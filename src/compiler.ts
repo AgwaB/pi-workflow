@@ -5,14 +5,14 @@ import { compileRole } from "./roles.js";
 import {
   AgentDefinition,
   ApprovalMode,
-  CompiledFlow,
+  CompiledWorkflow,
   CompiledRole,
   CompiledTask,
   CompiledTaskSafety,
   FastMode,
-  FlowSpec,
-  FlowTaskSpec,
-  FlowValidationError,
+  WorkflowSpec,
+  WorkflowTaskSpec,
+  WorkflowValidationError,
   PermissionPreview,
   STAGE_FIRST_RUN_TYPE,
   TaskCapability,
@@ -31,7 +31,7 @@ interface CompileOptions {
   cwd: string;
 }
 
-export async function compileWorkflowSpec(spec: FlowSpec, options: CompileOptions): Promise<CompiledFlow> {
+export async function compileWorkflowSpec(spec: WorkflowSpec, options: CompileOptions): Promise<CompiledWorkflow> {
   const issues: ValidationIssue[] = [];
   const warnings: string[] = [];
   const agentCache = new Map<string, AgentDefinition>();
@@ -54,7 +54,7 @@ export async function compileWorkflowSpec(spec: FlowSpec, options: CompileOption
 
   const compiledRoles = await compileRoles(spec, options.cwd, agentCache, issues);
   const roleMap = new Map(compiledRoles.map((role) => [role.name, role]));
-  const rawTasks = getFlowTasks(spec);
+  const rawTasks = getWorkflowTasks(spec);
   const compiledTasks: CompiledTask[] = [];
   const seenTaskIds = new Set<string>();
 
@@ -124,7 +124,7 @@ export async function compileWorkflowSpec(spec: FlowSpec, options: CompileOption
     });
   }
 
-  if (issues.length > 0) throw new FlowValidationError(issues);
+  if (issues.length > 0) throw new WorkflowValidationError(issues);
 
   return {
     schemaVersion: 1,
@@ -140,20 +140,20 @@ export async function compileWorkflowSpec(spec: FlowSpec, options: CompileOption
   };
 }
 
-function getFlowTasks(spec: FlowSpec): FlowTaskSpec[] {
+function getWorkflowTasks(spec: WorkflowSpec): WorkflowTaskSpec[] {
   if (spec.flow.type === "single") return [spec.flow.task];
   if (spec.flow.type === "parallel") return spec.flow.tasks;
   return spec.flow.steps;
 }
 
-function taskPathFor(spec: FlowSpec, index: number): string {
+function taskPathFor(spec: WorkflowSpec, index: number): string {
   if (spec.flow.type === "single") return "$.flow.task";
   if (spec.flow.type === "parallel") return `$.flow.tasks[${index}]`;
   return `$.flow.steps[${index}]`;
 }
 
 async function compileRoles(
-  spec: FlowSpec,
+  spec: WorkflowSpec,
   cwd: string,
   agentCache: Map<string, AgentDefinition>,
   issues: ValidationIssue[],
@@ -262,7 +262,7 @@ function validateFastMode(model: string | undefined, fast: FastMode | undefined,
   }
 }
 
-function resolveRuntime(task: FlowTaskSpec, spec: FlowSpec, agent: AgentDefinition): {
+function resolveRuntime(task: WorkflowTaskSpec, spec: WorkflowSpec, agent: AgentDefinition): {
   model?: string;
   thinking?: ThinkingLevel;
   fast?: FastMode;
@@ -347,7 +347,7 @@ function roleNamesFor(role: string | string[] | undefined): string[] {
   return Array.isArray(role) ? role : [role];
 }
 
-function buildCompiledPrompt(task: FlowTaskSpec, roles: CompiledRole[]): string {
+function buildCompiledPrompt(task: WorkflowTaskSpec, roles: CompiledRole[]): string {
   const parts = ["# Flow Task", task.task.trim()];
 
   if (roles.length > 0) {
@@ -380,7 +380,7 @@ export async function compileWorkflow(spec: any, options: CompileOptions & { tas
   if (!Array.isArray(stages)) return compileWorkflowSpec(spec, options);
   const agentName = spec.agent ?? spec.defaults?.agent ?? "scout";
   const agent = await loadAgentByName(agentName, options.cwd).catch(() => undefined as any);
-  if (!agent) throw new FlowValidationError([{ path: "$.agent", message: `unknown agent "${agentName}"` }]);
+  if (!agent) throw new WorkflowValidationError([{ path: "$.agent", message: `unknown agent "${agentName}"` }]);
   const roleEntries = Object.entries(spec.roles ?? {});
   const roles = roleEntries.map(([name, role]: [string, any]) => ({
     name,

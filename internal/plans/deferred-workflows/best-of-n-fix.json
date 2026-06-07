@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "name": "best-of-n-fix",
-  "description": "Stage-first best-of-N fix recipe for uncertain fixes only: read-only normalization, three isolated delegate attempts in managed worktrees, then read-only comparison for the runtime task. Expensive; human selects; no auto-merge.",
+  "description": "Stage-first best-of-N fix workflow for uncertain fixes only: read-only normalization, three isolated delegate attempts in managed worktrees, then read-only comparison for the runtime task. Expensive; human selects; no auto-merge.",
   "agent": "scout",
   "readOnly": true,
   "tools": [
@@ -81,7 +81,7 @@
       "auto-merge desired",
       "no file edits allowed"
     ],
-    "similarRecipes": [
+    "similarWorkflows": [
       "implement"
     ],
     "mutationRisk": "managed-worktree writes without bash; no auto-merge",

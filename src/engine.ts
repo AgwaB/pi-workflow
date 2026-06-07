@@ -4,10 +4,10 @@ import { compileWorkflow, compileWorkflowSpec } from "./compiler.js";
 import { loadWorkflowSpec } from "./schema.js";
 import {
   createRunRecord,
-  compiledFlowPath,
+  compiledWorkflowPath,
   fromProjectPath,
   indexSupervisorErrorPath,
-  isTerminalFlowStatus,
+  isTerminalWorkflowStatus,
   isTerminalTaskStatus,
   listRunRecords,
   readIndex,
@@ -23,7 +23,7 @@ import {
 } from "./store.js";
 import { launchTmuxTask, refreshRunFromArtifacts } from "./tmux.js";
 import { ensureManagedWorktree } from "./worktree.js";
-import { CompiledFlow, FlowIndexRecord, FlowRunRecord, FlowTaskRunRecord } from "./types.js";
+import { CompiledWorkflow, WorkflowIndexRecord, WorkflowRunRecord, WorkflowTaskRunRecord } from "./types.js";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 60_000;
 const MAX_WAIT_TIMEOUT_MS = 1_800_000;
@@ -34,7 +34,7 @@ const MAX_CONCURRENCY = 16;
 
 const supervisorTimers = new Map<string, ReturnType<typeof setInterval>>();
 
-export async function runWorkflowSpec(specPath: string, cwd: string, options: { task?: string } = {}): Promise<FlowRunRecord> {
+export async function runWorkflowSpec(specPath: string, cwd: string, options: { task?: string } = {}): Promise<WorkflowRunRecord> {
   const loaded = await loadWorkflowSpec(specPath, cwd);
   const compiled = options.task !== undefined
     ? await compileWorkflow(loaded.spec, { cwd, task: options.task })
@@ -51,13 +51,13 @@ export async function runWorkflowSpec(specPath: string, cwd: string, options: { 
   return scheduled;
 }
 
-export async function refreshRun(cwd: string, runIdOrPrefix: string): Promise<FlowRunRecord> {
+export async function refreshRun(cwd: string, runIdOrPrefix: string): Promise<WorkflowRunRecord> {
   const current = await readRunRecord(cwd, runIdOrPrefix);
   const refreshed = await withRunLease(cwd, current.runId, async () => refreshRunFromArtifacts(cwd, await readRunRecord(cwd, current.runId)));
   return refreshed ?? current;
 }
 
-export async function waitForRun(cwd: string, runIdOrPrefix: string, timeoutMs?: number): Promise<FlowRunRecord> {
+export async function waitForRun(cwd: string, runIdOrPrefix: string, timeoutMs?: number): Promise<WorkflowRunRecord> {
   const timeout = clampTimeout(timeoutMs);
   const deadline = Date.now() + timeout;
   let run = await refreshRun(cwd, runIdOrPrefix);
@@ -112,12 +112,12 @@ export function watchRun(cwd: string, runId: string): void {
   supervisorTimers.set(key, timer);
 }
 
-export async function scheduleRun(cwd: string, runId: string, compiled?: CompiledFlow): Promise<FlowRunRecord | undefined> {
+export async function scheduleRun(cwd: string, runId: string, compiled?: CompiledWorkflow): Promise<WorkflowRunRecord | undefined> {
   return withRunLease(cwd, runId, async () => {
     let run = await refreshRunFromArtifacts(cwd, await readRunRecord(cwd, runId));
-    if (run.taskSummary.blocked > 0 || isTerminalFlowStatus(run.status)) return run;
+    if (run.taskSummary.blocked > 0 || isTerminalWorkflowStatus(run.status)) return run;
 
-    const compiledFlow = compiled ?? await readCompiledFlow(cwd, run.runId);
+    const compiledFlow = compiled ?? await readCompiledWorkflow(cwd, run.runId);
     if (!compiledFlow) return run;
 
     if (compiledFlow.type === "chain") {
@@ -140,13 +140,13 @@ export async function formatStatus(cwd: string): Promise<string> {
   if (cached) {
     await reconcileIndexedActiveRuns(cwd, cached);
     const refreshed = await readIndex(cwd).catch(() => cached) ?? cached;
-    if (refreshed.runs.length === 0) return "No flow runs found.";
+    if (refreshed.runs.length === 0) return "No workflow runs found.";
     return formatIndex(refreshed);
   }
 
   await reconcileActiveRuns(cwd);
   const rebuilt = await updateIndex(cwd).catch(() => readIndex(cwd));
-  if (!rebuilt || rebuilt.runs.length === 0) return "No flow runs found.";
+  if (!rebuilt || rebuilt.runs.length === 0) return "No workflow runs found.";
   return formatIndex(rebuilt);
 }
 
@@ -179,7 +179,7 @@ export async function formatLogs(cwd: string, runIdOrPrefix: string, taskId = "t
   return `${run.runId}/${task.taskId} output=${task.files.output}\n${tail || "(empty log)"}`;
 }
 
-export function formatRun(run: FlowRunRecord, detail: "summary" | "full" = "summary"): string {
+export function formatRun(run: WorkflowRunRecord, detail: "summary" | "full" = "summary"): string {
   const lines = [
     `${run.runId} [${run.status}] type=${run.type} backend=${run.backend.type}/${run.backend.mode}`,
     `created=${run.createdAt} updated=${run.updatedAt}`,
@@ -200,7 +200,7 @@ async function reconcileActiveRuns(cwd: string): Promise<void> {
   }
 }
 
-async function reconcileIndexedActiveRuns(cwd: string, index: FlowIndexRecord): Promise<void> {
+async function reconcileIndexedActiveRuns(cwd: string, index: WorkflowIndexRecord): Promise<void> {
   for (const run of index.runs) {
     if (run.status === "running") await refreshRun(cwd, run.runId).catch((error) => recordSupervisorError(cwd, run.runId, error));
   }
@@ -218,7 +218,7 @@ async function recordSupervisorError(cwd: string, runId: string, error: unknown)
   }).catch(() => undefined);
 }
 
-async function scheduleParallel(cwd: string, run: FlowRunRecord, compiledFlow: CompiledFlow): Promise<void> {
+async function scheduleParallel(cwd: string, run: WorkflowRunRecord, compiledFlow: CompiledWorkflow): Promise<void> {
   const joinIndex = compiledFlow.tasks.findIndex((task) => isJoinTaskKind(task.kind));
   if (joinIndex === -1) {
     await scheduleParallelMainTasks(cwd, run, compiledFlow, allTaskIndexes(run));
@@ -229,14 +229,14 @@ async function scheduleParallel(cwd: string, run: FlowRunRecord, compiledFlow: C
   await scheduleParallelMainTasks(cwd, run, compiledFlow, mainIndexes);
 
   const refreshed = await readRunRecord(cwd, run.runId);
-  const mainTasks = mainIndexes.map((index) => refreshed.tasks[index]).filter((task): task is FlowTaskRunRecord => Boolean(task));
+  const mainTasks = mainIndexes.map((index) => refreshed.tasks[index]).filter((task): task is WorkflowTaskRunRecord => Boolean(task));
   if (mainTasks.some((task) => task.status === "pending" || task.status === "running")) return;
   if (refreshed.tasks.some((task, index) => index !== joinIndex && task.status === "blocked")) return;
 
   await launchPendingTaskAt(cwd, refreshed, compiledFlow, joinIndex, { join: true });
 }
 
-async function scheduleParallelMainTasks(cwd: string, run: FlowRunRecord, compiledFlow: CompiledFlow, indexes: number[]): Promise<void> {
+async function scheduleParallelMainTasks(cwd: string, run: WorkflowRunRecord, compiledFlow: CompiledWorkflow, indexes: number[]): Promise<void> {
   const maxConcurrency = Math.max(1, Math.min(MAX_CONCURRENCY, compiledFlow.maxConcurrency));
   let running = indexes.filter((index) => run.tasks[index]?.status === "running").length;
 
@@ -247,11 +247,11 @@ async function scheduleParallelMainTasks(cwd: string, run: FlowRunRecord, compil
   }
 }
 
-function allTaskIndexes(run: FlowRunRecord): number[] {
+function allTaskIndexes(run: WorkflowRunRecord): number[] {
   return run.tasks.map((_, index) => index);
 }
 
-async function scheduleDag(cwd: string, run: FlowRunRecord, compiledFlow: CompiledFlow): Promise<void> {
+async function scheduleDag(cwd: string, run: WorkflowRunRecord, compiledFlow: CompiledWorkflow): Promise<void> {
   let changed = markDagDependentsSkipped(run, compiledFlow);
   if (changed) {
     await writeRunRecord(cwd, run);
@@ -272,7 +272,7 @@ async function scheduleDag(cwd: string, run: FlowRunRecord, compiledFlow: Compil
   }
 }
 
-function markDagDependentsSkipped(run: FlowRunRecord, compiledFlow: CompiledFlow): boolean {
+function markDagDependentsSkipped(run: WorkflowRunRecord, compiledFlow: CompiledWorkflow): boolean {
   const bySpecId = new Map(run.tasks.map((task) => [task.specId, task]));
   let changed = false;
   let passChanged = true;
@@ -299,7 +299,7 @@ function markDagDependentsSkipped(run: FlowRunRecord, compiledFlow: CompiledFlow
   return changed;
 }
 
-async function scheduleRetry(cwd: string, run: FlowRunRecord, compiledFlow: CompiledFlow): Promise<void> {
+async function scheduleRetry(cwd: string, run: WorkflowRunRecord, compiledFlow: CompiledWorkflow): Promise<void> {
   if (run.tasks.some((task) => task.status === "running")) return;
 
   const completedIndex = run.tasks.findIndex((task) => task.status === "completed");
@@ -317,7 +317,7 @@ async function scheduleRetry(cwd: string, run: FlowRunRecord, compiledFlow: Comp
   await launchPendingTaskAt(cwd, run, compiledFlow, pendingIndex, { retry: true });
 }
 
-async function scheduleChain(cwd: string, run: FlowRunRecord, compiledFlow: CompiledFlow): Promise<void> {
+async function scheduleChain(cwd: string, run: WorkflowRunRecord, compiledFlow: CompiledWorkflow): Promise<void> {
   if (run.tasks.some((task) => task.status === "running")) return;
 
   const failedIndex = run.tasks.findIndex((task) => task.status === "failed" || task.status === "interrupted");
@@ -337,8 +337,8 @@ async function scheduleChain(cwd: string, run: FlowRunRecord, compiledFlow: Comp
 
 async function launchPendingTaskAt(
   cwd: string,
-  run: FlowRunRecord,
-  compiledFlow: CompiledFlow,
+  run: WorkflowRunRecord,
+  compiledFlow: CompiledWorkflow,
   index: number,
   options: { chain?: boolean; join?: boolean; dag?: boolean; retry?: boolean } = {},
 ): Promise<boolean> {
@@ -384,10 +384,10 @@ async function launchPendingTaskAt(
 
 async function prepareChainTask(
   cwd: string,
-  run: FlowRunRecord,
-  compiledFlow: CompiledFlow,
+  run: WorkflowRunRecord,
+  compiledFlow: CompiledWorkflow,
   index: number,
-): Promise<CompiledFlow["tasks"][number]> {
+): Promise<CompiledWorkflow["tasks"][number]> {
   const compiledTask = compiledFlow.tasks[index]!;
   const task = run.tasks[index]!;
   const previousTask = index > 0 ? run.tasks[index - 1] : undefined;
@@ -425,10 +425,10 @@ async function prepareChainTask(
 
 async function prepareDagTask(
   cwd: string,
-  run: FlowRunRecord,
-  compiledFlow: CompiledFlow,
+  run: WorkflowRunRecord,
+  compiledFlow: CompiledWorkflow,
   index: number,
-): Promise<CompiledFlow["tasks"][number]> {
+): Promise<CompiledWorkflow["tasks"][number]> {
   const compiledTask = compiledFlow.tasks[index]!;
   const task = run.tasks[index]!;
   const dependsOn = compiledTask.dependsOn ?? [];
@@ -465,10 +465,10 @@ async function prepareDagTask(
 
 async function prepareJoinTask(
   cwd: string,
-  run: FlowRunRecord,
-  compiledFlow: CompiledFlow,
+  run: WorkflowRunRecord,
+  compiledFlow: CompiledWorkflow,
   joinIndex: number,
-): Promise<CompiledFlow["tasks"][number]> {
+): Promise<CompiledWorkflow["tasks"][number]> {
   const compiledTask = compiledFlow.tasks[joinIndex]!;
   const task = run.tasks[joinIndex]!;
   const sections = await Promise.all(run.tasks.map(async (sourceTask, index) => {
@@ -502,10 +502,10 @@ async function prepareJoinTask(
 
 async function prepareRetryTask(
   cwd: string,
-  run: FlowRunRecord,
-  compiledFlow: CompiledFlow,
+  run: WorkflowRunRecord,
+  compiledFlow: CompiledWorkflow,
   index: number,
-): Promise<CompiledFlow["tasks"][number]> {
+): Promise<CompiledWorkflow["tasks"][number]> {
   const compiledTask = compiledFlow.tasks[index]!;
   const task = run.tasks[index]!;
   const previousTask = index > 0 ? run.tasks[index - 1] : undefined;
@@ -527,7 +527,7 @@ async function prepareRetryTask(
   };
 }
 
-async function skipRemainingRetryTasks(cwd: string, run: FlowRunRecord, startIndex: number): Promise<void> {
+async function skipRemainingRetryTasks(cwd: string, run: WorkflowRunRecord, startIndex: number): Promise<void> {
   let changed = false;
   for (const task of run.tasks.slice(startIndex)) {
     if (task.status !== "pending") continue;
@@ -537,7 +537,7 @@ async function skipRemainingRetryTasks(cwd: string, run: FlowRunRecord, startInd
   if (changed) await writeRunRecord(cwd, run);
 }
 
-async function skipRemainingChainTasks(cwd: string, run: FlowRunRecord, startIndex: number): Promise<void> {
+async function skipRemainingChainTasks(cwd: string, run: WorkflowRunRecord, startIndex: number): Promise<void> {
   let changed = false;
   for (const task of run.tasks.slice(startIndex)) {
     if (task.status !== "pending") continue;
@@ -547,17 +547,17 @@ async function skipRemainingChainTasks(cwd: string, run: FlowRunRecord, startInd
   if (changed) await writeRunRecord(cwd, run);
 }
 
-function isJoinTaskKind(kind: CompiledFlow["tasks"][number]["kind"]): boolean {
+function isJoinTaskKind(kind: CompiledWorkflow["tasks"][number]["kind"]): boolean {
   return kind === "aggregate" || kind === "judge" || kind === "vote";
 }
 
-function joinContextLabel(kind: CompiledFlow["tasks"][number]["kind"]): string {
+function joinContextLabel(kind: CompiledWorkflow["tasks"][number]["kind"]): string {
   if (kind === "judge") return "Judge";
   if (kind === "vote") return "Vote";
   return "Parallel Aggregate";
 }
 
-function findInheritedWorktree(run: FlowRunRecord, beforeIndex: number): { path: string; branch: string | null; baseCwd: string | null } | undefined {
+function findInheritedWorktree(run: WorkflowRunRecord, beforeIndex: number): { path: string; branch: string | null; baseCwd: string | null } | undefined {
   for (let index = beforeIndex - 1; index >= 0; index -= 1) {
     const worktree = run.tasks[index]?.worktree;
     if (worktree?.enabled && worktree.path) {
@@ -576,11 +576,11 @@ async function readOutputPreview(cwd: string, projectPath: string, maxChars = 40
   }
 }
 
-async function readCompiledFlow(cwd: string, runId: string): Promise<CompiledFlow | undefined> {
-  return readJson<CompiledFlow>(compiledFlowPath(cwd, runId));
+async function readCompiledWorkflow(cwd: string, runId: string): Promise<CompiledWorkflow | undefined> {
+  return readJson<CompiledWorkflow>(compiledWorkflowPath(cwd, runId));
 }
 
-function formatIndex(index: FlowIndexRecord): string {
+function formatIndex(index: WorkflowIndexRecord): string {
   return index.runs.map((run) => {
     const lines = [
       `${run.runId} [${run.status}] type=${run.type} updated=${run.updatedAt}`,
@@ -596,7 +596,7 @@ function formatIndex(index: FlowIndexRecord): string {
   }).join("\n\n");
 }
 
-function formatTask(task: FlowTaskRunRecord, detail: "summary" | "full"): string {
+function formatTask(task: WorkflowTaskRunRecord, detail: "summary" | "full"): string {
   const elapsed = task.elapsedMs !== undefined ? ` elapsed=${Math.round(task.elapsedMs / 1000)}s` : "";
   const pane = task.paneId ? ` pane=${task.paneId}` : "";
   const pid = task.pid ? ` pid=${task.pid}` : "";
@@ -621,11 +621,11 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export async function runWorkflow(specPath: string, cwd: string, options: { task?: string } = {}): Promise<FlowRunRecord> {
+export async function runWorkflow(specPath: string, cwd: string, options: { task?: string } = {}): Promise<WorkflowRunRecord> {
   if (!options.task || options.task.trim() === "") throw new Error("This workflow needs a task");
   return runWorkflowSpec(specPath, cwd, options);
 }
 export const waitForWorkflowRun = waitForRun;
-export async function continueWorkflow(_cwd: string, _runId: string): Promise<FlowRunRecord | undefined> {
+export async function continueWorkflow(_cwd: string, _runId: string): Promise<WorkflowRunRecord | undefined> {
   return undefined;
 }

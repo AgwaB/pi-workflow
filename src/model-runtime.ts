@@ -1,53 +1,53 @@
 import { THINKING_LEVELS, type ThinkingLevel } from "./types.js";
 
-export type FlowModelThinkingLevelMap = Partial<Record<ThinkingLevel, string | null>>;
+export type WorkflowModelThinkingLevelMap = Partial<Record<ThinkingLevel, string | null>>;
 
-export interface FlowModelInfo {
+export interface WorkflowModelInfo {
   provider: string;
   id: string;
   fullId: string;
   reasoning?: boolean;
-  thinkingLevelMap?: FlowModelThinkingLevelMap;
+  thinkingLevelMap?: WorkflowModelThinkingLevelMap;
 }
 
-export interface FlowRuntimeDefaults {
+export interface WorkflowRuntimeDefaults {
   model?: string;
   thinking?: ThinkingLevel;
 }
 
-export interface FlowRuntimeResolutionInput {
+export interface WorkflowRuntimeResolutionInput {
   model?: string;
   thinking?: ThinkingLevel;
 }
 
-export interface FlowRuntimeResolutionContext {
+export interface WorkflowRuntimeResolutionContext {
   taskKey: string;
   stageId: string;
   taskId: string;
   agent: string;
 }
 
-export type FlowRuntimeResolver = (
-  runtime: FlowRuntimeResolutionInput,
-  context: FlowRuntimeResolutionContext,
-) => Promise<FlowRuntimeResolutionInput>;
+export type WorkflowRuntimeResolver = (
+  runtime: WorkflowRuntimeResolutionInput,
+  context: WorkflowRuntimeResolutionContext,
+) => Promise<WorkflowRuntimeResolutionInput>;
 
-export interface FlowRuntimePrompt {
+export interface WorkflowRuntimePrompt {
   select(title: string, options: string[]): Promise<string | undefined>;
 }
 
-export interface ResolveFlowRuntimeOptions {
-  defaults?: FlowRuntimeDefaults;
-  availableModels?: FlowModelInfo[];
-  prompt?: FlowRuntimePrompt;
+export interface ResolveWorkflowRuntimeOptions {
+  defaults?: WorkflowRuntimeDefaults;
+  availableModels?: WorkflowModelInfo[];
+  prompt?: WorkflowRuntimePrompt;
 }
 
-export function toFlowModelInfo(model: {
+export function toWorkflowModelInfo(model: {
   provider: string;
   id: string;
   reasoning?: boolean;
-  thinkingLevelMap?: FlowModelThinkingLevelMap;
-}): FlowModelInfo {
+  thinkingLevelMap?: WorkflowModelThinkingLevelMap;
+}): WorkflowModelInfo {
   return {
     provider: model.provider,
     id: model.id,
@@ -57,11 +57,11 @@ export function toFlowModelInfo(model: {
   };
 }
 
-export async function resolveFlowRuntime(
-  runtime: FlowRuntimeResolutionInput,
-  context: FlowRuntimeResolutionContext,
-  options: ResolveFlowRuntimeOptions,
-): Promise<FlowRuntimeResolutionInput> {
+async function resolveWorkflowRuntimeInternal(
+  runtime: WorkflowRuntimeResolutionInput,
+  context: WorkflowRuntimeResolutionContext,
+  options: ResolveWorkflowRuntimeOptions,
+): Promise<WorkflowRuntimeResolutionInput> {
   const requested = runtime.model ?? options.defaults?.model;
   const { baseModel, thinking } = requested ? splitKnownThinkingSuffix(requested) : { baseModel: undefined, thinking: undefined };
   const model = await resolveModel(baseModel, context, options);
@@ -84,7 +84,7 @@ export function splitKnownThinkingSuffix(model: string): { baseModel: string; th
   };
 }
 
-export function getSupportedThinkingLevels(model: FlowModelInfo | undefined): ThinkingLevel[] {
+export function getSupportedThinkingLevels(model: WorkflowModelInfo | undefined): ThinkingLevel[] {
   if (!model) return [...THINKING_LEVELS];
   if (model.reasoning === false) return ["off"];
   if (!model.thinkingLevelMap) return [...THINKING_LEVELS];
@@ -99,8 +99,8 @@ export function getSupportedThinkingLevels(model: FlowModelInfo | undefined): Th
 
 async function resolveModel(
   requested: string | undefined,
-  context: FlowRuntimeResolutionContext,
-  options: ResolveFlowRuntimeOptions,
+  context: WorkflowRuntimeResolutionContext,
+  options: ResolveWorkflowRuntimeOptions,
 ): Promise<string | undefined> {
   if (!requested) return undefined;
   const available = options.availableModels ?? [];
@@ -130,9 +130,9 @@ async function resolveModel(
 
 async function chooseAmbiguousModel(
   requested: string,
-  matches: FlowModelInfo[],
-  context: FlowRuntimeResolutionContext,
-  prompt: FlowRuntimePrompt | undefined,
+  matches: WorkflowModelInfo[],
+  context: WorkflowRuntimeResolutionContext,
+  prompt: WorkflowRuntimePrompt | undefined,
 ): Promise<string> {
   const choices = matches.map((model) => model.fullId).sort();
   if (!prompt) {
@@ -146,8 +146,8 @@ async function chooseAmbiguousModel(
 async function resolveThinking(
   modelId: string | undefined,
   requested: ThinkingLevel | undefined,
-  context: FlowRuntimeResolutionContext,
-  options: ResolveFlowRuntimeOptions,
+  context: WorkflowRuntimeResolutionContext,
+  options: ResolveWorkflowRuntimeOptions,
 ): Promise<ThinkingLevel | undefined> {
   if (!requested) return undefined;
   const model = findModelInfo(modelId, options.availableModels ?? []);
@@ -172,7 +172,7 @@ async function resolveThinking(
   return selected;
 }
 
-function findModelInfo(modelId: string | undefined, available: FlowModelInfo[]): FlowModelInfo | undefined {
+function findModelInfo(modelId: string | undefined, available: WorkflowModelInfo[]): WorkflowModelInfo | undefined {
   if (!modelId) return undefined;
   const { baseModel } = splitKnownThinkingSuffix(modelId);
   return available.find((model) => model.fullId === baseModel);
@@ -183,17 +183,17 @@ function isThinkingLevel(value: string): value is ThinkingLevel {
 }
 
 export async function resolveWorkflowRuntime(
-  runtime: FlowRuntimeResolutionInput,
-  context: FlowRuntimeResolutionContext,
-  options: ResolveFlowRuntimeOptions,
-): Promise<FlowRuntimeResolutionInput> {
+  runtime: WorkflowRuntimeResolutionInput,
+  context: WorkflowRuntimeResolutionContext,
+  options: ResolveWorkflowRuntimeOptions,
+): Promise<WorkflowRuntimeResolutionInput> {
   try {
-    return await resolveFlowRuntime(runtime, context, options);
+    return await resolveWorkflowRuntimeInternal(runtime, context, options);
   } catch (error) {
     if (options.prompt && runtime.model && /did not match any available/.test(error instanceof Error ? error.message : String(error))) {
       const choices = (options.availableModels ?? []).map((model) => model.fullId).sort();
       const selected = await options.prompt.select(`Model "${runtime.model}" is unavailable for ${context.taskKey}. Choose one.`, choices);
-      return resolveFlowRuntime({ ...runtime, model: selected }, context, options);
+      return resolveWorkflowRuntimeInternal({ ...runtime, model: selected }, context, options);
     }
     throw error;
   }

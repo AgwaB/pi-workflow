@@ -2,8 +2,8 @@
 import { readFile } from "node:fs/promises";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
-import { flowRunPath, fromProjectPath, listRunRecords, readIndex, readRunRecord } from "./store.js";
-import { FlowIndexRecord, FlowRunRecord, FlowRunStatus, FlowTaskRunRecord, STAGE_FIRST_RUN_TYPE, TaskRunStatus, TaskSummary } from "./types.js";
+import { workflowRunPath, fromProjectPath, listRunRecords, readIndex, readRunRecord } from "./store.js";
+import { WorkflowIndexRecord, WorkflowRunRecord, WorkflowRunStatus, WorkflowTaskRunRecord, STAGE_FIRST_RUN_TYPE, TaskRunStatus, TaskSummary } from "./types.js";
 
 const REFRESH_INTERVAL_MS = 1_000;
 const OUTPUT_PREVIEW_LINES = 8;
@@ -22,7 +22,7 @@ type TUI = {
   requestRender(): void;
 };
 
-type FlowSummary = FlowIndexRecord["runs"][number];
+type WorkflowSummary = WorkflowIndexRecord["runs"][number];
 type ViewMode = "runs" | "stages" | "tasks" | "task";
 type Theme = {
   fg?: (color: string, text: string) => string;
@@ -30,21 +30,21 @@ type Theme = {
   bold?: (text: string) => string;
 };
 
-export async function showFlowView(ctx: ExtensionCommandContext, initialRunId?: string, flowCwd = ctx.cwd): Promise<void> {
+export async function showWorkflowView(ctx: ExtensionCommandContext, initialRunId?: string, workflowCwd = ctx.cwd): Promise<void> {
   await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
-    const view = new FlowView(flowCwd, tui, theme as Theme, done, initialRunId);
+    const view = new WorkflowView(workflowCwd, tui, theme as Theme, done, initialRunId);
     view.start();
     return view;
   });
 }
 
-export class FlowView implements Component {
+export class WorkflowView implements Component {
   private mode: ViewMode = "runs";
-  private flows: FlowSummary[] = [];
+  private flows: WorkflowSummary[] = [];
   private selectedFlow = 0;
   private selectedStage = 0;
   private selectedTask = 0;
-  private detailRun?: FlowRunRecord;
+  private detailRun?: WorkflowRunRecord;
   private outputPreview = "";
   private taskPromptPreview = "";
   private message = "";
@@ -222,9 +222,9 @@ export class FlowView implements Component {
     const lines = [...this.renderDrilldownHeader(width)];
 
     if (this.loading && this.flows.length === 0) {
-      lines.push(...boxed(this.theme, "Loading", width, [placeholder(this.theme, "loading flows...")]));
+      lines.push(...boxed(this.theme, "Loading", width, [placeholder(this.theme, "loading workflows...")]));
     } else if (this.flows.length === 0) {
-      lines.push(...boxed(this.theme, "Runs", width, [placeholder(this.theme, "no flow runs found")]));
+      lines.push(...boxed(this.theme, "Runs", width, [placeholder(this.theme, "no workflow runs found")]));
     } else if (this.mode === "runs") {
       lines.push(...this.renderRunsScreen(width));
     } else if (this.mode === "stages" && this.detailRun) {
@@ -268,7 +268,7 @@ export class FlowView implements Component {
     return this.renderTwoPane(width, "Filters / Summary", sideLines, "Runs", this.runLines(Math.max(1, this.mainPaneBodyWidth(width))), 32);
   }
 
-  private renderStagesScreen(width: number, run: FlowRunRecord): string[] {
+  private renderStagesScreen(width: number, run: WorkflowRunRecord): string[] {
     const sideLines = [
       ...this.runDetailSummaryLines(run),
       "",
@@ -279,7 +279,7 @@ export class FlowView implements Component {
     return this.renderTwoPane(width, "Run Summary", sideLines, "Stages", this.stageLines(run, Math.max(1, this.mainPaneBodyWidth(width))), 34);
   }
 
-  private renderTasksScreen(width: number, run: FlowRunRecord): string[] {
+  private renderTasksScreen(width: number, run: WorkflowRunRecord): string[] {
     const stage = this.currentStageSummary(run);
     const task = this.selectedTaskRecord();
     const sideLines = [
@@ -324,7 +324,7 @@ export class FlowView implements Component {
     return width - leftWidth - 5;
   }
 
-  private renderTaskDetail(width: number, run: FlowRunRecord, task: FlowTaskRunRecord): string[] {
+  private renderTaskDetail(width: number, run: WorkflowRunRecord, task: WorkflowTaskRunRecord): string[] {
     const lines = [
       ...boxed(this.theme, "Task Detail", width, [
         `${statusGlyph(this.theme, task.status)} ${strong(this.theme, task.displayName)} ${statusBadge(this.theme, task.status)} ${muted(this.theme, this.breadcrumbText())}`,
@@ -397,7 +397,7 @@ export class FlowView implements Component {
     return lines;
   }
 
-  private stageLines(run: FlowRunRecord, width: number): string[] {
+  private stageLines(run: WorkflowRunRecord, width: number): string[] {
     const stages = stageSummaries(run);
     const currentStage = this.currentStageId(run);
     return stages.map((stage) => {
@@ -411,7 +411,7 @@ export class FlowView implements Component {
     });
   }
 
-  private taskLines(run: FlowRunRecord, width: number): string[] {
+  private taskLines(run: WorkflowRunRecord, width: number): string[] {
     const allTasks = this.tasksForSelectedStage(run);
     const window = visibleWindow(allTasks, this.selectedTask, MAX_STAGE_TASK_ROWS);
     const lines: string[] = [];
@@ -428,7 +428,7 @@ export class FlowView implements Component {
     return lines.length > 0 ? lines : [placeholder(this.theme, "  no tasks in selected stage")];
   }
 
-  private taskPreviewLines(task: FlowTaskRunRecord, width: number): string[] {
+  private taskPreviewLines(task: WorkflowTaskRunRecord, width: number): string[] {
     const preview = previewLines(this.outputPreview, "(empty log)", 3).map((line) => fit(previewText(this.theme, line), width));
     const lines = [
       `${statusGlyph(this.theme, task.status)} ${strong(this.theme, task.displayName)} ${statusBadge(this.theme, task.status)} ${agentText(this.theme, task.agent)} ${metaValue(this.theme, taskRuntimeSummary(task))}`,
@@ -441,11 +441,11 @@ export class FlowView implements Component {
     return lines.map((line) => fit(line, width));
   }
 
-  private taskIdentityLines(run: FlowRunRecord, task: FlowTaskRunRecord, width: number): string[] {
+  private taskIdentityLines(run: WorkflowRunRecord, task: WorkflowTaskRunRecord, width: number): string[] {
     return [...this.taskOverviewLines(run, task, width), "", ...this.taskTimelineLines(run, task, width)];
   }
 
-  private taskOverviewLines(run: FlowRunRecord, task: FlowTaskRunRecord, width: number): string[] {
+  private taskOverviewLines(run: WorkflowRunRecord, task: WorkflowTaskRunRecord, width: number): string[] {
     const lines = [
       `${statusGlyph(this.theme, task.status)} ${strong(this.theme, task.displayName)}`,
       kvRow(this.theme, "run", run.runId),
@@ -462,7 +462,7 @@ export class FlowView implements Component {
     return lines.map((line) => fit(line, width));
   }
 
-  private taskTimelineLines(run: FlowRunRecord, task: FlowTaskRunRecord, width: number): string[] {
+  private taskTimelineLines(run: WorkflowRunRecord, task: WorkflowTaskRunRecord, width: number): string[] {
     const lines = [
       timelineLine(this.theme, "created", run.createdAt, "dim"),
     ];
@@ -474,7 +474,7 @@ export class FlowView implements Component {
     return lines.map((line) => fit(line, width));
   }
 
-  private taskActivityLines(task: FlowTaskRunRecord, width: number): string[] {
+  private taskActivityLines(task: WorkflowTaskRunRecord, width: number): string[] {
     const lines = [
       accent(this.theme, "Task contract"),
       ...previewLines(this.taskPromptPreview, "(task prompt unavailable)", TASK_PROMPT_PREVIEW_LINES).map((line) => fit(previewText(this.theme, line), width)),
@@ -488,7 +488,7 @@ export class FlowView implements Component {
     return lines;
   }
 
-  private taskArtifactLines(run: FlowRunRecord, task: FlowTaskRunRecord, width: number): string[] {
+  private taskArtifactLines(run: WorkflowRunRecord, task: WorkflowTaskRunRecord, width: number): string[] {
     const lines = [
       accent(this.theme, "Files"),
       pathRow(this.theme, "output", task.files.output),
@@ -590,29 +590,29 @@ export class FlowView implements Component {
     this.selectedTask = clampIndex(this.selectedTask, tasks.length);
   }
 
-  private currentStageId(run: FlowRunRecord): string | undefined {
+  private currentStageId(run: WorkflowRunRecord): string | undefined {
     const stages = stageSummaries(run);
     return stages[this.selectedStage]?.id;
   }
 
-  private tasksForSelectedStage(run: FlowRunRecord): FlowTaskRunRecord[] {
+  private tasksForSelectedStage(run: WorkflowRunRecord): WorkflowTaskRunRecord[] {
     const stageId = this.currentStageId(run);
     if (!stageId) return run.tasks;
     if (run.type !== STAGE_FIRST_RUN_TYPE) return run.tasks;
     return run.tasks.filter((task) => (task.stageId ?? "unknown") === stageId);
   }
 
-  private selectedTaskRecord(): FlowTaskRunRecord | undefined {
+  private selectedTaskRecord(): WorkflowTaskRunRecord | undefined {
     if (!this.detailRun) return undefined;
     return this.tasksForSelectedStage(this.detailRun)[this.selectedTask];
   }
 
-  private currentStageSummary(run: FlowRunRecord): { id: string; summary: TaskSummary } | undefined {
+  private currentStageSummary(run: WorkflowRunRecord): { id: string; summary: TaskSummary } | undefined {
     return stageSummaries(run)[this.selectedStage];
   }
 
   private breadcrumbText(): string {
-    const parts = ["flow"];
+    const parts = ["workflow"];
     const flow = this.flows[this.selectedFlow];
     if (flow && this.mode !== "runs") parts.push(flow.name ?? shortId(flow.runId));
     const stageId = this.detailRun ? this.currentStageId(this.detailRun) : undefined;
@@ -622,7 +622,7 @@ export class FlowView implements Component {
     return parts.join(" › ");
   }
 
-  private runSummaryLines(flow: FlowSummary): string[] {
+  private runSummaryLines(flow: WorkflowSummary): string[] {
     return [
       `${statusGlyph(this.theme, flow.status)} ${strong(this.theme, flow.name ?? flow.type)} ${statusBadge(this.theme, flow.status, runStatusLabel(flow))}`,
       progressBar(this.theme, flow.taskSummary, 8),
@@ -631,7 +631,7 @@ export class FlowView implements Component {
     ];
   }
 
-  private runDetailSummaryLines(run: FlowRunRecord): string[] {
+  private runDetailSummaryLines(run: WorkflowRunRecord): string[] {
     const lines = [
       `${statusGlyph(this.theme, run.status)} ${strong(this.theme, run.name ?? run.type)} ${statusBadge(this.theme, run.status)}`,
       progressBar(this.theme, run.taskSummary, 10),
@@ -653,7 +653,7 @@ export class FlowView implements Component {
     return lines;
   }
 
-  private stageContextLines(run: FlowRunRecord): string[] {
+  private stageContextLines(run: WorkflowRunRecord): string[] {
     const stageId = this.currentStageId(run);
     const lines = [kvRow(this.theme, "run", shortId(run.runId))];
     if (stageId) lines.push(kvRow(this.theme, "stage", stageId));
@@ -694,7 +694,7 @@ export class FlowView implements Component {
   }
 }
 
-async function loadFlowSummaries(cwd: string, initialRunId?: string): Promise<FlowSummary[]> {
+async function loadFlowSummaries(cwd: string, initialRunId?: string): Promise<WorkflowSummary[]> {
   const index = await readIndex(cwd).catch(() => undefined);
   let flows = index?.runs ?? [];
   if (flows.length === 0) {
@@ -712,7 +712,7 @@ async function loadFlowSummaries(cwd: string, initialRunId?: string): Promise<Fl
   return flows;
 }
 
-function runToSummary(cwd: string, run: FlowRunRecord): FlowSummary {
+function runToSummary(cwd: string, run: WorkflowRunRecord): WorkflowSummary {
   return {
     runId: run.runId,
     name: run.name,
@@ -721,7 +721,7 @@ function runToSummary(cwd: string, run: FlowRunRecord): FlowSummary {
     taskSummary: run.taskSummary,
     createdAt: run.createdAt,
     updatedAt: run.updatedAt,
-    runJson: flowRunPath(cwd, run.runId),
+    runJson: workflowRunPath(cwd, run.runId),
     parentRunId: run.parentRunId,
     rootRunId: run.rootRunId,
     round: run.round,
@@ -750,10 +750,10 @@ async function readFilePreview(cwd: string, projectPath: string, maxLines: numbe
   return text.split(/\r?\n/).slice(-maxLines).join("\n").trim();
 }
 
-function stageSummaries(run: FlowRunRecord): Array<{ id: string; summary: TaskSummary }> {
+function stageSummaries(run: WorkflowRunRecord): Array<{ id: string; summary: TaskSummary }> {
   if (run.type !== STAGE_FIRST_RUN_TYPE) return [{ id: String(run.type), summary: run.taskSummary }];
   const order: string[] = [];
-  const byStage = new Map<string, FlowTaskRunRecord[]>();
+  const byStage = new Map<string, WorkflowTaskRunRecord[]>();
   for (const task of run.tasks) {
     const stageId = task.stageId ?? "unknown";
     if (!byStage.has(stageId)) {
@@ -765,7 +765,7 @@ function stageSummaries(run: FlowRunRecord): Array<{ id: string; summary: TaskSu
   return order.map((id) => ({ id, summary: summarizeTasks(byStage.get(id) ?? []) }));
 }
 
-function summarizeTasks(tasks: FlowTaskRunRecord[]): TaskSummary {
+function summarizeTasks(tasks: WorkflowTaskRunRecord[]): TaskSummary {
   const summary: TaskSummary = { pending: 0, running: 0, blocked: 0, completed: 0, failed: 0, skipped: 0, interrupted: 0, total: 0 };
   for (const task of tasks) {
     summary[task.status] += 1;
@@ -774,7 +774,7 @@ function summarizeTasks(tasks: FlowTaskRunRecord[]): TaskSummary {
   return summary;
 }
 
-function statusForSummary(summary: TaskSummary): FlowRunStatus {
+function statusForSummary(summary: TaskSummary): WorkflowRunStatus {
   if (summary.running > 0 || summary.pending > 0) return "running";
   if (summary.blocked > 0) return "blocked";
   if (summary.failed > 0 || summary.interrupted > 0) return "failed";
@@ -782,13 +782,13 @@ function statusForSummary(summary: TaskSummary): FlowRunStatus {
   return "interrupted";
 }
 
-function taskElapsed(task: FlowTaskRunRecord): string {
+function taskElapsed(task: WorkflowTaskRunRecord): string {
   if (task.elapsedMs !== undefined) return formatDuration(task.elapsedMs);
   if (task.startedAt && task.status === "running") return formatDuration(Date.now() - Date.parse(task.startedAt));
   return task.status;
 }
 
-function taskRuntimeSummary(task: FlowTaskRunRecord): string {
+function taskRuntimeSummary(task: WorkflowTaskRunRecord): string {
   const model = task.runtime.model ? shortModelName(task.runtime.model) : "inherit";
   const thinking = task.runtime.thinking ?? "inherit";
   const fast = task.runtime.fast && task.runtime.fast !== "inherit" ? ` · fast ${task.runtime.fast}` : "";
@@ -827,7 +827,7 @@ function formatDuration(ms: number): string {
   return `${seconds}s`;
 }
 
-function statusGlyph(theme: Theme, status: FlowRunStatus | TaskRunStatus): string {
+function statusGlyph(theme: Theme, status: WorkflowRunStatus | TaskRunStatus): string {
   if (status === "completed") return success(theme, "✓");
   if (status === "running") return accent(theme, "↻");
   if (status === "blocked") return warning(theme, "◆");
@@ -836,20 +836,20 @@ function statusGlyph(theme: Theme, status: FlowRunStatus | TaskRunStatus): strin
   return muted(theme, "•");
 }
 
-function metaByStatus(theme: Theme, status: FlowRunStatus | TaskRunStatus, content: string): string {
+function metaByStatus(theme: Theme, status: WorkflowRunStatus | TaskRunStatus, content: string): string {
   if (status === "running") return accent(theme, content);
   if (status === "blocked") return warning(theme, content);
   if (status === "failed" || status === "interrupted") return errorText(theme, content);
   return content;
 }
 
-function statusBadge(theme: Theme, status: FlowRunStatus | TaskRunStatus, label = statusText(status)): string {
+function statusBadge(theme: Theme, status: WorkflowRunStatus | TaskRunStatus, label = statusText(status)): string {
   const content = ` ${label.toUpperCase().replace(/_/g, " ")} `;
   const colored = fg(theme, statusColor(status), strong(theme, content));
   return theme.bg ? bgBand(theme, statusBgColor(status), colored) : fg(theme, statusColor(status), strong(theme, `[${content.trim()}]`));
 }
 
-function statusBgColor(status: FlowRunStatus | TaskRunStatus): string {
+function statusBgColor(status: WorkflowRunStatus | TaskRunStatus): string {
   if (status === "completed") return "toolSuccessBg";
   if (status === "failed" || status === "interrupted") return "toolErrorBg";
   if (status === "running" || status === "blocked") return "toolPendingBg";
@@ -863,7 +863,7 @@ function progressBar(theme: Theme, summary: TaskSummary, cells: number): string 
   return fg(theme, statusColor(statusForSummary(summary)), `${bar} ${summary.completed}/${summary.total}`);
 }
 
-function statusColor(status: FlowRunStatus | TaskRunStatus): string {
+function statusColor(status: WorkflowRunStatus | TaskRunStatus): string {
   if (status === "completed") return "success";
   if (status === "running") return "accent";
   if (status === "blocked") return "warning";
@@ -871,11 +871,11 @@ function statusColor(status: FlowRunStatus | TaskRunStatus): string {
   return "dim";
 }
 
-function statusText(status: FlowRunStatus | TaskRunStatus): string {
+function statusText(status: WorkflowRunStatus | TaskRunStatus): string {
   return status;
 }
 
-function runStatusLabel(flow: FlowSummary): string {
+function runStatusLabel(flow: WorkflowSummary): string {
   if (flow.continuation?.status === "awaiting_approval") return "approval";
   if (flow.continuation?.status === "invalid_generated_spec") return "invalid spec";
   if (flow.continuation?.status === "continued") return "continued";
@@ -883,7 +883,7 @@ function runStatusLabel(flow: FlowSummary): string {
 }
 
 function shortId(runId: string): string {
-  return runId.replace(/^flow_/, "flow_").slice(0, 18);
+  return runId.replace(/^workflow_/, "workflow_").slice(0, 24);
 }
 
 function previewLines(text: string, fallback: string, maxLines: number): string[] {
@@ -1168,7 +1168,7 @@ function inlinePreviewText(theme: Theme, text: string): string {
 
 function bgBand(theme: Theme, color: string, text: string): string {
   if (!theme.bg) return text;
-  const marker = "__PI_FLOW_BG_MARKER__";
+  const marker = "__PI_WORKFLOW_BG_MARKER__";
   const wrapped = theme.bg(color, marker);
   const markerIndex = wrapped.indexOf(marker);
   if (markerIndex < 0) return theme.bg(color, text);

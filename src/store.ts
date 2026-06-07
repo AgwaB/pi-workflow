@@ -4,13 +4,13 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 
 import {
-  CompiledFlow,
+  CompiledWorkflow,
   CompiledTask,
   STAGE_FIRST_RUN_TYPE,
-  FlowIndexRecord,
-  FlowRunRecord,
-  FlowRunStatus,
-  FlowTaskRunRecord,
+  WorkflowIndexRecord,
+  WorkflowRunRecord,
+  WorkflowRunStatus,
+  WorkflowTaskRunRecord,
   TaskRunStatus,
   TaskSummary,
 } from "./types.js";
@@ -38,40 +38,40 @@ export function makeRunId(): string {
   return `workflow_${Date.now().toString(36)}_${randomBytes(3).toString("hex")}`;
 }
 
-export function flowsRoot(cwd: string): string {
+export function workflowsRoot(cwd: string): string {
   return join(cwd, ".pi", "workflows");
 }
 
-export function flowRunDir(cwd: string, runId: string): string {
-  return join(flowsRoot(cwd), runId);
+export function workflowRunDir(cwd: string, runId: string): string {
+  return join(workflowsRoot(cwd), runId);
 }
 
-export function flowRunPath(cwd: string, runId: string): string {
-  return join(flowRunDir(cwd, runId), "run.json");
+export function workflowRunPath(cwd: string, runId: string): string {
+  return join(workflowRunDir(cwd, runId), "run.json");
 }
 
-export function flowIndexPath(cwd: string): string {
-  return join(flowsRoot(cwd), "index.json");
+export function workflowIndexPath(cwd: string): string {
+  return join(workflowsRoot(cwd), "index.json");
 }
 
-export function compiledFlowPath(cwd: string, runId: string): string {
-  return join(flowRunDir(cwd, runId), "compiled.json");
+export function compiledWorkflowPath(cwd: string, runId: string): string {
+  return join(workflowRunDir(cwd, runId), "compiled.json");
 }
 
 export function supervisorPath(cwd: string, runId: string): string {
-  return join(flowRunDir(cwd, runId), "supervisor.json");
+  return join(workflowRunDir(cwd, runId), "supervisor.json");
 }
 
 export function indexSupervisorErrorPath(cwd: string): string {
-  return join(flowsRoot(cwd), "supervisor-error.json");
+  return join(workflowsRoot(cwd), "supervisor-error.json");
 }
 
 export function taskDir(cwd: string, runId: string, taskId: string): string {
-  return join(flowRunDir(cwd, runId), "tasks", taskId);
+  return join(workflowRunDir(cwd, runId), "tasks", taskId);
 }
 
 export function managedWorktreePath(cwd: string, runId: string, taskId: string): string {
-  return join(flowRunDir(cwd, runId), "worktrees", taskId);
+  return join(workflowRunDir(cwd, runId), "worktrees", taskId);
 }
 
 export function toProjectPath(cwd: string, filePath: string): string {
@@ -103,7 +103,7 @@ export async function writeJsonAtomic(file: string, value: unknown): Promise<voi
 }
 
 export async function withRunLease<T>(cwd: string, runId: string, action: () => Promise<T>): Promise<T | undefined> {
-  const dir = flowRunDir(cwd, runId);
+  const dir = workflowRunDir(cwd, runId);
   await ensureDir(dir);
   const lockFile = join(dir, "supervisor.lock");
   const ownerId = `${process.pid}-${randomBytes(3).toString("hex")}`;
@@ -226,11 +226,11 @@ async function ownsLock(lockFile: string, ownerId: string): Promise<boolean> {
 
 export async function createRunRecord(
   cwd: string,
-  compiled: CompiledFlow,
+  compiled: CompiledWorkflow,
   specPath: string,
-): Promise<{ run: FlowRunRecord; runDir: string }> {
+): Promise<{ run: WorkflowRunRecord; runDir: string }> {
   const runId = makeRunId();
-  const runDir = flowRunDir(cwd, runId);
+  const runDir = workflowRunDir(cwd, runId);
   await ensureDir(runDir);
   await ensureDir(join(runDir, "tasks"));
 
@@ -255,17 +255,17 @@ export async function createRunRecord(
   return { run, runDir };
 }
 
-export async function writeRunRecord(cwd: string, run: FlowRunRecord): Promise<void> {
+export async function writeRunRecord(cwd: string, run: WorkflowRunRecord): Promise<void> {
   await assertActiveRunLease(cwd, run.runId);
   run.updatedAt = nowIso();
   const derived = deriveRunStatus(run);
   Object.assign(run, derived);
-  await writeJsonAtomic(flowRunPath(cwd, run.runId), run);
+  await writeJsonAtomic(workflowRunPath(cwd, run.runId), run);
   await updateIndex(cwd).catch(() => undefined);
 }
 
-export async function writeStaticRunArtifacts(cwd: string, run: FlowRunRecord, compiled: CompiledFlow, originalSpec: unknown): Promise<void> {
-  const runDir = flowRunDir(cwd, run.runId);
+export async function writeStaticRunArtifacts(cwd: string, run: WorkflowRunRecord, compiled: CompiledWorkflow, originalSpec: unknown): Promise<void> {
+  const runDir = workflowRunDir(cwd, run.runId);
   await writeJsonAtomic(join(runDir, "spec.json"), originalSpec);
   await writeJsonAtomic(join(runDir, "compiled.json"), compiled);
 }
@@ -274,11 +274,11 @@ async function assertActiveRunLease(cwd: string, runId: string): Promise<void> {
   const context = runLeaseContext.getStore();
   if (!context) return;
   if (context.cwd !== cwd || context.runId !== runId) return;
-  await assertLockOwner(join(flowRunDir(cwd, runId), "supervisor.lock"), context.ownerId);
+  await assertLockOwner(join(workflowRunDir(cwd, runId), "supervisor.lock"), context.ownerId);
 }
 
 export async function findRunRecordPath(cwd: string, runIdOrPrefix: string): Promise<string | undefined> {
-  const root = flowsRoot(cwd);
+  const root = workflowsRoot(cwd);
   let entries: string[];
   try {
     entries = await readdir(root);
@@ -290,27 +290,27 @@ export async function findRunRecordPath(cwd: string, runIdOrPrefix: string): Pro
   const matches = entries.filter((entry) => entry === runIdOrPrefix || entry.startsWith(runIdOrPrefix)).sort();
   if (matches.length === 0) return undefined;
   if (matches.length > 1 && !matches.includes(runIdOrPrefix)) {
-    throw new Error(`Ambiguous flow run id prefix "${runIdOrPrefix}": ${matches.slice(0, 8).join(", ")}`);
+    throw new Error(`Ambiguous workflow run id prefix "${runIdOrPrefix}": ${matches.slice(0, 8).join(", ")}`);
   }
   const runId = matches.includes(runIdOrPrefix) ? runIdOrPrefix : matches[0]!;
-  return flowRunPath(cwd, runId);
+  return workflowRunPath(cwd, runId);
 }
 
-export async function readRunRecord(cwd: string, runIdOrPrefix: string): Promise<FlowRunRecord> {
+export async function readRunRecord(cwd: string, runIdOrPrefix: string): Promise<WorkflowRunRecord> {
   const file = await findRunRecordPath(cwd, runIdOrPrefix);
   if (!file) throw new Error(`Flow run not found: ${runIdOrPrefix}`);
 
-  const run = await readJson<FlowRunRecord>(file);
-  if (!run?.runId || !Array.isArray(run.tasks)) throw new Error(`Invalid flow run record: ${file}`);
+  const run = await readJson<WorkflowRunRecord>(file);
+  if (!run?.runId || !Array.isArray(run.tasks)) throw new Error(`Invalid workflow run record: ${file}`);
   return deriveRunStatus(run);
 }
 
-export async function readIndex(cwd: string): Promise<FlowIndexRecord | undefined> {
-  return readJson<FlowIndexRecord>(flowIndexPath(cwd));
+export async function readIndex(cwd: string): Promise<WorkflowIndexRecord | undefined> {
+  return readJson<WorkflowIndexRecord>(workflowIndexPath(cwd));
 }
 
-export async function listRunRecords(cwd: string): Promise<FlowRunRecord[]> {
-  const root = flowsRoot(cwd);
+export async function listRunRecords(cwd: string): Promise<WorkflowRunRecord[]> {
+  const root = workflowsRoot(cwd);
   let entries: string[];
   try {
     entries = await readdir(root);
@@ -324,7 +324,7 @@ export async function listRunRecords(cwd: string): Promise<FlowRunRecord[]> {
     try {
       const fileStat = await stat(file);
       if (!fileStat.isFile()) return undefined;
-      const parsed = JSON.parse(await readFile(file, "utf8")) as FlowRunRecord;
+      const parsed = JSON.parse(await readFile(file, "utf8")) as WorkflowRunRecord;
       if (!isRunRecordLike(parsed)) return undefined;
       return deriveRunStatus(parsed);
     } catch (error) {
@@ -335,34 +335,34 @@ export async function listRunRecords(cwd: string): Promise<FlowRunRecord[]> {
     }
   }));
 
-  return records.filter((record): record is FlowRunRecord => Boolean(record));
+  return records.filter((record): record is WorkflowRunRecord => Boolean(record));
 }
 
-function isRunRecordLike(value: unknown): value is FlowRunRecord {
+function isRunRecordLike(value: unknown): value is WorkflowRunRecord {
   if (!value || typeof value !== "object") return false;
-  const run = value as Partial<FlowRunRecord>;
+  const run = value as Partial<WorkflowRunRecord>;
   if (typeof run.runId !== "string" || !Array.isArray(run.tasks)) return false;
   return run.tasks.every((task) => Boolean(
     task
     && typeof task === "object"
-    && typeof (task as FlowTaskRunRecord).status === "string"
-    && TASK_STATUSES.includes((task as FlowTaskRunRecord).status as keyof Omit<TaskSummary, "total">),
+    && typeof (task as WorkflowTaskRunRecord).status === "string"
+    && TASK_STATUSES.includes((task as WorkflowTaskRunRecord).status as keyof Omit<TaskSummary, "total">),
   ));
 }
 
-export async function updateIndex(cwd: string): Promise<FlowIndexRecord> {
-  const lockFile = join(flowsRoot(cwd), "index.lock");
+export async function updateIndex(cwd: string): Promise<WorkflowIndexRecord> {
+  const lockFile = join(workflowsRoot(cwd), "index.lock");
   const ownerId = `${process.pid}-${randomBytes(3).toString("hex")}`;
-  await ensureDir(flowsRoot(cwd));
+  await ensureDir(workflowsRoot(cwd));
   await acquireLockWithWait(lockFile, ownerId);
 
   try {
     const runs = (await listRunRecords(cwd)).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
-    const active = runs.filter((run) => !isTerminalFlowStatus(run.status));
-    const terminal = runs.filter((run) => isTerminalFlowStatus(run.status)).slice(0, TERMINAL_INDEX_LIMIT);
+    const active = runs.filter((run) => !isTerminalWorkflowStatus(run.status));
+    const terminal = runs.filter((run) => isTerminalWorkflowStatus(run.status)).slice(0, TERMINAL_INDEX_LIMIT);
     const selected = [...active, ...terminal].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
 
-    const index: FlowIndexRecord = {
+    const index: WorkflowIndexRecord = {
       schemaVersion: 1,
       updatedAt: nowIso(),
       runs: selected.map((run) => ({
@@ -373,7 +373,7 @@ export async function updateIndex(cwd: string): Promise<FlowIndexRecord> {
         taskSummary: run.taskSummary,
         createdAt: run.createdAt,
         updatedAt: run.updatedAt,
-        runJson: toProjectPath(cwd, flowRunPath(cwd, run.runId)),
+        runJson: toProjectPath(cwd, workflowRunPath(cwd, run.runId)),
         tasks: run.tasks.map((task) => ({
           taskId: task.taskId,
           displayName: task.displayName,
@@ -386,21 +386,21 @@ export async function updateIndex(cwd: string): Promise<FlowIndexRecord> {
       })),
     };
 
-    await writeJsonAtomic(flowIndexPath(cwd), index);
+    await writeJsonAtomic(workflowIndexPath(cwd), index);
     return index;
   } finally {
     await releaseLock(lockFile, ownerId);
   }
 }
 
-export function deriveRunStatus(run: FlowRunRecord): FlowRunRecord {
+export function deriveRunStatus(run: WorkflowRunRecord): WorkflowRunRecord {
   const next = { ...run, tasks: run.tasks };
   next.taskSummary = summarizeTasks(next.tasks);
-  next.status = deriveFlowStatus(next.taskSummary);
+  next.status = deriveWorkflowStatus(next.taskSummary);
   return next;
 }
 
-export function summarizeTasks(tasks: FlowTaskRunRecord[]): TaskSummary {
+export function summarizeTasks(tasks: WorkflowTaskRunRecord[]): TaskSummary {
   const summary = emptySummary();
   for (const task of tasks) {
     summary[task.status] += 1;
@@ -409,7 +409,7 @@ export function summarizeTasks(tasks: FlowTaskRunRecord[]): TaskSummary {
   return summary;
 }
 
-export function deriveFlowStatus(summary: TaskSummary): FlowRunStatus {
+export function deriveWorkflowStatus(summary: TaskSummary): WorkflowRunStatus {
   if (summary.blocked > 0) return "blocked";
   if (summary.running > 0 || summary.pending > 0) return "running";
   if (summary.total > 0 && summary.completed === summary.total) return "completed";
@@ -417,7 +417,7 @@ export function deriveFlowStatus(summary: TaskSummary): FlowRunStatus {
   return "interrupted";
 }
 
-export function isTerminalFlowStatus(status: FlowRunStatus): boolean {
+export function isTerminalWorkflowStatus(status: WorkflowRunStatus): boolean {
   return status === "completed" || status === "failed" || status === "interrupted";
 }
 
@@ -426,7 +426,7 @@ export function isTerminalTaskStatus(status: TaskRunStatus): boolean {
 }
 
 export function setTaskTerminal(
-  task: FlowTaskRunRecord,
+  task: WorkflowTaskRunRecord,
   status: TaskRunStatus,
   statusDetail: string,
   options: { completedAt?: string; exitCode?: number; lastMessage?: string } = {},
@@ -444,7 +444,7 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function createTaskRecord(cwd: string, runId: string, task: CompiledTask, index: number): FlowTaskRunRecord {
+function createTaskRecord(cwd: string, runId: string, task: CompiledTask, index: number): WorkflowTaskRunRecord {
   const taskId = `task-${index + 1}`;
   const dir = taskDir(cwd, runId, taskId);
   const files = {
@@ -499,7 +499,7 @@ export async function resolveFlowsCwd(cwd: string): Promise<string> {
   let current = cwd;
   while (true) {
     try {
-      const found = await readJson(flowIndexPath(current));
+      const found = await readJson(workflowIndexPath(current));
       if (found) return current;
     } catch {}
     const parent = dirname(current);
@@ -508,7 +508,7 @@ export async function resolveFlowsCwd(cwd: string): Promise<string> {
   }
 }
 
-export async function createStageFirstRunRecord(cwd: string, compiled: CompiledFlow, specPath: string): Promise<{ run: FlowRunRecord; runDir: string }> {
+export async function createStageFirstRunRecord(cwd: string, compiled: CompiledWorkflow, specPath: string): Promise<{ run: WorkflowRunRecord; runDir: string }> {
   const result = await createRunRecord(cwd, compiled, specPath);
   result.run.type = STAGE_FIRST_RUN_TYPE as any;
   return result;

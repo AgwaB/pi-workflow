@@ -1,7 +1,0 @@
-schemaVersion: &one 1
-name: invalid-yaml-anchor
-flow:
-  type: single
-  task:
-    agent: scout
-    task: Validation must reject YAML anchors.

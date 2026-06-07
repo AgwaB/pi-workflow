@@ -46,7 +46,7 @@ for (let iteration = 1; iteration <= iterations; iteration += 1) {
 }
 
 const report = [
-  "# pi-subagent-flow soak report",
+  "# pi-workflow soak report",
   "",
   `Date: ${new Date().toISOString()}`,
   `Result: ${failed ? "FAIL" : "PASS"}`,
@@ -57,7 +57,6 @@ const report = [
   "| Iteration | Command | Exit | Evidence |",
   "|---:|---|---:|---|",
   ...rows.map((row) => `| ${row.iteration} | \`${row.command}\` | ${row.status} | ${row.evidence} |`),
-  "",
 ].join("\n");
 writeFileSync(join(resultDir, "report.md"), report);
 writeFileSync(join(root, "e2e-test", "soak-report.md"), report);

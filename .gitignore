@@ -24,6 +24,7 @@ node_modules/
 cache/
 skill-test-runs/
 internal/e2e-test/results/
+e2e-test/results/
 internal/e2e-test/fixtures/worktree-base/.git/
 
 # Local third-party reference checkouts
@@ -33,3 +34,4 @@ internal/reference/
 .recovery/
 .harness-archive/
 *.tar.gz
+e2e-test/soak-report.md

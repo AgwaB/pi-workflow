@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "name": "decision-debate",
-  "description": "Decision stress-test recipe: build the strongest case for a proposal, challenge it, defend it, and synthesize a judge verdict for design, ADR, API/UX, and tradeoff-heavy decisions.",
+  "description": "Decision stress-test workflow: build the strongest case for a proposal, challenge it, defend it, and synthesize a judge verdict for design, ADR, API/UX, and tradeoff-heavy decisions.",
   "agent": "scout",
   "readOnly": true,
   "tools": [
@@ -95,7 +95,7 @@
       "code review for defects",
       "multiple fix attempts"
     ],
-    "similarRecipes": [
+    "similarWorkflows": [
       "deep-review",
       "revise-loop"
     ],

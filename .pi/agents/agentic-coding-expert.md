@@ -98,8 +98,8 @@ Use this agent when:
 
 - Fixture: A flow spec launches four write-capable agents with `bash` in the same cwd and no worktree policy. Expected: flag shared-cwd parallel mutation and require worktree isolation or explicit opt-out.
 - Fixture: A `readOnly: true` reviewer has `tools: read, grep, find, ls, bash`. Expected: classify `bash` as mutation-capable unless guarded by trusted policy; do not treat `readOnly` as a sandbox.
-- Fixture: `/flow run` returns immediately but chain step 2 depends on step 1 and no supervisor is described. Expected: flag missing supervisor/reconciliation contract.
-- Fixture: Panel reads all `.pi/flows/*/run.json` forever without index/retention. Expected: flag unbounded status scan and require index/retention or rebuild semantics.
+- Fixture: `/workflow run` returns immediately but chain step 2 depends on step 1 and no supervisor is described. Expected: flag missing supervisor/reconciliation contract.
+- Fixture: Panel reads all `.pi/workflows/*/run.json` forever without index/retention. Expected: flag unbounded status scan and require index/retention or rebuild semantics.
 
 ## Safety Review / Rules
 

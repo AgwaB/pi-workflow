@@ -4,11 +4,11 @@ import { extname } from "node:path";
 import {
   APPROVAL_MODES,
   FAST_MODES,
-  FLOW_TYPES,
-  FlowMapItemSpec,
-  FlowSpec,
-  FlowTaskSpec,
-  FlowValidationError,
+  WORKFLOW_TYPES,
+  WorkflowMapItemSpec,
+  WorkflowSpec,
+  WorkflowTaskSpec,
+  WorkflowValidationError,
   THINKING_LEVELS,
   ValidationIssue,
   WORKTREE_POLICIES,
@@ -50,15 +50,15 @@ const TASK_KEYS = new Set([
   "maxRuntimeMs",
   "dependsOn",
 ]);
-const FLOW_SINGLE_KEYS = new Set(["type", "task"]);
-const FLOW_PARALLEL_KEYS = new Set(["type", "tasks", "aggregate"]);
-const FLOW_CHAIN_KEYS = new Set(["type", "steps"]);
-const FLOW_DAG_KEYS = new Set(["type", "tasks"]);
-const FLOW_MAP_KEYS = new Set(["type", "items", "task", "aggregate"]);
+const WORKFLOW_SINGLE_KEYS = new Set(["type", "task"]);
+const WORKFLOW_PARALLEL_KEYS = new Set(["type", "tasks", "aggregate"]);
+const WORKFLOW_CHAIN_KEYS = new Set(["type", "steps"]);
+const WORKFLOW_DAG_KEYS = new Set(["type", "tasks"]);
+const WORKFLOW_MAP_KEYS = new Set(["type", "items", "task", "aggregate"]);
 const MAP_ITEM_KEYS = new Set(["id", "input"]);
 
 export interface LoadedWorkflowSpec extends ResolvedWorkflowSpecRef {
-  spec: FlowSpec;
+  spec: WorkflowSpec;
 }
 
 export async function loadWorkflowSpec(specRef: string, cwd: string): Promise<LoadedWorkflowSpec> {
@@ -68,8 +68,8 @@ export async function loadWorkflowSpec(specRef: string, cwd: string): Promise<Lo
   try {
     parsed = parseSpecText(await readFile(resolved.specPath, "utf8"), resolved.specPath);
   } catch (error) {
-    if (error instanceof FlowValidationError) throw error;
-    throw new FlowValidationError([
+    if (error instanceof WorkflowValidationError) throw error;
+    throw new WorkflowValidationError([
       {
         path: specRef,
         message: error instanceof Error ? error.message : String(error),
@@ -89,7 +89,7 @@ function parseSpecText(text: string, specPath: string): unknown {
   return JSON.parse(text);
 }
 
-export function parseWorkflowSpec(value: unknown): FlowSpec {
+export function parseWorkflowSpec(value: unknown): WorkflowSpec {
   const issues: ValidationIssue[] = [];
   const root = objectAt(value, "$", issues);
 
@@ -106,11 +106,11 @@ export function parseWorkflowSpec(value: unknown): FlowSpec {
     if (root.backend !== undefined) parseBackend(root.backend, "$.backend", issues);
     if (root.defaults !== undefined) parseDefaults(root.defaults, "$.defaults", issues);
     if (root.roles !== undefined) parseRoles(root.roles, "$.roles", issues);
-    parseFlow(root.flow, "$.flow", issues);
+    parseWorkflowBody(root.flow, "$.flow", issues);
   }
 
-  if (issues.length > 0) throw new FlowValidationError(issues);
-  return value as FlowSpec;
+  if (issues.length > 0) throw new WorkflowValidationError(issues);
+  return value as WorkflowSpec;
 }
 
 function parseDefaults(value: unknown, path: string, issues: ValidationIssue[]): void {
@@ -192,44 +192,44 @@ function parseRoles(value: unknown, path: string, issues: ValidationIssue[]): vo
   }
 }
 
-function parseFlow(value: unknown, path: string, issues: ValidationIssue[]): void {
-  const flow = objectAt(value, path, issues);
-  if (!flow) return;
+function parseWorkflowBody(value: unknown, path: string, issues: ValidationIssue[]): void {
+  const body = objectAt(value, path, issues);
+  if (!body) return;
 
-  if (!FLOW_TYPES.includes(flow.type as never)) {
+  if (!WORKFLOW_TYPES.includes(body.type as never)) {
     issues.push({ path: `${path}.type`, message: 'must be "single", "parallel", "chain", "dag", or "map"' });
     return;
   }
 
-  if (flow.type === "single") {
-    rejectUnknownKeys(flow, FLOW_SINGLE_KEYS, path, issues);
-    parseTask(flow.task, `${path}.task`, issues);
+  if (body.type === "single") {
+    rejectUnknownKeys(body, WORKFLOW_SINGLE_KEYS, path, issues);
+    parseTask(body.task, `${path}.task`, issues);
     return;
   }
 
-  if (flow.type === "parallel") {
-    rejectUnknownKeys(flow, FLOW_PARALLEL_KEYS, path, issues);
-    parseTaskArray(flow.tasks, `${path}.tasks`, issues, 2);
-    if (flow.aggregate !== undefined) parseTask(flow.aggregate, `${path}.aggregate`, issues);
+  if (body.type === "parallel") {
+    rejectUnknownKeys(body, WORKFLOW_PARALLEL_KEYS, path, issues);
+    parseTaskArray(body.tasks, `${path}.tasks`, issues, 2);
+    if (body.aggregate !== undefined) parseTask(body.aggregate, `${path}.aggregate`, issues);
     return;
   }
 
-  if (flow.type === "chain") {
-    rejectUnknownKeys(flow, FLOW_CHAIN_KEYS, path, issues);
-    parseTaskArray(flow.steps, `${path}.steps`, issues);
+  if (body.type === "chain") {
+    rejectUnknownKeys(body, WORKFLOW_CHAIN_KEYS, path, issues);
+    parseTaskArray(body.steps, `${path}.steps`, issues);
     return;
   }
 
-  if (flow.type === "dag") {
-    rejectUnknownKeys(flow, FLOW_DAG_KEYS, path, issues);
-    parseTaskArray(flow.tasks, `${path}.tasks`, issues, 1, { idRequired: true, allowDependsOn: true });
+  if (body.type === "dag") {
+    rejectUnknownKeys(body, WORKFLOW_DAG_KEYS, path, issues);
+    parseTaskArray(body.tasks, `${path}.tasks`, issues, 1, { idRequired: true, allowDependsOn: true });
     return;
   }
 
-  rejectUnknownKeys(flow, FLOW_MAP_KEYS, path, issues);
-  parseMapItems(flow.items, `${path}.items`, issues);
-  parseTask(flow.task, `${path}.task`, issues);
-  if (flow.aggregate !== undefined) parseTask(flow.aggregate, `${path}.aggregate`, issues);
+  rejectUnknownKeys(body, WORKFLOW_MAP_KEYS, path, issues);
+  parseMapItems(body.items, `${path}.items`, issues);
+  parseTask(body.task, `${path}.task`, issues);
+  if (body.aggregate !== undefined) parseTask(body.aggregate, `${path}.aggregate`, issues);
 }
 
 function parseMapItems(value: unknown, path: string, issues: ValidationIssue[]): void {
@@ -245,7 +245,7 @@ function parseMapItems(value: unknown, path: string, issues: ValidationIssue[]):
   const seen = new Set<string>();
   value.forEach((itemValue, index) => {
     const itemPath = `${path}[${index}]`;
-    const item = objectAt(itemValue, itemPath, issues) as (Partial<FlowMapItemSpec> & Record<string, unknown>) | undefined;
+    const item = objectAt(itemValue, itemPath, issues) as (Partial<WorkflowMapItemSpec> & Record<string, unknown>) | undefined;
     if (!item) return;
     rejectUnknownKeys(item, MAP_ITEM_KEYS, itemPath, issues);
     requiredString(item, "id", `${itemPath}.id`, issues);
@@ -283,7 +283,7 @@ function parseTask(
   issues: ValidationIssue[],
   options: { idRequired?: boolean; allowDependsOn?: boolean } = {},
 ): void {
-  const task = objectAt(value, path, issues) as (Partial<FlowTaskSpec> & Record<string, unknown>) | undefined;
+  const task = objectAt(value, path, issues) as (Partial<WorkflowTaskSpec> & Record<string, unknown>) | undefined;
   if (!task) return;
 
   rejectUnknownKeys(task, TASK_KEYS, path, issues);
@@ -428,20 +428,20 @@ function isStageFirstSpec(value: unknown): value is any {
 }
 
 export function parseStageFirstWorkflowSpec(value: unknown): any {
-  if (!value || typeof value !== "object") throw new FlowValidationError([{ path: "$", message: "must be an object" }]);
+  if (!value || typeof value !== "object") throw new WorkflowValidationError([{ path: "$", message: "must be an object" }]);
   const spec = value as any;
   const stages = spec.workflow?.stages ?? spec.flow?.stages;
-  if (spec.schemaVersion !== 1) throw new FlowValidationError([{ path: "$.schemaVersion", message: "must be exactly 1" }]);
-  if (!Array.isArray(stages)) throw new FlowValidationError([{ path: "$.workflow.stages", message: "must be an array" }]);
+  if (spec.schemaVersion !== 1) throw new WorkflowValidationError([{ path: "$.schemaVersion", message: "must be exactly 1" }]);
+  if (!Array.isArray(stages)) throw new WorkflowValidationError([{ path: "$.workflow.stages", message: "must be an array" }]);
   for (const [index, stage] of stages.entries()) {
-    if (!stage || typeof stage !== "object") throw new FlowValidationError([{ path: `$.workflow.stages[${index}]`, message: "must be an object" }]);
+    if (!stage || typeof stage !== "object") throw new WorkflowValidationError([{ path: `$.workflow.stages[${index}]`, message: "must be an object" }]);
     if (stage.type === "parallel" && Array.isArray(stage.tasks)) {
       for (const [taskIndex, task] of stage.tasks.entries()) {
-        if (task?.inject !== undefined) throw new FlowValidationError([{ path: `$.workflow.stages[${index}].tasks[${taskIndex}].inject`, message: "unknown field" }]);
+        if (task?.inject !== undefined) throw new WorkflowValidationError([{ path: `$.workflow.stages[${index}].tasks[${taskIndex}].inject`, message: "unknown field" }]);
       }
     }
     if (stage.type === "foreach" && stage.each?.inject !== undefined) {
-      throw new FlowValidationError([{ path: `$.workflow.stages[${index}].each.inject`, message: "unknown field" }]);
+      throw new WorkflowValidationError([{ path: `$.workflow.stages[${index}].each.inject`, message: "unknown field" }]);
     }
   }
   if (!spec.workflow && spec.flow?.stages) return { ...spec, workflow: { stages: spec.flow.stages } };
@@ -451,7 +451,7 @@ export function parseStageFirstWorkflowSpec(value: unknown): any {
 const originalParseWorkflowSpec = parseWorkflowSpec;
 export function parseWorkflowSpecCompat(value: unknown): any {
   if (value && typeof value === "object" && (value as any).flow?.type !== undefined && !(value as any).flow?.stages) {
-    throw new FlowValidationError([{ path: "$.flow.type", message: "unknown field" }]);
+    throw new WorkflowValidationError([{ path: "$.flow.type", message: "unknown field" }]);
   }
   if (isStageFirstSpec(value)) return parseStageFirstWorkflowSpec(value);
   return originalParseWorkflowSpec(value);

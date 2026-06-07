@@ -4,15 +4,15 @@ import { createHash } from "node:crypto";
 import { copyFile, lstat, mkdir, readFile, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, normalize, relative } from "node:path";
 
-import { flowRunDir, flowsRoot, managedWorktreePath, toProjectPath } from "./store.js";
-import { CompiledTask, FlowRunRecord, FlowTaskRunRecord, WorktreeSnapshotRecord } from "./types.js";
+import { workflowRunDir, workflowsRoot, managedWorktreePath, toProjectPath } from "./store.js";
+import { CompiledTask, WorkflowRunRecord, WorkflowTaskRunRecord, WorktreeSnapshotRecord } from "./types.js";
 
 const GIT_MAX_BUFFER = 50 * 1024 * 1024;
 
 export async function ensureManagedWorktree(
   projectCwd: string,
-  run: FlowRunRecord,
-  task: FlowTaskRunRecord,
+  run: WorkflowRunRecord,
+  task: WorkflowTaskRunRecord,
   compiledTask: CompiledTask,
 ): Promise<void> {
   if (!compiledTask.safety.requiresWorktree) return;
@@ -23,7 +23,7 @@ export async function ensureManagedWorktree(
   }
 
   const path = managedWorktreePath(projectCwd, run.runId, task.taskId);
-  const branch = `pi-flow/${run.runId}-${task.taskId}`;
+  const branch = `pi-workflow/${run.runId}-${task.taskId}`;
   await mkdir(dirname(path), { recursive: true });
 
   const snapshot = await captureDirtyWorktreeSnapshot(projectCwd, run, task, gitRoot);
@@ -81,19 +81,19 @@ interface CapturedWorktreeSnapshot {
 
 async function captureDirtyWorktreeSnapshot(
   projectCwd: string,
-  run: FlowRunRecord,
-  task: FlowTaskRunRecord,
+  run: WorkflowRunRecord,
+  task: WorkflowTaskRunRecord,
   gitRoot: string,
 ): Promise<CapturedWorktreeSnapshot> {
-  const snapshotDir = join(flowRunDir(projectCwd, run.runId), "worktree-snapshots", task.taskId);
+  const snapshotDir = join(workflowRunDir(projectCwd, run.runId), "worktree-snapshots", task.taskId);
   await rm(snapshotDir, { recursive: true, force: true });
   await mkdir(snapshotDir, { recursive: true });
 
   const baseHead = git(gitRoot, ["rev-parse", "HEAD"]).trim();
-  const excludedFlowState = gitRelativePrefix(gitRoot, flowsRoot(projectCwd)) ?? ".pi/workflows";
-  const flowStatePathspec = excludedFlowState ? [`:(exclude)${excludedFlowState}`] : [];
-  const trackedPatch = git(gitRoot, ["diff", "--binary", "HEAD", "--", ".", ...flowStatePathspec]);
-  const trackedFiles = parseNul(git(gitRoot, ["diff", "--name-only", "-z", "HEAD", "--", ".", ...flowStatePathspec]))
+  const excludedFlowState = gitRelativePrefix(gitRoot, workflowsRoot(projectCwd)) ?? ".pi/workflows";
+  const workflowStatePathspec = excludedFlowState ? [`:(exclude)${excludedFlowState}`] : [];
+  const trackedPatch = git(gitRoot, ["diff", "--binary", "HEAD", "--", ".", ...workflowStatePathspec]);
+  const trackedFiles = parseNul(git(gitRoot, ["diff", "--name-only", "-z", "HEAD", "--", ".", ...workflowStatePathspec]))
     .map(safeGitRelativePath)
     .filter((file) => !isUnderGitPrefix(file, excludedFlowState));
   const untrackedFiles = parseNul(git(gitRoot, ["ls-files", "--others", "--exclude-standard", "-z"])).map(safeGitRelativePath)

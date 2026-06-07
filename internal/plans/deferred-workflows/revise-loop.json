@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "name": "revise-loop",
-  "description": "Evaluator-optimizer recipe: draft or restate the target artifact, evaluate it, revise once, evaluate again, and produce a final recommendation. General-purpose but bounded; read-only by default.",
+  "description": "Evaluator-optimizer workflow: draft or restate the target artifact, evaluate it, revise once, evaluate again, and produce a final recommendation. General-purpose but bounded; read-only by default.",
   "agent": "scout",
   "readOnly": true,
   "tools": [
@@ -69,7 +69,7 @@
             "remainingIssues"
           ]
         },
-        "prompt": "Evaluate the revised draft. Return JSON only with verdict, score, remainingIssues, regressionRisks, and acceptability. Use verdict values ACCEPT, ACCEPT_WITH_NOTES, REVISE_AGAIN, or REJECT. This recipe has a hard one-revision cap, so if more work is needed, explain the next human action instead of proposing another automatic loop."
+        "prompt": "Evaluate the revised draft. Return JSON only with verdict, score, remainingIssues, regressionRisks, and acceptability. Use verdict values ACCEPT, ACCEPT_WITH_NOTES, REVISE_AGAIN, or REJECT. This workflow has a hard one-revision cap, so if more work is needed, explain the next human action instead of proposing another automatic loop."
       },
       {
         "id": "final",
@@ -99,7 +99,7 @@
       "source-backed research",
       "parallel fix attempts"
     ],
-    "similarRecipes": [
+    "similarWorkflows": [
       "deep-review",
       "decision-debate"
     ],

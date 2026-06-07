@@ -17,22 +17,22 @@ import {
 import { WORKFLOW_COMMAND, WORKFLOW_HELP } from "./index.js";
 import { loadWorkflowSpec } from "./schema.js";
 import { listWorkflows, recommendWorkflows, resolveWorkflowRef } from "./workflow-specs.js";
-import { CompiledFlow, FlowValidationError } from "./types.js";
+import { CompiledWorkflow, WorkflowValidationError } from "./types.js";
 
-export default function flowExtension(pi: ExtensionAPI): void {
+export default function workflowExtension(pi: ExtensionAPI): void {
   pi.on("session_start", async (_event, ctx) => {
     await resumeSupervisors(ctx.cwd).catch(() => undefined);
   });
 
   pi.registerCommand(WORKFLOW_COMMAND, {
-    description: "Run and inspect spec-defined Pi subagent flows",
+    description: "Run and inspect workflow-defined Pi subagent runs",
     handler: async (args, ctx) => {
-      await handleFlowCommand(args, ctx);
+      await handleWorkflowCommand(args, ctx);
     },
   });
 }
 
-async function handleFlowCommand(args: string, ctx: ExtensionCommandContext): Promise<void> {
+async function handleWorkflowCommand(args: string, ctx: ExtensionCommandContext): Promise<void> {
   const tokens = splitArgs(args);
   const action = tokens[0] ?? "help";
 
@@ -124,12 +124,12 @@ async function handleFlowCommand(args: string, ctx: ExtensionCommandContext): Pr
   }
 }
 
-async function loadAndCompile(specPath: string, cwd: string): Promise<{ loaded: Awaited<ReturnType<typeof loadWorkflowSpec>>; compiled: CompiledFlow }> {
+async function loadAndCompile(specPath: string, cwd: string): Promise<{ loaded: Awaited<ReturnType<typeof loadWorkflowSpec>>; compiled: CompiledWorkflow }> {
   const loaded = await loadWorkflowSpec(specPath, cwd);
   return { loaded, compiled: await compileWorkflowSpec(loaded.spec, { cwd }) };
 }
 
-function formatValidationSummary(result: { loaded: Awaited<ReturnType<typeof loadWorkflowSpec>>; compiled: CompiledFlow }, cwd: string): string {
+function formatValidationSummary(result: { loaded: Awaited<ReturnType<typeof loadWorkflowSpec>>; compiled: CompiledWorkflow }, cwd: string): string {
   const { loaded, compiled } = result;
   const blocked = compiled.tasks.filter((task) => task.safety.permission.status === "blocked");
   const lines = [
@@ -168,7 +168,7 @@ function toDisplayPath(path: string, cwd: string): string {
   return display.startsWith("..") ? path : display;
 }
 
-function formatRoles(compiled: CompiledFlow): string {
+function formatRoles(compiled: CompiledWorkflow): string {
   if (compiled.roles.length === 0) return "No roles compiled.";
 
   return compiled.roles.map((role) => {
@@ -208,7 +208,7 @@ function formatAgents(agents: Awaited<ReturnType<typeof discoverAgents>>["agents
 }
 
 function formatError(error: unknown): string {
-  if (error instanceof FlowValidationError) {
+  if (error instanceof WorkflowValidationError) {
     return `Workflow validation failed:\n${error.issues.map((issue) => `- ${issue.path}: ${issue.message}`).join("\n")}`;
   }
   return error instanceof Error ? error.message : String(error);

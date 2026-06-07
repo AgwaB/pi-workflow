@@ -7,7 +7,6 @@
   "license": "MIT",
   "files": [
     "src",
-    "examples",
     "workflows",
     "skills",
     "docs",
@@ -32,8 +31,8 @@
     "typecheck": "tsc --noEmit",
     "test": "npm run test:unit",
     "test:unit": "rm -rf .tmp/unit && tsc -p tsconfig.json --outDir .tmp/unit --noEmit false && node --test test/*.test.mjs",
-    "e2e": "node internal/e2e-test/run.mjs",
-    "e2e:soak": "node internal/e2e-test/soak.mjs",
+    "e2e": "node e2e-test/run.mjs",
+    "e2e:soak": "node e2e-test/soak.mjs",
     "pack:dry": "npm pack --dry-run"
   },
   "pi": {

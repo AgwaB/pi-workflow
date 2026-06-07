@@ -4,7 +4,7 @@ import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 
-import { CompiledTask, FlowRunRecord, FlowTaskRunRecord } from "./types.js";
+import { CompiledTask, WorkflowRunRecord, WorkflowTaskRunRecord } from "./types.js";
 import {
   fromProjectPath,
   isTerminalTaskStatus,
@@ -24,7 +24,7 @@ const LAUNCH_STALE_MS = 30_000;
 
 export type TmuxLaunchResult = { kind: "launched" } | { kind: "capacity"; message: string; retryAfterMs?: number };
 
-export async function cleanupTmuxRun(_cwd: string, run: FlowRunRecord): Promise<void> {
+export async function cleanupTmuxRun(_cwd: string, run: WorkflowRunRecord): Promise<void> {
   for (const task of run.tasks) {
     if (task.paneId && !isTerminalTaskStatus(task.status)) killTmuxPane(task.paneId);
   }
@@ -32,8 +32,8 @@ export async function cleanupTmuxRun(_cwd: string, run: FlowRunRecord): Promise<
 
 export async function launchTmuxTask(
   cwd: string,
-  run: FlowRunRecord,
-  task: FlowTaskRunRecord,
+  run: WorkflowRunRecord,
+  task: WorkflowTaskRunRecord,
   compiledTask: CompiledTask,
 ): Promise<TmuxLaunchResult> {
   if (task.status !== "pending") return { kind: "launched" };
@@ -100,7 +100,7 @@ export async function launchTmuxTask(
   return { kind: "launched" };
 }
 
-export async function refreshRunFromArtifacts(cwd: string, run: FlowRunRecord): Promise<FlowRunRecord> {
+export async function refreshRunFromArtifacts(cwd: string, run: WorkflowRunRecord): Promise<WorkflowRunRecord> {
   let changed = false;
 
   for (const task of run.tasks) {
@@ -150,7 +150,7 @@ export async function refreshRunFromArtifacts(cwd: string, run: FlowRunRecord): 
 
 function buildSystemPrompt(task: CompiledTask): string {
   return [
-    `You are Pi flow subagent '${task.agent}'.`,
+    `You are Pi workflow subagent '${task.agent}'.`,
     "You were launched by /workflow from a deterministic workflow spec.",
     "Do not assume parent conversation history.",
     "Do not launch other agents or orchestration workflows unless explicitly instructed.",
@@ -193,7 +193,7 @@ async function writeCompletionScript(file: string): Promise<void> {
   const script = `
 import fs from 'node:fs'; import path from 'node:path';
 const taskId=process.argv[2]; const exitCode=Number(process.argv[3]||'0'); const outputFile=process.argv[4]; const resultFile=process.argv[5]; const stderrFile=process.argv[6]; const launchToken=process.argv[7];
-if(!taskId||!outputFile||!resultFile||!stderrFile){throw new Error('flow completion missing task artifact paths')}
+if(!taskId||!outputFile||!resultFile||!stderrFile){throw new Error('workflow completion missing task artifact paths')}
 function readJson(f){try{return JSON.parse(fs.readFileSync(f,'utf8'))}catch{return undefined}} function writeJson(f,v){fs.mkdirSync(path.dirname(f),{recursive:true});const tmp=path.join(path.dirname(f),'.'+Date.now().toString(36)+'-'+Math.random().toString(16).slice(2)+'.tmp');fs.writeFileSync(tmp,JSON.stringify(v,null,2)+'\\n');fs.renameSync(tmp,f)}
 function readText(f){try{return fs.readFileSync(f,'utf8')}catch{return ''}} function fileSize(f){try{return fs.statSync(f).size}catch{return 0}} function cap(s){s=String(s||''); return s.length>4000?s.slice(0,4000)+'…':s}
 const completedAt=new Date().toISOString(); let result=readJson(resultFile)||{}; const stderrText=cap(readText(stderrFile).trim()); const outputBytes=fileSize(outputFile); let errorMessage=cap(typeof result.errorMessage==='string'?result.errorMessage:''); const stopReason=result.stopReason;
@@ -203,7 +203,7 @@ else if(stopReason==='error'||stopReason==='aborted'){status='failed'; failureKi
 else if(Number.isFinite(exitCode)&&exitCode!==0){status='failed'; failureKind='exit_code'; errorMessage=errorMessage||stderrText||('child Pi exited with code '+exitCode)}
 else if(outputBytes===0){status='failed'; failureKind='no_final_output'; errorMessage=errorMessage||stderrText||'child Pi produced no final assistant output'}
 errorMessage=cap(errorMessage); result={...result,launchToken,status,exitCode,completedAt,outputLog:outputFile,stderrLog:stderrFile,finalTextBytes:outputBytes,noFinalOutput:outputBytes===0,contextLengthExceeded,failureKind,errorMessage:errorMessage||undefined}; writeJson(resultFile,result);
-if(status==='failed'){const line='[flow task failed: '+(errorMessage||failureKind||'unknown error')+']\\n'; const existing=readText(outputFile); fs.writeFileSync(outputFile, existing ? existing.replace(/\\s*$/,'\\n')+line : line)}
+if(status==='failed'){const line='[workflow task failed: '+(errorMessage||failureKind||'unknown error')+']\\n'; const existing=readText(outputFile); fs.writeFileSync(outputFile, existing ? existing.replace(/\\s*$/,'\\n')+line : line)}
 `;
   await writeFile(file, script, { mode: 0o700 });
 }
@@ -211,7 +211,7 @@ if(status==='failed'){const line='[flow task failed: '+(errorMessage||failureKin
 async function writeRunnerScript(options: {
   runnerScript: string;
   taskCwd: string;
-  task: FlowTaskRunRecord;
+  task: WorkflowTaskRunRecord;
   compiledTask: CompiledTask;
   systemPromptFile: string;
   taskPromptFile: string;
@@ -228,15 +228,15 @@ set -o pipefail
 mkdir -p ${shellQuote(dirname(options.outputFile))}
 : > ${shellQuote(options.outputFile)}
 : > ${shellQuote(options.stderrFile)}
-cd ${shellQuote(options.taskCwd)} || { echo ${shellQuote(`flow runner failed to enter task cwd: ${options.taskCwd}`)} >> ${shellQuote(options.stderrFile)}; ${shellQuote(process.execPath)} ${shellQuote(options.completeScript)} ${shellQuote(options.task.taskId)} 1 ${shellQuote(options.outputFile)} ${shellQuote(options.resultFile)} ${shellQuote(options.stderrFile)} ${shellQuote(options.launchToken)}; exit 1; }
+cd ${shellQuote(options.taskCwd)} || { echo ${shellQuote(`workflow runner failed to enter task cwd: ${options.taskCwd}`)} >> ${shellQuote(options.stderrFile)}; ${shellQuote(process.execPath)} ${shellQuote(options.completeScript)} ${shellQuote(options.task.taskId)} 1 ${shellQuote(options.outputFile)} ${shellQuote(options.resultFile)} ${shellQuote(options.stderrFile)} ${shellQuote(options.launchToken)}; exit 1; }
 pi ${args} -p "$(cat ${shellQuote(options.taskPromptFile)})" 2> >(tee ${shellQuote(options.stderrFile)} >&2) | ${shellQuote(process.execPath)} ${shellQuote(options.parserScript)} ${shellQuote(options.outputFile)} ${shellQuote(options.resultFile)} ${shellQuote(options.launchToken)}
 status=("\${PIPESTATUS[@]}")
 code="\${status[0]:-1}"
 parser_code="\${status[1]:-0}"
 completion_code="$code"
-if [ "$parser_code" != "0" ]; then echo "flow JSON parser failed with code $parser_code" >> ${shellQuote(options.stderrFile)}; if [ "$completion_code" = "0" ]; then completion_code="$parser_code"; fi; fi
+if [ "$parser_code" != "0" ]; then echo "workflow JSON parser failed with code $parser_code" >> ${shellQuote(options.stderrFile)}; if [ "$completion_code" = "0" ]; then completion_code="$parser_code"; fi; fi
 ${shellQuote(process.execPath)} ${shellQuote(options.completeScript)} ${shellQuote(options.task.taskId)} "$completion_code" ${shellQuote(options.outputFile)} ${shellQuote(options.resultFile)} ${shellQuote(options.stderrFile)} ${shellQuote(options.launchToken)}
-echo "[flow completed task=${options.task.taskId} exit=$completion_code]"
+echo "[workflow completed task=${options.task.taskId} exit=$completion_code]"
 exit "$completion_code"
 `;
   await writeFile(options.runnerScript, script, "utf8");
@@ -309,7 +309,7 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
-function isLaunchStale(task: FlowTaskRunRecord): boolean {
+function isLaunchStale(task: WorkflowTaskRunRecord): boolean {
   if (!task.startedAt) return true;
   return Date.now() - Date.parse(task.startedAt) > LAUNCH_STALE_MS;
 }
@@ -318,7 +318,7 @@ function isTmuxCapacityError(message: string): boolean {
   return /no space for new pane|resource temporarily unavailable|\bEAGAIN\b|\bEMFILE\b|\bENOMEM\b/i.test(message);
 }
 
-function resetPendingLaunchClaim(task: FlowTaskRunRecord, message: string): void {
+function resetPendingLaunchClaim(task: WorkflowTaskRunRecord, message: string): void {
   task.status = "pending";
   task.statusDetail = "waiting_capacity";
   task.lastMessage = message;

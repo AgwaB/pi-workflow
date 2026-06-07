@@ -9,20 +9,20 @@ export type {
   AgentDefinition,
   ApprovalMode,
   BackendOptions,
-  CompiledFlow,
+  CompiledWorkflow,
   CompiledRole,
   CompiledTask,
   FastMode,
-  FlowDefaults,
-  FlowSpec,
-  FlowTaskSpec,
-  FlowType,
+  WorkflowDefaults,
+  WorkflowSpec,
+  WorkflowTaskSpec,
+  WorkflowType,
   RoleSpec,
   TaskCapability,
   ThinkingLevel,
   WorktreePolicy,
 } from "./types.js";
-export { FlowValidationError } from "./types.js";
+export { WorkflowValidationError } from "./types.js";
 
 export const WORKFLOW_COMMAND = "workflow";
 

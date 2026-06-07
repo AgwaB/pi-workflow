@@ -12,7 +12,7 @@ import { listWorkflows, recommendWorkflows, resolveWorkflowRef } from "../.tmp/u
 import { resolveWorkflowRuntime } from "../.tmp/unit/model-runtime.js";
 import { loadWorkflow, parseWorkflow } from "../.tmp/unit/schema.js";
 import { acquireSupervisorLease, createStageFirstRunRecord, deriveRunStatus, heartbeatSupervisorLease, resolveFlowsCwd, setTaskTerminal, supervisorLeasePath, workflowProcessRoleForTests, workflowSupervisorOwnerIdForTests, writeJsonAtomic } from "../.tmp/unit/store.js";
-import { FlowValidationError, STAGE_FIRST_RUN_TYPE } from "../.tmp/unit/types.js";
+import { WorkflowValidationError, STAGE_FIRST_RUN_TYPE } from "../.tmp/unit/types.js";
 import { applyTaskResultArtifact, buildJsonOutputRetryInstructions, extractJsonOutput, parseJsonOutput } from "../.tmp/unit/result.js";
 import { canStageProceedAfterPreviousFailure, extractStageFirstForeachItems, shouldScheduleAfterStageFailure } from "../.tmp/unit/workflow-runtime.js";
 import { deriveWorkflowStatus, isActiveTaskStatus, isNonCompletedTerminalTaskStatus, summarizeTasks } from "../.tmp/unit/status.js";
@@ -40,7 +40,7 @@ function workflowSpec(agent = "unit-scout", extra = {}) {
 }
 
 function assertThrowsFlow(fn) {
-  assert.throws(fn, FlowValidationError);
+  assert.throws(fn, WorkflowValidationError);
   try {
     fn();
   } catch (error) {
@@ -50,7 +50,7 @@ function assertThrowsFlow(fn) {
 }
 
 function assertIssue(error, path, messagePart) {
-  assert(error instanceof FlowValidationError);
+  assert(error instanceof WorkflowValidationError);
   assert(error.issues.some((issue) => issue.path === path && issue.message.includes(messagePart)), JSON.stringify(error.issues));
 }
 

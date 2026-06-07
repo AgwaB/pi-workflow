@@ -2,21 +2,21 @@ export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhig
 export const FAST_MODES = ["inherit", "on", "off"] as const;
 export const APPROVAL_MODES = ["non-interactive", "on-request"] as const;
 export const WORKTREE_POLICIES = ["auto", "on", "off"] as const;
-export const FLOW_TYPES = ["single", "parallel", "chain", "dag", "tree", "retry"] as const;
+export const WORKFLOW_TYPES = ["single", "parallel", "chain", "dag", "tree", "retry"] as const;
 export const STAGE_FIRST_RUN_TYPE = "workflow-v1" as const;
 
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 export type FastMode = (typeof FAST_MODES)[number];
 export type ApprovalMode = (typeof APPROVAL_MODES)[number];
 export type WorktreePolicy = (typeof WORKTREE_POLICIES)[number];
-export type FlowType = (typeof FLOW_TYPES)[number];
+export type WorkflowType = (typeof WORKFLOW_TYPES)[number];
 
 export interface BackendOptions {
   type?: "local-pi";
   mode?: "auto" | "tmux" | "headless";
 }
 
-export interface FlowDefaults {
+export interface WorkflowDefaults {
   cwd?: string;
   model?: string;
   thinking?: ThinkingLevel;
@@ -37,7 +37,7 @@ export interface RoleSpec {
   maxChars?: number;
 }
 
-export interface FlowTaskSpec {
+export interface WorkflowTaskSpec {
   id?: string;
   agent: string;
   role?: string | string[];
@@ -55,24 +55,24 @@ export interface FlowTaskSpec {
   outputContract?: string;
 }
 
-export interface FlowMapItemSpec {
+export interface WorkflowMapItemSpec {
   id?: string;
   task: string;
 }
 
-export type FlowBody =
-  | { type: "single"; task: FlowTaskSpec }
-  | { type: "parallel"; tasks: FlowTaskSpec[] }
-  | { type: "chain"; steps: FlowTaskSpec[] };
+export type WorkflowBody =
+  | { type: "single"; task: WorkflowTaskSpec }
+  | { type: "parallel"; tasks: WorkflowTaskSpec[] }
+  | { type: "chain"; steps: WorkflowTaskSpec[] };
 
-export interface FlowSpec {
+export interface WorkflowSpec {
   schemaVersion: 1;
   name?: string;
   description?: string;
-  defaults?: FlowDefaults;
+  defaults?: WorkflowDefaults;
   backend?: BackendOptions;
   roles?: Record<string, RoleSpec>;
-  flow: FlowBody;
+  flow: WorkflowBody;
 }
 
 export interface ValidationIssue {
@@ -80,17 +80,15 @@ export interface ValidationIssue {
   message: string;
 }
 
-export class FlowValidationError extends Error {
+export class WorkflowValidationError extends Error {
   readonly issues: ValidationIssue[];
 
   constructor(issues: ValidationIssue[]) {
     super(issues.map((issue) => `${issue.path}: ${issue.message}`).join("\n"));
-    this.name = "FlowValidationError";
+    this.name = "WorkflowValidationError";
     this.issues = issues;
   }
 }
-
-export { FlowValidationError as WorkflowValidationError };
 
 export interface AgentDefinition {
   name: string;
@@ -175,10 +173,9 @@ export interface CompiledTask {
 }
 
 export type TaskRunStatus = "pending" | "running" | "blocked" | "completed" | "failed" | "skipped" | "interrupted";
-export type FlowRunStatus = "running" | "blocked" | "completed" | "failed" | "interrupted";
-export type WorkflowRunStatus = FlowRunStatus;
+export type WorkflowRunStatus = "running" | "blocked" | "completed" | "failed" | "interrupted";
 
-export interface FlowTaskRunRecord {
+export interface WorkflowTaskRunRecord {
   taskId: string;
   specId: string;
   displayName: string;
@@ -238,8 +235,6 @@ export interface FlowTaskRunRecord {
   };
 }
 
-export type WorkflowTaskRunRecord = FlowTaskRunRecord;
-
 export interface TaskSummary {
   pending: number;
   running: number;
@@ -251,13 +246,13 @@ export interface TaskSummary {
   total: number;
 }
 
-export interface FlowRunRecord {
+export interface WorkflowRunRecord {
   schemaVersion: 1;
   runId: string;
   name?: string;
   description?: string;
-  type: FlowType;
-  status: FlowRunStatus;
+  type: WorkflowType;
+  status: WorkflowRunStatus;
   taskSummary: TaskSummary;
   cwd: string;
   backend: { type: "local-pi"; mode: "tmux" };
@@ -269,19 +264,17 @@ export interface FlowRunRecord {
   createdAt: string;
   updatedAt: string;
   specPath: string;
-  tasks: FlowTaskRunRecord[];
+  tasks: WorkflowTaskRunRecord[];
 }
 
-export type WorkflowRunRecord = FlowRunRecord;
-
-export interface FlowIndexRecord {
+export interface WorkflowIndexRecord {
   schemaVersion: 1;
   updatedAt: string;
   runs: Array<{
     runId: string;
     name?: string;
-    type: FlowType;
-    status: FlowRunStatus;
+    type: WorkflowType;
+    status: WorkflowRunStatus;
     taskSummary: TaskSummary;
     createdAt: string;
     updatedAt: string;
@@ -334,11 +327,11 @@ export interface WorktreeSnapshotRecord {
   [key: string]: unknown;
 }
 
-export interface CompiledFlow {
+export interface CompiledWorkflow {
   schemaVersion: 1;
   name?: string;
   description?: string;
-  type: FlowType;
+  type: WorkflowType;
   cwd: string;
   backend: { type: "local-pi"; mode: "tmux" };
   maxConcurrency: number;

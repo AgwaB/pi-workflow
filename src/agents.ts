@@ -6,7 +6,7 @@ import {
   APPROVAL_MODES,
   AgentDefinition,
   FAST_MODES,
-  FlowValidationError,
+  WorkflowValidationError,
   THINKING_LEVELS,
   ValidationIssue,
 } from "./types.js";
@@ -137,23 +137,23 @@ async function readAgentFile(file: string, root: string, scope: "project" | "use
   const sourcePath = resolve(file);
   const rootStat = await lstat(rootPath);
   if (scope === "project" && rootStat.isSymbolicLink()) {
-    throw new FlowValidationError([{ path: "$agent", message: `agent root must not be a symlink: ${rootPath}` }]);
+    throw new WorkflowValidationError([{ path: "$agent", message: `agent root must not be a symlink: ${rootPath}` }]);
   }
   if (!isPathInside(rootPath, sourcePath)) {
-    throw new FlowValidationError([{ path: "$agent", message: `agent path escapes root: ${sourcePath}` }]);
+    throw new WorkflowValidationError([{ path: "$agent", message: `agent path escapes root: ${sourcePath}` }]);
   }
 
   const realRoot = await realpath(rootPath);
   const realSource = await realpath(sourcePath);
   if (!isPathInside(realRoot, realSource)) {
-    throw new FlowValidationError([{ path: "$agent", message: `agent symlink escapes root: ${sourcePath}` }]);
+    throw new WorkflowValidationError([{ path: "$agent", message: `agent symlink escapes root: ${sourcePath}` }]);
   }
 
   return parseAgentMarkdown(await readFile(realSource, "utf8"), realSource, scope, realRoot);
 }
 
 function isProjectRootSymlinkError(error: unknown): boolean {
-  return error instanceof FlowValidationError
+  return error instanceof WorkflowValidationError
     && error.issues.some((issue) => issue.message.startsWith("agent root must not be a symlink:"));
 }
 
@@ -212,19 +212,19 @@ function parseSimpleYaml(yaml: string): Record<string, unknown> {
     const listItem = rawLine.match(/^\s+-\s*(.*)$/);
     if (listItem) {
       if (!currentListKey || !Array.isArray(result[currentListKey])) {
-        throw new FlowValidationError([{ path: "$agent.frontmatter", message: `unsupported YAML list item: ${line}` }]);
+        throw new WorkflowValidationError([{ path: "$agent.frontmatter", message: `unsupported YAML list item: ${line}` }]);
       }
       (result[currentListKey] as string[]).push(stripQuotes(listItem[1]!.trim()));
       continue;
     }
 
     if (/^\s/.test(rawLine)) {
-      throw new FlowValidationError([{ path: "$agent.frontmatter", message: `unsupported indented YAML: ${line}` }]);
+      throw new WorkflowValidationError([{ path: "$agent.frontmatter", message: `unsupported indented YAML: ${line}` }]);
     }
 
     const match = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
     if (!match) {
-      throw new FlowValidationError([{ path: "$agent.frontmatter", message: `unsupported YAML frontmatter line: ${line}` }]);
+      throw new WorkflowValidationError([{ path: "$agent.frontmatter", message: `unsupported YAML frontmatter line: ${line}` }]);
     }
 
     const key = match[1]!;
@@ -298,7 +298,7 @@ function enumValue<T extends readonly string[]>(value: unknown, values: T): T[nu
 function uniqueStrings(values: Array<string | undefined>): string[] {
   const issues: ValidationIssue[] = [];
   const unique = values.filter((value): value is string => typeof value === "string" && value.trim() !== "");
-  if (unique.length === 0) throw new FlowValidationError([{ path: "$agent", message: "agent has no valid name" }]);
+  if (unique.length === 0) throw new WorkflowValidationError([{ path: "$agent", message: "agent has no valid name" }]);
   const seen = new Set<string>();
   const result: string[] = [];
   for (const value of unique) {
@@ -307,7 +307,7 @@ function uniqueStrings(values: Array<string | undefined>): string[] {
       result.push(value);
     }
   }
-  if (issues.length > 0) throw new FlowValidationError(issues);
+  if (issues.length > 0) throw new WorkflowValidationError(issues);
   return result;
 }
 

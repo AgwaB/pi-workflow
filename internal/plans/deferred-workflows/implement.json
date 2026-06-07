@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "name": "implement",
-  "description": "Stage-first bounded implementation recipe: read-only planning, validation baseline/red-test gate, foreach implementation in managed worktrees, and read-only review reduce for the runtime task.",
+  "description": "Stage-first bounded implementation workflow: read-only planning, validation baseline/red-test gate, foreach implementation in managed worktrees, and read-only review reduce for the runtime task.",
   "agent": "scout",
   "readOnly": true,
   "tools": [
@@ -95,7 +95,7 @@
       "unbounded broad rewrite",
       "deploy publish push upload external mutation"
     ],
-    "similarRecipes": [
+    "similarWorkflows": [
       "best-of-n-fix",
       "migration"
     ],
