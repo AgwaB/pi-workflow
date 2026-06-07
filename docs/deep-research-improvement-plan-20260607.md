@@ -143,17 +143,15 @@ Proposed shape:
 {
   "claimInventory": {
     "verificationCandidates": [],
-    "unverifiedClaims": [],
-    "duplicates": [],
-    "outOfScopeClaims": [],
-    "lowValueClaims": []
+    "preservedClaims": [],
+    "duplicates": []
   },
   "coverageGaps": [],
   "normalizationNotes": "..."
 }
 ```
 
-`verificationCandidates` is the only bucket sent to the verify stage. Other buckets are preserved so the workflow remains deep and auditable.
+`verificationCandidates` is the only bucket sent to the verify stage. `preservedClaims` stores useful but unverified audit/backlog material, including claims not selected because of budget, lower centrality, out-of-scope status, or low value. Use a `reason` field rather than many subjective top-level buckets. `duplicates` must reference the canonical claim ID they were merged into.
 
 Each normalized claim should have a stable ID. Each `verificationCandidates` item should include:
 
@@ -172,10 +170,18 @@ Each normalized claim should have a stable ID. Each `verificationCandidates` ite
 Bucket transition rules:
 
 - `verificationCandidates`: valid, source-backed, central claims selected for verification within the depth budget.
-- `unverifiedClaims`: valid research details worth preserving but not verified because they exceeded budget, were lower priority, or did not require rigorous verification for the report's main findings.
-- `duplicates`: claims merged into another normalized claim ID.
-- `outOfScopeClaims`: claims outside the extracted research scope.
-- `lowValueClaims`: vague, generic, or weakly sourced claims not useful enough to carry forward.
+- `preservedClaims`: valid research details worth preserving but not verified because they exceeded budget, were lower priority, were tangential/out of scope, or did not require rigorous verification for the report's main findings. Each item should include `reason`, for example `budget_overflow`, `lower_centrality`, `out_of_scope`, `low_value`, or `weak_source`.
+- `duplicates`: claims merged into another normalized claim ID; each duplicate must include `canonicalClaimId`.
+
+Selection logic for `verificationCandidates` is critical. When selecting under the depth cap, use explicit tie-breakers:
+
+1. `verificationNeed=core` before `useful` before `optional`.
+2. Higher `sourceQuality` before lower `sourceQuality`.
+3. Claims covering underrepresented `researchScope` items before already-saturated scope items.
+4. Claims with concrete, source-checkable assertions before vague synthesis claims.
+5. New/contradictory claims before repetitive claims.
+
+If more claims qualify than the cap allows, preserve the remainder as `preservedClaims` with `reason=budget_overflow`.
 
 Avoid over-relying on generic `high-risk` / `high-impact` language. If used, it should be grounded in research accuracy, not parent decision-making.
 
@@ -187,7 +193,9 @@ Verification statuses remain:
 verified | partially_supported | unsupported | conflicting
 ```
 
-But final reporting should treat them differently:
+Verification results should also allow `correctionOrCounterclaim` when the original claim is unsupported or overstated but the evidence supports a narrower or different claim. Corrected evidence is often more useful than a bare rejection.
+
+But final reporting should treat statuses differently:
 
 - `verified` -> eligible for `mainFindings`
 - `partially_supported` -> `caveatedFindings`
@@ -218,7 +226,7 @@ Proposed shape:
       "partiallySupported": 0,
       "unsupported": 0,
       "conflicting": 0,
-      "unverified": 0,
+      "preserved": 0,
       "coverageGaps": 0
     },
     "mainFindings": [
@@ -229,23 +237,18 @@ Proposed shape:
       }
     ],
     "caveatedFindings": [],
-    "contestedFindings": [],
-    "unsupportedClaims": [],
-    "unverifiedClaims": [],
+    "contestedAreas": [],
+    "notableUnsupportedClaims": [],
     "researchScopeCoverage": [],
     "remainingGaps": []
   },
   "evidencePacket": {
-    "verifiedClaims": [],
-    "partiallySupportedClaims": [],
-    "conflictingClaims": [],
-    "unsupportedClaims": [],
-    "unverifiedClaims": []
+    "claims": []
   }
 }
 ```
 
-The final report may summarize and group. The evidence packet may contain fuller details, but should avoid making the parent session believe unsupported or unverified claims are main findings.
+`finalReport` is the human-readable research report: concise synthesis, counts, and representative findings with claim IDs. `evidencePacket` is the canonical structured audit trail: all verified, partially supported, conflicting, unsupported, and preserved claims with status fields. Avoid maintaining parallel exhaustive bucket arrays in both places.
 
 ## Depth mode implications
 
@@ -265,10 +268,11 @@ Proposed initial approach:
 - Keep existing question and verification-candidate caps for now.
 - Add a soft per-question raw-claim target, not a hard deletion rule. For example: quick target 5 raw claims/question, standard target 8, max target 12.
 - If a research subagent finds more useful claims than the target, it should prioritize the strongest claims in `claims` and summarize the rest as `additionalUnverifiedLeads` rather than silently discard them.
-- Preserve claims that are not verified as `unverifiedClaims` rather than discarding them silently.
+- Preserve claims that are not verified as `preservedClaims` rather than discarding them silently.
+- Add an escape hatch for large runs: if raw claims exceed roughly 1.5x the verification cap, run a lightweight pre-filter by source quality and scope coverage before full normalization.
 - Use lifecycle buckets and reporting counts to learn whether caps are harming quality before reducing them.
 
-Reason: prematurely limiting raw claims may undermine the "deep" part of deep research. A soft target plus explicit unverified leads controls verbosity while preserving breadth.
+Reason: prematurely limiting raw claims may undermine the "deep" part of deep research. A soft target plus explicit preserved leads controls verbosity while preserving breadth.
 
 ## Open questions for reviewers
 
@@ -276,7 +280,7 @@ Reason: prematurely limiting raw claims may undermine the "deep" part of deep re
 2. Is separating `researchScope` extraction from question planning enough to avoid self-justifying coverage boilerplate?
 3. Is preserving unverified claims valuable, or will it overload the final artifact?
 4. Should `verificationCandidates` caps remain unchanged initially, or should standard/max be reduced immediately?
-5. Are `mainFindings`, `caveatedFindings`, `contestedFindings`, `unsupportedClaims`, and `unverifiedClaims` the right buckets?
+5. Are `mainFindings`, `caveatedFindings`, `contestedAreas`, `notableUnsupportedClaims`, and canonical `evidencePacket.claims` the right split?
 6. Does `finalReport + evidencePacket` keep the parent session informed without turning the workflow into a decision-maker?
 7. What is the smallest change that improves accuracy without compromising depth?
 
