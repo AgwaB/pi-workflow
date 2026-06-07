@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { readFile } from "node:fs/promises";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 

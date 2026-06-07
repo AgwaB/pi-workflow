@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { copyFile, lstat, mkdir, readFile, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";

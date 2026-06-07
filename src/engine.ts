@@ -264,7 +264,7 @@ async function scheduleDag(cwd: string, run: FlowRunRecord, compiledFlow: Compil
     const task = run.tasks[index];
     const compiledTask = compiledFlow.tasks[index];
     if (!task || !compiledTask || task.status !== "pending") continue;
-    if (!compiledTask.dependsOn.every((dep) => bySpecId.get(dep)?.status === "completed")) continue;
+    if (!(compiledTask.dependsOn ?? []).every((dep) => bySpecId.get(dep)?.status === "completed")) continue;
     const launched = await launchPendingTaskAt(cwd, run, compiledFlow, index, { dag: true });
     if (launched) running += 1;
   }
@@ -281,7 +281,7 @@ function markDagDependentsSkipped(run: FlowRunRecord, compiledFlow: CompiledFlow
       if (task.status !== "pending") continue;
       const compiledTask = compiledFlow.tasks[index];
       if (!compiledTask) continue;
-      const failedDep = compiledTask.dependsOn.find((dep) => {
+      const failedDep = (compiledTask.dependsOn ?? []).find((dep) => {
         const status = bySpecId.get(dep)?.status;
         return status === "failed" || status === "interrupted" || status === "skipped";
       });
@@ -429,10 +429,11 @@ async function prepareDagTask(
 ): Promise<CompiledFlow["tasks"][number]> {
   const compiledTask = compiledFlow.tasks[index]!;
   const task = run.tasks[index]!;
-  if (compiledTask.dependsOn.length === 0) return compiledTask;
+  const dependsOn = compiledTask.dependsOn ?? [];
+  if (dependsOn.length === 0) return compiledTask;
 
   const bySpecId = new Map(run.tasks.map((sourceTask) => [sourceTask.specId, sourceTask]));
-  const sections = await Promise.all(compiledTask.dependsOn.map(async (dep) => {
+  const sections = await Promise.all(dependsOn.map(async (dep) => {
     const sourceTask = bySpecId.get(dep);
     if (!sourceTask) return `## ${dep}\nmissing dependency record`;
     const outputPreview = await readOutputPreview(cwd, sourceTask.files.output, 1200);

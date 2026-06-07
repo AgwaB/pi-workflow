@@ -24,6 +24,12 @@ const LAUNCH_STALE_MS = 30_000;
 
 export type TmuxLaunchResult = { kind: "launched" } | { kind: "capacity"; message: string; retryAfterMs?: number };
 
+export async function cleanupTmuxRun(_cwd: string, run: FlowRunRecord): Promise<void> {
+  for (const task of run.tasks) {
+    if (task.paneId && !isTerminalTaskStatus(task.status)) killTmuxPane(task.paneId);
+  }
+}
+
 export async function launchTmuxTask(
   cwd: string,
   run: FlowRunRecord,

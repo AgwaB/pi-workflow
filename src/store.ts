@@ -53,6 +53,18 @@ export function flowIndexPath(cwd: string): string {
   return join(flowsRoot(cwd), "index.json");
 }
 
+export function compiledFlowPath(cwd: string, runId: string): string {
+  return join(flowRunDir(cwd, runId), "compiled.json");
+}
+
+export function supervisorPath(cwd: string, runId: string): string {
+  return join(flowRunDir(cwd, runId), "supervisor.json");
+}
+
+export function indexSupervisorErrorPath(cwd: string): string {
+  return join(flowsRoot(cwd), "supervisor-error.json");
+}
+
 export function taskDir(cwd: string, runId: string, taskId: string): string {
   return join(flowRunDir(cwd, runId), "tasks", taskId);
 }
@@ -410,6 +422,21 @@ export function isTerminalFlowStatus(status: FlowRunStatus): boolean {
 
 export function isTerminalTaskStatus(status: TaskRunStatus): boolean {
   return status === "completed" || status === "failed" || status === "skipped" || status === "interrupted" || status === "blocked";
+}
+
+export function setTaskTerminal(
+  task: FlowTaskRunRecord,
+  status: TaskRunStatus,
+  statusDetail: string,
+  options: { completedAt?: string; exitCode?: number; lastMessage?: string } = {},
+): boolean {
+  if (isTerminalTaskStatus(task.status)) return false;
+  task.status = status;
+  task.statusDetail = statusDetail;
+  task.completedAt = options.completedAt ?? nowIso();
+  task.exitCode = options.exitCode;
+  task.lastMessage = options.lastMessage;
+  return true;
 }
 
 function sleep(ms: number): Promise<void> {

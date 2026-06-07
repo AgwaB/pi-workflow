@@ -2,7 +2,8 @@ export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhig
 export const FAST_MODES = ["inherit", "on", "off"] as const;
 export const APPROVAL_MODES = ["non-interactive", "on-request"] as const;
 export const WORKTREE_POLICIES = ["auto", "on", "off"] as const;
-export const FLOW_TYPES = ["single", "parallel", "chain"] as const;
+export const FLOW_TYPES = ["single", "parallel", "chain", "dag", "tree", "retry"] as const;
+export const STAGE_FIRST_RUN_TYPE = "stage-first" as const;
 
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 export type FastMode = (typeof FAST_MODES)[number];
@@ -24,6 +25,7 @@ export interface FlowDefaults {
   tools?: string[];
   worktreePolicy?: WorktreePolicy;
   maxConcurrency?: number;
+  maxRuntimeMs?: number;
   backend?: BackendOptions;
 }
 
@@ -48,7 +50,14 @@ export interface FlowTaskSpec {
   tools?: string[];
   readOnly?: boolean;
   worktreePolicy?: WorktreePolicy;
+  maxRuntimeMs?: number;
+  output?: WorkflowTaskOutputSpec;
   outputContract?: string;
+}
+
+export interface FlowMapItemSpec {
+  id?: string;
+  task: string;
 }
 
 export type FlowBody =
@@ -80,6 +89,8 @@ export class FlowValidationError extends Error {
     this.issues = issues;
   }
 }
+
+export { FlowValidationError as WorkflowValidationError };
 
 export interface AgentDefinition {
   name: string;
@@ -128,6 +139,7 @@ export interface CompiledTaskRuntime {
   fast?: FastMode;
   approvalMode: ApprovalMode;
   tools?: string[];
+  maxRuntimeMs?: number;
 }
 
 export interface CompiledTaskSafety {
@@ -155,12 +167,16 @@ export interface CompiledTask {
   explicitWorktreePolicy: boolean;
   runtime: CompiledTaskRuntime;
   safety: CompiledTaskSafety;
+  output?: WorkflowTaskOutputSpec;
   outputContract?: string;
   compiledPrompt: string;
+  kind?: string;
+  dependsOn?: string[];
 }
 
 export type TaskRunStatus = "pending" | "running" | "blocked" | "completed" | "failed" | "skipped" | "interrupted";
 export type FlowRunStatus = "running" | "blocked" | "completed" | "failed" | "interrupted";
+export type WorkflowRunStatus = FlowRunStatus;
 
 export interface FlowTaskRunRecord {
   taskId: string;
@@ -177,6 +193,7 @@ export interface FlowTaskRunRecord {
     thinking?: ThinkingLevel;
     fast?: FastMode;
     approvalMode: ApprovalMode;
+    maxRuntimeMs?: number;
   };
   tools?: string[];
   cwd: string;
@@ -186,10 +203,16 @@ export interface FlowTaskRunRecord {
     branch: string | null;
     baseCwd: string | null;
     warning: string | null;
+    snapshot?: WorktreeSnapshotRecord;
   };
   backendTaskId: string;
   paneId?: string;
   pid?: number;
+  launchToken?: string;
+  backendHandle?: string;
+  kind?: string;
+  stageId?: string;
+  dependsOn?: string[];
   startedAt?: string;
   completedAt?: string;
   elapsedMs?: number;
@@ -203,7 +226,11 @@ export interface FlowTaskRunRecord {
   };
   backendFiles?: Record<string, string>;
   lastMessage?: string;
+  output?: WorkflowTaskOutputSpec;
+  outputValidation?: WorkflowTaskOutputValidationRecord;
 }
+
+export type WorkflowTaskRunRecord = FlowTaskRunRecord;
 
 export interface TaskSummary {
   pending: number;
@@ -226,11 +253,18 @@ export interface FlowRunRecord {
   taskSummary: TaskSummary;
   cwd: string;
   backend: { type: "local-pi"; mode: "tmux" };
+  parentRunId?: string;
+  rootRunId?: string;
+  round?: number;
+  continuation?: WorkflowContinuationRecord;
+  fanout?: unknown[];
   createdAt: string;
   updatedAt: string;
   specPath: string;
   tasks: FlowTaskRunRecord[];
 }
+
+export type WorkflowRunRecord = FlowRunRecord;
 
 export interface FlowIndexRecord {
   schemaVersion: 1;
@@ -244,6 +278,11 @@ export interface FlowIndexRecord {
     createdAt: string;
     updatedAt: string;
     runJson: string;
+    parentRunId?: string;
+    rootRunId?: string;
+    round?: number;
+    continuation?: WorkflowContinuationRecord;
+    fanout?: unknown[];
     tasks: Array<{
       taskId: string;
       displayName: string;
@@ -252,8 +291,39 @@ export interface FlowIndexRecord {
       statusDetail: string;
       paneId?: string;
       lastMessage?: string;
+      kind?: string;
+      stageId?: string;
+      backendHandle?: string;
     }>;
   }>;
+}
+
+export type OutputFormat = "text" | "json" | "markdown";
+export type OutputOnInvalidAction = "fail" | "warn";
+
+export interface WorkflowTaskOutputSpec {
+  format: OutputFormat;
+  requiredKeys?: string[];
+  onInvalid?: OutputOnInvalidAction;
+}
+
+export interface WorkflowTaskOutputValidationRecord {
+  format: OutputFormat;
+  status: "valid" | "invalid" | "warning";
+  message: string;
+  structured: boolean;
+}
+
+export interface WorkflowContinuationRecord {
+  status?: string;
+  mode?: string;
+  [key: string]: unknown;
+}
+
+export interface WorktreeSnapshotRecord {
+  files?: string[];
+  hash?: string;
+  [key: string]: unknown;
 }
 
 export interface CompiledFlow {
