@@ -619,7 +619,10 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export const runFlowRecipe = runFlowSpec;
+export async function runFlowRecipe(specPath: string, cwd: string, options: { task?: string } = {}): Promise<FlowRunRecord> {
+  if (!options.task || options.task.trim() === "") throw new Error("This recipe needs a task");
+  return runFlowSpec(specPath, cwd);
+}
 export const waitForWorkflowRun = waitForRun;
 export const runWorkflowRecipe = runFlowSpec;
 export async function continueWorkflow(_cwd: string, _runId: string): Promise<FlowRunRecord | undefined> {

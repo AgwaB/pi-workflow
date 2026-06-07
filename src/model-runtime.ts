@@ -181,3 +181,20 @@ function findModelInfo(modelId: string | undefined, available: FlowModelInfo[]):
 function isThinkingLevel(value: string): value is ThinkingLevel {
   return (THINKING_LEVELS as readonly string[]).includes(value);
 }
+
+export async function resolveWorkflowRuntime(
+  runtime: FlowRuntimeResolutionInput,
+  context: FlowRuntimeResolutionContext,
+  options: ResolveFlowRuntimeOptions,
+): Promise<FlowRuntimeResolutionInput> {
+  try {
+    return await resolveFlowRuntime(runtime, context, options);
+  } catch (error) {
+    if (options.prompt && runtime.model && /did not match any available/.test(error instanceof Error ? error.message : String(error))) {
+      const choices = (options.availableModels ?? []).map((model) => model.fullId).sort();
+      const selected = await options.prompt.select(`Model "${runtime.model}" is unavailable for ${context.taskKey}. Choose one.`, choices);
+      return resolveFlowRuntime({ ...runtime, model: selected }, context, options);
+    }
+    throw error;
+  }
+}

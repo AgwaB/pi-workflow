@@ -5,14 +5,18 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { parseAgentMarkdown } from "../.tmp/unit/agents.js";
-import { compileFlowRecipe } from "../.tmp/unit/compiler.js";
+import { compileFlowRecipe, compileWorkflowRecipe } from "../.tmp/unit/compiler.js";
 import { formatRun, runFlowRecipe } from "../.tmp/unit/engine.js";
 import { flowArgumentCompletions, parseFlowRunArgs } from "../.tmp/unit/extension.js";
 import { listFlowRecipes, recommendFlowRecipes, resolveFlowRecipeRef } from "../.tmp/unit/recipes.js";
-import { resolveFlowRuntime } from "../.tmp/unit/model-runtime.js";
-import { loadFlowRecipe, parseFlowRecipe } from "../.tmp/unit/schema.js";
-import { createStageFirstRunRecord, deriveRunStatus, resolveFlowsCwd, setTaskTerminal } from "../.tmp/unit/store.js";
+import { resolveFlowRuntime, resolveWorkflowRuntime } from "../.tmp/unit/model-runtime.js";
+import { loadFlowRecipe, parseFlowRecipe, parseWorkflowRecipe } from "../.tmp/unit/schema.js";
+import { acquireSupervisorLease, createStageFirstRunRecord, deriveRunStatus, heartbeatSupervisorLease, resolveFlowsCwd, setTaskTerminal, supervisorLeasePath, workflowProcessRoleForTests, workflowSupervisorOwnerIdForTests, writeJsonAtomic } from "../.tmp/unit/store.js";
 import { FlowValidationError, STAGE_FIRST_RUN_TYPE } from "../.tmp/unit/types.js";
+import { applyTaskResultArtifact, buildJsonOutputRetryInstructions, extractJsonOutput, parseJsonOutput } from "../.tmp/unit/result.js";
+import { canStageProceedAfterPreviousFailure, extractStageFirstForeachItems, shouldScheduleAfterStageFailure } from "../.tmp/unit/workflow-runtime.js";
+import { deriveWorkflowStatus, isActiveTaskStatus, isNonCompletedTerminalTaskStatus, summarizeTasks } from "../.tmp/unit/status.js";
+import { assertWorkflowActionAllowedForRole, assertWorkflowToolAllowedForRole, getWorkflowProcessRole, isWorkflowSupervisorEnabled, workflowWorkerEnvPrefix } from "../.tmp/unit/process-role.js";
 
 function makeProject() {
   return mkdtempSync(join(tmpdir(), "flow-recipe-unit-"));

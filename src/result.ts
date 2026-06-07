@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { copyFile, readFile } from "node:fs/promises";
 
 import { WorkflowTaskRunRecord } from "./types.js";
 import {
@@ -78,6 +78,18 @@ export async function applyTaskResultArtifact(cwd: string, task: WorkflowTaskRun
     }
 
     await writeJsonAtomic(artifact.resultFile, nextResult);
+
+    if (!validation.valid && task.output.onInvalid === "fail") {
+      const attempts = (task.outputRetry?.attempts ?? 0) + 1;
+      await copyFile(fromProjectPath(cwd, task.files.output), `${fromProjectPath(cwd, task.files.output)}.invalid-attempt-${attempts}`).catch(() => undefined);
+      await copyFile(artifact.resultFile, `${artifact.resultFile}.invalid-attempt-${attempts}`).catch(() => undefined);
+      task.status = "pending";
+      task.statusDetail = "retry_output_invalid";
+      task.paneId = undefined;
+      task.launchToken = undefined;
+      task.outputRetry = { attempts, maxAttempts: 1, reason: "output_invalid", message: validation.message, requiredKeys: task.output.requiredKeys ?? [] };
+      return true;
+    }
   }
 
   return setTaskTerminal(task, nextStatus, detail, {
@@ -146,4 +158,72 @@ async function readJsonLoose<T>(file: string): Promise<T | undefined> {
   } catch {
     return undefined;
   }
+}
+
+export function extractJsonOutput(output: string): { text: string; extracted: boolean } {
+  const trimmed = output.trim();
+  const fence = trimmed.match(/^```(?:json)?\s*\n([\s\S]*?)\n?```$/i);
+  if (fence) return { text: fence[1]!.trim(), extracted: false };
+  try { JSON.parse(trimmed); return { text: trimmed, extracted: false }; } catch {}
+  const start = trimmed.indexOf("{");
+  const end = trimmed.lastIndexOf("}");
+  if (start >= 0 && end > start) return { text: trimmed.slice(start, end + 1), extracted: true };
+  return { text: trimmed, extracted: false };
+}
+
+export function parseJsonOutput(output: string, requiredKeys: string[] = []): { valid: boolean; extracted: boolean; structuredOutput?: unknown; message?: string } {
+  const candidates = collectJsonObjectCandidates(output);
+  const ordered = candidates.length > 0 ? candidates : [extractJsonOutput(output).text];
+  let lastError = "invalid JSON";
+  for (let index = ordered.length - 1; index >= 0; index -= 1) {
+    const text = ordered[index]!;
+    try {
+      const parsed = JSON.parse(text);
+      if (requiredKeys.length && (!parsed || typeof parsed !== "object" || Array.isArray(parsed))) continue;
+      const missing = requiredKeys.filter((key) => !Object.prototype.hasOwnProperty.call(parsed as Record<string, unknown>, key));
+      if (missing.length > 0) continue;
+      return { valid: true, extracted: output.trim() !== text.trim(), structuredOutput: parsed };
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+  }
+  return { valid: false, extracted: true, message: lastError };
+}
+
+function collectJsonObjectCandidates(output: string): string[] {
+  const candidates: string[] = [];
+  for (let start = output.indexOf("{"); start !== -1; start = output.indexOf("{", start + 1)) {
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let index = start; index < output.length; index += 1) {
+      const ch = output[index]!;
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (ch === "\\") escaped = true;
+        else if (ch === '"') inString = false;
+        continue;
+      }
+      if (ch === '"') inString = true;
+      else if (ch === "{") depth += 1;
+      else if (ch === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          candidates.push(output.slice(start, index + 1));
+          break;
+        }
+      }
+    }
+  }
+  return candidates;
+}
+
+export function buildJsonOutputRetryInstructions(task: Pick<WorkflowTaskRunRecord, "output" | "outputRetry">): string {
+  const keys = task.output?.requiredKeys ?? task.outputRetry?.requiredKeys ?? [];
+  return [
+    `Validation error: ${task.outputRetry?.message ?? "invalid JSON output"}`,
+    "Return only valid JSON. JSON.parse(finalAnswer) would succeed.",
+    "Invalid JSON: {\"item\": true",
+    `Valid shape: {${keys.map((key) => `\"${key}\": {}`).join(",")}}`,
+  ].join("\n");
 }

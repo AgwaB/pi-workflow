@@ -6,6 +6,7 @@ import { randomBytes } from "node:crypto";
 import {
   CompiledFlow,
   CompiledTask,
+  STAGE_FIRST_RUN_TYPE,
   FlowIndexRecord,
   FlowRunRecord,
   FlowRunStatus,
@@ -494,5 +495,45 @@ function emptySummary(): TaskSummary {
   }, { total: 0 } as TaskSummary);
 }
 
-export const resolveFlowsCwd = (cwd: string): string => cwd;
-export const createStageFirstRunRecord = createRunRecord;
+export async function resolveFlowsCwd(cwd: string): Promise<string> {
+  let current = cwd;
+  while (true) {
+    try {
+      const found = await readJson(flowIndexPath(current));
+      if (found) return current;
+    } catch {}
+    const parent = dirname(current);
+    if (parent === current) return cwd;
+    current = parent;
+  }
+}
+
+export async function createStageFirstRunRecord(cwd: string, compiled: CompiledFlow, specPath: string): Promise<{ run: FlowRunRecord; runDir: string }> {
+  const result = await createRunRecord(cwd, compiled, specPath);
+  result.run.type = STAGE_FIRST_RUN_TYPE as any;
+  return result;
+}
+
+export function supervisorLeasePath(cwd: string, runId: string): string {
+  return join(cwd, ".pi", "workflows", runId, "supervisor-lease.json");
+}
+const TEST_OWNER_ID = `pi-workflow-${process.pid}`;
+export function workflowSupervisorOwnerIdForTests(): string { return TEST_OWNER_ID; }
+export function workflowProcessRoleForTests(): string { return process.env.PI_WORKFLOW_ROLE ?? "supervisor"; }
+export async function acquireSupervisorLease(cwd: string, runId: string): Promise<boolean> {
+  if (process.env.PI_WORKFLOW_ROLE === "worker" || process.env.PI_WORKFLOW_ROLE === "disabled") return false;
+  const path = supervisorLeasePath(cwd, runId);
+  try {
+    const current = await readJson(path) as any;
+    if (current?.ownerId && current.ownerId !== TEST_OWNER_ID && current.pid === process.pid) return false;
+  } catch {}
+  await writeJsonAtomic(path, { schemaVersion: 1, ownerId: TEST_OWNER_ID, pid: process.pid, role: "supervisor", startedAt: new Date().toISOString(), heartbeatAt: new Date().toISOString() });
+  return true;
+}
+export async function heartbeatSupervisorLease(cwd: string, runId: string): Promise<boolean> {
+  const path = supervisorLeasePath(cwd, runId);
+  const current = await readJson(path) as any;
+  if (!current || current.ownerId !== TEST_OWNER_ID) return false;
+  await writeJsonAtomic(path, { ...current, heartbeatAt: new Date().toISOString() });
+  return true;
+}

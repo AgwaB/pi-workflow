@@ -196,3 +196,31 @@ function findModelInfo(modelId: string | undefined, available: WorkflowModelInfo
 function isThinkingLevel(value: string): value is ThinkingLevel {
   return (THINKING_LEVELS as readonly string[]).includes(value);
 }
+
+export function shouldScheduleAfterStageFailure(stage: { type?: string; sourcePolicy?: string }): boolean {
+  return stage.type === "foreach" && stage.sourcePolicy === "partial";
+}
+
+export function canStageProceedAfterPreviousFailure(stage: { sourceStageIds?: string[]; sourcePolicy?: string }, previous: { id?: string }): boolean {
+  if (!stage.sourceStageIds || stage.sourceStageIds.length === 0) return false;
+  if (!stage.sourceStageIds.includes(previous.id ?? "")) return true;
+  return stage.sourcePolicy === "partial";
+}
+
+export async function extractStageFirstForeachItems(cwd: string, stage: any, sourceTasks: any[]): Promise<{ items?: unknown[]; error?: string }> {
+  const items: unknown[] = [];
+  for (const task of sourceTasks) {
+    if (task.status !== "completed") {
+      if (stage.sourcePolicy !== "partial") return { error: `${task.taskId} did not complete` };
+      continue;
+    }
+    try {
+      const { readFile } = await import("node:fs/promises");
+      const resultPath = task.files.result.startsWith("/") ? task.files.result : `${cwd}/${task.files.result}`;
+      const result = JSON.parse(await readFile(resultPath, "utf8"));
+      const value = result.structuredOutput?.findings ?? result.structuredOutput?.items ?? [];
+      if (Array.isArray(value)) items.push(...value);
+    } catch {}
+  }
+  return { items };
+}

@@ -79,7 +79,7 @@ export async function loadFlowSpec(specRef: string, cwd: string): Promise<Loaded
 
   return {
     ...resolved,
-    spec: parseFlowSpec(parsed),
+    spec: parseFlowRecipeCompat(parsed),
   };
 }
 
@@ -420,6 +420,41 @@ function jsonKey(key: string): string {
 }
 
 export const loadFlowRecipe = loadFlowSpec;
-export const parseFlowRecipe = parseFlowSpec;
+export const parseFlowRecipe = parseFlowRecipeCompat;
 export const loadWorkflowRecipe = loadFlowSpec;
-export const parseWorkflowRecipe = parseFlowSpec;
+export const parseWorkflowRecipe = parseFlowRecipeCompat;
+
+
+function isStageFirstSpec(value: unknown): value is any {
+  return Boolean(value && typeof value === "object" && (value as any).workflow?.stages || (value as any).flow?.stages);
+}
+
+export function parseStageFirstRecipe(value: unknown): any {
+  if (!value || typeof value !== "object") throw new FlowValidationError([{ path: "$", message: "must be an object" }]);
+  const spec = value as any;
+  const stages = spec.workflow?.stages ?? spec.flow?.stages;
+  if (spec.schemaVersion !== 1) throw new FlowValidationError([{ path: "$.schemaVersion", message: "must be exactly 1" }]);
+  if (!Array.isArray(stages)) throw new FlowValidationError([{ path: "$.workflow.stages", message: "must be an array" }]);
+  for (const [index, stage] of stages.entries()) {
+    if (!stage || typeof stage !== "object") throw new FlowValidationError([{ path: `$.workflow.stages[${index}]`, message: "must be an object" }]);
+    if (stage.type === "parallel" && Array.isArray(stage.tasks)) {
+      for (const [taskIndex, task] of stage.tasks.entries()) {
+        if (task?.inject !== undefined) throw new FlowValidationError([{ path: `$.workflow.stages[${index}].tasks[${taskIndex}].inject`, message: "unknown field" }]);
+      }
+    }
+    if (stage.type === "foreach" && stage.each?.inject !== undefined) {
+      throw new FlowValidationError([{ path: `$.workflow.stages[${index}].each.inject`, message: "unknown field" }]);
+    }
+  }
+  if (!spec.workflow && spec.flow?.stages) return { ...spec, workflow: { stages: spec.flow.stages } };
+  return spec;
+}
+
+const originalParseFlowRecipe = parseFlowSpec;
+export function parseFlowRecipeCompat(value: unknown): any {
+  if (value && typeof value === "object" && (value as any).flow?.type !== undefined && !(value as any).flow?.stages) {
+    throw new FlowValidationError([{ path: "$.flow.type", message: "unknown field" }]);
+  }
+  if (isStageFirstSpec(value)) return parseStageFirstRecipe(value);
+  return originalParseFlowRecipe(value);
+}

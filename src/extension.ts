@@ -203,14 +203,24 @@ function emit(ctx: ExtensionCommandContext, text: string, level: "info" | "warni
   stream.write(`${text}\n`);
 }
 
-export function parseFlowRunArgs(args: string): { specRef: string; task: string } {
-  const tokens = splitArgs(args);
-  if (tokens[0] === "run") tokens.shift();
-  return { specRef: tokens[0] ?? "", task: tokens.slice(1).join(" ") };
+export function parseFlowRunArgs(args: string): { specPath: string; task: string } {
+  const trimmed = args.trim();
+  const withoutRun = trimmed.startsWith("run ") ? trimmed.slice(4) : trimmed;
+  const match = withoutRun.match(/^(\S+)\s+([\s\S]*)$/);
+  if (!match) return { specPath: withoutRun, task: "" };
+  let task = match[2] ?? "";
+  const quoted = task.match(/^"([\s\S]*)"$/);
+  if (quoted) task = quoted[1] ?? "";
+  return { specPath: match[1] ?? "", task };
 }
 
-export async function flowArgumentCompletions(): Promise<string[]> {
-  return ["help", "validate", "roles", "agents", "run", "status", "show", "logs", "wait"];
+export function flowArgumentCompletions(args: string, recipes: Array<{ name: string }> = []): Array<{ value: string }> | undefined {
+  if (args === "recipe ") return [{ value: "recipe list" }, { value: "recipe show" }];
+  if (args.startsWith("run ")) {
+    const prefix = args.slice(4).trim();
+    return recipes.filter((recipe) => recipe.name.startsWith(prefix)).map((recipe) => ({ value: `run ${recipe.name}` }));
+  }
+  return undefined;
 }
 
 function splitArgs(args: string): string[] {

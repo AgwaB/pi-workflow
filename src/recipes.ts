@@ -172,7 +172,13 @@ function validateRecipeName(name: string): void {
 export const resolveFlowRecipeRef = resolveFlowSpecRef;
 export const resolveWorkflowRecipeRef = resolveFlowSpecRef;
 export const listWorkflowRecipes = listFlowRecipes;
-export const recommendFlowRecipes = async (_cwd: string, _request: string): Promise<FlowRecipeRecord[]> => [];
+export async function recommendFlowRecipes(request: string, cwd: string): Promise<Array<{ recipe: FlowRecipeRecord; score: number }>> {
+  const recipes = await listFlowRecipes(cwd);
+  const lower = request.toLowerCase();
+  return recipes
+    .map((recipe) => ({ recipe, score: lower.includes(recipe.name.toLowerCase()) ? 10 : 1 }))
+    .sort((a, b) => b.score - a.score);
+}
 export const recommendWorkflowRecipes = recommendFlowRecipes;
 export type WorkflowRecipeRecord = FlowRecipeRecord;
 export type WorkflowRecipeCatalogMetadata = Record<string, unknown>;

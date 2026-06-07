@@ -14,6 +14,7 @@ import {
   FlowTaskSpec,
   FlowValidationError,
   PermissionPreview,
+  STAGE_FIRST_RUN_TYPE,
   TaskCapability,
   ThinkingLevel,
   ValidationIssue,
@@ -372,4 +373,89 @@ function jsonKey(key: string): string {
   return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(key) ? key : JSON.stringify(key);
 }
 
-export const compileFlowRecipe = compileFlowSpec;
+
+
+export async function compileFlowRecipe(spec: any, options: CompileOptions & { task?: string; runtimeDefaults?: { model?: string; thinking?: ThinkingLevel } }): Promise<any> {
+  const stages = spec.workflow?.stages ?? spec.flow?.stages;
+  if (!Array.isArray(stages)) return compileFlowSpec(spec, options);
+  const agentName = spec.agent ?? spec.defaults?.agent ?? "scout";
+  const agent = await loadAgentByName(agentName, options.cwd).catch(() => undefined as any);
+  if (!agent) throw new FlowValidationError([{ path: "$.agent", message: `unknown agent "${agentName}"` }]);
+  const roleEntries = Object.entries(spec.roles ?? {});
+  const roles = roleEntries.map(([name, role]: [string, any]) => ({
+    name,
+    fromAgent: role.fromAgent,
+    content: role.prompt ?? "",
+    maxChars: role.maxChars ?? 8000,
+    truncated: false,
+    includedSections: [],
+    excludedSections: [],
+  }));
+  const roleText = roles.length ? `# Role Context\n\n${roles.map((r) => `## Role: ${r.name}\n${r.content}`).join("\n\n")}` : "";
+  const tasks: any[] = [];
+  const stageRecords: any[] = [];
+  for (const stage of stages) {
+    stageRecords.push({ id: stage.id, type: stage.type, sourcePolicy: stage.sourcePolicy ?? "require-success" });
+    const stageAgent = stage.agent ?? agentName;
+    const stageInject = stage.inject;
+    const defaultInject = stage.type === "task";
+    const injectTask = stageInject ?? defaultInject;
+    const addTask = (taskId: string, prompt: string, deferPrompt = false) => {
+      const key = `${stage.id}.${taskId}`;
+      const compiledPrompt = deferPrompt ? "" : [
+        injectTask && options.task ? `# Task\n\n${options.task}` : undefined,
+        `# Flow Stage\n\nstage=${stage.id}\ntype=${stage.type}`,
+        `# Instructions\n\n${prompt}`,
+        roleText || undefined,
+      ].filter(Boolean).join("\n\n");
+      tasks.push({
+        key,
+        id: key,
+        specId: key,
+        taskId,
+        stageId: stage.id,
+        agent: stageAgent,
+        agentPath: agent.sourcePath,
+        agentDescription: agent.description,
+        agentSystemPrompt: agent.body,
+        roleNames: roles.map((r) => r.name),
+        task: prompt,
+        cwd: options.cwd,
+        explicitCwd: false,
+        explicitWorktreePolicy: false,
+        runtime: { approvalMode: "non-interactive", model: options.runtimeDefaults?.model, thinking: options.runtimeDefaults?.thinking },
+        safety: { readOnlyDeclared: true, capability: "read-only", sharedCwdSafe: true, worktreePolicy: "auto", requiresWorktree: false, permission: { status: "pending" } },
+        output: stage.output,
+        outputContract: undefined,
+        compiledPrompt,
+        injectTask,
+        kind: stage.type,
+        dependsOn: [],
+      });
+    };
+    if (stage.type === "parallel" && Array.isArray(stage.tasks)) {
+      for (const item of stage.tasks) addTask(item.id ?? `item-${tasks.length + 1}`, item.prompt ?? "");
+    } else if (stage.type === "foreach") {
+      addTask("item", stage.each?.prompt ?? stage.prompt ?? "", true);
+    } else {
+      addTask("main", stage.prompt ?? "");
+    }
+  }
+  return {
+    schemaVersion: 1,
+    name: spec.name,
+    description: spec.description,
+    type: STAGE_FIRST_RUN_TYPE,
+    task: options.task,
+    cwd: options.cwd,
+    backend: { type: "local-pi", mode: "tmux" },
+    maxConcurrency: spec.defaults?.maxConcurrency ?? 4,
+    roles,
+    stages: stageRecords,
+    tasks,
+    warnings: [],
+    budget: { models: options.runtimeDefaults?.model ? [{ model: options.runtimeDefaults.model }] : [], unratedModels: [] },
+  };
+}
+
+export const compileWorkflowRecipe = compileFlowRecipe;

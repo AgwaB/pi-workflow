@@ -3,7 +3,7 @@ export const FAST_MODES = ["inherit", "on", "off"] as const;
 export const APPROVAL_MODES = ["non-interactive", "on-request"] as const;
 export const WORKTREE_POLICIES = ["auto", "on", "off"] as const;
 export const FLOW_TYPES = ["single", "parallel", "chain", "dag", "tree", "retry"] as const;
-export const STAGE_FIRST_RUN_TYPE = "stage-first" as const;
+export const STAGE_FIRST_RUN_TYPE = "recipe-v1" as const;
 
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 export type FastMode = (typeof FAST_MODES)[number];
@@ -228,6 +228,14 @@ export interface FlowTaskRunRecord {
   lastMessage?: string;
   output?: WorkflowTaskOutputSpec;
   outputValidation?: WorkflowTaskOutputValidationRecord;
+  outputRetry?: {
+    attempts: number;
+    maxAttempts?: number;
+    reason?: string;
+    message?: string;
+    requiredKeys?: string[];
+    artifacts?: string[];
+  };
 }
 
 export type WorkflowTaskRunRecord = FlowTaskRunRecord;

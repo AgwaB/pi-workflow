@@ -50,3 +50,7 @@ export function isTerminalWorkflowStatus(status: WorkflowRunStatus): boolean {
 export function isTerminalTaskStatus(status: TaskRunStatus): boolean {
   return status === "completed" || status === "failed" || status === "skipped" || status === "interrupted" || status === "blocked";
 }
+
+export function isNonCompletedTerminalTaskStatus(status: TaskRunStatus): boolean {
+  return isTerminalTaskStatus(status) && status !== "completed";
+}
