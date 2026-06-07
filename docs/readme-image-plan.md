@@ -93,7 +93,7 @@ Visual style:
 - Add one small note, not a big legend:
 
 ```text
-stage order schedules work; source context is passed only where the recipe asks for it
+stage order schedules work; source context is passed only where the workflow asks for it
 ```
 
 If space is tight, skip bottom-row individual child circles and only show stage boxes plus fan-out/fan-in icons.
@@ -106,9 +106,9 @@ A workflow composed from stage types: one plan task fans out into research tasks
 
 ### 3. `docs/assets/readme-deep-research.png`
 
-Placement: near the `deep-research at a glance` snippet or in the bundled recipes section.
+Placement: near the `deep-research at a glance` snippet or in the bundled workflows section.
 
-Purpose: show one representative bundled recipe. This should be the only recipe with a detailed image in the main README.
+Purpose: show one representative bundled workflow. This should be the only workflow with a detailed image in the main README.
 
 Recommended content:
 
@@ -127,25 +127,25 @@ Optional annotations:
 - `claimsForVerification[]` between `normalize-claims` and `verify-claims`
 - `Source Stage Context` into each reduce stage
 
-Do not show exact caps like 12 questions or 96 claims in the main image. If a cap is needed, use `bounded by recipe`.
+Do not show exact caps like 12 questions or 96 claims in the main image. If a cap is needed, use `bounded by workflow`.
 
 Alt text:
 
 ```text
-The deep-research recipe plans research questions, runs dynamic research fan-out, reduces those outputs into normalized claims, verifies selected claims with another fan-out, and uses a final reduce stage to produce a cited report.
+The deep-research workflow plans research questions, runs dynamic research fan-out, reduces those outputs into normalized claims, verifies selected claims with another fan-out, and uses a final reduce stage to produce a cited report.
 ```
 
-## Optional recipe gallery image
+## Optional workflow gallery image
 
-If the README later needs a stronger marketing-style image, add a compact recipe gallery instead of making every recipe fully diagrammed.
+If the README later needs a stronger marketing-style image, add a compact workflow gallery instead of making every workflow fully diagrammed.
 
 Possible file:
 
 ```text
-docs/assets/readme-recipe-gallery.png
+docs/assets/readme-workflow-gallery.png
 ```
 
-Layout: one row/card per recipe, each as a stage-chip sequence.
+Layout: one row/card per workflow, each as a stage-chip sequence.
 
 Examples:
 
@@ -159,7 +159,7 @@ revise-loop     task -> reduce -> reduce -> reduce -> reduce
 decision-debate task -> parallel -> reduce -> reduce
 ```
 
-This should be optional because a table plus one representative recipe is usually clearer than seven mini diagrams.
+This should be optional because a table plus one representative workflow is usually clearer than seven mini diagrams.
 
 ## Copy rules for image labels
 
@@ -194,5 +194,5 @@ Use relative paths so npm/GitHub rendering works:
 ```
 
 ```md
-![Deep research recipe flow](./docs/assets/readme-deep-research.png)
+![Deep research workflow flow](./docs/assets/readme-deep-research.png)
 ```

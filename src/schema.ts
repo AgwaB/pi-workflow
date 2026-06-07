@@ -13,7 +13,7 @@ import {
   ValidationIssue,
   WORKTREE_POLICIES,
 } from "./types.js";
-import { ResolvedFlowSpecRef, resolveFlowSpecRef } from "./recipes.js";
+import { ResolvedWorkflowSpecRef, resolveWorkflowRef } from "./workflow-specs.js";
 import { parseYamlSubset } from "./yaml.js";
 
 const TOP_LEVEL_KEYS = new Set(["schemaVersion", "name", "description", "defaults", "backend", "roles", "flow"]);
@@ -57,12 +57,12 @@ const FLOW_DAG_KEYS = new Set(["type", "tasks"]);
 const FLOW_MAP_KEYS = new Set(["type", "items", "task", "aggregate"]);
 const MAP_ITEM_KEYS = new Set(["id", "input"]);
 
-export interface LoadedFlowSpec extends ResolvedFlowSpecRef {
+export interface LoadedWorkflowSpec extends ResolvedWorkflowSpecRef {
   spec: FlowSpec;
 }
 
-export async function loadFlowSpec(specRef: string, cwd: string): Promise<LoadedFlowSpec> {
-  const resolved = await resolveFlowSpecRef(specRef, cwd);
+export async function loadWorkflowSpec(specRef: string, cwd: string): Promise<LoadedWorkflowSpec> {
+  const resolved = await resolveWorkflowRef(specRef, cwd);
   let parsed: unknown;
 
   try {
@@ -79,7 +79,7 @@ export async function loadFlowSpec(specRef: string, cwd: string): Promise<Loaded
 
   return {
     ...resolved,
-    spec: parseFlowRecipeCompat(parsed),
+    spec: parseWorkflowSpecCompat(parsed),
   };
 }
 
@@ -89,7 +89,7 @@ function parseSpecText(text: string, specPath: string): unknown {
   return JSON.parse(text);
 }
 
-export function parseFlowSpec(value: unknown): FlowSpec {
+export function parseWorkflowSpec(value: unknown): FlowSpec {
   const issues: ValidationIssue[] = [];
   const root = objectAt(value, "$", issues);
 
@@ -419,17 +419,15 @@ function jsonKey(key: string): string {
   return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(key) ? key : JSON.stringify(key);
 }
 
-export const loadFlowRecipe = loadFlowSpec;
-export const parseFlowRecipe = parseFlowRecipeCompat;
-export const loadWorkflowRecipe = loadFlowSpec;
-export const parseWorkflowRecipe = parseFlowRecipeCompat;
+export const loadWorkflow = loadWorkflowSpec;
+export const parseWorkflow = parseWorkflowSpecCompat;
 
 
 function isStageFirstSpec(value: unknown): value is any {
   return Boolean(value && typeof value === "object" && (value as any).workflow?.stages || (value as any).flow?.stages);
 }
 
-export function parseStageFirstRecipe(value: unknown): any {
+export function parseStageFirstWorkflowSpec(value: unknown): any {
   if (!value || typeof value !== "object") throw new FlowValidationError([{ path: "$", message: "must be an object" }]);
   const spec = value as any;
   const stages = spec.workflow?.stages ?? spec.flow?.stages;
@@ -450,11 +448,11 @@ export function parseStageFirstRecipe(value: unknown): any {
   return spec;
 }
 
-const originalParseFlowRecipe = parseFlowSpec;
-export function parseFlowRecipeCompat(value: unknown): any {
+const originalParseWorkflowSpec = parseWorkflowSpec;
+export function parseWorkflowSpecCompat(value: unknown): any {
   if (value && typeof value === "object" && (value as any).flow?.type !== undefined && !(value as any).flow?.stages) {
     throw new FlowValidationError([{ path: "$.flow.type", message: "unknown field" }]);
   }
-  if (isStageFirstSpec(value)) return parseStageFirstRecipe(value);
-  return originalParseFlowRecipe(value);
+  if (isStageFirstSpec(value)) return parseStageFirstWorkflowSpec(value);
+  return originalParseWorkflowSpec(value);
 }

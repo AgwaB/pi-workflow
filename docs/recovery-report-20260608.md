@@ -25,7 +25,7 @@ Not recovered / still broken:
   - `.pi/workflows/workflow_mq3d1nkq_ac6b53/...`
   - `.pi/eval/ab-execution/runs/run-20260607T120050Z/...`
 - `npm run typecheck` currently fails because the restored tree is a mixed partial state.
-- Active source/docs still contain old `recipe`/legacy terminology; the full terminology cleanup is not restored.
+- Active source/docs still contain old `workflow`/legacy terminology; the full terminology cleanup is not restored.
 
 ## Safety backup
 
@@ -99,8 +99,8 @@ Representative errors:
 2. Treat the current directory as a salvage tree, not a trusted working tree.
 3. Use `.recovery/full-write-files/` and `.recovery/tool-calls/` as evidence for manual patch reconstruction.
 4. Re-apply latest known product decisions onto a clean git checkout:
-   - public term is `workflow`, not `recipe`
-   - remove legacy recipe aliases/paths
+   - public term is `workflow`, not `workflow`
+   - remove legacy workflow aliases/paths
    - current bundled workflows are only `deep-research` and `deep-review`
    - deferred workflows live under `internal/plans/deferred-workflows/`
    - A/B eval metadata includes `evaluationHypothesis`

@@ -24,14 +24,14 @@ import {
 const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const EXPLICIT_WRITE_TOOLS = new Set(["edit", "write"]);
 const MUTATION_CAPABLE_TOOLS = new Set(["bash"]);
-const DELEGATION_TOOLS = new Set(["tmux_subagent", "skill_test_subagent", "flow", "/flow"]);
+const DELEGATION_TOOLS = new Set(["tmux_subagent", "skill_test_subagent", "workflow", "/workflow"]);
 const DEFAULT_MAX_RUNTIME_MS = 30 * 60 * 1000;
 
 interface CompileOptions {
   cwd: string;
 }
 
-export async function compileFlowSpec(spec: FlowSpec, options: CompileOptions): Promise<CompiledFlow> {
+export async function compileWorkflowSpec(spec: FlowSpec, options: CompileOptions): Promise<CompiledFlow> {
   const issues: ValidationIssue[] = [];
   const warnings: string[] = [];
   const agentCache = new Map<string, AgentDefinition>();
@@ -375,9 +375,9 @@ function jsonKey(key: string): string {
 
 
 
-export async function compileFlowRecipe(spec: any, options: CompileOptions & { task?: string; runtimeDefaults?: { model?: string; thinking?: ThinkingLevel } }): Promise<any> {
+export async function compileWorkflow(spec: any, options: CompileOptions & { task?: string; runtimeDefaults?: { model?: string; thinking?: ThinkingLevel } }): Promise<any> {
   const stages = spec.workflow?.stages ?? spec.flow?.stages;
-  if (!Array.isArray(stages)) return compileFlowSpec(spec, options);
+  if (!Array.isArray(stages)) return compileWorkflowSpec(spec, options);
   const agentName = spec.agent ?? spec.defaults?.agent ?? "scout";
   const agent = await loadAgentByName(agentName, options.cwd).catch(() => undefined as any);
   if (!agent) throw new FlowValidationError([{ path: "$.agent", message: `unknown agent "${agentName}"` }]);
@@ -457,5 +457,3 @@ export async function compileFlowRecipe(spec: any, options: CompileOptions & { t
     budget: { models: options.runtimeDefaults?.model ? [{ model: options.runtimeDefaults.model }] : [], unratedModels: [] },
   };
 }
-
-export const compileWorkflowRecipe = compileFlowRecipe;

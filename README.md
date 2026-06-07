@@ -139,7 +139,7 @@ Use it when you want to adapt a built-in workflow or create a project-specific w
 Project workflow definitions should be saved under:
 
 ```text
-.pi/workflow-recipes/<name>.json
+.pi/workflows/<name>.json
 ```
 
 Examples:
@@ -151,12 +151,12 @@ It should inspect the repo, check docs/tests risk, and produce a final checklist
 
 ```text
 Use workflow-guide to customize deep-review for frontend accessibility and UX review.
-Save it as .pi/workflow-recipes/frontend-review.json.
+Save it as .pi/workflows/frontend-review.json.
 ```
 
 ```text
 Use workflow-guide to review this workflow definition and fix any invalid stage dependencies:
-.pi/workflow-recipes/my-workflow.json
+.pi/workflows/my-workflow.json
 ```
 
 ```text
@@ -167,7 +167,7 @@ Ask before dependency installs, long validation, or broad edits.
 Then validate and run:
 
 ```text
-/workflow validate .pi/workflow-recipes/frontend-review.json
+/workflow validate .pi/workflows/frontend-review.json
 /workflow run frontend-review "Review the current diff for accessibility and UX regressions."
 ```
 
@@ -198,13 +198,13 @@ pi-workflow inspect workflow_mq224pi8_775e71 --json
 These commands remain available for orchestration, workflow authoring, and debugging:
 
 ```text
-/workflow validate <recipe-name-or-path>
+/workflow validate <workflow-name-or-path>
 /workflow roles
 /workflow agents
 /workflow recommend "<request>"
-/workflow recipe list
-/workflow recipe show <recipe-name>
-/workflow run <recipe-name-or-path> "<task>"
+/workflow list
+/workflow show <workflow-name>
+/workflow run <workflow-name-or-path> "<task>"
 /workflow delegate ...
 /workflow status
 /workflow show <run-id>

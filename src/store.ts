@@ -35,11 +35,11 @@ export function nowIso(): string {
 }
 
 export function makeRunId(): string {
-  return `flow_${Date.now().toString(36)}_${randomBytes(3).toString("hex")}`;
+  return `workflow_${Date.now().toString(36)}_${randomBytes(3).toString("hex")}`;
 }
 
 export function flowsRoot(cwd: string): string {
-  return join(cwd, ".pi", "flows");
+  return join(cwd, ".pi", "workflows");
 }
 
 export function flowRunDir(cwd: string, runId: string): string {

@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 
-import { compileFlowSpec } from "./compiler.js";
-import { loadFlowSpec } from "./schema.js";
+import { compileWorkflow, compileWorkflowSpec } from "./compiler.js";
+import { loadWorkflowSpec } from "./schema.js";
 import {
   createRunRecord,
   compiledFlowPath,
@@ -34,9 +34,11 @@ const MAX_CONCURRENCY = 16;
 
 const supervisorTimers = new Map<string, ReturnType<typeof setInterval>>();
 
-export async function runFlowSpec(specPath: string, cwd: string): Promise<FlowRunRecord> {
-  const loaded = await loadFlowSpec(specPath, cwd);
-  const compiled = await compileFlowSpec(loaded.spec, { cwd });
+export async function runWorkflowSpec(specPath: string, cwd: string, options: { task?: string } = {}): Promise<FlowRunRecord> {
+  const loaded = await loadWorkflowSpec(specPath, cwd);
+  const compiled = options.task !== undefined
+    ? await compileWorkflow(loaded.spec, { cwd, task: options.task })
+    : await compileWorkflowSpec(loaded.spec, { cwd });
 
   const { run } = await createRunRecord(cwd, compiled, loaded.specPath);
   await withRunLease(cwd, run.runId, async () => {
@@ -619,12 +621,11 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export async function runFlowRecipe(specPath: string, cwd: string, options: { task?: string } = {}): Promise<FlowRunRecord> {
-  if (!options.task || options.task.trim() === "") throw new Error("This recipe needs a task");
-  return runFlowSpec(specPath, cwd);
+export async function runWorkflow(specPath: string, cwd: string, options: { task?: string } = {}): Promise<FlowRunRecord> {
+  if (!options.task || options.task.trim() === "") throw new Error("This workflow needs a task");
+  return runWorkflowSpec(specPath, cwd, options);
 }
 export const waitForWorkflowRun = waitForRun;
-export const runWorkflowRecipe = runFlowSpec;
 export async function continueWorkflow(_cwd: string, _runId: string): Promise<FlowRunRecord | undefined> {
   return undefined;
 }

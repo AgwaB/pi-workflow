@@ -1,10 +1,10 @@
 export { discoverAgents, loadAgentByName, parseAgentMarkdown } from "./agents.js";
-export { compileFlowSpec } from "./compiler.js";
-export { formatLogs, formatRunDetails, formatRunStatus, formatStatus, refreshRun, resumeSupervisors, runFlowSpec, waitForRun } from "./engine.js";
-export { listFlowRecipes, resolveFlowSpecRef } from "./recipes.js";
-export type { FlowRecipeRecord, ResolvedFlowSpecRef } from "./recipes.js";
+export { compileWorkflow, compileWorkflowSpec } from "./compiler.js";
+export { formatLogs, formatRunDetails, formatRunStatus, formatStatus, refreshRun, resumeSupervisors, runWorkflow, runWorkflowSpec, waitForRun } from "./engine.js";
+export { listWorkflows, recommendWorkflows, resolveWorkflowRef } from "./workflow-specs.js";
+export type { ResolvedWorkflowSpecRef, WorkflowRecommendation, WorkflowSpecRecord } from "./workflow-specs.js";
 export { compileRole, extractMarkdownSections } from "./roles.js";
-export { loadFlowSpec, parseFlowSpec } from "./schema.js";
+export { loadWorkflow, loadWorkflowSpec, parseWorkflow, parseWorkflowSpec } from "./schema.js";
 export type {
   AgentDefinition,
   ApprovalMode,
@@ -24,21 +24,20 @@ export type {
 } from "./types.js";
 export { FlowValidationError } from "./types.js";
 
-export const FLOW_COMMAND = "flow";
 export const WORKFLOW_COMMAND = "workflow";
 
-export const FLOW_HELP = `pi-subagent-flow
+export const WORKFLOW_HELP = `pi-workflow
 
 Usage:
-  /flow help
-  /flow validate <spec.json>
-  /flow roles <spec.json>
-  /flow agents
-  /flow run <spec.json>
-  /flow status [run-id]
-  /flow show <run-id>
-  /flow logs <run-id> [task-id] [lines]
-  /flow wait <run-id> [timeout-ms]
+  /workflow help
+  /workflow validate <workflow-name-or-path>
+  /workflow roles <workflow-name-or-path>
+  /workflow agents
+  /workflow list
+  /workflow recommend "<request>"
+  /workflow run <workflow-name-or-path> "<task>"
+  /workflow status [run-id]
+  /workflow show <run-id-or-workflow-name>
+  /workflow logs <run-id> [task-id] [lines]
+  /workflow wait <run-id> [timeout-ms]
 `;
-
-export const WORKFLOW_HELP = FLOW_HELP;

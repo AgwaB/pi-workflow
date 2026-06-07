@@ -133,8 +133,6 @@ function workflowRoots(cwd: string): WorkflowRoot[] {
     { path: resolve(cwd, "workflows") },
     { path: PACKAGE_WORKFLOW_ROOT },
     { path: join(homedir(), ".pi", "agent", "workflows") },
-    { path: resolve(cwd, ".pi", "workflow-recipes"), legacy: true },
-    { path: join(homedir(), ".pi", "agent", "workflow-recipes"), legacy: true },
   ]);
 }
 
@@ -185,13 +183,8 @@ async function scoreWorkflow(workflow: WorkflowSpecRecord, query: string[]): Pro
 async function readWorkflowCatalog(specPath: string): Promise<WorkflowCatalogMetadata> {
   if (!specPath.endsWith(".json")) return {};
   try {
-    const parsed = JSON.parse(await readFile(specPath, "utf8")) as { catalog?: WorkflowCatalogMetadata & { similarRecipes?: string[] } };
-    if (!parsed.catalog) return {};
-    const { similarRecipes, ...catalog } = parsed.catalog;
-    return {
-      ...catalog,
-      similarWorkflows: catalog.similarWorkflows ?? similarRecipes,
-    };
+    const parsed = JSON.parse(await readFile(specPath, "utf8")) as { catalog?: WorkflowCatalogMetadata };
+    return parsed.catalog ?? {};
   } catch {
     return {};
   }

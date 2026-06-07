@@ -1,6 +1,6 @@
 # A/B/C Execution Panel Review — 2026-06-07
 
-This document records the four-reviewer panel review of the pi-workflow A/B/C evaluation. It is a review of the evaluation purpose, direction, method, setup/process/results, and workflow recipe improvement priorities.
+This document records the four-reviewer panel review of the pi-workflow A/B/C evaluation. It is a review of the evaluation purpose, direction, method, setup/process/results, and workworkflow improvement priorities.
 
 ## Source artifacts
 
@@ -57,7 +57,7 @@ needs-eval-fix + needs-workflow-fix
 The panel agreed on two points:
 
 1. The runner is now much more credible as a diagnostic harness after terminal gating, judge-failure separation, and scoreability reporting.
-2. The latest Kimi result still should not be treated as release-grade superiority evidence. There are remaining measurement bugs and several recipes are not sharp enough against a strong plain Kimi baseline.
+2. The latest Kimi result still should not be treated as release-grade superiority evidence. There are remaining measurement bugs and several workflows are not sharp enough against a strong plain Kimi baseline.
 
 ## Highest-priority findings
 
@@ -124,9 +124,9 @@ Panel interpretation:
 - Tying or slightly losing with 58 tasks is poor product ROI.
 - Reports should expose task count, latency, and cost/effort as interpretation context.
 
-### 5. Recipe weakness is real, even after measurement caveats
+### 5. Workflow weakness is real, even after measurement caveats
 
-The panel did not attribute all poor workflow results to test flaws. Several recipes appear weak or over-structured:
+The panel did not attribute all poor workflow results to test flaws. Several workflows appear weak or over-structured:
 
 - `decision-debate`: repeated weak evidence; likely stage dependency/final schema issues.
 - `deep-research`: too much fanout for unclear gain.
@@ -158,12 +158,12 @@ Current purpose is good for diagnostic evidence hygiene: record what ran, what f
 Better pre-release purpose:
 
 ```text
-Identify which task classes justify recipe orchestration over strong plain Pi, under what budget/time constraints, and with what evidence.
+Identify which task classes justify workflow orchestration over strong plain Pi, under what budget/time constraints, and with what evidence.
 ```
 
 ### 2. Test direction
 
-Move away from universal workflow-vs-plain claims. Use conditional recipe claims:
+Move away from universal workflow-vs-plain claims. Use conditional workflow claims:
 
 - `revise-loop` for iterative critique/revision tasks.
 - `deep-review` for hard seeded defect detection, not generic prose quality.
@@ -212,16 +212,16 @@ Likely cause ranking:
 
 1. eval/method issues: tie threshold, normalizer, n=1, same-model judge;
 2. strong Kimi xhigh plain baseline;
-3. recipe/task mismatch;
-4. actual recipe weaknesses, especially `decision-debate`, `deep-research`, `migration`;
+3. workflow/task mismatch;
+4. actual workflow weaknesses, especially `decision-debate`, `deep-research`, `migration`;
 5. insufficient fixture power for `deep-review`.
 
-### 6. Workflow recipe improvement priorities
+### 6. Workworkflow improvement priorities
 
 - `decision-debate`: fix frame-to-positions data flow; require strongest dissent and changed-conditions in final output; consider reducing 3-way debate if it only adds verbosity.
 - `deep-research`: hard-cap fanout; make verification selective; report source-quality/citation table; reduce default depth.
 - `migration`: cap inventory/item planning; focus on critical path and staged executable plan.
-- `deep-review`: improve final report concision and severity preservation; strengthen fixture before heavy recipe changes.
+- `deep-review`: improve final report concision and severity preservation; strengthen fixture before heavy workflow changes.
 - `revise-loop`: keep structure, but bound timeout and make completion budget explicit.
 
 ## Safe and unsafe claims
@@ -247,7 +247,7 @@ deep-review tied plain on hidden seeded answer-key coverage, 3/3 vs 3/3.
 Unsafe:
 
 ```text
-pi-workflow recipes generally outperform plain Pi.
+pi-workworkflows generally outperform plain Pi.
 ```
 
 ```text
@@ -282,7 +282,7 @@ the result generalizes across models/providers.
 
 ## Final recommendation
 
-Do not make public-facing quality claims yet. First fix the tie-threshold and normalizer bugs, then rejudge the existing Kimi artifacts. After corrected evidence, decide recipe improvements in this order:
+Do not make public-facing quality claims yet. First fix the tie-threshold and normalizer bugs, then rejudge the existing Kimi artifacts. After corrected evidence, decide workflow improvements in this order:
 
 1. `decision-debate`
 2. `deep-research`

@@ -249,7 +249,7 @@ export class FlowView implements Component {
     const approval = this.flows.filter((flow) => flow.continuation?.status === "awaiting_approval").length;
     const lines = [
       `${chip(this.theme, "mode", this.mode === "task" ? "detail" : this.mode, "accent")} ${chip(this.theme, "running", String(active), "accent")} ${chip(this.theme, "blocked", String(blocked), "warning")} ${chip(this.theme, "failed", String(failed), "error")} ${chip(this.theme, "done", String(completed), "success")}${approval > 0 ? ` ${chip(this.theme, "approval", String(approval), "warning")}` : ""}`,
-      `${metaLabel(this.theme, "path")} ${metaValue(this.theme, this.breadcrumbText())} ${muted(this.theme, "·")} ${metaLabel(this.theme, "source")} ${pathText(this.theme, `${this.cwd}/.pi/flows/index.json`)}`,
+      `${metaLabel(this.theme, "path")} ${metaValue(this.theme, this.breadcrumbText())} ${muted(this.theme, "·")} ${metaLabel(this.theme, "source")} ${pathText(this.theme, `${this.cwd}/.pi/workflows/index.json`)}`,
     ];
     return [...boxed(this.theme, "✦ Flow Board", width, lines, "borderAccent"), ""];
   }
@@ -497,10 +497,10 @@ export class FlowView implements Component {
       pathRow(this.theme, "system", task.files.systemPrompt),
       "",
       accent(this.theme, "Agent-only controls"),
-      commandLine(this.theme, `/flow logs ${run.runId} ${task.taskId}`),
-      commandLine(this.theme, `/flow wait ${run.runId} 60000`),
+      commandLine(this.theme, `/workflow logs ${run.runId} ${task.taskId}`),
+      commandLine(this.theme, `/workflow wait ${run.runId} 60000`),
     ];
-    if (run.continuation?.status === "awaiting_approval") lines.push(commandLine(this.theme, `/flow continue ${run.runId}`));
+    if (run.continuation?.status === "awaiting_approval") lines.push(commandLine(this.theme, `/workflow continue ${run.runId}`));
     if (task.backendHandle?.display) lines.push("", accent(this.theme, "Backend"), metaValue(this.theme, task.backendHandle.display));
     return lines.map((line) => fit(line, width));
   }

@@ -90,7 +90,7 @@ async function captureDirtyWorktreeSnapshot(
   await mkdir(snapshotDir, { recursive: true });
 
   const baseHead = git(gitRoot, ["rev-parse", "HEAD"]).trim();
-  const excludedFlowState = gitRelativePrefix(gitRoot, flowsRoot(projectCwd)) ?? ".pi/flows";
+  const excludedFlowState = gitRelativePrefix(gitRoot, flowsRoot(projectCwd)) ?? ".pi/workflows";
   const flowStatePathspec = excludedFlowState ? [`:(exclude)${excludedFlowState}`] : [];
   const trackedPatch = git(gitRoot, ["diff", "--binary", "HEAD", "--", ".", ...flowStatePathspec]);
   const trackedFiles = parseNul(git(gitRoot, ["diff", "--name-only", "-z", "HEAD", "--", ".", ...flowStatePathspec]))

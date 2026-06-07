@@ -16,10 +16,10 @@ Out of scope for MVP: interactive skill UX, multi-suite concept, token/cost bill
 
 ## Runtime facts (verified)
 
-- Pi runs non-interactively as: `pi --offline --no-session ... -e <pkg> -p "/flow run <ref> <task>"` for schemaVersion 2 recipes (see `e2e-test/run.mjs`).
-- `/flow run <recipe-or-file> <task>` and `/flow delegate <agent> <task>` both print a run id (`flow_...`).
-- `/flow wait <run-id> [timeout-ms]` blocks until terminal.
-- Per-run state: `.pi/flows/<run-id>/run.json` with `status`, `taskSummary`, `tasks[]`.
+- Pi runs non-interactively as: `pi --offline --no-session ... -e <pkg> -p "/workflow run <ref> <task>"` for schemaVersion 2 workflows (see `e2e-test/run.mjs`).
+- `/workflow run <workflow-or-file> <task>` and `/workflow delegate <agent> <task>` both print a run id (`flow_...`).
+- `/workflow wait <run-id> [timeout-ms]` blocks until terminal.
+- Per-run state: `.pi/workflows/<run-id>/run.json` with `status`, `taskSummary`, `tasks[]`.
 - Each task has `files.output` (output.log), `files.result` (result.json), `stageId`, `kind`, `elapsedMs`, `startedAt`, `completedAt`, `output` contract.
 - Specs accept `model` and `thinking` at top-level/stage/task. `thinking` is an enum (THINKING_LEVELS).
 
@@ -31,7 +31,7 @@ Out of scope for MVP: interactive skill UX, multi-suite concept, token/cost bill
     "id": "research-agent-evals",
     "task": "Research best practices for evaluating coding-agent workflows.",
     "arms": {
-      "A": { "type": "recipe", "name": "deep-research" },
+      "A": { "type": "workflow", "name": "deep-research" },
       "B": { "type": "plain" },
       "C": { "type": "parallel5", "agent": "researcher" }
     },
@@ -49,7 +49,7 @@ Out of scope for MVP: interactive skill UX, multi-suite concept, token/cost bill
 ```
 
 - `arms` may contain two or more labeled arms (`A`, `B`, optional `C`, ...).
-- Supported arm types are `recipe`, `agent`, `plain`, and `parallel5`.
+- Supported arm types are `workflow`, `agent`, `plain`, and `parallel5`.
 - `plain` is a direct single Pi call with no expert agent/persona wrapper.
 - `parallel5` is a simple five-way research fanout plus synthesis, intended only as a research comparison point.
 - `model`/`thinking` are shared by all arms; `null` means use environment default. Runner-level `--model` / `--thinking` may override all arms for a run.
@@ -63,15 +63,15 @@ Out of scope for MVP: interactive skill UX, multi-suite concept, token/cost bill
 
 For each arm:
 
-- `recipe`: `/flow run <name> <task>`.
-- `agent`: `/flow delegate <name> "<task>"`.
+- `workflow`: `/workflow run <name> <task>`.
+- `agent`: `/workflow delegate <name> "<task>"`.
 
 Shared model/reasoning:
 
-- Model/reasoning defaults to the user's current setting. If overridden, run a generated recipe file so the override applies to both arms equally. Save generated files under `.pi/eval/ab-execution/.generated/`, then `/flow run <recipe-path> <task>`.
-- If no override, call the recipe/delegate path directly.
+- Model/reasoning defaults to the user's current setting. If overridden, run a generated workflow file so the override applies to both arms equally. Save generated files under `.pi/eval/ab-execution/.generated/`, then `/workflow run <workflow-path> <task>`.
+- If no override, call the workflow/delegate path directly.
 
-Then `/flow wait <run-id>` and read `.pi/flows/<run-id>/run.json`.
+Then `/workflow wait <run-id>` and read `.pi/workflows/<run-id>/run.json`.
 
 ## Final-output extraction (deterministic)
 
@@ -79,7 +79,7 @@ Rule for picking the arm's final user-facing output from `run.json.tasks`:
 
 1. Consider only `status === "completed"` tasks.
 2. Prefer the last task (by array order) whose `kind` is a synthesis kind: `reduce` | `aggregate` | `synthesize` | `judge` | `vote`.
-3. Else use the last completed task in array order (covers single `task` recipes and `agent` delegate runs).
+3. Else use the last completed task in array order (covers single `task` workflows and `agent` delegate runs).
 4. Read its `files.output`. If `output.format === "json"`, parse and render the structured JSON into readable Markdown so the judge sees the full deliverable, not just one primary field.
 
 Record the chosen `taskId` in the internal manifest for auditability.
@@ -95,7 +95,7 @@ Record the chosen `taskId` in the internal manifest for auditability.
 
 From `run.json`/tasks per arm: `status`, task count, completed/failed/skipped/blocked/interrupted counts, basic elapsed/wall-clock fields, and token/cost placeholders left `null` in MVP.
 
-Save to `internal/<task-id>/arm-<label>/metadata.json`. Also write a top-level `manifest.json` with git commit/dirty status, runner/task/rubric/judge prompt hashes, recipe/agent file hashes, model/thinking settings, effective settings when explicit or `default-unresolved` when ambient, fixture paths and hashes, answer-key presence, coverageCriteria presence, Pi version, Node version, platform, and architecture.
+Save to `internal/<task-id>/arm-<label>/metadata.json`. Also write a top-level `manifest.json` with git commit/dirty status, runner/task/rubric/judge prompt hashes, workflow/agent file hashes, model/thinking settings, effective settings when explicit or `default-unresolved` when ambient, fixture paths and hashes, answer-key presence, coverageCriteria presence, Pi version, Node version, platform, and architecture.
 
 ## Hidden answer-key checks
 
@@ -143,4 +143,4 @@ This check is intentionally simple and auditable; it complements, not replaces, 
 
 1. Judge model/thinking: default to the user's current model/reasoning; overridable via runner flag.
 2. Scoring: independent per-arm sessions only. No pairwise/reversed-order in MVP; accuracy work deferred.
-3. Generated recipe files for model/reasoning override: written to a dedicated eval directory, not `.pi/flow-recipes/`.
+3. Generated workflow files for model/reasoning override: written to a dedicated eval directory, not `.pi/workflows/`.

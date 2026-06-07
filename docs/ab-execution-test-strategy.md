@@ -9,7 +9,7 @@ A/B evaluation compares execution strategies on the same task. Most tasks use tw
 Example:
 
 ```text
-A = workflow recipe, such as deep-review or deep-research
+A = workworkflow, such as deep-review or deep-research
 B = plain single Pi run, with no expert agent/persona wrapper
 C = naive parallel-5 research, for research tasks only
 ```
@@ -24,12 +24,12 @@ Process:
 
 1. Run all configured arms on the same task.
 2. Extract each arm's final user-facing output.
-3. Normalize outputs to remove run ids, workflow artifact paths, explicit arm labels, generated eval spec names, and structural markdown heading markers that can fingerprint JSON recipe outputs.
+3. Normalize outputs to remove run ids, workflow artifact paths, explicit arm labels, generated eval spec names, and structural markdown heading markers that can fingerprint JSON workflow outputs.
 4. Randomize blind labels so the judge sees only anonymized `output-<label>.md` files.
 5. Score each output independently with the rubric in `.pi/eval/ab-execution/rubric.md`.
 6. Derive a blind winner from independent scores and hard-failure flags; small mean differences at or below one rubric point across one dimension are treated as ties.
 
-The blind judge must not see recipe names, agent names, task counts, run ids, stage names, logs, or operational metadata.
+The blind judge must not see workflow names, agent names, task counts, run ids, stage names, logs, or operational metadata.
 
 ### Layer 2 — hidden answer-key check for seeded tasks
 
@@ -61,7 +61,7 @@ Each run writes a manifest with:
 
 - git commit and dirty status,
 - runner/task/rubric/judge prompt hashes,
-- recipe/agent file paths and hashes,
+- workflow/agent file paths and hashes,
 - execution model/thinking and judge model/thinking settings, with ambient defaults recorded as `default-unresolved` when the runner cannot resolve them,
 - fixture paths and hashes,
 - answer-key presence,
@@ -82,7 +82,7 @@ The local task list lives in:
 Comparison:
 
 ```text
-A: recipe deep-research
+A: workflow deep-research
 B: plain single Pi
 C: naive parallel-5 research with researcher subagents and final synthesis
 ```
@@ -103,7 +103,7 @@ Primary validation: blind output quality plus human spot-check against the cover
 Comparison:
 
 ```text
-A: recipe deep-review
+A: workflow deep-review
 B: plain single Pi
 ```
 
@@ -133,7 +133,7 @@ Primary validation: hidden answer-key coverage, then blind output quality. All t
 Comparison:
 
 ```text
-A: recipe migration
+A: workflow migration
 B: plain single Pi
 ```
 
@@ -153,7 +153,7 @@ Primary validation: blind output quality.
 Comparison:
 
 ```text
-A: recipe decision-debate
+A: workflow decision-debate
 B: plain single Pi
 ```
 
@@ -174,7 +174,7 @@ Primary validation: blind output quality plus human spot-check for scenario-spec
 Comparison:
 
 ```text
-A: recipe revise-loop
+A: workflow revise-loop
 B: plain single Pi
 ```
 

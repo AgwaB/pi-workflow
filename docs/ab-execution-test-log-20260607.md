@@ -170,7 +170,7 @@ Initial observed summary:
 | `review-seeded-safety-diff` | blind A | answer-key tie |
 | `migration-plan` | blind B | all arms scoreable |
 | `decision-microservices-monolith` | blind A | all arms scoreable |
-| `revise-json-extraction-proposal` | blind A | recipe arm was still `running` at runner wait boundary and was correctly non-scoreable |
+| `revise-json-extraction-proposal` | blind A | workflow arm was still `running` at runner wait boundary and was correctly non-scoreable |
 
 Important event:
 
@@ -278,13 +278,13 @@ Use this report for the final latest result:
 
 ### 4.2 Mapping-revealed final result
 
-| Task | Configured winner | Recipe arm | Plain / other arm | Interpretation |
+| Task | Configured winner | Workflow arm | Plain / other arm | Interpretation |
 |---|---|---|---|---|
 | `research-agent-evals` | **plain single Pi** | `deep-research`: 4.83 | `plain`: 5.00; `parallel5`: 4.83 | Plain won by judge score. Human spot-check still required for research coverage. |
 | `review-seeded-safety-diff` | **plain single Pi** | `deep-review`: 4.50, `hallucinated-file-path` | `plain`: 5.00 | Blind judge favored plain. Hidden answer-key was tie: both found 3/3 seeded issues. Treat objective seeded coverage as tie. |
 | `migration-plan` | **plain single Pi** | `migration`: 4.50 | `plain`: 5.00 | Plain produced the stronger judged migration plan in this run. |
 | `decision-microservices-monolith` | **plain single Pi** | `decision-debate`: 4.67 | `plain`: 5.00 | Plain again won; `decision-debate` remains weak evidence. |
-| `revise-json-extraction-proposal` | **`revise-loop` recipe** | `revise-loop`: 4.50 | `plain`: 3.33, `unsupported-critical-claim` | Recipe won after the workflow completed and was rejudged. |
+| `revise-json-extraction-proposal` | **`revise-loop` workflow** | `revise-loop`: 4.50 | `plain`: 3.33, `unsupported-critical-claim` | Workflow won after the workflow completed and was rejudged. |
 
 ### 4.3 Aggregate view
 
@@ -292,7 +292,7 @@ Configured winners:
 
 ```text
 plain single Pi: 4/5
-recipe workflow: 1/5
+workflow: 1/5
 parallel5: 0/1 research comparison
 ```
 
@@ -304,7 +304,7 @@ Important nuance:
 
 ## 5. Interpretation
 
-This latest Kimi xhigh run does **not** support a broad claim that pi-workflow recipes outperform plain single Pi.
+This latest Kimi xhigh run does **not** support a broad claim that pi-workworkflows outperform plain single Pi.
 
 More accurate conclusions:
 
@@ -313,11 +313,11 @@ More accurate conclusions:
   - judge failures are separated as `unscored`,
   - hard failures and scoreability are explicit in reports.
 - Kimi xhigh plain single Pi is a very strong baseline.
-- Current recipe evidence is mixed:
+- Current workflow evidence is mixed:
   - `revise-loop` showed value after full completion,
   - `deep-review` tied objective seeded coverage but lost blind score,
   - `deep-research`, `migration`, and `decision-debate` lost to plain in the final Kimi rejudge.
-- `decision-debate` should not be used as positive release evidence without recipe redesign and a better scenario or acceptance rubric.
+- `decision-debate` should not be used as positive release evidence without workflow redesign and a better scenario or acceptance rubric.
 
 ## 6. Claims allowed / not allowed
 
@@ -372,7 +372,7 @@ Most important panel findings:
 - `research-agent-evals` winner is a tie-threshold/floating edge and should be treated as near-tie/uncertain.
 - The normalizer rewrites real `ab-execution` fixture paths to `<eval-spec>`, likely contaminating the `review-seeded-safety-diff` blind score.
 - Latest evidence remains diagnostic: n=1, single judge, same execution/judge model, no human spot-check.
-- Recipe weaknesses are still real, especially `decision-debate`, `deep-research`, and `migration`.
+- Workflow weaknesses are still real, especially `decision-debate`, `deep-research`, and `migration`.
 
 ## 8. Follow-ups
 

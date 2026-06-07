@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "name": "deep-research",
-  "description": "Planner-driven deep research recipe: plan research questions by depth, fan out question research, normalize/rank claims, verify selected claims, and synthesize a cited report with optional ask continuation.",
+  "description": "Planner-driven deep research workflow: plan research questions by depth, fan out question research, normalize/rank claims, verify selected claims, and synthesize a cited report with optional ask continuation.",
   "agent": "researcher",
   "readOnly": true,
   "tools": [
@@ -127,7 +127,7 @@
           ],
           "onInvalidGeneratedSpec": "block"
         },
-        "prompt": "Use Source Stage Context and the runtime task to produce a cited finalReport. Treat research and normalized outputs as claims, not truth, and prefer claims verified or partially supported by the verification stage. Include source URLs/titles in the report. Structure the report with summary, verified claims, practical recommendations or answer, caveats, and remaining gaps. Respect plan.depth: quick should be compact; standard should be balanced; max should favor coverage and explicitly discuss gaps. Include a bounded nextWorkflowRecipe only when a meaningful blocking evidence gap remains; otherwise omit nextWorkflowRecipe."
+        "prompt": "Use Source Stage Context and the runtime task to produce a cited finalReport. Treat research and normalized outputs as claims, not truth, and prefer claims verified or partially supported by the verification stage. Include source URLs/titles in the report. Structure the report with summary, verified claims, practical recommendations or answer, caveats, and remaining gaps. Respect plan.depth: quick should be compact; standard should be balanced; max should favor coverage and explicitly discuss gaps. Include a bounded nextWorkflow only when a meaningful blocking evidence gap remains; otherwise omit nextWorkflow."
       }
     ]
   },
@@ -143,7 +143,7 @@
       "quick repository check",
       "review verdict required"
     ],
-    "similarRecipes": [],
+    "similarWorkflows": [],
     "mutationRisk": "read-only",
     "naturalLanguageTriggers": [
       "deep research",

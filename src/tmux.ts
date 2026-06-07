@@ -151,7 +151,7 @@ export async function refreshRunFromArtifacts(cwd: string, run: FlowRunRecord): 
 function buildSystemPrompt(task: CompiledTask): string {
   return [
     `You are Pi flow subagent '${task.agent}'.`,
-    "You were launched by /flow from a deterministic JSON spec.",
+    "You were launched by /workflow from a deterministic workflow spec.",
     "Do not assume parent conversation history.",
     "Do not launch other agents or orchestration workflows unless explicitly instructed.",
     "When complete, provide a concise final report with findings, changed files if any, and blockers.",

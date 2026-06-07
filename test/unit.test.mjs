@@ -5,12 +5,12 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { parseAgentMarkdown } from "../.tmp/unit/agents.js";
-import { compileFlowRecipe, compileWorkflowRecipe } from "../.tmp/unit/compiler.js";
-import { formatRun, runFlowRecipe } from "../.tmp/unit/engine.js";
-import { flowArgumentCompletions, parseFlowRunArgs } from "../.tmp/unit/extension.js";
-import { listFlowRecipes, recommendFlowRecipes, resolveFlowRecipeRef } from "../.tmp/unit/recipes.js";
-import { resolveFlowRuntime, resolveWorkflowRuntime } from "../.tmp/unit/model-runtime.js";
-import { loadFlowRecipe, parseFlowRecipe, parseWorkflowRecipe } from "../.tmp/unit/schema.js";
+import { compileWorkflow } from "../.tmp/unit/compiler.js";
+import { formatRun, runWorkflow } from "../.tmp/unit/engine.js";
+import { workflowArgumentCompletions, parseWorkflowRunArgs } from "../.tmp/unit/extension.js";
+import { listWorkflows, recommendWorkflows, resolveWorkflowRef } from "../.tmp/unit/workflow-specs.js";
+import { resolveWorkflowRuntime } from "../.tmp/unit/model-runtime.js";
+import { loadWorkflow, parseWorkflow } from "../.tmp/unit/schema.js";
 import { acquireSupervisorLease, createStageFirstRunRecord, deriveRunStatus, heartbeatSupervisorLease, resolveFlowsCwd, setTaskTerminal, supervisorLeasePath, workflowProcessRoleForTests, workflowSupervisorOwnerIdForTests, writeJsonAtomic } from "../.tmp/unit/store.js";
 import { FlowValidationError, STAGE_FIRST_RUN_TYPE } from "../.tmp/unit/types.js";
 import { applyTaskResultArtifact, buildJsonOutputRetryInstructions, extractJsonOutput, parseJsonOutput } from "../.tmp/unit/result.js";
@@ -19,7 +19,7 @@ import { deriveWorkflowStatus, isActiveTaskStatus, isNonCompletedTerminalTaskSta
 import { assertWorkflowActionAllowedForRole, assertWorkflowToolAllowedForRole, getWorkflowProcessRole, isWorkflowSupervisorEnabled, workflowWorkerEnvPrefix } from "../.tmp/unit/process-role.js";
 
 function makeProject() {
-  return mkdtempSync(join(tmpdir(), "flow-recipe-unit-"));
+  return mkdtempSync(join(tmpdir(), "workflow-unit-"));
 }
 
 function writeAgent(cwd, name, tools = "read, grep, find, ls") {
@@ -28,7 +28,7 @@ function writeAgent(cwd, name, tools = "read, grep, find, ls") {
   writeFileSync(join(dir, `${name}.md`), `---\ndescription: ${name}\ntools: [${tools.split(/,\s*/).filter(Boolean).map((tool) => JSON.stringify(tool)).join(", ")}]\nreadOnly: true\n---\n# ${name}\n\nUse repository evidence.\n`);
 }
 
-function recipe(agent = "unit-scout", extra = {}) {
+function workflowSpec(agent = "unit-scout", extra = {}) {
   return {
     schemaVersion: 1,
     agent,
@@ -173,14 +173,14 @@ test("agent parser reads frontmatter tool ceilings", () => {
 });
 
 test("schema accepts final v1 workflow and rejects old legacy bodies", () => {
-  const parsed = parseFlowRecipe(recipe());
+  const parsed = parseWorkflow(workflowSpec());
   assert.equal(parsed.schemaVersion, 1);
   assert.equal(parsed.flow.stages[0].id, "main");
 
-  const wrongVersion = assertThrowsFlow(() => parseFlowRecipe({ ...recipe(), schemaVersion: 99 }));
+  const wrongVersion = assertThrowsFlow(() => parseWorkflow({ ...workflowSpec(), schemaVersion: 99 }));
   assertIssue(wrongVersion, "$.schemaVersion", "must be exactly 1");
 
-  const legacy = assertThrowsFlow(() => parseFlowRecipe({
+  const legacy = assertThrowsFlow(() => parseWorkflow({
     schemaVersion: 1,
     flow: { type: "single", task: { agent: "unit-scout", task: "legacy" } },
   }));
@@ -188,7 +188,7 @@ test("schema accepts final v1 workflow and rejects old legacy bodies", () => {
 });
 
 test("schema accepts stage-level inject and rejects item-level inject", () => {
-  const parsed = parseFlowRecipe(recipe("unit-scout", {
+  const parsed = parseWorkflow(workflowSpec("unit-scout", {
     flow: {
       stages: [
         { id: "entry", type: "task", inject: false, prompt: "Entry" },
@@ -201,11 +201,11 @@ test("schema accepts stage-level inject and rejects item-level inject", () => {
   assert.equal(parsed.flow.stages[1].inject, true);
   assert.equal(parsed.flow.stages[2].inject, true);
 
-  assertThrowsFlow(() => parseFlowRecipe(recipe("unit-scout", {
+  assertThrowsFlow(() => parseWorkflow(workflowSpec("unit-scout", {
     flow: { stages: [{ id: "fanout", type: "parallel", tasks: [{ id: "a", prompt: "A", inject: true }, { id: "b", prompt: "B" }] }] },
   })));
 
-  assertThrowsFlow(() => parseFlowRecipe(recipe("unit-scout", {
+  assertThrowsFlow(() => parseWorkflow(workflowSpec("unit-scout", {
     flow: {
       stages: [
         { id: "extract", type: "task", output: { format: "json" }, prompt: "Extract" },
@@ -219,7 +219,7 @@ test("schema and compiler accept partial sourcePolicy on foreach", async () => {
   const cwd = makeProject();
   try {
     writeAgent(cwd, "unit-scout", "read");
-    const spec = recipe("unit-scout", {
+    const spec = workflowSpec("unit-scout", {
       workflow: {
         stages: [
           { id: "extract", type: "task", output: { format: "json" }, prompt: "Extract" },
@@ -227,8 +227,8 @@ test("schema and compiler accept partial sourcePolicy on foreach", async () => {
         ],
       },
     });
-    assert.equal(parseWorkflowRecipe(spec).workflow.stages[1].sourcePolicy, "partial");
-    const compiled = await compileWorkflowRecipe(spec, { cwd, task: "Review" });
+    assert.equal(parseWorkflow(spec).workflow.stages[1].sourcePolicy, "partial");
+    const compiled = await compileWorkflow(spec, { cwd, task: "Review" });
     assert.equal(compiled.stages[1].sourcePolicy, "partial");
   } finally {
     rmSync(cwd, { recursive: true, force: true });
@@ -365,7 +365,7 @@ test("compiler injects runtime task by effective stage policy", async () => {
   const cwd = makeProject();
   try {
     writeAgent(cwd, "unit-scout", "read");
-    const compiled = await compileFlowRecipe(recipe("unit-scout", {
+    const compiled = await compileWorkflow(workflowSpec("unit-scout", {
       roles: { lens: { prompt: "Role context marker." } },
       flow: {
         stages: [
@@ -399,7 +399,7 @@ test("compiler defers foreach task injection until runtime interpolation", async
   const cwd = makeProject();
   try {
     writeAgent(cwd, "unit-scout", "read");
-    const compiled = await compileFlowRecipe(recipe("unit-scout", {
+    const compiled = await compileWorkflow(workflowSpec("unit-scout", {
       flow: {
         stages: [
           { id: "extract", type: "task", output: { format: "json" }, prompt: "Extract" },
@@ -418,7 +418,7 @@ test("compiler defers foreach task injection until runtime interpolation", async
 });
 
 test("runtime model resolver defaults to current model and thinking", async () => {
-  const resolved = await resolveFlowRuntime({}, {
+  const resolved = await resolveWorkflowRuntime({}, {
     taskKey: "main.main",
     stageId: "main",
     taskId: "main",
@@ -433,7 +433,7 @@ test("runtime model resolver defaults to current model and thinking", async () =
 
 test("runtime model resolver asks before choosing ambiguous enabled models", async () => {
   const selections = [];
-  const resolved = await resolveFlowRuntime({ model: "gpt-5.5" }, {
+  const resolved = await resolveWorkflowRuntime({ model: "gpt-5.5" }, {
     taskKey: "main.main",
     stageId: "main",
     taskId: "main",
@@ -481,7 +481,7 @@ test("runtime model resolver asks before choosing an available model when reques
 });
 
 test("runtime model resolver asks before changing unsupported thinking", async () => {
-  const resolved = await resolveFlowRuntime({ model: "gpt-5.5", thinking: "xhigh" }, {
+  const resolved = await resolveWorkflowRuntime({ model: "gpt-5.5", thinking: "xhigh" }, {
     taskKey: "main.main",
     stageId: "main",
     taskId: "main",
@@ -513,11 +513,11 @@ test("runtime model resolver refuses ambiguity, missing model, or unsupported th
   ];
 
   await assert.rejects(
-    () => resolveFlowRuntime({ model: "gpt-5.5" }, context, { availableModels }),
+    () => resolveWorkflowRuntime({ model: "gpt-5.5" }, context, { availableModels }),
     /ambiguous in \/model/,
   );
   await assert.rejects(
-    () => resolveFlowRuntime({ model: "openai-codex/gpt-5.5", thinking: "xhigh" }, context, {
+    () => resolveWorkflowRuntime({ model: "openai-codex/gpt-5.5", thinking: "xhigh" }, context, {
       availableModels: [{ provider: "openai-codex", id: "gpt-5.5", fullId: "openai-codex/gpt-5.5", reasoning: false }],
     }),
     /does not support reasoning level "xhigh"/,
@@ -528,7 +528,7 @@ test("compiler applies runtime defaults before budget estimates", async () => {
   const cwd = makeProject();
   try {
     writeAgent(cwd, "unit-scout", "read");
-    const compiled = await compileFlowRecipe(recipe("unit-scout", {
+    const compiled = await compileWorkflow(workflowSpec("unit-scout", {
       budget: {
         expectedOutputTokensPerTask: 100,
         modelRates: { "openai-codex/gpt-5.5": { inputUsdPerMillionTokens: 1, outputUsdPerMillionTokens: 2 } },
@@ -548,9 +548,9 @@ test("run boundary requires runtime task", async () => {
   const cwd = makeProject();
   try {
     writeAgent(cwd, "unit-scout", "read");
-    writeFileSync(join(cwd, "recipe.json"), JSON.stringify(recipe("unit-scout")));
-    await assert.rejects(() => runFlowRecipe("recipe.json", cwd), /This recipe needs a task/);
-    await assert.rejects(() => runFlowRecipe("recipe.json", cwd, { task: "   " }), /This recipe needs a task/);
+    writeFileSync(join(cwd, "workflow.json"), JSON.stringify(workflowSpec("unit-scout")));
+    await assert.rejects(() => runWorkflow("workflow.json", cwd), /This workflow needs a task/);
+    await assert.rejects(() => runWorkflow("workflow.json", cwd, { task: "   " }), /This workflow needs a task/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -560,11 +560,11 @@ test("run records use workflow-v1 type and derive completion", async () => {
   const cwd = makeProject();
   try {
     writeAgent(cwd, "unit-scout", "read");
-    const compiled = await compileFlowRecipe(recipe("unit-scout"), { cwd, task: "Summarize" });
-    const { run } = await createStageFirstRunRecord(cwd, compiled, join(cwd, "recipe.json"));
+    const compiled = await compileWorkflow(workflowSpec("unit-scout"), { cwd, task: "Summarize" });
+    const { run } = await createStageFirstRunRecord(cwd, compiled, join(cwd, "workflow.json"));
     assert.equal(run.type, STAGE_FIRST_RUN_TYPE);
-    assert.equal(run.type, "recipe-v1");
-    assert.match(formatRun(run), /type=recipe/);
+    assert.equal(run.type, "workflow-v1");
+    assert.match(formatRun(run), /type=workflow/);
     setTaskTerminal(run.tasks[0], "completed", "completed");
     assert.equal(deriveRunStatus(run).status, "completed");
   } finally {
@@ -575,8 +575,8 @@ test("run records use workflow-v1 type and derive completion", async () => {
 test("workflow registry resolves exact names and recommendation metadata", async () => {
   const cwd = makeProject();
   try {
-    mkdirSync(join(cwd, "flows"), { recursive: true });
-    writeFileSync(join(cwd, "flows", "review.json"), JSON.stringify(recipe("unit-scout", {
+    mkdirSync(join(cwd, "workflows"), { recursive: true });
+    writeFileSync(join(cwd, "workflows", "review.json"), JSON.stringify(workflowSpec("unit-scout", {
       name: "review",
       catalog: {
         useWhen: ["standard review"],
@@ -586,32 +586,32 @@ test("workflow registry resolves exact names and recommendation metadata", async
       },
     })));
 
-    const recipes = await listFlowRecipes(cwd);
-    assert.deepEqual(recipes.map((item) => item.name), ["review"]);
-    const resolved = await resolveFlowRecipeRef("review", cwd);
-    assert.equal(resolved.recipeName, "review");
-    const loaded = await loadFlowRecipe("review", cwd);
+    const workflows = await listWorkflows(cwd);
+    assert.deepEqual(workflows.map((item) => item.name), ["review"]);
+    const resolved = await resolveWorkflowRef("review", cwd);
+    assert.equal(resolved.workflowName, "review");
+    const loaded = await loadWorkflow("review", cwd);
     assert.equal(loaded.spec.name, "review");
-    const recs = await recommendFlowRecipes("please review this change", cwd);
-    assert.equal(recs[0].recipe.name, "review");
+    const recs = await recommendWorkflows("please review this change", cwd);
+    assert.equal(recs[0].workflow.name, "review");
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
 });
 
-test("flow command completions and run arg parsing preserve task text", () => {
-  const recipes = [{ name: "review", specPath: "/tmp/review.json", fileName: "review.json", aliases: ["review"], recipeRoot: "/tmp" }];
-  assert.deepEqual(flowArgumentCompletions("recipe ", recipes)?.map((item) => item.value), ["recipe list", "recipe show"]);
-  assert.deepEqual(flowArgumentCompletions("run re", recipes)?.map((item) => item.value), ["run review"]);
-  assert.deepEqual(parseFlowRunArgs("run review Fix this:\n  const x = 1;"), { specPath: "review", task: "Fix this:\n  const x = 1;" });
-  assert.deepEqual(parseFlowRunArgs("run review \"Fix the thing\""), { specPath: "review", task: "Fix the thing" });
+test("workflow command completions and run arg parsing preserve task text", () => {
+  const workflows = [{ name: "review", specPath: "/tmp/review.json", fileName: "review.json", aliases: ["review"], workflowRoot: "/tmp" }];
+  assert.deepEqual(workflowArgumentCompletions("workflow ", workflows)?.map((item) => item.value), ["workflow list", "workflow show"]);
+  assert.deepEqual(workflowArgumentCompletions("run re", workflows)?.map((item) => item.value), ["run review"]);
+  assert.deepEqual(parseWorkflowRunArgs("run review Fix this:\n  const x = 1;"), { specPath: "review", task: "Fix this:\n  const x = 1;" });
+  assert.deepEqual(parseWorkflowRunArgs("run review \"Fix the thing\""), { specPath: "review", task: "Fix the thing" });
 });
 
-test("resolveFlowsCwd finds ancestor flow state root", async () => {
+test("resolveFlowsCwd finds ancestor workflow state root", async () => {
   const cwd = makeProject();
   try {
-    mkdirSync(join(cwd, ".pi", "flows"), { recursive: true });
-    writeFileSync(join(cwd, ".pi", "flows", "index.json"), JSON.stringify({ schemaVersion: 1, updatedAt: "2026-06-04T00:00:00.000Z", runs: [] }));
+    mkdirSync(join(cwd, ".pi", "workflows"), { recursive: true });
+    writeFileSync(join(cwd, ".pi", "workflows", "index.json"), JSON.stringify({ schemaVersion: 1, updatedAt: "2026-06-04T00:00:00.000Z", runs: [] }));
     const nested = join(cwd, "a", "b");
     mkdirSync(nested, { recursive: true });
     assert.equal(await resolveFlowsCwd(nested), cwd);

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "name": "deep-review",
-  "description": "Planner-gated deep review recipe: cheap triage selects review lenses, reviewers produce findings, devil's advocate challenges findings, and final synthesis keeps evidence-backed issues.",
+  "description": "Planner-gated deep review workflow: cheap triage selects review lenses, reviewers produce findings, devil's advocate challenges findings, and final synthesis keeps evidence-backed issues.",
   "agent": "scout",
   "readOnly": true,
   "tools": [
@@ -97,7 +97,7 @@
       "low-risk simple review",
       "implementation or file edits"
     ],
-    "similarRecipes": [],
+    "similarWorkflows": [],
     "mutationRisk": "read-only",
     "naturalLanguageTriggers": [
       "deep review",
