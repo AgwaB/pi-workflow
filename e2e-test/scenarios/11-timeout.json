@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "name": "e2e-runtime-timeout",
+  "description": "A running task exceeding maxRuntimeMs is reconciled as failed/timeout.",
+  "defaults": {
+    "backend": { "type": "local-pi", "mode": "tmux" },
+    "tools": ["read", "grep", "find", "ls"],
+    "maxRuntimeMs": 1000
+  },
+  "flow": {
+    "type": "single",
+    "task": {
+      "id": "timeout-before-reply",
+      "agent": "scout",
+      "readOnly": true,
+      "task": "Wait until you are ready, then reply exactly E2E_TIMEOUT_SHOULD_NOT_APPEAR."
+    }
+  }
+}

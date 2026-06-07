@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "name": "e2e-task-window-high-fanout",
+  "description": "Exercise task-window tmux strategy with more than four concurrent tasks.",
+  "defaults": {
+    "backend": { "type": "local-pi", "mode": "tmux" },
+    "maxConcurrency": 8,
+    "tools": ["read", "grep", "find", "ls"]
+  },
+  "flow": {
+    "type": "parallel",
+    "tasks": [
+      {
+        "id": "fanout-1",
+        "agent": "scout",
+        "readOnly": true,
+        "task": "Reply exactly E2E_TASK_WINDOW_1_OK and do not inspect or modify files."
+      },
+      {
+        "id": "fanout-2",
+        "agent": "scout",
+        "readOnly": true,
+        "task": "Reply exactly E2E_TASK_WINDOW_2_OK and do not inspect or modify files."
+      },
+      {
+        "id": "fanout-3",
+        "agent": "scout",
+        "readOnly": true,
+        "task": "Reply exactly E2E_TASK_WINDOW_3_OK and do not inspect or modify files."
+      },
+      {
+        "id": "fanout-4",
+        "agent": "scout",
+        "readOnly": true,
+        "task": "Reply exactly E2E_TASK_WINDOW_4_OK and do not inspect or modify files."
+      },
+      {
+        "id": "fanout-5",
+        "agent": "scout",
+        "readOnly": true,
+        "task": "Reply exactly E2E_TASK_WINDOW_5_OK and do not inspect or modify files."
+      },
+      {
+        "id": "fanout-6",
+        "agent": "scout",
+        "readOnly": true,
+        "task": "Reply exactly E2E_TASK_WINDOW_6_OK and do not inspect or modify files."
+      },
+      {
+        "id": "fanout-7",
+        "agent": "scout",
+        "readOnly": true,
+        "task": "Reply exactly E2E_TASK_WINDOW_7_OK and do not inspect or modify files."
+      },
+      {
+        "id": "fanout-8",
+        "agent": "scout",
+        "readOnly": true,
+        "task": "Reply exactly E2E_TASK_WINDOW_8_OK and do not inspect or modify files."
+      }
+    ]
+  }
+}

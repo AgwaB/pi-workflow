@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "name": "e2e-until-pass-helper",
+  "description": "Until-pass helper stops after the first passing check and skips later iterations.",
+  "defaults": {
+    "backend": { "type": "local-pi", "mode": "tmux" },
+    "tools": ["read", "grep", "find", "ls"]
+  },
+  "flow": {
+    "type": "until-pass",
+    "maxIterations": 2,
+    "work": {
+      "id": "produce",
+      "agent": "scout",
+      "readOnly": true,
+      "task": "Reply exactly UNTIL_PASS_WORK_TOKEN and do not inspect or modify files."
+    },
+    "check": {
+      "id": "check",
+      "agent": "scout",
+      "readOnly": true,
+      "task": "If the Current Work Attempt output preview includes UNTIL_PASS_WORK_TOKEN, reply exactly PASS E2E_UNTIL_PASS_OK. Otherwise reply exactly FAIL missing token. Do not inspect or modify files."
+    }
+  }
+}

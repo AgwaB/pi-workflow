@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "name": "backend-role-injection",
+  "description": "Inject backend-expert guidance into a read-only scout task for focused runtime review.",
+  "defaults": {
+    "backend": {
+      "type": "local-pi",
+      "mode": "tmux"
+    },
+    "tools": ["read", "grep", "find", "ls"]
+  },
+  "roles": {
+    "backend-review-lens": {
+      "fromAgent": "backend-expert",
+      "maxChars": 8000
+    }
+  },
+  "flow": {
+    "type": "single",
+    "task": {
+      "id": "backend-runtime-review",
+      "agent": "scout",
+      "role": "backend-review-lens",
+      "readOnly": true,
+      "task": "Using the injected backend review lens, inspect src/engine.ts, src/store.ts, and src/tmux.ts for reliability, concurrency, and artifact-consistency risks. Do not edit files.",
+      "outputContract": "Return evidence-backed findings only. Include severity, file path, and concrete recommendation for each issue. If no issues are found, say so explicitly."
+    }
+  }
+}

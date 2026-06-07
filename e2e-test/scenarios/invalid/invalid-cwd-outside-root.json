@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "name": "invalid-cwd-outside-root",
+  "flow": {
+    "type": "single",
+    "task": {
+      "agent": "scout",
+      "cwd": "../outside-project",
+      "readOnly": true,
+      "task": "Validation must reject cwd outside the project root."
+    }
+  }
+}

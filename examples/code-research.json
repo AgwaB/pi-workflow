@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "name": "code-research",
+  "description": "Run two read-only code research tasks in parallel and collect focused repository notes.",
+  "defaults": {
+    "backend": {
+      "type": "local-pi",
+      "mode": "tmux"
+    },
+    "maxConcurrency": 2,
+    "tools": ["read", "grep", "find", "ls"]
+  },
+  "flow": {
+    "type": "parallel",
+    "tasks": [
+      {
+        "id": "command-surface",
+        "agent": "scout",
+        "readOnly": true,
+        "task": "Research the /flow command surface in this repository. Identify the extension entrypoint, registered commands, and the files that implement command formatting. Do not modify files.",
+        "outputContract": "Return a concise Markdown summary with file paths and the command list."
+      },
+      {
+        "id": "artifact-flow",
+        "agent": "scout",
+        "readOnly": true,
+        "task": "Research how flow run artifacts are created and updated. Identify where run.json, compiled.json, task logs, and index.json are written. Do not modify files.",
+        "outputContract": "Return a concise Markdown summary with file paths and artifact responsibilities."
+      }
+    ]
+  }
+}

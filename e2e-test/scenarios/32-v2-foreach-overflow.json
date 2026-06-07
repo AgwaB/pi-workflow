@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 2,
+  "name": "e2e-v2-foreach-overflow",
+  "description": "Block v2 foreach expansion when extracted source items exceed maxItems.",
+  "agent": "scout",
+  "readOnly": true,
+  "tools": ["read", "grep", "find", "ls"],
+  "flow": {
+    "stages": [
+      {
+        "id": "extract",
+        "type": "task",
+        "output": { "format": "json", "requiredKeys": ["claims"] },
+        "prompt": "Reply exactly {\"claims\":[\"E2E_V2_OVERFLOW_A\",\"E2E_V2_OVERFLOW_B\"]} and do not inspect or modify files."
+      },
+      {
+        "id": "verify",
+        "type": "foreach",
+        "from": { "stage": "extract", "path": "$.claims" },
+        "maxItems": 1,
+        "each": {
+          "prompt": "Reply exactly ${item}_SHOULD_NOT_RUN and do not inspect or modify files."
+        }
+      }
+    ]
+  }
+}

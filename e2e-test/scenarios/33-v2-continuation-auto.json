@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 2,
+  "name": "e2e-v2-continuation-auto",
+  "description": "Run a v2 continuation stage that launches a linked child run automatically.",
+  "agent": "scout",
+  "readOnly": true,
+  "tools": ["read", "grep", "find", "ls"],
+  "flow": {
+    "stages": [
+      {
+        "id": "collect",
+        "type": "task",
+        "prompt": "Reply exactly E2E_V2_CONTINUATION_PARENT_SOURCE and do not inspect or modify files."
+      },
+      {
+        "id": "decide",
+        "type": "reduce",
+        "output": { "format": "json", "requiredKeys": ["summary"] },
+        "continuation": {
+          "mode": "auto",
+          "maxRound": 2,
+          "maxGeneratedTasks": 2,
+          "maxTasksPerRound": 2,
+          "allowedAgents": ["scout"],
+          "allowedTools": ["read", "grep", "find", "ls"],
+          "onInvalidGeneratedSpec": "block"
+        },
+        "prompt": "Reply exactly {\"summary\":\"E2E_V2_CONTINUATION_PARENT\",\"nextFlowSpec\":{\"schemaVersion\":2,\"name\":\"e2e-v2-continuation-child\",\"agent\":\"scout\",\"readOnly\":true,\"tools\":[\"read\",\"grep\",\"find\",\"ls\"],\"flow\":{\"stages\":[{\"id\":\"child\",\"type\":\"task\",\"prompt\":\"Reply exactly E2E_V2_CONTINUATION_CHILD_OK and do not inspect or modify files.\"}]}}} and do not inspect or modify files."
+      }
+    ]
+  }
+}

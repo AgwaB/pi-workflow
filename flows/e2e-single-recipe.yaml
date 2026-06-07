@@ -1,0 +1,19 @@
+schemaVersion: 1
+name: e2e-named-recipe
+description: Project-local named recipe used by the E2E runner.
+defaults:
+  backend:
+    type: local-pi
+    mode: tmux
+  tools:
+    - read
+    - grep
+    - find
+    - ls
+flow:
+  type: single
+  task:
+    id: named-recipe-token
+    agent: scout
+    readOnly: true
+    task: Reply exactly E2E_RECIPE_OK and do not inspect or modify files.

@@ -1,0 +1,32 @@
+[
+  {
+    "id": "code-map",
+    "task": "Explain the pi-subagent-flow stage-first runtime architecture: how /flow run schedules stages and tasks, where run artifacts are stored, and how stage outputs are passed between stages. Cite concrete files and paths.",
+    "arms": {
+      "A": { "type": "recipe", "name": "code-research" },
+      "B": { "type": "agent", "name": "scout" }
+    },
+    "model": null,
+    "thinking": null
+  },
+  {
+    "id": "review-current-diff",
+    "task": "Review the current working changes for correctness, safety, and regressions. Provide evidence-backed findings with file references and a clear verdict. Do not modify any files.",
+    "arms": {
+      "A": { "type": "recipe", "name": "review" },
+      "B": { "type": "agent", "name": "general-review-expert" }
+    },
+    "model": null,
+    "thinking": null
+  },
+  {
+    "id": "research-methodology",
+    "task": "Summarize current best practices for evaluating agentic coding workflows, including which metrics matter beyond end-task success. Provide sources and a short candidate measurement rubric.",
+    "arms": {
+      "A": { "type": "recipe", "name": "deep-research" },
+      "B": { "type": "agent", "name": "researcher" }
+    },
+    "model": null,
+    "thinking": null
+  }
+]

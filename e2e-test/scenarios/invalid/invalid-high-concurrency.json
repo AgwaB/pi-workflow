@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "name": "invalid-high-concurrency",
+  "defaults": {
+    "maxConcurrency": 17
+  },
+  "flow": {
+    "type": "parallel",
+    "tasks": [
+      { "agent": "scout", "task": "A" },
+      { "agent": "scout", "task": "B" }
+    ]
+  }
+}

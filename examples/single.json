@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "name": "single-scout",
+  "description": "Run one read-only scout task against the current repository.",
+  "defaults": {
+    "backend": {
+      "type": "local-pi",
+      "mode": "tmux"
+    },
+    "tools": ["read", "grep", "find", "ls"]
+  },
+  "flow": {
+    "type": "single",
+    "task": {
+      "id": "repo-scan",
+      "agent": "scout",
+      "readOnly": true,
+      "task": "Inspect the repository structure and summarize the main files. Do not modify files."
+    }
+  }
+}

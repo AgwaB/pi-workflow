@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "name": "invalid-budget-token-block",
+  "defaults": {
+    "backend": { "type": "local-pi", "mode": "tmux" },
+    "tools": ["read", "grep", "find", "ls"]
+  },
+  "budget": {
+    "maxEstimatedTokens": 1,
+    "onExceed": "block"
+  },
+  "flow": {
+    "type": "single",
+    "task": {
+      "agent": "scout",
+      "readOnly": true,
+      "task": "This task is intentionally too large for a one-token static budget."
+    }
+  }
+}

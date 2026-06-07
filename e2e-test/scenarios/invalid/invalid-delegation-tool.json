@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "name": "invalid-delegation-tool",
+  "agent": "scout",
+  "tools": ["/flow"],
+  "flow": {
+    "stages": [
+      {
+        "id": "main",
+        "type": "task",
+        "prompt": "Validation must reject delegation tools."
+      }
+    ]
+  }
+}

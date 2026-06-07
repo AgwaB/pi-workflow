@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "name": "partition-example",
+  "description": "Static partition helper for grouping work by package or ownership boundary.",
+  "defaults": {
+    "backend": { "type": "local-pi", "mode": "tmux" },
+    "tools": ["read", "grep", "find", "ls"],
+    "worktreePolicy": "on"
+  },
+  "flow": {
+    "type": "partition",
+    "partitions": [
+      { "id": "package-a", "input": "packages/a\nsrc/a" },
+      { "id": "package-b", "input": "packages/b\nsrc/b" }
+    ],
+    "task": {
+      "id": "partition-work",
+      "agent": "scout",
+      "readOnly": true,
+      "task": "Review only the files or directories named in the Partition Context. Keep findings scoped to that partition."
+    },
+    "aggregate": {
+      "id": "partition-summary",
+      "agent": "scout",
+      "readOnly": true,
+      "task": "Summarize partition outputs and identify any cross-partition conflicts."
+    }
+  }
+}

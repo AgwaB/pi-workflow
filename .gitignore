@@ -1,0 +1,35 @@
+# Dependencies and package outputs
+node_modules/
+*.tgz
+.tmp/
+
+# Local environment and OS/editor noise
+.DS_Store
+.env
+.env.*
+!.env.example
+
+# Pi runtime artifacts
+.pi/*
+!.pi/agents/
+.pi/agents/*
+!.pi/agents/agentic-coding-expert.md
+!.pi/agents/e2e-custom-tool-agent.md
+!.pi/agents/e2e-no-tools-agent.md
+!.pi/agents/e2e-symlink-agent.md
+
+# Local work history, workflow state, caches, and generated test evidence
+.memory/
+.harness/
+cache/
+skill-test-runs/
+internal/e2e-test/results/
+internal/e2e-test/fixtures/worktree-base/.git/
+
+# Local third-party reference checkouts
+internal/reference/
+
+# Recovery/salvage artifacts and local archives
+.recovery/
+.harness-archive/
+*.tar.gz

@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "name": "tree-example",
+  "description": "Explicit parent-child tree topology.",
+  "defaults": {
+    "backend": { "type": "local-pi", "mode": "tmux" },
+    "tools": ["read", "grep", "find", "ls"]
+  },
+  "flow": {
+    "type": "tree",
+    "tasks": [
+      {
+        "id": "root",
+        "agent": "scout",
+        "readOnly": true,
+        "task": "Inspect the root area and summarize what child tasks should know."
+      },
+      {
+        "id": "child-a",
+        "parent": "root",
+        "agent": "scout",
+        "readOnly": true,
+        "task": "Use the parent dependency context to inspect child area A."
+      },
+      {
+        "id": "child-b",
+        "parent": "root",
+        "agent": "scout",
+        "readOnly": true,
+        "task": "Use the parent dependency context to inspect child area B."
+      }
+    ]
+  }
+}

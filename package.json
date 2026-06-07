@@ -1,0 +1,60 @@
+{
+  "name": "pi-workflow",
+  "version": "0.1.0",
+  "description": "Workflow orchestration for Pi subagents.",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "files": [
+    "src",
+    "examples",
+    "workflows",
+    "skills",
+    "docs",
+    "README.md",
+    "LICENSE",
+    "tsconfig.json"
+  ],
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "workflow"
+  ],
+  "exports": {
+    ".": "./src/index.ts",
+    "./extension": "./src/extension.ts",
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "pi-workflow": "./src/cli.mjs"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "npm run test:unit",
+    "test:unit": "rm -rf .tmp/unit && tsc -p tsconfig.json --outDir .tmp/unit --noEmit false && node --test test/*.test.mjs",
+    "e2e": "node internal/e2e-test/run.mjs",
+    "e2e:soak": "node internal/e2e-test/soak.mjs",
+    "pack:dry": "npm pack --dry-run"
+  },
+  "pi": {
+    "extensions": [
+      "./src/extension.ts"
+    ],
+    "skills": [
+      "./skills/workflow-guide"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.76.0 <1"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.78.0",
+    "@earendil-works/pi-coding-agent": ">=0.76.0 <1",
+    "@types/node": "^24.0.0",
+    "typebox": "^1.1.39",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

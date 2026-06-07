@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 2,
+  "name": "review",
+  "description": "Stage-first standard single-review recipe: one review-only bash-capable reviewer produces structured findings, verdict, evidence, and recommended next action for the runtime task.",
+  "agent": "delegate",
+  "readOnly": false,
+  "tools": [
+    "read",
+    "grep",
+    "find",
+    "ls",
+    "bash"
+  ],
+  "worktreePolicy": "auto",
+  "flow": {
+    "stages": [
+      {
+        "id": "review",
+        "type": "task",
+        "output": {
+          "format": "json",
+          "requiredKeys": [
+            "summary",
+            "verdict",
+            "findings",
+            "recommendedNextAction"
+          ]
+        },
+        "prompt": "Perform a review-only inspection of the target described in the runtime task. Do not modify files. Use bash only for non-mutating inspection commands such as git status, git diff, git diff --stat, git show, grep/find/ls, and read-only validation commands when needed. Do not install dependencies, run formatters, write files, start servers, use network/deploy commands, or execute cleanup commands. Do not quote secrets or sensitive values; summarize them if encountered. Return JSON only with summary, verdict, findings, risks, and recommendedNextAction. verdict must be one of pass, pass-with-notes, needs-fix, or blocked. Each finding must include severity, title, evidence, rationale, and recommendedAction. Use only repository evidence; if evidence is missing, say so rather than guessing."
+      }
+    ]
+  },
+  "catalog": {
+    "useWhen": [
+      "standard code review",
+      "single reviewer",
+      "review-only task",
+      "structured findings and verdict"
+    ],
+    "avoidWhen": [
+      "thorough panel review",
+      "multi-provider review",
+      "finding verification pass",
+      "implementation or file edits"
+    ],
+    "similarRecipes": [
+      "deep-review",
+      "focused-review"
+    ],
+    "mutationRisk": "review-only bash inspection in managed worktree",
+    "naturalLanguageTriggers": [
+      "review this change",
+      "audit this code",
+      "standard review",
+      "single review"
+    ]
+  }
+}

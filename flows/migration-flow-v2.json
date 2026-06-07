@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 2,
+  "name": "migration-flow-v2",
+  "description": "V2 migration planning prototype: inventory parallel areas, foreach detailed migration plans, and reduce into a staged migration plan. Describe target in MIGRATION_BRIEF.md.",
+  "agent": "scout",
+  "readOnly": true,
+  "tools": ["read", "grep", "find", "ls"],
+  "flow": {
+    "stages": [
+      {
+        "id": "inventory",
+        "type": "parallel",
+        "output": { "format": "json", "requiredKeys": ["migrationItems"] },
+        "tasks": [
+          { "id": "entrypoints", "prompt": "Read MIGRATION_BRIEF.md if present. Inventory entrypoints and public contracts. Return JSON with migrationItems." },
+          { "id": "state-data", "prompt": "Read MIGRATION_BRIEF.md if present. Inventory state, data, and persistence concerns. Return JSON with migrationItems." },
+          { "id": "tests-tooling", "prompt": "Read MIGRATION_BRIEF.md if present. Inventory tests, tooling, and validation gates. Return JSON with migrationItems." }
+        ]
+      },
+      {
+        "id": "plan-items",
+        "type": "foreach",
+        "from": { "stage": "inventory", "path": "$.migrationItems", "mode": "concat" },
+        "maxItems": 18,
+        "maxConcurrency": 4,
+        "output": { "format": "json", "requiredKeys": ["item", "plan"] },
+        "each": { "prompt": "Create a migration plan for this item: ${item}. Return JSON with item, plan, risks, and validation." }
+      },
+      {
+        "id": "migration-plan",
+        "type": "reduce",
+        "from": ["inventory", "plan-items"],
+        "sourcePolicy": "partial",
+        "prompt": "Synthesize a staged migration plan with phases, dependencies, validation gates, rollback notes, and open decisions."
+      }
+    ]
+  }
+}

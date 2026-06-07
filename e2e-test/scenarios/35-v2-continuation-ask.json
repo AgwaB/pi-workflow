@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 2,
+  "name": "e2e-v2-continuation-ask",
+  "description": "Record a valid generated nextFlowSpec as awaiting approval when continuation mode is ask.",
+  "agent": "scout",
+  "readOnly": true,
+  "tools": ["read", "grep", "find", "ls"],
+  "flow": {
+    "stages": [
+      {
+        "id": "collect",
+        "type": "task",
+        "prompt": "Reply exactly E2E_V2_CONTINUATION_ASK_SOURCE and do not inspect or modify files."
+      },
+      {
+        "id": "decide",
+        "type": "reduce",
+        "output": { "format": "json", "requiredKeys": ["summary"] },
+        "continuation": {
+          "mode": "ask",
+          "maxRound": 2,
+          "maxGeneratedTasks": 2,
+          "maxTasksPerRound": 2,
+          "allowedAgents": ["scout"],
+          "allowedTools": ["read", "grep", "find", "ls"],
+          "onInvalidGeneratedSpec": "block"
+        },
+        "prompt": "Reply exactly {\"summary\":\"E2E_V2_CONTINUATION_ASK\",\"nextFlowSpec\":{\"schemaVersion\":2,\"name\":\"e2e-v2-continuation-ask-child\",\"agent\":\"scout\",\"readOnly\":true,\"tools\":[\"read\",\"grep\",\"find\",\"ls\"],\"flow\":{\"stages\":[{\"id\":\"child\",\"type\":\"task\",\"prompt\":\"Reply exactly E2E_V2_CONTINUATION_ASK_CHILD and do not inspect or modify files.\"}]}}} and do not inspect or modify files."
+      }
+    ]
+  }
+}

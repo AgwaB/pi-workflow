@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "flow": {
+    "type": "tree",
+    "tasks": [
+      { "id": "a", "parent": "b", "agent": "scout", "readOnly": true, "task": "a" },
+      { "id": "b", "parent": "a", "agent": "scout", "readOnly": true, "task": "b" }
+    ]
+  }
+}

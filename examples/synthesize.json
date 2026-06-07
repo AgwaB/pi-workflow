@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "name": "synthesize-example",
+  "description": "Explicit synthesize join task after parallel evidence collection.",
+  "defaults": {
+    "backend": { "type": "local-pi", "mode": "tmux" },
+    "tools": ["read", "grep", "find", "ls"]
+  },
+  "flow": {
+    "type": "parallel",
+    "tasks": [
+      { "id": "source-a", "agent": "scout", "readOnly": true, "task": "Collect evidence from angle A." },
+      { "id": "source-b", "agent": "scout", "readOnly": true, "task": "Collect evidence from angle B." }
+    ],
+    "synthesize": {
+      "id": "synthesis",
+      "agent": "scout",
+      "readOnly": true,
+      "task": "Use the Synthesize Context to produce a concise evidence-backed synthesis. Do not treat this as hidden truth; cite task outputs."
+    }
+  }
+}

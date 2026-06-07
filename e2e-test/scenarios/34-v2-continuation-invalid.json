@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 2,
+  "name": "e2e-v2-continuation-invalid",
+  "description": "Block when a continuation stage emits an invalid generated nextFlowSpec.",
+  "agent": "scout",
+  "readOnly": true,
+  "tools": ["read", "grep", "find", "ls"],
+  "flow": {
+    "stages": [
+      {
+        "id": "collect",
+        "type": "task",
+        "prompt": "Reply exactly E2E_V2_CONTINUATION_INVALID_SOURCE and do not inspect or modify files."
+      },
+      {
+        "id": "decide",
+        "type": "reduce",
+        "output": { "format": "json", "requiredKeys": ["summary"] },
+        "continuation": {
+          "mode": "auto",
+          "maxRound": 2,
+          "maxGeneratedTasks": 2,
+          "maxTasksPerRound": 2,
+          "onInvalidGeneratedSpec": "block"
+        },
+        "prompt": "Reply exactly {\"summary\":\"E2E_V2_CONTINUATION_INVALID\",\"nextFlowSpec\":{\"schemaVersion\":2,\"agent\":\"scout\",\"flow\":{\"stages\":[]}}} and do not inspect or modify files."
+      }
+    ]
+  }
+}

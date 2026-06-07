@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "flow": {
+    "type": "retry",
+    "maxAttempts": 6,
+    "task": { "agent": "scout", "readOnly": true, "task": "ok" }
+  }
+}

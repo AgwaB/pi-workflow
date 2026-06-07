@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "name": "invalid-agent-path",
+  "flow": {
+    "type": "single",
+    "task": {
+      "agent": "../AGENTS",
+      "task": "Validation must reject unsafe agent names."
+    }
+  }
+}

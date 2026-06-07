@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 2,
+  "name": "discover-verify-summarize",
+  "description": "Stage-first read-only recipe: discover facts for the runtime task, verify them against repository evidence, then summarize.",
+  "agent": "scout",
+  "readOnly": true,
+  "tools": [
+    "read",
+    "grep",
+    "find",
+    "ls"
+  ],
+  "flow": {
+    "stages": [
+      {
+        "id": "discover",
+        "type": "task",
+        "prompt": "Discover facts needed to answer the runtime task. Do not modify files. Return factual bullet points with file paths and no recommendations."
+      },
+      {
+        "id": "verify",
+        "type": "reduce",
+        "from": "discover",
+        "prompt": "Using Source Stage Context, verify the discovered facts against repository evidence. Flag unsupported or stale claims. Do not modify files. Return Verified, Corrected, and Unsupported sections with file-path evidence."
+      },
+      {
+        "id": "summarize",
+        "type": "reduce",
+        "from": "verify",
+        "inject": true,
+        "prompt": "Using Source Stage Context and the runtime task, produce a concise grounded summary. Do not modify files. Return Markdown with sections: Answer, Core evidence, Relevant files, Caveats, Where to start."
+      }
+    ]
+  },
+  "catalog": {
+    "useWhen": [
+      "new contributor architecture summary",
+      "discover facts then verify then summarize",
+      "grounded repository overview"
+    ],
+    "avoidWhen": [
+      "implementation or file edits",
+      "formal review findings",
+      "deep multi-round research"
+    ],
+    "similarRecipes": [
+      "code-research",
+      "deep-research"
+    ],
+    "mutationRisk": "read-only",
+    "naturalLanguageTriggers": [
+      "discover verify summarize",
+      "new contributor summary",
+      "explain this repo"
+    ]
+  }
+}

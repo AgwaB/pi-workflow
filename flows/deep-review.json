@@ -1,0 +1,105 @@
+{
+  "schemaVersion": 2,
+  "name": "deep-review",
+  "description": "Stage-first deep review recipe: parallel review lenses, foreach validation of findings, and final evidence-backed synthesis for the runtime task.",
+  "agent": "scout",
+  "readOnly": true,
+  "tools": [
+    "read",
+    "grep",
+    "find",
+    "ls"
+  ],
+  "flow": {
+    "stages": [
+      {
+        "id": "reviewers",
+        "type": "parallel",
+        "output": {
+          "format": "json",
+          "requiredKeys": [
+            "findings"
+          ]
+        },
+        "tasks": [
+          {
+            "id": "runtime",
+            "prompt": "Review runtime, scheduler, state, and concurrency correctness for the target described in the runtime task. Return JSON with a findings array. Each finding must include severity, title, evidence, rationale, and recommendedAction."
+          },
+          {
+            "id": "safety",
+            "prompt": "Review permission, tool, worktree, data-safety, and fail-closed behavior for the target described in the runtime task. Return JSON with a findings array. Each finding must include severity, title, evidence, rationale, and recommendedAction."
+          },
+          {
+            "id": "product",
+            "prompt": "Review command UX, documentation, and product-contract fit for the target described in the runtime task. Return JSON with a findings array. Each finding must include severity, title, evidence, rationale, and recommendedAction."
+          }
+        ]
+      },
+      {
+        "id": "validate",
+        "type": "foreach",
+        "from": {
+          "stage": "reviewers",
+          "path": "$.findings",
+          "mode": "concat"
+        },
+        "maxConcurrency": 4,
+        "output": {
+          "format": "json",
+          "requiredKeys": [
+            "finding",
+            "verdict"
+          ]
+        },
+        "each": {
+          "prompt": "Validate this proposed finding against repository evidence without using the original task as independent proof: ${item}. Return JSON with finding, verdict, evidence, and recommendedAction. verdict must be one of confirmed, partially-supported, unsupported, or needs-human-check."
+        }
+      },
+      {
+        "id": "report",
+        "type": "reduce",
+        "from": [
+          "reviewers",
+          "validate"
+        ],
+        "sourcePolicy": "partial",
+        "inject": true,
+        "output": {
+          "format": "json",
+          "requiredKeys": [
+            "summary",
+            "findings"
+          ]
+        },
+        "prompt": "Use Source Stage Context and the runtime task to produce an evidence-backed deep review synthesis. Keep only findings with realistic impact and proportional fixes. Return JSON with summary, verdict, findings, risks, and recommendedNextAction."
+      }
+    ]
+  },
+  "catalog": {
+    "useWhen": [
+      "thorough code review",
+      "panel review",
+      "multi-lens review",
+      "verify findings before synthesis",
+      "deep audit"
+    ],
+    "avoidWhen": [
+      "quick single reviewer review",
+      "low-risk simple review",
+      "implementation or file edits"
+    ],
+    "similarRecipes": [
+      "review",
+      "focused-review"
+    ],
+    "mutationRisk": "read-only",
+    "naturalLanguageTriggers": [
+      "deep review",
+      "thorough review",
+      "panel review",
+      "multi provider review",
+      "verify findings"
+    ]
+  }
+}

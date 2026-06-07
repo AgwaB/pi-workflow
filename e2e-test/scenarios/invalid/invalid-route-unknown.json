@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "flow": {
+    "type": "route",
+    "items": [{ "id": "x", "route": "missing", "input": "x" }],
+    "routes": [{ "id": "known", "task": { "agent": "scout", "readOnly": true, "task": "ok" } }]
+  }
+}

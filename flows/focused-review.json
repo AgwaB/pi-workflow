@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 2,
+  "name": "focused-review",
+  "description": "Stage-first focused read-only review recipe: parallel runtime/API/docs/release lenses followed by aggregate triage for the runtime task.",
+  "agent": "scout",
+  "readOnly": true,
+  "tools": [
+    "read",
+    "grep",
+    "find",
+    "ls"
+  ],
+  "flow": {
+    "stages": [
+      {
+        "id": "reviewers",
+        "type": "parallel",
+        "maxConcurrency": 3,
+        "tasks": [
+          {
+            "id": "runtime-safety-review",
+            "prompt": "Review runtime, state, concurrency, timeout, worktree, and artifact-consistency risks for the target described in the runtime task. Do not modify files. Return only evidence-backed findings with severity, file path, rationale, and concrete recommendation. If no issues are found, say so explicitly."
+          },
+          {
+            "id": "api-docs-review",
+            "prompt": "Review command/API/documentation consistency for the target described in the runtime task. Do not modify files. Return evidence-backed findings about mismatched docs, unclear UX, or schema/runtime drift. Include file paths and concrete recommendations."
+          },
+          {
+            "id": "release-hygiene-review",
+            "prompt": "Review release hygiene, test coverage, packaging, and workflow risks for the target described in the runtime task. Do not modify files. Return evidence-backed findings with severity, file path, and concrete recommendation."
+          }
+        ]
+      },
+      {
+        "id": "review-triage",
+        "type": "reduce",
+        "from": "reviewers",
+        "sourcePolicy": "partial",
+        "inject": true,
+        "prompt": "Using Source Stage Context and the runtime task, deduplicate and triage the review findings. Do not modify files. Return Markdown with: Must fix, Should fix, Defer, and No-action observations. Preserve file-path evidence."
+      }
+    ]
+  },
+  "catalog": {
+    "useWhen": [
+      "focused review across runtime api docs release readiness",
+      "triage review findings",
+      "evidence-backed focused audit"
+    ],
+    "avoidWhen": [
+      "single standard review contract",
+      "deep finding verification pipeline",
+      "implementation or file edits"
+    ],
+    "similarRecipes": [
+      "review",
+      "deep-review",
+      "public-readiness"
+    ],
+    "mutationRisk": "read-only",
+    "naturalLanguageTriggers": [
+      "focused review",
+      "triage findings",
+      "review runtime api docs"
+    ]
+  }
+}

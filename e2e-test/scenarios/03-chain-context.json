@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "name": "e2e-chain-context",
+  "description": "A real chain flow passes previous-step output context to the next Pi child agent.",
+  "defaults": {
+    "backend": { "type": "local-pi", "mode": "tmux" },
+    "tools": ["read", "grep", "find", "ls"]
+  },
+  "flow": {
+    "type": "chain",
+    "steps": [
+      {
+        "id": "produce-token",
+        "agent": "scout",
+        "readOnly": true,
+        "task": "Reply exactly CHAIN_CONTEXT_TOKEN_7381 and do not inspect or modify files."
+      },
+      {
+        "id": "consume-token",
+        "agent": "scout",
+        "readOnly": true,
+        "task": "If the previous chain step context contains CHAIN_CONTEXT_TOKEN_7381, reply exactly E2E_CHAIN_CONTEXT_OK. Otherwise reply exactly E2E_CHAIN_CONTEXT_MISSING. Do not inspect or modify files."
+      }
+    ]
+  }
+}
