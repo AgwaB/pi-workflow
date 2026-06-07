@@ -58,41 +58,46 @@ The main issue is not that the workflow researched too much. The issue is that t
 
 ### 1. Add research-scope coverage tracking
 
-Each planned research question should state what part of the runtime task it covers.
+Coverage tracking should prevent scope omissions without turning the workflow into a parent-decision system.
 
-Proposed question shape:
+Important design constraint: scope extraction and question planning should be separated. If the same prompt invents scope items and questions at once, it can create a self-justifying plan where every generated scope item is conveniently covered. The workflow should first extract target research scope from the runtime task, then plan questions against that target scope.
+
+Proposed plan shape:
 
 ```json
 {
-  "id": "llm-judge",
-  "question": "How reliable is LLM-as-judge for code evaluation?",
-  "covers": [
+  "researchScope": [
+    "blind evaluation methodology",
+    "seeded defects / answer keys",
+    "benchmark contamination",
+    "LLM-as-judge reliability",
+    "reproducibility metadata",
+    "cost-vs-quality tradeoff"
+  ],
+  "researchQuestions": [
     {
-      "scopeItem": "LLM-as-judge reliability",
-      "source": "runtime task",
-      "coverageRole": "primary"
+      "id": "llm-judge",
+      "question": "How reliable is LLM-as-judge for code evaluation?",
+      "covers": ["LLM-as-judge reliability"],
+      "whyItMatters": "...",
+      "searchQueries": ["..."],
+      "expectedSourceTypes": ["academic papers", "benchmark docs"],
+      "priority": "high"
     }
   ],
-  "whyItMatters": "...",
-  "searchQueries": ["..."],
-  "expectedSourceTypes": ["academic papers", "benchmark docs"],
-  "priority": "high"
+  "researchScopeCoverage": [
+    {
+      "scopeItem": "benchmark contamination",
+      "coveredBy": ["contamination"],
+      "status": "covered"
+    }
+  ]
 }
 ```
 
-`covers` is not meant to be a parent-decision mapping. It is a research-scope mapping: what part of the requested research scope this question is responsible for.
+`covers` is not meant to be a parent-decision mapping. It is a lightweight research-scope mapping: what part of the requested research scope this question is responsible for. Use a flat string array to reduce token overhead and schema error risk.
 
-Also add plan-level `researchScopeCoverage`:
-
-```json
-{
-  "scopeItem": "benchmark contamination",
-  "coveredBy": ["contamination"],
-  "status": "covered"
-}
-```
-
-Allowed statuses:
+Allowed `researchScopeCoverage.status` values:
 
 ```text
 covered | partial | gap | out_of_scope
@@ -101,14 +106,14 @@ covered | partial | gap | out_of_scope
 Prompt rule:
 
 ```text
-If a researchScopeCoverage item is gap, either add a research question for it or explain why it is intentionally out_of_scope.
+First extract researchScope from the runtime task. Then create researchQuestions that cover those scope items. If any researchScopeCoverage item is gap, either add a research question for it or explain why it is intentionally out_of_scope.
 ```
 
 Purpose: this does not magically improve research, but it should expose missed scope items earlier and make omissions visible in the final report.
 
 ### 2. Preserve broad raw discovery, but make claim lifecycle explicit
 
-Avoid treating all claims as equivalent. Instead, preserve broad discovery while separating claim states.
+Avoid treating all claims as equivalent. Instead, preserve broad discovery while separating claim states. The research stage may use a soft per-question raw-claim target to limit verbosity, but should preserve useful overflow as unverified leads rather than silently discard it.
 
 Proposed lifecycle:
 
@@ -150,10 +155,11 @@ Proposed shape:
 
 `verificationCandidates` is the only bucket sent to the verify stage. Other buckets are preserved so the workflow remains deep and auditable.
 
-Each `verificationCandidates` item should include:
+Each normalized claim should have a stable ID. Each `verificationCandidates` item should include:
 
 ```json
 {
+  "id": "claim-004",
   "claim": "...",
   "sourceUrls": ["..."],
   "sourceQuality": "high|medium|low|unknown",
@@ -162,6 +168,14 @@ Each `verificationCandidates` item should include:
   "verificationNeed": "core|useful|optional"
 }
 ```
+
+Bucket transition rules:
+
+- `verificationCandidates`: valid, source-backed, central claims selected for verification within the depth budget.
+- `unverifiedClaims`: valid research details worth preserving but not verified because they exceeded budget, were lower priority, or did not require rigorous verification for the report's main findings.
+- `duplicates`: claims merged into another normalized claim ID.
+- `outOfScopeClaims`: claims outside the extracted research scope.
+- `lowValueClaims`: vague, generic, or weakly sourced claims not useful enough to carry forward.
 
 Avoid over-relying on generic `high-risk` / `high-impact` language. If used, it should be grounded in research accuracy, not parent decision-making.
 
@@ -180,6 +194,8 @@ But final reporting should treat them differently:
 - `conflicting` -> `contestedFindings`
 - `unsupported` -> `unsupportedClaims`
 - not verified -> `unverifiedClaims`
+
+Each synthesized finding must reference supporting claim IDs from the evidence packet. This keeps the final report concise while allowing the parent session to inspect the underlying evidence.
 
 This avoids calling weak or uncertain claims verified while preserving them for inspection.
 
@@ -205,7 +221,13 @@ Proposed shape:
       "unverified": 0,
       "coverageGaps": 0
     },
-    "mainFindings": [],
+    "mainFindings": [
+      {
+        "finding": "...",
+        "supportingClaims": ["claim-004", "claim-012"],
+        "confidence": "high"
+      }
+    ],
     "caveatedFindings": [],
     "contestedFindings": [],
     "unsupportedClaims": [],
@@ -240,17 +262,18 @@ Current depth policy:
 
 Proposed initial approach:
 
-- Keep existing numeric caps for now.
-- Do not add a hard raw-claim cap yet.
+- Keep existing question and verification-candidate caps for now.
+- Add a soft per-question raw-claim target, not a hard deletion rule. For example: quick target 5 raw claims/question, standard target 8, max target 12.
+- If a research subagent finds more useful claims than the target, it should prioritize the strongest claims in `claims` and summarize the rest as `additionalUnverifiedLeads` rather than silently discard them.
 - Preserve claims that are not verified as `unverifiedClaims` rather than discarding them silently.
 - Use lifecycle buckets and reporting counts to learn whether caps are harming quality before reducing them.
 
-Reason: prematurely limiting raw claims may undermine the "deep" part of deep research. The safer first step is evidence-state separation and visibility.
+Reason: prematurely limiting raw claims may undermine the "deep" part of deep research. A soft target plus explicit unverified leads controls verbosity while preserving breadth.
 
 ## Open questions for reviewers
 
-1. Is `covers` as object-array research-scope mapping useful, or too much schema overhead?
-2. Is plan-level `researchScopeCoverage` likely to reveal real omissions, or will it become LLM self-justification boilerplate?
+1. Is flat-array `covers` enough, or do we need richer scope metadata later?
+2. Is separating `researchScope` extraction from question planning enough to avoid self-justifying coverage boilerplate?
 3. Is preserving unverified claims valuable, or will it overload the final artifact?
 4. Should `verificationCandidates` caps remain unchanged initially, or should standard/max be reduced immediately?
 5. Are `mainFindings`, `caveatedFindings`, `contestedFindings`, `unsupportedClaims`, and `unverifiedClaims` the right buckets?
