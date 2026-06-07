@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "name": "judge-example",
+  "description": "Explicit judge join task after parallel candidates.",
+  "defaults": {
+    "backend": { "type": "local-pi", "mode": "tmux" },
+    "tools": ["read", "grep", "find", "ls"]
+  },
+  "flow": {
+    "type": "parallel",
+    "tasks": [
+      { "id": "candidate-a", "agent": "scout", "readOnly": true, "task": "Produce candidate answer A." },
+      { "id": "candidate-b", "agent": "scout", "readOnly": true, "task": "Produce candidate answer B." }
+    ],
+    "judge": {
+      "id": "judge",
+      "agent": "scout",
+      "readOnly": true,
+      "task": "Use the Judge Context to compare candidates and choose the better-supported answer."
+    }
+  }
+}

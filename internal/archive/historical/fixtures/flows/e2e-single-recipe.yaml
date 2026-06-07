@@ -1,0 +1,22 @@
+> Historical archive. Non-authoritative. Preserved for recovery context only.
+> Current public terminology is workflow / workflow spec / workflow file / workflow run.
+
+schemaVersion: 1
+name: e2e-named-workflow
+description: Project-local named workflow used by the E2E runner.
+defaults:
+  backend:
+    type: local-pi
+    mode: tmux
+  tools:
+    - read
+    - grep
+    - find
+    - ls
+flow:
+  type: single
+  task:
+    id: named-workflow-token
+    agent: scout
+    readOnly: true
+    task: Reply exactly E2E_RECIPE_OK and do not inspect or modify files.

@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "name": "chain-discovery-review",
+  "description": "Run a read-only discovery task, then review its findings.",
+  "defaults": {
+    "backend": {
+      "type": "local-pi",
+      "mode": "tmux"
+    },
+    "tools": ["read", "grep", "find", "ls"]
+  },
+  "flow": {
+    "type": "chain",
+    "steps": [
+      {
+        "id": "discover",
+        "agent": "scout",
+        "readOnly": true,
+        "task": "Read docs/usage-reference.md and identify the three highest-risk implementation areas. Do not edit files."
+      },
+      {
+        "id": "review-discovery",
+        "agent": "agentic-coding-expert",
+        "readOnly": true,
+        "task": "Review the discovery output for missing risks and recommend follow-up questions. Do not edit files."
+      }
+    ]
+  }
+}

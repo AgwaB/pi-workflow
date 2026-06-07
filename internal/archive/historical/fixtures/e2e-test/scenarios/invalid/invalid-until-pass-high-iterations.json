@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "flow": {
+    "type": "until-pass",
+    "maxIterations": 6,
+    "work": { "agent": "scout", "readOnly": true, "task": "work" },
+    "check": { "agent": "scout", "readOnly": true, "task": "check" }
+  }
+}

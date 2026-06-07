@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 2,
+  "name": "e2e-v2-foreach-reduce",
+  "description": "Run v2 parallel JSON extraction, foreach concat expansion, and reduce over generated item tasks.",
+  "agent": "scout",
+  "readOnly": true,
+  "tools": ["read", "grep", "find", "ls"],
+  "flow": {
+    "stages": [
+      {
+        "id": "extract",
+        "type": "parallel",
+        "output": { "format": "json", "requiredKeys": ["claims"] },
+        "tasks": [
+          {
+            "id": "a",
+            "prompt": "Reply exactly {\"claims\":[\"E2E_V2_FOREACH_A\"]} and do not inspect or modify files."
+          },
+          {
+            "id": "b",
+            "prompt": "Reply exactly {\"claims\":[\"E2E_V2_FOREACH_B\"]} and do not inspect or modify files."
+          }
+        ]
+      },
+      {
+        "id": "verify",
+        "type": "foreach",
+        "from": { "stage": "extract", "path": "$.claims", "mode": "concat" },
+        "maxItems": 4,
+        "maxConcurrency": 2,
+        "each": {
+          "prompt": "Reply exactly ${item}_VERIFIED and do not inspect or modify files."
+        }
+      },
+      {
+        "id": "summary",
+        "type": "reduce",
+        "from": "verify",
+        "prompt": "If the Source Stage Context includes E2E_V2_FOREACH_A_VERIFIED and E2E_V2_FOREACH_B_VERIFIED, reply exactly E2E_V2_FOREACH_REDUCE_OK. Otherwise reply exactly E2E_V2_FOREACH_REDUCE_MISSING. Do not inspect or modify files."
+      }
+    ]
+  }
+}

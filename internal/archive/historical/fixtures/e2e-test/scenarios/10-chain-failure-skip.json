@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "name": "e2e-chain-failure-skip",
+  "description": "A failed first chain step stops the chain and marks later steps skipped.",
+  "defaults": {
+    "backend": { "type": "local-pi", "mode": "tmux" },
+    "tools": ["read", "grep", "find", "ls"]
+  },
+  "flow": {
+    "type": "chain",
+    "steps": [
+      {
+        "id": "fail-missing-cwd",
+        "agent": "scout",
+        "cwd": "./e2e-test/fixtures/does-not-exist",
+        "readOnly": true,
+        "task": "This step should fail before child Pi starts because the cwd is missing."
+      },
+      {
+        "id": "must-skip",
+        "agent": "scout",
+        "readOnly": true,
+        "task": "This step must be skipped and should never launch."
+      }
+    ]
+  }
+}

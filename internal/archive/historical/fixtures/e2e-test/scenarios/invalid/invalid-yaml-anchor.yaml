@@ -1,0 +1,10 @@
+> Historical archive. Non-authoritative. Preserved for recovery context only.
+> Current public terminology is workflow / workflow spec / workflow file / workflow run.
+
+schemaVersion: &one 1
+name: invalid-yaml-anchor
+flow:
+  type: single
+  task:
+    agent: scout
+    task: Validation must reject YAML anchors.

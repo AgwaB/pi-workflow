@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "name": "e2e-managed-worktree-git",
+  "description": "Create a managed worktree from a real git fixture and run a real Pi child agent there.",
+  "defaults": {
+    "cwd": "./e2e-test/fixtures/worktree-base",
+    "backend": { "type": "local-pi", "mode": "tmux" },
+    "tools": ["read", "grep", "find", "ls"]
+  },
+  "flow": {
+    "type": "single",
+    "task": {
+      "id": "worktree-token",
+      "agent": "delegate",
+      "readOnly": true,
+      "worktreePolicy": "on",
+      "task": "Reply exactly E2E_WORKTREE_GIT_OK and do not inspect or modify files."
+    }
+  }
+}

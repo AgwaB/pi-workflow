@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "name": "e2e-until-pass-exhaustion",
+  "description": "Until-pass helper fails when no check replies PASS before maxIterations is exhausted.",
+  "defaults": {
+    "backend": { "type": "local-pi", "mode": "tmux" },
+    "tools": ["read", "grep", "find", "ls"]
+  },
+  "flow": {
+    "type": "until-pass",
+    "maxIterations": 2,
+    "work": {
+      "id": "produce-fail",
+      "agent": "scout",
+      "readOnly": true,
+      "task": "Reply exactly UNTIL_PASS_NEVER_OK and do not inspect or modify files."
+    },
+    "check": {
+      "id": "check-fail",
+      "agent": "scout",
+      "readOnly": true,
+      "task": "Reply exactly FAIL still not good. Do not use the word PASS. Do not inspect or modify files."
+    }
+  }
+}

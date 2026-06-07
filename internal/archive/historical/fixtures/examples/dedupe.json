@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "name": "dedupe-example",
+  "description": "Explicit dedupe join task that groups overlapping findings from parallel branches.",
+  "defaults": {
+    "backend": { "type": "local-pi", "mode": "tmux" },
+    "tools": ["read", "grep", "find", "ls"]
+  },
+  "flow": {
+    "type": "parallel",
+    "tasks": [
+      { "id": "review-a", "agent": "scout", "readOnly": true, "task": "List findings from source A." },
+      { "id": "review-b", "agent": "scout", "readOnly": true, "task": "List findings from source B." }
+    ],
+    "dedupe": {
+      "id": "dedupe-findings",
+      "agent": "scout",
+      "readOnly": true,
+      "task": "Use the Dedupe Context to group duplicate or overlapping findings. Preserve evidence links to source task outputs."
+    }
+  }
+}

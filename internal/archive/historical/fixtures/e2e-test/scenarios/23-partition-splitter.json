@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "name": "e2e-partition-splitter",
+  "description": "Static partitions expand into child tasks and aggregate output previews.",
+  "defaults": {
+    "backend": { "type": "local-pi", "mode": "tmux" },
+    "maxConcurrency": 2,
+    "tools": ["read", "grep", "find", "ls"]
+  },
+  "flow": {
+    "type": "partition",
+    "partitions": [
+      { "id": "package-a", "input": "PARTITION_A_TOKEN" },
+      { "id": "package-b", "input": "PARTITION_B_TOKEN" }
+    ],
+    "task": {
+      "id": "partition-work",
+      "agent": "scout",
+      "readOnly": true,
+      "task": "Reply exactly with the value shown under Partition input in the Partition Context. Do not inspect or modify files."
+    },
+    "aggregate": {
+      "id": "partition-summary",
+      "agent": "scout",
+      "readOnly": true,
+      "task": "If the Parallel Aggregate Context includes PARTITION_A_TOKEN and PARTITION_B_TOKEN in output previews, reply exactly E2E_PARTITION_AGGREGATE_OK. Otherwise reply exactly E2E_PARTITION_AGGREGATE_MISSING. Do not inspect or modify files."
+    }
+  }
+}

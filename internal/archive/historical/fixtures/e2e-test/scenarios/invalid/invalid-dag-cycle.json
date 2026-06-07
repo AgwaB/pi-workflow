@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "name": "invalid-dag-cycle",
+  "flow": {
+    "type": "dag",
+    "tasks": [
+      {
+        "id": "a",
+        "agent": "scout",
+        "dependsOn": ["b"],
+        "task": "Validation must reject DAG cycles."
+      },
+      {
+        "id": "b",
+        "agent": "scout",
+        "dependsOn": ["a"],
+        "task": "Validation must reject DAG cycles."
+      }
+    ]
+  }
+}

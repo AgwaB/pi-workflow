@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "name": "e2e-synthesize-helper",
+  "description": "Parallel synthesize helper receives explicit context after main tasks finish.",
+  "defaults": {
+    "backend": { "type": "local-pi", "mode": "tmux" },
+    "maxConcurrency": 2,
+    "tools": ["read", "grep", "find", "ls"]
+  },
+  "flow": {
+    "type": "parallel",
+    "tasks": [
+      {
+        "id": "synthesize-source-a",
+        "agent": "scout",
+        "readOnly": true,
+        "task": "Reply exactly SYNTHESIZE_SOURCE_A_TOKEN and do not inspect or modify files."
+      },
+      {
+        "id": "synthesize-source-b",
+        "agent": "scout",
+        "readOnly": true,
+        "task": "Reply exactly SYNTHESIZE_SOURCE_B_TOKEN and do not inspect or modify files."
+      }
+    ],
+    "synthesize": {
+      "id": "synthesize-summary",
+      "agent": "scout",
+      "readOnly": true,
+      "task": "If the Synthesize Context includes SYNTHESIZE_SOURCE_A_TOKEN and SYNTHESIZE_SOURCE_B_TOKEN in output previews, reply exactly E2E_SYNTHESIZE_OK. Otherwise reply E2E_SYNTHESIZE_MISSING. Do not inspect or modify files."
+    }
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "name": "e2e-required-worktree-readonly",
+  "description": "Required managed worktree is created from the project git root even for a read-only task.",
+  "flow": {
+    "stages": [
+      {
+        "id": "main",
+        "type": "task",
+        "prompt": "Reply exactly E2E_REQUIRED_WORKTREE_OK. Do not modify files.",
+        "worktreePolicy": "on",
+        "agent": "scout",
+        "readOnly": true
+      }
+    ]
+  },
+  "backend": {
+    "type": "local-pi",
+    "mode": "tmux"
+  },
+  "tools": [
+    "read",
+    "grep",
+    "find",
+    "ls"
+  ]
+}

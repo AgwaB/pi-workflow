@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 2,
+  "name": "v2-stage-preview",
+  "description": "Run a stage-first v2 flow with parallel read-only inspection followed by reduce synthesis.",
+  "agent": "scout",
+  "readOnly": true,
+  "tools": ["read", "grep", "find", "ls"],
+  "flow": {
+    "stages": [
+      {
+        "id": "inspect",
+        "type": "parallel",
+        "tasks": [
+          {
+            "id": "source-a",
+            "prompt": "Inspect README.md and summarize the project goal."
+          },
+          {
+            "id": "source-b",
+            "prompt": "Inspect ROADMAP.md and summarize the v2 implementation direction."
+          }
+        ]
+      },
+      {
+        "id": "summarize",
+        "type": "reduce",
+        "from": "inspect",
+        "prompt": "Synthesize the inspection notes into a concise summary."
+      }
+    ]
+  }
+}
