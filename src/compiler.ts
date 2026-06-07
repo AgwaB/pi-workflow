@@ -371,3 +371,5 @@ function buildCompiledPrompt(task: FlowTaskSpec, roles: CompiledRole[]): string 
 function jsonKey(key: string): string {
   return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(key) ? key : JSON.stringify(key);
 }
+
+export const compileFlowRecipe = compileFlowSpec;

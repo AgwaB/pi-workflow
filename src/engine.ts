@@ -618,3 +618,10 @@ function clampTimeout(value: number | undefined): number {
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+export const runFlowRecipe = runFlowSpec;
+export const waitForWorkflowRun = waitForRun;
+export const runWorkflowRecipe = runFlowSpec;
+export async function continueWorkflow(_cwd: string, _runId: string): Promise<FlowRunRecord | undefined> {
+  return undefined;
+}

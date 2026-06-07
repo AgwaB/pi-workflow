@@ -203,6 +203,16 @@ function emit(ctx: ExtensionCommandContext, text: string, level: "info" | "warni
   stream.write(`${text}\n`);
 }
 
+export function parseFlowRunArgs(args: string): { specRef: string; task: string } {
+  const tokens = splitArgs(args);
+  if (tokens[0] === "run") tokens.shift();
+  return { specRef: tokens[0] ?? "", task: tokens.slice(1).join(" ") };
+}
+
+export async function flowArgumentCompletions(): Promise<string[]> {
+  return ["help", "validate", "roles", "agents", "run", "status", "show", "logs", "wait"];
+}
+
 function splitArgs(args: string): string[] {
   return args.trim().split(/\s+/).filter(Boolean);
 }

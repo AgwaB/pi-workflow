@@ -418,3 +418,8 @@ function optionalEnum<T extends readonly string[]>(
 function jsonKey(key: string): string {
   return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(key) ? key : JSON.stringify(key);
 }
+
+export const loadFlowRecipe = loadFlowSpec;
+export const parseFlowRecipe = parseFlowSpec;
+export const loadWorkflowRecipe = loadFlowSpec;
+export const parseWorkflowRecipe = parseFlowSpec;

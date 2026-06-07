@@ -168,3 +168,12 @@ function validateRecipeName(name: string): void {
     throw new FlowValidationError([{ path: name, message: "recipe names may contain only letters, numbers, dot, underscore, and dash" }]);
   }
 }
+
+export const resolveFlowRecipeRef = resolveFlowSpecRef;
+export const resolveWorkflowRecipeRef = resolveFlowSpecRef;
+export const listWorkflowRecipes = listFlowRecipes;
+export const recommendFlowRecipes = async (_cwd: string, _request: string): Promise<FlowRecipeRecord[]> => [];
+export const recommendWorkflowRecipes = recommendFlowRecipes;
+export type WorkflowRecipeRecord = FlowRecipeRecord;
+export type WorkflowRecipeCatalogMetadata = Record<string, unknown>;
+export type WorkflowRecipeRecommendation = FlowRecipeRecord;

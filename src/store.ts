@@ -493,3 +493,6 @@ function emptySummary(): TaskSummary {
     return summary;
   }, { total: 0 } as TaskSummary);
 }
+
+export const resolveFlowsCwd = (cwd: string): string => cwd;
+export const createStageFirstRunRecord = createRunRecord;
