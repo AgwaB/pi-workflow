@@ -85,7 +85,11 @@ export async function applyTaskResultArtifact(cwd: string, task: WorkflowTaskRun
       await copyFile(artifact.resultFile, `${artifact.resultFile}.invalid-attempt-${attempts}`).catch(() => undefined);
       task.status = "pending";
       task.statusDetail = "retry_output_invalid";
+      task.startedAt = undefined;
+      task.completedAt = undefined;
+      task.exitCode = undefined;
       task.paneId = undefined;
+      task.pid = undefined;
       task.launchToken = undefined;
       task.outputRetry = { attempts, maxAttempts: 1, reason: "output_invalid", message: validation.message, requiredKeys: task.output.requiredKeys ?? [] };
       return true;
@@ -107,25 +111,13 @@ async function validateTaskOutput(cwd: string, task: WorkflowTaskRunRecord): Pro
   const trimmed = normalizeJsonOutputText(text);
   if (!trimmed) return { valid: false, message: "expected JSON output, got empty output" };
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(trimmed);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return { valid: false, message: `expected valid JSON output: ${message}` };
-  }
-
   const requiredKeys = Array.isArray(task.output.requiredKeys) ? task.output.requiredKeys : [];
-  if (requiredKeys.length > 0) {
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return { valid: false, message: "expected top-level JSON object for requiredKeys validation", structuredOutput: parsed };
-    }
-    const object = parsed as Record<string, unknown>;
-    const missing = requiredKeys.filter((key) => !Object.prototype.hasOwnProperty.call(object, key));
-    if (missing.length > 0) return { valid: false, message: `JSON output missing required keys: ${missing.join(", ")}`, structuredOutput: parsed };
+  const parsed = parseJsonOutput(trimmed, requiredKeys);
+  if (!parsed.valid) {
+    return { valid: false, message: `expected valid JSON output: ${parsed.message ?? "invalid JSON"}`, structuredOutput: parsed.structuredOutput };
   }
 
-  return { valid: true, message: "JSON output valid", structuredOutput: parsed };
+  return { valid: true, message: "JSON output valid", structuredOutput: parsed.structuredOutput };
 }
 
 function canAcceptTerminalResult(task: WorkflowTaskRunRecord, result: Record<string, unknown>): boolean {

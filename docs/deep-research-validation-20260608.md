@@ -123,7 +123,47 @@ Follow-up fix applied:
 - `verify-claims` output now sets `onInvalid: "fail"`, which triggers the existing invalid-output retry path instead of silently recording a warning.
 - The verifier prompt now explicitly forbids prose, markdown fences, commentary, or text outside the JSON object.
 
+## Run 4 — standard-depth A/B diagnostic execution
+
+- A/B run: `.pi/eval/ab-execution/runs/run-20260608T133951Z/report.md`
+- Workflow run: `.pi/workflows/workflow_mq59cqo7_f22c07`
+- Model: `kimi-coding/kimi-for-coding`
+- Thinking: `high`
+- Result: operational `failed`, but final synthesis completed with valid JSON.
+- Task summary: 36 total, 34 completed, 0 failed, 0 blocked, 2 interrupted.
+
+Dynamic fanout evidence:
+
+| Stage | Generated/completed tasks |
+| --- | ---: |
+| `plan` | 1/1 completed |
+| `research-questions` | 8/8 completed |
+| `normalize-claims` | 1/1 completed |
+| `verify-claims` | 25 generated; 23 completed; 2 interrupted |
+| `final` | 1/1 completed |
+
+Final output structure check:
+
+- `final.main` output validation: valid JSON
+- Top-level keys: `finalReport`, `evidencePacket`
+
+Operational caveat:
+
+- `verify-claims.claim-023` and `verify-claims.claim-024` were marked `interrupted/pane_missing`.
+- Their output and stderr logs were empty and no result JSON was recorded.
+- This appears to be tmux launch/early-exit capture behavior, not a verifier answer-quality failure.
+- The final stage completed under partial-source policy, so the research artifact exists but the workflow run is not clean operational-success evidence.
+
+Hardening applied during this A/B cycle:
+
+- `/workflow wait` maximum timeout was raised from 30 minutes to 4 hours.
+- `deep-research` default task runtime was raised to 4 hours.
+- JSON output validation now uses the robust parser path that can recover valid object candidates from fenced/prose-wrapped output.
+- Invalid JSON retry now clears `pid`, `startedAt`, `completedAt`, and launch metadata so pending retries can relaunch.
+- Retry prompts now include the same task's invalid output attempt, not an unrelated previous dependency.
+- `normalize-claims` now asks for compact JSON with a tighter standard-depth verification-candidate cap to avoid model output truncation.
+
 Remaining hardening:
 
-1. Re-run `deep-research` quick/standard only if we need post-fix evidence for the JSON strictness change; the dynamic fanout behavior itself is validated by Run 3.
+1. Investigate/mitigate `pane_missing` for short-lived empty tmux panes.
 2. Keep A/B claims diagnostic; do not generalize one local task to universal workflow superiority.

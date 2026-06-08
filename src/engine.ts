@@ -24,11 +24,12 @@ import {
 } from "./store.js";
 import { launchTmuxTask, refreshRunFromArtifacts } from "./tmux.js";
 import { ensureManagedWorktree } from "./worktree.js";
+import { buildJsonOutputRetryInstructions } from "./result.js";
 import { extractStageFirstForeachItems } from "./workflow-runtime.js";
 import { CompiledTask, CompiledWorkflow, STAGE_FIRST_RUN_TYPE, WorkflowIndexRecord, WorkflowRunRecord, WorkflowTaskRunRecord } from "./types.js";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 60_000;
-const MAX_WAIT_TIMEOUT_MS = 1_800_000;
+const MAX_WAIT_TIMEOUT_MS = 14_400_000;
 const POLL_INTERVAL_MS = 1_000;
 const LOG_LINES_DEFAULT = 80;
 const LOG_LINES_MAX = 400;
@@ -512,14 +513,14 @@ async function launchPendingTaskAt(
     return false;
   }
 
-  const launchTask = options.chain
-    ? await prepareChainTask(cwd, run, compiledFlow, index)
-    : options.join
-      ? await prepareJoinTask(cwd, run, compiledFlow, index)
-      : options.dag
-        ? await prepareDagTask(cwd, run, compiledFlow, index)
-        : options.retry
-          ? await prepareRetryTask(cwd, run, compiledFlow, index)
+  const launchTask = task.outputRetry || options.retry
+    ? await prepareRetryTask(cwd, run, compiledFlow, index)
+    : options.chain
+      ? await prepareChainTask(cwd, run, compiledFlow, index)
+      : options.join
+        ? await prepareJoinTask(cwd, run, compiledFlow, index)
+        : options.dag
+          ? await prepareDagTask(cwd, run, compiledFlow, index)
           : compiledTask;
 
   try {
@@ -667,19 +668,23 @@ async function prepareRetryTask(
 ): Promise<CompiledWorkflow["tasks"][number]> {
   const compiledTask = compiledFlow.tasks[index]!;
   const task = run.tasks[index]!;
-  const previousTask = index > 0 ? run.tasks[index - 1] : undefined;
-  if (!previousTask) return compiledTask;
+  const retryInstructions = task.outputRetry ? buildJsonOutputRetryInstructions(task) : undefined;
+  const invalidAttempt = task.outputRetry?.attempts ? `${task.files.output}.invalid-attempt-${task.outputRetry.attempts}` : task.files.output;
+  const previousOutput = task.outputRetry
+    ? await readOutputPreview(cwd, invalidAttempt, 1200)
+    : await readOutputPreview(cwd, run.tasks[index - 1]?.files.output ?? task.files.output, 1200);
 
-  const previousOutput = await readOutputPreview(cwd, previousTask.files.output, 1200);
   return {
     ...compiledTask,
     cwd: task.cwd,
     compiledPrompt: [
       compiledTask.compiledPrompt,
+      "# Retry Instructions",
+      retryInstructions || "Retry after previous task failure.",
       "# Previous Retry Attempt",
-      `Previous task: ${previousTask.taskId} (${previousTask.specId})`,
-      `Previous status: ${previousTask.status}/${previousTask.statusDetail}`,
-      `Previous output: ${previousTask.files.output}`,
+      `Previous task: ${task.taskId} (${task.specId})`,
+      `Previous status: ${task.status}/${task.statusDetail}`,
+      `Previous output: ${invalidAttempt}`,
       "Previous output preview:",
       previousOutput || "(empty or unavailable)",
     ].join("\n\n"),

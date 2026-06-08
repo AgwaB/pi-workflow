@@ -277,6 +277,8 @@ test("invalid JSON output schedules one corrective retry and preserves artifacts
       worktree: { enabled: false, path: null, branch: null, baseCwd: null, warning: null },
       backendTaskId: "plan.main",
       paneId: "%1",
+      pid: 12345,
+      startedAt: new Date().toISOString(),
       launchToken: "token-1",
       files: {
         systemPrompt: ".pi/workflows/workflow_unit/stages/plan/tasks/main/system-prompt.md",
@@ -299,6 +301,8 @@ test("invalid JSON output schedules one corrective retry and preserves artifacts
     assert.equal(task.outputRetry.attempts, 1);
     assert.equal(task.outputRetry.requiredKeys.join(","), "item,plan");
     assert.equal(task.paneId, undefined);
+    assert.equal(task.pid, undefined);
+    assert.equal(task.startedAt, undefined);
     assert.equal(task.launchToken, undefined);
     assert.match(readFileSync(`${output}.invalid-attempt-1`, "utf8"), /"item"/);
     assert.equal(JSON.parse(readFileSync(`${result}.invalid-attempt-1`, "utf8")).failureKind, "output_invalid");

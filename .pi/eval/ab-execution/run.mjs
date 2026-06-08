@@ -1012,7 +1012,7 @@ function writeReport(results, resultDir) {
     else if (r.scores.winner === "unscored") blind.push("- winning configured arm: unscored (judge unavailable)");
     for (const key of armKeys(r.task)) {
       const m = r.arms[key].metadata;
-      blind.push(`- configured ${key} ${armLabel(r.task.arms[key])}: status=${m.status} tasks=${m.taskCount} completed=${m.completedTaskCount} failed=${m.failedTaskCount} skipped=${m.skippedTaskCount} blocked=${m.blockedTaskCount}`);
+      blind.push(`- configured ${key} ${armLabel(r.task.arms[key])}: status=${m.status} tasks=${m.taskCount} completed=${m.completedTaskCount} failed=${m.failedTaskCount} skipped=${m.skippedTaskCount} blocked=${m.blockedTaskCount} interrupted=${m.interruptedTaskCount ?? 0}`);
     }
     if (r.task.coverageCriteria) {
       blind.push("- coverage criteria: present; human spot-check required (not machine-gated)");
