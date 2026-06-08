@@ -93,7 +93,37 @@ Additional real Kimi validation after restoring fanout:
 - `workflow_mq4yqpz4_ece5b1`: synthetic dynamic-foreach smoke, completed 4/4 with generated tasks `verify.alpha` and `verify.beta`, and final reduce depending on both.
 - `workflow_mq4y2dq4_c5d8ab`: `deep-review` seeded fixture, completed 9/9 with generated reviewer and devil-advocate foreach tasks.
 
+## Run 3 — restored dynamic fanout quick validation
+
+- Run: `.pi/workflows/workflow_mq4zr1kr_3ae28e`
+- Generated spec: `.tmp/live-validation/deep-research-dynamic-kimi-quick-20260608T091103Z.json`
+- Model: `kimi-coding/kimi-for-coding`
+- Thinking: `high`
+- Result: `completed`
+- Task summary: 24 completed, 0 failed, 0 skipped, 0 interrupted.
+
+Dynamic fanout evidence:
+
+| Stage | Generated/completed tasks |
+| --- | ---: |
+| `plan` | 1/1 |
+| `research-questions` | 5/5: `rq1` ... `rq5` |
+| `normalize-claims` | 1/1 |
+| `verify-claims` | 16/16: `claim-001` ... `claim-016` |
+| `final` | 1/1 |
+
+The final report included `finalReport` and `evidencePacket`. The run verified that restored dynamic fanout now performs multi-question research and per-claim verification in a real Kimi execution.
+
+Observed issue from Run 3:
+
+- `verify-claims.claim-004` completed with a JSON output warning because the verifier produced prose instead of a strict JSON object.
+
+Follow-up fix applied:
+
+- `verify-claims` output now sets `onInvalid: "fail"`, which triggers the existing invalid-output retry path instead of silently recording a warning.
+- The verifier prompt now explicitly forbids prose, markdown fences, commentary, or text outside the JSON object.
+
 Remaining hardening:
 
-1. Run a full `deep-research` max/standard validation with restored fanout when cost/time are acceptable.
+1. Re-run `deep-research` quick/standard only if we need post-fix evidence for the JSON strictness change; the dynamic fanout behavior itself is validated by Run 3.
 2. Keep A/B claims diagnostic; do not generalize one local task to universal workflow superiority.

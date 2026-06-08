@@ -87,10 +87,11 @@
             "claim",
             "status",
             "evidence"
-          ]
+          ],
+          "onInvalid": "fail"
         },
         "each": {
-          "prompt": "Verify this normalized claim against source-backed evidence: ${item}. Prefer primary sources and independent corroboration. Use fetch_content for URLs and scrapling_fetch only as a fallback for known URLs that fetch poorly. Return JSON only with keys id, claim, status, evidence, caveats, confidence, and correctionOrCounterclaim. Preserve the original claim id and claim text. status must be exactly one of: verified, partially_supported, unsupported, conflicting. evidence must be an array of objects with source, url, dateOrYear, quote, and relevance. Use status=unsupported when source evidence is absent. If the original claim is unsupported or overstated but evidence supports a narrower or different claim, include correctionOrCounterclaim."
+          "prompt": "Verify this normalized claim against source-backed evidence: ${item}. Prefer primary sources and independent corroboration. Use fetch_content for URLs and scrapling_fetch only as a fallback for known URLs that fetch poorly. Return JSON only with keys id, claim, status, evidence, caveats, confidence, and correctionOrCounterclaim. Do not include prose, markdown fences, commentary, or text before/after the JSON object. Preserve the original claim id and claim text. status must be exactly one of: verified, partially_supported, unsupported, conflicting. evidence must be an array of objects with source, url, dateOrYear, quote, and relevance. Use status=unsupported when source evidence is absent. If the original claim is unsupported or overstated but evidence supports a narrower or different claim, include correctionOrCounterclaim."
         }
       },
       {
