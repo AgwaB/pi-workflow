@@ -209,6 +209,9 @@ export function canStageProceedAfterPreviousFailure(stage: { sourceStageIds?: st
 
 export async function extractStageFirstForeachItems(cwd: string, stage: any, sourceTasks: any[]): Promise<{ items?: unknown[]; error?: string }> {
   const items: unknown[] = [];
+  const path = stage.from?.path;
+  if (typeof path !== "string" || !path.startsWith("$.")) return { error: "foreach.from.path must be a simple path like $.items" };
+
   for (const task of sourceTasks) {
     if (task.status !== "completed") {
       if (stage.sourcePolicy !== "partial") return { error: `${task.taskId} did not complete` };
@@ -218,9 +221,30 @@ export async function extractStageFirstForeachItems(cwd: string, stage: any, sou
       const { readFile } = await import("node:fs/promises");
       const resultPath = task.files.result.startsWith("/") ? task.files.result : `${cwd}/${task.files.result}`;
       const result = JSON.parse(await readFile(resultPath, "utf8"));
-      const value = result.structuredOutput?.findings ?? result.structuredOutput?.items ?? [];
-      if (Array.isArray(value)) items.push(...value);
-    } catch {}
+      const value = readSimpleJsonPath(result.structuredOutput, path);
+      if (!Array.isArray(value)) {
+        if (stage.sourcePolicy !== "partial") return { error: `${task.taskId} ${path} did not resolve to an array` };
+        continue;
+      }
+      items.push(...value);
+    } catch (error) {
+      if (stage.sourcePolicy !== "partial") return { error: error instanceof Error ? error.message : String(error) };
+    }
   }
+
+  if (typeof stage.maxItems === "number" && items.length > stage.maxItems) {
+    return { error: `foreach extracted ${items.length} items, exceeding maxItems=${stage.maxItems}` };
+  }
+
   return { items };
+}
+
+function readSimpleJsonPath(value: unknown, path: string): unknown {
+  const parts = path.slice(2).split(".").filter(Boolean);
+  let current = value as any;
+  for (const part of parts) {
+    if (current === null || typeof current !== "object" || !(part in current)) return undefined;
+    current = current[part];
+  }
+  return current;
 }

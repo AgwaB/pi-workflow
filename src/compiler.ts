@@ -445,7 +445,15 @@ export async function compileWorkflow(spec: any, options: CompileOptions & { tas
         compiledPrompt,
         injectTask,
         kind: stage.type,
+        stageMaxConcurrency: stage.maxConcurrency,
         dependsOn: [...dependencyKeys],
+        foreach: stage.type === "foreach" ? {
+          from: stage.from,
+          prompt: String(stage.each?.prompt ?? stage.prompt ?? ""),
+          maxItems: stage.maxItems,
+          injectRuntimeTask: injectTask,
+          roleText,
+        } : undefined,
       });
       currentStageTaskKeys.push(key);
     };

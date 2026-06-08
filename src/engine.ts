@@ -4,6 +4,7 @@ import { compileWorkflow, compileWorkflowSpec } from "./compiler.js";
 import { loadWorkflowSpec } from "./schema.js";
 import {
   createRunRecord,
+  createTaskRunRecord,
   compiledWorkflowPath,
   fromProjectPath,
   indexSupervisorErrorPath,
@@ -23,7 +24,8 @@ import {
 } from "./store.js";
 import { launchTmuxTask, refreshRunFromArtifacts } from "./tmux.js";
 import { ensureManagedWorktree } from "./worktree.js";
-import { CompiledWorkflow, STAGE_FIRST_RUN_TYPE, WorkflowIndexRecord, WorkflowRunRecord, WorkflowTaskRunRecord } from "./types.js";
+import { extractStageFirstForeachItems } from "./workflow-runtime.js";
+import { CompiledTask, CompiledWorkflow, STAGE_FIRST_RUN_TYPE, WorkflowIndexRecord, WorkflowRunRecord, WorkflowTaskRunRecord } from "./types.js";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 60_000;
 const MAX_WAIT_TIMEOUT_MS = 1_800_000;
@@ -266,10 +268,166 @@ async function scheduleDag(cwd: string, run: WorkflowRunRecord, compiledFlow: Co
     const task = run.tasks[index];
     const compiledTask = compiledFlow.tasks[index];
     if (!task || !compiledTask || task.status !== "pending") continue;
-    if (!(compiledTask.dependsOn ?? []).every((dep) => bySpecId.get(dep)?.status === "completed")) continue;
+    if (!dependenciesReady(compiledTask, bySpecId, compiledFlow)) continue;
+
+    if (compiledTask.kind === "foreach" && compiledTask.foreach) {
+      const changed = await materializeForeachTask(cwd, run, compiledFlow, index, compiledTask);
+      if (changed) return;
+    }
+
+    if (compiledTask.stageMaxConcurrency !== undefined) {
+      const runningInStage = run.tasks.filter((candidate) => candidate.stageId === compiledTask.stageId && candidate.status === "running").length;
+      if (runningInStage >= Math.max(1, Math.min(MAX_CONCURRENCY, compiledTask.stageMaxConcurrency))) continue;
+    }
+
     const launched = await launchPendingTaskAt(cwd, run, compiledFlow, index, { dag: true });
     if (launched) running += 1;
   }
+}
+
+async function materializeForeachTask(
+  cwd: string,
+  run: WorkflowRunRecord,
+  compiledFlow: CompiledWorkflow,
+  index: number,
+  template: CompiledTask,
+): Promise<boolean> {
+  const templateRunTask = run.tasks[index];
+  if (!templateRunTask || !template.foreach || !template.stageId) return false;
+
+  const sourceStageIds = sourceStageIdsForFrom(template.foreach.from);
+  const sourceTasks = run.tasks.filter((task) => sourceStageIds.includes(task.stageId ?? ""));
+  const extracted = await extractStageFirstForeachItems(cwd, {
+    from: template.foreach.from,
+    sourcePolicy: stageSourcePolicy(compiledFlow, template.stageId),
+    maxItems: template.foreach.maxItems,
+  }, sourceTasks);
+
+  if (extracted.error) {
+    setTaskTerminal(templateRunTask, "blocked", "foreach_expansion_blocked", { lastMessage: extracted.error });
+    await writeRunRecord(cwd, run);
+    return true;
+  }
+
+  const items = extracted.items ?? [];
+  const generated = buildForeachGeneratedTasks(template, compiledFlow.task, items);
+  if (generated.error) {
+    setTaskTerminal(templateRunTask, "blocked", "foreach_expansion_blocked", { lastMessage: generated.error });
+    await writeRunRecord(cwd, run);
+    return true;
+  }
+
+  const placeholderSpecId = template.id;
+  const generatedSpecIds = generated.tasks.map((task) => task.id);
+  compiledFlow.tasks.splice(index, 1, ...generated.tasks);
+  updateDownstreamDependencies(compiledFlow, placeholderSpecId, generatedSpecIds);
+
+  const nextIndex = nextTaskRecordIndex(run);
+  const generatedRunTasks = generated.tasks.map((task, offset) => createTaskRunRecord(cwd, run.runId, task, nextIndex + offset));
+  run.tasks.splice(index, 1, ...generatedRunTasks);
+  for (const task of run.tasks) {
+    if (!task.dependsOn) continue;
+    task.dependsOn = replaceDependencyList(task.dependsOn, placeholderSpecId, generatedSpecIds);
+  }
+
+  await writeJsonAtomic(compiledWorkflowPath(cwd, run.runId), compiledFlow);
+  await writeRunRecord(cwd, run);
+  return true;
+}
+
+function nextTaskRecordIndex(run: WorkflowRunRecord): number {
+  let max = 0;
+  for (const task of run.tasks) {
+    const match = /^task-(\d+)$/.exec(task.taskId);
+    if (match) max = Math.max(max, Number(match[1]));
+  }
+  return max;
+}
+
+function dependenciesReady(compiledTask: CompiledTask, bySpecId: Map<string, WorkflowTaskRunRecord>, compiledFlow: CompiledWorkflow): boolean {
+  const deps = compiledTask.dependsOn ?? [];
+  if (deps.length === 0) return true;
+  const partial = stageSourcePolicy(compiledFlow, compiledTask.stageId ?? "") === "partial";
+  return deps.every((dep) => {
+    const status = bySpecId.get(dep)?.status;
+    if (status === "completed") return true;
+    if (partial && status && isTerminalTaskStatus(status)) return true;
+    return false;
+  });
+}
+
+function buildForeachGeneratedTasks(template: CompiledTask, runtimeTask: string | undefined, items: unknown[]): { tasks: CompiledTask[]; error?: string } {
+  const seen = new Set<string>();
+  const tasks: CompiledTask[] = [];
+  for (const [index, item] of items.entries()) {
+    const taskId = foreachItemTaskId(item, index);
+    if (seen.has(taskId)) return { tasks: [], error: `duplicate foreach generated task id "${taskId}"` };
+    seen.add(taskId);
+    const specId = `${template.stageId}.${taskId}`;
+    const itemText = formatForeachItem(item);
+    const instructions = template.foreach!.prompt.replace(/\$\{item\}/g, itemText);
+    const compiledPrompt = [
+      template.foreach!.injectRuntimeTask && runtimeTask ? `# Task\n\n${runtimeTask}` : undefined,
+      `# Workflow Stage\n\nstage=${template.stageId}\ntype=foreach\nitem=${taskId}`,
+      `# Instructions\n\n${instructions}`,
+      template.foreach!.roleText || undefined,
+    ].filter(Boolean).join("\n\n");
+    tasks.push({
+      ...template,
+      id: specId,
+      key: specId,
+      specId,
+      taskId,
+      task: instructions,
+      compiledPrompt,
+      dependsOn: [...(template.dependsOn ?? [])],
+      foreach: undefined,
+    } as CompiledTask);
+  }
+  return { tasks };
+}
+
+function foreachItemTaskId(item: unknown, index: number): string {
+  if (item && typeof item === "object" && typeof (item as any).id === "string") {
+    const sanitized = sanitizeTaskId((item as any).id);
+    if (sanitized) return sanitized;
+  }
+  return `item-${String(index + 1).padStart(3, "0")}`;
+}
+
+function sanitizeTaskId(value: string): string {
+  return value.trim().toLowerCase().replace(/[^a-z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
+}
+
+function formatForeachItem(item: unknown): string {
+  return typeof item === "string" ? item : JSON.stringify(item);
+}
+
+function sourceStageIdsForFrom(from: unknown): string[] {
+  if (Array.isArray(from)) return from.filter((item): item is string => typeof item === "string");
+  if (typeof from === "string") return [from];
+  if (from && typeof from === "object" && typeof (from as any).stage === "string") return [(from as any).stage];
+  return [];
+}
+
+function stageSourcePolicy(compiledFlow: CompiledWorkflow, stageId: string): string {
+  return ((compiledFlow as any).stages ?? []).find((stage: any) => stage.id === stageId)?.sourcePolicy ?? "require-success";
+}
+
+function updateDownstreamDependencies(compiledFlow: CompiledWorkflow, placeholderSpecId: string, generatedSpecIds: string[]): void {
+  for (const task of compiledFlow.tasks) {
+    if (!task.dependsOn) continue;
+    task.dependsOn = replaceDependencyList(task.dependsOn, placeholderSpecId, generatedSpecIds);
+  }
+}
+
+function replaceDependencyList(dependsOn: string[], placeholderSpecId: string, generatedSpecIds: string[]): string[] {
+  const replaced: string[] = [];
+  for (const dep of dependsOn) {
+    if (dep === placeholderSpecId) replaced.push(...generatedSpecIds);
+    else replaced.push(dep);
+  }
+  return [...new Set(replaced)];
 }
 
 function markDagDependentsSkipped(run: WorkflowRunRecord, compiledFlow: CompiledWorkflow): boolean {
@@ -288,6 +446,7 @@ function markDagDependentsSkipped(run: WorkflowRunRecord, compiledFlow: Compiled
         return status === "failed" || status === "interrupted" || status === "skipped";
       });
       if (!failedDep) continue;
+      if (stageSourcePolicy(compiledFlow, compiledTask.stageId ?? "") === "partial") continue;
       setTaskTerminal(task, "skipped", "skipped_after_dependency_failure", {
         lastMessage: `skipped because dependency ${failedDep} did not complete`,
       });

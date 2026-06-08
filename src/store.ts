@@ -235,7 +235,7 @@ export async function createRunRecord(
   await ensureDir(join(runDir, "tasks"));
 
   const createdAt = nowIso();
-  const tasks = compiled.tasks.map((task, index) => createTaskRecord(cwd, runId, task, index));
+  const tasks = compiled.tasks.map((task, index) => createTaskRunRecord(cwd, runId, task, index));
   const run = deriveRunStatus({
     schemaVersion: 1,
     runId,
@@ -444,7 +444,7 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function createTaskRecord(cwd: string, runId: string, task: CompiledTask, index: number): WorkflowTaskRunRecord {
+export function createTaskRunRecord(cwd: string, runId: string, task: CompiledTask, index: number): WorkflowTaskRunRecord {
   const taskId = `task-${index + 1}`;
   const dir = taskDir(cwd, runId, taskId);
   const files = {
@@ -483,6 +483,10 @@ function createTaskRecord(cwd: string, runId: string, task: CompiledTask, index:
       warning: null,
     },
     backendTaskId: taskId,
+    kind: task.kind,
+    stageId: task.stageId,
+    dependsOn: task.dependsOn,
+    output: task.output,
     files,
     lastMessage: blocked ? task.safety.permission.reason : undefined,
   };

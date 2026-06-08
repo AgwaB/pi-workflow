@@ -170,7 +170,17 @@ export interface CompiledTask {
   outputContract?: string;
   compiledPrompt: string;
   kind?: string;
+  stageId?: string;
+  taskId?: string;
+  stageMaxConcurrency?: number;
   dependsOn?: string[];
+  foreach?: {
+    from: unknown;
+    prompt: string;
+    maxItems?: number;
+    injectRuntimeTask: boolean;
+    roleText?: string;
+  };
 }
 
 export type TaskRunStatus = "pending" | "running" | "blocked" | "completed" | "failed" | "skipped" | "interrupted";
@@ -333,6 +343,7 @@ export interface CompiledWorkflow {
   name?: string;
   description?: string;
   type: CompiledWorkflowType;
+  task?: string;
   cwd: string;
   backend: { type: "local-pi"; mode: "tmux" };
   maxConcurrency: number;

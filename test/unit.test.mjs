@@ -6,12 +6,12 @@ import test from "node:test";
 
 import { parseAgentMarkdown } from "../.tmp/unit/agents.js";
 import { compileWorkflow } from "../.tmp/unit/compiler.js";
-import { formatRun, runWorkflow } from "../.tmp/unit/engine.js";
+import { formatRun, runWorkflow, scheduleRun } from "../.tmp/unit/engine.js";
 import { workflowArgumentCompletions, parseWorkflowRunArgs } from "../.tmp/unit/extension.js";
 import { listWorkflows, recommendWorkflows, resolveWorkflowRef } from "../.tmp/unit/workflow-specs.js";
 import { resolveWorkflowRuntime } from "../.tmp/unit/model-runtime.js";
 import { loadWorkflow, parseWorkflow } from "../.tmp/unit/schema.js";
-import { acquireSupervisorLease, createStageFirstRunRecord, deriveRunStatus, heartbeatSupervisorLease, resolveFlowsCwd, setTaskTerminal, supervisorLeasePath, workflowProcessRoleForTests, workflowSupervisorOwnerIdForTests, writeJsonAtomic } from "../.tmp/unit/store.js";
+import { acquireSupervisorLease, createStageFirstRunRecord, deriveRunStatus, heartbeatSupervisorLease, readRunRecord, resolveFlowsCwd, setTaskTerminal, supervisorLeasePath, workflowProcessRoleForTests, workflowSupervisorOwnerIdForTests, writeJsonAtomic, writeRunRecord, writeStaticRunArtifacts } from "../.tmp/unit/store.js";
 import { WorkflowValidationError, STAGE_FIRST_RUN_TYPE } from "../.tmp/unit/types.js";
 import { applyTaskResultArtifact, buildJsonOutputRetryInstructions, extractJsonOutput, parseJsonOutput } from "../.tmp/unit/result.js";
 import { canStageProceedAfterPreviousFailure, extractStageFirstForeachItems, shouldScheduleAfterStageFailure } from "../.tmp/unit/workflow-runtime.js";
@@ -444,6 +444,108 @@ test("compiler applies explicit stage from dependencies and stage runtime defaul
     assert.equal(byKey["final.main"].runtime.thinking, "high");
     assert.deepEqual(byKey["final.main"].runtime.tools, ["read", "grep"]);
     assert.equal(byKey["final.main"].runtime.maxRuntimeMs, 12345);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("stage-first foreach materializes source array into generated tasks", async () => {
+  const cwd = makeProject();
+  try {
+    writeAgent(cwd, "unit-scout", "read");
+    const spec = workflowSpec("unit-scout", {
+      flow: {
+        stages: [
+          { id: "extract", type: "task", output: { format: "json", requiredKeys: ["claims"] }, prompt: "Extract" },
+          { id: "verify", type: "foreach", inject: true, from: { stage: "extract", path: "$.claims", mode: "concat" }, maxConcurrency: 2, each: { prompt: "Verify ${item}" } },
+          { id: "summary", type: "reduce", from: "verify", prompt: "Summarize" },
+        ],
+      },
+    });
+    const compiled = await compileWorkflow(spec, { cwd, task: "Check claims" });
+    const { run } = await createStageFirstRunRecord(cwd, compiled, join(cwd, "workflows", "unit.json"));
+    await writeStaticRunArtifacts(cwd, run, compiled, spec);
+
+    setTaskTerminal(run.tasks[0], "completed", "completed", { exitCode: 0, lastMessage: "completed" });
+    await writeJsonAtomic(join(cwd, run.tasks[0].files.result), {
+      status: "completed",
+      structuredOutput: { claims: [{ id: "CLAIM_A", text: "A" }, "plain claim"] },
+    });
+    await writeRunRecord(cwd, run);
+
+    await scheduleRun(cwd, run.runId);
+    const materialized = await readRunRecord(cwd, run.runId);
+    const specIds = materialized.tasks.map((task) => task.specId);
+    assert.deepEqual(specIds, ["extract.main", "verify.claim_a", "verify.item-002", "summary.main"]);
+    assert.equal(materialized.tasks.find((task) => task.specId === "verify.claim_a")?.status, "pending");
+    assert.equal(materialized.tasks.find((task) => task.specId === "verify.item-002")?.status, "pending");
+    assert.deepEqual(JSON.parse(readFileSync(join(cwd, ".pi", "workflows", materialized.runId, "compiled.json"), "utf8")).tasks.find((task) => task.id === "summary.main").dependsOn, ["verify.claim_a", "verify.item-002"]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("successive foreach materialization keeps task ids unique", async () => {
+  const cwd = makeProject();
+  try {
+    writeAgent(cwd, "unit-scout", "read");
+    const spec = workflowSpec("unit-scout", {
+      flow: {
+        stages: [
+          { id: "extract", type: "task", output: { format: "json", requiredKeys: ["claims"] }, prompt: "Extract" },
+          { id: "review", type: "foreach", from: { stage: "extract", path: "$.claims" }, each: { prompt: "Review ${item}" } },
+          { id: "verify", type: "foreach", from: { stage: "review", path: "$.findings", mode: "concat" }, each: { prompt: "Verify ${item}" } },
+        ],
+      },
+    });
+    const compiled = await compileWorkflow(spec, { cwd, task: "Check claims" });
+    const { run } = await createStageFirstRunRecord(cwd, compiled, join(cwd, "workflows", "unit.json"));
+    await writeStaticRunArtifacts(cwd, run, compiled, spec);
+    setTaskTerminal(run.tasks[0], "completed", "completed", { exitCode: 0, lastMessage: "completed" });
+    await writeJsonAtomic(join(cwd, run.tasks[0].files.result), { status: "completed", structuredOutput: { claims: ["a", "b"] } });
+    await writeRunRecord(cwd, run);
+
+    await scheduleRun(cwd, run.runId);
+    let current = await readRunRecord(cwd, run.runId);
+    for (const task of current.tasks.filter((item) => item.stageId === "review")) {
+      setTaskTerminal(task, "completed", "completed", { exitCode: 0, lastMessage: "completed" });
+      await writeJsonAtomic(join(cwd, task.files.result), { status: "completed", structuredOutput: { findings: [{ title: `${task.specId}-finding` }] } });
+    }
+    await writeRunRecord(cwd, current);
+
+    await scheduleRun(cwd, run.runId);
+    current = await readRunRecord(cwd, run.runId);
+    const taskIds = current.tasks.map((task) => task.taskId);
+    assert.equal(new Set(taskIds).size, taskIds.length);
+    assert.deepEqual(current.tasks.filter((task) => task.stageId === "verify").map((task) => task.specId), ["verify.item-001", "verify.item-002"]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("stage-first foreach blocks when maxItems is exceeded", async () => {
+  const cwd = makeProject();
+  try {
+    writeAgent(cwd, "unit-scout", "read");
+    const spec = workflowSpec("unit-scout", {
+      flow: {
+        stages: [
+          { id: "extract", type: "task", output: { format: "json", requiredKeys: ["claims"] }, prompt: "Extract" },
+          { id: "verify", type: "foreach", from: { stage: "extract", path: "$.claims" }, maxItems: 1, each: { prompt: "Verify ${item}" } },
+        ],
+      },
+    });
+    const compiled = await compileWorkflow(spec, { cwd, task: "Check claims" });
+    const { run } = await createStageFirstRunRecord(cwd, compiled, join(cwd, "workflows", "unit.json"));
+    await writeStaticRunArtifacts(cwd, run, compiled, spec);
+    setTaskTerminal(run.tasks[0], "completed", "completed", { exitCode: 0, lastMessage: "completed" });
+    await writeJsonAtomic(join(cwd, run.tasks[0].files.result), { status: "completed", structuredOutput: { claims: ["a", "b"] } });
+    await writeRunRecord(cwd, run);
+
+    await scheduleRun(cwd, run.runId);
+    const blocked = await readRunRecord(cwd, run.runId);
+    assert.equal(blocked.tasks[1].status, "blocked");
+    assert.match(blocked.tasks[1].lastMessage, /exceeding maxItems=1/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

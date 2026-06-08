@@ -72,13 +72,28 @@ The bounded run demonstrates that `deep-research` can complete with real Kimi ex
 
 Do not overclaim from this run:
 
-- The current recovered compiler still represents `foreach` stages with a static placeholder task rather than full dynamic fanout.
-- The completed run therefore surfaced coverage gaps explicitly, but it did not execute every planned research question as separate subagent work.
+- This run was completed before full dynamic `foreach` fanout was restored.
+- The completed run surfaced coverage gaps explicitly, but it did not execute every planned research question as separate subagent work.
 - The result is valid evidence of execution readiness and output-shape viability, not proof that the workflow performs exhaustive research.
 
-## Follow-up hardening
+## Dynamic foreach restoration follow-up
 
-1. Restore/complete true dynamic foreach materialization from prior stage JSON arrays.
-2. Add deterministic tests for stage `from` dependencies and `workflow-v1` DAG scheduling.
-3. Add an E2E scenario for non-interactive tmux fallback with no pre-existing tmux server.
-4. Keep A/B claims diagnostic; do not generalize one local task to universal workflow superiority.
+After this validation, dynamic `foreach` fanout was restored with these semantics from the historical workflow model:
+
+- `from.path` reads a simple dot path such as `$.claims` from prior structured output.
+- all extracted items expand into generated tasks;
+- item object `id` values are sanitized into generated task ids, otherwise `item-001` style ids are used;
+- duplicate generated ids block expansion;
+- `maxItems` is optional; when present, overflow blocks; when absent, expansion is unlimited;
+- `maxConcurrency` controls stage concurrency, not item count;
+- downstream dependencies are rewired to all generated item tasks.
+
+Additional real Kimi validation after restoring fanout:
+
+- `workflow_mq4yqpz4_ece5b1`: synthetic dynamic-foreach smoke, completed 4/4 with generated tasks `verify.alpha` and `verify.beta`, and final reduce depending on both.
+- `workflow_mq4y2dq4_c5d8ab`: `deep-review` seeded fixture, completed 9/9 with generated reviewer and devil-advocate foreach tasks.
+
+Remaining hardening:
+
+1. Run a full `deep-research` max/standard validation with restored fanout when cost/time are acceptable.
+2. Keep A/B claims diagnostic; do not generalize one local task to universal workflow superiority.

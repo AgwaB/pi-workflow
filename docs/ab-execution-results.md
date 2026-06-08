@@ -43,6 +43,13 @@ The real Kimi run exposed issues that dry-run/mock checks did not catch:
 
 This evidence is diagnostic only. It shows that the active `deep-review` workflow can run through real Kimi subagents and match the plain baseline on the seeded safety diff. It does not prove that workflows generally outperform plain Pi, nor that the A/B suite is release-grade.
 
+## Dynamic foreach restoration
+
+After this A/B report, `workflow-v1` dynamic `foreach` fanout was restored and validated with real Kimi execution:
+
+- `workflow_mq4yqpz4_ece5b1`: generated `verify.alpha` and `verify.beta`, then reduced over both.
+- `workflow_mq4y2dq4_c5d8ab`: `deep-review` seeded fixture completed 9/9 with generated reviewer/devil-advocate tasks.
+
 ## Related deep-research validation
 
-See `docs/deep-research-validation-20260608.md` for real Kimi `deep-research` runs, including one failed xhigh/stuck final run and one bounded successful run.
+See `docs/deep-research-validation-20260608.md` for real Kimi `deep-research` runs and the dynamic-foreach follow-up evidence.
