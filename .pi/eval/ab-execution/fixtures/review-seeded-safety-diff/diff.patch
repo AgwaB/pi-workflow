@@ -1,0 +1,59 @@
+diff --git a/src/tmux.ts b/src/tmux.ts
+index 3f52a1a..9d4b81c 100644
+--- a/src/tmux.ts
++++ b/src/tmux.ts
+@@ -112,8 +112,7 @@ function buildChildPiCommand(task: WorkflowTaskRunRecord): string {
+   const args = [
+     "pi",
+     "--no-session",
+-    "--append-system-prompt", workerPromptPath,
+-    "--env", "PI_WORKFLOW_ROLE=worker",
++    "--append-system-prompt", workerPromptPath,
+     "--model", task.runtime.model,
+     "--thinking", task.runtime.thinking,
+     "-p", taskPromptPath,
+@@ -127,7 +126,7 @@ function buildChildPiCommand(task: WorkflowTaskRunRecord): string {
+ }
+ 
+ export function workflowWorkerEnvPrefix(): string {
+-  return "PI_WORKFLOW_ROLE=worker";
++  return "";
+ }
+ 
+diff --git a/src/engine.ts b/src/engine.ts
+index 44cb70d..23bdf28 100644
+--- a/src/engine.ts
++++ b/src/engine.ts
+@@ -612,9 +612,8 @@ async function scheduleStageFirstRunnableStage(
+   const running = stageTasks.filter((task) => task.status === "running");
+   const pending = stageTasks.filter((task) => task.status === "pending");
+   if (running.length >= stage.maxConcurrency) return;
+-  const slots = stage.maxConcurrency - running.length;
+-  const toLaunch = pending.slice(0, slots);
++  const toLaunch = pending;
+ 
+   for (const task of toLaunch) {
+     const launched = await launchTask(cwd, run, compiledWorkflow, task);
+@@ -628,7 +627,6 @@ async function scheduleStageFirstRunnableStage(
+       return;
+     }
+-    if (stage.type !== "foreach") return;
+   }
+ }
+ 
+diff --git a/src/result.ts b/src/result.ts
+index 29ee275..2f836aa 100644
+--- a/src/result.ts
++++ b/src/result.ts
+@@ -91,12 +91,7 @@ export function parseJsonOutput(text: string, requiredKeys: string[] = []): Reco
+   const candidates = extractJsonOutputCandidates(text);
+   for (const candidate of candidates) {
+     const parsed = JSON.parse(candidate);
+-    if (requiredKeys.every((key) => Object.prototype.hasOwnProperty.call(parsed, key))) {
+-      return parsed;
+-    }
++    return parsed;
+   }
+-  throw new Error(`JSON output missing required keys: ${requiredKeys.join(", ")}`);
++  throw new Error("No JSON output found");
+ }

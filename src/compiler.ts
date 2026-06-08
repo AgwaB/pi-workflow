@@ -392,20 +392,29 @@ export async function compileWorkflow(spec: any, options: CompileOptions & { tas
     excludedSections: [],
   }));
   const roleText = roles.length ? `# Role Context\n\n${roles.map((r) => `## Role: ${r.name}\n${r.content}`).join("\n\n")}` : "";
+  const defaultModel = options.runtimeDefaults?.model ?? spec.defaults?.model ?? spec.model;
+  const defaultThinking = options.runtimeDefaults?.thinking ?? spec.defaults?.thinking ?? spec.thinking;
   const tasks: any[] = [];
   const stageRecords: any[] = [];
+  let previousStageTaskKeys: string[] = [];
+  const stageTaskKeys = new Map<string, string[]>();
   for (const stage of stages) {
     stageRecords.push({ id: stage.id, type: stage.type, sourcePolicy: stage.sourcePolicy ?? "require-success" });
+    const currentStageTaskKeys: string[] = [];
+    const explicitDependencyKeys = dependencyKeysForStage(stage, stageTaskKeys);
+    const dependencyKeys = explicitDependencyKeys.length > 0 ? explicitDependencyKeys : previousStageTaskKeys;
     const stageAgent = stage.agent ?? agentName;
     const stageInject = stage.inject;
     const defaultInject = stage.type === "task";
     const injectTask = stageInject ?? defaultInject;
-    const addTask = (taskId: string, prompt: string, deferPrompt = false) => {
+    const injectRuntimeTaskInPrompt = stage.type === "foreach" ? false : injectTask;
+    const addTask = (taskId: string, prompt: string) => {
       const key = `${stage.id}.${taskId}`;
-      const compiledPrompt = deferPrompt ? "" : [
-        injectTask && options.task ? `# Task\n\n${options.task}` : undefined,
-        `# Flow Stage\n\nstage=${stage.id}\ntype=${stage.type}`,
-        `# Instructions\n\n${prompt}`,
+      const normalizedPrompt = String(prompt ?? "").replace(/\$\{item\}/g, "the relevant item from the dependency context");
+      const compiledPrompt = [
+        injectRuntimeTaskInPrompt && options.task ? `# Task\n\n${options.task}` : undefined,
+        `# Workflow Stage\n\nstage=${stage.id}\ntype=${stage.type}`,
+        `# Instructions\n\n${normalizedPrompt}`,
         roleText || undefined,
       ].filter(Boolean).join("\n\n");
       tasks.push({
@@ -419,27 +428,36 @@ export async function compileWorkflow(spec: any, options: CompileOptions & { tas
         agentDescription: agent.description,
         agentSystemPrompt: agent.body,
         roleNames: roles.map((r) => r.name),
-        task: prompt,
+        task: normalizedPrompt,
         cwd: options.cwd,
         explicitCwd: false,
         explicitWorktreePolicy: false,
-        runtime: { approvalMode: "non-interactive", model: options.runtimeDefaults?.model, thinking: options.runtimeDefaults?.thinking },
+        runtime: {
+          approvalMode: stage.approvalMode ?? spec.defaults?.approvalMode ?? "non-interactive",
+          model: stage.model ?? defaultModel,
+          thinking: stage.thinking ?? defaultThinking,
+          tools: stage.tools ?? spec.defaults?.tools ?? spec.tools,
+          maxRuntimeMs: stage.maxRuntimeMs ?? spec.defaults?.maxRuntimeMs ?? DEFAULT_MAX_RUNTIME_MS,
+        },
         safety: { readOnlyDeclared: true, capability: "read-only", sharedCwdSafe: true, worktreePolicy: "auto", requiresWorktree: false, permission: { status: "pending" } },
         output: stage.output,
         outputContract: undefined,
         compiledPrompt,
         injectTask,
         kind: stage.type,
-        dependsOn: [],
+        dependsOn: [...dependencyKeys],
       });
+      currentStageTaskKeys.push(key);
     };
     if (stage.type === "parallel" && Array.isArray(stage.tasks)) {
       for (const item of stage.tasks) addTask(item.id ?? `item-${tasks.length + 1}`, item.prompt ?? "");
     } else if (stage.type === "foreach") {
-      addTask("item", stage.each?.prompt ?? stage.prompt ?? "", true);
+      addTask("item", stage.each?.prompt ?? stage.prompt ?? "");
     } else {
       addTask("main", stage.prompt ?? "");
     }
+    previousStageTaskKeys = currentStageTaskKeys;
+    stageTaskKeys.set(stage.id, currentStageTaskKeys);
   }
   return {
     schemaVersion: 1,
@@ -454,6 +472,21 @@ export async function compileWorkflow(spec: any, options: CompileOptions & { tas
     stages: stageRecords,
     tasks,
     warnings: [],
-    budget: { models: options.runtimeDefaults?.model ? [{ model: options.runtimeDefaults.model }] : [], unratedModels: [] },
+    budget: { models: defaultModel ? [{ model: defaultModel }] : [], unratedModels: [] },
   };
+}
+
+function dependencyKeysForStage(stage: any, stageTaskKeys: Map<string, string[]>): string[] {
+  const from = stage.from;
+  if (!from) return [];
+  const stageIds = Array.isArray(from)
+    ? from
+    : typeof from === "string"
+      ? [from]
+      : typeof from.stage === "string"
+        ? [from.stage]
+        : [];
+  const keys: string[] = [];
+  for (const stageId of stageIds) keys.push(...(stageTaskKeys.get(stageId) ?? []));
+  return keys;
 }

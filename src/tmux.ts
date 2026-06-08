@@ -258,10 +258,14 @@ function buildPiArgs(task: CompiledTask, systemPromptFile: string): string[] {
 
 function createTmuxPane(runnerScript: string): { paneId: string; pid?: number } {
   const target = currentTmuxPane();
-  const args = ["split-window", "-d", "-h", "-P", "-F", "#{pane_id}"];
-  if (target) args.push("-t", target);
-  args.push(`bash ${shellQuote(runnerScript)}`);
-  const paneId = tmux(args);
+  const command = `bash ${shellQuote(runnerScript)}`;
+  let paneId: string;
+  if (target) {
+    paneId = tmux(["split-window", "-d", "-h", "-P", "-F", "#{pane_id}", "-t", target, command]);
+  } else {
+    const sessionName = `pi-workflow-${Date.now().toString(36)}-${randomBytes(3).toString("hex")}`;
+    paneId = tmux(["new-session", "-d", "-P", "-F", "#{pane_id}", "-s", sessionName, command]);
+  }
   const pidText = tryTmux(["display-message", "-p", "-t", paneId, "#{pane_pid}"]);
   const pid = Number.parseInt(pidText ?? "", 10);
   return { paneId, pid: Number.isFinite(pid) ? pid : undefined };

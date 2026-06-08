@@ -17,7 +17,7 @@ Out of scope for MVP: interactive skill UX, multi-suite concept, token/cost bill
 ## Runtime facts (verified)
 
 - Pi runs non-interactively as: `pi --offline --no-session ... -e <pkg> -p "/workflow run <ref> <task>"` for schemaVersion 2 workflows (see `e2e-test/run.mjs`).
-- `/workflow run <workflow-or-file> <task>` and `/workflow delegate <agent> <task>` both print a run id (`flow_...`).
+- `/workflow run <workflow-or-file> <task>` prints a workflow run id (`workflow_...`).
 - `/workflow wait <run-id> [timeout-ms]` blocks until terminal.
 - Per-run state: `.pi/workflows/<run-id>/run.json` with `status`, `taskSummary`, `tasks[]`.
 - Each task has `files.output` (output.log), `files.result` (result.json), `stageId`, `kind`, `elapsedMs`, `startedAt`, `completedAt`, `output` contract.

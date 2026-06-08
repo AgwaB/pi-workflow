@@ -10,6 +10,7 @@ export type FastMode = (typeof FAST_MODES)[number];
 export type ApprovalMode = (typeof APPROVAL_MODES)[number];
 export type WorktreePolicy = (typeof WORKTREE_POLICIES)[number];
 export type WorkflowType = (typeof WORKFLOW_TYPES)[number];
+export type CompiledWorkflowType = WorkflowType | typeof STAGE_FIRST_RUN_TYPE;
 
 export interface BackendOptions {
   type?: "local-pi";
@@ -251,7 +252,7 @@ export interface WorkflowRunRecord {
   runId: string;
   name?: string;
   description?: string;
-  type: WorkflowType;
+  type: CompiledWorkflowType;
   status: WorkflowRunStatus;
   taskSummary: TaskSummary;
   cwd: string;
@@ -273,7 +274,7 @@ export interface WorkflowIndexRecord {
   runs: Array<{
     runId: string;
     name?: string;
-    type: WorkflowType;
+    type: CompiledWorkflowType;
     status: WorkflowRunStatus;
     taskSummary: TaskSummary;
     createdAt: string;
@@ -331,7 +332,7 @@ export interface CompiledWorkflow {
   schemaVersion: 1;
   name?: string;
   description?: string;
-  type: WorkflowType;
+  type: CompiledWorkflowType;
   cwd: string;
   backend: { type: "local-pi"; mode: "tmux" };
   maxConcurrency: number;

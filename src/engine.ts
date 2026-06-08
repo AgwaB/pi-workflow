@@ -23,7 +23,7 @@ import {
 } from "./store.js";
 import { launchTmuxTask, refreshRunFromArtifacts } from "./tmux.js";
 import { ensureManagedWorktree } from "./worktree.js";
-import { CompiledWorkflow, WorkflowIndexRecord, WorkflowRunRecord, WorkflowTaskRunRecord } from "./types.js";
+import { CompiledWorkflow, STAGE_FIRST_RUN_TYPE, WorkflowIndexRecord, WorkflowRunRecord, WorkflowTaskRunRecord } from "./types.js";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 60_000;
 const MAX_WAIT_TIMEOUT_MS = 1_800_000;
@@ -122,7 +122,7 @@ export async function scheduleRun(cwd: string, runId: string, compiled?: Compile
 
     if (compiledFlow.type === "chain") {
       await scheduleChain(cwd, run, compiledFlow);
-    } else if (compiledFlow.type === "dag" || compiledFlow.type === "tree") {
+    } else if (compiledFlow.type === "dag" || compiledFlow.type === "tree" || compiledFlow.type === STAGE_FIRST_RUN_TYPE) {
       await scheduleDag(cwd, run, compiledFlow);
     } else if (compiledFlow.type === "retry") {
       await scheduleRetry(cwd, run, compiledFlow);
@@ -374,7 +374,7 @@ async function launchPendingTaskAt(
     });
     await writeRunRecord(cwd, run).catch(() => undefined);
     if (compiledFlow.type === "chain") await skipRemainingChainTasks(cwd, run, index + 1);
-    if (compiledFlow.type === "dag" || compiledFlow.type === "tree") {
+    if (compiledFlow.type === "dag" || compiledFlow.type === "tree" || compiledFlow.type === STAGE_FIRST_RUN_TYPE) {
       markDagDependentsSkipped(run, compiledFlow);
       await writeRunRecord(cwd, run).catch(() => undefined);
     }

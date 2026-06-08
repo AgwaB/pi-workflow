@@ -1,67 +1,48 @@
-# A/B/C Execution Results
+# A/B Execution Results
 
-This document summarizes the latest local execution evaluation after the workflow-v1 runtime, plain-baseline runner updates, answer-key matcher hardening, and structured JSON retry hardening.
+This document records current local diagnostic evaluation evidence for `pi-workflow`. Raw evaluator artifacts live under `.pi/eval/ab-execution/` and are local execution evidence, not packaged release assets.
 
-Raw evaluator artifacts live under `.pi/eval/ab-execution/` and are intentionally local-only.
-
-## Evaluation setup
+## Current active setup
 
 - Runner: `.pi/eval/ab-execution/run.mjs`
 - Task config: `.pi/eval/ab-execution/tasks.json`
-- Judge rubric: `.pi/eval/ab-execution/rubric.md`
-- Model/thinking: `kimi-coding/kimi-for-coding` / `xhigh`
-- Prior stitched suite summary: `.pi/eval/ab-execution/runs/suite-20260606T172500Z/report.md`
-- Latest Kimi xhigh live run: `.pi/eval/ab-execution/runs/run-20260607T054737Z/report.md`
-- Latest Kimi xhigh final rejudge: `.pi/eval/ab-execution/runs/run-20260607T120050Z/report.md`
+- Rubric: `.pi/eval/ab-execution/rubric.md`
+- Judge prompt: `.pi/eval/ab-execution/judge-prompt.md`
+- Execution model: `kimi-coding/kimi-for-coding`
+- Baseline: plain single Pi, with no specialist/persona wrapper
+- Active bundled workflow arms: `deep-research`, `deep-review`
 
-The runner compares execution arms on the same runtime task:
+The runner performs blind judging of anonymized final outputs first, then reveals operational metadata and hidden answer-key coverage where available.
 
-- workflow arm: `/workflow run <workflow> "<task>"`
-- baseline arm: plain single Pi, with no expert/persona wrapper
-- research-only comparison arm: generated `parallel5` researcher fanout plus synthesis
+## Latest real Kimi run
 
-Blind judges score anonymized final outputs independently. Hidden metadata and answer-key coverage are revealed only after blind scoring.
+- Initial real run after workflow-only runner cleanup: `.pi/eval/ab-execution/runs/run-20260608T063453Z/report.md`
+- Final rejudge after the workflow completed and wait handling was fixed: `.pi/eval/ab-execution/runs/run-20260608T070904Z/report.md`
 
-## Latest suite summary
+Task: `review-seeded-safety-diff`
 
-These results combine individual Kimi xhigh runs after structured-output retry hardening. They are not from one atomic all-task runner invocation; expensive/completed tasks were reused or rejudged.
+| Arm | Configured execution | Status | Blind score | Hidden answer-key coverage |
+| --- | --- | --- | --- | --- |
+| A | `workflow:deep-review` | completed, 4/4 tasks | 4.83 | 3/3 |
+| B | `plain:single-pi` | completed, 1/1 task | 4.67 | 3/3 |
 
-| Task | Workflow arm | Baseline arm(s) | Result | Evidence |
-|---|---|---|---|---|
-| `research-agent-evals` | `deep-research` | `plain`, `parallel5` | Top tie: `deep-research` and `parallel5` both 4.83; `plain` 4.50 | `.pi/eval/ab-execution/runs/run-20260606T123421Z` |
-| `review-seeded-safety-diff` | `deep-review` | `plain` | Blind tie 4.83/4.83; answer-key tie 3/3 vs 3/3 after matcher rejudge | `.pi/eval/ab-execution/runs/run-20260606T171918Z` |
-| `migration-plan` | `migration` | `plain` | Blind tie 4.17/4.17; workflow completed after one JSON retry | `.pi/eval/ab-execution/runs/run-20260606T153223Z` |
-| `decision-microservices-monolith` | `decision-debate` | `plain` | `plain` won: 4.83 vs `decision-debate` 4.17 | `.pi/eval/ab-execution/runs/run-20260606T160208Z` |
-| `revise-json-extraction-proposal` | `revise-loop` | `plain` | `revise-loop` won: 3.83 vs 3.50 | `.pi/eval/ab-execution/runs/run-20260606T161124Z` |
+Blind winner: tie. Hidden answer-key winner: tie.
+
+## Bugs found by real execution
+
+The real Kimi run exposed issues that dry-run/mock checks did not catch:
+
+1. Generated workflow spec paths were shell-quoted in a way `/workflow run` could not parse.
+2. A/B report generation referenced a missing `formatMean` helper.
+3. Non-interactive workflow execution failed when no tmux server existed; tmux launch now falls back to a detached session.
+4. Stage-first workflows were being scheduled like flat parallel runs instead of dependency-aware `workflow-v1` runs.
+5. `foreach` placeholder tasks could receive empty prompts after recovery.
+6. `waitForRun()` ignored nonzero `/workflow wait` exits, allowing premature scoring of a still-running workflow.
 
 ## Interpretation
 
-- `deep-research`: competitive with naive `parallel5`; both beat plain by blind score.
-- `deep-review`: seeded objective coverage passed after answer-key matcher broadened to catch valid paraphrases.
-- `migration`: runtime JSON retry hardening fixed the Kimi structured-output failure mode; quality tied plain.
-- `decision-debate`: under this prompt/model, plain outperformed the debate workflow. Treat this as a workflow/test follow-up before using `decision-debate` as positive release evidence.
-- `revise-loop`: modest blind win over plain on a code-oriented revision proposal.
+This evidence is diagnostic only. It shows that the active `deep-review` workflow can run through real Kimi subagents and match the plain baseline on the seeded safety diff. It does not prove that workflows generally outperform plain Pi, nor that the A/B suite is release-grade.
 
-## Validation context
+## Related deep-research validation
 
-Safe validation after runner/runtime hardening:
-
-```bash
-npm test
-PI_WORKFLOW_ROLE=disabled node .pi/eval/ab-execution/run.mjs --self-test
-PI_WORKFLOW_ROLE=disabled node .pi/eval/ab-execution/run.mjs --dry-run
-git diff --check
-```
-
-Results:
-
-- `npm test`: 35/35 passed.
-- Runner self-test: passed.
-- Eval dry-run: passed.
-- `git diff --check`: passed.
-
-## Follow-ups
-
-1. Decide whether `decision-debate` needs workflow prompt/structure hardening or a better scenario before using it as release evidence.
-2. Consider a single clean full-suite run after all runner/answer-key changes, if cost/time are acceptable.
-3. Keep human spot-check for research/revision coverage criteria; they are not machine-gated.
+See `docs/deep-research-validation-20260608.md` for real Kimi `deep-research` runs, including one failed xhigh/stuck final run and one bounded successful run.

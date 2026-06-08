@@ -379,13 +379,13 @@ test("compiler injects runtime task by effective stage policy", async () => {
 
     assert.equal(compiled.schemaVersion, 1);
     const byKey = Object.fromEntries(compiled.tasks.map((task) => [task.key, task]));
-    assert.match(byKey["entry.main"].compiledPrompt, /^# Task\n\nReview feature A\n\n# Flow Stage/);
+    assert.match(byKey["entry.main"].compiledPrompt, /^# Task\n\nReview feature A\n\n# Workflow Stage/);
     assert.equal(byKey["entry.main"].injectTask, true);
     assert.doesNotMatch(byKey["entry-no-inject.main"].compiledPrompt, /# Task/);
     assert.equal(byKey["entry-no-inject.main"].injectTask, false);
     assert.doesNotMatch(byKey["final.main"].compiledPrompt, /# Task/);
     assert.equal(byKey["final.main"].injectTask, false);
-    assert.match(byKey["final-inject.main"].compiledPrompt, /^# Task\n\nReview feature A\n\n# Flow Stage/);
+    assert.match(byKey["final-inject.main"].compiledPrompt, /^# Task\n\nReview feature A\n\n# Workflow Stage/);
     assert.equal(byKey["final-inject.main"].injectTask, true);
     assert.match(byKey["entry.main"].compiledPrompt, /# Instructions\n\nEntry instructions\./);
     assert.match(byKey["entry.main"].compiledPrompt, /# Role Context\n\n## Role: lens\nRole context marker\./);
@@ -410,8 +410,40 @@ test("compiler defers foreach task injection until runtime interpolation", async
 
     assert.equal(compiled.task, "Check ${WORKSPACE} literally");
     assert.equal(compiled.tasks[1].injectTask, true);
+    assert.deepEqual(compiled.tasks[1].dependsOn, ["extract.main"]);
     assert.doesNotMatch(compiled.tasks[1].compiledPrompt, /# Task/);
     assert.doesNotMatch(compiled.tasks[1].compiledPrompt, /WORKSPACE/);
+    assert.match(compiled.tasks[1].compiledPrompt, /Verify the relevant item from the dependency context/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("compiler applies explicit stage from dependencies and stage runtime defaults", async () => {
+  const cwd = makeProject();
+  try {
+    writeAgent(cwd, "unit-scout", "read");
+    const compiled = await compileWorkflow(workflowSpec("unit-scout", {
+      model: "kimi-coding/kimi-for-coding",
+      thinking: "high",
+      tools: ["read", "grep"],
+      defaults: { maxRuntimeMs: 12345 },
+      flow: {
+        stages: [
+          { id: "plan", type: "task", prompt: "Plan" },
+          { id: "research", type: "foreach", from: { stage: "plan", path: "$.questions" }, each: { prompt: "Research ${item}" } },
+          { id: "final", type: "reduce", from: ["plan", "research"], prompt: "Final" },
+        ],
+      },
+    }), { cwd, task: "Research topic" });
+
+    const byKey = Object.fromEntries(compiled.tasks.map((task) => [task.key, task]));
+    assert.deepEqual(byKey["research.item"].dependsOn, ["plan.main"]);
+    assert.deepEqual(byKey["final.main"].dependsOn, ["plan.main", "research.item"]);
+    assert.equal(byKey["final.main"].runtime.model, "kimi-coding/kimi-for-coding");
+    assert.equal(byKey["final.main"].runtime.thinking, "high");
+    assert.deepEqual(byKey["final.main"].runtime.tools, ["read", "grep"]);
+    assert.equal(byKey["final.main"].runtime.maxRuntimeMs, 12345);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
