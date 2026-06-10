@@ -42,6 +42,7 @@ Stage order controls scheduling, but a plain later `task` does **not** automatic
 | `parallel` | Static fan-out | fixed task list -> multiple subagents, bounded concurrency |
 | `foreach` | Dynamic fan-out | read an array from prior JSON output -> one subagent task per item |
 | `reduce` | Fan-in / synthesis | selected prior stage context -> one subagent |
+| `loop` | Bounded repetition | repeat a fixed child stage subgraph each round until a deterministic stop condition |
 
 `reduce` is not an automatic merge function. In the diagrams, **Supervisor** means the workflow runtime that gathers prior subagent outputs and passes bounded source context into a reduce subagent. It is not a user-defined agent.
 
@@ -85,7 +86,7 @@ The package includes built-in workflow definitions in [`workflows/`](./workflows
 
 | Workflow | Shape | Use when |
 |---|---|---|
-| `deep-research` | task -> foreach -> reduce -> foreach -> reduce | Source-backed research, claim verification, citations, or follow-up rounds. |
+| `deep-research` | task -> foreach -> reduce -> foreach -> reduce | Source-backed research, claim verification, and citations. |
 | `deep-review` | task -> foreach -> foreach -> reduce | Panel-style review where findings should be challenged before final synthesis. |
 | `migration` | parallel -> reduce -> foreach -> reduce | Large migration/refactor planning with ordered phases and risks. |
 | `implement` | task -> reduce -> foreach -> reduce | Bounded implementation batches with validation expectations and managed worktrees. |
@@ -128,7 +129,7 @@ The package includes built-in workflow definitions in [`workflows/`](./workflows
 }
 ```
 
-The snippet above is intentionally abbreviated. Runnable workflow definitions also declare prompts, output contracts, source policies, tools, runtime limits, and continuation behavior.
+The snippet above is intentionally abbreviated. Runnable workflow definitions also declare prompts, output contracts, source policies, tools, and runtime limits.
 
 ## Create or customize workflows with `workflow-guide`
 
@@ -172,6 +173,44 @@ Then validate and run:
 ```
 
 The most important authoring rule: stage order only controls scheduling. It does not automatically pass prior output into later `task` stages. Use `foreach.from` for dynamic fan-out and `reduce.from` for source-context fan-in.
+
+## `loop` stages
+
+A `loop` stage repeats a **fixed** child stage subgraph once per round until a deterministic stop condition holds, or until `maxRounds`/no-progress stops it. It is intra-run only: a loop does not start a new workflow run, and it does not choose different stages per round (that is out of scope for v1).
+
+```json
+{
+  "id": "fix-loop",
+  "type": "loop",
+  "maxRounds": 5,
+  "until": {
+    "all": [
+      { "stage": "check", "path": "$.status", "equals": "pass" },
+      { "stage": "check", "path": "$.verdict", "equals": "ACCEPT" }
+    ]
+  },
+  "stages": [
+    { "id": "implement", "type": "task", "agent": "delegate", "readOnly": false, "tools": ["read", "grep", "find", "ls", "edit", "write"], "prompt": "Fix the current round's blocking failures." },
+    { "id": "check", "type": "task", "agent": "scout", "tools": ["read", "grep", "find", "ls", "bash"], "output": { "format": "json", "requiredKeys": ["status", "verdict"] }, "prompt": "Run the approved validation and review the change. Return JSON with status, verdict, blockingFailures, nextHints." }
+  ],
+  "onExhausted": {
+    "id": "loop-summary",
+    "type": "reduce",
+    "prompt": "Summarize remaining failures and recommended human next action. Do not auto-merge."
+  }
+}
+```
+
+Rules and behavior:
+
+- **Child stages** (`stages`) are materialized at runtime with deterministic ids `<loopId>.r01.<childStageId>`, `<loopId>.r02.<childStageId>`, and so on. Round R fully precedes round R+1.
+- **`maxRounds`** is required, a positive integer, capped at 50.
+- **`until`** is required and deterministic (no model judgment). Leaf form is `{ stage, path, equals | notEquals | lengthEquals }`; combinators are `{ all: [...] }` and `{ any: [...] }`. `path` must start with `$.` and is read from that child stage's latest-round JSON output. `stage` must reference a child stage id. A missing path evaluates to false.
+- **No-progress stop**: the loop stops early (`stopped_no_progress`) when the progress metric does not strictly decrease versus the previous round. The default metric is the length of `$.blockingFailures` on the designated check stage; override with `progressPath`.
+- **`onExhausted`** is optional and must be a `reduce` stage. It runs once when the loop exhausts `maxRounds` or stops on no-progress.
+- **Separation rule**: keep the implementer and the validator/reviewer as separate child stages. The engine never merges them; merging reintroduces self-preferential bias.
+- **Worktree**: write-capable child stages share a single managed worktree reused across rounds. There is no auto-merge. On completion the loop records a result (`status`, `roundsUsed`, `worktreePath`, `finalCheck`, `summary`) for a human to merge.
+- Nested `loop` and `foreach` child stages are rejected in v1.
 
 ## Commands
 

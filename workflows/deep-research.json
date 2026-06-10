@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "name": "deep-research",
-  "description": "Planner-driven deep research workflow: plan research questions by depth, fan out question research, normalize/rank claims, verify selected claims, and synthesize a cited report with optional ask continuation.",
+  "description": "Planner-driven deep research workflow: plan research questions by depth, fan out question research, normalize/rank claims, verify selected claims, and synthesize a cited report.",
   "defaults": {
     "maxRuntimeMs": 14400000
   },
@@ -119,27 +119,7 @@
           ],
           "onInvalid": "fail"
         },
-        "continuation": {
-          "mode": "ask",
-          "maxRound": 3,
-          "maxGeneratedTasks": 24,
-          "maxTasksPerRound": 12,
-          "allowedAgents": [
-            "researcher"
-          ],
-          "allowedTools": [
-            "read",
-            "grep",
-            "find",
-            "ls",
-            "web_search",
-            "fetch_content",
-            "get_search_content",
-            "scrapling_fetch"
-          ],
-          "onInvalidGeneratedSpec": "block"
-        },
-        "prompt": "Use Source Stage Context and the runtime task to produce a bounded research report and evidence packet. Treat research and normalized outputs as claims, not truth. The parent session makes decisions; this workflow reports evidence strength. Return JSON only with finalReport and evidencePacket. Be complete but bounded: keep finalReport concise enough to finish in one response, prioritize the strongest evidence, and put lower-priority or unverified material in remainingGaps/evidencePacket instead of expanding indefinitely. finalReport must include summary, coverageSummary, mainFindings, caveatedFindings, contestedAreas, notableUnsupportedClaims, researchScopeCoverage, and remainingGaps. evidencePacket must include claims: the canonical audit trail of verified, partially_supported, conflicting, unsupported, and preserved/unverified claims with ids, status, sourceUrls/evidence, caveats, and correctionOrCounterclaim when present. Gate evidence strength strictly: verified claims are eligible for mainFindings; partially_supported claims go to caveatedFindings; conflicting claims go to contestedAreas; unsupported claims go to notableUnsupportedClaims; preserved/unverified material remains in evidencePacket and remainingGaps, not mainFindings. Every synthesized finding must reference supporting claim ids. Include source URLs/titles in evidencePacket and representative citations in finalReport. coverageSummary must count depth, researchQuestions, rawClaimsApprox, verificationCandidates, verified, partiallySupported, unsupported, conflicting, preserved, and coverageGaps. Respect plan.depth: quick should be compact; standard should be balanced; max should favor coverage and explicitly discuss gaps. Include a bounded nextWorkflow only when a meaningful blocking evidence gap remains; otherwise omit nextWorkflow."
+        "prompt": "Use Source Stage Context and the runtime task to produce a bounded research report and evidence packet. Treat research and normalized outputs as claims, not truth. The parent session makes decisions; this workflow reports evidence strength. Return JSON only with finalReport and evidencePacket. Be complete but bounded: keep finalReport concise enough to finish in one response, prioritize the strongest evidence, and put lower-priority or unverified material in remainingGaps/evidencePacket instead of expanding indefinitely. finalReport must include summary, coverageSummary, mainFindings, caveatedFindings, contestedAreas, notableUnsupportedClaims, researchScopeCoverage, and remainingGaps. evidencePacket must include claims: the canonical audit trail of verified, partially_supported, conflicting, unsupported, and preserved/unverified claims with ids, status, sourceUrls/evidence, caveats, and correctionOrCounterclaim when present. Gate evidence strength strictly: verified claims are eligible for mainFindings; partially_supported claims go to caveatedFindings; conflicting claims go to contestedAreas; unsupported claims go to notableUnsupportedClaims; preserved/unverified material remains in evidencePacket and remainingGaps, not mainFindings. Every synthesized finding must reference supporting claim ids. Include source URLs/titles in evidencePacket and representative citations in finalReport. coverageSummary must count depth, researchQuestions, rawClaimsApprox, verificationCandidates, verified, partiallySupported, unsupported, conflicting, preserved, and coverageGaps. Respect plan.depth: quick should be compact; standard should be balanced; max should favor coverage and explicitly discuss gaps."
       }
     ]
   },
@@ -147,7 +127,6 @@
     "useWhen": [
       "deep research with claim verification",
       "planner-driven research fanout",
-      "optional follow-up research rounds",
       "synthesize verified claims"
     ],
     "avoidWhen": [

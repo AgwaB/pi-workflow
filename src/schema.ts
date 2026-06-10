@@ -423,8 +423,43 @@ export const loadWorkflow = loadWorkflowSpec;
 export const parseWorkflow = parseWorkflowSpecCompat;
 
 
+const STAGE_FIRST_LOOP_MAX_ROUNDS = 50;
+const STAGE_FIRST_OUTPUT_FORMATS = ["text", "json", "markdown"] as const;
+const STAGE_FIRST_OUTPUT_ON_INVALID = ["fail", "warn"] as const;
+const STAGE_FIRST_OUTPUT_KEYS = new Set(["format", "requiredKeys", "onInvalid"]);
+const STAGE_FIRST_LOOP_STAGE_KEYS = new Set([
+  "id",
+  "type",
+  "stages",
+  "maxRounds",
+  "until",
+  "progressPath",
+  "onExhausted",
+  "prompt",
+  "agent",
+  "role",
+  "cwd",
+  "model",
+  "thinking",
+  "fast",
+  "approvalMode",
+  "tools",
+  "readOnly",
+  "worktreePolicy",
+  "maxRuntimeMs",
+  "maxConcurrency",
+  "from",
+  "sourcePolicy",
+  "sourceContext",
+  "inject",
+  "output",
+  "outputContract",
+  "dependsOn",
+]);
+const STAGE_FIRST_UNTIL_KEYS = new Set(["stage", "path", "equals", "notEquals", "lengthEquals", "all", "any"]);
+
 function isStageFirstSpec(value: unknown): value is any {
-  return Boolean(value && typeof value === "object" && (value as any).workflow?.stages || (value as any).flow?.stages);
+  return Boolean(value && typeof value === "object" && ((value as any).workflow?.stages || (value as any).flow?.stages));
 }
 
 export function parseStageFirstWorkflowSpec(value: unknown): any {
@@ -433,19 +468,175 @@ export function parseStageFirstWorkflowSpec(value: unknown): any {
   const stages = spec.workflow?.stages ?? spec.flow?.stages;
   if (spec.schemaVersion !== 1) throw new WorkflowValidationError([{ path: "$.schemaVersion", message: "must be exactly 1" }]);
   if (!Array.isArray(stages)) throw new WorkflowValidationError([{ path: "$.workflow.stages", message: "must be an array" }]);
-  for (const [index, stage] of stages.entries()) {
-    if (!stage || typeof stage !== "object") throw new WorkflowValidationError([{ path: `$.workflow.stages[${index}]`, message: "must be an object" }]);
-    if (stage.type === "parallel" && Array.isArray(stage.tasks)) {
-      for (const [taskIndex, task] of stage.tasks.entries()) {
-        if (task?.inject !== undefined) throw new WorkflowValidationError([{ path: `$.workflow.stages[${index}].tasks[${taskIndex}].inject`, message: "unknown field" }]);
-      }
-    }
-    if (stage.type === "foreach" && stage.each?.inject !== undefined) {
-      throw new WorkflowValidationError([{ path: `$.workflow.stages[${index}].each.inject`, message: "unknown field" }]);
-    }
+  for (const [index, stageValue] of stages.entries()) {
+    const stagePath = `$.workflow.stages[${index}]`;
+    const stage = requireStageFirstObject(stageValue, stagePath);
+    validateStageFirstStage(stage, stagePath);
+    if (stage.type === "loop") validateStageFirstLoopStage(stage, stagePath);
   }
   if (!spec.workflow && spec.flow?.stages) return { ...spec, workflow: { stages: spec.flow.stages } };
   return spec;
+}
+
+function requireStageFirstObject(value: unknown, path: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new WorkflowValidationError([{ path, message: "must be an object" }]);
+  }
+  return value as Record<string, unknown>;
+}
+
+function validateStageFirstStage(stage: Record<string, unknown>, path: string): void {
+  if (stage.continuation !== undefined) throw new WorkflowValidationError([{ path: `${path}.continuation`, message: "unknown field" }]);
+  if (stage.fast === "on") throw new WorkflowValidationError([{ path: `${path}.fast`, message: '"on" is not supported for workflow stages' }]);
+  if (stage.output !== undefined) validateStageFirstOutput(stage.output, `${path}.output`);
+  if (stage.sourceContext !== undefined) validateStageFirstSourceContext(stage.sourceContext, `${path}.sourceContext`);
+
+  if (stage.type === "parallel" && Array.isArray(stage.tasks)) {
+    for (const [taskIndex, taskValue] of stage.tasks.entries()) {
+      const task = taskValue && typeof taskValue === "object" && !Array.isArray(taskValue) ? taskValue as Record<string, unknown> : undefined;
+      if (task?.inject !== undefined) throw new WorkflowValidationError([{ path: `${path}.tasks[${taskIndex}].inject`, message: "unknown field" }]);
+    }
+  }
+
+  const each = stage.each;
+  if (stage.type === "foreach" && each && typeof each === "object" && !Array.isArray(each) && (each as Record<string, unknown>).inject !== undefined) {
+    throw new WorkflowValidationError([{ path: `${path}.each.inject`, message: "unknown field" }]);
+  }
+}
+
+function validateStageFirstOutput(value: unknown, path: string): void {
+  const output = requireStageFirstObject(value, path);
+  rejectUnknownStageFirstKeys(output, STAGE_FIRST_OUTPUT_KEYS, path);
+
+  if (output.format === undefined) throw new WorkflowValidationError([{ path: `${path}.format`, message: "is required" }]);
+  if (!STAGE_FIRST_OUTPUT_FORMATS.includes(output.format as never)) {
+    throw new WorkflowValidationError([{ path: `${path}.format`, message: `must be one of: ${STAGE_FIRST_OUTPUT_FORMATS.join(", ")}` }]);
+  }
+  if (output.requiredKeys !== undefined) validateStageFirstStringArray(output.requiredKeys, `${path}.requiredKeys`);
+  if (output.onInvalid !== undefined && !STAGE_FIRST_OUTPUT_ON_INVALID.includes(output.onInvalid as never)) {
+    throw new WorkflowValidationError([{ path: `${path}.onInvalid`, message: `must be one of: ${STAGE_FIRST_OUTPUT_ON_INVALID.join(", ")}` }]);
+  }
+}
+
+function validateStageFirstSourceContext(value: unknown, path: string): void {
+  if (typeof value === "boolean") return;
+  requireStageFirstObject(value, path);
+}
+
+function validateStageFirstStringArray(value: unknown, path: string): void {
+  if (!Array.isArray(value)) throw new WorkflowValidationError([{ path, message: "must be an array" }]);
+
+  const seen = new Set<string>();
+  for (const [index, item] of value.entries()) {
+    if (typeof item !== "string" || item.trim() === "") {
+      throw new WorkflowValidationError([{ path: `${path}[${index}]`, message: "must be a non-empty string" }]);
+    }
+    if (seen.has(item)) throw new WorkflowValidationError([{ path: `${path}[${index}]`, message: `duplicate value "${item}"` }]);
+    seen.add(item);
+  }
+}
+
+function validateStageFirstLoopStage(stage: Record<string, unknown>, path: string): void {
+  rejectUnknownStageFirstKeys(stage, STAGE_FIRST_LOOP_STAGE_KEYS, path);
+
+  if (stage.stages === undefined) throw new WorkflowValidationError([{ path: `${path}.stages`, message: "is required" }]);
+  if (!Array.isArray(stage.stages)) throw new WorkflowValidationError([{ path: `${path}.stages`, message: "must be an array" }]);
+  if (stage.stages.length < 1) throw new WorkflowValidationError([{ path: `${path}.stages`, message: "must contain at least one stage" }]);
+
+  const childStageIds = new Set<string>();
+  for (const [childIndex, childValue] of stage.stages.entries()) {
+    const childPath = `${path}.stages[${childIndex}]`;
+    const childStage = requireStageFirstObject(childValue, childPath);
+    if (childStage.type === "loop") throw new WorkflowValidationError([{ path: `${childPath}.type`, message: "loop nesting is not supported in v1" }]);
+    if (childStage.type === "foreach") throw new WorkflowValidationError([{ path: `${childPath}.type`, message: "foreach child stages are deferred for loop v1" }]);
+    validateStageFirstStage(childStage, childPath);
+    if (typeof childStage.id === "string" && childStage.id.trim() !== "") childStageIds.add(childStage.id);
+  }
+
+  validateStageFirstLoopMaxRounds(stage.maxRounds, `${path}.maxRounds`);
+
+  if (stage.until === undefined) throw new WorkflowValidationError([{ path: `${path}.until`, message: "is required" }]);
+  validateStageFirstUntilCondition(stage.until, `${path}.until`, childStageIds);
+
+  if (stage.progressPath !== undefined && (typeof stage.progressPath !== "string" || !stage.progressPath.startsWith("$."))) {
+    throw new WorkflowValidationError([{ path: `${path}.progressPath`, message: "must be a string starting with $." }]);
+  }
+
+  if (stage.onExhausted !== undefined) {
+    const onExhausted = requireStageFirstObject(stage.onExhausted, `${path}.onExhausted`);
+    validateStageFirstStage(onExhausted, `${path}.onExhausted`);
+    if (onExhausted.type !== "reduce") {
+      throw new WorkflowValidationError([{ path: `${path}.onExhausted.type`, message: 'must be "reduce"' }]);
+    }
+  }
+}
+
+function validateStageFirstLoopMaxRounds(value: unknown, path: string): void {
+  if (value === undefined) throw new WorkflowValidationError([{ path, message: "is required" }]);
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+    throw new WorkflowValidationError([{ path, message: "must be a positive integer" }]);
+  }
+  if (value > STAGE_FIRST_LOOP_MAX_ROUNDS) {
+    throw new WorkflowValidationError([{ path, message: `must be less than or equal to ${STAGE_FIRST_LOOP_MAX_ROUNDS}` }]);
+  }
+}
+
+function validateStageFirstUntilCondition(value: unknown, path: string, childStageIds: Set<string>): void {
+  const condition = requireStageFirstObject(value, path);
+  rejectUnknownStageFirstKeys(condition, STAGE_FIRST_UNTIL_KEYS, path);
+
+  const hasAll = condition.all !== undefined;
+  const hasAny = condition.any !== undefined;
+  const combinatorCount = Number(hasAll) + Number(hasAny);
+  const operatorKeys = ["equals", "notEquals", "lengthEquals"].filter((key) => condition[key] !== undefined);
+  const hasLeafField = condition.stage !== undefined || condition.path !== undefined || operatorKeys.length > 0;
+
+  if (combinatorCount > 0) {
+    if (combinatorCount > 1 || hasLeafField) {
+      throw new WorkflowValidationError([{ path, message: "must be either a leaf condition or a single all/any combinator" }]);
+    }
+    const key = hasAll ? "all" : "any";
+    const items = condition[key];
+    if (!Array.isArray(items)) throw new WorkflowValidationError([{ path: `${path}.${key}`, message: "must be an array" }]);
+    if (items.length < 1) throw new WorkflowValidationError([{ path: `${path}.${key}`, message: "must contain at least one condition" }]);
+    for (const [index, item] of items.entries()) validateStageFirstUntilCondition(item, `${path}.${key}[${index}]`, childStageIds);
+    return;
+  }
+
+  if (operatorKeys.length !== 1) {
+    throw new WorkflowValidationError([{ path, message: "leaf condition must define exactly one of equals, notEquals, or lengthEquals" }]);
+  }
+
+  if (typeof condition.stage !== "string" || condition.stage.trim() === "") {
+    throw new WorkflowValidationError([{ path: `${path}.stage`, message: "must be a non-empty string" }]);
+  }
+  if (!childStageIds.has(condition.stage)) {
+    throw new WorkflowValidationError([{ path: `${path}.stage`, message: `unknown child stage reference "${condition.stage}"` }]);
+  }
+
+  if (typeof condition.path !== "string" || !condition.path.startsWith("$.")) {
+    throw new WorkflowValidationError([{ path: `${path}.path`, message: "must be a string starting with $." }]);
+  }
+
+  const operator = operatorKeys[0]!;
+  const operatorValue = condition[operator];
+  if (operator === "lengthEquals") {
+    if (typeof operatorValue !== "number" || !Number.isInteger(operatorValue) || operatorValue < 0) {
+      throw new WorkflowValidationError([{ path: `${path}.lengthEquals`, message: "must be an integer greater than or equal to 0" }]);
+    }
+    return;
+  }
+
+  const valueType = typeof operatorValue;
+  if (valueType !== "string" && valueType !== "number" && valueType !== "boolean") {
+    throw new WorkflowValidationError([{ path: `${path}.${operator}`, message: "must be a string, number, or boolean" }]);
+  }
+}
+
+function rejectUnknownStageFirstKeys(object: Record<string, unknown>, allowedKeys: Set<string>, path: string): void {
+  for (const key of Object.keys(object)) {
+    if (!allowedKeys.has(key)) throw new WorkflowValidationError([{ path: `${path}.${jsonKey(key)}`, message: "unknown field" }]);
+  }
 }
 
 const originalParseWorkflowSpec = parseWorkflowSpec;

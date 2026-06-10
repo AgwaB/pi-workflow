@@ -246,9 +246,8 @@ export class WorkflowView implements Component {
     const blocked = this.flows.filter((flow) => flow.status === "blocked").length;
     const failed = this.flows.filter((flow) => flow.status === "failed" || flow.status === "interrupted").length;
     const completed = this.flows.filter((flow) => flow.status === "completed").length;
-    const approval = this.flows.filter((flow) => flow.continuation?.status === "awaiting_approval").length;
     const lines = [
-      `${chip(this.theme, "mode", this.mode === "task" ? "detail" : this.mode, "accent")} ${chip(this.theme, "running", String(active), "accent")} ${chip(this.theme, "blocked", String(blocked), "warning")} ${chip(this.theme, "failed", String(failed), "error")} ${chip(this.theme, "done", String(completed), "success")}${approval > 0 ? ` ${chip(this.theme, "approval", String(approval), "warning")}` : ""}`,
+      `${chip(this.theme, "mode", this.mode === "task" ? "detail" : this.mode, "accent")} ${chip(this.theme, "running", String(active), "accent")} ${chip(this.theme, "blocked", String(blocked), "warning")} ${chip(this.theme, "failed", String(failed), "error")} ${chip(this.theme, "done", String(completed), "success")}`,
       `${metaLabel(this.theme, "path")} ${metaValue(this.theme, this.breadcrumbText())} ${muted(this.theme, "·")} ${metaLabel(this.theme, "source")} ${pathText(this.theme, `${this.cwd}/.pi/workflows/index.json`)}`,
     ];
     return [...boxed(this.theme, "✦ Flow Board", width, lines, "borderAccent"), ""];
@@ -260,7 +259,6 @@ export class WorkflowView implements Component {
       accent(this.theme, "All runs"),
       kvRow(this.theme, "total", String(this.flows.length)),
       kvRow(this.theme, "running", String(this.flows.filter((flow) => flow.status === "running").length)),
-      kvRow(this.theme, "approval", String(this.flows.filter((flow) => flow.continuation?.status === "awaiting_approval").length)),
       "",
       accent(this.theme, "Selected"),
       ...(selected ? this.runSummaryLines(selected) : [placeholder(this.theme, "none")]),
@@ -500,7 +498,6 @@ export class WorkflowView implements Component {
       commandLine(this.theme, `/workflow logs ${run.runId} ${task.taskId}`),
       commandLine(this.theme, `/workflow wait ${run.runId} 60000`),
     ];
-    if (run.continuation?.status === "awaiting_approval") lines.push(commandLine(this.theme, `/workflow continue ${run.runId}`));
     if (task.backendHandle?.display) lines.push("", accent(this.theme, "Backend"), metaValue(this.theme, task.backendHandle.display));
     return lines.map((line) => fit(line, width));
   }
@@ -645,11 +642,6 @@ export class WorkflowView implements Component {
         lines.push(taskMetaLine(this.theme, [[item.stageId, `expanded=${item.expandedCount}`], ["max", String(item.maxConcurrency)]]));
       }
     }
-    if (run.continuation) {
-      lines.push("", accent(this.theme, "Continuation"));
-      lines.push(taskMetaLine(this.theme, [["status", run.continuation.status], ["stage", run.continuation.stageId]]));
-      if (run.continuation.childRunId) lines.push(kvRow(this.theme, "child", run.continuation.childRunId));
-    }
     return lines;
   }
 
@@ -658,8 +650,6 @@ export class WorkflowView implements Component {
     const lines = [kvRow(this.theme, "run", shortId(run.runId))];
     if (stageId) lines.push(kvRow(this.theme, "stage", stageId));
     if (run.fanout?.some((item) => item.stageId === stageId)) lines.push(warning(this.theme, "fanout stage"));
-    const continuation = run.continuation;
-    if (continuation && continuation.stageId === stageId) lines.push(warning(this.theme, `continuation ${continuation.status}`));
     return lines;
   }
 
@@ -725,7 +715,6 @@ function runToSummary(cwd: string, run: WorkflowRunRecord): WorkflowSummary {
     parentRunId: run.parentRunId,
     rootRunId: run.rootRunId,
     round: run.round,
-    continuation: run.continuation,
     fanout: run.fanout,
     tasks: run.tasks.map((task) => ({
       taskId: task.taskId,
@@ -876,9 +865,6 @@ function statusText(status: WorkflowRunStatus | TaskRunStatus): string {
 }
 
 function runStatusLabel(flow: WorkflowSummary): string {
-  if (flow.continuation?.status === "awaiting_approval") return "approval";
-  if (flow.continuation?.status === "invalid_generated_spec") return "invalid spec";
-  if (flow.continuation?.status === "continued") return "continued";
   return statusText(flow.status);
 }
 

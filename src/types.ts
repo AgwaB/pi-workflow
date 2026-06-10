@@ -150,6 +150,66 @@ export interface CompiledTaskSafety {
   permission: PermissionPreview;
 }
 
+export type LoopUntilCondition =
+  | { stage: string; path: string; equals: string | number | boolean }
+  | { stage: string; path: string; notEquals: string | number | boolean }
+  | { stage: string; path: string; lengthEquals: number }
+  | { all: LoopUntilCondition[] }
+  | { any: LoopUntilCondition[] };
+
+export type LoopResultStatus = "completed" | "exhausted" | "stopped_no_progress";
+
+export interface CompiledLoopChildTaskRef {
+  loopId: string;
+  round: number;
+  roundTag: string;
+  childStageId: string;
+  childTaskId: string;
+  firstChildStage: boolean;
+}
+
+export interface CompiledLoopStageRecord {
+  id: string;
+  type: "loop";
+  sourcePolicy?: string;
+  maxRounds: number;
+  until: LoopUntilCondition;
+  childStageIds: string[];
+  childTemplates: CompiledTask[];
+  childStageRecords?: Array<{ id: string; type?: string; sourcePolicy?: string }>;
+  onExhausted?: {
+    stageId: string;
+    template: CompiledTask;
+  };
+  progressPath?: string;
+  progressStageId?: string;
+}
+
+export interface LoopStateRecord {
+  loopId: string;
+  round: number;
+  status?: LoopResultStatus;
+  awaitingOnExhausted?: boolean;
+  onExhaustedSpecId?: string;
+  updatedAt?: string;
+}
+
+export interface LoopWorktreeRecord {
+  loopId: string;
+  path: string;
+  branch: string | null;
+  baseCwd: string | null;
+}
+
+export interface LoopResultRecord {
+  loopId: string;
+  status: LoopResultStatus;
+  roundsUsed: number;
+  worktreePath: string | null;
+  finalCheck?: unknown;
+  summary: string;
+}
+
 export interface CompiledTask {
   id: string;
   agent: string;
@@ -180,6 +240,14 @@ export interface CompiledTask {
     maxItems?: number;
     injectRuntimeTask: boolean;
     roleText?: string;
+  };
+  loopChild?: CompiledLoopChildTaskRef;
+  loopPlaceholder?: {
+    loopId: string;
+  };
+  loopExhausted?: {
+    loopId: string;
+    status: LoopResultStatus;
   };
 }
 
@@ -270,8 +338,10 @@ export interface WorkflowRunRecord {
   parentRunId?: string;
   rootRunId?: string;
   round?: number;
-  continuation?: WorkflowContinuationRecord;
   fanout?: unknown[];
+  loopStates?: LoopStateRecord[];
+  loopWorktrees?: LoopWorktreeRecord[];
+  loopResults?: LoopResultRecord[];
   createdAt: string;
   updatedAt: string;
   specPath: string;
@@ -293,7 +363,6 @@ export interface WorkflowIndexRecord {
     parentRunId?: string;
     rootRunId?: string;
     round?: number;
-    continuation?: WorkflowContinuationRecord;
     fanout?: unknown[];
     tasks: Array<{
       taskId: string;
@@ -326,12 +395,6 @@ export interface WorkflowTaskOutputValidationRecord {
   structured: boolean;
 }
 
-export interface WorkflowContinuationRecord {
-  status?: string;
-  mode?: string;
-  [key: string]: unknown;
-}
-
 export interface WorktreeSnapshotRecord {
   files?: string[];
   hash?: string;
@@ -349,5 +412,6 @@ export interface CompiledWorkflow {
   maxConcurrency: number;
   roles: CompiledRole[];
   tasks: CompiledTask[];
+  stages?: Array<Record<string, unknown> | CompiledLoopStageRecord>;
   warnings: string[];
 }

@@ -25,8 +25,18 @@ import {
 import { launchTmuxTask, refreshRunFromArtifacts } from "./tmux.js";
 import { ensureManagedWorktree } from "./worktree.js";
 import { buildJsonOutputRetryInstructions } from "./result.js";
-import { extractStageFirstForeachItems } from "./workflow-runtime.js";
-import { CompiledTask, CompiledWorkflow, STAGE_FIRST_RUN_TYPE, WorkflowIndexRecord, WorkflowRunRecord, WorkflowTaskRunRecord } from "./types.js";
+import { extractStageFirstForeachItems, readSimpleJsonPath } from "./workflow-runtime.js";
+import {
+  CompiledTask,
+  CompiledWorkflow,
+  LoopResultStatus,
+  LoopStateRecord,
+  LoopUntilCondition,
+  STAGE_FIRST_RUN_TYPE,
+  WorkflowIndexRecord,
+  WorkflowRunRecord,
+  WorkflowTaskRunRecord,
+} from "./types.js";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 60_000;
 const MAX_WAIT_TIMEOUT_MS = 14_400_000;
@@ -34,6 +44,8 @@ const POLL_INTERVAL_MS = 1_000;
 const LOG_LINES_DEFAULT = 80;
 const LOG_LINES_MAX = 400;
 const MAX_CONCURRENCY = 16;
+const LOOP_CARRY_FORWARD_MAX_CHARS = 4000;
+const LOOP_SUMMARY_MAX_CHARS = 1200;
 
 const supervisorTimers = new Map<string, ReturnType<typeof setInterval>>();
 
@@ -271,6 +283,12 @@ async function scheduleDag(cwd: string, run: WorkflowRunRecord, compiledFlow: Co
     if (!task || !compiledTask || task.status !== "pending") continue;
     if (!dependenciesReady(compiledTask, bySpecId, compiledFlow)) continue;
 
+    if (compiledTask.kind === "loop" && compiledTask.loopPlaceholder) {
+      const changed = await scheduleLoop(cwd, run, compiledFlow, index, compiledTask);
+      if (changed) return;
+      continue;
+    }
+
     if (compiledTask.kind === "foreach" && compiledTask.foreach) {
       const changed = await materializeForeachTask(cwd, run, compiledFlow, index, compiledTask);
       if (changed) return;
@@ -334,6 +352,537 @@ async function materializeForeachTask(
   await writeJsonAtomic(compiledWorkflowPath(cwd, run.runId), compiledFlow);
   await writeRunRecord(cwd, run);
   return true;
+}
+
+async function scheduleLoop(
+  cwd: string,
+  run: WorkflowRunRecord,
+  compiledFlow: CompiledWorkflow,
+  placeholderIndex: number,
+  placeholder: CompiledTask,
+): Promise<boolean> {
+  const loopId = placeholder.loopPlaceholder?.loopId ?? placeholder.stageId;
+  if (!loopId) return false;
+  const loopStage = findLoopStageRecord(compiledFlow, loopId);
+  const placeholderRunTask = run.tasks[placeholderIndex];
+  if (!loopStage || !placeholderRunTask) return false;
+
+  const state = getLoopState(run, loopId);
+  if (state?.awaitingOnExhausted) {
+    const exhaustedTask = findLoopExhaustedRunTask(run, compiledFlow, loopId);
+    if (exhaustedTask && !isTerminalTaskStatus(exhaustedTask.status)) return false;
+    await finalizeLoop(cwd, run, compiledFlow, placeholderRunTask, loopStage, state.status ?? "exhausted", state.round || latestLoopRound(compiledFlow, loopId));
+    return true;
+  }
+
+  const currentRound = latestLoopRound(compiledFlow, loopId);
+  if (currentRound === 0) {
+    await materializeLoopRound(cwd, run, compiledFlow, placeholderIndex, placeholder, loopStage, 1);
+    return true;
+  }
+
+  const roundTasks = getLoopRoundRunTasks(run, compiledFlow, loopId, currentRound);
+  if (roundTasks.length === 0) return false;
+  if (roundTasks.some((task) => !isTerminalTaskStatus(task.status))) return false;
+
+  if (await evaluateLoopUntilCondition(cwd, run, compiledFlow, loopId, currentRound, loopStage.until)) {
+    await finalizeLoop(cwd, run, compiledFlow, placeholderRunTask, loopStage, "completed", currentRound);
+    return true;
+  }
+
+  if (currentRound >= loopStage.maxRounds) {
+    await stopLoopOrRunOnExhausted(cwd, run, compiledFlow, placeholderRunTask, loopStage, "exhausted", currentRound);
+    return true;
+  }
+
+  if (await loopHasNoProgress(cwd, run, compiledFlow, loopStage, loopId, currentRound)) {
+    await stopLoopOrRunOnExhausted(cwd, run, compiledFlow, placeholderRunTask, loopStage, "stopped_no_progress", currentRound);
+    return true;
+  }
+
+  await materializeLoopRound(cwd, run, compiledFlow, placeholderIndex, placeholder, loopStage, currentRound + 1);
+  return true;
+}
+
+async function stopLoopOrRunOnExhausted(
+  cwd: string,
+  run: WorkflowRunRecord,
+  compiledFlow: CompiledWorkflow,
+  placeholderRunTask: WorkflowTaskRunRecord,
+  loopStage: any,
+  status: LoopResultStatus,
+  round: number,
+): Promise<void> {
+  if (loopStage.onExhausted) {
+    const exhaustedTask = findLoopExhaustedRunTask(run, compiledFlow, loopStage.id);
+    if (!exhaustedTask) {
+      await materializeLoopOnExhausted(cwd, run, compiledFlow, loopStage, status, round);
+      return;
+    }
+    const state = ensureLoopState(run, loopStage.id);
+    state.status = status;
+    state.round = round;
+    state.awaitingOnExhausted = true;
+    state.onExhaustedSpecId = exhaustedTask.specId;
+    state.updatedAt = new Date().toISOString();
+    if (!isTerminalTaskStatus(exhaustedTask.status)) {
+      await writeRunRecord(cwd, run);
+      return;
+    }
+  }
+
+  await finalizeLoop(cwd, run, compiledFlow, placeholderRunTask, loopStage, status, round);
+}
+
+async function materializeLoopRound(
+  cwd: string,
+  run: WorkflowRunRecord,
+  compiledFlow: CompiledWorkflow,
+  placeholderIndex: number,
+  placeholder: CompiledTask,
+  loopStage: any,
+  round: number,
+): Promise<void> {
+  const childTemplates = (loopStage.childTemplates ?? []) as CompiledTask[];
+  const roundTag = `r${String(round).padStart(2, "0")}`;
+  const countsByChildStage = new Map<string, number>();
+  for (const template of childTemplates) {
+    const childStageId = template.stageId ?? template.id.split(".")[0] ?? "child";
+    countsByChildStage.set(childStageId, (countsByChildStage.get(childStageId) ?? 0) + 1);
+  }
+
+  const localToRoundSpecId = new Map<string, string>();
+  for (const template of childTemplates) {
+    const childStageId = template.stageId ?? template.id.split(".")[0] ?? "child";
+    const childTaskId = template.taskId ?? "main";
+    const singleTaskChild = (countsByChildStage.get(childStageId) ?? 0) === 1;
+    const specId = singleTaskChild && childTaskId === "main"
+      ? `${loopStage.id}.${roundTag}.${childStageId}`
+      : `${loopStage.id}.${roundTag}.${childStageId}.${childTaskId}`;
+    localToRoundSpecId.set(template.id, specId);
+  }
+
+  const entryDependsOn = round === 1
+    ? [...(placeholder.dependsOn ?? [])]
+    : getLoopRoundRunTasks(run, compiledFlow, loopStage.id, round - 1).map((task) => task.specId);
+  const firstChildStageId = loopStage.childStageIds?.[0];
+  const carryForward = round > 1 ? await buildLoopCarryForwardContext(cwd, run, compiledFlow, loopStage, loopStage.id, round) : "";
+  const generatedTasks = childTemplates.map((template) => {
+    const childStageId = template.stageId ?? template.id.split(".")[0] ?? "child";
+    const childTaskId = template.taskId ?? "main";
+    const roundStageId = `${loopStage.id}.${roundTag}.${childStageId}`;
+    const rawDependsOn = template.dependsOn ?? [];
+    const dependsOn = rawDependsOn.length > 0
+      ? rawDependsOn.map((dep) => localToRoundSpecId.get(dep) ?? dep)
+      : [...entryDependsOn];
+    const sourcePolicy = childStageId === firstChildStageId && round > 1
+      ? "partial"
+      : loopChildSourcePolicy(loopStage, childStageId);
+    ensureGeneratedStageRecord(compiledFlow, roundStageId, template.kind, sourcePolicy);
+    const loopRoundPrompt = [
+      template.compiledPrompt,
+      "# Loop Round",
+      `loop=${loopStage.id}`,
+      `round=${round}`,
+      `childStage=${childStageId}`,
+      carryForward && childStageId === firstChildStageId ? `# Loop Carry-Forward Context\n\n${carryForward}` : undefined,
+    ].filter(Boolean).join("\n\n");
+    const specId = localToRoundSpecId.get(template.id)!;
+    return {
+      ...template,
+      id: specId,
+      key: specId,
+      specId,
+      taskId: childTaskId,
+      stageId: roundStageId,
+      dependsOn,
+      foreach: undefined,
+      compiledPrompt: loopRoundPrompt,
+      loopChild: {
+        loopId: loopStage.id,
+        round,
+        roundTag,
+        childStageId,
+        childTaskId,
+        firstChildStage: childStageId === firstChildStageId,
+      },
+    } as CompiledTask;
+  });
+
+  const insertionIndex = loopInsertionIndex(compiledFlow, loopStage.id, placeholderIndex);
+  compiledFlow.tasks.splice(insertionIndex, 0, ...generatedTasks);
+  const nextIndex = nextTaskRecordIndex(run);
+  const generatedRunTasks = generatedTasks.map((task, offset) => createTaskRunRecord(cwd, run.runId, task, nextIndex + offset));
+  run.tasks.splice(insertionIndex, 0, ...generatedRunTasks);
+
+  const state = ensureLoopState(run, loopStage.id);
+  state.round = round;
+  state.awaitingOnExhausted = false;
+  state.status = undefined;
+  state.onExhaustedSpecId = undefined;
+  state.updatedAt = new Date().toISOString();
+  run.round = round;
+
+  await writeJsonAtomic(compiledWorkflowPath(cwd, run.runId), compiledFlow);
+  await writeRunRecord(cwd, run);
+}
+
+async function materializeLoopOnExhausted(
+  cwd: string,
+  run: WorkflowRunRecord,
+  compiledFlow: CompiledWorkflow,
+  loopStage: any,
+  status: LoopResultStatus,
+  round: number,
+): Promise<void> {
+  const template = loopStage.onExhausted?.template as CompiledTask | undefined;
+  if (!template) return;
+  const stageId = `${loopStage.id}.onExhausted`;
+  const specId = `${stageId}.${loopStage.onExhausted.stageId ?? "summary"}`;
+  const dependsOn = getLoopRoundRunTasks(run, compiledFlow, loopStage.id, round).map((task) => task.specId);
+  const context = await buildLoopTerminalContext(cwd, run, compiledFlow, loopStage, status, round);
+  const task: CompiledTask = {
+    ...template,
+    id: specId,
+    key: specId,
+    specId,
+    taskId: loopStage.onExhausted.stageId ?? "summary",
+    stageId,
+    dependsOn,
+    compiledPrompt: [
+      template.compiledPrompt,
+      "# Loop Exhaustion Context",
+      context,
+    ].join("\n\n"),
+    loopExhausted: { loopId: loopStage.id, status },
+  } as CompiledTask;
+
+  ensureGeneratedStageRecord(compiledFlow, stageId, "reduce", "partial");
+  const placeholderIndex = compiledFlow.tasks.findIndex((candidate) => candidate.loopPlaceholder?.loopId === loopStage.id);
+  const insertionIndex = loopInsertionIndex(compiledFlow, loopStage.id, placeholderIndex);
+  compiledFlow.tasks.splice(insertionIndex, 0, task);
+  const runTask = createTaskRunRecord(cwd, run.runId, task, nextTaskRecordIndex(run));
+  run.tasks.splice(insertionIndex, 0, runTask);
+
+  const state = ensureLoopState(run, loopStage.id);
+  state.round = round;
+  state.status = status;
+  state.awaitingOnExhausted = true;
+  state.onExhaustedSpecId = specId;
+  state.updatedAt = new Date().toISOString();
+
+  await writeJsonAtomic(compiledWorkflowPath(cwd, run.runId), compiledFlow);
+  await writeRunRecord(cwd, run);
+}
+
+async function finalizeLoop(
+  cwd: string,
+  run: WorkflowRunRecord,
+  compiledFlow: CompiledWorkflow,
+  placeholderRunTask: WorkflowTaskRunRecord,
+  loopStage: any,
+  status: LoopResultStatus,
+  round: number,
+): Promise<void> {
+  const finalCheck = await readLoopStageStructuredOutput(cwd, run, compiledFlow, loopStage.id, round, loopDesignatedCheckStageId(loopStage));
+  const worktreePath = findLoopWorktreePath(run, loopStage.id);
+  const summary = buildLoopResultSummary(status, round, worktreePath, finalCheck);
+  upsertLoopResult(run, {
+    loopId: loopStage.id,
+    status,
+    roundsUsed: round,
+    worktreePath,
+    finalCheck,
+    summary,
+  });
+  const state = ensureLoopState(run, loopStage.id);
+  state.round = round;
+  state.status = status;
+  state.awaitingOnExhausted = false;
+  state.updatedAt = new Date().toISOString();
+  setTaskTerminal(placeholderRunTask, "completed", `loop_${status}`, { lastMessage: summary });
+  await writeRunRecord(cwd, run);
+}
+
+export async function evaluateLoopUntilCondition(
+  cwd: string,
+  run: WorkflowRunRecord,
+  compiledFlow: CompiledWorkflow,
+  loopId: string,
+  round: number,
+  condition: LoopUntilCondition,
+): Promise<boolean> {
+  const candidate = condition as any;
+  if (Array.isArray(candidate.all)) {
+    for (const item of candidate.all) {
+      if (!await evaluateLoopUntilCondition(cwd, run, compiledFlow, loopId, round, item)) return false;
+    }
+    return true;
+  }
+  if (Array.isArray(candidate.any)) {
+    for (const item of candidate.any) {
+      if (await evaluateLoopUntilCondition(cwd, run, compiledFlow, loopId, round, item)) return true;
+    }
+    return false;
+  }
+
+  if (typeof candidate.stage !== "string" || typeof candidate.path !== "string") return false;
+  const output = await readLoopStageStructuredOutput(cwd, run, compiledFlow, loopId, round, candidate.stage);
+  const value = output === undefined ? undefined : readSimpleJsonPath(output, candidate.path);
+  if (value === undefined) return false;
+  if (Object.prototype.hasOwnProperty.call(candidate, "equals")) return Object.is(value, candidate.equals);
+  if (Object.prototype.hasOwnProperty.call(candidate, "notEquals")) return !Object.is(value, candidate.notEquals);
+  if (Object.prototype.hasOwnProperty.call(candidate, "lengthEquals")) return valueLength(value) === candidate.lengthEquals;
+  return false;
+}
+
+async function loopHasNoProgress(
+  cwd: string,
+  run: WorkflowRunRecord,
+  compiledFlow: CompiledWorkflow,
+  loopStage: any,
+  loopId: string,
+  round: number,
+): Promise<boolean> {
+  if (round <= 1) return false;
+  const current = await readLoopProgressMetric(cwd, run, compiledFlow, loopStage, loopId, round);
+  const previous = await readLoopProgressMetric(cwd, run, compiledFlow, loopStage, loopId, round - 1);
+  return current !== undefined && previous !== undefined && current >= previous;
+}
+
+async function readLoopProgressMetric(
+  cwd: string,
+  run: WorkflowRunRecord,
+  compiledFlow: CompiledWorkflow,
+  loopStage: any,
+  loopId: string,
+  round: number,
+): Promise<number | undefined> {
+  const output = await readLoopStageStructuredOutput(cwd, run, compiledFlow, loopId, round, loopDesignatedCheckStageId(loopStage));
+  if (output === undefined) return undefined;
+  const value = readSimpleJsonPath(output, loopStage.progressPath ?? "$.blockingFailures");
+  const length = valueLength(value);
+  if (length !== undefined) return length;
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+async function readLoopStageStructuredOutput(
+  cwd: string,
+  run: WorkflowRunRecord,
+  compiledFlow: CompiledWorkflow,
+  loopId: string,
+  round: number,
+  childStageId: string,
+): Promise<unknown> {
+  const entry = getLoopRoundTaskEntries(run, compiledFlow, loopId, round)
+    .filter((item) => item.compiledTask.loopChild?.childStageId === childStageId)
+    .at(-1);
+  if (!entry || entry.runTask.status !== "completed") return undefined;
+  try {
+    const result = JSON.parse(await readFile(fromProjectPath(cwd, entry.runTask.files.result), "utf8"));
+    return result?.structuredOutput;
+  } catch {
+    return undefined;
+  }
+}
+
+async function buildLoopCarryForwardContext(
+  cwd: string,
+  run: WorkflowRunRecord,
+  compiledFlow: CompiledWorkflow,
+  loopStage: any,
+  loopId: string,
+  nextRound: number,
+): Promise<string> {
+  const previousRound = nextRound - 1;
+  const checkStageId = loopDesignatedCheckStageId(loopStage);
+  const latestCheck = await readLoopStageStructuredOutput(cwd, run, compiledFlow, loopId, previousRound, checkStageId);
+  const metric = await readLoopProgressMetric(cwd, run, compiledFlow, loopStage, loopId, previousRound);
+  const summary = [
+    `Previous round: ${previousRound}`,
+    `Designated check stage: ${checkStageId}`,
+    metric !== undefined ? `Progress metric (${loopStage.progressPath ?? "$.blockingFailures"} length/value): ${metric}` : undefined,
+    "Latest check structured output:",
+    compactJson(latestCheck, Math.floor(LOOP_CARRY_FORWARD_MAX_CHARS * 0.7)),
+    "Rolling summary:",
+    await buildLoopRollingSummary(cwd, run, compiledFlow, loopStage, loopId, previousRound),
+  ].filter(Boolean).join("\n");
+  return truncate(summary, LOOP_CARRY_FORWARD_MAX_CHARS);
+}
+
+async function buildLoopRollingSummary(
+  cwd: string,
+  run: WorkflowRunRecord,
+  compiledFlow: CompiledWorkflow,
+  loopStage: any,
+  loopId: string,
+  latestRound: number,
+): Promise<string> {
+  const start = Math.max(1, latestRound - 2);
+  const lines: string[] = [];
+  for (let round = start; round <= latestRound; round += 1) {
+    const metric = await readLoopProgressMetric(cwd, run, compiledFlow, loopStage, loopId, round);
+    lines.push(`round ${round}: ${metric === undefined ? "progress metric unavailable" : `progress=${metric}`}`);
+  }
+  return lines.join("\n");
+}
+
+async function buildLoopTerminalContext(
+  cwd: string,
+  run: WorkflowRunRecord,
+  compiledFlow: CompiledWorkflow,
+  loopStage: any,
+  status: LoopResultStatus,
+  round: number,
+): Promise<string> {
+  const finalCheck = await readLoopStageStructuredOutput(cwd, run, compiledFlow, loopStage.id, round, loopDesignatedCheckStageId(loopStage));
+  return truncate([
+    `loop=${loopStage.id}`,
+    `status=${status}`,
+    `roundsUsed=${round}`,
+    `worktreePath=${findLoopWorktreePath(run, loopStage.id) ?? "(none)"}`,
+    "Final check structured output:",
+    compactJson(finalCheck, LOOP_SUMMARY_MAX_CHARS),
+  ].join("\n"), LOOP_CARRY_FORWARD_MAX_CHARS);
+}
+
+function buildLoopResultSummary(status: LoopResultStatus, round: number, worktreePath: string | null, finalCheck: unknown): string {
+  const statusText = status === "completed"
+    ? "Loop completed"
+    : status === "exhausted"
+      ? "Loop exhausted before until condition passed"
+      : "Loop stopped because the progress metric did not strictly decrease";
+  return truncate([
+    `${statusText} after ${round} round${round === 1 ? "" : "s"}.`,
+    `worktree=${worktreePath ?? "(none)"}`,
+    `finalCheck=${compactJson(finalCheck, 700)}`,
+  ].join("\n"), LOOP_SUMMARY_MAX_CHARS);
+}
+
+function findLoopStageRecord(compiledFlow: CompiledWorkflow, loopId: string): any | undefined {
+  return ((compiledFlow as any).stages ?? []).find((stage: any) => stage?.id === loopId && stage?.type === "loop");
+}
+
+function latestLoopRound(compiledFlow: CompiledWorkflow, loopId: string): number {
+  let latest = 0;
+  for (const task of compiledFlow.tasks) {
+    if (task.loopChild?.loopId === loopId) latest = Math.max(latest, task.loopChild.round);
+  }
+  return latest;
+}
+
+function getLoopRoundRunTasks(run: WorkflowRunRecord, compiledFlow: CompiledWorkflow, loopId: string, round: number): WorkflowTaskRunRecord[] {
+  return getLoopRoundTaskEntries(run, compiledFlow, loopId, round).map((entry) => entry.runTask);
+}
+
+function getLoopRoundTaskEntries(
+  run: WorkflowRunRecord,
+  compiledFlow: CompiledWorkflow,
+  loopId: string,
+  round: number,
+): Array<{ runTask: WorkflowTaskRunRecord; compiledTask: CompiledTask; index: number }> {
+  const entries: Array<{ runTask: WorkflowTaskRunRecord; compiledTask: CompiledTask; index: number }> = [];
+  for (const [index, compiledTask] of compiledFlow.tasks.entries()) {
+    if (compiledTask.loopChild?.loopId !== loopId || compiledTask.loopChild.round !== round) continue;
+    const runTask = run.tasks[index];
+    if (runTask) entries.push({ runTask, compiledTask, index });
+  }
+  return entries;
+}
+
+function loopInsertionIndex(compiledFlow: CompiledWorkflow, loopId: string, placeholderIndex: number): number {
+  let index = Math.max(0, placeholderIndex + 1);
+  while (index < compiledFlow.tasks.length) {
+    const task = compiledFlow.tasks[index];
+    if (task?.loopChild?.loopId === loopId || task?.loopExhausted?.loopId === loopId) {
+      index += 1;
+      continue;
+    }
+    break;
+  }
+  return index;
+}
+
+function loopChildSourcePolicy(loopStage: any, childStageId: string): string {
+  const record = (loopStage.childStageRecords ?? []).find((stage: any) => stage.id === childStageId);
+  return record?.sourcePolicy ?? "require-success";
+}
+
+function ensureGeneratedStageRecord(compiledFlow: CompiledWorkflow, id: string, type: string | undefined, sourcePolicy: string): void {
+  const stages = ((compiledFlow as any).stages ??= []);
+  const existing = stages.find((stage: any) => stage.id === id);
+  if (existing) {
+    existing.sourcePolicy = existing.sourcePolicy ?? sourcePolicy;
+    return;
+  }
+  stages.push({ id, type: type ?? "task", sourcePolicy });
+}
+
+function getLoopState(run: WorkflowRunRecord, loopId: string): LoopStateRecord | undefined {
+  return run.loopStates?.find((state) => state.loopId === loopId);
+}
+
+function ensureLoopState(run: WorkflowRunRecord, loopId: string): LoopStateRecord {
+  run.loopStates ??= [];
+  let state = getLoopState(run, loopId);
+  if (!state) {
+    state = { loopId, round: 0 };
+    run.loopStates.push(state);
+  }
+  return state;
+}
+
+function findLoopExhaustedRunTask(run: WorkflowRunRecord, compiledFlow: CompiledWorkflow, loopId: string): WorkflowTaskRunRecord | undefined {
+  const index = compiledFlow.tasks.findIndex((task) => task.loopExhausted?.loopId === loopId);
+  return index >= 0 ? run.tasks[index] : undefined;
+}
+
+function loopDesignatedCheckStageId(loopStage: any): string {
+  if (typeof loopStage.progressStageId === "string" && loopStage.progressStageId.trim()) return loopStage.progressStageId;
+  const refs = new Set<string>();
+  collectUntilStageRefs(loopStage.until, refs);
+  if (refs.size === 1) return [...refs][0]!;
+  const childStageIds = loopStage.childStageIds ?? [];
+  return childStageIds[childStageIds.length - 1] ?? "check";
+}
+
+function collectUntilStageRefs(condition: unknown, refs: Set<string>): void {
+  if (!condition || typeof condition !== "object") return;
+  const candidate = condition as any;
+  if (typeof candidate.stage === "string") refs.add(candidate.stage);
+  for (const item of candidate.all ?? []) collectUntilStageRefs(item, refs);
+  for (const item of candidate.any ?? []) collectUntilStageRefs(item, refs);
+}
+
+function valueLength(value: unknown): number | undefined {
+  if (Array.isArray(value) || typeof value === "string") return value.length;
+  return undefined;
+}
+
+function upsertLoopResult(run: WorkflowRunRecord, result: NonNullable<WorkflowRunRecord["loopResults"]>[number]): void {
+  run.loopResults ??= [];
+  const index = run.loopResults.findIndex((item) => item.loopId === result.loopId);
+  if (index === -1) run.loopResults.push(result);
+  else run.loopResults[index] = result;
+}
+
+function findLoopWorktreePath(run: WorkflowRunRecord, loopId: string): string | null {
+  const recorded = run.loopWorktrees?.find((item) => item.loopId === loopId)?.path;
+  if (recorded) return recorded;
+  return run.tasks.find((task) => task.specId.startsWith(`${loopId}.r`) && task.worktree.enabled && task.worktree.path)?.worktree.path ?? null;
+}
+
+function compactJson(value: unknown, maxChars: number): string {
+  if (value === undefined) return "(unavailable)";
+  try {
+    return truncate(JSON.stringify(value), maxChars);
+  } catch {
+    return truncate(String(value), maxChars);
+  }
+}
+
+function truncate(value: string, maxChars: number): string {
+  return value.length > maxChars ? `${value.slice(0, Math.max(0, maxChars - 1))}…` : value;
 }
 
 function nextTaskRecordIndex(run: WorkflowRunRecord): number {
@@ -524,9 +1073,11 @@ async function launchPendingTaskAt(
           : compiledTask;
 
   try {
-    await ensureManagedWorktree(cwd, run, task, launchTask);
+    const worktreeLaunchTask = applyExistingLoopWorktree(run, task, launchTask);
+    await ensureManagedWorktree(cwd, run, task, worktreeLaunchTask);
+    recordCreatedLoopWorktree(run, task, worktreeLaunchTask);
     await writeRunRecord(cwd, run);
-    await launchTmuxTask(cwd, run, task, launchTask);
+    await launchTmuxTask(cwd, run, task, worktreeLaunchTask);
     return true;
   } catch (error) {
     setTaskTerminal(task, "failed", launchTask.safety.requiresWorktree ? "worktree_failed" : "launch_failed", {
@@ -540,6 +1091,53 @@ async function launchPendingTaskAt(
     }
     return false;
   }
+}
+
+function applyExistingLoopWorktree(
+  run: WorkflowRunRecord,
+  task: WorkflowTaskRunRecord,
+  compiledTask: CompiledTask,
+): CompiledTask {
+  const loopId = compiledTask.loopChild?.loopId;
+  if (!loopId) return compiledTask;
+  const existing = run.loopWorktrees?.find((item) => item.loopId === loopId);
+  if (!existing?.path) return compiledTask;
+
+  task.cwd = existing.path;
+  task.worktree = {
+    enabled: true,
+    path: existing.path,
+    branch: existing.branch,
+    baseCwd: existing.baseCwd,
+    warning: "reused loop managed worktree",
+  };
+  return {
+    ...compiledTask,
+    cwd: existing.path,
+    safety: {
+      ...compiledTask.safety,
+      requiresWorktree: false,
+    },
+  };
+}
+
+function recordCreatedLoopWorktree(
+  run: WorkflowRunRecord,
+  task: WorkflowTaskRunRecord,
+  compiledTask: CompiledTask,
+): void {
+  const loopId = compiledTask.loopChild?.loopId;
+  if (!loopId || !task.worktree.enabled || !task.worktree.path) return;
+  run.loopWorktrees ??= [];
+  const record = {
+    loopId,
+    path: task.worktree.path,
+    branch: task.worktree.branch,
+    baseCwd: task.worktree.baseCwd,
+  };
+  const index = run.loopWorktrees.findIndex((item) => item.loopId === loopId);
+  if (index === -1) run.loopWorktrees.push(record);
+  else run.loopWorktrees[index] = record;
 }
 
 async function prepareChainTask(
