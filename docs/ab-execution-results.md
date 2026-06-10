@@ -40,7 +40,7 @@ Raw report: `.pi/eval/ab-execution/runs/run-20260608T133951Z/report.md`
 
 Blind winner: tie.
 
-Important operational caveat: `workflow:deep-research` produced a valid `finalReport` and `evidencePacket`, but two `verify-claims` tmux panes disappeared before result capture (`pane_missing`, empty output/stderr, no result JSON). Therefore this is useful quality-comparison evidence, but not clean workflow operational-success evidence.
+Important operational caveat: `workflow:deep-research` produced a valid `finalReport` and structured claim index, but two `verify-claims` tmux panes disappeared before result capture (`pane_missing`, empty output/stderr, no result JSON). Therefore this is useful quality-comparison evidence, but not clean workflow operational-success evidence.
 
 ## Bugs and hardening found by real execution
 

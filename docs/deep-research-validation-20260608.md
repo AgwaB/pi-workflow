@@ -60,15 +60,15 @@ Completed stages:
 Final output structure check:
 
 - `finalReport` keys: `summary`, `coverageSummary`, `mainFindings`, `caveatedFindings`, `contestedAreas`, `notableUnsupportedClaims`, `researchScopeCoverage`, `remainingGaps`
-- `evidencePacket` keys: `claims`
-- Evidence packet claims: 18
+- `claimVerdictIndex` keys: `claims`
+- Claim verdict index claims: 18
 - Main findings: 5
 - Remaining gaps: 6
 - Coverage summary included counts for depth, researchQuestions, rawClaimsApprox, verificationCandidates, verified, partiallySupported, unsupported, conflicting, preserved, and coverageGaps.
 
 ## Interpretation
 
-The bounded run demonstrates that `deep-research` can complete with real Kimi execution and produce the intended `finalReport` + `evidencePacket` shape.
+The bounded run demonstrated that `deep-research` could complete with real Kimi execution and produce the then-current `finalReport` + claim-index shape. The current workflow has since evolved to use `claimVerdictIndex`, with full evidence retained in verifier task artifacts.
 
 Do not overclaim from this run:
 
@@ -112,7 +112,7 @@ Dynamic fanout evidence:
 | `verify-claims` | 16/16: `claim-001` ... `claim-016` |
 | `final` | 1/1 |
 
-The final report included `finalReport` and `evidencePacket`. The run verified that restored dynamic fanout now performs multi-question research and per-claim verification in a real Kimi execution.
+The final report included `finalReport` and a structured claim index. The run verified that restored dynamic fanout now performs multi-question research and per-claim verification in a real Kimi execution.
 
 Observed issue from Run 3:
 
@@ -145,7 +145,7 @@ Dynamic fanout evidence:
 Final output structure check:
 
 - `final.main` output validation: valid JSON
-- Top-level keys: `finalReport`, `evidencePacket`
+- Top-level keys: `finalReport`, structured claim index
 
 Operational caveat:
 

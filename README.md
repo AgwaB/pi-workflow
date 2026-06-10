@@ -59,7 +59,10 @@ A minimal workflow definition looks like:
       {
         "id": "plan",
         "type": "task",
-        "output": { "format": "json", "requiredKeys": ["questions"] },
+        "output": {
+          "format": "json",
+          "contract": { "requiredPaths": ["$.questions"] }
+        },
         "prompt": "Plan the research questions."
       },
       {
@@ -132,6 +135,8 @@ The package includes built-in workflow definitions in [`workflows/`](./workflows
 ```
 
 The snippet above is intentionally abbreviated. Runnable workflow definitions also declare prompts, output contracts, source policies, tools, and runtime limits.
+
+JSON outputs are validated with `output.contract` (for example `requiredPaths`, array bounds, and string length caps). To give models a shape hint without duplicating validation rules inline, use `output.template` for small one-off shapes or `output.templateRef` for reusable templates. `templateRef` supports internal refs such as `#/outputTemplates/final` and relative JSON files such as `./templates/deep-research.json#/final`.
 
 ## Create or customize workflows with `workflow-guide`
 

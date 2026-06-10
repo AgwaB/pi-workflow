@@ -26,6 +26,10 @@ node_modules/
 !.pi/eval/ab-execution/fixtures/review-seeded-safety-diff/
 !.pi/eval/ab-execution/fixtures/review-seeded-safety-diff/README.md
 !.pi/eval/ab-execution/fixtures/review-seeded-safety-diff/diff.patch
+!.pi/eval/review-ab/
+!.pi/eval/review-ab/**
+.pi/eval/review-ab/runs/
+.pi/eval/review-ab/.generated/
 !.pi/agents/e2e-custom-tool-agent.md
 !.pi/agents/e2e-no-tools-agent.md
 !.pi/agents/e2e-symlink-agent.md

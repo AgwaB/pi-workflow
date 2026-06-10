@@ -1,0 +1,122 @@
+{
+  "schemaVersion": 1,
+  "taskId": "pi-chat-functionality-broad",
+  "repoPath": "/tmp/pi-github-repos/earendil-works/pi-chat",
+  "reviewKind": "functionality",
+  "status": "draft-reference-audit-v1",
+  "riskAreas": [
+    { "id": "FUN-01", "name": "Setup and configuration flows", "mustInspect": ["README.md", "src/tui/chat-config.ts", "src/tui/discord-setup.ts", "src/tui/telegram-setup.ts", "src/config.ts"], "inspectionNotes": "Check docs, account/channel discovery, and config persistence." },
+    { "id": "FUN-02", "name": "Discord and Telegram live behavior", "mustInspect": ["src/live/discord.ts", "src/live/telegram.ts", "src/live/common.ts", "src/runtime.ts"], "inspectionNotes": "Check catch-up, checkpoints, reconnects, mentions, and attachments." },
+    { "id": "FUN-03", "name": "Conversation lifecycle and queueing", "mustInspect": ["src/runtime.ts", "index.ts", "src/log.ts"], "inspectionNotes": "Check armed state, pending jobs, active jobs, control actions, locks, and checkpoints." },
+    { "id": "FUN-04", "name": "Gondolin VM lifecycle and file operations", "mustInspect": ["src/gondolin.ts", "index.ts"], "inspectionNotes": "Check VM start/close/restart, mount path operations, and attachment staging." },
+    { "id": "FUN-05", "name": "Worker management", "mustInspect": ["index.ts"], "inspectionNotes": "Check tmux worker status/spawn/open/kill/restart behavior." },
+    { "id": "FUN-06", "name": "Streaming and rendering", "mustInspect": ["src/render/chunking.ts", "src/render/format.ts", "src/render/streaming.ts", "src/render/streaming-markdown.ts"], "inspectionNotes": "Check service limits, edit-in-place preview, chunking, and markdown conversion." },
+    { "id": "FUN-07", "name": "Persistence and corruption recovery", "mustInspect": ["src/log.ts", "src/config.ts", "src/discovery-store.ts", "index.ts"], "inspectionNotes": "Check JSONL/config/cache/lock behavior and recovery from partial/corrupt writes." },
+    { "id": "FUN-08", "name": "Tests and docs-code consistency", "mustInspect": ["README.md", "package.json", "index.ts", "src/"], "inspectionNotes": "Check scripts/tests and docs claims versus implementation." }
+  ],
+  "referenceFindings": [
+    {
+      "id": "FREF-001",
+      "category": "FUN-07",
+      "title": "Corrupt config.json is silently replaced with an empty configuration",
+      "severity": "medium",
+      "confidence": "high",
+      "claim": "loadChatConfig catches all read/parse errors and returns an empty config, so a transient/corrupt config.json can make all accounts/channels appear deleted without a visible recovery path or backup warning.",
+      "evidence": [
+        { "path": "src/config.ts", "symbolOrLines": "loadChatConfig", "quote": "try { ... JSON.parse(content) ... } catch { return { botName: \"pi\", accounts: {} }; }" }
+      ],
+      "impact": "Users may lose access to configured chat accounts/channels after a malformed write or manual edit and receive misleading 'no channels configured' behavior instead of a repairable parse error.",
+      "recommendedFix": "Distinguish ENOENT from JSON parse errors; surface parse errors in /chat-config, keep a .bak of the last valid config, and avoid overwriting corrupt config without confirmation.",
+      "matchHints": [["loadChatConfig", "catch", "accounts: {}"], ["config.json", "corrupt", "empty config"]],
+      "credit": 1,
+      "conditional": false
+    },
+    {
+      "id": "FREF-002",
+      "category": "FUN-03",
+      "title": "Conversation lock release can delete another session's lock",
+      "severity": "medium",
+      "confidence": "medium",
+      "claim": "releaseConversationLock unconditionally unlinks the lock path without checking the owner id, so a stale runtime object or overlapping connect/disconnect path can remove a lock now owned by another process/session.",
+      "evidence": [
+        { "path": "src/log.ts", "symbolOrLines": "releaseConversationLock", "quote": "export async function releaseConversationLock(conversation: ResolvedConversation): Promise<void> { await unlink(conversation.lockPath).catch(() => undefined); }" },
+        { "path": "src/log.ts", "symbolOrLines": "acquireConversationLock", "quote": "await handle.writeFile(`${owner}\\n`, \"utf8\");" }
+      ],
+      "impact": "Concurrent workers or reconnect paths can lose mutual exclusion, leading to duplicate live connections and interleaved channel.jsonl writes.",
+      "recommendedFix": "Pass owner id to releaseConversationLock and unlink only if the file still contains that owner; otherwise leave the lock intact and report a stale-release warning.",
+      "matchHints": [["releaseConversationLock", "unlink", "owner"], ["lock", "unconditional", "duplicate session"]],
+      "credit": 1,
+      "conditional": true
+    },
+    {
+      "id": "FREF-003",
+      "category": "FUN-02",
+      "title": "Discord catch-up can repeatedly fetch and download a large backlog on reconnect",
+      "severity": "medium",
+      "confidence": "medium",
+      "claim": "Discord catchUp paginates messages after the last checkpoint and messageToInput downloads attachments for every message before ingestion filters can complete; if the checkpoint is stale or absent, reconnect can process a large backlog and all its attachments.",
+      "evidence": [
+        { "path": "src/live/discord.ts", "symbolOrLines": "catchUp", "quote": "while (true) { const batch = await channel.messages.fetch(cursor ? { after: cursor, limit: 100 } : { limit: 25 }); ... allMessages.push(...sorted); ... }" },
+        { "path": "src/live/discord.ts", "symbolOrLines": "messageToInput", "quote": "for (const attachment of message.attachments.values()) { const response = await fetch(attachment.url); ... await storeDownloadedAttachment(...) }" }
+      ],
+      "impact": "A reconnect can be slow, expensive, or memory/disk intensive, and may delay live responsiveness after downtime.",
+      "recommendedFix": "Bound catch-up by max messages/age/bytes, defer attachment download until a message is accepted and queued, and expose skipped-backlog status to users.",
+      "matchHints": [["Discord", "catchUp", "attachments"], ["messages.fetch", "backlog", "download"]],
+      "credit": 1,
+      "conditional": false
+    },
+    {
+      "id": "FREF-004",
+      "category": "FUN-05",
+      "title": "tmux worker/status identifiers can collide after sanitization and truncation",
+      "severity": "low",
+      "confidence": "high",
+      "claim": "tmuxSafeName replaces many distinct conversation ids with the same sanitized prefix and truncates to 100 characters; the same name is used for tmux sessions and status paths, so long/similar ids can collide.",
+      "evidence": [
+        { "path": "index.ts", "symbolOrLines": "tmuxSafeName / workerStatusPath", "quote": "const safe = value.replace(/[^a-zA-Z0-9_-]+/g, \"_\").replace(/^_+|_+$/g, \"\") || \"channel\"; return `${WORKER_TMUX_PREFIX}${safe}`.slice(0, 100);" },
+        { "path": "index.ts", "symbolOrLines": "workerStatusPath", "quote": "return join(WORKER_STATUS_DIR, `${tmuxSafeName(conversationId)}.json`);" }
+      ],
+      "impact": "Two configured channels can share a worker session/status file, causing one to appear already running or overwrite the other's status.",
+      "recommendedFix": "Append a short hash of the original conversationId or use a reversible safe encoding instead of lossy sanitize+truncate.",
+      "matchHints": [["tmuxSafeName", "collision"], ["workerStatusPath", "truncate", "100"]],
+      "credit": 0.5,
+      "conditional": false
+    },
+    {
+      "id": "FREF-005",
+      "category": "FUN-08",
+      "title": "Package has no automated test script despite broad integration surface",
+      "severity": "low",
+      "confidence": "high",
+      "claim": "package.json only defines check/format and no test script, even though pi-chat has complex config, lock, rendering, attachment, and service-adapter behavior that can be unit-tested without live credentials.",
+      "evidence": [
+        { "path": "package.json", "symbolOrLines": "scripts", "quote": "\"scripts\": { \"check\": \"biome check . && tsc --noEmit\", \"format\": \"biome check --write .\" }" }
+      ],
+      "impact": "Regressions in path handling, config corruption, lock ownership, chunking, and command parsing are likely to be caught late by manual/live testing.",
+      "recommendedFix": "Add node --test coverage for config load/save errors, lock owner release, runtime command parsing, attachment sanitization/size handling, and render chunking.",
+      "matchHints": [["package.json", "no test"], ["test gaps", "runtime", "attachment"]],
+      "credit": 0.5,
+      "conditional": false
+    }
+  ],
+  "noIssueExpectations": [
+    {
+      "id": "FNOISSUE-001",
+      "category": "FUN-03",
+      "claim": "Remote control commands are gated through parseControlCommand and isAllowedInput before execution.",
+      "evidence": [{ "path": "src/runtime.ts", "symbolOrLines": "parseControlCommand", "quote": "if (!this.isAllowedInput(normalized)) return undefined;" }],
+      "coverageCredit": 0.25
+    },
+    {
+      "id": "FNOISSUE-002",
+      "category": "FUN-04",
+      "claim": "Outgoing chat_attach staging uses O_NOFOLLOW, file stat, sanitized basename, UUID, and wx write to avoid common overwrite/symlink issues.",
+      "evidence": [{ "path": "src/gondolin.ts", "symbolOrLines": "stageAttachment", "quote": "open(sourcePath, O_RDONLY | O_NOFOLLOW); ... safeName ... `${Date.now()}-${randomUUID()}-${safeName}` ... flag: \"wx\"" }],
+      "coverageCredit": 0.25
+    }
+  ],
+  "knownUncertainties": [
+    { "category": "FUN-02", "question": "Exact Telegram reconnect/cursor semantics require live API behavior or mocks to validate fully.", "whyNotResolvedFromCode": "The adapter polls external Telegram APIs and depends on update offsets/checkpoints." },
+    { "category": "FUN-06", "question": "Streaming preview behavior needs service-level integration tests for edit/delete rate limits and markdown behavior.", "whyNotResolvedFromCode": "Static code inspection cannot confirm remote platform behavior." }
+  ]
+}

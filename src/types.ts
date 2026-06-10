@@ -1,5 +1,5 @@
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
-export const FAST_MODES = ["inherit", "on", "off"] as const;
+export const FAST_MODES = ["inherit", "off"] as const;
 export const APPROVAL_MODES = ["non-interactive", "on-request"] as const;
 export const WORKTREE_POLICIES = ["auto", "on", "off"] as const;
 export const WORKFLOW_TYPES = ["single", "parallel", "chain", "dag", "tree", "retry"] as const;
@@ -14,7 +14,12 @@ export type CompiledWorkflowType = WorkflowType | typeof STAGE_FIRST_RUN_TYPE;
 
 export interface BackendOptions {
   type?: "local-pi";
-  mode?: "auto" | "tmux" | "headless";
+  mode?: "auto" | "headless";
+}
+
+export interface WorkflowBackendHandle {
+  display?: string;
+  [key: string]: unknown;
 }
 
 export interface WorkflowDefaults {
@@ -73,6 +78,7 @@ export interface WorkflowSpec {
   defaults?: WorkflowDefaults;
   backend?: BackendOptions;
   roles?: Record<string, RoleSpec>;
+  outputTemplates?: Record<string, unknown>;
   flow: WorkflowBody;
 }
 
@@ -210,6 +216,14 @@ export interface LoopResultRecord {
   summary: string;
 }
 
+export interface WorkflowSourceContextSpec {
+  maxPreviewChars?: number;
+  maxStructuredChars?: number;
+  maxStructuredCharsByStage?: Record<string, number>;
+  structuredOutputPathsByStage?: Record<string, string[]>;
+  maxPacketChars?: number;
+}
+
 export interface CompiledTask {
   id: string;
   agent: string;
@@ -228,6 +242,7 @@ export interface CompiledTask {
   safety: CompiledTaskSafety;
   output?: WorkflowTaskOutputSpec;
   outputContract?: string;
+  sourceContext?: WorkflowSourceContextSpec;
   compiledPrompt: string;
   kind?: string;
   stageId?: string;
@@ -282,10 +297,9 @@ export interface WorkflowTaskRunRecord {
     snapshot?: WorktreeSnapshotRecord;
   };
   backendTaskId: string;
-  paneId?: string;
   pid?: number;
   launchToken?: string;
-  backendHandle?: string;
+  backendHandle?: WorkflowBackendHandle;
   kind?: string;
   stageId?: string;
   dependsOn?: string[];
@@ -309,8 +323,13 @@ export interface WorkflowTaskRunRecord {
     maxAttempts?: number;
     reason?: string;
     message?: string;
-    requiredKeys?: string[];
     artifacts?: string[];
+  };
+  launchRetry?: {
+    attempts: number;
+    maxAttempts?: number;
+    reason?: string;
+    message?: string;
   };
 }
 
@@ -334,7 +353,7 @@ export interface WorkflowRunRecord {
   status: WorkflowRunStatus;
   taskSummary: TaskSummary;
   cwd: string;
-  backend: { type: "local-pi"; mode: "tmux" };
+  backend: { type: "local-pi"; mode: "headless" };
   parentRunId?: string;
   rootRunId?: string;
   round?: number;
@@ -370,11 +389,10 @@ export interface WorkflowIndexRecord {
       agent: string;
       status: TaskRunStatus;
       statusDetail: string;
-      paneId?: string;
       lastMessage?: string;
       kind?: string;
       stageId?: string;
-      backendHandle?: string;
+      backendHandle?: WorkflowBackendHandle;
     }>;
   }>;
 }
@@ -382,10 +400,18 @@ export interface WorkflowIndexRecord {
 export type OutputFormat = "text" | "json" | "markdown";
 export type OutputOnInvalidAction = "fail" | "warn";
 
+export interface WorkflowStructuredOutputContract {
+  requiredPaths?: string[];
+  arrays?: Array<{ path: string; minItems?: number; maxItems?: number }>;
+  maxStringChars?: Array<{ path: string; maxChars: number }>;
+}
+
 export interface WorkflowTaskOutputSpec {
   format: OutputFormat;
-  requiredKeys?: string[];
   onInvalid?: OutputOnInvalidAction;
+  contract?: WorkflowStructuredOutputContract;
+  template?: unknown;
+  templateRef?: string;
 }
 
 export interface WorkflowTaskOutputValidationRecord {
@@ -408,7 +434,7 @@ export interface CompiledWorkflow {
   type: CompiledWorkflowType;
   task?: string;
   cwd: string;
-  backend: { type: "local-pi"; mode: "tmux" };
+  backend: { type: "local-pi"; mode: "headless" };
   maxConcurrency: number;
   roles: CompiledRole[];
   tasks: CompiledTask[];

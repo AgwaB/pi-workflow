@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 
 import { parseAgentMarkdown } from "../.tmp/unit/agents.js";
 import { compileWorkflow } from "../.tmp/unit/compiler.js";
-import { evaluateLoopUntilCondition, formatRun, runWorkflow, scheduleRun } from "../.tmp/unit/engine.js";
+import { buildRunSourceContext, evaluateLoopUntilCondition, formatRun, runWorkflow, scheduleRun } from "../.tmp/unit/engine.js";
 import { workflowArgumentCompletions, parseWorkflowRunArgs } from "../.tmp/unit/extension.js";
 import { listWorkflows, recommendWorkflows, resolveWorkflowRef } from "../.tmp/unit/workflow-specs.js";
 import { resolveWorkflowRuntime } from "../.tmp/unit/model-runtime.js";
@@ -17,6 +17,8 @@ import { applyTaskResultArtifact, buildJsonOutputRetryInstructions, extractJsonO
 import { canStageProceedAfterPreviousFailure, extractStageFirstForeachItems, shouldScheduleAfterStageFailure } from "../.tmp/unit/workflow-runtime.js";
 import { deriveWorkflowStatus, isActiveTaskStatus, isNonCompletedTerminalTaskStatus, summarizeTasks } from "../.tmp/unit/status.js";
 import { assertWorkflowActionAllowedForRole, assertWorkflowToolAllowedForRole, getWorkflowProcessRole, isWorkflowSupervisorEnabled, workflowWorkerEnvPrefix } from "../.tmp/unit/process-role.js";
+import { buildSourceContextPacket, summarizeWorkflowTelemetry, validateStructuredContract } from "../.tmp/unit/workflow-artifacts.js";
+import { refreshRunFromSubagentArtifacts, setSubagentApiForTests } from "../.tmp/unit/subagent-backend.js";
 
 function makeProject() {
   return mkdtempSync(join(tmpdir(), "workflow-unit-"));
@@ -445,89 +447,11 @@ test("JSON output extraction tolerates prose and fenced JSON", () => {
 
 test("JSON output parsing picks candidate matching required keys", () => {
   const output = 'Prose with escaped example `{\\"findings\\": null}` before the final answer.\n\n{"finding":{"title":"kept"},"verdict":"KEEP"}';
-  assert.deepEqual(parseJsonOutput(output, ["finding", "verdict"]), {
+  assert.deepEqual(parseJsonOutput(output, ["$.finding", "$.verdict"]), {
     valid: true,
     extracted: true,
     structuredOutput: { finding: { title: "kept" }, verdict: "KEEP" },
   });
-});
-
-test("invalid JSON output schedules one corrective retry and preserves artifacts", async () => {
-  const cwd = makeProject();
-  try {
-    const taskDir = join(cwd, ".pi", "workflows", "workflow_unit", "stages", "plan", "tasks", "main");
-    mkdirSync(taskDir, { recursive: true });
-    const output = join(taskDir, "output.log");
-    const stderr = join(taskDir, "stderr.log");
-    const result = join(taskDir, "result.json");
-    writeFileSync(output, '{"item":{"id":"x"},"plan":{"steps":[]}\n');
-    writeFileSync(stderr, "");
-    const task = {
-      taskId: "plan.main",
-      specId: "plan.main",
-      displayName: "plan.main",
-      agent: "unit-scout",
-      agentFile: "unit-scout.md",
-      roles: [],
-      status: "running",
-      statusDetail: "running",
-      runtime: { approvalMode: "non-interactive" },
-      cwd,
-      worktree: { enabled: false, path: null, branch: null, baseCwd: null, warning: null },
-      backendTaskId: "plan.main",
-      paneId: "%1",
-      pid: 12345,
-      startedAt: new Date().toISOString(),
-      launchToken: "token-1",
-      files: {
-        systemPrompt: ".pi/workflows/workflow_unit/stages/plan/tasks/main/system-prompt.md",
-        taskPrompt: ".pi/workflows/workflow_unit/stages/plan/tasks/main/task.md",
-        output: ".pi/workflows/workflow_unit/stages/plan/tasks/main/output.log",
-        stderr: ".pi/workflows/workflow_unit/stages/plan/tasks/main/stderr.log",
-        result: ".pi/workflows/workflow_unit/stages/plan/tasks/main/result.json",
-      },
-      output: { format: "json", requiredKeys: ["item", "plan"], onInvalid: "fail" },
-    };
-    const changed = await applyTaskResultArtifact(cwd, task, {
-      resultFile: result,
-      result: { status: "completed", completedAt: new Date().toISOString(), exitCode: 0, launchToken: "token-1" },
-      status: "completed",
-      completedAfterTimeout: false,
-    });
-    assert.equal(changed, true);
-    assert.equal(task.status, "pending");
-    assert.equal(task.statusDetail, "retry_output_invalid");
-    assert.equal(task.outputRetry.attempts, 1);
-    assert.equal(task.outputRetry.requiredKeys.join(","), "item,plan");
-    assert.equal(task.paneId, undefined);
-    assert.equal(task.pid, undefined);
-    assert.equal(task.startedAt, undefined);
-    assert.equal(task.launchToken, undefined);
-    assert.match(readFileSync(`${output}.invalid-attempt-1`, "utf8"), /"item"/);
-    assert.equal(JSON.parse(readFileSync(`${result}.invalid-attempt-1`, "utf8")).failureKind, "output_invalid");
-  } finally {
-    rmSync(cwd, { recursive: true, force: true });
-  }
-});
-
-test("JSON output retry prompt includes validation error, self-check, and few-shot examples", () => {
-  const prompt = buildJsonOutputRetryInstructions({
-    output: { format: "json", requiredKeys: ["item", "plan"], onInvalid: "fail" },
-    outputRetry: {
-      attempts: 1,
-      maxAttempts: 1,
-      reason: "output_invalid",
-      message: "expected valid JSON output: missing closing brace",
-      requiredKeys: ["item", "plan"],
-      artifacts: [],
-    },
-  });
-  assert.match(prompt, /Validation error: expected valid JSON output: missing closing brace/);
-  assert.match(prompt, /JSON\.parse\(finalAnswer\) would succeed/);
-  assert.match(prompt, /Invalid JSON:/);
-  assert.match(prompt, /Valid shape:/);
-  assert.match(prompt, /"item"/);
-  assert.match(prompt, /"plan"/);
 });
 
 test("partial foreach continues scheduling after an item failure", () => {
@@ -1142,6 +1066,796 @@ test("bundled test-repair-loop workflow materializes a serial repair/check round
     assert.deepEqual(taskBySpec(materialized, "repair-loop.r01.repair").dependsOn ?? [], []);
     assert.deepEqual(taskBySpec(materialized, "repair-loop.r01.test-check").dependsOn, ["repair-loop.r01.repair"]);
   } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("workflow artifact telemetry summarizes stage status, retries, wall clock, and output bytes", () => {
+  const run = {
+    createdAt: "2026-06-08T00:00:00.000Z",
+    updatedAt: "2026-06-08T00:02:00.000Z",
+    tasks: [
+      {
+        stageId: "plan",
+        status: "completed",
+        startedAt: "2026-06-08T00:00:00.000Z",
+        completedAt: "2026-06-08T00:00:10.000Z",
+        files: { output: "a", stderr: "", result: "" },
+      },
+      {
+        stageId: "verify",
+        status: "completed",
+        startedAt: "2026-06-08T00:00:15.000Z",
+        completedAt: "2026-06-08T00:00:45.000Z",
+        outputRetry: { attempts: 1 },
+        files: { output: "b", stderr: "", result: "" },
+      },
+      {
+        stageId: "verify",
+        status: "interrupted",
+        startedAt: "2026-06-08T00:00:20.000Z",
+        completedAt: "2026-06-08T00:00:25.000Z",
+        launchRetry: { attempts: 1 },
+        files: { output: "c", stderr: "", result: "" },
+      },
+    ],
+  };
+  const summary = summarizeWorkflowTelemetry(run, { outputBytesByTaskId: { a: 10, b: 20, c: 0 } });
+  assert.equal(summary.wallClockMs, 120000);
+  assert.equal(summary.taskCount, 3);
+  assert.equal(summary.statusCounts.completed, 2);
+  assert.equal(summary.statusCounts.interrupted, 1);
+  assert.equal(summary.retryCounts.output, 1);
+  assert.equal(summary.retryCounts.launch, 1);
+  assert.equal(summary.outputBytes, 30);
+  assert.equal(summary.stages.verify.taskCount, 2);
+  assert.equal(summary.stages.verify.durationMs, 35000);
+});
+
+test("workflow source context packet prefers structured output and caps raw previews", () => {
+  const run = {
+    tasks: [
+      {
+        taskId: "task-1",
+        specId: "plan.main",
+        stageId: "plan",
+        status: "completed",
+        outputValidation: { structured: true },
+        files: { output: "plan.out", result: "plan.json" },
+      },
+      {
+        taskId: "task-2",
+        specId: "verify.claim-001",
+        stageId: "verify",
+        status: "completed",
+        outputValidation: { structured: true },
+        files: { output: "verify.out", result: "verify.json" },
+      },
+      {
+        taskId: "task-3",
+        specId: "verify.claim-002",
+        stageId: "verify",
+        status: "failed",
+        files: { output: "failed.out", result: "failed.json" },
+      },
+    ],
+  };
+  const packet = buildSourceContextPacket(run, {
+    structuredOutputsByTaskId: {
+      "task-1": { researchQuestions: [{ id: "rq1", question: "Q?" }] },
+      "task-2": { id: "claim-001", status: "verified", evidence: [{ url: "https://example.test", quote: "ok" }] },
+    },
+    rawOutputsByTaskId: {
+      "task-3": "abcdefghijklmnopqrstuvwxyz",
+    },
+    maxPreviewChars: 8,
+  });
+
+  assert.equal(packet.tasks.length, 3);
+  assert.deepEqual(packet.byStage.verify.statusCounts, { completed: 1, failed: 1 });
+  assert.equal(packet.tasks[1].structuredOutput.status, "verified");
+  assert.equal(packet.tasks[2].outputPreview, "abcdefgh…");
+  assert.equal(packet.tasks[2].structuredOutput, undefined);
+});
+
+test("workflow source context packet can cap oversized structured output", () => {
+  const packet = buildSourceContextPacket({
+    tasks: [
+      {
+        taskId: "task-1",
+        specId: "normalize.main",
+        stageId: "normalize",
+        status: "completed",
+        files: { output: "normalize.out", result: "normalize.json" },
+      },
+    ],
+  }, {
+    structuredOutputsByTaskId: {
+      "task-1": { huge: "abcdefghijklmnopqrstuvwxyz" },
+    },
+    maxStructuredChars: 16,
+  });
+  assert.equal(packet.tasks[0].structuredOutput.truncated, true);
+  assert.equal(packet.tasks[0].structuredOutput.originalChars > 16, true);
+  assert.match(packet.tasks[0].structuredOutput.preview, /^\{/);
+});
+
+test("workflow source context packet applies stage caps and a global packet budget", () => {
+  const run = {
+    tasks: [
+      { taskId: "task-1", specId: "plan.main", stageId: "plan", status: "completed", files: { output: "plan.out", result: "plan.json" } },
+      { taskId: "task-2", specId: "verify.claim-001", stageId: "verify", status: "completed", files: { output: "verify.out", result: "verify.json" } },
+      { taskId: "task-3", specId: "verify.claim-002", stageId: "verify", status: "completed", files: { output: "verify2.out", result: "verify2.json" } },
+    ],
+  };
+  const packet = buildSourceContextPacket(run, {
+    structuredOutputsByTaskId: {
+      "task-1": { plan: "abcdefghijklmnopqrstuvwxyz" },
+      "task-2": { evidence: "abcdefghijklmnopqrstuvwxyz" },
+      "task-3": { evidence: "abcdefghijklmnopqrstuvwxyz" },
+    },
+    maxStructuredChars: 64,
+    maxStructuredCharsByStage: { verify: 12 },
+    maxPacketChars: 320,
+  });
+
+  assert.equal(packet.tasks[1].structuredOutput.truncated, true);
+  assert.equal(packet.tasks[1].structuredOutput.preview.length <= 13, true);
+  assert.equal(packet.tasks[2].omittedOutput.reason, "packet_budget_exhausted");
+  assert.deepEqual(packet.byStage.verify.statusCounts, { completed: 2 });
+});
+
+test("workflow source context packet can project structured outputs by source stage", () => {
+  const packet = buildSourceContextPacket({
+    tasks: [
+      { taskId: "task-1", specId: "verify.claim-001", stageId: "verify", status: "completed", files: { output: "verify.out", result: "verify.json" } },
+    ],
+  }, {
+    structuredOutputsByTaskId: {
+      "task-1": {
+        id: "claim-001",
+        status: "verified",
+        verdictDigest: { support: "direct", sourceUrls: ["https://example.test"] },
+        evidence: [{ quote: "long quote that final should not need" }],
+      },
+    },
+    structuredOutputPathsByStage: {
+      verify: ["$.id", "$.status", "$.verdictDigest", "$.missingDigest"],
+    },
+  });
+
+  assert.deepEqual(packet.tasks[0].structuredOutput, {
+    id: "claim-001",
+    status: "verified",
+    verdictDigest: { support: "direct", sourceUrls: ["https://example.test"] },
+  });
+  assert.deepEqual(packet.tasks[0].projectionWarnings, [{ path: "$.missingDigest", reason: "missing" }]);
+});
+
+test("structured contract validator checks nested paths, arrays, and caps", () => {
+  const valid = validateStructuredContract({
+    finalReport: { mainFindings: [{ finding: "x" }], remainingGaps: { blocking: [], nonBlocking: ["minor"] } },
+    claimVerdictIndex: { claims: [{ id: "claim-001", status: "verified", sourceUrls: ["https://example.test"] }] },
+  }, {
+    requiredPaths: ["$.finalReport", "$.claimVerdictIndex.claims"],
+    arrays: [{ path: "$.claimVerdictIndex.claims", minItems: 1, maxItems: 2 }],
+    maxStringChars: [{ path: "$.finalReport.remainingGaps.nonBlocking[0]", maxChars: 16 }],
+  });
+  assert.equal(valid.valid, true);
+
+  const invalid = validateStructuredContract({ claimVerdictIndex: { claims: [] } }, {
+    requiredPaths: ["$.finalReport", "$.claimVerdictIndex.claims"],
+    arrays: [{ path: "$.claimVerdictIndex.claims", minItems: 1 }],
+  });
+  assert.equal(invalid.valid, false);
+  assert(invalid.issues.some((issue) => issue.path === "$.finalReport"));
+  assert(invalid.issues.some((issue) => issue.path === "$.claimVerdictIndex.claims" && issue.message.includes("at least 1")));
+});
+
+test("task output contract enforces nested structured JSON shape", async () => {
+  const cwd = makeProject();
+  try {
+    const taskDir = join(cwd, ".pi", "workflows", "workflow_unit", "tasks", "main");
+    mkdirSync(taskDir, { recursive: true });
+    const output = join(taskDir, "output.log");
+    const stderr = join(taskDir, "stderr.log");
+    const result = join(taskDir, "result.json");
+    writeFileSync(output, JSON.stringify({ finalReport: {}, claimVerdictIndex: { claims: [] } }));
+    writeFileSync(stderr, "");
+    const task = {
+      taskId: "main",
+      specId: "final.main",
+      displayName: "final.main",
+      agent: "unit-scout",
+      agentFile: "unit-scout.md",
+      roles: [],
+      status: "running",
+      statusDetail: "running",
+      runtime: { approvalMode: "non-interactive" },
+      cwd,
+      worktree: { enabled: false, path: null, branch: null, baseCwd: null, warning: null },
+      backendTaskId: "final.main",
+      launchToken: "token-1",
+      files: {
+        systemPrompt: ".pi/workflows/workflow_unit/tasks/main/system-prompt.md",
+        taskPrompt: ".pi/workflows/workflow_unit/tasks/main/task.md",
+        output: ".pi/workflows/workflow_unit/tasks/main/output.log",
+        stderr: ".pi/workflows/workflow_unit/tasks/main/stderr.log",
+        result: ".pi/workflows/workflow_unit/tasks/main/result.json",
+      },
+      output: {
+        format: "json",
+        onInvalid: "fail",
+        contract: {
+          requiredPaths: ["$.finalReport", "$.claimVerdictIndex.claims"],
+          arrays: [{ path: "$.claimVerdictIndex.claims", minItems: 1 }],
+        },
+      },
+    };
+    const changed = await applyTaskResultArtifact(cwd, task, {
+      resultFile: result,
+      result: { status: "completed", completedAt: new Date().toISOString(), exitCode: 0, launchToken: "token-1" },
+      status: "completed",
+      completedAfterTimeout: false,
+    });
+    assert.equal(changed, true);
+    assert.equal(task.status, "pending");
+    assert.equal(task.statusDetail, "retry_output_invalid");
+    const recorded = JSON.parse(readFileSync(result, "utf8"));
+    assert.equal(recorded.failureKind, "output_invalid");
+    assert.match(recorded.errorMessage, /expected at least 1 items/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("engine source context reads structured outputs and telemetry from task artifacts", async () => {
+  const cwd = makeProject();
+  try {
+    const run = {
+      createdAt: "2026-06-08T00:00:00.000Z",
+      updatedAt: "2026-06-08T00:01:00.000Z",
+      tasks: [
+        {
+          taskId: "task-1",
+          specId: "plan.main",
+          stageId: "plan",
+          status: "completed",
+          startedAt: "2026-06-08T00:00:00.000Z",
+          completedAt: "2026-06-08T00:00:10.000Z",
+          files: {
+            output: ".pi/workflows/workflow_unit/tasks/task-1/output.log",
+            stderr: ".pi/workflows/workflow_unit/tasks/task-1/stderr.log",
+            result: ".pi/workflows/workflow_unit/tasks/task-1/result.json",
+          },
+        },
+        {
+          taskId: "task-2",
+          specId: "verify.claim-001",
+          stageId: "verify",
+          status: "completed",
+          startedAt: "2026-06-08T00:00:20.000Z",
+          completedAt: "2026-06-08T00:00:50.000Z",
+          outputRetry: { attempts: 1 },
+          files: {
+            output: ".pi/workflows/workflow_unit/tasks/task-2/output.log",
+            stderr: ".pi/workflows/workflow_unit/tasks/task-2/stderr.log",
+            result: ".pi/workflows/workflow_unit/tasks/task-2/result.json",
+          },
+        },
+      ],
+    };
+    for (const task of run.tasks) mkdirSync(join(cwd, task.files.output, ".."), { recursive: true });
+    writeFileSync(join(cwd, run.tasks[0].files.output), "raw plan output");
+    writeFileSync(join(cwd, run.tasks[0].files.result), JSON.stringify({ structuredOutput: { researchQuestions: [{ id: "rq1" }] } }));
+    writeFileSync(join(cwd, run.tasks[1].files.output), "raw verify output");
+    writeFileSync(join(cwd, run.tasks[1].files.result), JSON.stringify({ structuredOutput: { id: "claim-001", status: "verified" } }));
+
+    const context = await buildRunSourceContext(cwd, run, run.tasks, { maxPreviewChars: 4 });
+    assert.equal(context.telemetry.wallClockMs, 60000);
+    assert.equal(context.telemetry.retryCounts.output, 1);
+    assert.equal(context.packet.tasks[0].structuredOutput.researchQuestions[0].id, "rq1");
+    assert.equal(context.packet.tasks[0].outputPreview, undefined);
+    assert.equal(context.packet.byStage.verify.statusCounts.completed, 1);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("schema and compiler support pi-subagent headless backend", async () => {
+  const cwd = makeProject();
+  try {
+    writeAgent(cwd, "unit-scout", "read");
+
+    const defaultCompiled = await compileWorkflow(workflowSpec("unit-scout"), { cwd, task: "Review" });
+    assert.equal(defaultCompiled.backend.mode, "headless");
+    assert.equal(defaultCompiled.maxConcurrency, 16);
+
+    const headlessSpec = workflowSpec("unit-scout", { defaults: { backend: { mode: "headless" } } });
+    assert.equal(parseWorkflow(headlessSpec).defaults.backend.mode, "headless");
+    assert.equal((await compileWorkflow(headlessSpec, { cwd, task: "Review" })).backend.mode, "headless");
+
+    assertThrowsFlow(() => parseWorkflow(workflowSpec("unit-scout", { defaults: { backend: { mode: "tmux" } } })));
+    assertThrowsFlow(() => parseWorkflow(workflowSpec("unit-scout", { defaults: { fast: "on" } })));
+    assertThrowsFlow(() => parseWorkflow(workflowSpec("unit-scout", { workflow: { stages: [{ id: "main", type: "task", fast: "on", prompt: "Do it." }] } })));
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("schema validates stage sourceContext projection settings", () => {
+  const parsed = parseWorkflow(workflowSpec("unit-scout", {
+    workflow: {
+      stages: [
+        {
+          id: "final",
+          type: "reduce",
+          sourceContext: {
+            maxStructuredChars: 1200,
+            maxPacketChars: 32000,
+            maxStructuredCharsByStage: { verify: 800 },
+            structuredOutputPathsByStage: { verify: ["$.id", "$.verdictDigest"] },
+          },
+          prompt: "Summarize",
+        },
+      ],
+    },
+  }));
+  assert.equal(parsed.workflow.stages[0].sourceContext.maxPacketChars, 32000);
+
+  const badCap = assertThrowsFlow(() => parseWorkflow(workflowSpec("unit-scout", {
+    workflow: { stages: [{ id: "final", type: "reduce", sourceContext: { maxPacketChars: "large" }, prompt: "Summarize" }] },
+  })));
+  assertIssue(badCap, "$.workflow.stages[0].sourceContext.maxPacketChars", "positive integer");
+
+  const badPath = assertThrowsFlow(() => parseWorkflow(workflowSpec("unit-scout", {
+    workflow: { stages: [{ id: "final", type: "reduce", sourceContext: { structuredOutputPathsByStage: { verify: ["id"] } }, prompt: "Summarize" }] },
+  })));
+  assertIssue(badPath, "$.workflow.stages[0].sourceContext.structuredOutputPathsByStage.verify[0]", "must start with $.");
+});
+
+test("compiler injects output JSON template from output protocol", async () => {
+  const cwd = makeProject();
+  try {
+    writeAgent(cwd, "unit-scout", "read");
+    const spec = workflowSpec("unit-scout", {
+      workflow: {
+        stages: [
+          {
+            id: "extract",
+            type: "task",
+            output: {
+              format: "json",
+              contract: { requiredPaths: ["$.items"] },
+              template: { items: [{ id: "item-001", text: "..." }] },
+            },
+            prompt: "Extract items.",
+          },
+          {
+            id: "verify",
+            type: "foreach",
+            from: { stage: "extract", path: "$.items" },
+            output: {
+              format: "json",
+              template: { id: "item-001", status: "verified|unsupported" },
+            },
+            each: { prompt: "Verify ${item}" },
+          },
+        ],
+      },
+    });
+    const compiled = await compileWorkflow(spec, { cwd, task: "Check items" });
+    assert.match(compiled.tasks[0].compiledPrompt, /# Output JSON Template/);
+    assert.match(compiled.tasks[0].compiledPrompt, /"items"/);
+
+    const { run } = await createStageFirstRunRecord(cwd, compiled, join(cwd, "workflows", "unit.json"));
+    await writeStaticRunArtifacts(cwd, run, compiled, spec);
+    setTaskTerminal(run.tasks[0], "completed", "completed", { exitCode: 0, lastMessage: "completed" });
+    await writeJsonAtomic(join(cwd, run.tasks[0].files.result), { status: "completed", structuredOutput: { items: [{ id: "alpha" }] } });
+    await writeRunRecord(cwd, run);
+    await scheduleRun(cwd, run.runId);
+    const compiledAfterMaterialize = JSON.parse(readFileSync(join(cwd, ".pi", "workflows", run.runId, "compiled.json"), "utf8"));
+    const verifyTask = compiledAfterMaterialize.tasks.find((task) => task.id === "verify.alpha");
+    assert.match(verifyTask.compiledPrompt, /# Output JSON Template/);
+    assert.match(verifyTask.compiledPrompt, /verified\|unsupported/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("compiler resolves internal and external output template refs", async () => {
+  const cwd = makeProject();
+  try {
+    writeAgent(cwd, "unit-scout", "read");
+    mkdirSync(join(cwd, "workflows", "templates"), { recursive: true });
+    writeFileSync(join(cwd, "workflows", "templates", "external.json"), JSON.stringify({ extract: { externalItems: ["..."] } }));
+
+    const internalSpec = workflowSpec("unit-scout", {
+      outputTemplates: { extract: { items: [{ id: "item-001" }] } },
+      workflow: {
+        stages: [
+          { id: "extract", type: "task", output: { format: "json", templateRef: "#/outputTemplates/extract" }, prompt: "Extract" },
+        ],
+      },
+    });
+    const internal = await compileWorkflow(internalSpec, { cwd, task: "Extract" });
+    assert.match(internal.tasks[0].compiledPrompt, /"items"/);
+    assert.equal(internal.tasks[0].output.templateRef, undefined);
+
+    const externalSpec = workflowSpec("unit-scout", {
+      workflow: {
+        stages: [
+          { id: "extract", type: "task", output: { format: "json", templateRef: "./templates/external.json#/extract" }, prompt: "Extract" },
+        ],
+      },
+    });
+    const external = await compileWorkflow(externalSpec, { cwd, specPath: join(cwd, "workflows", "external-workflow.json"), task: "Extract" });
+    assert.match(external.tasks[0].compiledPrompt, /"externalItems"/);
+    assert.equal(external.tasks[0].output.templateRef, undefined);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("JSON output parsing picks candidate matching contract paths", () => {
+  const output = 'Prose with escaped example `{\\"findings\\": null}` before the final answer.\n\n{"finding":{"title":"kept"},"verdict":"KEEP"}';
+  assert.deepEqual(parseJsonOutput(output, ["$.finding", "$.verdict"]), {
+    valid: true,
+    extracted: true,
+    structuredOutput: { finding: { title: "kept" }, verdict: "KEEP" },
+  });
+});
+
+test("invalid JSON output exhausts retry cap instead of looping", async () => {
+  const cwd = makeProject();
+  try {
+    const taskDir = join(cwd, ".pi", "workflows", "workflow_unit", "tasks", "task-1");
+    mkdirSync(taskDir, { recursive: true });
+    const output = join(taskDir, "output.log");
+    const result = join(taskDir, "result.json");
+    writeFileSync(output, '{"item":true');
+    const task = {
+      taskId: "task-1",
+      specId: "plan.main",
+      displayName: "plan.main",
+      agent: "unit-scout",
+      agentFile: "unit-scout.md",
+      roles: [],
+      status: "running",
+      statusDetail: "running",
+      runtime: { approvalMode: "non-interactive" },
+      cwd,
+      worktree: { enabled: false, path: null, branch: null, baseCwd: null, warning: null },
+      backendTaskId: "plan.main",
+      pid: 12345,
+      startedAt: new Date().toISOString(),
+      files: {
+        systemPrompt: ".pi/workflows/workflow_unit/tasks/task-1/system-prompt.md",
+        taskPrompt: ".pi/workflows/workflow_unit/tasks/task-1/task.md",
+        output: ".pi/workflows/workflow_unit/tasks/task-1/output.log",
+        stderr: ".pi/workflows/workflow_unit/tasks/task-1/stderr.log",
+        result: ".pi/workflows/workflow_unit/tasks/task-1/result.json",
+      },
+      output: { format: "json", contract: { requiredPaths: ["$.item"] }, onInvalid: "fail" },
+      outputRetry: { attempts: 1, maxAttempts: 1, reason: "output_invalid", message: "previous invalid output" },
+    };
+
+    const changed = await applyTaskResultArtifact(cwd, task, {
+      resultFile: result,
+      result: { status: "completed", completedAt: new Date().toISOString(), exitCode: 0 },
+      status: "completed",
+      completedAfterTimeout: false,
+    });
+
+    assert.equal(changed, true);
+    assert.equal(task.status, "failed");
+    assert.equal(task.statusDetail, "output_invalid_exhausted");
+    assert.equal(task.outputRetry.attempts, 2);
+    assert.equal(JSON.parse(readFileSync(result, "utf8")).failureKind, "output_invalid_exhausted");
+    assert.match(readFileSync(`${output}.invalid-attempt-2`, "utf8"), /item/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("output contract retry preserves DAG source context", async () => {
+  const cwd = makeProject();
+  let capturedPrompt = "";
+  try {
+    writeAgent(cwd, "unit-scout", "read");
+    setSubagentApiForTests({
+      async runSubagent(options) {
+        capturedPrompt = String(options.task ?? "");
+        return { runId: "run_stub", attemptId: "attempt_stub", status: "running" };
+      },
+      async getSubagentStatus() { return null; },
+      async reconcileSubagentRun() { return {}; },
+      async interruptSubagent() { return {}; },
+    });
+
+    const spec = workflowSpec("unit-scout", {
+      workflow: {
+        stages: [
+          { id: "extract", type: "task", output: { format: "json" }, prompt: "Extract source facts." },
+          {
+            id: "final",
+            type: "reduce",
+            from: "extract",
+            output: { format: "json", contract: { requiredPaths: ["$.summary"] }, onInvalid: "fail" },
+            prompt: "Summarize source facts.",
+          },
+        ],
+      },
+    });
+    const compiled = await compileWorkflow(spec, { cwd, task: "Review topic" });
+    const { run } = await createStageFirstRunRecord(cwd, compiled, join(cwd, "workflows", "unit.json"));
+    await writeStaticRunArtifacts(cwd, run, compiled, spec);
+
+    const sourceTask = run.tasks[0];
+    mkdirSync(dirname(join(cwd, sourceTask.files.output)), { recursive: true });
+    writeFileSync(join(cwd, sourceTask.files.output), "source fact alpha");
+    await writeJsonAtomic(join(cwd, sourceTask.files.result), {
+      status: "completed",
+      structuredOutput: { facts: ["source fact alpha"] },
+    });
+    setTaskTerminal(sourceTask, "completed", "completed", { exitCode: 0, lastMessage: "completed" });
+
+    const finalTask = run.tasks[1];
+    finalTask.status = "pending";
+    finalTask.statusDetail = "retry_output_invalid";
+    finalTask.outputRetry = { attempts: 1, maxAttempts: 1, reason: "output_invalid", message: "missing $.summary" };
+    mkdirSync(dirname(join(cwd, finalTask.files.output)), { recursive: true });
+    writeFileSync(`${join(cwd, finalTask.files.output)}.invalid-attempt-1`, '{"wrong":true}\n');
+    await writeRunRecord(cwd, run);
+
+    await scheduleRun(cwd, run.runId);
+
+    assert.match(capturedPrompt, /# Source Stage Context/);
+    assert.match(capturedPrompt, /source fact alpha/);
+    assert.match(capturedPrompt, /# Output Contract Retry Instructions/);
+    assert.match(capturedPrompt, /missing \$\.summary/);
+  } finally {
+    setSubagentApiForTests(undefined);
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("subagent launch forwards tool-call capture only when env is enabled", async () => {
+  const cwd = makeProject();
+  const previous = process.env.PI_WORKFLOW_CAPTURE_TOOL_CALLS;
+  const captured = [];
+  try {
+    writeAgent(cwd, "unit-scout", "read");
+    setSubagentApiForTests({
+      async runSubagent(options) {
+        captured.push(options);
+        return { runId: `run_stub_${captured.length}`, attemptId: `attempt_stub_${captured.length}`, status: "running" };
+      },
+      async getSubagentStatus() { return null; },
+      async reconcileSubagentRun() { return {}; },
+      async interruptSubagent() { return {}; },
+    });
+
+    const spec = workflowSpec("unit-scout", { workflow: { stages: [{ id: "main", type: "task", prompt: "Do work." }] } });
+    const compiled = await compileWorkflow(spec, { cwd, task: "Review topic" });
+
+    delete process.env.PI_WORKFLOW_CAPTURE_TOOL_CALLS;
+    const first = await createStageFirstRunRecord(cwd, compiled, join(cwd, "workflows", "unit-a.json"));
+    await writeStaticRunArtifacts(cwd, first.run, compiled, spec);
+    await writeRunRecord(cwd, first.run);
+    await scheduleRun(cwd, first.run.runId);
+    assert.equal(captured[0].captureToolCalls, undefined);
+
+    process.env.PI_WORKFLOW_CAPTURE_TOOL_CALLS = "1";
+    const second = await createStageFirstRunRecord(cwd, compiled, join(cwd, "workflows", "unit-b.json"));
+    await writeStaticRunArtifacts(cwd, second.run, compiled, spec);
+    await writeRunRecord(cwd, second.run);
+    await scheduleRun(cwd, second.run.runId);
+    assert.equal(captured[1].captureToolCalls, true);
+  } finally {
+    if (previous === undefined) delete process.env.PI_WORKFLOW_CAPTURE_TOOL_CALLS;
+    else process.env.PI_WORKFLOW_CAPTURE_TOOL_CALLS = previous;
+    setSubagentApiForTests(undefined);
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("subagent launch loads provider extensions for extension-backed tools", async () => {
+  const cwd = makeProject();
+  let captured;
+  try {
+    writeAgent(cwd, "unit-researcher", "read, web_search, fetch_content, get_search_content, scrapling_fetch");
+    setSubagentApiForTests({
+      async runSubagent(options) {
+        captured = options;
+        return { runId: "run_stub", attemptId: "attempt_stub", status: "running" };
+      },
+      async getSubagentStatus() { return null; },
+      async reconcileSubagentRun() { return {}; },
+      async interruptSubagent() { return {}; },
+    });
+
+    const spec = workflowSpec("unit-researcher", {
+      tools: ["read", "web_search", "fetch_content", "get_search_content", "scrapling_fetch"],
+      workflow: { stages: [{ id: "main", type: "task", prompt: "Research with web tools." }] },
+    });
+    const compiled = await compileWorkflow(spec, { cwd, task: "Research topic" });
+    const { run } = await createStageFirstRunRecord(cwd, compiled, join(cwd, "workflows", "unit.json"));
+    await writeStaticRunArtifacts(cwd, run, compiled, spec);
+    await writeRunRecord(cwd, run);
+    await scheduleRun(cwd, run.runId);
+
+    assert.deepEqual(captured.extensions, ["npm:pi-web-access", join(homedir(), ".pi", "agent", "packages", "pi-scrapling-access")]);
+  } finally {
+    setSubagentApiForTests(undefined);
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("completed subagent with contextLengthExceeded and valid output remains completed", async () => {
+  const cwd = makeProject();
+  try {
+    writeAgent(cwd, "unit-scout", "read");
+    const compiled = await compileWorkflow(workflowSpec("unit-scout", {
+      workflow: {
+        stages: [{
+          id: "main",
+          type: "task",
+          output: { format: "json", onInvalid: "fail", contract: { requiredPaths: ["$.ok"] } },
+          prompt: "Return JSON.",
+        }],
+      },
+    }), { cwd, task: "Review topic" });
+    const { run } = await createStageFirstRunRecord(cwd, compiled, join(cwd, "workflows", "unit.json"));
+    await writeStaticRunArtifacts(cwd, run, compiled, workflowSpec("unit-scout"));
+    const task = run.tasks[0];
+    task.status = "running";
+    task.statusDetail = "running";
+    task.startedAt = new Date().toISOString();
+    task.backendHandle = { engine: "pi-subagent", backend: "headless", runId: "run_context", attemptId: "attempt_context", cwd, runsDir: ".pi/workflow-subagents/context", display: "pi-subagent/headless run_context/attempt_context" };
+
+    const artifactDir = join(cwd, ".fake-context-subagent");
+    mkdirSync(artifactDir, { recursive: true });
+    writeFileSync(join(artifactDir, "output.log"), '{"ok":true}\n');
+    writeFileSync(join(artifactDir, "stderr.log"), "");
+    writeFileSync(join(artifactDir, "tool-calls-summary.json"), JSON.stringify({
+      enabled: true,
+      totalCalls: 1,
+      callsByTool: { fetch_content: 1 },
+      callsByCategory: { network: 1 },
+      errorsByTool: {},
+      resources: { urls: ["https://docs.example.test/a"], hosts: ["docs.example.test"] },
+    }));
+    writeFileSync(join(artifactDir, "result.json"), JSON.stringify({
+      status: "completed",
+      completedAt: new Date().toISOString(),
+      startedAt: task.startedAt,
+      exitCode: 0,
+      cwd,
+      metadata: { contextLengthExceeded: true, stopReason: "stop" },
+      artifacts: [
+        { type: "tool-calls-summary", path: ".fake-context-subagent/tool-calls-summary.json" },
+      ],
+    }));
+
+    setSubagentApiForTests({
+      async runSubagent() { throw new Error("not expected"); },
+      async reconcileSubagentRun() { return {}; },
+      async getSubagentStatus() {
+        return {
+          runId: "run_context",
+          attemptId: "attempt_context",
+          backend: "headless",
+          status: "completed",
+          failureKind: null,
+          startedAt: task.startedAt,
+          completedAt: new Date().toISOString(),
+          logs: [
+            { type: "output", path: ".fake-context-subagent/output.log", artifactCwd: cwd },
+            { type: "stderr", path: ".fake-context-subagent/stderr.log", artifactCwd: cwd },
+            { type: "result", path: ".fake-context-subagent/result.json", artifactCwd: cwd },
+          ],
+          metadata: { contextLengthExceeded: true, stopReason: "stop" },
+          attempts: [{ attemptId: "attempt_context", status: "completed", pid: 99999999 }],
+        };
+      },
+      async interruptSubagent() { return {}; },
+    });
+
+    await writeRunRecord(cwd, run);
+    const refreshed = await refreshRunFromSubagentArtifacts(cwd, await readRunRecord(cwd, run.runId));
+    const refreshedTask = refreshed.tasks[0];
+    const workflowResult = JSON.parse(readFileSync(join(cwd, refreshedTask.files.result), "utf8"));
+    assert.equal(refreshedTask.status, "completed");
+    assert.equal(refreshedTask.outputValidation.status, "valid");
+    assert.equal(workflowResult.contextLengthExceeded, true);
+    assert.equal(workflowResult.failureKind, undefined);
+    assert.deepEqual(workflowResult.structuredOutput, { ok: true });
+    assert.equal(workflowResult.subagent.toolCalls.totalCalls, 1);
+    assert.deepEqual(workflowResult.subagent.toolCalls.callsByTool, { fetch_content: 1 });
+    assert.equal(workflowResult.subagent.toolCallsSummaryPath, ".fake-context-subagent/tool-calls-summary.json");
+  } finally {
+    setSubagentApiForTests(undefined);
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("refresh adopts handle-less running subagent from deterministic runsDir", async () => {
+  const cwd = makeProject();
+  try {
+    writeAgent(cwd, "unit-scout", "read");
+    const compiled = await compileWorkflow(workflowSpec("unit-scout", {
+      workflow: { stages: [{ id: "main", type: "task", prompt: "Do work." }] },
+    }), { cwd, task: "Review topic" });
+    const { run } = await createStageFirstRunRecord(cwd, compiled, join(cwd, "workflows", "unit.json"));
+    await writeStaticRunArtifacts(cwd, run, compiled, workflowSpec("unit-scout"));
+    const task = run.tasks[0];
+    task.status = "running";
+    task.statusDetail = "launching";
+    task.startedAt = new Date().toISOString();
+    delete task.backendHandle;
+
+    const subRunId = "run_recovered";
+    const subAttemptId = "attempt_recovered";
+    const runsDir = join(cwd, ".pi", "workflow-subagents", run.runId, task.taskId);
+    const subRunDir = join(runsDir, subRunId);
+    mkdirSync(subRunDir, { recursive: true });
+    writeFileSync(join(subRunDir, "run.json"), JSON.stringify({
+      runId: subRunId,
+      correlationId: `${run.runId}:${task.taskId}`,
+      status: "completed",
+      backend: "headless",
+      startedAt: task.startedAt,
+      updatedAt: new Date().toISOString(),
+      latestAttemptId: subAttemptId,
+      attempts: [{ attemptId: subAttemptId, status: "completed", backend: "headless", startedAt: task.startedAt, updatedAt: new Date().toISOString() }],
+    }));
+
+    const artifactDir = join(cwd, ".fake-subagent");
+    mkdirSync(artifactDir, { recursive: true });
+    writeFileSync(join(artifactDir, "output.log"), "adopted output\n");
+    writeFileSync(join(artifactDir, "stderr.log"), "");
+    writeFileSync(join(artifactDir, "result.json"), JSON.stringify({
+      status: "completed",
+      completedAt: new Date().toISOString(),
+      startedAt: task.startedAt,
+      exitCode: 0,
+      metadata: { contextLengthExceeded: false },
+    }));
+
+    setSubagentApiForTests({
+      async runSubagent() { throw new Error("not expected"); },
+      async reconcileSubagentRun() { return {}; },
+      async getSubagentStatus() {
+        return {
+          runId: subRunId,
+          attemptId: subAttemptId,
+          backend: "headless",
+          status: "completed",
+          failureKind: null,
+          startedAt: task.startedAt,
+          completedAt: new Date().toISOString(),
+          logs: [
+            { type: "output", path: ".fake-subagent/output.log", artifactCwd: cwd },
+            { type: "stderr", path: ".fake-subagent/stderr.log", artifactCwd: cwd },
+            { type: "result", path: ".fake-subagent/result.json", artifactCwd: cwd },
+          ],
+          metadata: { contextLengthExceeded: false },
+          attempts: [{ attemptId: subAttemptId, status: "completed", pid: 99999999 }],
+        };
+      },
+      async interruptSubagent() { return {}; },
+    });
+
+    await writeRunRecord(cwd, run);
+    const refreshed = await refreshRunFromSubagentArtifacts(cwd, await readRunRecord(cwd, run.runId));
+    assert.equal(refreshed.tasks[0].status, "completed");
+    assert.equal(refreshed.tasks[0].backendHandle, undefined);
+    const workflowResult = JSON.parse(readFileSync(join(cwd, refreshed.tasks[0].files.result), "utf8"));
+    assert.equal(workflowResult.subagent.runId, subRunId);
+    assert.equal(readFileSync(join(cwd, refreshed.tasks[0].files.output), "utf8"), "adopted output\n");
+  } finally {
+    setSubagentApiForTests(undefined);
     rmSync(cwd, { recursive: true, force: true });
   }
 });

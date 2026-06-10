@@ -16,7 +16,7 @@ import {
 import { ResolvedWorkflowSpecRef, resolveWorkflowRef } from "./workflow-specs.js";
 import { parseYamlSubset } from "./yaml.js";
 
-const TOP_LEVEL_KEYS = new Set(["schemaVersion", "name", "description", "defaults", "backend", "roles", "flow"]);
+const TOP_LEVEL_KEYS = new Set(["schemaVersion", "name", "description", "defaults", "backend", "roles", "flow", "outputTemplates"]);
 const MAX_CONCURRENCY = 16;
 const MAX_RUNTIME_MS = 86_400_000;
 const DEFAULT_KEYS = new Set([
@@ -46,6 +46,7 @@ const TASK_KEYS = new Set([
   "tools",
   "readOnly",
   "worktreePolicy",
+  "output",
   "outputContract",
   "maxRuntimeMs",
   "dependsOn",
@@ -56,6 +57,11 @@ const WORKFLOW_CHAIN_KEYS = new Set(["type", "steps"]);
 const WORKFLOW_DAG_KEYS = new Set(["type", "tasks"]);
 const WORKFLOW_MAP_KEYS = new Set(["type", "items", "task", "aggregate"]);
 const MAP_ITEM_KEYS = new Set(["id", "input"]);
+const OUTPUT_KEYS = new Set(["format", "onInvalid", "contract", "template", "templateRef"]);
+const OUTPUT_FORMATS = new Set(["text", "json", "markdown"]);
+const OUTPUT_ON_INVALID = new Set(["fail", "warn"]);
+const OUTPUT_CONTRACT_KEYS = new Set(["requiredPaths", "arrays", "maxStringChars"]);
+const SOURCE_CONTEXT_KEYS = new Set(["maxPreviewChars", "maxStructuredChars", "maxStructuredCharsByStage", "structuredOutputPathsByStage", "maxPacketChars"]);
 
 export interface LoadedWorkflowSpec extends ResolvedWorkflowSpecRef {
   spec: WorkflowSpec;
@@ -106,6 +112,7 @@ export function parseWorkflowSpec(value: unknown): WorkflowSpec {
     if (root.backend !== undefined) parseBackend(root.backend, "$.backend", issues);
     if (root.defaults !== undefined) parseDefaults(root.defaults, "$.defaults", issues);
     if (root.roles !== undefined) parseRoles(root.roles, "$.roles", issues);
+    if (root.outputTemplates !== undefined) parseOutputTemplates(root.outputTemplates, "$.outputTemplates", issues);
     parseWorkflowBody(root.flow, "$.flow", issues);
   }
 
@@ -150,12 +157,8 @@ function parseBackend(value: unknown, path: string, issues: ValidationIssue[]): 
     issues.push({ path: `${path}.type`, message: 'must be "local-pi"' });
   }
 
-  if (backend.mode !== undefined) {
-    if (backend.mode === "headless") {
-      issues.push({ path: `${path}.mode`, message: '"headless" is reserved and unsupported in MVP' });
-    } else if (backend.mode !== "auto" && backend.mode !== "tmux") {
-      issues.push({ path: `${path}.mode`, message: 'must be "auto" or "tmux"' });
-    }
+  if (backend.mode !== undefined && backend.mode !== "auto" && backend.mode !== "headless") {
+    issues.push({ path: `${path}.mode`, message: 'must be "auto" or "headless"' });
   }
 }
 
@@ -300,11 +303,90 @@ function parseTask(
   optionalStringArray(task, "tools", `${path}.tools`, issues);
   optionalBoolean(task, "readOnly", `${path}.readOnly`, issues);
   optionalEnum(task, "worktreePolicy", WORKTREE_POLICIES, `${path}.worktreePolicy`, issues);
+  if (task.output !== undefined) parseOutput(task.output, `${path}.output`, issues);
   optionalString(task, "outputContract", `${path}.outputContract`, issues);
   optionalPositiveInteger(task, "maxRuntimeMs", `${path}.maxRuntimeMs`, issues, MAX_RUNTIME_MS);
   optionalStringArray(task, "dependsOn", `${path}.dependsOn`, issues);
   if (task.dependsOn !== undefined && !options.allowDependsOn) {
     issues.push({ path: `${path}.dependsOn`, message: "is only supported for dag flows" });
+  }
+}
+
+function parseOutputTemplates(value: unknown, path: string, issues: ValidationIssue[]): void {
+  const templates = objectAt(value, path, issues);
+  if (!templates) return;
+  for (const key of Object.keys(templates)) {
+    if (key.trim() === "") issues.push({ path, message: "template names must be non-empty" });
+  }
+}
+
+function parseOutput(value: unknown, path: string, issues: ValidationIssue[]): void {
+  const output = objectAt(value, path, issues);
+  if (!output) return;
+  rejectUnknownKeys(output, OUTPUT_KEYS, path, issues);
+  if (!OUTPUT_FORMATS.has(output.format as string)) issues.push({ path: `${path}.format`, message: "must be one of: text, json, markdown" });
+  optionalString(output, "templateRef", `${path}.templateRef`, issues);
+  if (output.template !== undefined && output.templateRef !== undefined) {
+    issues.push({ path, message: "must not specify both template and templateRef" });
+  }
+  if (output.onInvalid !== undefined && !OUTPUT_ON_INVALID.has(output.onInvalid as string)) {
+    issues.push({ path: `${path}.onInvalid`, message: "must be one of: fail, warn" });
+  }
+  if (output.contract !== undefined) parseOutputContract(output.contract, `${path}.contract`, issues);
+}
+
+function parseOutputContract(value: unknown, path: string, issues: ValidationIssue[]): void {
+  const contract = objectAt(value, path, issues);
+  if (!contract) return;
+  rejectUnknownKeys(contract, OUTPUT_CONTRACT_KEYS, path, issues);
+  optionalStringArray(contract, "requiredPaths", `${path}.requiredPaths`, issues);
+}
+
+function parseSourceContext(value: unknown, path: string, issues: ValidationIssue[]): void {
+  const sourceContext = objectAt(value, path, issues);
+  if (!sourceContext) return;
+  rejectUnknownKeys(sourceContext, SOURCE_CONTEXT_KEYS, path, issues);
+  optionalPositiveInteger(sourceContext, "maxPreviewChars", `${path}.maxPreviewChars`, issues);
+  optionalPositiveInteger(sourceContext, "maxStructuredChars", `${path}.maxStructuredChars`, issues);
+  optionalPositiveInteger(sourceContext, "maxPacketChars", `${path}.maxPacketChars`, issues);
+  parsePositiveIntegerMap(sourceContext.maxStructuredCharsByStage, `${path}.maxStructuredCharsByStage`, issues);
+  parseJsonPathArrayMap(sourceContext.structuredOutputPathsByStage, `${path}.structuredOutputPathsByStage`, issues);
+}
+
+function parsePositiveIntegerMap(value: unknown, path: string, issues: ValidationIssue[]): void {
+  if (value === undefined) return;
+  const map = objectAt(value, path, issues);
+  if (!map) return;
+  for (const [key, item] of Object.entries(map)) {
+    if (key.trim() === "") issues.push({ path, message: "keys must be non-empty" });
+    if (typeof item !== "number" || !Number.isInteger(item) || item <= 0) {
+      issues.push({ path: `${path}.${jsonKey(key)}`, message: "must be a positive integer" });
+    }
+  }
+}
+
+function parseJsonPathArrayMap(value: unknown, path: string, issues: ValidationIssue[]): void {
+  if (value === undefined) return;
+  const map = objectAt(value, path, issues);
+  if (!map) return;
+  for (const [key, paths] of Object.entries(map)) {
+    if (key.trim() === "") issues.push({ path, message: "keys must be non-empty" });
+    const itemPath = `${path}.${jsonKey(key)}`;
+    if (!Array.isArray(paths)) {
+      issues.push({ path: itemPath, message: "must be an array" });
+      continue;
+    }
+    const seen = new Set<string>();
+    paths.forEach((jsonPath, index) => {
+      const entryPath = `${itemPath}[${index}]`;
+      if (typeof jsonPath !== "string" || jsonPath.trim() === "") {
+        issues.push({ path: entryPath, message: "must be a non-empty string" });
+        return;
+      }
+      if (!jsonPath.startsWith("$.")) issues.push({ path: entryPath, message: "must start with $." });
+      if (seen.has(jsonPath)) issues.push({ path: entryPath, message: `duplicate value "${jsonPath}"` });
+      seen.add(jsonPath);
+    });
   }
 }
 
@@ -426,7 +508,7 @@ export const parseWorkflow = parseWorkflowSpecCompat;
 const STAGE_FIRST_LOOP_MAX_ROUNDS = 50;
 const STAGE_FIRST_OUTPUT_FORMATS = ["text", "json", "markdown"] as const;
 const STAGE_FIRST_OUTPUT_ON_INVALID = ["fail", "warn"] as const;
-const STAGE_FIRST_OUTPUT_KEYS = new Set(["format", "requiredKeys", "onInvalid"]);
+const STAGE_FIRST_OUTPUT_KEYS = new Set(["format", "requiredKeys", "onInvalid", "contract", "template", "templateRef"]);
 const STAGE_FIRST_LOOP_STAGE_KEYS = new Set([
   "id",
   "type",
@@ -468,12 +550,24 @@ export function parseStageFirstWorkflowSpec(value: unknown): any {
   const stages = spec.workflow?.stages ?? spec.flow?.stages;
   if (spec.schemaVersion !== 1) throw new WorkflowValidationError([{ path: "$.schemaVersion", message: "must be exactly 1" }]);
   if (!Array.isArray(stages)) throw new WorkflowValidationError([{ path: "$.workflow.stages", message: "must be an array" }]);
+
+  const issues: ValidationIssue[] = [];
+  if (spec.backend !== undefined) parseBackend(spec.backend, "$.backend", issues);
+  if (spec.defaults?.backend !== undefined) parseBackend(spec.defaults.backend, "$.defaults.backend", issues);
+  if (spec.fast === "on") issues.push({ path: "$.fast", message: "fast:on is not supported" });
+  if (spec.defaults?.fast === "on") issues.push({ path: "$.defaults.fast", message: "fast:on is not supported" });
+  if (spec.outputTemplates !== undefined) parseOutputTemplates(spec.outputTemplates, "$.outputTemplates", issues);
+
   for (const [index, stageValue] of stages.entries()) {
     const stagePath = `$.workflow.stages[${index}]`;
     const stage = requireStageFirstObject(stageValue, stagePath);
     validateStageFirstStage(stage, stagePath);
+    if (stage.output !== undefined) parseOutput(stage.output, `${stagePath}.output`, issues);
+    if (stage.sourceContext !== undefined) parseSourceContext(stage.sourceContext, `${stagePath}.sourceContext`, issues);
     if (stage.type === "loop") validateStageFirstLoopStage(stage, stagePath);
   }
+
+  if (issues.length > 0) throw new WorkflowValidationError(issues);
   if (!spec.workflow && spec.flow?.stages) return { ...spec, workflow: { stages: spec.flow.stages } };
   return spec;
 }

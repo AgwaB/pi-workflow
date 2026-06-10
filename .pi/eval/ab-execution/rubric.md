@@ -1,6 +1,3 @@
-> Historical archive. Non-authoritative. Preserved for recovery context only.
-> Current public terminology is workflow / workflow spec / workflow file / workflow run.
-
 # A/B Execution Rubric
 
 Blind scoring rubric for comparing two execution arms (A and B) on the same task.
@@ -65,7 +62,7 @@ A_score = mean(correctness, completeness, evidenceQuality, actionability, concis
 B_score = mean(...)
 
 if exactly one arm has a hard failure -> the other arm wins
-else if |A_score - B_score| >= 0.01    -> higher mean wins
+else if top score gap > 1/6 + epsilon  -> higher mean wins
 else                                    -> tie
 ```
 

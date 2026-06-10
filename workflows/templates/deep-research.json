@@ -1,0 +1,409 @@
+{
+  "plan": {
+    "depth": "quick|standard|max",
+    "taskType": "vendor_comparison|decision_memo|implementation_guidance|research_survey|security_review|api_reference|benchmark_analysis|other",
+    "researchAxes": [
+      {
+        "axis": "...",
+        "values": [
+          "..."
+        ],
+        "whyItMatters": "..."
+      }
+    ],
+    "factSlots": [
+      {
+        "id": "slot-001",
+        "label": "...",
+        "type": "mechanism|numeric|pricing|policy|version|date|limit|tradeoff|risk|recommendation|source_landscape|other",
+        "required": true,
+        "entities": [
+          "..."
+        ],
+        "sourcePriority": "primary_required|primary_preferred|credible_secondary_ok",
+        "verificationPriority": "critical|high|normal|low"
+      }
+    ],
+    "sourcePolicy": {
+      "preferredSources": [
+        "official_docs",
+        "official_pricing",
+        "official_blog",
+        "primary_paper",
+        "benchmark_repo",
+        "credible_secondary"
+      ],
+      "primaryRequiredFor": [
+        "pricing",
+        "numeric",
+        "policy",
+        "version",
+        "date",
+        "limit"
+      ],
+      "sourceQualityRules": "..."
+    },
+    "verificationPriorities": [
+      {
+        "priority": "critical|high|normal|low",
+        "target": "...",
+        "reason": "..."
+      }
+    ],
+    "expectedFinalShape": "side_by_side_comparison|decision_memo|implementation_checklist|research_brief|security_findings|benchmark_table|other",
+    "planRisks": [
+      {
+        "risk": "...",
+        "mitigation": "..."
+      }
+    ],
+    "researchScope": [
+      "..."
+    ],
+    "researchQuestions": [
+      {
+        "id": "rq1",
+        "question": "...",
+        "covers": [
+          "..."
+        ],
+        "coversFactSlots": [
+          "slot-001"
+        ],
+        "searchQueries": [
+          "..."
+        ],
+        "priority": "core|useful|optional"
+      }
+    ],
+    "researchScopeCoverage": [
+      {
+        "scopeItem": "...",
+        "coveredBy": [
+          "rq1"
+        ],
+        "status": "covered|partial|gap|out_of_scope"
+      }
+    ],
+    "verificationRubric": {
+      "sourceQuality": "...",
+      "corroboration": "...",
+      "blockingEvidenceGap": "..."
+    },
+    "notes": "..."
+  },
+  "researchQuestion": {
+    "question": "...",
+    "covers": [
+      "..."
+    ],
+    "extractedFacts": [
+      {
+        "slotId": "slot-001",
+        "slotLabel": "...",
+        "entity": "...",
+        "value": "...",
+        "factType": "mechanism|numeric|pricing|policy|version|date|limit|tradeoff|risk|recommendation|source_landscape|other",
+        "sourceUrls": [
+          "..."
+        ],
+        "sourceTitleOrPublisher": "...",
+        "dateOrYear": "...",
+        "sourceQuality": "high|medium|low",
+        "confidence": "high|medium|low",
+        "quote": "...",
+        "notes": "..."
+      }
+    ],
+    "claims": [
+      {
+        "claim": "...",
+        "sourceUrls": [
+          "..."
+        ],
+        "sourceQuality": "high|medium|low",
+        "scopeItems": [
+          "..."
+        ],
+        "factSlotIds": [
+          "slot-001"
+        ]
+      }
+    ],
+    "additionalUnverifiedLeads": [
+      "..."
+    ],
+    "sources": [
+      {
+        "title": "...",
+        "url": "...",
+        "publisher": "...",
+        "sourceQuality": "high|medium|low"
+      }
+    ],
+    "caveats": [
+      "..."
+    ],
+    "sourceQualityNotes": "..."
+  },
+  "normalizeClaims": {
+    "claimInventory": {
+      "verificationCandidates": [
+        {
+          "id": "claim-001",
+          "claim": "...",
+          "sourceUrls": [
+            "..."
+          ],
+          "sourceQuality": "high|medium|low",
+          "reasonToVerify": "...",
+          "scopeItems": [
+            "..."
+          ],
+          "factSlotIds": [
+            "slot-001"
+          ],
+          "verificationNeed": "core|useful|optional"
+        }
+      ],
+      "preservedClaims": [
+        {
+          "id": "preserved-001",
+          "claim": "...",
+          "reason": "budget_overflow|lower_centrality|out_of_scope|low_value|weak_source|duplicate|unverified_slot_fact",
+          "sourceUrls": [
+            "..."
+          ],
+          "factSlotIds": [
+            "slot-001"
+          ],
+          "whyItMatters": "..."
+        }
+      ],
+      "duplicates": [
+        {
+          "id": "duplicate-001",
+          "canonicalClaimId": "claim-001"
+        }
+      ]
+    },
+    "factSlotCoverage": [
+      {
+        "slotId": "slot-001",
+        "label": "...",
+        "status": "filled|partial|conflicting|missing|not_applicable",
+        "bestValue": "...",
+        "sourceUrls": [
+          "..."
+        ],
+        "sourceQuality": "high|medium|low|none",
+        "verificationCandidateIds": [
+          "claim-001"
+        ],
+        "gapReason": "...",
+        "parentImpact": "..."
+      }
+    ],
+    "coverageGaps": [
+      {
+        "scopeItem": "...",
+        "status": "partial|gap|out_of_scope",
+        "note": "...",
+        "relatedFactSlotIds": [
+          "slot-001"
+        ]
+      }
+    ],
+    "researchScopeCoverage": [
+      {
+        "scopeItem": "...",
+        "status": "covered|partial|gap|out_of_scope"
+      }
+    ],
+    "normalizationNotes": "..."
+  },
+  "verifyClaim": {
+    "id": "claim-001",
+    "claim": "...",
+    "factSlotIds": [
+      "slot-001"
+    ],
+    "status": "verified|partially_supported|unsupported|conflicting",
+    "confidence": "high|medium|low",
+    "verdictDigest": {
+      "support": "One concise sentence explaining why the verifier assigned this status.",
+      "sourceUrls": [
+        "..."
+      ],
+      "caveat": "...",
+      "correctionOrCounterclaim": "..."
+    },
+    "evidence": [
+      {
+        "source": "...",
+        "url": "...",
+        "dateOrYear": "...",
+        "quote": "...",
+        "relevance": "..."
+      }
+    ],
+    "caveats": [
+      "..."
+    ],
+    "correctionOrCounterclaim": "..."
+  },
+  "final": {
+    "finalReport": {
+      "summary": "...",
+      "researchMetadata": {
+        "taskType": "...",
+        "expectedFinalShape": "...",
+        "researchQuestions": 0,
+        "factSlotsPlanned": 0,
+        "factSlotsFilled": 0,
+        "factSlotsPartial": 0,
+        "factSlotsMissing": 0,
+        "claimsVerified": 0,
+        "sourcePolicySummary": "..."
+      },
+      "coverageSummary": {
+        "depth": "quick|standard|max",
+        "verified": 0,
+        "partiallySupported": 0,
+        "unsupported": 0,
+        "conflicting": 0,
+        "preserved": 0,
+        "unverifiedButRelevant": 0,
+        "coverageGaps": 0
+      },
+      "factSlotCoverage": [
+        {
+          "slotId": "slot-001",
+          "label": "...",
+          "status": "filled|partial|conflicting|missing|not_applicable",
+          "bestValue": "...",
+          "sourceUrls": [
+            "..."
+          ],
+          "evidenceStatus": "verified|partially_supported|conflicting|unsupported|unverified",
+          "parentImpact": "..."
+        }
+      ],
+      "mainFindings": [
+        {
+          "id": "mf-1",
+          "finding": "...",
+          "claimIds": [
+            "claim-001"
+          ],
+          "citations": [
+            "..."
+          ]
+        }
+      ],
+      "caveatedFindings": [],
+      "contestedAreas": [],
+      "notableUnsupportedClaims": [],
+      "unverifiedButRelevant": [
+        {
+          "id": "uv-1",
+          "claimOrLead": "...",
+          "whyItMatters": "...",
+          "evidenceStatus": "preserved|unverified|weak_source|not_checked|out_of_scope_but_relevant",
+          "sourceUrls": [
+            "..."
+          ],
+          "parentAction": "consider|verify_next|treat_as_gap|ignore_unless_needed"
+        }
+      ],
+      "parentDecisionNotes": [
+        {
+          "decision": "...",
+          "whyParentMustDecide": "...",
+          "evidenceState": "verified|partial|conflicting|unverified|gap",
+          "options": [
+            "..."
+          ],
+          "recommendedDefault": "..."
+        }
+      ],
+      "researchScopeCoverage": [
+        {
+          "scopeItem": "...",
+          "status": "covered|partial|gap|out_of_scope"
+        }
+      ],
+      "remainingGaps": {
+        "blocking": [
+          {
+            "gap": "...",
+            "whyItMatters": "...",
+            "evidenceState": "missing_primary_source|unfetched_source|unsupported_quantitative_claim|incomplete_verification|other",
+            "sourceUrls": [
+              "..."
+            ],
+            "nextStep": "..."
+          }
+        ],
+        "nonBlocking": [
+          {
+            "gap": "...",
+            "whyItMatters": "...",
+            "evidenceState": "missing_primary_source|unfetched_source|unsupported_quantitative_claim|incomplete_verification|other",
+            "sourceUrls": [
+              "..."
+            ],
+            "nextStep": "..."
+          }
+        ]
+      },
+      "recommendations": [
+        {
+          "id": "rec-1",
+          "recommendation": "...",
+          "why": "...",
+          "claimIds": [
+            "claim-001"
+          ],
+          "priority": "now|next|later",
+          "sourceUrls": [
+            "..."
+          ],
+          "evidenceStatus": "verified|partial|conflicting|unverified|gap"
+        }
+      ],
+      "actionPlan": [
+        {
+          "step": "...",
+          "rationale": "...",
+          "claimIds": [
+            "claim-001"
+          ],
+          "sourceUrls": [
+            "..."
+          ],
+          "evidenceStatus": "verified|partial|conflicting|unverified|gap"
+        }
+      ]
+    },
+    "claimVerdictIndex": {
+      "claims": [
+        {
+          "id": "claim-001",
+          "status": "verified|partially_supported|unsupported|conflicting|preserved",
+          "confidence": "high|medium|low",
+          "sourceUrls": [
+            "..."
+          ],
+          "factSlotIds": [
+            "slot-001"
+          ],
+          "support": "...",
+          "caveat": "...",
+          "correctionOrCounterclaim": "..."
+        }
+      ],
+      "artifactNote": "Verifier task result artifacts contain the full evidence rows; this index is a compact synthesis handoff."
+    }
+  }
+}
