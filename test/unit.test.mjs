@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 
 import { parseAgentMarkdown } from "../.tmp/unit/agents.js";
@@ -280,16 +280,75 @@ test("schema accepts valid loop with until all and onExhausted reduce", () => {
 
 test("schema rejects nested loop child", () => {
   const error = assertThrowsFlow(() => parseWorkflow(loopWorkflowSpec({
-    stages: [{ id: "inner", type: "loop", stages: [], maxRounds: 1, until: { stage: "check", path: "$.status", equals: "pass" } }],
+    stages: [
+      { id: "inner", type: "loop", stages: [], maxRounds: 1, until: { stage: "check", path: "$.status", equals: "pass" } },
+      { id: "check", type: "task", prompt: "Check." },
+    ],
   })));
   assertIssue(error, "$.workflow.stages[0].stages[0].type", "not supported in v1");
 });
 
 test("schema rejects foreach child in loop as deferred", () => {
   const error = assertThrowsFlow(() => parseWorkflow(loopWorkflowSpec({
-    stages: [{ id: "items", type: "foreach", from: { stage: "check", path: "$.items" }, each: { prompt: "Review ${item}" } }],
+    stages: [
+      { id: "items", type: "foreach", from: { stage: "check", path: "$.items" }, each: { prompt: "Review ${item}" } },
+      { id: "check", type: "task", prompt: "Check." },
+    ],
   })));
   assertIssue(error, "$.workflow.stages[0].stages[0].type", "deferred");
+});
+
+test("schema rejects parallel child in loop", () => {
+  const error = assertThrowsFlow(() => parseWorkflow(loopWorkflowSpec({
+    stages: [
+      { id: "implement", type: "parallel", tasks: [{ id: "a", prompt: "A" }, { id: "b", prompt: "B" }] },
+      { id: "check", type: "task", prompt: "Check." },
+    ],
+  })));
+  assertIssue(error, "$.workflow.stages[0].stages[0].type", "parallel child stages are not supported in loop v1");
+});
+
+test("schema rejects loop check that is the first mutating implementation stage", () => {
+  const error = assertThrowsFlow(() => parseWorkflow(loopWorkflowSpec({
+    stages: [
+      { id: "implement", type: "task", readOnly: false, tools: ["read", "edit"], prompt: "Implement." },
+      { id: "check", type: "task", tools: ["read"], prompt: "Check." },
+    ],
+    until: { stage: "implement", path: "$.status", equals: "pass" },
+  })));
+  assertIssue(error, "$.workflow.stages[0].until.stage", "check/until stage must be distinct");
+});
+
+test("schema accepts bundled implement-loop separation shape", () => {
+  const spec = JSON.parse(readFileSync(join(process.cwd(), "workflows", "implement-loop.json"), "utf8"));
+  assert.doesNotThrow(() => parseWorkflow(spec));
+});
+
+test("schema rejects loop missing its own id", () => {
+  const spec = loopWorkflowSpec();
+  delete spec.workflow.stages[0].id;
+  const error = assertThrowsFlow(() => parseWorkflow(spec));
+  assertIssue(error, "$.workflow.stages[0].id", "is required");
+});
+
+test("schema rejects loop child missing id", () => {
+  const error = assertThrowsFlow(() => parseWorkflow(loopWorkflowSpec({
+    stages: [
+      { type: "task", prompt: "Implement." },
+      { id: "check", type: "task", prompt: "Check." },
+    ],
+  })));
+  assertIssue(error, "$.workflow.stages[0].stages[0].id", "is required");
+});
+
+test("schema rejects duplicate loop child ids", () => {
+  const error = assertThrowsFlow(() => parseWorkflow(loopWorkflowSpec({
+    stages: [
+      { id: "implement", type: "task", prompt: "Implement." },
+      { id: "implement", type: "task", prompt: "Check." },
+    ],
+  })));
+  assertIssue(error, "$.workflow.stages[0].stages[1].id", "duplicate child stage id");
 });
 
 test("schema rejects loop maxRounds missing", () => {
@@ -710,6 +769,51 @@ test("loop round 1 materializes child tasks with deterministic ids", async () =>
   }
 });
 
+test("loop resume reconciliation backfills missing run records for compiled round tasks", async () => {
+  const cwd = makeProject();
+  try {
+    writeAgent(cwd, "unit-scout", "read");
+    const loopStage = loopWorkflowSpec().workflow.stages[0];
+    const spec = workflowSpec("unit-scout", {
+      workflow: { stages: [loopStage, { id: "after", type: "task", prompt: "After loop." }] },
+    });
+    const { run } = await createLoopRun(cwd, spec);
+    await scheduleRun(cwd, run.runId);
+    let current = await readRunRecord(cwd, run.runId);
+    assert.deepEqual(current.tasks.map((task) => task.specId), [
+      "fix-loop.loop",
+      "fix-loop.r01.implement",
+      "fix-loop.r01.check",
+      "after.main",
+    ]);
+
+    current.tasks = current.tasks.filter((task) => !task.specId.startsWith("fix-loop.r01."));
+    await writeRunRecord(cwd, current);
+
+    await scheduleRun(cwd, run.runId);
+    current = await readRunRecord(cwd, run.runId);
+    assert.deepEqual(current.tasks.map((task) => task.specId), [
+      "fix-loop.loop",
+      "fix-loop.r01.implement",
+      "fix-loop.r01.check",
+      "after.main",
+    ]);
+    assert.equal(current.tasks.filter((task) => task.specId === "fix-loop.r01.implement").length, 1);
+    assert.equal(current.tasks.filter((task) => task.specId === "fix-loop.r01.check").length, 1);
+
+    await completeTask(cwd, taskBySpec(current, "fix-loop.r01.implement"), { changed: true });
+    await completeTask(cwd, taskBySpec(current, "fix-loop.r01.check"), { status: "pass", verdict: "ACCEPT", blockingFailures: [] });
+    await writeRunRecord(cwd, current);
+    await scheduleRun(cwd, run.runId);
+    current = await readRunRecord(cwd, run.runId);
+    assert.equal(taskBySpec(current, "fix-loop.loop").status, "completed");
+    assert.equal(current.loopResults[0].status, "completed");
+    assert.equal(taskBySpec(current, "after.main").status, "pending");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("loop until satisfied after a round marks loop completed and stops materializing", async () => {
   const cwd = makeProject();
   try {
@@ -822,6 +926,48 @@ test("loop maxRounds exhaustion materializes and waits for onExhausted", async (
   }
 });
 
+test("loop onExhausted context includes bounded prior round check outputs", async () => {
+  const cwd = makeProject();
+  try {
+    writeAgent(cwd, "unit-scout", "read");
+    const spec = loopWorkflowSpec({
+      maxRounds: 2,
+      onExhausted: { id: "loop-summary", type: "reduce", prompt: "Summarize each round." },
+    });
+    const { run } = await createLoopRun(cwd, spec);
+    await scheduleRun(cwd, run.runId);
+    let current = await readRunRecord(cwd, run.runId);
+    await completeTask(cwd, taskBySpec(current, "fix-loop.r01.implement"), { changed: true });
+    await completeTask(cwd, taskBySpec(current, "fix-loop.r01.check"), { status: "fail", verdict: "REJECT", blockingFailures: ["a", "b"] });
+    await writeRunRecord(cwd, current);
+
+    await scheduleRun(cwd, run.runId);
+    current = await readRunRecord(cwd, run.runId);
+    await completeTask(cwd, taskBySpec(current, "fix-loop.r02.implement"), { changed: true });
+    await completeTask(cwd, taskBySpec(current, "fix-loop.r02.check"), { status: "fail", verdict: "REJECT", blockingFailures: ["a"] });
+    await writeRunRecord(cwd, current);
+
+    await scheduleRun(cwd, run.runId);
+    current = await readRunRecord(cwd, run.runId);
+    const exhausted = taskBySpec(current, "fix-loop.onExhausted.loop-summary");
+    assert.deepEqual(exhausted.dependsOn, [
+      "fix-loop.r01.implement",
+      "fix-loop.r01.check",
+      "fix-loop.r02.implement",
+      "fix-loop.r02.check",
+    ]);
+    const compiledAfterExhaustion = JSON.parse(readFileSync(join(cwd, ".pi", "workflows", current.runId, "compiled.json"), "utf8"));
+    const exhaustedTask = compiledAfterExhaustion.tasks.find((task) => task.id === "fix-loop.onExhausted.loop-summary");
+    assert.match(exhaustedTask.compiledPrompt, /Round check outputs/);
+    assert.match(exhaustedTask.compiledPrompt, /Round 1/);
+    assert.match(exhaustedTask.compiledPrompt, /"blockingFailures":\["a","b"\]/);
+    assert.match(exhaustedTask.compiledPrompt, /Round 2/);
+    assert.match(exhaustedTask.compiledPrompt, /"blockingFailures":\["a"\]/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("loop until evaluator supports equals notEquals lengthEquals all and any", async () => {
   const cwd = makeProject();
   try {
@@ -850,6 +996,28 @@ test("loop until evaluator supports equals notEquals lengthEquals all and any", 
       ],
     }), true);
     assert.equal(await evaluateLoopUntilCondition(cwd, current, compiledAfterRound1, "fix-loop", 1, { stage: "check", path: "$.missing", notEquals: "anything" }), false);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("loop completed task with unreadable result records a warning", async () => {
+  const cwd = makeProject();
+  try {
+    writeAgent(cwd, "unit-scout", "read");
+    const { run } = await createLoopRun(cwd);
+    await scheduleRun(cwd, run.runId);
+    const current = await readRunRecord(cwd, run.runId);
+    await completeTask(cwd, taskBySpec(current, "fix-loop.r01.implement"), { changed: true });
+    const check = taskBySpec(current, "fix-loop.r01.check");
+    setTaskTerminal(check, "completed", "completed", { exitCode: 0, lastMessage: "completed" });
+    mkdirSync(dirname(join(cwd, check.files.result)), { recursive: true });
+    writeFileSync(join(cwd, check.files.result), "{not-json");
+    await writeRunRecord(cwd, current);
+    const compiledAfterRound1 = JSON.parse(readFileSync(join(cwd, ".pi", "workflows", current.runId, "compiled.json"), "utf8"));
+
+    assert.equal(await evaluateLoopUntilCondition(cwd, current, compiledAfterRound1, "fix-loop", 1, { stage: "check", path: "$.status", equals: "pass" }), false);
+    assert.match(check.lastMessage, /completed loop task result unreadable/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

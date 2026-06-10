@@ -203,14 +203,14 @@ A `loop` stage repeats a **fixed** child stage subgraph once per round until a d
 
 Rules and behavior:
 
-- **Child stages** (`stages`) are materialized at runtime with deterministic ids `<loopId>.r01.<childStageId>`, `<loopId>.r02.<childStageId>`, and so on. Round R fully precedes round R+1.
+- **Ids**: the loop and every child stage require non-empty ids; child ids must be unique. Child stages are materialized at runtime with deterministic ids `<loopId>.r01.<childStageId>`, `<loopId>.r02.<childStageId>`, and so on. Round R fully precedes round R+1.
 - **`maxRounds`** is required, a positive integer, capped at 50.
 - **`until`** is required and deterministic (no model judgment). Leaf form is `{ stage, path, equals | notEquals | lengthEquals }`; combinators are `{ all: [...] }` and `{ any: [...] }`. `path` must start with `$.` and is read from that child stage's latest-round JSON output. `stage` must reference a child stage id. A missing path evaluates to false.
 - **No-progress stop**: the loop stops early (`stopped_no_progress`) when the progress metric does not strictly decrease versus the previous round. The default metric is the length of `$.blockingFailures` on the designated check stage; override with `progressPath`.
 - **`onExhausted`** is optional and must be a `reduce` stage. It runs once when the loop exhausts `maxRounds` or stops on no-progress.
-- **Separation rule**: keep the implementer and the validator/reviewer as separate child stages. The engine never merges them; merging reintroduces self-preferential bias.
+- **Separation rule**: loops require at least two child stages, and `until` must not reference the first implementation child as its own check. Keep the validator/reviewer read-only in practice; validation commands such as `bash` are allowed for checks, but the check prompt must not modify files. The engine never merges implement and check; merging reintroduces self-preferential bias.
 - **Worktree**: write-capable child stages share a single managed worktree reused across rounds. There is no auto-merge. On completion the loop records a result (`status`, `roundsUsed`, `worktreePath`, `finalCheck`, `summary`) for a human to merge.
-- Nested `loop` and `foreach` child stages are rejected in v1.
+- Nested `loop`, `foreach`, and `parallel` child stages are rejected in v1.
 
 ## Commands
 

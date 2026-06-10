@@ -267,6 +267,12 @@ function allTaskIndexes(run: WorkflowRunRecord): number[] {
 }
 
 async function scheduleDag(cwd: string, run: WorkflowRunRecord, compiledFlow: CompiledWorkflow): Promise<void> {
+  if (compiledFlow.type === STAGE_FIRST_RUN_TYPE) {
+    const reconciled = await reconcileLoopTaskMaterialization(cwd, run, compiledFlow);
+    if (reconciled) return;
+    assertLoopTaskPositionalAlignment(run, compiledFlow);
+  }
+
   let changed = markDagDependentsSkipped(run, compiledFlow);
   if (changed) {
     await writeRunRecord(cwd, run);
@@ -509,11 +515,9 @@ async function materializeLoopRound(
     } as CompiledTask;
   });
 
-  const insertionIndex = loopInsertionIndex(compiledFlow, loopStage.id, placeholderIndex);
-  compiledFlow.tasks.splice(insertionIndex, 0, ...generatedTasks);
-  const nextIndex = nextTaskRecordIndex(run);
-  const generatedRunTasks = generatedTasks.map((task, offset) => createTaskRunRecord(cwd, run.runId, task, nextIndex + offset));
-  run.tasks.splice(insertionIndex, 0, ...generatedRunTasks);
+  upsertCompiledLoopTasksAtInsertion(compiledFlow, loopStage.id, placeholderIndex, generatedTasks);
+  reconcileLoopTaskRecordsInMemory(cwd, run, compiledFlow, new Set([loopStage.id]));
+  assertLoopTaskPositionalAlignment(run, compiledFlow, new Set([loopStage.id]));
 
   const state = ensureLoopState(run, loopStage.id);
   state.round = round;
@@ -539,7 +543,7 @@ async function materializeLoopOnExhausted(
   if (!template) return;
   const stageId = `${loopStage.id}.onExhausted`;
   const specId = `${stageId}.${loopStage.onExhausted.stageId ?? "summary"}`;
-  const dependsOn = getLoopRoundRunTasks(run, compiledFlow, loopStage.id, round).map((task) => task.specId);
+  const dependsOn = getLoopRunTasksThroughRound(run, compiledFlow, loopStage.id, round).map((task) => task.specId);
   const context = await buildLoopTerminalContext(cwd, run, compiledFlow, loopStage, status, round);
   const task: CompiledTask = {
     ...template,
@@ -559,10 +563,9 @@ async function materializeLoopOnExhausted(
 
   ensureGeneratedStageRecord(compiledFlow, stageId, "reduce", "partial");
   const placeholderIndex = compiledFlow.tasks.findIndex((candidate) => candidate.loopPlaceholder?.loopId === loopStage.id);
-  const insertionIndex = loopInsertionIndex(compiledFlow, loopStage.id, placeholderIndex);
-  compiledFlow.tasks.splice(insertionIndex, 0, task);
-  const runTask = createTaskRunRecord(cwd, run.runId, task, nextTaskRecordIndex(run));
-  run.tasks.splice(insertionIndex, 0, runTask);
+  upsertCompiledLoopTasksAtInsertion(compiledFlow, loopStage.id, placeholderIndex, [task]);
+  reconcileLoopTaskRecordsInMemory(cwd, run, compiledFlow, new Set([loopStage.id]));
+  assertLoopTaskPositionalAlignment(run, compiledFlow, new Set([loopStage.id]));
 
   const state = ensureLoopState(run, loopStage.id);
   state.round = round;
@@ -681,7 +684,8 @@ async function readLoopStageStructuredOutput(
   try {
     const result = JSON.parse(await readFile(fromProjectPath(cwd, entry.runTask.files.result), "utf8"));
     return result?.structuredOutput;
-  } catch {
+  } catch (error) {
+    entry.runTask.lastMessage = `completed loop task result unreadable: ${error instanceof Error ? error.message : String(error)}`;
     return undefined;
   }
 }
@@ -735,15 +739,44 @@ async function buildLoopTerminalContext(
   status: LoopResultStatus,
   round: number,
 ): Promise<string> {
-  const finalCheck = await readLoopStageStructuredOutput(cwd, run, compiledFlow, loopStage.id, round, loopDesignatedCheckStageId(loopStage));
+  const checkStageId = loopDesignatedCheckStageId(loopStage);
+  const finalCheck = await readLoopStageStructuredOutput(cwd, run, compiledFlow, loopStage.id, round, checkStageId);
+  const roundChecks = await buildLoopRoundCheckContext(cwd, run, compiledFlow, loopStage, loopStage.id, round, checkStageId);
   return truncate([
     `loop=${loopStage.id}`,
     `status=${status}`,
     `roundsUsed=${round}`,
     `worktreePath=${findLoopWorktreePath(run, loopStage.id) ?? "(none)"}`,
+    "Round check outputs (bounded, most recent retained):",
+    roundChecks,
     "Final check structured output:",
     compactJson(finalCheck, LOOP_SUMMARY_MAX_CHARS),
   ].join("\n"), LOOP_CARRY_FORWARD_MAX_CHARS);
+}
+
+async function buildLoopRoundCheckContext(
+  cwd: string,
+  run: WorkflowRunRecord,
+  compiledFlow: CompiledWorkflow,
+  loopStage: any,
+  loopId: string,
+  latestRound: number,
+  checkStageId: string,
+): Promise<string> {
+  const sections: string[] = [];
+  for (let round = latestRound; round >= 1; round -= 1) {
+    const output = await readLoopStageStructuredOutput(cwd, run, compiledFlow, loopId, round, checkStageId);
+    const metric = await readLoopProgressMetric(cwd, run, compiledFlow, loopStage, loopId, round);
+    const section = [
+      `Round ${round}`,
+      metric !== undefined ? `progress=${metric}` : "progress metric unavailable",
+      compactJson(output, 900),
+    ].join("\n");
+    const candidate = [section, ...sections].join("\n\n");
+    if (candidate.length > LOOP_CARRY_FORWARD_MAX_CHARS && sections.length > 0) break;
+    sections.unshift(section);
+  }
+  return truncate(sections.join("\n\n") || "(unavailable)", LOOP_CARRY_FORWARD_MAX_CHARS);
 }
 
 function buildLoopResultSummary(status: LoopResultStatus, round: number, worktreePath: string | null, finalCheck: unknown): string {
@@ -775,6 +808,17 @@ function getLoopRoundRunTasks(run: WorkflowRunRecord, compiledFlow: CompiledWork
   return getLoopRoundTaskEntries(run, compiledFlow, loopId, round).map((entry) => entry.runTask);
 }
 
+function getLoopRunTasksThroughRound(
+  run: WorkflowRunRecord,
+  compiledFlow: CompiledWorkflow,
+  loopId: string,
+  latestRound: number,
+): WorkflowTaskRunRecord[] {
+  const tasks: WorkflowTaskRunRecord[] = [];
+  for (let round = 1; round <= latestRound; round += 1) tasks.push(...getLoopRoundRunTasks(run, compiledFlow, loopId, round));
+  return tasks;
+}
+
 function getLoopRoundTaskEntries(
   run: WorkflowRunRecord,
   compiledFlow: CompiledWorkflow,
@@ -782,12 +826,164 @@ function getLoopRoundTaskEntries(
   round: number,
 ): Array<{ runTask: WorkflowTaskRunRecord; compiledTask: CompiledTask; index: number }> {
   const entries: Array<{ runTask: WorkflowTaskRunRecord; compiledTask: CompiledTask; index: number }> = [];
-  for (const [index, compiledTask] of compiledFlow.tasks.entries()) {
+  const runTaskBySpecId = new Map<string, { task: WorkflowTaskRunRecord; index: number }>();
+  for (const [index, task] of run.tasks.entries()) runTaskBySpecId.set(task.specId, { task, index });
+  for (const compiledTask of compiledFlow.tasks) {
     if (compiledTask.loopChild?.loopId !== loopId || compiledTask.loopChild.round !== round) continue;
-    const runTask = run.tasks[index];
-    if (runTask) entries.push({ runTask, compiledTask, index });
+    const runEntry = runTaskBySpecId.get(compiledTaskSpecId(compiledTask));
+    if (runEntry) entries.push({ runTask: runEntry.task, compiledTask, index: runEntry.index });
   }
   return entries;
+}
+
+async function reconcileLoopTaskMaterialization(
+  cwd: string,
+  run: WorkflowRunRecord,
+  compiledFlow: CompiledWorkflow,
+): Promise<boolean> {
+  const loopIds = loopStageIdSet(compiledFlow);
+  if (loopIds.size === 0) return false;
+  const changed = reconcileLoopTaskRecordsInMemory(cwd, run, compiledFlow, loopIds);
+  if (!changed) return false;
+  assertLoopTaskPositionalAlignment(run, compiledFlow, loopIds);
+  await writeRunRecord(cwd, run);
+  return true;
+}
+
+function reconcileLoopTaskRecordsInMemory(
+  cwd: string,
+  run: WorkflowRunRecord,
+  compiledFlow: CompiledWorkflow,
+  loopIds: Set<string>,
+): boolean {
+  const compiledSpecIds = new Set(compiledFlow.tasks.map((task) => compiledTaskSpecId(task)));
+  const filteredRunTasks: WorkflowTaskRunRecord[] = [];
+  const seenLoopSpecIds = new Set<string>();
+  let changed = false;
+
+  for (const task of run.tasks) {
+    const loopGenerated = isLoopGeneratedRunTask(task, loopIds);
+    if (loopGenerated && !compiledSpecIds.has(task.specId)) {
+      changed = true;
+      continue;
+    }
+    if (loopGenerated && seenLoopSpecIds.has(task.specId)) {
+      changed = true;
+      continue;
+    }
+    if (loopGenerated) seenLoopSpecIds.add(task.specId);
+    filteredRunTasks.push(task);
+  }
+
+  const runTaskBySpecId = new Map<string, WorkflowTaskRunRecord>();
+  for (const task of filteredRunTasks) {
+    if (!runTaskBySpecId.has(task.specId)) runTaskBySpecId.set(task.specId, task);
+  }
+
+  const reordered: WorkflowTaskRunRecord[] = [];
+  const usedSpecIds = new Set<string>();
+  let nextIndex = nextTaskRecordIndex({ ...run, tasks: filteredRunTasks });
+  for (const compiledTask of compiledFlow.tasks) {
+    const specId = compiledTaskSpecId(compiledTask);
+    const existing = runTaskBySpecId.get(specId);
+    if (existing) {
+      reordered.push(existing);
+      usedSpecIds.add(specId);
+      continue;
+    }
+    if (!isLoopGeneratedCompiledTask(compiledTask, loopIds)) continue;
+    const created = createTaskRunRecord(cwd, run.runId, compiledTask, nextIndex);
+    nextIndex += 1;
+    reordered.push(created);
+    usedSpecIds.add(specId);
+    changed = true;
+  }
+
+  for (const task of filteredRunTasks) {
+    if (!usedSpecIds.has(task.specId)) reordered.push(task);
+  }
+
+  if (!sameTaskRecordOrder(filteredRunTasks, reordered)) changed = true;
+  if (changed) run.tasks = reordered;
+  return changed;
+}
+
+function assertLoopTaskPositionalAlignment(
+  run: WorkflowRunRecord,
+  compiledFlow: CompiledWorkflow,
+  loopIds = loopStageIdSet(compiledFlow),
+): void {
+  for (const [index, compiledTask] of compiledFlow.tasks.entries()) {
+    if (!isLoopGeneratedCompiledTask(compiledTask, loopIds)) continue;
+    const runTask = run.tasks[index];
+    const specId = compiledTaskSpecId(compiledTask);
+    if (!runTask || runTask.specId !== specId) {
+      throw new Error(`Loop task materialization is misaligned at index ${index}: expected ${specId}, found ${runTask?.specId ?? "(missing)"}`);
+    }
+  }
+
+  for (const [index, runTask] of run.tasks.entries()) {
+    if (!isLoopGeneratedRunTask(runTask, loopIds)) continue;
+    const compiledTask = compiledFlow.tasks[index];
+    if (!compiledTask || compiledTaskSpecId(compiledTask) !== runTask.specId) {
+      throw new Error(`Loop task materialization is misaligned at index ${index}: run task ${runTask.specId} has no matching compiled task`);
+    }
+  }
+}
+
+function upsertCompiledLoopTasksAtInsertion(
+  compiledFlow: CompiledWorkflow,
+  loopId: string,
+  placeholderIndex: number,
+  tasks: CompiledTask[],
+): void {
+  const specIds = new Set(tasks.map((task) => compiledTaskSpecId(task)));
+  compiledFlow.tasks = compiledFlow.tasks.filter((task) => !specIds.has(compiledTaskSpecId(task)));
+  const currentPlaceholderIndex = compiledFlow.tasks.findIndex((task) => task.loopPlaceholder?.loopId === loopId);
+  const insertionIndex = loopInsertionIndex(compiledFlow, loopId, currentPlaceholderIndex === -1 ? placeholderIndex : currentPlaceholderIndex);
+  compiledFlow.tasks.splice(insertionIndex, 0, ...tasks);
+}
+
+function compiledTaskSpecId(task: CompiledTask): string {
+  const specId = (task as CompiledTask & { specId?: unknown }).specId;
+  return typeof specId === "string" && specId.trim() !== "" ? specId : task.id;
+}
+
+function isLoopGeneratedCompiledTask(task: CompiledTask, loopIds: Set<string>): boolean {
+  return Boolean(
+    task.loopChild?.loopId && loopIds.has(task.loopChild.loopId)
+    || task.loopExhausted?.loopId && loopIds.has(task.loopExhausted.loopId),
+  );
+}
+
+function isLoopGeneratedRunTask(task: WorkflowTaskRunRecord, loopIds: Set<string>): boolean {
+  for (const loopId of loopIds) {
+    if (task.specId.startsWith(`${loopId}.onExhausted.`)) return true;
+    if (new RegExp(`^${escapeRegExp(loopId)}\\.r\\d{2}\\.`).test(task.specId)) return true;
+    if (task.stageId?.startsWith(`${loopId}.onExhausted`)) return true;
+    if (new RegExp(`^${escapeRegExp(loopId)}\\.r\\d{2}\\.`).test(task.stageId ?? "")) return true;
+  }
+  return false;
+}
+
+function loopStageIdSet(compiledFlow: CompiledWorkflow): Set<string> {
+  const loopIds = new Set<string>();
+  for (const stage of ((compiledFlow as any).stages ?? [])) {
+    if (stage?.type === "loop" && typeof stage.id === "string") loopIds.add(stage.id);
+  }
+  for (const task of compiledFlow.tasks) {
+    if (task.loopChild?.loopId) loopIds.add(task.loopChild.loopId);
+    if (task.loopExhausted?.loopId) loopIds.add(task.loopExhausted.loopId);
+  }
+  return loopIds;
+}
+
+function sameTaskRecordOrder(left: WorkflowTaskRunRecord[], right: WorkflowTaskRunRecord[]): boolean {
+  return left.length === right.length && left.every((task, index) => task === right[index]);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function loopInsertionIndex(compiledFlow: CompiledWorkflow, loopId: string, placeholderIndex: number): number {
@@ -833,8 +1029,8 @@ function ensureLoopState(run: WorkflowRunRecord, loopId: string): LoopStateRecor
 }
 
 function findLoopExhaustedRunTask(run: WorkflowRunRecord, compiledFlow: CompiledWorkflow, loopId: string): WorkflowTaskRunRecord | undefined {
-  const index = compiledFlow.tasks.findIndex((task) => task.loopExhausted?.loopId === loopId);
-  return index >= 0 ? run.tasks[index] : undefined;
+  const compiledTask = compiledFlow.tasks.find((task) => task.loopExhausted?.loopId === loopId);
+  return compiledTask ? run.tasks.find((task) => task.specId === compiledTaskSpecId(compiledTask)) : undefined;
 }
 
 function loopDesignatedCheckStageId(loopStage: any): string {

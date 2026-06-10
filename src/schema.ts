@@ -538,25 +538,42 @@ function validateStageFirstStringArray(value: unknown, path: string): void {
 
 function validateStageFirstLoopStage(stage: Record<string, unknown>, path: string): void {
   rejectUnknownStageFirstKeys(stage, STAGE_FIRST_LOOP_STAGE_KEYS, path);
+  validateStageFirstRequiredString(stage, "id", `${path}.id`);
 
   if (stage.stages === undefined) throw new WorkflowValidationError([{ path: `${path}.stages`, message: "is required" }]);
   if (!Array.isArray(stage.stages)) throw new WorkflowValidationError([{ path: `${path}.stages`, message: "must be an array" }]);
-  if (stage.stages.length < 1) throw new WorkflowValidationError([{ path: `${path}.stages`, message: "must contain at least one stage" }]);
+  if (stage.stages.length < 2) {
+    throw new WorkflowValidationError([{ path: `${path}.stages`, message: "must contain at least 2 stages (separate implementation and check stages)" }]);
+  }
 
   const childStageIds = new Set<string>();
+  const childStageIdList: string[] = [];
   for (const [childIndex, childValue] of stage.stages.entries()) {
     const childPath = `${path}.stages[${childIndex}]`;
     const childStage = requireStageFirstObject(childValue, childPath);
+    const childStageId = validateStageFirstRequiredString(childStage, "id", `${childPath}.id`);
+    if (childStageIds.has(childStageId)) {
+      throw new WorkflowValidationError([{ path: `${childPath}.id`, message: `duplicate child stage id "${childStageId}"` }]);
+    }
+    childStageIds.add(childStageId);
+    childStageIdList.push(childStageId);
     if (childStage.type === "loop") throw new WorkflowValidationError([{ path: `${childPath}.type`, message: "loop nesting is not supported in v1" }]);
     if (childStage.type === "foreach") throw new WorkflowValidationError([{ path: `${childPath}.type`, message: "foreach child stages are deferred for loop v1" }]);
+    if (childStage.type === "parallel") {
+      throw new WorkflowValidationError([{
+        path: `${childPath}.type`,
+        message: "parallel child stages are not supported in loop v1 because loop children share one worktree and until/progress selection must remain deterministic",
+      }]);
+    }
     validateStageFirstStage(childStage, childPath);
-    if (typeof childStage.id === "string" && childStage.id.trim() !== "") childStageIds.add(childStage.id);
   }
 
   validateStageFirstLoopMaxRounds(stage.maxRounds, `${path}.maxRounds`);
 
   if (stage.until === undefined) throw new WorkflowValidationError([{ path: `${path}.until`, message: "is required" }]);
-  validateStageFirstUntilCondition(stage.until, `${path}.until`, childStageIds);
+  const untilStageRefs: Array<{ stageId: string; path: string }> = [];
+  validateStageFirstUntilCondition(stage.until, `${path}.until`, childStageIds, untilStageRefs);
+  validateStageFirstLoopCheckSeparation(untilStageRefs, childStageIdList);
 
   if (stage.progressPath !== undefined && (typeof stage.progressPath !== "string" || !stage.progressPath.startsWith("$."))) {
     throw new WorkflowValidationError([{ path: `${path}.progressPath`, message: "must be a string starting with $." }]);
@@ -581,7 +598,37 @@ function validateStageFirstLoopMaxRounds(value: unknown, path: string): void {
   }
 }
 
-function validateStageFirstUntilCondition(value: unknown, path: string, childStageIds: Set<string>): void {
+function validateStageFirstRequiredString(object: Record<string, unknown>, key: string, path: string): string {
+  if (object[key] === undefined) throw new WorkflowValidationError([{ path, message: "is required" }]);
+  const value = object[key];
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new WorkflowValidationError([{ path, message: "must be a non-empty string" }]);
+  }
+  return value;
+}
+
+function validateStageFirstLoopCheckSeparation(
+  untilStageRefs: Array<{ stageId: string; path: string }>,
+  childStageIds: string[],
+): void {
+  const implementationStageId = childStageIds[0];
+  if (!implementationStageId) return;
+  for (const ref of untilStageRefs) {
+    if (ref.stageId === implementationStageId) {
+      throw new WorkflowValidationError([{
+        path: ref.path,
+        message: "check/until stage must be distinct from the first implementation stage and must not share mutating tools with it",
+      }]);
+    }
+  }
+}
+
+function validateStageFirstUntilCondition(
+  value: unknown,
+  path: string,
+  childStageIds: Set<string>,
+  stageRefs: Array<{ stageId: string; path: string }> = [],
+): void {
   const condition = requireStageFirstObject(value, path);
   rejectUnknownStageFirstKeys(condition, STAGE_FIRST_UNTIL_KEYS, path);
 
@@ -599,7 +646,7 @@ function validateStageFirstUntilCondition(value: unknown, path: string, childSta
     const items = condition[key];
     if (!Array.isArray(items)) throw new WorkflowValidationError([{ path: `${path}.${key}`, message: "must be an array" }]);
     if (items.length < 1) throw new WorkflowValidationError([{ path: `${path}.${key}`, message: "must contain at least one condition" }]);
-    for (const [index, item] of items.entries()) validateStageFirstUntilCondition(item, `${path}.${key}[${index}]`, childStageIds);
+    for (const [index, item] of items.entries()) validateStageFirstUntilCondition(item, `${path}.${key}[${index}]`, childStageIds, stageRefs);
     return;
   }
 
@@ -613,6 +660,7 @@ function validateStageFirstUntilCondition(value: unknown, path: string, childSta
   if (!childStageIds.has(condition.stage)) {
     throw new WorkflowValidationError([{ path: `${path}.stage`, message: `unknown child stage reference "${condition.stage}"` }]);
   }
+  stageRefs.push({ stageId: condition.stage, path: `${path}.stage` });
 
   if (typeof condition.path !== "string" || !condition.path.startsWith("$.")) {
     throw new WorkflowValidationError([{ path: `${path}.path`, message: "must be a string starting with $." }]);
