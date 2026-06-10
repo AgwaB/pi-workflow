@@ -370,27 +370,23 @@ Current runner already has:
 - A/A mode
 - tool-call audit ingestion for workflow subagents
 
-Needs extraction/generalization:
+Needs extraction/generalization (roadmap, not current release scope):
 
 - move from `.pi/eval/ab-execution/run.mjs` to `src/eval/` or `evals/ab-execution/`
-- formalize eval spec schema
-- add sanitized worktree mode
-- add Gondolin mode
-- support external `answerKeyRef`
+- formalize eval spec schema for agents/workflows/models/prompts
 - add compute-matched baselines
 - add pairwise swapped judging
 - add semantic citation support auditing
 - add token/cost accounting
 
-## Recommended Next Implementation Steps
+Current hardening sequence:
 
-1. Add `answerKeyRef` and move hidden keys outside arm-visible task specs.
-2. Add sanitized worktree isolation mode.
-3. Add strict eval-artifact deny/audit mode.
-4. Add plain two-pass baseline.
-5. Add pairwise swapped judging.
-6. Prototype Gondolin execution for candidate arms.
-7. Build a held-out fact-verification-heavy task set.
+1. Minimal hygiene first: add `answerKeyRef`, move hidden keys out of arm-visible task specs, avoid storing raw answer keys in run artifacts, and write isolation/access audit metadata.
+2. Strong isolation second: add sanitized worktree mode and strict eval-artifact deny/audit mode.
+3. Sandbox spike third: prototype Gondolin execution for candidate arms.
+4. Evidence quality later: build a held-out fact-verification-heavy task set.
+
+General eval harness expansion is intentionally deferred until after the isolation work. The current runner should remain diagnostic-only and deep-research/deep-review oriented until the generic arm/task schema is designed.
 
 ## Open Questions
 
