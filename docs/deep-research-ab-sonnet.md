@@ -1,3 +1,5 @@
+> Historical archive (2026-06-09). 이 문서는 당시 실행 기록으로, 언급된 경로·파일은 이후 제거되었거나 변경되었을 수 있음. 당시 사용한 `deep-research-sonnet-low.json`은 제거되었고, 현재는 `workflows/deep-research/` 번들이 공식 경로임. 결과는 diagnostic-only.
+
 # Deep Research A/B 비교: pi-workflow vs Claude Code (sonnet, thinking low)
 
 작성일: 2026-06-09
@@ -16,7 +18,7 @@
 
 | 항목 | 우리 pi-workflow | Claude Code |
 |---|---|---|
-| 구동 방식 | 고정 recipe `deep-research-sonnet-low.json` | 모델이 즉석 생성한 JS workflow |
+| 구동 방식 | 고정 workflow spec `deep-research-sonnet-low.json` (현재 제거됨) | 모델이 즉석 생성한 JS workflow |
 | 모델 | claude-sonnet-4-6, thinking low | claude-sonnet-4-6, effort low |
 | 상태 | completed | completed |
 | wall-clock | 446초 (~7.4분) | 291초 (~4.9분) |
@@ -97,7 +99,7 @@
 ## 한계 / 공정성
 
 - 각 1회 실행이라 ±20%는 노이즈로 봐야 함.
-- 우리 recipe는 고정·결정론적; Claude는 매번 workflow script를 재생성하므로 형태가 실행마다 달라질 수 있음.
+- 우리 workflow spec은 고정·결정론적; Claude는 매번 workflow script를 재생성하므로 형태가 실행마다 달라질 수 있음.
 - 이번 실행에서는 토큰 비용 비교 불가(우리 쪽 OAuth usage 공백). 직전 Kimi A/B와 다른 점.
 - 두 `workflow` tool은 동시에 로드하지 않음(둘 다 `workflow` tool을 등록하므로 충돌). 각자 별도 프로세스에서 실행.
 
@@ -109,7 +111,7 @@
 - 최종 종합 보고서: `.pi/workflows/workflow_mq6p8tac_6b0ebb/tasks/task-5/result.json`
   - 구조화 보고서 본문은 `.structuredOutput.finalReport` 아래
 - 단계별 task 결과: `.pi/workflows/workflow_mq6p8tac_6b0ebb/tasks/task-*/result.json` 및 `output.log`
-- 사용한 recipe: `workflows/deep-research-sonnet-low.json` (`workflows/deep-research.json`의 sonnet:low 변형)
+- 사용한 workflow spec: `deep-research-sonnet-low.json` (당시 flat `deep-research.json`의 sonnet:low 변형; 둘 다 이후 제거/번들 이관됨)
 - 최종 결과 백업: `/tmp/dr-ab/RESULT-ours-final.json`
 
 Claude Code:

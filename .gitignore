@@ -20,6 +20,7 @@ node_modules/
 .pi/eval/ab-execution/*
 !.pi/eval/ab-execution/run.mjs
 !.pi/eval/ab-execution/isolation.mjs
+!.pi/eval/ab-execution/README.md
 !.pi/eval/ab-execution/tasks.json
 !.pi/eval/ab-execution/rubric.md
 !.pi/eval/ab-execution/judge-prompt.md
