@@ -270,7 +270,7 @@ async function scheduleDag(cwd: string, run: WorkflowRunRecord, compiledFlow: Co
   if (compiledFlow.type === STAGE_FIRST_RUN_TYPE) {
     const reconciled = await reconcileLoopTaskMaterialization(cwd, run, compiledFlow);
     if (reconciled) return;
-    assertLoopTaskPositionalAlignment(run, compiledFlow);
+    assertRunTaskPositionalAlignment(run, compiledFlow);
   }
 
   let changed = markDagDependentsSkipped(run, compiledFlow);
@@ -661,12 +661,51 @@ async function readLoopProgressMetric(
   loopId: string,
   round: number,
 ): Promise<number | undefined> {
-  const output = await readLoopStageStructuredOutput(cwd, run, compiledFlow, loopId, round, loopDesignatedCheckStageId(loopStage));
+  const checkStageId = loopDesignatedCheckStageId(loopStage);
+  const output = await readLoopStageStructuredOutput(cwd, run, compiledFlow, loopId, round, checkStageId);
   if (output === undefined) return undefined;
-  const value = readSimpleJsonPath(output, loopStage.progressPath ?? "$.blockingFailures");
+  const progressPath = loopStage.progressPath ?? "$.blockingFailures";
+  const value = readSimpleJsonPath(output, progressPath);
   const length = valueLength(value);
   if (length !== undefined) return length;
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (value !== undefined) {
+    warnInvalidLoopProgressMetric(run, compiledFlow, loopId, round, checkStageId, progressPath, value);
+  }
+  return undefined;
+}
+
+function warnInvalidLoopProgressMetric(
+  run: WorkflowRunRecord,
+  compiledFlow: CompiledWorkflow,
+  loopId: string,
+  round: number,
+  childStageId: string,
+  progressPath: string,
+  value: unknown,
+): void {
+  const entry = getLatestLoopStageTaskEntry(run, compiledFlow, loopId, round, childStageId);
+  if (!entry || entry.runTask.status !== "completed") return;
+  entry.runTask.lastMessage = `loop progressPath ${progressPath} resolved to unsupported ${describeLoopProgressValue(value)}; no-progress comparison skipped`;
+}
+
+function getLatestLoopStageTaskEntry(
+  run: WorkflowRunRecord,
+  compiledFlow: CompiledWorkflow,
+  loopId: string,
+  round: number,
+  childStageId: string,
+): { compiledTask: CompiledTask; runTask: WorkflowTaskRunRecord } | undefined {
+  return getLoopRoundTaskEntries(run, compiledFlow, loopId, round)
+    .filter((item) => item.compiledTask.loopChild?.childStageId === childStageId)
+    .at(-1);
+}
+
+function describeLoopProgressValue(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  if (typeof value === "number" && !Number.isFinite(value)) return "non-finite number";
+  return typeof value;
 }
 
 async function readLoopStageStructuredOutput(
@@ -677,9 +716,7 @@ async function readLoopStageStructuredOutput(
   round: number,
   childStageId: string,
 ): Promise<unknown> {
-  const entry = getLoopRoundTaskEntries(run, compiledFlow, loopId, round)
-    .filter((item) => item.compiledTask.loopChild?.childStageId === childStageId)
-    .at(-1);
+  const entry = getLatestLoopStageTaskEntry(run, compiledFlow, loopId, round, childStageId);
   if (!entry || entry.runTask.status !== "completed") return undefined;
   try {
     const result = JSON.parse(await readFile(fromProjectPath(cwd, entry.runTask.files.result), "utf8"));
@@ -906,6 +943,26 @@ function reconcileLoopTaskRecordsInMemory(
   if (!sameTaskRecordOrder(filteredRunTasks, reordered)) changed = true;
   if (changed) run.tasks = reordered;
   return changed;
+}
+
+function assertRunTaskPositionalAlignment(run: WorkflowRunRecord, compiledFlow: CompiledWorkflow): void {
+  const maxLength = Math.max(run.tasks.length, compiledFlow.tasks.length);
+  for (let index = 0; index < maxLength; index += 1) {
+    const runTask = run.tasks[index];
+    const compiledTask = compiledFlow.tasks[index];
+    if (!runTask && compiledTask) {
+      throw new Error(`Workflow task materialization is misaligned at index ${index}: compiled task ${compiledTaskSpecId(compiledTask)} has no run record`);
+    }
+    if (runTask && !compiledTask) {
+      throw new Error(`Workflow task materialization is misaligned at index ${index}: run task ${runTask.specId} has no compiled task`);
+    }
+    if (runTask && compiledTask) {
+      const specId = compiledTaskSpecId(compiledTask);
+      if (runTask.specId !== specId) {
+        throw new Error(`Workflow task materialization is misaligned at index ${index}: expected ${specId}, found ${runTask.specId}`);
+      }
+    }
+  }
 }
 
 function assertLoopTaskPositionalAlignment(

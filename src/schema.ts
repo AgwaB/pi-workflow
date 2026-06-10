@@ -565,6 +565,12 @@ function validateStageFirstLoopStage(stage: Record<string, unknown>, path: strin
         message: "parallel child stages are not supported in loop v1 because loop children share one worktree and until/progress selection must remain deterministic",
       }]);
     }
+    if (childStage.from !== undefined) {
+      throw new WorkflowValidationError([{
+        path: `${childPath}.from`,
+        message: "loop child stages must not define from in v1; loop children run strictly in listed order so the final check observes all mutations",
+      }]);
+    }
     validateStageFirstStage(childStage, childPath);
   }
 
@@ -611,13 +617,13 @@ function validateStageFirstLoopCheckSeparation(
   untilStageRefs: Array<{ stageId: string; path: string }>,
   childStageIds: string[],
 ): void {
-  const implementationStageId = childStageIds[0];
-  if (!implementationStageId) return;
+  const finalCheckStageId = childStageIds[childStageIds.length - 1];
+  if (!finalCheckStageId) return;
   for (const ref of untilStageRefs) {
-    if (ref.stageId === implementationStageId) {
+    if (ref.stageId !== finalCheckStageId) {
       throw new WorkflowValidationError([{
         path: ref.path,
-        message: "check/until stage must be distinct from the first implementation stage and must not share mutating tools with it",
+        message: "loop until/check stage must be the final child stage in v1; loop children run strictly in listed order so validation observes all mutations",
       }]);
     }
   }

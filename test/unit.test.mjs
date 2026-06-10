@@ -308,7 +308,7 @@ test("schema rejects parallel child in loop", () => {
   assertIssue(error, "$.workflow.stages[0].stages[0].type", "parallel child stages are not supported in loop v1");
 });
 
-test("schema rejects loop check that is the first mutating implementation stage", () => {
+test("schema rejects loop until referencing a non-final child stage", () => {
   const error = assertThrowsFlow(() => parseWorkflow(loopWorkflowSpec({
     stages: [
       { id: "implement", type: "task", readOnly: false, tools: ["read", "edit"], prompt: "Implement." },
@@ -316,7 +316,29 @@ test("schema rejects loop check that is the first mutating implementation stage"
     ],
     until: { stage: "implement", path: "$.status", equals: "pass" },
   })));
-  assertIssue(error, "$.workflow.stages[0].until.stage", "check/until stage must be distinct");
+  assertIssue(error, "$.workflow.stages[0].until.stage", "final child stage");
+});
+
+test("schema rejects loop child from fan-out", () => {
+  const error = assertThrowsFlow(() => parseWorkflow(loopWorkflowSpec({
+    stages: [
+      { id: "implement", type: "task", prompt: "Implement." },
+      { id: "check", type: "task", from: "implement", prompt: "Check." },
+    ],
+  })));
+  assertIssue(error, "$.workflow.stages[0].stages[1].from", "must not define from");
+});
+
+test("schema rejects loop until check before a later mutating child", () => {
+  const error = assertThrowsFlow(() => parseWorkflow(loopWorkflowSpec({
+    stages: [
+      { id: "implement", type: "task", prompt: "Implement." },
+      { id: "check", type: "task", tools: ["read"], prompt: "Check." },
+      { id: "mutate-again", type: "task", tools: ["read", "edit"], prompt: "Mutate after check." },
+    ],
+    until: { stage: "check", path: "$.status", equals: "pass" },
+  })));
+  assertIssue(error, "$.workflow.stages[0].until.stage", "final child stage");
 });
 
 test("schema accepts bundled implement-loop separation shape", () => {
@@ -814,6 +836,30 @@ test("loop resume reconciliation backfills missing run records for compiled roun
   }
 });
 
+test("stage-first scheduler fails closed on compiled run positional mismatch", async () => {
+  const cwd = makeProject();
+  try {
+    writeAgent(cwd, "unit-scout", "read");
+    const spec = workflowSpec("unit-scout", {
+      workflow: {
+        stages: [
+          { id: "one", type: "task", prompt: "One." },
+          { id: "two", type: "task", prompt: "Two." },
+        ],
+      },
+    });
+    const compiled = await compileWorkflow(spec, { cwd, task: "Check alignment" });
+    const { run } = await createStageFirstRunRecord(cwd, compiled, join(cwd, "workflows", "alignment.json"));
+    await writeStaticRunArtifacts(cwd, run, compiled, spec);
+    run.tasks = [run.tasks[1], run.tasks[0]];
+    await writeRunRecord(cwd, run);
+
+    await assert.rejects(() => scheduleRun(cwd, run.runId), /materialization is misaligned/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("loop until satisfied after a round marks loop completed and stops materializing", async () => {
   const cwd = makeProject();
   try {
@@ -888,6 +934,32 @@ test("loop no-progress stops early with stopped_no_progress", async () => {
     assert.equal(current.loopResults[0].roundsUsed, 2);
     assert.equal(current.tasks.some((task) => task.specId.includes(".r03.")), false);
     assert.equal(taskBySpec(current, "fix-loop.loop").statusDetail, "loop_stopped_no_progress");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("loop invalid progressPath value records a warning", async () => {
+  const cwd = makeProject();
+  try {
+    writeAgent(cwd, "unit-scout", "read");
+    const { run } = await createLoopRun(cwd, loopWorkflowSpec({ progressPath: "$.passing" }));
+    await scheduleRun(cwd, run.runId);
+    let current = await readRunRecord(cwd, run.runId);
+    await completeTask(cwd, taskBySpec(current, "fix-loop.r01.implement"), { changed: true });
+    await completeTask(cwd, taskBySpec(current, "fix-loop.r01.check"), { status: "fail", verdict: "REJECT", passing: false });
+    await writeRunRecord(cwd, current);
+    await scheduleRun(cwd, run.runId);
+
+    current = await readRunRecord(cwd, run.runId);
+    await completeTask(cwd, taskBySpec(current, "fix-loop.r02.implement"), { changed: true });
+    await completeTask(cwd, taskBySpec(current, "fix-loop.r02.check"), { status: "fail", verdict: "REJECT", passing: false });
+    await writeRunRecord(cwd, current);
+    await scheduleRun(cwd, run.runId);
+
+    current = await readRunRecord(cwd, run.runId);
+    assert.match(taskBySpec(current, "fix-loop.r02.check").lastMessage ?? "", /progressPath \$\.passing resolved to unsupported boolean/);
+    assert.equal(current.tasks.some((task) => task.specId.includes(".r03.")), true);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
