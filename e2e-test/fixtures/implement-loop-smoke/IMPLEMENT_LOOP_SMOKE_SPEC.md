@@ -15,10 +15,10 @@ Fix the failing demo tests with the smallest safe code change.
 ## Scope
 
 Allowed files:
-- `scratch/loop-demo/math.js`
-- `scratch/loop-demo/math.test.js`
+- `e2e-test/fixtures/implement-loop-smoke/math.js`
+- `e2e-test/fixtures/implement-loop-smoke/math.test.js`
 
-Do not modify files outside `scratch/loop-demo/`.
+Do not modify files outside `e2e-test/fixtures/implement-loop-smoke/`.
 
 ## Current behavior
 
@@ -36,7 +36,7 @@ Examples:
 ## Approved validation command
 
 ```bash
-node --test scratch/loop-demo/math.test.js
+node --test e2e-test/fixtures/implement-loop-smoke/math.test.js
 ```
 
 ## Acceptance criteria
@@ -54,7 +54,7 @@ The loop is successful only when the final `check` stage returns JSON with:
 The `check` stage must verify:
 1. The approved validation command exits with code `0`.
 2. The patch is minimal.
-3. No files outside `scratch/loop-demo/` were modified.
+3. No files outside `e2e-test/fixtures/implement-loop-smoke/` were modified.
 4. The implementation does not hard-code only the tested examples.
 
 ## Safety constraints
@@ -78,15 +78,15 @@ Return JSON with:
 Fix the failing demo test only.
 
 Use this task spec:
-- scratch/loop-demo/IMPLEMENT_LOOP_SMOKE_SPEC.md
+- e2e-test/fixtures/implement-loop-smoke/IMPLEMENT_LOOP_SMOKE_SPEC.md
 
 Approved validation command:
-- node --test scratch/loop-demo/math.test.js
+- node --test e2e-test/fixtures/implement-loop-smoke/math.test.js
 
 Allowed files:
-- scratch/loop-demo/math.js
-- scratch/loop-demo/math.test.js
+- e2e-test/fixtures/implement-loop-smoke/math.js
+- e2e-test/fixtures/implement-loop-smoke/math.test.js
 
-Do not modify files outside scratch/loop-demo/.
+Do not modify files outside e2e-test/fixtures/implement-loop-smoke/.
 Use model kimi-coding/kimi-for-coding with medium thinking if the workflow runtime asks for model selection.
 ```
