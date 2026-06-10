@@ -43,6 +43,7 @@ Stage order controls scheduling, but a plain later `task` does **not** automatic
 | `foreach` | Dynamic fan-out | read an array from prior JSON output -> one subagent task per item |
 | `reduce` | Fan-in / synthesis | selected prior stage context -> one subagent |
 | `transform` | Deterministic local post-processing | selected prior structured outputs -> directory-local `.mjs` helper -> structured output |
+| `loop` | Bounded repetition | repeat a fixed child stage subgraph each round until a deterministic stop condition |
 
 `reduce` is not an automatic merge function. In the diagrams, **Supervisor** means the workflow runtime that gathers prior subagent outputs and passes bounded source context into a reduce subagent. It is not a user-defined agent.
 
@@ -91,6 +92,8 @@ The package includes built-in workflow definitions in [`workflows/`](./workflows
 |---|---|---|
 | `deep-research` | task -> foreach -> reduce -> foreach -> transform -> reduce | Source-backed research, claim verification, deterministic evidence gating, citations, or follow-up suggestions. |
 | `deep-review` | task -> foreach -> foreach -> reduce | Panel-style review where findings should be challenged before final synthesis. |
+| `implement-loop` | loop: implement -> final check | Iterative implementation in one managed worktree until validation passes and review accepts. |
+| `test-repair-loop` | loop: repair -> final test-check | Focused repair loop for failing tests or explicit validation commands. |
 
 Other workflow shapes such as migration planning, implementation batches, best-of-N fixes, revise loops, and decision debates are intentionally deferred until stronger task-fit evidence exists.
 
@@ -135,9 +138,7 @@ Other workflow shapes such as migration planning, implementation batches, best-o
 }
 ```
 
-The snippet above is intentionally abbreviated. Runnable workflow definitions also declare prompts, output contracts, source policies, tools, runtime limits, and continuation behavior.
-
-> **Continuation status:** continuation is currently a documented/experimental workflow-level control-policy field, not a task/stage type. The parser preserves it in workflow definitions, but the compiler/runtime do not yet execute follow-up rounds automatically. Treat any `nextWorkflow`/continuation output as a parent-facing suggestion until bounded continuation support is implemented.
+The snippet above is intentionally abbreviated. Runnable workflow definitions also declare prompts, output contracts, source policies, tools, and runtime limits.
 
 JSON outputs are validated with `output.contract` (for example `requiredPaths`, array bounds, and string length caps). To give models a shape hint without duplicating validation rules inline, use `output.template` for small one-off shapes or `output.templateRef` for reusable templates. `templateRef` supports internal refs such as `#/outputTemplates/final` and relative JSON files such as `./templates.json#/final` inside workflow bundles.
 
@@ -183,6 +184,44 @@ Then validate and run:
 ```
 
 The most important authoring rule: stage order only controls scheduling. It does not automatically pass prior output into later `task` stages. Use `foreach.from` for dynamic fan-out and `reduce.from` for source-context fan-in.
+
+## `loop` stages
+
+A `loop` stage repeats a **fixed** child stage subgraph once per round until a deterministic stop condition holds, or until `maxRounds`/no-progress stops it. It is intra-run only: a loop does not start a new workflow run, and it does not choose different stages per round (that is out of scope for v1).
+
+```json
+{
+  "id": "fix-loop",
+  "type": "loop",
+  "maxRounds": 5,
+  "until": {
+    "all": [
+      { "stage": "check", "path": "$.status", "equals": "pass" },
+      { "stage": "check", "path": "$.verdict", "equals": "ACCEPT" }
+    ]
+  },
+  "stages": [
+    { "id": "implement", "type": "task", "agent": "delegate", "readOnly": false, "tools": ["read", "grep", "find", "ls", "edit", "write"], "prompt": "Fix the current round's blocking failures." },
+    { "id": "check", "type": "task", "agent": "scout", "tools": ["read", "grep", "find", "ls", "bash"], "output": { "format": "json", "requiredKeys": ["status", "verdict"] }, "prompt": "Run the approved validation and review the change. Return JSON with status, verdict, blockingFailures, nextHints." }
+  ],
+  "onExhausted": {
+    "id": "loop-summary",
+    "type": "reduce",
+    "prompt": "Summarize remaining failures and recommended human next action. Do not auto-merge."
+  }
+}
+```
+
+Rules and behavior:
+
+- **Ids**: the loop and every child stage require non-empty ids; child ids must be unique. Child stages are materialized at runtime with deterministic ids `<loopId>.r01.<childStageId>`, `<loopId>.r02.<childStageId>`, and so on. Round R fully precedes round R+1.
+- **`maxRounds`** is required, a positive integer, capped at 50.
+- **`until`** is required and deterministic (no model judgment). Leaf form is `{ stage, path, equals | notEquals | lengthEquals }`; combinators are `{ all: [...] }` and `{ any: [...] }`. `path` must start with `$.` and is read from that child stage's latest-round JSON output. `stage` must reference a child stage id. A missing path evaluates to false.
+- **No-progress stop**: the loop stops early (`stopped_no_progress`) when the progress metric does not strictly decrease versus the previous round. The default metric is the length of `$.blockingFailures` on the designated check stage; override with `progressPath`. If `progressPath` resolves to an unsupported value such as a boolean/object/null, the check task records a warning and the comparison is skipped for that round.
+- **`onExhausted`** is optional and must be a `reduce` stage. It runs once when the loop exhausts `maxRounds` or stops on no-progress.
+- **Separation rule**: loops require at least two child stages, child stages run strictly in listed order (`from` is rejected inside loops), and every `until` leaf must reference the final child stage. Keep the final validator/reviewer read-only in practice; validation commands such as `bash` are allowed for checks, but the check prompt must not modify files. The engine never merges implement and check; merging reintroduces self-preferential bias.
+- **Worktree**: write-capable child stages share a single managed worktree reused across rounds. There is no auto-merge. On completion the loop records a result (`status`, `roundsUsed`, `worktreePath`, `finalCheck`, `summary`) for a human to merge.
+- Nested `loop`, `foreach`, and `parallel` child stages are rejected in v1.
 
 ## Commands
 

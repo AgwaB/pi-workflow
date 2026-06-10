@@ -24,7 +24,7 @@ import {
   WorktreePolicy,
 } from "./types.js";
 
-const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
+const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls", "web_search", "fetch_content", "get_search_content", "scrapling_fetch"]);
 const EXPLICIT_WRITE_TOOLS = new Set(["edit", "write"]);
 const MUTATION_CAPABLE_TOOLS = new Set(["bash"]);
 const DELEGATION_TOOLS = new Set(["skill_test_subagent", "workflow", "/workflow"]);
@@ -388,13 +388,18 @@ async function resolveOutputTemplate(
   path: string,
   issues: ValidationIssue[],
 ): Promise<WorkflowTaskOutputSpec | undefined> {
-  if (!output?.templateRef) return output;
-  if (output.template !== undefined) {
+  if (!output) return undefined;
+  const requiredPaths = (output.requiredKeys ?? []).map((key) => `$.${key}`);
+  const withRequiredKeys = requiredPaths.length > 0
+    ? { ...output, contract: { ...(output.contract ?? {}), requiredPaths: [...new Set([...(output.contract?.requiredPaths ?? []), ...requiredPaths])] } }
+    : output;
+  if (!withRequiredKeys.templateRef) return withRequiredKeys;
+  if (withRequiredKeys.template !== undefined) {
     issues.push({ path, message: "must not specify both template and templateRef" });
-    return output;
+    return withRequiredKeys;
   }
-  const resolved = await loadOutputTemplateRef(output.templateRef, spec, options, path, issues);
-  return resolved === undefined ? output : { ...output, template: resolved, templateRef: undefined };
+  const resolved = await loadOutputTemplateRef(withRequiredKeys.templateRef, spec, options, path, issues);
+  return resolved === undefined ? withRequiredKeys : { ...withRequiredKeys, template: resolved, templateRef: undefined };
 }
 
 async function loadOutputTemplateRef(
@@ -464,9 +469,10 @@ function resolveJsonPointer(value: unknown, pointer: string): { exists: boolean;
 export async function compileWorkflow(spec: any, options: CompileOptions & { task?: string; runtimeDefaults?: { model?: string; thinking?: ThinkingLevel } }): Promise<any> {
   const stages = spec.workflow?.stages ?? spec.flow?.stages;
   if (!Array.isArray(stages)) return compileWorkflowSpec(spec, options);
+
   const agentName = spec.agent ?? spec.defaults?.agent ?? "scout";
-  const agent = await loadAgentByName(agentName, options.cwd).catch(() => undefined as any);
-  if (!agent) throw new WorkflowValidationError([{ path: "$.agent", message: `unknown agent "${agentName}"` }]);
+  const agentCache = new Map<string, AgentDefinition>();
+  const defaultAgent = await loadStageFirstAgent(agentName, options.cwd, agentCache, "$.agent");
   const roleEntries = Object.entries(spec.roles ?? {});
   const roles = roleEntries.map(([name, role]: [string, any]) => ({
     name,
@@ -489,85 +495,140 @@ export async function compileWorkflow(spec: any, options: CompileOptions & { tas
   const issues: ValidationIssue[] = [];
   let previousStageTaskKeys: string[] = [];
   const stageTaskKeys = new Map<string, string[]>();
-  for (const stage of stages) {
-    stageRecords.push({ id: stage.id, type: stage.type, sourcePolicy: stage.sourcePolicy ?? "require-success" });
-    const currentStageTaskKeys: string[] = [];
-    const explicitDependencyKeys = dependencyKeysForStage(stage, stageTaskKeys);
-    const dependencyKeys = explicitDependencyKeys.length > 0 ? explicitDependencyKeys : previousStageTaskKeys;
-    const stageAgent = stage.agent ?? agentName;
+
+  const buildTask = async (stage: any, taskId: string, prompt: string, dependencyKeys: string[], overrides: (Partial<CompiledTask> & Record<string, unknown>) = {}): Promise<any> => {
+    const stageAgentName = stage.agent ?? agentName;
+    const stageAgent = stageAgentName === agentName ? defaultAgent : await loadStageFirstAgent(stageAgentName, options.cwd, agentCache, `$.workflow.stages.${stage.id}.agent`);
     const stageInject = stage.inject;
     const defaultInject = stage.type === "task";
     const injectTask = stageInject ?? defaultInject;
     const injectRuntimeTaskInPrompt = stage.type === "foreach" ? false : injectTask;
     const stageOutput = await resolveOutputTemplate(stage.output, spec, options, `$.workflow.stages.${jsonKey(stage.id)}.output`, issues);
-    const addTask = (taskId: string, prompt: string) => {
-      const key = `${stage.id}.${taskId}`;
-      const normalizedPrompt = String(prompt ?? "").replace(/\$\{item\}/g, "the relevant item from the dependency context");
-      const compiledPrompt = [
-        injectRuntimeTaskInPrompt && options.task ? `# Task\n\n${options.task}` : undefined,
-        workflowInputText || undefined,
-        `# Workflow Stage\n\nstage=${stage.id}\ntype=${stage.type}`,
-        `# Instructions\n\n${normalizedPrompt}`,
-        formatOutputTemplateSection(stageOutput),
-        roleText || undefined,
-      ].filter(Boolean).join("\n\n");
-      tasks.push({
-        key,
-        id: key,
-        specId: key,
-        taskId,
-        stageId: stage.id,
-        agent: stageAgent,
-        agentPath: agent.sourcePath,
-        agentDescription: agent.description,
-        agentSystemPrompt: agent.body,
-        roleNames: roles.map((r) => r.name),
-        task: normalizedPrompt,
-        cwd: options.cwd,
-        explicitCwd: false,
-        explicitWorktreePolicy: false,
-        runtime: {
-          approvalMode: stage.approvalMode ?? spec.defaults?.approvalMode ?? "non-interactive",
-          model: stage.model ?? defaultModel,
-          thinking: stage.thinking ?? defaultThinking,
-          tools: stage.tools ?? spec.defaults?.tools ?? spec.tools,
-          maxRuntimeMs: stage.maxRuntimeMs ?? spec.defaults?.maxRuntimeMs ?? DEFAULT_MAX_RUNTIME_MS,
-        },
-        safety: { readOnlyDeclared: true, capability: "read-only", sharedCwdSafe: true, worktreePolicy: "auto", requiresWorktree: false, permission: { status: "pending" } },
-        output: stageOutput,
-        outputContract: undefined,
-        sourceContext: stage.sourceContext,
-        compiledPrompt,
-        injectTask,
-        kind: stage.type,
-        stageMaxConcurrency: stage.maxConcurrency,
-        dependsOn: [...dependencyKeys],
-        foreach: stage.type === "foreach" ? {
-          from: stage.from,
-          prompt: String(stage.each?.prompt ?? stage.prompt ?? ""),
-          maxItems: stage.maxItems,
-          injectRuntimeTask: injectTask,
-          roleText,
-        } : undefined,
-        transform: stage.type === "transform" ? {
-          helper: String(stage.helper),
-          options: stage.options,
-        } : undefined,
+    const key = `${stage.id}.${taskId}`;
+    const normalizedPrompt = String(prompt ?? "").replace(/\$\{item\}/g, "the relevant item from the dependency context");
+    const compiledPrompt = [
+      injectRuntimeTaskInPrompt && options.task ? `# Task\n\n${options.task}` : undefined,
+      workflowInputText || undefined,
+      `# Workflow Stage\n\nstage=${stage.id}\ntype=${stage.type}`,
+      `# Instructions\n\n${normalizedPrompt}`,
+      formatOutputTemplateSection(stageOutput),
+      roleText || undefined,
+    ].filter(Boolean).join("\n\n");
+    const runtime = {
+      approvalMode: stage.approvalMode ?? spec.defaults?.approvalMode ?? "non-interactive",
+      model: stage.model ?? defaultModel,
+      thinking: stage.thinking ?? defaultThinking,
+      tools: stage.tools ?? spec.defaults?.tools ?? spec.tools ?? stageAgent.tools,
+      maxRuntimeMs: stage.maxRuntimeMs ?? spec.defaults?.maxRuntimeMs ?? DEFAULT_MAX_RUNTIME_MS,
+    };
+    const readOnlyDeclared = stage.readOnly ?? spec.defaults?.readOnly ?? spec.readOnly ?? stageAgent.readOnly ?? false;
+    const worktreePolicy = stage.worktreePolicy ?? spec.defaults?.worktreePolicy ?? spec.worktreePolicy ?? "auto";
+    const safety = classifySafety(runtime.tools, readOnlyDeclared, worktreePolicy, runtime.approvalMode);
+
+    return {
+      key,
+      id: key,
+      specId: key,
+      taskId,
+      stageId: stage.id,
+      agent: stageAgentName,
+      agentPath: stageAgent.sourcePath,
+      agentDescription: stageAgent.description,
+      agentSystemPrompt: stageAgent.body,
+      systemPromptMode: stageAgent.systemPromptMode,
+      inheritProjectContext: stageAgent.inheritProjectContext,
+      inheritSkills: stageAgent.inheritSkills,
+      roleNames: roles.map((r) => r.name),
+      task: normalizedPrompt,
+      cwd: options.cwd,
+      explicitCwd: stage.cwd !== undefined,
+      explicitWorktreePolicy: stage.worktreePolicy !== undefined,
+      runtime,
+      safety,
+      output: stageOutput,
+      outputContract: stage.outputContract,
+      sourceContext: stage.sourceContext,
+      compiledPrompt,
+      injectTask,
+      kind: stage.type,
+      stageMaxConcurrency: stage.maxConcurrency,
+      dependsOn: [...dependencyKeys],
+      foreach: stage.type === "foreach" ? {
+        from: stage.from,
+        prompt: String(stage.each?.prompt ?? stage.prompt ?? ""),
+        maxItems: stage.maxItems,
+        injectRuntimeTask: injectTask,
+        roleText,
+      } : undefined,
+      transform: stage.type === "transform" ? {
+        helper: String(stage.helper),
+        options: stage.options,
+      } : undefined,
+      ...overrides,
+    };
+  };
+
+  for (const stage of stages) {
+    const currentStageTaskKeys: string[] = [];
+    const explicitDependencyKeys = dependencyKeysForStage(stage, stageTaskKeys);
+    const dependencyKeys = explicitDependencyKeys.length > 0 ? explicitDependencyKeys : previousStageTaskKeys;
+
+    if (stage.type === "loop") {
+      const placeholderKey = `${stage.id}.loop`;
+      const loopTemplates = await compileLoopChildTemplates(stage, buildTask);
+      stageRecords.push({
+        id: stage.id,
+        type: "loop",
+        sourcePolicy: stage.sourcePolicy ?? "require-success",
+        maxRounds: stage.maxRounds,
+        until: stage.until,
+        childStageIds: loopTemplates.childStageIds,
+        childTemplates: loopTemplates.childTemplates,
+        childStageRecords: loopTemplates.childStageRecords,
+        onExhausted: loopTemplates.onExhausted,
+        progressPath: stage.progressPath,
       });
-      currentStageTaskKeys.push(key);
+      tasks.push(await buildTask(stage, "loop", stage.prompt ?? "Loop controller placeholder.", dependencyKeys, {
+        key: placeholderKey,
+        id: placeholderKey,
+        specId: placeholderKey,
+        taskId: "loop",
+        kind: "loop",
+        loopPlaceholder: { loopId: stage.id },
+        foreach: undefined,
+        safety: { readOnlyDeclared: true, capability: "read-only", sharedCwdSafe: true, worktreePolicy: "off", requiresWorktree: false, permission: { status: "pending" } },
+        compiledPrompt: [
+          workflowInputText || undefined,
+          `# Workflow Stage\n\nstage=${stage.id}\ntype=loop`,
+          "# Instructions\n\nLoop controller placeholder. Child stages are materialized by the workflow engine at runtime.",
+          roleText || undefined,
+        ].filter(Boolean).join("\n\n"),
+      }));
+      currentStageTaskKeys.push(placeholderKey);
+      previousStageTaskKeys = currentStageTaskKeys;
+      stageTaskKeys.set(stage.id, currentStageTaskKeys);
+      continue;
+    }
+
+    stageRecords.push({ id: stage.id, type: stage.type, sourcePolicy: stage.sourcePolicy ?? "require-success" });
+    const addTask = async (taskId: string, prompt: string) => {
+      const task = await buildTask(stage, taskId, prompt, dependencyKeys);
+      tasks.push(task);
+      currentStageTaskKeys.push(task.id);
     };
     if (stage.type === "parallel" && Array.isArray(stage.tasks)) {
-      for (const item of stage.tasks) addTask(item.id ?? `item-${tasks.length + 1}`, item.prompt ?? "");
+      for (const item of stage.tasks) await addTask(item.id ?? `item-${tasks.length + 1}`, item.prompt ?? "");
     } else if (stage.type === "foreach") {
-      addTask("item", stage.each?.prompt ?? stage.prompt ?? "");
+      await addTask("item", stage.each?.prompt ?? stage.prompt ?? "");
     } else if (stage.type === "transform") {
-      addTask("main", `Run transform helper ${stage.helper}.`);
+      await addTask("main", `Run transform helper ${stage.helper}.`);
     } else {
-      addTask("main", stage.prompt ?? "");
+      await addTask("main", stage.prompt ?? "");
     }
     previousStageTaskKeys = currentStageTaskKeys;
     stageTaskKeys.set(stage.id, currentStageTaskKeys);
   }
+
   const backendOptions = spec.defaults?.backend ?? spec.backend ?? {};
   if (backendOptions.type !== undefined && backendOptions.type !== "local-pi") issues.push({ path: "$.backend.type", message: 'must be "local-pi"' });
   if (backendOptions.mode !== undefined && backendOptions.mode !== "auto" && backendOptions.mode !== "headless") issues.push({ path: "$.backend.mode", message: 'must be "auto" or "headless"' });
@@ -577,6 +638,7 @@ export async function compileWorkflow(spec: any, options: CompileOptions & { tas
     if (stage?.fast === "on") issues.push({ path: `$.workflow.stages[${index}].fast`, message: "fast:on is not supported" });
   }
   if (issues.length > 0) throw new WorkflowValidationError(issues);
+
   return {
     schemaVersion: 1,
     name: spec.name,
@@ -592,6 +654,69 @@ export async function compileWorkflow(spec: any, options: CompileOptions & { tas
     warnings: [],
     budget: { models: defaultModel ? [{ model: defaultModel }] : [], unratedModels: [] },
   };
+}
+
+async function loadStageFirstAgent(
+  name: string,
+  cwd: string,
+  cache: Map<string, AgentDefinition>,
+  path: string,
+): Promise<AgentDefinition> {
+  const cached = cache.get(name);
+  if (cached) return cached;
+  const agent = await loadAgentByName(name, cwd).catch(() => undefined);
+  if (!agent) throw new WorkflowValidationError([{ path, message: `unknown agent "${name}"` }]);
+  cache.set(name, agent);
+  for (const alias of agent.aliases) cache.set(alias, agent);
+  return agent;
+}
+
+async function compileLoopChildTemplates(
+  loopStage: any,
+  buildTask: (stage: any, taskId: string, prompt: string, dependencyKeys: string[], overrides?: Partial<CompiledTask> & Record<string, unknown>) => Promise<any>,
+): Promise<{
+  childStageIds: string[];
+  childTemplates: any[];
+  childStageRecords: Array<{ id: string; type?: string; sourcePolicy?: string }>;
+  onExhausted?: { stageId: string; template: any };
+}> {
+  const childStageIds: string[] = [];
+  const childTemplates: any[] = [];
+  const childStageRecords: Array<{ id: string; type?: string; sourcePolicy?: string }> = [];
+  let previousChildTaskKeys: string[] = [];
+  const childTaskKeys = new Map<string, string[]>();
+
+  for (const childStage of loopStage.stages ?? []) {
+    childStageIds.push(childStage.id);
+    childStageRecords.push({ id: childStage.id, type: childStage.type, sourcePolicy: childStage.sourcePolicy ?? "require-success" });
+    const currentChildTaskKeys: string[] = [];
+    const explicitDependencyKeys = dependencyKeysForStage(childStage, childTaskKeys);
+    const dependencyKeys = explicitDependencyKeys.length > 0 ? explicitDependencyKeys : previousChildTaskKeys;
+    const addChildTask = async (taskId: string, prompt: string) => {
+      const template = await buildTask(childStage, taskId, prompt, dependencyKeys);
+      childTemplates.push(template);
+      currentChildTaskKeys.push(template.id);
+    };
+
+    if (childStage.type === "parallel" && Array.isArray(childStage.tasks)) {
+      for (const item of childStage.tasks) await addChildTask(item.id ?? `item-${childTemplates.length + 1}`, item.prompt ?? "");
+    } else {
+      await addChildTask("main", childStage.prompt ?? "");
+    }
+
+    previousChildTaskKeys = currentChildTaskKeys;
+    childTaskKeys.set(childStage.id, currentChildTaskKeys);
+  }
+
+  const onExhaustedStage = loopStage.onExhausted;
+  const onExhausted = onExhaustedStage
+    ? {
+        stageId: onExhaustedStage.id ?? "onExhausted",
+        template: await buildTask(onExhaustedStage, "main", onExhaustedStage.prompt ?? "", []),
+      }
+    : undefined;
+
+  return { childStageIds, childTemplates, childStageRecords, onExhausted };
 }
 
 function dependencyKeysForStage(stage: any, stageTaskKeys: Map<string, string[]>): string[] {

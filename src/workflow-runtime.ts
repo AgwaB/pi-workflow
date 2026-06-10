@@ -239,7 +239,7 @@ export async function extractStageFirstForeachItems(cwd: string, stage: any, sou
   return { items };
 }
 
-function readSimpleJsonPath(value: unknown, path: string): unknown {
+export function readSimpleJsonPath(value: unknown, path: string): unknown {
   const parts = path.slice(2).split(".").filter(Boolean);
   let current = value as any;
   for (const part of parts) {

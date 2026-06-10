@@ -55,8 +55,9 @@ function main() {
     const cwd = process.cwd();
     const workflows = await listWorkflows(cwd);
     const names = workflows.map((item) => item.name).sort();
-    for (const required of ['deep-research', 'deep-review']) {
-      if (!names.includes(required)) throw new Error('missing workflow: ' + required + '; got: ' + names.join(','));
+    const expected = ['deep-research', 'deep-review', 'implement-loop', 'test-repair-loop'];
+    for (const name of expected) {
+      if (!names.includes(name)) throw new Error('missing workflow: ' + name + ' in ' + names.join(','));
     }
     const resolved = await resolveWorkflowRef('deep-research', cwd);
     if (!resolved.specPath.endsWith('workflows/deep-research/spec.json')) throw new Error('bad resolved path: ' + resolved.specPath);

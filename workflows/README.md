@@ -17,8 +17,10 @@ Runtime selection is explicit: `/workflow run` takes an exact workflow name or e
 
 | Workflow | Required agents | Mode | Use when |
 |---|---|---|---|
-| `deep-research` | `researcher` | plan + foreach questions + normalize + foreach verifier + audit-claims transform + final reduce + continuation suggestion | Research needs source-backed claims, dynamic breadth/depth, independent verification, deterministic evidence gating, citations, or bounded follow-up. Supports `quick`, `standard`, and `max` depth through task wording/input. |
+| `deep-research` | `researcher` | plan + foreach questions + normalize + foreach verifier + audit-claims transform + final reduce | Research needs source-backed claims, dynamic breadth/depth, independent verification, deterministic evidence gating, or citations. Supports `quick`, `standard`, and `max` depth through task wording/input. |
 | `deep-review` | `scout` | cheap triage + foreach review lenses + foreach devil's advocate + reduce, read-only | Thorough/panel review where findings should be independently challenged before synthesis. |
+| `implement-loop` | `delegate`, `scout` | loop: implement -> final check (validation+review) repeated until pass+ACCEPT or maxRounds/no-progress | Iterative implementation in a single managed worktree until validation passes and review accepts. Loop children are strictly serial (no child `from`, nested foreach/parallel/loop); no auto-merge; a human merges the reported worktree. |
+| `test-repair-loop` | `delegate`, `scout` | loop: repair -> final test-check repeated until pass+ACCEPT or maxRounds/no-progress | Focused repair loop for failing tests or explicit validation commands. Uses one managed worktree, keeps patching separate from validation, and records a human-mergeable result. |
 
 ## Bundle layout
 
@@ -59,7 +61,5 @@ export default async function helper({ sources, options, context }) {
 ```
 
 Helper refs are intentionally directory-local only. Allowed refs start with `./` and point to `.mjs` files inside the workflow bundle directory. Parent-directory refs, absolute paths, home-relative paths, protocol refs (`file://`, `https://`), and `npm:` refs are rejected. This is containment and reproducibility, not a sandbox: helper code still runs inside the workflow process.
-
-Continuation is not a task/stage type today. Bundled workflow specs may include continuation policy metadata and prompts may emit `nextWorkflow`, but the current compiler/runtime do not automatically launch follow-up rounds.
 
 Deferred workflow candidates live under `internal/plans/deferred-workflows/` and are not bundled workflow surface.
