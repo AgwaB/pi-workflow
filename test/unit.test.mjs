@@ -1113,6 +1113,39 @@ test("bundled implement-loop workflow parses and compiles (schema/engine integra
   }
 });
 
+test("bundled test-repair-loop workflow materializes a serial repair/check round", async () => {
+  const cwd = makeProject();
+  try {
+    writeAgent(cwd, "delegate", "read, grep, find, ls, edit, write");
+    writeAgent(cwd, "scout", "read, grep, find, ls, bash");
+    const specPath = join(process.cwd(), "workflows", "test-repair-loop.json");
+    const spec = JSON.parse(readFileSync(specPath, "utf8"));
+    parseWorkflow(spec);
+    const compiled = await compileWorkflow(spec, { cwd, task: "Fix npm test; approved command: npm test." });
+    const loopStage = compiled.stages.find((stage) => stage.id === "repair-loop");
+    assert.equal(loopStage.type, "loop");
+    assert.deepEqual(loopStage.childStageIds, ["repair", "test-check"]);
+    assert.equal(loopStage.maxRounds, 4);
+    assert.equal(loopStage.progressPath, "$.failingChecks");
+
+    const { run } = await createStageFirstRunRecord(cwd, compiled, specPath);
+    await writeStaticRunArtifacts(cwd, run, compiled, spec);
+    await writeRunRecord(cwd, run);
+    await scheduleRun(cwd, run.runId);
+
+    const materialized = await readRunRecord(cwd, run.runId);
+    assert.deepEqual(materialized.tasks.map((task) => task.specId), [
+      "repair-loop.loop",
+      "repair-loop.r01.repair",
+      "repair-loop.r01.test-check",
+    ]);
+    assert.deepEqual(taskBySpec(materialized, "repair-loop.r01.repair").dependsOn ?? [], []);
+    assert.deepEqual(taskBySpec(materialized, "repair-loop.r01.test-check").dependsOn, ["repair-loop.r01.repair"]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("runtime model resolver defaults to current model and thinking", async () => {
   const resolved = await resolveWorkflowRuntime({}, {
     taskKey: "main.main",

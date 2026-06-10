@@ -88,6 +88,8 @@ The package includes built-in workflow definitions in [`workflows/`](./workflows
 |---|---|---|
 | `deep-research` | task -> foreach -> reduce -> foreach -> reduce | Source-backed research, claim verification, and citations. |
 | `deep-review` | task -> foreach -> foreach -> reduce | Panel-style review where findings should be challenged before final synthesis. |
+| `implement-loop` | loop: implement -> final check | Iterative implementation in one managed worktree until validation passes and review accepts. |
+| `test-repair-loop` | loop: repair -> final test-check | Focused repair loop for failing tests or explicit validation commands. |
 | `migration` | parallel -> reduce -> foreach -> reduce | Large migration/refactor planning with ordered phases and risks. |
 | `implement` | task -> reduce -> foreach -> reduce | Bounded implementation batches with validation expectations and managed worktrees. |
 | `best-of-n-fix` | task -> foreach -> reduce | Multiple isolated fix attempts when uncertainty justifies the cost. |
