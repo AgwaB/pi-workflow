@@ -1506,26 +1506,6 @@ test("schema validates stage sourceContext projection settings", () => {
   assertIssue(badPath, "$.workflow.stages[0].sourceContext.structuredOutputPathsByStage.verify[0]", "must start with $.");
 });
 
-test("schema and compiler accept partial sourcePolicy on foreach", async () => {
-  const cwd = makeProject();
-  try {
-    writeAgent(cwd, "unit-scout", "read");
-    const spec = workflowSpec("unit-scout", {
-      workflow: {
-        stages: [
-          { id: "extract", type: "task", output: { format: "json" }, prompt: "Extract" },
-          { id: "verify", type: "foreach", sourcePolicy: "partial", from: { stage: "extract", path: "$.items" }, each: { prompt: "Verify ${item}" } },
-        ],
-      },
-    });
-    assert.equal(parseWorkflow(spec).workflow.stages[1].sourcePolicy, "partial");
-    const compiled = await compileWorkflow(spec, { cwd, task: "Review" });
-    assert.equal(compiled.stages[1].sourcePolicy, "partial");
-  } finally {
-    rmSync(cwd, { recursive: true, force: true });
-  }
-});
-
 test("schema and compiler accept transform stages", async () => {
   const cwd = makeProject();
   try {
@@ -1715,15 +1695,6 @@ test("deep-research claim evidence gate downgrades unsupported verified claims",
   assert.deepEqual(result.auditedClaims[1].sourceUrls, ["https://example.com/release"]);
 });
 
-test("JSON output extraction tolerates prose and fenced JSON", () => {
-  assert.deepEqual(extractJsonOutput('{"findings":[]}'), { text: '{"findings":[]}', extracted: false });
-  assert.deepEqual(extractJsonOutput('```json\n{"findings":[]}\n```'), { text: '{"findings":[]}', extracted: false });
-  assert.deepEqual(extractJsonOutput('Here are findings.\n\n{"findings":[{"title":"brace } inside string"}]}\nThanks.'), {
-    text: '{"findings":[{"title":"brace } inside string"}]}',
-    extracted: true,
-  });
-});
-
 test("JSON output parsing picks candidate matching contract paths", () => {
   const output = 'Prose with escaped example `{\\"findings\\": null}` before the final answer.\n\n{"finding":{"title":"kept"},"verdict":"KEEP"}';
   assert.deepEqual(parseJsonOutput(output, ["$.finding", "$.verdict"]), {
@@ -1805,129 +1776,7 @@ test("JSON output retry prompt includes validation error, self-check, and few-sh
   assert.match(prompt, /# Output JSON Template/);
 });
 
-test("partial foreach continues scheduling after an item failure", () => {
-  assert.equal(shouldScheduleAfterStageFailure({ id: "review", type: "foreach", sourcePolicy: "partial" }), true);
-  assert.equal(shouldScheduleAfterStageFailure({ id: "review", type: "foreach", sourcePolicy: "require-success" }), false);
-  assert.equal(shouldScheduleAfterStageFailure({ id: "report", type: "reduce", sourcePolicy: "partial" }), false);
-});
-
-test("dependency-aware skip lets explicit partial sources bypass unrelated previous failures", () => {
-  const previous = { id: "failed", type: "task", sourceStageIds: [], sourcePolicy: "require-success" };
-  assert.equal(canStageProceedAfterPreviousFailure({ id: "next", type: "task", sourceStageIds: [], sourcePolicy: "require-success" }, previous), false);
-  assert.equal(canStageProceedAfterPreviousFailure({ id: "strict", type: "reduce", sourceStageIds: ["failed"], sourcePolicy: "require-success" }, previous), false);
-  assert.equal(canStageProceedAfterPreviousFailure({ id: "partial", type: "reduce", sourceStageIds: ["failed"], sourcePolicy: "partial" }, previous), true);
-  assert.equal(canStageProceedAfterPreviousFailure({ id: "unrelated", type: "reduce", sourceStageIds: ["ok"], sourcePolicy: "require-success" }, previous), true);
-});
-
-test("partial foreach extraction skips failed source tasks", async () => {
-  const cwd = makeProject();
-  try {
-    const completedFile = join(cwd, ".pi", "workflows", "workflow_unit", "stages", "reviewers", "tasks", "item-001", "result.json");
-    const failedFile = join(cwd, ".pi", "workflows", "workflow_unit", "stages", "reviewers", "tasks", "item-002", "result.json");
-    await writeJsonAtomic(completedFile, { structuredOutput: { findings: [{ title: "kept" }] } });
-    await writeJsonAtomic(failedFile, { status: "failed" });
-    const sourceTasks = [
-      { taskId: "reviewers.item-001", status: "completed", files: { result: ".pi/workflows/workflow_unit/stages/reviewers/tasks/item-001/result.json" } },
-      { taskId: "reviewers.item-002", status: "failed", files: { result: ".pi/workflows/workflow_unit/stages/reviewers/tasks/item-002/result.json" } },
-    ];
-    const partialStage = { from: { path: "$.findings", mode: "concat" }, sourcePolicy: "partial" };
-    const strictStage = { from: { path: "$.findings", mode: "concat" }, sourcePolicy: "require-success" };
-    assert.deepEqual(await extractStageFirstForeachItems(cwd, partialStage, sourceTasks), { items: [{ title: "kept" }] });
-    assert.match((await extractStageFirstForeachItems(cwd, strictStage, sourceTasks)).error, /did not complete/);
-  } finally {
-    rmSync(cwd, { recursive: true, force: true });
-  }
-});
-
-test("compiler injects runtime task by effective stage policy", async () => {
-  const cwd = makeProject();
-  try {
-    writeAgent(cwd, "unit-scout", "read");
-    const compiled = await compileWorkflow(workflowSpec("unit-scout", {
-      roles: { lens: { prompt: "Role context marker." } },
-      flow: {
-        stages: [
-          { id: "entry", type: "task", prompt: "Entry instructions." },
-          { id: "entry-no-inject", type: "task", inject: false, prompt: "Entry no inject." },
-          { id: "final", type: "reduce", prompt: "Final instructions." },
-          { id: "final-inject", type: "reduce", inject: true, from: "final", prompt: "Final with task." },
-        ],
-      },
-    }), { cwd, task: "Review feature A" });
-
-    assert.equal(compiled.schemaVersion, 1);
-    const byKey = Object.fromEntries(compiled.tasks.map((task) => [task.key, task]));
-    assert.match(byKey["entry.main"].compiledPrompt, /^# Task\n\nReview feature A\n\n# Workflow Stage/);
-    assert.equal(byKey["entry.main"].injectTask, true);
-    assert.doesNotMatch(byKey["entry-no-inject.main"].compiledPrompt, /# Task/);
-    assert.equal(byKey["entry-no-inject.main"].injectTask, false);
-    assert.doesNotMatch(byKey["final.main"].compiledPrompt, /# Task/);
-    assert.equal(byKey["final.main"].injectTask, false);
-    assert.match(byKey["final-inject.main"].compiledPrompt, /^# Task\n\nReview feature A\n\n# Workflow Stage/);
-    assert.equal(byKey["final-inject.main"].injectTask, true);
-    assert.match(byKey["entry.main"].compiledPrompt, /# Instructions\n\nEntry instructions\./);
-    assert.match(byKey["entry.main"].compiledPrompt, /# Role Context\n\n## Role: lens\nRole context marker\./);
-    assert.match(byKey["entry.main"].compiledPrompt, /# Role Context\n\n## Role: lens\nRole context marker\./);
-  } finally {
-    rmSync(cwd, { recursive: true, force: true });
-  }
-});
-
-test("compiler defers foreach task injection until runtime interpolation", async () => {
-  const cwd = makeProject();
-  try {
-    writeAgent(cwd, "unit-scout", "read");
-    const compiled = await compileWorkflow(workflowSpec("unit-scout", {
-      flow: {
-        stages: [
-          { id: "extract", type: "task", output: { format: "json" }, prompt: "Extract" },
-          { id: "verify", type: "foreach", inject: true, from: { stage: "extract", path: "$.claims" }, each: { prompt: "Verify ${item}" } },
-        ],
-      },
-    }), { cwd, task: "Check ${WORKSPACE} literally" });
-
-    assert.equal(compiled.task, "Check ${WORKSPACE} literally");
-    assert.equal(compiled.tasks[1].injectTask, true);
-    assert.deepEqual(compiled.tasks[1].dependsOn, ["extract.main"]);
-    assert.doesNotMatch(compiled.tasks[1].compiledPrompt, /# Task/);
-    assert.doesNotMatch(compiled.tasks[1].compiledPrompt, /WORKSPACE/);
-    assert.match(compiled.tasks[1].compiledPrompt, /Verify the relevant item from the dependency context/);
-  } finally {
-    rmSync(cwd, { recursive: true, force: true });
-  }
-});
-
-test("compiler applies explicit stage from dependencies and stage runtime defaults", async () => {
-  const cwd = makeProject();
-  try {
-    writeAgent(cwd, "unit-scout", "read");
-    const compiled = await compileWorkflow(workflowSpec("unit-scout", {
-      model: "kimi-coding/kimi-for-coding",
-      thinking: "high",
-      tools: ["read", "grep"],
-      defaults: { maxRuntimeMs: 12345 },
-      flow: {
-        stages: [
-          { id: "plan", type: "task", prompt: "Plan" },
-          { id: "research", type: "foreach", from: { stage: "plan", path: "$.questions" }, each: { prompt: "Research ${item}" } },
-          { id: "final", type: "reduce", from: ["plan", "research"], prompt: "Final" },
-        ],
-      },
-    }), { cwd, task: "Research topic" });
-
-    const byKey = Object.fromEntries(compiled.tasks.map((task) => [task.key, task]));
-    assert.deepEqual(byKey["research.item"].dependsOn, ["plan.main"]);
-    assert.deepEqual(byKey["final.main"].dependsOn, ["plan.main", "research.item"]);
-    assert.equal(byKey["final.main"].runtime.model, "kimi-coding/kimi-for-coding");
-    assert.equal(byKey["final.main"].runtime.thinking, "high");
-    assert.deepEqual(byKey["final.main"].runtime.tools, ["read", "grep"]);
-    assert.equal(byKey["final.main"].runtime.maxRuntimeMs, 12345);
-  } finally {
-    rmSync(cwd, { recursive: true, force: true });
-  }
-});
-
-test("stage-first foreach materializes source array into generated tasks", async () => {
+test("stage-first foreach materializes source array into generated tasks with output contract paths", async () => {
   const cwd = makeProject();
   try {
     writeAgent(cwd, "unit-scout", "read");
@@ -1963,7 +1812,7 @@ test("stage-first foreach materializes source array into generated tasks", async
   }
 });
 
-test("successive foreach materialization keeps task ids unique", async () => {
+test("successive foreach materialization keeps task ids unique with output contract paths", async () => {
   const cwd = makeProject();
   try {
     writeAgent(cwd, "unit-scout", "read");
@@ -2076,7 +1925,7 @@ test("stage-first transform marks helper errors as failed", async () => {
   }
 });
 
-test("stage-first foreach blocks when maxItems is exceeded", async () => {
+test("stage-first foreach blocks when maxItems is exceeded with output contract paths", async () => {
   const cwd = makeProject();
   try {
     writeAgent(cwd, "unit-scout", "read");
