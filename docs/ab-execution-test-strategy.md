@@ -124,7 +124,7 @@ Hidden answer-key issues:
 
 1. Child workers are launched without explicit `PI_WORKFLOW_ROLE=worker`.
 2. Scheduler ignores `maxConcurrency` and may launch all pending tasks.
-3. Structured JSON parsing returns the first JSON candidate without checking `requiredKeys`.
+3. Structured JSON parsing returns the first JSON candidate without checking contract-required JSON paths.
 
 Primary validation: hidden answer-key coverage, then blind output quality. All three seeded issues are configured as hard objective misses if not found.
 
@@ -184,7 +184,7 @@ What it tests:
 
 - iterative critique/revision value on code-oriented output,
 - edge-case coverage for raw/fenced/prose/multiple JSON candidates,
-- requiredKeys candidate selection,
+- contract-required JSON path candidate selection,
 - string/escape-aware balanced scanning,
 - realistic unit test planning,
 - avoidance of regex-only or prompt-only parsing assumptions.

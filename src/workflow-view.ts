@@ -456,7 +456,6 @@ export class WorkflowView implements Component {
       kvRow(this.theme, "agent", task.agent, "syntaxType"),
       kvRow(this.theme, "model", task.runtime.model ?? "inherit"),
       kvRow(this.theme, "thinking", task.runtime.thinking ?? "inherit"),
-      kvRow(this.theme, "fast", task.runtime.fast ?? "inherit"),
       kvRow(this.theme, "tools", (task.tools ?? []).join(",") || "(default)"),
     ];
     return lines.map((line) => fit(line, width));
@@ -735,7 +734,6 @@ function runToSummary(cwd: string, run: WorkflowRunRecord): WorkflowSummary {
       agent: task.agent,
       status: task.status,
       statusDetail: task.statusDetail,
-      paneId: task.paneId,
       backendHandle: task.backendHandle,
       lastMessage: task.lastMessage,
     })),
@@ -791,8 +789,7 @@ function taskElapsed(task: WorkflowTaskRunRecord): string {
 function taskRuntimeSummary(task: WorkflowTaskRunRecord): string {
   const model = task.runtime.model ? shortModelName(task.runtime.model) : "inherit";
   const thinking = task.runtime.thinking ?? "inherit";
-  const fast = task.runtime.fast && task.runtime.fast !== "inherit" ? ` · fast ${task.runtime.fast}` : "";
-  return `${model}/${thinking}${fast}`;
+  return `${model}/${thinking}`;
 }
 
 function shortModelName(model: string): string {

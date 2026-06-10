@@ -242,13 +242,13 @@ Proposed shape:
     "researchScopeCoverage": [],
     "remainingGaps": []
   },
-  "evidencePacket": {
+  "claimVerdictIndex": {
     "claims": []
   }
 }
 ```
 
-`finalReport` is the human-readable research report: concise synthesis, counts, and representative findings with claim IDs. `evidencePacket` is the canonical structured audit trail: all verified, partially supported, conflicting, unsupported, and preserved claims with status fields. Avoid maintaining parallel exhaustive bucket arrays in both places.
+`finalReport` is the human-readable research report: concise synthesis, counts, representative findings, recommendations, and action steps with claim IDs. `claimVerdictIndex` is the compact synthesis handoff: claim ids, verifier status, confidence, source URLs, and short caveats for claims used in the final report. The canonical full evidence audit trail lives in each verifier task result artifact, not in the final report payload.
 
 ## Depth mode implications
 
@@ -280,8 +280,8 @@ Reason: prematurely limiting raw claims may undermine the "deep" part of deep re
 2. Is separating `researchScope` extraction from question planning enough to avoid self-justifying coverage boilerplate?
 3. Is preserving unverified claims valuable, or will it overload the final artifact?
 4. Should `verificationCandidates` caps remain unchanged initially, or should standard/max be reduced immediately?
-5. Are `mainFindings`, `caveatedFindings`, `contestedAreas`, `notableUnsupportedClaims`, and canonical `evidencePacket.claims` the right split?
-6. Does `finalReport + evidencePacket` keep the parent session informed without turning the workflow into a decision-maker?
+5. Are `mainFindings`, `caveatedFindings`, `contestedAreas`, `notableUnsupportedClaims`, and compact `claimVerdictIndex.claims` the right synthesis split?
+6. Does `finalReport + claimVerdictIndex` keep the parent session informed while preserving full evidence in verifier task artifacts and without turning the workflow into a decision-maker?
 7. What is the smallest change that improves accuracy without compromising depth?
 
 ## Success criteria

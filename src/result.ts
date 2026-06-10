@@ -1,6 +1,7 @@
 import { copyFile, readFile } from "node:fs/promises";
 
 import { WorkflowTaskRunRecord } from "./types.js";
+import { formatOutputTemplateSection, validateStructuredContract } from "./workflow-artifacts.js";
 import {
   fromProjectPath,
   nowIso,
@@ -77,23 +78,37 @@ export async function applyTaskResultArtifact(cwd: string, task: WorkflowTaskRun
       lastMessage = `completed with output warning: ${validation.message}`;
     }
 
-    await writeJsonAtomic(artifact.resultFile, nextResult);
-
     if (!validation.valid && task.output.onInvalid === "fail") {
       const attempts = (task.outputRetry?.attempts ?? 0) + 1;
+      const maxAttempts = task.outputRetry?.maxAttempts ?? 1;
+      const exhausted = attempts > maxAttempts;
+      nextResult.failureKind = exhausted ? "output_invalid_exhausted" : "output_invalid";
+      nextResult.errorMessage = exhausted
+        ? `output invalid after ${maxAttempts} retry attempt${maxAttempts === 1 ? "" : "s"}: ${validation.message}`
+        : validation.message;
+      await writeJsonAtomic(artifact.resultFile, nextResult);
       await copyFile(fromProjectPath(cwd, task.files.output), `${fromProjectPath(cwd, task.files.output)}.invalid-attempt-${attempts}`).catch(() => undefined);
       await copyFile(artifact.resultFile, `${artifact.resultFile}.invalid-attempt-${attempts}`).catch(() => undefined);
-      task.status = "pending";
-      task.statusDetail = "retry_output_invalid";
       task.startedAt = undefined;
       task.completedAt = undefined;
       task.exitCode = undefined;
-      task.paneId = undefined;
       task.pid = undefined;
       task.launchToken = undefined;
-      task.outputRetry = { attempts, maxAttempts: 1, reason: "output_invalid", message: validation.message, requiredKeys: task.output.requiredKeys ?? [] };
+      task.backendHandle = undefined;
+      task.backendFiles = undefined;
+      task.outputRetry = { attempts, maxAttempts, reason: exhausted ? "output_invalid_exhausted" : "output_invalid", message: validation.message };
+      if (exhausted) {
+        return setTaskTerminal(task, "failed", "output_invalid_exhausted", {
+          exitCode: 1,
+          lastMessage: String(nextResult.errorMessage),
+        });
+      }
+      task.status = "pending";
+      task.statusDetail = "retry_output_invalid";
       return true;
     }
+
+    await writeJsonAtomic(artifact.resultFile, nextResult);
   }
 
   return setTaskTerminal(task, nextStatus, detail, {
@@ -111,10 +126,21 @@ async function validateTaskOutput(cwd: string, task: WorkflowTaskRunRecord): Pro
   const trimmed = normalizeJsonOutputText(text);
   if (!trimmed) return { valid: false, message: "expected JSON output, got empty output" };
 
-  const requiredKeys = Array.isArray(task.output.requiredKeys) ? task.output.requiredKeys : [];
-  const parsed = parseJsonOutput(trimmed, requiredKeys);
+  const selectorPaths = task.output.contract?.requiredPaths ?? [];
+  const parsed = parseJsonOutput(trimmed, selectorPaths);
   if (!parsed.valid) {
     return { valid: false, message: `expected valid JSON output: ${parsed.message ?? "invalid JSON"}`, structuredOutput: parsed.structuredOutput };
+  }
+
+  if (task.output.contract) {
+    const contract = validateStructuredContract(parsed.structuredOutput, task.output.contract);
+    if (!contract.valid) {
+      return {
+        valid: false,
+        message: `structured output contract failed: ${contract.issues.map((issue) => `${issue.path} ${issue.message}`).join("; ")}`,
+        structuredOutput: parsed.structuredOutput,
+      };
+    }
   }
 
   return { valid: true, message: "JSON output valid", structuredOutput: parsed.structuredOutput };
@@ -122,7 +148,7 @@ async function validateTaskOutput(cwd: string, task: WorkflowTaskRunRecord): Pro
 
 function canAcceptTerminalResult(task: WorkflowTaskRunRecord, result: Record<string, unknown>): boolean {
   if (task.launchToken !== undefined) return typeof result.launchToken === "string" && result.launchToken === task.launchToken;
-  return Boolean(task.paneId || task.pid);
+  return Boolean(task.pid || task.backendHandle);
 }
 
 function resultCompletedAfterTimeout(task: WorkflowTaskRunRecord, completedAt: string): boolean {
@@ -163,23 +189,43 @@ export function extractJsonOutput(output: string): { text: string; extracted: bo
   return { text: trimmed, extracted: false };
 }
 
-export function parseJsonOutput(output: string, requiredKeys: string[] = []): { valid: boolean; extracted: boolean; structuredOutput?: unknown; message?: string } {
+export function parseJsonOutput(output: string, selectorPaths: string[] = []): { valid: boolean; extracted: boolean; structuredOutput?: unknown; message?: string } {
   const candidates = collectJsonObjectCandidates(output);
   const ordered = candidates.length > 0 ? candidates : [extractJsonOutput(output).text];
   let lastError = "invalid JSON";
+  let fallback: { text: string; parsed: unknown } | undefined;
   for (let index = ordered.length - 1; index >= 0; index -= 1) {
     const text = ordered[index]!;
     try {
       const parsed = JSON.parse(text);
-      if (requiredKeys.length && (!parsed || typeof parsed !== "object" || Array.isArray(parsed))) continue;
-      const missing = requiredKeys.filter((key) => !Object.prototype.hasOwnProperty.call(parsed as Record<string, unknown>, key));
-      if (missing.length > 0) continue;
+      fallback ??= { text, parsed };
+      if (selectorPaths.length > 0 && !selectorPaths.every((path) => jsonPathExists(parsed, path))) continue;
       return { valid: true, extracted: output.trim() !== text.trim(), structuredOutput: parsed };
     } catch (error) {
       lastError = error instanceof Error ? error.message : String(error);
     }
   }
+  if (fallback) return { valid: true, extracted: output.trim() !== fallback.text.trim(), structuredOutput: fallback.parsed };
   return { valid: false, extracted: true, message: lastError };
+}
+
+function jsonPathExists(value: unknown, path: string): boolean {
+  if (!path.startsWith("$")) return false;
+  const pattern = /\.([A-Za-z_][A-Za-z0-9_-]*)|\[(\d+)\]/g;
+  let current = value;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(path)) !== null) {
+    if (match[1] !== undefined) {
+      const key = match[1];
+      if (!current || typeof current !== "object" || Array.isArray(current) || !Object.prototype.hasOwnProperty.call(current, key)) return false;
+      current = (current as Record<string, unknown>)[key];
+      continue;
+    }
+    const index = Number(match[2]);
+    if (!Array.isArray(current) || index < 0 || index >= current.length) return false;
+    current = current[index];
+  }
+  return true;
 }
 
 function collectJsonObjectCandidates(output: string): string[] {
@@ -211,11 +257,13 @@ function collectJsonObjectCandidates(output: string): string[] {
 }
 
 export function buildJsonOutputRetryInstructions(task: Pick<WorkflowTaskRunRecord, "output" | "outputRetry">): string {
-  const keys = task.output?.requiredKeys ?? task.outputRetry?.requiredKeys ?? [];
+  const template = formatOutputTemplateSection(task.output);
+  const requiredPaths = task.output?.contract?.requiredPaths;
   return [
     `Validation error: ${task.outputRetry?.message ?? "invalid JSON output"}`,
     "Return only valid JSON. JSON.parse(finalAnswer) would succeed.",
     "Invalid JSON: {\"item\": true",
-    `Valid shape: {${keys.map((key) => `\"${key}\": {}`).join(",")}}`,
-  ].join("\n");
+    requiredPaths && requiredPaths.length > 0 ? `Required JSON paths: ${requiredPaths.join(", ")}` : undefined,
+    template,
+  ].filter(Boolean).join("\n");
 }

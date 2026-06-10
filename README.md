@@ -58,7 +58,10 @@ A minimal workflow definition looks like:
       {
         "id": "plan",
         "type": "task",
-        "output": { "format": "json", "requiredKeys": ["questions"] },
+        "output": {
+          "format": "json",
+          "contract": { "requiredPaths": ["$.questions"] }
+        },
         "prompt": "Plan the research questions."
       },
       {
@@ -129,6 +132,10 @@ The package includes built-in workflow definitions in [`workflows/`](./workflows
 ```
 
 The snippet above is intentionally abbreviated. Runnable workflow definitions also declare prompts, output contracts, source policies, tools, runtime limits, and continuation behavior.
+
+> **Continuation status:** continuation is currently a documented/experimental workflow-level control-policy field, not a task/stage type. The parser preserves it in workflow definitions, but the compiler/runtime do not yet execute follow-up rounds automatically. Treat any `nextWorkflow`/continuation output as a parent-facing suggestion until bounded continuation support is implemented.
+
+JSON outputs are validated with `output.contract` (for example `requiredPaths`, array bounds, and string length caps). To give models a shape hint without duplicating validation rules inline, use `output.template` for small one-off shapes or `output.templateRef` for reusable templates. `templateRef` supports internal refs such as `#/outputTemplates/final` and relative JSON files such as `./templates/deep-research.json#/final`.
 
 ## Create or customize workflows with `workflow-guide`
 

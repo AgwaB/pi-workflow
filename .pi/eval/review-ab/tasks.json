@@ -1,0 +1,86 @@
+[
+  {
+    "id": "pi-chat-security-broad",
+    "repoUrl": "https://github.com/earendil-works/pi-chat",
+    "localPath": "/tmp/pi-github-repos/earendil-works/pi-chat",
+    "reviewKind": "security",
+    "task": "Review the pi-chat repository from a security and safety perspective. Focus on trust boundaries, secrets, chat-originated inputs, attachments, Gondolin VM isolation assumptions, remote control commands, tmux worker orchestration, logging, persistent memory, and skills. Do not modify files. Produce evidence-backed findings with severity, affected files, rationale, and recommended fixes.",
+    "arms": {
+      "A": { "type": "workflow", "name": "deep-review" },
+      "B": { "type": "plain" }
+    },
+    "riskAreas": [
+      {
+        "id": "SEC-01",
+        "name": "Secrets and token handling",
+        "description": "Bot tokens, configured Gondolin HTTP secrets, encrypted runtime secret exchange, storage paths, and accidental disclosure.",
+        "mustInspect": ["src/secrets.ts", "src/gondolin.ts", "src/config.ts", "src/tui/chat-config.ts", "index.ts"]
+      },
+      {
+        "id": "SEC-02",
+        "name": "Chat-originated input authorization",
+        "description": "Allowed users/roles, bot filtering, mentions/triggers, DMs/groups, and remote control commands such as stop/status/compact/new.",
+        "mustInspect": ["src/runtime.ts", "src/live/discord.ts", "src/live/telegram.ts", "index.ts", "src/core/config-types.ts"]
+      },
+      {
+        "id": "SEC-03",
+        "name": "Attachments and file boundaries",
+        "description": "Downloaded or outgoing attachments crossing from chat into workspace or from VM to chat; path traversal, symlink, MIME, size, and host path containment risks.",
+        "mustInspect": ["src/log.ts", "src/live/common.ts", "src/gondolin.ts", "src/live/discord.ts", "src/live/telegram.ts", "index.ts"]
+      },
+      {
+        "id": "SEC-04",
+        "name": "Gondolin VM and mount isolation assumptions",
+        "description": "Workspace/shared mounts, guest-to-host and host-to-guest path mapping, VM lifecycle, network/HTTP hook assumptions, and cross-channel isolation.",
+        "mustInspect": ["src/gondolin.ts", "src/core/config-types.ts", "src/config.ts", "index.ts"]
+      },
+      {
+        "id": "SEC-05",
+        "name": "tmux worker orchestration and host command construction",
+        "description": "Managed worker sessions, shell quoting, session names, dashboard attach commands, restart/kill behavior, and host-side command injection risk.",
+        "mustInspect": ["index.ts"]
+      },
+      {
+        "id": "SEC-06",
+        "name": "Persistent prompt inputs: memory and skills",
+        "description": "Account/channel memory, auto-discovered skills, prompt injection persistence, cross-channel leakage, disabled skills, and skill path handling.",
+        "mustInspect": ["index.ts", "src/gondolin.ts", "src/log.ts", "README.md"]
+      },
+      {
+        "id": "SEC-07",
+        "name": "Logging, status, and telemetry disclosure",
+        "description": "Chat logs, worker status snapshots, session metadata, errors, usage/status responses, and sensitive information exposure.",
+        "mustInspect": ["src/log.ts", "index.ts", "src/live/discord.ts", "src/live/telegram.ts"]
+      },
+      {
+        "id": "SEC-08",
+        "name": "Supply chain and operational safety",
+        "description": "Dependency/security posture, QEMU/Gondolin assumptions, automatic downloads, required intents, token handling in service clients, and failure modes.",
+        "mustInspect": ["package.json", "README.md", "src/services/discord.ts", "src/services/telegram.ts", "src/discovery-store.ts"]
+      }
+    ],
+    "referencePath": ".pi/eval/review-ab/references/pi-chat-security-broad.json"
+  },
+  {
+    "id": "pi-chat-functionality-broad",
+    "repoUrl": "https://github.com/earendil-works/pi-chat",
+    "localPath": "/tmp/pi-github-repos/earendil-works/pi-chat",
+    "reviewKind": "functionality",
+    "task": "Review the pi-chat repository from a functionality and product reliability perspective. Focus on setup flows, Discord/Telegram behavior, connect/disconnect/reconnect lifecycle, worker management, streaming/rendering, attachments, config persistence, stale locks/processes, error recovery, docs-code mismatches, and test gaps. Do not modify files. Produce evidence-backed findings with severity, affected files, user impact, and recommended fixes.",
+    "arms": {
+      "A": { "type": "workflow", "name": "deep-review" },
+      "B": { "type": "plain" }
+    },
+    "riskAreas": [
+      { "id": "FUN-01", "name": "Setup and configuration flows", "description": "README, /chat-config flows, account/channel discovery, secret configuration, and user-facing error messages.", "mustInspect": ["README.md", "src/tui/chat-config.ts", "src/tui/discord-setup.ts", "src/tui/telegram-setup.ts", "src/config.ts"] },
+      { "id": "FUN-02", "name": "Discord and Telegram live behavior", "description": "Message ingestion, checkpoint/catch-up, mentions, replies, attachments, reconnects, and service API differences.", "mustInspect": ["src/live/discord.ts", "src/live/telegram.ts", "src/live/common.ts", "src/runtime.ts"] },
+      { "id": "FUN-03", "name": "Conversation lifecycle and queueing", "description": "Connect/disconnect, armed state, pending jobs, active jobs, abort/new/compact/status, checkpoints, and queue semantics.", "mustInspect": ["src/runtime.ts", "index.ts", "src/log.ts"] },
+      { "id": "FUN-04", "name": "Gondolin VM lifecycle and file operations", "description": "VM startup/close/restart, mount operations, tool file operations, attachment staging, and session persistence.", "mustInspect": ["src/gondolin.ts", "index.ts"] },
+      { "id": "FUN-05", "name": "Worker management", "description": "tmux worker spawn/list/status/open/kill, stale statuses, session reuse, restart behavior, and dashboard layout.", "mustInspect": ["index.ts"] },
+      { "id": "FUN-06", "name": "Streaming and rendering", "description": "Markdown rendering, chunking, preview edit/delete behavior, service limits, and formatting degradation.", "mustInspect": ["src/render/chunking.ts", "src/render/format.ts", "src/render/streaming.ts", "src/render/streaming-markdown.ts"] },
+      { "id": "FUN-07", "name": "Persistence and corruption recovery", "description": "Chat log JSONL, config files, locks, memory files, discovery cache, and recovery from partial/corrupt writes.", "mustInspect": ["src/log.ts", "src/config.ts", "src/discovery-store.ts", "index.ts"] },
+      { "id": "FUN-08", "name": "Tests and docs-code consistency", "description": "Missing tests, docs claims versus code behavior, package scripts, requirements, and operational caveats.", "mustInspect": ["README.md", "package.json", "index.ts", "src/"] }
+    ],
+    "referencePath": ".pi/eval/review-ab/references/pi-chat-functionality-broad.json"
+  }
+]

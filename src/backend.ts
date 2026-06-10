@@ -1,5 +1,5 @@
 import { CompiledTask, WorkflowRunRecord, WorkflowTaskRunRecord } from "./types.js";
-import { cleanupTmuxRun, launchTmuxTask, refreshRunFromArtifacts } from "./tmux.js";
+import { cleanupSubagentRun, launchSubagentTask, refreshRunFromSubagentArtifacts } from "./subagent-backend.js";
 
 export type BackendLaunchResult =
   | { kind: "launched" }
@@ -13,13 +13,13 @@ export interface WorkflowBackend {
   cleanupRun(cwd: string, run: WorkflowRunRecord): Promise<void>;
 }
 
-const tmuxBackend: WorkflowBackend = {
-  id: "tmux",
-  refreshRun: refreshRunFromArtifacts,
-  cleanupRun: cleanupTmuxRun,
+const subagentHeadlessBackend: WorkflowBackend = {
+  id: "pi-subagent/headless",
+  refreshRun: refreshRunFromSubagentArtifacts,
+  cleanupRun: cleanupSubagentRun,
   async launchTask(cwd, run, task, compiledTask) {
     try {
-      return await launchTmuxTask(cwd, run, task, compiledTask);
+      return await launchSubagentTask(cwd, run, task, compiledTask);
     } catch (error) {
       return { kind: "fatal", message: error instanceof Error ? error.message : String(error) };
     }
@@ -27,6 +27,6 @@ const tmuxBackend: WorkflowBackend = {
 };
 
 export function resolveWorkflowBackend(run: WorkflowRunRecord): WorkflowBackend {
-  if (run.backend.type === "local-pi" && run.backend.mode === "tmux") return tmuxBackend;
+  if (run.backend.type === "local-pi" && run.backend.mode === "headless") return subagentHeadlessBackend;
   throw new Error(`Unsupported workflow backend: ${run.backend.type}/${run.backend.mode}`);
 }

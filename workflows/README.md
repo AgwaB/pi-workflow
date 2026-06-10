@@ -17,7 +17,9 @@ Runtime selection is explicit: `/workflow run` takes an exact workflow name or e
 
 | Workflow | Required agents | Mode | Use when |
 |---|---|---|---|
-| `deep-research` | `researcher` | plan + foreach questions + normalize + foreach verifier + reduce + ask continuation | Research needs source-backed claims, dynamic breadth/depth, independent verification, citations, or bounded follow-up. Supports `quick`, `standard`, and `max` depth through task wording/input. |
+| `deep-research` | `researcher` | plan + foreach questions + normalize + foreach verifier + reduce + continuation suggestion | Research needs source-backed claims, dynamic breadth/depth, independent verification, citations, or bounded follow-up. Supports `quick`, `standard`, and `max` depth through task wording/input. |
 | `deep-review` | `scout` | cheap triage + foreach review lenses + foreach devil's advocate + reduce, read-only | Thorough/panel review where findings should be independently challenged before synthesis. |
+
+Continuation is not a task/stage type today. Bundled workflow specs may include continuation policy metadata and prompts may emit `nextWorkflow`, but the current compiler/runtime do not automatically launch follow-up rounds.
 
 Deferred workflow candidates live under `internal/plans/deferred-workflows/` and are not bundled workflow surface.

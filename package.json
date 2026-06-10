@@ -54,6 +54,9 @@
     "typescript": "^5.0.0"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.19.0"
+  },
+  "dependencies": {
+    "@agwab/pi-subagent": "file:../pi-subagent-engine"
   }
 }

@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { relative } from "node:path";
 
 import { discoverAgents } from "./agents.js";
-import { compileWorkflowSpec } from "./compiler.js";
+import { compileWorkflow } from "./compiler.js";
 import {
   formatLogs,
   formatRunDetails,
@@ -126,7 +126,7 @@ async function handleWorkflowCommand(args: string, ctx: ExtensionCommandContext)
 
 async function loadAndCompile(specPath: string, cwd: string): Promise<{ loaded: Awaited<ReturnType<typeof loadWorkflowSpec>>; compiled: CompiledWorkflow }> {
   const loaded = await loadWorkflowSpec(specPath, cwd);
-  return { loaded, compiled: await compileWorkflowSpec(loaded.spec, { cwd }) };
+  return { loaded, compiled: await compileWorkflow(loaded.spec, { cwd, specPath: loaded.specPath }) };
 }
 
 function formatValidationSummary(result: { loaded: Awaited<ReturnType<typeof loadWorkflowSpec>>; compiled: CompiledWorkflow }, cwd: string): string {

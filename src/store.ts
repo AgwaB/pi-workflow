@@ -380,7 +380,6 @@ export async function updateIndex(cwd: string): Promise<WorkflowIndexRecord> {
           agent: task.agent,
           status: task.status,
           statusDetail: task.statusDetail,
-          paneId: task.paneId,
           lastMessage: task.lastMessage,
         })),
       })),
@@ -469,7 +468,6 @@ export function createTaskRunRecord(cwd: string, runId: string, task: CompiledTa
     runtime: {
       model: task.runtime.model,
       thinking: task.runtime.thinking,
-      fast: task.runtime.fast,
       approvalMode: task.runtime.approvalMode,
       maxRuntimeMs: task.runtime.maxRuntimeMs,
     },

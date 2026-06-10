@@ -22,9 +22,10 @@ import {
   writeRunRecord,
   writeStaticRunArtifacts,
 } from "./store.js";
-import { launchTmuxTask, refreshRunFromArtifacts } from "./tmux.js";
+import { resolveWorkflowBackend } from "./backend.js";
 import { ensureManagedWorktree } from "./worktree.js";
 import { buildJsonOutputRetryInstructions } from "./result.js";
+import { buildSourceContextPacket, formatOutputTemplateSection, summarizeWorkflowTelemetry, type SourceContextPacketOptions } from "./workflow-artifacts.js";
 import { extractStageFirstForeachItems } from "./workflow-runtime.js";
 import { CompiledTask, CompiledWorkflow, STAGE_FIRST_RUN_TYPE, WorkflowIndexRecord, WorkflowRunRecord, WorkflowTaskRunRecord } from "./types.js";
 
@@ -34,14 +35,17 @@ const POLL_INTERVAL_MS = 1_000;
 const LOG_LINES_DEFAULT = 80;
 const LOG_LINES_MAX = 400;
 const MAX_CONCURRENCY = 16;
+const SOURCE_CONTEXT_PREVIEW_CHARS = 1_200;
+const SOURCE_CONTEXT_STRUCTURED_CHARS = 6_000;
+const SOURCE_CONTEXT_MAX_PACKET_CHARS = 48_000;
 
 const supervisorTimers = new Map<string, ReturnType<typeof setInterval>>();
 
 export async function runWorkflowSpec(specPath: string, cwd: string, options: { task?: string } = {}): Promise<WorkflowRunRecord> {
   const loaded = await loadWorkflowSpec(specPath, cwd);
   const compiled = options.task !== undefined
-    ? await compileWorkflow(loaded.spec, { cwd, task: options.task })
-    : await compileWorkflowSpec(loaded.spec, { cwd });
+    ? await compileWorkflow(loaded.spec, { cwd, specPath: loaded.specPath, task: options.task })
+    : await compileWorkflowSpec(loaded.spec, { cwd, specPath: loaded.specPath });
 
   const { run } = await createRunRecord(cwd, compiled, loaded.specPath);
   await withRunLease(cwd, run.runId, async () => {
@@ -56,7 +60,10 @@ export async function runWorkflowSpec(specPath: string, cwd: string, options: { 
 
 export async function refreshRun(cwd: string, runIdOrPrefix: string): Promise<WorkflowRunRecord> {
   const current = await readRunRecord(cwd, runIdOrPrefix);
-  const refreshed = await withRunLease(cwd, current.runId, async () => refreshRunFromArtifacts(cwd, await readRunRecord(cwd, current.runId)));
+  const refreshed = await withRunLease(cwd, current.runId, async () => {
+    const run = await readRunRecord(cwd, current.runId);
+    return resolveWorkflowBackend(run).refreshRun(cwd, run);
+  });
   return refreshed ?? current;
 }
 
@@ -117,7 +124,8 @@ export function watchRun(cwd: string, runId: string): void {
 
 export async function scheduleRun(cwd: string, runId: string, compiled?: CompiledWorkflow): Promise<WorkflowRunRecord | undefined> {
   return withRunLease(cwd, runId, async () => {
-    let run = await refreshRunFromArtifacts(cwd, await readRunRecord(cwd, runId));
+    let run = await readRunRecord(cwd, runId);
+    run = await resolveWorkflowBackend(run).refreshRun(cwd, run);
     if (run.taskSummary.blocked > 0 || isTerminalWorkflowStatus(run.status)) return run;
 
     const compiledFlow = compiled ?? await readCompiledWorkflow(cwd, run.runId);
@@ -371,6 +379,7 @@ function buildForeachGeneratedTasks(template: CompiledTask, runtimeTask: string 
       template.foreach!.injectRuntimeTask && runtimeTask ? `# Task\n\n${runtimeTask}` : undefined,
       `# Workflow Stage\n\nstage=${template.stageId}\ntype=foreach\nitem=${taskId}`,
       `# Instructions\n\n${instructions}`,
+      formatOutputTemplateSection(template.output),
       template.foreach!.roleText || undefined,
     ].filter(Boolean).join("\n\n");
     tasks.push({
@@ -504,7 +513,7 @@ async function launchPendingTaskAt(
 ): Promise<boolean> {
   const task = run.tasks[index];
   if (!task || task.status !== "pending") return false;
-  if (task.paneId || task.pid) return false;
+  if (task.backendHandle || task.pid) return false;
 
   const compiledTask = compiledFlow.tasks[index];
   if (!compiledTask) {
@@ -513,7 +522,7 @@ async function launchPendingTaskAt(
     return false;
   }
 
-  const launchTask = task.outputRetry || options.retry
+  let launchTask = options.retry
     ? await prepareRetryTask(cwd, run, compiledFlow, index)
     : options.chain
       ? await prepareChainTask(cwd, run, compiledFlow, index)
@@ -522,12 +531,14 @@ async function launchPendingTaskAt(
         : options.dag
           ? await prepareDagTask(cwd, run, compiledFlow, index)
           : compiledTask;
+  if (task.outputRetry) launchTask = await prepareOutputRetryTask(cwd, task, launchTask);
 
   try {
     await ensureManagedWorktree(cwd, run, task, launchTask);
     await writeRunRecord(cwd, run);
-    await launchTmuxTask(cwd, run, task, launchTask);
-    return true;
+    const launch = await resolveWorkflowBackend(run).launchTask(cwd, run, task, launchTask);
+    if (launch.kind === "fatal") throw new Error(launch.message);
+    return launch.kind === "launched";
   } catch (error) {
     setTaskTerminal(task, "failed", launchTask.safety.requiresWorktree ? "worktree_failed" : "launch_failed", {
       lastMessage: error instanceof Error ? error.message : String(error),
@@ -595,30 +606,18 @@ async function prepareDagTask(
   if (dependsOn.length === 0) return compiledTask;
 
   const bySpecId = new Map(run.tasks.map((sourceTask) => [sourceTask.specId, sourceTask]));
-  const sections = await Promise.all(dependsOn.map(async (dep) => {
-    const sourceTask = bySpecId.get(dep);
-    if (!sourceTask) return `## ${dep}\nmissing dependency record`;
-    const outputPreview = await readOutputPreview(cwd, sourceTask.files.output, 1200);
-    return [
-      `## ${sourceTask.taskId} (${sourceTask.specId})`,
-      `agent: ${sourceTask.agent}`,
-      `status: ${sourceTask.status}/${sourceTask.statusDetail}`,
-      `output: ${sourceTask.files.output}`,
-      `stderr: ${sourceTask.files.stderr}`,
-      `result: ${sourceTask.files.result}`,
-      "output preview:",
-      outputPreview || "(empty or unavailable)",
-    ].join("\n");
-  }));
+  const sourceTasks = dependsOn.map((dep) => bySpecId.get(dep)).filter((sourceTask): sourceTask is WorkflowTaskRunRecord => Boolean(sourceTask));
+  const missing = dependsOn.filter((dep) => !bySpecId.has(dep));
+  const context = await buildRunSourceContext(cwd, run, sourceTasks, sourceContextOptions(compiledTask));
 
   return {
     ...compiledTask,
     cwd: task.cwd,
     compiledPrompt: [
       compiledTask.compiledPrompt,
-      "# DAG Dependency Context",
-      "Use these dependency statuses, artifact paths, and short output previews. Do not assume dependencies beyond this explicit list.",
-      ...sections,
+      "# Source Stage Context",
+      "Use this deterministic source context packet. Prefer structuredOutput over outputPreview. Do not assume dependencies beyond this explicit packet.",
+      JSON.stringify({ ...context, missingDependencies: missing }, null, 2),
     ].join("\n\n"),
   };
 }
@@ -631,22 +630,9 @@ async function prepareJoinTask(
 ): Promise<CompiledWorkflow["tasks"][number]> {
   const compiledTask = compiledFlow.tasks[joinIndex]!;
   const task = run.tasks[joinIndex]!;
-  const sections = await Promise.all(run.tasks.map(async (sourceTask, index) => {
-    if (index === joinIndex) return undefined;
-    const outputPreview = await readOutputPreview(cwd, sourceTask.files.output, 1200);
-    return [
-      `## ${sourceTask.taskId} (${sourceTask.specId})`,
-      `kind: ${sourceTask.kind ?? "main"}`,
-      `agent: ${sourceTask.agent}`,
-      `status: ${sourceTask.status}/${sourceTask.statusDetail}`,
-      `output: ${sourceTask.files.output}`,
-      `stderr: ${sourceTask.files.stderr}`,
-      `result: ${sourceTask.files.result}`,
-      "output preview:",
-      outputPreview || "(empty or unavailable)",
-    ].join("\n");
-  }));
   const label = joinContextLabel(compiledTask.kind);
+  const sourceTasks = run.tasks.filter((_, index) => index !== joinIndex);
+  const context = await buildRunSourceContext(cwd, run, sourceTasks, sourceContextOptions(compiledTask));
 
   return {
     ...compiledTask,
@@ -654,8 +640,8 @@ async function prepareJoinTask(
     compiledPrompt: [
       compiledTask.compiledPrompt,
       `# ${label} Context`,
-      "Use these task statuses, artifact paths, and short output previews. Do not assume all tasks succeeded.",
-      ...sections.filter((section): section is string => Boolean(section)),
+      "Use this deterministic source context packet. Prefer structuredOutput over outputPreview. Do not assume all tasks succeeded.",
+      JSON.stringify(context, null, 2),
     ].join("\n\n"),
   };
 }
@@ -668,11 +654,8 @@ async function prepareRetryTask(
 ): Promise<CompiledWorkflow["tasks"][number]> {
   const compiledTask = compiledFlow.tasks[index]!;
   const task = run.tasks[index]!;
-  const retryInstructions = task.outputRetry ? buildJsonOutputRetryInstructions(task) : undefined;
-  const invalidAttempt = task.outputRetry?.attempts ? `${task.files.output}.invalid-attempt-${task.outputRetry.attempts}` : task.files.output;
-  const previousOutput = task.outputRetry
-    ? await readOutputPreview(cwd, invalidAttempt, 1200)
-    : await readOutputPreview(cwd, run.tasks[index - 1]?.files.output ?? task.files.output, 1200);
+  const previousOutputPath = run.tasks[index - 1]?.files.output ?? task.files.output;
+  const previousOutput = await readOutputPreview(cwd, previousOutputPath, 1200);
 
   return {
     ...compiledTask,
@@ -680,8 +663,34 @@ async function prepareRetryTask(
     compiledPrompt: [
       compiledTask.compiledPrompt,
       "# Retry Instructions",
-      retryInstructions || "Retry after previous task failure.",
+      "Retry after previous task failure.",
       "# Previous Retry Attempt",
+      `Previous task: ${task.taskId} (${task.specId})`,
+      `Previous status: ${task.status}/${task.statusDetail}`,
+      `Previous output: ${previousOutputPath}`,
+      "Previous output preview:",
+      previousOutput || "(empty or unavailable)",
+    ].join("\n\n"),
+  };
+}
+
+async function prepareOutputRetryTask(
+  cwd: string,
+  task: WorkflowTaskRunRecord,
+  preparedTask: CompiledWorkflow["tasks"][number],
+): Promise<CompiledWorkflow["tasks"][number]> {
+  const retryInstructions = buildJsonOutputRetryInstructions(task);
+  const invalidAttempt = task.outputRetry?.attempts ? `${task.files.output}.invalid-attempt-${task.outputRetry.attempts}` : task.files.output;
+  const previousOutput = await readOutputPreview(cwd, invalidAttempt, 1200);
+
+  return {
+    ...preparedTask,
+    cwd: task.cwd,
+    compiledPrompt: [
+      preparedTask.compiledPrompt,
+      "# Output Contract Retry Instructions",
+      retryInstructions,
+      "# Previous Invalid Output Attempt",
       `Previous task: ${task.taskId} (${task.specId})`,
       `Previous status: ${task.status}/${task.statusDetail}`,
       `Previous output: ${invalidAttempt}`,
@@ -731,13 +740,66 @@ function findInheritedWorktree(run: WorkflowRunRecord, beforeIndex: number): { p
   return undefined;
 }
 
-async function readOutputPreview(cwd: string, projectPath: string, maxChars = 4000): Promise<string> {
+function sourceContextOptions(task: Pick<CompiledTask, "sourceContext">): SourceContextPacketOptions {
+  const sourceContext = task.sourceContext ?? {};
+  return {
+    maxPreviewChars: sourceContext.maxPreviewChars ?? SOURCE_CONTEXT_PREVIEW_CHARS,
+    maxStructuredChars: sourceContext.maxStructuredChars ?? SOURCE_CONTEXT_STRUCTURED_CHARS,
+    maxStructuredCharsByStage: sourceContext.maxStructuredCharsByStage,
+    structuredOutputPathsByStage: sourceContext.structuredOutputPathsByStage,
+    maxPacketChars: sourceContext.maxPacketChars ?? SOURCE_CONTEXT_MAX_PACKET_CHARS,
+  };
+}
+
+export async function buildRunSourceContext(
+  cwd: string,
+  run: Pick<WorkflowRunRecord, "createdAt" | "updatedAt"> & { tasks: WorkflowTaskRunRecord[] },
+  sourceTasks: WorkflowTaskRunRecord[],
+  options: Pick<SourceContextPacketOptions, "maxPreviewChars" | "maxStructuredChars" | "maxStructuredCharsByStage" | "structuredOutputPathsByStage" | "maxPacketChars"> = {},
+): Promise<{ telemetry: ReturnType<typeof summarizeWorkflowTelemetry>; packet: ReturnType<typeof buildSourceContextPacket> }> {
+  const maxPreviewChars = options.maxPreviewChars ?? SOURCE_CONTEXT_PREVIEW_CHARS;
+  const maxStructuredChars = options.maxStructuredChars ?? SOURCE_CONTEXT_STRUCTURED_CHARS;
+  const maxPacketChars = options.maxPacketChars ?? SOURCE_CONTEXT_MAX_PACKET_CHARS;
+  const structuredOutputsByTaskId: Record<string, unknown> = {};
+  const rawOutputsByTaskId: Record<string, string> = {};
+  const outputBytesByTaskId: Record<string, number> = {};
+
+  await Promise.all(sourceTasks.map(async (task) => {
+    const [result, output] = await Promise.all([
+      readJson<{ structuredOutput?: unknown }>(fromProjectPath(cwd, task.files.result)).catch(() => undefined),
+      readOutputText(cwd, task.files.output),
+    ]);
+    if (result && Object.prototype.hasOwnProperty.call(result, "structuredOutput")) structuredOutputsByTaskId[task.taskId] = result.structuredOutput;
+    rawOutputsByTaskId[task.taskId] = output.text;
+    outputBytesByTaskId[task.files.output] = output.bytes;
+  }));
+
+  return {
+    telemetry: summarizeWorkflowTelemetry(run, { outputBytesByTaskId }),
+    packet: buildSourceContextPacket({ tasks: sourceTasks }, {
+      structuredOutputsByTaskId,
+      rawOutputsByTaskId,
+      maxPreviewChars,
+      maxStructuredChars,
+      maxStructuredCharsByStage: options.maxStructuredCharsByStage,
+      structuredOutputPathsByStage: options.structuredOutputPathsByStage,
+      maxPacketChars,
+    }),
+  };
+}
+
+async function readOutputText(cwd: string, projectPath: string): Promise<{ text: string; bytes: number }> {
   try {
     const text = await readFile(fromProjectPath(cwd, projectPath), "utf8");
-    return text.trim().slice(0, maxChars);
+    return { text, bytes: Buffer.byteLength(text, "utf8") };
   } catch {
-    return "";
+    return { text: "", bytes: 0 };
   }
+}
+
+async function readOutputPreview(cwd: string, projectPath: string, maxChars = 4000): Promise<string> {
+  const output = await readOutputText(cwd, projectPath);
+  return output.text.trim().slice(0, maxChars);
 }
 
 async function readCompiledWorkflow(cwd: string, runId: string): Promise<CompiledWorkflow | undefined> {
@@ -751,10 +813,9 @@ function formatIndex(index: WorkflowIndexRecord): string {
       `tasks=${run.taskSummary.completed}/${run.taskSummary.total} completed, running=${run.taskSummary.running}, pending=${run.taskSummary.pending}, blocked=${run.taskSummary.blocked}, failed=${run.taskSummary.failed}`,
     ];
     for (const task of run.tasks) {
-      const pane = task.paneId ? ` pane=${task.paneId}` : "";
       const message = task.lastMessage ? ` — ${task.lastMessage}` : "";
       const kind = task.kind && task.kind !== "main" ? ` ${task.kind}` : "";
-      lines.push(`- ${task.taskId}${kind} ${task.agent} [${task.status}/${task.statusDetail}]${pane}${message}`);
+      lines.push(`- ${task.taskId}${kind} ${task.agent} [${task.status}/${task.statusDetail}]${message}`);
     }
     return lines.join("\n");
   }).join("\n\n");
@@ -762,9 +823,8 @@ function formatIndex(index: WorkflowIndexRecord): string {
 
 function formatTask(task: WorkflowTaskRunRecord, detail: "summary" | "full"): string {
   const elapsed = task.elapsedMs !== undefined ? ` elapsed=${Math.round(task.elapsedMs / 1000)}s` : "";
-  const pane = task.paneId ? ` pane=${task.paneId}` : "";
   const pid = task.pid ? ` pid=${task.pid}` : "";
-  const runtime = `model=${task.runtime.model ?? "inherit"} thinking=${task.runtime.thinking ?? "inherit"} fast=${task.runtime.fast ?? "inherit"}`;
+  const runtime = `model=${task.runtime.model ?? "inherit"} thinking=${task.runtime.thinking ?? "inherit"}`;
   const message = task.lastMessage ? `\n  last=${task.lastMessage}` : "";
   const worktree = task.worktree.enabled ? `\n  worktree=${task.worktree.path}` : "";
   const deps = task.dependsOn && task.dependsOn.length > 0 ? `\n  dependsOn=${task.dependsOn.join(",")}` : "";
@@ -773,7 +833,7 @@ function formatTask(task: WorkflowTaskRunRecord, detail: "summary" | "full"): st
     : ` output=${task.files.output}`;
 
   const kind = task.kind && task.kind !== "main" ? ` kind=${task.kind}` : "";
-  return `- ${task.taskId}${kind} spec=${task.specId} agent=${task.agent} [${task.status}/${task.statusDetail}]${elapsed}${pane}${pid} ${runtime}${full}${message}`;
+  return `- ${task.taskId}${kind} spec=${task.specId} agent=${task.agent} [${task.status}/${task.statusDetail}]${elapsed}${pid} ${runtime}${full}${message}`;
 }
 
 function clampTimeout(value: number | undefined): number {
