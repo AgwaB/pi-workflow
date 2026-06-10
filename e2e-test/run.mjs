@@ -52,7 +52,10 @@ function main() {
     const cwd = process.cwd();
     const workflows = await listWorkflows(cwd);
     const names = workflows.map((item) => item.name).sort();
-    if (names.join(',') !== 'deep-research,deep-review') throw new Error('unexpected workflows: ' + names.join(','));
+    const expected = ['deep-research', 'deep-review', 'implement-loop', 'test-repair-loop'];
+    for (const name of expected) {
+      if (!names.includes(name)) throw new Error('missing workflow: ' + name + ' in ' + names.join(','));
+    }
     const resolved = await resolveWorkflowRef('deep-research', cwd);
     if (!resolved.specPath.endsWith('workflows/deep-research.json')) throw new Error('bad resolved path: ' + resolved.specPath);
     const recs = await recommendWorkflows('need detailed accurate research with verification', cwd);
