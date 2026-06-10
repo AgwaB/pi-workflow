@@ -57,7 +57,7 @@ const WORKFLOW_CHAIN_KEYS = new Set(["type", "steps"]);
 const WORKFLOW_DAG_KEYS = new Set(["type", "tasks"]);
 const WORKFLOW_MAP_KEYS = new Set(["type", "items", "task", "aggregate"]);
 const MAP_ITEM_KEYS = new Set(["id", "input"]);
-const OUTPUT_KEYS = new Set(["format", "onInvalid", "contract", "template", "templateRef"]);
+const OUTPUT_KEYS = new Set(["format", "requiredKeys", "onInvalid", "contract", "template", "templateRef"]);
 const OUTPUT_FORMATS = new Set(["text", "json", "markdown"]);
 const OUTPUT_ON_INVALID = new Set(["fail", "warn"]);
 const OUTPUT_CONTRACT_KEYS = new Set(["requiredPaths", "arrays", "maxStringChars"]);
@@ -325,6 +325,7 @@ function parseOutput(value: unknown, path: string, issues: ValidationIssue[]): v
   if (!output) return;
   rejectUnknownKeys(output, OUTPUT_KEYS, path, issues);
   if (!OUTPUT_FORMATS.has(output.format as string)) issues.push({ path: `${path}.format`, message: "must be one of: text, json, markdown" });
+  optionalStringArray(output, "requiredKeys", `${path}.requiredKeys`, issues);
   optionalString(output, "templateRef", `${path}.templateRef`, issues);
   if (output.template !== undefined && output.templateRef !== undefined) {
     issues.push({ path, message: "must not specify both template and templateRef" });
@@ -536,7 +537,6 @@ const STAGE_FIRST_LOOP_STAGE_KEYS = new Set([
   "inject",
   "output",
   "outputContract",
-  "dependsOn",
 ]);
 const STAGE_FIRST_UNTIL_KEYS = new Set(["stage", "path", "equals", "notEquals", "lengthEquals", "all", "any"]);
 
@@ -558,9 +558,13 @@ export function parseStageFirstWorkflowSpec(value: unknown): any {
   if (spec.defaults?.fast === "on") issues.push({ path: "$.defaults.fast", message: "fast:on is not supported" });
   if (spec.outputTemplates !== undefined) parseOutputTemplates(spec.outputTemplates, "$.outputTemplates", issues);
 
+  const stageIds = new Set<string>();
   for (const [index, stageValue] of stages.entries()) {
     const stagePath = `$.workflow.stages[${index}]`;
     const stage = requireStageFirstObject(stageValue, stagePath);
+    const stageId = validateStageFirstRequiredString(stage, "id", `${stagePath}.id`);
+    if (stageIds.has(stageId)) throw new WorkflowValidationError([{ path: `${stagePath}.id`, message: `duplicate stage id "${stageId}"` }]);
+    stageIds.add(stageId);
     validateStageFirstStage(stage, stagePath);
     if (stage.output !== undefined) parseOutput(stage.output, `${stagePath}.output`, issues);
     if (stage.sourceContext !== undefined) parseSourceContext(stage.sourceContext, `${stagePath}.sourceContext`, issues);

@@ -388,13 +388,18 @@ async function resolveOutputTemplate(
   path: string,
   issues: ValidationIssue[],
 ): Promise<WorkflowTaskOutputSpec | undefined> {
-  if (!output?.templateRef) return output;
-  if (output.template !== undefined) {
+  if (!output) return undefined;
+  const requiredPaths = (output.requiredKeys ?? []).map((key) => `$.${key}`);
+  const withRequiredKeys = requiredPaths.length > 0
+    ? { ...output, contract: { ...(output.contract ?? {}), requiredPaths: [...new Set([...(output.contract?.requiredPaths ?? []), ...requiredPaths])] } }
+    : output;
+  if (!withRequiredKeys.templateRef) return withRequiredKeys;
+  if (withRequiredKeys.template !== undefined) {
     issues.push({ path, message: "must not specify both template and templateRef" });
-    return output;
+    return withRequiredKeys;
   }
-  const resolved = await loadOutputTemplateRef(output.templateRef, spec, options, path, issues);
-  return resolved === undefined ? output : { ...output, template: resolved, templateRef: undefined };
+  const resolved = await loadOutputTemplateRef(withRequiredKeys.templateRef, spec, options, path, issues);
+  return resolved === undefined ? withRequiredKeys : { ...withRequiredKeys, template: resolved, templateRef: undefined };
 }
 
 async function loadOutputTemplateRef(
@@ -577,8 +582,7 @@ export async function compileWorkflow(spec: any, options: CompileOptions & { tas
         childTemplates: loopTemplates.childTemplates,
         childStageRecords: loopTemplates.childStageRecords,
         onExhausted: loopTemplates.onExhausted,
-        progressPath: stage.progressPath ?? stage.progress?.path,
-        progressStageId: stage.progressStageId ?? stage.progress?.stage,
+        progressPath: stage.progressPath,
       });
       tasks.push(await buildTask(stage, "loop", stage.prompt ?? "Loop controller placeholder.", dependencyKeys, {
         key: placeholderKey,

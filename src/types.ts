@@ -188,7 +188,6 @@ export interface CompiledLoopStageRecord {
     template: CompiledTask;
   };
   progressPath?: string;
-  progressStageId?: string;
 }
 
 export interface LoopStateRecord {
@@ -408,6 +407,7 @@ export interface WorkflowStructuredOutputContract {
 
 export interface WorkflowTaskOutputSpec {
   format: OutputFormat;
+  requiredKeys?: string[];
   onInvalid?: OutputOnInvalidAction;
   contract?: WorkflowStructuredOutputContract;
   template?: unknown;

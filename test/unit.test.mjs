@@ -348,6 +348,23 @@ test("schema accepts bundled implement-loop separation shape", () => {
   assert.doesNotThrow(() => parseWorkflow(spec));
 });
 
+test("schema rejects duplicate top-level stage ids", () => {
+  const error = assertThrowsFlow(() => parseWorkflow(workflowSpec("unit-scout", {
+    workflow: {
+      stages: [
+        { id: "duplicate", type: "task", prompt: "One." },
+        { id: "duplicate", type: "task", prompt: "Two." },
+      ],
+    },
+  })));
+  assertIssue(error, "$.workflow.stages[1].id", "duplicate stage id");
+});
+
+test("schema rejects loop dependsOn because stage-first dependencies use from", () => {
+  const error = assertThrowsFlow(() => parseWorkflow(loopWorkflowSpec({ dependsOn: ["setup.main"] })));
+  assertIssue(error, "$.workflow.stages[0].dependsOn", "unknown field");
+});
+
 test("schema rejects loop missing its own id", () => {
   const spec = loopWorkflowSpec();
   delete spec.workflow.stages[0].id;
@@ -863,6 +880,44 @@ test("loop no-progress stops early with stopped_no_progress", async () => {
   }
 });
 
+test("loop output requiredKeys compile to requiredPaths contract", async () => {
+  const cwd = makeProject();
+  try {
+    writeAgent(cwd, "unit-scout", "read");
+    const compiled = await compileWorkflow(loopWorkflowSpec(), { cwd, task: "Fix failures" });
+    const loopStage = compiled.stages.find((stage) => stage.id === "fix-loop");
+    const checkTemplate = loopStage.childTemplates.find((task) => task.stageId === "check");
+    assert.deepEqual(checkTemplate.output.contract.requiredPaths, ["$.status", "$.verdict"]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("loop check missing requiredKeys triggers output retry", async () => {
+  const cwd = makeProject();
+  try {
+    writeAgent(cwd, "unit-scout", "read");
+    const { run } = await createLoopRun(cwd);
+    await scheduleRun(cwd, run.runId);
+    const current = await readRunRecord(cwd, run.runId);
+    const check = taskBySpec(current, "fix-loop.r01.check");
+    mkdirSync(dirname(join(cwd, check.files.output)), { recursive: true });
+    writeFileSync(join(cwd, check.files.output), JSON.stringify({ status: "pass" }));
+    const changed = await applyTaskResultArtifact(cwd, check, {
+      resultFile: join(cwd, check.files.result),
+      result: { status: "completed", completedAt: new Date().toISOString(), exitCode: 0 },
+      status: "completed",
+      completedAfterTimeout: false,
+    });
+    assert.equal(changed, true);
+    assert.equal(check.status, "pending");
+    assert.equal(check.statusDetail, "retry_output_invalid");
+    assert.match(check.outputRetry.message, /\$\.verdict/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("loop invalid progressPath value records a warning", async () => {
   const cwd = makeProject();
   try {
@@ -884,6 +939,31 @@ test("loop invalid progressPath value records a warning", async () => {
     current = await readRunRecord(cwd, run.runId);
     assert.match(taskBySpec(current, "fix-loop.r02.check").lastMessage ?? "", /progressPath \$\.passing resolved to unsupported boolean/);
     assert.equal(current.tasks.some((task) => task.specId.includes(".r03.")), true);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("loop explicit missing progressPath records a warning", async () => {
+  const cwd = makeProject();
+  try {
+    writeAgent(cwd, "unit-scout", "read");
+    const { run } = await createLoopRun(cwd, loopWorkflowSpec({ progressPath: "$.missingProgress" }));
+    await scheduleRun(cwd, run.runId);
+    let current = await readRunRecord(cwd, run.runId);
+    await completeTask(cwd, taskBySpec(current, "fix-loop.r01.implement"), { changed: true });
+    await completeTask(cwd, taskBySpec(current, "fix-loop.r01.check"), { status: "fail", verdict: "REJECT", blockingFailures: ["a"] });
+    await writeRunRecord(cwd, current);
+    await scheduleRun(cwd, run.runId);
+
+    current = await readRunRecord(cwd, run.runId);
+    await completeTask(cwd, taskBySpec(current, "fix-loop.r02.implement"), { changed: true });
+    await completeTask(cwd, taskBySpec(current, "fix-loop.r02.check"), { status: "fail", verdict: "REJECT", blockingFailures: ["a"] });
+    await writeRunRecord(cwd, current);
+    await scheduleRun(cwd, run.runId);
+
+    current = await readRunRecord(cwd, run.runId);
+    assert.match(taskBySpec(current, "fix-loop.r02.check").lastMessage ?? "", /progressPath \$\.missingProgress resolved to unsupported undefined/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

@@ -677,7 +677,7 @@ async function readLoopProgressMetric(
   const length = valueLength(value);
   if (length !== undefined) return length;
   if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (value !== undefined) {
+  if (value !== undefined || loopStage.progressPath !== undefined) {
     warnInvalidLoopProgressMetric(run, compiledFlow, loopId, round, checkStageId, progressPath, value);
   }
   return undefined;
@@ -710,6 +710,7 @@ function getLatestLoopStageTaskEntry(
 }
 
 function describeLoopProgressValue(value: unknown): string {
+  if (value === undefined) return "undefined";
   if (value === null) return "null";
   if (Array.isArray(value)) return "array";
   if (typeof value === "number" && !Number.isFinite(value)) return "non-finite number";
@@ -1099,7 +1100,6 @@ function findLoopExhaustedRunTask(run: WorkflowRunRecord, compiledFlow: Compiled
 }
 
 function loopDesignatedCheckStageId(loopStage: any): string {
-  if (typeof loopStage.progressStageId === "string" && loopStage.progressStageId.trim()) return loopStage.progressStageId;
   const refs = new Set<string>();
   collectUntilStageRefs(loopStage.until, refs);
   if (refs.size === 1) return [...refs][0]!;
@@ -1701,6 +1701,3 @@ export async function runWorkflow(specPath: string, cwd: string, options: { task
   return runWorkflowSpec(specPath, cwd, options);
 }
 export const waitForWorkflowRun = waitForRun;
-export async function continueWorkflow(_cwd: string, _runId: string): Promise<WorkflowRunRecord | undefined> {
-  return undefined;
-}
