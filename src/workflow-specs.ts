@@ -223,13 +223,19 @@ async function listSpecFiles(root: string): Promise<string[]> {
     .map((entry) => join(root, entry.name));
 
   const bundleSpecs = await Promise.all(entries
-    .filter((entry) => entry.isDirectory())
+    .filter((entry) => entry.isDirectory() && !isWorkflowRunDirName(entry.name))
     .map(async (entry) => {
       const bundleSpec = join(root, entry.name, "spec.json");
       return (await isFile(bundleSpec)) ? bundleSpec : null;
     }));
 
   return [...flatFiles, ...bundleSpecs.filter((spec): spec is string => spec !== null)];
+}
+
+// Run-state directories under .pi/workflows/ contain a spec.json snapshot of
+// the workflow that produced them; they are records, not registrable bundles.
+function isWorkflowRunDirName(name: string): boolean {
+  return /^workflow_[a-z0-9]+_[a-f0-9]+$/.test(name);
 }
 
 function isBundleSpec(file: string, searchRoot: string): boolean {

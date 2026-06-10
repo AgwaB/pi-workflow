@@ -15,12 +15,14 @@ import {
   formatRun,
 } from "./engine.js";
 import { WORKFLOW_COMMAND, WORKFLOW_HELP } from "./index.js";
+import { assertWorkflowActionAllowedForRole, isWorkflowSupervisorEnabled } from "./process-role.js";
 import { loadWorkflowSpec } from "./schema.js";
 import { listWorkflows, recommendWorkflows, resolveWorkflowRef } from "./workflow-specs.js";
 import { CompiledWorkflow, WorkflowValidationError } from "./types.js";
 
 export default function workflowExtension(pi: ExtensionAPI): void {
   pi.on("session_start", async (_event, ctx) => {
+    if (!isWorkflowSupervisorEnabled()) return;
     await resumeSupervisors(ctx.cwd).catch(() => undefined);
   });
 
@@ -37,6 +39,7 @@ async function handleWorkflowCommand(args: string, ctx: ExtensionCommandContext)
   const action = tokens[0] ?? "help";
 
   try {
+    assertWorkflowActionAllowedForRole(action);
     if (action === "help" || action === "--help" || action === "-h") {
       emit(ctx, WORKFLOW_HELP, "info");
       return;

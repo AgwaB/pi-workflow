@@ -9,13 +9,13 @@ import { compileWorkflow } from "../.tmp/unit/compiler.js";
 import { buildRunSourceContext, evaluateLoopUntilCondition, formatRun, runWorkflow, scheduleRun } from "../.tmp/unit/engine.js";
 import { workflowArgumentCompletions, parseWorkflowRunArgs } from "../.tmp/unit/extension.js";
 import { listWorkflows, recommendWorkflows, resolveWorkflowRef } from "../.tmp/unit/workflow-specs.js";
-import { resolveWorkflowRuntime } from "../.tmp/unit/model-runtime.js";
+import { resolveWorkflowRuntime } from "../.tmp/unit/workflow-runtime.js";
 import { loadWorkflow, parseWorkflow } from "../.tmp/unit/schema.js";
 import { acquireSupervisorLease, createStageFirstRunRecord, deriveRunStatus, heartbeatSupervisorLease, readRunRecord, resolveFlowsCwd, setTaskTerminal, supervisorLeasePath, workflowProcessRoleForTests, workflowSupervisorOwnerIdForTests, writeJsonAtomic, writeRunRecord, writeStaticRunArtifacts } from "../.tmp/unit/store.js";
 import { WorkflowValidationError, STAGE_FIRST_RUN_TYPE } from "../.tmp/unit/types.js";
 import { applyTaskResultArtifact, buildJsonOutputRetryInstructions, extractJsonOutput, parseJsonOutput } from "../.tmp/unit/result.js";
 import { canStageProceedAfterPreviousFailure, extractStageFirstForeachItems, shouldScheduleAfterStageFailure } from "../.tmp/unit/workflow-runtime.js";
-import { deriveWorkflowStatus, isActiveTaskStatus, isNonCompletedTerminalTaskStatus, summarizeTasks } from "../.tmp/unit/status.js";
+import { deriveWorkflowStatus, summarizeTasks } from "../.tmp/unit/store.js";
 import { assertWorkflowActionAllowedForRole, assertWorkflowToolAllowedForRole, getWorkflowProcessRole, isWorkflowSupervisorEnabled, workflowWorkerEnvPrefix } from "../.tmp/unit/process-role.js";
 import { buildSourceContextPacket, summarizeWorkflowTelemetry, validateStructuredContract } from "../.tmp/unit/workflow-artifacts.js";
 import { loadWorkflowHelper, resolveWorkflowHelperRef } from "../.tmp/unit/workflow-helpers.js";
@@ -116,8 +116,8 @@ test("shared status helpers derive canonical task summaries", () => {
     interrupted: 0,
   });
   assert.equal(deriveWorkflowStatus({ total: 2, pending: 1, running: 0, blocked: 1, completed: 0, failed: 0, skipped: 0, interrupted: 0 }), "blocked");
-  assert.equal(isActiveTaskStatus("pending"), true);
-  assert.equal(isNonCompletedTerminalTaskStatus("skipped"), true);
+  // blocked outranks running so supervisors surface stuck runs instead of polling forever
+  assert.equal(deriveWorkflowStatus({ total: 2, pending: 0, running: 1, blocked: 1, completed: 0, failed: 0, skipped: 0, interrupted: 0 }), "blocked");
 });
 
 test("workflow process role helpers default to supervisor and honor worker/disabled", () => {
@@ -299,6 +299,17 @@ test("schema rejects foreach child in loop as deferred", () => {
     ],
   })));
   assertIssue(error, "$.workflow.stages[0].stages[0].type", "deferred");
+});
+
+test("schema rejects transform child in loop as deferred", () => {
+  const error = assertThrowsFlow(() => parseWorkflow(loopWorkflowSpec({
+    stages: [
+      { id: "implement", type: "task", prompt: "Implement." },
+      { id: "gate", type: "transform", helper: "./helpers/gate.mjs" },
+      { id: "check", type: "task", prompt: "Check." },
+    ],
+  })));
+  assertIssue(error, "$.workflow.stages[0].stages[1].type", "deferred");
 });
 
 test("schema rejects parallel child in loop", () => {
@@ -2623,6 +2634,13 @@ test("workflow registry resolves bundle specs and sets correct workflowRoot", as
     const loaded = await loadWorkflow("bundle-wf", cwd);
     assert.equal(loaded.spec.name, "bundle-wf");
     assert.equal(loaded.specPath, join(cwd, "workflows", "bundle-wf", "spec.json"));
+
+    // Run-state directories store a spec.json snapshot; they must never
+    // register as workflows even though they live under .pi/workflows/.
+    mkdirSync(join(cwd, ".pi", "workflows", "workflow_mq99zzzz_abc123"), { recursive: true });
+    writeFileSync(join(cwd, ".pi", "workflows", "workflow_mq99zzzz_abc123", "spec.json"), JSON.stringify(workflowSpec("unit-scout", { name: "bundle-wf" })));
+    const withRunState = await listWorkflows(cwd);
+    assert.ok(!withRunState.some((workflow) => workflow.specPath.includes("workflow_mq99zzzz_abc123")));
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

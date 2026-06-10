@@ -663,6 +663,7 @@ function validateStageFirstLoopStage(stage: Record<string, unknown>, path: strin
     childStageIdList.push(childStageId);
     if (childStage.type === "loop") throw new WorkflowValidationError([{ path: `${childPath}.type`, message: "loop nesting is not supported in v1" }]);
     if (childStage.type === "foreach") throw new WorkflowValidationError([{ path: `${childPath}.type`, message: "foreach child stages are deferred for loop v1" }]);
+    if (childStage.type === "transform") throw new WorkflowValidationError([{ path: `${childPath}.type`, message: "transform child stages are deferred for loop v1; loop round materialization is only validated for task children" }]);
     if (childStage.type === "parallel") {
       throw new WorkflowValidationError([{
         path: `${childPath}.type`,
