@@ -57,6 +57,6 @@
     "node": ">=22.19.0"
   },
   "dependencies": {
-    "@agwab/pi-subagent": "file:../pi-subagent-engine"
+    "@agwab/pi-subagent": "^0.3.2"
   }
 }
