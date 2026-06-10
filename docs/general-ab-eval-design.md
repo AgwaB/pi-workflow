@@ -175,9 +175,11 @@ Only for local debugging. Not valid for comparative claims when answer keys or p
 
 ### `worktree`
 
-Create a sanitized temporary worktree/workspace and remove or omit eval-only artifacts.
+Implemented (2026-06-10). Create a sanitized temporary worktree/workspace and remove or omit eval-only artifacts.
 
-Exclusions should include:
+The implementation uses `git worktree add --detach <tmp> HEAD` per arm, requires a clean working tree (fail closed), deletes tracked deny-listed paths, verifies zero deny matches remain (except allowlisted fixtures), and removes the worktree after collecting run state into internal-only result storage. The deny list lives in `.pi/eval/ab-execution/isolation.mjs` (`DENY_PATH_PREFIXES`) and is the single source for the sanitizer, the leak-audit regex, and the candidate prompt text.
+
+Exclusions:
 
 ```text
 .pi/eval/**
@@ -185,9 +187,11 @@ evals/ab-execution/**
 docs/ab-execution*
 docs/deep-research-*
 .pi/skill-runs/**
+.pi/workflows/**           (host run state; fresh per workspace)
+.pi/workflow-subagents/**  (host tool logs; fresh per workspace)
 ```
 
-This reduces accidental self-contamination, but it is not a security boundary. Processes can still read host paths unless combined with sandboxing or path guards.
+This reduces accidental self-contamination, but it is not a security boundary. Processes can still read host paths unless combined with sandboxing or path guards, and `node_modules` is a host symlink.
 
 ### `gondolin`
 
@@ -381,10 +385,14 @@ Needs extraction/generalization (roadmap, not current release scope):
 
 Current hardening sequence:
 
-1. Minimal hygiene first: add `answerKeyRef`, move hidden keys out of arm-visible task specs, avoid storing raw answer keys in run artifacts, and write isolation/access audit metadata.
-2. Strong isolation second: add sanitized worktree mode and strict eval-artifact deny/audit mode.
-3. Sandbox spike third: prototype Gondolin execution for candidate arms.
-4. Evidence quality later: build a held-out fact-verification-heavy task set.
+1. Minimal hygiene first: add `answerKeyRef`, move hidden keys out of arm-visible task specs, avoid storing raw answer keys in run artifacts, and write isolation/access audit metadata. — **Done.**
+2. Strong isolation second: add sanitized worktree mode and strict eval-artifact deny/audit mode. — **Done (2026-06-10).** Implemented in `.pi/eval/ab-execution/isolation.mjs` + `run.mjs`:
+   - `--isolation worktree` (default): each arm runs in a detached `git worktree` of HEAD with deny-listed eval artifacts removed and verified absent (fail closed). Requires a clean working tree (dirty tree aborts). Allowlisted task fixtures are copied back in. `node_modules` is symlinked from the host (documented limitation: hygiene, not a security boundary).
+   - Strict audit (default on under worktree): any deny-path mention in candidate output or workflow tool logs marks the task `invalid-isolation`; no winner is declared and no judge tokens are spent. Allowlisted fixture mentions are excluded from leak scanning.
+   - Visibility split is enforced and recorded per task in `internal/<task>/isolation-manifest.json` and `eval-isolation-audit.json`; candidate prompts are fingerprint-checked against rubric/judge-prompt content before launch.
+   - Workflow run state and subagent tool logs are collected from the workspace into internal-only result storage (`internal/<task>/arm-*/state-root/`) before worktree cleanup, so rejudge and audits work after the workspace is gone.
+3. Sandbox spike third: prototype Gondolin execution for candidate arms. — Deferred; this is the step that turns hygiene into a real boundary.
+4. Evidence quality later: build a held-out fact-verification-heavy task set. — Deferred.
 
 General eval harness expansion is intentionally deferred until after the isolation work. The current runner should remain diagnostic-only and deep-research/deep-review oriented until the generic arm/task schema is designed.
 
