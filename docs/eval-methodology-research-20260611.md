@@ -1,8 +1,11 @@
 # Eval Methodology Research — 2026-06-11
 
-Sources: Kimi xhigh subagent (offline; synthesized from local design docs/panel reviews and their cited papers) + external web research (arXiv/ACL 2024–2026, framework docs). Strong = paper/measured; Weak = blog/opinion.
+Sources, three tracks:
+1. Kimi xhigh subagent, offline (local design docs/panel reviews + their cited papers) — `.pi/agent/runs/run_mq8stq25_144c58/`
+2. Direct web research (arXiv/ACL 2024–2026, framework docs)
+3. Kimi xhigh subagent, web-enabled rerun (fetched primary sources directly) — `.pi/agent/runs/run_mq8tc1tb_3ed4bf/`
 
-Run evidence: `.pi/agent/runs/run_mq8stq25_144c58/`
+Strong = paper/measured/official source; Weak = blog/opinion.
 
 ## 1. LLM-as-judge: pairwise vs absolute
 
@@ -59,3 +62,57 @@ Run evidence: `.pi/agent/runs/run_mq8stq25_144c58/`
 ## Single best next step (consensus of both tracks)
 
 **Add the compute-matched `plain-self-check` arm (draft → self-revise) + paired-difference reporting with exact CI, then rerun the suite.** One cheap arm removes the biggest confounder (structure vs extra compute); paired stats make any n meaningful; everything else (pairwise judging, task expansion) builds on this clean baseline.
+
+---
+
+# Round 2: web-enabled Kimi rerun (2026-06-11, run_mq8tc1tb_3ed4bf)
+
+Focus: questions round 1 could not cover. Confirms round-1 conclusions with primary sources and adds the following.
+
+## R2-1. Judge ensemble independence vs provider caching
+
+- **(Strong)** Provider prefix caching is real and auditable ([arXiv:2502.07776](https://arxiv.org/pdf/2502.07776)); our "in-batch stddev 0" is consistent with cache/batch determinism, while cross-run ±1.0 matches T=0 nondeterminism ([arXiv:2603.04417](https://arxiv.org/pdf/2603.04417)).
+- **Action**: inject a random nonce at the head of each ensemble judge call to break prefix-cache correlation; force CoT rationale before the score (rationale-first reduces cross-run variance).
+
+## R2-2. Judge frameworks under local-CLI constraints (no logprobs)
+
+- **(Strong)** G-Eval and TrustJudge's distribution-sensitive scoring need logprobs — **not applicable** to our CLI judges (Anthropic/reasoning models hide logprobs).
+- **(Strong)** TrustJudge ([arXiv:2509.21117](https://arxiv.org/html/2509.21117)): expanding scale granularity 5→10/100 + likelihood-aware aggregation cuts score-comparison inconsistency 8.4pp and transitivity violations 10.8pp — the granularity part is prompt-only, works without logprobs, and complements our anchored rubric.
+- **(Strong)** VERDI ([arXiv:2605.11334](https://arxiv.org/html/2605.11334)): trace-based confidence (does the judge's reasoning contradict its score?) works without logprobs; lightweight regex/NLI check.
+- **Action**: widen score scale to 10 (keep anchors); add a cheap self-contradiction check on judge notes vs score.
+
+## R2-3. Automated seeded-defect task generation (answer-key bottleneck)
+
+- **(Strong)** SWE-Mutation ([arXiv:2605.22175](https://arxiv.org/html/2605.22175)), SWE-ABS ([arXiv:2603.00520](https://arxiv.org/pdf/2603.00520)): LLM-driven mutation of golden solutions generates realistic buggy fixtures at scale; SWE-ABS found ~1/5 of "solved" SWE-bench patches semantically wrong. CR-Bench ([arXiv:2603.11078](https://arxiv.org/html/2603.11078)) scores review agents by line-level bug-hit utility.
+- **Action**: prototype "golden fixture → LLM bug injection → mechanical check" pipeline to scale the review-task family without hand-written keys.
+
+## R2-4. Latest MAS-vs-single evidence (sharpens our hypothesis)
+
+- **(Strong)** BenchAgent details: only EvoAgent (+1.44pp, within Wilson 95% CI) beat the single anchor; 5 of 6 MAS lost by 2.5–11pp. BUT Claude-Code-style runtime workflow won GAIA L2/3 by 20+pp — orchestration *quality* matters, not agent count ([arXiv:2606.05670](https://arxiv.org/html/2606.05670)).
+- **(Strong)** Information-theoretic result ([arXiv:2604.02460](https://arxiv.org/html/2604.02460)): under equal thinking-token budget, single-agent dominates MAS on multi-hop reasoning unless single-agent context utilization is degraded (long/noisy context). This predicts *when* our workflow should win: long-horizon, context-overflow tasks.
+- **Action**: tag tasks by context-pressure; expect workflow wins only there; use Wilson CI for win-rate claims.
+
+## R2-5. Inspect AI paired statistics — verified against source
+
+- **(Strong)** Inspect AI's `stderr` is CLT-based and has **no paired statistics** ([source](https://github.com/UKGovernmentBEIS/inspect_ai/blob/main/src/inspect_ai/scorer/_metrics/std.py)) — confirms we must implement paired bootstrap CI ourselves (small mjs function; port their bootstrap_stderr logic applied to per-task diffs).
+
+## R2-6. Small-team eval operations (Anthropic/OpenAI official guidance)
+
+- **(Strong)** Anthropic ([demystifying-evals](https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents)): start with 20–50 tasks; separate **capability suite** (low pass rate, drives improvement) from **regression suite** (must stay passing); prefer deterministic graders; clean-environment isolation is mandatory (validates our worktree work).
+- **(Strong)** OpenAI ([eval-skills](https://developers.openai.com/blog/eval-skills)): 10–20 prompts per skill, deterministic checks before rubric grading.
+- **(Weak)** Eval-author monoculture warning: one author writing >40% of tasks makes the benchmark a self-portrait.
+- **Action**: promote current 2 tasks to regression suite; build new tasks as capability suite.
+
+## R2 corrections to round-1 conclusions
+
+| Round-1 claim | Round-2 refinement |
+|---|---|
+| k≈8 ensemble is the main variance fix | Granularity expansion (5→10/100) + aggregation rules achieve much of the gain **without** ensemble cost (TrustJudge) |
+| Pairwise is manipulable — use cautiously | Don't discard pairwise; bidirectional probability aggregation fixes its transitivity problems |
+| T=0 doesn't fix inconsistency | True, but trace-based confidence (VERDI) identifies *which* judgments to trust |
+
+## Updated next-step sequence (merged)
+
+1. **Now**: nonce injection + CoT-rationale-first judge prompt + score scale 5→10 (prompt-only changes)
+2. **Short**: paired bootstrap CI in mjs + compute-matched `plain-self-check` arm → rerun suite
+3. **Mid**: mutation-based task generation pipeline; split regression/capability suites; 20+ tasks
