@@ -193,6 +193,8 @@ docs/deep-research-*
 
 This reduces accidental self-contamination, but it is not a security boundary. Processes can still read host paths unless combined with sandboxing or path guards, and `node_modules` is a host symlink.
 
+External target repos (2026-06-12): a task may declare `targetRepo: <name>`, resolved through the machine-local registry `~/.pi/agent/eval-private/pi-workflow/targets.json` (override: `PI_WORKFLOW_EVAL_TARGETS`), to evaluate arms against another codebase. The runner then builds a sanitized worktree pair per arm — the candidate cwd from the target repo (fixtures copied in from this repo, nested `node_modules` symlinked from the clone) and an extension worktree from this repo so `/workflow` machinery and workflow definitions stay available. Run state remains cwd-local to the target worktree, so collection, audits, and rejudge are unchanged. Both repos must be clean at launch; the target HEAD sha is recorded in the run manifest and per-arm isolation manifests.
+
 ### `gondolin`
 
 Run candidate arms inside a Gondolin VM/sandbox with only the sanitized workspace mounted.
