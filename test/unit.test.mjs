@@ -6,8 +6,8 @@ import test from "node:test";
 
 import { parseAgentMarkdown } from "../.tmp/unit/agents.js";
 import { compileWorkflow } from "../.tmp/unit/compiler.js";
-import { buildRunSourceContext, evaluateLoopUntilCondition, formatRun, runWorkflow, scheduleRun } from "../.tmp/unit/engine.js";
-import { workflowArgumentCompletions, parseWorkflowRunArgs } from "../.tmp/unit/extension.js";
+import { buildRunSourceContext, evaluateLoopUntilCondition, formatRun, resumeRun, runWorkflow, scheduleRun } from "../.tmp/unit/engine.js";
+import { notifyUnfinishedRuns, workflowArgumentCompletions, parseWorkflowRunArgs } from "../.tmp/unit/extension.js";
 import { listWorkflows, recommendWorkflows, resolveWorkflowRef } from "../.tmp/unit/workflow-specs.js";
 import { resolveWorkflowRuntime } from "../.tmp/unit/workflow-runtime.js";
 import { loadWorkflow, parseWorkflow } from "../.tmp/unit/schema.js";
@@ -2513,7 +2513,7 @@ test("workflow registry fails closed when flat and bundle specs conflict", async
 
 test("workflow command completions and run arg parsing preserve task text", () => {
   const workflows = [{ name: "review", specPath: "/tmp/review.json", fileName: "review.json", aliases: ["review"], workflowRoot: "/tmp" }];
-  assert.deepEqual(workflowArgumentCompletions("", workflows)?.map((item) => item.value), ["help", "list", "recommend", "validate", "roles", "agents", "run", "status", "show", "logs", "wait"]);
+  assert.deepEqual(workflowArgumentCompletions("", workflows)?.map((item) => item.value), ["help", "list", "recommend", "validate", "roles", "agents", "run", "status", "show", "logs", "wait", "resume"]);
   assert.deepEqual(workflowArgumentCompletions("l", workflows)?.map((item) => item.value), ["list", "logs"]);
   assert.deepEqual(workflowArgumentCompletions("run re", workflows)?.map((item) => item.value), ["run review"]);
   assert.deepEqual(workflowArgumentCompletions("validate re", workflows)?.map((item) => item.value), ["validate review"]);
@@ -2529,6 +2529,113 @@ test("resolveFlowsCwd finds ancestor workflow state root", async () => {
     const nested = join(cwd, "a", "b");
     mkdirSync(nested, { recursive: true });
     assert.equal(await resolveFlowsCwd(nested), cwd);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("resumeRun resets failed and skipped tasks, preserves completed work, and relaunches", async () => {
+  const cwd = makeProject();
+  try {
+    writeAgent(cwd, "unit-scout");
+    const spec = workflowSpec("unit-scout", {
+      workflow: {
+        stages: [
+          { id: "one", type: "task", output: { format: "json" }, prompt: "Step one." },
+          { id: "two", type: "reduce", from: "one", output: { format: "json" }, prompt: "Step two." },
+          { id: "three", type: "reduce", from: "two", prompt: "Step three." },
+        ],
+      },
+    });
+    const compiled = await compileWorkflow(spec, { cwd, task: "Resume target" });
+    const { run } = await createStageFirstRunRecord(cwd, compiled, join(cwd, "workflows", "unit.json"));
+    await writeStaticRunArtifacts(cwd, run, compiled, spec);
+
+    await completeTask(cwd, taskBySpec(run, "one.main"), { facts: ["a"] });
+    setTaskTerminal(taskBySpec(run, "two.main"), "failed", "failed", { exitCode: 1, lastMessage: "boom" });
+    setTaskTerminal(taskBySpec(run, "three.main"), "skipped", "skipped_after_dependency_failure", { lastMessage: "skipped" });
+    await writeRunRecord(cwd, run);
+    assert.equal((await readRunRecord(cwd, run.runId)).status, "failed");
+
+    const launchedTasks = [];
+    setSubagentApiForTests({
+      async runSubagent(options) {
+        launchedTasks.push(String(options.task ?? "").slice(0, 40));
+        return { runId: "run_stub", attemptId: "attempt_stub", status: "running" };
+      },
+      async getSubagentStatus() { return null; },
+      async reconcileSubagentRun() { return {}; },
+      async interruptSubagent() { return {}; },
+    });
+    try {
+      const { run: resumed, resetTaskIds } = await resumeRun(cwd, run.runId);
+      assert.deepEqual(resetTaskIds, [taskBySpec(run, "two.main").taskId, taskBySpec(run, "three.main").taskId]);
+      assert.equal(resumed.status, "running");
+      assert.equal(taskBySpec(resumed, "one.main").status, "completed");
+      assert.equal(taskBySpec(resumed, "two.main").status, "running");
+      assert.equal(taskBySpec(resumed, "three.main").status, "pending");
+      assert.equal(launchedTasks.length, 1);
+    } finally {
+      setSubagentApiForTests(undefined);
+    }
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("resumeRun rejects completed and loop runs", async () => {
+  const cwd = makeProject();
+  try {
+    writeAgent(cwd, "unit-scout");
+    const spec = workflowSpec("unit-scout", {
+      workflow: { stages: [{ id: "only", type: "task", prompt: "Do it." }] },
+    });
+    const compiled = await compileWorkflow(spec, { cwd, task: "Done target" });
+    const { run } = await createStageFirstRunRecord(cwd, compiled, join(cwd, "workflows", "unit.json"));
+    await writeStaticRunArtifacts(cwd, run, compiled, spec);
+    await completeTask(cwd, taskBySpec(run, "only.main"), {});
+    await writeRunRecord(cwd, run);
+    await assert.rejects(() => resumeRun(cwd, run.runId), /failed or interrupted/);
+
+    const { run: loopRun } = await createLoopRun(cwd);
+    setTaskTerminal(loopRun.tasks[0], "failed", "failed", { exitCode: 1 });
+    for (const task of loopRun.tasks.slice(1)) setTaskTerminal(task, "skipped", "skipped", {});
+    await writeRunRecord(cwd, loopRun);
+    await assert.rejects(() => resumeRun(cwd, loopRun.runId), /loop workflows/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("notifyUnfinishedRuns reports recent failed root runs with resume hint", async () => {
+  const cwd = makeProject();
+  try {
+    const nowMs = Date.parse("2026-06-12T12:00:00.000Z");
+    const indexDir = join(cwd, ".pi", "workflows");
+    mkdirSync(indexDir, { recursive: true });
+    const summary = { pending: 0, running: 0, blocked: 0, completed: 1, failed: 1, skipped: 3, interrupted: 0, total: 5 };
+    writeFileSync(join(indexDir, "index.json"), JSON.stringify({
+      schemaVersion: 1,
+      updatedAt: "2026-06-12T11:00:00.000Z",
+      runs: [
+        { runId: "workflow_recent", name: "deep-research", type: "workflow-v1", status: "failed", taskSummary: summary, createdAt: "2026-06-11T00:00:00.000Z", updatedAt: "2026-06-11T00:00:00.000Z", runJson: "x", tasks: [] },
+        { runId: "workflow_old", name: "stale", type: "workflow-v1", status: "failed", taskSummary: summary, createdAt: "2026-05-01T00:00:00.000Z", updatedAt: "2026-05-01T00:00:00.000Z", runJson: "x", tasks: [] },
+        { runId: "workflow_child", name: "loop-child", type: "workflow-v1", status: "failed", parentRunId: "workflow_recent", taskSummary: summary, createdAt: "2026-06-11T00:00:00.000Z", updatedAt: "2026-06-11T00:00:00.000Z", runJson: "x", tasks: [] },
+        { runId: "workflow_done", name: "ok", type: "workflow-v1", status: "completed", taskSummary: summary, createdAt: "2026-06-11T00:00:00.000Z", updatedAt: "2026-06-11T00:00:00.000Z", runJson: "x", tasks: [] },
+      ],
+    }));
+
+    const notices = [];
+    await notifyUnfinishedRuns(cwd, (message, type) => notices.push({ message, type }), nowMs);
+    assert.equal(notices.length, 1);
+    assert.equal(notices[0].type, "warning");
+    assert.match(notices[0].message, /deep-research workflow_recent: failed/);
+    assert.match(notices[0].message, /\/workflow resume workflow_recent/);
+    assert.doesNotMatch(notices[0].message, /workflow_old|workflow_child|workflow_done/);
+
+    const silent = [];
+    await notifyUnfinishedRuns(join(cwd, "no-such"), (message) => silent.push(message), nowMs);
+    assert.equal(silent.length, 0);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

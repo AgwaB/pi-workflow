@@ -9,6 +9,7 @@ import {
   formatRunDetails,
   formatRunStatus,
   formatStatus,
+  resumeRun,
   resumeSupervisors,
   runWorkflowSpec,
   waitForRun,
@@ -16,14 +17,19 @@ import {
 } from "./engine.js";
 import { WORKFLOW_COMMAND, WORKFLOW_HELP } from "./index.js";
 import { assertWorkflowActionAllowedForRole, isWorkflowSupervisorEnabled } from "./process-role.js";
+import { readIndex } from "./store.js";
 import { loadWorkflowSpec } from "./schema.js";
 import { listWorkflows, recommendWorkflows, resolveWorkflowRef } from "./workflow-specs.js";
 import { CompiledWorkflow, WorkflowValidationError } from "./types.js";
+
+const UNFINISHED_RUN_NOTICE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const UNFINISHED_RUN_NOTICE_MAX_RUNS = 5;
 
 export default function workflowExtension(pi: ExtensionAPI): void {
   pi.on("session_start", async (_event, ctx) => {
     if (!isWorkflowSupervisorEnabled()) return;
     await resumeSupervisors(ctx.cwd).catch(() => undefined);
+    await notifyUnfinishedRuns(ctx.cwd, (message, type) => ctx.ui.notify(message, type)).catch(() => undefined);
   });
 
   pi.registerCommand(WORKFLOW_COMMAND, {
@@ -35,6 +41,26 @@ export default function workflowExtension(pi: ExtensionAPI): void {
       await handleWorkflowCommand(args, ctx);
     },
   });
+}
+
+export async function notifyUnfinishedRuns(cwd: string, notify: (message: string, type?: "info" | "warning" | "error") => void, nowMs: number = Date.now()): Promise<void> {
+  const index = await readIndex(cwd);
+  if (!index?.runs?.length) return;
+  const unfinished = index.runs.filter((run) => {
+    if (run.parentRunId) return false;
+    if (run.status !== "failed" && run.status !== "interrupted") return false;
+    const updatedAtMs = Date.parse(run.updatedAt ?? "");
+    return Number.isFinite(updatedAtMs) && nowMs - updatedAtMs <= UNFINISHED_RUN_NOTICE_MAX_AGE_MS;
+  });
+  if (unfinished.length === 0) return;
+
+  const lines = unfinished.slice(0, UNFINISHED_RUN_NOTICE_MAX_RUNS).map((run) => {
+    const summary = run.taskSummary;
+    const counts = summary ? ` (${summary.completed}/${summary.total} tasks completed, ${summary.failed} failed, ${summary.interrupted} interrupted)` : "";
+    return `- ${run.name ?? "(unnamed)"} ${run.runId}: ${run.status}${counts} — /workflow resume ${run.runId}`;
+  });
+  if (unfinished.length > UNFINISHED_RUN_NOTICE_MAX_RUNS) lines.push(`- … and ${unfinished.length - UNFINISHED_RUN_NOTICE_MAX_RUNS} more (/workflow status)`);
+  notify([`Unfinished workflow run${unfinished.length > 1 ? "s" : ""} in this project:`, ...lines].join("\n"), "warning");
 }
 
 async function handleWorkflowCommand(args: string, ctx: ExtensionCommandContext): Promise<void> {
@@ -120,6 +146,13 @@ async function handleWorkflowCommand(args: string, ctx: ExtensionCommandContext)
       const runId = requireArg(tokens, 1, "/workflow wait <run-id> [timeout-ms]");
       const run = await waitForRun(ctx.cwd, runId, tokens[2] ? Number(tokens[2]) : undefined);
       emit(ctx, formatRun(run, "full"), run.status === "completed" ? "info" : run.status === "blocked" ? "warning" : "error");
+      return;
+    }
+
+    if (action === "resume") {
+      const runId = requireArg(tokens, 1, "/workflow resume <run-id>");
+      const { run, resetTaskIds } = await resumeRun(ctx.cwd, runId);
+      emit(ctx, [`Reset ${resetTaskIds.length} task(s) to pending: ${resetTaskIds.join(", ")}`, formatRun(run, "full")].join("\n"), "info");
       return;
     }
 
@@ -254,6 +287,7 @@ const WORKFLOW_ACTION_COMPLETIONS = [
   { value: "show", label: "show", description: "Show a run or workflow spec" },
   { value: "logs", label: "logs", description: "Show workflow task logs" },
   { value: "wait", label: "wait", description: "Wait for a workflow run" },
+  { value: "resume", label: "resume", description: "Resume a failed or interrupted run" },
 ];
 
 export function workflowArgumentCompletions(args: string, workflows: Array<{ name: string }> = []): Array<{ value: string; label: string; description?: string }> | undefined {

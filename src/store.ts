@@ -452,6 +452,26 @@ export function setTaskTerminal(
   return true;
 }
 
+const RESUMABLE_TASK_STATUSES = new Set<TaskRunStatus>(["failed", "interrupted", "skipped"]);
+
+export function resetTaskForResume(task: WorkflowTaskRunRecord): boolean {
+  if (!RESUMABLE_TASK_STATUSES.has(task.status)) return false;
+  task.status = "pending";
+  task.statusDetail = "pending";
+  task.startedAt = undefined;
+  task.completedAt = undefined;
+  task.elapsedMs = undefined;
+  task.exitCode = undefined;
+  task.pid = undefined;
+  task.launchToken = undefined;
+  task.backendHandle = undefined;
+  task.backendFiles = undefined;
+  task.lastMessage = undefined;
+  task.outputValidation = undefined;
+  task.outputRetry = undefined;
+  return true;
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }

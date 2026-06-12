@@ -15,6 +15,7 @@ import {
   readIndex,
   readJson,
   readRunRecord,
+  resetTaskForResume,
   setTaskTerminal,
   supervisorPath,
   updateIndex,
@@ -96,6 +97,39 @@ export async function waitForRun(cwd: string, runIdOrPrefix: string, timeoutMs?:
   }
 
   return run;
+}
+
+export interface ResumeRunSummary {
+  run: WorkflowRunRecord;
+  resetTaskIds: string[];
+}
+
+export async function resumeRun(cwd: string, runIdOrPrefix: string): Promise<ResumeRunSummary> {
+  const current = await readRunRecord(cwd, runIdOrPrefix);
+  if (current.status !== "failed" && current.status !== "interrupted") {
+    throw new Error(`resume requires a failed or interrupted run; ${current.runId} is ${current.status}`);
+  }
+  const compiledFlow = await readCompiledWorkflow(cwd, current.runId);
+  const hasLoopTasks = compiledFlow?.tasks.some((task) => task.kind === "loop" || task.loopPlaceholder !== undefined || task.loopChild !== undefined) ?? false;
+  if (hasLoopTasks || (current.loopStates?.length ?? 0) > 0) {
+    throw new Error(`resume does not support loop workflows yet: ${current.runId}`);
+  }
+
+  const resetTaskIds: string[] = [];
+  const updated = await withRunLease(cwd, current.runId, async () => {
+    const run = await readRunRecord(cwd, current.runId);
+    for (const task of run.tasks) {
+      if (resetTaskForResume(task)) resetTaskIds.push(task.taskId);
+    }
+    if (resetTaskIds.length > 0) await writeRunRecord(cwd, run);
+    return run;
+  });
+  if (!updated) throw new Error(`Could not acquire supervisor lease for ${current.runId}; another supervisor may be active`);
+  if (resetTaskIds.length === 0) throw new Error(`No failed, interrupted, or skipped tasks to resume in ${current.runId}`);
+
+  const scheduled = await scheduleRun(cwd, current.runId) ?? await readRunRecord(cwd, current.runId);
+  if (scheduled.status === "running") watchRun(cwd, scheduled.runId);
+  return { run: scheduled, resetTaskIds };
 }
 
 export async function resumeSupervisors(cwd: string): Promise<void> {
