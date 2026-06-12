@@ -86,6 +86,8 @@ Initial size target:
 
 Detailed starter design: `docs/dynamic-review-eval-plan-20260612.md`.
 
+Fixture-selection caveat: dynamic fixtures with exact pre-existing regression tests or obvious one-line reverts are valid runner smokes, but they are weak A/B holdout evidence because all arms can ceiling. Hard holdout tasks should require designing/adapting a repro test, not merely finding and rerunning an already named failing test.
+
 ### Suite C — Deep research
 
 Purpose: compare planner/claim-verification workflow against direct and naive-parallel baselines.

@@ -39,6 +39,12 @@ Use the existing RED/GREEN-verified seeds as the starting point, but package eac
 
 The gondolin seeds already have static answer-key coverage; dynamic scoring needs a private manifest of expected test signals rather than prose keywords.
 
+### Fixture difficulty guardrails
+
+Do not treat every RED/GREEN seed as a useful A/B discriminator. A fixture is likely too easy for holdout if the exact upstream regression test already exists, the patch is an obvious one-line revert, or the allowed test command directly names the failing behavior. Those fixtures are still useful as runner/external-target smokes, but they should not be counted as hard holdout evidence for workflow-vs-plain superiority.
+
+For hard A/B fixtures, prefer seeds where the arm must design or adapt a targeted repro: cross-file behavior, event ordering, async/concurrency, stateful protocol transitions, or traps that require semantic reasoning. Existing tests may be used for setup clues, but the answer key should record whether a novel repro test is expected versus whether an existing test is acceptable smoke evidence.
+
 ## Runner changes
 
 Add a new task class, e.g. `dynamic-review-seeded-diff`, with per-arm worktrees that allow mutation inside the arm workspace. The runner should:
@@ -77,7 +83,7 @@ Keep model constant (`kimi-coding/kimi-for-coding`, xhigh for first ceiling-brea
 
 ## Success criteria
 
-The fixture is useful only if at least one arm misses or over-tests a seed/trap. If all arms produce complete RED/GREEN evidence, increase subtlety:
+The fixture is useful as a discriminator only if at least one arm misses or over-tests a seed/trap. If all arms produce complete RED/GREEN evidence, keep it as a smoke/regression fixture and increase subtlety before spending xhigh holdout budget:
 
 - cross-file seeds requiring caller/context tests,
 - time/concurrency tests with deterministic fake clocks or lock fixtures,
