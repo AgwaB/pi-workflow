@@ -14,24 +14,6 @@ node_modules/
 !.pi/agents/
 .pi/agents/*
 !.pi/agents/agentic-coding-expert.md
-!.pi/eval/
-.pi/eval/*
-!.pi/eval/ab-execution/
-.pi/eval/ab-execution/*
-!.pi/eval/ab-execution/run.mjs
-!.pi/eval/ab-execution/isolation.mjs
-!.pi/eval/ab-execution/README.md
-!.pi/eval/ab-execution/tasks.json
-!.pi/eval/ab-execution/rubric.md
-!.pi/eval/ab-execution/judge-prompt.md
-!.pi/eval/ab-execution/fixtures/
-!.pi/eval/ab-execution/fixtures/review-seeded-safety-diff/
-!.pi/eval/ab-execution/fixtures/review-seeded-safety-diff/README.md
-!.pi/eval/ab-execution/fixtures/review-seeded-safety-diff/diff.patch
-!.pi/eval/review-ab/
-!.pi/eval/review-ab/**
-.pi/eval/review-ab/runs/
-.pi/eval/review-ab/.generated/
 !.pi/agents/e2e-custom-tool-agent.md
 !.pi/agents/e2e-no-tools-agent.md
 !.pi/agents/e2e-symlink-agent.md
@@ -41,15 +23,9 @@ node_modules/
 .harness/
 cache/
 skill-test-runs/
-internal/e2e-test/results/
-e2e-test/results/
-internal/e2e-test/fixtures/worktree-base/.git/
-
-# Local third-party reference checkouts
-internal/reference/
+internal/
 
 # Recovery/salvage artifacts and local archives
 .recovery/
 .harness-archive/
 *.tar.gz
-e2e-test/soak-report.md

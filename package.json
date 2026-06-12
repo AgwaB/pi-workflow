@@ -10,7 +10,6 @@
     "workflows",
     "skills",
     "docs/usage.md",
-    "docs/ab-execution-results.md",
     "README.md",
     "LICENSE",
     "tsconfig.json"
@@ -32,11 +31,11 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "npm run test:unit",
-    "test:unit": "rm -rf .tmp/unit && tsc -p tsconfig.json --outDir .tmp/unit --noEmit false && node --test test/*.test.mjs",
-    "e2e": "node e2e-test/run.mjs",
-    "e2e:soak": "node e2e-test/soak.mjs",
-    "pack:dry": "npm pack --dry-run",
-    "release:check": "node ./scripts/release-check.mjs"
+    "test:build": "rm -rf .tmp/unit && tsc -p tsconfig.json --outDir .tmp/unit --noEmit false",
+    "test:unit": "npm run test:build && node --test test/unit/*.test.mjs",
+    "e2e": "node test/e2e/run.mjs",
+    "e2e:soak": "node test/soak/run.mjs",
+    "pack:dry": "npm pack --dry-run"
   },
   "pi": {
     "extensions": [

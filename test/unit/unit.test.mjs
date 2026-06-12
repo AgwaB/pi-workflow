@@ -11,8 +11,8 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { parseAgentMarkdown } from "../.tmp/unit/agents.js";
-import { compileWorkflow } from "../.tmp/unit/compiler.js";
+import { parseAgentMarkdown } from "../../.tmp/unit/agents.js";
+import { compileWorkflow } from "../../.tmp/unit/compiler.js";
 import {
 	buildRunSourceContext,
 	evaluateLoopUntilCondition,
@@ -20,19 +20,19 @@ import {
 	resumeRun,
 	runWorkflow,
 	scheduleRun,
-} from "../.tmp/unit/engine.js";
+} from "../../.tmp/unit/engine.js";
 import {
 	notifyUnfinishedRuns,
 	workflowArgumentCompletions,
 	parseWorkflowRunArgs,
-} from "../.tmp/unit/extension.js";
+} from "../../.tmp/unit/extension.js";
 import {
 	listWorkflows,
 	recommendWorkflows,
 	resolveWorkflowRef,
-} from "../.tmp/unit/workflow-specs.js";
-import { resolveWorkflowRuntime } from "../.tmp/unit/workflow-runtime.js";
-import { loadWorkflow, parseWorkflow } from "../.tmp/unit/schema.js";
+} from "../../.tmp/unit/workflow-specs.js";
+import { resolveWorkflowRuntime } from "../../.tmp/unit/workflow-runtime.js";
+import { loadWorkflow, parseWorkflow } from "../../.tmp/unit/schema.js";
 import {
 	acquireSupervisorLease,
 	createStageFirstRunRecord,
@@ -47,43 +47,43 @@ import {
 	writeJsonAtomic,
 	writeRunRecord,
 	writeStaticRunArtifacts,
-} from "../.tmp/unit/store.js";
+} from "../../.tmp/unit/store.js";
 import {
 	WorkflowValidationError,
 	STAGE_FIRST_RUN_TYPE,
-} from "../.tmp/unit/types.js";
+} from "../../.tmp/unit/types.js";
 import {
 	applyTaskResultArtifact,
 	buildJsonOutputRetryInstructions,
 	extractJsonOutput,
 	parseJsonOutput,
-} from "../.tmp/unit/result.js";
+} from "../../.tmp/unit/result.js";
 import {
 	canStageProceedAfterPreviousFailure,
 	extractStageFirstForeachItems,
 	shouldScheduleAfterStageFailure,
-} from "../.tmp/unit/workflow-runtime.js";
-import { deriveWorkflowStatus, summarizeTasks } from "../.tmp/unit/store.js";
+} from "../../.tmp/unit/workflow-runtime.js";
+import { deriveWorkflowStatus, summarizeTasks } from "../../.tmp/unit/store.js";
 import {
 	assertWorkflowActionAllowedForRole,
 	assertWorkflowToolAllowedForRole,
 	getWorkflowProcessRole,
 	isWorkflowSupervisorEnabled,
 	workflowWorkerEnvPrefix,
-} from "../.tmp/unit/process-role.js";
+} from "../../.tmp/unit/process-role.js";
 import {
 	buildSourceContextPacket,
 	summarizeWorkflowTelemetry,
 	validateStructuredContract,
-} from "../.tmp/unit/workflow-artifacts.js";
+} from "../../.tmp/unit/workflow-artifacts.js";
 import {
 	loadWorkflowHelper,
 	resolveWorkflowHelperRef,
-} from "../.tmp/unit/workflow-helpers.js";
+} from "../../.tmp/unit/workflow-helpers.js";
 import {
 	refreshRunFromSubagentArtifacts,
 	setSubagentApiForTests,
-} from "../.tmp/unit/subagent-backend.js";
+} from "../../.tmp/unit/subagent-backend.js";
 
 function makeProject() {
 	return mkdtempSync(join(tmpdir(), "workflow-unit-"));
@@ -3154,7 +3154,7 @@ test("workflow helper loader rejects external or invalid helper refs", async () 
 
 test("deep-research claim evidence gate downgrades unsupported verified claims", async () => {
 	const { default: helper } = await import(
-		`../workflows/deep-research/helpers/claim-evidence-gate.mjs?test=${Date.now()}`
+		`../../workflows/deep-research/helpers/claim-evidence-gate.mjs?test=${Date.now()}`
 	);
 
 	const result = await helper({
@@ -5002,6 +5002,7 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 	const helperPath = join(
 		dirname(fileURLToPath(import.meta.url)),
 		"..",
+		"..",
 		"workflows",
 		"deep-review",
 		"helpers",
@@ -5052,12 +5053,14 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 			"reviewers.lens-a": {
 				findings: [
 					{
-						title: "Role-restriction unit tests would fail if assertWorkflowActionAllowedForRole is removed",
-						file: "test/unit.test.mjs",
+						title:
+							"Role-restriction unit tests would fail if assertWorkflowActionAllowedForRole is removed",
+						file: "test/unit/unit.test.mjs",
 					},
 					{
-						title: "JSON output contract-path tests would fail if selectorPaths matching and fallback are removed",
-						file: "test/unit.test.mjs",
+						title:
+							"JSON output contract-path tests would fail if selectorPaths matching and fallback are removed",
+						file: "test/unit/unit.test.mjs",
 					},
 				],
 			},
@@ -5087,7 +5090,9 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 	// Unrecognized verdict routes to needsHuman, not silence.
 	assert.equal(partition.partitionSummary.needsHuman, 1);
 	assert.ok(
-		partition.normalizationNotes.some((n) => n.includes("unrecognized verdict")),
+		partition.normalizationNotes.some((n) =>
+			n.includes("unrecognized verdict"),
+		),
 	);
 	await assert.rejects(
 		helper({ sources: {}, options: { mode: "bogus" } }),
@@ -5098,6 +5103,7 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 test("deep-research claim-evidence-gate enforces structured evidence, rejoins identity, and partitions statuses", async () => {
 	const helperPath = join(
 		dirname(fileURLToPath(import.meta.url)),
+		"..",
 		"..",
 		"workflows",
 		"deep-research",
@@ -5113,9 +5119,21 @@ test("deep-research claim-evidence-gate enforces structured evidence, rejoins id
 			"normalize-claims.main": {
 				claimInventory: {
 					verificationCandidates: [
-						{ id: "claim-001", claim: "Original claim text", factSlotIds: ["slot-001"] },
-						{ id: "claim-002", claim: "Costs 5 usd per 1M tokens", factSlotIds: ["slot-002"] },
-						{ id: "claim-003", claim: "Local docs claim", factSlotIds: ["slot-001"] },
+						{
+							id: "claim-001",
+							claim: "Original claim text",
+							factSlotIds: ["slot-001"],
+						},
+						{
+							id: "claim-002",
+							claim: "Costs 5 usd per 1M tokens",
+							factSlotIds: ["slot-002"],
+						},
+						{
+							id: "claim-003",
+							claim: "Local docs claim",
+							factSlotIds: ["slot-001"],
+						},
 					],
 				},
 				factSlotCoverage: [{ slotId: "slot-001" }, { slotId: "slot-002" }],

@@ -324,15 +324,15 @@ This repository follows the same release shape as `@agwab/pi-subagent`:
 - `publishConfig.access: public`
 - Pi package manifest in `package.json`
 - README + `docs/usage.md`
-- a `release:check` script before publish
 
-Before publishing:
+Before publishing, maintainers should run the public checks and inspect the package surface:
 
 ```bash
 npm run typecheck
 npm test
 npm run e2e
-npm run release:check
+npm pack --dry-run --json
+npm publish --dry-run
 ```
 
-`release:check` verifies package metadata, npm version availability, static checks, package contents, and `npm publish --dry-run`.
+The dry-run package should not include local/internal files, test output, runtime state, or machine-specific paths.

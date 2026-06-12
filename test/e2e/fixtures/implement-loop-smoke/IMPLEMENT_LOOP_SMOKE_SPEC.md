@@ -15,10 +15,10 @@ Fix the failing demo tests with the smallest safe code change.
 ## Scope
 
 Allowed files:
-- `e2e-test/fixtures/implement-loop-smoke/math.js`
-- `e2e-test/fixtures/implement-loop-smoke/math.test.js`
+- `test/e2e/fixtures/implement-loop-smoke/math.js`
+- `test/e2e/fixtures/implement-loop-smoke/math.test.js`
 
-Do not modify files outside `e2e-test/fixtures/implement-loop-smoke/`.
+Do not modify files outside `test/e2e/fixtures/implement-loop-smoke/`.
 
 ## Current behavior
 
@@ -36,7 +36,7 @@ Examples:
 ## Approved validation command
 
 ```bash
-node --test e2e-test/fixtures/implement-loop-smoke/math.test.js
+node --test test/e2e/fixtures/implement-loop-smoke/math.test.js
 ```
 
 ## Acceptance criteria
@@ -54,7 +54,7 @@ The loop is successful only when the final `check` stage returns JSON with:
 The `check` stage must verify:
 1. The approved validation command exits with code `0`.
 2. The patch is minimal.
-3. No files outside `e2e-test/fixtures/implement-loop-smoke/` were modified.
+3. No files outside `test/e2e/fixtures/implement-loop-smoke/` were modified.
 4. The implementation does not hard-code only the tested examples.
 
 ## Safety constraints
@@ -78,15 +78,15 @@ Return JSON with:
 Fix the failing demo test only.
 
 Use this task spec:
-- e2e-test/fixtures/implement-loop-smoke/IMPLEMENT_LOOP_SMOKE_SPEC.md
+- test/e2e/fixtures/implement-loop-smoke/IMPLEMENT_LOOP_SMOKE_SPEC.md
 
 Approved validation command:
-- node --test e2e-test/fixtures/implement-loop-smoke/math.test.js
+- node --test test/e2e/fixtures/implement-loop-smoke/math.test.js
 
 Allowed files:
-- e2e-test/fixtures/implement-loop-smoke/math.js
-- e2e-test/fixtures/implement-loop-smoke/math.test.js
+- test/e2e/fixtures/implement-loop-smoke/math.js
+- test/e2e/fixtures/implement-loop-smoke/math.test.js
 
-Do not modify files outside e2e-test/fixtures/implement-loop-smoke/.
+Do not modify files outside test/e2e/fixtures/implement-loop-smoke/.
 Use model kimi-coding/kimi-for-coding with medium thinking if the workflow runtime asks for model selection.
 ```

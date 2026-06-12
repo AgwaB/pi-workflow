@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const resultRoot = join(root, "e2e-test", "results");
+const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+const resultRoot = join(root, ".tmp", "test-results", "e2e");
 const stamp = new Date()
 	.toISOString()
 	.replace(/[-:]/g, "")
@@ -60,6 +60,11 @@ function nodeEval(label, code, options = {}) {
 	);
 }
 
+function ensureCompiledArtifacts() {
+	if (existsSync(join(root, ".tmp", "unit", "workflow-specs.js"))) return;
+	run("test-build", "npm", ["run", "test:build"]);
+}
+
 function assertNoLegacyTerms() {
 	const forbidden = [
 		"rec" + "ipe",
@@ -79,7 +84,7 @@ function assertNoLegacyTerms() {
 		"bash",
 		[
 			"-lc",
-			`grep -RInE '${forbidden.join("|")}' src test README.md docs workflows package.json 2>/dev/null | grep -v '^docs/remaining-work-handoff-'`,
+			`grep -RInE '${forbidden.join("|")}' src test README.md docs workflows package.json 2>/dev/null`,
 		],
 		{ expectFailure: true },
 	);
@@ -89,8 +94,7 @@ function assertNoLegacyTerms() {
 function main() {
 	console.log(`Writing E2E evidence to ${relative(root, resultDir)}`);
 
-	run("typecheck", "npm", ["run", "typecheck"]);
-	run("unit", "npm", ["test"]);
+	ensureCompiledArtifacts();
 	run("diff-check", "git", ["diff", "--check"]);
 	assertNoLegacyTerms();
 
@@ -149,8 +153,6 @@ function main() {
   `,
 	);
 
-	run("pack-dry", "npm", ["run", "pack:dry"]);
-
 	writeReport();
 	if (failed) process.exitCode = 1;
 }
@@ -169,7 +171,10 @@ function writeReport() {
 		),
 	];
 	writeFileSync(join(resultDir, "report.md"), `${lines.join("\n")}\n`);
-	writeFileSync(join(root, "e2e-test", "report.md"), `${lines.join("\n")}\n`);
+	writeFileSync(
+		join(root, ".tmp", "test-results", "e2e-report.md"),
+		`${lines.join("\n")}\n`,
+	);
 }
 
 main();

@@ -4,13 +4,15 @@
 
 [![npm](https://img.shields.io/npm/v/@agwab/pi-workflow.svg)](https://www.npmjs.com/package/@agwab/pi-workflow)
 
-`pi-workflow` lets you write project-specific workflows and run them through Pi's focused `/workflow` command surface. It supports explicit multi-subagent workflow structure — stage graphs, fan-out/fan-in, transforms, bounded loops, and resumable artifacts — on top of [`@agwab/pi-subagent`](https://www.npmjs.com/package/@agwab/pi-subagent)'s durable worker runtime.
+`pi-workflow` lets you create project-specific workflows and run repeatable multi-agent work in Pi. It supports explicit workflow structure — stage graphs, fan-out/fan-in, bounded loops, and resumable artifacts — on top of [`@agwab/pi-subagent`](https://www.npmjs.com/package/@agwab/pi-subagent)'s durable worker runtime.
 
-It is intentionally a thin orchestration layer, so you can add it when you want repeatable workflow structure, customize workflows as plain JSON/YAML, and remove it when plain Pi or direct subagent calls are enough.
+It is intentionally a thin orchestration layer, so you can add it when you want reusable team workflows and remove it when plain Pi or direct subagent calls are enough.
 
 npm package: [`@agwab/pi-workflow`](https://www.npmjs.com/package/@agwab/pi-workflow)
 
 ## Installation
+
+Install the package. This downloads both the `/workflow` extension and the bundled `workflow-guide` skill:
 
 ```bash
 pi install npm:@agwab/pi-workflow
@@ -18,60 +20,42 @@ pi install npm:@agwab/pi-workflow
 
 Then reload Pi.
 
-Requires Node.js `>=22.19.0` on macOS or Linux. Native Windows is not supported; use WSL2.
-
-For local development, add this package as a Pi extension source and reload Pi:
+To update later:
 
 ```bash
-pi install /absolute/path/to/pi-workflow
+pi update npm:@agwab/pi-workflow
 ```
+
+Requires Node.js `>=22.19.0` on macOS or Linux. Native Windows is not supported; use WSL2.
 
 ## Quick usage
 
-List bundled starter workflows and project workflows:
+After installing and reloading Pi, call the bundled skill explicitly when you want to create or customize a workflow:
 
 ```text
-/workflow list
-```
-
-Ask Pi to recommend a workflow for a task:
-
-```text
-/workflow recommend "deeply research this repository and verify key claims"
-```
-
-Run a workflow by exact name:
-
-```text
-/workflow run deep-research "Research this repo and summarize the architecture tradeoffs."
+/skill:workflow-guide create a workflow for weekly release readiness.
+It should inspect docs, tests, recent changes, and produce a final checklist.
+Save it as a reusable project workflow.
 ```
 
 ```text
-/workflow run deep-review "Review the current diff from multiple angles."
+/skill:workflow-guide adapt deep-review for frontend accessibility and UX review.
+Save it as a reusable project workflow.
+```
+
+Then ask Pi to use a bundled or project workflow by name:
+
+```text
+Use the bundled deep-research workflow to research this repository and summarize the architecture tradeoffs.
 ```
 
 ```text
-/workflow run implement-loop "Implement the requested small fix, run validation, and stop when the check accepts."
+Use the bundled deep-review workflow to review the current diff from multiple angles.
 ```
 
-Inspect a run:
+If `/skill:workflow-guide` is not available, enable skill commands in Pi settings or use natural language: `Use workflow-guide to ...`.
 
-```text
-/workflow status
-/workflow status workflow_mq224pi8_775e71
-/workflow show workflow_mq224pi8_775e71
-/workflow logs workflow_mq224pi8_775e71 task-1 80
-/workflow wait workflow_mq224pi8_775e71 600000
-```
-
-For read-only terminal inspection outside the Pi command UI:
-
-```bash
-pi-workflow inspect workflow_mq224pi8_775e71
-pi-workflow inspect workflow_mq224pi8_775e71 --failures
-pi-workflow inspect workflow_mq224pi8_775e71 --results
-pi-workflow inspect workflow_mq224pi8_775e71 --json
-```
+`workflow-guide` is the recommended way to create or customize workflows: describe the outcome, the agents/tools you want to allow, and the review or validation steps you expect.
 
 ## What workflows do
 
@@ -85,7 +69,6 @@ Important rule: **stage order controls scheduling only**. A later plain `task` s
 | `parallel` | Static fan-out | fixed task list -> multiple subagents, bounded concurrency |
 | `foreach` | Dynamic fan-out | read an array from prior JSON output -> one subagent task per item |
 | `reduce` | Fan-in / synthesis | selected prior stage context -> one subagent |
-| `transform` | Deterministic local post-processing | selected prior structured outputs -> directory-local `.mjs` helper |
 | `loop` | Bounded repetition | repeat a fixed child stage subgraph until a deterministic stop condition |
 
 A minimal workflow definition:
@@ -153,63 +136,40 @@ The package includes a small starter set in [`workflows/`](./workflows/). These 
 
 Workflow names resolve from project `.pi/workflows/`, repository `workflows/`, bundled package workflows, and `~/.pi/agent/workflows/`; ambiguous names fail closed.
 
-| Workflow | Shape | Use when |
-|---|---|---|
-| `deep-research` | task -> foreach -> reduce -> foreach -> transform -> reduce | Source-backed research, claim verification, deterministic evidence gating, citations, or follow-up suggestions. |
-| `deep-review` | task -> foreach -> transform -> foreach -> transform -> reduce | Multi-lens review where findings should be challenged before final synthesis. |
-| `implement-loop` | loop: implement -> final check | Iterative implementation in one managed worktree until validation passes and review accepts. |
-| `test-repair-loop` | loop: repair -> final test-check | Focused repair loop for failing tests or explicit validation commands. |
+| Workflow | Use when |
+|---|---|
+| `deep-research` | Source-backed research, claim verification, citations, or follow-up suggestions. |
+| `deep-review` | Multi-lens review where findings should be challenged before final synthesis. |
+| `implement-loop` | Iterative implementation in one managed worktree until validation passes and review accepts. |
+| `test-repair-loop` | Focused repair loop for failing tests or explicit validation commands. |
 
 Additional workflow shapes are intentionally left to project-local workflows until their task fit is clear enough to bundle.
-
-## Commands
-
-Implemented Pi command surface:
-
-| Command | Purpose |
-|---|---|
-| `/workflow` or `/workflow help` | Show help. |
-| `/workflow list` | List discoverable workflows. |
-| `/workflow recommend "<request>"` | Score workflow catalog metadata for a request. |
-| `/workflow validate <workflow-name-or-path>` | Load, validate, and compile a workflow spec. |
-| `/workflow roles <workflow-name-or-path>` | Show compiled role context for a workflow. |
-| `/workflow agents` | List discoverable Pi agents and their tool/model ceilings. |
-| `/workflow run <workflow-name-or-path> "<task>"` | Start a workflow run for the runtime task. |
-| `/workflow status [run-id]` | Summarize all runs or one run. |
-| `/workflow show <run-id-or-workflow-name>` | Show run details for `workflow_*`, or raw workflow spec for a workflow name. |
-| `/workflow logs <run-id> [task-id] [lines]` | Show captured task logs. Defaults to `task-1`. |
-| `/workflow wait <run-id> [timeout-ms]` | Wait until a run reaches a terminal state. |
-
-There is not currently a `/workflow` board, `/workflow view`, `/workflow continue`, or `/workflow delegate` command. Use `status`, `show`, `logs`, `wait`, and `pi-workflow inspect` for inspection.
 
 ## Create or customize workflows with `workflow-guide`
 
 `pi-workflow` includes a `workflow-guide` skill for creating, modifying, and reviewing workflow definitions.
 
-Use it when you want to adapt a bundled starter or create a project-specific workflow. Project workflow definitions should be saved under:
-
-```text
-.pi/workflows/<name>.json
-```
+Use it when you want to adapt a bundled starter or create a project-specific workflow. Tell Pi what kind of workflow you want, what it should check, which agents it should use, and where to save it.
 
 Examples:
 
 ```text
-Use workflow-guide to create a workflow for weekly release readiness.
-It should inspect the repo, check docs/tests risk, and produce a final checklist.
+/skill:workflow-guide create a backend API review workflow.
+It should check concurrency, transaction safety, error handling, observability, and test risk.
+Save it as a reusable project workflow.
 ```
 
 ```text
-Use workflow-guide to customize deep-review for frontend accessibility and UX review.
-Save it as .pi/workflows/frontend-review.json.
+/skill:workflow-guide create a release readiness workflow.
+It should inspect the current diff, docs, tests, package metadata, and produce a launch checklist.
 ```
-
-Then validate and run:
 
 ```text
-/workflow validate .pi/workflows/frontend-review.json
-/workflow run frontend-review "Review the current diff for accessibility and UX regressions."
+/skill:workflow-guide customize deep-review for frontend accessibility and UX review.
+Save it as a reusable project workflow.
 ```
+
+After the workflow is created, ask Pi to use that workflow by name for future tasks.
 
 ## Safety notes
 
@@ -226,4 +186,3 @@ Then validate and run:
 
 - [`docs/usage.md`](./docs/usage.md) — command reference, install/development notes, workflow resolution, run artifacts, authoring rules, and release checks.
 - [`workflows/README.md`](./workflows/README.md) — bundled workflow notes.
-- [`docs/ab-execution-results.md`](./docs/ab-execution-results.md) — local diagnostic A/B evaluation summary.

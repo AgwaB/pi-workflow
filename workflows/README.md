@@ -62,4 +62,4 @@ export default async function helper({ sources, options, context }) {
 
 Helper refs are intentionally directory-local only. Allowed refs start with `./` and point to `.mjs` files inside the workflow bundle directory. Parent-directory refs, absolute paths, home-relative paths, protocol refs (`file://`, `https://`), and `npm:` refs are rejected. This is containment and reproducibility, not a sandbox: helper code still runs inside the workflow process.
 
-Deferred workflow candidates live under `internal/plans/deferred-workflows/` and are not bundled workflow surface.
+Additional workflow candidates are intentionally not bundled until their task fit is validated.
