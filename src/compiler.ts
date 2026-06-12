@@ -836,10 +836,11 @@ export async function compileWorkflow(
 			...fromDependencyKeys,
 			...afterDependencyKeys,
 		]);
-		const dependencyKeys =
-			explicitDependencyKeys.length > 0
-				? explicitDependencyKeys
-				: previousStageTaskKeys;
+		const hasExplicitDependencyIntent =
+			stage.from !== undefined || stage.after !== undefined;
+		const dependencyKeys = hasExplicitDependencyIntent
+			? explicitDependencyKeys
+			: previousStageTaskKeys;
 		const contextDependencyOverrides: Partial<CompiledTask> =
 			stage.after !== undefined
 				? { contextDependsOn: [...fromDependencyKeys] }

@@ -1424,6 +1424,35 @@ test("compiler separates order-only after dependencies from source context", asy
 	}
 });
 
+test("compiler treats empty after as an explicit parallel root", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const compiled = await compileWorkflow(
+			workflowSpec("unit-scout", {
+				workflow: {
+					stages: [
+						{ id: "a", type: "task", prompt: "A." },
+						{ id: "b", type: "task", after: [], prompt: "B." },
+						{ id: "c", type: "task", from: ["a", "b"], prompt: "C." },
+						{ id: "d", type: "task", prompt: "D." },
+					],
+				},
+			}),
+			{ cwd, task: "Check parallel roots" },
+		);
+
+		const byKey = Object.fromEntries(
+			compiled.tasks.map((task) => [task.key, task]),
+		);
+		assert.deepEqual(byKey["b.main"].dependsOn, []);
+		assert.deepEqual(byKey["c.main"].dependsOn, ["a.main", "b.main"]);
+		assert.deepEqual(byKey["d.main"].dependsOn, ["c.main"]);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("schema accepts object-form tools and rejects invalid tool objects", () => {
 	parseWorkflow(
 		workflowSpec("unit-scout", {
@@ -4018,6 +4047,67 @@ test("stage-first foreach blocks when maxItems is exceeded with output contract 
 		assert.equal(blocked.tasks[1].status, "blocked");
 		assert.match(blocked.tasks[1].lastMessage, /exceeding maxItems=1/);
 	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("stage-first scheduler launches empty-after roots in parallel", async () => {
+	const cwd = makeProject();
+	const prompts = [];
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		setSubagentApiForTests({
+			async runSubagent(options) {
+				prompts.push(String(options.task ?? ""));
+				return {
+					runId: `run_stub_${prompts.length}`,
+					attemptId: `attempt_stub_${prompts.length}`,
+					status: "running",
+				};
+			},
+			async getSubagentStatus() {
+				return null;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+		const spec = workflowSpec("unit-scout", {
+			workflow: {
+				stages: [
+					{ id: "a", type: "task", prompt: "A." },
+					{ id: "b", type: "task", after: [], prompt: "B." },
+					{ id: "c", type: "task", from: ["a", "b"], prompt: "C." },
+				],
+			},
+		});
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Check scheduling",
+		});
+		const { run } = await createStageFirstRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await writeRunRecord(cwd, run);
+
+		await scheduleRun(cwd, run.runId);
+
+		const updated = await readRunRecord(cwd, run.runId);
+		assert.equal(taskBySpec(updated, "a.main").status, "running");
+		assert.equal(taskBySpec(updated, "b.main").status, "running");
+		assert.equal(taskBySpec(updated, "c.main").status, "pending");
+		assert.equal(prompts.length, 2);
+		assert(prompts.some((prompt) => prompt.includes("stage=a")));
+		assert(prompts.some((prompt) => prompt.includes("stage=b")));
+		assert(!prompts.some((prompt) => prompt.includes("stage=c")));
+	} finally {
+		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });
