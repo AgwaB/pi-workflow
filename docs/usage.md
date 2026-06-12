@@ -268,11 +268,38 @@ Authoring checklist:
 6. Add JSON output contracts for model-produced data that later stages depend on.
 7. Run `/workflow validate <workflow-or-file>` before using the workflow.
 
+### Tool allowlists
+
+Workflow `tools` are still the child-worker allowlist. Entries can be strings:
+
+```json
+{ "tools": ["read", "grep", "fetch_content"] }
+```
+
+or object specs for custom/local providers:
+
+```json
+{
+  "tools": [
+    "read",
+    {
+      "name": "scrapling_fetch",
+      "extensions": ["packages/pi-scrapling-access"],
+      "classification": "read-only",
+      "optional": true,
+      "fallbackTools": ["fetch_content"]
+    }
+  ]
+}
+```
+
+Scope order is workflow-level `tools` < `defaults.tools` < stage `tools`; the narrowest defined list controls the final tool names, and selected string names can inherit broader object metadata. Agent frontmatter `tools` remain the hard ceiling, so workflow specs cannot grant tools an agent did not declare. Built-in classifications win for built-in tools. Custom tools without an explicit object `classification` stay blocked for explicit review. Avoid hardcoded machine-local paths in bundled/public workflows; project-local workflows may use local package refs intentionally when they are part of that project.
+
 ## Safety and execution model
 
 - `/workflow` is an orchestrator, not an OS sandbox.
 - Workers run through `@agwab/pi-subagent`; sandbox/worktree behavior follows that package.
-- Workflow tool lists can only narrow agent-declared tool authority.
+- Workflow tool lists can only narrow agent-declared tool authority, even when object-form provider metadata is used.
 - `readOnly: true` filters tools; it does not isolate the filesystem.
 - Write-capable workflows should use managed worktrees in git repositories.
 - In non-git workspaces with `worktreePolicy: "off"`, writes mutate the live directory.
@@ -281,7 +308,7 @@ Authoring checklist:
 
 ## Web tools
 
-Workflows that use `web_search`, `fetch_content`, or `get_search_content` require Pi web access tooling. The bundled worker launcher enables the public `npm:pi-web-access` package for those tools. If a custom workflow references a tool that is not available in your Pi setup, customize the workflow tool list and prompts, then validate the custom workflow before running it.
+Workflows that use `web_search`, `fetch_content`, `get_search_content`, or `code_search` require Pi web access tooling. The bundled worker launcher enables the public `npm:pi-web-access` package for those tools. Object-form custom tool `extensions` are merged with this built-in mapping and deduplicated for the subagent launch. If a custom workflow references a tool that is not available in your Pi setup, customize the workflow tool list and prompts, then validate the custom workflow before running it.
 
 ## Release checks
 

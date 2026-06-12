@@ -11,6 +11,7 @@ import {
   CompiledRole,
   CompiledTask,
   CompiledTaskSafety,
+  CompiledToolProvider,
   FastMode,
   WorkflowSpec,
   WorkflowTaskOutputSpec,
@@ -21,6 +22,8 @@ import {
   TaskCapability,
   ThinkingLevel,
   ValidationIssue,
+  WorkflowToolObjectSpec,
+  WorkflowToolSpec,
   WorktreePolicy,
 } from "./types.js";
 
@@ -28,6 +31,8 @@ const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls", "web_search", "fe
 const EXPLICIT_WRITE_TOOLS = new Set(["edit", "write"]);
 const MUTATION_CAPABLE_TOOLS = new Set(["bash"]);
 const DELEGATION_TOOLS = new Set(["skill_test_subagent", "workflow", "/workflow"]);
+const TOOL_CLASSIFICATION_VALUES = new Set(["read-only", "write-capable", "mutation-capable"]);
+const TOOL_NAME_PATTERN = /^[A-Za-z0-9_.:/-]+$/;
 const DEFAULT_MAX_RUNTIME_MS = 30 * 60 * 1000;
 const DEFAULT_MAX_CONCURRENCY = 16;
 
@@ -84,15 +89,21 @@ export async function compileWorkflowSpec(spec: WorkflowSpec, options: CompileOp
       }
     }
 
-    validateToolNames(task.tools, issues, `${taskPath}.tools`);
-    validateToolNames(spec.defaults?.tools, issues, "$.defaults.tools");
-    validateToolSubset(spec.defaults?.tools, agent, issues, "$.defaults.tools");
-    validateToolSubset(task.tools, agent, issues, `${taskPath}.tools`);
+    validateToolSpecs(spec.defaults?.tools, issues, "$.defaults.tools");
+    validateToolSpecs(task.tools, issues, `${taskPath}.tools`);
+    const toolSelection = resolveToolSelection([spec.defaults?.tools, task.tools], agent.tools);
+    const toolPath = task.tools !== undefined
+      ? `${taskPath}.tools`
+      : spec.defaults?.tools !== undefined
+        ? "$.defaults.tools"
+        : `${taskPath}.agent`;
+    validateToolSubset(toolSelection.tools, agent, issues, toolPath);
+    validateDelegationBoundary(toolSelection.tools, issues, toolPath);
 
-    const runtime = resolveRuntime(task, spec, agent);
+    const runtime = resolveRuntime(task, spec, agent, toolSelection);
     const worktreePolicy = task.worktreePolicy ?? spec.defaults?.worktreePolicy ?? "auto";
     const readOnlyDeclared = task.readOnly ?? agent.readOnly ?? false;
-    const safety = classifySafety(runtime.tools, readOnlyDeclared, worktreePolicy, runtime.approvalMode);
+    const safety = classifySafety(runtime.tools, runtime.toolProviders, readOnlyDeclared, worktreePolicy, runtime.approvalMode);
 
     if (readOnlyDeclared && runtime.tools?.some((tool) => EXPLICIT_WRITE_TOOLS.has(tool))) {
       issues.push({
@@ -240,13 +251,149 @@ function validateCwdInsideProject(cwd: string, projectRoot: string, path: string
   issues.push({ path, message: `cwd must stay inside project root: ${projectRoot}` });
 }
 
-function validateToolNames(tools: string[] | undefined, issues: ValidationIssue[], path: string): void {
-  if (!tools) return;
+interface ToolSelection {
+  tools?: string[];
+  toolProviders?: Record<string, CompiledToolProvider>;
+}
+
+function validateToolSpecs(tools: WorkflowToolSpec[] | undefined, issues: ValidationIssue[], path: string): void {
+  if (tools === undefined) return;
+  if (!Array.isArray(tools)) {
+    issues.push({ path, message: "must be an array" });
+    return;
+  }
+
+  const seen = new Set<string>();
   for (const [index, tool] of tools.entries()) {
-    if (!/^[A-Za-z0-9_.:/-]+$/.test(tool)) {
-      issues.push({ path: `${path}[${index}]`, message: `invalid tool name "${tool}"` });
+    const itemPath = `${path}[${index}]`;
+    const name = toolNameForSpec(tool);
+    if (name === undefined) {
+      issues.push({ path: itemPath, message: "must be a tool name string or object with a name" });
+      continue;
+    }
+    validateToolName(name, typeof tool === "string" ? itemPath : `${itemPath}.name`, issues);
+    if (seen.has(name)) issues.push({ path: itemPath, message: `duplicate value "${name}"` });
+    seen.add(name);
+
+    if (typeof tool !== "string") validateToolObjectMetadata(tool, itemPath, issues);
+  }
+}
+
+function validateToolObjectMetadata(tool: WorkflowToolObjectSpec, path: string, issues: ValidationIssue[]): void {
+  if (tool.extensions !== undefined) validateStringArrayValue(tool.extensions, `${path}.extensions`, issues, { validateToolNames: false });
+  if (tool.classification !== undefined && !TOOL_CLASSIFICATION_VALUES.has(tool.classification)) {
+    issues.push({ path: `${path}.classification`, message: "must be one of: read-only, write-capable, mutation-capable" });
+  }
+  if (tool.optional !== undefined && typeof tool.optional !== "boolean") {
+    issues.push({ path: `${path}.optional`, message: "must be a boolean" });
+  }
+  if (tool.fallbackTools !== undefined) validateStringArrayValue(tool.fallbackTools, `${path}.fallbackTools`, issues, { validateToolNames: true });
+}
+
+function validateStringArrayValue(value: unknown, path: string, issues: ValidationIssue[], options: { validateToolNames: boolean }): void {
+  if (!Array.isArray(value)) {
+    issues.push({ path, message: "must be an array" });
+    return;
+  }
+
+  const seen = new Set<string>();
+  for (const [index, item] of value.entries()) {
+    const itemPath = `${path}[${index}]`;
+    if (typeof item !== "string" || item.trim() === "") {
+      issues.push({ path: itemPath, message: "must be a non-empty string" });
+      continue;
+    }
+    if (options.validateToolNames) validateToolName(item, itemPath, issues);
+    if (seen.has(item)) issues.push({ path: itemPath, message: `duplicate value "${item}"` });
+    seen.add(item);
+  }
+}
+
+function validateToolName(tool: string, path: string, issues: ValidationIssue[]): void {
+  if (tool.trim() === "") {
+    issues.push({ path, message: "must be a non-empty string" });
+    return;
+  }
+  if (!TOOL_NAME_PATTERN.test(tool)) issues.push({ path, message: `invalid tool name "${tool}"` });
+}
+
+function resolveToolSelection(scopes: Array<WorkflowToolSpec[] | undefined>, fallbackTools: string[] | undefined): ToolSelection {
+  const metadata = new Map<string, CompiledToolProvider>();
+  let selectedTools: string[] | undefined;
+
+  for (const scope of scopes) {
+    if (scope === undefined || !Array.isArray(scope)) continue;
+    selectedTools = [];
+    for (const tool of scope) {
+      const name = toolNameForSpec(tool);
+      if (name === undefined) continue;
+      if (typeof tool !== "string") {
+        const provider = providerFromToolObject(tool);
+        if (provider) metadata.set(name, mergeToolProviders(metadata.get(name), provider));
+      }
+      selectedTools.push(name);
     }
   }
+
+  const tools = selectedTools ?? fallbackTools;
+  return { tools, toolProviders: providersForSelectedTools(tools, metadata) };
+}
+
+function toolNameForSpec(tool: WorkflowToolSpec): string | undefined {
+  if (typeof tool === "string") return tool;
+  if (tool && typeof tool === "object" && !Array.isArray(tool) && typeof (tool as { name?: unknown }).name === "string") {
+    return (tool as { name: string }).name;
+  }
+  return undefined;
+}
+
+function providerFromToolObject(tool: WorkflowToolObjectSpec): CompiledToolProvider | undefined {
+  const provider: CompiledToolProvider = {};
+  if (Array.isArray(tool.extensions)) provider.extensions = [...tool.extensions];
+  if (tool.classification !== undefined) provider.classification = tool.classification;
+  if (tool.optional !== undefined) provider.optional = tool.optional;
+  if (Array.isArray(tool.fallbackTools)) provider.fallbackTools = [...tool.fallbackTools];
+  return hasProviderMetadata(provider) ? provider : undefined;
+}
+
+function mergeToolProviders(base: CompiledToolProvider | undefined, override: CompiledToolProvider): CompiledToolProvider {
+  const merged: CompiledToolProvider = { ...(base ?? {}) };
+  if (override.extensions !== undefined) merged.extensions = [...override.extensions];
+  if (override.classification !== undefined) merged.classification = override.classification;
+  if (override.optional !== undefined) merged.optional = override.optional;
+  if (override.fallbackTools !== undefined) merged.fallbackTools = [...override.fallbackTools];
+  return merged;
+}
+
+function providersForSelectedTools(tools: string[] | undefined, metadata: Map<string, CompiledToolProvider>): Record<string, CompiledToolProvider> | undefined {
+  if (!tools || tools.length === 0) return undefined;
+  const providers: Record<string, CompiledToolProvider> = {};
+  for (const tool of tools) {
+    const provider = metadata.get(tool);
+    if (provider && hasProviderMetadata(provider)) providers[tool] = cloneToolProvider(provider);
+  }
+  return Object.keys(providers).length > 0 ? providers : undefined;
+}
+
+function cloneToolProvider(provider: CompiledToolProvider): CompiledToolProvider {
+  return {
+    ...(provider.extensions !== undefined ? { extensions: [...provider.extensions] } : {}),
+    ...(provider.classification !== undefined ? { classification: provider.classification } : {}),
+    ...(provider.optional !== undefined ? { optional: provider.optional } : {}),
+    ...(provider.fallbackTools !== undefined ? { fallbackTools: [...provider.fallbackTools] } : {}),
+  };
+}
+
+function hasProviderMetadata(provider: CompiledToolProvider): boolean {
+  return provider.extensions !== undefined || provider.classification !== undefined || provider.optional !== undefined || provider.fallbackTools !== undefined;
+}
+
+function filterToolSelection(selection: ToolSelection): ToolSelection {
+  const tools = filterDelegationTools(selection.tools);
+  return {
+    tools,
+    toolProviders: providersForSelectedTools(tools, new Map(Object.entries(selection.toolProviders ?? {}))),
+  };
 }
 
 function validateDelegationBoundary(tools: string[] | undefined, issues: ValidationIssue[], path: string): void {
@@ -267,32 +414,36 @@ function validateUnsupportedFastMode(fast: FastMode | undefined, issues: Validat
   if ((fast as string | undefined) === "on") issues.push({ path, message: "fast:on is not supported" });
 }
 
-function resolveRuntime(task: WorkflowTaskSpec, spec: WorkflowSpec, agent: AgentDefinition): {
+function resolveRuntime(task: WorkflowTaskSpec, spec: WorkflowSpec, agent: AgentDefinition, toolSelection: ToolSelection): {
   model?: string;
   thinking?: ThinkingLevel;
   fast?: FastMode;
   approvalMode: ApprovalMode;
   tools?: string[];
+  toolProviders?: Record<string, CompiledToolProvider>;
   maxRuntimeMs: number;
 } {
+  const filteredToolSelection = filterToolSelection(toolSelection);
   return {
     model: task.model ?? spec.defaults?.model ?? agent.model,
     thinking: task.thinking ?? spec.defaults?.thinking ?? agent.thinking,
     fast: task.fast ?? spec.defaults?.fast ?? agent.fast,
     approvalMode: task.approvalMode ?? spec.defaults?.approvalMode ?? agent.approvalMode ?? "non-interactive",
-    tools: filterDelegationTools(task.tools ?? spec.defaults?.tools ?? agent.tools),
+    tools: filteredToolSelection.tools,
+    ...(filteredToolSelection.toolProviders ? { toolProviders: filteredToolSelection.toolProviders } : {}),
     maxRuntimeMs: task.maxRuntimeMs ?? spec.defaults?.maxRuntimeMs ?? DEFAULT_MAX_RUNTIME_MS,
   };
 }
 
 function classifySafety(
   tools: string[] | undefined,
+  toolProviders: Record<string, CompiledToolProvider> | undefined,
   readOnlyDeclared: boolean,
   worktreePolicy: WorktreePolicy,
   approvalMode: ApprovalMode,
 ): CompiledTaskSafety {
-  const capability = classifyCapability(tools, readOnlyDeclared);
-  const sharedCwdSafe = Boolean(readOnlyDeclared && tools && tools.every((tool) => READ_ONLY_TOOLS.has(tool)));
+  const capability = classifyCapability(tools, toolProviders, readOnlyDeclared);
+  const sharedCwdSafe = Boolean(readOnlyDeclared && tools && tools.every((tool) => effectiveToolClassification(tool, toolProviders) === "read-only"));
   const requiresWorktree = worktreePolicy === "on" || (worktreePolicy === "auto" && !sharedCwdSafe);
 
   return {
@@ -301,21 +452,29 @@ function classifySafety(
     sharedCwdSafe,
     worktreePolicy,
     requiresWorktree,
-    permission: permissionPreview(tools, capability, approvalMode),
+    permission: permissionPreview(tools, toolProviders, capability, approvalMode),
   };
 }
 
-function classifyCapability(tools: string[] | undefined, readOnlyDeclared: boolean): TaskCapability {
+function classifyCapability(tools: string[] | undefined, toolProviders: Record<string, CompiledToolProvider> | undefined, readOnlyDeclared: boolean): TaskCapability {
   if (!tools || tools.length === 0) return "write-capable";
-  if (tools.some((tool) => MUTATION_CAPABLE_TOOLS.has(tool) || !READ_ONLY_TOOLS.has(tool) && !EXPLICIT_WRITE_TOOLS.has(tool))) {
+  if (tools.some((tool) => effectiveToolClassification(tool, toolProviders) === "mutation-capable" || effectiveToolClassification(tool, toolProviders) === undefined)) {
     return "mutation-capable";
   }
-  if (tools.some((tool) => EXPLICIT_WRITE_TOOLS.has(tool))) return "write-capable";
+  if (tools.some((tool) => effectiveToolClassification(tool, toolProviders) === "write-capable")) return "write-capable";
   return readOnlyDeclared ? "read-only" : "write-capable";
+}
+
+function effectiveToolClassification(tool: string, toolProviders: Record<string, CompiledToolProvider> | undefined): TaskCapability | undefined {
+  if (READ_ONLY_TOOLS.has(tool)) return "read-only";
+  if (EXPLICIT_WRITE_TOOLS.has(tool)) return "write-capable";
+  if (MUTATION_CAPABLE_TOOLS.has(tool)) return "mutation-capable";
+  return toolProviders?.[tool]?.classification;
 }
 
 function permissionPreview(
   tools: string[] | undefined,
+  toolProviders: Record<string, CompiledToolProvider> | undefined,
   capability: TaskCapability,
   approvalMode: ApprovalMode,
 ): PermissionPreview {
@@ -327,7 +486,7 @@ function permissionPreview(
     };
   }
 
-  const unknownTools = tools.filter((tool) => !READ_ONLY_TOOLS.has(tool) && !EXPLICIT_WRITE_TOOLS.has(tool) && !MUTATION_CAPABLE_TOOLS.has(tool));
+  const unknownTools = tools.filter((tool) => effectiveToolClassification(tool, toolProviders) === undefined);
   if (unknownTools.length > 0) {
     return {
       status: "blocked",
@@ -493,12 +652,20 @@ export async function compileWorkflow(spec: any, options: CompileOptions & { tas
   const tasks: any[] = [];
   const stageRecords: any[] = [];
   const issues: ValidationIssue[] = [];
+  const validatedAgentPaths = new Set<string>();
+  validateToolSpecs(spec.tools, issues, "$.tools");
+  validateToolSpecs(spec.defaults?.tools, issues, "$.defaults.tools");
   let previousStageTaskKeys: string[] = [];
   const stageTaskKeys = new Map<string, string[]>();
 
   const buildTask = async (stage: any, taskId: string, prompt: string, dependencyKeys: string[], overrides: (Partial<CompiledTask> & Record<string, unknown>) = {}): Promise<any> => {
     const stageAgentName = stage.agent ?? agentName;
     const stageAgent = stageAgentName === agentName ? defaultAgent : await loadStageFirstAgent(stageAgentName, options.cwd, agentCache, `$.workflow.stages.${stage.id}.agent`);
+    if (!validatedAgentPaths.has(stageAgent.sourcePath)) {
+      validateAgentRuntime(stageAgent, issues, `$.workflow.stages.${jsonKey(stage.id)}.agent`);
+      validatedAgentPaths.add(stageAgent.sourcePath);
+    }
+    validateToolSpecs(stage.tools, issues, `$.workflow.stages.${jsonKey(stage.id)}.tools`);
     const stageInject = stage.inject;
     const defaultInject = stage.type === "task";
     const injectTask = stageInject ?? defaultInject;
@@ -514,16 +681,28 @@ export async function compileWorkflow(spec: any, options: CompileOptions & { tas
       formatOutputTemplateSection(stageOutput),
       roleText || undefined,
     ].filter(Boolean).join("\n\n");
+    const toolSelection = resolveToolSelection([spec.tools, spec.defaults?.tools, stage.tools], stageAgent.tools);
+    const toolPath = stage.tools !== undefined
+      ? `$.workflow.stages.${jsonKey(stage.id)}.tools`
+      : spec.defaults?.tools !== undefined
+        ? "$.defaults.tools"
+        : spec.tools !== undefined
+          ? "$.tools"
+          : `$.workflow.stages.${jsonKey(stage.id)}.agent`;
+    validateToolSubset(toolSelection.tools, stageAgent, issues, toolPath);
+    validateDelegationBoundary(toolSelection.tools, issues, toolPath);
+    const filteredToolSelection = filterToolSelection(toolSelection);
     const runtime = {
       approvalMode: stage.approvalMode ?? spec.defaults?.approvalMode ?? "non-interactive",
       model: stage.model ?? defaultModel,
       thinking: stage.thinking ?? defaultThinking,
-      tools: stage.tools ?? spec.defaults?.tools ?? spec.tools ?? stageAgent.tools,
+      tools: filteredToolSelection.tools,
+      ...(filteredToolSelection.toolProviders ? { toolProviders: filteredToolSelection.toolProviders } : {}),
       maxRuntimeMs: stage.maxRuntimeMs ?? spec.defaults?.maxRuntimeMs ?? DEFAULT_MAX_RUNTIME_MS,
     };
     const readOnlyDeclared = stage.readOnly ?? spec.defaults?.readOnly ?? spec.readOnly ?? stageAgent.readOnly ?? false;
     const worktreePolicy = stage.worktreePolicy ?? spec.defaults?.worktreePolicy ?? spec.worktreePolicy ?? "auto";
-    const safety = classifySafety(runtime.tools, readOnlyDeclared, worktreePolicy, runtime.approvalMode);
+    const safety = classifySafety(runtime.tools, runtime.toolProviders, readOnlyDeclared, worktreePolicy, runtime.approvalMode);
 
     return {
       key,

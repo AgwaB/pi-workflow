@@ -4,6 +4,7 @@ import { extname } from "node:path";
 import {
   APPROVAL_MODES,
   FAST_MODES,
+  TOOL_CLASSIFICATIONS,
   WORKFLOW_TYPES,
   WorkflowMapItemSpec,
   WorkflowSpec,
@@ -63,6 +64,8 @@ const OUTPUT_ON_INVALID = new Set(["fail", "warn"]);
 const OUTPUT_CONTRACT_KEYS = new Set(["requiredPaths", "arrays", "maxStringChars"]);
 const SOURCE_CONTEXT_KEYS = new Set(["maxPreviewChars", "maxStructuredChars", "maxStructuredCharsByStage", "structuredOutputPathsByStage", "maxPacketChars"]);
 const TRANSFORM_STAGE_KEYS = new Set(["id", "type", "from", "helper", "options", "sourcePolicy"]);
+const TOOL_OBJECT_KEYS = new Set(["name", "extensions", "classification", "optional", "fallbackTools"]);
+const TOOL_NAME_PATTERN = /^[A-Za-z0-9_.:/-]+$/;
 
 export interface LoadedWorkflowSpec extends ResolvedWorkflowSpecRef {
   spec: WorkflowSpec;
@@ -131,7 +134,7 @@ function parseDefaults(value: unknown, path: string, issues: ValidationIssue[]):
   optionalEnum(defaults, "thinking", THINKING_LEVELS, `${path}.thinking`, issues);
   optionalEnum(defaults, "fast", FAST_MODES, `${path}.fast`, issues);
   optionalEnum(defaults, "approvalMode", APPROVAL_MODES, `${path}.approvalMode`, issues);
-  optionalStringArray(defaults, "tools", `${path}.tools`, issues);
+  optionalWorkflowToolArray(defaults, "tools", `${path}.tools`, issues);
   optionalEnum(defaults, "worktreePolicy", WORKTREE_POLICIES, `${path}.worktreePolicy`, issues);
 
   if (defaults.maxConcurrency !== undefined) {
@@ -301,7 +304,7 @@ function parseTask(
   optionalEnum(task, "thinking", THINKING_LEVELS, `${path}.thinking`, issues);
   optionalEnum(task, "fast", FAST_MODES, `${path}.fast`, issues);
   optionalEnum(task, "approvalMode", APPROVAL_MODES, `${path}.approvalMode`, issues);
-  optionalStringArray(task, "tools", `${path}.tools`, issues);
+  optionalWorkflowToolArray(task, "tools", `${path}.tools`, issues);
   optionalBoolean(task, "readOnly", `${path}.readOnly`, issues);
   optionalEnum(task, "worktreePolicy", WORKTREE_POLICIES, `${path}.worktreePolicy`, issues);
   if (task.output !== undefined) parseOutput(task.output, `${path}.output`, issues);
@@ -466,6 +469,77 @@ function optionalPositiveInteger(object: Record<string, unknown>, key: string, p
   }
 }
 
+function optionalWorkflowToolArray(object: Record<string, unknown>, key: string, path: string, issues: ValidationIssue[]): void {
+  if (object[key] === undefined) return;
+  validateWorkflowToolArray(object[key], path, issues);
+}
+
+function validateWorkflowToolArray(value: unknown, path: string, issues: ValidationIssue[]): void {
+  if (!Array.isArray(value)) {
+    issues.push({ path, message: "must be an array" });
+    return;
+  }
+
+  const seen = new Set<string>();
+  value.forEach((item, index) => {
+    const itemPath = `${path}[${index}]`;
+    const name = validateWorkflowToolEntry(item, itemPath, issues);
+    if (name === undefined) return;
+    if (seen.has(name)) issues.push({ path: itemPath, message: `duplicate value "${name}"` });
+    seen.add(name);
+  });
+}
+
+function validateWorkflowToolEntry(item: unknown, path: string, issues: ValidationIssue[]): string | undefined {
+  if (typeof item === "string") {
+    validateToolName(item, path, issues);
+    return item;
+  }
+
+  const tool = objectAt(item, path, issues);
+  if (!tool) return undefined;
+
+  rejectUnknownKeys(tool, TOOL_OBJECT_KEYS, path, issues);
+  requiredString(tool, "name", `${path}.name`, issues);
+  if (typeof tool.name !== "string") return undefined;
+  validateToolName(tool.name, `${path}.name`, issues);
+
+  optionalStringArray(tool, "extensions", `${path}.extensions`, issues);
+  optionalEnum(tool, "classification", TOOL_CLASSIFICATIONS, `${path}.classification`, issues);
+  optionalBoolean(tool, "optional", `${path}.optional`, issues);
+  optionalToolNameArray(tool, "fallbackTools", `${path}.fallbackTools`, issues);
+
+  return tool.name;
+}
+
+function optionalToolNameArray(object: Record<string, unknown>, key: string, path: string, issues: ValidationIssue[]): void {
+  if (object[key] === undefined) return;
+  if (!Array.isArray(object[key])) {
+    issues.push({ path, message: "must be an array" });
+    return;
+  }
+
+  const seen = new Set<string>();
+  (object[key] as unknown[]).forEach((item, index) => {
+    const itemPath = `${path}[${index}]`;
+    if (typeof item !== "string") {
+      issues.push({ path: itemPath, message: "must be a non-empty string" });
+      return;
+    }
+    validateToolName(item, itemPath, issues);
+    if (seen.has(item)) issues.push({ path: itemPath, message: `duplicate value "${item}"` });
+    seen.add(item);
+  });
+}
+
+function validateToolName(value: string, path: string, issues: ValidationIssue[]): void {
+  if (value.trim() === "") {
+    issues.push({ path, message: "must be a non-empty string" });
+    return;
+  }
+  if (!TOOL_NAME_PATTERN.test(value)) issues.push({ path, message: `invalid tool name "${value}"` });
+}
+
 function optionalStringArray(object: Record<string, unknown>, key: string, path: string, issues: ValidationIssue[]): void {
   if (object[key] === undefined) return;
   if (!Array.isArray(object[key])) {
@@ -558,6 +632,10 @@ export function parseStageFirstWorkflowSpec(value: unknown): any {
   if (spec.fast === "on") issues.push({ path: "$.fast", message: "fast:on is not supported" });
   if (spec.defaults?.fast === "on") issues.push({ path: "$.defaults.fast", message: "fast:on is not supported" });
   if (spec.outputTemplates !== undefined) parseOutputTemplates(spec.outputTemplates, "$.outputTemplates", issues);
+  if (spec.tools !== undefined) optionalWorkflowToolArray(spec, "tools", "$.tools", issues);
+  if (spec.defaults && typeof spec.defaults === "object" && !Array.isArray(spec.defaults) && spec.defaults.tools !== undefined) {
+    optionalWorkflowToolArray(spec.defaults, "tools", "$.defaults.tools", issues);
+  }
 
   const stageIds = new Set<string>();
   for (const [index, stageValue] of stages.entries()) {
@@ -592,6 +670,7 @@ function requireStageFirstObject(value: unknown, path: string): Record<string, u
 function validateStageFirstStage(stage: Record<string, unknown>, path: string): void {
   if (stage.continuation !== undefined) throw new WorkflowValidationError([{ path: `${path}.continuation`, message: "unknown field" }]);
   if (stage.fast === "on") throw new WorkflowValidationError([{ path: `${path}.fast`, message: '"on" is not supported for workflow stages' }]);
+  if (stage.tools !== undefined) validateStageFirstWorkflowToolArray(stage.tools, `${path}.tools`);
   if (stage.output !== undefined) validateStageFirstOutput(stage.output, `${path}.output`);
   if (stage.sourceContext !== undefined) validateStageFirstSourceContext(stage.sourceContext, `${path}.sourceContext`);
 
@@ -638,6 +717,12 @@ function validateStageFirstStringArray(value: unknown, path: string): void {
     if (seen.has(item)) throw new WorkflowValidationError([{ path: `${path}[${index}]`, message: `duplicate value "${item}"` }]);
     seen.add(item);
   }
+}
+
+function validateStageFirstWorkflowToolArray(value: unknown, path: string): void {
+  const issues: ValidationIssue[] = [];
+  validateWorkflowToolArray(value, path, issues);
+  if (issues.length > 0) throw new WorkflowValidationError([issues[0]!]);
 }
 
 function validateStageFirstLoopStage(stage: Record<string, unknown>, path: string): void {

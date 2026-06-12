@@ -2,6 +2,7 @@ export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhig
 export const FAST_MODES = ["inherit", "off"] as const;
 export const APPROVAL_MODES = ["non-interactive", "on-request"] as const;
 export const WORKTREE_POLICIES = ["auto", "on", "off"] as const;
+export const TOOL_CLASSIFICATIONS = ["read-only", "write-capable", "mutation-capable"] as const;
 export const WORKFLOW_TYPES = ["single", "parallel", "chain", "dag", "tree", "retry"] as const;
 export const STAGE_FIRST_RUN_TYPE = "workflow-v1" as const;
 
@@ -9,6 +10,7 @@ export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 export type FastMode = (typeof FAST_MODES)[number];
 export type ApprovalMode = (typeof APPROVAL_MODES)[number];
 export type WorktreePolicy = (typeof WORKTREE_POLICIES)[number];
+export type ToolClassification = (typeof TOOL_CLASSIFICATIONS)[number];
 export type WorkflowType = (typeof WORKFLOW_TYPES)[number];
 export type CompiledWorkflowType = WorkflowType | typeof STAGE_FIRST_RUN_TYPE;
 
@@ -22,13 +24,30 @@ export interface WorkflowBackendHandle {
   [key: string]: unknown;
 }
 
+export interface WorkflowToolObjectSpec {
+  name: string;
+  extensions?: string[];
+  classification?: ToolClassification;
+  optional?: boolean;
+  fallbackTools?: string[];
+}
+
+export type WorkflowToolSpec = string | WorkflowToolObjectSpec;
+
+export interface CompiledToolProvider {
+  extensions?: string[];
+  classification?: ToolClassification;
+  optional?: boolean;
+  fallbackTools?: string[];
+}
+
 export interface WorkflowDefaults {
   cwd?: string;
   model?: string;
   thinking?: ThinkingLevel;
   fast?: FastMode;
   approvalMode?: ApprovalMode;
-  tools?: string[];
+  tools?: WorkflowToolSpec[];
   worktreePolicy?: WorktreePolicy;
   maxConcurrency?: number;
   maxRuntimeMs?: number;
@@ -53,7 +72,7 @@ export interface WorkflowTaskSpec {
   thinking?: ThinkingLevel;
   fast?: FastMode;
   approvalMode?: ApprovalMode;
-  tools?: string[];
+  tools?: WorkflowToolSpec[];
   readOnly?: boolean;
   worktreePolicy?: WorktreePolicy;
   maxRuntimeMs?: number;
@@ -130,7 +149,7 @@ export interface CompiledRole {
   excludedSections: string[];
 }
 
-export type TaskCapability = "read-only" | "write-capable" | "mutation-capable";
+export type TaskCapability = ToolClassification;
 
 export interface PermissionPreview {
   status: "pending" | "blocked";
@@ -144,6 +163,7 @@ export interface CompiledTaskRuntime {
   fast?: FastMode;
   approvalMode: ApprovalMode;
   tools?: string[];
+  toolProviders?: Record<string, CompiledToolProvider>;
   maxRuntimeMs?: number;
 }
 
