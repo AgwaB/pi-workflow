@@ -229,6 +229,88 @@ function taskBySpec(run, specId) {
 	return task;
 }
 
+function captureSubagentPrompts(prompts = []) {
+	let launchCount = 0;
+	setSubagentApiForTests({
+		async runSubagent(options) {
+			launchCount += 1;
+			prompts.push(String(options.task ?? ""));
+			return {
+				runId: `run_stub_${launchCount}`,
+				attemptId: `attempt_stub_${launchCount}`,
+				status: "running",
+			};
+		},
+		async getSubagentStatus() {
+			return null;
+		},
+		async reconcileSubagentRun() {
+			return {};
+		},
+		async interruptSubagent() {
+			return {};
+		},
+	});
+	return prompts;
+}
+
+function dagContainerRuntimeSpec({
+	finalSourcePolicy,
+	reportSourcePolicy,
+} = {}) {
+	return workflowSpec("unit-scout", {
+		workflow: {
+			stages: [
+				{
+					id: "setup",
+					type: "task",
+					output: { format: "json" },
+					prompt: "Setup.",
+				},
+				{
+					id: "analysis",
+					type: "dag",
+					from: "setup",
+					outputFrom: "final",
+					stages: [
+						{
+							id: "scan",
+							type: "task",
+							output: { format: "json" },
+							prompt: "Scan.",
+						},
+						{
+							id: "review",
+							type: "task",
+							after: "scan",
+							prompt: "Review.",
+						},
+						{
+							id: "final",
+							type: "reduce",
+							from: ["scan", "review"],
+							output: { format: "json" },
+							prompt: "Finalize.",
+							...(finalSourcePolicy
+								? { sourcePolicy: finalSourcePolicy }
+								: {}),
+						},
+					],
+				},
+				{
+					id: "report",
+					type: "reduce",
+					from: "analysis",
+					prompt: "Report.",
+					...(reportSourcePolicy
+						? { sourcePolicy: reportSourcePolicy }
+						: {}),
+				},
+			],
+		},
+	});
+}
+
 test("shared status helpers derive canonical task summaries", () => {
 	assert.deepEqual(
 		summarizeTasks([
@@ -4638,6 +4720,300 @@ test("stage-first after dependencies do not inject order-only source context", a
 		assert.match(mixedPrompt, /# Source Stage Context/);
 		assert.match(mixedPrompt, /from-source-content/);
 		assert.doesNotMatch(mixedPrompt, /after-source-content/);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("stage-first diamond fan-out launches branches in parallel and joins context", async () => {
+	const cwd = makeProject();
+	const prompts = [];
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		captureSubagentPrompts(prompts);
+		const spec = workflowSpec("unit-scout", {
+			workflow: {
+				stages: [
+					{
+						id: "a",
+						type: "task",
+						output: { format: "json" },
+						prompt: "A.",
+					},
+					{
+						id: "b",
+						type: "task",
+						from: "a",
+						output: { format: "json" },
+						prompt: "B.",
+					},
+					{
+						id: "c",
+						type: "task",
+						from: "a",
+						output: { format: "json" },
+						prompt: "C.",
+					},
+					{
+						id: "d",
+						type: "reduce",
+						from: ["b", "c"],
+						prompt: "D.",
+					},
+				],
+			},
+		});
+		const compiled = await compileWorkflow(spec, { cwd, task: "Check diamond" });
+		const { run } = await createStageFirstRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await writeRunRecord(cwd, run);
+
+		await scheduleRun(cwd, run.runId);
+		let current = await readRunRecord(cwd, run.runId);
+		assert.equal(taskBySpec(current, "a.main").status, "running");
+		assert.equal(taskBySpec(current, "b.main").status, "pending");
+		assert.equal(taskBySpec(current, "c.main").status, "pending");
+		assert.equal(taskBySpec(current, "d.main").status, "pending");
+		assert.equal(prompts.length, 1);
+
+		await completeTask(cwd, taskBySpec(current, "a.main"), {
+			marker: "a-output",
+		});
+		await writeRunRecord(cwd, current);
+
+		await scheduleRun(cwd, run.runId);
+		current = await readRunRecord(cwd, run.runId);
+		assert.equal(taskBySpec(current, "b.main").status, "running");
+		assert.equal(taskBySpec(current, "c.main").status, "running");
+		assert.equal(taskBySpec(current, "d.main").status, "pending");
+		assert.equal(prompts.length, 3);
+		assert(prompts.some((prompt) => prompt.includes("stage=b")));
+		assert(prompts.some((prompt) => prompt.includes("stage=c")));
+
+		await completeTask(cwd, taskBySpec(current, "b.main"), {
+			marker: "b-output",
+		});
+		await completeTask(cwd, taskBySpec(current, "c.main"), {
+			marker: "c-output",
+		});
+		await writeRunRecord(cwd, current);
+
+		await scheduleRun(cwd, run.runId);
+		current = await readRunRecord(cwd, run.runId);
+		assert.equal(taskBySpec(current, "d.main").status, "running");
+		const joinPrompt = prompts.find((prompt) => prompt.includes("stage=d"));
+		assert(joinPrompt);
+		assert.match(joinPrompt, /# Source Stage Context/);
+		assert.match(joinPrompt, /b-output/);
+		assert.match(joinPrompt, /c-output/);
+		assert.doesNotMatch(joinPrompt, /a-output/);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("stage-first dag container waits for outer sources and skips strict dependents", async () => {
+	const cwd = makeProject();
+	const prompts = [];
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		captureSubagentPrompts(prompts);
+		const spec = dagContainerRuntimeSpec();
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Check strict container",
+		});
+		const { run } = await createStageFirstRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await writeRunRecord(cwd, run);
+
+		await scheduleRun(cwd, run.runId);
+		let current = await readRunRecord(cwd, run.runId);
+		assert.equal(taskBySpec(current, "setup.main").status, "running");
+		assert.equal(taskBySpec(current, "analysis.scan.main").status, "pending");
+		assert(!prompts.some((prompt) => prompt.includes("stage=analysis.scan")));
+
+		await completeTask(cwd, taskBySpec(current, "setup.main"), {
+			marker: "setup-output",
+		});
+		await writeRunRecord(cwd, current);
+
+		await scheduleRun(cwd, run.runId);
+		current = await readRunRecord(cwd, run.runId);
+		assert.equal(taskBySpec(current, "analysis.scan.main").status, "running");
+		assert.equal(taskBySpec(current, "analysis.review.main").status, "pending");
+		assert.equal(taskBySpec(current, "analysis.final.main").status, "pending");
+		assert.equal(taskBySpec(current, "report.main").status, "pending");
+		const scanPrompt = prompts.find((prompt) =>
+			prompt.includes("stage=analysis.scan"),
+		);
+		assert(scanPrompt);
+		assert.match(scanPrompt, /# Source Stage Context/);
+		assert.match(scanPrompt, /setup-output/);
+
+		await completeTask(
+			cwd,
+			taskBySpec(current, "analysis.scan.main"),
+			{ marker: "scan-failed-output" },
+			"failed",
+		);
+		await writeRunRecord(cwd, current);
+
+		await scheduleRun(cwd, run.runId);
+		current = await readRunRecord(cwd, run.runId);
+		assert.equal(taskBySpec(current, "analysis.scan.main").status, "failed");
+		assert.equal(taskBySpec(current, "analysis.review.main").status, "skipped");
+		assert.equal(taskBySpec(current, "analysis.final.main").status, "skipped");
+		assert.equal(taskBySpec(current, "report.main").status, "skipped");
+		assert.equal(current.status, "failed");
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("stage-first partial dag join proceeds and exposes outputFrom downstream", async () => {
+	const cwd = makeProject();
+	const prompts = [];
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		captureSubagentPrompts(prompts);
+		const spec = dagContainerRuntimeSpec({
+			finalSourcePolicy: "partial",
+			reportSourcePolicy: "partial",
+		});
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Check partial container",
+		});
+		const { run } = await createStageFirstRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await writeRunRecord(cwd, run);
+
+		await scheduleRun(cwd, run.runId);
+		let current = await readRunRecord(cwd, run.runId);
+		await completeTask(cwd, taskBySpec(current, "setup.main"), {
+			marker: "setup-output",
+		});
+		await writeRunRecord(cwd, current);
+
+		await scheduleRun(cwd, run.runId);
+		current = await readRunRecord(cwd, run.runId);
+		await completeTask(
+			cwd,
+			taskBySpec(current, "analysis.scan.main"),
+			{ marker: "scan-failed-output" },
+			"failed",
+		);
+		await writeRunRecord(cwd, current);
+
+		await scheduleRun(cwd, run.runId);
+		current = await readRunRecord(cwd, run.runId);
+		assert.equal(taskBySpec(current, "analysis.scan.main").status, "failed");
+		assert.equal(taskBySpec(current, "analysis.review.main").status, "skipped");
+		assert.equal(taskBySpec(current, "analysis.final.main").status, "running");
+		assert.equal(taskBySpec(current, "report.main").status, "pending");
+		const finalPrompt = prompts.find((prompt) =>
+			prompt.includes("stage=analysis.final"),
+		);
+		assert(finalPrompt);
+		assert.match(finalPrompt, /# Source Stage Context/);
+		assert.match(finalPrompt, /scan-failed-output/);
+
+		await completeTask(cwd, taskBySpec(current, "analysis.final.main"), {
+			marker: "final-output",
+		});
+		await writeRunRecord(cwd, current);
+
+		await scheduleRun(cwd, run.runId);
+		current = await readRunRecord(cwd, run.runId);
+		assert.equal(taskBySpec(current, "report.main").status, "running");
+		const reportPrompt = prompts.find((prompt) =>
+			prompt.includes("stage=report"),
+		);
+		assert(reportPrompt);
+		assert.match(reportPrompt, /# Source Stage Context/);
+		assert.match(reportPrompt, /final-output/);
+		assert.doesNotMatch(reportPrompt, /scan-failed-output/);
+		assert.doesNotMatch(reportPrompt, /analysis.scan.main/);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("resumeRun resets failed dag container children and relaunches roots", async () => {
+	const cwd = makeProject();
+	const prompts = [];
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		captureSubagentPrompts(prompts);
+		const spec = dagContainerRuntimeSpec();
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Resume container",
+		});
+		const { run } = await createStageFirstRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await writeRunRecord(cwd, run);
+
+		await scheduleRun(cwd, run.runId);
+		let current = await readRunRecord(cwd, run.runId);
+		await completeTask(cwd, taskBySpec(current, "setup.main"), {
+			marker: "setup-output",
+		});
+		await writeRunRecord(cwd, current);
+
+		await scheduleRun(cwd, run.runId);
+		current = await readRunRecord(cwd, run.runId);
+		await completeTask(
+			cwd,
+			taskBySpec(current, "analysis.scan.main"),
+			{ marker: "scan-failed-output" },
+			"failed",
+		);
+		await writeRunRecord(cwd, current);
+
+		await scheduleRun(cwd, run.runId);
+		const failed = await readRunRecord(cwd, run.runId);
+		assert.equal(failed.status, "failed");
+		const expectedResetTaskIds = [
+			"analysis.scan.main",
+			"analysis.review.main",
+			"analysis.final.main",
+			"report.main",
+		].map((specId) => taskBySpec(failed, specId).taskId);
+
+		prompts.length = 0;
+		const { run: resumed, resetTaskIds } = await resumeRun(cwd, run.runId);
+		assert.deepEqual(resetTaskIds, expectedResetTaskIds);
+		assert.equal(resumed.status, "running");
+		assert.equal(taskBySpec(resumed, "setup.main").status, "completed");
+		assert.equal(taskBySpec(resumed, "analysis.scan.main").status, "running");
+		assert.equal(taskBySpec(resumed, "analysis.review.main").status, "pending");
+		assert.equal(taskBySpec(resumed, "analysis.final.main").status, "pending");
+		assert.equal(taskBySpec(resumed, "report.main").status, "pending");
+		assert.equal(prompts.length, 1);
+		assert.match(prompts[0], /stage=analysis\.scan/);
+		assert.match(prompts[0], /setup-output/);
 	} finally {
 		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
