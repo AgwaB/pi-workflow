@@ -6,7 +6,7 @@
 //      normalize-claims.claimInventory.verificationCandidates by id (the
 //      verifier echo is not trusted for identity fields),
 //   2. applies deterministic evidence gates (verified requires structured,
-//      URL-backed evidence; exact quantitative claims require a source URL),
+//      source-backed evidence; exact quantitative claims require a source ref),
 //   3. partitions claims by final status and counts them so the synthesis
 //      stage consumes code-computed buckets instead of re-deriving them,
 //   4. cross-checks plan.factSlots against normalize-claims.factSlotCoverage
@@ -41,16 +41,35 @@ function collectUrls(value, urls = new Set()) {
   return urls;
 }
 
-// Structured evidence check: at least one evidence row carrying both a URL and
-// a quote/excerpt. Unlike a keyword scan over the serialized claim, this cannot
-// be satisfied by merely mentioning a URL in prose.
+function looksLikeLocalSourceRef(value) {
+  const text = String(value ?? '').trim();
+  return /^(?:\.?[\w.-]+\/)?[\w./-]+\.(?:md|json|ya?ml|ts|tsx|js|mjs|cjs|py|go|rs|zig|txt)$/i.test(text);
+}
+
+function collectEvidenceRefs(claim) {
+  const refs = new Set([...collectUrls(claim)]);
+  for (const row of Array.isArray(claim?.evidence) ? claim.evidence : []) {
+    if (!row || typeof row !== 'object') continue;
+    for (const value of [row.url, row.source, row.file, row.path]) {
+      if (typeof value !== 'string') continue;
+      if (/^https?:\/\//i.test(value) || looksLikeLocalSourceRef(value)) refs.add(value.trim());
+    }
+  }
+  return refs;
+}
+
+// Structured evidence check: at least one evidence row carrying both a source
+// reference (HTTP URL or local repository file path) and a quote/excerpt. Unlike
+// a keyword scan over the serialized claim, this cannot be satisfied by merely
+// mentioning a URL/path in prose.
 function hasFetchedEvidence(claim) {
   const rows = Array.isArray(claim?.evidence) ? claim.evidence : [];
   return rows.some((row) => {
     if (!row || typeof row !== 'object') return false;
-    const url = typeof row.url === 'string' && /^https?:\/\//.test(row.url);
+    const refs = [row.url, row.source, row.file, row.path].filter((value) => typeof value === 'string');
+    const sourceRef = refs.some((value) => /^https?:\/\//i.test(value) || looksLikeLocalSourceRef(value));
     const quote = typeof row.quote === 'string' && row.quote.trim().length > 0;
-    return url && quote;
+    return sourceRef && quote;
   });
 }
 
@@ -124,10 +143,10 @@ export default async function claimEvidenceGate({ sources, options = {} }) {
   for (const { sourceId, claim } of verifierClaims) {
     if (!claim || typeof claim !== 'object') continue;
     gateSummary.total += 1;
-    const urls = [...collectUrls(claim)];
+    const sourceRefs = [...collectEvidenceRefs(claim)];
     const exactQuantitative = hasExactQuantitativeClaim(claim);
     const fetched = hasFetchedEvidence(claim);
-    let next = { ...claim, sourceId, sourceUrls: urls };
+    let next = { ...claim, sourceId, sourceUrls: sourceRefs };
 
     // Identity join: the normalizer's candidate record is authoritative for
     // claim id, claim text, and factSlotIds. Verifier echoes drift.
@@ -144,10 +163,10 @@ export default async function claimEvidenceGate({ sources, options = {} }) {
 
     const verdict = verdictOf(next);
     if (verdict === 'verified' && options.requireFetchedEvidenceForVerified !== false && !fetched) {
-      next = withVerdict(next, 'partially_supported', 'verified claim lacked structured evidence rows with both url and quote');
+      next = withVerdict(next, 'partially_supported', 'verified claim lacked structured evidence rows with both source reference and quote');
     }
-    if (verdictOf(next) === 'verified' && options.downgradeExactQuantitativeWithoutSource !== false && exactQuantitative && urls.length === 0) {
-      next = withVerdict(next, 'partially_supported', 'exact quantitative claim lacked source URL evidence');
+    if (verdictOf(next) === 'verified' && options.downgradeExactQuantitativeWithoutSource !== false && exactQuantitative && sourceRefs.length === 0) {
+      next = withVerdict(next, 'partially_supported', 'exact quantitative claim lacked structured source reference evidence');
     }
 
     if (verdictOf(next) !== verdict) {
@@ -155,7 +174,7 @@ export default async function claimEvidenceGate({ sources, options = {} }) {
       remainingGaps.push({
         claimId: next.id ?? next.claimId,
         evidenceState: 'insufficient_for_verified',
-        sourceUrls: urls,
+        sourceUrls: sourceRefs,
         nextStep: 'Fetch or inspect primary source evidence for the exact claim before using it as verified.',
       });
     } else {

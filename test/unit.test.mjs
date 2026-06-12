@@ -5115,6 +5115,7 @@ test("deep-research claim-evidence-gate enforces structured evidence, rejoins id
 					verificationCandidates: [
 						{ id: "claim-001", claim: "Original claim text", factSlotIds: ["slot-001"] },
 						{ id: "claim-002", claim: "Costs 5 usd per 1M tokens", factSlotIds: ["slot-002"] },
+						{ id: "claim-003", claim: "Local docs claim", factSlotIds: ["slot-001"] },
 					],
 				},
 				factSlotCoverage: [{ slotId: "slot-001" }, { slotId: "slot-002" }],
@@ -5132,15 +5133,21 @@ test("deep-research claim-evidence-gate enforces structured evidence, rejoins id
 				// URL mentioned in prose but no structured url+quote row: must downgrade.
 				evidence: [{ source: "see https://example.test/blog" }],
 			},
+			"verify-claims.claim-003": {
+				id: "claim-003",
+				claim: "Local docs claim",
+				status: "verified",
+				evidence: [{ url: "docs/usage.md", quote: "local file evidence" }],
+			},
 		},
 		options: {
 			requireFetchedEvidenceForVerified: true,
 			downgradeExactQuantitativeWithoutSource: true,
 		},
 	});
-	assert.deepEqual(out.statusPartitions.verified, ["claim-001"]);
+	assert.deepEqual(out.statusPartitions.verified, ["claim-001", "claim-003"]);
 	assert.deepEqual(out.statusPartitions.partiallySupported, ["claim-002"]);
-	assert.equal(out.verdictCounts.verified, 1);
+	assert.equal(out.verdictCounts.verified, 2);
 	// Identity rejoined from the normalizer, not the verifier echo.
 	assert.equal(out.auditedClaims[0].claim, "Original claim text");
 	assert.equal(out.gateSummary.identityRejoined, 1);
@@ -5148,6 +5155,6 @@ test("deep-research claim-evidence-gate enforces structured evidence, rejoins id
 	assert.deepEqual(out.slotCoverageCheck.droppedSlotIds, ["slot-003"]);
 	assert.ok(out.remainingGaps.some((g) => g.slotId === "slot-003"));
 	// Compact digest exists for source-context budgeting.
-	assert.equal(out.claimDigests.length, 2);
+	assert.equal(out.claimDigests.length, 3);
 	assert.ok(!("evidence" in out.claimDigests[0]));
 });
