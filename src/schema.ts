@@ -653,6 +653,7 @@ export function parseStageFirstWorkflowSpec(value: unknown): any {
 			validateStageFirstSupportStage(stage, stagePath, issues);
 		if (stage.type === "loop") validateStageFirstLoopStage(stage, stagePath);
 	}
+	validateStageFirstDagGraph(stages, issues);
 
 	if (issues.length > 0) throw new WorkflowValidationError(issues);
 	return spec;
@@ -1145,6 +1146,138 @@ function validateStageFirstUntilCondition(
 			},
 		]);
 	}
+}
+
+type StageFirstDagRef = { stageId: string; path: string };
+type StageFirstDagEdge = { toId: string; path: string };
+
+function validateStageFirstDagGraph(
+	stages: unknown[],
+	issues: ValidationIssue[],
+): void {
+	const stageIndexById = new Map<string, number>();
+	for (const [index, stageValue] of stages.entries()) {
+		const stage = stageValue as Record<string, unknown>;
+		if (typeof stage.id === "string" && stage.id.trim() !== "")
+			stageIndexById.set(stage.id, index);
+	}
+
+	const stageIds = [...stageIndexById.keys()];
+	const adjacency = new Map<string, StageFirstDagEdge[]>();
+	for (const [index, stageValue] of stages.entries()) {
+		const stage = stageValue as Record<string, unknown>;
+		if (typeof stage.id !== "string" || stage.id.trim() === "") continue;
+		for (const ref of stageFirstDagRefs(stage, index)) {
+			if (!stageIndexById.has(ref.stageId)) {
+				issues.push({
+					path: ref.path,
+					message: `unknown stage reference "${ref.stageId}"`,
+				});
+				continue;
+			}
+			if (ref.stageId === stage.id) {
+				issues.push({
+					path: ref.path,
+					message: "stage must not depend on itself",
+				});
+				continue;
+			}
+			const edges = adjacency.get(stage.id) ?? [];
+			edges.push({ toId: ref.stageId, path: ref.path });
+			adjacency.set(stage.id, edges);
+		}
+	}
+
+	const cycle = findDependencyCycle(stageIds, adjacency);
+	if (cycle)
+		issues.push({
+			path: cycle.path,
+			message: `dependency cycle detected: ${cycle.stageIds.join(" -> ")}`,
+		});
+}
+
+function stageFirstDagRefs(
+	stage: Record<string, unknown>,
+	index: number,
+): StageFirstDagRef[] {
+	const path = `$.workflow.stages[${index}]`;
+	return [
+		...stageFirstFromRefs(stage.from, `${path}.from`),
+		...stageFirstAfterRefs(stage.after, `${path}.after`),
+	];
+}
+
+function stageFirstFromRefs(from: unknown, path: string): StageFirstDagRef[] {
+	if (from === undefined) return [];
+	if (typeof from === "string") return [{ stageId: from, path }];
+	if (Array.isArray(from)) {
+		return from
+			.map((item, index) =>
+				typeof item === "string"
+					? { stageId: item, path: `${path}[${index}]` }
+					: undefined,
+			)
+			.filter((item): item is StageFirstDagRef => Boolean(item));
+	}
+	if (from && typeof from === "object" && !Array.isArray(from)) {
+		const stage = (from as Record<string, unknown>).stage;
+		if (typeof stage === "string") return [{ stageId: stage, path: `${path}.stage` }];
+	}
+	return [];
+}
+
+function stageFirstAfterRefs(after: unknown, path: string): StageFirstDagRef[] {
+	if (after === undefined) return [];
+	if (typeof after === "string") return [{ stageId: after, path }];
+	if (Array.isArray(after)) {
+		return after
+			.map((item, index) =>
+				typeof item === "string"
+					? { stageId: item, path: `${path}[${index}]` }
+					: undefined,
+			)
+			.filter((item): item is StageFirstDagRef => Boolean(item));
+	}
+	return [];
+}
+
+function findDependencyCycle(
+	stageIds: string[],
+	adjacency: Map<string, StageFirstDagEdge[]>,
+): { path: string; stageIds: string[] } | undefined {
+	const state = new Map<string, "visiting" | "visited">();
+	for (const root of stageIds) {
+		if (state.has(root)) continue;
+		state.set(root, "visiting");
+		const stack: Array<{ stageId: string; nextEdge: number }> = [
+			{ stageId: root, nextEdge: 0 },
+		];
+		while (stack.length > 0) {
+			const frame = stack[stack.length - 1]!;
+			const edges = adjacency.get(frame.stageId) ?? [];
+			if (frame.nextEdge >= edges.length) {
+				state.set(frame.stageId, "visited");
+				stack.pop();
+				continue;
+			}
+			const edge = edges[frame.nextEdge]!;
+			frame.nextEdge += 1;
+			const edgeState = state.get(edge.toId);
+			if (edgeState === "visiting") {
+				const pathIds = stack.map((item) => item.stageId);
+				const start = pathIds.indexOf(edge.toId);
+				return {
+					path: edge.path,
+					stageIds: pathIds.slice(start).concat(edge.toId),
+				};
+			}
+			if (!edgeState) {
+				state.set(edge.toId, "visiting");
+				stack.push({ stageId: edge.toId, nextEdge: 0 });
+			}
+		}
+	}
+	return undefined;
 }
 
 function rejectUnknownStageFirstKeys(

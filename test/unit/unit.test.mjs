@@ -776,6 +776,115 @@ test("schema rejects duplicate top-level stage ids", () => {
 	assertIssue(error, "$.workflow.stages[1].id", "duplicate stage id");
 });
 
+test("schema rejects unknown stage references in DAG edges", () => {
+	const cases = [
+		{
+			spec: workflowSpec("unit-scout", {
+				workflow: {
+					stages: [
+						{ id: "one", type: "task", prompt: "One." },
+						{ id: "two", type: "task", from: "ghost", prompt: "Two." },
+					],
+				},
+			}),
+			path: "$.workflow.stages[1].from",
+		},
+		{
+			spec: workflowSpec("unit-scout", {
+				workflow: {
+					stages: [
+						{ id: "one", type: "task", prompt: "One." },
+						{
+							id: "two",
+							type: "task",
+							from: ["one", "ghost"],
+							prompt: "Two.",
+						},
+					],
+				},
+			}),
+			path: "$.workflow.stages[1].from[1]",
+		},
+		{
+			spec: workflowSpec("unit-scout", {
+				workflow: {
+					stages: [
+						{ id: "one", type: "task", prompt: "One." },
+						{
+							id: "two",
+							type: "foreach",
+							from: { stage: "ghost", path: "$.items" },
+							each: { prompt: "Two ${item}." },
+						},
+					],
+				},
+			}),
+			path: "$.workflow.stages[1].from.stage",
+		},
+		{
+			spec: workflowSpec("unit-scout", {
+				workflow: {
+					stages: [
+						{ id: "one", type: "task", prompt: "One." },
+						{ id: "two", type: "task", after: "ghost", prompt: "Two." },
+					],
+				},
+			}),
+			path: "$.workflow.stages[1].after",
+		},
+	];
+
+	for (const item of cases) {
+		const error = assertThrowsFlow(() => parseWorkflow(item.spec));
+		assertIssue(error, item.path, "unknown stage reference");
+	}
+});
+
+test("schema rejects DAG self-dependencies", () => {
+	const error = assertThrowsFlow(() =>
+		parseWorkflow(
+			workflowSpec("unit-scout", {
+				workflow: {
+					stages: [{ id: "one", type: "task", from: "one", prompt: "One." }],
+				},
+			}),
+		),
+	);
+	assertIssue(error, "$.workflow.stages[0].from", "depend on itself");
+});
+
+test("schema rejects DAG dependency cycles", () => {
+	const error = assertThrowsFlow(() =>
+		parseWorkflow(
+			workflowSpec("unit-scout", {
+				workflow: {
+					stages: [
+						{ id: "a", type: "task", after: "b", prompt: "A." },
+						{ id: "b", type: "task", from: "a", prompt: "B." },
+					],
+				},
+			}),
+		),
+	);
+	assertIssue(
+		error,
+		"$.workflow.stages[1].from",
+		"dependency cycle detected: a -> b -> a",
+	);
+});
+
+test("schema accepts bundled stage-first workflow fixtures", () => {
+	for (const specPath of [
+		"workflows/implement-loop.json",
+		"workflows/test-repair-loop.json",
+		"workflows/deep-research/spec.json",
+		"workflows/deep-review/spec.json",
+	]) {
+		const spec = JSON.parse(readFileSync(join(process.cwd(), specPath), "utf8"));
+		assert.doesNotThrow(() => parseWorkflow(spec), specPath);
+	}
+});
+
 test("schema rejects loop dependsOn because stage-first dependencies use from", () => {
 	const error = assertThrowsFlow(() =>
 		parseWorkflow(loopWorkflowSpec({ dependsOn: ["setup.main"] })),
