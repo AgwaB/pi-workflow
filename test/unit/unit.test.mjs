@@ -155,6 +155,21 @@ function loopWorkflowSpec(loop = {}) {
 	});
 }
 
+function dagWorkflowSpec(dag = {}) {
+	return workflowSpec("unit-scout", {
+		workflow: {
+			stages: [
+				{
+					id: "box",
+					type: "dag",
+					stages: [{ id: "child", type: "task", prompt: "Child." }],
+					...dag,
+				},
+			],
+		},
+	});
+}
+
 function assertThrowsFlow(fn) {
 	assert.throws(fn, WorkflowValidationError);
 	try {
@@ -869,6 +884,168 @@ test("schema rejects DAG dependency cycles", () => {
 	assertIssue(
 		error,
 		"$.workflow.stages[1].from",
+		"dependency cycle detected: a -> b -> a",
+	);
+});
+
+test("schema accepts dag containers with diamond and nested child graphs", () => {
+	assert.doesNotThrow(() =>
+		parseWorkflow(
+			dagWorkflowSpec({
+				stages: [
+					{ id: "a", type: "task", prompt: "A." },
+					{ id: "b", type: "task", after: "a", prompt: "B." },
+					{ id: "c", type: "task", after: "a", prompt: "C." },
+					{ id: "d", type: "reduce", from: ["b", "c"], prompt: "D." },
+				],
+			}),
+		),
+	);
+
+	assert.doesNotThrow(() =>
+		parseWorkflow(
+			dagWorkflowSpec({
+				stages: [
+					{
+						id: "inner",
+						type: "dag",
+						stages: [
+							{ id: "first", type: "task", prompt: "First." },
+							{
+								id: "last",
+								type: "task",
+								from: "first",
+								prompt: "Last.",
+							},
+						],
+					},
+					{ id: "outer", type: "reduce", from: "inner", prompt: "Outer." },
+				],
+			}),
+		),
+	);
+});
+
+test("schema rejects leaf fields on dag containers", () => {
+	const error = assertThrowsFlow(() =>
+		parseWorkflow(dagWorkflowSpec({ prompt: "Not on a container." })),
+	);
+	assertIssue(error, "$.workflow.stages[0].prompt", "unknown field");
+});
+
+test("schema rejects loop children in dag containers", () => {
+	const error = assertThrowsFlow(() =>
+		parseWorkflow(
+			dagWorkflowSpec({
+				stages: [
+					{
+						id: "inner-loop",
+						type: "loop",
+						stages: [],
+						maxRounds: 1,
+						until: { stage: "check", path: "$.status", equals: "pass" },
+					},
+				],
+			}),
+		),
+	);
+	assertIssue(
+		error,
+		"$.workflow.stages[0].stages[0].type",
+		"run the loop as a top-level stage",
+	);
+});
+
+test("schema scopes dag child references to sibling stages", () => {
+	const error = assertThrowsFlow(() =>
+		parseWorkflow(
+			workflowSpec("unit-scout", {
+				workflow: {
+					stages: [
+						{ id: "outer", type: "task", prompt: "Outer." },
+						{
+							id: "box",
+							type: "dag",
+							outputFrom: "inner",
+							stages: [
+								{
+									id: "inner",
+									type: "task",
+									after: "outer",
+									prompt: "Inner.",
+								},
+							],
+						},
+					],
+				},
+			}),
+		),
+	);
+	assertIssue(
+		error,
+		"$.workflow.stages[1].stages[0].after",
+		"stage references resolve within the same container",
+	);
+});
+
+test("schema rejects dag outputFrom naming a missing child", () => {
+	const error = assertThrowsFlow(() =>
+		parseWorkflow(dagWorkflowSpec({ outputFrom: "missing" })),
+	);
+	assertIssue(
+		error,
+		"$.workflow.stages[0].outputFrom",
+		"unknown child stage reference",
+	);
+});
+
+test("schema rejects dag containers with multiple sink children and no outputFrom", () => {
+	const error = assertThrowsFlow(() =>
+		parseWorkflow(
+			dagWorkflowSpec({
+				stages: [
+					{ id: "left", type: "task", prompt: "Left." },
+					{ id: "right", type: "task", prompt: "Right." },
+				],
+			}),
+		),
+	);
+	assertIssue(error, "$.workflow.stages[0].outputFrom", "left, right");
+});
+
+test("schema rejects duplicate dag child ids", () => {
+	const error = assertThrowsFlow(() =>
+		parseWorkflow(
+			dagWorkflowSpec({
+				stages: [
+					{ id: "same", type: "task", prompt: "One." },
+					{ id: "same", type: "task", prompt: "Two." },
+				],
+			}),
+		),
+	);
+	assertIssue(
+		error,
+		"$.workflow.stages[0].stages[1].id",
+		"duplicate child stage id",
+	);
+});
+
+test("schema rejects cycles among dag children with scoped paths", () => {
+	const error = assertThrowsFlow(() =>
+		parseWorkflow(
+			dagWorkflowSpec({
+				outputFrom: "a",
+				stages: [
+					{ id: "a", type: "task", after: ["b"], prompt: "A." },
+					{ id: "b", type: "task", after: ["a"], prompt: "B." },
+				],
+			}),
+		),
+	);
+	assertIssue(
+		error,
+		"$.workflow.stages[0].stages[1].after[0]",
 		"dependency cycle detected: a -> b -> a",
 	);
 });
