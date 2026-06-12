@@ -32,10 +32,7 @@ import {
 	resolveWorkflowRef,
 } from "../../.tmp/unit/workflow-specs.js";
 import { resolveWorkflowRuntime } from "../../.tmp/unit/workflow-runtime.js";
-import {
-	loadWorkflow,
-	parseWorkflow,
-} from "../../.tmp/unit/schema.js";
+import { loadWorkflow, parseWorkflow } from "../../.tmp/unit/schema.js";
 import {
 	acquireSupervisorLease,
 	createStageFirstRunRecord,
@@ -113,7 +110,9 @@ function workflowSpec(agent = "unit-scout", extra = {}) {
 		agent,
 		readOnly: true,
 		tools: ["read"],
-		workflow: { stages: [{ id: "main", type: "task", prompt: "Do the work." }] },
+		workflow: {
+			stages: [{ id: "main", type: "task", prompt: "Do the work." }],
+		},
 		...extra,
 	};
 }
@@ -682,6 +681,54 @@ test("schema rejects loop child from fan-out", () => {
 	);
 });
 
+test("schema rejects invalid stage after shapes", () => {
+	const nonString = assertThrowsFlow(() =>
+		parseWorkflow(
+			workflowSpec("unit-scout", {
+				workflow: {
+					stages: [
+						{ id: "one", type: "task", prompt: "One." },
+						{ id: "two", type: "task", after: ["one", 42], prompt: "Two." },
+					],
+				},
+			}),
+		),
+	);
+	assertIssue(nonString, "$.workflow.stages[1].after[1]", "non-empty string");
+
+	const empty = assertThrowsFlow(() =>
+		parseWorkflow(
+			workflowSpec("unit-scout", {
+				workflow: {
+					stages: [
+						{ id: "one", type: "task", prompt: "One." },
+						{ id: "two", type: "task", after: "", prompt: "Two." },
+					],
+				},
+			}),
+		),
+	);
+	assertIssue(empty, "$.workflow.stages[1].after", "non-empty string");
+});
+
+test("schema rejects loop child after fan-out", () => {
+	const error = assertThrowsFlow(() =>
+		parseWorkflow(
+			loopWorkflowSpec({
+				stages: [
+					{ id: "implement", type: "task", prompt: "Implement." },
+					{ id: "check", type: "task", after: "implement", prompt: "Check." },
+				],
+			}),
+		),
+	);
+	assertIssue(
+		error,
+		"$.workflow.stages[0].stages[1].after",
+		"must not define after",
+	);
+});
+
 test("schema rejects loop until check before a later mutating child", () => {
 	const error = assertThrowsFlow(() =>
 		parseWorkflow(
@@ -1209,6 +1256,60 @@ test("compiler applies explicit stage from dependencies and stage runtime defaul
 		assert.equal(byKey["final.main"].runtime.thinking, "high");
 		assert.deepEqual(byKey["final.main"].runtime.tools, ["read", "grep"]);
 		assert.equal(byKey["final.main"].runtime.maxRuntimeMs, 12345);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("compiler separates order-only after dependencies from source context", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const compiled = await compileWorkflow(
+			workflowSpec("unit-scout", {
+				workflow: {
+					stages: [
+						{
+							id: "source",
+							type: "parallel",
+							tasks: [
+								{ id: "one", prompt: "Source one." },
+								{ id: "two", prompt: "Source two." },
+							],
+						},
+						{ id: "gate", type: "task", prompt: "Gate." },
+						{
+							id: "mixed",
+							type: "task",
+							from: "source",
+							after: "gate",
+							prompt: "Mixed.",
+						},
+						{
+							id: "fromOnly",
+							type: "task",
+							from: "source",
+							prompt: "From only.",
+						},
+					],
+				},
+			}),
+			{ cwd, task: "Check sources" },
+		);
+
+		const byKey = Object.fromEntries(
+			compiled.tasks.map((task) => [task.key, task]),
+		);
+		assert.deepEqual(byKey["mixed.main"].dependsOn, [
+			"source.one",
+			"source.two",
+			"gate.main",
+		]);
+		assert.deepEqual(byKey["mixed.main"].contextDependsOn, [
+			"source.one",
+			"source.two",
+		]);
+		assert.equal(byKey["fromOnly.main"].contextDependsOn, undefined);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
@@ -3808,6 +3909,107 @@ test("stage-first foreach blocks when maxItems is exceeded with output contract 
 		assert.equal(blocked.tasks[1].status, "blocked");
 		assert.match(blocked.tasks[1].lastMessage, /exceeding maxItems=1/);
 	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("stage-first after dependencies do not inject order-only source context", async () => {
+	const cwd = makeProject();
+	const prompts = [];
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		setSubagentApiForTests({
+			async runSubagent(options) {
+				prompts.push(String(options.task ?? ""));
+				return {
+					runId: `run_stub_${prompts.length}`,
+					attemptId: `attempt_stub_${prompts.length}`,
+					status: "running",
+				};
+			},
+			async getSubagentStatus() {
+				return null;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+		const spec = workflowSpec("unit-scout", {
+			workflow: {
+				stages: [
+					{
+						id: "source",
+						type: "task",
+						output: { format: "json" },
+						prompt: "Source.",
+					},
+					{
+						id: "gate",
+						type: "task",
+						output: { format: "json" },
+						prompt: "Gate.",
+					},
+					{
+						id: "afterOnly",
+						type: "task",
+						after: "gate",
+						prompt: "After only.",
+					},
+					{
+						id: "mixed",
+						type: "task",
+						from: "source",
+						after: "gate",
+						prompt: "Mixed.",
+					},
+				],
+			},
+		});
+		const compiled = await compileWorkflow(spec, { cwd, task: "Check context" });
+		const { run } = await createStageFirstRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+
+		await completeTask(cwd, taskBySpec(run, "source.main"), {
+			content: "from-source-content",
+		});
+		await completeTask(cwd, taskBySpec(run, "gate.main"), {
+			content: "after-source-content",
+		});
+		for (const task of [
+			taskBySpec(run, "source.main"),
+			taskBySpec(run, "gate.main"),
+		]) {
+			mkdirSync(dirname(join(cwd, task.files.output)), { recursive: true });
+			writeFileSync(
+				join(cwd, task.files.output),
+				task.specId === "source.main"
+					? "from-source-content\n"
+					: "after-source-content\n",
+			);
+		}
+		await writeRunRecord(cwd, run);
+
+		await scheduleRun(cwd, run.runId);
+
+		const afterOnlyPrompt = prompts.find((prompt) =>
+			prompt.includes("stage=afterOnly"),
+		);
+		const mixedPrompt = prompts.find((prompt) => prompt.includes("stage=mixed"));
+		assert(afterOnlyPrompt);
+		assert(mixedPrompt);
+		assert.doesNotMatch(afterOnlyPrompt, /# Source Stage Context/);
+		assert.match(mixedPrompt, /# Source Stage Context/);
+		assert.match(mixedPrompt, /from-source-content/);
+		assert.doesNotMatch(mixedPrompt, /after-source-content/);
+	} finally {
+		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });

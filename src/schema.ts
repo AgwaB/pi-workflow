@@ -3,12 +3,12 @@ import { extname } from "node:path";
 
 import {
 	TOOL_CLASSIFICATIONS,
-	WorkflowSpec,
+	type WorkflowSpec,
 	WorkflowValidationError,
-	ValidationIssue,
+	type ValidationIssue,
 } from "./types.js";
 import {
-	ResolvedWorkflowSpecRef,
+	type ResolvedWorkflowSpecRef,
 	resolveWorkflowRef,
 } from "./workflow-specs.js";
 import { parseYamlSubset } from "./yaml.js";
@@ -41,6 +41,7 @@ const SUPPORT_STAGE_KEYS = new Set([
 	"id",
 	"type",
 	"from",
+	"after",
 	"support",
 	"sourcePolicy",
 ]);
@@ -48,7 +49,7 @@ const SUPPORT_SPEC_KEYS = new Set(["uses", "options"]);
 const LEGACY_TRANSFORM_MIGRATION_MESSAGE =
 	'legacy type "transform" is not supported; use support: { "uses": "./helpers/name.mjs", "options": { ... } } without a type field';
 const LEGACY_FLOW_MIGRATION_MESSAGE =
-	'legacy flow.type bodies are not supported; use workflow.stages with stage type fields and from dependencies';
+	"legacy flow.type bodies are not supported; use workflow.stages with stage type fields and from dependencies";
 const TOOL_OBJECT_KEYS = new Set([
 	"name",
 	"extensions",
@@ -550,6 +551,7 @@ const STAGE_FIRST_LOOP_STAGE_KEYS = new Set([
 	"maxRuntimeMs",
 	"maxConcurrency",
 	"from",
+	"after",
 	"sourcePolicy",
 	"sourceContext",
 	"inject",
@@ -568,9 +570,7 @@ const STAGE_FIRST_UNTIL_KEYS = new Set([
 
 function isStageFirstSpec(value: unknown): value is any {
 	return Boolean(
-		value &&
-		typeof value === "object" &&
-		(value as any).workflow?.stages,
+		value && typeof value === "object" && (value as any).workflow?.stages,
 	);
 }
 
@@ -685,6 +685,8 @@ function validateStageFirstStage(
 		]);
 	if (stage.tools !== undefined)
 		validateStageFirstWorkflowToolArray(stage.tools, `${path}.tools`);
+	if (stage.after !== undefined)
+		validateStageFirstAfter(stage.after, `${path}.after`);
 	if (stage.output !== undefined)
 		validateStageFirstOutput(stage.output, `${path}.output`);
 	if (stage.sourceContext !== undefined)
@@ -800,6 +802,26 @@ function validateStageFirstStringArray(value: unknown, path: string): void {
 	}
 }
 
+function validateStageFirstAfter(value: unknown, path: string): void {
+	if (typeof value === "string") {
+		if (value.trim() === "")
+			throw new WorkflowValidationError([
+				{ path, message: "must be a non-empty string" },
+			]);
+		return;
+	}
+	if (!Array.isArray(value))
+		throw new WorkflowValidationError([
+			{ path, message: "must be a string or array of strings" },
+		]);
+	for (const [index, item] of value.entries()) {
+		if (typeof item !== "string" || item.trim() === "")
+			throw new WorkflowValidationError([
+				{ path: `${path}[${index}]`, message: "must be a non-empty string" },
+			]);
+	}
+}
+
 function validateStageFirstWorkflowToolArray(
 	value: unknown,
 	path: string,
@@ -898,6 +920,15 @@ function validateStageFirstLoopStage(
 					path: `${childPath}.from`,
 					message:
 						"loop child stages must not define from in v1; loop children run strictly in listed order so the final check observes all mutations",
+				},
+			]);
+		}
+		if (childStage.after !== undefined) {
+			throw new WorkflowValidationError([
+				{
+					path: `${childPath}.after`,
+					message:
+						"loop child stages must not define after in v1; loop children run strictly in listed order so the final check observes all mutations",
 				},
 			]);
 		}

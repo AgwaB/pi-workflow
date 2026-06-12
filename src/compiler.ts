@@ -4,21 +4,21 @@ import { dirname, extname, isAbsolute, relative, resolve } from "node:path";
 import { loadAgentByName } from "./agents.js";
 import { formatOutputTemplateSection } from "./workflow-artifacts.js";
 import {
-	AgentDefinition,
-	ApprovalMode,
-	CompiledTask,
-	CompiledTaskSafety,
-	CompiledToolProvider,
-	WorkflowTaskOutputSpec,
+	type AgentDefinition,
+	type ApprovalMode,
+	type CompiledTask,
+	type CompiledTaskSafety,
+	type CompiledToolProvider,
+	type WorkflowTaskOutputSpec,
 	WorkflowValidationError,
-	PermissionPreview,
+	type PermissionPreview,
 	STAGE_FIRST_RUN_TYPE,
-	TaskCapability,
-	ThinkingLevel,
-	ValidationIssue,
-	WorkflowToolObjectSpec,
-	WorkflowToolSpec,
-	WorktreePolicy,
+	type TaskCapability,
+	type ThinkingLevel,
+	type ValidationIssue,
+	type WorkflowToolObjectSpec,
+	type WorkflowToolSpec,
+	type WorktreePolicy,
 } from "./types.js";
 
 const READ_ONLY_TOOLS = new Set([
@@ -596,7 +596,7 @@ function resolveJsonPointer(
 			!current ||
 			typeof current !== "object" ||
 			Array.isArray(current) ||
-			!Object.prototype.hasOwnProperty.call(current, token)
+			!Object.hasOwn(current, token)
 		)
 			return { exists: false };
 		current = (current as Record<string, unknown>)[token];
@@ -830,11 +830,20 @@ export async function compileWorkflow(
 
 	for (const stage of stages) {
 		const currentStageTaskKeys: string[] = [];
-		const explicitDependencyKeys = dependencyKeysForStage(stage, stageTaskKeys);
+		const fromDependencyKeys = dependencyKeysForStage(stage, stageTaskKeys);
+		const afterDependencyKeys = afterDependencyKeysForStage(stage, stageTaskKeys);
+		const explicitDependencyKeys = uniqueDependencyKeys([
+			...fromDependencyKeys,
+			...afterDependencyKeys,
+		]);
 		const dependencyKeys =
 			explicitDependencyKeys.length > 0
 				? explicitDependencyKeys
 				: previousStageTaskKeys;
+		const contextDependencyOverrides: Partial<CompiledTask> =
+			stage.after !== undefined
+				? { contextDependsOn: [...fromDependencyKeys] }
+				: {};
 
 		const stageKind = stageKindFor(stage);
 
@@ -860,6 +869,7 @@ export async function compileWorkflow(
 					stage.prompt ?? "Loop controller placeholder.",
 					dependencyKeys,
 					{
+						...contextDependencyOverrides,
 						key: placeholderKey,
 						id: placeholderKey,
 						specId: placeholderKey,
@@ -898,7 +908,13 @@ export async function compileWorkflow(
 			sourcePolicy: stage.sourcePolicy ?? "require-success",
 		});
 		const addTask = async (taskId: string, prompt: string) => {
-			const task = await buildTask(stage, taskId, prompt, dependencyKeys);
+			const task = await buildTask(
+				stage,
+				taskId,
+				prompt,
+				dependencyKeys,
+				contextDependencyOverrides,
+			);
 			tasks.push(task);
 			currentStageTaskKeys.push(task.id);
 		};
@@ -1148,17 +1164,42 @@ function dependencyKeysForStage(
 	stage: any,
 	stageTaskKeys: Map<string, string[]>,
 ): string[] {
-	const from = stage.from;
-	if (!from) return [];
-	const stageIds = Array.isArray(from)
-		? from
-		: typeof from === "string"
-			? [from]
-			: typeof from.stage === "string"
-				? [from.stage]
-				: [];
+	return dependencyKeysForStageIds(stageIdsFromFrom(stage.from), stageTaskKeys);
+}
+
+function afterDependencyKeysForStage(
+	stage: any,
+	stageTaskKeys: Map<string, string[]>,
+): string[] {
+	return dependencyKeysForStageIds(stageIdsFromAfter(stage.after), stageTaskKeys);
+}
+
+function dependencyKeysForStageIds(
+	stageIds: string[],
+	stageTaskKeys: Map<string, string[]>,
+): string[] {
 	const keys: string[] = [];
 	for (const stageId of stageIds)
 		keys.push(...(stageTaskKeys.get(stageId) ?? []));
-	return keys;
+	return uniqueDependencyKeys(keys);
+}
+
+function stageIdsFromFrom(from: any): string[] {
+	if (!from) return [];
+	if (Array.isArray(from))
+		return from.filter((stageId): stageId is string => typeof stageId === "string");
+	if (typeof from === "string") return [from];
+	if (typeof from.stage === "string") return [from.stage];
+	return [];
+}
+
+function stageIdsFromAfter(after: any): string[] {
+	if (after === undefined) return [];
+	if (Array.isArray(after))
+		return after.filter((stageId): stageId is string => typeof stageId === "string");
+	return typeof after === "string" ? [after] : [];
+}
+
+function uniqueDependencyKeys(keys: string[]): string[] {
+	return [...new Set(keys)];
 }

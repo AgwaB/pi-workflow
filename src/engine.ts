@@ -40,15 +40,15 @@ import {
 	readSimpleJsonPath,
 } from "./workflow-runtime.js";
 import {
-	CompiledTask,
-	CompiledWorkflow,
-	LoopResultStatus,
-	LoopStateRecord,
-	LoopUntilCondition,
+	type CompiledTask,
+	type CompiledWorkflow,
+	type LoopResultStatus,
+	type LoopStateRecord,
+	type LoopUntilCondition,
 	STAGE_FIRST_RUN_TYPE,
-	WorkflowIndexRecord,
-	WorkflowRunRecord,
-	WorkflowTaskRunRecord,
+	type WorkflowIndexRecord,
+	type WorkflowRunRecord,
+	type WorkflowTaskRunRecord,
 } from "./types.js";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 60_000;
@@ -238,7 +238,9 @@ export async function scheduleRun(
 		if (!compiledFlow) return run;
 
 		if (compiledFlow.type !== STAGE_FIRST_RUN_TYPE) {
-			throw new Error(`unsupported compiled workflow type: ${compiledFlow.type}`);
+			throw new Error(
+				`unsupported compiled workflow type: ${compiledFlow.type}`,
+			);
 		}
 		await scheduleDag(cwd, run, compiledFlow);
 
@@ -380,7 +382,7 @@ async function scheduleDag(
 		assertRunTaskPositionalAlignment(run, compiledFlow);
 	}
 
-	let changed = markDagDependentsSkipped(run, compiledFlow);
+	const changed = markDagDependentsSkipped(run, compiledFlow);
 	if (changed) {
 		await writeRunRecord(cwd, run);
 		run = await readRunRecord(cwd, run.runId);
@@ -993,11 +995,11 @@ export async function evaluateLoopUntilCondition(
 			? undefined
 			: readSimpleJsonPath(output, candidate.path);
 	if (value === undefined) return false;
-	if (Object.prototype.hasOwnProperty.call(candidate, "equals"))
+	if (Object.hasOwn(candidate, "equals"))
 		return Object.is(value, candidate.equals);
-	if (Object.prototype.hasOwnProperty.call(candidate, "notEquals"))
+	if (Object.hasOwn(candidate, "notEquals"))
 		return !Object.is(value, candidate.notEquals);
-	if (Object.prototype.hasOwnProperty.call(candidate, "lengthEquals"))
+	if (Object.hasOwn(candidate, "lengthEquals"))
 		return valueLength(value) === candidate.lengthEquals;
 	return false;
 }
@@ -2097,10 +2099,7 @@ async function readSupportSources(
 		const result = await readJson<{ structuredOutput?: unknown }>(
 			fromProjectPath(cwd, source.files.result),
 		).catch(() => undefined);
-		if (
-			result &&
-			Object.prototype.hasOwnProperty.call(result, "structuredOutput")
-		) {
+		if (result && Object.hasOwn(result, "structuredOutput")) {
 			sources[source.specId] = result.structuredOutput;
 		} else {
 			sources[source.specId] = (
@@ -2166,18 +2165,19 @@ async function prepareDagTask(
 ): Promise<CompiledWorkflow["tasks"][number]> {
 	const compiledTask = compiledFlow.tasks[index]!;
 	const task = run.tasks[index]!;
-	const dependsOn = compiledTask.dependsOn ?? [];
-	if (dependsOn.length === 0) return compiledTask;
+	const contextDependsOn =
+		compiledTask.contextDependsOn ?? compiledTask.dependsOn ?? [];
+	if (contextDependsOn.length === 0) return compiledTask;
 
 	const bySpecId = new Map(
 		run.tasks.map((sourceTask) => [sourceTask.specId, sourceTask]),
 	);
-	const sourceTasks = dependsOn
+	const sourceTasks = contextDependsOn
 		.map((dep) => bySpecId.get(dep))
 		.filter((sourceTask): sourceTask is WorkflowTaskRunRecord =>
 			Boolean(sourceTask),
 		);
-	const missing = dependsOn.filter((dep) => !bySpecId.has(dep));
+	const missing = contextDependsOn.filter((dep) => !bySpecId.has(dep));
 	const context = await buildRunSourceContext(
 		cwd,
 		run,
@@ -2277,10 +2277,7 @@ export async function buildRunSourceContext(
 				).catch(() => undefined),
 				readOutputText(cwd, task.files.output),
 			]);
-			if (
-				result &&
-				Object.prototype.hasOwnProperty.call(result, "structuredOutput")
-			)
+			if (result && Object.hasOwn(result, "structuredOutput"))
 				structuredOutputsByTaskId[task.taskId] = result.structuredOutput;
 			rawOutputsByTaskId[task.taskId] = output.text;
 			outputBytesByTaskId[task.files.output] = output.bytes;
