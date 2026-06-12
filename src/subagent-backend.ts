@@ -1,5 +1,5 @@
 import { copyFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
 
 import type { CompiledTask, CompiledToolProvider, WorkflowRunRecord, WorkflowTaskRunRecord } from "./types.js";
 import { fromProjectPath, isTerminalTaskStatus, nowIso, toProjectPath, writeRunRecord } from "./store.js";
@@ -7,6 +7,7 @@ import { applyTaskResultArtifact, isTaskTimedOut, markTaskTimedOut } from "./res
 import type { BackendLaunchResult } from "./backend.js";
 
 const DEFAULT_SUBAGENT_RUNS_ROOT = ".pi/workflow-subagents";
+const EXTRA_SUBAGENT_EXTENSIONS_ENV = "PI_WORKFLOW_SUBAGENT_EXTRA_EXTENSIONS";
 const TOOL_PROVIDER_EXTENSIONS: Record<string, string[]> = {
   web_search: ["npm:pi-web-access"],
   code_search: ["npm:pi-web-access"],
@@ -138,7 +139,10 @@ export async function launchSubagentTask(
   let launched: SubagentResultEnvelope;
   try {
     const api = await loadSubagentApi();
-    const providerExtensions = providerExtensionsForTools(compiledTask.runtime.tools, compiledTask.runtime.toolProviders);
+    const extensions = uniqueStrings([
+      ...providerExtensionsForTools(compiledTask.runtime.tools, compiledTask.runtime.toolProviders),
+      ...extraSubagentExtensionsFromEnv(),
+    ]);
     const subagentOptions: Record<string, unknown> = {
       cwd: task.cwd,
       backend: "headless",
@@ -156,7 +160,7 @@ export async function launchSubagentTask(
       runsDir,
       correlationId,
     };
-    if (providerExtensions.length > 0) subagentOptions.extensions = providerExtensions;
+    if (extensions.length > 0) subagentOptions.extensions = extensions;
     if (captureToolCallsEnabled()) subagentOptions.captureToolCalls = true;
     launched = await api.runSubagent(subagentOptions);
   } catch (error) {
@@ -336,6 +340,17 @@ function providerExtensionsForTools(tools: readonly string[] | undefined, toolPr
     for (const provider of toolProviders?.[tool]?.extensions ?? []) providers.add(provider);
   }
   return [...providers];
+}
+
+function extraSubagentExtensionsFromEnv(env: NodeJS.ProcessEnv = process.env): string[] {
+  return String(env[EXTRA_SUBAGENT_EXTENSIONS_ENV] ?? "")
+    .split(delimiter)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function uniqueStrings(values: readonly string[]): string[] {
+  return [...new Set(values)];
 }
 
 async function readToolCallsSummary(snapshot: SubagentRunStatusSnapshot, subagentResult: Record<string, unknown> | undefined): Promise<{ ref: SubagentArtifactRef; summary: unknown } | undefined> {
