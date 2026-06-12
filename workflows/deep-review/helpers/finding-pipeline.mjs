@@ -45,7 +45,7 @@ function fileKeyOf(finding) {
 }
 
 function titleTokens(finding) {
-  const stop = new Set(["the", "a", "an", "is", "are", "was", "were", "of", "in", "to", "for", "and", "or", "with", "from", "by", "on", "its", "this", "that", "now", "no", "longer"]);
+  const stop = new Set(["the", "a", "an", "is", "are", "was", "were", "of", "in", "to", "for", "and", "or", "with", "from", "by", "on", "its", "this", "that", "now", "no", "longer", "test", "tests", "would", "could", "should", "fail", "fails", "failure", "removed", "dropped"]);
   return new Set(normalizeText(finding.title).split(" ").filter((token) => token.length > 1 && !stop.has(token)));
 }
 
@@ -56,7 +56,7 @@ function tokenOverlap(a, b) {
   return shared / Math.min(a.size, b.size);
 }
 
-const DUPLICATE_OVERLAP = 0.6;
+const DUPLICATE_OVERLAP = 0.7;
 
 function normalizeFinding(finding, index) {
   return {

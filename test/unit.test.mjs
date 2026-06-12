@@ -5047,6 +5047,26 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 		dedup.findings.some((f) => f.evidence.includes("longer supporting")),
 	);
 
+	const distinctTestEvidenceFindings = await helper({
+		sources: {
+			"reviewers.lens-a": {
+				findings: [
+					{
+						title: "Role-restriction unit tests would fail if assertWorkflowActionAllowedForRole is removed",
+						file: "test/unit.test.mjs",
+					},
+					{
+						title: "JSON output contract-path tests would fail if selectorPaths matching and fallback are removed",
+						file: "test/unit.test.mjs",
+					},
+				],
+			},
+		},
+		options: { mode: "dedup" },
+	});
+	assert.equal(distinctTestEvidenceFindings.dedupSummary.uniqueCount, 2);
+	assert.equal(distinctTestEvidenceFindings.dedupSummary.duplicateCount, 0);
+
 	const partition = await helper({
 		sources: {
 			"dedup-findings.main": dedup,

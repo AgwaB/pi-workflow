@@ -181,6 +181,13 @@
             "recommendedNextAction": "..."
           }
         },
+        "sourceContext": {
+          "maxStructuredChars": 2000,
+          "maxStructuredCharsByStage": {
+            "partition-verdicts": 24000
+          },
+          "maxPacketChars": 32000
+        },
         "prompt": "Use Source Stage Context and the runtime task to produce an evidence-backed deep review synthesis. The partition-verdicts source already applied devil-advocate verdicts deterministically: partitions.keep, partitions.weaken, partitions.drop, and partitions.needsHuman. Include every partitions.keep item as a finding with its severity field copied verbatim; the severity join is code-enforced upstream, so never change a keep item's severity. Include partitions.weaken items with reduced severity, citing the counterEvidence that justifies each reduction. Exclude partitions.drop items from findings. List partitions.needsHuman items under needsHuman. Report partitionSummary counts and any normalizationNotes in risks so silent verdict drift is visible. If any source task failed, mention the partial-review limitation in risks. Return JSON only with summary, verdict, findings, risks, needsHuman, evidenceIndex, and recommendedNextAction; no prose, fences, or text outside the JSON object."
       }
     ]
