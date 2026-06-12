@@ -1,8 +1,8 @@
 import { copyFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 
-import { CompiledTask, WorkflowRunRecord, WorkflowTaskRunRecord } from "./types.js";
-import { fromProjectPath, isTerminalTaskStatus, nowIso, setTaskTerminal, toProjectPath, writeRunRecord } from "./store.js";
+import type { CompiledTask, CompiledToolProvider, WorkflowRunRecord, WorkflowTaskRunRecord } from "./types.js";
+import { fromProjectPath, isTerminalTaskStatus, nowIso, toProjectPath, writeRunRecord } from "./store.js";
 import { applyTaskResultArtifact, isTaskTimedOut, markTaskTimedOut } from "./result.js";
 import type { BackendLaunchResult } from "./backend.js";
 
@@ -138,7 +138,7 @@ export async function launchSubagentTask(
   let launched: SubagentResultEnvelope;
   try {
     const api = await loadSubagentApi();
-    const providerExtensions = providerExtensionsForTools(compiledTask.runtime.tools);
+    const providerExtensions = providerExtensionsForTools(compiledTask.runtime.tools, compiledTask.runtime.toolProviders);
     const subagentOptions: Record<string, unknown> = {
       cwd: task.cwd,
       backend: "headless",
@@ -168,7 +168,7 @@ export async function launchSubagentTask(
     throw error;
   }
 
-  const handle = makeSubagentHandle(run, task, launched.runId, launched.attemptId, runsDir);
+  const handle = makeSubagentHandle(task, launched.runId, launched.attemptId, runsDir);
   task.backendHandle = handle;
   task.backendTaskId = launched.runId;
   task.backendFiles = {
@@ -329,10 +329,11 @@ function captureToolCallsEnabled(): boolean {
   return typeof value === "string" && /^(1|true|yes|on)$/i.test(value.trim());
 }
 
-function providerExtensionsForTools(tools: readonly string[] | undefined): string[] {
+function providerExtensionsForTools(tools: readonly string[] | undefined, toolProviders: Record<string, CompiledToolProvider> | undefined): string[] {
   const providers = new Set<string>();
   for (const tool of tools ?? []) {
     for (const provider of TOOL_PROVIDER_EXTENSIONS[tool] ?? []) providers.add(provider);
+    for (const provider of toolProviders?.[tool]?.extensions ?? []) providers.add(provider);
   }
   return [...providers];
 }
@@ -403,7 +404,7 @@ async function recoverSubagentHandle(run: WorkflowRunRecord, task: WorkflowTaskR
     const attemptId = record.activeAttemptId ?? record.latestAttemptId ?? record.attempts?.at(-1)?.attemptId;
     if (typeof attemptId !== "string" || attemptId.length === 0) continue;
     candidates.push({
-      handle: makeSubagentHandle(run, task, record.runId ?? entry.name, attemptId, runsDir),
+      handle: makeSubagentHandle(task, record.runId ?? entry.name, attemptId, runsDir),
       updatedAtMs: timestampMs(record.updatedAt) ?? timestampMs(record.startedAt) ?? timestampMs(record.attempts?.at(-1)?.updatedAt) ?? timestampMs(record.attempts?.at(-1)?.startedAt) ?? 0,
     });
   }
@@ -418,7 +419,7 @@ function timestampMs(value: string | undefined): number | undefined {
   return Number.isFinite(time) ? time : undefined;
 }
 
-function makeSubagentHandle(run: WorkflowRunRecord, task: WorkflowTaskRunRecord, runId: string, attemptId: string, runsDir: string): SubagentBackendHandle {
+function makeSubagentHandle(task: WorkflowTaskRunRecord, runId: string, attemptId: string, runsDir: string): SubagentBackendHandle {
   return {
     engine: "pi-subagent",
     backend: "headless",

@@ -123,6 +123,28 @@ A minimal workflow definition:
 }
 ```
 
+### Tool allowlists and provider metadata
+
+`tools` may be a string allowlist or a mix of strings and objects. Strings keep the existing behavior. Object entries select the same tool name while adding local provider and safety metadata for custom tools:
+
+```json
+{
+  "tools": [
+    "read",
+    "fetch_content",
+    {
+      "name": "scrapling_fetch",
+      "extensions": ["packages/pi-scrapling-access"],
+      "classification": "read-only",
+      "optional": true,
+      "fallbackTools": ["fetch_content"]
+    }
+  ]
+}
+```
+
+Agent frontmatter remains the authority ceiling: workflow, defaults, and stage `tools` can only narrow tools already declared by the selected agent. Built-in tool classifications remain authoritative; custom tools without an explicit object `classification` still require explicit review. Bundled/public workflows should avoid machine-specific local provider paths. Project-local workflows may use deliberate local package refs such as `packages/...` when they are portable within that project.
+
 ## Bundled workflows
 
 The package includes workflow definitions in [`workflows/`](./workflows/). Workflow names resolve from project `.pi/workflows/`, repository `workflows/`, bundled package workflows, and `~/.pi/agent/workflows/`; ambiguous names fail closed.
@@ -190,7 +212,7 @@ Then validate and run:
 - `/workflow` is an orchestrator, not an OS sandbox.
 - Subagent workers are launched through `@agwab/pi-subagent`; inspect that package's sandbox/worktree behavior for execution isolation details.
 - Agent-declared tools are the authority ceiling; workflow definitions can only narrow them.
-- `readOnly: true` is enforced through tool filtering, not filesystem isolation.
+- `readOnly: true` and custom tool classifications are permission previews/tool policy, not filesystem isolation.
 - Review workflows should remain read-only unless a workflow explicitly documents managed-worktree mutation.
 - Mutation-capable tasks should normally use managed worktrees in git repositories.
 - In non-git workspaces, write-capable workflows with `worktreePolicy: "off"` mutate the live directory.

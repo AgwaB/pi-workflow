@@ -578,7 +578,7 @@ test("compiler defers foreach task injection until runtime interpolation", async
 test("compiler applies explicit stage from dependencies and stage runtime defaults", async () => {
   const cwd = makeProject();
   try {
-    writeAgent(cwd, "unit-scout", "read");
+    writeAgent(cwd, "unit-scout", "read, grep");
     const compiled = await compileWorkflow(workflowSpec("unit-scout", {
       model: "kimi-coding/kimi-for-coding",
       thinking: "high",
@@ -600,6 +600,155 @@ test("compiler applies explicit stage from dependencies and stage runtime defaul
     assert.equal(byKey["final.main"].runtime.thinking, "high");
     assert.deepEqual(byKey["final.main"].runtime.tools, ["read", "grep"]);
     assert.equal(byKey["final.main"].runtime.maxRuntimeMs, 12345);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("schema accepts object-form tools and rejects invalid tool objects", () => {
+  parseWorkflow(workflowSpec("unit-scout", {
+    tools: [
+      "read",
+      {
+        name: "scrapling_fetch",
+        extensions: ["packages/pi-scrapling-access"],
+        classification: "read-only",
+        optional: true,
+        fallbackTools: ["fetch_content"],
+      },
+    ],
+  }));
+
+  const missingName = assertThrowsFlow(() => parseWorkflow(workflowSpec("unit-scout", { tools: [{ extensions: ["pkg"] }] })));
+  assertIssue(missingName, "$.tools[0].name", "is required");
+
+  const invalid = assertThrowsFlow(() => parseWorkflow(workflowSpec("unit-scout", {
+    tools: [
+      "read",
+      { name: "bad tool" },
+      { name: "custom_class", classification: "side-effect" },
+      { name: "custom_ext", extensions: "pkg" },
+      { name: "custom_fallback", fallbackTools: ["bad tool"] },
+    ],
+  })));
+  assertIssue(invalid, "$.tools[1].name", "invalid tool name");
+  assertIssue(invalid, "$.tools[2].classification", "must be one of");
+  assertIssue(invalid, "$.tools[3].extensions", "must be an array");
+  assertIssue(invalid, "$.tools[4].fallbackTools[0]", "invalid tool name");
+});
+
+test("compiler normalizes object-form tools and treats classified custom read-only tools as safe", async () => {
+  const cwd = makeProject();
+  try {
+    writeAgent(cwd, "unit-scout", "read, fetch_content, scrapling_fetch");
+    const compiled = await compileWorkflow(workflowSpec("unit-scout", {
+      tools: [
+        "read",
+        "fetch_content",
+        {
+          name: "scrapling_fetch",
+          extensions: ["packages/pi-scrapling-access"],
+          classification: "read-only",
+          optional: true,
+          fallbackTools: ["fetch_content"],
+        },
+      ],
+    }), { cwd, task: "Fetch safely" });
+
+    const task = compiled.tasks[0];
+    assert.deepEqual(task.runtime.tools, ["read", "fetch_content", "scrapling_fetch"]);
+    assert.deepEqual(task.runtime.toolProviders, {
+      scrapling_fetch: {
+        extensions: ["packages/pi-scrapling-access"],
+        classification: "read-only",
+        optional: true,
+        fallbackTools: ["fetch_content"],
+      },
+    });
+    assert.equal(task.safety.capability, "read-only");
+    assert.equal(task.safety.permission.status, "pending");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("compiler keeps unclassified custom tools blocked for explicit review", async () => {
+  const cwd = makeProject();
+  try {
+    writeAgent(cwd, "unit-scout", "read, custom_external_tool");
+    const compiled = await compileWorkflow(workflowSpec("unit-scout", {
+      tools: ["read", "custom_external_tool"],
+    }), { cwd, task: "Check custom tool" });
+
+    assert.equal(compiled.tasks[0].safety.permission.status, "blocked");
+    assert.equal(compiled.tasks[0].safety.permission.reason, "unknown/custom tools require explicit review: custom_external_tool");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("object-form tools cannot expand beyond agent-declared tool ceilings", async () => {
+  const cwd = makeProject();
+  try {
+    writeAgent(cwd, "unit-scout", "read");
+    await assert.rejects(
+      () => compileWorkflow(workflowSpec("unit-scout", {
+        tools: [{ name: "scrapling_fetch", classification: "read-only" }],
+      }), { cwd, task: "Fetch" }),
+      (error) => {
+        assert(error instanceof WorkflowValidationError);
+        assertIssue(error, "$.tools", "expands agent");
+        return true;
+      },
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("narrow tool scopes inherit metadata for strings and override it for objects", async () => {
+  const cwd = makeProject();
+  try {
+    writeAgent(cwd, "unit-scout", "read, scrapling_fetch");
+    const compiled = await compileWorkflow(workflowSpec("unit-scout", {
+      tools: [
+        "read",
+        {
+          name: "scrapling_fetch",
+          extensions: ["packages/base-provider"],
+          classification: "mutation-capable",
+          optional: true,
+        },
+      ],
+      workflow: {
+        stages: [
+          { id: "inherit", type: "task", tools: ["scrapling_fetch"], prompt: "Inherit metadata." },
+          {
+            id: "override",
+            type: "task",
+            tools: [{ name: "scrapling_fetch", extensions: ["packages/stage-provider"], classification: "read-only" }],
+            prompt: "Override metadata.",
+          },
+        ],
+      },
+    }), { cwd, task: "Fetch" });
+
+    const byKey = Object.fromEntries(compiled.tasks.map((task) => [task.key, task]));
+    assert.deepEqual(byKey["inherit.main"].runtime.tools, ["scrapling_fetch"]);
+    assert.deepEqual(byKey["inherit.main"].runtime.toolProviders, {
+      scrapling_fetch: {
+        extensions: ["packages/base-provider"],
+        classification: "mutation-capable",
+        optional: true,
+      },
+    });
+    assert.deepEqual(byKey["override.main"].runtime.toolProviders, {
+      scrapling_fetch: {
+        extensions: ["packages/stage-provider"],
+        classification: "read-only",
+        optional: true,
+      },
+    });
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -2081,6 +2230,47 @@ test("subagent launch loads provider extensions for extension-backed tools", asy
     await scheduleRun(cwd, run.runId);
 
     assert.deepEqual(captured.extensions, ["npm:pi-web-access"]);
+  } finally {
+    setSubagentApiForTests(undefined);
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("subagent launch merges object-form provider extensions with built-in mappings", async () => {
+  const cwd = makeProject();
+  let captured;
+  try {
+    writeAgent(cwd, "unit-researcher", "read, fetch_content, scrapling_fetch");
+    setSubagentApiForTests({
+      async runSubagent(options) {
+        captured = options;
+        return { runId: "run_stub", attemptId: "attempt_stub", status: "running" };
+      },
+      async getSubagentStatus() { return null; },
+      async reconcileSubagentRun() { return {}; },
+      async interruptSubagent() { return {}; },
+    });
+
+    const spec = workflowSpec("unit-researcher", {
+      tools: [
+        "read",
+        "fetch_content",
+        {
+          name: "scrapling_fetch",
+          extensions: ["npm:pi-web-access", "packages/pi-scrapling-access"],
+          classification: "read-only",
+        },
+      ],
+      workflow: { stages: [{ id: "main", type: "task", prompt: "Research with custom fetch fallback." }] },
+    });
+    const compiled = await compileWorkflow(spec, { cwd, task: "Research topic" });
+    const { run } = await createStageFirstRunRecord(cwd, compiled, join(cwd, "workflows", "unit.json"));
+    await writeStaticRunArtifacts(cwd, run, compiled, spec);
+    await writeRunRecord(cwd, run);
+    await scheduleRun(cwd, run.runId);
+
+    assert.deepEqual(captured.tools, ["read", "fetch_content", "scrapling_fetch"]);
+    assert.deepEqual(captured.extensions, ["npm:pi-web-access", "packages/pi-scrapling-access"]);
   } finally {
     setSubagentApiForTests(undefined);
     rmSync(cwd, { recursive: true, force: true });
