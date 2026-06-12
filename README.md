@@ -4,7 +4,7 @@
 
 [![npm](https://img.shields.io/npm/v/@agwab/pi-workflow.svg)](https://www.npmjs.com/package/@agwab/pi-workflow)
 
-`pi-workflow` lets you write project-specific workflows and run them through Pi's focused `/workflow` command surface. It supports explicit multi-subagent workflow structure — stage graphs, fan-out/fan-in, transforms, bounded loops, and resumable artifacts — on top of [`@agwab/pi-subagent`](https://www.npmjs.com/package/@agwab/pi-subagent)'s durable worker runtime.
+`pi-workflow` lets you write project-specific workflows and run them through Pi's focused `/workflow` command surface. It supports explicit workflow structure — stage graphs, subagent fan-out/fan-in, local support helpers, bounded loops, and resumable artifacts — on top of [`@agwab/pi-subagent`](https://www.npmjs.com/package/@agwab/pi-subagent)'s durable worker runtime.
 
 It is intentionally a thin orchestration layer, so you can add it when you want repeatable workflow structure, customize workflows as plain JSON/YAML, and remove it when plain Pi or direct subagent calls are enough.
 
@@ -77,16 +77,22 @@ pi-workflow inspect workflow_mq224pi8_775e71 --json
 
 A workflow is a deterministic stage graph. The concrete user task is supplied at runtime; the workflow definition supplies the structure, role prompts, tool ceilings, output contracts, and safety policy.
 
-Important rule: **stage order controls scheduling only**. A later plain `task` stage does not automatically receive prior output. Use `foreach.from` for dynamic fan-out and `reduce.from` for source-context fan-in.
+Important rule: **stage order controls scheduling only**. A later plain `task` stage does not automatically receive prior output. Use `foreach.from` for dynamic fan-out, `reduce.from` for source-context fan-in, and support `from` for local helper inputs.
 
-| Stage | Use it for | Runtime shape |
-|---|---|---|
-| `task` | One focused step | one prompt -> one subagent |
-| `parallel` | Static fan-out | fixed task list -> multiple subagents, bounded concurrency |
-| `foreach` | Dynamic fan-out | read an array from prior JSON output -> one subagent task per item |
-| `reduce` | Fan-in / synthesis | selected prior stage context -> one subagent |
-| `transform` | Deterministic local post-processing | selected prior structured outputs -> directory-local `.mjs` helper |
-| `loop` | Bounded repetition | repeat a fixed child stage subgraph until a deterministic stop condition |
+Public workflow definitions have three layers:
+
+- **Workflow layer**: stage ids, `from`, `sourcePolicy`, scheduling, and run artifacts.
+- **Subagent layer**: child Pi/model worker shapes — `task`, `parallel`, `foreach`, `reduce`, and `loop`.
+- **Support layer**: workflow-local helper execution via `support`; this is local Node code, not a subagent task type.
+
+| Node | Layer | Use it for | Runtime shape |
+|---|---|---|---|
+| `type: "task"` | Subagent | One focused step | one prompt -> one subagent |
+| `type: "parallel"` | Subagent/control | Static fan-out | fixed task list -> multiple subagents, bounded concurrency |
+| `type: "foreach"` | Subagent/control | Dynamic fan-out | read an array from prior JSON output -> one subagent task per item |
+| `type: "reduce"` | Subagent | Fan-in / synthesis | selected prior stage context -> one subagent |
+| `type: "loop"` | Workflow/control | Bounded repetition | repeat a fixed child stage subgraph until a deterministic stop condition |
+| `support` | Support | Deterministic local post-processing | selected prior structured outputs -> directory-local `.mjs` helper |
 
 A minimal workflow definition:
 
@@ -115,9 +121,18 @@ A minimal workflow definition:
         "each": { "prompt": "Research this question: ${item}" }
       },
       {
+        "id": "normalize",
+        "from": "research",
+        "sourcePolicy": "partial",
+        "support": {
+          "uses": "./helpers/normalize.mjs",
+          "options": { "dedupe": true }
+        }
+      },
+      {
         "id": "summary",
         "type": "reduce",
-        "from": ["plan", "research"],
+        "from": ["plan", "normalize"],
         "prompt": "Use Source Stage Context to synthesize the answer."
       }
     ]
@@ -155,8 +170,8 @@ Workflow names resolve from project `.pi/workflows/`, repository `workflows/`, b
 
 | Workflow | Shape | Use when |
 |---|---|---|
-| `deep-research` | task -> foreach -> reduce -> foreach -> transform -> reduce | Source-backed research, claim verification, deterministic evidence gating, citations, or follow-up suggestions. |
-| `deep-review` | task -> foreach -> transform -> foreach -> transform -> reduce | Multi-lens review where findings should be challenged before final synthesis. |
+| `deep-research` | task -> foreach -> reduce -> foreach -> support -> reduce | Source-backed research, claim verification, deterministic evidence gating, citations, or follow-up suggestions. |
+| `deep-review` | task -> foreach -> support -> foreach -> support -> reduce | Multi-lens review where findings should be challenged before final synthesis. |
 | `implement-loop` | loop: implement -> final check | Iterative implementation in one managed worktree until validation passes and review accepts. |
 | `test-repair-loop` | loop: repair -> final test-check | Focused repair loop for failing tests or explicit validation commands. |
 
@@ -217,6 +232,7 @@ Then validate and run:
 - Subagent workers are launched through `@agwab/pi-subagent`; inspect that package's sandbox/worktree behavior for execution isolation details.
 - Agent-declared tools are the authority ceiling; workflow definitions can only narrow them.
 - `readOnly: true` and custom tool classifications are permission previews/tool policy, not filesystem isolation.
+- Support helpers run as local `.mjs` code inside the workflow process with bundle path containment only; they are not sandboxed and are not constrained by subagent tool allowlists.
 - Review workflows should remain read-only unless a workflow explicitly documents managed-worktree mutation.
 - Mutation-capable tasks should normally use managed worktrees in git repositories.
 - In non-git workspaces, write-capable workflows with `worktreePolicy: "off"` mutate the live directory.

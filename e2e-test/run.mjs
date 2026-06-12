@@ -124,7 +124,7 @@ function main() {
     const researchSpec = parseWorkflow(JSON.parse(await readFile('workflows/deep-research/spec.json', 'utf8')));
     const compiledResearch = await compileWorkflow(researchSpec, { cwd: process.cwd(), task: 'Research smoke', specPath: process.cwd() + '/workflows/deep-research/spec.json' });
     const audit = compiledResearch.tasks.find((task) => task.stageId === 'audit-claims');
-    if (!audit || audit.kind !== 'transform') throw new Error('missing deep-research audit transform');
+    if (!audit || audit.kind !== 'support') throw new Error('missing deep-research audit support');
     if (!audit.dependsOn?.includes('verify-claims.item')) throw new Error('bad audit dependency: ' + JSON.stringify(audit.dependsOn));
   `,
 	);

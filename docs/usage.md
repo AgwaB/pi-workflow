@@ -124,8 +124,8 @@ The runtime task is not optional. `/workflow run <workflow>` without task text f
 
 | Workflow | Required agents | Mode | Use when |
 |---|---|---|---|
-| `deep-research` | `researcher` | plan + foreach questions + normalize + foreach verifier + audit transform + final reduce | Research needs source-backed claims, dynamic breadth/depth, independent verification, deterministic evidence gating, or citations. |
-| `deep-review` | `scout` | triage + foreach review lenses + dedup transform + foreach devil's advocate + verdict-partition transform + reduce | Thorough multi-lens review where findings should be independently challenged before synthesis. |
+| `deep-research` | `researcher` | plan + foreach questions + normalize + foreach verifier + audit support + final reduce | Research needs source-backed claims, dynamic breadth/depth, independent verification, deterministic evidence gating, or citations. |
+| `deep-review` | `scout` | triage + foreach review lenses + dedup support + foreach devil's advocate + verdict-partition support + reduce | Thorough multi-lens review where findings should be independently challenged before synthesis. |
 | `implement-loop` | `delegate`, `scout` | loop: implement -> final check | Iterative implementation in one managed worktree until validation passes and review accepts, or max/no-progress stops. |
 | `test-repair-loop` | `delegate`, `scout` | loop: repair -> final test-check | Focused repair loop for failing tests or explicit validation commands. |
 
@@ -135,16 +135,22 @@ Bundled starters use normal Pi agent discovery. Ensure the named agents exist in
 
 Stages are scheduled in order, but stage order does not pass data by itself.
 
-| Stage type | Data behavior |
-|---|---|
-| `task` | Receives only its compiled prompt and runtime task injection. Prior output is not automatic. |
-| `parallel` | Static fixed fan-out. |
-| `foreach` | Reads an array from `from.stage` + JSON path and materializes one task per item. |
-| `reduce` | Receives bounded Source Stage Context from `from` stages. |
-| `transform` | Runs a directory-local `.mjs` helper over selected source outputs. |
-| `loop` | Repeats fixed child stages until deterministic `until`, `maxRounds`, or no-progress stop. |
+Public workflow definitions separate three layers:
 
-Use `foreach.from` for dynamic fan-out and `reduce.from` for fan-in. Do not rely on a later plain `task` to see previous stage output.
+- **Workflow layer**: graph/control/data-dependency fields such as `id`, `from`, `sourcePolicy`, scheduling, and artifacts.
+- **Subagent layer**: child Pi/model worker shapes: `task`, `parallel`, `foreach`, `reduce`, and `loop`.
+- **Support layer**: local helper execution through a `support` object. Support is not a subagent task type.
+
+| Node | Layer | Data behavior |
+|---|---|---|
+| `type: "task"` | Subagent | Receives only its compiled prompt and runtime task injection. Prior output is not automatic. |
+| `type: "parallel"` | Subagent/control | Static fixed fan-out. |
+| `type: "foreach"` | Subagent/control | Reads an array from `from.stage` + JSON path and materializes one task per item. |
+| `type: "reduce"` | Subagent | Receives bounded Source Stage Context from `from` stages. |
+| `type: "loop"` | Workflow/control | Repeats fixed child stages until deterministic `until`, `maxRounds`, or no-progress stop. |
+| `support` | Support | Runs a directory-local `.mjs` helper over selected source outputs. |
+
+Use `foreach.from` for dynamic fan-out, `reduce.from` for subagent fan-in, and support `from` for local helper inputs. Do not rely on a later plain `task` to see previous stage output.
 
 ## Output contracts
 
@@ -163,16 +169,19 @@ Use:
 
 `output.template` and `output.templateRef` are prompt-shape hints; contracts are the validation authority.
 
-## Transform helpers
+## Support helpers
 
-A `transform` stage runs local helper code inline instead of launching a subagent:
+A support node runs local helper code inline instead of launching a subagent:
 
 ```json
 {
   "id": "audit-claims",
-  "type": "transform",
   "from": "verify-claims",
-  "helper": "./helpers/claim-evidence-gate.mjs"
+  "sourcePolicy": "partial",
+  "support": {
+    "uses": "./helpers/claim-evidence-gate.mjs",
+    "options": { "requireFetchedEvidenceForVerified": true }
+  }
 }
 ```
 
@@ -184,7 +193,7 @@ export default async function helper({ sources, options, context }) {
 }
 ```
 
-Helper refs must start with `./`, end in `.mjs`, and stay inside the workflow bundle directory. This is path containment, not a security sandbox; helper code still runs inside the workflow process.
+Helper refs must start with `./`, end in `.mjs`, and stay inside the workflow bundle directory. This is path containment, not a security sandbox; helper code still runs inside the workflow process and is not constrained by subagent tool allowlists. Legacy `type: "transform"` specs are rejected with a migration error; move the helper ref to `support.uses` and options to `support.options`.
 
 ## Loop behavior
 
@@ -206,7 +215,7 @@ fix-loop.r02.implement
 fix-loop.r02.check
 ```
 
-Loop child stages run strictly in listed order. Nested `loop`, `foreach`, `parallel`, and `transform` children are rejected in v1.
+Loop child stages run strictly in listed order. Nested `loop`, `foreach`, `parallel`, and support children are rejected in v1.
 
 A loop stops when:
 
@@ -266,8 +275,8 @@ Project workflows should live in:
 Authoring checklist:
 
 1. Start from a bundled workflow when one fits.
-2. Decide the stage graph first: task, parallel, foreach, reduce, transform, or loop.
-3. Make every data dependency explicit with `foreach.from` or `reduce.from`.
+2. Decide the workflow graph first: subagent stages (`task`, `parallel`, `foreach`, `reduce`, `loop`) plus support nodes when deterministic local helper code is needed.
+3. Make every data dependency explicit with `foreach.from`, `reduce.from`, or support `from`.
 4. Keep read-only workflows read-only.
 5. For write-capable workflows, choose a worktree policy and validation stage.
 6. Add JSON output contracts for model-produced data that later stages depend on.
