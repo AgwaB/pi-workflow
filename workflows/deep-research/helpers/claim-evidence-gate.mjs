@@ -1,3 +1,17 @@
+// Deterministic claim audit for deep-research.
+//
+// Sources: plan (optional), normalize-claims (optional), verify-claims foreach
+// outputs. For every verifier result this transform:
+//   1. rejoins the original claim text and factSlotIds from
+//      normalize-claims.claimInventory.verificationCandidates by id (the
+//      verifier echo is not trusted for identity fields),
+//   2. applies deterministic evidence gates (verified requires structured,
+//      URL-backed evidence; exact quantitative claims require a source URL),
+//   3. partitions claims by final status and counts them so the synthesis
+//      stage consumes code-computed buckets instead of re-deriving them,
+//   4. cross-checks plan.factSlots against normalize-claims.factSlotCoverage
+//      and reports slots the normalizer silently dropped.
+
 function asArray(value) {
   if (Array.isArray(value)) return value;
   if (value && typeof value === 'object') {
@@ -27,9 +41,17 @@ function collectUrls(value, urls = new Set()) {
   return urls;
 }
 
-function hasFetchedEvidence(value) {
-  const text = JSON.stringify(value ?? '');
-  return /fetched|inspected|retrieved|get_search_content|fetch_content|sourceurls?|url/i.test(text) && collectUrls(value).size > 0;
+// Structured evidence check: at least one evidence row carrying both a URL and
+// a quote/excerpt. Unlike a keyword scan over the serialized claim, this cannot
+// be satisfied by merely mentioning a URL in prose.
+function hasFetchedEvidence(claim) {
+  const rows = Array.isArray(claim?.evidence) ? claim.evidence : [];
+  return rows.some((row) => {
+    if (!row || typeof row !== 'object') return false;
+    const url = typeof row.url === 'string' && /^https?:\/\//.test(row.url);
+    const quote = typeof row.quote === 'string' && row.quote.trim().length > 0;
+    return url && quote;
+  });
 }
 
 function hasExactQuantitativeClaim(value) {
@@ -58,26 +80,71 @@ function withVerdict(claim, verdict, reason) {
   };
 }
 
+const STATUS_BUCKETS = {
+  verified: 'verified',
+  partially_supported: 'partiallySupported',
+  unsupported: 'unsupported',
+  conflicting: 'conflicting',
+};
+
+function findSource(sources, stageId) {
+  for (const [specId, source] of Object.entries(sources ?? {})) {
+    if (specId === stageId || specId.startsWith(`${stageId}.`)) return source;
+  }
+  return null;
+}
+
 export default async function claimEvidenceGate({ sources, options = {} }) {
-  const claims = Object.entries(sources ?? {}).flatMap(([sourceId, source]) => {
-    return asArray(source).map((claim) => ({ sourceId, claim }));
-  });
+  const plan = findSource(sources, 'plan');
+  const normalized = findSource(sources, 'normalize-claims');
+  const candidatesById = new Map();
+  for (const candidate of asArray(normalized?.claimInventory?.verificationCandidates)) {
+    if (candidate && typeof candidate === 'object' && typeof candidate.id === 'string') {
+      candidatesById.set(candidate.id, candidate);
+    }
+  }
+
+  const claims = Object.entries(sources ?? {})
+    .filter(([specId]) => specId === 'verify-claims' || specId.startsWith('verify-claims.'))
+    .flatMap(([sourceId, source]) => asArray(source).map((claim) => ({ sourceId, claim })));
+  // Legacy layout: when no verify-claims.* source ids exist (for example a
+  // single from: string dependency), fall back to every non-plan/non-normalize
+  // source.
+  const verifierClaims = claims.length > 0
+    ? claims
+    : Object.entries(sources ?? {})
+        .filter(([specId]) => !specId.startsWith('plan') && !specId.startsWith('normalize-claims'))
+        .flatMap(([sourceId, source]) => asArray(source).map((claim) => ({ sourceId, claim })));
 
   const auditedClaims = [];
   const remainingGaps = [];
-  const gateSummary = { total: 0, unchanged: 0, downgraded: 0 };
+  const identityJoinNotes = [];
+  const gateSummary = { total: 0, unchanged: 0, downgraded: 0, identityRejoined: 0 };
 
-  for (const { sourceId, claim } of claims) {
+  for (const { sourceId, claim } of verifierClaims) {
     if (!claim || typeof claim !== 'object') continue;
     gateSummary.total += 1;
-    const verdict = verdictOf(claim);
     const urls = [...collectUrls(claim)];
     const exactQuantitative = hasExactQuantitativeClaim(claim);
     const fetched = hasFetchedEvidence(claim);
     let next = { ...claim, sourceId, sourceUrls: urls };
 
+    // Identity join: the normalizer's candidate record is authoritative for
+    // claim id, claim text, and factSlotIds. Verifier echoes drift.
+    const claimId = typeof next.id === 'string' ? next.id : typeof next.claimId === 'string' ? next.claimId : null;
+    const candidate = claimId ? candidatesById.get(claimId) : null;
+    if (candidate) {
+      if (typeof candidate.claim === 'string' && candidate.claim && next.claim !== candidate.claim) {
+        if (next.claim) identityJoinNotes.push(`claim ${claimId}: verifier restated claim text; original restored`);
+        next.claim = candidate.claim;
+        gateSummary.identityRejoined += 1;
+      }
+      if (Array.isArray(candidate.factSlotIds)) next.factSlotIds = [...candidate.factSlotIds];
+    }
+
+    const verdict = verdictOf(next);
     if (verdict === 'verified' && options.requireFetchedEvidenceForVerified !== false && !fetched) {
-      next = withVerdict(next, 'partially_supported', 'verified claim lacked fetched/inspected URL evidence');
+      next = withVerdict(next, 'partially_supported', 'verified claim lacked structured evidence rows with both url and quote');
     }
     if (verdictOf(next) === 'verified' && options.downgradeExactQuantitativeWithoutSource !== false && exactQuantitative && urls.length === 0) {
       next = withVerdict(next, 'partially_supported', 'exact quantitative claim lacked source URL evidence');
@@ -86,7 +153,7 @@ export default async function claimEvidenceGate({ sources, options = {} }) {
     if (verdictOf(next) !== verdict) {
       gateSummary.downgraded += 1;
       remainingGaps.push({
-        claimId: claim.id ?? claim.claimId,
+        claimId: next.id ?? next.claimId,
         evidenceState: 'insufficient_for_verified',
         sourceUrls: urls,
         nextStep: 'Fetch or inspect primary source evidence for the exact claim before using it as verified.',
@@ -97,5 +164,56 @@ export default async function claimEvidenceGate({ sources, options = {} }) {
     auditedClaims.push(next);
   }
 
-  return { auditedClaims, gateSummary, remainingGaps };
+  // Deterministic status partition + counts for the synthesis stage.
+  const statusPartitions = { verified: [], partiallySupported: [], unsupported: [], conflicting: [], other: [] };
+  for (const claim of auditedClaims) {
+    const bucket = STATUS_BUCKETS[verdictOf(claim)] ?? 'other';
+    statusPartitions[bucket].push(claim.id ?? claim.claimId ?? null);
+  }
+  const verdictCounts = Object.fromEntries(Object.entries(statusPartitions).map(([bucket, ids]) => [bucket, ids.length]));
+
+  // Slot coverage cross-check: planned slots that the normalizer dropped.
+  const plannedSlotIds = asArray(plan?.factSlots)
+    .map((slot) => (slot && typeof slot === 'object' && typeof slot.id === 'string' ? slot.id : null))
+    .filter(Boolean);
+  const coveredSlotIds = new Set(
+    asArray(normalized?.factSlotCoverage)
+      .map((slot) => (slot && typeof slot === 'object' && typeof slot.slotId === 'string' ? slot.slotId : null))
+      .filter(Boolean),
+  );
+  const droppedSlotIds = plannedSlotIds.filter((id) => !coveredSlotIds.has(id));
+  for (const slotId of droppedSlotIds) {
+    remainingGaps.push({
+      slotId,
+      evidenceState: 'slot_missing_from_coverage',
+      nextStep: 'normalize-claims omitted this planned fact slot from factSlotCoverage; treat as a coverage gap.',
+    });
+  }
+
+  // Compact per-claim digest for the synthesis stage's source-context budget;
+  // auditedClaims (with full evidence rows) stays in the artifact as audit trail.
+  const claimDigests = auditedClaims.map((claim) => ({
+    id: claim.id ?? claim.claimId ?? null,
+    claim: claim.claim,
+    factSlotIds: claim.factSlotIds,
+    status: verdictOf(claim),
+    confidence: claim.confidence,
+    verdictDigest: claim.verdictDigest,
+    correctionOrCounterclaim: claim.correctionOrCounterclaim,
+  }));
+
+  return {
+    auditedClaims,
+    claimDigests,
+    gateSummary,
+    remainingGaps,
+    statusPartitions,
+    verdictCounts,
+    slotCoverageCheck: {
+      plannedSlotCount: plannedSlotIds.length,
+      coveredSlotCount: coveredSlotIds.size,
+      droppedSlotIds,
+    },
+    identityJoinNotes,
+  };
 }

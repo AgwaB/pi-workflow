@@ -78,12 +78,15 @@ Supported spec files: `.json`, `.yaml`, `.yml`.
 A workflow can be a flat file:
 
 ```text
-workflows/deep-review.json
+workflows/test-repair-loop.json
 ```
 
 or a bundle:
 
 ```text
+workflows/deep-review/
+  spec.json
+
 workflows/deep-research/
   spec.json
   templates.json
@@ -115,16 +118,18 @@ A run prints a `workflow_*` id. Use that id for follow-up commands:
 
 The runtime task is not optional. `/workflow run <workflow>` without task text fails before launch.
 
-## Built-in workflows
+## Bundled starter workflows
+
+`pi-workflow` ships a small starter set, not a comprehensive workflow catalog. Treat these as practical defaults and authoring examples; create project-local workflows under `.pi/workflows/` when your team needs patterns that are not bundled.
 
 | Workflow | Required agents | Mode | Use when |
 |---|---|---|---|
 | `deep-research` | `researcher` | plan + foreach questions + normalize + foreach verifier + audit transform + final reduce | Research needs source-backed claims, dynamic breadth/depth, independent verification, deterministic evidence gating, or citations. |
-| `deep-review` | `scout` | triage + foreach review lenses + foreach devil's advocate + reduce | Thorough read-only/panel review where findings should be independently challenged before synthesis. |
+| `deep-review` | `scout` | triage + foreach review lenses + dedup transform + foreach devil's advocate + verdict-partition transform + reduce | Thorough multi-lens review where findings should be independently challenged before synthesis. |
 | `implement-loop` | `delegate`, `scout` | loop: implement -> final check | Iterative implementation in one managed worktree until validation passes and review accepts, or max/no-progress stops. |
 | `test-repair-loop` | `delegate`, `scout` | loop: repair -> final test-check | Focused repair loop for failing tests or explicit validation commands. |
 
-Bundled workflows use normal Pi agent discovery. Ensure the named agents exist in `~/.pi/agent/agents/` or project `.pi/agents/`, or customize the workflow with agents that exist in your environment.
+Bundled starters use normal Pi agent discovery. Ensure the named agents exist in `~/.pi/agent/agents/` or project `.pi/agents/`, or customize the workflow with agents that exist in your environment.
 
 ## Stage model
 

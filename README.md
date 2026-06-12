@@ -1,10 +1,12 @@
 # pi-workflow
 
-**Workflow orchestration for Pi subagents.**
+**Workflow orchestration for Pi.**
 
 [![npm](https://img.shields.io/npm/v/@agwab/pi-workflow.svg)](https://www.npmjs.com/package/@agwab/pi-workflow)
 
-`pi-workflow` turns multi-subagent work into explicit workflows that Pi can run, inspect, and resume. It builds on [`@agwab/pi-subagent`](https://www.npmjs.com/package/@agwab/pi-subagent) for durable worker execution and adds a workflow layer for stage graphs, fan-out/fan-in, transforms, and bounded loops.
+`pi-workflow` lets you write project-specific workflows and run them through Pi's focused `/workflow` command surface. It supports explicit multi-subagent workflow structure — stage graphs, fan-out/fan-in, transforms, bounded loops, and resumable artifacts — on top of [`@agwab/pi-subagent`](https://www.npmjs.com/package/@agwab/pi-subagent)'s durable worker runtime.
+
+It is intentionally a thin orchestration layer, so you can add it when you want repeatable workflow structure, customize workflows as plain JSON/YAML, and remove it when plain Pi or direct subagent calls are enough.
 
 npm package: [`@agwab/pi-workflow`](https://www.npmjs.com/package/@agwab/pi-workflow)
 
@@ -16,9 +18,9 @@ pi install npm:@agwab/pi-workflow
 
 Then reload Pi.
 
-Requires Node.js `>=22.19.0`. Like Pi and `pi-subagent`, this package is intended for macOS or Linux; on Windows, use WSL2.
+Requires Node.js `>=22.19.0` on macOS or Linux. Native Windows is not supported; use WSL2.
 
-For local development, install the checkout as a Pi package source and reload Pi:
+For local development, add this package as a Pi extension source and reload Pi:
 
 ```bash
 pi install /absolute/path/to/pi-workflow
@@ -26,7 +28,7 @@ pi install /absolute/path/to/pi-workflow
 
 ## Quick usage
 
-List bundled and project workflows:
+List bundled starter workflows and project workflows:
 
 ```text
 /workflow list
@@ -145,18 +147,20 @@ A minimal workflow definition:
 
 Agent frontmatter remains the authority ceiling: workflow, defaults, and stage `tools` can only narrow tools already declared by the selected agent. Built-in tool classifications remain authoritative; custom tools without an explicit object `classification` still require explicit review. Bundled/public workflows should avoid machine-specific local provider paths. Project-local workflows may use deliberate local package refs such as `packages/...` when they are portable within that project.
 
-## Bundled workflows
+## Bundled starter workflows
 
-The package includes workflow definitions in [`workflows/`](./workflows/). Workflow names resolve from project `.pi/workflows/`, repository `workflows/`, bundled package workflows, and `~/.pi/agent/workflows/`; ambiguous names fail closed.
+The package includes a small starter set in [`workflows/`](./workflows/). These are practical defaults and authoring examples, not a comprehensive workflow catalog. Most teams should copy or create project-specific workflows under `.pi/workflows/` as their patterns settle.
+
+Workflow names resolve from project `.pi/workflows/`, repository `workflows/`, bundled package workflows, and `~/.pi/agent/workflows/`; ambiguous names fail closed.
 
 | Workflow | Shape | Use when |
 |---|---|---|
 | `deep-research` | task -> foreach -> reduce -> foreach -> transform -> reduce | Source-backed research, claim verification, deterministic evidence gating, citations, or follow-up suggestions. |
-| `deep-review` | task -> foreach -> foreach -> reduce | Panel-style review where findings should be challenged before final synthesis. |
+| `deep-review` | task -> foreach -> transform -> foreach -> transform -> reduce | Multi-lens review where findings should be challenged before final synthesis. |
 | `implement-loop` | loop: implement -> final check | Iterative implementation in one managed worktree until validation passes and review accepts. |
 | `test-repair-loop` | loop: repair -> final test-check | Focused repair loop for failing tests or explicit validation commands. |
 
-Other workflow shapes such as migration planning, best-of-N fixes, revise loops, and decision debates are intentionally deferred until stronger task-fit evidence exists.
+Additional workflow shapes are intentionally left to project-local workflows until their task fit is clear enough to bundle.
 
 ## Commands
 
@@ -182,7 +186,7 @@ There is not currently a `/workflow` board, `/workflow view`, `/workflow continu
 
 `pi-workflow` includes a `workflow-guide` skill for creating, modifying, and reviewing workflow definitions.
 
-Use it when you want to adapt a bundled workflow or create a project-specific workflow. Project workflow definitions should be saved under:
+Use it when you want to adapt a bundled starter or create a project-specific workflow. Project workflow definitions should be saved under:
 
 ```text
 .pi/workflows/<name>.json
