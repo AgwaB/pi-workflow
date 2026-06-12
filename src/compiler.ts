@@ -828,6 +828,102 @@ export async function compileWorkflow(
 		};
 	};
 
+	const compileDagContainerStage = async (
+		containerStage: any,
+		containerDependencyKeys: string[],
+		containerContextDependsOn: string[] | undefined,
+	): Promise<string[]> => {
+		const scopedStageTaskKeys = new Map<string, string[]>();
+
+		for (const childStage of containerStage.stages ?? []) {
+			const currentChildTaskKeys: string[] = [];
+			const childFromDependencyKeys = dependencyKeysForStage(
+				childStage,
+				scopedStageTaskKeys,
+			);
+			const childAfterDependencyKeys = afterDependencyKeysForStage(
+				childStage,
+				scopedStageTaskKeys,
+			);
+			const siblingDependencyKeys = uniqueDependencyKeys([
+				...childFromDependencyKeys,
+				...childAfterDependencyKeys,
+			]);
+			const isRootChild = siblingDependencyKeys.length === 0;
+			const childDependencyKeys = isRootChild
+				? containerDependencyKeys
+				: siblingDependencyKeys;
+			const childContextDependsOn = isRootChild
+				? containerContextDependsOn
+				: childStage.after !== undefined
+					? childFromDependencyKeys
+					: undefined;
+			const childDependencyOverrides: Partial<CompiledTask> =
+				childContextDependsOn !== undefined
+					? { contextDependsOn: [...childContextDependsOn] }
+					: {};
+			const namespacedChildStage = namespacedDagChildStage(
+				containerStage,
+				childStage,
+			);
+			const childStageKind = stageKindFor(namespacedChildStage);
+
+			if (childStageKind === "dag") {
+				currentChildTaskKeys.push(
+					...(await compileDagContainerStage(
+						namespacedChildStage,
+						childDependencyKeys,
+						childContextDependsOn,
+					)),
+				);
+				scopedStageTaskKeys.set(childStage.id, currentChildTaskKeys);
+				continue;
+			}
+
+			stageRecords.push({
+				id: namespacedChildStage.id,
+				type: childStageKind,
+				sourcePolicy: namespacedChildStage.sourcePolicy ?? "require-success",
+			});
+			const addChildTask = async (taskId: string, prompt: string) => {
+				const task = await buildTask(
+					namespacedChildStage,
+					taskId,
+					prompt,
+					childDependencyKeys,
+					childDependencyOverrides,
+				);
+				tasks.push(task);
+				currentChildTaskKeys.push(task.id);
+			};
+
+			if (childStageKind === "parallel" && Array.isArray(childStage.tasks)) {
+				for (const item of childStage.tasks)
+					await addChildTask(
+						item.id ?? `item-${tasks.length + 1}`,
+						item.prompt ?? "",
+					);
+			} else if (childStageKind === "foreach") {
+				await addChildTask(
+					"item",
+					namespacedChildStage.each?.prompt ?? namespacedChildStage.prompt ?? "",
+				);
+			} else if (childStageKind === "support") {
+				await addChildTask(
+					"main",
+					`Run support helper ${namespacedChildStage.support.uses}.`,
+				);
+			} else {
+				await addChildTask("main", namespacedChildStage.prompt ?? "");
+			}
+
+			scopedStageTaskKeys.set(childStage.id, currentChildTaskKeys);
+		}
+
+		const outputChildId = resolveDagOutputChildId(containerStage);
+		return outputChildId ? (scopedStageTaskKeys.get(outputChildId) ?? []) : [];
+	};
+
 	for (const stage of stages) {
 		const currentStageTaskKeys: string[] = [];
 		const fromDependencyKeys = dependencyKeysForStage(stage, stageTaskKeys);
@@ -847,6 +943,19 @@ export async function compileWorkflow(
 				: {};
 
 		const stageKind = stageKindFor(stage);
+
+		if (stageKind === "dag") {
+			currentStageTaskKeys.push(
+				...(await compileDagContainerStage(
+					stage,
+					dependencyKeys,
+					stage.after !== undefined ? fromDependencyKeys : undefined,
+				)),
+			);
+			previousStageTaskKeys = currentStageTaskKeys;
+			stageTaskKeys.set(stage.id, currentStageTaskKeys);
+			continue;
+		}
 
 		if (stageKind === "loop") {
 			const placeholderKey = `${stage.id}.loop`;
@@ -1051,6 +1160,7 @@ function buildSupportTask(
 		compiledPrompt,
 		injectTask: false,
 		kind: "support",
+		stageMaxConcurrency: stage.maxConcurrency,
 		dependsOn: [...dependencyKeys],
 		support: { uses, options },
 		...overrides,
@@ -1159,6 +1269,71 @@ async function compileLoopChildTemplates(
 		: undefined;
 
 	return { childStageIds, childTemplates, childStageRecords, onExhausted };
+}
+
+function namespacedDagChildStage(containerStage: any, childStage: any): any {
+	const namespacedStage = {
+		...childStage,
+		id: `${containerStage.id}.${childStage.id}`,
+	};
+	if (
+		namespacedStage.sourcePolicy === undefined &&
+		containerStage.sourcePolicy !== undefined
+	) {
+		namespacedStage.sourcePolicy = containerStage.sourcePolicy;
+	}
+	if (
+		namespacedStage.maxConcurrency === undefined &&
+		containerStage.maxConcurrency !== undefined
+	) {
+		namespacedStage.maxConcurrency = containerStage.maxConcurrency;
+	}
+	if (namespacedStage.type === "foreach") {
+		namespacedStage.from = namespaceDagStageRefs(
+			childStage.from,
+			containerStage.id,
+		);
+	}
+	return namespacedStage;
+}
+
+function namespaceDagStageRefs(value: any, namespace: string): any {
+	if (typeof value === "string") return `${namespace}.${value}`;
+	if (Array.isArray(value))
+		return value.map((item) =>
+			typeof item === "string" ? `${namespace}.${item}` : item,
+		);
+	if (value && typeof value === "object") {
+		return typeof value.stage === "string"
+			? { ...value, stage: `${namespace}.${value.stage}` }
+			: value;
+	}
+	return value;
+}
+
+function resolveDagOutputChildId(stage: any): string | undefined {
+	if (typeof stage.outputFrom === "string" && stage.outputFrom.trim() !== "")
+		return stage.outputFrom;
+	const sinkIds = dagSinkStageIds(stage.stages ?? []);
+	return sinkIds.length === 1 ? sinkIds[0] : undefined;
+}
+
+function dagSinkStageIds(stages: any[]): string[] {
+	const childStageIds = new Set<string>();
+	for (const childStage of stages) {
+		if (typeof childStage?.id === "string" && childStage.id.trim() !== "")
+			childStageIds.add(childStage.id);
+	}
+	const dependedOnStageIds = new Set<string>();
+	for (const childStage of stages) {
+		for (const stageId of [
+			...stageIdsFromFrom(childStage?.from),
+			...stageIdsFromAfter(childStage?.after),
+		]) {
+			if (childStageIds.has(stageId)) dependedOnStageIds.add(stageId);
+		}
+	}
+	return [...childStageIds].filter((id) => !dependedOnStageIds.has(id));
 }
 
 function dependencyKeysForStage(

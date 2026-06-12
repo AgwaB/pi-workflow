@@ -1630,6 +1630,260 @@ test("compiler treats empty after as an explicit parallel root", async () => {
 	}
 });
 
+test("compiler lowers dag containers to namespaced child tasks", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const compiled = await compileWorkflow(
+			workflowSpec("unit-scout", {
+				workflow: {
+					stages: [
+						{
+							id: "seed",
+							type: "parallel",
+							tasks: [
+								{ id: "one", prompt: "Seed one." },
+								{ id: "two", prompt: "Seed two." },
+							],
+						},
+						{ id: "gate", type: "task", prompt: "Gate." },
+						{
+							id: "box",
+							type: "dag",
+							from: "seed",
+							after: "gate",
+							outputFrom: "d",
+							stages: [
+								{ id: "a", type: "task", prompt: "A." },
+								{ id: "b", type: "task", after: "a", prompt: "B." },
+								{ id: "c", type: "task", after: "a", prompt: "C." },
+								{
+									id: "d",
+									type: "reduce",
+									from: "b",
+									after: "c",
+									prompt: "D.",
+								},
+							],
+						},
+						{ id: "implicit", type: "task", prompt: "Implicit." },
+						{ id: "down", type: "task", from: "box", prompt: "Down." },
+					],
+				},
+			}),
+			{ cwd, task: "Check dag" },
+		);
+
+		const byKey = Object.fromEntries(
+			compiled.tasks.map((task) => [task.key, task]),
+		);
+		assert.deepEqual(
+			compiled.tasks.map((task) => task.key),
+			[
+				"seed.one",
+				"seed.two",
+				"gate.main",
+				"box.a.main",
+				"box.b.main",
+				"box.c.main",
+				"box.d.main",
+				"implicit.main",
+				"down.main",
+			],
+		);
+		assert.deepEqual(
+			compiled.stages
+				.filter((stage) => String(stage.id).startsWith("box"))
+				.map((stage) => stage.id),
+			["box.a", "box.b", "box.c", "box.d"],
+		);
+		assert.deepEqual(byKey["box.a.main"].dependsOn, [
+			"seed.one",
+			"seed.two",
+			"gate.main",
+		]);
+		assert.deepEqual(byKey["box.a.main"].contextDependsOn, [
+			"seed.one",
+			"seed.two",
+		]);
+		assert.deepEqual(byKey["box.b.main"].dependsOn, ["box.a.main"]);
+		assert.deepEqual(byKey["box.b.main"].contextDependsOn, []);
+		assert.deepEqual(byKey["box.d.main"].dependsOn, [
+			"box.b.main",
+			"box.c.main",
+		]);
+		assert.deepEqual(byKey["box.d.main"].contextDependsOn, ["box.b.main"]);
+		assert.deepEqual(byKey["implicit.main"].dependsOn, ["box.d.main"]);
+		assert.deepEqual(byKey["down.main"].dependsOn, ["box.d.main"]);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("compiler lowers foreach and support children inside dag containers", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const compiled = await compileWorkflow(
+			workflowSpec("unit-scout", {
+				workflow: {
+					stages: [
+						{
+							id: "fan",
+							type: "dag",
+							sourcePolicy: "partial",
+							maxConcurrency: 2,
+							outputFrom: "audit",
+							stages: [
+								{
+									id: "source",
+									type: "task",
+									output: { format: "json" },
+									prompt: "Source.",
+								},
+								{
+									id: "verify",
+									type: "foreach",
+									from: { stage: "source", path: "$.items" },
+									each: { prompt: "Verify ${item}." },
+								},
+								{
+									id: "audit",
+									from: "verify",
+									support: { uses: "./helpers/audit.mjs" },
+								},
+							],
+						},
+					],
+				},
+			}),
+			{ cwd, task: "Check fanout" },
+		);
+
+		const byKey = Object.fromEntries(
+			compiled.tasks.map((task) => [task.key, task]),
+		);
+		assert.deepEqual(byKey["fan.verify.item"].dependsOn, [
+			"fan.source.main",
+		]);
+		assert.deepEqual(byKey["fan.verify.item"].foreach.from, {
+			stage: "fan.source",
+			path: "$.items",
+		});
+		assert.equal(byKey["fan.verify.item"].stageMaxConcurrency, 2);
+		assert.equal(
+			compiled.stages.find((stage) => stage.id === "fan.verify").sourcePolicy,
+			"partial",
+		);
+		assert.equal(byKey["fan.audit.main"].agent, "support");
+		assert.equal(byKey["fan.audit.main"].stageMaxConcurrency, 2);
+		assert.deepEqual(byKey["fan.audit.main"].dependsOn, ["fan.verify.item"]);
+		assert.deepEqual(byKey["fan.audit.main"].support, {
+			uses: "./helpers/audit.mjs",
+			options: undefined,
+		});
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("compiler lowers nested dag containers with composed namespaces", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const compiled = await compileWorkflow(
+			workflowSpec("unit-scout", {
+				workflow: {
+					stages: [
+						{
+							id: "outer",
+							type: "dag",
+							outputFrom: "inner",
+							stages: [
+								{ id: "root", type: "task", prompt: "Root." },
+								{
+									id: "inner",
+									type: "dag",
+									from: "root",
+									stages: [
+										{ id: "leaf", type: "task", prompt: "Leaf." },
+									],
+								},
+							],
+						},
+						{ id: "next", type: "task", from: "outer", prompt: "Next." },
+					],
+				},
+			}),
+			{ cwd, task: "Check nested" },
+		);
+
+		const byKey = Object.fromEntries(
+			compiled.tasks.map((task) => [task.key, task]),
+		);
+		assert.deepEqual(Object.keys(byKey), [
+			"outer.root.main",
+			"outer.inner.leaf.main",
+			"next.main",
+		]);
+		assert.deepEqual(byKey["outer.inner.leaf.main"].dependsOn, [
+			"outer.root.main",
+		]);
+		assert.deepEqual(byKey["next.main"].dependsOn, [
+			"outer.inner.leaf.main",
+		]);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("compiler keeps dag namespace prefixes distinct from loop ids", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const compiled = await compileWorkflow(
+			workflowSpec("unit-scout", {
+				workflow: {
+					stages: [
+						{
+							id: "box",
+							type: "loop",
+							stages: [
+								{ id: "implement", type: "task", prompt: "Implement." },
+								{ id: "check", type: "task", prompt: "Check." },
+							],
+							maxRounds: 1,
+							until: { stage: "check", path: "$.status", equals: "pass" },
+						},
+						{
+							id: "boxcar",
+							type: "dag",
+							stages: [
+								{ id: "r01", type: "task", prompt: "Looks loop-like." },
+								{ id: "done", type: "task", from: "r01", prompt: "Done." },
+							],
+						},
+					],
+				},
+			}),
+			{ cwd, task: "Check prefixes" },
+		);
+
+		assert.equal(
+			compiled.stages.find((stage) => stage.id === "box").type,
+			"loop",
+		);
+		assert(compiled.tasks.some((task) => task.key === "box.loop"));
+		assert(compiled.tasks.some((task) => task.key === "boxcar.r01.main"));
+		assert.equal(
+			compiled.tasks.find((task) => task.key === "boxcar.r01.main").loopChild,
+			undefined,
+		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("schema accepts object-form tools and rejects invalid tool objects", () => {
 	parseWorkflow(
 		workflowSpec("unit-scout", {
