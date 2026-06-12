@@ -4026,6 +4026,67 @@ test("subagent launch loads provider extensions for extension-backed tools", asy
 	}
 });
 
+test("subagent launch appends extra extensions from env", async () => {
+	const cwd = makeProject();
+	const previous = process.env.PI_WORKFLOW_SUBAGENT_EXTRA_EXTENSIONS;
+	let captured;
+	try {
+		process.env.PI_WORKFLOW_SUBAGENT_EXTRA_EXTENSIONS = "/tmp/pi-telemetry-extension.mjs";
+		writeAgent(cwd, "unit-researcher", "read, fetch_content");
+		setSubagentApiForTests({
+			async runSubagent(options) {
+				captured = options;
+				return {
+					runId: "run_stub",
+					attemptId: "attempt_stub",
+					status: "running",
+				};
+			},
+			async getSubagentStatus() {
+				return null;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+
+		const spec = workflowSpec("unit-researcher", {
+			tools: ["read", "fetch_content"],
+			workflow: {
+				stages: [
+					{ id: "main", type: "task", prompt: "Research with fetch." },
+				],
+			},
+		});
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Research topic",
+		});
+		const { run } = await createStageFirstRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await writeRunRecord(cwd, run);
+		await scheduleRun(cwd, run.runId);
+
+		assert.deepEqual(captured.extensions, [
+			"npm:pi-web-access",
+			"/tmp/pi-telemetry-extension.mjs",
+		]);
+	} finally {
+		if (previous === undefined)
+			delete process.env.PI_WORKFLOW_SUBAGENT_EXTRA_EXTENSIONS;
+		else process.env.PI_WORKFLOW_SUBAGENT_EXTRA_EXTENSIONS = previous;
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("subagent launch merges object-form provider extensions with built-in mappings", async () => {
 	const cwd = makeProject();
 	let captured;
