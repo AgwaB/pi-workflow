@@ -582,19 +582,19 @@ test("schema rejects foreach child in loop as deferred", () => {
 	assertIssue(error, "$.workflow.stages[0].stages[0].type", "deferred");
 });
 
-test("schema rejects transform child in loop as deferred", () => {
+test("schema rejects support child in loop as deferred", () => {
 	const error = assertThrowsFlow(() =>
 		parseWorkflow(
 			loopWorkflowSpec({
 				stages: [
 					{ id: "implement", type: "task", prompt: "Implement." },
-					{ id: "gate", type: "transform", helper: "./helpers/gate.mjs" },
+					{ id: "gate", support: { uses: "./helpers/gate.mjs" } },
 					{ id: "check", type: "task", prompt: "Check." },
 				],
 			}),
 		),
 	);
-	assertIssue(error, "$.workflow.stages[0].stages[1].type", "deferred");
+	assertIssue(error, "$.workflow.stages[0].stages[1].support", "deferred");
 });
 
 test("schema rejects parallel child in loop", () => {
@@ -2869,7 +2869,7 @@ test("schema validates stage sourceContext projection settings", () => {
 	);
 });
 
-test("schema and compiler accept transform stages", async () => {
+test("schema and compiler accept support nodes", async () => {
 	const cwd = makeProject();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
@@ -2884,26 +2884,27 @@ test("schema and compiler accept transform stages", async () => {
 					},
 					{
 						id: "audit",
-						type: "transform",
 						from: "verify",
-						helper: "./helpers/audit.mjs",
-						options: { strict: true },
+						support: {
+							uses: "./helpers/audit.mjs",
+							options: { strict: true },
+						},
 					},
 				],
 			},
 		});
 
 		const parsed = parseWorkflow(spec);
-		assert.equal(parsed.workflow.stages[1].helper, "./helpers/audit.mjs");
+		assert.equal(parsed.workflow.stages[1].support.uses, "./helpers/audit.mjs");
 		const compiled = await compileWorkflow(spec, { cwd, task: "Research" });
-		const transformTask = compiled.tasks.find(
-			(task) => task.stageId === "audit",
-		);
-		assert.ok(transformTask);
-		assert.equal(transformTask.kind, "transform");
-		assert.deepEqual(transformTask.dependsOn, ["verify.main"]);
-		assert.deepEqual(transformTask.transform, {
-			helper: "./helpers/audit.mjs",
+		const supportTask = compiled.tasks.find((task) => task.stageId === "audit");
+		assert.ok(supportTask);
+		assert.equal(supportTask.kind, "support");
+		assert.equal(supportTask.agent, "support");
+		assert.equal(supportTask.runtime.tools, undefined);
+		assert.deepEqual(supportTask.dependsOn, ["verify.main"]);
+		assert.deepEqual(supportTask.support, {
+			uses: "./helpers/audit.mjs",
 			options: { strict: true },
 		});
 	} finally {
@@ -2911,19 +2912,8 @@ test("schema and compiler accept transform stages", async () => {
 	}
 });
 
-test("schema rejects invalid transform stages", () => {
-	const missingHelper = assertThrowsFlow(() =>
-		parseWorkflow(
-			workflowSpec("unit-scout", {
-				workflow: {
-					stages: [{ id: "audit", type: "transform", from: "verify" }],
-				},
-			}),
-		),
-	);
-	assertIssue(missingHelper, "$.workflow.stages[0].helper", "required");
-
-	const unknownKey = assertThrowsFlow(() =>
+test("schema rejects invalid support nodes and legacy transform syntax", () => {
+	const legacy = assertThrowsFlow(() =>
 		parseWorkflow(
 			workflowSpec("unit-scout", {
 				workflow: {
@@ -2933,6 +2923,61 @@ test("schema rejects invalid transform stages", () => {
 							type: "transform",
 							from: "verify",
 							helper: "./helpers/audit.mjs",
+						},
+					],
+				},
+			}),
+		),
+	);
+	assertIssue(
+		legacy,
+		"$.workflow.stages[0].type",
+		'legacy type "transform" is not supported',
+	);
+	assertIssue(legacy, "$.workflow.stages[0].type", "use support");
+
+	const missingUses = assertThrowsFlow(() =>
+		parseWorkflow(
+			workflowSpec("unit-scout", {
+				workflow: {
+					stages: [{ id: "audit", from: "verify", support: {} }],
+				},
+			}),
+		),
+	);
+	assertIssue(missingUses, "$.workflow.stages[0].support.uses", "required");
+
+	const typedSupport = assertThrowsFlow(() =>
+		parseWorkflow(
+			workflowSpec("unit-scout", {
+				workflow: {
+					stages: [
+						{
+							id: "audit",
+							type: "task",
+							from: "verify",
+							support: { uses: "./helpers/audit.mjs" },
+						},
+					],
+				},
+			}),
+		),
+	);
+	assertIssue(
+		typedSupport,
+		"$.workflow.stages[0].type",
+		"must not declare type",
+	);
+
+	const unknownKey = assertThrowsFlow(() =>
+		parseWorkflow(
+			workflowSpec("unit-scout", {
+				workflow: {
+					stages: [
+						{
+							id: "audit",
+							from: "verify",
+							support: { uses: "./helpers/audit.mjs" },
 							prompt: "No prompt",
 						},
 					],
@@ -3483,7 +3528,7 @@ test("successive foreach materialization keeps task ids unique with output contr
 	}
 });
 
-test("stage-first transform executes helper and writes artifacts", async () => {
+test("stage-first support executes helper and writes artifacts", async () => {
 	const cwd = makeProject();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
@@ -3505,10 +3550,11 @@ test("stage-first transform executes helper and writes artifacts", async () => {
 					},
 					{
 						id: "audit",
-						type: "transform",
 						from: "extract",
-						helper: "./helpers/audit.mjs",
-						options: { strict: true },
+						support: {
+							uses: "./helpers/audit.mjs",
+							options: { strict: true },
+						},
 					},
 				],
 			},
@@ -3537,13 +3583,13 @@ test("stage-first transform executes helper and writes artifacts", async () => {
 
 		await scheduleRun(cwd, run.runId);
 		const updated = await readRunRecord(cwd, run.runId);
-		const transform = updated.tasks.find(
-			(task) => task.specId === "audit.main",
-		);
-		assert.equal(transform?.status, "completed");
-		assert.equal(transform?.lastMessage, "transform completed");
+		const support = updated.tasks.find((task) => task.specId === "audit.main");
+		assert.equal(support?.kind, "support");
+		assert.equal(support?.status, "completed");
+		assert.equal(support?.statusDetail, "support_completed");
+		assert.equal(support?.lastMessage, "support completed");
 		assert.deepEqual(
-			JSON.parse(readFileSync(join(cwd, transform.files.result), "utf8"))
+			JSON.parse(readFileSync(join(cwd, support.files.result), "utf8"))
 				.structuredOutput,
 			{
 				audited: 2,
@@ -3556,7 +3602,7 @@ test("stage-first transform executes helper and writes artifacts", async () => {
 	}
 });
 
-test("stage-first transform marks helper errors as failed", async () => {
+test("stage-first support marks helper errors as failed", async () => {
 	const cwd = makeProject();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
@@ -3578,9 +3624,8 @@ test("stage-first transform marks helper errors as failed", async () => {
 					},
 					{
 						id: "audit",
-						type: "transform",
 						from: "extract",
-						helper: "./helpers/fail.mjs",
+						support: { uses: "./helpers/fail.mjs" },
 					},
 				],
 			},
@@ -3605,12 +3650,11 @@ test("stage-first transform marks helper errors as failed", async () => {
 
 		await scheduleRun(cwd, run.runId);
 		const updated = await readRunRecord(cwd, run.runId);
-		const transform = updated.tasks.find(
-			(task) => task.specId === "audit.main",
-		);
-		assert.equal(transform?.status, "failed");
-		assert.equal(transform?.statusDetail, "launch_failed");
-		assert.match(transform?.lastMessage ?? "", /helper boom/);
+		const support = updated.tasks.find((task) => task.specId === "audit.main");
+		assert.equal(support?.kind, "support");
+		assert.equal(support?.status, "failed");
+		assert.equal(support?.statusDetail, "support_failed");
+		assert.match(support?.lastMessage ?? "", /helper boom/);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}

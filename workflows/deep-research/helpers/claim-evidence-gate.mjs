@@ -1,7 +1,7 @@
 // Deterministic claim audit for deep-research.
 //
 // Sources: plan (optional), normalize-claims (optional), verify-claims foreach
-// outputs. For every verifier result this transform:
+// outputs. For every verifier result this support helper:
 //   1. rejoins the original claim text and factSlotIds from
 //      normalize-claims.claimInventory.verificationCandidates by id (the
 //      verifier echo is not trusted for identity fields),

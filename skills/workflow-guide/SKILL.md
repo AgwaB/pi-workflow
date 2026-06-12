@@ -23,7 +23,7 @@ Resolve paths relative to this skill directory. Treat those docs as the source o
 - If a stage needs prior output, use `reduce.from` or `foreach.from`.
 - For dynamic fan-out, use `foreach.from` with a JSON path into a prior stage's structured output.
 - For synthesis/fan-in, use `reduce.from` and Source Stage Context.
-- For deterministic local post-processing, use `transform` with a bundle-local `./*.mjs` helper.
+- For deterministic local post-processing, use a support node (`support.uses`) with a bundle-local `./*.mjs` helper; support is local code, not a subagent task type.
 - For bounded iteration, use `loop` with fixed child stages, `maxRounds`, and deterministic `until`.
 - Agent-declared tools are the authority ceiling; workflow `tools` can only narrow them.
 - Keep review/research workflows read-only unless the workflow explicitly documents managed-worktree mutation.
@@ -37,7 +37,7 @@ Resolve paths relative to this skill directory. Treat those docs as the source o
 When creating or changing a workflow:
 
 1. Identify the user goal and whether a bundled workflow already fits.
-2. Choose the stage graph first.
+2. Choose the workflow graph first: subagent stages plus support nodes where needed.
 3. Define every data dependency explicitly.
 4. Add JSON output contracts for model outputs consumed by later stages.
 5. Set tool ceilings and read/write policy.
@@ -50,7 +50,7 @@ When authoring or reviewing a workflow, report:
 
 - which existing workflow was used or why none fit,
 - the stage graph,
-- every `foreach.from` and `reduce.from` data dependency,
+- every `foreach.from`, `reduce.from`, and support `from` data dependency,
 - write-capable stages and worktree policy,
 - required agents and tool ceilings,
 - output contracts used by downstream stages,

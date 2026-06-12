@@ -94,12 +94,13 @@
       },
       {
         "id": "dedup-findings",
-        "type": "transform",
         "from": "reviewers",
         "sourcePolicy": "partial",
-        "helper": "./helpers/finding-pipeline.mjs",
-        "options": {
-          "mode": "dedup"
+        "support": {
+          "uses": "./helpers/finding-pipeline.mjs",
+          "options": {
+            "mode": "dedup"
+          }
         }
       },
       {
@@ -136,16 +137,17 @@
       },
       {
         "id": "partition-verdicts",
-        "type": "transform",
         "from": [
           "dedup-findings",
           "devil-advocate"
         ],
         "sourcePolicy": "partial",
-        "helper": "./helpers/finding-pipeline.mjs",
-        "options": {
-          "mode": "partition",
-          "dedupStage": "dedup-findings"
+        "support": {
+          "uses": "./helpers/finding-pipeline.mjs",
+          "options": {
+            "mode": "partition",
+            "dedupStage": "dedup-findings"
+          }
         }
       },
       {
