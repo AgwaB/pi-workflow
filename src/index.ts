@@ -36,10 +36,13 @@ Usage:
   /workflow agents
   /workflow list
   /workflow recommend "<request>"
-  /workflow run <workflow-name-or-path> "<task>"
+  /workflow run <workflow-name-or-path> "<task>" [--detach]
   /workflow status [run-id]
   /workflow show <run-id-or-workflow-name>
   /workflow logs <run-id> [task-id] [lines]
   /workflow wait <run-id> [timeout-ms]
   /workflow resume <run-id>
+
+With --detach, a standalone supervisor process (pi-workflow supervise) keeps
+the run progressing after this session exits.
 `;

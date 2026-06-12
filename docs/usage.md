@@ -46,13 +46,14 @@ pi-workflow inspect <run-id-or-prefix> [--failures] [--results] [--json]
 | `/workflow validate <workflow-name-or-path>` | Load and compile a workflow without starting a run. Reports blocked permission previews and warnings. |
 | `/workflow roles <workflow-name-or-path>` | Show the compiled role context included for each workflow role. |
 | `/workflow agents` | List discoverable Pi agents, model/thinking defaults, tool ceilings, and source paths. |
-| `/workflow run <workflow-name-or-path> "<task>"` | Start a workflow run with the supplied runtime task. |
+| `/workflow run <workflow-name-or-path> "<task>" [--detach]` | Start a workflow run with the supplied runtime task. `--detach` spawns a standalone supervisor process so the run keeps progressing after this Pi session exits (log: `.pi/workflows/<run-id>/supervise.log`). |
 | `/workflow status [run-id]` | Show all workflow runs in the current project, or one run. |
 | `/workflow show <run-id-or-workflow-name>` | If the ref starts with `workflow_`, show run details; otherwise show the raw workflow spec. |
 | `/workflow logs <run-id> [task-id] [lines]` | Print captured logs for a workflow task. Defaults to `task-1`. |
 | `/workflow wait <run-id> [timeout-ms]` | Poll until the run finishes or the optional timeout elapses. |
+| `/workflow resume <run-id>` | Resume a failed or interrupted run: completed tasks are preserved; failed/interrupted/skipped tasks reset to pending and reschedule. Loop workflows are not supported yet. |
 
-Not implemented: `/workflow view`, `/workflow continue`, `/workflow delegate`, and a `/workflow` board. Use `status`, `show`, `logs`, `wait`, and `pi-workflow inspect` instead.
+Not implemented: `/workflow view`, `/workflow continue`, `/workflow delegate`, and a `/workflow` board. Use `status`, `show`, `logs`, `wait`, `resume`, and `pi-workflow inspect` instead. The standalone CLI also offers `pi-workflow supervise <run-id>|--all` to drive scheduling from outside a Pi session (unfinished failed/interrupted runs within the last 7 days are announced at session start with resume hints).
 
 ## Workflow resolution
 

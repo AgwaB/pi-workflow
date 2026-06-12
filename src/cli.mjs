@@ -1,12 +1,21 @@
 #!/usr/bin/env node
-import { readFile, readdir } from "node:fs/promises";
-import { isAbsolute, join, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
+import { readFile, readdir, stat } from "node:fs/promises";
+import { dirname, isAbsolute, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 function usage() {
   return `pi-workflow
 
 Usage:
   pi-workflow inspect <run-id-or-prefix> [--failures] [--results] [--json]
+  pi-workflow supervise <run-id-or-prefix> [--poll-ms N] [--max-runtime-ms N]
+  pi-workflow supervise --all [--poll-ms N] [--max-runtime-ms N]
+
+supervise drives workflow scheduling from a standalone process until the
+target run(s) reach a terminal status, so runs keep progressing after the
+Pi session that started them exits. The run lease arbitrates with any
+in-session supervisor. Exit codes: 0 completed, 1 failed/interrupted, 2 blocked.
 `;
 }
 
@@ -15,6 +24,10 @@ const command = args[0];
 if (!command || command === "help" || command === "--help" || command === "-h") {
   process.stdout.write(usage());
   process.exit(0);
+}
+
+if (command === "supervise") {
+  process.exit(await supervise(args.slice(1)));
 }
 
 if (command !== "inspect") {
@@ -60,6 +73,106 @@ for (const task of selected) {
 }
 
 process.stdout.write(`${lines.join("\n")}\n`);
+
+async function supervise(argv) {
+  let runRef;
+  let allMode = false;
+  let pollMs = 2_000;
+  let maxRuntimeMs = 14_400_000;
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === "--all") allMode = true;
+    else if (arg === "--poll-ms") pollMs = Math.max(250, Number(argv[++index]) || pollMs);
+    else if (arg === "--max-runtime-ms") maxRuntimeMs = Math.max(1_000, Number(argv[++index]) || maxRuntimeMs);
+    else if (!arg.startsWith("--") && !runRef) runRef = arg;
+    else {
+      process.stderr.write(`Unknown supervise argument "${arg}".\n${usage()}`);
+      return 1;
+    }
+  }
+  if (!runRef && !allMode) {
+    process.stderr.write(`Missing run id (or --all).\n${usage()}`);
+    return 1;
+  }
+
+  const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+  const buildDir = await ensureEngineBuild(packageRoot);
+  const engine = await import(pathToFileURL(join(buildDir, "engine.js")).href);
+  const store = await import(pathToFileURL(join(buildDir, "store.js")).href);
+  const processRole = await import(pathToFileURL(join(buildDir, "process-role.js")).href);
+  processRole.assertWorkflowActionAllowedForRole("supervise");
+
+  const cwd = process.cwd();
+  const runId = runRef ? (await store.readRunRecord(cwd, runRef)).runId : undefined;
+  const lastPrinted = new Map();
+  const deadline = Date.now() + maxRuntimeMs;
+  log(`supervising ${runId ?? "all running runs"} in ${cwd} (poll ${pollMs}ms)`);
+
+  while (true) {
+    const runs = runId
+      ? [await store.readRunRecord(cwd, runId)]
+      : (await store.listRunRecords(cwd)).filter((run) => run.status === "running" && !run.parentRunId);
+
+    for (const run of runs) {
+      if (run.status !== "running") continue;
+      await engine.scheduleRun(cwd, run.runId).catch((error) => log(`schedule error ${run.runId}: ${error?.message ?? error}`));
+    }
+
+    const refreshed = runId ? [await store.readRunRecord(cwd, runId)] : (await store.listRunRecords(cwd)).filter((run) => !run.parentRunId);
+    for (const run of refreshed) {
+      const summary = run.taskSummary;
+      const line = `${run.runId} ${run.status} (${summary.completed}/${summary.total} completed, ${summary.running} running, ${summary.failed} failed, ${summary.interrupted} interrupted)`;
+      if (lastPrinted.get(run.runId) !== line) {
+        lastPrinted.set(run.runId, line);
+        log(line);
+      }
+    }
+
+    if (runId) {
+      const run = refreshed[0];
+      if (run.status !== "running") {
+        log(`done: ${run.runId} ${run.status}`);
+        return run.status === "completed" ? 0 : run.status === "blocked" ? 2 : 1;
+      }
+    } else if (!refreshed.some((run) => run.status === "running")) {
+      log("done: no running runs remain");
+      return 0;
+    }
+
+    if (Date.now() >= deadline) {
+      log(`giving up after --max-runtime-ms ${maxRuntimeMs}; run(s) still in progress`);
+      return 1;
+    }
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, pollMs));
+  }
+}
+
+function log(message) {
+  process.stdout.write(`[supervise ${new Date().toISOString()}] ${message}\n`);
+}
+
+async function ensureEngineBuild(packageRoot) {
+  const buildDir = join(packageRoot, ".tmp", "cli");
+  const marker = join(buildDir, "engine.js");
+  const markerStat = await stat(marker).catch(() => undefined);
+  let needsBuild = !markerStat;
+  if (!needsBuild) {
+    for (const entry of await readdir(join(packageRoot, "src"))) {
+      if (!entry.endsWith(".ts")) continue;
+      const entryStat = await stat(join(packageRoot, "src", entry));
+      if (entryStat.mtimeMs > markerStat.mtimeMs) {
+        needsBuild = true;
+        break;
+      }
+    }
+  }
+  if (needsBuild) {
+    log(`building engine into ${buildDir} ...`);
+    const result = spawnSync("npx", ["tsc", "-p", join(packageRoot, "tsconfig.json"), "--outDir", buildDir, "--noEmit", "false"], { cwd: packageRoot, encoding: "utf8" });
+    if (result.status !== 0) throw new Error(`engine build failed:\n${result.stdout ?? ""}${result.stderr ?? ""}`);
+  }
+  return buildDir;
+}
 
 async function readRun(cwd, ref) {
   const root = join(cwd, ".pi", "workflows");

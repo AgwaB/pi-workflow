@@ -1,6 +1,9 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { spawn } from "node:child_process";
+import { closeSync, openSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { relative } from "node:path";
+import { join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { discoverAgents } from "./agents.js";
 import { compileWorkflow } from "./compiler.js";
@@ -41,6 +44,19 @@ export default function workflowExtension(pi: ExtensionAPI): void {
       await handleWorkflowCommand(args, ctx);
     },
   });
+}
+
+function spawnDetachedSupervisor(cwd: string, runId: string): { pid: number | undefined; logPath: string } {
+  const cliPath = fileURLToPath(new URL("./cli.mjs", import.meta.url));
+  const logPath = join(cwd, ".pi", "workflows", runId, "supervise.log");
+  const fd = openSync(logPath, "a");
+  try {
+    const child = spawn(process.execPath, [cliPath, "supervise", runId], { cwd, detached: true, stdio: ["ignore", fd, fd] });
+    child.unref();
+    return { pid: child.pid, logPath };
+  } finally {
+    closeSync(fd);
+  }
 }
 
 export async function notifyUnfinishedRuns(cwd: string, notify: (message: string, type?: "info" | "warning" | "error") => void, nowMs: number = Date.now()): Promise<void> {
@@ -113,7 +129,12 @@ async function handleWorkflowCommand(args: string, ctx: ExtensionCommandContext)
       if (!parsed.task.trim()) throw new Error("This workflow needs a task. Usage: /workflow run <workflow-name-or-path> \"<task>\"");
       const run = await runWorkflowSpec(specPath, ctx.cwd, { task: parsed.task });
       const verb = run.status === "blocked" ? "created but blocked" : run.status === "failed" ? "created but failed to launch" : "started";
-      emit(ctx, `Workflow run ${run.runId} ${verb}.\nSpec: ${toDisplayPath(run.specPath, ctx.cwd)}\n${formatRun(run)}`, run.status === "failed" ? "error" : run.status === "blocked" ? "warning" : "info");
+      let detachNote = "";
+      if (parsed.detach && run.status === "running") {
+        const supervisor = spawnDetachedSupervisor(ctx.cwd, run.runId);
+        detachNote = `\nDetached supervisor pid ${supervisor.pid ?? "?"} — survives this session; log: ${toDisplayPath(supervisor.logPath, ctx.cwd)}`;
+      }
+      emit(ctx, `Workflow run ${run.runId} ${verb}.\nSpec: ${toDisplayPath(run.specPath, ctx.cwd)}\n${formatRun(run)}${detachNote}`, run.status === "failed" ? "error" : run.status === "blocked" ? "warning" : "info");
       return;
     }
 
@@ -264,15 +285,20 @@ function emit(ctx: ExtensionCommandContext, text: string, level: "info" | "warni
   stream.write(`${text}\n`);
 }
 
-export function parseWorkflowRunArgs(args: string): { specPath: string; task: string } {
+export function parseWorkflowRunArgs(args: string): { specPath: string; task: string; detach: boolean } {
   const trimmed = args.trim();
-  const withoutRun = trimmed.startsWith("run ") ? trimmed.slice(4) : trimmed;
+  let withoutRun = trimmed.startsWith("run ") ? trimmed.slice(4) : trimmed;
+  let detach = false;
+  if (/(^|\s)--detach$/.test(withoutRun)) {
+    detach = true;
+    withoutRun = withoutRun.replace(/(^|\s)--detach$/, "").trim();
+  }
   const match = withoutRun.match(/^(\S+)\s+([\s\S]*)$/);
-  if (!match) return { specPath: withoutRun, task: "" };
+  if (!match) return { specPath: withoutRun, task: "", detach };
   let task = match[2] ?? "";
   const quoted = task.match(/^"([\s\S]*)"$/);
   if (quoted) task = quoted[1] ?? "";
-  return { specPath: match[1] ?? "", task };
+  return { specPath: match[1] ?? "", task, detach };
 }
 
 const WORKFLOW_ACTION_COMPLETIONS = [

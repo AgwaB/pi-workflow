@@ -2517,8 +2517,9 @@ test("workflow command completions and run arg parsing preserve task text", () =
   assert.deepEqual(workflowArgumentCompletions("l", workflows)?.map((item) => item.value), ["list", "logs"]);
   assert.deepEqual(workflowArgumentCompletions("run re", workflows)?.map((item) => item.value), ["run review"]);
   assert.deepEqual(workflowArgumentCompletions("validate re", workflows)?.map((item) => item.value), ["validate review"]);
-  assert.deepEqual(parseWorkflowRunArgs("run review Fix this:\n  const x = 1;"), { specPath: "review", task: "Fix this:\n  const x = 1;" });
-  assert.deepEqual(parseWorkflowRunArgs("run review \"Fix the thing\""), { specPath: "review", task: "Fix the thing" });
+  assert.deepEqual(parseWorkflowRunArgs("run review Fix this:\n  const x = 1;"), { specPath: "review", task: "Fix this:\n  const x = 1;", detach: false });
+  assert.deepEqual(parseWorkflowRunArgs("run review \"Fix the thing\""), { specPath: "review", task: "Fix the thing", detach: false });
+  assert.deepEqual(parseWorkflowRunArgs("run review \"Fix the thing\" --detach"), { specPath: "review", task: "Fix the thing", detach: true });
 });
 
 test("resolveFlowsCwd finds ancestor workflow state root", async () => {
