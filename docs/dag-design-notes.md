@@ -1,6 +1,6 @@
 # DAG design notes
 
-Status: design note, not yet implemented.
+Status: implemented (2026-06-13). Original design reasoning is retained below for history.
 
 ## Current model
 
@@ -77,3 +77,11 @@ This avoids overloading `from` as both data flow and sequencing.
 ## Legacy cleanup
 
 The old top-level `flow.type` topology model (`single`, `parallel`, `chain`, `dag`, `map`) predates stage-first workflows. The stage-first public model should be the authoritative authoring surface. Legacy `flow.type` bodies should fail closed with guidance to use `workflow.stages`.
+
+## Implementation record (2026-06-13)
+
+- **D1 — Split context from order dependencies.** `from` remains data + order and feeds Source Stage Context. `after` is order-only; when a stage uses both, scheduling waits on both sets but context is built only from `from`.
+- **D2 — Validate whole graphs at parse time.** Top-level `workflow.stages` and each DAG container child graph reject unknown refs, self-dependencies, duplicate ids, and cycles before compile/run, with issue paths pointing at the offending field.
+- **D3 — Preserve explicit parallel roots.** `after: []` is accepted as an explicit opt-out from the implicit previous-stage chain.
+- **D4 — Lower containers statically.** `type: "dag"` containers flatten child stages into namespaced task/stage ids such as `analysis.scan.main`; `outputFrom` (or a single-sink default) maps the container id to the selected child task keys for downstream edges.
+- **D5 — Defer namespace-aware loop keys.** Loop children inside DAG containers are rejected in v1. Supporting them needs namespace-aware loop materialization keys and resume/reconciliation semantics, so loops remain top-level for now.
