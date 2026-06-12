@@ -24,7 +24,7 @@ import {
   WorktreePolicy,
 } from "./types.js";
 
-const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls", "web_search", "fetch_content", "get_search_content", "scrapling_fetch"]);
+const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls", "web_search", "fetch_content", "get_search_content"]);
 const EXPLICIT_WRITE_TOOLS = new Set(["edit", "write"]);
 const MUTATION_CAPABLE_TOOLS = new Set(["bash"]);
 const DELEGATION_TOOLS = new Set(["skill_test_subagent", "workflow", "/workflow"]);

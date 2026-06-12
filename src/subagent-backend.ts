@@ -1,5 +1,4 @@
 import { copyFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 
 import { CompiledTask, WorkflowRunRecord, WorkflowTaskRunRecord } from "./types.js";
@@ -13,7 +12,6 @@ const TOOL_PROVIDER_EXTENSIONS: Record<string, string[]> = {
   code_search: ["npm:pi-web-access"],
   fetch_content: ["npm:pi-web-access"],
   get_search_content: ["npm:pi-web-access"],
-  scrapling_fetch: [join(homedir(), ".pi", "agent", "packages", "pi-scrapling-access")],
 };
 
 interface SubagentBackendHandle extends Record<string, unknown> {

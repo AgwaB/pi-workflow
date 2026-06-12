@@ -1,15 +1,16 @@
 {
-  "name": "pi-workflow",
+  "name": "@agwab/pi-workflow",
   "version": "0.1.0",
   "description": "Workflow orchestration for Pi subagents.",
-  "private": true,
+  "private": false,
   "type": "module",
   "license": "MIT",
   "files": [
     "src",
     "workflows",
     "skills",
-    "docs",
+    "docs/usage.md",
+    "docs/ab-execution-results.md",
     "README.md",
     "LICENSE",
     "tsconfig.json"
@@ -17,7 +18,8 @@
   "keywords": [
     "pi-package",
     "pi-extension",
-    "workflow"
+    "workflow",
+    "pi"
   ],
   "exports": {
     ".": "./src/index.ts",
@@ -25,7 +27,7 @@
     "./package.json": "./package.json"
   },
   "bin": {
-    "pi-workflow": "./src/cli.mjs"
+    "pi-workflow": "src/cli.mjs"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
@@ -33,7 +35,8 @@
     "test:unit": "rm -rf .tmp/unit && tsc -p tsconfig.json --outDir .tmp/unit --noEmit false && node --test test/*.test.mjs",
     "e2e": "node e2e-test/run.mjs",
     "e2e:soak": "node e2e-test/soak.mjs",
-    "pack:dry": "npm pack --dry-run"
+    "pack:dry": "npm pack --dry-run",
+    "release:check": "node ./scripts/release-check.mjs"
   },
   "pi": {
     "extensions": [
@@ -44,11 +47,11 @@
     ]
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": ">=0.76.0 <1"
+    "@earendil-works/pi-coding-agent": "*"
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "^0.78.0",
-    "@earendil-works/pi-coding-agent": ">=0.76.0 <1",
+    "@earendil-works/pi-coding-agent": "*",
     "@types/node": "^24.0.0",
     "typebox": "^1.1.39",
     "typescript": "^5.0.0"
@@ -58,5 +61,21 @@
   },
   "dependencies": {
     "@agwab/pi-subagent": "^0.3.2"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": false
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AgwaB/pi-workflow.git"
+  },
+  "homepage": "https://github.com/AgwaB/pi-workflow#readme",
+  "bugs": {
+    "url": "https://github.com/AgwaB/pi-workflow/issues"
   }
 }

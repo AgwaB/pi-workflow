@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 
@@ -2059,7 +2059,7 @@ test("subagent launch loads provider extensions for extension-backed tools", asy
   const cwd = makeProject();
   let captured;
   try {
-    writeAgent(cwd, "unit-researcher", "read, web_search, fetch_content, get_search_content, scrapling_fetch");
+    writeAgent(cwd, "unit-researcher", "read, web_search, fetch_content, get_search_content");
     setSubagentApiForTests({
       async runSubagent(options) {
         captured = options;
@@ -2071,7 +2071,7 @@ test("subagent launch loads provider extensions for extension-backed tools", asy
     });
 
     const spec = workflowSpec("unit-researcher", {
-      tools: ["read", "web_search", "fetch_content", "get_search_content", "scrapling_fetch"],
+      tools: ["read", "web_search", "fetch_content", "get_search_content"],
       workflow: { stages: [{ id: "main", type: "task", prompt: "Research with web tools." }] },
     });
     const compiled = await compileWorkflow(spec, { cwd, task: "Research topic" });
@@ -2080,7 +2080,7 @@ test("subagent launch loads provider extensions for extension-backed tools", asy
     await writeRunRecord(cwd, run);
     await scheduleRun(cwd, run.runId);
 
-    assert.deepEqual(captured.extensions, ["npm:pi-web-access", join(homedir(), ".pi", "agent", "packages", "pi-scrapling-access")]);
+    assert.deepEqual(captured.extensions, ["npm:pi-web-access"]);
   } finally {
     setSubagentApiForTests(undefined);
     rmSync(cwd, { recursive: true, force: true });
@@ -2513,8 +2513,10 @@ test("workflow registry fails closed when flat and bundle specs conflict", async
 
 test("workflow command completions and run arg parsing preserve task text", () => {
   const workflows = [{ name: "review", specPath: "/tmp/review.json", fileName: "review.json", aliases: ["review"], workflowRoot: "/tmp" }];
-  assert.deepEqual(workflowArgumentCompletions("workflow ", workflows)?.map((item) => item.value), ["workflow list", "workflow show"]);
+  assert.deepEqual(workflowArgumentCompletions("", workflows)?.map((item) => item.value), ["help", "list", "recommend", "validate", "roles", "agents", "run", "status", "show", "logs", "wait"]);
+  assert.deepEqual(workflowArgumentCompletions("l", workflows)?.map((item) => item.value), ["list", "logs"]);
   assert.deepEqual(workflowArgumentCompletions("run re", workflows)?.map((item) => item.value), ["run review"]);
+  assert.deepEqual(workflowArgumentCompletions("validate re", workflows)?.map((item) => item.value), ["validate review"]);
   assert.deepEqual(parseWorkflowRunArgs("run review Fix this:\n  const x = 1;"), { specPath: "review", task: "Fix this:\n  const x = 1;" });
   assert.deepEqual(parseWorkflowRunArgs("run review \"Fix the thing\""), { specPath: "review", task: "Fix the thing" });
 });

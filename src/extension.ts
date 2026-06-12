@@ -28,6 +28,9 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 
   pi.registerCommand(WORKFLOW_COMMAND, {
     description: "Run and inspect workflow-defined Pi subagent runs",
+    getArgumentCompletions(prefix) {
+      return workflowArgumentCompletions(prefix) ?? null;
+    },
     handler: async (args, ctx) => {
       await handleWorkflowCommand(args, ctx);
     },
@@ -239,11 +242,39 @@ export function parseWorkflowRunArgs(args: string): { specPath: string; task: st
   return { specPath: match[1] ?? "", task };
 }
 
-export function workflowArgumentCompletions(args: string, workflows: Array<{ name: string }> = []): Array<{ value: string }> | undefined {
-  if (args === "workflow ") return [{ value: "workflow list" }, { value: "workflow show" }];
-  if (args.startsWith("run ")) {
-    const prefix = args.slice(4).trim();
-    return workflows.filter((workflow) => workflow.name.startsWith(prefix)).map((workflow) => ({ value: `run ${workflow.name}` }));
+const WORKFLOW_ACTION_COMPLETIONS = [
+  { value: "help", label: "help", description: "Show /workflow help" },
+  { value: "list", label: "list", description: "List discoverable workflows" },
+  { value: "recommend", label: "recommend", description: "Recommend workflows for a request" },
+  { value: "validate", label: "validate", description: "Validate a workflow spec" },
+  { value: "roles", label: "roles", description: "Show compiled workflow role context" },
+  { value: "agents", label: "agents", description: "List discoverable Pi agents" },
+  { value: "run", label: "run", description: "Start a workflow run" },
+  { value: "status", label: "status", description: "Show workflow run status" },
+  { value: "show", label: "show", description: "Show a run or workflow spec" },
+  { value: "logs", label: "logs", description: "Show workflow task logs" },
+  { value: "wait", label: "wait", description: "Wait for a workflow run" },
+];
+
+export function workflowArgumentCompletions(args: string, workflows: Array<{ name: string }> = []): Array<{ value: string; label: string; description?: string }> | undefined {
+  const trimmed = args.trimStart();
+  if (!trimmed.includes(" ")) {
+    const prefix = trimmed.trim();
+    const matches = WORKFLOW_ACTION_COMPLETIONS.filter((item) => item.value.startsWith(prefix));
+    return matches.length > 0 ? matches : undefined;
+  }
+
+  const workflowNameCommands = ["run", "validate", "roles", "show"];
+  for (const command of workflowNameCommands) {
+    if (!trimmed.startsWith(`${command} `)) continue;
+    const prefix = trimmed.slice(command.length + 1).trim();
+    if (prefix.includes(" ")) return undefined;
+    const matches = workflows.filter((workflow) => workflow.name.startsWith(prefix)).map((workflow) => ({
+      value: `${command} ${workflow.name}`,
+      label: workflow.name,
+      description: `Use workflow ${workflow.name}`,
+    }));
+    return matches.length > 0 ? matches : undefined;
   }
   return undefined;
 }

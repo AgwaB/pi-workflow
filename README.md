@@ -2,39 +2,80 @@
 
 **Workflow orchestration for Pi subagents.**
 
-`pi-workflow` turns multi-subagent work into explicit workflows that Pi can run, inspect, and adapt.
+[![npm](https://img.shields.io/npm/v/@agwab/pi-workflow.svg)](https://www.npmjs.com/package/@agwab/pi-workflow)
 
-Start with built-in workflows for verified research and evidence-backed review. Other workflow shapes are deferred until stronger task-fit evidence exists.
+`pi-workflow` turns multi-subagent work into explicit workflows that Pi can run, inspect, and resume. It builds on [`@agwab/pi-subagent`](https://www.npmjs.com/package/@agwab/pi-subagent) for durable worker execution and adds a workflow layer for stage graphs, fan-out/fan-in, transforms, and bounded loops.
 
-## Try this first
-
-After installation, ask Pi naturally:
-
-```text
-Deep research this repo and summarize the architecture tradeoffs.
-```
-
-```text
-Review the current diff from multiple angles.
-```
-
-```text
-Deep review this change and challenge any findings before the final report.
-```
+npm package: [`@agwab/pi-workflow`](https://www.npmjs.com/package/@agwab/pi-workflow)
 
 ## Installation
 
 ```bash
-pi install npm:pi-workflow
+pi install npm:@agwab/pi-workflow
 ```
 
-## How workflows work
+Then reload Pi.
 
-A workflow is a sequence of stages. Users can ask for workflows in natural language; each workflow is backed by a definition file that describes the stage graph.
+Requires Node.js `>=22.19.0`. Like Pi and `pi-subagent`, this package is intended for macOS or Linux; on Windows, use WSL2.
 
-Stage order controls scheduling, but a plain later `task` does **not** automatically receive prior outputs. Workflow definitions must explicitly pass prior results through `foreach.from` or `reduce.from`.
+For local development, install the checkout as a Pi package source and reload Pi:
 
-![Workflow stage types](./docs/assets/readme-stage-types.png)
+```bash
+pi install /absolute/path/to/pi-workflow
+```
+
+## Quick usage
+
+List bundled and project workflows:
+
+```text
+/workflow list
+```
+
+Ask Pi to recommend a workflow for a task:
+
+```text
+/workflow recommend "deeply research this repository and verify key claims"
+```
+
+Run a workflow by exact name:
+
+```text
+/workflow run deep-research "Research this repo and summarize the architecture tradeoffs."
+```
+
+```text
+/workflow run deep-review "Review the current diff from multiple angles."
+```
+
+```text
+/workflow run implement-loop "Implement the requested small fix, run validation, and stop when the check accepts."
+```
+
+Inspect a run:
+
+```text
+/workflow status
+/workflow status workflow_mq224pi8_775e71
+/workflow show workflow_mq224pi8_775e71
+/workflow logs workflow_mq224pi8_775e71 task-1 80
+/workflow wait workflow_mq224pi8_775e71 600000
+```
+
+For read-only terminal inspection outside the Pi command UI:
+
+```bash
+pi-workflow inspect workflow_mq224pi8_775e71
+pi-workflow inspect workflow_mq224pi8_775e71 --failures
+pi-workflow inspect workflow_mq224pi8_775e71 --results
+pi-workflow inspect workflow_mq224pi8_775e71 --json
+```
+
+## What workflows do
+
+A workflow is a deterministic stage graph. The concrete user task is supplied at runtime; the workflow definition supplies the structure, role prompts, tool ceilings, output contracts, and safety policy.
+
+Important rule: **stage order controls scheduling only**. A later plain `task` stage does not automatically receive prior output. Use `foreach.from` for dynamic fan-out and `reduce.from` for source-context fan-in.
 
 | Stage | Use it for | Runtime shape |
 |---|---|---|
@@ -42,12 +83,10 @@ Stage order controls scheduling, but a plain later `task` does **not** automatic
 | `parallel` | Static fan-out | fixed task list -> multiple subagents, bounded concurrency |
 | `foreach` | Dynamic fan-out | read an array from prior JSON output -> one subagent task per item |
 | `reduce` | Fan-in / synthesis | selected prior stage context -> one subagent |
-| `transform` | Deterministic local post-processing | selected prior structured outputs -> directory-local `.mjs` helper -> structured output |
-| `loop` | Bounded repetition | repeat a fixed child stage subgraph each round until a deterministic stop condition |
+| `transform` | Deterministic local post-processing | selected prior structured outputs -> directory-local `.mjs` helper |
+| `loop` | Bounded repetition | repeat a fixed child stage subgraph until a deterministic stop condition |
 
-`reduce` is not an automatic merge function. In the diagrams, **Supervisor** means the workflow runtime that gathers prior subagent outputs and passes bounded source context into a reduce subagent. It is not a user-defined agent.
-
-A minimal workflow definition looks like:
+A minimal workflow definition:
 
 ```json
 {
@@ -84,9 +123,9 @@ A minimal workflow definition looks like:
 }
 ```
 
-## Built-in workflows
+## Bundled workflows
 
-The package includes built-in workflow definitions in [`workflows/`](./workflows/). The concrete task is supplied at runtime. When the parent agent needs a deterministic starting point, `/workflow recommend "<request>"` scores workflow metadata and returns an explicit workflow name to validate/run.
+The package includes workflow definitions in [`workflows/`](./workflows/). Workflow names resolve from project `.pi/workflows/`, repository `workflows/`, bundled package workflows, and `~/.pi/agent/workflows/`; ambiguous names fail closed.
 
 | Workflow | Shape | Use when |
 |---|---|---|
@@ -95,60 +134,33 @@ The package includes built-in workflow definitions in [`workflows/`](./workflows
 | `implement-loop` | loop: implement -> final check | Iterative implementation in one managed worktree until validation passes and review accepts. |
 | `test-repair-loop` | loop: repair -> final test-check | Focused repair loop for failing tests or explicit validation commands. |
 
-Other workflow shapes such as migration planning, implementation batches, best-of-N fixes, revise loops, and decision debates are intentionally deferred until stronger task-fit evidence exists.
+Other workflow shapes such as migration planning, best-of-N fixes, revise loops, and decision debates are intentionally deferred until stronger task-fit evidence exists.
 
-### `deep-research` at a glance
+## Commands
 
-![Deep research workflow](./docs/assets/readme-deep-research.png)
+Implemented Pi command surface:
 
-```json
-{
-  "name": "deep-research",
-  "workflow": {
-    "stages": [
-      { "id": "plan", "type": "task" },
-      {
-        "id": "research-questions",
-        "type": "foreach",
-        "from": { "stage": "plan", "path": "$.researchQuestions" }
-      },
-      {
-        "id": "normalize-claims",
-        "type": "reduce",
-        "from": ["plan", "research-questions"]
-      },
-      {
-        "id": "verify-claims",
-        "type": "foreach",
-        "from": { "stage": "normalize-claims", "path": "$.claimsForVerification" }
-      },
-      {
-        "id": "audit-claims",
-        "type": "transform",
-        "from": "verify-claims",
-        "helper": "./helpers/claim-evidence-gate.mjs"
-      },
-      {
-        "id": "final",
-        "type": "reduce",
-        "from": ["plan", "research-questions", "normalize-claims", "audit-claims"]
-      }
-    ]
-  }
-}
-```
+| Command | Purpose |
+|---|---|
+| `/workflow` or `/workflow help` | Show help. |
+| `/workflow list` | List discoverable workflows. |
+| `/workflow recommend "<request>"` | Score workflow catalog metadata for a request. |
+| `/workflow validate <workflow-name-or-path>` | Load, validate, and compile a workflow spec. |
+| `/workflow roles <workflow-name-or-path>` | Show compiled role context for a workflow. |
+| `/workflow agents` | List discoverable Pi agents and their tool/model ceilings. |
+| `/workflow run <workflow-name-or-path> "<task>"` | Start a workflow run for the runtime task. |
+| `/workflow status [run-id]` | Summarize all runs or one run. |
+| `/workflow show <run-id-or-workflow-name>` | Show run details for `workflow_*`, or raw workflow spec for a workflow name. |
+| `/workflow logs <run-id> [task-id] [lines]` | Show captured task logs. Defaults to `task-1`. |
+| `/workflow wait <run-id> [timeout-ms]` | Wait until a run reaches a terminal state. |
 
-The snippet above is intentionally abbreviated. Runnable workflow definitions also declare prompts, output contracts, source policies, tools, and runtime limits.
-
-JSON outputs are validated with `output.contract` (for example `requiredPaths`, array bounds, and string length caps). To give models a shape hint without duplicating validation rules inline, use `output.template` for small one-off shapes or `output.templateRef` for reusable templates. `templateRef` supports internal refs such as `#/outputTemplates/final` and relative JSON files such as `./templates.json#/final` inside workflow bundles.
+There is not currently a `/workflow` board, `/workflow view`, `/workflow continue`, or `/workflow delegate` command. Use `status`, `show`, `logs`, `wait`, and `pi-workflow inspect` for inspection.
 
 ## Create or customize workflows with `workflow-guide`
 
-`pi-workflow` includes a `workflow-guide` skill for creating custom workflow definitions.
+`pi-workflow` includes a `workflow-guide` skill for creating, modifying, and reviewing workflow definitions.
 
-Use it when you want to adapt a built-in workflow or create a project-specific workflow. The guide starts from existing workflows when possible, applies the stage-first rules, checks `foreach.from` / `reduce.from` data dependencies, handles tool ceilings and worktree policy, and validates the workflow definition before handoff.
-
-Project workflow definitions should be saved under:
+Use it when you want to adapt a bundled workflow or create a project-specific workflow. Project workflow definitions should be saved under:
 
 ```text
 .pi/workflows/<name>.json
@@ -166,16 +178,6 @@ Use workflow-guide to customize deep-review for frontend accessibility and UX re
 Save it as .pi/workflows/frontend-review.json.
 ```
 
-```text
-Use workflow-guide to review this workflow definition and fix any invalid stage dependencies:
-.pi/workflows/my-workflow.json
-```
-
-```text
-Use workflow-guide to create a bounded implementation workflow for this repo.
-Ask before dependency installs, long validation, or broad edits.
-```
-
 Then validate and run:
 
 ```text
@@ -183,92 +185,10 @@ Then validate and run:
 /workflow run frontend-review "Review the current diff for accessibility and UX regressions."
 ```
 
-The most important authoring rule: stage order only controls scheduling. It does not automatically pass prior output into later `task` stages. Use `foreach.from` for dynamic fan-out and `reduce.from` for source-context fan-in.
-
-## `loop` stages
-
-A `loop` stage repeats a **fixed** child stage subgraph once per round until a deterministic stop condition holds, or until `maxRounds`/no-progress stops it. It is intra-run only: a loop does not start a new workflow run, and it does not choose different stages per round (that is out of scope for v1).
-
-```json
-{
-  "id": "fix-loop",
-  "type": "loop",
-  "maxRounds": 5,
-  "until": {
-    "all": [
-      { "stage": "check", "path": "$.status", "equals": "pass" },
-      { "stage": "check", "path": "$.verdict", "equals": "ACCEPT" }
-    ]
-  },
-  "stages": [
-    { "id": "implement", "type": "task", "agent": "delegate", "readOnly": false, "tools": ["read", "grep", "find", "ls", "edit", "write"], "prompt": "Fix the current round's blocking failures." },
-    { "id": "check", "type": "task", "agent": "scout", "tools": ["read", "grep", "find", "ls", "bash"], "output": { "format": "json", "requiredKeys": ["status", "verdict"] }, "prompt": "Run the approved validation and review the change. Return JSON with status, verdict, blockingFailures, nextHints." }
-  ],
-  "onExhausted": {
-    "id": "loop-summary",
-    "type": "reduce",
-    "prompt": "Summarize remaining failures and recommended human next action. Do not auto-merge."
-  }
-}
-```
-
-Rules and behavior:
-
-- **Ids**: the loop and every child stage require non-empty ids; child ids must be unique. Child stages are materialized at runtime with deterministic ids `<loopId>.r01.<childStageId>`, `<loopId>.r02.<childStageId>`, and so on. Round R fully precedes round R+1.
-- **`maxRounds`** is required, a positive integer, capped at 50.
-- **`until`** is required and deterministic (no model judgment). Leaf form is `{ stage, path, equals | notEquals | lengthEquals }`; combinators are `{ all: [...] }` and `{ any: [...] }`. `path` must start with `$.` and is read from that child stage's latest-round JSON output. `stage` must reference a child stage id. A missing path evaluates to false.
-- **No-progress stop**: the loop stops early (`stopped_no_progress`) when the progress metric does not strictly decrease versus the previous round. The default metric is the length of `$.blockingFailures` on the designated check stage; override with `progressPath`. If `progressPath` resolves to an unsupported value such as a boolean/object/null, the check task records a warning and the comparison is skipped for that round.
-- **`onExhausted`** is optional and must be a `reduce` stage. It runs once when the loop exhausts `maxRounds` or stops on no-progress.
-- **Separation rule**: loops require at least two child stages, child stages run strictly in listed order (`from` is rejected inside loops), and every `until` leaf must reference the final child stage. Keep the final validator/reviewer read-only in practice; validation commands such as `bash` are allowed for checks, but the check prompt must not modify files. The engine never merges implement and check; merging reintroduces self-preferential bias.
-- **Worktree**: write-capable child stages share a single managed worktree reused across rounds. There is no auto-merge. On completion the loop records a result (`status`, `roundsUsed`, `worktreePath`, `finalCheck`, `summary`) for a human to merge.
-- Nested `loop`, `foreach`, and `parallel` child stages are rejected in v1.
-
-## Commands
-
-User-facing command surface:
-
-```text
-/workflow                # open the workflow board
-/workflow <run-id>       # open the board focused on a run
-/workflow help
-```
-
-For read-only terminal inspection of an existing run, use the CLI instead of launching a workflow:
-
-```bash
-pi-workflow inspect workflow_mq224pi8_775e71
-pi-workflow inspect workflow_mq224pi8_775e71 --failures
-pi-workflow inspect workflow_mq224pi8_775e71 --results
-pi-workflow inspect workflow_mq224pi8_775e71 --json
-```
-
-<details>
-<summary>Agent-facing/internal commands</summary>
-
-These commands remain available for orchestration, workflow authoring, and debugging:
-
-```text
-/workflow validate <workflow-name-or-path>
-/workflow roles
-/workflow agents
-/workflow recommend "<request>"
-/workflow list
-/workflow show <workflow-name>
-/workflow run <workflow-name-or-path> "<task>"
-/workflow delegate ...
-/workflow status
-/workflow show <run-id>
-/workflow view [run-id]
-/workflow logs <run-id> [task-id] [lines]
-/workflow continue <run-id>
-/workflow wait <run-id> [timeout-ms]
-```
-
-</details>
-
 ## Safety notes
 
 - `/workflow` is an orchestrator, not an OS sandbox.
+- Subagent workers are launched through `@agwab/pi-subagent`; inspect that package's sandbox/worktree behavior for execution isolation details.
 - Agent-declared tools are the authority ceiling; workflow definitions can only narrow them.
 - `readOnly: true` is enforced through tool filtering, not filesystem isolation.
 - Review workflows should remain read-only unless a workflow explicitly documents managed-worktree mutation.
@@ -278,9 +198,6 @@ These commands remain available for orchestration, workflow authoring, and debug
 
 ## Detailed docs
 
-- [`docs/workflow-authoring.md`](./docs/workflow-authoring.md) — how to create/review stage-first workflow definitions; use this as the main authoring guide.
-- [`docs/usage-reference.md`](./docs/usage-reference.md) — detailed command, schema, runtime, output, role, worktree, and safety reference.
-- [`docs/ab-execution-test-strategy.md`](./docs/ab-execution-test-strategy.md) — local A/B validation method and prepared test inventory.
-- [`docs/ab-execution-results.md`](./docs/ab-execution-results.md) — corrected workflow-vs-baseline A/B evaluation summary.
+- [`docs/usage.md`](./docs/usage.md) — command reference, install/development notes, workflow resolution, run artifacts, authoring rules, and release checks.
 - [`workflows/README.md`](./workflows/README.md) — bundled workflow notes.
-- [`docs/readme-image-plan.md`](./docs/readme-image-plan.md) — README diagram slots and copy guidance.
+- [`docs/ab-execution-results.md`](./docs/ab-execution-results.md) — local diagnostic A/B evaluation summary.
