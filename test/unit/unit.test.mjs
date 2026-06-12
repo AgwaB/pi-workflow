@@ -32,7 +32,10 @@ import {
 	resolveWorkflowRef,
 } from "../../.tmp/unit/workflow-specs.js";
 import { resolveWorkflowRuntime } from "../../.tmp/unit/workflow-runtime.js";
-import { loadWorkflow, parseWorkflow } from "../../.tmp/unit/schema.js";
+import {
+	loadWorkflow,
+	parseWorkflow,
+} from "../../.tmp/unit/schema.js";
 import {
 	acquireSupervisorLease,
 	createStageFirstRunRecord,
@@ -110,7 +113,7 @@ function workflowSpec(agent = "unit-scout", extra = {}) {
 		agent,
 		readOnly: true,
 		tools: ["read"],
-		flow: { stages: [{ id: "main", type: "task", prompt: "Do the work." }] },
+		workflow: { stages: [{ id: "main", type: "task", prompt: "Do the work." }] },
 		...extra,
 	};
 }
@@ -417,7 +420,7 @@ test("agent parser reads frontmatter tool ceilings", () => {
 test("schema accepts final v1 workflow and rejects old legacy bodies", () => {
 	const parsed = parseWorkflow(workflowSpec());
 	assert.equal(parsed.schemaVersion, 1);
-	assert.equal(parsed.flow.stages[0].id, "main");
+	assert.equal(parsed.workflow.stages[0].id, "main");
 
 	const wrongVersion = assertThrowsFlow(() =>
 		parseWorkflow({ ...workflowSpec(), schemaVersion: 99 }),
@@ -430,7 +433,25 @@ test("schema accepts final v1 workflow and rejects old legacy bodies", () => {
 			flow: { type: "single", task: { agent: "unit-scout", task: "legacy" } },
 		}),
 	);
-	assertIssue(legacy, "$.flow.type", "unknown field");
+	assertIssue(legacy, "$.flow.type", "legacy flow.type bodies");
+
+	for (const type of ["dag", "map"]) {
+		const legacyTopology = assertThrowsFlow(() =>
+			parseWorkflow({
+				schemaVersion: 1,
+				flow: { type, tasks: [] },
+			}),
+		);
+		assertIssue(legacyTopology, "$.flow.type", "workflow.stages");
+	}
+
+	const directLegacy = assertThrowsFlow(() =>
+		parseWorkflow({
+			schemaVersion: 1,
+			flow: { type: "dag", tasks: [] },
+		}),
+	);
+	assertIssue(directLegacy, "$.flow.type", "legacy flow.type bodies");
 
 	const continuation = assertThrowsFlow(() =>
 		parseWorkflow(
@@ -458,7 +479,7 @@ test("schema accepts final v1 workflow and rejects old legacy bodies", () => {
 test("schema accepts stage-level inject and rejects item-level inject", () => {
 	const parsed = parseWorkflow(
 		workflowSpec("unit-scout", {
-			flow: {
+			workflow: {
 				stages: [
 					{ id: "entry", type: "task", inject: false, prompt: "Entry" },
 					{
@@ -475,14 +496,14 @@ test("schema accepts stage-level inject and rejects item-level inject", () => {
 			},
 		}),
 	);
-	assert.equal(parsed.flow.stages[0].inject, false);
-	assert.equal(parsed.flow.stages[1].inject, true);
-	assert.equal(parsed.flow.stages[2].inject, true);
+	assert.equal(parsed.workflow.stages[0].inject, false);
+	assert.equal(parsed.workflow.stages[1].inject, true);
+	assert.equal(parsed.workflow.stages[2].inject, true);
 
 	assertThrowsFlow(() =>
 		parseWorkflow(
 			workflowSpec("unit-scout", {
-				flow: {
+				workflow: {
 					stages: [
 						{
 							id: "fanout",
@@ -501,7 +522,7 @@ test("schema accepts stage-level inject and rejects item-level inject", () => {
 	assertThrowsFlow(() =>
 		parseWorkflow(
 			workflowSpec("unit-scout", {
-				flow: {
+				workflow: {
 					stages: [
 						{
 							id: "extract",
@@ -1043,7 +1064,7 @@ test("compiler injects runtime task by effective stage policy", async () => {
 		const compiled = await compileWorkflow(
 			workflowSpec("unit-scout", {
 				roles: { lens: { prompt: "Role context marker." } },
-				flow: {
+				workflow: {
 					stages: [
 						{ id: "entry", type: "task", prompt: "Entry instructions." },
 						{
@@ -1107,7 +1128,7 @@ test("compiler defers foreach task injection until runtime interpolation", async
 		writeAgent(cwd, "unit-scout", "read");
 		const compiled = await compileWorkflow(
 			workflowSpec("unit-scout", {
-				flow: {
+				workflow: {
 					stages: [
 						{
 							id: "extract",
@@ -1152,7 +1173,7 @@ test("compiler applies explicit stage from dependencies and stage runtime defaul
 				thinking: "high",
 				tools: ["read", "grep"],
 				defaults: { maxRuntimeMs: 12345 },
-				flow: {
+				workflow: {
 					stages: [
 						{ id: "plan", type: "task", prompt: "Plan" },
 						{
@@ -1390,7 +1411,7 @@ test("stage-first foreach materializes source array into generated tasks", async
 	try {
 		writeAgent(cwd, "unit-scout", "read");
 		const spec = workflowSpec("unit-scout", {
-			flow: {
+			workflow: {
 				stages: [
 					{
 						id: "extract",
@@ -1473,7 +1494,7 @@ test("successive foreach materialization keeps task ids unique", async () => {
 	try {
 		writeAgent(cwd, "unit-scout", "read");
 		const spec = workflowSpec("unit-scout", {
-			flow: {
+			workflow: {
 				stages: [
 					{
 						id: "extract",
@@ -1549,7 +1570,7 @@ test("stage-first foreach blocks when maxItems is exceeded", async () => {
 	try {
 		writeAgent(cwd, "unit-scout", "read");
 		const spec = workflowSpec("unit-scout", {
-			flow: {
+			workflow: {
 				stages: [
 					{
 						id: "extract",
@@ -3368,7 +3389,7 @@ test("stage-first foreach materializes source array into generated tasks with ou
 	try {
 		writeAgent(cwd, "unit-scout", "read");
 		const spec = workflowSpec("unit-scout", {
-			flow: {
+			workflow: {
 				stages: [
 					{
 						id: "extract",
@@ -3454,7 +3475,7 @@ test("successive foreach materialization keeps task ids unique with output contr
 	try {
 		writeAgent(cwd, "unit-scout", "read");
 		const spec = workflowSpec("unit-scout", {
-			flow: {
+			workflow: {
 				stages: [
 					{
 						id: "extract",
@@ -3540,7 +3561,7 @@ test("stage-first support executes helper and writes artifacts", async () => {
 			"export default async function helper({ sources, options, context }) { return { audited: sources['extract.main'].claims.length, strict: options.strict, stageId: context.stageId }; }\n",
 		);
 		const spec = workflowSpec("unit-scout", {
-			flow: {
+			workflow: {
 				stages: [
 					{
 						id: "extract",
@@ -3602,6 +3623,85 @@ test("stage-first support executes helper and writes artifacts", async () => {
 	}
 });
 
+test("stage-first support omits failed dependency sources", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const workflowDir = join(cwd, "workflows", "bundle");
+		mkdirSync(join(workflowDir, "helpers"), { recursive: true });
+		const specPath = join(workflowDir, "spec.json");
+		writeFileSync(
+			join(workflowDir, "helpers", "sources.mjs"),
+			"export default async function helper({ sources }) { return { sourceKeys: Object.keys(sources).sort(), failedSource: sources['extract.failed'] ?? null, okSource: sources['extract.ok'] }; }\n",
+		);
+		const spec = workflowSpec("unit-scout", {
+			workflow: {
+				stages: [
+					{
+						id: "extract",
+						type: "parallel",
+						output: { format: "json" },
+						tasks: [
+							{ id: "ok", prompt: "Extract OK" },
+							{ id: "failed", prompt: "Extract failed" },
+						],
+					},
+					{
+						id: "audit",
+						from: "extract",
+						sourcePolicy: "partial",
+						support: { uses: "./helpers/sources.mjs" },
+					},
+				],
+			},
+		});
+		writeFileSync(specPath, JSON.stringify(spec));
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Check claims",
+			specPath,
+		});
+		const { run } = await createStageFirstRunRecord(cwd, compiled, specPath);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		const ok = run.tasks.find((task) => task.specId === "extract.ok");
+		const failed = run.tasks.find((task) => task.specId === "extract.failed");
+		assert.ok(ok);
+		assert.ok(failed);
+		setTaskTerminal(ok, "completed", "completed", {
+			exitCode: 0,
+			lastMessage: "completed",
+		});
+		await writeJsonAtomic(join(cwd, ok.files.result), {
+			status: "completed",
+			structuredOutput: { claims: ["kept"] },
+		});
+		setTaskTerminal(failed, "failed", "failed", {
+			exitCode: 1,
+			lastMessage: "failed",
+		});
+		mkdirSync(dirname(join(cwd, failed.files.output)), { recursive: true });
+		writeFileSync(join(cwd, failed.files.output), "failed raw source\n");
+		await writeJsonAtomic(join(cwd, failed.files.result), { status: "failed" });
+		await writeRunRecord(cwd, run);
+
+		await scheduleRun(cwd, run.runId);
+		const updated = await readRunRecord(cwd, run.runId);
+		const support = updated.tasks.find((task) => task.specId === "audit.main");
+		assert.equal(support?.status, "completed");
+		assert.deepEqual(
+			JSON.parse(readFileSync(join(cwd, support.files.result), "utf8"))
+				.structuredOutput,
+			{
+				failedSource: null,
+				okSource: { claims: ["kept"] },
+				sourceKeys: ["extract.ok"],
+			},
+		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("stage-first support marks helper errors as failed", async () => {
 	const cwd = makeProject();
 	try {
@@ -3614,7 +3714,7 @@ test("stage-first support marks helper errors as failed", async () => {
 			"export default async function helper() { throw new Error('helper boom'); }\n",
 		);
 		const spec = workflowSpec("unit-scout", {
-			flow: {
+			workflow: {
 				stages: [
 					{
 						id: "extract",
@@ -3665,7 +3765,7 @@ test("stage-first foreach blocks when maxItems is exceeded with output contract 
 	try {
 		writeAgent(cwd, "unit-scout", "read");
 		const spec = workflowSpec("unit-scout", {
-			flow: {
+			workflow: {
 				stages: [
 					{
 						id: "extract",

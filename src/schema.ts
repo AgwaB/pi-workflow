@@ -2,17 +2,10 @@ import { readFile } from "node:fs/promises";
 import { extname } from "node:path";
 
 import {
-	APPROVAL_MODES,
-	FAST_MODES,
 	TOOL_CLASSIFICATIONS,
-	WORKFLOW_TYPES,
-	WorkflowMapItemSpec,
 	WorkflowSpec,
-	WorkflowTaskSpec,
 	WorkflowValidationError,
-	THINKING_LEVELS,
 	ValidationIssue,
-	WORKTREE_POLICIES,
 } from "./types.js";
 import {
 	ResolvedWorkflowSpecRef,
@@ -20,62 +13,8 @@ import {
 } from "./workflow-specs.js";
 import { parseYamlSubset } from "./yaml.js";
 
-const TOP_LEVEL_KEYS = new Set([
-	"schemaVersion",
-	"name",
-	"description",
-	"defaults",
-	"backend",
-	"roles",
-	"flow",
-	"outputTemplates",
-]);
-const MAX_CONCURRENCY = 16;
-const MAX_RUNTIME_MS = 86_400_000;
-const DEFAULT_KEYS = new Set([
-	"cwd",
-	"model",
-	"thinking",
-	"fast",
-	"approvalMode",
-	"tools",
-	"worktreePolicy",
-	"maxConcurrency",
-	"maxRuntimeMs",
-	"backend",
-]);
 const BACKEND_KEYS = new Set(["type", "mode"]);
-const ROLE_KEYS = new Set([
-	"fromAgent",
-	"prompt",
-	"includeSections",
-	"excludeSections",
-	"maxChars",
-]);
-const TASK_KEYS = new Set([
-	"id",
-	"agent",
-	"role",
-	"task",
-	"cwd",
-	"model",
-	"thinking",
-	"fast",
-	"approvalMode",
-	"tools",
-	"readOnly",
-	"worktreePolicy",
-	"output",
-	"outputContract",
-	"maxRuntimeMs",
-	"dependsOn",
-]);
-const WORKFLOW_SINGLE_KEYS = new Set(["type", "task"]);
-const WORKFLOW_PARALLEL_KEYS = new Set(["type", "tasks", "aggregate"]);
-const WORKFLOW_CHAIN_KEYS = new Set(["type", "steps"]);
-const WORKFLOW_DAG_KEYS = new Set(["type", "tasks"]);
-const WORKFLOW_MAP_KEYS = new Set(["type", "items", "task", "aggregate"]);
-const MAP_ITEM_KEYS = new Set(["id", "input"]);
+
 const OUTPUT_KEYS = new Set([
 	"format",
 	"requiredKeys",
@@ -108,6 +47,8 @@ const SUPPORT_STAGE_KEYS = new Set([
 const SUPPORT_SPEC_KEYS = new Set(["uses", "options"]);
 const LEGACY_TRANSFORM_MIGRATION_MESSAGE =
 	'legacy type "transform" is not supported; use support: { "uses": "./helpers/name.mjs", "options": { ... } } without a type field';
+const LEGACY_FLOW_MIGRATION_MESSAGE =
+	'legacy flow.type bodies are not supported; use workflow.stages with stage type fields and from dependencies';
 const TOOL_OBJECT_KEYS = new Set([
 	"name",
 	"extensions",
@@ -145,7 +86,7 @@ export async function loadWorkflowSpec(
 
 	return {
 		...resolved,
-		spec: parseWorkflowSpecCompat(parsed),
+		spec: parseWorkflow(parsed),
 	};
 }
 
@@ -154,100 +95,6 @@ function parseSpecText(text: string, specPath: string): unknown {
 	if (extension === ".yaml" || extension === ".yml")
 		return parseYamlSubset(text, specPath);
 	return JSON.parse(text);
-}
-
-export function parseWorkflowSpec(value: unknown): WorkflowSpec {
-	const issues: ValidationIssue[] = [];
-	const root = objectAt(value, "$", issues);
-
-	if (root) {
-		rejectUnknownKeys(root, TOP_LEVEL_KEYS, "$", issues);
-
-		if (root.schemaVersion !== 1) {
-			issues.push({ path: "$.schemaVersion", message: "must be exactly 1" });
-		}
-
-		optionalString(root, "name", "$.name", issues);
-		optionalString(root, "description", "$.description", issues);
-
-		if (root.backend !== undefined)
-			parseBackend(root.backend, "$.backend", issues);
-		if (root.defaults !== undefined)
-			parseDefaults(root.defaults, "$.defaults", issues);
-		if (root.roles !== undefined) parseRoles(root.roles, "$.roles", issues);
-		if (root.outputTemplates !== undefined)
-			parseOutputTemplates(root.outputTemplates, "$.outputTemplates", issues);
-		parseWorkflowBody(root.flow, "$.flow", issues);
-	}
-
-	if (issues.length > 0) throw new WorkflowValidationError(issues);
-	return value as WorkflowSpec;
-}
-
-function parseDefaults(
-	value: unknown,
-	path: string,
-	issues: ValidationIssue[],
-): void {
-	const defaults = objectAt(value, path, issues);
-	if (!defaults) return;
-
-	rejectUnknownKeys(defaults, DEFAULT_KEYS, path, issues);
-	optionalString(defaults, "cwd", `${path}.cwd`, issues);
-	optionalString(defaults, "model", `${path}.model`, issues);
-	optionalEnum(
-		defaults,
-		"thinking",
-		THINKING_LEVELS,
-		`${path}.thinking`,
-		issues,
-	);
-	optionalEnum(defaults, "fast", FAST_MODES, `${path}.fast`, issues);
-	optionalEnum(
-		defaults,
-		"approvalMode",
-		APPROVAL_MODES,
-		`${path}.approvalMode`,
-		issues,
-	);
-	optionalWorkflowToolArray(defaults, "tools", `${path}.tools`, issues);
-	optionalEnum(
-		defaults,
-		"worktreePolicy",
-		WORKTREE_POLICIES,
-		`${path}.worktreePolicy`,
-		issues,
-	);
-
-	if (defaults.maxConcurrency !== undefined) {
-		const maxConcurrency = defaults.maxConcurrency;
-		if (
-			typeof maxConcurrency !== "number" ||
-			!Number.isInteger(maxConcurrency) ||
-			maxConcurrency <= 0
-		) {
-			issues.push({
-				path: `${path}.maxConcurrency`,
-				message: "must be a positive integer",
-			});
-		} else if (maxConcurrency > MAX_CONCURRENCY) {
-			issues.push({
-				path: `${path}.maxConcurrency`,
-				message: `must be less than or equal to ${MAX_CONCURRENCY}`,
-			});
-		}
-	}
-
-	optionalPositiveInteger(
-		defaults,
-		"maxRuntimeMs",
-		`${path}.maxRuntimeMs`,
-		issues,
-		MAX_RUNTIME_MS,
-	);
-
-	if (defaults.backend !== undefined)
-		parseBackend(defaults.backend, `${path}.backend`, issues);
 }
 
 function parseBackend(
@@ -272,234 +119,6 @@ function parseBackend(
 		issues.push({
 			path: `${path}.mode`,
 			message: 'must be "auto" or "headless"',
-		});
-	}
-}
-
-function parseRoles(
-	value: unknown,
-	path: string,
-	issues: ValidationIssue[],
-): void {
-	const roles = objectAt(value, path, issues);
-	if (!roles) return;
-
-	for (const [name, roleValue] of Object.entries(roles)) {
-		if (name.trim() === "") {
-			issues.push({ path, message: "role names must be non-empty" });
-			continue;
-		}
-
-		const rolePath = `${path}.${jsonKey(name)}`;
-		const role = objectAt(roleValue, rolePath, issues);
-		if (!role) continue;
-
-		rejectUnknownKeys(role, ROLE_KEYS, rolePath, issues);
-		optionalString(role, "fromAgent", `${rolePath}.fromAgent`, issues);
-		optionalString(role, "prompt", `${rolePath}.prompt`, issues);
-		optionalStringArray(
-			role,
-			"includeSections",
-			`${rolePath}.includeSections`,
-			issues,
-		);
-		optionalStringArray(
-			role,
-			"excludeSections",
-			`${rolePath}.excludeSections`,
-			issues,
-		);
-
-		if (role.maxChars !== undefined) {
-			const maxChars = role.maxChars;
-			if (
-				typeof maxChars !== "number" ||
-				!Number.isInteger(maxChars) ||
-				maxChars <= 0
-			) {
-				issues.push({
-					path: `${rolePath}.maxChars`,
-					message: "must be a positive integer",
-				});
-			}
-		}
-
-		if (role.fromAgent === undefined && role.prompt === undefined) {
-			issues.push({
-				path: rolePath,
-				message: "must define fromAgent, prompt, or both",
-			});
-		}
-	}
-}
-
-function parseWorkflowBody(
-	value: unknown,
-	path: string,
-	issues: ValidationIssue[],
-): void {
-	const body = objectAt(value, path, issues);
-	if (!body) return;
-
-	if (!WORKFLOW_TYPES.includes(body.type as never)) {
-		issues.push({
-			path: `${path}.type`,
-			message: 'must be "single", "parallel", "chain", "dag", or "map"',
-		});
-		return;
-	}
-
-	if (body.type === "single") {
-		rejectUnknownKeys(body, WORKFLOW_SINGLE_KEYS, path, issues);
-		parseTask(body.task, `${path}.task`, issues);
-		return;
-	}
-
-	if (body.type === "parallel") {
-		rejectUnknownKeys(body, WORKFLOW_PARALLEL_KEYS, path, issues);
-		parseTaskArray(body.tasks, `${path}.tasks`, issues, 2);
-		if (body.aggregate !== undefined)
-			parseTask(body.aggregate, `${path}.aggregate`, issues);
-		return;
-	}
-
-	if (body.type === "chain") {
-		rejectUnknownKeys(body, WORKFLOW_CHAIN_KEYS, path, issues);
-		parseTaskArray(body.steps, `${path}.steps`, issues);
-		return;
-	}
-
-	if (body.type === "dag") {
-		rejectUnknownKeys(body, WORKFLOW_DAG_KEYS, path, issues);
-		parseTaskArray(body.tasks, `${path}.tasks`, issues, 1, {
-			idRequired: true,
-			allowDependsOn: true,
-		});
-		return;
-	}
-
-	rejectUnknownKeys(body, WORKFLOW_MAP_KEYS, path, issues);
-	parseMapItems(body.items, `${path}.items`, issues);
-	parseTask(body.task, `${path}.task`, issues);
-	if (body.aggregate !== undefined)
-		parseTask(body.aggregate, `${path}.aggregate`, issues);
-}
-
-function parseMapItems(
-	value: unknown,
-	path: string,
-	issues: ValidationIssue[],
-): void {
-	if (!Array.isArray(value)) {
-		issues.push({ path, message: "must be an array" });
-		return;
-	}
-	if (value.length < 1) {
-		issues.push({ path, message: "must contain at least one item" });
-		return;
-	}
-
-	const seen = new Set<string>();
-	value.forEach((itemValue, index) => {
-		const itemPath = `${path}[${index}]`;
-		const item = objectAt(itemValue, itemPath, issues) as
-			| (Partial<WorkflowMapItemSpec> & Record<string, unknown>)
-			| undefined;
-		if (!item) return;
-		rejectUnknownKeys(item, MAP_ITEM_KEYS, itemPath, issues);
-		requiredString(item, "id", `${itemPath}.id`, issues);
-		requiredString(item, "input", `${itemPath}.input`, issues);
-		if (typeof item.id === "string") {
-			if (seen.has(item.id))
-				issues.push({
-					path: `${itemPath}.id`,
-					message: `duplicate value "${item.id}"`,
-				});
-			seen.add(item.id);
-		}
-	});
-}
-
-function parseTaskArray(
-	value: unknown,
-	path: string,
-	issues: ValidationIssue[],
-	minLength = 1,
-	options: { idRequired?: boolean; allowDependsOn?: boolean } = {},
-): void {
-	if (!Array.isArray(value)) {
-		issues.push({ path, message: "must be an array" });
-		return;
-	}
-
-	if (value.length < minLength) {
-		issues.push({
-			path,
-			message:
-				minLength === 1
-					? "must contain at least one task"
-					: `must contain at least ${minLength} tasks`,
-		});
-		return;
-	}
-
-	value.forEach((task, index) =>
-		parseTask(task, `${path}[${index}]`, issues, options),
-	);
-}
-
-function parseTask(
-	value: unknown,
-	path: string,
-	issues: ValidationIssue[],
-	options: { idRequired?: boolean; allowDependsOn?: boolean } = {},
-): void {
-	const task = objectAt(value, path, issues) as
-		| (Partial<WorkflowTaskSpec> & Record<string, unknown>)
-		| undefined;
-	if (!task) return;
-
-	rejectUnknownKeys(task, TASK_KEYS, path, issues);
-	if (options.idRequired) requiredString(task, "id", `${path}.id`, issues);
-	else optionalString(task, "id", `${path}.id`, issues);
-	requiredString(task, "agent", `${path}.agent`, issues);
-	parseRoleReference(task.role, `${path}.role`, issues);
-	requiredString(task, "task", `${path}.task`, issues);
-	optionalString(task, "cwd", `${path}.cwd`, issues);
-	optionalString(task, "model", `${path}.model`, issues);
-	optionalEnum(task, "thinking", THINKING_LEVELS, `${path}.thinking`, issues);
-	optionalEnum(task, "fast", FAST_MODES, `${path}.fast`, issues);
-	optionalEnum(
-		task,
-		"approvalMode",
-		APPROVAL_MODES,
-		`${path}.approvalMode`,
-		issues,
-	);
-	optionalWorkflowToolArray(task, "tools", `${path}.tools`, issues);
-	optionalBoolean(task, "readOnly", `${path}.readOnly`, issues);
-	optionalEnum(
-		task,
-		"worktreePolicy",
-		WORKTREE_POLICIES,
-		`${path}.worktreePolicy`,
-		issues,
-	);
-	if (task.output !== undefined)
-		parseOutput(task.output, `${path}.output`, issues);
-	optionalString(task, "outputContract", `${path}.outputContract`, issues);
-	optionalPositiveInteger(
-		task,
-		"maxRuntimeMs",
-		`${path}.maxRuntimeMs`,
-		issues,
-		MAX_RUNTIME_MS,
-	);
-	optionalStringArray(task, "dependsOn", `${path}.dependsOn`, issues);
-	if (task.dependsOn !== undefined && !options.allowDependsOn) {
-		issues.push({
-			path: `${path}.dependsOn`,
-			message: "is only supported for dag flows",
 		});
 	}
 }
@@ -658,33 +277,6 @@ function parseJsonPathArrayMap(
 			seen.add(jsonPath);
 		});
 	}
-}
-
-function parseRoleReference(
-	value: unknown,
-	path: string,
-	issues: ValidationIssue[],
-): void {
-	if (value === undefined) return;
-	if (typeof value === "string") {
-		if (value.trim() === "")
-			issues.push({ path, message: "must be non-empty" });
-		return;
-	}
-
-	if (!Array.isArray(value)) {
-		issues.push({ path, message: "must be a string or string array" });
-		return;
-	}
-
-	value.forEach((item, index) => {
-		if (typeof item !== "string" || item.trim() === "") {
-			issues.push({
-				path: `${path}[${index}]`,
-				message: "must be a non-empty string",
-			});
-		}
-	});
 }
 
 function objectAt(
@@ -924,7 +516,6 @@ function jsonKey(key: string): string {
 }
 
 export const loadWorkflow = loadWorkflowSpec;
-export const parseWorkflow = parseWorkflowSpecCompat;
 
 const STAGE_FIRST_LOOP_MAX_ROUNDS = 50;
 const STAGE_FIRST_OUTPUT_FORMATS = ["text", "json", "markdown"] as const;
@@ -978,8 +569,8 @@ const STAGE_FIRST_UNTIL_KEYS = new Set([
 function isStageFirstSpec(value: unknown): value is any {
 	return Boolean(
 		value &&
-			typeof value === "object" &&
-			((value as any).workflow?.stages || (value as any).flow?.stages),
+		typeof value === "object" &&
+		(value as any).workflow?.stages,
 	);
 }
 
@@ -989,7 +580,7 @@ export function parseStageFirstWorkflowSpec(value: unknown): any {
 			{ path: "$", message: "must be an object" },
 		]);
 	const spec = value as any;
-	const stages = spec.workflow?.stages ?? spec.flow?.stages;
+	const stages = spec.workflow?.stages;
 	if (spec.schemaVersion !== 1)
 		throw new WorkflowValidationError([
 			{ path: "$.schemaVersion", message: "must be exactly 1" },
@@ -1064,8 +655,6 @@ export function parseStageFirstWorkflowSpec(value: unknown): any {
 	}
 
 	if (issues.length > 0) throw new WorkflowValidationError(issues);
-	if (!spec.workflow && spec.flow?.stages)
-		return { ...spec, workflow: { stages: spec.flow.stages } };
 	return spec;
 }
 
@@ -1540,18 +1129,18 @@ function rejectUnknownStageFirstKeys(
 	}
 }
 
-const originalParseWorkflowSpec = parseWorkflowSpec;
-export function parseWorkflowSpecCompat(value: unknown): any {
+export function parseWorkflow(value: unknown): WorkflowSpec {
 	if (
 		value &&
 		typeof value === "object" &&
-		(value as any).flow?.type !== undefined &&
-		!(value as any).flow?.stages
+		(value as any).flow?.type !== undefined
 	) {
 		throw new WorkflowValidationError([
-			{ path: "$.flow.type", message: "unknown field" },
+			{ path: "$.flow.type", message: LEGACY_FLOW_MIGRATION_MESSAGE },
 		]);
 	}
 	if (isStageFirstSpec(value)) return parseStageFirstWorkflowSpec(value);
-	return originalParseWorkflowSpec(value);
+	throw new WorkflowValidationError([
+		{ path: "$.workflow.stages", message: "must be an array" },
+	]);
 }

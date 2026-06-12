@@ -1,11 +1,11 @@
 export { discoverAgents, loadAgentByName, parseAgentMarkdown } from "./agents.js";
-export { compileWorkflow, compileWorkflowSpec } from "./compiler.js";
+export { compileWorkflow } from "./compiler.js";
 export { formatLogs, formatRunDetails, formatRunStatus, formatStatus, refreshRun, resumeRun, resumeSupervisors, runWorkflow, runWorkflowSpec, waitForRun } from "./engine.js";
 export type { ResumeRunSummary } from "./engine.js";
 export { listWorkflows, recommendWorkflows, resolveWorkflowRef } from "./workflow-specs.js";
 export type { ResolvedWorkflowSpecRef, WorkflowRecommendation, WorkflowSpecRecord } from "./workflow-specs.js";
 export { compileRole, extractMarkdownSections } from "./roles.js";
-export { loadWorkflow, loadWorkflowSpec, parseWorkflow, parseWorkflowSpec } from "./schema.js";
+export { loadWorkflow, loadWorkflowSpec, parseWorkflow } from "./schema.js";
 export type {
   AgentDefinition,
   ApprovalMode,
@@ -16,8 +16,6 @@ export type {
   FastMode,
   WorkflowDefaults,
   WorkflowSpec,
-  WorkflowTaskSpec,
-  WorkflowType,
   RoleSpec,
   TaskCapability,
   ThinkingLevel,

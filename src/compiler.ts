@@ -3,19 +3,13 @@ import { dirname, extname, isAbsolute, relative, resolve } from "node:path";
 
 import { loadAgentByName } from "./agents.js";
 import { formatOutputTemplateSection } from "./workflow-artifacts.js";
-import { compileRole } from "./roles.js";
 import {
 	AgentDefinition,
 	ApprovalMode,
-	CompiledWorkflow,
-	CompiledRole,
 	CompiledTask,
 	CompiledTaskSafety,
 	CompiledToolProvider,
-	FastMode,
-	WorkflowSpec,
 	WorkflowTaskOutputSpec,
-	WorkflowTaskSpec,
 	WorkflowValidationError,
 	PermissionPreview,
 	STAGE_FIRST_RUN_TYPE,
@@ -57,233 +51,6 @@ interface CompileOptions {
 	specPath?: string;
 }
 
-export async function compileWorkflowSpec(
-	spec: WorkflowSpec,
-	options: CompileOptions,
-): Promise<CompiledWorkflow> {
-	const issues: ValidationIssue[] = [];
-	const warnings: string[] = [];
-	const agentCache = new Map<string, AgentDefinition>();
-	const projectRoot = resolve(options.cwd);
-	const defaultCwd = resolve(projectRoot, spec.defaults?.cwd ?? ".");
-	const backendOptions = spec.defaults?.backend ?? spec.backend ?? {};
-	const backend = {
-		type: "local-pi" as const,
-		mode: "headless" as const,
-	};
-
-	validateCwdInsideProject(defaultCwd, projectRoot, "$.defaults.cwd", issues);
-
-	if (backendOptions.type !== undefined && backendOptions.type !== "local-pi") {
-		issues.push({ path: "$.backend.type", message: 'must be "local-pi"' });
-	}
-	if (
-		backendOptions.mode !== undefined &&
-		backendOptions.mode !== "auto" &&
-		backendOptions.mode !== "headless"
-	) {
-		issues.push({
-			path: "$.backend.mode",
-			message: 'must be "auto" or "headless"',
-		});
-	}
-
-	const compiledRoles = await compileRoles(
-		spec,
-		options.cwd,
-		agentCache,
-		issues,
-	);
-	const roleMap = new Map(compiledRoles.map((role) => [role.name, role]));
-	const rawTasks = getWorkflowTasks(spec);
-	const compiledTasks: CompiledTask[] = [];
-	const seenTaskIds = new Set<string>();
-
-	for (const [index, task] of rawTasks.entries()) {
-		const taskPath = taskPathFor(spec, index);
-		const id = task.id ?? `task-${index + 1}`;
-
-		if (seenTaskIds.has(id)) {
-			issues.push({
-				path: `${taskPath}.id`,
-				message: `duplicate task id "${id}"`,
-			});
-			continue;
-		}
-		seenTaskIds.add(id);
-
-		const agent = await getAgent(
-			task.agent,
-			options.cwd,
-			agentCache,
-			issues,
-			`${taskPath}.agent`,
-		);
-		if (!agent) continue;
-
-		validateAgentRuntime(agent, issues, `${taskPath}.agent`);
-		const roleNames = roleNamesFor(task.role);
-		for (const roleName of roleNames) {
-			if (!roleMap.has(roleName)) {
-				issues.push({
-					path: `${taskPath}.role`,
-					message: `unknown role "${roleName}"`,
-				});
-			}
-		}
-
-		validateToolSpecs(spec.defaults?.tools, issues, "$.defaults.tools");
-		validateToolSpecs(task.tools, issues, `${taskPath}.tools`);
-		const toolSelection = resolveToolSelection(
-			[spec.defaults?.tools, task.tools],
-			agent.tools,
-		);
-		const toolPath =
-			task.tools !== undefined
-				? `${taskPath}.tools`
-				: spec.defaults?.tools !== undefined
-					? "$.defaults.tools"
-					: `${taskPath}.agent`;
-		validateToolSubset(toolSelection.tools, agent, issues, toolPath);
-		validateDelegationBoundary(toolSelection.tools, issues, toolPath);
-
-		const runtime = resolveRuntime(task, spec, agent, toolSelection);
-		const worktreePolicy =
-			task.worktreePolicy ?? spec.defaults?.worktreePolicy ?? "auto";
-		const readOnlyDeclared = task.readOnly ?? agent.readOnly ?? false;
-		const safety = classifySafety(
-			runtime.tools,
-			runtime.toolProviders,
-			readOnlyDeclared,
-			worktreePolicy,
-			runtime.approvalMode,
-		);
-
-		if (
-			readOnlyDeclared &&
-			runtime.tools?.some((tool) => EXPLICIT_WRITE_TOOLS.has(tool))
-		) {
-			issues.push({
-				path: `${taskPath}.readOnly`,
-				message:
-					"readOnly cannot be true when effective tools include edit or write",
-			});
-		}
-
-		validateDelegationBoundary(runtime.tools, issues, `${taskPath}.tools`);
-		validateUnsupportedFastMode(runtime.fast, issues, `${taskPath}.fast`);
-
-		const selectedRoles = roleNames
-			.map((roleName) => roleMap.get(roleName))
-			.filter((role): role is CompiledRole => Boolean(role));
-		const output = await resolveOutputTemplate(
-			task.output,
-			spec,
-			options,
-			`${taskPath}.output`,
-			issues,
-		);
-		const taskForPrompt = output === task.output ? task : { ...task, output };
-		const cwd = resolve(projectRoot, task.cwd ?? spec.defaults?.cwd ?? ".");
-		if (task.cwd !== undefined)
-			validateCwdInsideProject(cwd, projectRoot, `${taskPath}.cwd`, issues);
-
-		compiledTasks.push({
-			id,
-			agent: task.agent,
-			agentPath: agent.sourcePath,
-			agentDescription: agent.description,
-			agentSystemPrompt: agent.body,
-			systemPromptMode: agent.systemPromptMode,
-			inheritProjectContext: agent.inheritProjectContext,
-			inheritSkills: agent.inheritSkills,
-			roleNames,
-			task: task.task,
-			cwd,
-			explicitCwd: task.cwd !== undefined,
-			explicitWorktreePolicy: task.worktreePolicy !== undefined,
-			runtime,
-			safety,
-			output,
-			outputContract: task.outputContract,
-			compiledPrompt: buildCompiledPrompt(taskForPrompt, selectedRoles),
-		});
-	}
-
-	if (issues.length > 0) throw new WorkflowValidationError(issues);
-
-	return {
-		schemaVersion: 1,
-		name: spec.name,
-		description: spec.description,
-		type: spec.flow.type,
-		cwd: defaultCwd,
-		backend,
-		maxConcurrency: spec.defaults?.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY,
-		roles: compiledRoles,
-		tasks: compiledTasks,
-		warnings,
-	};
-}
-
-function getWorkflowTasks(spec: WorkflowSpec): WorkflowTaskSpec[] {
-	if (spec.flow.type === "single") return [spec.flow.task];
-	if (spec.flow.type === "parallel") return spec.flow.tasks;
-	return spec.flow.steps;
-}
-
-function taskPathFor(spec: WorkflowSpec, index: number): string {
-	if (spec.flow.type === "single") return "$.flow.task";
-	if (spec.flow.type === "parallel") return `$.flow.tasks[${index}]`;
-	return `$.flow.steps[${index}]`;
-}
-
-async function compileRoles(
-	spec: WorkflowSpec,
-	cwd: string,
-	agentCache: Map<string, AgentDefinition>,
-	issues: ValidationIssue[],
-): Promise<CompiledRole[]> {
-	const roles = spec.roles ?? {};
-	const compiled: CompiledRole[] = [];
-
-	for (const [name, roleSpec] of Object.entries(roles)) {
-		const sourceAgent = roleSpec.fromAgent
-			? await getAgent(
-					roleSpec.fromAgent,
-					cwd,
-					agentCache,
-					issues,
-					`$.roles.${jsonKey(name)}.fromAgent`,
-				)
-			: undefined;
-
-		compiled.push(compileRole(name, roleSpec, sourceAgent));
-	}
-
-	return compiled;
-}
-
-async function getAgent(
-	name: string,
-	cwd: string,
-	cache: Map<string, AgentDefinition>,
-	issues: ValidationIssue[],
-	path: string,
-): Promise<AgentDefinition | undefined> {
-	if (cache.has(name)) return cache.get(name);
-
-	const agent = await loadAgentByName(name, cwd);
-	if (!agent) {
-		issues.push({ path, message: `unknown agent "${name}"` });
-		return undefined;
-	}
-
-	cache.set(name, agent);
-	for (const alias of agent.aliases) cache.set(alias, agent);
-	return agent;
-}
-
 function validateAgentRuntime(
 	agent: AgentDefinition,
 	issues: ValidationIssue[],
@@ -323,24 +90,6 @@ function validateToolSubset(
 			});
 		}
 	}
-}
-
-function validateCwdInsideProject(
-	cwd: string,
-	projectRoot: string,
-	path: string,
-	issues: ValidationIssue[],
-): void {
-	const relativePath = relative(projectRoot, cwd);
-	if (
-		relativePath === "" ||
-		(!relativePath.startsWith("..") && !isAbsolute(relativePath))
-	)
-		return;
-	issues.push({
-		path,
-		message: `cwd must stay inside project root: ${projectRoot}`,
-	});
 }
 
 interface ToolSelection {
@@ -594,50 +343,6 @@ function filterDelegationTools(
 	return tools.filter((tool) => !DELEGATION_TOOLS.has(tool));
 }
 
-function validateUnsupportedFastMode(
-	fast: FastMode | undefined,
-	issues: ValidationIssue[],
-	path: string,
-): void {
-	if ((fast as string | undefined) === "on")
-		issues.push({ path, message: "fast:on is not supported" });
-}
-
-function resolveRuntime(
-	task: WorkflowTaskSpec,
-	spec: WorkflowSpec,
-	agent: AgentDefinition,
-	toolSelection: ToolSelection,
-): {
-	model?: string;
-	thinking?: ThinkingLevel;
-	fast?: FastMode;
-	approvalMode: ApprovalMode;
-	tools?: string[];
-	toolProviders?: Record<string, CompiledToolProvider>;
-	maxRuntimeMs: number;
-} {
-	const filteredToolSelection = filterToolSelection(toolSelection);
-	return {
-		model: task.model ?? spec.defaults?.model ?? agent.model,
-		thinking: task.thinking ?? spec.defaults?.thinking ?? agent.thinking,
-		fast: task.fast ?? spec.defaults?.fast ?? agent.fast,
-		approvalMode:
-			task.approvalMode ??
-			spec.defaults?.approvalMode ??
-			agent.approvalMode ??
-			"non-interactive",
-		tools: filteredToolSelection.tools,
-		...(filteredToolSelection.toolProviders
-			? { toolProviders: filteredToolSelection.toolProviders }
-			: {}),
-		maxRuntimeMs:
-			task.maxRuntimeMs ??
-			spec.defaults?.maxRuntimeMs ??
-			DEFAULT_MAX_RUNTIME_MS,
-	};
-}
-
 function classifySafety(
 	tools: string[] | undefined,
 	toolProviders: Record<string, CompiledToolProvider> | undefined,
@@ -743,39 +448,6 @@ function permissionPreview(
 	}
 
 	return { status: "pending" };
-}
-
-function roleNamesFor(role: string | string[] | undefined): string[] {
-	if (role === undefined) return [];
-	return Array.isArray(role) ? role : [role];
-}
-
-function buildCompiledPrompt(
-	task: WorkflowTaskSpec,
-	roles: CompiledRole[],
-): string {
-	const parts = ["# Flow Task", task.task.trim()];
-
-	if (roles.length > 0) {
-		parts.push("# Role Context");
-		for (const role of roles) {
-			parts.push(`## Role: ${role.name}\n${role.content}`.trim());
-		}
-	}
-
-	if (task.outputContract?.trim()) {
-		parts.push("# Output Contract", task.outputContract.trim());
-	}
-
-	const templateSection = formatOutputTemplateSection(task.output);
-	if (templateSection) parts.push(templateSection);
-
-	parts.push(
-		"# Constraints",
-		"- Use only the task prompt and files you inspect.\n- Do not assume parent conversation history.\n- Do not launch other agents unless explicitly instructed.",
-	);
-
-	return parts.join("\n\n");
 }
 
 function jsonKey(key: string): string {
@@ -939,8 +611,12 @@ export async function compileWorkflow(
 		runtimeDefaults?: { model?: string; thinking?: ThinkingLevel };
 	},
 ): Promise<any> {
-	const stages = spec.workflow?.stages ?? spec.flow?.stages;
-	if (!Array.isArray(stages)) return compileWorkflowSpec(spec, options);
+	const stages = spec.workflow?.stages;
+	if (!Array.isArray(stages)) {
+		throw new WorkflowValidationError([
+			{ path: "$.workflow.stages", message: "must be an array" },
+		]);
+	}
 
 	const agentName = spec.agent ?? spec.defaults?.agent ?? "scout";
 	const agentCache = new Map<string, AgentDefinition>();

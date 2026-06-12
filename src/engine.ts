@@ -1,7 +1,7 @@
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-import { compileWorkflow, compileWorkflowSpec } from "./compiler.js";
+import { compileWorkflow } from "./compiler.js";
 import { loadWorkflowSpec } from "./schema.js";
 import {
 	createRunRecord,
@@ -71,17 +71,11 @@ export async function runWorkflowSpec(
 	options: { task?: string } = {},
 ): Promise<WorkflowRunRecord> {
 	const loaded = await loadWorkflowSpec(specPath, cwd);
-	const compiled =
-		options.task !== undefined
-			? await compileWorkflow(loaded.spec, {
-					cwd,
-					specPath: loaded.specPath,
-					task: options.task,
-				})
-			: await compileWorkflowSpec(loaded.spec, {
-					cwd,
-					specPath: loaded.specPath,
-				});
+	const compiled = await compileWorkflow(loaded.spec, {
+		cwd,
+		specPath: loaded.specPath,
+		task: options.task,
+	});
 
 	const { run } = await createRunRecord(cwd, compiled, loaded.specPath);
 	await withRunLease(cwd, run.runId, async () => {
@@ -243,19 +237,10 @@ export async function scheduleRun(
 			compiled ?? (await readCompiledWorkflow(cwd, run.runId));
 		if (!compiledFlow) return run;
 
-		if (compiledFlow.type === "chain") {
-			await scheduleChain(cwd, run, compiledFlow);
-		} else if (
-			compiledFlow.type === "dag" ||
-			compiledFlow.type === "tree" ||
-			compiledFlow.type === STAGE_FIRST_RUN_TYPE
-		) {
-			await scheduleDag(cwd, run, compiledFlow);
-		} else if (compiledFlow.type === "retry") {
-			await scheduleRetry(cwd, run, compiledFlow);
-		} else {
-			await scheduleParallel(cwd, run, compiledFlow);
+		if (compiledFlow.type !== STAGE_FIRST_RUN_TYPE) {
+			throw new Error(`unsupported compiled workflow type: ${compiledFlow.type}`);
 		}
+		await scheduleDag(cwd, run, compiledFlow);
 
 		run = await readRunRecord(cwd, run.runId);
 		return run;
@@ -380,76 +365,6 @@ async function recordSupervisorError(
 	}).catch(() => undefined);
 }
 
-async function scheduleParallel(
-	cwd: string,
-	run: WorkflowRunRecord,
-	compiledFlow: CompiledWorkflow,
-): Promise<void> {
-	const joinIndex = compiledFlow.tasks.findIndex((task) =>
-		isJoinTaskKind(task.kind),
-	);
-	if (joinIndex === -1) {
-		await scheduleParallelMainTasks(
-			cwd,
-			run,
-			compiledFlow,
-			allTaskIndexes(run),
-		);
-		return;
-	}
-
-	const mainIndexes = allTaskIndexes(run).filter(
-		(index) => index !== joinIndex,
-	);
-	await scheduleParallelMainTasks(cwd, run, compiledFlow, mainIndexes);
-
-	const refreshed = await readRunRecord(cwd, run.runId);
-	const mainTasks = mainIndexes
-		.map((index) => refreshed.tasks[index])
-		.filter((task): task is WorkflowTaskRunRecord => Boolean(task));
-	if (
-		mainTasks.some(
-			(task) => task.status === "pending" || task.status === "running",
-		)
-	)
-		return;
-	if (
-		refreshed.tasks.some(
-			(task, index) => index !== joinIndex && task.status === "blocked",
-		)
-	)
-		return;
-
-	await launchPendingTaskAt(cwd, refreshed, compiledFlow, joinIndex, {
-		join: true,
-	});
-}
-
-async function scheduleParallelMainTasks(
-	cwd: string,
-	run: WorkflowRunRecord,
-	compiledFlow: CompiledWorkflow,
-	indexes: number[],
-): Promise<void> {
-	const maxConcurrency = Math.max(
-		1,
-		Math.min(MAX_CONCURRENCY, compiledFlow.maxConcurrency),
-	);
-	let running = indexes.filter(
-		(index) => run.tasks[index]?.status === "running",
-	).length;
-
-	for (const index of indexes) {
-		if (running >= maxConcurrency) return;
-		const launched = await launchPendingTaskAt(cwd, run, compiledFlow, index);
-		if (launched) running += 1;
-	}
-}
-
-function allTaskIndexes(run: WorkflowRunRecord): number[] {
-	return run.tasks.map((_, index) => index);
-}
-
 async function scheduleDag(
 	cwd: string,
 	run: WorkflowRunRecord,
@@ -524,9 +439,7 @@ async function scheduleDag(
 				continue;
 		}
 
-		const launched = await launchPendingTaskAt(cwd, run, compiledFlow, index, {
-			dag: true,
-		});
+		const launched = await launchPendingTaskAt(cwd, run, compiledFlow, index);
 		if (launched) running += 1;
 	}
 }
@@ -2042,76 +1955,11 @@ function markDagDependentsSkipped(
 	return changed;
 }
 
-async function scheduleRetry(
-	cwd: string,
-	run: WorkflowRunRecord,
-	compiledFlow: CompiledWorkflow,
-): Promise<void> {
-	if (run.tasks.some((task) => task.status === "running")) return;
-
-	const completedIndex = run.tasks.findIndex(
-		(task) => task.status === "completed",
-	);
-	if (completedIndex !== -1) {
-		await skipRemainingRetryTasks(cwd, run, completedIndex + 1);
-		return;
-	}
-
-	const pendingIndex = run.tasks.findIndex((task) => task.status === "pending");
-	if (pendingIndex === -1) return;
-	const previous = pendingIndex > 0 ? run.tasks[pendingIndex - 1] : undefined;
-	if (previous && !isTerminalTaskStatus(previous.status)) return;
-	if (
-		previous &&
-		previous.status !== "failed" &&
-		previous.status !== "interrupted"
-	)
-		return;
-
-	await launchPendingTaskAt(cwd, run, compiledFlow, pendingIndex, {
-		retry: true,
-	});
-}
-
-async function scheduleChain(
-	cwd: string,
-	run: WorkflowRunRecord,
-	compiledFlow: CompiledWorkflow,
-): Promise<void> {
-	if (run.tasks.some((task) => task.status === "running")) return;
-
-	const failedIndex = run.tasks.findIndex(
-		(task) => task.status === "failed" || task.status === "interrupted",
-	);
-	if (failedIndex !== -1) {
-		await skipRemainingChainTasks(cwd, run, failedIndex + 1);
-		return;
-	}
-
-	const pendingIndex = run.tasks.findIndex((task) => task.status === "pending");
-	if (pendingIndex === -1) return;
-
-	const previousComplete = run.tasks
-		.slice(0, pendingIndex)
-		.every((task) => task.status === "completed");
-	if (!previousComplete) return;
-
-	await launchPendingTaskAt(cwd, run, compiledFlow, pendingIndex, {
-		chain: true,
-	});
-}
-
 async function launchPendingTaskAt(
 	cwd: string,
 	run: WorkflowRunRecord,
 	compiledFlow: CompiledWorkflow,
 	index: number,
-	options: {
-		chain?: boolean;
-		join?: boolean;
-		dag?: boolean;
-		retry?: boolean;
-	} = {},
 ): Promise<boolean> {
 	const task = run.tasks[index];
 	if (!task || task.status !== "pending") return false;
@@ -2126,15 +1974,7 @@ async function launchPendingTaskAt(
 		return false;
 	}
 
-	let launchTask = options.retry
-		? await prepareRetryTask(cwd, run, compiledFlow, index)
-		: options.chain
-			? await prepareChainTask(cwd, run, compiledFlow, index)
-			: options.join
-				? await prepareJoinTask(cwd, run, compiledFlow, index)
-				: options.dag
-					? await prepareDagTask(cwd, run, compiledFlow, index)
-					: compiledTask;
+	let launchTask = await prepareDagTask(cwd, run, compiledFlow, index);
 	if (task.outputRetry)
 		launchTask = await prepareOutputRetryTask(cwd, task, launchTask);
 
@@ -2165,16 +2005,8 @@ async function launchPendingTaskAt(
 			lastMessage: error instanceof Error ? error.message : String(error),
 		});
 		await writeRunRecord(cwd, run).catch(() => undefined);
-		if (compiledFlow.type === "chain")
-			await skipRemainingChainTasks(cwd, run, index + 1);
-		if (
-			compiledFlow.type === "dag" ||
-			compiledFlow.type === "tree" ||
-			compiledFlow.type === STAGE_FIRST_RUN_TYPE
-		) {
-			markDagDependentsSkipped(run, compiledFlow);
-			await writeRunRecord(cwd, run).catch(() => undefined);
-		}
+		markDagDependentsSkipped(run, compiledFlow);
+		await writeRunRecord(cwd, run).catch(() => undefined);
 		return false;
 	}
 }
@@ -2261,7 +2093,7 @@ async function readSupportSources(
 	const sources: Record<string, unknown> = {};
 	for (const specId of dependsOn) {
 		const source = run.tasks.find((candidate) => candidate.specId === specId);
-		if (!source) continue;
+		if (!source || source.status !== "completed") continue;
 		const result = await readJson<{ structuredOutput?: unknown }>(
 			fromProjectPath(cwd, source.files.result),
 		).catch(() => undefined);
@@ -2326,51 +2158,6 @@ function recordCreatedLoopWorktree(
 	else run.loopWorktrees[index] = record;
 }
 
-async function prepareChainTask(
-	cwd: string,
-	run: WorkflowRunRecord,
-	compiledFlow: CompiledWorkflow,
-	index: number,
-): Promise<CompiledWorkflow["tasks"][number]> {
-	const compiledTask = compiledFlow.tasks[index]!;
-	const task = run.tasks[index]!;
-	const previousTask = index > 0 ? run.tasks[index - 1] : undefined;
-	const inheritedWorktree = findInheritedWorktree(run, index);
-
-	if (
-		inheritedWorktree &&
-		!compiledTask.explicitCwd &&
-		!compiledTask.explicitWorktreePolicy
-	) {
-		task.cwd = inheritedWorktree.path;
-		task.worktree = {
-			enabled: true,
-			path: inheritedWorktree.path,
-			branch: inheritedWorktree.branch,
-			baseCwd: inheritedWorktree.baseCwd,
-			warning: "inherited from previous chain step",
-		};
-	}
-
-	if (!previousTask) return compiledTask;
-
-	const previousOutput = previousTask.files.output;
-	const previousSummary = await readOutputPreview(cwd, previousOutput);
-	return {
-		...compiledTask,
-		cwd: task.cwd,
-		compiledPrompt: [
-			compiledTask.compiledPrompt,
-			"# Previous Chain Step",
-			`Previous task: ${previousTask.taskId} (${previousTask.specId})`,
-			`Previous status: ${previousTask.status}`,
-			`Previous output path: ${previousOutput}`,
-			"Previous output preview:",
-			previousSummary || "(empty output)",
-		].join("\n\n"),
-	};
-}
-
 async function prepareDagTask(
 	cwd: string,
 	run: WorkflowRunRecord,
@@ -2410,64 +2197,6 @@ async function prepareDagTask(
 	};
 }
 
-async function prepareJoinTask(
-	cwd: string,
-	run: WorkflowRunRecord,
-	compiledFlow: CompiledWorkflow,
-	joinIndex: number,
-): Promise<CompiledWorkflow["tasks"][number]> {
-	const compiledTask = compiledFlow.tasks[joinIndex]!;
-	const task = run.tasks[joinIndex]!;
-	const label = joinContextLabel(compiledTask.kind);
-	const sourceTasks = run.tasks.filter((_, index) => index !== joinIndex);
-	const context = await buildRunSourceContext(
-		cwd,
-		run,
-		sourceTasks,
-		sourceContextOptions(compiledTask),
-	);
-
-	return {
-		...compiledTask,
-		cwd: task.cwd,
-		compiledPrompt: [
-			compiledTask.compiledPrompt,
-			`# ${label} Context`,
-			"Use this deterministic source context packet. Prefer structuredOutput over outputPreview. Do not assume all tasks succeeded.",
-			JSON.stringify(context, null, 2),
-		].join("\n\n"),
-	};
-}
-
-async function prepareRetryTask(
-	cwd: string,
-	run: WorkflowRunRecord,
-	compiledFlow: CompiledWorkflow,
-	index: number,
-): Promise<CompiledWorkflow["tasks"][number]> {
-	const compiledTask = compiledFlow.tasks[index]!;
-	const task = run.tasks[index]!;
-	const previousOutputPath =
-		run.tasks[index - 1]?.files.output ?? task.files.output;
-	const previousOutput = await readOutputPreview(cwd, previousOutputPath, 1200);
-
-	return {
-		...compiledTask,
-		cwd: task.cwd,
-		compiledPrompt: [
-			compiledTask.compiledPrompt,
-			"# Retry Instructions",
-			"Retry after previous task failure.",
-			"# Previous Retry Attempt",
-			`Previous task: ${task.taskId} (${task.specId})`,
-			`Previous status: ${task.status}/${task.statusDetail}`,
-			`Previous output: ${previousOutputPath}`,
-			"Previous output preview:",
-			previousOutput || "(empty or unavailable)",
-		].join("\n\n"),
-	};
-}
-
 async function prepareOutputRetryTask(
 	cwd: string,
 	task: WorkflowTaskRunRecord,
@@ -2494,69 +2223,6 @@ async function prepareOutputRetryTask(
 			previousOutput || "(empty or unavailable)",
 		].join("\n\n"),
 	};
-}
-
-async function skipRemainingRetryTasks(
-	cwd: string,
-	run: WorkflowRunRecord,
-	startIndex: number,
-): Promise<void> {
-	let changed = false;
-	for (const task of run.tasks.slice(startIndex)) {
-		if (task.status !== "pending") continue;
-		setTaskTerminal(task, "skipped", "retry_not_needed", {
-			lastMessage: "skipped because an earlier retry attempt completed",
-		});
-		changed = true;
-	}
-	if (changed) await writeRunRecord(cwd, run);
-}
-
-async function skipRemainingChainTasks(
-	cwd: string,
-	run: WorkflowRunRecord,
-	startIndex: number,
-): Promise<void> {
-	let changed = false;
-	for (const task of run.tasks.slice(startIndex)) {
-		if (task.status !== "pending") continue;
-		setTaskTerminal(task, "skipped", "skipped_after_failure", {
-			lastMessage: "skipped because an earlier chain step failed",
-		});
-		changed = true;
-	}
-	if (changed) await writeRunRecord(cwd, run);
-}
-
-function isJoinTaskKind(
-	kind: CompiledWorkflow["tasks"][number]["kind"],
-): boolean {
-	return kind === "aggregate" || kind === "judge" || kind === "vote";
-}
-
-function joinContextLabel(
-	kind: CompiledWorkflow["tasks"][number]["kind"],
-): string {
-	if (kind === "judge") return "Judge";
-	if (kind === "vote") return "Vote";
-	return "Parallel Aggregate";
-}
-
-function findInheritedWorktree(
-	run: WorkflowRunRecord,
-	beforeIndex: number,
-): { path: string; branch: string | null; baseCwd: string | null } | undefined {
-	for (let index = beforeIndex - 1; index >= 0; index -= 1) {
-		const worktree = run.tasks[index]?.worktree;
-		if (worktree?.enabled && worktree.path) {
-			return {
-				path: worktree.path,
-				branch: worktree.branch,
-				baseCwd: worktree.baseCwd,
-			};
-		}
-	}
-	return undefined;
 }
 
 function sourceContextOptions(

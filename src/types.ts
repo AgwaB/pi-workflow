@@ -14,14 +14,6 @@ export const TOOL_CLASSIFICATIONS = [
 	"write-capable",
 	"mutation-capable",
 ] as const;
-export const WORKFLOW_TYPES = [
-	"single",
-	"parallel",
-	"chain",
-	"dag",
-	"tree",
-	"retry",
-] as const;
 export const STAGE_FIRST_RUN_TYPE = "workflow-v1" as const;
 
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
@@ -29,8 +21,7 @@ export type FastMode = (typeof FAST_MODES)[number];
 export type ApprovalMode = (typeof APPROVAL_MODES)[number];
 export type WorktreePolicy = (typeof WORKTREE_POLICIES)[number];
 export type ToolClassification = (typeof TOOL_CLASSIFICATIONS)[number];
-export type WorkflowType = (typeof WORKFLOW_TYPES)[number];
-export type CompiledWorkflowType = WorkflowType | typeof STAGE_FIRST_RUN_TYPE;
+export type CompiledWorkflowType = typeof STAGE_FIRST_RUN_TYPE;
 
 export interface BackendOptions {
 	type?: "local-pi";
@@ -66,6 +57,7 @@ export interface WorkflowDefaults {
 	fast?: FastMode;
 	approvalMode?: ApprovalMode;
 	tools?: WorkflowToolSpec[];
+	readOnly?: boolean;
 	worktreePolicy?: WorktreePolicy;
 	maxConcurrency?: number;
 	maxRuntimeMs?: number;
@@ -80,43 +72,25 @@ export interface RoleSpec {
 	maxChars?: number;
 }
 
-export interface WorkflowTaskSpec {
-	id?: string;
-	agent: string;
-	role?: string | string[];
-	task: string;
-	cwd?: string;
-	model?: string;
-	thinking?: ThinkingLevel;
-	fast?: FastMode;
-	approvalMode?: ApprovalMode;
-	tools?: WorkflowToolSpec[];
-	readOnly?: boolean;
-	worktreePolicy?: WorktreePolicy;
-	maxRuntimeMs?: number;
-	output?: WorkflowTaskOutputSpec;
-	outputContract?: string;
-}
-
-export interface WorkflowMapItemSpec {
-	id?: string;
-	task: string;
-}
-
-export type WorkflowBody =
-	| { type: "single"; task: WorkflowTaskSpec }
-	| { type: "parallel"; tasks: WorkflowTaskSpec[] }
-	| { type: "chain"; steps: WorkflowTaskSpec[] };
-
 export interface WorkflowSpec {
 	schemaVersion: 1;
 	name?: string;
 	description?: string;
+	agent?: string;
+	readOnly?: boolean;
+	tools?: WorkflowToolSpec[];
+	model?: string;
+	thinking?: ThinkingLevel;
+	fast?: FastMode;
+	worktreePolicy?: WorktreePolicy;
+	input?: unknown;
+	catalog?: Record<string, unknown>;
 	defaults?: WorkflowDefaults;
 	backend?: BackendOptions;
 	roles?: Record<string, RoleSpec>;
 	outputTemplates?: Record<string, unknown>;
-	flow: WorkflowBody;
+	workflow?: { stages: unknown[] };
+	flow?: { type?: unknown };
 }
 
 export interface ValidationIssue {

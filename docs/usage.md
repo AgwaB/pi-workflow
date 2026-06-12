@@ -152,6 +152,8 @@ Public workflow definitions separate three layers:
 
 Use `foreach.from` for dynamic fan-out, `reduce.from` for subagent fan-in, and support `from` for local helper inputs. Do not rely on a later plain `task` to see previous stage output.
 
+Legacy top-level `flow.type` bodies are rejected. Author new workflows with `workflow.stages`; future DAG work should extend this stage-first graph model instead of reviving the old `flow.type: "dag"` surface.
+
 ## Output contracts
 
 JSON-output stages can declare output contracts. The engine extracts JSON from model output, validates required paths/keys and basic caps, and retries invalid output up to the workflow's retry policy.

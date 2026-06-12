@@ -22,7 +22,6 @@ export interface WorkflowSpecRecord {
   aliases: string[];
   specPath: string;
   workflowRoot: string;
-  legacy?: boolean;
 }
 
 export interface WorkflowCatalogMetadata {
@@ -49,7 +48,6 @@ interface WorkflowCandidate {
 
 interface WorkflowRoot {
   path: string;
-  legacy?: boolean;
 }
 
 export async function resolveWorkflowRef(ref: string, cwd: string): Promise<ResolvedWorkflowSpecRef> {
@@ -116,7 +114,6 @@ export async function listWorkflows(cwd: string): Promise<WorkflowSpecRecord[]> 
         aliases,
         specPath: file,
         workflowRoot: workflowRootFor(file, root.path),
-        legacy: root.legacy,
       };
     });
   }));
