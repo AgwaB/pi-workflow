@@ -1,0 +1,505 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-06-12T22:53:51.599Z",
+  "evaluation": "codex-output-contract-holdout-kimi-xhigh-abc",
+  "taskId": "codex-tools-output-contract-holdout-dynamic-review-v1",
+  "model": "kimi-coding/kimi-for-coding",
+  "thinking": "xhigh",
+  "targetRepo": {
+    "url": "https://github.com/openai/codex.git",
+    "commit": "7cc80b39f1247beb9319228d9b3129c510763914"
+  },
+  "fixtureCommit": "4feaebe",
+  "telemetryCommit": "64d967d",
+  "repetitions": 3,
+  "maxObjectiveScorePerRep": 18,
+  "runDirs": [
+    ".pi/eval/dynamic-review/runs/codex-output-holdout-kimi-xhigh-telemetry-rep1-20260612T215844Z",
+    ".pi/eval/dynamic-review/runs/codex-output-holdout-kimi-xhigh-telemetry-rep2-20260612T221744Z",
+    ".pi/eval/dynamic-review/runs/codex-output-holdout-kimi-xhigh-telemetry-rep3-20260612T223337Z"
+  ],
+  "winnerCounts": {
+    "A": 0,
+    "B": 0,
+    "C": 3
+  },
+  "byArm": {
+    "A": {
+      "label": "workflow",
+      "type": "workflow:dynamic-review",
+      "scores": [
+        8,
+        11,
+        12
+      ],
+      "mean": 10.333,
+      "median": 11,
+      "stdevPopulation": 1.7,
+      "min": 8,
+      "max": 12,
+      "wins": 0,
+      "rows": [
+        {
+          "rep": 1,
+          "runDir": ".pi/eval/dynamic-review/runs/codex-output-holdout-kimi-xhigh-telemetry-rep1-20260612T215844Z",
+          "objectiveScore": 8,
+          "seedPoints": 8,
+          "maxSeedPoints": 18,
+          "trapPenalty": 0,
+          "hardFailures": [],
+          "commandRunCount": 15,
+          "actualCommandRunCount": 15,
+          "commandEvidence": {
+            "source": "candidate-reported+pi-tool-events",
+            "reportedCount": 4,
+            "actualCount": 15,
+            "matchedCount": 4,
+            "unmatchedActualCount": 11,
+            "reportedOnlyCount": 0,
+            "independentlyVerified": true,
+            "note": "bash command telemetry was reconstructed from Pi tool_call/tool_result events and matched to candidate-reported commandRuns when possible"
+          },
+          "changedFiles": [
+            "codex-rs/tools/src/tool_output.rs",
+            "dynamic-review-result.json"
+          ],
+          "issuePoints": [
+            {
+              "id": "seed-json-tool-output-custom-payload-response-item",
+              "points": 3,
+              "maxPoints": 6
+            },
+            {
+              "id": "seed-json-tool-output-code-mode-structured-json",
+              "points": 3,
+              "maxPoints": 6
+            },
+            {
+              "id": "seed-code-mode-content-items-skip-blank-text",
+              "points": 2,
+              "maxPoints": 6
+            }
+          ]
+        },
+        {
+          "rep": 2,
+          "runDir": ".pi/eval/dynamic-review/runs/codex-output-holdout-kimi-xhigh-telemetry-rep2-20260612T221744Z",
+          "objectiveScore": 11,
+          "seedPoints": 11,
+          "maxSeedPoints": 18,
+          "trapPenalty": 0,
+          "hardFailures": [],
+          "commandRunCount": 10,
+          "actualCommandRunCount": 10,
+          "commandEvidence": {
+            "source": "candidate-reported+pi-tool-events",
+            "reportedCount": 3,
+            "actualCount": 10,
+            "matchedCount": 3,
+            "unmatchedActualCount": 7,
+            "reportedOnlyCount": 0,
+            "independentlyVerified": true,
+            "note": "bash command telemetry was reconstructed from Pi tool_call/tool_result events and matched to candidate-reported commandRuns when possible"
+          },
+          "changedFiles": [
+            "codex-rs/tools/src/tool_output.rs",
+            "dynamic-review-result.json"
+          ],
+          "issuePoints": [
+            {
+              "id": "seed-json-tool-output-custom-payload-response-item",
+              "points": 4,
+              "maxPoints": 6
+            },
+            {
+              "id": "seed-json-tool-output-code-mode-structured-json",
+              "points": 5,
+              "maxPoints": 6
+            },
+            {
+              "id": "seed-code-mode-content-items-skip-blank-text",
+              "points": 2,
+              "maxPoints": 6
+            }
+          ]
+        },
+        {
+          "rep": 3,
+          "runDir": ".pi/eval/dynamic-review/runs/codex-output-holdout-kimi-xhigh-telemetry-rep3-20260612T223337Z",
+          "objectiveScore": 12,
+          "seedPoints": 12,
+          "maxSeedPoints": 18,
+          "trapPenalty": 0,
+          "hardFailures": [],
+          "commandRunCount": 13,
+          "actualCommandRunCount": 13,
+          "commandEvidence": {
+            "source": "candidate-reported+pi-tool-events",
+            "reportedCount": 5,
+            "actualCount": 13,
+            "matchedCount": 5,
+            "unmatchedActualCount": 8,
+            "reportedOnlyCount": 0,
+            "independentlyVerified": true,
+            "note": "bash command telemetry was reconstructed from Pi tool_call/tool_result events and matched to candidate-reported commandRuns when possible"
+          },
+          "changedFiles": [
+            "codex-rs/tools/src/tool_output.rs",
+            "dynamic-review-result.json"
+          ],
+          "issuePoints": [
+            {
+              "id": "seed-json-tool-output-custom-payload-response-item",
+              "points": 5,
+              "maxPoints": 6
+            },
+            {
+              "id": "seed-json-tool-output-code-mode-structured-json",
+              "points": 5,
+              "maxPoints": 6
+            },
+            {
+              "id": "seed-code-mode-content-items-skip-blank-text",
+              "points": 2,
+              "maxPoints": 6
+            }
+          ]
+        }
+      ]
+    },
+    "B": {
+      "label": "plain",
+      "type": "plain",
+      "scores": [
+        11,
+        14,
+        15
+      ],
+      "mean": 13.333,
+      "median": 14,
+      "stdevPopulation": 1.7,
+      "min": 11,
+      "max": 15,
+      "wins": 0,
+      "rows": [
+        {
+          "rep": 1,
+          "runDir": ".pi/eval/dynamic-review/runs/codex-output-holdout-kimi-xhigh-telemetry-rep1-20260612T215844Z",
+          "objectiveScore": 11,
+          "seedPoints": 11,
+          "maxSeedPoints": 18,
+          "trapPenalty": 0,
+          "hardFailures": [],
+          "commandRunCount": 11,
+          "actualCommandRunCount": 11,
+          "commandEvidence": {
+            "source": "candidate-reported+pi-tool-events",
+            "reportedCount": 3,
+            "actualCount": 11,
+            "matchedCount": 3,
+            "unmatchedActualCount": 8,
+            "reportedOnlyCount": 0,
+            "independentlyVerified": true,
+            "note": "bash command telemetry was reconstructed from Pi tool_call/tool_result events and matched to candidate-reported commandRuns when possible"
+          },
+          "changedFiles": [
+            "codex-rs/tools/src/tool_output.rs",
+            "codex-rs/tools/tests/tool_output_regression.rs",
+            "dynamic-review-result.json"
+          ],
+          "issuePoints": [
+            {
+              "id": "seed-json-tool-output-custom-payload-response-item",
+              "points": 4,
+              "maxPoints": 6
+            },
+            {
+              "id": "seed-json-tool-output-code-mode-structured-json",
+              "points": 4,
+              "maxPoints": 6
+            },
+            {
+              "id": "seed-code-mode-content-items-skip-blank-text",
+              "points": 3,
+              "maxPoints": 6
+            }
+          ]
+        },
+        {
+          "rep": 2,
+          "runDir": ".pi/eval/dynamic-review/runs/codex-output-holdout-kimi-xhigh-telemetry-rep2-20260612T221744Z",
+          "objectiveScore": 14,
+          "seedPoints": 14,
+          "maxSeedPoints": 18,
+          "trapPenalty": 0,
+          "hardFailures": [],
+          "commandRunCount": 14,
+          "actualCommandRunCount": 14,
+          "commandEvidence": {
+            "source": "candidate-reported+pi-tool-events",
+            "reportedCount": 5,
+            "actualCount": 14,
+            "matchedCount": 5,
+            "unmatchedActualCount": 9,
+            "reportedOnlyCount": 0,
+            "independentlyVerified": true,
+            "note": "bash command telemetry was reconstructed from Pi tool_call/tool_result events and matched to candidate-reported commandRuns when possible"
+          },
+          "changedFiles": [
+            "codex-rs/tools/src/tool_output.rs",
+            "dynamic-review-result.json"
+          ],
+          "issuePoints": [
+            {
+              "id": "seed-json-tool-output-custom-payload-response-item",
+              "points": 4,
+              "maxPoints": 6
+            },
+            {
+              "id": "seed-json-tool-output-code-mode-structured-json",
+              "points": 5,
+              "maxPoints": 6
+            },
+            {
+              "id": "seed-code-mode-content-items-skip-blank-text",
+              "points": 5,
+              "maxPoints": 6
+            }
+          ]
+        },
+        {
+          "rep": 3,
+          "runDir": ".pi/eval/dynamic-review/runs/codex-output-holdout-kimi-xhigh-telemetry-rep3-20260612T223337Z",
+          "objectiveScore": 15,
+          "seedPoints": 15,
+          "maxSeedPoints": 18,
+          "trapPenalty": 0,
+          "hardFailures": [],
+          "commandRunCount": 10,
+          "actualCommandRunCount": 10,
+          "commandEvidence": {
+            "source": "candidate-reported+pi-tool-events",
+            "reportedCount": 4,
+            "actualCount": 10,
+            "matchedCount": 4,
+            "unmatchedActualCount": 6,
+            "reportedOnlyCount": 0,
+            "independentlyVerified": true,
+            "note": "bash command telemetry was reconstructed from Pi tool_call/tool_result events and matched to candidate-reported commandRuns when possible"
+          },
+          "changedFiles": [
+            "codex-rs/tools/src/tool_output.rs",
+            "dynamic-review-result.json"
+          ],
+          "issuePoints": [
+            {
+              "id": "seed-json-tool-output-custom-payload-response-item",
+              "points": 5,
+              "maxPoints": 6
+            },
+            {
+              "id": "seed-json-tool-output-code-mode-structured-json",
+              "points": 5,
+              "maxPoints": 6
+            },
+            {
+              "id": "seed-code-mode-content-items-skip-blank-text",
+              "points": 5,
+              "maxPoints": 6
+            }
+          ]
+        }
+      ]
+    },
+    "C": {
+      "label": "plain-self-check",
+      "type": "plain-self-check",
+      "scores": [
+        15,
+        15,
+        17
+      ],
+      "mean": 15.667,
+      "median": 15,
+      "stdevPopulation": 0.943,
+      "min": 15,
+      "max": 17,
+      "wins": 3,
+      "rows": [
+        {
+          "rep": 1,
+          "runDir": ".pi/eval/dynamic-review/runs/codex-output-holdout-kimi-xhigh-telemetry-rep1-20260612T215844Z",
+          "objectiveScore": 15,
+          "seedPoints": 15,
+          "maxSeedPoints": 18,
+          "trapPenalty": 0,
+          "hardFailures": [],
+          "commandRunCount": 20,
+          "actualCommandRunCount": 20,
+          "commandEvidence": {
+            "source": "candidate-reported+pi-tool-events",
+            "reportedCount": 3,
+            "actualCount": 20,
+            "matchedCount": 3,
+            "unmatchedActualCount": 17,
+            "reportedOnlyCount": 0,
+            "independentlyVerified": true,
+            "note": "bash command telemetry was reconstructed from Pi tool_call/tool_result events and matched to candidate-reported commandRuns when possible"
+          },
+          "changedFiles": [
+            "codex-rs/tools/src/tool_output.rs",
+            "dynamic-review-result.json"
+          ],
+          "issuePoints": [
+            {
+              "id": "seed-json-tool-output-custom-payload-response-item",
+              "points": 5,
+              "maxPoints": 6
+            },
+            {
+              "id": "seed-json-tool-output-code-mode-structured-json",
+              "points": 5,
+              "maxPoints": 6
+            },
+            {
+              "id": "seed-code-mode-content-items-skip-blank-text",
+              "points": 5,
+              "maxPoints": 6
+            }
+          ]
+        },
+        {
+          "rep": 2,
+          "runDir": ".pi/eval/dynamic-review/runs/codex-output-holdout-kimi-xhigh-telemetry-rep2-20260612T221744Z",
+          "objectiveScore": 15,
+          "seedPoints": 15,
+          "maxSeedPoints": 18,
+          "trapPenalty": 0,
+          "hardFailures": [],
+          "commandRunCount": 25,
+          "actualCommandRunCount": 25,
+          "commandEvidence": {
+            "source": "candidate-reported+pi-tool-events",
+            "reportedCount": 3,
+            "actualCount": 25,
+            "matchedCount": 3,
+            "unmatchedActualCount": 22,
+            "reportedOnlyCount": 0,
+            "independentlyVerified": true,
+            "note": "bash command telemetry was reconstructed from Pi tool_call/tool_result events and matched to candidate-reported commandRuns when possible"
+          },
+          "changedFiles": [
+            "codex-rs/tools/src/tool_output.rs",
+            "codex-rs/tools/src/tool_output_tests.rs",
+            "dynamic-review-result.json"
+          ],
+          "issuePoints": [
+            {
+              "id": "seed-json-tool-output-custom-payload-response-item",
+              "points": 6,
+              "maxPoints": 6
+            },
+            {
+              "id": "seed-json-tool-output-code-mode-structured-json",
+              "points": 6,
+              "maxPoints": 6
+            },
+            {
+              "id": "seed-code-mode-content-items-skip-blank-text",
+              "points": 3,
+              "maxPoints": 6
+            }
+          ]
+        },
+        {
+          "rep": 3,
+          "runDir": ".pi/eval/dynamic-review/runs/codex-output-holdout-kimi-xhigh-telemetry-rep3-20260612T223337Z",
+          "objectiveScore": 17,
+          "seedPoints": 17,
+          "maxSeedPoints": 18,
+          "trapPenalty": 0,
+          "hardFailures": [],
+          "commandRunCount": 27,
+          "actualCommandRunCount": 27,
+          "commandEvidence": {
+            "source": "candidate-reported+pi-tool-events",
+            "reportedCount": 4,
+            "actualCount": 27,
+            "matchedCount": 4,
+            "unmatchedActualCount": 23,
+            "reportedOnlyCount": 0,
+            "independentlyVerified": true,
+            "note": "bash command telemetry was reconstructed from Pi tool_call/tool_result events and matched to candidate-reported commandRuns when possible"
+          },
+          "changedFiles": [
+            "codex-rs/tools/src/tool_output.rs",
+            "codex-rs/tools/src/tool_output_tests.rs",
+            "dynamic-review-result.json"
+          ],
+          "issuePoints": [
+            {
+              "id": "seed-json-tool-output-custom-payload-response-item",
+              "points": 5,
+              "maxPoints": 6
+            },
+            {
+              "id": "seed-json-tool-output-code-mode-structured-json",
+              "points": 6,
+              "maxPoints": 6
+            },
+            {
+              "id": "seed-code-mode-content-items-skip-blank-text",
+              "points": 6,
+              "maxPoints": 6
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "pairwise": {
+    "A-B": {
+      "deltas": [
+        -3,
+        -3,
+        -3
+      ],
+      "meanDelta": -3,
+      "leftBetter": 0,
+      "ties": 0,
+      "rightBetter": 3
+    },
+    "A-C": {
+      "deltas": [
+        -7,
+        -4,
+        -5
+      ],
+      "meanDelta": -5.333,
+      "leftBetter": 0,
+      "ties": 0,
+      "rightBetter": 3
+    },
+    "B-C": {
+      "deltas": [
+        -4,
+        -1,
+        -2
+      ],
+      "meanDelta": -2.333,
+      "leftBetter": 0,
+      "ties": 0,
+      "rightBetter": 3
+    }
+  },
+  "telemetryNotes": [
+    "All three arms have Pi bash tool telemetry in actual-command-runs.json and reconciled verified-command-runs.json.",
+    "matchedCount counts candidate-reported commands matched to actual Pi bash events; unmatchedActualCount records additional actual commands not listed in final JSON.",
+    "Tool telemetry records command, cwd, exit code, combined output excerpt, startedAt/completedAt, and elapsedMs."
+  ],
+  "scorePaths": [
+    ".pi/eval/dynamic-review/runs/codex-output-holdout-kimi-xhigh-telemetry-rep1-20260612T215844Z/tasks/codex-tools-output-contract-holdout-dynamic-review-v1/dynamic-score.json",
+    ".pi/eval/dynamic-review/runs/codex-output-holdout-kimi-xhigh-telemetry-rep2-20260612T221744Z/tasks/codex-tools-output-contract-holdout-dynamic-review-v1/dynamic-score.json",
+    ".pi/eval/dynamic-review/runs/codex-output-holdout-kimi-xhigh-telemetry-rep3-20260612T223337Z/tasks/codex-tools-output-contract-holdout-dynamic-review-v1/dynamic-score.json"
+  ]
+}
