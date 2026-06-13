@@ -32,10 +32,7 @@ import {
 	resolveWorkflowRef,
 } from "../../.tmp/unit/workflow-specs.js";
 import { resolveWorkflowRuntime } from "../../.tmp/unit/workflow-runtime.js";
-import {
-	loadWorkflow,
-	parseWorkflow,
-} from "../../.tmp/unit/schema.js";
+import { loadWorkflow, parseWorkflow } from "../../.tmp/unit/schema.js";
 import {
 	acquireSupervisorLease,
 	createStageFirstRunRecord,
@@ -113,7 +110,9 @@ function workflowSpec(agent = "unit-scout", extra = {}) {
 		agent,
 		readOnly: true,
 		tools: ["read"],
-		workflow: { stages: [{ id: "main", type: "task", prompt: "Do the work." }] },
+		workflow: {
+			stages: [{ id: "main", type: "task", prompt: "Do the work." }],
+		},
 		...extra,
 	};
 }
@@ -150,6 +149,21 @@ function loopWorkflowSpec(loop = {}) {
 						],
 					},
 					...loop,
+				},
+			],
+		},
+	});
+}
+
+function dagWorkflowSpec(dag = {}) {
+	return workflowSpec("unit-scout", {
+		workflow: {
+			stages: [
+				{
+					id: "box",
+					type: "dag",
+					stages: [{ id: "child", type: "task", prompt: "Child." }],
+					...dag,
 				},
 			],
 		},
@@ -213,6 +227,88 @@ function taskBySpec(run, specId) {
 	const task = run.tasks.find((item) => item.specId === specId);
 	assert(task, `missing task ${specId}`);
 	return task;
+}
+
+function captureSubagentPrompts(prompts = []) {
+	let launchCount = 0;
+	setSubagentApiForTests({
+		async runSubagent(options) {
+			launchCount += 1;
+			prompts.push(String(options.task ?? ""));
+			return {
+				runId: `run_stub_${launchCount}`,
+				attemptId: `attempt_stub_${launchCount}`,
+				status: "running",
+			};
+		},
+		async getSubagentStatus() {
+			return null;
+		},
+		async reconcileSubagentRun() {
+			return {};
+		},
+		async interruptSubagent() {
+			return {};
+		},
+	});
+	return prompts;
+}
+
+function dagContainerRuntimeSpec({
+	finalSourcePolicy,
+	reportSourcePolicy,
+} = {}) {
+	return workflowSpec("unit-scout", {
+		workflow: {
+			stages: [
+				{
+					id: "setup",
+					type: "task",
+					output: { format: "json" },
+					prompt: "Setup.",
+				},
+				{
+					id: "analysis",
+					type: "dag",
+					from: "setup",
+					outputFrom: "final",
+					stages: [
+						{
+							id: "scan",
+							type: "task",
+							output: { format: "json" },
+							prompt: "Scan.",
+						},
+						{
+							id: "review",
+							type: "task",
+							after: "scan",
+							prompt: "Review.",
+						},
+						{
+							id: "final",
+							type: "reduce",
+							from: ["scan", "review"],
+							output: { format: "json" },
+							prompt: "Finalize.",
+							...(finalSourcePolicy
+								? { sourcePolicy: finalSourcePolicy }
+								: {}),
+						},
+					],
+				},
+				{
+					id: "report",
+					type: "reduce",
+					from: "analysis",
+					prompt: "Report.",
+					...(reportSourcePolicy
+						? { sourcePolicy: reportSourcePolicy }
+						: {}),
+				},
+			],
+		},
+	});
 }
 
 test("shared status helpers derive canonical task summaries", () => {
@@ -682,6 +778,54 @@ test("schema rejects loop child from fan-out", () => {
 	);
 });
 
+test("schema rejects invalid stage after shapes", () => {
+	const nonString = assertThrowsFlow(() =>
+		parseWorkflow(
+			workflowSpec("unit-scout", {
+				workflow: {
+					stages: [
+						{ id: "one", type: "task", prompt: "One." },
+						{ id: "two", type: "task", after: ["one", 42], prompt: "Two." },
+					],
+				},
+			}),
+		),
+	);
+	assertIssue(nonString, "$.workflow.stages[1].after[1]", "non-empty string");
+
+	const empty = assertThrowsFlow(() =>
+		parseWorkflow(
+			workflowSpec("unit-scout", {
+				workflow: {
+					stages: [
+						{ id: "one", type: "task", prompt: "One." },
+						{ id: "two", type: "task", after: "", prompt: "Two." },
+					],
+				},
+			}),
+		),
+	);
+	assertIssue(empty, "$.workflow.stages[1].after", "non-empty string");
+});
+
+test("schema rejects loop child after fan-out", () => {
+	const error = assertThrowsFlow(() =>
+		parseWorkflow(
+			loopWorkflowSpec({
+				stages: [
+					{ id: "implement", type: "task", prompt: "Implement." },
+					{ id: "check", type: "task", after: "implement", prompt: "Check." },
+				],
+			}),
+		),
+	);
+	assertIssue(
+		error,
+		"$.workflow.stages[0].stages[1].after",
+		"must not define after",
+	);
+});
+
 test("schema rejects loop until check before a later mutating child", () => {
 	const error = assertThrowsFlow(() =>
 		parseWorkflow(
@@ -727,6 +871,277 @@ test("schema rejects duplicate top-level stage ids", () => {
 		),
 	);
 	assertIssue(error, "$.workflow.stages[1].id", "duplicate stage id");
+});
+
+test("schema rejects unknown stage references in DAG edges", () => {
+	const cases = [
+		{
+			spec: workflowSpec("unit-scout", {
+				workflow: {
+					stages: [
+						{ id: "one", type: "task", prompt: "One." },
+						{ id: "two", type: "task", from: "ghost", prompt: "Two." },
+					],
+				},
+			}),
+			path: "$.workflow.stages[1].from",
+		},
+		{
+			spec: workflowSpec("unit-scout", {
+				workflow: {
+					stages: [
+						{ id: "one", type: "task", prompt: "One." },
+						{
+							id: "two",
+							type: "task",
+							from: ["one", "ghost"],
+							prompt: "Two.",
+						},
+					],
+				},
+			}),
+			path: "$.workflow.stages[1].from[1]",
+		},
+		{
+			spec: workflowSpec("unit-scout", {
+				workflow: {
+					stages: [
+						{ id: "one", type: "task", prompt: "One." },
+						{
+							id: "two",
+							type: "foreach",
+							from: { stage: "ghost", path: "$.items" },
+							each: { prompt: "Two ${item}." },
+						},
+					],
+				},
+			}),
+			path: "$.workflow.stages[1].from.stage",
+		},
+		{
+			spec: workflowSpec("unit-scout", {
+				workflow: {
+					stages: [
+						{ id: "one", type: "task", prompt: "One." },
+						{ id: "two", type: "task", after: "ghost", prompt: "Two." },
+					],
+				},
+			}),
+			path: "$.workflow.stages[1].after",
+		},
+	];
+
+	for (const item of cases) {
+		const error = assertThrowsFlow(() => parseWorkflow(item.spec));
+		assertIssue(error, item.path, "unknown stage reference");
+	}
+});
+
+test("schema rejects DAG self-dependencies", () => {
+	const error = assertThrowsFlow(() =>
+		parseWorkflow(
+			workflowSpec("unit-scout", {
+				workflow: {
+					stages: [{ id: "one", type: "task", from: "one", prompt: "One." }],
+				},
+			}),
+		),
+	);
+	assertIssue(error, "$.workflow.stages[0].from", "depend on itself");
+});
+
+test("schema rejects DAG dependency cycles", () => {
+	const error = assertThrowsFlow(() =>
+		parseWorkflow(
+			workflowSpec("unit-scout", {
+				workflow: {
+					stages: [
+						{ id: "a", type: "task", after: "b", prompt: "A." },
+						{ id: "b", type: "task", from: "a", prompt: "B." },
+					],
+				},
+			}),
+		),
+	);
+	assertIssue(
+		error,
+		"$.workflow.stages[1].from",
+		"dependency cycle detected: a -> b -> a",
+	);
+});
+
+test("schema accepts dag containers with diamond and nested child graphs", () => {
+	assert.doesNotThrow(() =>
+		parseWorkflow(
+			dagWorkflowSpec({
+				stages: [
+					{ id: "a", type: "task", prompt: "A." },
+					{ id: "b", type: "task", after: "a", prompt: "B." },
+					{ id: "c", type: "task", after: "a", prompt: "C." },
+					{ id: "d", type: "reduce", from: ["b", "c"], prompt: "D." },
+				],
+			}),
+		),
+	);
+
+	assert.doesNotThrow(() =>
+		parseWorkflow(
+			dagWorkflowSpec({
+				stages: [
+					{
+						id: "inner",
+						type: "dag",
+						stages: [
+							{ id: "first", type: "task", prompt: "First." },
+							{
+								id: "last",
+								type: "task",
+								from: "first",
+								prompt: "Last.",
+							},
+						],
+					},
+					{ id: "outer", type: "reduce", from: "inner", prompt: "Outer." },
+				],
+			}),
+		),
+	);
+});
+
+test("schema rejects leaf fields on dag containers", () => {
+	const error = assertThrowsFlow(() =>
+		parseWorkflow(dagWorkflowSpec({ prompt: "Not on a container." })),
+	);
+	assertIssue(error, "$.workflow.stages[0].prompt", "unknown field");
+});
+
+test("schema rejects loop children in dag containers", () => {
+	const error = assertThrowsFlow(() =>
+		parseWorkflow(
+			dagWorkflowSpec({
+				stages: [
+					{
+						id: "inner-loop",
+						type: "loop",
+						stages: [],
+						maxRounds: 1,
+						until: { stage: "check", path: "$.status", equals: "pass" },
+					},
+				],
+			}),
+		),
+	);
+	assertIssue(
+		error,
+		"$.workflow.stages[0].stages[0].type",
+		"run the loop as a top-level stage",
+	);
+});
+
+test("schema scopes dag child references to sibling stages", () => {
+	const error = assertThrowsFlow(() =>
+		parseWorkflow(
+			workflowSpec("unit-scout", {
+				workflow: {
+					stages: [
+						{ id: "outer", type: "task", prompt: "Outer." },
+						{
+							id: "box",
+							type: "dag",
+							outputFrom: "inner",
+							stages: [
+								{
+									id: "inner",
+									type: "task",
+									after: "outer",
+									prompt: "Inner.",
+								},
+							],
+						},
+					],
+				},
+			}),
+		),
+	);
+	assertIssue(
+		error,
+		"$.workflow.stages[1].stages[0].after",
+		"stage references resolve within the same container",
+	);
+});
+
+test("schema rejects dag outputFrom naming a missing child", () => {
+	const error = assertThrowsFlow(() =>
+		parseWorkflow(dagWorkflowSpec({ outputFrom: "missing" })),
+	);
+	assertIssue(
+		error,
+		"$.workflow.stages[0].outputFrom",
+		"unknown child stage reference",
+	);
+});
+
+test("schema rejects dag containers with multiple sink children and no outputFrom", () => {
+	const error = assertThrowsFlow(() =>
+		parseWorkflow(
+			dagWorkflowSpec({
+				stages: [
+					{ id: "left", type: "task", prompt: "Left." },
+					{ id: "right", type: "task", prompt: "Right." },
+				],
+			}),
+		),
+	);
+	assertIssue(error, "$.workflow.stages[0].outputFrom", "left, right");
+});
+
+test("schema rejects duplicate dag child ids", () => {
+	const error = assertThrowsFlow(() =>
+		parseWorkflow(
+			dagWorkflowSpec({
+				stages: [
+					{ id: "same", type: "task", prompt: "One." },
+					{ id: "same", type: "task", prompt: "Two." },
+				],
+			}),
+		),
+	);
+	assertIssue(
+		error,
+		"$.workflow.stages[0].stages[1].id",
+		"duplicate child stage id",
+	);
+});
+
+test("schema rejects cycles among dag children with scoped paths", () => {
+	const error = assertThrowsFlow(() =>
+		parseWorkflow(
+			dagWorkflowSpec({
+				outputFrom: "a",
+				stages: [
+					{ id: "a", type: "task", after: ["b"], prompt: "A." },
+					{ id: "b", type: "task", after: ["a"], prompt: "B." },
+				],
+			}),
+		),
+	);
+	assertIssue(
+		error,
+		"$.workflow.stages[0].stages[1].after[0]",
+		"dependency cycle detected: a -> b -> a",
+	);
+});
+
+test("schema accepts bundled stage-first workflow fixtures", () => {
+	for (const specPath of [
+		"workflows/implement-loop.json",
+		"workflows/test-repair-loop.json",
+		"workflows/deep-research/spec.json",
+		"workflows/deep-review/spec.json",
+	]) {
+		const spec = JSON.parse(readFileSync(join(process.cwd(), specPath), "utf8"));
+		assert.doesNotThrow(() => parseWorkflow(spec), specPath);
+	}
 });
 
 test("schema rejects loop dependsOn because stage-first dependencies use from", () => {
@@ -1209,6 +1624,343 @@ test("compiler applies explicit stage from dependencies and stage runtime defaul
 		assert.equal(byKey["final.main"].runtime.thinking, "high");
 		assert.deepEqual(byKey["final.main"].runtime.tools, ["read", "grep"]);
 		assert.equal(byKey["final.main"].runtime.maxRuntimeMs, 12345);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("compiler separates order-only after dependencies from source context", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const compiled = await compileWorkflow(
+			workflowSpec("unit-scout", {
+				workflow: {
+					stages: [
+						{
+							id: "source",
+							type: "parallel",
+							tasks: [
+								{ id: "one", prompt: "Source one." },
+								{ id: "two", prompt: "Source two." },
+							],
+						},
+						{ id: "gate", type: "task", prompt: "Gate." },
+						{
+							id: "mixed",
+							type: "task",
+							from: "source",
+							after: "gate",
+							prompt: "Mixed.",
+						},
+						{
+							id: "fromOnly",
+							type: "task",
+							from: "source",
+							prompt: "From only.",
+						},
+					],
+				},
+			}),
+			{ cwd, task: "Check sources" },
+		);
+
+		const byKey = Object.fromEntries(
+			compiled.tasks.map((task) => [task.key, task]),
+		);
+		assert.deepEqual(byKey["mixed.main"].dependsOn, [
+			"source.one",
+			"source.two",
+			"gate.main",
+		]);
+		assert.deepEqual(byKey["mixed.main"].contextDependsOn, [
+			"source.one",
+			"source.two",
+		]);
+		assert.equal(byKey["fromOnly.main"].contextDependsOn, undefined);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("compiler treats empty after as an explicit parallel root", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const compiled = await compileWorkflow(
+			workflowSpec("unit-scout", {
+				workflow: {
+					stages: [
+						{ id: "a", type: "task", prompt: "A." },
+						{ id: "b", type: "task", after: [], prompt: "B." },
+						{ id: "c", type: "task", from: ["a", "b"], prompt: "C." },
+						{ id: "d", type: "task", prompt: "D." },
+					],
+				},
+			}),
+			{ cwd, task: "Check parallel roots" },
+		);
+
+		const byKey = Object.fromEntries(
+			compiled.tasks.map((task) => [task.key, task]),
+		);
+		assert.deepEqual(byKey["b.main"].dependsOn, []);
+		assert.deepEqual(byKey["c.main"].dependsOn, ["a.main", "b.main"]);
+		assert.deepEqual(byKey["d.main"].dependsOn, ["c.main"]);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("compiler lowers dag containers to namespaced child tasks", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const compiled = await compileWorkflow(
+			workflowSpec("unit-scout", {
+				workflow: {
+					stages: [
+						{
+							id: "seed",
+							type: "parallel",
+							tasks: [
+								{ id: "one", prompt: "Seed one." },
+								{ id: "two", prompt: "Seed two." },
+							],
+						},
+						{ id: "gate", type: "task", prompt: "Gate." },
+						{
+							id: "box",
+							type: "dag",
+							from: "seed",
+							after: "gate",
+							outputFrom: "d",
+							stages: [
+								{ id: "a", type: "task", prompt: "A." },
+								{ id: "b", type: "task", after: "a", prompt: "B." },
+								{ id: "c", type: "task", after: "a", prompt: "C." },
+								{
+									id: "d",
+									type: "reduce",
+									from: "b",
+									after: "c",
+									prompt: "D.",
+								},
+							],
+						},
+						{ id: "implicit", type: "task", prompt: "Implicit." },
+						{ id: "down", type: "task", from: "box", prompt: "Down." },
+					],
+				},
+			}),
+			{ cwd, task: "Check dag" },
+		);
+
+		const byKey = Object.fromEntries(
+			compiled.tasks.map((task) => [task.key, task]),
+		);
+		assert.deepEqual(
+			compiled.tasks.map((task) => task.key),
+			[
+				"seed.one",
+				"seed.two",
+				"gate.main",
+				"box.a.main",
+				"box.b.main",
+				"box.c.main",
+				"box.d.main",
+				"implicit.main",
+				"down.main",
+			],
+		);
+		assert.deepEqual(
+			compiled.stages
+				.filter((stage) => String(stage.id).startsWith("box"))
+				.map((stage) => stage.id),
+			["box.a", "box.b", "box.c", "box.d"],
+		);
+		assert.deepEqual(byKey["box.a.main"].dependsOn, [
+			"seed.one",
+			"seed.two",
+			"gate.main",
+		]);
+		assert.deepEqual(byKey["box.a.main"].contextDependsOn, [
+			"seed.one",
+			"seed.two",
+		]);
+		assert.deepEqual(byKey["box.b.main"].dependsOn, ["box.a.main"]);
+		assert.deepEqual(byKey["box.b.main"].contextDependsOn, []);
+		assert.deepEqual(byKey["box.d.main"].dependsOn, [
+			"box.b.main",
+			"box.c.main",
+		]);
+		assert.deepEqual(byKey["box.d.main"].contextDependsOn, ["box.b.main"]);
+		assert.deepEqual(byKey["implicit.main"].dependsOn, ["box.d.main"]);
+		assert.deepEqual(byKey["down.main"].dependsOn, ["box.d.main"]);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("compiler lowers foreach and support children inside dag containers", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const compiled = await compileWorkflow(
+			workflowSpec("unit-scout", {
+				workflow: {
+					stages: [
+						{
+							id: "fan",
+							type: "dag",
+							sourcePolicy: "partial",
+							maxConcurrency: 2,
+							outputFrom: "audit",
+							stages: [
+								{
+									id: "source",
+									type: "task",
+									output: { format: "json" },
+									prompt: "Source.",
+								},
+								{
+									id: "verify",
+									type: "foreach",
+									from: { stage: "source", path: "$.items" },
+									each: { prompt: "Verify ${item}." },
+								},
+								{
+									id: "audit",
+									from: "verify",
+									support: { uses: "./helpers/audit.mjs" },
+								},
+							],
+						},
+					],
+				},
+			}),
+			{ cwd, task: "Check fanout" },
+		);
+
+		const byKey = Object.fromEntries(
+			compiled.tasks.map((task) => [task.key, task]),
+		);
+		assert.deepEqual(byKey["fan.verify.item"].dependsOn, [
+			"fan.source.main",
+		]);
+		assert.deepEqual(byKey["fan.verify.item"].foreach.from, {
+			stage: "fan.source",
+			path: "$.items",
+		});
+		assert.equal(byKey["fan.verify.item"].stageMaxConcurrency, 2);
+		assert.equal(
+			compiled.stages.find((stage) => stage.id === "fan.verify").sourcePolicy,
+			"partial",
+		);
+		assert.equal(byKey["fan.audit.main"].agent, "support");
+		assert.equal(byKey["fan.audit.main"].stageMaxConcurrency, 2);
+		assert.deepEqual(byKey["fan.audit.main"].dependsOn, ["fan.verify.item"]);
+		assert.deepEqual(byKey["fan.audit.main"].support, {
+			uses: "./helpers/audit.mjs",
+			options: undefined,
+		});
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("compiler lowers nested dag containers with composed namespaces", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const compiled = await compileWorkflow(
+			workflowSpec("unit-scout", {
+				workflow: {
+					stages: [
+						{
+							id: "outer",
+							type: "dag",
+							outputFrom: "inner",
+							stages: [
+								{ id: "root", type: "task", prompt: "Root." },
+								{
+									id: "inner",
+									type: "dag",
+									from: "root",
+									stages: [
+										{ id: "leaf", type: "task", prompt: "Leaf." },
+									],
+								},
+							],
+						},
+						{ id: "next", type: "task", from: "outer", prompt: "Next." },
+					],
+				},
+			}),
+			{ cwd, task: "Check nested" },
+		);
+
+		const byKey = Object.fromEntries(
+			compiled.tasks.map((task) => [task.key, task]),
+		);
+		assert.deepEqual(Object.keys(byKey), [
+			"outer.root.main",
+			"outer.inner.leaf.main",
+			"next.main",
+		]);
+		assert.deepEqual(byKey["outer.inner.leaf.main"].dependsOn, [
+			"outer.root.main",
+		]);
+		assert.deepEqual(byKey["next.main"].dependsOn, [
+			"outer.inner.leaf.main",
+		]);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("compiler keeps dag namespace prefixes distinct from loop ids", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const compiled = await compileWorkflow(
+			workflowSpec("unit-scout", {
+				workflow: {
+					stages: [
+						{
+							id: "box",
+							type: "loop",
+							stages: [
+								{ id: "implement", type: "task", prompt: "Implement." },
+								{ id: "check", type: "task", prompt: "Check." },
+							],
+							maxRounds: 1,
+							until: { stage: "check", path: "$.status", equals: "pass" },
+						},
+						{
+							id: "boxcar",
+							type: "dag",
+							stages: [
+								{ id: "r01", type: "task", prompt: "Looks loop-like." },
+								{ id: "done", type: "task", from: "r01", prompt: "Done." },
+							],
+						},
+					],
+				},
+			}),
+			{ cwd, task: "Check prefixes" },
+		);
+
+		assert.equal(
+			compiled.stages.find((stage) => stage.id === "box").type,
+			"loop",
+		);
+		assert(compiled.tasks.some((task) => task.key === "box.loop"));
+		assert(compiled.tasks.some((task) => task.key === "boxcar.r01.main"));
+		assert.equal(
+			compiled.tasks.find((task) => task.key === "boxcar.r01.main").loopChild,
+			undefined,
+		);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
@@ -3808,6 +4560,462 @@ test("stage-first foreach blocks when maxItems is exceeded with output contract 
 		assert.equal(blocked.tasks[1].status, "blocked");
 		assert.match(blocked.tasks[1].lastMessage, /exceeding maxItems=1/);
 	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("stage-first scheduler launches empty-after roots in parallel", async () => {
+	const cwd = makeProject();
+	const prompts = [];
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		setSubagentApiForTests({
+			async runSubagent(options) {
+				prompts.push(String(options.task ?? ""));
+				return {
+					runId: `run_stub_${prompts.length}`,
+					attemptId: `attempt_stub_${prompts.length}`,
+					status: "running",
+				};
+			},
+			async getSubagentStatus() {
+				return null;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+		const spec = workflowSpec("unit-scout", {
+			workflow: {
+				stages: [
+					{ id: "a", type: "task", prompt: "A." },
+					{ id: "b", type: "task", after: [], prompt: "B." },
+					{ id: "c", type: "task", from: ["a", "b"], prompt: "C." },
+				],
+			},
+		});
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Check scheduling",
+		});
+		const { run } = await createStageFirstRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await writeRunRecord(cwd, run);
+
+		await scheduleRun(cwd, run.runId);
+
+		const updated = await readRunRecord(cwd, run.runId);
+		assert.equal(taskBySpec(updated, "a.main").status, "running");
+		assert.equal(taskBySpec(updated, "b.main").status, "running");
+		assert.equal(taskBySpec(updated, "c.main").status, "pending");
+		assert.equal(prompts.length, 2);
+		assert(prompts.some((prompt) => prompt.includes("stage=a")));
+		assert(prompts.some((prompt) => prompt.includes("stage=b")));
+		assert(!prompts.some((prompt) => prompt.includes("stage=c")));
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("stage-first after dependencies do not inject order-only source context", async () => {
+	const cwd = makeProject();
+	const prompts = [];
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		setSubagentApiForTests({
+			async runSubagent(options) {
+				prompts.push(String(options.task ?? ""));
+				return {
+					runId: `run_stub_${prompts.length}`,
+					attemptId: `attempt_stub_${prompts.length}`,
+					status: "running",
+				};
+			},
+			async getSubagentStatus() {
+				return null;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+		const spec = workflowSpec("unit-scout", {
+			workflow: {
+				stages: [
+					{
+						id: "source",
+						type: "task",
+						output: { format: "json" },
+						prompt: "Source.",
+					},
+					{
+						id: "gate",
+						type: "task",
+						output: { format: "json" },
+						prompt: "Gate.",
+					},
+					{
+						id: "afterOnly",
+						type: "task",
+						after: "gate",
+						prompt: "After only.",
+					},
+					{
+						id: "mixed",
+						type: "task",
+						from: "source",
+						after: "gate",
+						prompt: "Mixed.",
+					},
+				],
+			},
+		});
+		const compiled = await compileWorkflow(spec, { cwd, task: "Check context" });
+		const { run } = await createStageFirstRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+
+		await completeTask(cwd, taskBySpec(run, "source.main"), {
+			content: "from-source-content",
+		});
+		await completeTask(cwd, taskBySpec(run, "gate.main"), {
+			content: "after-source-content",
+		});
+		for (const task of [
+			taskBySpec(run, "source.main"),
+			taskBySpec(run, "gate.main"),
+		]) {
+			mkdirSync(dirname(join(cwd, task.files.output)), { recursive: true });
+			writeFileSync(
+				join(cwd, task.files.output),
+				task.specId === "source.main"
+					? "from-source-content\n"
+					: "after-source-content\n",
+			);
+		}
+		await writeRunRecord(cwd, run);
+
+		await scheduleRun(cwd, run.runId);
+
+		const afterOnlyPrompt = prompts.find((prompt) =>
+			prompt.includes("stage=afterOnly"),
+		);
+		const mixedPrompt = prompts.find((prompt) => prompt.includes("stage=mixed"));
+		assert(afterOnlyPrompt);
+		assert(mixedPrompt);
+		assert.doesNotMatch(afterOnlyPrompt, /# Source Stage Context/);
+		assert.match(mixedPrompt, /# Source Stage Context/);
+		assert.match(mixedPrompt, /from-source-content/);
+		assert.doesNotMatch(mixedPrompt, /after-source-content/);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("stage-first diamond fan-out launches branches in parallel and joins context", async () => {
+	const cwd = makeProject();
+	const prompts = [];
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		captureSubagentPrompts(prompts);
+		const spec = workflowSpec("unit-scout", {
+			workflow: {
+				stages: [
+					{
+						id: "a",
+						type: "task",
+						output: { format: "json" },
+						prompt: "A.",
+					},
+					{
+						id: "b",
+						type: "task",
+						from: "a",
+						output: { format: "json" },
+						prompt: "B.",
+					},
+					{
+						id: "c",
+						type: "task",
+						from: "a",
+						output: { format: "json" },
+						prompt: "C.",
+					},
+					{
+						id: "d",
+						type: "reduce",
+						from: ["b", "c"],
+						prompt: "D.",
+					},
+				],
+			},
+		});
+		const compiled = await compileWorkflow(spec, { cwd, task: "Check diamond" });
+		const { run } = await createStageFirstRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await writeRunRecord(cwd, run);
+
+		await scheduleRun(cwd, run.runId);
+		let current = await readRunRecord(cwd, run.runId);
+		assert.equal(taskBySpec(current, "a.main").status, "running");
+		assert.equal(taskBySpec(current, "b.main").status, "pending");
+		assert.equal(taskBySpec(current, "c.main").status, "pending");
+		assert.equal(taskBySpec(current, "d.main").status, "pending");
+		assert.equal(prompts.length, 1);
+
+		await completeTask(cwd, taskBySpec(current, "a.main"), {
+			marker: "a-output",
+		});
+		await writeRunRecord(cwd, current);
+
+		await scheduleRun(cwd, run.runId);
+		current = await readRunRecord(cwd, run.runId);
+		assert.equal(taskBySpec(current, "b.main").status, "running");
+		assert.equal(taskBySpec(current, "c.main").status, "running");
+		assert.equal(taskBySpec(current, "d.main").status, "pending");
+		assert.equal(prompts.length, 3);
+		assert(prompts.some((prompt) => prompt.includes("stage=b")));
+		assert(prompts.some((prompt) => prompt.includes("stage=c")));
+
+		await completeTask(cwd, taskBySpec(current, "b.main"), {
+			marker: "b-output",
+		});
+		await completeTask(cwd, taskBySpec(current, "c.main"), {
+			marker: "c-output",
+		});
+		await writeRunRecord(cwd, current);
+
+		await scheduleRun(cwd, run.runId);
+		current = await readRunRecord(cwd, run.runId);
+		assert.equal(taskBySpec(current, "d.main").status, "running");
+		const joinPrompt = prompts.find((prompt) => prompt.includes("stage=d"));
+		assert(joinPrompt);
+		assert.match(joinPrompt, /# Source Stage Context/);
+		assert.match(joinPrompt, /b-output/);
+		assert.match(joinPrompt, /c-output/);
+		assert.doesNotMatch(joinPrompt, /a-output/);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("stage-first dag container waits for outer sources and skips strict dependents", async () => {
+	const cwd = makeProject();
+	const prompts = [];
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		captureSubagentPrompts(prompts);
+		const spec = dagContainerRuntimeSpec();
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Check strict container",
+		});
+		const { run } = await createStageFirstRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await writeRunRecord(cwd, run);
+
+		await scheduleRun(cwd, run.runId);
+		let current = await readRunRecord(cwd, run.runId);
+		assert.equal(taskBySpec(current, "setup.main").status, "running");
+		assert.equal(taskBySpec(current, "analysis.scan.main").status, "pending");
+		assert(!prompts.some((prompt) => prompt.includes("stage=analysis.scan")));
+
+		await completeTask(cwd, taskBySpec(current, "setup.main"), {
+			marker: "setup-output",
+		});
+		await writeRunRecord(cwd, current);
+
+		await scheduleRun(cwd, run.runId);
+		current = await readRunRecord(cwd, run.runId);
+		assert.equal(taskBySpec(current, "analysis.scan.main").status, "running");
+		assert.equal(taskBySpec(current, "analysis.review.main").status, "pending");
+		assert.equal(taskBySpec(current, "analysis.final.main").status, "pending");
+		assert.equal(taskBySpec(current, "report.main").status, "pending");
+		const scanPrompt = prompts.find((prompt) =>
+			prompt.includes("stage=analysis.scan"),
+		);
+		assert(scanPrompt);
+		assert.match(scanPrompt, /# Source Stage Context/);
+		assert.match(scanPrompt, /setup-output/);
+
+		await completeTask(
+			cwd,
+			taskBySpec(current, "analysis.scan.main"),
+			{ marker: "scan-failed-output" },
+			"failed",
+		);
+		await writeRunRecord(cwd, current);
+
+		await scheduleRun(cwd, run.runId);
+		current = await readRunRecord(cwd, run.runId);
+		assert.equal(taskBySpec(current, "analysis.scan.main").status, "failed");
+		assert.equal(taskBySpec(current, "analysis.review.main").status, "skipped");
+		assert.equal(taskBySpec(current, "analysis.final.main").status, "skipped");
+		assert.equal(taskBySpec(current, "report.main").status, "skipped");
+		assert.equal(current.status, "failed");
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("stage-first partial dag join proceeds and exposes outputFrom downstream", async () => {
+	const cwd = makeProject();
+	const prompts = [];
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		captureSubagentPrompts(prompts);
+		const spec = dagContainerRuntimeSpec({
+			finalSourcePolicy: "partial",
+			reportSourcePolicy: "partial",
+		});
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Check partial container",
+		});
+		const { run } = await createStageFirstRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await writeRunRecord(cwd, run);
+
+		await scheduleRun(cwd, run.runId);
+		let current = await readRunRecord(cwd, run.runId);
+		await completeTask(cwd, taskBySpec(current, "setup.main"), {
+			marker: "setup-output",
+		});
+		await writeRunRecord(cwd, current);
+
+		await scheduleRun(cwd, run.runId);
+		current = await readRunRecord(cwd, run.runId);
+		await completeTask(
+			cwd,
+			taskBySpec(current, "analysis.scan.main"),
+			{ marker: "scan-failed-output" },
+			"failed",
+		);
+		await writeRunRecord(cwd, current);
+
+		await scheduleRun(cwd, run.runId);
+		current = await readRunRecord(cwd, run.runId);
+		assert.equal(taskBySpec(current, "analysis.scan.main").status, "failed");
+		assert.equal(taskBySpec(current, "analysis.review.main").status, "skipped");
+		assert.equal(taskBySpec(current, "analysis.final.main").status, "running");
+		assert.equal(taskBySpec(current, "report.main").status, "pending");
+		const finalPrompt = prompts.find((prompt) =>
+			prompt.includes("stage=analysis.final"),
+		);
+		assert(finalPrompt);
+		assert.match(finalPrompt, /# Source Stage Context/);
+		assert.match(finalPrompt, /scan-failed-output/);
+
+		await completeTask(cwd, taskBySpec(current, "analysis.final.main"), {
+			marker: "final-output",
+		});
+		await writeRunRecord(cwd, current);
+
+		await scheduleRun(cwd, run.runId);
+		current = await readRunRecord(cwd, run.runId);
+		assert.equal(taskBySpec(current, "report.main").status, "running");
+		const reportPrompt = prompts.find((prompt) =>
+			prompt.includes("stage=report"),
+		);
+		assert(reportPrompt);
+		assert.match(reportPrompt, /# Source Stage Context/);
+		assert.match(reportPrompt, /final-output/);
+		assert.doesNotMatch(reportPrompt, /scan-failed-output/);
+		assert.doesNotMatch(reportPrompt, /analysis.scan.main/);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("resumeRun resets failed dag container children and relaunches roots", async () => {
+	const cwd = makeProject();
+	const prompts = [];
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		captureSubagentPrompts(prompts);
+		const spec = dagContainerRuntimeSpec();
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Resume container",
+		});
+		const { run } = await createStageFirstRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await writeRunRecord(cwd, run);
+
+		await scheduleRun(cwd, run.runId);
+		let current = await readRunRecord(cwd, run.runId);
+		await completeTask(cwd, taskBySpec(current, "setup.main"), {
+			marker: "setup-output",
+		});
+		await writeRunRecord(cwd, current);
+
+		await scheduleRun(cwd, run.runId);
+		current = await readRunRecord(cwd, run.runId);
+		await completeTask(
+			cwd,
+			taskBySpec(current, "analysis.scan.main"),
+			{ marker: "scan-failed-output" },
+			"failed",
+		);
+		await writeRunRecord(cwd, current);
+
+		await scheduleRun(cwd, run.runId);
+		const failed = await readRunRecord(cwd, run.runId);
+		assert.equal(failed.status, "failed");
+		const expectedResetTaskIds = [
+			"analysis.scan.main",
+			"analysis.review.main",
+			"analysis.final.main",
+			"report.main",
+		].map((specId) => taskBySpec(failed, specId).taskId);
+
+		prompts.length = 0;
+		const { run: resumed, resetTaskIds } = await resumeRun(cwd, run.runId);
+		assert.deepEqual(resetTaskIds, expectedResetTaskIds);
+		assert.equal(resumed.status, "running");
+		assert.equal(taskBySpec(resumed, "setup.main").status, "completed");
+		assert.equal(taskBySpec(resumed, "analysis.scan.main").status, "running");
+		assert.equal(taskBySpec(resumed, "analysis.review.main").status, "pending");
+		assert.equal(taskBySpec(resumed, "analysis.final.main").status, "pending");
+		assert.equal(taskBySpec(resumed, "report.main").status, "pending");
+		assert.equal(prompts.length, 1);
+		assert.match(prompts[0], /stage=analysis\.scan/);
+		assert.match(prompts[0], /setup-output/);
+	} finally {
+		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });

@@ -267,6 +267,7 @@ export interface CompiledTask {
 	taskId?: string;
 	stageMaxConcurrency?: number;
 	dependsOn?: string[];
+	contextDependsOn?: string[];
 	foreach?: {
 		from: unknown;
 		prompt: string;

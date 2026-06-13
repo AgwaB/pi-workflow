@@ -3,12 +3,12 @@ import { extname } from "node:path";
 
 import {
 	TOOL_CLASSIFICATIONS,
-	WorkflowSpec,
+	type WorkflowSpec,
 	WorkflowValidationError,
-	ValidationIssue,
+	type ValidationIssue,
 } from "./types.js";
 import {
-	ResolvedWorkflowSpecRef,
+	type ResolvedWorkflowSpecRef,
 	resolveWorkflowRef,
 } from "./workflow-specs.js";
 import { parseYamlSubset } from "./yaml.js";
@@ -41,6 +41,7 @@ const SUPPORT_STAGE_KEYS = new Set([
 	"id",
 	"type",
 	"from",
+	"after",
 	"support",
 	"sourcePolicy",
 ]);
@@ -48,7 +49,7 @@ const SUPPORT_SPEC_KEYS = new Set(["uses", "options"]);
 const LEGACY_TRANSFORM_MIGRATION_MESSAGE =
 	'legacy type "transform" is not supported; use support: { "uses": "./helpers/name.mjs", "options": { ... } } without a type field';
 const LEGACY_FLOW_MIGRATION_MESSAGE =
-	'legacy flow.type bodies are not supported; use workflow.stages with stage type fields and from dependencies';
+	"legacy flow.type bodies are not supported; use workflow.stages with stage type fields and from dependencies";
 const TOOL_OBJECT_KEYS = new Set([
 	"name",
 	"extensions",
@@ -550,12 +551,24 @@ const STAGE_FIRST_LOOP_STAGE_KEYS = new Set([
 	"maxRuntimeMs",
 	"maxConcurrency",
 	"from",
+	"after",
 	"sourcePolicy",
 	"sourceContext",
 	"inject",
 	"output",
 	"outputContract",
 ]);
+const STAGE_FIRST_DAG_STAGE_KEYS = new Set([
+	"id",
+	"type",
+	"stages",
+	"outputFrom",
+	"from",
+	"after",
+	"sourcePolicy",
+	"maxConcurrency",
+]);
+const STAGE_FIRST_DAG_CHILD_TYPES = new Set(["task", "foreach", "reduce"]);
 const STAGE_FIRST_UNTIL_KEYS = new Set([
 	"stage",
 	"path",
@@ -568,9 +581,7 @@ const STAGE_FIRST_UNTIL_KEYS = new Set([
 
 function isStageFirstSpec(value: unknown): value is any {
 	return Boolean(
-		value &&
-		typeof value === "object" &&
-		(value as any).workflow?.stages,
+		value && typeof value === "object" && (value as any).workflow?.stages,
 	);
 }
 
@@ -634,6 +645,10 @@ export function parseStageFirstWorkflowSpec(value: unknown): any {
 				{ path: `${stagePath}.id`, message: `duplicate stage id "${stageId}"` },
 			]);
 		stageIds.add(stageId);
+		if (stage.type === "dag") {
+			validateStageFirstDagStage(stage, stagePath, issues);
+			continue;
+		}
 		validateStageFirstStage(stage, stagePath);
 		if (stage.output !== undefined)
 			parseOutput(stage.output, `${stagePath}.output`, issues);
@@ -653,6 +668,7 @@ export function parseStageFirstWorkflowSpec(value: unknown): any {
 			validateStageFirstSupportStage(stage, stagePath, issues);
 		if (stage.type === "loop") validateStageFirstLoopStage(stage, stagePath);
 	}
+	validateStageFirstDagGraph(stages, issues);
 
 	if (issues.length > 0) throw new WorkflowValidationError(issues);
 	return spec;
@@ -685,6 +701,8 @@ function validateStageFirstStage(
 		]);
 	if (stage.tools !== undefined)
 		validateStageFirstWorkflowToolArray(stage.tools, `${path}.tools`);
+	if (stage.after !== undefined)
+		validateStageFirstAfter(stage.after, `${path}.after`);
 	if (stage.output !== undefined)
 		validateStageFirstOutput(stage.output, `${path}.output`);
 	if (stage.sourceContext !== undefined)
@@ -745,6 +763,148 @@ function validateStageFirstSupportStage(
 		objectAt(support.options, `${path}.support.options`, issues);
 }
 
+function validateStageFirstDagStage(
+	stage: Record<string, unknown>,
+	path: string,
+	issues: ValidationIssue[],
+): void {
+	rejectUnknownStageFirstKeys(stage, STAGE_FIRST_DAG_STAGE_KEYS, path);
+	validateStageFirstRequiredString(stage, "id", `${path}.id`);
+	if (stage.after !== undefined)
+		validateStageFirstAfter(stage.after, `${path}.after`);
+
+	if (stage.stages === undefined)
+		throw new WorkflowValidationError([
+			{ path: `${path}.stages`, message: "is required" },
+		]);
+	if (!Array.isArray(stage.stages))
+		throw new WorkflowValidationError([
+			{ path: `${path}.stages`, message: "must be an array" },
+		]);
+	if (stage.stages.length < 1)
+		throw new WorkflowValidationError([
+			{ path: `${path}.stages`, message: "must contain at least one stage" },
+		]);
+
+	const childStageIds = new Set<string>();
+	for (const [childIndex, childValue] of stage.stages.entries()) {
+		const childPath = `${path}.stages[${childIndex}]`;
+		const childStage = requireStageFirstObject(childValue, childPath);
+		const childStageId = validateStageFirstRequiredString(
+			childStage,
+			"id",
+			`${childPath}.id`,
+		);
+		if (childStageIds.has(childStageId))
+			throw new WorkflowValidationError([
+				{
+					path: `${childPath}.id`,
+					message: `duplicate child stage id "${childStageId}"`,
+				},
+			]);
+		childStageIds.add(childStageId);
+		validateStageFirstDagChildStage(childStage, childPath, issues);
+	}
+
+	validateStageFirstDagGraph(stage.stages, issues, {
+		stageArrayPath: `${path}.stages`,
+		unknownReferenceHint: "; stage references resolve within the same container",
+	});
+	validateStageFirstDagOutputFrom(stage, path, childStageIds, issues);
+}
+
+function validateStageFirstDagChildStage(
+	stage: Record<string, unknown>,
+	path: string,
+	issues: ValidationIssue[],
+): void {
+	if (stage.type === "loop")
+		throw new WorkflowValidationError([
+			{
+				path: `${path}.type`,
+				message:
+					"loop stages are not supported inside dag containers in v1; run the loop as a top-level stage",
+			},
+		]);
+	if (stage.type === "dag") {
+		validateStageFirstDagStage(stage, path, issues);
+		return;
+	}
+	if (stage.support !== undefined) {
+		validateStageFirstStage(stage, path);
+		validateStageFirstSupportStage(stage, path, issues);
+		return;
+	}
+	if (stage.type === "transform") {
+		issues.push({
+			path: `${path}.type`,
+			message: LEGACY_TRANSFORM_MIGRATION_MESSAGE,
+		});
+		return;
+	}
+	if (
+		typeof stage.type !== "string" ||
+		!STAGE_FIRST_DAG_CHILD_TYPES.has(stage.type)
+	) {
+		throw new WorkflowValidationError([
+			{
+				path: `${path}.type`,
+				message: "must be one of: task, foreach, reduce, dag, or support",
+			},
+		]);
+	}
+
+	validateStageFirstStage(stage, path);
+	if (stage.output !== undefined) parseOutput(stage.output, `${path}.output`, issues);
+	if (stage.sourceContext !== undefined)
+		parseSourceContext(stage.sourceContext, `${path}.sourceContext`, issues);
+}
+
+function validateStageFirstDagOutputFrom(
+	stage: Record<string, unknown>,
+	path: string,
+	childStageIds: Set<string>,
+	issues: ValidationIssue[],
+): void {
+	if (stage.outputFrom !== undefined) {
+		if (typeof stage.outputFrom !== "string" || stage.outputFrom.trim() === "") {
+			issues.push({
+				path: `${path}.outputFrom`,
+				message: "must be a non-empty string",
+			});
+			return;
+		}
+		if (!childStageIds.has(stage.outputFrom)) {
+			issues.push({
+				path: `${path}.outputFrom`,
+				message: `unknown child stage reference "${stage.outputFrom}"`,
+			});
+		}
+		return;
+	}
+
+	const dependedOnChildIds = new Set<string>();
+	for (const [childIndex, childValue] of (stage.stages as unknown[]).entries()) {
+		const childStage = childValue as Record<string, unknown>;
+		for (const ref of stageFirstDagRefs(
+			childStage,
+			childIndex,
+			`${path}.stages`,
+		)) {
+			if (childStageIds.has(ref.stageId)) dependedOnChildIds.add(ref.stageId);
+		}
+	}
+	const sinkIds = [...childStageIds].filter((id) => !dependedOnChildIds.has(id));
+	if (sinkIds.length === 1) return;
+	issues.push({
+		path: `${path}.outputFrom`,
+		message:
+			sinkIds.length > 1
+				? `is required when dag has multiple sink children; candidates: ${sinkIds.join(", ")}`
+				: "is required when dag has no sink child",
+	});
+}
+
 function validateStageFirstOutput(value: unknown, path: string): void {
 	const output = requireStageFirstObject(value, path);
 	rejectUnknownStageFirstKeys(output, STAGE_FIRST_OUTPUT_KEYS, path);
@@ -797,6 +957,26 @@ function validateStageFirstStringArray(value: unknown, path: string): void {
 				{ path: `${path}[${index}]`, message: `duplicate value "${item}"` },
 			]);
 		seen.add(item);
+	}
+}
+
+function validateStageFirstAfter(value: unknown, path: string): void {
+	if (typeof value === "string") {
+		if (value.trim() === "")
+			throw new WorkflowValidationError([
+				{ path, message: "must be a non-empty string" },
+			]);
+		return;
+	}
+	if (!Array.isArray(value))
+		throw new WorkflowValidationError([
+			{ path, message: "must be a string or array of strings" },
+		]);
+	for (const [index, item] of value.entries()) {
+		if (typeof item !== "string" || item.trim() === "")
+			throw new WorkflowValidationError([
+				{ path: `${path}[${index}]`, message: "must be a non-empty string" },
+			]);
 	}
 }
 
@@ -898,6 +1078,15 @@ function validateStageFirstLoopStage(
 					path: `${childPath}.from`,
 					message:
 						"loop child stages must not define from in v1; loop children run strictly in listed order so the final check observes all mutations",
+				},
+			]);
+		}
+		if (childStage.after !== undefined) {
+			throw new WorkflowValidationError([
+				{
+					path: `${childPath}.after`,
+					message:
+						"loop child stages must not define after in v1; loop children run strictly in listed order so the final check observes all mutations",
 				},
 			]);
 		}
@@ -1114,6 +1303,144 @@ function validateStageFirstUntilCondition(
 			},
 		]);
 	}
+}
+
+type StageFirstDagRef = { stageId: string; path: string };
+type StageFirstDagEdge = { toId: string; path: string };
+
+function validateStageFirstDagGraph(
+	stages: unknown[],
+	issues: ValidationIssue[],
+	options: {
+		stageArrayPath?: string;
+		unknownReferenceHint?: string;
+	} = {},
+): void {
+	const stageArrayPath = options.stageArrayPath ?? "$.workflow.stages";
+	const stageIndexById = new Map<string, number>();
+	for (const [index, stageValue] of stages.entries()) {
+		const stage = stageValue as Record<string, unknown>;
+		if (typeof stage.id === "string" && stage.id.trim() !== "")
+			stageIndexById.set(stage.id, index);
+	}
+
+	const stageIds = [...stageIndexById.keys()];
+	const adjacency = new Map<string, StageFirstDagEdge[]>();
+	for (const [index, stageValue] of stages.entries()) {
+		const stage = stageValue as Record<string, unknown>;
+		if (typeof stage.id !== "string" || stage.id.trim() === "") continue;
+		for (const ref of stageFirstDagRefs(stage, index, stageArrayPath)) {
+			if (!stageIndexById.has(ref.stageId)) {
+				issues.push({
+					path: ref.path,
+					message: `unknown stage reference "${ref.stageId}"${options.unknownReferenceHint ?? ""}`,
+				});
+				continue;
+			}
+			if (ref.stageId === stage.id) {
+				issues.push({
+					path: ref.path,
+					message: "stage must not depend on itself",
+				});
+				continue;
+			}
+			const edges = adjacency.get(stage.id) ?? [];
+			edges.push({ toId: ref.stageId, path: ref.path });
+			adjacency.set(stage.id, edges);
+		}
+	}
+
+	const cycle = findDependencyCycle(stageIds, adjacency);
+	if (cycle)
+		issues.push({
+			path: cycle.path,
+			message: `dependency cycle detected: ${cycle.stageIds.join(" -> ")}`,
+		});
+}
+
+function stageFirstDagRefs(
+	stage: Record<string, unknown>,
+	index: number,
+	stageArrayPath = "$.workflow.stages",
+): StageFirstDagRef[] {
+	const path = `${stageArrayPath}[${index}]`;
+	return [
+		...stageFirstFromRefs(stage.from, `${path}.from`),
+		...stageFirstAfterRefs(stage.after, `${path}.after`),
+	];
+}
+
+function stageFirstFromRefs(from: unknown, path: string): StageFirstDagRef[] {
+	if (from === undefined) return [];
+	if (typeof from === "string") return [{ stageId: from, path }];
+	if (Array.isArray(from)) {
+		return from
+			.map((item, index) =>
+				typeof item === "string"
+					? { stageId: item, path: `${path}[${index}]` }
+					: undefined,
+			)
+			.filter((item): item is StageFirstDagRef => Boolean(item));
+	}
+	if (from && typeof from === "object" && !Array.isArray(from)) {
+		const stage = (from as Record<string, unknown>).stage;
+		if (typeof stage === "string") return [{ stageId: stage, path: `${path}.stage` }];
+	}
+	return [];
+}
+
+function stageFirstAfterRefs(after: unknown, path: string): StageFirstDagRef[] {
+	if (after === undefined) return [];
+	if (typeof after === "string") return [{ stageId: after, path }];
+	if (Array.isArray(after)) {
+		return after
+			.map((item, index) =>
+				typeof item === "string"
+					? { stageId: item, path: `${path}[${index}]` }
+					: undefined,
+			)
+			.filter((item): item is StageFirstDagRef => Boolean(item));
+	}
+	return [];
+}
+
+function findDependencyCycle(
+	stageIds: string[],
+	adjacency: Map<string, StageFirstDagEdge[]>,
+): { path: string; stageIds: string[] } | undefined {
+	const state = new Map<string, "visiting" | "visited">();
+	for (const root of stageIds) {
+		if (state.has(root)) continue;
+		state.set(root, "visiting");
+		const stack: Array<{ stageId: string; nextEdge: number }> = [
+			{ stageId: root, nextEdge: 0 },
+		];
+		while (stack.length > 0) {
+			const frame = stack[stack.length - 1]!;
+			const edges = adjacency.get(frame.stageId) ?? [];
+			if (frame.nextEdge >= edges.length) {
+				state.set(frame.stageId, "visited");
+				stack.pop();
+				continue;
+			}
+			const edge = edges[frame.nextEdge]!;
+			frame.nextEdge += 1;
+			const edgeState = state.get(edge.toId);
+			if (edgeState === "visiting") {
+				const pathIds = stack.map((item) => item.stageId);
+				const start = pathIds.indexOf(edge.toId);
+				return {
+					path: edge.path,
+					stageIds: pathIds.slice(start).concat(edge.toId),
+				};
+			}
+			if (!edgeState) {
+				state.set(edge.toId, "visiting");
+				stack.push({ stageId: edge.toId, nextEdge: 0 });
+			}
+		}
+	}
+	return undefined;
 }
 
 function rejectUnknownStageFirstKeys(

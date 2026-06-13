@@ -133,26 +133,113 @@ Bundled starters use normal Pi agent discovery. Ensure the named agents exist in
 
 ## Stage model
 
-Stages are scheduled in order, but stage order does not pass data by itself.
+Stage-first workflows are DAG-capable stage lists. A stage with no `from` or `after` keeps the historical implicit chain from the previous stage, but stage order does not pass data by itself. Use explicit edges when a stage needs prior output or only needs to wait.
 
 Public workflow definitions separate three layers:
 
-- **Workflow layer**: graph/control/data-dependency fields such as `id`, `from`, `sourcePolicy`, scheduling, and artifacts.
+- **Workflow layer**: graph/control/data-dependency fields such as `id`, `from`, `after`, `sourcePolicy`, scheduling, and artifacts.
 - **Subagent layer**: child Pi/model worker shapes: `task`, `parallel`, `foreach`, `reduce`, and `loop`.
 - **Support layer**: local helper execution through a `support` object. Support is not a subagent task type.
 
 | Node | Layer | Data behavior |
 |---|---|---|
-| `type: "task"` | Subagent | Receives only its compiled prompt and runtime task injection. Prior output is not automatic. |
+| `type: "task"` | Subagent | Receives only its compiled prompt and runtime task injection unless it has explicit source edges. |
 | `type: "parallel"` | Subagent/control | Static fixed fan-out. |
 | `type: "foreach"` | Subagent/control | Reads an array from `from.stage` + JSON path and materializes one task per item. |
 | `type: "reduce"` | Subagent | Receives bounded Source Stage Context from `from` stages. |
 | `type: "loop"` | Workflow/control | Repeats fixed child stages until deterministic `until`, `maxRounds`, or no-progress stop. |
+| `type: "dag"` | Workflow/control | Composite container; lowers child stages to namespaced tasks and exposes an `outputFrom` child downstream. |
 | `support` | Support | Runs a directory-local `.mjs` helper over selected source outputs. |
 
 Use `foreach.from` for dynamic fan-out, `reduce.from` for subagent fan-in, and support `from` for local helper inputs. Do not rely on a later plain `task` to see previous stage output.
 
-Legacy top-level `flow.type` bodies are rejected. Author new workflows with `workflow.stages`; future DAG work should extend this stage-first graph model instead of reviving the old `flow.type: "dag"` surface.
+Legacy top-level `flow.type` bodies are rejected. Author new workflows with `workflow.stages`; do not revive the old `flow.type: "dag"` surface.
+
+### DAG authoring
+
+The implemented DAG surface is stage-first:
+
+- `from` is a data + order edge. The downstream stage waits for source tasks and subagent stages receive a bounded `# Source Stage Context` packet; support helpers receive selected source outputs through their helper input.
+- `after` is order-only. It accepts a string or string array, waits for those stages, and does not add their outputs to Source Stage Context. A stage can combine `from` and `after`; only `from` sources are injected as data.
+- `after: []` is an explicit parallel root. It opts out of the implicit previous-stage chain while documenting that the stage intentionally has no ordering dependency.
+- Parse-time graph validation rejects unknown stage references, self-dependencies, duplicate stage ids, and dependency cycles with path-precise issues. Top-level stages are validated as one graph; each `type: "dag"` container is validated as its own sibling-scoped graph.
+- A `type: "dag"` stage is a composite workflow/control container. Children may be `task`, `foreach`, `reduce`, support nodes, or nested `dag` stages. Child `from`/`after` references resolve only to siblings inside the same container.
+- A DAG container's runtime children are statically flattened with namespaced ids such as `analysis.scan.main`. Root children inherit the container's external dependencies; their source context follows the container's `from` edges.
+- `outputFrom` names the child whose task keys represent the container for downstream `from: "containerId"` edges. If omitted, exactly one sink child defaults as the output; multiple sink children require explicit `outputFrom`.
+- Container `sourcePolicy` and `maxConcurrency` act as defaults for children that do not set their own values.
+- Loop children inside DAG containers are rejected in v1; namespace-aware loop keys inside DAG containers are deferred.
+
+Example diamond plus a DAG container consumed downstream:
+
+```json
+{
+  "schemaVersion": 1,
+  "agent": "scout",
+  "workflow": {
+    "stages": [
+      {
+        "id": "plan",
+        "type": "task",
+        "output": { "format": "json" },
+        "prompt": "Plan the review."
+      },
+      {
+        "id": "scan",
+        "type": "task",
+        "from": "plan",
+        "output": { "format": "json" },
+        "prompt": "Scan using the plan context."
+      },
+      {
+        "id": "review",
+        "type": "task",
+        "after": "plan",
+        "output": { "format": "json" },
+        "prompt": "Run an independent review after planning finishes."
+      },
+      {
+        "id": "merge",
+        "type": "reduce",
+        "from": ["scan", "review"],
+        "output": { "format": "json" },
+        "prompt": "Merge both branch outputs."
+      },
+      {
+        "id": "analysis",
+        "type": "dag",
+        "from": "merge",
+        "outputFrom": "final",
+        "stages": [
+          {
+            "id": "scan",
+            "type": "task",
+            "output": { "format": "json" },
+            "prompt": "Scan the merged findings."
+          },
+          {
+            "id": "review",
+            "type": "task",
+            "after": "scan",
+            "prompt": "Review after the scan without scan output context."
+          },
+          {
+            "id": "final",
+            "type": "reduce",
+            "from": ["scan", "review"],
+            "prompt": "Summarize the analysis children."
+          }
+        ]
+      },
+      {
+        "id": "report",
+        "type": "reduce",
+        "from": "analysis",
+        "prompt": "Write the final report using analysis.final output."
+      }
+    ]
+  }
+}
+```
 
 ## Output contracts
 

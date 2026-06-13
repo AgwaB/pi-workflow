@@ -38,6 +38,10 @@ Bundle names resolve from the directory name (`/workflow run name ...`). If both
 
 `output.templateRef` in a bundle is resolved relative to `spec.json`, for example `./templates.json#/final`.
 
+## DAG authoring
+
+Stage-first workflows can use `from` for data edges, `after` for order-only edges, and `type: "dag"` containers for nested sibling-scoped graphs. A downstream stage consumes a container with `from: "analysis"`, which resolves to the container's `outputFrom` child. See `docs/usage.md` for the full DAG example and validation rules.
+
 ## Support helpers
 
 A support node runs local helper code inline instead of launching a subagent:
