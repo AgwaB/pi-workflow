@@ -105,7 +105,7 @@ function main() {
     const cwd = process.cwd();
     const workflows = await listWorkflows(cwd);
     const names = workflows.map((item) => item.name).sort();
-    const expected = ['deep-research', 'deep-review', 'implement-loop', 'test-repair-loop'];
+    const expected = ['deep-research', 'deep-review', 'implement-loop', 'spec-review', 'test-repair-loop'];
     for (const name of expected) {
       if (!names.includes(name)) throw new Error('missing workflow: ' + name + ' in ' + names.join(','));
     }

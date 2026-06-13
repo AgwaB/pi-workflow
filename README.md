@@ -6,7 +6,7 @@
 
 `pi-workflow` lets Pi run repeatable multi-agent workflows: research, review, implementation loops, test repair, and project-specific team routines.
 
-It is a thin orchestration layer on top of [`@agwab/pi-subagent`](https://www.npmjs.com/package/@agwab/pi-subagent). A workflow defines stages, agents, tools, output contracts, support helpers, and safety policy. The concrete user task is still supplied at runtime in natural language.
+It is a thin orchestration layer on top of [`@agwab/pi-subagent`](https://www.npmjs.com/package/@agwab/pi-subagent). A workflow defines stages, agents, tools, output contracts, and support helpers. The concrete user task is still supplied at runtime in natural language.
 
 ## Installation
 
@@ -44,19 +44,12 @@ Use the bundled deep-review workflow to review the current diff from multiple an
 ```
 
 ```text
-Use the test-repair-loop workflow to fix the failing validation command I just ran.
+Use the spec-review workflow to compare docs/API_SPEC.md against the implementation and tests.
 ```
 
-Bundled starter workflows:
-
-| Workflow | Use when |
-|---|---|
-| `deep-research` | Source-backed research, claim verification, citations, or follow-up suggestions. |
-| `deep-review` | Multi-lens review where findings should be challenged before final synthesis. |
-| `implement-loop` | Iterative implementation in one managed worktree until validation passes and review accepts. |
-| `test-repair-loop` | Focused repair loop for failing tests or explicit validation commands. |
-
-These are starter workflows, not a complete catalog. Most teams should create project-specific workflows as their patterns settle.
+```text
+Use the test-repair-loop workflow to fix the failing validation command I just ran.
+```
 
 ## Usage: create your own workflows
 
@@ -78,31 +71,17 @@ Save it as a reusable project workflow.
 It should check concurrency, transaction safety, error handling, observability, and test risk.
 ```
 
-If `/skill:workflow-guide` is not available, enable skill commands in Pi settings or ask naturally:
-
-```text
-Use workflow-guide to create a reusable workflow for release readiness.
-```
-
-Project workflows usually live under:
-
-```text
-.pi/workflows/
-```
-
-Workflow names resolve from project `.pi/workflows/`, repository `workflows/`, bundled package workflows, and `~/.pi/agent/workflows/`. Ambiguous names fail closed.
-
 ## Workflow architecture
 
-`pi-workflow` has three layers:
+A workflow is a deterministic stage graph for running one runtime task through subagent-backed work and local support rails.
 
-1. **Workflow** — the deterministic graph: stage ids, `from` links, scheduling, loop bounds, run state, artifacts, and resume behavior.
-2. **Task** — the subagent execution patterns used inside the graph: one worker, fixed fan-out, dynamic fan-out, fan-in synthesis, or bounded loops.
-3. **Support** — local deterministic helper rails around subagent work: output contracts, Source Stage Context, support helpers, tool ceilings, worktrees, logs, and artifacts.
+The user supplies the runtime task in natural language. The workflow spec supplies the structure: stage ids, `from` links, agents, tool ceilings, output contracts, support helpers, loop bounds, run artifacts, and resume behavior.
 
-### 1. Workflow layer
+`pi-workflow` has three main parts:
 
-A workflow is a deterministic stage graph. It decides what work exists, when each stage can run, and what prior stage context is available.
+1. **Workflow graph** — decides what stages exist and when each stage can run.
+2. **Subagent-backed stages** — `task`, `parallel`, `foreach`, and `reduce` launch Pi subagents through `@agwab/pi-subagent`.
+3. **Support rails** — Source Stage Context, JSON contracts, local support helpers, tool policy, worktrees, logs, and artifacts keep runs structured and reviewable.
 
 Important rule:
 
@@ -110,55 +89,78 @@ Important rule:
 
 A later plain `task` does not automatically receive prior output. Use `foreach.from`, `reduce.from`, or support `from` when a stage needs structured output from earlier stages.
 
-### 2. Task layer: subagent execution patterns
+A small workflow definition looks like this:
 
-Most workflow stages launch one or more Pi subagents through `@agwab/pi-subagent`.
+```json
+{
+  "schemaVersion": 1,
+  "agent": "researcher",
+  "readOnly": true,
+  "tools": ["read", "grep", "find", "ls"],
+  "workflow": {
+    "stages": [
+      {
+        "id": "plan",
+        "type": "task",
+        "output": { "format": "json" },
+        "prompt": "Plan the work as JSON with an items array."
+      },
+      {
+        "id": "inspect",
+        "type": "foreach",
+        "from": { "stage": "plan", "path": "$.items", "mode": "concat" },
+        "each": { "prompt": "Inspect this item: ${item}" }
+      },
+      {
+        "id": "prepare",
+        "from": "inspect",
+        "sourcePolicy": "partial",
+        "support": { "uses": "./helpers/prepare.mjs" }
+      },
+      {
+        "id": "report",
+        "type": "reduce",
+        "from": ["plan", "prepare"],
+        "prompt": "Use Source Stage Context to write the final report."
+      }
+    ]
+  }
+}
+```
+
+## Supported task patterns
+
+Workflow definitions compose task patterns. In the workflow spec they are stage types; at runtime, most of them map to concrete subagent execution shapes.
 
 ![Core workflow stage shapes](./docs/assets/readme/stage-types.png)
 
-_Core subagent-backed stage shapes. `loop` and support nodes are described separately._
-
-| Stage | Use it for | Runtime shape |
+| Pattern | Use it for | Runtime shape |
 |---|---|---|
-| `task` | One focused step | one prompt → one subagent |
-| `parallel` | Static fan-out | fixed task list → multiple subagents, bounded concurrency |
-| `foreach` | Dynamic fan-out | JSON array from prior output → one subagent task per item |
-| `reduce` | Fan-in / synthesis | selected Source Stage Context → one subagent |
-| `loop` | Bounded repetition | repeat a fixed child stage subgraph until a deterministic stop condition |
+| `task` | One focused step | one prompt -> one subagent |
+| `parallel` | Static fan-out | fixed task list -> multiple subagents with bounded concurrency |
+| `foreach` | Dynamic fan-out | JSON array from prior output -> one subagent per item |
+| `reduce` | Fan-in / synthesis | prior stage context -> one synthesis subagent |
+| `loop` | Bounded repetition | repeat child stages until a deterministic stop condition |
 
-Example starter shapes:
+Support helpers are separate from task patterns: they run local workflow code for deterministic preparation, validation, or post-processing.
+
+## Predefined workflows
+
+The package includes a small starter set. These are practical defaults and authoring examples, not a complete workflow catalog.
+
+| Workflow | Use when |
+|---|---|
+| `deep-research` | Source-backed research, claim verification, citations, or follow-up suggestions. |
+| `deep-review` | Multi-lens review where findings should be challenged before final synthesis. |
+| `spec-review` | Read-only comparison of a spec/contract against implementation and tests. |
+| `implement-loop` | Iterative implementation in one managed worktree until validation passes and review accepts. |
+| `test-repair-loop` | Focused repair loop for failing tests or explicit validation commands. |
 
 ![Deep research workflow flow](./docs/assets/readme/deep-research-flow.png)
 
 ![Deep review workflow flow](./docs/assets/readme/deep-review-flow.png)
 
-### 3. Support layer
-
-Support nodes and policies keep workflow runs deterministic and reviewable. They are not subagent tasks.
-
-Support includes:
-
-- output contracts and JSON validation
-- output retry instructions when JSON is invalid
-- Source Stage Context packaging and size caps
-- directory-local `.mjs` support helpers
-- tool allowlists and object-form tool metadata
-- managed worktree policy for mutation-capable workflows
-- run logs, artifacts, telemetry, and resume state
-
-Support helpers run inside the workflow process, not in a subagent sandbox. Helper refs must stay inside the workflow bundle directory.
-
-## Safety notes
-
-- `/workflow` is an orchestrator, not an OS sandbox.
-- Workers run through `@agwab/pi-subagent`; sandbox/worktree behavior follows that package.
-- Agent-declared tools are the authority ceiling; workflow definitions can only narrow them.
-- `readOnly: true` and custom tool classifications are permission previews/tool policy, not filesystem isolation.
-- Support helpers run as local `.mjs` code inside the workflow process with bundle path containment only; they are not sandboxed and are not constrained by subagent tool allowlists.
-- Review workflows should remain read-only unless a workflow explicitly documents managed-worktree mutation.
-- Mutation-capable workflows should normally use managed worktrees in git repositories.
-- In non-git workspaces, write-capable workflows with `worktreePolicy: "off"` mutate the live directory.
-- No backend fallback exists: the resolved backend/strategy is fixed per run.
+Most teams should create project-specific workflows as their patterns settle.
 
 ## More
 

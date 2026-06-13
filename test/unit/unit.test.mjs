@@ -291,9 +291,7 @@ function dagContainerRuntimeSpec({
 							from: ["scan", "review"],
 							output: { format: "json" },
 							prompt: "Finalize.",
-							...(finalSourcePolicy
-								? { sourcePolicy: finalSourcePolicy }
-								: {}),
+							...(finalSourcePolicy ? { sourcePolicy: finalSourcePolicy } : {}),
 						},
 					],
 				},
@@ -302,9 +300,7 @@ function dagContainerRuntimeSpec({
 					type: "reduce",
 					from: "analysis",
 					prompt: "Report.",
-					...(reportSourcePolicy
-						? { sourcePolicy: reportSourcePolicy }
-						: {}),
+					...(reportSourcePolicy ? { sourcePolicy: reportSourcePolicy } : {}),
 				},
 			],
 		},
@@ -1136,10 +1132,13 @@ test("schema accepts bundled stage-first workflow fixtures", () => {
 	for (const specPath of [
 		"workflows/implement-loop.json",
 		"workflows/test-repair-loop.json",
+		"workflows/spec-review.json",
 		"workflows/deep-research/spec.json",
 		"workflows/deep-review/spec.json",
 	]) {
-		const spec = JSON.parse(readFileSync(join(process.cwd(), specPath), "utf8"));
+		const spec = JSON.parse(
+			readFileSync(join(process.cwd(), specPath), "utf8"),
+		);
 		assert.doesNotThrow(() => parseWorkflow(spec), specPath);
 	}
 });
@@ -1845,9 +1844,7 @@ test("compiler lowers foreach and support children inside dag containers", async
 		const byKey = Object.fromEntries(
 			compiled.tasks.map((task) => [task.key, task]),
 		);
-		assert.deepEqual(byKey["fan.verify.item"].dependsOn, [
-			"fan.source.main",
-		]);
+		assert.deepEqual(byKey["fan.verify.item"].dependsOn, ["fan.source.main"]);
 		assert.deepEqual(byKey["fan.verify.item"].foreach.from, {
 			stage: "fan.source",
 			path: "$.items",
@@ -1887,9 +1884,7 @@ test("compiler lowers nested dag containers with composed namespaces", async () 
 									id: "inner",
 									type: "dag",
 									from: "root",
-									stages: [
-										{ id: "leaf", type: "task", prompt: "Leaf." },
-									],
+									stages: [{ id: "leaf", type: "task", prompt: "Leaf." }],
 								},
 							],
 						},
@@ -1911,9 +1906,7 @@ test("compiler lowers nested dag containers with composed namespaces", async () 
 		assert.deepEqual(byKey["outer.inner.leaf.main"].dependsOn, [
 			"outer.root.main",
 		]);
-		assert.deepEqual(byKey["next.main"].dependsOn, [
-			"outer.inner.leaf.main",
-		]);
+		assert.deepEqual(byKey["next.main"].dependsOn, ["outer.inner.leaf.main"]);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
@@ -3073,6 +3066,51 @@ test("bundled implement-loop workflow parses and compiles (schema/engine integra
 		assert.equal(loopStage.maxRounds, 5);
 		assert.deepEqual(loopStage.childStageIds, ["implement", "check"]);
 		assert.equal(compiled.tasks.filter((task) => task.loopChild).length, 0);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("bundled spec-review workflow compiles parallel roots and verification fanout", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "scout", "read, grep, find, ls");
+		const specPath = join(process.cwd(), "workflows", "spec-review.json");
+		const spec = JSON.parse(readFileSync(specPath, "utf8"));
+		parseWorkflow(spec);
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Compare docs/API_SPEC.md to src implementation and tests.",
+		});
+		assert.deepEqual(
+			compiled.tasks.slice(0, 3).map((task) => task.key),
+			["extract-spec.main", "map-implementation.main", "inspect-tests.main"],
+		);
+		assert.deepEqual(
+			compiled.tasks.slice(0, 3).map((task) => task.dependsOn),
+			[[], [], []],
+		);
+		const candidates = compiled.tasks.find(
+			(task) => task.key === "candidate-findings.main",
+		);
+		assert.equal(candidates.kind, "reduce");
+		assert.deepEqual(candidates.dependsOn, [
+			"extract-spec.main",
+			"map-implementation.main",
+			"inspect-tests.main",
+		]);
+		const verifier = compiled.tasks.find(
+			(task) => task.key === "verify-findings.item",
+		);
+		assert.equal(verifier.kind, "foreach");
+		assert.deepEqual(verifier.dependsOn, ["candidate-findings.main"]);
+		const report = compiled.tasks.find((task) => task.key === "report.main");
+		assert.equal(report.kind, "reduce");
+		assert.deepEqual(report.dependsOn, [
+			"extract-spec.main",
+			"candidate-findings.main",
+			"verify-findings.item",
+		]);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
@@ -4680,7 +4718,10 @@ test("stage-first after dependencies do not inject order-only source context", a
 				],
 			},
 		});
-		const compiled = await compileWorkflow(spec, { cwd, task: "Check context" });
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Check context",
+		});
 		const { run } = await createStageFirstRunRecord(
 			cwd,
 			compiled,
@@ -4713,7 +4754,9 @@ test("stage-first after dependencies do not inject order-only source context", a
 		const afterOnlyPrompt = prompts.find((prompt) =>
 			prompt.includes("stage=afterOnly"),
 		);
-		const mixedPrompt = prompts.find((prompt) => prompt.includes("stage=mixed"));
+		const mixedPrompt = prompts.find((prompt) =>
+			prompt.includes("stage=mixed"),
+		);
 		assert(afterOnlyPrompt);
 		assert(mixedPrompt);
 		assert.doesNotMatch(afterOnlyPrompt, /# Source Stage Context/);
@@ -4764,7 +4807,10 @@ test("stage-first diamond fan-out launches branches in parallel and joins contex
 				],
 			},
 		});
-		const compiled = await compileWorkflow(spec, { cwd, task: "Check diamond" });
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Check diamond",
+		});
 		const { run } = await createStageFirstRunRecord(
 			cwd,
 			compiled,
@@ -5239,7 +5285,8 @@ test("subagent launch appends extra extensions from env", async () => {
 	const previous = process.env.PI_WORKFLOW_SUBAGENT_EXTRA_EXTENSIONS;
 	let captured;
 	try {
-		process.env.PI_WORKFLOW_SUBAGENT_EXTRA_EXTENSIONS = "/tmp/pi-telemetry-extension.mjs";
+		process.env.PI_WORKFLOW_SUBAGENT_EXTRA_EXTENSIONS =
+			"/tmp/pi-telemetry-extension.mjs";
 		writeAgent(cwd, "unit-researcher", "read, fetch_content");
 		setSubagentApiForTests({
 			async runSubagent(options) {
@@ -5264,9 +5311,7 @@ test("subagent launch appends extra extensions from env", async () => {
 		const spec = workflowSpec("unit-researcher", {
 			tools: ["read", "fetch_content"],
 			workflow: {
-				stages: [
-					{ id: "main", type: "task", prompt: "Research with fetch." },
-				],
+				stages: [{ id: "main", type: "task", prompt: "Research with fetch." }],
 			},
 		});
 		const compiled = await compileWorkflow(spec, {
