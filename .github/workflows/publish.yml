@@ -1,0 +1,102 @@
+name: Publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish, e.g. 0.1.1 or 0.2.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  npm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Show Node/npm versions
+        run: |
+          node --version
+          npm --version
+
+      - run: npm ci --legacy-peer-deps
+
+      - name: Configure git author
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Prepare release version
+        id: prepare
+        run: |
+          set -euo pipefail
+          target="${{ inputs.version }}"
+          current="$(node -p "require('./package.json').version")"
+          needs_push=false
+
+          if [ "$current" = "$target" ]; then
+            echo "package.json is already at $target; skipping npm version."
+            if ! git rev-parse -q --verify "refs/tags/v$target" >/dev/null 2>&1; then
+              git tag "v$target"
+            fi
+            if ! git ls-remote --exit-code --tags origin "refs/tags/v$target" >/dev/null 2>&1; then
+              needs_push=true
+            fi
+          else
+            npm version "$target" -m "chore(release): %s"
+            needs_push=true
+          fi
+
+          echo "needs_push=$needs_push" >> "$GITHUB_OUTPUT"
+
+      - name: Check npm package version
+        id: npm_version
+        run: |
+          set -euo pipefail
+          name="$(node -p "require('./package.json').name")"
+          version="${{ inputs.version }}"
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "$name@$version already exists on npm; publish will be skipped."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Release validation
+        run: npm run release:check
+
+      - name: Publish to npm
+        if: steps.npm_version.outputs.exists != 'true'
+        run: npm publish --access public
+
+      - name: Push release commit and tag
+        if: steps.prepare.outputs.needs_push == 'true'
+        run: |
+          git push origin HEAD:main
+          git push origin "refs/tags/v${{ inputs.version }}"
+
+      - name: Create GitHub release
+        run: |
+          if gh release view "v${{ inputs.version }}" >/dev/null 2>&1; then
+            echo "GitHub release v${{ inputs.version }} already exists."
+          else
+            gh release create "v${{ inputs.version }}" --title "v${{ inputs.version }}" --generate-notes
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}

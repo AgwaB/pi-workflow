@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "spec-review:verify-findings",
+  "type": "object",
+  "required": [
+    "schema",
+    "digest",
+    "id",
+    "verdict"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "minLength": 1
+    },
+    "digest": {
+      "type": "string",
+      "minLength": 1
+    },
+    "id": {},
+    "verdict": {}
+  },
+  "additionalProperties": true
+}

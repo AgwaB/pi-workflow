@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "spec-review:analysis.map-implementation",
+  "type": "object",
+  "required": [
+    "schema",
+    "digest",
+    "implementationMap"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "minLength": 1
+    },
+    "digest": {
+      "type": "string",
+      "minLength": 1
+    },
+    "implementationMap": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      },
+      "maxItems": 60
+    }
+  },
+  "additionalProperties": true
+}

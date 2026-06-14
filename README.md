@@ -6,6 +6,8 @@
 
 `pi-workflow` lets Pi run repeatable multi-agent workflows: research, review, implementation loops, test repair, and project-specific team routines.
 
+> **Breaking pre-1.0 workflow format:** public `schemaVersion: 1` specs now use `artifactGraph.stages`. Legacy `workflow.stages` specs are rejected by the normal runtime. See [`docs/MIGRATION.md`](./docs/MIGRATION.md) before upgrading existing workflows.
+
 It is a thin orchestration layer on top of [`@agwab/pi-subagent`](https://www.npmjs.com/package/@agwab/pi-subagent). A workflow defines stages, agents, tools, output contracts, and support helpers. The concrete user task is still supplied at runtime in natural language.
 
 ## Installation
@@ -75,44 +77,46 @@ It should check concurrency, transaction safety, error handling, observability, 
 
 A workflow is a deterministic stage graph for running one runtime task through subagent-backed work and local support rails.
 
-The user supplies the runtime task in natural language. The workflow spec supplies the structure: stage ids, `from` links, agents, tool ceilings, output contracts, support helpers, loop bounds, run artifacts, and resume behavior.
+The user supplies the runtime task in natural language. The workflow spec supplies the structure: `artifactGraph.stages`, stage ids, `from`/`after` links, agents, tool ceilings, control artifacts, support helpers, loop bounds, run artifacts, and resume behavior.
 
 `pi-workflow` has three main parts:
 
 1. **Workflow graph** — decides what stages exist and when each stage can run.
-2. **Subagent-backed stages** — `task`, `parallel`, `foreach`, and `reduce` launch Pi subagents through `@agwab/pi-subagent`.
-3. **Support rails** — Source Stage Context, JSON contracts, local support helpers, tool policy, worktrees, logs, and artifacts keep runs structured and reviewable.
+2. **Subagent-backed stages** — `task`, `foreach`, `reduce`, and `loop` launch Pi subagents through `@agwab/pi-subagent` (there is no `parallel` stage type; use multiple roots or `after: []`).
+3. **Support rails** — workflow artifacts (`control.json`, `analysis.md`, `refs.json`), read ledgers, local support helpers, tool policy, worktrees, logs, and artifacts keep runs structured and reviewable.
 
 Important rule:
 
 > Stage order controls scheduling; `from` controls data flow.
 
-A later plain `task` does not automatically receive prior output. Use `foreach.from`, `reduce.from`, or support `from` when a stage needs structured output from earlier stages.
+A later plain `task` does not automatically receive prior output. Use `foreach.from`, `reduce.from`, or support `from` when a stage needs upstream control artifacts.
 
 A small workflow definition looks like this:
 
 ```json
 {
   "schemaVersion": 1,
-  "agent": "researcher",
-  "readOnly": true,
-  "tools": ["read", "grep", "find", "ls"],
-  "workflow": {
+  "defaults": {
+    "agent": "researcher",
+    "readOnly": true,
+    "tools": ["read", "grep", "find", "ls"]
+  },
+  "artifactGraph": {
     "stages": [
       {
         "id": "plan",
         "type": "task",
-        "output": { "format": "json" },
-        "prompt": "Plan the work as JSON with an items array."
+        "prompt": "Put machine-readable JSON in <control> with an items array."
       },
       {
         "id": "inspect",
         "type": "foreach",
-        "from": { "stage": "plan", "path": "$.items", "mode": "concat" },
+        "from": { "source": "plan", "path": "$.items" },
         "each": { "prompt": "Inspect this item: ${item}" }
       },
       {
         "id": "prepare",
+        "type": "support",
         "from": "inspect",
         "sourcePolicy": "partial",
         "support": { "uses": "./helpers/prepare.mjs" }
@@ -121,7 +125,7 @@ A small workflow definition looks like this:
         "id": "report",
         "type": "reduce",
         "from": ["plan", "prepare"],
-        "prompt": "Use Source Stage Context to write the final report."
+        "prompt": "Use upstream workflow artifacts to write the final report."
       }
     ]
   }
@@ -137,9 +141,8 @@ Workflow definitions compose task patterns. In the workflow spec they are stage 
 | Pattern | Use it for | Runtime shape |
 |---|---|---|
 | `task` | One focused step | one prompt -> one subagent |
-| `parallel` | Static fan-out | fixed task list -> multiple subagents with bounded concurrency |
-| `foreach` | Dynamic fan-out | JSON array from prior output -> one subagent per item |
-| `reduce` | Fan-in / synthesis | prior stage context -> one synthesis subagent |
+| `foreach` | Dynamic fan-out | JSON array from an upstream control artifact -> one subagent per item |
+| `reduce` | Fan-in / synthesis | upstream workflow artifacts -> one synthesis subagent |
 | `loop` | Bounded repetition | repeat child stages until a deterministic stop condition |
 
 Support helpers are separate from task patterns: they run local workflow code for deterministic preparation, validation, or post-processing.
@@ -153,6 +156,9 @@ The package includes a small starter set. These are practical defaults and autho
 | `deep-research` | Source-backed research, claim verification, citations, or follow-up suggestions. |
 | `deep-review` | Multi-lens review where findings should be challenged before final synthesis. |
 | `spec-review` | Read-only comparison of a spec/contract against implementation and tests. |
+| `change-impact-review` | Read-only impact review for a proposed or applied change, especially missing tests, docs, release work, compatibility risk, and ship blockers. |
+| `execution-review` | Execution-backed patch review with targeted repro tests, narrow validation, and RED/GREEN evidence. |
+| `deep-execution-review` | Repo-wide ambiguous regression hunt with triage, parallel execution-backed reviewers, synthesis, and an evidence gap loop. |
 | `implement-loop` | Iterative implementation in one managed worktree until validation passes and review accepts. |
 | `test-repair-loop` | Focused repair loop for failing tests or explicit validation commands. |
 

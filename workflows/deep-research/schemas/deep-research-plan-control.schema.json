@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "deep-research:plan",
+  "type": "object",
+  "required": [
+    "schema",
+    "digest",
+    "depth",
+    "taskType",
+    "researchAxes",
+    "factSlots",
+    "sourcePolicy",
+    "verificationPriorities",
+    "expectedFinalShape",
+    "planRisks",
+    "researchScope",
+    "researchQuestions",
+    "researchScopeCoverage",
+    "verificationRubric"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "minLength": 1
+    },
+    "digest": {
+      "type": "string",
+      "minLength": 1
+    },
+    "depth": {},
+    "taskType": {},
+    "researchAxes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      },
+      "minItems": 1
+    },
+    "factSlots": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      },
+      "minItems": 1,
+      "maxItems": 64
+    },
+    "sourcePolicy": {},
+    "verificationPriorities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      },
+      "minItems": 1
+    },
+    "expectedFinalShape": {},
+    "planRisks": {},
+    "researchScope": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      },
+      "minItems": 1
+    },
+    "researchQuestions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      },
+      "minItems": 1,
+      "maxItems": 24
+    },
+    "researchScopeCoverage": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      },
+      "minItems": 1
+    },
+    "verificationRubric": {}
+  },
+  "additionalProperties": true
+}

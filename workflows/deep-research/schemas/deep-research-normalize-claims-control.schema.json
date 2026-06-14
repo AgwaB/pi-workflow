@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "deep-research:normalize-claims",
+  "type": "object",
+  "required": [
+    "schema",
+    "digest",
+    "claimInventory",
+    "factSlotCoverage"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "minLength": 1
+    },
+    "digest": {
+      "type": "string",
+      "minLength": 1
+    },
+    "claimInventory": {
+      "type": "object",
+      "properties": {
+        "verificationCandidates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "maxItems": 48
+        },
+        "preservedClaims": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "maxItems": 24
+        },
+        "duplicates": {}
+      },
+      "additionalProperties": true,
+      "required": [
+        "verificationCandidates",
+        "preservedClaims",
+        "duplicates"
+      ]
+    },
+    "factSlotCoverage": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      },
+      "maxItems": 64
+    }
+  },
+  "additionalProperties": true
+}

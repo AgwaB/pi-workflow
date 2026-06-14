@@ -1,5 +1,6 @@
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, extname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { compileWorkflow } from "./compiler.js";
 import { loadWorkflowSpec } from "./schema.js";
@@ -29,6 +30,17 @@ import { resolveWorkflowBackend } from "./backend.js";
 import { ensureManagedWorktree } from "./worktree.js";
 import { buildJsonOutputRetryInstructions } from "./result.js";
 import { loadWorkflowHelper } from "./workflow-helpers.js";
+import {
+	WORKFLOW_ARTIFACT_TOOL_NAME,
+	writeWorkflowArtifactExtensionWrapper,
+} from "./workflow-artifact-extension.js";
+import {
+	WORKFLOW_SOURCE_MANIFEST_SCHEMA,
+	type WorkflowSourceManifest,
+	type WorkflowSourceManifestSource,
+} from "./workflow-artifact-tool.js";
+import { writeVNextTaskArtifactBundle } from "./workflow-vnext-artifacts.js";
+import type { JsonSchema } from "./json-schema.js";
 import {
 	buildSourceContextPacket,
 	formatOutputTemplateSection,
@@ -460,15 +472,25 @@ async function materializeForeachTask(
 	const sourceTasks = run.tasks.filter((task) =>
 		sourceStageIds.includes(task.stageId ?? ""),
 	);
-	const extracted = await extractStageFirstForeachItems(
-		cwd,
-		{
-			from: template.foreach.from,
-			sourcePolicy: stageSourcePolicy(compiledFlow, template.stageId),
-			maxItems: template.foreach.maxItems,
-		},
-		sourceTasks,
-	);
+	const extracted = template.artifactGraph?.enabled
+		? await extractArtifactGraphForeachItems(
+				cwd,
+				{
+					from: template.foreach.from,
+					sourcePolicy: stageSourcePolicy(compiledFlow, template.stageId),
+					maxItems: template.foreach.maxItems,
+				},
+				sourceTasks,
+			)
+		: await extractStageFirstForeachItems(
+				cwd,
+				{
+					from: template.foreach.from,
+					sourcePolicy: stageSourcePolicy(compiledFlow, template.stageId),
+					maxItems: template.foreach.maxItems,
+				},
+				sourceTasks,
+			);
 
 	if (extracted.error) {
 		setTaskTerminal(templateRunTask, "blocked", "foreach_expansion_blocked", {
@@ -518,6 +540,52 @@ async function materializeForeachTask(
 	await writeJsonAtomic(compiledWorkflowPath(cwd, run.runId), compiledFlow);
 	await writeRunRecord(cwd, run);
 	return true;
+}
+
+async function extractArtifactGraphForeachItems(
+	cwd: string,
+	stage: { from: unknown; sourcePolicy?: string; maxItems?: number },
+	sourceTasks: WorkflowTaskRunRecord[],
+): Promise<{ items?: unknown[]; error?: string }> {
+	const items: unknown[] = [];
+	const path = (stage.from as any)?.path;
+	if (typeof path !== "string" || !path.startsWith("$.")) {
+		return {
+			error: "foreach.from.path must be a control JSONPath like $.items",
+		};
+	}
+	for (const task of sourceTasks) {
+		if (task.status !== "completed") {
+			if (stage.sourcePolicy !== "partial")
+				return { error: `${task.taskId} did not complete` };
+			continue;
+		}
+		try {
+			const control = await readArtifactGraphControl(cwd, task);
+			const value = readSimpleJsonPath(control, path);
+			if (!Array.isArray(value)) {
+				if (stage.sourcePolicy !== "partial") {
+					return {
+						error: `${task.taskId} control ${path} did not resolve to an array`,
+					};
+				}
+				continue;
+			}
+			items.push(...value);
+		} catch (error) {
+			if (stage.sourcePolicy !== "partial") {
+				return {
+					error: error instanceof Error ? error.message : String(error),
+				};
+			}
+		}
+	}
+	if (typeof stage.maxItems === "number" && items.length > stage.maxItems) {
+		return {
+			error: `foreach extracted ${items.length} items, exceeding maxItems=${stage.maxItems}`,
+		};
+	}
+	return { items };
 }
 
 async function scheduleLoop(
@@ -980,20 +1048,28 @@ export async function evaluateLoopUntilCondition(
 		return false;
 	}
 
-	if (typeof candidate.stage !== "string" || typeof candidate.path !== "string")
-		return false;
+	const stageId =
+		typeof candidate.stage === "string"
+			? candidate.stage
+			: typeof candidate.source === "string"
+				? candidate.source
+				: undefined;
+	if (stageId === undefined || typeof candidate.path !== "string") return false;
 	const output = await readLoopStageStructuredOutput(
 		cwd,
 		run,
 		compiledFlow,
 		loopId,
 		round,
-		candidate.stage,
+		stageId,
 	);
 	const value =
 		output === undefined
 			? undefined
 			: readSimpleJsonPath(output, candidate.path);
+	if (Object.hasOwn(candidate, "exists")) {
+		return candidate.exists === (value !== undefined);
+	}
 	if (value === undefined) return false;
 	if (Object.hasOwn(candidate, "equals"))
 		return Object.is(value, candidate.equals);
@@ -1129,6 +1205,9 @@ async function readLoopStageStructuredOutput(
 	);
 	if (!entry || entry.runTask.status !== "completed") return undefined;
 	try {
+		if (entry.compiledTask.artifactGraph?.enabled) {
+			return await readArtifactGraphControl(cwd, entry.runTask);
+		}
 		const result = JSON.parse(
 			await readFile(fromProjectPath(cwd, entry.runTask.files.result), "utf8"),
 		);
@@ -1714,6 +1793,7 @@ function collectUntilStageRefs(condition: unknown, refs: Set<string>): void {
 	if (!condition || typeof condition !== "object") return;
 	const candidate = condition as any;
 	if (typeof candidate.stage === "string") refs.add(candidate.stage);
+	else if (typeof candidate.source === "string") refs.add(candidate.source);
 	for (const item of candidate.all ?? []) collectUntilStageRefs(item, refs);
 	for (const item of candidate.any ?? []) collectUntilStageRefs(item, refs);
 }
@@ -1977,8 +2057,11 @@ async function launchPendingTaskAt(
 	}
 
 	let launchTask = await prepareDagTask(cwd, run, compiledFlow, index);
-	if (task.outputRetry)
-		launchTask = await prepareOutputRetryTask(cwd, task, launchTask);
+	if (task.outputRetry) {
+		launchTask = task.artifactGraph?.enabled
+			? await prepareArtifactGraphRetryTask(cwd, task, launchTask)
+			: await prepareOutputRetryTask(cwd, task, launchTask);
+	}
 
 	try {
 		if (launchTask.kind === "support") {
@@ -2027,11 +2110,13 @@ async function executeSupportTask(
 	task.startedAt = task.startedAt ?? new Date().toISOString();
 	await writeRunRecord(cwd, run);
 
-	const sources = await readSupportSources(
-		cwd,
-		run,
-		compiledTask.dependsOn ?? [],
-	);
+	const sources = compiledTask.artifactGraph?.enabled
+		? await readArtifactGraphSupportSources(
+				cwd,
+				run,
+				compiledTask.dependsOn ?? [],
+			)
+		: await readSupportSources(cwd, run, compiledTask.dependsOn ?? []);
 	const helperSpecPath = await supportHelperSpecPath(cwd, run);
 	const helper = await loadWorkflowHelper(
 		compiledTask.support.uses,
@@ -2049,6 +2134,15 @@ async function executeSupportTask(
 			cwd,
 		},
 	});
+
+	if (compiledTask.artifactGraph?.enabled) {
+		await writeArtifactGraphSupportResult(cwd, task, structuredOutput);
+		setTaskTerminal(task, "completed", "support_completed", {
+			lastMessage: "support completed",
+		});
+		await writeRunRecord(cwd, run);
+		return true;
+	}
 
 	await mkdir(dirname(fromProjectPath(cwd, task.files.output)), {
 		recursive: true,
@@ -2110,6 +2204,90 @@ async function readSupportSources(
 	return sources;
 }
 
+async function readArtifactGraphSupportSources(
+	cwd: string,
+	run: WorkflowRunRecord,
+	dependsOn: string[],
+): Promise<Record<string, unknown>> {
+	const sources: Record<string, unknown> = {};
+	const usedNames = new Set<string>();
+	for (const specId of dependsOn) {
+		const source = run.tasks.find((candidate) => candidate.specId === specId);
+		if (!source || source.status !== "completed") continue;
+		sources[sourceNameForTask(source, usedNames)] =
+			await readArtifactGraphControl(cwd, source);
+	}
+	return sources;
+}
+
+async function writeArtifactGraphSupportResult(
+	cwd: string,
+	task: WorkflowTaskRunRecord,
+	structuredOutput: unknown,
+): Promise<void> {
+	const control = normalizeSupportControl(structuredOutput);
+	const rawOutput = [
+		"<control>",
+		JSON.stringify(control, null, 2),
+		"</control>",
+		"<analysis>",
+		"Support helper completed deterministically.",
+		"</analysis>",
+		"<refs>",
+		"[]",
+		"</refs>",
+	].join("\n");
+	await mkdir(dirname(fromProjectPath(cwd, task.files.output)), {
+		recursive: true,
+	});
+	await writeFile(fromProjectPath(cwd, task.files.output), rawOutput, "utf8");
+	await writeFile(fromProjectPath(cwd, task.files.stderr), "", "utf8");
+	const written = await writeVNextTaskArtifactBundle({
+		taskDir: dirname(fromProjectPath(cwd, task.files.result)),
+		rawOutput,
+		completedAt: new Date().toISOString(),
+		analysisRequired: task.artifactGraph?.output.analysisRequired ?? true,
+		refsRequired: task.artifactGraph?.output.refsRequired ?? true,
+		maxDigestChars: task.artifactGraph?.output.maxDigestChars,
+		controlJsonSchema: await readTaskControlJsonSchema(task),
+	});
+	if (!written.valid) {
+		throw new Error(
+			`support control failed vNext validation: ${written.parsed.issues
+				.map((issue) => issue.message)
+				.join("; ")}`,
+		);
+	}
+}
+
+async function readTaskControlJsonSchema(
+	task: WorkflowTaskRunRecord,
+): Promise<JsonSchema | undefined> {
+	const schemaPath = task.artifactGraph?.output.controlSchemaPath;
+	if (!schemaPath) return undefined;
+	return JSON.parse(await readFile(schemaPath, "utf8")) as JsonSchema;
+}
+
+function normalizeSupportControl(value: unknown): Record<string, unknown> {
+	if (value && typeof value === "object" && !Array.isArray(value)) {
+		const record = value as Record<string, unknown>;
+		return {
+			schema:
+				typeof record.schema === "string" ? record.schema : "stage-control-v1",
+			digest:
+				typeof record.digest === "string"
+					? record.digest
+					: "Support helper completed.",
+			...record,
+		};
+	}
+	return {
+		schema: "stage-control-v1",
+		digest: "Support helper completed.",
+		value,
+	};
+}
+
 function applyExistingLoopWorktree(
 	run: WorkflowRunRecord,
 	task: WorkflowTaskRunRecord,
@@ -2167,6 +2345,15 @@ async function prepareDagTask(
 	const task = run.tasks[index]!;
 	const contextDependsOn =
 		compiledTask.contextDependsOn ?? compiledTask.dependsOn ?? [];
+	if (compiledTask.artifactGraph?.enabled) {
+		return await prepareArtifactGraphTask(
+			cwd,
+			run,
+			compiledTask,
+			task,
+			contextDependsOn,
+		);
+	}
 	if (contextDependsOn.length === 0) return compiledTask;
 
 	const bySpecId = new Map(
@@ -2193,6 +2380,310 @@ async function prepareDagTask(
 			"# Source Stage Context",
 			"Use this deterministic source context packet. Prefer structuredOutput over outputPreview. Do not assume dependencies beyond this explicit packet.",
 			JSON.stringify({ ...context, missingDependencies: missing }, null, 2),
+		].join("\n\n"),
+	};
+}
+
+async function prepareArtifactGraphTask(
+	cwd: string,
+	run: WorkflowRunRecord,
+	compiledTask: CompiledTask,
+	task: WorkflowTaskRunRecord,
+	contextDependsOn: readonly string[],
+): Promise<CompiledTask> {
+	const taskDir = dirname(fromProjectPath(cwd, task.files.result));
+	const manifestPath = join(taskDir, "source-manifest.json");
+	const ledgerPath = join(taskDir, "read-ledger.jsonl");
+	const wrapperPath = join(taskDir, "workflow-artifact-extension.ts");
+	const sources = await buildArtifactGraphSourceManifestSources(
+		cwd,
+		run,
+		contextDependsOn,
+		compiledTask.artifactGraph?.sourceProjection,
+	);
+	const manifest: WorkflowSourceManifest = {
+		schema: WORKFLOW_SOURCE_MANIFEST_SCHEMA,
+		runId: run.runId,
+		taskId: task.taskId,
+		sources,
+		policy: { accessMode: "workflow-task" },
+	};
+	await writeJsonAtomic(manifestPath, manifest);
+	await writeWorkflowArtifactExtensionWrapper({
+		wrapperPath,
+		importPath: workflowArtifactExtensionImportPath(),
+		config: {
+			runId: run.runId,
+			taskId: task.taskId,
+			manifestPath,
+			ledgerPath,
+			accessMode: "workflow-task",
+			runDir: workflowRunDir(cwd, run.runId),
+		},
+	});
+
+	const requiredReads = compiledTask.artifactGraph?.requiredReads ?? [];
+	return {
+		...compiledTask,
+		cwd: task.cwd,
+		runtime: {
+			...compiledTask.runtime,
+			tools: uniqueStrings([
+				...(compiledTask.runtime.tools ?? []),
+				WORKFLOW_ARTIFACT_TOOL_NAME,
+			]),
+			toolProviders: {
+				...(compiledTask.runtime.toolProviders ?? {}),
+				[WORKFLOW_ARTIFACT_TOOL_NAME]: {
+					classification: "read-only",
+					extensions: [wrapperPath],
+				},
+			},
+		},
+		compiledPrompt: [
+			compiledTask.compiledPrompt,
+			formatArtifactGraphSourceContext(sources, requiredReads),
+		].join("\n\n"),
+	};
+}
+
+async function buildArtifactGraphSourceManifestSources(
+	cwd: string,
+	run: WorkflowRunRecord,
+	contextDependsOn: readonly string[],
+	projection?: NonNullable<CompiledTask["artifactGraph"]>["sourceProjection"],
+): Promise<WorkflowSourceManifestSource[]> {
+	const bySpecId = new Map(
+		run.tasks.map((sourceTask) => [sourceTask.specId, sourceTask]),
+	);
+	const sources: WorkflowSourceManifestSource[] = [];
+	const usedNames = new Set<string>();
+	for (const dep of contextDependsOn) {
+		const sourceTask = bySpecId.get(dep);
+		if (!sourceTask || sourceTask.status !== "completed") continue;
+		const source = sourceNameForTask(sourceTask, usedNames);
+		const artifacts = await artifactRefsForTask(cwd, sourceTask);
+		if (Object.keys(artifacts).length === 0) continue;
+		const control = await readArtifactGraphControl(cwd, sourceTask).catch(
+			() => undefined,
+		);
+		const controlProjection = projectArtifactGraphControl(control, projection);
+		sources.push({
+			source,
+			displayName: sourceTask.displayName,
+			taskId: sourceTask.taskId,
+			specId: sourceTask.specId,
+			digest: controlDigest(control),
+			...(controlProjection.value !== undefined
+				? { controlProjection: controlProjection.value }
+				: {}),
+			...(controlProjection.missingPaths.length > 0
+				? { projectionMissingPaths: controlProjection.missingPaths }
+				: {}),
+			...(controlProjection.truncated ? { projectionTruncated: true } : {}),
+			artifacts,
+		});
+	}
+	return sources;
+}
+
+async function artifactRefsForTask(
+	cwd: string,
+	task: WorkflowTaskRunRecord,
+): Promise<WorkflowSourceManifestSource["artifacts"]> {
+	const taskDir = dirname(fromProjectPath(cwd, task.files.result));
+	const candidates = {
+		control: {
+			path: join(taskDir, "control.json"),
+			mediaType: "application/json",
+		},
+		analysis: {
+			path: join(taskDir, "analysis.md"),
+			mediaType: "text/markdown",
+		},
+		refs: { path: join(taskDir, "refs.json"), mediaType: "application/json" },
+		raw: { path: join(taskDir, "raw.md"), mediaType: "text/markdown" },
+	} as const;
+	const artifacts: WorkflowSourceManifestSource["artifacts"] = {};
+	for (const [kind, ref] of Object.entries(candidates)) {
+		try {
+			if ((await stat(ref.path)).isFile()) (artifacts as any)[kind] = ref;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		}
+	}
+	return artifacts;
+}
+
+function controlDigest(control: unknown): string | undefined {
+	return control && typeof (control as any).digest === "string"
+		? (control as any).digest
+		: undefined;
+}
+
+function projectArtifactGraphControl(
+	control: unknown,
+	projection:
+		| NonNullable<CompiledTask["artifactGraph"]>["sourceProjection"]
+		| undefined,
+): { value?: unknown; missingPaths: string[]; truncated: boolean } {
+	if (!projection?.include || projection.include.length === 0) {
+		return { missingPaths: [], truncated: false };
+	}
+	const projected: Record<string, unknown> = {};
+	const missingPaths: string[] = [];
+	for (const path of projection.include) {
+		const resolved = readSimpleJsonPath(control, path);
+		if (resolved === undefined) {
+			missingPaths.push(path);
+			continue;
+		}
+		setProjectedJsonPath(projected, path, resolved);
+	}
+	const value = Object.keys(projected).length > 0 ? projected : undefined;
+	return capArtifactGraphProjection(value, missingPaths, projection.maxChars);
+}
+
+function capArtifactGraphProjection(
+	value: unknown,
+	missingPaths: string[],
+	maxChars: number | undefined,
+): { value?: unknown; missingPaths: string[]; truncated: boolean } {
+	if (value === undefined || maxChars === undefined) {
+		return { value, missingPaths, truncated: false };
+	}
+	const serialized = JSON.stringify(value);
+	if (serialized.length <= maxChars) {
+		return { value, missingPaths, truncated: false };
+	}
+	return {
+		value: {
+			truncated: true,
+			originalChars: serialized.length,
+			preview: serialized.slice(0, Math.max(0, maxChars - 1)) + "…",
+		},
+		missingPaths,
+		truncated: true,
+	};
+}
+
+function setProjectedJsonPath(
+	target: Record<string, unknown>,
+	path: string,
+	value: unknown,
+): void {
+	const tokens = path
+		.replace(/^\$\.?/, "")
+		.split(".")
+		.map((token) => token.trim())
+		.filter(Boolean);
+	let current = target;
+	for (const [index, token] of tokens.entries()) {
+		if (index === tokens.length - 1) {
+			current[token] = value;
+			return;
+		}
+		const existing = current[token];
+		if (!existing || typeof existing !== "object" || Array.isArray(existing)) {
+			current[token] = {};
+		}
+		current = current[token] as Record<string, unknown>;
+	}
+}
+
+function sourceNameForTask(
+	task: WorkflowTaskRunRecord,
+	usedNames: Set<string>,
+): string {
+	const preferred = task.stageId ?? task.specId;
+	if (!usedNames.has(preferred)) {
+		usedNames.add(preferred);
+		return preferred;
+	}
+	usedNames.add(task.specId);
+	return task.specId;
+}
+
+function formatArtifactGraphSourceContext(
+	sources: readonly WorkflowSourceManifestSource[],
+	requiredReads: readonly string[],
+): string {
+	return [
+		"# Workflow Artifact Inputs",
+		"Use workflow_artifact to list/read upstream workflow artifacts. The inline data below is a digest only; it is not a substitute for required reads.",
+		requiredReads.length > 0
+			? [
+					"Required reads before final output:",
+					...requiredReads.map((read) => `- ${read}`),
+				].join("\n")
+			: "No hard requiredReads are declared for this stage.",
+		"Available sources:",
+		JSON.stringify(
+			sources.map((source) => ({
+				source: source.source,
+				taskId: source.taskId,
+				specId: source.specId,
+				digest: source.digest,
+				controlProjection: source.controlProjection,
+				projectionMissingPaths: source.projectionMissingPaths,
+				projectionTruncated: source.projectionTruncated,
+				availableArtifacts: Object.keys(source.artifacts),
+			})),
+			null,
+			2,
+		),
+	].join("\n\n");
+}
+
+function uniqueStrings(values: readonly string[]): string[] {
+	return [...new Set(values.filter((value) => value.trim().length > 0))];
+}
+
+async function readArtifactGraphControl(
+	cwd: string,
+	task: WorkflowTaskRunRecord,
+): Promise<unknown> {
+	const taskDir = dirname(fromProjectPath(cwd, task.files.result));
+	return await readJson(join(taskDir, "control.json"));
+}
+
+function workflowArtifactExtensionImportPath(): string {
+	const current = fileURLToPath(import.meta.url);
+	return fileURLToPath(
+		new URL(
+			`./workflow-artifact-extension${extname(current)}`,
+			import.meta.url,
+		),
+	);
+}
+
+async function prepareArtifactGraphRetryTask(
+	cwd: string,
+	task: WorkflowTaskRunRecord,
+	preparedTask: CompiledWorkflow["tasks"][number],
+): Promise<CompiledWorkflow["tasks"][number]> {
+	const invalidAttempt = task.outputRetry?.attempts
+		? `${dirname(fromProjectPath(cwd, task.files.result))}/raw.invalid-attempt-${task.outputRetry.attempts}.md`
+		: fromProjectPath(cwd, task.files.output);
+	const previousOutput = await readFile(invalidAttempt, "utf8").catch(() => "");
+	const issueText = task.outputRetry?.artifacts?.length
+		? [
+				"Your previous attempt did not read required workflow artifacts:",
+				...task.outputRetry.artifacts.map((artifact) => `- ${artifact}`),
+				"Use workflow_artifact before producing the final answer.",
+			].join("\n")
+		: (task.outputRetry?.message ?? "vNext workflow output was invalid");
+
+	return {
+		...preparedTask,
+		cwd: task.cwd,
+		compiledPrompt: [
+			preparedTask.compiledPrompt,
+			"# vNext Output Retry Instructions",
+			issueText,
+			"Return the final answer again using exactly <control>, <analysis>, and <refs> sections.",
+			"# Previous Attempt Preview",
+			previousOutput.slice(0, 4000) || "(empty or unavailable)",
 		].join("\n\n"),
 	};
 }

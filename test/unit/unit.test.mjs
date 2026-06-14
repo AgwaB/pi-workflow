@@ -4,6 +4,7 @@ import {
 	mkdtempSync,
 	readFileSync,
 	rmSync,
+	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -20,6 +21,7 @@ import {
 	resumeRun,
 	runWorkflow,
 	scheduleRun,
+	waitForRun,
 } from "../../.tmp/unit/engine.js";
 import {
 	notifyUnfinishedRuns,
@@ -32,9 +34,14 @@ import {
 	resolveWorkflowRef,
 } from "../../.tmp/unit/workflow-specs.js";
 import { resolveWorkflowRuntime } from "../../.tmp/unit/workflow-runtime.js";
-import { loadWorkflow, parseWorkflow } from "../../.tmp/unit/schema.js";
+import {
+	loadWorkflow,
+	parseLegacyStageFirstWorkflowSpec,
+	parseWorkflow as parsePublicWorkflow,
+} from "../../.tmp/unit/schema.js";
 import {
 	acquireSupervisorLease,
+	createRunRecord,
 	createStageFirstRunRecord,
 	deriveRunStatus,
 	heartbeatSupervisorLease,
@@ -81,6 +88,23 @@ import {
 	resolveWorkflowHelperRef,
 } from "../../.tmp/unit/workflow-helpers.js";
 import {
+	handleWorkflowArtifactToolCall,
+	listWorkflowArtifactSources,
+	loadWorkflowSourceManifest,
+	readWorkflowArtifactReadLedger,
+} from "../../.tmp/unit/workflow-artifact-tool.js";
+import {
+	buildWorkflowArtifactExtensionWrapper,
+	registerWorkflowArtifactTool,
+	writeWorkflowArtifactExtensionWrapper,
+} from "../../.tmp/unit/workflow-artifact-extension.js";
+import {
+	buildVNextOutputRetryInstructions,
+	parseVNextOutput,
+	writeVNextTaskArtifactBundle,
+} from "../../.tmp/unit/workflow-vnext-artifacts.js";
+import { validateJsonSchema } from "../../.tmp/unit/json-schema.js";
+import {
 	refreshRunFromSubagentArtifacts,
 	setSubagentApiForTests,
 } from "../../.tmp/unit/subagent-backend.js";
@@ -104,6 +128,8 @@ function writeAgent(cwd, name, tools = "read, grep, find, ls") {
 	);
 }
 
+const parseWorkflow = parseLegacyStageFirstWorkflowSpec;
+
 function workflowSpec(agent = "unit-scout", extra = {}) {
 	return {
 		schemaVersion: 1,
@@ -115,6 +141,67 @@ function workflowSpec(agent = "unit-scout", extra = {}) {
 		},
 		...extra,
 	};
+}
+
+function artifactGraphWorkflowSpec(extra = {}) {
+	return {
+		schemaVersion: 1,
+		name: "unit-artifact-graph",
+		defaults: { agent: "unit-scout", readOnly: true, tools: ["read"] },
+		artifactGraph: {
+			stages: [
+				{
+					id: "main",
+					type: "task",
+					prompt: "Do the work.",
+					output: {
+						controlSchema: "./schemas/stage-control.schema.json",
+						analysis: { required: true },
+						refs: { required: true },
+					},
+				},
+			],
+		},
+		...extra,
+	};
+}
+
+function writeDefaultStageControlSchema(workflowRoot) {
+	mkdirSync(join(workflowRoot, "schemas"), { recursive: true });
+	writeFileSync(
+		join(workflowRoot, "schemas", "stage-control.schema.json"),
+		JSON.stringify({
+			type: "object",
+			required: ["schema", "digest"],
+			properties: {
+				schema: { type: "string" },
+				digest: { type: "string" },
+			},
+		}),
+	);
+}
+
+function bundledArtifactGraphSpecPaths() {
+	return [
+		"workflows/implement-loop.json",
+		"workflows/test-repair-loop.json",
+		"workflows/spec-review.json",
+		"workflows/deep-research/spec.json",
+		"workflows/deep-review/spec.json",
+		"workflows/execution-review/spec.json",
+		"workflows/deep-execution-review/spec.json",
+		"workflows/change-impact-review.json",
+	];
+}
+
+function flattenArtifactGraphStages(stages) {
+	return stages.flatMap((stage) => [
+		stage,
+		...(stage.stages ? flattenArtifactGraphStages(stage.stages) : []),
+		...(stage.onExhausted
+			? flattenArtifactGraphStages([stage.onExhausted])
+			: []),
+	]);
 }
 
 function loopWorkflowSpec(loop = {}) {
@@ -215,6 +302,29 @@ async function completeTask(
 		exitCode: status === "completed" ? 0 : 1,
 		lastMessage: status,
 	});
+	if (task.artifactGraph?.enabled && status === "completed") {
+		const control = {
+			schema: "stage-control-v1",
+			digest: `${task.stageId ?? task.specId} completed`,
+			...structuredOutput,
+		};
+		await writeVNextTaskArtifactBundle({
+			taskDir: dirname(join(cwd, task.files.result)),
+			rawOutput: [
+				"<control>",
+				JSON.stringify(control),
+				"</control>",
+				"<analysis>",
+				`${task.stageId ?? task.specId} analysis`,
+				"</analysis>",
+				"<refs>",
+				"[]",
+				"</refs>",
+			].join("\n"),
+			completedAt: new Date().toISOString(),
+		});
+		return;
+	}
 	await writeJsonAtomic(join(cwd, task.files.result), {
 		status,
 		completedAt: new Date().toISOString(),
@@ -509,7 +619,256 @@ test("agent parser reads frontmatter tool ceilings", () => {
 	assert.equal(agent.readOnly, true);
 });
 
-test("schema accepts final v1 workflow and rejects old legacy bodies", () => {
+test("public schemaVersion 1 parser accepts artifact graph and rejects old workflow.stages", () => {
+	const parsed = parsePublicWorkflow(
+		artifactGraphWorkflowSpec({
+			name: "impact-vnext",
+			catalog: { useWhen: ["impact review"] },
+			artifactGraph: {
+				stages: [
+					{
+						id: "risk",
+						type: "task",
+						prompt: "Assess risk.",
+						output: {
+							controlSchema: "./schemas/risk.schema.json",
+							analysis: { required: true },
+							refs: { required: true },
+						},
+					},
+					{
+						id: "final",
+						type: "reduce",
+						from: ["risk"],
+						inputPolicy: {
+							requiredReads: ["risk.analysis"],
+							enforcement: "fail",
+						},
+						prompt: "Synthesize.",
+					},
+				],
+			},
+		}),
+	);
+	assert.equal(parsed.schemaVersion, 1);
+	assert.equal(parsed.name, "impact-vnext");
+	assert.equal(parsed.artifactGraph.stages[0].id, "risk");
+	assert.equal(
+		parsed.artifactGraph.stages[1].inputPolicy.requiredReads[0],
+		"risk.analysis",
+	);
+
+	const oldStageFirst = assertThrowsFlow(() =>
+		parsePublicWorkflow(workflowSpec()),
+	);
+	assertIssue(
+		oldStageFirst,
+		"$.workflow.stages",
+		"old schemaVersion: 1 workflow.stages is not supported",
+	);
+
+	const legacyFlow = assertThrowsFlow(() =>
+		parsePublicWorkflow({
+			schemaVersion: 1,
+			flow: { type: "single", task: { agent: "unit-scout", task: "legacy" } },
+		}),
+	);
+	assertIssue(
+		legacyFlow,
+		"$.flow.type",
+		"schemaVersion: 1 now means artifactGraph",
+	);
+});
+
+test("artifact graph schema validates sourcePolicy maxItems and schema refs", () => {
+	const invalidPolicy = assertThrowsFlow(() =>
+		parsePublicWorkflow(
+			artifactGraphWorkflowSpec({
+				artifactGraph: {
+					stages: [
+						{
+							id: "main",
+							type: "task",
+							prompt: "Do it.",
+							sourcePolicy: "sometimes",
+						},
+					],
+				},
+			}),
+		),
+	);
+	assertIssue(
+		invalidPolicy,
+		"$.artifactGraph.stages[0].sourcePolicy",
+		"must be one of",
+	);
+
+	assert.doesNotThrow(() =>
+		parsePublicWorkflow(
+			artifactGraphWorkflowSpec({
+				artifactGraph: {
+					stages: [
+						{
+							id: "plan",
+							type: "task",
+							prompt: "Plan.",
+						},
+						{
+							id: "items",
+							type: "foreach",
+							from: { source: "plan", path: "$.items" },
+							maxItems: 5,
+							each: { prompt: "Item ${item}" },
+						},
+					],
+				},
+			}),
+		),
+	);
+
+	const badSchemaRef = assertThrowsFlow(() =>
+		parsePublicWorkflow(
+			artifactGraphWorkflowSpec({
+				artifactGraph: {
+					stages: [
+						{
+							id: "main",
+							type: "task",
+							prompt: "Do it.",
+							output: { controlSchema: "../schema.json" },
+						},
+					],
+				},
+			}),
+		),
+	);
+	assertIssue(
+		badSchemaRef,
+		"$.artifactGraph.stages[0].output.controlSchema",
+		"must not contain ..",
+	);
+});
+
+test("artifact graph loader rejects unsupported controlSchema keywords", async () => {
+	const cwd = makeProject();
+	try {
+		mkdirSync(join(cwd, "workflows", "schemas"), { recursive: true });
+		writeFileSync(
+			join(cwd, "workflows", "schemas", "bad.json"),
+			JSON.stringify({
+				type: "object",
+				properties: { name: { type: "string", pattern: "^[a-z]+$" } },
+			}),
+		);
+		writeFileSync(
+			join(cwd, "workflows", "bad-schema.json"),
+			JSON.stringify(
+				artifactGraphWorkflowSpec({
+					artifactGraph: {
+						stages: [
+							{
+								id: "main",
+								type: "task",
+								prompt: "Do it.",
+								output: { controlSchema: "./schemas/bad.json" },
+							},
+						],
+					},
+				}),
+			),
+		);
+		await assert.rejects(
+			() => loadWorkflow("bad-schema", cwd),
+			(error) =>
+				error instanceof WorkflowValidationError &&
+				/pattern is not supported/.test(String(error)),
+		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("artifact graph loader rejects missing controlSchema files", async () => {
+	const cwd = makeProject();
+	try {
+		mkdirSync(join(cwd, "workflows"), { recursive: true });
+		writeFileSync(
+			join(cwd, "workflows", "missing-schema.json"),
+			JSON.stringify(
+				artifactGraphWorkflowSpec({
+					artifactGraph: {
+						stages: [
+							{
+								id: "main",
+								type: "task",
+								prompt: "Do it.",
+								output: { controlSchema: "./schemas/missing.json" },
+							},
+						],
+					},
+				}),
+			),
+		);
+		await assert.rejects(
+			() => loadWorkflow("missing-schema", cwd),
+			(error) =>
+				error instanceof WorkflowValidationError &&
+				/controlSchema not readable JSON/.test(String(error)),
+		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("artifact graph schema rejects legacy output and invalid required reads", () => {
+	const invalid = assertThrowsFlow(() =>
+		parsePublicWorkflow(
+			artifactGraphWorkflowSpec({
+				artifactGraph: {
+					stages: [
+						{
+							id: "extract",
+							type: "task",
+							prompt: "Extract.",
+							output: { format: "json", requiredKeys: ["items"] },
+						},
+						{
+							id: "review",
+							type: "reduce",
+							from: ["missing"],
+							inputPolicy: {
+								requiredReads: ["extract.prompt", "extract.analysis"],
+							},
+							prompt: "Review.",
+						},
+					],
+				},
+			}),
+		),
+	);
+	assertIssue(
+		invalid,
+		"$.artifactGraph.stages[0].output.format",
+		"legacy output field",
+	);
+	assertIssue(
+		invalid,
+		"$.artifactGraph.stages[0].output.requiredKeys",
+		"legacy output field",
+	);
+	assertIssue(
+		invalid,
+		"$.artifactGraph.stages[1].from[0]",
+		"unknown stage reference",
+	);
+	assertIssue(
+		invalid,
+		"$.artifactGraph.stages[1].inputPolicy.requiredReads[0]",
+		"artifact must be one of",
+	);
+});
+
+test("legacy stage-first parser accepts old workflow model for internal runtime coverage", () => {
 	const parsed = parseWorkflow(workflowSpec());
 	assert.equal(parsed.schemaVersion, 1);
 	assert.equal(parsed.workflow.stages[0].id, "main");
@@ -518,32 +877,6 @@ test("schema accepts final v1 workflow and rejects old legacy bodies", () => {
 		parseWorkflow({ ...workflowSpec(), schemaVersion: 99 }),
 	);
 	assertIssue(wrongVersion, "$.schemaVersion", "must be exactly 1");
-
-	const legacy = assertThrowsFlow(() =>
-		parseWorkflow({
-			schemaVersion: 1,
-			flow: { type: "single", task: { agent: "unit-scout", task: "legacy" } },
-		}),
-	);
-	assertIssue(legacy, "$.flow.type", "legacy flow.type bodies");
-
-	for (const type of ["dag", "map"]) {
-		const legacyTopology = assertThrowsFlow(() =>
-			parseWorkflow({
-				schemaVersion: 1,
-				flow: { type, tasks: [] },
-			}),
-		);
-		assertIssue(legacyTopology, "$.flow.type", "workflow.stages");
-	}
-
-	const directLegacy = assertThrowsFlow(() =>
-		parseWorkflow({
-			schemaVersion: 1,
-			flow: { type: "dag", tasks: [] },
-		}),
-	);
-	assertIssue(directLegacy, "$.flow.type", "legacy flow.type bodies");
 
 	const continuation = assertThrowsFlow(() =>
 		parseWorkflow(
@@ -843,14 +1176,15 @@ test("schema rejects loop until check before a later mutating child", () => {
 	assertIssue(error, "$.workflow.stages[0].until.stage", "final child stage");
 });
 
-test("schema accepts bundled implement-loop separation shape", () => {
+test("schema accepts bundled implement-loop artifact graph shape", () => {
 	const spec = JSON.parse(
 		readFileSync(
 			join(process.cwd(), "workflows", "implement-loop.json"),
 			"utf8",
 		),
 	);
-	assert.doesNotThrow(() => parseWorkflow(spec));
+	assert.doesNotThrow(() => parsePublicWorkflow(spec));
+	assert.equal(spec.artifactGraph.stages[0].type, "loop");
 });
 
 test("schema rejects duplicate top-level stage ids", () => {
@@ -1128,18 +1462,30 @@ test("schema rejects cycles among dag children with scoped paths", () => {
 	);
 });
 
-test("schema accepts bundled stage-first workflow fixtures", () => {
-	for (const specPath of [
-		"workflows/implement-loop.json",
-		"workflows/test-repair-loop.json",
-		"workflows/spec-review.json",
-		"workflows/deep-research/spec.json",
-		"workflows/deep-review/spec.json",
-	]) {
+test("schema accepts bundled artifact graph workflow fixtures", () => {
+	for (const specPath of bundledArtifactGraphSpecPaths()) {
 		const spec = JSON.parse(
 			readFileSync(join(process.cwd(), specPath), "utf8"),
 		);
-		assert.doesNotThrow(() => parseWorkflow(spec), specPath);
+		assert.doesNotThrow(() => parsePublicWorkflow(spec), specPath);
+		assert.ok(spec.artifactGraph, specPath);
+		assert.equal(spec.workflow, undefined, specPath);
+	}
+});
+
+test("bundled artifact graph outputs declare control schemas", () => {
+	for (const specPath of bundledArtifactGraphSpecPaths()) {
+		const spec = JSON.parse(
+			readFileSync(join(process.cwd(), specPath), "utf8"),
+		);
+		for (const stage of flattenArtifactGraphStages(spec.artifactGraph.stages)) {
+			if (!stage.output) continue;
+			assert.equal(
+				typeof stage.output.controlSchema,
+				"string",
+				`${specPath}:${stage.id}`,
+			);
+		}
 	}
 });
 
@@ -2234,6 +2580,93 @@ test("stage-first foreach materializes source array into generated tasks", async
 	}
 });
 
+test("stage-first foreach materializes items from a dag container output", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const spec = workflowSpec("unit-scout", {
+			workflow: {
+				stages: [
+					{
+						id: "analysis",
+						type: "dag",
+						outputFrom: "source",
+						stages: [
+							{
+								id: "source",
+								type: "task",
+								output: { format: "json" },
+								prompt: "Source.",
+							},
+						],
+					},
+					{
+						id: "verify",
+						type: "foreach",
+						from: { stage: "analysis", path: "$.items", mode: "concat" },
+						each: { prompt: "Verify ${item}." },
+					},
+					{
+						id: "summary",
+						type: "reduce",
+						from: "verify",
+						prompt: "Summarize.",
+					},
+				],
+			},
+		});
+		const compiled = await compileWorkflow(spec, { cwd, task: "Check items" });
+		assert.deepEqual(
+			compiled.tasks.find((task) => task.id === "verify.item")?.foreach.from,
+			{ stage: "analysis.source", path: "$.items", mode: "concat" },
+		);
+		const { run } = await createStageFirstRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+
+		setTaskTerminal(run.tasks[0], "completed", "completed", {
+			exitCode: 0,
+			lastMessage: "completed",
+		});
+		await writeJsonAtomic(join(cwd, run.tasks[0].files.result), {
+			status: "completed",
+			structuredOutput: {
+				items: [
+					{ id: "ITEM_A", text: "A" },
+					{ id: "ITEM_B", text: "B" },
+				],
+			},
+		});
+		await writeRunRecord(cwd, run);
+
+		await scheduleRun(cwd, run.runId);
+		const materialized = await readRunRecord(cwd, run.runId);
+		assert.deepEqual(
+			materialized.tasks.map((task) => task.specId),
+			[
+				"analysis.source.main",
+				"verify.item_a",
+				"verify.item_b",
+				"summary.main",
+			],
+		);
+		assert.deepEqual(
+			JSON.parse(
+				readFileSync(
+					join(cwd, ".pi", "workflows", materialized.runId, "compiled.json"),
+					"utf8",
+				),
+			).tasks.find((task) => task.id === "summary.main").dependsOn,
+			["verify.item_a", "verify.item_b"],
+		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("successive foreach materialization keeps task ids unique", async () => {
 	const cwd = makeProject();
 	try {
@@ -2994,6 +3427,39 @@ test("loop until evaluator supports equals notEquals lengthEquals all and any", 
 				compiledAfterRound1,
 				"fix-loop",
 				1,
+				{ source: "check", path: "$.status", equals: "pass" },
+			),
+			true,
+		);
+		assert.equal(
+			await evaluateLoopUntilCondition(
+				cwd,
+				current,
+				compiledAfterRound1,
+				"fix-loop",
+				1,
+				{ stage: "check", path: "$.status", exists: true },
+			),
+			true,
+		);
+		assert.equal(
+			await evaluateLoopUntilCondition(
+				cwd,
+				current,
+				compiledAfterRound1,
+				"fix-loop",
+				1,
+				{ source: "check", path: "$.missing", exists: false },
+			),
+			true,
+		);
+		assert.equal(
+			await evaluateLoopUntilCondition(
+				cwd,
+				current,
+				compiledAfterRound1,
+				"fix-loop",
+				1,
 				{ stage: "check", path: "$.missing", notEquals: "anything" },
 			),
 			false,
@@ -3048,17 +3514,18 @@ test("loop completed task with unreadable result records a warning", async () =>
 test("bundled implement-loop workflow parses and compiles (schema/engine integration)", async () => {
 	const cwd = makeProject();
 	try {
-		writeAgent(cwd, "delegate", "read, grep, find, ls, edit, write");
-		writeAgent(cwd, "scout", "read, grep, find, ls, bash");
+		writeAgent(cwd, "delegate", "read, grep, find, ls, bash, edit, write");
+		writeAgent(cwd, "scout", "read, grep, find, ls");
 		const spec = JSON.parse(
 			readFileSync(
 				join(process.cwd(), "workflows", "implement-loop.json"),
 				"utf8",
 			),
 		);
-		parseWorkflow(spec);
+		parsePublicWorkflow(spec);
 		const compiled = await compileWorkflow(spec, {
 			cwd,
+			specPath: join(process.cwd(), "workflows", "implement-loop.json"),
 			task: "Fix the failing auth test.",
 		});
 		const loopStage = compiled.stages.find((stage) => stage.id === "fix-loop");
@@ -3071,47 +3538,648 @@ test("bundled implement-loop workflow parses and compiles (schema/engine integra
 	}
 });
 
-test("bundled spec-review workflow compiles parallel roots and verification fanout", async () => {
+test("spec-review partition helper joins verifier results and flags missing coverage", async () => {
+	const helper = (
+		await import(
+			pathToFileURL(
+				join(process.cwd(), "workflows", "helpers", "spec-review-pipeline.mjs"),
+			).href
+		)
+	).default;
+	const result = await helper({
+		sources: {
+			"analysis.candidate-findings.main": {
+				requirementCoverage: [{ requirementId: "REQ-001", status: "partial" }],
+				candidateFindings: [
+					{
+						id: "FINDING-001",
+						title: "Kept issue",
+						severity: "high",
+						requirementIds: ["REQ-001"],
+						claim: "Issue is real",
+					},
+					{
+						id: "FINDING-002",
+						title: "Dropped issue",
+						severity: "medium",
+						requirementIds: ["REQ-002"],
+						claim: "Issue is not real",
+					},
+					{
+						id: "FINDING-003",
+						title: "Missing verifier",
+						severity: "low",
+						claim: "Needs verification",
+					},
+				],
+				needsHuman: [{ question: "Spec ambiguity?" }],
+				noIssueNotes: ["REQ-004 satisfied"],
+			},
+			"verify-findings.finding-001": {
+				id: "FINDING-001",
+				verdict: "KEEP",
+				severity: "high",
+				evidence: [{ file: "src/a.ts", quote: "a", relevance: "r" }],
+				finalClaim: "Kept final claim",
+				recommendedAction: "Fix it",
+			},
+			"verify-findings.finding-002": {
+				id: "FINDING-002",
+				verdict: "DROP",
+				finalClaim: "Not supported",
+			},
+			"verify-findings.orphan": {
+				id: "FINDING-999",
+				verdict: "KEEP",
+			},
+		},
+		options: { mode: "partition" },
+		context: { cwd: process.cwd(), specPath: "workflows/spec-review.json" },
+	});
+
+	assert.equal(result.schema, "spec-review-partition-v1");
+	assert.deepEqual(result.verifierCoverage.missingIds, ["FINDING-003"]);
+	assert.deepEqual(result.verifierCoverage.orphanVerifierIds, ["FINDING-999"]);
+	assert.deepEqual(
+		result.finalFindings.map((finding) => finding.id),
+		["FINDING-001"],
+	);
+	assert.deepEqual(
+		result.droppedFindings.map((finding) => finding.id),
+		["FINDING-002"],
+	);
+	assert(
+		result.needsHuman.some((item) => item.source === "missing-verification"),
+	);
+	assert(result.needsHuman.some((item) => item.source === "orphan-verifier"));
+	assert.deepEqual(result.noIssueNotes, ["REQ-004 satisfied"]);
+});
+
+test("bundled spec-review workflow compiles explicit DAG analysis and verification fanout", async () => {
 	const cwd = makeProject();
 	try {
 		writeAgent(cwd, "scout", "read, grep, find, ls");
 		const specPath = join(process.cwd(), "workflows", "spec-review.json");
 		const spec = JSON.parse(readFileSync(specPath, "utf8"));
-		parseWorkflow(spec);
+		parsePublicWorkflow(spec);
+		assert.equal(spec.artifactGraph.stages[0].id, "analysis");
+		assert.equal(spec.artifactGraph.stages[0].type, "dag");
+		assert.equal(spec.artifactGraph.stages[0].outputFrom, "candidate-findings");
 		const compiled = await compileWorkflow(spec, {
 			cwd,
+			specPath,
 			task: "Compare docs/API_SPEC.md to src implementation and tests.",
 		});
 		assert.deepEqual(
 			compiled.tasks.slice(0, 3).map((task) => task.key),
-			["extract-spec.main", "map-implementation.main", "inspect-tests.main"],
+			[
+				"analysis.extract-spec.main",
+				"analysis.map-implementation.main",
+				"analysis.inspect-tests.main",
+			],
 		);
 		assert.deepEqual(
 			compiled.tasks.slice(0, 3).map((task) => task.dependsOn),
 			[[], [], []],
 		);
 		const candidates = compiled.tasks.find(
-			(task) => task.key === "candidate-findings.main",
+			(task) => task.key === "analysis.candidate-findings.main",
 		);
 		assert.equal(candidates.kind, "reduce");
 		assert.deepEqual(candidates.dependsOn, [
-			"extract-spec.main",
-			"map-implementation.main",
-			"inspect-tests.main",
+			"analysis.extract-spec.main",
+			"analysis.map-implementation.main",
+			"analysis.inspect-tests.main",
 		]);
 		const verifier = compiled.tasks.find(
 			(task) => task.key === "verify-findings.item",
 		);
 		assert.equal(verifier.kind, "foreach");
-		assert.deepEqual(verifier.dependsOn, ["candidate-findings.main"]);
-		const report = compiled.tasks.find((task) => task.key === "report.main");
-		assert.equal(report.kind, "reduce");
-		assert.deepEqual(report.dependsOn, [
-			"extract-spec.main",
-			"candidate-findings.main",
+		assert.deepEqual(verifier.dependsOn, ["analysis.candidate-findings.main"]);
+		assert.deepEqual(verifier.foreach.from, {
+			stage: "analysis.candidate-findings",
+			path: "$.candidateFindings",
+		});
+		const partition = compiled.tasks.find(
+			(task) => task.key === "partition-findings.main",
+		);
+		assert.equal(partition.kind, "support");
+		assert.deepEqual(partition.dependsOn, [
+			"analysis.candidate-findings.main",
 			"verify-findings.item",
 		]);
+		assert.deepEqual(partition.support, {
+			uses: "./helpers/spec-review-pipeline.mjs",
+			options: { mode: "partition" },
+		});
+		const reportStage = compiled.stages.find((stage) => stage.id === "report");
+		assert.equal(reportStage.sourcePolicy, "require-success");
+		const report = compiled.tasks.find((task) => task.key === "report.main");
+		assert.equal(report.kind, "reduce");
+		assert.deepEqual(report.dependsOn, ["partition-findings.main"]);
 	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("artifact graph compiler propagates graph maxConcurrency", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const compiled = await compileWorkflow(
+			artifactGraphWorkflowSpec({
+				artifactGraph: {
+					maxConcurrency: 3,
+					stages: [{ id: "main", type: "task", prompt: "Do it." }],
+				},
+			}),
+			{ cwd, task: "Do it." },
+		);
+		assert.equal(compiled.maxConcurrency, 3);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("bundled change-impact-review artifact graph workflow compiles multi-join DAG", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "scout", "read, grep, find, ls");
+		const specPath = join(
+			process.cwd(),
+			"workflows",
+			"change-impact-review.json",
+		);
+		const spec = JSON.parse(readFileSync(specPath, "utf8"));
+		parsePublicWorkflow(spec);
+		assert.equal(spec.artifactGraph.stages[0].id, "impact-analysis");
+		assert.equal(spec.artifactGraph.stages[0].type, "dag");
+		assert.equal(spec.artifactGraph.stages[0].outputFrom, "impact-synthesis");
+
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			specPath,
+			task: "Review the current branch impact before shipping.",
+		});
+		const byKey = Object.fromEntries(
+			compiled.tasks.map((task) => [task.key, task]),
+		);
+
+		assert.deepEqual(
+			compiled.tasks.slice(0, 3).map((task) => task.key),
+			[
+				"impact-analysis.change-scope.main",
+				"impact-analysis.implementation-map.main",
+				"impact-analysis.validation-map.main",
+			],
+		);
+		assert.deepEqual(
+			compiled.tasks.slice(0, 3).map((task) => task.dependsOn),
+			[[], [], []],
+		);
+		assert.deepEqual(
+			byKey["impact-analysis.api-contract-impact.main"].dependsOn,
+			[
+				"impact-analysis.change-scope.main",
+				"impact-analysis.implementation-map.main",
+			],
+		);
+		assert.deepEqual(
+			byKey["impact-analysis.state-data-impact.main"].dependsOn,
+			[
+				"impact-analysis.change-scope.main",
+				"impact-analysis.implementation-map.main",
+			],
+		);
+		assert.deepEqual(
+			byKey["impact-analysis.validation-impact.main"].dependsOn,
+			[
+				"impact-analysis.change-scope.main",
+				"impact-analysis.validation-map.main",
+			],
+		);
+		assert.deepEqual(
+			byKey["impact-analysis.docs-release-impact.main"].dependsOn,
+			[
+				"impact-analysis.change-scope.main",
+				"impact-analysis.implementation-map.main",
+				"impact-analysis.validation-map.main",
+			],
+		);
+		assert.deepEqual(
+			byKey["impact-analysis.security-performance-impact.main"].dependsOn,
+			[
+				"impact-analysis.change-scope.main",
+				"impact-analysis.implementation-map.main",
+			],
+		);
+		assert.deepEqual(
+			byKey["impact-analysis.contract-consistency.main"].dependsOn,
+			[
+				"impact-analysis.api-contract-impact.main",
+				"impact-analysis.state-data-impact.main",
+				"impact-analysis.docs-release-impact.main",
+			],
+		);
+		assert.deepEqual(byKey["impact-analysis.regression-risk.main"].dependsOn, [
+			"impact-analysis.api-contract-impact.main",
+			"impact-analysis.state-data-impact.main",
+			"impact-analysis.validation-impact.main",
+			"impact-analysis.security-performance-impact.main",
+		]);
+		assert.deepEqual(byKey["impact-analysis.ship-readiness.main"].dependsOn, [
+			"impact-analysis.validation-impact.main",
+			"impact-analysis.docs-release-impact.main",
+			"impact-analysis.security-performance-impact.main",
+		]);
+		assert.deepEqual(byKey["impact-analysis.impact-synthesis.main"].dependsOn, [
+			"impact-analysis.change-scope.main",
+			"impact-analysis.contract-consistency.main",
+			"impact-analysis.regression-risk.main",
+			"impact-analysis.ship-readiness.main",
+		]);
+		assert.equal(byKey["impact-analysis.impact-synthesis.main"].kind, "reduce");
+		assert.equal(
+			byKey["impact-analysis.impact-synthesis.main"].artifactGraph.output
+				.controlSchema,
+			"./schemas/impact-synthesis-control.schema.json",
+		);
+		assert.ok(
+			byKey[
+				"impact-analysis.impact-synthesis.main"
+			].artifactGraph.output.controlSchemaPath.endsWith(
+				join("workflows", "schemas", "impact-synthesis-control.schema.json"),
+			),
+		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("bundled artifact graph workflows are public runnable", async () => {
+	const workflows = await listWorkflows(process.cwd());
+	for (const name of [
+		"change-impact-review",
+		"spec-review",
+		"deep-review",
+		"deep-research",
+		"execution-review",
+		"deep-execution-review",
+		"implement-loop",
+		"test-repair-loop",
+	]) {
+		assert(
+			workflows.some((workflow) => workflow.name === name),
+			name,
+		);
+	}
+	const resolved = await resolveWorkflowRef(
+		"change-impact-review",
+		process.cwd(),
+	);
+	assert(resolved.specPath.endsWith("workflows/change-impact-review.json"));
+
+	const recs = await recommendWorkflows(
+		"impact review this PR before shipping missing tests docs release risk",
+		process.cwd(),
+	);
+	assert.equal(recs[0]?.workflow.name, "change-impact-review");
+});
+
+test("bundled change-impact-review workflow schedules multi-join DAG waves", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "scout", "read, grep, find, ls");
+		captureSubagentPrompts([]);
+		const specPath = join(
+			process.cwd(),
+			"workflows",
+			"change-impact-review.json",
+		);
+		const spec = JSON.parse(readFileSync(specPath, "utf8"));
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Review impact of adding change-impact-review before shipping.",
+		});
+		const { run } = await createStageFirstRunRecord(cwd, compiled, specPath);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await writeRunRecord(cwd, run);
+
+		const runningSpecIds = (record) =>
+			record.tasks
+				.filter((task) => task.status === "running")
+				.map((task) => task.specId)
+				.sort();
+
+		await scheduleRun(cwd, run.runId);
+		let current = await readRunRecord(cwd, run.runId);
+		assert.deepEqual(runningSpecIds(current), [
+			"impact-analysis.change-scope.main",
+			"impact-analysis.implementation-map.main",
+			"impact-analysis.validation-map.main",
+		]);
+
+		await completeTask(
+			cwd,
+			taskBySpec(current, "impact-analysis.change-scope.main"),
+			{
+				changeSummary: "Add change-impact-review workflow.",
+				changeInputs: [{ source: "runtime task", type: "description" }],
+				affectedFiles: ["workflows/change-impact-review.json"],
+				affectedComponents: [
+					{
+						component: "bundled workflow registry",
+						reason: "new workflow file",
+						confidence: "high",
+					},
+				],
+				publicSurfaces: ["/workflow run change-impact-review"],
+				assumptions: [],
+				outOfScope: [],
+			},
+		);
+		await completeTask(
+			cwd,
+			taskBySpec(current, "impact-analysis.implementation-map.main"),
+			{
+				components: [
+					{
+						component: "workflow spec",
+						file: "workflows/change-impact-review.json",
+						evidence: "new bundled workflow",
+						currentBehavior: "registry discovers workflows from workflows/",
+						dependencies: [],
+					},
+				],
+				entryPoints: ["/workflow run"],
+				dataFlows: [],
+				unknowns: [],
+			},
+		);
+		await completeTask(
+			cwd,
+			taskBySpec(current, "impact-analysis.validation-map.main"),
+			{
+				tests: [{ file: "test/unit/unit.test.mjs", evidence: "compile test" }],
+				docs: [{ file: "workflows/README.md", evidence: "workflow row" }],
+				releaseArtifacts: [
+					{ file: "package.json", evidence: "files includes workflows" },
+				],
+				validationCommandsMentioned: ["npm test"],
+				knownGaps: [],
+			},
+		);
+		await writeRunRecord(cwd, current);
+
+		await scheduleRun(cwd, current.runId);
+		current = await readRunRecord(cwd, current.runId);
+		assert.deepEqual(runningSpecIds(current), [
+			"impact-analysis.api-contract-impact.main",
+			"impact-analysis.docs-release-impact.main",
+			"impact-analysis.security-performance-impact.main",
+			"impact-analysis.state-data-impact.main",
+			"impact-analysis.validation-impact.main",
+		]);
+
+		await completeTask(
+			cwd,
+			taskBySpec(current, "impact-analysis.api-contract-impact.main"),
+			{
+				status: "low",
+				impacts: [],
+				assumptions: [],
+			},
+		);
+		await completeTask(
+			cwd,
+			taskBySpec(current, "impact-analysis.state-data-impact.main"),
+			{
+				status: "none",
+				impacts: [],
+				assumptions: [],
+			},
+		);
+		await completeTask(
+			cwd,
+			taskBySpec(current, "impact-analysis.validation-impact.main"),
+			{
+				coverageStatus: "partial",
+				coveredAreas: ["static compile shape"],
+				missingValidation: [],
+				recommendedCommands: ["npm test"],
+				assumptions: [],
+			},
+		);
+		await completeTask(
+			cwd,
+			taskBySpec(current, "impact-analysis.docs-release-impact.main"),
+			{
+				status: "low",
+				impacts: [],
+				assumptions: [],
+			},
+		);
+		await completeTask(
+			cwd,
+			taskBySpec(current, "impact-analysis.security-performance-impact.main"),
+			{
+				status: "none",
+				impacts: [],
+				assumptions: [],
+			},
+		);
+		await writeRunRecord(cwd, current);
+
+		await scheduleRun(cwd, current.runId);
+		current = await readRunRecord(cwd, current.runId);
+		assert.deepEqual(runningSpecIds(current), [
+			"impact-analysis.contract-consistency.main",
+			"impact-analysis.regression-risk.main",
+			"impact-analysis.ship-readiness.main",
+		]);
+
+		await completeTask(
+			cwd,
+			taskBySpec(current, "impact-analysis.contract-consistency.main"),
+			{
+				status: "pass",
+				issues: [],
+				confirmedConsistencies: ["workflow spec and docs agree"],
+			},
+		);
+		await completeTask(
+			cwd,
+			taskBySpec(current, "impact-analysis.regression-risk.main"),
+			{
+				riskLevel: "low",
+				risks: [],
+				riskReducers: ["unit compile test"],
+			},
+		);
+		await completeTask(
+			cwd,
+			taskBySpec(current, "impact-analysis.ship-readiness.main"),
+			{
+				status: "ready",
+				requiredBeforeShip: [],
+				niceToHave: [],
+				assumptions: [],
+			},
+		);
+		await writeRunRecord(cwd, current);
+
+		await scheduleRun(cwd, current.runId);
+		current = await readRunRecord(cwd, current.runId);
+		assert.deepEqual(runningSpecIds(current), [
+			"impact-analysis.impact-synthesis.main",
+		]);
+		const synthesisPrompt = readFileSync(
+			join(
+				cwd,
+				taskBySpec(current, "impact-analysis.impact-synthesis.main").files
+					.taskPrompt,
+			),
+			"utf8",
+		);
+		assert.match(synthesisPrompt, /contract-consistency/);
+		assert.match(synthesisPrompt, /regression-risk/);
+		assert.match(synthesisPrompt, /ship-readiness/);
+
+		await completeTask(
+			cwd,
+			taskBySpec(current, "impact-analysis.impact-synthesis.main"),
+			{
+				summary: "Ready to ship after validation.",
+				verdict: "READY",
+				riskLevel: "low",
+				blockingIssues: [],
+				nonBlockingIssues: [],
+				confirmedSafeAreas: ["DAG waves scheduled correctly"],
+				recommendedNextActions: ["Run npm test"],
+				validationToRun: ["npm test"],
+				needsHuman: [],
+			},
+		);
+		await writeRunRecord(cwd, current);
+
+		current = await readRunRecord(cwd, current.runId);
+		assert.equal(deriveRunStatus(current).status, "completed");
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("bundled spec-review workflow materializes verifier and partitions verified findings", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "scout", "read, grep, find, ls");
+		captureSubagentPrompts([]);
+		const specPath = join(process.cwd(), "workflows", "spec-review.json");
+		const spec = JSON.parse(readFileSync(specPath, "utf8"));
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			specPath,
+			task: "Compare docs/API_SPEC.md to src implementation and tests.",
+		});
+		const { run } = await createStageFirstRunRecord(cwd, compiled, specPath);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+
+		await completeTask(cwd, taskBySpec(run, "analysis.extract-spec.main"), {
+			requirements: [{ id: "REQ-001", requirement: "Must match" }],
+		});
+		await completeTask(
+			cwd,
+			taskBySpec(run, "analysis.map-implementation.main"),
+			{
+				implementationMap: [],
+			},
+		);
+		await completeTask(cwd, taskBySpec(run, "analysis.inspect-tests.main"), {
+			testMap: [],
+		});
+		await completeTask(
+			cwd,
+			taskBySpec(run, "analysis.candidate-findings.main"),
+			{
+				requirementCoverage: [{ requirementId: "REQ-001", status: "partial" }],
+				candidateFindings: [
+					{
+						id: "FINDING-001",
+						requirementIds: ["REQ-001"],
+						severity: "medium",
+						title: "Missing behavior",
+						claim: "Implementation misses behavior",
+					},
+				],
+				needsHuman: [],
+				noIssueNotes: [],
+			},
+		);
+		await writeRunRecord(cwd, run);
+
+		await scheduleRun(cwd, run.runId);
+		let current = await readRunRecord(cwd, run.runId);
+		assert.deepEqual(
+			current.tasks.map((task) => task.specId),
+			[
+				"analysis.extract-spec.main",
+				"analysis.map-implementation.main",
+				"analysis.inspect-tests.main",
+				"analysis.candidate-findings.main",
+				"verify-findings.finding-001",
+				"partition-findings.main",
+				"report.main",
+			],
+		);
+		assert.deepEqual(taskBySpec(current, "partition-findings.main").dependsOn, [
+			"analysis.candidate-findings.main",
+			"verify-findings.finding-001",
+		]);
+
+		await completeTask(
+			cwd,
+			taskBySpec(current, "verify-findings.finding-001"),
+			{
+				id: "FINDING-001",
+				verdict: "KEEP",
+				severity: "medium",
+				evidence: [
+					{ file: "src/example.ts", quote: "missing", relevance: "gap" },
+				],
+				counterEvidence: [],
+				finalClaim: "Implementation misses behavior",
+				recommendedAction: "Implement the missing behavior",
+			},
+		);
+		await writeRunRecord(cwd, current);
+
+		await scheduleRun(cwd, current.runId);
+		current = await readRunRecord(cwd, current.runId);
+		const partitionTask = taskBySpec(current, "partition-findings.main");
+		assert.equal(partitionTask.status, "completed");
+		const partitionResult = JSON.parse(
+			readFileSync(
+				join(dirname(join(cwd, partitionTask.files.result)), "control.json"),
+				"utf8",
+			),
+		);
+		assert.deepEqual(partitionResult.verifierCoverage.missingIds, []);
+		assert.deepEqual(
+			partitionResult.finalFindings.map((finding) => finding.id),
+			["FINDING-001"],
+		);
+		assert.deepEqual(partitionResult.verdictCounts, {
+			keep: 1,
+			weaken: 0,
+			drop: 0,
+			needsHuman: 0,
+			missingVerification: 0,
+			invalidVerifier: 0,
+			orphanVerifier: 0,
+		});
+	} finally {
+		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });
@@ -3119,13 +4187,14 @@ test("bundled spec-review workflow compiles parallel roots and verification fano
 test("bundled test-repair-loop workflow materializes a serial repair/check round", async () => {
 	const cwd = makeProject();
 	try {
-		writeAgent(cwd, "delegate", "read, grep, find, ls, edit, write");
-		writeAgent(cwd, "scout", "read, grep, find, ls, bash");
+		writeAgent(cwd, "delegate", "read, grep, find, ls, bash, edit, write");
+		writeAgent(cwd, "scout", "read, grep, find, ls");
 		const specPath = join(process.cwd(), "workflows", "test-repair-loop.json");
 		const spec = JSON.parse(readFileSync(specPath, "utf8"));
-		parseWorkflow(spec);
+		parsePublicWorkflow(spec);
 		const compiled = await compileWorkflow(spec, {
 			cwd,
+			specPath,
 			task: "Fix npm test; approved command: npm test.",
 		});
 		const loopStage = compiled.stages.find(
@@ -3489,6 +4558,87 @@ test("task output contract enforces nested structured JSON shape", async () => {
 		const recorded = JSON.parse(readFileSync(result, "utf8"));
 		assert.equal(recorded.failureKind, "output_invalid");
 		assert.match(recorded.errorMessage, /expected at least 1 items/);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("timeout task with valid JSON output is salvaged", async () => {
+	const cwd = makeProject();
+	try {
+		const output = join(
+			cwd,
+			".pi/workflows/workflow_unit/tasks/task-1/output.log",
+		);
+		const result = join(
+			cwd,
+			".pi/workflows/workflow_unit/tasks/task-1/result.json",
+		);
+		mkdirSync(dirname(output), { recursive: true });
+		writeFileSync(
+			output,
+			JSON.stringify({ summary: "done", findings: [], commandRuns: [] }),
+		);
+		const task = {
+			taskId: "task-1",
+			specId: "review.main",
+			stageId: "review",
+			displayName: "review.main",
+			agent: "unit-scout",
+			agentDescription: "test",
+			agentFile: "unit-scout.md",
+			roles: [],
+			status: "running",
+			statusDetail: "running",
+			startedAt: "2026-06-14T00:00:00.000Z",
+			runtime: { approvalMode: "non-interactive", maxRuntimeMs: 1000 },
+			cwd,
+			worktree: {
+				enabled: false,
+				path: null,
+				branch: null,
+				baseCwd: null,
+				warning: null,
+			},
+			backendHandle: { engine: "unit" },
+			files: {
+				systemPrompt:
+					".pi/workflows/workflow_unit/tasks/task-1/system-prompt.md",
+				taskPrompt: ".pi/workflows/workflow_unit/tasks/task-1/task.md",
+				output: ".pi/workflows/workflow_unit/tasks/task-1/output.log",
+				stderr: ".pi/workflows/workflow_unit/tasks/task-1/stderr.log",
+				result: ".pi/workflows/workflow_unit/tasks/task-1/result.json",
+			},
+			output: {
+				format: "json",
+				onInvalid: "fail",
+				contract: {
+					requiredPaths: ["$.summary", "$.findings", "$.commandRuns"],
+					arrays: [{ path: "$.findings" }, { path: "$.commandRuns" }],
+				},
+			},
+		};
+		const changed = await applyTaskResultArtifact(cwd, task, {
+			resultFile: result,
+			result: {
+				status: "failed",
+				failureKind: "timeout",
+				completedAt: "2026-06-14T00:00:02.000Z",
+				exitCode: 124,
+				errorMessage: "pi-subagent run timed out",
+			},
+			status: "failed",
+			completedAfterTimeout: true,
+		});
+		assert.equal(changed, true);
+		assert.equal(task.status, "completed");
+		assert.equal(task.statusDetail, "timeout_output_salvaged");
+		assert.equal(task.exitCode, 0);
+		assert.equal(task.outputValidation.status, "valid");
+		const recorded = JSON.parse(readFileSync(result, "utf8"));
+		assert.equal(recorded.status, "completed");
+		assert.equal(recorded.outputSalvaged, true);
+		assert.equal(recorded.salvagedFrom.failureKind, "timeout");
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
@@ -6022,7 +7172,7 @@ test("static run artifacts preserve workflow bundle files", async () => {
 	}
 });
 
-test("run records use workflow-v1 type and derive completion", async () => {
+test("run records use workflow-v1 type and preserve artifact graph discriminator", async () => {
 	const cwd = makeProject();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
@@ -6037,9 +7187,24 @@ test("run records use workflow-v1 type and derive completion", async () => {
 		);
 		assert.equal(run.type, STAGE_FIRST_RUN_TYPE);
 		assert.equal(run.type, "workflow-v1");
+		assert.equal(run.artifactGraph, undefined);
 		assert.match(formatRun(run), /type=workflow/);
 		setTaskTerminal(run.tasks[0], "completed", "completed");
 		assert.equal(deriveRunStatus(run).status, "completed");
+
+		const artifactCompiled = await compileWorkflow(
+			artifactGraphWorkflowSpec(),
+			{
+				cwd,
+				task: "Summarize",
+			},
+		);
+		const { run: artifactRun } = await createRunRecord(
+			cwd,
+			artifactCompiled,
+			join(cwd, "artifact.json"),
+		);
+		assert.deepEqual(artifactRun.artifactGraph, { enabled: true });
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
@@ -6049,10 +7214,11 @@ test("workflow registry resolves exact names and recommendation metadata", async
 	const cwd = makeProject();
 	try {
 		mkdirSync(join(cwd, "workflows"), { recursive: true });
+		writeDefaultStageControlSchema(join(cwd, "workflows"));
 		writeFileSync(
 			join(cwd, "workflows", "review.json"),
 			JSON.stringify(
-				workflowSpec("unit-scout", {
+				artifactGraphWorkflowSpec({
 					name: "review",
 					catalog: {
 						useWhen: ["standard review"],
@@ -6080,14 +7246,50 @@ test("workflow registry resolves exact names and recommendation metadata", async
 	}
 });
 
+test("workflow registry resolves renamed execution-review workflow aliases", async () => {
+	const cwd = makeProject();
+	try {
+		mkdirSync(join(cwd, "workflows", "execution-review"), { recursive: true });
+		mkdirSync(join(cwd, "workflows", "deep-execution-review"), {
+			recursive: true,
+		});
+		writeFileSync(
+			join(cwd, "workflows", "execution-review", "spec.json"),
+			JSON.stringify(artifactGraphWorkflowSpec({ name: "execution-review" })),
+		);
+		writeFileSync(
+			join(cwd, "workflows", "deep-execution-review", "spec.json"),
+			JSON.stringify(
+				artifactGraphWorkflowSpec({ name: "deep-execution-review" }),
+			),
+		);
+
+		const oldSingle = await resolveWorkflowRef("dynamic-review", cwd);
+		assert.equal(oldSingle.workflowName, "execution-review");
+		assert.equal(
+			oldSingle.specPath,
+			join(cwd, "workflows", "execution-review", "spec.json"),
+		);
+		const oldDeep = await resolveWorkflowRef("deep-dynamic-review", cwd);
+		assert.equal(oldDeep.workflowName, "deep-execution-review");
+		assert.equal(
+			oldDeep.specPath,
+			join(cwd, "workflows", "deep-execution-review", "spec.json"),
+		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("workflow registry resolves bundle specs and sets correct workflowRoot", async () => {
 	const cwd = makeProject();
 	try {
 		mkdirSync(join(cwd, "workflows", "bundle-wf"), { recursive: true });
+		writeDefaultStageControlSchema(join(cwd, "workflows", "bundle-wf"));
 		writeFileSync(
 			join(cwd, "workflows", "bundle-wf", "spec.json"),
 			JSON.stringify(
-				workflowSpec("unit-scout", {
+				artifactGraphWorkflowSpec({
 					name: "bundle-wf",
 					catalog: { useWhen: ["bundle testing"] },
 				}),
@@ -6146,11 +7348,11 @@ test("workflow registry fails closed when flat and bundle specs conflict", async
 		mkdirSync(join(cwd, "workflows", "ambiguous"), { recursive: true });
 		writeFileSync(
 			join(cwd, "workflows", "ambiguous.json"),
-			JSON.stringify(workflowSpec("unit-scout", { name: "ambiguous" })),
+			JSON.stringify(artifactGraphWorkflowSpec({ name: "ambiguous" })),
 		);
 		writeFileSync(
 			join(cwd, "workflows", "ambiguous", "spec.json"),
-			JSON.stringify(workflowSpec("unit-scout", { name: "ambiguous" })),
+			JSON.stringify(artifactGraphWorkflowSpec({ name: "ambiguous" })),
 		);
 
 		await assert.rejects(
@@ -6633,4 +7835,831 @@ test("deep-research claim-evidence-gate enforces structured evidence, rejoins id
 	// Compact digest exists for source-context budgeting.
 	assert.equal(out.claimDigests.length, 3);
 	assert.ok(!("evidence" in out.claimDigests[0]));
+});
+
+test("workflow_artifact lists visible sources, reads by source name, and records a read ledger", async () => {
+	const cwd = makeProject();
+	try {
+		const runId = "workflow_unit";
+		const runDir = join(cwd, ".pi", "workflows", runId);
+		const producerDir = join(runDir, "tasks", "task-1");
+		const consumerDir = join(runDir, "tasks", "task-2");
+		mkdirSync(producerDir, { recursive: true });
+		mkdirSync(consumerDir, { recursive: true });
+		writeFileSync(
+			join(producerDir, "control.json"),
+			'{"digest":"planned 2 items"}\n',
+		);
+		writeFileSync(
+			join(producerDir, "analysis.md"),
+			"Important upstream analysis\n",
+		);
+		writeFileSync(join(producerDir, "refs.json"), "[]\n");
+		writeFileSync(join(producerDir, "raw.md"), "raw output\n");
+		writeFileSync(join(producerDir, "prompt.md"), "hidden prompt\n");
+		const manifestPath = join(consumerDir, "source-manifest.json");
+		const ledgerPath = join(consumerDir, "read-ledger.jsonl");
+		writeFileSync(
+			manifestPath,
+			JSON.stringify(
+				{
+					schema: "workflow-source-manifest-v1",
+					runId,
+					taskId: "task-2",
+					sources: [
+						{
+							source: "plan",
+							displayName: "Plan",
+							taskId: "task-1",
+							specId: "plan",
+							digest: "planned 2 items",
+							artifacts: {
+								control: { path: join(producerDir, "control.json") },
+								analysis: { path: join(producerDir, "analysis.md") },
+								refs: { path: join(producerDir, "refs.json") },
+								raw: { path: join(producerDir, "raw.md") },
+								prompt: { path: join(producerDir, "prompt.md") },
+							},
+						},
+					],
+				},
+				null,
+				2,
+			),
+		);
+
+		const manifest = await loadWorkflowSourceManifest(manifestPath, { runDir });
+		const taskList = listWorkflowArtifactSources(manifest, {
+			accessMode: "workflow-task",
+		});
+		assert.deepEqual(taskList[0].artifacts, [
+			"control",
+			"analysis",
+			"refs",
+			"raw",
+		]);
+		const debugList = listWorkflowArtifactSources(manifest, {
+			accessMode: "human-debug",
+		});
+		assert.ok(debugList[0].artifacts.includes("prompt"));
+
+		const listResult = await handleWorkflowArtifactToolCall(
+			{ action: "list" },
+			{ runId, taskId: "task-2", manifestPath, ledgerPath, runDir },
+		);
+		assert.match(listResult.content[0].text, /"source": "plan"/);
+		assert.doesNotMatch(
+			listResult.content[0].text,
+			new RegExp(cwd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+		);
+
+		const readResult = await handleWorkflowArtifactToolCall(
+			{ action: "read", source: "plan", artifact: "analysis" },
+			{ runId, taskId: "task-2", manifestPath, ledgerPath, runDir },
+		);
+		assert.match(
+			readResult.content[0].text,
+			/# workflow_artifact: plan\.analysis/,
+		);
+		assert.match(readResult.content[0].text, /Important upstream analysis/);
+		assert.doesNotMatch(
+			readResult.content[0].text,
+			new RegExp(cwd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+		);
+
+		const ledger = await readWorkflowArtifactReadLedger(ledgerPath);
+		assert.equal(ledger.length, 1);
+		assert.equal(ledger[0].runId, runId);
+		assert.equal(ledger[0].taskId, "task-2");
+		assert.equal(ledger[0].source, "plan");
+		assert.equal(ledger[0].artifact, "analysis");
+		assert.equal(ledger[0].truncated, false);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("workflow_artifact rejects path injection, unknown artifacts, and debug reads in workflow-task mode", async () => {
+	const cwd = makeProject();
+	try {
+		const runId = "workflow_unit";
+		const runDir = join(cwd, ".pi", "workflows", runId);
+		const producerDir = join(runDir, "tasks", "task-1");
+		const consumerDir = join(runDir, "tasks", "task-2");
+		mkdirSync(producerDir, { recursive: true });
+		mkdirSync(consumerDir, { recursive: true });
+		writeFileSync(join(producerDir, "analysis.md"), "analysis\n");
+		writeFileSync(join(producerDir, "prompt.md"), "prompt\n");
+		const manifestPath = join(consumerDir, "source-manifest.json");
+		const ledgerPath = join(consumerDir, "read-ledger.jsonl");
+		writeFileSync(
+			manifestPath,
+			JSON.stringify({
+				schema: "workflow-source-manifest-v1",
+				runId,
+				taskId: "task-2",
+				sources: [
+					{
+						source: "plan",
+						artifacts: {
+							analysis: { path: join(producerDir, "analysis.md") },
+							prompt: { path: join(producerDir, "prompt.md") },
+						},
+					},
+				],
+			}),
+		);
+
+		await assert.rejects(
+			handleWorkflowArtifactToolCall(
+				{ action: "read", source: "../plan", artifact: "analysis" },
+				{ runId, taskId: "task-2", manifestPath, ledgerPath, runDir },
+			),
+			/canonical workflow artifact source name/,
+		);
+		await assert.rejects(
+			handleWorkflowArtifactToolCall(
+				{ action: "read", source: "missing", artifact: "analysis" },
+				{ runId, taskId: "task-2", manifestPath, ledgerPath, runDir },
+			),
+			/unknown workflow artifact source/,
+		);
+		await assert.rejects(
+			handleWorkflowArtifactToolCall(
+				{ action: "read", source: "plan", artifact: "prompt" },
+				{ runId, taskId: "task-2", manifestPath, ledgerPath, runDir },
+			),
+			/not available in workflow-task access mode/,
+		);
+		await assert.rejects(
+			handleWorkflowArtifactToolCall(
+				{ action: "read", source: "plan", artifact: "bogus" },
+				{ runId, taskId: "task-2", manifestPath, ledgerPath, runDir },
+			),
+			/must be one of/,
+		);
+
+		writeFileSync(
+			manifestPath,
+			JSON.stringify({
+				schema: "workflow-source-manifest-v1",
+				runId,
+				taskId: "task-2",
+				sources: [
+					{
+						source: "evil",
+						artifacts: { analysis: { path: join(cwd, "outside.md") } },
+					},
+				],
+			}),
+		);
+		await assert.rejects(
+			loadWorkflowSourceManifest(manifestPath, { runDir }),
+			/inside the workflow run directory/,
+		);
+
+		writeFileSync(join(cwd, "outside-secret.md"), "secret\n");
+		symlinkSync(join(cwd, "outside-secret.md"), join(producerDir, "link.md"));
+		writeFileSync(
+			manifestPath,
+			JSON.stringify({
+				schema: "workflow-source-manifest-v1",
+				runId,
+				taskId: "task-2",
+				sources: [
+					{
+						source: "linked",
+						artifacts: { analysis: { path: join(producerDir, "link.md") } },
+					},
+				],
+			}),
+		);
+		await assert.rejects(
+			handleWorkflowArtifactToolCall(
+				{ action: "read", source: "linked", artifact: "analysis" },
+				{ runId, taskId: "task-2", manifestPath, ledgerPath, runDir },
+			),
+			/must not be a symlink/,
+		);
+
+		const largePath = join(producerDir, "large.md");
+		writeFileSync(largePath, "x".repeat(10_000));
+		writeFileSync(
+			manifestPath,
+			JSON.stringify({
+				schema: "workflow-source-manifest-v1",
+				runId,
+				taskId: "task-2",
+				sources: [
+					{
+						source: "large",
+						artifacts: { analysis: { path: largePath } },
+					},
+				],
+			}),
+		);
+		const large = await handleWorkflowArtifactToolCall(
+			{ action: "read", source: "large", artifact: "analysis" },
+			{
+				runId,
+				taskId: "task-2",
+				manifestPath,
+				ledgerPath,
+				runDir,
+				maxBytes: 32,
+			},
+		);
+		assert.equal(large.details.bytes, 10_000);
+		assert.equal(large.details.returnedBytes, 32);
+		assert.equal(large.details.truncated, true);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("workflow_artifact extension registers and activates the tool", async () => {
+	const cwd = makeProject();
+	try {
+		const runId = "workflow_unit";
+		const runDir = join(cwd, ".pi", "workflows", runId);
+		const producerDir = join(runDir, "tasks", "task-1");
+		const consumerDir = join(runDir, "tasks", "task-2");
+		mkdirSync(producerDir, { recursive: true });
+		mkdirSync(consumerDir, { recursive: true });
+		writeFileSync(
+			join(producerDir, "analysis.md"),
+			"extension-visible analysis\n",
+		);
+		const manifestPath = join(consumerDir, "source-manifest.json");
+		const ledgerPath = join(consumerDir, "read-ledger.jsonl");
+		writeFileSync(
+			manifestPath,
+			JSON.stringify({
+				schema: "workflow-source-manifest-v1",
+				runId,
+				taskId: "task-2",
+				sources: [
+					{
+						source: "plan",
+						artifacts: {
+							analysis: { path: join(producerDir, "analysis.md") },
+						},
+					},
+				],
+			}),
+		);
+
+		const registeredTools = [];
+		const handlers = new Map();
+		let activeTools = ["read"];
+		const fakePi = {
+			registerTool(tool) {
+				registeredTools.push(tool);
+			},
+			on(event, handler) {
+				handlers.set(event, handler);
+			},
+			getActiveTools() {
+				return activeTools;
+			},
+			setActiveTools(tools) {
+				activeTools = tools;
+			},
+		};
+
+		registerWorkflowArtifactTool(fakePi, {
+			runId,
+			taskId: "task-2",
+			manifestPath,
+			ledgerPath,
+			runDir,
+		});
+		assert.equal(registeredTools.length, 1);
+		assert.equal(registeredTools[0].name, "workflow_artifact");
+		handlers.get("session_start")?.({}, {});
+		assert.deepEqual(
+			new Set(activeTools),
+			new Set(["read", "workflow_artifact"]),
+		);
+
+		const result = await registeredTools[0].execute("tool-call-1", {
+			action: "read",
+			source: "plan",
+			artifact: "analysis",
+		});
+		assert.match(result.content[0].text, /extension-visible analysis/);
+		const ledger = await readWorkflowArtifactReadLedger(ledgerPath);
+		assert.equal(ledger.length, 1);
+		assert.equal(ledger[0].source, "plan");
+		assert.equal(ledger[0].artifact, "analysis");
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("artifact graph workflow runs vNext artifacts and enforces required reads", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		mkdirSync(join(cwd, "workflows"), { recursive: true });
+		writeFileSync(
+			join(cwd, "workflows", "artifact.json"),
+			JSON.stringify(
+				artifactGraphWorkflowSpec({
+					name: "artifact",
+					artifactGraph: {
+						stages: [
+							{
+								id: "analyze",
+								type: "task",
+								prompt: "Analyze.",
+								output: {
+									analysis: { required: true },
+									refs: { required: true },
+								},
+							},
+							{
+								id: "final",
+								type: "reduce",
+								from: ["analyze"],
+								sourceProjection: {
+									include: ["$.digest", "$.items"],
+									maxChars: 200,
+								},
+								inputPolicy: {
+									requiredReads: ["analyze.analysis"],
+									enforcement: "fail",
+								},
+								prompt: "Finalize.",
+							},
+						],
+					},
+				}),
+			),
+		);
+
+		let launchCount = 0;
+		const runs = new Map();
+		setSubagentApiForTests({
+			async runSubagent(options) {
+				launchCount += 1;
+				const runId = `run_artifact_${launchCount}`;
+				const attemptId = `attempt_artifact_${launchCount}`;
+				const artifactDir = join(cwd, `.fake-artifact-${launchCount}`);
+				mkdirSync(artifactDir, { recursive: true });
+				const isFinal = launchCount === 2;
+				if (isFinal) {
+					const [workflowRunId, taskId] = String(options.correlationId).split(
+						":",
+					);
+					const ledgerPath = join(
+						cwd,
+						".pi",
+						"workflows",
+						workflowRunId,
+						"tasks",
+						taskId,
+						"read-ledger.jsonl",
+					);
+					mkdirSync(dirname(ledgerPath), { recursive: true });
+					writeFileSync(
+						ledgerPath,
+						`${JSON.stringify({
+							schema: "workflow-artifact-read-v1",
+							runId: workflowRunId,
+							taskId,
+							source: "analyze",
+							artifact: "analysis",
+							at: new Date().toISOString(),
+							bytes: 10,
+							returnedBytes: 10,
+							truncated: false,
+						})}\n`,
+					);
+				}
+				const control = isFinal
+					? { schema: "stage-control-v1", digest: "final done", verdict: "ok" }
+					: {
+							schema: "stage-control-v1",
+							digest: "analysis done",
+							items: [{ id: "a" }],
+						};
+				const output = [
+					"<control>",
+					JSON.stringify(control),
+					"</control>",
+					"<analysis>",
+					isFinal
+						? "Final analysis after required read."
+						: "Detailed analysis.",
+					"</analysis>",
+					"<refs>",
+					"[]",
+					"</refs>",
+				].join("\n");
+				writeFileSync(join(artifactDir, "output.log"), output);
+				writeFileSync(join(artifactDir, "stderr.log"), "");
+				writeFileSync(
+					join(artifactDir, "result.json"),
+					JSON.stringify({
+						status: "completed",
+						completedAt: new Date().toISOString(),
+						startedAt: new Date().toISOString(),
+						exitCode: 0,
+					}),
+				);
+				runs.set(runId, { runId, attemptId, artifactDir });
+				return { runId, attemptId, status: "running" };
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async getSubagentStatus({ runId }) {
+				const run = runs.get(runId);
+				return {
+					runId,
+					attemptId: run.attemptId,
+					backend: "headless",
+					status: "completed",
+					failureKind: null,
+					startedAt: new Date().toISOString(),
+					completedAt: new Date().toISOString(),
+					logs: [
+						{
+							type: "output",
+							path: "output.log",
+							artifactCwd: run.artifactDir,
+						},
+						{
+							type: "stderr",
+							path: "stderr.log",
+							artifactCwd: run.artifactDir,
+						},
+						{
+							type: "result",
+							path: "result.json",
+							artifactCwd: run.artifactDir,
+						},
+					],
+					metadata: { contextLengthExceeded: false },
+					attempts: [
+						{ attemptId: run.attemptId, status: "completed", pid: 12345 },
+					],
+				};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+
+		const started = await runWorkflow("artifact", cwd, {
+			task: "Run artifact graph",
+		});
+		const completed = await waitForRun(cwd, started.runId, 5_000);
+		assert.equal(completed.status, "completed");
+		assert.equal(launchCount, 2);
+		const finalTask = taskBySpec(completed, "final.main");
+		assert.equal(finalTask.status, "completed");
+		const finalDir = dirname(join(cwd, finalTask.files.result));
+		assert.equal(
+			JSON.parse(readFileSync(join(finalDir, "control.json"), "utf8")).digest,
+			"final done",
+		);
+		assert.match(
+			readFileSync(join(finalDir, "analysis.md"), "utf8"),
+			/Final analysis/,
+		);
+		assert.ok(
+			readFileSync(join(finalDir, "task.md"), "utf8").includes(
+				"Required reads before final output",
+			),
+		);
+		const finalManifest = JSON.parse(
+			readFileSync(join(finalDir, "source-manifest.json"), "utf8"),
+		);
+		assert.deepEqual(finalManifest.sources[0].controlProjection, {
+			digest: "analysis done",
+			items: [{ id: "a" }],
+		});
+		assert.match(
+			readFileSync(join(finalDir, "task.md"), "utf8"),
+			/controlProjection/,
+		);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("workflow_artifact generated extension wrapper embeds config without prompt-visible paths", async () => {
+	const cwd = makeProject();
+	try {
+		const wrapperPath = join(
+			cwd,
+			".pi",
+			"workflows",
+			"workflow_unit",
+			"tasks",
+			"task-2",
+			"workflow-artifact-extension.ts",
+		);
+		const config = {
+			runId: "workflow_unit",
+			taskId: "task-2",
+			manifestPath: join(
+				cwd,
+				".pi",
+				"workflows",
+				"workflow_unit",
+				"tasks",
+				"task-2",
+				"source-manifest.json",
+			),
+			ledgerPath: join(
+				cwd,
+				".pi",
+				"workflows",
+				"workflow_unit",
+				"tasks",
+				"task-2",
+				"read-ledger.jsonl",
+			),
+			accessMode: "workflow-task",
+		};
+		const importPath = join(cwd, "src", "workflow-artifact-extension.ts");
+		const content = buildWorkflowArtifactExtensionWrapper({
+			importPath,
+			config,
+		});
+		assert.match(content, /registerWorkflowArtifactTool/);
+		assert.match(content, /file:\/\//);
+		assert.match(content, /"runId": "workflow_unit"/);
+		assert.match(content, /"accessMode": "workflow-task"/);
+		await writeWorkflowArtifactExtensionWrapper({
+			wrapperPath,
+			importPath,
+			config,
+		});
+		assert.equal(readFileSync(wrapperPath, "utf8"), content);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("vNext output parser accepts canonical control analysis refs sections", () => {
+	const raw = [
+		"<control>",
+		JSON.stringify({
+			schema: "stage-control-v1",
+			digest: "ready",
+			findings: [{ id: "f-1" }],
+		}),
+		"</control>",
+		"<analysis>",
+		"# Analysis\n\nDetailed reasoning. Literal <control> text is okay here.",
+		"</analysis>",
+		"<refs>",
+		JSON.stringify([{ kind: "file", path: "src/compiler.ts" }]),
+		"</refs>",
+	].join("\n");
+	const parsed = parseVNextOutput(raw, {
+		controlContract: { requiredPaths: ["$.findings"] },
+	});
+	assert.equal(parsed.valid, true, JSON.stringify(parsed.issues));
+	assert.equal(parsed.control.digest, "ready");
+	assert.match(parsed.analysis, /Detailed reasoning/);
+	assert.deepEqual(parsed.refs, [{ kind: "file", path: "src/compiler.ts" }]);
+});
+
+test("vNext output parser tolerates literal closing tags inside JSON strings", () => {
+	const raw = [
+		"<control>",
+		JSON.stringify({
+			schema: "stage-control-v1",
+			digest: "quote contains </control> safely",
+			evidence: "also mention </analysis> and </refs> as data",
+		}),
+		"</control>",
+		"<analysis>",
+		"Analysis may mention </analysis> as literal text.",
+		"</analysis>",
+		"<refs>",
+		JSON.stringify([{ note: "literal </refs> in JSON data" }]),
+		"</refs>",
+	].join("\n");
+	const parsed = parseVNextOutput(raw);
+	assert.equal(parsed.valid, true, JSON.stringify(parsed.issues));
+	assert.equal(parsed.control.digest, "quote contains </control> safely");
+	assert.deepEqual(parsed.refs, [{ note: "literal </refs> in JSON data" }]);
+});
+
+test("minimal JSON schema validator enforces control schema subset", () => {
+	const schema = {
+		type: "object",
+		required: ["schema", "digest", "items"],
+		properties: {
+			schema: { type: "string" },
+			digest: { type: "string", minLength: 1 },
+			items: {
+				type: "array",
+				minItems: 1,
+				items: {
+					type: "object",
+					required: ["id"],
+					properties: { id: { type: "string" } },
+				},
+			},
+		},
+	};
+	assert.equal(
+		validateJsonSchema(
+			{ schema: "stage-control-v1", digest: "ok", items: [{ id: "a" }] },
+			schema,
+		).valid,
+		true,
+	);
+	const invalid = validateJsonSchema(
+		{ schema: "stage-control-v1", digest: "ok", items: [] },
+		schema,
+	);
+	assert.equal(invalid.valid, false);
+	assert.ok(invalid.issues.some((issue) => issue.path === "$.items"));
+});
+
+test("vNext output parser rejects missing sections, bad control, outside prose, and contract failures", () => {
+	const missing = parseVNextOutput("<control>{}</control>\n<refs>[]</refs>");
+	assert.equal(missing.valid, false);
+	assert.ok(
+		missing.issues.some(
+			(issue) =>
+				issue.code === "missing_section" && issue.section === "analysis",
+		),
+	);
+	assert.ok(missing.issues.some((issue) => issue.path === "$.schema"));
+	assert.ok(missing.issues.some((issue) => issue.path === "$.digest"));
+
+	const badJson = parseVNextOutput(
+		"<control>{nope}</control><analysis>x</analysis><refs>{}</refs>",
+	);
+	assert.equal(badJson.valid, false);
+	assert.ok(
+		badJson.issues.some(
+			(issue) => issue.code === "invalid_json" && issue.section === "control",
+		),
+	);
+	assert.ok(
+		badJson.issues.some(
+			(issue) => issue.code === "invalid_type" && issue.section === "refs",
+		),
+	);
+
+	const prose = parseVNextOutput(
+		'hello\n<control>{"schema":"x","digest":"d"}</control><analysis>x</analysis><refs>[]</refs>',
+	);
+	assert.equal(prose.valid, false);
+	assert.ok(prose.issues.some((issue) => issue.code === "unexpected_text"));
+
+	const contract = parseVNextOutput(
+		'<control>{"schema":"x","digest":"d"}</control><analysis>x</analysis><refs>[]</refs>',
+		{ controlContract: { requiredPaths: ["$.items"] } },
+	);
+	assert.equal(contract.valid, false);
+	assert.ok(
+		contract.issues.some(
+			(issue) => issue.code === "contract_failed" && issue.path === "$.items",
+		),
+	);
+	const jsonSchema = parseVNextOutput(
+		'<control>{"schema":"x","digest":"d","items":[]}</control><analysis>x</analysis><refs>[]</refs>',
+		{
+			controlJsonSchema: {
+				type: "object",
+				required: ["items"],
+				properties: { items: { type: "array", minItems: 1 } },
+			},
+		},
+	);
+	assert.equal(jsonSchema.valid, false);
+	assert.ok(
+		jsonSchema.issues.some(
+			(issue) =>
+				issue.code === "contract_failed" &&
+				issue.path === "$.items" &&
+				/control JSON schema failed/.test(issue.message),
+		),
+	);
+	assert.match(buildVNextOutputRetryInstructions(contract.issues), /Issues/);
+	assert.match(buildVNextOutputRetryInstructions(contract.issues), /items/);
+});
+
+test("vNext artifact bundle writer writes sidecars before result envelope", async () => {
+	const cwd = makeProject();
+	try {
+		const taskDir = join(
+			cwd,
+			".pi",
+			"workflows",
+			"workflow_unit",
+			"tasks",
+			"task-1",
+		);
+		const raw = [
+			"<control>",
+			JSON.stringify({
+				schema: "stage-control-v1",
+				digest: "bundle digest",
+				outcome: "complete",
+			}),
+			"</control>",
+			"<analysis>",
+			"Bundle analysis",
+			"</analysis>",
+			"<refs>",
+			"[]",
+			"</refs>",
+		].join("\n");
+		const written = await writeVNextTaskArtifactBundle({
+			taskDir,
+			rawOutput: raw,
+			startedAt: "2026-06-14T00:00:00.000Z",
+			completedAt: "2026-06-14T00:00:01.000Z",
+			prompt: "prompt text",
+			systemPrompt: "system prompt",
+			stderr: "",
+		});
+		assert.equal(written.valid, true);
+		assert.equal(
+			JSON.parse(readFileSync(join(taskDir, "control.json"), "utf8")).digest,
+			"bundle digest",
+		);
+		assert.equal(
+			readFileSync(join(taskDir, "analysis.md"), "utf8"),
+			"Bundle analysis\n",
+		);
+		assert.deepEqual(
+			JSON.parse(readFileSync(join(taskDir, "refs.json"), "utf8")),
+			[],
+		);
+		assert.equal(readFileSync(join(taskDir, "raw.md"), "utf8"), raw);
+		assert.equal(
+			readFileSync(join(taskDir, "prompt.md"), "utf8"),
+			"prompt text",
+		);
+		assert.equal(
+			readFileSync(join(taskDir, "system-prompt.md"), "utf8"),
+			"system prompt",
+		);
+		const result = JSON.parse(
+			readFileSync(join(taskDir, "result.json"), "utf8"),
+		);
+		assert.equal(result.schema, "workflow-task-result-v1");
+		assert.equal(result.protocol, "workflow-output-sections-v1");
+		assert.equal(result.status, "completed");
+		assert.equal(result.controlDigest, "bundle digest");
+		assert.equal(result.artifacts.control, "control.json");
+		assert.equal(result.artifacts.analysis, "analysis.md");
+		assert.equal(result.artifacts["system-prompt"], "system-prompt.md");
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("vNext artifact bundle writer stores invalid attempts without commit result", async () => {
+	const cwd = makeProject();
+	try {
+		const taskDir = join(
+			cwd,
+			".pi",
+			"workflows",
+			"workflow_unit",
+			"tasks",
+			"task-1",
+		);
+		const written = await writeVNextTaskArtifactBundle({
+			taskDir,
+			rawOutput: "<control>{}</control><analysis></analysis><refs>{}</refs>",
+			attempt: 2,
+			completedAt: "2026-06-14T00:00:01.000Z",
+		});
+		assert.equal(written.valid, false);
+		assert.ok(written.parsed.issues.length > 0);
+		assert.match(
+			readFileSync(join(taskDir, "raw.invalid-attempt-2.md"), "utf8"),
+			/<control>/,
+		);
+		const result = JSON.parse(
+			readFileSync(join(taskDir, "result.invalid-attempt-2.json"), "utf8"),
+		);
+		assert.equal(result.status, "failed");
+		assert.equal(result.outputValidation.valid, false);
+		assert.ok(
+			result.outputValidation.issues.some((issue) => issue.path === "$.digest"),
+		);
+		assert.throws(
+			() => readFileSync(join(taskDir, "result.json"), "utf8"),
+			/ENOENT/,
+		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
 });

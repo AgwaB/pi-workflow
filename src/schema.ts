@@ -1,8 +1,11 @@
-import { readFile } from "node:fs/promises";
-import { extname } from "node:path";
+import { readFile, realpath } from "node:fs/promises";
+import { dirname, extname, isAbsolute, relative, resolve } from "node:path";
 
+import { parseArtifactGraphWorkflowSpec } from "./artifact-graph-schema.js";
+import { validateJsonSchemaSubset } from "./json-schema.js";
 import {
 	TOOL_CLASSIFICATIONS,
+	type ArtifactGraphWorkflowSpec,
 	type WorkflowSpec,
 	WorkflowValidationError,
 	type ValidationIssue,
@@ -48,8 +51,6 @@ const SUPPORT_STAGE_KEYS = new Set([
 const SUPPORT_SPEC_KEYS = new Set(["uses", "options"]);
 const LEGACY_TRANSFORM_MIGRATION_MESSAGE =
 	'legacy type "transform" is not supported; use support: { "uses": "./helpers/name.mjs", "options": { ... } } without a type field';
-const LEGACY_FLOW_MIGRATION_MESSAGE =
-	"legacy flow.type bodies are not supported; use workflow.stages with stage type fields and from dependencies";
 const TOOL_OBJECT_KEYS = new Set([
 	"name",
 	"extensions",
@@ -60,7 +61,7 @@ const TOOL_OBJECT_KEYS = new Set([
 const TOOL_NAME_PATTERN = /^[A-Za-z0-9_.:/-]+$/;
 
 export interface LoadedWorkflowSpec extends ResolvedWorkflowSpecRef {
-	spec: WorkflowSpec;
+	spec: ArtifactGraphWorkflowSpec;
 }
 
 export async function loadWorkflowSpec(
@@ -85,10 +86,71 @@ export async function loadWorkflowSpec(
 		]);
 	}
 
+	const spec = parseWorkflow(parsed);
+	await validateArtifactGraphControlSchemaFiles(spec, resolved.specPath);
 	return {
 		...resolved,
-		spec: parseWorkflow(parsed),
+		spec,
 	};
+}
+
+async function validateArtifactGraphControlSchemaFiles(
+	spec: ArtifactGraphWorkflowSpec,
+	specPath: string,
+): Promise<void> {
+	const issues: ValidationIssue[] = [];
+	const specDir = dirname(specPath);
+	const seen = new Set<string>();
+	for (const stage of flattenArtifactGraphStages(spec.artifactGraph.stages)) {
+		const controlSchema = stage.output?.controlSchema;
+		if (!controlSchema || seen.has(controlSchema)) continue;
+		seen.add(controlSchema);
+		const schemaPath = resolve(specDir, controlSchema);
+		try {
+			const [realSpecDir, realSchemaPath] = await Promise.all([
+				realpath(specDir),
+				realpath(schemaPath),
+			]);
+			if (!isInsidePath(realSpecDir, realSchemaPath)) {
+				issues.push({
+					path: `${stage.id}.output.controlSchema`,
+					message: `controlSchema must stay inside the workflow bundle: ${controlSchema}`,
+				});
+				continue;
+			}
+			const schema = JSON.parse(await readFile(realSchemaPath, "utf8"));
+			const validation = validateJsonSchemaSubset(schema);
+			for (const issue of validation.issues) {
+				issues.push({
+					path: `${stage.id}.output.controlSchema${issue.path.slice(1)}`,
+					message: issue.message,
+				});
+			}
+		} catch (error) {
+			issues.push({
+				path: `${stage.id}.output.controlSchema`,
+				message: `controlSchema not readable JSON: ${controlSchema} (${error instanceof Error ? error.message : String(error)})`,
+			});
+		}
+	}
+	if (issues.length > 0) throw new WorkflowValidationError(issues);
+}
+
+function isInsidePath(parent: string, child: string): boolean {
+	const rel = relative(parent, child);
+	return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+function flattenArtifactGraphStages(stages: readonly any[]): any[] {
+	return stages.flatMap((stage) => [
+		stage,
+		...(Array.isArray(stage.stages)
+			? flattenArtifactGraphStages(stage.stages)
+			: []),
+		...(stage.onExhausted
+			? flattenArtifactGraphStages([stage.onExhausted])
+			: []),
+	]);
 }
 
 function parseSpecText(text: string, specPath: string): unknown {
@@ -585,7 +647,9 @@ function isStageFirstSpec(value: unknown): value is any {
 	);
 }
 
-export function parseStageFirstWorkflowSpec(value: unknown): any {
+export function parseLegacyStageFirstWorkflowSpec(
+	value: unknown,
+): WorkflowSpec {
 	if (!value || typeof value !== "object")
 		throw new WorkflowValidationError([
 			{ path: "$", message: "must be an object" },
@@ -808,7 +872,8 @@ function validateStageFirstDagStage(
 
 	validateStageFirstDagGraph(stage.stages, issues, {
 		stageArrayPath: `${path}.stages`,
-		unknownReferenceHint: "; stage references resolve within the same container",
+		unknownReferenceHint:
+			"; stage references resolve within the same container",
 	});
 	validateStageFirstDagOutputFrom(stage, path, childStageIds, issues);
 }
@@ -855,7 +920,8 @@ function validateStageFirstDagChildStage(
 	}
 
 	validateStageFirstStage(stage, path);
-	if (stage.output !== undefined) parseOutput(stage.output, `${path}.output`, issues);
+	if (stage.output !== undefined)
+		parseOutput(stage.output, `${path}.output`, issues);
 	if (stage.sourceContext !== undefined)
 		parseSourceContext(stage.sourceContext, `${path}.sourceContext`, issues);
 }
@@ -867,7 +933,10 @@ function validateStageFirstDagOutputFrom(
 	issues: ValidationIssue[],
 ): void {
 	if (stage.outputFrom !== undefined) {
-		if (typeof stage.outputFrom !== "string" || stage.outputFrom.trim() === "") {
+		if (
+			typeof stage.outputFrom !== "string" ||
+			stage.outputFrom.trim() === ""
+		) {
 			issues.push({
 				path: `${path}.outputFrom`,
 				message: "must be a non-empty string",
@@ -884,7 +953,9 @@ function validateStageFirstDagOutputFrom(
 	}
 
 	const dependedOnChildIds = new Set<string>();
-	for (const [childIndex, childValue] of (stage.stages as unknown[]).entries()) {
+	for (const [childIndex, childValue] of (
+		stage.stages as unknown[]
+	).entries()) {
 		const childStage = childValue as Record<string, unknown>;
 		for (const ref of stageFirstDagRefs(
 			childStage,
@@ -894,7 +965,9 @@ function validateStageFirstDagOutputFrom(
 			if (childStageIds.has(ref.stageId)) dependedOnChildIds.add(ref.stageId);
 		}
 	}
-	const sinkIds = [...childStageIds].filter((id) => !dependedOnChildIds.has(id));
+	const sinkIds = [...childStageIds].filter(
+		(id) => !dependedOnChildIds.has(id),
+	);
 	if (sinkIds.length === 1) return;
 	issues.push({
 		path: `${path}.outputFrom`,
@@ -1384,7 +1457,8 @@ function stageFirstFromRefs(from: unknown, path: string): StageFirstDagRef[] {
 	}
 	if (from && typeof from === "object" && !Array.isArray(from)) {
 		const stage = (from as Record<string, unknown>).stage;
-		if (typeof stage === "string") return [{ stageId: stage, path: `${path}.stage` }];
+		if (typeof stage === "string")
+			return [{ stageId: stage, path: `${path}.stage` }];
 	}
 	return [];
 }
@@ -1456,18 +1530,15 @@ function rejectUnknownStageFirstKeys(
 	}
 }
 
-export function parseWorkflow(value: unknown): WorkflowSpec {
-	if (
-		value &&
-		typeof value === "object" &&
-		(value as any).flow?.type !== undefined
-	) {
+export function parseWorkflow(value: unknown): ArtifactGraphWorkflowSpec {
+	if (isStageFirstSpec(value)) {
 		throw new WorkflowValidationError([
-			{ path: "$.flow.type", message: LEGACY_FLOW_MIGRATION_MESSAGE },
+			{
+				path: "$.workflow.stages",
+				message:
+					"old schemaVersion: 1 workflow.stages is not supported in normal runtime; use artifactGraph.stages",
+			},
 		]);
 	}
-	if (isStageFirstSpec(value)) return parseStageFirstWorkflowSpec(value);
-	throw new WorkflowValidationError([
-		{ path: "$.workflow.stages", message: "must be an array" },
-	]);
+	return parseArtifactGraphWorkflowSpec(value);
 }

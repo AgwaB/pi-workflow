@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "deep-research:final",
+  "type": "object",
+  "required": [
+    "schema",
+    "digest",
+    "finalReport",
+    "claimVerdictIndex"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "minLength": 1
+    },
+    "digest": {
+      "type": "string",
+      "minLength": 1
+    },
+    "finalReport": {
+      "type": "object",
+      "properties": {
+        "researchMetadata": {},
+        "coverageSummary": {},
+        "factSlotCoverage": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "maxItems": 64
+        },
+        "mainFindings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "maxItems": 12
+        },
+        "recommendations": {},
+        "actionPlan": {},
+        "parentDecisionNotes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "maxItems": 12
+        },
+        "unverifiedButRelevant": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "maxItems": 16
+        },
+        "remainingGaps": {}
+      },
+      "additionalProperties": true,
+      "required": [
+        "researchMetadata",
+        "coverageSummary",
+        "factSlotCoverage",
+        "mainFindings",
+        "recommendations",
+        "actionPlan",
+        "parentDecisionNotes",
+        "unverifiedButRelevant",
+        "remainingGaps"
+      ]
+    },
+    "claimVerdictIndex": {
+      "type": "object",
+      "properties": {
+        "claims": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "maxItems": 64
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "claims"
+      ]
+    }
+  },
+  "additionalProperties": true
+}

@@ -2,8 +2,33 @@
   "schemaVersion": 1,
   "name": "implement-loop",
   "description": "Bounded implementation loop: implement a scoped change, then validate+review it, repeating in a single managed worktree until validation passes and review accepts, or until maxRounds/no-progress stops it. No auto-merge; a human merges the reported worktree.",
-  "agent": "scout",
-  "workflow": {
+  "defaults": {
+    "agent": "scout"
+  },
+  "catalog": {
+    "useWhen": [
+      "iterative implementation until tests pass",
+      "fix then validate then revise loop",
+      "bounded implement-check loop in a managed worktree"
+    ],
+    "avoidWhen": [
+      "single-shot implementation",
+      "review-only task",
+      "research or synthesis",
+      "auto-merge desired"
+    ],
+    "similarWorkflows": [
+      "test-repair-loop"
+    ],
+    "mutationRisk": "managed-worktree writes without bash in implement; check uses bash for validation; no auto-merge",
+    "naturalLanguageTriggers": [
+      "implement until tests pass",
+      "loop until it works",
+      "fix and re-test loop",
+      "iterate until acceptance"
+    ]
+  },
+  "artifactGraph": {
     "stages": [
       {
         "id": "fix-loop",
@@ -43,7 +68,8 @@
           {
             "id": "check",
             "type": "task",
-            "agent": "scout",
+            "agent": "delegate",
+            "readOnly": true,
             "tools": [
               "read",
               "grep",
@@ -52,13 +78,16 @@
               "bash"
             ],
             "output": {
-              "format": "json",
-              "requiredKeys": [
-                "status",
-                "verdict"
-              ]
+              "analysis": {
+                "required": true
+              },
+              "refs": {
+                "required": true
+              },
+              "maxDigestChars": 1200,
+              "controlSchema": "./schemas/implement-loop-fix-loop-check-control.schema.json"
             },
-            "prompt": "Run the approved validation commands named by the runtime task and review the implementation against it. Return JSON only with status, verdict, checks, blockingFailures, reviewNotes, and nextHints. status is the mechanical validation result and must be exactly pass or fail. verdict is the review judgment and must be exactly ACCEPT or REVISE. checks lists each command with exitCode and status. blockingFailures lists remaining blocking issues (empty when fully resolved). Do not modify files. Run only the validation commands the runtime task approves; do not push, publish, deploy, install, or mutate external systems."
+            "prompt": "Run the approved validation commands named by the runtime task and review the implementation against it. Put machine-readable JSON in <control> with status, verdict, checks, blockingFailures, reviewNotes, and nextHints. status is the mechanical validation result and must be exactly pass or fail. verdict is the review judgment and must be exactly ACCEPT or REVISE. checks lists each command with exitCode and status. blockingFailures lists remaining blocking issues (empty when fully resolved). Do not modify files. Run only the validation commands the runtime task approves; do not push, publish, deploy, install, or mutate external systems."
           }
         ],
         "onExhausted": {
@@ -67,29 +96,6 @@
           "prompt": "Using Source Stage Context, summarize what each round attempted, the remaining blocking failures, the final worktree state, and the recommended human next action. Treat round outputs as claims, not truth. Do not modify files and do not auto-merge."
         }
       }
-    ]
-  },
-  "catalog": {
-    "useWhen": [
-      "iterative implementation until tests pass",
-      "fix then validate then revise loop",
-      "bounded implement-check loop in a managed worktree"
-    ],
-    "avoidWhen": [
-      "single-shot implementation",
-      "review-only task",
-      "research or synthesis",
-      "auto-merge desired"
-    ],
-    "similarWorkflows": [
-      "test-repair-loop"
-    ],
-    "mutationRisk": "managed-worktree writes without bash in implement; check uses bash for validation; no auto-merge",
-    "naturalLanguageTriggers": [
-      "implement until tests pass",
-      "loop until it works",
-      "fix and re-test loop",
-      "iterate until acceptance"
     ]
   }
 }

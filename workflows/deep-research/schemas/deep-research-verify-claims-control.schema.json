@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "deep-research:verify-claims",
+  "type": "object",
+  "required": [
+    "schema",
+    "digest",
+    "id",
+    "claim",
+    "factSlotIds",
+    "status",
+    "verdictDigest",
+    "evidence"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "minLength": 1
+    },
+    "digest": {
+      "type": "string",
+      "minLength": 1
+    },
+    "id": {},
+    "claim": {},
+    "factSlotIds": {},
+    "status": {},
+    "verdictDigest": {},
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      },
+      "maxItems": 5
+    }
+  },
+  "additionalProperties": true
+}

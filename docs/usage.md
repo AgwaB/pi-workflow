@@ -73,7 +73,7 @@ Name refs are resolved from these roots:
 3. bundled package `workflows/`
 4. `~/.pi/agent/workflows/`
 
-Supported spec files: `.json`, `.yaml`, `.yml`.
+Runnable workflow discovery currently supports `.json` spec files. The low-level loader can parse `.yaml`/`.yml`, but named workflow discovery and bundled workflow resolution are JSON-only.
 
 A workflow can be a flat file:
 
@@ -89,7 +89,6 @@ workflows/deep-review/
 
 workflows/deep-research/
   spec.json
-  templates.json
   helpers/
     claim-evidence-gate.mjs
 ```
@@ -127,6 +126,9 @@ The runtime task is not optional. `/workflow run <workflow>` without task text f
 | `deep-research` | `researcher` | plan + foreach questions + normalize + foreach verifier + audit support + final reduce | Research needs source-backed claims, dynamic breadth/depth, independent verification, deterministic evidence gating, or citations. |
 | `deep-review` | `scout` | triage + foreach review lenses + dedup support + foreach devil's advocate + verdict-partition support + reduce | Thorough multi-lens review where findings should be independently challenged before synthesis. |
 | `spec-review` | `scout` | extract spec + map implementation + inspect tests -> reduce candidates -> foreach verifier -> reduce report | Read-only spec/contract conformance review against implementation and tests. |
+| `change-impact-review` | `scout` | scope/implementation/validation maps -> impact lenses -> consistency/regression/ship-readiness joins -> final synthesis | Read-only impact review for a proposed or applied change, especially missing tests, docs, release work, compatibility risk, and ship blockers. |
+| `execution-review` | `delegate` | targeted repro tests + narrow validation + RED/GREEN evidence | Execution-backed patch review in a disposable workspace. |
+| `deep-execution-review` | `delegate`, `scout` | triage -> foreach mutating reviewers -> synthesis -> evidence gap loop | Repo-wide ambiguous regression hunt with targeted tests/fixes and command evidence. |
 | `implement-loop` | `delegate`, `scout` | loop: implement -> final check | Iterative implementation in one managed worktree until validation passes and review accepts, or max/no-progress stops. |
 | `test-repair-loop` | `delegate`, `scout` | loop: repair -> final test-check | Focused repair loop for failing tests or explicit validation commands. |
 
@@ -134,75 +136,79 @@ Bundled starters use normal Pi agent discovery. Ensure the named agents exist in
 
 ## Stage model
 
-Stage-first workflows are DAG-capable stage lists. A stage with no `from` or `after` keeps the historical implicit chain from the previous stage, but stage order does not pass data by itself. Use explicit edges when a stage needs prior output or only needs to wait.
+Public `schemaVersion: 1` workflows use `artifactGraph.stages`. The old `workflow.stages` and top-level `flow.type` authoring surfaces are rejected by the normal runtime.
+
+`fast: "on"` is intentionally unsupported in workflow specs; omit `fast` or use `"off"`/`"inherit"` where runtime defaults expose the field.
 
 Public workflow definitions separate three layers:
 
-- **Workflow layer**: graph/control/data-dependency fields such as `id`, `from`, `after`, `sourcePolicy`, scheduling, and artifacts.
-- **Subagent layer**: child Pi/model worker shapes: `task`, `parallel`, `foreach`, `reduce`, and `loop`.
-- **Support layer**: local helper execution through a `support` object. Support is not a subagent task type.
+- **Workflow layer**: graph/control/data-dependency fields such as `id`, `from`, `after`, `sourcePolicy`, `sourceProjection`, scheduling, and artifacts.
+- **Subagent layer**: child Pi/model worker shapes: `task`, `foreach`, `reduce`, and `loop`.
+- **Support layer**: local helper execution through a `type: "support"` stage with a `support` object.
+
+Every subagent stage writes artifact bundles:
+
+- `control.json` — strict machine-readable control-plane JSON. Deterministic workflow decisions read this file only.
+- `analysis.md` — prose reasoning/evidence for humans and downstream readers.
+- `refs.json` — structured evidence pointers.
+- `raw.md` — original final answer.
 
 | Node | Layer | Data behavior |
 |---|---|---|
-| `type: "task"` | Subagent | Receives only its compiled prompt and runtime task injection unless it has explicit source edges. |
-| `type: "parallel"` | Subagent/control | Static fixed fan-out. |
-| `type: "foreach"` | Subagent/control | Reads an array from `from.stage` + JSON path and materializes one task per item. |
-| `type: "reduce"` | Subagent | Receives bounded Source Stage Context from `from` stages. |
-| `type: "loop"` | Workflow/control | Repeats fixed child stages until deterministic `until`, `maxRounds`, or no-progress stop. |
+| `type: "task"` | Subagent | One focused subagent prompt. |
+| `type: "foreach"` | Subagent/control | Reads an array from an upstream `control.json` simple dot path and materializes one task per item. |
+| `type: "reduce"` | Subagent | Fan-in over upstream artifact handles and optional `sourceProjection` inline control snippets. |
+| `type: "loop"` | Workflow/control | Repeats fixed child stages until deterministic `until`, `maxRounds`, or no-progress stop. Loop conditions read child `control.json`. |
 | `type: "dag"` | Workflow/control | Composite container; lowers child stages to namespaced tasks and exposes an `outputFrom` child downstream. |
-| `support` | Support | Runs a directory-local `.mjs` helper over selected source outputs. |
+| `type: "support"` | Support | Runs a directory-local `.mjs` helper over selected upstream `control.json` values and writes a vNext artifact bundle. |
 
 Use `foreach.from` for dynamic fan-out, `reduce.from` for subagent fan-in, and support `from` for local helper inputs. Do not rely on a later plain `task` to see previous stage output.
 
-Legacy top-level `flow.type` bodies are rejected. Author new workflows with `workflow.stages`; do not revive the old `flow.type: "dag"` surface.
-
 ### DAG authoring
 
-The implemented DAG surface is stage-first:
-
-- `from` is a data + order edge. The downstream stage waits for source tasks and subagent stages receive a bounded `# Source Stage Context` packet; support helpers receive selected source outputs through their helper input.
-- `after` is order-only. It accepts a string or string array, waits for those stages, and does not add their outputs to Source Stage Context. A stage can combine `from` and `after`; only `from` sources are injected as data.
+- `from` is a data + order edge. Downstream artifact-graph stages receive a `workflow_artifact` manifest and digest-only inline source list; deterministic runtime decisions read upstream `control.json`.
+- `after` is order-only. It accepts a string or string array, waits for those stages, and does not make their artifacts available as source data.
 - `after: []` is an explicit parallel root. It opts out of the implicit previous-stage chain while documenting that the stage intentionally has no ordering dependency.
-- Parse-time graph validation rejects unknown stage references, self-dependencies, duplicate stage ids, and dependency cycles with path-precise issues. Top-level stages are validated as one graph; each `type: "dag"` container is validated as its own sibling-scoped graph.
+- Parse-time graph validation rejects unknown stage references, self-dependencies, duplicate stage ids, dependency cycles, legacy output fields, and unsafe `controlSchema` paths.
+- `inputPolicy.requiredReads` is fail-closed: if declared, the task must read each listed `source.artifact` via `workflow_artifact` before its final output is accepted. Direct repo `read`/`grep` calls do not satisfy this proof; the ledger proves artifact access, not semantic use.
+- `sourceProjection.include` can inline small selected simple dot paths from upstream `control.json` (for example `$.digest` or `$.items`); full artifacts remain available through `workflow_artifact`.
 - A `type: "dag"` stage is a composite workflow/control container. Children may be `task`, `foreach`, `reduce`, support nodes, or nested `dag` stages. Child `from`/`after` references resolve only to siblings inside the same container.
-- A DAG container's runtime children are statically flattened with namespaced ids such as `analysis.scan.main`. Root children inherit the container's external dependencies; their source context follows the container's `from` edges.
 - `outputFrom` names the child whose task keys represent the container for downstream `from: "containerId"` edges. If omitted, exactly one sink child defaults as the output; multiple sink children require explicit `outputFrom`.
-- Container `sourcePolicy` and `maxConcurrency` act as defaults for children that do not set their own values.
-- Loop children inside DAG containers are rejected in v1; namespace-aware loop keys inside DAG containers are deferred.
 
 Example diamond plus a DAG container consumed downstream:
 
 ```json
 {
   "schemaVersion": 1,
-  "agent": "scout",
-  "workflow": {
+  "defaults": {
+    "agent": "scout",
+    "readOnly": true,
+    "tools": ["read", "grep", "find", "ls"]
+  },
+  "artifactGraph": {
     "stages": [
       {
         "id": "plan",
         "type": "task",
-        "output": { "format": "json" },
-        "prompt": "Plan the review."
+        "prompt": "Put machine-readable JSON in <control> with an items array."
       },
       {
         "id": "scan",
-        "type": "task",
-        "from": "plan",
-        "output": { "format": "json" },
-        "prompt": "Scan using the plan context."
+        "type": "foreach",
+        "from": { "source": "plan", "path": "$.items" },
+        "each": { "prompt": "Scan this item: ${item}" }
       },
       {
         "id": "review",
         "type": "task",
         "after": "plan",
-        "output": { "format": "json" },
         "prompt": "Run an independent review after planning finishes."
       },
       {
         "id": "merge",
         "type": "reduce",
         "from": ["scan", "review"],
-        "output": { "format": "json" },
+        "sourceProjection": { "include": ["$.digest"] },
         "prompt": "Merge both branch outputs."
       },
       {
@@ -211,31 +217,17 @@ Example diamond plus a DAG container consumed downstream:
         "from": "merge",
         "outputFrom": "final",
         "stages": [
-          {
-            "id": "scan",
-            "type": "task",
-            "output": { "format": "json" },
-            "prompt": "Scan the merged findings."
-          },
-          {
-            "id": "review",
-            "type": "task",
-            "after": "scan",
-            "prompt": "Review after the scan without scan output context."
-          },
-          {
-            "id": "final",
-            "type": "reduce",
-            "from": ["scan", "review"],
-            "prompt": "Summarize the analysis children."
-          }
+          { "id": "scan", "type": "task", "prompt": "Scan the merged findings." },
+          { "id": "review", "type": "task", "after": "scan", "prompt": "Review after the scan without scan output context." },
+          { "id": "final", "type": "reduce", "from": ["scan", "review"], "prompt": "Summarize the analysis children." }
         ]
       },
       {
         "id": "report",
         "type": "reduce",
         "from": "analysis",
-        "prompt": "Write the final report using analysis.final output."
+        "inputPolicy": { "requiredReads": ["analysis.analysis"], "enforcement": "fail" },
+        "prompt": "Write the final report using analysis artifacts."
       }
     ]
   }
@@ -244,20 +236,29 @@ Example diamond plus a DAG container consumed downstream:
 
 ## Output contracts
 
-JSON-output stages can declare output contracts. The engine extracts JSON from model output, validates required paths/keys and basic caps, and retries invalid output up to the workflow's retry policy.
+Artifact-graph subagent stages must return the vNext section protocol:
 
-Use:
+```text
+<control>{"schema":"stage-control-v1","digest":"..."}</control>
+<analysis>Detailed reasoning and evidence discussion.</analysis>
+<refs>[]</refs>
+```
+
+The engine parses that output strictly: exactly one `<control>`, then one `<analysis>`, then one `<refs>` section, with no prose outside the tags. It writes `control.json`, `analysis.md`, `refs.json`, and `raw.md`, and retries/fails invalid output within the stage retry budget. `control.digest` is required and bounded by `output.maxDigestChars`.
+
+Use workflow-local JSON Schema files when the control plane needs stronger validation:
 
 ```json
 {
   "output": {
-    "format": "json",
-    "contract": { "requiredPaths": ["$.questions"] }
+    "controlSchema": "./schemas/questions-control.schema.json",
+    "analysis": { "required": true },
+    "refs": { "required": true }
   }
 }
 ```
 
-`output.template` and `output.templateRef` are prompt-shape hints; contracts are the validation authority.
+The built-in validator supports the subset used by bundled workflows: `type`, `required`, `properties`, `items`, `enum`, `const`, length/item/number bounds, `additionalProperties`, and simple `allOf`/`anyOf`/`oneOf`. Unsupported keywords such as `$ref`, `$defs`, `definitions`, and `pattern` are rejected when the workflow is loaded.
 
 ## Support helpers
 
@@ -266,6 +267,7 @@ A support node runs local helper code inline instead of launching a subagent:
 ```json
 {
   "id": "audit-claims",
+  "type": "support",
   "from": "verify-claims",
   "sourcePolicy": "partial",
   "support": {
@@ -279,11 +281,13 @@ Helper API:
 
 ```js
 export default async function helper({ sources, options, context }) {
-  return { /* structured output */ };
+  return { schema: "helper-output-v1", digest: "...", value: { /* control data */ } };
 }
 ```
 
-Helper refs must start with `./`, end in `.mjs`, and stay inside the workflow bundle directory. This is path containment, not a security sandbox; helper code still runs inside the workflow process and is not constrained by subagent tool allowlists. Legacy `type: "transform"` specs are rejected with a migration error; move the helper ref to `support.uses` and options to `support.options`.
+For artifact-graph workflows, `sources` contains upstream `control.json` values keyed by stable source names. The helper result is normalized into a vNext artifact bundle, so downstream deterministic readers still consume `control.json`.
+
+Helper refs must start with `./`, end in `.mjs`, and stay inside the workflow bundle directory. This is path containment, not a security sandbox: helper code runs unsandboxed inside the workflow process, has Node.js process permissions, is not constrained by subagent tool allowlists, and should only be bundled from trusted repository code. Legacy `type: "transform"` specs are rejected with a migration error; move the helper ref to `support.uses` and options to `support.options`.
 
 ## Loop behavior
 
@@ -305,7 +309,7 @@ fix-loop.r02.implement
 fix-loop.r02.check
 ```
 
-Loop child stages run strictly in listed order. Nested `loop`, `foreach`, `parallel`, and support children are rejected in v1.
+Loop child stages run strictly in listed order. Nested `loop`, `foreach`, `dag`, and support children are rejected in v1. There is no `parallel` stage type; model parallel branches as multiple roots or with `after: []`.
 
 A loop stops when:
 
@@ -333,9 +337,15 @@ Important files:
 | `spec.json` | Workflow spec snapshot used by the run. |
 | `tasks/<task-id>/task.md` | Compiled task prompt. |
 | `tasks/<task-id>/system-prompt.md` | Compiled system prompt. |
-| `tasks/<task-id>/output.log` | Captured worker output. |
+| `tasks/<task-id>/control.json` | vNext machine-readable control artifact for artifact-graph tasks. |
+| `tasks/<task-id>/analysis.md` | Human-readable reasoning/evidence artifact. |
+| `tasks/<task-id>/refs.json` | Structured evidence pointers. |
+| `tasks/<task-id>/raw.md` | Original final answer before section extraction. |
+| `tasks/<task-id>/read-ledger.jsonl` | `workflow_artifact` read proof used by `requiredReads`. |
+| `tasks/<task-id>/source-manifest.json` | Upstream artifact manifest visible to the task. |
+| `tasks/<task-id>/output.log` | Captured worker output copied from the subagent attempt. |
 | `tasks/<task-id>/stderr.log` | Captured worker stderr. |
-| `tasks/<task-id>/result.json` | Structured task result when available. |
+| `tasks/<task-id>/result.json` | Structured task result envelope and artifact pointers. |
 
 Subagent worker artifacts are stored under `.pi/workflow-subagents/` by default and are referenced from the workflow run record.
 
@@ -365,7 +375,7 @@ Project workflows should live in:
 Authoring checklist:
 
 1. Start from a bundled workflow when one fits.
-2. Decide the workflow graph first: subagent stages (`task`, `parallel`, `foreach`, `reduce`, `loop`) plus support nodes when deterministic local helper code is needed.
+2. Decide the workflow graph first: subagent stages (`task`, `foreach`, `reduce`, `loop`), `dag` containers, and support nodes when deterministic local helper code is needed.
 3. Make every data dependency explicit with `foreach.from`, `reduce.from`, or support `from`.
 4. Keep read-only workflows read-only.
 5. For write-capable workflows, choose a worktree policy and validation stage.
@@ -427,11 +437,10 @@ This repository follows the same release shape as `@agwab/pi-subagent`:
 Before publishing, maintainers should run the public checks and inspect the package surface:
 
 ```bash
-npm run typecheck
-npm test
-npm run e2e
-npm pack --dry-run --json
+npm run release:check
 npm publish --dry-run
 ```
+
+`npm run release:check` runs typecheck, unit tests, e2e consumer/CLI smoke, and `npm run pack:dry`.
 
 The dry-run package should not include local/internal files, test output, runtime state, or machine-specific paths.

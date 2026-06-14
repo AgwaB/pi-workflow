@@ -1,274 +1,544 @@
 // @ts-nocheck
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFile, lstat, mkdir, readFile, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, normalize, relative } from "node:path";
+import {
+	copyFile,
+	lstat,
+	mkdir,
+	readdir,
+	readFile,
+	readlink,
+	rm,
+	stat,
+	symlink,
+	writeFile,
+} from "node:fs/promises";
+import {
+	dirname,
+	isAbsolute,
+	join,
+	normalize,
+	relative,
+	resolve,
+} from "node:path";
 
-import { workflowRunDir, workflowsRoot, managedWorktreePath, toProjectPath } from "./store.js";
-import { CompiledTask, WorkflowRunRecord, WorkflowTaskRunRecord, WorktreeSnapshotRecord } from "./types.js";
+import {
+	workflowRunDir,
+	workflowsRoot,
+	managedWorktreePath,
+	toProjectPath,
+} from "./store.js";
+import type {
+	CompiledTask,
+	WorkflowRunRecord,
+	WorkflowTaskRunRecord,
+	WorktreeSnapshotRecord,
+} from "./types.js";
 
 const GIT_MAX_BUFFER = 50 * 1024 * 1024;
+const DEFAULT_PRIVATE_RUNTIME_ARTIFACT_NAMES = ["target"];
+const PRIVATE_RUNTIME_ARTIFACT_NAMES_ENV =
+	"PI_WORKFLOW_PRIVATE_RUNTIME_ARTIFACT_NAMES";
+const CLONE_RUNTIME_ARTIFACT_DIRS_ENV =
+	"PI_WORKFLOW_CLONE_RUNTIME_ARTIFACT_DIRS";
+const ALLOW_FULL_RUNTIME_ARTIFACT_COPY_ENV =
+	"PI_WORKFLOW_ALLOW_FULL_RUNTIME_ARTIFACT_COPY";
 
 export async function ensureManagedWorktree(
-  projectCwd: string,
-  run: WorkflowRunRecord,
-  task: WorkflowTaskRunRecord,
-  compiledTask: CompiledTask,
+	projectCwd: string,
+	run: WorkflowRunRecord,
+	task: WorkflowTaskRunRecord,
+	compiledTask: CompiledTask,
 ): Promise<void> {
-  if (!compiledTask.safety.requiresWorktree) return;
+	if (!compiledTask.safety.requiresWorktree) return;
 
-  const gitRoot = findGitRoot(compiledTask.cwd);
-  if (!gitRoot) {
-    throw new Error(`managed worktree required for ${task.taskId}, but ${compiledTask.cwd} is not inside a git repository`);
-  }
+	const gitRoot = findGitRoot(compiledTask.cwd);
+	if (!gitRoot) {
+		throw new Error(
+			`managed worktree required for ${task.taskId}, but ${compiledTask.cwd} is not inside a git repository`,
+		);
+	}
 
-  const path = managedWorktreePath(projectCwd, run.runId, task.taskId);
-  const branch = `pi-workflow/${run.runId}-${task.taskId}`;
-  await mkdir(dirname(path), { recursive: true });
+	const path = managedWorktreePath(projectCwd, run.runId, task.taskId);
+	const branch = `pi-workflow/${run.runId}-${task.taskId}`;
+	await mkdir(dirname(path), { recursive: true });
 
-  const snapshot = await captureDirtyWorktreeSnapshot(projectCwd, run, task, gitRoot);
-  if (task.worktree.enabled && task.worktree.path) {
-    if (task.worktree.path !== path) {
-      throw new Error(`managed worktree path mismatch for ${task.taskId}: expected ${path}, found ${task.worktree.path}`);
-    }
-    if (await canReuseManagedWorktree(path, task.worktree.snapshot, snapshot.record)) {
-      task.cwd = path;
-      task.worktree = {
-        ...task.worktree,
-        enabled: true,
-        path,
-        branch: task.worktree.branch ?? branch,
-        baseCwd: compiledTask.cwd,
-        warning: snapshot.record.dirty ? "reusing existing managed worktree with dirty source checkout snapshot" : "reusing existing managed worktree path",
-        snapshot: snapshot.record,
-      };
-      return;
-    }
-    await removeManagedWorktree(gitRoot, path, task.worktree.branch ?? branch);
-  } else if (await exists(path)) {
-    await removeManagedWorktree(gitRoot, path, branch);
-  }
+	const snapshot = await captureDirtyWorktreeSnapshot(
+		projectCwd,
+		run,
+		task,
+		gitRoot,
+	);
+	if (task.worktree.enabled && task.worktree.path) {
+		if (task.worktree.path !== path) {
+			throw new Error(
+				`managed worktree path mismatch for ${task.taskId}: expected ${path}, found ${task.worktree.path}`,
+			);
+		}
+		if (
+			await canReuseManagedWorktree(
+				path,
+				task.worktree.snapshot,
+				snapshot.record,
+			)
+		) {
+			await materializePrivateRuntimeArtifacts(gitRoot, path);
+			task.cwd = path;
+			task.worktree = {
+				...task.worktree,
+				enabled: true,
+				path,
+				branch: task.worktree.branch ?? branch,
+				baseCwd: compiledTask.cwd,
+				warning: snapshot.record.dirty
+					? "reusing existing managed worktree with dirty source checkout snapshot"
+					: "reusing existing managed worktree path",
+				snapshot: snapshot.record,
+			};
+			return;
+		}
+		await removeManagedWorktree(gitRoot, path, task.worktree.branch ?? branch);
+	} else if (await exists(path)) {
+		await removeManagedWorktree(gitRoot, path, branch);
+	}
 
-  execFileSync("git", ["worktree", "add", "-b", branch, path, "HEAD"], {
-    cwd: gitRoot,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+	execFileSync("git", ["worktree", "add", "-b", branch, path, "HEAD"], {
+		cwd: gitRoot,
+		stdio: ["ignore", "pipe", "pipe"],
+	});
 
-  try {
-    await applyDirtyWorktreeSnapshot(path, snapshot);
-  } catch (error) {
-    cleanupManagedWorktree(gitRoot, path, branch);
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`failed to apply dirty worktree snapshot for ${task.taskId}: ${message}`);
-  }
+	try {
+		await applyDirtyWorktreeSnapshot(path, snapshot);
+		await materializePrivateRuntimeArtifacts(gitRoot, path);
+	} catch (error) {
+		cleanupManagedWorktree(gitRoot, path, branch);
+		const message = error instanceof Error ? error.message : String(error);
+		throw new Error(
+			`failed to apply dirty worktree snapshot for ${task.taskId}: ${message}`,
+		);
+	}
 
-  task.cwd = path;
-  task.worktree = {
-    enabled: true,
-    path,
-    branch,
-    baseCwd: compiledTask.cwd,
-    warning: snapshot.record.dirty ? "applied dirty source checkout snapshot" : null,
-    snapshot: snapshot.record,
-  };
+	task.cwd = path;
+	task.worktree = {
+		enabled: true,
+		path,
+		branch,
+		baseCwd: compiledTask.cwd,
+		warning: snapshot.record.dirty
+			? "applied dirty source checkout snapshot"
+			: null,
+		snapshot: snapshot.record,
+	};
 }
 
 interface CapturedWorktreeSnapshot {
-  record: WorktreeSnapshotRecord;
-  snapshotDir: string;
-  trackedPatchPath?: string;
+	record: WorktreeSnapshotRecord;
+	snapshotDir: string;
+	trackedPatchPath?: string;
 }
 
 async function captureDirtyWorktreeSnapshot(
-  projectCwd: string,
-  run: WorkflowRunRecord,
-  task: WorkflowTaskRunRecord,
-  gitRoot: string,
+	projectCwd: string,
+	run: WorkflowRunRecord,
+	task: WorkflowTaskRunRecord,
+	gitRoot: string,
 ): Promise<CapturedWorktreeSnapshot> {
-  const snapshotDir = join(workflowRunDir(projectCwd, run.runId), "worktree-snapshots", task.taskId);
-  await rm(snapshotDir, { recursive: true, force: true });
-  await mkdir(snapshotDir, { recursive: true });
+	const snapshotDir = join(
+		workflowRunDir(projectCwd, run.runId),
+		"worktree-snapshots",
+		task.taskId,
+	);
+	await rm(snapshotDir, { recursive: true, force: true });
+	await mkdir(snapshotDir, { recursive: true });
 
-  const baseHead = git(gitRoot, ["rev-parse", "HEAD"]).trim();
-  const excludedFlowState = gitRelativePrefix(gitRoot, workflowsRoot(projectCwd)) ?? ".pi/workflows";
-  const workflowStatePathspec = excludedFlowState ? [`:(exclude)${excludedFlowState}`] : [];
-  const trackedPatch = git(gitRoot, ["diff", "--binary", "HEAD", "--", ".", ...workflowStatePathspec]);
-  const trackedFiles = parseNul(git(gitRoot, ["diff", "--name-only", "-z", "HEAD", "--", ".", ...workflowStatePathspec]))
-    .map(safeGitRelativePath)
-    .filter((file) => !isUnderGitPrefix(file, excludedFlowState));
-  const untrackedFiles = parseNul(git(gitRoot, ["ls-files", "--others", "--exclude-standard", "-z"])).map(safeGitRelativePath)
-    .filter((file) => !isUnderGitPrefix(file, excludedFlowState));
-  const trackedPatchPath = trackedPatch.length > 0 ? join(snapshotDir, "tracked.patch") : undefined;
-  const untrackedFileSha256: Record<string, string> = {};
+	const baseHead = git(gitRoot, ["rev-parse", "HEAD"]).trim();
+	const excludedFlowState =
+		gitRelativePrefix(gitRoot, workflowsRoot(projectCwd)) ?? ".pi/workflows";
+	const workflowStatePathspec = excludedFlowState
+		? [`:(exclude)${excludedFlowState}`]
+		: [];
+	const trackedPatch = git(gitRoot, [
+		"diff",
+		"--binary",
+		"HEAD",
+		"--",
+		".",
+		...workflowStatePathspec,
+	]);
+	const trackedFiles = parseNul(
+		git(gitRoot, [
+			"diff",
+			"--name-only",
+			"-z",
+			"HEAD",
+			"--",
+			".",
+			...workflowStatePathspec,
+		]),
+	)
+		.map(safeGitRelativePath)
+		.filter((file) => !isUnderGitPrefix(file, excludedFlowState));
+	const untrackedFiles = parseNul(
+		git(gitRoot, ["ls-files", "--others", "--exclude-standard", "-z"]),
+	)
+		.map(safeGitRelativePath)
+		.filter((file) => !isUnderGitPrefix(file, excludedFlowState));
+	const trackedPatchPath =
+		trackedPatch.length > 0 ? join(snapshotDir, "tracked.patch") : undefined;
+	const untrackedFileSha256: Record<string, string> = {};
 
-  if (trackedPatchPath) await writeFile(trackedPatchPath, trackedPatch, "utf8");
-  for (const file of untrackedFiles) {
-    await copySnapshotFile(gitRoot, join(snapshotDir, "untracked"), file);
-    untrackedFileSha256[file] = await hashSnapshotPath(gitRoot, file);
-  }
+	if (trackedPatchPath) await writeFile(trackedPatchPath, trackedPatch, "utf8");
+	for (const file of untrackedFiles) {
+		await copySnapshotFile(gitRoot, join(snapshotDir, "untracked"), file);
+		untrackedFileSha256[file] = await hashSnapshotPath(gitRoot, file);
+	}
 
-  const record: WorktreeSnapshotRecord = {
-    createdAt: new Date().toISOString(),
-    sourceGitRoot: gitRoot,
-    baseHead,
-    dirty: trackedFiles.length > 0 || untrackedFiles.length > 0,
-    trackedPatch: trackedPatchPath ? toProjectPath(projectCwd, trackedPatchPath) : null,
-    trackedPatchSha256: trackedPatchPath ? sha256Text(trackedPatch) : null,
-    trackedFileCount: trackedFiles.length,
-    untrackedFileCount: untrackedFiles.length,
-    untrackedFiles,
-    untrackedFileSha256,
-    ignoredExcluded: true,
-  };
-  await writeFile(join(snapshotDir, "metadata.json"), `${JSON.stringify(record, null, 2)}\n`, "utf8");
-  return { record, snapshotDir, trackedPatchPath };
+	const record: WorktreeSnapshotRecord = {
+		createdAt: new Date().toISOString(),
+		sourceGitRoot: gitRoot,
+		baseHead,
+		dirty: trackedFiles.length > 0 || untrackedFiles.length > 0,
+		trackedPatch: trackedPatchPath
+			? toProjectPath(projectCwd, trackedPatchPath)
+			: null,
+		trackedPatchSha256: trackedPatchPath ? sha256Text(trackedPatch) : null,
+		trackedFileCount: trackedFiles.length,
+		untrackedFileCount: untrackedFiles.length,
+		untrackedFiles,
+		untrackedFileSha256,
+		ignoredExcluded: true,
+	};
+	await writeFile(
+		join(snapshotDir, "metadata.json"),
+		`${JSON.stringify(record, null, 2)}\n`,
+		"utf8",
+	);
+	return { record, snapshotDir, trackedPatchPath };
 }
 
-async function applyDirtyWorktreeSnapshot(worktreeRoot: string, snapshot: CapturedWorktreeSnapshot): Promise<void> {
-  if (snapshot.trackedPatchPath) {
-    execFileSync("git", ["apply", "--whitespace=nowarn", snapshot.trackedPatchPath], {
-      cwd: worktreeRoot,
-      stdio: ["ignore", "pipe", "pipe"],
-      maxBuffer: GIT_MAX_BUFFER,
-    });
-  }
-  for (const file of snapshot.record.untrackedFiles) {
-    await copySnapshotFile(join(snapshot.snapshotDir, "untracked"), worktreeRoot, file);
-  }
+async function applyDirtyWorktreeSnapshot(
+	worktreeRoot: string,
+	snapshot: CapturedWorktreeSnapshot,
+): Promise<void> {
+	if (snapshot.trackedPatchPath) {
+		execFileSync(
+			"git",
+			["apply", "--whitespace=nowarn", snapshot.trackedPatchPath],
+			{
+				cwd: worktreeRoot,
+				stdio: ["ignore", "pipe", "pipe"],
+				maxBuffer: GIT_MAX_BUFFER,
+			},
+		);
+	}
+	for (const file of snapshot.record.untrackedFiles) {
+		await copySnapshotFile(
+			join(snapshot.snapshotDir, "untracked"),
+			worktreeRoot,
+			file,
+		);
+	}
+}
+
+async function materializePrivateRuntimeArtifacts(
+	sourceRoot: string,
+	worktreeRoot: string,
+): Promise<void> {
+	const names = privateRuntimeArtifactNames();
+	if (names.length === 0) return;
+	const candidates = await findRuntimeArtifactCandidates(
+		sourceRoot,
+		new Set(names),
+	);
+	for (const relPath of candidates) {
+		const sourcePath = join(sourceRoot, relPath);
+		const targetPath = join(worktreeRoot, relPath);
+		const targetInfo = await lstat(targetPath).catch(() => undefined);
+		if (targetInfo && !targetInfo.isSymbolicLink()) continue;
+		const cloneSource = await runtimeArtifactCloneSource(sourcePath);
+		if (!cloneSource) continue;
+		if (targetInfo?.isSymbolicLink()) await rm(targetPath, { force: true });
+		await mkdir(dirname(targetPath), { recursive: true });
+		if (!cloneRuntimeArtifact(cloneSource, targetPath)) {
+			// Runtime artifacts are an optimization/isolation aid. If cloning fails,
+			// leave the worktree usable and let the candidate command surface errors.
+			await rm(targetPath, { recursive: true, force: true }).catch(
+				() => undefined,
+			);
+		}
+	}
+}
+
+function privateRuntimeArtifactNames(): string[] {
+	const raw = process.env[PRIVATE_RUNTIME_ARTIFACT_NAMES_ENV];
+	if (raw === undefined) return DEFAULT_PRIVATE_RUNTIME_ARTIFACT_NAMES;
+	if (/^(0|false|off|none|no)$/i.test(raw.trim())) return [];
+	return raw
+		.split(",")
+		.map((name) => name.trim())
+		.filter(Boolean);
+}
+
+async function findRuntimeArtifactCandidates(
+	root: string,
+	names: Set<string>,
+): Promise<string[]> {
+	const found: string[] = [];
+	async function visit(dir: string, depth: number): Promise<void> {
+		if (depth > 4) return;
+		let entries: Awaited<ReturnType<typeof readdir>>;
+		try {
+			entries = await readdir(dir, { withFileTypes: true });
+		} catch {
+			return;
+		}
+		for (const entry of entries) {
+			if (
+				entry.name === ".git" ||
+				entry.name === ".pi" ||
+				entry.name === "node_modules"
+			)
+				continue;
+			const absPath = join(dir, entry.name);
+			const relPath = relative(root, absPath);
+			if (names.has(entry.name)) {
+				found.push(relPath);
+				continue;
+			}
+			if (entry.isDirectory()) await visit(absPath, depth + 1);
+		}
+	}
+	await visit(root, 0);
+	return found.sort();
+}
+
+async function runtimeArtifactCloneSource(
+	sourcePath: string,
+): Promise<string | undefined> {
+	let cloneSource = sourcePath;
+	const info = await lstat(sourcePath).catch(() => undefined);
+	if (!info) return undefined;
+	if (info.isSymbolicLink()) {
+		const linkTarget = await readlink(sourcePath);
+		cloneSource = isAbsolute(linkTarget)
+			? linkTarget
+			: resolve(dirname(sourcePath), linkTarget);
+	} else if (!cloneRuntimeArtifactDirectories()) {
+		return undefined;
+	}
+	const targetInfo = await stat(cloneSource).catch(() => undefined);
+	return targetInfo?.isDirectory() ? cloneSource : undefined;
+}
+
+function cloneRuntimeArtifactDirectories(): boolean {
+	return /^(1|true|yes|on)$/i.test(
+		process.env[CLONE_RUNTIME_ARTIFACT_DIRS_ENV]?.trim() ?? "",
+	);
+}
+
+function cloneRuntimeArtifact(sourcePath: string, targetPath: string): boolean {
+	try {
+		execFileSync("cp", ["-cR", sourcePath, targetPath], {
+			stdio: ["ignore", "ignore", "ignore"],
+		});
+		return true;
+	} catch {
+		if (!allowFullRuntimeArtifactCopy()) return false;
+		try {
+			execFileSync("cp", ["-R", sourcePath, targetPath], {
+				stdio: ["ignore", "ignore", "ignore"],
+			});
+			return true;
+		} catch {
+			return false;
+		}
+	}
+}
+
+function allowFullRuntimeArtifactCopy(): boolean {
+	return /^(1|true|yes|on)$/i.test(
+		process.env[ALLOW_FULL_RUNTIME_ARTIFACT_COPY_ENV]?.trim() ?? "",
+	);
 }
 
 async function canReuseManagedWorktree(
-  path: string,
-  previous: WorktreeSnapshotRecord | null | undefined,
-  current: WorktreeSnapshotRecord,
+	path: string,
+	previous: WorktreeSnapshotRecord | null | undefined,
+	current: WorktreeSnapshotRecord,
 ): Promise<boolean> {
-  if (!previous) return false;
-  if (!(await exists(path))) return false;
-  if (!sameSnapshotContent(previous, current)) return false;
-  try {
-    return git(path, ["rev-parse", "HEAD"]).trim() === current.baseHead;
-  } catch {
-    return false;
-  }
+	if (!previous) return false;
+	if (!(await exists(path))) return false;
+	if (!sameSnapshotContent(previous, current)) return false;
+	try {
+		return git(path, ["rev-parse", "HEAD"]).trim() === current.baseHead;
+	} catch {
+		return false;
+	}
 }
 
-function sameSnapshotContent(previous: WorktreeSnapshotRecord, current: WorktreeSnapshotRecord): boolean {
-  if (previous.sourceGitRoot !== current.sourceGitRoot) return false;
-  if (previous.baseHead !== current.baseHead) return false;
-  if (previous.dirty !== current.dirty) return false;
-  if ((previous.trackedPatchSha256 ?? null) !== (current.trackedPatchSha256 ?? null)) return false;
-  if (previous.trackedFileCount !== current.trackedFileCount) return false;
-  if (previous.untrackedFileCount !== current.untrackedFileCount) return false;
-  if (previous.ignoredExcluded !== current.ignoredExcluded) return false;
-  if (!sameStringArray(previous.untrackedFiles, current.untrackedFiles)) return false;
+function sameSnapshotContent(
+	previous: WorktreeSnapshotRecord,
+	current: WorktreeSnapshotRecord,
+): boolean {
+	if (previous.sourceGitRoot !== current.sourceGitRoot) return false;
+	if (previous.baseHead !== current.baseHead) return false;
+	if (previous.dirty !== current.dirty) return false;
+	if (
+		(previous.trackedPatchSha256 ?? null) !==
+		(current.trackedPatchSha256 ?? null)
+	)
+		return false;
+	if (previous.trackedFileCount !== current.trackedFileCount) return false;
+	if (previous.untrackedFileCount !== current.untrackedFileCount) return false;
+	if (previous.ignoredExcluded !== current.ignoredExcluded) return false;
+	if (!sameStringArray(previous.untrackedFiles, current.untrackedFiles))
+		return false;
 
-  const previousHashes = previous.untrackedFileSha256 ?? {};
-  const currentHashes = current.untrackedFileSha256 ?? {};
-  return current.untrackedFiles.every((file) => previousHashes[file] === currentHashes[file]);
+	const previousHashes = previous.untrackedFileSha256 ?? {};
+	const currentHashes = current.untrackedFileSha256 ?? {};
+	return current.untrackedFiles.every(
+		(file) => previousHashes[file] === currentHashes[file],
+	);
 }
 
 function sameStringArray(left: string[], right: string[]): boolean {
-  if (left.length !== right.length) return false;
-  return left.every((value, index) => value === right[index]);
+	if (left.length !== right.length) return false;
+	return left.every((value, index) => value === right[index]);
 }
 
-async function removeManagedWorktree(gitRoot: string, path: string, branch: string): Promise<void> {
-  cleanupManagedWorktree(gitRoot, path, branch);
-  await rm(path, { recursive: true, force: true });
+async function removeManagedWorktree(
+	gitRoot: string,
+	path: string,
+	branch: string,
+): Promise<void> {
+	cleanupManagedWorktree(gitRoot, path, branch);
+	await rm(path, { recursive: true, force: true });
 }
 
-async function copySnapshotFile(sourceRoot: string, targetRoot: string, file: string): Promise<void> {
-  const safePath = safeGitRelativePath(file);
-  const source = join(sourceRoot, safePath);
-  const target = join(targetRoot, safePath);
-  await mkdir(dirname(target), { recursive: true });
-  const info = await lstat(source);
-  if (info.isSymbolicLink()) {
-    await symlink(await readlink(source), target);
-    return;
-  }
-  if (!info.isFile()) throw new Error(`snapshot path is not a regular file: ${file}`);
-  await copyFile(source, target);
+async function copySnapshotFile(
+	sourceRoot: string,
+	targetRoot: string,
+	file: string,
+): Promise<void> {
+	const safePath = safeGitRelativePath(file);
+	const source = join(sourceRoot, safePath);
+	const target = join(targetRoot, safePath);
+	await mkdir(dirname(target), { recursive: true });
+	const info = await lstat(source);
+	if (info.isSymbolicLink()) {
+		await symlink(await readlink(source), target);
+		return;
+	}
+	if (!info.isFile())
+		throw new Error(`snapshot path is not a regular file: ${file}`);
+	await copyFile(source, target);
 }
 
-async function hashSnapshotPath(sourceRoot: string, file: string): Promise<string> {
-  const source = join(sourceRoot, safeGitRelativePath(file));
-  const info = await lstat(source);
-  if (info.isSymbolicLink()) return `symlink:${sha256Text(await readlink(source))}`;
-  if (!info.isFile()) throw new Error(`snapshot path is not a regular file: ${file}`);
-  return sha256Buffer(await readFile(source));
+async function hashSnapshotPath(
+	sourceRoot: string,
+	file: string,
+): Promise<string> {
+	const source = join(sourceRoot, safeGitRelativePath(file));
+	const info = await lstat(source);
+	if (info.isSymbolicLink())
+		return `symlink:${sha256Text(await readlink(source))}`;
+	if (!info.isFile())
+		throw new Error(`snapshot path is not a regular file: ${file}`);
+	return sha256Buffer(await readFile(source));
 }
 
 function sha256Text(value: string): string {
-  return sha256Buffer(Buffer.from(value, "utf8"));
+	return sha256Buffer(Buffer.from(value, "utf8"));
 }
 
 function sha256Buffer(value: Buffer): string {
-  return createHash("sha256").update(value).digest("hex");
+	return createHash("sha256").update(value).digest("hex");
 }
 
-function cleanupManagedWorktree(gitRoot: string, path: string, branch: string): void {
-  tryGit(gitRoot, ["worktree", "remove", "--force", path]);
-  tryGit(gitRoot, ["branch", "-D", branch]);
+function cleanupManagedWorktree(
+	gitRoot: string,
+	path: string,
+	branch: string,
+): void {
+	tryGit(gitRoot, ["worktree", "remove", "--force", path]);
+	tryGit(gitRoot, ["branch", "-D", branch]);
 }
 
 function findGitRoot(cwd: string): string | undefined {
-  try {
-    return execFileSync("git", ["rev-parse", "--show-toplevel"], {
-      cwd,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
-  } catch {
-    return undefined;
-  }
+	try {
+		return execFileSync("git", ["rev-parse", "--show-toplevel"], {
+			cwd,
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "ignore"],
+		}).trim();
+	} catch {
+		return undefined;
+	}
 }
 
 function git(cwd: string, args: string[]): string {
-  return execFileSync("git", args, {
-    cwd,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-    maxBuffer: GIT_MAX_BUFFER,
-  });
+	return execFileSync("git", args, {
+		cwd,
+		encoding: "utf8",
+		stdio: ["ignore", "pipe", "pipe"],
+		maxBuffer: GIT_MAX_BUFFER,
+	});
 }
 
 function tryGit(cwd: string, args: string[]): void {
-  try {
-    git(cwd, args);
-  } catch {
-    // Best-effort cleanup only.
-  }
+	try {
+		git(cwd, args);
+	} catch {
+		// Best-effort cleanup only.
+	}
 }
 
 function parseNul(value: string): string[] {
-  return value.split("\0").filter(Boolean);
+	return value.split("\0").filter(Boolean);
 }
 
 function gitRelativePrefix(gitRoot: string, value: string): string | undefined {
-  const rel = normalize(relative(gitRoot, value));
-  if (!rel || rel === "." || isAbsolute(rel) || rel === ".." || rel.startsWith("../") || rel.startsWith("..\\")) return undefined;
-  return rel;
+	const rel = normalize(relative(gitRoot, value));
+	if (
+		!rel ||
+		rel === "." ||
+		isAbsolute(rel) ||
+		rel === ".." ||
+		rel.startsWith("../") ||
+		rel.startsWith("..\\")
+	)
+		return undefined;
+	return rel;
 }
 
 function isUnderGitPrefix(value: string, prefix: string | undefined): boolean {
-  if (!prefix) return false;
-  return value === prefix || value.startsWith(`${prefix}/`) || value.startsWith(`${prefix}\\`);
+	if (!prefix) return false;
+	return (
+		value === prefix ||
+		value.startsWith(`${prefix}/`) ||
+		value.startsWith(`${prefix}\\`)
+	);
 }
 
 function safeGitRelativePath(value: string): string {
-  if (isAbsolute(value)) throw new Error(`snapshot path must be relative: ${value}`);
-  const normalized = normalize(value);
-  if (normalized === ".." || normalized.startsWith("../") || normalized.startsWith("..\\")) throw new Error(`snapshot path escapes git root: ${value}`);
-  return normalized;
+	if (isAbsolute(value))
+		throw new Error(`snapshot path must be relative: ${value}`);
+	const normalized = normalize(value);
+	if (
+		normalized === ".." ||
+		normalized.startsWith("../") ||
+		normalized.startsWith("..\\")
+	)
+		throw new Error(`snapshot path escapes git root: ${value}`);
+	return normalized;
 }
 
 async function exists(path: string): Promise<boolean> {
-  try {
-    await stat(path);
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-    throw error;
-  }
+	try {
+		await stat(path);
+		return true;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+		throw error;
+	}
 }

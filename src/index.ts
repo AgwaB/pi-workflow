@@ -1,25 +1,51 @@
-export { discoverAgents, loadAgentByName, parseAgentMarkdown } from "./agents.js";
-export { compileWorkflow } from "./compiler.js";
-export { formatLogs, formatRunDetails, formatRunStatus, formatStatus, refreshRun, resumeRun, resumeSupervisors, runWorkflow, runWorkflowSpec, waitForRun } from "./engine.js";
+export {
+	discoverAgents,
+	loadAgentByName,
+	parseAgentMarkdown,
+} from "./agents.js";
+export {
+	formatLogs,
+	formatRunDetails,
+	formatRunStatus,
+	formatStatus,
+	refreshRun,
+	resumeRun,
+	resumeSupervisors,
+	runWorkflow,
+	runWorkflowSpec,
+	waitForRun,
+} from "./engine.js";
 export type { ResumeRunSummary } from "./engine.js";
-export { listWorkflows, recommendWorkflows, resolveWorkflowRef } from "./workflow-specs.js";
-export type { ResolvedWorkflowSpecRef, WorkflowRecommendation, WorkflowSpecRecord } from "./workflow-specs.js";
+export {
+	listWorkflows,
+	recommendWorkflows,
+	resolveWorkflowRef,
+} from "./workflow-specs.js";
+export type {
+	ResolvedWorkflowSpecRef,
+	WorkflowRecommendation,
+	WorkflowSpecRecord,
+} from "./workflow-specs.js";
 export { compileRole, extractMarkdownSections } from "./roles.js";
 export { loadWorkflow, loadWorkflowSpec, parseWorkflow } from "./schema.js";
+export { parseArtifactGraphWorkflowSpec } from "./artifact-graph-schema.js";
 export type {
-  AgentDefinition,
-  ApprovalMode,
-  BackendOptions,
-  CompiledWorkflow,
-  CompiledRole,
-  CompiledTask,
-  FastMode,
-  WorkflowDefaults,
-  WorkflowSpec,
-  RoleSpec,
-  TaskCapability,
-  ThinkingLevel,
-  WorktreePolicy,
+	AgentDefinition,
+	ApprovalMode,
+	BackendOptions,
+	CompiledWorkflow,
+	CompiledRole,
+	CompiledTask,
+	FastMode,
+	WorkflowDefaults,
+	ArtifactGraphWorkflowSpec,
+	ArtifactGraphStageSpec,
+	ArtifactGraphStageType,
+	WorkflowArtifactKind,
+	RoleSpec,
+	TaskCapability,
+	ThinkingLevel,
+	WorktreePolicy,
 } from "./types.js";
 export { WorkflowValidationError } from "./types.js";
 

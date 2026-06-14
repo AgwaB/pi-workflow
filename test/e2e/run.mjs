@@ -97,22 +97,57 @@ function main() {
 	ensureCompiledArtifacts();
 	run("diff-check", "git", ["diff", "--check"]);
 	assertNoLegacyTerms();
+	run("cli-help", process.execPath, ["src/cli.mjs", "--help"]);
+	run("cli-unknown-command", process.execPath, ["src/cli.mjs", "nope"], {
+		expectFailure: true,
+	});
+	run("consumer-install-cli", "bash", [
+		"-lc",
+		`set -euo pipefail
+        tmp="$(mktemp -d)"
+        tarball="$(npm pack --pack-destination "$tmp" --silent | tail -1)"
+        cd "$tmp"
+        npm init -y >/dev/null
+        npm install --legacy-peer-deps "./$tarball" >/dev/null
+        node node_modules/@agwab/pi-workflow/src/cli.mjs --help >/dev/null
+        ./node_modules/.bin/pi-workflow --help >/dev/null
+        node --input-type=module -e "import { parseWorkflow, WORKFLOW_COMMAND } from '@agwab/pi-workflow'; if (typeof parseWorkflow !== 'function' || WORKFLOW_COMMAND !== 'workflow') throw new Error('bad public import')"`,
+	]);
 
 	nodeEval(
 		"workflow-registry",
 		`
+    import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+    import { tmpdir } from 'node:os';
+    import { join } from 'node:path';
     import { listWorkflows, recommendWorkflows, resolveWorkflowRef } from './.tmp/unit/workflow-specs.js';
-    const cwd = process.cwd();
-    const workflows = await listWorkflows(cwd);
-    const names = workflows.map((item) => item.name).sort();
-    const expected = ['deep-research', 'deep-review', 'implement-loop', 'spec-review', 'test-repair-loop'];
-    for (const name of expected) {
-      if (!names.includes(name)) throw new Error('missing workflow: ' + name + ' in ' + names.join(','));
+    const cwd = mkdtempSync(join(tmpdir(), 'pi-workflow-registry-e2e-'));
+    try {
+      mkdirSync(join(cwd, 'workflows'), { recursive: true });
+      const spec = {
+        schemaVersion: 1,
+        name: 'review-vnext',
+        catalog: { useWhen: ['artifact graph review'], naturalLanguageTriggers: ['review artifact graph'] },
+        defaults: { agent: 'unit-scout', readOnly: true, tools: ['read'] },
+        artifactGraph: { stages: [{ id: 'main', type: 'task', prompt: 'Review.' }] }
+      };
+      writeFileSync(join(cwd, 'workflows', 'review-vnext.json'), JSON.stringify(spec));
+      writeFileSync(join(cwd, 'workflows', 'legacy.json'), JSON.stringify({ schemaVersion: 1, workflow: { stages: [{ id: 'main', type: 'task', prompt: 'Legacy.' }] } }));
+      const workflows = await listWorkflows(cwd);
+      const names = workflows.map((item) => item.name).sort();
+      if (names.join(',') !== 'review-vnext') throw new Error('unexpected workflows: ' + names.join(','));
+      const resolved = await resolveWorkflowRef('review-vnext', cwd);
+      if (!resolved.specPath.endsWith('workflows/review-vnext.json')) throw new Error('bad resolved path: ' + resolved.specPath);
+      const recs = await recommendWorkflows('please review artifact graph', cwd);
+      if (recs[0]?.workflow.name !== 'review-vnext') throw new Error('review-vnext not recommended');
+      await resolveWorkflowRef('legacy', cwd).then(() => { throw new Error('legacy workflow should not resolve'); }, (error) => { if (!/workflow name or spec file not found/.test(String(error))) throw error; });
+      for (const bundled of ['change-impact-review', 'spec-review', 'deep-review', 'deep-research', 'execution-review', 'deep-execution-review', 'implement-loop', 'test-repair-loop']) {
+        const resolvedBundled = await resolveWorkflowRef(bundled, process.cwd());
+        if (!resolvedBundled.specPath.includes('/workflows/')) throw new Error('bad bundled path for ' + bundled + ': ' + resolvedBundled.specPath);
+      }
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
     }
-    const resolved = await resolveWorkflowRef('deep-research', cwd);
-    if (!resolved.specPath.endsWith('workflows/deep-research/spec.json')) throw new Error('bad resolved path: ' + resolved.specPath);
-    const recs = await recommendWorkflows('need detailed accurate research with verification', cwd);
-    if (!recs.some((item) => item.workflow.name === 'deep-research')) throw new Error('deep-research not recommended');
   `,
 	);
 
@@ -122,9 +157,25 @@ function main() {
     import { readFile } from 'node:fs/promises';
     import { parseWorkflow } from './.tmp/unit/schema.js';
     import { compileWorkflow } from './.tmp/unit/compiler.js';
-    const reviewSpec = parseWorkflow(JSON.parse(await readFile('workflows/deep-review/spec.json', 'utf8')));
-    if (reviewSpec.schemaVersion !== 1) throw new Error('bad review schema');
-    if (!reviewSpec.workflow?.stages?.length) throw new Error('missing review workflow stages');
+    const publicSpec = parseWorkflow({ schemaVersion: 1, artifactGraph: { stages: [{ id: 'main', type: 'task', prompt: 'Do it.' }] } });
+    if (publicSpec.schemaVersion !== 1) throw new Error('bad vNext schema');
+    if (!publicSpec.artifactGraph?.stages?.length) throw new Error('missing artifact graph stages');
+    const bundled = [
+      ['change-impact-review', 'workflows/change-impact-review.json', 'impact-analysis.impact-synthesis'],
+      ['spec-review', 'workflows/spec-review.json', 'report'],
+      ['deep-review', 'workflows/deep-review/spec.json', 'report'],
+      ['deep-research', 'workflows/deep-research/spec.json', 'final'],
+      ['execution-review', 'workflows/execution-review/spec.json', 'repro'],
+      ['deep-execution-review', 'workflows/deep-execution-review/spec.json', 'synthesis'],
+      ['implement-loop', 'workflows/implement-loop.json', 'fix-loop'],
+      ['test-repair-loop', 'workflows/test-repair-loop.json', 'repair-loop'],
+    ];
+    for (const [name, specPath, expectedStage] of bundled) {
+      const spec = parseWorkflow(JSON.parse(await readFile(specPath, 'utf8')));
+      const compiled = await compileWorkflow(spec, { cwd: process.cwd(), task: name + ' smoke', specPath: process.cwd() + '/' + specPath });
+      if (!compiled.artifactGraph?.enabled) throw new Error(name + ' did not compile as artifact graph');
+      if (!compiled.tasks.some((task) => task.stageId === expectedStage)) throw new Error('missing expected stage for ' + name + ': ' + expectedStage);
+    }
     const researchSpec = parseWorkflow(JSON.parse(await readFile('workflows/deep-research/spec.json', 'utf8')));
     const compiledResearch = await compileWorkflow(researchSpec, { cwd: process.cwd(), task: 'Research smoke', specPath: process.cwd() + '/workflows/deep-research/spec.json' });
     const audit = compiledResearch.tasks.find((task) => task.stageId === 'audit-claims');
@@ -147,6 +198,7 @@ function main() {
       mkdirSync(join(cwd, 'workflows'), { recursive: true });
       writeFileSync(join(cwd, 'workflows', 'unit.json'), JSON.stringify({ schemaVersion: 1, agent: 'unit-scout', readOnly: true, tools: ['read'], workflow: { stages: [{ id: 'main', type: 'task', prompt: 'Do it.' }] } }));
       await runWorkflow('unit', cwd).then(() => { throw new Error('expected missing task rejection'); }, (error) => { if (!/workflow needs a task/.test(String(error))) throw error; });
+      await runWorkflow('workflows/unit.json', cwd, { task: 'Do it.' }).then(() => { throw new Error('expected old schema rejection'); }, (error) => { if (!/old schemaVersion: 1 workflow.stages/.test(String(error))) throw error; });
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }

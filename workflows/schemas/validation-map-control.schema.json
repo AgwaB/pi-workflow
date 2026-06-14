@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "validation-map-control",
+  "type": "object",
+  "required": [
+    "schema",
+    "digest",
+    "tests",
+    "docs",
+    "releaseArtifacts",
+    "validationCommandsMentioned",
+    "knownGaps"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "minLength": 1
+    },
+    "digest": {
+      "type": "string",
+      "minLength": 1
+    },
+    "tests": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "docs": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "releaseArtifacts": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "validationCommandsMentioned": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "knownGaps": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  "additionalProperties": true
+}

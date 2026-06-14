@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "implement-loop:fix-loop.check",
+  "type": "object",
+  "required": [
+    "schema",
+    "digest",
+    "status",
+    "verdict"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "minLength": 1
+    },
+    "digest": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {},
+    "verdict": {}
+  },
+  "additionalProperties": true
+}

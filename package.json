@@ -6,14 +6,17 @@
   "type": "module",
   "license": "MIT",
   "files": [
+    "dist",
     "src",
     "workflows",
     "skills",
     "docs/usage.md",
+    "docs/MIGRATION.md",
     "docs/assets/readme/stage-types.png",
     "docs/assets/readme/deep-research-flow.png",
     "docs/assets/readme/deep-review-flow.png",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE",
     "tsconfig.json"
   ],
@@ -24,21 +27,25 @@
     "pi"
   ],
   "exports": {
-    ".": "./src/index.ts",
+    ".": "./dist/index.js",
     "./extension": "./src/extension.ts",
     "./package.json": "./package.json"
   },
+  "main": "./dist/index.js",
   "bin": {
     "pi-workflow": "src/cli.mjs"
   },
   "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.json --outDir dist --noEmit false",
     "typecheck": "tsc --noEmit",
     "test": "npm run test:unit",
     "test:build": "rm -rf .tmp/unit && tsc -p tsconfig.json --outDir .tmp/unit --noEmit false",
     "test:unit": "npm run test:build && node --test test/unit/*.test.mjs",
     "e2e": "node test/e2e/run.mjs",
     "e2e:soak": "node test/soak/run.mjs",
-    "pack:dry": "npm pack --dry-run"
+    "pack:dry": "npm pack --dry-run --json",
+    "prepack": "npm run build",
+    "release:check": "node scripts/release-check.mjs"
   },
   "pi": {
     "extensions": [

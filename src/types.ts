@@ -93,6 +93,74 @@ export interface WorkflowSpec {
 	flow?: { type?: unknown };
 }
 
+export type ArtifactGraphStageType =
+	| "task"
+	| "reduce"
+	| "foreach"
+	| "support"
+	| "loop"
+	| "dag";
+
+export type WorkflowArtifactKind = "control" | "analysis" | "refs" | "raw";
+
+export interface ArtifactGraphWorkflowSpec {
+	schemaVersion: 1;
+	name?: string;
+	description?: string;
+	input?: unknown;
+	catalog?: Record<string, unknown>;
+	defaults?: WorkflowDefaults;
+	roles?: Record<string, RoleSpec>;
+	artifactGraph: {
+		stages: ArtifactGraphStageSpec[];
+		maxConcurrency?: number;
+	};
+}
+
+export interface ArtifactGraphStageSpec {
+	id: string;
+	type: ArtifactGraphStageType;
+	prompt?: string;
+	agent?: string;
+	role?: string | string[];
+	cwd?: string;
+	model?: string;
+	thinking?: ThinkingLevel;
+	fast?: FastMode;
+	approvalMode?: ApprovalMode;
+	tools?: WorkflowToolSpec[];
+	readOnly?: boolean;
+	worktreePolicy?: WorktreePolicy;
+	maxRuntimeMs?: number;
+	maxConcurrency?: number;
+	maxItems?: number;
+	from?: string | string[] | { source: string; path: string };
+	after?: string | string[];
+	sourcePolicy?: "success" | "partial" | "require-success";
+	sourceProjection?: {
+		include?: string[];
+		maxChars?: number;
+	};
+	inputPolicy?: {
+		requiredReads?: string[];
+		enforcement?: "fail";
+	};
+	output?: {
+		controlSchema?: string;
+		analysis?: { required?: boolean };
+		refs?: { required?: boolean };
+		maxDigestChars?: number;
+	};
+	each?: Record<string, unknown>;
+	stages?: ArtifactGraphStageSpec[];
+	outputFrom?: string;
+	support?: { uses: string; options?: Record<string, unknown> };
+	until?: unknown;
+	maxRounds?: number;
+	progressPath?: string;
+	onExhausted?: ArtifactGraphStageSpec;
+}
+
 export interface ValidationIssue {
 	path: string;
 	message: string;
@@ -168,10 +236,18 @@ export interface CompiledTaskSafety {
 	permission: PermissionPreview;
 }
 
+export type LoopUntilLeaf = {
+	stage?: string;
+	source?: string;
+	path: string;
+	equals?: string | number | boolean | null;
+	notEquals?: string | number | boolean | null;
+	lengthEquals?: number;
+	exists?: boolean;
+};
+
 export type LoopUntilCondition =
-	| { stage: string; path: string; equals: string | number | boolean }
-	| { stage: string; path: string; notEquals: string | number | boolean }
-	| { stage: string; path: string; lengthEquals: number }
+	| LoopUntilLeaf
 	| { all: LoopUntilCondition[] }
 	| { any: LoopUntilCondition[] };
 
@@ -242,6 +318,22 @@ export interface WorkflowSourceContextSpec {
 	maxPacketChars?: number;
 }
 
+export interface CompiledArtifactGraphTask {
+	enabled: true;
+	output: {
+		analysisRequired: boolean;
+		refsRequired: boolean;
+		controlSchema?: string;
+		controlSchemaPath?: string;
+		maxDigestChars?: number;
+	};
+	requiredReads: string[];
+	sourceProjection?: {
+		include?: string[];
+		maxChars?: number;
+	};
+}
+
 export interface CompiledTask {
 	id: string;
 	agent: string;
@@ -287,6 +379,7 @@ export interface CompiledTask {
 		loopId: string;
 		status: LoopResultStatus;
 	};
+	artifactGraph?: CompiledArtifactGraphTask;
 }
 
 export type TaskRunStatus =
@@ -360,6 +453,7 @@ export interface WorkflowTaskRunRecord {
 		message?: string;
 		artifacts?: string[];
 	};
+	artifactGraph?: CompiledArtifactGraphTask;
 	launchRetry?: {
 		attempts: number;
 		maxAttempts?: number;
@@ -385,6 +479,7 @@ export interface WorkflowRunRecord {
 	name?: string;
 	description?: string;
 	type: CompiledWorkflowType;
+	artifactGraph?: { enabled: true };
 	status: WorkflowRunStatus;
 	taskSummary: TaskSummary;
 	cwd: string;
@@ -409,6 +504,7 @@ export interface WorkflowIndexRecord {
 		runId: string;
 		name?: string;
 		type: CompiledWorkflowType;
+		artifactGraph?: { enabled: true };
 		status: WorkflowRunStatus;
 		taskSummary: TaskSummary;
 		createdAt: string;
@@ -476,4 +572,5 @@ export interface CompiledWorkflow {
 	tasks: CompiledTask[];
 	stages?: Array<Record<string, unknown> | CompiledLoopStageRecord>;
 	warnings: string[];
+	artifactGraph?: { enabled: true };
 }

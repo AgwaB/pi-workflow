@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
 import { dirname, extname, isAbsolute, relative, resolve } from "node:path";
 
 import { loadAgentByName } from "./agents.js";
@@ -6,6 +6,8 @@ import { formatOutputTemplateSection } from "./workflow-artifacts.js";
 import {
 	type AgentDefinition,
 	type ApprovalMode,
+	type ArtifactGraphStageSpec,
+	type ArtifactGraphWorkflowSpec,
 	type CompiledTask,
 	type CompiledTaskSafety,
 	type CompiledToolProvider,
@@ -49,6 +51,198 @@ const DEFAULT_MAX_CONCURRENCY = 16;
 interface CompileOptions {
 	cwd: string;
 	specPath?: string;
+}
+
+interface LoweredArtifactGraphSpec {
+	spec: any;
+	stageMetadata: Map<string, NonNullable<CompiledTask["artifactGraph"]>>;
+}
+
+function isArtifactGraphSpec(
+	value: unknown,
+): value is ArtifactGraphWorkflowSpec {
+	return Boolean(
+		value &&
+			typeof value === "object" &&
+			Array.isArray((value as any).artifactGraph?.stages),
+	);
+}
+
+function lowerArtifactGraphSpec(
+	spec: ArtifactGraphWorkflowSpec,
+	options: CompileOptions,
+): LoweredArtifactGraphSpec {
+	const stageMetadata = new Map<
+		string,
+		NonNullable<CompiledTask["artifactGraph"]>
+	>();
+	const specDir = options.specPath
+		? dirname(resolve(options.cwd, options.specPath))
+		: options.cwd;
+	const defaults =
+		spec.artifactGraph.maxConcurrency === undefined
+			? spec.defaults
+			: {
+					...(spec.defaults ?? {}),
+					maxConcurrency: spec.artifactGraph.maxConcurrency,
+				};
+	return {
+		spec: {
+			schemaVersion: spec.schemaVersion,
+			name: spec.name,
+			description: spec.description,
+			input: spec.input,
+			catalog: spec.catalog,
+			roles: spec.roles,
+			defaults,
+			agent: (defaults as any)?.agent,
+			readOnly: defaults?.readOnly,
+			tools: defaults?.tools,
+			workflow: {
+				stages: lowerArtifactGraphStages(spec.artifactGraph.stages, {
+					metadata: stageMetadata,
+					specDir,
+				}),
+			},
+		},
+		stageMetadata,
+	};
+}
+
+function lowerArtifactGraphStages(
+	stages: readonly ArtifactGraphStageSpec[],
+	context: {
+		metadata: Map<string, NonNullable<CompiledTask["artifactGraph"]>>;
+		specDir: string;
+		namespace?: string;
+	},
+): any[] {
+	return stages.map((stage) => lowerArtifactGraphStage(stage, context));
+}
+
+function lowerArtifactGraphStage(
+	stage: ArtifactGraphStageSpec,
+	context: {
+		metadata: Map<string, NonNullable<CompiledTask["artifactGraph"]>>;
+		specDir: string;
+		namespace?: string;
+	},
+): any {
+	const stageId = context.namespace
+		? `${context.namespace}.${stage.id}`
+		: stage.id;
+	const lowered: any = {
+		...stage,
+		from: lowerArtifactGraphFrom(stage.from),
+		prompt: lowerArtifactGraphPrompt(stage),
+	};
+	delete lowered.inputPolicy;
+	delete lowered.sourceProjection;
+	delete lowered.artifactGraph;
+	if (stage.output !== undefined) delete lowered.output;
+	if (stage.stages) {
+		lowered.stages = lowerArtifactGraphStages(stage.stages, {
+			metadata: context.metadata,
+			specDir: context.specDir,
+			namespace: stageId,
+		});
+	}
+	if (stage.each && typeof stage.each === "object") {
+		lowered.each = {
+			...stage.each,
+			prompt: appendVNextOutputInstructions(
+				String((stage.each as any).prompt ?? stage.prompt ?? ""),
+				stage,
+			),
+		};
+	}
+	if (stage.onExhausted) {
+		lowered.onExhausted = lowerArtifactGraphStage(stage.onExhausted, context);
+	}
+	if (stage.type !== "dag") {
+		context.metadata.set(
+			stageId,
+			artifactGraphTaskMetadata(stage, context.specDir),
+		);
+	}
+	return lowered;
+}
+
+function lowerArtifactGraphFrom(from: ArtifactGraphStageSpec["from"]): unknown {
+	if (
+		from &&
+		typeof from === "object" &&
+		!Array.isArray(from) &&
+		typeof from.source === "string"
+	) {
+		return { stage: from.source, path: from.path };
+	}
+	return from;
+}
+
+function lowerArtifactGraphPrompt(
+	stage: ArtifactGraphStageSpec,
+): string | undefined {
+	if (stage.type === "dag" || stage.type === "support") return stage.prompt;
+	return appendVNextOutputInstructions(stage.prompt ?? "", stage);
+}
+
+function appendVNextOutputInstructions(
+	prompt: string,
+	stage: ArtifactGraphStageSpec,
+): string {
+	const controlSchema = stage.output?.controlSchema;
+	return [
+		prompt,
+		"# vNext Workflow Output Protocol",
+		"Return your final answer exactly as these three sections, in this order, with no prose outside the tags:",
+		"<control>{...}</control>",
+		"<analysis>...</analysis>",
+		"<refs>[]</refs>",
+		"The <control> section must be valid JSON object data for the workflow control plane.",
+		"The control object must include a non-empty string `schema` and a concise non-empty string `digest`.",
+		controlSchema
+			? `Use workflow-local control schema reference: ${controlSchema}`
+			: "Use schema `stage-control-v1` unless the workflow asks for a more specific control schema.",
+		"Put detailed prose, reasoning, and evidence discussion in <analysis> only.",
+		"Put structured evidence pointers in <refs> as a JSON array; use [] if none.",
+	]
+		.filter(Boolean)
+		.join("\n\n");
+}
+
+function artifactGraphTaskMetadata(
+	stage: ArtifactGraphStageSpec,
+	specDir: string,
+): NonNullable<CompiledTask["artifactGraph"]> {
+	const controlSchema = stage.output?.controlSchema;
+	return {
+		enabled: true,
+		output: {
+			analysisRequired: stage.output?.analysis?.required ?? true,
+			refsRequired: stage.output?.refs?.required ?? true,
+			controlSchema,
+			controlSchemaPath: controlSchema
+				? resolve(specDir, controlSchema)
+				: undefined,
+			maxDigestChars: stage.output?.maxDigestChars,
+		},
+		requiredReads: stage.inputPolicy?.requiredReads ?? [],
+		sourceProjection: stage.sourceProjection,
+	};
+}
+
+function annotateArtifactGraphCompiledWorkflow(
+	compiled: any,
+	metadata: ReadonlyMap<string, NonNullable<CompiledTask["artifactGraph"]>>,
+): void {
+	compiled.artifactGraph = { enabled: true };
+	for (const task of compiled.tasks ?? []) {
+		const stageId = task.stageId ?? task.id;
+		const graph = metadata.get(stageId);
+		if (!graph) continue;
+		task.artifactGraph = graph;
+	}
 }
 
 function validateAgentRuntime(
@@ -560,7 +754,19 @@ async function loadOutputTemplateRef(
 	}
 
 	try {
-		const content = JSON.parse(await readFile(resolvedPath, "utf8"));
+		const [realRoot, realTemplatePath] = await Promise.all([
+			realpath(containmentRoot),
+			realpath(resolvedPath),
+		]);
+		if (!isPathInside(realTemplatePath, realRoot)) {
+			issues.push({
+				path: `${path}.templateRef`,
+				message:
+					"external templateRef must stay within the workflow package or workspace",
+			});
+			return undefined;
+		}
+		const content = JSON.parse(await readFile(realTemplatePath, "utf8"));
 		if (!fragment) return content;
 		const resolved = resolveJsonPointer(content, fragment);
 		if (!resolved.exists)
@@ -611,6 +817,13 @@ export async function compileWorkflow(
 		runtimeDefaults?: { model?: string; thinking?: ThinkingLevel };
 	},
 ): Promise<any> {
+	if (isArtifactGraphSpec(spec)) {
+		const lowered = lowerArtifactGraphSpec(spec, options);
+		const compiled = await compileWorkflow(lowered.spec, options);
+		annotateArtifactGraphCompiledWorkflow(compiled, lowered.stageMetadata);
+		return compiled;
+	}
+
 	const stages = spec.workflow?.stages;
 	if (!Array.isArray(stages)) {
 		throw new WorkflowValidationError([
@@ -828,12 +1041,15 @@ export async function compileWorkflow(
 		};
 	};
 
+	const topLevelSourceStageIds = new Map<string, string>();
+
 	const compileDagContainerStage = async (
 		containerStage: any,
 		containerDependencyKeys: string[],
 		containerContextDependsOn: string[] | undefined,
 	): Promise<string[]> => {
 		const scopedStageTaskKeys = new Map<string, string[]>();
+		const scopedSourceStageIds = new Map<string, string>();
 
 		for (const childStage of containerStage.stages ?? []) {
 			const currentChildTaskKeys: string[] = [];
@@ -862,9 +1078,9 @@ export async function compileWorkflow(
 				childContextDependsOn !== undefined
 					? { contextDependsOn: [...childContextDependsOn] }
 					: {};
-			const namespacedChildStage = namespacedDagChildStage(
-				containerStage,
-				childStage,
+			const namespacedChildStage = rewriteForeachFromStageRefs(
+				namespacedDagChildStage(containerStage, childStage),
+				scopedSourceStageIds,
 			);
 			const childStageKind = stageKindFor(namespacedChildStage);
 
@@ -877,6 +1093,9 @@ export async function compileWorkflow(
 					)),
 				);
 				scopedStageTaskKeys.set(childStage.id, currentChildTaskKeys);
+				const outputStageId = resolveDagOutputStageId(namespacedChildStage);
+				if (outputStageId)
+					scopedSourceStageIds.set(childStage.id, outputStageId);
 				continue;
 			}
 
@@ -906,7 +1125,9 @@ export async function compileWorkflow(
 			} else if (childStageKind === "foreach") {
 				await addChildTask(
 					"item",
-					namespacedChildStage.each?.prompt ?? namespacedChildStage.prompt ?? "",
+					namespacedChildStage.each?.prompt ??
+						namespacedChildStage.prompt ??
+						"",
 				);
 			} else if (childStageKind === "support") {
 				await addChildTask(
@@ -918,6 +1139,7 @@ export async function compileWorkflow(
 			}
 
 			scopedStageTaskKeys.set(childStage.id, currentChildTaskKeys);
+			scopedSourceStageIds.set(childStage.id, namespacedChildStage.id);
 		}
 
 		const outputChildId = resolveDagOutputChildId(containerStage);
@@ -927,7 +1149,10 @@ export async function compileWorkflow(
 	for (const stage of stages) {
 		const currentStageTaskKeys: string[] = [];
 		const fromDependencyKeys = dependencyKeysForStage(stage, stageTaskKeys);
-		const afterDependencyKeys = afterDependencyKeysForStage(stage, stageTaskKeys);
+		const afterDependencyKeys = afterDependencyKeysForStage(
+			stage,
+			stageTaskKeys,
+		);
 		const explicitDependencyKeys = uniqueDependencyKeys([
 			...fromDependencyKeys,
 			...afterDependencyKeys,
@@ -954,6 +1179,8 @@ export async function compileWorkflow(
 			);
 			previousStageTaskKeys = currentStageTaskKeys;
 			stageTaskKeys.set(stage.id, currentStageTaskKeys);
+			const outputStageId = resolveDagOutputStageId(stage);
+			if (outputStageId) topLevelSourceStageIds.set(stage.id, outputStageId);
 			continue;
 		}
 
@@ -1012,14 +1239,18 @@ export async function compileWorkflow(
 			continue;
 		}
 
+		const runtimeStage = rewriteForeachFromStageRefs(
+			stage,
+			topLevelSourceStageIds,
+		);
 		stageRecords.push({
-			id: stage.id,
+			id: runtimeStage.id,
 			type: stageKind,
-			sourcePolicy: stage.sourcePolicy ?? "require-success",
+			sourcePolicy: runtimeStage.sourcePolicy ?? "require-success",
 		});
 		const addTask = async (taskId: string, prompt: string) => {
 			const task = await buildTask(
-				stage,
+				runtimeStage,
 				taskId,
 				prompt,
 				dependencyKeys,
@@ -1028,18 +1259,22 @@ export async function compileWorkflow(
 			tasks.push(task);
 			currentStageTaskKeys.push(task.id);
 		};
-		if (stageKind === "parallel" && Array.isArray(stage.tasks)) {
-			for (const item of stage.tasks)
+		if (stageKind === "parallel" && Array.isArray(runtimeStage.tasks)) {
+			for (const item of runtimeStage.tasks)
 				await addTask(item.id ?? `item-${tasks.length + 1}`, item.prompt ?? "");
 		} else if (stageKind === "foreach") {
-			await addTask("item", stage.each?.prompt ?? stage.prompt ?? "");
+			await addTask(
+				"item",
+				runtimeStage.each?.prompt ?? runtimeStage.prompt ?? "",
+			);
 		} else if (stageKind === "support") {
-			await addTask("main", `Run support helper ${stage.support.uses}.`);
+			await addTask("main", `Run support helper ${runtimeStage.support.uses}.`);
 		} else {
-			await addTask("main", stage.prompt ?? "");
+			await addTask("main", runtimeStage.prompt ?? "");
 		}
 		previousStageTaskKeys = currentStageTaskKeys;
 		stageTaskKeys.set(stage.id, currentStageTaskKeys);
+		topLevelSourceStageIds.set(stage.id, runtimeStage.id);
 	}
 
 	const backendOptions = spec.defaults?.backend ?? spec.backend ?? {};
@@ -1271,6 +1506,47 @@ async function compileLoopChildTemplates(
 	return { childStageIds, childTemplates, childStageRecords, onExhausted };
 }
 
+function rewriteForeachFromStageRefs(
+	stage: any,
+	sourceStageIds: Map<string, string>,
+): any {
+	if (stage?.type !== "foreach") return stage;
+	const rewrittenFrom = rewriteFromStageRefs(stage.from, sourceStageIds);
+	return rewrittenFrom === stage.from
+		? stage
+		: { ...stage, from: rewrittenFrom };
+}
+
+function rewriteFromStageRefs(
+	value: any,
+	sourceStageIds: Map<string, string>,
+): any {
+	if (typeof value === "string") return sourceStageIds.get(value) ?? value;
+	if (Array.isArray(value))
+		return value.map((item) =>
+			typeof item === "string" ? (sourceStageIds.get(item) ?? item) : item,
+		);
+	if (value && typeof value === "object") {
+		return typeof value.stage === "string"
+			? { ...value, stage: sourceStageIds.get(value.stage) ?? value.stage }
+			: value;
+	}
+	return value;
+}
+
+function resolveDagOutputStageId(stage: any): string | undefined {
+	const outputChildId = resolveDagOutputChildId(stage);
+	if (!outputChildId) return undefined;
+	const outputChild = (stage.stages ?? []).find(
+		(childStage: any) => childStage?.id === outputChildId,
+	);
+	if (!outputChild) return undefined;
+	const namespacedOutputChild = namespacedDagChildStage(stage, outputChild);
+	return stageKindFor(outputChild) === "dag"
+		? resolveDagOutputStageId(namespacedOutputChild)
+		: namespacedOutputChild.id;
+}
+
 function namespacedDagChildStage(containerStage: any, childStage: any): any {
 	const namespacedStage = {
 		...childStage,
@@ -1347,7 +1623,10 @@ function afterDependencyKeysForStage(
 	stage: any,
 	stageTaskKeys: Map<string, string[]>,
 ): string[] {
-	return dependencyKeysForStageIds(stageIdsFromAfter(stage.after), stageTaskKeys);
+	return dependencyKeysForStageIds(
+		stageIdsFromAfter(stage.after),
+		stageTaskKeys,
+	);
 }
 
 function dependencyKeysForStageIds(
@@ -1363,7 +1642,9 @@ function dependencyKeysForStageIds(
 function stageIdsFromFrom(from: any): string[] {
 	if (!from) return [];
 	if (Array.isArray(from))
-		return from.filter((stageId): stageId is string => typeof stageId === "string");
+		return from.filter(
+			(stageId): stageId is string => typeof stageId === "string",
+		);
 	if (typeof from === "string") return [from];
 	if (typeof from.stage === "string") return [from.stage];
 	return [];
@@ -1372,7 +1653,9 @@ function stageIdsFromFrom(from: any): string[] {
 function stageIdsFromAfter(after: any): string[] {
 	if (after === undefined) return [];
 	if (Array.isArray(after))
-		return after.filter((stageId): stageId is string => typeof stageId === "string");
+		return after.filter(
+			(stageId): stageId is string => typeof stageId === "string",
+		);
 	return typeof after === "string" ? [after] : [];
 }
 
