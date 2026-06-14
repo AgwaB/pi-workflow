@@ -142,7 +142,7 @@ function main() {
       const recs = await recommendWorkflows('please review artifact graph', cwd);
       if (recs[0]?.workflow.name !== 'review-artifact') throw new Error('review-artifact not recommended');
       await resolveWorkflowRef('invalid', cwd).then(() => { throw new Error('invalid workflow should not resolve'); }, (error) => { if (!/workflow name or spec file not found/.test(String(error))) throw error; });
-      for (const bundled of ['spec-review', 'deep-review', 'deep-research']) {
+      for (const bundled of ['spec-review', 'deep-review', 'deep-research', 'impact-review']) {
         const resolvedBundled = await resolveWorkflowRef(bundled, process.cwd());
         if (!resolvedBundled.specPath.includes('/workflows/')) throw new Error('bad bundled path for ' + bundled + ': ' + resolvedBundled.specPath);
       }
@@ -165,6 +165,7 @@ function main() {
       ['spec-review', 'workflows/spec-review/spec.json', 'report'],
       ['deep-review', 'workflows/deep-review/spec.json', 'report'],
       ['deep-research', 'workflows/deep-research/spec.json', 'final'],
+      ['impact-review', 'workflows/impact-review/spec.json', 'impact-analysis.impact-synthesis'],
     ];
     for (const [name, specPath, expectedStage] of bundled) {
       const spec = parseWorkflow(JSON.parse(await readFile(specPath, 'utf8')));

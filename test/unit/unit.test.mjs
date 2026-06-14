@@ -223,6 +223,7 @@ function bundledArtifactGraphSpecPaths() {
 		"workflows/spec-review/spec.json",
 		"workflows/deep-research/spec.json",
 		"workflows/deep-review/spec.json",
+		"workflows/impact-review/spec.json",
 	];
 }
 
@@ -2986,9 +2987,91 @@ test("artifact graph compiler propagates graph maxConcurrency", async () => {
 	}
 });
 
+test("bundled impact-review artifact graph workflow compiles multi-join DAG", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "scout", "read, grep, find, ls");
+		const specPath = join(process.cwd(), "workflows", "impact-review", "spec.json");
+		const spec = JSON.parse(readFileSync(specPath, "utf8"));
+		parsePublicWorkflow(spec);
+		assert.equal(spec.name, "impact-review");
+		assert.equal(spec.artifactGraph.stages[0].id, "impact-analysis");
+		assert.equal(spec.artifactGraph.stages[0].type, "dag");
+		assert.equal(spec.artifactGraph.stages[0].outputFrom, "impact-synthesis");
+
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			specPath,
+			task: "Review ship impact before merging this PR.",
+		});
+		const byKey = Object.fromEntries(
+			compiled.tasks.map((task) => [task.key, task]),
+		);
+
+		assert.deepEqual(
+			compiled.tasks.slice(0, 3).map((task) => task.key),
+			[
+				"impact-analysis.change-scope.main",
+				"impact-analysis.implementation-map.main",
+				"impact-analysis.validation-map.main",
+			],
+		);
+		assert.deepEqual(
+			compiled.tasks.slice(0, 3).map((task) => task.dependsOn),
+			[[], [], []],
+		);
+		assert.deepEqual(
+			byKey["impact-analysis.api-contract-impact.main"].dependsOn,
+			[
+				"impact-analysis.change-scope.main",
+				"impact-analysis.implementation-map.main",
+			],
+		);
+		assert.deepEqual(
+			byKey["impact-analysis.validation-impact.main"].dependsOn,
+			[
+				"impact-analysis.change-scope.main",
+				"impact-analysis.validation-map.main",
+			],
+		);
+		assert.deepEqual(byKey["impact-analysis.regression-risk.main"].dependsOn, [
+			"impact-analysis.api-contract-impact.main",
+			"impact-analysis.state-data-impact.main",
+			"impact-analysis.validation-impact.main",
+			"impact-analysis.security-performance-impact.main",
+		]);
+		assert.deepEqual(byKey["impact-analysis.impact-synthesis.main"].dependsOn, [
+			"impact-analysis.change-scope.main",
+			"impact-analysis.contract-consistency.main",
+			"impact-analysis.regression-risk.main",
+			"impact-analysis.ship-readiness.main",
+		]);
+		assert.equal(byKey["impact-analysis.impact-synthesis.main"].kind, "reduce");
+		assert.ok(
+			byKey[
+				"impact-analysis.impact-synthesis.main"
+			].artifactGraph.output.controlSchemaPath.endsWith(
+				join(
+					"workflows",
+					"impact-review",
+					"schemas",
+					"impact-synthesis-control.schema.json",
+				),
+			),
+		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("bundled artifact graph workflows are public runnable", async () => {
 	const workflows = await listWorkflows(process.cwd());
-	for (const name of ["spec-review", "deep-review", "deep-research"]) {
+	for (const name of [
+		"spec-review",
+		"deep-review",
+		"deep-research",
+		"impact-review",
+	]) {
 		assert(
 			workflows.some((workflow) => workflow.name === name),
 			name,
@@ -3002,6 +3085,11 @@ test("bundled artifact graph workflows are public runnable", async () => {
 		process.cwd(),
 	);
 	assert.equal(recs[0]?.workflow.name, "spec-review");
+	const impactRecs = await recommendWorkflows(
+		"impact review this PR before shipping missing tests docs release risk",
+		process.cwd(),
+	);
+	assert.equal(impactRecs[0]?.workflow.name, "impact-review");
 });
 
 test("bundled spec-review workflow materializes verifier and partitions verified findings", async () => {

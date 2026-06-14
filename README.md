@@ -155,6 +155,7 @@ The package includes a small starter set. These are practical defaults and autho
 | `deep-research` | Source-backed research, claim verification, citations, or follow-up suggestions. |
 | `deep-review` | Multi-lens review where findings should be challenged before final synthesis. |
 | `spec-review` | Read-only comparison of a spec/contract against implementation and tests. |
+| `impact-review` | Read-only ship-impact review for changed or proposed work, especially missing tests, docs, release work, compatibility risk, and follow-up actions. |
 
 ![Deep research workflow flow](./docs/assets/readme/deep-research-flow.png)
 
