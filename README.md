@@ -155,9 +155,6 @@ The package includes a small starter set. These are practical defaults and autho
 | `deep-research` | Source-backed research, claim verification, citations, or follow-up suggestions. |
 | `deep-review` | Multi-lens review where findings should be challenged before final synthesis. |
 | `spec-review` | Read-only comparison of a spec/contract against implementation and tests. |
-| `change-impact-review` | Read-only impact review for a proposed or applied change, especially missing tests, docs, release work, compatibility risk, and ship blockers. |
-| `deep-execution-review` | Repo-wide ambiguous regression hunt with triage, parallel execution-backed reviewers, synthesis, and an evidence gap loop. |
-| `implement-loop` | Iterative implementation in one managed worktree until validation passes and review accepts. |
 
 ![Deep research workflow flow](./docs/assets/readme/deep-research-flow.png)
 

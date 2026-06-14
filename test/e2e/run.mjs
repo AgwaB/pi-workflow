@@ -142,7 +142,7 @@ function main() {
       const recs = await recommendWorkflows('please review artifact graph', cwd);
       if (recs[0]?.workflow.name !== 'review-artifact') throw new Error('review-artifact not recommended');
       await resolveWorkflowRef('invalid', cwd).then(() => { throw new Error('invalid workflow should not resolve'); }, (error) => { if (!/workflow name or spec file not found/.test(String(error))) throw error; });
-      for (const bundled of ['change-impact-review', 'spec-review', 'deep-review', 'deep-research', 'deep-execution-review', 'implement-loop']) {
+      for (const bundled of ['spec-review', 'deep-review', 'deep-research']) {
         const resolvedBundled = await resolveWorkflowRef(bundled, process.cwd());
         if (!resolvedBundled.specPath.includes('/workflows/')) throw new Error('bad bundled path for ' + bundled + ': ' + resolvedBundled.specPath);
       }
@@ -162,12 +162,9 @@ function main() {
     if (publicSpec.schemaVersion !== 1) throw new Error('bad artifact graph schema');
     if (!publicSpec.artifactGraph?.stages?.length) throw new Error('missing artifact graph stages');
     const bundled = [
-      ['change-impact-review', 'workflows/change-impact-review/spec.json', 'impact-analysis.impact-synthesis'],
       ['spec-review', 'workflows/spec-review/spec.json', 'report'],
       ['deep-review', 'workflows/deep-review/spec.json', 'report'],
       ['deep-research', 'workflows/deep-research/spec.json', 'final'],
-      ['deep-execution-review', 'workflows/deep-execution-review/spec.json', 'synthesis'],
-      ['implement-loop', 'workflows/implement-loop/spec.json', 'fix-loop'],
     ];
     for (const [name, specPath, expectedStage] of bundled) {
       const spec = parseWorkflow(JSON.parse(await readFile(specPath, 'utf8')));
