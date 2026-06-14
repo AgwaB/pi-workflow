@@ -62,13 +62,15 @@ writeFileSync(
 					{
 						id: "one",
 						type: "task",
-						prompt: 'Put {"schema":"stage-control-v1","digest":"one done","ok":true,"step":"one"} in <control>.',
+						prompt:
+							'Put {"schema":"stage-control-v1","digest":"one done","ok":true,"step":"one"} in <control>.',
 					},
 					{
 						id: "two",
 						type: "reduce",
 						from: "one",
-						prompt: 'Put {"schema":"stage-control-v1","digest":"two done","ok":true,"step":"two"} in <control>.',
+						prompt:
+							'Put {"schema":"stage-control-v1","digest":"two done","ok":true,"step":"two"} in <control>.',
 					},
 				],
 			},

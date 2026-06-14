@@ -75,13 +75,7 @@ Name refs are resolved from these roots:
 
 Runnable workflow discovery currently supports `.json` spec files. The low-level loader can parse `.yaml`/`.yml`, but named workflow discovery and bundled workflow resolution are JSON-only.
 
-A workflow can be a flat file:
-
-```text
-workflows/test-repair-loop.json
-```
-
-or a bundle:
+A workflow can be a direct spec path, but bundled reusable workflows should use directory bundles:
 
 ```text
 workflows/deep-review/
@@ -93,7 +87,7 @@ workflows/deep-research/
     claim-evidence-gate.mjs
 ```
 
-Bundle names resolve from the directory name. If a flat file and a bundle expose the same name, resolution fails closed as ambiguous.
+Bundle names resolve from the directory name. If two specs expose the same name, resolution fails closed as ambiguous.
 
 ## Running workflows
 

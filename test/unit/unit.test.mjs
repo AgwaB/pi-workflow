@@ -219,14 +219,14 @@ function writeDefaultStageControlSchema(workflowRoot) {
 
 function bundledArtifactGraphSpecPaths() {
 	return [
-		"workflows/implement-loop.json",
-		"workflows/test-repair-loop.json",
-		"workflows/spec-review.json",
+		"workflows/implement-loop/spec.json",
+		"workflows/test-repair-loop/spec.json",
+		"workflows/spec-review/spec.json",
 		"workflows/deep-research/spec.json",
 		"workflows/deep-review/spec.json",
 		"workflows/execution-review/spec.json",
 		"workflows/deep-execution-review/spec.json",
-		"workflows/change-impact-review.json",
+		"workflows/change-impact-review/spec.json",
 	];
 }
 
@@ -875,7 +875,7 @@ test("artifact graph schema rejects unknown output fields and invalid required r
 test("schema accepts bundled implement-loop artifact graph shape", () => {
 	const spec = JSON.parse(
 		readFileSync(
-			join(process.cwd(), "workflows", "implement-loop.json"),
+			join(process.cwd(), "workflows", "implement-loop", "spec.json"),
 			"utf8",
 		),
 	);
@@ -2642,14 +2642,14 @@ test("bundled implement-loop workflow parses and compiles (schema/engine integra
 		writeAgent(cwd, "scout", "read, grep, find, ls");
 		const spec = JSON.parse(
 			readFileSync(
-				join(process.cwd(), "workflows", "implement-loop.json"),
+				join(process.cwd(), "workflows", "implement-loop", "spec.json"),
 				"utf8",
 			),
 		);
 		parsePublicWorkflow(spec);
 		const compiled = await compileWorkflow(spec, {
 			cwd,
-			specPath: join(process.cwd(), "workflows", "implement-loop.json"),
+			specPath: join(process.cwd(), "workflows", "implement-loop", "spec.json"),
 			task: "Fix the failing auth test.",
 		});
 		const loopStage = compiled.stages.find((stage) => stage.id === "fix-loop");
@@ -2666,7 +2666,13 @@ test("spec-review partition helper joins verifier results and flags missing cove
 	const helper = (
 		await import(
 			pathToFileURL(
-				join(process.cwd(), "workflows", "helpers", "spec-review-pipeline.mjs"),
+				join(
+					process.cwd(),
+					"workflows",
+					"spec-review",
+					"helpers",
+					"spec-review-pipeline.mjs",
+				),
 			).href
 		)
 	).default;
@@ -2718,7 +2724,7 @@ test("spec-review partition helper joins verifier results and flags missing cove
 			},
 		},
 		options: { mode: "partition" },
-		context: { cwd: process.cwd(), specPath: "workflows/spec-review.json" },
+		context: { cwd: process.cwd(), specPath: "workflows/spec-review/spec.json" },
 	});
 
 	assert.equal(result.schema, "spec-review-partition-v1");
@@ -2743,7 +2749,7 @@ test("bundled spec-review workflow compiles explicit DAG analysis and verificati
 	const cwd = makeProject();
 	try {
 		writeAgent(cwd, "scout", "read, grep, find, ls");
-		const specPath = join(process.cwd(), "workflows", "spec-review.json");
+		const specPath = join(process.cwd(), "workflows", "spec-review", "spec.json");
 		const spec = JSON.parse(readFileSync(specPath, "utf8"));
 		parsePublicWorkflow(spec);
 		assert.equal(spec.artifactGraph.stages[0].id, "analysis");
@@ -2832,7 +2838,7 @@ test("bundled change-impact-review artifact graph workflow compiles multi-join D
 		const specPath = join(
 			process.cwd(),
 			"workflows",
-			"change-impact-review.json",
+			"change-impact-review/spec.json",
 		);
 		const spec = JSON.parse(readFileSync(specPath, "utf8"));
 		parsePublicWorkflow(spec);
@@ -2932,7 +2938,7 @@ test("bundled change-impact-review artifact graph workflow compiles multi-join D
 			byKey[
 				"impact-analysis.impact-synthesis.main"
 			].artifactGraph.output.controlSchemaPath.endsWith(
-				join("workflows", "schemas", "impact-synthesis-control.schema.json"),
+				join("workflows", "change-impact-review", "schemas", "impact-synthesis-control.schema.json"),
 			),
 		);
 	} finally {
@@ -2961,7 +2967,7 @@ test("bundled artifact graph workflows are public runnable", async () => {
 		"change-impact-review",
 		process.cwd(),
 	);
-	assert(resolved.specPath.endsWith("workflows/change-impact-review.json"));
+	assert(resolved.specPath.endsWith("workflows/change-impact-review/spec.json"));
 
 	const recs = await recommendWorkflows(
 		"impact review this PR before shipping missing tests docs release risk",
@@ -2978,7 +2984,7 @@ test("bundled change-impact-review workflow schedules multi-join DAG waves", asy
 		const specPath = join(
 			process.cwd(),
 			"workflows",
-			"change-impact-review.json",
+			"change-impact-review/spec.json",
 		);
 		const spec = JSON.parse(readFileSync(specPath, "utf8"));
 		const compiled = await compileWorkflow(spec, {
@@ -3009,7 +3015,7 @@ test("bundled change-impact-review workflow schedules multi-join DAG waves", asy
 			{
 				changeSummary: "Add change-impact-review workflow.",
 				changeInputs: [{ source: "runtime task", type: "description" }],
-				affectedFiles: ["workflows/change-impact-review.json"],
+				affectedFiles: ["workflows/change-impact-review/spec.json"],
 				affectedComponents: [
 					{
 						component: "bundled workflow registry",
@@ -3029,7 +3035,7 @@ test("bundled change-impact-review workflow schedules multi-join DAG waves", asy
 				components: [
 					{
 						component: "workflow spec",
-						file: "workflows/change-impact-review.json",
+						file: "workflows/change-impact-review/spec.json",
 						evidence: "new bundled workflow",
 						currentBehavior: "registry discovers workflows from workflows/",
 						dependencies: [],
@@ -3199,7 +3205,7 @@ test("bundled spec-review workflow materializes verifier and partitions verified
 	try {
 		writeAgent(cwd, "scout", "read, grep, find, ls");
 		captureSubagentPrompts([]);
-		const specPath = join(process.cwd(), "workflows", "spec-review.json");
+		const specPath = join(process.cwd(), "workflows", "spec-review", "spec.json");
 		const spec = JSON.parse(readFileSync(specPath, "utf8"));
 		const compiled = await compileWorkflow(spec, {
 			cwd,
@@ -3313,7 +3319,7 @@ test("bundled test-repair-loop workflow materializes a serial repair/check round
 	try {
 		writeAgent(cwd, "delegate", "read, grep, find, ls, bash, edit, write");
 		writeAgent(cwd, "scout", "read, grep, find, ls");
-		const specPath = join(process.cwd(), "workflows", "test-repair-loop.json");
+		const specPath = join(process.cwd(), "workflows", "test-repair-loop", "spec.json");
 		const spec = JSON.parse(readFileSync(specPath, "utf8"));
 		parsePublicWorkflow(spec);
 		const compiled = await compileWorkflow(spec, {
@@ -4622,7 +4628,9 @@ test("subagent launch forwards tool-call capture only when env is enabled", asyn
 		});
 
 		const spec = workflowSpec("unit-scout", {
-			artifactGraph: { stages: [{ id: "main", type: "task", prompt: "Do work." }] },
+			artifactGraph: {
+				stages: [{ id: "main", type: "task", prompt: "Do work." }],
+			},
 		});
 		const compiled = await compileWorkflow(spec, { cwd, task: "Review topic" });
 
@@ -5846,7 +5854,9 @@ test("resumeRun rejects completed and loop runs", async () => {
 	try {
 		writeAgent(cwd, "unit-scout");
 		const spec = workflowSpec("unit-scout", {
-			artifactGraph: { stages: [{ id: "only", type: "task", prompt: "Do it." }] },
+			artifactGraph: {
+				stages: [{ id: "only", type: "task", prompt: "Do it." }],
+			},
 		});
 		const compiled = await compileWorkflow(spec, { cwd, task: "Done target" });
 		const { run } = await createWorkflowRunRecord(

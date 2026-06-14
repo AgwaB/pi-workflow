@@ -28,7 +28,7 @@ Runtime selection is explicit: `/workflow run` takes an exact workflow name or e
 
 ## Bundle layout
 
-Workflows can be authored as either a flat file (`workflows/name.json`) or a directory-local bundle:
+Bundled starter workflows use directory-local bundles:
 
 ```text
 workflows/name/
@@ -39,7 +39,7 @@ workflows/name/
     support-helper.mjs
 ```
 
-Bundle names resolve from the directory name (`/workflow run name ...`). If both `workflows/name.json` and `workflows/name/spec.json` exist, resolution fails closed as ambiguous.
+Bundle names resolve from the directory name (`/workflow run name ...`). If two specs expose the same workflow name, resolution fails closed as ambiguous.
 
 `output.controlSchema` in a bundle is resolved relative to the workflow spec file, for example `./schemas/final-control.schema.json`.
 

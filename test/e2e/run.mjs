@@ -161,14 +161,14 @@ function main() {
     if (publicSpec.schemaVersion !== 1) throw new Error('bad vNext schema');
     if (!publicSpec.artifactGraph?.stages?.length) throw new Error('missing artifact graph stages');
     const bundled = [
-      ['change-impact-review', 'workflows/change-impact-review.json', 'impact-analysis.impact-synthesis'],
-      ['spec-review', 'workflows/spec-review.json', 'report'],
+      ['change-impact-review', 'workflows/change-impact-review/spec.json', 'impact-analysis.impact-synthesis'],
+      ['spec-review', 'workflows/spec-review/spec.json', 'report'],
       ['deep-review', 'workflows/deep-review/spec.json', 'report'],
       ['deep-research', 'workflows/deep-research/spec.json', 'final'],
       ['execution-review', 'workflows/execution-review/spec.json', 'repro'],
       ['deep-execution-review', 'workflows/deep-execution-review/spec.json', 'synthesis'],
-      ['implement-loop', 'workflows/implement-loop.json', 'fix-loop'],
-      ['test-repair-loop', 'workflows/test-repair-loop.json', 'repair-loop'],
+      ['implement-loop', 'workflows/implement-loop/spec.json', 'fix-loop'],
+      ['test-repair-loop', 'workflows/test-repair-loop/spec.json', 'repair-loop'],
     ];
     for (const [name, specPath, expectedStage] of bundled) {
       const spec = parseWorkflow(JSON.parse(await readFile(specPath, 'utf8')));
