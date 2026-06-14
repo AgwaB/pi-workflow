@@ -19,7 +19,7 @@ if (!existsSync(join(build, "engine.js"))) {
 
 const { compileWorkflow } = await import(join(build, "compiler.js"));
 const {
-	createStageFirstRunRecord,
+	createWorkflowRunRecord,
 	readRunRecord,
 	writeRunRecord,
 	writeStaticRunArtifacts,
@@ -50,7 +50,7 @@ writeFileSync(
 		"---",
 		"# e2e-echo",
 		"",
-		"Respond with exactly the JSON the task asks for. No prose.",
+		"Respond with <control>, <analysis>, and <refs> sections. Put requested JSON in <control>.",
 		"",
 	].join("\n"),
 );
@@ -59,23 +59,19 @@ const spec = {
 	schemaVersion: 1,
 	name: "e2e-supervise",
 	description: "Two-step echo workflow for supervise E2E.",
-	agent: "e2e-echo",
-	readOnly: true,
-	tools: ["read"],
-	workflow: {
+	defaults: { agent: "e2e-echo", readOnly: true, tools: ["read"] },
+	artifactGraph: {
 		stages: [
 			{
 				id: "one",
 				type: "task",
-				output: { format: "json", requiredKeys: ["ok", "step"] },
-				prompt: 'Return JSON only: {"ok": true, "step": "one"}',
+				prompt: 'Put {"schema":"stage-control-v1","digest":"one done","ok":true,"step":"one"} in <control>.',
 			},
 			{
 				id: "two",
 				type: "reduce",
 				from: "one",
-				output: { format: "json", requiredKeys: ["ok", "step"] },
-				prompt: 'Return JSON only: {"ok": true, "step": "two"}',
+				prompt: 'Put {"schema":"stage-control-v1","digest":"two done","ok":true,"step":"two"} in <control>.',
 			},
 		],
 	},
@@ -92,7 +88,7 @@ const compiled = await compileWorkflow(spec, {
 	task: "Supervise E2E check",
 	specPath,
 });
-const { run } = await createStageFirstRunRecord(cwd, compiled, specPath);
+const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
 await writeStaticRunArtifacts(cwd, run, compiled, spec);
 await writeRunRecord(cwd, run);
 console.log(

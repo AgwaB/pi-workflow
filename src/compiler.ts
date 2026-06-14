@@ -1,8 +1,6 @@
-import { readFile, realpath } from "node:fs/promises";
-import { dirname, extname, isAbsolute, relative, resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 
 import { loadAgentByName } from "./agents.js";
-import { formatOutputTemplateSection } from "./workflow-artifacts.js";
 import {
 	type AgentDefinition,
 	type ApprovalMode,
@@ -11,10 +9,9 @@ import {
 	type CompiledTask,
 	type CompiledTaskSafety,
 	type CompiledToolProvider,
-	type WorkflowTaskOutputSpec,
 	WorkflowValidationError,
 	type PermissionPreview,
-	STAGE_FIRST_RUN_TYPE,
+	WORKFLOW_RUN_TYPE,
 	type TaskCapability,
 	type ThinkingLevel,
 	type ValidationIssue,
@@ -53,25 +50,15 @@ interface CompileOptions {
 	specPath?: string;
 }
 
-interface LoweredArtifactGraphSpec {
-	spec: any;
+interface ArtifactGraphCompilePlanBuildResult {
+	plan: any;
 	stageMetadata: Map<string, NonNullable<CompiledTask["artifactGraph"]>>;
 }
 
-function isArtifactGraphSpec(
-	value: unknown,
-): value is ArtifactGraphWorkflowSpec {
-	return Boolean(
-		value &&
-			typeof value === "object" &&
-			Array.isArray((value as any).artifactGraph?.stages),
-	);
-}
-
-function lowerArtifactGraphSpec(
+function buildArtifactGraphCompilePlan(
 	spec: ArtifactGraphWorkflowSpec,
 	options: CompileOptions,
-): LoweredArtifactGraphSpec {
+): ArtifactGraphCompilePlanBuildResult {
 	const stageMetadata = new Map<
 		string,
 		NonNullable<CompiledTask["artifactGraph"]>
@@ -87,7 +74,7 @@ function lowerArtifactGraphSpec(
 					maxConcurrency: spec.artifactGraph.maxConcurrency,
 				};
 	return {
-		spec: {
+		plan: {
 			schemaVersion: spec.schemaVersion,
 			name: spec.name,
 			description: spec.description,
@@ -95,15 +82,10 @@ function lowerArtifactGraphSpec(
 			catalog: spec.catalog,
 			roles: spec.roles,
 			defaults,
-			agent: (defaults as any)?.agent,
-			readOnly: defaults?.readOnly,
-			tools: defaults?.tools,
-			workflow: {
-				stages: lowerArtifactGraphStages(spec.artifactGraph.stages, {
-					metadata: stageMetadata,
-					specDir,
-				}),
-			},
+			stages: lowerArtifactGraphStages(spec.artifactGraph.stages, {
+				metadata: stageMetadata,
+				specDir,
+			}),
 		},
 		stageMetadata,
 	};
@@ -648,198 +630,42 @@ function jsonKey(key: string): string {
 	return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(key) ? key : JSON.stringify(key);
 }
 
-async function resolveOutputTemplate(
-	output: WorkflowTaskOutputSpec | undefined,
-	spec: any,
-	options: CompileOptions,
-	path: string,
-	issues: ValidationIssue[],
-): Promise<WorkflowTaskOutputSpec | undefined> {
-	if (!output) return undefined;
-	const requiredPaths = (output.requiredKeys ?? []).map((key) => `$.${key}`);
-	const withRequiredKeys =
-		requiredPaths.length > 0
-			? {
-					...output,
-					contract: {
-						...(output.contract ?? {}),
-						requiredPaths: [
-							...new Set([
-								...(output.contract?.requiredPaths ?? []),
-								...requiredPaths,
-							]),
-						],
-					},
-				}
-			: output;
-	if (!withRequiredKeys.templateRef) return withRequiredKeys;
-	if (withRequiredKeys.template !== undefined) {
-		issues.push({
-			path,
-			message: "must not specify both template and templateRef",
-		});
-		return withRequiredKeys;
-	}
-	const resolved = await loadOutputTemplateRef(
-		withRequiredKeys.templateRef,
-		spec,
-		options,
-		path,
-		issues,
-	);
-	return resolved === undefined
-		? withRequiredKeys
-		: { ...withRequiredKeys, template: resolved, templateRef: undefined };
-}
-
-async function loadOutputTemplateRef(
-	ref: string,
-	spec: any,
-	options: CompileOptions,
-	path: string,
-	issues: ValidationIssue[],
-): Promise<unknown | undefined> {
-	if (ref.startsWith("#")) {
-		const resolved = resolveJsonPointer(spec, ref.slice(1));
-		if (!resolved.exists)
-			issues.push({
-				path: `${path}.templateRef`,
-				message: `templateRef not found: ${ref}`,
-			});
-		return resolved.value;
-	}
-
-	const [relativePath, fragment = ""] = ref.split("#", 2);
-	if (
-		!relativePath ||
-		isAbsolute(relativePath) ||
-		!relativePath.endsWith(".json")
-	) {
-		issues.push({
-			path: `${path}.templateRef`,
-			message: "external templateRef must be a relative .json path",
-		});
-		return undefined;
-	}
-	if (!options.specPath) {
-		issues.push({
-			path: `${path}.templateRef`,
-			message: "external templateRef requires a workflow spec path",
-		});
-		return undefined;
-	}
-
-	const baseDir = dirname(resolve(options.specPath));
-	const resolvedPath = resolve(baseDir, relativePath);
-	const containmentRoot = isPathInside(
-		resolve(options.specPath),
-		resolve(options.cwd),
-	)
-		? resolve(options.cwd)
-		: baseDir;
-	if (!isPathInside(resolvedPath, containmentRoot)) {
-		issues.push({
-			path: `${path}.templateRef`,
-			message:
-				"external templateRef must stay within the workflow package or workspace",
-		});
-		return undefined;
-	}
-	if (extname(resolvedPath).toLowerCase() !== ".json") {
-		issues.push({
-			path: `${path}.templateRef`,
-			message: "external templateRef must point to a JSON file",
-		});
-		return undefined;
-	}
-
-	try {
-		const [realRoot, realTemplatePath] = await Promise.all([
-			realpath(containmentRoot),
-			realpath(resolvedPath),
-		]);
-		if (!isPathInside(realTemplatePath, realRoot)) {
-			issues.push({
-				path: `${path}.templateRef`,
-				message:
-					"external templateRef must stay within the workflow package or workspace",
-			});
-			return undefined;
-		}
-		const content = JSON.parse(await readFile(realTemplatePath, "utf8"));
-		if (!fragment) return content;
-		const resolved = resolveJsonPointer(content, fragment);
-		if (!resolved.exists)
-			issues.push({
-				path: `${path}.templateRef`,
-				message: `templateRef fragment not found: ${ref}`,
-			});
-		return resolved.value;
-	} catch (error) {
-		issues.push({
-			path: `${path}.templateRef`,
-			message: error instanceof Error ? error.message : String(error),
-		});
-		return undefined;
-	}
-}
-
-function isPathInside(filePath: string, root: string): boolean {
-	const rel = relative(root, filePath);
-	return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
-}
-
-function resolveJsonPointer(
-	value: unknown,
-	pointer: string,
-): { exists: boolean; value?: unknown } {
-	if (pointer === "" || pointer === "/") return { exists: true, value };
-	if (!pointer.startsWith("/")) return { exists: false };
-	let current = value;
-	for (const rawToken of pointer.slice(1).split("/")) {
-		const token = rawToken.replace(/~1/g, "/").replace(/~0/g, "~");
-		if (
-			!current ||
-			typeof current !== "object" ||
-			Array.isArray(current) ||
-			!Object.hasOwn(current, token)
-		)
-			return { exists: false };
-		current = (current as Record<string, unknown>)[token];
-	}
-	return { exists: true, value: current };
-}
-
 export async function compileWorkflow(
+	spec: ArtifactGraphWorkflowSpec,
+	options: CompileOptions & {
+		task?: string;
+		runtimeDefaults?: { model?: string; thinking?: ThinkingLevel };
+	},
+): Promise<any> {
+	const compilePlan = buildArtifactGraphCompilePlan(spec, options);
+	const compiled = await compileArtifactGraphPlan(compilePlan.plan, options);
+	annotateArtifactGraphCompiledWorkflow(compiled, compilePlan.stageMetadata);
+	return compiled;
+}
+
+async function compileArtifactGraphPlan(
 	spec: any,
 	options: CompileOptions & {
 		task?: string;
 		runtimeDefaults?: { model?: string; thinking?: ThinkingLevel };
 	},
 ): Promise<any> {
-	if (isArtifactGraphSpec(spec)) {
-		const lowered = lowerArtifactGraphSpec(spec, options);
-		const compiled = await compileWorkflow(lowered.spec, options);
-		annotateArtifactGraphCompiledWorkflow(compiled, lowered.stageMetadata);
-		return compiled;
-	}
-
-	const stages = spec.workflow?.stages;
+	const stages = spec.stages;
 	if (!Array.isArray(stages)) {
 		throw new WorkflowValidationError([
-			{ path: "$.workflow.stages", message: "must be an array" },
+			{ path: "$.artifactGraph.stages", message: "must be an array" },
 		]);
 	}
 
-	const agentName = spec.agent ?? spec.defaults?.agent ?? "scout";
+	const agentName = spec.defaults?.agent ?? "scout";
 	const agentCache = new Map<string, AgentDefinition>();
 	let defaultAgent: AgentDefinition | undefined;
 	const getDefaultAgent = async (): Promise<AgentDefinition> => {
-		defaultAgent ??= await loadStageFirstAgent(
+		defaultAgent ??= await loadWorkflowAgent(
 			agentName,
 			options.cwd,
 			agentCache,
-			"$.agent",
+			"$.defaults.agent",
 		);
 		return defaultAgent;
 	};
@@ -864,17 +690,13 @@ export async function compileWorkflow(
 		Object.keys(workflowInput).length > 0
 			? `# Workflow Input\n\n${JSON.stringify(workflowInput, null, 2)}`
 			: "";
-	const defaultModel =
-		options.runtimeDefaults?.model ?? spec.defaults?.model ?? spec.model;
+	const defaultModel = options.runtimeDefaults?.model ?? spec.defaults?.model;
 	const defaultThinking =
-		options.runtimeDefaults?.thinking ??
-		spec.defaults?.thinking ??
-		spec.thinking;
+		options.runtimeDefaults?.thinking ?? spec.defaults?.thinking;
 	const tasks: any[] = [];
 	const stageRecords: any[] = [];
 	const issues: ValidationIssue[] = [];
 	const validatedAgentPaths = new Set<string>();
-	validateToolSpecs(spec.tools, issues, "$.tools");
 	validateToolSpecs(spec.defaults?.tools, issues, "$.defaults.tools");
 	let previousStageTaskKeys: string[] = [];
 	const stageTaskKeys = new Map<string, string[]>();
@@ -904,37 +726,27 @@ export async function compileWorkflow(
 		const stageAgent =
 			stageAgentName === agentName
 				? await getDefaultAgent()
-				: await loadStageFirstAgent(
+				: await loadWorkflowAgent(
 						stageAgentName,
 						options.cwd,
 						agentCache,
-						`$.workflow.stages.${stage.id}.agent`,
+						`$.artifactGraph.stages.${stage.id}.agent`,
 					);
 		if (!validatedAgentPaths.has(stageAgent.sourcePath)) {
 			validateAgentRuntime(
 				stageAgent,
 				issues,
-				`$.workflow.stages.${jsonKey(stage.id)}.agent`,
+				`$.artifactGraph.stages.${jsonKey(stage.id)}.agent`,
 			);
 			validatedAgentPaths.add(stageAgent.sourcePath);
 		}
 		validateToolSpecs(
 			stage.tools,
 			issues,
-			`$.workflow.stages.${jsonKey(stage.id)}.tools`,
+			`$.artifactGraph.stages.${jsonKey(stage.id)}.tools`,
 		);
-		const stageInject = stage.inject;
-		const defaultInject = stage.type === "task";
-		const injectTask = stageInject ?? defaultInject;
-		const injectRuntimeTaskInPrompt =
-			stage.type === "foreach" ? false : injectTask;
-		const stageOutput = await resolveOutputTemplate(
-			stage.output,
-			spec,
-			options,
-			`$.workflow.stages.${jsonKey(stage.id)}.output`,
-			issues,
-		);
+		const injectTask = stage.type === "task";
+		const injectRuntimeTaskInPrompt = stage.type !== "foreach" && injectTask;
 		const normalizedPrompt = String(prompt ?? "").replace(
 			/\$\{item\}/g,
 			"the relevant item from the dependency context",
@@ -946,23 +758,20 @@ export async function compileWorkflow(
 			workflowInputText || undefined,
 			`# Workflow Stage\n\nstage=${stage.id}\ntype=${stage.type}`,
 			`# Instructions\n\n${normalizedPrompt}`,
-			formatOutputTemplateSection(stageOutput),
 			roleText || undefined,
 		]
 			.filter(Boolean)
 			.join("\n\n");
 		const toolSelection = resolveToolSelection(
-			[spec.tools, spec.defaults?.tools, stage.tools],
+			[spec.defaults?.tools, stage.tools],
 			stageAgent.tools,
 		);
 		const toolPath =
 			stage.tools !== undefined
-				? `$.workflow.stages.${jsonKey(stage.id)}.tools`
+				? `$.artifactGraph.stages.${jsonKey(stage.id)}.tools`
 				: spec.defaults?.tools !== undefined
 					? "$.defaults.tools"
-					: spec.tools !== undefined
-						? "$.tools"
-						: `$.workflow.stages.${jsonKey(stage.id)}.agent`;
+					: `$.artifactGraph.stages.${jsonKey(stage.id)}.agent`;
 		validateToolSubset(toolSelection.tools, stageAgent, issues, toolPath);
 		validateDelegationBoundary(toolSelection.tools, issues, toolPath);
 		const filteredToolSelection = filterToolSelection(toolSelection);
@@ -1019,7 +828,6 @@ export async function compileWorkflow(
 			explicitWorktreePolicy: stage.worktreePolicy !== undefined,
 			runtime,
 			safety,
-			output: stageOutput,
 			outputContract: stage.outputContract,
 			sourceContext: stage.sourceContext,
 			compiledPrompt,
@@ -1299,7 +1107,7 @@ export async function compileWorkflow(
 	for (const [index, stage] of stages.entries()) {
 		if (stage?.fast === "on")
 			issues.push({
-				path: `$.workflow.stages[${index}].fast`,
+				path: `$.artifactGraph.stages[${index}].fast`,
 				message: "fast:on is not supported",
 			});
 	}
@@ -1309,7 +1117,7 @@ export async function compileWorkflow(
 		schemaVersion: 1,
 		name: spec.name,
 		description: spec.description,
-		type: STAGE_FIRST_RUN_TYPE,
+		type: WORKFLOW_RUN_TYPE,
 		task: options.task,
 		cwd: options.cwd,
 		backend: { type: "local-pi", mode: "headless" },
@@ -1402,7 +1210,7 @@ function buildSupportTask(
 	};
 }
 
-async function loadStageFirstAgent(
+async function loadWorkflowAgent(
 	name: string,
 	cwd: string,
 	cache: Map<string, AgentDefinition>,

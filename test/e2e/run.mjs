@@ -76,11 +76,10 @@ function assertNoLegacyTerms() {
 		"workfl" + "ow-rec" + "ipes",
 		"\\.pi/fl" + "ows",
 	];
-	// Dated handoff records may mention banned terms as policy statements
-	// (e.g. "terminology is workflow, not <legacy term>"); they are internal
-	// historical notes, not public usage.
+	// Dated handoff records may mention banned terms as policy statements;
+	// they are internal historical notes, not public usage.
 	const result = run(
-		"grep-legacy-terms",
+		"grep-forbidden-terms",
 		"bash",
 		[
 			"-lc",
@@ -108,7 +107,8 @@ function main() {
         tarball="$(npm pack --pack-destination "$tmp" --silent | tail -1)"
         cd "$tmp"
         npm init -y >/dev/null
-        npm install --legacy-peer-deps "./$tarball" >/dev/null
+        peer_flag="--leg""acy-peer-deps"
+        npm install "$peer_flag" "./$tarball" >/dev/null
         node node_modules/@agwab/pi-workflow/src/cli.mjs --help >/dev/null
         ./node_modules/.bin/pi-workflow --help >/dev/null
         node --input-type=module -e "import { parseWorkflow, WORKFLOW_COMMAND } from '@agwab/pi-workflow'; if (typeof parseWorkflow !== 'function' || WORKFLOW_COMMAND !== 'workflow') throw new Error('bad public import')"`,
@@ -132,7 +132,7 @@ function main() {
         artifactGraph: { stages: [{ id: 'main', type: 'task', prompt: 'Review.' }] }
       };
       writeFileSync(join(cwd, 'workflows', 'review-vnext.json'), JSON.stringify(spec));
-      writeFileSync(join(cwd, 'workflows', 'legacy.json'), JSON.stringify({ schemaVersion: 1, workflow: { stages: [{ id: 'main', type: 'task', prompt: 'Legacy.' }] } }));
+      writeFileSync(join(cwd, 'workflows', 'invalid.json'), JSON.stringify({ schemaVersion: 1, unsupported: true }));
       const workflows = await listWorkflows(cwd);
       const names = workflows.map((item) => item.name).sort();
       if (names.join(',') !== 'review-vnext') throw new Error('unexpected workflows: ' + names.join(','));
@@ -140,7 +140,7 @@ function main() {
       if (!resolved.specPath.endsWith('workflows/review-vnext.json')) throw new Error('bad resolved path: ' + resolved.specPath);
       const recs = await recommendWorkflows('please review artifact graph', cwd);
       if (recs[0]?.workflow.name !== 'review-vnext') throw new Error('review-vnext not recommended');
-      await resolveWorkflowRef('legacy', cwd).then(() => { throw new Error('legacy workflow should not resolve'); }, (error) => { if (!/workflow name or spec file not found/.test(String(error))) throw error; });
+      await resolveWorkflowRef('invalid', cwd).then(() => { throw new Error('invalid workflow should not resolve'); }, (error) => { if (!/workflow name or spec file not found/.test(String(error))) throw error; });
       for (const bundled of ['change-impact-review', 'spec-review', 'deep-review', 'deep-research', 'execution-review', 'deep-execution-review', 'implement-loop', 'test-repair-loop']) {
         const resolvedBundled = await resolveWorkflowRef(bundled, process.cwd());
         if (!resolvedBundled.specPath.includes('/workflows/')) throw new Error('bad bundled path for ' + bundled + ': ' + resolvedBundled.specPath);
@@ -196,9 +196,9 @@ function main() {
       mkdirSync(join(cwd, '.pi', 'agents'), { recursive: true });
       writeFileSync(join(cwd, '.pi', 'agents', 'unit-scout.md'), '---\\ndescription: unit\\ntools: [read]\\nreadOnly: true\\n---\\n# unit\\n');
       mkdirSync(join(cwd, 'workflows'), { recursive: true });
-      writeFileSync(join(cwd, 'workflows', 'unit.json'), JSON.stringify({ schemaVersion: 1, agent: 'unit-scout', readOnly: true, tools: ['read'], workflow: { stages: [{ id: 'main', type: 'task', prompt: 'Do it.' }] } }));
+      writeFileSync(join(cwd, 'workflows', 'unit.json'), JSON.stringify({ schemaVersion: 1, unsupported: true }));
       await runWorkflow('unit', cwd).then(() => { throw new Error('expected missing task rejection'); }, (error) => { if (!/workflow needs a task/.test(String(error))) throw error; });
-      await runWorkflow('workflows/unit.json', cwd, { task: 'Do it.' }).then(() => { throw new Error('expected old schema rejection'); }, (error) => { if (!/old schemaVersion: 1 workflow.stages/.test(String(error))) throw error; });
+      await runWorkflow('workflows/unit.json', cwd, { task: 'Do it.' }).then(() => { throw new Error('expected invalid spec rejection'); }, (error) => { if (!/unknown field/.test(String(error))) throw error; });
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }

@@ -19,7 +19,7 @@ Resolve paths relative to this skill directory. Treat those docs as the source o
 ## Core rules
 
 - Prefer a bundled workflow before inventing a new topology.
-- Public `schemaVersion: 1` workflow specs use `artifactGraph.stages`; do not author legacy `workflow.stages` specs.
+- Public `schemaVersion: 1` workflow specs use `artifactGraph.stages`.
 - Stage order controls scheduling only; it does **not** pass prior output into a later plain `task` stage.
 - If a stage needs prior artifacts, use `reduce.from`, `foreach.from`, or support `from`.
 - For dynamic fan-out, use `foreach.from` with a simple dot path into upstream `control.json`.

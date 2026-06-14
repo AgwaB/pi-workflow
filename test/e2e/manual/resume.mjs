@@ -43,7 +43,7 @@ writeFileSync(
 		"---",
 		"# e2e-echo",
 		"",
-		"Respond with exactly the JSON the task asks for. No prose.",
+		"Respond with <control>, <analysis>, and <refs> sections. Put requested JSON in <control>.",
 		"",
 	].join("\n"),
 );
@@ -56,23 +56,19 @@ writeFileSync(
 			schemaVersion: 1,
 			name: "e2e-resume",
 			description: "Two-step echo workflow for resume E2E.",
-			agent: "e2e-echo",
-			readOnly: true,
-			tools: ["read"],
-			workflow: {
+			defaults: { agent: "e2e-echo", readOnly: true, tools: ["read"] },
+			artifactGraph: {
 				stages: [
 					{
 						id: "one",
 						type: "task",
-						output: { format: "json", requiredKeys: ["ok", "step"] },
-						prompt: 'Return JSON only: {"ok": true, "step": "one"}',
+						prompt: 'Put {"schema":"stage-control-v1","digest":"one done","ok":true,"step":"one"} in <control>.',
 					},
 					{
 						id: "two",
 						type: "reduce",
 						from: "one",
-						output: { format: "json", requiredKeys: ["ok", "step"] },
-						prompt: 'Return JSON only: {"ok": true, "step": "two"}',
+						prompt: 'Put {"schema":"stage-control-v1","digest":"two done","ok":true,"step":"two"} in <control>.',
 					},
 				],
 			},

@@ -4,9 +4,9 @@
 
 ### Breaking
 
-- `schemaVersion: 1` is now the artifact-graph public workflow contract.
-- Old `workflow.stages`, top-level `flow.type`, and legacy `output.format` authoring are rejected by the normal runtime.
-- Bundled starter workflows now use `artifactGraph.stages` and vNext `<control>/<analysis>/<refs>` output sections.
+- `schemaVersion: 1` is the artifact-graph public workflow contract.
+- Bundled starter workflows use `artifactGraph.stages` and vNext `<control>/<analysis>/<refs>` output sections.
+- Draft pre-launch authoring/runtime code paths were removed before public launch.
 
 ### Added
 

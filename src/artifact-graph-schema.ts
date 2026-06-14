@@ -1,7 +1,11 @@
 import { isAbsolute } from "node:path";
 
 import {
+	APPROVAL_MODES,
+	FAST_MODES,
+	THINKING_LEVELS,
 	TOOL_CLASSIFICATIONS,
+	WORKTREE_POLICIES,
 	WorkflowValidationError,
 	type ArtifactGraphStageType,
 	type ArtifactGraphWorkflowSpec,
@@ -65,14 +69,6 @@ const OUTPUT_KEYS = new Set([
 	"analysis",
 	"refs",
 	"maxDigestChars",
-]);
-const LEGACY_OUTPUT_KEYS = new Set([
-	"format",
-	"requiredKeys",
-	"onInvalid",
-	"contract",
-	"template",
-	"templateRef",
 ]);
 const REQUIRED_FLAG_KEYS = new Set(["required"]);
 const INPUT_POLICY_KEYS = new Set(["requiredReads", "enforcement"]);
@@ -138,10 +134,6 @@ const ROLES_KEYS = new Set([
 	"maxChars",
 ]);
 
-const LEGACY_STAGE_FIRST_MESSAGE =
-	"old schemaVersion: 1 workflow.stages is not supported in normal runtime; use artifactGraph.stages";
-const LEGACY_FLOW_MESSAGE =
-	"legacy flow.type bodies are not supported; schemaVersion: 1 now means artifactGraph";
 const TOOL_NAME_PATTERN = /^[A-Za-z0-9_.:/-]+$/;
 
 export function isArtifactGraphWorkflowSpecShape(
@@ -175,15 +167,6 @@ function validateArtifactGraphTopLevel(
 ): void {
 	if (spec.schemaVersion !== 1) {
 		issues.push({ path: "$.schemaVersion", message: "must be exactly 1" });
-	}
-	if (isRecord(spec.workflow) && spec.workflow.stages !== undefined) {
-		issues.push({
-			path: "$.workflow.stages",
-			message: LEGACY_STAGE_FIRST_MESSAGE,
-		});
-	}
-	if (isRecord(spec.flow) && spec.flow.type !== undefined) {
-		issues.push({ path: "$.flow.type", message: LEGACY_FLOW_MESSAGE });
 	}
 	rejectUnknownKeys(spec, TOP_LEVEL_KEYS, "$", issues);
 	optionalString(spec.name, "$.name", issues);
@@ -352,6 +335,20 @@ function validateStage(
 	optionalString(stage.agent, `${path}.agent`, issues);
 	optionalString(stage.cwd, `${path}.cwd`, issues);
 	optionalString(stage.model, `${path}.model`, issues);
+	optionalEnum(stage.thinking, THINKING_LEVELS, `${path}.thinking`, issues);
+	optionalEnum(stage.fast, FAST_MODES, `${path}.fast`, issues);
+	optionalEnum(
+		stage.approvalMode,
+		APPROVAL_MODES,
+		`${path}.approvalMode`,
+		issues,
+	);
+	optionalEnum(
+		stage.worktreePolicy,
+		WORKTREE_POLICIES,
+		`${path}.worktreePolicy`,
+		issues,
+	);
 	optionalBoolean(stage.readOnly, `${path}.readOnly`, issues);
 	optionalPositiveInteger(stage.maxRuntimeMs, `${path}.maxRuntimeMs`, issues);
 	optionalPositiveInteger(
@@ -492,15 +489,6 @@ function validateOutput(
 	if (value === undefined) return;
 	const output = recordAt(value, path, issues);
 	if (!output) return;
-	for (const key of Object.keys(output)) {
-		if (LEGACY_OUTPUT_KEYS.has(key)) {
-			issues.push({
-				path: `${path}.${jsonKey(key)}`,
-				message:
-					"legacy output field is not valid in artifactGraph; use controlSchema/analysis/refs",
-			});
-		}
-	}
 	rejectUnknownKeys(output, OUTPUT_KEYS, path, issues);
 	validateControlSchemaRef(
 		output.controlSchema,
@@ -930,6 +918,21 @@ function validateDefaults(
 	optionalString(defaults.cwd, `${path}.cwd`, issues);
 	optionalString(defaults.agent, `${path}.agent`, issues);
 	optionalString(defaults.model, `${path}.model`, issues);
+	optionalEnum(defaults.thinking, THINKING_LEVELS, `${path}.thinking`, issues);
+	optionalEnum(defaults.fast, FAST_MODES, `${path}.fast`, issues);
+	optionalEnum(
+		defaults.approvalMode,
+		APPROVAL_MODES,
+		`${path}.approvalMode`,
+		issues,
+	);
+	optionalEnum(
+		defaults.worktreePolicy,
+		WORKTREE_POLICIES,
+		`${path}.worktreePolicy`,
+		issues,
+	);
+	validateBackend(defaults.backend, `${path}.backend`, issues);
 	optionalBoolean(defaults.readOnly, `${path}.readOnly`, issues);
 	optionalPositiveInteger(
 		defaults.maxConcurrency,
@@ -1036,7 +1039,7 @@ function validateWorkflowToolObject(
 ): void {
 	rejectUnknownKeys(value, TOOL_OBJECT_KEYS, path, issues);
 	validateStringArray(value.extensions, `${path}.extensions`, issues);
-	validateStringArray(value.fallbackTools, `${path}.fallbackTools`, issues);
+	validateToolNameArray(value.fallbackTools, `${path}.fallbackTools`, issues);
 	optionalBoolean(value.optional, `${path}.optional`, issues);
 	if (
 		value.classification !== undefined &&
@@ -1053,6 +1056,30 @@ function workflowToolName(value: unknown): string | undefined {
 	if (typeof value === "string") return value;
 	if (isRecord(value) && typeof value.name === "string") return value.name;
 	return undefined;
+}
+
+function validateToolNameArray(
+	value: unknown,
+	path: string,
+	issues: ValidationIssue[],
+): void {
+	if (value === undefined) return;
+	if (!Array.isArray(value)) {
+		issues.push({ path, message: "must be an array" });
+		return;
+	}
+	const seen = new Set<string>();
+	for (const [index, item] of value.entries()) {
+		const itemPath = `${path}[${index}]`;
+		if (typeof item !== "string") {
+			issues.push({ path: itemPath, message: "must be a non-empty string" });
+			continue;
+		}
+		validateToolName(item, itemPath, issues);
+		if (seen.has(item))
+			issues.push({ path: itemPath, message: `duplicate value "${item}"` });
+		seen.add(item);
+	}
 }
 
 function validateToolName(
@@ -1180,6 +1207,42 @@ function optionalBoolean(
 ): void {
 	if (value !== undefined && typeof value !== "boolean") {
 		issues.push({ path, message: "must be a boolean" });
+	}
+}
+
+function optionalEnum<T extends readonly string[]>(
+	value: unknown,
+	values: T,
+	path: string,
+	issues: ValidationIssue[],
+): void {
+	if (value === undefined) return;
+	if (!values.includes(value as never)) {
+		issues.push({ path, message: `must be one of: ${values.join(", ")}` });
+	}
+}
+
+function validateBackend(
+	value: unknown,
+	path: string,
+	issues: ValidationIssue[],
+): void {
+	if (value === undefined) return;
+	const backend = recordAt(value, path, issues);
+	if (!backend) return;
+	rejectUnknownKeys(backend, new Set(["type", "mode"]), path, issues);
+	if (backend.type !== undefined && backend.type !== "local-pi") {
+		issues.push({ path: `${path}.type`, message: 'must be "local-pi"' });
+	}
+	if (
+		backend.mode !== undefined &&
+		backend.mode !== "auto" &&
+		backend.mode !== "headless"
+	) {
+		issues.push({
+			path: `${path}.mode`,
+			message: 'must be "auto" or "headless"',
+		});
 	}
 }
 

@@ -136,7 +136,7 @@ Bundled starters use normal Pi agent discovery. Ensure the named agents exist in
 
 ## Stage model
 
-Public `schemaVersion: 1` workflows use `artifactGraph.stages`. The old `workflow.stages` and top-level `flow.type` authoring surfaces are rejected by the normal runtime.
+Public `schemaVersion: 1` workflows use `artifactGraph.stages` as the only authoring surface.
 
 `fast: "on"` is intentionally unsupported in workflow specs; omit `fast` or use `"off"`/`"inherit"` where runtime defaults expose the field.
 
@@ -169,7 +169,7 @@ Use `foreach.from` for dynamic fan-out, `reduce.from` for subagent fan-in, and s
 - `from` is a data + order edge. Downstream artifact-graph stages receive a `workflow_artifact` manifest and digest-only inline source list; deterministic runtime decisions read upstream `control.json`.
 - `after` is order-only. It accepts a string or string array, waits for those stages, and does not make their artifacts available as source data.
 - `after: []` is an explicit parallel root. It opts out of the implicit previous-stage chain while documenting that the stage intentionally has no ordering dependency.
-- Parse-time graph validation rejects unknown stage references, self-dependencies, duplicate stage ids, dependency cycles, legacy output fields, and unsafe `controlSchema` paths.
+- Parse-time graph validation rejects unknown stage references, self-dependencies, duplicate stage ids, dependency cycles, unsupported output fields, and unsafe `controlSchema` paths.
 - `inputPolicy.requiredReads` is fail-closed: if declared, the task must read each listed `source.artifact` via `workflow_artifact` before its final output is accepted. Direct repo `read`/`grep` calls do not satisfy this proof; the ledger proves artifact access, not semantic use.
 - `sourceProjection.include` can inline small selected simple dot paths from upstream `control.json` (for example `$.digest` or `$.items`); full artifacts remain available through `workflow_artifact`.
 - A `type: "dag"` stage is a composite workflow/control container. Children may be `task`, `foreach`, `reduce`, support nodes, or nested `dag` stages. Child `from`/`after` references resolve only to siblings inside the same container.

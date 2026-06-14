@@ -6,7 +6,7 @@
 
 `pi-workflow` lets Pi run repeatable multi-agent workflows: research, review, implementation loops, test repair, and project-specific team routines.
 
-> **Breaking pre-1.0 workflow format:** public `schemaVersion: 1` specs now use `artifactGraph.stages`. Legacy `workflow.stages` specs are rejected by the normal runtime. See [`docs/MIGRATION.md`](./docs/MIGRATION.md) before upgrading existing workflows.
+Public `schemaVersion: 1` workflow specs use `artifactGraph.stages` as the artifact-graph contract.
 
 It is a thin orchestration layer on top of [`@agwab/pi-subagent`](https://www.npmjs.com/package/@agwab/pi-subagent). A workflow defines stages, agents, tools, output contracts, and support helpers. The concrete user task is still supplied at runtime in natural language.
 

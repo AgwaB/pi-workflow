@@ -28,7 +28,6 @@ import {
 } from "./store.js";
 import { resolveWorkflowBackend } from "./backend.js";
 import { ensureManagedWorktree } from "./worktree.js";
-import { buildJsonOutputRetryInstructions } from "./result.js";
 import { loadWorkflowHelper } from "./workflow-helpers.js";
 import {
 	WORKFLOW_ARTIFACT_TOOL_NAME,
@@ -43,21 +42,17 @@ import { writeVNextTaskArtifactBundle } from "./workflow-vnext-artifacts.js";
 import type { JsonSchema } from "./json-schema.js";
 import {
 	buildSourceContextPacket,
-	formatOutputTemplateSection,
 	summarizeWorkflowTelemetry,
 	type SourceContextPacketOptions,
 } from "./workflow-artifacts.js";
-import {
-	extractStageFirstForeachItems,
-	readSimpleJsonPath,
-} from "./workflow-runtime.js";
+import { readSimpleJsonPath } from "./workflow-runtime.js";
 import {
 	type CompiledTask,
 	type CompiledWorkflow,
 	type LoopResultStatus,
 	type LoopStateRecord,
 	type LoopUntilCondition,
-	STAGE_FIRST_RUN_TYPE,
+	WORKFLOW_RUN_TYPE,
 	type WorkflowIndexRecord,
 	type WorkflowRunRecord,
 	type WorkflowTaskRunRecord,
@@ -249,7 +244,7 @@ export async function scheduleRun(
 			compiled ?? (await readCompiledWorkflow(cwd, run.runId));
 		if (!compiledFlow) return run;
 
-		if (compiledFlow.type !== STAGE_FIRST_RUN_TYPE) {
+		if (compiledFlow.type !== WORKFLOW_RUN_TYPE) {
 			throw new Error(
 				`unsupported compiled workflow type: ${compiledFlow.type}`,
 			);
@@ -384,7 +379,7 @@ async function scheduleDag(
 	run: WorkflowRunRecord,
 	compiledFlow: CompiledWorkflow,
 ): Promise<void> {
-	if (compiledFlow.type === STAGE_FIRST_RUN_TYPE) {
+	if (compiledFlow.type === WORKFLOW_RUN_TYPE) {
 		const reconciled = await reconcileLoopTaskMaterialization(
 			cwd,
 			run,
@@ -472,25 +467,15 @@ async function materializeForeachTask(
 	const sourceTasks = run.tasks.filter((task) =>
 		sourceStageIds.includes(task.stageId ?? ""),
 	);
-	const extracted = template.artifactGraph?.enabled
-		? await extractArtifactGraphForeachItems(
-				cwd,
-				{
-					from: template.foreach.from,
-					sourcePolicy: stageSourcePolicy(compiledFlow, template.stageId),
-					maxItems: template.foreach.maxItems,
-				},
-				sourceTasks,
-			)
-		: await extractStageFirstForeachItems(
-				cwd,
-				{
-					from: template.foreach.from,
-					sourcePolicy: stageSourcePolicy(compiledFlow, template.stageId),
-					maxItems: template.foreach.maxItems,
-				},
-				sourceTasks,
-			);
+	const extracted = await extractArtifactGraphForeachItems(
+		cwd,
+		{
+			from: template.foreach.from,
+			sourcePolicy: stageSourcePolicy(compiledFlow, template.stageId),
+			maxItems: template.foreach.maxItems,
+		},
+		sourceTasks,
+	);
 
 	if (extracted.error) {
 		setTaskTerminal(templateRunTask, "blocked", "foreach_expansion_blocked", {
@@ -1901,7 +1886,6 @@ function buildForeachGeneratedTasks(
 				: undefined,
 			`# Workflow Stage\n\nstage=${template.stageId}\ntype=foreach\nitem=${taskId}`,
 			`# Instructions\n\n${instructions}`,
-			formatOutputTemplateSection(template.output),
 			template.foreach!.roleText || undefined,
 		]
 			.filter(Boolean)
@@ -2058,9 +2042,7 @@ async function launchPendingTaskAt(
 
 	let launchTask = await prepareDagTask(cwd, run, compiledFlow, index);
 	if (task.outputRetry) {
-		launchTask = task.artifactGraph?.enabled
-			? await prepareArtifactGraphRetryTask(cwd, task, launchTask)
-			: await prepareOutputRetryTask(cwd, task, launchTask);
+		launchTask = await prepareArtifactGraphRetryTask(cwd, task, launchTask);
 	}
 
 	try {
@@ -2688,34 +2670,6 @@ async function prepareArtifactGraphRetryTask(
 	};
 }
 
-async function prepareOutputRetryTask(
-	cwd: string,
-	task: WorkflowTaskRunRecord,
-	preparedTask: CompiledWorkflow["tasks"][number],
-): Promise<CompiledWorkflow["tasks"][number]> {
-	const retryInstructions = buildJsonOutputRetryInstructions(task);
-	const invalidAttempt = task.outputRetry?.attempts
-		? `${task.files.output}.invalid-attempt-${task.outputRetry.attempts}`
-		: task.files.output;
-	const previousOutput = await readOutputPreview(cwd, invalidAttempt, 1200);
-
-	return {
-		...preparedTask,
-		cwd: task.cwd,
-		compiledPrompt: [
-			preparedTask.compiledPrompt,
-			"# Output Contract Retry Instructions",
-			retryInstructions,
-			"# Previous Invalid Output Attempt",
-			`Previous task: ${task.taskId} (${task.specId})`,
-			`Previous status: ${task.status}/${task.statusDetail}`,
-			`Previous output: ${invalidAttempt}`,
-			"Previous output preview:",
-			previousOutput || "(empty or unavailable)",
-		].join("\n\n"),
-	};
-}
-
 function sourceContextOptions(
 	task: Pick<CompiledTask, "sourceContext">,
 ): SourceContextPacketOptions {
@@ -2804,15 +2758,6 @@ async function readOutputText(
 	}
 }
 
-async function readOutputPreview(
-	cwd: string,
-	projectPath: string,
-	maxChars = 4000,
-): Promise<string> {
-	const output = await readOutputText(cwd, projectPath);
-	return output.text.trim().slice(0, maxChars);
-}
-
 async function readCompiledWorkflow(
 	cwd: string,
 	runId: string,
@@ -2895,4 +2840,3 @@ export async function runWorkflow(
 		throw new Error("This workflow needs a task");
 	return runWorkflowSpec(specPath, cwd, options);
 }
-export const waitForWorkflowRun = waitForRun;

@@ -36,13 +36,12 @@ import {
 import { resolveWorkflowRuntime } from "../../.tmp/unit/workflow-runtime.js";
 import {
 	loadWorkflow,
-	parseLegacyStageFirstWorkflowSpec,
 	parseWorkflow as parsePublicWorkflow,
 } from "../../.tmp/unit/schema.js";
 import {
 	acquireSupervisorLease,
 	createRunRecord,
-	createStageFirstRunRecord,
+	createWorkflowRunRecord,
 	deriveRunStatus,
 	heartbeatSupervisorLease,
 	readRunRecord,
@@ -57,17 +56,10 @@ import {
 } from "../../.tmp/unit/store.js";
 import {
 	WorkflowValidationError,
-	STAGE_FIRST_RUN_TYPE,
+	WORKFLOW_RUN_TYPE,
 } from "../../.tmp/unit/types.js";
 import {
-	applyTaskResultArtifact,
-	buildJsonOutputRetryInstructions,
-	extractJsonOutput,
-	parseJsonOutput,
-} from "../../.tmp/unit/result.js";
-import {
 	canStageProceedAfterPreviousFailure,
-	extractStageFirstForeachItems,
 	shouldScheduleAfterStageFailure,
 } from "../../.tmp/unit/workflow-runtime.js";
 import { deriveWorkflowStatus, summarizeTasks } from "../../.tmp/unit/store.js";
@@ -128,19 +120,63 @@ function writeAgent(cwd, name, tools = "read, grep, find, ls") {
 	);
 }
 
-const parseWorkflow = parseLegacyStageFirstWorkflowSpec;
+const parseWorkflow = parsePublicWorkflow;
 
 function workflowSpec(agent = "unit-scout", extra = {}) {
+	const {
+		artifactGraph,
+		defaults,
+		tools,
+		readOnly,
+		model,
+		thinking,
+		fast,
+		approvalMode,
+		worktreePolicy,
+		maxConcurrency,
+		maxRuntimeMs,
+		backend,
+		...rest
+	} = extra;
+	const baseDefaults = {
+		agent,
+		readOnly: readOnly ?? true,
+		tools: tools ?? ["read"],
+		...(model !== undefined ? { model } : {}),
+		...(thinking !== undefined ? { thinking } : {}),
+		...(fast !== undefined ? { fast } : {}),
+		...(approvalMode !== undefined ? { approvalMode } : {}),
+		...(worktreePolicy !== undefined ? { worktreePolicy } : {}),
+		...(maxConcurrency !== undefined ? { maxConcurrency } : {}),
+		...(maxRuntimeMs !== undefined ? { maxRuntimeMs } : {}),
+		...(backend !== undefined ? { backend } : {}),
+		...(defaults ?? {}),
+	};
+	const graph = artifactGraph ?? {
+		stages: [{ id: "main", type: "task", prompt: "Do the work." }],
+	};
 	return {
 		schemaVersion: 1,
-		agent,
-		readOnly: true,
-		tools: ["read"],
-		workflow: {
-			stages: [{ id: "main", type: "task", prompt: "Do the work." }],
+		defaults: baseDefaults,
+		artifactGraph: {
+			...graph,
+			stages: normalizeArtifactGraphStages(graph.stages ?? []),
 		},
-		...extra,
+		...rest,
 	};
+}
+
+function normalizeArtifactGraphStages(stages) {
+	return stages.map((stage) => normalizeArtifactGraphStage(stage));
+}
+
+function normalizeArtifactGraphStage(stage) {
+	const next = { ...stage };
+	if (Array.isArray(next.stages))
+		next.stages = normalizeArtifactGraphStages(next.stages);
+	if (next.onExhausted)
+		next.onExhausted = normalizeArtifactGraphStage(next.onExhausted);
+	return next;
 }
 
 function artifactGraphWorkflowSpec(extra = {}) {
@@ -206,7 +242,7 @@ function flattenArtifactGraphStages(stages) {
 
 function loopWorkflowSpec(loop = {}) {
 	return workflowSpec("unit-scout", {
-		workflow: {
+		artifactGraph: {
 			stages: [
 				{
 					id: "fix-loop",
@@ -220,11 +256,6 @@ function loopWorkflowSpec(loop = {}) {
 						{
 							id: "check",
 							type: "task",
-							output: {
-								format: "json",
-								requiredKeys: ["status", "verdict"],
-								onInvalid: "fail",
-							},
 							prompt: "Check the fix.",
 						},
 					],
@@ -236,21 +267,6 @@ function loopWorkflowSpec(loop = {}) {
 						],
 					},
 					...loop,
-				},
-			],
-		},
-	});
-}
-
-function dagWorkflowSpec(dag = {}) {
-	return workflowSpec("unit-scout", {
-		workflow: {
-			stages: [
-				{
-					id: "box",
-					type: "dag",
-					stages: [{ id: "child", type: "task", prompt: "Child." }],
-					...dag,
 				},
 			],
 		},
@@ -282,7 +298,7 @@ async function createLoopRun(cwd, spec = loopWorkflowSpec()) {
 		cwd,
 		task: "Fix the loop target",
 	});
-	const { run } = await createStageFirstRunRecord(
+	const { run } = await createWorkflowRunRecord(
 		cwd,
 		compiled,
 		join(cwd, "workflows", "loop.json"),
@@ -369,7 +385,7 @@ function dagContainerRuntimeSpec({
 	reportSourcePolicy,
 } = {}) {
 	return workflowSpec("unit-scout", {
-		workflow: {
+		artifactGraph: {
 			stages: [
 				{
 					id: "setup",
@@ -619,7 +635,7 @@ test("agent parser reads frontmatter tool ceilings", () => {
 	assert.equal(agent.readOnly, true);
 });
 
-test("public schemaVersion 1 parser accepts artifact graph and rejects old workflow.stages", () => {
+test("public schemaVersion 1 parser accepts artifact graph and rejects non-artifactGraph top-level shapes", () => {
 	const parsed = parsePublicWorkflow(
 		artifactGraphWorkflowSpec({
 			name: "impact-vnext",
@@ -658,26 +674,14 @@ test("public schemaVersion 1 parser accepts artifact graph and rejects old workf
 		"risk.analysis",
 	);
 
-	const oldStageFirst = assertThrowsFlow(() =>
-		parsePublicWorkflow(workflowSpec()),
-	);
-	assertIssue(
-		oldStageFirst,
-		"$.workflow.stages",
-		"old schemaVersion: 1 workflow.stages is not supported",
-	);
-
-	const legacyFlow = assertThrowsFlow(() =>
+	const invalidTopLevel = assertThrowsFlow(() =>
 		parsePublicWorkflow({
 			schemaVersion: 1,
-			flow: { type: "single", task: { agent: "unit-scout", task: "legacy" } },
+			artifactGraph: { stages: [{ id: "main", type: "task", prompt: "Do." }] },
+			unsupported: true,
 		}),
 	);
-	assertIssue(
-		legacyFlow,
-		"$.flow.type",
-		"schemaVersion: 1 now means artifactGraph",
-	);
+	assertIssue(invalidTopLevel, "$.unsupported", "unknown field");
 });
 
 test("artifact graph schema validates sourcePolicy maxItems and schema refs", () => {
@@ -820,7 +824,7 @@ test("artifact graph loader rejects missing controlSchema files", async () => {
 	}
 });
 
-test("artifact graph schema rejects legacy output and invalid required reads", () => {
+test("artifact graph schema rejects unknown output fields and invalid required reads", () => {
 	const invalid = assertThrowsFlow(() =>
 		parsePublicWorkflow(
 			artifactGraphWorkflowSpec({
@@ -830,7 +834,7 @@ test("artifact graph schema rejects legacy output and invalid required reads", (
 							id: "extract",
 							type: "task",
 							prompt: "Extract.",
-							output: { format: "json", requiredKeys: ["items"] },
+							output: { unexpected: true, extra: ["items"] },
 						},
 						{
 							id: "review",
@@ -848,13 +852,13 @@ test("artifact graph schema rejects legacy output and invalid required reads", (
 	);
 	assertIssue(
 		invalid,
-		"$.artifactGraph.stages[0].output.format",
-		"legacy output field",
+		"$.artifactGraph.stages[0].output.unexpected",
+		"unknown field",
 	);
 	assertIssue(
 		invalid,
-		"$.artifactGraph.stages[0].output.requiredKeys",
-		"legacy output field",
+		"$.artifactGraph.stages[0].output.extra",
+		"unknown field",
 	);
 	assertIssue(
 		invalid,
@@ -868,314 +872,6 @@ test("artifact graph schema rejects legacy output and invalid required reads", (
 	);
 });
 
-test("legacy stage-first parser accepts old workflow model for internal runtime coverage", () => {
-	const parsed = parseWorkflow(workflowSpec());
-	assert.equal(parsed.schemaVersion, 1);
-	assert.equal(parsed.workflow.stages[0].id, "main");
-
-	const wrongVersion = assertThrowsFlow(() =>
-		parseWorkflow({ ...workflowSpec(), schemaVersion: 99 }),
-	);
-	assertIssue(wrongVersion, "$.schemaVersion", "must be exactly 1");
-
-	const continuation = assertThrowsFlow(() =>
-		parseWorkflow(
-			workflowSpec("unit-scout", {
-				workflow: {
-					stages: [
-						{
-							id: "final",
-							type: "reduce",
-							continuation: { mode: "ask" },
-							prompt: "Final",
-						},
-					],
-				},
-			}),
-		),
-	);
-	assertIssue(
-		continuation,
-		"$.workflow.stages[0].continuation",
-		"unknown field",
-	);
-});
-
-test("schema accepts stage-level inject and rejects item-level inject", () => {
-	const parsed = parseWorkflow(
-		workflowSpec("unit-scout", {
-			workflow: {
-				stages: [
-					{ id: "entry", type: "task", inject: false, prompt: "Entry" },
-					{
-						id: "fanout",
-						type: "parallel",
-						inject: true,
-						tasks: [
-							{ id: "a", prompt: "A" },
-							{ id: "b", prompt: "B" },
-						],
-					},
-					{ id: "summary", type: "reduce", inject: true, prompt: "Summary" },
-				],
-			},
-		}),
-	);
-	assert.equal(parsed.workflow.stages[0].inject, false);
-	assert.equal(parsed.workflow.stages[1].inject, true);
-	assert.equal(parsed.workflow.stages[2].inject, true);
-
-	assertThrowsFlow(() =>
-		parseWorkflow(
-			workflowSpec("unit-scout", {
-				workflow: {
-					stages: [
-						{
-							id: "fanout",
-							type: "parallel",
-							tasks: [
-								{ id: "a", prompt: "A", inject: true },
-								{ id: "b", prompt: "B" },
-							],
-						},
-					],
-				},
-			}),
-		),
-	);
-
-	assertThrowsFlow(() =>
-		parseWorkflow(
-			workflowSpec("unit-scout", {
-				workflow: {
-					stages: [
-						{
-							id: "extract",
-							type: "task",
-							output: { format: "json" },
-							prompt: "Extract",
-						},
-						{
-							id: "verify",
-							type: "foreach",
-							from: { stage: "extract", path: "$.items" },
-							each: { prompt: "Verify", inject: true },
-						},
-					],
-				},
-			}),
-		),
-	);
-});
-
-test("schema accepts valid loop with until all and onExhausted reduce", () => {
-	const parsed = parseWorkflow(
-		loopWorkflowSpec({
-			onExhausted: {
-				id: "loop-summary",
-				type: "reduce",
-				prompt: "Summarize remaining failures.",
-			},
-		}),
-	);
-
-	assert.equal(parsed.workflow.stages[0].type, "loop");
-	assert.equal(parsed.workflow.stages[0].maxRounds, 5);
-	assert.equal(parsed.workflow.stages[0].until.all.length, 2);
-	assert.equal(parsed.workflow.stages[0].onExhausted.type, "reduce");
-});
-
-test("schema rejects nested loop child", () => {
-	const error = assertThrowsFlow(() =>
-		parseWorkflow(
-			loopWorkflowSpec({
-				stages: [
-					{
-						id: "inner",
-						type: "loop",
-						stages: [],
-						maxRounds: 1,
-						until: { stage: "check", path: "$.status", equals: "pass" },
-					},
-					{ id: "check", type: "task", prompt: "Check." },
-				],
-			}),
-		),
-	);
-	assertIssue(
-		error,
-		"$.workflow.stages[0].stages[0].type",
-		"not supported in v1",
-	);
-});
-
-test("schema rejects foreach child in loop as deferred", () => {
-	const error = assertThrowsFlow(() =>
-		parseWorkflow(
-			loopWorkflowSpec({
-				stages: [
-					{
-						id: "items",
-						type: "foreach",
-						from: { stage: "check", path: "$.items" },
-						each: { prompt: "Review ${item}" },
-					},
-					{ id: "check", type: "task", prompt: "Check." },
-				],
-			}),
-		),
-	);
-	assertIssue(error, "$.workflow.stages[0].stages[0].type", "deferred");
-});
-
-test("schema rejects support child in loop as deferred", () => {
-	const error = assertThrowsFlow(() =>
-		parseWorkflow(
-			loopWorkflowSpec({
-				stages: [
-					{ id: "implement", type: "task", prompt: "Implement." },
-					{ id: "gate", support: { uses: "./helpers/gate.mjs" } },
-					{ id: "check", type: "task", prompt: "Check." },
-				],
-			}),
-		),
-	);
-	assertIssue(error, "$.workflow.stages[0].stages[1].support", "deferred");
-});
-
-test("schema rejects parallel child in loop", () => {
-	const error = assertThrowsFlow(() =>
-		parseWorkflow(
-			loopWorkflowSpec({
-				stages: [
-					{
-						id: "implement",
-						type: "parallel",
-						tasks: [
-							{ id: "a", prompt: "A" },
-							{ id: "b", prompt: "B" },
-						],
-					},
-					{ id: "check", type: "task", prompt: "Check." },
-				],
-			}),
-		),
-	);
-	assertIssue(
-		error,
-		"$.workflow.stages[0].stages[0].type",
-		"parallel child stages are not supported in loop v1",
-	);
-});
-
-test("schema rejects loop until referencing a non-final child stage", () => {
-	const error = assertThrowsFlow(() =>
-		parseWorkflow(
-			loopWorkflowSpec({
-				stages: [
-					{
-						id: "implement",
-						type: "task",
-						readOnly: false,
-						tools: ["read", "edit"],
-						prompt: "Implement.",
-					},
-					{ id: "check", type: "task", tools: ["read"], prompt: "Check." },
-				],
-				until: { stage: "implement", path: "$.status", equals: "pass" },
-			}),
-		),
-	);
-	assertIssue(error, "$.workflow.stages[0].until.stage", "final child stage");
-});
-
-test("schema rejects loop child from fan-out", () => {
-	const error = assertThrowsFlow(() =>
-		parseWorkflow(
-			loopWorkflowSpec({
-				stages: [
-					{ id: "implement", type: "task", prompt: "Implement." },
-					{ id: "check", type: "task", from: "implement", prompt: "Check." },
-				],
-			}),
-		),
-	);
-	assertIssue(
-		error,
-		"$.workflow.stages[0].stages[1].from",
-		"must not define from",
-	);
-});
-
-test("schema rejects invalid stage after shapes", () => {
-	const nonString = assertThrowsFlow(() =>
-		parseWorkflow(
-			workflowSpec("unit-scout", {
-				workflow: {
-					stages: [
-						{ id: "one", type: "task", prompt: "One." },
-						{ id: "two", type: "task", after: ["one", 42], prompt: "Two." },
-					],
-				},
-			}),
-		),
-	);
-	assertIssue(nonString, "$.workflow.stages[1].after[1]", "non-empty string");
-
-	const empty = assertThrowsFlow(() =>
-		parseWorkflow(
-			workflowSpec("unit-scout", {
-				workflow: {
-					stages: [
-						{ id: "one", type: "task", prompt: "One." },
-						{ id: "two", type: "task", after: "", prompt: "Two." },
-					],
-				},
-			}),
-		),
-	);
-	assertIssue(empty, "$.workflow.stages[1].after", "non-empty string");
-});
-
-test("schema rejects loop child after fan-out", () => {
-	const error = assertThrowsFlow(() =>
-		parseWorkflow(
-			loopWorkflowSpec({
-				stages: [
-					{ id: "implement", type: "task", prompt: "Implement." },
-					{ id: "check", type: "task", after: "implement", prompt: "Check." },
-				],
-			}),
-		),
-	);
-	assertIssue(
-		error,
-		"$.workflow.stages[0].stages[1].after",
-		"must not define after",
-	);
-});
-
-test("schema rejects loop until check before a later mutating child", () => {
-	const error = assertThrowsFlow(() =>
-		parseWorkflow(
-			loopWorkflowSpec({
-				stages: [
-					{ id: "implement", type: "task", prompt: "Implement." },
-					{ id: "check", type: "task", tools: ["read"], prompt: "Check." },
-					{
-						id: "mutate-again",
-						type: "task",
-						tools: ["read", "edit"],
-						prompt: "Mutate after check.",
-					},
-				],
-				until: { stage: "check", path: "$.status", equals: "pass" },
-			}),
-		),
-	);
-	assertIssue(error, "$.workflow.stages[0].until.stage", "final child stage");
-});
-
 test("schema accepts bundled implement-loop artifact graph shape", () => {
 	const spec = JSON.parse(
 		readFileSync(
@@ -1185,281 +881,6 @@ test("schema accepts bundled implement-loop artifact graph shape", () => {
 	);
 	assert.doesNotThrow(() => parsePublicWorkflow(spec));
 	assert.equal(spec.artifactGraph.stages[0].type, "loop");
-});
-
-test("schema rejects duplicate top-level stage ids", () => {
-	const error = assertThrowsFlow(() =>
-		parseWorkflow(
-			workflowSpec("unit-scout", {
-				workflow: {
-					stages: [
-						{ id: "duplicate", type: "task", prompt: "One." },
-						{ id: "duplicate", type: "task", prompt: "Two." },
-					],
-				},
-			}),
-		),
-	);
-	assertIssue(error, "$.workflow.stages[1].id", "duplicate stage id");
-});
-
-test("schema rejects unknown stage references in DAG edges", () => {
-	const cases = [
-		{
-			spec: workflowSpec("unit-scout", {
-				workflow: {
-					stages: [
-						{ id: "one", type: "task", prompt: "One." },
-						{ id: "two", type: "task", from: "ghost", prompt: "Two." },
-					],
-				},
-			}),
-			path: "$.workflow.stages[1].from",
-		},
-		{
-			spec: workflowSpec("unit-scout", {
-				workflow: {
-					stages: [
-						{ id: "one", type: "task", prompt: "One." },
-						{
-							id: "two",
-							type: "task",
-							from: ["one", "ghost"],
-							prompt: "Two.",
-						},
-					],
-				},
-			}),
-			path: "$.workflow.stages[1].from[1]",
-		},
-		{
-			spec: workflowSpec("unit-scout", {
-				workflow: {
-					stages: [
-						{ id: "one", type: "task", prompt: "One." },
-						{
-							id: "two",
-							type: "foreach",
-							from: { stage: "ghost", path: "$.items" },
-							each: { prompt: "Two ${item}." },
-						},
-					],
-				},
-			}),
-			path: "$.workflow.stages[1].from.stage",
-		},
-		{
-			spec: workflowSpec("unit-scout", {
-				workflow: {
-					stages: [
-						{ id: "one", type: "task", prompt: "One." },
-						{ id: "two", type: "task", after: "ghost", prompt: "Two." },
-					],
-				},
-			}),
-			path: "$.workflow.stages[1].after",
-		},
-	];
-
-	for (const item of cases) {
-		const error = assertThrowsFlow(() => parseWorkflow(item.spec));
-		assertIssue(error, item.path, "unknown stage reference");
-	}
-});
-
-test("schema rejects DAG self-dependencies", () => {
-	const error = assertThrowsFlow(() =>
-		parseWorkflow(
-			workflowSpec("unit-scout", {
-				workflow: {
-					stages: [{ id: "one", type: "task", from: "one", prompt: "One." }],
-				},
-			}),
-		),
-	);
-	assertIssue(error, "$.workflow.stages[0].from", "depend on itself");
-});
-
-test("schema rejects DAG dependency cycles", () => {
-	const error = assertThrowsFlow(() =>
-		parseWorkflow(
-			workflowSpec("unit-scout", {
-				workflow: {
-					stages: [
-						{ id: "a", type: "task", after: "b", prompt: "A." },
-						{ id: "b", type: "task", from: "a", prompt: "B." },
-					],
-				},
-			}),
-		),
-	);
-	assertIssue(
-		error,
-		"$.workflow.stages[1].from",
-		"dependency cycle detected: a -> b -> a",
-	);
-});
-
-test("schema accepts dag containers with diamond and nested child graphs", () => {
-	assert.doesNotThrow(() =>
-		parseWorkflow(
-			dagWorkflowSpec({
-				stages: [
-					{ id: "a", type: "task", prompt: "A." },
-					{ id: "b", type: "task", after: "a", prompt: "B." },
-					{ id: "c", type: "task", after: "a", prompt: "C." },
-					{ id: "d", type: "reduce", from: ["b", "c"], prompt: "D." },
-				],
-			}),
-		),
-	);
-
-	assert.doesNotThrow(() =>
-		parseWorkflow(
-			dagWorkflowSpec({
-				stages: [
-					{
-						id: "inner",
-						type: "dag",
-						stages: [
-							{ id: "first", type: "task", prompt: "First." },
-							{
-								id: "last",
-								type: "task",
-								from: "first",
-								prompt: "Last.",
-							},
-						],
-					},
-					{ id: "outer", type: "reduce", from: "inner", prompt: "Outer." },
-				],
-			}),
-		),
-	);
-});
-
-test("schema rejects leaf fields on dag containers", () => {
-	const error = assertThrowsFlow(() =>
-		parseWorkflow(dagWorkflowSpec({ prompt: "Not on a container." })),
-	);
-	assertIssue(error, "$.workflow.stages[0].prompt", "unknown field");
-});
-
-test("schema rejects loop children in dag containers", () => {
-	const error = assertThrowsFlow(() =>
-		parseWorkflow(
-			dagWorkflowSpec({
-				stages: [
-					{
-						id: "inner-loop",
-						type: "loop",
-						stages: [],
-						maxRounds: 1,
-						until: { stage: "check", path: "$.status", equals: "pass" },
-					},
-				],
-			}),
-		),
-	);
-	assertIssue(
-		error,
-		"$.workflow.stages[0].stages[0].type",
-		"run the loop as a top-level stage",
-	);
-});
-
-test("schema scopes dag child references to sibling stages", () => {
-	const error = assertThrowsFlow(() =>
-		parseWorkflow(
-			workflowSpec("unit-scout", {
-				workflow: {
-					stages: [
-						{ id: "outer", type: "task", prompt: "Outer." },
-						{
-							id: "box",
-							type: "dag",
-							outputFrom: "inner",
-							stages: [
-								{
-									id: "inner",
-									type: "task",
-									after: "outer",
-									prompt: "Inner.",
-								},
-							],
-						},
-					],
-				},
-			}),
-		),
-	);
-	assertIssue(
-		error,
-		"$.workflow.stages[1].stages[0].after",
-		"stage references resolve within the same container",
-	);
-});
-
-test("schema rejects dag outputFrom naming a missing child", () => {
-	const error = assertThrowsFlow(() =>
-		parseWorkflow(dagWorkflowSpec({ outputFrom: "missing" })),
-	);
-	assertIssue(
-		error,
-		"$.workflow.stages[0].outputFrom",
-		"unknown child stage reference",
-	);
-});
-
-test("schema rejects dag containers with multiple sink children and no outputFrom", () => {
-	const error = assertThrowsFlow(() =>
-		parseWorkflow(
-			dagWorkflowSpec({
-				stages: [
-					{ id: "left", type: "task", prompt: "Left." },
-					{ id: "right", type: "task", prompt: "Right." },
-				],
-			}),
-		),
-	);
-	assertIssue(error, "$.workflow.stages[0].outputFrom", "left, right");
-});
-
-test("schema rejects duplicate dag child ids", () => {
-	const error = assertThrowsFlow(() =>
-		parseWorkflow(
-			dagWorkflowSpec({
-				stages: [
-					{ id: "same", type: "task", prompt: "One." },
-					{ id: "same", type: "task", prompt: "Two." },
-				],
-			}),
-		),
-	);
-	assertIssue(
-		error,
-		"$.workflow.stages[0].stages[1].id",
-		"duplicate child stage id",
-	);
-});
-
-test("schema rejects cycles among dag children with scoped paths", () => {
-	const error = assertThrowsFlow(() =>
-		parseWorkflow(
-			dagWorkflowSpec({
-				outputFrom: "a",
-				stages: [
-					{ id: "a", type: "task", after: ["b"], prompt: "A." },
-					{ id: "b", type: "task", after: ["a"], prompt: "B." },
-				],
-			}),
-		),
-	);
-	assertIssue(
-		error,
-		"$.workflow.stages[0].stages[1].after[0]",
-		"dependency cycle detected: a -> b -> a",
-	);
 });
 
 test("schema accepts bundled artifact graph workflow fixtures", () => {
@@ -1489,142 +910,30 @@ test("bundled artifact graph outputs declare control schemas", () => {
 	}
 });
 
-test("schema rejects loop dependsOn because stage-first dependencies use from", () => {
-	const error = assertThrowsFlow(() =>
-		parseWorkflow(loopWorkflowSpec({ dependsOn: ["setup.main"] })),
-	);
-	assertIssue(error, "$.workflow.stages[0].dependsOn", "unknown field");
-});
-
-test("schema rejects loop missing its own id", () => {
-	const spec = loopWorkflowSpec();
-	delete spec.workflow.stages[0].id;
-	const error = assertThrowsFlow(() => parseWorkflow(spec));
-	assertIssue(error, "$.workflow.stages[0].id", "is required");
-});
-
-test("schema rejects loop child missing id", () => {
-	const error = assertThrowsFlow(() =>
-		parseWorkflow(
-			loopWorkflowSpec({
-				stages: [
-					{ type: "task", prompt: "Implement." },
-					{ id: "check", type: "task", prompt: "Check." },
-				],
-			}),
-		),
-	);
-	assertIssue(error, "$.workflow.stages[0].stages[0].id", "is required");
-});
-
-test("schema rejects duplicate loop child ids", () => {
-	const error = assertThrowsFlow(() =>
-		parseWorkflow(
-			loopWorkflowSpec({
-				stages: [
-					{ id: "implement", type: "task", prompt: "Implement." },
-					{ id: "implement", type: "task", prompt: "Check." },
-				],
-			}),
-		),
-	);
-	assertIssue(
-		error,
-		"$.workflow.stages[0].stages[1].id",
-		"duplicate child stage id",
-	);
-});
-
-test("schema rejects loop maxRounds missing", () => {
-	const error = assertThrowsFlow(() =>
-		parseWorkflow(loopWorkflowSpec({ maxRounds: undefined })),
-	);
-	assertIssue(error, "$.workflow.stages[0].maxRounds", "is required");
-});
-
-test("schema rejects loop maxRounds zero", () => {
-	const error = assertThrowsFlow(() =>
-		parseWorkflow(loopWorkflowSpec({ maxRounds: 0 })),
-	);
-	assertIssue(error, "$.workflow.stages[0].maxRounds", "positive integer");
-});
-
-test("schema rejects loop maxRounds above hard cap", () => {
-	const error = assertThrowsFlow(() =>
-		parseWorkflow(loopWorkflowSpec({ maxRounds: 51 })),
-	);
-	assertIssue(
-		error,
-		"$.workflow.stages[0].maxRounds",
-		"less than or equal to 50",
-	);
-});
-
-test("schema rejects loop until missing", () => {
-	const error = assertThrowsFlow(() =>
-		parseWorkflow(loopWorkflowSpec({ until: undefined })),
-	);
-	assertIssue(error, "$.workflow.stages[0].until", "is required");
-});
-
-test("schema rejects loop until path not starting with dollar dot", () => {
-	const error = assertThrowsFlow(() =>
-		parseWorkflow(
-			loopWorkflowSpec({
-				until: { stage: "check", path: "status", equals: "pass" },
-			}),
-		),
-	);
-	assertIssue(error, "$.workflow.stages[0].until.path", "starting with $.");
-});
-
-test("schema rejects loop until leaf unknown stage ref", () => {
-	const error = assertThrowsFlow(() =>
-		parseWorkflow(
-			loopWorkflowSpec({
-				until: { stage: "review", path: "$.status", equals: "pass" },
-			}),
-		),
-	);
-	assertIssue(error, "$.workflow.stages[0].until.stage", "unknown");
-});
-
-test("schema rejects loop onExhausted non-reduce type", () => {
-	const error = assertThrowsFlow(() =>
-		parseWorkflow(
-			loopWorkflowSpec({
-				onExhausted: { id: "fallback", type: "task", prompt: "Fallback work." },
-			}),
-		),
-	);
-	assertIssue(error, "$.workflow.stages[0].onExhausted.type", "reduce");
-});
-
 test("schema and compiler accept partial sourcePolicy on foreach", async () => {
 	const cwd = makeProject();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
-		const spec = workflowSpec("unit-scout", {
-			workflow: {
+		const spec = artifactGraphWorkflowSpec({
+			artifactGraph: {
 				stages: [
 					{
 						id: "extract",
 						type: "task",
-						output: { format: "json" },
 						prompt: "Extract",
 					},
 					{
 						id: "verify",
 						type: "foreach",
 						sourcePolicy: "partial",
-						from: { stage: "extract", path: "$.items" },
+						from: { source: "extract", path: "$.items" },
 						each: { prompt: "Verify ${item}" },
 					},
 				],
 			},
 		});
 		assert.equal(
-			parseWorkflow(spec).workflow.stages[1].sourcePolicy,
+			parseWorkflow(spec).artifactGraph.stages[1].sourcePolicy,
 			"partial",
 		);
 		const compiled = await compileWorkflow(spec, { cwd, task: "Review" });
@@ -1632,36 +941,6 @@ test("schema and compiler accept partial sourcePolicy on foreach", async () => {
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
-});
-
-test("JSON output extraction tolerates prose and fenced JSON", () => {
-	assert.deepEqual(extractJsonOutput('{"findings":[]}'), {
-		text: '{"findings":[]}',
-		extracted: false,
-	});
-	assert.deepEqual(extractJsonOutput('```json\n{"findings":[]}\n```'), {
-		text: '{"findings":[]}',
-		extracted: false,
-	});
-	assert.deepEqual(
-		extractJsonOutput(
-			'Here are findings.\n\n{"findings":[{"title":"brace } inside string"}]}\nThanks.',
-		),
-		{
-			text: '{"findings":[{"title":"brace } inside string"}]}',
-			extracted: true,
-		},
-	);
-});
-
-test("JSON output parsing picks candidate matching required keys", () => {
-	const output =
-		'Prose with escaped example `{\\"findings\\": null}` before the final answer.\n\n{"finding":{"title":"kept"},"verdict":"KEEP"}';
-	assert.deepEqual(parseJsonOutput(output, ["$.finding", "$.verdict"]), {
-		valid: true,
-		extracted: true,
-		structuredOutput: { finding: { title: "kept" }, verdict: "KEEP" },
-	});
 });
 
 test("partial foreach continues scheduling after an item failure", () => {
@@ -1748,98 +1027,27 @@ test("dependency-aware skip lets explicit partial sources bypass unrelated previ
 	);
 });
 
-test("partial foreach extraction skips failed source tasks", async () => {
-	const cwd = makeProject();
-	try {
-		const completedFile = join(
-			cwd,
-			".pi",
-			"workflows",
-			"workflow_unit",
-			"stages",
-			"reviewers",
-			"tasks",
-			"item-001",
-			"result.json",
-		);
-		const failedFile = join(
-			cwd,
-			".pi",
-			"workflows",
-			"workflow_unit",
-			"stages",
-			"reviewers",
-			"tasks",
-			"item-002",
-			"result.json",
-		);
-		await writeJsonAtomic(completedFile, {
-			structuredOutput: { findings: [{ title: "kept" }] },
-		});
-		await writeJsonAtomic(failedFile, { status: "failed" });
-		const sourceTasks = [
-			{
-				taskId: "reviewers.item-001",
-				status: "completed",
-				files: {
-					result:
-						".pi/workflows/workflow_unit/stages/reviewers/tasks/item-001/result.json",
-				},
-			},
-			{
-				taskId: "reviewers.item-002",
-				status: "failed",
-				files: {
-					result:
-						".pi/workflows/workflow_unit/stages/reviewers/tasks/item-002/result.json",
-				},
-			},
-		];
-		const partialStage = {
-			from: { path: "$.findings", mode: "concat" },
-			sourcePolicy: "partial",
-		};
-		const strictStage = {
-			from: { path: "$.findings", mode: "concat" },
-			sourcePolicy: "require-success",
-		};
-		assert.deepEqual(
-			await extractStageFirstForeachItems(cwd, partialStage, sourceTasks),
-			{ items: [{ title: "kept" }] },
-		);
-		assert.match(
-			(await extractStageFirstForeachItems(cwd, strictStage, sourceTasks))
-				.error,
-			/did not complete/,
-		);
-	} finally {
-		rmSync(cwd, { recursive: true, force: true });
-	}
-});
-
-test("compiler injects runtime task by effective stage policy", async () => {
+test("compiler injects runtime task for task stages only", async () => {
 	const cwd = makeProject();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
 		const compiled = await compileWorkflow(
 			workflowSpec("unit-scout", {
 				roles: { lens: { prompt: "Role context marker." } },
-				workflow: {
+				artifactGraph: {
 					stages: [
 						{ id: "entry", type: "task", prompt: "Entry instructions." },
 						{
-							id: "entry-no-inject",
+							id: "entry-extra",
 							type: "task",
-							inject: false,
-							prompt: "Entry no inject.",
+							prompt: "Entry extra instructions.",
 						},
 						{ id: "final", type: "reduce", prompt: "Final instructions." },
 						{
-							id: "final-inject",
+							id: "final-extra",
 							type: "reduce",
-							inject: true,
 							from: "final",
-							prompt: "Final with task.",
+							prompt: "Final extra instructions.",
 						},
 					],
 				},
@@ -1856,15 +1064,15 @@ test("compiler injects runtime task by effective stage policy", async () => {
 			/^# Task\n\nReview feature A\n\n# Workflow Stage/,
 		);
 		assert.equal(byKey["entry.main"].injectTask, true);
-		assert.doesNotMatch(byKey["entry-no-inject.main"].compiledPrompt, /# Task/);
-		assert.equal(byKey["entry-no-inject.main"].injectTask, false);
-		assert.doesNotMatch(byKey["final.main"].compiledPrompt, /# Task/);
-		assert.equal(byKey["final.main"].injectTask, false);
 		assert.match(
-			byKey["final-inject.main"].compiledPrompt,
+			byKey["entry-extra.main"].compiledPrompt,
 			/^# Task\n\nReview feature A\n\n# Workflow Stage/,
 		);
-		assert.equal(byKey["final-inject.main"].injectTask, true);
+		assert.equal(byKey["entry-extra.main"].injectTask, true);
+		assert.doesNotMatch(byKey["final.main"].compiledPrompt, /# Task/);
+		assert.equal(byKey["final.main"].injectTask, false);
+		assert.doesNotMatch(byKey["final-extra.main"].compiledPrompt, /# Task/);
+		assert.equal(byKey["final-extra.main"].injectTask, false);
 		assert.match(
 			byKey["entry.main"].compiledPrompt,
 			/# Instructions\n\nEntry instructions\./,
@@ -1882,25 +1090,23 @@ test("compiler injects runtime task by effective stage policy", async () => {
 	}
 });
 
-test("compiler defers foreach task injection until runtime interpolation", async () => {
+test("compiler omits runtime task injection from foreach templates", async () => {
 	const cwd = makeProject();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
 		const compiled = await compileWorkflow(
 			workflowSpec("unit-scout", {
-				workflow: {
+				artifactGraph: {
 					stages: [
 						{
 							id: "extract",
 							type: "task",
-							output: { format: "json" },
 							prompt: "Extract",
 						},
 						{
 							id: "verify",
 							type: "foreach",
-							inject: true,
-							from: { stage: "extract", path: "$.claims" },
+							from: { source: "extract", path: "$.claims" },
 							each: { prompt: "Verify ${item}" },
 						},
 					],
@@ -1910,7 +1116,7 @@ test("compiler defers foreach task injection until runtime interpolation", async
 		);
 
 		assert.equal(compiled.task, "Check ${WORKSPACE} literally");
-		assert.equal(compiled.tasks[1].injectTask, true);
+		assert.equal(compiled.tasks[1].injectTask, false);
 		assert.deepEqual(compiled.tasks[1].dependsOn, ["extract.main"]);
 		assert.doesNotMatch(compiled.tasks[1].compiledPrompt, /# Task/);
 		assert.doesNotMatch(compiled.tasks[1].compiledPrompt, /WORKSPACE/);
@@ -1933,13 +1139,13 @@ test("compiler applies explicit stage from dependencies and stage runtime defaul
 				thinking: "high",
 				tools: ["read", "grep"],
 				defaults: { maxRuntimeMs: 12345 },
-				workflow: {
+				artifactGraph: {
 					stages: [
 						{ id: "plan", type: "task", prompt: "Plan" },
 						{
 							id: "research",
 							type: "foreach",
-							from: { stage: "plan", path: "$.questions" },
+							from: { source: "plan", path: "$.questions" },
 							each: { prompt: "Research ${item}" },
 						},
 						{
@@ -1980,7 +1186,7 @@ test("compiler separates order-only after dependencies from source context", asy
 		writeAgent(cwd, "unit-scout", "read");
 		const compiled = await compileWorkflow(
 			workflowSpec("unit-scout", {
-				workflow: {
+				artifactGraph: {
 					stages: [
 						{
 							id: "source",
@@ -2034,7 +1240,7 @@ test("compiler treats empty after as an explicit parallel root", async () => {
 		writeAgent(cwd, "unit-scout", "read");
 		const compiled = await compileWorkflow(
 			workflowSpec("unit-scout", {
-				workflow: {
+				artifactGraph: {
 					stages: [
 						{ id: "a", type: "task", prompt: "A." },
 						{ id: "b", type: "task", after: [], prompt: "B." },
@@ -2063,7 +1269,7 @@ test("compiler lowers dag containers to namespaced child tasks", async () => {
 		writeAgent(cwd, "unit-scout", "read");
 		const compiled = await compileWorkflow(
 			workflowSpec("unit-scout", {
-				workflow: {
+				artifactGraph: {
 					stages: [
 						{
 							id: "seed",
@@ -2153,7 +1359,7 @@ test("compiler lowers foreach and support children inside dag containers", async
 		writeAgent(cwd, "unit-scout", "read");
 		const compiled = await compileWorkflow(
 			workflowSpec("unit-scout", {
-				workflow: {
+				artifactGraph: {
 					stages: [
 						{
 							id: "fan",
@@ -2171,7 +1377,7 @@ test("compiler lowers foreach and support children inside dag containers", async
 								{
 									id: "verify",
 									type: "foreach",
-									from: { stage: "source", path: "$.items" },
+									from: { source: "source", path: "$.items" },
 									each: { prompt: "Verify ${item}." },
 								},
 								{
@@ -2218,7 +1424,7 @@ test("compiler lowers nested dag containers with composed namespaces", async () 
 		writeAgent(cwd, "unit-scout", "read");
 		const compiled = await compileWorkflow(
 			workflowSpec("unit-scout", {
-				workflow: {
+				artifactGraph: {
 					stages: [
 						{
 							id: "outer",
@@ -2264,7 +1470,7 @@ test("compiler keeps dag namespace prefixes distinct from loop ids", async () =>
 		writeAgent(cwd, "unit-scout", "read");
 		const compiled = await compileWorkflow(
 			workflowSpec("unit-scout", {
-				workflow: {
+				artifactGraph: {
 					stages: [
 						{
 							id: "box",
@@ -2326,7 +1532,11 @@ test("schema accepts object-form tools and rejects invalid tool objects", () => 
 			workflowSpec("unit-scout", { tools: [{ extensions: ["pkg"] }] }),
 		),
 	);
-	assertIssue(missingName, "$.tools[0].name", "is required");
+	assertIssue(
+		missingName,
+		"$.defaults.tools[0]",
+		"must be a tool name string or object with a name",
+	);
 
 	const invalid = assertThrowsFlow(() =>
 		parseWorkflow(
@@ -2341,10 +1551,14 @@ test("schema accepts object-form tools and rejects invalid tool objects", () => 
 			}),
 		),
 	);
-	assertIssue(invalid, "$.tools[1].name", "invalid tool name");
-	assertIssue(invalid, "$.tools[2].classification", "must be one of");
-	assertIssue(invalid, "$.tools[3].extensions", "must be an array");
-	assertIssue(invalid, "$.tools[4].fallbackTools[0]", "invalid tool name");
+	assertIssue(invalid, "$.defaults.tools[1].name", "invalid tool name");
+	assertIssue(invalid, "$.defaults.tools[2].classification", "must be one of");
+	assertIssue(invalid, "$.defaults.tools[3].extensions", "must be an array");
+	assertIssue(
+		invalid,
+		"$.defaults.tools[4].fallbackTools[0]",
+		"invalid tool name",
+	);
 });
 
 test("compiler normalizes object-form tools and treats classified custom read-only tools as safe", async () => {
@@ -2424,7 +1638,7 @@ test("object-form tools cannot expand beyond agent-declared tool ceilings", asyn
 				),
 			(error) => {
 				assert(error instanceof WorkflowValidationError);
-				assertIssue(error, "$.tools", "expands agent");
+				assertIssue(error, "$.defaults.tools", "expands agent");
 				return true;
 			},
 		);
@@ -2448,7 +1662,7 @@ test("narrow tool scopes inherit metadata for strings and override it for object
 						optional: true,
 					},
 				],
-				workflow: {
+				artifactGraph: {
 					stages: [
 						{
 							id: "inherit",
@@ -2497,24 +1711,22 @@ test("narrow tool scopes inherit metadata for strings and override it for object
 	}
 });
 
-test("stage-first foreach materializes source array into generated tasks", async () => {
+test("artifactGraph runtime foreach materializes source array into generated tasks", async () => {
 	const cwd = makeProject();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
 		const spec = workflowSpec("unit-scout", {
-			workflow: {
+			artifactGraph: {
 				stages: [
 					{
 						id: "extract",
 						type: "task",
-						output: { format: "json", requiredKeys: ["claims"] },
 						prompt: "Extract",
 					},
 					{
 						id: "verify",
 						type: "foreach",
-						inject: true,
-						from: { stage: "extract", path: "$.claims", mode: "concat" },
+						from: { source: "extract", path: "$.claims" },
 						maxConcurrency: 2,
 						each: { prompt: "Verify ${item}" },
 					},
@@ -2528,22 +1740,15 @@ test("stage-first foreach materializes source array into generated tasks", async
 			},
 		});
 		const compiled = await compileWorkflow(spec, { cwd, task: "Check claims" });
-		const { run } = await createStageFirstRunRecord(
+		const { run } = await createWorkflowRunRecord(
 			cwd,
 			compiled,
 			join(cwd, "workflows", "unit.json"),
 		);
 		await writeStaticRunArtifacts(cwd, run, compiled, spec);
 
-		setTaskTerminal(run.tasks[0], "completed", "completed", {
-			exitCode: 0,
-			lastMessage: "completed",
-		});
-		await writeJsonAtomic(join(cwd, run.tasks[0].files.result), {
-			status: "completed",
-			structuredOutput: {
-				claims: [{ id: "CLAIM_A", text: "A" }, "plain claim"],
-			},
+		await completeTask(cwd, run.tasks[0], {
+			claims: [{ id: "CLAIM_A", text: "A" }, "plain claim"],
 		});
 		await writeRunRecord(cwd, run);
 
@@ -2580,12 +1785,12 @@ test("stage-first foreach materializes source array into generated tasks", async
 	}
 });
 
-test("stage-first foreach materializes items from a dag container output", async () => {
+test("artifactGraph runtime foreach materializes items from a dag container output", async () => {
 	const cwd = makeProject();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
 		const spec = workflowSpec("unit-scout", {
-			workflow: {
+			artifactGraph: {
 				stages: [
 					{
 						id: "analysis",
@@ -2603,7 +1808,7 @@ test("stage-first foreach materializes items from a dag container output", async
 					{
 						id: "verify",
 						type: "foreach",
-						from: { stage: "analysis", path: "$.items", mode: "concat" },
+						from: { source: "analysis", path: "$.items" },
 						each: { prompt: "Verify ${item}." },
 					},
 					{
@@ -2618,27 +1823,20 @@ test("stage-first foreach materializes items from a dag container output", async
 		const compiled = await compileWorkflow(spec, { cwd, task: "Check items" });
 		assert.deepEqual(
 			compiled.tasks.find((task) => task.id === "verify.item")?.foreach.from,
-			{ stage: "analysis.source", path: "$.items", mode: "concat" },
+			{ stage: "analysis.source", path: "$.items" },
 		);
-		const { run } = await createStageFirstRunRecord(
+		const { run } = await createWorkflowRunRecord(
 			cwd,
 			compiled,
 			join(cwd, "workflows", "unit.json"),
 		);
 		await writeStaticRunArtifacts(cwd, run, compiled, spec);
 
-		setTaskTerminal(run.tasks[0], "completed", "completed", {
-			exitCode: 0,
-			lastMessage: "completed",
-		});
-		await writeJsonAtomic(join(cwd, run.tasks[0].files.result), {
-			status: "completed",
-			structuredOutput: {
-				items: [
-					{ id: "ITEM_A", text: "A" },
-					{ id: "ITEM_B", text: "B" },
-				],
-			},
+		await completeTask(cwd, run.tasks[0], {
+			items: [
+				{ id: "ITEM_A", text: "A" },
+				{ id: "ITEM_B", text: "B" },
+			],
 		});
 		await writeRunRecord(cwd, run);
 
@@ -2672,44 +1870,36 @@ test("successive foreach materialization keeps task ids unique", async () => {
 	try {
 		writeAgent(cwd, "unit-scout", "read");
 		const spec = workflowSpec("unit-scout", {
-			workflow: {
+			artifactGraph: {
 				stages: [
 					{
 						id: "extract",
 						type: "task",
-						output: { format: "json", requiredKeys: ["claims"] },
 						prompt: "Extract",
 					},
 					{
 						id: "review",
 						type: "foreach",
-						from: { stage: "extract", path: "$.claims" },
+						from: { source: "extract", path: "$.claims" },
 						each: { prompt: "Review ${item}" },
 					},
 					{
 						id: "verify",
 						type: "foreach",
-						from: { stage: "review", path: "$.findings", mode: "concat" },
+						from: { source: "review", path: "$.findings" },
 						each: { prompt: "Verify ${item}" },
 					},
 				],
 			},
 		});
 		const compiled = await compileWorkflow(spec, { cwd, task: "Check claims" });
-		const { run } = await createStageFirstRunRecord(
+		const { run } = await createWorkflowRunRecord(
 			cwd,
 			compiled,
 			join(cwd, "workflows", "unit.json"),
 		);
 		await writeStaticRunArtifacts(cwd, run, compiled, spec);
-		setTaskTerminal(run.tasks[0], "completed", "completed", {
-			exitCode: 0,
-			lastMessage: "completed",
-		});
-		await writeJsonAtomic(join(cwd, run.tasks[0].files.result), {
-			status: "completed",
-			structuredOutput: { claims: ["a", "b"] },
-		});
+		await completeTask(cwd, run.tasks[0], { claims: ["a", "b"] });
 		await writeRunRecord(cwd, run);
 
 		await scheduleRun(cwd, run.runId);
@@ -2717,13 +1907,8 @@ test("successive foreach materialization keeps task ids unique", async () => {
 		for (const task of current.tasks.filter(
 			(item) => item.stageId === "review",
 		)) {
-			setTaskTerminal(task, "completed", "completed", {
-				exitCode: 0,
-				lastMessage: "completed",
-			});
-			await writeJsonAtomic(join(cwd, task.files.result), {
-				status: "completed",
-				structuredOutput: { findings: [{ title: `${task.specId}-finding` }] },
+			await completeTask(cwd, task, {
+				findings: [{ title: `${task.specId}-finding` }],
 			});
 		}
 		await writeRunRecord(cwd, current);
@@ -2743,23 +1928,22 @@ test("successive foreach materialization keeps task ids unique", async () => {
 	}
 });
 
-test("stage-first foreach blocks when maxItems is exceeded", async () => {
+test("artifactGraph runtime foreach blocks when maxItems is exceeded", async () => {
 	const cwd = makeProject();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
 		const spec = workflowSpec("unit-scout", {
-			workflow: {
+			artifactGraph: {
 				stages: [
 					{
 						id: "extract",
 						type: "task",
-						output: { format: "json", requiredKeys: ["claims"] },
 						prompt: "Extract",
 					},
 					{
 						id: "verify",
 						type: "foreach",
-						from: { stage: "extract", path: "$.claims" },
+						from: { source: "extract", path: "$.claims" },
 						maxItems: 1,
 						each: { prompt: "Verify ${item}" },
 					},
@@ -2767,20 +1951,13 @@ test("stage-first foreach blocks when maxItems is exceeded", async () => {
 			},
 		});
 		const compiled = await compileWorkflow(spec, { cwd, task: "Check claims" });
-		const { run } = await createStageFirstRunRecord(
+		const { run } = await createWorkflowRunRecord(
 			cwd,
 			compiled,
 			join(cwd, "workflows", "unit.json"),
 		);
 		await writeStaticRunArtifacts(cwd, run, compiled, spec);
-		setTaskTerminal(run.tasks[0], "completed", "completed", {
-			exitCode: 0,
-			lastMessage: "completed",
-		});
-		await writeJsonAtomic(join(cwd, run.tasks[0].files.result), {
-			status: "completed",
-			structuredOutput: { claims: ["a", "b"] },
-		});
+		await completeTask(cwd, run.tasks[0], { claims: ["a", "b"] });
 		await writeRunRecord(cwd, run);
 
 		await scheduleRun(cwd, run.runId);
@@ -2843,9 +2020,9 @@ test("loop resume reconciliation backfills missing run records for compiled roun
 	const cwd = makeProject();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
-		const loopStage = loopWorkflowSpec().workflow.stages[0];
+		const loopStage = loopWorkflowSpec().artifactGraph.stages[0];
 		const spec = workflowSpec("unit-scout", {
-			workflow: {
+			artifactGraph: {
 				stages: [
 					loopStage,
 					{ id: "after", type: "task", prompt: "After loop." },
@@ -2911,12 +2088,12 @@ test("loop resume reconciliation backfills missing run records for compiled roun
 	}
 });
 
-test("stage-first scheduler fails closed on compiled run positional mismatch", async () => {
+test("artifactGraph runtime scheduler fails closed on compiled run positional mismatch", async () => {
 	const cwd = makeProject();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
 		const spec = workflowSpec("unit-scout", {
-			workflow: {
+			artifactGraph: {
 				stages: [
 					{ id: "one", type: "task", prompt: "One." },
 					{ id: "two", type: "task", prompt: "Two." },
@@ -2927,7 +2104,7 @@ test("stage-first scheduler fails closed on compiled run positional mismatch", a
 			cwd,
 			task: "Check alignment",
 		});
-		const { run } = await createStageFirstRunRecord(
+		const { run } = await createWorkflowRunRecord(
 			cwd,
 			compiled,
 			join(cwd, "workflows", "alignment.json"),
@@ -3072,59 +2249,6 @@ test("loop no-progress stops early with stopped_no_progress", async () => {
 			taskBySpec(current, "fix-loop.loop").statusDetail,
 			"loop_stopped_no_progress",
 		);
-	} finally {
-		rmSync(cwd, { recursive: true, force: true });
-	}
-});
-
-test("loop output requiredKeys compile to requiredPaths contract", async () => {
-	const cwd = makeProject();
-	try {
-		writeAgent(cwd, "unit-scout", "read");
-		const compiled = await compileWorkflow(loopWorkflowSpec(), {
-			cwd,
-			task: "Fix failures",
-		});
-		const loopStage = compiled.stages.find((stage) => stage.id === "fix-loop");
-		const checkTemplate = loopStage.childTemplates.find(
-			(task) => task.stageId === "check",
-		);
-		assert.deepEqual(checkTemplate.output.contract.requiredPaths, [
-			"$.status",
-			"$.verdict",
-		]);
-	} finally {
-		rmSync(cwd, { recursive: true, force: true });
-	}
-});
-
-test("loop check missing requiredKeys triggers output retry", async () => {
-	const cwd = makeProject();
-	try {
-		writeAgent(cwd, "unit-scout", "read");
-		const { run } = await createLoopRun(cwd);
-		await scheduleRun(cwd, run.runId);
-		const current = await readRunRecord(cwd, run.runId);
-		const check = taskBySpec(current, "fix-loop.r01.check");
-		mkdirSync(dirname(join(cwd, check.files.output)), { recursive: true });
-		writeFileSync(
-			join(cwd, check.files.output),
-			JSON.stringify({ status: "pass" }),
-		);
-		const changed = await applyTaskResultArtifact(cwd, check, {
-			resultFile: join(cwd, check.files.result),
-			result: {
-				status: "completed",
-				completedAt: new Date().toISOString(),
-				exitCode: 0,
-			},
-			status: "completed",
-			completedAfterTimeout: false,
-		});
-		assert.equal(changed, true);
-		assert.equal(check.status, "pending");
-		assert.equal(check.statusDetail, "retry_output_invalid");
-		assert.match(check.outputRetry.message, /\$\.verdict/);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
@@ -3861,7 +2985,7 @@ test("bundled change-impact-review workflow schedules multi-join DAG waves", asy
 			cwd,
 			task: "Review impact of adding change-impact-review before shipping.",
 		});
-		const { run } = await createStageFirstRunRecord(cwd, compiled, specPath);
+		const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
 		await writeStaticRunArtifacts(cwd, run, compiled, spec);
 		await writeRunRecord(cwd, run);
 
@@ -4082,7 +3206,7 @@ test("bundled spec-review workflow materializes verifier and partitions verified
 			specPath,
 			task: "Compare docs/API_SPEC.md to src implementation and tests.",
 		});
-		const { run } = await createStageFirstRunRecord(cwd, compiled, specPath);
+		const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
 		await writeStaticRunArtifacts(cwd, run, compiled, spec);
 
 		await completeTask(cwd, taskBySpec(run, "analysis.extract-spec.main"), {
@@ -4205,7 +3329,7 @@ test("bundled test-repair-loop workflow materializes a serial repair/check round
 		assert.equal(loopStage.maxRounds, 4);
 		assert.equal(loopStage.progressPath, "$.failingChecks");
 
-		const { run } = await createStageFirstRunRecord(cwd, compiled, specPath);
+		const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
 		await writeStaticRunArtifacts(cwd, run, compiled, spec);
 		await writeRunRecord(cwd, run);
 		await scheduleRun(cwd, run.runId);
@@ -4284,7 +3408,6 @@ test("workflow source context packet prefers structured output and caps raw prev
 				specId: "plan.main",
 				stageId: "plan",
 				status: "completed",
-				outputValidation: { structured: true },
 				files: { output: "plan.out", result: "plan.json" },
 			},
 			{
@@ -4292,7 +3415,6 @@ test("workflow source context packet prefers structured output and caps raw prev
 				specId: "verify.claim-001",
 				stageId: "verify",
 				status: "completed",
-				outputValidation: { structured: true },
 				files: { output: "verify.out", result: "verify.json" },
 			},
 			{
@@ -4485,165 +3607,6 @@ test("structured contract validator checks nested paths, arrays, and caps", () =
 	);
 });
 
-test("task output contract enforces nested structured JSON shape", async () => {
-	const cwd = makeProject();
-	try {
-		const taskDir = join(
-			cwd,
-			".pi",
-			"workflows",
-			"workflow_unit",
-			"tasks",
-			"main",
-		);
-		mkdirSync(taskDir, { recursive: true });
-		const output = join(taskDir, "output.log");
-		const stderr = join(taskDir, "stderr.log");
-		const result = join(taskDir, "result.json");
-		writeFileSync(
-			output,
-			JSON.stringify({ finalReport: {}, claimVerdictIndex: { claims: [] } }),
-		);
-		writeFileSync(stderr, "");
-		const task = {
-			taskId: "main",
-			specId: "final.main",
-			displayName: "final.main",
-			agent: "unit-scout",
-			agentFile: "unit-scout.md",
-			roles: [],
-			status: "running",
-			statusDetail: "running",
-			runtime: { approvalMode: "non-interactive" },
-			cwd,
-			worktree: {
-				enabled: false,
-				path: null,
-				branch: null,
-				baseCwd: null,
-				warning: null,
-			},
-			backendTaskId: "final.main",
-			launchToken: "token-1",
-			files: {
-				systemPrompt: ".pi/workflows/workflow_unit/tasks/main/system-prompt.md",
-				taskPrompt: ".pi/workflows/workflow_unit/tasks/main/task.md",
-				output: ".pi/workflows/workflow_unit/tasks/main/output.log",
-				stderr: ".pi/workflows/workflow_unit/tasks/main/stderr.log",
-				result: ".pi/workflows/workflow_unit/tasks/main/result.json",
-			},
-			output: {
-				format: "json",
-				onInvalid: "fail",
-				contract: {
-					requiredPaths: ["$.finalReport", "$.claimVerdictIndex.claims"],
-					arrays: [{ path: "$.claimVerdictIndex.claims", minItems: 1 }],
-				},
-			},
-		};
-		const changed = await applyTaskResultArtifact(cwd, task, {
-			resultFile: result,
-			result: {
-				status: "completed",
-				completedAt: new Date().toISOString(),
-				exitCode: 0,
-				launchToken: "token-1",
-			},
-			status: "completed",
-			completedAfterTimeout: false,
-		});
-		assert.equal(changed, true);
-		assert.equal(task.status, "pending");
-		assert.equal(task.statusDetail, "retry_output_invalid");
-		const recorded = JSON.parse(readFileSync(result, "utf8"));
-		assert.equal(recorded.failureKind, "output_invalid");
-		assert.match(recorded.errorMessage, /expected at least 1 items/);
-	} finally {
-		rmSync(cwd, { recursive: true, force: true });
-	}
-});
-
-test("timeout task with valid JSON output is salvaged", async () => {
-	const cwd = makeProject();
-	try {
-		const output = join(
-			cwd,
-			".pi/workflows/workflow_unit/tasks/task-1/output.log",
-		);
-		const result = join(
-			cwd,
-			".pi/workflows/workflow_unit/tasks/task-1/result.json",
-		);
-		mkdirSync(dirname(output), { recursive: true });
-		writeFileSync(
-			output,
-			JSON.stringify({ summary: "done", findings: [], commandRuns: [] }),
-		);
-		const task = {
-			taskId: "task-1",
-			specId: "review.main",
-			stageId: "review",
-			displayName: "review.main",
-			agent: "unit-scout",
-			agentDescription: "test",
-			agentFile: "unit-scout.md",
-			roles: [],
-			status: "running",
-			statusDetail: "running",
-			startedAt: "2026-06-14T00:00:00.000Z",
-			runtime: { approvalMode: "non-interactive", maxRuntimeMs: 1000 },
-			cwd,
-			worktree: {
-				enabled: false,
-				path: null,
-				branch: null,
-				baseCwd: null,
-				warning: null,
-			},
-			backendHandle: { engine: "unit" },
-			files: {
-				systemPrompt:
-					".pi/workflows/workflow_unit/tasks/task-1/system-prompt.md",
-				taskPrompt: ".pi/workflows/workflow_unit/tasks/task-1/task.md",
-				output: ".pi/workflows/workflow_unit/tasks/task-1/output.log",
-				stderr: ".pi/workflows/workflow_unit/tasks/task-1/stderr.log",
-				result: ".pi/workflows/workflow_unit/tasks/task-1/result.json",
-			},
-			output: {
-				format: "json",
-				onInvalid: "fail",
-				contract: {
-					requiredPaths: ["$.summary", "$.findings", "$.commandRuns"],
-					arrays: [{ path: "$.findings" }, { path: "$.commandRuns" }],
-				},
-			},
-		};
-		const changed = await applyTaskResultArtifact(cwd, task, {
-			resultFile: result,
-			result: {
-				status: "failed",
-				failureKind: "timeout",
-				completedAt: "2026-06-14T00:00:02.000Z",
-				exitCode: 124,
-				errorMessage: "pi-subagent run timed out",
-			},
-			status: "failed",
-			completedAfterTimeout: true,
-		});
-		assert.equal(changed, true);
-		assert.equal(task.status, "completed");
-		assert.equal(task.statusDetail, "timeout_output_salvaged");
-		assert.equal(task.exitCode, 0);
-		assert.equal(task.outputValidation.status, "valid");
-		const recorded = JSON.parse(readFileSync(result, "utf8"));
-		assert.equal(recorded.status, "completed");
-		assert.equal(recorded.outputSalvaged, true);
-		assert.equal(recorded.salvagedFrom.failureKind, "timeout");
-	} finally {
-		rmSync(cwd, { recursive: true, force: true });
-	}
-});
-
 test("engine source context reads structured outputs and telemetry from task artifacts", async () => {
 	const cwd = makeProject();
 	try {
@@ -4746,7 +3709,7 @@ test("schema and compiler support pi-subagent headless backend", async () => {
 		assertThrowsFlow(() =>
 			parseWorkflow(
 				workflowSpec("unit-scout", {
-					workflow: {
+					artifactGraph: {
 						stages: [
 							{ id: "main", type: "task", fast: "on", prompt: "Do it." },
 						],
@@ -4759,92 +3722,21 @@ test("schema and compiler support pi-subagent headless backend", async () => {
 	}
 });
 
-test("schema validates stage sourceContext projection settings", () => {
-	const parsed = parseWorkflow(
-		workflowSpec("unit-scout", {
-			workflow: {
-				stages: [
-					{
-						id: "final",
-						type: "reduce",
-						sourceContext: {
-							maxStructuredChars: 1200,
-							maxPacketChars: 32000,
-							maxStructuredCharsByStage: { verify: 800 },
-							structuredOutputPathsByStage: {
-								verify: ["$.id", "$.verdictDigest"],
-							},
-						},
-						prompt: "Summarize",
-					},
-				],
-			},
-		}),
-	);
-	assert.equal(parsed.workflow.stages[0].sourceContext.maxPacketChars, 32000);
-
-	const badCap = assertThrowsFlow(() =>
-		parseWorkflow(
-			workflowSpec("unit-scout", {
-				workflow: {
-					stages: [
-						{
-							id: "final",
-							type: "reduce",
-							sourceContext: { maxPacketChars: "large" },
-							prompt: "Summarize",
-						},
-					],
-				},
-			}),
-		),
-	);
-	assertIssue(
-		badCap,
-		"$.workflow.stages[0].sourceContext.maxPacketChars",
-		"positive integer",
-	);
-
-	const badPath = assertThrowsFlow(() =>
-		parseWorkflow(
-			workflowSpec("unit-scout", {
-				workflow: {
-					stages: [
-						{
-							id: "final",
-							type: "reduce",
-							sourceContext: {
-								structuredOutputPathsByStage: { verify: ["id"] },
-							},
-							prompt: "Summarize",
-						},
-					],
-				},
-			}),
-		),
-	);
-	assertIssue(
-		badPath,
-		"$.workflow.stages[0].sourceContext.structuredOutputPathsByStage.verify[0]",
-		"must start with $.",
-	);
-});
-
-test("schema and compiler accept support nodes", async () => {
+test("schema and compiler accept artifactGraph support nodes", async () => {
 	const cwd = makeProject();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
 		const spec = workflowSpec("unit-scout", {
-			workflow: {
+			artifactGraph: {
 				stages: [
 					{
 						id: "verify",
 						type: "task",
-						output: { format: "json" },
 						prompt: "Verify claims",
 					},
 					{
 						id: "audit",
+						type: "support",
 						from: "verify",
 						support: {
 							uses: "./helpers/audit.mjs",
@@ -4856,7 +3748,10 @@ test("schema and compiler accept support nodes", async () => {
 		});
 
 		const parsed = parseWorkflow(spec);
-		assert.equal(parsed.workflow.stages[1].support.uses, "./helpers/audit.mjs");
+		assert.equal(
+			parsed.artifactGraph.stages[1].support.uses,
+			"./helpers/audit.mjs",
+		);
 		const compiled = await compileWorkflow(spec, { cwd, task: "Research" });
 		const supportTask = compiled.tasks.find((task) => task.stageId === "audit");
 		assert.ok(supportTask);
@@ -4873,206 +3768,24 @@ test("schema and compiler accept support nodes", async () => {
 	}
 });
 
-test("schema rejects invalid support nodes and legacy transform syntax", () => {
-	const legacy = assertThrowsFlow(() =>
-		parseWorkflow(
-			workflowSpec("unit-scout", {
-				workflow: {
-					stages: [
-						{
-							id: "audit",
-							type: "transform",
-							from: "verify",
-							helper: "./helpers/audit.mjs",
-						},
-					],
-				},
-			}),
-		),
-	);
-	assertIssue(
-		legacy,
-		"$.workflow.stages[0].type",
-		'legacy type "transform" is not supported',
-	);
-	assertIssue(legacy, "$.workflow.stages[0].type", "use support");
-
+test("schema rejects invalid artifactGraph support nodes", () => {
 	const missingUses = assertThrowsFlow(() =>
 		parseWorkflow(
 			workflowSpec("unit-scout", {
-				workflow: {
-					stages: [{ id: "audit", from: "verify", support: {} }],
-				},
-			}),
-		),
-	);
-	assertIssue(missingUses, "$.workflow.stages[0].support.uses", "required");
-
-	const typedSupport = assertThrowsFlow(() =>
-		parseWorkflow(
-			workflowSpec("unit-scout", {
-				workflow: {
+				artifactGraph: {
 					stages: [
-						{
-							id: "audit",
-							type: "task",
-							from: "verify",
-							support: { uses: "./helpers/audit.mjs" },
-						},
+						{ id: "verify", type: "task", prompt: "Verify." },
+						{ id: "audit", type: "support", from: "verify", support: {} },
 					],
 				},
 			}),
 		),
 	);
 	assertIssue(
-		typedSupport,
-		"$.workflow.stages[0].type",
-		"must not declare type",
+		missingUses,
+		"$.artifactGraph.stages[1].support.uses",
+		"must be a non-empty string",
 	);
-
-	const unknownKey = assertThrowsFlow(() =>
-		parseWorkflow(
-			workflowSpec("unit-scout", {
-				workflow: {
-					stages: [
-						{
-							id: "audit",
-							from: "verify",
-							support: { uses: "./helpers/audit.mjs" },
-							prompt: "No prompt",
-						},
-					],
-				},
-			}),
-		),
-	);
-	assertIssue(unknownKey, "$.workflow.stages[0].prompt", "unknown field");
-});
-
-test("compiler injects output JSON template from output protocol", async () => {
-	const cwd = makeProject();
-	try {
-		writeAgent(cwd, "unit-scout", "read");
-		const spec = workflowSpec("unit-scout", {
-			workflow: {
-				stages: [
-					{
-						id: "extract",
-						type: "task",
-						output: {
-							format: "json",
-							contract: { requiredPaths: ["$.items"] },
-							template: { items: [{ id: "item-001", text: "..." }] },
-						},
-						prompt: "Extract items.",
-					},
-					{
-						id: "verify",
-						type: "foreach",
-						from: { stage: "extract", path: "$.items" },
-						output: {
-							format: "json",
-							template: { id: "item-001", status: "verified|unsupported" },
-						},
-						each: { prompt: "Verify ${item}" },
-					},
-				],
-			},
-		});
-		const compiled = await compileWorkflow(spec, { cwd, task: "Check items" });
-		assert.match(compiled.tasks[0].compiledPrompt, /# Output JSON Template/);
-		assert.match(compiled.tasks[0].compiledPrompt, /"items"/);
-
-		const { run } = await createStageFirstRunRecord(
-			cwd,
-			compiled,
-			join(cwd, "workflows", "unit.json"),
-		);
-		await writeStaticRunArtifacts(cwd, run, compiled, spec);
-		setTaskTerminal(run.tasks[0], "completed", "completed", {
-			exitCode: 0,
-			lastMessage: "completed",
-		});
-		await writeJsonAtomic(join(cwd, run.tasks[0].files.result), {
-			status: "completed",
-			structuredOutput: { items: [{ id: "alpha" }] },
-		});
-		await writeRunRecord(cwd, run);
-		await scheduleRun(cwd, run.runId);
-		const compiledAfterMaterialize = JSON.parse(
-			readFileSync(
-				join(cwd, ".pi", "workflows", run.runId, "compiled.json"),
-				"utf8",
-			),
-		);
-		const verifyTask = compiledAfterMaterialize.tasks.find(
-			(task) => task.id === "verify.alpha",
-		);
-		assert.match(verifyTask.compiledPrompt, /# Output JSON Template/);
-		assert.match(verifyTask.compiledPrompt, /verified\|unsupported/);
-	} finally {
-		rmSync(cwd, { recursive: true, force: true });
-	}
-});
-
-test("compiler resolves internal and external output template refs", async () => {
-	const cwd = makeProject();
-	try {
-		writeAgent(cwd, "unit-scout", "read");
-		mkdirSync(join(cwd, "workflows", "templates"), { recursive: true });
-		writeFileSync(
-			join(cwd, "workflows", "templates", "external.json"),
-			JSON.stringify({ extract: { externalItems: ["..."] } }),
-		);
-
-		const internalSpec = workflowSpec("unit-scout", {
-			outputTemplates: { extract: { items: [{ id: "item-001" }] } },
-			workflow: {
-				stages: [
-					{
-						id: "extract",
-						type: "task",
-						output: {
-							format: "json",
-							templateRef: "#/outputTemplates/extract",
-						},
-						prompt: "Extract",
-					},
-				],
-			},
-		});
-		const internal = await compileWorkflow(internalSpec, {
-			cwd,
-			task: "Extract",
-		});
-		assert.match(internal.tasks[0].compiledPrompt, /"items"/);
-		assert.equal(internal.tasks[0].output.templateRef, undefined);
-
-		const externalSpec = workflowSpec("unit-scout", {
-			workflow: {
-				stages: [
-					{
-						id: "extract",
-						type: "task",
-						output: {
-							format: "json",
-							templateRef: "./templates/external.json#/extract",
-						},
-						prompt: "Extract",
-					},
-				],
-			},
-		});
-		const external = await compileWorkflow(externalSpec, {
-			cwd,
-			specPath: join(cwd, "workflows", "external-workflow.json"),
-			task: "Extract",
-		});
-		assert.match(external.tasks[0].compiledPrompt, /"externalItems"/);
-		assert.equal(external.tasks[0].output.templateRef, undefined);
-	} finally {
-		rmSync(cwd, { recursive: true, force: true });
-	}
 });
 
 test("workflow helper loader resolves directory-local helpers", async () => {
@@ -5204,292 +3917,7 @@ test("deep-research claim evidence gate downgrades unsupported verified claims",
 	]);
 });
 
-test("JSON output parsing picks candidate matching contract paths", () => {
-	const output =
-		'Prose with escaped example `{\\"findings\\": null}` before the final answer.\n\n{"finding":{"title":"kept"},"verdict":"KEEP"}';
-	assert.deepEqual(parseJsonOutput(output, ["$.finding", "$.verdict"]), {
-		valid: true,
-		extracted: true,
-		structuredOutput: { finding: { title: "kept" }, verdict: "KEEP" },
-	});
-});
-
-test("invalid JSON output exhausts retry cap instead of looping", async () => {
-	const cwd = makeProject();
-	try {
-		const taskDir = join(
-			cwd,
-			".pi",
-			"workflows",
-			"workflow_unit",
-			"tasks",
-			"task-1",
-		);
-		mkdirSync(taskDir, { recursive: true });
-		const output = join(taskDir, "output.log");
-		const result = join(taskDir, "result.json");
-		writeFileSync(output, '{"item":true');
-		const task = {
-			taskId: "task-1",
-			specId: "plan.main",
-			displayName: "plan.main",
-			agent: "unit-scout",
-			agentFile: "unit-scout.md",
-			roles: [],
-			status: "running",
-			statusDetail: "running",
-			runtime: { approvalMode: "non-interactive" },
-			cwd,
-			worktree: {
-				enabled: false,
-				path: null,
-				branch: null,
-				baseCwd: null,
-				warning: null,
-			},
-			backendTaskId: "plan.main",
-			pid: 12345,
-			startedAt: new Date().toISOString(),
-			files: {
-				systemPrompt:
-					".pi/workflows/workflow_unit/tasks/task-1/system-prompt.md",
-				taskPrompt: ".pi/workflows/workflow_unit/tasks/task-1/task.md",
-				output: ".pi/workflows/workflow_unit/tasks/task-1/output.log",
-				stderr: ".pi/workflows/workflow_unit/tasks/task-1/stderr.log",
-				result: ".pi/workflows/workflow_unit/tasks/task-1/result.json",
-			},
-			output: {
-				format: "json",
-				contract: { requiredPaths: ["$.item"] },
-				onInvalid: "fail",
-			},
-			outputRetry: {
-				attempts: 1,
-				maxAttempts: 1,
-				reason: "output_invalid",
-				message: "previous invalid output",
-			},
-		};
-
-		const changed = await applyTaskResultArtifact(cwd, task, {
-			resultFile: result,
-			result: {
-				status: "completed",
-				completedAt: new Date().toISOString(),
-				exitCode: 0,
-			},
-			status: "completed",
-			completedAfterTimeout: false,
-		});
-
-		assert.equal(changed, true);
-		assert.equal(task.status, "failed");
-		assert.equal(task.statusDetail, "output_invalid_exhausted");
-		assert.equal(task.outputRetry.attempts, 2);
-		assert.equal(
-			JSON.parse(readFileSync(result, "utf8")).failureKind,
-			"output_invalid_exhausted",
-		);
-		assert.match(readFileSync(`${output}.invalid-attempt-2`, "utf8"), /item/);
-	} finally {
-		rmSync(cwd, { recursive: true, force: true });
-	}
-});
-
-test("JSON output retry prompt includes validation error, self-check, and few-shot examples", () => {
-	const prompt = buildJsonOutputRetryInstructions({
-		output: {
-			format: "json",
-			contract: { requiredPaths: ["$.item", "$.plan"] },
-			template: { item: {}, plan: {} },
-			onInvalid: "fail",
-		},
-		outputRetry: {
-			attempts: 1,
-			maxAttempts: 1,
-			reason: "output_invalid",
-			message: "expected valid JSON output: missing closing brace",
-			artifacts: [],
-		},
-	});
-	assert.match(
-		prompt,
-		/Validation error: expected valid JSON output: missing closing brace/,
-	);
-	assert.match(prompt, /JSON\.parse\(finalAnswer\) would succeed/);
-	assert.match(prompt, /Invalid JSON:/);
-	assert.match(prompt, /Required JSON paths:/);
-	assert.match(prompt, /\$\.item/);
-	assert.match(prompt, /\$\.plan/);
-	assert.match(prompt, /# Output JSON Template/);
-});
-
-test("stage-first foreach materializes source array into generated tasks with output contract paths", async () => {
-	const cwd = makeProject();
-	try {
-		writeAgent(cwd, "unit-scout", "read");
-		const spec = workflowSpec("unit-scout", {
-			workflow: {
-				stages: [
-					{
-						id: "extract",
-						type: "task",
-						output: {
-							format: "json",
-							contract: { requiredPaths: ["$.claims"] },
-						},
-						prompt: "Extract",
-					},
-					{
-						id: "verify",
-						type: "foreach",
-						inject: true,
-						from: { stage: "extract", path: "$.claims", mode: "concat" },
-						maxConcurrency: 2,
-						each: { prompt: "Verify ${item}" },
-					},
-					{
-						id: "summary",
-						type: "reduce",
-						from: "verify",
-						prompt: "Summarize",
-					},
-				],
-			},
-		});
-		const compiled = await compileWorkflow(spec, { cwd, task: "Check claims" });
-		const { run } = await createStageFirstRunRecord(
-			cwd,
-			compiled,
-			join(cwd, "workflows", "unit.json"),
-		);
-		await writeStaticRunArtifacts(cwd, run, compiled, spec);
-
-		setTaskTerminal(run.tasks[0], "completed", "completed", {
-			exitCode: 0,
-			lastMessage: "completed",
-		});
-		await writeJsonAtomic(join(cwd, run.tasks[0].files.result), {
-			status: "completed",
-			structuredOutput: {
-				claims: [{ id: "CLAIM_A", text: "A" }, "plain claim"],
-			},
-		});
-		await writeRunRecord(cwd, run);
-
-		await scheduleRun(cwd, run.runId);
-		const materialized = await readRunRecord(cwd, run.runId);
-		const specIds = materialized.tasks.map((task) => task.specId);
-		assert.deepEqual(specIds, [
-			"extract.main",
-			"verify.claim_a",
-			"verify.item-002",
-			"summary.main",
-		]);
-		assert.equal(
-			materialized.tasks.find((task) => task.specId === "verify.claim_a")
-				?.status,
-			"pending",
-		);
-		assert.equal(
-			materialized.tasks.find((task) => task.specId === "verify.item-002")
-				?.status,
-			"pending",
-		);
-		assert.deepEqual(
-			JSON.parse(
-				readFileSync(
-					join(cwd, ".pi", "workflows", materialized.runId, "compiled.json"),
-					"utf8",
-				),
-			).tasks.find((task) => task.id === "summary.main").dependsOn,
-			["verify.claim_a", "verify.item-002"],
-		);
-	} finally {
-		rmSync(cwd, { recursive: true, force: true });
-	}
-});
-
-test("successive foreach materialization keeps task ids unique with output contract paths", async () => {
-	const cwd = makeProject();
-	try {
-		writeAgent(cwd, "unit-scout", "read");
-		const spec = workflowSpec("unit-scout", {
-			workflow: {
-				stages: [
-					{
-						id: "extract",
-						type: "task",
-						output: {
-							format: "json",
-							contract: { requiredPaths: ["$.claims"] },
-						},
-						prompt: "Extract",
-					},
-					{
-						id: "review",
-						type: "foreach",
-						from: { stage: "extract", path: "$.claims" },
-						each: { prompt: "Review ${item}" },
-					},
-					{
-						id: "verify",
-						type: "foreach",
-						from: { stage: "review", path: "$.findings", mode: "concat" },
-						each: { prompt: "Verify ${item}" },
-					},
-				],
-			},
-		});
-		const compiled = await compileWorkflow(spec, { cwd, task: "Check claims" });
-		const { run } = await createStageFirstRunRecord(
-			cwd,
-			compiled,
-			join(cwd, "workflows", "unit.json"),
-		);
-		await writeStaticRunArtifacts(cwd, run, compiled, spec);
-		setTaskTerminal(run.tasks[0], "completed", "completed", {
-			exitCode: 0,
-			lastMessage: "completed",
-		});
-		await writeJsonAtomic(join(cwd, run.tasks[0].files.result), {
-			status: "completed",
-			structuredOutput: { claims: ["a", "b"] },
-		});
-		await writeRunRecord(cwd, run);
-
-		await scheduleRun(cwd, run.runId);
-		let current = await readRunRecord(cwd, run.runId);
-		for (const task of current.tasks.filter(
-			(item) => item.stageId === "review",
-		)) {
-			setTaskTerminal(task, "completed", "completed", {
-				exitCode: 0,
-				lastMessage: "completed",
-			});
-			await writeJsonAtomic(join(cwd, task.files.result), {
-				status: "completed",
-				structuredOutput: { findings: [{ title: `${task.specId}-finding` }] },
-			});
-		}
-		await writeRunRecord(cwd, current);
-
-		await scheduleRun(cwd, run.runId);
-		current = await readRunRecord(cwd, run.runId);
-		const taskIds = current.tasks.map((task) => task.taskId);
-		assert.equal(new Set(taskIds).size, taskIds.length);
-		assert.deepEqual(
-			current.tasks
-				.filter((task) => task.stageId === "verify")
-				.map((task) => task.specId),
-			["verify.item-001", "verify.item-002"],
-		);
-	} finally {
-		rmSync(cwd, { recursive: true, force: true });
-	}
-});
-
-test("stage-first support executes helper and writes artifacts", async () => {
+test("artifactGraph runtime support executes helper and writes artifacts", async () => {
 	const cwd = makeProject();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
@@ -5498,10 +3926,10 @@ test("stage-first support executes helper and writes artifacts", async () => {
 		const specPath = join(workflowDir, "spec.json");
 		writeFileSync(
 			join(workflowDir, "helpers", "audit.mjs"),
-			"export default async function helper({ sources, options, context }) { return { audited: sources['extract.main'].claims.length, strict: options.strict, stageId: context.stageId }; }\n",
+			"export default async function helper({ sources, options, context }) { return { audited: sources.extract.claims.length, strict: options.strict, stageId: context.stageId }; }\n",
 		);
 		const spec = workflowSpec("unit-scout", {
-			workflow: {
+			artifactGraph: {
 				stages: [
 					{
 						id: "extract",
@@ -5526,20 +3954,13 @@ test("stage-first support executes helper and writes artifacts", async () => {
 			task: "Check claims",
 			specPath,
 		});
-		const { run } = await createStageFirstRunRecord(cwd, compiled, specPath);
+		const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
 		await writeStaticRunArtifacts(cwd, run, compiled, spec);
 		writeFileSync(
 			join(workflowDir, "helpers", "audit.mjs"),
 			"export default async function helper() { throw new Error('live helper should not run'); }\n",
 		);
-		setTaskTerminal(run.tasks[0], "completed", "completed", {
-			exitCode: 0,
-			lastMessage: "completed",
-		});
-		await writeJsonAtomic(join(cwd, run.tasks[0].files.result), {
-			status: "completed",
-			structuredOutput: { claims: ["a", "b"] },
-		});
+		await completeTask(cwd, run.tasks[0], { claims: ["a", "b"] });
 		await writeRunRecord(cwd, run);
 
 		await scheduleRun(cwd, run.runId);
@@ -5550,9 +3971,15 @@ test("stage-first support executes helper and writes artifacts", async () => {
 		assert.equal(support?.statusDetail, "support_completed");
 		assert.equal(support?.lastMessage, "support completed");
 		assert.deepEqual(
-			JSON.parse(readFileSync(join(cwd, support.files.result), "utf8"))
-				.structuredOutput,
+			JSON.parse(
+				readFileSync(
+					join(dirname(join(cwd, support.files.result)), "control.json"),
+					"utf8",
+				),
+			),
 			{
+				schema: "stage-control-v1",
+				digest: "Support helper completed.",
 				audited: 2,
 				strict: true,
 				stageId: "audit",
@@ -5563,7 +3990,7 @@ test("stage-first support executes helper and writes artifacts", async () => {
 	}
 });
 
-test("stage-first support omits failed dependency sources", async () => {
+test("artifactGraph runtime support omits failed dependency sources", async () => {
 	const cwd = makeProject();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
@@ -5572,10 +3999,10 @@ test("stage-first support omits failed dependency sources", async () => {
 		const specPath = join(workflowDir, "spec.json");
 		writeFileSync(
 			join(workflowDir, "helpers", "sources.mjs"),
-			"export default async function helper({ sources }) { return { sourceKeys: Object.keys(sources).sort(), failedSource: sources['extract.failed'] ?? null, okSource: sources['extract.ok'] }; }\n",
+			"export default async function helper({ sources }) { return { sourceKeys: Object.keys(sources).sort(), failedSource: sources['extract.failed'] ?? null, okSource: sources.extract ?? sources['extract.ok'] }; }\n",
 		);
 		const spec = workflowSpec("unit-scout", {
-			workflow: {
+			artifactGraph: {
 				stages: [
 					{
 						id: "extract",
@@ -5601,20 +4028,13 @@ test("stage-first support omits failed dependency sources", async () => {
 			task: "Check claims",
 			specPath,
 		});
-		const { run } = await createStageFirstRunRecord(cwd, compiled, specPath);
+		const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
 		await writeStaticRunArtifacts(cwd, run, compiled, spec);
 		const ok = run.tasks.find((task) => task.specId === "extract.ok");
 		const failed = run.tasks.find((task) => task.specId === "extract.failed");
 		assert.ok(ok);
 		assert.ok(failed);
-		setTaskTerminal(ok, "completed", "completed", {
-			exitCode: 0,
-			lastMessage: "completed",
-		});
-		await writeJsonAtomic(join(cwd, ok.files.result), {
-			status: "completed",
-			structuredOutput: { claims: ["kept"] },
-		});
+		await completeTask(cwd, ok, { claims: ["kept"] });
 		setTaskTerminal(failed, "failed", "failed", {
 			exitCode: 1,
 			lastMessage: "failed",
@@ -5629,12 +4049,22 @@ test("stage-first support omits failed dependency sources", async () => {
 		const support = updated.tasks.find((task) => task.specId === "audit.main");
 		assert.equal(support?.status, "completed");
 		assert.deepEqual(
-			JSON.parse(readFileSync(join(cwd, support.files.result), "utf8"))
-				.structuredOutput,
+			JSON.parse(
+				readFileSync(
+					join(dirname(join(cwd, support.files.result)), "control.json"),
+					"utf8",
+				),
+			),
 			{
+				schema: "stage-control-v1",
+				digest: "Support helper completed.",
 				failedSource: null,
-				okSource: { claims: ["kept"] },
-				sourceKeys: ["extract.ok"],
+				okSource: {
+					schema: "stage-control-v1",
+					digest: "extract completed",
+					claims: ["kept"],
+				},
+				sourceKeys: ["extract"],
 			},
 		);
 	} finally {
@@ -5642,7 +4072,7 @@ test("stage-first support omits failed dependency sources", async () => {
 	}
 });
 
-test("stage-first support marks helper errors as failed", async () => {
+test("artifactGraph runtime support marks helper errors as failed", async () => {
 	const cwd = makeProject();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
@@ -5654,7 +4084,7 @@ test("stage-first support marks helper errors as failed", async () => {
 			"export default async function helper() { throw new Error('helper boom'); }\n",
 		);
 		const spec = workflowSpec("unit-scout", {
-			workflow: {
+			artifactGraph: {
 				stages: [
 					{
 						id: "extract",
@@ -5676,7 +4106,7 @@ test("stage-first support marks helper errors as failed", async () => {
 			task: "Check claims",
 			specPath,
 		});
-		const { run } = await createStageFirstRunRecord(cwd, compiled, specPath);
+		const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
 		await writeStaticRunArtifacts(cwd, run, compiled, spec);
 		setTaskTerminal(run.tasks[0], "completed", "completed", {
 			exitCode: 0,
@@ -5700,59 +4130,7 @@ test("stage-first support marks helper errors as failed", async () => {
 	}
 });
 
-test("stage-first foreach blocks when maxItems is exceeded with output contract paths", async () => {
-	const cwd = makeProject();
-	try {
-		writeAgent(cwd, "unit-scout", "read");
-		const spec = workflowSpec("unit-scout", {
-			workflow: {
-				stages: [
-					{
-						id: "extract",
-						type: "task",
-						output: {
-							format: "json",
-							contract: { requiredPaths: ["$.claims"] },
-						},
-						prompt: "Extract",
-					},
-					{
-						id: "verify",
-						type: "foreach",
-						from: { stage: "extract", path: "$.claims" },
-						maxItems: 1,
-						each: { prompt: "Verify ${item}" },
-					},
-				],
-			},
-		});
-		const compiled = await compileWorkflow(spec, { cwd, task: "Check claims" });
-		const { run } = await createStageFirstRunRecord(
-			cwd,
-			compiled,
-			join(cwd, "workflows", "unit.json"),
-		);
-		await writeStaticRunArtifacts(cwd, run, compiled, spec);
-		setTaskTerminal(run.tasks[0], "completed", "completed", {
-			exitCode: 0,
-			lastMessage: "completed",
-		});
-		await writeJsonAtomic(join(cwd, run.tasks[0].files.result), {
-			status: "completed",
-			structuredOutput: { claims: ["a", "b"] },
-		});
-		await writeRunRecord(cwd, run);
-
-		await scheduleRun(cwd, run.runId);
-		const blocked = await readRunRecord(cwd, run.runId);
-		assert.equal(blocked.tasks[1].status, "blocked");
-		assert.match(blocked.tasks[1].lastMessage, /exceeding maxItems=1/);
-	} finally {
-		rmSync(cwd, { recursive: true, force: true });
-	}
-});
-
-test("stage-first scheduler launches empty-after roots in parallel", async () => {
+test("artifactGraph runtime scheduler launches empty-after roots in parallel", async () => {
 	const cwd = makeProject();
 	const prompts = [];
 	try {
@@ -5777,7 +4155,7 @@ test("stage-first scheduler launches empty-after roots in parallel", async () =>
 			},
 		});
 		const spec = workflowSpec("unit-scout", {
-			workflow: {
+			artifactGraph: {
 				stages: [
 					{ id: "a", type: "task", prompt: "A." },
 					{ id: "b", type: "task", after: [], prompt: "B." },
@@ -5789,7 +4167,7 @@ test("stage-first scheduler launches empty-after roots in parallel", async () =>
 			cwd,
 			task: "Check scheduling",
 		});
-		const { run } = await createStageFirstRunRecord(
+		const { run } = await createWorkflowRunRecord(
 			cwd,
 			compiled,
 			join(cwd, "workflows", "unit.json"),
@@ -5813,7 +4191,7 @@ test("stage-first scheduler launches empty-after roots in parallel", async () =>
 	}
 });
 
-test("stage-first after dependencies do not inject order-only source context", async () => {
+test("artifactGraph runtime after dependencies do not inject order-only source context", async () => {
 	const cwd = makeProject();
 	const prompts = [];
 	try {
@@ -5838,7 +4216,7 @@ test("stage-first after dependencies do not inject order-only source context", a
 			},
 		});
 		const spec = workflowSpec("unit-scout", {
-			workflow: {
+			artifactGraph: {
 				stages: [
 					{
 						id: "source",
@@ -5872,7 +4250,7 @@ test("stage-first after dependencies do not inject order-only source context", a
 			cwd,
 			task: "Check context",
 		});
-		const { run } = await createStageFirstRunRecord(
+		const { run } = await createWorkflowRunRecord(
 			cwd,
 			compiled,
 			join(cwd, "workflows", "unit.json"),
@@ -5880,7 +4258,7 @@ test("stage-first after dependencies do not inject order-only source context", a
 		await writeStaticRunArtifacts(cwd, run, compiled, spec);
 
 		await completeTask(cwd, taskBySpec(run, "source.main"), {
-			content: "from-source-content",
+			content: "source completed",
 		});
 		await completeTask(cwd, taskBySpec(run, "gate.main"), {
 			content: "after-source-content",
@@ -5893,7 +4271,7 @@ test("stage-first after dependencies do not inject order-only source context", a
 			writeFileSync(
 				join(cwd, task.files.output),
 				task.specId === "source.main"
-					? "from-source-content\n"
+					? "source completed\n"
 					: "after-source-content\n",
 			);
 		}
@@ -5909,9 +4287,10 @@ test("stage-first after dependencies do not inject order-only source context", a
 		);
 		assert(afterOnlyPrompt);
 		assert(mixedPrompt);
-		assert.doesNotMatch(afterOnlyPrompt, /# Source Stage Context/);
-		assert.match(mixedPrompt, /# Source Stage Context/);
-		assert.match(mixedPrompt, /from-source-content/);
+		assert.match(afterOnlyPrompt, /# Workflow Artifact Inputs/);
+		assert.doesNotMatch(afterOnlyPrompt, /source completed/);
+		assert.match(mixedPrompt, /# Workflow Artifact Inputs/);
+		assert.match(mixedPrompt, /source completed/);
 		assert.doesNotMatch(mixedPrompt, /after-source-content/);
 	} finally {
 		setSubagentApiForTests(undefined);
@@ -5919,14 +4298,14 @@ test("stage-first after dependencies do not inject order-only source context", a
 	}
 });
 
-test("stage-first diamond fan-out launches branches in parallel and joins context", async () => {
+test("artifactGraph runtime diamond fan-out launches branches in parallel and joins context", async () => {
 	const cwd = makeProject();
 	const prompts = [];
 	try {
 		writeAgent(cwd, "unit-scout", "read");
 		captureSubagentPrompts(prompts);
 		const spec = workflowSpec("unit-scout", {
-			workflow: {
+			artifactGraph: {
 				stages: [
 					{
 						id: "a",
@@ -5961,7 +4340,7 @@ test("stage-first diamond fan-out launches branches in parallel and joins contex
 			cwd,
 			task: "Check diamond",
 		});
-		const { run } = await createStageFirstRunRecord(
+		const { run } = await createWorkflowRunRecord(
 			cwd,
 			compiled,
 			join(cwd, "workflows", "unit.json"),
@@ -5978,7 +4357,7 @@ test("stage-first diamond fan-out launches branches in parallel and joins contex
 		assert.equal(prompts.length, 1);
 
 		await completeTask(cwd, taskBySpec(current, "a.main"), {
-			marker: "a-output",
+			marker: "a completed",
 		});
 		await writeRunRecord(cwd, current);
 
@@ -5992,10 +4371,10 @@ test("stage-first diamond fan-out launches branches in parallel and joins contex
 		assert(prompts.some((prompt) => prompt.includes("stage=c")));
 
 		await completeTask(cwd, taskBySpec(current, "b.main"), {
-			marker: "b-output",
+			marker: "b completed",
 		});
 		await completeTask(cwd, taskBySpec(current, "c.main"), {
-			marker: "c-output",
+			marker: "c completed",
 		});
 		await writeRunRecord(cwd, current);
 
@@ -6004,17 +4383,17 @@ test("stage-first diamond fan-out launches branches in parallel and joins contex
 		assert.equal(taskBySpec(current, "d.main").status, "running");
 		const joinPrompt = prompts.find((prompt) => prompt.includes("stage=d"));
 		assert(joinPrompt);
-		assert.match(joinPrompt, /# Source Stage Context/);
-		assert.match(joinPrompt, /b-output/);
-		assert.match(joinPrompt, /c-output/);
-		assert.doesNotMatch(joinPrompt, /a-output/);
+		assert.match(joinPrompt, /# Workflow Artifact Inputs/);
+		assert.match(joinPrompt, /b completed/);
+		assert.match(joinPrompt, /c completed/);
+		assert.doesNotMatch(joinPrompt, /a completed/);
 	} finally {
 		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
-test("stage-first dag container waits for outer sources and skips strict dependents", async () => {
+test("artifactGraph runtime dag container waits for outer sources and skips strict dependents", async () => {
 	const cwd = makeProject();
 	const prompts = [];
 	try {
@@ -6025,7 +4404,7 @@ test("stage-first dag container waits for outer sources and skips strict depende
 			cwd,
 			task: "Check strict container",
 		});
-		const { run } = await createStageFirstRunRecord(
+		const { run } = await createWorkflowRunRecord(
 			cwd,
 			compiled,
 			join(cwd, "workflows", "unit.json"),
@@ -6040,7 +4419,7 @@ test("stage-first dag container waits for outer sources and skips strict depende
 		assert(!prompts.some((prompt) => prompt.includes("stage=analysis.scan")));
 
 		await completeTask(cwd, taskBySpec(current, "setup.main"), {
-			marker: "setup-output",
+			marker: "setup completed",
 		});
 		await writeRunRecord(cwd, current);
 
@@ -6054,8 +4433,8 @@ test("stage-first dag container waits for outer sources and skips strict depende
 			prompt.includes("stage=analysis.scan"),
 		);
 		assert(scanPrompt);
-		assert.match(scanPrompt, /# Source Stage Context/);
-		assert.match(scanPrompt, /setup-output/);
+		assert.match(scanPrompt, /# Workflow Artifact Inputs/);
+		assert.match(scanPrompt, /setup completed/);
 
 		await completeTask(
 			cwd,
@@ -6078,7 +4457,7 @@ test("stage-first dag container waits for outer sources and skips strict depende
 	}
 });
 
-test("stage-first partial dag join proceeds and exposes outputFrom downstream", async () => {
+test("artifactGraph runtime partial dag join proceeds and exposes outputFrom downstream", async () => {
 	const cwd = makeProject();
 	const prompts = [];
 	try {
@@ -6092,7 +4471,7 @@ test("stage-first partial dag join proceeds and exposes outputFrom downstream", 
 			cwd,
 			task: "Check partial container",
 		});
-		const { run } = await createStageFirstRunRecord(
+		const { run } = await createWorkflowRunRecord(
 			cwd,
 			compiled,
 			join(cwd, "workflows", "unit.json"),
@@ -6103,7 +4482,7 @@ test("stage-first partial dag join proceeds and exposes outputFrom downstream", 
 		await scheduleRun(cwd, run.runId);
 		let current = await readRunRecord(cwd, run.runId);
 		await completeTask(cwd, taskBySpec(current, "setup.main"), {
-			marker: "setup-output",
+			marker: "setup completed",
 		});
 		await writeRunRecord(cwd, current);
 
@@ -6127,11 +4506,11 @@ test("stage-first partial dag join proceeds and exposes outputFrom downstream", 
 			prompt.includes("stage=analysis.final"),
 		);
 		assert(finalPrompt);
-		assert.match(finalPrompt, /# Source Stage Context/);
-		assert.match(finalPrompt, /scan-failed-output/);
+		assert.match(finalPrompt, /# Workflow Artifact Inputs/);
+		assert.doesNotMatch(finalPrompt, /scan-failed-output/);
 
 		await completeTask(cwd, taskBySpec(current, "analysis.final.main"), {
-			marker: "final-output",
+			marker: "analysis.final completed",
 		});
 		await writeRunRecord(cwd, current);
 
@@ -6142,8 +4521,8 @@ test("stage-first partial dag join proceeds and exposes outputFrom downstream", 
 			prompt.includes("stage=report"),
 		);
 		assert(reportPrompt);
-		assert.match(reportPrompt, /# Source Stage Context/);
-		assert.match(reportPrompt, /final-output/);
+		assert.match(reportPrompt, /# Workflow Artifact Inputs/);
+		assert.match(reportPrompt, /analysis.final completed/);
 		assert.doesNotMatch(reportPrompt, /scan-failed-output/);
 		assert.doesNotMatch(reportPrompt, /analysis.scan.main/);
 	} finally {
@@ -6163,7 +4542,7 @@ test("resumeRun resets failed dag container children and relaunches roots", asyn
 			cwd,
 			task: "Resume container",
 		});
-		const { run } = await createStageFirstRunRecord(
+		const { run } = await createWorkflowRunRecord(
 			cwd,
 			compiled,
 			join(cwd, "workflows", "unit.json"),
@@ -6174,7 +4553,7 @@ test("resumeRun resets failed dag container children and relaunches roots", asyn
 		await scheduleRun(cwd, run.runId);
 		let current = await readRunRecord(cwd, run.runId);
 		await completeTask(cwd, taskBySpec(current, "setup.main"), {
-			marker: "setup-output",
+			marker: "setup completed",
 		});
 		await writeRunRecord(cwd, current);
 
@@ -6209,103 +4588,7 @@ test("resumeRun resets failed dag container children and relaunches roots", asyn
 		assert.equal(taskBySpec(resumed, "report.main").status, "pending");
 		assert.equal(prompts.length, 1);
 		assert.match(prompts[0], /stage=analysis\.scan/);
-		assert.match(prompts[0], /setup-output/);
-	} finally {
-		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
-	}
-});
-
-test("output contract retry preserves DAG source context", async () => {
-	const cwd = makeProject();
-	let capturedPrompt = "";
-	try {
-		writeAgent(cwd, "unit-scout", "read");
-		setSubagentApiForTests({
-			async runSubagent(options) {
-				capturedPrompt = String(options.task ?? "");
-				return {
-					runId: "run_stub",
-					attemptId: "attempt_stub",
-					status: "running",
-				};
-			},
-			async getSubagentStatus() {
-				return null;
-			},
-			async reconcileSubagentRun() {
-				return {};
-			},
-			async interruptSubagent() {
-				return {};
-			},
-		});
-
-		const spec = workflowSpec("unit-scout", {
-			workflow: {
-				stages: [
-					{
-						id: "extract",
-						type: "task",
-						output: { format: "json" },
-						prompt: "Extract source facts.",
-					},
-					{
-						id: "final",
-						type: "reduce",
-						from: "extract",
-						output: {
-							format: "json",
-							contract: { requiredPaths: ["$.summary"] },
-							onInvalid: "fail",
-						},
-						prompt: "Summarize source facts.",
-					},
-				],
-			},
-		});
-		const compiled = await compileWorkflow(spec, { cwd, task: "Review topic" });
-		const { run } = await createStageFirstRunRecord(
-			cwd,
-			compiled,
-			join(cwd, "workflows", "unit.json"),
-		);
-		await writeStaticRunArtifacts(cwd, run, compiled, spec);
-
-		const sourceTask = run.tasks[0];
-		mkdirSync(dirname(join(cwd, sourceTask.files.output)), { recursive: true });
-		writeFileSync(join(cwd, sourceTask.files.output), "source fact alpha");
-		await writeJsonAtomic(join(cwd, sourceTask.files.result), {
-			status: "completed",
-			structuredOutput: { facts: ["source fact alpha"] },
-		});
-		setTaskTerminal(sourceTask, "completed", "completed", {
-			exitCode: 0,
-			lastMessage: "completed",
-		});
-
-		const finalTask = run.tasks[1];
-		finalTask.status = "pending";
-		finalTask.statusDetail = "retry_output_invalid";
-		finalTask.outputRetry = {
-			attempts: 1,
-			maxAttempts: 1,
-			reason: "output_invalid",
-			message: "missing $.summary",
-		};
-		mkdirSync(dirname(join(cwd, finalTask.files.output)), { recursive: true });
-		writeFileSync(
-			`${join(cwd, finalTask.files.output)}.invalid-attempt-1`,
-			'{"wrong":true}\n',
-		);
-		await writeRunRecord(cwd, run);
-
-		await scheduleRun(cwd, run.runId);
-
-		assert.match(capturedPrompt, /# Source Stage Context/);
-		assert.match(capturedPrompt, /source fact alpha/);
-		assert.match(capturedPrompt, /# Output Contract Retry Instructions/);
-		assert.match(capturedPrompt, /missing \$\.summary/);
+		assert.match(prompts[0], /setup completed/);
 	} finally {
 		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
@@ -6339,12 +4622,12 @@ test("subagent launch forwards tool-call capture only when env is enabled", asyn
 		});
 
 		const spec = workflowSpec("unit-scout", {
-			workflow: { stages: [{ id: "main", type: "task", prompt: "Do work." }] },
+			artifactGraph: { stages: [{ id: "main", type: "task", prompt: "Do work." }] },
 		});
 		const compiled = await compileWorkflow(spec, { cwd, task: "Review topic" });
 
 		delete process.env.PI_WORKFLOW_CAPTURE_TOOL_CALLS;
-		const first = await createStageFirstRunRecord(
+		const first = await createWorkflowRunRecord(
 			cwd,
 			compiled,
 			join(cwd, "workflows", "unit-a.json"),
@@ -6355,7 +4638,7 @@ test("subagent launch forwards tool-call capture only when env is enabled", asyn
 		assert.equal(captured[0].captureToolCalls, undefined);
 
 		process.env.PI_WORKFLOW_CAPTURE_TOOL_CALLS = "1";
-		const second = await createStageFirstRunRecord(
+		const second = await createWorkflowRunRecord(
 			cwd,
 			compiled,
 			join(cwd, "workflows", "unit-b.json"),
@@ -6404,7 +4687,7 @@ test("subagent launch loads provider extensions for extension-backed tools", asy
 
 		const spec = workflowSpec("unit-researcher", {
 			tools: ["read", "web_search", "fetch_content", "get_search_content"],
-			workflow: {
+			artifactGraph: {
 				stages: [
 					{ id: "main", type: "task", prompt: "Research with web tools." },
 				],
@@ -6414,7 +4697,7 @@ test("subagent launch loads provider extensions for extension-backed tools", asy
 			cwd,
 			task: "Research topic",
 		});
-		const { run } = await createStageFirstRunRecord(
+		const { run } = await createWorkflowRunRecord(
 			cwd,
 			compiled,
 			join(cwd, "workflows", "unit.json"),
@@ -6423,7 +4706,12 @@ test("subagent launch loads provider extensions for extension-backed tools", asy
 		await writeRunRecord(cwd, run);
 		await scheduleRun(cwd, run.runId);
 
-		assert.deepEqual(captured.extensions, ["npm:pi-web-access"]);
+		assert.equal(captured.extensions[0], "npm:pi-web-access");
+		assert(
+			captured.extensions.some((entry) =>
+				entry.endsWith("workflow-artifact-extension.ts"),
+			),
+		);
 	} finally {
 		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
@@ -6460,7 +4748,7 @@ test("subagent launch appends extra extensions from env", async () => {
 
 		const spec = workflowSpec("unit-researcher", {
 			tools: ["read", "fetch_content"],
-			workflow: {
+			artifactGraph: {
 				stages: [{ id: "main", type: "task", prompt: "Research with fetch." }],
 			},
 		});
@@ -6468,7 +4756,7 @@ test("subagent launch appends extra extensions from env", async () => {
 			cwd,
 			task: "Research topic",
 		});
-		const { run } = await createStageFirstRunRecord(
+		const { run } = await createWorkflowRunRecord(
 			cwd,
 			compiled,
 			join(cwd, "workflows", "unit.json"),
@@ -6477,10 +4765,13 @@ test("subagent launch appends extra extensions from env", async () => {
 		await writeRunRecord(cwd, run);
 		await scheduleRun(cwd, run.runId);
 
-		assert.deepEqual(captured.extensions, [
-			"npm:pi-web-access",
-			"/tmp/pi-telemetry-extension.mjs",
-		]);
+		assert(captured.extensions.includes("npm:pi-web-access"));
+		assert(captured.extensions.includes("/tmp/pi-telemetry-extension.mjs"));
+		assert(
+			captured.extensions.some((entry) =>
+				entry.endsWith("workflow-artifact-extension.ts"),
+			),
+		);
 	} finally {
 		if (previous === undefined)
 			delete process.env.PI_WORKFLOW_SUBAGENT_EXTRA_EXTENSIONS;
@@ -6525,7 +4816,7 @@ test("subagent launch merges object-form provider extensions with built-in mappi
 					classification: "read-only",
 				},
 			],
-			workflow: {
+			artifactGraph: {
 				stages: [
 					{
 						id: "main",
@@ -6539,7 +4830,7 @@ test("subagent launch merges object-form provider extensions with built-in mappi
 			cwd,
 			task: "Research topic",
 		});
-		const { run } = await createStageFirstRunRecord(
+		const { run } = await createWorkflowRunRecord(
 			cwd,
 			compiled,
 			join(cwd, "workflows", "unit.json"),
@@ -6552,11 +4843,15 @@ test("subagent launch merges object-form provider extensions with built-in mappi
 			"read",
 			"fetch_content",
 			"scrapling_fetch",
+			"workflow_artifact",
 		]);
-		assert.deepEqual(captured.extensions, [
-			"npm:pi-web-access",
-			"packages/pi-scrapling-access",
-		]);
+		assert(captured.extensions.includes("npm:pi-web-access"));
+		assert(captured.extensions.includes("packages/pi-scrapling-access"));
+		assert(
+			captured.extensions.some((entry) =>
+				entry.endsWith("workflow-artifact-extension.ts"),
+			),
+		);
 	} finally {
 		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
@@ -6569,24 +4864,19 @@ test("completed subagent with contextLengthExceeded and valid output remains com
 		writeAgent(cwd, "unit-scout", "read");
 		const compiled = await compileWorkflow(
 			workflowSpec("unit-scout", {
-				workflow: {
+				artifactGraph: {
 					stages: [
 						{
 							id: "main",
 							type: "task",
-							output: {
-								format: "json",
-								onInvalid: "fail",
-								contract: { requiredPaths: ["$.ok"] },
-							},
-							prompt: "Return JSON.",
+							prompt: "Return valid vNext output.",
 						},
 					],
 				},
 			}),
 			{ cwd, task: "Review topic" },
 		);
-		const { run } = await createStageFirstRunRecord(
+		const { run } = await createWorkflowRunRecord(
 			cwd,
 			compiled,
 			join(cwd, "workflows", "unit.json"),
@@ -6613,7 +4903,20 @@ test("completed subagent with contextLengthExceeded and valid output remains com
 
 		const artifactDir = join(cwd, ".fake-context-subagent");
 		mkdirSync(artifactDir, { recursive: true });
-		writeFileSync(join(artifactDir, "output.log"), '{"ok":true}\n');
+		writeFileSync(
+			join(artifactDir, "output.log"),
+			[
+				"<control>",
+				JSON.stringify({ schema: "stage-control-v1", digest: "ok", ok: true }),
+				"</control>",
+				"<analysis>",
+				"context length output analysis",
+				"</analysis>",
+				"<refs>",
+				"[]",
+				"</refs>",
+			].join("\n"),
+		);
 		writeFileSync(join(artifactDir, "stderr.log"), "");
 		writeFileSync(
 			join(artifactDir, "tool-calls-summary.json"),
@@ -6705,17 +5008,16 @@ test("completed subagent with contextLengthExceeded and valid output remains com
 			readFileSync(join(cwd, refreshedTask.files.result), "utf8"),
 		);
 		assert.equal(refreshedTask.status, "completed");
-		assert.equal(refreshedTask.outputValidation.status, "valid");
-		assert.equal(workflowResult.contextLengthExceeded, true);
+		assert.equal(workflowResult.outputValidation.valid, true);
 		assert.equal(workflowResult.failureKind, undefined);
-		assert.deepEqual(workflowResult.structuredOutput, { ok: true });
-		assert.equal(workflowResult.subagent.toolCalls.totalCalls, 1);
-		assert.deepEqual(workflowResult.subagent.toolCalls.callsByTool, {
-			fetch_content: 1,
-		});
-		assert.equal(
-			workflowResult.subagent.toolCallsSummaryPath,
-			".fake-context-subagent/tool-calls-summary.json",
+		assert.deepEqual(
+			JSON.parse(
+				readFileSync(
+					join(dirname(join(cwd, refreshedTask.files.result)), "control.json"),
+					"utf8",
+				),
+			),
+			{ schema: "stage-control-v1", digest: "ok", ok: true },
 		);
 	} finally {
 		setSubagentApiForTests(undefined);
@@ -6729,13 +5031,13 @@ test("refresh adopts handle-less running subagent from deterministic runsDir", a
 		writeAgent(cwd, "unit-scout", "read");
 		const compiled = await compileWorkflow(
 			workflowSpec("unit-scout", {
-				workflow: {
+				artifactGraph: {
 					stages: [{ id: "main", type: "task", prompt: "Do work." }],
 				},
 			}),
 			{ cwd, task: "Review topic" },
 		);
-		const { run } = await createStageFirstRunRecord(
+		const { run } = await createWorkflowRunRecord(
 			cwd,
 			compiled,
 			join(cwd, "workflows", "unit.json"),
@@ -6787,7 +5089,18 @@ test("refresh adopts handle-less running subagent from deterministic runsDir", a
 
 		const artifactDir = join(cwd, ".fake-subagent");
 		mkdirSync(artifactDir, { recursive: true });
-		writeFileSync(join(artifactDir, "output.log"), "adopted output\n");
+		const adoptedOutput = [
+			"<control>",
+			JSON.stringify({ schema: "stage-control-v1", digest: "adopted" }),
+			"</control>",
+			"<analysis>",
+			"adopted output",
+			"</analysis>",
+			"<refs>",
+			"[]",
+			"</refs>",
+		].join("\n");
+		writeFileSync(join(artifactDir, "output.log"), adoptedOutput);
 		writeFileSync(join(artifactDir, "stderr.log"), "");
 		writeFileSync(
 			join(artifactDir, "result.json"),
@@ -6854,10 +5167,10 @@ test("refresh adopts handle-less running subagent from deterministic runsDir", a
 		const workflowResult = JSON.parse(
 			readFileSync(join(cwd, refreshed.tasks[0].files.result), "utf8"),
 		);
-		assert.equal(workflowResult.subagent.runId, subRunId);
+		assert.equal(workflowResult.outputValidation.valid, true);
 		assert.equal(
 			readFileSync(join(cwd, refreshed.tasks[0].files.output), "utf8"),
-			"adopted output\n",
+			adoptedOutput,
 		);
 	} finally {
 		setSubagentApiForTests(undefined);
@@ -7142,7 +5455,7 @@ test("static run artifacts preserve workflow bundle files", async () => {
 			task: "Summarize",
 			specPath,
 		});
-		const { run } = await createStageFirstRunRecord(cwd, compiled, specPath);
+		const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
 		await writeStaticRunArtifacts(cwd, run, compiled, spec);
 
 		assert.equal(
@@ -7172,7 +5485,7 @@ test("static run artifacts preserve workflow bundle files", async () => {
 	}
 });
 
-test("run records use workflow-v1 type and preserve artifact graph discriminator", async () => {
+test("run records use artifact-graph type and preserve artifact graph discriminator", async () => {
 	const cwd = makeProject();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
@@ -7180,15 +5493,15 @@ test("run records use workflow-v1 type and preserve artifact graph discriminator
 			cwd,
 			task: "Summarize",
 		});
-		const { run } = await createStageFirstRunRecord(
+		const { run } = await createWorkflowRunRecord(
 			cwd,
 			compiled,
 			join(cwd, "workflow.json"),
 		);
-		assert.equal(run.type, STAGE_FIRST_RUN_TYPE);
-		assert.equal(run.type, "workflow-v1");
-		assert.equal(run.artifactGraph, undefined);
-		assert.match(formatRun(run), /type=workflow/);
+		assert.equal(run.type, WORKFLOW_RUN_TYPE);
+		assert.equal(run.type, "artifact-graph");
+		assert.deepEqual(run.artifactGraph, { enabled: true });
+		assert.match(formatRun(run), /type=artifact-graph/);
 		setTaskTerminal(run.tasks[0], "completed", "completed");
 		assert.equal(deriveRunStatus(run).status, "completed");
 
@@ -7445,7 +5758,7 @@ test("resumeRun resets failed and skipped tasks, preserves completed work, and r
 	try {
 		writeAgent(cwd, "unit-scout");
 		const spec = workflowSpec("unit-scout", {
-			workflow: {
+			artifactGraph: {
 				stages: [
 					{
 						id: "one",
@@ -7468,7 +5781,7 @@ test("resumeRun resets failed and skipped tasks, preserves completed work, and r
 			cwd,
 			task: "Resume target",
 		});
-		const { run } = await createStageFirstRunRecord(
+		const { run } = await createWorkflowRunRecord(
 			cwd,
 			compiled,
 			join(cwd, "workflows", "unit.json"),
@@ -7533,10 +5846,10 @@ test("resumeRun rejects completed and loop runs", async () => {
 	try {
 		writeAgent(cwd, "unit-scout");
 		const spec = workflowSpec("unit-scout", {
-			workflow: { stages: [{ id: "only", type: "task", prompt: "Do it." }] },
+			artifactGraph: { stages: [{ id: "only", type: "task", prompt: "Do it." }] },
 		});
 		const compiled = await compileWorkflow(spec, { cwd, task: "Done target" });
-		const { run } = await createStageFirstRunRecord(
+		const { run } = await createWorkflowRunRecord(
 			cwd,
 			compiled,
 			join(cwd, "workflows", "unit.json"),
@@ -7585,7 +5898,7 @@ test("notifyUnfinishedRuns reports recent failed root runs with resume hint", as
 					{
 						runId: "workflow_recent",
 						name: "deep-research",
-						type: "workflow-v1",
+						type: "artifact-graph",
 						status: "failed",
 						taskSummary: summary,
 						createdAt: "2026-06-11T00:00:00.000Z",
@@ -7596,7 +5909,7 @@ test("notifyUnfinishedRuns reports recent failed root runs with resume hint", as
 					{
 						runId: "workflow_old",
 						name: "stale",
-						type: "workflow-v1",
+						type: "artifact-graph",
 						status: "failed",
 						taskSummary: summary,
 						createdAt: "2026-05-01T00:00:00.000Z",
@@ -7607,7 +5920,7 @@ test("notifyUnfinishedRuns reports recent failed root runs with resume hint", as
 					{
 						runId: "workflow_child",
 						name: "loop-child",
-						type: "workflow-v1",
+						type: "artifact-graph",
 						status: "failed",
 						parentRunId: "workflow_recent",
 						taskSummary: summary,
@@ -7619,7 +5932,7 @@ test("notifyUnfinishedRuns reports recent failed root runs with resume hint", as
 					{
 						runId: "workflow_done",
 						name: "ok",
-						type: "workflow-v1",
+						type: "artifact-graph",
 						status: "completed",
 						taskSummary: summary,
 						createdAt: "2026-06-11T00:00:00.000Z",

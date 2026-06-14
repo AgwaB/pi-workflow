@@ -14,14 +14,14 @@ export const TOOL_CLASSIFICATIONS = [
 	"write-capable",
 	"mutation-capable",
 ] as const;
-export const STAGE_FIRST_RUN_TYPE = "workflow-v1" as const;
+export const WORKFLOW_RUN_TYPE = "artifact-graph" as const;
 
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 export type FastMode = (typeof FAST_MODES)[number];
 export type ApprovalMode = (typeof APPROVAL_MODES)[number];
 export type WorktreePolicy = (typeof WORKTREE_POLICIES)[number];
 export type ToolClassification = (typeof TOOL_CLASSIFICATIONS)[number];
-export type CompiledWorkflowType = typeof STAGE_FIRST_RUN_TYPE;
+export type WorkflowRunType = typeof WORKFLOW_RUN_TYPE;
 
 export interface BackendOptions {
 	type?: "local-pi";
@@ -70,27 +70,6 @@ export interface RoleSpec {
 	includeSections?: string[];
 	excludeSections?: string[];
 	maxChars?: number;
-}
-
-export interface WorkflowSpec {
-	schemaVersion: 1;
-	name?: string;
-	description?: string;
-	agent?: string;
-	readOnly?: boolean;
-	tools?: WorkflowToolSpec[];
-	model?: string;
-	thinking?: ThinkingLevel;
-	fast?: FastMode;
-	worktreePolicy?: WorktreePolicy;
-	input?: unknown;
-	catalog?: Record<string, unknown>;
-	defaults?: WorkflowDefaults;
-	backend?: BackendOptions;
-	roles?: Record<string, RoleSpec>;
-	outputTemplates?: Record<string, unknown>;
-	workflow?: { stages: unknown[] };
-	flow?: { type?: unknown };
 }
 
 export type ArtifactGraphStageType =
@@ -350,7 +329,6 @@ export interface CompiledTask {
 	explicitWorktreePolicy: boolean;
 	runtime: CompiledTaskRuntime;
 	safety: CompiledTaskSafety;
-	output?: WorkflowTaskOutputSpec;
 	outputContract?: string;
 	sourceContext?: WorkflowSourceContextSpec;
 	compiledPrompt: string;
@@ -444,8 +422,6 @@ export interface WorkflowTaskRunRecord {
 	};
 	backendFiles?: Record<string, string>;
 	lastMessage?: string;
-	output?: WorkflowTaskOutputSpec;
-	outputValidation?: WorkflowTaskOutputValidationRecord;
 	outputRetry?: {
 		attempts: number;
 		maxAttempts?: number;
@@ -478,7 +454,7 @@ export interface WorkflowRunRecord {
 	runId: string;
 	name?: string;
 	description?: string;
-	type: CompiledWorkflowType;
+	type: WorkflowRunType;
 	artifactGraph?: { enabled: true };
 	status: WorkflowRunStatus;
 	taskSummary: TaskSummary;
@@ -503,7 +479,7 @@ export interface WorkflowIndexRecord {
 	runs: Array<{
 		runId: string;
 		name?: string;
-		type: CompiledWorkflowType;
+		type: WorkflowRunType;
 		artifactGraph?: { enabled: true };
 		status: WorkflowRunStatus;
 		taskSummary: TaskSummary;
@@ -528,29 +504,10 @@ export interface WorkflowIndexRecord {
 	}>;
 }
 
-export type OutputFormat = "text" | "json" | "markdown";
-export type OutputOnInvalidAction = "fail" | "warn";
-
 export interface WorkflowStructuredOutputContract {
 	requiredPaths?: string[];
 	arrays?: Array<{ path: string; minItems?: number; maxItems?: number }>;
 	maxStringChars?: Array<{ path: string; maxChars: number }>;
-}
-
-export interface WorkflowTaskOutputSpec {
-	format: OutputFormat;
-	requiredKeys?: string[];
-	onInvalid?: OutputOnInvalidAction;
-	contract?: WorkflowStructuredOutputContract;
-	template?: unknown;
-	templateRef?: string;
-}
-
-export interface WorkflowTaskOutputValidationRecord {
-	format: OutputFormat;
-	status: "valid" | "invalid" | "warning";
-	message: string;
-	structured: boolean;
 }
 
 export interface WorktreeSnapshotRecord {
@@ -563,7 +520,7 @@ export interface CompiledWorkflow {
 	schemaVersion: 1;
 	name?: string;
 	description?: string;
-	type: CompiledWorkflowType;
+	type: WorkflowRunType;
 	task?: string;
 	cwd: string;
 	backend: { type: "local-pi"; mode: "headless" };

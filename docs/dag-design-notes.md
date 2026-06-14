@@ -73,11 +73,11 @@ This avoids overloading `from` as both data flow and sequencing.
 1. Keep top-level `artifactGraph.stages` DAG-capable by default.
 2. Use explicit order-only edges (`after`).
 3. Keep `type: "dag"` only as a nested workflow/control container with child `stages`.
-4. Do not revive legacy top-level `flow.type: "dag"`; reject it with migration guidance.
+4. Keep `artifactGraph.stages` as the authoritative authoring surface.
 
-## Legacy cleanup
+## Authoring surface
 
-The old top-level `flow.type` topology model (`single`, `parallel`, `chain`, `dag`, `map`) and old `workflow.stages` public model predate artifact-graph workflows. The artifact-graph model is the authoritative authoring surface. Legacy shapes fail closed with guidance to use `artifactGraph.stages`.
+The artifact-graph model is the public workflow contract. Top-level workflow specs use `artifactGraph.stages`, while `type: "dag"` remains available only as a nested workflow/control container.
 
 ## Implementation record (2026-06-13)
 

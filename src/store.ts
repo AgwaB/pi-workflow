@@ -24,7 +24,7 @@ import { randomBytes } from "node:crypto";
 import {
 	type CompiledWorkflow,
 	type CompiledTask,
-	STAGE_FIRST_RUN_TYPE,
+	WORKFLOW_RUN_TYPE,
 	type WorkflowIndexRecord,
 	type WorkflowRunRecord,
 	type WorkflowRunStatus,
@@ -603,7 +603,6 @@ export function resetTaskForResume(task: WorkflowTaskRunRecord): boolean {
 	task.backendHandle = undefined;
 	task.backendFiles = undefined;
 	task.lastMessage = undefined;
-	task.outputValidation = undefined;
 	task.outputRetry = undefined;
 	return true;
 }
@@ -660,7 +659,6 @@ export function createTaskRunRecord(
 		kind: task.kind,
 		stageId: task.stageId,
 		dependsOn: task.dependsOn,
-		output: task.output,
 		artifactGraph: task.artifactGraph,
 		files,
 		lastMessage: blocked ? task.safety.permission.reason : undefined,
@@ -692,13 +690,13 @@ export async function resolveFlowsCwd(cwd: string): Promise<string> {
 	}
 }
 
-export async function createStageFirstRunRecord(
+export async function createWorkflowRunRecord(
 	cwd: string,
 	compiled: CompiledWorkflow,
 	specPath: string,
 ): Promise<{ run: WorkflowRunRecord; runDir: string }> {
 	const result = await createRunRecord(cwd, compiled, specPath);
-	result.run.type = STAGE_FIRST_RUN_TYPE as any;
+	result.run.type = WORKFLOW_RUN_TYPE as any;
 	return result;
 }
 
