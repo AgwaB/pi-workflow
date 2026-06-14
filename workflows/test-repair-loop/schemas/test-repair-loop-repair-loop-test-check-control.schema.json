@@ -1,6 +1,4 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "test-repair-loop:repair-loop.test-check",
   "type": "object",
   "required": [
     "schema",
@@ -21,6 +19,5 @@
     "status": {},
     "verdict": {},
     "failingChecks": {}
-  },
-  "additionalProperties": true
+  }
 }

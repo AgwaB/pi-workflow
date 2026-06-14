@@ -1,6 +1,4 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "deep-research:research-questions",
   "type": "object",
   "required": [
     "schema",
@@ -23,27 +21,23 @@
     "extractedFacts": {
       "type": "array",
       "items": {
-        "type": "object",
-        "additionalProperties": true
+        "type": "object"
       },
       "maxItems": 32
     },
     "claims": {
       "type": "array",
       "items": {
-        "type": "object",
-        "additionalProperties": true
+        "type": "object"
       },
       "maxItems": 24
     },
     "sources": {
       "type": "array",
       "items": {
-        "type": "object",
-        "additionalProperties": true
+        "type": "object"
       },
       "maxItems": 24
     }
-  },
-  "additionalProperties": true
+  }
 }

@@ -1,6 +1,4 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "spec-review:analysis.candidate-findings",
   "type": "object",
   "required": [
     "schema",
@@ -20,19 +18,16 @@
     "candidateFindings": {
       "type": "array",
       "items": {
-        "type": "object",
-        "additionalProperties": true
+        "type": "object"
       },
       "maxItems": 30
     },
     "requirementCoverage": {
       "type": "array",
       "items": {
-        "type": "object",
-        "additionalProperties": true
+        "type": "object"
       },
       "maxItems": 40
     }
-  },
-  "additionalProperties": true
+  }
 }

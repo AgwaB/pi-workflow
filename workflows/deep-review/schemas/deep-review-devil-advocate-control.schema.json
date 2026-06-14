@@ -1,6 +1,4 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "deep-review:devil-advocate",
   "type": "object",
   "required": [
     "schema",
@@ -19,6 +17,5 @@
     },
     "finding": {},
     "verdict": {}
-  },
-  "additionalProperties": true
+  }
 }

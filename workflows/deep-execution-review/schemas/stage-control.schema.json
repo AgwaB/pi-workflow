@@ -1,6 +1,4 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "stage-control",
   "type": "object",
   "required": [
     "schema",
@@ -15,6 +13,5 @@
       "type": "string",
       "minLength": 1
     }
-  },
-  "additionalProperties": true
+  }
 }

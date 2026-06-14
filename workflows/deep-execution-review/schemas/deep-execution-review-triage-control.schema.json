@@ -1,6 +1,4 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "deep-execution-review:triage",
   "type": "object",
   "required": [
     "schema",
@@ -19,12 +17,10 @@
     "suspectAreas": {
       "type": "array",
       "items": {
-        "type": "object",
-        "additionalProperties": true
+        "type": "object"
       },
       "minItems": 2,
       "maxItems": 5
     }
-  },
-  "additionalProperties": true
+  }
 }

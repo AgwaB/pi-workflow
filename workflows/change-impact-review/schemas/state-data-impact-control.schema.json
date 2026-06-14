@@ -1,6 +1,4 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "state-data-impact-control",
   "type": "object",
   "required": [
     "schema",
@@ -40,6 +38,5 @@
         "type": "object"
       }
     }
-  },
-  "additionalProperties": true
+  }
 }

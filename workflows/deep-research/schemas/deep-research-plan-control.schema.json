@@ -1,6 +1,4 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "deep-research:plan",
   "type": "object",
   "required": [
     "schema",
@@ -32,16 +30,14 @@
     "researchAxes": {
       "type": "array",
       "items": {
-        "type": "object",
-        "additionalProperties": true
+        "type": "object"
       },
       "minItems": 1
     },
     "factSlots": {
       "type": "array",
       "items": {
-        "type": "object",
-        "additionalProperties": true
+        "type": "object"
       },
       "minItems": 1,
       "maxItems": 64
@@ -50,8 +46,7 @@
     "verificationPriorities": {
       "type": "array",
       "items": {
-        "type": "object",
-        "additionalProperties": true
+        "type": "object"
       },
       "minItems": 1
     },
@@ -60,16 +55,14 @@
     "researchScope": {
       "type": "array",
       "items": {
-        "type": "object",
-        "additionalProperties": true
+        "type": "object"
       },
       "minItems": 1
     },
     "researchQuestions": {
       "type": "array",
       "items": {
-        "type": "object",
-        "additionalProperties": true
+        "type": "object"
       },
       "minItems": 1,
       "maxItems": 24
@@ -77,12 +70,10 @@
     "researchScopeCoverage": {
       "type": "array",
       "items": {
-        "type": "object",
-        "additionalProperties": true
+        "type": "object"
       },
       "minItems": 1
     },
     "verificationRubric": {}
-  },
-  "additionalProperties": true
+  }
 }

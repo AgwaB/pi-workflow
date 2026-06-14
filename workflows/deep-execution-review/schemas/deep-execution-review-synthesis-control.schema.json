@@ -1,6 +1,4 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "deep-execution-review:synthesis",
   "type": "object",
   "required": [
     "schema",
@@ -22,17 +20,14 @@
     "findings": {
       "type": "array",
       "items": {
-        "type": "object",
-        "additionalProperties": true
+        "type": "object"
       }
     },
     "commandRuns": {
       "type": "array",
       "items": {
-        "type": "object",
-        "additionalProperties": true
+        "type": "object"
       }
     }
-  },
-  "additionalProperties": true
+  }
 }

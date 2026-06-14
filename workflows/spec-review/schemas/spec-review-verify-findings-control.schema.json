@@ -1,6 +1,4 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "spec-review:verify-findings",
   "type": "object",
   "required": [
     "schema",
@@ -19,6 +17,5 @@
     },
     "id": {},
     "verdict": {}
-  },
-  "additionalProperties": true
+  }
 }

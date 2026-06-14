@@ -1,6 +1,4 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "spec-review:analysis.inspect-tests",
   "type": "object",
   "required": [
     "schema",
@@ -19,11 +17,9 @@
     "testMap": {
       "type": "array",
       "items": {
-        "type": "object",
-        "additionalProperties": true
+        "type": "object"
       },
       "maxItems": 60
     }
-  },
-  "additionalProperties": true
+  }
 }

@@ -1,6 +1,4 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "implementation-map-control",
   "type": "object",
   "required": [
     "schema",
@@ -43,6 +41,5 @@
         "type": "object"
       }
     }
-  },
-  "additionalProperties": true
+  }
 }

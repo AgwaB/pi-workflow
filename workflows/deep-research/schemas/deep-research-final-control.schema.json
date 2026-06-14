@@ -1,6 +1,4 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "deep-research:final",
   "type": "object",
   "required": [
     "schema",
@@ -25,16 +23,14 @@
         "factSlotCoverage": {
           "type": "array",
           "items": {
-            "type": "object",
-            "additionalProperties": true
+            "type": "object"
           },
           "maxItems": 64
         },
         "mainFindings": {
           "type": "array",
           "items": {
-            "type": "object",
-            "additionalProperties": true
+            "type": "object"
           },
           "maxItems": 12
         },
@@ -43,22 +39,19 @@
         "parentDecisionNotes": {
           "type": "array",
           "items": {
-            "type": "object",
-            "additionalProperties": true
+            "type": "object"
           },
           "maxItems": 12
         },
         "unverifiedButRelevant": {
           "type": "array",
           "items": {
-            "type": "object",
-            "additionalProperties": true
+            "type": "object"
           },
           "maxItems": 16
         },
         "remainingGaps": {}
       },
-      "additionalProperties": true,
       "required": [
         "researchMetadata",
         "coverageSummary",
@@ -77,17 +70,14 @@
         "claims": {
           "type": "array",
           "items": {
-            "type": "object",
-            "additionalProperties": true
+            "type": "object"
           },
           "maxItems": 64
         }
       },
-      "additionalProperties": true,
       "required": [
         "claims"
       ]
     }
-  },
-  "additionalProperties": true
+  }
 }

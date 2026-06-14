@@ -1,6 +1,4 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "deep-execution-review:gap-loop.evidence-check",
   "type": "object",
   "required": [
     "schema",
@@ -27,24 +25,20 @@
     "findings": {
       "type": "array",
       "items": {
-        "type": "object",
-        "additionalProperties": true
+        "type": "object"
       }
     },
     "commandRuns": {
       "type": "array",
       "items": {
-        "type": "object",
-        "additionalProperties": true
+        "type": "object"
       }
     },
     "blockingFindings": {
       "type": "array",
       "items": {
-        "type": "object",
-        "additionalProperties": true
+        "type": "object"
       }
     }
-  },
-  "additionalProperties": true
+  }
 }
