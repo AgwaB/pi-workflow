@@ -3401,6 +3401,100 @@ test("bundled change-impact-review workflow schedules multi-join DAG waves", asy
 	}
 });
 
+test("bundled deep-execution-review workflow materializes reviewer fanout and gap loop", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "delegate", "read, grep, find, ls, bash, edit, write");
+		writeAgent(cwd, "scout", "read, grep, find, ls");
+		captureSubagentPrompts([]);
+		const specPath = join(
+			process.cwd(),
+			"workflows",
+			"deep-execution-review",
+			"spec.json",
+		);
+		const spec = JSON.parse(readFileSync(specPath, "utf8"));
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			specPath,
+			task: "Find and prove ambiguous regressions in this repository.",
+		});
+		const loopStage = compiled.stages.find((stage) => stage.id === "gap-loop");
+		assert.equal(loopStage.type, "loop");
+		assert.deepEqual(loopStage.childStageIds, ["gap-review", "evidence-check"]);
+		assert.equal(loopStage.maxRounds, 2);
+		assert.equal(loopStage.progressPath, "$.blockingFindings");
+		assert.deepEqual(
+			compiled.tasks.map((task) => task.specId),
+			[
+				"triage.main",
+				"execution-reviewers.item",
+				"synthesis.main",
+				"gap-loop.loop",
+			],
+		);
+
+		const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await completeTask(cwd, taskBySpec(run, "triage.main"), {
+			riskLevel: "medium",
+			suspectAreas: [
+				{
+					id: "auth",
+					focus: "Auth regression",
+					pathsToInspect: ["src/auth.ts"],
+					whySuspect: "Changed auth behavior.",
+					validationHint: "node --test test/auth.test.js",
+				},
+				{
+					id: "cache",
+					focus: "Cache regression",
+					pathsToInspect: ["src/cache.ts"],
+					whySuspect: "Changed cache behavior.",
+					validationHint: "node --test test/cache.test.js",
+				},
+			],
+			deprioritizedAreas: [],
+		});
+		await writeRunRecord(cwd, run);
+
+		await scheduleRun(cwd, run.runId);
+		const materialized = await readRunRecord(cwd, run.runId);
+		assert.deepEqual(
+			materialized.tasks.map((task) => task.specId),
+			[
+				"triage.main",
+				"execution-reviewers.auth",
+				"execution-reviewers.cache",
+				"synthesis.main",
+				"gap-loop.loop",
+			],
+		);
+		assert.deepEqual(
+			taskBySpec(materialized, "execution-reviewers.auth").dependsOn,
+			["triage.main"],
+		);
+		assert.deepEqual(
+			taskBySpec(materialized, "execution-reviewers.cache").dependsOn,
+			["triage.main"],
+		);
+		assert.deepEqual(taskBySpec(materialized, "synthesis.main").dependsOn, [
+			"triage.main",
+			"execution-reviewers.auth",
+			"execution-reviewers.cache",
+		]);
+		assert.deepEqual(taskBySpec(materialized, "gap-loop.loop").dependsOn, [
+			"triage.main",
+			"execution-reviewers.auth",
+			"execution-reviewers.cache",
+			"synthesis.main",
+		]);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("bundled spec-review workflow materializes verifier and partitions verified findings", async () => {
 	const cwd = makeProject();
 	try {
