@@ -54,6 +54,6 @@ When authoring or reviewing a workflow, report:
 - every `foreach.from`, `reduce.from`, and support `from` data dependency,
 - write-capable stages and worktree policy,
 - required agents and tool ceilings,
-- `output.controlSchema` files and vNext control fields used by downstream stages,
+- `output.controlSchema` files and workflow control fields used by downstream stages,
 - exact validation command and result,
 - any blockers before running the workflow.

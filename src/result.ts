@@ -34,7 +34,7 @@ export async function applyTaskResultArtifact(
 			? rawCompletedAt
 			: nowIso();
 
-	if (artifact.completedAfterTimeout && artifact.status !== "completed") {
+	if (artifact.completedAfterTimeout) {
 		markTaskTimedOut(task);
 		return true;
 	}

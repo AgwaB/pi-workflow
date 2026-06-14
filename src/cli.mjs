@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { spawnSync } from "node:child_process";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -96,7 +95,7 @@ async function supervise(argv) {
   }
 
   const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
-  const buildDir = await ensureEngineBuild(packageRoot);
+  const buildDir = await resolveEngineDist(packageRoot);
   const engine = await import(pathToFileURL(join(buildDir, "engine.js")).href);
   const store = await import(pathToFileURL(join(buildDir, "store.js")).href);
   const processRole = await import(pathToFileURL(join(buildDir, "process-role.js")).href);
@@ -151,25 +150,14 @@ function log(message) {
   process.stdout.write(`[supervise ${new Date().toISOString()}] ${message}\n`);
 }
 
-async function ensureEngineBuild(packageRoot) {
-  const buildDir = join(packageRoot, ".tmp", "cli");
+async function resolveEngineDist(packageRoot) {
+  const buildDir = join(packageRoot, "dist");
   const marker = join(buildDir, "engine.js");
   const markerStat = await stat(marker).catch(() => undefined);
-  let needsBuild = !markerStat;
-  if (!needsBuild) {
-    for (const entry of await readdir(join(packageRoot, "src"))) {
-      if (!entry.endsWith(".ts")) continue;
-      const entryStat = await stat(join(packageRoot, "src", entry));
-      if (entryStat.mtimeMs > markerStat.mtimeMs) {
-        needsBuild = true;
-        break;
-      }
-    }
-  }
-  if (needsBuild) {
-    log(`building engine into ${buildDir} ...`);
-    const result = spawnSync("npx", ["tsc", "-p", join(packageRoot, "tsconfig.json"), "--outDir", buildDir, "--noEmit", "false"], { cwd: packageRoot, encoding: "utf8" });
-    if (result.status !== 0) throw new Error(`engine build failed:\n${result.stdout ?? ""}${result.stderr ?? ""}`);
+  if (!markerStat?.isFile()) {
+    throw new Error(
+      `pi-workflow engine build is missing at ${marker}. Run npm run build before using supervise from a source checkout, or install from the packed package.`,
+    );
   }
   return buildDir;
 }

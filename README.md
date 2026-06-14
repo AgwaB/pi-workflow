@@ -35,7 +35,7 @@ Requires Node.js `>=22.19.0` on macOS or Linux. Native Windows is not supported;
 
 ## Usage: ask naturally
 
-After installation, ask Pi to use a bundled or project workflow by name:
+After installation, ask Pi to use a bundled or project workflow by name. Bundled workflows reference common Pi agents such as `scout`, `delegate`, and workflow-specific reviewer/researcher agents; create or install matching agents in your Pi environment before running them.
 
 ```text
 Use the bundled deep-research workflow to research this repository and summarize the architecture tradeoffs.
@@ -47,10 +47,6 @@ Use the bundled deep-review workflow to review the current diff from multiple an
 
 ```text
 Use the spec-review workflow to compare docs/API_SPEC.md against the implementation and tests.
-```
-
-```text
-Use the test-repair-loop workflow to fix the failing validation command I just ran.
 ```
 
 ## Usage: create your own workflows
@@ -89,7 +85,9 @@ Important rule:
 
 > Stage order controls scheduling; `from` controls data flow.
 
-A later plain `task` does not automatically receive prior output. Use `foreach.from`, `reduce.from`, or support `from` when a stage needs upstream control artifacts.
+A later plain `task` does not automatically receive prior output. Use `foreach.from`, `reduce.from`, or support `from` when a stage needs upstream control artifacts. Use `after` for order-only dependencies.
+
+Nested `type: "dag"` stages are workflow/control containers, not leaf tasks: they contain child `stages`, may expose one child via `outputFrom`, and let downstream stages depend on the container as a named source.
 
 A small workflow definition looks like this:
 
@@ -144,6 +142,7 @@ Workflow definitions compose task patterns. In the workflow spec they are stage 
 | `foreach` | Dynamic fan-out | JSON array from an upstream control artifact -> one subagent per item |
 | `reduce` | Fan-in / synthesis | upstream workflow artifacts -> one synthesis subagent |
 | `loop` | Bounded repetition | repeat child stages until a deterministic stop condition |
+| `dag` | Nested graph container | child stages lowered to namespaced tasks; selected output exposed downstream |
 
 Support helpers are separate from task patterns: they run local workflow code for deterministic preparation, validation, or post-processing.
 
@@ -157,10 +156,8 @@ The package includes a small starter set. These are practical defaults and autho
 | `deep-review` | Multi-lens review where findings should be challenged before final synthesis. |
 | `spec-review` | Read-only comparison of a spec/contract against implementation and tests. |
 | `change-impact-review` | Read-only impact review for a proposed or applied change, especially missing tests, docs, release work, compatibility risk, and ship blockers. |
-| `execution-review` | Execution-backed patch review with targeted repro tests, narrow validation, and RED/GREEN evidence. |
 | `deep-execution-review` | Repo-wide ambiguous regression hunt with triage, parallel execution-backed reviewers, synthesis, and an evidence gap loop. |
 | `implement-loop` | Iterative implementation in one managed worktree until validation passes and review accepts. |
-| `test-repair-loop` | Focused repair loop for failing tests or explicit validation commands. |
 
 ![Deep research workflow flow](./docs/assets/readme/deep-research-flow.png)
 

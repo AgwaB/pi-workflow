@@ -121,10 +121,8 @@ The runtime task is not optional. `/workflow run <workflow>` without task text f
 | `deep-review` | `scout` | triage + foreach review lenses + dedup support + foreach devil's advocate + verdict-partition support + reduce | Thorough multi-lens review where findings should be independently challenged before synthesis. |
 | `spec-review` | `scout` | extract spec + map implementation + inspect tests -> reduce candidates -> foreach verifier -> reduce report | Read-only spec/contract conformance review against implementation and tests. |
 | `change-impact-review` | `scout` | scope/implementation/validation maps -> impact lenses -> consistency/regression/ship-readiness joins -> final synthesis | Read-only impact review for a proposed or applied change, especially missing tests, docs, release work, compatibility risk, and ship blockers. |
-| `execution-review` | `delegate` | targeted repro tests + narrow validation + RED/GREEN evidence | Execution-backed patch review in a disposable workspace. |
 | `deep-execution-review` | `delegate`, `scout` | triage -> foreach mutating reviewers -> synthesis -> evidence gap loop | Repo-wide ambiguous regression hunt with targeted tests/fixes and command evidence. |
 | `implement-loop` | `delegate`, `scout` | loop: implement -> final check | Iterative implementation in one managed worktree until validation passes and review accepts, or max/no-progress stops. |
-| `test-repair-loop` | `delegate`, `scout` | loop: repair -> final test-check | Focused repair loop for failing tests or explicit validation commands. |
 
 Bundled starters use normal Pi agent discovery. Ensure the named agents exist in `~/.pi/agent/agents/` or project `.pi/agents/`, or customize the workflow with agents that exist in your environment.
 
@@ -154,19 +152,29 @@ Every subagent stage writes artifact bundles:
 | `type: "reduce"` | Subagent | Fan-in over upstream artifact handles and optional `sourceProjection` inline control snippets. |
 | `type: "loop"` | Workflow/control | Repeats fixed child stages until deterministic `until`, `maxRounds`, or no-progress stop. Loop conditions read child `control.json`. |
 | `type: "dag"` | Workflow/control | Composite container; lowers child stages to namespaced tasks and exposes an `outputFrom` child downstream. |
-| `type: "support"` | Support | Runs a directory-local `.mjs` helper over selected upstream `control.json` values and writes a vNext artifact bundle. |
+| `type: "support"` | Support | Runs a directory-local `.mjs` helper over selected upstream `control.json` values and writes a workflow artifact bundle. |
 
 Use `foreach.from` for dynamic fan-out, `reduce.from` for subagent fan-in, and support `from` for local helper inputs. Do not rely on a later plain `task` to see previous stage output.
 
 ### DAG authoring
 
+Top-level `artifactGraph.stages` is DAG-capable by default. A nested `type: "dag"` is a workflow/control container, not a leaf subagent task: it must contain child `stages` and should not have its own prompt. The runtime lowers public graph relationships onto the internal dependency scheduler while preserving artifact/data boundaries.
+
+Keep these layers distinct:
+
+- **Workflow layer**: graph/control/data-dependency semantics such as `id`, `from`, `after`, `sourcePolicy`, `sourceProjection`, scheduling, and artifacts.
+- **Subagent layer**: model-backed execution patterns such as `task`, `foreach`, `reduce`, and loop child tasks.
+- **Support layer**: deterministic local helper execution through `support: { uses, options }`.
+
+DAG rules:
+
 - `from` is a data + order edge. Downstream artifact-graph stages receive a `workflow_artifact` manifest and digest-only inline source list; deterministic runtime decisions read upstream `control.json`.
 - `after` is order-only. It accepts a string or string array, waits for those stages, and does not make their artifacts available as source data.
 - `after: []` is an explicit parallel root. It opts out of the implicit previous-stage chain while documenting that the stage intentionally has no ordering dependency.
 - Parse-time graph validation rejects unknown stage references, self-dependencies, duplicate stage ids, dependency cycles, unsupported output fields, and unsafe `controlSchema` paths.
-- `inputPolicy.requiredReads` is fail-closed: if declared, the task must read each listed `source.artifact` via `workflow_artifact` before its final output is accepted. Direct repo `read`/`grep` calls do not satisfy this proof; the ledger proves artifact access, not semantic use.
+- `inputPolicy.requiredReads` is fail-closed: if declared, the task must read each listed `source.artifact` via `workflow_artifact` before its final output is accepted. Direct repo `read`/`grep` calls do not satisfy this proof; the ledger proves artifact access, not semantic use. DAG container outputs use the selected child source name, for example `analysis.final.analysis` for `id: "analysis", outputFrom: "final"`.
 - `sourceProjection.include` can inline small selected simple dot paths from upstream `control.json` (for example `$.digest` or `$.items`); full artifacts remain available through `workflow_artifact`.
-- A `type: "dag"` stage is a composite workflow/control container. Children may be `task`, `foreach`, `reduce`, support nodes, or nested `dag` stages. Child `from`/`after` references resolve only to siblings inside the same container.
+- A `type: "dag"` stage may contain `task`, `foreach`, `reduce`, support nodes, or nested `dag` stages. Loops are top-level workflow/control stages in v1. Child `from`/`after` references resolve only to siblings inside the same container.
 - `outputFrom` names the child whose task keys represent the container for downstream `from: "containerId"` edges. If omitted, exactly one sink child defaults as the output; multiple sink children require explicit `outputFrom`.
 
 Example diamond plus a DAG container consumed downstream:
@@ -220,7 +228,7 @@ Example diamond plus a DAG container consumed downstream:
         "id": "report",
         "type": "reduce",
         "from": "analysis",
-        "inputPolicy": { "requiredReads": ["analysis.analysis"], "enforcement": "fail" },
+        "inputPolicy": { "requiredReads": ["analysis.final.analysis"], "enforcement": "fail" },
         "prompt": "Write the final report using analysis artifacts."
       }
     ]
@@ -230,7 +238,7 @@ Example diamond plus a DAG container consumed downstream:
 
 ## Output contracts
 
-Artifact-graph subagent stages must return the vNext section protocol:
+Artifact-graph subagent stages must return the workflow output section protocol:
 
 ```text
 <control>{"schema":"stage-control-v1","digest":"..."}</control>
@@ -279,7 +287,7 @@ export default async function helper({ sources, options, context }) {
 }
 ```
 
-For artifact-graph workflows, `sources` contains upstream `control.json` values keyed by stable source names. The helper result is normalized into a vNext artifact bundle, so downstream deterministic readers still consume `control.json`.
+For artifact-graph workflows, `sources` contains upstream `control.json` values keyed by stable source names. The helper result is normalized into a workflow artifact bundle, so downstream deterministic readers still consume `control.json`.
 
 Helper refs must start with `./`, end in `.mjs`, and stay inside the workflow bundle directory. This is path containment, not a security sandbox: helper code runs unsandboxed inside the workflow process, has Node.js process permissions, is not constrained by subagent tool allowlists, and should only be bundled from trusted repository code. Legacy `type: "transform"` specs are rejected with a migration error; move the helper ref to `support.uses` and options to `support.options`.
 
@@ -331,7 +339,7 @@ Important files:
 | `spec.json` | Workflow spec snapshot used by the run. |
 | `tasks/<task-id>/task.md` | Compiled task prompt. |
 | `tasks/<task-id>/system-prompt.md` | Compiled system prompt. |
-| `tasks/<task-id>/control.json` | vNext machine-readable control artifact for artifact-graph tasks. |
+| `tasks/<task-id>/control.json` | Machine-readable control artifact for artifact-graph tasks. |
 | `tasks/<task-id>/analysis.md` | Human-readable reasoning/evidence artifact. |
 | `tasks/<task-id>/refs.json` | Structured evidence pointers. |
 | `tasks/<task-id>/raw.md` | Original final answer before section extraction. |
@@ -435,6 +443,6 @@ npm run release:check
 npm publish --dry-run
 ```
 
-`npm run release:check` runs typecheck, unit tests, e2e consumer/CLI smoke, and `npm run pack:dry`.
+`npm run release:check` runs unit tests, e2e consumer/CLI smoke, typecheck, build, and `npm run pack:dry`.
 
 The dry-run package should not include local/internal files, test output, runtime state, or machine-specific paths.

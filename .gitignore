@@ -11,14 +11,8 @@ dist/
 !.env.example
 AGENTS.md
 
-# Pi runtime artifacts
-.pi/*
-!.pi/agents/
-.pi/agents/*
-!.pi/agents/agentic-coding-expert.md
-!.pi/agents/e2e-custom-tool-agent.md
-!.pi/agents/e2e-no-tools-agent.md
-!.pi/agents/e2e-symlink-agent.md
+# Pi runtime artifacts and local eval outputs
+.pi/
 
 # Local work history, workflow state, caches, and generated test evidence
 .memory/

@@ -38,7 +38,7 @@ import {
 	type WorkflowSourceManifest,
 	type WorkflowSourceManifestSource,
 } from "./workflow-artifact-tool.js";
-import { writeVNextTaskArtifactBundle } from "./workflow-vnext-artifacts.js";
+import { writeWorkflowTaskArtifactBundle } from "./workflow-output-artifacts.js";
 import type { JsonSchema } from "./json-schema.js";
 import {
 	buildSourceContextPacket,
@@ -2224,7 +2224,7 @@ async function writeArtifactGraphSupportResult(
 	});
 	await writeFile(fromProjectPath(cwd, task.files.output), rawOutput, "utf8");
 	await writeFile(fromProjectPath(cwd, task.files.stderr), "", "utf8");
-	const written = await writeVNextTaskArtifactBundle({
+	const written = await writeWorkflowTaskArtifactBundle({
 		taskDir: dirname(fromProjectPath(cwd, task.files.result)),
 		rawOutput,
 		completedAt: new Date().toISOString(),
@@ -2235,7 +2235,7 @@ async function writeArtifactGraphSupportResult(
 	});
 	if (!written.valid) {
 		throw new Error(
-			`support control failed vNext validation: ${written.parsed.issues
+			`support control failed workflow output validation: ${written.parsed.issues
 				.map((issue) => issue.message)
 				.join("; ")}`,
 		);
@@ -2654,14 +2654,14 @@ async function prepareArtifactGraphRetryTask(
 				...task.outputRetry.artifacts.map((artifact) => `- ${artifact}`),
 				"Use workflow_artifact before producing the final answer.",
 			].join("\n")
-		: (task.outputRetry?.message ?? "vNext workflow output was invalid");
+		: (task.outputRetry?.message ?? "workflow output was invalid");
 
 	return {
 		...preparedTask,
 		cwd: task.cwd,
 		compiledPrompt: [
 			preparedTask.compiledPrompt,
-			"# vNext Output Retry Instructions",
+			"# Workflow Output Retry Instructions",
 			issueText,
 			"Return the final answer again using exactly <control>, <analysis>, and <refs> sections.",
 			"# Previous Attempt Preview",

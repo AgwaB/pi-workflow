@@ -104,6 +104,7 @@ const NORMAL_ARTIFACT_KINDS = new Set<WorkflowArtifactKind>([
 	"raw",
 ]);
 const SOURCE_POLICY_VALUES = new Set(["success", "partial", "require-success"]);
+const STAGE_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 const TOOL_OBJECT_KEYS = new Set([
 	"name",
@@ -203,8 +204,9 @@ function validateStageArray(
 	}
 	if (value.length === 0) issues.push({ path, message: "must not be empty" });
 	const ids = collectStageIds(value, path, issues);
+	const sourceIds = collectStageSourceIds(value);
 	for (const [index, item] of value.entries()) {
-		validateStage(item, `${path}[${index}]`, ids, issues);
+		validateStage(item, `${path}[${index}]`, ids, sourceIds, issues);
 	}
 	validateStageDependencyGraph(value, path, issues);
 }
@@ -221,6 +223,7 @@ function validateStageDependencyGraph(
 			.filter((id): id is string => typeof id === "string" && id.trim() !== ""),
 	);
 	const outgoing = new Map<string, string[]>([...ids].map((id) => [id, []]));
+	const seen = new Set<string>();
 	for (const [index, stage] of stages.entries()) {
 		if (!isRecord(stage) || typeof stage.id !== "string") continue;
 		for (const [field, refs] of dependencyRefsByField(stage)) {
@@ -233,9 +236,16 @@ function validateStageDependencyGraph(
 					});
 					continue;
 				}
+				if (!seen.has(ref)) {
+					issues.push({
+						path: `${path}[${index}].${field}`,
+						message: `stage "${stage.id}" must reference only earlier sibling stages; "${ref}" appears later`,
+					});
+				}
 				outgoing.get(ref)?.push(stage.id);
 			}
 		}
+		seen.add(stage.id);
 	}
 	const state = new Map<string, "visiting" | "done">();
 	const stack: string[] = [];
@@ -310,6 +320,12 @@ function collectStageIds(
 		if (!isRecord(item)) continue;
 		const id = requiredString(item.id, `${itemPath}.id`, issues);
 		if (id === undefined) continue;
+		if (!STAGE_ID_PATTERN.test(id)) {
+			issues.push({
+				path: `${itemPath}.id`,
+				message: "stage id must contain only letters, numbers, _ and -",
+			});
+		}
 		if (ids.has(id)) {
 			issues.push({
 				path: `${itemPath}.id`,
@@ -321,10 +337,46 @@ function collectStageIds(
 	return ids;
 }
 
+function collectStageSourceIds(stages: readonly unknown[]): Set<string> {
+	const ids = new Set<string>();
+	for (const stage of stages) {
+		if (!isRecord(stage)) continue;
+		const sourceId = stageSourceId(stage);
+		if (sourceId) ids.add(sourceId);
+	}
+	return ids;
+}
+
+function stageSourceId(stage: Record<string, unknown>): string | undefined {
+	const id =
+		typeof stage.id === "string" && stage.id.trim() !== ""
+			? stage.id
+			: undefined;
+	if (!id) return undefined;
+	if (stage.type !== "dag" || !Array.isArray(stage.stages)) return id;
+	const outputChildId =
+		typeof stage.outputFrom === "string"
+			? stage.outputFrom
+			: singleSinkStageId(stage.stages);
+	if (!outputChildId) return undefined;
+	const outputChild = stage.stages.find(
+		(child) => isRecord(child) && child.id === outputChildId,
+	);
+	if (!isRecord(outputChild)) return undefined;
+	const childSourceId = stageSourceId(outputChild);
+	return childSourceId ? `${id}.${childSourceId}` : undefined;
+}
+
+function singleSinkStageId(stages: readonly unknown[]): string | undefined {
+	const sinks = findSinkStageIds(stages);
+	return sinks.length === 1 ? sinks[0] : undefined;
+}
+
 function validateStage(
 	value: unknown,
 	path: string,
 	siblingIds: ReadonlySet<string>,
+	sourceIds: ReadonlySet<string>,
 	issues: ValidationIssue[],
 ): void {
 	const stage = recordAt(value, path, issues);
@@ -374,13 +426,13 @@ function validateStage(
 	validateInputPolicy(
 		stage.inputPolicy,
 		`${path}.inputPolicy`,
-		siblingIds,
+		sourceIds,
 		issues,
 	);
 	validateOutput(stage.output, `${path}.output`, issues);
-	validateSupport(stage.support, `${path}.support`, issues);
+	validateSupportStage(stage, type, path, issues);
 	validateForeachStage(stage, type, path, issues);
-	validateLoopStage(stage, type, path, siblingIds, issues);
+	validateLoopStage(stage, type, path, siblingIds, sourceIds, issues);
 	validateDagStage(stage, type, path, issues);
 }
 
@@ -561,7 +613,7 @@ function validateInputPolicy(
 function validateRequiredReads(
 	value: unknown,
 	path: string,
-	siblingIds: ReadonlySet<string>,
+	sourceIds: ReadonlySet<string>,
 	issues: ValidationIssue[],
 ): void {
 	if (value === undefined) return;
@@ -582,14 +634,14 @@ function validateRequiredReads(
 		if (seen.has(item))
 			issues.push({ path: itemPath, message: `duplicate value "${item}"` });
 		seen.add(item);
-		validateRequiredRead(item, itemPath, siblingIds, issues);
+		validateRequiredRead(item, itemPath, sourceIds, issues);
 	}
 }
 
 function validateRequiredRead(
 	value: string,
 	path: string,
-	siblingIds: ReadonlySet<string>,
+	sourceIds: ReadonlySet<string>,
 	issues: ValidationIssue[],
 ): void {
 	const dot = value.lastIndexOf(".");
@@ -599,10 +651,10 @@ function validateRequiredRead(
 		issues.push({ path, message: "must use source.artifact form" });
 		return;
 	}
-	if (!siblingIds.has(source)) {
+	if (!sourceIds.has(source)) {
 		issues.push({
 			path,
-			message: `required read source "${source}" is not a visible sibling stage`,
+			message: `required read source "${source}" is not an available upstream artifact source`,
 		});
 	}
 	if (!NORMAL_ARTIFACT_KINDS.has(artifact as WorkflowArtifactKind)) {
@@ -640,18 +692,28 @@ function validateSourceProjection(
 	optionalPositiveInteger(projection.maxChars, `${path}.maxChars`, issues);
 }
 
-function validateSupport(
-	value: unknown,
+function validateSupportStage(
+	stage: Record<string, unknown>,
+	type: ArtifactGraphStageType | undefined,
 	path: string,
 	issues: ValidationIssue[],
 ): void {
-	if (value === undefined) return;
-	const support = recordAt(value, path, issues);
+	if (type !== "support") {
+		if (stage.support !== undefined) {
+			issues.push({
+				path: `${path}.support`,
+				message: "is only valid on support stages",
+			});
+		}
+		return;
+	}
+	const support = recordAt(stage.support, `${path}.support`, issues);
 	if (!support) return;
-	rejectUnknownKeys(support, SUPPORT_KEYS, path, issues);
-	const uses = requiredString(support.uses, `${path}.uses`, issues);
-	if (uses !== undefined) validateSupportRef(uses, `${path}.uses`, issues);
-	optionalRecord(support.options, `${path}.options`, issues);
+	rejectUnknownKeys(support, SUPPORT_KEYS, `${path}.support`, issues);
+	const uses = requiredString(support.uses, `${path}.support.uses`, issues);
+	if (uses !== undefined)
+		validateSupportRef(uses, `${path}.support.uses`, issues);
+	optionalRecord(support.options, `${path}.support.options`, issues);
 }
 
 function validateSupportRef(
@@ -709,6 +771,7 @@ function validateLoopStage(
 	type: ArtifactGraphStageType | undefined,
 	path: string,
 	siblingIds: ReadonlySet<string>,
+	sourceIds: ReadonlySet<string>,
 	issues: ValidationIssue[],
 ): void {
 	if (type !== "loop") {
@@ -727,8 +790,15 @@ function validateLoopStage(
 		}
 		return;
 	}
-	optionalPositiveInteger(stage.maxRounds, `${path}.maxRounds`, issues);
-	optionalString(stage.progressPath, `${path}.progressPath`, issues);
+	if (stage.maxRounds === undefined) {
+		issues.push({
+			path: `${path}.maxRounds`,
+			message: "loop stages must declare maxRounds",
+		});
+	} else {
+		optionalPositiveInteger(stage.maxRounds, `${path}.maxRounds`, issues);
+	}
+	validateOptionalJsonPath(stage.progressPath, `${path}.progressPath`, issues);
 	const until = recordAt(stage.until, `${path}.until`, issues);
 	if (until) validateLoopUntil(until, `${path}.until`, issues);
 	if (!Array.isArray(stage.stages)) {
@@ -774,7 +844,13 @@ function validateLoopStage(
 		}
 	}
 	if (stage.onExhausted !== undefined) {
-		validateStage(stage.onExhausted, `${path}.onExhausted`, siblingIds, issues);
+		validateStage(
+			stage.onExhausted,
+			`${path}.onExhausted`,
+			siblingIds,
+			sourceIds,
+			issues,
+		);
 	}
 }
 
@@ -786,7 +862,7 @@ function validateLoopUntil(
 	rejectUnknownKeys(until, UNTIL_KEYS, path, issues);
 	optionalString(until.source, `${path}.source`, issues);
 	optionalString(until.stage, `${path}.stage`, issues);
-	optionalString(until.path, `${path}.path`, issues);
+	validateOptionalJsonPath(until.path, `${path}.path`, issues);
 	optionalBoolean(until.exists, `${path}.exists`, issues);
 	if (
 		until.lengthEquals !== undefined &&
@@ -884,6 +960,14 @@ function validateDagStage(
 		return;
 	}
 	validateStageArray(stage.stages, `${path}.stages`, issues);
+	for (const [index, child] of stage.stages.entries()) {
+		if (isRecord(child) && child.type === "loop") {
+			issues.push({
+				path: `${path}.stages[${index}].type`,
+				message: "loop stages are only supported at the top level in v1",
+			});
+		}
+	}
 	const childIds = collectStageIds(stage.stages, `${path}.stages`, []);
 	if (stage.outputFrom !== undefined) {
 		optionalString(stage.outputFrom, `${path}.outputFrom`, issues);
@@ -1200,6 +1284,21 @@ function optionalString(
 	}
 }
 
+function validateOptionalJsonPath(
+	value: unknown,
+	path: string,
+	issues: ValidationIssue[],
+): void {
+	if (value === undefined) return;
+	if (typeof value !== "string" || value.trim() === "") {
+		issues.push({ path, message: "must be a non-empty string" });
+		return;
+	}
+	if (!value.startsWith("$.")) {
+		issues.push({ path, message: "must be a JSONPath starting with $." });
+	}
+}
+
 function optionalBoolean(
 	value: unknown,
 	path: string,
@@ -1234,14 +1333,10 @@ function validateBackend(
 	if (backend.type !== undefined && backend.type !== "local-pi") {
 		issues.push({ path: `${path}.type`, message: 'must be "local-pi"' });
 	}
-	if (
-		backend.mode !== undefined &&
-		backend.mode !== "auto" &&
-		backend.mode !== "headless"
-	) {
+	if (backend.mode !== undefined && backend.mode !== "headless") {
 		issues.push({
 			path: `${path}.mode`,
-			message: 'must be "auto" or "headless"',
+			message: 'must be "headless"',
 		});
 	}
 }

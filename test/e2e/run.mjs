@@ -111,6 +111,7 @@ function main() {
         npm install "$peer_flag" "./$tarball" >/dev/null
         node node_modules/@agwab/pi-workflow/src/cli.mjs --help >/dev/null
         ./node_modules/.bin/pi-workflow --help >/dev/null
+        PI_WORKFLOW_ROLE=supervisor ./node_modules/.bin/pi-workflow supervise --all --poll-ms 250 --max-runtime-ms 1000 >/dev/null
         node --input-type=module -e "import { parseWorkflow, WORKFLOW_COMMAND } from '@agwab/pi-workflow'; if (typeof parseWorkflow !== 'function' || WORKFLOW_COMMAND !== 'workflow') throw new Error('bad public import')"`,
 	]);
 
@@ -126,22 +127,22 @@ function main() {
       mkdirSync(join(cwd, 'workflows'), { recursive: true });
       const spec = {
         schemaVersion: 1,
-        name: 'review-vnext',
+        name: 'review-artifact',
         catalog: { useWhen: ['artifact graph review'], naturalLanguageTriggers: ['review artifact graph'] },
         defaults: { agent: 'unit-scout', readOnly: true, tools: ['read'] },
         artifactGraph: { stages: [{ id: 'main', type: 'task', prompt: 'Review.' }] }
       };
-      writeFileSync(join(cwd, 'workflows', 'review-vnext.json'), JSON.stringify(spec));
+      writeFileSync(join(cwd, 'workflows', 'review-artifact.json'), JSON.stringify(spec));
       writeFileSync(join(cwd, 'workflows', 'invalid.json'), JSON.stringify({ schemaVersion: 1, unsupported: true }));
       const workflows = await listWorkflows(cwd);
       const names = workflows.map((item) => item.name).sort();
-      if (names.join(',') !== 'review-vnext') throw new Error('unexpected workflows: ' + names.join(','));
-      const resolved = await resolveWorkflowRef('review-vnext', cwd);
-      if (!resolved.specPath.endsWith('workflows/review-vnext.json')) throw new Error('bad resolved path: ' + resolved.specPath);
+      if (names.join(',') !== 'review-artifact') throw new Error('unexpected workflows: ' + names.join(','));
+      const resolved = await resolveWorkflowRef('review-artifact', cwd);
+      if (!resolved.specPath.endsWith('workflows/review-artifact.json')) throw new Error('bad resolved path: ' + resolved.specPath);
       const recs = await recommendWorkflows('please review artifact graph', cwd);
-      if (recs[0]?.workflow.name !== 'review-vnext') throw new Error('review-vnext not recommended');
+      if (recs[0]?.workflow.name !== 'review-artifact') throw new Error('review-artifact not recommended');
       await resolveWorkflowRef('invalid', cwd).then(() => { throw new Error('invalid workflow should not resolve'); }, (error) => { if (!/workflow name or spec file not found/.test(String(error))) throw error; });
-      for (const bundled of ['change-impact-review', 'spec-review', 'deep-review', 'deep-research', 'execution-review', 'deep-execution-review', 'implement-loop', 'test-repair-loop']) {
+      for (const bundled of ['change-impact-review', 'spec-review', 'deep-review', 'deep-research', 'deep-execution-review', 'implement-loop']) {
         const resolvedBundled = await resolveWorkflowRef(bundled, process.cwd());
         if (!resolvedBundled.specPath.includes('/workflows/')) throw new Error('bad bundled path for ' + bundled + ': ' + resolvedBundled.specPath);
       }
@@ -158,17 +159,15 @@ function main() {
     import { parseWorkflow } from './.tmp/unit/schema.js';
     import { compileWorkflow } from './.tmp/unit/compiler.js';
     const publicSpec = parseWorkflow({ schemaVersion: 1, artifactGraph: { stages: [{ id: 'main', type: 'task', prompt: 'Do it.' }] } });
-    if (publicSpec.schemaVersion !== 1) throw new Error('bad vNext schema');
+    if (publicSpec.schemaVersion !== 1) throw new Error('bad artifact graph schema');
     if (!publicSpec.artifactGraph?.stages?.length) throw new Error('missing artifact graph stages');
     const bundled = [
       ['change-impact-review', 'workflows/change-impact-review/spec.json', 'impact-analysis.impact-synthesis'],
       ['spec-review', 'workflows/spec-review/spec.json', 'report'],
       ['deep-review', 'workflows/deep-review/spec.json', 'report'],
       ['deep-research', 'workflows/deep-research/spec.json', 'final'],
-      ['execution-review', 'workflows/execution-review/spec.json', 'repro'],
       ['deep-execution-review', 'workflows/deep-execution-review/spec.json', 'synthesis'],
       ['implement-loop', 'workflows/implement-loop/spec.json', 'fix-loop'],
-      ['test-repair-loop', 'workflows/test-repair-loop/spec.json', 'repair-loop'],
     ];
     for (const [name, specPath, expectedStage] of bundled) {
       const spec = parseWorkflow(JSON.parse(await readFile(specPath, 'utf8')));

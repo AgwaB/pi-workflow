@@ -28,8 +28,7 @@
       "production mutation"
     ],
     "similarWorkflows": [
-      "deep-review",
-      "execution-review"
+      "deep-review"
     ],
     "mutationRisk": "managed-worktree writes and local validation commands only; final synthesis is read-only; no auto-merge",
     "naturalLanguageTriggers": [

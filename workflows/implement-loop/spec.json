@@ -17,9 +17,7 @@
       "research or synthesis",
       "auto-merge desired"
     ],
-    "similarWorkflows": [
-      "test-repair-loop"
-    ],
+    "similarWorkflows": [],
     "mutationRisk": "managed-worktree writes without bash in implement; check uses bash for validation; no auto-merge",
     "naturalLanguageTriggers": [
       "implement until tests pass",

@@ -5,6 +5,7 @@ import {
 	open,
 	readdir,
 	readFile,
+	realpath,
 	rename,
 	stat,
 	unlink,
@@ -18,6 +19,7 @@ import {
 	join,
 	relative,
 	resolve,
+	sep,
 } from "node:path";
 import { randomBytes } from "node:crypto";
 
@@ -353,13 +355,71 @@ async function copyWorkflowBundleArtifacts(
 	if (basename(specPath) !== "spec.json") return;
 	const sourceDir = dirname(specPath);
 	if (resolve(sourceDir) === resolve(targetDir)) return;
-	await cp(sourceDir, targetDir, {
-		recursive: true,
-		force: true,
-		errorOnExist: false,
-		filter: (source) =>
-			!relative(sourceDir, source).split(/[\\/]/).includes("node_modules"),
-	});
+	const sourceRoot = await realpath(sourceDir);
+	const spec = JSON.parse(await readFile(specPath, "utf8"));
+	const refs = collectWorkflowBundleRefs(spec);
+	refs.add("spec.json");
+	for (const ref of refs) {
+		await copyWorkflowBundleFile(sourceRoot, targetDir, ref);
+	}
+}
+
+function collectWorkflowBundleRefs(value: unknown): Set<string> {
+	const refs = new Set<string>();
+	visitWorkflowBundleRefs(value, refs);
+	return refs;
+}
+
+function visitWorkflowBundleRefs(value: unknown, refs: Set<string>): void {
+	if (!value || typeof value !== "object") return;
+	if (Array.isArray(value)) {
+		for (const item of value) visitWorkflowBundleRefs(item, refs);
+		return;
+	}
+	const record = value as Record<string, unknown>;
+	if (typeof record.controlSchema === "string") {
+		addWorkflowBundleRef(refs, record.controlSchema);
+	}
+	if (
+		record.support &&
+		typeof record.support === "object" &&
+		!Array.isArray(record.support)
+	) {
+		const support = record.support as Record<string, unknown>;
+		if (typeof support.uses === "string") {
+			addWorkflowBundleRef(refs, support.uses);
+		}
+	}
+	for (const item of Object.values(record)) visitWorkflowBundleRefs(item, refs);
+}
+
+function addWorkflowBundleRef(refs: Set<string>, ref: string): void {
+	if (!ref.startsWith("./")) return;
+	refs.add(ref.slice(2));
+}
+
+async function copyWorkflowBundleFile(
+	sourceRoot: string,
+	targetDir: string,
+	ref: string,
+): Promise<void> {
+	const source = resolve(sourceRoot, ref);
+	const realSource = await realpath(source);
+	const sourceRelative = relative(sourceRoot, realSource);
+	if (
+		sourceRelative === ".." ||
+		sourceRelative.startsWith(`..${sep}`) ||
+		isAbsolute(sourceRelative)
+	) {
+		throw new Error(`workflow bundle ref escapes workflow directory: ${ref}`);
+	}
+	const fileStat = await stat(realSource);
+	if (!fileStat.isFile()) {
+		throw new Error(`workflow bundle ref is not a file: ${ref}`);
+	}
+	const target = resolve(targetDir, ref);
+	await mkdir(dirname(target), { recursive: true });
+	await cp(realSource, target, { force: true, errorOnExist: false });
 }
 
 async function assertActiveRunLease(cwd: string, runId: string): Promise<void> {

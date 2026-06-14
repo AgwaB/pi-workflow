@@ -18,6 +18,7 @@ concurrency:
 
 jobs:
   npm:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -44,9 +45,11 @@ jobs:
 
       - name: Prepare release version
         id: prepare
+        env:
+          TARGET_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          target="${{ inputs.version }}"
+          target="$TARGET_VERSION"
           current="$(node -p "require('./package.json').version")"
           needs_push=false
 
@@ -67,10 +70,12 @@ jobs:
 
       - name: Check npm package version
         id: npm_version
+        env:
+          TARGET_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
           name="$(node -p "require('./package.json').name")"
-          version="${{ inputs.version }}"
+          version="$TARGET_VERSION"
           if npm view "$name@$version" version >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
             echo "$name@$version already exists on npm; publish will be skipped."
@@ -83,20 +88,23 @@ jobs:
 
       - name: Publish to npm
         if: steps.npm_version.outputs.exists != 'true'
-        run: npm publish --access public
+        run: npm publish --access public --provenance
 
       - name: Push release commit and tag
         if: steps.prepare.outputs.needs_push == 'true'
+        env:
+          TARGET_VERSION: ${{ inputs.version }}
         run: |
           git push origin HEAD:main
-          git push origin "refs/tags/v${{ inputs.version }}"
+          git push origin "refs/tags/v$TARGET_VERSION"
 
       - name: Create GitHub release
-        run: |
-          if gh release view "v${{ inputs.version }}" >/dev/null 2>&1; then
-            echo "GitHub release v${{ inputs.version }} already exists."
-          else
-            gh release create "v${{ inputs.version }}" --title "v${{ inputs.version }}" --generate-notes
-          fi
         env:
           GH_TOKEN: ${{ github.token }}
+          TARGET_VERSION: ${{ inputs.version }}
+        run: |
+          if gh release view "v$TARGET_VERSION" >/dev/null 2>&1; then
+            echo "GitHub release v$TARGET_VERSION already exists."
+          else
+            gh release create "v$TARGET_VERSION" --title "v$TARGET_VERSION" --generate-notes
+          fi

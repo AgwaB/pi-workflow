@@ -26,9 +26,9 @@ const CANONICAL_SECTION_ORDER = [
 ] as const;
 const DEFAULT_MAX_DIGEST_CHARS = 1000;
 
-type VNextSectionName = (typeof CANONICAL_SECTION_ORDER)[number];
+type WorkflowOutputSectionName = (typeof CANONICAL_SECTION_ORDER)[number];
 
-export type VNextOutputIssueCode =
+export type WorkflowOutputIssueCode =
 	| "missing_section"
 	| "duplicate_section"
 	| "unexpected_text"
@@ -39,24 +39,24 @@ export type VNextOutputIssueCode =
 	| "empty_section"
 	| "contract_failed";
 
-export interface VNextOutputIssue {
-	code: VNextOutputIssueCode;
+export interface WorkflowOutputIssue {
+	code: WorkflowOutputIssueCode;
 	message: string;
-	section?: VNextSectionName;
+	section?: WorkflowOutputSectionName;
 	path?: string;
 }
 
-export interface ParsedVNextOutput {
+export interface ParsedWorkflowOutput {
 	protocol: typeof VNEXT_OUTPUT_PROTOCOL;
 	valid: boolean;
 	raw: string;
 	control?: Record<string, unknown>;
 	analysis?: string;
 	refs?: unknown[];
-	issues: VNextOutputIssue[];
+	issues: WorkflowOutputIssue[];
 }
 
-export interface ParseVNextOutputOptions {
+export interface ParseWorkflowOutputOptions {
 	analysisRequired?: boolean;
 	refsRequired?: boolean;
 	maxDigestChars?: number;
@@ -64,8 +64,8 @@ export interface ParseVNextOutputOptions {
 	controlJsonSchema?: JsonSchema;
 }
 
-export interface VNextTaskArtifactBundleOptions
-	extends ParseVNextOutputOptions {
+export interface WorkflowTaskArtifactBundleOptions
+	extends ParseWorkflowOutputOptions {
 	taskDir: string;
 	rawOutput: string;
 	attempt?: number;
@@ -78,7 +78,7 @@ export interface VNextTaskArtifactBundleOptions
 	stderr?: string;
 }
 
-export interface VNextTaskResultEnvelope {
+export interface WorkflowTaskResultEnvelope {
 	schema: typeof VNEXT_TASK_RESULT_SCHEMA;
 	protocol: typeof VNEXT_OUTPUT_PROTOCOL;
 	status: "completed" | "failed";
@@ -89,32 +89,32 @@ export interface VNextTaskResultEnvelope {
 	exitCode: number;
 	outputValidation: {
 		valid: boolean;
-		issues: VNextOutputIssue[];
+		issues: WorkflowOutputIssue[];
 	};
 }
 
-type ValidParsedVNextOutput = ParsedVNextOutput & {
+type ValidParsedWorkflowOutput = ParsedWorkflowOutput & {
 	valid: true;
 	control: Record<string, unknown>;
 	analysis: string;
 	refs: unknown[];
 };
 
-export type VNextArtifactBundleWriteResult =
+export type WorkflowArtifactBundleWriteResult =
 	| {
 			valid: true;
-			parsed: ValidParsedVNextOutput;
-			result: VNextTaskResultEnvelope;
+			parsed: ValidParsedWorkflowOutput;
+			result: WorkflowTaskResultEnvelope;
 			files: Record<string, string>;
 	  }
 	| {
 			valid: false;
-			parsed: ParsedVNextOutput;
+			parsed: ParsedWorkflowOutput;
 			files: Record<string, string>;
 	  };
 
 interface SectionMatch {
-	name: VNextSectionName;
+	name: WorkflowOutputSectionName;
 	content: string;
 	start: number;
 	end: number;
@@ -125,11 +125,11 @@ interface SectionRequirements {
 	refsRequired: boolean;
 }
 
-export function parseVNextOutput(
+export function parseWorkflowOutput(
 	raw: string,
-	options: ParseVNextOutputOptions = {},
-): ParsedVNextOutput {
-	const issues: VNextOutputIssue[] = [];
+	options: ParseWorkflowOutputOptions = {},
+): ParsedWorkflowOutput {
+	const issues: WorkflowOutputIssue[] = [];
 	const requirements = sectionRequirements(options);
 	const sections = collectSections(raw, requirements);
 	validateSectionLayout(raw, sections, issues, requirements);
@@ -160,30 +160,30 @@ export function parseVNextOutput(
 	);
 }
 
-export async function writeVNextTaskArtifactBundle(
-	options: VNextTaskArtifactBundleOptions,
-): Promise<VNextArtifactBundleWriteResult> {
+export async function writeWorkflowTaskArtifactBundle(
+	options: WorkflowTaskArtifactBundleOptions,
+): Promise<WorkflowArtifactBundleWriteResult> {
 	const taskDir = resolve(options.taskDir);
 	await mkdir(taskDir, { recursive: true });
-	const parsed = parseVNextOutput(options.rawOutput, options);
+	const parsed = parseWorkflowOutput(options.rawOutput, options);
 	if (!parsed.valid)
-		return await writeInvalidVNextAttempt(taskDir, parsed, options);
-	return await writeValidVNextBundle(
+		return await writeInvalidWorkflowOutputAttempt(taskDir, parsed, options);
+	return await writeValidWorkflowOutputBundle(
 		taskDir,
-		parsed as ValidParsedVNextOutput,
+		parsed as ValidParsedWorkflowOutput,
 		options,
 	);
 }
 
-export function buildVNextOutputRetryInstructions(
-	issues: readonly VNextOutputIssue[],
+export function buildWorkflowOutputRetryInstructions(
+	issues: readonly WorkflowOutputIssue[],
 ): string {
 	const issueLines = issues.map((issue) => {
 		const where = issue.path ?? issue.section;
 		return `- ${where ? `${where}: ` : ""}${issue.message}`;
 	});
 	return [
-		"Validation error: vNext workflow output protocol was invalid.",
+		"Validation error: workflow output protocol was invalid.",
 		"Return exactly these sections, in this order, with no prose outside the tags:",
 		"<control>{...}</control>",
 		"<analysis>...</analysis>",
@@ -194,7 +194,7 @@ export function buildVNextOutputRetryInstructions(
 }
 
 function sectionRequirements(
-	options: ParseVNextOutputOptions,
+	options: ParseWorkflowOutputOptions,
 ): SectionRequirements {
 	return {
 		analysisRequired: options.analysisRequired ?? true,
@@ -263,7 +263,7 @@ function skipWhitespace(raw: string, index: number): number {
 function validateSectionLayout(
 	raw: string,
 	sections: readonly SectionMatch[],
-	issues: VNextOutputIssue[],
+	issues: WorkflowOutputIssue[],
 	requirements: SectionRequirements,
 ): void {
 	validateSectionCounts(sections, issues, requirements);
@@ -273,7 +273,7 @@ function validateSectionLayout(
 
 function validateSectionCounts(
 	sections: readonly SectionMatch[],
-	issues: VNextOutputIssue[],
+	issues: WorkflowOutputIssue[],
 	requirements: SectionRequirements,
 ): void {
 	const counts = sectionCounts(sections);
@@ -287,7 +287,7 @@ function validateSectionCounts(
 
 function validateCanonicalOrder(
 	sections: readonly SectionMatch[],
-	issues: VNextOutputIssue[],
+	issues: WorkflowOutputIssue[],
 	requirements: SectionRequirements,
 ): void {
 	if (sections.length === 0) return;
@@ -303,7 +303,7 @@ function validateCanonicalOrder(
 function validateNoOutsideText(
 	raw: string,
 	sections: readonly SectionMatch[],
-	issues: VNextOutputIssue[],
+	issues: WorkflowOutputIssue[],
 ): void {
 	let cursor = 0;
 	for (const section of sections) {
@@ -318,8 +318,8 @@ function validateNoOutsideText(
 
 function parseControlSection(
 	text: string | undefined,
-	issues: VNextOutputIssue[],
-	options: ParseVNextOutputOptions,
+	issues: WorkflowOutputIssue[],
+	options: ParseWorkflowOutputOptions,
 ): Record<string, unknown> | undefined {
 	if (text === undefined) return undefined;
 	const parsed = parseJsonSection(text, SECTION_CONTROL, issues);
@@ -338,7 +338,7 @@ function parseControlSection(
 
 function parseAnalysisSection(
 	text: string | undefined,
-	issues: VNextOutputIssue[],
+	issues: WorkflowOutputIssue[],
 	requirements: SectionRequirements,
 ): string | undefined {
 	if (text === undefined) return undefined;
@@ -354,7 +354,7 @@ function parseAnalysisSection(
 
 function parseRefsSection(
 	text: string | undefined,
-	issues: VNextOutputIssue[],
+	issues: WorkflowOutputIssue[],
 	requirements: SectionRequirements,
 ): unknown[] | undefined {
 	if (text === undefined) return requirements.refsRequired ? undefined : [];
@@ -371,7 +371,7 @@ function parseRefsSection(
 
 function validateControlContract(
 	control: Record<string, unknown> | undefined,
-	issues: VNextOutputIssue[],
+	issues: WorkflowOutputIssue[],
 	contract: StructuredContract | undefined,
 ): void {
 	if (!control || !contract) return;
@@ -381,7 +381,7 @@ function validateControlContract(
 
 function validateControlJsonSchema(
 	control: Record<string, unknown> | undefined,
-	issues: VNextOutputIssue[],
+	issues: WorkflowOutputIssue[],
 	schema: JsonSchema | undefined,
 ): void {
 	if (!control || schema === undefined) return;
@@ -391,15 +391,15 @@ function validateControlJsonSchema(
 
 function buildParsedOutput(
 	raw: string,
-	issues: VNextOutputIssue[],
+	issues: WorkflowOutputIssue[],
 	sections: {
 		control?: Record<string, unknown>;
 		analysis?: string;
 		refs?: unknown[];
 	},
 	requirements: SectionRequirements,
-): ParsedVNextOutput {
-	const parsed: ParsedVNextOutput = {
+): ParsedWorkflowOutput {
+	const parsed: ParsedWorkflowOutput = {
 		protocol: VNEXT_OUTPUT_PROTOCOL,
 		valid: parsedOutputValid(issues, sections, requirements),
 		raw,
@@ -412,7 +412,7 @@ function buildParsedOutput(
 }
 
 function parsedOutputValid(
-	issues: readonly VNextOutputIssue[],
+	issues: readonly WorkflowOutputIssue[],
 	sections: {
 		control?: Record<string, unknown>;
 		analysis?: string;
@@ -427,11 +427,11 @@ function parsedOutputValid(
 	return true;
 }
 
-async function writeInvalidVNextAttempt(
+async function writeInvalidWorkflowOutputAttempt(
 	taskDir: string,
-	parsed: ParsedVNextOutput,
-	options: VNextTaskArtifactBundleOptions,
-): Promise<VNextArtifactBundleWriteResult> {
+	parsed: ParsedWorkflowOutput,
+	options: WorkflowTaskArtifactBundleOptions,
+): Promise<WorkflowArtifactBundleWriteResult> {
 	const attempt = Math.max(1, Math.floor(options.attempt ?? 1));
 	const files = {
 		rawInvalid: join(taskDir, `raw.invalid-attempt-${attempt}.md`),
@@ -445,11 +445,11 @@ async function writeInvalidVNextAttempt(
 	return { valid: false, parsed, files };
 }
 
-async function writeValidVNextBundle(
+async function writeValidWorkflowOutputBundle(
 	taskDir: string,
-	parsed: ValidParsedVNextOutput,
-	options: VNextTaskArtifactBundleOptions,
-): Promise<VNextArtifactBundleWriteResult> {
+	parsed: ValidParsedWorkflowOutput,
+	options: WorkflowTaskArtifactBundleOptions,
+): Promise<WorkflowArtifactBundleWriteResult> {
 	const files = artifactFileMap(taskDir, options);
 	await writeSidecars(files, parsed, options);
 	const result = validResultEnvelope(files, parsed, options);
@@ -459,7 +459,7 @@ async function writeValidVNextBundle(
 
 function artifactFileMap(
 	taskDir: string,
-	options: VNextTaskArtifactBundleOptions,
+	options: WorkflowTaskArtifactBundleOptions,
 ): Record<string, string> {
 	const files: Record<string, string> = {
 		control: join(taskDir, "control.json"),
@@ -477,8 +477,8 @@ function artifactFileMap(
 
 async function writeSidecars(
 	files: Record<string, string>,
-	parsed: ValidParsedVNextOutput,
-	options: VNextTaskArtifactBundleOptions,
+	parsed: ValidParsedWorkflowOutput,
+	options: WorkflowTaskArtifactBundleOptions,
 ): Promise<void> {
 	await writeJsonAtomic(files.control!, parsed.control);
 	await writeTextAtomic(
@@ -501,9 +501,9 @@ async function writeOptionalText(
 }
 
 function invalidResultEnvelope(
-	parsed: ParsedVNextOutput,
-	options: VNextTaskArtifactBundleOptions,
-): VNextTaskResultEnvelope {
+	parsed: ParsedWorkflowOutput,
+	options: WorkflowTaskArtifactBundleOptions,
+): WorkflowTaskResultEnvelope {
 	return {
 		schema: VNEXT_TASK_RESULT_SCHEMA,
 		protocol: VNEXT_OUTPUT_PROTOCOL,
@@ -517,11 +517,11 @@ function invalidResultEnvelope(
 
 function validResultEnvelope(
 	files: Record<string, string>,
-	parsed: ValidParsedVNextOutput,
-	options: VNextTaskArtifactBundleOptions,
-): VNextTaskResultEnvelope {
+	parsed: ValidParsedWorkflowOutput,
+	options: WorkflowTaskArtifactBundleOptions,
+): WorkflowTaskResultEnvelope {
 	const status = options.lifecycleStatus ?? "completed";
-	const result: VNextTaskResultEnvelope = {
+	const result: WorkflowTaskResultEnvelope = {
 		schema: VNEXT_TASK_RESULT_SCHEMA,
 		protocol: VNEXT_OUTPUT_PROTOCOL,
 		status,
@@ -544,8 +544,8 @@ function artifactIndex(files: Record<string, string>): Record<string, string> {
 
 function sectionCounts(
 	sections: readonly SectionMatch[],
-): Map<VNextSectionName, number> {
-	const counts = new Map<VNextSectionName, number>();
+): Map<WorkflowOutputSectionName, number> {
+	const counts = new Map<WorkflowOutputSectionName, number>();
 	for (const section of sections) {
 		counts.set(section.name, (counts.get(section.name) ?? 0) + 1);
 	}
@@ -553,7 +553,7 @@ function sectionCounts(
 }
 
 function sectionRequired(
-	name: VNextSectionName,
+	name: WorkflowOutputSectionName,
 	requirements: SectionRequirements,
 ): boolean {
 	if (name === SECTION_ANALYSIS) return requirements.analysisRequired;
@@ -563,13 +563,13 @@ function sectionRequired(
 
 function requiredSectionOrder(
 	requirements: SectionRequirements,
-): VNextSectionName[] {
+): WorkflowOutputSectionName[] {
 	return CANONICAL_SECTION_ORDER.filter((name) =>
 		sectionRequired(name, requirements),
 	);
 }
 
-function missingSectionIssue(section: VNextSectionName): VNextOutputIssue {
+function missingSectionIssue(section: WorkflowOutputSectionName): WorkflowOutputIssue {
 	return {
 		code: "missing_section",
 		section,
@@ -577,7 +577,7 @@ function missingSectionIssue(section: VNextSectionName): VNextOutputIssue {
 	};
 }
 
-function duplicateSectionIssue(section: VNextSectionName): VNextOutputIssue {
+function duplicateSectionIssue(section: WorkflowOutputSectionName): WorkflowOutputIssue {
 	return {
 		code: "duplicate_section",
 		section,
@@ -585,16 +585,16 @@ function duplicateSectionIssue(section: VNextSectionName): VNextOutputIssue {
 	};
 }
 
-function outsideTextIssue(): VNextOutputIssue {
+function outsideTextIssue(): WorkflowOutputIssue {
 	return {
 		code: "unexpected_text",
-		message: "output must not contain prose outside vNext sections",
+		message: "output must not contain prose outside workflow output sections",
 	};
 }
 
 function sectionText(
 	sections: readonly SectionMatch[],
-	name: VNextSectionName,
+	name: WorkflowOutputSectionName,
 ): string | undefined {
 	const matches = sections.filter((section) => section.name === name);
 	return matches.length === 1 ? matches[0]!.content.trim() : undefined;
@@ -603,7 +603,7 @@ function sectionText(
 function parseJsonSection(
 	text: string,
 	section: typeof SECTION_CONTROL | typeof SECTION_REFS,
-	issues: VNextOutputIssue[],
+	issues: WorkflowOutputIssue[],
 ): unknown | undefined {
 	if (text.trim().length === 0) {
 		issues.push({
@@ -627,8 +627,8 @@ function parseJsonSection(
 
 function validateBaseControl(
 	control: Record<string, unknown>,
-	issues: VNextOutputIssue[],
-	options: ParseVNextOutputOptions,
+	issues: WorkflowOutputIssue[],
+	options: ParseWorkflowOutputOptions,
 ): void {
 	validateControlSchemaField(control, issues);
 	validateControlDigestField(control, issues, options);
@@ -636,7 +636,7 @@ function validateBaseControl(
 
 function validateControlSchemaField(
 	control: Record<string, unknown>,
-	issues: VNextOutputIssue[],
+	issues: WorkflowOutputIssue[],
 ): void {
 	if (typeof control.schema === "string" && control.schema.length > 0) return;
 	issues.push({
@@ -649,8 +649,8 @@ function validateControlSchemaField(
 
 function validateControlDigestField(
 	control: Record<string, unknown>,
-	issues: VNextOutputIssue[],
-	options: ParseVNextOutputOptions,
+	issues: WorkflowOutputIssue[],
+	options: ParseWorkflowOutputOptions,
 ): void {
 	if (
 		typeof control.digest !== "string" ||
@@ -674,7 +674,7 @@ function validateControlDigestField(
 	});
 }
 
-function contractIssue(issue: StructuredContractIssue): VNextOutputIssue {
+function contractIssue(issue: StructuredContractIssue): WorkflowOutputIssue {
 	return {
 		code: "contract_failed",
 		section: SECTION_CONTROL,
@@ -683,7 +683,7 @@ function contractIssue(issue: StructuredContractIssue): VNextOutputIssue {
 	};
 }
 
-function jsonSchemaIssue(issue: JsonSchemaIssue): VNextOutputIssue {
+function jsonSchemaIssue(issue: JsonSchemaIssue): WorkflowOutputIssue {
 	return {
 		code: "contract_failed",
 		section: SECTION_CONTROL,

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+	existsSync,
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
@@ -91,10 +92,10 @@ import {
 	writeWorkflowArtifactExtensionWrapper,
 } from "../../.tmp/unit/workflow-artifact-extension.js";
 import {
-	buildVNextOutputRetryInstructions,
-	parseVNextOutput,
-	writeVNextTaskArtifactBundle,
-} from "../../.tmp/unit/workflow-vnext-artifacts.js";
+	buildWorkflowOutputRetryInstructions,
+	parseWorkflowOutput,
+	writeWorkflowTaskArtifactBundle,
+} from "../../.tmp/unit/workflow-output-artifacts.js";
 import { validateJsonSchema } from "../../.tmp/unit/json-schema.js";
 import {
 	refreshRunFromSubagentArtifacts,
@@ -220,11 +221,9 @@ function writeDefaultStageControlSchema(workflowRoot) {
 function bundledArtifactGraphSpecPaths() {
 	return [
 		"workflows/implement-loop/spec.json",
-		"workflows/test-repair-loop/spec.json",
 		"workflows/spec-review/spec.json",
 		"workflows/deep-research/spec.json",
 		"workflows/deep-review/spec.json",
-		"workflows/execution-review/spec.json",
 		"workflows/deep-execution-review/spec.json",
 		"workflows/change-impact-review/spec.json",
 	];
@@ -324,7 +323,7 @@ async function completeTask(
 			digest: `${task.stageId ?? task.specId} completed`,
 			...structuredOutput,
 		};
-		await writeVNextTaskArtifactBundle({
+		await writeWorkflowTaskArtifactBundle({
 			taskDir: dirname(join(cwd, task.files.result)),
 			rawOutput: [
 				"<control>",
@@ -638,7 +637,7 @@ test("agent parser reads frontmatter tool ceilings", () => {
 test("public schemaVersion 1 parser accepts artifact graph and rejects non-artifactGraph top-level shapes", () => {
 	const parsed = parsePublicWorkflow(
 		artifactGraphWorkflowSpec({
-			name: "impact-vnext",
+			name: "impact-artifact",
 			catalog: { useWhen: ["impact review"] },
 			artifactGraph: {
 				stages: [
@@ -667,7 +666,7 @@ test("public schemaVersion 1 parser accepts artifact graph and rejects non-artif
 		}),
 	);
 	assert.equal(parsed.schemaVersion, 1);
-	assert.equal(parsed.name, "impact-vnext");
+	assert.equal(parsed.name, "impact-artifact");
 	assert.equal(parsed.artifactGraph.stages[0].id, "risk");
 	assert.equal(
 		parsed.artifactGraph.stages[1].inputPolicy.requiredReads[0],
@@ -869,6 +868,191 @@ test("artifact graph schema rejects unknown output fields and invalid required r
 		invalid,
 		"$.artifactGraph.stages[1].inputPolicy.requiredReads[0]",
 		"artifact must be one of",
+	);
+});
+
+test("artifact graph schema enforces launch-time invariants", () => {
+	const missingSupport = assertThrowsFlow(() =>
+		parsePublicWorkflow(
+			artifactGraphWorkflowSpec({
+				artifactGraph: {
+					stages: [{ id: "audit", type: "support", prompt: "Audit." }],
+				},
+			}),
+		),
+	);
+	assertIssue(
+		missingSupport,
+		"$.artifactGraph.stages[0].support",
+		"must be an object",
+	);
+
+	const supportOnTask = assertThrowsFlow(() =>
+		parsePublicWorkflow(
+			artifactGraphWorkflowSpec({
+				artifactGraph: {
+					stages: [
+						{
+							id: "audit",
+							type: "task",
+							prompt: "Audit.",
+							support: { uses: "./helpers/audit.mjs" },
+						},
+					],
+				},
+			}),
+		),
+	);
+	assertIssue(
+		supportOnTask,
+		"$.artifactGraph.stages[0].support",
+		"only valid on support stages",
+	);
+
+	const loopWithoutMaxRounds = assertThrowsFlow(() =>
+		parsePublicWorkflow(
+			loopWorkflowSpec({ maxRounds: undefined, until: { exists: true } }),
+		),
+	);
+	assertIssue(
+		loopWithoutMaxRounds,
+		"$.artifactGraph.stages[0].maxRounds",
+		"must declare maxRounds",
+	);
+
+	const badLoopPath = assertThrowsFlow(() =>
+		parsePublicWorkflow(
+			loopWorkflowSpec({
+				until: { stage: "check", path: "status", exists: true },
+			}),
+		),
+	);
+	assertIssue(
+		badLoopPath,
+		"$.artifactGraph.stages[0].until.path",
+		"starting with $.",
+	);
+
+	const forwardRef = assertThrowsFlow(() =>
+		parsePublicWorkflow(
+			artifactGraphWorkflowSpec({
+				artifactGraph: {
+					stages: [
+						{ id: "final", type: "reduce", from: "scan", prompt: "Final." },
+						{ id: "scan", type: "task", prompt: "Scan." },
+					],
+				},
+			}),
+		),
+	);
+	assertIssue(
+		forwardRef,
+		"$.artifactGraph.stages[0].from",
+		"earlier sibling stages",
+	);
+
+	const backendAuto = assertThrowsFlow(() =>
+		parsePublicWorkflow(
+			artifactGraphWorkflowSpec({
+				defaults: { agent: "unit-scout", backend: { mode: "auto" } },
+			}),
+		),
+	);
+	assertIssue(backendAuto, "$.defaults.backend.mode", 'must be "headless"');
+
+	assert.doesNotThrow(() =>
+		parsePublicWorkflow(
+			artifactGraphWorkflowSpec({
+				artifactGraph: {
+					stages: [
+						{
+							id: "analysis",
+							type: "dag",
+							outputFrom: "final",
+							stages: [
+								{ id: "scan", type: "task", prompt: "Scan." },
+								{
+									id: "final",
+									type: "reduce",
+									from: "scan",
+									prompt: "Final.",
+								},
+							],
+						},
+						{
+							id: "report",
+							type: "reduce",
+							from: "analysis",
+							inputPolicy: {
+								requiredReads: ["analysis.final.analysis"],
+							},
+							prompt: "Report.",
+						},
+					],
+				},
+			}),
+		),
+	);
+
+	const dagContainerRead = assertThrowsFlow(() =>
+		parsePublicWorkflow(
+			artifactGraphWorkflowSpec({
+				artifactGraph: {
+					stages: [
+						{
+							id: "analysis",
+							type: "dag",
+							outputFrom: "final",
+							stages: [{ id: "final", type: "task", prompt: "Final." }],
+						},
+						{
+							id: "report",
+							type: "reduce",
+							from: "analysis",
+							inputPolicy: { requiredReads: ["analysis.analysis"] },
+							prompt: "Report.",
+						},
+					],
+				},
+			}),
+		),
+	);
+	assertIssue(
+		dagContainerRead,
+		"$.artifactGraph.stages[1].inputPolicy.requiredReads[0]",
+		"not an available upstream artifact source",
+	);
+
+	const badStageId = assertThrowsFlow(() =>
+		parsePublicWorkflow(
+			artifactGraphWorkflowSpec({
+				artifactGraph: {
+					stages: [{ id: "bad/id", type: "task", prompt: "Bad." }],
+				},
+			}),
+		),
+	);
+	assertIssue(badStageId, "$.artifactGraph.stages[0].id", "stage id");
+
+	const loopInDag = assertThrowsFlow(() =>
+		parsePublicWorkflow(
+			artifactGraphWorkflowSpec({
+				artifactGraph: {
+					stages: [
+						{
+							id: "box",
+							type: "dag",
+							stages: [loopWorkflowSpec().artifactGraph.stages[0]],
+						},
+					],
+				},
+			}),
+		),
+	);
+	assertIssue(
+		loopInDag,
+		"$.artifactGraph.stages[0].stages[0].type",
+		"top level",
 	);
 });
 
@@ -1188,26 +1372,20 @@ test("compiler separates order-only after dependencies from source context", asy
 			workflowSpec("unit-scout", {
 				artifactGraph: {
 					stages: [
-						{
-							id: "source",
-							type: "parallel",
-							tasks: [
-								{ id: "one", prompt: "Source one." },
-								{ id: "two", prompt: "Source two." },
-							],
-						},
+						{ id: "sourceOne", type: "task", prompt: "Source one." },
+						{ id: "sourceTwo", type: "task", after: [], prompt: "Source two." },
 						{ id: "gate", type: "task", prompt: "Gate." },
 						{
 							id: "mixed",
 							type: "task",
-							from: "source",
+							from: ["sourceOne", "sourceTwo"],
 							after: "gate",
 							prompt: "Mixed.",
 						},
 						{
 							id: "fromOnly",
 							type: "task",
-							from: "source",
+							from: ["sourceOne", "sourceTwo"],
 							prompt: "From only.",
 						},
 					],
@@ -1220,13 +1398,13 @@ test("compiler separates order-only after dependencies from source context", asy
 			compiled.tasks.map((task) => [task.key, task]),
 		);
 		assert.deepEqual(byKey["mixed.main"].dependsOn, [
-			"source.one",
-			"source.two",
+			"sourceOne.main",
+			"sourceTwo.main",
 			"gate.main",
 		]);
 		assert.deepEqual(byKey["mixed.main"].contextDependsOn, [
-			"source.one",
-			"source.two",
+			"sourceOne.main",
+			"sourceTwo.main",
 		]);
 		assert.equal(byKey["fromOnly.main"].contextDependsOn, undefined);
 	} finally {
@@ -1271,19 +1449,13 @@ test("compiler lowers dag containers to namespaced child tasks", async () => {
 			workflowSpec("unit-scout", {
 				artifactGraph: {
 					stages: [
-						{
-							id: "seed",
-							type: "parallel",
-							tasks: [
-								{ id: "one", prompt: "Seed one." },
-								{ id: "two", prompt: "Seed two." },
-							],
-						},
+						{ id: "seedOne", type: "task", prompt: "Seed one." },
+						{ id: "seedTwo", type: "task", after: [], prompt: "Seed two." },
 						{ id: "gate", type: "task", prompt: "Gate." },
 						{
 							id: "box",
 							type: "dag",
-							from: "seed",
+							from: ["seedOne", "seedTwo"],
 							after: "gate",
 							outputFrom: "d",
 							stages: [
@@ -1313,8 +1485,8 @@ test("compiler lowers dag containers to namespaced child tasks", async () => {
 		assert.deepEqual(
 			compiled.tasks.map((task) => task.key),
 			[
-				"seed.one",
-				"seed.two",
+				"seedOne.main",
+				"seedTwo.main",
 				"gate.main",
 				"box.a.main",
 				"box.b.main",
@@ -1331,13 +1503,13 @@ test("compiler lowers dag containers to namespaced child tasks", async () => {
 			["box.a", "box.b", "box.c", "box.d"],
 		);
 		assert.deepEqual(byKey["box.a.main"].dependsOn, [
-			"seed.one",
-			"seed.two",
+			"seedOne.main",
+			"seedTwo.main",
 			"gate.main",
 		]);
 		assert.deepEqual(byKey["box.a.main"].contextDependsOn, [
-			"seed.one",
-			"seed.two",
+			"seedOne.main",
+			"seedTwo.main",
 		]);
 		assert.deepEqual(byKey["box.b.main"].dependsOn, ["box.a.main"]);
 		assert.deepEqual(byKey["box.b.main"].contextDependsOn, []);
@@ -1382,6 +1554,7 @@ test("compiler lowers foreach and support children inside dag containers", async
 								},
 								{
 									id: "audit",
+									type: "support",
 									from: "verify",
 									support: { uses: "./helpers/audit.mjs" },
 								},
@@ -1982,6 +2155,12 @@ test("loop compiles to a loop stage record with no premature child tasks", async
 		assert.equal(loopStage.maxRounds, 5);
 		assert.deepEqual(loopStage.childStageIds, ["implement", "check"]);
 		assert.equal(loopStage.childTemplates.length, 2);
+		assert.equal(loopStage.childTemplates[0].artifactGraph?.enabled, true);
+		assert.equal(loopStage.childTemplates[1].artifactGraph?.enabled, true);
+		assert.match(
+			loopStage.childTemplates[1].compiledPrompt,
+			/Workflow Output Protocol/,
+		);
 		assert.deepEqual(
 			compiled.tasks.map((task) => task.specId),
 			["fix-loop.loop"],
@@ -2011,6 +2190,14 @@ test("loop round 1 materializes child tasks with deterministic ids", async () =>
 		assert.deepEqual(taskBySpec(materialized, "fix-loop.r01.check").dependsOn, [
 			"fix-loop.r01.implement",
 		]);
+		assert.equal(
+			taskBySpec(materialized, "fix-loop.r01.implement").artifactGraph?.enabled,
+			true,
+		);
+		assert.equal(
+			taskBySpec(materialized, "fix-loop.r01.check").artifactGraph?.enabled,
+			true,
+		);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
@@ -2145,6 +2332,8 @@ test("loop until satisfied after a round marks loop completed and stops material
 		assert.equal(current.loopResults[0].status, "completed");
 		assert.equal(current.loopResults[0].roundsUsed, 1);
 		assert.deepEqual(current.loopResults[0].finalCheck, {
+			schema: "stage-control-v1",
+			digest: "fix-loop.r01.check completed",
 			status: "pass",
 			verdict: "ACCEPT",
 			blockingFailures: [],
@@ -2604,12 +2793,11 @@ test("loop completed task with unreadable result records a warning", async () =>
 			changed: true,
 		});
 		const check = taskBySpec(current, "fix-loop.r01.check");
-		setTaskTerminal(check, "completed", "completed", {
-			exitCode: 0,
-			lastMessage: "completed",
-		});
-		mkdirSync(dirname(join(cwd, check.files.result)), { recursive: true });
-		writeFileSync(join(cwd, check.files.result), "{not-json");
+		await completeTask(cwd, check, { status: "pass" });
+		writeFileSync(
+			join(dirname(join(cwd, check.files.result)), "control.json"),
+			"{not-json",
+		);
 		await writeRunRecord(cwd, current);
 		const compiledAfterRound1 = JSON.parse(
 			readFileSync(
@@ -2724,7 +2912,10 @@ test("spec-review partition helper joins verifier results and flags missing cove
 			},
 		},
 		options: { mode: "partition" },
-		context: { cwd: process.cwd(), specPath: "workflows/spec-review/spec.json" },
+		context: {
+			cwd: process.cwd(),
+			specPath: "workflows/spec-review/spec.json",
+		},
 	});
 
 	assert.equal(result.schema, "spec-review-partition-v1");
@@ -2749,7 +2940,12 @@ test("bundled spec-review workflow compiles explicit DAG analysis and verificati
 	const cwd = makeProject();
 	try {
 		writeAgent(cwd, "scout", "read, grep, find, ls");
-		const specPath = join(process.cwd(), "workflows", "spec-review", "spec.json");
+		const specPath = join(
+			process.cwd(),
+			"workflows",
+			"spec-review",
+			"spec.json",
+		);
 		const spec = JSON.parse(readFileSync(specPath, "utf8"));
 		parsePublicWorkflow(spec);
 		assert.equal(spec.artifactGraph.stages[0].id, "analysis");
@@ -2938,7 +3134,12 @@ test("bundled change-impact-review artifact graph workflow compiles multi-join D
 			byKey[
 				"impact-analysis.impact-synthesis.main"
 			].artifactGraph.output.controlSchemaPath.endsWith(
-				join("workflows", "change-impact-review", "schemas", "impact-synthesis-control.schema.json"),
+				join(
+					"workflows",
+					"change-impact-review",
+					"schemas",
+					"impact-synthesis-control.schema.json",
+				),
 			),
 		);
 	} finally {
@@ -2953,10 +3154,8 @@ test("bundled artifact graph workflows are public runnable", async () => {
 		"spec-review",
 		"deep-review",
 		"deep-research",
-		"execution-review",
 		"deep-execution-review",
 		"implement-loop",
-		"test-repair-loop",
 	]) {
 		assert(
 			workflows.some((workflow) => workflow.name === name),
@@ -2967,7 +3166,9 @@ test("bundled artifact graph workflows are public runnable", async () => {
 		"change-impact-review",
 		process.cwd(),
 	);
-	assert(resolved.specPath.endsWith("workflows/change-impact-review/spec.json"));
+	assert(
+		resolved.specPath.endsWith("workflows/change-impact-review/spec.json"),
+	);
 
 	const recs = await recommendWorkflows(
 		"impact review this PR before shipping missing tests docs release risk",
@@ -3205,7 +3406,12 @@ test("bundled spec-review workflow materializes verifier and partitions verified
 	try {
 		writeAgent(cwd, "scout", "read, grep, find, ls");
 		captureSubagentPrompts([]);
-		const specPath = join(process.cwd(), "workflows", "spec-review", "spec.json");
+		const specPath = join(
+			process.cwd(),
+			"workflows",
+			"spec-review",
+			"spec.json",
+		);
 		const spec = JSON.parse(readFileSync(specPath, "utf8"));
 		const compiled = await compileWorkflow(spec, {
 			cwd,
@@ -3310,54 +3516,6 @@ test("bundled spec-review workflow materializes verifier and partitions verified
 		});
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
-	}
-});
-
-test("bundled test-repair-loop workflow materializes a serial repair/check round", async () => {
-	const cwd = makeProject();
-	try {
-		writeAgent(cwd, "delegate", "read, grep, find, ls, bash, edit, write");
-		writeAgent(cwd, "scout", "read, grep, find, ls");
-		const specPath = join(process.cwd(), "workflows", "test-repair-loop", "spec.json");
-		const spec = JSON.parse(readFileSync(specPath, "utf8"));
-		parsePublicWorkflow(spec);
-		const compiled = await compileWorkflow(spec, {
-			cwd,
-			specPath,
-			task: "Fix npm test; approved command: npm test.",
-		});
-		const loopStage = compiled.stages.find(
-			(stage) => stage.id === "repair-loop",
-		);
-		assert.equal(loopStage.type, "loop");
-		assert.deepEqual(loopStage.childStageIds, ["repair", "test-check"]);
-		assert.equal(loopStage.maxRounds, 4);
-		assert.equal(loopStage.progressPath, "$.failingChecks");
-
-		const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
-		await writeStaticRunArtifacts(cwd, run, compiled, spec);
-		await writeRunRecord(cwd, run);
-		await scheduleRun(cwd, run.runId);
-
-		const materialized = await readRunRecord(cwd, run.runId);
-		assert.deepEqual(
-			materialized.tasks.map((task) => task.specId),
-			[
-				"repair-loop.loop",
-				"repair-loop.r01.repair",
-				"repair-loop.r01.test-check",
-			],
-		);
-		assert.deepEqual(
-			taskBySpec(materialized, "repair-loop.r01.repair").dependsOn ?? [],
-			[],
-		);
-		assert.deepEqual(
-			taskBySpec(materialized, "repair-loop.r01.test-check").dependsOn,
-			["repair-loop.r01.repair"],
-		);
-	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });
@@ -3945,6 +4103,7 @@ test("artifactGraph runtime support executes helper and writes artifacts", async
 					},
 					{
 						id: "audit",
+						type: "support",
 						from: "extract",
 						support: {
 							uses: "./helpers/audit.mjs",
@@ -4005,24 +4164,27 @@ test("artifactGraph runtime support omits failed dependency sources", async () =
 		const specPath = join(workflowDir, "spec.json");
 		writeFileSync(
 			join(workflowDir, "helpers", "sources.mjs"),
-			"export default async function helper({ sources }) { return { sourceKeys: Object.keys(sources).sort(), failedSource: sources['extract.failed'] ?? null, okSource: sources.extract ?? sources['extract.ok'] }; }\n",
+			"export default async function helper({ sources }) { return { sourceKeys: Object.keys(sources).sort(), failedSource: sources.extractFailed ?? null, okSource: sources.extractOk }; }\n",
 		);
 		const spec = workflowSpec("unit-scout", {
 			artifactGraph: {
 				stages: [
 					{
-						id: "extract",
-						type: "parallel",
-						output: { format: "json" },
-						tasks: [
-							{ id: "ok", prompt: "Extract OK" },
-							{ id: "failed", prompt: "Extract failed" },
-						],
+						id: "extractOk",
+						type: "task",
+						prompt: "Extract OK",
+					},
+					{
+						id: "extractFailed",
+						type: "task",
+						after: [],
+						prompt: "Extract failed",
 					},
 					{
 						id: "audit",
-						from: "extract",
+						from: ["extractOk", "extractFailed"],
 						sourcePolicy: "partial",
+						type: "support",
 						support: { uses: "./helpers/sources.mjs" },
 					},
 				],
@@ -4036,8 +4198,10 @@ test("artifactGraph runtime support omits failed dependency sources", async () =
 		});
 		const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
 		await writeStaticRunArtifacts(cwd, run, compiled, spec);
-		const ok = run.tasks.find((task) => task.specId === "extract.ok");
-		const failed = run.tasks.find((task) => task.specId === "extract.failed");
+		const ok = run.tasks.find((task) => task.specId === "extractOk.main");
+		const failed = run.tasks.find(
+			(task) => task.specId === "extractFailed.main",
+		);
 		assert.ok(ok);
 		assert.ok(failed);
 		await completeTask(cwd, ok, { claims: ["kept"] });
@@ -4067,10 +4231,10 @@ test("artifactGraph runtime support omits failed dependency sources", async () =
 				failedSource: null,
 				okSource: {
 					schema: "stage-control-v1",
-					digest: "extract completed",
+					digest: "extractOk completed",
 					claims: ["kept"],
 				},
-				sourceKeys: ["extract"],
+				sourceKeys: ["extractOk"],
 			},
 		);
 	} finally {
@@ -4100,6 +4264,7 @@ test("artifactGraph runtime support marks helper errors as failed", async () => 
 					},
 					{
 						id: "audit",
+						type: "support",
 						from: "extract",
 						support: { uses: "./helpers/fail.mjs" },
 					},
@@ -4877,7 +5042,7 @@ test("completed subagent with contextLengthExceeded and valid output remains com
 						{
 							id: "main",
 							type: "task",
-							prompt: "Return valid vNext output.",
+							prompt: "Return valid workflow output.",
 						},
 					],
 				},
@@ -5095,7 +5260,7 @@ test("refresh adopts handle-less running subagent from deterministic runsDir", a
 			}),
 		);
 
-		const artifactDir = join(cwd, ".fake-subagent");
+		const artifactDir = join(runsDir, subRunId, "attempts", subAttemptId);
 		mkdirSync(artifactDir, { recursive: true });
 		const adoptedOutput = [
 			"<control>",
@@ -5140,18 +5305,18 @@ test("refresh adopts handle-less running subagent from deterministic runsDir", a
 					logs: [
 						{
 							type: "output",
-							path: ".fake-subagent/output.log",
-							artifactCwd: cwd,
+							path: "output.log",
+							artifactCwd: artifactDir,
 						},
 						{
 							type: "stderr",
-							path: ".fake-subagent/stderr.log",
-							artifactCwd: cwd,
+							path: "stderr.log",
+							artifactCwd: artifactDir,
 						},
 						{
 							type: "result",
-							path: ".fake-subagent/result.json",
-							artifactCwd: cwd,
+							path: "result.json",
+							artifactCwd: artifactDir,
 						},
 					],
 					metadata: { contextLengthExceeded: false },
@@ -5440,18 +5605,35 @@ test("run boundary requires runtime task", async () => {
 	}
 });
 
-test("static run artifacts preserve workflow bundle files", async () => {
+test("static run artifacts preserve declared workflow bundle files only", async () => {
 	const cwd = makeProject();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
 		const workflowDir = join(cwd, "workflows", "bundle");
 		mkdirSync(join(workflowDir, "helpers"), { recursive: true });
+		mkdirSync(join(workflowDir, "schemas"), { recursive: true });
 		const specPath = join(workflowDir, "spec.json");
-		const spec = workflowSpec("unit-scout", { name: "bundle" });
+		const spec = workflowSpec("unit-scout", {
+			name: "bundle",
+			artifactGraph: {
+				stages: [
+					{
+						id: "audit",
+						type: "support",
+						support: { uses: "./helpers/audit.mjs" },
+						output: { controlSchema: "./schemas/audit-control.schema.json" },
+					},
+				],
+			},
+		});
 		writeFileSync(specPath, JSON.stringify(spec));
 		writeFileSync(
 			join(workflowDir, "templates.json"),
 			JSON.stringify({ audit: { ok: true } }),
+		);
+		writeFileSync(
+			join(workflowDir, "schemas", "audit-control.schema.json"),
+			JSON.stringify({ type: "object" }),
 		);
 		writeFileSync(
 			join(workflowDir, "helpers", "audit.mjs"),
@@ -5465,28 +5647,19 @@ test("static run artifacts preserve workflow bundle files", async () => {
 		});
 		const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
 		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		const bundleDir = join(cwd, ".pi", "workflows", run.runId, "bundle");
 
+		assert.equal(existsSync(join(bundleDir, "templates.json")), false);
+		assert.match(
+			readFileSync(join(bundleDir, "helpers", "audit.mjs"), "utf8"),
+			/export default/,
+		);
 		assert.equal(
 			readFileSync(
-				join(cwd, ".pi", "workflows", run.runId, "bundle", "templates.json"),
+				join(bundleDir, "schemas", "audit-control.schema.json"),
 				"utf8",
 			),
-			JSON.stringify({ audit: { ok: true } }),
-		);
-		assert.match(
-			readFileSync(
-				join(
-					cwd,
-					".pi",
-					"workflows",
-					run.runId,
-					"bundle",
-					"helpers",
-					"audit.mjs",
-				),
-				"utf8",
-			),
-			/export default/,
+			JSON.stringify({ type: "object" }),
 		);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
@@ -5567,35 +5740,18 @@ test("workflow registry resolves exact names and recommendation metadata", async
 	}
 });
 
-test("workflow registry resolves renamed execution-review workflow aliases", async () => {
+test("workflow registry does not resolve prelaunch renamed workflow aliases", async () => {
 	const cwd = makeProject();
 	try {
-		mkdirSync(join(cwd, "workflows", "execution-review"), { recursive: true });
-		mkdirSync(join(cwd, "workflows", "deep-execution-review"), {
-			recursive: true,
-		});
+		mkdirSync(join(cwd, "workflows", "modern-review"), { recursive: true });
 		writeFileSync(
-			join(cwd, "workflows", "execution-review", "spec.json"),
-			JSON.stringify(artifactGraphWorkflowSpec({ name: "execution-review" })),
-		);
-		writeFileSync(
-			join(cwd, "workflows", "deep-execution-review", "spec.json"),
-			JSON.stringify(
-				artifactGraphWorkflowSpec({ name: "deep-execution-review" }),
-			),
+			join(cwd, "workflows", "modern-review", "spec.json"),
+			JSON.stringify(artifactGraphWorkflowSpec({ name: "modern-review" })),
 		);
 
-		const oldSingle = await resolveWorkflowRef("dynamic-review", cwd);
-		assert.equal(oldSingle.workflowName, "execution-review");
-		assert.equal(
-			oldSingle.specPath,
-			join(cwd, "workflows", "execution-review", "spec.json"),
-		);
-		const oldDeep = await resolveWorkflowRef("deep-dynamic-review", cwd);
-		assert.equal(oldDeep.workflowName, "deep-execution-review");
-		assert.equal(
-			oldDeep.specPath,
-			join(cwd, "workflows", "deep-execution-review", "spec.json"),
+		await assert.rejects(
+			() => resolveWorkflowRef("dynamic-review", cwd),
+			/workflow name or spec file not found/,
 		);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
@@ -6480,7 +6636,7 @@ test("workflow_artifact extension registers and activates the tool", async () =>
 	}
 });
 
-test("artifact graph workflow runs vNext artifacts and enforces required reads", async () => {
+test("artifact graph workflow runs workflow artifacts and enforces required reads", async () => {
 	const cwd = makeProject();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
@@ -6528,7 +6684,13 @@ test("artifact graph workflow runs vNext artifacts and enforces required reads",
 				launchCount += 1;
 				const runId = `run_artifact_${launchCount}`;
 				const attemptId = `attempt_artifact_${launchCount}`;
-				const artifactDir = join(cwd, `.fake-artifact-${launchCount}`);
+				const artifactDir = join(
+					cwd,
+					String(options.runsDir),
+					runId,
+					"attempts",
+					attemptId,
+				);
 				mkdirSync(artifactDir, { recursive: true });
 				const isFinal = launchCount === 2;
 				if (isFinal) {
@@ -6729,7 +6891,7 @@ test("workflow_artifact generated extension wrapper embeds config without prompt
 	}
 });
 
-test("vNext output parser accepts canonical control analysis refs sections", () => {
+test("workflow output parser accepts canonical control analysis refs sections", () => {
 	const raw = [
 		"<control>",
 		JSON.stringify({
@@ -6745,7 +6907,7 @@ test("vNext output parser accepts canonical control analysis refs sections", () 
 		JSON.stringify([{ kind: "file", path: "src/compiler.ts" }]),
 		"</refs>",
 	].join("\n");
-	const parsed = parseVNextOutput(raw, {
+	const parsed = parseWorkflowOutput(raw, {
 		controlContract: { requiredPaths: ["$.findings"] },
 	});
 	assert.equal(parsed.valid, true, JSON.stringify(parsed.issues));
@@ -6754,7 +6916,7 @@ test("vNext output parser accepts canonical control analysis refs sections", () 
 	assert.deepEqual(parsed.refs, [{ kind: "file", path: "src/compiler.ts" }]);
 });
 
-test("vNext output parser tolerates literal closing tags inside JSON strings", () => {
+test("workflow output parser tolerates literal closing tags inside JSON strings", () => {
 	const raw = [
 		"<control>",
 		JSON.stringify({
@@ -6770,7 +6932,7 @@ test("vNext output parser tolerates literal closing tags inside JSON strings", (
 		JSON.stringify([{ note: "literal </refs> in JSON data" }]),
 		"</refs>",
 	].join("\n");
-	const parsed = parseVNextOutput(raw);
+	const parsed = parseWorkflowOutput(raw);
 	assert.equal(parsed.valid, true, JSON.stringify(parsed.issues));
 	assert.equal(parsed.control.digest, "quote contains </control> safely");
 	assert.deepEqual(parsed.refs, [{ note: "literal </refs> in JSON data" }]);
@@ -6809,8 +6971,8 @@ test("minimal JSON schema validator enforces control schema subset", () => {
 	assert.ok(invalid.issues.some((issue) => issue.path === "$.items"));
 });
 
-test("vNext output parser rejects missing sections, bad control, outside prose, and contract failures", () => {
-	const missing = parseVNextOutput("<control>{}</control>\n<refs>[]</refs>");
+test("workflow output parser rejects missing sections, bad control, outside prose, and contract failures", () => {
+	const missing = parseWorkflowOutput("<control>{}</control>\n<refs>[]</refs>");
 	assert.equal(missing.valid, false);
 	assert.ok(
 		missing.issues.some(
@@ -6821,7 +6983,7 @@ test("vNext output parser rejects missing sections, bad control, outside prose, 
 	assert.ok(missing.issues.some((issue) => issue.path === "$.schema"));
 	assert.ok(missing.issues.some((issue) => issue.path === "$.digest"));
 
-	const badJson = parseVNextOutput(
+	const badJson = parseWorkflowOutput(
 		"<control>{nope}</control><analysis>x</analysis><refs>{}</refs>",
 	);
 	assert.equal(badJson.valid, false);
@@ -6836,13 +6998,13 @@ test("vNext output parser rejects missing sections, bad control, outside prose, 
 		),
 	);
 
-	const prose = parseVNextOutput(
+	const prose = parseWorkflowOutput(
 		'hello\n<control>{"schema":"x","digest":"d"}</control><analysis>x</analysis><refs>[]</refs>',
 	);
 	assert.equal(prose.valid, false);
 	assert.ok(prose.issues.some((issue) => issue.code === "unexpected_text"));
 
-	const contract = parseVNextOutput(
+	const contract = parseWorkflowOutput(
 		'<control>{"schema":"x","digest":"d"}</control><analysis>x</analysis><refs>[]</refs>',
 		{ controlContract: { requiredPaths: ["$.items"] } },
 	);
@@ -6852,7 +7014,7 @@ test("vNext output parser rejects missing sections, bad control, outside prose, 
 			(issue) => issue.code === "contract_failed" && issue.path === "$.items",
 		),
 	);
-	const jsonSchema = parseVNextOutput(
+	const jsonSchema = parseWorkflowOutput(
 		'<control>{"schema":"x","digest":"d","items":[]}</control><analysis>x</analysis><refs>[]</refs>',
 		{
 			controlJsonSchema: {
@@ -6871,11 +7033,11 @@ test("vNext output parser rejects missing sections, bad control, outside prose, 
 				/control JSON schema failed/.test(issue.message),
 		),
 	);
-	assert.match(buildVNextOutputRetryInstructions(contract.issues), /Issues/);
-	assert.match(buildVNextOutputRetryInstructions(contract.issues), /items/);
+	assert.match(buildWorkflowOutputRetryInstructions(contract.issues), /Issues/);
+	assert.match(buildWorkflowOutputRetryInstructions(contract.issues), /items/);
 });
 
-test("vNext artifact bundle writer writes sidecars before result envelope", async () => {
+test("workflow artifact bundle writer writes sidecars before result envelope", async () => {
 	const cwd = makeProject();
 	try {
 		const taskDir = join(
@@ -6901,7 +7063,7 @@ test("vNext artifact bundle writer writes sidecars before result envelope", asyn
 			"[]",
 			"</refs>",
 		].join("\n");
-		const written = await writeVNextTaskArtifactBundle({
+		const written = await writeWorkflowTaskArtifactBundle({
 			taskDir,
 			rawOutput: raw,
 			startedAt: "2026-06-14T00:00:00.000Z",
@@ -6947,7 +7109,7 @@ test("vNext artifact bundle writer writes sidecars before result envelope", asyn
 	}
 });
 
-test("vNext artifact bundle writer stores invalid attempts without commit result", async () => {
+test("workflow artifact bundle writer stores invalid attempts without commit result", async () => {
 	const cwd = makeProject();
 	try {
 		const taskDir = join(
@@ -6958,7 +7120,7 @@ test("vNext artifact bundle writer stores invalid attempts without commit result
 			"tasks",
 			"task-1",
 		);
-		const written = await writeVNextTaskArtifactBundle({
+		const written = await writeWorkflowTaskArtifactBundle({
 			taskDir,
 			rawOutput: "<control>{}</control><analysis></analysis><refs>{}</refs>",
 			attempt: 2,

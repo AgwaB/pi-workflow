@@ -132,14 +132,18 @@ function lowerArtifactGraphStage(
 	if (stage.each && typeof stage.each === "object") {
 		lowered.each = {
 			...stage.each,
-			prompt: appendVNextOutputInstructions(
+			prompt: appendWorkflowOutputInstructions(
 				String((stage.each as any).prompt ?? stage.prompt ?? ""),
 				stage,
 			),
 		};
 	}
 	if (stage.onExhausted) {
-		lowered.onExhausted = lowerArtifactGraphStage(stage.onExhausted, context);
+		lowered.onExhausted = lowerArtifactGraphStage(stage.onExhausted, {
+			metadata: context.metadata,
+			specDir: context.specDir,
+			namespace: stageId,
+		});
 	}
 	if (stage.type !== "dag") {
 		context.metadata.set(
@@ -166,17 +170,17 @@ function lowerArtifactGraphPrompt(
 	stage: ArtifactGraphStageSpec,
 ): string | undefined {
 	if (stage.type === "dag" || stage.type === "support") return stage.prompt;
-	return appendVNextOutputInstructions(stage.prompt ?? "", stage);
+	return appendWorkflowOutputInstructions(stage.prompt ?? "", stage);
 }
 
-function appendVNextOutputInstructions(
+function appendWorkflowOutputInstructions(
 	prompt: string,
 	stage: ArtifactGraphStageSpec,
 ): string {
 	const controlSchema = stage.output?.controlSchema;
 	return [
 		prompt,
-		"# vNext Workflow Output Protocol",
+		"# Workflow Output Protocol",
 		"Return your final answer exactly as these three sections, in this order, with no prose outside the tags:",
 		"<control>{...}</control>",
 		"<analysis>...</analysis>",
@@ -220,11 +224,52 @@ function annotateArtifactGraphCompiledWorkflow(
 ): void {
 	compiled.artifactGraph = { enabled: true };
 	for (const task of compiled.tasks ?? []) {
-		const stageId = task.stageId ?? task.id;
-		const graph = metadata.get(stageId);
+		annotateArtifactGraphTask(task, metadata);
+	}
+	for (const stage of compiled.stages ?? []) {
+		if (stage?.type !== "loop" || typeof stage.id !== "string") continue;
+		for (const template of stage.childTemplates ?? []) {
+			const stageId = taskStageId(template);
+			annotateArtifactGraphTask(
+				template,
+				metadata,
+				stageId ? [`${stage.id}.${stageId}`] : [],
+			);
+		}
+		const exhaustedTemplate = stage.onExhausted?.template;
+		if (exhaustedTemplate) {
+			const stageId = taskStageId(exhaustedTemplate);
+			annotateArtifactGraphTask(
+				exhaustedTemplate,
+				metadata,
+				stageId ? [`${stage.id}.${stageId}`] : [],
+			);
+		}
+	}
+}
+
+function annotateArtifactGraphTask(
+	task: any,
+	metadata: ReadonlyMap<string, NonNullable<CompiledTask["artifactGraph"]>>,
+	aliases: readonly string[] = [],
+): void {
+	const ids = [...aliases];
+	const stageId = taskStageId(task);
+	if (stageId) ids.push(stageId);
+	for (const id of ids) {
+		const graph = metadata.get(id);
 		if (!graph) continue;
 		task.artifactGraph = graph;
+		return;
 	}
+}
+
+function taskStageId(task: any): string | undefined {
+	return typeof task?.stageId === "string"
+		? task.stageId
+		: typeof task?.id === "string"
+			? task.id
+			: undefined;
 }
 
 function validateAgentRuntime(
@@ -924,13 +969,7 @@ async function compileArtifactGraphPlan(
 				currentChildTaskKeys.push(task.id);
 			};
 
-			if (childStageKind === "parallel" && Array.isArray(childStage.tasks)) {
-				for (const item of childStage.tasks)
-					await addChildTask(
-						item.id ?? `item-${tasks.length + 1}`,
-						item.prompt ?? "",
-					);
-			} else if (childStageKind === "foreach") {
+			if (childStageKind === "foreach") {
 				await addChildTask(
 					"item",
 					namespacedChildStage.each?.prompt ??
@@ -1067,10 +1106,7 @@ async function compileArtifactGraphPlan(
 			tasks.push(task);
 			currentStageTaskKeys.push(task.id);
 		};
-		if (stageKind === "parallel" && Array.isArray(runtimeStage.tasks)) {
-			for (const item of runtimeStage.tasks)
-				await addTask(item.id ?? `item-${tasks.length + 1}`, item.prompt ?? "");
-		} else if (stageKind === "foreach") {
+		if (stageKind === "foreach") {
 			await addTask(
 				"item",
 				runtimeStage.each?.prompt ?? runtimeStage.prompt ?? "",
@@ -1085,17 +1121,16 @@ async function compileArtifactGraphPlan(
 		topLevelSourceStageIds.set(stage.id, runtimeStage.id);
 	}
 
-	const backendOptions = spec.defaults?.backend ?? spec.backend ?? {};
+	const backendOptions = spec.defaults?.backend ?? {};
 	if (backendOptions.type !== undefined && backendOptions.type !== "local-pi")
-		issues.push({ path: "$.backend.type", message: 'must be "local-pi"' });
-	if (
-		backendOptions.mode !== undefined &&
-		backendOptions.mode !== "auto" &&
-		backendOptions.mode !== "headless"
-	)
 		issues.push({
-			path: "$.backend.mode",
-			message: 'must be "auto" or "headless"',
+			path: "$.defaults.backend.type",
+			message: 'must be "local-pi"',
+		});
+	if (backendOptions.mode !== undefined && backendOptions.mode !== "headless")
+		issues.push({
+			path: "$.defaults.backend.mode",
+			message: 'must be "headless"',
 		});
 	if (spec.fast === "on")
 		issues.push({ path: "$.fast", message: "fast:on is not supported" });
@@ -1134,15 +1169,11 @@ async function compileArtifactGraphPlan(
 }
 
 function isSupportStage(stage: any): boolean {
-	return Boolean(
-		stage?.support &&
-			typeof stage.support === "object" &&
-			!Array.isArray(stage.support),
-	);
+	return stage?.type === "support";
 }
 
 function stageKindFor(stage: any): string | undefined {
-	return isSupportStage(stage) ? "support" : stage.type;
+	return stage.type;
 }
 
 function buildSupportTask(
@@ -1284,15 +1315,7 @@ async function compileLoopChildTemplates(
 			currentChildTaskKeys.push(template.id);
 		};
 
-		if (childStage.type === "parallel" && Array.isArray(childStage.tasks)) {
-			for (const item of childStage.tasks)
-				await addChildTask(
-					item.id ?? `item-${childTemplates.length + 1}`,
-					item.prompt ?? "",
-				);
-		} else {
-			await addChildTask("main", childStage.prompt ?? "");
-		}
+		await addChildTask("main", childStage.prompt ?? "");
 
 		previousChildTaskKeys = currentChildTaskKeys;
 		childTaskKeys.set(childStage.id, currentChildTaskKeys);

@@ -8,6 +8,7 @@ import {
 	readdir,
 	readFile,
 	readlink,
+	realpath,
 	rm,
 	stat,
 	symlink,
@@ -255,7 +256,10 @@ async function materializePrivateRuntimeArtifacts(
 		const targetPath = join(worktreeRoot, relPath);
 		const targetInfo = await lstat(targetPath).catch(() => undefined);
 		if (targetInfo && !targetInfo.isSymbolicLink()) continue;
-		const cloneSource = await runtimeArtifactCloneSource(sourcePath);
+		const cloneSource = await runtimeArtifactCloneSource(
+			sourceRoot,
+			sourcePath,
+		);
 		if (!cloneSource) continue;
 		if (targetInfo?.isSymbolicLink()) await rm(targetPath, { force: true });
 		await mkdir(dirname(targetPath), { recursive: true });
@@ -313,6 +317,7 @@ async function findRuntimeArtifactCandidates(
 }
 
 async function runtimeArtifactCloneSource(
+	sourceRoot: string,
 	sourcePath: string,
 ): Promise<string | undefined> {
 	let cloneSource = sourcePath;
@@ -327,7 +332,22 @@ async function runtimeArtifactCloneSource(
 		return undefined;
 	}
 	const targetInfo = await stat(cloneSource).catch(() => undefined);
-	return targetInfo?.isDirectory() ? cloneSource : undefined;
+	if (!targetInfo?.isDirectory()) return undefined;
+	return (await isInsideRealPath(sourceRoot, cloneSource))
+		? cloneSource
+		: undefined;
+}
+
+async function isInsideRealPath(
+	root: string,
+	candidate: string,
+): Promise<boolean> {
+	const [realRoot, realCandidate] = await Promise.all([
+		realpath(root),
+		realpath(candidate),
+	]);
+	const rel = relative(realRoot, realCandidate);
+	return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
 function cloneRuntimeArtifactDirectories(): boolean {

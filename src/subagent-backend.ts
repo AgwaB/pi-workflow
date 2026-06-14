@@ -6,7 +6,15 @@ import {
 	rm,
 	writeFile,
 } from "node:fs/promises";
-import { delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import {
+	delimiter,
+	dirname,
+	isAbsolute,
+	join,
+	relative,
+	resolve,
+	sep,
+} from "node:path";
 
 import type {
 	CompiledTask,
@@ -30,10 +38,10 @@ import {
 import type { BackendLaunchResult } from "./backend.js";
 import { readWorkflowArtifactReadLedger } from "./workflow-artifact-tool.js";
 import {
-	buildVNextOutputRetryInstructions,
-	parseVNextOutput,
-	writeVNextTaskArtifactBundle,
-} from "./workflow-vnext-artifacts.js";
+	buildWorkflowOutputRetryInstructions,
+	parseWorkflowOutput,
+	writeWorkflowTaskArtifactBundle,
+} from "./workflow-output-artifacts.js";
 
 const DEFAULT_SUBAGENT_RUNS_ROOT = ".pi/workflow-subagents";
 const EXTRA_SUBAGENT_EXTENSIONS_ENV = "PI_WORKFLOW_SUBAGENT_EXTRA_EXTENSIONS";
@@ -355,17 +363,24 @@ async function materializeTerminalSubagentResult(
 	const outputFile = fromProjectPath(cwd, task.files.output);
 	const stderrFile = fromProjectPath(cwd, task.files.stderr);
 	const resultFile = fromProjectPath(cwd, task.files.result);
+	const artifactRoot = task.backendFiles?.runsDir
+		? fromProjectPath(task.cwd, task.backendFiles.runsDir)
+		: undefined;
 
 	await mkdir(dirname(outputFile), { recursive: true });
-	await copyLogOrEmpty(snapshot, outputRef, outputFile);
-	await copyLogOrEmpty(snapshot, stderrRef, stderrFile);
+	await copyLogOrEmpty(snapshot, outputRef, outputFile, artifactRoot);
+	await copyLogOrEmpty(snapshot, stderrRef, stderrFile, artifactRoot);
 
 	const subagentResult = resultRef
 		? await readJsonLoose<Record<string, unknown>>(
-				safeArtifactPath(snapshot, resultRef),
+				safeArtifactPath(snapshot, resultRef, artifactRoot),
 			)
 		: undefined;
-	const toolCalls = await readToolCallsSummary(snapshot, subagentResult);
+	const toolCalls = await readToolCallsSummary(
+		snapshot,
+		subagentResult,
+		artifactRoot,
+	);
 	const outputBytes = Buffer.byteLength(
 		await readFile(outputFile, "utf8").catch(() => ""),
 		"utf8",
@@ -476,10 +491,10 @@ async function materializeTerminalArtifactGraphResult(
 		maxDigestChars: artifactOptions?.maxDigestChars,
 		controlJsonSchema,
 	};
-	const parsed = parseVNextOutput(rawOutput, parseOptions);
+	const parsed = parseWorkflowOutput(rawOutput, parseOptions);
 	const attempt = (task.outputRetry?.attempts ?? 0) + 1;
 	if (!parsed.valid) {
-		await writeVNextTaskArtifactBundle({
+		await writeWorkflowTaskArtifactBundle({
 			taskDir: dirname(options.resultFile),
 			rawOutput,
 			attempt,
@@ -487,33 +502,43 @@ async function materializeTerminalArtifactGraphResult(
 			...parseOptions,
 		});
 		return retryOrFailArtifactGraphTask(task, {
-			reason: "vnext_output_invalid",
+			reason: "workflow_output_invalid",
 			attempt,
-			message: buildVNextOutputRetryInstructions(parsed.issues),
+			message: buildWorkflowOutputRetryInstructions(parsed.issues),
 		});
 	}
 
-	const missingReads = await missingRequiredArtifactReads(
+	const readCheck = await checkRequiredArtifactReads(
 		dirname(options.resultFile),
 		task.artifactGraph?.requiredReads ?? [],
 	);
-	if (missingReads.length > 0) {
+	if (readCheck.missing.length > 0 || readCheck.ledgerError) {
+		const reason = readCheck.ledgerError
+			? "required_reads_ledger_unavailable"
+			: "required_reads_missing";
+		const artifacts = readCheck.ledgerError
+			? (task.artifactGraph?.requiredReads ?? [])
+			: readCheck.missing;
+		const message = readCheck.ledgerError
+			? `required workflow artifact read ledger was unavailable or corrupt: ${readCheck.ledgerError}; required reads could not be verified: ${artifacts.join(", ")}`
+			: `missing required workflow artifact reads: ${readCheck.missing.join(", ")}`;
 		await writeArtifactGraphMissingReadsAttempt(
 			dirname(options.resultFile),
 			rawOutput,
 			attempt,
-			missingReads,
+			artifacts,
 			options.completedAt,
+			{ failureKind: reason, errorMessage: message },
 		);
 		return retryOrFailArtifactGraphTask(task, {
-			reason: "required_reads_missing",
+			reason,
 			attempt,
-			message: `missing required workflow artifact reads: ${missingReads.join(", ")}`,
-			artifacts: missingReads,
+			message,
+			artifacts,
 		});
 	}
 
-	const written = await writeVNextTaskArtifactBundle({
+	const written = await writeWorkflowTaskArtifactBundle({
 		taskDir: dirname(options.resultFile),
 		rawOutput,
 		startedAt: options.startedAt,
@@ -524,9 +549,9 @@ async function materializeTerminalArtifactGraphResult(
 	});
 	if (!written.valid) {
 		return retryOrFailArtifactGraphTask(task, {
-			reason: "vnext_output_invalid",
+			reason: "workflow_output_invalid",
 			attempt,
-			message: buildVNextOutputRetryInstructions(written.parsed.issues),
+			message: buildWorkflowOutputRetryInstructions(written.parsed.issues),
 		});
 	}
 	const completedAfterTimeout = resultCompletedAfterTimeout(
@@ -554,18 +579,26 @@ async function readTaskControlJsonSchema(
 	return JSON.parse(await readFile(schemaPath, "utf8")) as JsonSchema;
 }
 
-async function missingRequiredArtifactReads(
+async function checkRequiredArtifactReads(
 	taskDir: string,
 	requiredReads: readonly string[],
-): Promise<string[]> {
-	if (requiredReads.length === 0) return [];
-	const ledger = await readWorkflowArtifactReadLedger(
-		join(taskDir, "read-ledger.jsonl"),
-	).catch(() => []);
+): Promise<{ missing: string[]; ledgerError?: string }> {
+	if (requiredReads.length === 0) return { missing: [] };
+	let ledger;
+	try {
+		ledger = await readWorkflowArtifactReadLedger(
+			join(taskDir, "read-ledger.jsonl"),
+		);
+	} catch (error) {
+		return {
+			missing: [...requiredReads],
+			ledgerError: error instanceof Error ? error.message : String(error),
+		};
+	}
 	const actual = new Set(
 		ledger.map((entry) => `${entry.source}.${entry.artifact}`),
 	);
-	return requiredReads.filter((required) => !actual.has(required));
+	return { missing: requiredReads.filter((required) => !actual.has(required)) };
 }
 
 async function writeArtifactGraphMissingReadsAttempt(
@@ -574,6 +607,10 @@ async function writeArtifactGraphMissingReadsAttempt(
 	attempt: number,
 	missingReads: readonly string[],
 	completedAt: string,
+	options: {
+		failureKind?: string;
+		errorMessage?: string;
+	} = {},
 ): Promise<void> {
 	await writeFile(
 		join(taskDir, `raw.invalid-attempt-${attempt}.md`),
@@ -586,8 +623,10 @@ async function writeArtifactGraphMissingReadsAttempt(
 		status: "failed",
 		completedAt,
 		exitCode: 1,
-		failureKind: "required_reads_missing",
-		errorMessage: `missing required workflow artifact reads: ${missingReads.join(", ")}`,
+		failureKind: options.failureKind ?? "required_reads_missing",
+		errorMessage:
+			options.errorMessage ??
+			`missing required workflow artifact reads: ${missingReads.join(", ")}`,
 		missingRequiredReads: [...missingReads],
 		outputValidation: { valid: true, issues: [] },
 	});
@@ -747,6 +786,7 @@ function uniqueStrings(values: readonly string[]): string[] {
 async function readToolCallsSummary(
 	snapshot: SubagentRunStatusSnapshot,
 	subagentResult: Record<string, unknown> | undefined,
+	artifactRoot: string | undefined,
 ): Promise<{ ref: SubagentArtifactRef; summary: unknown } | undefined> {
 	const artifacts = Array.isArray(subagentResult?.artifacts)
 		? subagentResult.artifacts
@@ -764,7 +804,7 @@ async function readToolCallsSummary(
 	if (!ref) return undefined;
 	const artifactRef = { ...ref, artifactCwd: ref.artifactCwd ?? resultCwd };
 	const summary = await readJsonLoose<unknown>(
-		safeArtifactPath(snapshot, artifactRef),
+		safeArtifactPath(snapshot, artifactRef, artifactRoot),
 	);
 	return summary === undefined ? undefined : { ref: artifactRef, summary };
 }
@@ -773,13 +813,21 @@ async function copyLogOrEmpty(
 	snapshot: SubagentRunStatusSnapshot,
 	ref: SubagentRunLogRef | undefined,
 	target: string,
+	artifactRoot: string | undefined,
 ): Promise<void> {
 	await mkdir(dirname(target), { recursive: true });
 	if (!ref) {
 		await writeFile(target, "", "utf8");
 		return;
 	}
-	await copyFile(safeArtifactPath(snapshot, ref), target).catch(async () => {
+	let source: string;
+	try {
+		source = safeArtifactPath(snapshot, ref, artifactRoot);
+	} catch {
+		await writeFile(target, "", "utf8");
+		return;
+	}
+	await copyFile(source, target).catch(async () => {
 		await writeFile(target, "", "utf8");
 	});
 }
@@ -787,6 +835,7 @@ async function copyLogOrEmpty(
 function safeArtifactPath(
 	snapshot: SubagentRunStatusSnapshot,
 	artifact: Pick<SubagentRunLogRef, "path" | "artifactCwd">,
+	artifactRoot: string | undefined,
 ): string {
 	if (isAbsolute(artifact.path) || artifact.path.split("/").includes(".."))
 		throw new Error("subagent artifact path must be relative and safe");
@@ -795,7 +844,16 @@ function safeArtifactPath(
 			snapshot.logs.find((log) => log.artifactCwd)?.artifactCwd ??
 			".",
 	);
-	return resolve(artifactCwd, artifact.path.split("/").join(sep));
+	const artifactPath = resolve(artifactCwd, artifact.path.split("/").join(sep));
+	if (artifactRoot && !isInsidePath(resolve(artifactRoot), artifactPath)) {
+		throw new Error("subagent artifact path must stay inside the task runsDir");
+	}
+	return artifactPath;
+}
+
+function isInsidePath(parent: string, child: string): boolean {
+	const rel = relative(parent, child);
+	return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
 async function readJsonLoose<T>(file: string): Promise<T | undefined> {

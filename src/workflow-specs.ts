@@ -24,11 +24,6 @@ const RESERVED_WORKFLOW_FILES = new Set([
 	"index.json",
 	"index-supervisor-error.json",
 ]);
-const RENAMED_WORKFLOW_ALIASES = new Map([
-	["dynamic-review", "execution-review"],
-	["deep-dynamic-review", "deep-execution-review"],
-]);
-
 export interface ResolvedWorkflowSpecRef {
 	inputRef: string;
 	specPath: string;
@@ -93,11 +88,7 @@ export async function resolveWorkflowRef(
 	}
 
 	validateWorkflowName(trimmed);
-	let matches = await findWorkflowCandidates(trimmed, cwd);
-	if (matches.length === 0) {
-		const renamed = RENAMED_WORKFLOW_ALIASES.get(trimmed);
-		if (renamed) matches = await findWorkflowCandidates(renamed, cwd);
-	}
+	const matches = await findWorkflowCandidates(trimmed, cwd);
 	if (matches.length === 0) {
 		throw new WorkflowValidationError([
 			{ path: trimmed, message: "workflow name or spec file not found" },
