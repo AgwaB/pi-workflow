@@ -870,19 +870,25 @@ test("artifact graph schema rejects unknown output fields and invalid required r
 });
 
 test("artifact graph schema enforces launch-time invariants", () => {
-	const missingSupport = assertThrowsFlow(() =>
+	const legacySupportType = assertThrowsFlow(() =>
 		parsePublicWorkflow(
 			artifactGraphWorkflowSpec({
 				artifactGraph: {
-					stages: [{ id: "audit", type: "support", prompt: "Audit." }],
+					stages: [
+						{
+							id: "audit",
+							type: "support",
+							support: { uses: "./helpers/audit.mjs" },
+						},
+					],
 				},
 			}),
 		),
 	);
 	assertIssue(
-		missingSupport,
-		"$.artifactGraph.stages[0].support",
-		"must be an object",
+		legacySupportType,
+		"$.artifactGraph.stages[0].type",
+		"must be one of: task, reduce, foreach, loop, dag",
 	);
 
 	const supportOnTask = assertThrowsFlow(() =>
@@ -903,8 +909,8 @@ test("artifact graph schema enforces launch-time invariants", () => {
 	);
 	assertIssue(
 		supportOnTask,
-		"$.artifactGraph.stages[0].support",
-		"only valid on support stages",
+		"$.artifactGraph.stages[0].type",
+		"must be omitted when support is declared",
 	);
 
 	const loopWithoutMaxRounds = assertThrowsFlow(() =>
@@ -1541,7 +1547,6 @@ test("compiler lowers foreach and support children inside dag containers", async
 								},
 								{
 									id: "audit",
-									type: "support",
 									from: "verify",
 									support: { uses: "./helpers/audit.mjs" },
 								},
@@ -2991,7 +2996,12 @@ test("bundled impact-review artifact graph workflow compiles multi-join DAG", as
 	const cwd = makeProject();
 	try {
 		writeAgent(cwd, "scout", "read, grep, find, ls");
-		const specPath = join(process.cwd(), "workflows", "impact-review", "spec.json");
+		const specPath = join(
+			process.cwd(),
+			"workflows",
+			"impact-review",
+			"spec.json",
+		);
 		const spec = JSON.parse(readFileSync(specPath, "utf8"));
 		parsePublicWorkflow(spec);
 		assert.equal(spec.name, "impact-review");
@@ -3591,7 +3601,6 @@ test("schema and compiler accept artifactGraph support nodes", async () => {
 					},
 					{
 						id: "audit",
-						type: "support",
 						from: "verify",
 						support: {
 							uses: "./helpers/audit.mjs",
@@ -3630,7 +3639,7 @@ test("schema rejects invalid artifactGraph support nodes", () => {
 				artifactGraph: {
 					stages: [
 						{ id: "verify", type: "task", prompt: "Verify." },
-						{ id: "audit", type: "support", from: "verify", support: {} },
+						{ id: "audit", from: "verify", support: {} },
 					],
 				},
 			}),
@@ -3794,7 +3803,6 @@ test("artifactGraph runtime support executes helper and writes artifacts", async
 					},
 					{
 						id: "audit",
-						type: "support",
 						from: "extract",
 						support: {
 							uses: "./helpers/audit.mjs",
@@ -3875,7 +3883,6 @@ test("artifactGraph runtime support omits failed dependency sources", async () =
 						id: "audit",
 						from: ["extractOk", "extractFailed"],
 						sourcePolicy: "partial",
-						type: "support",
 						support: { uses: "./helpers/sources.mjs" },
 					},
 				],
@@ -3955,7 +3962,6 @@ test("artifactGraph runtime support marks helper errors as failed", async () => 
 					},
 					{
 						id: "audit",
-						type: "support",
 						from: "extract",
 						support: { uses: "./helpers/fail.mjs" },
 					},
@@ -5310,7 +5316,6 @@ test("static run artifacts preserve declared workflow bundle files only", async 
 				stages: [
 					{
 						id: "audit",
-						type: "support",
 						support: { uses: "./helpers/audit.mjs" },
 						output: { controlSchema: "./schemas/audit-control.schema.json" },
 					},

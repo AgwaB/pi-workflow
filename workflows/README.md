@@ -45,12 +45,11 @@ Artifact-graph workflows use `from` for data edges, `after` for order-only edges
 
 ## Support helpers
 
-A support node runs local helper code inline instead of launching a subagent:
+A support node runs local helper code inline instead of launching a subagent. Declare it with a `support` object, not a separate `type` value:
 
 ```json
 {
   "id": "audit-claims",
-  "type": "support",
   "from": "verify-claims",
   "sourcePolicy": "partial",
   "support": {

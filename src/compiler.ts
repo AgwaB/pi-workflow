@@ -145,7 +145,7 @@ function lowerArtifactGraphStage(
 			namespace: stageId,
 		});
 	}
-	if (stage.type !== "dag") {
+	if (stageKindFor(stage) !== "dag") {
 		context.metadata.set(
 			stageId,
 			artifactGraphTaskMetadata(stage, context.specDir),
@@ -169,7 +169,7 @@ function lowerArtifactGraphFrom(from: ArtifactGraphStageSpec["from"]): unknown {
 function lowerArtifactGraphPrompt(
 	stage: ArtifactGraphStageSpec,
 ): string | undefined {
-	if (stage.type === "dag" || stage.type === "support") return stage.prompt;
+	if (stage.type === "dag" || isSupportStage(stage)) return stage.prompt;
 	return appendWorkflowOutputInstructions(stage.prompt ?? "", stage);
 }
 
@@ -790,8 +790,9 @@ async function compileArtifactGraphPlan(
 			issues,
 			`$.artifactGraph.stages.${jsonKey(stage.id)}.tools`,
 		);
-		const injectTask = stage.type === "task";
-		const injectRuntimeTaskInPrompt = stage.type !== "foreach" && injectTask;
+		const taskStageKind = stageKindFor(stage) ?? "task";
+		const injectTask = taskStageKind === "task";
+		const injectRuntimeTaskInPrompt = taskStageKind !== "foreach" && injectTask;
 		const normalizedPrompt = String(prompt ?? "").replace(
 			/\$\{item\}/g,
 			"the relevant item from the dependency context",
@@ -801,7 +802,7 @@ async function compileArtifactGraphPlan(
 				? `# Task\n\n${options.task}`
 				: undefined,
 			workflowInputText || undefined,
-			`# Workflow Stage\n\nstage=${stage.id}\ntype=${stage.type}`,
+			`# Workflow Stage\n\nstage=${stage.id}\ntype=${taskStageKind}`,
 			`# Instructions\n\n${normalizedPrompt}`,
 			roleText || undefined,
 		]
@@ -877,11 +878,11 @@ async function compileArtifactGraphPlan(
 			sourceContext: stage.sourceContext,
 			compiledPrompt,
 			injectTask,
-			kind: stage.type,
+			kind: taskStageKind,
 			stageMaxConcurrency: stage.maxConcurrency,
 			dependsOn: [...dependencyKeys],
 			foreach:
-				stage.type === "foreach"
+				taskStageKind === "foreach"
 					? {
 							from: stage.from,
 							prompt: String(stage.each?.prompt ?? stage.prompt ?? ""),
@@ -1169,11 +1170,11 @@ async function compileArtifactGraphPlan(
 }
 
 function isSupportStage(stage: any): boolean {
-	return stage?.type === "support";
+	return stage?.support !== undefined && stage?.type === undefined;
 }
 
 function stageKindFor(stage: any): string | undefined {
-	return stage.type;
+	return isSupportStage(stage) ? "support" : stage.type;
 }
 
 function buildSupportTask(
@@ -1200,7 +1201,7 @@ function buildSupportTask(
 	);
 	const compiledPrompt = [
 		workflowInputText || undefined,
-		`# Workflow Stage\n\nstage=${stage.id}\ntype=support`,
+		`# Workflow Stage\n\nstage=${stage.id}\nkind=support`,
 		`# Support Helper\n\nuses=${uses}`,
 		normalizedPrompt ? `# Instructions\n\n${normalizedPrompt}` : undefined,
 	]

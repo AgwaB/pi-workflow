@@ -136,8 +136,7 @@
             "downgradeExactQuantitativeWithoutSource": true,
             "requireFetchedEvidenceForVerified": true
           }
-        },
-        "type": "support"
+        }
       },
       {
         "id": "final",

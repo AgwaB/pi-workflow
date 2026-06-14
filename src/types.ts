@@ -76,7 +76,6 @@ export type ArtifactGraphStageType =
 	| "task"
 	| "reduce"
 	| "foreach"
-	| "support"
 	| "loop"
 	| "dag";
 
@@ -98,7 +97,7 @@ export interface ArtifactGraphWorkflowSpec {
 
 export interface ArtifactGraphStageSpec {
 	id: string;
-	type: ArtifactGraphStageType;
+	type?: ArtifactGraphStageType;
 	prompt?: string;
 	agent?: string;
 	role?: string | string[];

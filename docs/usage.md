@@ -134,7 +134,7 @@ Public workflow definitions separate three layers:
 
 - **Workflow layer**: graph/control/data-dependency fields such as `id`, `from`, `after`, `sourcePolicy`, `sourceProjection`, scheduling, and artifacts.
 - **Subagent layer**: child Pi/model worker shapes: `task`, `foreach`, `reduce`, and `loop`.
-- **Support layer**: local helper execution through a `type: "support"` stage with a `support` object.
+- **Support layer**: local helper execution through a stage that declares a `support` object.
 
 Every subagent stage writes artifact bundles:
 
@@ -150,7 +150,7 @@ Every subagent stage writes artifact bundles:
 | `type: "reduce"` | Subagent | Fan-in over upstream artifact handles and optional `sourceProjection` inline control snippets. |
 | `type: "loop"` | Workflow/control | Repeats fixed child stages until deterministic `until`, `maxRounds`, or no-progress stop. Loop conditions read child `control.json`. |
 | `type: "dag"` | Workflow/control | Composite container; lowers child stages to namespaced tasks and exposes an `outputFrom` child downstream. |
-| `type: "support"` | Support | Runs a directory-local `.mjs` helper over selected upstream `control.json` values and writes a workflow artifact bundle. |
+| `support: { uses }` | Support | Runs a directory-local `.mjs` helper over selected upstream `control.json` values and writes a workflow artifact bundle. |
 
 Use `foreach.from` for dynamic fan-out, `reduce.from` for subagent fan-in, and support `from` for local helper inputs. Do not rely on a later plain `task` to see previous stage output.
 
@@ -262,12 +262,11 @@ The built-in validator supports the subset used by bundled workflows: `type`, `r
 
 ## Support helpers
 
-A support node runs local helper code inline instead of launching a subagent:
+A support node runs local helper code inline instead of launching a subagent. It is declared by adding a `support` object; it does not use a separate `type` value:
 
 ```json
 {
   "id": "audit-claims",
-  "type": "support",
   "from": "verify-claims",
   "sourcePolicy": "partial",
   "support": {

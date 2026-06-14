@@ -4,11 +4,9 @@
 
 [![npm](https://img.shields.io/npm/v/@agwab/pi-workflow.svg)](https://www.npmjs.com/package/@agwab/pi-workflow)
 
-`pi-workflow` lets Pi run repeatable multi-agent workflows: research, review, implementation loops, test repair, and project-specific team routines.
+`pi-workflow` lets Pi run named, repeatable multi-step workflows: research, code review, spec conformance checks, impact review, and project-specific team routines.
 
-Public `schemaVersion: 1` workflow specs use `artifactGraph.stages` as the artifact-graph contract.
-
-It is a thin orchestration layer on top of [`@agwab/pi-subagent`](https://www.npmjs.com/package/@agwab/pi-subagent). A workflow defines stages, agents, tools, output contracts, and support helpers. The concrete user task is still supplied at runtime in natural language.
+You choose a workflow and describe the task in natural language. `pi-workflow` coordinates the steps, passes results between them, and records the run so it can be inspected or resumed.
 
 ## Installation
 
@@ -35,7 +33,7 @@ Requires Node.js `>=22.19.0` on macOS or Linux. Native Windows is not supported;
 
 ## Usage: ask naturally
 
-After installation, ask Pi to use a bundled or project workflow by name. Bundled workflows reference common Pi agents such as `scout`, `delegate`, and workflow-specific reviewer/researcher agents; create or install matching agents in your Pi environment before running them.
+After installation, ask Pi to use a bundled or project workflow by name. Bundled workflows reference common Pi agents such as `scout` and `researcher`; create or install matching agents in your Pi environment before running them.
 
 ```text
 Use the bundled deep-research workflow to research this repository and summarize the architecture tradeoffs.
@@ -71,23 +69,15 @@ It should check concurrency, transaction safety, error handling, observability, 
 
 ## Workflow architecture
 
-A workflow is a deterministic stage graph for running one runtime task through subagent-backed work and local support rails.
+A workflow is a deterministic stage graph for running one natural-language task through a reusable process.
 
-The user supplies the runtime task in natural language. The workflow spec supplies the structure: `artifactGraph.stages`, stage ids, `from`/`after` links, agents, tool ceilings, control artifacts, support helpers, loop bounds, run artifacts, and resume behavior.
+`pi-workflow` is organized around three parts:
 
-`pi-workflow` has three main parts:
+1. **Workflow** — the graph and run lifecycle: what stages exist, when they run, and how outputs move forward.
+2. **Task** — agent-backed work: focused prompts, dynamic fan-out, fan-in synthesis, and bounded loops.
+3. **Support** — deterministic local rails: helper code, validation, normalization, artifacts, and resume-friendly run state.
 
-1. **Workflow graph** — decides what stages exist and when each stage can run.
-2. **Subagent-backed stages** — `task`, `foreach`, `reduce`, and `loop` launch Pi subagents through `@agwab/pi-subagent` (there is no `parallel` stage type; use multiple roots or `after: []`).
-3. **Support rails** — workflow artifacts (`control.json`, `analysis.md`, `refs.json`), read ledgers, local support helpers, tool policy, worktrees, logs, and artifacts keep runs structured and reviewable.
-
-Important rule:
-
-> Stage order controls scheduling; `from` controls data flow.
-
-A later plain `task` does not automatically receive prior output. Use `foreach.from`, `reduce.from`, or support `from` when a stage needs upstream control artifacts. Use `after` for order-only dependencies.
-
-Nested `type: "dag"` stages are workflow/control containers, not leaf tasks: they contain child `stages`, may expose one child via `outputFrom`, and let downstream stages depend on the container as a named source.
+In short: workflows define the process, tasks ask Pi agents to do the work, and support keeps the process structured and repeatable.
 
 A small workflow definition looks like this:
 
@@ -114,7 +104,6 @@ A small workflow definition looks like this:
       },
       {
         "id": "prepare",
-        "type": "support",
         "from": "inspect",
         "sourcePolicy": "partial",
         "support": { "uses": "./helpers/prepare.mjs" }
@@ -132,19 +121,20 @@ A small workflow definition looks like this:
 
 ## Supported task patterns
 
-Workflow definitions compose task patterns. In the workflow spec they are stage types; at runtime, most of them map to concrete subagent execution shapes.
-
-![Core workflow stage shapes](./docs/assets/readme/stage-types.png)
+Workflow definitions compose a small set of task patterns and graph shapes.
 
 | Pattern | Use it for | Runtime shape |
 |---|---|---|
 | `task` | One focused step | one prompt -> one subagent |
+| `parallel` | Independent fixed work | graph shape: multiple known stages can run at the same time |
 | `foreach` | Dynamic fan-out | JSON array from an upstream control artifact -> one subagent per item |
 | `reduce` | Fan-in / synthesis | upstream workflow artifacts -> one synthesis subagent |
 | `loop` | Bounded repetition | repeat child stages until a deterministic stop condition |
 | `dag` | Nested graph container | child stages lowered to namespaced tasks; selected output exposed downstream |
 
-Support helpers are separate from task patterns: they run local workflow code for deterministic preparation, validation, or post-processing.
+![Core workflow stage shapes](./docs/assets/readme/stage-types.png)
+
+`parallel` is a graph shape, not a separate `type` value. Support helpers are declared with a `support` object, not a task `type`.
 
 ## Predefined workflows
 

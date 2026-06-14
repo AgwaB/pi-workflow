@@ -28,7 +28,6 @@ const STAGE_TYPES = new Set<ArtifactGraphStageType>([
 	"task",
 	"reduce",
 	"foreach",
-	"support",
 	"loop",
 	"dag",
 ]);
@@ -382,7 +381,7 @@ function validateStage(
 	const stage = recordAt(value, path, issues);
 	if (!stage) return;
 	rejectUnknownKeys(stage, STAGE_KEYS, path, issues);
-	const type = validateStageType(stage.type, `${path}.type`, issues);
+	const type = validateStageType(stage, `${path}.type`, issues);
 	optionalString(stage.prompt, `${path}.prompt`, issues);
 	optionalString(stage.agent, `${path}.agent`, issues);
 	optionalString(stage.cwd, `${path}.cwd`, issues);
@@ -437,16 +436,21 @@ function validateStage(
 }
 
 function validateStageType(
-	value: unknown,
+	stage: Record<string, unknown>,
 	path: string,
 	issues: ValidationIssue[],
 ): ArtifactGraphStageType | undefined {
-	const type = requiredString(value, path, issues);
+	if (stage.type === undefined) {
+		if (stage.support !== undefined) return undefined;
+		issues.push({ path, message: "must be a non-empty string" });
+		return undefined;
+	}
+	const type = requiredString(stage.type, path, issues);
 	if (type === undefined) return undefined;
 	if (!STAGE_TYPES.has(type as ArtifactGraphStageType)) {
 		issues.push({
 			path,
-			message: "must be one of: task, reduce, foreach, support, loop, dag",
+			message: "must be one of: task, reduce, foreach, loop, dag",
 		});
 		return undefined;
 	}
@@ -698,14 +702,12 @@ function validateSupportStage(
 	path: string,
 	issues: ValidationIssue[],
 ): void {
-	if (type !== "support") {
-		if (stage.support !== undefined) {
-			issues.push({
-				path: `${path}.support`,
-				message: "is only valid on support stages",
-			});
-		}
-		return;
+	if (stage.support === undefined) return;
+	if (type !== undefined) {
+		issues.push({
+			path: `${path}.type`,
+			message: "must be omitted when support is declared",
+		});
 	}
 	const support = recordAt(stage.support, `${path}.support`, issues);
 	if (!support) return;
@@ -895,9 +897,15 @@ function validateLoopChildren(
 	for (const [index, child] of stages.entries()) {
 		if (!isRecord(child)) continue;
 		const childPath = `${path}[${index}]`;
-		if (["loop", "foreach", "support", "dag"].includes(String(child.type))) {
+		if (["loop", "foreach", "dag"].includes(String(child.type))) {
 			issues.push({
 				path: `${childPath}.type`,
+				message: "loop child stages must be simple task or reduce stages",
+			});
+		}
+		if (child.support !== undefined) {
+			issues.push({
+				path: `${childPath}.support`,
 				message: "loop child stages must be simple task or reduce stages",
 			});
 		}

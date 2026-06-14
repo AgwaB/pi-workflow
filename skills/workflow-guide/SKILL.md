@@ -24,7 +24,7 @@ Resolve paths relative to this skill directory. Treat those docs as the source o
 - If a stage needs prior artifacts, use `reduce.from`, `foreach.from`, or support `from`.
 - For dynamic fan-out, use `foreach.from` with a simple dot path into upstream `control.json`.
 - For synthesis/fan-in, use `reduce.from` and require/encourage `workflow_artifact` reads for detailed upstream artifacts.
-- For deterministic local post-processing, use a `type: "support"` node with `support.uses` pointing to a bundle-local `./*.mjs` helper; support is trusted local code, not sandboxed subagent work.
+- For deterministic local post-processing, declare a `support` object with `support.uses` pointing to a bundle-local `./*.mjs` helper; support is trusted local code, not sandboxed subagent work and does not use a separate `type` value.
 - For bounded iteration, use `loop` with fixed child stages, `maxRounds`, and deterministic `until`.
 - Agent-declared tools are the authority ceiling; workflow `tools` can only narrow them.
 - Keep review/research workflows read-only unless the workflow explicitly documents managed-worktree mutation.

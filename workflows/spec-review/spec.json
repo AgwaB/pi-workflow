@@ -150,8 +150,7 @@
           "options": {
             "mode": "partition"
           }
-        },
-        "type": "support"
+        }
       },
       {
         "id": "report",

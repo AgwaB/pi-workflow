@@ -83,8 +83,7 @@
           "options": {
             "mode": "dedup"
           }
-        },
-        "type": "support"
+        }
       },
       {
         "id": "devil-advocate",
@@ -121,8 +120,7 @@
             "mode": "partition",
             "dedupStage": "dedup-findings"
           }
-        },
-        "type": "support"
+        }
       },
       {
         "id": "report",
