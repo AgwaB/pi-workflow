@@ -12,33 +12,6 @@
       "ls"
     ]
   },
-  "catalog": {
-    "useWhen": [
-      "review impact of a diff or pull request before shipping",
-      "find missing tests docs release notes or follow-up work after a change",
-      "pre-implementation impact analysis for a cross-cutting change",
-      "ship-risk review for changed files or proposed architecture updates"
-    ],
-    "avoidWhen": [
-      "tiny typo or formatting-only changes",
-      "line-by-line correctness review only",
-      "implementation or file edits",
-      "no change description, diff, file list, or intended behavior is available"
-    ],
-    "similarWorkflows": [
-      "deep-review",
-      "spec-review"
-    ],
-    "mutationRisk": "read-only",
-    "naturalLanguageTriggers": [
-      "impact review",
-      "change impact",
-      "PR risk review",
-      "what else does this change affect",
-      "ship risk",
-      "missing tests or docs for this diff"
-    ]
-  },
   "artifactGraph": {
     "stages": [
       {

@@ -19,28 +19,6 @@
   "input": {
     "depth": "standard"
   },
-  "catalog": {
-    "useWhen": [
-      "deep research with claim verification",
-      "planner-driven research fanout",
-      "optional follow-up research rounds",
-      "synthesize verified claims"
-    ],
-    "avoidWhen": [
-      "code implementation",
-      "quick repository check",
-      "review verdict required"
-    ],
-    "similarWorkflows": [],
-    "mutationRisk": "read-only",
-    "naturalLanguageTriggers": [
-      "deep research",
-      "research this thoroughly",
-      "max research",
-      "verify claims",
-      "continue research"
-    ]
-  },
   "artifactGraph": {
     "stages": [
       {

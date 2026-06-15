@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 import { loadAgentByName } from "./agents.js";
@@ -80,7 +81,6 @@ function buildArtifactGraphCompilePlan(
 			name: spec.name,
 			description: spec.description,
 			input: spec.input,
-			catalog: spec.catalog,
 			roles: spec.roles,
 			defaults,
 			stages: lowerArtifactGraphStages(spec.artifactGraph.stages, {
@@ -686,7 +686,64 @@ export async function compileWorkflow(
 	const compilePlan = buildArtifactGraphCompilePlan(spec, options);
 	const compiled = await compileArtifactGraphPlan(compilePlan.plan, options);
 	annotateArtifactGraphCompiledWorkflow(compiled, compilePlan.stageMetadata);
+	const foreachSpecDir = options.specPath
+		? dirname(resolve(options.cwd, options.specPath))
+		: options.cwd;
+	compiled.warnings.push(
+		...(await collectForeachPathWarnings(
+			spec.artifactGraph?.stages ?? [],
+			foreachSpecDir,
+		)),
+	);
 	return compiled;
+}
+
+// Static check for foreach `from.path`: when the source stage declares an
+// output.controlSchema, warn if the path's top-level key is absent from the
+// schema properties (a likely typo that would silently fan out over nothing at
+// runtime). Conservative by design: only direct task/reduce sources with a
+// loadable object schema are checked; dag-container sources, schemas without a
+// `properties` map, and unreadable files are skipped to avoid false positives.
+async function collectForeachPathWarnings(
+	stages: any[],
+	specDir: string,
+): Promise<string[]> {
+	const warnings: string[] = [];
+	const stageById = new Map<string, any>();
+	for (const stage of stages) {
+		if (stage && typeof stage.id === "string") stageById.set(stage.id, stage);
+	}
+	for (const stage of stages) {
+		if (stage?.type !== "foreach") continue;
+		const from = stage.from;
+		if (!from || typeof from !== "object") continue;
+		const sourceId = (from as any).source ?? (from as any).stage;
+		const path = (from as any).path;
+		if (typeof sourceId !== "string" || typeof path !== "string") continue;
+		const source = stageById.get(sourceId);
+		// Skip dag containers: the relevant schema is on the outputFrom child.
+		if (!source || source.type === "dag") continue;
+		const controlSchema = source.output?.controlSchema;
+		if (typeof controlSchema !== "string") continue;
+		const topKey = path.replace(/^\$\./, "").split(/[.[]/)[0];
+		if (!topKey) continue;
+		let schema: any;
+		try {
+			schema = JSON.parse(
+				await readFile(resolve(specDir, controlSchema), "utf8"),
+			);
+		} catch {
+			continue; // unreadable/invalid schema: skip rather than false-warn
+		}
+		const properties = schema?.properties;
+		if (!properties || typeof properties !== "object") continue;
+		if (!Object.hasOwn(properties, topKey)) {
+			warnings.push(
+				`foreach stage "${stage.id}" reads "${path}" from "${sourceId}", but "${topKey}" is not a property of ${sourceId}'s control schema (${controlSchema}). This will fan out over an empty list at runtime if the path is wrong.`,
+			);
+		}
+	}
+	return warnings;
 }
 
 async function compileArtifactGraphPlan(
@@ -742,6 +799,7 @@ async function compileArtifactGraphPlan(
 	const tasks: any[] = [];
 	const stageRecords: any[] = [];
 	const issues: ValidationIssue[] = [];
+	const warnings: string[] = [];
 	const validatedAgentPaths = new Set<string>();
 	validateToolSpecs(spec.defaults?.tools, issues, "$.defaults.tools");
 	let previousStageTaskKeys: string[] = [];
@@ -862,6 +920,19 @@ async function compileArtifactGraphPlan(
 			worktreePolicy,
 			runtime.approvalMode,
 		);
+		// Warn when a stage declares readOnly: true but its effective tools are
+		// still mutation/write-capable (e.g. bash). readOnly only filters tools;
+		// it does not isolate the filesystem, so such a stage can still mutate.
+		if (readOnlyDeclared && safety.capability !== "read-only") {
+			const mutatingTools = (runtime.tools ?? []).filter(
+				(tool: string) =>
+					effectiveToolClassification(tool, runtime.toolProviders) !==
+					"read-only",
+			);
+			warnings.push(
+				`stage "${stage.id}" declares readOnly: true but has ${safety.capability} tools (${mutatingTools.join(", ") || "unknown"}); readOnly filters tools but does not prevent these from mutating. Remove the tool or rely on worktree isolation.`,
+			);
+		}
 
 		return {
 			key,
@@ -1170,7 +1241,7 @@ async function compileArtifactGraphPlan(
 		roles,
 		stages: stageRecords,
 		tasks,
-		warnings: [],
+		warnings,
 		budget: {
 			models: defaultModel ? [{ model: defaultModel }] : [],
 			unratedModels: [],

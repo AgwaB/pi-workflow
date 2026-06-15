@@ -42,7 +42,6 @@ pi-workflow inspect <run-id-or-prefix> [--failures] [--results] [--json]
 |---|---|
 | `/workflow` or `/workflow help` | Show help. |
 | `/workflow list` | List workflow specs discoverable from the current project and installed package. |
-| `/workflow recommend "<request>"` | Score workflow catalog metadata against a natural-language request. This is advisory; run remains explicit. |
 | `/workflow validate <workflow-name-or-path>` | Load and compile a workflow without starting a run. Reports blocked permission previews and warnings. |
 | `/workflow roles <workflow-name-or-path>` | Show the compiled role context included for each workflow role. |
 | `/workflow agents` | List discoverable Pi agents, model/thinking defaults, tool ceilings, and source paths. |
@@ -95,7 +94,6 @@ Recommended workflow selection flow:
 
 ```text
 /workflow list
-/workflow recommend "review this diff for security, reliability, and tests"
 /workflow validate deep-review
 /workflow run deep-review "Review the current diff for security, reliability, and test coverage."
 ```

@@ -12,32 +12,6 @@
       "ls"
     ]
   },
-  "catalog": {
-    "useWhen": [
-      "compare a spec to implementation",
-      "requirements conformance review",
-      "API contract review against code",
-      "check implementation and tests against documented behavior",
-      "find spec gaps without editing files"
-    ],
-    "avoidWhen": [
-      "implementation or file edits are requested",
-      "no spec, contract, issue, or requirements document is available",
-      "quick generic code review",
-      "research unrelated to repository behavior"
-    ],
-    "similarWorkflows": [
-      "deep-review"
-    ],
-    "mutationRisk": "read-only",
-    "naturalLanguageTriggers": [
-      "spec review",
-      "compare spec to implementation",
-      "does the implementation match the spec",
-      "requirements gap review",
-      "contract conformance review"
-    ]
-  },
   "artifactGraph": {
     "stages": [
       {

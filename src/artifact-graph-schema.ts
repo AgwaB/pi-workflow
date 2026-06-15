@@ -18,7 +18,6 @@ const TOP_LEVEL_KEYS = new Set([
 	"name",
 	"description",
 	"input",
-	"catalog",
 	"defaults",
 	"roles",
 	"artifactGraph",
@@ -172,7 +171,6 @@ function validateArtifactGraphTopLevel(
 	rejectUnknownKeys(spec, TOP_LEVEL_KEYS, "$", issues);
 	optionalString(spec.name, "$.name", issues);
 	optionalString(spec.description, "$.description", issues);
-	optionalRecord(spec.catalog, "$.catalog", issues);
 	validateDefaults(spec.defaults, "$.defaults", issues);
 	validateRoles(spec.roles, "$.roles", issues);
 }

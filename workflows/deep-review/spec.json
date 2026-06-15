@@ -12,29 +12,6 @@
       "ls"
     ]
   },
-  "catalog": {
-    "useWhen": [
-      "thorough code review",
-      "multi-lens review",
-      "devil advocate validation",
-      "verify findings before synthesis",
-      "deep audit"
-    ],
-    "avoidWhen": [
-      "quick single reviewer review",
-      "low-risk simple review",
-      "implementation or file edits"
-    ],
-    "similarWorkflows": [],
-    "mutationRisk": "read-only",
-    "naturalLanguageTriggers": [
-      "deep review",
-      "thorough review",
-      "multi provider review",
-      "verify findings",
-      "devil advocate review"
-    ]
-  },
   "artifactGraph": {
     "stages": [
       {

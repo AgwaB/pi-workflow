@@ -31,7 +31,6 @@ import {
 } from "../../.tmp/unit/extension.js";
 import {
 	listWorkflows,
-	recommendWorkflows,
 	resolveWorkflowRef,
 } from "../../.tmp/unit/workflow-specs.js";
 import { resolveWorkflowRuntime } from "../../.tmp/unit/workflow-runtime.js";
@@ -522,7 +521,7 @@ test("worker and disabled roles block supervisor workflow actions", () => {
 		);
 
 		process.env.PI_WORKFLOW_ROLE = "disabled";
-		assert.doesNotThrow(() => assertWorkflowActionAllowedForRole("recommend"));
+		assert.doesNotThrow(() => assertWorkflowActionAllowedForRole("validate"));
 		assert.throws(
 			() => assertWorkflowActionAllowedForRole("run"),
 			/PI_WORKFLOW_ROLE=disabled/,
@@ -636,7 +635,6 @@ test("public schemaVersion 1 parser accepts artifact graph and rejects non-artif
 	const parsed = parsePublicWorkflow(
 		artifactGraphWorkflowSpec({
 			name: "impact-artifact",
-			catalog: { useWhen: ["impact review"] },
 			artifactGraph: {
 				stages: [
 					{
@@ -1115,6 +1113,127 @@ test("schema and compiler accept partial sourcePolicy on foreach", async () => {
 		);
 		const compiled = await compileWorkflow(spec, { cwd, task: "Review" });
 		assert.equal(compiled.stages[1].sourcePolicy, "partial");
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("compiler warns when readOnly stage keeps mutation-capable tools", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read, bash");
+		const spec = artifactGraphWorkflowSpec({
+			artifactGraph: {
+				stages: [
+					{
+						id: "check",
+						type: "task",
+						readOnly: true,
+						tools: ["read", "bash"],
+						prompt: "Run checks read-only.",
+					},
+				],
+			},
+		});
+		const compiled = await compileWorkflow(spec, { cwd, task: "Check" });
+		assert.equal(compiled.tasks[0].safety.readOnlyDeclared, true);
+		assert.equal(compiled.tasks[0].safety.capability, "mutation-capable");
+		assert.ok(
+			compiled.warnings.some(
+				(w) =>
+					/stage "check" declares readOnly: true/.test(w) && /bash/.test(w),
+			),
+			`expected readOnly+bash warning, got: ${JSON.stringify(compiled.warnings)}`,
+		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("compiler does not warn when read-only stage uses only read-only tools", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read, grep");
+		const spec = artifactGraphWorkflowSpec({
+			artifactGraph: {
+				stages: [
+					{
+						id: "scan",
+						type: "task",
+						readOnly: true,
+						tools: ["read", "grep"],
+						prompt: "Scan read-only.",
+					},
+				],
+			},
+		});
+		const compiled = await compileWorkflow(spec, { cwd, task: "Scan" });
+		assert.equal(
+			compiled.warnings.filter((w) => /declares readOnly: true/.test(w)).length,
+			0,
+		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("compiler warns when a foreach path is absent from the source control schema", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		mkdirSync(join(cwd, "schemas"), { recursive: true });
+		writeFileSync(
+			join(cwd, "schemas", "scan.schema.json"),
+			JSON.stringify({
+				type: "object",
+				required: ["schema", "digest", "gapItems"],
+				properties: {
+					schema: { type: "string" },
+					digest: { type: "string" },
+					gapItems: { type: "array" },
+				},
+			}),
+		);
+		const baseSpec = (foreachPath) =>
+			artifactGraphWorkflowSpec({
+				artifactGraph: {
+					stages: [
+						{
+							id: "scan",
+							type: "task",
+							prompt: "Scan.",
+							output: { controlSchema: "./schemas/scan.schema.json" },
+						},
+						{
+							id: "analyze",
+							type: "foreach",
+							from: { source: "scan", path: foreachPath },
+							each: { prompt: "Analyze ${item}" },
+						},
+					],
+				},
+			});
+
+		const good = await compileWorkflow(baseSpec("$.gapItems"), {
+			cwd,
+			task: "Analyze",
+		});
+		assert.equal(
+			good.warnings.filter((w) => /foreach stage "analyze"/.test(w)).length,
+			0,
+			`unexpected foreach warning: ${JSON.stringify(good.warnings)}`,
+		);
+
+		const bad = await compileWorkflow(baseSpec("$.gapItemsTYPO"), {
+			cwd,
+			task: "Analyze",
+		});
+		assert.ok(
+			bad.warnings.some(
+				(w) => /foreach stage "analyze"/.test(w) && /gapItemsTYPO/.test(w),
+			),
+			`expected foreach path warning, got: ${JSON.stringify(bad.warnings)}`,
+		);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
@@ -3134,17 +3253,6 @@ test("bundled artifact graph workflows are public runnable", async () => {
 	}
 	const resolved = await resolveWorkflowRef("spec-review", process.cwd());
 	assert(resolved.specPath.endsWith("workflows/spec-review/spec.json"));
-
-	const recs = await recommendWorkflows(
-		"compare this spec to the implementation and tests",
-		process.cwd(),
-	);
-	assert.equal(recs[0]?.workflow.name, "spec-review");
-	const impactRecs = await recommendWorkflows(
-		"impact review this PR before shipping missing tests docs release risk",
-		process.cwd(),
-	);
-	assert.equal(impactRecs[0]?.workflow.name, "impact-review");
 });
 
 test("bundled spec-review workflow materializes verifier and partitions verified findings", async () => {
@@ -5445,7 +5553,7 @@ test("run records use artifact-graph type and preserve artifact graph discrimina
 	}
 });
 
-test("workflow registry resolves exact names and recommendation metadata", async () => {
+test("workflow registry resolves exact names", async () => {
 	const cwd = makeProject();
 	try {
 		mkdirSync(join(cwd, "workflows"), { recursive: true });
@@ -5455,12 +5563,6 @@ test("workflow registry resolves exact names and recommendation metadata", async
 			JSON.stringify(
 				artifactGraphWorkflowSpec({
 					name: "review",
-					catalog: {
-						useWhen: ["standard review"],
-						avoidWhen: ["implementation"],
-						mutationRisk: "read-only",
-						naturalLanguageTriggers: ["review this change"],
-					},
 				}),
 			),
 		);
@@ -5474,8 +5576,6 @@ test("workflow registry resolves exact names and recommendation metadata", async
 		assert.equal(resolved.workflowName, "review");
 		const loaded = await loadWorkflow("review", cwd);
 		assert.equal(loaded.spec.name, "review");
-		const recs = await recommendWorkflows("please review this change", cwd);
-		assert.equal(recs[0].workflow.name, "review");
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
@@ -5509,7 +5609,6 @@ test("workflow registry resolves bundle specs and sets correct workflowRoot", as
 			JSON.stringify(
 				artifactGraphWorkflowSpec({
 					name: "bundle-wf",
-					catalog: { useWhen: ["bundle testing"] },
 				}),
 			),
 		);
@@ -5597,7 +5696,6 @@ test("workflow command completions and run arg parsing preserve task text", () =
 		[
 			"help",
 			"list",
-			"recommend",
 			"validate",
 			"roles",
 			"agents",

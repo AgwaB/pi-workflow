@@ -1,6 +1,6 @@
 ---
 name: workflow-guide
-description: Create, modify, or review pi-workflow workflow definitions. Use when the user asks to build/customize a /workflow workflow, validate a workflow spec, choose workflow stage topology, or explain pi-workflow authoring rules.
+description: Create, modify, review, or choose pi-workflow workflow definitions. Use when the user asks to build/customize a /workflow workflow, validate a workflow spec, choose workflow stage topology, decide which workflow fits a task (including vague or ambiguous requests where the workflow should be clarified and recommended collaboratively), or explain pi-workflow authoring rules.
 ---
 
 # Workflow Guide
@@ -33,6 +33,21 @@ Resolve paths relative to this skill directory. Treat those docs as the source o
 - Project workflows should be saved under `.pi/workflows/<name>.json` or a bundle directory with `spec.json`, schemas, and helpers.
 - Always run `/workflow validate <workflow-or-file>` before handing off or running a reusable workflow.
 
+## Intake (run before authoring when the request is ambiguous)
+
+When the request is vague, broad, delegated ("just pick a good one"), or self-contradictory, do not write a spec yet. Clarify and recommend first, then build collaboratively.
+
+1. Do not generate a spec on an underspecified request. Surface what is missing instead of guessing.
+2. Survey existing options with `/workflow list` and read each candidate's `description` and stage graph; present the top candidates and what each is for.
+3. Ask the user the decisions that determine the graph, only the ones still unknown:
+   - What is inspected/produced, and what decision does the output support?
+   - Read-only review/research, or write-capable (managed worktree)?
+   - Fixed parallel stages, or dynamic fan-out (`foreach`) over an upstream list?
+   - Which agents must exist, and what tool ceiling do they allow?
+4. If a bundled or existing project workflow fits, recommend it and stop; do not invent a new topology.
+5. If the request is contradictory (for example "read-only" plus "edit and commit"), name the conflict and offer concrete alternatives rather than silently resolving it. Workflow workers do not commit; mutation goes through a managed worktree for human review with no auto-merge.
+6. If a new workflow is needed, agree the stage graph (nodes, `from`/`foreach.from`/`reduce.from` edges, read/write policy) with the user before writing the spec, then continue with Authoring.
+
 ## Authoring workflow
 
 When creating or changing a workflow:
@@ -43,7 +58,8 @@ When creating or changing a workflow:
 4. Add `output.controlSchema` JSON Schema files for model outputs consumed by later stages; long prose belongs in `<analysis>`, not `<control>`.
 5. Set tool ceilings and read/write policy.
 6. Validate with `/workflow validate <workflow-or-file>`.
-7. Report the exact validation result and any remaining safety notes.
+7. Do not ignore validation warnings. Treat a `foreach` path warning (the path's top-level key is not a property of the source stage's control schema) as a likely typo that would fan out over nothing at runtime, and fix the path or the source schema. Treat a readOnly-with-mutation-tools warning (a stage declares `readOnly: true` but keeps a mutation-capable tool such as `bash`) as intentional only when the stage relies on worktree isolation; otherwise remove the tool.
+8. Report the exact validation result, every warning, and any remaining safety notes.
 
 ## Response expectations
 
@@ -56,4 +72,5 @@ When authoring or reviewing a workflow, report:
 - required agents and tool ceilings,
 - `output.controlSchema` files and workflow control fields used by downstream stages,
 - exact validation command and result,
+- every validation warning and how it was resolved or why it is acceptable,
 - any blockers before running the workflow.

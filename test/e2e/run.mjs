@@ -121,14 +121,13 @@ function main() {
     import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
     import { tmpdir } from 'node:os';
     import { join } from 'node:path';
-    import { listWorkflows, recommendWorkflows, resolveWorkflowRef } from './.tmp/unit/workflow-specs.js';
+    import { listWorkflows, resolveWorkflowRef } from './.tmp/unit/workflow-specs.js';
     const cwd = mkdtempSync(join(tmpdir(), 'pi-workflow-registry-e2e-'));
     try {
       mkdirSync(join(cwd, 'workflows'), { recursive: true });
       const spec = {
         schemaVersion: 1,
         name: 'review-artifact',
-        catalog: { useWhen: ['artifact graph review'], naturalLanguageTriggers: ['review artifact graph'] },
         defaults: { agent: 'unit-scout', readOnly: true, tools: ['read'] },
         artifactGraph: { stages: [{ id: 'main', type: 'task', prompt: 'Review.' }] }
       };
@@ -139,8 +138,6 @@ function main() {
       if (names.join(',') !== 'review-artifact') throw new Error('unexpected workflows: ' + names.join(','));
       const resolved = await resolveWorkflowRef('review-artifact', cwd);
       if (!resolved.specPath.endsWith('workflows/review-artifact.json')) throw new Error('bad resolved path: ' + resolved.specPath);
-      const recs = await recommendWorkflows('please review artifact graph', cwd);
-      if (recs[0]?.workflow.name !== 'review-artifact') throw new Error('review-artifact not recommended');
       await resolveWorkflowRef('invalid', cwd).then(() => { throw new Error('invalid workflow should not resolve'); }, (error) => { if (!/workflow name or spec file not found/.test(String(error))) throw error; });
       for (const bundled of ['spec-review', 'deep-review', 'deep-research', 'impact-review']) {
         const resolvedBundled = await resolveWorkflowRef(bundled, process.cwd());

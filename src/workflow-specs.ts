@@ -39,22 +39,6 @@ export interface WorkflowSpecRecord {
 	workflowRoot: string;
 }
 
-export interface WorkflowCatalogMetadata {
-	useWhen?: string[];
-	avoidWhen?: string[];
-	similarWorkflows?: string[];
-	mutationRisk?: string;
-	naturalLanguageTriggers?: string[];
-}
-
-export interface WorkflowRecommendation {
-	workflow: WorkflowSpecRecord;
-	score: number;
-	reasons: string[];
-	cautions: string[];
-	catalog: WorkflowCatalogMetadata;
-}
-
 interface WorkflowCandidate {
 	name: string;
 	file: string;
@@ -119,28 +103,6 @@ export function isSpecFileName(fileName: string): boolean {
 	);
 }
 
-export async function recommendWorkflows(
-	request: string,
-	cwd: string,
-	limit = 5,
-): Promise<WorkflowRecommendation[]> {
-	const query = tokenize(request);
-	if (query.length === 0) return [];
-
-	const workflows = await listWorkflows(cwd);
-	const recommendations = await Promise.all(
-		workflows.map(async (workflow) => scoreWorkflow(workflow, query)),
-	);
-	return recommendations
-		.filter((item) => item.score > 0)
-		.sort(
-			(left, right) =>
-				right.score - left.score ||
-				left.workflow.name.localeCompare(right.workflow.name),
-		)
-		.slice(0, Math.max(1, limit));
-}
-
 export async function listWorkflows(
 	cwd: string,
 ): Promise<WorkflowSpecRecord[]> {
@@ -186,99 +148,6 @@ function uniqueWorkflowRoots(roots: WorkflowRoot[]): WorkflowRoot[] {
 		unique.push(root);
 	}
 	return unique;
-}
-
-async function scoreWorkflow(
-	workflow: WorkflowSpecRecord,
-	query: string[],
-): Promise<WorkflowRecommendation> {
-	const catalog = await readWorkflowCatalog(workflow.specPath);
-	const haystacks = [
-		workflow.name,
-		workflow.fileName,
-		...workflow.aliases,
-		...(catalog.naturalLanguageTriggers ?? []),
-		...(catalog.useWhen ?? []),
-	];
-	const avoid = catalog.avoidWhen ?? [];
-	const reasons: string[] = [];
-	const cautions: string[] = [];
-	let score = 0;
-
-	for (const text of haystacks) {
-		const tokens = new Set(tokenize(text));
-		const matched = query.filter((token) => tokens.has(token));
-		if (matched.length === 0) continue;
-		const weight = catalog.naturalLanguageTriggers?.includes(text)
-			? 4
-			: catalog.useWhen?.includes(text)
-				? 3
-				: 1;
-		score += matched.length * weight;
-		if (reasons.length < 4)
-			reasons.push(`matched "${text}" (${matched.join(", ")})`);
-	}
-
-	for (const text of avoid) {
-		const tokens = new Set(tokenize(text));
-		const matched = query.filter((token) => tokens.has(token));
-		if (matched.length === 0) continue;
-		score -= matched.length * 3;
-		cautions.push(`avoidWhen matched "${text}" (${matched.join(", ")})`);
-	}
-
-	if (
-		catalog.mutationRisk &&
-		query.includes("write") &&
-		catalog.mutationRisk.includes("read-only")
-	) {
-		cautions.push(`mutationRisk=${catalog.mutationRisk}`);
-	}
-
-	return { workflow, score, reasons, cautions, catalog };
-}
-
-async function readWorkflowCatalog(
-	specPath: string,
-): Promise<WorkflowCatalogMetadata> {
-	if (!specPath.endsWith(".json")) return {};
-	try {
-		const parsed = JSON.parse(await readFile(specPath, "utf8")) as {
-			catalog?: WorkflowCatalogMetadata;
-		};
-		return parsed.catalog ?? {};
-	} catch {
-		return {};
-	}
-}
-
-const RECOMMEND_STOP_WORDS = new Set([
-	"a",
-	"an",
-	"and",
-	"are",
-	"as",
-	"be",
-	"do",
-	"for",
-	"in",
-	"is",
-	"it",
-	"of",
-	"or",
-	"please",
-	"the",
-	"this",
-	"to",
-	"with",
-]);
-
-function tokenize(text: string): string[] {
-	return text
-		.toLowerCase()
-		.replace(/[^a-z0-9_.-]+/g, " ")
-		.split(/\s+/)
-		.filter((token) => token.length >= 2 && !RECOMMEND_STOP_WORDS.has(token));
 }
 
 async function findWorkflowCandidates(

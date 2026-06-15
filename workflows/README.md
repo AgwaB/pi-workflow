@@ -11,7 +11,7 @@ Run them from the project root by exact filename alias, for example:
 /workflow run deep-research "Research the current project architecture and verify the key claims. Use max depth."
 ```
 
-Runtime selection is explicit: `/workflow run` takes an exact workflow name or explicit path plus a task string. Parent agents can use `/workflow recommend "<request>"` as a helper step to score workflow `catalog` metadata and choose a deterministic starting point. If a name is ambiguous across `.pi/workflows/`, `workflows/`, and `~/.pi/agent/workflows/`, `/workflow` fails closed.
+Runtime selection is explicit: `/workflow run` takes an exact workflow name or explicit path plus a task string. Use `/workflow list` to discover available workflows and choose a deterministic starting point. If a name is ambiguous across `.pi/workflows/`, `workflows/`, and `~/.pi/agent/workflows/`, `/workflow` fails closed.
 
 ## Bundled starter workflows
 

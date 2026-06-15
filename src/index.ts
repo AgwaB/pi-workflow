@@ -16,14 +16,9 @@ export {
 	waitForRun,
 } from "./engine.js";
 export type { ResumeRunSummary } from "./engine.js";
-export {
-	listWorkflows,
-	recommendWorkflows,
-	resolveWorkflowRef,
-} from "./workflow-specs.js";
+export { listWorkflows, resolveWorkflowRef } from "./workflow-specs.js";
 export type {
 	ResolvedWorkflowSpecRef,
-	WorkflowRecommendation,
 	WorkflowSpecRecord,
 } from "./workflow-specs.js";
 export { compileRole, extractMarkdownSections } from "./roles.js";
@@ -59,7 +54,6 @@ Usage:
   /workflow roles <workflow-name-or-path>
   /workflow agents
   /workflow list
-  /workflow recommend "<request>"
   /workflow run <workflow-name-or-path> "<task>" [--detach]
   /workflow status [run-id]
   /workflow show <run-id-or-workflow-name>

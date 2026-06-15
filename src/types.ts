@@ -86,7 +86,6 @@ export interface ArtifactGraphWorkflowSpec {
 	name?: string;
 	description?: string;
 	input?: unknown;
-	catalog?: Record<string, unknown>;
 	defaults?: WorkflowDefaults;
 	roles?: Record<string, RoleSpec>;
 	artifactGraph: {
