@@ -5935,6 +5935,95 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 	);
 });
 
+test("deep-review finding-pipeline preserves structured locations through dedup and partition", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-review",
+		"helpers",
+		"finding-pipeline.mjs",
+	);
+	const helper = (await import(pathToFileURL(helperPath).href)).default;
+
+	const dedup = await helper({
+		sources: {
+			"reviewers.lens-a": {
+				findings: [
+					{
+						severity: "high",
+						title: "Path boundary bypass in isPathInsideRoot",
+						file: "host/src/alpine/rootfs.ts",
+						// Line numbers live only in prose evidence here; the pipeline
+						// must reconstruct them into structured locations.
+						evidence:
+							"Gates resolveWritePath (line 46) and assertSafeWritePath (line 90).",
+					},
+					{
+						severity: "medium",
+						title: "Regex anchor dropped in matchHostname",
+						file: "host/src/host/patterns.ts",
+						// Explicit structured locations must pass through verbatim.
+						locations: [
+							{
+								file: "host/src/host/patterns.ts",
+								line: 15,
+								symbol: "matchHostname",
+							},
+						],
+						evidence: "diff drops the $ anchor",
+					},
+				],
+			},
+		},
+		options: { mode: "dedup" },
+	});
+
+	const boundary = dedup.findings.find((f) =>
+		f.title.includes("Path boundary"),
+	);
+	// Reconstructed from prose: two distinct line locations on the cited file.
+	assert.deepEqual(boundary.locations, [
+		{ file: "host/src/alpine/rootfs.ts", line: 46 },
+		{ file: "host/src/alpine/rootfs.ts", line: 90 },
+	]);
+	const regex = dedup.findings.find((f) => f.title.includes("Regex anchor"));
+	// Explicit location preserved verbatim, including the symbol.
+	assert.deepEqual(regex.locations, [
+		{ file: "host/src/host/patterns.ts", line: 15, symbol: "matchHostname" },
+	]);
+
+	const partition = await helper({
+		sources: {
+			"dedup-findings.main": dedup,
+			"devil-advocate.item-001": {
+				finding: { title: "Path boundary bypass in isPathInsideRoot" },
+				verdict: "KEEP",
+			},
+			"devil-advocate.item-002": {
+				finding: { title: "Regex anchor dropped in matchHostname" },
+				verdict: "KEEP",
+			},
+		},
+		options: { mode: "partition", dedupStage: "dedup-findings" },
+	});
+	assert.equal(partition.partitionSummary.keep, 2);
+	// Identity evidence is code-preserved onto keep items, same as severity.
+	const keepBoundary = partition.partitions.keep.find((k) =>
+		k.title.includes("Path boundary"),
+	);
+	assert.equal(keepBoundary.file, "host/src/alpine/rootfs.ts");
+	assert.ok(keepBoundary.locations.some((loc) => loc.line === 46));
+	assert.ok(keepBoundary.locations.some((loc) => loc.line === 90));
+	const keepRegex = partition.partitions.keep.find((k) =>
+		k.title.includes("Regex anchor"),
+	);
+	assert.deepEqual(keepRegex.locations, [
+		{ file: "host/src/host/patterns.ts", line: 15, symbol: "matchHostname" },
+	]);
+});
+
 test("deep-research claim-evidence-gate enforces structured evidence, rejoins identity, and partitions statuses", async () => {
 	const helperPath = join(
 		dirname(fileURLToPath(import.meta.url)),

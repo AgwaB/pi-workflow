@@ -58,11 +58,75 @@ function tokenOverlap(a, b) {
 
 const DUPLICATE_OVERLAP = 0.7;
 
+// Identity evidence (file/line/symbol) must survive the LLM reduce stage
+// unchanged, so it is carried as structured `locations` rather than left in
+// prose. Locations are normalized from the reviewer's explicit `locations`
+// array when present, and otherwise reconstructed deterministically from the
+// finding's `file` field plus any "line N"/":N" references in its evidence
+// text. A location is { file, line?, lineEnd?, symbol? }, so ranges, symbols,
+// and multi-site findings extend the same shape without new top-level fields.
+function normalizeLocation(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const file = String(raw.file ?? "").trim().replace(/^\.\//, "");
+  const line = Number.isFinite(Number(raw.line)) ? Number(raw.line) : undefined;
+  const lineEnd = Number.isFinite(Number(raw.lineEnd)) ? Number(raw.lineEnd) : undefined;
+  const symbol = raw.symbol != null && String(raw.symbol).trim() ? String(raw.symbol).trim() : undefined;
+  if (!file && line === undefined && !symbol) return null;
+  const location = {};
+  if (file) location.file = file;
+  if (line !== undefined) location.line = line;
+  if (lineEnd !== undefined) location.lineEnd = lineEnd;
+  if (symbol) location.symbol = symbol;
+  return location;
+}
+
+function dedupeLocations(locations) {
+  const seen = new Set();
+  const out = [];
+  for (const location of locations) {
+    if (!location) continue;
+    const key = `${location.file ?? ""}|${location.line ?? ""}|${location.lineEnd ?? ""}|${location.symbol ?? ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(location);
+  }
+  return out;
+}
+
+// Pull "line 46", "lines 46-90", "L46", or ":46" references out of evidence prose
+// so a reviewer that only mentioned the line in text still yields a structured
+// location. Bounded to a small count to avoid sweeping unrelated numbers.
+function linesFromEvidence(text) {
+  const lines = [];
+  const re = /(?:\blines?\s+~?(\d{1,6})(?:\s*[–-]\s*(\d{1,6}))?|\bL(\d{1,6})\b|:(\d{1,6})(?:[–-](\d{1,6}))?)/gi;
+  let match;
+  while ((match = re.exec(String(text ?? ""))) !== null && lines.length < 12) {
+    const start = Number(match[1] ?? match[3] ?? match[4]);
+    const end = Number(match[2] ?? match[5]);
+    if (Number.isFinite(start)) lines.push({ line: start, lineEnd: Number.isFinite(end) ? end : undefined });
+  }
+  return lines;
+}
+
+function locationsOf(finding) {
+  const explicit = Array.isArray(finding.locations) ? finding.locations.map(normalizeLocation).filter(Boolean) : [];
+  if (explicit.length > 0) return dedupeLocations(explicit);
+  // Reconstruct from file + evidence line references when the reviewer did not
+  // emit a structured locations array.
+  const file = String(finding.file ?? "").trim().replace(/^\.\//, "");
+  if (!file) return [];
+  const lineRefs = linesFromEvidence(finding.evidence);
+  if (lineRefs.length === 0) return dedupeLocations([normalizeLocation({ file })]);
+  return dedupeLocations(lineRefs.map((ref) => normalizeLocation({ file, line: ref.line, lineEnd: ref.lineEnd })));
+}
+
 function normalizeFinding(finding, index) {
   return {
     id: typeof finding.id === "string" && finding.id ? finding.id : `finding-${String(index + 1).padStart(3, "0")}`,
     severity: String(finding.severity ?? "unknown"),
     title: String(finding.title ?? "").trim(),
+    file: String(finding.file ?? "").trim().replace(/^\.\//, "") || undefined,
+    locations: locationsOf(finding),
     evidence: finding.evidence ?? "",
     rationale: finding.rationale ?? "",
     recommendedAction: finding.recommendedAction ?? "",
@@ -181,6 +245,10 @@ function partitionVerdicts(sources, options = {}) {
       // KEEP findings carry the reviewer severity verbatim (code-enforced join);
       // WEAKEN severity reduction is the report stage's job, with cited counter-evidence.
       severity: reviewerFinding ? reviewerFinding.severity : (entry.finding && typeof entry.finding === "object" ? String(entry.finding.severity ?? "unknown") : "unknown"),
+      // Identity evidence is code-preserved the same way severity is, so the
+      // reduce stage cannot silently drop file/line/symbol pins.
+      file: reviewerFinding?.file,
+      locations: reviewerFinding ? reviewerFinding.locations ?? locationsOf(reviewerFinding) : locationsOf(entry.finding && typeof entry.finding === "object" ? entry.finding : {}),
       reviewerFinding,
       evidence: entry.evidence ?? [],
       counterEvidence: entry.counterEvidence ?? [],
@@ -201,6 +269,8 @@ function partitionVerdicts(sources, options = {}) {
       title: String(finding.title ?? ""),
       verdict: "NEEDS_HUMAN",
       severity: finding.severity,
+      file: finding.file,
+      locations: finding.locations ?? locationsOf(finding),
       reviewerFinding: finding,
       evidence: [],
       counterEvidence: [],

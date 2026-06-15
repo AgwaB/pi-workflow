@@ -17,7 +17,50 @@
     "findings": {
       "type": "array",
       "items": {
-        "type": "object"
+        "type": "object",
+        "required": [
+          "severity",
+          "title",
+          "file"
+        ],
+        "properties": {
+          "severity": {
+            "type": "string",
+            "minLength": 1
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "file": {
+            "type": "string",
+            "minLength": 1
+          },
+          "locations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "file"
+              ],
+              "properties": {
+                "file": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "line": {
+                  "type": "number"
+                },
+                "lineEnd": {
+                  "type": "number"
+                },
+                "symbol": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
       }
     }
   }
