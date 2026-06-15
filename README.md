@@ -132,7 +132,6 @@ Workflow definitions compose a small set of task patterns and graph shapes.
 | Pattern | Use it for | Runtime shape |
 |---|---|---|
 | `task` | One focused step | one prompt -> one subagent |
-| `parallel` | Independent fixed work | graph shape: multiple known stages can run at the same time |
 | `foreach` | Dynamic fan-out | JSON array from an upstream control artifact -> one subagent per item |
 | `reduce` | Fan-in / synthesis | upstream workflow artifacts -> one synthesis subagent |
 | `loop` | Bounded repetition | repeat child stages until a deterministic stop condition |
@@ -140,7 +139,7 @@ Workflow definitions compose a small set of task patterns and graph shapes.
 
 ![Core workflow stage shapes](./docs/assets/readme/stage-types.png)
 
-`parallel` is a graph shape, not a separate `type` value. Support helpers are declared with a `support` object, not a task `type`.
+Parallel execution is a graph shape, not a stage type: model parallel branches as multiple roots or with `after: []`. Support helpers are declared with a `support` object, not a task `type`.
 
 ## Predefined workflows
 
