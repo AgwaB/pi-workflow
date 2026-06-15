@@ -1,8 +1,17 @@
-# pi-workflow
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/readme/logo-dark.svg">
+    <img src="docs/assets/readme/logo.svg" width="160" alt="pi-workflow">
+  </picture>
+</p>
 
-**Workflow orchestration for Pi.**
+<h1 align="center">pi-workflow</h1>
 
-[![npm](https://img.shields.io/npm/v/@agwab/pi-workflow.svg)](https://www.npmjs.com/package/@agwab/pi-workflow)
+<p align="center"><strong>Workflow orchestration for Pi.</strong></p>
+
+<p align="center">
+  <a href="https://www.npmjs.com/package/@agwab/pi-workflow"><img src="https://img.shields.io/npm/v/@agwab/pi-workflow.svg" alt="npm"></a>
+</p>
 
 `pi-workflow` lets Pi run named, repeatable multi-step workflows: research, code review, spec conformance checks, impact review, and project-specific team routines.
 

@@ -1,0 +1,14 @@
+<svg width="240" height="240" viewBox="0 0 240 240" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="pi-workflow">
+  <rect width="240" height="240" rx="52" fill="#1f2937"/>
+  <g stroke="#fbfaf7" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <path d="M49 120 C 71 120,71 80,89 80"/><path d="M49 120 L87 120"/><path d="M49 120 C 71 120,71 160,89 160"/>
+    <path d="M105 80 L141 80"/><path d="M105 120 L141 120"/><path d="M105 160 L141 160"/>
+    <path d="M157 80 C 179 80,173 120,191 120"/><path d="M157 120 L191 120"/><path d="M157 160 C 179 160,173 120,191 120"/>
+  </g>
+  <g fill="#1f2937" stroke="#fbfaf7" stroke-width="3">
+    <circle cx="41" cy="120" r="11"/>
+    <circle cx="97" cy="80" r="11"/><circle cx="97" cy="120" r="11"/><circle cx="97" cy="160" r="11"/>
+    <circle cx="149" cy="80" r="11"/><circle cx="149" cy="120" r="11"/><circle cx="149" cy="160" r="11"/>
+  </g>
+  <circle cx="199" cy="120" r="11" fill="#fbfaf7"/>
+</svg>
