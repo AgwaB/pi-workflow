@@ -28,6 +28,7 @@ const READ_ONLY_TOOLS = new Set([
 	"web_search",
 	"fetch_content",
 	"get_search_content",
+	"scrapling_fetch",
 ]);
 const EXPLICIT_WRITE_TOOLS = new Set(["edit", "write"]);
 const MUTATION_CAPABLE_TOOLS = new Set(["bash"]);
