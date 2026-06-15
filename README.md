@@ -1,8 +1,5 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/readme/logo-dark.svg">
-    <img src="docs/assets/readme/logo.svg" width="160" alt="pi-workflow">
-  </picture>
+  <img src="docs/assets/readme/logo.svg" width="160" alt="pi-workflow">
 </p>
 
 <h1 align="center">pi-workflow</h1>
