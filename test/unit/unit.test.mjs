@@ -6072,6 +6072,149 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 			n.includes("unrecognized verdict"),
 		),
 	);
+
+	const supportDemotion = await helper({
+		sources: {
+			"dedup-findings.main": {
+				findings: [
+					{
+						severity: "medium",
+						title: "Dropping colon parser loses file:line locations",
+						file: "workflows/deep-review/helpers/finding-pipeline.mjs",
+						evidence: "removing :801 parsing loses line pins",
+					},
+					{
+						severity: "low",
+						title: "Dead match[4] fallback remains after capture group removal",
+						file: "workflows/deep-review/helpers/finding-pipeline.mjs",
+						evidence: "const start still reads match[4]",
+					},
+					{
+						severity: "low",
+						title: "Stale comment still says colon references are supported",
+						file: "workflows/deep-review/helpers/finding-pipeline.mjs",
+						evidence: "comment mentions :N references",
+					},
+					{
+						severity: "low",
+						title: "Existing tests do not cover file:line fallback",
+						file: "test/unit/unit.test.mjs",
+						evidence: "test coverage gap",
+					},
+				],
+			},
+			"devil-advocate.item-001": {
+				finding: { title: "Dropping colon parser loses file:line locations" },
+				verdict: "KEEP",
+			},
+			"devil-advocate.item-002": {
+				finding: {
+					title: "Dead match[4] fallback remains after capture group removal",
+				},
+				verdict: "KEEP",
+			},
+			"devil-advocate.item-003": {
+				finding: {
+					title: "Stale comment still says colon references are supported",
+				},
+				verdict: "KEEP",
+			},
+			"devil-advocate.item-004": {
+				finding: { title: "Existing tests do not cover file:line fallback" },
+				verdict: "KEEP",
+			},
+		},
+		options: { mode: "partition", dedupStage: "dedup-findings" },
+	});
+	assert.deepEqual(
+		supportDemotion.partitions.keep.map((finding) => finding.title),
+		["Dropping colon parser loses file:line locations"],
+	);
+	assert.equal(supportDemotion.partitionSummary.supportNotes, 3);
+	assert.equal(supportDemotion.supportNotes.length, 3);
+	assert.ok(
+		supportDemotion.supportNotes.every(
+			(note) =>
+				note.supportingFindingOf ===
+				"Dropping colon parser loses file:line locations",
+		),
+	);
+	assert.ok(
+		supportDemotion.normalizationNotes.some((note) =>
+			note.includes("support finding"),
+		),
+	);
+
+	const rootMerge = await helper({
+		sources: {
+			"dedup-findings.main": {
+				findings: [
+					{
+						severity: "medium",
+						title: "maxItems equality is incorrectly treated as an overflow",
+						file: "src/engine.ts",
+						locations: [{ file: "src/engine.ts", line: 568 }],
+						evidence:
+							"if (typeof stage.maxItems === number && items.length >= stage.maxItems)",
+					},
+					{
+						severity: "medium",
+						title: "foreach maxItems boundary is incorrectly rejected",
+						file: "src/engine.ts",
+						locations: [
+							{ file: "src/engine.ts", line: 568 },
+							{ file: "src/json-schema.ts", line: 277 },
+						],
+						evidence:
+							"items.length >= stage.maxItems rejects exact maxItems boundary",
+					},
+					{
+						severity: "high",
+						title: "unrelated scheduler status regression",
+						file: "src/engine.ts",
+						locations: [{ file: "src/engine.ts", line: 820 }],
+						evidence: "blocked status is overwritten later",
+					},
+				],
+			},
+			"devil-advocate.item-001": {
+				finding: {
+					title: "maxItems equality is incorrectly treated as an overflow",
+				},
+				verdict: "KEEP",
+			},
+			"devil-advocate.item-002": {
+				finding: { title: "foreach maxItems boundary is incorrectly rejected" },
+				verdict: "KEEP",
+			},
+			"devil-advocate.item-003": {
+				finding: { title: "unrelated scheduler status regression" },
+				verdict: "KEEP",
+			},
+		},
+		options: { mode: "partition", dedupStage: "dedup-findings" },
+	});
+	assert.deepEqual(
+		rootMerge.partitions.keep.map((finding) => finding.title),
+		[
+			"maxItems equality is incorrectly treated as an overflow",
+			"unrelated scheduler status regression",
+		],
+	);
+	assert.equal(rootMerge.partitionSummary.mergedFindings, 1);
+	assert.equal(rootMerge.partitions.keep[0].mergedFindings.length, 1);
+	assert.ok(
+		rootMerge.partitions.keep[0].locations.some(
+			(location) =>
+				location.file === "src/json-schema.ts" && location.line === 277,
+		),
+	);
+	assert.ok(
+		rootMerge.normalizationNotes.some((note) =>
+			note.includes("equivalent root finding"),
+		),
+	);
+
 	await assert.rejects(
 		helper({ sources: {}, options: { mode: "bogus" } }),
 		/unknown mode/,
