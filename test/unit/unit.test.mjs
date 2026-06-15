@@ -1306,6 +1306,51 @@ test("compiler omits runtime task injection from foreach templates", async () =>
 	}
 });
 
+test("compiler injects runtime task into foreach and reduce stages that opt in", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const compiled = await compileWorkflow(
+			workflowSpec("unit-scout", {
+				artifactGraph: {
+					stages: [
+						{ id: "extract", type: "task", prompt: "Extract" },
+						{
+							id: "verify",
+							type: "foreach",
+							injectRuntimeTask: true,
+							from: { source: "extract", path: "$.claims" },
+							each: { prompt: "Verify ${item}" },
+						},
+						{
+							id: "summary",
+							type: "reduce",
+							injectRuntimeTask: true,
+							from: "verify",
+							prompt: "Summarize",
+						},
+					],
+				},
+			}),
+			{ cwd, task: "OPT_IN_CONSTRAINT_MARKER" },
+		);
+		const byStage = Object.fromEntries(
+			compiled.tasks.map((task) => [task.stageId, task]),
+		);
+		// Opted-in foreach template carries the runtime task injection flag.
+		assert.equal(byStage.verify.injectTask, true);
+		assert.equal(byStage.verify.foreach.injectRuntimeTask, true);
+		// Opted-in reduce stage embeds the runtime task body in its prompt.
+		assert.equal(byStage.summary.injectTask, true);
+		assert.match(
+			byStage.summary.compiledPrompt,
+			/# Task\n\nOPT_IN_CONSTRAINT_MARKER/,
+		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("compiler applies explicit stage from dependencies and stage runtime defaults", async () => {
 	const cwd = makeProject();
 	try {

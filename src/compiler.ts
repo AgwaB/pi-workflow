@@ -792,8 +792,16 @@ async function compileArtifactGraphPlan(
 			`$.artifactGraph.stages.${jsonKey(stage.id)}.tools`,
 		);
 		const taskStageKind = stageKindFor(stage) ?? "task";
-		const injectTask = taskStageKind === "task";
-		const injectRuntimeTaskInPrompt = taskStageKind !== "foreach" && injectTask;
+		// By default only `task` stages receive the runtime task body; foreach and
+		// reduce stages operate on upstream item/Source Context instead. A stage
+		// may opt in with `injectRuntimeTask: true` when a cross-cutting user
+		// constraint (e.g. "review the diff on its own terms") must reach every
+		// stage, not just the entry stage.
+		const optInInjectRuntimeTask = stage.injectRuntimeTask === true;
+		const injectTask = taskStageKind === "task" || optInInjectRuntimeTask;
+		const injectRuntimeTaskInPrompt =
+			(taskStageKind !== "foreach" && injectTask) ||
+			(taskStageKind === "foreach" && optInInjectRuntimeTask);
 		const normalizedPrompt = String(prompt ?? "").replace(
 			/\$\{item\}/g,
 			"the relevant item from the dependency context",

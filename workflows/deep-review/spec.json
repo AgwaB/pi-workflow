@@ -55,6 +55,7 @@
       {
         "id": "reviewers",
         "type": "foreach",
+        "injectRuntimeTask": true,
         "from": {
           "source": "triage",
           "path": "$.reviewLenses"
@@ -88,6 +89,7 @@
       {
         "id": "devil-advocate",
         "type": "foreach",
+        "injectRuntimeTask": true,
         "from": {
           "source": "dedup-findings",
           "path": "$.findings"
@@ -125,6 +127,7 @@
       {
         "id": "report",
         "type": "reduce",
+        "injectRuntimeTask": true,
         "from": [
           "triage",
           "partition-verdicts"

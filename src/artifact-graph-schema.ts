@@ -35,6 +35,7 @@ const STAGE_KEYS = new Set([
 	"id",
 	"type",
 	"prompt",
+	"injectRuntimeTask",
 	"agent",
 	"role",
 	"cwd",
@@ -401,6 +402,7 @@ function validateStage(
 		issues,
 	);
 	optionalBoolean(stage.readOnly, `${path}.readOnly`, issues);
+	optionalBoolean(stage.injectRuntimeTask, `${path}.injectRuntimeTask`, issues);
 	optionalPositiveInteger(stage.maxRuntimeMs, `${path}.maxRuntimeMs`, issues);
 	optionalPositiveInteger(
 		stage.maxConcurrency,
