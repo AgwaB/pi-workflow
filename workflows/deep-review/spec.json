@@ -37,7 +37,6 @@
           "source": "triage",
           "path": "$.reviewLenses"
         },
-        "maxConcurrency": 10,
         "output": {
           "analysis": {
             "required": true
@@ -71,7 +70,6 @@
           "source": "dedup-findings",
           "path": "$.findings"
         },
-        "maxConcurrency": 10,
         "output": {
           "analysis": {
             "required": true

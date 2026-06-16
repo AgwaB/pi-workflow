@@ -3252,6 +3252,32 @@ test("bundled artifact graph workflows are public runnable", async () => {
 	assert(resolved.specPath.endsWith("workflows/spec-review/spec.json"));
 });
 
+test("bundled deep-review workflow leaves reviewer fanout unconstrained by stage caps", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "scout", "read, grep, find, ls");
+		const specPath = join(
+			process.cwd(),
+			"workflows",
+			"deep-review",
+			"spec.json",
+		);
+		const spec = JSON.parse(readFileSync(specPath, "utf8"));
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			specPath,
+		});
+		const reviewers = compiled.tasks.find((task) => task.key === "reviewers.item");
+		const devilAdvocate = compiled.tasks.find(
+			(task) => task.key === "devil-advocate.item",
+		);
+		assert.equal(reviewers?.stageMaxConcurrency, undefined);
+		assert.equal(devilAdvocate?.stageMaxConcurrency, undefined);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("bundled spec-review workflow materializes verifier and partitions verified findings", async () => {
 	const cwd = makeProject();
 	try {
