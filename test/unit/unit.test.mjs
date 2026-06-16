@@ -6207,7 +6207,7 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 			},
 			"devil-advocate.item-004": {
 				finding: { title: "Existing tests do not cover file:line fallback" },
-				verdict: "KEEP",
+				verdict: "WEAKEN",
 			},
 		},
 		options: { mode: "partition", dedupStage: "dedup-findings" },
@@ -6216,6 +6216,7 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 		supportDemotion.partitions.keep.map((finding) => finding.title),
 		["Dropping colon parser loses file:line locations"],
 	);
+	assert.deepEqual(supportDemotion.partitions.weaken, []);
 	assert.equal(supportDemotion.partitionSummary.supportNotes, 3);
 	assert.equal(supportDemotion.supportNotes.length, 3);
 	assert.ok(

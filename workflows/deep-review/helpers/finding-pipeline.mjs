@@ -462,43 +462,47 @@ function supportReasonOf(item) {
 }
 
 function demoteSupportFindings(partitions, normalizationNotes) {
-	const roots = partitions.keep.filter(
+	const roots = [...partitions.keep, ...partitions.weaken].filter(
 		(item) => !supportReasonOf(item) && !isTestPath(primaryFileOf(item)),
 	);
 	if (roots.length === 0) return [];
-	const nextKeep = [];
 	const supportNotes = [];
-	for (const item of partitions.keep) {
-		const reason = supportReasonOf(item);
-		if (!reason) {
-			nextKeep.push(item);
-			continue;
+	const demoteFrom = (items) => {
+		const next = [];
+		for (const item of items) {
+			const reason = supportReasonOf(item);
+			if (!reason) {
+				next.push(item);
+				continue;
+			}
+			const file = primaryFileOf(item);
+			const relatedRoot =
+				roots.find((root) => primaryFileOf(root) === file) ??
+				(isTestPath(file) ? roots[0] : undefined);
+			if (!relatedRoot) {
+				next.push(item);
+				continue;
+			}
+			supportNotes.push({
+				title: item.title,
+				severity: item.severity,
+				file: item.file,
+				locations: item.locations,
+				evidenceQuotes: item.evidenceQuotes,
+				reason,
+				supportingFindingOf: relatedRoot.title,
+				evidence: item.evidence,
+				counterEvidence: item.counterEvidence,
+				recommendedAction: item.recommendedAction,
+			});
+			normalizationNotes.push(
+				`support finding "${item.title}" moved out of findings (${reason}) under "${relatedRoot.title}"`,
+			);
 		}
-		const file = primaryFileOf(item);
-		const relatedRoot =
-			roots.find((root) => primaryFileOf(root) === file) ??
-			(isTestPath(file) ? roots[0] : undefined);
-		if (!relatedRoot) {
-			nextKeep.push(item);
-			continue;
-		}
-		supportNotes.push({
-			title: item.title,
-			severity: item.severity,
-			file: item.file,
-			locations: item.locations,
-			evidenceQuotes: item.evidenceQuotes,
-			reason,
-			supportingFindingOf: relatedRoot.title,
-			evidence: item.evidence,
-			counterEvidence: item.counterEvidence,
-			recommendedAction: item.recommendedAction,
-		});
-		normalizationNotes.push(
-			`support finding "${item.title}" moved out of findings (${reason}) under "${relatedRoot.title}"`,
-		);
-	}
-	partitions.keep = nextKeep;
+		return next;
+	};
+	partitions.keep = demoteFrom(partitions.keep);
+	partitions.weaken = demoteFrom(partitions.weaken);
 	return supportNotes;
 }
 
