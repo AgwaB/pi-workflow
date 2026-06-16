@@ -6140,6 +6140,9 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 		partition.reportContext.partialFailures.map((failure) => failure.specId),
 		["devil-advocate.item-003", "reviewers.release-test-hygiene"],
 	);
+	assert.equal(partition.sourceStatusSummary.total, 2);
+	assert.equal(partition.sourceStatusSummary.completed, 0);
+	assert.equal(partition.sourceStatusSummary.nonCompleted, 2);
 	assert.equal(partition.reportContext.keep[0].findingId, partition.partitions.keep[0].findingId);
 	// Severity joined from the reviewer finding, not the devil-advocate echo.
 	assert.equal(partition.partitions.keep[0].severity, "critical");

@@ -229,6 +229,23 @@ function mergePartialFailures(...groups) {
 	return merged;
 }
 
+function mergeSourceStatusSummary(directStatusSummary, partialFailures) {
+	const directFailureKeys = new Set(
+		asObjects(directStatusSummary?.partialFailures).map((status) =>
+			sourceStatusKey(slimSourceStatus(status)),
+		),
+	);
+	const transitiveOnlyFailures = asObjects(partialFailures).filter(
+		(status) => !directFailureKeys.has(sourceStatusKey(slimSourceStatus(status))),
+	);
+	return {
+		total: Number(directStatusSummary?.total ?? 0) + transitiveOnlyFailures.length,
+		completed: Number(directStatusSummary?.completed ?? 0),
+		nonCompleted: asObjects(partialFailures).length,
+		partialFailures,
+	};
+}
+
 function evidenceQuotesOf(finding) {
 	return dedupeStrings([
 		...quoteStrings(finding.evidenceQuotes),
@@ -789,11 +806,10 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 		supportNotes,
 		reportContext,
 		digest: `partition: keep=${partitionSummary.keep}, weaken=${partitionSummary.weaken}, drop=${partitionSummary.drop}, needsHuman=${partitionSummary.needsHuman}, missingVerdicts=${missingVerdicts}, partialFailures=${partialFailures.length}, supportNotes=${supportNotes.length}`,
-		sourceStatusSummary: {
-			...directStatusSummary,
+		sourceStatusSummary: mergeSourceStatusSummary(
+			directStatusSummary,
 			partialFailures,
-			nonCompleted: partialFailures.length,
-		},
+		),
 		partitionSummary,
 		normalizationNotes,
 	};
