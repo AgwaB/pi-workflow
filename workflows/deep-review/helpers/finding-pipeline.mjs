@@ -430,12 +430,9 @@ function supportTextOf(item) {
 	return textFragments([
 		item?.title,
 		item?.evidence,
-		item?.counterEvidence,
-		item?.recommendedAction,
 		item?.reviewerFinding?.title,
 		item?.reviewerFinding?.evidence,
 		item?.reviewerFinding?.rationale,
-		item?.reviewerFinding?.recommendedAction,
 	]).join(" ");
 }
 
