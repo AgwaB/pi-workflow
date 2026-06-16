@@ -3065,7 +3065,7 @@ test("spec-review partition helper joins verifier results and flags missing cove
 	assert.deepEqual(result.noIssueNotes, ["REQ-004 satisfied"]);
 });
 
-test("bundled spec-review workflow compiles explicit DAG analysis and verification fanout", async () => {
+test("bundled spec-review workflow compiles flat analysis and verification fanout", async () => {
 	const cwd = makeProject();
 	try {
 		writeAgent(cwd, "scout", "read, grep, find, ls");
@@ -3077,9 +3077,10 @@ test("bundled spec-review workflow compiles explicit DAG analysis and verificati
 		);
 		const spec = JSON.parse(readFileSync(specPath, "utf8"));
 		parsePublicWorkflow(spec);
-		assert.equal(spec.artifactGraph.stages[0].id, "analysis");
-		assert.equal(spec.artifactGraph.stages[0].type, "dag");
-		assert.equal(spec.artifactGraph.stages[0].outputFrom, "candidate-findings");
+		assert.deepEqual(
+			spec.artifactGraph.stages.slice(0, 4).map((stage) => stage.id),
+			["extract-spec", "map-implementation", "inspect-tests", "candidate-findings"],
+		);
 		const compiled = await compileWorkflow(spec, {
 			cwd,
 			specPath,
@@ -3087,32 +3088,28 @@ test("bundled spec-review workflow compiles explicit DAG analysis and verificati
 		});
 		assert.deepEqual(
 			compiled.tasks.slice(0, 3).map((task) => task.key),
-			[
-				"analysis.extract-spec.main",
-				"analysis.map-implementation.main",
-				"analysis.inspect-tests.main",
-			],
+			["extract-spec.main", "map-implementation.main", "inspect-tests.main"],
 		);
 		assert.deepEqual(
 			compiled.tasks.slice(0, 3).map((task) => task.dependsOn),
 			[[], [], []],
 		);
 		const candidates = compiled.tasks.find(
-			(task) => task.key === "analysis.candidate-findings.main",
+			(task) => task.key === "candidate-findings.main",
 		);
 		assert.equal(candidates.kind, "reduce");
 		assert.deepEqual(candidates.dependsOn, [
-			"analysis.extract-spec.main",
-			"analysis.map-implementation.main",
-			"analysis.inspect-tests.main",
+			"extract-spec.main",
+			"map-implementation.main",
+			"inspect-tests.main",
 		]);
 		const verifier = compiled.tasks.find(
 			(task) => task.key === "verify-findings.item",
 		);
 		assert.equal(verifier.kind, "foreach");
-		assert.deepEqual(verifier.dependsOn, ["analysis.candidate-findings.main"]);
+		assert.deepEqual(verifier.dependsOn, ["candidate-findings.main"]);
 		assert.deepEqual(verifier.foreach.from, {
-			stage: "analysis.candidate-findings",
+			stage: "candidate-findings",
 			path: "$.candidateFindings",
 		});
 		const partition = compiled.tasks.find(
@@ -3120,7 +3117,7 @@ test("bundled spec-review workflow compiles explicit DAG analysis and verificati
 		);
 		assert.equal(partition.kind, "support");
 		assert.deepEqual(partition.dependsOn, [
-			"analysis.candidate-findings.main",
+			"candidate-findings.main",
 			"verify-findings.item",
 		]);
 		assert.deepEqual(partition.support, {
@@ -3275,22 +3272,22 @@ test("bundled spec-review workflow materializes verifier and partitions verified
 		const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
 		await writeStaticRunArtifacts(cwd, run, compiled, spec);
 
-		await completeTask(cwd, taskBySpec(run, "analysis.extract-spec.main"), {
+		await completeTask(cwd, taskBySpec(run, "extract-spec.main"), {
 			requirements: [{ id: "REQ-001", requirement: "Must match" }],
 		});
 		await completeTask(
 			cwd,
-			taskBySpec(run, "analysis.map-implementation.main"),
+			taskBySpec(run, "map-implementation.main"),
 			{
 				implementationMap: [],
 			},
 		);
-		await completeTask(cwd, taskBySpec(run, "analysis.inspect-tests.main"), {
+		await completeTask(cwd, taskBySpec(run, "inspect-tests.main"), {
 			testMap: [],
 		});
 		await completeTask(
 			cwd,
-			taskBySpec(run, "analysis.candidate-findings.main"),
+			taskBySpec(run, "candidate-findings.main"),
 			{
 				requirementCoverage: [{ requirementId: "REQ-001", status: "partial" }],
 				candidateFindings: [
@@ -3313,17 +3310,17 @@ test("bundled spec-review workflow materializes verifier and partitions verified
 		assert.deepEqual(
 			current.tasks.map((task) => task.specId),
 			[
-				"analysis.extract-spec.main",
-				"analysis.map-implementation.main",
-				"analysis.inspect-tests.main",
-				"analysis.candidate-findings.main",
+				"extract-spec.main",
+				"map-implementation.main",
+				"inspect-tests.main",
+				"candidate-findings.main",
 				"verify-findings.finding-001",
 				"partition-findings.main",
 				"report.main",
 			],
 		);
 		assert.deepEqual(taskBySpec(current, "partition-findings.main").dependsOn, [
-			"analysis.candidate-findings.main",
+			"candidate-findings.main",
 			"verify-findings.finding-001",
 		]);
 

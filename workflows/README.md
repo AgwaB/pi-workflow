@@ -19,7 +19,7 @@ Runtime selection is explicit: `/workflow run` takes an exact workflow name or e
 |---|---|---|---|
 | `deep-research` | `researcher` | plan + foreach questions + normalize + foreach verifier + audit-claims support + final reduce | Research needs source-backed claims, dynamic breadth/depth, independent verification, deterministic evidence gating, or citations. Supports `quick`, `standard`, and `max` depth through task wording/input. |
 | `deep-review` | `scout` | cheap triage + foreach review lenses + dedup support + foreach devil's advocate + verdict-partition support + reduce, read-only | Thorough multi-lens review where findings should be independently challenged before synthesis. |
-| `spec-review` | `scout` | DAG-style parallel roots: extract spec + map implementation + inspect tests -> reduce candidates -> foreach verifier -> reduce report, read-only | Compare a spec or contract against implementation and tests, then report evidence-backed conformance gaps without editing files. |
+| `spec-review` | `scout` | parallel roots: extract spec + map implementation + inspect tests -> reduce candidates -> foreach verifier -> reduce report, read-only | Compare a spec or contract against implementation and tests, then report evidence-backed conformance gaps without editing files. |
 | `impact-review` | `scout` | multi-join DAG: scope/implementation/validation maps -> contract/state/validation/docs/security lenses -> consistency/regression/ship-readiness joins -> final synthesis, read-only | Review ship impact for changed or proposed work, especially missing tests, docs, release work, compatibility risk, and follow-up actions. |
 
 ## Bundle layout
