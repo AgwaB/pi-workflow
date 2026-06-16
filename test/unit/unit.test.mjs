@@ -3263,6 +3263,10 @@ test("bundled deep-review workflow leaves reviewer fanout unconstrained by stage
 			"spec.json",
 		);
 		const spec = JSON.parse(readFileSync(specPath, "utf8"));
+		const reviewersStage = spec.artifactGraph.stages.find(
+			(stage) => stage.id === "reviewers",
+		);
+		assert.match(reviewersStage.each.prompt, /leading \+ or - marker/);
 		const compiled = await compileWorkflow(spec, {
 			cwd,
 			specPath,
