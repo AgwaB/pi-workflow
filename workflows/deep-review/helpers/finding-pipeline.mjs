@@ -447,7 +447,18 @@ function isTestPath(file) {
 function supportReasonOf(item) {
 	const file = primaryFileOf(item);
 	const text = normalizeText(supportTextOf(item));
-	if (isTestPath(file) || /\b(test|tests|coverage)\b/.test(text))
+	const titleText = normalizeText(
+		textFragments([item?.title, item?.reviewerFinding?.title]).join(" "),
+	);
+	if (
+		isTestPath(file) ||
+		(/\b(test|tests|coverage|fixture|fixtures|assertion|assertions)\b/.test(
+			titleText,
+		) &&
+			/\b(gap|missing|lack|lacks|cover|coverage|assert|assertion|fixtures?)\b/.test(
+				titleText,
+			))
+	)
 		return "test/coverage support";
 	if (/\b(stale|comment|comments|doc|docs|documentation)\b/.test(text))
 		return "comment/documentation support";

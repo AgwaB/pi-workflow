@@ -6166,7 +6166,8 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 						severity: "medium",
 						title: "Dropping colon parser loses file:line locations",
 						file: "workflows/deep-review/helpers/finding-pipeline.mjs",
-						evidence: "removing :801 parsing loses line pins",
+						evidence:
+							"removing :801 parsing loses line pins; tests mention the path but the runtime behavior is the defect",
 						recommendedAction: "Restore the parser and add targeted tests.",
 					},
 					{
