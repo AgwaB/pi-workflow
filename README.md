@@ -156,6 +156,10 @@ The package includes a small starter set. These are practical defaults and autho
 
 ![Deep review workflow flow](./docs/assets/readme/deep-review-flow.png)
 
+![Spec review workflow flow](./docs/assets/readme/spec-review-flow.png)
+
+![Impact review workflow flow](./docs/assets/readme/impact-review-flow.png)
+
 Most teams should create project-specific workflows as their patterns settle.
 
 ## More
