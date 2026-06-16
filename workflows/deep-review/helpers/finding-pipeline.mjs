@@ -142,6 +142,37 @@ function dedupeLocations(locations) {
 	return out;
 }
 
+function quoteStrings(value) {
+	if (typeof value === "string" && value.trim()) return [value.trim()];
+	if (Array.isArray(value)) return value.flatMap(quoteStrings);
+	if (value && typeof value === "object") {
+		if (typeof value.quote === "string" && value.quote.trim())
+			return [value.quote.trim()];
+		return Object.values(value).flatMap(quoteStrings);
+	}
+	return [];
+}
+
+function dedupeStrings(values) {
+	const seen = new Set();
+	const out = [];
+	for (const value of values) {
+		const text = String(value ?? "").trim();
+		if (!text || seen.has(text)) continue;
+		seen.add(text);
+		out.push(text);
+	}
+	return out;
+}
+
+function evidenceQuotesOf(finding) {
+	return dedupeStrings([
+		...quoteStrings(finding.evidenceQuotes),
+		...quoteStrings(finding.evidenceQuote),
+		...quoteStrings(finding.evidence),
+	]);
+}
+
 // Pull "line 46", "lines 46-90", "L46", or ":46" references out of evidence prose
 // so a reviewer that only mentioned the line in text still yields a structured
 // location. Bounded to a small count to avoid sweeping unrelated numbers.
@@ -197,6 +228,7 @@ function normalizeFinding(finding, index) {
 				.replace(/^\.\//, "") || undefined,
 		locations: locationsOf(finding),
 		evidence: finding.evidence ?? "",
+		evidenceQuotes: evidenceQuotesOf(finding),
 		rationale: finding.rationale ?? "",
 		recommendedAction: finding.recommendedAction ?? "",
 		confidence: finding.confidence ?? "unknown",
@@ -371,6 +403,7 @@ function demoteSupportFindings(partitions, normalizationNotes) {
 			severity: item.severity,
 			file: item.file,
 			locations: item.locations,
+			evidenceQuotes: item.evidenceQuotes,
 			reason,
 			supportingFindingOf: relatedRoot.title,
 			evidence: item.evidence,
@@ -447,6 +480,10 @@ function mergeFindingItems(primary, duplicate) {
 		...(Array.isArray(primary.locations) ? primary.locations : []),
 		...(Array.isArray(duplicate.locations) ? duplicate.locations : []),
 	]);
+	primary.evidenceQuotes = dedupeStrings([
+		...(Array.isArray(primary.evidenceQuotes) ? primary.evidenceQuotes : []),
+		...(Array.isArray(duplicate.evidenceQuotes) ? duplicate.evidenceQuotes : []),
+	]);
 	primary.mergedFindings = [
 		...(Array.isArray(primary.mergedFindings) ? primary.mergedFindings : []),
 		{
@@ -454,6 +491,7 @@ function mergeFindingItems(primary, duplicate) {
 			severity: duplicate.severity,
 			file: duplicate.file,
 			locations: duplicate.locations,
+			evidenceQuotes: duplicate.evidenceQuotes,
 			evidence: duplicate.evidence,
 			counterEvidence: duplicate.counterEvidence,
 			recommendedAction: duplicate.recommendedAction,
@@ -554,6 +592,12 @@ function partitionVerdicts(sources, options = {}) {
 							: {},
 					),
 			reviewerFinding,
+			evidenceQuotes: dedupeStrings([
+				...(reviewerFinding?.evidenceQuotes ?? []),
+				...quoteStrings(entry.evidenceQuotes),
+				...quoteStrings(entry.evidenceQuote),
+				...quoteStrings(entry.evidence),
+			]),
 			evidence: entry.evidence ?? [],
 			counterEvidence: entry.counterEvidence ?? [],
 			recommendedAction: entry.recommendedAction ?? "",
@@ -576,6 +620,7 @@ function partitionVerdicts(sources, options = {}) {
 			file: finding.file,
 			locations: finding.locations ?? locationsOf(finding),
 			reviewerFinding: finding,
+			evidenceQuotes: finding.evidenceQuotes ?? evidenceQuotesOf(finding),
 			evidence: [],
 			counterEvidence: [],
 			recommendedAction: "",

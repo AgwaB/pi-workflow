@@ -56,6 +56,15 @@
                 }
               }
             }
+          },
+          "evidenceQuote": {
+            "type": "string"
+          },
+          "evidenceQuotes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         }
       }

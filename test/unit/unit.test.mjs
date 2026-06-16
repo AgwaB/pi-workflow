@@ -6268,6 +6268,7 @@ test("deep-review finding-pipeline preserves structured locations through dedup 
 						// must reconstruct them into structured locations.
 						evidence:
 							"Gates resolveWritePath (line 46) and assertSafeWritePath (line 90).",
+						evidenceQuote: "if (!isPathInsideRoot(target, root)) throw",
 					},
 					{
 						severity: "medium",
@@ -6282,6 +6283,7 @@ test("deep-review finding-pipeline preserves structured locations through dedup 
 							},
 						],
 						evidence: "diff drops the $ anchor",
+						evidenceQuotes: ["return pattern.test(hostname)", "diff drops the $ anchor"],
 					},
 				],
 			},
@@ -6297,10 +6299,18 @@ test("deep-review finding-pipeline preserves structured locations through dedup 
 		{ file: "host/src/alpine/rootfs.ts", line: 46 },
 		{ file: "host/src/alpine/rootfs.ts", line: 90 },
 	]);
+	assert.deepEqual(boundary.evidenceQuotes, [
+		"if (!isPathInsideRoot(target, root)) throw",
+		"Gates resolveWritePath (line 46) and assertSafeWritePath (line 90).",
+	]);
 	const regex = dedup.findings.find((f) => f.title.includes("Regex anchor"));
 	// Explicit location preserved verbatim, including the symbol.
 	assert.deepEqual(regex.locations, [
 		{ file: "host/src/host/patterns.ts", line: 15, symbol: "matchHostname" },
+	]);
+	assert.deepEqual(regex.evidenceQuotes, [
+		"return pattern.test(hostname)",
+		"diff drops the $ anchor",
 	]);
 
 	const partition = await helper({
@@ -6325,11 +6335,20 @@ test("deep-review finding-pipeline preserves structured locations through dedup 
 	assert.equal(keepBoundary.file, "host/src/alpine/rootfs.ts");
 	assert.ok(keepBoundary.locations.some((loc) => loc.line === 46));
 	assert.ok(keepBoundary.locations.some((loc) => loc.line === 90));
+	assert.ok(
+		keepBoundary.evidenceQuotes.includes(
+			"if (!isPathInsideRoot(target, root)) throw",
+		),
+	);
 	const keepRegex = partition.partitions.keep.find((k) =>
 		k.title.includes("Regex anchor"),
 	);
 	assert.deepEqual(keepRegex.locations, [
 		{ file: "host/src/host/patterns.ts", line: 15, symbol: "matchHostname" },
+	]);
+	assert.deepEqual(keepRegex.evidenceQuotes, [
+		"return pattern.test(hostname)",
+		"diff drops the $ anchor",
 	]);
 });
 
