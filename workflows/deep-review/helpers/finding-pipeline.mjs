@@ -460,7 +460,7 @@ function supportReasonOf(item) {
 			))
 	)
 		return "test/coverage support";
-	if (/\b(stale|comment|comments|doc|docs|documentation)\b/.test(text))
+	if (/\b(stale|comment|comments|doc|docs|documentation)\b/.test(titleText))
 		return "comment/documentation support";
 	if (
 		/\bdead\b/.test(text) &&

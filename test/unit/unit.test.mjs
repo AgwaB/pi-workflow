@@ -6233,6 +6233,51 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 		),
 	);
 
+	const docsEvidenceRoot = await helper({
+		sources: {
+			"dedup-findings.main": {
+				findings: [
+					{
+						severity: "medium",
+						title: "String-form scrapling_fetch becomes a blocked custom tool",
+						file: "src/compiler.ts",
+						evidence:
+							"Docs mention object-form migration, but the root defect is runtime string-form compatibility.",
+						evidenceQuotes: ["-\t\"scrapling_fetch\","],
+					},
+					{
+						severity: "medium",
+						title:
+							"Missing targeted unit coverage for scrapling_fetch after removing its built-in safety classification",
+						file: "test/unit/unit.test.mjs",
+						evidence: "test coverage gap for scrapling_fetch",
+						evidenceQuotes: ["tools: [\"read\", \"custom_external_tool\"]"],
+					},
+				],
+			},
+			"devil-advocate.item-001": {
+				finding: {
+					title: "String-form scrapling_fetch becomes a blocked custom tool",
+				},
+				verdict: "KEEP",
+			},
+			"devil-advocate.item-002": {
+				finding: {
+					title:
+						"Missing targeted unit coverage for scrapling_fetch after removing its built-in safety classification",
+				},
+				verdict: "WEAKEN",
+			},
+		},
+		options: { mode: "partition", dedupStage: "dedup-findings" },
+	});
+	assert.deepEqual(
+		docsEvidenceRoot.partitions.keep.map((finding) => finding.title),
+		["String-form scrapling_fetch becomes a blocked custom tool"],
+	);
+	assert.deepEqual(docsEvidenceRoot.partitions.weaken, []);
+	assert.equal(docsEvidenceRoot.partitionSummary.supportNotes, 1);
+
 	const rootMerge = await helper({
 		sources: {
 			"dedup-findings.main": {
@@ -6415,6 +6460,38 @@ test("deep-review finding-pipeline preserves structured locations through dedup 
 		"return pattern.test(hostname)",
 		"diff drops the $ anchor",
 	]);
+
+	const schemaDir = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-review",
+		"schemas",
+	);
+	const dedupSchema = JSON.parse(
+		readFileSync(join(schemaDir, "deep-review-dedup-control.schema.json"), "utf8"),
+	);
+	const partitionSchema = JSON.parse(
+		readFileSync(
+			join(schemaDir, "deep-review-partition-control.schema.json"),
+			"utf8",
+		),
+	);
+	const validDedup = validateJsonSchema(
+		{ schema: "stage-control-v1", ...dedup },
+		dedupSchema,
+	);
+	assert.equal(validDedup.valid, true, JSON.stringify(validDedup.issues));
+	const validPartition = validateJsonSchema(
+		{ schema: "stage-control-v1", ...partition },
+		partitionSchema,
+	);
+	assert.equal(
+		validPartition.valid,
+		true,
+		JSON.stringify(validPartition.issues),
+	);
 });
 
 test("deep-research claim-evidence-gate enforces structured evidence, rejoins identity, and partitions statuses", async () => {
@@ -7137,6 +7214,55 @@ test("workflow output parser tolerates literal closing tags inside JSON strings"
 	assert.equal(parsed.valid, true, JSON.stringify(parsed.issues));
 	assert.equal(parsed.control.digest, "quote contains </control> safely");
 	assert.deepEqual(parsed.refs, [{ note: "literal </refs> in JSON data" }]);
+});
+
+test("deep-review report schema requires identity evidence for findings", () => {
+	const schemaDir = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-review",
+		"schemas",
+	);
+	const reportSchema = JSON.parse(
+		readFileSync(join(schemaDir, "deep-review-report-control.schema.json"), "utf8"),
+	);
+	const validControl = {
+		schema: "./schemas/deep-review-report-control.schema.json",
+		digest: "one finding",
+		summary: "summary",
+		verdict: "material_issue_found",
+		findings: [
+			{
+				findingId: "finding-001",
+				rootCauseId: "root-001",
+				title: "Pinned evidence survives",
+				severity: "medium",
+				locations: [{ file: "src/engine.ts", line: 10 }],
+				evidenceQuotes: ["if (changed) return bad;"],
+			},
+		],
+		risks: [],
+		needsHuman: [],
+		evidenceIndex: [],
+		recommendedNextAction: "Fix it.",
+	};
+	const valid = validateJsonSchema(validControl, reportSchema);
+	assert.equal(valid.valid, true, JSON.stringify(valid.issues));
+	const invalid = validateJsonSchema(
+		{
+			...validControl,
+			findings: [{ ...validControl.findings[0], evidenceQuotes: [] }],
+		},
+		reportSchema,
+	);
+	assert.equal(invalid.valid, false);
+	assert.ok(
+		invalid.issues.some(
+			(issue) => issue.path === "$.findings[0].evidenceQuotes",
+		),
+	);
 });
 
 test("minimal JSON schema validator enforces control schema subset", () => {
