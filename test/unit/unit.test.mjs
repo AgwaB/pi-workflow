@@ -2995,7 +2995,7 @@ test("spec-review partition helper joins verifier results and flags missing cove
 	).default;
 	const result = await helper({
 		sources: {
-			"analysis.candidate-findings.main": {
+			"candidate-findings.main": {
 				requirementCoverage: [{ requirementId: "REQ-001", status: "partial" }],
 				candidateFindings: [
 					{
