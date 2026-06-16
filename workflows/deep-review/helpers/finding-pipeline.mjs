@@ -165,6 +165,70 @@ function dedupeStrings(values) {
 	return out;
 }
 
+function sourceStatusesOf(context) {
+	return asObjects(context?.sourceStatuses);
+}
+
+function slimSourceStatus(status) {
+	return {
+		...(status.source ? { source: String(status.source) } : {}),
+		...(status.displayName ? { displayName: String(status.displayName) } : {}),
+		...(status.taskId ? { taskId: String(status.taskId) } : {}),
+		...(status.specId ? { specId: String(status.specId) } : {}),
+		...(status.stageId ? { stageId: String(status.stageId) } : {}),
+		status: String(status.status ?? "unknown"),
+		...(status.statusDetail ? { statusDetail: String(status.statusDetail) } : {}),
+		...(status.errorType ? { errorType: String(status.errorType) } : {}),
+		...(status.lastMessage ? { lastMessage: String(status.lastMessage).slice(0, 500) } : {}),
+	};
+}
+
+function sourceStatusKey(status) {
+	return `${status.specId ?? ""}|${status.taskId ?? ""}|${status.source ?? ""}|${status.status ?? ""}`;
+}
+
+function sourceStatusSummary(statuses) {
+	const all = sourceStatusesOf({ sourceStatuses: statuses }).map(slimSourceStatus);
+	const partialFailures = [];
+	const seen = new Set();
+	for (const status of all) {
+		if (status.status === "completed") continue;
+		const key = sourceStatusKey(status);
+		if (seen.has(key)) continue;
+		seen.add(key);
+		partialFailures.push(status);
+	}
+	return {
+		total: all.length,
+		completed: all.filter((status) => status.status === "completed").length,
+		nonCompleted: partialFailures.length,
+		partialFailures,
+	};
+}
+
+function partialFailuresFromSource(source) {
+	return [
+		...asObjects(source?.sourceStatusSummary?.partialFailures),
+		...asObjects(source?.reportContext?.partialFailures),
+	].map(slimSourceStatus);
+}
+
+function mergePartialFailures(...groups) {
+	const merged = [];
+	const seen = new Set();
+	for (const group of groups) {
+		for (const status of group ?? []) {
+			const slim = slimSourceStatus(status);
+			if (slim.status === "completed") continue;
+			const key = sourceStatusKey(slim);
+			if (seen.has(key)) continue;
+			seen.add(key);
+			merged.push(slim);
+		}
+	}
+	return merged;
+}
+
 function evidenceQuotesOf(finding) {
 	return dedupeStrings([
 		...quoteStrings(finding.evidenceQuotes),
@@ -215,11 +279,14 @@ function locationsOf(finding) {
 }
 
 function normalizeFinding(finding, index) {
+	const id =
+		typeof finding.id === "string" && finding.id
+			? finding.id
+			: `finding-${String(index + 1).padStart(3, "0")}`;
 	return {
-		id:
-			typeof finding.id === "string" && finding.id
-				? finding.id
-				: `finding-${String(index + 1).padStart(3, "0")}`,
+		id,
+		findingId: typeof finding.findingId === "string" && finding.findingId ? finding.findingId : id,
+		rootCauseId: typeof finding.rootCauseId === "string" && finding.rootCauseId ? finding.rootCauseId : `root-${String(index + 1).padStart(3, "0")}`,
 		severity: String(finding.severity ?? "unknown"),
 		title: String(finding.title ?? "").trim(),
 		file:
@@ -235,11 +302,12 @@ function normalizeFinding(finding, index) {
 	};
 }
 
-function dedupFindings(sources) {
+function dedupFindings(sources, context = {}) {
 	const flattened = [];
 	for (const source of Object.values(sources ?? {})) {
 		for (const finding of findingsOf(source)) flattened.push(finding);
 	}
+	const statusSummary = sourceStatusSummary(sourceStatusesOf(context));
 	// Duplicate when two findings share the same file (or both lack one) and
 	// their title tokens largely overlap. Deterministic, order-stable: the first
 	// occurrence wins unless a later duplicate carries more evidence text.
@@ -276,6 +344,8 @@ function dedupFindings(sources) {
 	);
 	return {
 		findings,
+		digest: `dedup: raw=${flattened.length}, unique=${findings.length}, duplicates=${duplicates.length}, partialFailures=${statusSummary.nonCompleted}`,
+		sourceStatusSummary: statusSummary,
 		dedupSummary: {
 			rawCount: flattened.length,
 			uniqueCount: findings.length,
@@ -487,6 +557,8 @@ function mergeFindingItems(primary, duplicate) {
 	primary.mergedFindings = [
 		...(Array.isArray(primary.mergedFindings) ? primary.mergedFindings : []),
 		{
+			findingId: duplicate.findingId ?? duplicate.id,
+			rootCauseId: duplicate.rootCauseId,
 			title: duplicate.title,
 			severity: duplicate.severity,
 			file: duplicate.file,
@@ -523,8 +595,57 @@ function mergeEquivalentRootFindings(partitions, normalizationNotes) {
 	return mergedCount;
 }
 
-function partitionVerdicts(sources, options = {}) {
+function compactFindingForReport(item) {
+	return {
+		...(item.findingId ? { findingId: item.findingId } : {}),
+		...(item.rootCauseId ? { rootCauseId: item.rootCauseId } : {}),
+		title: item.title,
+		severity: item.severity,
+		...(item.file ? { file: item.file } : {}),
+		locations: Array.isArray(item.locations) ? item.locations : [],
+		evidenceQuotes: Array.isArray(item.evidenceQuotes) ? item.evidenceQuotes : [],
+		...(item.recommendedAction ? { recommendedAction: item.recommendedAction } : {}),
+		...(Array.isArray(item.counterEvidence) && item.counterEvidence.length > 0
+			? { counterEvidence: item.counterEvidence }
+			: {}),
+		...(item.note ? { note: item.note } : {}),
+		...(Array.isArray(item.mergedFindings) && item.mergedFindings.length > 0
+			? {
+					mergedFindingIds: item.mergedFindings
+						.map((finding) => finding.findingId ?? finding.id)
+						.filter(Boolean),
+				}
+			: {}),
+	};
+}
+
+function buildReportContext(partitions, supportNotes, partitionSummary, normalizationNotes, partialFailures) {
+	return {
+		keep: partitions.keep.map(compactFindingForReport),
+		weaken: partitions.weaken.map(compactFindingForReport),
+		needsHuman: partitions.needsHuman.map(compactFindingForReport),
+		supportNoteSummaries: supportNotes.map((note) => ({
+			title: note.title,
+			...(note.severity ? { severity: note.severity } : {}),
+			...(note.file ? { file: note.file } : {}),
+			...(note.reason ? { reason: note.reason } : {}),
+			...(note.supportingFindingOf ? { supportingFindingOf: note.supportingFindingOf } : {}),
+			locations: Array.isArray(note.locations) ? note.locations : [],
+			evidenceQuotes: Array.isArray(note.evidenceQuotes) ? note.evidenceQuotes : [],
+		})),
+		partialFailures,
+		partitionSummary,
+		normalizationNotes,
+	};
+}
+
+function partitionVerdicts(sources, options = {}, context = {}) {
 	const dedupStageId = String(options.dedupStage ?? "dedup-findings");
+	const directStatusSummary = sourceStatusSummary(sourceStatusesOf(context));
+	const partialFailures = mergePartialFailures(
+		directStatusSummary.partialFailures,
+		...Object.values(sources ?? {}).map(partialFailuresFromSource),
+	);
 	let reviewerFindings = [];
 	const verdictEntries = [];
 	for (const [specId, source] of Object.entries(sources ?? {})) {
@@ -556,6 +677,7 @@ function partitionVerdicts(sources, options = {}) {
 	const partitions = { keep: [], weaken: [], drop: [], needsHuman: [] };
 	const normalizationNotes = [];
 	const matchedTitles = new Set();
+	let missingVerdicts = 0;
 
 	for (const entry of verdictEntries) {
 		const title = findingTitleOf(entry);
@@ -572,6 +694,8 @@ function partitionVerdicts(sources, options = {}) {
 			);
 		}
 		const item = {
+			findingId: reviewerFinding?.findingId ?? reviewerFinding?.id,
+			rootCauseId: reviewerFinding?.rootCauseId ?? reviewerFinding?.findingId ?? reviewerFinding?.id,
 			title,
 			verdict,
 			// KEEP findings carry the reviewer severity verbatim (code-enforced join);
@@ -613,7 +737,10 @@ function partitionVerdicts(sources, options = {}) {
 	for (const finding of reviewerFindings) {
 		const titleKey = normalizeText(finding.title);
 		if (matchedTitles.has(titleKey)) continue;
+		missingVerdicts += 1;
 		partitions.needsHuman.push({
+			findingId: finding.findingId ?? finding.id,
+			rootCauseId: finding.rootCauseId ?? finding.findingId ?? finding.id,
 			title: String(finding.title ?? ""),
 			verdict: "NEEDS_HUMAN",
 			severity: finding.severity,
@@ -637,27 +764,45 @@ function partitionVerdicts(sources, options = {}) {
 		normalizationNotes,
 	);
 
+	const partitionSummary = {
+		keep: partitions.keep.length,
+		weaken: partitions.weaken.length,
+		drop: partitions.drop.length,
+		needsHuman: partitions.needsHuman.length,
+		supportNotes: supportNotes.length,
+		mergedFindings,
+		verdictsReceived: verdictEntries.length,
+		reviewerFindings: reviewerFindings.length,
+		missingVerdicts,
+		partialFailures: partialFailures.length,
+	};
+	const reportContext = buildReportContext(
+		partitions,
+		supportNotes,
+		partitionSummary,
+		normalizationNotes,
+		partialFailures,
+	);
+
 	return {
 		partitions,
 		supportNotes,
-		partitionSummary: {
-			keep: partitions.keep.length,
-			weaken: partitions.weaken.length,
-			drop: partitions.drop.length,
-			needsHuman: partitions.needsHuman.length,
-			supportNotes: supportNotes.length,
-			mergedFindings,
-			verdictsReceived: verdictEntries.length,
-			reviewerFindings: reviewerFindings.length,
+		reportContext,
+		digest: `partition: keep=${partitionSummary.keep}, weaken=${partitionSummary.weaken}, drop=${partitionSummary.drop}, needsHuman=${partitionSummary.needsHuman}, missingVerdicts=${missingVerdicts}, partialFailures=${partialFailures.length}, supportNotes=${supportNotes.length}`,
+		sourceStatusSummary: {
+			...directStatusSummary,
+			partialFailures,
+			nonCompleted: partialFailures.length,
 		},
+		partitionSummary,
 		normalizationNotes,
 	};
 }
 
-export default async function findingPipeline({ sources, options = {} }) {
+export default async function findingPipeline({ sources, options = {}, context = {} }) {
 	const mode = String(options.mode ?? "");
-	if (mode === "dedup") return dedupFindings(sources);
-	if (mode === "partition") return partitionVerdicts(sources, options);
+	if (mode === "dedup") return dedupFindings(sources, context);
+	if (mode === "partition") return partitionVerdicts(sources, options, context);
 	throw new Error(
 		`finding-pipeline: unknown mode "${mode}" (expected "dedup" or "partition")`,
 	);

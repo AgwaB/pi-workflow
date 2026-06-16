@@ -44,6 +44,11 @@ export interface WorkflowSourceManifestSource {
 	displayName?: string;
 	taskId?: string;
 	specId?: string;
+	stageId?: string;
+	status?: string;
+	statusDetail?: string;
+	lastMessage?: string;
+	errorType?: string;
 	digest?: string;
 	controlProjection?: unknown;
 	projectionMissingPaths?: string[];
@@ -90,6 +95,11 @@ export interface WorkflowArtifactListEntry {
 	displayName?: string;
 	taskId?: string;
 	specId?: string;
+	stageId?: string;
+	status?: string;
+	statusDetail?: string;
+	lastMessage?: string;
+	errorType?: string;
 	digest?: string;
 	controlProjection?: unknown;
 	projectionMissingPaths?: string[];
@@ -197,6 +207,17 @@ export function normalizeWorkflowSourceManifest(
 			),
 			taskId: optionalString(sourceValue.taskId, `sources[${index}].taskId`),
 			specId: optionalString(sourceValue.specId, `sources[${index}].specId`),
+			stageId: optionalString(sourceValue.stageId, `sources[${index}].stageId`),
+			status: optionalString(sourceValue.status, `sources[${index}].status`),
+			statusDetail: optionalString(
+				sourceValue.statusDetail,
+				`sources[${index}].statusDetail`,
+			),
+			lastMessage: optionalString(
+				sourceValue.lastMessage,
+				`sources[${index}].lastMessage`,
+			),
+			errorType: optionalString(sourceValue.errorType, `sources[${index}].errorType`),
 			digest: optionalString(sourceValue.digest, `sources[${index}].digest`),
 			controlProjection: sourceValue.controlProjection,
 			projectionMissingPaths: optionalStringArray(
@@ -246,6 +267,11 @@ export function listWorkflowArtifactSources(
 			displayName: source.displayName,
 			taskId: source.taskId,
 			specId: source.specId,
+			stageId: source.stageId,
+			status: source.status,
+			statusDetail: source.statusDetail,
+			lastMessage: source.lastMessage,
+			errorType: source.errorType,
 			digest: source.digest,
 			controlProjection: source.controlProjection,
 			projectionMissingPaths: source.projectionMissingPaths,

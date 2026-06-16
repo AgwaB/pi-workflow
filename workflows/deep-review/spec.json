@@ -108,6 +108,15 @@
           "partition-verdicts"
         ],
         "sourcePolicy": "partial",
+        "sourceProjection": {
+          "include": [
+            "$.reportContext",
+            "$.partitionSummary",
+            "$.normalizationNotes",
+            "$.sourceStatusSummary"
+          ],
+          "maxChars": 8000
+        },
         "output": {
           "analysis": {
             "required": true
@@ -118,7 +127,7 @@
           "maxDigestChars": 1200,
           "controlSchema": "./schemas/deep-review-report-control.schema.json"
         },
-        "prompt": "Use Source Stage Context and the runtime task to produce an evidence-backed deep review synthesis. The partition-verdicts source already applied devil-advocate verdicts deterministically: partitions.keep, partitions.weaken, partitions.drop, and partitions.needsHuman. Include every partitions.keep item as a finding with its severity field copied verbatim; the severity join is code-enforced upstream, so never change a keep item's severity. If a keep/weaken item has mergedFindings, treat them as provenance for the same root defect, not as separate findings. Each keep and weaken item also carries code-preserved locations and evidenceQuotes arrays; copy each finding's locations and evidenceQuotes into your finding verbatim and never drop the line numbers, symbols, or exact quote strings they contain. Include partitions.weaken items with reduced severity, citing the counterEvidence that justifies each reduction. Exclude partitions.drop items from findings. List partitions.needsHuman items under needsHuman. The support helper may also provide supportNotes for test gaps, stale comments/docs, or dead-code symptoms related to a root finding; do not promote supportNotes to findings, but summarize them in risks or evidenceIndex as supporting context. Report partitionSummary counts and any normalizationNotes in risks so silent verdict drift is visible. If any source task failed, mention the partial-review limitation in risks. Put machine-readable JSON in <control> with summary, verdict, findings, risks, needsHuman, evidenceIndex, and recommendedNextAction. Each finding must include title, severity, locations, and evidenceQuotes copied from its keep/weaken item. Put detailed prose and evidence discussion in <analysis>."
+        "prompt": "Use Source Stage Context and the runtime task to produce an evidence-backed deep review synthesis. Prefer the partition-verdicts controlProjection.reportContext as the authoritative finding ledger when it is present; use workflow_artifact reads only when required fields are missing or debug detail is needed. The partition-verdicts source already applied devil-advocate verdicts deterministically: reportContext.keep, reportContext.weaken, reportContext.needsHuman, and reportContext.supportNoteSummaries summarize the final ledger. Include every reportContext.keep item as a finding with its severity field copied verbatim; the severity join is code-enforced upstream, so never change a keep item's severity. If a keep/weaken item has mergedFindingIds or merged provenance, treat them as provenance for the same root defect, not as separate findings. Each keep and weaken item carries code-preserved locations and evidenceQuotes arrays; copy each finding's locations and evidenceQuotes into your finding verbatim and never drop the line numbers, symbols, or exact quote strings they contain. Include reportContext.weaken items with reduced severity, citing the counterEvidence that justifies each reduction. Exclude drop items from findings. List reportContext.needsHuman items under needsHuman. The support helper may also provide supportNoteSummaries for test gaps, stale comments/docs, or dead-code symptoms related to a root finding; do not promote support notes to findings, but summarize them in risks or evidenceIndex as supporting context. Report partitionSummary counts and any normalizationNotes in risks so silent verdict drift is visible. If sourceStatusSummary/reportContext.partialFailures or any source manifest entry shows non-completed upstream work, mention the partial-review limitation in risks and be conservative about unreviewed scopes. Put machine-readable JSON in <control> with summary, verdict, findings, risks, needsHuman, evidenceIndex, and recommendedNextAction. Each finding must include title, severity, locations, and evidenceQuotes copied from its keep/weaken item. Put detailed prose and evidence discussion in <analysis>."
       }
     ]
   }

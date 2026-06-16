@@ -2114,6 +2114,14 @@ async function executeSupportTask(
 			taskId: task.taskId,
 			runId: run.runId,
 			cwd,
+			...(compiledTask.artifactGraph?.enabled
+				? {
+						sourceStatuses: buildArtifactGraphSupportSourceStatuses(
+							run,
+							compiledTask.dependsOn ?? [],
+						),
+					}
+				: {}),
 		},
 	});
 
@@ -2200,6 +2208,63 @@ async function readArtifactGraphSupportSources(
 			await readArtifactGraphControl(cwd, source);
 	}
 	return sources;
+}
+
+function buildArtifactGraphSupportSourceStatuses(
+	run: WorkflowRunRecord,
+	dependsOn: readonly string[],
+): Array<Record<string, unknown>> {
+	const statuses: Array<Record<string, unknown>> = [];
+	const usedNames = new Set<string>();
+	for (const specId of dependsOn) {
+		const source = run.tasks.find((candidate) => candidate.specId === specId);
+		if (!source) continue;
+		statuses.push({
+			source: sourceNameForTask(source, usedNames),
+			displayName: source.displayName,
+			taskId: source.taskId,
+			specId: source.specId,
+			stageId: source.stageId,
+			...sourceStatusForTask(source),
+		});
+	}
+	return statuses;
+}
+
+function sourceStatusForTask(
+	task: WorkflowTaskRunRecord,
+): {
+	status: string;
+	statusDetail?: string;
+	lastMessage?: string;
+	errorType?: string;
+} {
+	const lastMessage = sanitizeSourceLastMessage(task.lastMessage);
+	return {
+		status: task.status,
+		...(task.statusDetail ? { statusDetail: task.statusDetail } : {}),
+		...(lastMessage ? { lastMessage } : {}),
+		...(task.status !== "completed" ? { errorType: sourceErrorType(task) } : {}),
+	};
+}
+
+function sanitizeSourceLastMessage(value: string | undefined): string | undefined {
+	const text = String(value ?? "").replace(/\s+/g, " ").trim();
+	return text ? text.slice(0, 500) : undefined;
+}
+
+function sourceErrorType(task: WorkflowTaskRunRecord): string {
+	const detail = String(task.statusDetail ?? "").toLowerCase();
+	const message = String(task.lastMessage ?? "").toLowerCase();
+	if (/timeout|timed out/.test(detail) || /timeout|timed out/.test(message))
+		return "timeout";
+	if (/schema|validation|invalid/.test(detail) || /schema|validation|invalid/.test(message))
+		return "schema_violation";
+	if (/model|subagent/.test(detail) || /model|subagent/.test(message))
+		return "model_failure";
+	if (/skip|skipped/.test(task.status) || /skip|skipped/.test(detail))
+		return "skipped";
+	return task.status === "failed" ? "failed" : task.status;
 }
 
 async function writeArtifactGraphSupportResult(
@@ -2442,8 +2507,21 @@ async function buildArtifactGraphSourceManifestSources(
 	const usedNames = new Set<string>();
 	for (const dep of contextDependsOn) {
 		const sourceTask = bySpecId.get(dep);
-		if (!sourceTask || sourceTask.status !== "completed") continue;
+		if (!sourceTask) continue;
 		const source = sourceNameForTask(sourceTask, usedNames);
+		const status = sourceStatusForTask(sourceTask);
+		if (sourceTask.status !== "completed") {
+			sources.push({
+				source,
+				displayName: sourceTask.displayName,
+				taskId: sourceTask.taskId,
+				specId: sourceTask.specId,
+				stageId: sourceTask.stageId,
+				...status,
+				artifacts: {},
+			});
+			continue;
+		}
 		const artifacts = await artifactRefsForTask(cwd, sourceTask);
 		if (Object.keys(artifacts).length === 0) continue;
 		const control = await readArtifactGraphControl(cwd, sourceTask).catch(
@@ -2455,6 +2533,8 @@ async function buildArtifactGraphSourceManifestSources(
 			displayName: sourceTask.displayName,
 			taskId: sourceTask.taskId,
 			specId: sourceTask.specId,
+			stageId: sourceTask.stageId,
+			...status,
 			digest: controlDigest(control),
 			...(controlProjection.value !== undefined
 				? { controlProjection: controlProjection.value }
@@ -2592,7 +2672,7 @@ function formatArtifactGraphSourceContext(
 ): string {
 	return [
 		"# Workflow Artifact Inputs",
-		"Use workflow_artifact to list/read upstream workflow artifacts. The inline data below is a digest only; it is not a substitute for required reads.",
+		"Use workflow_artifact to list/read upstream workflow artifacts. Inline controlProjection fields are authoritative for the projected data they contain; use artifact reads for declared requiredReads, missing fields, or debug detail.",
 		requiredReads.length > 0
 			? [
 					"Required reads before final output:",
@@ -2605,6 +2685,11 @@ function formatArtifactGraphSourceContext(
 				source: source.source,
 				taskId: source.taskId,
 				specId: source.specId,
+				stageId: source.stageId,
+				status: source.status,
+				statusDetail: source.statusDetail,
+				lastMessage: source.lastMessage,
+				errorType: source.errorType,
 				digest: source.digest,
 				controlProjection: source.controlProjection,
 				projectionMissingPaths: source.projectionMissingPaths,

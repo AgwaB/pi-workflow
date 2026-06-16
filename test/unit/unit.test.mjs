@@ -4030,7 +4030,7 @@ test("artifactGraph runtime support executes helper and writes artifacts", async
 	}
 });
 
-test("artifactGraph runtime support omits failed dependency sources", async () => {
+test("artifactGraph runtime support omits failed control sources but passes status metadata", async () => {
 	const cwd = makeProject();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
@@ -4039,7 +4039,7 @@ test("artifactGraph runtime support omits failed dependency sources", async () =
 		const specPath = join(workflowDir, "spec.json");
 		writeFileSync(
 			join(workflowDir, "helpers", "sources.mjs"),
-			"export default async function helper({ sources }) { return { sourceKeys: Object.keys(sources).sort(), failedSource: sources.extractFailed ?? null, okSource: sources.extractOk }; }\n",
+			"export default async function helper({ sources, context }) { return { sourceKeys: Object.keys(sources).sort(), sourceStatuses: context.sourceStatuses, failedSource: sources.extractFailed ?? null, okSource: sources.extractOk }; }\n",
 		);
 		const spec = workflowSpec("unit-scout", {
 			artifactGraph: {
@@ -4092,25 +4092,46 @@ test("artifactGraph runtime support omits failed dependency sources", async () =
 		const updated = await readRunRecord(cwd, run.runId);
 		const support = updated.tasks.find((task) => task.specId === "audit.main");
 		assert.equal(support?.status, "completed");
-		assert.deepEqual(
-			JSON.parse(
-				readFileSync(
-					join(dirname(join(cwd, support.files.result)), "control.json"),
-					"utf8",
-				),
+		const control = JSON.parse(
+			readFileSync(
+				join(dirname(join(cwd, support.files.result)), "control.json"),
+				"utf8",
 			),
-			{
-				schema: "stage-control-v1",
-				digest: "Support helper completed.",
-				failedSource: null,
-				okSource: {
-					schema: "stage-control-v1",
-					digest: "extractOk completed",
-					claims: ["kept"],
-				},
-				sourceKeys: ["extractOk"],
-			},
 		);
+		assert.deepEqual(control, {
+			schema: "stage-control-v1",
+			digest: "Support helper completed.",
+			failedSource: null,
+			okSource: {
+				schema: "stage-control-v1",
+				digest: "extractOk completed",
+				claims: ["kept"],
+			},
+			sourceKeys: ["extractOk"],
+			sourceStatuses: [
+				{
+					source: "extractOk",
+					displayName: "extractOk.main",
+					taskId: ok.taskId,
+					specId: "extractOk.main",
+					stageId: "extractOk",
+					status: "completed",
+					statusDetail: "completed",
+					lastMessage: "completed",
+				},
+				{
+					source: "extractFailed",
+					displayName: "extractFailed.main",
+					taskId: failed.taskId,
+					specId: "extractFailed.main",
+					stageId: "extractFailed",
+					status: "failed",
+					statusDetail: "failed",
+					lastMessage: "failed",
+					errorType: "failed",
+				},
+			],
+		});
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
@@ -6040,10 +6061,24 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 			},
 		},
 		options: { mode: "dedup" },
+		context: {
+			sourceStatuses: [
+				{
+					source: "reviewers.release-test-hygiene",
+					specId: "reviewers.release-test-hygiene",
+					stageId: "reviewers",
+					status: "failed",
+					statusDetail: "failed",
+					lastMessage: "pi-subagent run failed: model",
+					errorType: "model_failure",
+				},
+			],
+		},
 	});
 	assert.equal(dedup.dedupSummary.rawCount, 3);
 	assert.equal(dedup.dedupSummary.uniqueCount, 2);
 	assert.equal(dedup.dedupSummary.duplicateCount, 1);
+	assert.match(dedup.digest, /dedup: raw=3, unique=2, duplicates=1/);
 	// Duplicate resolution keeps the variant with more evidence text.
 	assert.ok(
 		dedup.findings.some((f) => f.evidence.includes("longer supporting")),
@@ -6084,8 +6119,28 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 			},
 		},
 		options: { mode: "partition", dedupStage: "dedup-findings" },
+		context: {
+			sourceStatuses: [
+				{
+					source: "devil-advocate.item-003",
+					specId: "devil-advocate.item-003",
+					stageId: "devil-advocate",
+					status: "failed",
+					statusDetail: "failed",
+					lastMessage: "pi-subagent run failed: model",
+					errorType: "model_failure",
+				},
+			],
+		},
 	});
 	assert.equal(partition.partitionSummary.keep, 1);
+	assert.match(partition.digest, /partition: keep=1/);
+	assert.equal(partition.partitionSummary.partialFailures, 2);
+	assert.deepEqual(
+		partition.reportContext.partialFailures.map((failure) => failure.specId),
+		["devil-advocate.item-003", "reviewers.release-test-hygiene"],
+	);
+	assert.equal(partition.reportContext.keep[0].findingId, partition.partitions.keep[0].findingId);
 	// Severity joined from the reviewer finding, not the devil-advocate echo.
 	assert.equal(partition.partitions.keep[0].severity, "critical");
 	// Unrecognized verdict routes to needsHuman, not silence.
@@ -6464,6 +6519,9 @@ test("workflow_artifact lists visible sources, reads by source name, and records
 							displayName: "Plan",
 							taskId: "task-1",
 							specId: "plan",
+							stageId: "plan",
+							status: "completed",
+							statusDetail: "completed",
 							digest: "planned 2 items",
 							artifacts: {
 								control: { path: join(producerDir, "control.json") },
@@ -6472,6 +6530,18 @@ test("workflow_artifact lists visible sources, reads by source name, and records
 								raw: { path: join(producerDir, "raw.md") },
 								prompt: { path: join(producerDir, "prompt.md") },
 							},
+						},
+						{
+							source: "failed-reviewer",
+							displayName: "Failed reviewer",
+							taskId: "task-failed",
+							specId: "reviewers.failed",
+							stageId: "reviewers",
+							status: "failed",
+							statusDetail: "failed",
+							lastMessage: "model failed",
+							errorType: "model_failure",
+							artifacts: {},
 						},
 					],
 				},
@@ -6490,6 +6560,14 @@ test("workflow_artifact lists visible sources, reads by source name, and records
 			"refs",
 			"raw",
 		]);
+		assert.equal(taskList[1].source, "failed-reviewer");
+		assert.equal(taskList[1].specId, "reviewers.failed");
+		assert.equal(taskList[1].stageId, "reviewers");
+		assert.equal(taskList[1].status, "failed");
+		assert.equal(taskList[1].statusDetail, "failed");
+		assert.equal(taskList[1].lastMessage, "model failed");
+		assert.equal(taskList[1].errorType, "model_failure");
+		assert.deepEqual(taskList[1].artifacts, []);
 		const debugList = listWorkflowArtifactSources(manifest, {
 			accessMode: "human-debug",
 		});
