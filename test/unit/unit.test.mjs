@@ -7303,21 +7303,10 @@ test("artifact graph workflow runs workflow artifacts and enforces required read
 						taskId,
 						"read-ledger.jsonl",
 					);
-					mkdirSync(dirname(ledgerPath), { recursive: true });
-					writeFileSync(
-						ledgerPath,
-						`${JSON.stringify({
-							schema: "workflow-artifact-read-v1",
-							runId: workflowRunId,
-							taskId,
-							source: "analyze",
-							artifact: "analysis",
-							at: new Date().toISOString(),
-							bytes: 10,
-							returnedBytes: 10,
-							truncated: false,
-						})}\n`,
-					);
+					const ledger = readFileSync(ledgerPath, "utf8");
+					assert.match(ledger, /"source":"analyze"/);
+					assert.match(ledger, /"artifact":"analysis"/);
+					assert.match(ledger, /"runtimePreload":true/);
 				}
 				const control = isFinal
 					? { schema: "stage-control-v1", digest: "final done", verdict: "ok" }
@@ -7411,11 +7400,12 @@ test("artifact graph workflow runs workflow artifacts and enforces required read
 			readFileSync(join(finalDir, "analysis.md"), "utf8"),
 			/Final analysis/,
 		);
+		const finalTaskPrompt = readFileSync(join(finalDir, "task.md"), "utf8");
+		assert.ok(finalTaskPrompt.includes("Required reads before final output"));
 		assert.ok(
-			readFileSync(join(finalDir, "task.md"), "utf8").includes(
-				"Required reads before final output",
-			),
+			finalTaskPrompt.includes("# Required Workflow Artifact Read Contents"),
 		);
+		assert.ok(finalTaskPrompt.includes("## analyze.analysis"));
 		const finalManifest = JSON.parse(
 			readFileSync(join(finalDir, "source-manifest.json"), "utf8"),
 		);

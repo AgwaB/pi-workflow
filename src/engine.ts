@@ -1,4 +1,4 @@
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -13,6 +13,7 @@ import {
 	isTerminalWorkflowStatus,
 	isTerminalTaskStatus,
 	listRunRecords,
+	nowIso,
 	readIndex,
 	readJson,
 	readRunRecord,
@@ -2491,6 +2492,13 @@ async function prepareArtifactGraphTask(
 	});
 
 	const requiredReads = compiledTask.artifactGraph?.requiredReads ?? [];
+	const requiredReadContext = await preloadRequiredArtifactReads({
+		sources,
+		requiredReads,
+		ledgerPath,
+		runId: run.runId,
+		taskId: task.taskId,
+	});
 	return {
 		...compiledTask,
 		cwd: task.cwd,
@@ -2511,7 +2519,78 @@ async function prepareArtifactGraphTask(
 		compiledPrompt: [
 			compiledTask.compiledPrompt,
 			formatArtifactGraphSourceContext(sources, requiredReads),
-		].join("\n\n"),
+			requiredReadContext || undefined,
+		]
+			.filter(Boolean)
+			.join("\n\n"),
+	};
+}
+
+async function preloadRequiredArtifactReads(options: {
+	sources: WorkflowSourceManifestSource[];
+	requiredReads: readonly string[];
+	ledgerPath: string;
+	runId: string;
+	taskId: string;
+}): Promise<string> {
+	if (options.requiredReads.length === 0) return "";
+	const sections: string[] = [];
+	for (const required of options.requiredReads) {
+		const parsed = parseRequiredArtifactRead(required);
+		if (!parsed) {
+			sections.push(
+				`## ${required}\n\nRequired read name is invalid; expected source.artifact.`,
+			);
+			continue;
+		}
+		const source = options.sources.find(
+			(candidate) => candidate.source === parsed.source,
+		);
+		const artifact = source?.artifacts?.[parsed.artifact];
+		if (!source || !artifact?.path) {
+			sections.push(
+				`## ${required}\n\nRequired artifact was not available in the source manifest.`,
+			);
+			continue;
+		}
+		const content = await readFile(artifact.path, "utf8");
+		const bytes = Buffer.byteLength(content, "utf8");
+		await appendFile(
+			options.ledgerPath,
+			`${JSON.stringify({
+				schema: "workflow-artifact-read-v1",
+				runId: options.runId,
+				taskId: options.taskId,
+				source: parsed.source,
+				artifact: parsed.artifact,
+				at: nowIso(),
+				bytes,
+				returnedBytes: bytes,
+				truncated: false,
+				runtimePreload: true,
+			})}\n`,
+			"utf8",
+		);
+		const fence = parsed.artifact === "control" || parsed.artifact === "refs" ? "json" : "";
+		sections.push(
+			[`## ${required}`, "", `\`\`\`${fence}`, content, "```"].join("\n"),
+		);
+	}
+	return [
+		"# Required Workflow Artifact Read Contents",
+		"The workflow runtime preloaded these declared requiredReads in full and recorded them in the read ledger before launch. Treat this section as equivalent to reading the same artifacts with workflow_artifact.",
+		...sections,
+	].join("\n\n");
+}
+
+function parseRequiredArtifactRead(
+	value: string,
+): { source: string; artifact: keyof WorkflowSourceManifestSource["artifacts"] } | null {
+	const match = String(value).match(/^([A-Za-z0-9_.-]+)\.(control|analysis|refs|raw)$/);
+	if (!match) return null;
+	return {
+		source: match[1] ?? "",
+		artifact: match[2] as keyof WorkflowSourceManifestSource["artifacts"],
 	};
 }
 
