@@ -1,0 +1,99 @@
+{
+  "schemaVersion": 1,
+  "taskId": "internal-runtime-task-propagation-draft",
+  "candidateId": "review-case-b2",
+  "status": "draft",
+  "sourceRevision": "a48c12a899447309b0adbb200d014c88cca61c8c",
+  "fixturePatch": "fixture.diff",
+  "referenceFixPatch": "reference-fix.patch",
+  "bugs": [
+    {
+      "bugId": "G1",
+      "severity": "high",
+      "category": "api_contract",
+      "summary": "The proposed patch ignores `injectRuntimeTask` opt-in when computing `injectTask`, so non-foreach opt-in stages lose runtime task prompt injection and foreach child metadata no longer carries the opt-in flag.",
+      "impact": "Opted-in reduce/support/report-style stages can miss cross-cutting user constraints. For foreach stages, the direct prompt condition still has a foreach-specific opt-in branch, but the emitted `foreach.injectRuntimeTask` metadata is changed from the opt-in value to false.",
+      "locations": [
+        {
+          "file": "src/compiler.ts",
+          "startLine": 798,
+          "endLine": 804,
+          "symbol": "compileArtifactGraphPlan"
+        },
+        {
+          "file": "src/compiler.ts",
+          "startLine": 891,
+          "endLine": 900,
+          "symbol": "compileArtifactGraphPlan.foreach"
+        }
+      ],
+      "requiredEvidence": [
+        {
+          "file": "src/compiler.ts",
+          "quote": "may opt in with `injectRuntimeTask: true`",
+          "matchMode": "substring"
+        },
+        {
+          "file": "src/compiler.ts",
+          "quote": "const injectTask = taskStageKind === \"task\";",
+          "matchMode": "substring"
+        },
+        {
+          "file": "src/compiler.ts",
+          "quote": "(taskStageKind !== \"foreach\" && injectTask)",
+          "matchMode": "substring"
+        },
+        {
+          "file": "src/compiler.ts",
+          "quote": "injectRuntimeTask: injectTask",
+          "matchMode": "substring"
+        }
+      ],
+      "acceptableFixes": [
+        "Restore `const injectTask = taskStageKind === \"task\" || optInInjectRuntimeTask;`.",
+        "Preserve opt-in runtime task injection for non-task stages while keeping default injection limited.",
+        "Add a regression test that opted-in non-task stages and foreach metadata receive runtime task constraints."
+      ],
+      "mustNotSay": [
+        "All stages should always receive the runtime task unconditionally.",
+        "This only affects prompt text and cannot change review behavior.",
+        "The foreach prompt condition itself loses the opt-in branch; it still references `optInInjectRuntimeTask` directly."
+      ]
+    }
+  ],
+  "noIssueRegions": [],
+  "mustAvoidClaims": [
+    "Using prior A/B run notes as evidence.",
+    "Claiming the patch must match HEAD instead of evaluating runtime task propagation semantics."
+  ],
+  "difficulty": {
+    "bucket": "medium",
+    "plainExpected": "mixed",
+    "rationale": "Provider reviews judged this medium: the changed line is local, but correct impact requires tracing non-foreach prompt injection and foreach metadata."
+  },
+  "leakagePolicy": {
+    "candidateVisible": [
+      "sanitized repo",
+      "fixture.diff",
+      "neutral review prompt"
+    ],
+    "candidateForbidden": [
+      "gold-key.draft.json",
+      "author-notes.md",
+      "reference-fix.patch",
+      "repro.sh",
+      ".git",
+      ".pi/eval",
+      "A/B run artifacts"
+    ]
+  },
+  "approval": {
+    "state": "needs-review",
+    "providerReviews": [
+      ".pi/eval/bug-forge/provider-reviews/gpt-5.5-xhigh-gold-review.md",
+      ".pi/eval/bug-forge/provider-reviews/kimi-xhigh-gold-review.md"
+    ],
+    "approvedBy": [],
+    "notes": "Calibration saturated: all arms scored 1.0. Rewrite with subtler same-root-cause variant before primary benchmark use."
+  }
+}

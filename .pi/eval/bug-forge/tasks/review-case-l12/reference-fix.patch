@@ -1,0 +1,13 @@
+diff --git aabb/src/workflow-artifacts.ts bbaa/src/workflow-artifacts.ts
+index 48743f7..eee56d9 100644
+--- aabb/src/workflow-artifacts.ts
++++ bbaa/src/workflow-artifacts.ts
+@@ -145,7 +145,7 @@ export function buildSourceContextPacket(
+ 				stageId,
+ 				status,
+ 				structuredOutput: capStructuredOutput(
+-					structuredOutput,
++					projection.value,
+ 					stageStructuredChars,
+ 				),
+ 				outputPreview:

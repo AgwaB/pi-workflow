@@ -1,0 +1,13 @@
+diff --git aabb/src/compiler.ts bbaa/src/compiler.ts
+index fd222b7..4a4f2b1 100644
+--- aabb/src/compiler.ts
++++ bbaa/src/compiler.ts
+@@ -800,7 +800,7 @@ async function compileArtifactGraphPlan(
+ 		const optInInjectRuntimeTask = stage.injectRuntimeTask === true;
+ 		const injectTask = taskStageKind === "task" || optInInjectRuntimeTask;
+ 		const injectRuntimeTaskInPrompt =
+-			(taskStageKind === "task" && injectTask) ||
++			(taskStageKind !== "foreach" && injectTask) ||
+ 			(taskStageKind === "foreach" && optInInjectRuntimeTask);
+ 		const normalizedPrompt = String(prompt ?? "").replace(
+ 			/\$\{item\}/g,

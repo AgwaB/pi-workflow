@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "taskId": "internal-reduce-runtime-task-prompt-draft",
+  "candidateId": "review-case-f6",
+  "status": "draft",
+  "sourceRevision": "a48c12a899447309b0adbb200d014c88cca61c8c",
+  "fixturePatch": "fixture.diff",
+  "referenceFixPatch": "reference-fix.patch",
+  "bugs": [
+    {
+      "bugId": "G1",
+      "severity": "high",
+      "category": "api_contract",
+      "summary": "The proposed patch stops opt-in reduce stages from receiving the runtime task in their compiled prompt.",
+      "impact": "Stages such as deep-review report can still have injectTask metadata true, but the model prompt omits cross-cutting user constraints. Final reducers may ignore answer format, patch scope, or caveats while appearing correctly opted in.",
+      "locations": [
+        {
+          "file": "src/compiler.ts",
+          "startLine": 798,
+          "endLine": 803,
+          "symbol": "compileArtifactGraphPlan.injectRuntimeTaskInPrompt"
+        }
+      ],
+      "requiredEvidence": [
+        {
+          "file": "src/compiler.ts",
+          "quote": "const injectRuntimeTaskInPrompt =",
+          "matchMode": "substring"
+        },
+        {
+          "file": "src/compiler.ts",
+          "quote": "(taskStageKind === \"task\" && injectTask)",
+          "matchMode": "substring"
+        },
+        {
+          "file": "src/compiler.ts",
+          "quote": "const injectTask = taskStageKind === \"task\" || optInInjectRuntimeTask;",
+          "matchMode": "substring"
+        }
+      ],
+      "acceptableFixes": [
+        "Keep non-foreach opt-in stages using `(taskStageKind !== \"foreach\" && injectTask)`.",
+        "Add a compile regression asserting an opt-in reduce stage prompt contains `# Task`."
+      ],
+      "mustNotSay": [
+        "The injectTask metadata is false for reduce stages; the bug is that prompt injection is gated too narrowly."
+      ]
+    }
+  ],
+  "noIssueRegions": [],
+  "mustAvoidClaims": [
+    "Using prior A/B run notes as evidence.",
+    "Relying on git history instead of the sanitized workspace and proposed patch."
+  ],
+  "difficulty": {
+    "bucket": "medium",
+    "plainExpected": "mixed",
+    "rationale": "Subtler E5 replacement: compiler metadata still looks opted-in, but reduce prompt injection is narrowed away."
+  },
+  "leakagePolicy": {
+    "candidateVisible": [
+      "sanitized repo",
+      "fixture.diff",
+      "neutral review prompt"
+    ],
+    "candidateForbidden": [
+      "gold-key.draft.json",
+      "author-notes.md",
+      "reference-fix.patch",
+      "repro.sh",
+      ".git",
+      ".pi/eval",
+      "A/B run artifacts"
+    ]
+  },
+  "approval": {
+    "state": "needs-review",
+    "providerReviews": [],
+    "approvedBy": [],
+    "notes": "Wave2 direct calibration exposed a draft-gold line-number error; candidates correctly cited src/compiler.ts:803. Gold location corrected to pinned source lines 798-803 before interpretation."
+  }
+}

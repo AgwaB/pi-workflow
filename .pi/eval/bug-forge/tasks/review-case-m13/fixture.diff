@@ -1,0 +1,13 @@
+diff --git aaaa/src/engine.ts bbbb/src/engine.ts
+index c68eaa1..a84c63a 100644
+--- aaaa/src/engine.ts
++++ bbbb/src/engine.ts
+@@ -565,7 +565,7 @@ async function extractArtifactGraphForeachItems(
+ 			}
+ 		}
+ 	}
+-	if (typeof stage.maxItems === "number" && items.length > stage.maxItems) {
++	if (typeof stage.maxItems === "number" && items.length >= stage.maxItems) {
+ 		return {
+ 			error: `foreach extracted ${items.length} items, exceeding maxItems=${stage.maxItems}`,
+ 		};

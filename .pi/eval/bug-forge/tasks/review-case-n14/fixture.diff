@@ -1,0 +1,13 @@
+diff --git aaaa/src/engine.ts bbbb/src/engine.ts
+index c68eaa1..34c259a 100644
+--- aaaa/src/engine.ts
++++ bbbb/src/engine.ts
+@@ -541,7 +541,7 @@ async function extractArtifactGraphForeachItems(
+ 	}
+ 	for (const task of sourceTasks) {
+ 		if (task.status !== "completed") {
+-			if (stage.sourcePolicy !== "partial")
++			if (stage.sourcePolicy === "partial")
+ 				return { error: `${task.taskId} did not complete` };
+ 			continue;
+ 		}

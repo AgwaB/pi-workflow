@@ -1,0 +1,100 @@
+{
+  "schemaVersion": 1,
+  "taskId": "internal-location-colon-fallback",
+  "candidateId": "review-case-d4",
+  "status": "locked",
+  "sourceRevision": "a48c12a899447309b0adbb200d014c88cca61c8c",
+  "fixturePatch": "fixture.diff",
+  "referenceFixPatch": "reference-fix.patch",
+  "bugs": [
+    {
+      "bugId": "G1",
+      "severity": "medium",
+      "category": "correctness",
+      "summary": "The proposed patch removes colon-style `file:line` evidence parsing from the fallback location extractor.",
+      "impact": "Findings whose reviewers cite locations only in evidence prose, such as `src/compiler.ts:801`, degrade from line-pinned locations to file-only locations. This weakens downstream localization and objective scoring while leaving explicit locations unaffected.",
+      "locations": [
+        {
+          "file": "workflows/deep-review/helpers/finding-pipeline.mjs",
+          "startLine": 61,
+          "endLine": 67,
+          "symbol": "location preservation contract"
+        },
+        {
+          "file": "workflows/deep-review/helpers/finding-pipeline.mjs",
+          "startLine": 96,
+          "endLine": 106,
+          "symbol": "linesFromEvidence"
+        }
+      ],
+      "requiredEvidence": [
+        {
+          "file": "workflows/deep-review/helpers/finding-pipeline.mjs",
+          "quote": "finding's `file` field plus any \"line N\"/\":N\" references in its evidence",
+          "matchMode": "substring"
+        },
+        {
+          "file": "workflows/deep-review/helpers/finding-pipeline.mjs",
+          "quote": "|:(\\d{1,6})(?:[\u2013-](\\d{1,6}))?",
+          "matchMode": "substring"
+        },
+        {
+          "file": "workflows/deep-review/helpers/finding-pipeline.mjs",
+          "quote": "const re = /(?:\\blines?\\s+~?(\\d{1,6})(?:\\s*[\u2013-]\\s*(\\d{1,6}))?|\\bL(\\d{1,6})\\b)/gi;",
+          "matchMode": "substring"
+        }
+      ],
+      "acceptableFixes": [
+        "Restore colon-style `:(\\d{1,6})` parsing in `linesFromEvidence`.",
+        "Restore colon-style parsing and add a focused regression test showing `file.ts:123` evidence produces `{ file, line: 123 }`.",
+        "Preserve fallback parsing for `line N`, `lines N-M`, `LNN`, and `:NN` forms."
+      ],
+      "mustNotSay": [
+        "Explicit reviewer `locations` are also discarded by this patch.",
+        "The regex change is cosmetic because file-only locations are equivalent to line-pinned locations.",
+        "Treating the residual `match[4]`/`match[5]` dead capture as an independent root bug.",
+        "Treating stale comments or missing regression tests as separate gold bugs without identifying the colon-style fallback parsing regression."
+      ]
+    }
+  ],
+  "noIssueRegions": [],
+  "mustAvoidClaims": [
+    "Using prior A/B run notes as evidence.",
+    "Claiming all location preservation is broken; the defect is limited to fallback evidence parsing.",
+    "Treating dead `match[4]`, the stale contract comment, or a missing regression test as a materially separate root bug."
+  ],
+  "difficulty": {
+    "bucket": "medium",
+    "plainExpected": "mixed",
+    "rationale": "The diff is small but the impact requires knowing that reviewer evidence often uses file:line citations and that fallback parsing feeds structured locations."
+  },
+  "leakagePolicy": {
+    "candidateVisible": [
+      "sanitized repo",
+      "fixture.diff",
+      "neutral review prompt"
+    ],
+    "candidateForbidden": [
+      "gold-key.draft.json",
+      "author-notes.md",
+      "reference-fix.patch",
+      "repro.sh",
+      ".git",
+      ".pi/eval",
+      "A/B run artifacts"
+    ]
+  },
+  "approval": {
+    "state": "approved",
+    "providerReviews": [
+      ".pi/eval/bug-forge/provider-reviews/d4-gpt-review.md",
+      ".pi/eval/bug-forge/provider-reviews/d4-kimi-review.md"
+    ],
+    "approvedBy": [
+      "openai-codex/gpt-5.5",
+      "kimi-coding/kimi-for-coding:low",
+      "calibration-gen2-20260615T161626Z"
+    ],
+    "notes": "Locked after provider review reconciliation. Support symptoms (dead match captures, stale comment, missing tests) remain duplicate/support FPs unless the colon-style fallback parsing regression is identified."
+  }
+}

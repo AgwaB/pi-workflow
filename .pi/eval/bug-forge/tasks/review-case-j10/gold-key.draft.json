@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "taskId": "internal-scrapling-readonly-classification-draft",
+  "candidateId": "review-case-j10",
+  "status": "locked",
+  "sourceRevision": "a48c12a899447309b0adbb200d014c88cca61c8c",
+  "fixturePatch": "fixture.diff",
+  "referenceFixPatch": "reference-fix.patch",
+  "bugs": [
+    {
+      "bugId": "G1",
+      "severity": "medium",
+      "category": "api_contract",
+      "summary": "The proposed patch removes `scrapling_fetch` from built-in read-only tool classification.",
+      "impact": "`scrapling_fetch` is no longer classified as read-only by the built-in classifier; read-only workflow validation may reject or mishandle stages using only Scrapling unless every spec supplies custom classification metadata.",
+      "locations": [
+        {
+          "file": "src/compiler.ts",
+          "startLine": 24,
+          "endLine": 32,
+          "symbol": "READ_ONLY_TOOLS"
+        }
+      ],
+      "requiredEvidence": [
+        {
+          "file": "src/compiler.ts",
+          "quote": "-\t\"scrapling_fetch\",",
+          "matchMode": "substring"
+        },
+        {
+          "file": "src/compiler.ts",
+          "quote": "const READ_ONLY_TOOLS = new Set",
+          "matchMode": "substring"
+        }
+      ],
+      "acceptableFixes": [
+        "Restore `scrapling_fetch` to `READ_ONLY_TOOLS`.",
+        "Restore the read-only classification and add a compiler test that Scrapling-only read stages remain read-only."
+      ],
+      "mustNotSay": [
+        "scrapling_fetch is mutation-capable by default."
+      ]
+    }
+  ],
+  "noIssueRegions": [],
+  "mustAvoidClaims": [
+    "Using prior A/B run notes as evidence.",
+    "Relying on git history instead of the sanitized workspace and proposed patch."
+  ],
+  "difficulty": {
+    "bucket": "easy",
+    "plainExpected": "likely-catches",
+    "rationale": "Regression of a known tool-safety classification invariant."
+  },
+  "leakagePolicy": {
+    "candidateVisible": [
+      "sanitized repo",
+      "fixture.diff",
+      "neutral review prompt"
+    ],
+    "candidateForbidden": [
+      "gold-key.draft.json",
+      "author-notes.md",
+      "reference-fix.patch",
+      "repro.sh",
+      ".git",
+      ".pi/eval",
+      "A/B run artifacts"
+    ]
+  },
+  "approval": {
+    "state": "approved",
+    "providerReviews": [
+      ".pi/eval/bug-forge/provider-reviews/review-case-j10-gpt-review.md",
+      ".pi/eval/bug-forge/provider-reviews/review-case-j10-kimi-review.md",
+      ".pi/eval/bug-forge/provider-reviews/review-case-j10-final-kimi-rereview.md"
+    ],
+    "approvedBy": [
+      "kimi-coding/kimi-for-coding:low final review",
+      "repro.sh RED/GREEN"
+    ],
+    "notes": "Locked after revised gold evidence, RED/GREEN repro fix, and final Kimi low approval. Earlier GPT/Kimi reviews confirmed bug existence but requested evidence/repro revisions."
+  }
+}

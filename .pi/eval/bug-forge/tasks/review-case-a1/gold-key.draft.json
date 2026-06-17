@@ -1,0 +1,86 @@
+{
+  "schemaVersion": 1,
+  "taskId": "internal-location-dataflow-preservation-draft",
+  "candidateId": "review-case-a1",
+  "status": "draft",
+  "sourceRevision": "a48c12a899447309b0adbb200d014c88cca61c8c",
+  "fixturePatch": "fixture.diff",
+  "referenceFixPatch": "reference-fix.patch",
+  "bugs": [
+    {
+      "bugId": "G1",
+      "severity": "high",
+      "category": "correctness",
+      "summary": "The proposed patch discards normalized structured locations by replacing `locationsOf(finding)` with an empty array.",
+      "impact": "Deep-review findings lose line/range/symbol identity even when upstream reviewers provided locations, causing localization and answer-key scoring failures; a separate `file` field may still survive for some findings.",
+      "locations": [
+        {
+          "file": "workflows/deep-review/helpers/finding-pipeline.mjs",
+          "startLine": 126,
+          "endLine": 130,
+          "symbol": "normalizeFinding"
+        }
+      ],
+      "requiredEvidence": [
+        {
+          "file": "workflows/deep-review/helpers/finding-pipeline.mjs",
+          "quote": "locations: [],",
+          "matchMode": "substring"
+        },
+        {
+          "file": "workflows/deep-review/helpers/finding-pipeline.mjs",
+          "quote": "Identity evidence (file/line/symbol) must survive the LLM reduce stage",
+          "matchMode": "substring"
+        },
+        {
+          "file": "workflows/deep-review/helpers/finding-pipeline.mjs",
+          "quote": "locationsOf(finding)",
+          "matchMode": "substring"
+        }
+      ],
+      "acceptableFixes": [
+        "Restore `locations: locationsOf(finding)` in normalized findings.",
+        "Preserve normalized file/line location fields through partition/report formatting.",
+        "Add a regression check that final findings retain machine-readable locations."
+      ],
+      "mustNotSay": [
+        "This is only a cosmetic formatting issue.",
+        "All file identity is necessarily lost even when the separate `file` field survives."
+      ]
+    }
+  ],
+  "noIssueRegions": [],
+  "mustAvoidClaims": [
+    "Using prior A/B run notes as evidence."
+  ],
+  "difficulty": {
+    "bucket": "easy",
+    "plainExpected": "likely-catches",
+    "rationale": "Provider reviews judged this objectively useful but likely easy because the changed line and nearby invariant comment are direct. Keep as calibration/regression unless later variant is made subtler."
+  },
+  "leakagePolicy": {
+    "candidateVisible": [
+      "sanitized repo",
+      "fixture.diff",
+      "neutral review prompt"
+    ],
+    "candidateForbidden": [
+      "gold-key.draft.json",
+      "author-notes.md",
+      "reference-fix.patch",
+      "repro.sh",
+      ".git",
+      ".pi/eval",
+      "A/B run artifacts"
+    ]
+  },
+  "approval": {
+    "state": "needs-review",
+    "providerReviews": [
+      ".pi/eval/bug-forge/provider-reviews/gpt-5.5-xhigh-gold-review.md",
+      ".pi/eval/bug-forge/provider-reviews/kimi-xhigh-gold-review.md"
+    ],
+    "approvedBy": [],
+    "notes": "Calibration saturated: all arms scored 1.0. Keep only as easy regression/calibration; do not lock as primary discriminating task."
+  }
+}

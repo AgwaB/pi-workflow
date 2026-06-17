@@ -1,0 +1,13 @@
+diff --git aaaa/src/workflow-runtime.ts bbbb/src/workflow-runtime.ts
+index 09648d5..75a94b3 100644
+--- aaaa/src/workflow-runtime.ts
++++ bbbb/src/workflow-runtime.ts
+@@ -101,7 +101,7 @@ export function getSupportedThinkingLevels(
+ 
+ 	return THINKING_LEVELS.filter((level) => {
+ 		const mapped = model.thinkingLevelMap?.[level];
+-		if (mapped === null) return false;
++		if (mapped === null) return true;
+ 		if (level === "xhigh") return mapped !== undefined;
+ 		return true;
+ 	});

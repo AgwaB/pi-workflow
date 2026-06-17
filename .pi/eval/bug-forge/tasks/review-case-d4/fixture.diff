@@ -1,0 +1,19 @@
+diff --git aa/workflows/deep-review/helpers/finding-pipeline.mjs bb/workflows/deep-review/helpers/finding-pipeline.mjs
+index d33e909..61e37d9 100644
+--- aa/workflows/deep-review/helpers/finding-pipeline.mjs
++++ bb/workflows/deep-review/helpers/finding-pipeline.mjs
+@@ -93,12 +93,12 @@ function dedupeLocations(locations) {
+   return out;
+ }
+ 
+-// Pull "line 46", "lines 46-90", "L46", or ":46" references out of evidence prose
++// Pull "line 46", "lines 46-90", or "L46" references out of evidence prose
+ // so a reviewer that only mentioned the line in text still yields a structured
+ // location. Bounded to a small count to avoid sweeping unrelated numbers.
+ function linesFromEvidence(text) {
+   const lines = [];
+-  const re = /(?:\blines?\s+~?(\d{1,6})(?:\s*[–-]\s*(\d{1,6}))?|\bL(\d{1,6})\b|:(\d{1,6})(?:[–-](\d{1,6}))?)/gi;
++  const re = /(?:\blines?\s+~?(\d{1,6})(?:\s*[–-]\s*(\d{1,6}))?|\bL(\d{1,6})\b)/gi;
+   let match;
+   while ((match = re.exec(String(text ?? ""))) !== null && lines.length < 12) {
+     const start = Number(match[1] ?? match[3] ?? match[4]);

@@ -1,0 +1,12 @@
+diff --git aaaa/src/artifact-graph-schema.ts bbbb/src/artifact-graph-schema.ts
+index fb2b8c7..cb208cc 100644
+--- aaaa/src/artifact-graph-schema.ts
++++ bbbb/src/artifact-graph-schema.ts
+@@ -18,7 +18,6 @@ const TOP_LEVEL_KEYS = new Set([
+ 	"name",
+ 	"description",
+ 	"input",
+-	"catalog",
+ 	"defaults",
+ 	"roles",
+ 	"artifactGraph",

@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "taskId": "internal-source-projection-bypass-draft",
+  "candidateId": "review-case-l12",
+  "status": "draft",
+  "sourceRevision": "a48c12a899447309b0adbb200d014c88cca61c8c",
+  "fixturePatch": "fixture.diff",
+  "referenceFixPatch": "reference-fix.patch",
+  "bugs": [
+    {
+      "bugId": "G1",
+      "severity": "high",
+      "category": "reliability",
+      "summary": "The proposed patch ignores sourceProjection and sends the full structured output into Source Context.",
+      "impact": "Stages that request a narrow source projection can receive unrelated or oversized upstream JSON, causing context bloat and possible leakage of fields the spec intentionally excluded.",
+      "locations": [
+        {
+          "file": "src/workflow-artifacts.ts",
+          "startLine": 133,
+          "endLine": 150,
+          "symbol": "buildSourceContextPacket"
+        }
+      ],
+      "requiredEvidence": [
+        {
+          "file": "src/workflow-artifacts.ts",
+          "quote": "structuredOutput: capStructuredOutput(",
+          "matchMode": "substring"
+        },
+        {
+          "file": "src/workflow-artifacts.ts",
+          "quote": "projectStructuredOutput(",
+          "matchMode": "substring"
+        },
+        {
+          "file": "src/workflow-artifacts.ts",
+          "quote": "projectionWarnings",
+          "matchMode": "substring"
+        }
+      ],
+      "acceptableFixes": [
+        "Pass `projection.value` to `capStructuredOutput`.",
+        "Add a sourceProjection test proving excluded fields are absent from the context packet."
+      ],
+      "mustNotSay": [
+        "sourceProjection is unused elsewhere; the function still computes projection and warnings."
+      ]
+    }
+  ],
+  "noIssueRegions": [],
+  "mustAvoidClaims": [
+    "Using prior A/B run notes as evidence.",
+    "Relying on git history instead of the sanitized workspace and proposed patch."
+  ],
+  "difficulty": {
+    "bucket": "hard",
+    "plainExpected": "mixed",
+    "rationale": "Harder data-flow task: projection is still computed, but the wrong value is passed onward."
+  },
+  "leakagePolicy": {
+    "candidateVisible": [
+      "sanitized repo",
+      "fixture.diff",
+      "neutral review prompt"
+    ],
+    "candidateForbidden": [
+      "gold-key.draft.json",
+      "author-notes.md",
+      "reference-fix.patch",
+      "repro.sh",
+      ".git",
+      ".pi/eval",
+      "A/B run artifacts"
+    ]
+  },
+  "approval": {
+    "state": "needs-review",
+    "providerReviews": [],
+    "approvedBy": [],
+    "notes": "Second-wave draft; validate/materialize only. Requires calibration and provider review before lock."
+  }
+}

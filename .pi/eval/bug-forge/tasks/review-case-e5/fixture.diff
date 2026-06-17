@@ -1,0 +1,12 @@
+diff --git aa/workflows/deep-review/spec.json bb/workflows/deep-review/spec.json
+index 60a0798..5244062 100644
+--- aa/workflows/deep-review/spec.json
++++ bb/workflows/deep-review/spec.json
+@@ -127,7 +127,6 @@
+       {
+         "id": "report",
+         "type": "reduce",
+-        "injectRuntimeTask": true,
+         "from": [
+           "triage",
+           "partition-verdicts"

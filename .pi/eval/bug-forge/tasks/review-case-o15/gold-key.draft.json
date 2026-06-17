@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "taskId": "internal-blocked-status-priority-draft",
+  "candidateId": "review-case-o15",
+  "status": "draft",
+  "sourceRevision": "a48c12a899447309b0adbb200d014c88cca61c8c",
+  "fixturePatch": "fixture.diff",
+  "referenceFixPatch": "reference-fix.patch",
+  "bugs": [
+    {
+      "bugId": "G1",
+      "severity": "medium",
+      "category": "reliability",
+      "summary": "The proposed patch makes running/pending status outrank blocked workflow tasks.",
+      "impact": "A workflow with a blocked task and another running/pending task is reported as running instead of blocked, hiding stuck runs from status polling and operators.",
+      "locations": [
+        {
+          "file": "src/store.ts",
+          "startLine": 603,
+          "endLine": 609,
+          "symbol": "deriveWorkflowStatus"
+        }
+      ],
+      "requiredEvidence": [
+        {
+          "file": "src/store.ts",
+          "quote": "summary.running > 0 || summary.pending > 0",
+          "matchMode": "substring"
+        },
+        {
+          "file": "test/unit/unit.test.mjs",
+          "quote": "blocked outranks running so supervisors surface stuck runs instead of polling forever",
+          "matchMode": "substring"
+        }
+      ],
+      "acceptableFixes": [
+        "Keep `blocked` before running/pending in `deriveWorkflowStatus`.",
+        "Retain the unit test asserting blocked outranks running."
+      ],
+      "mustNotSay": [
+        "This is only display ordering; workflow status controls polling/visibility."
+      ]
+    }
+  ],
+  "noIssueRegions": [],
+  "mustAvoidClaims": [
+    "Using prior A/B run notes as evidence.",
+    "Relying on git history instead of the sanitized workspace and proposed patch."
+  ],
+  "difficulty": {
+    "bucket": "medium",
+    "plainExpected": "likely-catches",
+    "rationale": "Status-priority invariant with explicit existing test evidence."
+  },
+  "leakagePolicy": {
+    "candidateVisible": [
+      "sanitized repo",
+      "fixture.diff",
+      "neutral review prompt"
+    ],
+    "candidateForbidden": [
+      "gold-key.draft.json",
+      "author-notes.md",
+      "reference-fix.patch",
+      "repro.sh",
+      ".git",
+      ".pi/eval",
+      "A/B run artifacts"
+    ]
+  },
+  "approval": {
+    "state": "needs-review",
+    "providerReviews": [],
+    "approvedBy": [],
+    "notes": "Second-wave draft; validate/materialize only. Requires calibration and provider review before lock."
+  }
+}

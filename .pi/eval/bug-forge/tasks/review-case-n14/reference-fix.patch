@@ -1,0 +1,13 @@
+diff --git aabb/src/engine.ts bbaa/src/engine.ts
+index 34c259a..c68eaa1 100644
+--- aabb/src/engine.ts
++++ bbaa/src/engine.ts
+@@ -541,7 +541,7 @@ async function extractArtifactGraphForeachItems(
+ 	}
+ 	for (const task of sourceTasks) {
+ 		if (task.status !== "completed") {
+-			if (stage.sourcePolicy === "partial")
++			if (stage.sourcePolicy !== "partial")
+ 				return { error: `${task.taskId} did not complete` };
+ 			continue;
+ 		}

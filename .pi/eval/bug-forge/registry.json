@@ -1,0 +1,133 @@
+{
+  "schemaVersion": 1,
+  "status": "pilot-15-calibrated",
+  "tasks": [
+    {
+      "candidateId": "review-case-a1",
+      "path": "tasks/review-case-a1",
+      "internalTopic": "location/dataflow preservation variant",
+      "bucket": "easy-regression",
+      "fixtureStatus": "authored",
+      "goldStatus": "calibration-only-saturated"
+    },
+    {
+      "candidateId": "review-case-b2",
+      "path": "tasks/review-case-b2",
+      "internalTopic": "runtime task / stale-context propagation variant",
+      "bucket": "saturated-needs-subtler-variant",
+      "fixtureStatus": "authored",
+      "goldStatus": "draft-revise-before-lock"
+    },
+    {
+      "candidateId": "review-case-c3",
+      "path": "tasks/review-case-c3",
+      "internalTopic": "no-issue / adversarial overclaim control",
+      "bucket": "no-issue-sanity",
+      "fixtureStatus": "authored",
+      "goldStatus": "locked-no-issue-sanity"
+    },
+    {
+      "candidateId": "review-case-d4",
+      "path": "tasks/review-case-d4",
+      "internalTopic": "fallback location parser / colon file-line preservation",
+      "bucket": "locked-precision-discriminator",
+      "fixtureStatus": "authored-calibrated",
+      "goldStatus": "locked-provider-reviewed"
+    },
+    {
+      "candidateId": "review-case-e5",
+      "path": "tasks/review-case-e5",
+      "internalTopic": "report-stage runtime task propagation",
+      "bucket": "saturated-direct-workflow-reporting-calibration",
+      "fixtureStatus": "authored-calibrated",
+      "goldStatus": "draft-do-not-lock-primary"
+    },
+    {
+      "candidateId": "review-case-f6",
+      "path": "tasks/review-case-f6",
+      "internalTopic": "reduce-stage runtime task prompt injection",
+      "bucket": "saturated-direct-after-goldfix",
+      "fixtureStatus": "authored-calibrated",
+      "goldStatus": "draft-demote-primary"
+    },
+    {
+      "candidateId": "review-case-g7",
+      "path": "tasks/review-case-g7",
+      "internalTopic": "provider thinking-level null map semantics",
+      "bucket": "saturated-direct",
+      "fixtureStatus": "authored-calibrated",
+      "goldStatus": "draft-demote-primary"
+    },
+    {
+      "candidateId": "review-case-h8",
+      "path": "tasks/review-case-h8",
+      "internalTopic": "artifact graph catalog schema compatibility",
+      "bucket": "saturated-direct-easy",
+      "fixtureStatus": "authored-calibrated",
+      "goldStatus": "draft-demote-primary"
+    },
+    {
+      "candidateId": "review-case-i9",
+      "path": "tasks/review-case-i9",
+      "internalTopic": "foreach JSONPath schema/runtime contract",
+      "bucket": "saturated-direct",
+      "fixtureStatus": "authored-calibrated",
+      "goldStatus": "draft-demote-primary"
+    },
+    {
+      "candidateId": "review-case-j10",
+      "path": "tasks/review-case-j10",
+      "internalTopic": "scrapling read-only tool classification",
+      "bucket": "locked-hard-recall-holdout",
+      "fixtureStatus": "authored-calibrated",
+      "goldStatus": "locked-provider-reviewed"
+    },
+    {
+      "candidateId": "review-case-k11",
+      "path": "tasks/review-case-k11",
+      "internalTopic": "workflow output protocol outside-text validation",
+      "bucket": "saturated-direct",
+      "fixtureStatus": "authored-calibrated",
+      "goldStatus": "draft-demote-primary"
+    },
+    {
+      "candidateId": "review-case-l12",
+      "path": "tasks/review-case-l12",
+      "internalTopic": "sourceProjection bypass in source context",
+      "bucket": "saturated-direct",
+      "fixtureStatus": "authored-calibrated",
+      "goldStatus": "draft-demote-primary"
+    },
+    {
+      "candidateId": "review-case-m13",
+      "path": "tasks/review-case-m13",
+      "internalTopic": "foreach maxItems inclusive boundary",
+      "bucket": "locked-workflow-precision-discriminator",
+      "fixtureStatus": "authored-calibrated",
+      "goldStatus": "locked-provider-reviewed"
+    },
+    {
+      "candidateId": "review-case-n14",
+      "path": "tasks/review-case-n14",
+      "internalTopic": "partial sourcePolicy inversion",
+      "bucket": "saturated-direct",
+      "fixtureStatus": "authored-calibrated",
+      "goldStatus": "draft-demote-primary"
+    },
+    {
+      "candidateId": "review-case-o15",
+      "path": "tasks/review-case-o15",
+      "internalTopic": "blocked workflow status priority",
+      "bucket": "saturated-direct",
+      "fixtureStatus": "authored-calibrated",
+      "goldStatus": "draft-demote-primary"
+    }
+  ],
+  "nextActions": [
+    "Use C3, D4, J10, and M13 as the current locked set, with J10 treated as a hard recall holdout and M13 as a precision/root-splitting discriminator.",
+    "Do not use saturated tasks as primary discriminators without rewriting.",
+    "For a stronger benchmark, author more non-saturated recall tasks like J10 with provider-approved evidence from the start.",
+    "Keep pinned source revision a48c12a899447309b0adbb200d014c88cca61c8c available locally or via a stable source bundle before fresh materialization."
+  ],
+  "latestCalibration": ".pi/eval/bug-forge/runs/calibration-wave2-workflow-20260615T175939Z/analysis.md"
+}

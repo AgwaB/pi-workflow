@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "taskId": "internal-no-issue-overclaim-control-draft",
+  "candidateId": "review-case-c3",
+  "status": "locked",
+  "sourceRevision": "a48c12a899447309b0adbb200d014c88cca61c8c",
+  "fixturePatch": "fixture.diff",
+  "referenceFixPatch": "reference-fix.patch",
+  "bugs": [],
+  "noIssueRegions": [
+    {
+      "file": "src/compiler.ts",
+      "startLine": 798,
+      "endLine": 804,
+      "symbol": "compileArtifactGraphPlan"
+    }
+  ],
+  "mustAvoidClaims": [
+    "Claiming that reordering a boolean OR changes behavior.",
+    "Claiming runtime task injection is broken without explaining a behavior-changing path.",
+    "Assuming every task contains a seeded bug."
+  ],
+  "difficulty": {
+    "bucket": "no-issue",
+    "plainExpected": "mixed",
+    "rationale": "Provider reviews approved this as a no-issue overclaim trap near a historically risky invariant; both operands are pure booleans so OR reordering is behavior-preserving."
+  },
+  "leakagePolicy": {
+    "candidateVisible": [
+      "sanitized repo",
+      "fixture.diff",
+      "neutral review prompt"
+    ],
+    "candidateForbidden": [
+      "gold-key.draft.json",
+      "author-notes.md",
+      "reference-fix.patch",
+      "repro.sh",
+      ".git",
+      ".pi/eval",
+      "A/B run artifacts"
+    ]
+  },
+  "approval": {
+    "state": "approved",
+    "providerReviews": [
+      ".pi/eval/bug-forge/provider-reviews/gpt-5.5-xhigh-gold-review.md",
+      ".pi/eval/bug-forge/provider-reviews/kimi-xhigh-gold-review.md"
+    ],
+    "approvedBy": [
+      "gpt-5.5-xhigh",
+      "kimi-xhigh",
+      "calibration-20260615T235739Z"
+    ],
+    "notes": "Locked as a no-issue sanity control after two provider approvals and calibration where all arms correctly reported no material issue."
+  }
+}

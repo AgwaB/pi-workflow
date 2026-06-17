@@ -1,0 +1,13 @@
+diff --git aaaa/src/compiler.ts bbbb/src/compiler.ts
+index 4a4f2b1..fd222b7 100644
+--- aaaa/src/compiler.ts
++++ bbbb/src/compiler.ts
+@@ -800,7 +800,7 @@ async function compileArtifactGraphPlan(
+ 		const optInInjectRuntimeTask = stage.injectRuntimeTask === true;
+ 		const injectTask = taskStageKind === "task" || optInInjectRuntimeTask;
+ 		const injectRuntimeTaskInPrompt =
+-			(taskStageKind !== "foreach" && injectTask) ||
++			(taskStageKind === "task" && injectTask) ||
+ 			(taskStageKind === "foreach" && optInInjectRuntimeTask);
+ 		const normalizedPrompt = String(prompt ?? "").replace(
+ 			/\$\{item\}/g,

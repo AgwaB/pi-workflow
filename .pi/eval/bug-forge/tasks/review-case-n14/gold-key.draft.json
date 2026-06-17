@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "taskId": "internal-partial-source-policy-inversion-draft",
+  "candidateId": "review-case-n14",
+  "status": "draft",
+  "sourceRevision": "a48c12a899447309b0adbb200d014c88cca61c8c",
+  "fixturePatch": "fixture.diff",
+  "referenceFixPatch": "reference-fix.patch",
+  "bugs": [
+    {
+      "bugId": "G1",
+      "severity": "high",
+      "category": "reliability",
+      "summary": "The proposed patch inverts partial-source handling for incomplete foreach sources.",
+      "impact": "Partial foreach stages should skip incomplete source tasks, while require-success stages should block. The change makes partial stages block and strict stages continue without required sources.",
+      "locations": [
+        {
+          "file": "src/engine.ts",
+          "startLine": 542,
+          "endLine": 547,
+          "symbol": "extractArtifactGraphForeachItems"
+        }
+      ],
+      "requiredEvidence": [
+        {
+          "file": "src/engine.ts",
+          "quote": "if (stage.sourcePolicy === \"partial\")",
+          "matchMode": "substring"
+        },
+        {
+          "file": "src/engine.ts",
+          "quote": "return { error: `${task.taskId} did not complete` };",
+          "matchMode": "substring"
+        }
+      ],
+      "acceptableFixes": [
+        "Restore `if (stage.sourcePolicy !== \"partial\") return error; continue otherwise.`",
+        "Keep/add tests for partial foreach after item failure and require-success blocking."
+      ],
+      "mustNotSay": [
+        "This only changes an error message; it changes scheduling semantics."
+      ]
+    }
+  ],
+  "noIssueRegions": [],
+  "mustAvoidClaims": [
+    "Using prior A/B run notes as evidence.",
+    "Relying on git history instead of the sanitized workspace and proposed patch."
+  ],
+  "difficulty": {
+    "bucket": "hard",
+    "plainExpected": "mixed",
+    "rationale": "Recall discriminator candidate: local condition is small but impact requires knowing partial-source scheduling semantics."
+  },
+  "leakagePolicy": {
+    "candidateVisible": [
+      "sanitized repo",
+      "fixture.diff",
+      "neutral review prompt"
+    ],
+    "candidateForbidden": [
+      "gold-key.draft.json",
+      "author-notes.md",
+      "reference-fix.patch",
+      "repro.sh",
+      ".git",
+      ".pi/eval",
+      "A/B run artifacts"
+    ]
+  },
+  "approval": {
+    "state": "needs-review",
+    "providerReviews": [],
+    "approvedBy": [],
+    "notes": "Second-wave draft; validate/materialize only. Requires calibration and provider review before lock."
+  }
+}

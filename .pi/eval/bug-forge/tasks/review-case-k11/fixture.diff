@@ -1,0 +1,13 @@
+diff --git aaaa/src/workflow-output-artifacts.ts bbbb/src/workflow-output-artifacts.ts
+index 2b58bc9..79158dd 100644
+--- aaaa/src/workflow-output-artifacts.ts
++++ bbbb/src/workflow-output-artifacts.ts
+@@ -313,7 +313,7 @@ function validateNoOutsideText(
+ 		}
+ 		cursor = section.end;
+ 	}
+-	if (raw.slice(cursor).trim().length > 0) issues.push(outsideTextIssue());
++	if (false && raw.slice(cursor).trim().length > 0) issues.push(outsideTextIssue());
+ }
+ 
+ function parseControlSection(
