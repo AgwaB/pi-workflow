@@ -1,0 +1,199 @@
+diff --git a/eth/tracers/logger/logger.go b/eth/tracers/logger/logger.go
+index 8e44581..7f2b2ae 100644
+--- a/eth/tracers/logger/logger.go
++++ b/eth/tracers/logger/logger.go
+@@ -229,9 +229,9 @@ type StructLogger struct {
+ 	logs       []json.RawMessage // buffer of json-encoded logs
+ 	resultSize int
+ 
+-	interrupt atomic.Bool           // Atomic flag to signal execution interruption
+-	reason    atomic.Pointer[error] // Reason for the interruption, populated by Stop
+-	skip      bool                  // skip processing hooks.
++	interrupt atomic.Bool // Atomic flag to signal execution interruption
++	reason    error       // Textual reason for the interruption
++	skip      bool        // skip processing hooks.
+ }
+ 
+ // NewStreamingStructLogger returns a new streaming logger.
+@@ -357,8 +357,8 @@ func (l *StructLogger) OnExit(depth int, output []byte, gasUsed uint64, err erro
+ 
+ func (l *StructLogger) GetResult() (json.RawMessage, error) {
+ 	// Tracing aborted
+-	if p := l.reason.Load(); p != nil {
+-		return nil, *p
++	if l.reason != nil {
++		return nil, l.reason
+ 	}
+ 	failed := l.err != nil
+ 	returnData := common.CopyBytes(l.output)
+@@ -376,7 +376,7 @@ func (l *StructLogger) GetResult() (json.RawMessage, error) {
+ 
+ // Stop terminates execution of the tracer at the first opportune moment.
+ func (l *StructLogger) Stop(err error) {
+-	l.reason.Store(&err)
++	l.reason = err
+ 	l.interrupt.Store(true)
+ }
+ 
+diff --git a/eth/tracers/native/4byte.go b/eth/tracers/native/4byte.go
+index a542eef..cec45a1 100644
+--- a/eth/tracers/native/4byte.go
++++ b/eth/tracers/native/4byte.go
+@@ -49,9 +49,9 @@ func init() {
+ //	  0xc281d19e-0: 1
+ //	}
+ type fourByteTracer struct {
+-	ids               map[string]int        // ids aggregates the 4byte ids found
+-	interrupt         atomic.Bool           // Atomic flag to signal execution interruption
+-	reason            atomic.Pointer[error] // Reason for the interruption, populated by Stop
++	ids               map[string]int // ids aggregates the 4byte ids found
++	interrupt         atomic.Bool    // Atomic flag to signal execution interruption
++	reason            error          // Textual reason for the interruption
+ 	chainConfig       *params.ChainConfig
+ 	activePrecompiles []common.Address // Updated on tx start based on given rules
+ }
+@@ -124,15 +124,12 @@ func (t *fourByteTracer) GetResult() (json.RawMessage, error) {
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	if p := t.reason.Load(); p != nil {
+-		return res, *p
+-	}
+-	return res, nil
++	return res, t.reason
+ }
+ 
+ // Stop terminates execution of the tracer at the first opportune moment.
+ func (t *fourByteTracer) Stop(err error) {
+-	t.reason.Store(&err)
++	t.reason = err
+ 	t.interrupt.Store(true)
+ }
+ 
+diff --git a/eth/tracers/native/call.go b/eth/tracers/native/call.go
+index dfa8048..06220da 100644
+--- a/eth/tracers/native/call.go
++++ b/eth/tracers/native/call.go
+@@ -116,8 +116,8 @@ type callTracer struct {
+ 	config    callTracerConfig
+ 	gasLimit  uint64
+ 	depth     int
+-	interrupt atomic.Bool           // Atomic flag to signal execution interruption
+-	reason    atomic.Pointer[error] // Reason for the interruption, populated by Stop
++	interrupt atomic.Bool // Atomic flag to signal execution interruption
++	reason    error       // Textual reason for the interruption
+ }
+ 
+ type callTracerConfig struct {
+@@ -268,15 +268,12 @@ func (t *callTracer) GetResult() (json.RawMessage, error) {
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	if p := t.reason.Load(); p != nil {
+-		return res, *p
+-	}
+-	return res, nil
++	return res, t.reason
+ }
+ 
+ // Stop terminates execution of the tracer at the first opportune moment.
+ func (t *callTracer) Stop(err error) {
+-	t.reason.Store(&err)
++	t.reason = err
+ 	t.interrupt.Store(true)
+ }
+ 
+diff --git a/eth/tracers/native/call_flat.go b/eth/tracers/native/call_flat.go
+index 484f2d4..4e7fc31 100644
+--- a/eth/tracers/native/call_flat.go
++++ b/eth/tracers/native/call_flat.go
+@@ -233,10 +233,7 @@ func (t *flatCallTracer) GetResult() (json.RawMessage, error) {
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	if p := t.tracer.reason.Load(); p != nil {
+-		return res, *p
+-	}
+-	return res, nil
++	return res, t.tracer.reason
+ }
+ 
+ // Stop terminates execution of the tracer at the first opportune moment.
+diff --git a/eth/tracers/native/erc7562.go b/eth/tracers/native/erc7562.go
+index 0bf80d7..34e202f 100644
+--- a/eth/tracers/native/erc7562.go
++++ b/eth/tracers/native/erc7562.go
+@@ -135,8 +135,8 @@ type opcodeWithPartialStack struct {
+ type erc7562Tracer struct {
+ 	config    erc7562TracerConfig
+ 	gasLimit  uint64
+-	interrupt atomic.Bool           // Atomic flag to signal execution interruption
+-	reason    atomic.Pointer[error] // Reason for the interruption, populated by Stop
++	interrupt atomic.Bool // Atomic flag to signal execution interruption
++	reason    error       // Textual reason for the interruption
+ 	env       *tracing.VMContext
+ 
+ 	ignoredOpcodes       map[vm.OpCode]struct{}
+@@ -317,10 +317,7 @@ func (t *erc7562Tracer) OnLog(log1 *types.Log) {
+ // error arising from the encoding or forceful termination (via `Stop`).
+ func (t *erc7562Tracer) GetResult() (json.RawMessage, error) {
+ 	if t.interrupt.Load() {
+-		if p := t.reason.Load(); p != nil {
+-			return nil, *p
+-		}
+-		return nil, nil
++		return nil, t.reason
+ 	}
+ 	if len(t.callstackWithOpcodes) != 1 {
+ 		return nil, errors.New("incorrect number of top-level calls")
+@@ -340,15 +337,12 @@ func (t *erc7562Tracer) GetResult() (json.RawMessage, error) {
+ 		return nil, err
+ 	}
+ 
+-	if p := t.reason.Load(); p != nil {
+-		return enc, *p
+-	}
+-	return enc, nil
++	return enc, t.reason
+ }
+ 
+ // Stop terminates execution of the tracer at the first opportune moment.
+ func (t *erc7562Tracer) Stop(err error) {
+-	t.reason.Store(&err)
++	t.reason = err
+ 	t.interrupt.Store(true)
+ }
+ 
+diff --git a/eth/tracers/native/prestate.go b/eth/tracers/native/prestate.go
+index 7026cca..36cb16e 100644
+--- a/eth/tracers/native/prestate.go
++++ b/eth/tracers/native/prestate.go
+@@ -71,8 +71,8 @@ type prestateTracer struct {
+ 	to          common.Address
+ 	config      PrestateTracerConfig
+ 	chainConfig *params.ChainConfig
+-	interrupt   atomic.Bool           // Atomic flag to signal execution interruption
+-	reason      atomic.Pointer[error] // Reason for the interruption, populated by Stop
++	interrupt   atomic.Bool // Atomic flag to signal execution interruption
++	reason      error       // Textual reason for the interruption
+ 	created     map[common.Address]bool
+ 	deleted     map[common.Address]bool
+ }
+@@ -240,15 +240,12 @@ func (t *prestateTracer) GetResult() (json.RawMessage, error) {
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	if p := t.reason.Load(); p != nil {
+-		return json.RawMessage(res), *p
+-	}
+-	return json.RawMessage(res), nil
++	return json.RawMessage(res), t.reason
+ }
+ 
+ // Stop terminates execution of the tracer at the first opportune moment.
+ func (t *prestateTracer) Stop(err error) {
+-	t.reason.Store(&err)
++	t.reason = err
+ 	t.interrupt.Store(true)
+ }
+ 

@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "status": "pilot-32-with-oss-geth-holdout",
+  "status": "pilot-35-with-oss-geth-hard-holdout",
   "tasks": [
     {
       "candidateId": "review-case-a1",
@@ -257,9 +257,34 @@
       "bucket": "oss-geth-pilot",
       "fixtureStatus": "authored-oss-pilot",
       "goldStatus": "locked-local-provider-review-pending"
+    },
+    {
+      "candidateId": "geth-case-006",
+      "path": "tasks/geth-case-006",
+      "internalTopic": "native tracer Stop/GetResult interruption reason data race",
+      "bucket": "oss-geth-hard-pilot",
+      "fixtureStatus": "authored-oss-pilot",
+      "goldStatus": "locked-local-provider-review-pending"
+    },
+    {
+      "candidateId": "geth-case-007",
+      "path": "tasks/geth-case-007",
+      "internalTopic": "snapshot generator goroutine survives Release shutdown",
+      "bucket": "oss-geth-hard-pilot",
+      "fixtureStatus": "authored-oss-pilot",
+      "goldStatus": "locked-local-provider-review-pending"
+    },
+    {
+      "candidateId": "geth-case-008",
+      "path": "tasks/geth-case-008",
+      "internalTopic": "snap sync testPeer request counter data race",
+      "bucket": "oss-geth-hard-pilot",
+      "fixtureStatus": "authored-oss-pilot",
+      "goldStatus": "locked-local-provider-review-pending"
     }
   ],
   "nextActions": [
+    "Treat geth-case-006 through geth-case-008 as OSS-derived hard pilot holdouts; do not tune workflow behavior on their first-run failures.",
     "Treat geth-case-001 through geth-case-005 as an OSS-derived pilot holdout; do not tune workflow behavior on their first-run failures.",
     "Treat review-case-p16 through review-case-aa27 as a local blind holdout for backtesting only until provider review promotes them.",
     "Do not tune workflow prompts/helpers on holdout failures in the same pass; record failures as evidence first.",
@@ -276,7 +301,7 @@
   "latestOssPilot": {
     "source": "ethereum/go-ethereum",
     "localPath": "/tmp/pi-github-repos/ethereum/go-ethereum",
-    "taskRange": "geth-case-001..geth-case-005",
+    "taskRange": "geth-case-001..geth-case-008",
     "status": "local-provider-review-pending"
   }
 }

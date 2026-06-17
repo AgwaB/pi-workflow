@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 1,
+  "taskId": "oss-geth-snapshot-generator-release-leak",
+  "candidateId": "geth-case-007",
+  "status": "locked",
+  "sourceRevision": "bc1967f088469b7d78607b75bd7df3e960d0df82",
+  "fixturePatch": "fixture.diff",
+  "referenceFixPatch": "reference-fix.patch",
+  "bugs": [
+    {
+      "bugId": "G1",
+      "severity": "high",
+      "category": "reliability",
+      "summary": "The patch lets diskLayer.Release reset resources without reliably cancelling and waiting for the snapshot generator goroutine.",
+      "impact": "During shutdown, snapshot generation can survive Release and keep accessing trie/database state after cleanup, causing goroutine leaks or closed-database iterator errors.",
+      "locations": [
+        {
+          "file": "core/state/snapshot/disklayer.go",
+          "startLine": 51,
+          "endLine": 60,
+          "symbol": "diskLayer.Release"
+        },
+        {
+          "file": "core/state/snapshot/disklayer.go",
+          "startLine": 188,
+          "endLine": 201,
+          "symbol": "diskLayer.stopGeneration"
+        },
+        {
+          "file": "core/state/snapshot/generate.go",
+          "startLine": 58,
+          "endLine": 80,
+          "symbol": "generateSnapshot"
+        }
+      ],
+      "requiredEvidence": [
+        {
+          "file": "core/state/snapshot/disklayer.go",
+          "quote": "genAbort <- abort",
+          "matchMode": "substring"
+        },
+        {
+          "file": "core/state/snapshot/disklayer.go",
+          "quote": "generating := dl.genMarker != nil",
+          "matchMode": "substring"
+        },
+        {
+          "file": "core/state/snapshot/disklayer.go",
+          "quote": "dl.stopGeneration()",
+          "matchMode": "substring"
+        }
+      ],
+      "acceptableFixes": [
+        "Have Release call stopGeneration before releasing resources, and make stopGeneration cancel and wait for the generator goroutine to exit.",
+        "Do not rely on genMarker as the only running-state check; cancellation must work even after generation completed but the goroutine is still awaiting abort/cleanup."
+      ]
+    }
+  ],
+  "noIssueRegions": [],
+  "mustAvoidClaims": [
+    "Using upstream PR titles, issue numbers, commit messages, or git history as evidence.",
+    "Relying on private repro.sh, gold-key.draft.json, or reference-fix.patch.",
+    "Claiming unrelated broad rewrites outside the proposed patch are required."
+  ],
+  "difficulty": {
+    "bucket": "hard",
+    "plainExpected": "mixed",
+    "rationale": "The bug is a shutdown lifecycle race involving generator completion state, Release, and goroutine cleanup rather than a single local condition."
+  },
+  "leakagePolicy": {
+    "candidateVisible": [
+      "sanitized go-ethereum workspace at pinned revision",
+      "fixture.diff",
+      "neutral review prompt"
+    ],
+    "candidateForbidden": [
+      "gold-key.draft.json",
+      "author-notes.md",
+      "reference-fix.patch",
+      "repro.sh",
+      ".git",
+      ".pi/eval",
+      "judge prompts, answer keys, run artifacts, and A/B mappings",
+      "upstream PR/issue text or commit message"
+    ]
+  },
+  "approval": {
+    "state": "approved",
+    "providerReviews": [],
+    "approvedBy": [
+      "local deterministic OSS fixture authoring",
+      "source-only reverse fixture with RED/GREEN repro"
+    ],
+    "notes": "Pilot OSS-derived holdout task; provider review pending before promotion to primary release gate."
+  }
+}

@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "taskId": "oss-geth-snap-testpeer-counter-race",
+  "candidateId": "geth-case-008",
+  "status": "locked",
+  "sourceRevision": "8091994e7b5954827ad68ccca463647b220b1621",
+  "fixturePatch": "fixture.diff",
+  "referenceFixPatch": "reference-fix.patch",
+  "bugs": [
+    {
+      "bugId": "G1",
+      "severity": "medium",
+      "category": "test",
+      "summary": "The patch reverts snap testPeer request counters from atomics to plain ints incremented by concurrent request handlers.",
+      "impact": "Snap sync tests can race on shared testPeer counters under -race, making the test harness unreliable for concurrent sync behavior.",
+      "locations": [
+        {
+          "file": "eth/protocols/snap/sync_test.go",
+          "startLine": 145,
+          "endLine": 204,
+          "symbol": "testPeer request counters"
+        }
+      ],
+      "requiredEvidence": [
+        {
+          "file": "eth/protocols/snap/sync_test.go",
+          "quote": "t.nAccountRequests++",
+          "matchMode": "substring"
+        },
+        {
+          "file": "eth/protocols/snap/sync_test.go",
+          "quote": "nAccountRequests  int",
+          "matchMode": "substring"
+        }
+      ],
+      "acceptableFixes": [
+        "Use atomic.Int64 counters and Load/Add for request counters touched by concurrent snap sync goroutines.",
+        "Do not increment shared testPeer request counters with plain ++ from concurrently invoked Request* methods."
+      ]
+    }
+  ],
+  "noIssueRegions": [],
+  "mustAvoidClaims": [
+    "Using upstream PR titles, issue numbers, commit messages, or git history as evidence.",
+    "Relying on private repro.sh, gold-key.draft.json, or reference-fix.patch.",
+    "Claiming unrelated broad rewrites outside the proposed patch are required."
+  ],
+  "difficulty": {
+    "bucket": "hard",
+    "plainExpected": "mixed",
+    "rationale": "The defect is test-only but requires recognizing that Syncer invokes testPeer Request* methods concurrently."
+  },
+  "leakagePolicy": {
+    "candidateVisible": [
+      "sanitized go-ethereum workspace at pinned revision",
+      "fixture.diff",
+      "neutral review prompt"
+    ],
+    "candidateForbidden": [
+      "gold-key.draft.json",
+      "author-notes.md",
+      "reference-fix.patch",
+      "repro.sh",
+      ".git",
+      ".pi/eval",
+      "judge prompts, answer keys, run artifacts, and A/B mappings",
+      "upstream PR/issue text or commit message"
+    ]
+  },
+  "approval": {
+    "state": "approved",
+    "providerReviews": [],
+    "approvedBy": [
+      "local deterministic OSS fixture authoring",
+      "source-only reverse fixture with RED/GREEN repro"
+    ],
+    "notes": "Pilot OSS-derived holdout task; provider review pending before promotion to primary release gate."
+  }
+}
