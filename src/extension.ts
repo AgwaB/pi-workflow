@@ -840,94 +840,229 @@ export function parseWorkflowRunArgs(args: string): {
 	model?: string;
 	thinking?: ThinkingLevel;
 } {
-	const parsed: {
-		detach: boolean;
-		model?: string;
-		thinking?: ThinkingLevel;
-	} = { detach: false };
-	const trimmed = args.trim();
-	let withoutRun = trimmed.startsWith("run ") ? trimmed.slice(4) : trimmed;
-	withoutRun = consumeLeadingRunOptions(withoutRun, parsed);
-	withoutRun = consumeTrailingRunOptions(withoutRun, parsed);
+	const parsed: WorkflowRunParsedOptions = { detach: false };
+	const body = stripWorkflowRunCommand(args.trim());
+	const tokens = tokenizeWorkflowRunArgs(body);
 
-	const match = withoutRun.match(/^(\S+)\s+([\s\S]*)$/);
-	if (!match) return { specPath: withoutRun, task: "", ...parsed };
-	let task = match[2] ?? "";
-	const quoted = task.match(/^"([\s\S]*)"$/);
-	if (quoted) task = quoted[1] ?? "";
-	return { specPath: match[1] ?? "", task, ...parsed };
-}
-
-function consumeLeadingRunOptions(
-	input: string,
-	parsed: { detach: boolean; model?: string; thinking?: ThinkingLevel },
-): string {
-	let rest = input.trim();
-	while (true) {
-		const next = consumeSingleLeadingRunOption(rest, parsed);
-		if (next === rest) return rest;
-		rest = next.trim();
+	let cursor = 0;
+	while (cursor < tokens.length) {
+		const consumed = consumeLeadingRunOptionTokens(tokens, cursor, parsed);
+		if (consumed === 0) break;
+		cursor += consumed;
 	}
-}
 
-function consumeTrailingRunOptions(
-	input: string,
-	parsed: { detach: boolean; model?: string; thinking?: ThinkingLevel },
-): string {
-	let rest = input.trim();
-	while (true) {
-		const next = consumeSingleTrailingRunOption(rest, parsed);
-		if (next === rest) return rest;
-		rest = next.trim();
+	const specToken = tokens[cursor];
+	if (!specToken) return { specPath: "", task: "", ...parsed };
+
+	let taskTokenEnd = tokens.length;
+	while (taskTokenEnd > cursor + 1) {
+		const nextEnd = consumeTrailingRunOptionTokens(
+			tokens,
+			taskTokenEnd,
+			parsed,
+		);
+		if (nextEnd === taskTokenEnd) break;
+		taskTokenEnd = nextEnd;
 	}
+
+	let taskStart = specToken.end;
+	while (taskStart < body.length && /\s/.test(body[taskStart] ?? ""))
+		taskStart += 1;
+	const taskEnd =
+		taskTokenEnd < tokens.length
+			? trimEndBefore(body, tokens[taskTokenEnd]!.start)
+			: body.length;
+	const task = unquoteWorkflowTask(body.slice(taskStart, taskEnd));
+
+	return { specPath: specToken.text, task, ...parsed };
 }
 
-function consumeSingleLeadingRunOption(
-	input: string,
-	parsed: { detach: boolean; model?: string; thinking?: ThinkingLevel },
-): string {
-	const detach = input.match(/^--detach(?:\s+|$)([\s\S]*)$/);
-	if (detach) {
+type WorkflowRunParsedOptions = {
+	detach: boolean;
+	model?: string;
+	thinking?: ThinkingLevel;
+};
+
+interface WorkflowRunArgToken {
+	text: string;
+	start: number;
+	end: number;
+	quoted: boolean;
+}
+
+function stripWorkflowRunCommand(input: string): string {
+	return input === "run"
+		? ""
+		: input.startsWith("run ")
+			? input.slice(4).trimStart()
+			: input;
+}
+
+function tokenizeWorkflowRunArgs(input: string): WorkflowRunArgToken[] {
+	const tokens: WorkflowRunArgToken[] = [];
+	let index = 0;
+
+	while (index < input.length) {
+		while (index < input.length && /\s/.test(input[index] ?? "")) index += 1;
+		if (index >= input.length) break;
+
+		const start = index;
+		const quote = input[index];
+		if (quote === "\"" || quote === "'") {
+			index += 1;
+			let text = "";
+			let escaped = false;
+			while (index < input.length) {
+				const char = input[index] ?? "";
+				index += 1;
+				if (escaped) {
+					text += char;
+					escaped = false;
+					continue;
+				}
+				if (char === "\\") {
+					escaped = true;
+					continue;
+				}
+				if (char === quote) break;
+				text += char;
+			}
+			tokens.push({ text, start, end: index, quoted: true });
+			continue;
+		}
+
+		while (index < input.length && !/\s/.test(input[index] ?? ""))
+			index += 1;
+		tokens.push({
+			text: input.slice(start, index),
+			start,
+			end: index,
+			quoted: false,
+		});
+	}
+
+	return tokens;
+}
+
+function consumeLeadingRunOptionTokens(
+	tokens: readonly WorkflowRunArgToken[],
+	index: number,
+	parsed: WorkflowRunParsedOptions,
+): number {
+	const token = tokens[index];
+	if (!token || token.quoted) return 0;
+
+	if (token.text === "--detach") {
 		parsed.detach = true;
-		return detach[1] ?? "";
+		return 1;
 	}
-	const model = input.match(/^--model(?:=|\s+)(\S+)(?:\s+|$)([\s\S]*)$/);
-	if (model) {
-		parsed.model = model[1];
-		return model[2] ?? "";
+
+	const model = optionValueFromEquals(token.text, "--model");
+	if (model !== undefined) {
+		parsed.model = model;
+		return 1;
 	}
-	const thinking = input.match(
-		/^--(?:thinking|reasoning)(?:=|\s+)(\S+)(?:\s+|$)([\s\S]*)$/,
-	);
-	if (thinking) {
-		parsed.thinking = parseThinkingLevel(thinking[1] ?? "");
-		return thinking[2] ?? "";
+	if (token.text === "--model") {
+		parsed.model = requiredOptionValue(tokens[index + 1], "--model");
+		return 2;
 	}
-	return input;
+
+	const thinking =
+		optionValueFromEquals(token.text, "--thinking") ??
+		optionValueFromEquals(token.text, "--reasoning");
+	if (thinking !== undefined) {
+		parsed.thinking = parseThinkingLevel(thinking);
+		return 1;
+	}
+	if (token.text === "--thinking" || token.text === "--reasoning") {
+		parsed.thinking = parseThinkingLevel(
+			requiredOptionValue(tokens[index + 1], token.text),
+		);
+		return 2;
+	}
+
+	return 0;
 }
 
-function consumeSingleTrailingRunOption(
-	input: string,
-	parsed: { detach: boolean; model?: string; thinking?: ThinkingLevel },
-): string {
-	const detach = input.match(/([\s\S]*?)(?:\s+)--detach$/);
-	if (detach) {
+function consumeTrailingRunOptionTokens(
+	tokens: readonly WorkflowRunArgToken[],
+	end: number,
+	parsed: WorkflowRunParsedOptions,
+): number {
+	const last = tokens[end - 1];
+	if (!last) return end;
+
+	if (!last.quoted && last.text === "--detach") {
 		parsed.detach = true;
-		return detach[1] ?? "";
+		return end - 1;
 	}
-	const model = input.match(/([\s\S]*?)(?:\s+)--model(?:=|\s+)(\S+)$/);
-	if (model) {
-		parsed.model = model[2];
-		return model[1] ?? "";
+
+	const model = !last.quoted
+		? optionValueFromEquals(last.text, "--model")
+		: undefined;
+	if (model !== undefined) {
+		parsed.model = model;
+		return end - 1;
 	}
-	const thinking = input.match(
-		/([\s\S]*?)(?:\s+)--(?:thinking|reasoning)(?:=|\s+)(\S+)$/,
-	);
-	if (thinking) {
-		parsed.thinking = parseThinkingLevel(thinking[2] ?? "");
-		return thinking[1] ?? "";
+
+	const thinking = !last.quoted
+		? (optionValueFromEquals(last.text, "--thinking") ??
+			optionValueFromEquals(last.text, "--reasoning"))
+		: undefined;
+	if (thinking !== undefined) {
+		parsed.thinking = parseThinkingLevel(thinking);
+		return end - 1;
 	}
-	return input;
+
+	const option = tokens[end - 2];
+	if (!option || option.quoted) return end;
+	if (option.text === "--model") {
+		parsed.model = last.text;
+		return end - 2;
+	}
+	if (option.text === "--thinking" || option.text === "--reasoning") {
+		parsed.thinking = parseThinkingLevel(last.text);
+		return end - 2;
+	}
+
+	return end;
+}
+
+function optionValueFromEquals(
+	text: string,
+	option: string,
+): string | undefined {
+	return text.startsWith(`${option}=`)
+		? text.slice(option.length + 1)
+		: undefined;
+}
+
+function requiredOptionValue(
+	token: WorkflowRunArgToken | undefined,
+	option: string,
+): string {
+	if (!token) throw new Error(`Workflow run option ${option} requires a value`);
+	return token.text;
+}
+
+function trimEndBefore(input: string, index: number): number {
+	let end = index;
+	while (end > 0 && /\s/.test(input[end - 1] ?? "")) end -= 1;
+	return end;
+}
+
+function unquoteWorkflowTask(input: string): string {
+	const trimmed = input.trim();
+	const tokens = tokenizeWorkflowRunArgs(trimmed);
+	const only = tokens[0];
+	if (
+		only?.quoted &&
+		tokens.length === 1 &&
+		only.start === 0 &&
+		only.end === trimmed.length
+	)
+		return only.text;
+	return trimmed;
 }
 
 function parseThinkingLevel(value: string): ThinkingLevel {

@@ -5836,6 +5836,24 @@ test("workflow command completions and run arg parsing preserve task text", () =
 		{ specPath: "review", task: "Fix the thing", detach: true },
 	);
 	assert.deepEqual(
+		parseWorkflowRunArgs('run review "Keep literal --detach in the task"'),
+		{
+			specPath: "review",
+			task: "Keep literal --detach in the task",
+			detach: false,
+		},
+	);
+	assert.deepEqual(
+		parseWorkflowRunArgs(
+			'run review "Keep literal --model=openai-codex/gpt-5.5 in the task"',
+		),
+		{
+			specPath: "review",
+			task: "Keep literal --model=openai-codex/gpt-5.5 in the task",
+			detach: false,
+		},
+	);
+	assert.deepEqual(
 		parseWorkflowRunArgs(
 			'run --model kimi-coding/kimi-for-coding --thinking low review "Fix the thing" --detach',
 		),
