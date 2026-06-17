@@ -129,11 +129,14 @@ const goldOne = {
 };
 const good = { findings: [{ severity: "high", file: "src/compiler.ts", line: 3, claim: "runtime task injection is omitted for opted-in stages", evidenceQuote: "taskStageKind", fix: "include opt-in condition", confidence: 0.8 }], noMaterialIssues: false };
 const goodMultiLocation = { findings: [{ severity: "high", file: "src/compiler.ts", line: 99, locations: [{ file: "src/other.ts", line: 1 }, { file: "src/compiler.ts", line: 3 }], claim: "runtime task injection is omitted for opted-in stages", evidenceQuote: "taskStageKind", fix: "include opt-in condition", confidence: 0.8 }], noMaterialIssues: false };
+const goodSupportLocationWithExactEvidence = { findings: [{ severity: "high", file: "src/compiler.ts", line: 99, claim: "runtime task injection is omitted for opted-in stages", evidenceQuote: "taskStageKind", fix: "include opt-in condition", confidence: 0.8 }], noMaterialIssues: false };
 const badFp = { findings: [{ severity: "medium", file: "src/other.ts", claim: "unrelated", evidenceQuote: "none", fix: "none" }], noMaterialIssues: false };
 check(validateCandidateFindings(good).length === 0, "self-test: good candidate schema invalid");
 check(validateCandidateFindings(goodMultiLocation).length === 0, "self-test: multi-location candidate schema invalid");
+check(validateCandidateFindings(goodSupportLocationWithExactEvidence).length === 0, "self-test: support-location evidence candidate schema invalid");
 check(scoreFindings(goldOne, good).recall === 1, "self-test: true positive recall failed");
 check(scoreFindings(goldOne, goodMultiLocation).recall === 1, "self-test: multi-location true positive recall failed");
+check(scoreFindings(goldOne, goodSupportLocationWithExactEvidence).recall === 1, "self-test: exact evidence should match despite support-only line failed");
 check(scoreFindings(goldOne, badFp).falsePositiveCount === 1, "self-test: false positive count failed");
 const noIssueGold = { taskId: "no-issue", candidateId: "no-issue", bugs: [] };
 check(scoreFindings(noIssueGold, { findings: [], noMaterialIssues: true }).objectiveScore > 0.9, "self-test: no-issue success failed");

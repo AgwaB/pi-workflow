@@ -159,9 +159,14 @@ export function scoreFindings(gold, candidate) {
     let best = null;
     for (const [index, finding] of findings.entries()) {
       if (matchedFinding.has(index)) continue;
-      const fileMatch = (bug.locations ?? []).some((loc) => findingMatchesRegion(finding, loc));
-      if (!fileMatch) continue;
       const evidenceScore = (bug.requiredEvidence ?? []).some((e) => candidateLocations(finding).some((location) => location.file === e.file) && quoteMatches(finding.evidenceQuote, e)) ? 1 : 0;
+      const locationMatch = (bug.locations ?? []).some((loc) => findingMatchesRegion(finding, loc));
+      // A reviewer can correctly quote the exact changed/gold evidence while
+      // choosing a supporting control-flow location as the display location.
+      // Treat exact required-evidence matches on the same file as sufficient
+      // identity evidence, but do not allow semantic-only same-file claims to
+      // bypass location matching.
+      if (!locationMatch && !evidenceScore) continue;
       const semanticScore = Math.max(tokenOverlap(finding.claim, bug.summary), tokenOverlap(finding.claim, bug.impact));
       const score = evidenceScore * 2 + semanticScore;
       if (score > 0.2 && (!best || score > best.score)) best = { index, finding, score, evidenceScore, semanticScore };
