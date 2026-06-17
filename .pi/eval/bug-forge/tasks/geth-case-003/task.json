@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "candidateId": "geth-case-003",
+  "status": "fixture-authored",
+  "sourceRevision": "c16684c1eec23bdc3f806827713aad380a6a90f3",
+  "sourceRepository": {
+    "type": "local-git",
+    "remote": "https://github.com/ethereum/go-ethereum",
+    "localPathEnv": "BUG_FORGE_GETH_REPO",
+    "localPath": "/tmp/pi-github-repos/ethereum/go-ethereum",
+    "license": "GPL-3.0-or-later/LGPL-3.0-or-later; see COPYING and COPYING.LESSER"
+  },
+  "candidateVisible": {
+    "promptTemplate": "../../prompts/candidate-review.md",
+    "fixturePatch": "fixture.diff"
+  },
+  "privateOracle": {
+    "goldKeyDraft": "gold-key.draft.json",
+    "authorNotes": "author-notes.md",
+    "referenceFixPatch": "reference-fix.patch",
+    "repro": "repro.sh"
+  },
+  "notes": "eth_simulateV1 pre-Shanghai withdrawals fields"
+}

@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "taskId": "oss-geth-txpool-locals-journal-race",
+  "candidateId": "geth-case-002",
+  "status": "locked",
+  "sourceRevision": "02dd66dfc0b1551bb55b95ae0b914a58441ce2ac",
+  "fixturePatch": "fixture.diff",
+  "referenceFixPatch": "reference-fix.patch",
+  "bugs": [
+    {
+      "bugId": "G1",
+      "severity": "high",
+      "category": "reliability",
+      "summary": "The patch moves journal load/setup/close back into TxTracker.loop, making journal lifecycle operations run in the background goroutine without the tracker mutex discipline used by Stop.",
+      "impact": "Starting or stopping the local transaction tracker can race journal state, which the Go race detector catches in the txpool locals journal tests.",
+      "locations": [
+        {
+          "file": "core/txpool/locals/tx_tracker.go",
+          "startLine": 190,
+          "endLine": 205,
+          "symbol": "TxTracker.loop"
+        }
+      ],
+      "requiredEvidence": [
+        {
+          "file": "core/txpool/locals/tx_tracker.go",
+          "quote": "defer tracker.journal.close()",
+          "matchMode": "substring"
+        }
+      ],
+      "acceptableFixes": [
+        "Load and set up the journal before launching the loop goroutine, and close it during Stop under tracker.mu after the loop exits.",
+        "Do not defer journal close inside the background loop without the same locking used by journal users."
+      ]
+    }
+  ],
+  "noIssueRegions": [],
+  "mustAvoidClaims": [
+    "Using upstream PR titles, issue numbers, commit messages, or git history as evidence.",
+    "Relying on private repro.sh, gold-key.draft.json, or reference-fix.patch.",
+    "Claiming unrelated broad rewrites outside the proposed patch are required."
+  ],
+  "difficulty": {
+    "bucket": "hard",
+    "plainExpected": "mixed",
+    "rationale": "The code looks like lifecycle cleanup, but the observable bug is a cross-goroutine race only visible with -race."
+  },
+  "leakagePolicy": {
+    "candidateVisible": [
+      "sanitized go-ethereum workspace at pinned revision",
+      "fixture.diff",
+      "neutral review prompt"
+    ],
+    "candidateForbidden": [
+      "gold-key.draft.json",
+      "author-notes.md",
+      "reference-fix.patch",
+      "repro.sh",
+      ".git",
+      ".pi/eval",
+      "judge prompts, answer keys, run artifacts, and A/B mappings",
+      "upstream PR/issue text or commit message"
+    ]
+  },
+  "approval": {
+    "state": "approved",
+    "providerReviews": [],
+    "approvedBy": [
+      "local deterministic OSS fixture authoring",
+      "source-only reverse fixture with RED/GREEN repro"
+    ],
+    "notes": "Pilot OSS-derived holdout task; provider review pending before promotion to primary release gate."
+  }
+}

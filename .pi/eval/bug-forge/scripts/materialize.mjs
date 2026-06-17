@@ -70,12 +70,26 @@ const revision = gold.sourceRevision && gold.sourceRevision !== "TBD" ? gold.sou
 const fixture = path.join(taskDir, task.candidateVisible?.fixturePatch ?? "fixture.diff");
 if (!fs.existsSync(fixture)) throw new Error(`Missing fixture diff: ${fixture}`);
 
+function sourceRepoCwd(task) {
+  const source = task.sourceRepository;
+  if (!source) return ROOT;
+  if (source.type !== "local-git") throw new Error(`Unsupported sourceRepository.type: ${source.type}`);
+  const localPath = source.localPathEnv && process.env[source.localPathEnv]
+    ? process.env[source.localPathEnv]
+    : source.localPath;
+  if (!localPath) throw new Error("sourceRepository.localPath or localPathEnv is required");
+  const resolved = path.resolve(localPath);
+  if (!fs.existsSync(path.join(resolved, ".git"))) throw new Error(`Local git source not found: ${resolved}`);
+  return resolved;
+}
+
+const sourceCwd = sourceRepoCwd(task);
 if (!checkOnly) fs.rmSync(out, { recursive: true, force: true });
 fs.mkdirSync(out, { recursive: true });
 if (!checkOnly) {
-  const archive = spawnSync("git", ["archive", revision], { cwd: ROOT, encoding: null, maxBuffer: 256 * 1024 * 1024 });
-  if (archive.status !== 0) throw new Error(`git archive ${revision} failed: ${archive.stderr?.toString()}`);
-  const tar = spawnSync("tar", ["-x", "-C", out], { input: archive.stdout, encoding: null, maxBuffer: 256 * 1024 * 1024 });
+  const archive = spawnSync("git", ["archive", revision], { cwd: sourceCwd, encoding: null, maxBuffer: 512 * 1024 * 1024 });
+  if (archive.status !== 0) throw new Error(`git archive ${revision} failed in ${sourceCwd}: ${archive.stderr?.toString()}`);
+  const tar = spawnSync("tar", ["-x", "-C", out], { input: archive.stdout, encoding: null, maxBuffer: 512 * 1024 * 1024 });
   if (tar.status !== 0) throw new Error(`tar extract failed: ${tar.stderr?.toString()}`);
   for (const rel of [".git", ".harness", ".harness-archive", ".pi/eval"]) {
     fs.rmSync(path.join(out, rel), { recursive: true, force: true });
@@ -83,6 +97,6 @@ if (!checkOnly) {
   run("git", ["apply", fixture], { cwd: out });
 }
 const hits = listForbiddenHits(out);
-const result = { taskId, out, revision, fixture, forbiddenHits: hits, ok: hits.length === 0 };
+const result = { taskId, out, revision, sourceCwd, fixture, forbiddenHits: hits, ok: hits.length === 0 };
 console.log(JSON.stringify(result, null, 2));
 if (hits.length) process.exitCode = 1;

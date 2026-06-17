@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "candidateId": "geth-case-005",
+  "status": "fixture-authored",
+  "sourceRevision": "f4a90d178a53ab8792dde74eec8db40c6120e111",
+  "sourceRepository": {
+    "type": "local-git",
+    "remote": "https://github.com/ethereum/go-ethereum",
+    "localPathEnv": "BUG_FORGE_GETH_REPO",
+    "localPath": "/tmp/pi-github-repos/ethereum/go-ethereum",
+    "license": "GPL-3.0-or-later/LGPL-3.0-or-later; see COPYING and COPYING.LESSER"
+  },
+  "candidateVisible": {
+    "promptTemplate": "../../prompts/candidate-review.md",
+    "fixturePatch": "fixture.diff"
+  },
+  "privateOracle": {
+    "goldKeyDraft": "gold-key.draft.json",
+    "authorNotes": "author-notes.md",
+    "referenceFixPatch": "reference-fix.patch",
+    "repro": "repro.sh"
+  },
+  "notes": "RPC method length validation order"
+}

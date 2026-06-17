@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "taskId": "oss-geth-waitfornodes-deadlock",
+  "candidateId": "geth-case-001",
+  "status": "locked",
+  "sourceRevision": "281dc4c2091400ea1388b030300e5adc7672ffa0",
+  "fixturePatch": "fixture.diff",
+  "referenceFixPatch": "reference-fix.patch",
+  "bugs": [
+    {
+      "bugId": "G1",
+      "severity": "high",
+      "category": "reliability",
+      "summary": "The patch reintroduces a synchronous nodeFeed subscription in waitForNodes while that code also takes Table.mutex.",
+      "impact": "A goroutine waiting for table growth can deadlock addFoundNode/nodeFeed delivery and prevent discovery table progress or shutdown under concurrent node additions.",
+      "locations": [
+        {
+          "file": "p2p/discover/table.go",
+          "startLine": 763,
+          "endLine": 784,
+          "symbol": "Table.waitForNodes"
+        }
+      ],
+      "requiredEvidence": [
+        {
+          "file": "p2p/discover/table.go",
+          "quote": "ch = make(chan *enode.Node)",
+          "matchMode": "substring"
+        }
+      ],
+      "acceptableFixes": [
+        "Keep nodeFeed delivery decoupled from the goroutine that takes Table.mutex, for example by using a buffered notify channel and forwarding goroutine.",
+        "Ensure waitForNodes cannot block addFoundNode/nodeFeed sends while holding or contending on Table.mutex."
+      ]
+    }
+  ],
+  "noIssueRegions": [],
+  "mustAvoidClaims": [
+    "Using upstream PR titles, issue numbers, commit messages, or git history as evidence.",
+    "Relying on private repro.sh, gold-key.draft.json, or reference-fix.patch.",
+    "Claiming unrelated broad rewrites outside the proposed patch are required."
+  ],
+  "difficulty": {
+    "bucket": "hard",
+    "plainExpected": "mixed",
+    "rationale": "The failure depends on lock/feed interactions across goroutines, not a simple local invariant."
+  },
+  "leakagePolicy": {
+    "candidateVisible": [
+      "sanitized go-ethereum workspace at pinned revision",
+      "fixture.diff",
+      "neutral review prompt"
+    ],
+    "candidateForbidden": [
+      "gold-key.draft.json",
+      "author-notes.md",
+      "reference-fix.patch",
+      "repro.sh",
+      ".git",
+      ".pi/eval",
+      "judge prompts, answer keys, run artifacts, and A/B mappings",
+      "upstream PR/issue text or commit message"
+    ]
+  },
+  "approval": {
+    "state": "approved",
+    "providerReviews": [],
+    "approvedBy": [
+      "local deterministic OSS fixture authoring",
+      "source-only reverse fixture with RED/GREEN repro"
+    ],
+    "notes": "Pilot OSS-derived holdout task; provider review pending before promotion to primary release gate."
+  }
+}

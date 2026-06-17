@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "status": "pilot-27-with-local-holdout",
+  "status": "pilot-32-with-oss-geth-holdout",
   "tasks": [
     {
       "candidateId": "review-case-a1",
@@ -217,9 +217,50 @@
       "bucket": "local-blind-holdout-no-issue",
       "fixtureStatus": "authored-local-holdout",
       "goldStatus": "locked-local-provider-review-pending"
+    },
+    {
+      "candidateId": "geth-case-001",
+      "path": "tasks/geth-case-001",
+      "internalTopic": "p2p/discover waitForNodes lock/feed deadlock",
+      "bucket": "oss-geth-pilot",
+      "fixtureStatus": "authored-oss-pilot",
+      "goldStatus": "locked-local-provider-review-pending"
+    },
+    {
+      "candidateId": "geth-case-002",
+      "path": "tasks/geth-case-002",
+      "internalTopic": "txpool locals journal lifecycle data race",
+      "bucket": "oss-geth-pilot",
+      "fixtureStatus": "authored-oss-pilot",
+      "goldStatus": "locked-local-provider-review-pending"
+    },
+    {
+      "candidateId": "geth-case-003",
+      "path": "tasks/geth-case-003",
+      "internalTopic": "eth_simulateV1 pre-Shanghai withdrawals fields",
+      "bucket": "oss-geth-pilot",
+      "fixtureStatus": "authored-oss-pilot",
+      "goldStatus": "locked-local-provider-review-pending"
+    },
+    {
+      "candidateId": "geth-case-004",
+      "path": "tasks/geth-case-004",
+      "internalTopic": "getBlobs nil blob list JSON contract",
+      "bucket": "oss-geth-pilot",
+      "fixtureStatus": "authored-oss-pilot",
+      "goldStatus": "locked-local-provider-review-pending"
+    },
+    {
+      "candidateId": "geth-case-005",
+      "path": "tasks/geth-case-005",
+      "internalTopic": "RPC method length validation order",
+      "bucket": "oss-geth-pilot",
+      "fixtureStatus": "authored-oss-pilot",
+      "goldStatus": "locked-local-provider-review-pending"
     }
   ],
   "nextActions": [
+    "Treat geth-case-001 through geth-case-005 as an OSS-derived pilot holdout; do not tune workflow behavior on their first-run failures.",
     "Treat review-case-p16 through review-case-aa27 as a local blind holdout for backtesting only until provider review promotes them.",
     "Do not tune workflow prompts/helpers on holdout failures in the same pass; record failures as evidence first.",
     "Use C3, D4, J10, and M13 as the current locked set, with J10 treated as a hard recall holdout and M13 as a precision/root-splitting discriminator.",
@@ -230,6 +271,12 @@
   "latestHoldout": {
     "taskRange": "review-case-p16..review-case-aa27",
     "sourceRevision": "eacad6c512da81031d0fe033de368a5b4fce4057",
+    "status": "local-provider-review-pending"
+  },
+  "latestOssPilot": {
+    "source": "ethereum/go-ethereum",
+    "localPath": "/tmp/pi-github-repos/ethereum/go-ethereum",
+    "taskRange": "geth-case-001..geth-case-005",
     "status": "local-provider-review-pending"
   }
 }

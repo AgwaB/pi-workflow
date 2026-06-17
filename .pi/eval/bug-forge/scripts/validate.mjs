@@ -55,15 +55,26 @@ function validateGoldShape(taskId, gold) {
   check(gold.approval && Array.isArray(gold.approval.providerReviews) && Array.isArray(gold.approval.approvedBy), `${taskId}: approval incomplete`);
 }
 
-function sourceTextAtRevision(revision, file) {
+function sourceRepoCwd(task) {
+  const source = task.sourceRepository;
+  if (!source) return ROOT;
+  if (source.type !== "local-git") return ROOT;
+  const localPath = source.localPathEnv && process.env[source.localPathEnv]
+    ? process.env[source.localPathEnv]
+    : source.localPath;
+  return localPath ? path.resolve(localPath) : ROOT;
+}
+
+function sourceTextAtRevision(revision, file, task) {
   if (!revision || revision === "TBD" || !file) return "";
-  const cp = run("git", ["show", `${revision}:${file}`]);
+  const cwd = sourceRepoCwd(task);
+  const cp = run("git", ["show", `${revision}:${file}`], cwd);
   return cp.status === 0 ? cp.stdout : "";
 }
 
-function quoteAppears(taskDir, gold, evidence) {
+function quoteAppears(taskDir, gold, evidence, task) {
   const candidates = [];
-  const sourceText = sourceTextAtRevision(gold.sourceRevision, evidence.file);
+  const sourceText = sourceTextAtRevision(gold.sourceRevision, evidence.file, task);
   if (sourceText) candidates.push(sourceText);
   const fixture = path.join(taskDir, gold.fixturePatch ?? "fixture.diff");
   if (fs.existsSync(fixture)) candidates.push(fs.readFileSync(fixture, "utf8"));
@@ -105,7 +116,7 @@ for (const task of registry.tasks ?? []) {
     check((bug.locations ?? []).every((loc) => loc.file && loc.file !== "TBD"), `${task.candidateId}/${bug.bugId}: location not concrete`);
     for (const ev of bug.requiredEvidence ?? []) {
       check(ev.file && ev.file !== "TBD" && ev.quote && !ev.quote.startsWith("TBD"), `${task.candidateId}/${bug.bugId}: evidence not concrete`);
-      check(quoteAppears(taskDir, gold, ev), `${task.candidateId}/${bug.bugId}: evidence quote not found: ${ev.quote}`);
+      check(quoteAppears(taskDir, gold, ev, task), `${task.candidateId}/${bug.bugId}: evidence quote not found: ${ev.quote}`);
     }
   }
 }

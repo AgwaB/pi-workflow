@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "taskId": "oss-geth-simulate-withdrawals-fork-fields",
+  "candidateId": "geth-case-003",
+  "status": "locked",
+  "sourceRevision": "c16684c1eec23bdc3f806827713aad380a6a90f3",
+  "fixturePatch": "fixture.diff",
+  "referenceFixPatch": "reference-fix.patch",
+  "bugs": [
+    {
+      "bugId": "G1",
+      "severity": "high",
+      "category": "api_contract",
+      "summary": "The patch unconditionally attaches withdrawals to simulated block bodies instead of gating the field on the simulated block's Shanghai fork activation.",
+      "impact": "Pre-Shanghai eth_simulateV1 results emit withdrawals and withdrawalsRoot fields, producing block output that is invalid for that fork boundary and changes header/hash semantics.",
+      "locations": [
+        {
+          "file": "internal/ethapi/simulate.go",
+          "startLine": 401,
+          "endLine": 406,
+          "symbol": "simulator.processBlock"
+        }
+      ],
+      "requiredEvidence": [
+        {
+          "file": "internal/ethapi/simulate.go",
+          "quote": "Withdrawals:  *block.BlockOverrides.Withdrawals",
+          "matchMode": "substring"
+        }
+      ],
+      "acceptableFixes": [
+        "Only assign blockBody.Withdrawals when sim.chainConfig.IsShanghai(header.Number, header.Time) is true.",
+        "Keep pre-Shanghai simulated block bodies with nil withdrawals so JSON/header fields are omitted."
+      ]
+    }
+  ],
+  "noIssueRegions": [],
+  "mustAvoidClaims": [
+    "Using upstream PR titles, issue numbers, commit messages, or git history as evidence.",
+    "Relying on private repro.sh, gold-key.draft.json, or reference-fix.patch.",
+    "Claiming unrelated broad rewrites outside the proposed patch are required."
+  ],
+  "difficulty": {
+    "bucket": "hard",
+    "plainExpected": "mixed",
+    "rationale": "The defect requires recognizing protocol fork-gated fields rather than only local struct construction."
+  },
+  "leakagePolicy": {
+    "candidateVisible": [
+      "sanitized go-ethereum workspace at pinned revision",
+      "fixture.diff",
+      "neutral review prompt"
+    ],
+    "candidateForbidden": [
+      "gold-key.draft.json",
+      "author-notes.md",
+      "reference-fix.patch",
+      "repro.sh",
+      ".git",
+      ".pi/eval",
+      "judge prompts, answer keys, run artifacts, and A/B mappings",
+      "upstream PR/issue text or commit message"
+    ]
+  },
+  "approval": {
+    "state": "approved",
+    "providerReviews": [],
+    "approvedBy": [
+      "local deterministic OSS fixture authoring",
+      "source-only reverse fixture with RED/GREEN repro"
+    ],
+    "notes": "Pilot OSS-derived holdout task; provider review pending before promotion to primary release gate."
+  }
+}
