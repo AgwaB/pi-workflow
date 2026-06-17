@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import { isArtifactGraphWorkflowSpecShape } from "./artifact-graph-schema.js";
 import { WorkflowValidationError } from "./types.js";
 
-const SPEC_EXTENSIONS = new Set([".json", ".yaml", ".yml"]);
+const SPEC_EXTENSIONS = new Set([".json"]);
 const PACKAGE_WORKFLOW_ROOT = resolve(
 	dirname(fileURLToPath(import.meta.url)),
 	"..",

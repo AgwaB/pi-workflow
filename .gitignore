@@ -25,3 +25,4 @@ internal/
 .recovery/
 .harness-archive/
 *.tar.gz
+.worktrees

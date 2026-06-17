@@ -23,7 +23,7 @@
     "stages": [
       {
         "id": "plan",
-        "type": "task",
+        "type": "single",
         "output": {
           "analysis": {
             "required": true

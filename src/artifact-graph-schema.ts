@@ -24,7 +24,7 @@ const TOP_LEVEL_KEYS = new Set([
 ]);
 const ARTIFACT_GRAPH_KEYS = new Set(["stages", "maxConcurrency"]);
 const STAGE_TYPES = new Set<ArtifactGraphStageType>([
-	"task",
+	"single",
 	"reduce",
 	"foreach",
 	"loop",
@@ -450,7 +450,7 @@ function validateStageType(
 	if (!STAGE_TYPES.has(type as ArtifactGraphStageType)) {
 		issues.push({
 			path,
-			message: "must be one of: task, reduce, foreach, loop, dag",
+			message: "must be one of: single, reduce, foreach, loop, dag",
 		});
 		return undefined;
 	}
@@ -900,13 +900,13 @@ function validateLoopChildren(
 		if (["loop", "foreach", "dag"].includes(String(child.type))) {
 			issues.push({
 				path: `${childPath}.type`,
-				message: "loop child stages must be simple task or reduce stages",
+				message: "loop child stages must be single or reduce stages",
 			});
 		}
 		if (child.support !== undefined) {
 			issues.push({
 				path: `${childPath}.support`,
-				message: "loop child stages must be simple task or reduce stages",
+				message: "loop child stages must be single or reduce stages",
 			});
 		}
 		if (child.from !== undefined || child.after !== undefined) {

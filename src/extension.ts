@@ -1,6 +1,7 @@
 import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
+	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
 import { closeSync, openSync } from "node:fs";
@@ -15,6 +16,7 @@ import {
 	formatRunDetails,
 	formatRunStatus,
 	formatStatus,
+	refreshRun,
 	resumeRun,
 	resumeSupervisors,
 	runWorkflowSpec,
@@ -22,15 +24,16 @@ import {
 	formatRun,
 } from "./engine.js";
 import { WORKFLOW_COMMAND, WORKFLOW_HELP } from "./index.js";
+import { showWorkflowView } from "./workflow-view.js";
 import {
 	assertWorkflowActionAllowedForRole,
+	assertWorkflowToolAllowedForRole,
 	isWorkflowSupervisorEnabled,
 } from "./process-role.js";
 import { readIndex } from "./store.js";
 import { loadWorkflowSpec } from "./schema.js";
 import { listWorkflows, resolveWorkflowRef } from "./workflow-specs.js";
 import {
-	THINKING_LEVELS,
 	type CompiledWorkflow,
 	type ThinkingLevel,
 	WorkflowValidationError,
@@ -38,6 +41,40 @@ import {
 
 const UNFINISHED_RUN_NOTICE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const UNFINISHED_RUN_NOTICE_MAX_RUNS = 5;
+const RUN_FEEDBACK_POLL_MS = 2_000;
+const runFeedbackTimers = new Map<string, ReturnType<typeof setInterval>>();
+
+export const WORKFLOW_LIST_TOOL = "workflow_list" as const;
+export const WORKFLOW_RUN_TOOL = "workflow_run" as const;
+
+const WORKFLOW_LIST_TOOL_PARAMETERS = {
+	type: "object",
+	additionalProperties: false,
+	properties: {},
+} as const;
+
+const WORKFLOW_RUN_TOOL_PARAMETERS = {
+	type: "object",
+	additionalProperties: false,
+	properties: {
+		workflow: {
+			type: "string",
+			description:
+				'Exact workflow name or spec path, for example "deep-research".',
+		},
+		task: {
+			type: "string",
+			description:
+				"Full runtime task for the workflow. Preserve the user's language, file references, and constraints.",
+		},
+		detach: {
+			type: "boolean",
+			description:
+				"Optional. When true, spawn a standalone supervisor so the run keeps progressing after this Pi session exits.",
+		},
+	},
+	required: ["workflow", "task"],
+} as const;
 
 export default function workflowExtension(pi: ExtensionAPI): void {
 	pi.on("session_start", async (_event, ctx) => {
@@ -48,15 +85,92 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 		).catch(() => undefined);
 	});
 
+	registerWorkflowNaturalLanguageTools(pi);
+
 	pi.registerCommand(WORKFLOW_COMMAND, {
-		description: "Run and inspect workflow-defined Pi subagent runs",
+		description: "Open the workflow board and inspect runs",
 		getArgumentCompletions(prefix) {
 			return workflowArgumentCompletions(prefix) ?? null;
 		},
 		handler: async (args, ctx) => {
-			await handleWorkflowCommand(args, ctx);
+			await handleWorkflowCommand(args, ctx, pi);
 		},
 	});
+}
+
+export function registerWorkflowNaturalLanguageTools(
+	pi: ExtensionAPI,
+	env: NodeJS.ProcessEnv = process.env,
+): void {
+	if (!isWorkflowSupervisorEnabled(env)) return;
+
+	pi.registerTool({
+		name: WORKFLOW_LIST_TOOL,
+		label: "List Workflows",
+		description:
+			"List pi-workflow specs discoverable from the current project and installed package.",
+		promptSnippet:
+			"List available pi-workflow workflow names, descriptions, and spec paths.",
+		promptGuidelines: [
+			"Use workflow_list when the user asks what workflows exist or asks you to choose a workflow but did not name one.",
+			"Use workflow_list before workflow_run when the requested workflow name is uncertain; do not guess workflow names.",
+		],
+		parameters: WORKFLOW_LIST_TOOL_PARAMETERS as any,
+		async execute(
+			_toolCallId: string,
+			params: unknown,
+			_signal: AbortSignal,
+			_onUpdate: unknown,
+			ctx: ExtensionContext,
+		) {
+			assertWorkflowToolAllowedForRole();
+			parseWorkflowListToolParams(params);
+			const workflows = await listWorkflowSummaries(ctx.cwd);
+			return {
+				content: [
+					{ type: "text", text: formatWorkflowListToolResult(workflows) },
+				],
+				details: { workflows },
+			};
+		},
+	} as any);
+
+	pi.registerTool({
+		name: WORKFLOW_RUN_TOOL,
+		label: "Run Workflow",
+		description:
+			"Start a named pi-workflow run from an explicit natural-language user request.",
+		promptSnippet:
+			"Start a pi-workflow by exact workflow name/path and full runtime task text.",
+		promptGuidelines: [
+			"Use workflow_run when the user explicitly asks to run, start, execute, or use a pi-workflow by name, including Korean requests such as 'deep-research workflow로 이 레포 조사해줘'.",
+			"Do not use workflow_run for ordinary research, review, or coding requests unless the user asks to use a workflow.",
+			"Do not call workflow_run unless both an exact workflow name/path and a concrete task are known; ask a clarifying question if either is missing.",
+			"Preserve the user's task language, file references, constraints, and requested depth in workflow_run.task; do not reduce it to 'run the workflow'.",
+		],
+		parameters: WORKFLOW_RUN_TOOL_PARAMETERS as any,
+		async execute(
+			_toolCallId: string,
+			params: unknown,
+			_signal: AbortSignal,
+			_onUpdate: unknown,
+			ctx: ExtensionContext,
+		) {
+			assertWorkflowToolAllowedForRole();
+			const request = parseWorkflowRunToolParams(params);
+			const result = await startWorkflowRunFromRequest(request, ctx, pi);
+			return {
+				content: [{ type: "text", text: result.text }],
+				details: {
+					runId: result.run.runId,
+					status: result.run.status,
+					specPath: toDisplayPath(result.run.specPath, ctx.cwd),
+					taskSummary: result.run.taskSummary,
+					openCommand: `/workflow ${result.run.runId}`,
+				},
+			};
+		},
+	} as any);
 }
 
 function spawnDetachedSupervisor(
@@ -78,6 +192,259 @@ function spawnDetachedSupervisor(
 		closeSync(fd);
 	}
 }
+
+function watchWorkflowFeedback(ctx: ExtensionContext, runId: string): void {
+	const printMode =
+		process.argv.includes("--print") || process.argv.includes("-p");
+	if (!ctx.hasUI || printMode) return;
+
+	const key = `${ctx.cwd}\0${runId}`;
+	if (runFeedbackTimers.has(key)) return;
+
+	const clear = () => {
+		const existing = runFeedbackTimers.get(key);
+		if (existing) clearInterval(existing);
+		runFeedbackTimers.delete(key);
+	};
+
+	const timer = setInterval(() => {
+		void (async () => {
+			let run;
+			try {
+				run = await refreshRun(ctx.cwd, runId);
+			} catch {
+				clear();
+				return;
+			}
+			if (run.status === "running") return;
+
+			clear();
+			const summary = run.taskSummary;
+			const firstProblem = run.tasks.find((task) =>
+				["failed", "blocked", "interrupted"].includes(task.status),
+			);
+			const problem = firstProblem
+				? `\n${firstProblem.displayName ?? firstProblem.specId}: ${firstProblem.lastMessage ?? firstProblem.statusDetail}`
+				: "";
+			const type = run.status === "completed" ? "info" : "error";
+			ctx.ui.notify(
+				`Workflow ${run.runId} ${run.status} (${summary.completed}/${summary.total} completed, ${summary.failed} failed, ${summary.interrupted} interrupted).${problem}\nOpen: /workflow ${run.runId}`,
+				type,
+			);
+		})().catch(() => clear());
+	}, RUN_FEEDBACK_POLL_MS);
+	timer.unref?.();
+	runFeedbackTimers.set(key, timer);
+}
+
+interface WorkflowListSummary {
+	name: string;
+	aliases: string[];
+	specPath: string;
+	description?: string;
+	agent?: string;
+	readOnly?: boolean;
+}
+
+interface WorkflowRunToolRequest {
+	workflow: string;
+	task: string;
+	detach: boolean;
+	runtimeDefaults?: { model?: string; thinking?: ThinkingLevel };
+}
+
+function parseWorkflowListToolParams(params: unknown): void {
+	if (params === undefined || params === null) return;
+	if (!isPlainRecord(params))
+		throw new Error("workflow_list input must be an object");
+	const keys = Object.keys(params);
+	if (keys.length > 0)
+		throw new Error(
+			`workflow_list does not accept arguments: ${keys.join(", ")}`,
+		);
+}
+
+function parseWorkflowRunToolParams(params: unknown): WorkflowRunToolRequest {
+	if (!isPlainRecord(params))
+		throw new Error("workflow_run input must be an object");
+	const workflow = stringParam(params, "workflow").trim();
+	const task = stringParam(params, "task").trim();
+	if (!workflow) throw new Error("workflow_run requires workflow");
+	if (!task) throw new Error("workflow_run requires a concrete task");
+	const detachValue = params.detach;
+	if (detachValue !== undefined && typeof detachValue !== "boolean")
+		throw new Error("workflow_run detach must be a boolean when provided");
+	return { workflow, task, detach: detachValue === true };
+}
+
+function stringParam(params: Record<string, unknown>, key: string): string {
+	const value = params[key];
+	if (typeof value !== "string")
+		throw new Error(`workflow_run ${key} must be a string`);
+	return value;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+async function listWorkflowSummaries(
+	cwd: string,
+): Promise<WorkflowListSummary[]> {
+	const workflows = await listWorkflows(cwd);
+	return await Promise.all(
+		workflows.map(async (workflow) => {
+			let description: string | undefined;
+			let agent: string | undefined;
+			let readOnly: boolean | undefined;
+			try {
+				const loaded = await loadWorkflowSpec(workflow.specPath, cwd);
+				description = loaded.spec.description;
+				agent = (loaded.spec.defaults as { agent?: string } | undefined)?.agent;
+				readOnly = loaded.spec.defaults?.readOnly;
+			} catch {
+				// listWorkflows already filters runnable specs; omit optional metadata if a
+				// workflow disappears between discovery and summary formatting.
+			}
+			return {
+				name: workflow.name,
+				aliases: workflow.aliases,
+				specPath: toDisplayPath(workflow.specPath, cwd),
+				...(description ? { description } : {}),
+				...(agent ? { agent } : {}),
+				...(readOnly !== undefined ? { readOnly } : {}),
+			};
+		}),
+	);
+}
+
+function formatWorkflowListToolResult(
+	workflows: WorkflowListSummary[],
+): string {
+	if (workflows.length === 0) return "No workflows found.";
+	return [
+		"Available workflows:",
+		...workflows.map((workflow) => {
+			const aliases = workflow.aliases
+				.filter((alias) => alias !== workflow.name)
+				.join(", ");
+			const metadata = [
+				workflow.agent ? `agent=${workflow.agent}` : undefined,
+				workflow.readOnly !== undefined
+					? `readOnly=${workflow.readOnly}`
+					: undefined,
+			]
+				.filter((item): item is string => item !== undefined)
+				.join(", ");
+			return [
+				`- ${workflow.name}${aliases ? ` (aliases: ${aliases})` : ""}: ${workflow.description ?? "No description."}`,
+				`  spec: ${workflow.specPath}${metadata ? `; ${metadata}` : ""}`,
+			].join("\n");
+		}),
+	].join("\n");
+}
+
+async function startWorkflowRunFromRequest(
+	request: WorkflowRunToolRequest,
+	ctx: ExtensionContext,
+	api: ExtensionAPI,
+): Promise<{ run: Awaited<ReturnType<typeof runWorkflowSpec>>; text: string }> {
+	const workflow = request.workflow.trim();
+	const task = request.task.trim();
+	if (!workflow) throw new Error("workflow name or spec path is required");
+	if (!task)
+		throw new Error(
+			'This workflow needs a task. Usage: /workflow run <workflow-name-or-path> "<task>"',
+		);
+	const run = await runWorkflowSpec(workflow, ctx.cwd, {
+		task,
+		runtimeDefaults: request.runtimeDefaults ?? currentRuntimeDefaults(ctx, api),
+	});
+	const verb =
+		run.status === "blocked"
+			? "created but blocked"
+			: run.status === "failed"
+				? "created but failed to launch"
+				: "started";
+	if (run.status === "running") watchWorkflowFeedback(ctx, run.runId);
+
+	let detachNote = "";
+	if (request.detach && run.status === "running") {
+		const supervisor = spawnDetachedSupervisor(ctx.cwd, run.runId);
+		detachNote = `\nDetached supervisor pid ${supervisor.pid ?? "?"} — survives this session; log: ${toDisplayPath(supervisor.logPath, ctx.cwd)}`;
+	}
+
+	return {
+		run,
+		text: `Workflow run ${run.runId} ${verb}.\nSpec: ${toDisplayPath(run.specPath, ctx.cwd)}\n${formatRun(run)}${detachNote}\nOpen: /workflow ${run.runId}`,
+	};
+}
+
+async function openWorkflowBoard(
+	ctx: ExtensionCommandContext,
+	runId?: string,
+): Promise<void> {
+	const printMode =
+		process.argv.includes("--print") || process.argv.includes("-p");
+	if (!ctx.hasUI || printMode) {
+		emit(
+			ctx,
+			runId
+				? await formatRunStatus(ctx.cwd, runId)
+				: await formatStatus(ctx.cwd),
+			"info",
+		);
+		return;
+	}
+	await showWorkflowView(ctx, runId, ctx.cwd);
+}
+
+function isWorkflowRunRef(token: string): boolean {
+	return token.startsWith("workflow_");
+}
+
+function currentRuntimeDefaults(
+	ctx: ExtensionContext,
+	api: ExtensionAPI,
+): {
+	model?: string;
+	thinking?: ThinkingLevel;
+} {
+	const model = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
+	const rawThinking = api.getThinkingLevel();
+	const thinking = isThinkingLevel(rawThinking) ? rawThinking : undefined;
+	return {
+		...(model ? { model } : {}),
+		...(thinking ? { thinking } : {}),
+	};
+}
+
+function isThinkingLevel(value: string | undefined): value is ThinkingLevel {
+	return (
+		value === "off" ||
+		value === "minimal" ||
+		value === "low" ||
+		value === "medium" ||
+		value === "high" ||
+		value === "xhigh"
+	);
+}
+
+const WORKFLOW_KNOWN_ACTIONS = new Set([
+	"help",
+	"list",
+	"validate",
+	"roles",
+	"agents",
+	"run",
+	"status",
+	"show",
+	"logs",
+	"wait",
+	"resume",
+	"--help",
+	"-h",
+]);
 
 export async function notifyUnfinishedRuns(
 	cwd: string,
@@ -122,11 +489,28 @@ export async function notifyUnfinishedRuns(
 async function handleWorkflowCommand(
 	args: string,
 	ctx: ExtensionCommandContext,
+	api: ExtensionAPI,
 ): Promise<void> {
 	const tokens = splitArgs(args);
-	const action = tokens[0] ?? "help";
 
 	try {
+		if (tokens.length === 0) {
+			assertWorkflowActionAllowedForRole("board");
+			await openWorkflowBoard(ctx);
+			return;
+		}
+
+		const action = tokens[0] ?? "help";
+		if (
+			tokens.length === 1 &&
+			!WORKFLOW_KNOWN_ACTIONS.has(action) &&
+			isWorkflowRunRef(action)
+		) {
+			assertWorkflowActionAllowedForRole("board");
+			await openWorkflowBoard(ctx, action);
+			return;
+		}
+
 		assertWorkflowActionAllowedForRole(action);
 		if (action === "help" || action === "--help" || action === "-h") {
 			emit(ctx, WORKFLOW_HELP, "info");
@@ -187,34 +571,26 @@ async function handleWorkflowCommand(
 			const specPath =
 				parsed.specPath ||
 				requireArg(tokens, 1, '/workflow run <workflow-name-or-path> "<task>"');
-			if (!parsed.task.trim())
-				throw new Error(
-					'This workflow needs a task. Usage: /workflow run <workflow-name-or-path> "<task>"',
-				);
-			const run = await runWorkflowSpec(specPath, ctx.cwd, {
-				task: parsed.task,
-				runtimeDefaults:
-					parsed.model || parsed.thinking
-						? { model: parsed.model, thinking: parsed.thinking }
-						: undefined,
-			});
-			const verb =
-				run.status === "blocked"
-					? "created but blocked"
-					: run.status === "failed"
-						? "created but failed to launch"
-						: "started";
-			let detachNote = "";
-			if (parsed.detach && run.status === "running") {
-				const supervisor = spawnDetachedSupervisor(ctx.cwd, run.runId);
-				detachNote = `\nDetached supervisor pid ${supervisor.pid ?? "?"} — survives this session; log: ${toDisplayPath(supervisor.logPath, ctx.cwd)}`;
-			}
+			const runtimeDefaults =
+				parsed.model || parsed.thinking
+					? { model: parsed.model, thinking: parsed.thinking }
+					: undefined;
+			const result = await startWorkflowRunFromRequest(
+				{
+					workflow: specPath,
+					task: parsed.task,
+					detach: parsed.detach,
+					runtimeDefaults,
+				},
+				ctx,
+				api,
+			);
 			emit(
 				ctx,
-				`Workflow run ${run.runId} ${verb}.\nSpec: ${toDisplayPath(run.specPath, ctx.cwd)}\n${formatRun(run)}${detachNote}`,
-				run.status === "failed"
+				result.text,
+				result.run.status === "failed"
 					? "error"
-					: run.status === "blocked"
+					: result.run.status === "blocked"
 						? "warning"
 						: "info",
 			);
@@ -557,12 +933,8 @@ function consumeSingleTrailingRunOption(
 function parseThinkingLevel(value: string): ThinkingLevel {
 	if (isThinkingLevel(value)) return value;
 	throw new Error(
-		`Invalid workflow thinking level "${value}". Supported: ${THINKING_LEVELS.join(", ")}`,
+		`Invalid workflow thinking level "${value}". Supported: off, minimal, low, medium, high, xhigh`,
 	);
-}
-
-function isThinkingLevel(value: string): value is ThinkingLevel {
-	return (THINKING_LEVELS as readonly string[]).includes(value);
 }
 
 const WORKFLOW_ACTION_COMPLETIONS = [

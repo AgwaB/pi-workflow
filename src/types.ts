@@ -73,7 +73,7 @@ export interface RoleSpec {
 }
 
 export type ArtifactGraphStageType =
-	| "task"
+	| "single"
 	| "reduce"
 	| "foreach"
 	| "loop"

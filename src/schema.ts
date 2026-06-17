@@ -12,7 +12,6 @@ import {
 	type ResolvedWorkflowSpecRef,
 	resolveWorkflowRef,
 } from "./workflow-specs.js";
-import { parseYamlSubset } from "./yaml.js";
 
 export interface LoadedWorkflowSpec extends ResolvedWorkflowSpecRef {
 	spec: ArtifactGraphWorkflowSpec;
@@ -110,7 +109,7 @@ function flattenArtifactGraphStages(stages: readonly any[]): any[] {
 function parseSpecText(text: string, specPath: string): unknown {
 	const extension = extname(specPath).toLowerCase();
 	if (extension === ".yaml" || extension === ".yml")
-		return parseYamlSubset(text, specPath);
+		throw new Error("YAML workflow specs are not supported; use JSON (.json).");
 	return JSON.parse(text);
 }
 

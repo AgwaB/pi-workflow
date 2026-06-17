@@ -27,8 +27,15 @@ export function assertWorkflowActionAllowedForRole(
 ): void {
 	const role = getWorkflowProcessRole(env);
 	if (role === "supervisor") return;
-	if ((action === "help" || action === "validate") && role === "worker") return;
-	if ((action === "help" || action === "validate") && role === "disabled")
+	if (
+		(action === "help" || action === "validate" || action === "board") &&
+		role === "worker"
+	)
+		return;
+	if (
+		(action === "help" || action === "validate" || action === "board") &&
+		role === "disabled"
+	)
 		return;
 	throw new Error(
 		`Workflow action "${action}" is not allowed when ${PI_WORKFLOW_ROLE_ENV}=${role}`,

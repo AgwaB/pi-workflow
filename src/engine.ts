@@ -1738,7 +1738,7 @@ function ensureGeneratedStageRecord(
 		existing.sourcePolicy = existing.sourcePolicy ?? sourcePolicy;
 		return;
 	}
-	stages.push({ id, type: type ?? "task", sourcePolicy });
+	stages.push({ id, type: type ?? "single", sourcePolicy });
 }
 
 function getLoopState(
@@ -2955,7 +2955,7 @@ function formatIndex(index: WorkflowIndexRecord): string {
 		.map((run) => {
 			const lines = [
 				`${run.runId} [${run.status}] type=${run.type} updated=${run.updatedAt}`,
-				`tasks=${run.taskSummary.completed}/${run.taskSummary.total} completed, running=${run.taskSummary.running}, pending=${run.taskSummary.pending}, blocked=${run.taskSummary.blocked}, failed=${run.taskSummary.failed}`,
+				`tasks=${run.taskSummary.completed}/${run.taskSummary.total} completed, running=${run.taskSummary.running}, pending=${run.taskSummary.pending}, blocked=${run.taskSummary.blocked}, failed=${run.taskSummary.failed}, skipped=${run.taskSummary.skipped}, interrupted=${run.taskSummary.interrupted}`,
 			];
 			for (const task of run.tasks) {
 				const message = task.lastMessage ? ` — ${task.lastMessage}` : "";
@@ -2981,7 +2981,7 @@ function formatTask(
 	const runtime =
 		task.kind === "support"
 			? "runtime=local-support"
-			: `model=${task.runtime.model ?? "inherit"} thinking=${task.runtime.thinking ?? "inherit"}`;
+			: `model=${task.runtime.model ?? "(not recorded)"} thinking=${task.runtime.thinking ?? "(not recorded)"}`;
 	const message = task.lastMessage ? `\n  last=${task.lastMessage}` : "";
 	const worktree = task.worktree.enabled
 		? `\n  worktree=${task.worktree.path}`

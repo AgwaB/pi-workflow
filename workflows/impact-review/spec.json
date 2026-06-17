@@ -21,7 +21,7 @@
         "stages": [
           {
             "id": "change-scope",
-            "type": "task",
+            "type": "single",
             "after": [],
             "output": {
               "controlSchema": "./schemas/change-scope-control.schema.json",
@@ -36,7 +36,7 @@
           },
           {
             "id": "implementation-map",
-            "type": "task",
+            "type": "single",
             "after": [],
             "output": {
               "controlSchema": "./schemas/implementation-map-control.schema.json",
@@ -51,7 +51,7 @@
           },
           {
             "id": "validation-map",
-            "type": "task",
+            "type": "single",
             "after": [],
             "output": {
               "controlSchema": "./schemas/validation-map-control.schema.json",

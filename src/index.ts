@@ -49,6 +49,7 @@ export const WORKFLOW_COMMAND = "workflow";
 export const WORKFLOW_HELP = `pi-workflow
 
 Usage:
+  /workflow [run-id]
   /workflow help
   /workflow validate <workflow-name-or-path>
   /workflow roles <workflow-name-or-path>
@@ -60,6 +61,9 @@ Usage:
   /workflow logs <run-id> [task-id] [lines]
   /workflow wait <run-id> [timeout-ms]
   /workflow resume <run-id>
+
+/workflow opens the read-only workflow board TUI.
+/workflow <run-id> opens the board focused on that run.
 
 With --detach, a standalone supervisor process (pi-workflow supervise) keeps
 the run progressing after this session exits.

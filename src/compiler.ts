@@ -146,7 +146,7 @@ function lowerArtifactGraphStage(
 			namespace: stageId,
 		});
 	}
-	if (stageKindFor(stage) !== "dag") {
+	if (runtimeStageKindFor(stage) !== "dag") {
 		context.metadata.set(
 			stageId,
 			artifactGraphTaskMetadata(stage, context.specDir),
@@ -849,17 +849,17 @@ async function compileArtifactGraphPlan(
 			issues,
 			`$.artifactGraph.stages.${jsonKey(stage.id)}.tools`,
 		);
-		const taskStageKind = stageKindFor(stage) ?? "task";
-		// By default only `task` stages receive the runtime task body; foreach and
-		// reduce stages operate on upstream item/Source Context instead. A stage
-		// may opt in with `injectRuntimeTask: true` when a cross-cutting user
+		const runtimeStageKind = runtimeStageKindFor(stage) ?? "single";
+		// By default only `single` stages receive the runtime task body; foreach
+		// and reduce stages operate on upstream item/Source Context instead. A
+		// stage may opt in with `injectRuntimeTask: true` when a cross-cutting user
 		// constraint (e.g. "review the diff on its own terms") must reach every
 		// stage, not just the entry stage.
 		const optInInjectRuntimeTask = stage.injectRuntimeTask === true;
-		const injectTask = taskStageKind === "task" || optInInjectRuntimeTask;
+		const injectTask = runtimeStageKind === "single" || optInInjectRuntimeTask;
 		const injectRuntimeTaskInPrompt =
-			(taskStageKind !== "foreach" && injectTask) ||
-			(taskStageKind === "foreach" && optInInjectRuntimeTask);
+			(runtimeStageKind !== "foreach" && injectTask) ||
+			(runtimeStageKind === "foreach" && optInInjectRuntimeTask);
 		const normalizedPrompt = String(prompt ?? "").replace(
 			/\$\{item\}/g,
 			"the relevant item from the dependency context",
@@ -869,7 +869,7 @@ async function compileArtifactGraphPlan(
 				? `# Task\n\n${options.task}`
 				: undefined,
 			workflowInputText || undefined,
-			`# Workflow Stage\n\nstage=${stage.id}\ntype=${taskStageKind}`,
+			`# Workflow Stage\n\nstage=${stage.id}\ntype=${runtimeStageKind}`,
 			`# Instructions\n\n${normalizedPrompt}`,
 			roleText || undefined,
 		]
@@ -958,11 +958,11 @@ async function compileArtifactGraphPlan(
 			sourceContext: stage.sourceContext,
 			compiledPrompt,
 			injectTask,
-			kind: taskStageKind,
+			kind: runtimeStageKind,
 			stageMaxConcurrency: stage.maxConcurrency,
 			dependsOn: [...dependencyKeys],
 			foreach:
-				taskStageKind === "foreach"
+				runtimeStageKind === "foreach"
 					? {
 							from: stage.from,
 							prompt: String(stage.each?.prompt ?? stage.prompt ?? ""),
@@ -1016,7 +1016,7 @@ async function compileArtifactGraphPlan(
 				namespacedDagChildStage(containerStage, childStage),
 				scopedSourceStageIds,
 			);
-			const childStageKind = stageKindFor(namespacedChildStage);
+			const childStageKind = runtimeStageKindFor(namespacedChildStage);
 
 			if (childStageKind === "dag") {
 				currentChildTaskKeys.push(
@@ -1095,7 +1095,7 @@ async function compileArtifactGraphPlan(
 				? { contextDependsOn: [...fromDependencyKeys] }
 				: {};
 
-		const stageKind = stageKindFor(stage);
+		const stageKind = runtimeStageKindFor(stage);
 
 		if (stageKind === "dag") {
 			currentStageTaskKeys.push(
@@ -1253,7 +1253,7 @@ function isSupportStage(stage: any): boolean {
 	return stage?.support !== undefined && stage?.type === undefined;
 }
 
-function stageKindFor(stage: any): string | undefined {
+function runtimeStageKindFor(stage: any): string | undefined {
 	return isSupportStage(stage) ? "support" : stage.type;
 }
 
@@ -1454,7 +1454,7 @@ function resolveDagOutputStageId(stage: any): string | undefined {
 	);
 	if (!outputChild) return undefined;
 	const namespacedOutputChild = namespacedDagChildStage(stage, outputChild);
-	return stageKindFor(outputChild) === "dag"
+	return runtimeStageKindFor(outputChild) === "dag"
 		? resolveDagOutputStageId(namespacedOutputChild)
 		: namespacedOutputChild.id;
 }

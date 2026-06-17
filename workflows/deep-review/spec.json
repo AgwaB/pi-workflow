@@ -16,7 +16,7 @@
     "stages": [
       {
         "id": "triage",
-        "type": "task",
+        "type": "single",
         "output": {
           "analysis": {
             "required": true

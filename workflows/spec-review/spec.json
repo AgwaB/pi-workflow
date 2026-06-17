@@ -16,7 +16,7 @@
     "stages": [
       {
         "id": "extract-spec",
-        "type": "task",
+        "type": "single",
         "after": [],
         "output": {
           "analysis": {
@@ -32,7 +32,7 @@
       },
       {
         "id": "map-implementation",
-        "type": "task",
+        "type": "single",
         "after": [],
         "output": {
           "analysis": {
@@ -48,7 +48,7 @@
       },
       {
         "id": "inspect-tests",
-        "type": "task",
+        "type": "single",
         "after": [],
         "output": {
           "analysis": {

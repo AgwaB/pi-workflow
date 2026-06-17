@@ -129,7 +129,7 @@ function main() {
         schemaVersion: 1,
         name: 'review-artifact',
         defaults: { agent: 'unit-scout', readOnly: true, tools: ['read'] },
-        artifactGraph: { stages: [{ id: 'main', type: 'task', prompt: 'Review.' }] }
+        artifactGraph: { stages: [{ id: 'main', type: 'single', prompt: 'Review.' }] }
       };
       writeFileSync(join(cwd, 'workflows', 'review-artifact.json'), JSON.stringify(spec));
       writeFileSync(join(cwd, 'workflows', 'invalid.json'), JSON.stringify({ schemaVersion: 1, unsupported: true }));
@@ -155,7 +155,7 @@ function main() {
     import { readFile } from 'node:fs/promises';
     import { parseWorkflow } from './.tmp/unit/schema.js';
     import { compileWorkflow } from './.tmp/unit/compiler.js';
-    const publicSpec = parseWorkflow({ schemaVersion: 1, artifactGraph: { stages: [{ id: 'main', type: 'task', prompt: 'Do it.' }] } });
+    const publicSpec = parseWorkflow({ schemaVersion: 1, artifactGraph: { stages: [{ id: 'main', type: 'single', prompt: 'Do it.' }] } });
     if (publicSpec.schemaVersion !== 1) throw new Error('bad artifact graph schema');
     if (!publicSpec.artifactGraph?.stages?.length) throw new Error('missing artifact graph stages');
     const bundled = [

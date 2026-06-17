@@ -27,6 +27,9 @@ import {
 } from "../../.tmp/unit/engine.js";
 import {
 	notifyUnfinishedRuns,
+	registerWorkflowNaturalLanguageTools,
+	WORKFLOW_LIST_TOOL,
+	WORKFLOW_RUN_TOOL,
 	workflowArgumentCompletions,
 	parseWorkflowRunArgs,
 } from "../../.tmp/unit/extension.js";
@@ -154,7 +157,7 @@ function workflowSpec(agent = "unit-scout", extra = {}) {
 		...(defaults ?? {}),
 	};
 	const graph = artifactGraph ?? {
-		stages: [{ id: "main", type: "task", prompt: "Do the work." }],
+		stages: [{ id: "main", type: "single", prompt: "Do the work." }],
 	};
 	return {
 		schemaVersion: 1,
@@ -189,7 +192,7 @@ function artifactGraphWorkflowSpec(extra = {}) {
 			stages: [
 				{
 					id: "main",
-					type: "task",
+					type: "single",
 					prompt: "Do the work.",
 					output: {
 						controlSchema: "./schemas/stage-control.schema.json",
@@ -247,12 +250,12 @@ function loopWorkflowSpec(loop = {}) {
 					stages: [
 						{
 							id: "implement",
-							type: "task",
+							type: "single",
 							prompt: "Implement the requested fix.",
 						},
 						{
 							id: "check",
-							type: "task",
+							type: "single",
 							prompt: "Check the fix.",
 						},
 					],
@@ -386,7 +389,7 @@ function dagContainerRuntimeSpec({
 			stages: [
 				{
 					id: "setup",
-					type: "task",
+					type: "single",
 					output: { format: "json" },
 					prompt: "Setup.",
 				},
@@ -398,13 +401,13 @@ function dagContainerRuntimeSpec({
 					stages: [
 						{
 							id: "scan",
-							type: "task",
+							type: "single",
 							output: { format: "json" },
 							prompt: "Scan.",
 						},
 						{
 							id: "review",
-							type: "task",
+							type: "single",
 							after: "scan",
 							prompt: "Review.",
 						},
@@ -504,6 +507,7 @@ test("worker and disabled roles block supervisor workflow actions", () => {
 		process.env.PI_WORKFLOW_ROLE = "worker";
 		assert.doesNotThrow(() => assertWorkflowActionAllowedForRole("help"));
 		assert.doesNotThrow(() => assertWorkflowActionAllowedForRole("validate"));
+		assert.doesNotThrow(() => assertWorkflowActionAllowedForRole("board"));
 		assert.throws(
 			() => assertWorkflowActionAllowedForRole("run"),
 			/PI_WORKFLOW_ROLE=worker/,
@@ -523,6 +527,7 @@ test("worker and disabled roles block supervisor workflow actions", () => {
 
 		process.env.PI_WORKFLOW_ROLE = "disabled";
 		assert.doesNotThrow(() => assertWorkflowActionAllowedForRole("validate"));
+		assert.doesNotThrow(() => assertWorkflowActionAllowedForRole("board"));
 		assert.throws(
 			() => assertWorkflowActionAllowedForRole("run"),
 			/PI_WORKFLOW_ROLE=disabled/,
@@ -640,7 +645,7 @@ test("public schemaVersion 1 parser accepts artifact graph and rejects non-artif
 				stages: [
 					{
 						id: "risk",
-						type: "task",
+						type: "single",
 						prompt: "Assess risk.",
 						output: {
 							controlSchema: "./schemas/risk.schema.json",
@@ -673,7 +678,7 @@ test("public schemaVersion 1 parser accepts artifact graph and rejects non-artif
 	const invalidTopLevel = assertThrowsFlow(() =>
 		parsePublicWorkflow({
 			schemaVersion: 1,
-			artifactGraph: { stages: [{ id: "main", type: "task", prompt: "Do." }] },
+			artifactGraph: { stages: [{ id: "main", type: "single", prompt: "Do." }] },
 			unsupported: true,
 		}),
 	);
@@ -688,7 +693,7 @@ test("artifact graph schema validates sourcePolicy maxItems and schema refs", ()
 					stages: [
 						{
 							id: "main",
-							type: "task",
+							type: "single",
 							prompt: "Do it.",
 							sourcePolicy: "sometimes",
 						},
@@ -710,7 +715,7 @@ test("artifact graph schema validates sourcePolicy maxItems and schema refs", ()
 					stages: [
 						{
 							id: "plan",
-							type: "task",
+							type: "single",
 							prompt: "Plan.",
 						},
 						{
@@ -733,7 +738,7 @@ test("artifact graph schema validates sourcePolicy maxItems and schema refs", ()
 					stages: [
 						{
 							id: "main",
-							type: "task",
+							type: "single",
 							prompt: "Do it.",
 							output: { controlSchema: "../schema.json" },
 						},
@@ -768,7 +773,7 @@ test("artifact graph loader rejects unsupported controlSchema keywords", async (
 						stages: [
 							{
 								id: "main",
-								type: "task",
+								type: "single",
 								prompt: "Do it.",
 								output: { controlSchema: "./schemas/bad.json" },
 							},
@@ -800,7 +805,7 @@ test("artifact graph loader rejects missing controlSchema files", async () => {
 						stages: [
 							{
 								id: "main",
-								type: "task",
+								type: "single",
 								prompt: "Do it.",
 								output: { controlSchema: "./schemas/missing.json" },
 							},
@@ -828,7 +833,7 @@ test("artifact graph schema rejects unknown output fields and invalid required r
 					stages: [
 						{
 							id: "extract",
-							type: "task",
+							type: "single",
 							prompt: "Extract.",
 							output: { unexpected: true, extra: ["items"] },
 						},
@@ -887,7 +892,7 @@ test("artifact graph schema enforces launch-time invariants", () => {
 	assertIssue(
 		legacySupportType,
 		"$.artifactGraph.stages[0].type",
-		"must be one of: task, reduce, foreach, loop, dag",
+		"must be one of: single, reduce, foreach, loop, dag",
 	);
 
 	const supportOnTask = assertThrowsFlow(() =>
@@ -897,7 +902,7 @@ test("artifact graph schema enforces launch-time invariants", () => {
 					stages: [
 						{
 							id: "audit",
-							type: "task",
+							type: "single",
 							prompt: "Audit.",
 							support: { uses: "./helpers/audit.mjs" },
 						},
@@ -942,7 +947,7 @@ test("artifact graph schema enforces launch-time invariants", () => {
 				artifactGraph: {
 					stages: [
 						{ id: "final", type: "reduce", from: "scan", prompt: "Final." },
-						{ id: "scan", type: "task", prompt: "Scan." },
+						{ id: "scan", type: "single", prompt: "Scan." },
 					],
 				},
 			}),
@@ -973,7 +978,7 @@ test("artifact graph schema enforces launch-time invariants", () => {
 							type: "dag",
 							outputFrom: "final",
 							stages: [
-								{ id: "scan", type: "task", prompt: "Scan." },
+								{ id: "scan", type: "single", prompt: "Scan." },
 								{
 									id: "final",
 									type: "reduce",
@@ -1006,7 +1011,7 @@ test("artifact graph schema enforces launch-time invariants", () => {
 							id: "analysis",
 							type: "dag",
 							outputFrom: "final",
-							stages: [{ id: "final", type: "task", prompt: "Final." }],
+							stages: [{ id: "final", type: "single", prompt: "Final." }],
 						},
 						{
 							id: "report",
@@ -1030,7 +1035,7 @@ test("artifact graph schema enforces launch-time invariants", () => {
 		parsePublicWorkflow(
 			artifactGraphWorkflowSpec({
 				artifactGraph: {
-					stages: [{ id: "bad/id", type: "task", prompt: "Bad." }],
+					stages: [{ id: "bad/id", type: "single", prompt: "Bad." }],
 				},
 			}),
 		),
@@ -1095,7 +1100,7 @@ test("schema and compiler accept partial sourcePolicy on foreach", async () => {
 				stages: [
 					{
 						id: "extract",
-						type: "task",
+						type: "single",
 						prompt: "Extract",
 					},
 					{
@@ -1128,7 +1133,7 @@ test("compiler warns when readOnly stage keeps mutation-capable tools", async ()
 				stages: [
 					{
 						id: "check",
-						type: "task",
+						type: "single",
 						readOnly: true,
 						tools: ["read", "bash"],
 						prompt: "Run checks read-only.",
@@ -1160,7 +1165,7 @@ test("compiler does not warn when read-only stage uses only read-only tools", as
 				stages: [
 					{
 						id: "scan",
-						type: "task",
+						type: "single",
 						readOnly: true,
 						tools: ["read", "grep"],
 						prompt: "Scan read-only.",
@@ -1201,7 +1206,7 @@ test("compiler warns when a foreach path is absent from the source control schem
 					stages: [
 						{
 							id: "scan",
-							type: "task",
+							type: "single",
 							prompt: "Scan.",
 							output: { controlSchema: "./schemas/scan.schema.json" },
 						},
@@ -1270,7 +1275,7 @@ test("partial foreach continues scheduling after an item failure", () => {
 test("dependency-aware skip lets explicit partial sources bypass unrelated previous failures", () => {
 	const previous = {
 		id: "failed",
-		type: "task",
+		type: "single",
 		sourceStageIds: [],
 		sourcePolicy: "require-success",
 	};
@@ -1278,7 +1283,7 @@ test("dependency-aware skip lets explicit partial sources bypass unrelated previ
 		canStageProceedAfterPreviousFailure(
 			{
 				id: "next",
-				type: "task",
+				type: "single",
 				sourceStageIds: [],
 				sourcePolicy: "require-success",
 			},
@@ -1324,7 +1329,7 @@ test("dependency-aware skip lets explicit partial sources bypass unrelated previ
 	);
 });
 
-test("compiler injects runtime task for task stages only", async () => {
+test("compiler injects runtime task for single stages only", async () => {
 	const cwd = makeProject();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
@@ -1333,10 +1338,10 @@ test("compiler injects runtime task for task stages only", async () => {
 				roles: { lens: { prompt: "Role context marker." } },
 				artifactGraph: {
 					stages: [
-						{ id: "entry", type: "task", prompt: "Entry instructions." },
+						{ id: "entry", type: "single", prompt: "Entry instructions." },
 						{
 							id: "entry-extra",
-							type: "task",
+							type: "single",
 							prompt: "Entry extra instructions.",
 						},
 						{ id: "final", type: "reduce", prompt: "Final instructions." },
@@ -1397,7 +1402,7 @@ test("compiler omits runtime task injection from foreach templates", async () =>
 					stages: [
 						{
 							id: "extract",
-							type: "task",
+							type: "single",
 							prompt: "Extract",
 						},
 						{
@@ -1434,7 +1439,7 @@ test("compiler injects runtime task into foreach and reduce stages that opt in",
 			workflowSpec("unit-scout", {
 				artifactGraph: {
 					stages: [
-						{ id: "extract", type: "task", prompt: "Extract" },
+						{ id: "extract", type: "single", prompt: "Extract" },
 						{
 							id: "verify",
 							type: "foreach",
@@ -1483,7 +1488,7 @@ test("compiler applies explicit stage from dependencies and stage runtime defaul
 				defaults: { maxRuntimeMs: 12345 },
 				artifactGraph: {
 					stages: [
-						{ id: "plan", type: "task", prompt: "Plan" },
+						{ id: "plan", type: "single", prompt: "Plan" },
 						{
 							id: "research",
 							type: "foreach",
@@ -1530,19 +1535,19 @@ test("compiler separates order-only after dependencies from source context", asy
 			workflowSpec("unit-scout", {
 				artifactGraph: {
 					stages: [
-						{ id: "sourceOne", type: "task", prompt: "Source one." },
-						{ id: "sourceTwo", type: "task", after: [], prompt: "Source two." },
-						{ id: "gate", type: "task", prompt: "Gate." },
+						{ id: "sourceOne", type: "single", prompt: "Source one." },
+						{ id: "sourceTwo", type: "single", after: [], prompt: "Source two." },
+						{ id: "gate", type: "single", prompt: "Gate." },
 						{
 							id: "mixed",
-							type: "task",
+							type: "single",
 							from: ["sourceOne", "sourceTwo"],
 							after: "gate",
 							prompt: "Mixed.",
 						},
 						{
 							id: "fromOnly",
-							type: "task",
+							type: "single",
 							from: ["sourceOne", "sourceTwo"],
 							prompt: "From only.",
 						},
@@ -1578,10 +1583,10 @@ test("compiler treats empty after as an explicit parallel root", async () => {
 			workflowSpec("unit-scout", {
 				artifactGraph: {
 					stages: [
-						{ id: "a", type: "task", prompt: "A." },
-						{ id: "b", type: "task", after: [], prompt: "B." },
-						{ id: "c", type: "task", from: ["a", "b"], prompt: "C." },
-						{ id: "d", type: "task", prompt: "D." },
+						{ id: "a", type: "single", prompt: "A." },
+						{ id: "b", type: "single", after: [], prompt: "B." },
+						{ id: "c", type: "single", from: ["a", "b"], prompt: "C." },
+						{ id: "d", type: "single", prompt: "D." },
 					],
 				},
 			}),
@@ -1607,9 +1612,9 @@ test("compiler lowers dag containers to namespaced child tasks", async () => {
 			workflowSpec("unit-scout", {
 				artifactGraph: {
 					stages: [
-						{ id: "seedOne", type: "task", prompt: "Seed one." },
-						{ id: "seedTwo", type: "task", after: [], prompt: "Seed two." },
-						{ id: "gate", type: "task", prompt: "Gate." },
+						{ id: "seedOne", type: "single", prompt: "Seed one." },
+						{ id: "seedTwo", type: "single", after: [], prompt: "Seed two." },
+						{ id: "gate", type: "single", prompt: "Gate." },
 						{
 							id: "box",
 							type: "dag",
@@ -1617,9 +1622,9 @@ test("compiler lowers dag containers to namespaced child tasks", async () => {
 							after: "gate",
 							outputFrom: "d",
 							stages: [
-								{ id: "a", type: "task", prompt: "A." },
-								{ id: "b", type: "task", after: "a", prompt: "B." },
-								{ id: "c", type: "task", after: "a", prompt: "C." },
+								{ id: "a", type: "single", prompt: "A." },
+								{ id: "b", type: "single", after: "a", prompt: "B." },
+								{ id: "c", type: "single", after: "a", prompt: "C." },
 								{
 									id: "d",
 									type: "reduce",
@@ -1629,8 +1634,8 @@ test("compiler lowers dag containers to namespaced child tasks", async () => {
 								},
 							],
 						},
-						{ id: "implicit", type: "task", prompt: "Implicit." },
-						{ id: "down", type: "task", from: "box", prompt: "Down." },
+						{ id: "implicit", type: "single", prompt: "Implicit." },
+						{ id: "down", type: "single", from: "box", prompt: "Down." },
 					],
 				},
 			}),
@@ -1700,7 +1705,7 @@ test("compiler lowers foreach and support children inside dag containers", async
 							stages: [
 								{
 									id: "source",
-									type: "task",
+									type: "single",
 									output: { format: "json" },
 									prompt: "Source.",
 								},
@@ -1761,16 +1766,16 @@ test("compiler lowers nested dag containers with composed namespaces", async () 
 							type: "dag",
 							outputFrom: "inner",
 							stages: [
-								{ id: "root", type: "task", prompt: "Root." },
+								{ id: "root", type: "single", prompt: "Root." },
 								{
 									id: "inner",
 									type: "dag",
 									from: "root",
-									stages: [{ id: "leaf", type: "task", prompt: "Leaf." }],
+									stages: [{ id: "leaf", type: "single", prompt: "Leaf." }],
 								},
 							],
 						},
-						{ id: "next", type: "task", from: "outer", prompt: "Next." },
+						{ id: "next", type: "single", from: "outer", prompt: "Next." },
 					],
 				},
 			}),
@@ -1806,8 +1811,8 @@ test("compiler keeps dag namespace prefixes distinct from loop ids", async () =>
 							id: "box",
 							type: "loop",
 							stages: [
-								{ id: "implement", type: "task", prompt: "Implement." },
-								{ id: "check", type: "task", prompt: "Check." },
+								{ id: "implement", type: "single", prompt: "Implement." },
+								{ id: "check", type: "single", prompt: "Check." },
 							],
 							maxRounds: 1,
 							until: { stage: "check", path: "$.status", equals: "pass" },
@@ -1816,8 +1821,8 @@ test("compiler keeps dag namespace prefixes distinct from loop ids", async () =>
 							id: "boxcar",
 							type: "dag",
 							stages: [
-								{ id: "r01", type: "task", prompt: "Looks loop-like." },
-								{ id: "done", type: "task", from: "r01", prompt: "Done." },
+								{ id: "r01", type: "single", prompt: "Looks loop-like." },
+								{ id: "done", type: "single", from: "r01", prompt: "Done." },
 							],
 						},
 					],
@@ -1996,13 +2001,13 @@ test("narrow tool scopes inherit metadata for strings and override it for object
 					stages: [
 						{
 							id: "inherit",
-							type: "task",
+							type: "single",
 							tools: ["scrapling_fetch"],
 							prompt: "Inherit metadata.",
 						},
 						{
 							id: "override",
-							type: "task",
+							type: "single",
 							tools: [
 								{
 									name: "scrapling_fetch",
@@ -2050,7 +2055,7 @@ test("artifactGraph runtime foreach materializes source array into generated tas
 				stages: [
 					{
 						id: "extract",
-						type: "task",
+						type: "single",
 						prompt: "Extract",
 					},
 					{
@@ -2129,7 +2134,7 @@ test("artifactGraph runtime foreach materializes items from a dag container outp
 						stages: [
 							{
 								id: "source",
-								type: "task",
+								type: "single",
 								output: { format: "json" },
 								prompt: "Source.",
 							},
@@ -2204,7 +2209,7 @@ test("successive foreach materialization keeps task ids unique", async () => {
 				stages: [
 					{
 						id: "extract",
-						type: "task",
+						type: "single",
 						prompt: "Extract",
 					},
 					{
@@ -2267,7 +2272,7 @@ test("artifactGraph runtime foreach blocks when maxItems is exceeded", async () 
 				stages: [
 					{
 						id: "extract",
-						type: "task",
+						type: "single",
 						prompt: "Extract",
 					},
 					{
@@ -2369,7 +2374,7 @@ test("loop resume reconciliation backfills missing run records for compiled roun
 			artifactGraph: {
 				stages: [
 					loopStage,
-					{ id: "after", type: "task", prompt: "After loop." },
+					{ id: "after", type: "single", prompt: "After loop." },
 				],
 			},
 		});
@@ -2439,8 +2444,8 @@ test("artifactGraph runtime scheduler fails closed on compiled run positional mi
 		const spec = workflowSpec("unit-scout", {
 			artifactGraph: {
 				stages: [
-					{ id: "one", type: "task", prompt: "One." },
-					{ id: "two", type: "task", prompt: "Two." },
+					{ id: "one", type: "single", prompt: "One." },
+					{ id: "two", type: "single", prompt: "Two." },
 				],
 			},
 		});
@@ -3143,7 +3148,7 @@ test("artifact graph compiler propagates graph maxConcurrency", async () => {
 			artifactGraphWorkflowSpec({
 				artifactGraph: {
 					maxConcurrency: 3,
-					stages: [{ id: "main", type: "task", prompt: "Do it." }],
+					stages: [{ id: "main", type: "single", prompt: "Do it." }],
 				},
 			}),
 			{ cwd, task: "Do it." },
@@ -3757,7 +3762,7 @@ test("schema and compiler support pi-subagent headless backend", async () => {
 				workflowSpec("unit-scout", {
 					artifactGraph: {
 						stages: [
-							{ id: "main", type: "task", fast: "on", prompt: "Do it." },
+							{ id: "main", type: "single", fast: "on", prompt: "Do it." },
 						],
 					},
 				}),
@@ -3777,7 +3782,7 @@ test("schema and compiler accept artifactGraph support nodes", async () => {
 				stages: [
 					{
 						id: "verify",
-						type: "task",
+						type: "single",
 						prompt: "Verify claims",
 					},
 					{
@@ -3819,7 +3824,7 @@ test("schema rejects invalid artifactGraph support nodes", () => {
 			workflowSpec("unit-scout", {
 				artifactGraph: {
 					stages: [
-						{ id: "verify", type: "task", prompt: "Verify." },
+						{ id: "verify", type: "single", prompt: "Verify." },
 						{ id: "audit", from: "verify", support: {} },
 					],
 				},
@@ -3978,7 +3983,7 @@ test("artifactGraph runtime support executes helper and writes artifacts", async
 				stages: [
 					{
 						id: "extract",
-						type: "task",
+						type: "single",
 						output: { format: "json" },
 						prompt: "Extract",
 					},
@@ -4051,12 +4056,12 @@ test("artifactGraph runtime support omits failed control sources but passes stat
 				stages: [
 					{
 						id: "extractOk",
-						type: "task",
+						type: "single",
 						prompt: "Extract OK",
 					},
 					{
 						id: "extractFailed",
-						type: "task",
+						type: "single",
 						after: [],
 						prompt: "Extract failed",
 					},
@@ -4158,7 +4163,7 @@ test("artifactGraph runtime support marks helper errors as failed", async () => 
 				stages: [
 					{
 						id: "extract",
-						type: "task",
+						type: "single",
 						output: { format: "json" },
 						prompt: "Extract",
 					},
@@ -4227,9 +4232,9 @@ test("artifactGraph runtime scheduler launches empty-after roots in parallel", a
 		const spec = workflowSpec("unit-scout", {
 			artifactGraph: {
 				stages: [
-					{ id: "a", type: "task", prompt: "A." },
-					{ id: "b", type: "task", after: [], prompt: "B." },
-					{ id: "c", type: "task", from: ["a", "b"], prompt: "C." },
+					{ id: "a", type: "single", prompt: "A." },
+					{ id: "b", type: "single", after: [], prompt: "B." },
+					{ id: "c", type: "single", from: ["a", "b"], prompt: "C." },
 				],
 			},
 		});
@@ -4290,25 +4295,25 @@ test("artifactGraph runtime after dependencies do not inject order-only source c
 				stages: [
 					{
 						id: "source",
-						type: "task",
+						type: "single",
 						output: { format: "json" },
 						prompt: "Source.",
 					},
 					{
 						id: "gate",
-						type: "task",
+						type: "single",
 						output: { format: "json" },
 						prompt: "Gate.",
 					},
 					{
 						id: "afterOnly",
-						type: "task",
+						type: "single",
 						after: "gate",
 						prompt: "After only.",
 					},
 					{
 						id: "mixed",
-						type: "task",
+						type: "single",
 						from: "source",
 						after: "gate",
 						prompt: "Mixed.",
@@ -4379,20 +4384,20 @@ test("artifactGraph runtime diamond fan-out launches branches in parallel and jo
 				stages: [
 					{
 						id: "a",
-						type: "task",
+						type: "single",
 						output: { format: "json" },
 						prompt: "A.",
 					},
 					{
 						id: "b",
-						type: "task",
+						type: "single",
 						from: "a",
 						output: { format: "json" },
 						prompt: "B.",
 					},
 					{
 						id: "c",
-						type: "task",
+						type: "single",
 						from: "a",
 						output: { format: "json" },
 						prompt: "C.",
@@ -4693,7 +4698,7 @@ test("subagent launch forwards tool-call capture only when env is enabled", asyn
 
 		const spec = workflowSpec("unit-scout", {
 			artifactGraph: {
-				stages: [{ id: "main", type: "task", prompt: "Do work." }],
+				stages: [{ id: "main", type: "single", prompt: "Do work." }],
 			},
 		});
 		const compiled = await compileWorkflow(spec, { cwd, task: "Review topic" });
@@ -4761,7 +4766,7 @@ test("subagent launch loads provider extensions for extension-backed tools", asy
 			tools: ["read", "web_search", "fetch_content", "get_search_content"],
 			artifactGraph: {
 				stages: [
-					{ id: "main", type: "task", prompt: "Research with web tools." },
+					{ id: "main", type: "single", prompt: "Research with web tools." },
 				],
 			},
 		});
@@ -4821,7 +4826,7 @@ test("subagent launch appends extra extensions from env", async () => {
 		const spec = workflowSpec("unit-researcher", {
 			tools: ["read", "fetch_content"],
 			artifactGraph: {
-				stages: [{ id: "main", type: "task", prompt: "Research with fetch." }],
+				stages: [{ id: "main", type: "single", prompt: "Research with fetch." }],
 			},
 		});
 		const compiled = await compileWorkflow(spec, {
@@ -4892,7 +4897,7 @@ test("subagent launch merges object-form provider extensions with built-in mappi
 				stages: [
 					{
 						id: "main",
-						type: "task",
+						type: "single",
 						prompt: "Research with custom fetch fallback.",
 					},
 				],
@@ -4940,7 +4945,7 @@ test("completed subagent with contextLengthExceeded and valid output remains com
 					stages: [
 						{
 							id: "main",
-							type: "task",
+							type: "single",
 							prompt: "Return valid workflow output.",
 						},
 					],
@@ -5104,7 +5109,7 @@ test("refresh adopts handle-less running subagent from deterministic runsDir", a
 		const compiled = await compileWorkflow(
 			workflowSpec("unit-scout", {
 				artifactGraph: {
-					stages: [{ id: "main", type: "task", prompt: "Do work." }],
+					stages: [{ id: "main", type: "single", prompt: "Do work." }],
 				},
 			}),
 			{ cwd, task: "Review topic" },
@@ -5860,6 +5865,122 @@ test("workflow command completions and run arg parsing preserve task text", () =
 	);
 });
 
+test("natural-language workflow tools list and start workflows", async () => {
+	const cwd = makeProject();
+	const originalRole = process.env.PI_WORKFLOW_ROLE;
+	try {
+		process.env.PI_WORKFLOW_ROLE = "supervisor";
+		writeAgent(cwd, "unit-scout", "read");
+		mkdirSync(join(cwd, "workflows"), { recursive: true });
+		writeFileSync(
+			join(cwd, "workflows", "research-lite.json"),
+			JSON.stringify(
+				workflowSpec("unit-scout", {
+					name: "research-lite",
+					description: "Research lite workflow",
+				}),
+			),
+		);
+
+		const disabledTools = [];
+		registerWorkflowNaturalLanguageTools(
+			{
+				registerTool(tool) {
+					disabledTools.push(tool);
+				},
+			},
+			{ PI_WORKFLOW_ROLE: "worker" },
+		);
+		assert.equal(disabledTools.length, 0);
+
+		const registeredTools = [];
+		const fakePi = {
+			registerTool(tool) {
+				registeredTools.push(tool);
+			},
+			getThinkingLevel() {
+				return undefined;
+			},
+		};
+		registerWorkflowNaturalLanguageTools(fakePi, {
+			PI_WORKFLOW_ROLE: "supervisor",
+		});
+		assert.deepEqual(
+			registeredTools.map((tool) => tool.name),
+			[WORKFLOW_LIST_TOOL, WORKFLOW_RUN_TOOL],
+		);
+		assert.match(registeredTools[1].promptSnippet, /Start a pi-workflow/);
+
+		const ctx = {
+			cwd,
+			hasUI: false,
+			model: undefined,
+			ui: { notify() {} },
+		};
+		const listResult = await registeredTools[0].execute(
+			"tool-list",
+			{},
+			undefined,
+			undefined,
+			ctx,
+		);
+		assert.match(listResult.content[0].text, /research-lite/);
+		assert.equal(
+			listResult.details.workflows[0].description,
+			"Research lite workflow",
+		);
+
+		await assert.rejects(
+			() =>
+				registeredTools[1].execute(
+					"tool-run-empty",
+					{ workflow: "research-lite", task: "   " },
+					undefined,
+					undefined,
+					ctx,
+				),
+			/concrete task/,
+		);
+
+		let launchedTask = "";
+		setSubagentApiForTests({
+			async runSubagent(options) {
+				launchedTask = String(options.task ?? "");
+				return {
+					runId: "run_tool_1",
+					attemptId: "attempt_tool_1",
+					status: "running",
+				};
+			},
+			async getSubagentStatus() {
+				return null;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+		const runResult = await registeredTools[1].execute(
+			"tool-run",
+			{ workflow: "research-lite", task: "Investigate the repo" },
+			undefined,
+			undefined,
+			ctx,
+		);
+		assert.match(runResult.content[0].text, /Workflow run workflow_/);
+		assert.match(runResult.content[0].text, /Open: \/workflow workflow_/);
+		assert.equal(runResult.details.status, "running");
+		assert.match(launchedTask, /Investigate the repo/);
+	} finally {
+		setSubagentApiForTests(undefined);
+		if (originalRole === undefined) delete process.env.PI_WORKFLOW_ROLE;
+		else process.env.PI_WORKFLOW_ROLE = originalRole;
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("resolveFlowsCwd finds ancestor workflow state root", async () => {
 	const cwd = makeProject();
 	try {
@@ -5889,7 +6010,7 @@ test("resumeRun resets failed and skipped tasks, preserves completed work, and r
 				stages: [
 					{
 						id: "one",
-						type: "task",
+						type: "single",
 						output: { format: "json" },
 						prompt: "Step one.",
 					},
@@ -5974,7 +6095,7 @@ test("resumeRun rejects completed and loop runs", async () => {
 		writeAgent(cwd, "unit-scout");
 		const spec = workflowSpec("unit-scout", {
 			artifactGraph: {
-				stages: [{ id: "only", type: "task", prompt: "Do it." }],
+				stages: [{ id: "only", type: "single", prompt: "Do it." }],
 			},
 		});
 		const compiled = await compileWorkflow(spec, { cwd, task: "Done target" });
@@ -7272,7 +7393,7 @@ test("artifact graph workflow runs workflow artifacts and enforces required read
 						stages: [
 							{
 								id: "analyze",
-								type: "task",
+								type: "single",
 								prompt: "Analyze.",
 								output: {
 									analysis: { required: true },
