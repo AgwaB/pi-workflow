@@ -100,11 +100,17 @@ function materialize(taskId, outDir) {
   return JSON.parse(cp.stdout);
 }
 
+function candidateSidecarPath(outputPath) {
+  return outputPath.replace(/\.md$/, ".candidate.json");
+}
+
 function scoreOutput(taskId, outputPath) {
   const taskDir = path.join(BF, "tasks", taskId);
   const gold = readJson(path.join(taskDir, "gold-key.draft.json"));
-  const text = fs.readFileSync(outputPath, "utf8");
-  const extracted = extractFindingsJson(text);
+  const sidecarPath = candidateSidecarPath(outputPath);
+  const extracted = fs.existsSync(sidecarPath)
+    ? { ok: true, extractionMode: "candidate_json_sidecar", data: readJson(sidecarPath) }
+    : extractFindingsJson(fs.readFileSync(outputPath, "utf8"));
   const validationIssues = validateCandidateFindings(extracted.data);
   const score = scoreFindings(gold, extracted.data);
   return { extracted: { ok: extracted.ok, extractionMode: extracted.extractionMode, error: extracted.error }, validationIssues, score };
@@ -263,6 +269,7 @@ function collectWorkflowFinal(workspace, runId, outPath, waitText) {
   const raw = fs.existsSync(rawPath) ? fs.readFileSync(rawPath, "utf8") : "";
   write(outPath.replace(/\.md$/, ".workflow-control.json"), JSON.stringify(control, null, 2));
   write(outPath.replace(/\.md$/, ".workflow-raw.md"), raw);
+  write(candidateSidecarPath(outPath), JSON.stringify(normalized, null, 2));
   write(outPath, `${raw}\n\n\`\`\`json\n${JSON.stringify(normalized, null, 2)}\n\`\`\`\n`);
   return { collected: true, runStatus: runJson.status, reportTaskId: reportTask.taskId, controlPath };
 }
@@ -298,6 +305,7 @@ function collectWorkflowPartitionFallback(runJson, runDir, outPath, waitText) {
   const raw = fs.existsSync(rawPath) ? fs.readFileSync(rawPath, "utf8") : waitText;
   write(outPath.replace(/\.md$/, ".workflow-partition-control.json"), JSON.stringify(control, null, 2));
   write(outPath.replace(/\.md$/, ".workflow-partial-raw.md"), raw);
+  write(candidateSidecarPath(outPath), JSON.stringify(normalized, null, 2));
   write(outPath, `${raw}\n\n\`\`\`json\n${JSON.stringify(normalized, null, 2)}\n\`\`\`\n`);
   return { partialCollected: true, partitionTaskId: partitionTask.taskId, partitionControlPath: controlPath };
 }
