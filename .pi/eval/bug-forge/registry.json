@@ -246,9 +246,9 @@
       "candidateId": "geth-case-004",
       "path": "tasks/geth-case-004",
       "internalTopic": "getBlobs nil blob list JSON contract",
-      "bucket": "oss-geth-pilot",
+      "bucket": "oss-geth-pilot-provider-reviewed",
       "fixtureStatus": "authored-oss-pilot",
-      "goldStatus": "locked-local-provider-review-pending"
+      "goldStatus": "locked-provider-reviewed-gpt55"
     },
     {
       "candidateId": "geth-case-005",
@@ -270,9 +270,9 @@
       "candidateId": "geth-case-007",
       "path": "tasks/geth-case-007",
       "internalTopic": "snapshot generator goroutine survives Release shutdown",
-      "bucket": "oss-geth-hard-pilot",
+      "bucket": "oss-geth-hard-pilot-needs-review",
       "fixtureStatus": "authored-oss-pilot",
-      "goldStatus": "locked-local-provider-review-pending"
+      "goldStatus": "draft-needs-leakage-mitigation"
     },
     {
       "candidateId": "geth-case-008",
@@ -284,6 +284,7 @@
     }
   ],
   "nextActions": [
+    "Do not use geth-case-007 as a primary gate until candidate-visible regression tests/comments are masked or the task is rebuilt from an earlier source revision.",
     "Treat geth-case-006 through geth-case-008 as OSS-derived hard pilot holdouts; do not tune workflow behavior on their first-run failures.",
     "Treat geth-case-001 through geth-case-005 as an OSS-derived pilot holdout; do not tune workflow behavior on their first-run failures.",
     "Treat review-case-p16 through review-case-aa27 as a local blind holdout for backtesting only until provider review promotes them.",

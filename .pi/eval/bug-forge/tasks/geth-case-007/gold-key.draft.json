@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "taskId": "oss-geth-snapshot-generator-release-leak",
   "candidateId": "geth-case-007",
-  "status": "locked",
+  "status": "draft",
   "sourceRevision": "bc1967f088469b7d78607b75bd7df3e960d0df82",
   "fixturePatch": "fixture.diff",
   "referenceFixPatch": "reference-fix.patch",
@@ -11,8 +11,8 @@
       "bugId": "G1",
       "severity": "high",
       "category": "reliability",
-      "summary": "The patch lets diskLayer.Release reset resources without reliably cancelling and waiting for the snapshot generator goroutine.",
-      "impact": "During shutdown, snapshot generation can survive Release and keep accessing trie/database state after cleanup, causing goroutine leaks or closed-database iterator errors.",
+      "summary": "The patch removes the Release-time call that stops snapshot generation before diskLayer resources are released.",
+      "impact": "During shutdown, diskLayer.Release can reset resources without first stopping the background snapshot generator, allowing the generator goroutine to survive cleanup and leak or access closed database state.",
       "locations": [
         {
           "file": "core/state/snapshot/disklayer.go",
@@ -21,51 +21,40 @@
           "symbol": "diskLayer.Release"
         },
         {
-          "file": "core/state/snapshot/disklayer.go",
-          "startLine": 188,
-          "endLine": 201,
-          "symbol": "diskLayer.stopGeneration"
-        },
-        {
-          "file": "core/state/snapshot/generate.go",
-          "startLine": 58,
-          "endLine": 80,
-          "symbol": "generateSnapshot"
+          "file": "core/state/snapshot/snapshot.go",
+          "startLine": 637,
+          "endLine": 642,
+          "symbol": "Tree.Release"
         }
       ],
       "requiredEvidence": [
         {
           "file": "core/state/snapshot/disklayer.go",
-          "quote": "genAbort <- abort",
-          "matchMode": "substring"
-        },
-        {
-          "file": "core/state/snapshot/disklayer.go",
-          "quote": "generating := dl.genMarker != nil",
-          "matchMode": "substring"
-        },
-        {
-          "file": "core/state/snapshot/disklayer.go",
           "quote": "dl.stopGeneration()",
+          "matchMode": "substring"
+        },
+        {
+          "file": "core/state/snapshot/disklayer.go",
+          "quote": "func (dl *diskLayer) Release() error {",
           "matchMode": "substring"
         }
       ],
       "acceptableFixes": [
-        "Have Release call stopGeneration before releasing resources, and make stopGeneration cancel and wait for the generator goroutine to exit.",
-        "Do not rely on genMarker as the only running-state check; cancellation must work even after generation completed but the goroutine is still awaiting abort/cleanup."
+        "Have diskLayer.Release call stopGeneration before releasing/resetting resources.",
+        "Ensure Release is a lifecycle barrier that stops and waits for the snapshot generator before database/cache cleanup can proceed."
       ]
     },
     {
       "bugId": "G2",
       "severity": "high",
       "category": "reliability",
-      "summary": "The patch reintroduces an unbuffered genAbort protocol that can leave a completed generator waiting for an external abort and can deadlock later Journal or diffToDisk calls after the receiver exits.",
-      "impact": "Snapshot lifecycle operations can block forever or leak a generator goroutine because callers send on genAbort based only on a non-nil channel, not on a live receiver/done state.",
+      "summary": "The patch reintroduces an unbuffered genAbort lifecycle protocol that can park a completed generator waiting for an external abort and deadlock later callers after the receiver exits.",
+      "impact": "Snapshot lifecycle operations such as Journal or diffToDisk can block forever because they send on genAbort based only on a non-nil channel, not on a live receiver or done state.",
       "locations": [
         {
           "file": "core/state/snapshot/generate.go",
           "startLine": 698,
-          "endLine": 703,
+          "endLine": 706,
           "symbol": "diskLayer.generate"
         },
         {
@@ -102,6 +91,16 @@
           "file": "core/state/snapshot/snapshot.go",
           "quote": "base.genAbort <- abort",
           "matchMode": "substring"
+        },
+        {
+          "file": "core/state/snapshot/generate.go",
+          "quote": "abort <- nil",
+          "matchMode": "substring"
+        },
+        {
+          "file": "core/state/snapshot/generate.go",
+          "quote": "Someone will be looking for us, wait it out",
+          "matchMode": "substring"
         }
       ],
       "acceptableFixes": [
@@ -115,7 +114,9 @@
   "mustAvoidClaims": [
     "Using upstream PR titles, issue numbers, commit messages, or git history as evidence.",
     "Relying on private repro.sh, gold-key.draft.json, or reference-fix.patch.",
-    "Claiming unrelated broad rewrites outside the proposed patch are required."
+    "Claiming unrelated broad rewrites outside the proposed patch are required.",
+    "Treating geth-case-007 as a primary gate before masking candidate-visible regression tests/comments or choosing an earlier source revision.",
+    "Double-counting one vague generator lifecycle finding as both G1 and G2 without distinguishing Release cleanup from genAbort repeated-send/deadlock."
   ],
   "difficulty": {
     "bucket": "hard",
@@ -140,13 +141,15 @@
     ]
   },
   "approval": {
-    "state": "approved",
-    "providerReviews": [],
+    "state": "needs-review",
+    "providerReviews": [
+      ".pi/eval/bug-forge/provider-reviews/geth-gold-review-20260618/geth-case-007-gpt55-high-review.md"
+    ],
     "approvedBy": [
       "local deterministic OSS fixture authoring",
       "source-only reverse fixture with RED/GREEN repro",
       "local gold review: geth-case-007 genAbort lifecycle issue added as G2"
     ],
-    "notes": "Pilot OSS-derived holdout task; local review added a second source-grounded genAbort lifecycle bug found by multiple arms; external provider review still pending before primary gate promotion."
+    "notes": "GPT-5.5 high provider review returned NEEDS_CHANGES: G1 and G2 are real/separable, but source revision leaks intended issues through regression test/comments; keep draft until masked/narrowed or provider-approved."
   }
 }

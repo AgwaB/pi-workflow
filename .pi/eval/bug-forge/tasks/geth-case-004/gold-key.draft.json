@@ -80,12 +80,15 @@
   },
   "approval": {
     "state": "approved",
-    "providerReviews": [],
+    "providerReviews": [
+      ".pi/eval/bug-forge/provider-reviews/geth-gold-review-20260618/geth-case-004-gpt55-high-review.md"
+    ],
     "approvedBy": [
       "local deterministic OSS fixture authoring",
       "source-only reverse fixture with RED/GREEN repro",
-      "local gold/scorer review: geth-case-004 nil/null evidence key corrected"
+      "local gold/scorer review: geth-case-004 nil/null evidence key corrected",
+      "GPT-5.5 high provider gold review: APPROVE"
     ],
-    "notes": "Pilot OSS-derived holdout task; local gold/scorer review corrected required evidence after raw first-run mismatch; external provider review still pending before primary gate promotion."
+    "notes": "Provider review approved geth-case-004 after nil/null evidence correction; still local/private benchmark artifact, not public release material. Provider review also noted eth/catalyst/api.go contract comments are valid secondary evidence, but requiredEvidence remains marshaler-focused for deterministic validation."
   }
 }
