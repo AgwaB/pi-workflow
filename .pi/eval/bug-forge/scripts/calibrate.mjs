@@ -130,15 +130,15 @@ function classifyInvalidCell(runResult, scored) {
   return reasons.length ? { valid: false, reasons: [...new Set(reasons)] } : { valid: true, reasons: [] };
 }
 
-async function runPlain(taskId, workspace, prompt, outPath, model, thinking) {
-  const cp = await pi(prompt, workspace, model, thinking);
+async function runPlain(taskId, workspace, prompt, outPath, model, thinking, options = {}) {
+  const cp = await pi(prompt, workspace, model, thinking, [], { extensionRoot: options.extensionRoot });
   write(outPath, `${cp.stdout}\n${cp.stderr ? `\n\n[stderr]\n${cp.stderr}` : ""}`);
   return { status: cp.status, outputPath: outPath };
 }
-async function runSelfCheck(taskId, workspace, prompt, outPath, model, thinking) {
-  const draft = await pi(prompt, workspace, model, thinking);
+async function runSelfCheck(taskId, workspace, prompt, outPath, model, thinking, options = {}) {
+  const draft = await pi(prompt, workspace, model, thinking, [], { extensionRoot: options.extensionRoot });
   const draftText = `${draft.stdout}\n${draft.stderr ? `\n\n[stderr]\n${draft.stderr}` : ""}`;
-  const revise = await pi(selfCheckPrompt(prompt, draftText), workspace, model, thinking);
+  const revise = await pi(selfCheckPrompt(prompt, draftText), workspace, model, thinking, [], { extensionRoot: options.extensionRoot });
   const finalText = `${revise.stdout}\n${revise.stderr ? `\n\n[stderr]\n${revise.stderr}` : ""}`;
   write(outPath.replace(/\.md$/, ".draft.md"), draftText);
   write(outPath, finalText);
@@ -442,6 +442,7 @@ const model = arg("--model") ?? "kimi-coding/kimi-for-coding";
 const thinking = arg("--thinking") ?? "low";
 const outerConcurrency = positiveInt(arg("--concurrency"), 3);
 const workflowExtensionRoot = arg("--workflow-extension-root") ? path.resolve(arg("--workflow-extension-root")) : undefined;
+const piExtensionRoot = arg("--pi-extension-root") ? path.resolve(arg("--pi-extension-root")) : workflowExtensionRoot;
 const requestedWorkflowRef = arg("--workflow-ref") ?? "deep-review";
 const workflowScoreStage = arg("--workflow-score-stage") ?? (has("--workflow-no-report") ? "partition" : "report");
 if (!["report", "partition"].includes(workflowScoreStage)) throw new Error(`--workflow-score-stage must be report or partition, got ${workflowScoreStage}`);
@@ -451,7 +452,7 @@ const workflowNoReport = has("--workflow-no-report");
 const partitionOnlyIsolation = assertPartitionOnlyIsolation({ workflowNoReport, workflowExtensionRoot, outRoot });
 const workflowRef = arms.includes("workflow") ? writeWorkflowEvalVariant(requestedWorkflowRef, workflowExtensionRoot, outRoot, { model, thinking, noReport: workflowNoReport }) : requestedWorkflowRef;
 
-const manifest = { kind: "bug-forge-calibration", startedAt: new Date().toISOString(), model, thinking, concurrency: outerConcurrency, tasks: selectedTasks, arms, outRoot, workflowRef, requestedWorkflowRef, workflowScoreStage, workflowNoReport, workflowEvalVariant: arms.includes("workflow"), ...(partitionOnlyIsolation ? { partitionOnlyIsolation } : {}), ...(workflowExtensionRoot ? { workflowExtensionRoot } : {}) };
+const manifest = { kind: "bug-forge-calibration", startedAt: new Date().toISOString(), model, thinking, concurrency: outerConcurrency, tasks: selectedTasks, arms, outRoot, workflowRef, requestedWorkflowRef, workflowScoreStage, workflowNoReport, workflowEvalVariant: arms.includes("workflow"), ...(partitionOnlyIsolation ? { partitionOnlyIsolation } : {}), ...(workflowExtensionRoot ? { workflowExtensionRoot } : {}), ...(piExtensionRoot ? { piExtensionRoot } : {}) };
 write(path.join(outRoot, "manifest.json"), JSON.stringify(manifest, null, 2));
 
 async function runCell({ taskId, arm }) {
@@ -467,8 +468,8 @@ async function runCell({ taskId, arm }) {
     write(path.join(armDir, "materialize.json"), JSON.stringify(mat, null, 2));
     const prompt = candidatePrompt(taskId, workspace, fixtureDiff);
     write(path.join(armDir, "prompt.md"), prompt);
-    if (arm === "plain") runResult = await runPlain(taskId, workspace, prompt, outputPath, model, thinking);
-    else if (arm === "self-check") runResult = await runSelfCheck(taskId, workspace, prompt, outputPath, model, thinking);
+    if (arm === "plain") runResult = await runPlain(taskId, workspace, prompt, outputPath, model, thinking, { extensionRoot: piExtensionRoot });
+    else if (arm === "self-check") runResult = await runSelfCheck(taskId, workspace, prompt, outputPath, model, thinking, { extensionRoot: piExtensionRoot });
     else if (arm === "workflow") runResult = await runWorkflowArm(taskId, workspace, prompt, outputPath, model, thinking, { extensionRoot: workflowExtensionRoot, workflowRef, scoreStage: workflowScoreStage });
     else throw new Error(`unknown arm: ${arm}`);
   } catch (err) {
