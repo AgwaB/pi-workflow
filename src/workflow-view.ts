@@ -123,7 +123,7 @@ export class WorkflowView implements Component {
 	}
 
 	render(width: number): string[] {
-		const safeWidth = Math.max(40, width);
+		const safeWidth = Math.max(1, Math.floor(width || 1));
 		const selectedTask = this.selectedTaskRecord();
 		const lines =
 			this.mode === "task" && this.detailRun && selectedTask
@@ -1592,13 +1592,27 @@ function fit(text: string, width: number): string {
 	return truncateToWidth(text, Math.max(1, width));
 }
 
+const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, {
+	granularity: "grapheme",
+});
+
 function visibleWidth(text: string): number {
-	return stripAnsi(text).length;
+	const clean = stripAnsi(text);
+	let width = 0;
+	for (const { segment } of GRAPHEME_SEGMENTER.segment(clean)) {
+		width += graphemeWidth(segment);
+	}
+	return width;
 }
 
 function truncateToWidth(text: string, width: number): string {
-	if (visibleWidth(text) <= width) return text;
-	const limit = Math.max(1, width - 1);
+	const safeWidth = Math.max(0, Math.floor(width || 0));
+	if (safeWidth === 0) return "";
+	if (visibleWidth(text) <= safeWidth) return text;
+
+	const ellipsis = "…";
+	const ellipsisWidth = visibleWidth(ellipsis);
+	const limit = Math.max(0, safeWidth - ellipsisWidth);
 	let visible = 0;
 	let output = "";
 	for (let index = 0; index < text.length; ) {
@@ -1608,25 +1622,52 @@ function truncateToWidth(text: string, width: number): string {
 			index = ansi.nextIndex;
 			continue;
 		}
-		const char = text[index] ?? "";
-		if (visible + 1 > limit) break;
+
+		const codePoint = text.codePointAt(index);
+		if (codePoint === undefined) break;
+		const char = String.fromCodePoint(codePoint);
+		const charWidth = graphemeWidth(char);
+		if (visible + charWidth > limit) break;
 		output += char;
-		visible += 1;
+		visible += charWidth;
 		index += char.length;
 	}
-	return `${output}…`;
+	return `${output}${ellipsis}`;
 }
 
 function stripAnsi(text: string): string {
-	return text.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
+	let output = "";
+	for (let index = 0; index < text.length; ) {
+		const ansi = readAnsi(text, index);
+		if (ansi) {
+			index = ansi.nextIndex;
+			continue;
+		}
+		const codePoint = text.codePointAt(index);
+		if (codePoint === undefined) break;
+		const char = String.fromCodePoint(codePoint);
+		output += char;
+		index += char.length;
+	}
+	return output;
 }
 
 function readAnsi(
 	text: string,
 	index: number,
 ): { value: string; nextIndex: number } | undefined {
-	if (text.charCodeAt(index) !== 0x1b || text[index + 1] !== "[")
-		return undefined;
+	if (text.charCodeAt(index) !== 0x1b) return undefined;
+	const next = text[index + 1];
+	if (next === "[") return readCsi(text, index);
+	if (next === "]") return readTerminatedEscape(text, index, 2);
+	if (next === "_") return readTerminatedEscape(text, index, 2);
+	return undefined;
+}
+
+function readCsi(
+	text: string,
+	index: number,
+): { value: string; nextIndex: number } | undefined {
 	let nextIndex = index + 2;
 	while (nextIndex < text.length) {
 		const code = text.charCodeAt(nextIndex);
@@ -1635,6 +1676,67 @@ function readAnsi(
 			return { value: text.slice(index, nextIndex), nextIndex };
 	}
 	return { value: text.slice(index), nextIndex: text.length };
+}
+
+function readTerminatedEscape(
+	text: string,
+	index: number,
+	bodyOffset: number,
+): { value: string; nextIndex: number } | undefined {
+	let nextIndex = index + bodyOffset;
+	while (nextIndex < text.length) {
+		if (text[nextIndex] === "\x07") {
+			const end = nextIndex + 1;
+			return { value: text.slice(index, end), nextIndex: end };
+		}
+		if (text[nextIndex] === "\x1b" && text[nextIndex + 1] === "\\") {
+			const end = nextIndex + 2;
+			return { value: text.slice(index, end), nextIndex: end };
+		}
+		nextIndex += 1;
+	}
+	return { value: text.slice(index), nextIndex: text.length };
+}
+
+function graphemeWidth(segment: string): number {
+	if (segment.length === 0) return 0;
+	if (segment === "\t") return 3;
+	if (/^[\p{Mark}\p{Control}\p{Surrogate}\u200d\ufe0e\ufe0f]+$/u.test(segment))
+		return 0;
+	if (isEmojiLike(segment)) return 2;
+	const base = segment.replace(
+		/^[\p{Mark}\p{Control}\p{Format}\p{Surrogate}]+/u,
+		"",
+	);
+	const codePoint = base.codePointAt(0);
+	if (codePoint === undefined) return 0;
+	return isWideCodePoint(codePoint) ? 2 : 1;
+}
+
+function isEmojiLike(segment: string): boolean {
+	if (/[\ufe0f\u200d]/u.test(segment)) return true;
+	const codePoint = segment.codePointAt(0);
+	if (codePoint === undefined) return false;
+	return (
+		(codePoint >= 0x1f000 && codePoint <= 0x1fbff) ||
+		(codePoint >= 0x2600 && codePoint <= 0x27bf) ||
+		(codePoint >= 0x2b50 && codePoint <= 0x2b55)
+	);
+}
+
+function isWideCodePoint(codePoint: number): boolean {
+	return (
+		(codePoint >= 0x1100 && codePoint <= 0x115f) ||
+		codePoint === 0x2329 ||
+		codePoint === 0x232a ||
+		(codePoint >= 0x2e80 && codePoint <= 0xa4cf) ||
+		(codePoint >= 0xac00 && codePoint <= 0xd7a3) ||
+		(codePoint >= 0xf900 && codePoint <= 0xfaff) ||
+		(codePoint >= 0xfe10 && codePoint <= 0xfe19) ||
+		(codePoint >= 0xfe30 && codePoint <= 0xfe6f) ||
+		(codePoint >= 0xff00 && codePoint <= 0xff60) ||
+		(codePoint >= 0xffe0 && codePoint <= 0xffe6)
+	);
 }
 
 function placeholder(theme: Theme, text: string): string {

@@ -37,6 +37,7 @@ import {
 	listWorkflows,
 	resolveWorkflowRef,
 } from "../../.tmp/unit/workflow-specs.js";
+import { WorkflowView } from "../../.tmp/unit/workflow-view.js";
 import { resolveWorkflowRuntime } from "../../.tmp/unit/workflow-runtime.js";
 import {
 	loadWorkflow,
@@ -7948,3 +7949,91 @@ test("workflow artifact bundle writer stores invalid attempts without commit res
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });
+
+test("workflow board render clamps ANSI and wide glyphs to viewport width", () => {
+	const theme = {
+		fg: (color, text) => `\u001b[38;2;${color.length};2;3m${text}\u001b[39m`,
+		bg: (_color, text) => `\u001b[48;2;32;40;31m${text}\u001b[49m`,
+		bold: (text) => `\u001b[1m${text}\u001b[22m`,
+	};
+	const view = new WorkflowView(
+		process.cwd(),
+		{ requestRender() {} },
+		theme,
+		() => {},
+	);
+	view.loading = false;
+	view.flows = [
+		{
+			runId: "workflow_crash_regression_width_test",
+			name: "검증 결과 ✅ delivery-signed workflow".repeat(4),
+			type: WORKFLOW_RUN_TYPE,
+			artifactGraph: { enabled: true },
+			status: "completed",
+			taskSummary: {
+				pending: 0,
+				running: 0,
+				blocked: 0,
+				completed: 3,
+				failed: 0,
+				skipped: 0,
+				interrupted: 0,
+				total: 3,
+			},
+			createdAt: "2026-06-17T06:00:00.000Z",
+			updatedAt: "2026-06-17T06:09:35.895Z",
+			runJson: ".pi/workflows/workflow_crash_regression_width_test/run.json",
+			tasks: [],
+		},
+	];
+	view.message = "검증 결과 ✅ passed".repeat(8);
+
+	for (const width of [86, 40, 10, 1]) {
+		const lines = view.render(width);
+		for (const [index, line] of lines.entries()) {
+			assert.ok(
+				testVisibleWidth(line) <= width,
+				`line ${index} exceeds width ${width}: ${testVisibleWidth(line)} > ${width}`,
+			);
+		}
+	}
+});
+
+function testVisibleWidth(text) {
+	let clean = "";
+	for (let index = 0; index < text.length; ) {
+		if (text[index] === "\u001b" && text[index + 1] === "[") {
+			index += 2;
+			while (index < text.length) {
+				const code = text.charCodeAt(index);
+				index += 1;
+				if (code >= 0x40 && code <= 0x7e) break;
+			}
+			continue;
+		}
+		const codePoint = text.codePointAt(index);
+		if (codePoint === undefined) break;
+		const char = String.fromCodePoint(codePoint);
+		clean += char;
+		index += char.length;
+	}
+	let width = 0;
+	for (const char of clean) {
+		const codePoint = char.codePointAt(0) ?? 0;
+		width += isTestWideCodePoint(codePoint) ? 2 : 1;
+	}
+	return width;
+}
+
+function isTestWideCodePoint(codePoint) {
+	return (
+		(codePoint >= 0x1100 && codePoint <= 0x115f) ||
+		(codePoint >= 0x2e80 && codePoint <= 0xa4cf) ||
+		(codePoint >= 0xac00 && codePoint <= 0xd7a3) ||
+		(codePoint >= 0xf900 && codePoint <= 0xfaff) ||
+		(codePoint >= 0xfe10 && codePoint <= 0xfe6f) ||
+		(codePoint >= 0xff00 && codePoint <= 0xffe6) ||
+		(codePoint >= 0x1f000 && codePoint <= 0x1fbff) ||
+		(codePoint >= 0x2600 && codePoint <= 0x27bf)
+	);
+}
