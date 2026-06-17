@@ -1,0 +1,14 @@
+diff --git a/core/types/transaction.go b/core/types/transaction.go
+--- a/core/types/transaction.go
++++ b/core/types/transaction.go
+@@ -66,7 +66,6 @@
+ // NewTx creates a new transaction.
+ func NewTx(inner TxData) *Transaction {
+-	tx := &Transaction{}
+-	innerCopy := inner.copy()
+-	tx.setDecoded(innerCopy, 0)
+-	return tx
++	tx := new(Transaction)
++	tx.setDecoded(inner.copy(), 0)
++	return tx
+ }

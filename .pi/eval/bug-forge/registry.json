@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "status": "pilot-35-with-oss-geth-hard-holdout",
+  "status": "pilot-37-with-oss-geth-controls",
   "tasks": [
     {
       "candidateId": "review-case-a1",
@@ -281,9 +281,26 @@
       "bucket": "oss-geth-hard-pilot",
       "fixtureStatus": "authored-oss-pilot",
       "goldStatus": "locked-local-provider-review-pending"
+    },
+    {
+      "candidateId": "geth-control-001",
+      "path": "tasks/geth-control-001",
+      "internalTopic": "go-ethereum no-issue comment-only control",
+      "bucket": "oss-geth-no-issue-control-provider-reviewed",
+      "fixtureStatus": "authored-oss-control",
+      "goldStatus": "locked-provider-reviewed-gpt55"
+    },
+    {
+      "candidateId": "geth-control-002",
+      "path": "tasks/geth-control-002",
+      "internalTopic": "go-ethereum no-issue NewTx equivalent refactor control",
+      "bucket": "oss-geth-no-issue-control-provider-reviewed",
+      "fixtureStatus": "authored-oss-control",
+      "goldStatus": "locked-provider-reviewed-gpt55"
     }
   ],
   "nextActions": [
+    "Run compact locked subset A/B with geth-case-002, geth-case-004, geth-control-001, and geth-control-002; keep geth-case-007 out of primary gate until leakage mitigation.",
     "Do not use geth-case-007 as a primary gate until candidate-visible regression tests/comments are masked or the task is rebuilt from an earlier source revision.",
     "Treat geth-case-006 through geth-case-008 as OSS-derived hard pilot holdouts; do not tune workflow behavior on their first-run failures.",
     "Treat geth-case-001 through geth-case-005 as an OSS-derived pilot holdout; do not tune workflow behavior on their first-run failures.",
@@ -302,7 +319,7 @@
   "latestOssPilot": {
     "source": "ethereum/go-ethereum",
     "localPath": "/tmp/pi-github-repos/ethereum/go-ethereum",
-    "taskRange": "geth-case-001..geth-case-008",
-    "status": "local-provider-review-pending"
+    "taskRange": "geth-case-001..geth-case-008 plus geth-control-001..002",
+    "status": "mixed: geth-case-004 and controls provider-reviewed; geth-case-007 needs leakage mitigation"
   }
 }

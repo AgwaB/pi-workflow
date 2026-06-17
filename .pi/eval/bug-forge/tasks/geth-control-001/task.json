@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "candidateId": "geth-control-001",
+  "status": "fixture-authored",
+  "sourceRevision": "7122ecc3ebba8f0416f4a14424a19c923b669ea7",
+  "sourceRepository": {
+    "type": "local-git",
+    "remote": "https://github.com/ethereum/go-ethereum",
+    "localPathEnv": "BUG_FORGE_GETH_REPO",
+    "localPath": "/tmp/pi-github-repos/ethereum/go-ethereum",
+    "license": "GPL-3.0-or-later/LGPL-3.0-or-later; see COPYING and COPYING.LESSER"
+  },
+  "candidateVisible": {
+    "promptTemplate": "../../prompts/candidate-review.md",
+    "fixturePatch": "fixture.diff"
+  },
+  "privateOracle": {
+    "goldKeyDraft": "gold-key.draft.json",
+    "authorNotes": "author-notes.md",
+    "referenceFixPatch": "reference-fix.patch",
+    "repro": "repro.sh"
+  },
+  "notes": "go-ethereum no-issue control: comment-only HexOrDecimal256 constructor wording"
+}

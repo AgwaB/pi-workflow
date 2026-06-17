@@ -171,3 +171,26 @@ Adjusted next action:
 1. Promote `geth-case-004` to the compact locked subset candidate.
 2. Keep `geth-case-007` in draft/diagnostic bucket only.
 3. Build at least one real no-issue OSS control before another primary A/B run.
+
+## OSS no-issue controls update 2026-06-18
+
+Added and provider-reviewed two go-ethereum no-issue controls:
+
+- `geth-control-001`: comment-only `NewHexOrDecimal256` wording patch. GPT-5.5 high review: `APPROVE`.
+- `geth-control-002`: behavior-preserving `NewTx` local refactor. GPT-5.5 high review: `APPROVE`.
+
+Validation evidence:
+
+- `node .pi/eval/bug-forge/scripts/validate.mjs` passed with `checkedTasks: 37`.
+- Materialized both controls with `BUG_FORGE_GETH_REPO=/tmp/pi-github-repos/ethereum/go-ethereum`.
+- `go test ./common/math` passed for `geth-control-001`.
+- `go test ./core/types` passed for `geth-control-002`.
+
+Recommended compact locked subset for the next A/B smoke:
+
+- `geth-case-002` — strongest current bug discriminator.
+- `geth-case-004` — provider-reviewed nil/null API contract bug.
+- `geth-control-001` — provider-reviewed comment-only precision control.
+- `geth-control-002` — provider-reviewed no-op refactor precision control.
+
+Keep `geth-case-007` excluded from primary gate until leakage mitigation.

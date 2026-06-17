@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "taskId": "oss-geth-noissue-newtx-equivalent-refactor",
+  "candidateId": "geth-control-002",
+  "status": "locked",
+  "sourceRevision": "7122ecc3ebba8f0416f4a14424a19c923b669ea7",
+  "fixturePatch": "fixture.diff",
+  "referenceFixPatch": "reference-fix.patch",
+  "bugs": [],
+  "noIssueRegions": [
+    {
+      "file": "core/types/transaction.go",
+      "startLine": 67,
+      "endLine": 74,
+      "symbol": "NewTx"
+    }
+  ],
+  "mustAvoidClaims": [
+    "Reporting style-only or equivalent refactor changes as material defects.",
+    "Using upstream PR titles, issue numbers, commit messages, or git history as evidence.",
+    "Relying on private repro.sh, gold-key.draft.json, or reference-fix.patch.",
+    "Claiming unrelated broad rewrites outside the proposed patch are required."
+  ],
+  "difficulty": {
+    "bucket": "no-issue",
+    "plainExpected": "mixed",
+    "rationale": "Candidate should recognize that allocation form and a named local copy preserve behavior and do not create a material issue."
+  },
+  "leakagePolicy": {
+    "candidateVisible": [
+      "sanitized go-ethereum workspace at pinned revision",
+      "fixture.diff",
+      "neutral review prompt"
+    ],
+    "candidateForbidden": [
+      "gold-key.draft.json",
+      "author-notes.md",
+      "reference-fix.patch",
+      "repro.sh",
+      ".git",
+      ".pi/eval",
+      "judge prompts, answer keys, run artifacts, and A/B mappings",
+      "upstream PR/issue text or commit message"
+    ]
+  },
+  "approval": {
+    "state": "approved",
+    "providerReviews": [
+      ".pi/eval/bug-forge/provider-reviews/geth-noissue-controls-20260618/geth-controls-gpt55-high-review.md"
+    ],
+    "approvedBy": [
+      "local deterministic OSS no-issue control authoring",
+      "GPT-5.5 high provider no-issue review: APPROVE"
+    ],
+    "notes": "Provider review approved this no-issue control; treat style/doc/perf nits as non-material false positives for precision scoring."
+  }
+}
