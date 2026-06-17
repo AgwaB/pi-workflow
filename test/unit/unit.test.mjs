@@ -6159,6 +6159,53 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 		),
 	);
 
+	const sparseUnmatchedVerdict = await helper({
+		sources: {
+			"dedup-findings.main": { findings: [] },
+			"devil-advocate.item-001": {
+				finding: { title: "Sparse unmatched claim" },
+				verdict: "KEEP",
+			},
+		},
+		options: { mode: "partition", dedupStage: "dedup-findings" },
+	});
+	assert.equal(sparseUnmatchedVerdict.partitionSummary.keep, 0);
+	assert.equal(sparseUnmatchedVerdict.partitionSummary.needsHuman, 1);
+	assert.equal(
+		sparseUnmatchedVerdict.partitions.needsHuman[0].findingId,
+		"verdict-001",
+	);
+	assert.ok(
+		sparseUnmatchedVerdict.normalizationNotes.some((note) =>
+			note.includes("lacked identity evidence"),
+		),
+	);
+
+	const weakenCounterEvidence = await helper({
+		sources: {
+			"dedup-findings.main": {
+				findings: [
+					{
+						severity: "medium",
+						title: "Config parser accepts invalid booleans",
+						file: "src/config.ts",
+						locations: [{ file: "src/config.ts", line: 12 }],
+						evidenceQuotes: ["parseBoolean(value)"],
+					},
+				],
+			},
+			"devil-advocate.item-001": {
+				finding: { title: "Config parser accepts invalid booleans" },
+				verdict: "WEAKEN",
+				counterEvidence: "Only non-production config paths call this parser.",
+			},
+		},
+		options: { mode: "partition", dedupStage: "dedup-findings" },
+	});
+	assert.deepEqual(weakenCounterEvidence.reportContext.weaken[0].counterEvidence, [
+		"Only non-production config paths call this parser.",
+	]);
+
 	const supportDemotion = await helper({
 		sources: {
 			"dedup-findings.main": {
@@ -6167,8 +6214,15 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 						severity: "medium",
 						title: "Dropping colon parser loses file:line locations",
 						file: "workflows/deep-review/helpers/finding-pipeline.mjs",
+						locations: [
+							{
+								file: "workflows/deep-review/helpers/finding-pipeline.mjs",
+								line: 96,
+							},
+						],
 						evidence:
 							"removing :801 parsing loses line pins; tests mention the path but the runtime behavior is the defect",
+						evidenceQuotes: ["|:(\\d{1,6})(?:[–-](\\d{1,6}))?"],
 						recommendedAction: "Restore the parser and add targeted tests.",
 					},
 					{
@@ -6234,6 +6288,97 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 		),
 	);
 
+	const supportOnlyDemotion = await helper({
+		sources: {
+			"dedup-findings.main": {
+				findings: [
+					{
+						severity: "low",
+						title:
+							"Prose line-reference extraction lacks tests for remaining patterns and the removed colon branch",
+						file: "test/unit/unit.test.mjs",
+						evidence: "test coverage gap for file:line fallback",
+					},
+					{
+						severity: "low",
+						title:
+							"normalizeLocation comment still advertises unsupported colon line references",
+						file: "workflows/deep-review/helpers/finding-pipeline.mjs",
+						evidence: "stale comment mentions :N references",
+					},
+					{
+						severity: "low",
+						title:
+							"Dead match capture fallback remains after regex branch removal",
+						file: "workflows/deep-review/helpers/finding-pipeline.mjs",
+						evidence: "dead capture fallback",
+					},
+				],
+			},
+			"devil-advocate.item-001": {
+				finding: {
+					title:
+						"Prose line-reference extraction lacks tests for remaining patterns and the removed colon branch",
+				},
+				verdict: "KEEP",
+			},
+			"devil-advocate.item-002": {
+				finding: {
+					title:
+						"normalizeLocation comment still advertises unsupported colon line references",
+				},
+				verdict: "KEEP",
+			},
+			"devil-advocate.item-003": {
+				finding: {
+					title:
+						"Dead match capture fallback remains after regex branch removal",
+				},
+				verdict: "WEAKEN",
+			},
+		},
+		options: { mode: "partition", dedupStage: "dedup-findings" },
+	});
+	assert.deepEqual(supportOnlyDemotion.partitions.keep, []);
+	assert.deepEqual(supportOnlyDemotion.partitions.weaken, []);
+	assert.equal(supportOnlyDemotion.partitionSummary.supportNotes, 3);
+	assert.equal(supportOnlyDemotion.partitionSummary.needsHuman, 1);
+	assert.equal(
+		supportOnlyDemotion.partitions.needsHuman[0].findingId,
+		"needs-human-support-only",
+	);
+	assert.ok(
+		supportOnlyDemotion.normalizationNotes.some((note) =>
+			note.includes("support-only review produced 3 non-root finding"),
+		),
+	);
+
+	const documentationNamedRoot = await helper({
+		sources: {
+			"dedup-findings.main": {
+				findings: [
+					{
+						severity: "high",
+						title: "Documentation endpoint leaks secret tokens",
+						file: "src/docs-endpoint.ts",
+						locations: [{ file: "src/docs-endpoint.ts", line: 22 }],
+						evidenceQuotes: ["return { token: process.env.SECRET_TOKEN }"],
+					},
+				],
+			},
+			"devil-advocate.item-001": {
+				finding: { title: "Documentation endpoint leaks secret tokens" },
+				verdict: "KEEP",
+			},
+		},
+		options: { mode: "partition", dedupStage: "dedup-findings" },
+	});
+	assert.deepEqual(
+		documentationNamedRoot.partitions.keep.map((finding) => finding.title),
+		["Documentation endpoint leaks secret tokens"],
+	);
+	assert.equal(documentationNamedRoot.partitionSummary.supportNotes, 0);
+
 	const docsEvidenceRoot = await helper({
 		sources: {
 			"dedup-findings.main": {
@@ -6290,6 +6435,7 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 						locations: [{ file: "src/engine.ts", line: 568 }],
 						evidence:
 							"if (typeof stage.maxItems === number && items.length >= stage.maxItems)",
+						evidenceQuotes: ["items.length >= stage.maxItems"],
 					},
 					{
 						severity: "medium",
@@ -6301,6 +6447,7 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 						],
 						evidence:
 							"items.length >= stage.maxItems rejects exact maxItems boundary",
+						evidenceQuotes: ["items.length >= stage.maxItems rejects exact maxItems boundary"],
 					},
 					{
 						severity: "high",
@@ -6308,6 +6455,7 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 						file: "src/engine.ts",
 						locations: [{ file: "src/engine.ts", line: 820 }],
 						evidence: "blocked status is overwritten later",
+						evidenceQuotes: ["blocked status is overwritten later"],
 					},
 				],
 			},

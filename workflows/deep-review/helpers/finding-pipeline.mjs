@@ -450,17 +450,23 @@ function supportReasonOf(item) {
 	const titleText = normalizeText(
 		textFragments([item?.title, item?.reviewerFinding?.title]).join(" "),
 	);
-	if (
-		isTestPath(file) ||
-		(/\b(test|tests|coverage|fixture|fixtures|assertion|assertions)\b/.test(
+	const hasTestSupportLanguage =
+		/\b(test|tests|coverage|fixture|fixtures|assertion|assertions)\b/.test(
 			titleText,
 		) &&
-			/\b(gap|missing|lack|lacks|cover|coverage|assert|assertion|fixtures?)\b/.test(
-				titleText,
-			))
-	)
+		/\b(gap|missing|lack|lacks|cover|coverage|assert|assertion|fixtures?)\b/.test(
+			titleText,
+		);
+	if ((isTestPath(file) || hasTestSupportLanguage) && hasTestSupportLanguage)
 		return "test/coverage support";
-	if (/\b(stale|comment|comments|doc|docs|documentation)\b/.test(titleText))
+	const hasDocSubject = /\b(comment|comments|doc|docs|documentation)\b/.test(
+		titleText,
+	);
+	const hasDocSupportLanguage =
+		/\b(stale|outdated|obsolete|mismatch|mismatched|contradict|contradicts|unsupported|advertises?|mentions?|references?|leftover)\b/.test(
+			titleText,
+		);
+	if (hasDocSubject && hasDocSupportLanguage)
 		return "comment/documentation support";
 	if (
 		/\bdead\b/.test(text) &&
@@ -472,12 +478,48 @@ function supportReasonOf(item) {
 	return null;
 }
 
+function supportNoteFromItem(item, reason, relatedRoot) {
+	return {
+		title: item.title,
+		severity: item.severity,
+		file: item.file,
+		locations: item.locations,
+		evidenceQuotes: item.evidenceQuotes,
+		reason,
+		...(relatedRoot ? { supportingFindingOf: relatedRoot.title } : {}),
+		evidence: item.evidence,
+		counterEvidence: item.counterEvidence,
+		recommendedAction: item.recommendedAction,
+	};
+}
+
+function supportOnlyNeedsHumanItem(supportNotes) {
+	const evidenceQuotes = dedupeStrings(
+		supportNotes.flatMap((note) => note.evidenceQuotes ?? []),
+	).slice(0, 8);
+	const locations = dedupeLocations(
+		supportNotes.flatMap((note) => (Array.isArray(note.locations) ? note.locations : [])),
+	);
+	return {
+		findingId: "needs-human-support-only",
+		rootCauseId: "support-only-findings",
+		title:
+			"Support-only findings need an underlying root-cause review before reporting",
+		verdict: "NEEDS_HUMAN",
+		severity: "unknown",
+		...(locations.length > 0 ? { locations } : {}),
+		...(evidenceQuotes.length > 0 ? { evidenceQuotes } : {}),
+		note:
+			"All candidate findings were test/coverage, stale comment/docs, or dead-code symptoms. They were moved out of reportable findings because no independent behavioral root finding remained.",
+	};
+}
+
 function demoteSupportFindings(partitions, normalizationNotes) {
 	const roots = [...partitions.keep, ...partitions.weaken].filter(
 		(item) => !supportReasonOf(item) && !isTestPath(primaryFileOf(item)),
 	);
-	if (roots.length === 0) return [];
 	const supportNotes = [];
+	let supportOnlyDemotions = 0;
 	const demoteFrom = (items) => {
 		const next = [];
 		for (const item of items) {
@@ -490,30 +532,36 @@ function demoteSupportFindings(partitions, normalizationNotes) {
 			const relatedRoot =
 				roots.find((root) => primaryFileOf(root) === file) ??
 				(isTestPath(file) ? roots[0] : undefined);
-			if (!relatedRoot) {
+			if (!relatedRoot && roots.length > 0) {
 				next.push(item);
 				continue;
 			}
-			supportNotes.push({
-				title: item.title,
-				severity: item.severity,
-				file: item.file,
-				locations: item.locations,
-				evidenceQuotes: item.evidenceQuotes,
-				reason,
-				supportingFindingOf: relatedRoot.title,
-				evidence: item.evidence,
-				counterEvidence: item.counterEvidence,
-				recommendedAction: item.recommendedAction,
-			});
-			normalizationNotes.push(
-				`support finding "${item.title}" moved out of findings (${reason}) under "${relatedRoot.title}"`,
-			);
+			supportNotes.push(supportNoteFromItem(item, reason, relatedRoot));
+			if (relatedRoot) {
+				normalizationNotes.push(
+					`support finding "${item.title}" moved out of findings (${reason}) under "${relatedRoot.title}"`,
+				);
+			} else {
+				supportOnlyDemotions += 1;
+				normalizationNotes.push(
+					`support-only finding "${item.title}" moved out of findings (${reason}); no independent root finding remained`,
+				);
+			}
 		}
 		return next;
 	};
 	partitions.keep = demoteFrom(partitions.keep);
 	partitions.weaken = demoteFrom(partitions.weaken);
+	if (
+		supportOnlyDemotions > 0 &&
+		partitions.keep.length === 0 &&
+		partitions.weaken.length === 0
+	) {
+		partitions.needsHuman.push(supportOnlyNeedsHumanItem(supportNotes));
+		normalizationNotes.push(
+			`support-only review produced ${supportOnlyDemotions} non-root finding(s); routed to NEEDS_HUMAN instead of reportable findings`,
+		);
+	}
 	return supportNotes;
 }
 
@@ -707,11 +755,14 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 	const matchedTitles = new Set();
 	let missingVerdicts = 0;
 
+	let verdictIndex = 0;
 	for (const entry of verdictEntries) {
+		verdictIndex += 1;
 		const title = findingTitleOf(entry);
 		const { finding: reviewerFinding, key: titleKey } = findMatch(title);
 		if (reviewerFinding) matchedTitles.add(titleKey);
 		const { verdict, normalized, invalid } = normalizeVerdict(entry.verdict);
+		const fallbackId = `verdict-${String(verdictIndex).padStart(3, "0")}`;
 		if (invalid !== undefined) {
 			normalizationNotes.push(
 				`unrecognized verdict ${JSON.stringify(invalid)} for "${title}" routed to NEEDS_HUMAN`,
@@ -722,9 +773,13 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 			);
 		}
 		const item = {
-			findingId: reviewerFinding?.findingId ?? reviewerFinding?.id,
-			rootCauseId: reviewerFinding?.rootCauseId ?? reviewerFinding?.findingId ?? reviewerFinding?.id,
-			title,
+			findingId: reviewerFinding?.findingId ?? reviewerFinding?.id ?? fallbackId,
+			rootCauseId:
+				reviewerFinding?.rootCauseId ??
+				reviewerFinding?.findingId ??
+				reviewerFinding?.id ??
+				fallbackId,
+			title: reviewerFinding?.title ?? title,
 			verdict,
 			// KEEP findings carry the reviewer severity verbatim (code-enforced join);
 			// WEAKEN severity reduction is the report stage's job, with cited counter-evidence.
@@ -750,9 +805,27 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 				...quoteStrings(entry.evidence),
 			]),
 			evidence: entry.evidence ?? [],
-			counterEvidence: entry.counterEvidence ?? [],
+			counterEvidence: dedupeStrings(quoteStrings(entry.counterEvidence)),
 			recommendedAction: entry.recommendedAction ?? "",
 		};
+		const isSupportItem = Boolean(supportReasonOf(item));
+		const lacksIdentityEvidence =
+			!isSupportItem &&
+			(verdict === "KEEP" || verdict === "WEAKEN") &&
+			((!Array.isArray(item.locations) || item.locations.length === 0) ||
+				(!Array.isArray(item.evidenceQuotes) || item.evidenceQuotes.length === 0));
+		if (lacksIdentityEvidence) {
+			partitions.needsHuman.push({
+				...item,
+				verdict: "NEEDS_HUMAN",
+				note:
+					"verdict lacked code-preserved locations or evidenceQuotes required for reportable keep/weaken findings",
+			});
+			normalizationNotes.push(
+				`verdict for "${title}" lacked identity evidence; routed to NEEDS_HUMAN instead of ${verdict}`,
+			);
+			continue;
+		}
 		if (verdict === "KEEP") partitions.keep.push(item);
 		else if (verdict === "WEAKEN") partitions.weaken.push(item);
 		else if (verdict === "DROP") partitions.drop.push(item);

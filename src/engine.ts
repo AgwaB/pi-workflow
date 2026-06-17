@@ -2194,17 +2194,31 @@ async function readSupportSources(
 	return sources;
 }
 
+function supportSourceNamesForDependencies(
+	run: WorkflowRunRecord,
+	dependsOn: readonly string[],
+): Map<string, string> {
+	const names = new Map<string, string>();
+	const usedNames = new Set<string>();
+	for (const specId of dependsOn) {
+		const source = run.tasks.find((candidate) => candidate.specId === specId);
+		if (!source) continue;
+		names.set(source.specId, sourceNameForTask(source, usedNames));
+	}
+	return names;
+}
+
 async function readArtifactGraphSupportSources(
 	cwd: string,
 	run: WorkflowRunRecord,
 	dependsOn: string[],
 ): Promise<Record<string, unknown>> {
 	const sources: Record<string, unknown> = {};
-	const usedNames = new Set<string>();
+	const sourceNames = supportSourceNamesForDependencies(run, dependsOn);
 	for (const specId of dependsOn) {
 		const source = run.tasks.find((candidate) => candidate.specId === specId);
 		if (!source || source.status !== "completed") continue;
-		sources[sourceNameForTask(source, usedNames)] =
+		sources[sourceNames.get(source.specId) ?? source.specId] =
 			await readArtifactGraphControl(cwd, source);
 	}
 	return sources;
@@ -2215,12 +2229,12 @@ function buildArtifactGraphSupportSourceStatuses(
 	dependsOn: readonly string[],
 ): Array<Record<string, unknown>> {
 	const statuses: Array<Record<string, unknown>> = [];
-	const usedNames = new Set<string>();
+	const sourceNames = supportSourceNamesForDependencies(run, dependsOn);
 	for (const specId of dependsOn) {
 		const source = run.tasks.find((candidate) => candidate.specId === specId);
 		if (!source) continue;
 		statuses.push({
-			source: sourceNameForTask(source, usedNames),
+			source: sourceNames.get(source.specId) ?? source.specId,
 			displayName: source.displayName,
 			taskId: source.taskId,
 			specId: source.specId,
