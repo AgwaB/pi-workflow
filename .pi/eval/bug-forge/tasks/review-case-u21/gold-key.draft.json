@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "taskId": "holdout-required-reads-duplicate-silence",
+  "candidateId": "review-case-u21",
+  "status": "locked",
+  "sourceRevision": "eacad6c512da81031d0fe033de368a5b4fce4057",
+  "fixturePatch": "fixture.diff",
+  "referenceFixPatch": "reference-fix.patch",
+  "bugs": [
+    {
+      "bugId": "G1",
+      "severity": "medium",
+      "category": "safety",
+      "summary": "The patch silently accepts duplicate requiredReads values.",
+      "impact": "Workflow authors lose fail-closed feedback for duplicated required artifact reads, making handoff/read-ledger contracts easier to misconfigure unnoticed.",
+      "locations": [
+        {
+          "file": "src/artifact-graph-schema.ts",
+          "startLine": 638,
+          "endLine": 638,
+          "symbol": "validateRequiredReads"
+        }
+      ],
+      "requiredEvidence": [
+        {
+          "file": "src/artifact-graph-schema.ts",
+          "quote": "if (seen.has(item)) continue;",
+          "matchMode": "substring"
+        }
+      ],
+      "acceptableFixes": [
+        "Keep emitting a validation issue for duplicate requiredReads.",
+        "Add a schema test that duplicate inputPolicy.requiredReads is rejected."
+      ]
+    }
+  ],
+  "noIssueRegions": [],
+  "mustAvoidClaims": [
+    "Using prior A/B run notes as evidence.",
+    "Relying on git history instead of the sanitized workspace and proposed patch.",
+    "Assuming every holdout task contains a seeded bug."
+  ],
+  "difficulty": {
+    "bucket": "medium",
+    "plainExpected": "mixed",
+    "rationale": "Small control-flow change that weakens schema validation."
+  },
+  "leakagePolicy": {
+    "candidateVisible": [
+      "sanitized repo",
+      "fixture.diff",
+      "neutral review prompt"
+    ],
+    "candidateForbidden": [
+      "gold-key.draft.json",
+      "author-notes.md",
+      "reference-fix.patch",
+      "repro.sh",
+      ".git",
+      ".pi/eval",
+      "A/B run artifacts"
+    ]
+  },
+  "approval": {
+    "state": "approved",
+    "providerReviews": [],
+    "approvedBy": [
+      "local deterministic fixture authoring",
+      "repro.sh RED/GREEN or no-op revert check"
+    ],
+    "notes": "Local blind holdout locked before calibration runs; provider review pending before promotion to primary release gate."
+  }
+}

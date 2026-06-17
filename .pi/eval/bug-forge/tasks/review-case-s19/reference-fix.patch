@@ -1,0 +1,13 @@
+diff --git b/src/engine.ts a/src/engine.ts
+index d3a5d5a..d7532e9 100644
+--- b/src/engine.ts
++++ a/src/engine.ts
+@@ -1862,7 +1862,7 @@ function dependenciesReady(
+ 	return deps.every((dep) => {
+ 		const status = bySpecId.get(dep)?.status;
+ 		if (status === "completed") return true;
+-		if (partial && status === "completed") return true;
++		if (partial && status && isTerminalTaskStatus(status)) return true;
+ 		return false;
+ 	});
+ }

@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "taskId": "holdout-artifact-path-containment",
+  "candidateId": "review-case-y25",
+  "status": "locked",
+  "sourceRevision": "eacad6c512da81031d0fe033de368a5b4fce4057",
+  "fixturePatch": "fixture.diff",
+  "referenceFixPatch": "reference-fix.patch",
+  "bugs": [
+    {
+      "bugId": "G1",
+      "severity": "high",
+      "category": "security",
+      "summary": "The patch weakens workflow_artifact path containment.",
+      "impact": "Artifact manifest paths outside the workflow run directory can pass containment checks, risking unintended file reads through workflow_artifact.",
+      "locations": [
+        {
+          "file": "src/workflow-artifact-tool.ts",
+          "startLine": 612,
+          "endLine": 612,
+          "symbol": "isInsidePath"
+        }
+      ],
+      "requiredEvidence": [
+        {
+          "file": "src/workflow-artifact-tool.ts",
+          "quote": "return rel === \"\" || (!rel.startsWith(\"..\") || !isAbsolute(rel));",
+          "matchMode": "substring"
+        }
+      ],
+      "acceptableFixes": [
+        "Restore the AND condition in workflow-artifact-tool isInsidePath.",
+        "Add a workflow_artifact path traversal regression."
+      ]
+    }
+  ],
+  "noIssueRegions": [],
+  "mustAvoidClaims": [
+    "Using prior A/B run notes as evidence.",
+    "Relying on git history instead of the sanitized workspace and proposed patch.",
+    "Assuming every holdout task contains a seeded bug."
+  ],
+  "difficulty": {
+    "bucket": "hard",
+    "plainExpected": "mixed",
+    "rationale": "Same operator pattern in a different runtime-facing artifact path."
+  },
+  "leakagePolicy": {
+    "candidateVisible": [
+      "sanitized repo",
+      "fixture.diff",
+      "neutral review prompt"
+    ],
+    "candidateForbidden": [
+      "gold-key.draft.json",
+      "author-notes.md",
+      "reference-fix.patch",
+      "repro.sh",
+      ".git",
+      ".pi/eval",
+      "A/B run artifacts"
+    ]
+  },
+  "approval": {
+    "state": "approved",
+    "providerReviews": [],
+    "approvedBy": [
+      "local deterministic fixture authoring",
+      "repro.sh RED/GREEN or no-op revert check"
+    ],
+    "notes": "Local blind holdout locked before calibration runs; provider review pending before promotion to primary release gate."
+  }
+}

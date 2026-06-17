@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "taskId": "holdout-missing-workflow-root-throws",
+  "candidateId": "review-case-w23",
+  "status": "locked",
+  "sourceRevision": "eacad6c512da81031d0fe033de368a5b4fce4057",
+  "fixturePatch": "fixture.diff",
+  "referenceFixPatch": "reference-fix.patch",
+  "bugs": [
+    {
+      "bugId": "G1",
+      "severity": "medium",
+      "category": "reliability",
+      "summary": "The patch makes missing optional workflow roots fatal.",
+      "impact": "listWorkflows/resolveWorkflowRef can fail in normal installations where a project, package, or home workflow directory does not exist.",
+      "locations": [
+        {
+          "file": "src/workflow-specs.ts",
+          "startLine": 178,
+          "endLine": 178,
+          "symbol": "listSpecFiles"
+        }
+      ],
+      "requiredEvidence": [
+        {
+          "file": "src/workflow-specs.ts",
+          "quote": "if ((error as NodeJS.ErrnoException).code === \"ENOENT\") throw error;",
+          "matchMode": "substring"
+        }
+      ],
+      "acceptableFixes": [
+        "Continue returning [] for ENOENT in optional workflow roots.",
+        "Add a workflow registry test with absent optional roots."
+      ]
+    }
+  ],
+  "noIssueRegions": [],
+  "mustAvoidClaims": [
+    "Using prior A/B run notes as evidence.",
+    "Relying on git history instead of the sanitized workspace and proposed patch.",
+    "Assuming every holdout task contains a seeded bug."
+  ],
+  "difficulty": {
+    "bucket": "medium",
+    "plainExpected": "mixed",
+    "rationale": "This only fails when optional roots such as ~/.pi/agent/workflows are absent."
+  },
+  "leakagePolicy": {
+    "candidateVisible": [
+      "sanitized repo",
+      "fixture.diff",
+      "neutral review prompt"
+    ],
+    "candidateForbidden": [
+      "gold-key.draft.json",
+      "author-notes.md",
+      "reference-fix.patch",
+      "repro.sh",
+      ".git",
+      ".pi/eval",
+      "A/B run artifacts"
+    ]
+  },
+  "approval": {
+    "state": "approved",
+    "providerReviews": [],
+    "approvedBy": [
+      "local deterministic fixture authoring",
+      "repro.sh RED/GREEN or no-op revert check"
+    ],
+    "notes": "Local blind holdout locked before calibration runs; provider review pending before promotion to primary release gate."
+  }
+}

@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "taskId": "holdout-runtime-default-thinking-precedence",
+  "candidateId": "review-case-q17",
+  "status": "locked",
+  "sourceRevision": "eacad6c512da81031d0fe033de368a5b4fce4057",
+  "fixturePatch": "fixture.diff",
+  "referenceFixPatch": "reference-fix.patch",
+  "bugs": [
+    {
+      "bugId": "G1",
+      "severity": "medium",
+      "category": "api_contract",
+      "summary": "The patch makes workflow spec thinking defaults override explicit runtime thinking defaults.",
+      "impact": "/workflow run --thinking/--reasoning can silently be ignored for specs with defaults.thinking, defeating reproducible eval/model runs.",
+      "locations": [
+        {
+          "file": "src/compiler.ts",
+          "startLine": 798,
+          "endLine": 798,
+          "symbol": "compileArtifactGraphPlan"
+        }
+      ],
+      "requiredEvidence": [
+        {
+          "file": "src/compiler.ts",
+          "quote": "spec.defaults?.thinking ?? options.runtimeDefaults?.thinking",
+          "matchMode": "substring"
+        }
+      ],
+      "acceptableFixes": [
+        "Keep options.runtimeDefaults.thinking before spec.defaults.thinking.",
+        "Add a regression test for --thinking overriding workflow defaults.thinking."
+      ]
+    }
+  ],
+  "noIssueRegions": [],
+  "mustAvoidClaims": [
+    "Using prior A/B run notes as evidence.",
+    "Relying on git history instead of the sanitized workspace and proposed patch.",
+    "Assuming every holdout task contains a seeded bug."
+  ],
+  "difficulty": {
+    "bucket": "hard",
+    "plainExpected": "mixed",
+    "rationale": "Same invariant as model override but on separate thinking path."
+  },
+  "leakagePolicy": {
+    "candidateVisible": [
+      "sanitized repo",
+      "fixture.diff",
+      "neutral review prompt"
+    ],
+    "candidateForbidden": [
+      "gold-key.draft.json",
+      "author-notes.md",
+      "reference-fix.patch",
+      "repro.sh",
+      ".git",
+      ".pi/eval",
+      "A/B run artifacts"
+    ]
+  },
+  "approval": {
+    "state": "approved",
+    "providerReviews": [],
+    "approvedBy": [
+      "local deterministic fixture authoring",
+      "repro.sh RED/GREEN or no-op revert check"
+    ],
+    "notes": "Local blind holdout locked before calibration runs; provider review pending before promotion to primary release gate."
+  }
+}

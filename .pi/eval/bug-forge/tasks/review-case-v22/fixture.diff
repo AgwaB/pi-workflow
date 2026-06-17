@@ -1,0 +1,13 @@
+diff --git a/src/workflow-specs.ts b/src/workflow-specs.ts
+index 11dfe57..9446980 100644
+--- a/src/workflow-specs.ts
++++ b/src/workflow-specs.ts
+@@ -237,7 +237,7 @@ function aliasesFor(file: string, searchRoot: string): string[] {
+ 	const name = basename(file);
+ 	const extension = extname(name);
+ 	if (isBundleSpec(file, searchRoot)) return [basename(dirname(file))];
+-	return [name, name.slice(0, -extension.length)];
++	return [name];
+ }
+ 
+ function workflowRootFor(file: string, searchRoot: string): string {

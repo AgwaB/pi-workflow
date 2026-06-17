@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "status": "pilot-15-calibrated",
+  "status": "pilot-27-with-local-holdout",
   "tasks": [
     {
       "candidateId": "review-case-a1",
@@ -9,6 +9,14 @@
       "bucket": "easy-regression",
       "fixtureStatus": "authored",
       "goldStatus": "calibration-only-saturated"
+    },
+    {
+      "candidateId": "review-case-aa27",
+      "path": "tasks/review-case-aa27",
+      "internalTopic": "noissue requiredreads copy",
+      "bucket": "local-blind-holdout-no-issue",
+      "fixtureStatus": "authored-local-holdout",
+      "goldStatus": "locked-local-provider-review-pending"
     },
     {
       "candidateId": "review-case-b2",
@@ -121,13 +129,107 @@
       "bucket": "saturated-direct",
       "fixtureStatus": "authored-calibrated",
       "goldStatus": "draft-demote-primary"
+    },
+    {
+      "candidateId": "review-case-p16",
+      "path": "tasks/review-case-p16",
+      "internalTopic": "runtime default model precedence",
+      "bucket": "local-blind-holdout",
+      "fixtureStatus": "authored-local-holdout",
+      "goldStatus": "locked-local-provider-review-pending"
+    },
+    {
+      "candidateId": "review-case-q17",
+      "path": "tasks/review-case-q17",
+      "internalTopic": "runtime default thinking precedence",
+      "bucket": "local-blind-holdout",
+      "fixtureStatus": "authored-local-holdout",
+      "goldStatus": "locked-local-provider-review-pending"
+    },
+    {
+      "candidateId": "review-case-r18",
+      "path": "tasks/review-case-r18",
+      "internalTopic": "inject runtime task opt in",
+      "bucket": "local-blind-holdout",
+      "fixtureStatus": "authored-local-holdout",
+      "goldStatus": "locked-local-provider-review-pending"
+    },
+    {
+      "candidateId": "review-case-s19",
+      "path": "tasks/review-case-s19",
+      "internalTopic": "partial terminal dependencies",
+      "bucket": "local-blind-holdout",
+      "fixtureStatus": "authored-local-holdout",
+      "goldStatus": "locked-local-provider-review-pending"
+    },
+    {
+      "candidateId": "review-case-t20",
+      "path": "tasks/review-case-t20",
+      "internalTopic": "order only partial source inversion",
+      "bucket": "local-blind-holdout",
+      "fixtureStatus": "authored-local-holdout",
+      "goldStatus": "locked-local-provider-review-pending"
+    },
+    {
+      "candidateId": "review-case-u21",
+      "path": "tasks/review-case-u21",
+      "internalTopic": "required reads duplicate silence",
+      "bucket": "local-blind-holdout",
+      "fixtureStatus": "authored-local-holdout",
+      "goldStatus": "locked-local-provider-review-pending"
+    },
+    {
+      "candidateId": "review-case-v22",
+      "path": "tasks/review-case-v22",
+      "internalTopic": "flat workflow alias loss",
+      "bucket": "local-blind-holdout",
+      "fixtureStatus": "authored-local-holdout",
+      "goldStatus": "locked-local-provider-review-pending"
+    },
+    {
+      "candidateId": "review-case-w23",
+      "path": "tasks/review-case-w23",
+      "internalTopic": "missing workflow root throws",
+      "bucket": "local-blind-holdout",
+      "fixtureStatus": "authored-local-holdout",
+      "goldStatus": "locked-local-provider-review-pending"
+    },
+    {
+      "candidateId": "review-case-x24",
+      "path": "tasks/review-case-x24",
+      "internalTopic": "control schema path containment",
+      "bucket": "local-blind-holdout",
+      "fixtureStatus": "authored-local-holdout",
+      "goldStatus": "locked-local-provider-review-pending"
+    },
+    {
+      "candidateId": "review-case-y25",
+      "path": "tasks/review-case-y25",
+      "internalTopic": "artifact path containment",
+      "bucket": "local-blind-holdout",
+      "fixtureStatus": "authored-local-holdout",
+      "goldStatus": "locked-local-provider-review-pending"
+    },
+    {
+      "candidateId": "review-case-z26",
+      "path": "tasks/review-case-z26",
+      "internalTopic": "noissue partial commutative condition",
+      "bucket": "local-blind-holdout-no-issue",
+      "fixtureStatus": "authored-local-holdout",
+      "goldStatus": "locked-local-provider-review-pending"
     }
   ],
   "nextActions": [
+    "Treat review-case-p16 through review-case-aa27 as a local blind holdout for backtesting only until provider review promotes them.",
+    "Do not tune workflow prompts/helpers on holdout failures in the same pass; record failures as evidence first.",
     "Use C3, D4, J10, and M13 as the current locked set, with J10 treated as a hard recall holdout and M13 as a precision/root-splitting discriminator.",
     "Do not use saturated tasks as primary discriminators without rewriting.",
-    "For a stronger benchmark, author more non-saturated recall tasks like J10 with provider-approved evidence from the start.",
     "Keep pinned source revision a48c12a899447309b0adbb200d014c88cca61c8c available locally or via a stable source bundle before fresh materialization."
   ],
-  "latestCalibration": ".pi/eval/bug-forge/runs/calibration-wave2-workflow-20260615T175939Z/analysis.md"
+  "latestCalibration": ".pi/eval/bug-forge/runs/calibration-wave2-workflow-20260615T175939Z/analysis.md",
+  "latestHoldout": {
+    "taskRange": "review-case-p16..review-case-aa27",
+    "sourceRevision": "eacad6c512da81031d0fe033de368a5b4fce4057",
+    "status": "local-provider-review-pending"
+  }
 }

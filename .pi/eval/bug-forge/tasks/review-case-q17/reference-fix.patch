@@ -1,0 +1,13 @@
+diff --git b/src/compiler.ts a/src/compiler.ts
+index 3692436..1e93a68 100644
+--- b/src/compiler.ts
++++ a/src/compiler.ts
+@@ -795,7 +795,7 @@ async function compileArtifactGraphPlan(
+ 			: "";
+ 	const defaultModel = options.runtimeDefaults?.model ?? spec.defaults?.model;
+ 	const defaultThinking =
+-		spec.defaults?.thinking ?? options.runtimeDefaults?.thinking;
++		options.runtimeDefaults?.thinking ?? spec.defaults?.thinking;
+ 	const tasks: any[] = [];
+ 	const stageRecords: any[] = [];
+ 	const issues: ValidationIssue[] = [];

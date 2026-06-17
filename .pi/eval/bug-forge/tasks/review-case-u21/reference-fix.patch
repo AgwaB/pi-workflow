@@ -1,0 +1,14 @@
+diff --git b/src/artifact-graph-schema.ts a/src/artifact-graph-schema.ts
+index c9ed686..9dfbbfd 100644
+--- b/src/artifact-graph-schema.ts
++++ a/src/artifact-graph-schema.ts
+@@ -635,7 +635,8 @@ function validateRequiredReads(
+ 			});
+ 			continue;
+ 		}
+-		if (seen.has(item)) continue;
++		if (seen.has(item))
++			issues.push({ path: itemPath, message: `duplicate value "${item}"` });
+ 		seen.add(item);
+ 		validateRequiredRead(item, itemPath, sourceIds, issues);
+ 	}

@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "candidateId": "review-case-x24",
+  "status": "fixture-authored",
+  "sourceRevision": "eacad6c512da81031d0fe033de368a5b4fce4057",
+  "candidateVisible": {
+    "promptTemplate": "../../prompts/candidate-review.md",
+    "fixturePatch": "fixture.diff"
+  },
+  "privateOracle": {
+    "goldKeyDraft": "gold-key.draft.json",
+    "authorNotes": "author-notes.md",
+    "referenceFixPatch": "reference-fix.patch",
+    "repro": "repro.sh"
+  },
+  "notes": "controlSchema paths must stay inside the workflow bundle."
+}

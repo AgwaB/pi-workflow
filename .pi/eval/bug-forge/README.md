@@ -29,7 +29,7 @@ tasks/<neutral-task-id>/
 
 ## Pilot plan
 
-Current task set is a 15-task draft pilot:
+Current task set contains the original 15-task pilot plus a 12-task local blind holdout:
 
 - `review-case-a1` — easy location/dataflow regression calibration only.
 - `review-case-b2` — saturated runtime task propagation draft; needs subtler replacement.
@@ -46,8 +46,9 @@ Current task set is a 15-task draft pilot:
 - `review-case-m13` — foreach maxItems inclusive boundary.
 - `review-case-n14` — partial sourcePolicy inversion.
 - `review-case-o15` — blocked workflow status priority.
+- `review-case-p16`..`review-case-aa27` — local blind holdout covering runtime default precedence, prompt injection opt-in, partial failure semantics, required read validation, workflow registry robustness, path containment, and two no-issue controls.
 
-The second-wave tasks are draft until calibration and provider review decide which ones remain non-saturated and objective enough to lock.
+The second-wave tasks are draft until calibration and provider review decide which ones remain non-saturated and objective enough to lock. The P16-AA27 holdout is locally locked for backtesting only; do not tune workflow behavior on its results until failures are recorded and provider review promotes the tasks.
 
 ## Scripts
 

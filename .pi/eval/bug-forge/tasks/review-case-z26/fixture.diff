@@ -1,0 +1,13 @@
+diff --git a/src/workflow-runtime.ts b/src/workflow-runtime.ts
+index 09648d5..d75c00c 100644
+--- a/src/workflow-runtime.ts
++++ b/src/workflow-runtime.ts
+@@ -257,7 +257,7 @@ export function shouldScheduleAfterStageFailure(stage: {
+ 	type?: string;
+ 	sourcePolicy?: string;
+ }): boolean {
+-	return stage.type === "foreach" && stage.sourcePolicy === "partial";
++	return stage.sourcePolicy === "partial" && stage.type === "foreach";
+ }
+ 
+ export function canStageProceedAfterPreviousFailure(

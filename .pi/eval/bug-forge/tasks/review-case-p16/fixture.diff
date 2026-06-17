@@ -1,0 +1,13 @@
+diff --git a/src/compiler.ts b/src/compiler.ts
+index 1e93a68..4657fb0 100644
+--- a/src/compiler.ts
++++ b/src/compiler.ts
+@@ -793,7 +793,7 @@ async function compileArtifactGraphPlan(
+ 		Object.keys(workflowInput).length > 0
+ 			? `# Workflow Input\n\n${JSON.stringify(workflowInput, null, 2)}`
+ 			: "";
+-	const defaultModel = options.runtimeDefaults?.model ?? spec.defaults?.model;
++	const defaultModel = spec.defaults?.model ?? options.runtimeDefaults?.model;
+ 	const defaultThinking =
+ 		options.runtimeDefaults?.thinking ?? spec.defaults?.thinking;
+ 	const tasks: any[] = [];

@@ -1,0 +1,13 @@
+diff --git a/src/compiler.ts b/src/compiler.ts
+index 1e93a68..f11aaa9 100644
+--- a/src/compiler.ts
++++ b/src/compiler.ts
+@@ -856,7 +856,7 @@ async function compileArtifactGraphPlan(
+ 		// constraint (e.g. "review the diff on its own terms") must reach every
+ 		// stage, not just the entry stage.
+ 		const optInInjectRuntimeTask = stage.injectRuntimeTask === true;
+-		const injectTask = runtimeStageKind === "single" || optInInjectRuntimeTask;
++		const injectTask = runtimeStageKind === "single";
+ 		const injectRuntimeTaskInPrompt =
+ 			(runtimeStageKind !== "foreach" && injectTask) ||
+ 			(runtimeStageKind === "foreach" && optInInjectRuntimeTask);

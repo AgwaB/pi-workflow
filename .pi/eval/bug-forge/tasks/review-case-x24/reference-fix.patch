@@ -1,0 +1,13 @@
+diff --git b/src/schema.ts a/src/schema.ts
+index 8f9e92e..479749d 100644
+--- b/src/schema.ts
++++ a/src/schema.ts
+@@ -91,7 +91,7 @@ async function validateArtifactGraphControlSchemaFiles(
+ 
+ function isInsidePath(parent: string, child: string): boolean {
+ 	const rel = relative(parent, child);
+-	return rel === "" || (!rel.startsWith("..") || !isAbsolute(rel));
++	return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+ }
+ 
+ function flattenArtifactGraphStages(stages: readonly any[]): any[] {

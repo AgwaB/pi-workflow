@@ -1,0 +1,13 @@
+diff --git a/src/engine.ts b/src/engine.ts
+index d7532e9..cf0866c 100644
+--- a/src/engine.ts
++++ b/src/engine.ts
+@@ -2491,7 +2491,7 @@ async function prepareArtifactGraphTask(
+ 		},
+ 	});
+ 
+-	const requiredReads = compiledTask.artifactGraph?.requiredReads ?? [];
++	const requiredReads = [...(compiledTask.artifactGraph?.requiredReads ?? [])];
+ 	const requiredReadContext = await preloadRequiredArtifactReads({
+ 		sources,
+ 		requiredReads,

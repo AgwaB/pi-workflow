@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "taskId": "holdout-runtime-default-model-precedence",
+  "candidateId": "review-case-p16",
+  "status": "locked",
+  "sourceRevision": "eacad6c512da81031d0fe033de368a5b4fce4057",
+  "fixturePatch": "fixture.diff",
+  "referenceFixPatch": "reference-fix.patch",
+  "bugs": [
+    {
+      "bugId": "G1",
+      "severity": "high",
+      "category": "api_contract",
+      "summary": "The patch makes workflow spec defaults override explicit runtime model defaults.",
+      "impact": "/workflow run --model and workflow_run runtime defaults no longer reliably pin launched subagents when a workflow spec already declares defaults.model.",
+      "locations": [
+        {
+          "file": "src/compiler.ts",
+          "startLine": 796,
+          "endLine": 796,
+          "symbol": "compileArtifactGraphPlan"
+        }
+      ],
+      "requiredEvidence": [
+        {
+          "file": "src/compiler.ts",
+          "quote": "const defaultModel = spec.defaults?.model ?? options.runtimeDefaults?.model;",
+          "matchMode": "substring"
+        }
+      ],
+      "acceptableFixes": [
+        "Keep options.runtimeDefaults.model before spec.defaults.model.",
+        "Add a regression test proving /workflow run --model overrides workflow defaults.model."
+      ]
+    }
+  ],
+  "noIssueRegions": [],
+  "mustAvoidClaims": [
+    "Using prior A/B run notes as evidence.",
+    "Relying on git history instead of the sanitized workspace and proposed patch.",
+    "Assuming every holdout task contains a seeded bug."
+  ],
+  "difficulty": {
+    "bucket": "hard",
+    "plainExpected": "mixed",
+    "rationale": "The diff looks like harmless precedence cleanup but breaks explicit /workflow run --model overrides."
+  },
+  "leakagePolicy": {
+    "candidateVisible": [
+      "sanitized repo",
+      "fixture.diff",
+      "neutral review prompt"
+    ],
+    "candidateForbidden": [
+      "gold-key.draft.json",
+      "author-notes.md",
+      "reference-fix.patch",
+      "repro.sh",
+      ".git",
+      ".pi/eval",
+      "A/B run artifacts"
+    ]
+  },
+  "approval": {
+    "state": "approved",
+    "providerReviews": [],
+    "approvedBy": [
+      "local deterministic fixture authoring",
+      "repro.sh RED/GREEN or no-op revert check"
+    ],
+    "notes": "Local blind holdout locked before calibration runs; provider review pending before promotion to primary release gate."
+  }
+}

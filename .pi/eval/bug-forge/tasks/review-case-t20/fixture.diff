@@ -1,0 +1,13 @@
+diff --git a/src/workflow-runtime.ts b/src/workflow-runtime.ts
+index 09648d5..6548830 100644
+--- a/src/workflow-runtime.ts
++++ b/src/workflow-runtime.ts
+@@ -265,7 +265,7 @@ export function canStageProceedAfterPreviousFailure(
+ 	previous: { id?: string },
+ ): boolean {
+ 	if (!stage.sourceStageIds || stage.sourceStageIds.length === 0) return false;
+-	if (!stage.sourceStageIds.includes(previous.id ?? "")) return true;
++	if (!stage.sourceStageIds.includes(previous.id ?? "")) return false;
+ 	return stage.sourcePolicy === "partial";
+ }
+ 
