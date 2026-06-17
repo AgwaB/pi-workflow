@@ -167,8 +167,33 @@ function workflowEvidenceQuote(finding, control) {
   return unique.length ? unique.join("\n") : firstEvidenceQuote(control, true);
 }
 
+function normalizeWorkflowLocation(location) {
+  if (!location || typeof location !== "object" || !location.file) return null;
+  const line = Number.isInteger(location.line) ? location.line : (Number.isInteger(location.startLine) ? location.startLine : undefined);
+  const lineEnd = Number.isInteger(location.lineEnd) ? location.lineEnd : (Number.isInteger(location.endLine) ? location.endLine : undefined);
+  return {
+    file: String(location.file),
+    ...(line !== undefined ? { line } : {}),
+    ...(lineEnd !== undefined ? { lineEnd } : {}),
+    ...(typeof location.symbol === "string" && location.symbol.trim() ? { symbol: location.symbol.trim() } : {}),
+  };
+}
+
+function workflowLocations(finding) {
+  const locations = (Array.isArray(finding.locations) ? finding.locations : [])
+    .map(normalizeWorkflowLocation)
+    .filter(Boolean);
+  const seen = new Set();
+  return locations.filter((location) => {
+    const key = `${location.file}:${location.line ?? ""}:${location.lineEnd ?? ""}:${location.symbol ?? ""}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function preferredWorkflowLocation(finding) {
-  const locations = Array.isArray(finding.locations) ? finding.locations.filter((item) => item?.file) : [];
+  const locations = workflowLocations(finding);
   const sourceLike = locations.find((item) => !String(item.file).startsWith("test/"));
   return sourceLike ?? locations[0] ?? null;
 }
@@ -181,12 +206,14 @@ function normalizeWorkflowControl(control) {
 }
 
 function normalizeWorkflowFinding(finding, control) {
+  const locations = workflowLocations(finding);
   const loc = preferredWorkflowLocation(finding);
   return {
     severity: ["critical", "high", "medium", "low"].includes(finding.severity) ? finding.severity : "medium",
     file: (!String(finding.file ?? "").startsWith("test/") && finding.file) || loc?.file || finding.file || "unknown",
     ...(Number.isInteger(finding.line ?? loc?.line) ? { line: finding.line ?? loc.line } : {}),
     ...(Number.isInteger(finding.lineEnd ?? loc?.lineEnd) ? { lineEnd: finding.lineEnd ?? loc.lineEnd } : {}),
+    ...(locations.length ? { locations } : {}),
     claim: finding.claim ?? finding.title ?? finding.rationale ?? control.summary?.headline ?? control.digest ?? "workflow finding",
     evidenceQuote: workflowEvidenceQuote(finding, control),
     fix: finding.fix ?? finding.recommendedAction ?? control.recommendedNextAction ?? "See workflow recommendation.",

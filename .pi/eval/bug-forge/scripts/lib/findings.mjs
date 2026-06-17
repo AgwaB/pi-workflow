@@ -50,6 +50,21 @@ export function validateCandidateFindings(data) {
     }
     if (finding.line !== undefined && (!Number.isInteger(finding.line) || finding.line < 1)) issues.push(`${prefix}.line invalid`);
     if (finding.lineEnd !== undefined && (!Number.isInteger(finding.lineEnd) || finding.lineEnd < 1)) issues.push(`${prefix}.lineEnd invalid`);
+    if (finding.locations !== undefined) {
+      if (!Array.isArray(finding.locations)) issues.push(`${prefix}.locations must be an array`);
+      for (const [locationIndex, location] of (Array.isArray(finding.locations) ? finding.locations : []).entries()) {
+        const locationPrefix = `${prefix}.locations[${locationIndex}]`;
+        if (!location || typeof location !== "object") {
+          issues.push(`${locationPrefix} must be an object`);
+          continue;
+        }
+        if (typeof location.file !== "string" || !location.file.trim()) issues.push(`${locationPrefix}.file missing`);
+        for (const key of ["line", "lineEnd", "startLine", "endLine"]) {
+          if (location[key] !== undefined && (!Number.isInteger(location[key]) || location[key] < 1)) issues.push(`${locationPrefix}.${key} invalid`);
+        }
+        if (location.symbol !== undefined && (typeof location.symbol !== "string" || !location.symbol.trim())) issues.push(`${locationPrefix}.symbol invalid`);
+      }
+    }
     if (finding.confidence !== undefined && (typeof finding.confidence !== "number" || finding.confidence < 0 || finding.confidence > 1)) issues.push(`${prefix}.confidence invalid`);
   }
   if (data?.noMaterialIssues === true && (data?.findings ?? []).length > 0) issues.push("noMaterialIssues=true conflicts with non-empty findings");
@@ -96,13 +111,42 @@ function quoteMatches(value, evidence) {
   return textVariants.some((text) => quoteVariantsList.some((quote) => text.toLowerCase().includes(quote.toLowerCase())));
 }
 
-function lineOverlaps(finding, region) {
-  if (!finding.line || !region.startLine) return true;
-  const a0 = finding.line;
-  const a1 = finding.lineEnd ?? finding.line;
+function lineOverlaps(location, region) {
+  const line = location.line ?? location.startLine;
+  const lineEnd = location.lineEnd ?? location.endLine ?? line;
+  if (!line || !region.startLine) return true;
+  const a0 = line;
+  const a1 = lineEnd;
   const b0 = region.startLine;
   const b1 = region.endLine ?? region.startLine;
   return Math.max(a0, b0) <= Math.min(a1, b1);
+}
+
+function candidateLocations(finding) {
+  const locations = [];
+  if (Array.isArray(finding.locations)) {
+    for (const location of finding.locations) {
+      if (location && typeof location === "object" && location.file) locations.push(location);
+    }
+  }
+  if (finding.file) {
+    locations.push({
+      file: finding.file,
+      ...(finding.line !== undefined ? { line: finding.line } : {}),
+      ...(finding.lineEnd !== undefined ? { lineEnd: finding.lineEnd } : {}),
+    });
+  }
+  const seen = new Set();
+  return locations.filter((location) => {
+    const key = `${location.file}:${location.line ?? location.startLine ?? ""}:${location.lineEnd ?? location.endLine ?? ""}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function findingMatchesRegion(finding, region) {
+  return candidateLocations(finding).some((location) => location.file === region.file && lineOverlaps(location, region));
 }
 
 export function scoreFindings(gold, candidate) {
@@ -115,9 +159,9 @@ export function scoreFindings(gold, candidate) {
     let best = null;
     for (const [index, finding] of findings.entries()) {
       if (matchedFinding.has(index)) continue;
-      const fileMatch = (bug.locations ?? []).some((loc) => loc.file === finding.file && lineOverlaps(finding, loc));
+      const fileMatch = (bug.locations ?? []).some((loc) => findingMatchesRegion(finding, loc));
       if (!fileMatch) continue;
-      const evidenceScore = (bug.requiredEvidence ?? []).some((e) => e.file === finding.file && quoteMatches(finding.evidenceQuote, e)) ? 1 : 0;
+      const evidenceScore = (bug.requiredEvidence ?? []).some((e) => candidateLocations(finding).some((location) => location.file === e.file) && quoteMatches(finding.evidenceQuote, e)) ? 1 : 0;
       const semanticScore = Math.max(tokenOverlap(finding.claim, bug.summary), tokenOverlap(finding.claim, bug.impact));
       const score = evidenceScore * 2 + semanticScore;
       if (score > 0.2 && (!best || score > best.score)) best = { index, finding, score, evidenceScore, semanticScore };
