@@ -39,18 +39,24 @@ Requires Node.js `>=22.19.0` on macOS or Linux. Native Windows is not supported;
 
 ## Usage: ask naturally
 
-After installation, ask Pi to use a bundled or project workflow by name. Bundled workflows reference common Pi agents such as `scout` and `researcher`; create or install matching agents in your Pi environment before running them.
+After installation, ask Pi to use a bundled or project workflow by name. The package exposes `workflow_list` and `workflow_run` tools so Pi can discover workflows and start a run from an explicit natural-language request. Bundled workflows reference common Pi agents such as `scout` and `researcher`; create or install matching agents in your Pi environment before running them.
 
 ```text
 Use the bundled deep-research workflow to research this repository and summarize the architecture tradeoffs.
 ```
 
 ```text
-Use the bundled deep-review workflow to review the current diff from multiple angles.
+Deep-review workflow로 현재 diff를 여러 관점에서 리뷰해줘.
 ```
 
 ```text
 Use the spec-review workflow to compare docs/API_SPEC.md against the implementation and tests.
+```
+
+If you want deterministic manual control, use the slash command form:
+
+```text
+/workflow run deep-research "Research this repository and summarize the architecture tradeoffs."
 ```
 
 ## Usage: create your own workflows
@@ -99,7 +105,7 @@ A small workflow definition looks like this:
     "stages": [
       {
         "id": "plan",
-        "type": "task",
+        "type": "single",
         "prompt": "Put machine-readable JSON in <control> with an items array."
       },
       {
@@ -125,21 +131,21 @@ A small workflow definition looks like this:
 }
 ```
 
-## Supported task patterns
+## Supported stage patterns
 
-Workflow definitions compose a small set of task patterns and graph shapes.
+Workflow definitions compose a small set of stage patterns and graph shapes.
 
 | Pattern | Use it for | Runtime shape |
 |---|---|---|
-| `task` | One focused step | one prompt -> one subagent |
+| `single` | One focused step | one prompt -> one subagent |
 | `foreach` | Dynamic fan-out | JSON array from an upstream control artifact -> one subagent per item |
 | `reduce` | Fan-in / synthesis | upstream workflow artifacts -> one synthesis subagent |
 | `loop` | Bounded repetition | repeat child stages until a deterministic stop condition |
 | `dag` | Nested graph container | child stages lowered to namespaced tasks; selected output exposed downstream |
 
-![Core workflow stage shapes](./docs/assets/readme/stage-types.png)
+![Core workflow stage shapes: single, foreach, reduce, loop, and dag](./docs/assets/readme/stage-types.png)
 
-Parallel execution is a graph shape, not a stage type: model parallel branches as multiple roots or with `after: []`. Support helpers are declared with a `support` object, not a task `type`.
+Parallel execution is a graph shape, not a stage type: model parallel branches as multiple roots or with `after: []`. Support helpers are declared with a `support` object, not a stage `type`.
 
 ## Predefined workflows
 
@@ -161,6 +167,18 @@ The package includes a small starter set. These are practical defaults and autho
 ![Impact review workflow flow](./docs/assets/readme/impact-review-flow.png)
 
 Most teams should create project-specific workflows as their patterns settle.
+
+## Workflow board
+
+After starting a run, open `/workflow` to inspect it in a read-only TUI. Browse runs, drill into stages and tasks, and preview task output without leaving Pi.
+
+![Workflow board: runs list](./docs/assets/readme/workflow-board-runs.png)
+
+![Workflow board: stages view](./docs/assets/readme/workflow-board-stages.png)
+
+![Workflow board: tasks and output preview](./docs/assets/readme/workflow-board-tasks.png)
+
+![Workflow board: task detail](./docs/assets/readme/workflow-board-task-detail.png)
 
 ## More
 

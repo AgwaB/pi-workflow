@@ -34,13 +34,39 @@ Terminal CLI:
 pi-workflow inspect <run-id-or-prefix> [--failures] [--results] [--json]
 ```
 
-`/workflow` with no arguments displays help. It does not currently open a board UI.
+`/workflow` with no arguments opens the read-only workflow board TUI. `/workflow <run-id>` opens the board focused on that run.
+
+## Natural-language invocation
+
+The extension also registers two LLM-callable tools for normal chat requests:
+
+| Tool | Purpose |
+|---|---|
+| `workflow_list` | List discoverable workflows when the user asks what exists or asks Pi to choose without naming one. |
+| `workflow_run` | Start a run when the user explicitly asks to use/run/start a named workflow and provides a concrete task. |
+
+Examples:
+
+```text
+Use the deep-research workflow to research this repository's architecture tradeoffs.
+```
+
+```text
+deep-review workflow로 현재 diff를 reliability/test coverage 관점에서 리뷰해줘.
+```
+
+Natural-language invocation uses the same workflow resolution roots and task-required rule as `/workflow run`. If the workflow name or concrete task is missing, Pi should ask a clarifying question instead of launching a run. The deterministic manual equivalent is:
+
+```text
+/workflow run deep-research "Research this repository's architecture tradeoffs."
+```
 
 ## Commands
 
 | Command | Purpose |
 |---|---|
-| `/workflow` or `/workflow help` | Show help. |
+| `/workflow` or `/workflow <run-id>` | Open the read-only workflow board TUI. With a run id or prefix, focus that run. Falls back to text `status` output in `--print` mode or when no TUI is available. |
+| `/workflow help` | Show help. |
 | `/workflow list` | List workflow specs discoverable from the current project and installed package. |
 | `/workflow validate <workflow-name-or-path>` | Load and compile a workflow without starting a run. Reports blocked permission previews and warnings. |
 | `/workflow roles <workflow-name-or-path>` | Show the compiled role context included for each workflow role. |
@@ -52,7 +78,7 @@ pi-workflow inspect <run-id-or-prefix> [--failures] [--results] [--json]
 | `/workflow wait <run-id> [timeout-ms]` | Poll until the run finishes or the optional timeout elapses. |
 | `/workflow resume <run-id>` | Resume a failed or interrupted run: completed tasks are preserved; failed/interrupted/skipped tasks reset to pending and reschedule. Loop workflows are not supported yet. |
 
-Not implemented: `/workflow view`, `/workflow continue`, `/workflow delegate`, and a `/workflow` board. Use `status`, `show`, `logs`, `wait`, `resume`, and `pi-workflow inspect` instead. The standalone CLI also offers `pi-workflow supervise <run-id>|--all` to drive scheduling from outside a Pi session (unfinished failed/interrupted runs within the last 7 days are announced at session start with resume hints).
+Not implemented: `/workflow continue` and `/workflow delegate`. Use `status`, `show`, `logs`, `wait`, `resume`, and `pi-workflow inspect` for text/CLI inspection. The standalone CLI also offers `pi-workflow supervise <run-id>|--all` to drive scheduling from outside a Pi session (unfinished failed/interrupted runs within the last 7 days are announced at session start with resume hints).
 
 ## Workflow resolution
 
@@ -72,7 +98,7 @@ Name refs are resolved from these roots:
 3. bundled package `workflows/`
 4. `~/.pi/agent/workflows/`
 
-Runnable workflow discovery currently supports `.json` spec files. The low-level loader can parse `.yaml`/`.yml`, but named workflow discovery and bundled workflow resolution are JSON-only.
+Workflow specs are JSON-only. Use `.json` for direct path refs, named discovery, and bundle `spec.json` files; `.yaml` and `.yml` workflow specs are not supported.
 
 A workflow can be a direct spec path, but bundled reusable workflows should use directory bundles:
 
@@ -131,7 +157,7 @@ Public `schemaVersion: 1` workflows use `artifactGraph.stages` as the only autho
 Public workflow definitions separate three layers:
 
 - **Workflow layer**: graph/control/data-dependency fields such as `id`, `from`, `after`, `sourcePolicy`, `sourceProjection`, scheduling, and artifacts.
-- **Subagent layer**: child Pi/model worker shapes: `task`, `foreach`, `reduce`, and `loop`.
+- **Subagent layer**: child Pi/model worker shapes: `single`, `foreach`, `reduce`, and `loop`.
 - **Support layer**: local helper execution through a stage that declares a `support` object.
 
 Every subagent stage writes artifact bundles:
@@ -143,14 +169,14 @@ Every subagent stage writes artifact bundles:
 
 | Node | Layer | Data behavior |
 |---|---|---|
-| `type: "task"` | Subagent | One focused subagent prompt. |
+| `type: "single"` | Subagent | One focused subagent prompt. |
 | `type: "foreach"` | Subagent/control | Reads an array from an upstream `control.json` simple dot path and materializes one task per item. |
 | `type: "reduce"` | Subagent | Fan-in over upstream artifact handles and optional `sourceProjection` inline control snippets. |
 | `type: "loop"` | Workflow/control | Repeats fixed child stages until deterministic `until`, `maxRounds`, or no-progress stop. Loop conditions read child `control.json`. |
 | `type: "dag"` | Workflow/control | Composite container; lowers child stages to namespaced tasks and exposes an `outputFrom` child downstream. |
 | `support: { uses }` | Support | Runs a directory-local `.mjs` helper over selected upstream `control.json` values and writes a workflow artifact bundle. |
 
-Use `foreach.from` for dynamic fan-out, `reduce.from` for subagent fan-in, and support `from` for local helper inputs. Do not rely on a later plain `task` to see previous stage output.
+Use `foreach.from` for dynamic fan-out, `reduce.from` for subagent fan-in, and support `from` for local helper inputs. Do not rely on a later plain `single` stage to see previous stage output.
 
 ### DAG authoring
 
@@ -159,7 +185,7 @@ Top-level `artifactGraph.stages` is DAG-capable by default. A nested `type: "dag
 Keep these layers distinct:
 
 - **Workflow layer**: graph/control/data-dependency semantics such as `id`, `from`, `after`, `sourcePolicy`, `sourceProjection`, scheduling, and artifacts.
-- **Subagent layer**: model-backed execution patterns such as `task`, `foreach`, `reduce`, and loop child tasks.
+- **Subagent layer**: model-backed execution patterns such as `single`, `foreach`, `reduce`, and loop child stages.
 - **Support layer**: deterministic local helper execution through `support: { uses, options }`.
 
 DAG rules:
@@ -170,7 +196,7 @@ DAG rules:
 - Parse-time graph validation rejects unknown stage references, self-dependencies, duplicate stage ids, dependency cycles, unsupported output fields, and unsafe `controlSchema` paths.
 - `inputPolicy.requiredReads` is fail-closed: if declared, the task must read each listed `source.artifact` via `workflow_artifact` before its final output is accepted. Direct repo `read`/`grep` calls do not satisfy this proof; the ledger proves artifact access, not semantic use. DAG container outputs use the selected child source name, for example `analysis.final.analysis` for `id: "analysis", outputFrom: "final"`.
 - `sourceProjection.include` can inline small selected simple dot paths from upstream `control.json` (for example `$.digest` or `$.items`); full artifacts remain available through `workflow_artifact`.
-- A `type: "dag"` stage may contain `task`, `foreach`, `reduce`, support nodes, or nested `dag` stages. Loops are top-level workflow/control stages in v1. Child `from`/`after` references resolve only to siblings inside the same container.
+- A `type: "dag"` stage may contain `single`, `foreach`, `reduce`, support nodes, or nested `dag` stages. Loops are top-level workflow/control stages in v1. Child `from`/`after` references resolve only to siblings inside the same container.
 - `outputFrom` names the child whose task keys represent the container for downstream `from: "containerId"` edges. If omitted, exactly one sink child defaults as the output; multiple sink children require explicit `outputFrom`.
 
 Example diamond plus a DAG container consumed downstream:
@@ -187,7 +213,7 @@ Example diamond plus a DAG container consumed downstream:
     "stages": [
       {
         "id": "plan",
-        "type": "task",
+        "type": "single",
         "prompt": "Put machine-readable JSON in <control> with an items array."
       },
       {
@@ -198,7 +224,7 @@ Example diamond plus a DAG container consumed downstream:
       },
       {
         "id": "review",
-        "type": "task",
+        "type": "single",
         "after": "plan",
         "prompt": "Run an independent review after planning finishes."
       },
@@ -215,8 +241,8 @@ Example diamond plus a DAG container consumed downstream:
         "from": "merge",
         "outputFrom": "final",
         "stages": [
-          { "id": "scan", "type": "task", "prompt": "Scan the merged findings." },
-          { "id": "review", "type": "task", "after": "scan", "prompt": "Review after the scan without scan output context." },
+          { "id": "scan", "type": "single", "prompt": "Scan the merged findings." },
+          { "id": "review", "type": "single", "after": "scan", "prompt": "Review after the scan without scan output context." },
           { "id": "final", "type": "reduce", "from": ["scan", "review"], "prompt": "Summarize the analysis children." }
         ]
       },
@@ -372,7 +398,7 @@ Project workflows should live in:
 Authoring checklist:
 
 1. Start from a bundled workflow when one fits.
-2. Decide the workflow graph first: subagent stages (`task`, `foreach`, `reduce`, `loop`), `dag` containers, and support nodes when deterministic local helper code is needed.
+2. Decide the workflow graph first: subagent stages (`single`, `foreach`, `reduce`, `loop`), `dag` containers, and support nodes when deterministic local helper code is needed.
 3. Make every data dependency explicit with `foreach.from`, `reduce.from`, or support `from`.
 4. Keep read-only workflows read-only.
 5. For write-capable workflows, choose a worktree policy and validation stage.

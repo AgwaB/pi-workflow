@@ -20,7 +20,7 @@ Resolve paths relative to this skill directory. Treat those docs as the source o
 
 - Prefer a bundled workflow before inventing a new topology.
 - Public `schemaVersion: 1` workflow specs use `artifactGraph.stages`.
-- Stage order controls scheduling only; it does **not** pass prior output into a later plain `task` stage.
+- Stage order controls scheduling only; it does **not** pass prior output into a later plain `single` stage.
 - If a stage needs prior artifacts, use `reduce.from`, `foreach.from`, or support `from`.
 - For dynamic fan-out, use `foreach.from` with a simple dot path into upstream `control.json`.
 - For synthesis/fan-in, use `reduce.from` and require/encourage `workflow_artifact` reads for detailed upstream artifacts.
@@ -31,6 +31,7 @@ Resolve paths relative to this skill directory. Treat those docs as the source o
 - Write-capable workflows need explicit worktree policy, validation/check stages, and protected-path awareness.
 - In non-git workspaces with `worktreePolicy: "off"`, writes mutate the live directory.
 - Project workflows should be saved under `.pi/workflows/<name>.json` or a bundle directory with `spec.json`, schemas, and helpers.
+- For natural-language execution of existing workflows, prefer `workflow_list` and `workflow_run` when those tools are available; use `/workflow ...` commands as the deterministic manual fallback.
 - Always run `/workflow validate <workflow-or-file>` before handing off or running a reusable workflow.
 
 ## Intake (run before authoring when the request is ambiguous)
@@ -38,7 +39,7 @@ Resolve paths relative to this skill directory. Treat those docs as the source o
 When the request is vague, broad, delegated ("just pick a good one"), or self-contradictory, do not write a spec yet. Clarify and recommend first, then build collaboratively.
 
 1. Do not generate a spec on an underspecified request. Surface what is missing instead of guessing.
-2. Survey existing options with `/workflow list` and read each candidate's `description` and stage graph; present the top candidates and what each is for.
+2. Survey existing options with `workflow_list` when available, otherwise `/workflow list`, and read each candidate's `description` and stage graph; present the top candidates and what each is for.
 3. Ask the user the decisions that determine the graph, only the ones still unknown:
    - What is inspected/produced, and what decision does the output support?
    - Read-only review/research, or write-capable (managed worktree)?
