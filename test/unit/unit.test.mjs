@@ -6419,6 +6419,24 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 							"The finding itself concedes the leftover capture reads are dead code.",
 						],
 					},
+					{
+						severity: "medium",
+						title:
+							"linesFromEvidence drops :N line-reference parsing, breaking advertised location reconstruction contract",
+						file: "workflows/deep-review/helpers/finding-pipeline.mjs",
+						locations: [
+							{
+								file: "workflows/deep-review/helpers/finding-pipeline.mjs",
+								line: 96,
+								lineEnd: 101,
+							},
+						],
+						evidenceQuotes: [
+							"-  const re = /(?:\\blines?\\s+~?(\\d{1,6})(?:\\s*[–-]\\s*(\\d{1,6}))?|\\bL(\\d{1,6})\\b|:(\\d{1,6})(?:[–-](\\d{1,6}))?)/gi;",
+							"+  const re = /(?:\\blines?\\s+~?(\\d{1,6})(?:\\s*[–-]\\s*(\\d{1,6}))?|\\bL(\\d{1,6})\\b)/gi;",
+							"The prose parsing path is therefore a fallback for non-compliant reviewers, not the primary contract.",
+						],
+					},
 				],
 			},
 			"devil-advocate.item-001": {
@@ -6442,16 +6460,23 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 				},
 				verdict: "WEAKEN",
 			},
+			"devil-advocate.item-004": {
+				finding: {
+					title:
+						"linesFromEvidence drops :N line-reference parsing, breaking advertised location reconstruction contract",
+				},
+				verdict: "WEAKEN",
+			},
 		},
 		options: { mode: "partition", dedupStage: "dedup-findings" },
 	});
 	assert.equal(d4DuplicateRootCollapse.partitionSummary.keep, 1);
 	assert.equal(d4DuplicateRootCollapse.partitionSummary.weaken, 0);
 	assert.equal(d4DuplicateRootCollapse.partitionSummary.supportNotes, 1);
-	assert.equal(d4DuplicateRootCollapse.partitionSummary.mergedFindings, 1);
+	assert.equal(d4DuplicateRootCollapse.partitionSummary.mergedFindings, 2);
 	assert.deepEqual(
 		d4DuplicateRootCollapse.reportContext.keep[0].mergedFindingIds,
-		["verdict-002"],
+		["verdict-002", "verdict-004"],
 	);
 
 	const supportOnlyDemotion = await helper({

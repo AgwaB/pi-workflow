@@ -705,6 +705,23 @@ function mergeEquivalentRootFindings(partitions, normalizationNotes) {
 		}
 		partitions[bucketName] = merged;
 	}
+
+	const remainingWeaken = [];
+	for (const item of partitions.weaken) {
+		const keepRoot = partitions.keep.find((candidate) =>
+			sameRootFinding(candidate, item),
+		);
+		if (!keepRoot) {
+			remainingWeaken.push(item);
+			continue;
+		}
+		mergeFindingItems(keepRoot, item);
+		mergedCount += 1;
+		normalizationNotes.push(
+			`equivalent weakened root finding "${item.title}" merged into keep finding "${keepRoot.title}"`,
+		);
+	}
+	partitions.weaken = remainingWeaken;
 	return mergedCount;
 }
 
