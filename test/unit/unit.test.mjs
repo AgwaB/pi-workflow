@@ -6364,6 +6364,96 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 		),
 	);
 
+	const d4DuplicateRootCollapse = await helper({
+		sources: {
+			"dedup-findings.main": {
+				findings: [
+					{
+						severity: "medium",
+						title:
+							"Regex/capture-group contract mismatch and loss of ':line' location extraction",
+						file: "workflows/deep-review/helpers/finding-pipeline.mjs",
+						locations: [
+							{
+								file: "workflows/deep-review/helpers/finding-pipeline.mjs",
+								line: 96,
+								lineEnd: 106,
+							},
+						],
+						evidenceQuotes: [
+							"-  const re = /(?:\\blines?\\s+~?(\\d{1,6})(?:\\s*[–-]\\s*(\\d{1,6}))?|\\bL(\\d{1,6})\\b|:(\\d{1,6})(?:[–-](\\d{1,6}))?)/gi;",
+							"+  const re = /(?:\\blines?\\s+~?(\\d{1,6})(?:\\s*[–-]\\s*(\\d{1,6}))?|\\bL(\\d{1,6})\\b)/gi;",
+							"This leaves dead, misleading code.",
+						],
+					},
+					{
+						severity: "medium",
+						title:
+							"Removing ':' line-reference extraction drops structured locations for file:line evidence",
+						file: "workflows/deep-review/helpers/finding-pipeline.mjs",
+						locations: [
+							{
+								file: "workflows/deep-review/helpers/finding-pipeline.mjs",
+								line: 96,
+								lineEnd: 102,
+							},
+						],
+						evidenceQuotes: [
+							"-  const re = /(?:\\blines?\\s+~?(\\d{1,6})(?:\\s*[–-]\\s*(\\d{1,6}))?|\\bL(\\d{1,6})\\b|:(\\d{1,6})(?:[–-](\\d{1,6}))?)/gi;",
+							"+  const re = /(?:\\blines?\\s+~?(\\d{1,6})(?:\\s*[–-]\\s*(\\d{1,6}))?|\\bL(\\d{1,6})\\b)/gi;",
+						],
+					},
+					{
+						severity: "low",
+						title:
+							"Stale capture-group reads after removing ':' evidence format",
+						file: "workflows/deep-review/helpers/finding-pipeline.mjs",
+						locations: [
+							{
+								file: "workflows/deep-review/helpers/finding-pipeline.mjs",
+								line: 104,
+							},
+						],
+						evidenceQuotes: [
+							"const start = Number(match[1] ?? match[3] ?? match[4]);",
+							"The finding itself concedes the leftover capture reads are dead code.",
+						],
+					},
+				],
+			},
+			"devil-advocate.item-001": {
+				finding: {
+					title:
+						"Regex/capture-group contract mismatch and loss of ':line' location extraction",
+				},
+				verdict: "KEEP",
+			},
+			"devil-advocate.item-002": {
+				finding: {
+					title:
+						"Removing ':' line-reference extraction drops structured locations for file:line evidence",
+				},
+				verdict: "KEEP",
+			},
+			"devil-advocate.item-003": {
+				finding: {
+					title:
+						"Stale capture-group reads after removing ':' evidence format",
+				},
+				verdict: "WEAKEN",
+			},
+		},
+		options: { mode: "partition", dedupStage: "dedup-findings" },
+	});
+	assert.equal(d4DuplicateRootCollapse.partitionSummary.keep, 1);
+	assert.equal(d4DuplicateRootCollapse.partitionSummary.weaken, 0);
+	assert.equal(d4DuplicateRootCollapse.partitionSummary.supportNotes, 1);
+	assert.equal(d4DuplicateRootCollapse.partitionSummary.mergedFindings, 1);
+	assert.deepEqual(
+		d4DuplicateRootCollapse.reportContext.keep[0].mergedFindingIds,
+		["verdict-002"],
+	);
+
 	const supportOnlyDemotion = await helper({
 		sources: {
 			"dedup-findings.main": {

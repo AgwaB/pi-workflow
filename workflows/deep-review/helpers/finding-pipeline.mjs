@@ -430,9 +430,14 @@ function supportTextOf(item) {
 	return textFragments([
 		item?.title,
 		item?.evidence,
+		item?.evidenceQuotes,
+		item?.counterEvidence,
+		item?.recommendedAction,
 		item?.reviewerFinding?.title,
 		item?.reviewerFinding?.evidence,
+		item?.reviewerFinding?.evidenceQuotes,
 		item?.reviewerFinding?.rationale,
+		item?.reviewerFinding?.recommendedAction,
 	]).join(" ");
 }
 
@@ -468,12 +473,21 @@ function supportReasonOf(item) {
 		);
 	if (hasDocSubject && hasDocSupportLanguage)
 		return "comment/documentation support";
-	if (
+	const hasDeadCodeSupportTitle =
+		/\b(dead|stale|leftover|orphaned)\b/.test(titleText) &&
+		/\b(capture|captures|branch|fallback|code|reference|references|read|reads)\b/.test(
+			titleText,
+		);
+	const hasDeadCodeSupportEvidence =
 		/\bdead\b/.test(text) &&
 		/\b(capture|captures|branch|fallback|code|reference|references)\b/.test(
 			text,
-		)
-	)
+		) &&
+		/\b(cleanup|nit|purely|no behavioral|not independent|concedes)\b/.test(
+			text,
+		) &&
+		!/\b(loss|drops?|removed|regression|contract)\b/.test(titleText);
+	if (hasDeadCodeSupportTitle || hasDeadCodeSupportEvidence)
 		return "dead-code support";
 	return null;
 }
@@ -569,6 +583,7 @@ function rootTextOf(item) {
 	return textFragments([
 		item?.title,
 		item?.evidence,
+		item?.evidenceQuotes,
 		item?.counterEvidence,
 		item?.recommendedAction,
 	]).join(" ");
@@ -576,6 +591,25 @@ function rootTextOf(item) {
 
 function rootTokensOf(item) {
 	return titleTokens({ title: rootTextOf(item) });
+}
+
+function normalizedEvidenceQuotesOf(item) {
+	return dedupeStrings(quoteStrings(item?.evidenceQuotes))
+		.map((quote) => normalizeText(quote))
+		.filter((quote) => quote.length >= 24);
+}
+
+function evidenceQuotesOverlap(a, b) {
+	const quotesA = normalizedEvidenceQuotesOf(a);
+	const quotesB = normalizedEvidenceQuotesOf(b);
+	if (quotesA.length === 0 || quotesB.length === 0) return false;
+	for (const left of quotesA) {
+		for (const right of quotesB) {
+			if (left === right || left.includes(right) || right.includes(left))
+				return true;
+		}
+	}
+	return false;
 }
 
 function locationRangesOf(item) {
@@ -616,8 +650,11 @@ function sameRootFinding(a, b) {
 	if (fileA && fileB && fileA !== fileB) return false;
 	const locationOverlap = locationsOverlapOrTouch(a, b);
 	if (locationOverlap === false) return false;
+	const quoteOverlap = evidenceQuotesOverlap(a, b);
 	const overlap = tokenOverlap(rootTokensOf(a), rootTokensOf(b));
+	if (locationOverlap === true && quoteOverlap) return true;
 	if (locationOverlap === true) return overlap >= 0.35;
+	if (quoteOverlap) return overlap >= 0.25;
 	return overlap >= DUPLICATE_OVERLAP;
 }
 
