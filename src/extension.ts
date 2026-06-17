@@ -29,7 +29,12 @@ import {
 import { readIndex } from "./store.js";
 import { loadWorkflowSpec } from "./schema.js";
 import { listWorkflows, resolveWorkflowRef } from "./workflow-specs.js";
-import { type CompiledWorkflow, WorkflowValidationError } from "./types.js";
+import {
+	THINKING_LEVELS,
+	type CompiledWorkflow,
+	type ThinkingLevel,
+	WorkflowValidationError,
+} from "./types.js";
 
 const UNFINISHED_RUN_NOTICE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const UNFINISHED_RUN_NOTICE_MAX_RUNS = 5;
@@ -188,6 +193,10 @@ async function handleWorkflowCommand(
 				);
 			const run = await runWorkflowSpec(specPath, ctx.cwd, {
 				task: parsed.task,
+				runtimeDefaults:
+					parsed.model || parsed.thinking
+						? { model: parsed.model, thinking: parsed.thinking }
+						: undefined,
 			});
 			const verb =
 				run.status === "blocked"
@@ -452,20 +461,108 @@ export function parseWorkflowRunArgs(args: string): {
 	specPath: string;
 	task: string;
 	detach: boolean;
+	model?: string;
+	thinking?: ThinkingLevel;
 } {
+	const parsed: {
+		detach: boolean;
+		model?: string;
+		thinking?: ThinkingLevel;
+	} = { detach: false };
 	const trimmed = args.trim();
 	let withoutRun = trimmed.startsWith("run ") ? trimmed.slice(4) : trimmed;
-	let detach = false;
-	if (/(^|\s)--detach$/.test(withoutRun)) {
-		detach = true;
-		withoutRun = withoutRun.replace(/(^|\s)--detach$/, "").trim();
-	}
+	withoutRun = consumeLeadingRunOptions(withoutRun, parsed);
+	withoutRun = consumeTrailingRunOptions(withoutRun, parsed);
+
 	const match = withoutRun.match(/^(\S+)\s+([\s\S]*)$/);
-	if (!match) return { specPath: withoutRun, task: "", detach };
+	if (!match) return { specPath: withoutRun, task: "", ...parsed };
 	let task = match[2] ?? "";
 	const quoted = task.match(/^"([\s\S]*)"$/);
 	if (quoted) task = quoted[1] ?? "";
-	return { specPath: match[1] ?? "", task, detach };
+	return { specPath: match[1] ?? "", task, ...parsed };
+}
+
+function consumeLeadingRunOptions(
+	input: string,
+	parsed: { detach: boolean; model?: string; thinking?: ThinkingLevel },
+): string {
+	let rest = input.trim();
+	while (true) {
+		const next = consumeSingleLeadingRunOption(rest, parsed);
+		if (next === rest) return rest;
+		rest = next.trim();
+	}
+}
+
+function consumeTrailingRunOptions(
+	input: string,
+	parsed: { detach: boolean; model?: string; thinking?: ThinkingLevel },
+): string {
+	let rest = input.trim();
+	while (true) {
+		const next = consumeSingleTrailingRunOption(rest, parsed);
+		if (next === rest) return rest;
+		rest = next.trim();
+	}
+}
+
+function consumeSingleLeadingRunOption(
+	input: string,
+	parsed: { detach: boolean; model?: string; thinking?: ThinkingLevel },
+): string {
+	const detach = input.match(/^--detach(?:\s+|$)([\s\S]*)$/);
+	if (detach) {
+		parsed.detach = true;
+		return detach[1] ?? "";
+	}
+	const model = input.match(/^--model(?:=|\s+)(\S+)(?:\s+|$)([\s\S]*)$/);
+	if (model) {
+		parsed.model = model[1];
+		return model[2] ?? "";
+	}
+	const thinking = input.match(
+		/^--(?:thinking|reasoning)(?:=|\s+)(\S+)(?:\s+|$)([\s\S]*)$/,
+	);
+	if (thinking) {
+		parsed.thinking = parseThinkingLevel(thinking[1] ?? "");
+		return thinking[2] ?? "";
+	}
+	return input;
+}
+
+function consumeSingleTrailingRunOption(
+	input: string,
+	parsed: { detach: boolean; model?: string; thinking?: ThinkingLevel },
+): string {
+	const detach = input.match(/([\s\S]*?)(?:\s+)--detach$/);
+	if (detach) {
+		parsed.detach = true;
+		return detach[1] ?? "";
+	}
+	const model = input.match(/([\s\S]*?)(?:\s+)--model(?:=|\s+)(\S+)$/);
+	if (model) {
+		parsed.model = model[2];
+		return model[1] ?? "";
+	}
+	const thinking = input.match(
+		/([\s\S]*?)(?:\s+)--(?:thinking|reasoning)(?:=|\s+)(\S+)$/,
+	);
+	if (thinking) {
+		parsed.thinking = parseThinkingLevel(thinking[2] ?? "");
+		return thinking[1] ?? "";
+	}
+	return input;
+}
+
+function parseThinkingLevel(value: string): ThinkingLevel {
+	if (isThinkingLevel(value)) return value;
+	throw new Error(
+		`Invalid workflow thinking level "${value}". Supported: ${THINKING_LEVELS.join(", ")}`,
+	);
+}
+
+function isThinkingLevel(value: string): value is ThinkingLevel {
+	return (THINKING_LEVELS as readonly string[]).includes(value);
 }
 
 const WORKFLOW_ACTION_COMPLETIONS = [

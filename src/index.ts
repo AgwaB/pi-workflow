@@ -54,7 +54,7 @@ Usage:
   /workflow roles <workflow-name-or-path>
   /workflow agents
   /workflow list
-  /workflow run <workflow-name-or-path> "<task>" [--detach]
+  /workflow run [--model MODEL] [--thinking LEVEL] <workflow-name-or-path> "<task>" [--detach]
   /workflow status [run-id]
   /workflow show <run-id-or-workflow-name>
   /workflow logs <run-id> [task-id] [lines]

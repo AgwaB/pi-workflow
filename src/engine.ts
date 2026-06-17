@@ -56,6 +56,7 @@ import {
 	type WorkflowIndexRecord,
 	type WorkflowRunRecord,
 	type WorkflowTaskRunRecord,
+	type ThinkingLevel,
 } from "./types.js";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 60_000;
@@ -72,16 +73,22 @@ const SOURCE_CONTEXT_MAX_PACKET_CHARS = 48_000;
 
 const supervisorTimers = new Map<string, ReturnType<typeof setInterval>>();
 
+export interface WorkflowRunOptions {
+	task?: string;
+	runtimeDefaults?: { model?: string; thinking?: ThinkingLevel };
+}
+
 export async function runWorkflowSpec(
 	specPath: string,
 	cwd: string,
-	options: { task?: string } = {},
+	options: WorkflowRunOptions = {},
 ): Promise<WorkflowRunRecord> {
 	const loaded = await loadWorkflowSpec(specPath, cwd);
 	const compiled = await compileWorkflow(loaded.spec, {
 		cwd,
 		specPath: loaded.specPath,
 		task: options.task,
+		runtimeDefaults: options.runtimeDefaults,
 	});
 
 	const { run } = await createRunRecord(cwd, compiled, loaded.specPath);
@@ -2933,7 +2940,7 @@ function sleep(ms: number): Promise<void> {
 export async function runWorkflow(
 	specPath: string,
 	cwd: string,
-	options: { task?: string } = {},
+	options: WorkflowRunOptions = {},
 ): Promise<WorkflowRunRecord> {
 	if (!options.task || options.task.trim() === "")
 		throw new Error("This workflow needs a task");

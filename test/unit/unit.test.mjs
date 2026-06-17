@@ -21,6 +21,7 @@ import {
 	formatRun,
 	resumeRun,
 	runWorkflow,
+	runWorkflowSpec,
 	scheduleRun,
 	waitForRun,
 } from "../../.tmp/unit/engine.js";
@@ -5503,6 +5504,53 @@ test("run boundary requires runtime task", async () => {
 	}
 });
 
+test("workflow run runtime defaults reach launched subagents", async () => {
+	const cwd = makeProject();
+	const captured = [];
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		writeFileSync(
+			join(cwd, "workflow.json"),
+			JSON.stringify(workflowSpec("unit-scout")),
+		);
+		setSubagentApiForTests({
+			async runSubagent(options) {
+				captured.push(options);
+				return {
+					runId: "run_runtime_defaults",
+					attemptId: "attempt_runtime_defaults",
+					status: "running",
+				};
+			},
+			async getSubagentStatus() {
+				return null;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+
+		const run = await runWorkflowSpec("workflow.json", cwd, {
+			task: "Review the diff",
+			runtimeDefaults: {
+				model: "kimi-coding/kimi-for-coding",
+				thinking: "low",
+			},
+		});
+
+		assert.equal(run.tasks[0].runtime.model, "kimi-coding/kimi-for-coding");
+		assert.equal(run.tasks[0].runtime.thinking, "low");
+		assert.equal(captured[0].model, "kimi-coding/kimi-for-coding");
+		assert.equal(captured[0].thinking, "low");
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("static run artifacts preserve declared workflow bundle files only", async () => {
 	const cwd = makeProject();
 	try {
@@ -5781,6 +5829,34 @@ test("workflow command completions and run arg parsing preserve task text", () =
 	assert.deepEqual(
 		parseWorkflowRunArgs('run review "Fix the thing" --detach'),
 		{ specPath: "review", task: "Fix the thing", detach: true },
+	);
+	assert.deepEqual(
+		parseWorkflowRunArgs(
+			'run --model kimi-coding/kimi-for-coding --thinking low review "Fix the thing" --detach',
+		),
+		{
+			specPath: "review",
+			task: "Fix the thing",
+			detach: true,
+			model: "kimi-coding/kimi-for-coding",
+			thinking: "low",
+		},
+	);
+	assert.deepEqual(
+		parseWorkflowRunArgs(
+			'run review "Fix the thing" --model=openai-codex/gpt-5.5 --reasoning=xhigh',
+		),
+		{
+			specPath: "review",
+			task: "Fix the thing",
+			detach: false,
+			model: "openai-codex/gpt-5.5",
+			thinking: "xhigh",
+		},
+	);
+	assert.throws(
+		() => parseWorkflowRunArgs("run --thinking turbo review Fix"),
+		/Invalid workflow thinking level/,
 	);
 });
 
