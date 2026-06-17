@@ -523,7 +523,6 @@ function rootTextOf(item) {
 		item?.evidence,
 		item?.counterEvidence,
 		item?.recommendedAction,
-		item?.reviewerFinding,
 	]).join(" ");
 }
 
@@ -744,7 +743,6 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 							? entry.finding
 							: {},
 					),
-			reviewerFinding,
 			evidenceQuotes: dedupeStrings([
 				...(reviewerFinding?.evidenceQuotes ?? []),
 				...quoteStrings(entry.evidenceQuotes),
@@ -775,7 +773,6 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 			severity: finding.severity,
 			file: finding.file,
 			locations: finding.locations ?? locationsOf(finding),
-			reviewerFinding: finding,
 			evidenceQuotes: finding.evidenceQuotes ?? evidenceQuotesOf(finding),
 			evidence: [],
 			counterEvidence: [],

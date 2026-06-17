@@ -6140,6 +6140,7 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 	assert.equal(partition.partitionSummary.keep, 1);
 	assert.match(partition.digest, /partition: keep=1/);
 	assert.equal(partition.partitionSummary.partialFailures, 2);
+	assert.equal("reviewerFinding" in partition.partitions.keep[0], false);
 	assert.deepEqual(
 		partition.reportContext.partialFailures.map((failure) => failure.specId),
 		["devil-advocate.item-003", "reviewers.release-test-hygiene"],
@@ -6460,6 +6461,10 @@ test("deep-review finding-pipeline preserves structured locations through dedup 
 		"return pattern.test(hostname)",
 		"diff drops the $ anchor",
 	]);
+	assert.equal(
+		partition.partitions.keep.some((finding) => "reviewerFinding" in finding),
+		false,
+	);
 
 	const schemaDir = join(
 		dirname(fileURLToPath(import.meta.url)),
