@@ -8,20 +8,91 @@
   "referenceFixPatch": "reference-fix.patch",
   "bugs": [
     {
+      "bugId": "G2",
+      "severity": "medium",
+      "category": "reliability",
+      "summary": "Start returns success before journal setup completes and setupWriter errors are only logged in the background loop.",
+      "impact": "A node can report successful startup even though the local transaction journal cannot be opened, leaving the tracker goroutine exited and local transaction persistence disabled without surfacing the startup failure.",
+      "locations": [
+        {
+          "file": "core/txpool/locals/tx_tracker.go",
+          "startLine": 173,
+          "endLine": 179,
+          "symbol": "TxTracker.Start"
+        },
+        {
+          "file": "core/txpool/locals/tx_tracker.go",
+          "startLine": 199,
+          "endLine": 203,
+          "symbol": "TxTracker.loop"
+        },
+        {
+          "file": "core/txpool/locals/journal.go",
+          "startLine": 120,
+          "endLine": 135,
+          "symbol": "journal.setupWriter"
+        }
+      ],
+      "requiredEvidence": [
+        {
+          "file": "core/txpool/locals/tx_tracker.go",
+          "quote": "go tracker.loop()",
+          "matchMode": "substring"
+        },
+        {
+          "file": "core/txpool/locals/tx_tracker.go",
+          "quote": "log.Error(\"Failed to setup the journal writer\", \"err\", err)",
+          "matchMode": "substring"
+        }
+      ],
+      "acceptableFixes": [
+        "Keep journal load/setupWriter in Start and return setupWriter errors synchronously before spawning the loop.",
+        "If setup must move to the goroutine, make Start wait for setup completion and return any setupWriter error before reporting success."
+      ]
+    },
+    {
       "bugId": "G1",
       "severity": "high",
       "category": "reliability",
-      "summary": "The patch moves journal load/setup/close back into TxTracker.loop, making journal lifecycle operations run in the background goroutine without the tracker mutex discipline used by Stop.",
-      "impact": "Starting or stopping the local transaction tracker can race journal state, which the Go race detector catches in the txpool locals journal tests.",
+      "summary": "The patch moves journal load/setup/close into TxTracker.loop, so journal writer lifecycle operations can run in the background without the tracker mutex discipline used by TrackAll/recheck/Stop.",
+      "impact": "The local transaction journal writer can be loaded, assigned, inserted into, rotated, or closed from different goroutines without journal-internal locking, producing data races and possible persistence loss under the race detector.",
       "locations": [
         {
           "file": "core/txpool/locals/tx_tracker.go",
           "startLine": 190,
           "endLine": 205,
           "symbol": "TxTracker.loop"
+        },
+        {
+          "file": "core/txpool/locals/tx_tracker.go",
+          "startLine": 86,
+          "endLine": 120,
+          "symbol": "TxTracker.TrackAll"
+        },
+        {
+          "file": "core/txpool/locals/journal.go",
+          "startLine": 120,
+          "endLine": 135,
+          "symbol": "journal.setupWriter"
+        },
+        {
+          "file": "core/txpool/locals/journal.go",
+          "startLine": 197,
+          "endLine": 204,
+          "symbol": "journal.close"
         }
       ],
       "requiredEvidence": [
+        {
+          "file": "core/txpool/locals/tx_tracker.go",
+          "quote": "tracker.journal.load(func(transactions []*types.Transaction) []error {",
+          "matchMode": "substring"
+        },
+        {
+          "file": "core/txpool/locals/tx_tracker.go",
+          "quote": "tracker.TrackAll(transactions)",
+          "matchMode": "substring"
+        },
         {
           "file": "core/txpool/locals/tx_tracker.go",
           "quote": "defer tracker.journal.close()",
@@ -30,7 +101,39 @@
       ],
       "acceptableFixes": [
         "Load and set up the journal before launching the loop goroutine, and close it during Stop under tracker.mu after the loop exits.",
-        "Do not defer journal close inside the background loop without the same locking used by journal users."
+        "Keep journal writer lifecycle operations serialized with journal insert/rotate users or add journal-internal synchronization."
+      ]
+    },
+    {
+      "bugId": "G3",
+      "severity": "low",
+      "category": "reliability",
+      "summary": "Stop no longer propagates journal close errors to callers.",
+      "impact": "Shutdown can silently drop or ignore close/flush failures from the local transaction journal that were previously returned through the node lifecycle Stop path.",
+      "locations": [
+        {
+          "file": "core/txpool/locals/tx_tracker.go",
+          "startLine": 184,
+          "endLine": 188,
+          "symbol": "TxTracker.Stop"
+        },
+        {
+          "file": "core/txpool/locals/journal.go",
+          "startLine": 197,
+          "endLine": 204,
+          "symbol": "journal.close"
+        }
+      ],
+      "requiredEvidence": [
+        {
+          "file": "core/txpool/locals/tx_tracker.go",
+          "quote": "err = tracker.journal.close()",
+          "matchMode": "substring"
+        }
+      ],
+      "acceptableFixes": [
+        "Have Stop close the journal after the loop exits and return journal.close errors as before.",
+        "If close remains in the loop, explicitly capture and propagate close errors to Stop callers."
       ]
     }
   ],
@@ -38,12 +141,13 @@
   "mustAvoidClaims": [
     "Using upstream PR titles, issue numbers, commit messages, or git history as evidence.",
     "Relying on private repro.sh, gold-key.draft.json, or reference-fix.patch.",
-    "Claiming unrelated broad rewrites outside the proposed patch are required."
+    "Claiming unrelated broad rewrites outside the proposed patch are required.",
+    "Double-counting the asynchronous startup ordering issue as a separate bug beyond G2 unless it is supported by distinct evidence."
   ],
   "difficulty": {
     "bucket": "hard",
     "plainExpected": "mixed",
-    "rationale": "The code looks like lifecycle cleanup, but the observable bug is a cross-goroutine race only visible with -race."
+    "rationale": "The fixture now has multiple real lifecycle regressions: a race, startup error swallowing, and Stop close-error loss. It is strong for recall but needs provider re-review after gold expansion."
   },
   "leakagePolicy": {
     "candidateVisible": [
@@ -64,11 +168,15 @@
   },
   "approval": {
     "state": "approved",
-    "providerReviews": [],
+    "providerReviews": [
+      ".pi/eval/bug-forge/provider-reviews/geth-case-002-gold-review-20260618/geth-case-002-gpt55-high-review.md",
+      ".pi/eval/bug-forge/provider-reviews/geth-case-002-gold-review-20260618/geth-case-002-expanded-gpt55-high-review.md"
+    ],
     "approvedBy": [
       "local deterministic OSS fixture authoring",
-      "source-only reverse fixture with RED/GREEN repro"
+      "source-only reverse fixture with RED/GREEN repro",
+      "GPT-5.5 high provider gold review: APPROVE expanded G2/G1/G3"
     ],
-    "notes": "Pilot OSS-derived holdout task; provider review pending before promotion to primary release gate."
+    "notes": "Provider review first returned NEEDS_CHANGES for one-bug gold, then APPROVED expanded G2/G1/G3 gold. Kept requiredEvidence fixture-visible for deterministic validation; did not add generic G3 return-nil evidence to avoid overmatching."
   }
 }

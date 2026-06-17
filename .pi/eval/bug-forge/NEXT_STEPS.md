@@ -194,3 +194,34 @@ Recommended compact locked subset for the next A/B smoke:
 - `geth-control-002` — provider-reviewed no-op refactor precision control.
 
 Keep `geth-case-007` excluded from primary gate until leakage mitigation.
+
+## Compact locked-controls run update 2026-06-18
+
+Run: `.pi/eval/bug-forge/runs/geth-locked-controls-gpt55-codex-low-fast-20260617T155426Z`
+
+Raw first-run report:
+
+- plain mean: raw dominated by `geth-case-002` G1-only gold; see `report.md`.
+- self-check/workflow both initially scored poorly on `geth-case-002` because current gold only had G1.
+- no-issue controls passed cleanly for all arms.
+
+Provider gold review for `geth-case-002` found current one-bug gold incomplete:
+
+- Existing G1 lifecycle/race bug is valid.
+- Add G2: `Start()` returns success before journal setup completes and setup errors are swallowed in `loop`.
+- Add G3: `Stop()` no longer propagates journal close errors.
+
+Updated gold was provider-approved after expansion. Use `.pi/eval/bug-forge/runs/geth-locked-controls-gpt55-codex-low-fast-20260617T155426Z/gold-reviewed-rescore.md` for interpretation; do not overwrite raw `score.json`.
+
+Gold-reviewed rescore means:
+
+- plain mean: `0.985`
+- self-check mean: `0.919`
+- workflow mean: `0.919`
+
+Interpretation:
+
+- compact subset is now primarily a precision/no-issue smoke plus `geth-case-002` gold quality check.
+- workflow and self-check both caught G2 but missed G1/G3 in this fast partition-only run.
+- plain caught G2+G1 and missed G3.
+- next useful comparison is a full workflow rerun on `geth-case-002` plus controls, or finding another production discriminator where workflow recall has room to improve.

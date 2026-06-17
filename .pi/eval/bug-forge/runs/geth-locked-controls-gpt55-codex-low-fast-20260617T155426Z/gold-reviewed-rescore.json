@@ -1,0 +1,328 @@
+{
+  "kind": "gold-reviewed-rescore",
+  "sourceRun": ".pi/eval/bug-forge/runs/geth-locked-controls-gpt55-codex-low-fast-20260617T155426Z",
+  "createdAt": "2026-06-17T16:07:04.275Z",
+  "note": "Raw score.json files were not modified. This rescoring uses updated geth-case-002 expanded gold after GPT-5.5 provider gold review, with bug order adjusted for deterministic greedy matching.",
+  "results": [
+    {
+      "task": "geth-case-002",
+      "arm": "plain",
+      "extracted": {
+        "ok": true,
+        "extractionMode": "json_block"
+      },
+      "validationIssues": [],
+      "score": {
+        "taskId": "oss-geth-txpool-locals-journal-race",
+        "candidateId": "geth-case-002",
+        "objectiveScore": 0.940909090909091,
+        "precision": 1,
+        "recall": 0.8333333333333334,
+        "f1": 0.9090909090909091,
+        "evidence": 1,
+        "falsePositiveCount": 0,
+        "noIssueHallucinationPenalty": 0,
+        "matches": [
+          {
+            "bugId": "G2",
+            "findingIndex": 0,
+            "evidenceScore": 1,
+            "semanticScore": 0.3333333333333333
+          },
+          {
+            "bugId": "G1",
+            "findingIndex": 1,
+            "evidenceScore": 1,
+            "semanticScore": 0.11764705882352941
+          }
+        ],
+        "missed": [
+          "G3"
+        ]
+      }
+    },
+    {
+      "task": "geth-case-002",
+      "arm": "self-check",
+      "extracted": {
+        "ok": true,
+        "extractionMode": "json_block"
+      },
+      "validationIssues": [],
+      "score": {
+        "taskId": "oss-geth-txpool-locals-journal-race",
+        "candidateId": "geth-case-002",
+        "objectiveScore": 0.675,
+        "precision": 1,
+        "recall": 0.3333333333333333,
+        "f1": 0.5,
+        "evidence": 1,
+        "falsePositiveCount": 0,
+        "noIssueHallucinationPenalty": 0,
+        "matches": [
+          {
+            "bugId": "G2",
+            "findingIndex": 0,
+            "evidenceScore": 1,
+            "semanticScore": 0.25
+          }
+        ],
+        "missed": [
+          "G1",
+          "G3"
+        ]
+      }
+    },
+    {
+      "task": "geth-case-002",
+      "arm": "workflow",
+      "extracted": {
+        "ok": true,
+        "extractionMode": "candidate_json_sidecar"
+      },
+      "validationIssues": [],
+      "score": {
+        "taskId": "oss-geth-txpool-locals-journal-race",
+        "candidateId": "geth-case-002",
+        "objectiveScore": 0.675,
+        "precision": 1,
+        "recall": 0.3333333333333333,
+        "f1": 0.5,
+        "evidence": 1,
+        "falsePositiveCount": 0,
+        "noIssueHallucinationPenalty": 0,
+        "matches": [
+          {
+            "bugId": "G2",
+            "findingIndex": 0,
+            "evidenceScore": 1,
+            "semanticScore": 0.2857142857142857
+          }
+        ],
+        "missed": [
+          "G1",
+          "G3"
+        ]
+      }
+    },
+    {
+      "task": "geth-case-004",
+      "arm": "plain",
+      "extracted": {
+        "ok": true,
+        "extractionMode": "json_block"
+      },
+      "validationIssues": [],
+      "score": {
+        "taskId": "oss-geth-getblobs-nil-json-contract",
+        "candidateId": "geth-case-004",
+        "objectiveScore": 1,
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "evidence": 1,
+        "falsePositiveCount": 0,
+        "noIssueHallucinationPenalty": 0,
+        "matches": [
+          {
+            "bugId": "G1",
+            "findingIndex": 0,
+            "evidenceScore": 1,
+            "semanticScore": 0.1875
+          }
+        ],
+        "missed": []
+      }
+    },
+    {
+      "task": "geth-case-004",
+      "arm": "self-check",
+      "extracted": {
+        "ok": true,
+        "extractionMode": "json_block"
+      },
+      "validationIssues": [],
+      "score": {
+        "taskId": "oss-geth-getblobs-nil-json-contract",
+        "candidateId": "geth-case-004",
+        "objectiveScore": 1,
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "evidence": 1,
+        "falsePositiveCount": 0,
+        "noIssueHallucinationPenalty": 0,
+        "matches": [
+          {
+            "bugId": "G1",
+            "findingIndex": 0,
+            "evidenceScore": 1,
+            "semanticScore": 0.2777777777777778
+          }
+        ],
+        "missed": []
+      }
+    },
+    {
+      "task": "geth-case-004",
+      "arm": "workflow",
+      "extracted": {
+        "ok": true,
+        "extractionMode": "candidate_json_sidecar"
+      },
+      "validationIssues": [],
+      "score": {
+        "taskId": "oss-geth-getblobs-nil-json-contract",
+        "candidateId": "geth-case-004",
+        "objectiveScore": 1,
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "evidence": 1,
+        "falsePositiveCount": 0,
+        "noIssueHallucinationPenalty": 0,
+        "matches": [
+          {
+            "bugId": "G1",
+            "findingIndex": 0,
+            "evidenceScore": 1,
+            "semanticScore": 0.2
+          }
+        ],
+        "missed": []
+      }
+    },
+    {
+      "task": "geth-control-001",
+      "arm": "plain",
+      "extracted": {
+        "ok": true,
+        "extractionMode": "json_block"
+      },
+      "validationIssues": [],
+      "score": {
+        "taskId": "oss-geth-noissue-comment-only-hexordecimal256",
+        "candidateId": "geth-control-001",
+        "objectiveScore": 1,
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "evidence": 1,
+        "falsePositiveCount": 0,
+        "noIssueHallucinationPenalty": 0,
+        "matches": [],
+        "missed": []
+      }
+    },
+    {
+      "task": "geth-control-001",
+      "arm": "self-check",
+      "extracted": {
+        "ok": true,
+        "extractionMode": "json_block"
+      },
+      "validationIssues": [],
+      "score": {
+        "taskId": "oss-geth-noissue-comment-only-hexordecimal256",
+        "candidateId": "geth-control-001",
+        "objectiveScore": 1,
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "evidence": 1,
+        "falsePositiveCount": 0,
+        "noIssueHallucinationPenalty": 0,
+        "matches": [],
+        "missed": []
+      }
+    },
+    {
+      "task": "geth-control-001",
+      "arm": "workflow",
+      "extracted": {
+        "ok": true,
+        "extractionMode": "candidate_json_sidecar"
+      },
+      "validationIssues": [],
+      "score": {
+        "taskId": "oss-geth-noissue-comment-only-hexordecimal256",
+        "candidateId": "geth-control-001",
+        "objectiveScore": 1,
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "evidence": 1,
+        "falsePositiveCount": 0,
+        "noIssueHallucinationPenalty": 0,
+        "matches": [],
+        "missed": []
+      }
+    },
+    {
+      "task": "geth-control-002",
+      "arm": "plain",
+      "extracted": {
+        "ok": true,
+        "extractionMode": "json_block"
+      },
+      "validationIssues": [],
+      "score": {
+        "taskId": "oss-geth-noissue-newtx-equivalent-refactor",
+        "candidateId": "geth-control-002",
+        "objectiveScore": 1,
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "evidence": 1,
+        "falsePositiveCount": 0,
+        "noIssueHallucinationPenalty": 0,
+        "matches": [],
+        "missed": []
+      }
+    },
+    {
+      "task": "geth-control-002",
+      "arm": "self-check",
+      "extracted": {
+        "ok": true,
+        "extractionMode": "json_block"
+      },
+      "validationIssues": [],
+      "score": {
+        "taskId": "oss-geth-noissue-newtx-equivalent-refactor",
+        "candidateId": "geth-control-002",
+        "objectiveScore": 1,
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "evidence": 1,
+        "falsePositiveCount": 0,
+        "noIssueHallucinationPenalty": 0,
+        "matches": [],
+        "missed": []
+      }
+    },
+    {
+      "task": "geth-control-002",
+      "arm": "workflow",
+      "extracted": {
+        "ok": true,
+        "extractionMode": "candidate_json_sidecar"
+      },
+      "validationIssues": [],
+      "score": {
+        "taskId": "oss-geth-noissue-newtx-equivalent-refactor",
+        "candidateId": "geth-control-002",
+        "objectiveScore": 1,
+        "precision": 1,
+        "recall": 1,
+        "f1": 1,
+        "evidence": 1,
+        "falsePositiveCount": 0,
+        "noIssueHallucinationPenalty": 0,
+        "matches": [],
+        "missed": []
+      }
+    }
+  ]
+}
