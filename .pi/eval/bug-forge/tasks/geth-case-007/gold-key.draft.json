@@ -54,6 +54,61 @@
         "Have Release call stopGeneration before releasing resources, and make stopGeneration cancel and wait for the generator goroutine to exit.",
         "Do not rely on genMarker as the only running-state check; cancellation must work even after generation completed but the goroutine is still awaiting abort/cleanup."
       ]
+    },
+    {
+      "bugId": "G2",
+      "severity": "high",
+      "category": "reliability",
+      "summary": "The patch reintroduces an unbuffered genAbort protocol that can leave a completed generator waiting for an external abort and can deadlock later Journal or diffToDisk calls after the receiver exits.",
+      "impact": "Snapshot lifecycle operations can block forever or leak a generator goroutine because callers send on genAbort based only on a non-nil channel, not on a live receiver/done state.",
+      "locations": [
+        {
+          "file": "core/state/snapshot/generate.go",
+          "startLine": 698,
+          "endLine": 703,
+          "symbol": "diskLayer.generate"
+        },
+        {
+          "file": "core/state/snapshot/journal.go",
+          "startLine": 199,
+          "endLine": 210,
+          "symbol": "diskLayer.Journal"
+        },
+        {
+          "file": "core/state/snapshot/snapshot.go",
+          "startLine": 524,
+          "endLine": 528,
+          "symbol": "diffToDisk"
+        },
+        {
+          "file": "core/state/snapshot/disklayer.go",
+          "startLine": 188,
+          "endLine": 201,
+          "symbol": "diskLayer.stopGeneration"
+        }
+      ],
+      "requiredEvidence": [
+        {
+          "file": "core/state/snapshot/generate.go",
+          "quote": "abort = <-dl.genAbort",
+          "matchMode": "substring"
+        },
+        {
+          "file": "core/state/snapshot/journal.go",
+          "quote": "dl.genAbort <- abort",
+          "matchMode": "substring"
+        },
+        {
+          "file": "core/state/snapshot/snapshot.go",
+          "quote": "base.genAbort <- abort",
+          "matchMode": "substring"
+        }
+      ],
+      "acceptableFixes": [
+        "Use an idempotent cancel/done lifecycle instead of an unbuffered genAbort channel that remains non-nil after the receiver exits.",
+        "Clear or close genAbort under synchronization when generation exits, and ensure Journal/diffToDisk/stop paths cannot send without a live receiver.",
+        "Keep Release/stopGeneration blocking until the generator goroutine exits, including after generation has completed but before cleanup is acknowledged."
+      ]
     }
   ],
   "noIssueRegions": [],
@@ -89,8 +144,9 @@
     "providerReviews": [],
     "approvedBy": [
       "local deterministic OSS fixture authoring",
-      "source-only reverse fixture with RED/GREEN repro"
+      "source-only reverse fixture with RED/GREEN repro",
+      "local gold review: geth-case-007 genAbort lifecycle issue added as G2"
     ],
-    "notes": "Pilot OSS-derived holdout task; provider review pending before promotion to primary release gate."
+    "notes": "Pilot OSS-derived holdout task; local review added a second source-grounded genAbort lifecycle bug found by multiple arms; external provider review still pending before primary gate promotion."
   }
 }

@@ -30,6 +30,16 @@
       "requiredEvidence": [
         {
           "file": "beacon/engine/bapl_encode.go",
+          "quote": "if list == nil {",
+          "matchMode": "substring"
+        },
+        {
+          "file": "beacon/engine/bapl_encode.go",
+          "quote": "return []byte(\"null\"), nil",
+          "matchMode": "substring"
+        },
+        {
+          "file": "beacon/engine/bapl_encode.go",
           "quote": "b.Array(func() {",
           "matchMode": "substring"
         }
@@ -73,8 +83,9 @@
     "providerReviews": [],
     "approvedBy": [
       "local deterministic OSS fixture authoring",
-      "source-only reverse fixture with RED/GREEN repro"
+      "source-only reverse fixture with RED/GREEN repro",
+      "local gold/scorer review: geth-case-004 nil/null evidence key corrected"
     ],
-    "notes": "Pilot OSS-derived holdout task; provider review pending before promotion to primary release gate."
+    "notes": "Pilot OSS-derived holdout task; local gold/scorer review corrected required evidence after raw first-run mismatch; external provider review still pending before primary gate promotion."
   }
 }
