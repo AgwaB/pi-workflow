@@ -24,10 +24,11 @@ pi install npm:@agwab/pi-workflow
 
 Then reload Pi.
 
-This installs both:
+This installs:
 
 - the `/workflow` extension
 - the bundled `workflow-guide` skill
+- the bundled `execution-router` skill
 
 To update later:
 
@@ -46,7 +47,7 @@ Use the bundled deep-research workflow to research this repository and summarize
 ```
 
 ```text
-Deep-review workflow로 현재 diff를 여러 관점에서 리뷰해줘.
+Use the deep-review workflow to review the current diff from multiple perspectives.
 ```
 
 ```text
@@ -59,9 +60,17 @@ If you want deterministic manual control, use the slash command form:
 /workflow run deep-research "Research this repository and summarize the architecture tradeoffs."
 ```
 
+## Usage: choose an execution mode
+
+Use the bundled `execution-router` skill when you are not sure whether a task should be handled directly, by a targeted verifier/subagent, by an existing workflow, or by a new workflow:
+
+```text
+/skill:execution-router decide whether this repository review should use a single-agent pass, deep-review, or a targeted verifier.
+```
+
 ## Usage: create your own workflows
 
-Use the bundled `workflow-guide` skill when you want to create, adapt, or review a workflow definition:
+Use the bundled `workflow-guide` skill when you want to create, adapt, or review a workflow definition. It includes validated scaffold bundles for common graph shapes, so new workflows can start from a known-good structure before customization and validation:
 
 ```text
 /skill:workflow-guide create a workflow for weekly release readiness.
@@ -142,10 +151,13 @@ Workflow definitions compose a small set of stage patterns and graph shapes.
 | `reduce` | Fan-in / synthesis | upstream workflow artifacts -> one synthesis subagent |
 | `loop` | Bounded repetition | repeat child stages until a deterministic stop condition |
 | `dag` | Nested graph container | child stages lowered to namespaced tasks; selected output exposed downstream |
+| `dynamic` | Adaptive orchestration | trusted bundle-local controller code can create official workflow tasks with `ctx.agent()` |
 
 ![Core workflow stage shapes: single, foreach, reduce, loop, and dag](./docs/assets/readme/stage-types.png)
 
 Parallel execution is a graph shape, not a stage type: model parallel branches as multiple roots or with `after: []`. Support helpers are declared with a `support` object, not a stage `type`.
+
+Dynamic workflows are for advanced adaptive orchestration. A JSON `type: "dynamic"` stage references trusted bundle-local `.mjs` controller code; that controller may call `ctx.agent()`, `ctx.helper()`, or `ctx.workflow()` to splice generated work into the official run graph. Nested workflow specs are self-contained at their own directory level: refs inside a nested spec must stay in that nested subtree, not parent shared files via `../`. Dynamic runs persist replay state and `ctx.log()` records under `.pi/workflows/<run-id>/dynamic/`, reject generated dependency cycles, and support retrying pure helpers declared with `idempotent: true`. Approval supports `approval: "auto"` or interactive `approval: "ask"`. With `--detach`, the initial scheduling pass can still run dynamic controllers inline before the detached supervisor takes over. Later detached/headless approval blocks fail closed with `dynamic_ui_unavailable` or `dynamic_approval_timeout`; resume them from an interactive Pi session with `/workflow resume <run-id>`.
 
 ## Predefined workflows
 
@@ -153,8 +165,11 @@ The package includes a small starter set. These are practical defaults and autho
 
 | Workflow | Use when |
 |---|---|
-| `deep-research` | Source-backed research, claim verification, citations, or follow-up suggestions. |
-| `deep-review` | Multi-lens review where findings should be challenged before final synthesis. |
+| `deep-research` | Source-backed exploratory research, citations, and follow-up suggestions. |
+| `deep-review` | General multi-lens review where findings should be challenged before final synthesis. |
+| `deep-discovery` | Broad repository discovery when the request is to find important bugs or risks across a whole codebase. |
+| `deep-focused-review` | Focused suspicious-area/pattern review with adjacent call-path checks. |
+| `deep-diff-review` | Diff/PR review centered on changed-hunk regression and compatibility risk. |
 | `spec-review` | Read-only comparison of a spec/contract against implementation and tests. |
 | `impact-review` | Read-only ship-impact review for changed or proposed work, especially missing tests, docs, release work, compatibility risk, and follow-up actions. |
 

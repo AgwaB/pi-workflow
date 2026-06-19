@@ -1,0 +1,118 @@
+{
+  "schemaVersion": 1,
+  "name": "scaffold-dag-required-reads",
+  "description": "Workflow-guide scaffold: nested DAG with outputFrom plus downstream inputPolicy.requiredReads. Copy before adapting.",
+  "defaults": {
+    "agent": "scout",
+    "readOnly": true,
+    "tools": [
+      "read",
+      "grep",
+      "find",
+      "ls"
+    ]
+  },
+  "artifactGraph": {
+    "stages": [
+      {
+        "id": "intake",
+        "type": "single",
+        "after": [],
+        "output": {
+          "controlSchema": "./schemas/intake-control.schema.json",
+          "analysis": {
+            "required": true
+          },
+          "refs": {
+            "required": true
+          },
+          "maxDigestChars": 800
+        },
+        "prompt": "Summarize the runtime task for the nested DAG analysis. Do not modify files. Put machine-readable JSON in <control> with schema, digest, taskSummary, scope, and constraints. Put detailed notes in <analysis> and structured evidence references in <refs>."
+      },
+      {
+        "id": "analysis",
+        "type": "dag",
+        "from": "intake",
+        "outputFrom": "final",
+        "stages": [
+          {
+            "id": "scan",
+            "type": "single",
+            "after": [],
+            "output": {
+              "controlSchema": "./schemas/scan-control.schema.json",
+              "analysis": {
+                "required": true
+              },
+              "refs": {
+                "required": true
+              },
+              "maxDigestChars": 800
+            },
+            "prompt": "Scan the repository or provided context for facts relevant to the intake task. Do not modify files. Put machine-readable JSON in <control> with schema, digest, scanSummary, evidence, and openQuestions. Put detailed observations in <analysis>."
+          },
+          {
+            "id": "review",
+            "type": "single",
+            "after": "scan",
+            "output": {
+              "controlSchema": "./schemas/review-control.schema.json",
+              "analysis": {
+                "required": true
+              },
+              "refs": {
+                "required": true
+              },
+              "maxDigestChars": 800
+            },
+            "prompt": "After scan completes, perform an independent read-only review of the same runtime task. This ordering edge does not provide scan artifacts; do not assume scan details unless independently observed. Put machine-readable JSON in <control> with schema, digest, reviewSummary, risks, and confidence."
+          },
+          {
+            "id": "final",
+            "type": "reduce",
+            "from": [
+              "scan",
+              "review"
+            ],
+            "sourcePolicy": "require-success",
+            "output": {
+              "controlSchema": "./schemas/analysis-final-control.schema.json",
+              "analysis": {
+                "required": true
+              },
+              "refs": {
+                "required": true
+              },
+              "maxDigestChars": 800
+            },
+            "prompt": "Use Source Stage Context from scan and review to synthesize the nested DAG analysis. Do not modify files. Put machine-readable JSON in <control> with schema, digest, conclusion, supportingPoints, limitations, and nextSteps. Put the detailed synthesis in <analysis>."
+          }
+        ]
+      },
+      {
+        "id": "report",
+        "type": "reduce",
+        "from": "analysis",
+        "sourcePolicy": "require-success",
+        "inputPolicy": {
+          "requiredReads": [
+            "analysis.final.analysis"
+          ],
+          "enforcement": "fail"
+        },
+        "output": {
+          "controlSchema": "./schemas/report-control.schema.json",
+          "analysis": {
+            "required": true
+          },
+          "refs": {
+            "required": true
+          },
+          "maxDigestChars": 800
+        },
+        "prompt": "Produce the final report for the runtime task. Before final output, read the required workflow artifact analysis.final.analysis using workflow_artifact; the workflow will fail closed if that read is not proven. Use Source Stage Context and the required artifact contents. Do not modify files. Put machine-readable JSON in <control> with schema, digest, verdict, summary, requiredArtifactUsed, and followUps."
+      }
+    ]
+  }
+}

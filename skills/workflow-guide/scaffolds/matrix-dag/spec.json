@@ -1,0 +1,200 @@
+{
+  "schemaVersion": 1,
+  "name": "scaffold-matrix-dag",
+  "description": "Workflow-guide scaffold: read-only nested matrix DAG with parallel lenses, join reducers, outputFrom, and required artifact read. Copy before adapting.",
+  "defaults": {
+    "agent": "scout",
+    "readOnly": true,
+    "tools": [
+      "read",
+      "grep",
+      "find",
+      "ls"
+    ]
+  },
+  "artifactGraph": {
+    "stages": [
+      {
+        "id": "scope",
+        "type": "single",
+        "output": {
+          "controlSchema": "./schemas/scope-control.schema.json",
+          "analysis": {
+            "required": true
+          },
+          "refs": {
+            "required": true
+          }
+        },
+        "prompt": "Review the runtime task and map the narrowest change scope. Do not modify files. Use only read-only tools. Put machine-readable JSON in <control> with schema, digest, changeSummary, changedFiles, assumptions, and outOfScope. Put evidence, caveats, and file references in <analysis>, and structured references in <refs>."
+      },
+      {
+        "id": "matrix",
+        "type": "dag",
+        "from": "scope",
+        "outputFrom": "release",
+        "stages": [
+          {
+            "id": "api",
+            "type": "single",
+            "after": [],
+            "output": {
+              "controlSchema": "./schemas/lens-control.schema.json",
+              "analysis": {
+                "required": true
+              },
+              "refs": {
+                "required": true
+              }
+            },
+            "prompt": "Using the parent Source Stage Context from scope, review API, CLI, config, schema, package export, and externally observable contract impact. Do not modify files. Put machine-readable JSON in <control> with schema, digest, lens set to api, status, findings, and questions."
+          },
+          {
+            "id": "state",
+            "type": "single",
+            "after": [],
+            "output": {
+              "controlSchema": "./schemas/lens-control.schema.json",
+              "analysis": {
+                "required": true
+              },
+              "refs": {
+                "required": true
+              }
+            },
+            "prompt": "Using the parent Source Stage Context from scope, review state, data flow, persistence, cache, artifacts, concurrency, and lifecycle impact. Do not modify files. Put machine-readable JSON in <control> with schema, digest, lens set to state, status, findings, and questions."
+          },
+          {
+            "id": "tests",
+            "type": "single",
+            "after": [],
+            "output": {
+              "controlSchema": "./schemas/lens-control.schema.json",
+              "analysis": {
+                "required": true
+              },
+              "refs": {
+                "required": true
+              }
+            },
+            "prompt": "Using the parent Source Stage Context from scope, review tests, fixtures, examples, and validation coverage relevant to the scoped change. Do not modify files and do not run commands. Put machine-readable JSON in <control> with schema, digest, lens set to tests, status, findings, and questions."
+          },
+          {
+            "id": "docs",
+            "type": "single",
+            "after": [],
+            "output": {
+              "controlSchema": "./schemas/lens-control.schema.json",
+              "analysis": {
+                "required": true
+              },
+              "refs": {
+                "required": true
+              }
+            },
+            "prompt": "Using the parent Source Stage Context from scope, review documentation, examples, changelog, migration notes, and release-facing artifacts. Do not modify files. Put machine-readable JSON in <control> with schema, digest, lens set to docs, status, findings, and questions."
+          },
+          {
+            "id": "security",
+            "type": "single",
+            "after": [],
+            "output": {
+              "controlSchema": "./schemas/lens-control.schema.json",
+              "analysis": {
+                "required": true
+              },
+              "refs": {
+                "required": true
+              }
+            },
+            "prompt": "Using the parent Source Stage Context from scope, review security, privacy, performance, reliability, and observability impact. Do not modify files. Put machine-readable JSON in <control> with schema, digest, lens set to security, status, findings, and questions."
+          },
+          {
+            "id": "consistency",
+            "type": "reduce",
+            "from": [
+              "api",
+              "state",
+              "tests"
+            ],
+            "sourcePolicy": "require-success",
+            "sourceProjection": {
+              "include": [
+                "$.digest",
+                "$.status",
+                "$.lens"
+              ]
+            },
+            "output": {
+              "controlSchema": "./schemas/join-control.schema.json",
+              "analysis": {
+                "required": true
+              },
+              "refs": {
+                "required": true
+              }
+            },
+            "prompt": "Join the api, state, and tests lens artifacts. Do not modify files. Put machine-readable JSON in <control> with schema, digest, join set to consistency, status, agreements, conflicts, and actions. Identify cross-lens consistency gaps only when supported by upstream artifacts."
+          },
+          {
+            "id": "release",
+            "type": "reduce",
+            "from": [
+              "docs",
+              "security",
+              "consistency"
+            ],
+            "sourcePolicy": "require-success",
+            "sourceProjection": {
+              "include": [
+                "$.digest",
+                "$.status",
+                "$.lens",
+                "$.join"
+              ]
+            },
+            "output": {
+              "controlSchema": "./schemas/release-control.schema.json",
+              "analysis": {
+                "required": true
+              },
+              "refs": {
+                "required": true
+              }
+            },
+            "prompt": "Join docs, security, and consistency artifacts into a release readiness assessment. Do not modify files. Put machine-readable JSON in <control> with schema, digest, verdict, riskLevel, blockers, followUps, and requiredValidation. Keep detailed rationale and upstream evidence in <analysis>."
+          }
+        ]
+      },
+      {
+        "id": "report",
+        "type": "reduce",
+        "from": "matrix",
+        "sourcePolicy": "require-success",
+        "sourceProjection": {
+          "include": [
+            "$.digest",
+            "$.verdict",
+            "$.riskLevel"
+          ]
+        },
+        "inputPolicy": {
+          "requiredReads": [
+            "matrix.release.analysis"
+          ],
+          "enforcement": "fail"
+        },
+        "output": {
+          "controlSchema": "./schemas/report-control.schema.json",
+          "analysis": {
+            "required": true
+          },
+          "refs": {
+            "required": true
+          }
+        },
+        "prompt": "Write the final matrix-join-dag-smoke report. Before final output, read the required workflow artifact matrix.release.analysis with workflow_artifact and base the report on that artifact. Do not modify files. Put machine-readable JSON in <control> with schema, digest, verdict, riskLevel, summary, blockers, and nextActions. Put the human-readable final report and cited evidence in <analysis>."
+      }
+    ]
+  }
+}

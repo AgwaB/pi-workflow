@@ -10,6 +10,12 @@ pi install npm:@agwab/pi-workflow
 
 Reload Pi after installation.
 
+This installs:
+
+- the `/workflow` extension
+- the bundled `workflow-guide` skill
+- the bundled `execution-router` skill
+
 Requires Node.js `>=22.19.0`. The package depends on `@agwab/pi-subagent`, which Pi installs through npm package dependencies.
 
 For local development, install the checkout as a package source:
@@ -52,7 +58,7 @@ Use the deep-research workflow to research this repository's architecture tradeo
 ```
 
 ```text
-deep-review workflow로 현재 diff를 reliability/test coverage 관점에서 리뷰해줘.
+Use the deep-review workflow to review the current diff for reliability and test coverage.
 ```
 
 Natural-language invocation uses the same workflow resolution roots and task-required rule as `/workflow run`. If the workflow name or concrete task is missing, Pi should ask a clarifying question instead of launching a run. The deterministic manual equivalent is:
@@ -60,6 +66,15 @@ Natural-language invocation uses the same workflow resolution roots and task-req
 ```text
 /workflow run deep-research "Research this repository's architecture tradeoffs."
 ```
+
+## Bundled skills
+
+| Skill | Use when |
+|---|---|
+| `execution-router` | Decide whether a task should be handled directly, by an existing workflow, by a targeted verifier/subagent, or by a new/extended workflow. |
+| `workflow-guide` | Create, modify, review, validate, or explain workflow definitions after the authoring target is known. |
+
+For reusable workflow authoring, `workflow-guide` includes validated scaffold bundles for common graph shapes. Copy a scaffold, adapt prompts/schemas/stage ids, then run `/workflow validate` on the copied spec before use.
 
 ## Commands
 
@@ -71,14 +86,14 @@ Natural-language invocation uses the same workflow resolution roots and task-req
 | `/workflow validate <workflow-name-or-path>` | Load and compile a workflow without starting a run. Reports blocked permission previews and warnings. |
 | `/workflow roles <workflow-name-or-path>` | Show the compiled role context included for each workflow role. |
 | `/workflow agents` | List discoverable Pi agents, model/thinking defaults, tool ceilings, and source paths. |
-| `/workflow run <workflow-name-or-path> "<task>" [--detach]` | Start a workflow run with the supplied runtime task. `--detach` spawns a standalone supervisor process so the run keeps progressing after this Pi session exits (log: `.pi/workflows/<run-id>/supervise.log`). |
+| `/workflow run <workflow-name-or-path> "<task>" [--detach]` | Start a workflow run with the supplied runtime task. `--detach` spawns a standalone supervisor process after the initial scheduling pass so the run keeps progressing after this Pi session exits (log: `.pi/workflows/<run-id>/supervise.log`). Dynamic controllers and `approval: "ask"` prompts in that first pass can still run inline; later detached/headless approval blocks require an interactive `/workflow resume <run-id>`. |
 | `/workflow status [run-id]` | Show all workflow runs in the current project, or one run. |
 | `/workflow show <run-id-or-workflow-name>` | If the ref starts with `workflow_`, show run details; otherwise show the raw workflow spec. |
 | `/workflow logs <run-id> [task-id] [lines]` | Print captured logs for a workflow task. Defaults to `task-1`. |
 | `/workflow wait <run-id> [timeout-ms]` | Poll until the run finishes or the optional timeout elapses. |
-| `/workflow resume <run-id>` | Resume a failed or interrupted run: completed tasks are preserved; failed/interrupted/skipped tasks reset to pending and reschedule. Loop workflows are not supported yet. |
+| `/workflow resume <run-id>` | Resume a failed, interrupted, or resumable blocked run (including dynamic approval blocked in headless mode): completed tasks are preserved; failed/interrupted/skipped or resumable blocked tasks reset to pending and reschedule. Loop workflows are not supported yet. |
 
-Not implemented: `/workflow continue` and `/workflow delegate`. Use `status`, `show`, `logs`, `wait`, `resume`, and `pi-workflow inspect` for text/CLI inspection. The standalone CLI also offers `pi-workflow supervise <run-id>|--all` to drive scheduling from outside a Pi session (unfinished failed/interrupted runs within the last 7 days are announced at session start with resume hints).
+Not implemented: `/workflow continue` and `/workflow delegate`. Use `status`, `show`, `logs`, `wait`, `resume`, and `pi-workflow inspect` for text/CLI inspection. The standalone CLI also offers `pi-workflow supervise <run-id>|--all` to drive scheduling from outside a Pi session (unfinished failed/interrupted or resumable blocked runs within the last 7 days are announced at session start with resume hints).
 
 ## Workflow resolution
 
@@ -142,7 +157,10 @@ The runtime task is not optional. `/workflow run <workflow>` without task text f
 | Workflow | Required agents | Mode | Use when |
 |---|---|---|---|
 | `deep-research` | `researcher` | plan + foreach questions + normalize + foreach verifier + audit support + final reduce | Research needs source-backed claims, dynamic breadth/depth, independent verification, deterministic evidence gating, or citations. |
-| `deep-review` | `scout` | triage + foreach review lenses + dedup support + foreach devil's advocate + verdict-partition support + reduce | Thorough multi-lens review where findings should be independently challenged before synthesis. |
+| `deep-review` | `scout` | triage + foreach review lenses + dedup support + foreach devil's advocate + verdict-partition support + reduce | General thorough multi-lens review where findings should be independently challenged before synthesis. Prefer a more specific review workflow when the request shape is clear. |
+| `deep-discovery` | `scout` | domain/subsystem triage + foreach subsystem/risk packets + dedup support + foreach devil's advocate + verdict-partition support + reduce | Broad repository discovery: use when the request is to find important bugs or risks across a whole codebase with no suspected area or diff. |
+| `deep-focused-review` | `scout` | suspicious-scope triage + foreach defect-family/call-path packets + dedup support + foreach devil's advocate + verdict-partition support + reduce | Focused review: use when the user gives a suspicious area, component, subsystem, or defect pattern and wants deep review plus adjacent-path checks. |
+| `deep-diff-review` | `scout` | changed-hunk triage + foreach impact packets + dedup support + foreach devil's advocate + verdict-partition support + reduce | Diff/PR review: use when changed hunks, a patch, PR, or explicit changed-file context should drive regression and compatibility review. |
 | `spec-review` | `scout` | extract spec + map implementation + inspect tests -> reduce candidates -> foreach verifier -> reduce report | Read-only spec/contract conformance review against implementation and tests. |
 | `impact-review` | `scout` | scope/implementation/validation maps -> impact lenses -> consistency/regression/ship-readiness joins -> final synthesis | Read-only ship-impact review for changed or proposed work, especially missing tests, docs, release work, compatibility risk, and follow-up actions. |
 
@@ -159,6 +177,7 @@ Public workflow definitions separate three layers:
 - **Workflow layer**: graph/control/data-dependency fields such as `id`, `from`, `after`, `sourcePolicy`, `sourceProjection`, scheduling, and artifacts.
 - **Subagent layer**: child Pi/model worker shapes: `single`, `foreach`, `reduce`, and `loop`.
 - **Support layer**: local helper execution through a stage that declares a `support` object.
+- **Dynamic layer**: trusted bundle-local controller code that can adaptively add official workflow tasks at runtime.
 
 Every subagent stage writes artifact bundles:
 
@@ -174,9 +193,42 @@ Every subagent stage writes artifact bundles:
 | `type: "reduce"` | Subagent | Fan-in over upstream artifact handles and optional `sourceProjection` inline control snippets. |
 | `type: "loop"` | Workflow/control | Repeats fixed child stages until deterministic `until`, `maxRounds`, or no-progress stop. Loop conditions read child `control.json`. |
 | `type: "dag"` | Workflow/control | Composite container; lowers child stages to namespaced tasks and exposes an `outputFrom` child downstream. |
+| `type: "dynamic"` | Dynamic/control | Runs a trusted bundle-local controller `.mjs`; generated `ctx.agent()` work is spliced into `compiled.json`/`run.json` as official workflow tasks. |
 | `support: { uses }` | Support | Runs a directory-local `.mjs` helper over selected upstream `control.json` values and writes a workflow artifact bundle. |
 
-Use `foreach.from` for dynamic fan-out, `reduce.from` for subagent fan-in, and support `from` for local helper inputs. Do not rely on a later plain `single` stage to see previous stage output.
+Use `foreach.from` for static data-driven fan-out, `reduce.from` for subagent fan-in, support `from` for local helper inputs, and `type: "dynamic"` only when the workflow must decide its own child tasks at runtime. Do not rely on a later plain `single` stage to see previous stage output.
+
+### Dynamic workflow authoring
+
+Dynamic workflows keep JSON as the source of truth while allowing trusted bundle-local JavaScript to orchestrate adaptive work. A dynamic stage looks like this:
+
+```json
+{
+  "id": "adaptive",
+  "type": "dynamic",
+  "dynamic": {
+    "uses": "./helpers/controller.mjs",
+    "mode": "graph-splice",
+    "permissions": { "approval": "auto" },
+    "budget": { "maxAgents": 1000, "maxConcurrency": 16 }
+  }
+}
+```
+
+Controller/helper/nested workflow refs must be bundle-local `./...` paths. Nested workflow specs are intentionally self-contained at their own directory level: refs inside a nested spec may point to files in that nested spec's subtree, but not to parent-level shared files via `../`. Put shared helpers/schemas under each nested workflow subtree or expose them through the parent controller/helper layer. Controller/helper code is trusted Node.js code for orchestration and timeout isolation, not a security sandbox. Generated agents are real workflow tasks: `ctx.agent({ id, agent, prompt, tools })` inserts a deterministic `stageId.id` task into `compiled.json` and `run.json`, persists a request hash in `dynamic/events.jsonl`, and replays fail-closed if the same id later changes request shape. On resume, controllers must re-issue previously recorded `ctx.agent`, `ctx.helper`, and `ctx.workflow` operations in the same order before issuing new operations; omitted or out-of-order replay fails closed with an explicit replay-invariant error. Use `ctx.parallel([() => ctx.agent(...), ...])` for dynamic fan-out; the runtime records queued sibling generation ops before the controller suspends, and non-suspension operation failures make the controller fail closed. Generated dependency cycles are rejected. `ctx.helper(name, input)` can call only helpers declared in `dynamic.helpers`; pure/retry-safe helpers may set `idempotent: true` so a crash after `helper.started` but before `helper.completed` can retry the helper instead of permanently failing closed. `ctx.workflow(name, input)` can call only nested specs declared in `dynamic.workflows`.
+
+Dynamic outputs should be compact typed artifacts. The controller returns normal workflow sections through `{ control, analysis, refs }`; generated child agents must return the same `<control>`, `<analysis>`, `<refs>` protocol as other artifact-graph tasks. Runtime state is stored under `.pi/workflows/<run-id>/dynamic/`:
+
+- `events.jsonl` — append-only decisions such as controller status, task generation, helper completions, nested workflow starts, and approvals.
+- `state.json` — replayable projection/cache of controller status, generated task ids, and budget counters.
+- `controller.log` — JSONL records from `ctx.log(...)`, useful for controller debugging.
+
+Approval modes:
+
+- `approval: "auto"` is the default.
+- `approval: "ask"` uses Pi's interactive `ctx.ui.confirm` and records the approved dynamic scope, including the full task digest and run-bundle fingerprint. Approving the controller authorizes this controller's generated agents to run without later approval prompts; generated agents run non-interactively within the displayed roles/tools and budgets. Read-only generated agents use the shared workspace; mutation-capable generated agents and agents using Pi-default tools use managed worktrees. Nested workflows keep their own approval policy and may still block for approval. Pure headless scheduling fails closed with `dynamic_ui_unavailable`; missed/timed-out prompts fail closed with `dynamic_approval_timeout`. `/workflow resume <run-id>` from an interactive Pi session retries either blocked approval state.
+
+Budgets bound controller behavior (`maxAgents`, `maxConcurrency`, `maxRuntimeMs`, `maxNestedWorkflowDepth`, `maxGraphMutations`, `maxHelperRuns`). Suspended child-agent wait time does not count as active controller runtime. `ctx.budget.remaining()` reports current headroom, including live generated-agent concurrency from the run record, and `ctx.budget.check()` returns false once any budget dimension is exhausted. `allowDynamicRoles` and `allowDynamicTools` default to enabled under the trusted-code model and are enforced when disabled: controller attempts to choose generated agent roles or override tools fail.
 
 ### DAG authoring
 
@@ -389,21 +441,35 @@ pi-workflow inspect workflow_mq224pi8_775e71 --json
 
 Use the bundled `workflow-guide` skill when creating or reviewing reusable workflows.
 
-Project workflows should live in:
+Project workflows should live in one of these forms:
 
 ```text
 .pi/workflows/<name>.json
+.pi/workflows/<name>/spec.json
 ```
+
+Use the directory-bundle form when the workflow needs schemas, support helpers, or copied scaffold files.
+
+`workflow-guide` ships validate-ready scaffolds under `skills/workflow-guide/scaffolds/`:
+
+| Scaffold | Use when |
+|---|---|
+| `foreach-reduce` | Extract a list of work items, verify each item, then synthesize a report. |
+| `support-partition` | Candidate findings need deterministic partitioning/dedup after verifier verdicts. |
+| `dag-required-reads` | A nested analysis DAG must expose one child output and force downstream artifact reads. |
+| `matrix-dag` | Multiple review lenses should run in parallel and then join through reducers. |
+| `object-tool-fallback` | A read-only workflow needs optional custom/web extraction fallback tooling. |
 
 Authoring checklist:
 
 1. Start from a bundled workflow when one fits.
-2. Decide the workflow graph first: subagent stages (`single`, `foreach`, `reduce`, `loop`), `dag` containers, and support nodes when deterministic local helper code is needed.
-3. Make every data dependency explicit with `foreach.from`, `reduce.from`, or support `from`.
-4. Keep read-only workflows read-only.
-5. For write-capable workflows, choose a worktree policy and validation stage.
-6. Add JSON output contracts for model-produced data that later stages depend on.
-7. Run `/workflow validate <workflow-or-file>` before using the workflow.
+2. Start from a scaffold when its topology matches the requested new workflow.
+3. Decide the workflow graph first: subagent stages (`single`, `foreach`, `reduce`, `loop`), `dag` containers, dynamic stages when adaptive runtime orchestration is required, and support nodes when deterministic local helper code is needed.
+4. Make every data dependency explicit with `foreach.from`, `reduce.from`, support `from`, or dynamic `ctx.agent`/`ctx.helper`/`ctx.workflow` calls.
+5. Keep read-only workflows read-only.
+6. For write-capable workflows, choose a worktree policy and validation stage.
+7. Add JSON output contracts for model-produced data that later stages depend on.
+8. Run `/workflow validate <workflow-or-file>` before using the workflow.
 
 ### Tool allowlists
 

@@ -1,0 +1,26 @@
+{
+  "type": "object",
+  "required": ["schema", "digest", "candidateId", "finding", "verdict", "evidenceQuotes", "counterEvidence", "recommendedAction"],
+  "properties": {
+    "schema": { "type": "string", "minLength": 1 },
+    "digest": { "type": "string", "minLength": 1 },
+    "candidateId": { "type": "string", "minLength": 1 },
+    "finding": {
+      "type": "object",
+      "required": ["id", "title", "severity", "locations", "evidenceQuotes"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "title": { "type": "string", "minLength": 1 },
+        "severity": { "type": "string", "minLength": 1 },
+        "locations": { "type": "array", "items": { "type": "object" } },
+        "evidenceQuotes": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": true
+    },
+    "verdict": { "type": "string", "enum": ["KEEP", "WEAKEN", "DROP", "NEEDS_HUMAN"] },
+    "evidenceQuotes": { "type": "array", "items": { "type": "string" } },
+    "counterEvidence": { "type": "array", "items": { "type": "string" } },
+    "recommendedAction": { "type": "string" }
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,23 @@
+{
+  "type": "object",
+  "required": [
+    "schema",
+    "digest",
+    "reviewSummary",
+    "risks",
+    "confidence"
+  ],
+  "properties": {
+    "schema": { "type": "string", "minLength": 1 },
+    "digest": { "type": "string", "minLength": 1 },
+    "reviewSummary": { "type": "string" },
+    "risks": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "confidence": {
+      "type": "string",
+      "enum": ["low", "medium", "high"]
+    }
+  }
+}

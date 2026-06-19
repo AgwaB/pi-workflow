@@ -77,7 +77,8 @@ export type ArtifactGraphStageType =
 	| "reduce"
 	| "foreach"
 	| "loop"
-	| "dag";
+	| "dag"
+	| "dynamic";
 
 export type WorkflowArtifactKind = "control" | "analysis" | "refs" | "raw";
 
@@ -92,6 +93,41 @@ export interface ArtifactGraphWorkflowSpec {
 		stages: ArtifactGraphStageSpec[];
 		maxConcurrency?: number;
 	};
+}
+
+export interface DynamicWorkflowBudgetSpec {
+	maxAgents?: number;
+	maxConcurrency?: number;
+	maxRuntimeMs?: number;
+	maxNestedWorkflowDepth?: number;
+	maxGraphMutations?: number;
+	maxHelperRuns?: number;
+}
+
+export interface DynamicWorkflowPermissionsSpec {
+	approval?: "auto" | "ask";
+	allowDynamicRoles?: boolean;
+	allowDynamicTools?: boolean;
+}
+
+export interface DynamicWorkflowHelperSpec {
+	uses: string;
+	inputSchema?: string;
+	outputSchema?: string;
+	idempotent?: boolean;
+}
+
+export interface DynamicWorkflowNestedSpec {
+	uses: string;
+}
+
+export interface DynamicWorkflowStageSpec {
+	uses: string;
+	mode?: "graph-splice";
+	budget?: DynamicWorkflowBudgetSpec;
+	permissions?: DynamicWorkflowPermissionsSpec;
+	helpers?: Record<string, DynamicWorkflowHelperSpec>;
+	workflows?: Record<string, DynamicWorkflowNestedSpec>;
 }
 
 export interface ArtifactGraphStageSpec {
@@ -132,6 +168,7 @@ export interface ArtifactGraphStageSpec {
 	stages?: ArtifactGraphStageSpec[];
 	outputFrom?: string;
 	support?: { uses: string; options?: Record<string, unknown> };
+	dynamic?: DynamicWorkflowStageSpec;
 	until?: unknown;
 	maxRounds?: number;
 	progressPath?: string;
@@ -295,6 +332,44 @@ export interface WorkflowSourceContextSpec {
 	maxPacketChars?: number;
 }
 
+export interface CompiledDynamicWorkflowBudget {
+	maxAgents: number;
+	maxConcurrency: number;
+	maxRuntimeMs: number;
+	maxNestedWorkflowDepth: number;
+	maxGraphMutations: number;
+	maxHelperRuns: number;
+}
+
+export interface CompiledDynamicWorkflowHelper {
+	uses: string;
+	usesPath?: string;
+	inputSchema?: string;
+	inputSchemaPath?: string;
+	outputSchema?: string;
+	outputSchemaPath?: string;
+	idempotent?: boolean;
+}
+
+export interface CompiledDynamicNestedWorkflow {
+	uses: string;
+	usesPath?: string;
+}
+
+export interface CompiledDynamicWorkflowTask {
+	uses: string;
+	usesPath?: string;
+	mode: "graph-splice";
+	budget: CompiledDynamicWorkflowBudget;
+	permissions: {
+		approval: "auto" | "ask";
+		allowDynamicRoles: boolean;
+		allowDynamicTools: boolean;
+	};
+	helpers: Record<string, CompiledDynamicWorkflowHelper>;
+	workflows: Record<string, CompiledDynamicNestedWorkflow>;
+}
+
 export interface CompiledArtifactGraphTask {
 	enabled: true;
 	output: {
@@ -346,6 +421,12 @@ export interface CompiledTask {
 	support?: {
 		uses: string;
 		options?: Record<string, unknown>;
+	};
+	dynamic?: CompiledDynamicWorkflowTask;
+	dynamicGenerated?: {
+		controllerSpecId: string;
+		opId: string;
+		requestHash: string;
 	};
 	loopChild?: CompiledLoopChildTaskRef;
 	loopPlaceholder?: {
@@ -428,6 +509,11 @@ export interface WorkflowTaskRunRecord {
 		artifacts?: string[];
 	};
 	artifactGraph?: CompiledArtifactGraphTask;
+	dynamicGenerated?: {
+		controllerSpecId: string;
+		opId: string;
+		requestHash: string;
+	};
 	launchRetry?: {
 		attempts: number;
 		maxAttempts?: number;
@@ -465,6 +551,10 @@ export interface WorkflowRunRecord {
 	loopStates?: LoopStateRecord[];
 	loopWorktrees?: LoopWorktreeRecord[];
 	loopResults?: LoopResultRecord[];
+	dynamic?: {
+		events: string;
+		state: string;
+	};
 	createdAt: string;
 	updatedAt: string;
 	specPath: string;

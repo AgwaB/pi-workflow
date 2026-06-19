@@ -39,12 +39,13 @@ import type { BackendLaunchResult } from "./backend.js";
 import { readWorkflowArtifactReadLedger } from "./workflow-artifact-tool.js";
 import {
 	buildWorkflowOutputRetryInstructions,
-	parseWorkflowOutput,
+	parseWorkflowOutputForBundle,
 	writeWorkflowTaskArtifactBundle,
 } from "./workflow-output-artifacts.js";
 
 const DEFAULT_SUBAGENT_RUNS_ROOT = ".pi/workflow-subagents";
 const EXTRA_SUBAGENT_EXTENSIONS_ENV = "PI_WORKFLOW_SUBAGENT_EXTRA_EXTENSIONS";
+const DEFAULT_TRANSIENT_MODEL_FAILURE_RETRIES = 5;
 const TOOL_PROVIDER_EXTENSIONS: Record<string, string[]> = {
 	web_search: ["npm:pi-web-access"],
 	code_search: ["npm:pi-web-access"],
@@ -221,7 +222,7 @@ export async function launchSubagentTask(
 			runsDir,
 			correlationId,
 		};
-		if (extensions.length > 0) subagentOptions.extensions = extensions;
+		subagentOptions.extensions = extensions;
 		if (captureToolCallsEnabled()) subagentOptions.captureToolCalls = true;
 		launched = await api.runSubagent(subagentOptions);
 	} catch (error) {
@@ -409,6 +410,10 @@ async function materializeTerminalSubagentResult(
 		(typeof subagentResult?.errorMessage === "string"
 			? subagentResult.errorMessage
 			: undefined);
+	const contextLengthExceeded = Boolean(
+		(subagentResult?.metadata as any)?.contextLengthExceeded ??
+			snapshot.metadata?.contextLengthExceeded,
+	);
 	if (task.artifactGraph?.enabled && statusInfo.status === "completed") {
 		return await materializeTerminalArtifactGraphResult(cwd, task, {
 			outputFile,
@@ -419,6 +424,31 @@ async function materializeTerminalSubagentResult(
 			exitCode,
 		});
 	}
+	if (
+		shouldAttemptArtifactGraphSalvage({
+			task,
+			statusInfo,
+			outputBytes,
+			exitCode,
+			contextLengthExceeded,
+			subagentResult,
+			snapshot,
+		})
+	) {
+		return await materializeTerminalArtifactGraphResult(cwd, task, {
+			outputFile,
+			stderrFile,
+			resultFile,
+			completedAt,
+			startedAt,
+			exitCode,
+			salvage: {
+				failureKind: statusInfo.failureKind ?? snapshot.failureKind ?? "model",
+				subagentStatus: snapshot.status,
+				subagentFailureKind: snapshot.failureKind,
+			},
+		});
+	}
 	const workflowResult = {
 		status: statusInfo.status,
 		failureKind: statusInfo.failureKind,
@@ -427,10 +457,7 @@ async function materializeTerminalSubagentResult(
 		startedAt,
 		errorMessage,
 		noFinalOutput: outputBytes === 0,
-		contextLengthExceeded: Boolean(
-			(subagentResult?.metadata as any)?.contextLengthExceeded ??
-				snapshot.metadata?.contextLengthExceeded,
-		),
+		contextLengthExceeded,
 		subagent: {
 			runId: snapshot.runId,
 			attemptId: snapshot.attemptId,
@@ -446,6 +473,16 @@ async function materializeTerminalSubagentResult(
 			toolCallsArtifactCwd: toolCalls?.ref.artifactCwd,
 		},
 	};
+	if (shouldRetryTransientModelFailure(statusInfo, workflowResult, outputBytes)) {
+		await writeJson(
+			transientFailureAttemptPath(resultFile, (task.launchRetry?.attempts ?? 0) + 1),
+			workflowResult,
+		);
+		return retryOrFailTransientSubagentFailure(task, {
+			reason: statusInfo.failureKind ?? "model",
+			message: errorMessage ?? "pi-subagent run failed before producing output",
+		});
+	}
 	await writeJson(resultFile, workflowResult);
 
 	const completedAfterTimeout = resultCompletedAfterTimeout(task, completedAt);
@@ -472,6 +509,11 @@ async function materializeTerminalArtifactGraphResult(
 		completedAt: string;
 		startedAt?: string;
 		exitCode: number;
+		salvage?: {
+			failureKind: string;
+			subagentStatus: string;
+			subagentFailureKind: string | null;
+		};
 	},
 ): Promise<boolean> {
 	const rawOutput = await readFile(options.outputFile, "utf8").catch(() => "");
@@ -491,7 +533,7 @@ async function materializeTerminalArtifactGraphResult(
 		maxDigestChars: artifactOptions?.maxDigestChars,
 		controlJsonSchema,
 	};
-	const parsed = parseWorkflowOutput(rawOutput, parseOptions);
+	const parsed = parseWorkflowOutputForBundle(rawOutput, parseOptions);
 	const attempt = (task.outputRetry?.attempts ?? 0) + 1;
 	if (!parsed.valid) {
 		await writeWorkflowTaskArtifactBundle({
@@ -545,6 +587,15 @@ async function materializeTerminalArtifactGraphResult(
 		completedAt: options.completedAt,
 		exitCode: options.exitCode,
 		stderr: await readFile(options.stderrFile, "utf8").catch(() => ""),
+		...(options.salvage
+			? {
+					salvagedFromFailureKind: options.salvage.failureKind,
+					subagentWarning:
+						"pi-subagent reported failure before a valid final workflow output was salvaged",
+					subagentStatus: options.salvage.subagentStatus,
+					subagentFailureKind: options.salvage.subagentFailureKind,
+				}
+			: {}),
 		...parseOptions,
 	});
 	if (!written.valid) {
@@ -647,6 +698,61 @@ function failArtifactGraphTask(
 	return true;
 }
 
+function shouldRetryTransientModelFailure(
+	statusInfo: {
+		status: WorkflowTaskRunRecord["status"];
+		failureKind?: string;
+		errorMessage?: string;
+	},
+	workflowResult: { contextLengthExceeded?: boolean; noFinalOutput?: boolean },
+	outputBytes: number,
+): boolean {
+	return (
+		statusInfo.status === "failed" &&
+		statusInfo.failureKind === "model" &&
+		outputBytes === 0 &&
+		workflowResult.noFinalOutput === true &&
+		workflowResult.contextLengthExceeded !== true
+	);
+}
+
+function transientFailureAttemptPath(resultFile: string, attempt: number): string {
+	return join(dirname(resultFile), `result.transient-model-failure-${attempt}.json`);
+}
+
+function retryOrFailTransientSubagentFailure(
+	task: WorkflowTaskRunRecord,
+	options: { reason: string; message: string },
+): boolean {
+	const attempt = (task.launchRetry?.attempts ?? 0) + 1;
+	const maxAttempts = task.launchRetry?.maxAttempts ?? DEFAULT_TRANSIENT_MODEL_FAILURE_RETRIES;
+	const exhausted = attempt > maxAttempts;
+	task.launchRetry = {
+		attempts: attempt,
+		maxAttempts,
+		reason: exhausted ? `${options.reason}_exhausted` : options.reason,
+		message: options.message,
+	};
+	delete task.backendHandle;
+	delete task.backendFiles;
+	task.pid = undefined;
+	task.startedAt = undefined;
+	task.completedAt = undefined;
+	task.exitCode = undefined;
+	if (!exhausted) {
+		task.status = "pending";
+		task.statusDetail = "retry_model_failure";
+		task.lastMessage = `${options.message}; retrying transient model failure (${attempt}/${maxAttempts})`;
+		return true;
+	}
+	task.status = "failed";
+	task.statusDetail = task.launchRetry.reason ?? "model_exhausted";
+	task.exitCode = 1;
+	task.completedAt = nowIso();
+	task.lastMessage = `${options.message}; transient model failure retries exhausted (${maxAttempts})`;
+	return true;
+}
+
 function retryOrFailArtifactGraphTask(
 	task: WorkflowTaskRunRecord,
 	options: {
@@ -686,6 +792,34 @@ function retryOrFailArtifactGraphTask(
 	return true;
 }
 
+function shouldAttemptArtifactGraphSalvage(options: {
+	task: WorkflowTaskRunRecord;
+	statusInfo: {
+		status: WorkflowTaskRunRecord["status"];
+		failureKind?: string;
+		errorMessage?: string;
+	};
+	outputBytes: number;
+	exitCode: number;
+	contextLengthExceeded: boolean;
+	subagentResult: Record<string, unknown> | undefined;
+	snapshot: SubagentRunStatusSnapshot;
+}): boolean {
+	if (!options.task.artifactGraph?.enabled) return false;
+	if (options.statusInfo.status !== "failed") return false;
+	if (
+		(options.statusInfo.failureKind ?? options.snapshot.failureKind) !== "model"
+	)
+		return false;
+	if (options.outputBytes <= 0) return false;
+	if (options.exitCode !== 0) return false;
+	if (options.contextLengthExceeded) return false;
+	const stopReason =
+		(options.subagentResult?.metadata as Record<string, unknown> | undefined)
+			?.stopReason ?? options.snapshot.metadata?.stopReason;
+	return stopReason === "stop" || stopReason === "end";
+}
+
 function workflowStatusFromSubagent(
 	snapshot: SubagentRunStatusSnapshot,
 	result: Record<string, unknown> | undefined,
@@ -706,6 +840,14 @@ function workflowStatusFromSubagent(
 			errorMessage: "child Pi produced no final assistant output",
 		};
 	if (snapshot.status === "completed") return { status: "completed" };
+	if (
+		snapshot.failureKind === "model" &&
+		outputBytes > 0 &&
+		snapshot.metadata?.stopReason === "stop" &&
+		!contextLengthExceeded
+	) {
+		return { status: "completed" };
+	}
 	if (contextLengthExceeded)
 		return {
 			status: "failed",
@@ -978,15 +1120,39 @@ function subagentRunsDir(
 }
 
 function buildSystemPrompt(task: CompiledTask): string {
+	const workflowMaxDigestChars = task.artifactGraph?.output.maxDigestChars;
+	const workflowOutputContract = task.artifactGraph?.enabled
+		? [
+				"# Workflow Output Contract",
+				"For this workflow task, the output protocol in the task prompt overrides any direct-response format in the agent definition.",
+				"Your final response must start exactly with <control> and end exactly with </refs>.",
+				"Do not include preambles, status updates, Markdown headings, or prose outside the required workflow output sections.",
+				"Never start with status text such as 'I have enough evidence' or 'Composing output'; put all explanatory prose inside <analysis> only.",
+				...(workflowMaxDigestChars !== undefined
+					? [
+							`The control.digest string is required and must be at most ${workflowMaxDigestChars} characters; prefer one short sentence.`,
+						]
+					: []),
+			]
+		: [
+				"When complete, provide a concise final report with findings, changed files if any, and blockers.",
+			];
 	return [
 		`You are Pi workflow subagent '${task.agent}'.`,
 		"You were launched by /workflow from a deterministic workflow spec.",
 		"Do not assume parent conversation history.",
 		"Do not launch other agents or orchestration workflows unless explicitly instructed.",
-		"When complete, provide a concise final report with findings, changed files if any, and blockers.",
+		...workflowOutputContract,
 		"",
 		"# Agent Definition",
 		task.agentSystemPrompt.trim(),
+		...(task.artifactGraph?.enabled
+			? [
+					"",
+					"# Workflow Output Contract Reminder",
+					"Ignore any agent-definition final-answer format that conflicts with the workflow output protocol. The first byte of your final answer must be '<' in <control>; place all prose inside <analysis>; end with </refs>.",
+				]
+			: []),
 	].join("\n");
 }
 

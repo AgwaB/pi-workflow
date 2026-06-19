@@ -1,0 +1,28 @@
+{
+  "type": "object",
+  "required": [
+    "schema",
+    "digest",
+    "conclusion",
+    "supportingPoints",
+    "limitations",
+    "nextSteps"
+  ],
+  "properties": {
+    "schema": { "type": "string", "minLength": 1 },
+    "digest": { "type": "string", "minLength": 1 },
+    "conclusion": { "type": "string" },
+    "supportingPoints": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "limitations": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "nextSteps": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}

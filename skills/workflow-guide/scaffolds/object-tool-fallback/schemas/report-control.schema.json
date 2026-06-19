@@ -1,0 +1,44 @@
+{
+  "type": "object",
+  "required": [
+    "schema",
+    "digest",
+    "url",
+    "summary",
+    "extractedItems",
+    "limitations",
+    "sourceTools"
+  ],
+  "properties": {
+    "schema": { "type": "string", "minLength": 1 },
+    "digest": { "type": "string", "minLength": 1 },
+    "url": { "type": "string", "minLength": 1 },
+    "summary": { "type": "string", "minLength": 1 },
+    "extractedItems": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["label", "value"],
+        "properties": {
+          "label": { "type": "string", "minLength": 1 },
+          "value": { "type": "string", "minLength": 1 },
+          "confidence": { "type": "string" }
+        },
+        "additionalProperties": true
+      },
+      "maxItems": 30
+    },
+    "limitations": {
+      "type": "array",
+      "items": { "type": "string" },
+      "maxItems": 10
+    },
+    "sourceTools": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1,
+      "maxItems": 5
+    }
+  },
+  "additionalProperties": true
+}

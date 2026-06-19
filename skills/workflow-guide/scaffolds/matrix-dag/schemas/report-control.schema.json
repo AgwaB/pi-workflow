@@ -1,0 +1,65 @@
+{
+  "type": "object",
+  "required": [
+    "schema",
+    "digest",
+    "verdict",
+    "riskLevel",
+    "summary",
+    "blockers",
+    "nextActions"
+  ],
+  "properties": {
+    "schema": {
+      "const": "stage-control-v1"
+    },
+    "digest": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 600
+    },
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "READY",
+        "NEEDS_WORK",
+        "BLOCKED",
+        "UNKNOWN"
+      ]
+    },
+    "riskLevel": {
+      "type": "string",
+      "enum": [
+        "none",
+        "low",
+        "medium",
+        "high",
+        "unknown"
+      ]
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000
+    },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1000
+      },
+      "maxItems": 30
+    },
+    "nextActions": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1000
+      },
+      "maxItems": 30
+    }
+  },
+  "additionalProperties": false
+}

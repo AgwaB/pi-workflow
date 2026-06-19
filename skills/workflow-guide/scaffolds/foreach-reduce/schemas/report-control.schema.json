@@ -1,0 +1,39 @@
+{
+  "type": "object",
+  "required": [
+    "schema",
+    "digest",
+    "summary",
+    "verdict",
+    "findings"
+  ],
+  "properties": {
+    "schema": { "type": "string", "minLength": 1 },
+    "digest": { "type": "string", "minLength": 1 },
+    "summary": { "type": "string", "minLength": 1 },
+    "verdict": { "type": "string", "enum": ["MATCHES", "GAPS_FOUND", "INCONCLUSIVE", "NEEDS_HUMAN"] },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["endpointId", "severity", "title", "claim"],
+        "properties": {
+          "endpointId": { "type": "string", "minLength": 1 },
+          "severity": { "type": "string", "enum": ["high", "medium", "low"] },
+          "title": { "type": "string", "minLength": 1 },
+          "claim": { "type": "string", "minLength": 1 },
+          "docEvidence": { "type": "array", "items": { "type": "object" }, "maxItems": 12 },
+          "implementationEvidence": { "type": "array", "items": { "type": "object" }, "maxItems": 12 },
+          "testEvidence": { "type": "array", "items": { "type": "object" }, "maxItems": 12 },
+          "recommendedAction": { "type": "string" }
+        }
+      },
+      "maxItems": 50
+    },
+    "endpointCoverageSummary": { "type": "array", "items": { "type": "object" }, "maxItems": 80 },
+    "testCoverageSummary": { "type": "array", "items": { "type": "object" }, "maxItems": 80 },
+    "needsHuman": { "type": "array", "items": { "type": "object" }, "maxItems": 50 },
+    "risks": { "type": "array", "items": { "type": "object" }, "maxItems": 40 },
+    "recommendedNextAction": { "type": "string" }
+  }
+}

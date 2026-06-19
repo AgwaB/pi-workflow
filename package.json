@@ -55,7 +55,8 @@
       "./src/extension.ts"
     ],
     "skills": [
-      "./skills/workflow-guide"
+      "./skills/workflow-guide",
+      "./skills/execution-router"
     ]
   },
   "peerDependencies": {
@@ -72,7 +73,7 @@
     "node": ">=22.19.0"
   },
   "dependencies": {
-    "@agwab/pi-subagent": "^0.3.2"
+    "@agwab/pi-subagent": "^0.3.5"
   },
   "publishConfig": {
     "access": "public"

@@ -20,10 +20,12 @@ import {
 } from "./types.js";
 
 const REFRESH_INTERVAL_MS = 1_000;
-const OUTPUT_PREVIEW_LINES = 8;
-const TASK_PROMPT_PREVIEW_LINES = 12;
 const MAX_LIST_ROWS = 18;
 const MAX_STAGE_TASK_ROWS = 18;
+const TASK_ARTIFACT_MAX_LINES = 1_000;
+const TASK_ARTIFACT_VIEW_LINES = 16;
+
+type TaskArtifactView = "output" | "prompt";
 
 type Component = {
 	render(width: number): string[];
@@ -68,9 +70,13 @@ export class WorkflowView implements Component {
 	private selectedFlow = 0;
 	private selectedStage = 0;
 	private selectedTask = 0;
+	private selectedTaskId = "";
 	private detailRun?: WorkflowRunRecord;
-	private outputPreview = "";
-	private taskPromptPreview = "";
+	private taskArtifactView: TaskArtifactView = "output";
+	private artifactScrollLine = 0;
+	private outputLines: string[] = [];
+	private promptLines: string[] = [];
+	private loadedTaskKey = "";
 	private message = "";
 	private error = "";
 	private loading = true;
@@ -175,10 +181,33 @@ export class WorkflowView implements Component {
 	}
 
 	private handleTaskInput(data: string): void {
-		if (matchesKey(data, "escape") || this.isBackInput(data)) {
+		if (
+			matchesKey(data, "escape") ||
+			data === "b" ||
+			data === "B" ||
+			matchesKey(data, "backspace")
+		) {
 			this.mode = "tasks";
 			this.message = "";
 			this.tui.requestRender();
+			return;
+		}
+
+		if (matchesKey(data, "left")) {
+			this.switchTaskArtifact(-1);
+			return;
+		}
+		if (matchesKey(data, "right")) {
+			this.switchTaskArtifact(1);
+			return;
+		}
+
+		if (matchesKey(data, "up")) {
+			this.scrollTaskArtifact(-1);
+			return;
+		}
+		if (matchesKey(data, "down")) {
+			this.scrollTaskArtifact(1);
 			return;
 		}
 
@@ -188,13 +217,6 @@ export class WorkflowView implements Component {
 		}
 		if (data === "]" || data === "n" || data === "N") {
 			this.moveTask(1);
-			return;
-		}
-
-		if (data === "l" || data === "L") {
-			const task = this.selectedTaskRecord();
-			this.message = task ? `log ${task.files.output}` : "no selected task";
-			this.tui.requestRender();
 		}
 	}
 
@@ -247,21 +269,37 @@ export class WorkflowView implements Component {
 	private async updateTaskPreviews(): Promise<void> {
 		const task = this.selectedTaskRecord();
 		if (!task) {
-			this.outputPreview = "";
-			this.taskPromptPreview = "";
+			this.outputLines = [];
+			this.promptLines = [];
+			this.loadedTaskKey = "";
+			this.resetArtifactScroll();
 			return;
 		}
 
-		const [outputPreview, taskPromptPreview] = await Promise.all([
-			readFilePreview(this.cwd, task.files.output, OUTPUT_PREVIEW_LINES),
-			readFilePreview(
+		const taskKey = `${task.taskId}:${task.files.output}:${task.files.taskPrompt}`;
+		if (taskKey !== this.loadedTaskKey) {
+			this.loadedTaskKey = taskKey;
+			this.resetArtifactScroll();
+		}
+
+		const [outputLines, promptLines] = await Promise.all([
+			readFileLinesBounded(
+				this.cwd,
+				task.files.output,
+				TASK_ARTIFACT_MAX_LINES,
+			),
+			readFileLinesBounded(
 				this.cwd,
 				task.files.taskPrompt,
-				TASK_PROMPT_PREVIEW_LINES,
+				TASK_ARTIFACT_MAX_LINES,
 			),
 		]);
-		this.outputPreview = outputPreview;
-		this.taskPromptPreview = taskPromptPreview;
+		this.outputLines = outputLines;
+		this.promptLines = promptLines;
+		this.artifactScrollLine = Math.min(
+			this.artifactScrollLine,
+			this.maxArtifactScrollLine(),
+		);
 	}
 
 	private renderBoard(width: number): string[] {
@@ -296,22 +334,28 @@ export class WorkflowView implements Component {
 	}
 
 	private renderDrilldownHeader(width: number): string[] {
-		const active = this.flows.filter(
-			(flow) => flow.status === "running",
-		).length;
-		const blocked = this.flows.filter(
-			(flow) => flow.status === "blocked",
-		).length;
-		const failed = this.flows.filter(
-			(flow) => flow.status === "failed" || flow.status === "interrupted",
-		).length;
-		const completed = this.flows.filter(
-			(flow) => flow.status === "completed",
-		).length;
+		const taskSummary = this.mode !== "runs" ? this.detailRun?.taskSummary : undefined;
+		const active = taskSummary
+			? taskSummary.running
+			: this.flows.filter((flow) => flow.status === "running").length;
+		const blocked = taskSummary
+			? taskSummary.blocked
+			: this.flows.filter((flow) => flow.status === "blocked").length;
+		const failed = taskSummary
+			? taskSummary.failed + taskSummary.interrupted
+			: this.flows.filter(
+					(flow) => flow.status === "failed" || flow.status === "interrupted",
+				).length;
+		const completed = taskSummary
+			? taskSummary.completed
+			: this.flows.filter((flow) => flow.status === "completed").length;
 		const lines = [
 			`${chip(this.theme, "mode", this.mode === "task" ? "detail" : this.mode, "accent")} ${chip(this.theme, "running", String(active), "accent")} ${chip(this.theme, "blocked", String(blocked), "warning")} ${chip(this.theme, "failed", String(failed), "error")} ${chip(this.theme, "done", String(completed), "success")}`,
-			`${metaLabel(this.theme, "path")} ${metaValue(this.theme, this.breadcrumbText())} ${muted(this.theme, "·")} ${metaLabel(this.theme, "source")} ${pathText(this.theme, `${this.cwd}/.pi/workflows/index.json`)}`,
 		];
+		if (this.mode !== "tasks")
+			lines.push(
+				`${metaLabel(this.theme, "path")} ${metaValue(this.theme, this.breadcrumbText())} ${muted(this.theme, "·")} ${metaLabel(this.theme, "source")} ${pathText(this.theme, `${this.cwd}/.pi/workflows/index.json`)}`,
+			);
 		return [
 			...boxed(this.theme, "✦ Flow Board", width, lines, "borderAccent"),
 			"",
@@ -363,47 +407,17 @@ export class WorkflowView implements Component {
 	}
 
 	private renderTasksScreen(width: number, run: WorkflowRunRecord): string[] {
-		const stage = this.currentStageSummary(run);
-		const task = this.selectedTaskRecord();
-		const sideLines = [
-			accent(this.theme, stage ? stage.id : "Stage"),
-			...(stage
-				? [
-						progressBar(this.theme, stage.summary, 10),
-						kvRow(
-							this.theme,
-							"completed",
-							`${stage.summary.completed}/${stage.summary.total}`,
-						),
-					]
-				: [placeholder(this.theme, "no selected stage")]),
-			"",
-			...this.stageContextLines(run),
-			"",
-			accent(this.theme, "Navigation"),
-			navHint(this.theme, "Enter/right: detail"),
-			navHint(this.theme, "b/Esc/left: stages"),
-		];
-		const lines = this.renderTwoPane(
+		const leftBodyWidth = width < 92 ? Math.max(1, width - 4) : 30;
+		const leftLines = this.compactStageLines(run, leftBodyWidth);
+		const rightBodyWidth = Math.max(1, this.mainPaneBodyWidth(width));
+		return this.renderTwoPane(
 			width,
-			"Stage Summary",
-			sideLines,
+			"Stages",
+			leftLines,
 			`${this.currentStageId(run) ?? "Stage"} tasks`,
-			this.taskLines(run, Math.max(1, this.mainPaneBodyWidth(width))),
+			this.taskLines(run, rightBodyWidth),
 			34,
 		);
-		if (task)
-			lines.push(
-				"",
-				...boxed(
-					this.theme,
-					"Selected Task Preview",
-					width,
-					this.taskPreviewLines(task, width - 4),
-					statusColor(task.status),
-				),
-			);
-		return lines;
 	}
 
 	private renderTwoPane(
@@ -478,69 +492,24 @@ export class WorkflowView implements Component {
 			"",
 		];
 
-		if (width >= 170) {
-			const overviewWidth = 36;
-			const timelineWidth = 38;
-			const activityWidth = Math.min(
-				82,
-				Math.max(62, Math.floor(width * 0.36)),
+		const validationLines = this.taskValidationStripLines(task, width - 4);
+		if (validationLines.length > 0) {
+			lines.push(
+				...boxed(
+					this.theme,
+					"Validation",
+					width,
+					validationLines,
+					task.outputValidation?.status === "invalid" ||
+						task.outputValidation?.valid === false
+						? "error"
+						: "warning",
+				),
+				"",
 			);
-			const artifactWidth = Math.max(
-				44,
-				width - overviewWidth - timelineWidth - activityWidth - 3,
-			);
-			const widths = [
-				overviewWidth,
-				timelineWidth,
-				activityWidth,
-				artifactWidth,
-			];
-			const overview = boxed(
-				this.theme,
-				"Task / Runtime",
-				overviewWidth,
-				this.taskOverviewLines(run, task, overviewWidth - 4),
-				statusColor(task.status),
-			);
-			const timeline = boxed(
-				this.theme,
-				"Timeline",
-				timelineWidth,
-				this.taskTimelineLines(run, task, timelineWidth - 4),
-			);
-			const activity = boxed(
-				this.theme,
-				"Contract / Output",
-				activityWidth,
-				this.taskActivityLines(task, activityWidth - 4),
-				"borderAccent",
-			);
-			const artifacts = boxed(
-				this.theme,
-				"Artifacts / Commands",
-				artifactWidth,
-				this.taskArtifactLines(run, task, artifactWidth - 4),
-			);
-			const maxRows = Math.max(
-				overview.length,
-				timeline.length,
-				activity.length,
-				artifacts.length,
-			);
-			for (let index = 0; index < maxRows; index += 1) {
-				lines.push(
-					joinFixedColumns(
-						[
-							overview[index] ?? "",
-							timeline[index] ?? "",
-							activity[index] ?? "",
-							artifacts[index] ?? "",
-						],
-						widths,
-					),
-				);
-			}
-		} else if (width >= 118) {
+		}
+
+		if (width >= 118) {
 			const leftWidth = 42;
 			const mainWidth = Math.max(60, width - leftWidth - 1);
 			const widths = [leftWidth, mainWidth];
@@ -548,14 +517,18 @@ export class WorkflowView implements Component {
 				this.theme,
 				"Task / Runtime",
 				leftWidth,
-				this.taskOverviewLines(run, task, leftWidth - 4),
+				[
+					...this.taskOverviewLines(run, task, leftWidth - 4),
+					"",
+					...this.taskTimelineLines(run, task, leftWidth - 4),
+				],
 				statusColor(task.status),
 			);
 			const main = boxed(
 				this.theme,
-				"Activity",
+				"Artifact Viewer",
 				mainWidth,
-				this.taskActivityLines(task, mainWidth - 4),
+				this.taskArtifactViewerLines(task, mainWidth - 4),
 				"borderAccent",
 			);
 			const maxRows = Math.max(left.length, main.length);
@@ -564,14 +537,6 @@ export class WorkflowView implements Component {
 					joinFixedColumns([left[index] ?? "", main[index] ?? ""], widths),
 				);
 			}
-			lines.push(
-				"",
-				...boxed(this.theme, "Timeline / Artifacts", width, [
-					...this.taskTimelineLines(run, task, width - 4),
-					"",
-					...this.taskArtifactLines(run, task, width - 4),
-				]),
-			);
 		} else {
 			lines.push(
 				...boxed(
@@ -583,17 +548,10 @@ export class WorkflowView implements Component {
 				"",
 				...boxed(
 					this.theme,
-					"Activity",
+					"Artifact Viewer",
 					width,
-					this.taskActivityLines(task, width - 4),
+					this.taskArtifactViewerLines(task, width - 4),
 					"borderAccent",
-				),
-				"",
-				...boxed(
-					this.theme,
-					"Artifacts / Commands",
-					width,
-					this.taskArtifactLines(run, task, width - 4),
 				),
 			);
 		}
@@ -652,6 +610,24 @@ export class WorkflowView implements Component {
 		});
 	}
 
+	private compactStageLines(run: WorkflowRunRecord, width: number): string[] {
+		const stages = stageSummaries(run);
+		const currentStage = this.currentStageId(run);
+		return stages.map((stage) => {
+			const selected = stage.id === currentStage;
+			const status = statusForSummary(stage.summary);
+			const prefix = selected ? accent(this.theme, "› ") : "  ";
+			const label = `${prefix}${statusGlyph(this.theme, status)} ${selected ? strong(this.theme, stage.id) : stage.id}`;
+			const line = joinColumns(
+				label,
+				compactStatusLabel(this.theme, status),
+				width,
+				Math.max(12, Math.floor(width * 0.55)),
+			);
+			return selectedLine(this.theme, line, width, selected, true);
+		});
+	}
+
 	private taskLines(run: WorkflowRunRecord, width: number): string[] {
 		const allTasks = this.tasksForSelectedStage(run);
 		const window = visibleWindow(
@@ -671,11 +647,7 @@ export class WorkflowView implements Component {
 			const selected = index === this.selectedTask;
 			const prefix = selected ? accent(this.theme, "› ") : "  ";
 			const left = `${prefix}${statusGlyph(this.theme, task.status)} ${selected ? strong(this.theme, task.displayName) : task.displayName}`;
-			const right = `${taskMetaLine(this.theme, [
-				["agent", task.agent],
-				["rt", taskRuntimeSummary(task)],
-				["elapsed", taskElapsed(task)],
-			])} ${statusBadge(this.theme, task.status)}${task.lastMessage ? ` ${muted(this.theme, "·")} ${metaValue(this.theme, task.lastMessage)}` : ""}`;
+			const right = taskListStatusLabel(this.theme, task);
 			const line = joinColumns(
 				left,
 				metaByStatus(this.theme, task.status, right),
@@ -693,34 +665,6 @@ export class WorkflowView implements Component {
 			: [placeholder(this.theme, "  no tasks in selected stage")];
 	}
 
-	private taskPreviewLines(
-		task: WorkflowTaskRunRecord,
-		width: number,
-	): string[] {
-		const preview = previewLines(this.outputPreview, "(empty log)", 3).map(
-			(line) => fit(previewText(this.theme, line), width),
-		);
-		const lines = [
-			`${statusGlyph(this.theme, task.status)} ${strong(this.theme, task.displayName)} ${statusBadge(this.theme, task.status)} ${taskMetaLine(
-				this.theme,
-				[
-					["agent", task.agent],
-					["rt", taskRuntimeSummary(task)],
-				],
-			)}`,
-			taskMetaLine(this.theme, [
-				[
-					"elapsed",
-					`${taskElapsed(task)}${task.lastMessage ? ` · ${task.lastMessage}` : ""}`,
-				],
-			]),
-			pathRow(this.theme, "output", task.files.output),
-			"",
-			accent(this.theme, "Live output"),
-			...preview,
-		];
-		return lines.map((line) => fit(line, width));
-	}
 
 	private taskIdentityLines(
 		run: WorkflowRunRecord,
@@ -781,15 +725,16 @@ export class WorkflowView implements Component {
 		);
 		if (task.lastMessage)
 			lines.push(timelineLine(this.theme, "last", task.lastMessage, "warning"));
-		if (task.outputValidation)
+		const validation = taskValidationSummary(task);
+		if (validation)
 			lines.push(
 				timelineLine(
 					this.theme,
 					"contract",
-					task.outputValidation.status,
-					task.outputValidation.status === "valid"
+					validation.status,
+					validation.status === "valid"
 						? "success"
-						: task.outputValidation.status === "invalid"
+						: validation.status === "invalid"
 							? "error"
 							: "warning",
 				),
@@ -797,63 +742,106 @@ export class WorkflowView implements Component {
 		return lines.map((line) => fit(line, width));
 	}
 
-	private taskActivityLines(
+
+	private taskValidationStripLines(
 		task: WorkflowTaskRunRecord,
 		width: number,
 	): string[] {
-		const lines = [
-			accent(this.theme, "Task contract"),
-			...previewLines(
-				this.taskPromptPreview,
-				"(task prompt unavailable)",
-				TASK_PROMPT_PREVIEW_LINES,
-			).map((line) => fit(previewText(this.theme, line), width)),
-			"",
-			accent(this.theme, "Live output preview"),
-			...previewLines(
-				this.outputPreview,
-				"(empty log)",
-				OUTPUT_PREVIEW_LINES,
-			).map((line) => fit(previewText(this.theme, line), width)),
+		const summary = taskValidationSummary(task);
+		if (!summary) return [];
+		return [
+			fit(
+				validationLine(this.theme, summary.status, summary.message),
+				width,
+			),
 		];
-		if (task.outputValidation) {
-			lines.push(
-				"",
-				accent(this.theme, "Output contract"),
-				validationLine(
-					this.theme,
-					task.outputValidation.status,
-					task.outputValidation.message ?? "",
-				),
-			);
-		}
-		return lines;
 	}
 
-	private taskArtifactLines(
-		run: WorkflowRunRecord,
+	private taskArtifactViewerLines(
 		task: WorkflowTaskRunRecord,
 		width: number,
 	): string[] {
-		const lines = [
-			accent(this.theme, "Files"),
-			pathRow(this.theme, "output", task.files.output),
-			pathRow(this.theme, "result", task.files.result),
-			pathRow(this.theme, "prompt", task.files.taskPrompt),
-			pathRow(this.theme, "system", task.files.systemPrompt),
+		const selectedLabel =
+			this.taskArtifactView === "output" ? "Output" : "Prompt";
+		const switchHint =
+			this.taskArtifactView === "output" ? "→ Prompt" : "← Output";
+		const sourceLines = this.currentArtifactSourceLines();
+		const total = sourceLines.length;
+		const maxStart = Math.max(0, total - TASK_ARTIFACT_VIEW_LINES);
+		const start = Math.min(this.artifactScrollLine, maxStart);
+		const end =
+			total === 0
+				? 0
+				: Math.min(total, start + TASK_ARTIFACT_VIEW_LINES);
+		const visible =
+			total === 0
+				? [
+						this.taskArtifactView === "output"
+							? "(empty log)"
+							: "(task prompt unavailable)",
+					]
+				: sourceLines.slice(start, end);
+
+		return [
+			`${accent(this.theme, `Viewing: ${selectedLabel}`)}    ${muted(
+				this.theme,
+				switchHint,
+			)}`,
+			`${metaLabel(this.theme, "lines")} ${metaValue(
+				this.theme,
+				total === 0 ? "0-0 / 0" : `${start + 1}-${end} / ${total}`,
+			)} ${muted(this.theme, "·")} ${pathText(
+				this.theme,
+				this.currentArtifactPath(task),
+			)}`,
 			"",
-			accent(this.theme, "Agent-only controls"),
-			commandLine(this.theme, `/workflow logs ${run.runId} ${task.taskId}`),
-			commandLine(this.theme, `/workflow wait ${run.runId} 60000`),
+			...visible.map((line) => fit(previewText(this.theme, line), width)),
 		];
-		if (task.backendHandle?.display)
-			lines.push(
-				"",
-				accent(this.theme, "Backend"),
-				metaValue(this.theme, task.backendHandle.display),
-			);
-		return lines.map((line) => fit(line, width));
 	}
+
+	private currentArtifactSourceLines(): string[] {
+		return this.taskArtifactView === "output"
+			? this.outputLines
+			: this.promptLines;
+	}
+
+	private currentArtifactPath(task: WorkflowTaskRunRecord): string {
+		return this.taskArtifactView === "output"
+			? task.files.output
+			: task.files.taskPrompt;
+	}
+
+	private switchTaskArtifact(delta: number): void {
+		const views: TaskArtifactView[] = ["output", "prompt"];
+		const currentIndex = views.indexOf(this.taskArtifactView);
+		this.taskArtifactView =
+			views[wrapIndex(currentIndex + delta, views.length)] ?? "output";
+		this.resetArtifactScroll();
+		this.message = "";
+		this.tui.requestRender();
+	}
+
+	private scrollTaskArtifact(delta: number): void {
+		const max = this.maxArtifactScrollLine();
+		this.artifactScrollLine = Math.max(
+			0,
+			Math.min(max, this.artifactScrollLine + delta),
+		);
+		this.message = "";
+		this.tui.requestRender();
+	}
+
+	private maxArtifactScrollLine(): number {
+		return Math.max(
+			0,
+			this.currentArtifactSourceLines().length - TASK_ARTIFACT_VIEW_LINES,
+		);
+	}
+
+	private resetArtifactScroll(): void {
+		this.artifactScrollLine = 0;
+	}
+
 
 	private moveModeSelection(delta: number): void {
 		if (this.mode === "runs") {
@@ -910,6 +898,7 @@ export class WorkflowView implements Component {
 			if (!this.selectedTaskRecord()) return;
 			this.mode = "task";
 			this.message = "";
+			this.resetArtifactScroll();
 			void this.updateTaskPreviews();
 			this.tui.requestRender();
 		}
@@ -920,6 +909,8 @@ export class WorkflowView implements Component {
 		this.selectedFlow = wrapIndex(this.selectedFlow + delta, this.flows.length);
 		this.selectedStage = 0;
 		this.selectedTask = 0;
+		this.selectedTaskId = "";
+		this.resetArtifactScroll();
 		this.message = "";
 		void this.reload(true);
 		this.tui.requestRender();
@@ -930,6 +921,8 @@ export class WorkflowView implements Component {
 		const stages = stageSummaries(this.detailRun);
 		this.selectedStage = wrapIndex(this.selectedStage + delta, stages.length);
 		this.selectedTask = 0;
+		this.selectedTaskId = "";
+		this.resetArtifactScroll();
 		this.message = "";
 		void this.updateTaskPreviews();
 		this.tui.requestRender();
@@ -939,6 +932,8 @@ export class WorkflowView implements Component {
 		if (!this.detailRun) return;
 		const tasks = this.tasksForSelectedStage(this.detailRun);
 		this.selectedTask = wrapIndex(this.selectedTask + delta, tasks.length);
+		this.syncSelectedTaskId(tasks);
+		this.resetArtifactScroll();
 		this.message = "";
 		void this.updateTaskPreviews();
 		this.tui.requestRender();
@@ -949,7 +944,14 @@ export class WorkflowView implements Component {
 		const stages = stageSummaries(this.detailRun);
 		this.selectedStage = clampIndex(this.selectedStage, stages.length);
 		const tasks = this.tasksForSelectedStage(this.detailRun);
-		this.selectedTask = clampIndex(this.selectedTask, tasks.length);
+		const selectedTaskIndex = this.selectedTaskId
+			? tasks.findIndex((task) => task.taskId === this.selectedTaskId)
+			: -1;
+		this.selectedTask =
+			selectedTaskIndex >= 0
+				? selectedTaskIndex
+				: clampIndex(this.selectedTask, tasks.length);
+		this.syncSelectedTaskId(tasks);
 	}
 
 	private currentStageId(run: WorkflowRunRecord): string | undefined {
@@ -961,9 +963,19 @@ export class WorkflowView implements Component {
 		run: WorkflowRunRecord,
 	): WorkflowTaskRunRecord[] {
 		const stageId = this.currentStageId(run);
-		if (!stageId) return run.tasks;
-		if (run.type !== WORKFLOW_RUN_TYPE) return run.tasks;
-		return run.tasks.filter((task) => (task.stageId ?? "unknown") === stageId);
+		const tasks =
+			!stageId || run.type !== WORKFLOW_RUN_TYPE
+				? run.tasks
+				: run.tasks.filter((task) => (task.stageId ?? "unknown") === stageId);
+		return tasks
+			.map((task, index) => ({ task, index }))
+			.sort((left, right) => {
+				const priority =
+					taskProblemPriority(left.task.status) -
+					taskProblemPriority(right.task.status);
+				return priority || left.index - right.index;
+			})
+			.map((entry) => entry.task);
 	}
 
 	private selectedTaskRecord(): WorkflowTaskRunRecord | undefined {
@@ -971,11 +983,12 @@ export class WorkflowView implements Component {
 		return this.tasksForSelectedStage(this.detailRun)[this.selectedTask];
 	}
 
-	private currentStageSummary(
-		run: WorkflowRunRecord,
-	): { id: string; summary: TaskSummary } | undefined {
-		return stageSummaries(run)[this.selectedStage];
+	private syncSelectedTaskId(tasks?: WorkflowTaskRunRecord[]): void {
+		const stageTasks =
+			tasks ?? (this.detailRun ? this.tasksForSelectedStage(this.detailRun) : []);
+		this.selectedTaskId = stageTasks[this.selectedTask]?.taskId ?? "";
 	}
+
 
 	private breadcrumbText(): string {
 		const parts = ["workflow"];
@@ -1057,7 +1070,7 @@ export class WorkflowView implements Component {
 	private footerText(width: number): string {
 		if (width < 72) {
 			if (this.mode === "task")
-				return "b/Esc back · l log · r refresh · q close";
+				return "←/→ artifact · ↑/↓ scroll · Esc back · r refresh · q close";
 			if (this.mode === "tasks")
 				return "Enter detail · ←/→ nav · ↑/↓ move · q close";
 			if (this.mode === "stages")
@@ -1065,7 +1078,7 @@ export class WorkflowView implements Component {
 			return "Enter stages · ↑/↓ move · q/Esc close";
 		}
 		if (this.mode === "task")
-			return "b/Esc/← back to tasks · [/]/n/p sibling task · l show log path · r refresh · q close";
+			return "←/→ switch Output/Prompt · ↑/↓ scroll artifact · b/Esc back · r refresh · q close";
 		if (this.mode === "tasks")
 			return "Enter/→ detail · b/Esc/← stages · ↑/↓ move · [/]/n/p sibling · r refresh · q close";
 		if (this.mode === "stages")
@@ -1156,18 +1169,23 @@ function runToSummary(cwd: string, run: WorkflowRunRecord): WorkflowSummary {
 	};
 }
 
-async function readFilePreview(
+
+async function readFileLinesBounded(
 	cwd: string,
-	projectPath: string,
+	projectPath: string | undefined,
 	maxLines: number,
-): Promise<string> {
+): Promise<string[]> {
+	if (!projectPath) return [];
 	const text = await readFile(fromProjectPath(cwd, projectPath), "utf8").catch(
 		(error) => {
 			if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
 			throw error;
 		},
 	);
-	return text.split(/\r?\n/).slice(-maxLines).join("\n").trim();
+	if (!text) return [];
+	const lines = text.split(/\r?\n/);
+	if (lines[lines.length - 1] === "") lines.pop();
+	return lines.slice(-maxLines);
 }
 
 function stageSummaries(
@@ -1350,6 +1368,30 @@ function statusText(status: WorkflowRunStatus | TaskRunStatus): string {
 	return status;
 }
 
+function taskListStatusLabel(
+	theme: Theme,
+	task: WorkflowTaskRunRecord,
+): string {
+	const validation = taskValidationSummary(task);
+	const label =
+		validation?.status === "invalid"
+			? "invalid output"
+			: validation?.status === "valid"
+				? "valid"
+				: task.status === "completed"
+					? "done"
+					: statusText(task.status);
+	return fg(theme, statusColor(task.status), strong(theme, label));
+}
+
+function compactStatusLabel(
+	theme: Theme,
+	status: WorkflowRunStatus | TaskRunStatus,
+): string {
+	const label = status === "completed" ? "done" : statusText(status);
+	return fg(theme, statusColor(status), strong(theme, label));
+}
+
 function runStatusLabel(flow: WorkflowSummary): string {
 	return statusText(flow.status);
 }
@@ -1358,15 +1400,6 @@ function shortId(runId: string): string {
 	return runId.replace(/^workflow_/, "workflow_").slice(0, 24);
 }
 
-function previewLines(
-	text: string,
-	fallback: string,
-	maxLines: number,
-): string[] {
-	const trimmed = text.trim();
-	if (!trimmed) return [fallback];
-	return trimmed.split(/\r?\n/).slice(-maxLines);
-}
 
 function visibleWindow<T>(
 	items: T[],
@@ -1406,6 +1439,37 @@ function wrapIndex(index: number, length: number): number {
 function clampIndex(index: number, length: number): number {
 	if (length <= 0) return 0;
 	return Math.max(0, Math.min(index, length - 1));
+}
+
+function taskProblemPriority(status: TaskRunStatus): number {
+	if (status === "failed" || status === "interrupted") return 0;
+	if (status === "blocked") return 1;
+	if (status === "running") return 2;
+	return 3;
+}
+
+function taskValidationSummary(
+	task: WorkflowTaskRunRecord,
+): { status: string; message: string } | undefined {
+	const validation = task.outputValidation;
+	if (!validation) return undefined;
+	const status =
+		validation.status ??
+		(validation.valid === true
+			? "valid"
+			: validation.valid === false
+				? "invalid"
+				: "warning");
+	const issue = Array.isArray(validation.issues)
+		? validation.issues[0]
+		: undefined;
+	const issueMessage =
+		typeof issue === "string"
+			? issue
+			: issue?.message ?? issue?.path ?? issue?.code ?? "";
+	const message = validation.message ?? validation.reason ?? issueMessage;
+	if (status === "valid" && !message) return undefined;
+	return { status, message };
 }
 
 const MOD_CTRL = 4;
@@ -1788,14 +1852,6 @@ function pathText(theme: Theme, projectPath: string): string {
 	return `${dim(theme, projectPath.slice(0, lastSlash + 1))}${metaValue(theme, projectPath.slice(lastSlash + 1))}`;
 }
 
-function commandLine(theme: Theme, command: string): string {
-	const parts = command.split(" ");
-	const head = parts.length >= 2 ? parts.slice(0, 2).join(" ") : command;
-	const rest = parts.length >= 2 ? parts.slice(2).join(" ") : "";
-	return rest
-		? `${accent(theme, head)} ${muted(theme, rest)}`
-		: accent(theme, head);
-}
 
 function navHint(theme: Theme, text: string): string {
 	return text

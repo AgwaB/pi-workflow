@@ -1,0 +1,40 @@
+{
+  "type": "object",
+  "required": ["schema", "digest", "candidates"],
+  "properties": {
+    "schema": { "type": "string", "minLength": 1 },
+    "digest": { "type": "string", "minLength": 1 },
+    "candidates": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "required": ["id", "title", "severity", "locations", "evidenceQuotes", "rationale", "recommendedAction"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "title": { "type": "string", "minLength": 1 },
+          "severity": { "type": "string", "minLength": 1 },
+          "locations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["file"],
+              "properties": {
+                "file": { "type": "string", "minLength": 1 },
+                "line": { "type": "number" },
+                "lineEnd": { "type": "number" },
+                "symbol": { "type": "string", "minLength": 1 }
+              },
+              "additionalProperties": false
+            }
+          },
+          "evidenceQuotes": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "rationale": { "type": "string" },
+          "recommendedAction": { "type": "string" }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

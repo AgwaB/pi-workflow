@@ -76,6 +76,10 @@ export interface WorkflowTaskArtifactBundleOptions
 	prompt?: string;
 	systemPrompt?: string;
 	stderr?: string;
+	salvagedFromFailureKind?: string;
+	subagentWarning?: string;
+	subagentStatus?: string;
+	subagentFailureKind?: string | null;
 }
 
 export interface WorkflowTaskResultEnvelope {
@@ -91,6 +95,10 @@ export interface WorkflowTaskResultEnvelope {
 		valid: boolean;
 		issues: WorkflowOutputIssue[];
 	};
+	salvagedFromFailureKind?: string;
+	subagentWarning?: string;
+	subagentStatus?: string;
+	subagentFailureKind?: string | null;
 }
 
 type ValidParsedWorkflowOutput = ParsedWorkflowOutput & {
@@ -160,12 +168,21 @@ export function parseWorkflowOutput(
 	);
 }
 
+export function parseWorkflowOutputForBundle(
+	raw: string,
+	options: ParseWorkflowOutputOptions = {},
+): ParsedWorkflowOutput {
+	const parsed = parseWorkflowOutput(raw, options);
+	if (parsed.valid) return parsed;
+	return parseSanitizedWorkflowOutput(raw, options) ?? parsed;
+}
+
 export async function writeWorkflowTaskArtifactBundle(
 	options: WorkflowTaskArtifactBundleOptions,
 ): Promise<WorkflowArtifactBundleWriteResult> {
 	const taskDir = resolve(options.taskDir);
 	await mkdir(taskDir, { recursive: true });
-	const parsed = parseWorkflowOutput(options.rawOutput, options);
+	const parsed = parseWorkflowOutputForBundle(options.rawOutput, options);
 	if (!parsed.valid)
 		return await writeInvalidWorkflowOutputAttempt(taskDir, parsed, options);
 	return await writeValidWorkflowOutputBundle(
@@ -244,6 +261,13 @@ function findSectionClose(
 		if (candidate < 0) break;
 		fallback = candidate;
 		const after = skipWhitespace(raw, candidate + options.closeTag.length);
+		if (
+			options.closeTag === "</control>" &&
+			isInsideJsonString(raw.slice(options.contentStart, candidate))
+		) {
+			searchFrom = candidate + options.closeTag.length;
+			continue;
+		}
 		if (options.nextTag) {
 			if (raw.startsWith(options.nextTag, after)) return candidate;
 		} else if (raw.slice(after).trim() === "") {
@@ -260,6 +284,23 @@ function skipWhitespace(raw: string, index: number): number {
 	return cursor;
 }
 
+function isInsideJsonString(text: string): boolean {
+	let inString = false;
+	let escaped = false;
+	for (const char of text) {
+		if (escaped) {
+			escaped = false;
+			continue;
+		}
+		if (char === "\\") {
+			escaped = true;
+			continue;
+		}
+		if (char === '"') inString = !inString;
+	}
+	return inString;
+}
+
 function validateSectionLayout(
 	raw: string,
 	sections: readonly SectionMatch[],
@@ -269,6 +310,89 @@ function validateSectionLayout(
 	validateSectionCounts(sections, issues, requirements);
 	validateCanonicalOrder(sections, issues, requirements);
 	validateNoOutsideText(raw, sections, issues);
+}
+
+function parseSanitizedWorkflowOutput(
+	raw: string,
+	options: ParseWorkflowOutputOptions,
+): ParsedWorkflowOutput | undefined {
+	const requirements = sectionRequirements(options);
+	const sections = collectSections(raw, requirements);
+	if (hasExactlyRequiredSections(sections, requirements)) {
+		const sanitized = sections
+			.map((section) => raw.slice(section.start, section.end).trim())
+			.join("\n");
+		if (sanitized !== raw.trim()) {
+			const parsed = parseWorkflowOutput(sanitized, options);
+			if (parsed.valid) return parsed;
+		}
+	}
+	const repaired = repairMissingTailSections(raw, requirements);
+	if (repaired !== undefined) {
+		const parsed = parseWorkflowOutput(repaired, options);
+		if (parsed.valid) return parsed;
+	}
+	return undefined;
+}
+
+function repairMissingTailSections(
+	raw: string,
+	requirements: SectionRequirements,
+): string | undefined {
+	const controlOpen = raw.indexOf("<control>");
+	if (controlOpen < 0) return undefined;
+	const controlContentStart = controlOpen + "<control>".length;
+	const controlClose = raw.indexOf("</control>", controlContentStart);
+	if (controlClose < 0) return undefined;
+	const controlContent = raw.slice(controlContentStart, controlClose).trim();
+	const afterControl = raw.slice(controlClose + "</control>".length);
+	let analysis = "";
+	let refs = "[]";
+	const analysisOpen = afterControl.indexOf("<analysis>");
+	if (requirements.analysisRequired) {
+		if (analysisOpen < 0) return undefined;
+		const analysisStart = analysisOpen + "<analysis>".length;
+		const analysisClose = afterControl.indexOf("</analysis>", analysisStart);
+		const refsOpenAfterAnalysis = afterControl.indexOf("<refs>", analysisStart);
+		const analysisEnd =
+			analysisClose >= 0
+				? analysisClose
+				: refsOpenAfterAnalysis >= 0
+					? refsOpenAfterAnalysis
+					: afterControl.length;
+		analysis = afterControl.slice(analysisStart, analysisEnd).trim();
+		if (analysis.length === 0) return undefined;
+	}
+	const refsSearchStart =
+		analysisOpen >= 0 ? analysisOpen + "<analysis>".length : 0;
+	const refsOpen = afterControl.indexOf("<refs>", refsSearchStart);
+	if (refsOpen >= 0) {
+		const refsStart = refsOpen + "<refs>".length;
+		const refsClose = afterControl.indexOf("</refs>", refsStart);
+		if (refsClose >= 0) refs = afterControl.slice(refsStart, refsClose).trim();
+	} else if (requirements.refsRequired) {
+		refs = "[]";
+	}
+	return [
+		"<control>",
+		controlContent,
+		"</control>",
+		"<analysis>",
+		analysis,
+		"</analysis>",
+		"<refs>",
+		refs,
+		"</refs>",
+	].join("\n");
+}
+
+function hasExactlyRequiredSections(
+	sections: readonly SectionMatch[],
+	requirements: SectionRequirements,
+): boolean {
+	const expected = requiredSectionOrder(requirements);
+	if (sections.length !== expected.length) return false;
+	return sections.every((section, index) => section.name === expected[index]);
 }
 
 function validateSectionCounts(
@@ -532,6 +656,14 @@ function validResultEnvelope(
 		exitCode: options.exitCode ?? (status === "completed" ? 0 : 1),
 		outputValidation: { valid: true, issues: [] },
 	};
+	if (options.salvagedFromFailureKind !== undefined)
+		result.salvagedFromFailureKind = options.salvagedFromFailureKind;
+	if (options.subagentWarning !== undefined)
+		result.subagentWarning = options.subagentWarning;
+	if (options.subagentStatus !== undefined)
+		result.subagentStatus = options.subagentStatus;
+	if (options.subagentFailureKind !== undefined)
+		result.subagentFailureKind = options.subagentFailureKind;
 	if (result.startedAt === undefined) delete result.startedAt;
 	return result;
 }
@@ -569,7 +701,9 @@ function requiredSectionOrder(
 	);
 }
 
-function missingSectionIssue(section: WorkflowOutputSectionName): WorkflowOutputIssue {
+function missingSectionIssue(
+	section: WorkflowOutputSectionName,
+): WorkflowOutputIssue {
 	return {
 		code: "missing_section",
 		section,
@@ -577,7 +711,9 @@ function missingSectionIssue(section: WorkflowOutputSectionName): WorkflowOutput
 	};
 }
 
-function duplicateSectionIssue(section: WorkflowOutputSectionName): WorkflowOutputIssue {
+function duplicateSectionIssue(
+	section: WorkflowOutputSectionName,
+): WorkflowOutputIssue {
 	return {
 		code: "duplicate_section",
 		section,

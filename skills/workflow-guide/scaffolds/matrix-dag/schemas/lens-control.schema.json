@@ -1,0 +1,83 @@
+{
+  "type": "object",
+  "required": [
+    "schema",
+    "digest",
+    "lens",
+    "status",
+    "findings",
+    "questions"
+  ],
+  "properties": {
+    "schema": {
+      "const": "stage-control-v1"
+    },
+    "digest": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 600
+    },
+    "lens": {
+      "type": "string",
+      "enum": [
+        "api",
+        "state",
+        "tests",
+        "docs",
+        "security"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "clear",
+        "concern",
+        "blocked",
+        "unknown"
+      ]
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "severity",
+          "summary"
+        ],
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": [
+              "blocker",
+              "high",
+              "medium",
+              "low",
+              "info"
+            ]
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000
+          },
+          "evidence": {
+            "type": "string",
+            "maxLength": 1000
+          }
+        },
+        "additionalProperties": false
+      },
+      "maxItems": 40
+    },
+    "questions": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 500
+      },
+      "maxItems": 20
+    }
+  },
+  "additionalProperties": false
+}

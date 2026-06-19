@@ -1,0 +1,54 @@
+{
+  "type": "object",
+  "required": [
+    "schema",
+    "digest",
+    "changeSummary",
+    "changedFiles",
+    "assumptions",
+    "outOfScope"
+  ],
+  "properties": {
+    "schema": {
+      "const": "stage-control-v1"
+    },
+    "digest": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 600
+    },
+    "changeSummary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000
+    },
+    "changedFiles": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 300
+      },
+      "maxItems": 100
+    },
+    "assumptions": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 500
+      },
+      "maxItems": 30
+    },
+    "outOfScope": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 500
+      },
+      "maxItems": 30
+    }
+  },
+  "additionalProperties": false
+}

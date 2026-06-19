@@ -1,0 +1,441 @@
+{
+  "type": "object",
+  "required": [
+    "schema",
+    "digest",
+    "partitions",
+    "reportContext",
+    "sourceStatusSummary",
+    "partitionSummary",
+    "normalizationNotes"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "minLength": 1
+    },
+    "digest": {
+      "type": "string",
+      "minLength": 1
+    },
+    "partitions": {
+      "type": "object",
+      "required": [
+        "keep",
+        "weaken",
+        "drop",
+        "needsHuman"
+      ],
+      "properties": {
+        "keep": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "weaken": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "drop": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "needsHuman": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "supportNotes": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "reportContext": {
+      "type": "object",
+      "required": [
+        "keep",
+        "weaken",
+        "needsHuman",
+        "supportNoteSummaries",
+        "partialFailures",
+        "partitionSummary",
+        "normalizationNotes"
+      ],
+      "properties": {
+        "keep": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "findingId",
+              "rootCauseId",
+              "title",
+              "severity",
+              "locations",
+              "evidenceQuotes"
+            ],
+            "properties": {
+              "findingId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "rootCauseId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1
+              },
+              "severity": {
+                "type": "string",
+                "minLength": 1
+              },
+              "file": {
+                "type": "string",
+                "minLength": 1
+              },
+              "locations": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "file"
+                  ],
+                  "properties": {
+                    "file": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "line": {
+                      "type": "number"
+                    },
+                    "lineEnd": {
+                      "type": "number"
+                    },
+                    "symbol": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                }
+              },
+              "evidenceQuotes": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "recommendedAction": {
+                "type": "string"
+              },
+              "counterEvidence": {
+                "type": "array"
+              },
+              "note": {
+                "type": "string"
+              },
+              "mergedFindingIds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        },
+        "weaken": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "findingId",
+              "rootCauseId",
+              "title",
+              "severity",
+              "locations",
+              "evidenceQuotes"
+            ],
+            "properties": {
+              "findingId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "rootCauseId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1
+              },
+              "severity": {
+                "type": "string",
+                "minLength": 1
+              },
+              "locations": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "file"
+                  ],
+                  "properties": {
+                    "file": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "line": {
+                      "type": "number"
+                    },
+                    "lineEnd": {
+                      "type": "number"
+                    },
+                    "symbol": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                }
+              },
+              "evidenceQuotes": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        },
+        "needsHuman": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "findingId",
+              "rootCauseId",
+              "title",
+              "severity"
+            ],
+            "properties": {
+              "findingId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "rootCauseId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1
+              },
+              "severity": {
+                "type": "string",
+                "minLength": 1
+              },
+              "locations": {
+                "type": "array",
+                "items": {
+                  "type": "object"
+                }
+              },
+              "evidenceQuotes": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "supportNoteSummaries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "title"
+            ],
+            "properties": {
+              "title": {
+                "type": "string",
+                "minLength": 1
+              },
+              "severity": {
+                "type": "string"
+              },
+              "file": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "supportingFindingOf": {
+                "type": "string"
+              },
+              "locations": {
+                "type": "array"
+              },
+              "evidenceQuotes": {
+                "type": "array"
+              }
+            }
+          }
+        },
+        "partialFailures": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "status"
+            ],
+            "properties": {
+              "source": {
+                "type": "string"
+              },
+              "displayName": {
+                "type": "string"
+              },
+              "taskId": {
+                "type": "string"
+              },
+              "specId": {
+                "type": "string"
+              },
+              "stageId": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string",
+                "minLength": 1
+              },
+              "statusDetail": {
+                "type": "string"
+              },
+              "lastMessage": {
+                "type": "string"
+              },
+              "errorType": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "partitionSummary": {
+          "type": "object"
+        },
+        "normalizationNotes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "sourceStatusSummary": {
+      "type": "object",
+      "required": [
+        "total",
+        "completed",
+        "nonCompleted",
+        "partialFailures"
+      ],
+      "properties": {
+        "total": {
+          "type": "number",
+          "minimum": 0
+        },
+        "completed": {
+          "type": "number",
+          "minimum": 0
+        },
+        "nonCompleted": {
+          "type": "number",
+          "minimum": 0
+        },
+        "partialFailures": {
+          "type": "array"
+        }
+      }
+    },
+    "partitionSummary": {
+      "type": "object",
+      "required": [
+        "keep",
+        "weaken",
+        "drop",
+        "needsHuman",
+        "supportNotes",
+        "mergedFindings",
+        "verdictsReceived",
+        "reviewerFindings",
+        "missingVerdicts",
+        "partialFailures"
+      ],
+      "properties": {
+        "keep": {
+          "type": "number",
+          "minimum": 0
+        },
+        "weaken": {
+          "type": "number",
+          "minimum": 0
+        },
+        "drop": {
+          "type": "number",
+          "minimum": 0
+        },
+        "needsHuman": {
+          "type": "number",
+          "minimum": 0
+        },
+        "supportNotes": {
+          "type": "number",
+          "minimum": 0
+        },
+        "mergedFindings": {
+          "type": "number",
+          "minimum": 0
+        },
+        "verdictsReceived": {
+          "type": "number",
+          "minimum": 0
+        },
+        "reviewerFindings": {
+          "type": "number",
+          "minimum": 0
+        },
+        "missingVerdicts": {
+          "type": "number",
+          "minimum": 0
+        },
+        "partialFailures": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "normalizationNotes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

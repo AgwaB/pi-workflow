@@ -17,15 +17,18 @@ import {
 	dirname,
 	isAbsolute,
 	join,
+	normalize,
 	relative,
 	resolve,
 	sep,
 } from "node:path";
 import { randomBytes } from "node:crypto";
 
+import { parseWorkflow } from "./schema.js";
 import {
 	type CompiledWorkflow,
 	type CompiledTask,
+	type CompiledLoopStageRecord,
 	WORKFLOW_RUN_TYPE,
 	type WorkflowIndexRecord,
 	type WorkflowRunRecord,
@@ -294,8 +297,9 @@ export async function createRunRecord(
 	cwd: string,
 	compiled: CompiledWorkflow,
 	specPath: string,
+	options: { runId?: string; parentRunId?: string; rootRunId?: string } = {},
 ): Promise<{ run: WorkflowRunRecord; runDir: string }> {
-	const runId = makeRunId();
+	const runId = options.runId ?? makeRunId();
 	const runDir = workflowRunDir(cwd, runId);
 	await ensureDir(runDir);
 	await ensureDir(join(runDir, "tasks"));
@@ -304,6 +308,8 @@ export async function createRunRecord(
 	const tasks = compiled.tasks.map((task, index) =>
 		createTaskRunRecord(cwd, runId, task, index),
 	);
+	const hasDynamicController = compiledWorkflowHasDynamicController(compiled);
+	if (hasDynamicController) await ensureDir(join(runDir, "dynamic"));
 	const run = deriveRunStatus({
 		schemaVersion: 1,
 		runId,
@@ -315,6 +321,16 @@ export async function createRunRecord(
 		taskSummary: emptySummary(),
 		cwd: compiled.cwd,
 		backend: compiled.backend,
+		...(options.parentRunId ? { parentRunId: options.parentRunId } : {}),
+		...(options.rootRunId ? { rootRunId: options.rootRunId } : {}),
+		...(hasDynamicController
+			? {
+					dynamic: {
+						events: toProjectPath(cwd, join(runDir, "dynamic", "events.jsonl")),
+						state: toProjectPath(cwd, join(runDir, "dynamic", "state.json")),
+					},
+				}
+			: {}),
 		createdAt,
 		updatedAt: createdAt,
 		specPath,
@@ -336,6 +352,18 @@ export async function writeRunRecord(
 	await updateIndex(cwd).catch(() => undefined);
 }
 
+export async function writeCompiledRunArtifact(
+	cwd: string,
+	runId: string,
+	compiled: CompiledWorkflow,
+): Promise<void> {
+	const runDir = workflowRunDir(cwd, runId);
+	await writeJsonAtomic(
+		join(runDir, "compiled.json"),
+		rewriteCompiledBundlePaths(compiled, join(runDir, "bundle")),
+	);
+}
+
 export async function writeStaticRunArtifacts(
 	cwd: string,
 	run: WorkflowRunRecord,
@@ -344,41 +372,277 @@ export async function writeStaticRunArtifacts(
 ): Promise<void> {
 	const runDir = workflowRunDir(cwd, run.runId);
 	await writeJsonAtomic(join(runDir, "spec.json"), originalSpec);
-	await writeJsonAtomic(join(runDir, "compiled.json"), compiled);
-	await copyWorkflowBundleArtifacts(run.specPath, join(runDir, "bundle"));
+	await writeCompiledRunArtifact(cwd, run.runId, compiled);
+	await copyWorkflowBundleArtifacts(
+		cwd,
+		run.specPath,
+		join(runDir, "bundle"),
+		originalSpec,
+	);
+}
+
+function rewriteCompiledBundlePaths(
+	compiled: CompiledWorkflow,
+	bundleDir: string,
+): CompiledWorkflow {
+	const rewritten = JSON.parse(JSON.stringify(compiled)) as CompiledWorkflow;
+	rewriteCompiledBundlePathsInValue(rewritten, bundleDir);
+	return rewritten;
+}
+
+function rewriteCompiledBundlePathsInValue(value: unknown, bundleDir: string): void {
+	if (!value || typeof value !== "object") return;
+	if (Array.isArray(value)) {
+		for (const item of value) rewriteCompiledBundlePathsInValue(item, bundleDir);
+		return;
+	}
+	const record = value as Record<string, any>;
+	const output = record.artifactGraph?.output;
+	if (output?.controlSchema) {
+		output.controlSchemaPath = join(
+			bundleDir,
+			stripBundleRefPrefix(output.controlSchema),
+		);
+	}
+	if (record.kind === "dynamic" && record.dynamic?.uses) {
+		record.agentPath = join(bundleDir, stripBundleRefPrefix(record.dynamic.uses));
+	}
+	if (record.kind === "support" && record.support?.uses) {
+		record.agentPath = join(bundleDir, stripBundleRefPrefix(record.support.uses));
+	}
+	if (record.dynamic) {
+		const dynamic = record.dynamic;
+		if (dynamic.uses) {
+			dynamic.usesPath = join(bundleDir, stripBundleRefPrefix(dynamic.uses));
+		}
+		for (const helper of Object.values(dynamic.helpers ?? {}) as any[]) {
+			if (helper.uses) {
+				helper.usesPath = join(bundleDir, stripBundleRefPrefix(helper.uses));
+			}
+			if (helper.inputSchema) {
+				helper.inputSchemaPath = join(
+					bundleDir,
+					stripBundleRefPrefix(helper.inputSchema),
+				);
+			}
+			if (helper.outputSchema) {
+				helper.outputSchemaPath = join(
+					bundleDir,
+					stripBundleRefPrefix(helper.outputSchema),
+				);
+			}
+		}
+		for (const workflow of Object.values(dynamic.workflows ?? {}) as any[]) {
+			if (workflow.uses) {
+				workflow.usesPath = join(
+					bundleDir,
+					stripBundleRefPrefix(workflow.uses),
+				);
+			}
+		}
+	}
+	for (const item of Object.values(record)) {
+		rewriteCompiledBundlePathsInValue(item, bundleDir);
+	}
+}
+
+function stripBundleRefPrefix(ref: string): string {
+	return ref.startsWith("./") ? ref.slice(2) : ref;
 }
 
 async function copyWorkflowBundleArtifacts(
+	cwd: string,
 	specPath: string,
 	targetDir: string,
+	spec: unknown,
 ): Promise<void> {
-	if (basename(specPath) !== "spec.json") return;
-	const sourceDir = dirname(specPath);
+	const sourceSpecPath = isAbsolute(specPath) ? specPath : resolve(cwd, specPath);
+	const sourceDir = dirname(sourceSpecPath);
 	if (resolve(sourceDir) === resolve(targetDir)) return;
-	const sourceRoot = await realpath(sourceDir);
-	const spec = JSON.parse(await readFile(specPath, "utf8"));
-	const refs = collectWorkflowBundleRefs(spec);
-	refs.add("spec.json");
-	for (const ref of refs) {
+	let sourceRoot: string;
+	try {
+		sourceRoot = await realpath(sourceDir);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+		throw error;
+	}
+	const entrySpecName = basename(sourceSpecPath);
+	const collection = collectWorkflowBundleRefs(spec);
+	collection.refs.add(entrySpecName);
+	await collectNestedWorkflowBundleRefs(sourceRoot, collection);
+	for (const ref of collection.refs) {
 		await copyWorkflowBundleFile(sourceRoot, targetDir, ref);
 	}
 }
 
-function collectWorkflowBundleRefs(value: unknown): Set<string> {
-	const refs = new Set<string>();
-	visitWorkflowBundleRefs(value, refs);
-	return refs;
+interface WorkflowBundleRefCollection {
+	refs: Set<string>;
+	schemaRefs: Set<string>;
+	workflowRefs: Set<string>;
 }
 
-function visitWorkflowBundleRefs(value: unknown, refs: Set<string>): void {
+async function collectNestedWorkflowBundleRefs(
+	sourceRoot: string,
+	collection: WorkflowBundleRefCollection,
+): Promise<void> {
+	const seenWorkflow = new Set<string>();
+	const seenSchema = new Set<string>();
+	const seenCode = new Set<string>();
+	let changed = true;
+	while (changed) {
+		changed = false;
+		for (const ref of [...collection.workflowRefs]) {
+			if (seenWorkflow.has(ref) || !ref.endsWith(".json")) continue;
+			seenWorkflow.add(ref);
+			const nested = await readJsonBundleFile(sourceRoot, ref);
+			if (nested === undefined) continue;
+			parseWorkflow(nested);
+			const nestedPrefix = dirname(ref);
+			const nestedCollection = collectWorkflowBundleRefs(nested);
+			for (const nestedRef of nestedCollection.refs) {
+				const combined =
+					nestedPrefix === "." ? nestedRef : join(nestedPrefix, nestedRef);
+				if (!collection.refs.has(combined)) {
+					collection.refs.add(combined);
+					changed = true;
+				}
+			}
+			for (const nestedRef of nestedCollection.workflowRefs) {
+				const combined =
+					nestedPrefix === "." ? nestedRef : join(nestedPrefix, nestedRef);
+				if (!collection.workflowRefs.has(combined)) {
+					collection.workflowRefs.add(combined);
+					changed = true;
+				}
+			}
+			for (const nestedRef of nestedCollection.schemaRefs) {
+				const combined =
+					nestedPrefix === "." ? nestedRef : join(nestedPrefix, nestedRef);
+				if (!collection.schemaRefs.has(combined)) {
+					collection.schemaRefs.add(combined);
+					changed = true;
+				}
+			}
+		}
+		for (const ref of [...collection.schemaRefs]) {
+			if (seenSchema.has(ref) || !ref.endsWith(".json")) continue;
+			seenSchema.add(ref);
+			const schema = await readJsonBundleFile(sourceRoot, ref);
+			if (schema === undefined) continue;
+			for (const schemaRef of collectJsonSchemaBundleRefs(schema)) {
+				const combined = normalizeBundleRelativeRef(
+					dirname(ref) === "." ? schemaRef : join(dirname(ref), schemaRef),
+				);
+				if (!combined) {
+					throw new Error(
+						`workflow bundle schema ref escapes workflow directory: ${schemaRef} in ${ref}`,
+					);
+				}
+				if (!collection.refs.has(combined)) {
+					collection.refs.add(combined);
+					changed = true;
+				}
+				if (!collection.schemaRefs.has(combined)) {
+					collection.schemaRefs.add(combined);
+					changed = true;
+				}
+			}
+		}
+		for (const ref of [...collection.refs]) {
+			if (seenCode.has(ref) || !/\.(mjs|cjs|js)$/.test(ref)) continue;
+			seenCode.add(ref);
+			const source = await readBundleText(sourceRoot, ref);
+			if (source === undefined) continue;
+			for (const imported of await collectLocalEsModuleRefs(sourceRoot, source, ref)) {
+				if (!collection.refs.has(imported)) {
+					collection.refs.add(imported);
+					changed = true;
+				}
+				if (imported.endsWith(".js") || imported.endsWith(".cjs")) {
+					for (const packageRef of await packageJsonRefsForJsImport(
+						sourceRoot,
+						imported,
+					)) {
+						if (!collection.refs.has(packageRef)) {
+							collection.refs.add(packageRef);
+							changed = true;
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+async function readJsonBundleFile(
+	sourceRoot: string,
+	ref: string,
+): Promise<unknown | undefined> {
+	const text = await readBundleText(sourceRoot, ref);
+	return text === undefined ? undefined : JSON.parse(text);
+}
+
+async function readBundleText(
+	sourceRoot: string,
+	ref: string,
+): Promise<string | undefined> {
+	const normalized = normalizeBundleRelativeRef(ref);
+	if (!normalized) return undefined;
+	const candidate = resolve(sourceRoot, normalized);
+	let realSource: string;
+	try {
+		realSource = await realpath(candidate);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		throw error;
+	}
+	const sourceRelative = relative(sourceRoot, realSource);
+	if (
+		sourceRelative === ".." ||
+		sourceRelative.startsWith(`..${sep}`) ||
+		isAbsolute(sourceRelative)
+	) {
+		return undefined;
+	}
+	return readFile(realSource, "utf8");
+}
+
+async function packageJsonRefsForJsImport(
+	sourceRoot: string,
+	importedRef: string,
+): Promise<string[]> {
+	let current = dirname(importedRef);
+	while (true) {
+		const candidate = current === "." ? "package.json" : join(current, "package.json");
+		const text = await readBundleText(sourceRoot, candidate).catch(() => undefined);
+		if (text !== undefined) return [candidate];
+		if (current === "." || current === "") return [];
+		current = dirname(current);
+	}
+}
+
+function collectWorkflowBundleRefs(value: unknown): WorkflowBundleRefCollection {
+	const collection: WorkflowBundleRefCollection = {
+		refs: new Set<string>(),
+		schemaRefs: new Set<string>(),
+		workflowRefs: new Set<string>(),
+	};
+	visitWorkflowBundleRefs(value, collection);
+	return collection;
+}
+
+function visitWorkflowBundleRefs(
+	value: unknown,
+	collection: WorkflowBundleRefCollection,
+): void {
 	if (!value || typeof value !== "object") return;
 	if (Array.isArray(value)) {
-		for (const item of value) visitWorkflowBundleRefs(item, refs);
+		for (const item of value) visitWorkflowBundleRefs(item, collection);
 		return;
 	}
 	const record = value as Record<string, unknown>;
 	if (typeof record.controlSchema === "string") {
-		addWorkflowBundleRef(refs, record.controlSchema);
+		addWorkflowBundleRef(collection, record.controlSchema, "schema");
 	}
 	if (
 		record.support &&
@@ -387,15 +651,254 @@ function visitWorkflowBundleRefs(value: unknown, refs: Set<string>): void {
 	) {
 		const support = record.support as Record<string, unknown>;
 		if (typeof support.uses === "string") {
-			addWorkflowBundleRef(refs, support.uses);
+			addWorkflowBundleRef(collection, support.uses, "file");
 		}
 	}
-	for (const item of Object.values(record)) visitWorkflowBundleRefs(item, refs);
+	if (
+		record.dynamic &&
+		typeof record.dynamic === "object" &&
+		!Array.isArray(record.dynamic)
+	) {
+		const dynamic = record.dynamic as Record<string, unknown>;
+		if (typeof dynamic.uses === "string") {
+			addWorkflowBundleRef(collection, dynamic.uses, "file");
+		}
+		if (
+			dynamic.helpers &&
+			typeof dynamic.helpers === "object" &&
+			!Array.isArray(dynamic.helpers)
+		) {
+			for (const helper of Object.values(dynamic.helpers)) {
+				if (!helper || typeof helper !== "object" || Array.isArray(helper))
+					continue;
+				const helperRecord = helper as Record<string, unknown>;
+				if (typeof helperRecord.uses === "string")
+					addWorkflowBundleRef(collection, helperRecord.uses, "file");
+				if (typeof helperRecord.inputSchema === "string")
+					addWorkflowBundleRef(collection, helperRecord.inputSchema, "schema");
+				if (typeof helperRecord.outputSchema === "string")
+					addWorkflowBundleRef(collection, helperRecord.outputSchema, "schema");
+			}
+		}
+		if (
+			dynamic.workflows &&
+			typeof dynamic.workflows === "object" &&
+			!Array.isArray(dynamic.workflows)
+		) {
+			for (const workflow of Object.values(dynamic.workflows)) {
+				if (!workflow || typeof workflow !== "object" || Array.isArray(workflow))
+					continue;
+				const workflowRecord = workflow as Record<string, unknown>;
+				if (typeof workflowRecord.uses === "string")
+					addWorkflowBundleRef(collection, workflowRecord.uses, "workflow");
+			}
+		}
+	}
+	if (
+		record.output &&
+		typeof record.output === "object" &&
+		!Array.isArray(record.output)
+	) {
+		visitWorkflowBundleRefs(record.output, collection);
+	}
+	if (record.each && typeof record.each === "object" && !Array.isArray(record.each)) {
+		visitWorkflowBundleRefs(record.each, collection);
+	}
+	if (
+		record.onExhausted &&
+		typeof record.onExhausted === "object" &&
+		!Array.isArray(record.onExhausted)
+	) {
+		visitWorkflowBundleRefs(record.onExhausted, collection);
+	}
+	if (Array.isArray(record.stages)) {
+		for (const stage of record.stages) visitWorkflowBundleRefs(stage, collection);
+	}
+	if (record.artifactGraph && typeof record.artifactGraph === "object") {
+		visitWorkflowBundleRefs(record.artifactGraph, collection);
+	}
 }
 
-function addWorkflowBundleRef(refs: Set<string>, ref: string): void {
+function collectJsonSchemaBundleRefs(value: unknown): Set<string> {
+	const refs = new Set<string>();
+	visitJsonSchemaBundleRefs(value, refs);
+	return refs;
+}
+
+function visitJsonSchemaBundleRefs(value: unknown, refs: Set<string>): void {
+	if (!value || typeof value !== "object") return;
+	if (Array.isArray(value)) {
+		for (const item of value) visitJsonSchemaBundleRefs(item, refs);
+		return;
+	}
+	const record = value as Record<string, unknown>;
+	if (typeof record.$ref === "string") addJsonSchemaBundleRef(refs, record.$ref);
+	for (const item of Object.values(record)) visitJsonSchemaBundleRefs(item, refs);
+}
+
+function addWorkflowBundleRef(
+	collection: WorkflowBundleRefCollection,
+	ref: string,
+	kind: "file" | "schema" | "workflow",
+): void {
 	if (!ref.startsWith("./")) return;
-	refs.add(ref.slice(2));
+	const normalized = normalizeBundleRelativeRef(ref.slice(2));
+	if (!normalized) {
+		throw new Error(`workflow bundle ref escapes workflow directory: ${ref}`);
+	}
+	collection.refs.add(normalized);
+	if (kind === "schema") collection.schemaRefs.add(normalized);
+	if (kind === "workflow") collection.workflowRefs.add(normalized);
+}
+
+function addJsonSchemaBundleRef(refs: Set<string>, ref: string): void {
+	const [pathPart] = ref.split("#");
+	if (!pathPart) return;
+	if (
+		isAbsolute(pathPart) ||
+		pathPart.includes("\\") ||
+		pathPart.includes("://") ||
+		/^[A-Za-z][A-Za-z0-9+.-]*:/.test(pathPart)
+	) {
+		return;
+	}
+	refs.add(pathPart.startsWith("./") ? pathPart.slice(2) : pathPart);
+}
+
+async function collectLocalEsModuleRefs(
+	sourceRoot: string,
+	source: string,
+	ownerRef: string,
+): Promise<string[]> {
+	const refs: string[] = [];
+	const importPattern =
+		/(?:import|export)\s*(?:[^'";]*?\s*from\s*)?["']([^"']+)["']|import\s*\(\s*["']([^"']+)["']\s*(?:,[^)]*)?\)|require\s*\(\s*["']([^"']+)["']\s*\)/g;
+	const sourceForScan = stripJavaScriptComments(source);
+	for (const match of sourceForScan.matchAll(importPattern)) {
+		if (match.index !== undefined && isInsideJavaScriptString(sourceForScan, match.index)) continue;
+		const specifier = match[1] ?? match[2] ?? match[3];
+		if (!specifier?.startsWith(".")) continue;
+		const combined = normalizeBundleRelativeRef(join(dirname(ownerRef), specifier));
+		if (!combined) {
+			throw new Error(
+				`workflow bundle import escapes workflow directory: ${specifier} in ${ownerRef}`,
+			);
+		}
+		refs.push(...(await resolveLocalBundleImportRefs(sourceRoot, combined, specifier, ownerRef)));
+	}
+	return uniqueStringArray(refs);
+}
+
+async function resolveLocalBundleImportRefs(
+	sourceRoot: string,
+	ref: string,
+	specifier: string,
+	ownerRef: string,
+): Promise<string[]> {
+	if (/\.(mjs|cjs|js|json)$/.test(ref)) return [ref];
+	const candidates = [
+		`${ref}.js`,
+		`${ref}.cjs`,
+		`${ref}.json`,
+		join(ref, "index.js"),
+		join(ref, "index.cjs"),
+		join(ref, "index.json"),
+	].map((candidate) => normalizeBundleRelativeRef(candidate));
+	for (const candidate of candidates) {
+		if (!candidate) continue;
+		try {
+			if ((await stat(resolve(sourceRoot, candidate))).isFile()) return [candidate];
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		}
+	}
+	throw new Error(
+		`workflow bundle import cannot be resolved: ${specifier} in ${ownerRef}; use a bundle-local file with an explicit extension or a resolvable .js/.cjs/.json/index file`,
+	);
+}
+
+function isInsideJavaScriptString(source: string, index: number): boolean {
+	let quote: '"' | "'" | "`" | undefined;
+	for (let i = 0; i < index; i += 1) {
+		const char = source[i]!;
+		if (quote) {
+			if (char === "\\") {
+				i += 1;
+				continue;
+			}
+			if (char === quote) quote = undefined;
+			continue;
+		}
+		if (char === '"' || char === "'" || char === "`") quote = char;
+	}
+	return quote !== undefined;
+}
+
+function stripJavaScriptComments(source: string): string {
+	let result = "";
+	let i = 0;
+	let quote: '"' | "'" | "`" | undefined;
+	while (i < source.length) {
+		const char = source[i]!;
+		const next = source[i + 1];
+		if (quote) {
+			result += char;
+			if (char === "\\") {
+				if (next !== undefined) result += next;
+				i += 2;
+				continue;
+			}
+			if (char === quote) quote = undefined;
+			i += 1;
+			continue;
+		}
+		if (char === '"' || char === "'" || char === "`") {
+			quote = char;
+			result += char;
+			i += 1;
+			continue;
+		}
+		if (char === "/" && next === "/") {
+			while (i < source.length && source[i] !== "\n") {
+				result += " ";
+				i += 1;
+			}
+			continue;
+		}
+		if (char === "/" && next === "*") {
+			result += "  ";
+			i += 2;
+			while (i < source.length && !(source[i] === "*" && source[i + 1] === "/")) {
+				result += source[i] === "\n" ? "\n" : " ";
+				i += 1;
+			}
+			if (i < source.length) {
+				result += "  ";
+				i += 2;
+			}
+			continue;
+		}
+		result += char;
+		i += 1;
+	}
+	return result;
+}
+
+function normalizeBundleRelativeRef(ref: string): string | undefined {
+	const normalized = normalize(ref).replaceAll("\\", "/");
+	if (
+		normalized === "." ||
+		isAbsolute(normalized) ||
+		normalized === ".." ||
+		normalized.startsWith("../")
+	) {
+		return undefined;
+	}
+	return normalized.startsWith("./") ? normalized.slice(2) : normalized;
+}
+
+function uniqueStringArray(values: string[]): string[] {
+	return [...new Set(values)];
 }
 
 async function copyWorkflowBundleFile(
@@ -565,11 +1068,18 @@ export async function updateIndex(cwd: string): Promise<WorkflowIndexRecord> {
 				taskSummary: run.taskSummary,
 				createdAt: run.createdAt,
 				updatedAt: run.updatedAt,
+				parentRunId: run.parentRunId,
+				rootRunId: run.rootRunId,
+				round: run.round,
+				fanout: run.fanout,
 				runJson: toProjectPath(cwd, workflowRunPath(cwd, run.runId)),
 				tasks: run.tasks.map((task) => ({
 					taskId: task.taskId,
 					displayName: task.displayName,
 					agent: task.agent,
+					kind: task.kind,
+					stageId: task.stageId,
+					backendHandle: task.backendHandle,
 					status: task.status,
 					statusDetail: task.statusDetail,
 					lastMessage: task.lastMessage,
@@ -649,9 +1159,21 @@ const RESUMABLE_TASK_STATUSES = new Set<TaskRunStatus>([
 	"interrupted",
 	"skipped",
 ]);
+const RESUMABLE_BLOCKED_STATUS_DETAILS = new Set([
+	"dynamic_ui_unavailable",
+	"dynamic_approval_timeout",
+]);
 
 export function resetTaskForResume(task: WorkflowTaskRunRecord): boolean {
-	if (!RESUMABLE_TASK_STATUSES.has(task.status)) return false;
+	if (
+		!RESUMABLE_TASK_STATUSES.has(task.status) &&
+		!(
+			task.status === "blocked" &&
+			RESUMABLE_BLOCKED_STATUS_DETAILS.has(task.statusDetail)
+		)
+	) {
+		return false;
+	}
 	task.status = "pending";
 	task.statusDetail = "pending";
 	task.startedAt = undefined;
@@ -671,6 +1193,42 @@ function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function compiledWorkflowHasDynamicController(compiled: CompiledWorkflow): boolean {
+	return (
+		compiled.tasks.some(compiledTaskHasDynamicController) ||
+		(compiled.stages ?? []).some(compiledStageRecordHasDynamicController)
+	);
+}
+
+function compiledTaskHasDynamicController(task: CompiledTask): boolean {
+	return task.kind === "dynamic";
+}
+
+function compiledStageRecordHasDynamicController(
+	record: Record<string, unknown> | CompiledLoopStageRecord,
+): boolean {
+	if (
+		"childTemplates" in record &&
+		Array.isArray(record.childTemplates) &&
+		record.childTemplates.some(compiledTaskHasDynamicController)
+	) {
+		return true;
+	}
+	if ("onExhausted" in record) {
+		const onExhausted = record.onExhausted;
+		if (
+			onExhausted &&
+			typeof onExhausted === "object" &&
+			"template" in onExhausted &&
+			onExhausted.template &&
+			compiledTaskHasDynamicController(onExhausted.template as CompiledTask)
+		) {
+			return true;
+		}
+	}
+	return false;
+}
+
 export function createTaskRunRecord(
 	cwd: string,
 	runId: string,
@@ -687,6 +1245,22 @@ export function createTaskRunRecord(
 		result: toProjectPath(cwd, join(dir, "result.json")),
 	};
 	const blocked = task.safety.permission.status === "blocked";
+	const bundleDir = join(workflowRunDir(cwd, runId), "bundle");
+	const agentFile =
+		task.kind === "dynamic" && task.dynamic?.uses
+			? toProjectPath(cwd, join(bundleDir, stripBundleRefPrefix(task.dynamic.uses)))
+			: task.kind === "support" && task.support?.uses
+				? toProjectPath(cwd, join(bundleDir, stripBundleRefPrefix(task.support.uses)))
+				: task.agentPath;
+	const taskArtifactGraph = task.artifactGraph
+		? (JSON.parse(JSON.stringify(task.artifactGraph)) as typeof task.artifactGraph)
+		: undefined;
+	if (taskArtifactGraph) {
+		rewriteCompiledBundlePathsInValue(
+			{ artifactGraph: taskArtifactGraph },
+			bundleDir,
+		);
+	}
 
 	return {
 		taskId,
@@ -694,7 +1268,7 @@ export function createTaskRunRecord(
 		displayName: task.id,
 		agent: task.agent,
 		agentDescription: task.agentDescription,
-		agentFile: task.agentPath,
+		agentFile,
 		roles: task.roleNames,
 		status: blocked ? "blocked" : "pending",
 		statusDetail: blocked
@@ -719,7 +1293,8 @@ export function createTaskRunRecord(
 		kind: task.kind,
 		stageId: task.stageId,
 		dependsOn: task.dependsOn,
-		artifactGraph: task.artifactGraph,
+		artifactGraph: taskArtifactGraph,
+		dynamicGenerated: task.dynamicGenerated,
 		files,
 		lastMessage: blocked ? task.safety.permission.reason : undefined,
 	};

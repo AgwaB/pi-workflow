@@ -16,7 +16,9 @@ AGENTS.md
 
 # Local work history, workflow state, caches, and generated test evidence
 .memory/
+.gjc/
 .harness/
+.harness-project/
 cache/
 skill-test-runs/
 internal/

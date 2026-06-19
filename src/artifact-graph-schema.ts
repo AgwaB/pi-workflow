@@ -29,6 +29,7 @@ const STAGE_TYPES = new Set<ArtifactGraphStageType>([
 	"foreach",
 	"loop",
 	"dag",
+	"dynamic",
 ]);
 const STAGE_KEYS = new Set([
 	"id",
@@ -58,6 +59,7 @@ const STAGE_KEYS = new Set([
 	"stages",
 	"outputFrom",
 	"support",
+	"dynamic",
 	"until",
 	"maxRounds",
 	"progressPath",
@@ -73,6 +75,53 @@ const REQUIRED_FLAG_KEYS = new Set(["required"]);
 const INPUT_POLICY_KEYS = new Set(["requiredReads", "enforcement"]);
 const SOURCE_PROJECTION_KEYS = new Set(["include", "maxChars"]);
 const SUPPORT_KEYS = new Set(["uses", "options"]);
+const DYNAMIC_STAGE_FORBIDDEN_KEYS = new Set([
+	"prompt",
+	"injectRuntimeTask",
+	"agent",
+	"role",
+	"cwd",
+	"model",
+	"thinking",
+	"fast",
+	"approvalMode",
+	"tools",
+	"readOnly",
+	"worktreePolicy",
+	"maxRuntimeMs",
+	"maxConcurrency",
+	"maxItems",
+]);
+const DYNAMIC_KEYS = new Set([
+	"uses",
+	"mode",
+	"budget",
+	"permissions",
+	"helpers",
+	"workflows",
+]);
+const DYNAMIC_BUDGET_KEYS = new Set([
+	"maxAgents",
+	"maxConcurrency",
+	"maxRuntimeMs",
+	"maxNestedWorkflowDepth",
+	"maxGraphMutations",
+	"maxHelperRuns",
+]);
+const DYNAMIC_PERMISSIONS_KEYS = new Set([
+	"approval",
+	"allowDynamicRoles",
+	"allowDynamicTools",
+]);
+const DYNAMIC_HELPER_KEYS = new Set([
+	"uses",
+	"inputSchema",
+	"outputSchema",
+	"idempotent",
+]);
+const DYNAMIC_NESTED_WORKFLOW_KEYS = new Set(["uses"]);
+const RESERVED_DYNAMIC_MAP_KEYS = new Set(["__proto__", "prototype", "constructor"]);
+const DYNAMIC_APPROVAL_VALUES = ["auto", "ask"] as const;
 const EACH_KEYS = new Set([
 	"prompt",
 	"agent",
@@ -430,6 +479,7 @@ function validateStage(
 	);
 	validateOutput(stage.output, `${path}.output`, issues);
 	validateSupportStage(stage, type, path, issues);
+	validateDynamicStage(stage, type, path, issues);
 	validateForeachStage(stage, type, path, issues);
 	validateLoopStage(stage, type, path, siblingIds, sourceIds, issues);
 	validateDagStage(stage, type, path, issues);
@@ -450,7 +500,7 @@ function validateStageType(
 	if (!STAGE_TYPES.has(type as ArtifactGraphStageType)) {
 		issues.push({
 			path,
-			message: "must be one of: single, reduce, foreach, loop, dag",
+			message: "must be one of: single, reduce, foreach, loop, dag, dynamic",
 		});
 		return undefined;
 	}
@@ -570,15 +620,7 @@ function validateControlSchemaRef(
 		issues.push({ path, message: "must be a non-empty string" });
 		return;
 	}
-	if (isAbsolute(value) || value.includes("\\")) {
-		issues.push({ path, message: "must be a relative POSIX JSON file path" });
-	}
-	if (value.split("/").includes("..")) {
-		issues.push({ path, message: "must not contain .. path segments" });
-	}
-	if (!value.endsWith(".json")) {
-		issues.push({ path, message: "must point to a .json schema file" });
-	}
+	validateWorkflowBundleJsonRef(value, path, issues);
 }
 
 function validateRequiredFlagObject(
@@ -726,12 +768,224 @@ function validateSupportRef(
 	if (!value.startsWith("./") || !value.endsWith(".mjs")) {
 		issues.push({ path, message: "must be a relative ./ helper .mjs path" });
 	}
+	validateWorkflowBundleRef(value, path, issues);
+}
+
+function validateWorkflowBundleRef(
+	value: string,
+	path: string,
+	issues: ValidationIssue[],
+): void {
+	if (!value.startsWith("./")) {
+		issues.push({ path, message: "must be a relative ./ bundle path" });
+	}
 	if (
 		isAbsolute(value) ||
+		value.startsWith(".//") ||
+		value.includes("//") ||
 		value.includes("\\") ||
+		value.includes("://") ||
+		/^[A-Za-z][A-Za-z0-9+.-]*:/.test(value) ||
 		value.split("/").includes("..")
 	) {
 		issues.push({ path, message: "must stay inside the workflow bundle" });
+	}
+}
+
+function validateWorkflowBundleJsonRef(
+	value: string,
+	path: string,
+	issues: ValidationIssue[],
+): void {
+	validateWorkflowBundleRef(value, path, issues);
+	if (!value.endsWith(".json")) {
+		issues.push({ path, message: "must point to a bundle-local .json file" });
+	}
+}
+
+function validateDynamicStage(
+	stage: Record<string, unknown>,
+	type: ArtifactGraphStageType | undefined,
+	path: string,
+	issues: ValidationIssue[],
+): void {
+	if (type !== "dynamic") {
+		if (stage.dynamic !== undefined) {
+			issues.push({
+				path: `${path}.dynamic`,
+				message: "is only valid on dynamic stages",
+			});
+		}
+		return;
+	}
+	for (const key of DYNAMIC_STAGE_FORBIDDEN_KEYS) {
+		if (stage[key] !== undefined) {
+			issues.push({
+				path: `${path}.${key}`,
+				message:
+					"is ignored by dynamic stages; configure dynamic.permissions or dynamic.budget instead",
+			});
+		}
+	}
+	const dynamic = recordAt(stage.dynamic, `${path}.dynamic`, issues);
+	if (!dynamic) return;
+	rejectUnknownKeys(dynamic, DYNAMIC_KEYS, `${path}.dynamic`, issues);
+	const uses = requiredString(dynamic.uses, `${path}.dynamic.uses`, issues);
+	if (uses !== undefined) validateSupportRef(uses, `${path}.dynamic.uses`, issues);
+	if (dynamic.mode !== undefined && dynamic.mode !== "graph-splice") {
+		issues.push({ path: `${path}.dynamic.mode`, message: 'must be "graph-splice"' });
+	}
+	validateDynamicBudget(dynamic.budget, `${path}.dynamic.budget`, issues);
+	validateDynamicPermissions(
+		dynamic.permissions,
+		`${path}.dynamic.permissions`,
+		issues,
+	);
+	validateDynamicHelpers(dynamic.helpers, `${path}.dynamic.helpers`, issues);
+	validateDynamicWorkflows(dynamic.workflows, `${path}.dynamic.workflows`, issues);
+}
+
+function validateDynamicBudget(
+	value: unknown,
+	path: string,
+	issues: ValidationIssue[],
+): void {
+	if (value === undefined) return;
+	const budget = recordAt(value, path, issues);
+	if (!budget) return;
+	rejectUnknownKeys(budget, DYNAMIC_BUDGET_KEYS, path, issues);
+	for (const key of DYNAMIC_BUDGET_KEYS) {
+		optionalPositiveInteger(budget[key], `${path}.${key}`, issues);
+	}
+}
+
+function validateDynamicPermissions(
+	value: unknown,
+	path: string,
+	issues: ValidationIssue[],
+): void {
+	if (value === undefined) return;
+	const permissions = recordAt(value, path, issues);
+	if (!permissions) return;
+	rejectUnknownKeys(permissions, DYNAMIC_PERMISSIONS_KEYS, path, issues);
+	optionalEnum(permissions.approval, DYNAMIC_APPROVAL_VALUES, `${path}.approval`, issues);
+	optionalBoolean(
+		permissions.allowDynamicRoles,
+		`${path}.allowDynamicRoles`,
+		issues,
+	);
+	optionalBoolean(
+		permissions.allowDynamicTools,
+		`${path}.allowDynamicTools`,
+		issues,
+	);
+}
+
+function validateDynamicHelpers(
+	value: unknown,
+	path: string,
+	issues: ValidationIssue[],
+): void {
+	if (value === undefined) return;
+	const helpers = recordAt(value, path, issues);
+	if (!helpers) return;
+	for (const [key, helperValue] of Object.entries(helpers)) {
+		if (!STAGE_ID_PATTERN.test(key)) {
+			issues.push({
+				path: `${path}.${jsonKey(key)}`,
+				message: "helper id must contain only letters, numbers, _ and -",
+			});
+		}
+		if (RESERVED_DYNAMIC_MAP_KEYS.has(key)) {
+			issues.push({
+				path: `${path}.${jsonKey(key)}`,
+				message: "helper id is reserved",
+			});
+		}
+		const helperPath = `${path}.${jsonKey(key)}`;
+		const helper = recordAt(helperValue, helperPath, issues);
+		if (!helper) continue;
+		rejectUnknownKeys(helper, DYNAMIC_HELPER_KEYS, helperPath, issues);
+		const uses = requiredString(helper.uses, `${helperPath}.uses`, issues);
+		if (uses !== undefined) validateSupportRef(uses, `${helperPath}.uses`, issues);
+		if (helper.inputSchema !== undefined) {
+			const inputSchema = requiredString(
+				helper.inputSchema,
+				`${helperPath}.inputSchema`,
+				issues,
+			);
+			if (inputSchema)
+				validateWorkflowBundleJsonRef(
+					inputSchema,
+					`${helperPath}.inputSchema`,
+					issues,
+				);
+		}
+		if (helper.outputSchema !== undefined) {
+			const outputSchema = requiredString(
+				helper.outputSchema,
+				`${helperPath}.outputSchema`,
+				issues,
+			);
+			if (outputSchema)
+				validateWorkflowBundleJsonRef(
+					outputSchema,
+					`${helperPath}.outputSchema`,
+					issues,
+				);
+		}
+		if (
+			helper.idempotent !== undefined &&
+			typeof helper.idempotent !== "boolean"
+		) {
+			issues.push({
+				path: `${helperPath}.idempotent`,
+				message: "idempotent must be a boolean",
+			});
+		}
+	}
+}
+
+function validateDynamicWorkflows(
+	value: unknown,
+	path: string,
+	issues: ValidationIssue[],
+): void {
+	if (value === undefined) return;
+	const workflows = recordAt(value, path, issues);
+	if (!workflows) return;
+	for (const [key, workflowValue] of Object.entries(workflows)) {
+		if (!STAGE_ID_PATTERN.test(key)) {
+			issues.push({
+				path: `${path}.${jsonKey(key)}`,
+				message: "workflow id must contain only letters, numbers, _ and -",
+			});
+		}
+		if (RESERVED_DYNAMIC_MAP_KEYS.has(key)) {
+			issues.push({
+				path: `${path}.${jsonKey(key)}`,
+				message: "workflow id is reserved",
+			});
+		}
+		const workflowPath = `${path}.${jsonKey(key)}`;
+		const workflow = recordAt(workflowValue, workflowPath, issues);
+		if (!workflow) continue;
+		rejectUnknownKeys(
+			workflow,
+			DYNAMIC_NESTED_WORKFLOW_KEYS,
+			workflowPath,
+			issues,
+		);
+		const uses = requiredString(workflow.uses, `${workflowPath}.uses`, issues);
+		if (uses !== undefined) {
+			validateWorkflowBundleRef(uses, `${workflowPath}.uses`, issues);
+			if (!uses.endsWith(".json")) {
+				issues.push({
+					path: `${workflowPath}.uses`,
+					message: "must reference a workflow .json spec",
+				});
+			}
+		}
 	}
 }
 
@@ -897,7 +1151,7 @@ function validateLoopChildren(
 	for (const [index, child] of stages.entries()) {
 		if (!isRecord(child)) continue;
 		const childPath = `${path}[${index}]`;
-		if (["loop", "foreach", "dag"].includes(String(child.type))) {
+		if (["loop", "foreach", "dag", "dynamic"].includes(String(child.type))) {
 			issues.push({
 				path: `${childPath}.type`,
 				message: "loop child stages must be single or reduce stages",

@@ -46,6 +46,12 @@ const TOOL_CLASSIFICATION_VALUES = new Set([
 const TOOL_NAME_PATTERN = /^[A-Za-z0-9_.:/-]+$/;
 const DEFAULT_MAX_RUNTIME_MS = 30 * 60 * 1000;
 const DEFAULT_MAX_CONCURRENCY = 16;
+const DEFAULT_DYNAMIC_MAX_AGENTS = 1000;
+const DEFAULT_DYNAMIC_MAX_CONCURRENCY = 16;
+const DEFAULT_DYNAMIC_MAX_RUNTIME_MS = 14_400_000;
+const DEFAULT_DYNAMIC_MAX_NESTED_WORKFLOW_DEPTH = 3;
+const DEFAULT_DYNAMIC_MAX_GRAPH_MUTATIONS = 5000;
+const DEFAULT_DYNAMIC_MAX_HELPER_RUNS = 1000;
 
 interface CompileOptions {
 	cwd: string;
@@ -118,6 +124,7 @@ function lowerArtifactGraphStage(
 		...stage,
 		from: lowerArtifactGraphFrom(stage.from),
 		prompt: lowerArtifactGraphPrompt(stage),
+		artifactGraphOutput: stage.output,
 	};
 	delete lowered.inputPolicy;
 	delete lowered.sourceProjection;
@@ -760,6 +767,9 @@ async function compileArtifactGraphPlan(
 		]);
 	}
 
+	const specDir = options.specPath
+		? dirname(resolve(options.cwd, options.specPath))
+		: options.cwd;
 	const agentName = spec.defaults?.agent ?? "scout";
 	const agentCache = new Map<string, AgentDefinition>();
 	let defaultAgent: AgentDefinition | undefined;
@@ -822,6 +832,20 @@ async function compileArtifactGraphPlan(
 				dependencyKeys,
 				options.cwd,
 				workflowInputText,
+				overrides,
+			);
+		}
+		if (isDynamicStage(stage)) {
+			return buildDynamicTask(
+				stage,
+				taskId,
+				key,
+				prompt,
+				dependencyKeys,
+				options.cwd,
+				specDir,
+				workflowInputText,
+				options.task,
 				overrides,
 			);
 		}
@@ -1062,6 +1086,11 @@ async function compileArtifactGraphPlan(
 					"main",
 					`Run support helper ${namespacedChildStage.support.uses}.`,
 				);
+			} else if (childStageKind === "dynamic") {
+				await addChildTask(
+					"controller",
+					`Run dynamic controller ${namespacedChildStage.dynamic.uses}.`,
+				);
 			} else {
 				await addChildTask("main", namespacedChildStage.prompt ?? "");
 			}
@@ -1194,6 +1223,8 @@ async function compileArtifactGraphPlan(
 			);
 		} else if (stageKind === "support") {
 			await addTask("main", `Run support helper ${runtimeStage.support.uses}.`);
+		} else if (stageKind === "dynamic") {
+			await addTask("controller", `Run dynamic controller ${runtimeStage.dynamic.uses}.`);
 		} else {
 			await addTask("main", runtimeStage.prompt ?? "");
 		}
@@ -1251,6 +1282,10 @@ async function compileArtifactGraphPlan(
 
 function isSupportStage(stage: any): boolean {
 	return stage?.support !== undefined && stage?.type === undefined;
+}
+
+function isDynamicStage(stage: any): boolean {
+	return stage?.type === "dynamic" && stage?.dynamic !== undefined;
 }
 
 function runtimeStageKindFor(stage: any): string | undefined {
@@ -1320,6 +1355,146 @@ function buildSupportTask(
 		support: { uses, options },
 		...overrides,
 	};
+}
+
+function buildDynamicTask(
+	stage: any,
+	taskId: string,
+	key: string,
+	prompt: string,
+	dependencyKeys: string[],
+	cwd: string,
+	specDir: string,
+	workflowInputText: string,
+	runtimeTask: string | undefined,
+	overrides: Partial<CompiledTask> & Record<string, unknown>,
+): any {
+	const dynamic = stage.dynamic ?? {};
+	const uses = String(dynamic.uses);
+	const normalizedPrompt = String(prompt ?? "").replace(
+		/\$\{item\}/g,
+		"the relevant item from the dependency context",
+	);
+	const controlSchema = stage.artifactGraphOutput?.controlSchema ?? stage.output?.controlSchema;
+	const compiledPrompt = [
+		workflowInputText || undefined,
+		runtimeTask?.trim() ? `# Runtime Task\n\n${runtimeTask.trim()}` : undefined,
+		`# Workflow Stage\n\nstage=${stage.id}\nkind=dynamic`,
+		`# Dynamic Controller\n\nuses=${uses}\nmode=${dynamic.mode ?? "graph-splice"}`,
+		[
+			"# Workflow Output Protocol",
+			"Dynamic controller return values are normalized into workflow artifact sections: <control>{...}</control>, <analysis>...</analysis>, and <refs>[]</refs>.",
+			"The control object must include a non-empty `schema` string and concise `digest`/`summary`.",
+			controlSchema
+				? `Use workflow-local control schema reference: ${controlSchema}`
+				: "Use schema `dynamic-controller-result-v1` unless the workflow asks for a more specific control schema.",
+		].join("\n\n"),
+		normalizedPrompt ? `# Instructions\n\n${normalizedPrompt}` : undefined,
+	]
+		.filter(Boolean)
+		.join("\n\n");
+	const helpers: Record<string, any> = {};
+	for (const [helperId, helper] of Object.entries(
+		isPlainRecord(dynamic.helpers) ? dynamic.helpers : {},
+	)) {
+		if (!isPlainRecord(helper)) continue;
+		helpers[helperId] = {
+			uses: String(helper.uses),
+			usesPath: resolve(specDir, String(helper.uses)),
+			...(helper.idempotent === true ? { idempotent: true } : {}),
+			...(typeof helper.inputSchema === "string"
+				? {
+						inputSchema: helper.inputSchema,
+						inputSchemaPath: resolve(specDir, helper.inputSchema),
+					}
+				: {}),
+			...(typeof helper.outputSchema === "string"
+				? {
+						outputSchema: helper.outputSchema,
+						outputSchemaPath: resolve(specDir, helper.outputSchema),
+					}
+				: {}),
+		};
+	}
+	const workflows: Record<string, any> = {};
+	for (const [workflowId, workflow] of Object.entries(
+		isPlainRecord(dynamic.workflows) ? dynamic.workflows : {},
+	)) {
+		if (!isPlainRecord(workflow)) continue;
+		workflows[workflowId] = {
+			uses: String(workflow.uses),
+			usesPath: resolve(specDir, String(workflow.uses)),
+		};
+	}
+
+	return {
+		key,
+		id: key,
+		specId: key,
+		taskId,
+		stageId: stage.id,
+		agent: "dynamic",
+		agentPath: uses,
+		agentDescription: "Workflow dynamic controller",
+		agentSystemPrompt: "",
+		roleNames: [],
+		task: normalizedPrompt,
+		cwd,
+		explicitCwd: false,
+		explicitWorktreePolicy: false,
+		runtime: {
+			approvalMode: "non-interactive",
+			maxRuntimeMs:
+				dynamic.budget?.maxRuntimeMs ?? DEFAULT_DYNAMIC_MAX_RUNTIME_MS,
+		},
+		safety: {
+			readOnlyDeclared: false,
+			capability: "mutation-capable",
+			sharedCwdSafe: false,
+			worktreePolicy: "off",
+			requiresWorktree: false,
+			permission: { status: "pending" },
+		},
+		compiledPrompt,
+		injectTask: false,
+		kind: "dynamic",
+		stageMaxConcurrency: stage.maxConcurrency,
+		dependsOn: [...dependencyKeys],
+		dynamic: {
+			uses,
+			usesPath: resolve(specDir, uses),
+			mode: dynamic.mode ?? "graph-splice",
+			budget: {
+				maxAgents: dynamic.budget?.maxAgents ?? DEFAULT_DYNAMIC_MAX_AGENTS,
+				maxConcurrency:
+					dynamic.budget?.maxConcurrency ?? DEFAULT_DYNAMIC_MAX_CONCURRENCY,
+				maxRuntimeMs:
+					dynamic.budget?.maxRuntimeMs ?? DEFAULT_DYNAMIC_MAX_RUNTIME_MS,
+				maxNestedWorkflowDepth:
+					dynamic.budget?.maxNestedWorkflowDepth ??
+					DEFAULT_DYNAMIC_MAX_NESTED_WORKFLOW_DEPTH,
+				maxGraphMutations:
+					dynamic.budget?.maxGraphMutations ??
+					DEFAULT_DYNAMIC_MAX_GRAPH_MUTATIONS,
+				maxHelperRuns:
+					dynamic.budget?.maxHelperRuns ?? DEFAULT_DYNAMIC_MAX_HELPER_RUNS,
+			},
+			permissions: {
+				approval: dynamic.permissions?.approval ?? "auto",
+				allowDynamicRoles:
+					dynamic.permissions?.allowDynamicRoles ?? true,
+				allowDynamicTools:
+					dynamic.permissions?.allowDynamicTools ?? true,
+			},
+			helpers,
+			workflows,
+		},
+		...overrides,
+	};
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 async function loadWorkflowAgent(

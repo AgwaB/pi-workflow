@@ -139,7 +139,7 @@ function main() {
       const resolved = await resolveWorkflowRef('review-artifact', cwd);
       if (!resolved.specPath.endsWith('workflows/review-artifact.json')) throw new Error('bad resolved path: ' + resolved.specPath);
       await resolveWorkflowRef('invalid', cwd).then(() => { throw new Error('invalid workflow should not resolve'); }, (error) => { if (!/workflow name or spec file not found/.test(String(error))) throw error; });
-      for (const bundled of ['spec-review', 'deep-review', 'deep-research', 'impact-review']) {
+      for (const bundled of ['spec-review', 'deep-review', 'deep-discovery', 'deep-focused-review', 'deep-diff-review', 'deep-research', 'impact-review']) {
         const resolvedBundled = await resolveWorkflowRef(bundled, process.cwd());
         if (!resolvedBundled.specPath.includes('/workflows/')) throw new Error('bad bundled path for ' + bundled + ': ' + resolvedBundled.specPath);
       }
@@ -161,6 +161,9 @@ function main() {
     const bundled = [
       ['spec-review', 'workflows/spec-review/spec.json', 'report'],
       ['deep-review', 'workflows/deep-review/spec.json', 'report'],
+      ['deep-discovery', 'workflows/deep-discovery/spec.json', 'report'],
+      ['deep-focused-review', 'workflows/deep-focused-review/spec.json', 'report'],
+      ['deep-diff-review', 'workflows/deep-diff-review/spec.json', 'report'],
       ['deep-research', 'workflows/deep-research/spec.json', 'final'],
       ['impact-review', 'workflows/impact-review/spec.json', 'impact-analysis.impact-synthesis'],
     ];

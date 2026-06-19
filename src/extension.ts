@@ -30,7 +30,7 @@ import {
 	assertWorkflowToolAllowedForRole,
 	isWorkflowSupervisorEnabled,
 } from "./process-role.js";
-import { readIndex } from "./store.js";
+import { readIndex, readRunRecord } from "./store.js";
 import { loadWorkflowSpec } from "./schema.js";
 import { listWorkflows, resolveWorkflowRef } from "./workflow-specs.js";
 import {
@@ -77,9 +77,15 @@ const WORKFLOW_RUN_TOOL_PARAMETERS = {
 } as const;
 
 export default function workflowExtension(pi: ExtensionAPI): void {
+	let workflowCompletionCache: Array<{ name: string }> = [];
 	pi.on("session_start", async (_event, ctx) => {
 		if (!isWorkflowSupervisorEnabled()) return;
-		await resumeSupervisors(ctx.cwd).catch(() => undefined);
+		workflowCompletionCache = await listWorkflows(ctx.cwd).catch(
+			() => workflowCompletionCache,
+		);
+		await resumeSupervisors(ctx.cwd, {
+			dynamicUi: dynamicUiFromContext(ctx),
+		}).catch(() => undefined);
 		await notifyUnfinishedRuns(ctx.cwd, (message, type) =>
 			ctx.ui.notify(message, type),
 		).catch(() => undefined);
@@ -90,7 +96,7 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 	pi.registerCommand(WORKFLOW_COMMAND, {
 		description: "Open the workflow board and inspect runs",
 		getArgumentCompletions(prefix) {
-			return workflowArgumentCompletions(prefix) ?? null;
+			return workflowArgumentCompletions(prefix, workflowCompletionCache) ?? null;
 		},
 		handler: async (args, ctx) => {
 			await handleWorkflowCommand(args, ctx, pi);
@@ -143,7 +149,7 @@ export function registerWorkflowNaturalLanguageTools(
 		promptSnippet:
 			"Start a pi-workflow by exact workflow name/path and full runtime task text.",
 		promptGuidelines: [
-			"Use workflow_run when the user explicitly asks to run, start, execute, or use a pi-workflow by name, including Korean requests such as 'deep-research workflow로 이 레포 조사해줘'.",
+			"Use workflow_run when the user explicitly asks to run, start, execute, or use a pi-workflow by name, including non-English requests that explicitly name a workflow.",
 			"Do not use workflow_run for ordinary research, review, or coding requests unless the user asks to use a workflow.",
 			"Do not call workflow_run unless both an exact workflow name/path and a concrete task are known; ask a clarifying question if either is missing.",
 			"Preserve the user's task language, file references, constraints, and requested depth in workflow_run.task; do not reduce it to 'run the workflow'.",
@@ -359,6 +365,7 @@ async function startWorkflowRunFromRequest(
 	const run = await runWorkflowSpec(workflow, ctx.cwd, {
 		task,
 		runtimeDefaults: request.runtimeDefaults ?? currentRuntimeDefaults(ctx, api),
+		dynamicUi: dynamicUiFromContext(ctx),
 	});
 	const verb =
 		run.status === "blocked"
@@ -401,6 +408,23 @@ async function openWorkflowBoard(
 
 function isWorkflowRunRef(token: string): boolean {
 	return token.startsWith("workflow_");
+}
+
+function dynamicUiFromContext(ctx: ExtensionContext): {
+	hasUI: boolean;
+	confirm: (
+		title: string,
+		message: string,
+		options?: Parameters<ExtensionContext["ui"]["confirm"]>[2],
+	) => Promise<boolean>;
+} {
+	const printMode =
+		process.argv.includes("--print") || process.argv.includes("-p");
+	return {
+		hasUI: ctx.hasUI && !printMode,
+		confirm: (title, message, options) =>
+			ctx.ui.confirm(title, message, options),
+	};
 }
 
 function currentRuntimeDefaults(
@@ -453,25 +477,42 @@ export async function notifyUnfinishedRuns(
 ): Promise<void> {
 	const index = await readIndex(cwd);
 	if (!index?.runs?.length) return;
-	const unfinished = index.runs.filter((run) => {
-		if (run.parentRunId) return false;
-		if (run.status !== "failed" && run.status !== "interrupted") return false;
+	const unfinished = [];
+	for (const run of index.runs) {
+		if (run.parentRunId && run.status !== "blocked") continue;
 		const updatedAtMs = Date.parse(run.updatedAt ?? "");
-		return (
-			Number.isFinite(updatedAtMs) &&
-			nowMs - updatedAtMs <= UNFINISHED_RUN_NOTICE_MAX_AGE_MS
+		if (
+			!Number.isFinite(updatedAtMs) ||
+			nowMs - updatedAtMs > UNFINISHED_RUN_NOTICE_MAX_AGE_MS
+		) {
+			continue;
+		}
+		if (!run.parentRunId && (run.status === "failed" || run.status === "interrupted")) {
+			unfinished.push(run);
+			continue;
+		}
+		if (run.status !== "blocked") continue;
+		const fullRun = await readRunRecord(cwd, run.runId).catch(() => undefined);
+		const resumableDynamicApproval = fullRun?.tasks.some(
+			(task) =>
+				task.status === "blocked" &&
+				(task.statusDetail === "dynamic_ui_unavailable" ||
+					task.statusDetail === "dynamic_approval_timeout"),
 		);
-	});
+		if (resumableDynamicApproval) unfinished.push(run);
+	}
 	if (unfinished.length === 0) return;
 
 	const lines = unfinished
 		.slice(0, UNFINISHED_RUN_NOTICE_MAX_RUNS)
 		.map((run) => {
 			const summary = run.taskSummary;
+			const blocked = (summary as { blocked?: number } | undefined)?.blocked ?? 0;
 			const counts = summary
-				? ` (${summary.completed}/${summary.total} tasks completed, ${summary.failed} failed, ${summary.interrupted} interrupted)`
+				? ` (${summary.completed}/${summary.total} tasks completed, ${summary.failed} failed, ${summary.interrupted} interrupted${blocked ? `, ${blocked} blocked` : ""})`
 				: "";
-			return `- ${run.name ?? "(unnamed)"} ${run.runId}: ${run.status}${counts} — /workflow resume ${run.runId}`;
+			const parent = run.parentRunId ? ` parent=${run.parentRunId}` : "";
+			return `- ${run.name ?? "(unnamed)"} ${run.runId}${parent}: ${run.status}${counts} — /workflow resume ${run.runId}`;
 		});
 	if (unfinished.length > UNFINISHED_RUN_NOTICE_MAX_RUNS)
 		lines.push(
@@ -651,6 +692,7 @@ async function handleWorkflowCommand(
 				ctx.cwd,
 				runId,
 				tokens[2] ? Number(tokens[2]) : undefined,
+				{ dynamicUi: dynamicUiFromContext(ctx) },
 			);
 			emit(
 				ctx,
@@ -666,14 +708,20 @@ async function handleWorkflowCommand(
 
 		if (action === "resume") {
 			const runId = requireArg(tokens, 1, "/workflow resume <run-id>");
-			const { run, resetTaskIds } = await resumeRun(ctx.cwd, runId);
+			const { run, resetTaskIds } = await resumeRun(ctx.cwd, runId, {
+				dynamicUi: dynamicUiFromContext(ctx),
+			});
 			emit(
 				ctx,
 				[
 					`Reset ${resetTaskIds.length} task(s) to pending: ${resetTaskIds.join(", ")}`,
 					formatRun(run, "full"),
 				].join("\n"),
-				"info",
+				run.status === "completed"
+					? "info"
+					: run.status === "blocked"
+						? "warning"
+						: "error",
 			);
 			return;
 		}
@@ -1098,7 +1146,7 @@ const WORKFLOW_ACTION_COMPLETIONS = [
 	{
 		value: "resume",
 		label: "resume",
-		description: "Resume a failed or interrupted run",
+		description: "Resume a failed, interrupted, or resumable blocked run",
 	},
 ];
 

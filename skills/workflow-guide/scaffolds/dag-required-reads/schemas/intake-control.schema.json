@@ -1,0 +1,23 @@
+{
+  "type": "object",
+  "required": [
+    "schema",
+    "digest",
+    "taskSummary",
+    "scope",
+    "constraints"
+  ],
+  "properties": {
+    "schema": { "type": "string", "minLength": 1 },
+    "digest": { "type": "string", "minLength": 1 },
+    "taskSummary": { "type": "string" },
+    "scope": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "constraints": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}

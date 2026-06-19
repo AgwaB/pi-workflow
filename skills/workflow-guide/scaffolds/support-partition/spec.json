@@ -1,0 +1,113 @@
+{
+  "schemaVersion": 1,
+  "name": "scaffold-support-partition",
+  "description": "Workflow-guide scaffold: collect candidates, foreach verify, partition verdicts with a bundle-local support helper, and reduce final report. Copy before adapting.",
+  "defaults": {
+    "agent": "scout",
+    "readOnly": true,
+    "tools": [
+      "read",
+      "grep",
+      "find",
+      "ls"
+    ]
+  },
+  "artifactGraph": {
+    "stages": [
+      {
+        "id": "collect-candidates",
+        "type": "single",
+        "output": {
+          "analysis": {
+            "required": true
+          },
+          "refs": {
+            "required": true
+          },
+          "maxDigestChars": 1000,
+          "controlSchema": "./schemas/candidates-control.schema.json"
+        },
+        "prompt": "Collect candidate findings for the runtime task. Do not modify files. Put machine-readable JSON in <control> with schema, digest, and candidates. candidates must be an array of 0-8 candidate finding objects. Each candidate must include id, title, severity, locations, evidenceQuotes, rationale, and recommendedAction. locations must contain repository file pins, with line/lineEnd/symbol when known. evidenceQuotes must be exact quotes. Put detailed evidence and caveats in <analysis>. Put refs as an array in <refs>."
+      },
+      {
+        "id": "verify-candidates",
+        "type": "foreach",
+        "injectRuntimeTask": true,
+        "from": {
+          "source": "collect-candidates",
+          "path": "$.candidates"
+        },
+        "output": {
+          "analysis": {
+            "required": true
+          },
+          "refs": {
+            "required": true
+          },
+          "maxDigestChars": 1000,
+          "controlSchema": "./schemas/verification-control.schema.json"
+        },
+        "each": {
+          "prompt": "Verify this candidate finding against repository evidence: ${item}. Do not modify files. Try to refute it. Put machine-readable JSON in <control> with schema, digest, candidateId, finding, verdict, evidenceQuotes, counterEvidence, and recommendedAction. verdict must be exactly KEEP, WEAKEN, DROP, or NEEDS_HUMAN. Echo the verified finding object in finding. KEEP only when evidence is strong and impact is actionable. WEAKEN when plausible but severity/action should be reduced. DROP when unsupported or non-actionable. NEEDS_HUMAN when ambiguous. Put detailed reasoning in <analysis> and refs in <refs>."
+        }
+      },
+      {
+        "id": "partition-verdicts",
+        "from": [
+          "collect-candidates",
+          "verify-candidates"
+        ],
+        "sourcePolicy": "partial",
+        "output": {
+          "analysis": {
+            "required": true
+          },
+          "refs": {
+            "required": true
+          },
+          "maxDigestChars": 1000,
+          "controlSchema": "./schemas/partition-control.schema.json"
+        },
+        "support": {
+          "uses": "./helpers/partition.mjs",
+          "options": {
+            "candidateStage": "collect-candidates",
+            "verificationStage": "verify-candidates"
+          }
+        }
+      },
+      {
+        "id": "report",
+        "type": "reduce",
+        "injectRuntimeTask": true,
+        "from": "partition-verdicts",
+        "sourcePolicy": "partial",
+        "sourceProjection": {
+          "include": [
+            "$.value.reportContext",
+            "$.value.partitionSummary",
+            "$.value.normalizationNotes"
+          ],
+          "maxChars": 8000
+        },
+        "inputPolicy": {
+          "requiredReads": [
+            "partition-verdicts.control"
+          ],
+          "enforcement": "fail"
+        },
+        "output": {
+          "analysis": {
+            "required": true
+          },
+          "refs": {
+            "required": true
+          },
+          "maxDigestChars": 1000,
+          "controlSchema": "./schemas/report-control.schema.json"
+        },
+        "prompt": "Produce the final finding-partition-smoke report. Read the partition-verdicts.control artifact with workflow_artifact before final output. Report only kept and weakened findings from value.reportContext.keep and value.reportContext.weaken. Do not include dropped findings as findings. Put NEEDS_HUMAN items only in needsHuman. Copy findingId, title, severity, locations, and evidenceQuotes from the support helper reportContext. Put machine-readable JSON in <control> with schema, digest, summary, findings, needsHuman, partitionSummary, and recommendedNextAction. Put details and evidence discussion in <analysis>."
+      }
+    ]
+  }
+}

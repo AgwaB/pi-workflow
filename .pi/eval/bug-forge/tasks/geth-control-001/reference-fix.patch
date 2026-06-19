@@ -1,7 +1,0 @@
-diff --git a/common/math/big.go b/common/math/big.go
---- a/common/math/big.go
-+++ b/common/math/big.go
-@@ -42,2 +42,2 @@
--// NewHexOrDecimal256 creates a new HexOrDecimal256 value.
-+// NewHexOrDecimal256 creates a new HexOrDecimal256
- func NewHexOrDecimal256(x int64) *HexOrDecimal256 {

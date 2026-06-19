@@ -1,0 +1,30 @@
+{
+  "type": "object",
+  "required": ["schema", "digest", "summary", "findings", "needsHuman", "partitionSummary", "recommendedNextAction"],
+  "properties": {
+    "schema": { "type": "string", "minLength": 1 },
+    "digest": { "type": "string", "minLength": 1 },
+    "summary": { "type": "string", "minLength": 1 },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["findingId", "title", "severity", "locations", "evidenceQuotes", "verdict"],
+        "properties": {
+          "findingId": { "type": "string", "minLength": 1 },
+          "title": { "type": "string", "minLength": 1 },
+          "severity": { "type": "string", "minLength": 1 },
+          "verdict": { "type": "string", "enum": ["KEEP", "WEAKEN"] },
+          "locations": { "type": "array", "items": { "type": "object" } },
+          "evidenceQuotes": { "type": "array", "items": { "type": "string" } },
+          "recommendedAction": { "type": "string" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "needsHuman": { "type": "array", "items": { "type": "object" } },
+    "partitionSummary": { "type": "object" },
+    "recommendedNextAction": { "type": "string" }
+  },
+  "additionalProperties": true
+}

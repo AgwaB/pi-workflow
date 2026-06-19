@@ -1,0 +1,26 @@
+{
+  "type": "object",
+  "required": [
+    "schema",
+    "digest",
+    "id",
+    "method",
+    "path",
+    "verdict"
+  ],
+  "properties": {
+    "schema": { "type": "string", "minLength": 1 },
+    "digest": { "type": "string", "minLength": 1 },
+    "id": { "type": "string", "minLength": 1 },
+    "method": { "type": "string", "minLength": 1 },
+    "path": { "type": "string", "minLength": 1 },
+    "verdict": { "type": "string", "enum": ["MATCHES", "GAP_FOUND", "INCONCLUSIVE", "NEEDS_HUMAN"] },
+    "severity": { "type": "string", "enum": ["high", "medium", "low", "info"] },
+    "verifiedClaims": { "type": "array", "items": { "type": "object" }, "maxItems": 30 },
+    "gaps": { "type": "array", "items": { "type": "object" }, "maxItems": 20 },
+    "testCoverageAssessment": { "type": "string" },
+    "evidence": { "type": "array", "items": { "type": "object" }, "maxItems": 30 },
+    "counterEvidence": { "type": "array", "items": { "type": "object" }, "maxItems": 30 },
+    "recommendedAction": { "type": "string" }
+  }
+}

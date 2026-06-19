@@ -1,0 +1,33 @@
+{
+  "type": "object",
+  "required": [
+    "schema",
+    "digest",
+    "url",
+    "fetchToolUsed",
+    "fallbackAttempted",
+    "sourceStatus",
+    "limitations"
+  ],
+  "properties": {
+    "schema": { "type": "string", "minLength": 1 },
+    "digest": { "type": "string", "minLength": 1 },
+    "url": { "type": "string", "minLength": 1 },
+    "fetchToolUsed": { "type": "string", "enum": ["fetch_content", "scrapling_fetch", "none"] },
+    "fallbackAttempted": { "type": "boolean" },
+    "title": { "type": "string" },
+    "extractedText": { "type": "string" },
+    "keyData": {
+      "type": "array",
+      "items": { "type": "string" },
+      "maxItems": 20
+    },
+    "sourceStatus": { "type": "string", "enum": ["fetched", "partial", "failed"] },
+    "limitations": {
+      "type": "array",
+      "items": { "type": "string" },
+      "maxItems": 10
+    }
+  },
+  "additionalProperties": true
+}

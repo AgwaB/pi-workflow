@@ -1,0 +1,65 @@
+{
+  "type": "object",
+  "required": [
+    "schema",
+    "digest",
+    "join",
+    "status",
+    "agreements",
+    "conflicts",
+    "actions"
+  ],
+  "properties": {
+    "schema": {
+      "const": "stage-control-v1"
+    },
+    "digest": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 600
+    },
+    "join": {
+      "type": "string",
+      "enum": [
+        "consistency"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "consistent",
+        "inconsistent",
+        "blocked",
+        "unknown"
+      ]
+    },
+    "agreements": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 800
+      },
+      "maxItems": 30
+    },
+    "conflicts": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 800
+      },
+      "maxItems": 30
+    },
+    "actions": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 800
+      },
+      "maxItems": 30
+    }
+  },
+  "additionalProperties": false
+}
