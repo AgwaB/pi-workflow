@@ -9,6 +9,8 @@ import {
 } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 
+import { readSimpleJsonPath } from "./workflow-runtime.js";
+
 export const WORKFLOW_SOURCE_MANIFEST_SCHEMA =
 	"workflow-source-manifest-v1" as const;
 export const WORKFLOW_ARTIFACT_READ_SCHEMA =
@@ -77,6 +79,9 @@ export interface WorkflowArtifactReadLedgerRecord {
 	bytes: number;
 	returnedBytes: number;
 	truncated: boolean;
+	path?: string;
+	maxItems?: number;
+	maxChars?: number;
 }
 
 export interface WorkflowArtifactToolConfig {
@@ -107,6 +112,19 @@ export interface WorkflowArtifactListEntry {
 	artifacts: WorkflowArtifactKind[];
 }
 
+export interface WorkflowArtifactProjectionMetadata {
+	path: string;
+	valueType: string;
+	maxItems?: number;
+	maxChars?: number;
+	totalItems?: number;
+	itemsReturned?: number;
+	itemsTruncated?: boolean;
+	originalChars: number;
+	charsReturned: number;
+	charsTruncated: boolean;
+}
+
 export interface WorkflowArtifactReadResult {
 	source: string;
 	artifact: WorkflowArtifactKind;
@@ -115,6 +133,7 @@ export interface WorkflowArtifactReadResult {
 	returnedBytes: number;
 	truncated: boolean;
 	mediaType?: string;
+	projection?: WorkflowArtifactProjectionMetadata;
 }
 
 export interface WorkflowArtifactToolResult {
@@ -128,6 +147,7 @@ const WORKFLOW_ARTIFACT_KIND_SET = new Set<string>(WORKFLOW_ARTIFACT_KINDS);
 const DEFAULT_MAX_BYTES = 50 * 1024;
 const DEFAULT_MAX_LINES = 2000;
 const SOURCE_NAME_PATTERN = /^[A-Za-z0-9_.:-]+$/;
+const SIMPLE_JSON_PATH_PATTERN = /^(\$|\$(\.[A-Za-z0-9_-]+)+)$/;
 
 export async function loadWorkflowSourceManifest(
 	manifestPath: string,
@@ -217,7 +237,10 @@ export function normalizeWorkflowSourceManifest(
 				sourceValue.lastMessage,
 				`sources[${index}].lastMessage`,
 			),
-			errorType: optionalString(sourceValue.errorType, `sources[${index}].errorType`),
+			errorType: optionalString(
+				sourceValue.errorType,
+				`sources[${index}].errorType`,
+			),
 			digest: optionalString(sourceValue.digest, `sources[${index}].digest`),
 			controlProjection: sourceValue.controlProjection,
 			projectionMissingPaths: optionalStringArray(
@@ -322,6 +345,9 @@ export async function readWorkflowArtifact(
 		maxBytes?: number;
 		maxLines?: number;
 		runDir?: string;
+		path?: string;
+		maxItems?: number;
+		maxChars?: number;
 	} = {},
 ): Promise<WorkflowArtifactReadResult> {
 	const resolved = resolveWorkflowArtifact(
@@ -353,6 +379,21 @@ export async function readWorkflowArtifact(
 			);
 		}
 	}
+	if (options.path !== undefined) {
+		return readProjectedWorkflowArtifact({
+			source: resolved.source.source,
+			artifact: resolved.artifact,
+			artifactPath,
+			bytes: fileStat.size,
+			mediaType: resolved.ref.mediaType,
+			path: options.path,
+			maxItems: options.maxItems,
+			maxChars: options.maxChars,
+		});
+	}
+	if (options.maxItems !== undefined || options.maxChars !== undefined) {
+		throw new Error("workflow_artifact maxItems/maxChars require path");
+	}
 	const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
 	const maxLines = options.maxLines ?? DEFAULT_MAX_LINES;
 	const sizeTruncated = fileStat.size > maxBytes;
@@ -373,6 +414,91 @@ export async function readWorkflowArtifact(
 		truncated: truncated.truncated || sizeTruncated,
 		mediaType: resolved.ref.mediaType,
 	};
+}
+
+async function readProjectedWorkflowArtifact(options: {
+	source: string;
+	artifact: WorkflowArtifactKind;
+	artifactPath: string;
+	bytes: number;
+	mediaType?: string;
+	path: string;
+	maxItems?: number;
+	maxChars?: number;
+}): Promise<WorkflowArtifactReadResult> {
+	const parsed = JSON.parse(await readFile(options.artifactPath, "utf8"));
+	const resolved = readSimpleJsonPath(parsed, options.path);
+	if (resolved === undefined) {
+		throw new Error(`workflow_artifact path did not resolve: ${options.path}`);
+	}
+	const sliced = applyProjectionItemLimit(resolved, options);
+	const serialized = JSON.stringify(sliced.value, null, 2);
+	const preview =
+		options.maxChars !== undefined && serialized.length > options.maxChars
+			? serialized.slice(0, options.maxChars)
+			: serialized;
+	const projection: WorkflowArtifactProjectionMetadata = {
+		path: options.path,
+		valueType: jsonValueType(resolved),
+		...(options.maxItems === undefined ? {} : { maxItems: options.maxItems }),
+		...(options.maxChars === undefined ? {} : { maxChars: options.maxChars }),
+		...(sliced.totalItems === undefined
+			? {}
+			: { totalItems: sliced.totalItems }),
+		...(sliced.itemsReturned === undefined
+			? {}
+			: { itemsReturned: sliced.itemsReturned }),
+		...(sliced.itemsTruncated === undefined
+			? {}
+			: { itemsTruncated: sliced.itemsTruncated }),
+		originalChars: serialized.length,
+		charsReturned: preview.length,
+		charsTruncated: preview.length !== serialized.length,
+	};
+	const envelope = projection.charsTruncated
+		? { projection, preview }
+		: { projection, value: sliced.value };
+	const content = JSON.stringify(envelope, null, 2);
+	return {
+		source: options.source,
+		artifact: options.artifact,
+		content,
+		bytes: options.bytes,
+		returnedBytes: Buffer.byteLength(content, "utf8"),
+		truncated: Boolean(projection.charsTruncated || projection.itemsTruncated),
+		mediaType: options.mediaType,
+		projection,
+	};
+}
+
+function applyProjectionItemLimit(
+	value: unknown,
+	options: { maxItems?: number; path: string },
+): {
+	value: unknown;
+	totalItems?: number;
+	itemsReturned?: number;
+	itemsTruncated?: boolean;
+} {
+	if (options.maxItems === undefined) return { value };
+	if (!Array.isArray(value)) {
+		throw new Error(
+			`workflow_artifact maxItems requires path to resolve to an array: ${options.path}`,
+		);
+	}
+	const itemsReturned = Math.min(value.length, options.maxItems);
+	return {
+		value: value.slice(0, options.maxItems),
+		totalItems: value.length,
+		itemsReturned,
+		itemsTruncated: itemsReturned < value.length,
+	};
+}
+
+function jsonValueType(value: unknown): string {
+	if (Array.isArray(value)) return "array";
+	if (value === null) return "null";
+	return typeof value;
 }
 
 export async function appendWorkflowArtifactReadLedger(
@@ -452,6 +578,9 @@ export async function handleWorkflowArtifactToolCall(
 			maxBytes: config.maxBytes,
 			maxLines: config.maxLines,
 			runDir,
+			path: input.path,
+			maxItems: input.maxItems,
+			maxChars: input.maxChars,
 		},
 	);
 	await appendWorkflowArtifactReadLedger(config.ledgerPath, {
@@ -464,15 +593,27 @@ export async function handleWorkflowArtifactToolCall(
 		bytes: read.bytes,
 		returnedBytes: read.returnedBytes,
 		truncated: read.truncated,
+		...(read.projection?.path === undefined
+			? {}
+			: { path: read.projection.path }),
+		...(read.projection?.maxItems === undefined
+			? {}
+			: { maxItems: read.projection.maxItems }),
+		...(read.projection?.maxChars === undefined
+			? {}
+			: { maxChars: read.projection.maxChars }),
 	});
+	const projectionLabel = read.projection
+		? ` path=${read.projection.path}`
+		: "";
 	const truncation = read.truncated
-		? `\n\n[workflow_artifact output truncated: returned ${read.returnedBytes} of ${read.bytes} bytes.]`
+		? `\n\n[workflow_artifact output truncated: returned ${read.returnedBytes} bytes from ${read.bytes} artifact bytes.]`
 		: "";
 	return {
 		content: [
 			{
 				type: "text",
-				text: `# workflow_artifact: ${read.source}.${read.artifact}\n\n${read.content}${truncation}`,
+				text: `# workflow_artifact: ${read.source}.${read.artifact}${projectionLabel}\n\n${read.content}${truncation}`,
 			},
 		],
 		details: {
@@ -485,6 +626,7 @@ export async function handleWorkflowArtifactToolCall(
 			returnedBytes: read.returnedBytes,
 			truncated: read.truncated,
 			mediaType: read.mediaType,
+			projection: read.projection,
 		},
 	};
 }
@@ -520,6 +662,15 @@ function normalizeReadLedgerRecord(
 		value.truncated,
 		`line ${lineNumber}.truncated`,
 	);
+	const path = normalizeProjectionPath(value.path);
+	const maxItems = optionalNonNegativeInteger(
+		value.maxItems,
+		`line ${lineNumber}.maxItems`,
+	);
+	const maxChars = optionalNonNegativeInteger(
+		value.maxChars,
+		`line ${lineNumber}.maxChars`,
+	);
 	return {
 		schema: WORKFLOW_ARTIFACT_READ_SCHEMA,
 		runId,
@@ -530,14 +681,22 @@ function normalizeReadLedgerRecord(
 		bytes,
 		returnedBytes,
 		truncated,
+		...(path === undefined ? {} : { path }),
+		...(maxItems === undefined ? {} : { maxItems }),
+		...(maxChars === undefined ? {} : { maxChars }),
 	};
 }
 
-function normalizeToolInput(
-	value: unknown,
-):
+function normalizeToolInput(value: unknown):
 	| { action: "list"; source?: string; artifact?: string }
-	| { action: "read"; source?: string; artifact?: string } {
+	| {
+			action: "read";
+			source?: string;
+			artifact?: string;
+			path?: string;
+			maxItems?: number;
+			maxChars?: number;
+	  } {
 	if (!isRecord(value))
 		throw new Error("workflow_artifact input must be an object");
 	const action = requiredString(value.action, "action");
@@ -545,9 +704,24 @@ function normalizeToolInput(
 		throw new Error("workflow_artifact action must be list or read");
 	const source = optionalString(value.source, "source");
 	const artifact = optionalString(value.artifact, "artifact");
+	const path = normalizeProjectionPath(value.path);
+	const maxItems = optionalNonNegativeInteger(value.maxItems, "maxItems");
+	const maxChars = optionalNonNegativeInteger(value.maxChars, "maxChars");
 	if (source !== undefined) validateSourceName(source, "source");
 	if (artifact !== undefined) assertArtifactKind(artifact, "artifact");
-	return { action, source, artifact };
+	if (action === "list") return { action, source, artifact };
+	return { action, source, artifact, path, maxItems, maxChars };
+}
+
+function normalizeProjectionPath(value: unknown): string | undefined {
+	const path = optionalString(value, "path");
+	if (path === undefined) return undefined;
+	if (!SIMPLE_JSON_PATH_PATTERN.test(path)) {
+		throw new Error(
+			"path must be $ or a simple dot JSON path like $.claims.items",
+		);
+	}
+	return path;
 }
 
 function normalizePolicy(
@@ -692,6 +866,17 @@ function requiredNumber(value: unknown, field: string): number {
 	if (typeof value !== "number" || !Number.isFinite(value))
 		throw new Error(`${field} must be a finite number`);
 	return value;
+}
+
+function optionalNonNegativeInteger(
+	value: unknown,
+	field: string,
+): number | undefined {
+	if (value === undefined) return undefined;
+	if (!Number.isInteger(value) || (value as number) < 0) {
+		throw new Error(`${field} must be a non-negative integer`);
+	}
+	return value as number;
 }
 
 function requiredBoolean(value: unknown, field: string): boolean {

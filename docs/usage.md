@@ -15,8 +15,9 @@ This installs:
 - the `/workflow` extension
 - the bundled `workflow-guide` skill
 - the bundled `execution-router` skill
+- bundled runtime helpers, including `@agwab/pi-subagent` and `pi-web-access`
 
-Requires Node.js `>=22.19.0`. The package depends on `@agwab/pi-subagent`, which Pi installs through npm package dependencies.
+Requires Node.js `>=22.19.0`.
 
 For local development, install the checkout as a package source:
 
@@ -44,12 +45,13 @@ pi-workflow inspect <run-id-or-prefix> [--failures] [--results] [--json]
 
 ## Natural-language invocation
 
-The extension also registers two LLM-callable tools for normal chat requests:
+The extension also registers LLM-callable tools for normal chat requests:
 
 | Tool | Purpose |
 |---|---|
 | `workflow_list` | List discoverable workflows when the user asks what exists or asks Pi to choose without naming one. |
 | `workflow_run` | Start a run when the user explicitly asks to use/run/start a named workflow and provides a concrete task. |
+| `workflow_dynamic` | Start a spec-less direct dynamic run when the user explicitly asks for dynamic workflow execution and provides a concrete task. |
 
 Examples:
 
@@ -61,11 +63,29 @@ Use the deep-research workflow to research this repository's architecture tradeo
 Use the deep-review workflow to review the current diff for reliability and test coverage.
 ```
 
-Natural-language invocation uses the same workflow resolution roots and task-required rule as `/workflow run`. If the workflow name or concrete task is missing, Pi should ask a clarifying question instead of launching a run. The deterministic manual equivalent is:
+Natural-language named-workflow invocation uses the same workflow resolution roots and task-required rule as `/workflow run`. If the workflow name or concrete task is missing, Pi should ask a clarifying question instead of launching a run. The deterministic manual equivalent is:
 
 ```text
 /workflow run deep-research "Research this repository's architecture tradeoffs."
 ```
+
+For explicit dynamic workflow requests that should not require a workflow name or spec, Pi can use `workflow_dynamic`. The deterministic manual equivalent is:
+
+```text
+/workflow dynamic "Research this repository's architecture tradeoffs."
+```
+
+`workflow_dynamic` and `/workflow dynamic` use a built-in trusted
+direct-dynamic controller and record normal `.pi/workflows/<run-id>`
+artifacts/events for observability; they do not ask the user to choose,
+generate, preview, approve, or save a workflow spec. Direct dynamic generated
+workers validate external URL refs before completion, verifier outputs are
+asked to record structured `claimSupports`, and final synthesis additionally
+requires at least one ref plus an upstream source-ledger subset check. Stale,
+unreachable, or newly invented final URL refs trigger the normal
+workflow-output retry path. When positive verifier `claimSupports` are present,
+final URL refs are restricted to those supported source locators rather than
+every upstream URL.
 
 ## Bundled skills
 
@@ -86,7 +106,8 @@ For reusable workflow authoring, `workflow-guide` includes validated scaffold bu
 | `/workflow validate <workflow-name-or-path>` | Load and compile a workflow without starting a run. Reports blocked permission previews and warnings. |
 | `/workflow roles <workflow-name-or-path>` | Show the compiled role context included for each workflow role. |
 | `/workflow agents` | List discoverable Pi agents, model/thinking defaults, tool ceilings, and source paths. |
-| `/workflow run <workflow-name-or-path> "<task>" [--detach]` | Start a workflow run with the supplied runtime task. `--detach` spawns a standalone supervisor process after the initial scheduling pass so the run keeps progressing after this Pi session exits (log: `.pi/workflows/<run-id>/supervise.log`). Dynamic controllers and `approval: "ask"` prompts in that first pass can still run inline; later detached/headless approval blocks require an interactive `/workflow resume <run-id>`. |
+| `/workflow run <workflow-name-or-path> "<task>" [--detach]` | Start a named workflow run with the supplied runtime task. `--detach` spawns a standalone supervisor process after the initial scheduling pass so the run keeps progressing after this Pi session exits (log: `.pi/workflows/<run-id>/supervise.log`). Dynamic controllers and `approval: "ask"` prompts in that first pass can still run inline; later detached/headless approval blocks require an interactive `/workflow resume <run-id>`. |
+| `/workflow dynamic "<task>" [--detach]` | Start a spec-less direct dynamic run. The runtime uses a built-in trusted controller to plan/fan out/synthesize dynamically; no workflow name, user-selected spec, or generated spec is required. Supports the same `--model` and `--thinking` overrides as `/workflow run`. |
 | `/workflow status [run-id]` | Show all workflow runs in the current project, or one run. |
 | `/workflow show <run-id-or-workflow-name>` | If the ref starts with `workflow_`, show run details; otherwise show the raw workflow spec. |
 | `/workflow logs <run-id> [task-id] [lines]` | Print captured logs for a workflow task. Defaults to `task-1`. |
@@ -148,7 +169,23 @@ A run prints a `workflow_*` id. Use that id for follow-up commands:
 /workflow logs workflow_mq224pi8_775e71 task-1 120
 ```
 
-The runtime task is not optional. `/workflow run <workflow>` without task text fails before launch.
+The runtime task is not optional. `/workflow run <workflow>` and `/workflow dynamic` without task text fail before launch.
+
+### Run-scoped `fetch_content` cache
+
+Workflow tasks that use `fetch_content` share a run-scoped file cache by default. The cache is stored under the workflow run directory, for example:
+
+```text
+.pi/workflows/<run-id>/source-cache/fetch-content/
+```
+
+The cache is only reused within the same workflow run, including resume/retry of that run. It is not reused across separate runs by default. Cache events are appended to `events.jsonl` with `hit`, `miss`, `write`, and `skip` records for telemetry and audit. To disable the cache for a run, set:
+
+```bash
+PI_WORKFLOW_FETCH_CONTENT_CACHE=0
+```
+
+Benchmark note: cache-enabled runs are a distinct cohort from older uncached runs. Do not compare wall-clock numbers directly unless the task set, model, and cache policy are controlled and recorded.
 
 ## Bundled starter workflows
 
@@ -156,7 +193,8 @@ The runtime task is not optional. `/workflow run <workflow>` without task text f
 
 | Workflow | Required agents | Mode | Use when |
 |---|---|---|---|
-| `deep-research` | `researcher` | plan + foreach questions + normalize + foreach verifier + audit support + final reduce | Research needs source-backed claims, dynamic breadth/depth, independent verification, deterministic evidence gating, or citations. |
+| `deep-research` | `researcher` | plan + foreach questions + normalize + foreach verifier + audit support + full audit reduce + deterministic executive render | Research needs source-backed claims, dynamic breadth/depth, independent verification, deterministic evidence gating, citations, and a compact parent-facing handoff with full audit artifacts preserved. |
+| `adaptive-research` | `researcher` | static intake + planner-driven dynamic decision loop + static final reduce | Experimental example for adaptive research where a dynamic stage decides fan-out/follow-up/stop within static policy. Not a replacement for `deep-research`. |
 | `deep-review` | `scout` | triage + foreach review lenses + dedup support + foreach devil's advocate + verdict-partition support + reduce | General thorough multi-lens review where findings should be independently challenged before synthesis. Prefer a more specific review workflow when the request shape is clear. |
 | `deep-discovery` | `scout` | domain/subsystem triage + foreach subsystem/risk packets + dedup support + foreach devil's advocate + verdict-partition support + reduce | Broad repository discovery: use when the request is to find important bugs or risks across a whole codebase with no suspected area or diff. |
 | `deep-focused-review` | `scout` | suspicious-scope triage + foreach defect-family/call-path packets + dedup support + foreach devil's advocate + verdict-partition support + reduce | Focused review: use when the user gives a suspicious area, component, subsystem, or defect pattern and wants deep review plus adjacent-path checks. |
@@ -164,7 +202,11 @@ The runtime task is not optional. `/workflow run <workflow>` without task text f
 | `spec-review` | `scout` | extract spec + map implementation + inspect tests -> reduce candidates -> foreach verifier -> reduce report | Read-only spec/contract conformance review against implementation and tests. |
 | `impact-review` | `scout` | scope/implementation/validation maps -> impact lenses -> consistency/regression/ship-readiness joins -> final synthesis | Read-only ship-impact review for changed or proposed work, especially missing tests, docs, release work, compatibility risk, and follow-up actions. |
 
-Bundled starters use normal Pi agent discovery. Ensure the named agents exist in `~/.pi/agent/agents/` or project `.pi/agents/`, or customize the workflow with agents that exist in your environment.
+Bundled starters use local-first Pi agent discovery with bundled fallback
+agents. Project `.pi/agents/` definitions win, then user
+`~/.pi/agent/agents/`, then pi-workflow's bundled common agents (`scout`,
+`researcher`, `typescript-expert`). Customize the workflow when you need a
+different role or stricter tool ceiling.
 
 ## Stage model
 
@@ -198,6 +240,8 @@ Every subagent stage writes artifact bundles:
 
 Use `foreach.from` for static data-driven fan-out, `reduce.from` for subagent fan-in, support `from` for local helper inputs, and `type: "dynamic"` only when the workflow must decide its own child tasks at runtime. Do not rely on a later plain `single` stage to see previous stage output.
 
+Planner-driven dynamic stages may declare `dynamic.decisionLoop` to keep adaptive behavior policy-bound in JSON. The planner emits `dynamic-decision-v1` data only; trusted controller/runtime code validates and persists decisions, maps accepted actions to generated workflow tasks, extracts state indexes, and enforces budgets, role/tool ceilings, replay invariants, and fail-closed invalid-decision behavior. Users still provide only the normal workflow task string.
+
 ### Dynamic workflow authoring
 
 Dynamic workflows keep JSON as the source of truth while allowing trusted bundle-local JavaScript to orchestrate adaptive work. A dynamic stage looks like this:
@@ -217,7 +261,7 @@ Dynamic workflows keep JSON as the source of truth while allowing trusted bundle
 
 Controller/helper/nested workflow refs must be bundle-local `./...` paths. Nested workflow specs are intentionally self-contained at their own directory level: refs inside a nested spec may point to files in that nested spec's subtree, but not to parent-level shared files via `../`. Put shared helpers/schemas under each nested workflow subtree or expose them through the parent controller/helper layer. Controller/helper code is trusted Node.js code for orchestration and timeout isolation, not a security sandbox. Generated agents are real workflow tasks: `ctx.agent({ id, agent, prompt, tools })` inserts a deterministic `stageId.id` task into `compiled.json` and `run.json`, persists a request hash in `dynamic/events.jsonl`, and replays fail-closed if the same id later changes request shape. On resume, controllers must re-issue previously recorded `ctx.agent`, `ctx.helper`, and `ctx.workflow` operations in the same order before issuing new operations; omitted or out-of-order replay fails closed with an explicit replay-invariant error. Use `ctx.parallel([() => ctx.agent(...), ...])` for dynamic fan-out; the runtime records queued sibling generation ops before the controller suspends, and non-suspension operation failures make the controller fail closed. Generated dependency cycles are rejected. `ctx.helper(name, input)` can call only helpers declared in `dynamic.helpers`; pure/retry-safe helpers may set `idempotent: true` so a crash after `helper.started` but before `helper.completed` can retry the helper instead of permanently failing closed. `ctx.workflow(name, input)` can call only nested specs declared in `dynamic.workflows`.
 
-Dynamic outputs should be compact typed artifacts. The controller returns normal workflow sections through `{ control, analysis, refs }`; generated child agents must return the same `<control>`, `<analysis>`, `<refs>` protocol as other artifact-graph tasks. Runtime state is stored under `.pi/workflows/<run-id>/dynamic/`:
+Dynamic outputs should be compact typed artifacts. The controller returns normal workflow sections through `{ control, analysis, refs }`; generated child agents must return the same `<control>`, `<analysis>`, `<refs>` protocol as other artifact-graph tasks. When a controller result includes `outputTasks`/`outputTaskIds` (the built-in decision loop sets this from accepted `synthesize` actions), downstream `from: "<dynamic-stage>"` reducers also receive those exported task artifacts as stable sources such as `<dynamic-stage>.output`. Runtime state is stored under `.pi/workflows/<run-id>/dynamic/`:
 
 - `events.jsonl` — append-only decisions such as controller status, task generation, helper completions, nested workflow starts, and approvals.
 - `state.json` — replayable projection/cache of controller status, generated task ids, and budget counters.
@@ -246,7 +290,7 @@ DAG rules:
 - `after` is order-only. It accepts a string or string array, waits for those stages, and does not make their artifacts available as source data.
 - `after: []` is an explicit parallel root. It opts out of the implicit previous-stage chain while documenting that the stage intentionally has no ordering dependency.
 - Parse-time graph validation rejects unknown stage references, self-dependencies, duplicate stage ids, dependency cycles, unsupported output fields, and unsafe `controlSchema` paths.
-- `inputPolicy.requiredReads` is fail-closed: if declared, the task must read each listed `source.artifact` via `workflow_artifact` before its final output is accepted. Direct repo `read`/`grep` calls do not satisfy this proof; the ledger proves artifact access, not semantic use. DAG container outputs use the selected child source name, for example `analysis.final.analysis` for `id: "analysis", outputFrom: "final"`.
+- `inputPolicy.requiredReads` is fail-closed: if declared, the task must read each listed `source.artifact` via `workflow_artifact` before its final output is accepted. The runtime does not preload required artifact contents into the prompt; it exposes source refs and checks the read ledger. Direct repo `read`/`grep` calls do not satisfy this proof; the ledger proves artifact access, not semantic use. DAG container outputs use the selected child source name, for example `analysis.final.analysis` for `id: "analysis", outputFrom: "final"`.
 - `sourceProjection.include` can inline small selected simple dot paths from upstream `control.json` (for example `$.digest` or `$.items`); full artifacts remain available through `workflow_artifact`.
 - A `type: "dag"` stage may contain `single`, `foreach`, `reduce`, support nodes, or nested `dag` stages. Loops are top-level workflow/control stages in v1. Child `from`/`after` references resolve only to siblings inside the same container.
 - `outputFrom` names the child whose task keys represent the container for downstream `from: "containerId"` edges. If omitted, exactly one sink child defaults as the output; multiple sink children require explicit `outputFrom`.
@@ -511,7 +555,13 @@ Scope order is workflow-level `tools` < `defaults.tools` < stage `tools`; the na
 
 ## Web tools
 
-Workflows that use `web_search`, `fetch_content`, `get_search_content`, or `code_search` require Pi web access tooling. The bundled worker launcher enables the public `npm:pi-web-access` package for those tools. Object-form custom tool `extensions` are merged with this built-in mapping and deduplicated for the subagent launch. If a custom workflow references a tool that is not available in your Pi setup, customize the workflow tool list and prompts, then validate the custom workflow before running it.
+Workflows that use `web_search`, `fetch_content`, `get_search_content`, or
+`code_search` use the bundled `pi-web-access` dependency packaged with
+pi-workflow. The worker launcher injects that bundled extension automatically
+for those tools. Object-form custom tool `extensions` are merged with this
+built-in mapping and deduplicated for the subagent launch. Web calls can still
+fail when network access, provider credentials, browser state, or quota are
+unavailable; research workflows should report those limits instead of guessing.
 
 ## Release checks
 

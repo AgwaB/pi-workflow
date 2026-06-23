@@ -34,6 +34,7 @@ import {
 	type WorkflowRunRecord,
 	type WorkflowRunStatus,
 	type WorkflowTaskRunRecord,
+	type WorkflowTaskResumeEvent,
 	type TaskRunStatus,
 	type TaskSummary,
 } from "./types.js";
@@ -390,10 +391,14 @@ function rewriteCompiledBundlePaths(
 	return rewritten;
 }
 
-function rewriteCompiledBundlePathsInValue(value: unknown, bundleDir: string): void {
+function rewriteCompiledBundlePathsInValue(
+	value: unknown,
+	bundleDir: string,
+): void {
 	if (!value || typeof value !== "object") return;
 	if (Array.isArray(value)) {
-		for (const item of value) rewriteCompiledBundlePathsInValue(item, bundleDir);
+		for (const item of value)
+			rewriteCompiledBundlePathsInValue(item, bundleDir);
 		return;
 	}
 	const record = value as Record<string, any>;
@@ -405,10 +410,16 @@ function rewriteCompiledBundlePathsInValue(value: unknown, bundleDir: string): v
 		);
 	}
 	if (record.kind === "dynamic" && record.dynamic?.uses) {
-		record.agentPath = join(bundleDir, stripBundleRefPrefix(record.dynamic.uses));
+		record.agentPath = join(
+			bundleDir,
+			stripBundleRefPrefix(record.dynamic.uses),
+		);
 	}
 	if (record.kind === "support" && record.support?.uses) {
-		record.agentPath = join(bundleDir, stripBundleRefPrefix(record.support.uses));
+		record.agentPath = join(
+			bundleDir,
+			stripBundleRefPrefix(record.support.uses),
+		);
 	}
 	if (record.dynamic) {
 		const dynamic = record.dynamic;
@@ -456,7 +467,9 @@ async function copyWorkflowBundleArtifacts(
 	targetDir: string,
 	spec: unknown,
 ): Promise<void> {
-	const sourceSpecPath = isAbsolute(specPath) ? specPath : resolve(cwd, specPath);
+	const sourceSpecPath = isAbsolute(specPath)
+		? specPath
+		: resolve(cwd, specPath);
 	const sourceDir = dirname(sourceSpecPath);
 	if (resolve(sourceDir) === resolve(targetDir)) return;
 	let sourceRoot: string;
@@ -553,7 +566,11 @@ async function collectNestedWorkflowBundleRefs(
 			seenCode.add(ref);
 			const source = await readBundleText(sourceRoot, ref);
 			if (source === undefined) continue;
-			for (const imported of await collectLocalEsModuleRefs(sourceRoot, source, ref)) {
+			for (const imported of await collectLocalEsModuleRefs(
+				sourceRoot,
+				source,
+				ref,
+			)) {
 				if (!collection.refs.has(imported)) {
 					collection.refs.add(imported);
 					changed = true;
@@ -613,15 +630,20 @@ async function packageJsonRefsForJsImport(
 ): Promise<string[]> {
 	let current = dirname(importedRef);
 	while (true) {
-		const candidate = current === "." ? "package.json" : join(current, "package.json");
-		const text = await readBundleText(sourceRoot, candidate).catch(() => undefined);
+		const candidate =
+			current === "." ? "package.json" : join(current, "package.json");
+		const text = await readBundleText(sourceRoot, candidate).catch(
+			() => undefined,
+		);
 		if (text !== undefined) return [candidate];
 		if (current === "." || current === "") return [];
 		current = dirname(current);
 	}
 }
 
-function collectWorkflowBundleRefs(value: unknown): WorkflowBundleRefCollection {
+function collectWorkflowBundleRefs(
+	value: unknown,
+): WorkflowBundleRefCollection {
 	const collection: WorkflowBundleRefCollection = {
 		refs: new Set<string>(),
 		schemaRefs: new Set<string>(),
@@ -686,7 +708,11 @@ function visitWorkflowBundleRefs(
 			!Array.isArray(dynamic.workflows)
 		) {
 			for (const workflow of Object.values(dynamic.workflows)) {
-				if (!workflow || typeof workflow !== "object" || Array.isArray(workflow))
+				if (
+					!workflow ||
+					typeof workflow !== "object" ||
+					Array.isArray(workflow)
+				)
 					continue;
 				const workflowRecord = workflow as Record<string, unknown>;
 				if (typeof workflowRecord.uses === "string")
@@ -701,7 +727,11 @@ function visitWorkflowBundleRefs(
 	) {
 		visitWorkflowBundleRefs(record.output, collection);
 	}
-	if (record.each && typeof record.each === "object" && !Array.isArray(record.each)) {
+	if (
+		record.each &&
+		typeof record.each === "object" &&
+		!Array.isArray(record.each)
+	) {
 		visitWorkflowBundleRefs(record.each, collection);
 	}
 	if (
@@ -712,7 +742,8 @@ function visitWorkflowBundleRefs(
 		visitWorkflowBundleRefs(record.onExhausted, collection);
 	}
 	if (Array.isArray(record.stages)) {
-		for (const stage of record.stages) visitWorkflowBundleRefs(stage, collection);
+		for (const stage of record.stages)
+			visitWorkflowBundleRefs(stage, collection);
 	}
 	if (record.artifactGraph && typeof record.artifactGraph === "object") {
 		visitWorkflowBundleRefs(record.artifactGraph, collection);
@@ -732,8 +763,10 @@ function visitJsonSchemaBundleRefs(value: unknown, refs: Set<string>): void {
 		return;
 	}
 	const record = value as Record<string, unknown>;
-	if (typeof record.$ref === "string") addJsonSchemaBundleRef(refs, record.$ref);
-	for (const item of Object.values(record)) visitJsonSchemaBundleRefs(item, refs);
+	if (typeof record.$ref === "string")
+		addJsonSchemaBundleRef(refs, record.$ref);
+	for (const item of Object.values(record))
+		visitJsonSchemaBundleRefs(item, refs);
 }
 
 function addWorkflowBundleRef(
@@ -775,16 +808,29 @@ async function collectLocalEsModuleRefs(
 		/(?:import|export)\s*(?:[^'";]*?\s*from\s*)?["']([^"']+)["']|import\s*\(\s*["']([^"']+)["']\s*(?:,[^)]*)?\)|require\s*\(\s*["']([^"']+)["']\s*\)/g;
 	const sourceForScan = stripJavaScriptComments(source);
 	for (const match of sourceForScan.matchAll(importPattern)) {
-		if (match.index !== undefined && isInsideJavaScriptString(sourceForScan, match.index)) continue;
+		if (
+			match.index !== undefined &&
+			isInsideJavaScriptString(sourceForScan, match.index)
+		)
+			continue;
 		const specifier = match[1] ?? match[2] ?? match[3];
 		if (!specifier?.startsWith(".")) continue;
-		const combined = normalizeBundleRelativeRef(join(dirname(ownerRef), specifier));
+		const combined = normalizeBundleRelativeRef(
+			join(dirname(ownerRef), specifier),
+		);
 		if (!combined) {
 			throw new Error(
 				`workflow bundle import escapes workflow directory: ${specifier} in ${ownerRef}`,
 			);
 		}
-		refs.push(...(await resolveLocalBundleImportRefs(sourceRoot, combined, specifier, ownerRef)));
+		refs.push(
+			...(await resolveLocalBundleImportRefs(
+				sourceRoot,
+				combined,
+				specifier,
+				ownerRef,
+			)),
+		);
 	}
 	return uniqueStringArray(refs);
 }
@@ -807,7 +853,8 @@ async function resolveLocalBundleImportRefs(
 	for (const candidate of candidates) {
 		if (!candidate) continue;
 		try {
-			if ((await stat(resolve(sourceRoot, candidate))).isFile()) return [candidate];
+			if ((await stat(resolve(sourceRoot, candidate))).isFile())
+				return [candidate];
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 		}
@@ -868,7 +915,10 @@ function stripJavaScriptComments(source: string): string {
 		if (char === "/" && next === "*") {
 			result += "  ";
 			i += 2;
-			while (i < source.length && !(source[i] === "*" && source[i + 1] === "/")) {
+			while (
+				i < source.length &&
+				!(source[i] === "*" && source[i + 1] === "/")
+			) {
 				result += source[i] === "\n" ? "\n" : " ";
 				i += 1;
 			}
@@ -1174,6 +1224,7 @@ export function resetTaskForResume(task: WorkflowTaskRunRecord): boolean {
 	) {
 		return false;
 	}
+	recordTaskResumeEvent(task);
 	task.status = "pending";
 	task.statusDetail = "pending";
 	task.startedAt = undefined;
@@ -1189,11 +1240,62 @@ export function resetTaskForResume(task: WorkflowTaskRunRecord): boolean {
 	return true;
 }
 
+function recordTaskResumeEvent(task: WorkflowTaskRunRecord): void {
+	task.resumeEvents ??= [];
+	task.resumeEvents.push(buildTaskResumeEvent(task));
+}
+
+function buildTaskResumeEvent(
+	task: WorkflowTaskRunRecord,
+): WorkflowTaskResumeEvent {
+	const backendRunId = taskBackendHandleString(task, "runId");
+	const backendAttemptId = taskBackendHandleString(task, "attemptId");
+	return {
+		at: nowIso(),
+		fromStatus: task.status,
+		fromStatusDetail: task.statusDetail,
+		...(task.lastMessage === undefined
+			? {}
+			: { lastMessage: task.lastMessage }),
+		...(task.outputRetry?.attempts === undefined
+			? {}
+			: { outputRetryAttempts: task.outputRetry.attempts }),
+		...(task.outputRetry?.reason === undefined
+			? {}
+			: { outputRetryReason: task.outputRetry.reason }),
+		...(task.outputRetry?.repairMode === undefined
+			? {}
+			: { outputRetryRepairMode: task.outputRetry.repairMode }),
+		...(task.launchRetry?.attempts === undefined
+			? {}
+			: { launchRetryAttempts: task.launchRetry.attempts }),
+		...(task.launchRetry?.reason === undefined
+			? {}
+			: { launchRetryReason: task.launchRetry.reason }),
+		...(backendRunId === undefined ? {} : { backendRunId }),
+		...(backendAttemptId === undefined ? {} : { backendAttemptId }),
+	};
+}
+
+function taskBackendHandleString(
+	task: WorkflowTaskRunRecord,
+	key: string,
+): string | undefined {
+	const handle = task.backendHandle;
+	if (!handle || typeof handle !== "object" || Array.isArray(handle)) {
+		return undefined;
+	}
+	const value = handle[key];
+	return typeof value === "string" ? value : undefined;
+}
+
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function compiledWorkflowHasDynamicController(compiled: CompiledWorkflow): boolean {
+function compiledWorkflowHasDynamicController(
+	compiled: CompiledWorkflow,
+): boolean {
 	return (
 		compiled.tasks.some(compiledTaskHasDynamicController) ||
 		(compiled.stages ?? []).some(compiledStageRecordHasDynamicController)
@@ -1248,12 +1350,20 @@ export function createTaskRunRecord(
 	const bundleDir = join(workflowRunDir(cwd, runId), "bundle");
 	const agentFile =
 		task.kind === "dynamic" && task.dynamic?.uses
-			? toProjectPath(cwd, join(bundleDir, stripBundleRefPrefix(task.dynamic.uses)))
+			? toProjectPath(
+					cwd,
+					join(bundleDir, stripBundleRefPrefix(task.dynamic.uses)),
+				)
 			: task.kind === "support" && task.support?.uses
-				? toProjectPath(cwd, join(bundleDir, stripBundleRefPrefix(task.support.uses)))
+				? toProjectPath(
+						cwd,
+						join(bundleDir, stripBundleRefPrefix(task.support.uses)),
+					)
 				: task.agentPath;
 	const taskArtifactGraph = task.artifactGraph
-		? (JSON.parse(JSON.stringify(task.artifactGraph)) as typeof task.artifactGraph)
+		? (JSON.parse(
+				JSON.stringify(task.artifactGraph),
+			) as typeof task.artifactGraph)
 		: undefined;
 	if (taskArtifactGraph) {
 		rewriteCompiledBundlePathsInValue(

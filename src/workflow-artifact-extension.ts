@@ -38,6 +38,23 @@ const workflowArtifactParameters = {
 			],
 			description: "Artifact kind to read when action is read.",
 		},
+		path: {
+			type: "string",
+			description:
+				"Optional simple JSON path for projected reads, for example $.claims or $.claimIndex.items. Supported only for JSON artifacts.",
+		},
+		maxItems: {
+			type: "integer",
+			minimum: 0,
+			description:
+				"Optional head-N array limit for projected reads. Requires path resolving to an array; this is not semantic top-k.",
+		},
+		maxChars: {
+			type: "integer",
+			minimum: 0,
+			description:
+				"Optional character limit for the projected JSON value after maxItems is applied.",
+		},
 	},
 	required: ["action"],
 } as const;

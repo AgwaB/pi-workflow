@@ -1,5 +1,6 @@
 import { isAbsolute } from "node:path";
 
+import { DYNAMIC_OUTPUT_PROFILES } from "./dynamic-profiles.js";
 import {
 	APPROVAL_MODES,
 	FAST_MODES,
@@ -72,6 +73,7 @@ const OUTPUT_KEYS = new Set([
 	"maxDigestChars",
 ]);
 const REQUIRED_FLAG_KEYS = new Set(["required"]);
+const REFS_OUTPUT_KEYS = new Set(["required", "minItems"]);
 const INPUT_POLICY_KEYS = new Set(["requiredReads", "enforcement"]);
 const SOURCE_PROJECTION_KEYS = new Set(["include", "maxChars"]);
 const SUPPORT_KEYS = new Set(["uses", "options"]);
@@ -99,6 +101,7 @@ const DYNAMIC_KEYS = new Set([
 	"permissions",
 	"helpers",
 	"workflows",
+	"decisionLoop",
 ]);
 const DYNAMIC_BUDGET_KEYS = new Set([
 	"maxAgents",
@@ -120,7 +123,45 @@ const DYNAMIC_HELPER_KEYS = new Set([
 	"idempotent",
 ]);
 const DYNAMIC_NESTED_WORKFLOW_KEYS = new Set(["uses"]);
-const RESERVED_DYNAMIC_MAP_KEYS = new Set(["__proto__", "prototype", "constructor"]);
+const DYNAMIC_DECISION_LOOP_KEYS = new Set([
+	"planner",
+	"workerDefaults",
+	"verifier",
+	"synthesis",
+	"allowedAgents",
+	"allowedTools",
+	"allowedOutputProfiles",
+	"maxDecisionRounds",
+	"maxActionsPerRound",
+	"repair",
+	"stateIndex",
+	"stopPolicy",
+]);
+const DYNAMIC_DECISION_LOOP_PROFILE_KEYS = new Set([
+	"agent",
+	"model",
+	"thinking",
+	"tools",
+	"outputProfile",
+	"maxRuntimeMs",
+]);
+const DYNAMIC_DECISION_LOOP_REPAIR_KEYS = new Set(["maxAttempts"]);
+const DYNAMIC_DECISION_LOOP_STATE_INDEX_KEYS = new Set([
+	"maxFindings",
+	// Deprecated/no-op compatibility field; accepted but not used by Phase 1.
+	"requiredFindingIds",
+]);
+const DYNAMIC_DECISION_LOOP_STOP_POLICY_KEYS = new Set([
+	"requireSynthesisAction",
+	"failOnInvalidDecision",
+	"maxStalls",
+	"failOnDroppedRequiredBranch",
+]);
+const RESERVED_DYNAMIC_MAP_KEYS = new Set([
+	"__proto__",
+	"prototype",
+	"constructor",
+]);
 const DYNAMIC_APPROVAL_VALUES = ["auto", "ask"] as const;
 const EACH_KEYS = new Set([
 	"prompt",
@@ -607,7 +648,7 @@ function validateOutput(
 		issues,
 	);
 	validateRequiredFlagObject(output.analysis, `${path}.analysis`, issues);
-	validateRequiredFlagObject(output.refs, `${path}.refs`, issues);
+	validateRefsOutputObject(output.refs, `${path}.refs`, issues);
 }
 
 function validateControlSchemaRef(
@@ -633,6 +674,19 @@ function validateRequiredFlagObject(
 	if (!object) return;
 	rejectUnknownKeys(object, REQUIRED_FLAG_KEYS, path, issues);
 	optionalBoolean(object.required, `${path}.required`, issues);
+}
+
+function validateRefsOutputObject(
+	value: unknown,
+	path: string,
+	issues: ValidationIssue[],
+): void {
+	if (value === undefined) return;
+	const object = recordAt(value, path, issues);
+	if (!object) return;
+	rejectUnknownKeys(object, REFS_OUTPUT_KEYS, path, issues);
+	optionalBoolean(object.required, `${path}.required`, issues);
+	optionalPositiveInteger(object.minItems, `${path}.minItems`, issues);
 }
 
 function validateInputPolicy(
@@ -831,9 +885,13 @@ function validateDynamicStage(
 	if (!dynamic) return;
 	rejectUnknownKeys(dynamic, DYNAMIC_KEYS, `${path}.dynamic`, issues);
 	const uses = requiredString(dynamic.uses, `${path}.dynamic.uses`, issues);
-	if (uses !== undefined) validateSupportRef(uses, `${path}.dynamic.uses`, issues);
+	if (uses !== undefined)
+		validateSupportRef(uses, `${path}.dynamic.uses`, issues);
 	if (dynamic.mode !== undefined && dynamic.mode !== "graph-splice") {
-		issues.push({ path: `${path}.dynamic.mode`, message: 'must be "graph-splice"' });
+		issues.push({
+			path: `${path}.dynamic.mode`,
+			message: 'must be "graph-splice"',
+		});
 	}
 	validateDynamicBudget(dynamic.budget, `${path}.dynamic.budget`, issues);
 	validateDynamicPermissions(
@@ -842,7 +900,16 @@ function validateDynamicStage(
 		issues,
 	);
 	validateDynamicHelpers(dynamic.helpers, `${path}.dynamic.helpers`, issues);
-	validateDynamicWorkflows(dynamic.workflows, `${path}.dynamic.workflows`, issues);
+	validateDynamicWorkflows(
+		dynamic.workflows,
+		`${path}.dynamic.workflows`,
+		issues,
+	);
+	validateDynamicDecisionLoop(
+		dynamic.decisionLoop,
+		`${path}.dynamic.decisionLoop`,
+		issues,
+	);
 }
 
 function validateDynamicBudget(
@@ -868,7 +935,12 @@ function validateDynamicPermissions(
 	const permissions = recordAt(value, path, issues);
 	if (!permissions) return;
 	rejectUnknownKeys(permissions, DYNAMIC_PERMISSIONS_KEYS, path, issues);
-	optionalEnum(permissions.approval, DYNAMIC_APPROVAL_VALUES, `${path}.approval`, issues);
+	optionalEnum(
+		permissions.approval,
+		DYNAMIC_APPROVAL_VALUES,
+		`${path}.approval`,
+		issues,
+	);
 	optionalBoolean(
 		permissions.allowDynamicRoles,
 		`${path}.allowDynamicRoles`,
@@ -907,7 +979,8 @@ function validateDynamicHelpers(
 		if (!helper) continue;
 		rejectUnknownKeys(helper, DYNAMIC_HELPER_KEYS, helperPath, issues);
 		const uses = requiredString(helper.uses, `${helperPath}.uses`, issues);
-		if (uses !== undefined) validateSupportRef(uses, `${helperPath}.uses`, issues);
+		if (uses !== undefined)
+			validateSupportRef(uses, `${helperPath}.uses`, issues);
 		if (helper.inputSchema !== undefined) {
 			const inputSchema = requiredString(
 				helper.inputSchema,
@@ -987,6 +1060,162 @@ function validateDynamicWorkflows(
 			}
 		}
 	}
+}
+
+function validateDynamicDecisionLoop(
+	value: unknown,
+	path: string,
+	issues: ValidationIssue[],
+): void {
+	if (value === undefined) return;
+	const loop = recordAt(value, path, issues);
+	if (!loop) return;
+	rejectUnknownKeys(loop, DYNAMIC_DECISION_LOOP_KEYS, path, issues);
+	for (const key of ["planner", "workerDefaults", "verifier", "synthesis"]) {
+		validateDynamicDecisionLoopProfile(loop[key], `${path}.${key}`, issues);
+	}
+	validateStringArray(loop.allowedAgents, `${path}.allowedAgents`, issues);
+	validateWorkflowToolArray(loop.allowedTools, `${path}.allowedTools`, issues);
+	validateDynamicOutputProfileArray(
+		loop.allowedOutputProfiles,
+		`${path}.allowedOutputProfiles`,
+		issues,
+	);
+	optionalPositiveInteger(
+		loop.maxDecisionRounds,
+		`${path}.maxDecisionRounds`,
+		issues,
+	);
+	optionalPositiveInteger(
+		loop.maxActionsPerRound,
+		`${path}.maxActionsPerRound`,
+		issues,
+	);
+	validateDynamicDecisionLoopRepair(loop.repair, `${path}.repair`, issues);
+	validateDynamicDecisionLoopStateIndex(
+		loop.stateIndex,
+		`${path}.stateIndex`,
+		issues,
+	);
+	validateDynamicDecisionLoopStopPolicy(
+		loop.stopPolicy,
+		`${path}.stopPolicy`,
+		issues,
+	);
+}
+
+function validateDynamicDecisionLoopProfile(
+	value: unknown,
+	path: string,
+	issues: ValidationIssue[],
+): void {
+	if (value === undefined) return;
+	const profile = recordAt(value, path, issues);
+	if (!profile) return;
+	rejectUnknownKeys(profile, DYNAMIC_DECISION_LOOP_PROFILE_KEYS, path, issues);
+	optionalString(profile.agent, `${path}.agent`, issues);
+	optionalString(profile.model, `${path}.model`, issues);
+	optionalEnum(profile.thinking, THINKING_LEVELS, `${path}.thinking`, issues);
+	validateWorkflowToolArray(profile.tools, `${path}.tools`, issues);
+	optionalEnum(
+		profile.outputProfile,
+		DYNAMIC_OUTPUT_PROFILES,
+		`${path}.outputProfile`,
+		issues,
+	);
+	optionalPositiveInteger(profile.maxRuntimeMs, `${path}.maxRuntimeMs`, issues);
+}
+
+function validateDynamicOutputProfileArray(
+	value: unknown,
+	path: string,
+	issues: ValidationIssue[],
+): void {
+	if (value === undefined) return;
+	if (!Array.isArray(value)) {
+		issues.push({ path, message: "must be an array" });
+		return;
+	}
+	const seen = new Set<string>();
+	for (const [index, item] of value.entries()) {
+		const itemPath = `${path}[${index}]`;
+		optionalEnum(item, DYNAMIC_OUTPUT_PROFILES, itemPath, issues);
+		if (typeof item !== "string") continue;
+		if (seen.has(item)) {
+			issues.push({ path: itemPath, message: `duplicate value "${item}"` });
+		}
+		seen.add(item);
+	}
+}
+
+function validateDynamicDecisionLoopRepair(
+	value: unknown,
+	path: string,
+	issues: ValidationIssue[],
+): void {
+	if (value === undefined) return;
+	const repair = recordAt(value, path, issues);
+	if (!repair) return;
+	rejectUnknownKeys(repair, DYNAMIC_DECISION_LOOP_REPAIR_KEYS, path, issues);
+	optionalPositiveInteger(repair.maxAttempts, `${path}.maxAttempts`, issues);
+}
+
+function validateDynamicDecisionLoopStateIndex(
+	value: unknown,
+	path: string,
+	issues: ValidationIssue[],
+): void {
+	if (value === undefined) return;
+	const stateIndex = recordAt(value, path, issues);
+	if (!stateIndex) return;
+	rejectUnknownKeys(
+		stateIndex,
+		DYNAMIC_DECISION_LOOP_STATE_INDEX_KEYS,
+		path,
+		issues,
+	);
+	optionalPositiveInteger(
+		stateIndex.maxFindings,
+		`${path}.maxFindings`,
+		issues,
+	);
+	validateStringArray(
+		stateIndex.requiredFindingIds,
+		`${path}.requiredFindingIds`,
+		issues,
+	);
+}
+
+function validateDynamicDecisionLoopStopPolicy(
+	value: unknown,
+	path: string,
+	issues: ValidationIssue[],
+): void {
+	if (value === undefined) return;
+	const stopPolicy = recordAt(value, path, issues);
+	if (!stopPolicy) return;
+	rejectUnknownKeys(
+		stopPolicy,
+		DYNAMIC_DECISION_LOOP_STOP_POLICY_KEYS,
+		path,
+		issues,
+	);
+	optionalBoolean(
+		stopPolicy.requireSynthesisAction,
+		`${path}.requireSynthesisAction`,
+		issues,
+	);
+	optionalBoolean(
+		stopPolicy.failOnInvalidDecision,
+		`${path}.failOnInvalidDecision`,
+		issues,
+	);
+	optionalPositiveInteger(stopPolicy.maxStalls, `${path}.maxStalls`, issues);
+	optionalBoolean(
+		stopPolicy.failOnDroppedRequiredBranch,
+		`${path}.failOnDroppedRequiredBranch`,
+		issues,
+	);
 }
 
 function validateForeachStage(

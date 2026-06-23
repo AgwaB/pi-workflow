@@ -8,6 +8,7 @@
   "files": [
     "dist",
     "src",
+    "agents",
     "workflows",
     "skills",
     "docs/usage.md",
@@ -73,7 +74,8 @@
     "node": ">=22.19.0"
   },
   "dependencies": {
-    "@agwab/pi-subagent": "^0.3.5"
+    "@agwab/pi-subagent": "^0.3.5",
+    "pi-web-access": "^0.10.7"
   },
   "publishConfig": {
     "access": "public"
@@ -90,5 +92,9 @@
   "homepage": "https://github.com/AgwaB/pi-workflow#readme",
   "bugs": {
     "url": "https://github.com/AgwaB/pi-workflow/issues"
-  }
+  },
+  "bundleDependencies": [
+    "@agwab/pi-subagent",
+    "pi-web-access"
+  ]
 }

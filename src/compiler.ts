@@ -2,6 +2,16 @@ import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 import { loadAgentByName } from "./agents.js";
+import { DYNAMIC_OUTPUT_PROFILES } from "./dynamic-profiles.js";
+import {
+	classifyToolCapability,
+	effectiveToolClassification,
+	providersForSelectedTools,
+	resolveToolSelection,
+	TOOL_NAME_PATTERN,
+	toolNameForSpec,
+	type ToolSelection,
+} from "./tool-metadata.js";
 import {
 	type AgentDefinition,
 	type ApprovalMode,
@@ -21,18 +31,6 @@ import {
 	type WorktreePolicy,
 } from "./types.js";
 
-const READ_ONLY_TOOLS = new Set([
-	"read",
-	"grep",
-	"find",
-	"ls",
-	"web_search",
-	"fetch_content",
-	"get_search_content",
-	"scrapling_fetch",
-]);
-const EXPLICIT_WRITE_TOOLS = new Set(["edit", "write"]);
-const MUTATION_CAPABLE_TOOLS = new Set(["bash"]);
 const DELEGATION_TOOLS = new Set([
 	"skill_test_subagent",
 	"workflow",
@@ -43,7 +41,6 @@ const TOOL_CLASSIFICATION_VALUES = new Set([
 	"write-capable",
 	"mutation-capable",
 ]);
-const TOOL_NAME_PATTERN = /^[A-Za-z0-9_.:/-]+$/;
 const DEFAULT_MAX_RUNTIME_MS = 30 * 60 * 1000;
 const DEFAULT_MAX_CONCURRENCY = 16;
 const DEFAULT_DYNAMIC_MAX_AGENTS = 1000;
@@ -52,6 +49,9 @@ const DEFAULT_DYNAMIC_MAX_RUNTIME_MS = 14_400_000;
 const DEFAULT_DYNAMIC_MAX_NESTED_WORKFLOW_DEPTH = 3;
 const DEFAULT_DYNAMIC_MAX_GRAPH_MUTATIONS = 5000;
 const DEFAULT_DYNAMIC_MAX_HELPER_RUNS = 1000;
+const DEFAULT_DYNAMIC_DECISION_LOOP_MAX_ROUNDS = 4;
+const DEFAULT_DYNAMIC_DECISION_LOOP_MAX_ACTIONS = 6;
+const DEFAULT_DYNAMIC_DECISION_LOOP_MAX_STALLS = 3;
 
 interface CompileOptions {
 	cwd: string;
@@ -215,6 +215,7 @@ function artifactGraphTaskMetadata(
 		output: {
 			analysisRequired: stage.output?.analysis?.required ?? true,
 			refsRequired: stage.output?.refs?.required ?? true,
+			refsMinItems: stage.output?.refs?.minItems,
 			controlSchema,
 			controlSchemaPath: controlSchema
 				? resolve(specDir, controlSchema)
@@ -321,11 +322,6 @@ function validateToolSubset(
 	}
 }
 
-interface ToolSelection {
-	tools?: string[];
-	toolProviders?: Record<string, CompiledToolProvider>;
-}
-
 function validateToolSpecs(
 	tools: WorkflowToolSpec[] | undefined,
 	issues: ValidationIssue[],
@@ -430,114 +426,6 @@ function validateToolName(
 		issues.push({ path, message: `invalid tool name "${tool}"` });
 }
 
-function resolveToolSelection(
-	scopes: Array<WorkflowToolSpec[] | undefined>,
-	fallbackTools: string[] | undefined,
-): ToolSelection {
-	const metadata = new Map<string, CompiledToolProvider>();
-	let selectedTools: string[] | undefined;
-
-	for (const scope of scopes) {
-		if (scope === undefined || !Array.isArray(scope)) continue;
-		selectedTools = [];
-		for (const tool of scope) {
-			const name = toolNameForSpec(tool);
-			if (name === undefined) continue;
-			if (typeof tool !== "string") {
-				const provider = providerFromToolObject(tool);
-				if (provider)
-					metadata.set(name, mergeToolProviders(metadata.get(name), provider));
-			}
-			selectedTools.push(name);
-		}
-	}
-
-	const tools = selectedTools ?? fallbackTools;
-	return { tools, toolProviders: providersForSelectedTools(tools, metadata) };
-}
-
-function toolNameForSpec(tool: WorkflowToolSpec): string | undefined {
-	if (typeof tool === "string") return tool;
-	if (
-		tool &&
-		typeof tool === "object" &&
-		!Array.isArray(tool) &&
-		typeof (tool as { name?: unknown }).name === "string"
-	) {
-		return (tool as { name: string }).name;
-	}
-	return undefined;
-}
-
-function providerFromToolObject(
-	tool: WorkflowToolObjectSpec,
-): CompiledToolProvider | undefined {
-	const provider: CompiledToolProvider = {};
-	if (Array.isArray(tool.extensions))
-		provider.extensions = [...tool.extensions];
-	if (tool.classification !== undefined)
-		provider.classification = tool.classification;
-	if (tool.optional !== undefined) provider.optional = tool.optional;
-	if (Array.isArray(tool.fallbackTools))
-		provider.fallbackTools = [...tool.fallbackTools];
-	return hasProviderMetadata(provider) ? provider : undefined;
-}
-
-function mergeToolProviders(
-	base: CompiledToolProvider | undefined,
-	override: CompiledToolProvider,
-): CompiledToolProvider {
-	const merged: CompiledToolProvider = { ...(base ?? {}) };
-	if (override.extensions !== undefined)
-		merged.extensions = [...override.extensions];
-	if (override.classification !== undefined)
-		merged.classification = override.classification;
-	if (override.optional !== undefined) merged.optional = override.optional;
-	if (override.fallbackTools !== undefined)
-		merged.fallbackTools = [...override.fallbackTools];
-	return merged;
-}
-
-function providersForSelectedTools(
-	tools: string[] | undefined,
-	metadata: Map<string, CompiledToolProvider>,
-): Record<string, CompiledToolProvider> | undefined {
-	if (!tools || tools.length === 0) return undefined;
-	const providers: Record<string, CompiledToolProvider> = {};
-	for (const tool of tools) {
-		const provider = metadata.get(tool);
-		if (provider && hasProviderMetadata(provider))
-			providers[tool] = cloneToolProvider(provider);
-	}
-	return Object.keys(providers).length > 0 ? providers : undefined;
-}
-
-function cloneToolProvider(
-	provider: CompiledToolProvider,
-): CompiledToolProvider {
-	return {
-		...(provider.extensions !== undefined
-			? { extensions: [...provider.extensions] }
-			: {}),
-		...(provider.classification !== undefined
-			? { classification: provider.classification }
-			: {}),
-		...(provider.optional !== undefined ? { optional: provider.optional } : {}),
-		...(provider.fallbackTools !== undefined
-			? { fallbackTools: [...provider.fallbackTools] }
-			: {}),
-	};
-}
-
-function hasProviderMetadata(provider: CompiledToolProvider): boolean {
-	return (
-		provider.extensions !== undefined ||
-		provider.classification !== undefined ||
-		provider.optional !== undefined ||
-		provider.fallbackTools !== undefined
-	);
-}
-
 function filterToolSelection(selection: ToolSelection): ToolSelection {
 	const tools = filterDelegationTools(selection.tools);
 	return {
@@ -579,7 +467,11 @@ function classifySafety(
 	worktreePolicy: WorktreePolicy,
 	approvalMode: ApprovalMode,
 ): CompiledTaskSafety {
-	const capability = classifyCapability(tools, toolProviders, readOnlyDeclared);
+	const capability = classifyToolCapability(
+		tools,
+		toolProviders,
+		readOnlyDeclared,
+	);
 	const sharedCwdSafe = Boolean(
 		readOnlyDeclared &&
 			tools &&
@@ -604,42 +496,6 @@ function classifySafety(
 			approvalMode,
 		),
 	};
-}
-
-function classifyCapability(
-	tools: string[] | undefined,
-	toolProviders: Record<string, CompiledToolProvider> | undefined,
-	readOnlyDeclared: boolean,
-): TaskCapability {
-	if (!tools || tools.length === 0) return "write-capable";
-	if (
-		tools.some(
-			(tool) =>
-				effectiveToolClassification(tool, toolProviders) ===
-					"mutation-capable" ||
-				effectiveToolClassification(tool, toolProviders) === undefined,
-		)
-	) {
-		return "mutation-capable";
-	}
-	if (
-		tools.some(
-			(tool) =>
-				effectiveToolClassification(tool, toolProviders) === "write-capable",
-		)
-	)
-		return "write-capable";
-	return readOnlyDeclared ? "read-only" : "write-capable";
-}
-
-function effectiveToolClassification(
-	tool: string,
-	toolProviders: Record<string, CompiledToolProvider> | undefined,
-): TaskCapability | undefined {
-	if (READ_ONLY_TOOLS.has(tool)) return "read-only";
-	if (EXPLICIT_WRITE_TOOLS.has(tool)) return "write-capable";
-	if (MUTATION_CAPABLE_TOOLS.has(tool)) return "mutation-capable";
-	return toolProviders?.[tool]?.classification;
 }
 
 function permissionPreview(
@@ -836,7 +692,28 @@ async function compileArtifactGraphPlan(
 			);
 		}
 		if (isDynamicStage(stage)) {
-			return buildDynamicTask(
+			validateToolSpecs(
+				stage.tools,
+				issues,
+				`$.artifactGraph.stages.${jsonKey(stage.id)}.tools`,
+			);
+			const rawDynamicToolSelection = resolveToolSelection(
+				[spec.defaults?.tools, stage.tools],
+				undefined,
+			);
+			const dynamicToolPath =
+				stage.tools !== undefined
+					? `$.artifactGraph.stages.${jsonKey(stage.id)}.tools`
+					: spec.defaults?.tools !== undefined
+						? "$.defaults.tools"
+						: `$.artifactGraph.stages.${jsonKey(stage.id)}.dynamic`;
+			validateDelegationBoundary(
+				rawDynamicToolSelection.tools,
+				issues,
+				dynamicToolPath,
+			);
+			const dynamicToolSelection = filterToolSelection(rawDynamicToolSelection);
+			const dynamicTask = buildDynamicTask(
 				stage,
 				taskId,
 				key,
@@ -846,8 +723,22 @@ async function compileArtifactGraphPlan(
 				specDir,
 				workflowInputText,
 				options.task,
+				defaultModel,
+				defaultThinking,
 				overrides,
 			);
+			if (dynamicToolSelection.tools || dynamicToolSelection.toolProviders) {
+				dynamicTask.runtime = {
+					...dynamicTask.runtime,
+					...(dynamicToolSelection.tools
+						? { tools: dynamicToolSelection.tools }
+						: {}),
+					...(dynamicToolSelection.toolProviders
+						? { toolProviders: dynamicToolSelection.toolProviders }
+						: {}),
+				};
+			}
+			return dynamicTask;
 		}
 
 		const stageAgentName = stage.agent ?? agentName;
@@ -1224,7 +1115,10 @@ async function compileArtifactGraphPlan(
 		} else if (stageKind === "support") {
 			await addTask("main", `Run support helper ${runtimeStage.support.uses}.`);
 		} else if (stageKind === "dynamic") {
-			await addTask("controller", `Run dynamic controller ${runtimeStage.dynamic.uses}.`);
+			await addTask(
+				"controller",
+				`Run dynamic controller ${runtimeStage.dynamic.uses}.`,
+			);
 		} else {
 			await addTask("main", runtimeStage.prompt ?? "");
 		}
@@ -1367,6 +1261,8 @@ function buildDynamicTask(
 	specDir: string,
 	workflowInputText: string,
 	runtimeTask: string | undefined,
+	defaultModel: string | undefined,
+	defaultThinking: ThinkingLevel | undefined,
 	overrides: Partial<CompiledTask> & Record<string, unknown>,
 ): any {
 	const dynamic = stage.dynamic ?? {};
@@ -1375,7 +1271,8 @@ function buildDynamicTask(
 		/\$\{item\}/g,
 		"the relevant item from the dependency context",
 	);
-	const controlSchema = stage.artifactGraphOutput?.controlSchema ?? stage.output?.controlSchema;
+	const controlSchema =
+		stage.artifactGraphOutput?.controlSchema ?? stage.output?.controlSchema;
 	const compiledPrompt = [
 		workflowInputText || undefined,
 		runtimeTask?.trim() ? `# Runtime Task\n\n${runtimeTask.trim()}` : undefined,
@@ -1426,6 +1323,11 @@ function buildDynamicTask(
 			usesPath: resolve(specDir, String(workflow.uses)),
 		};
 	}
+	const decisionLoop = compileDynamicDecisionLoop(
+		dynamic.decisionLoop,
+		defaultModel,
+		defaultThinking,
+	);
 
 	return {
 		key,
@@ -1444,6 +1346,8 @@ function buildDynamicTask(
 		explicitWorktreePolicy: false,
 		runtime: {
 			approvalMode: "non-interactive",
+			model: defaultModel,
+			thinking: defaultThinking,
 			maxRuntimeMs:
 				dynamic.budget?.maxRuntimeMs ?? DEFAULT_DYNAMIC_MAX_RUNTIME_MS,
 		},
@@ -1481,16 +1385,164 @@ function buildDynamicTask(
 			},
 			permissions: {
 				approval: dynamic.permissions?.approval ?? "auto",
-				allowDynamicRoles:
-					dynamic.permissions?.allowDynamicRoles ?? true,
-				allowDynamicTools:
-					dynamic.permissions?.allowDynamicTools ?? true,
+				allowDynamicRoles: dynamic.permissions?.allowDynamicRoles ?? true,
+				allowDynamicTools: dynamic.permissions?.allowDynamicTools ?? true,
 			},
 			helpers,
 			workflows,
+			...(decisionLoop ? { decisionLoop } : {}),
 		},
 		...overrides,
 	};
+}
+
+function compileDynamicDecisionLoop(
+	value: unknown,
+	defaultModel?: string,
+	defaultThinking?: ThinkingLevel,
+): any | undefined {
+	if (!isPlainRecord(value)) return undefined;
+	const allowedToolSelection = filterToolSelection(
+		resolveToolSelection(
+			[Array.isArray(value.allowedTools) ? value.allowedTools : undefined],
+			undefined,
+		),
+	);
+	const maxFindings = positiveInteger(
+		recordValue(value.stateIndex, "maxFindings"),
+	);
+	const deprecatedRequiredFindingIds = stringArray(
+		recordValue(value.stateIndex, "requiredFindingIds"),
+	);
+	return {
+		planner: compileDynamicDecisionLoopProfile(
+			value.planner,
+			defaultModel,
+			defaultThinking,
+		),
+		workerDefaults: compileDynamicDecisionLoopProfile(
+			value.workerDefaults,
+			defaultModel,
+			defaultThinking,
+		),
+		verifier: compileDynamicDecisionLoopProfile(
+			value.verifier,
+			defaultModel,
+			defaultThinking,
+		),
+		synthesis: compileDynamicDecisionLoopProfile(
+			value.synthesis,
+			defaultModel,
+			defaultThinking,
+		),
+		allowedAgents: stringArray(value.allowedAgents),
+		...(allowedToolSelection.tools
+			? { allowedTools: allowedToolSelection.tools }
+			: {}),
+		...(allowedToolSelection.toolProviders
+			? { allowedToolProviders: allowedToolSelection.toolProviders }
+			: {}),
+		allowedOutputProfiles:
+			stringArray(value.allowedOutputProfiles).length > 0
+				? stringArray(value.allowedOutputProfiles)
+				: [...DYNAMIC_OUTPUT_PROFILES],
+		maxDecisionRounds:
+			positiveInteger(value.maxDecisionRounds) ??
+			DEFAULT_DYNAMIC_DECISION_LOOP_MAX_ROUNDS,
+		maxActionsPerRound:
+			positiveInteger(value.maxActionsPerRound) ??
+			DEFAULT_DYNAMIC_DECISION_LOOP_MAX_ACTIONS,
+		repair: {
+			maxAttempts:
+				positiveInteger(recordValue(value.repair, "maxAttempts")) ?? 2,
+		},
+		stateIndex: {
+			...(maxFindings !== undefined ? { maxFindings } : {}),
+			// Deprecated/no-op compatibility field: compile it for the public
+			// authoring contract, but the Phase 1 runtime intentionally ignores it.
+			...(deprecatedRequiredFindingIds.length > 0
+				? { requiredFindingIds: deprecatedRequiredFindingIds }
+				: {}),
+		},
+		stopPolicy: {
+			// Deprecated/no-op compatibility field: synthesize action shape is
+			// enforced by validateDynamicDecision(), not this flag.
+			requireSynthesisAction:
+				booleanValue(recordValue(value.stopPolicy, "requireSynthesisAction")) ??
+				false,
+			failOnInvalidDecision:
+				booleanValue(recordValue(value.stopPolicy, "failOnInvalidDecision")) ??
+				true,
+			maxStalls:
+				positiveInteger(recordValue(value.stopPolicy, "maxStalls")) ??
+				DEFAULT_DYNAMIC_DECISION_LOOP_MAX_STALLS,
+			// Deprecated/no-op compatibility field: dropped-branch enforcement is
+			// deferred; the runtime surfaces blockers/omissions instead.
+			failOnDroppedRequiredBranch:
+				booleanValue(
+					recordValue(value.stopPolicy, "failOnDroppedRequiredBranch"),
+				) ?? true,
+		},
+	};
+}
+
+function compileDynamicDecisionLoopProfile(
+	value: unknown,
+	defaultModel?: string,
+	defaultThinking?: ThinkingLevel,
+): any | undefined {
+	if (!isPlainRecord(value)) return undefined;
+	const toolSelection = filterToolSelection(
+		resolveToolSelection(
+			[Array.isArray(value.tools) ? value.tools : undefined],
+			undefined,
+		),
+	);
+	const model =
+		typeof value.model === "string" && value.model.trim()
+			? value.model.trim()
+			: defaultModel;
+	const thinking =
+		typeof value.thinking === "string" && value.thinking.trim()
+			? value.thinking.trim()
+			: defaultThinking;
+	return {
+		...(typeof value.agent === "string" && value.agent.trim()
+			? { agent: value.agent.trim() }
+			: {}),
+		...(model ? { model } : {}),
+		...(thinking ? { thinking } : {}),
+		...(toolSelection.tools ? { tools: toolSelection.tools } : {}),
+		...(toolSelection.toolProviders
+			? { toolProviders: toolSelection.toolProviders }
+			: {}),
+		...(typeof value.outputProfile === "string" && value.outputProfile.trim()
+			? { outputProfile: value.outputProfile.trim() }
+			: {}),
+		...(positiveInteger(value.maxRuntimeMs) !== undefined
+			? { maxRuntimeMs: positiveInteger(value.maxRuntimeMs) }
+			: {}),
+	};
+}
+
+function stringArray(value: unknown): string[] {
+	return Array.isArray(value)
+		? value.filter((item): item is string => typeof item === "string")
+		: [];
+}
+
+function positiveInteger(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isInteger(value) && value > 0
+		? value
+		: undefined;
+}
+
+function booleanValue(value: unknown): boolean | undefined {
+	return typeof value === "boolean" ? value : undefined;
+}
+
+function recordValue(value: unknown, key: string): unknown {
+	return isPlainRecord(value) ? value[key] : undefined;
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {

@@ -11,6 +11,7 @@ export {
 	refreshRun,
 	resumeRun,
 	resumeSupervisors,
+	runDynamicTask,
 	runWorkflow,
 	runWorkflowSpec,
 	waitForRun,
@@ -33,6 +34,7 @@ export type {
 	CompiledTask,
 	FastMode,
 	WorkflowDefaults,
+	WorkflowRunProvenance,
 	ArtifactGraphWorkflowSpec,
 	ArtifactGraphStageSpec,
 	ArtifactGraphStageType,
@@ -43,6 +45,13 @@ export type {
 	WorktreePolicy,
 } from "./types.js";
 export { WorkflowValidationError } from "./types.js";
+export { runDynamicDecisionLoop } from "./dynamic-decision-loop.js";
+export type {
+	DynamicDecisionLoopControllerContext,
+	DynamicDecisionLoopResult,
+	DynamicDecisionLoopRunResult,
+	RunDynamicDecisionLoopOptions,
+} from "./dynamic-decision-loop.js";
 
 export const WORKFLOW_COMMAND = "workflow";
 
@@ -56,6 +65,7 @@ Usage:
   /workflow agents
   /workflow list
   /workflow run [--model MODEL] [--thinking LEVEL] <workflow-name-or-path> "<task>" [--detach]
+  /workflow dynamic [--model MODEL] [--thinking LEVEL] "<task>" [--detach]
   /workflow status [run-id]
   /workflow show <run-id-or-workflow-name>
   /workflow logs <run-id> [task-id] [lines]
@@ -64,6 +74,8 @@ Usage:
 
 /workflow opens the read-only workflow board TUI.
 /workflow <run-id> opens the board focused on that run.
+/workflow dynamic starts a spec-less direct dynamic run: no workflow name,
+user-selected spec, or generated workflow spec is required.
 
 With --detach, a standalone supervisor process (pi-workflow supervise) keeps
 the run progressing after this session exits.

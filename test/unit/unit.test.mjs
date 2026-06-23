@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import {
 	existsSync,
 	mkdirSync,
@@ -13,13 +14,15 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { parseAgentMarkdown } from "../../.tmp/unit/agents.js";
+import { loadAgentByName, parseAgentMarkdown } from "../../.tmp/unit/agents.js";
 import { compileWorkflow } from "../../.tmp/unit/compiler.js";
 import {
 	buildRunSourceContext,
 	evaluateLoopUntilCondition,
 	formatRun,
 	resumeRun,
+	runDynamicControllerEngineIntegrityCheckForTests,
+	runDynamicTask,
 	runWorkflow,
 	runWorkflowSpec,
 	scheduleRun,
@@ -28,9 +31,11 @@ import {
 import {
 	notifyUnfinishedRuns,
 	registerWorkflowNaturalLanguageTools,
+	WORKFLOW_DYNAMIC_TOOL,
 	WORKFLOW_LIST_TOOL,
 	WORKFLOW_RUN_TOOL,
 	workflowArgumentCompletions,
+	parseWorkflowDynamicArgs,
 	parseWorkflowRunArgs,
 } from "../../.tmp/unit/extension.js";
 import {
@@ -50,6 +55,7 @@ import {
 	deriveRunStatus,
 	heartbeatSupervisorLease,
 	readRunRecord,
+	resetTaskForResume,
 	resolveFlowsCwd,
 	setTaskTerminal,
 	supervisorLeasePath,
@@ -99,6 +105,17 @@ import {
 	recordDynamicControllerPhase,
 } from "../../.tmp/unit/dynamic-state.js";
 import {
+	dynamicLoopSignature,
+	validateDynamicDecision,
+	writeDynamicDecisionArtifacts,
+} from "../../.tmp/unit/dynamic-decision.js";
+import { runDynamicDecisionLoop } from "../../.tmp/unit/dynamic-decision-loop.js";
+import {
+	assembleDynamicStateIndex,
+	extractDynamicStateArtifact,
+	writeDynamicStateIndexArtifacts,
+} from "../../.tmp/unit/dynamic-state-index.js";
+import {
 	handleWorkflowArtifactToolCall,
 	listWorkflowArtifactSources,
 	loadWorkflowSourceManifest,
@@ -114,8 +131,10 @@ import {
 	parseWorkflowOutput,
 	writeWorkflowTaskArtifactBundle,
 } from "../../.tmp/unit/workflow-output-artifacts.js";
+import { registerWorkflowFetchCacheExtension } from "../../.tmp/unit/workflow-fetch-cache-extension.js";
 import { validateJsonSchema } from "../../.tmp/unit/json-schema.js";
 import {
+	launchSubagentTask,
 	refreshRunFromSubagentArtifacts,
 	setSubagentApiForTests,
 } from "../../.tmp/unit/subagent-backend.js";
@@ -137,6 +156,10 @@ function writeAgent(cwd, name, tools = "read, grep, find, ls") {
 				", ",
 			)}]\nreadOnly: true\n---\n# ${name}\n\nUse repository evidence.\n`,
 	);
+}
+
+function isBundledPiWebAccessExtension(entry) {
+	return /node_modules[\\/]pi-web-access[\\/]index\.ts$/.test(entry);
 }
 
 const parseWorkflow = parsePublicWorkflow;
@@ -372,6 +395,63 @@ function taskBySpec(run, specId) {
 	assert(task, `missing task ${specId}`);
 	return task;
 }
+
+async function createDynamicControllerRun(cwd, controllerSource) {
+	writeAgent(cwd, "unit-scout", "read");
+	const workflowDir = join(cwd, "workflows", "bundle");
+	mkdirSync(join(workflowDir, "helpers"), { recursive: true });
+	const specPath = join(workflowDir, "spec.json");
+	writeFileSync(
+		join(workflowDir, "helpers", "controller.mjs"),
+		controllerSource,
+	);
+	const spec = artifactGraphWorkflowSpec({
+		artifactGraph: {
+			stages: [
+				{
+					id: "adaptive",
+					type: "dynamic",
+					dynamic: { uses: "./helpers/controller.mjs" },
+				},
+			],
+		},
+	});
+	writeFileSync(specPath, JSON.stringify(spec));
+	const compiled = await compileWorkflow(spec, {
+		cwd,
+		task: "Review dynamically.",
+		specPath,
+	});
+	const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
+	await writeStaticRunArtifacts(cwd, run, compiled, spec);
+	await writeRunRecord(cwd, run);
+	return { compiled, run, spec, specPath, workflowDir };
+}
+
+test("dynamic controller engine guard reports stale missing runDecisionLoop wiring", async () => {
+	const specificMessage =
+		"incompatible or stale pi-workflow engine: dynamic controller context is missing runDecisionLoop (rebuild dist / reload workflow engine)";
+	await assert.rejects(
+		() =>
+			runDynamicControllerEngineIntegrityCheckForTests({
+				engineCapabilities: { decisionLoop: false },
+				controllerSource: [
+					"export default function controller(ctx) {",
+					"  if (typeof ctx?.dynamic?.runDecisionLoop !== 'function') {",
+					"    throw new Error('dynamic decision-loop helper is unavailable in controller context');",
+					"  }",
+					"  return ctx.dynamic.runDecisionLoop();",
+					"}",
+				].join("\n"),
+			}),
+		(error) => {
+			assert(error instanceof Error);
+			assert.equal(error.message, specificMessage);
+			assert.doesNotMatch(error.message, /helper is unavailable/);
+			return true;
+		},
+	);
+});
 
 function captureSubagentPrompts(prompts = []) {
 	let launchCount = 0;
@@ -655,6 +735,47 @@ test("agent parser reads frontmatter tool ceilings", () => {
 	assert.equal(agent.readOnly, true);
 });
 
+test("bundled common agents are fallback after project-local agents", async () => {
+	const cwd = makeProject();
+	const home = mkdtempSync(join(tmpdir(), "workflow-home-"));
+	const previousHome = process.env.HOME;
+	try {
+		process.env.HOME = home;
+
+		const bundled = await loadAgentByName("scout", cwd);
+		assert.equal(bundled?.scope, "bundled");
+		assert.match(bundled?.sourcePath ?? "", /agents[\\/]scout\.md$/);
+
+		writeAgent(cwd, "scout", "read");
+		const local = await loadAgentByName("scout", cwd);
+		assert.equal(local?.scope, "project");
+		assert.match(local?.sourcePath ?? "", /\.pi[\\/]agents[\\/]scout\.md$/);
+
+		const compiled = await compileWorkflow(
+			workflowSpec("researcher", {
+				tools: ["read", "fetch_content"],
+				artifactGraph: {
+					stages: [
+						{
+							id: "main",
+							type: "single",
+							prompt: "Research with bundled researcher.",
+						},
+					],
+				},
+			}),
+			{ cwd, task: "Research topic" },
+		);
+		assert.equal(compiled.tasks[0].agent, "researcher");
+		assert.match(compiled.tasks[0].agentPath, /agents[\\/]researcher\.md$/);
+	} finally {
+		if (previousHome === undefined) delete process.env.HOME;
+		else process.env.HOME = previousHome;
+		rmSync(cwd, { recursive: true, force: true });
+		rmSync(home, { recursive: true, force: true });
+	}
+});
+
 test("public schemaVersion 1 parser accepts artifact graph and rejects non-artifactGraph top-level shapes", () => {
 	const parsed = parsePublicWorkflow(
 		artifactGraphWorkflowSpec({
@@ -832,6 +953,9 @@ test("artifact graph schema accepts dynamic stages and validates helper refs", (
 								allowDynamicRoles: true,
 								allowDynamicTools: true,
 							},
+							decisionLoop: {
+								stopPolicy: { maxStalls: 4 },
+							},
 							helpers: {
 								normalize: {
 									uses: "./helpers/normalize.mjs",
@@ -849,6 +973,10 @@ test("artifact graph schema accepts dynamic stages and validates helper refs", (
 	assert.equal(
 		parsed.artifactGraph.stages[0].dynamic.uses,
 		"./helpers/controller.mjs",
+	);
+	assert.equal(
+		parsed.artifactGraph.stages[0].dynamic.decisionLoop.stopPolicy.maxStalls,
+		4,
 	);
 
 	const badPath = assertThrowsFlow(() =>
@@ -1049,6 +1177,125 @@ test("compiler lowers dynamic stages to controller placeholders", async () => {
 	}
 });
 
+test("compiler defaults dynamic decision repair to two re-asks and maxStalls to three", async () => {
+	const cwd = makeProject();
+	try {
+		const compiled = await compileWorkflow(
+			artifactGraphWorkflowSpec({
+				artifactGraph: {
+					stages: [
+						{
+							id: "adaptive",
+							type: "dynamic",
+							dynamic: {
+								uses: "./helpers/controller.mjs",
+								decisionLoop: {},
+							},
+						},
+					],
+				},
+			}),
+			{ cwd, task: "Review dynamically." },
+		);
+
+		const loop = compiled.tasks[0].dynamic.decisionLoop;
+		assert.equal(loop.repair.maxAttempts, 2);
+		assert.equal(loop.stopPolicy.maxStalls, 3);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("compiler applies runtime defaults to dynamic stages and decision-loop profiles", async () => {
+	const cwd = makeProject();
+	try {
+		const compiled = await compileWorkflow(
+			artifactGraphWorkflowSpec({
+				artifactGraph: {
+					stages: [
+						{
+							id: "adaptive",
+							type: "dynamic",
+							dynamic: {
+								uses: "./helpers/controller.mjs",
+								decisionLoop: {
+									planner: {},
+									workerDefaults: { model: "profile/model" },
+									verifier: { thinking: "medium" },
+									synthesis: {},
+								},
+							},
+						},
+					],
+				},
+			}),
+			{
+				cwd,
+				task: "Review dynamically.",
+				runtimeDefaults: { model: "runtime/model", thinking: "low" },
+			},
+		);
+
+		const controller = compiled.tasks[0];
+		assert.equal(controller.runtime.model, "runtime/model");
+		assert.equal(controller.runtime.thinking, "low");
+		const loop = controller.dynamic.decisionLoop;
+		assert.equal(loop.planner.model, "runtime/model");
+		assert.equal(loop.planner.thinking, "low");
+		assert.equal(loop.workerDefaults.model, "profile/model");
+		assert.equal(loop.workerDefaults.thinking, "low");
+		assert.equal(loop.verifier.model, "runtime/model");
+		assert.equal(loop.verifier.thinking, "medium");
+		assert.equal(loop.synthesis.model, "runtime/model");
+		assert.equal(loop.synthesis.thinking, "low");
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("compiler accepts deprecated dynamic decision-loop no-op fields", async () => {
+	const cwd = makeProject();
+	try {
+		const compiled = await compileWorkflow(
+			artifactGraphWorkflowSpec({
+				artifactGraph: {
+					stages: [
+						{
+							id: "adaptive",
+							type: "dynamic",
+							dynamic: {
+								uses: "./helpers/controller.mjs",
+								decisionLoop: {
+									stateIndex: {
+										maxFindings: 5,
+										requiredFindingIds: ["F-deprecated"],
+									},
+									stopPolicy: {
+										requireSynthesisAction: true,
+										failOnInvalidDecision: false,
+										maxStalls: 5,
+										failOnDroppedRequiredBranch: true,
+									},
+								},
+							},
+						},
+					],
+				},
+			}),
+			{ cwd, task: "Review dynamically." },
+		);
+
+		const loop = compiled.tasks[0].dynamic.decisionLoop;
+		assert.deepEqual(loop.stateIndex.requiredFindingIds, ["F-deprecated"]);
+		assert.equal(loop.stopPolicy.requireSynthesisAction, true);
+		assert.equal(loop.stopPolicy.failOnInvalidDecision, false);
+		assert.equal(loop.stopPolicy.maxStalls, 5);
+		assert.equal(loop.stopPolicy.failOnDroppedRequiredBranch, true);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("dynamic event ledger writes monotonic events and rebuilds state", async () => {
 	const cwd = makeProject();
 	try {
@@ -1118,6 +1365,2110 @@ test("dynamic request hashes use persisted JSON shape", () => {
 		hashDynamicRequest({ value: { toJSON: () => "json-shape" } }),
 		hashDynamicRequest({ value: "json-shape" }),
 	);
+});
+
+test("dynamic-decision-v1 accepts strict executable decisions and canonicalizes hashes", () => {
+	const decision = {
+		schema: "dynamic-decision-v1",
+		decisionId: "decide-r0",
+		round: 0,
+		phase: "orientation",
+		status: "continue",
+		nextActions: [
+			{
+				type: "add_work_item",
+				actionId: "act-inspect-auth",
+				workItemId: "inspect-auth",
+				agent: "unit-scout",
+				prompt: "Inspect auth paths.",
+				tools: ["read", "custom_external_tool"],
+				outputProfile: "candidate_findings_v1",
+				inputRefs: [
+					{
+						kind: "workflow-artifact-ref",
+						taskId: "seed",
+						artifact: "control",
+						digest: "sha256:seed",
+					},
+				],
+			},
+		],
+	};
+
+	const result = validateDynamicDecision(decision, {
+		expectedRound: 0,
+		maxActions: 2,
+		allowedTools: ["read", "custom_external_tool"],
+		toolProviders: {
+			custom_external_tool: { classification: "read-only" },
+		},
+		knownArtifactTaskIds: ["seed"],
+	});
+
+	assert.equal(result.ok, true, result.errors.join("\n"));
+	assert.equal(result.decision?.nextActions[0].type, "add_work_item");
+	assert.match(result.hash, /^[a-f0-9]{64}$/);
+	assert.equal(
+		validateDynamicDecision(result.decision, {
+			expectedRound: 0,
+			allowedTools: ["read", "custom_external_tool"],
+			toolProviders: {
+				custom_external_tool: { classification: "read-only" },
+			},
+			knownArtifactTaskIds: ["seed"],
+		}).hash,
+		result.hash,
+	);
+});
+
+test("dynamic-decision-v1 rejects schema, invariant, ref, id, and tool violations", () => {
+	const invalid = validateDynamicDecision(
+		{
+			schema: "dynamic-decision-v1",
+			decisionId: "decide r0",
+			round: 1,
+			phase: "round",
+			status: "continue",
+			unknown: true,
+			nextActions: [
+				{
+					type: "synthesize",
+					actionId: "decide-r0",
+					outputProfile: "unknown_profile",
+					inputRefs: [{ kind: "workflow-artifact-ref", taskId: "missing" }],
+				},
+				{
+					type: "add_work_item",
+					actionId: "Act 1",
+					workItemId: "act-1",
+					agent: "unit-scout",
+					prompt: "Bad tools.",
+					tools: ["unknown_tool"],
+				},
+			],
+		},
+		{
+			expectedRound: 0,
+			maxActions: 1,
+			allowedTools: ["read"],
+			knownArtifactTaskIds: ["seed"],
+		},
+	);
+
+	assert.equal(invalid.ok, false);
+	assert.match(invalid.errors.join("\n"), /unknown decision field unknown/);
+	assert.match(invalid.errors.join("\n"), /round must match expected round 0/);
+	assert.match(
+		invalid.errors.join("\n"),
+		/status continue cannot include stop or synthesize/,
+	);
+	assert.match(invalid.errors.join("\n"), /nextActions exceeds maxActions 1/);
+	assert.match(invalid.errors.join("\n"), /references unknown artifact task/);
+	assert.match(invalid.errors.join("\n"), /outputProfile is unknown/);
+	assert.match(invalid.errors.join("\n"), /outside the allowed tool ceiling/);
+	assert.match(invalid.errors.join("\n"), /collides|duplicated/);
+});
+
+function canonicalDynamicDecision(overrides = {}) {
+	const canonical = {
+		schema: "dynamic-decision-v1",
+		decisionId: "decide-r0",
+		round: 0,
+		phase: "orientation",
+		status: "continue",
+		nextActions: [
+			{
+				type: "add_work_item",
+				actionId: "act-review",
+				workItemId: "review",
+				agent: "unit-scout",
+				prompt: "Review the target.",
+			},
+		],
+	};
+	return { ...canonical, ...overrides };
+}
+
+function assertDynamicDecisionRejects(decision, pattern, context = {}) {
+	const result = validateDynamicDecision(decision, {
+		expectedRound: 0,
+		maxActions: 1,
+		...context,
+	});
+	assert.equal(result.ok, false, result.errors.join("\n"));
+	assert.match(result.errors.join("\n"), pattern);
+	return result;
+}
+
+test("dynamic-decision-v1 rejects top-level actions alias", () => {
+	const canonical = canonicalDynamicDecision();
+	assertDynamicDecisionRejects(
+		{
+			...canonical,
+			nextActions: undefined,
+			actions: canonical.nextActions,
+		},
+		/decision field actions is not allowed; use nextActions/,
+	);
+});
+
+test("dynamic-decision-v1 rejects action alias for type", () => {
+	assertDynamicDecisionRejects(
+		canonicalDynamicDecision({
+			nextActions: [
+				{
+					action: "add_work_item",
+					actionId: "act-review",
+					workItemId: "review",
+					agent: "unit-scout",
+					prompt: "Review the target.",
+				},
+			],
+		}),
+		/nextActions\[0\]\.action is not allowed; use type/,
+	);
+});
+
+test("dynamic-decision-v1 rejects id alias for actionId", () => {
+	assertDynamicDecisionRejects(
+		canonicalDynamicDecision({
+			nextActions: [
+				{
+					type: "add_work_item",
+					id: "act-review",
+					workItemId: "review",
+					agent: "unit-scout",
+					prompt: "Review the target.",
+				},
+			],
+		}),
+		/nextActions\[0\]\.id is not allowed; use actionId/,
+	);
+});
+
+test("dynamic-decision-v1 rejects missing actionId", () => {
+	assertDynamicDecisionRejects(
+		canonicalDynamicDecision({
+			nextActions: [
+				{
+					type: "add_work_item",
+					workItemId: "review",
+					agent: "unit-scout",
+					prompt: "Review the target.",
+				},
+			],
+		}),
+		/nextActions\[0\]\.actionId must be a non-empty string/,
+	);
+});
+
+test("dynamic-decision-v1 rejects top-level decision arrays", () => {
+	assertDynamicDecisionRejects(
+		[canonicalDynamicDecision()],
+		/decision must be an object/,
+	);
+});
+
+test("dynamic-decision-v1 rejects nextActions object drift", () => {
+	const canonical = canonicalDynamicDecision();
+	assertDynamicDecisionRejects(
+		{
+			...canonical,
+			nextActions: canonical.nextActions[0],
+		},
+		/nextActions must be an array/,
+	);
+});
+
+test("dynamic-decision-v1 rejects inputRefs string drift", () => {
+	const canonical = canonicalDynamicDecision();
+	assertDynamicDecisionRejects(
+		{
+			...canonical,
+			nextActions: [
+				{
+					...canonical.nextActions[0],
+					inputRefs: "seed",
+				},
+			],
+		},
+		/nextActions\[0\]\.inputRefs must be an array/,
+	);
+});
+
+test("dynamic-decision-v1 rejects inputRefs string-array drift", () => {
+	const canonical = canonicalDynamicDecision();
+	assertDynamicDecisionRejects(
+		{
+			...canonical,
+			nextActions: [
+				{
+					...canonical.nextActions[0],
+					inputRefs: ["seed"],
+				},
+			],
+		},
+		/nextActions\[0\]\.inputRefs\[0\] must be an object/,
+	);
+});
+
+test("dynamic-decision-v1 rejects prose rationale in control JSON", () => {
+	assertDynamicDecisionRejects(
+		canonicalDynamicDecision({ rationale: "Need inspection first." }),
+		/unknown decision field rationale/,
+	);
+});
+
+test("dynamic-decision-v1 rejects prose criteria descriptions in control JSON", () => {
+	assertDynamicDecisionRejects(
+		canonicalDynamicDecision({
+			criteria: [{ id: "C1", description: "Long-form criterion" }],
+		}),
+		/unknown decision field criteria/,
+	);
+});
+
+test("dynamic-decision-v1 rejects malformed criteria drift in control JSON", () => {
+	assertDynamicDecisionRejects(
+		canonicalDynamicDecision({ criteria: "" }),
+		/unknown decision field criteria/,
+	);
+});
+
+test("dynamic-decision-v1 rejects gaps drift in control JSON", () => {
+	assertDynamicDecisionRejects(
+		canonicalDynamicDecision({ gaps: [""] }),
+		/unknown decision field gaps/,
+	);
+});
+
+test("dynamic-decision-v1 rejects unknown top-level field", () => {
+	assertDynamicDecisionRejects(
+		canonicalDynamicDecision({ unexpected: true }),
+		/unknown decision field unexpected/,
+	);
+});
+
+test("dynamic-decision-v1 rejects unknown action field", () => {
+	const canonical = canonicalDynamicDecision();
+	assertDynamicDecisionRejects(
+		{
+			...canonical,
+			nextActions: [{ ...canonical.nextActions[0], unexpected: true }],
+		},
+		/nextActions\[0\]\.unexpected is not allowed/,
+	);
+});
+
+test("dynamic-decision artifacts persist raw validation and accepted canonical decision", async () => {
+	const cwd = makeProject();
+	try {
+		const rawDecision = {
+			schema: "dynamic-decision-v1",
+			decisionId: "decide-r2",
+			round: 2,
+			phase: "final",
+			status: "stop",
+			nextActions: [
+				{
+					type: "stop",
+					actionId: "stop-r2",
+					reason: "All criteria satisfied.",
+				},
+			],
+		};
+		const validation = validateDynamicDecision(rawDecision, {
+			expectedRound: 2,
+		});
+		const written = await writeDynamicDecisionArtifacts({
+			cwd,
+			runId: "workflow_decision_artifacts",
+			controllerSpecId: "adaptive.controller",
+			rawDecision,
+			validation,
+			stateIndexDigest: "sha256:index",
+		});
+
+		assert.equal(validation.ok, true, validation.errors.join("\n"));
+		assert.equal(existsSync(written.rawPath), true);
+		assert.equal(existsSync(written.validationPath), true);
+		assert.equal(existsSync(written.acceptedPath), true);
+		const accepted = JSON.parse(readFileSync(written.acceptedPath, "utf8"));
+		assert.equal(accepted.validatorVersion, "dynamic-decision-validator-v1");
+		assert.equal(accepted.stateIndexDigest, "sha256:index");
+		assert.equal(accepted.decisionHash, validation.hash);
+		assert.equal(accepted.decision.decisionId, "decide-r2");
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("dynamic-state-index extracts findings verifications coverage and guardrails", () => {
+	const candidate = extractDynamicStateArtifact({
+		taskId: "inspect-auth",
+		outputProfile: "candidate_findings_v1",
+		control: {
+			findings: [
+				{
+					id: "AUTH-1",
+					title: "Missing auth check",
+					severity: "high",
+					confidence: "medium",
+					evidenceRefs: [
+						{
+							taskId: "inspect-auth",
+							artifact: "analysis",
+							digest: "sha256:a",
+						},
+					],
+				},
+			],
+			gaps: ["Need route coverage"],
+		},
+	});
+	const verification = extractDynamicStateArtifact({
+		taskId: "verify-auth",
+		outputProfile: "verification_result_v1",
+		control: {
+			findingId: "AUTH-1",
+			verdict: "weakened",
+			confidence: "low",
+			evidenceRefs: [{ taskId: "verify-auth", artifact: "control" }],
+		},
+	});
+	const coverage = extractDynamicStateArtifact({
+		taskId: "inspect-tests",
+		outputProfile: "coverage_assessment_v1",
+		control: {
+			criteriaCoverage: {
+				C1: { status: "partial", notes: "Auth tests missing" },
+			},
+			conflicts: [
+				{
+					id: "conflict-auth",
+					message: "Implementation and tests disagree",
+					relatedFindingIds: ["AUTH-1"],
+				},
+			],
+		},
+	});
+
+	const index = assembleDynamicStateIndex([candidate, verification, coverage], {
+		requiredFindingIds: ["AUTH-1"],
+	});
+
+	assert.equal(index.schema, "dynamic-state-index-v1");
+	assert.match(index.digest, /^[a-f0-9]{64}$/);
+	assert.equal(index.findings.length, 1);
+	assert.equal(index.findings[0].verificationStatus, "weakened");
+	assert.equal(index.findings[0].confidence, "low");
+	assert.equal(index.criteriaCoverage[0].criterionId, "C1");
+	assert.equal(index.conflicts[0].relatedFindingIds[0], "AUTH-1");
+	assert.equal(
+		index.gaps.some((gap) => gap.message.includes("Need route coverage")),
+		true,
+	);
+	assert.equal(
+		index.blockers.some((blocker) => blocker.id === "unverified-AUTH-1"),
+		false,
+	);
+});
+
+test("dynamic-state-index extracts verifier claim-source support", () => {
+	const verification = extractDynamicStateArtifact({
+		taskId: "verify-auth",
+		outputProfile: "verification_result_v1",
+		control: {
+			findingId: "AUTH-1",
+			verdict: "verified",
+			confidence: "high",
+			claimSupports: [
+				{
+					claim: "The route requires an authenticated session.",
+					status: "supports",
+					sourceLocators: ["https://example.test/auth-doc"],
+					excerpt: "authenticated session required",
+				},
+			],
+		},
+	});
+	const index = assembleDynamicStateIndex([verification]);
+
+	assert.equal(verification.claimSupports.length, 1);
+	assert.equal(index.claimSupports[0].findingId, "AUTH-1");
+	assert.equal(index.claimSupports[0].status, "supports");
+	assert.deepEqual(index.claimSupports[0].sourceLocators, [
+		"https://example.test/auth-doc",
+	]);
+	assert.deepEqual(index.claimSupportSummary, {
+		positiveVerifications: 1,
+		positiveVerificationsWithClaimSupport: 1,
+		positiveVerificationsMissingClaimSupport: 0,
+		claimSupports: 1,
+		positiveClaimSupports: 1,
+	});
+	assert.equal(
+		index.gaps.some((gap) => gap.id === "missing-claim-support-auth-1"),
+		false,
+	);
+});
+
+test("dynamic-state-index records missing structured support for positive verifications", () => {
+	const verification = extractDynamicStateArtifact({
+		taskId: "verify-auth",
+		outputProfile: "verification_result_v1",
+		control: {
+			findingId: "AUTH-1",
+			verdict: "verified",
+			confidence: "high",
+		},
+	});
+	const index = assembleDynamicStateIndex([verification]);
+
+	assert.equal(
+		index.gaps.some((gap) => gap.id === "missing-claim-support-auth-1"),
+		true,
+	);
+	assert.deepEqual(index.claimSupportSummary, {
+		positiveVerifications: 1,
+		positiveVerificationsWithClaimSupport: 0,
+		positiveVerificationsMissingClaimSupport: 1,
+		claimSupports: 0,
+		positiveClaimSupports: 0,
+	});
+});
+
+test("dynamic-state-index records extraction lossiness blockers and omissions", () => {
+	const malformed = extractDynamicStateArtifact({
+		taskId: "bad-inspect",
+		outputProfile: "candidate_findings_v1",
+		control: {
+			findings: "not-array",
+			omissions: ["truncated control"],
+		},
+	});
+	const overflow = extractDynamicStateArtifact({
+		taskId: "overflow-inspect",
+		outputProfile: "candidate_findings_v1",
+		maxFindings: 1,
+		control: {
+			findings: [
+				{ id: "F1", title: "High risk", severity: "high", confidence: "low" },
+				{
+					id: "F2",
+					title: "Dropped",
+					severity: "medium",
+					confidence: "medium",
+				},
+			],
+		},
+	});
+
+	const index = assembleDynamicStateIndex([malformed, overflow], {
+		requiredFindingIds: ["F1", "F2"],
+		maxFindings: 1,
+	});
+
+	assert.equal(
+		index.blockers.some((blocker) =>
+			blocker.message.includes("findings must be an array"),
+		),
+		true,
+	);
+	assert.equal(
+		index.blockers.some((blocker) =>
+			blocker.message.includes("Required finding F2 was dropped"),
+		),
+		true,
+	);
+	assert.equal(
+		index.blockers.some((blocker) =>
+			blocker.message.includes("High-risk finding F1 remains unverified"),
+		),
+		true,
+	);
+	assert.equal(
+		index.omissions.some((item) => item.includes("maxFindings=1")),
+		true,
+	);
+	assert.equal(
+		index.omissions.some((item) => item.includes("truncated control")),
+		true,
+	);
+});
+
+test("dynamic-state-index assembly is verification order independent", () => {
+	const finding = extractDynamicStateArtifact({
+		taskId: "inspect-auth",
+		outputProfile: "candidate_findings_v1",
+		control: {
+			findings: [
+				{
+					id: "AUTH-1",
+					title: "Auth gap",
+					severity: "medium",
+					confidence: "medium",
+				},
+			],
+		},
+	});
+	const verification = extractDynamicStateArtifact({
+		taskId: "verify-auth",
+		outputProfile: "verification_result_v1",
+		control: { findingId: "AUTH-1", verdict: "verified", confidence: "high" },
+	});
+
+	const normal = assembleDynamicStateIndex([finding, verification]);
+	const reversed = assembleDynamicStateIndex([verification, finding]);
+	assert.equal(reversed.findings[0].verificationStatus, "verified");
+	assert.equal(reversed.digest, normal.digest);
+	assert.equal(
+		reversed.blockers.some((blocker) =>
+			blocker.message.includes("Verification references unknown finding"),
+		),
+		false,
+	);
+});
+
+test("dynamic-state-index namespaces synthetic ids by source task", () => {
+	const first = extractDynamicStateArtifact({
+		taskId: "inspect-one",
+		outputProfile: "candidate_findings_v1",
+		control: {
+			findings: [{ title: "Missing id", severity: "low", confidence: "low" }],
+			gaps: ["Needs evidence"],
+		},
+	});
+	const second = extractDynamicStateArtifact({
+		taskId: "inspect-two",
+		outputProfile: "candidate_findings_v1",
+		control: {
+			findings: [{ title: "Missing id", severity: "low", confidence: "low" }],
+			gaps: ["Needs evidence"],
+		},
+	});
+	const index = assembleDynamicStateIndex([first, second]);
+
+	assert.deepEqual(
+		index.findings.map((finding) => finding.id),
+		["finding-inspect-one-001", "finding-inspect-two-001"],
+	);
+	assert.deepEqual(
+		index.gaps.map((gap) => gap.id),
+		[
+			"gap-inspect-one-1",
+			"gap-inspect-two-1",
+			"weak-evidence-finding-inspect-one-001",
+			"weak-evidence-finding-inspect-two-001",
+		],
+	);
+});
+
+test("dynamic-state-index preserves required findings during truncation or blocks", () => {
+	const extract = extractDynamicStateArtifact({
+		taskId: "inspect-many",
+		outputProfile: "candidate_findings_v1",
+		control: {
+			findings: [
+				{ id: "A", title: "A", severity: "low", confidence: "high" },
+				{ id: "B", title: "B", severity: "low", confidence: "high" },
+			],
+		},
+	});
+	const index = assembleDynamicStateIndex([extract], {
+		requiredFindingIds: ["B"],
+		maxFindings: 1,
+	});
+
+	assert.deepEqual(
+		index.findings.map((finding) => finding.id),
+		["B"],
+	);
+	assert.equal(
+		index.blockers.some((blocker) =>
+			blocker.message.includes("Required finding B was dropped"),
+		),
+		false,
+	);
+	assert.equal(
+		index.omissions.some((item) => item.includes("A")),
+		true,
+	);
+});
+
+test("dynamic-state-index artifacts reject divergent rewrites", async () => {
+	const cwd = makeProject();
+	try {
+		const firstExtract = extractDynamicStateArtifact({
+			taskId: "inspect-one",
+			outputProfile: "candidate_findings_v1",
+			control: { findings: [{ id: "A", title: "A", confidence: "high" }] },
+		});
+		const secondExtract = extractDynamicStateArtifact({
+			taskId: "inspect-two",
+			outputProfile: "candidate_findings_v1",
+			control: { findings: [{ id: "B", title: "B", confidence: "high" }] },
+		});
+		const firstIndex = assembleDynamicStateIndex([firstExtract]);
+		const secondIndex = assembleDynamicStateIndex([secondExtract]);
+		const base = {
+			cwd,
+			runId: "workflow_state_index_divergent",
+			controllerSpecId: "adaptive.controller",
+			round: 1,
+		};
+		await writeDynamicStateIndexArtifacts({
+			...base,
+			extracts: [firstExtract],
+			index: firstIndex,
+		});
+		await assert.rejects(
+			() =>
+				writeDynamicStateIndexArtifacts({
+					...base,
+					extracts: [secondExtract],
+					index: secondIndex,
+				}),
+			/divergent digest/,
+		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("dynamic-state-index artifacts persist extracts and canonical index", async () => {
+	const cwd = makeProject();
+	try {
+		const extract = extractDynamicStateArtifact({
+			taskId: "inspect-auth",
+			outputProfile: "candidate_findings_v1",
+			control: {
+				findings: [
+					{
+						id: "AUTH-1",
+						title: "Missing auth check",
+						severity: "medium",
+						confidence: "high",
+					},
+				],
+			},
+		});
+		const index = assembleDynamicStateIndex([extract]);
+		const written = await writeDynamicStateIndexArtifacts({
+			cwd,
+			runId: "workflow_state_index_artifacts",
+			controllerSpecId: "adaptive.controller",
+			round: 1,
+			extracts: [extract],
+			index,
+		});
+
+		assert.equal(existsSync(written.extractsPath), true);
+		assert.equal(existsSync(written.indexPath), true);
+		const saved = JSON.parse(readFileSync(written.indexPath, "utf8"));
+		assert.equal(saved.digest, index.digest);
+		assert.equal(saved.findings[0].id, "AUTH-1");
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("dynamic-decision artifacts reject divergent accepted rewrites", async () => {
+	const cwd = makeProject();
+	try {
+		const baseDecision = {
+			schema: "dynamic-decision-v1",
+			decisionId: "decide-r2",
+			round: 2,
+			phase: "final",
+			status: "stop",
+			nextActions: [{ type: "stop", actionId: "stop-r2", reason: "done" }],
+		};
+		const changedDecision = {
+			...baseDecision,
+			nextActions: [{ type: "stop", actionId: "stop-r2", reason: "changed" }],
+		};
+		const base = {
+			cwd,
+			runId: "workflow_decision_divergent",
+			controllerSpecId: "adaptive.controller",
+		};
+		await writeDynamicDecisionArtifacts({
+			...base,
+			rawDecision: baseDecision,
+			validation: validateDynamicDecision(baseDecision, { expectedRound: 2 }),
+		});
+		await assert.rejects(
+			() =>
+				writeDynamicDecisionArtifacts({
+					...base,
+					rawDecision: changedDecision,
+					validation: validateDynamicDecision(changedDecision, {
+						expectedRound: 2,
+					}),
+				}),
+			/divergent hash/,
+		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("deterministic dynamic decision-loop fixture persists decisions and state indexes", async () => {
+	const cwd = makeProject();
+	try {
+		const runId = "workflow_decision_loop_fixture";
+		const controllerSpecId = "adaptive.controller";
+		const decideR0 = {
+			schema: "dynamic-decision-v1",
+			decisionId: "decide-r0",
+			round: 0,
+			phase: "orientation",
+			status: "continue",
+			nextActions: [
+				{
+					type: "add_work_item",
+					actionId: "act-inspect-auth",
+					workItemId: "inspect-auth",
+					agent: "unit-scout",
+					prompt: "Inspect auth implementation.",
+					tools: ["read"],
+					outputProfile: "candidate_findings_v1",
+				},
+				{
+					type: "add_work_item",
+					actionId: "act-inspect-tests",
+					workItemId: "inspect-tests",
+					agent: "unit-scout",
+					prompt: "Inspect tests.",
+					tools: ["read"],
+					outputProfile: "coverage_assessment_v1",
+				},
+			],
+		};
+		const r0 = validateDynamicDecision(decideR0, {
+			expectedRound: 0,
+			maxActions: 2,
+			allowedTools: ["read"],
+		});
+		assert.equal(r0.ok, true, r0.errors.join("\n"));
+		await writeDynamicDecisionArtifacts({
+			cwd,
+			runId,
+			controllerSpecId,
+			rawDecision: decideR0,
+			validation: r0,
+		});
+
+		const inspectAuth = extractDynamicStateArtifact({
+			taskId: "inspect-auth",
+			outputProfile: "candidate_findings_v1",
+			control: {
+				findings: [
+					{
+						id: "AUTH-1",
+						title: "Auth check may be bypassed",
+						severity: "high",
+						confidence: "medium",
+						evidenceRefs: [
+							{
+								taskId: "inspect-auth",
+								artifact: "analysis",
+								digest: "sha256:auth",
+							},
+						],
+					},
+				],
+			},
+		});
+		const inspectTests = extractDynamicStateArtifact({
+			taskId: "inspect-tests",
+			outputProfile: "coverage_assessment_v1",
+			control: {
+				criteriaCoverage: {
+					C2: { status: "partial", notes: "No negative auth test found" },
+				},
+				gaps: ["Auth negative coverage gap"],
+			},
+		});
+		const indexR0 = assembleDynamicStateIndex([inspectAuth, inspectTests], {
+			requiredFindingIds: ["AUTH-1"],
+		});
+		assert.equal(
+			indexR0.blockers.some((blocker) => blocker.id === "unverified-AUTH-1"),
+			true,
+		);
+		await writeDynamicStateIndexArtifacts({
+			cwd,
+			runId,
+			controllerSpecId,
+			round: 0,
+			extracts: [inspectAuth, inspectTests],
+			index: indexR0,
+		});
+
+		const decideR1 = {
+			schema: "dynamic-decision-v1",
+			decisionId: "decide-r1",
+			round: 1,
+			phase: "round",
+			status: "continue",
+			nextActions: [
+				{
+					type: "verify",
+					actionId: "act-verify-auth-1",
+					targetFindingId: "AUTH-1",
+					prompt: "Verify AUTH-1.",
+					tools: ["read"],
+					outputProfile: "verification_result_v1",
+				},
+				{
+					type: "add_work_item",
+					actionId: "act-followup-tests",
+					workItemId: "followup-tests",
+					agent: "unit-scout",
+					prompt: "Inspect missing auth tests.",
+					tools: ["read"],
+					outputProfile: "coverage_assessment_v1",
+				},
+			],
+		};
+		const r1 = validateDynamicDecision(decideR1, {
+			expectedRound: 1,
+			maxActions: 2,
+			allowedTools: ["read"],
+			knownFindingIds: ["AUTH-1"],
+		});
+		assert.equal(r1.ok, true, r1.errors.join("\n"));
+		await writeDynamicDecisionArtifacts({
+			cwd,
+			runId,
+			controllerSpecId,
+			rawDecision: decideR1,
+			validation: r1,
+			stateIndexDigest: indexR0.digest,
+		});
+
+		const verifyAuth = extractDynamicStateArtifact({
+			taskId: "verify-auth-1",
+			outputProfile: "verification_result_v1",
+			control: {
+				findingId: "AUTH-1",
+				verdict: "verified",
+				confidence: "high",
+				evidenceRefs: [{ taskId: "verify-auth-1", artifact: "control" }],
+			},
+		});
+		const followupTests = extractDynamicStateArtifact({
+			taskId: "followup-tests",
+			outputProfile: "coverage_assessment_v1",
+			control: {
+				criteriaCoverage: {
+					C1: { status: "satisfied" },
+					C2: { status: "satisfied" },
+				},
+			},
+		});
+		const indexR1 = assembleDynamicStateIndex(
+			[inspectAuth, inspectTests, verifyAuth, followupTests],
+			{ requiredFindingIds: ["AUTH-1"] },
+		);
+		assert.equal(indexR1.findings[0].verificationStatus, "verified");
+		assert.equal(
+			indexR1.blockers.some((blocker) => blocker.id === "unverified-AUTH-1"),
+			false,
+		);
+		await writeDynamicStateIndexArtifacts({
+			cwd,
+			runId,
+			controllerSpecId,
+			round: 1,
+			extracts: [inspectAuth, inspectTests, verifyAuth, followupTests],
+			index: indexR1,
+		});
+
+		const decideR2 = {
+			schema: "dynamic-decision-v1",
+			decisionId: "decide-r2",
+			round: 2,
+			phase: "final",
+			status: "stop",
+			nextActions: [
+				{
+					type: "stop",
+					actionId: "act-stop-r2",
+					reason:
+						"Verified finding and coverage state are sufficient for synthesis.",
+				},
+			],
+		};
+		const r2 = validateDynamicDecision(decideR2, {
+			expectedRound: 2,
+		});
+		assert.equal(r2.ok, true, r2.errors.join("\n"));
+		const finalDecision = await writeDynamicDecisionArtifacts({
+			cwd,
+			runId,
+			controllerSpecId,
+			rawDecision: decideR2,
+			validation: r2,
+			stateIndexDigest: indexR1.digest,
+		});
+
+		assert.equal(existsSync(finalDecision.acceptedPath), true);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+function dynamicLoopConfig(overrides = {}) {
+	const base = {
+		allowedAgents: ["unit-scout"],
+		allowedTools: ["read"],
+		allowedToolProviders: {},
+		allowedOutputProfiles: [
+			"candidate_findings_v1",
+			"verification_result_v1",
+			"coverage_assessment_v1",
+			"generic_summary_v1",
+			"synthesis_v1",
+		],
+		maxDecisionRounds: 3,
+		maxActionsPerRound: 4,
+		repair: { maxAttempts: 0 },
+		stateIndex: { maxFindings: 10 },
+		stopPolicy: {
+			requireSynthesisAction: false,
+			failOnInvalidDecision: false,
+			maxStalls: 3,
+			failOnDroppedRequiredBranch: false,
+		},
+	};
+	return {
+		...base,
+		...overrides,
+		repair: { ...base.repair, ...(overrides.repair ?? {}) },
+		stateIndex: { ...base.stateIndex, ...(overrides.stateIndex ?? {}) },
+		stopPolicy: { ...base.stopPolicy, ...(overrides.stopPolicy ?? {}) },
+	};
+}
+
+function dynamicLoopPersistedDecision(decision, extras = {}) {
+	return {
+		ok: true,
+		errors: [],
+		decision: {
+			schema: "dynamic-decision-v1",
+			decisionId: `decide-r${decision.round}`,
+			phase:
+				decision.status === "stop" || decision.status === "synthesize"
+					? "final"
+					: "round",
+			...decision,
+		},
+		decisionHash: `hash-${decision.round}`,
+		...extras,
+	};
+}
+
+function dynamicLoopInvalidDecision(errors = ["invalid decision"]) {
+	return { ok: false, errors };
+}
+
+function makeDynamicDecisionLoopCtx({
+	config = dynamicLoopConfig(),
+	persistedDecisions = [],
+	agentResults = {},
+	generatedTaskIds = [],
+	stateIndexDigests = [],
+} = {}) {
+	const calls = {
+		agent: [],
+		validationContexts: [],
+		stateIndexRequests: [],
+		decisionLoopStatus: [],
+	};
+	let validationIndex = 0;
+	const ctx = {
+		task: "Unit dynamic task",
+		sources: { seed: { digest: "sha256:seed" } },
+		graph: { generatedTaskIds: () => [...generatedTaskIds] },
+		dynamic: {
+			config: () => config,
+			async recordDecisionLoopStatus(status) {
+				calls.decisionLoopStatus.push(status);
+			},
+		},
+		decision: {
+			async validateAndPersist(_rawDecision, context) {
+				calls.validationContexts.push(context);
+				const persisted = persistedDecisions[validationIndex];
+				validationIndex += 1;
+				if (!persisted) {
+					throw new Error(
+						`unexpected decision validation call ${validationIndex}`,
+					);
+				}
+				return persisted;
+			},
+		},
+		stateIndex: {
+			async extractAndPersist(request) {
+				calls.stateIndexRequests.push(request);
+				return {
+					digest:
+						stateIndexDigests[calls.stateIndexRequests.length - 1] ??
+						`index-${calls.stateIndexRequests.length}`,
+					index: {},
+					artifacts: {},
+				};
+			},
+		},
+		async agent(request) {
+			calls.agent.push(request);
+			if (request.profile === "planner") {
+				return { control: { plannerRequestId: request.id } };
+			}
+			return (
+				agentResults[request.id] ?? {
+					taskId: `${request.id}-task`,
+					specId: `${request.id}-spec`,
+					control: { digest: `${request.id}-digest` },
+				}
+			);
+		},
+	};
+	return { ctx, calls };
+}
+
+function makeValidatingDynamicDecisionLoopCtx({
+	config = dynamicLoopConfig(),
+	plannerControls = [],
+	plannerAnalyses = [],
+	plannerRefs = [],
+	agentResults = {},
+	generatedTaskIds = [],
+	stateIndexDigests = [],
+} = {}) {
+	const calls = {
+		agent: [],
+		validationResults: [],
+		stateIndexRequests: [],
+		decisionLoopStatus: [],
+	};
+	let plannerIndex = 0;
+	const ctx = {
+		task: "Unit dynamic task",
+		sources: { seed: { digest: "sha256:seed" } },
+		graph: { generatedTaskIds: () => [...generatedTaskIds] },
+		dynamic: {
+			config: () => config,
+			async recordDecisionLoopStatus(status) {
+				calls.decisionLoopStatus.push(status);
+			},
+		},
+		decision: {
+			async validateAndPersist(rawDecision, context) {
+				const validation = validateDynamicDecision(rawDecision, context);
+				calls.validationResults.push(validation);
+				return {
+					ok: validation.ok,
+					errors: validation.errors,
+					decision: validation.decision,
+					decisionHash: validation.hash,
+				};
+			},
+		},
+		stateIndex: {
+			async extractAndPersist(request) {
+				calls.stateIndexRequests.push(request);
+				return {
+					digest:
+						stateIndexDigests[calls.stateIndexRequests.length - 1] ??
+						`index-${calls.stateIndexRequests.length}`,
+					index: {},
+					artifacts: {},
+				};
+			},
+		},
+		async agent(request) {
+			calls.agent.push(request);
+			if (request.profile === "planner") {
+				const index = plannerIndex;
+				const control = plannerControls[index];
+				plannerIndex += 1;
+				if (control === undefined) {
+					throw new Error(`unexpected planner call ${plannerIndex}`);
+				}
+				return {
+					control,
+					...(plannerAnalyses[index] !== undefined
+						? { analysis: plannerAnalyses[index] }
+						: {}),
+					...(plannerRefs[index] !== undefined
+						? { refs: plannerRefs[index] }
+						: {}),
+				};
+			}
+			return (
+				agentResults[request.id] ?? {
+					taskId: `${request.id}-task`,
+					specId: `${request.id}-spec`,
+					control: { digest: `${request.id}-digest` },
+				}
+			);
+		},
+	};
+	return { ctx, calls };
+}
+
+function dynamicLoopAliasDriftRawDecision() {
+	return {
+		schema: "dynamic-decision-v1",
+		decisionId: "decide-r0",
+		round: 0,
+		phase: "round",
+		status: "continue",
+		actions: [
+			{
+				type: "add_work_item",
+				actionId: "act-review",
+				workItemId: "review",
+				agent: "unit-scout",
+				prompt: "Review the target.",
+				tools: ["read"],
+				outputProfile: "candidate_findings_v1",
+			},
+		],
+	};
+}
+
+function dynamicLoopValidWorkDecision() {
+	return {
+		schema: "dynamic-decision-v1",
+		decisionId: "decide-r0",
+		round: 0,
+		phase: "round",
+		status: "continue",
+		nextActions: [
+			{
+				type: "add_work_item",
+				actionId: "act-review",
+				workItemId: "review",
+				agent: "unit-scout",
+				prompt: "Review the target.",
+				tools: ["read"],
+				outputProfile: "candidate_findings_v1",
+			},
+		],
+	};
+}
+
+function plannerCalls(calls) {
+	return calls.agent.filter((request) => request.profile === "planner");
+}
+
+function dispatchedCalls(calls) {
+	return calls.agent.filter((request) => request.profile !== "planner");
+}
+
+test("runDynamicDecisionLoop treats deprecated config fields as no-op and hides them from planner prompts", async () => {
+	async function runWithConfig(config) {
+		const { ctx, calls } = makeValidatingDynamicDecisionLoopCtx({
+			config,
+			plannerControls: [dynamicLoopValidWorkDecision()],
+			agentResults: {
+				review: { taskId: "review", specId: "adaptive.review" },
+			},
+		});
+		const result = await runDynamicDecisionLoop(ctx);
+		return {
+			result,
+			plannerPrompt: plannerCalls(calls)[0]?.prompt ?? "",
+			dispatched: dispatchedCalls(calls).map((request) => ({
+				id: request.id,
+				profile: request.profile,
+				prompt: request.prompt,
+				outputProfile: request.outputProfile,
+				dependsOn: request.dependsOn,
+			})),
+			stateIndexRequests: calls.stateIndexRequests,
+		};
+	}
+	const baseline = await runWithConfig(
+		dynamicLoopConfig({ maxDecisionRounds: 1 }),
+	);
+	const withDeprecated = await runWithConfig(
+		dynamicLoopConfig({
+			maxDecisionRounds: 1,
+			stateIndex: {
+				maxFindings: 10,
+				requiredFindingIds: ["F-deprecated"],
+			},
+			stopPolicy: {
+				requireSynthesisAction: true,
+				failOnInvalidDecision: false,
+				failOnDroppedRequiredBranch: true,
+			},
+		}),
+	);
+
+	assert.equal(
+		withDeprecated.result.control.status,
+		baseline.result.control.status,
+	);
+	assert.deepEqual(
+		withDeprecated.result.control.generatedTasks,
+		baseline.result.control.generatedTasks,
+	);
+	assert.deepEqual(withDeprecated.dispatched, baseline.dispatched);
+	assert.deepEqual(
+		withDeprecated.stateIndexRequests,
+		baseline.stateIndexRequests,
+	);
+	for (const hidden of [
+		"requireSynthesisAction",
+		"failOnDroppedRequiredBranch",
+		"requiredFindingIds",
+		"F-deprecated",
+	]) {
+		assert.equal(
+			withDeprecated.plannerPrompt.includes(hidden),
+			false,
+			`${hidden} surfaced in planner prompt`,
+		);
+	}
+});
+
+test("runDynamicDecisionLoop records planner prose outside control JSON", async () => {
+	const { ctx } = makeValidatingDynamicDecisionLoopCtx({
+		config: dynamicLoopConfig({ maxDecisionRounds: 1 }),
+		plannerControls: [dynamicLoopValidWorkDecision()],
+		plannerAnalyses: ["Planner rationale and strategy live here."],
+		plannerRefs: [[{ taskId: "seed", artifact: "analysis" }]],
+		agentResults: {
+			review: { taskId: "review", specId: "adaptive.review" },
+		},
+	});
+
+	const result = await runDynamicDecisionLoop(ctx);
+
+	assert.match(result.analysis, /Planner rationale and strategy live here\./);
+	assert.deepEqual(result.refs, [{ taskId: "seed", artifact: "analysis" }]);
+	assert.equal(Object.hasOwn(result.control, "analysis"), false);
+	assert.equal(Object.hasOwn(result.control, "rationale"), false);
+});
+
+test("runDynamicDecisionLoop sends compact artifact-ref handoff without inlining large blobs", async () => {
+	const largeBlob = `BEGIN-LARGE-${"x".repeat(5000)}-END-LARGE`;
+	const decision = {
+		...dynamicLoopValidWorkDecision(),
+		nextActions: [
+			{
+				type: "add_work_item",
+				actionId: "act-review",
+				workItemId: "review",
+				agent: "unit-scout",
+				prompt: `Review the declared scope.\n${largeBlob}`,
+				tools: ["read"],
+				outputProfile: "candidate_findings_v1",
+				inputRefs: [
+					{
+						kind: "workflow-artifact-ref",
+						taskId: "seed.main",
+						artifact: "control",
+						digest: "sha256:seed",
+					},
+				],
+			},
+		],
+	};
+	const { ctx, calls } = makeValidatingDynamicDecisionLoopCtx({
+		config: dynamicLoopConfig({ maxDecisionRounds: 1 }),
+		plannerControls: [decision],
+		generatedTaskIds: ["seed.main"],
+		agentResults: {
+			review: { taskId: "review", specId: "adaptive.review" },
+		},
+	});
+
+	await runDynamicDecisionLoop(ctx);
+	const [worker] = dispatchedCalls(calls);
+
+	assert.equal(worker.profile, "worker");
+	assert.match(worker.prompt, /# Dynamic Worker Handoff/);
+	assert.match(worker.prompt, /## Objective\nReview the declared scope\./);
+	assert.match(worker.prompt, /## Output Profile\ncandidate_findings_v1/);
+	assert.match(
+		worker.prompt,
+		/## Input Artifact Refs\n- seed\.main\.control \(digest sha256:seed\)/,
+	);
+	assert.equal(worker.prompt.includes(largeBlob), false);
+	assert.ok(worker.prompt.length < largeBlob.length / 2);
+	assert.deepEqual(worker.inputs, [
+		{
+			kind: "workflow-artifact-ref",
+			name: "seed.main.control",
+			options: { digest: "sha256:seed" },
+		},
+	]);
+});
+
+test("runDynamicDecisionLoop repairs unknown dynamic inputRefs before fanout", async () => {
+	const invalidRefDecision = {
+		...dynamicLoopValidWorkDecision(),
+		nextActions: [
+			{
+				type: "add_work_item",
+				actionId: "act-review",
+				workItemId: "review",
+				agent: "unit-scout",
+				prompt: "Review the declared scope.",
+				tools: ["read"],
+				outputProfile: "candidate_findings_v1",
+				inputRefs: [
+					{
+						kind: "workflow-artifact-ref",
+						taskId: "task-1",
+						artifact: "analysis",
+					},
+				],
+			},
+		],
+	};
+	const config = dynamicLoopConfig({
+		maxDecisionRounds: 1,
+		repair: { maxAttempts: 1 },
+		stopPolicy: { failOnInvalidDecision: true },
+	});
+	const { ctx, calls } = makeValidatingDynamicDecisionLoopCtx({
+		config,
+		plannerControls: [invalidRefDecision, dynamicLoopValidWorkDecision()],
+		agentResults: { review: { taskId: "review", specId: "adaptive.review" } },
+	});
+
+	await runDynamicDecisionLoop(ctx);
+
+	assert.deepEqual(
+		calls.validationResults.map((validation) => validation.ok),
+		[false, true],
+	);
+	assert.match(
+		calls.validationResults[0].errors.join("\n"),
+		/\.inputRefs\[0\]\.taskId references unknown artifact task/,
+	);
+	assert.deepEqual(
+		plannerCalls(calls).map((request) => request.id),
+		["decide-r0", "decide-r0-repair-1"],
+	);
+	assert.equal(dispatchedCalls(calls).length, 1);
+});
+
+test("runDynamicDecisionLoop repairs reused generated task ids before fanout", async () => {
+	const reusedWorkItemDecision = {
+		...dynamicLoopValidWorkDecision(),
+		nextActions: [
+			{
+				type: "add_work_item",
+				actionId: "act-review-again",
+				workItemId: "adaptive.review",
+				agent: "unit-scout",
+				prompt: "Review the same generated task again.",
+				tools: ["read"],
+				outputProfile: "candidate_findings_v1",
+			},
+		],
+	};
+	const config = dynamicLoopConfig({
+		maxDecisionRounds: 1,
+		repair: { maxAttempts: 1 },
+		stopPolicy: { failOnInvalidDecision: true },
+	});
+	const freshWorkItemDecision = {
+		...dynamicLoopValidWorkDecision(),
+		nextActions: [
+			{
+				type: "add_work_item",
+				actionId: "act-review-fresh",
+				workItemId: "review-2",
+				agent: "unit-scout",
+				prompt: "Review a fresh generated task.",
+				tools: ["read"],
+				outputProfile: "candidate_findings_v1",
+			},
+		],
+	};
+	const { ctx, calls } = makeValidatingDynamicDecisionLoopCtx({
+		config,
+		generatedTaskIds: ["adaptive.review"],
+		plannerControls: [reusedWorkItemDecision, freshWorkItemDecision],
+		agentResults: {
+			"review-2": { taskId: "review-2", specId: "adaptive.review-2" },
+		},
+	});
+
+	await runDynamicDecisionLoop(ctx);
+
+	assert.deepEqual(
+		calls.validationResults.map((validation) => validation.ok),
+		[false, true],
+	);
+	assert.match(
+		calls.validationResults[0].errors.join("\n"),
+		/workItemId already exists as a generated task/,
+	);
+	assert.deepEqual(
+		plannerCalls(calls).map((request) => request.id),
+		["decide-r0", "decide-r0-repair-1"],
+	);
+	assert.equal(dispatchedCalls(calls).length, 1);
+});
+
+test("runDynamicDecisionLoop shape-repairs drift then dispatches accepted work once", async () => {
+	const config = dynamicLoopConfig({
+		maxDecisionRounds: 1,
+		maxActionsPerRound: 1,
+		repair: { maxAttempts: 2 },
+		stopPolicy: { failOnInvalidDecision: true },
+	});
+	const { ctx, calls } = makeValidatingDynamicDecisionLoopCtx({
+		config,
+		plannerControls: [
+			dynamicLoopAliasDriftRawDecision(),
+			dynamicLoopValidWorkDecision(),
+		],
+		agentResults: { review: { taskId: "review", specId: "adaptive.review" } },
+	});
+
+	const result = await runDynamicDecisionLoop(ctx);
+	const planners = plannerCalls(calls);
+	const dispatched = dispatchedCalls(calls);
+
+	assert.equal(result.control.status, "exhausted");
+	assert.equal(result.control.decisions.length, 1);
+	assert.deepEqual(
+		calls.validationResults.map((validation) => validation.ok),
+		[false, true],
+	);
+	assert.equal(
+		calls.validationResults.filter((validation) => validation.ok).length,
+		1,
+	);
+	assert.equal(planners.length, 2);
+	assert.ok(planners.length <= 1 + config.repair.maxAttempts);
+	assert.match(planners[1].prompt, /previous decision was invalid/);
+	assert.match(
+		planners[1].prompt,
+		/decision field actions is not allowed; use nextActions/,
+	);
+	assert.deepEqual(
+		planners.map((request) => request.id),
+		["decide-r0", "decide-r0-repair-1"],
+	);
+	assert.equal(dispatched.length, 1);
+	assert.equal(dispatched[0].profile, "worker");
+	assert.equal(dispatched[0].id, "review");
+	assert.deepEqual(result.control.generatedTasks, ["adaptive.review"]);
+	assert.equal(calls.stateIndexRequests.length, 1);
+});
+
+test("runDynamicDecisionLoop exhausts repair and blocks without dispatch when failOnInvalidDecision is true", async () => {
+	const config = dynamicLoopConfig({
+		maxDecisionRounds: 1,
+		repair: { maxAttempts: 2 },
+		stopPolicy: { failOnInvalidDecision: true },
+	});
+	const invalid = dynamicLoopAliasDriftRawDecision();
+	const { ctx, calls } = makeValidatingDynamicDecisionLoopCtx({
+		config,
+		plannerControls: [invalid, invalid, invalid],
+	});
+
+	const result = await runDynamicDecisionLoop(ctx);
+	const planners = plannerCalls(calls);
+	assert.equal(result.control.status, "blocked");
+	assert.match(
+		result.control.blockers.join("\n"),
+		/decision field actions is not allowed; use nextActions/,
+	);
+	assert.deepEqual(result.control.generatedTasks, []);
+	assert.equal(planners.length, 1 + config.repair.maxAttempts);
+	assert.ok(planners.length <= 1 + config.repair.maxAttempts);
+	assert.deepEqual(dispatchedCalls(calls), []);
+	assert.equal(calls.stateIndexRequests.length, 0);
+	assert.deepEqual(
+		calls.validationResults.map((validation) => validation.ok),
+		[false, false, false],
+	);
+});
+
+test("runDynamicDecisionLoop exhausts repair and blocks without dispatch when failOnInvalidDecision is false", async () => {
+	const config = dynamicLoopConfig({
+		maxDecisionRounds: 1,
+		repair: { maxAttempts: 2 },
+		stopPolicy: { failOnInvalidDecision: false },
+	});
+	const invalid = dynamicLoopAliasDriftRawDecision();
+	const { ctx, calls } = makeValidatingDynamicDecisionLoopCtx({
+		config,
+		plannerControls: [invalid, invalid, invalid],
+	});
+
+	const result = await runDynamicDecisionLoop(ctx);
+	const planners = plannerCalls(calls);
+
+	assert.equal(result.control.status, "blocked");
+	assert.match(
+		result.control.blockers.join("\n"),
+		/decision field actions is not allowed; use nextActions/,
+	);
+	assert.deepEqual(result.control.generatedTasks, []);
+	assert.equal(planners.length, 1 + config.repair.maxAttempts);
+	assert.ok(planners.length <= 1 + config.repair.maxAttempts);
+	assert.deepEqual(dispatchedCalls(calls), []);
+	assert.equal(calls.stateIndexRequests.length, 0);
+	assert.deepEqual(
+		calls.validationResults.map((validation) => validation.ok),
+		[false, false, false],
+	);
+});
+
+test("runDynamicDecisionLoop stops on accepted stop decision", async () => {
+	const { ctx, calls } = makeDynamicDecisionLoopCtx({
+		persistedDecisions: [
+			dynamicLoopPersistedDecision({
+				decisionId: "decide-r0",
+				round: 0,
+				status: "stop",
+				nextActions: [
+					{
+						type: "stop",
+						actionId: "stop-r0",
+						reason: "enough evidence",
+						caveats: ["sample caveat"],
+					},
+				],
+			}),
+		],
+	});
+
+	const result = await runDynamicDecisionLoop(ctx);
+
+	assert.equal(result.control.status, "stopped");
+	assert.deepEqual(result.control.blockers, ["enough evidence"]);
+	assert.deepEqual(result.control.caveats, ["sample caveat"]);
+	assert.deepEqual(result.control.generatedTasks, []);
+	assert.deepEqual(
+		calls.agent.map((request) => request.id),
+		["decide-r0"],
+	);
+});
+
+test("runDynamicDecisionLoop runs synthesis actions and returns synthesized", async () => {
+	const { ctx, calls } = makeDynamicDecisionLoopCtx({
+		agentResults: { "synth-final": { specId: "adaptive.synthesis" } },
+		persistedDecisions: [
+			dynamicLoopPersistedDecision({
+				decisionId: "decide-r0",
+				round: 0,
+				status: "synthesize",
+				nextActions: [{ type: "synthesize", actionId: "synth-final" }],
+			}),
+		],
+	});
+
+	const result = await runDynamicDecisionLoop(ctx);
+
+	assert.equal(result.control.status, "synthesized");
+	assert.deepEqual(result.control.generatedTasks, ["adaptive.synthesis"]);
+	assert.deepEqual(result.control.outputTasks, ["adaptive.synthesis"]);
+	assert.deepEqual(
+		calls.agent.map((request) => request.profile),
+		["planner", "synthesis"],
+	);
+	assert.equal(calls.agent[1].outputProfile, "synthesis_v1");
+	assert.equal(calls.stateIndexRequests.length, 0);
+});
+
+test("runDynamicDecisionLoop returns exhausted when maxRounds is reached", async () => {
+	const { ctx, calls } = makeDynamicDecisionLoopCtx({
+		config: dynamicLoopConfig({ maxDecisionRounds: 2 }),
+		persistedDecisions: [
+			dynamicLoopPersistedDecision({
+				decisionId: "decide-r0",
+				round: 0,
+				status: "continue",
+				nextActions: [],
+			}),
+			dynamicLoopPersistedDecision({
+				decisionId: "decide-r1",
+				round: 1,
+				status: "continue",
+				nextActions: [],
+			}),
+		],
+	});
+
+	const result = await runDynamicDecisionLoop(ctx);
+
+	assert.equal(result.control.status, "exhausted");
+	assert.equal(result.control.decisions.length, 2);
+	assert.deepEqual(result.control.omissions, [
+		"round 0 accepted no executable work actions",
+		"round 1 accepted no executable work actions",
+	]);
+	assert.equal(calls.validationContexts.length, 2);
+	assert.equal(calls.stateIndexRequests.length, 0);
+});
+
+test("runDynamicDecisionLoop increments stalls on no-progress and decrements on progress", async () => {
+	const { ctx, calls } = makeDynamicDecisionLoopCtx({
+		config: dynamicLoopConfig({
+			maxDecisionRounds: 3,
+			stopPolicy: { maxStalls: 10 },
+		}),
+		persistedDecisions: [
+			dynamicLoopPersistedDecision({
+				decisionId: "decide-r0",
+				round: 0,
+				status: "continue",
+				nextActions: [],
+			}),
+			dynamicLoopPersistedDecision({
+				decisionId: "decide-r1",
+				round: 1,
+				status: "continue",
+				nextActions: [
+					{
+						type: "add_work_item",
+						actionId: "act-review-1",
+						workItemId: "review-1",
+						prompt: "Review target 1.",
+					},
+				],
+			}),
+			dynamicLoopPersistedDecision({
+				decisionId: "decide-r2",
+				round: 2,
+				status: "continue",
+				nextActions: [
+					{
+						type: "add_work_item",
+						actionId: "act-review-2",
+						workItemId: "review-2",
+						prompt: "Review target 2.",
+					},
+				],
+			}),
+		],
+		agentResults: {
+			"review-1": { taskId: "review-1", specId: "adaptive.review-1" },
+			"review-2": { taskId: "review-2", specId: "adaptive.review-2" },
+		},
+	});
+
+	const result = await runDynamicDecisionLoop(ctx);
+
+	assert.equal(result.control.status, "exhausted");
+	assert.deepEqual(calls.decisionLoopStatus, [
+		{ stallCount: 1, replanCount: 0 },
+		{ stallCount: 0, replanCount: 0 },
+		{ stallCount: 0, replanCount: 0 },
+	]);
+	assert.match(result.analysis, /Stall counter: 0\./);
+});
+
+test("runDynamicDecisionLoop adds an extra stall for repeated loop signature", async () => {
+	const config = dynamicLoopConfig({
+		maxDecisionRounds: 2,
+		stopPolicy: { maxStalls: 10 },
+	});
+	const nextActions = [
+		{
+			type: "verify",
+			actionId: "verify-repeat-a",
+			targetFindingId: "finding-repeat",
+			prompt: "Re-check unchanged finding A.",
+		},
+		{
+			type: "verify",
+			actionId: "verify-repeat-b",
+			targetFindingId: "finding-repeat",
+			prompt: "Re-check unchanged finding B.",
+		},
+	];
+	const rawDecision = (round) => ({
+		schema: "dynamic-decision-v1",
+		decisionId: `decide-r${round}`,
+		round,
+		phase: "round",
+		status: "continue",
+		nextActions,
+	});
+	const validationContext = (round) => ({
+		expectedRound: round,
+		maxActions: config.maxActionsPerRound,
+		maxDecisionRounds: config.maxDecisionRounds,
+		allowedTools: config.allowedTools,
+		toolProviders: config.allowedToolProviders,
+		allowedOutputProfiles: config.allowedOutputProfiles,
+		allowedAgents: config.allowedAgents,
+		requireAgent: false,
+		knownGeneratedTaskIds: [],
+	});
+	const accepted = [0, 1].map((round) =>
+		validateDynamicDecision(rawDecision(round), validationContext(round)),
+	);
+	for (const validation of accepted) {
+		assert.equal(validation.ok, true, validation.errors.join("\n"));
+		assert(validation.decision);
+	}
+	assert.notEqual(accepted[0].hash, accepted[1].hash);
+	assert.equal(
+		dynamicLoopSignature(accepted[0].decision),
+		dynamicLoopSignature(accepted[1].decision),
+	);
+
+	const { ctx, calls } = makeValidatingDynamicDecisionLoopCtx({
+		config,
+		plannerControls: [rawDecision(0), rawDecision(1)],
+	});
+	const originalAgent = ctx.agent;
+	ctx.agent = async (request) => {
+		if (request.profile === "planner") return await originalAgent(request);
+		calls.agent.push(request);
+		throw new Error("worker did not complete");
+	};
+	ctx.parallel = async (thunks) =>
+		Promise.allSettled(thunks.map(async (thunk) => await thunk()));
+
+	await runDynamicDecisionLoop(ctx);
+
+	assert.deepEqual(calls.decisionLoopStatus, [
+		{ stallCount: 1, replanCount: 0 },
+		{ stallCount: 3, replanCount: 0 },
+	]);
+});
+
+test("runDynamicDecisionLoop triggers one bounded replan prompt with stall context", async () => {
+	const config = dynamicLoopConfig({
+		maxDecisionRounds: 2,
+		stopPolicy: { maxStalls: 1 },
+	});
+	const { ctx, calls } = makeDynamicDecisionLoopCtx({
+		config,
+		persistedDecisions: [
+			dynamicLoopPersistedDecision({
+				decisionId: "decide-r0",
+				round: 0,
+				status: "continue",
+				nextActions: [],
+			}),
+			dynamicLoopPersistedDecision({
+				decisionId: "decide-r1",
+				round: 1,
+				status: "stop",
+				nextActions: [
+					{
+						type: "stop",
+						actionId: "stop-r1",
+						reason: "replanned stop",
+					},
+				],
+			}),
+		],
+	});
+
+	const result = await runDynamicDecisionLoop(ctx);
+	const planners = plannerCalls(calls);
+
+	assert.equal(result.control.status, "stopped");
+	assert.equal(planners.length, 2);
+	assert.match(planners[1].prompt, /Replan requested/);
+	assert.match(planners[1].prompt, /Rounds without progress: 1\./);
+	assert.match(planners[1].prompt, /Last state index digest: none\./);
+	assert.deepEqual(calls.decisionLoopStatus, [
+		{ stallCount: 1, replanCount: 1 },
+	]);
+});
+
+test("runDynamicDecisionLoop blocks after replan budget exhausts with no progress", async () => {
+	const config = dynamicLoopConfig({
+		maxDecisionRounds: 3,
+		stopPolicy: { maxStalls: 1 },
+	});
+	const noProgress = (round) =>
+		dynamicLoopPersistedDecision({
+			decisionId: `decide-r${round}`,
+			round,
+			status: "continue",
+			nextActions: [],
+		});
+	const { ctx, calls } = makeDynamicDecisionLoopCtx({
+		config,
+		persistedDecisions: [noProgress(0), noProgress(1)],
+	});
+
+	const result = await runDynamicDecisionLoop(ctx);
+
+	assert.equal(result.control.status, "blocked");
+	assert.match(result.control.blockers.join("\n"), /decision loop stalled/);
+	assert.equal(plannerCalls(calls).length, 2);
+	assert.deepEqual(dispatchedCalls(calls), []);
+	assert.deepEqual(calls.decisionLoopStatus, [
+		{ stallCount: 1, replanCount: 1 },
+		{ stallCount: 3, replanCount: 1 },
+	]);
+});
+
+test("runDynamicDecisionLoop keeps maxDecisionRounds as an absolute cap", async () => {
+	const { ctx, calls } = makeDynamicDecisionLoopCtx({
+		config: dynamicLoopConfig({
+			maxDecisionRounds: 1,
+			stopPolicy: { maxStalls: 1 },
+		}),
+		persistedDecisions: [
+			dynamicLoopPersistedDecision({
+				decisionId: "decide-r0",
+				round: 0,
+				status: "continue",
+				nextActions: [],
+			}),
+		],
+	});
+
+	const result = await runDynamicDecisionLoop(ctx);
+
+	assert.equal(result.control.status, "exhausted");
+	assert.equal(plannerCalls(calls).length, 1);
+	assert.deepEqual(calls.decisionLoopStatus, [
+		{ stallCount: 1, replanCount: 0 },
+	]);
+});
+
+test("runDynamicDecisionLoop persists and recomputes stall/replan counters deterministically", async () => {
+	const cwd = makeProject();
+	try {
+		const config = dynamicLoopConfig({
+			maxDecisionRounds: 3,
+			stopPolicy: { maxStalls: 1 },
+		});
+		const noProgress = (round) =>
+			dynamicLoopPersistedDecision({
+				decisionId: `decide-r${round}`,
+				round,
+				status: "continue",
+				nextActions: [],
+			});
+		async function runAndPersist(runId) {
+			const { ctx, calls } = makeDynamicDecisionLoopCtx({
+				config,
+				persistedDecisions: [noProgress(0), noProgress(1)],
+			});
+			ctx.dynamic.recordDecisionLoopStatus = async (status) => {
+				calls.decisionLoopStatus.push(status);
+				const callIndex = calls.decisionLoopStatus.length;
+				const payload = {
+					callIndex,
+					status: "running",
+					decisionLoop: status,
+				};
+				await appendDynamicEvent(cwd, runId, {
+					controllerSpecId: "adaptive.controller",
+					type: "controller.status",
+					opId: `adaptive.controller:decision-loop-status:${String(callIndex).padStart(3, "0")}`,
+					requestHash: hashDynamicRequest(payload),
+					payload,
+				});
+			};
+			return {
+				result: await runDynamicDecisionLoop(ctx),
+				statuses: calls.decisionLoopStatus,
+			};
+		}
+
+		const first = await runAndPersist("workflow_stall_replay_1");
+		const projected = await rebuildDynamicState(cwd, "workflow_stall_replay_1");
+		const second = await runAndPersist("workflow_stall_replay_2");
+
+		assert.equal(first.result.control.status, "blocked");
+		assert.equal(second.result.control.status, first.result.control.status);
+		assert.deepEqual(second.statuses, first.statuses);
+		assert.deepEqual(
+			projected.controllers["adaptive.controller"].decisionLoop,
+			{ stallCount: 3, replanCount: 1 },
+		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("runDynamicDecisionLoop blocks on invalid decision when failOnInvalidDecision is false", async () => {
+	const invalid = dynamicLoopInvalidDecision(["missing nextActions"]);
+	const { ctx, calls } = makeDynamicDecisionLoopCtx({
+		config: dynamicLoopConfig({ repair: { maxAttempts: 1 } }),
+		persistedDecisions: [invalid, invalid],
+	});
+
+	const result = await runDynamicDecisionLoop(ctx);
+
+	assert.equal(result.control.status, "blocked");
+	assert.match(result.control.blockers.join("\n"), /missing nextActions/);
+	assert.deepEqual(
+		calls.agent.map((request) => request.id),
+		["decide-r0", "decide-r0-repair-1"],
+	);
+	assert.equal(calls.validationContexts.length, 2);
+});
+
+test("runDynamicDecisionLoop uses shared validator and blocks alias drift before dispatch", async () => {
+	const config = dynamicLoopConfig({
+		maxDecisionRounds: 1,
+		repair: { maxAttempts: 0 },
+	});
+	const rawDecision = {
+		schema: "dynamic-decision-v1",
+		decisionId: "decide-r0",
+		round: 0,
+		phase: "orientation",
+		status: "continue",
+		nextActions: [
+			{
+				action: "add_work_item",
+				id: "act-review",
+				workItemId: "review",
+				prompt: "Review the target.",
+				outputProfile: "candidate_findings_v1",
+			},
+		],
+	};
+	const official = validateDynamicDecision(rawDecision, {
+		expectedRound: 0,
+		maxActions: config.maxActionsPerRound,
+		maxDecisionRounds: config.maxDecisionRounds,
+		allowedTools: config.allowedTools,
+		toolProviders: config.allowedToolProviders,
+		allowedOutputProfiles: config.allowedOutputProfiles,
+		allowedAgents: config.allowedAgents,
+		requireAgent: false,
+		knownGeneratedTaskIds: [],
+	});
+	const calls = { agent: [], validationResults: [] };
+	const ctx = {
+		task: "Unit dynamic task",
+		sources: {},
+		graph: { generatedTaskIds: () => [] },
+		dynamic: { config: () => config },
+		decision: {
+			async validateAndPersist(decision, context) {
+				const validation = validateDynamicDecision(decision, context);
+				calls.validationResults.push(validation);
+				return {
+					ok: validation.ok,
+					errors: validation.errors,
+					decision: validation.decision,
+					decisionHash: validation.hash,
+				};
+			},
+		},
+		stateIndex: {
+			async extractAndPersist() {
+				throw new Error("state index should not run for invalid decisions");
+			},
+		},
+		async agent(request) {
+			calls.agent.push(request);
+			if (request.profile === "planner") return { control: rawDecision };
+			return {
+				taskId: `${request.id}-task`,
+				specId: `${request.id}-spec`,
+			};
+		},
+	};
+
+	assert.equal(official.ok, false);
+	assert.match(
+		official.errors.join("\n"),
+		/nextActions\[0\]\.action is not allowed; use type/,
+	);
+	assert.match(
+		official.errors.join("\n"),
+		/nextActions\[0\]\.id is not allowed; use actionId/,
+	);
+
+	const result = await runDynamicDecisionLoop(ctx);
+
+	assert.equal(result.control.status, "blocked");
+	assert.deepEqual(result.control.generatedTasks, []);
+	assert.equal(calls.validationResults.length, 1);
+	assert.deepEqual(calls.validationResults[0].errors, official.errors);
+	assert.deepEqual(
+		calls.agent.map((request) => `${request.profile}:${request.id}`),
+		["planner:decide-r0"],
+	);
+	assert.match(
+		result.control.blockers.join("\n"),
+		/nextActions\[0\]\.action is not allowed; use type/,
+	);
+});
+
+test("runDynamicDecisionLoop returns blocked invalid decision result when failOnInvalidDecision is true", async () => {
+	const invalid = dynamicLoopInvalidDecision(["malformed control"]);
+	const { ctx, calls } = makeDynamicDecisionLoopCtx({
+		config: dynamicLoopConfig({
+			repair: { maxAttempts: 1 },
+			stopPolicy: { failOnInvalidDecision: true },
+		}),
+		persistedDecisions: [invalid, invalid],
+	});
+
+	const result = await runDynamicDecisionLoop(ctx);
+	assert.equal(result.control.status, "blocked");
+	assert.match(
+		result.control.blockers.join("\n"),
+		/round 0 decision invalid: malformed control/,
+	);
+	assert.deepEqual(
+		calls.agent.map((request) => request.id),
+		["decide-r0", "decide-r0-repair-1"],
+	);
+});
+
+test("runDynamicDecisionLoop does not plan fanout for intended stop or invalid decisions", async () => {
+	let fanoutCalls = 0;
+	const stopped = makeDynamicDecisionLoopCtx({
+		persistedDecisions: [
+			dynamicLoopPersistedDecision({
+				decisionId: "decide-r0",
+				round: 0,
+				status: "stop",
+				nextActions: [{ type: "stop", actionId: "stop-r0", reason: "done" }],
+			}),
+		],
+	});
+	stopped.ctx.fanout = {
+		async plan() {
+			fanoutCalls += 1;
+			throw new Error("stop decisions must not plan fanout");
+		},
+	};
+
+	const stopResult = await runDynamicDecisionLoop(stopped.ctx);
+	assert.equal(stopResult.control.status, "stopped");
+	assert.equal(fanoutCalls, 0);
+
+	const invalid = makeDynamicDecisionLoopCtx({
+		config: dynamicLoopConfig({ repair: { maxAttempts: 0 } }),
+		persistedDecisions: [dynamicLoopInvalidDecision(["missing nextActions"])],
+	});
+	invalid.ctx.fanout = stopped.ctx.fanout;
+	const invalidResult = await runDynamicDecisionLoop(invalid.ctx);
+	assert.equal(invalidResult.control.status, "blocked");
+	assert.match(
+		invalidResult.control.blockers.join("\n"),
+		/missing nextActions/,
+	);
+	assert.equal(fanoutCalls, 0);
 });
 
 test("dynamic state cache rebuilds when state.json is missing or corrupt", async () => {
@@ -1228,6 +3579,872 @@ test("artifactGraph runtime dynamic executes trusted controller and writes aggre
 		assert.equal(control.schema, "dynamic-controller-result-v1");
 		assert.equal(control.digest, "done");
 		assert.equal(control.sourceCount, 0);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("runDynamicDecisionLoop projects dependent branch spec ids consistently", async () => {
+	let fanoutPlan;
+	const { ctx, calls } = makeDynamicDecisionLoopCtx({
+		config: dynamicLoopConfig({ maxDecisionRounds: 1, maxActionsPerRound: 3 }),
+		persistedDecisions: [
+			dynamicLoopPersistedDecision({
+				round: 0,
+				status: "continue",
+				nextActions: [
+					{
+						type: "add_work_item",
+						actionId: "act-src",
+						workItemId: "src",
+						prompt: "Inspect source policy.",
+						outputProfile: "candidate_findings_v1",
+					},
+					{
+						type: "add_work_item",
+						actionId: "act-tests",
+						workItemId: "tests",
+						prompt: "Inspect test policy.",
+						outputProfile: "coverage_assessment_v1",
+					},
+					{
+						type: "add_work_item",
+						actionId: "act-cross-check",
+						workItemId: "cross-check",
+						prompt: "Cross-check source and test evidence.",
+						outputProfile: "verification_result_v1",
+						dependsOn: ["src", "tests"],
+					},
+				],
+			}),
+		],
+		agentResults: {
+			src: {
+				taskId: "src",
+				specId: "adaptive.src",
+				control: { digest: "src done" },
+			},
+			tests: {
+				taskId: "tests",
+				specId: "adaptive.tests",
+				control: { digest: "tests done" },
+			},
+			"cross-check": {
+				taskId: "cross-check",
+				specId: "adaptive.cross-check",
+				control: { digest: "cross-check done" },
+			},
+		},
+	});
+	ctx.graph.generatedTaskSpecId = (taskId) => `adaptive.${taskId}`;
+	ctx.fanout = {
+		async plan(request) {
+			fanoutPlan = request;
+			return { accepted: true };
+		},
+	};
+
+	await runDynamicDecisionLoop(ctx);
+
+	const plannedCrossCheck = fanoutPlan.branches.find(
+		(branch) => branch.requestId === "cross-check",
+	);
+	const actualCrossCheck = calls.agent.find(
+		(request) => request.id === "cross-check",
+	);
+	assert.deepEqual(plannedCrossCheck.dependsOn, [
+		"adaptive.src",
+		"adaptive.tests",
+	]);
+	assert.deepEqual(plannedCrossCheck.agentRequest, actualCrossCheck);
+});
+
+test("artifactGraph dynamic surfaces unintended zero-fanout omissions as dropped stage", async () => {
+	const cwd = makeProject();
+	try {
+		const { run } = await createDynamicControllerRun(
+			cwd,
+			[
+				"export default async function controller() {",
+				"  return {",
+				"    control: {",
+				"      schema: 'dynamic-controller-result-v1',",
+				"      digest: 'zero-fanout',",
+				"      status: 'exhausted',",
+				"      decisions: [{ round: 0, decisionId: 'decide-r0', status: 'continue' }],",
+				"      generatedTasks: [],",
+				"      stateIndexes: [],",
+				"      blockers: [],",
+				"      omissions: ['round 0 accepted no executable work actions'],",
+				"      caveats: []",
+				"    },",
+				"    analysis: 'planner accepted no executable dynamic work',",
+				"    refs: []",
+				"  };",
+				"}",
+			].join("\n"),
+		);
+
+		await scheduleRun(cwd, run.runId);
+		const updated = await readRunRecord(cwd, run.runId);
+		const controller = taskBySpec(updated, "adaptive.controller");
+		assert.equal(controller.status, "failed");
+		assert.equal(controller.statusDetail, "dynamic_dropped");
+		assert.match(
+			controller.lastMessage ?? "",
+			/round 0 accepted no executable work actions/,
+		);
+		assert.equal(updated.taskSummary.failed, 1);
+		assert.equal(updated.taskSummary.completed, 0);
+		assert.match(formatRun(updated, "full"), /dynamic_dropped/);
+		assert.match(
+			formatRun(updated, "full"),
+			/round 0 accepted no executable work actions/,
+		);
+		const state = await readOrRebuildDynamicState(cwd, run.runId);
+		assert.deepEqual(state.controllers["adaptive.controller"].omissions, [
+			"round 0 accepted no executable work actions",
+		]);
+		const statusEvent = (await readDynamicEvents(cwd, run.runId))
+			.filter((event) => event.type === "controller.status")
+			.at(-1);
+		assert.deepEqual(statusEvent?.payload.omissions, [
+			"round 0 accepted no executable work actions",
+		]);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("artifactGraph dynamic treats explicit stopped result as clean completion", async () => {
+	const cwd = makeProject();
+	try {
+		const { run } = await createDynamicControllerRun(
+			cwd,
+			[
+				"export default async function controller() {",
+				"  return {",
+				"    control: {",
+				"      schema: 'dynamic-controller-result-v1',",
+				"      digest: 'explicit-stop',",
+				"      status: 'stopped',",
+				"      decisions: [{ round: 0, decisionId: 'decide-r0', status: 'stop' }],",
+				"      generatedTasks: [],",
+				"      stateIndexes: [],",
+				"      blockers: ['budget stop requested explicitly'],",
+				"      omissions: [],",
+				"      caveats: []",
+				"    },",
+				"    analysis: 'explicit clean stop',",
+				"    refs: []",
+				"  };",
+				"}",
+			].join("\n"),
+		);
+
+		await scheduleRun(cwd, run.runId);
+		const updated = await readRunRecord(cwd, run.runId);
+		const controller = taskBySpec(updated, "adaptive.controller");
+		assert.equal(controller.status, "completed");
+		assert.equal(controller.statusDetail, "dynamic_stopped");
+		assert.equal(updated.taskSummary.completed, 1);
+		assert.equal(updated.taskSummary.failed, 0);
+		assert.equal(updated.taskSummary.blocked, 0);
+		assert.match(
+			controller.lastMessage ?? "",
+			/budget stop requested explicitly/,
+		);
+		const state = await readOrRebuildDynamicState(cwd, run.runId);
+		assert.equal(state.controllers["adaptive.controller"].status, "complete");
+		assert.deepEqual(state.controllers["adaptive.controller"].omissions, []);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("artifactGraph dynamic surfaces invalid fail-open decision result as blocked", async () => {
+	const cwd = makeProject();
+	try {
+		const { run } = await createDynamicControllerRun(
+			cwd,
+			[
+				"export default async function controller() {",
+				"  return {",
+				"    control: {",
+				"      schema: 'dynamic-controller-result-v1',",
+				"      digest: 'invalid-decision',",
+				"      status: 'blocked',",
+				"      decisions: [{ round: 0 }],",
+				"      generatedTasks: [],",
+				"      stateIndexes: [],",
+				"      blockers: ['round 0 decision invalid: missing nextActions'],",
+				"      omissions: [],",
+				"      caveats: []",
+				"    },",
+				"    analysis: 'fail-closed=false returned a blocked controller result',",
+				"    refs: []",
+				"  };",
+				"}",
+			].join("\n"),
+		);
+
+		await scheduleRun(cwd, run.runId);
+		const updated = await readRunRecord(cwd, run.runId);
+		const controller = taskBySpec(updated, "adaptive.controller");
+		assert.equal(controller.status, "blocked");
+		assert.equal(controller.statusDetail, "dynamic_blocked");
+		assert.equal(updated.status, "blocked");
+		assert.equal(updated.taskSummary.completed, 0);
+		assert.equal(updated.taskSummary.blocked, 1);
+		assert.match(controller.lastMessage ?? "", /missing nextActions/);
+		assert.match(formatRun(updated, "full"), /dynamic_blocked/);
+		assert.match(formatRun(updated, "full"), /missing nextActions/);
+		const state = await readOrRebuildDynamicState(cwd, run.runId);
+		assert.equal(state.controllers["adaptive.controller"].status, "blocked");
+		assert.deepEqual(state.controllers["adaptive.controller"].blockers, [
+			"round 0 decision invalid: missing nextActions",
+		]);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("artifactGraph dynamic decision-loop failOnInvalidDecision surfaces blockers as dynamic_blocked", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const prompts = captureSubagentPrompts([]);
+		const workflowDir = join(cwd, "workflows", "bundle");
+		mkdirSync(join(workflowDir, "helpers"), { recursive: true });
+		const specPath = join(workflowDir, "spec.json");
+		writeFileSync(
+			join(workflowDir, "helpers", "controller.mjs"),
+			"export default async function controller(ctx) { return await ctx.dynamic.runDecisionLoop(); }\n",
+		);
+		const spec = artifactGraphWorkflowSpec({
+			artifactGraph: {
+				stages: [
+					{
+						id: "adaptive",
+						type: "dynamic",
+						dynamic: {
+							uses: "./helpers/controller.mjs",
+							decisionLoop: {
+								planner: {
+									agent: "unit-scout",
+									tools: ["read"],
+									outputProfile: "generic_summary_v1",
+								},
+								workerDefaults: {
+									agent: "unit-scout",
+									tools: ["read"],
+									outputProfile: "candidate_findings_v1",
+								},
+								allowedAgents: ["unit-scout"],
+								allowedTools: ["read"],
+								allowedOutputProfiles: [
+									"candidate_findings_v1",
+									"generic_summary_v1",
+								],
+								maxDecisionRounds: 1,
+								maxActionsPerRound: 1,
+								repair: { maxAttempts: 1 },
+								stopPolicy: { failOnInvalidDecision: true },
+							},
+						},
+					},
+				],
+			},
+		});
+		writeFileSync(specPath, JSON.stringify(spec));
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Review dynamically.",
+			specPath,
+		});
+		const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await writeRunRecord(cwd, run);
+
+		await scheduleRun(cwd, run.runId);
+		let updated = await readRunRecord(cwd, run.runId);
+		assert.equal(taskBySpec(updated, "adaptive.controller").status, "pending");
+		assert.equal(taskBySpec(updated, "adaptive.decide-r0").status, "running");
+
+		const invalidDecision = {
+			schema: "dynamic-decision-v1",
+			digest: "invalid decision envelope",
+			decisionId: "bad-r0",
+			round: 0,
+			phase: "round",
+			status: "continue",
+			actions: [
+				{
+					type: "add_work_item",
+					actionId: "act-review",
+					workItemId: "review",
+					prompt: "This work must not dispatch.",
+					outputProfile: "candidate_findings_v1",
+				},
+			],
+		};
+		await completeTask(
+			cwd,
+			taskBySpec(updated, "adaptive.decide-r0"),
+			invalidDecision,
+		);
+		await writeRunRecord(cwd, updated);
+
+		await scheduleRun(cwd, run.runId);
+		updated = await readRunRecord(cwd, run.runId);
+		assert.equal(
+			taskBySpec(updated, "adaptive.decide-r0-repair-1").status,
+			"running",
+		);
+		await completeTask(
+			cwd,
+			taskBySpec(updated, "adaptive.decide-r0-repair-1"),
+			invalidDecision,
+		);
+		await writeRunRecord(cwd, updated);
+
+		await scheduleRun(cwd, run.runId);
+		updated = await readRunRecord(cwd, run.runId);
+		const controller = taskBySpec(updated, "adaptive.controller");
+		assert.equal(controller.status, "blocked");
+		assert.equal(controller.statusDetail, "dynamic_blocked");
+		assert.equal(updated.status, "blocked");
+		assert.equal(updated.taskSummary.blocked, 1);
+		assert.equal(updated.taskSummary.failed, 0);
+		assert.match(
+			controller.lastMessage ?? "",
+			/decision field actions is not allowed; use nextActions/,
+		);
+		assert.equal(
+			updated.tasks.some((task) => task.specId === "adaptive.review"),
+			false,
+		);
+		assert.equal(prompts.length, 2);
+		const state = await readOrRebuildDynamicState(cwd, run.runId);
+		assert.equal(state.controllers["adaptive.controller"].status, "blocked");
+		assert.match(
+			state.controllers["adaptive.controller"].blockers.join("\n"),
+			/decision field actions is not allowed; use nextActions/,
+		);
+		const statusEvent = (await readDynamicEvents(cwd, run.runId))
+			.filter((event) => event.type === "controller.status")
+			.at(-1);
+		assert.equal(statusEvent?.payload.status, "blocked");
+		assert.deepEqual(
+			statusEvent?.payload.blockers,
+			state.controllers["adaptive.controller"].blockers,
+		);
+		const control = JSON.parse(
+			readFileSync(
+				join(dirname(join(cwd, controller.files.result)), "control.json"),
+				"utf8",
+			),
+		);
+		assert.equal(control.status, "blocked");
+		assert.deepEqual(
+			control.blockers,
+			state.controllers["adaptive.controller"].blockers,
+		);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("artifactGraph dynamic decision-loop plans fanout once and dedupes partial replay", async () => {
+	const cwd = makeProject();
+	const prompts = captureSubagentPrompts([]);
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const workflowDir = join(cwd, "workflows", "bundle");
+		mkdirSync(join(workflowDir, "helpers"), { recursive: true });
+		const specPath = join(workflowDir, "spec.json");
+		writeFileSync(
+			join(workflowDir, "helpers", "controller.mjs"),
+			"export default async function controller(ctx) { return await ctx.dynamic.runDecisionLoop(); }\n",
+		);
+		const spec = artifactGraphWorkflowSpec({
+			artifactGraph: {
+				stages: [
+					{
+						id: "adaptive",
+						type: "dynamic",
+						dynamic: {
+							uses: "./helpers/controller.mjs",
+							decisionLoop: {
+								planner: {
+									agent: "unit-scout",
+									tools: ["read"],
+									outputProfile: "generic_summary_v1",
+								},
+								workerDefaults: {
+									agent: "unit-scout",
+									tools: ["read"],
+									outputProfile: "candidate_findings_v1",
+								},
+								allowedAgents: ["unit-scout"],
+								allowedTools: ["read"],
+								allowedOutputProfiles: [
+									"candidate_findings_v1",
+									"coverage_assessment_v1",
+									"generic_summary_v1",
+								],
+								maxDecisionRounds: 1,
+								maxActionsPerRound: 2,
+								repair: { maxAttempts: 0 },
+							},
+						},
+					},
+				],
+			},
+		});
+		writeFileSync(specPath, JSON.stringify(spec));
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Review dynamically.",
+			specPath,
+		});
+		const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await writeRunRecord(cwd, run);
+
+		await scheduleRun(cwd, run.runId);
+		let updated = await readRunRecord(cwd, run.runId);
+		assert.equal(taskBySpec(updated, "adaptive.decide-r0").status, "running");
+		const decision = {
+			schema: "dynamic-decision-v1",
+			digest: "two branch decision",
+			decisionId: "decide-r0",
+			round: 0,
+			phase: "round",
+			status: "continue",
+			nextActions: [
+				{
+					type: "add_work_item",
+					actionId: "act-inspect-auth",
+					workItemId: "inspect-auth",
+					agent: "unit-scout",
+					prompt: "Inspect auth implementation.",
+					tools: ["read"],
+					outputProfile: "candidate_findings_v1",
+				},
+				{
+					type: "add_work_item",
+					actionId: "act-inspect-tests",
+					workItemId: "inspect-tests",
+					agent: "unit-scout",
+					prompt: "Inspect tests.",
+					tools: ["read"],
+					outputProfile: "coverage_assessment_v1",
+				},
+			],
+		};
+		await completeTask(
+			cwd,
+			taskBySpec(updated, "adaptive.decide-r0"),
+			decision,
+		);
+		await writeRunRecord(cwd, updated);
+
+		await scheduleRun(cwd, run.runId);
+		updated = await readRunRecord(cwd, run.runId);
+		assert.equal(
+			taskBySpec(updated, "adaptive.inspect-auth").status,
+			"running",
+		);
+		assert.equal(
+			taskBySpec(updated, "adaptive.inspect-tests").status,
+			"running",
+		);
+		assert.equal(prompts.length, 3);
+		let events = await readDynamicEvents(cwd, run.runId);
+		let fanoutEvents = events.filter(
+			(event) => event.type === "fanout.planned",
+		);
+		let branchTaskEvents = events.filter(
+			(event) => event.type === "task.generated" && event.payload.branchId,
+		);
+		assert.equal(fanoutEvents.length, 1);
+		assert.equal(fanoutEvents[0].payload.branches.length, 2);
+		assert.deepEqual(
+			fanoutEvents[0].payload.branches.map((branch) => ({
+				branchId: branch.branchId,
+				requestId: branch.requestId,
+				targetSpecId: branch.targetSpecId,
+			})),
+			[
+				{
+					branchId: "r0:act-inspect-auth",
+					requestId: "inspect-auth",
+					targetSpecId: "adaptive.inspect-auth",
+				},
+				{
+					branchId: "r0:act-inspect-tests",
+					requestId: "inspect-tests",
+					targetSpecId: "adaptive.inspect-tests",
+				},
+			],
+		);
+		assert.equal(branchTaskEvents.length, 2);
+		assert.deepEqual(
+			branchTaskEvents.map((event) => event.payload.branchId),
+			["r0:act-inspect-auth", "r0:act-inspect-tests"],
+		);
+		let state = await readOrRebuildDynamicState(cwd, run.runId);
+		assert.deepEqual(
+			state.controllers["adaptive.controller"].branches.map((branch) => ({
+				branchId: branch.branchId,
+				requestId: branch.requestId,
+				targetSpecId: branch.targetSpecId,
+				status: branch.status,
+				specId: branch.specId,
+			})),
+			[
+				{
+					branchId: "r0:act-inspect-auth",
+					requestId: "inspect-auth",
+					targetSpecId: "adaptive.inspect-auth",
+					status: "generated",
+					specId: "adaptive.inspect-auth",
+				},
+				{
+					branchId: "r0:act-inspect-tests",
+					requestId: "inspect-tests",
+					targetSpecId: "adaptive.inspect-tests",
+					status: "generated",
+					specId: "adaptive.inspect-tests",
+				},
+			],
+		);
+
+		await completeTask(cwd, taskBySpec(updated, "adaptive.inspect-auth"), {
+			digest: "auth done",
+		});
+		await writeRunRecord(cwd, updated);
+		await scheduleRun(cwd, run.runId);
+		updated = await readRunRecord(cwd, run.runId);
+		assert.equal(
+			taskBySpec(updated, "adaptive.controller").status,
+			"pending",
+			taskBySpec(updated, "adaptive.controller").lastMessage,
+		);
+		assert.equal(prompts.length, 3);
+		events = await readDynamicEvents(cwd, run.runId);
+		assert.equal(
+			events.filter((event) => event.type === "fanout.planned").length,
+			1,
+		);
+		assert.equal(
+			events.filter(
+				(event) => event.type === "task.generated" && event.payload.branchId,
+			).length,
+			2,
+		);
+		state = await readOrRebuildDynamicState(cwd, run.runId);
+		assert.deepEqual(
+			state.controllers["adaptive.controller"].branches.map((branch) => ({
+				branchId: branch.branchId,
+				status: branch.status,
+			})),
+			[
+				{ branchId: "r0:act-inspect-auth", status: "completed" },
+				{ branchId: "r0:act-inspect-tests", status: "generated" },
+			],
+		);
+
+		await completeTask(cwd, taskBySpec(updated, "adaptive.inspect-tests"), {
+			digest: "tests done",
+		});
+		await writeRunRecord(cwd, updated);
+		await scheduleRun(cwd, run.runId);
+		updated = await readRunRecord(cwd, run.runId);
+		assert.equal(
+			taskBySpec(updated, "adaptive.controller").status,
+			"completed",
+		);
+		assert.equal(prompts.length, 3);
+		events = await readDynamicEvents(cwd, run.runId);
+		fanoutEvents = events.filter((event) => event.type === "fanout.planned");
+		branchTaskEvents = events.filter(
+			(event) => event.type === "task.generated" && event.payload.branchId,
+		);
+		assert.equal(fanoutEvents.length, 1);
+		assert.equal(branchTaskEvents.length, 2);
+		state = await readOrRebuildDynamicState(cwd, run.runId);
+		assert.deepEqual(
+			state.controllers["adaptive.controller"].branches.map((branch) => ({
+				branchId: branch.branchId,
+				status: branch.status,
+			})),
+			[
+				{ branchId: "r0:act-inspect-auth", status: "completed" },
+				{ branchId: "r0:act-inspect-tests", status: "completed" },
+			],
+		);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("artifactGraph dynamic decision-loop status replay does not append duplicate status events", async () => {
+	const cwd = makeProject();
+	const prompts = captureSubagentPrompts([]);
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const workflowDir = join(cwd, "workflows", "bundle");
+		mkdirSync(join(workflowDir, "helpers"), { recursive: true });
+		const specPath = join(workflowDir, "spec.json");
+		writeFileSync(
+			join(workflowDir, "helpers", "controller.mjs"),
+			"export default async function controller(ctx) { return await ctx.dynamic.runDecisionLoop(); }\n",
+		);
+		const spec = artifactGraphWorkflowSpec({
+			artifactGraph: {
+				stages: [
+					{
+						id: "adaptive",
+						type: "dynamic",
+						dynamic: {
+							uses: "./helpers/controller.mjs",
+							decisionLoop: {
+								planner: {
+									agent: "unit-scout",
+									tools: ["read"],
+									outputProfile: "generic_summary_v1",
+								},
+								workerDefaults: {
+									agent: "unit-scout",
+									tools: ["read"],
+									outputProfile: "candidate_findings_v1",
+								},
+								allowedAgents: ["unit-scout"],
+								allowedTools: ["read"],
+								allowedOutputProfiles: [
+									"candidate_findings_v1",
+									"generic_summary_v1",
+								],
+								maxDecisionRounds: 2,
+								maxActionsPerRound: 1,
+								repair: { maxAttempts: 0 },
+								stopPolicy: { maxStalls: 10 },
+							},
+						},
+					},
+				],
+			},
+		});
+		writeFileSync(specPath, JSON.stringify(spec));
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Review dynamically.",
+			specPath,
+		});
+		const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await writeRunRecord(cwd, run);
+
+		await scheduleRun(cwd, run.runId);
+		let updated = await readRunRecord(cwd, run.runId);
+		assert.equal(taskBySpec(updated, "adaptive.decide-r0").status, "running");
+		await completeTask(cwd, taskBySpec(updated, "adaptive.decide-r0"), {
+			schema: "dynamic-decision-v1",
+			digest: "round 0 decision",
+			decisionId: "decide-r0",
+			round: 0,
+			phase: "round",
+			status: "continue",
+			nextActions: [
+				{
+					type: "add_work_item",
+					actionId: "act-review",
+					workItemId: "review",
+					agent: "unit-scout",
+					prompt: "Review the target.",
+					tools: ["read"],
+					outputProfile: "candidate_findings_v1",
+				},
+			],
+		});
+		await writeRunRecord(cwd, updated);
+
+		await scheduleRun(cwd, run.runId);
+		updated = await readRunRecord(cwd, run.runId);
+		assert.equal(taskBySpec(updated, "adaptive.review").status, "running");
+		assert.equal(
+			(await readDynamicEvents(cwd, run.runId)).filter(
+				(event) =>
+					event.type === "controller.status" &&
+					event.opId.includes(":decision-loop-status:"),
+			).length,
+			0,
+		);
+
+		await completeTask(cwd, taskBySpec(updated, "adaptive.review"), {
+			digest: "review done",
+			findings: [
+				{
+					id: "F-1",
+					title: "Sample finding",
+					severity: "low",
+					confidence: "medium",
+				},
+			],
+		});
+		await writeRunRecord(cwd, updated);
+		await scheduleRun(cwd, run.runId);
+		updated = await readRunRecord(cwd, run.runId);
+		assert.equal(taskBySpec(updated, "adaptive.decide-r1").status, "running");
+		assert.equal(prompts.length, 3);
+		let events = await readDynamicEvents(cwd, run.runId);
+		const statusEvents = () =>
+			events.filter(
+				(event) =>
+					event.type === "controller.status" &&
+					event.opId.includes(":decision-loop-status:"),
+			);
+		assert.equal(statusEvents().length, 1);
+		assert.equal(
+			statusEvents()[0].opId,
+			"adaptive.controller:decision-loop-status:001",
+		);
+		assert.deepEqual(statusEvents()[0].payload.decisionLoop, {
+			stallCount: 0,
+			replanCount: 0,
+		});
+		let state = await readOrRebuildDynamicState(cwd, run.runId);
+		assert.deepEqual(state.controllers["adaptive.controller"].decisionLoop, {
+			stallCount: 0,
+			replanCount: 0,
+		});
+
+		await scheduleRun(cwd, run.runId);
+		updated = await readRunRecord(cwd, run.runId);
+		assert.equal(taskBySpec(updated, "adaptive.decide-r1").status, "running");
+		assert.equal(prompts.length, 3);
+		events = await readDynamicEvents(cwd, run.runId);
+		assert.equal(statusEvents().length, 1);
+		assert.deepEqual(statusEvents()[0].payload.decisionLoop, {
+			stallCount: 0,
+			replanCount: 0,
+		});
+		state = await readOrRebuildDynamicState(cwd, run.runId);
+		assert.deepEqual(state.controllers["adaptive.controller"].decisionLoop, {
+			stallCount: 0,
+			replanCount: 0,
+		});
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("artifactGraph dynamic replay fails closed when a reused branchId changes request", async () => {
+	const cwd = makeProject();
+	const launched = captureSubagentPrompts([]);
+	try {
+		const { run } = await createDynamicControllerRun(
+			cwd,
+			[
+				"export default async function controller(ctx) {",
+				"  if (ctx.graph.generatedTaskIds().length === 0) {",
+				"    await ctx.agent({ id: 'first', agent: 'unit-scout', tools: ['read'], prompt: 'Original branch request.', branchId: 'r0:act-reused' });",
+				"  } else {",
+				"    await ctx.agent({ id: 'second', agent: 'unit-scout', tools: ['read'], prompt: 'Changed branch request.', branchId: 'r0:act-reused' });",
+				"  }",
+				"  return { control: { schema: 'dynamic-controller-result-v1', digest: 'done' }, analysis: 'done', refs: [] };",
+				"}",
+			].join("\n"),
+		);
+
+		await scheduleRun(cwd, run.runId);
+		let updated = await readRunRecord(cwd, run.runId);
+		assert.equal(taskBySpec(updated, "adaptive.first").status, "running");
+		assert.equal(launched.length, 1);
+
+		await completeTask(cwd, taskBySpec(updated, "adaptive.first"), {
+			digest: "first done",
+		});
+		await writeRunRecord(cwd, updated);
+		await scheduleRun(cwd, run.runId);
+		updated = await readRunRecord(cwd, run.runId);
+		const controller = taskBySpec(updated, "adaptive.controller");
+		assert.equal(controller.status, "failed");
+		assert.match(
+			controller.lastMessage ?? "",
+			/dynamic agent request changed for branchId "r0:act-reused"/,
+		);
+		assert.equal(
+			updated.tasks.some((task) => task.specId === "adaptive.second"),
+			false,
+		);
+		assert.equal(launched.length, 1);
+		const events = await readDynamicEvents(cwd, run.runId);
+		assert.equal(
+			events.filter((event) => event.type === "task.generated").length,
+			1,
+		);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("artifactGraph dynamic blocks completion when planned branch is never generated", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const { run } = await createDynamicControllerRun(
+			cwd,
+			[
+				"export default async function controller(ctx) {",
+				"  await ctx.fanout.plan({",
+				"    round: 0,",
+				"    decisionHash: 'manual-decision',",
+				"    branches: [{",
+				"      branchId: 'r0:act-ghost',",
+				"      actionId: 'act-ghost',",
+				"      type: 'add_work_item',",
+				"      outputProfile: 'candidate_findings_v1',",
+				"      agentRequest: { id: 'ghost', agent: 'unit-scout', tools: ['read'], prompt: 'Ghost work.', outputProfile: 'candidate_findings_v1', branchId: 'r0:act-ghost' }",
+				"    }]",
+				"  });",
+				"  return { control: { schema: 'dynamic-controller-result-v1', digest: 'bad-clean-success' }, analysis: 'bad', refs: [] };",
+				"}",
+			].join("\n"),
+		);
+
+		await scheduleRun(cwd, run.runId);
+		const updated = await readRunRecord(cwd, run.runId);
+		const controller = taskBySpec(updated, "adaptive.controller");
+		assert.equal(controller.status, "blocked");
+		assert.equal(controller.statusDetail, "dynamic_blocked");
+		assert.match(controller.lastMessage ?? "", /planned but never generated/);
+		assert.equal(updated.status, "blocked");
+		assert.equal(updated.taskSummary.blocked, 1);
+		const events = await readDynamicEvents(cwd, run.runId);
+		assert.equal(
+			events.filter((event) => event.type === "fanout.planned").length,
+			1,
+		);
+		assert.equal(
+			events.filter((event) => event.type === "task.generated").length,
+			0,
+		);
+		const state = await readOrRebuildDynamicState(cwd, run.runId);
+		assert.equal(
+			state.controllers["adaptive.controller"].branches[0].status,
+			"planned",
+		);
+		assert.match(
+			state.controllers["adaptive.controller"].blockers.join("\n"),
+			/planned but never generated/,
+		);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
@@ -1482,6 +4699,315 @@ test("artifactGraph runtime dynamic agent splices official task and replays resu
 		);
 		assert.equal(control.digest, "review child completed");
 		assert.deepEqual(control.child.result, "ok");
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("artifactGraph dynamic decision and state-index bridge persists replayable control ops", async () => {
+	const cwd = makeProject();
+	const launched = [];
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		setSubagentApiForTests({
+			async runSubagent(options) {
+				launched.push(String(options.task ?? ""));
+				return {
+					runId: `run_bridge_${launched.length}`,
+					attemptId: `attempt_bridge_${launched.length}`,
+					status: "running",
+				};
+			},
+			async getSubagentStatus() {
+				return null;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+		const workflowDir = join(cwd, "workflows", "bundle");
+		mkdirSync(join(workflowDir, "helpers"), { recursive: true });
+		const specPath = join(workflowDir, "spec.json");
+		writeFileSync(
+			join(workflowDir, "helpers", "controller.mjs"),
+			[
+				"export default async function controller(ctx) {",
+				"  ctx.phase('bridge');",
+				"  const rawDecision = {",
+				"    schema: 'dynamic-decision-v1',",
+				"    decisionId: 'decide-r0',",
+				"    round: 0,",
+				"    phase: 'orientation',",
+				"    status: 'continue',",
+				"    nextActions: [{ type: 'add_work_item', actionId: 'act-review', workItemId: 'review', agent: 'unit-scout', prompt: 'Review bridge state.', tools: ['read'], outputProfile: 'candidate_findings_v1' }],",
+				"  };",
+				"  const decision = await ctx.decision.validateAndPersist(rawDecision, { expectedRound: 0, maxActions: 1, allowedTools: ['read'] });",
+				"  const state = await ctx.stateIndex.extractAndPersist({ round: 0, tasks: [{ taskId: 'seed.main', outputProfile: 'candidate_findings_v1' }], maxFindings: 5 });",
+				"  const child = await ctx.agent({ id: 'review', agent: 'unit-scout', tools: ['read'], prompt: `Review ${decision.decisionHash} ${state.digest}.`, outputProfile: 'candidate_findings_v1' });",
+				"  return { control: { schema: 'dynamic-controller-result-v1', summary: child.control.digest, decisionHash: decision.decisionHash, stateIndexDigest: state.digest, generated: ctx.graph.generatedTaskIds() }, analysis: 'bridge complete', refs: [] };",
+				"}",
+			].join("\n"),
+		);
+		const spec = artifactGraphWorkflowSpec({
+			artifactGraph: {
+				stages: [
+					{ id: "seed", type: "single", prompt: "Seed." },
+					{
+						id: "adaptive",
+						from: "seed",
+						type: "dynamic",
+						dynamic: { uses: "./helpers/controller.mjs" },
+					},
+				],
+			},
+		});
+		writeFileSync(specPath, JSON.stringify(spec));
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Review dynamically.",
+			specPath,
+		});
+		const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await completeTask(cwd, taskBySpec(run, "seed.main"), {
+			digest: "seed ready",
+			findings: [
+				{
+					id: "F1",
+					title: "Seed finding",
+					severity: "medium",
+					confidence: "high",
+				},
+			],
+		});
+		await writeRunRecord(cwd, run);
+
+		await scheduleRun(cwd, run.runId);
+		let updated = await readRunRecord(cwd, run.runId);
+		assert.equal(taskBySpec(updated, "adaptive.controller").status, "pending");
+		assert.equal(
+			taskBySpec(updated, "adaptive.controller").statusDetail,
+			"suspended_waiting_children",
+		);
+		assert.equal(taskBySpec(updated, "adaptive.review").status, "running");
+		assert.equal(launched.length, 1);
+		assert.match(launched[0], /Review [a-f0-9]{64} [a-f0-9]{64}/);
+
+		let events = await readDynamicEvents(cwd, run.runId);
+		assert.deepEqual(
+			events
+				.filter((event) =>
+					[
+						"decision.persisted",
+						"state-index.persisted",
+						"task.generated",
+					].includes(event.type),
+				)
+				.map((event) => event.opId),
+			[
+				"adaptive.controller:decision:001",
+				"adaptive.controller:state-index:001",
+				"adaptive.controller:agent:review",
+			],
+		);
+		const decisionEvent = events.find(
+			(event) => event.type === "decision.persisted",
+		);
+		const stateIndexEvent = events.find(
+			(event) => event.type === "state-index.persisted",
+		);
+		assert(decisionEvent);
+		assert(stateIndexEvent);
+		assert.equal(decisionEvent.payload.callIndex, 1);
+		assert.equal(decisionEvent.payload.ok, true);
+		assert.equal(stateIndexEvent.payload.callIndex, 1);
+		assert.equal(stateIndexEvent.payload.round, 0);
+		for (const artifactPath of [
+			decisionEvent.payload.paths.raw,
+			decisionEvent.payload.paths.validation,
+			decisionEvent.payload.paths.accepted,
+			stateIndexEvent.payload.paths.extracts,
+			stateIndexEvent.payload.paths.index,
+		]) {
+			assert.equal(existsSync(join(cwd, artifactPath)), true, artifactPath);
+		}
+		const accepted = JSON.parse(
+			readFileSync(join(cwd, decisionEvent.payload.paths.accepted), "utf8"),
+		);
+		assert.equal(accepted.decision.decisionId, "decide-r0");
+		assert.equal(accepted.decisionHash, decisionEvent.payload.decisionHash);
+		const index = JSON.parse(
+			readFileSync(join(cwd, stateIndexEvent.payload.paths.index), "utf8"),
+		);
+		assert.equal(index.digest, stateIndexEvent.payload.digest);
+		assert.deepEqual(
+			index.findings.map((finding) => finding.id),
+			["F1"],
+		);
+
+		await completeTask(cwd, taskBySpec(updated, "adaptive.review"), {
+			digest: "review done",
+			result: "ok",
+		});
+		await writeRunRecord(cwd, updated);
+		await scheduleRun(cwd, run.runId);
+		updated = await readRunRecord(cwd, run.runId);
+		assert.equal(
+			taskBySpec(updated, "adaptive.controller").status,
+			"completed",
+		);
+		assert.equal(launched.length, 1);
+		events = await readDynamicEvents(cwd, run.runId);
+		assert.equal(
+			events.filter((event) => event.type === "decision.persisted").length,
+			1,
+		);
+		assert.equal(
+			events.filter((event) => event.type === "state-index.persisted").length,
+			1,
+		);
+		assert.equal(
+			events.filter((event) => event.type === "task.generated").length,
+			1,
+		);
+		const control = JSON.parse(
+			readFileSync(
+				join(
+					dirname(
+						join(cwd, taskBySpec(updated, "adaptive.controller").files.result),
+					),
+					"control.json",
+				),
+				"utf8",
+			),
+		);
+		assert.equal(control.digest, "review done");
+		assert.equal(control.decisionHash, decisionEvent.payload.decisionHash);
+		assert.equal(control.stateIndexDigest, stateIndexEvent.payload.digest);
+		assert.deepEqual(control.generated, ["adaptive.review"]);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("artifactGraph dynamic ctx.result returns scoped content-bound fields", async () => {
+	const cwd = makeProject();
+	const largeBlob = `RESULT-LARGE-${"z".repeat(6000)}-END`;
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		captureSubagentPrompts([]);
+		const workflowDir = join(cwd, "workflows", "bundle");
+		mkdirSync(join(workflowDir, "helpers"), { recursive: true });
+		const specPath = join(workflowDir, "spec.json");
+		writeFileSync(
+			join(workflowDir, "helpers", "controller.mjs"),
+			[
+				"export default async function controller(ctx) {",
+				"  await ctx.agent({ id: 'review', agent: 'unit-scout', tools: ['read'], prompt: 'Review scoped result.', outputProfile: 'generic_summary_v1' });",
+				"  const scoped = await ctx.result({ taskId: 'adaptive.review', include: ['$.schema', '$.digest', '$.summary'] });",
+				"  return { control: { schema: 'dynamic-controller-result-v1', digest: scoped.scope.scopeHash, scoped }, analysis: 'scoped result complete', refs: [] };",
+				"}",
+			].join("\n"),
+		);
+		const spec = artifactGraphWorkflowSpec({
+			artifactGraph: {
+				stages: [
+					{
+						id: "adaptive",
+						type: "dynamic",
+						dynamic: { uses: "./helpers/controller.mjs" },
+					},
+				],
+			},
+		});
+		writeFileSync(specPath, JSON.stringify(spec));
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Review dynamically.",
+			specPath,
+		});
+		const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await writeRunRecord(cwd, run);
+
+		await scheduleRun(cwd, run.runId);
+		let updated = await readRunRecord(cwd, run.runId);
+		assert.equal(taskBySpec(updated, "adaptive.review").status, "running");
+		await completeTask(cwd, taskBySpec(updated, "adaptive.review"), {
+			digest: "review scoped digest",
+			summary: "declared summary",
+			undeclaredExtra: largeBlob,
+		});
+		writeFileSync(
+			join(
+				dirname(join(cwd, taskBySpec(updated, "adaptive.review").files.result)),
+				"analysis.md",
+			),
+			largeBlob,
+		);
+		await writeRunRecord(cwd, updated);
+		await scheduleRun(cwd, run.runId);
+		updated = await readRunRecord(cwd, run.runId);
+		assert.equal(
+			taskBySpec(updated, "adaptive.controller").status,
+			"completed",
+		);
+
+		const control = JSON.parse(
+			readFileSync(
+				join(
+					dirname(
+						join(cwd, taskBySpec(updated, "adaptive.controller").files.result),
+					),
+					"control.json",
+				),
+				"utf8",
+			),
+		);
+		const scoped = control.scoped;
+		const expectedControl = {
+			schema: "stage-control-v1",
+			digest: "review scoped digest",
+			summary: "declared summary",
+		};
+		const include = ["$.schema", "$.digest", "$.summary"];
+		assert.deepEqual(scoped.control, expectedControl);
+		assert.equal(Object.hasOwn(scoped.control, "undeclaredExtra"), false);
+		assert.equal(Object.hasOwn(scoped, "analysis"), false);
+		assert.equal(Object.hasOwn(scoped, "refs"), false);
+		assert.equal(JSON.stringify(scoped).includes(largeBlob), false);
+		assert.deepEqual(scoped.scope.include, include);
+		assert.equal(scoped.scope.contentDigest, "review scoped digest");
+		assert.equal(
+			scoped.scope.scopeHash,
+			hashDynamicRequest({
+				taskId: "adaptive.review",
+				artifact: "control",
+				include,
+				contentDigest: "review scoped digest",
+				missingPaths: [],
+				content: expectedControl,
+			}),
+		);
+		assert.deepEqual(scoped.artifacts.control, {
+			taskId: "adaptive.review",
+			artifact: "control",
+			digest: "review scoped digest",
+		});
+		assert.deepEqual(scoped.artifacts.analysis, {
+			taskId: "adaptive.review",
+			artifact: "analysis",
+		});
+		const events = await readDynamicEvents(cwd, run.runId);
+		assert.equal(
+			events.filter((event) => event.type === "result.read").length,
+			1,
+		);
 	} finally {
 		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
@@ -2780,6 +6306,91 @@ test("artifactGraph dynamic generated input sources use generated spec ids", asy
 		assert.deepEqual(secondCompiled.artifactGraph.requiredReads, [
 			"adaptive.first.control",
 		]);
+		assert.equal(secondCompiled.artifactGraph.output.maxDigestChars, 1000);
+		assert.match(
+			secondCompiled.compiledPrompt,
+			/control\.digest string must be at most 1000 characters/,
+		);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("artifactGraph downstream reduce sees exported dynamic output source", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		captureSubagentPrompts([]);
+		const workflowDir = join(cwd, "workflows", "bundle");
+		mkdirSync(join(workflowDir, "helpers"), { recursive: true });
+		const specPath = join(workflowDir, "spec.json");
+		writeFileSync(
+			join(workflowDir, "helpers", "controller.mjs"),
+			[
+				"export default async function controller(ctx) {",
+				"  const result = await ctx.agent({ id: 'synthesis', agent: 'unit-scout', tools: ['read'], prompt: 'Synthesize dynamic output.' });",
+				"  return { control: { schema: 'dynamic-controller-result-v1', digest: 'controller done', generatedTasks: [result.specId], outputTasks: [result.specId] }, analysis: 'controller done', refs: [] };",
+				"}",
+			].join("\n"),
+		);
+		const spec = artifactGraphWorkflowSpec({
+			artifactGraph: {
+				stages: [
+					{
+						id: "adaptive",
+						type: "dynamic",
+						dynamic: { uses: "./helpers/controller.mjs" },
+					},
+					{
+						id: "final",
+						type: "reduce",
+						from: "adaptive",
+						prompt: "Write final report from the dynamic output.",
+					},
+				],
+			},
+		});
+		writeFileSync(specPath, JSON.stringify(spec));
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Review dynamically.",
+			specPath,
+		});
+		const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await writeRunRecord(cwd, run);
+
+		await scheduleRun(cwd, run.runId);
+		let updated = await readRunRecord(cwd, run.runId);
+		await completeTask(cwd, taskBySpec(updated, "adaptive.synthesis"), {
+			digest: "synthesis done",
+			answer: "source-backed synthesis",
+		});
+		await writeRunRecord(cwd, updated);
+		for (let attempt = 0; attempt < 3; attempt += 1) {
+			await scheduleRun(cwd, run.runId);
+			updated = await readRunRecord(cwd, run.runId);
+			if (taskBySpec(updated, "final.main").status === "running") break;
+		}
+		const finalTask = taskBySpec(updated, "final.main");
+		assert.equal(finalTask.status, "running");
+		const manifest = JSON.parse(
+			readFileSync(
+				join(
+					dirname(join(cwd, finalTask.files.result)),
+					"source-manifest.json",
+				),
+				"utf8",
+			),
+		);
+		assert.deepEqual(
+			manifest.sources.map((source) => source.source),
+			["adaptive", "adaptive.output"],
+		);
+		assert.equal(manifest.sources[1].specId, "adaptive.synthesis");
+		assert.equal(manifest.sources[1].digest, "synthesis done");
+		assert.deepEqual(manifest.sources[1].controlProjection, undefined);
 	} finally {
 		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
@@ -3780,6 +7391,233 @@ test("bundled artifact graph outputs declare control schemas", () => {
 	}
 });
 
+test("bundled deep-research preserves full audit before executive final", async () => {
+	const specPath = join(
+		process.cwd(),
+		"workflows",
+		"deep-research",
+		"spec.json",
+	);
+	const spec = parsePublicWorkflow(JSON.parse(readFileSync(specPath, "utf8")));
+	const compiled = await compileWorkflow(spec, {
+		cwd: process.cwd(),
+		task: "Research the deep-research artifact contract.",
+		specPath,
+	});
+	const byStage = new Map(compiled.tasks.map((task) => [task.stageId, task]));
+	const finalAudit = byStage.get("final-audit");
+	const final = byStage.get("final");
+
+	assert.equal(finalAudit?.kind, "reduce");
+	assert.deepEqual(finalAudit.dependsOn, [
+		"plan.main",
+		"research-questions.item",
+		"normalize-claims.main",
+		"audit-claims.main",
+	]);
+	assert.ok(
+		finalAudit.artifactGraph.output.controlSchemaPath.endsWith(
+			join(
+				"workflows",
+				"deep-research",
+				"schemas",
+				"deep-research-final-control.schema.json",
+			),
+		),
+	);
+
+	assert.equal(final?.kind, "support");
+	assert.deepEqual(final.dependsOn, ["final-audit.main"]);
+	assert.equal(final.support.uses, "./helpers/render-executive.mjs");
+	assert.deepEqual(final.support.options, {
+		maxWords: 600,
+		maxUrls: 5,
+		maxFindings: 3,
+		maxRecommendations: 3,
+		maxGaps: 2,
+	});
+	assert.ok(
+		final.artifactGraph.output.controlSchemaPath.endsWith(
+			join(
+				"workflows",
+				"deep-research",
+				"schemas",
+				"deep-research-executive-render-control.schema.json",
+			),
+		),
+	);
+});
+
+test("non-dynamic artifact graph compile/run golden preserves static structure", async () => {
+	const cwd = makeProject();
+	const launched = [];
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		setSubagentApiForTests({
+			async runSubagent(options) {
+				launched.push(String(options.task ?? ""));
+				return {
+					runId: `run_static_${launched.length}`,
+					attemptId: `attempt_static_${launched.length}`,
+					status: "running",
+				};
+			},
+			async getSubagentStatus() {
+				return null;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+		const spec = workflowSpec("unit-scout", {
+			artifactGraph: {
+				stages: [
+					{ id: "scope", type: "single", prompt: "Scope." },
+					{ id: "report", type: "reduce", from: "scope", prompt: "Report." },
+				],
+			},
+		});
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Review static behavior",
+		});
+
+		assert.equal(compiled.type, "artifact-graph");
+		assert.equal(compiled.artifactGraph.enabled, true);
+		assert.deepEqual(
+			compiled.stages.map((stage) => ({
+				id: stage.id,
+				type: stage.type,
+				sourcePolicy: stage.sourcePolicy,
+			})),
+			[
+				{ id: "scope", type: "single", sourcePolicy: "require-success" },
+				{ id: "report", type: "reduce", sourcePolicy: "require-success" },
+			],
+		);
+		assert.deepEqual(
+			compiled.tasks.map((task) => ({
+				id: task.id,
+				key: task.key,
+				stageId: task.stageId,
+				kind: task.kind,
+				agent: task.agent,
+				dependsOn: task.dependsOn,
+				injectTask: task.injectTask,
+				requiredReads: task.artifactGraph.requiredReads,
+			})),
+			[
+				{
+					id: "scope.main",
+					key: "scope.main",
+					stageId: "scope",
+					kind: "single",
+					agent: "unit-scout",
+					dependsOn: [],
+					injectTask: true,
+					requiredReads: [],
+				},
+				{
+					id: "report.main",
+					key: "report.main",
+					stageId: "report",
+					kind: "reduce",
+					agent: "unit-scout",
+					dependsOn: ["scope.main"],
+					injectTask: false,
+					requiredReads: [],
+				},
+			],
+		);
+
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "static.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await writeRunRecord(cwd, run);
+
+		await scheduleRun(cwd, run.runId);
+		let updated = await readRunRecord(cwd, run.runId);
+		assert.equal(updated.dynamic, undefined);
+		assert.deepEqual(
+			updated.tasks.map((task) => ({
+				specId: task.specId,
+				status: task.status,
+				statusDetail: task.statusDetail,
+			})),
+			[
+				{
+					specId: "scope.main",
+					status: "running",
+					statusDetail: "running",
+				},
+				{
+					specId: "report.main",
+					status: "pending",
+					statusDetail: "pending",
+				},
+			],
+		);
+		assert.equal(launched.length, 1);
+		assert.match(launched[0], /# Task\n\nReview static behavior/);
+		assert.match(launched[0], /stage=scope/);
+
+		await completeTask(cwd, taskBySpec(updated, "scope.main"), {
+			digest: "scope done",
+		});
+		await writeRunRecord(cwd, updated);
+		await scheduleRun(cwd, run.runId);
+		updated = await readRunRecord(cwd, run.runId);
+		assert.deepEqual(
+			updated.tasks.map((task) => ({
+				specId: task.specId,
+				status: task.status,
+				statusDetail: task.statusDetail,
+			})),
+			[
+				{
+					specId: "scope.main",
+					status: "completed",
+					statusDetail: "completed",
+				},
+				{
+					specId: "report.main",
+					status: "running",
+					statusDetail: "running",
+				},
+			],
+		);
+		assert.equal(launched.length, 2);
+		assert.doesNotMatch(launched[1], /# Task/);
+		assert.match(launched[1], /stage=report/);
+
+		await completeTask(cwd, taskBySpec(updated, "report.main"), {
+			digest: "report done",
+		});
+		await writeRunRecord(cwd, updated);
+		updated = await readRunRecord(cwd, run.runId);
+		assert.equal(updated.status, "completed");
+		assert.deepEqual(updated.taskSummary, {
+			total: 2,
+			pending: 0,
+			running: 0,
+			blocked: 0,
+			completed: 2,
+			failed: 0,
+			skipped: 0,
+			interrupted: 0,
+		});
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("schema and compiler accept partial sourcePolicy on foreach", async () => {
 	const cwd = makeProject();
 	try {
@@ -4735,6 +8573,368 @@ test("narrow tool scopes inherit metadata for strings and override it for object
 				optional: true,
 			},
 		});
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("tool metadata cannot downgrade known mutating tools", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read, bash");
+		const compiled = await compileWorkflow(
+			workflowSpec("unit-scout", {
+				tools: ["read", { name: "bash", classification: "read-only" }],
+			}),
+			{ cwd, task: "Inspect" },
+		);
+
+		assert.equal(compiled.tasks[0].safety.capability, "mutation-capable");
+		assert.equal(compiled.tasks[0].safety.permission.reason, undefined);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("compiler rejects delegation tools on dynamic stage metadata before filtering", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read, workflow");
+		await assert.rejects(
+			() =>
+				compileWorkflow(
+					artifactGraphWorkflowSpec({
+						defaults: {
+							agent: "unit-scout",
+							readOnly: true,
+							tools: ["read", "workflow"],
+						},
+						artifactGraph: {
+							stages: [
+								{
+									id: "adaptive",
+									type: "dynamic",
+									dynamic: { uses: "./helpers/controller.mjs" },
+								},
+							],
+						},
+					}),
+					{ cwd, task: "Reject delegation tool." },
+				),
+			(error) => {
+				assert(error instanceof WorkflowValidationError);
+				assertIssue(error, "$.defaults.tools", "delegation/orchestration tool");
+				return true;
+			},
+		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("dynamic controllers expose a deterministic available tool view", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const workflowDir = join(cwd, "workflows", "bundle");
+		mkdirSync(join(workflowDir, "helpers"), { recursive: true });
+		const specPath = join(workflowDir, "spec.json");
+		writeFileSync(
+			join(workflowDir, "helpers", "controller.mjs"),
+			[
+				"export default async function controller(ctx) {",
+				"  return { control: { schema: 'dynamic-controller-result-v1', summary: 'tools', tools: ctx.tools.available() }, analysis: 'done', refs: [] };",
+				"}",
+			].join("\n"),
+		);
+		const spec = artifactGraphWorkflowSpec({
+			defaults: {
+				agent: "unit-scout",
+				readOnly: true,
+				tools: [
+					"read",
+					{
+						name: "custom_external_tool",
+						classification: "read-only",
+						extensions: ["unit-provider"],
+					},
+					{ name: "bash", classification: "read-only" },
+				],
+			},
+			artifactGraph: {
+				stages: [
+					{
+						id: "adaptive",
+						type: "dynamic",
+						dynamic: { uses: "./helpers/controller.mjs" },
+					},
+				],
+			},
+		});
+		writeFileSync(specPath, JSON.stringify(spec));
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Show tools.",
+			specPath,
+		});
+		const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await writeRunRecord(cwd, run);
+
+		await scheduleRun(cwd, run.runId);
+		const updated = await readRunRecord(cwd, run.runId);
+		const control = JSON.parse(
+			readFileSync(
+				join(
+					dirname(
+						join(cwd, taskBySpec(updated, "adaptive.controller").files.result),
+					),
+					"control.json",
+				),
+				"utf8",
+			),
+		);
+		const byName = Object.fromEntries(
+			control.tools.map((tool) => [tool.name, tool]),
+		);
+		assert.equal(byName.custom_external_tool.classification, "read-only");
+		assert.deepEqual(byName.custom_external_tool.extensions, ["unit-provider"]);
+		assert.equal(byName.bash.classification, "mutation-capable");
+		assert.equal(byName.bash.floor, "mutation-capable");
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("dynamic generated tasks propagate toolProviders and enforce tool ceilings", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read, custom_external_tool");
+		captureSubagentPrompts([]);
+		const workflowDir = join(cwd, "workflows", "bundle");
+		mkdirSync(join(workflowDir, "helpers"), { recursive: true });
+		const specPath = join(workflowDir, "spec.json");
+		writeFileSync(
+			join(workflowDir, "helpers", "controller.mjs"),
+			[
+				"export default async function controller(ctx) {",
+				"  await ctx.agent({ id: 'custom', agent: 'unit-scout', tools: ['custom_external_tool'], prompt: 'Use custom tool.' });",
+				"  return { control: { schema: 'dynamic-controller-result-v1', summary: 'done' }, analysis: 'done', refs: [] };",
+				"}",
+			].join("\n"),
+		);
+		const spec = artifactGraphWorkflowSpec({
+			defaults: {
+				agent: "unit-scout",
+				readOnly: true,
+				tools: [
+					"read",
+					{
+						name: "custom_external_tool",
+						classification: "read-only",
+						extensions: ["unit-provider"],
+					},
+				],
+			},
+			artifactGraph: {
+				stages: [
+					{
+						id: "adaptive",
+						type: "dynamic",
+						dynamic: { uses: "./helpers/controller.mjs" },
+					},
+				],
+			},
+		});
+		writeFileSync(specPath, JSON.stringify(spec));
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Generate custom task.",
+			specPath,
+		});
+		const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await writeRunRecord(cwd, run);
+
+		await scheduleRun(cwd, run.runId);
+		const updated = await readRunRecord(cwd, run.runId);
+		assert.equal(taskBySpec(updated, "adaptive.custom").status, "running");
+		const compiledAfterSplice = JSON.parse(
+			readFileSync(
+				join(cwd, ".pi", "workflows", run.runId, "compiled.json"),
+				"utf8",
+			),
+		);
+		const generated = compiledAfterSplice.tasks.find(
+			(task) => task.id === "adaptive.custom",
+		);
+		assert.deepEqual(generated.runtime.tools, ["custom_external_tool"]);
+		assert.deepEqual(generated.runtime.toolProviders, {
+			custom_external_tool: {
+				classification: "read-only",
+				extensions: ["unit-provider"],
+			},
+		});
+		assert.equal(generated.safety.capability, "read-only");
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("dynamic generated tasks reject explicit tools for agents without ceilings", async () => {
+	const cwd = makeProject();
+	try {
+		const agentDir = join(cwd, ".pi", "agents");
+		mkdirSync(agentDir, { recursive: true });
+		writeFileSync(
+			join(agentDir, "no-ceiling.md"),
+			"---\ndescription: no-ceiling\nreadOnly: true\n---\n# no-ceiling\n",
+		);
+		const workflowDir = join(cwd, "workflows", "bundle");
+		mkdirSync(join(workflowDir, "helpers"), { recursive: true });
+		const specPath = join(workflowDir, "spec.json");
+		writeFileSync(
+			join(workflowDir, "helpers", "controller.mjs"),
+			[
+				"export default async function controller(ctx) {",
+				"  await ctx.agent({ id: 'bad', agent: 'no-ceiling', tools: ['read'], prompt: 'Bad.' });",
+				"  return { control: { schema: 'dynamic-controller-result-v1', summary: 'bad' }, analysis: 'bad', refs: [] };",
+				"}",
+			].join("\n"),
+		);
+		const spec = artifactGraphWorkflowSpec({
+			artifactGraph: {
+				stages: [
+					{
+						id: "adaptive",
+						type: "dynamic",
+						dynamic: { uses: "./helpers/controller.mjs" },
+					},
+				],
+			},
+		});
+		writeFileSync(specPath, JSON.stringify(spec));
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Reject missing ceiling.",
+			specPath,
+		});
+		const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await writeRunRecord(cwd, run);
+
+		await scheduleRun(cwd, run.runId);
+		const updated = await readRunRecord(cwd, run.runId);
+		const controller = taskBySpec(updated, "adaptive.controller");
+		assert.equal(controller.status, "failed");
+		assert.equal(controller.statusDetail, "dynamic_failed");
+		assert.match(
+			controller.lastMessage,
+			/does not declare a tools authority ceiling/,
+		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("dynamic generated tasks reject delegation tools on target agents", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read, workflow");
+		const workflowDir = join(cwd, "workflows", "bundle");
+		mkdirSync(join(workflowDir, "helpers"), { recursive: true });
+		const specPath = join(workflowDir, "spec.json");
+		writeFileSync(
+			join(workflowDir, "helpers", "controller.mjs"),
+			[
+				"export default async function controller(ctx) {",
+				"  await ctx.agent({ id: 'bad', agent: 'unit-scout', tools: ['workflow'], prompt: 'Bad.' });",
+				"  return { control: { schema: 'dynamic-controller-result-v1', summary: 'bad' }, analysis: 'bad', refs: [] };",
+				"}",
+			].join("\n"),
+		);
+		const spec = artifactGraphWorkflowSpec({
+			artifactGraph: {
+				stages: [
+					{
+						id: "adaptive",
+						type: "dynamic",
+						dynamic: { uses: "./helpers/controller.mjs" },
+					},
+				],
+			},
+		});
+		writeFileSync(specPath, JSON.stringify(spec));
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Reject delegation tool.",
+			specPath,
+		});
+		const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await writeRunRecord(cwd, run);
+
+		await scheduleRun(cwd, run.runId);
+		const updated = await readRunRecord(cwd, run.runId);
+		const controller = taskBySpec(updated, "adaptive.controller");
+		assert.equal(controller.status, "failed");
+		assert.match(
+			controller.lastMessage,
+			/invalid delegation\/orchestration tools: workflow/,
+		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("dynamic generated tasks reject maxSubagentDepth on target agents", async () => {
+	const cwd = makeProject();
+	try {
+		const agentDir = join(cwd, ".pi", "agents");
+		mkdirSync(agentDir, { recursive: true });
+		writeFileSync(
+			join(agentDir, "nested-agent.md"),
+			'---\ndescription: nested-agent\ntools: ["read"]\nmaxSubagentDepth: 1\nreadOnly: true\n---\n# nested-agent\n',
+		);
+		const workflowDir = join(cwd, "workflows", "bundle");
+		mkdirSync(join(workflowDir, "helpers"), { recursive: true });
+		const specPath = join(workflowDir, "spec.json");
+		writeFileSync(
+			join(workflowDir, "helpers", "controller.mjs"),
+			[
+				"export default async function controller(ctx) {",
+				"  await ctx.agent({ id: 'bad', agent: 'nested-agent', tools: ['read'], prompt: 'Bad.' });",
+				"  return { control: { schema: 'dynamic-controller-result-v1', summary: 'bad' }, analysis: 'bad', refs: [] };",
+				"}",
+			].join("\n"),
+		);
+		const spec = artifactGraphWorkflowSpec({
+			artifactGraph: {
+				stages: [
+					{
+						id: "adaptive",
+						type: "dynamic",
+						dynamic: { uses: "./helpers/controller.mjs" },
+					},
+				],
+			},
+		});
+		writeFileSync(specPath, JSON.stringify(spec));
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Reject nested agent.",
+			specPath,
+		});
+		const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await writeRunRecord(cwd, run);
+
+		await scheduleRun(cwd, run.runId);
+		const updated = await readRunRecord(cwd, run.runId);
+		const controller = taskBySpec(updated, "adaptive.controller");
+		assert.equal(controller.status, "failed");
+		assert.match(controller.lastMessage, /maxSubagentDepth > 0/);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
@@ -5990,6 +10190,327 @@ test("bundled artifact graph workflows are public runnable", async () => {
 	assert(resolved.specPath.endsWith("workflows/spec-review/spec.json"));
 });
 
+test("adaptive-research copied bundle controller runs injected dynamic decision loop", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(
+			cwd,
+			"researcher",
+			"read, grep, find, ls, web_search, fetch_content, get_search_content",
+		);
+		const prompts = captureSubagentPrompts([]);
+		const specPath = join(
+			process.cwd(),
+			"workflows",
+			"adaptive-research",
+			"spec.json",
+		);
+		const spec = JSON.parse(readFileSync(specPath, "utf8"));
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			specPath,
+			task: "Research copied dynamic controller resolution.",
+		});
+		const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await completeTask(cwd, taskBySpec(run, "intake.main"), {
+			schema: "adaptive-research-intake-v1",
+			digest: "intake ready",
+			taskSummary: "Research copied dynamic controller resolution.",
+			likelyAxes: [],
+			sourceNeeds: [],
+			caveats: [],
+		});
+		await writeRunRecord(cwd, run);
+
+		await scheduleRun(cwd, run.runId);
+		let updated = await readRunRecord(cwd, run.runId);
+		let controller = taskBySpec(updated, "adaptive.controller");
+		assert.equal(controller.status, "pending");
+		assert.equal(
+			controller.agentFile,
+			`.pi/workflows/${run.runId}/bundle/helpers/controller.mjs`,
+		);
+		assert.equal(taskBySpec(updated, "adaptive.decide-r0").status, "running");
+		assert.match(prompts[0] ?? "", /adaptive research workflow stage/);
+
+		await completeTask(cwd, taskBySpec(updated, "adaptive.decide-r0"), {
+			schema: "dynamic-decision-v1",
+			digest: "stop decision envelope",
+			decisionId: "decision-r0",
+			round: 0,
+			phase: "round",
+			status: "stop",
+			nextActions: [
+				{
+					type: "stop",
+					actionId: "stop-r0",
+					reason: "copied bundle decision loop resolved",
+					caveats: ["integration test"],
+				},
+			],
+		});
+		await writeRunRecord(cwd, updated);
+
+		await scheduleRun(cwd, run.runId);
+		updated = await readRunRecord(cwd, run.runId);
+		controller = taskBySpec(updated, "adaptive.controller");
+		assert.equal(controller.status, "completed");
+		assert.equal(controller.statusDetail, "dynamic_stopped");
+		const control = JSON.parse(
+			readFileSync(
+				join(dirname(join(cwd, controller.files.result)), "control.json"),
+				"utf8",
+			),
+		);
+		assert.equal(control.schema, "dynamic-controller-result-v1");
+		assert.equal(control.status, "stopped");
+		assert.deepEqual(control.blockers, [
+			"copied bundle decision loop resolved",
+		]);
+		assert.deepEqual(control.generatedTasks, []);
+		const events = await readDynamicEvents(cwd, run.runId);
+		assert.equal(
+			events.some((event) => event.type === "decision.persisted"),
+			true,
+		);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("built dist scheduler injects runDecisionLoop on the real dynamic path", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const marker = "__PI_WORKFLOW_DIST_RESULT__";
+		const script = `
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
+
+const repoRoot = ${JSON.stringify(process.cwd())};
+const cwd = ${JSON.stringify(cwd)};
+const marker = ${JSON.stringify(marker)};
+const workflowDir = join(cwd, "workflows", "dist-dynamic");
+mkdirSync(join(workflowDir, "helpers"), { recursive: true });
+const specPath = join(workflowDir, "spec.json");
+writeFileSync(
+	join(workflowDir, "helpers", "controller.mjs"),
+	[
+		"export default async function controller(ctx) {",
+		"  if (typeof ctx?.dynamic?.runDecisionLoop !== 'function') {",
+		"    throw new Error('dynamic decision-loop helper is unavailable in controller context');",
+		"  }",
+		"  return await ctx.dynamic.runDecisionLoop({",
+		"    maxRounds: 1,",
+		"    buildPlannerPrompt(input) {",
+		"      return 'Deterministic built-dist decision-loop regression. Round ' + input.round + '. Return a valid dynamic-decision-v1 stop decision.';",
+		"    }",
+		"  });",
+		"}",
+	].join("\\n"),
+);
+const spec = {
+	schemaVersion: 1,
+	defaults: { agent: "unit-scout", readOnly: true, tools: ["read"] },
+	artifactGraph: {
+		stages: [
+			{
+				id: "adaptive",
+				type: "dynamic",
+				dynamic: {
+					uses: "./helpers/controller.mjs",
+					decisionLoop: {
+						planner: {
+							agent: "unit-scout",
+							tools: ["read"],
+							outputProfile: "generic_summary_v1",
+						},
+						workerDefaults: {
+							agent: "unit-scout",
+							tools: ["read"],
+							outputProfile: "candidate_findings_v1",
+						},
+						allowedAgents: ["unit-scout"],
+						allowedTools: ["read"],
+						allowedOutputProfiles: [
+							"candidate_findings_v1",
+							"generic_summary_v1",
+						],
+						maxDecisionRounds: 1,
+						maxActionsPerRound: 1,
+						repair: { maxAttempts: 1 },
+						stopPolicy: { failOnInvalidDecision: true },
+					},
+				},
+			},
+		],
+	},
+};
+writeFileSync(specPath, JSON.stringify(spec));
+const distUrl = (file) => pathToFileURL(join(repoRoot, "dist", file)).href;
+const { compileWorkflow } = await import(distUrl("compiler.js"));
+const { scheduleRun } = await import(distUrl("engine.js"));
+const { readDynamicEvents } = await import(distUrl("dynamic-events.js"));
+const { setSubagentApiForTests } = await import(distUrl("subagent-backend.js"));
+const { writeWorkflowTaskArtifactBundle } = await import(distUrl("workflow-output-artifacts.js"));
+const {
+	createWorkflowRunRecord,
+	readRunRecord,
+	setTaskTerminal,
+	writeJsonAtomic,
+	writeRunRecord,
+	writeStaticRunArtifacts,
+} = await import(distUrl("store.js"));
+let launchCount = 0;
+setSubagentApiForTests({
+	async runSubagent() {
+		launchCount += 1;
+		return {
+			runId: "dist_stub_" + launchCount,
+			attemptId: "dist_attempt_" + launchCount,
+			status: "running",
+		};
+	},
+	async getSubagentStatus() {
+		return null;
+	},
+	async reconcileSubagentRun() {
+		return {};
+	},
+	async interruptSubagent() {
+		return {};
+	},
+});
+async function completeTask(task, structuredOutput, status = "completed") {
+	setTaskTerminal(task, status, status, {
+		exitCode: status === "completed" ? 0 : 1,
+		lastMessage: status,
+	});
+	if (task.artifactGraph?.enabled && status === "completed") {
+		const control = {
+			schema: "stage-control-v1",
+			digest: (task.stageId ?? task.specId) + " completed",
+			...structuredOutput,
+		};
+		await writeWorkflowTaskArtifactBundle({
+			taskDir: dirname(join(cwd, task.files.result)),
+			rawOutput: [
+				"<control>",
+				JSON.stringify(control),
+				"</control>",
+				"<analysis>",
+				(task.stageId ?? task.specId) + " analysis",
+				"</analysis>",
+				"<refs>",
+				"[]",
+				"</refs>",
+			].join("\\n"),
+			completedAt: new Date().toISOString(),
+		});
+		return;
+	}
+	await writeJsonAtomic(join(cwd, task.files.result), {
+		status,
+		completedAt: new Date().toISOString(),
+		exitCode: status === "completed" ? 0 : 1,
+		structuredOutput,
+	});
+}
+const compiled = await compileWorkflow(spec, {
+	cwd,
+	task: "Verify built dist dynamic injection.",
+	specPath,
+});
+const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
+await writeStaticRunArtifacts(cwd, run, compiled, spec);
+await writeRunRecord(cwd, run);
+await scheduleRun(cwd, run.runId);
+let updated = await readRunRecord(cwd, run.runId);
+let controller = updated.tasks.find((task) => task.specId === "adaptive.controller");
+const planner = updated.tasks.find((task) => task.specId === "adaptive.decide-r0");
+if (controller?.status === "pending" && planner?.status === "running") {
+	await completeTask(planner, {
+		schema: "dynamic-decision-v1",
+		decisionId: "decision-r0",
+		round: 0,
+		phase: "round",
+		status: "stop",
+		nextActions: [
+			{
+				type: "stop",
+				actionId: "stop-r0",
+				reason: "built dist decision loop persisted a stop decision",
+				caveats: ["integration test"],
+			},
+		],
+	});
+	await writeRunRecord(cwd, updated);
+	await scheduleRun(cwd, run.runId);
+	updated = await readRunRecord(cwd, run.runId);
+	controller = updated.tasks.find((task) => task.specId === "adaptive.controller");
+}
+const control = controller?.status === "completed"
+	? JSON.parse(readFileSync(join(dirname(join(cwd, controller.files.result)), "control.json"), "utf8"))
+	: null;
+const events = await readDynamicEvents(cwd, run.runId);
+const decisionPersistedCount = events.filter((event) => event.type === "decision.persisted").length;
+console.log(marker + JSON.stringify({
+	status: controller?.status ?? null,
+	statusDetail: controller?.statusDetail ?? null,
+	message: controller?.lastMessage ?? null,
+	plannerStatus: planner?.status ?? null,
+	controlStatus: control?.status ?? null,
+	controlDecisionCount: Array.isArray(control?.decisions) ? control.decisions.length : 0,
+	decisionPersistedCount,
+	launchCount,
+}));
+if (
+	controller?.status !== "completed" ||
+	controller?.statusDetail !== "dynamic_stopped" ||
+	control?.status !== "stopped" ||
+	!Array.isArray(control?.decisions) ||
+	control.decisions.length < 1 ||
+	decisionPersistedCount < 1
+) {
+	process.exitCode = 1;
+}
+`;
+		const child = spawnSync(
+			process.execPath,
+			["--input-type=module", "-e", script],
+			{
+				cwd: process.cwd(),
+				encoding: "utf8",
+				env: { ...process.env, PI_WORKFLOW_ROLE: "supervisor" },
+			},
+		);
+		const output = `${child.stdout}\n${child.stderr}`;
+		assert.equal(child.error, undefined);
+		const resultLine = child.stdout
+			.split(/\r?\n/)
+			.find((line) => line.startsWith(marker));
+		assert(resultLine, output);
+		const result = JSON.parse(resultLine.slice(marker.length));
+		assert.equal(child.status, 0, output);
+		assert.equal(result.status, "completed");
+		assert.equal(result.statusDetail, "dynamic_stopped");
+		assert.equal(result.plannerStatus, "completed");
+		assert.equal(result.controlStatus, "stopped");
+		assert.equal(result.controlDecisionCount >= 1, true);
+		assert.equal(result.decisionPersistedCount >= 1, true);
+		assert.equal(result.launchCount, 1);
+		assert.doesNotMatch(
+			output,
+			/dynamic decision-loop helper is unavailable in controller context/,
+		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("bundled deep-review workflow leaves reviewer fanout unconstrained by stage caps", async () => {
 	const cwd = makeProject();
 	try {
@@ -6150,7 +10671,21 @@ test("workflow artifact telemetry summarizes stage status, retries, wall clock, 
 				status: "completed",
 				startedAt: "2026-06-08T00:00:15.000Z",
 				completedAt: "2026-06-08T00:00:45.000Z",
-				outputRetry: { attempts: 1 },
+				outputRetry: {
+					attempts: 1,
+					reason: "workflow_output_invalid",
+					repairMode: "new_session",
+				},
+				resumeEvents: [
+					{
+						at: "2026-06-08T00:00:50.000Z",
+						fromStatus: "failed",
+						fromStatusDetail: "workflow_output_invalid_exhausted",
+						outputRetryAttempts: 2,
+						outputRetryReason: "workflow_output_invalid_exhausted",
+						outputRetryRepairMode: "same_session",
+					},
+				],
 				files: { output: "b", stderr: "", result: "" },
 			},
 			{
@@ -6170,11 +10705,67 @@ test("workflow artifact telemetry summarizes stage status, retries, wall clock, 
 	assert.equal(summary.taskCount, 3);
 	assert.equal(summary.statusCounts.completed, 2);
 	assert.equal(summary.statusCounts.interrupted, 1);
-	assert.equal(summary.retryCounts.output, 1);
+	assert.equal(summary.retryCounts.output, 3);
 	assert.equal(summary.retryCounts.launch, 1);
+	assert.equal(summary.retryReasons.output.workflow_output_invalid, 1);
+	assert.equal(
+		summary.retryReasons.output.workflow_output_invalid_exhausted,
+		1,
+	);
+	assert.equal(summary.resumeCounts.events, 1);
+	assert.equal(summary.resumeCounts.tasks, 1);
+	assert.equal(summary.resumeStatusCounts.failed, 1);
+	assert.equal(summary.outputRepairCounts.sameSession, 1);
+	assert.equal(summary.outputRepairCounts.newSession, 1);
 	assert.equal(summary.outputBytes, 30);
 	assert.equal(summary.stages.verify.taskCount, 2);
 	assert.equal(summary.stages.verify.durationMs, 35000);
+});
+
+test("workflow resume reset preserves retry accounting metadata", () => {
+	const task = {
+		taskId: "task-1",
+		specId: "verify.claim-1",
+		displayName: "verify",
+		agent: "unit-agent",
+		agentFile: "agents/unit.md",
+		roles: [],
+		status: "failed",
+		statusDetail: "workflow_output_invalid_exhausted",
+		runtime: { approvalMode: "non-interactive" },
+		tools: [],
+		cwd: ".",
+		worktree: {
+			enabled: false,
+			path: null,
+			branch: null,
+			baseCwd: null,
+			warning: null,
+		},
+		backendTaskId: "run_backend",
+		backendHandle: {
+			engine: "pi-subagent",
+			runId: "run_backend",
+			attemptId: "attempt_backend",
+		},
+		files: { output: "out", stderr: "err", result: "result" },
+		lastMessage: "invalid output",
+		outputRetry: {
+			attempts: 1,
+			reason: "workflow_output_invalid_exhausted",
+			repairMode: "new_session",
+		},
+	};
+
+	assert.equal(resetTaskForResume(task), true);
+	assert.equal(task.status, "pending");
+	assert.equal(task.outputRetry, undefined);
+	assert.equal(task.resumeEvents.length, 1);
+	assert.equal(task.resumeEvents[0].fromStatus, "failed");
+	assert.equal(task.resumeEvents[0].outputRetryAttempts, 1);
+	assert.equal(task.resumeEvents[0].outputRetryRepairMode, "new_session");
+	assert.equal(task.resumeEvents[0].backendRunId, "run_backend");
+	assert.equal(task.resumeEvents[0].backendAttemptId, "attempt_backend");
 });
 
 test("workflow source context packet prefers structured output and caps raw previews", () => {
@@ -6743,6 +11334,119 @@ test("deep-research claim evidence gate downgrades unsupported verified claims",
 	]);
 });
 
+test("deep-research executive renderer emits bounded final and sidecar", async () => {
+	const cwd = makeProject();
+	try {
+		const helperPath = join(
+			dirname(fileURLToPath(import.meta.url)),
+			"..",
+			"..",
+			"workflows",
+			"deep-research",
+			"helpers",
+			"render-executive.mjs",
+		);
+		const helper = (
+			await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)
+		).default;
+		const result = await helper({
+			sources: {
+				"final-audit.main": {
+					digest: "Audited research digest",
+					finalReport: {
+						summary:
+							"Use the deterministic executive final for the parent handoff and keep the full audit in final-audit.control.json.",
+						factSlotCoverage: [
+							{ slotId: "slot-001", status: "filled" },
+							{ slotId: "slot-002", status: "partial" },
+							{ slotId: "slot-003", status: "missing" },
+						],
+						mainFindings: [
+							{
+								finding:
+									"The final support stage renders executiveMarkdown from the full audit control artifact.",
+								sourceUrls: ["https://example.test/spec"],
+							},
+						],
+						recommendations: [
+							{
+								recommendation:
+									"Read executive.md first, then inspect final-audit.control.json for claim-level evidence.",
+								sourceUrls: ["https://example.test/audit"],
+							},
+						],
+						remainingGaps: [
+							{ gap: "Run a larger holdout before making superiority claims." },
+						],
+					},
+					claimVerdictIndex: {
+						claims: [
+							{ id: "claim-001", status: "verified" },
+							{ id: "claim-002", status: "partially_supported" },
+						],
+					},
+				},
+			},
+			options: {
+				maxWords: 120,
+				maxUrls: 1,
+				maxFindings: 1,
+				maxRecommendations: 1,
+				maxGaps: 1,
+			},
+			context: { cwd, runId: "workflow_exec", taskId: "task-final" },
+		});
+
+		assert.equal(result.schema, "deep-research-executive-render-v1");
+		assert.equal(result.status, "passed");
+		assert.equal(result.gates.passed, true);
+		assert.ok(result.wordCount <= 120);
+		assert.ok(result.sourceUrlCount <= 1);
+		assert.equal(result.auditArtifact, "final-audit.control.json");
+		assert.match(result.executiveMarkdown, /# Executive summary/);
+		assert.match(result.executiveMarkdown, /Audit trail/);
+		assert.equal(result.claimSummary.verified, 1);
+		assert.equal(result.factSlotSummary.missingOrConflicting, 1);
+		assert.equal(
+			readFileSync(
+				join(
+					cwd,
+					".pi",
+					"workflows",
+					"workflow_exec",
+					"tasks",
+					"task-final",
+					"executive.md",
+				),
+				"utf8",
+			),
+			`${result.executiveMarkdown}\n`,
+		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("deep-research executive renderer blocks without audit control", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"render-executive.mjs",
+	);
+	const helper = (
+		await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)
+	).default;
+	const result = await helper({ sources: {}, options: {}, context: {} });
+
+	assert.equal(result.status, "blocked");
+	assert.equal(result.gates.passed, false);
+	assert.deepEqual(result.blockers, ["missing final-audit control source"]);
+});
+
 test("artifactGraph runtime support executes helper and writes artifacts", async () => {
 	const cwd = makeProject();
 	try {
@@ -6752,7 +11456,7 @@ test("artifactGraph runtime support executes helper and writes artifacts", async
 		const specPath = join(workflowDir, "spec.json");
 		writeFileSync(
 			join(workflowDir, "helpers", "audit.mjs"),
-			"export default async function helper({ sources, options, context }) { return { audited: sources.extract.claims.length, strict: options.strict, stageId: context.stageId }; }\n",
+			"export default async function helper({ sources, options, context }) { return { audited: sources.extract.claims.length, strict: options.strict, stageId: context.stageId, analysis: 'Audit helper summary.', refs: ['README.md'] }; }\n",
 		);
 		const spec = workflowSpec("unit-scout", {
 			artifactGraph: {
@@ -6796,20 +11500,26 @@ test("artifactGraph runtime support executes helper and writes artifacts", async
 		assert.equal(support?.status, "completed");
 		assert.equal(support?.statusDetail, "support_completed");
 		assert.equal(support?.lastMessage, "support completed");
+		const supportDir = dirname(join(cwd, support.files.result));
 		assert.deepEqual(
-			JSON.parse(
-				readFileSync(
-					join(dirname(join(cwd, support.files.result)), "control.json"),
-					"utf8",
-				),
-			),
+			JSON.parse(readFileSync(join(supportDir, "control.json"), "utf8")),
 			{
 				schema: "stage-control-v1",
 				digest: "Support helper completed.",
 				audited: 2,
 				strict: true,
 				stageId: "audit",
+				analysis: "Audit helper summary.",
+				refs: ["README.md"],
 			},
+		);
+		assert.equal(
+			readFileSync(join(supportDir, "analysis.md"), "utf8").trim(),
+			"Audit helper summary.",
+		);
+		assert.deepEqual(
+			JSON.parse(readFileSync(join(supportDir, "refs.json"), "utf8")),
+			["README.md"],
 		);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
@@ -7559,7 +12269,11 @@ test("subagent launch loads provider extensions for extension-backed tools", asy
 		await writeRunRecord(cwd, run);
 		await scheduleRun(cwd, run.runId);
 
-		assert.equal(captured.extensions[0], "npm:pi-web-access");
+		assert(
+			captured.extensions.some((entry) =>
+				entry.endsWith("workflow-fetch-cache-extension.ts"),
+			),
+		);
 		assert(
 			captured.extensions.some((entry) =>
 				entry.endsWith("workflow-artifact-extension.ts"),
@@ -7620,7 +12334,11 @@ test("subagent launch appends extra extensions from env", async () => {
 		await writeRunRecord(cwd, run);
 		await scheduleRun(cwd, run.runId);
 
-		assert(captured.extensions.includes("npm:pi-web-access"));
+		assert(
+			captured.extensions.some((entry) =>
+				entry.endsWith("workflow-fetch-cache-extension.ts"),
+			),
+		);
 		assert(captured.extensions.includes("/tmp/pi-telemetry-extension.mjs"));
 		assert(
 			captured.extensions.some((entry) =>
@@ -7636,10 +12354,104 @@ test("subagent launch appends extra extensions from env", async () => {
 	}
 });
 
-test("subagent launch merges object-form provider extensions with built-in mappings", async () => {
+test("workflow fetch_content cache wrapper replays run-scoped hits with fresh response ids", async () => {
+	const cwd = makeProject();
+	try {
+		const cacheDir = join(
+			cwd,
+			".pi",
+			"workflows",
+			"workflow_unit",
+			"source-cache",
+			"fetch-content",
+		);
+		const registered = new Map();
+		const appended = [];
+		const stored = new Map();
+		let originCalls = 0;
+		let generatedIds = 0;
+		const storage = {
+			generateId() {
+				generatedIds += 1;
+				return `cached-${generatedIds}`;
+			},
+			storeResult(id, data) {
+				stored.set(id, data);
+			},
+		};
+		const fakePi = {
+			registerTool(tool) {
+				registered.set(tool.name, tool);
+			},
+			appendEntry(type, data) {
+				appended.push({ type, data });
+			},
+		};
+		const webAccessExtension = (pi) => {
+			pi.registerTool({
+				name: "fetch_content",
+				async execute(_toolCallId, params) {
+					originCalls += 1;
+					const responseId = `origin-${originCalls}`;
+					const data = {
+						id: responseId,
+						type: "fetch",
+						timestamp: Date.now(),
+						urls: [
+							{
+								url: params.url,
+								title: "Example",
+								content: "cached body",
+							},
+						],
+					};
+					storage.storeResult(responseId, data);
+					pi.appendEntry("web-search-results", data);
+					return {
+						content: [{ type: "text", text: `body via ${responseId}` }],
+						details: {
+							urls: [params.url],
+							urlCount: 1,
+							successful: 1,
+							responseId,
+							totalChars: 11,
+						},
+					};
+				},
+			});
+		};
+		registerWorkflowFetchCacheExtension(
+			fakePi,
+			{ runId: "workflow_unit", taskId: "task-1", cacheDir },
+			webAccessExtension,
+			storage,
+		);
+
+		const tool = registered.get("fetch_content");
+		const first = await tool.execute("call-1", { url: "https://example.test" });
+		const second = await tool.execute("call-2", {
+			url: "https://example.test",
+		});
+
+		assert.equal(originCalls, 1);
+		assert.equal(first.details.cache.hit, false);
+		assert.equal(second.details.cache.hit, true);
+		assert.equal(second.details.responseId, "cached-1");
+		assert.match(second.content[0].text, /cached-1/);
+		assert.equal(stored.has("cached-1"), true);
+		assert.equal(appended.at(-1).data.id, "cached-1");
+		assert.equal(existsSync(join(cacheDir, "events.jsonl")), true);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("subagent launch can opt out of fetch cache and keep built-in provider mappings", async () => {
 	const cwd = makeProject();
 	let captured;
+	const previousFetchCache = process.env.PI_WORKFLOW_FETCH_CONTENT_CACHE;
 	try {
+		process.env.PI_WORKFLOW_FETCH_CONTENT_CACHE = "0";
 		writeAgent(cwd, "unit-researcher", "read, fetch_content, scrapling_fetch");
 		setSubagentApiForTests({
 			async runSubagent(options) {
@@ -7667,7 +12479,7 @@ test("subagent launch merges object-form provider extensions with built-in mappi
 				"fetch_content",
 				{
 					name: "scrapling_fetch",
-					extensions: ["npm:pi-web-access", "packages/pi-scrapling-access"],
+					extensions: ["packages/pi-scrapling-access"],
 					classification: "read-only",
 				},
 			],
@@ -7700,7 +12512,7 @@ test("subagent launch merges object-form provider extensions with built-in mappi
 			"scrapling_fetch",
 			"workflow_artifact",
 		]);
-		assert(captured.extensions.includes("npm:pi-web-access"));
+		assert(captured.extensions.some(isBundledPiWebAccessExtension));
 		assert(captured.extensions.includes("packages/pi-scrapling-access"));
 		assert(
 			captured.extensions.some((entry) =>
@@ -7708,6 +12520,80 @@ test("subagent launch merges object-form provider extensions with built-in mappi
 			),
 		);
 	} finally {
+		if (previousFetchCache === undefined)
+			delete process.env.PI_WORKFLOW_FETCH_CONTENT_CACHE;
+		else process.env.PI_WORKFLOW_FETCH_CONTENT_CACHE = previousFetchCache;
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("subagent launch uses generated fetch cache extension by default", async () => {
+	const cwd = makeProject();
+	let captured;
+	const previousFetchCache = process.env.PI_WORKFLOW_FETCH_CONTENT_CACHE;
+	try {
+		delete process.env.PI_WORKFLOW_FETCH_CONTENT_CACHE;
+		writeAgent(cwd, "unit-researcher", "read, fetch_content, web_search");
+		setSubagentApiForTests({
+			async runSubagent(options) {
+				captured = options;
+				return {
+					runId: "run_stub",
+					attemptId: "attempt_stub",
+					status: "running",
+				};
+			},
+			async getSubagentStatus() {
+				return null;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+
+		const spec = workflowSpec("unit-researcher", {
+			tools: ["read", "fetch_content", "web_search"],
+			artifactGraph: {
+				stages: [
+					{
+						id: "main",
+						type: "single",
+						prompt: "Research with cached fetch.",
+					},
+				],
+			},
+		});
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Research topic",
+		});
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await writeRunRecord(cwd, run);
+		await scheduleRun(cwd, run.runId);
+
+		assert.equal(captured.tools.includes("fetch_content"), true);
+		assert.equal(
+			captured.extensions.some(isBundledPiWebAccessExtension),
+			false,
+		);
+		assert(
+			captured.extensions.some((entry) =>
+				entry.endsWith("workflow-fetch-cache-extension.ts"),
+			),
+		);
+	} finally {
+		if (previousFetchCache === undefined)
+			delete process.env.PI_WORKFLOW_FETCH_CONTENT_CACHE;
+		else process.env.PI_WORKFLOW_FETCH_CONTENT_CACHE = previousFetchCache;
 		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
 	}
@@ -7874,6 +12760,149 @@ test("completed subagent with contextLengthExceeded and valid output remains com
 			),
 			{ schema: "stage-control-v1", digest: "ok", ok: true },
 		);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("failed context-window subagent with valid artifactGraph output is salvaged", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const compiled = await compileWorkflow(
+			workflowSpec("unit-scout", {
+				artifactGraph: {
+					stages: [
+						{
+							id: "main",
+							type: "single",
+							prompt: "Return valid workflow output.",
+						},
+					],
+				},
+			}),
+			{ cwd, task: "Review topic" },
+		);
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(
+			cwd,
+			run,
+			compiled,
+			workflowSpec("unit-scout"),
+		);
+		const task = run.tasks[0];
+		task.status = "running";
+		task.statusDetail = "running";
+		task.startedAt = new Date().toISOString();
+		task.backendHandle = {
+			engine: "pi-subagent",
+			backend: "headless",
+			runId: "run_context_failed",
+			attemptId: "attempt_context_failed",
+			cwd,
+			runsDir: ".pi/workflow-subagents/context-failed",
+			display: "pi-subagent/headless run_context_failed/attempt_context_failed",
+		};
+
+		const artifactDir = join(cwd, ".fake-context-failed-subagent");
+		mkdirSync(artifactDir, { recursive: true });
+		writeFileSync(
+			join(artifactDir, "output.log"),
+			[
+				"<control>",
+				JSON.stringify({ schema: "stage-control-v1", digest: "ok", ok: true }),
+				"</control>",
+				"<analysis>",
+				"salvaged context output analysis",
+				"</analysis>",
+				"<refs>",
+				"[]",
+				"</refs>",
+			].join("\n"),
+		);
+		writeFileSync(join(artifactDir, "stderr.log"), "context exceeded\n");
+		writeFileSync(
+			join(artifactDir, "result.json"),
+			JSON.stringify({
+				status: "failed",
+				failureKind: "model",
+				completedAt: new Date().toISOString(),
+				startedAt: task.startedAt,
+				exitCode: 1,
+				cwd,
+				metadata: { contextLengthExceeded: true, stopReason: "length" },
+			}),
+		);
+
+		setSubagentApiForTests({
+			async runSubagent() {
+				throw new Error("not expected");
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async getSubagentStatus() {
+				return {
+					runId: "run_context_failed",
+					attemptId: "attempt_context_failed",
+					backend: "headless",
+					status: "failed",
+					failureKind: "model",
+					startedAt: task.startedAt,
+					completedAt: new Date().toISOString(),
+					logs: [
+						{
+							type: "output",
+							path: ".fake-context-failed-subagent/output.log",
+							artifactCwd: cwd,
+						},
+						{
+							type: "stderr",
+							path: ".fake-context-failed-subagent/stderr.log",
+							artifactCwd: cwd,
+						},
+						{
+							type: "result",
+							path: ".fake-context-failed-subagent/result.json",
+							artifactCwd: cwd,
+						},
+					],
+					metadata: { contextLengthExceeded: true, stopReason: "length" },
+					attempts: [
+						{
+							attemptId: "attempt_context_failed",
+							status: "failed",
+							pid: 99999999,
+						},
+					],
+				};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+
+		await writeRunRecord(cwd, run);
+		const refreshed = await refreshRunFromSubagentArtifacts(
+			cwd,
+			await readRunRecord(cwd, run.runId),
+		);
+		const refreshedTask = refreshed.tasks[0];
+		const workflowResult = JSON.parse(
+			readFileSync(join(cwd, refreshedTask.files.result), "utf8"),
+		);
+		assert.equal(refreshedTask.status, "completed");
+		assert.equal(workflowResult.status, "completed");
+		assert.equal(
+			workflowResult.salvagedFromFailureKind,
+			"context_or_request_too_large",
+		);
+		assert.equal(workflowResult.outputValidation.valid, true);
 	} finally {
 		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
@@ -9166,6 +14195,7 @@ test("workflow command completions and run arg parsing preserve task text", () =
 			"roles",
 			"agents",
 			"run",
+			"dynamic",
 			"status",
 			"show",
 			"logs",
@@ -9242,6 +14272,26 @@ test("workflow command completions and run arg parsing preserve task text", () =
 			thinking: "xhigh",
 		},
 	);
+	assert.deepEqual(
+		parseWorkflowDynamicArgs(
+			'dynamic --model openai-codex/gpt-5.5 --thinking low "Research adaptive workflows" --detach',
+		),
+		{
+			task: "Research adaptive workflows",
+			detach: true,
+			model: "openai-codex/gpt-5.5",
+			thinking: "low",
+		},
+	);
+	assert.deepEqual(
+		parseWorkflowDynamicArgs(
+			'dynamic "Keep literal --detach and --model=x in the task"',
+		),
+		{
+			task: "Keep literal --detach and --model=x in the task",
+			detach: false,
+		},
+	);
 	assert.throws(
 		() => parseWorkflowRunArgs("run --thinking turbo review Fix"),
 		/Invalid workflow thinking level/,
@@ -9290,7 +14340,7 @@ test("natural-language workflow tools list and start workflows", async () => {
 		});
 		assert.deepEqual(
 			registeredTools.map((tool) => tool.name),
-			[WORKFLOW_LIST_TOOL, WORKFLOW_RUN_TOOL],
+			[WORKFLOW_LIST_TOOL, WORKFLOW_RUN_TOOL, WORKFLOW_DYNAMIC_TOOL],
 		);
 		assert.match(registeredTools[1].promptSnippet, /Start a pi-workflow/);
 
@@ -9406,7 +14456,7 @@ test("natural-language workflow tools list and start workflows", async () => {
 		});
 		assert.deepEqual(
 			registeredTools.map((tool) => tool.name),
-			[WORKFLOW_LIST_TOOL, WORKFLOW_RUN_TOOL],
+			[WORKFLOW_LIST_TOOL, WORKFLOW_RUN_TOOL, WORKFLOW_DYNAMIC_TOOL],
 		);
 		assert.match(registeredTools[1].promptSnippet, /Start a pi-workflow/);
 
@@ -9472,6 +14522,160 @@ test("natural-language workflow tools list and start workflows", async () => {
 		assert.match(runResult.content[0].text, /Open: \/workflow workflow_/);
 		assert.equal(runResult.details.status, "running");
 		assert.match(launchedTask, /Investigate the repo/);
+	} finally {
+		setSubagentApiForTests(undefined);
+		if (originalRole === undefined) delete process.env.PI_WORKFLOW_ROLE;
+		else process.env.PI_WORKFLOW_ROLE = originalRole;
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("spec-less direct dynamic run records provenance and launches planner", async () => {
+	const cwd = makeProject();
+	try {
+		const launched = [];
+		setSubagentApiForTests({
+			async runSubagent(options) {
+				launched.push(options);
+				return {
+					runId: "run_dynamic_planner",
+					attemptId: "attempt_dynamic_planner",
+					status: "running",
+				};
+			},
+			async getSubagentStatus() {
+				return null;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+
+		const run = await runDynamicTask(cwd, {
+			task: "Research dynamic workflow evaluation methods.",
+			runtimeDefaults: { model: "openai-codex/gpt-5.5", thinking: "low" },
+		});
+		assert.equal(run.status, "running");
+		assert.equal(run.name, "dynamic");
+		assert.equal(run.provenance.mode, "direct-dynamic");
+		assert.equal(run.provenance.requestedWorkflow, null);
+		assert.equal(run.provenance.specPath, null);
+		assert.equal(run.provenance.userSelectedWorkflow, false);
+		assert.equal(run.provenance.generatedSpec, false);
+		assert.match(
+			run.provenance.runtimeBundle,
+			/\.pi\/workflow-runtime\/direct-dynamic-runtime-v1\/spec\.json$/,
+		);
+		assert.equal(run.tasks[0].kind, "dynamic");
+		assert.equal(launched.length, 1);
+		assert.equal(launched[0].model, "openai-codex/gpt-5.5");
+		assert.equal(launched[0].thinking, "low");
+		assert.deepEqual(
+			launched[0].tools.filter((tool) => tool !== "workflow_artifact"),
+			["read", "grep", "find", "ls", "web_search", "fetch_content"],
+		);
+		assert.equal(launched[0].tools.includes("get_search_content"), false);
+		assert.match(
+			String(launched[0].systemPrompt),
+			/Only these tools are enabled for this workflow task: read, grep, find, ls, web_search, fetch_content, workflow_artifact\./,
+		);
+		assert.match(
+			String(launched[0].systemPrompt),
+			/Full cached search-content hydration is unavailable here\./,
+		);
+		const materializedSpec = JSON.parse(
+			readFileSync(join(cwd, run.provenance.runtimeBundle), "utf8"),
+		);
+		assert.equal(
+			JSON.stringify(materializedSpec).includes("get_search_content"),
+			false,
+		);
+		assert.match(String(launched[0].task), /request-only direct dynamic/);
+		assert.match(
+			String(launched[0].task),
+			/Research dynamic workflow evaluation methods/,
+		);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("workflow_dynamic tool starts spec-less direct dynamic runs", async () => {
+	const cwd = makeProject();
+	const originalRole = process.env.PI_WORKFLOW_ROLE;
+	try {
+		process.env.PI_WORKFLOW_ROLE = "supervisor";
+		const registeredTools = [];
+		const fakePi = {
+			registerTool(tool) {
+				registeredTools.push(tool);
+			},
+			getThinkingLevel() {
+				return "low";
+			},
+		};
+		registerWorkflowNaturalLanguageTools(fakePi, {
+			PI_WORKFLOW_ROLE: "supervisor",
+		});
+		const dynamicTool = registeredTools.find(
+			(tool) => tool.name === WORKFLOW_DYNAMIC_TOOL,
+		);
+		assert.ok(dynamicTool);
+
+		const launched = [];
+		setSubagentApiForTests({
+			async runSubagent(options) {
+				launched.push(options);
+				return {
+					runId: "run_tool_dynamic_1",
+					attemptId: "attempt_tool_dynamic_1",
+					status: "running",
+				};
+			},
+			async getSubagentStatus() {
+				return null;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+		const ctx = {
+			cwd,
+			hasUI: false,
+			model: undefined,
+			ui: { notify() {} },
+		};
+		await assert.rejects(
+			() =>
+				dynamicTool.execute(
+					"tool-dynamic-empty",
+					{ task: "   " },
+					undefined,
+					undefined,
+					ctx,
+				),
+			/concrete task/,
+		);
+		const result = await dynamicTool.execute(
+			"tool-dynamic",
+			{ task: "동적 워크플로우로 리서치해줘" },
+			undefined,
+			undefined,
+			ctx,
+		);
+		assert.match(result.content[0].text, /Dynamic workflow run workflow_/);
+		assert.match(result.content[0].text, /Mode: direct-dynamic/);
+		assert.equal(result.details.mode, "direct-dynamic");
+		assert.equal(result.details.provenance.userSelectedWorkflow, false);
+		assert.equal(launched.length, 1);
+		assert.match(String(launched[0].task), /동적 워크플로우로 리서치해줘/);
 	} finally {
 		setSubagentApiForTests(undefined);
 		if (originalRole === undefined) delete process.env.PI_WORKFLOW_ROLE;
@@ -10918,6 +16122,85 @@ test("workflow_artifact lists visible sources, reads by source name, and records
 	}
 });
 
+test("workflow_artifact can read deterministic JSON projections with caps", async () => {
+	const cwd = makeProject();
+	try {
+		const runId = "workflow_unit";
+		const runDir = join(cwd, ".pi", "workflows", runId);
+		const producerDir = join(runDir, "tasks", "task-1");
+		const consumerDir = join(runDir, "tasks", "task-2");
+		mkdirSync(producerDir, { recursive: true });
+		mkdirSync(consumerDir, { recursive: true });
+		writeFileSync(
+			join(producerDir, "control.json"),
+			JSON.stringify(
+				{
+					claims: [
+						{ id: "claim-1", text: "first" },
+						{ id: "claim-2", text: "second" },
+						{ id: "claim-3", text: "third" },
+					],
+				},
+				null,
+				2,
+			),
+		);
+		const manifestPath = join(consumerDir, "source-manifest.json");
+		const ledgerPath = join(consumerDir, "read-ledger.jsonl");
+		writeFileSync(
+			manifestPath,
+			JSON.stringify({
+				schema: "workflow-source-manifest-v1",
+				runId,
+				taskId: "task-2",
+				sources: [
+					{
+						source: "normalize",
+						artifacts: {
+							control: { path: join(producerDir, "control.json") },
+						},
+					},
+				],
+			}),
+		);
+
+		const result = await handleWorkflowArtifactToolCall(
+			{
+				action: "read",
+				source: "normalize",
+				artifact: "control",
+				path: "$.claims",
+				maxItems: 2,
+				maxChars: 200,
+			},
+			{ runId, taskId: "task-2", manifestPath, ledgerPath, runDir },
+		);
+
+		assert.match(
+			result.content[0].text,
+			/# workflow_artifact: normalize\.control path=\$\.claims/,
+		);
+		assert.match(result.content[0].text, /"id": "claim-1"/);
+		assert.match(result.content[0].text, /"id": "claim-2"/);
+		assert.doesNotMatch(result.content[0].text, /claim-3/);
+		assert.equal(result.details.projection.path, "$.claims");
+		assert.equal(result.details.projection.totalItems, 3);
+		assert.equal(result.details.projection.itemsReturned, 2);
+		assert.equal(result.details.projection.itemsTruncated, true);
+		assert.equal(result.details.truncated, true);
+
+		const ledger = await readWorkflowArtifactReadLedger(ledgerPath);
+		assert.equal(ledger.length, 1);
+		assert.equal(ledger[0].source, "normalize");
+		assert.equal(ledger[0].artifact, "control");
+		assert.equal(ledger[0].path, "$.claims");
+		assert.equal(ledger[0].maxItems, 2);
+		assert.equal(ledger[0].maxChars, 200);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("workflow_artifact rejects path injection, unknown artifacts, and debug reads in workflow-task mode", async () => {
 	const cwd = makeProject();
 	try {
@@ -11197,19 +16480,42 @@ test("artifact graph workflow runs workflow artifacts and enforces required read
 					const [workflowRunId, taskId] = String(options.correlationId).split(
 						":",
 					);
-					const ledgerPath = join(
+					const taskDir = join(
 						cwd,
 						".pi",
 						"workflows",
 						workflowRunId,
 						"tasks",
 						taskId,
-						"read-ledger.jsonl",
 					);
-					const ledger = readFileSync(ledgerPath, "utf8");
-					assert.match(ledger, /"source":"analyze"/);
-					assert.match(ledger, /"artifact":"analysis"/);
-					assert.match(ledger, /"runtimePreload":true/);
+					const ledgerPath = join(taskDir, "read-ledger.jsonl");
+					assert.match(
+						String(options.task),
+						/Required reads before final output/,
+					);
+					assert.match(
+						String(options.task),
+						/# Required Workflow Artifact Reads/,
+					);
+					assert.doesNotMatch(
+						String(options.task),
+						/# Required Workflow Artifact Read Contents/,
+					);
+					assert.doesNotMatch(String(options.task), /Detailed analysis\./);
+					writeFileSync(
+						ledgerPath,
+						`${JSON.stringify({
+							schema: "workflow-artifact-read-v1",
+							runId: workflowRunId,
+							taskId,
+							source: "analyze",
+							artifact: "analysis",
+							at: new Date().toISOString(),
+							bytes: 18,
+							returnedBytes: 18,
+							truncated: false,
+						})}\n`,
+					);
 				}
 				const control = isFinal
 					? { schema: "stage-control-v1", digest: "final done", verdict: "ok" }
@@ -11305,10 +16611,9 @@ test("artifact graph workflow runs workflow artifacts and enforces required read
 		);
 		const finalTaskPrompt = readFileSync(join(finalDir, "task.md"), "utf8");
 		assert.ok(finalTaskPrompt.includes("Required reads before final output"));
-		assert.ok(
-			finalTaskPrompt.includes("# Required Workflow Artifact Read Contents"),
-		);
-		assert.ok(finalTaskPrompt.includes("## analyze.analysis"));
+		assert.ok(finalTaskPrompt.includes("# Required Workflow Artifact Reads"));
+		assert.ok(finalTaskPrompt.includes("- analyze.analysis:"));
+		assert.doesNotMatch(finalTaskPrompt, /Detailed analysis\./);
 		const finalManifest = JSON.parse(
 			readFileSync(join(finalDir, "source-manifest.json"), "utf8"),
 		);
@@ -11320,6 +16625,550 @@ test("artifact graph workflow runs workflow artifacts and enforces required read
 			readFileSync(join(finalDir, "task.md"), "utf8"),
 			/controlProjection/,
 		);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("artifact graph output retry reuses confirmed subagent session", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		mkdirSync(join(cwd, "workflows"), { recursive: true });
+		writeFileSync(
+			join(cwd, "workflows", "session-retry.json"),
+			JSON.stringify(
+				workflowSpec("unit-scout", {
+					artifactGraph: {
+						stages: [{ id: "main", type: "single", prompt: "Analyze." }],
+					},
+				}),
+			),
+		);
+
+		const launched = [];
+		const runs = new Map();
+		setSubagentApiForTests({
+			async runSubagent(options) {
+				launched.push(options);
+				const runId = `run_session_${launched.length}`;
+				const attemptId = `attempt_session_${launched.length}`;
+				const artifactDir = join(
+					cwd,
+					String(options.runsDir),
+					runId,
+					"attempts",
+					attemptId,
+				);
+				mkdirSync(artifactDir, { recursive: true });
+				const output =
+					launched.length === 1
+						? "not workflow output"
+						: [
+								"<control>",
+								JSON.stringify({ schema: "stage-control-v1", digest: "ok" }),
+								"</control>",
+								"<analysis>",
+								"retry succeeded",
+								"</analysis>",
+								"<refs>",
+								"[]",
+								"</refs>",
+							].join("\n");
+				writeFileSync(join(artifactDir, "output.log"), output);
+				writeFileSync(join(artifactDir, "stderr.log"), "");
+				writeFileSync(
+					join(artifactDir, "result.json"),
+					JSON.stringify({
+						status: "completed",
+						completedAt: new Date().toISOString(),
+						startedAt: new Date().toISOString(),
+						exitCode: 0,
+						metadata: {
+							contextLengthExceeded: false,
+							sessionId: options.sessionId,
+							session: {
+								id: options.sessionId,
+								requested: true,
+								disposition: "resumed",
+							},
+						},
+					}),
+				);
+				runs.set(runId, { runId, attemptId, artifactDir });
+				return { runId, attemptId, status: "running" };
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async getSubagentStatus({ runId }) {
+				const run = runs.get(runId);
+				return {
+					runId,
+					attemptId: run.attemptId,
+					backend: "headless",
+					status: "completed",
+					failureKind: null,
+					startedAt: new Date().toISOString(),
+					completedAt: new Date().toISOString(),
+					logs: [
+						{
+							type: "output",
+							path: "output.log",
+							artifactCwd: run.artifactDir,
+						},
+						{
+							type: "stderr",
+							path: "stderr.log",
+							artifactCwd: run.artifactDir,
+						},
+						{
+							type: "result",
+							path: "result.json",
+							artifactCwd: run.artifactDir,
+						},
+					],
+					metadata: { contextLengthExceeded: false },
+					attempts: [
+						{ attemptId: run.attemptId, status: "completed", pid: 12345 },
+					],
+				};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+
+		const started = await runWorkflow("session-retry", cwd, {
+			task: "Run artifact graph",
+		});
+		const completed = await waitForRun(cwd, started.runId, 5_000);
+		assert.equal(completed.status, "completed");
+		assert.equal(launched.length, 2);
+		const expectedSessionId = `pi-workflow.${started.runId}.task-1`;
+		assert.equal(launched[0].sessionId, expectedSessionId);
+		assert.equal(launched[1].sessionId, expectedSessionId);
+		const task = taskBySpec(completed, "main.main");
+		assert.equal(task.outputRetry.maxAttempts, 2);
+		assert.equal(task.outputRetry.repairMode, "same_session");
+		assert.equal(task.outputRetry.sessionId, expectedSessionId);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("artifact graph output retry starts new session when subagent session is unconfirmed", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		mkdirSync(join(cwd, "workflows"), { recursive: true });
+		writeFileSync(
+			join(cwd, "workflows", "session-fallback.json"),
+			JSON.stringify(
+				workflowSpec("unit-scout", {
+					artifactGraph: {
+						stages: [{ id: "main", type: "single", prompt: "Analyze." }],
+					},
+				}),
+			),
+		);
+
+		const launched = [];
+		const runs = new Map();
+		setSubagentApiForTests({
+			async runSubagent(options) {
+				launched.push(options);
+				const runId = `run_fallback_${launched.length}`;
+				const attemptId = `attempt_fallback_${launched.length}`;
+				const artifactDir = join(
+					cwd,
+					String(options.runsDir),
+					runId,
+					"attempts",
+					attemptId,
+				);
+				mkdirSync(artifactDir, { recursive: true });
+				const output =
+					launched.length === 1
+						? "not workflow output"
+						: [
+								"<control>",
+								JSON.stringify({ schema: "stage-control-v1", digest: "ok" }),
+								"</control>",
+								"<analysis>",
+								"fallback retry succeeded",
+								"</analysis>",
+								"<refs>",
+								"[]",
+								"</refs>",
+							].join("\n");
+				writeFileSync(join(artifactDir, "output.log"), output);
+				writeFileSync(join(artifactDir, "stderr.log"), "");
+				writeFileSync(
+					join(artifactDir, "result.json"),
+					JSON.stringify({
+						status: "completed",
+						completedAt: new Date().toISOString(),
+						startedAt: new Date().toISOString(),
+						exitCode: 0,
+						metadata: {
+							contextLengthExceeded: false,
+							sessionId: options.sessionId,
+							session: {
+								id: options.sessionId,
+								requested: true,
+								disposition: launched.length === 1 ? "created" : "resumed",
+							},
+						},
+					}),
+				);
+				runs.set(runId, { runId, attemptId, artifactDir });
+				return { runId, attemptId, status: "running" };
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async getSubagentStatus({ runId }) {
+				const run = runs.get(runId);
+				return {
+					runId,
+					attemptId: run.attemptId,
+					backend: "headless",
+					status: "completed",
+					failureKind: null,
+					startedAt: new Date().toISOString(),
+					completedAt: new Date().toISOString(),
+					logs: [
+						{
+							type: "output",
+							path: "output.log",
+							artifactCwd: run.artifactDir,
+						},
+						{
+							type: "stderr",
+							path: "stderr.log",
+							artifactCwd: run.artifactDir,
+						},
+						{
+							type: "result",
+							path: "result.json",
+							artifactCwd: run.artifactDir,
+						},
+					],
+					metadata: { contextLengthExceeded: false },
+					attempts: [
+						{ attemptId: run.attemptId, status: "completed", pid: 12345 },
+					],
+				};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+
+		const started = await runWorkflow("session-fallback", cwd, {
+			task: "Run artifact graph",
+		});
+		const completed = await waitForRun(cwd, started.runId, 5_000);
+		assert.equal(completed.status, "completed");
+		assert.equal(launched.length, 2);
+		const baseSessionId = `pi-workflow.${started.runId}.task-1`;
+		const retrySessionId = `${baseSessionId}.retry-1`;
+		assert.equal(launched[0].sessionId, baseSessionId);
+		assert.equal(launched[1].sessionId, retrySessionId);
+		const task = taskBySpec(completed, "main.main");
+		assert.equal(task.outputRetry.maxAttempts, 2);
+		assert.equal(task.outputRetry.repairMode, "new_session");
+		assert.equal(task.outputRetry.sessionId, retrySessionId);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("recovered artifact graph subagent handle preserves same-session retry", async () => {
+	const cwd = makeProject();
+	try {
+		const now = new Date().toISOString();
+		const expectedSessionId = "pi-workflow.workflow_recovery.task-1";
+		const artifactDir = join(
+			cwd,
+			".pi",
+			"workflow-subagents",
+			"workflow_recovery",
+			"task-1",
+			"run_recovered",
+			"attempts",
+			"attempt_recovered",
+		);
+		mkdirSync(artifactDir, { recursive: true });
+		writeFileSync(join(artifactDir, "output.log"), "not workflow output");
+		writeFileSync(join(artifactDir, "stderr.log"), "");
+		writeFileSync(
+			join(artifactDir, "result.json"),
+			JSON.stringify({
+				status: "completed",
+				completedAt: now,
+				startedAt: now,
+				exitCode: 0,
+				metadata: {
+					contextLengthExceeded: false,
+					sessionId: expectedSessionId,
+					session: {
+						id: expectedSessionId,
+						requested: true,
+						disposition: "resumed",
+					},
+				},
+			}),
+		);
+		writeFileSync(
+			join(
+				cwd,
+				".pi",
+				"workflow-subagents",
+				"workflow_recovery",
+				"task-1",
+				"run_recovered",
+				"run.json",
+			),
+			JSON.stringify({
+				schemaVersion: 2,
+				runId: "run_recovered",
+				correlationId: "workflow_recovery:task-1",
+				status: "completed",
+				failureKind: null,
+				startedAt: now,
+				updatedAt: now,
+				completedAt: now,
+				activeAttemptId: "attempt_recovered",
+				latestAttemptId: "attempt_recovered",
+				attempts: [
+					{
+						attemptId: "attempt_recovered",
+						status: "completed",
+						failureKind: null,
+						startedAt: now,
+						updatedAt: now,
+						completedAt: now,
+					},
+				],
+			}),
+		);
+
+		let relaunched;
+		setSubagentApiForTests({
+			async runSubagent(options) {
+				relaunched = options;
+				return {
+					runId: "run_relaunched",
+					attemptId: "attempt_relaunched",
+					status: "running",
+				};
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async getSubagentStatus() {
+				return {
+					runId: "run_recovered",
+					attemptId: "attempt_recovered",
+					backend: "headless",
+					status: "completed",
+					failureKind: null,
+					startedAt: now,
+					completedAt: now,
+					logs: [
+						{ type: "output", path: "output.log", artifactCwd: artifactDir },
+						{ type: "stderr", path: "stderr.log", artifactCwd: artifactDir },
+						{ type: "result", path: "result.json", artifactCwd: artifactDir },
+					],
+					metadata: { contextLengthExceeded: false },
+					attempts: [
+						{ attemptId: "attempt_recovered", status: "completed", pid: 12345 },
+					],
+				};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+
+		const artifactGraph = {
+			enabled: true,
+			output: { analysisRequired: true, refsRequired: true },
+			requiredReads: [],
+		};
+		const task = {
+			taskId: "task-1",
+			specId: "main.main",
+			displayName: "main.main",
+			agent: "unit-scout",
+			agentFile: ".pi/agents/unit-scout.md",
+			roles: [],
+			status: "running",
+			statusDetail: "running",
+			runtime: { approvalMode: "non-interactive" },
+			cwd,
+			worktree: {
+				enabled: false,
+				path: null,
+				branch: null,
+				baseCwd: null,
+				warning: null,
+			},
+			backendTaskId: "run_recovered",
+			artifactGraph,
+			files: {
+				systemPrompt: ".pi/workflows/workflow_recovery/tasks/task-1/system.md",
+				taskPrompt: ".pi/workflows/workflow_recovery/tasks/task-1/task.md",
+				output: ".pi/workflows/workflow_recovery/tasks/task-1/output.log",
+				stderr: ".pi/workflows/workflow_recovery/tasks/task-1/stderr.log",
+				result: ".pi/workflows/workflow_recovery/tasks/task-1/result.json",
+			},
+		};
+		const run = {
+			schemaVersion: 1,
+			runId: "workflow_recovery",
+			type: WORKFLOW_RUN_TYPE,
+			artifactGraph: { enabled: true },
+			status: "running",
+			taskSummary: {
+				pending: 0,
+				running: 1,
+				blocked: 0,
+				completed: 0,
+				failed: 0,
+				skipped: 0,
+				interrupted: 0,
+				total: 1,
+			},
+			cwd,
+			backend: { type: "local-pi", mode: "headless" },
+			createdAt: now,
+			updatedAt: now,
+			specPath: "workflow.json",
+			tasks: [task],
+		};
+
+		const refreshed = await refreshRunFromSubagentArtifacts(cwd, run);
+		assert.equal(refreshed.tasks[0].status, "pending");
+		assert.equal(refreshed.tasks[0].outputRetry.repairMode, "same_session");
+		assert.equal(refreshed.tasks[0].outputRetry.sessionId, expectedSessionId);
+
+		const compiledTask = {
+			id: "main.main",
+			agent: "unit-scout",
+			agentPath: ".pi/agents/unit-scout.md",
+			agentSystemPrompt: "Artifact agent.",
+			roleNames: [],
+			task: "Do the work.",
+			cwd,
+			explicitCwd: false,
+			explicitWorktreePolicy: false,
+			runtime: {
+				fast: "off",
+				approvalMode: "non-interactive",
+				tools: ["read"],
+			},
+			safety: { capability: "read-only", reason: "test" },
+			compiledPrompt: "Artifact prompt.",
+			artifactGraph,
+		};
+		await launchSubagentTask(cwd, refreshed, refreshed.tasks[0], compiledTask);
+		assert.equal(relaunched.sessionId, expectedSessionId);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("non artifact graph subagent launches do not request child sessions", async () => {
+	const cwd = makeProject();
+	try {
+		let captured;
+		setSubagentApiForTests({
+			async runSubagent(options) {
+				captured = options;
+				return {
+					runId: "run_plain",
+					attemptId: "attempt_plain",
+					status: "running",
+				};
+			},
+		});
+		const now = new Date().toISOString();
+		const task = {
+			taskId: "task-1",
+			specId: "plain.main",
+			displayName: "plain.main",
+			agent: "unit-scout",
+			agentFile: ".pi/agents/unit-scout.md",
+			roles: [],
+			status: "pending",
+			statusDetail: "pending",
+			runtime: { approvalMode: "non-interactive" },
+			cwd,
+			worktree: {
+				enabled: false,
+				path: null,
+				branch: null,
+				baseCwd: null,
+				warning: null,
+			},
+			backendTaskId: "",
+			files: {
+				systemPrompt: ".pi/workflows/workflow_plain/tasks/task-1/system.md",
+				taskPrompt: ".pi/workflows/workflow_plain/tasks/task-1/task.md",
+				output: ".pi/workflows/workflow_plain/tasks/task-1/output.log",
+				stderr: ".pi/workflows/workflow_plain/tasks/task-1/stderr.log",
+				result: ".pi/workflows/workflow_plain/tasks/task-1/result.json",
+			},
+		};
+		const run = {
+			schemaVersion: 1,
+			runId: "workflow_plain",
+			type: WORKFLOW_RUN_TYPE,
+			status: "running",
+			taskSummary: {
+				pending: 1,
+				running: 0,
+				blocked: 0,
+				completed: 0,
+				failed: 0,
+				skipped: 0,
+				interrupted: 0,
+				total: 1,
+			},
+			cwd,
+			backend: { type: "local-pi", mode: "headless" },
+			createdAt: now,
+			updatedAt: now,
+			specPath: "workflow.json",
+			tasks: [task],
+		};
+		const compiledTask = {
+			id: "plain.main",
+			agent: "unit-scout",
+			agentPath: ".pi/agents/unit-scout.md",
+			agentSystemPrompt: "Plain agent.",
+			roleNames: [],
+			task: "Do the work.",
+			cwd,
+			explicitCwd: false,
+			explicitWorktreePolicy: false,
+			runtime: {
+				fast: "off",
+				approvalMode: "non-interactive",
+				tools: ["read"],
+			},
+			safety: { capability: "read-only", reason: "test" },
+			compiledPrompt: "Plain prompt.",
+		};
+		await launchSubagentTask(cwd, run, task, compiledTask);
+		assert.equal(captured.sessionId, undefined);
 	} finally {
 		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
@@ -11404,6 +17253,396 @@ test("workflow output parser accepts canonical control analysis refs sections", 
 	assert.equal(parsed.control.digest, "ready");
 	assert.match(parsed.analysis, /Detailed reasoning/);
 	assert.deepEqual(parsed.refs, [{ kind: "file", path: "src/compiler.ts" }]);
+});
+
+test("workflow output parser can require non-empty refs", () => {
+	const raw = [
+		"<control>",
+		JSON.stringify({ schema: "stage-control-v1", digest: "ready" }),
+		"</control>",
+		"<analysis>",
+		"Detailed reasoning with a cited claim.",
+		"</analysis>",
+		"<refs>",
+		"[]",
+		"</refs>",
+	].join("\n");
+
+	const defaultParsed = parseWorkflowOutput(raw);
+	assert.equal(defaultParsed.valid, true, JSON.stringify(defaultParsed.issues));
+
+	const strictParsed = parseWorkflowOutput(raw, { refsMinItems: 1 });
+	assert.equal(strictParsed.valid, false);
+	assert.ok(
+		strictParsed.issues.some(
+			(issue) => issue.code === "too_few_items" && issue.section === "refs",
+		),
+		JSON.stringify(strictParsed.issues),
+	);
+	assert.match(
+		buildWorkflowOutputRetryInstructions(strictParsed.issues),
+		/refs must include at least one item/,
+	);
+});
+
+test("workflow output parser rejects empty strict ref locators", () => {
+	const raw = [
+		"<control>",
+		JSON.stringify({ schema: "stage-control-v1", digest: "ready" }),
+		"</control>",
+		"<analysis>",
+		"Detailed reasoning with a cited claim.",
+		"</analysis>",
+		"<refs>",
+		JSON.stringify([
+			"",
+			{ title: "missing locator" },
+			{ url: "https://example.com" },
+		]),
+		"</refs>",
+	].join("\n");
+
+	const defaultParsed = parseWorkflowOutput(raw);
+	assert.equal(defaultParsed.valid, true, JSON.stringify(defaultParsed.issues));
+
+	const strictParsed = parseWorkflowOutput(raw, { refsMinItems: 1 });
+	assert.equal(strictParsed.valid, false);
+	const locatorIssues = strictParsed.issues.filter(
+		(issue) => issue.code === "invalid_ref_locator" && issue.section === "refs",
+	);
+	assert.equal(locatorIssues.length, 2, JSON.stringify(strictParsed.issues));
+	assert.match(
+		buildWorkflowOutputRetryInstructions(strictParsed.issues),
+		/non-empty locator string/,
+	);
+});
+
+test("workflow artifact bundle can validate strict ref URL availability", async () => {
+	const taskDir = mkdtempSync(join(tmpdir(), "workflow-ref-url-validation-"));
+	const originalFetch = globalThis.fetch;
+	try {
+		globalThis.fetch = async () => ({
+			ok: false,
+			status: 404,
+			url: "https://example.test/missing",
+			arrayBuffer: async () => new ArrayBuffer(0),
+		});
+		const raw = [
+			"<control>",
+			JSON.stringify({ schema: "stage-control-v1", digest: "ready" }),
+			"</control>",
+			"<analysis>",
+			"Detailed reasoning with a cited claim.",
+			"</analysis>",
+			"<refs>",
+			JSON.stringify([{ url: "https://example.test/missing" }]),
+			"</refs>",
+		].join("\n");
+
+		const written = await writeWorkflowTaskArtifactBundle({
+			taskDir,
+			rawOutput: raw,
+			refsMinItems: 1,
+			refsUrlValidation: { timeoutMs: 100, maxUrls: 5 },
+		});
+
+		assert.equal(written.valid, false);
+		assert.ok(
+			written.parsed.issues.some(
+				(issue) =>
+					issue.code === "unavailable_ref_locator" &&
+					issue.path === "refs[0]" &&
+					/HTTP 404/.test(issue.message),
+			),
+			JSON.stringify(written.parsed.issues),
+		);
+	} finally {
+		globalThis.fetch = originalFetch;
+		rmSync(taskDir, { recursive: true, force: true });
+	}
+});
+
+test("workflow artifact bundle can restrict refs to an upstream source ledger", async () => {
+	const taskDir = mkdtempSync(join(tmpdir(), "workflow-ref-ledger-"));
+	try {
+		const raw = [
+			"<control>",
+			JSON.stringify({ schema: "stage-control-v1", digest: "ready" }),
+			"</control>",
+			"<analysis>",
+			"Detailed reasoning with one upstream and one invented source.",
+			"</analysis>",
+			"<refs>",
+			JSON.stringify([
+				{ url: "https://example.test/allowed" },
+				{ url: "https://example.test/invented" },
+			]),
+			"</refs>",
+		].join("\n");
+
+		const written = await writeWorkflowTaskArtifactBundle({
+			taskDir,
+			rawOutput: raw,
+			refsAllowedLocators: ["https://example.test/allowed"],
+		});
+
+		assert.equal(written.valid, false);
+		assert.ok(
+			written.parsed.issues.some(
+				(issue) =>
+					issue.code === "unavailable_ref_locator" &&
+					issue.path === "refs[1]" &&
+					/not in the verified upstream source ledger/.test(issue.message),
+			),
+			JSON.stringify(written.parsed.issues),
+		);
+	} finally {
+		rmSync(taskDir, { recursive: true, force: true });
+	}
+});
+
+test("workflow output retry instructions include ref repair guidance", () => {
+	const message = buildWorkflowOutputRetryInstructions([
+		{
+			code: "unavailable_ref_locator",
+			section: "refs",
+			path: "refs[0]",
+			message:
+				"ref URL is not reachable (HTTP 404): https://example.test/stale",
+		},
+	]);
+
+	assert.match(message, /Ref repair guidance/);
+	assert.match(message, /Do not repeat refs/);
+	assert.match(message, /Remove stale refs or replace them/);
+});
+
+test("workflow output retry instructions include claim-support repair guidance", () => {
+	const message = buildWorkflowOutputRetryInstructions([
+		{
+			code: "missing_claim_support",
+			section: "control",
+			path: "$.claimSupports",
+			message: "positive verdict requires claim support",
+		},
+	]);
+
+	assert.match(message, /Claim-support repair guidance/);
+	assert.match(message, /verified or weakened/);
+	assert.match(message, /sourceLocator must also appear in <refs>/);
+});
+
+test("workflow artifact bundle gates positive verifier claim support", async () => {
+	const taskDir = mkdtempSync(join(tmpdir(), "workflow-claim-support-"));
+	try {
+		const raw = [
+			"<control>",
+			JSON.stringify({
+				schema: "stage-control-v1",
+				digest: "claim support ok",
+				findingId: "F1",
+				verdict: "verified",
+				claimSupports: [
+					{
+						claim: "Runtime validates citation evidence.",
+						status: "supports",
+						sourceLocators: ["https://example.test/source"],
+						excerpt: "validates citation evidence",
+					},
+				],
+			}),
+			"</control>",
+			"<analysis>",
+			"Verifier checked the source excerpt.",
+			"</analysis>",
+			"<refs>",
+			JSON.stringify([{ url: "https://example.test/source" }]),
+			"</refs>",
+		].join("\n");
+
+		const written = await writeWorkflowTaskArtifactBundle({
+			taskDir,
+			rawOutput: raw,
+			outputProfile: "verification_result_v1",
+		});
+
+		assert.equal(written.valid, true, JSON.stringify(written.parsed.issues));
+	} finally {
+		rmSync(taskDir, { recursive: true, force: true });
+	}
+});
+
+test("workflow artifact bundle rejects positive verifier support outside refs", async () => {
+	const taskDir = mkdtempSync(join(tmpdir(), "workflow-claim-support-bad-"));
+	try {
+		const raw = [
+			"<control>",
+			JSON.stringify({
+				schema: "stage-control-v1",
+				digest: "claim support bad",
+				findingId: "F1",
+				verdict: "verified",
+				claimSupports: [
+					{
+						claim: "Runtime validates citation evidence.",
+						status: "supports",
+						sourceLocators: ["https://example.test/invented"],
+						excerpt: "validates citation evidence",
+					},
+				],
+			}),
+			"</control>",
+			"<analysis>",
+			"Verifier checked the source excerpt.",
+			"</analysis>",
+			"<refs>",
+			JSON.stringify([{ url: "https://example.test/source" }]),
+			"</refs>",
+		].join("\n");
+
+		const written = await writeWorkflowTaskArtifactBundle({
+			taskDir,
+			rawOutput: raw,
+			outputProfile: "verification_result_v1",
+		});
+
+		assert.equal(written.valid, false);
+		assert.ok(
+			written.parsed.issues.some(
+				(issue) =>
+					issue.code === "source_locator_not_in_refs" &&
+					/also appear in <refs>/.test(issue.message),
+			),
+			JSON.stringify(written.parsed.issues),
+		);
+	} finally {
+		rmSync(taskDir, { recursive: true, force: true });
+	}
+});
+
+test("workflow output parser recovers control object followed by one stray closing brace", () => {
+	const control = {
+		schema: "stage-control-v1",
+		digest: "stray brace recovered",
+		findings: [{ id: "f-1", status: "ok" }],
+	};
+	const raw = [
+		"<control>",
+		`${JSON.stringify(control)}}`,
+		"</control>",
+		"<analysis>",
+		"Analysis.",
+		"</analysis>",
+		"<refs>",
+		"[]",
+		"</refs>",
+	].join("\n");
+	const parsed = parseWorkflowOutput(raw);
+	assert.equal(parsed.valid, true, JSON.stringify(parsed.issues));
+	assert.deepEqual(parsed.control, control);
+	assert.equal(
+		parsed.issues.some(
+			(issue) => issue.code === "invalid_json" && issue.section === "control",
+		),
+		false,
+	);
+});
+
+test("workflow output parser rejects truncated control JSON with invalid_json", () => {
+	const controlText = JSON.stringify({
+		schema: "stage-control-v1",
+		digest: "truncated",
+		details: { ready: true },
+	});
+	const raw = [
+		"<control>",
+		controlText.slice(0, -1),
+		"</control>",
+		"<analysis>",
+		"Analysis.",
+		"</analysis>",
+		"<refs>",
+		"[]",
+		"</refs>",
+	].join("\n");
+	const parsed = parseWorkflowOutput(raw);
+	assert.equal(parsed.valid, false);
+	assert.ok(
+		parsed.issues.some(
+			(issue) => issue.code === "invalid_json" && issue.section === "control",
+		),
+		JSON.stringify(parsed.issues),
+	);
+});
+
+test("workflow output parser rejects substantive trailing control text after first object", () => {
+	const controlText = JSON.stringify({
+		schema: "stage-control-v1",
+		digest: "base object",
+	});
+	const prose = parseWorkflowOutput(
+		[
+			"<control>",
+			`${controlText} trailing prose`,
+			"</control>",
+			"<analysis>",
+			"Analysis.",
+			"</analysis>",
+			"<refs>",
+			"[]",
+			"</refs>",
+		].join("\n"),
+	);
+	assert.equal(prose.valid, false);
+	assert.ok(
+		prose.issues.some(
+			(issue) => issue.code === "invalid_json" && issue.section === "control",
+		),
+		JSON.stringify(prose.issues),
+	);
+
+	const secondObject = parseWorkflowOutput(
+		[
+			"<control>",
+			`${controlText}${JSON.stringify({ schema: "stage-control-v1", digest: "second" })}`,
+			"</control>",
+			"<analysis>",
+			"Analysis.",
+			"</analysis>",
+			"<refs>",
+			"[]",
+			"</refs>",
+		].join("\n"),
+	);
+	assert.equal(secondObject.valid, false);
+	assert.ok(
+		secondObject.issues.some(
+			(issue) => issue.code === "invalid_json" && issue.section === "control",
+		),
+		JSON.stringify(secondObject.issues),
+	);
+});
+
+test("workflow output parser balances control braces inside strings during stray-brace recovery", () => {
+	const control = {
+		schema: "stage-control-v1",
+		digest: 'string has { and } plus escaped quote "inside"',
+		evidence: 'nested-looking {"a":"}"} text and backslash \\ end',
+	};
+	const raw = [
+		"<control>",
+		`${JSON.stringify(control)}}`,
+		"</control>",
+		"<analysis>",
+		"Analysis.",
+		"</analysis>",
+		"<refs>",
+		"[]",
+		"</refs>",
+	].join("\n");
+	const parsed = parseWorkflowOutput(raw);
+	assert.equal(parsed.valid, true, JSON.stringify(parsed.issues));
+	assert.deepEqual(parsed.control, control);
 });
 
 test("workflow output parser tolerates literal closing tags inside JSON strings", () => {
@@ -11532,6 +17771,90 @@ test("minimal JSON schema validator enforces control schema subset", () => {
 	);
 	assert.equal(invalid.valid, false);
 	assert.ok(invalid.issues.some((issue) => issue.path === "$.items"));
+});
+
+test("workflow output parser normalizes reviewer location ranges before schema validation", () => {
+	const schemaDir = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-review",
+		"schemas",
+	);
+	const reviewerSchema = JSON.parse(
+		readFileSync(
+			join(schemaDir, "deep-review-reviewers-control.schema.json"),
+			"utf8",
+		),
+	);
+	const baseFinding = {
+		severity: "medium",
+		title: "Early local transactions can be skipped from persistence",
+		file: "core/txpool/locals/tx_tracker.go",
+		evidenceQuotes: ["func (tracker *TxTracker) Start() error { ... }"],
+	};
+	const parseControl = (control) =>
+		parseWorkflowOutput(
+			[
+				"<control>",
+				JSON.stringify(control),
+				"</control>",
+				"<analysis>",
+				"analysis",
+				"</analysis>",
+				"<refs>",
+				"[]",
+				"</refs>",
+			].join("\n"),
+			{ controlJsonSchema: reviewerSchema },
+		);
+
+	const stringLocations = parseControl({
+		schema: "./schemas/deep-review-reviewers-control.schema.json",
+		digest: "task-7 attempt 1 shape",
+		findings: [
+			{
+				...baseFinding,
+				locations: [
+					"core/txpool/locals/tx_tracker.go:175-178",
+					"core/txpool/locals/journal.go:140",
+				],
+			},
+		],
+	});
+	assert.equal(
+		stringLocations.valid,
+		true,
+		JSON.stringify(stringLocations.issues),
+	);
+	assert.deepEqual(stringLocations.control.findings[0].locations, [
+		{ file: "core/txpool/locals/tx_tracker.go", line: 175, lineEnd: 178 },
+		{ file: "core/txpool/locals/journal.go", line: 140 },
+	]);
+
+	const stringLineRange = parseControl({
+		schema: "./schemas/deep-review-reviewers-control.schema.json",
+		digest: "task-7 attempt 2 shape",
+		findings: [
+			{
+				...baseFinding,
+				locations: [
+					{ file: "core/txpool/locals/tx_tracker.go", line: "175-178" },
+					{ file: "core/txpool/locals/journal.go", line: "140" },
+				],
+			},
+		],
+	});
+	assert.equal(
+		stringLineRange.valid,
+		true,
+		JSON.stringify(stringLineRange.issues),
+	);
+	assert.deepEqual(stringLineRange.control.findings[0].locations, [
+		{ file: "core/txpool/locals/tx_tracker.go", line: 175, lineEnd: 178 },
+		{ file: "core/txpool/locals/journal.go", line: 140 },
+	]);
 });
 
 test("workflow output parser rejects missing sections, bad control, outside prose, and contract failures", () => {

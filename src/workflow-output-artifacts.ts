@@ -25,6 +25,8 @@ const CANONICAL_SECTION_ORDER = [
 	SECTION_REFS,
 ] as const;
 const DEFAULT_MAX_DIGEST_CHARS = 1000;
+const DEFAULT_REFS_URL_VALIDATION_TIMEOUT_MS = 8_000;
+const DEFAULT_REFS_URL_VALIDATION_MAX_URLS = 25;
 
 type WorkflowOutputSectionName = (typeof CANONICAL_SECTION_ORDER)[number];
 
@@ -37,6 +39,13 @@ export type WorkflowOutputIssueCode =
 	| "missing_required_field"
 	| "field_too_long"
 	| "empty_section"
+	| "too_few_items"
+	| "invalid_ref_locator"
+	| "unavailable_ref_locator"
+	| "missing_required_read"
+	| "missing_claim_support"
+	| "missing_claim_support_locator"
+	| "source_locator_not_in_refs"
 	| "contract_failed";
 
 export interface WorkflowOutputIssue {
@@ -59,9 +68,19 @@ export interface ParsedWorkflowOutput {
 export interface ParseWorkflowOutputOptions {
 	analysisRequired?: boolean;
 	refsRequired?: boolean;
+	refsMinItems?: number;
+	refsUrlValidation?: boolean | RefsUrlValidationOptions;
+	refsAllowedLocators?: readonly string[];
 	maxDigestChars?: number;
 	controlContract?: StructuredContract;
 	controlJsonSchema?: JsonSchema;
+	outputProfile?: string;
+}
+
+export interface RefsUrlValidationOptions {
+	enabled?: boolean;
+	timeoutMs?: number;
+	maxUrls?: number;
 }
 
 export interface WorkflowTaskArtifactBundleOptions
@@ -131,6 +150,7 @@ interface SectionMatch {
 interface SectionRequirements {
 	analysisRequired: boolean;
 	refsRequired: boolean;
+	refsMinItems: number;
 }
 
 export function parseWorkflowOutput(
@@ -177,12 +197,39 @@ export function parseWorkflowOutputForBundle(
 	return parseSanitizedWorkflowOutput(raw, options) ?? parsed;
 }
 
+async function validateWorkflowOutputRefsForBundle(
+	parsed: ParsedWorkflowOutput,
+	options: ParseWorkflowOutputOptions,
+): Promise<ParsedWorkflowOutput> {
+	if (!parsed.valid) return parsed;
+	const issues = [
+		...validateRefsAllowedLocators(
+			parsed.refs ?? [],
+			options.refsAllowedLocators,
+		),
+		...validateVerificationClaimSupport(
+			parsed.control,
+			parsed.refs ?? [],
+			options.outputProfile,
+		),
+		...(await validateRefsUrlAvailability(
+			parsed.refs ?? [],
+			options.refsUrlValidation,
+		)),
+	];
+	if (issues.length === 0) return parsed;
+	return { ...parsed, valid: false, issues: [...parsed.issues, ...issues] };
+}
+
 export async function writeWorkflowTaskArtifactBundle(
 	options: WorkflowTaskArtifactBundleOptions,
 ): Promise<WorkflowArtifactBundleWriteResult> {
 	const taskDir = resolve(options.taskDir);
 	await mkdir(taskDir, { recursive: true });
-	const parsed = parseWorkflowOutputForBundle(options.rawOutput, options);
+	const parsed = await validateWorkflowOutputRefsForBundle(
+		parseWorkflowOutputForBundle(options.rawOutput, options),
+		options,
+	);
 	if (!parsed.valid)
 		return await writeInvalidWorkflowOutputAttempt(taskDir, parsed, options);
 	return await writeValidWorkflowOutputBundle(
@@ -204,19 +251,84 @@ export function buildWorkflowOutputRetryInstructions(
 		"Return exactly these sections, in this order, with no prose outside the tags:",
 		"<control>{...}</control>",
 		"<analysis>...</analysis>",
-		"<refs>[]</refs>",
+		"<refs>[...]</refs>",
+		...retryRepairGuidance(issues),
 		"Issues:",
 		...issueLines,
 	].join("\n");
 }
 
+function retryRepairGuidance(issues: readonly WorkflowOutputIssue[]): string[] {
+	const guidance: string[] = [];
+	const hasUnavailableRef = issues.some(
+		(issue) => issue.code === "unavailable_ref_locator",
+	);
+	if (hasUnavailableRef) {
+		guidance.push(
+			"Ref repair guidance:",
+			"- Do not repeat refs that validation reported as unreachable or outside the allowed source ledger.",
+			"- Remove stale refs or replace them with sources you have actually verified with available tools.",
+			"- Keep every remaining <refs> item auditably tied to the revised analysis/control output.",
+		);
+	}
+	const hasClaimSupportIssue = issues.some((issue) =>
+		[
+			"missing_claim_support",
+			"missing_claim_support_locator",
+			"source_locator_not_in_refs",
+		].includes(issue.code),
+	);
+	if (hasClaimSupportIssue) {
+		guidance.push(
+			"Claim-support repair guidance:",
+			"- If verdict/status is verified or weakened, include a positive claimSupports entry with status supports or partial.",
+			"- Each positive claimSupports entry must include sourceLocators and a short excerpt or notes explaining the evidence.",
+			"- Every positive sourceLocator must also appear in <refs>; remove unsupported positive verdicts or downgrade to inconclusive/rejected when evidence is insufficient.",
+		);
+	}
+	const hasRequiredReadIssue = issues.some(
+		(issue) => issue.code === "missing_required_read",
+	);
+	if (hasRequiredReadIssue) {
+		guidance.push(
+			"Required-read repair guidance:",
+			"- Before returning again, call workflow_artifact for each required source listed in the issues.",
+			"- Prefer projected reads with path/maxItems/maxChars when only a JSON slice is needed.",
+		);
+	}
+	const hasJsonIssue = issues.some((issue) => issue.code === "invalid_json");
+	if (hasJsonIssue) {
+		guidance.push(
+			"JSON repair guidance:",
+			"- Return parseable JSON inside <control> and <refs>; do not append prose or a second object inside JSON sections.",
+		);
+	}
+	const hasSchemaIssue = issues.some(
+		(issue) => issue.code === "contract_failed",
+	);
+	if (hasSchemaIssue) {
+		guidance.push(
+			"Schema repair guidance:",
+			"- Preserve the requested output schema exactly; add missing required fields and remove incompatible shapes rather than adding prose explanations.",
+		);
+	}
+	return guidance;
+}
+
 function sectionRequirements(
 	options: ParseWorkflowOutputOptions,
 ): SectionRequirements {
+	const refsMinItems = normalizedRefsMinItems(options.refsMinItems);
 	return {
 		analysisRequired: options.analysisRequired ?? true,
-		refsRequired: options.refsRequired ?? true,
+		refsRequired: (options.refsRequired ?? true) || refsMinItems > 0,
+		refsMinItems,
 	};
+}
+
+function normalizedRefsMinItems(value: number | undefined): number {
+	if (value === undefined) return 0;
+	return Number.isInteger(value) && value > 0 ? value : 0;
 }
 
 function collectSections(
@@ -456,8 +568,89 @@ function parseControlSection(
 		});
 		return undefined;
 	}
-	validateBaseControl(parsed, issues, options);
-	return parsed;
+	const normalized = normalizeWorkflowControl(parsed);
+	validateBaseControl(normalized, issues, options);
+	return normalized;
+}
+
+function normalizeWorkflowControl(
+	control: Record<string, unknown>,
+): Record<string, unknown> {
+	const normalized = normalizeControlValue(control);
+	return isPlainRecord(normalized) ? normalized : control;
+}
+
+function normalizeControlValue(value: unknown): unknown {
+	if (Array.isArray(value)) return value.map(normalizeControlValue);
+	if (!isPlainRecord(value)) return value;
+	const normalized: Record<string, unknown> = {};
+	for (const [key, child] of Object.entries(value)) {
+		normalized[key] =
+			key === "locations" && Array.isArray(child)
+				? child.map(normalizeLocationValue)
+				: normalizeControlValue(child);
+	}
+	return normalized;
+}
+
+function normalizeLocationValue(value: unknown): unknown {
+	if (typeof value === "string") return parseLocationString(value) ?? value;
+	if (!isPlainRecord(value)) return value;
+	const normalized: Record<string, unknown> = { ...value };
+	if (typeof normalized.file === "string" && normalized.line === undefined) {
+		const parsed = parseLocationString(normalized.file);
+		if (parsed !== undefined) {
+			normalized.file = parsed.file;
+			normalized.line = parsed.line;
+			if (parsed.lineEnd !== undefined) normalized.lineEnd = parsed.lineEnd;
+		}
+	}
+	if (typeof normalized.line === "string") {
+		const parsed = parseLineRange(normalized.line);
+		if (parsed !== undefined) {
+			normalized.line = parsed.line;
+			if (normalized.lineEnd === undefined && parsed.lineEnd !== undefined)
+				normalized.lineEnd = parsed.lineEnd;
+		}
+	}
+	if (typeof normalized.lineEnd === "string") {
+		const parsed = parsePositiveInteger(normalized.lineEnd);
+		if (parsed !== undefined) normalized.lineEnd = parsed;
+	}
+	return normalized;
+}
+
+function parseLocationString(
+	value: string,
+): { file: string; line: number; lineEnd?: number } | undefined {
+	const match = /^(.+?):(\d+)(?:\s*[-–—]\s*(\d+))?$/.exec(value.trim());
+	if (!match) return undefined;
+	const file = match[1]?.trim();
+	const line = parsePositiveInteger(match[2] ?? "");
+	const lineEnd = parsePositiveInteger(match[3] ?? "");
+	if (!file || line === undefined) return undefined;
+	return lineEnd !== undefined && lineEnd >= line
+		? { file, line, lineEnd }
+		: { file, line };
+}
+
+function parseLineRange(
+	value: string,
+): { line: number; lineEnd?: number } | undefined {
+	const match = /^(\d+)(?:\s*[-–—]\s*(\d+))?$/.exec(value.trim());
+	if (!match) return undefined;
+	const line = parsePositiveInteger(match[1] ?? "");
+	const lineEnd = parsePositiveInteger(match[2] ?? "");
+	if (line === undefined) return undefined;
+	return lineEnd !== undefined && lineEnd >= line
+		? { line, lineEnd }
+		: { line };
+}
+
+function parsePositiveInteger(value: string): number | undefined {
+	if (!/^\d+$/.test(value.trim())) return undefined;
+	const parsed = Number(value.trim());
+	return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
 
 function parseAnalysisSection(
@@ -484,13 +677,338 @@ function parseRefsSection(
 	if (text === undefined) return requirements.refsRequired ? undefined : [];
 	const parsed = parseJsonSection(text, SECTION_REFS, issues);
 	if (parsed === undefined) return undefined;
-	if (Array.isArray(parsed)) return parsed;
+	if (Array.isArray(parsed)) {
+		if (parsed.length < requirements.refsMinItems) {
+			issues.push({
+				code: "too_few_items",
+				section: SECTION_REFS,
+				message:
+					requirements.refsMinItems === 1
+						? "refs must include at least one item"
+						: `refs must include at least ${requirements.refsMinItems} items`,
+			});
+		}
+		if (requirements.refsMinItems > 0) validateRefsLocators(parsed, issues);
+		return parsed;
+	}
 	issues.push({
 		code: "invalid_type",
 		section: SECTION_REFS,
 		message: "refs must be a JSON array",
 	});
 	return undefined;
+}
+
+function validateRefsLocators(
+	refs: readonly unknown[],
+	issues: WorkflowOutputIssue[],
+): void {
+	refs.forEach((ref, index) => {
+		const locator = refLocator(ref);
+		if (locator !== undefined && locator.trim().length > 0) return;
+		issues.push({
+			code: "invalid_ref_locator",
+			section: SECTION_REFS,
+			path: `refs[${index}]`,
+			message:
+				"refs items must include a non-empty locator string (string item, or object url/ref/path/taskId/source)",
+		});
+	});
+}
+
+function refLocator(ref: unknown): string | undefined {
+	if (typeof ref === "string") return ref;
+	if (!ref || typeof ref !== "object") return undefined;
+	const record = ref as Record<string, unknown>;
+	for (const key of ["url", "ref", "path", "taskId", "source"]) {
+		const value = record[key];
+		if (typeof value === "string") return value;
+	}
+	return undefined;
+}
+
+function validateRefsAllowedLocators(
+	refs: readonly unknown[],
+	allowedLocators: readonly string[] | undefined,
+): WorkflowOutputIssue[] {
+	if (allowedLocators === undefined) return [];
+	const allowed = new Set(
+		allowedLocators.flatMap((locator) => refLocatorAliases(locator)),
+	);
+	const issues: WorkflowOutputIssue[] = [];
+	refs.forEach((ref, index) => {
+		const locator = refLocator(ref);
+		if (locator === undefined || locator.trim().length === 0) return;
+		const aliases = refLocatorAliases(locator);
+		if (aliases.some((alias) => allowed.has(alias))) return;
+		issues.push({
+			code: "unavailable_ref_locator",
+			section: SECTION_REFS,
+			path: `refs[${index}]`,
+			message: `ref locator is not in the verified upstream source ledger: ${locator}`,
+		});
+	});
+	return issues;
+}
+
+function validateVerificationClaimSupport(
+	control: Record<string, unknown> | undefined,
+	refs: readonly unknown[],
+	outputProfile: string | undefined,
+): WorkflowOutputIssue[] {
+	if (outputProfile !== "verification_result_v1") return [];
+	if (!control) return [];
+	const verdict = control.verdict ?? control.status;
+	if (verdict !== "verified" && verdict !== "weakened") return [];
+	const entries = positiveClaimSupportEntries(control);
+	if (entries.length === 0) {
+		return [
+			{
+				code: "missing_claim_support",
+				section: SECTION_CONTROL,
+				path: "$.claimSupports",
+				message:
+					"verification_result_v1 positive verdict requires at least one positive claimSupports entry",
+			},
+		];
+	}
+	const refAliases = new Set(
+		refs.flatMap((ref) => {
+			const locator = refLocator(ref);
+			return locator ? refLocatorAliases(locator) : [];
+		}),
+	);
+	const issues: WorkflowOutputIssue[] = [];
+	for (const [index, entry] of entries.entries()) {
+		const locators = claimSupportLocators(entry);
+		if (locators.length === 0) {
+			issues.push({
+				code: "missing_claim_support_locator",
+				section: SECTION_CONTROL,
+				path: `$.claimSupports[${index}].sourceLocators`,
+				message:
+					"positive claimSupports entries must include at least one source locator",
+			});
+			continue;
+		}
+		for (const locator of locators) {
+			const aliases = refLocatorAliases(locator);
+			if (aliases.some((alias) => refAliases.has(alias))) continue;
+			issues.push({
+				code: "source_locator_not_in_refs",
+				section: SECTION_CONTROL,
+				path: `$.claimSupports[${index}].sourceLocators`,
+				message: `positive claim support locator must also appear in <refs>: ${locator}`,
+			});
+		}
+	}
+	return issues;
+}
+
+function positiveClaimSupportEntries(
+	control: Record<string, unknown>,
+): Record<string, unknown>[] {
+	const raw =
+		control.claimSupports ??
+		control.sourceSupports ??
+		control.claimSourceSupport ??
+		control.sourceSupport;
+	const entries = Array.isArray(raw)
+		? raw
+		: raw && typeof raw === "object"
+			? [raw]
+			: hasTopLevelClaimSupportFields(control)
+				? [control]
+				: [];
+	return entries.filter(
+		(entry): entry is Record<string, unknown> =>
+			!!entry &&
+			typeof entry === "object" &&
+			!Array.isArray(entry) &&
+			isPositiveClaimSupportStatus(
+				entry.status ??
+					entry.supportStatus ??
+					entry.support ??
+					entry.verdict ??
+					control.verdict ??
+					control.status,
+			),
+	);
+}
+
+function hasTopLevelClaimSupportFields(
+	control: Record<string, unknown>,
+): boolean {
+	return [
+		"claim",
+		"sourceLocators",
+		"locators",
+		"sources",
+		"refs",
+		"urls",
+		"sourceRefs",
+		"excerpt",
+		"quote",
+	].some((key) => control[key] !== undefined);
+}
+
+function claimSupportLocators(entry: Record<string, unknown>): string[] {
+	return [
+		...refLocatorsField(entry.sourceLocators),
+		...refLocatorsField(entry.locators),
+		...refLocatorsField(entry.sources),
+		...refLocatorsField(entry.refs),
+		...refLocatorsField(entry.urls),
+		...(refLocator(entry) ? [refLocator(entry)!] : []),
+	].filter(Boolean);
+}
+
+function refLocatorsField(value: unknown): string[] {
+	if (typeof value === "string" && value.trim()) return [value.trim()];
+	if (!Array.isArray(value)) return [];
+	return value.flatMap((item) => {
+		const locator = refLocator(item);
+		return locator ? [locator] : [];
+	});
+}
+
+function isPositiveClaimSupportStatus(value: unknown): boolean {
+	return (
+		value === "supports" ||
+		value === "partial" ||
+		value === "verified" ||
+		value === "weakened"
+	);
+}
+
+function refLocatorAliases(locator: string): string[] {
+	const trimmed = locator.trim();
+	if (!trimmed) return [];
+	const aliases = new Set<string>([trimmed]);
+	try {
+		const parsed = new URL(trimmed);
+		if (["http:", "https:"].includes(parsed.protocol)) {
+			aliases.add(parsed.href);
+			if (parsed.pathname !== "/" && parsed.pathname.endsWith("/")) {
+				const withoutTrailingSlash = new URL(parsed.href);
+				withoutTrailingSlash.pathname = withoutTrailingSlash.pathname.replace(
+					/\/+$/u,
+					"",
+				);
+				aliases.add(withoutTrailingSlash.href);
+			}
+		}
+	} catch {
+		// Non-URL refs are matched exactly after trimming.
+	}
+	return [...aliases];
+}
+
+async function validateRefsUrlAvailability(
+	refs: readonly unknown[],
+	option: ParseWorkflowOutputOptions["refsUrlValidation"],
+): Promise<WorkflowOutputIssue[]> {
+	const config = refsUrlValidationConfig(option);
+	if (!config) return [];
+	const issues: WorkflowOutputIssue[] = [];
+	const checks = new Map<
+		string,
+		Promise<{ ok: true } | { ok: false; reason: string }>
+	>();
+	let checkedUrls = 0;
+	for (const [index, ref] of refs.entries()) {
+		const locator = refLocator(ref);
+		const href = locator === undefined ? undefined : httpRefHref(locator);
+		if (href === undefined) continue;
+		if (checkedUrls >= config.maxUrls) break;
+		checkedUrls += 1;
+		let check = checks.get(href);
+		if (!check) {
+			check = checkRefUrlAvailability(href, config.timeoutMs);
+			checks.set(href, check);
+		}
+		const result = await check;
+		if (result.ok) continue;
+		issues.push({
+			code: "unavailable_ref_locator",
+			section: SECTION_REFS,
+			path: `refs[${index}]`,
+			message: `ref URL is not reachable (${result.reason}): ${href}`,
+		});
+	}
+	return issues;
+}
+
+function refsUrlValidationConfig(
+	option: ParseWorkflowOutputOptions["refsUrlValidation"],
+): { timeoutMs: number; maxUrls: number } | undefined {
+	if (!option) return undefined;
+	if (option === true) {
+		return {
+			timeoutMs: DEFAULT_REFS_URL_VALIDATION_TIMEOUT_MS,
+			maxUrls: DEFAULT_REFS_URL_VALIDATION_MAX_URLS,
+		};
+	}
+	if (option.enabled === false) return undefined;
+	return {
+		timeoutMs:
+			Number.isInteger(option.timeoutMs) && option.timeoutMs! > 0
+				? option.timeoutMs!
+				: DEFAULT_REFS_URL_VALIDATION_TIMEOUT_MS,
+		maxUrls:
+			Number.isInteger(option.maxUrls) && option.maxUrls! > 0
+				? option.maxUrls!
+				: DEFAULT_REFS_URL_VALIDATION_MAX_URLS,
+	};
+}
+
+function httpRefHref(locator: string): string | undefined {
+	try {
+		const parsed = new URL(locator);
+		return ["http:", "https:"].includes(parsed.protocol)
+			? parsed.href
+			: undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+async function checkRefUrlAvailability(
+	href: string,
+	timeoutMs: number,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+	const headers = { "user-agent": "pi-workflow-ref-validator/0.1" };
+	for (const attempt of [
+		{ method: "HEAD", headers },
+		{ method: "GET", headers: { ...headers, range: "bytes=0-2047" } },
+	]) {
+		try {
+			const response = await fetch(href, {
+				...attempt,
+				redirect: "follow",
+				signal: AbortSignal.timeout(timeoutMs),
+			});
+			if (response.ok) {
+				if (attempt.method === "GET") {
+					try {
+						await response.arrayBuffer();
+					} catch {
+						// Availability was already established by the HTTP status.
+					}
+				}
+				return { ok: true };
+			}
+			if (attempt.method === "GET")
+				return { ok: false, reason: `HTTP ${response.status}` };
+		} catch (error) {
+			if (attempt.method === "GET") {
+				const reason =
+					error instanceof Error ? error.message || error.name : String(error);
+				return { ok: false, reason };
+			}
+		}
+	}
+	return { ok: false, reason: "request failed" };
 }
 
 function validateControlContract(
@@ -752,6 +1270,10 @@ function parseJsonSection(
 	try {
 		return JSON.parse(text);
 	} catch (error) {
+		if (section === SECTION_CONTROL) {
+			const recovered = parseFirstBalancedControlJson(text);
+			if (recovered !== undefined) return recovered;
+		}
 		issues.push({
 			code: "invalid_json",
 			section,
@@ -759,6 +1281,64 @@ function parseJsonSection(
 		});
 		return undefined;
 	}
+}
+
+function parseFirstBalancedControlJson(text: string): unknown | undefined {
+	const json = firstBalancedJsonObject(text);
+	if (json === undefined) return undefined;
+	const objectStart = text.indexOf("{");
+	if (objectStart < 0) return undefined;
+	if (text.slice(0, objectStart).trim().length > 0) return undefined;
+	const remainder = text.slice(objectStart + json.length);
+	if (!isTrivialControlJsonRemainder(remainder)) return undefined;
+	try {
+		return JSON.parse(json);
+	} catch {
+		return undefined;
+	}
+}
+
+function firstBalancedJsonObject(text: string): string | undefined {
+	const start = text.indexOf("{");
+	if (start < 0) return undefined;
+	let depth = 0;
+	let inString = false;
+	let escaped = false;
+	for (let index = start; index < text.length; index += 1) {
+		const char = text[index];
+		if (char === undefined) break;
+		if (inString) {
+			if (escaped) {
+				escaped = false;
+				continue;
+			}
+			if (char === "\\") {
+				escaped = true;
+				continue;
+			}
+			if (char === '"') inString = false;
+			continue;
+		}
+		if (char === '"') {
+			inString = true;
+			continue;
+		}
+		if (char === "{") {
+			depth += 1;
+			continue;
+		}
+		if (char === "}") {
+			depth -= 1;
+			if (depth === 0) return text.slice(start, index + 1);
+			if (depth < 0) return undefined;
+		}
+	}
+	return undefined;
+}
+
+function isTrivialControlJsonRemainder(remainder: string): boolean {
+	const trimmed = remainder.trim();
+	return trimmed.length === 0 || trimmed === "}" || trimmed === "]";
 }
 
 function validateBaseControl(

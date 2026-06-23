@@ -1,5 +1,21 @@
-import { appendFile, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
-import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import {
+	appendFile,
+	mkdir,
+	readFile,
+	readdir,
+	stat,
+	writeFile,
+} from "node:fs/promises";
+import {
+	basename,
+	dirname,
+	extname,
+	isAbsolute,
+	join,
+	relative,
+	resolve,
+	sep,
+} from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
 
@@ -16,13 +32,13 @@ import {
 	isTerminalTaskStatus,
 	listRunRecords,
 	makeRunId,
-	nowIso,
 	readIndex,
 	readJson,
 	readRunRecord,
 	resetTaskForResume,
 	setTaskTerminal,
 	supervisorPath,
+	toProjectPath,
 	updateIndex,
 	withRunLease,
 	workflowRunDir,
@@ -33,11 +49,20 @@ import {
 } from "./store.js";
 import { resolveWorkflowBackend } from "./backend.js";
 import { ensureManagedWorktree } from "./worktree.js";
-import { loadWorkflowHelper, resolveWorkflowHelperRef } from "./workflow-helpers.js";
+import {
+	loadWorkflowHelper,
+	resolveWorkflowHelperRef,
+} from "./workflow-helpers.js";
 import {
 	WORKFLOW_ARTIFACT_TOOL_NAME,
 	writeWorkflowArtifactExtensionWrapper,
 } from "./workflow-artifact-extension.js";
+import {
+	buildAvailableToolView,
+	classifyToolCapability,
+	effectiveToolClassification,
+	providersForSelectedTools,
+} from "./tool-metadata.js";
 import {
 	WORKFLOW_SOURCE_MANIFEST_SCHEMA,
 	type WorkflowSourceManifest,
@@ -62,10 +87,29 @@ import {
 	recordDynamicControllerPhase,
 	recordDynamicControllerStatus,
 	recordDynamicEventAndUpdateState,
+	type DynamicControllerStatus,
 } from "./dynamic-state.js";
+import {
+	validateDynamicDecision,
+	writeDynamicDecisionArtifacts,
+} from "./dynamic-decision.js";
+import {
+	isDynamicOutputProfile,
+	type DynamicOutputProfile,
+} from "./dynamic-profiles.js";
+import {
+	DIRECT_DYNAMIC_RUNTIME_VERSION,
+	ensureDirectDynamicRuntimeBundle,
+} from "./dynamic-runtime-bundle.js";
+import {
+	assembleDynamicStateIndex,
+	extractDynamicStateArtifact,
+	writeDynamicStateIndexArtifacts,
+} from "./dynamic-state-index.js";
 import {
 	type CompiledDynamicWorkflowTask,
 	type CompiledTask,
+	type CompiledToolProvider,
 	type CompiledWorkflow,
 	type LoopResultStatus,
 	type LoopStateRecord,
@@ -87,22 +131,20 @@ const MAX_CONCURRENCY = 16;
 const LOOP_CARRY_FORWARD_MAX_CHARS = 4000;
 const LOOP_SUMMARY_MAX_CHARS = 1200;
 const SOURCE_CONTEXT_PREVIEW_CHARS = 1_200;
-const DYNAMIC_READ_ONLY_TOOLS = new Set([
-	"read",
-	"grep",
-	"find",
-	"ls",
-	"web_search",
-	"fetch_content",
-	"get_search_content",
-	"scrapling_fetch",
-]);
-const DYNAMIC_WRITE_TOOLS = new Set(["edit", "write"]);
-const DYNAMIC_MUTATION_TOOLS = new Set(["bash"]);
 const SOURCE_CONTEXT_STRUCTURED_CHARS = 6_000;
 const SOURCE_CONTEXT_MAX_PACKET_CHARS = 48_000;
 const DYNAMIC_APPROVAL_TIMEOUT_MS = 5 * 60_000;
-
+const DYNAMIC_CONTROLLER_ENGINE_CAPABILITIES = Object.freeze({
+	decisionLoop: true,
+});
+const DYNAMIC_CONTROLLER_ENGINE_INTEGRITY_ERROR_MESSAGE =
+	"incompatible or stale pi-workflow engine: dynamic controller context is missing runDecisionLoop (rebuild dist / reload workflow engine)";
+const DYNAMIC_OUTPUT_MAX_DIGEST_CHARS = 1000;
+const DYNAMIC_DELEGATION_TOOLS = new Set([
+	"skill_test_subagent",
+	"workflow",
+	"/workflow",
+]);
 const supervisorTimers = new Map<string, ReturnType<typeof setInterval>>();
 
 export interface DynamicWorkflowUi {
@@ -132,20 +174,53 @@ export async function runWorkflowSpec(
 	options: WorkflowRunOptions = {},
 ): Promise<WorkflowRunRecord> {
 	const loaded = await loadWorkflowSpec(specPath, cwd);
-	const compiled = await compileWorkflow(loaded.spec, {
+	return runLoadedWorkflowSpec(cwd, loaded.specPath, loaded.spec, options);
+}
+
+export async function runDynamicTask(
+	cwd: string,
+	options: WorkflowRunOptions = {},
+): Promise<WorkflowRunRecord> {
+	if (!options.task || options.task.trim() === "") {
+		throw new Error(
+			'This dynamic workflow needs a task. Usage: /workflow dynamic "<task>"',
+		);
+	}
+	const specPath = await ensureDirectDynamicRuntimeBundle(cwd);
+	const loaded = await loadWorkflowSpec(specPath, cwd);
+	return runLoadedWorkflowSpec(cwd, loaded.specPath, loaded.spec, options, {
+		mode: "direct-dynamic",
+		requestedWorkflow: null,
+		specPath: null,
+		userSelectedWorkflow: false,
+		generatedSpec: false,
+		runtimeBundle: toProjectPath(cwd, loaded.specPath),
+		runtimeVersion: DIRECT_DYNAMIC_RUNTIME_VERSION,
+	});
+}
+
+async function runLoadedWorkflowSpec(
+	cwd: string,
+	specPath: string,
+	spec: Parameters<typeof compileWorkflow>[0],
+	options: WorkflowRunOptions,
+	provenance?: WorkflowRunRecord["provenance"],
+): Promise<WorkflowRunRecord> {
+	const compiled = await compileWorkflow(spec, {
 		cwd,
-		specPath: loaded.specPath,
+		specPath,
 		task: options.task,
 		runtimeDefaults: options.runtimeDefaults,
 	});
 
-	const { run } = await createRunRecord(cwd, compiled, loaded.specPath, {
+	const { run } = await createRunRecord(cwd, compiled, specPath, {
 		runId: options.runId,
 		parentRunId: options.parentRunId,
 		rootRunId: options.parentRunId,
 	});
+	if (provenance) run.provenance = provenance;
 	await withRunLease(cwd, run.runId, async () => {
-		await writeStaticRunArtifacts(cwd, run, compiled, loaded.spec);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
 		await writeRunRecord(cwd, run);
 	});
 
@@ -479,7 +554,8 @@ async function scheduleDag(
 			run,
 			compiledFlow,
 		);
-		if (dynamicReconciled || staleDynamicRecovered) await writeRunRecord(cwd, run);
+		if (dynamicReconciled || staleDynamicRecovered)
+			await writeRunRecord(cwd, run);
 		assertRunTaskPositionalAlignment(run, compiledFlow);
 	}
 
@@ -592,7 +668,10 @@ async function suspendedDynamicControllerStillWaiting(
 	}
 	const generatedTasks = generatedTaskIds
 		.map((specId) => run.tasks.find((candidate) => candidate.specId === specId))
-		.filter((candidate): candidate is WorkflowTaskRunRecord => candidate !== undefined);
+		.filter(
+			(candidate): candidate is WorkflowTaskRunRecord =>
+				candidate !== undefined,
+		);
 	let waiting = generatedTasks.some(
 		(generated) => !isTerminalTaskStatus(generated.status),
 	);
@@ -603,7 +682,8 @@ async function suspendedDynamicControllerStillWaiting(
 	) {
 		return true;
 	}
-	for (const nestedRunId of controllerState?.waitingNestedWorkflowRunIds ?? []) {
+	for (const nestedRunId of controllerState?.waitingNestedWorkflowRunIds ??
+		[]) {
 		const nestedRun = await readRunRecord(cwd, nestedRunId).catch(
 			() => undefined,
 		);
@@ -2409,12 +2489,13 @@ async function executeDynamicControllerTask(
 			return false;
 		}
 	}
-	const runtimeBudgetMessage = await dynamicRuntimeBudgetExceededMessageForController(
-		cwd,
-		run.runId,
-		task.specId,
-		compiledTask.dynamic,
-	);
+	const runtimeBudgetMessage =
+		await dynamicRuntimeBudgetExceededMessageForController(
+			cwd,
+			run.runId,
+			task.specId,
+			compiledTask.dynamic,
+		);
 	if (runtimeBudgetMessage) {
 		await recordDynamicControllerStatus(cwd, run.runId, {
 			controllerSpecId: task.specId,
@@ -2447,9 +2528,12 @@ async function executeDynamicControllerTask(
 		activeRuntimeRecorded = true;
 		const elapsedMs = Math.max(0, Date.now() - activeRuntimeStartedAt);
 		if (elapsedMs === 0) return;
-		await recordDynamicRuntimeUsage(cwd, run.runId, task.specId, elapsedMs).catch(
-			() => undefined,
-		);
+		await recordDynamicRuntimeUsage(
+			cwd,
+			run.runId,
+			task.specId,
+			elapsedMs,
+		).catch(() => undefined);
 	};
 
 	try {
@@ -2475,36 +2559,64 @@ async function executeDynamicControllerTask(
 			dynamic: compiledTask.dynamic,
 		});
 		await recordActiveRuntime();
+		const unrunBranchBlockers = await dynamicUnrunBranchBlockers(
+			cwd,
+			run.runId,
+			task.specId,
+		);
+		const outputForOutcome =
+			unrunBranchBlockers.length > 0
+				? dynamicControllerOutputWithBranchBlockers(
+						structuredOutput,
+						unrunBranchBlockers,
+					)
+				: structuredOutput;
+		const outcome = dynamicControllerOutcomeFromOutput(outputForOutcome);
 		if (compiledTask.artifactGraph?.enabled) {
-			await writeArtifactGraphDynamicResult(cwd, task, structuredOutput);
+			await writeArtifactGraphDynamicResult(
+				cwd,
+				task,
+				outputForOutcome,
+				outcome.lifecycleStatus,
+			);
 		} else {
 			await mkdir(dirname(fromProjectPath(cwd, task.files.output)), {
 				recursive: true,
 			});
 			await writeFile(
 				fromProjectPath(cwd, task.files.output),
-				`${JSON.stringify(structuredOutput, null, 2)}\n`,
+				`${JSON.stringify(outputForOutcome, null, 2)}\n`,
 				"utf8",
 			);
 			await writeFile(fromProjectPath(cwd, task.files.stderr), "", "utf8");
 			await writeJsonAtomic(fromProjectPath(cwd, task.files.result), {
-				status: "completed",
-				structuredOutput,
+				status: outcome.lifecycleStatus,
+				structuredOutput: outputForOutcome,
 			});
 		}
 		await recordDynamicControllerStatus(cwd, run.runId, {
 			controllerSpecId: task.specId,
-			status: "complete",
+			status: outcome.controllerStatus,
+			...(outcome.taskStatus === "completed"
+				? {}
+				: { message: outcome.message }),
+			blockers: outcome.blockers,
+			omissions: outcome.omissions,
 		});
-		setTaskTerminal(task, "completed", "dynamic_completed", {
-			lastMessage: "dynamic controller completed",
+		setTaskTerminal(task, outcome.taskStatus, outcome.statusDetail, {
+			lastMessage: outcome.message,
 		});
 		await writeRunRecord(cwd, run);
-		return true;
+		return outcome.taskStatus === "completed";
 	} catch (error) {
 		await recordActiveRuntime();
 		if (error instanceof DynamicControllerSuspended) {
-			const message = await dynamicSuspensionMessage(cwd, run, task, error.message);
+			const message = await dynamicSuspensionMessage(
+				cwd,
+				run,
+				task,
+				error.message,
+			);
 			await recordDynamicControllerStatus(cwd, run.runId, {
 				controllerSpecId: task.specId,
 				status: "suspended_waiting_children",
@@ -2556,6 +2668,16 @@ async function executeDynamicControllerTask(
 	}
 }
 
+function dynamicDecisionLoopModuleUrl(): string {
+	const enginePath = fileURLToPath(import.meta.url);
+	if (extname(enginePath) === ".ts") {
+		return pathToFileURL(
+			resolve(dirname(enginePath), "../dist/dynamic-decision-loop.js"),
+		).href;
+	}
+	return new URL("./dynamic-decision-loop.js", import.meta.url).href;
+}
+
 async function runDynamicControllerWorker(input: {
 	cwd: string;
 	run: WorkflowRunRecord;
@@ -2573,18 +2695,32 @@ async function runDynamicControllerWorker(input: {
 		input.helperSpecPath,
 		{ label: "dynamic controller" },
 	);
+	const controllerStageId =
+		input.controllerTask.stageId ??
+		input.controllerTask.specId.replace(/\.controller$/, "");
 	const state = await readOrRebuildDynamicState(input.cwd, input.run.runId);
-	const generatedTaskIds = [
-		...(state.controllers[input.controllerTask.specId]?.generatedTaskIds ?? []),
-	];
+	const controllerState = state.controllers[input.controllerTask.specId];
+	const generatedTaskIds = [...(controllerState?.generatedTaskIds ?? [])];
+	const generatedBranchTaskIds = (controllerState?.branches ?? [])
+		.map((branch) => branch.specId)
+		.filter((specId): specId is string => typeof specId === "string");
 	const worker = new Worker(DYNAMIC_CONTROLLER_WORKER_SOURCE, {
 		eval: true,
 		workerData: {
 			controllerUrl: pathToFileURL(resolved.path).href,
+			decisionLoopModuleUrl: dynamicDecisionLoopModuleUrl(),
+			engineCapabilities: DYNAMIC_CONTROLLER_ENGINE_CAPABILITIES,
 			task: input.compiledFlow.task ?? input.controllerCompiledTask.task,
 			sources: input.sources,
+			controllerStageId,
 			generatedTaskIds,
+			generatedBranchTaskIds,
 			budgetRemaining: await currentDynamicBudgetRemaining(input),
+			availableTools: buildAvailableToolView(
+				input.controllerCompiledTask.runtime.tools,
+				input.controllerCompiledTask.runtime.toolProviders,
+			),
+			decisionLoop: input.dynamic.decisionLoop,
 		},
 	});
 	const helperCallCounts = new Map<string, number>();
@@ -2612,15 +2748,18 @@ async function runDynamicControllerWorker(input: {
 			void worker.terminate().catch(() => undefined);
 			callback();
 		};
-		const timer = setTimeout(() => {
-			finish(() =>
-				rejectPromise(
-					new DynamicControllerBudgetBlocked(
-						`dynamic runtime budget exhausted: maxRuntimeMs=${input.dynamic.budget.maxRuntimeMs}`,
+		const timer = setTimeout(
+			() => {
+				finish(() =>
+					rejectPromise(
+						new DynamicControllerBudgetBlocked(
+							`dynamic runtime budget exhausted: maxRuntimeMs=${input.dynamic.budget.maxRuntimeMs}`,
+						),
 					),
-				),
-			);
-		}, Math.max(1, timeoutMs));
+				);
+			},
+			Math.max(1, timeoutMs),
+		);
 		worker.on("message", (message) => {
 			const runHandler = async (): Promise<void> => {
 				if (settled) return;
@@ -2650,6 +2789,68 @@ async function runDynamicControllerWorker(input: {
 			opQueue = opQueue.then(runHandler, runHandler).catch((error) => {
 				finish(() => rejectPromise(error));
 			});
+		});
+		worker.on("error", (error) => finish(() => rejectPromise(error)));
+		worker.on("exit", (code) => {
+			if (!settled && code !== 0) {
+				finish(() =>
+					rejectPromise(
+						new Error(`dynamic controller worker exited with code ${code}`),
+					),
+				);
+			}
+		});
+	});
+}
+
+export async function runDynamicControllerEngineIntegrityCheckForTests(
+	input: {
+		controllerSource?: string;
+		engineCapabilities?: Record<string, unknown>;
+	} = {},
+): Promise<unknown> {
+	const controllerSource =
+		input.controllerSource ??
+		"export default function controller() { return { ok: true }; }\n";
+	const worker = new Worker(DYNAMIC_CONTROLLER_WORKER_SOURCE, {
+		eval: true,
+		workerData: {
+			controllerUrl: `data:text/javascript;charset=utf-8,${encodeURIComponent(controllerSource)}`,
+			decisionLoopModuleUrl: dynamicDecisionLoopModuleUrl(),
+			engineCapabilities:
+				input.engineCapabilities ?? DYNAMIC_CONTROLLER_ENGINE_CAPABILITIES,
+			task: "",
+			sources: {},
+			generatedTaskIds: [],
+			generatedBranchTaskIds: [],
+			budgetRemaining: {},
+			availableTools: [],
+			decisionLoop: null,
+		},
+	});
+
+	return await new Promise<unknown>((resolvePromise, rejectPromise) => {
+		let settled = false;
+		const finish = (callback: () => void): void => {
+			if (settled) return;
+			settled = true;
+			worker.removeAllListeners();
+			void worker.terminate().catch(() => undefined);
+			callback();
+		};
+		worker.on("message", (message) => {
+			if (message?.type === "done") finish(() => resolvePromise(message.value));
+			else if (message?.type === "error") {
+				finish(() => rejectPromise(dynamicWorkerError(message.error)));
+			} else if (message?.type === "op") {
+				finish(() =>
+					rejectPromise(
+						new Error(
+							`unexpected dynamic controller test operation: ${String(message.op)}`,
+						),
+					),
+				);
+			}
 		});
 		worker.on("error", (error) => finish(() => rejectPromise(error)));
 		worker.on("exit", (code) => {
@@ -2711,7 +2912,11 @@ async function handleDynamicWorkerMessage(
 		return;
 	}
 	if (message.type === "done") {
-		await assertPriorDynamicOpsReplayed(input, state.replayedOpIds, state.replayPrefix);
+		await assertPriorDynamicOpsReplayed(
+			input,
+			state.replayedOpIds,
+			state.replayPrefix,
+		);
 		state.finish(() => state.resolve(message.value));
 		return;
 	}
@@ -2734,11 +2939,21 @@ async function handleDynamicWorkerMessage(
 			const request = normalizeDynamicAgentRequest(message.request);
 			const opId = `${input.controllerTask.specId}:agent:${request.id}`;
 			if (state.agentOpIds.has(opId)) {
-				throw new Error(`duplicate dynamic agent id in one controller execution: ${request.id}`);
+				throw new Error(
+					`duplicate dynamic agent id in one controller execution: ${request.id}`,
+				);
 			}
 			state.agentOpIds.add(opId);
-			assertDynamicReplayPrefix(state.replayPrefix, opId);
-			state.replayedOpIds.add(opId);
+			const replayOpId = await dynamicReplayOpIdForAgentRequest({
+				cwd: input.cwd,
+				runId: input.run.runId,
+				controllerSpecId: input.controllerTask.specId,
+				opId,
+				branchId: request.branchId,
+				requestHash: hashDynamicRequest(request),
+			});
+			assertDynamicReplayPrefix(state.replayPrefix, replayOpId);
+			state.replayedOpIds.add(replayOpId);
 			value = await runDynamicAgentRequest({
 				...input,
 				request,
@@ -2746,11 +2961,104 @@ async function handleDynamicWorkerMessage(
 				isSettled: state.isSettled,
 			});
 			state.setGeneratedTaskIds([
-				...(await readOrRebuildDynamicState(input.cwd, input.run.runId))
-					.controllers[input.controllerTask.specId]?.generatedTaskIds ?? [],
+				...((await readOrRebuildDynamicState(input.cwd, input.run.runId))
+					.controllers[input.controllerTask.specId]?.generatedTaskIds ?? []),
 			]);
+		} else if (message.op === "decision") {
+			const callIndex = requiredDynamicPositiveInteger(
+				message.callIndex,
+				"decision call index",
+				"ctx.decision.validateAndPersist()",
+			);
+			const opId = `${input.controllerTask.specId}:decision:${String(callIndex).padStart(3, "0")}`;
+			assertDynamicReplayPrefix(state.replayPrefix, opId);
+			state.replayedOpIds.add(opId);
+			value = await runDynamicDecisionPersistCall({
+				cwd: input.cwd,
+				run: input.run,
+				controllerTask: input.controllerTask,
+				opId,
+				callIndex,
+				rawDecision: message.rawDecision,
+				context: message.context,
+			});
+		} else if (message.op === "fanoutPlan") {
+			const callIndex = requiredDynamicPositiveInteger(
+				message.callIndex,
+				"fanout plan call index",
+				"ctx.fanout.plan()",
+			);
+			const request = normalizeDynamicFanoutPlanRequest(message.request);
+			const opId = `${input.controllerTask.specId}:fanout:r${request.round}:${request.decisionHash}`;
+			assertDynamicReplayPrefix(state.replayPrefix, opId);
+			state.replayedOpIds.add(opId);
+			value = await runDynamicFanoutPlanPersistCall({
+				cwd: input.cwd,
+				run: input.run,
+				controllerTask: input.controllerTask,
+				opId,
+				callIndex,
+				request,
+			});
+		} else if (message.op === "stateIndex") {
+			const callIndex = requiredDynamicPositiveInteger(
+				message.callIndex,
+				"state index call index",
+				"ctx.stateIndex.extractAndPersist()",
+			);
+			const opId = `${input.controllerTask.specId}:state-index:${String(callIndex).padStart(3, "0")}`;
+			assertDynamicReplayPrefix(state.replayPrefix, opId);
+			state.replayedOpIds.add(opId);
+			value = await runDynamicStateIndexPersistCall({
+				cwd: input.cwd,
+				run: input.run,
+				controllerTask: input.controllerTask,
+				controllerCompiledTask: input.controllerCompiledTask,
+				opId,
+				callIndex,
+				request: message.request,
+			});
+		} else if (message.op === "controllerStatus") {
+			const callIndex = requiredDynamicPositiveInteger(
+				message.callIndex,
+				"controller status call index",
+				"ctx.dynamic.recordDecisionLoopStatus()",
+			);
+			const opId = `${input.controllerTask.specId}:decision-loop-status:${String(callIndex).padStart(3, "0")}`;
+			assertDynamicReplayPrefix(state.replayPrefix, opId);
+			state.replayedOpIds.add(opId);
+			value = await runDynamicDecisionLoopStatusPersistCall({
+				cwd: input.cwd,
+				run: input.run,
+				controllerTask: input.controllerTask,
+				opId,
+				callIndex,
+				request: message.request,
+			});
+		} else if (message.op === "result") {
+			const callIndex = requiredDynamicPositiveInteger(
+				message.callIndex,
+				"result call index",
+				"ctx.result()",
+			);
+			const opId = `${input.controllerTask.specId}:result:${String(callIndex).padStart(3, "0")}`;
+			assertDynamicReplayPrefix(state.replayPrefix, opId);
+			state.replayedOpIds.add(opId);
+			value = await runDynamicResultReadCall({
+				cwd: input.cwd,
+				run: input.run,
+				controllerTask: input.controllerTask,
+				controllerCompiledTask: input.controllerCompiledTask,
+				opId,
+				callIndex,
+				request: message.request,
+			});
 		} else if (message.op === "helper") {
-			const helperId = requiredDynamicString(message.name, "helper name", "ctx.helper()");
+			const helperId = requiredDynamicString(
+				message.name,
+				"helper name",
+				"ctx.helper()",
+			);
 			const count = (state.helperCallCounts.get(helperId) ?? 0) + 1;
 			state.helperCallCounts.set(helperId, count);
 			const opId = `${input.controllerTask.specId}:helper:${helperId}:${String(count).padStart(3, "0")}`;
@@ -2768,7 +3076,11 @@ async function handleDynamicWorkerMessage(
 				isSettled: state.isSettled,
 			});
 		} else if (message.op === "workflow") {
-			const workflowId = requiredDynamicString(message.name, "workflow name", "ctx.workflow()");
+			const workflowId = requiredDynamicString(
+				message.name,
+				"workflow name",
+				"ctx.workflow()",
+			);
 			const count = (state.workflowCallCounts.get(workflowId) ?? 0) + 1;
 			state.workflowCallCounts.set(workflowId, count);
 			const opId = `${input.controllerTask.specId}:workflow:${workflowId}:${String(count).padStart(3, "0")}`;
@@ -2816,6 +3128,59 @@ async function handleDynamicWorkerMessage(
 	}
 }
 
+async function dynamicReplayOpIdForAgentRequest(input: {
+	cwd: string;
+	runId: string;
+	controllerSpecId: string;
+	opId: string;
+	branchId?: string;
+	requestHash: string;
+}): Promise<string> {
+	const events = await readDynamicEvents(input.cwd, input.runId);
+	return (
+		findDynamicGeneratedTaskEvent(events, {
+			controllerSpecId: input.controllerSpecId,
+			opId: input.opId,
+			branchId: input.branchId,
+			requestHash: input.requestHash,
+		})?.opId ?? input.opId
+	);
+}
+
+function findDynamicGeneratedTaskEvent(
+	events: Awaited<ReturnType<typeof readDynamicEvents>>,
+	input: {
+		controllerSpecId: string;
+		opId?: string;
+		branchId?: string;
+		requestHash: string;
+	},
+) {
+	const identityMatches = events.filter(
+		(event) =>
+			event.controllerSpecId === input.controllerSpecId &&
+			event.type === "task.generated" &&
+			((input.opId !== undefined && event.opId === input.opId) ||
+				(input.branchId !== undefined &&
+					optionalEventString(event.payload.branchId) === input.branchId)),
+	);
+	const divergent = identityMatches.find(
+		(event) => event.requestHash !== input.requestHash,
+	);
+	if (divergent) {
+		const identity =
+			input.opId !== undefined && divergent.opId === input.opId
+				? `opId "${input.opId}"`
+				: `branchId "${input.branchId ?? "(missing)"}"`;
+		throw new Error(
+			`dynamic agent request changed for ${identity}; previous hash ${divergent.requestHash}, new hash ${input.requestHash}`,
+		);
+	}
+	return identityMatches
+		.reverse()
+		.find((event) => event.requestHash === input.requestHash);
+}
+
 async function priorDynamicOperationOpIds(input: {
 	cwd: string;
 	run: WorkflowRunRecord;
@@ -2827,7 +3192,13 @@ async function priorDynamicOperationOpIds(input: {
 			.filter(
 				(event) =>
 					event.controllerSpecId === input.controllerTask.specId &&
-					(event.type === "task.generated" ||
+					(event.type === "fanout.planned" ||
+						event.type === "task.generated" ||
+						event.type === "decision.persisted" ||
+						event.type === "state-index.persisted" ||
+						(event.type === "controller.status" &&
+							event.opId.includes(":decision-loop-status:")) ||
+						event.type === "result.read" ||
 						event.type === "helper.started" ||
 						event.type === "helper.completed" ||
 						event.type === "workflow.started" ||
@@ -2870,7 +3241,10 @@ async function assertPriorDynamicOpsReplayed(
 	const required = await priorDynamicOperationOpIds(input);
 	const omitted = required.filter((opId) => !replayedOpIds.has(opId));
 	if (omitted.length > 0 || replayPrefix.cursor < replayPrefix.opIds.length) {
-		const remaining = omitted.length > 0 ? omitted : replayPrefix.opIds.slice(replayPrefix.cursor);
+		const remaining =
+			omitted.length > 0
+				? omitted
+				: replayPrefix.opIds.slice(replayPrefix.cursor);
 		throw new Error(
 			`dynamic controller omitted previously recorded operation(s): ${remaining.join(", ")}`,
 		);
@@ -2899,10 +3273,872 @@ function isDynamicReplayInvariantError(error: unknown): boolean {
 		/dynamic (agent|helper|workflow|nested workflow|approval) request changed/.test(
 			error.message,
 		) ||
-		error.message.startsWith("dynamic controller omitted previously recorded operation") ||
-		error.message.startsWith("dynamic controller replayed operation out of order") ||
-		/^dynamic helper .+ previously started but did not complete/.test(error.message)
+		error.message.startsWith("dynamic decision persist request changed") ||
+		error.message.startsWith("dynamic fanout plan request changed") ||
+		error.message.startsWith("dynamic state index request changed") ||
+		error.message.startsWith("dynamic decision-loop status request changed") ||
+		error.message.startsWith("dynamic result read request changed") ||
+		error.message.startsWith(
+			"dynamic decision accepted artifact already exists with divergent hash",
+		) ||
+		error.message.startsWith(
+			"dynamic state index artifact already exists with divergent digest",
+		) ||
+		error.message.startsWith(
+			"dynamic controller omitted previously recorded operation",
+		) ||
+		error.message.startsWith(
+			"dynamic controller replayed operation out of order",
+		) ||
+		/^dynamic helper .+ previously started but did not complete/.test(
+			error.message,
+		)
 	);
+}
+
+async function runDynamicDecisionPersistCall(input: {
+	cwd: string;
+	run: WorkflowRunRecord;
+	controllerTask: WorkflowTaskRunRecord;
+	opId: string;
+	callIndex: number;
+	rawDecision: unknown;
+	context: unknown;
+}): Promise<Record<string, unknown>> {
+	const context = isPlainDynamicRecord(input.context) ? input.context : {};
+	const validation = validateDynamicDecision(input.rawDecision, context);
+	const stateIndexDigest = optionalDynamicStringField(context.stateIndexDigest);
+	const requestHash = hashDynamicRequest({
+		rawDecision: input.rawDecision,
+		context,
+		validationHash: validation.hash,
+		stateIndexDigest,
+	});
+	const alreadyRecorded = await assertDynamicControlOpRequestStable({
+		cwd: input.cwd,
+		runId: input.run.runId,
+		opId: input.opId,
+		type: "decision.persisted",
+		requestHash,
+		errorPrefix: "dynamic decision persist request changed",
+	});
+	const written = await writeDynamicDecisionArtifacts({
+		cwd: input.cwd,
+		runId: input.run.runId,
+		controllerSpecId: input.controllerTask.specId,
+		rawDecision: input.rawDecision,
+		validation,
+		stateIndexDigest,
+	});
+	if (!alreadyRecorded)
+		await recordDynamicEventAndUpdateState(input.cwd, input.run.runId, {
+			controllerSpecId: input.controllerTask.specId,
+			type: "decision.persisted",
+			opId: input.opId,
+			requestHash,
+			payload: {
+				callIndex: input.callIndex,
+				ok: validation.ok,
+				errors: validation.errors,
+				decisionHash: validation.hash,
+				stateIndexDigest,
+				paths: {
+					raw: toProjectPath(input.cwd, written.rawPath),
+					validation: toProjectPath(input.cwd, written.validationPath),
+					...(written.acceptedPath
+						? { accepted: toProjectPath(input.cwd, written.acceptedPath) }
+						: {}),
+				},
+			},
+		});
+	return {
+		ok: validation.ok,
+		errors: validation.errors,
+		decision: validation.decision,
+		decisionHash: validation.hash,
+		stateIndexDigest,
+		artifacts: {
+			raw: toProjectPath(input.cwd, written.rawPath),
+			validation: toProjectPath(input.cwd, written.validationPath),
+			...(written.acceptedPath
+				? { accepted: toProjectPath(input.cwd, written.acceptedPath) }
+				: {}),
+		},
+	};
+}
+
+async function runDynamicFanoutPlanPersistCall(input: {
+	cwd: string;
+	run: WorkflowRunRecord;
+	controllerTask: WorkflowTaskRunRecord;
+	opId: string;
+	callIndex: number;
+	request: NormalizedDynamicFanoutPlanRequest;
+}): Promise<Record<string, unknown>> {
+	const controllerStageId =
+		input.controllerTask.stageId ??
+		input.controllerTask.specId.replace(/\.controller$/, "");
+	const branches = input.request.branches.map((branch) => ({
+		branchId: branch.branchId,
+		actionId: branch.actionId,
+		requestId: branch.requestId,
+		type: branch.type,
+		outputProfile: branch.outputProfile,
+		...(branch.dependsOn && branch.dependsOn.length > 0
+			? { dependsOn: branch.dependsOn }
+			: {}),
+		requestHash: hashDynamicRequest(branch.agentRequest),
+		status: "planned" as const,
+		targetSpecId: `${controllerStageId}.${branch.requestId}`,
+	}));
+	// requestId/targetSpecId are derived audit fields; keep the fanout
+	// stability hash tied to the pre-existing branch request identity.
+	const requestHashBranches = branches.map(
+		({ requestId: _requestId, targetSpecId: _targetSpecId, ...branch }) =>
+			branch,
+	);
+	const payload = {
+		callIndex: input.callIndex,
+		round: input.request.round,
+		decisionHash: input.request.decisionHash,
+		branches,
+	};
+	const requestHash = hashDynamicRequest({
+		round: input.request.round,
+		decisionHash: input.request.decisionHash,
+		branches: requestHashBranches,
+	});
+	const alreadyRecorded = await assertDynamicControlOpRequestStable({
+		cwd: input.cwd,
+		runId: input.run.runId,
+		opId: input.opId,
+		type: "fanout.planned",
+		requestHash,
+		errorPrefix: "dynamic fanout plan request changed",
+	});
+	if (!alreadyRecorded) {
+		await recordDynamicEventAndUpdateState(input.cwd, input.run.runId, {
+			controllerSpecId: input.controllerTask.specId,
+			type: "fanout.planned",
+			opId: input.opId,
+			requestHash,
+			payload,
+		});
+		return payload;
+	}
+	const previous = (await readDynamicEvents(input.cwd, input.run.runId))
+		.filter(
+			(event) => event.opId === input.opId && event.type === "fanout.planned",
+		)
+		.at(-1);
+	return isPlainDynamicRecord(previous?.payload) ? previous.payload : payload;
+}
+
+async function runDynamicStateIndexPersistCall(input: {
+	cwd: string;
+	run: WorkflowRunRecord;
+	controllerTask: WorkflowTaskRunRecord;
+	controllerCompiledTask: CompiledTask;
+	opId: string;
+	callIndex: number;
+	request: unknown;
+}): Promise<Record<string, unknown>> {
+	const request = normalizeDynamicStateIndexRequest(input.request);
+	const extracts = await Promise.all(
+		request.tasks.map(async (taskRequest) => {
+			const task = resolveDynamicRunTask(input.run, taskRequest.taskId);
+			assertDynamicReadableTask(
+				task,
+				input.controllerTask,
+				input.controllerCompiledTask,
+			);
+			const result = await readWorkflowTaskStructuredResult(input.cwd, task, {
+				allowFailed: true,
+			});
+			return extractDynamicStateArtifact({
+				taskId: task.specId,
+				outputProfile: taskRequest.outputProfile,
+				control: isPlainDynamicRecord(result.control)
+					? result.control
+					: undefined,
+				analysis:
+					typeof result.analysis === "string" ? result.analysis : undefined,
+				refs: result.refs,
+				artifactRef: { taskId: task.specId, artifact: "control" },
+				status: result.status === "completed" ? "completed" : "failed",
+				maxFindings: request.maxFindings,
+			});
+		}),
+	);
+	const index = assembleDynamicStateIndex(extracts, {
+		// requiredFindingIds is accepted on ctx.stateIndex requests for
+		// compatibility, but is a deprecated/no-op Phase 1 runtime field.
+		maxFindings: request.maxFindings,
+	});
+	const requestHash = hashDynamicRequest({ request, digest: index.digest });
+	const alreadyRecorded = await assertDynamicControlOpRequestStable({
+		cwd: input.cwd,
+		runId: input.run.runId,
+		opId: input.opId,
+		type: "state-index.persisted",
+		requestHash,
+		errorPrefix: "dynamic state index request changed",
+	});
+	const written = await writeDynamicStateIndexArtifacts({
+		cwd: input.cwd,
+		runId: input.run.runId,
+		controllerSpecId: input.controllerTask.specId,
+		round: request.round,
+		extracts,
+		index,
+	});
+	if (!alreadyRecorded)
+		await recordDynamicEventAndUpdateState(input.cwd, input.run.runId, {
+			controllerSpecId: input.controllerTask.specId,
+			type: "state-index.persisted",
+			opId: input.opId,
+			requestHash,
+			payload: {
+				callIndex: input.callIndex,
+				round: request.round,
+				digest: index.digest,
+				tasks: request.tasks,
+				paths: {
+					extracts: toProjectPath(input.cwd, written.extractsPath),
+					index: toProjectPath(input.cwd, written.indexPath),
+				},
+			},
+		});
+	return {
+		digest: index.digest,
+		index,
+		artifacts: {
+			extracts: toProjectPath(input.cwd, written.extractsPath),
+			index: toProjectPath(input.cwd, written.indexPath),
+		},
+	};
+}
+
+async function runDynamicDecisionLoopStatusPersistCall(input: {
+	cwd: string;
+	run: WorkflowRunRecord;
+	controllerTask: WorkflowTaskRunRecord;
+	opId: string;
+	callIndex: number;
+	request: unknown;
+}): Promise<Record<string, unknown>> {
+	const decisionLoop = normalizeDynamicDecisionLoopStatusRequest(input.request);
+	const payload = {
+		callIndex: input.callIndex,
+		status: "running",
+		decisionLoop,
+	};
+	const requestHash = hashDynamicRequest(payload);
+	const alreadyRecorded = await assertDynamicControlOpRequestStable({
+		cwd: input.cwd,
+		runId: input.run.runId,
+		opId: input.opId,
+		type: "controller.status",
+		requestHash,
+		errorPrefix: "dynamic decision-loop status request changed",
+	});
+	if (!alreadyRecorded) {
+		await recordDynamicEventAndUpdateState(input.cwd, input.run.runId, {
+			controllerSpecId: input.controllerTask.specId,
+			type: "controller.status",
+			opId: input.opId,
+			requestHash,
+			payload,
+		});
+		return payload;
+	}
+	const previous = (await readDynamicEvents(input.cwd, input.run.runId))
+		.filter(
+			(event) =>
+				event.opId === input.opId && event.type === "controller.status",
+		)
+		.at(-1);
+	return isPlainDynamicRecord(previous?.payload) ? previous.payload : payload;
+}
+
+async function runDynamicResultReadCall(input: {
+	cwd: string;
+	run: WorkflowRunRecord;
+	controllerTask: WorkflowTaskRunRecord;
+	controllerCompiledTask: CompiledTask;
+	opId: string;
+	callIndex: number;
+	request: unknown;
+}): Promise<Record<string, unknown>> {
+	const request = normalizeDynamicResultReadRequest(input.request);
+	const task = resolveDynamicRunTask(input.run, request.taskId);
+	assertDynamicReadableTask(
+		task,
+		input.controllerTask,
+		input.controllerCompiledTask,
+	);
+	const result = await readWorkflowTaskScopedResult(input.cwd, task, {
+		allowFailed: request.allowFailed,
+		include: request.include,
+	});
+	const resultDigest = hashDynamicRequest(result);
+	const requestHash = hashDynamicRequest({
+		request,
+		status: result.status,
+		resultDigest,
+	});
+	const alreadyRecorded = await assertDynamicControlOpRequestStable({
+		cwd: input.cwd,
+		runId: input.run.runId,
+		opId: input.opId,
+		type: "result.read",
+		requestHash,
+		errorPrefix: "dynamic result read request changed",
+	});
+	if (!alreadyRecorded)
+		await recordDynamicEventAndUpdateState(input.cwd, input.run.runId, {
+			controllerSpecId: input.controllerTask.specId,
+			type: "result.read",
+			opId: input.opId,
+			requestHash,
+			payload: {
+				callIndex: input.callIndex,
+				taskId: task.specId,
+				status: result.status,
+				resultDigest,
+			},
+		});
+	return result;
+}
+
+async function assertDynamicControlOpRequestStable(input: {
+	cwd: string;
+	runId: string;
+	opId: string;
+	type:
+		| "decision.persisted"
+		| "fanout.planned"
+		| "state-index.persisted"
+		| "controller.status"
+		| "result.read";
+	requestHash: string;
+	errorPrefix: string;
+}): Promise<boolean> {
+	const previous = (await readDynamicEvents(input.cwd, input.runId)).filter(
+		(event) => event.opId === input.opId && event.type === input.type,
+	);
+	const divergent = previous.find(
+		(event) => event.requestHash !== input.requestHash,
+	);
+	if (divergent) {
+		throw new Error(
+			`${input.errorPrefix} for ${input.opId}; previous hash ${divergent.requestHash}, new hash ${input.requestHash}`,
+		);
+	}
+	return previous.length > 0;
+}
+
+interface NormalizedDynamicFanoutPlanRequest {
+	round: number;
+	decisionHash: string;
+	branches: Array<{
+		branchId: string;
+		actionId: string;
+		requestId: string;
+		type: "add_work_item" | "verify";
+		outputProfile: DynamicOutputProfile;
+		dependsOn?: string[];
+		agentRequest: DynamicAgentRequest;
+	}>;
+}
+
+function normalizeDynamicFanoutPlanRequest(
+	value: unknown,
+): NormalizedDynamicFanoutPlanRequest {
+	if (!isPlainDynamicRecord(value)) {
+		throw new Error("ctx.fanout.plan() input must be an object");
+	}
+	const round = requiredDynamicNonNegativeInteger(
+		value.round,
+		"round",
+		"ctx.fanout.plan()",
+	);
+	const decisionHash = requiredDynamicString(
+		value.decisionHash,
+		"decisionHash",
+		"ctx.fanout.plan()",
+	);
+	if (!Array.isArray(value.branches)) {
+		throw new Error("ctx.fanout.plan() branches must be an array");
+	}
+	const branches = value.branches.map((item, index) => {
+		if (!isPlainDynamicRecord(item)) {
+			throw new Error(`ctx.fanout.plan() branches[${index}] must be an object`);
+		}
+		const branchId = requiredDynamicString(
+			item.branchId,
+			`branches[${index}].branchId`,
+			"ctx.fanout.plan()",
+		);
+		const actionId = requiredDynamicString(
+			item.actionId,
+			`branches[${index}].actionId`,
+			"ctx.fanout.plan()",
+		);
+		const type = requiredDynamicString(
+			item.type,
+			`branches[${index}].type`,
+			"ctx.fanout.plan()",
+		);
+		if (type !== "add_work_item" && type !== "verify") {
+			throw new Error(
+				`ctx.fanout.plan() branches[${index}].type must be add_work_item or verify`,
+			);
+		}
+		const branchType: "add_work_item" | "verify" = type;
+		const outputProfile = requiredDynamicOutputProfile(
+			item.outputProfile,
+			`branches[${index}].outputProfile`,
+			"ctx.fanout.plan()",
+		);
+		const dependsOn = optionalDynamicStringArray(
+			item.dependsOn,
+			`branches[${index}].dependsOn`,
+		);
+		const agentRequest = normalizeDynamicAgentRequest(item.agentRequest);
+		if (agentRequest.branchId && agentRequest.branchId !== branchId) {
+			throw new Error(
+				`ctx.fanout.plan() branches[${index}].agentRequest.branchId must match branchId`,
+			);
+		}
+		const requestId = agentRequest.id;
+		const declaredRequestId = optionalDynamicString(
+			item.requestId,
+			`branches[${index}].requestId`,
+		);
+		if (declaredRequestId && declaredRequestId !== requestId) {
+			throw new Error(
+				`ctx.fanout.plan() branches[${index}].requestId must match agentRequest.id`,
+			);
+		}
+		return {
+			branchId,
+			actionId,
+			requestId,
+			type: branchType,
+			outputProfile,
+			dependsOn,
+			agentRequest: { ...agentRequest, branchId },
+		};
+	});
+	return { round, decisionHash, branches };
+}
+
+function normalizeDynamicStateIndexRequest(value: unknown): {
+	round: number;
+	tasks: Array<{ taskId: string; outputProfile: DynamicOutputProfile }>;
+	maxFindings?: number;
+} {
+	if (!isPlainDynamicRecord(value)) {
+		throw new Error(
+			"ctx.stateIndex.extractAndPersist() input must be an object",
+		);
+	}
+	const round = requiredDynamicNonNegativeInteger(
+		value.round,
+		"round",
+		"ctx.stateIndex.extractAndPersist()",
+	);
+	if (!Array.isArray(value.tasks)) {
+		throw new Error(
+			"ctx.stateIndex.extractAndPersist() tasks must be an array",
+		);
+	}
+	const tasks = value.tasks.map((item, index) => {
+		if (!isPlainDynamicRecord(item)) {
+			throw new Error(
+				`ctx.stateIndex.extractAndPersist() tasks[${index}] must be an object`,
+			);
+		}
+		return {
+			taskId: requiredDynamicString(
+				item.taskId ?? item.specId,
+				`tasks[${index}].taskId`,
+				"ctx.stateIndex.extractAndPersist()",
+			),
+			outputProfile: requiredDynamicOutputProfile(
+				item.outputProfile,
+				`tasks[${index}].outputProfile`,
+				"ctx.stateIndex.extractAndPersist()",
+			),
+		};
+	});
+	// Deprecated/no-op compatibility field: validate accepted shape, then drop
+	// it so Phase 1 runtime state-index assembly and replay hashes ignore it.
+	optionalDynamicStringArray(value.requiredFindingIds, "requiredFindingIds");
+	return {
+		round,
+		tasks,
+		maxFindings: optionalDynamicPositiveInteger(
+			value.maxFindings,
+			"maxFindings",
+		),
+	};
+}
+
+function normalizeDynamicDecisionLoopStatusRequest(value: unknown): {
+	stallCount: number;
+	replanCount: number;
+} {
+	if (!isPlainDynamicRecord(value)) {
+		throw new Error(
+			"ctx.dynamic.recordDecisionLoopStatus() input must be an object",
+		);
+	}
+	return {
+		stallCount: requiredDynamicNonNegativeInteger(
+			value.stallCount,
+			"stallCount",
+			"ctx.dynamic.recordDecisionLoopStatus()",
+		),
+		replanCount: requiredDynamicNonNegativeInteger(
+			value.replanCount,
+			"replanCount",
+			"ctx.dynamic.recordDecisionLoopStatus()",
+		),
+	};
+}
+
+const DEFAULT_DYNAMIC_RESULT_INCLUDE = ["$.schema", "$.digest"];
+
+function normalizeDynamicResultReadRequest(value: unknown): {
+	taskId: string;
+	allowFailed: boolean;
+	include: string[];
+} {
+	if (typeof value === "string") {
+		return {
+			taskId: value,
+			allowFailed: false,
+			include: [...DEFAULT_DYNAMIC_RESULT_INCLUDE],
+		};
+	}
+	if (!isPlainDynamicRecord(value)) {
+		throw new Error("ctx.result() input must be a task id string or object");
+	}
+	return {
+		taskId: requiredDynamicString(
+			value.taskId ?? value.specId,
+			"taskId",
+			"ctx.result()",
+		),
+		allowFailed: value.allowFailed === true,
+		include: normalizeDynamicResultInclude(value.include) ?? [
+			...DEFAULT_DYNAMIC_RESULT_INCLUDE,
+		],
+	};
+}
+
+function resolveDynamicRunTask(
+	run: WorkflowRunRecord,
+	taskIdOrSpecId: string,
+): WorkflowTaskRunRecord {
+	const task = run.tasks.find(
+		(candidate) =>
+			candidate.taskId === taskIdOrSpecId ||
+			candidate.specId === taskIdOrSpecId,
+	);
+	if (!task)
+		throw new Error(`dynamic task result not found: ${taskIdOrSpecId}`);
+	return task;
+}
+
+function assertDynamicReadableTask(
+	task: WorkflowTaskRunRecord,
+	controllerTask: WorkflowTaskRunRecord,
+	controllerCompiledTask: CompiledTask,
+): void {
+	if (task.dynamicGenerated?.controllerSpecId === controllerTask.specId) return;
+	const allowed = new Set([
+		...(controllerCompiledTask.dependsOn ?? []),
+		...(controllerCompiledTask.contextDependsOn ?? []),
+	]);
+	if (allowed.has(task.specId)) return;
+	throw new Error(
+		`dynamic result read is limited to generated tasks and upstream dependencies; ${task.specId} is not readable by ${controllerTask.specId}`,
+	);
+}
+
+async function readWorkflowTaskStructuredResult(
+	cwd: string,
+	task: WorkflowTaskRunRecord,
+	options: { allowFailed?: boolean } = {},
+): Promise<Record<string, unknown>> {
+	if (task.status === "completed") {
+		const output = await readTaskOutputArtifacts(cwd, task);
+		return {
+			status: task.status,
+			statusDetail: task.statusDetail,
+			taskId: task.taskId,
+			specId: task.specId,
+			...output,
+		};
+	}
+	if (!isTerminalTaskStatus(task.status)) {
+		throw new DynamicControllerSuspended(
+			`waiting for dynamic task result ${task.specId} (${task.status})`,
+		);
+	}
+	if (!options.allowFailed) {
+		throw new Error(
+			`dynamic task result ${task.specId} ended with ${task.status}: ${task.lastMessage ?? task.statusDetail}`,
+		);
+	}
+	const output = await readTaskOutputArtifacts(cwd, task).catch(() => ({}));
+	return {
+		status: task.status,
+		statusDetail: task.statusDetail,
+		taskId: task.taskId,
+		specId: task.specId,
+		lastMessage: task.lastMessage,
+		...output,
+	};
+}
+
+async function readTaskOutputArtifacts(
+	cwd: string,
+	task: WorkflowTaskRunRecord,
+): Promise<Record<string, unknown>> {
+	if (task.artifactGraph?.enabled) {
+		const taskDir = dirname(fromProjectPath(cwd, task.files.result));
+		return {
+			control: await readArtifactGraphControl(cwd, task).catch(() => undefined),
+			analysis: await readFile(join(taskDir, "analysis.md"), "utf8").catch(
+				() => undefined,
+			),
+			refs: await readJson(join(taskDir, "refs.json")).catch(() => undefined),
+		};
+	}
+	return {
+		result: await readJson(fromProjectPath(cwd, task.files.result)).catch(
+			() => undefined,
+		),
+	};
+}
+
+async function readWorkflowTaskScopedResult(
+	cwd: string,
+	task: WorkflowTaskRunRecord,
+	options: { allowFailed?: boolean; include: readonly string[] },
+): Promise<Record<string, unknown>> {
+	if (task.status === "completed") {
+		return {
+			...dynamicTaskResultMetadata(task),
+			...(await readScopedTaskOutput(cwd, task, options.include)),
+		};
+	}
+	if (!isTerminalTaskStatus(task.status)) {
+		throw new DynamicControllerSuspended(
+			`waiting for dynamic task result ${task.specId} (${task.status})`,
+		);
+	}
+	if (!options.allowFailed) {
+		throw new Error(
+			`dynamic task result ${task.specId} ended with ${task.status}: ${task.lastMessage ?? task.statusDetail}`,
+		);
+	}
+	const output = await readScopedTaskOutput(cwd, task, options.include).catch(
+		() => ({}),
+	);
+	return {
+		...dynamicTaskResultMetadata(task),
+		lastMessage: task.lastMessage,
+		...output,
+	};
+}
+
+function dynamicTaskResultMetadata(
+	task: WorkflowTaskRunRecord,
+): Record<string, unknown> {
+	return {
+		status: task.status,
+		statusDetail: task.statusDetail,
+		taskId: task.taskId,
+		specId: task.specId,
+		...(task.dynamicGenerated?.outputProfile
+			? { outputProfile: task.dynamicGenerated.outputProfile }
+			: {}),
+	};
+}
+
+async function readScopedTaskOutput(
+	cwd: string,
+	task: WorkflowTaskRunRecord,
+	include: readonly string[],
+): Promise<Record<string, unknown>> {
+	if (task.artifactGraph?.enabled) {
+		const control = await readArtifactGraphControl(cwd, task).catch(
+			() => undefined,
+		);
+		const projection = projectArtifactGraphControl(control, {
+			include: [...include],
+		});
+		const scopedControl = projection.value ?? {};
+		const digest = controlDigest(control);
+		return {
+			control: scopedControl,
+			artifacts: dynamicResultArtifactRefs(
+				task,
+				await artifactRefsForTask(cwd, task),
+				digest,
+			),
+			scope: dynamicResultScope({
+				taskId: task.specId,
+				artifact: "control",
+				include,
+				content: scopedControl,
+				contentDigest: digest,
+				missingPaths: projection.missingPaths,
+			}),
+		};
+	}
+	const result = await readJson(fromProjectPath(cwd, task.files.result)).catch(
+		() => undefined,
+	);
+	const projection = projectArtifactGraphControl(result, {
+		include: [...include],
+	});
+	const scopedResult = projection.value ?? {};
+	const digest = hashDynamicRequest(result);
+	return {
+		result: scopedResult,
+		artifacts: { result: { taskId: task.specId, artifact: "result", digest } },
+		scope: dynamicResultScope({
+			taskId: task.specId,
+			artifact: "result",
+			include,
+			content: scopedResult,
+			contentDigest: digest,
+			missingPaths: projection.missingPaths,
+		}),
+	};
+}
+
+function dynamicResultArtifactRefs(
+	task: WorkflowTaskRunRecord,
+	artifacts: WorkflowSourceManifestSource["artifacts"],
+	controlDigestValue: string | undefined,
+): Record<string, unknown> {
+	const refs: Record<string, unknown> = {};
+	for (const artifact of Object.keys(artifacts)) {
+		refs[artifact] = {
+			taskId: task.specId,
+			artifact,
+			...(artifact === "control" && controlDigestValue
+				? { digest: controlDigestValue }
+				: {}),
+		};
+	}
+	return refs;
+}
+
+function dynamicResultScope(input: {
+	taskId: string;
+	artifact: string;
+	include: readonly string[];
+	content: unknown;
+	contentDigest?: string;
+	missingPaths: readonly string[];
+}): Record<string, unknown> {
+	const base = {
+		taskId: input.taskId,
+		artifact: input.artifact,
+		include: [...input.include],
+		contentDigest: input.contentDigest,
+		missingPaths: [...input.missingPaths],
+		content: input.content,
+	};
+	return {
+		taskId: input.taskId,
+		artifact: input.artifact,
+		include: [...input.include],
+		...(input.contentDigest ? { contentDigest: input.contentDigest } : {}),
+		...(input.missingPaths.length > 0
+			? { missingPaths: [...input.missingPaths] }
+			: {}),
+		scopeHash: hashDynamicRequest(base),
+	};
+}
+
+function normalizeDynamicResultInclude(value: unknown): string[] | undefined {
+	if (value === undefined) return undefined;
+	if (!Array.isArray(value)) {
+		throw new Error("ctx.result() include must be an array of strings");
+	}
+	return value.map((item, index) =>
+		normalizeDynamicResultPath(
+			requiredDynamicString(item, `include[${index}]`, "ctx.result()"),
+		),
+	);
+}
+
+function normalizeDynamicResultPath(path: string): string {
+	let normalized = path.trim();
+	if (normalized === "$" || normalized.includes("*")) {
+		throw new Error("ctx.result() include paths must name explicit fields");
+	}
+	if (!normalized.startsWith("$.")) {
+		normalized = `$.${normalized.replace(/^\.+/, "")}`;
+	}
+	if (normalized === "$.") {
+		throw new Error("ctx.result() include paths must name explicit fields");
+	}
+	return normalized;
+}
+
+function requiredDynamicOutputProfile(
+	value: unknown,
+	field: string,
+	api: string,
+): DynamicOutputProfile {
+	const profile = requiredDynamicString(value, field, api);
+	if (!isDynamicOutputProfile(profile)) {
+		throw new Error(`${api} ${field} has an unsupported output profile`);
+	}
+	return profile;
+}
+
+function requiredDynamicNonNegativeInteger(
+	value: unknown,
+	field: string,
+	api: string,
+): number {
+	if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+		throw new Error(`${api} ${field} must be a non-negative integer`);
+	}
+	return value;
+}
+
+function requiredDynamicPositiveInteger(
+	value: unknown,
+	field: string,
+	api: string,
+): number {
+	if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+		throw new Error(`${api} ${field} must be a positive integer`);
+	}
+	return value;
+}
+
+function optionalDynamicStringField(value: unknown): string | undefined {
+	return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function optionalDynamicOutputProfile(
+	value: unknown,
+): DynamicOutputProfile | undefined {
+	if (value === undefined) return undefined;
+	return requiredDynamicOutputProfile(value, "outputProfile", "ctx.agent()");
 }
 
 async function currentDynamicBudgetRemaining(input: {
@@ -2918,7 +4154,11 @@ async function currentDynamicBudgetRemaining(input: {
 	return dynamicBudgetRemaining(
 		input.dynamic,
 		state.controllers[input.controllerTask.specId]?.counters,
-		countRunningDynamicAgents(run, input.controllerTask.specId, state.controllers[input.controllerTask.specId]?.generatedTaskIds ?? []),
+		countRunningDynamicAgents(
+			run,
+			input.controllerTask.specId,
+			state.controllers[input.controllerTask.specId]?.generatedTaskIds ?? [],
+		),
 	);
 }
 
@@ -2953,7 +4193,10 @@ async function appendDynamicControllerLog(
 }
 
 function dynamicWorkerError(error: any): Error {
-	const message = typeof error?.message === "string" ? error.message : "dynamic controller failed";
+	const message =
+		typeof error?.message === "string"
+			? error.message
+			: "dynamic controller failed";
 	if (error?.name === "DynamicControllerSuspended") {
 		return new DynamicControllerSuspended(message);
 	}
@@ -2965,7 +4208,10 @@ function dynamicWorkerError(error: any): Error {
 	return next;
 }
 
-function serializeDynamicWorkerError(error: unknown): { name: string; message: string } {
+function serializeDynamicWorkerError(error: unknown): {
+	name: string;
+	message: string;
+} {
 	return {
 		name: error instanceof Error ? error.name : "Error",
 		message: error instanceof Error ? error.message : String(error),
@@ -2982,7 +4228,7 @@ function dynamicBudgetRemaining(
 				helperRuns?: number;
 				nestedWorkflowDepth?: number;
 				runtimeMs?: number;
-			}
+		  }
 		| undefined,
 	runningAgents = counters?.runningAgents ?? 0,
 ): Record<string, number> {
@@ -2993,9 +4239,19 @@ function dynamicBudgetRemaining(
 			0,
 			remainingDynamicRuntimeMs(dynamic, counters?.runtimeMs ?? 0),
 		),
-		maxNestedWorkflowDepth: Math.max(0, dynamic.budget.maxNestedWorkflowDepth - (counters?.nestedWorkflowDepth ?? 0)),
-		maxGraphMutations: Math.max(0, dynamic.budget.maxGraphMutations - (counters?.graphMutations ?? 0)),
-		maxHelperRuns: Math.max(0, dynamic.budget.maxHelperRuns - (counters?.helperRuns ?? 0)),
+		maxNestedWorkflowDepth: Math.max(
+			0,
+			dynamic.budget.maxNestedWorkflowDepth -
+				(counters?.nestedWorkflowDepth ?? 0),
+		),
+		maxGraphMutations: Math.max(
+			0,
+			dynamic.budget.maxGraphMutations - (counters?.graphMutations ?? 0),
+		),
+		maxHelperRuns: Math.max(
+			0,
+			dynamic.budget.maxHelperRuns - (counters?.helperRuns ?? 0),
+		),
 	};
 }
 
@@ -3030,15 +4286,18 @@ async function runDynamicHelperWorker(input: {
 			void worker.terminate().catch(() => undefined);
 			callback();
 		};
-		const timer = setTimeout(() => {
-			finish(() =>
-				rejectPromise(
-					new DynamicControllerBudgetBlocked(
-						`dynamic helper runtime budget exhausted: timeoutMs=${input.timeoutMs}`,
+		const timer = setTimeout(
+			() => {
+				finish(() =>
+					rejectPromise(
+						new DynamicControllerBudgetBlocked(
+							`dynamic helper runtime budget exhausted: timeoutMs=${input.timeoutMs}`,
+						),
 					),
-				),
-			);
-		}, Math.max(1, input.timeoutMs));
+				);
+			},
+			Math.max(1, input.timeoutMs),
+		);
 		worker.on("message", (message) => {
 			if (message?.type === "done") finish(() => resolvePromise(message.value));
 			else if (message?.type === "error") {
@@ -3081,6 +4340,7 @@ try {
 const DYNAMIC_CONTROLLER_WORKER_SOURCE = String.raw`
 (async () => {
 const { parentPort, workerData } = await import("node:worker_threads");
+const ENGINE_INTEGRITY_ERROR_MESSAGE = ${JSON.stringify(DYNAMIC_CONTROLLER_ENGINE_INTEGRITY_ERROR_MESSAGE)};
 let nextOpId = 1;
 const pending = new Map();
 let generatedTaskIds = [...(workerData.generatedTaskIds || [])];
@@ -3126,8 +4386,25 @@ parentPort.on("message", (message) => {
   if (typeof imported.default !== "function") {
     throw new Error("dynamic controller must default-export a function");
   }
+  let decisionLoopModule;
+  async function runInjectedDecisionLoop(ctx, options) {
+    decisionLoopModule = decisionLoopModule || await import(workerData.decisionLoopModuleUrl);
+    const runDynamicDecisionLoop = decisionLoopModule && decisionLoopModule.runDynamicDecisionLoop;
+    if (typeof runDynamicDecisionLoop !== "function") {
+      throw new Error("dynamic decision-loop module must export runDynamicDecisionLoop");
+    }
+    return await runDynamicDecisionLoop(ctx, options || {});
+  }
   const helperCallCounts = new Map();
   const workflowCallCounts = new Map();
+  let decisionCallCount = 0;
+  let fanoutPlanCallCount = 0;
+  let stateIndexCallCount = 0;
+  let decisionLoopStatusCallCount = 0;
+  let resultReadCount = 0;
+  const dynamicConfig = Object.freeze(toJson(workerData.decisionLoop || null));
+  const engineCapabilities = workerData.engineCapabilities || {};
+  const supportsDecisionLoop = engineCapabilities.decisionLoop === true;
   const ctx = {
     task: workerData.task || "",
     sources: workerData.sources || {},
@@ -3142,8 +4419,57 @@ parentPort.on("message", (message) => {
     artifact(name, options) {
       return { kind: "workflow-artifact-ref", name, ...(options ? { options } : {}) };
     },
-    graph: { generatedTaskIds: () => [...generatedTaskIds] },
+    graph: {
+      generatedTaskIds: () => [...generatedTaskIds],
+      generatedBranchTaskIds: () => [...(workerData.generatedBranchTaskIds || [])],
+      generatedTaskSpecId: (taskId) => workerData.controllerStageId + "." + taskId,
+    },
     budget: { remaining: () => ({ ...budgetRemaining }), check: budgetCheck },
+    tools: { available: () => toJson(workerData.availableTools || []) },
+    dynamic: {
+      config: () => dynamicConfig,
+      ...(supportsDecisionLoop ? {
+        async runDecisionLoop(options) {
+          const generatedAtLoopStart = new Set(workerData.generatedTaskIds || []);
+          const loopInitialGeneratedTaskIds = generatedTaskIds.filter((id) => !generatedAtLoopStart.has(id));
+          const loopCtx = {
+            ...ctx,
+            graph: {
+              ...ctx.graph,
+              generatedTaskIds: () => [...loopInitialGeneratedTaskIds],
+              generatedBranchTaskIds: () => [],
+            },
+          };
+          return await runInjectedDecisionLoop(loopCtx, options);
+        },
+      } : {}),
+      async recordDecisionLoopStatus(status) {
+        decisionLoopStatusCallCount += 1;
+        return await call("controllerStatus", { callIndex: decisionLoopStatusCallCount, request: status });
+      },
+    },
+    decision: {
+      async validateAndPersist(rawDecision, context) {
+        decisionCallCount += 1;
+        return await call("decision", { callIndex: decisionCallCount, rawDecision, context });
+      },
+    },
+    stateIndex: {
+      async extractAndPersist(request) {
+        stateIndexCallCount += 1;
+        return await call("stateIndex", { callIndex: stateIndexCallCount, request });
+      },
+    },
+    fanout: {
+      async plan(request) {
+        fanoutPlanCallCount += 1;
+        return await call("fanoutPlan", { callIndex: fanoutPlanCallCount, request });
+      },
+    },
+    async result(request) {
+      resultReadCount += 1;
+      return await call("result", { callIndex: resultReadCount, request });
+    },
     async helper(name, input) {
       const count = (helperCallCounts.get(name) || 0) + 1;
       helperCallCounts.set(name, count);
@@ -3168,6 +4494,9 @@ parentPort.on("message", (message) => {
       return settled;
     },
   };
+  if (typeof ctx.dynamic.runDecisionLoop !== "function") {
+    throw new Error(ENGINE_INTEGRITY_ERROR_MESSAGE);
+  }
   const value = await imported.default(ctx);
   parentPort.postMessage({ type: "done", value: toJson(value) });
 })().catch((error) => {
@@ -3225,7 +4554,9 @@ async function repairMissingDynamicGeneratedTask(
 		);
 	}
 	const request = normalizeDynamicAgentRequest(event.payload.request);
-	let compiledTask = input.compiledFlow.tasks.find((task) => task.id === specId);
+	let compiledTask = input.compiledFlow.tasks.find(
+		(task) => task.id === specId,
+	);
 	compiledTask ??= isDynamicCompiledTaskPayload(event.payload.compiledTask)
 		? event.payload.compiledTask
 		: await buildDynamicGeneratedCompiledTask({
@@ -3241,6 +4572,7 @@ async function repairMissingDynamicGeneratedTask(
 				generatedSpecId: specId,
 				opId: event.opId,
 				requestHash: event.requestHash ?? hashDynamicRequest(request),
+				branchId: optionalEventString(event.payload.branchId),
 				request,
 				dynamic: input.dynamic,
 			});
@@ -3249,6 +4581,7 @@ async function repairMissingDynamicGeneratedTask(
 		opId: event.opId,
 		requestHash: event.requestHash ?? hashDynamicRequest(request),
 		requestId: request.id,
+		branchId: optionalEventString(event.payload.branchId),
 	});
 	const existingCompiledIndex = input.compiledFlow.tasks.findIndex(
 		(task) => task.id === specId,
@@ -3271,7 +4604,11 @@ async function repairMissingDynamicGeneratedTask(
 		nextTaskRecordIndex(input.run),
 	);
 	input.run.tasks.splice(insertAt, 0, runTask);
-	await writeCompiledRunArtifact(input.cwd, input.run.runId, input.compiledFlow);
+	await writeCompiledRunArtifact(
+		input.cwd,
+		input.run.runId,
+		input.compiledFlow,
+	);
 	await writeRunRecord(input.cwd, input.run);
 	return runTask;
 }
@@ -3284,18 +4621,21 @@ async function ensureDynamicControllerApproval(input: {
 	taskText?: string;
 	ui?: DynamicWorkflowUi;
 }): Promise<
-	| { allowed: true }
-	| { allowed: false; statusDetail: string; message: string }
+	{ allowed: true } | { allowed: false; statusDetail: string; message: string }
 > {
 	const opId = `${input.task.specId}:approval:controller`;
 	const approvalRequest = await dynamicApprovalRequestPayload(input);
 	const requestHash = hashDynamicRequest(approvalRequest);
-	const approvalEvents = (await readDynamicEvents(input.cwd, input.run.runId)).filter(
+	const approvalEvents = (
+		await readDynamicEvents(input.cwd, input.run.runId)
+	).filter(
 		(event) =>
 			event.opId === opId &&
 			(event.type === "approval.pending" || event.type === "approval.resolved"),
 	);
-	const divergent = approvalEvents.find((event) => event.requestHash !== requestHash);
+	const divergent = approvalEvents.find(
+		(event) => event.requestHash !== requestHash,
+	);
 	if (divergent) {
 		const message = `dynamic approval request changed since the pending prompt; previous hash ${divergent.requestHash}, new hash ${requestHash}. Resolve the workflow bundle/spec scope change, then start a new workflow run to approve the updated scope.`;
 		await recordDynamicControllerStatus(input.cwd, input.run.runId, {
@@ -3312,13 +4652,18 @@ async function ensureDynamicControllerApproval(input: {
 	const resolved = approvalEvents
 		.filter((event) => event.type === "approval.resolved")
 		.at(-1);
-	const approvalMessage = await dynamicApprovalPromptMessage(input, requestHash);
+	const approvalMessage = await dynamicApprovalPromptMessage(
+		input,
+		requestHash,
+	);
 	const hasPendingApproval = approvalEvents.some(
-		(event) => event.type === "approval.pending" && event.requestHash === requestHash,
+		(event) =>
+			event.type === "approval.pending" && event.requestHash === requestHash,
 	);
 	if (resolved) {
 		if (resolved.payload.approved === true) return { allowed: true };
-		const message = "dynamic controller approval was rejected; this run will not re-prompt on resume. Start a new workflow run if you want to approve it later.";
+		const message =
+			"dynamic controller approval was rejected; this run will not re-prompt on resume. Start a new workflow run if you want to approve it later.";
 		await recordDynamicControllerStatus(input.cwd, input.run.runId, {
 			controllerSpecId: input.task.specId,
 			status: "policy_blocked",
@@ -3343,8 +4688,7 @@ async function ensureDynamicControllerApproval(input: {
 				},
 			});
 		}
-		const message =
-			`dynamic approval mode "ask" requires an interactive Pi UI; this scheduler has no approval UI. Open an interactive Pi session and run /workflow resume ${input.run.runId} to approve or reject.`;
+		const message = `dynamic approval mode "ask" requires an interactive Pi UI; this scheduler has no approval UI. Open an interactive Pi session and run /workflow resume ${input.run.runId} to approve or reject.`;
 		await recordDynamicControllerStatus(input.cwd, input.run.runId, {
 			controllerSpecId: input.task.specId,
 			status: "awaiting_ui_unavailable",
@@ -3370,7 +4714,10 @@ async function ensureDynamicControllerApproval(input: {
 	}
 	let approved: boolean;
 	try {
-		approved = await confirmDynamicControllerApproval(input.ui, approvalMessage);
+		approved = await confirmDynamicControllerApproval(
+			input.ui,
+			approvalMessage,
+		);
 	} catch {
 		const message = `dynamic controller approval timed out or was unavailable. Open an interactive Pi session and run /workflow resume ${input.run.runId} to approve or reject.`;
 		await recordDynamicControllerStatus(input.cwd, input.run.runId, {
@@ -3392,7 +4739,8 @@ async function ensureDynamicControllerApproval(input: {
 		payload: { approved, approvalScope: approvalRequest },
 	});
 	if (!approved) {
-		const message = "dynamic controller approval was rejected; this run will not re-prompt on resume. Start a new workflow run if you want to approve it later.";
+		const message =
+			"dynamic controller approval was rejected; this run will not re-prompt on resume. Start a new workflow run if you want to approve it later.";
 		await recordDynamicControllerStatus(input.cwd, input.run.runId, {
 			controllerSpecId: input.task.specId,
 			status: "policy_blocked",
@@ -3503,9 +4851,13 @@ async function dynamicApprovalPromptMessage(
 		([id, workflow]) => `${id} -> ${workflow.uses}`,
 	);
 	const taskFingerprint = dynamicApprovalTaskFingerprint(input.taskText);
-	const resolvedBundleSpec = await workflowBundleSpecPath(input.cwd, input.run, {
-		required: true,
-	}).catch(() => undefined);
+	const resolvedBundleSpec = await workflowBundleSpecPath(
+		input.cwd,
+		input.run,
+		{
+			required: true,
+		},
+	).catch(() => undefined);
 	const bundleSpec = resolvedBundleSpec
 		? relative(input.cwd, resolvedBundleSpec).replaceAll("\\", "/")
 		: `.pi/workflows/${input.run.runId}/bundle/${basename(input.run.specPath)}`;
@@ -3620,9 +4972,12 @@ interface DynamicArtifactInput {
 
 interface DynamicAgentRequest {
 	id: string;
-	agent: string;
+	agent?: string;
+	profile?: string;
 	prompt: string;
+	outputProfile?: string;
 	tools?: string[];
+	branchId?: string;
 	readOnly?: boolean;
 	model?: string;
 	thinking?: ThinkingLevel;
@@ -3661,12 +5016,20 @@ async function runDynamicNestedWorkflowCall(input: {
 		controllerSpecId: input.controllerTask.specId,
 		dynamic: input.dynamic,
 	});
-	const workflowId = requiredDynamicString(input.workflowId, "workflow name", "ctx.workflow()");
+	const workflowId = requiredDynamicString(
+		input.workflowId,
+		"workflow name",
+		"ctx.workflow()",
+	);
 	const workflowSpec = input.dynamic.workflows[workflowId];
 	if (!workflowSpec) {
-		throw new Error(`dynamic nested workflow is not declared in spec.json: ${workflowId}`);
+		throw new Error(
+			`dynamic nested workflow is not declared in spec.json: ${workflowId}`,
+		);
 	}
-	const normalizedInput = normalizeDynamicNestedWorkflowInput(input.workflowInput);
+	const normalizedInput = normalizeDynamicNestedWorkflowInput(
+		input.workflowInput,
+	);
 	const nestedSpecPath = resolveDynamicNestedWorkflowSpecPath(
 		input.helperSpecPath,
 		workflowSpec.uses,
@@ -3729,7 +5092,9 @@ async function runDynamicNestedWorkflowCall(input: {
 			},
 		});
 	}
-	let nestedRun = await readRunRecord(input.cwd, nestedRunId).catch(() => undefined);
+	let nestedRun = await readRunRecord(input.cwd, nestedRunId).catch(
+		() => undefined,
+	);
 	if (!nestedRun) {
 		nestedRun = await runWorkflowSpec(nestedSpecPath, input.cwd, {
 			task: normalizedInput.task,
@@ -3880,13 +5245,17 @@ function resolveDynamicNestedWorkflowSpecPath(
 		/^[A-Za-z][A-Za-z0-9+.-]*:/.test(ref) ||
 		ref.split("/").includes("..")
 	) {
-		throw new Error("dynamic nested workflow must be a bundle-local ./ .json spec");
+		throw new Error(
+			"dynamic nested workflow must be a bundle-local ./ .json spec",
+		);
 	}
 	const root = dirname(helperSpecPath);
 	const resolved = resolve(root, ref);
 	const rel = relative(root, resolved);
 	if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
-		throw new Error("dynamic nested workflow must stay inside the workflow bundle");
+		throw new Error(
+			"dynamic nested workflow must stay inside the workflow bundle",
+		);
 	}
 	return resolved;
 }
@@ -3912,7 +5281,11 @@ async function runDynamicHelperCall(input: {
 		controllerSpecId: input.controllerTask.specId,
 		dynamic: input.dynamic,
 	});
-	const helperId = requiredDynamicString(input.helperId, "helper name", "ctx.helper()");
+	const helperId = requiredDynamicString(
+		input.helperId,
+		"helper name",
+		"ctx.helper()",
+	);
 	const helperSpec = input.dynamic.helpers[helperId];
 	if (!helperSpec) {
 		throw new Error(`dynamic helper is not declared in spec.json: ${helperId}`);
@@ -4000,9 +5373,9 @@ async function runDynamicHelperCall(input: {
 		},
 		timeoutMs: remainingDynamicRuntimeMs(
 			input.dynamic,
-			(
-				await readOrRebuildDynamicState(input.cwd, input.run.runId)
-			).controllers[input.controllerTask.specId]?.counters.runtimeMs ?? 0,
+			(await readOrRebuildDynamicState(input.cwd, input.run.runId)).controllers[
+				input.controllerTask.specId
+			]?.counters.runtimeMs ?? 0,
 		),
 	});
 	if (input.isSettled?.()) return undefined;
@@ -4060,7 +5433,9 @@ function resolveDynamicHelperSchemaPath(
 	ref: string,
 ): string {
 	if (ref.includes("#")) {
-		throw new Error("dynamic helper schema JSON Pointer fragments are not supported");
+		throw new Error(
+			"dynamic helper schema JSON Pointer fragments are not supported",
+		);
 	}
 	const pathPart = ref;
 	if (
@@ -4072,13 +5447,17 @@ function resolveDynamicHelperSchemaPath(
 		/^[A-Za-z][A-Za-z0-9+.-]*:/.test(pathPart) ||
 		pathPart.split("/").includes("..")
 	) {
-		throw new Error("dynamic helper schema must be a bundle-local ./ .json file");
+		throw new Error(
+			"dynamic helper schema must be a bundle-local ./ .json file",
+		);
 	}
 	const root = dirname(helperSpecPath);
 	const resolved = resolve(root, pathPart.slice(2));
 	const rel = relative(root, resolved);
 	if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
-		throw new Error("dynamic helper schema must stay inside the workflow bundle");
+		throw new Error(
+			"dynamic helper schema must stay inside the workflow bundle",
+		);
 	}
 	return resolved;
 }
@@ -4098,7 +5477,9 @@ async function assertDynamicHelperBudgetAvailable(input: {
 	}
 }
 
-function normalizeDynamicHelperCallInput(value: unknown): DynamicHelperCallInput {
+function normalizeDynamicHelperCallInput(
+	value: unknown,
+): DynamicHelperCallInput {
 	if (value === undefined) return { sources: {} };
 	if (!isPlainDynamicRecord(value)) {
 		return { sources: {}, options: { value } };
@@ -4106,7 +5487,9 @@ function normalizeDynamicHelperCallInput(value: unknown): DynamicHelperCallInput
 	if ("sources" in value || "options" in value) {
 		return {
 			sources: isPlainDynamicRecord(value.sources) ? value.sources : {},
-			...(isPlainDynamicRecord(value.options) ? { options: value.options } : {}),
+			...(isPlainDynamicRecord(value.options)
+				? { options: value.options }
+				: {}),
 		};
 	}
 	return { sources: {}, options: value };
@@ -4140,35 +5523,57 @@ async function runDynamicAgentRequest(input: {
 	const controllerStageId =
 		input.controllerTask.stageId ??
 		input.controllerTask.specId.replace(/\.controller$/, "");
-	const generatedSpecId = `${controllerStageId}.${request.id}`;
+	let generatedSpecId = `${controllerStageId}.${request.id}`;
 	const opId = `${input.controllerTask.specId}:agent:${request.id}`;
 	const requestHash = hashDynamicRequest(request);
-	const previous = (await readDynamicEvents(input.cwd, input.run.runId)).filter(
+	const branchId = request.branchId;
+	const events = await readDynamicEvents(input.cwd, input.run.runId);
+	const previousByOpId = events.filter(
 		(event) => event.opId === opId && event.type === "task.generated",
 	);
-	const divergent = previous.find((event) => event.requestHash !== requestHash);
+	const divergent = previousByOpId.find(
+		(event) => event.requestHash !== requestHash,
+	);
 	if (divergent) {
 		throw new Error(
 			`dynamic agent request changed for id "${request.id}"; previous hash ${divergent.requestHash}, new hash ${requestHash}`,
 		);
 	}
+	const previousGenerated = findDynamicGeneratedTaskEvent(events, {
+		controllerSpecId: input.controllerTask.specId,
+		opId,
+		branchId,
+		requestHash,
+	});
+	const previousGeneratedSpecId = optionalEventString(
+		previousGenerated?.payload.taskId,
+	);
+	if (previousGeneratedSpecId) generatedSpecId = previousGeneratedSpecId;
+	const generationOpId = previousGenerated?.opId ?? opId;
+	const generationRequestHash = previousGenerated?.requestHash ?? requestHash;
+	const generationBranchId =
+		optionalEventString(previousGenerated?.payload.branchId) ?? branchId;
+	const generationRequest = previousGenerated?.payload.request
+		? normalizeDynamicAgentRequest(previousGenerated.payload.request)
+		: request;
 	let compiledTask = input.compiledFlow.tasks.find(
 		(task) => task.id === generatedSpecId,
 	);
 	let runTask = input.run.tasks.find((task) => task.specId === generatedSpecId);
-	if (previous.length === 0 && (compiledTask || runTask)) {
+	if (!previousGenerated && (compiledTask || runTask)) {
 		throw new Error(`dynamic generated task id collision: ${generatedSpecId}`);
 	}
 	if (compiledTask) {
 		assertDynamicGeneratedMetadataMatches(compiledTask, {
 			controllerSpecId: input.controllerTask.specId,
-			opId,
-			requestHash,
-			requestId: request.id,
+			opId: generationOpId,
+			requestHash: generationRequestHash,
+			requestId: generationRequest.id,
+			branchId: generationBranchId,
 		});
 	}
 	if (!compiledTask || !runTask) {
-		if (previous.length === 0) {
+		if (!previousGenerated) {
 			await assertDynamicGenerationBudgetAvailable({
 				cwd: input.cwd,
 				runId: input.run.runId,
@@ -4176,7 +5581,7 @@ async function runDynamicAgentRequest(input: {
 				dynamic: input.dynamic,
 			});
 		}
-		const recordedCompiledTask = previous.at(-1)?.payload.compiledTask;
+		const recordedCompiledTask = previousGenerated?.payload.compiledTask;
 		compiledTask ??= isDynamicCompiledTaskPayload(recordedCompiledTask)
 			? recordedCompiledTask
 			: await buildDynamicGeneratedCompiledTask({
@@ -4187,19 +5592,21 @@ async function runDynamicAgentRequest(input: {
 					controllerSpecId: input.controllerTask.specId,
 					controllerStageId,
 					generatedSpecId,
-					opId,
-					requestHash,
-					request,
+					opId: generationOpId,
+					requestHash: generationRequestHash,
+					branchId: generationBranchId,
+					request: generationRequest,
 					dynamic: input.dynamic,
 				});
 		assertDynamicGeneratedMetadataMatches(compiledTask, {
 			controllerSpecId: input.controllerTask.specId,
-			opId,
-			requestHash,
-			requestId: request.id,
+			opId: generationOpId,
+			requestHash: generationRequestHash,
+			requestId: generationRequest.id,
+			branchId: generationBranchId,
 		});
 		if (input.isSettled?.()) return undefined;
-		if (previous.length === 0) {
+		if (!previousGenerated) {
 			await recordDynamicEventAndUpdateState(input.cwd, input.run.runId, {
 				controllerSpecId: input.controllerTask.specId,
 				type: "task.generated",
@@ -4207,15 +5614,15 @@ async function runDynamicAgentRequest(input: {
 				requestHash,
 				payload: {
 					taskId: generatedSpecId,
+					...(branchId ? { branchId } : {}),
 					request,
 					compiledTask,
 				},
 			});
 		}
-		const existingRunIndex = runTask
-			? input.run.tasks.indexOf(runTask)
-			: -1;
-		const existingCompiledIndex = input.compiledFlow.tasks.indexOf(compiledTask);
+		const existingRunIndex = runTask ? input.run.tasks.indexOf(runTask) : -1;
+		const existingCompiledIndex =
+			input.compiledFlow.tasks.indexOf(compiledTask);
 		const insertAt =
 			existingRunIndex >= 0
 				? existingRunIndex
@@ -4241,7 +5648,11 @@ async function runDynamicAgentRequest(input: {
 		if (!input.generatedTaskIds.includes(generatedSpecId)) {
 			input.generatedTaskIds.push(generatedSpecId);
 		}
-		await writeCompiledRunArtifact(input.cwd, input.run.runId, input.compiledFlow);
+		await writeCompiledRunArtifact(
+			input.cwd,
+			input.run.runId,
+			input.compiledFlow,
+		);
 		await writeRunRecord(input.cwd, input.run);
 	}
 
@@ -4290,38 +5701,102 @@ async function buildDynamicGeneratedCompiledTask(input: {
 	generatedSpecId: string;
 	opId: string;
 	requestHash: string;
+	branchId?: string;
 	request: DynamicAgentRequest;
 	dynamic: CompiledDynamicWorkflowTask;
 }): Promise<CompiledTask> {
 	if (input.dynamic.budget.maxAgents <= 0) {
 		throw new Error("dynamic agent budget is exhausted");
 	}
-	if (!input.dynamic.permissions.allowDynamicRoles) {
+	const executionProfile = dynamicDecisionLoopProfile(
+		input.dynamic,
+		input.request.profile,
+	);
+	if (executionProfile)
+		assertDynamicExecutionProfileRequest(input.request, executionProfile);
+	const effectiveOutputProfile =
+		input.request.outputProfile ?? executionProfile?.outputProfile;
+	if (effectiveOutputProfile) {
+		assertDynamicOutputProfileAllowed(input.dynamic, effectiveOutputProfile);
+	}
+	const requestedAgent = input.request.agent ?? executionProfile?.agent;
+	if (!requestedAgent) {
+		throw new Error(
+			"dynamic agent request must declare an agent or execution profile",
+		);
+	}
+	if (!executionProfile && !input.dynamic.permissions.allowDynamicRoles) {
 		throw new Error(
 			"dynamic agent role selection is not allowed by workflow permissions",
 		);
 	}
-	if (input.request.tools && !input.dynamic.permissions.allowDynamicTools) {
+	if (
+		input.request.tools &&
+		!executionProfile &&
+		!input.dynamic.permissions.allowDynamicTools
+	) {
 		throw new Error(
 			"dynamic agent tool overrides are not allowed by workflow permissions",
 		);
 	}
-	const agentDefinition = await loadAgentByName(input.request.agent, input.cwd);
+	const agentDefinition = await loadAgentByName(requestedAgent, input.cwd);
 	if (!agentDefinition) {
-		throw new Error(`Agent not found: ${input.request.agent}`);
+		throw new Error(`Agent not found: ${requestedAgent}`);
 	}
-	const tools = input.request.tools ?? agentDefinition.tools;
-	if (input.request.tools && agentDefinition.tools) {
-		const missing = input.request.tools.filter(
+	if (agentDefinition.maxSubagentDepth > 0) {
+		throw new Error(
+			`dynamic agent ${agentDefinition.displayName} declares maxSubagentDepth > 0, which is invalid in dynamic generated tasks`,
+		);
+	}
+	const tools =
+		executionProfile?.tools ?? input.request.tools ?? agentDefinition.tools;
+	if (input.request.tools && !executionProfile && !agentDefinition.tools) {
+		throw new Error(
+			`dynamic agent ${requestedAgent} does not declare a tools authority ceiling`,
+		);
+	}
+	if (tools && agentDefinition.tools) {
+		const missing = tools.filter(
 			(tool) => !agentDefinition.tools?.includes(tool),
 		);
 		if (missing.length > 0) {
 			throw new Error(
-				`dynamic agent requested tools not declared by ${input.request.agent}: ${missing.join(", ")}`,
+				`dynamic agent requested tools not declared by ${requestedAgent}: ${missing.join(", ")}`,
 			);
 		}
 	}
-	const capability = dynamicTaskCapability(tools);
+	const forbiddenDelegationTools = (tools ?? []).filter((tool) =>
+		DYNAMIC_DELEGATION_TOOLS.has(tool),
+	);
+	if (forbiddenDelegationTools.length > 0) {
+		throw new Error(
+			`dynamic agent ${requestedAgent} declares invalid delegation/orchestration tools: ${forbiddenDelegationTools.join(", ")}`,
+		);
+	}
+	const toolProviders =
+		executionProfile?.toolProviders ??
+		providersForSelectedTools(
+			tools,
+			new Map(
+				Object.entries(
+					input.controllerCompiledTask.runtime.toolProviders ?? {},
+				),
+			),
+		);
+	const unknownTools = (tools ?? []).filter(
+		(tool) => effectiveToolClassification(tool, toolProviders) === undefined,
+	);
+	if (unknownTools.length > 0) {
+		throw new Error(
+			`dynamic agent requested tools without trusted classification metadata: ${unknownTools.join(", ")}`,
+		);
+	}
+	assertDynamicExecutionPolicy({
+		dynamic: input.dynamic,
+		agent: requestedAgent,
+		tools,
+	});
+	const capability = dynamicTaskCapability(tools, toolProviders);
 	const requiresWorktree = capability !== "read-only";
 	const inputDependsOn = dynamicInputDependencySpecIds(
 		input.run,
@@ -4352,9 +5827,17 @@ async function buildDynamicGeneratedCompiledTask(input: {
 		dependsOn,
 		contextDependsOn,
 	});
+	const refsMinItems = dynamicGeneratedTaskRefsMinItems({
+		run: input.run,
+		outputProfile: effectiveOutputProfile,
+	});
+	const refsUrlValidation = dynamicGeneratedTaskRefsUrlValidation({
+		run: input.run,
+		outputProfile: effectiveOutputProfile,
+	});
 	const compiledPrompt = [
 		`# Workflow Stage\n\nstage=${input.controllerStageId}\ntype=dynamic-agent\nitem=${input.request.id}`,
-		`# Instructions\n\n${appendDynamicOutputInstructions(input.request.prompt)}`,
+		`# Instructions\n\n${appendDynamicOutputInstructions(input.request.prompt, effectiveOutputProfile, DYNAMIC_OUTPUT_MAX_DIGEST_CHARS, refsMinItems)}`,
 		input.request.compact
 			? "# Output Scope\n\nReturn compact typed output. Prefer concise control JSON and artifact refs over pasted context."
 			: undefined,
@@ -4367,7 +5850,7 @@ async function buildDynamicGeneratedCompiledTask(input: {
 		specId: input.generatedSpecId,
 		taskId: input.request.id,
 		stageId: input.controllerStageId,
-		agent: input.request.agent,
+		agent: requestedAgent,
 		agentPath: agentDefinition.sourcePath,
 		agentDescription: agentDefinition.description,
 		agentSystemPrompt: agentDefinition.body,
@@ -4381,15 +5864,25 @@ async function buildDynamicGeneratedCompiledTask(input: {
 		explicitWorktreePolicy: requiresWorktree,
 		runtime: {
 			approvalMode: "non-interactive",
-			model: input.request.model ?? agentDefinition.model,
-			thinking: input.request.thinking ?? agentDefinition.thinking,
+			model:
+				input.request.model ??
+				executionProfile?.model ??
+				input.controllerCompiledTask.runtime.model ??
+				agentDefinition.model,
+			thinking:
+				input.request.thinking ??
+				executionProfile?.thinking ??
+				input.controllerCompiledTask.runtime.thinking ??
+				agentDefinition.thinking,
 			tools,
+			...(toolProviders ? { toolProviders } : {}),
 			maxRuntimeMs:
-				input.request.maxRuntimeMs ?? input.dynamic.budget.maxRuntimeMs,
+				input.request.maxRuntimeMs ??
+				executionProfile?.maxRuntimeMs ??
+				input.dynamic.budget.maxRuntimeMs,
 		},
 		safety: {
-			readOnlyDeclared:
-				input.request.readOnly ?? capability === "read-only",
+			readOnlyDeclared: input.request.readOnly ?? capability === "read-only",
 			capability,
 			sharedCwdSafe: !requiresWorktree,
 			worktreePolicy: requiresWorktree ? "on" : "off",
@@ -4406,6 +5899,9 @@ async function buildDynamicGeneratedCompiledTask(input: {
 			output: {
 				analysisRequired: true,
 				refsRequired: true,
+				refsMinItems,
+				refsUrlValidation,
+				maxDigestChars: DYNAMIC_OUTPUT_MAX_DIGEST_CHARS,
 			},
 			requiredReads: input.request.requiredReads,
 			sourceProjection: dynamicInputSourceProjection(input.request.inputs),
@@ -4414,8 +5910,124 @@ async function buildDynamicGeneratedCompiledTask(input: {
 			controllerSpecId: input.controllerSpecId,
 			opId: input.opId,
 			requestHash: input.requestHash,
+			...(input.branchId ? { branchId: input.branchId } : {}),
+			...(effectiveOutputProfile
+				? { outputProfile: effectiveOutputProfile }
+				: {}),
 		},
 	} as CompiledTask;
+}
+
+function dynamicGeneratedTaskRefsMinItems(input: {
+	run: WorkflowRunRecord;
+	outputProfile: string | undefined;
+}): number | undefined {
+	if (input.outputProfile !== "synthesis_v1") return undefined;
+	return input.run.provenance?.mode === "direct-dynamic" ? 1 : undefined;
+}
+
+function dynamicGeneratedTaskRefsUrlValidation(input: {
+	run: WorkflowRunRecord;
+	outputProfile: string | undefined;
+}): boolean | undefined {
+	if (!input.outputProfile) return undefined;
+	return input.run.provenance?.mode === "direct-dynamic" ? true : undefined;
+}
+
+function assertDynamicExecutionProfileRequest(
+	request: DynamicAgentRequest,
+	profile: NonNullable<CompiledDynamicWorkflowTask["decisionLoop"]>["planner"],
+): void {
+	if (request.agent && profile?.agent && request.agent !== profile.agent) {
+		throw new Error(
+			`dynamic execution profile agent mismatch: requested ${request.agent}, profile ${profile.agent}`,
+		);
+	}
+	if (request.tools) {
+		throw new Error(
+			"dynamic execution profile requests cannot override tools; configure tools in dynamic.decisionLoop",
+		);
+	}
+	if (request.model && profile?.model && request.model !== profile.model) {
+		throw new Error("dynamic execution profile requests cannot override model");
+	}
+	if (
+		request.thinking &&
+		profile?.thinking &&
+		request.thinking !== profile.thinking
+	) {
+		throw new Error(
+			"dynamic execution profile requests cannot override thinking",
+		);
+	}
+	if (
+		request.maxRuntimeMs &&
+		profile?.maxRuntimeMs &&
+		request.maxRuntimeMs !== profile.maxRuntimeMs
+	) {
+		throw new Error(
+			"dynamic execution profile requests cannot override maxRuntimeMs",
+		);
+	}
+}
+
+function assertDynamicOutputProfileAllowed(
+	dynamic: CompiledDynamicWorkflowTask,
+	outputProfile: string,
+): void {
+	const allowed = dynamic.decisionLoop?.allowedOutputProfiles;
+	if (allowed && allowed.length > 0 && !allowed.includes(outputProfile)) {
+		throw new Error(
+			`dynamic output profile ${outputProfile} is not allowed by decisionLoop policy`,
+		);
+	}
+}
+
+function assertDynamicExecutionPolicy(input: {
+	dynamic: CompiledDynamicWorkflowTask;
+	agent: string;
+	tools?: string[];
+}): void {
+	const policy = input.dynamic.decisionLoop;
+	if (!policy) return;
+	if (
+		policy.allowedAgents.length > 0 &&
+		!policy.allowedAgents.includes(input.agent)
+	) {
+		throw new Error(
+			`dynamic execution agent ${input.agent} is not allowed by decisionLoop policy`,
+		);
+	}
+	const allowedTools = new Set(policy.allowedTools ?? []);
+	if (allowedTools.size > 0) {
+		const disallowed = (input.tools ?? []).filter(
+			(tool) => !allowedTools.has(tool),
+		);
+		if (disallowed.length > 0) {
+			throw new Error(
+				`dynamic execution tools not allowed by decisionLoop policy: ${disallowed.join(", ")}`,
+			);
+		}
+	}
+}
+
+function dynamicDecisionLoopProfile(
+	dynamic: CompiledDynamicWorkflowTask,
+	profileId: string | undefined,
+):
+	| NonNullable<CompiledDynamicWorkflowTask["decisionLoop"]>["planner"]
+	| undefined {
+	if (!profileId) return undefined;
+	const decisionLoop = dynamic.decisionLoop;
+	if (!decisionLoop) return undefined;
+	if (profileId === "planner") return decisionLoop.planner;
+	if (profileId === "worker" || profileId === "workerDefaults")
+		return decisionLoop.workerDefaults;
+	if (profileId === "verifier") return decisionLoop.verifier;
+	if (profileId === "synthesis") return decisionLoop.synthesis;
+	throw new Error(
+		`unknown dynamic decision-loop execution profile: ${profileId}`,
+	);
 }
 
 function isDynamicCompiledTaskPayload(value: unknown): value is CompiledTask {
@@ -4435,6 +6047,7 @@ function assertDynamicGeneratedMetadataMatches(
 		opId: string;
 		requestHash: string;
 		requestId: string;
+		branchId?: string;
 	},
 ): void {
 	const actual = compiledTask.dynamicGenerated;
@@ -4442,7 +6055,8 @@ function assertDynamicGeneratedMetadataMatches(
 		!actual ||
 		actual.controllerSpecId !== expected.controllerSpecId ||
 		actual.opId !== expected.opId ||
-		actual.requestHash !== expected.requestHash
+		actual.requestHash !== expected.requestHash ||
+		(expected.branchId !== undefined && actual.branchId !== expected.branchId)
 	) {
 		throw new Error(
 			`dynamic agent request changed for id "${expected.requestId}"; generated task metadata does not match replay request`,
@@ -4473,7 +6087,8 @@ function validateDynamicGeneratedDependencies(input: {
 		);
 		if (!runTask || !compiledTask) continue;
 		if (
-			compiledTask.dynamicGenerated?.controllerSpecId !== input.controllerSpecId &&
+			compiledTask.dynamicGenerated?.controllerSpecId !==
+				input.controllerSpecId &&
 			!isTerminalTaskStatus(runTask.status)
 		) {
 			throw new Error(
@@ -4481,7 +6096,8 @@ function validateDynamicGeneratedDependencies(input: {
 			);
 		}
 		if (
-			compiledTask.dynamicGenerated?.controllerSpecId !== input.controllerSpecId &&
+			compiledTask.dynamicGenerated?.controllerSpecId !==
+				input.controllerSpecId &&
 			compiledTaskTransitivelyDependsOn(
 				input.compiledFlow,
 				compiledTask.id,
@@ -4514,14 +6130,23 @@ function compiledTaskTransitivelyDependsOn(
 ): boolean {
 	if (seen.has(fromSpecId)) return false;
 	seen.add(fromSpecId);
-	const task = compiledFlow.tasks.find((candidate) => candidate.id === fromSpecId);
+	const task = compiledFlow.tasks.find(
+		(candidate) => candidate.id === fromSpecId,
+	);
 	if (!task) return false;
 	for (const dependency of uniqueStrings([
 		...(task.dependsOn ?? []),
 		...(task.contextDependsOn ?? []),
 	])) {
 		if (dependency === targetSpecId) return true;
-		if (compiledTaskTransitivelyDependsOn(compiledFlow, dependency, targetSpecId, seen)) {
+		if (
+			compiledTaskTransitivelyDependsOn(
+				compiledFlow,
+				dependency,
+				targetSpecId,
+				seen,
+			)
+		) {
 			return true;
 		}
 	}
@@ -4590,7 +6215,10 @@ function dynamicDependencySpecIds(
 	return uniqueStrings(specIds);
 }
 
-function splitDynamicArtifactName(name: string): { source: string; artifact?: string } {
+function splitDynamicArtifactName(name: string): {
+	source: string;
+	artifact?: string;
+} {
 	const parts = name.split(".").filter(Boolean);
 	const artifact = parts.at(-1);
 	if (
@@ -4675,9 +6303,12 @@ function normalizeDynamicAgentRequest(value: unknown): DynamicAgentRequest {
 	const inputs = normalizeDynamicArtifactInputs(record.inputs);
 	return {
 		id,
-		agent: requiredDynamicString(record.agent ?? record.role, "agent"),
+		agent: optionalDynamicString(record.agent ?? record.role, "agent"),
+		profile: optionalDynamicString(record.profile, "profile"),
 		prompt: requiredDynamicString(record.prompt, "prompt"),
+		outputProfile: optionalDynamicOutputProfile(record.outputProfile),
 		tools: optionalDynamicStringArray(record.tools, "tools"),
+		branchId: optionalDynamicString(record.branchId, "branchId"),
 		readOnly: optionalDynamicBoolean(record.readOnly, "readOnly"),
 		model: optionalDynamicString(record.model, "model"),
 		thinking: optionalDynamicThinking(record.thinking),
@@ -4691,7 +6322,9 @@ function normalizeDynamicAgentRequest(value: unknown): DynamicAgentRequest {
 			inputs
 				.filter((input) => input.required)
 				.map((input) => input.name)
-				.filter((name) => splitDynamicArtifactName(name).artifact !== undefined),
+				.filter(
+					(name) => splitDynamicArtifactName(name).artifact !== undefined,
+				),
 		dependsOn: optionalDynamicStringArray(record.dependsOn, "dependsOn"),
 		compact: record.compact !== false,
 	};
@@ -4727,7 +6360,9 @@ function optionalDynamicStringArray(
 	return value.map((item) => item.trim()).filter(Boolean);
 }
 
-function normalizeDynamicArtifactInputs(value: unknown): DynamicArtifactInput[] {
+function normalizeDynamicArtifactInputs(
+	value: unknown,
+): DynamicArtifactInput[] {
 	if (value === undefined) return [];
 	if (!Array.isArray(value)) {
 		throw new Error("ctx.agent() inputs must be an array");
@@ -4751,7 +6386,9 @@ function normalizeDynamicArtifactInput(
 	}
 	const record = value as Record<string, unknown>;
 	if (record.kind !== "workflow-artifact-ref") {
-		throw new Error(`ctx.agent() inputs[${index}] must be a workflow artifact ref`);
+		throw new Error(
+			`ctx.agent() inputs[${index}] must be a workflow artifact ref`,
+		);
 	}
 	const options = isPlainDynamicRecord(record.options)
 		? record.options
@@ -4764,7 +6401,9 @@ function normalizeDynamicArtifactInput(
 	};
 }
 
-function isPlainDynamicRecord(value: unknown): value is Record<string, unknown> {
+function isPlainDynamicRecord(
+	value: unknown,
+): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -4805,30 +6444,82 @@ function optionalDynamicThinking(value: unknown): ThinkingLevel | undefined {
 	throw new Error("ctx.agent() thinking has an unsupported value");
 }
 
-function dynamicTaskCapability(tools: string[] | undefined): TaskCapability {
-	if (!tools) return "mutation-capable";
-	let capability: TaskCapability = "read-only";
-	for (const tool of tools) {
-		if (DYNAMIC_MUTATION_TOOLS.has(tool)) return "mutation-capable";
-		if (DYNAMIC_WRITE_TOOLS.has(tool)) capability = "write-capable";
-		else if (!DYNAMIC_READ_ONLY_TOOLS.has(tool)) capability = "mutation-capable";
-	}
-	return capability;
+function dynamicTaskCapability(
+	tools: string[] | undefined,
+	toolProviders: Record<string, CompiledToolProvider> | undefined,
+): TaskCapability {
+	return classifyToolCapability(tools, toolProviders, true, {
+		unspecifiedToolsCapability: "mutation-capable",
+		emptyToolsCapability: "read-only",
+	});
 }
 
-function appendDynamicOutputInstructions(prompt: string): string {
+function appendDynamicOutputInstructions(
+	prompt: string,
+	outputProfile?: string,
+	maxDigestChars = DYNAMIC_OUTPUT_MAX_DIGEST_CHARS,
+	refsMinItems?: number,
+): string {
+	const refsExample =
+		refsMinItems !== undefined && refsMinItems > 0
+			? "<refs>[...]</refs>"
+			: "<refs>[]</refs>";
 	return [
 		prompt,
 		"# Workflow Output Protocol",
 		"Return your final answer exactly as these three sections, in this order, with no prose outside the tags:",
 		"<control>{...}</control>",
 		"<analysis>...</analysis>",
-		"<refs>[]</refs>",
+		refsExample,
 		"The <control> section must be valid JSON object data with non-empty string `schema` and `digest` fields.",
+		`The control.digest string must be at most ${maxDigestChars} characters; prefer one short sentence.`,
 		"Use schema `dynamic-task-result-v1` unless the dynamic controller asks for a more specific control schema.",
+		refsMinItems !== undefined && refsMinItems > 0
+			? `The <refs> JSON array must include at least ${refsMinItems} item${refsMinItems === 1 ? "" : "s"}. Include URLs or local file paths used by the analysis. Verify external URLs with fetch_content before including them; do not include stale, guessed, or unreachable URLs.`
+			: undefined,
+		dynamicOutputProfileInstructions(outputProfile),
 	]
 		.filter(Boolean)
 		.join("\n\n");
+}
+
+function dynamicOutputProfileInstructions(
+	outputProfile: string | undefined,
+): string | undefined {
+	if (!outputProfile) return undefined;
+	if (outputProfile === "candidate_findings_v1") {
+		return [
+			"# Dynamic Output Profile: candidate_findings_v1",
+			"Your <control> JSON should include `findings` as an array of candidate findings.",
+			"Each finding should include stable `id`, `title` or `summary`, `severity`, `confidence`, and `evidenceRefs` when evidence exists.",
+			"When using URL evidence, verify the URL with available tools before adding it to <refs> or evidenceRefs; put unreachable or uncertain sources in gaps instead of refs.",
+			"Use `gaps`, `blockers`, `conflicts`, or `omissions` arrays for incomplete work instead of hiding it.",
+		].join("\n");
+	}
+	if (outputProfile === "verification_result_v1") {
+		return [
+			"# Dynamic Output Profile: verification_result_v1",
+			"Your <control> JSON must include `findingId` and `verdict`.",
+			"`verdict` must be one of verified, rejected, weakened, or inconclusive.",
+			"Check cited URL/source refs with available tools before returning verified or weakened; use inconclusive when source availability or support cannot be established.",
+			"Include `confidence`, `evidenceRefs`, concise `notes`, and a `claimSupports` array when sources support or contradict the finding.",
+			"Each `claimSupports` entry should include `claim`, `status` (supports, partial, contradicts, unsupported, inconclusive), `sourceLocators` with verified URL/path refs, and a short `excerpt` or `notes` explaining the support.",
+		].join("\n");
+	}
+	if (outputProfile === "coverage_assessment_v1") {
+		return [
+			"# Dynamic Output Profile: coverage_assessment_v1",
+			"Your <control> JSON should include `criteriaCoverage` or `coverage` as an array.",
+			"Each entry should include `criterionId`, `status`, `evidenceRefs`, and `notes` when useful.",
+		].join("\n");
+	}
+	if (outputProfile === "synthesis_v1") {
+		return "# Dynamic Output Profile: synthesis_v1\nYour <control> JSON should include a compact final synthesis summary, caveats, and any remaining blockers or omissions. Final refs must come from verified upstream source ledgers; prefer sources with positive claimSupports and do not introduce new URL refs in synthesis.";
+	}
+	if (outputProfile === "generic_summary_v1") {
+		return "# Dynamic Output Profile: generic_summary_v1\nYour <control> JSON may be a compact summary, but include gaps/blockers/omissions if the result needs manual review.";
+	}
+	return `# Dynamic Output Profile: ${outputProfile}\nEmit control JSON suitable for this output profile and surface gaps/blockers explicitly.`;
 }
 
 async function executeSupportTask(
@@ -5043,9 +6734,7 @@ function buildArtifactGraphSupportSourceStatuses(
 	return statuses;
 }
 
-function sourceStatusForTask(
-	task: WorkflowTaskRunRecord,
-): {
+function sourceStatusForTask(task: WorkflowTaskRunRecord): {
 	status: string;
 	statusDetail?: string;
 	lastMessage?: string;
@@ -5056,12 +6745,18 @@ function sourceStatusForTask(
 		status: task.status,
 		...(task.statusDetail ? { statusDetail: task.statusDetail } : {}),
 		...(lastMessage ? { lastMessage } : {}),
-		...(task.status !== "completed" ? { errorType: sourceErrorType(task) } : {}),
+		...(task.status !== "completed"
+			? { errorType: sourceErrorType(task) }
+			: {}),
 	};
 }
 
-function sanitizeSourceLastMessage(value: string | undefined): string | undefined {
-	const text = String(value ?? "").replace(/\s+/g, " ").trim();
+function sanitizeSourceLastMessage(
+	value: string | undefined,
+): string | undefined {
+	const text = String(value ?? "")
+		.replace(/\s+/g, " ")
+		.trim();
 	return text ? text.slice(0, 500) : undefined;
 }
 
@@ -5086,10 +6781,55 @@ async function writeArtifactGraphDynamicResult(
 	cwd: string,
 	task: WorkflowTaskRunRecord,
 	structuredOutput: unknown,
+	lifecycleStatus: "completed" | "failed" = "completed",
 ): Promise<void> {
-	const { control, analysis, refs } = normalizeDynamicControllerOutput(
-		structuredOutput,
-	);
+	const { control, analysis, refs } =
+		normalizeDynamicControllerOutput(structuredOutput);
+	const rawOutput = [
+		"<control>",
+		JSON.stringify(control, null, 2),
+		"</control>",
+		"<analysis>",
+		analysis,
+		"</analysis>",
+		"<refs>",
+		JSON.stringify(refs, null, 2),
+		"</refs>",
+	].join("\n");
+	await mkdir(dirname(fromProjectPath(cwd, task.files.output)), {
+		recursive: true,
+	});
+	await writeFile(fromProjectPath(cwd, task.files.output), rawOutput, "utf8");
+	await writeFile(fromProjectPath(cwd, task.files.stderr), "", "utf8");
+	const written = await writeWorkflowTaskArtifactBundle({
+		taskDir: dirname(fromProjectPath(cwd, task.files.result)),
+		rawOutput,
+		completedAt: new Date().toISOString(),
+		lifecycleStatus,
+		analysisRequired: task.artifactGraph?.output.analysisRequired ?? true,
+		refsRequired: task.artifactGraph?.output.refsRequired ?? true,
+		refsMinItems: task.artifactGraph?.output.refsMinItems,
+		refsUrlValidation: task.artifactGraph?.output.refsUrlValidation,
+		maxDigestChars: task.artifactGraph?.output.maxDigestChars,
+		controlJsonSchema: await readTaskControlJsonSchema(task),
+	});
+	if (!written.valid) {
+		throw new Error(
+			`dynamic controller output failed workflow validation: ${written.parsed.issues
+				.map((issue) => issue.message)
+				.join("; ")}`,
+		);
+	}
+}
+
+async function writeArtifactGraphSupportResult(
+	cwd: string,
+	task: WorkflowTaskRunRecord,
+	structuredOutput: unknown,
+): Promise<void> {
+	const control = normalizeSupportControl(structuredOutput);
+	const analysis = supportOutputAnalysis(structuredOutput, control);
+	const refs = supportOutputRefs(structuredOutput, control);
 	const rawOutput = [
 		"<control>",
 		JSON.stringify(control, null, 2),
@@ -5112,46 +6852,8 @@ async function writeArtifactGraphDynamicResult(
 		completedAt: new Date().toISOString(),
 		analysisRequired: task.artifactGraph?.output.analysisRequired ?? true,
 		refsRequired: task.artifactGraph?.output.refsRequired ?? true,
-		maxDigestChars: task.artifactGraph?.output.maxDigestChars,
-		controlJsonSchema: await readTaskControlJsonSchema(task),
-	});
-	if (!written.valid) {
-		throw new Error(
-			`dynamic controller output failed workflow validation: ${written.parsed.issues
-				.map((issue) => issue.message)
-				.join("; ")}`,
-		);
-	}
-}
-
-async function writeArtifactGraphSupportResult(
-	cwd: string,
-	task: WorkflowTaskRunRecord,
-	structuredOutput: unknown,
-): Promise<void> {
-	const control = normalizeSupportControl(structuredOutput);
-	const rawOutput = [
-		"<control>",
-		JSON.stringify(control, null, 2),
-		"</control>",
-		"<analysis>",
-		"Support helper completed deterministically.",
-		"</analysis>",
-		"<refs>",
-		"[]",
-		"</refs>",
-	].join("\n");
-	await mkdir(dirname(fromProjectPath(cwd, task.files.output)), {
-		recursive: true,
-	});
-	await writeFile(fromProjectPath(cwd, task.files.output), rawOutput, "utf8");
-	await writeFile(fromProjectPath(cwd, task.files.stderr), "", "utf8");
-	const written = await writeWorkflowTaskArtifactBundle({
-		taskDir: dirname(fromProjectPath(cwd, task.files.result)),
-		rawOutput,
-		completedAt: new Date().toISOString(),
-		analysisRequired: task.artifactGraph?.output.analysisRequired ?? true,
-		refsRequired: task.artifactGraph?.output.refsRequired ?? true,
+		refsMinItems: task.artifactGraph?.output.refsMinItems,
+		refsUrlValidation: task.artifactGraph?.output.refsUrlValidation,
 		maxDigestChars: task.artifactGraph?.output.maxDigestChars,
 		controlJsonSchema: await readTaskControlJsonSchema(task),
 	});
@@ -5220,6 +6922,145 @@ function normalizeDynamicControllerOutput(value: unknown): {
 	};
 }
 
+interface DynamicControllerOutcome {
+	taskStatus: "completed" | "blocked" | "failed";
+	statusDetail: string;
+	message: string;
+	lifecycleStatus: "completed" | "failed";
+	controllerStatus: DynamicControllerStatus;
+	blockers: string[];
+	omissions: string[];
+}
+
+async function dynamicUnrunBranchBlockers(
+	cwd: string,
+	runId: string,
+	controllerSpecId: string,
+): Promise<string[]> {
+	const state = await readOrRebuildDynamicState(cwd, runId);
+	const branches = state.controllers[controllerSpecId]?.branches ?? [];
+	return branches
+		.filter((branch) => branch.status === "planned")
+		.map((branch) => {
+			const details = [
+				`branchId=${branch.branchId}`,
+				`actionId=${branch.actionId}`,
+				`type=${branch.type}`,
+			]
+				.filter(Boolean)
+				.join(" ");
+			return `accepted dynamic branch was planned but never generated: ${details}`;
+		});
+}
+
+function dynamicControllerOutputWithBranchBlockers(
+	structuredOutput: unknown,
+	blockers: string[],
+): { control: Record<string, unknown>; analysis: string; refs: unknown[] } {
+	const normalized = normalizeDynamicControllerOutput(structuredOutput);
+	return {
+		...normalized,
+		control: {
+			...normalized.control,
+			status: "blocked",
+			blockers: uniqueStrings([
+				...dynamicControlStringArray(normalized.control.blockers),
+				...blockers,
+			]),
+		},
+	};
+}
+
+function dynamicControllerOutcomeFromOutput(
+	structuredOutput: unknown,
+): DynamicControllerOutcome {
+	const { control } = normalizeDynamicControllerOutput(structuredOutput);
+	const status =
+		typeof control.status === "string" ? control.status : undefined;
+	const blockers = dynamicControlStringArray(control.blockers);
+	const omissions = dynamicControlStringArray(control.omissions);
+
+	if (status === "blocked" || (blockers.length > 0 && status !== "stopped")) {
+		return {
+			taskStatus: "blocked",
+			statusDetail: "dynamic_blocked",
+			message: dynamicControllerIssueMessage(
+				"dynamic controller blocked",
+				blockers.length > 0 ? blockers : omissions,
+			),
+			lifecycleStatus: "failed",
+			controllerStatus: "blocked",
+			blockers,
+			omissions,
+		};
+	}
+
+	if (omissions.length > 0) {
+		return {
+			taskStatus: "failed",
+			statusDetail: "dynamic_dropped",
+			message: dynamicControllerIssueMessage(
+				"dynamic controller dropped work",
+				omissions,
+			),
+			lifecycleStatus: "failed",
+			controllerStatus: "failed",
+			blockers,
+			omissions,
+		};
+	}
+
+	if (status === "stopped") {
+		return {
+			taskStatus: "completed",
+			statusDetail: "dynamic_stopped",
+			message:
+				blockers.length > 0
+					? dynamicControllerIssueMessage(
+							"dynamic controller stopped",
+							blockers,
+						)
+					: "dynamic controller stopped",
+			lifecycleStatus: "completed",
+			controllerStatus: "complete",
+			blockers,
+			omissions,
+		};
+	}
+
+	return {
+		taskStatus: "completed",
+		statusDetail: "dynamic_completed",
+		message:
+			status === "exhausted"
+				? "dynamic controller exhausted decision rounds"
+				: "dynamic controller completed",
+		lifecycleStatus: "completed",
+		controllerStatus: "complete",
+		blockers,
+		omissions,
+	};
+}
+
+function dynamicControlStringArray(value: unknown): string[] {
+	return Array.isArray(value)
+		? value
+				.filter((item): item is string => typeof item === "string")
+				.map((item) => item.trim())
+				.filter((item) => item.length > 0)
+		: [];
+}
+
+function dynamicControllerIssueMessage(
+	prefix: string,
+	issues: string[],
+): string {
+	const [first, ...rest] = issues;
+	if (!first) return prefix;
+	const suffix = rest.length > 0 ? ` (+${rest.length} more)` : "";
+	return `${prefix}: ${first}${suffix}`;
+}
+
 function normalizeSupportControl(value: unknown): Record<string, unknown> {
 	if (value && typeof value === "object" && !Array.isArray(value)) {
 		const record = value as Record<string, unknown>;
@@ -5238,6 +7079,45 @@ function normalizeSupportControl(value: unknown): Record<string, unknown> {
 		digest: "Support helper completed.",
 		value,
 	};
+}
+
+function supportOutputAnalysis(
+	value: unknown,
+	control: Record<string, unknown>,
+): string {
+	const record =
+		value && typeof value === "object" && !Array.isArray(value)
+			? (value as Record<string, unknown>)
+			: undefined;
+	for (const candidate of [
+		record?.analysis,
+		record?.executiveMarkdown,
+		record?.markdown,
+		control.summary,
+	]) {
+		if (typeof candidate === "string" && candidate.trim()) {
+			return candidate.trim();
+		}
+	}
+	return "Support helper completed deterministically.";
+}
+
+function supportOutputRefs(
+	value: unknown,
+	control: Record<string, unknown>,
+): unknown[] {
+	const record =
+		value && typeof value === "object" && !Array.isArray(value)
+			? (value as Record<string, unknown>)
+			: undefined;
+	if (Array.isArray(record?.refs)) return record.refs;
+	if (Array.isArray(control.refs)) return control.refs;
+	const urls = Array.isArray(record?.sourceUrls)
+		? record.sourceUrls
+		: Array.isArray(control.sourceUrls)
+			? control.sourceUrls
+			: [];
+	return urls.filter((url): url is string => typeof url === "string");
 }
 
 function applyExistingLoopWorktree(
@@ -5375,12 +7255,9 @@ async function prepareArtifactGraphTask(
 	});
 
 	const requiredReads = compiledTask.artifactGraph?.requiredReads ?? [];
-	const requiredReadContext = await preloadRequiredArtifactReads({
+	const requiredReadContext = formatRequiredArtifactReadReferences({
 		sources,
 		requiredReads,
-		ledgerPath,
-		runId: run.runId,
-		taskId: task.taskId,
 	});
 	return {
 		...compiledTask,
@@ -5409,67 +7286,39 @@ async function prepareArtifactGraphTask(
 	};
 }
 
-async function preloadRequiredArtifactReads(options: {
+function formatRequiredArtifactReadReferences(options: {
 	sources: WorkflowSourceManifestSource[];
 	requiredReads: readonly string[];
-	ledgerPath: string;
-	runId: string;
-	taskId: string;
-}): Promise<string> {
+}): string {
 	if (options.requiredReads.length === 0) return "";
-	const sections: string[] = [];
-	for (const required of options.requiredReads) {
+	const sections = options.requiredReads.map((required) => {
 		const parsed = parseRequiredArtifactRead(required);
 		if (!parsed) {
-			sections.push(
-				`## ${required}\n\nRequired read name is invalid; expected source.artifact.`,
-			);
-			continue;
+			return `- ${required}: invalid required read name; expected source.artifact.`;
 		}
 		const source = options.sources.find(
 			(candidate) => candidate.source === parsed.source,
 		);
 		const artifact = source?.artifacts?.[parsed.artifact];
 		if (!source || !artifact?.path) {
-			sections.push(
-				`## ${required}\n\nRequired artifact was not available in the source manifest.`,
-			);
-			continue;
+			return `- ${required}: required artifact is not available in the source manifest.`;
 		}
-		const content = await readFile(artifact.path, "utf8");
-		const bytes = Buffer.byteLength(content, "utf8");
-		await appendFile(
-			options.ledgerPath,
-			`${JSON.stringify({
-				schema: "workflow-artifact-read-v1",
-				runId: options.runId,
-				taskId: options.taskId,
-				source: parsed.source,
-				artifact: parsed.artifact,
-				at: nowIso(),
-				bytes,
-				returnedBytes: bytes,
-				truncated: false,
-				runtimePreload: true,
-			})}\n`,
-			"utf8",
-		);
-		const fence = parsed.artifact === "control" || parsed.artifact === "refs" ? "json" : "";
-		sections.push(
-			[`## ${required}`, "", `\`\`\`${fence}`, content, "```"].join("\n"),
-		);
-	}
+		return `- ${required}: available via workflow_artifact read with source=${JSON.stringify(parsed.source)}, artifact=${JSON.stringify(parsed.artifact)}.`;
+	});
 	return [
-		"# Required Workflow Artifact Read Contents",
-		"The workflow runtime preloaded these declared requiredReads in full and recorded them in the read ledger before launch. Treat this section as equivalent to reading the same artifacts with workflow_artifact.",
+		"# Required Workflow Artifact Reads",
+		"The workflow runtime does not preload requiredReads into this prompt. To satisfy the required-read gate, call workflow_artifact for each listed source/artifact before producing the final answer. The read ledger, not this prompt, proves access.",
 		...sections,
-	].join("\n\n");
+	].join("\n");
 }
 
-function parseRequiredArtifactRead(
-	value: string,
-): { source: string; artifact: keyof WorkflowSourceManifestSource["artifacts"] } | null {
-	const match = String(value).match(/^([A-Za-z0-9_.-]+)\.(control|analysis|refs|raw)$/);
+function parseRequiredArtifactRead(value: string): {
+	source: string;
+	artifact: keyof WorkflowSourceManifestSource["artifacts"];
+} | null {
+	const match = String(value).match(
+		/^([A-Za-z0-9_.-]+)\.(control|analysis|refs|raw)$/,
+	);
 	if (!match) return null;
 	return {
 		source: match[1] ?? "",
@@ -5528,8 +7377,118 @@ async function buildArtifactGraphSourceManifestSources(
 			...(controlProjection.truncated ? { projectionTruncated: true } : {}),
 			artifacts,
 		});
+		await appendDynamicOutputSources({
+			cwd,
+			run,
+			controllerTask: sourceTask,
+			control,
+			projection,
+			sources,
+			usedNames,
+		});
 	}
 	return sources;
+}
+
+async function appendDynamicOutputSources(input: {
+	cwd: string;
+	run: WorkflowRunRecord;
+	controllerTask: WorkflowTaskRunRecord;
+	control: unknown;
+	projection?: NonNullable<CompiledTask["artifactGraph"]>["sourceProjection"];
+	sources: WorkflowSourceManifestSource[];
+	usedNames: Set<string>;
+}): Promise<void> {
+	if (input.controllerTask.kind !== "dynamic") return;
+	const outputTaskIds = dynamicOutputTaskSpecIds(input.control);
+	if (outputTaskIds.length === 0) return;
+	const bySpecId = new Map(
+		input.run.tasks.map((sourceTask) => [sourceTask.specId, sourceTask]),
+	);
+	let outputIndex = 0;
+	for (const outputTaskId of outputTaskIds) {
+		const outputTask = bySpecId.get(outputTaskId);
+		if (!outputTask) continue;
+		const source = dynamicOutputSourceName(
+			input.controllerTask,
+			outputIndex,
+			input.usedNames,
+		);
+		outputIndex += 1;
+		const status = sourceStatusForTask(outputTask);
+		if (outputTask.status !== "completed") {
+			input.sources.push({
+				source,
+				displayName: outputTask.displayName,
+				taskId: outputTask.taskId,
+				specId: outputTask.specId,
+				stageId: outputTask.stageId,
+				...status,
+				artifacts: {},
+			});
+			continue;
+		}
+		const artifacts = await artifactRefsForTask(input.cwd, outputTask);
+		if (Object.keys(artifacts).length === 0) continue;
+		const control = await readArtifactGraphControl(input.cwd, outputTask).catch(
+			() => undefined,
+		);
+		const controlProjection = projectArtifactGraphControl(
+			control,
+			input.projection,
+		);
+		input.sources.push({
+			source,
+			displayName: outputTask.displayName,
+			taskId: outputTask.taskId,
+			specId: outputTask.specId,
+			stageId: outputTask.stageId,
+			...status,
+			digest: controlDigest(control),
+			...(controlProjection.value !== undefined
+				? { controlProjection: controlProjection.value }
+				: {}),
+			...(controlProjection.missingPaths.length > 0
+				? { projectionMissingPaths: controlProjection.missingPaths }
+				: {}),
+			...(controlProjection.truncated ? { projectionTruncated: true } : {}),
+			artifacts,
+		});
+	}
+}
+
+function dynamicOutputTaskSpecIds(control: unknown): string[] {
+	if (!control || typeof control !== "object" || Array.isArray(control)) {
+		return [];
+	}
+	const record = control as Record<string, unknown>;
+	return uniqueStrings([
+		...stringArrayValue(record.outputTasks),
+		...stringArrayValue(record.outputTaskIds),
+		...stringArrayValue(record.exportedTasks),
+	]);
+}
+
+function stringArrayValue(value: unknown): string[] {
+	if (!Array.isArray(value)) return [];
+	return value.filter((item): item is string => typeof item === "string");
+}
+
+function dynamicOutputSourceName(
+	controllerTask: WorkflowTaskRunRecord,
+	index: number,
+	usedNames: Set<string>,
+): string {
+	const base = `${controllerTask.stageId ?? controllerTask.specId}.output${index === 0 ? "" : `.${index + 1}`}`;
+	if (!usedNames.has(base)) {
+		usedNames.add(base);
+		return base;
+	}
+	let suffix = 2;
+	while (usedNames.has(`${base}.${suffix}`)) suffix += 1;
+	const source = `${base}.${suffix}`;
+	usedNames.add(source);
+	return source;
 }
 
 async function artifactRefsForTask(
@@ -5640,7 +7599,9 @@ function sourceNameForTask(
 	task: WorkflowTaskRunRecord,
 	usedNames: Set<string>,
 ): string {
-	const preferred = task.dynamicGenerated ? task.specId : task.stageId ?? task.specId;
+	const preferred = task.dynamicGenerated
+		? task.specId
+		: (task.stageId ?? task.specId);
 	if (!usedNames.has(preferred)) {
 		usedNames.add(preferred);
 		return preferred;
@@ -5731,7 +7692,8 @@ async function prepareArtifactGraphRetryTask(
 			preparedTask.compiledPrompt,
 			"# Workflow Output Retry Instructions",
 			issueText,
-			"Return the final answer again using exactly <control>, <analysis>, and <refs> sections.",
+			"Return the final answer again using exactly <control>, <analysis>, and <refs> sections. The first byte must be '<' in <control>; do not include apologies, status text, Markdown headings, or prose outside the required sections.",
+			"If the retry is for missing required workflow_artifact reads, use workflow_artifact before the final answer. Prefer projected reads with path/maxItems/maxChars when only a JSON slice is needed.",
 			"# Previous Attempt Preview",
 			previousOutput.slice(0, 4000) || "(empty or unavailable)",
 		].join("\n\n"),

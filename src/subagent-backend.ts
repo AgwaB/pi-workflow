@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import {
 	copyFile,
 	mkdir,
@@ -9,12 +10,14 @@ import {
 import {
 	delimiter,
 	dirname,
+	extname,
 	isAbsolute,
 	join,
 	relative,
 	resolve,
 	sep,
 } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import type {
 	CompiledTask,
@@ -37,6 +40,7 @@ import {
 } from "./result.js";
 import type { BackendLaunchResult } from "./backend.js";
 import { readWorkflowArtifactReadLedger } from "./workflow-artifact-tool.js";
+import { writeWorkflowFetchCacheExtensionWrapper } from "./workflow-fetch-cache-extension.js";
 import {
 	buildWorkflowOutputRetryInstructions,
 	parseWorkflowOutputForBundle,
@@ -45,13 +49,43 @@ import {
 
 const DEFAULT_SUBAGENT_RUNS_ROOT = ".pi/workflow-subagents";
 const EXTRA_SUBAGENT_EXTENSIONS_ENV = "PI_WORKFLOW_SUBAGENT_EXTRA_EXTENSIONS";
+const FETCH_CONTENT_CACHE_ENV = "PI_WORKFLOW_FETCH_CONTENT_CACHE";
+const LEGACY_FETCH_CACHE_ENV = "PI_WORKFLOW_FETCH_CACHE";
 const DEFAULT_TRANSIENT_MODEL_FAILURE_RETRIES = 5;
+const DEFAULT_ARTIFACT_OUTPUT_RETRIES = 2;
+const MODULE_PATH = fileURLToPath(import.meta.url);
+const MODULE_DIR = dirname(MODULE_PATH);
+const BUNDLED_PI_WEB_ACCESS_EXTENSION = bundledNodeModulePath(
+	"pi-web-access",
+	"index.ts",
+);
+const BUNDLED_PI_WEB_ACCESS_STORAGE = bundledNodeModulePath(
+	"pi-web-access",
+	"storage.ts",
+);
+const WORKFLOW_FETCH_CACHE_EXTENSION_IMPORT = resolve(
+	MODULE_DIR,
+	`workflow-fetch-cache-extension${extname(MODULE_PATH)}`,
+);
 const TOOL_PROVIDER_EXTENSIONS: Record<string, string[]> = {
-	web_search: ["npm:pi-web-access"],
-	code_search: ["npm:pi-web-access"],
-	fetch_content: ["npm:pi-web-access"],
-	get_search_content: ["npm:pi-web-access"],
+	web_search: [BUNDLED_PI_WEB_ACCESS_EXTENSION],
+	code_search: [BUNDLED_PI_WEB_ACCESS_EXTENSION],
+	fetch_content: [BUNDLED_PI_WEB_ACCESS_EXTENSION],
+	get_search_content: [BUNDLED_PI_WEB_ACCESS_EXTENSION],
 };
+
+function bundledNodeModulePath(
+	packageName: string,
+	...parts: string[]
+): string {
+	const candidates = [
+		resolve(MODULE_DIR, "..", "node_modules", packageName, ...parts),
+		resolve(MODULE_DIR, "..", "..", "node_modules", packageName, ...parts),
+	];
+	return (
+		candidates.find((candidate) => existsSync(candidate)) ?? candidates[0]!
+	);
+}
 
 interface SubagentBackendHandle extends Record<string, unknown> {
 	engine: "pi-subagent";
@@ -61,6 +95,7 @@ interface SubagentBackendHandle extends Record<string, unknown> {
 	cwd: string;
 	runsDir: string;
 	display: string;
+	sessionId?: string;
 }
 
 interface SubagentArtifactRef {
@@ -185,12 +220,14 @@ export async function launchSubagentTask(
 
 	const runsDir = subagentRunsDir(run, task);
 	const correlationId = `${run.runId}:${task.taskId}`;
+	const sessionId = subagentSessionId(run, task);
 	task.status = "running";
 	task.statusDetail = "launching";
 	task.startedAt = nowIso();
 	task.backendFiles = {
 		runsDir: toProjectPath(task.cwd, resolve(task.cwd, runsDir)),
 		correlationId,
+		...(sessionId === undefined ? {} : { sessionId }),
 	};
 	task.lastMessage = "pi-subagent launch claim recorded";
 	await writeRunRecord(cwd, run);
@@ -198,13 +235,12 @@ export async function launchSubagentTask(
 	let launched: SubagentResultEnvelope;
 	try {
 		const api = await loadSubagentApi();
-		const extensions = uniqueStrings([
-			...providerExtensionsForTools(
-				compiledTask.runtime.tools,
-				compiledTask.runtime.toolProviders,
-			),
-			...extraSubagentExtensionsFromEnv(),
-		]);
+		const extensions = await workflowTaskExtensions(
+			cwd,
+			run,
+			task,
+			compiledTask,
+		);
 		const subagentOptions: Record<string, unknown> = {
 			cwd: task.cwd,
 			backend: "headless",
@@ -221,6 +257,7 @@ export async function launchSubagentTask(
 			timeoutMs: compiledTask.runtime.maxRuntimeMs,
 			runsDir,
 			correlationId,
+			...(sessionId === undefined ? {} : { sessionId }),
 		};
 		subagentOptions.extensions = extensions;
 		if (captureToolCallsEnabled()) subagentOptions.captureToolCalls = true;
@@ -240,12 +277,14 @@ export async function launchSubagentTask(
 		launched.runId,
 		launched.attemptId,
 		runsDir,
+		sessionId,
 	);
 	task.backendHandle = handle;
 	task.backendTaskId = launched.runId;
 	task.backendFiles = {
 		runsDir: toProjectPath(task.cwd, resolve(task.cwd, runsDir)),
 		correlationId,
+		...(sessionId === undefined ? {} : { sessionId }),
 	};
 	task.statusDetail = "running";
 	task.lastMessage = "launched via pi-subagent/headless";
@@ -271,6 +310,9 @@ export async function refreshRunFromSubagentArtifacts(
 				task.backendFiles = {
 					runsDir: toProjectPath(task.cwd, resolve(task.cwd, handle.runsDir)),
 					correlationId: `${run.runId}:${task.taskId}`,
+					...(handle.sessionId === undefined
+						? {}
+						: { sessionId: handle.sessionId }),
 				};
 				task.statusDetail = "running";
 				task.lastMessage = `adopted pi-subagent run ${handle.runId}/${handle.attemptId}`;
@@ -345,7 +387,7 @@ export async function refreshRunFromSubagentArtifacts(
 			continue;
 		}
 
-		if (await materializeTerminalSubagentResult(cwd, task, snapshot))
+		if (await materializeTerminalSubagentResult(cwd, run, task, snapshot))
 			changed = true;
 	}
 
@@ -355,6 +397,7 @@ export async function refreshRunFromSubagentArtifacts(
 
 async function materializeTerminalSubagentResult(
 	cwd: string,
+	run: WorkflowRunRecord,
 	task: WorkflowTaskRunRecord,
 	snapshot: SubagentRunStatusSnapshot,
 ): Promise<boolean> {
@@ -382,10 +425,8 @@ async function materializeTerminalSubagentResult(
 		subagentResult,
 		artifactRoot,
 	);
-	const outputBytes = Buffer.byteLength(
-		await readFile(outputFile, "utf8").catch(() => ""),
-		"utf8",
-	);
+	const outputText = await readFile(outputFile, "utf8").catch(() => "");
+	const outputBytes = Buffer.byteLength(outputText, "utf8");
 	const statusInfo = workflowStatusFromSubagent(
 		snapshot,
 		subagentResult,
@@ -415,13 +456,14 @@ async function materializeTerminalSubagentResult(
 			snapshot.metadata?.contextLengthExceeded,
 	);
 	if (task.artifactGraph?.enabled && statusInfo.status === "completed") {
-		return await materializeTerminalArtifactGraphResult(cwd, task, {
+		return await materializeTerminalArtifactGraphResult(cwd, run, task, {
 			outputFile,
 			stderrFile,
 			resultFile,
 			completedAt,
 			startedAt,
 			exitCode,
+			subagentResult,
 		});
 	}
 	if (
@@ -429,19 +471,21 @@ async function materializeTerminalSubagentResult(
 			task,
 			statusInfo,
 			outputBytes,
+			outputText,
 			exitCode,
 			contextLengthExceeded,
 			subagentResult,
 			snapshot,
 		})
 	) {
-		return await materializeTerminalArtifactGraphResult(cwd, task, {
+		return await materializeTerminalArtifactGraphResult(cwd, run, task, {
 			outputFile,
 			stderrFile,
 			resultFile,
 			completedAt,
 			startedAt,
 			exitCode,
+			subagentResult,
 			salvage: {
 				failureKind: statusInfo.failureKind ?? snapshot.failureKind ?? "model",
 				subagentStatus: snapshot.status,
@@ -473,9 +517,14 @@ async function materializeTerminalSubagentResult(
 			toolCallsArtifactCwd: toolCalls?.ref.artifactCwd,
 		},
 	};
-	if (shouldRetryTransientModelFailure(statusInfo, workflowResult, outputBytes)) {
+	if (
+		shouldRetryTransientModelFailure(statusInfo, workflowResult, outputBytes)
+	) {
 		await writeJson(
-			transientFailureAttemptPath(resultFile, (task.launchRetry?.attempts ?? 0) + 1),
+			transientFailureAttemptPath(
+				resultFile,
+				(task.launchRetry?.attempts ?? 0) + 1,
+			),
 			workflowResult,
 		);
 		return retryOrFailTransientSubagentFailure(task, {
@@ -499,8 +548,40 @@ async function materializeTerminalSubagentResult(
 	return changed;
 }
 
+function artifactGraphRetrySession(
+	run: WorkflowRunRecord,
+	task: WorkflowTaskRunRecord,
+	subagentResult: Record<string, unknown> | undefined,
+	attempt: number,
+): { repairMode: "same_session" | "new_session"; sessionId: string } {
+	const expectedSessionId = subagentSessionId(run, task);
+	const metadata = subagentResult?.metadata;
+	const metadataRecord =
+		metadata && typeof metadata === "object" && !Array.isArray(metadata)
+			? (metadata as Record<string, unknown>)
+			: undefined;
+	const actualSessionId = metadataRecord?.sessionId;
+	const session = metadataRecord?.session;
+	const sessionDisposition =
+		session && typeof session === "object" && !Array.isArray(session)
+			? (session as Record<string, unknown>).disposition
+			: undefined;
+	if (
+		typeof actualSessionId === "string" &&
+		actualSessionId === expectedSessionId &&
+		sessionDisposition === "resumed"
+	) {
+		return { repairMode: "same_session", sessionId: expectedSessionId };
+	}
+	return {
+		repairMode: "new_session",
+		sessionId: retrySubagentSessionId(run, task, attempt),
+	};
+}
+
 async function materializeTerminalArtifactGraphResult(
 	cwd: string,
+	run: WorkflowRunRecord,
 	task: WorkflowTaskRunRecord,
 	options: {
 		outputFile: string;
@@ -509,6 +590,7 @@ async function materializeTerminalArtifactGraphResult(
 		completedAt: string;
 		startedAt?: string;
 		exitCode: number;
+		subagentResult?: Record<string, unknown>;
 		salvage?: {
 			failureKind: string;
 			subagentStatus: string;
@@ -527,14 +609,29 @@ async function materializeTerminalArtifactGraphResult(
 			message: error instanceof Error ? error.message : String(error),
 		});
 	}
+	const refsAllowedLocators = await directDynamicSynthesisAllowedRefLocators(
+		cwd,
+		run,
+		task,
+	);
 	const parseOptions = {
 		analysisRequired: artifactOptions?.analysisRequired ?? true,
 		refsRequired: artifactOptions?.refsRequired ?? true,
+		refsMinItems: artifactOptions?.refsMinItems,
+		refsUrlValidation: artifactOptions?.refsUrlValidation,
+		refsAllowedLocators,
 		maxDigestChars: artifactOptions?.maxDigestChars,
 		controlJsonSchema,
+		outputProfile: task.dynamicGenerated?.outputProfile,
 	};
 	const parsed = parseWorkflowOutputForBundle(rawOutput, parseOptions);
 	const attempt = (task.outputRetry?.attempts ?? 0) + 1;
+	const retrySession = artifactGraphRetrySession(
+		run,
+		task,
+		options.subagentResult,
+		attempt,
+	);
 	if (!parsed.valid) {
 		await writeWorkflowTaskArtifactBundle({
 			taskDir: dirname(options.resultFile),
@@ -547,6 +644,7 @@ async function materializeTerminalArtifactGraphResult(
 			reason: "workflow_output_invalid",
 			attempt,
 			message: buildWorkflowOutputRetryInstructions(parsed.issues),
+			...retrySession,
 		});
 	}
 
@@ -577,6 +675,7 @@ async function materializeTerminalArtifactGraphResult(
 			attempt,
 			message,
 			artifacts,
+			...retrySession,
 		});
 	}
 
@@ -603,6 +702,7 @@ async function materializeTerminalArtifactGraphResult(
 			reason: "workflow_output_invalid",
 			attempt,
 			message: buildWorkflowOutputRetryInstructions(written.parsed.issues),
+			...retrySession,
 		});
 	}
 	const completedAfterTimeout = resultCompletedAfterTimeout(
@@ -628,6 +728,207 @@ async function readTaskControlJsonSchema(
 	const schemaPath = task.artifactGraph?.output.controlSchemaPath;
 	if (!schemaPath) return undefined;
 	return JSON.parse(await readFile(schemaPath, "utf8")) as JsonSchema;
+}
+
+async function directDynamicSynthesisAllowedRefLocators(
+	cwd: string,
+	run: WorkflowRunRecord,
+	task: WorkflowTaskRunRecord,
+): Promise<string[] | undefined> {
+	if (run.provenance?.mode !== "direct-dynamic") return undefined;
+	if (task.dynamicGenerated?.outputProfile !== "synthesis_v1") return undefined;
+	const currentIndex = run.tasks.findIndex(
+		(candidate) => candidate.specId === task.specId,
+	);
+	const artifactLocators = new Set<string>();
+	const sourceLocators = new Set<string>();
+	const supportedSourceLocators = new Set<string>();
+	for (const [index, candidate] of run.tasks.entries()) {
+		if (candidate.specId === task.specId) continue;
+		if (currentIndex >= 0 && index > currentIndex) continue;
+		if (
+			candidate.dynamicGenerated?.controllerSpecId !==
+			task.dynamicGenerated.controllerSpecId
+		)
+			continue;
+		if (candidate.status !== "completed") continue;
+		addTaskArtifactRefLocators(artifactLocators, candidate);
+		for (const locator of await readTaskRefsLocators(cwd, candidate)) {
+			sourceLocators.add(locator);
+		}
+		for (const locator of await readTaskPositiveClaimSupportLocators(
+			cwd,
+			candidate,
+		)) {
+			supportedSourceLocators.add(locator);
+		}
+	}
+	const allowed = new Set([
+		...artifactLocators,
+		...(supportedSourceLocators.size > 0
+			? supportedSourceLocators
+			: sourceLocators),
+	]);
+	return [...allowed].sort();
+}
+
+function addTaskArtifactRefLocators(
+	allowed: Set<string>,
+	task: WorkflowTaskRunRecord,
+): void {
+	for (const id of [task.specId, task.taskId]) {
+		if (!id) continue;
+		allowed.add(id);
+		allowed.add(`workflow_artifact:${id}`);
+		for (const artifact of ["control", "analysis", "refs", "raw"]) {
+			allowed.add(`${id}.${artifact}`);
+			allowed.add(`workflow_artifact:${id}.${artifact}`);
+		}
+	}
+}
+
+async function readTaskRefsLocators(
+	cwd: string,
+	task: WorkflowTaskRunRecord,
+): Promise<string[]> {
+	try {
+		const refsPath = join(
+			dirname(fromProjectPath(cwd, task.files.result)),
+			"refs.json",
+		);
+		const parsed = JSON.parse(await readFile(refsPath, "utf8"));
+		if (!Array.isArray(parsed)) return [];
+		return parsed.flatMap((ref) => {
+			const locator = workflowRefLocator(ref);
+			return locator ? [locator] : [];
+		});
+	} catch {
+		return [];
+	}
+}
+
+async function readTaskPositiveClaimSupportLocators(
+	cwd: string,
+	task: WorkflowTaskRunRecord,
+): Promise<string[]> {
+	if (task.dynamicGenerated?.outputProfile !== "verification_result_v1") {
+		return [];
+	}
+	try {
+		const controlPath = join(
+			dirname(fromProjectPath(cwd, task.files.result)),
+			"control.json",
+		);
+		const parsed = JSON.parse(await readFile(controlPath, "utf8"));
+		return positiveClaimSupportLocators(parsed);
+	} catch {
+		return [];
+	}
+}
+
+function positiveClaimSupportLocators(control: unknown): string[] {
+	if (!control || typeof control !== "object" || Array.isArray(control)) {
+		return [];
+	}
+	const record = control as Record<string, unknown>;
+	const entries = claimSupportEntries(record);
+	return [
+		...new Set(
+			entries.flatMap((entry) =>
+				claimSupportLocators(entry, record.verdict ?? record.status),
+			),
+		),
+	]
+		.filter(Boolean)
+		.sort();
+}
+
+function claimSupportEntries(
+	control: Record<string, unknown>,
+): Record<string, unknown>[] {
+	const raw =
+		control.claimSupports ??
+		control.sourceSupports ??
+		control.claimSourceSupport ??
+		control.sourceSupport;
+	if (Array.isArray(raw)) {
+		return raw.filter(
+			(item): item is Record<string, unknown> =>
+				!!item && typeof item === "object" && !Array.isArray(item),
+		);
+	}
+	if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+		return [raw as Record<string, unknown>];
+	}
+	return hasTopLevelClaimSupportFields(control) ? [control] : [];
+}
+
+function hasTopLevelClaimSupportFields(
+	control: Record<string, unknown>,
+): boolean {
+	return [
+		"claim",
+		"sourceLocators",
+		"locators",
+		"sources",
+		"sourceRefs",
+		"excerpt",
+		"quote",
+	].some((key) => control[key] !== undefined);
+}
+
+function claimSupportLocators(
+	entry: Record<string, unknown>,
+	fallbackStatus: unknown,
+): string[] {
+	if (
+		!isPositiveClaimSupportStatus(
+			entry.status ??
+				entry.supportStatus ??
+				entry.support ??
+				entry.verdict ??
+				fallbackStatus,
+		)
+	) {
+		return [];
+	}
+	return [
+		...refLocatorsField(entry.sourceLocators),
+		...refLocatorsField(entry.locators),
+		...refLocatorsField(entry.sources),
+		...refLocatorsField(entry.refs),
+		...refLocatorsField(entry.urls),
+		...(workflowRefLocator(entry) ? [workflowRefLocator(entry)!] : []),
+	];
+}
+
+function isPositiveClaimSupportStatus(value: unknown): boolean {
+	return (
+		value === "supports" ||
+		value === "partial" ||
+		value === "verified" ||
+		value === "weakened"
+	);
+}
+
+function refLocatorsField(value: unknown): string[] {
+	if (typeof value === "string" && value.trim()) return [value.trim()];
+	if (!Array.isArray(value)) return [];
+	return value.flatMap((item) => {
+		const locator = workflowRefLocator(item);
+		return locator ? [locator] : [];
+	});
+}
+
+function workflowRefLocator(ref: unknown): string | undefined {
+	if (typeof ref === "string") return ref;
+	if (!ref || typeof ref !== "object" || Array.isArray(ref)) return undefined;
+	const record = ref as Record<string, unknown>;
+	for (const key of ["url", "ref", "path", "taskId", "source"]) {
+		const value = record[key];
+		if (typeof value === "string" && value.trim()) return value;
+	}
+	return undefined;
 }
 
 async function checkRequiredArtifactReads(
@@ -716,8 +1017,14 @@ function shouldRetryTransientModelFailure(
 	);
 }
 
-function transientFailureAttemptPath(resultFile: string, attempt: number): string {
-	return join(dirname(resultFile), `result.transient-model-failure-${attempt}.json`);
+function transientFailureAttemptPath(
+	resultFile: string,
+	attempt: number,
+): string {
+	return join(
+		dirname(resultFile),
+		`result.transient-model-failure-${attempt}.json`,
+	);
 }
 
 function retryOrFailTransientSubagentFailure(
@@ -725,7 +1032,8 @@ function retryOrFailTransientSubagentFailure(
 	options: { reason: string; message: string },
 ): boolean {
 	const attempt = (task.launchRetry?.attempts ?? 0) + 1;
-	const maxAttempts = task.launchRetry?.maxAttempts ?? DEFAULT_TRANSIENT_MODEL_FAILURE_RETRIES;
+	const maxAttempts =
+		task.launchRetry?.maxAttempts ?? DEFAULT_TRANSIENT_MODEL_FAILURE_RETRIES;
 	const exhausted = attempt > maxAttempts;
 	task.launchRetry = {
 		attempts: attempt,
@@ -760,17 +1068,27 @@ function retryOrFailArtifactGraphTask(
 		attempt: number;
 		message: string;
 		artifacts?: string[];
+		repairMode?: "same_session" | "new_session";
+		sessionId?: string;
 	},
 ): boolean {
-	const maxAttempts = task.outputRetry?.maxAttempts ?? 1;
+	const maxAttempts =
+		task.outputRetry?.maxAttempts ?? DEFAULT_ARTIFACT_OUTPUT_RETRIES;
 	const exhausted = options.attempt > maxAttempts;
-	task.outputRetry = {
+	const outputRetry = {
 		attempts: options.attempt,
 		maxAttempts,
 		reason: exhausted ? `${options.reason}_exhausted` : options.reason,
 		message: options.message,
 		artifacts: options.artifacts,
+		...(options.repairMode === undefined
+			? {}
+			: { repairMode: options.repairMode }),
+		...(options.sessionId === undefined
+			? {}
+			: { sessionId: options.sessionId }),
 	};
+	task.outputRetry = outputRetry;
 	delete task.backendHandle;
 	delete task.backendFiles;
 	task.pid = undefined;
@@ -784,8 +1102,7 @@ function retryOrFailArtifactGraphTask(
 		return true;
 	}
 	task.status = "failed";
-	task.statusDetail =
-		task.outputRetry.reason ?? "artifact_graph_output_invalid";
+	task.statusDetail = outputRetry.reason ?? "artifact_graph_output_invalid";
 	task.exitCode = 1;
 	task.completedAt = nowIso();
 	task.lastMessage = options.message;
@@ -800,6 +1117,7 @@ function shouldAttemptArtifactGraphSalvage(options: {
 		errorMessage?: string;
 	};
 	outputBytes: number;
+	outputText: string;
 	exitCode: number;
 	contextLengthExceeded: boolean;
 	subagentResult: Record<string, unknown> | undefined;
@@ -807,17 +1125,35 @@ function shouldAttemptArtifactGraphSalvage(options: {
 }): boolean {
 	if (!options.task.artifactGraph?.enabled) return false;
 	if (options.statusInfo.status !== "failed") return false;
+	const failureKind =
+		options.statusInfo.failureKind ?? options.snapshot.failureKind;
 	if (
-		(options.statusInfo.failureKind ?? options.snapshot.failureKind) !== "model"
-	)
+		failureKind !== "model" &&
+		failureKind !== "context_or_request_too_large"
+	) {
 		return false;
+	}
 	if (options.outputBytes <= 0) return false;
+	if (options.contextLengthExceeded) {
+		return looksLikeWorkflowOutputSections(options.outputText);
+	}
 	if (options.exitCode !== 0) return false;
-	if (options.contextLengthExceeded) return false;
 	const stopReason =
 		(options.subagentResult?.metadata as Record<string, unknown> | undefined)
 			?.stopReason ?? options.snapshot.metadata?.stopReason;
 	return stopReason === "stop" || stopReason === "end";
+}
+
+function looksLikeWorkflowOutputSections(text: string): boolean {
+	const trimmed = text.trimStart();
+	return (
+		trimmed.startsWith("<control>") &&
+		text.includes("</control>") &&
+		text.includes("<analysis>") &&
+		text.includes("</analysis>") &&
+		text.includes("<refs>") &&
+		text.includes("</refs>")
+	);
 }
 
 function workflowStatusFromSubagent(
@@ -896,6 +1232,67 @@ function findLog(
 function captureToolCallsEnabled(): boolean {
 	const value = process.env.PI_WORKFLOW_CAPTURE_TOOL_CALLS;
 	return typeof value === "string" && /^(1|true|yes|on)$/i.test(value.trim());
+}
+
+async function workflowTaskExtensions(
+	cwd: string,
+	run: WorkflowRunRecord,
+	task: WorkflowTaskRunRecord,
+	compiledTask: CompiledTask,
+): Promise<string[]> {
+	const baseExtensions = uniqueStrings([
+		...providerExtensionsForTools(
+			compiledTask.runtime.tools,
+			compiledTask.runtime.toolProviders,
+		),
+		...extraSubagentExtensionsFromEnv(),
+	]);
+	if (!shouldUseFetchContentCache(compiledTask.runtime.tools)) {
+		return baseExtensions;
+	}
+	const taskDir = dirname(fromProjectPath(cwd, task.files.result));
+	const wrapperPath = join(taskDir, "workflow-fetch-cache-extension.ts");
+	await writeWorkflowFetchCacheExtensionWrapper({
+		wrapperPath,
+		importPath: WORKFLOW_FETCH_CACHE_EXTENSION_IMPORT,
+		webAccessExtensionPath: BUNDLED_PI_WEB_ACCESS_EXTENSION,
+		webAccessStoragePath: BUNDLED_PI_WEB_ACCESS_STORAGE,
+		config: {
+			runId: run.runId,
+			taskId: task.taskId,
+			cacheDir: resolve(
+				cwd,
+				".pi",
+				"workflows",
+				run.runId,
+				"source-cache",
+				"fetch-content",
+			),
+		},
+	});
+	return uniqueStrings([
+		...baseExtensions.filter(
+			(extension) => resolve(extension) !== BUNDLED_PI_WEB_ACCESS_EXTENSION,
+		),
+		wrapperPath,
+	]);
+}
+
+function shouldUseFetchContentCache(
+	tools: readonly string[] | undefined,
+): boolean {
+	if (!(tools ?? []).includes("fetch_content")) return false;
+	return !isExplicitlyDisabled(fetchContentCacheEnvValue());
+}
+
+function fetchContentCacheEnvValue(): string | undefined {
+	return (
+		process.env[FETCH_CONTENT_CACHE_ENV] ?? process.env[LEGACY_FETCH_CACHE_ENV]
+	);
+}
+
+function isExplicitlyDisabled(value: string | undefined): boolean {
+	return typeof value === "string" && /^(0|false|no|off)$/i.test(value.trim());
 }
 
 function providerExtensionsForTools(
@@ -1057,6 +1454,7 @@ async function recoverSubagentHandle(
 				record.runId ?? entry.name,
 				attemptId,
 				runsDir,
+				subagentSessionId(run, task),
 			),
 			updatedAtMs:
 				timestampMs(record.updatedAt) ??
@@ -1082,6 +1480,7 @@ function makeSubagentHandle(
 	runId: string,
 	attemptId: string,
 	runsDir: string,
+	sessionId?: string,
 ): SubagentBackendHandle {
 	return {
 		engine: "pi-subagent",
@@ -1091,6 +1490,7 @@ function makeSubagentHandle(
 		cwd: task.cwd,
 		runsDir,
 		display: `pi-subagent/headless ${runId}/${attemptId}`,
+		...(sessionId === undefined ? {} : { sessionId }),
 	};
 }
 
@@ -1109,7 +1509,12 @@ function getSubagentHandle(
 		typeof candidate.runsDir !== "string"
 	)
 		return undefined;
-	return candidate as SubagentBackendHandle;
+	return {
+		...(candidate as SubagentBackendHandle),
+		...(typeof candidate.sessionId === "string"
+			? { sessionId: candidate.sessionId }
+			: {}),
+	};
 }
 
 function subagentRunsDir(
@@ -1119,8 +1524,37 @@ function subagentRunsDir(
 	return `${DEFAULT_SUBAGENT_RUNS_ROOT}/${run.runId}/${task.taskId}`;
 }
 
+function subagentSessionId(
+	run: WorkflowRunRecord,
+	task: WorkflowTaskRunRecord,
+): string | undefined {
+	if (!task.artifactGraph?.enabled) return undefined;
+	return task.outputRetry?.sessionId ?? baseSubagentSessionId(run, task);
+}
+
+function baseSubagentSessionId(
+	run: WorkflowRunRecord,
+	task: WorkflowTaskRunRecord,
+): string {
+	return `pi-workflow.${run.runId}.${task.taskId}`.replace(
+		/[^A-Za-z0-9._-]/g,
+		"-",
+	);
+}
+
+function retrySubagentSessionId(
+	run: WorkflowRunRecord,
+	task: WorkflowTaskRunRecord,
+	attempt: number,
+): string {
+	return `${baseSubagentSessionId(run, task)}.retry-${attempt}`;
+}
+
 function buildSystemPrompt(task: CompiledTask): string {
 	const workflowMaxDigestChars = task.artifactGraph?.output.maxDigestChars;
+	const workflowRefsMinItems = task.artifactGraph?.output.refsMinItems;
+	const workflowRefsUrlValidation =
+		task.artifactGraph?.output.refsUrlValidation;
 	const workflowOutputContract = task.artifactGraph?.enabled
 		? [
 				"# Workflow Output Contract",
@@ -1133,15 +1567,39 @@ function buildSystemPrompt(task: CompiledTask): string {
 							`The control.digest string is required and must be at most ${workflowMaxDigestChars} characters; prefer one short sentence.`,
 						]
 					: []),
+				...(workflowRefsMinItems !== undefined && workflowRefsMinItems > 0
+					? [
+							`The <refs> JSON array must include at least ${workflowRefsMinItems} item${workflowRefsMinItems === 1 ? "" : "s"}. Include URLs or local file paths used by the analysis.`,
+						]
+					: []),
+				...(workflowRefsUrlValidation
+					? [
+							"External URLs in <refs> are validated before completion. Use fetch_content to verify each URL you cite; replace stale or unreachable URLs with working canonical URLs or omit them.",
+						]
+					: []),
 			]
 		: [
 				"When complete, provide a concise final report with findings, changed files if any, and blockers.",
 			];
+	const enabledTools = task.runtime.tools ?? [];
+	const toolPolicy = [
+		"# Effective Tool Policy",
+		enabledTools.length > 0
+			? `Only these tools are enabled for this workflow task: ${enabledTools.join(", ")}.`
+			: "No tools are enabled for this workflow task.",
+		"If the agent definition below mentions tools that are not in this enabled list, ignore those mentions; unavailable tools cannot be called in this workflow run.",
+		!enabledTools.includes("get_search_content") &&
+		(enabledTools.includes("web_search") ||
+			enabledTools.includes("fetch_content"))
+			? "Full cached search-content hydration is unavailable here. Use web_search/fetch_content results and report evidence gaps instead of broad raw document retrieval."
+			: undefined,
+	].filter((line): line is string => typeof line === "string");
 	return [
 		`You are Pi workflow subagent '${task.agent}'.`,
 		"You were launched by /workflow from a deterministic workflow spec.",
 		"Do not assume parent conversation history.",
 		"Do not launch other agents or orchestration workflows unless explicitly instructed.",
+		...toolPolicy,
 		...workflowOutputContract,
 		"",
 		"# Agent Definition",

@@ -52,6 +52,7 @@ export interface CompiledToolProvider {
 
 export interface WorkflowDefaults {
 	cwd?: string;
+	agent?: string;
 	model?: string;
 	thinking?: ThinkingLevel;
 	fast?: FastMode;
@@ -121,6 +122,54 @@ export interface DynamicWorkflowNestedSpec {
 	uses: string;
 }
 
+export interface DynamicDecisionLoopExecutionProfileSpec {
+	agent?: string;
+	model?: string;
+	thinking?: ThinkingLevel;
+	tools?: WorkflowToolSpec[];
+	outputProfile?: string;
+	maxRuntimeMs?: number;
+}
+
+export interface DynamicDecisionLoopSpec {
+	planner?: DynamicDecisionLoopExecutionProfileSpec;
+	workerDefaults?: DynamicDecisionLoopExecutionProfileSpec;
+	verifier?: DynamicDecisionLoopExecutionProfileSpec;
+	synthesis?: DynamicDecisionLoopExecutionProfileSpec;
+	allowedAgents?: string[];
+	allowedTools?: WorkflowToolSpec[];
+	allowedOutputProfiles?: string[];
+	maxDecisionRounds?: number;
+	maxActionsPerRound?: number;
+	repair?: { maxAttempts?: number };
+	stateIndex?: {
+		maxFindings?: number;
+		/**
+		 * @deprecated Phase 1 compatibility no-op. Accepted by the authoring
+		 * contract but not used by the decision-loop runtime.
+		 */
+		requiredFindingIds?: string[];
+	};
+	stopPolicy?: {
+		/**
+		 * @deprecated Phase 1 compatibility no-op. Synthesize decisions are
+		 * governed by the canonical decision validator instead.
+		 */
+		requireSynthesisAction?: boolean;
+		failOnInvalidDecision?: boolean;
+		/**
+		 * Maximum progress-aware stall score before the dynamic loop asks the
+		 * planner for a bounded replan.
+		 */
+		maxStalls?: number;
+		/**
+		 * @deprecated Phase 1 compatibility no-op. Dropped-branch enforcement is
+		 * deferred; invalid/omitted work is surfaced via blockers/omissions.
+		 */
+		failOnDroppedRequiredBranch?: boolean;
+	};
+}
+
 export interface DynamicWorkflowStageSpec {
 	uses: string;
 	mode?: "graph-splice";
@@ -128,6 +177,7 @@ export interface DynamicWorkflowStageSpec {
 	permissions?: DynamicWorkflowPermissionsSpec;
 	helpers?: Record<string, DynamicWorkflowHelperSpec>;
 	workflows?: Record<string, DynamicWorkflowNestedSpec>;
+	decisionLoop?: DynamicDecisionLoopSpec;
 }
 
 export interface ArtifactGraphStageSpec {
@@ -161,7 +211,7 @@ export interface ArtifactGraphStageSpec {
 	output?: {
 		controlSchema?: string;
 		analysis?: { required?: boolean };
-		refs?: { required?: boolean };
+		refs?: { required?: boolean; minItems?: number };
 		maxDigestChars?: number;
 	};
 	each?: Record<string, unknown>;
@@ -197,7 +247,7 @@ export interface AgentDefinition {
 	packageName?: string;
 	aliases: string[];
 	sourcePath: string;
-	scope: "project" | "user";
+	scope: "project" | "user" | "bundled";
 	frontmatter: Record<string, unknown>;
 	body: string;
 	model?: string;
@@ -356,6 +406,56 @@ export interface CompiledDynamicNestedWorkflow {
 	usesPath?: string;
 }
 
+export interface CompiledDynamicDecisionLoopExecutionProfile {
+	agent?: string;
+	model?: string;
+	thinking?: ThinkingLevel;
+	tools?: string[];
+	toolProviders?: Record<string, CompiledToolProvider>;
+	outputProfile?: string;
+	maxRuntimeMs?: number;
+}
+
+export interface CompiledDynamicDecisionLoop {
+	planner?: CompiledDynamicDecisionLoopExecutionProfile;
+	workerDefaults?: CompiledDynamicDecisionLoopExecutionProfile;
+	verifier?: CompiledDynamicDecisionLoopExecutionProfile;
+	synthesis?: CompiledDynamicDecisionLoopExecutionProfile;
+	allowedAgents: string[];
+	allowedTools?: string[];
+	allowedToolProviders?: Record<string, CompiledToolProvider>;
+	allowedOutputProfiles: string[];
+	maxDecisionRounds: number;
+	maxActionsPerRound: number;
+	repair: { maxAttempts: number };
+	stateIndex: {
+		maxFindings?: number;
+		/**
+		 * @deprecated Phase 1 compatibility no-op. Accepted and compiled for
+		 * compatibility, but not used by the decision-loop runtime.
+		 */
+		requiredFindingIds?: string[];
+	};
+	stopPolicy: {
+		/**
+		 * @deprecated Phase 1 compatibility no-op. Synthesize decisions are
+		 * governed by the canonical decision validator instead.
+		 */
+		requireSynthesisAction: boolean;
+		failOnInvalidDecision: boolean;
+		/**
+		 * Maximum progress-aware stall score before the dynamic loop asks the
+		 * planner for a bounded replan.
+		 */
+		maxStalls: number;
+		/**
+		 * @deprecated Phase 1 compatibility no-op. Dropped-branch enforcement is
+		 * deferred; invalid/omitted work is surfaced via blockers/omissions.
+		 */
+		failOnDroppedRequiredBranch: boolean;
+	};
+}
+
 export interface CompiledDynamicWorkflowTask {
 	uses: string;
 	usesPath?: string;
@@ -368,6 +468,7 @@ export interface CompiledDynamicWorkflowTask {
 	};
 	helpers: Record<string, CompiledDynamicWorkflowHelper>;
 	workflows: Record<string, CompiledDynamicNestedWorkflow>;
+	decisionLoop?: CompiledDynamicDecisionLoop;
 }
 
 export interface CompiledArtifactGraphTask {
@@ -375,6 +476,8 @@ export interface CompiledArtifactGraphTask {
 	output: {
 		analysisRequired: boolean;
 		refsRequired: boolean;
+		refsMinItems?: number;
+		refsUrlValidation?: boolean;
 		controlSchema?: string;
 		controlSchemaPath?: string;
 		maxDigestChars?: number;
@@ -427,6 +530,8 @@ export interface CompiledTask {
 		controllerSpecId: string;
 		opId: string;
 		requestHash: string;
+		branchId?: string;
+		outputProfile?: string;
 	};
 	loopChild?: CompiledLoopChildTaskRef;
 	loopPlaceholder?: {
@@ -507,12 +612,17 @@ export interface WorkflowTaskRunRecord {
 		reason?: string;
 		message?: string;
 		artifacts?: string[];
+		repairMode?: "same_session" | "new_session";
+		sessionId?: string;
 	};
+	resumeEvents?: WorkflowTaskResumeEvent[];
 	artifactGraph?: CompiledArtifactGraphTask;
 	dynamicGenerated?: {
 		controllerSpecId: string;
 		opId: string;
 		requestHash: string;
+		branchId?: string;
+		outputProfile?: string;
 	};
 	launchRetry?: {
 		attempts: number;
@@ -531,6 +641,31 @@ export interface TaskSummary {
 	skipped: number;
 	interrupted: number;
 	total: number;
+}
+
+export interface WorkflowTaskResumeEvent {
+	at: string;
+	fromStatus: TaskRunStatus;
+	fromStatusDetail: string;
+	lastMessage?: string;
+	outputRetryAttempts?: number;
+	outputRetryReason?: string;
+	outputRetryRepairMode?: "same_session" | "new_session";
+	launchRetryAttempts?: number;
+	launchRetryReason?: string;
+	backendRunId?: string;
+	backendAttemptId?: string;
+}
+
+export interface WorkflowRunProvenance {
+	mode?: string;
+	requestedWorkflow?: string | null;
+	specPath?: string | null;
+	userSelectedWorkflow?: boolean;
+	generatedSpec?: boolean;
+	runtimeBundle?: string;
+	runtimeVersion?: string;
+	[key: string]: unknown;
 }
 
 export interface WorkflowRunRecord {
@@ -558,6 +693,7 @@ export interface WorkflowRunRecord {
 	createdAt: string;
 	updatedAt: string;
 	specPath: string;
+	provenance?: WorkflowRunProvenance;
 	tasks: WorkflowTaskRunRecord[];
 }
 

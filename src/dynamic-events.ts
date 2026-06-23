@@ -14,7 +14,11 @@ export type DynamicWorkflowEventType =
 	| "helper.completed"
 	| "workflow.started"
 	| "workflow.completed"
+	| "fanout.planned"
 	| "task.generated"
+	| "decision.persisted"
+	| "state-index.persisted"
+	| "result.read"
 	| "budget.used"
 	| "approval.pending"
 	| "approval.resolved";
@@ -100,7 +104,9 @@ export async function appendDynamicEvent(
 		payload: normalizePayload(input.payload ?? {}),
 	};
 	await ensureDir(dynamicRunDir(cwd, runId));
-	await appendFile(dynamicEventsPath(cwd, runId), `${JSON.stringify(event)}\n`,
+	await appendFile(
+		dynamicEventsPath(cwd, runId),
+		`${JSON.stringify(event)}\n`,
 		"utf8",
 	);
 	return event;
@@ -112,11 +118,19 @@ export function hashDynamicRequest(value: unknown): string {
 		.digest("hex");
 }
 
-function assertDynamicEvent(value: unknown, line: number): DynamicWorkflowEvent {
-	if (!isRecord(value)) throw new Error(`dynamic event at line ${line} must be an object`);
+function assertDynamicEvent(
+	value: unknown,
+	line: number,
+): DynamicWorkflowEvent {
+	if (!isRecord(value))
+		throw new Error(`dynamic event at line ${line} must be an object`);
 	if (value.schema !== DYNAMIC_EVENT_SCHEMA)
 		throw new Error(`dynamic event at line ${line} has unsupported schema`);
-	if (typeof value.seq !== "number" || !Number.isInteger(value.seq) || value.seq <= 0)
+	if (
+		typeof value.seq !== "number" ||
+		!Number.isInteger(value.seq) ||
+		value.seq <= 0
+	)
 		throw new Error(`dynamic event at line ${line} has invalid seq`);
 	if (typeof value.opId !== "string" || value.opId.trim() === "")
 		throw new Error(`dynamic event at line ${line} has invalid opId`);
@@ -128,7 +142,9 @@ function assertDynamicEvent(value: unknown, line: number): DynamicWorkflowEvent 
 		typeof value.controllerSpecId !== "string" ||
 		value.controllerSpecId.trim() === ""
 	)
-		throw new Error(`dynamic event at line ${line} has invalid controllerSpecId`);
+		throw new Error(
+			`dynamic event at line ${line} has invalid controllerSpecId`,
+		);
 	if (!isDynamicWorkflowEventType(value.type))
 		throw new Error(`dynamic event at line ${line} has invalid type`);
 	if (typeof value.timestamp !== "string" || value.timestamp.trim() === "")
@@ -149,14 +165,20 @@ function isDynamicWorkflowEventType(
 		value === "helper.completed" ||
 		value === "workflow.started" ||
 		value === "workflow.completed" ||
+		value === "fanout.planned" ||
 		value === "task.generated" ||
+		value === "decision.persisted" ||
+		value === "state-index.persisted" ||
+		value === "result.read" ||
 		value === "budget.used" ||
 		value === "approval.pending" ||
 		value === "approval.resolved"
 	);
 }
 
-function normalizePayload(value: Record<string, unknown>): Record<string, unknown> {
+function normalizePayload(
+	value: Record<string, unknown>,
+): Record<string, unknown> {
 	return JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
 }
 
@@ -173,7 +195,8 @@ function toStableJson(value: unknown): unknown {
 	if (Array.isArray(value)) return value.map((item) => toStableJson(item));
 	if (!isRecord(value)) return value;
 	const result: Record<string, unknown> = {};
-	for (const key of Object.keys(value).sort()) result[key] = toStableJson(value[key]);
+	for (const key of Object.keys(value).sort())
+		result[key] = toStableJson(value[key]);
 	return result;
 }
 

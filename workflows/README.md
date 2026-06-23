@@ -11,13 +11,18 @@ Run them from the project root by exact filename alias, for example:
 /workflow run deep-research "Research the current project architecture and verify the key claims. Use max depth."
 ```
 
-Runtime selection is explicit: `/workflow run` takes an exact workflow name or explicit path plus a task string. Use `/workflow list` to discover available workflows and choose a deterministic starting point. If a name is ambiguous across `.pi/workflows/`, `workflows/`, and `~/.pi/agent/workflows/`, `/workflow` fails closed.
+Runtime selection is explicit: `/workflow run` takes an exact workflow name or explicit path plus a task string. Use `/workflow list` to discover available workflows and choose a deterministic starting point. If a name is ambiguous across `.pi/workflows/`, `workflows/`, and `~/.pi/agent/workflows/`, `/workflow` fails closed. For spec-less direct dynamic execution, use `/workflow dynamic "<task>"`; it does not select one of the bundled workflow specs below.
 
 ## Bundled starter workflows
 
+Bundled starters use local-first agent lookup: project `.pi/agents/` overrides
+user `~/.pi/agent/agents/`, which overrides pi-workflow's bundled common agents
+(`scout`, `researcher`, `typescript-expert`).
+
 | Workflow | Required agents | Mode | Use when |
 |---|---|---|---|
-| `deep-research` | `researcher` | plan + foreach questions + normalize + foreach verifier + audit-claims support + final reduce | Research needs source-backed claims, dynamic breadth/depth, independent verification, deterministic evidence gating, or citations. Supports `quick`, `standard`, and `max` depth through task wording/input. |
+| `deep-research` | `researcher` | plan + foreach questions + normalize + foreach verifier + audit-claims support + full audit reduce + deterministic executive render | Research needs source-backed claims, dynamic breadth/depth, independent verification, deterministic evidence gating, citations, and a compact parent-facing handoff with full audit artifacts preserved. Supports `quick`, `standard`, and `max` depth through task wording/input. |
+| `adaptive-research` | `researcher` | static intake + planner-driven dynamic decision loop + static final reduce | Example/candidate for adaptive research where a dynamic stage decides fan-out/follow-up/stop within static policy. Not a replacement for `deep-research`. |
 | `deep-review` | `scout` | cheap triage + foreach review lenses + dedup support + foreach devil's advocate + verdict-partition support + reduce, read-only | General thorough multi-lens review where findings should be independently challenged before synthesis. Prefer a more specific review workflow below when the request shape is clear. |
 | `deep-discovery` | `scout` | domain/subsystem triage + foreach subsystem/risk packets + dedup support + foreach devil's advocate + verdict-partition support + reduce, read-only | Broad repository discovery: use when the request is to find important bugs or risks across a whole codebase with no suspected area or diff. |
 | `deep-focused-review` | `scout` | suspicious-scope triage + foreach defect-family/call-path packets + dedup support + foreach devil's advocate + verdict-partition support + reduce, read-only | Focused review: use when the user gives a suspicious area, component, subsystem, or defect pattern and wants deep review plus adjacent-path checks. |
@@ -71,5 +76,7 @@ export default async function helper({ sources, options, context }) {
 ```
 
 Helper refs are intentionally directory-local only. Allowed refs start with `./` and point to `.mjs` files inside the workflow bundle directory. Parent-directory refs, absolute paths, home-relative paths, protocol refs (`file://`, `https://`), and `npm:` refs are rejected. This is containment and reproducibility, not a sandbox: helper code still runs inside the workflow process and is not constrained by subagent tool allowlists.
+
+Workflow runs share a run-scoped `fetch_content` file cache by default. It is stored inside `.pi/workflows/<run-id>/source-cache/fetch-content/`, records hit/miss/write/skip events, and is not reused across separate runs unless a future feature explicitly says so. Set `PI_WORKFLOW_FETCH_CONTENT_CACHE=0` to opt out for a run. Treat cache-enabled benchmark runs as a separate cohort from older uncached measurements.
 
 Experimental workflow candidates should live outside the bundled `workflows/` directory until their task fit is validated.

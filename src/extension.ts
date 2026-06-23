@@ -19,6 +19,7 @@ import {
 	refreshRun,
 	resumeRun,
 	resumeSupervisors,
+	runDynamicTask,
 	runWorkflowSpec,
 	waitForRun,
 	formatRun,
@@ -46,6 +47,7 @@ const runFeedbackTimers = new Map<string, ReturnType<typeof setInterval>>();
 
 export const WORKFLOW_LIST_TOOL = "workflow_list" as const;
 export const WORKFLOW_RUN_TOOL = "workflow_run" as const;
+export const WORKFLOW_DYNAMIC_TOOL = "workflow_dynamic" as const;
 
 const WORKFLOW_LIST_TOOL_PARAMETERS = {
 	type: "object",
@@ -76,6 +78,33 @@ const WORKFLOW_RUN_TOOL_PARAMETERS = {
 	required: ["workflow", "task"],
 } as const;
 
+const WORKFLOW_DYNAMIC_TOOL_PARAMETERS = {
+	type: "object",
+	additionalProperties: false,
+	properties: {
+		task: {
+			type: "string",
+			description:
+				"Full runtime task for spec-less direct dynamic workflow execution. Preserve the user's language, file references, constraints, and requested depth.",
+		},
+		detach: {
+			type: "boolean",
+			description:
+				"Optional. When true, spawn a standalone supervisor so the dynamic run keeps progressing after this Pi session exits.",
+		},
+		model: {
+			type: "string",
+			description: "Optional model override for this dynamic workflow run.",
+		},
+		thinking: {
+			type: "string",
+			description: "Optional thinking/reasoning level override.",
+			enum: ["off", "minimal", "low", "medium", "high", "xhigh"],
+		},
+	},
+	required: ["task"],
+} as const;
+
 export default function workflowExtension(pi: ExtensionAPI): void {
 	let workflowCompletionCache: Array<{ name: string }> = [];
 	pi.on("session_start", async (_event, ctx) => {
@@ -96,7 +125,9 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 	pi.registerCommand(WORKFLOW_COMMAND, {
 		description: "Open the workflow board and inspect runs",
 		getArgumentCompletions(prefix) {
-			return workflowArgumentCompletions(prefix, workflowCompletionCache) ?? null;
+			return (
+				workflowArgumentCompletions(prefix, workflowCompletionCache) ?? null
+			);
 		},
 		handler: async (args, ctx) => {
 			await handleWorkflowCommand(args, ctx, pi);
@@ -171,6 +202,45 @@ export function registerWorkflowNaturalLanguageTools(
 					runId: result.run.runId,
 					status: result.run.status,
 					specPath: toDisplayPath(result.run.specPath, ctx.cwd),
+					taskSummary: result.run.taskSummary,
+					openCommand: `/workflow ${result.run.runId}`,
+				},
+			};
+		},
+	} as any);
+
+	pi.registerTool({
+		name: WORKFLOW_DYNAMIC_TOOL,
+		label: "Run Dynamic Workflow",
+		description:
+			"Start a spec-less direct dynamic pi-workflow run from an explicit dynamic-workflow request.",
+		promptSnippet:
+			"Start a spec-less direct dynamic pi-workflow run from full runtime task text.",
+		promptGuidelines: [
+			"Use workflow_dynamic only when the user explicitly asks for dynamic workflow, dynamic research, adaptive/direct dynamic execution, or /workflow dynamic semantics and provides a concrete task.",
+			"Do not use workflow_dynamic for ordinary research, review, or coding requests unless the user explicitly asks for dynamic workflow execution.",
+			"If the user names a workflow such as deep-research or adaptive-research, use workflow_run instead.",
+			"Do not call workflow_dynamic unless a concrete task is known; ask a clarifying question if it is missing.",
+			"Preserve the user's task language, file references, constraints, and requested depth in workflow_dynamic.task.",
+		],
+		parameters: WORKFLOW_DYNAMIC_TOOL_PARAMETERS as any,
+		async execute(
+			_toolCallId: string,
+			params: unknown,
+			_signal: AbortSignal,
+			_onUpdate: unknown,
+			ctx: ExtensionContext,
+		) {
+			assertWorkflowToolAllowedForRole();
+			const request = parseWorkflowDynamicToolParams(params);
+			const result = await startDynamicRunFromRequest(request, ctx, pi);
+			return {
+				content: [{ type: "text", text: result.text }],
+				details: {
+					runId: result.run.runId,
+					status: result.run.status,
+					mode: "direct-dynamic",
+					provenance: result.run.provenance,
 					taskSummary: result.run.taskSummary,
 					openCommand: `/workflow ${result.run.runId}`,
 				},
@@ -259,6 +329,12 @@ interface WorkflowRunToolRequest {
 	runtimeDefaults?: { model?: string; thinking?: ThinkingLevel };
 }
 
+interface WorkflowDynamicToolRequest {
+	task: string;
+	detach: boolean;
+	runtimeDefaults?: { model?: string; thinking?: ThinkingLevel };
+}
+
 function parseWorkflowListToolParams(params: unknown): void {
 	if (params === undefined || params === null) return;
 	if (!isPlainRecord(params))
@@ -273,8 +349,8 @@ function parseWorkflowListToolParams(params: unknown): void {
 function parseWorkflowRunToolParams(params: unknown): WorkflowRunToolRequest {
 	if (!isPlainRecord(params))
 		throw new Error("workflow_run input must be an object");
-	const workflow = stringParam(params, "workflow").trim();
-	const task = stringParam(params, "task").trim();
+	const workflow = stringParam(params, "workflow", "workflow_run").trim();
+	const task = stringParam(params, "task", "workflow_run").trim();
 	if (!workflow) throw new Error("workflow_run requires workflow");
 	if (!task) throw new Error("workflow_run requires a concrete task");
 	const detachValue = params.detach;
@@ -283,10 +359,52 @@ function parseWorkflowRunToolParams(params: unknown): WorkflowRunToolRequest {
 	return { workflow, task, detach: detachValue === true };
 }
 
-function stringParam(params: Record<string, unknown>, key: string): string {
+function parseWorkflowDynamicToolParams(
+	params: unknown,
+): WorkflowDynamicToolRequest {
+	if (!isPlainRecord(params))
+		throw new Error("workflow_dynamic input must be an object");
+	const task = stringParam(params, "task", "workflow_dynamic").trim();
+	if (!task) throw new Error("workflow_dynamic requires a concrete task");
+	const detachValue = params.detach;
+	if (detachValue !== undefined && typeof detachValue !== "boolean")
+		throw new Error("workflow_dynamic detach must be a boolean when provided");
+	const model = optionalStringParam(
+		params,
+		"model",
+		"workflow_dynamic",
+	)?.trim();
+	const rawThinking = optionalStringParam(
+		params,
+		"thinking",
+		"workflow_dynamic",
+	)?.trim();
+	const thinking = rawThinking ? parseThinkingLevel(rawThinking) : undefined;
+	const runtimeDefaults =
+		model || thinking ? { model: model || undefined, thinking } : undefined;
+	return { task, detach: detachValue === true, runtimeDefaults };
+}
+
+function stringParam(
+	params: Record<string, unknown>,
+	key: string,
+	toolName: string,
+): string {
 	const value = params[key];
 	if (typeof value !== "string")
-		throw new Error(`workflow_run ${key} must be a string`);
+		throw new Error(`${toolName} ${key} must be a string`);
+	return value;
+}
+
+function optionalStringParam(
+	params: Record<string, unknown>,
+	key: string,
+	toolName: string,
+): string | undefined {
+	const value = params[key];
+	if (value === undefined) return undefined;
+	if (typeof value !== "string")
+		throw new Error(`${toolName} ${key} must be a string when provided`);
 	return value;
 }
 
@@ -364,15 +482,11 @@ async function startWorkflowRunFromRequest(
 		);
 	const run = await runWorkflowSpec(workflow, ctx.cwd, {
 		task,
-		runtimeDefaults: request.runtimeDefaults ?? currentRuntimeDefaults(ctx, api),
+		runtimeDefaults:
+			request.runtimeDefaults ?? currentRuntimeDefaults(ctx, api),
 		dynamicUi: dynamicUiFromContext(ctx),
 	});
-	const verb =
-		run.status === "blocked"
-			? "created but blocked"
-			: run.status === "failed"
-				? "created but failed to launch"
-				: "started";
+	const verb = workflowRunStartVerb(run.status);
 	if (run.status === "running") watchWorkflowFeedback(ctx, run.runId);
 
 	let detachNote = "";
@@ -385,6 +499,45 @@ async function startWorkflowRunFromRequest(
 		run,
 		text: `Workflow run ${run.runId} ${verb}.\nSpec: ${toDisplayPath(run.specPath, ctx.cwd)}\n${formatRun(run)}${detachNote}\nOpen: /workflow ${run.runId}`,
 	};
+}
+
+async function startDynamicRunFromRequest(
+	request: WorkflowDynamicToolRequest,
+	ctx: ExtensionContext,
+	api: ExtensionAPI,
+): Promise<{ run: Awaited<ReturnType<typeof runDynamicTask>>; text: string }> {
+	const task = request.task.trim();
+	if (!task)
+		throw new Error(
+			'This dynamic workflow needs a task. Usage: /workflow dynamic "<task>"',
+		);
+	const run = await runDynamicTask(ctx.cwd, {
+		task,
+		runtimeDefaults:
+			request.runtimeDefaults ?? currentRuntimeDefaults(ctx, api),
+		dynamicUi: dynamicUiFromContext(ctx),
+	});
+	const verb = workflowRunStartVerb(run.status);
+	if (run.status === "running") watchWorkflowFeedback(ctx, run.runId);
+
+	let detachNote = "";
+	if (request.detach && run.status === "running") {
+		const supervisor = spawnDetachedSupervisor(ctx.cwd, run.runId);
+		detachNote = `\nDetached supervisor pid ${supervisor.pid ?? "?"} — survives this session; log: ${toDisplayPath(supervisor.logPath, ctx.cwd)}`;
+	}
+
+	return {
+		run,
+		text: `Dynamic workflow run ${run.runId} ${verb}.\nMode: direct-dynamic (spec-less)\n${formatRun(run)}${detachNote}\nOpen: /workflow ${run.runId}`,
+	};
+}
+
+function workflowRunStartVerb(status: string): string {
+	return status === "blocked"
+		? "created but blocked"
+		: status === "failed"
+			? "created but failed to launch"
+			: "started";
 }
 
 async function openWorkflowBoard(
@@ -461,6 +614,7 @@ const WORKFLOW_KNOWN_ACTIONS = new Set([
 	"roles",
 	"agents",
 	"run",
+	"dynamic",
 	"status",
 	"show",
 	"logs",
@@ -487,7 +641,10 @@ export async function notifyUnfinishedRuns(
 		) {
 			continue;
 		}
-		if (!run.parentRunId && (run.status === "failed" || run.status === "interrupted")) {
+		if (
+			!run.parentRunId &&
+			(run.status === "failed" || run.status === "interrupted")
+		) {
 			unfinished.push(run);
 			continue;
 		}
@@ -507,7 +664,8 @@ export async function notifyUnfinishedRuns(
 		.slice(0, UNFINISHED_RUN_NOTICE_MAX_RUNS)
 		.map((run) => {
 			const summary = run.taskSummary;
-			const blocked = (summary as { blocked?: number } | undefined)?.blocked ?? 0;
+			const blocked =
+				(summary as { blocked?: number } | undefined)?.blocked ?? 0;
 			const counts = summary
 				? ` (${summary.completed}/${summary.total} tasks completed, ${summary.failed} failed, ${summary.interrupted} interrupted${blocked ? `, ${blocked} blocked` : ""})`
 				: "";
@@ -626,15 +784,26 @@ async function handleWorkflowCommand(
 				ctx,
 				api,
 			);
-			emit(
+			emitRunStartResult(ctx, result.run.status, result.text);
+			return;
+		}
+
+		if (action === "dynamic") {
+			const parsed = parseWorkflowDynamicArgs(args);
+			const runtimeDefaults =
+				parsed.model || parsed.thinking
+					? { model: parsed.model, thinking: parsed.thinking }
+					: undefined;
+			const result = await startDynamicRunFromRequest(
+				{
+					task: parsed.task,
+					detach: parsed.detach,
+					runtimeDefaults,
+				},
 				ctx,
-				result.text,
-				result.run.status === "failed"
-					? "error"
-					: result.run.status === "blocked"
-						? "warning"
-						: "info",
+				api,
 			);
+			emitRunStartResult(ctx, result.run.status, result.text);
 			return;
 		}
 
@@ -865,6 +1034,18 @@ function formatError(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
+function emitRunStartResult(
+	ctx: ExtensionCommandContext,
+	status: string,
+	text: string,
+): void {
+	emit(
+		ctx,
+		text,
+		status === "failed" ? "error" : status === "blocked" ? "warning" : "info",
+	);
+}
+
 function emit(
 	ctx: ExtensionCommandContext,
 	text: string,
@@ -925,6 +1106,44 @@ export function parseWorkflowRunArgs(args: string): {
 	return { specPath: specToken.text, task, ...parsed };
 }
 
+export function parseWorkflowDynamicArgs(args: string): {
+	task: string;
+	detach: boolean;
+	model?: string;
+	thinking?: ThinkingLevel;
+} {
+	const parsed: WorkflowRunParsedOptions = { detach: false };
+	const body = stripWorkflowDynamicCommand(args.trim());
+	const tokens = tokenizeWorkflowRunArgs(body);
+
+	let cursor = 0;
+	while (cursor < tokens.length) {
+		const consumed = consumeLeadingRunOptionTokens(tokens, cursor, parsed);
+		if (consumed === 0) break;
+		cursor += consumed;
+	}
+
+	let taskTokenEnd = tokens.length;
+	while (taskTokenEnd > cursor) {
+		const nextEnd = consumeTrailingRunOptionTokens(
+			tokens,
+			taskTokenEnd,
+			parsed,
+		);
+		if (nextEnd === taskTokenEnd) break;
+		taskTokenEnd = nextEnd;
+	}
+
+	const taskStartToken = tokens[cursor];
+	if (!taskStartToken || taskTokenEnd <= cursor) return { task: "", ...parsed };
+	const taskEnd =
+		taskTokenEnd < tokens.length
+			? trimEndBefore(body, tokens[taskTokenEnd]!.start)
+			: body.length;
+	const task = unquoteWorkflowTask(body.slice(taskStartToken.start, taskEnd));
+	return { task, ...parsed };
+}
+
 type WorkflowRunParsedOptions = {
 	detach: boolean;
 	model?: string;
@@ -946,6 +1165,14 @@ function stripWorkflowRunCommand(input: string): string {
 			: input;
 }
 
+function stripWorkflowDynamicCommand(input: string): string {
+	return input === "dynamic"
+		? ""
+		: input.startsWith("dynamic ")
+			? input.slice("dynamic".length + 1).trimStart()
+			: input;
+}
+
 function tokenizeWorkflowRunArgs(input: string): WorkflowRunArgToken[] {
 	const tokens: WorkflowRunArgToken[] = [];
 	let index = 0;
@@ -956,7 +1183,7 @@ function tokenizeWorkflowRunArgs(input: string): WorkflowRunArgToken[] {
 
 		const start = index;
 		const quote = input[index];
-		if (quote === "\"" || quote === "'") {
+		if (quote === '"' || quote === "'") {
 			index += 1;
 			let text = "";
 			let escaped = false;
@@ -979,8 +1206,7 @@ function tokenizeWorkflowRunArgs(input: string): WorkflowRunArgToken[] {
 			continue;
 		}
 
-		while (index < input.length && !/\s/.test(input[index] ?? ""))
-			index += 1;
+		while (index < input.length && !/\s/.test(input[index] ?? "")) index += 1;
 		tokens.push({
 			text: input.slice(start, index),
 			start,
@@ -1139,6 +1365,11 @@ const WORKFLOW_ACTION_COMPLETIONS = [
 		description: "List discoverable Pi agents",
 	},
 	{ value: "run", label: "run", description: "Start a workflow run" },
+	{
+		value: "dynamic",
+		label: "dynamic",
+		description: "Start a spec-less direct dynamic workflow run",
+	},
 	{ value: "status", label: "status", description: "Show workflow run status" },
 	{ value: "show", label: "show", description: "Show a run or workflow spec" },
 	{ value: "logs", label: "logs", description: "Show workflow task logs" },

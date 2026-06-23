@@ -1,0 +1,65 @@
+{
+  "type": "object",
+  "required": [
+    "schema",
+    "digest",
+    "status",
+    "executiveMarkdown",
+    "wordCount",
+    "sourceUrlCount",
+    "claimSummary",
+    "factSlotSummary",
+    "gates",
+    "auditArtifact"
+  ],
+  "properties": {
+    "schema": { "type": "string", "const": "deep-research-executive-render-v1" },
+    "digest": { "type": "string" },
+    "status": { "type": "string", "enum": ["passed", "failed", "blocked"] },
+    "blockers": { "type": "array", "items": { "type": "string" } },
+    "executiveMarkdown": { "type": "string" },
+    "wordCount": { "type": "number" },
+    "sourceUrlCount": { "type": "number" },
+    "sourceUrls": { "type": "array", "items": { "type": "string" } },
+    "claimSummary": {
+      "type": "object",
+      "required": ["total", "verified", "partially_supported", "unsupported", "conflicting"],
+      "properties": {
+        "total": { "type": "number" },
+        "verified": { "type": "number" },
+        "partially_supported": { "type": "number" },
+        "unsupported": { "type": "number" },
+        "conflicting": { "type": "number" }
+      },
+      "additionalProperties": true
+    },
+    "factSlotSummary": {
+      "type": "object",
+      "required": ["total", "filled", "partial", "missingOrConflicting"],
+      "properties": {
+        "total": { "type": "number" },
+        "filled": { "type": "number" },
+        "partial": { "type": "number" },
+        "missingOrConflicting": { "type": "number" }
+      },
+      "additionalProperties": true
+    },
+    "gates": {
+      "type": "object",
+      "required": ["maxWords", "maxUrls", "maxFindings", "maxRecommendations", "maxGaps", "truncated", "passed"],
+      "properties": {
+        "maxWords": { "type": "number" },
+        "maxUrls": { "type": "number" },
+        "maxFindings": { "type": "number" },
+        "maxRecommendations": { "type": "number" },
+        "maxGaps": { "type": "number" },
+        "truncated": { "type": "boolean" },
+        "passed": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    "auditArtifact": { "type": "string" },
+    "sidecarPath": { "type": "string" }
+  },
+  "additionalProperties": true
+}

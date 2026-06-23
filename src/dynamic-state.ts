@@ -9,7 +9,7 @@ import {
 	type AppendDynamicWorkflowEventInput,
 	type DynamicWorkflowEvent,
 } from "./dynamic-events.js";
-import { nowIso, writeJsonAtomic } from "./store.js";
+import { nowIso, readRunRecord, writeJsonAtomic } from "./store.js";
 import type { CompiledDynamicWorkflowTask } from "./types.js";
 
 export const DYNAMIC_STATE_SCHEMA = "pi-workflow-dynamic-state-v1";
@@ -19,6 +19,7 @@ export type DynamicControllerStatus =
 	| "running"
 	| "suspended_waiting_children"
 	| "complete"
+	| "blocked"
 	| "policy_blocked"
 	| "budget_blocked"
 	| "failed"
@@ -34,12 +35,37 @@ export interface DynamicBudgetCounters {
 	runtimeMs: number;
 }
 
+export interface DynamicDecisionLoopState {
+	stallCount: number;
+	replanCount: number;
+}
+
 export interface DynamicPendingUiApproval {
 	opId: string;
 	requestHash: string;
 	message?: string;
 	options?: unknown[];
 	requestedAt: string;
+}
+
+export type DynamicBranchStatus =
+	| "planned"
+	| "generated"
+	| "completed"
+	| "failed"
+	| "dropped";
+
+export interface DynamicBranchState {
+	branchId: string;
+	actionId: string;
+	requestId?: string;
+	type: string;
+	status: DynamicBranchStatus;
+	outputProfile?: string;
+	dependsOn?: string[];
+	requestHash?: string;
+	targetSpecId?: string;
+	specId?: string;
 }
 
 export interface DynamicControllerState {
@@ -49,9 +75,13 @@ export interface DynamicControllerState {
 	status: DynamicControllerStatus;
 	phase?: string;
 	generatedTaskIds: string[];
+	branches: DynamicBranchState[];
 	nestedWorkflowRunIds: string[];
 	waitingNestedWorkflowRunIds: string[];
+	blockers: string[];
+	omissions: string[];
 	counters: DynamicBudgetCounters;
+	decisionLoop?: DynamicDecisionLoopState;
 	budget?: CompiledDynamicWorkflowTask["budget"];
 	permissions?: CompiledDynamicWorkflowTask["permissions"];
 	helperRefs?: string[];
@@ -111,7 +141,10 @@ export async function readOrRebuildDynamicState(
 				(max, controller) => Math.max(max, controller.lastEventSeq),
 				0,
 			);
-			if (projectedSeq === latestEventSeq) return state;
+			if (projectedSeq === latestEventSeq) {
+				await applyDynamicTaskLifecycle(cwd, runId, state);
+				return state;
+			}
 		}
 	} catch {
 		// Corrupt or stale state is a projection cache; rebuild from the append-only log.
@@ -125,6 +158,7 @@ export async function rebuildDynamicState(
 ): Promise<DynamicWorkflowState> {
 	const events = await readDynamicEvents(cwd, runId);
 	const state = projectDynamicState(runId, events);
+	await applyDynamicTaskLifecycle(cwd, runId, state);
 	await writeDynamicState(cwd, runId, state);
 	return state;
 }
@@ -167,6 +201,7 @@ export async function recordDynamicEventAndUpdateState(
 ): Promise<{ event: DynamicWorkflowEvent; state: DynamicWorkflowState }> {
 	const event = await appendDynamicEvent(cwd, runId, input);
 	const state = projectDynamicState(runId, await readDynamicEvents(cwd, runId));
+	await applyDynamicTaskLifecycle(cwd, runId, state);
 	await writeDynamicState(cwd, runId, state);
 	return { event, state };
 }
@@ -191,6 +226,7 @@ export async function ensureDynamicControllerInitialized(
 		mode: input.dynamic.mode,
 		budget: input.dynamic.budget,
 		permissions: input.dynamic.permissions,
+		decisionLoop: input.dynamic.decisionLoop,
 		helperRefs,
 		workflowRefs,
 		contentFingerprint: input.contentFingerprint,
@@ -230,13 +266,23 @@ export async function recordDynamicControllerStatus(
 		controllerSpecId: string;
 		status: DynamicControllerStatus;
 		message?: string;
+		blockers?: readonly string[];
+		omissions?: readonly string[];
+		decisionLoop?: Partial<DynamicDecisionLoopState>;
 	},
 ): Promise<DynamicWorkflowState> {
 	const existing = await readOrRebuildDynamicState(cwd, runId);
 	const controller = existing.controllers[input.controllerSpecId];
+	const blockers = cleanStringArray(input.blockers);
+	const omissions = cleanStringArray(input.omissions);
+	const decisionLoop = cleanDecisionLoopState(input.decisionLoop);
 	if (
 		controller?.status === input.status &&
-		(input.message ? controller.lastError === input.message : true)
+		(input.message ? controller.lastError === input.message : true) &&
+		sameStringArray(controller.blockers ?? [], blockers) &&
+		sameStringArray(controller.omissions ?? [], omissions) &&
+		(input.decisionLoop === undefined ||
+			sameDecisionLoopState(controller.decisionLoop, decisionLoop))
 	) {
 		return existing;
 	}
@@ -244,10 +290,18 @@ export async function recordDynamicControllerStatus(
 		controllerSpecId: input.controllerSpecId,
 		type: "controller.status",
 		opId: `${input.controllerSpecId}:controller:status:${input.status}`,
-		requestHash: hashDynamicRequest(input),
+		requestHash: hashDynamicRequest({
+			...input,
+			blockers,
+			omissions,
+			...(decisionLoop ? { decisionLoop } : {}),
+		}),
 		payload: {
 			status: input.status,
 			...(input.message ? { message: input.message } : {}),
+			...(blockers.length > 0 ? { blockers } : {}),
+			...(omissions.length > 0 ? { omissions } : {}),
+			...(decisionLoop ? { decisionLoop } : {}),
 		},
 	});
 	return state;
@@ -285,20 +339,29 @@ function applyDynamicEvent(
 	state: DynamicWorkflowState,
 	event: DynamicWorkflowEvent,
 ): void {
-	const controller = ensureControllerState(state, event.controllerSpecId, event);
+	const controller = ensureControllerState(
+		state,
+		event.controllerSpecId,
+		event,
+	);
 	controller.lastEventSeq = event.seq;
 	controller.updatedAt = event.timestamp;
 	state.updatedAt = event.timestamp;
 
 	if (event.type === "controller.initialized") {
-		controller.controllerTaskId = optionalString(event.payload.controllerTaskId);
+		controller.controllerTaskId = optionalString(
+			event.payload.controllerTaskId,
+		);
 		controller.stageId = optionalString(event.payload.stageId);
-		controller.status = asControllerStatus(event.payload.status) ?? controller.status;
+		controller.status =
+			asControllerStatus(event.payload.status) ?? controller.status;
 		controller.budget = isRecord(event.payload.budget)
-			? (event.payload.budget as unknown as CompiledDynamicWorkflowTask["budget"])
+			? (event.payload
+					.budget as unknown as CompiledDynamicWorkflowTask["budget"])
 			: controller.budget;
 		controller.permissions = isRecord(event.payload.permissions)
-			? (event.payload.permissions as CompiledDynamicWorkflowTask["permissions"])
+			? (event.payload
+					.permissions as CompiledDynamicWorkflowTask["permissions"])
 			: controller.permissions;
 		controller.helperRefs = Array.isArray(event.payload.helperRefs)
 			? event.payload.helperRefs.filter(
@@ -310,8 +373,13 @@ function applyDynamicEvent(
 
 	if (event.type === "controller.status") {
 		const status = asControllerStatus(event.payload.status);
-		if (!status) throw new Error(`invalid dynamic controller status at seq ${event.seq}`);
+		if (!status)
+			throw new Error(`invalid dynamic controller status at seq ${event.seq}`);
 		controller.status = status;
+		controller.blockers = payloadStringArray(event.payload.blockers);
+		controller.omissions = payloadStringArray(event.payload.omissions);
+		const decisionLoop = payloadDecisionLoopState(event.payload.decisionLoop);
+		if (decisionLoop) controller.decisionLoop = decisionLoop;
 		const message = optionalString(event.payload.message);
 		if (message) controller.lastError = message;
 		else if (
@@ -330,7 +398,8 @@ function applyDynamicEvent(
 
 	if (event.type === "controller.phase") {
 		const phase = optionalString(event.payload.phase);
-		if (!phase) throw new Error(`invalid dynamic controller phase at seq ${event.seq}`);
+		if (!phase)
+			throw new Error(`invalid dynamic controller phase at seq ${event.seq}`);
 		controller.phase = phase;
 		return;
 	}
@@ -347,9 +416,10 @@ function applyDynamicEvent(
 	if (event.type === "workflow.completed") {
 		const runId = optionalString(event.payload.runId);
 		if (runId) {
-			controller.waitingNestedWorkflowRunIds = controller.waitingNestedWorkflowRunIds.filter(
-				(candidate) => candidate !== runId,
-			);
+			controller.waitingNestedWorkflowRunIds =
+				controller.waitingNestedWorkflowRunIds.filter(
+					(candidate) => candidate !== runId,
+				);
 		}
 		return;
 	}
@@ -369,13 +439,53 @@ function applyDynamicEvent(
 		return;
 	}
 
+	if (event.type === "fanout.planned") {
+		const branches = Array.isArray(event.payload.branches)
+			? event.payload.branches
+			: [];
+		for (const branch of branches) {
+			if (!isRecord(branch)) continue;
+			const branchId = optionalString(branch.branchId);
+			const actionId = optionalString(branch.actionId);
+			const type = optionalString(branch.type);
+			if (!branchId || !actionId || !type) continue;
+			upsertDynamicBranch(controller, {
+				branchId,
+				actionId,
+				requestId: optionalString(branch.requestId),
+				type,
+				status: "planned",
+				outputProfile: optionalString(branch.outputProfile),
+				dependsOn: payloadStringArray(branch.dependsOn),
+				requestHash: optionalString(branch.requestHash),
+				targetSpecId: optionalString(branch.targetSpecId),
+			});
+		}
+		return;
+	}
+
 	if (event.type === "task.generated") {
 		const taskId = optionalString(event.payload.taskId);
-		if (!taskId) throw new Error(`invalid generated dynamic task id at seq ${event.seq}`);
+		if (!taskId)
+			throw new Error(`invalid generated dynamic task id at seq ${event.seq}`);
 		if (!controller.generatedTaskIds.includes(taskId)) {
 			controller.generatedTaskIds.push(taskId);
 			controller.counters.agents += 1;
 			controller.counters.graphMutations += 1;
+		}
+		const branchId = optionalString(event.payload.branchId);
+		const requestHash = optionalString(event.requestHash);
+		const request = isRecord(event.payload.request)
+			? event.payload.request
+			: undefined;
+		const requestId = optionalString(request?.id);
+		const branch = findDynamicBranch(controller, { branchId, requestHash });
+		if (branch) {
+			branch.status = advanceDynamicBranchStatus(branch.status, "generated");
+			branch.specId = taskId;
+			branch.targetSpecId ??= taskId;
+			if (requestId) branch.requestId ??= requestId;
+			if (requestHash) branch.requestHash = requestHash;
 		}
 		return;
 	}
@@ -418,13 +528,120 @@ function ensureControllerState(
 		controllerSpecId,
 		status: "pending",
 		generatedTaskIds: [],
+		branches: [],
 		nestedWorkflowRunIds: [],
 		waitingNestedWorkflowRunIds: [],
+		blockers: [],
+		omissions: [],
 		counters: emptyCounters(),
 		lastEventSeq: 0,
 		updatedAt: event.timestamp,
 	};
 	return state.controllers[controllerSpecId];
+}
+
+async function applyDynamicTaskLifecycle(
+	cwd: string,
+	runId: string,
+	state: DynamicWorkflowState,
+): Promise<void> {
+	const run = await readRunRecord(cwd, runId).catch(() => undefined);
+	if (!run) return;
+	for (const controller of Object.values(state.controllers)) {
+		for (const branch of controller.branches) {
+			if (!branch.specId) continue;
+			const task = run.tasks.find(
+				(candidate) =>
+					candidate.specId === branch.specId ||
+					candidate.taskId === branch.specId,
+			);
+			if (!task) continue;
+			branch.specId = task.specId;
+			branch.status = advanceDynamicBranchStatus(
+				branch.status,
+				dynamicBranchStatusFromTaskStatus(task.status),
+			);
+		}
+	}
+}
+
+function dynamicBranchStatusFromTaskStatus(
+	status: string,
+): DynamicBranchStatus {
+	if (status === "completed") return "completed";
+	if (status === "skipped") return "dropped";
+	if (status === "failed" || status === "blocked" || status === "interrupted")
+		return "failed";
+	return "generated";
+}
+
+function upsertDynamicBranch(
+	controller: DynamicControllerState,
+	next: DynamicBranchState,
+): void {
+	const existing = findDynamicBranch(controller, {
+		branchId: next.branchId,
+		requestHash: next.requestHash,
+	});
+	if (!existing) {
+		controller.branches.push({
+			...next,
+			...(next.dependsOn && next.dependsOn.length > 0
+				? { dependsOn: next.dependsOn }
+				: { dependsOn: undefined }),
+		});
+		return;
+	}
+	existing.status = advanceDynamicBranchStatus(existing.status, next.status);
+	existing.actionId = existing.actionId || next.actionId;
+	existing.requestId ??= next.requestId;
+	existing.type = existing.type || next.type;
+	existing.outputProfile ??= next.outputProfile;
+	if (next.dependsOn && next.dependsOn.length > 0)
+		existing.dependsOn = next.dependsOn;
+	existing.requestHash ??= next.requestHash;
+	existing.targetSpecId ??= next.targetSpecId;
+	existing.specId ??= next.specId;
+}
+
+function findDynamicBranch(
+	controller: DynamicControllerState,
+	input: { branchId?: string; requestHash?: string },
+): DynamicBranchState | undefined {
+	if (input.branchId !== undefined && input.requestHash !== undefined) {
+		return (
+			controller.branches.find(
+				(branch) =>
+					branch.branchId === input.branchId &&
+					branch.requestHash === input.requestHash,
+			) ??
+			controller.branches.find(
+				(branch) =>
+					branch.branchId === input.branchId &&
+					branch.requestHash === undefined,
+			)
+		);
+	}
+	return controller.branches.find(
+		(branch) =>
+			(input.branchId !== undefined && branch.branchId === input.branchId) ||
+			(input.requestHash !== undefined &&
+				branch.requestHash === input.requestHash),
+	);
+}
+
+function advanceDynamicBranchStatus(
+	current: DynamicBranchStatus,
+	next: DynamicBranchStatus,
+): DynamicBranchStatus {
+	const rank: Record<DynamicBranchStatus, number> = {
+		planned: 0,
+		generated: 1,
+		dropped: 2,
+		failed: 3,
+		completed: 4,
+	};
+	return rank[next] > rank[current] ? next : current;
 }
 
 function emptyCounters(): DynamicBudgetCounters {
@@ -440,7 +657,9 @@ function emptyCounters(): DynamicBudgetCounters {
 
 function mergeCounters(counters: DynamicBudgetCounters, value: unknown): void {
 	if (!isRecord(value)) return;
-	for (const key of Object.keys(counters) as Array<keyof DynamicBudgetCounters>) {
+	for (const key of Object.keys(counters) as Array<
+		keyof DynamicBudgetCounters
+	>) {
 		const amount = value[key];
 		if (typeof amount === "number" && Number.isFinite(amount)) {
 			counters[key] += amount;
@@ -461,12 +680,15 @@ function assertDynamicState(
 	return value as unknown as DynamicWorkflowState;
 }
 
-function asControllerStatus(value: unknown): DynamicControllerStatus | undefined {
+function asControllerStatus(
+	value: unknown,
+): DynamicControllerStatus | undefined {
 	if (
 		value === "pending" ||
 		value === "running" ||
 		value === "suspended_waiting_children" ||
 		value === "complete" ||
+		value === "blocked" ||
 		value === "policy_blocked" ||
 		value === "budget_blocked" ||
 		value === "failed" ||
@@ -479,6 +701,70 @@ function asControllerStatus(value: unknown): DynamicControllerStatus | undefined
 
 function optionalString(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim() !== "" ? value : undefined;
+}
+
+function cleanStringArray(value: readonly string[] | undefined): string[] {
+	return (value ?? [])
+		.map((item) => item.trim())
+		.filter((item) => item.length > 0);
+}
+
+function payloadStringArray(value: unknown): string[] {
+	return Array.isArray(value)
+		? value
+				.filter((item): item is string => typeof item === "string")
+				.map((item) => item.trim())
+				.filter((item) => item.length > 0)
+		: [];
+}
+
+function sameStringArray(
+	left: readonly string[],
+	right: readonly string[],
+): boolean {
+	return (
+		left.length === right.length &&
+		left.every((item, index) => item === right[index])
+	);
+}
+
+function cleanDecisionLoopState(
+	value: Partial<DynamicDecisionLoopState> | undefined,
+): DynamicDecisionLoopState | undefined {
+	if (!value) return undefined;
+	const stallCount = nonNegativeInteger(value.stallCount);
+	const replanCount = nonNegativeInteger(value.replanCount);
+	if (stallCount === undefined && replanCount === undefined) return undefined;
+	return {
+		stallCount: stallCount ?? 0,
+		replanCount: replanCount ?? 0,
+	};
+}
+
+function payloadDecisionLoopState(
+	value: unknown,
+): DynamicDecisionLoopState | undefined {
+	if (!isRecord(value)) return undefined;
+	const stallCount = nonNegativeInteger(value.stallCount);
+	const replanCount = nonNegativeInteger(value.replanCount);
+	if (stallCount === undefined || replanCount === undefined) return undefined;
+	return { stallCount, replanCount };
+}
+
+function sameDecisionLoopState(
+	left: DynamicDecisionLoopState | undefined,
+	right: DynamicDecisionLoopState | undefined,
+): boolean {
+	return (
+		(left?.stallCount ?? 0) === (right?.stallCount ?? 0) &&
+		(left?.replanCount ?? 0) === (right?.replanCount ?? 0)
+	);
+}
+
+function nonNegativeInteger(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isInteger(value) && value >= 0
+		? value
+		: undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

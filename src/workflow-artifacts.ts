@@ -2,11 +2,34 @@ import type { WorkflowRunRecord, WorkflowTaskRunRecord } from "./types.js";
 
 type StatusCounts = Partial<Record<WorkflowTaskRunRecord["status"], number>>;
 
+type OutputRepairCounts = WorkflowTelemetrySummary["outputRepairCounts"];
+
+interface WorkflowTelemetryAccumulator {
+	outputRetries: number;
+	launchRetries: number;
+	resumeEvents: number;
+	resumedTasks: number;
+	retryReasons: WorkflowTelemetrySummary["retryReasons"];
+	resumeStatusCounts: StatusCounts;
+	outputRepairCounts: OutputRepairCounts;
+}
+
 export interface WorkflowTelemetrySummary {
 	taskCount: number;
 	wallClockMs: number | null;
 	statusCounts: StatusCounts;
 	retryCounts: { output: number; launch: number };
+	retryReasons: {
+		output: Record<string, number>;
+		launch: Record<string, number>;
+	};
+	resumeCounts: { events: number; tasks: number };
+	resumeStatusCounts: StatusCounts;
+	outputRepairCounts: {
+		sameSession: number;
+		newSession: number;
+		unknown: number;
+	};
 	outputBytes: number;
 	stages: Record<
 		string,
@@ -29,14 +52,12 @@ export function summarizeWorkflowTelemetry(
 	const statusCounts: StatusCounts = {};
 	const stages: WorkflowTelemetrySummary["stages"] = {};
 	let outputBytes = 0;
-	let outputRetries = 0;
-	let launchRetries = 0;
+	const accumulator = createWorkflowTelemetryAccumulator();
 
 	for (const task of tasks) {
 		const status = task.status;
 		if (status) statusCounts[status] = (statusCounts[status] ?? 0) + 1;
-		outputRetries += task.outputRetry?.attempts ?? 0;
-		launchRetries += task.launchRetry?.attempts ?? 0;
+		accumulateTaskReliability(task, accumulator);
 
 		const outputKey = task.files?.output ?? task.taskId ?? task.specId ?? "";
 		const taskOutputBytes = options.outputBytesByTaskId?.[outputKey] ?? 0;
@@ -60,10 +81,95 @@ export function summarizeWorkflowTelemetry(
 		taskCount: tasks.length,
 		wallClockMs: durationBetween(run.createdAt, run.updatedAt),
 		statusCounts,
-		retryCounts: { output: outputRetries, launch: launchRetries },
+		retryCounts: {
+			output: accumulator.outputRetries,
+			launch: accumulator.launchRetries,
+		},
+		retryReasons: accumulator.retryReasons,
+		resumeCounts: {
+			events: accumulator.resumeEvents,
+			tasks: accumulator.resumedTasks,
+		},
+		resumeStatusCounts: accumulator.resumeStatusCounts,
+		outputRepairCounts: accumulator.outputRepairCounts,
 		outputBytes,
 		stages,
 	};
+}
+
+function createWorkflowTelemetryAccumulator(): WorkflowTelemetryAccumulator {
+	return {
+		outputRetries: 0,
+		launchRetries: 0,
+		resumeEvents: 0,
+		resumedTasks: 0,
+		retryReasons: { output: {}, launch: {} },
+		resumeStatusCounts: {},
+		outputRepairCounts: { sameSession: 0, newSession: 0, unknown: 0 },
+	};
+}
+
+function accumulateTaskReliability(
+	task: Partial<WorkflowTaskRunRecord>,
+	accumulator: WorkflowTelemetryAccumulator,
+): void {
+	const currentOutputAttempts = positiveCount(task.outputRetry?.attempts);
+	accumulator.outputRetries += currentOutputAttempts;
+	if (currentOutputAttempts > 0) {
+		countReason(accumulator.retryReasons.output, task.outputRetry?.reason);
+		countRepairMode(
+			accumulator.outputRepairCounts,
+			task.outputRetry?.repairMode,
+		);
+	}
+
+	const currentLaunchAttempts = positiveCount(task.launchRetry?.attempts);
+	accumulator.launchRetries += currentLaunchAttempts;
+	if (currentLaunchAttempts > 0)
+		countReason(accumulator.retryReasons.launch, task.launchRetry?.reason);
+
+	const resumeEvents = Array.isArray(task.resumeEvents)
+		? task.resumeEvents
+		: [];
+	if (resumeEvents.length === 0) return;
+	accumulator.resumedTasks += 1;
+	accumulator.resumeEvents += resumeEvents.length;
+	for (const event of resumeEvents) accumulateResumeEvent(event, accumulator);
+}
+
+function accumulateResumeEvent(
+	event: NonNullable<WorkflowTaskRunRecord["resumeEvents"]>[number],
+	accumulator: WorkflowTelemetryAccumulator,
+): void {
+	accumulator.resumeStatusCounts[event.fromStatus] =
+		(accumulator.resumeStatusCounts[event.fromStatus] ?? 0) + 1;
+	const previousOutputAttempts = positiveCount(event.outputRetryAttempts);
+	accumulator.outputRetries += previousOutputAttempts;
+	if (previousOutputAttempts === 0) return;
+	countReason(accumulator.retryReasons.output, event.outputRetryReason);
+	countRepairMode(accumulator.outputRepairCounts, event.outputRetryRepairMode);
+}
+
+function positiveCount(value: number | undefined): number {
+	if (value === undefined || !Number.isFinite(value)) return 0;
+	return Math.max(0, Math.floor(value));
+}
+
+function countReason(
+	counts: Record<string, number>,
+	reason: string | undefined,
+): void {
+	const key = reason && reason.trim().length > 0 ? reason : "unknown";
+	counts[key] = (counts[key] ?? 0) + 1;
+}
+
+function countRepairMode(
+	counts: OutputRepairCounts,
+	mode: "same_session" | "new_session" | undefined,
+): void {
+	if (mode === "same_session") counts.sameSession += 1;
+	else if (mode === "new_session") counts.newSession += 1;
+	else counts.unknown += 1;
 }
 
 export interface SourceContextPacket {
