@@ -40,12 +40,9 @@ Requires Node.js `>=22.19.0` on macOS or Linux. Native Windows is not supported;
 
 ## Usage: ask naturally
 
-After installation, ask Pi to use a bundled or project workflow by name. The
-package exposes `workflow_list` and `workflow_run` tools so Pi can discover
-workflows and start a named run from an explicit natural-language request. It
-also exposes `workflow_dynamic` for explicit spec-less dynamic workflow requests.
-Bundled workflows use local-first agent lookup and fall back to pi-workflow's
-bundled common agents such as `scout` and `researcher`.
+After installation, ask Pi to use a bundled or project workflow by name and describe the task you want handled. If you are not sure which workflow to use, ask Pi to list or choose from the available workflows.
+
+Bundled workflows use local-first agent lookup and fall back to pi-workflow's bundled common agents such as `scout` and `researcher`. Tool-level invocation details live in [`docs/usage.md`](./docs/usage.md).
 
 ```text
 Use the bundled deep-research workflow to research this repository and summarize the architecture tradeoffs.
@@ -65,17 +62,13 @@ If you want deterministic manual control, use the slash command form:
 /workflow run deep-research "Research this repository and summarize the architecture tradeoffs."
 ```
 
-For direct dynamic orchestration without choosing a workflow spec, use:
+For a one-off adaptive workflow that should plan, fan out, and synthesize without choosing a saved workflow, use:
 
 ```text
 /workflow dynamic "Research this repository and summarize the architecture tradeoffs."
 ```
 
-`/workflow dynamic` uses pi-workflow's built-in trusted dynamic controller at
-runtime; it does not ask you to name, author, or save a workflow spec. Direct
-dynamic research workers validate URL refs, verifiers can record structured
-claim-source support, and final synthesis is constrained to upstream source
-ledgers.
+`/workflow dynamic` uses pi-workflow's built-in trusted dynamic controller and records a normal workflow run under `.pi/workflows/`. Use it when you explicitly want adaptive orchestration rather than a named reusable workflow.
 
 ## Usage: choose an execution mode
 
@@ -170,13 +163,13 @@ Workflow definitions compose a small set of stage patterns and graph shapes.
 | `dag` | Nested graph container | child stages lowered to namespaced tasks; selected output exposed downstream |
 | `dynamic` | Adaptive orchestration | trusted bundle-local controller code can create official workflow tasks with `ctx.agent()` |
 
-![Core workflow stage shapes: single, foreach, reduce, loop, and dag](./docs/assets/readme/stage-types.png)
+![Core workflow stage shapes: single, foreach, reduce, loop, dag, and dynamic](./docs/assets/readme/stage-types.png)
 
 Parallel execution is a graph shape, not a stage type: model parallel branches as multiple roots or with `after: []`. Support helpers are declared with a `support` object, not a stage `type`.
 
-Dynamic workflows are for advanced adaptive orchestration. A JSON `type: "dynamic"` stage references trusted bundle-local `.mjs` controller code; that controller may call `ctx.agent()`, `ctx.helper()`, or `ctx.workflow()` to splice generated work into the official run graph. Nested workflow specs are self-contained at their own directory level: refs inside a nested spec must stay in that nested subtree, not parent shared files via `../`. Dynamic runs persist replay state and `ctx.log()` records under `.pi/workflows/<run-id>/dynamic/`, reject generated dependency cycles, and support retrying pure helpers declared with `idempotent: true`. Approval supports `approval: "auto"` or interactive `approval: "ask"`. With `--detach`, the initial scheduling pass can still run dynamic controllers inline before the detached supervisor takes over. Later detached/headless approval blocks fail closed with `dynamic_ui_unavailable` or `dynamic_approval_timeout`; resume them from an interactive Pi session with `/workflow resume <run-id>`.
+Dynamic workflows are the advanced form of adaptive orchestration. A JSON `type: "dynamic"` stage points at trusted bundle-local `.mjs` controller code; that controller can add official workflow tasks, call helpers, or run nested workflows while preserving replayable run state. See [`docs/usage.md`](./docs/usage.md) for approval, detach, helper retry, nested workflow, and cache details.
 
-Workflow `fetch_content` calls use a run-scoped file cache by default under `.pi/workflows/<run-id>/source-cache/fetch-content/`. Set `PI_WORKFLOW_FETCH_CONTENT_CACHE=0` to opt out. Treat cache-enabled benchmark runs as a separate cohort from older uncached measurements.
+Workflow `fetch_content` calls use a run-scoped file cache by default under `.pi/workflows/<run-id>/source-cache/fetch-content/`. Set `PI_WORKFLOW_FETCH_CONTENT_CACHE=0` to opt out.
 
 ## Predefined workflows
 
@@ -184,14 +177,10 @@ The package includes a small starter set. These are practical defaults and autho
 
 | Workflow | Use when |
 |---|---|
-| `deep-research` | Source-backed exploratory research with a compact executive handoff plus preserved audit/control artifacts. |
-| `adaptive-research` | Experimental static→dynamic→static research example where a planner-driven dynamic stage chooses fan-out/follow-up/stop within static policy. |
-| `deep-review` | General multi-lens review where findings should be challenged before final synthesis. |
-| `deep-discovery` | Broad repository discovery when the request is to find important bugs or risks across a whole codebase. |
-| `deep-focused-review` | Focused suspicious-area/pattern review with adjacent call-path checks. |
-| `deep-diff-review` | Diff/PR review centered on changed-hunk regression and compatibility risk. |
-| `spec-review` | Read-only comparison of a spec/contract against implementation and tests. |
-| `impact-review` | Read-only ship-impact review for changed or proposed work, especially missing tests, docs, release work, compatibility risk, and follow-up actions. |
+| `deep-research` | Grounded answers or summaries based on source material. |
+| `deep-review` | Careful code or design review from multiple angles. |
+| `spec-review` | Checks that requirements, API specs, or contracts are reflected in implementation and tests. |
+| `impact-review` | Pre-merge or pre-release risk review across affected areas, tests, and docs. |
 
 ![Deep research workflow flow](./docs/assets/readme/deep-research-flow.png)
 
@@ -201,17 +190,25 @@ The package includes a small starter set. These are practical defaults and autho
 
 ![Impact review workflow flow](./docs/assets/readme/impact-review-flow.png)
 
-Most teams should create project-specific workflows as their patterns settle.
+More official workflows are planned. Most teams should create project-specific workflows as their patterns settle.
 
 ## Workflow board
 
 After starting a run, open `/workflow` to inspect it in a read-only TUI. Browse runs, drill into stages and tasks, and preview task output without leaving Pi.
 
+Start from the run list.
+
 ![Workflow board: runs list](./docs/assets/readme/workflow-board-runs.png)
+
+Drill into stage progress.
 
 ![Workflow board: stages view](./docs/assets/readme/workflow-board-stages.png)
 
-![Workflow board: tasks and output preview](./docs/assets/readme/workflow-board-tasks.png)
+Inspect task-level fan-out.
+
+![Workflow board: task list](./docs/assets/readme/workflow-board-tasks.png)
+
+Open a task detail view with its artifact output.
 
 ![Workflow board: task detail](./docs/assets/readme/workflow-board-task-detail.png)
 

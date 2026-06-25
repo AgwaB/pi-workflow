@@ -219,7 +219,7 @@ export function registerWorkflowNaturalLanguageTools(
 		promptGuidelines: [
 			"Use workflow_dynamic only when the user explicitly asks for dynamic workflow, dynamic research, adaptive/direct dynamic execution, or /workflow dynamic semantics and provides a concrete task.",
 			"Do not use workflow_dynamic for ordinary research, review, or coding requests unless the user explicitly asks for dynamic workflow execution.",
-			"If the user names a workflow such as deep-research or adaptive-research, use workflow_run instead.",
+			"If the user names a workflow such as deep-research or spec-review, use workflow_run instead.",
 			"Do not call workflow_dynamic unless a concrete task is known; ask a clarifying question if it is missing.",
 			"Preserve the user's task language, file references, constraints, and requested depth in workflow_dynamic.task.",
 		],

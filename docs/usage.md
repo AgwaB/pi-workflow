@@ -39,6 +39,8 @@ Terminal CLI:
 
 ```bash
 pi-workflow inspect <run-id-or-prefix> [--failures] [--results] [--json]
+pi-workflow supervise <run-id-or-prefix> [--poll-ms N] [--max-runtime-ms N]
+pi-workflow supervise --all [--poll-ms N] [--max-runtime-ms N]
 ```
 
 `/workflow` with no arguments opens the read-only workflow board TUI. `/workflow <run-id>` opens the board focused on that run.
@@ -106,8 +108,8 @@ For reusable workflow authoring, `workflow-guide` includes validated scaffold bu
 | `/workflow validate <workflow-name-or-path>` | Load and compile a workflow without starting a run. Reports blocked permission previews and warnings. |
 | `/workflow roles <workflow-name-or-path>` | Show the compiled role context included for each workflow role. |
 | `/workflow agents` | List discoverable Pi agents, model/thinking defaults, tool ceilings, and source paths. |
-| `/workflow run <workflow-name-or-path> "<task>" [--detach]` | Start a named workflow run with the supplied runtime task. `--detach` spawns a standalone supervisor process after the initial scheduling pass so the run keeps progressing after this Pi session exits (log: `.pi/workflows/<run-id>/supervise.log`). Dynamic controllers and `approval: "ask"` prompts in that first pass can still run inline; later detached/headless approval blocks require an interactive `/workflow resume <run-id>`. |
-| `/workflow dynamic "<task>" [--detach]` | Start a spec-less direct dynamic run. The runtime uses a built-in trusted controller to plan/fan out/synthesize dynamically; no workflow name, user-selected spec, or generated spec is required. Supports the same `--model` and `--thinking` overrides as `/workflow run`. |
+| `/workflow run [--model MODEL] [--thinking LEVEL] <workflow-name-or-path> "<task>" [--detach]` | Start a named workflow run with the supplied runtime task. `--detach` spawns a standalone supervisor process after the initial scheduling pass so the run keeps progressing after this Pi session exits (log: `.pi/workflows/<run-id>/supervise.log`). Dynamic controllers and `approval: "ask"` prompts in that first pass can still run inline; later detached/headless approval blocks require an interactive `/workflow resume <run-id>`. |
+| `/workflow dynamic [--model MODEL] [--thinking LEVEL] "<task>" [--detach]` | Start a spec-less direct dynamic run. The runtime uses a built-in trusted controller to plan/fan out/synthesize dynamically; no workflow name, user-selected spec, or generated spec is required. Supports the same `--model` and `--thinking` overrides as `/workflow run`. |
 | `/workflow status [run-id]` | Show all workflow runs in the current project, or one run. |
 | `/workflow show <run-id-or-workflow-name>` | If the ref starts with `workflow_`, show run details; otherwise show the raw workflow spec. |
 | `/workflow logs <run-id> [task-id] [lines]` | Print captured logs for a workflow task. Defaults to `task-1`. |
@@ -115,6 +117,20 @@ For reusable workflow authoring, `workflow-guide` includes validated scaffold bu
 | `/workflow resume <run-id>` | Resume a failed, interrupted, or resumable blocked run (including dynamic approval blocked in headless mode): completed tasks are preserved; failed/interrupted/skipped or resumable blocked tasks reset to pending and reschedule. Loop workflows are not supported yet. |
 
 Not implemented: `/workflow continue` and `/workflow delegate`. Use `status`, `show`, `logs`, `wait`, `resume`, and `pi-workflow inspect` for text/CLI inspection. The standalone CLI also offers `pi-workflow supervise <run-id>|--all` to drive scheduling from outside a Pi session (unfinished failed/interrupted or resumable blocked runs within the last 7 days are announced at session start with resume hints).
+
+### Workflow board controls
+
+The `/workflow` board is read-only. It has four drill-down levels: runs, stages, tasks, and task detail.
+
+| Key | Action |
+|---|---|
+| `Enter` / `→` | Drill into the selected run, stage, or task. |
+| `b` / `Esc` / `←` | Go back one level. |
+| `↑` / `↓` | Move within the current list or scroll the task artifact. |
+| `[` / `]` or `p` / `n` | Move to the previous/next sibling run, stage, or task where supported. |
+| `r` | Refresh run state from `.pi/workflows`. |
+| `←` / `→` in task detail | Switch between task output and prompt artifacts. |
+| `q` | Close the board. |
 
 ## Workflow resolution
 
@@ -179,7 +195,7 @@ Workflow tasks that use `fetch_content` share a run-scoped file cache by default
 .pi/workflows/<run-id>/source-cache/fetch-content/
 ```
 
-The cache is only reused within the same workflow run, including resume/retry of that run. It is not reused across separate runs by default. Cache events are appended to `events.jsonl` with `hit`, `miss`, `write`, and `skip` records for telemetry and audit. To disable the cache for a run, set:
+The cache is only reused within the same workflow run, including resume/retry of that run. It is not reused across separate runs by default. Cache events are appended to that cache directory's `events.jsonl` with `hit`, `miss`, `write`, and `skip` records for telemetry and audit. To disable the cache for a run, set:
 
 ```bash
 PI_WORKFLOW_FETCH_CONTENT_CACHE=0
@@ -187,26 +203,22 @@ PI_WORKFLOW_FETCH_CONTENT_CACHE=0
 
 Benchmark note: cache-enabled runs are a distinct cohort from older uncached runs. Do not compare wall-clock numbers directly unless the task set, model, and cache policy are controlled and recorded.
 
-## Bundled starter workflows
+## Bundled workflows
 
-`pi-workflow` ships a small starter set, not a comprehensive workflow catalog. Treat these as practical defaults and authoring examples; create project-local workflows under `.pi/workflows/` when your team needs patterns that are not bundled.
+`pi-workflow` ships a small official starter set, not a comprehensive workflow catalog. More official workflows are planned; create project-local or repo-shared workflows under `.pi/workflows/` or `workflows/` when your team needs patterns that are not bundled.
 
 | Workflow | Required agents | Mode | Use when |
 |---|---|---|---|
-| `deep-research` | `researcher` | plan + foreach questions + normalize + foreach verifier + audit support + full audit reduce + deterministic executive render | Research needs source-backed claims, dynamic breadth/depth, independent verification, deterministic evidence gating, citations, and a compact parent-facing handoff with full audit artifacts preserved. |
-| `adaptive-research` | `researcher` | static intake + planner-driven dynamic decision loop + static final reduce | Experimental example for adaptive research where a dynamic stage decides fan-out/follow-up/stop within static policy. Not a replacement for `deep-research`. |
-| `deep-review` | `scout` | triage + foreach review lenses + dedup support + foreach devil's advocate + verdict-partition support + reduce | General thorough multi-lens review where findings should be independently challenged before synthesis. Prefer a more specific review workflow when the request shape is clear. |
-| `deep-discovery` | `scout` | domain/subsystem triage + foreach subsystem/risk packets + dedup support + foreach devil's advocate + verdict-partition support + reduce | Broad repository discovery: use when the request is to find important bugs or risks across a whole codebase with no suspected area or diff. |
-| `deep-focused-review` | `scout` | suspicious-scope triage + foreach defect-family/call-path packets + dedup support + foreach devil's advocate + verdict-partition support + reduce | Focused review: use when the user gives a suspicious area, component, subsystem, or defect pattern and wants deep review plus adjacent-path checks. |
-| `deep-diff-review` | `scout` | changed-hunk triage + foreach impact packets + dedup support + foreach devil's advocate + verdict-partition support + reduce | Diff/PR review: use when changed hunks, a patch, PR, or explicit changed-file context should drive regression and compatibility review. |
-| `spec-review` | `scout` | extract spec + map implementation + inspect tests -> reduce candidates -> foreach verifier -> reduce report | Read-only spec/contract conformance review against implementation and tests. |
-| `impact-review` | `scout` | scope/implementation/validation maps -> impact lenses -> consistency/regression/ship-readiness joins -> final synthesis | Read-only ship-impact review for changed or proposed work, especially missing tests, docs, release work, compatibility risk, and follow-up actions. |
+| `deep-research` | `researcher` | plan + foreach questions + normalize + foreach verifier + audit support + full audit reduce + deterministic executive render | Use when you need a grounded answer or summary based on source material. |
+| `deep-review` | `scout` | triage + foreach review lenses + dedup support + foreach devil's advocate + verdict-partition support + reduce | Use when you want code or design reviewed carefully from multiple angles. |
+| `spec-review` | `scout` | extract spec + map implementation + inspect tests -> reduce candidates -> foreach verifier -> reduce report | Use when you want to check whether requirements, an API spec, or a contract are reflected in the implementation and tests. |
+| `impact-review` | `scout` | scope/implementation/validation maps -> impact lenses -> consistency/regression/ship-readiness joins -> final synthesis | Use before merging or releasing a change to check affected areas, risks, missing tests, and missing docs. |
 
 Bundled starters use local-first Pi agent discovery with bundled fallback
 agents. Project `.pi/agents/` definitions win, then user
 `~/.pi/agent/agents/`, then pi-workflow's bundled common agents (`scout`,
-`researcher`, `typescript-expert`). Customize the workflow when you need a
-different role or stricter tool ceiling.
+`researcher`). Customize the workflow when you need a different role or
+stricter tool ceiling.
 
 ## Stage model
 
@@ -451,7 +463,7 @@ Important files:
 
 | File | Purpose |
 |---|---|
-| `run.json` | Canonical run record: status, tasks, stages, telemetry, result summary. |
+| `run.json` | Canonical run record: status, task summary, task records, fanout/loop/dynamic metadata, and run timestamps. |
 | `compiled.json` | Compiled workflow snapshot. |
 | `spec.json` | Workflow spec snapshot used by the run. |
 | `tasks/<task-id>/task.md` | Compiled task prompt. |
@@ -485,14 +497,16 @@ pi-workflow inspect workflow_mq224pi8_775e71 --json
 
 Use the bundled `workflow-guide` skill when creating or reviewing reusable workflows.
 
-Project workflows should live in one of these forms:
+Project workflows can live in either project workflow root:
 
 ```text
 .pi/workflows/<name>.json
 .pi/workflows/<name>/spec.json
+workflows/<name>.json
+workflows/<name>/spec.json
 ```
 
-Use the directory-bundle form when the workflow needs schemas, support helpers, or copied scaffold files.
+Use `workflows/` for repo-committed shared workflows and `.pi/workflows/` for local/project-private workflows. Use the directory-bundle form when the workflow needs schemas, support helpers, or copied scaffold files.
 
 `workflow-guide` ships validate-ready scaffolds under `skills/workflow-guide/scaffolds/`:
 
@@ -540,14 +554,14 @@ or object specs for custom/local providers:
 }
 ```
 
-Scope order is workflow-level `tools` < `defaults.tools` < stage `tools`; the narrowest defined list controls the final tool names, and selected string names can inherit broader object metadata. Agent frontmatter `tools` remain the hard ceiling, so workflow specs cannot grant tools an agent did not declare. Built-in classifications win for built-in tools. Custom tools without an explicit object `classification` stay blocked for explicit review. Avoid hardcoded machine-local paths in bundled/public workflows; project-local workflows may use local package refs intentionally when they are part of that project.
+Scope order is agent frontmatter fallback < `defaults.tools` < stage `tools`: the most specific defined list controls the final tool names, and selected string names can inherit broader object metadata for the same tool. Agent frontmatter `tools` remain the hard ceiling, so workflow specs cannot grant tools an agent did not declare. Built-in classifications win for built-in tools. Custom tools without an explicit object `classification` stay blocked for explicit review. Avoid hardcoded machine-local paths in bundled/public workflows; project-local workflows may use local package refs intentionally when they are part of that project.
 
 ## Safety and execution model
 
 - `/workflow` is an orchestrator, not an OS sandbox.
 - Workers run through `@agwab/pi-subagent`; sandbox/worktree behavior follows that package.
 - Workflow tool lists can only narrow agent-declared tool authority, even when object-form provider metadata is used.
-- `readOnly: true` filters tools; it does not isolate the filesystem.
+- `readOnly: true` is a safety declaration used for capability/worktree classification; it does not isolate the filesystem or make mutation-capable tools safe.
 - Write-capable workflows should use managed worktrees in git repositories.
 - In non-git workspaces with `worktreePolicy: "off"`, writes mutate the live directory.
 - No backend fallback exists. The compiled backend/strategy is fixed for the run.

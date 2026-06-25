@@ -129,13 +129,20 @@ export class WorkflowView implements Component {
 	}
 
 	render(width: number): string[] {
-		const safeWidth = Math.max(1, Math.floor(width || 1));
+		const viewportWidth = Math.max(1, Math.floor(width || 1));
+		// Leave a small right gutter. Some terminals/container PTYs wrap or leave
+		// stale cells when a custom view writes border glyphs in the final columns,
+		// which makes the right edge of the workflow panel look broken.
+		const contentWidth = Math.max(1, viewportWidth - 2);
 		const selectedTask = this.selectedTaskRecord();
 		const lines =
 			this.mode === "task" && this.detailRun && selectedTask
-				? this.renderTaskDetail(safeWidth, this.detailRun, selectedTask)
-				: this.renderBoard(safeWidth);
-		return lines.map((line) => fit(line, safeWidth));
+				? this.renderTaskDetail(contentWidth, this.detailRun, selectedTask)
+				: this.renderBoard(contentWidth);
+		// Return full-width lines so Pi clears stale cells to the right, while the
+		// actual border/content remains inside contentWidth and never touches the
+		// terminal's final columns.
+		return lines.map((line) => padAnsi(fit(line, contentWidth), viewportWidth));
 	}
 
 	private handleBoardInput(data: string): void {
@@ -569,18 +576,31 @@ export class WorkflowView implements Component {
 			lines.push(
 				scrollIndicator(this.theme, `  ${window.hiddenBefore} more runs above`),
 			);
+		const statusWidth = Math.max(
+			7,
+			...window.rows.map(({ item }) => visibleWidth(statusLabelText(runStatusLabel(item)))),
+		);
 		for (const { item: flow, index } of window.rows) {
 			const selected = index === this.selectedFlow;
 			const prefix = selected ? accent(this.theme, "› ") : "  ";
 			const marker = statusGlyph(this.theme, flow.status);
 			const name = flow.name ?? flow.type;
 			const left = `${prefix}${marker} ${selected ? strong(this.theme, name) : name}`;
-			const right = `${statusBadge(this.theme, flow.status, runStatusLabel(flow))} ${progressBar(this.theme, flow.taskSummary, 6)} ${metaValue(this.theme, shortId(flow.runId))} ${muted(this.theme, "·")} ${metaLabel(this.theme, "started")} ${metaValue(this.theme, timestampText(flow.createdAt))} ${muted(this.theme, "·")} ${metaValue(this.theme, elapsedText(flow.createdAt, flow.updatedAt, flow.status === "running"))}`;
+			const runIdText = shortId(flow.runId).slice(0, 16).padEnd(16, " ");
+			const runningText =
+				flow.taskSummary.running > 0
+					? ` ${muted(this.theme, "·")} ${metaLabel(this.theme, "running")} ${metaValue(this.theme, String(flow.taskSummary.running))}`
+					: "";
+			const baseRight = `${statusColumn(this.theme, flow.status, runStatusLabel(flow), statusWidth)}  ${progressBar(this.theme, flow.taskSummary, 5)} ${metaValue(this.theme, runIdText)}`;
+			const right =
+				width >= 90
+					? `${baseRight} ${muted(this.theme, "·")} ${metaLabel(this.theme, "start")} ${metaValue(this.theme, timestampText(flow.createdAt))}${runningText}`
+					: `${baseRight}${runningText}`;
 			const line = joinColumns(
 				left,
 				right,
 				width,
-				Math.max(18, Math.floor(width * 0.48)),
+				17,
 			);
 			lines.push(selectedLine(this.theme, line, width, selected, true));
 		}
@@ -1014,6 +1034,10 @@ export class WorkflowView implements Component {
 				["started", timestampText(flow.createdAt)],
 			]),
 			taskMetaLine(this.theme, [
+				["tasks", `${flow.taskSummary.completed}/${flow.taskSummary.total}`],
+				["running", String(flow.taskSummary.running)],
+			]),
+			taskMetaLine(this.theme, [
 				["updated", timestampText(flow.updatedAt)],
 				[
 					"elapsed",
@@ -1033,6 +1057,10 @@ export class WorkflowView implements Component {
 			progressBar(this.theme, run.taskSummary, 10),
 			taskMetaLine(this.theme, [
 				["tasks", `${run.taskSummary.completed}/${run.taskSummary.total}`],
+				["running", String(run.taskSummary.running)],
+			]),
+			taskMetaLine(this.theme, [
+				["pending", String(run.taskSummary.pending)],
 				[
 					"elapsed",
 					elapsedText(run.createdAt, run.updatedAt, run.status === "running"),
@@ -1227,10 +1255,11 @@ function summarizeTasks(tasks: WorkflowTaskRunRecord[]): TaskSummary {
 	return summary;
 }
 
-function statusForSummary(summary: TaskSummary): WorkflowRunStatus {
-	if (summary.running > 0 || summary.pending > 0) return "running";
+function statusForSummary(summary: TaskSummary): WorkflowRunStatus | TaskRunStatus {
+	if (summary.running > 0) return "running";
 	if (summary.blocked > 0) return "blocked";
 	if (summary.failed > 0 || summary.interrupted > 0) return "failed";
+	if (summary.pending > 0) return "pending";
 	if (summary.total > 0 && summary.completed === summary.total)
 		return "completed";
 	return "interrupted";
@@ -1318,11 +1347,28 @@ function statusBadge(
 	status: WorkflowRunStatus | TaskRunStatus,
 	label = statusText(status),
 ): string {
-	const content = ` ${label.toUpperCase().replace(/_/g, " ")} `;
+	const normalized = statusLabelText(label);
+	const padded = normalized.padEnd(9, " ");
+	const content = ` ${padded} `;
 	const colored = fg(theme, statusColor(status), strong(theme, content));
+	if (status === "pending") return colored;
 	return theme.bg
 		? bgBand(theme, statusBgColor(status), colored)
-		: fg(theme, statusColor(status), strong(theme, `[${content.trim()}]`));
+		: fg(theme, statusColor(status), strong(theme, `[${padded.trimEnd()}]`));
+}
+
+function statusColumn(
+	theme: Theme,
+	status: WorkflowRunStatus | TaskRunStatus,
+	label: string,
+	width: number,
+): string {
+	const normalized = statusLabelText(label);
+	return padAnsi(fg(theme, statusColor(status), strong(theme, normalized)), width);
+}
+
+function statusLabelText(label: string): string {
+	return label.toUpperCase().replace(/_/g, " ");
 }
 
 function statusBgColor(status: WorkflowRunStatus | TaskRunStatus): string {
@@ -1338,6 +1384,9 @@ function progressBar(
 	cells: number,
 ): string {
 	const safeCells = Math.max(1, cells);
+	const visibleProgress = summary.running > 0
+		? summary.completed + summary.running
+		: summary.completed;
 	const filled =
 		summary.total <= 0
 			? 0
@@ -1345,14 +1394,17 @@ function progressBar(
 					0,
 					Math.min(
 						safeCells,
-						Math.round((summary.completed / summary.total) * safeCells),
+						Math.round((visibleProgress / summary.total) * safeCells),
 					),
 				);
 	const bar = `${"▰".repeat(filled)}${"▱".repeat(safeCells - filled)}`;
+	const denominatorWidth = Math.max(2, String(summary.total).length);
+	const totalText = String(summary.total).padStart(denominatorWidth, " ");
+	const progressText = `${String(visibleProgress).padStart(denominatorWidth, " ")}/${totalText}`;
 	return fg(
 		theme,
 		statusColor(statusForSummary(summary)),
-		`${bar} ${summary.completed}/${summary.total}`,
+		`${bar} ${progressText}`,
 	);
 }
 
@@ -1674,6 +1726,7 @@ function truncateToWidth(text: string, width: number): string {
 	if (safeWidth === 0) return "";
 	if (visibleWidth(text) <= safeWidth) return text;
 
+	const hasAnsi = text.includes("\u001b[") || text.includes("\u001b]") || text.includes("\u001b_");
 	const ellipsis = "…";
 	const ellipsisWidth = visibleWidth(ellipsis);
 	const limit = Math.max(0, safeWidth - ellipsisWidth);
@@ -1696,7 +1749,7 @@ function truncateToWidth(text: string, width: number): string {
 		visible += charWidth;
 		index += char.length;
 	}
-	return `${output}${ellipsis}`;
+	return `${output}${ellipsis}${hasAnsi ? "\u001b[0m" : ""}`;
 }
 
 function stripAnsi(text: string): string {
@@ -1783,7 +1836,7 @@ function isEmojiLike(segment: string): boolean {
 	if (codePoint === undefined) return false;
 	return (
 		(codePoint >= 0x1f000 && codePoint <= 0x1fbff) ||
-		(codePoint >= 0x2600 && codePoint <= 0x27bf) ||
+		codePoint === 0x2705 ||
 		(codePoint >= 0x2b50 && codePoint <= 0x2b55)
 	);
 }

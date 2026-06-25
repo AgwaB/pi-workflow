@@ -85,10 +85,7 @@ Discover available workflows when the user asks to choose a workflow or when pro
 | Workflow | Use when | Do not use when |
 |---|---|---|
 | `deep-research` | Broad source gathering, claim extraction, cross-source synthesis, evidence/citation-heavy research. | Small factual answers, code edits, or tasks with no need for source-family fanout/reducer. |
-| `deep-review` | General code-review style defect discovery where recall, grounded findings, dedup, and verifier/refuter stages matter but the benchmark/request shape is not clearly broad/focused/diff. | Direct bug fixing, tiny diffs where single-agent can review coherently, or no-issue checks where FP risk dominates and workflow overhead is unjustified. |
-| `deep-discovery` | Broad repository discovery: the user asks to find important bugs/risks across a whole codebase with no suspected component, pattern, or changed hunk. | Current-diff/PR review, focused suspicious-area review, or tasks where exhaustive repo coverage would be misleading. |
-| `deep-focused-review` | Suspicious-area or suspicious-pattern review: the user names a component, file set, subsystem, invariant, defect family, or “look here deeply” scope. | Whole-repo bug hunting with no focus, or PR/diff review where changed hunks should be the primary anchor. |
-| `deep-diff-review` | Diff/PR review: changed hunks, patch text, branch comparison, staged/current diff, or explicit changed-file context should drive regression/compatibility review. | Broad source-only discovery, or focused review of stable code without changed-hunk context. |
+| `deep-review` | General code-review style defect discovery where recall, grounded findings, dedup, and verifier/refuter stages matter. | Direct bug fixing, tiny diffs where single-agent can review coherently, or no-issue checks where FP risk dominates and workflow overhead is unjustified. |
 | `impact-review` | Change impact analysis: what files/features/users/tests may be affected by a patch/design/change. | General research, implementation, or defect discovery without impact mapping. |
 | `spec-review` | Spec/requirements conformance: requirement extraction, implementation/test mapping, gap report. | Open-ended research or ordinary code review not anchored to a spec. |
 

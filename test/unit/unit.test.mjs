@@ -264,9 +264,6 @@ function bundledArtifactGraphSpecPaths() {
 		"workflows/spec-review/spec.json",
 		"workflows/deep-research/spec.json",
 		"workflows/deep-review/spec.json",
-		"workflows/deep-discovery/spec.json",
-		"workflows/deep-focused-review/spec.json",
-		"workflows/deep-diff-review/spec.json",
 		"workflows/impact-review/spec.json",
 	];
 }
@@ -10175,9 +10172,6 @@ test("bundled artifact graph workflows are public runnable", async () => {
 	for (const name of [
 		"spec-review",
 		"deep-review",
-		"deep-discovery",
-		"deep-focused-review",
-		"deep-diff-review",
 		"deep-research",
 		"impact-review",
 	]) {
@@ -10188,96 +10182,6 @@ test("bundled artifact graph workflows are public runnable", async () => {
 	}
 	const resolved = await resolveWorkflowRef("spec-review", process.cwd());
 	assert(resolved.specPath.endsWith("workflows/spec-review/spec.json"));
-});
-
-test("adaptive-research copied bundle controller runs injected dynamic decision loop", async () => {
-	const cwd = makeProject();
-	try {
-		writeAgent(
-			cwd,
-			"researcher",
-			"read, grep, find, ls, web_search, fetch_content, get_search_content",
-		);
-		const prompts = captureSubagentPrompts([]);
-		const specPath = join(
-			process.cwd(),
-			"workflows",
-			"adaptive-research",
-			"spec.json",
-		);
-		const spec = JSON.parse(readFileSync(specPath, "utf8"));
-		const compiled = await compileWorkflow(spec, {
-			cwd,
-			specPath,
-			task: "Research copied dynamic controller resolution.",
-		});
-		const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
-		await writeStaticRunArtifacts(cwd, run, compiled, spec);
-		await completeTask(cwd, taskBySpec(run, "intake.main"), {
-			schema: "adaptive-research-intake-v1",
-			digest: "intake ready",
-			taskSummary: "Research copied dynamic controller resolution.",
-			likelyAxes: [],
-			sourceNeeds: [],
-			caveats: [],
-		});
-		await writeRunRecord(cwd, run);
-
-		await scheduleRun(cwd, run.runId);
-		let updated = await readRunRecord(cwd, run.runId);
-		let controller = taskBySpec(updated, "adaptive.controller");
-		assert.equal(controller.status, "pending");
-		assert.equal(
-			controller.agentFile,
-			`.pi/workflows/${run.runId}/bundle/helpers/controller.mjs`,
-		);
-		assert.equal(taskBySpec(updated, "adaptive.decide-r0").status, "running");
-		assert.match(prompts[0] ?? "", /adaptive research workflow stage/);
-
-		await completeTask(cwd, taskBySpec(updated, "adaptive.decide-r0"), {
-			schema: "dynamic-decision-v1",
-			digest: "stop decision envelope",
-			decisionId: "decision-r0",
-			round: 0,
-			phase: "round",
-			status: "stop",
-			nextActions: [
-				{
-					type: "stop",
-					actionId: "stop-r0",
-					reason: "copied bundle decision loop resolved",
-					caveats: ["integration test"],
-				},
-			],
-		});
-		await writeRunRecord(cwd, updated);
-
-		await scheduleRun(cwd, run.runId);
-		updated = await readRunRecord(cwd, run.runId);
-		controller = taskBySpec(updated, "adaptive.controller");
-		assert.equal(controller.status, "completed");
-		assert.equal(controller.statusDetail, "dynamic_stopped");
-		const control = JSON.parse(
-			readFileSync(
-				join(dirname(join(cwd, controller.files.result)), "control.json"),
-				"utf8",
-			),
-		);
-		assert.equal(control.schema, "dynamic-controller-result-v1");
-		assert.equal(control.status, "stopped");
-		assert.deepEqual(control.blockers, [
-			"copied bundle decision loop resolved",
-		]);
-		assert.deepEqual(control.generatedTasks, []);
-		const events = await readDynamicEvents(cwd, run.runId);
-		assert.equal(
-			events.some((event) => event.type === "decision.persisted"),
-			true,
-		);
-	} finally {
-		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
-	}
 });
 
 test("built dist scheduler injects runDecisionLoop on the real dynamic path", async () => {
@@ -14665,7 +14569,7 @@ test("workflow_dynamic tool starts spec-less direct dynamic runs", async () => {
 		);
 		const result = await dynamicTool.execute(
 			"tool-dynamic",
-			{ task: "동적 워크플로우로 리서치해줘" },
+			{ task: "Research this with a dynamic workflow" },
 			undefined,
 			undefined,
 			ctx,
@@ -14675,7 +14579,10 @@ test("workflow_dynamic tool starts spec-less direct dynamic runs", async () => {
 		assert.equal(result.details.mode, "direct-dynamic");
 		assert.equal(result.details.provenance.userSelectedWorkflow, false);
 		assert.equal(launched.length, 1);
-		assert.match(String(launched[0].task), /동적 워크플로우로 리서치해줘/);
+		assert.match(
+			String(launched[0].task),
+			/Research this with a dynamic workflow/,
+		);
 	} finally {
 		setSubagentApiForTests(undefined);
 		if (originalRole === undefined) delete process.env.PI_WORKFLOW_ROLE;
@@ -18379,6 +18286,7 @@ function isTestWideCodePoint(codePoint) {
 		(codePoint >= 0xfe10 && codePoint <= 0xfe6f) ||
 		(codePoint >= 0xff00 && codePoint <= 0xffe6) ||
 		(codePoint >= 0x1f000 && codePoint <= 0x1fbff) ||
-		(codePoint >= 0x2600 && codePoint <= 0x27bf)
+		codePoint === 0x2705 ||
+		(codePoint >= 0x2b50 && codePoint <= 0x2b55)
 	);
 }
