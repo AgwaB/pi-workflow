@@ -576,24 +576,3 @@ for those tools. Object-form custom tool `extensions` are merged with this
 built-in mapping and deduplicated for the subagent launch. Web calls can still
 fail when network access, provider credentials, browser state, or quota are
 unavailable; research workflows should report those limits instead of guessing.
-
-## Release checks
-
-This repository follows the same release shape as `@agwab/pi-subagent`:
-
-- scoped npm package name: `@agwab/pi-workflow`
-- `private: false`
-- `publishConfig.access: public`
-- Pi package manifest in `package.json`
-- README + `docs/usage.md`
-
-Before publishing, maintainers should run the public checks and inspect the package surface:
-
-```bash
-npm run release:check
-npm publish --dry-run
-```
-
-`npm run release:check` runs unit tests, e2e consumer/CLI smoke, typecheck, build, and `npm run pack:dry`.
-
-The dry-run package should not include local/internal files, test output, runtime state, or machine-specific paths.

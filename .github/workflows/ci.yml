@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Show Node/npm versions
+        run: |
+          node --version
+          npm --version
+
+      - run: npm ci --legacy-peer-deps
+
+      - name: Validate
+        run: npm run validate
+
+      - name: E2E smoke
+        run: npm run e2e
+
+      - name: Package dry run
+        run: npm run pack:dry

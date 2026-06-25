@@ -21,11 +21,11 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
@@ -84,7 +84,15 @@ jobs:
           fi
 
       - name: Release validation
+        if: steps.npm_version.outputs.exists != 'true'
         run: npm run release:check
+
+      - name: Validation for already-published version
+        if: steps.npm_version.outputs.exists == 'true'
+        run: |
+          npm run validate
+          npm run e2e
+          npm run pack:dry
 
       - name: Publish to npm
         if: steps.npm_version.outputs.exists != 'true'
