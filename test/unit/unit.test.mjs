@@ -16779,6 +16779,48 @@ test("deep-research claim-evidence-gate enforces structured evidence, rejoins id
 	assert.ok(!("evidence" in out.claimDigests[0]));
 });
 
+test("deep-research verifier schema allows omitted identity echoes", () => {
+	const schemaPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"schemas",
+		"deep-research-verify-claims-control.schema.json",
+	);
+	const schema = JSON.parse(readFileSync(schemaPath, "utf8"));
+	const valid = validateJsonSchema(
+		{
+			schema: "./schemas/deep-research-verify-claims-control.schema.json",
+			digest: "verified from source-backed evidence",
+			id: "claim-001",
+			status: "verified",
+			verdictDigest: { support: "official source supports it" },
+			evidence: [
+				{
+					url: "https://example.test/source",
+					quote: "source-backed evidence",
+				},
+			],
+		},
+		schema,
+	);
+	assert.equal(valid.valid, true, JSON.stringify(valid.issues));
+	const invalid = validateJsonSchema(
+		{
+			schema: "./schemas/deep-research-verify-claims-control.schema.json",
+			digest: "missing id remains invalid",
+			status: "verified",
+			verdictDigest: { support: "official source supports it" },
+			evidence: [],
+		},
+		schema,
+	);
+	assert.equal(invalid.valid, false);
+	assert.ok(invalid.issues.some((issue) => issue.path === "$.id"));
+});
+
 test("deep-research claim-evidence-gate canonicalizes candidate ids and verifier integrity", async () => {
 	const helperPath = join(
 		dirname(fileURLToPath(import.meta.url)),
