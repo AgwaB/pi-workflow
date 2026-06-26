@@ -11387,6 +11387,9 @@ test("deep-research final-audit packet compacts deterministic ledgers", async ()
 				],
 				remainingGaps: [{ claimId: "claim-002", evidenceState: "insufficient_for_verified" }],
 				sourceRefJoinFailures: [{ claimId: "claim-002", evidenceState: "source_ref_not_available" }],
+				invalidVerifierRows: [{ sourceId: "verify-claims.bad", reason: "missing_claim_id", status: "verified" }],
+				duplicateVerifierRows: [{ claimId: "claim-001", rowCount: 2, sourceIds: ["verify-claims.a", "verify-claims.b"], statusInputs: ["verified", "verified"], selectedStatus: "verified" }],
+				gateSummary: { missingVerifierResults: 1 },
 				slotCoverageCheck: { droppedSlotIds: ["slot-002"] },
 			},
 		},
@@ -11399,7 +11402,13 @@ test("deep-research final-audit packet compacts deterministic ledgers", async ()
 	assert.deepEqual(result.packet.invariantChecks.omittedCandidateIds, ["claim-002"]);
 	assert.deepEqual(result.packet.invariantChecks.droppedSlotIds, ["slot-002"]);
 	assert.equal(result.packet.invariantChecks.sourceRefCoverage.sourceRefJoinFailures, 1);
+	assert.equal(result.packet.invariantChecks.verifierIntegrity.invalidVerifierRows, 1);
+	assert.equal(result.packet.invariantChecks.verifierIntegrity.duplicateVerifierRows, 1);
+	assert.equal(result.packet.invariantChecks.verifierIntegrity.missingVerifierResults, 1);
+	assert.equal(result.packet.verifierIntegrity.invalidVerifierRows[0].reason, "missing_claim_id");
+	assert.equal(result.packet.verifierIntegrity.duplicateVerifierRows[0].claimId, "claim-001");
 	assert.equal(result.packet.overflowLedger.omittedVerificationCandidateCount, 1);
+	assert.equal(result.packet.overflowLedger.invalidVerifierRowCount, 1);
 });
 
 test("deep-research executive renderer emits bounded final and sidecar", async () => {
@@ -16768,6 +16777,110 @@ test("deep-research claim-evidence-gate enforces structured evidence, rejoins id
 	assert.equal(out.claimDigests.length, 3);
 	assert.deepEqual(out.claimDigests[0].sourceRefs, ["wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]);
 	assert.ok(!("evidence" in out.claimDigests[0]));
+});
+
+test("deep-research claim-evidence-gate canonicalizes candidate ids and verifier integrity", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"claim-evidence-gate.mjs",
+	);
+	const helper = (await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)).default;
+	const out = await helper({
+		sources: {
+			"normalize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [
+						{
+							id: "claim-001",
+							claim: "Canonical claim one",
+							factSlotIds: ["slot-001"],
+							sourceRefs: ["wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+						},
+						{
+							id: "claim-002",
+							claim: "Missing verifier result",
+							factSlotIds: ["slot-002"],
+							sourceUrls: ["https://example.test/missing"],
+						},
+						{
+							id: "claim-003",
+							claim: "Latency improved by 42 ms",
+							factSlotIds: ["slot-003"],
+						},
+					],
+				},
+				factSlotCoverage: [],
+			},
+			"verify-claims.claim-001.a": {
+				id: "claim-001",
+				claim: "Verifier restated claim one",
+				status: "verified",
+				evidence: [
+					{
+						sourceRef: "wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+						quote: "Evidence supports claim one.",
+					},
+				],
+			},
+			"verify-claims.claim-001.b": {
+				claimId: "claim-001",
+				status: "unsupported",
+				verdictDigest: { caveat: "second verifier disagreed" },
+			},
+			"verify-claims.claim-003": {
+				id: "claim-003",
+				status: "verified",
+			},
+			"verify-claims.bad-missing": {
+				status: "verified",
+			},
+			"verify-claims.bad-non-string": {
+				id: 123,
+				status: "verified",
+			},
+			"verify-claims.unknown": {
+				id: "claim-999",
+				status: "verified",
+			},
+		},
+		options: {
+			requireFetchedEvidenceForVerified: true,
+			downgradeExactQuantitativeWithoutSource: true,
+		},
+	});
+
+	assert.deepEqual(out.auditedClaims.map((claim) => claim.id), [
+		"claim-001",
+		"claim-002",
+		"claim-003",
+	]);
+	assert.equal(out.gateSummary.total, 3);
+	assert.equal(out.gateSummary.verifierRowsTotal, 6);
+	assert.equal(out.gateSummary.invalidVerifierRows, 3);
+	assert.equal(out.gateSummary.missingVerifierResults, 1);
+	assert.equal(out.gateSummary.duplicateVerifierRows, 1);
+	assert.equal(out.gateSummary.duplicateStatusConflicts, 1);
+	assert.deepEqual(out.statusPartitions.unsupported, ["claim-001"]);
+	assert.deepEqual(out.statusPartitions.partiallySupported, ["claim-003"]);
+	assert.deepEqual(out.statusPartitions.other, ["claim-002"]);
+	assert.equal(out.auditedClaims[0].claim, "Canonical claim one");
+	assert.deepEqual(out.auditedClaims[0].factSlotIds, ["slot-001"]);
+	assert.equal(out.auditedClaims[1].status, "unverified");
+	assert.equal(out.auditedClaims[2].status, "partially_supported");
+	assert.deepEqual(out.invalidVerifierRows.map((row) => row.reason), [
+		"missing_claim_id",
+		"non_string_claim_id",
+		"unknown_claim_id",
+	]);
+	assert.equal(out.duplicateVerifierRows[0].claimId, "claim-001");
+	assert.equal(out.duplicateVerifierRows[0].selectedStatus, "unsupported");
+	assert.ok(out.remainingGaps.some((gap) => gap.evidenceState === "missing_verifier_result"));
+	assert.ok(out.remainingGaps.some((gap) => gap.evidenceState === "duplicate_verifier_rows_conflicting"));
 });
 
 test("workflow_artifact lists visible sources, reads by source name, and records a read ledger", async () => {

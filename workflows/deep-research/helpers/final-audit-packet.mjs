@@ -93,6 +93,30 @@ function compactGap(gap) {
 	};
 }
 
+function compactVerifierIssue(issue) {
+	const item = asObject(issue);
+	return {
+		sourceId: stringOf(item.sourceId),
+		claimId: stringOf(item.claimId),
+		reason: stringOf(item.reason),
+		status: stringOf(item.status),
+		nextStep: stringOf(item.nextStep),
+	};
+}
+
+function compactDuplicateVerifierRow(row) {
+	const item = asObject(row);
+	return {
+		claimId: stringOf(item.claimId),
+		rowCount: Number.isFinite(Number(item.rowCount)) ? Number(item.rowCount) : undefined,
+		sourceIds: compactStrings(item.sourceIds, 8),
+		statusInputs: compactStrings(item.statusInputs, 8),
+		selectedStatus: stringOf(item.selectedStatus),
+		statusConflict: item.statusConflict === true,
+		action: stringOf(item.action),
+	};
+}
+
 function partitionClaimDigests(claimDigests, statusPartitions) {
 	const byId = new Map();
 	for (const claim of claimDigests) {
@@ -130,6 +154,9 @@ export default async function finalAuditPacket({ sources }) {
 	const coverageGaps = asArray(normalized.coverageGaps).map(compactGap);
 	const remainingGaps = asArray(audit.remainingGaps).map(compactGap);
 	const sourceRefJoinFailures = asArray(audit.sourceRefJoinFailures).map(compactGap);
+	const invalidVerifierRows = asArray(audit.invalidVerifierRows).map(compactVerifierIssue);
+	const duplicateVerifierRows = asArray(audit.duplicateVerifierRows).map(compactDuplicateVerifierRow);
+	const gateSummary = asObject(audit.gateSummary);
 	const sourceRefCoverage = {
 		verificationCandidatesWithSourceRefs: verificationCandidates.filter(
 			(candidate) => compactStrings(candidate?.sourceRefs, 1).length > 0,
@@ -162,6 +189,11 @@ export default async function finalAuditPacket({ sources }) {
 			coverageGaps,
 			remainingGaps,
 			sourceRefJoinFailures,
+			verifierIntegrity: {
+				gateSummary,
+				invalidVerifierRows,
+				duplicateVerifierRows,
+			},
 			preservedClaims: preservedClaims.map((claim) => ({
 				id: idOf(claim),
 				claim: stringOf(claim.claim),
@@ -177,12 +209,19 @@ export default async function finalAuditPacket({ sources }) {
 				omittedCandidateIds,
 				droppedSlotIds: asArray(audit.slotCoverageCheck?.droppedSlotIds),
 				sourceRefCoverage,
+				verifierIntegrity: {
+					invalidVerifierRows: invalidVerifierRows.length,
+					duplicateVerifierRows: duplicateVerifierRows.length,
+					missingVerifierResults: Number(gateSummary.missingVerifierResults ?? 0),
+				},
 			},
 			overflowLedger: {
 				preservedClaimCount: preservedClaims.length,
 				coverageGapCount: coverageGaps.length,
 				remainingGapCount: remainingGaps.length,
 				omittedVerificationCandidateCount: omittedCandidateIds.length,
+				invalidVerifierRowCount: invalidVerifierRows.length,
+				duplicateVerifierRowCount: duplicateVerifierRows.length,
 			},
 		},
 	};
