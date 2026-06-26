@@ -117,19 +117,6 @@ function compactDuplicateVerifierRow(row) {
 	};
 }
 
-function partitionClaimDigests(claimDigests, statusPartitions) {
-	const byId = new Map();
-	for (const claim of claimDigests) {
-		const id = idOf(claim);
-		if (id) byId.set(id, compactClaimDigest(claim));
-	}
-	const partitions = {};
-	for (const [bucket, ids] of Object.entries(asObject(statusPartitions))) {
-		partitions[bucket] = asArray(ids).map((id) => byId.get(id) ?? { id }).filter(Boolean);
-	}
-	return partitions;
-}
-
 function countByStatus(slots) {
 	const counts = {};
 	for (const slot of slots) {
@@ -183,13 +170,12 @@ export default async function finalAuditPacket({ sources }) {
 			},
 			verdictCounts: asObject(audit.verdictCounts),
 			statusPartitions: asObject(audit.statusPartitions),
-			claimVerdictLedger: claimDigests.map(compactClaimDigest),
-			claimVerdictLedgerByStatus: partitionClaimDigests(claimDigests, audit.statusPartitions),
 			factSlotCoverage,
 			factSlotStatusCounts: countByStatus(factSlotCoverage),
 			coverageGaps,
 			remainingGaps,
 			sourceRefJoinFailures,
+			claimVerdictLedger: claimDigests.map(compactClaimDigest),
 			verifierIntegrity: {
 				gateSummary,
 				invalidVerifierRows,

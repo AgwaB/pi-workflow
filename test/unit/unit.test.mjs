@@ -11400,7 +11400,7 @@ test("deep-research final-audit packet compacts deterministic ledgers", async ()
 	assert.equal(result.packet.researchMetadataSeed.depth, "standard");
 	assert.equal(result.packet.verdictCounts.verified, 1);
 	assert.equal(result.packet.claimVerdictLedger.length, 1);
-	assert.deepEqual(result.packet.claimVerdictLedgerByStatus.verified.map((claim) => claim.id), ["claim-001"]);
+	assert.deepEqual(result.packet.statusPartitions.verified, ["claim-001"]);
 	assert.deepEqual(result.packet.invariantChecks.omittedCandidateIds, ["claim-002"]);
 	assert.deepEqual(result.packet.invariantChecks.droppedSlotIds, ["slot-002"]);
 	assert.equal(result.packet.invariantChecks.sourceRefCoverage.sourceRefJoinFailures, 1);
