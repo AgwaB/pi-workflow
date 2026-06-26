@@ -187,19 +187,21 @@ A run prints a `workflow_*` id. Use that id for follow-up commands:
 
 The runtime task is not optional. `/workflow run <workflow>` and `/workflow dynamic` without task text fail before launch.
 
-### Run-scoped `fetch_content` cache
+### Run-scoped web-source cache
 
-Workflow tasks that use `fetch_content` share a run-scoped file cache by default. The cache is stored under the workflow run directory, for example:
+Prefer normalized workflow web tools in new workflows:
+
+- `workflow_web_search` returns compact candidate cards.
+- `workflow_web_fetch_source` caches one or more URLs and returns compact source cards with `sourceRef` values; pass `urls: [...]` or `sources: [{ url, title }]` to batch several fetches in one tool call.
+- `workflow_web_source_read` reads narrow exact/fuzzy/term-matched evidence snippets by `sourceRef`; pass `queries: [...]` or `reads: [...]` to batch several snippets from the same source in one tool call, or `claim` + distinctive `terms` when the exact quote is unknown. Term/claim reads return candidate metadata (`matchedTerms`, `missingTerms`, `coverageRatio`) rather than a proof verdict.
+
+The normalized cache is stored under the workflow run directory:
 
 ```text
-.pi/workflows/<run-id>/source-cache/fetch-content/
+.pi/workflows/<run-id>/web-source-cache/
 ```
 
-The cache is only reused within the same workflow run, including resume/retry of that run. It is not reused across separate runs by default. Cache events are appended to that cache directory's `events.jsonl` with `hit`, `miss`, `write`, and `skip` records for telemetry and audit. To disable the cache for a run, set:
-
-```bash
-PI_WORKFLOW_FETCH_CONTENT_CACHE=0
-```
+Do not instruct agents to read that directory directly; source cards intentionally expose only opaque refs and short previews. The cache also writes an append-only index ledger plus same-URL fetch locks/negative-cache files so duplicate lookup and deterministic terminal failures can recover across parallel worker processes. Custom extension `fetch_content` providers are treated as trusted fetchers and are disabled under the default private-host policy; use the default safe fetch path or opt into trusted private-host behavior only for controlled providers. Legacy workflow tasks that still use `fetch_content` keep the older run-scoped file cache under `.pi/workflows/<run-id>/source-cache/fetch-content/`. Set `PI_WORKFLOW_FETCH_CONTENT_CACHE=0` to disable that legacy fetch cache for a run.
 
 Benchmark note: cache-enabled runs are a distinct cohort from older uncached runs. Do not compare wall-clock numbers directly unless the task set, model, and cache policy are controlled and recorded.
 
@@ -209,7 +211,7 @@ Benchmark note: cache-enabled runs are a distinct cohort from older uncached run
 
 | Workflow | Required agents | Mode | Use when |
 |---|---|---|---|
-| `deep-research` | `researcher` | plan + foreach questions + normalize + foreach verifier + audit support + full audit reduce + deterministic executive render | Use when you need a grounded answer or summary based on source material. |
+| `deep-research` | `researcher` | plan + foreach questions + normalize-input packet support + normalize + foreach verifier + audit support + final-audit packet support + full audit reduce + deterministic executive render | Use when you need a grounded answer or summary based on source material. |
 | `deep-review` | `scout` | triage + foreach review lenses + dedup support + foreach devil's advocate + verdict-partition support + reduce | Use when you want code or design reviewed carefully from multiple angles. |
 | `spec-review` | `scout` | extract spec + map implementation + inspect tests -> reduce candidates -> foreach verifier -> reduce report | Use when you want to check whether requirements, an API spec, or a contract are reflected in the implementation and tests. |
 | `impact-review` | `scout` | scope/implementation/validation maps -> impact lenses -> consistency/regression/ship-readiness joins -> final synthesis | Use before merging or releasing a change to check affected areas, risks, missing tests, and missing docs. |
@@ -534,7 +536,7 @@ Authoring checklist:
 Workflow `tools` are still the child-worker allowlist. Entries can be strings:
 
 ```json
-{ "tools": ["read", "grep", "fetch_content"] }
+{ "tools": ["read", "grep", "workflow_web_search", "workflow_web_fetch_source", "workflow_web_source_read"] }
 ```
 
 or object specs for custom/local providers:
@@ -548,7 +550,7 @@ or object specs for custom/local providers:
       "extensions": ["packages/pi-scrapling-access"],
       "classification": "read-only",
       "optional": true,
-      "fallbackTools": ["fetch_content"]
+      "fallbackTools": ["workflow_web_fetch_source"]
     }
   ]
 }
@@ -569,10 +571,22 @@ Scope order is agent frontmatter fallback < `defaults.tools` < stage `tools`: th
 
 ## Web tools
 
-Workflows that use `web_search`, `fetch_content`, `get_search_content`, or
-`code_search` use the bundled `pi-web-access` dependency packaged with
-pi-workflow. The worker launcher injects that bundled extension automatically
-for those tools. Object-form custom tool `extensions` are merged with this
-built-in mapping and deduplicated for the subagent launch. Web calls can still
-fail when network access, provider credentials, browser state, or quota are
-unavailable; research workflows should report those limits instead of guessing.
+New workflows should use `workflow_web_search`, `workflow_web_fetch_source`, and
+`workflow_web_source_read`. These tools route through a workflow web-source
+adapter, return compact model-visible cards/snippets, and preserve full source
+text in a run-scoped cache when safe. Fetch accepts `urls: [...]` and
+`sources: [{ url, title }]` so agents can cache several source cards in one call.
+Source-read accepts `queries: [...]` and `reads: [...]` so agents can retrieve
+several snippets from one `sourceRef` in a single call, and accepts `claim` +
+distinctive `terms` for deterministic quote
+candidate harvesting when the exact quote is unknown. Term/claim matches are
+candidate evidence and include matched/missing term metadata; they are not a
+verdict by themselves. The bundled `pi-web-access` adapter remains
+available as the default compatibility provider for this release scope.
+
+Legacy workflows that use `web_search`, `fetch_content`, `get_search_content`, or
+`code_search` still use the bundled `pi-web-access` dependency packaged with
+pi-workflow. Object-form custom tool `extensions` are merged with built-in
+mappings and deduplicated for the subagent launch. Web calls can still fail when
+network access, provider credentials, browser state, or quota are unavailable;
+research workflows should report those limits instead of guessing.

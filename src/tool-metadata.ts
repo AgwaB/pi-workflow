@@ -25,6 +25,9 @@ const BUILTIN_TOOL_METADATA: Record<string, CompiledToolProvider> = {
 	code_search: { classification: "read-only" },
 	fetch_content: { classification: "read-only" },
 	get_search_content: { classification: "read-only" },
+	workflow_web_search: { classification: "read-only" },
+	workflow_web_fetch_source: { classification: "read-only" },
+	workflow_web_source_read: { classification: "read-only" },
 	scrapling_fetch: { classification: "read-only" },
 	edit: { classification: "write-capable" },
 	write: { classification: "write-capable" },
@@ -35,6 +38,12 @@ const NON_DOWNGRADABLE_TOOL_FLOORS: Record<string, TaskCapability> = {
 	edit: "write-capable",
 	write: "write-capable",
 	bash: "mutation-capable",
+};
+
+const TOOL_AUTHORITY_COMPAT_ALIASES: Record<string, string[]> = {
+	workflow_web_search: ["web_search"],
+	workflow_web_fetch_source: ["fetch_content"],
+	workflow_web_source_read: ["fetch_content", "get_search_content"],
 };
 
 export interface ToolSelection {
@@ -256,7 +265,7 @@ export function validateToolAuthority(
 		? new Set(options.allowedTools)
 		: undefined;
 	for (const tool of tools) {
-		if (allowed && !allowed.has(tool)) {
+		if (allowed && !toolAllowedByAuthorityCeiling(tool, allowed)) {
 			errors.push(`tool "${tool}" is outside the allowed tool ceiling`);
 			continue;
 		}
@@ -268,6 +277,18 @@ export function validateToolAuthority(
 		}
 	}
 	return errors;
+}
+
+export function toolAllowedByAuthorityCeiling(
+	tool: string,
+	allowed: ReadonlySet<string>,
+): boolean {
+	return (
+		allowed.has(tool) ||
+		(TOOL_AUTHORITY_COMPAT_ALIASES[tool] ?? []).some((alias) =>
+			allowed.has(alias),
+		)
+	);
 }
 
 function maxClassification(

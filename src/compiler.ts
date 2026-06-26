@@ -9,6 +9,7 @@ import {
 	providersForSelectedTools,
 	resolveToolSelection,
 	TOOL_NAME_PATTERN,
+	toolAllowedByAuthorityCeiling,
 	toolNameForSpec,
 	type ToolSelection,
 } from "./tool-metadata.js";
@@ -313,7 +314,7 @@ function validateToolSubset(
 
 	const allowed = new Set(agent.tools);
 	for (const tool of requestedTools) {
-		if (!allowed.has(tool)) {
+		if (!toolAllowedByAuthorityCeiling(tool, allowed)) {
 			issues.push({
 				path,
 				message: `tool "${tool}" expands agent ${agent.displayName}; allowed tools: ${agent.tools.join(", ")}`,

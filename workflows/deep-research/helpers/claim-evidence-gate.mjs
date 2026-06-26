@@ -60,13 +60,37 @@ function collectEvidenceRefs(claim) {
 	const refs = new Set([...collectUrls(claim)]);
 	for (const row of Array.isArray(claim?.evidence) ? claim.evidence : []) {
 		if (!row || typeof row !== "object") continue;
-		for (const value of [row.url, row.source, row.file, row.path]) {
+		for (const value of [row.url, row.source, row.file, row.path, row.sourceRef]) {
 			if (typeof value !== "string") continue;
-			if (/^https?:\/\//i.test(value) || looksLikeLocalSourceRef(value))
+			if (/^https?:\/\//i.test(value) || isWorkflowSourceRef(value) || looksLikeLocalSourceRef(value))
 				refs.add(value.trim());
 		}
 	}
 	return refs;
+}
+
+function collectWorkflowSourceRefs(value, refs = new Set()) {
+	if (typeof value === "string") {
+		for (const match of value.matchAll(/\bwsrc_[a-f0-9]{32}\b/g)) refs.add(match[0]);
+		return refs;
+	}
+	if (Array.isArray(value)) {
+		for (const item of value) collectWorkflowSourceRefs(item, refs);
+		return refs;
+	}
+	if (value && typeof value === "object") {
+		for (const item of Object.values(value)) collectWorkflowSourceRefs(item, refs);
+	}
+	return refs;
+}
+
+function isWorkflowSourceRef(value) {
+	return /^wsrc_[a-f0-9]{32}$/.test(String(value ?? "").trim());
+}
+
+function sourceUrlArray(value) {
+	if (!Array.isArray(value)) return [];
+	return value.filter((item) => typeof item === "string" && item.trim()).map((item) => item.trim());
 }
 
 // Structured evidence check: at least one evidence row carrying both a source
@@ -74,18 +98,28 @@ function collectEvidenceRefs(claim) {
 // a keyword scan over the serialized claim, this cannot be satisfied by merely
 // mentioning a URL/path in prose.
 function hasFetchedEvidence(claim) {
-	const rows = Array.isArray(claim?.evidence) ? claim.evidence : [];
-	return rows.some((row) => {
-		if (!row || typeof row !== "object") return false;
-		const refs = [row.url, row.source, row.file, row.path].filter(
-			(value) => typeof value === "string",
-		);
-		const sourceRef = refs.some(
-			(value) => /^https?:\/\//i.test(value) || looksLikeLocalSourceRef(value),
-		);
-		const quote = typeof row.quote === "string" && row.quote.trim().length > 0;
-		return sourceRef && quote;
-	});
+	return Array.isArray(claim?.evidence) && claim.evidence.some(hasStrongEvidenceRow);
+}
+
+function hasStrongEvidenceRow(row) {
+	if (!row || typeof row !== "object") return false;
+	const refs = [row.url, row.source, row.file, row.path, row.sourceRef].filter(
+		(value) => typeof value === "string",
+	);
+	const sourceRef = refs.some(
+		(value) =>
+			/^https?:\/\//i.test(value) ||
+			isWorkflowSourceRef(value) ||
+			looksLikeLocalSourceRef(value),
+	);
+	const quote = typeof row.quote === "string" && row.quote.trim().length > 0;
+	if (!sourceRef || !quote) return false;
+	if (isCandidateEvidenceRow(row)) return false;
+	return true;
+}
+
+function isCandidateEvidenceRow(row) {
+	return row?.candidateOnly === true || row?.matchType === "terms" || row?.sourceRead?.matchType === "terms";
 }
 
 function hasExactQuantitativeClaim(value) {
@@ -179,20 +213,24 @@ export default async function claimEvidenceGate({ sources, options = {} }) {
 	const auditedClaims = [];
 	const remainingGaps = [];
 	const identityJoinNotes = [];
+	const sourceRefJoinFailures = [];
 	const gateSummary = {
 		total: 0,
 		unchanged: 0,
 		downgraded: 0,
 		identityRejoined: 0,
+		sourceRefsRejoined: 0,
+		sourceRefJoinFailures: 0,
 	};
 
 	for (const { sourceId, claim } of verifierClaims) {
 		if (!claim || typeof claim !== "object") continue;
 		gateSummary.total += 1;
-		const sourceRefs = [...collectEvidenceRefs(claim)];
+		const evidenceRefs = [...collectEvidenceRefs(claim)];
+		const workflowSourceRefs = new Set([...collectWorkflowSourceRefs(claim)]);
 		const exactQuantitative = hasExactQuantitativeClaim(claim);
 		const fetched = hasFetchedEvidence(claim);
-		let next = { ...claim, sourceId, sourceUrls: sourceRefs };
+		let next = { ...claim, sourceId, sourceUrls: evidenceRefs, evidenceRefs };
 
 		// Identity join: the normalizer's candidate record is authoritative for
 		// claim id, claim text, and factSlotIds. Verifier echoes drift.
@@ -218,6 +256,26 @@ export default async function claimEvidenceGate({ sources, options = {} }) {
 			}
 			if (Array.isArray(candidate.factSlotIds))
 				next.factSlotIds = [...candidate.factSlotIds];
+			const beforeSourceRefCount = workflowSourceRefs.size;
+			for (const sourceRef of collectWorkflowSourceRefs(candidate)) workflowSourceRefs.add(sourceRef);
+			if (workflowSourceRefs.size > beforeSourceRefCount) gateSummary.sourceRefsRejoined += 1;
+		}
+		if (workflowSourceRefs.size > 0) next.sourceRefs = [...workflowSourceRefs];
+		if (
+			claimId &&
+			candidate &&
+			workflowSourceRefs.size === 0 &&
+			(sourceUrlArray(candidate.sourceUrls).length > 0 || evidenceRefs.some((ref) => /^https?:\/\//i.test(ref)))
+		) {
+			const failure = {
+				claimId,
+				evidenceState: "source_ref_not_available",
+				sourceUrls: [...new Set([...sourceUrlArray(candidate?.sourceUrls), ...evidenceRefs.filter((ref) => /^https?:\/\//i.test(ref))])],
+				nextStep:
+					"Preserve sourceRefs from workflow_web_fetch_source through research and normalization when available.",
+			};
+			sourceRefJoinFailures.push(failure);
+			gateSummary.sourceRefJoinFailures += 1;
 		}
 
 		const verdict = verdictOf(next);
@@ -236,7 +294,7 @@ export default async function claimEvidenceGate({ sources, options = {} }) {
 			verdictOf(next) === "verified" &&
 			options.downgradeExactQuantitativeWithoutSource !== false &&
 			exactQuantitative &&
-			sourceRefs.length === 0
+			evidenceRefs.length === 0
 		) {
 			next = withVerdict(
 				next,
@@ -250,7 +308,7 @@ export default async function claimEvidenceGate({ sources, options = {} }) {
 			remainingGaps.push({
 				claimId: next.id ?? next.claimId,
 				evidenceState: "insufficient_for_verified",
-				sourceUrls: sourceRefs,
+				sourceUrls: evidenceRefs,
 				nextStep:
 					"Fetch or inspect primary source evidence for the exact claim before using it as verified.",
 			});
@@ -314,6 +372,8 @@ export default async function claimEvidenceGate({ sources, options = {} }) {
 		factSlotIds: claim.factSlotIds,
 		status: verdictOf(claim),
 		confidence: claim.confidence,
+		sourceRefs: claim.sourceRefs,
+		sourceUrls: claim.sourceUrls,
 		verdictDigest: claim.verdictDigest,
 		correctionOrCounterclaim: claim.correctionOrCounterclaim,
 	}));
@@ -323,6 +383,7 @@ export default async function claimEvidenceGate({ sources, options = {} }) {
 		claimDigests,
 		gateSummary,
 		remainingGaps,
+		sourceRefJoinFailures,
 		statusPartitions,
 		verdictCounts,
 		slotCoverageCheck: {
