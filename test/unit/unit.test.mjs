@@ -7402,7 +7402,7 @@ test("bundled artifact graph outputs declare control schemas", () => {
 	}
 });
 
-test("bundled deep-research preserves full audit before executive final", async () => {
+test("bundled deep-research compacts audit packets before executive final", async () => {
 	const specPath = join(
 		process.cwd(),
 		"workflows",
@@ -7428,11 +7428,11 @@ test("bundled deep-research preserves full audit before executive final", async 
 		"research-questions.item",
 	]);
 	assert.equal(normalizeInputPacket.support.uses, "./helpers/normalize-input-packet.mjs");
-	assert.deepEqual(normalizeClaims?.dependsOn, [
-		"plan.main",
-		"research-questions.item",
-		"normalize-input-packet.main",
-	]);
+	assert.deepEqual(normalizeClaims?.dependsOn, ["normalize-input-packet.main"]);
+	assert.deepEqual(normalizeClaims?.artifactGraph.sourceProjection, {
+		include: ["$.packet"],
+		maxChars: 24000,
+	});
 
 	assert.equal(finalAuditPacket?.kind, "support");
 	assert.deepEqual(finalAuditPacket.dependsOn, [
@@ -7443,13 +7443,14 @@ test("bundled deep-research preserves full audit before executive final", async 
 	assert.equal(finalAuditPacket.support.uses, "./helpers/final-audit-packet.mjs");
 
 	assert.equal(finalAudit?.kind, "reduce");
-	assert.deepEqual(finalAudit.dependsOn, [
-		"plan.main",
-		"research-questions.item",
-		"normalize-claims.main",
-		"audit-claims.main",
-		"final-audit-packet.main",
+	assert.deepEqual(finalAudit.dependsOn, ["final-audit-packet.main"]);
+	assert.deepEqual(finalAudit.artifactGraph.requiredReads, [
+		"final-audit-packet.control",
 	]);
+	assert.deepEqual(finalAudit.artifactGraph.sourceProjection, {
+		include: ["$.packet"],
+		maxChars: 24000,
+	});
 	assert.ok(
 		finalAudit.artifactGraph.output.controlSchemaPath.endsWith(
 			join(

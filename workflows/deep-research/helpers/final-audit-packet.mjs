@@ -175,6 +175,7 @@ export default async function finalAuditPacket({ sources }) {
 				taskType: stringOf(plan.taskType),
 				expectedFinalShape: stringOf(plan.expectedFinalShape),
 				researchQuestions: asArray(plan.researchQuestions).length,
+				sourcePolicy: asObject(plan.sourcePolicy),
 				plannedFactSlots: asArray(plan.factSlots).length,
 				filledFactSlots: factSlotCoverage.filter((slot) => slot.status === "filled").length,
 				partialFactSlots: factSlotCoverage.filter((slot) => slot.status === "partial").length,
