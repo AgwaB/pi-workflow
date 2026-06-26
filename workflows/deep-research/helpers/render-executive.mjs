@@ -1,7 +1,7 @@
-// Deterministic executive renderer for deep-research-compact-v2.
+// Deterministic evidence-backed renderer for deep-research.
 //
 // Input: final-audit.control.json from the full deep-research final stage.
-// Output: compact executiveMarkdown in control plus an executive.md sidecar.
+// Output: a parent-facing research report in executiveMarkdown plus sidecars.
 //
 // This intentionally treats final-audit.control.json as the source of truth and
 // renders a bounded view. It does not re-verify or invent evidence.
@@ -39,6 +39,21 @@ function cleanText(value) {
 		.trim();
 }
 
+function escapeTableCell(value) {
+	return cleanText(value).replace(/\\/g, "\\\\").replace(/\|/g, "\\|");
+}
+
+function stringifyItem(item) {
+	if (typeof item === "string") return cleanText(item) || "(empty string)";
+	try {
+		const json = JSON.stringify(item);
+		if (json) return cleanText(json);
+	} catch {
+		// Fall through to String below.
+	}
+	return cleanText(String(item)) || "(empty item)";
+}
+
 function truncateWords(text, maxWords) {
 	const items = words(text);
 	if (items.length <= maxWords) return cleanText(text);
@@ -56,85 +71,111 @@ function hostOf(url) {
 	}
 }
 
-function collectUrls(value, urls = []) {
-	if (typeof value === "string") {
-		for (const match of value.matchAll(/https?:\/\/[^\s)\]}"`]+/g))
-			urls.push(match[0].replace(/[.,;:]+$/, ""));
-		return urls;
+function normalizeUrl(url) {
+	if (typeof url !== "string") return null;
+	const trimmed = url.trim().replace(/[.,;:]+$/, "");
+	if (!/^https?:\/\//i.test(trimmed)) return null;
+	try {
+		const parsed = new URL(trimmed);
+		parsed.hash = "";
+		return parsed.toString();
+	} catch {
+		return trimmed;
 	}
+}
+
+function collectStructuredUrls(value, urls = []) {
+	if (!value || typeof value !== "object") return urls;
 	if (Array.isArray(value)) {
-		for (const item of value) collectUrls(item, urls);
+		for (const item of value) collectStructuredUrls(item, urls);
 		return urls;
 	}
-	if (value && typeof value === "object") {
-		for (const item of Object.values(value)) collectUrls(item, urls);
+	for (const [key, item] of Object.entries(value)) {
+		if (
+			/^(sourceUrls?|evidenceUrls?|urls?|url|uri|href|links?|references?|refs?|basis|sources)$/i.test(
+				key,
+			)
+		) {
+			for (const candidate of asArray(item).length ? item : [item]) {
+				const normalized = normalizeUrl(candidate);
+				if (normalized) urls.push(normalized);
+				else if (candidate && typeof candidate === "object") {
+					collectStructuredUrls(candidate, urls);
+				}
+			}
+			continue;
+		}
+		if (item && typeof item === "object") collectStructuredUrls(item, urls);
 	}
 	return urls;
 }
 
-function collectSourceLocators(value, locators = [], fieldName = "") {
-	if (typeof value === "string") {
-		const urls = collectUrls(value, []);
-		if (urls.length > 0) locators.push(...urls);
-		else if (
-			/^(sourceUrls?|sourceRefs?|sourcePaths?|urls?|paths?)$/i.test(fieldName)
-		) {
-			const trimmed = value.trim();
-			if (trimmed) locators.push(trimmed);
-		}
-		return locators;
-	}
-	if (Array.isArray(value)) {
-		for (const item of value) collectSourceLocators(item, locators, fieldName);
-		return locators;
-	}
-	if (value && typeof value === "object") {
-		for (const [key, item] of Object.entries(value)) {
-			collectSourceLocators(item, locators, key);
-		}
-	}
-	return locators;
-}
-
-function itemText(item, kind) {
-	if (typeof item === "string") return cleanText(item);
-	if (!item || typeof item !== "object") return "";
-	const fields =
-		kind === "recommendation"
-			? ["recommendation", "step", "action", "note", "finding", "gap"]
-			: kind === "gap"
-				? ["gap", "note", "finding", "whyItMatters", "parentImpact"]
-				: ["finding", "summary", "bestValue", "recommendation", "step", "note"];
-	for (const field of fields) {
-		if (typeof item[field] === "string" && item[field].trim())
-			return cleanText(item[field]);
-	}
-	return cleanText(JSON.stringify(item));
-}
-
-function sourceSuffix(item, state, options) {
-	const urls = [...new Set(collectUrls(item))].filter(Boolean);
-	const selected = [];
-	for (const url of urls) {
-		if (state.urls.size >= options.maxUrls) break;
-		if (state.urls.has(url)) continue;
-		state.urls.add(url);
-		selected.push(url);
-		if (selected.length >= 1) break; // one URL per bullet keeps memo compact
-	}
-	if (selected.length === 0) return "";
-	return ` (${selected.map((url) => hostOf(url)).join(", ")}: ${selected.join(" ")})`;
-}
-
-function bulletLines(items, kind, limit, state, options, perItemWords = 34) {
+function uniqueStructuredUrls(...values) {
 	const out = [];
-	for (const item of asArray(items)) {
-		if (out.length >= limit) break;
-		const text = truncateWords(itemText(item, kind), perItemWords);
-		if (!text) continue;
-		out.push(`- ${text}${sourceSuffix(item, state, options)}`);
+	const seen = new Set();
+	for (const value of values) {
+		for (const url of collectStructuredUrls(value, [])) {
+			if (seen.has(url)) continue;
+			seen.add(url);
+			out.push(url);
+		}
 	}
 	return out;
+}
+
+function urlsOf(item, limit = 3) {
+	return uniqueStructuredUrls(item).slice(0, limit);
+}
+
+function markdownLinkList(urls, maxItems = 3) {
+	return urls
+		.slice(0, maxItems)
+		.map((url) => `[${hostOf(url)}](${url})`)
+		.join(", ");
+}
+
+function itemText(item, fields, fallback = "") {
+	if (typeof item === "string") return cleanText(item) || fallback;
+	if (!item || typeof item !== "object") return fallback;
+	for (const field of fields) {
+		if (typeof item[field] === "string" && item[field].trim()) {
+			return cleanText(item[field]);
+		}
+	}
+	return fallback;
+}
+
+function evidenceStatusOf(item) {
+	if (!item || typeof item !== "object") return "not specified";
+	return cleanText(
+		item.evidenceStatus ??
+			item.status ??
+			item.confidence ??
+			item.sourceQuality ??
+			"not specified",
+	);
+}
+
+function confidenceOf(item) {
+	if (!item || typeof item !== "object") return "";
+	return cleanText(item.confidence ?? item.evidenceStatus ?? "");
+}
+
+function finiteNumber(value) {
+	const parsed = Number(value);
+	return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function coverageCounts(coverage, fallback) {
+	if (!coverage || typeof coverage !== "object") return null;
+	return {
+		total: finiteNumber(coverage.verificationCandidates) ?? fallback.total,
+		verified: finiteNumber(coverage.verified) ?? fallback.verified,
+		partially_supported:
+			finiteNumber(coverage.partiallySupported) ?? fallback.partially_supported,
+		unsupported: finiteNumber(coverage.unsupported) ?? fallback.unsupported,
+		conflicting: finiteNumber(coverage.conflicting) ?? fallback.conflicting,
+	};
 }
 
 function claimCounts(control) {
@@ -150,163 +191,422 @@ function claimCounts(control) {
 		const status = claim?.status;
 		if (status && Object.hasOwn(counts, status)) counts[status] += 1;
 	}
-	const coverage = control?.finalReport?.coverageSummary;
-	if (coverage && typeof coverage === "object") {
-		return {
-			total:
-				Number(coverage.verificationCandidates ?? counts.total) || counts.total,
-			verified: Number(coverage.verified ?? counts.verified) || counts.verified,
-			partially_supported:
-				Number(coverage.partiallySupported ?? counts.partially_supported) ||
-				counts.partially_supported,
-			unsupported:
-				Number(coverage.unsupported ?? counts.unsupported) ||
-				counts.unsupported,
-			conflicting:
-				Number(coverage.conflicting ?? counts.conflicting) ||
-				counts.conflicting,
-		};
+	const coverage = coverageCounts(
+		control?.finalReport?.coverageSummary,
+		counts,
+	);
+	if (claims.length === 0 && coverage) return coverage;
+	if (!coverage) return counts;
+
+	const mismatches = [];
+	for (const key of [
+		"total",
+		"verified",
+		"partially_supported",
+		"unsupported",
+		"conflicting",
+	]) {
+		if (coverage[key] !== counts[key]) {
+			mismatches.push({
+				field: key,
+				claimVerdictIndex: counts[key],
+				coverageSummary: coverage[key],
+			});
+		}
 	}
-	return counts;
+	return mismatches.length > 0
+		? { ...counts, coverageSummaryMismatch: mismatches }
+		: counts;
 }
 
-function renderExecutiveMarkdown(control, options) {
-	const report = control?.finalReport ?? {};
-	const state = { urls: new Set() };
-	const maxWords = options.maxWords;
-	const counts = claimCounts(control);
-	const factSlots = asArray(report.factSlotCoverage);
-	const filledSlots = factSlots.filter(
-		(slot) => slot?.status === "filled",
-	).length;
-	const partialSlots = factSlots.filter(
-		(slot) => slot?.status === "partial",
-	).length;
-	const missingSlots = factSlots.filter((slot) =>
-		["missing", "gap", "conflicting"].includes(slot?.status),
-	).length;
+function factSlotSummary(factSlots) {
+	return {
+		total: factSlots.length,
+		filled: factSlots.filter((slot) => slot?.status === "filled").length,
+		partial: factSlots.filter((slot) => slot?.status === "partial").length,
+		missingOrConflicting: factSlots.filter((slot) =>
+			["missing", "gap", "conflicting"].includes(slot?.status),
+		).length,
+	};
+}
 
-	const sections = [];
-	sections.push("# Executive summary");
-	sections.push("");
-	sections.push(
-		`**Bottom line:** ${truncateWords(report.summary ?? control.digest ?? "Research completed with audited evidence.", 85)}`,
-	);
-	sections.push("");
-
-	const findings = bulletLines(
-		report.mainFindings,
-		"finding",
-		options.maxFindings,
-		state,
-		options,
-	);
-	if (findings.length) {
-		sections.push("**Top findings**");
-		sections.push(...findings);
-		sections.push("");
+function statusRank(item) {
+	const status =
+		`${item?.evidenceStatus ?? item?.status ?? item?.confidence ?? ""}`.toLowerCase();
+	if (
+		status.includes("missing") ||
+		status.includes("gap") ||
+		status.includes("conflict")
+	) {
+		return 0;
 	}
+	if (status.includes("unsupported")) return 1;
+	if (status.includes("partial")) return 2;
+	if (status.includes("verified") && !status.includes("partial")) return 3;
+	if (status.includes("filled") || status.includes("high")) return 4;
+	return 5;
+}
 
-	const recommendations = bulletLines(
-		report.recommendations?.length ? report.recommendations : report.actionPlan,
-		"recommendation",
-		options.maxRecommendations,
-		state,
-		options,
-		32,
-	);
-	if (recommendations.length) {
-		sections.push("**Recommended next steps**");
-		sections.push(...recommendations);
-		sections.push("");
-	}
+function sortedFactSlots(report) {
+	return asArray(report.factSlotCoverage)
+		.slice()
+		.sort(
+			(a, b) =>
+				statusRank(a) - statusRank(b) ||
+				cleanText(a?.slotId ?? a?.label).localeCompare(
+					cleanText(b?.slotId ?? b?.label),
+				),
+		);
+}
 
-	const caveatItems = [
-		...asArray(report.caveatedFindings),
-		...asArray(report.remainingGaps),
-		...asArray(report.parentDecisionNotes),
+function renderEvidenceStrength(report) {
+	const slots = sortedFactSlots(report);
+	const rows = slots.map((slot) => {
+		const area = escapeTableCell(
+			slot.label ?? slot.slotId ?? slot.bestValue ?? "Evidence area",
+		);
+		const status = escapeTableCell(evidenceStatusOf(slot));
+		const evidence = escapeTableCell(
+			markdownLinkList(urlsOf(slot, 2), 2) || "—",
+		);
+		const impact = escapeTableCell(
+			slot.parentImpact ?? slot.whyItMatters ?? slot.notes ?? "",
+		);
+		return `| ${area || "Evidence area"} | ${status || "—"} | ${evidence} | ${impact || "—"} |`;
+	});
+	if (rows.length === 0) return [];
+	return [
+		"## Evidence strength",
+		"",
+		"| Area | Status | Evidence | Why it matters |",
+		"|---|---|---|---|",
+		...rows,
+		"",
 	];
-	const gaps = bulletLines(
-		caveatItems,
-		"gap",
-		options.maxGaps,
-		state,
-		options,
-		30,
+}
+
+function mainFindingEntries(report) {
+	return asArray(report.mainFindings).map((item) => ({
+		item,
+		text: itemText(
+			item,
+			["finding", "summary", "bestValue", "claim"],
+			stringifyItem(item),
+		),
+	}));
+}
+
+function recommendationEntries(report) {
+	return asArray(report.recommendations).map((item) => ({
+		item,
+		text: itemText(
+			item,
+			["recommendation", "action", "step", "note"],
+			stringifyItem(item),
+		),
+	}));
+}
+
+function actionEntries(report) {
+	return asArray(report.actionPlan).map((item) => ({
+		item,
+		text:
+			itemText(item, ["action", "recommendation", "note"]) ||
+			(typeof item?.step === "string" && cleanText(item.step)) ||
+			stringifyItem(item),
+	}));
+}
+
+function renderMainFindings(report) {
+	const findings = mainFindingEntries(report);
+	if (findings.length === 0) return [];
+	const out = ["## Main findings", ""];
+	findings.forEach(({ item: finding, text }, index) => {
+		const status = evidenceStatusOf(finding);
+		const confidence = confidenceOf(finding);
+		const urls = markdownLinkList(urlsOf(finding, 4), 4);
+		out.push(`### ${index + 1}. ${text}`);
+		out.push("");
+		out.push(
+			`Evidence status: **${status || "not specified"}**${confidence && confidence !== status ? `  \nConfidence: **${confidence}**` : ""}`,
+		);
+		if (urls) out.push(`Sources: ${urls}`);
+		const explanation = itemText(finding, [
+			"rationale",
+			"explanation",
+			"details",
+			"notes",
+		]);
+		if (explanation && explanation !== text) out.push("", explanation);
+		out.push("");
+	});
+	return out;
+}
+
+function renderRecommendations(report) {
+	const recommendations = recommendationEntries(report);
+	if (recommendations.length === 0) return [];
+	const out = ["## Recommendations", ""];
+	recommendations.forEach(({ item, text }, index) => {
+		const status = evidenceStatusOf(item);
+		const urls = markdownLinkList(urlsOf(item, 4), 4);
+		out.push(`${index + 1}. **${text}**`);
+		out.push(`   - Evidence status: ${status || "not specified"}`);
+		if (urls) out.push(`   - Sources: ${urls}`);
+		out.push("");
+	});
+	return out;
+}
+
+function renderActionPlan(report) {
+	const actions = actionEntries(report);
+	if (actions.length === 0) return [];
+	const out = ["## Action plan", ""];
+	actions.forEach(({ item, text }, index) => {
+		const numericStep = Number(item?.step);
+		const step = Number.isFinite(numericStep) ? numericStep : index + 1;
+		const urls = markdownLinkList(urlsOf(item, 3), 3);
+		const evidence = evidenceStatusOf(item);
+		out.push(`${step}. ${text}`);
+		if (evidence && evidence !== "not specified")
+			out.push(`   - Evidence: ${evidence}`);
+		if (urls) out.push(`   - Sources: ${urls}`);
+		out.push("");
+	});
+	return out;
+}
+
+function caveatText(item) {
+	return itemText(
+		item,
+		["gap", "finding", "claim", "note", "whyItMatters", "parentImpact"],
+		stringifyItem(item),
 	);
-	if (gaps.length) {
-		sections.push("**Key caveats / gaps**");
-		sections.push(...gaps);
-		sections.push("");
+}
+
+function caveatCategories(report) {
+	return [
+		{ kind: "Gap", items: asArray(report.remainingGaps) },
+		{ kind: "Unsupported", items: asArray(report.notableUnsupportedClaims) },
+		{ kind: "Contested", items: asArray(report.contestedAreas) },
+		{ kind: "Caveat", items: asArray(report.caveatedFindings) },
+		{ kind: "Unverified lead", items: asArray(report.unverifiedButRelevant) },
+		{ kind: "Decision note", items: asArray(report.parentDecisionNotes) },
+	]
+		.map((category) => ({
+			kind: category.kind,
+			entries: category.items
+				.map((item) => ({ item, text: caveatText(item) }))
+				.filter((entry) => entry.text),
+		}))
+		.filter((category) => category.entries.length > 0);
+}
+
+function selectCaveats(report) {
+	const categories = caveatCategories(report);
+	const selected = [];
+	for (const category of categories) {
+		for (const entry of category.entries) {
+			selected.push({ kind: category.kind, ...entry });
+		}
 	}
+	return {
+		selected,
+		total: selected.length,
+	};
+}
 
-	sections.push(
-		`**Audit trail:** Full evidence remains in \`final-audit.control.json\`: ${counts.verified} verified, ${counts.partially_supported} partially supported, ${counts.unsupported} unsupported, ${counts.conflicting} conflicting claims; fact slots ${filledSlots} filled, ${partialSlots} partial, ${missingSlots} missing/conflicting.`,
+function renderCaveats(report) {
+	const selection = selectCaveats(report);
+	if (selection.total === 0) return [];
+	const out = ["## Caveats and remaining gaps", ""];
+	for (const { kind, item, text } of selection.selected) {
+		const urls = markdownLinkList(urlsOf(item, 3), 3);
+		out.push(`- **${kind}:** ${text}${urls ? ` (${urls})` : ""}`);
+	}
+	out.push("");
+	return out;
+}
+
+function renderSourceIndex(sourceIndex) {
+	if (sourceIndex.length === 0) return [];
+	const grouped = new Map();
+	for (const url of sourceIndex) {
+		const host = hostOf(url);
+		if (!grouped.has(host)) grouped.set(host, []);
+		grouped.get(host).push(url);
+	}
+	const out = ["## Source index", ""];
+	for (const [host, urls] of grouped) {
+		out.push(
+			`- **${host}**: ${urls.map((url) => `[${url}](${url})`).join(", ")}`,
+		);
+	}
+	out.push("");
+	return out;
+}
+
+function renderAuditSummary(control, claimSummary, slots) {
+	const coverage = control?.finalReport?.coverageSummary ?? {};
+	const mismatches = asArray(claimSummary.coverageSummaryMismatch);
+	return [
+		"## Audit summary",
+		"",
+		`- Claims: ${claimSummary.verified} verified, ${claimSummary.partially_supported} partially supported, ${claimSummary.unsupported} unsupported, ${claimSummary.conflicting} conflicting.`,
+		`- Fact slots: ${slots.filled} filled, ${slots.partial} partial, ${slots.missingOrConflicting} missing/conflicting, ${slots.total} total.`,
+		...(mismatches.length > 0
+			? [
+					`- Coverage summary mismatch: displayed claim counts come from \`claimVerdictIndex\`; model coverageSummary disagreed on ${mismatches
+						.map((mismatch) => mismatch.field)
+						.join(", ")}.`,
+				]
+			: []),
+		...(coverage.researchQuestions != null
+			? [`- Research questions: ${coverage.researchQuestions}.`]
+			: []),
+		"- Audit artifact: `final-audit.control.json`.",
+		"",
+	];
+}
+
+function renderWarnings(sectionCounts) {
+	const checks = [
+		["findings", "renderedFindings", "findings"],
+		["recommendations", "renderedRecommendations", "recommendations"],
+		["actionItems", "renderedActionItems", "action items"],
+		["caveatsAndGaps", "renderedCaveatsAndGaps", "caveats/gaps"],
+		["factSlots", "renderedFactSlots", "fact slots"],
+		["sourceUrls", "renderedSourceUrls", "source URLs"],
+	];
+	return checks
+		.filter(([totalKey, renderedKey]) => {
+			const total = Number(sectionCounts[totalKey] ?? 0);
+			const rendered = Number(sectionCounts[renderedKey] ?? 0);
+			return total !== rendered;
+		})
+		.map(([totalKey, renderedKey, label]) => ({
+			section: totalKey,
+			label,
+			total: sectionCounts[totalKey],
+			rendered: sectionCounts[renderedKey],
+		}));
+}
+
+function renderResearchMarkdown(control) {
+	const report = control?.finalReport ?? {};
+	const claimSummary = claimCounts(control);
+	const factSlots = sortedFactSlots(report);
+	const slots = factSlotSummary(asArray(report.factSlotCoverage));
+	const findings = mainFindingEntries(report);
+	const recommendations = recommendationEntries(report);
+	const actions = actionEntries(report);
+	const caveats = selectCaveats(report);
+	const allSourceIndex = uniqueStructuredUrls(
+		report.factSlotCoverage,
+		report.mainFindings,
+		report.recommendations,
+		report.actionPlan,
+		report.caveatedFindings,
+		report.contestedAreas,
+		report.notableUnsupportedClaims,
+		report.remainingGaps,
+		report.parentDecisionNotes,
+		report.unverifiedButRelevant,
+		control?.claimVerdictIndex?.claims,
 	);
+	const sourceIndex = allSourceIndex;
+	const sectionCounts = {
+		findings: asArray(report.mainFindings).length,
+		renderedFindings: findings.length,
+		recommendations: asArray(report.recommendations).length,
+		renderedRecommendations: recommendations.length,
+		actionItems: asArray(report.actionPlan).length,
+		renderedActionItems: actions.length,
+		caveatsAndGaps:
+			asArray(report.remainingGaps).length +
+			asArray(report.notableUnsupportedClaims).length +
+			asArray(report.contestedAreas).length +
+			asArray(report.caveatedFindings).length +
+			asArray(report.unverifiedButRelevant).length +
+			asArray(report.parentDecisionNotes).length,
+		renderedCaveatsAndGaps: caveats.selected.length,
+		factSlots: asArray(report.factSlotCoverage).length,
+		renderedFactSlots: factSlots.length,
+		sourceUrls: allSourceIndex.length,
+		renderedSourceUrls: sourceIndex.length,
+	};
+	const warnings = renderWarnings(sectionCounts);
 
-	let markdown = sections
+	const sections = [
+		"# Research report",
+		"",
+		"## Bottom line",
+		"",
+		cleanText(
+			report.summary ??
+				control.digest ??
+				"Research completed with audited evidence.",
+		),
+		"",
+		...renderEvidenceStrength(report),
+		...renderMainFindings(report),
+		...renderRecommendations(report),
+		...renderActionPlan(report),
+		...renderCaveats(report),
+		...renderSourceIndex(sourceIndex),
+		...renderAuditSummary(control, claimSummary, slots),
+	];
+
+	const markdown = sections
 		.join("\n")
 		.replace(/\n{3,}/g, "\n\n")
 		.trim();
-	let truncated = false;
-	if (countWords(markdown) > maxWords) {
-		truncated = true;
-		markdown = truncateWords(markdown, maxWords);
-	}
-	for (const locator of [...new Set(collectSourceLocators(control))]) {
-		if (state.urls.size >= options.maxUrls) break;
-		state.urls.add(locator);
-	}
 	return {
 		markdown,
-		truncated,
-		sourceUrls: [...state.urls],
-		counts,
-		factSlots: {
-			total: factSlots.length,
-			filled: filledSlots,
-			partial: partialSlots,
-			missingOrConflicting: missingSlots,
-		},
+		sourceIndex,
+		allSourceIndex,
+		claimSummary,
+		factSlotSummary: slots,
+		sectionCounts,
+		renderWarnings: warnings,
 	};
 }
 
-export default async function renderExecutive({
-	sources,
-	options = {},
-	context = {},
-}) {
+function stripLeadingHeading(markdown) {
+	return String(markdown ?? "").replace(/^#\s+[^\n]+\n*/i, "");
+}
+
+export default async function renderExecutive({ sources, context = {} }) {
 	const control =
 		findSource(sources, "final-audit") ??
 		sources?.[Object.keys(sources ?? {})[0]];
-	const opts = {
-		maxWords: Number(options.maxWords ?? 600),
-		maxUrls: Number(options.maxUrls ?? 5),
-		maxFindings: Number(options.maxFindings ?? 3),
-		maxRecommendations: Number(options.maxRecommendations ?? 3),
-		maxGaps: Number(options.maxGaps ?? 2),
-	};
 	if (!control || typeof control !== "object") {
 		return {
 			schema: "deep-research-executive-render-v1",
-			digest: "Executive rendering failed: missing final-audit control source.",
+			digest:
+				"Research report rendering failed: missing final-audit control source.",
 			status: "blocked",
 			blockers: ["missing final-audit control source"],
 			executiveMarkdown: "",
+			reportMarkdown: "",
 			wordCount: 0,
 			sourceUrlCount: 0,
-			gates: { maxWords: opts.maxWords, maxUrls: opts.maxUrls, passed: false },
+			renderWarnings: [],
+			gates: {
+				renderedAllStructuredItems: false,
+				passed: false,
+			},
 		};
 	}
 
-	const rendered = renderExecutiveMarkdown(control, opts);
+	const rendered = renderResearchMarkdown(control);
 	const wordCount = countWords(rendered.markdown);
-	const sourceUrlCount = rendered.sourceUrls.length;
-	const passed = wordCount <= opts.maxWords && sourceUrlCount <= opts.maxUrls;
+	const sourceUrlCount = rendered.sourceIndex.length;
+	const renderedAllStructuredItems = rendered.renderWarnings.length === 0;
+	const passed = renderedAllStructuredItems;
 
-	// Best-effort sidecar for local inspection. The control field is still the
-	// authoritative workflow artifact; this file is a convenience view.
-	let sidecarPath;
+	let executiveSidecarPath;
+	let reportSidecarPath;
 	try {
 		if (context.cwd && context.runId && context.taskId) {
 			const taskDir = join(
@@ -318,36 +618,40 @@ export default async function renderExecutive({
 				context.taskId,
 			);
 			await mkdir(taskDir, { recursive: true });
-			sidecarPath = join(taskDir, "executive.md");
-			await writeFile(sidecarPath, `${rendered.markdown}\n`, "utf8");
+			executiveSidecarPath = join(taskDir, "executive.md");
+			reportSidecarPath = join(taskDir, "report.md");
+			await writeFile(executiveSidecarPath, `${rendered.markdown}\n`, "utf8");
+			await writeFile(reportSidecarPath, `${rendered.markdown}\n`, "utf8");
 		}
 	} catch {
-		// Sidecar is non-authoritative; keep control output deterministic.
+		// Sidecars are non-authoritative; keep control output deterministic.
 	}
 
 	return {
 		schema: "deep-research-executive-render-v1",
-		digest: truncateWords(
-			rendered.markdown.replace(/^# Executive summary\s*/i, ""),
-			45,
-		),
+		digest: truncateWords(stripLeadingHeading(rendered.markdown), 45),
 		status: passed ? "passed" : "failed",
+		renderMode: "evidence-backed-report",
 		executiveMarkdown: rendered.markdown,
+		reportMarkdown: rendered.markdown,
 		wordCount,
 		sourceUrlCount,
-		sourceUrls: rendered.sourceUrls,
-		claimSummary: rendered.counts,
-		factSlotSummary: rendered.factSlots,
+		totalSourceUrlCount: rendered.allSourceIndex.length,
+		sourceUrls: rendered.sourceIndex,
+		sourceIndex: rendered.sourceIndex.map((url) => ({
+			url,
+			host: hostOf(url),
+		})),
+		claimSummary: rendered.claimSummary,
+		factSlotSummary: rendered.factSlotSummary,
+		sectionCounts: rendered.sectionCounts,
+		renderWarnings: rendered.renderWarnings,
 		gates: {
-			maxWords: opts.maxWords,
-			maxUrls: opts.maxUrls,
-			maxFindings: opts.maxFindings,
-			maxRecommendations: opts.maxRecommendations,
-			maxGaps: opts.maxGaps,
-			truncated: rendered.truncated,
+			renderedAllStructuredItems,
 			passed,
 		},
 		auditArtifact: "final-audit.control.json",
-		...(sidecarPath ? { sidecarPath } : {}),
+		...(executiveSidecarPath ? { sidecarPath: executiveSidecarPath } : {}),
+		...(reportSidecarPath ? { reportSidecarPath } : {}),
 	};
 }

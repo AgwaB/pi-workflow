@@ -70,6 +70,7 @@ import {
 	WorkflowValidationError,
 	WORKFLOW_RUN_TYPE,
 } from "../../.tmp/unit/types.js";
+import { supportOutputAnalysis } from "../../.tmp/unit/artifact-graph-runtime.js";
 import {
 	canStageProceedAfterPreviousFailure,
 	shouldScheduleAfterStageFailure,
@@ -7426,13 +7427,7 @@ test("bundled deep-research preserves full audit before executive final", async 
 	assert.equal(final?.kind, "support");
 	assert.deepEqual(final.dependsOn, ["final-audit.main"]);
 	assert.equal(final.support.uses, "./helpers/render-executive.mjs");
-	assert.deepEqual(final.support.options, {
-		maxWords: 600,
-		maxUrls: 5,
-		maxFindings: 3,
-		maxRecommendations: 3,
-		maxGaps: 2,
-	});
+	assert.deepEqual(final.support.options ?? {}, {});
 	assert.ok(
 		final.artifactGraph.output.controlSchemaPath.endsWith(
 			join(
@@ -11238,7 +11233,28 @@ test("deep-research claim evidence gate downgrades unsupported verified claims",
 	]);
 });
 
-test("deep-research executive renderer emits bounded final and sidecar", async () => {
+test("support output analysis preserves field precedence for render helpers", () => {
+	assert.equal(
+		supportOutputAnalysis(
+			{ executiveMarkdown: "executive body", markdown: "markdown body" },
+			{},
+		),
+		"executive body",
+	);
+	assert.equal(
+		supportOutputAnalysis({ markdown: "markdown body" }, {}),
+		"markdown body",
+	);
+	assert.equal(
+		supportOutputAnalysis(
+			{ analysis: "analysis body", markdown: "markdown body" },
+			{},
+		),
+		"analysis body",
+	);
+});
+
+test("deep-research renderer emits evidence-backed report and sidecars", async () => {
 	const cwd = makeProject();
 	try {
 		const helperPath = join(
@@ -11259,24 +11275,40 @@ test("deep-research executive renderer emits bounded final and sidecar", async (
 					digest: "Audited research digest",
 					finalReport: {
 						summary:
-							"Use the deterministic executive final for the parent handoff and keep the full audit in final-audit.control.json.",
+							"Use the deterministic research report for the parent handoff and keep the full audit in final-audit.control.json.",
 						factSlotCoverage: [
-							{ slotId: "slot-001", status: "filled" },
+							{
+								slotId: "slot-001",
+								label: "Verified workflow evidence",
+								status: "filled",
+								evidenceStatus: "verified",
+								sourceUrls: ["https://example.test/spec"],
+								parentImpact: "Shows source-backed rendering.",
+							},
 							{ slotId: "slot-002", status: "partial" },
 							{ slotId: "slot-003", status: "missing" },
 						],
 						mainFindings: [
 							{
 								finding:
-									"The final support stage renders executiveMarkdown from the full audit control artifact.",
+									"The final support stage renders a full research report from the audit control artifact.",
+								evidenceStatus: "verified",
 								sourceUrls: ["https://example.test/spec"],
 							},
 						],
 						recommendations: [
 							{
 								recommendation:
-									"Read executive.md first, then inspect final-audit.control.json for claim-level evidence.",
+									"Read the rendered report first, then inspect final-audit.control.json for claim-level evidence.",
+								evidenceStatus: "verified",
 								sourceUrls: ["https://example.test/audit"],
+							},
+						],
+						actionPlan: [
+							{
+								step: 1,
+								action: "Review evidence strength before acting.",
+								sources: ["https://example.test/action"],
 							},
 						],
 						remainingGaps: [
@@ -11291,24 +11323,21 @@ test("deep-research executive renderer emits bounded final and sidecar", async (
 					},
 				},
 			},
-			options: {
-				maxWords: 120,
-				maxUrls: 1,
-				maxFindings: 1,
-				maxRecommendations: 1,
-				maxGaps: 1,
-			},
 			context: { cwd, runId: "workflow_exec", taskId: "task-final" },
 		});
 
 		assert.equal(result.schema, "deep-research-executive-render-v1");
 		assert.equal(result.status, "passed");
 		assert.equal(result.gates.passed, true);
-		assert.ok(result.wordCount <= 120);
-		assert.ok(result.sourceUrlCount <= 1);
+		assert.equal(result.gates.renderedAllStructuredItems, true);
+		assert.ok(result.wordCount <= 1000);
+		assert.ok(result.sourceUrlCount <= 4);
 		assert.equal(result.auditArtifact, "final-audit.control.json");
-		assert.match(result.executiveMarkdown, /# Executive summary/);
-		assert.match(result.executiveMarkdown, /Audit trail/);
+		assert.equal(result.renderMode, "evidence-backed-report");
+		assert.match(result.executiveMarkdown, /# Research report/);
+		assert.match(result.executiveMarkdown, /Evidence strength/);
+		assert.match(result.executiveMarkdown, /Source index/);
+		assert.match(result.executiveMarkdown, /Audit summary/);
 		assert.equal(result.claimSummary.verified, 1);
 		assert.equal(result.factSlotSummary.missingOrConflicting, 1);
 		assert.equal(
@@ -11326,9 +11355,147 @@ test("deep-research executive renderer emits bounded final and sidecar", async (
 			),
 			`${result.executiveMarkdown}\n`,
 		);
+		assert.equal(
+			readFileSync(
+				join(
+					cwd,
+					".pi",
+					"workflows",
+					"workflow_exec",
+					"tasks",
+					"task-final",
+					"report.md",
+				),
+				"utf8",
+			),
+			`${result.executiveMarkdown}\n`,
+		);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
+});
+
+test("deep-research renderer renders over-cap evidence without omission", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"render-executive.mjs",
+	);
+	const helper = (
+		await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)
+	).default;
+	const result = await helper({
+		sources: {
+			"final-audit.main": {
+				digest: "Audited research digest",
+				finalReport: {
+					summary:
+						"Renderer should render every structured item, even when legacy caps are low.",
+					coverageSummary: {
+						verificationCandidates: 99,
+						verified: 99,
+						partiallySupported: 0,
+						unsupported: 0,
+						conflicting: 0,
+					},
+					factSlotCoverage: [
+						{
+							slotId: "slot-verified-a",
+							label: "Verified A",
+							evidenceStatus: "verified",
+							url: "https://source.test/finding#section",
+							sourceUrls: ["https://evidence.test/verified-a"],
+						},
+						{
+							slotId: "slot-verified-b",
+							label: "Verified B",
+							evidenceStatus: "verified",
+							sourceUrls: ["https://evidence.test/verified-b"],
+						},
+						{
+							slotId: "slot-missing",
+							label: "Missing | launch criteria",
+							status: "missing",
+							parentImpact: "Must not be sorted behind verified rows.",
+						},
+						{
+							slotId: "slot-gap",
+							label: "Gap in dated release evidence",
+							status: "gap",
+							parentImpact: "Must survive the cap.",
+						},
+					],
+					mainFindings: [
+						{
+							finding: "Finding with nested URL field.",
+							evidence: { url: "https://source.test/finding#section" },
+						},
+						{
+							unexpectedText:
+								"Unrecognized finding field should still render via JSON fallback.",
+						},
+					],
+					caveatedFindings: [
+						{ finding: "Caveat one" },
+						{ finding: "Caveat two" },
+						{ finding: "Caveat three" },
+					],
+					notableUnsupportedClaims: [
+						{ claim: "Unsupported claim must remain visible." },
+					],
+					remainingGaps: [{ gap: "Blocking gap must remain visible." }],
+					unverifiedButRelevant: [{ finding: "Unverified but relevant lead" }],
+				},
+				claimVerdictIndex: {
+					claims: [
+						{ id: "claim-001", status: "verified" },
+						{ id: "claim-002", status: "unsupported" },
+					],
+				},
+			},
+		},
+		context: {},
+	});
+
+	assert.equal(result.status, "passed");
+	assert.equal(result.gates.renderedAllStructuredItems, true);
+	assert.deepEqual(result.renderWarnings, []);
+	assert.equal(result.sectionCounts.findings, 2);
+	assert.equal(result.sectionCounts.renderedFindings, 2);
+	assert.equal(result.sectionCounts.factSlots, 4);
+	assert.equal(result.sectionCounts.renderedFactSlots, 4);
+	assert.equal(result.sectionCounts.caveatsAndGaps, 6);
+	assert.equal(result.sectionCounts.renderedCaveatsAndGaps, 6);
+	assert.equal(result.totalSourceUrlCount, result.sourceUrlCount);
+	assert.match(result.executiveMarkdown, /Missing \\| launch criteria/);
+	assert.match(result.executiveMarkdown, /Gap in dated release evidence/);
+	assert.match(result.executiveMarkdown, /Verified A/);
+	assert.match(result.executiveMarkdown, /Verified B/);
+	assert.match(result.executiveMarkdown, /Caveat one/);
+	assert.match(result.executiveMarkdown, /Caveat two/);
+	assert.match(result.executiveMarkdown, /Caveat three/);
+	assert.match(
+		result.executiveMarkdown,
+		/Unsupported claim must remain visible/,
+	);
+	assert.match(result.executiveMarkdown, /Blocking gap must remain visible/);
+	assert.match(result.executiveMarkdown, /Unverified but relevant lead/);
+	assert.match(
+		result.executiveMarkdown,
+		/Unrecognized finding field should still render via JSON fallback/,
+	);
+	assert.doesNotMatch(result.executiveMarkdown, /omitted by render cap/);
+	assert.equal(result.claimSummary.verified, 1);
+	assert.equal(result.claimSummary.unsupported, 1);
+	assert.ok(result.claimSummary.coverageSummaryMismatch.length > 0);
+	assert.ok(
+		result.sourceUrls.includes("https://source.test/finding"),
+		"nested url fields should be included and fragments stripped",
+	);
 });
 
 test("deep-research executive renderer blocks without audit control", async () => {
@@ -15825,6 +15992,172 @@ test("deep-review finding-pipeline preserves structured locations through dedup 
 		true,
 		JSON.stringify(validPartition.issues),
 	);
+});
+
+test("deep-review render-review-report emits finding cards from partition ledger", async () => {
+	const cwd = makeProject();
+	try {
+		const helperPath = join(
+			dirname(fileURLToPath(import.meta.url)),
+			"..",
+			"..",
+			"workflows",
+			"deep-review",
+			"helpers",
+			"render-review-report.mjs",
+		);
+		const helper = (
+			await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)
+		).default;
+		const result = await helper({
+			sources: {
+				"partition-verdicts.main": {
+					partitionSummary: { keep: 1, weaken: 1, drop: 0, needsHuman: 1 },
+					reportContext: {
+						keep: [
+							{
+								findingId: "finding-001",
+								rootCauseId: "root-001",
+								title: "JWT accepts a default secret",
+								severity: "critical",
+								locations: [
+									{ file: "src/auth.ts", line: 14, symbol: "JWT_SECRET" },
+									{ file: "Dockerfile", line: 9, symbol: "JWT_SECRET" },
+									{ file: "src/auth|pipe.ts", line: 20, symbol: "JWT|SECRET" },
+								],
+								evidenceQuotes: [
+									"const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret';",
+									"function verify() {\n  return jwt.verify(raw, JWT_SECRET);\n}",
+									"ENV JWT_SECRET=dev-secret",
+								],
+								recommendedAction:
+									"Require JWT_SECRET at startup and remove default credentials.",
+							},
+						],
+						weaken: [
+							{
+								findingId: "finding-002",
+								rootCauseId: "root-002",
+								title: "Test-only issue should be weakened",
+								severity: "medium",
+								locations: [{ file: "tests/auth.test.ts", line: 1 }],
+								evidenceQuotes: ["expect(true).toBe(true);"],
+								counterEvidence: [
+									"This is a support gap, not the root defect.",
+								],
+							},
+						],
+						needsHuman: [
+							{
+								findingId: "finding-003",
+								title: "Ambiguous domain behavior",
+								severity: "low",
+							},
+						],
+						partialFailures: [],
+					},
+				},
+				"report.main": {
+					summary: "Repository is not launch-ready.",
+					verdict: "block_launch",
+					risks: ["No partial review failures."],
+					recommendedNextAction: "Fix critical findings before launch.",
+				},
+			},
+			context: { cwd, runId: "workflow_review", taskId: "task-final" },
+		});
+
+		assert.equal(result.schema, "deep-review-render-v1");
+		assert.equal(result.status, "passed");
+		assert.equal(result.gates.findingCountMismatch, false);
+		assert.equal(result.gates.renderedAllFindings, true);
+		assert.deepEqual(result.renderedFindingIds, ["finding-001", "finding-002"]);
+		assert.equal(result.findingSummary.bySeverity.critical, 1);
+		assert.match(result.markdown, /# Deep review report/);
+		assert.match(result.markdown, /Verdict: \*\*block_launch\*\*/);
+		assert.match(result.markdown, /Critical findings/);
+		assert.match(
+			result.markdown,
+			/\| `src\/auth\.ts` \| 14 \| `JWT_SECRET` \|/,
+		);
+		assert.match(result.markdown, /\| `Dockerfile` \| 9 \| `JWT_SECRET` \|/);
+		assert.match(
+			result.markdown,
+			/\| `src\/auth\\\|pipe\.ts` \| 20 \| `JWT\\\|SECRET` \|/,
+		);
+		assert.match(result.markdown, /```ts\nconst JWT_SECRET/);
+		assert.match(
+			result.markdown,
+			/function verify\(\) \{\n {2}return jwt\.verify\(raw, JWT_SECRET\);\n\}/,
+		);
+		assert.match(result.markdown, /ENV JWT_SECRET=dev-secret/);
+		assert.doesNotMatch(result.markdown, /overflow index/);
+		assert.match(result.markdown, /Verifier verdict: \*\*WEAKEN\*\*/);
+		assert.match(result.markdown, /Needs human review/);
+		assert.equal(
+			readFileSync(
+				join(
+					cwd,
+					".pi",
+					"workflows",
+					"workflow_review",
+					"tasks",
+					"task-final",
+					"review.md",
+				),
+				"utf8",
+			),
+			`${result.markdown}\n`,
+		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("deep-review render-review-report surfaces count mismatches and missing partition", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-review",
+		"helpers",
+		"render-review-report.mjs",
+	);
+	const helper = (
+		await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)
+	).default;
+	const missing = await helper({ sources: {}, options: {}, context: {} });
+	assert.equal(missing.status, "blocked");
+	assert.deepEqual(missing.blockers, [
+		"missing partition-verdicts control source",
+	]);
+
+	const mismatch = await helper({
+		sources: {
+			"partition-verdicts.main": {
+				partitionSummary: { keep: 2, weaken: 0 },
+				reportContext: {
+					keep: [
+						{
+							findingId: "finding-001",
+							title: "Only one finding exists",
+							severity: "high",
+							locations: [{ file: "src/a.ts", line: 1 }],
+							evidenceQuotes: ["unsafe()"],
+						},
+					],
+					weaken: [],
+					needsHuman: [],
+				},
+			},
+		},
+		options: {},
+		context: {},
+	});
+	assert.equal(mismatch.status, "failed");
+	assert.equal(mismatch.gates.findingCountMismatch, true);
+	assert.match(mismatch.markdown, /Renderer warning/);
 });
 
 test("deep-research claim-evidence-gate enforces structured evidence, rejoins identity, and partitions statuses", async () => {

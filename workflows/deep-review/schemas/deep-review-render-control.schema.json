@@ -1,0 +1,50 @@
+{
+  "type": "object",
+  "required": [
+    "schema",
+    "digest",
+    "status",
+    "markdown",
+    "findingSummary",
+    "renderedFindingIds",
+    "sourceArtifacts",
+    "gates"
+  ],
+  "properties": {
+    "schema": { "type": "string", "const": "deep-review-render-v1" },
+    "digest": { "type": "string", "minLength": 1 },
+    "status": { "type": "string", "enum": ["passed", "failed", "blocked"] },
+    "blockers": { "type": "array", "items": { "type": "string" } },
+    "markdown": { "type": "string" },
+    "findingSummary": {
+      "type": "object",
+      "required": ["total", "bySeverity"],
+      "properties": {
+        "total": { "type": "number" },
+        "bySeverity": { "type": "object", "additionalProperties": { "type": "number" } }
+      },
+      "additionalProperties": true
+    },
+    "renderedFindingIds": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "expectedFindingCount": { "type": "number" },
+    "sourceArtifacts": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "gates": {
+      "type": "object",
+      "required": ["renderedAllFindings", "findingCountMismatch", "passed"],
+      "properties": {
+        "renderedAllFindings": { "type": "boolean" },
+        "findingCountMismatch": { "type": "boolean" },
+        "passed": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    "sidecarPath": { "type": "string" }
+  },
+  "additionalProperties": true
+}

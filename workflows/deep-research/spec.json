@@ -159,14 +159,7 @@
           "controlSchema": "./schemas/deep-research-executive-render-control.schema.json"
         },
         "support": {
-          "uses": "./helpers/render-executive.mjs",
-          "options": {
-            "maxWords": 600,
-            "maxUrls": 5,
-            "maxFindings": 3,
-            "maxRecommendations": 3,
-            "maxGaps": 2
-          }
+          "uses": "./helpers/render-executive.mjs"
         }
       }
     ]

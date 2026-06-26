@@ -20,6 +20,7 @@
     "executiveMarkdown": { "type": "string" },
     "wordCount": { "type": "number" },
     "sourceUrlCount": { "type": "number" },
+    "totalSourceUrlCount": { "type": "number" },
     "sourceUrls": { "type": "array", "items": { "type": "string" } },
     "claimSummary": {
       "type": "object",
@@ -46,20 +47,46 @@
     },
     "gates": {
       "type": "object",
-      "required": ["maxWords", "maxUrls", "maxFindings", "maxRecommendations", "maxGaps", "truncated", "passed"],
+      "required": ["renderedAllStructuredItems", "passed"],
       "properties": {
-        "maxWords": { "type": "number" },
-        "maxUrls": { "type": "number" },
-        "maxFindings": { "type": "number" },
-        "maxRecommendations": { "type": "number" },
-        "maxGaps": { "type": "number" },
-        "truncated": { "type": "boolean" },
+        "renderedAllStructuredItems": { "type": "boolean" },
         "passed": { "type": "boolean" }
       },
       "additionalProperties": true
     },
     "auditArtifact": { "type": "string" },
-    "sidecarPath": { "type": "string" }
+    "sidecarPath": { "type": "string" },
+    "reportSidecarPath": { "type": "string" },
+    "reportMarkdown": { "type": "string" },
+    "renderMode": { "type": "string" },
+    "sourceIndex": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "url": { "type": "string" },
+          "host": { "type": "string" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "sectionCounts": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "renderWarnings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "section": { "type": "string" },
+          "label": { "type": "string" },
+          "total": { "type": "number" },
+          "rendered": { "type": "number" }
+        },
+        "additionalProperties": true
+      }
+    }
   },
   "additionalProperties": true
 }
