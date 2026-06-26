@@ -12,7 +12,9 @@
 
 `pi-workflow` lets Pi run named, repeatable multi-step workflows: research, code review, spec conformance checks, impact review, and project-specific team routines.
 
-You choose a workflow and describe the task in natural language. `pi-workflow` coordinates the steps, passes results between them, and records the run so it can be inspected or resumed.
+Built on [`@agwab/pi-subagent`](https://github.com/AgwaB/pi-subagent), it coordinates Pi subagent workers across workflow steps, passes results between them, and records the run so it can be inspected or resumed.
+
+You choose a workflow and describe the task in natural language.
 
 ## Installation
 
@@ -214,5 +216,14 @@ Open a task detail view with its artifact output.
 
 ## More
 
-- [`docs/usage.md`](./docs/usage.md) — command reference, workflow resolution, run artifacts, authoring rules, and release checks.
+- [`docs/usage.md`](./docs/usage.md) — command reference, workflow resolution, run artifacts, and authoring rules.
 - [`workflows/README.md`](./workflows/README.md) — bundled workflow notes.
+
+## Runtime dependencies
+
+`pi-workflow` bundles the runtime pieces it needs:
+
+- [`@agwab/pi-subagent`](https://github.com/AgwaB/pi-subagent) launches and tracks the Pi subagent workers used by workflow tasks.
+- [`pi-web-access`](https://github.com/nicobailon/pi-web-access) provides web tools such as `web_search`, `fetch_content`, `get_search_content`, and `code_search` when a workflow or agent requests them.
+
+The web provider is just a tool provider. You can replace or narrow it with your own extension if it exposes compatible tool names, arguments, and results. Be careful when changing providers: if the tool result shape, reference/evidence formatting, or field names differ, workflow specs, prompts, and control/output schemas that depend on those fields may need to change too. The stage graph and normal workflow run record format do not need to change for a compatible web-tool implementation swap.
