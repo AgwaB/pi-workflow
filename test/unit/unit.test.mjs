@@ -88,6 +88,7 @@ import {
 	summarizeWorkflowTelemetry,
 	validateStructuredContract,
 } from "../../.tmp/unit/workflow-artifacts.js";
+import { formatArtifactGraphSourceContext } from "../../.tmp/unit/artifact-graph-runtime.js";
 import {
 	loadWorkflowHelper,
 	resolveWorkflowHelperRef,
@@ -13055,7 +13056,12 @@ test("workflow web-source fetch single-flights duplicate URLs and caches transie
 			registered.get("workflow_web_fetch_source").execute("fetch-b", { url: "https://example.test/same#section" }),
 		]);
 		assert.match(first.content[0].text, /sourceRef/);
-		assert.equal(JSON.parse(second.content[0].text).card.duplicate, true);
+		const firstCard = JSON.parse(first.content[0].text).card;
+		const secondCard = JSON.parse(second.content[0].text).card;
+		assert.equal(
+			[firstCard.duplicate, secondCard.duplicate].filter(Boolean).length,
+			1,
+		);
 		assert.equal(callsByUrl.get("https://example.test/same"), 1);
 
 		const registeredCrossTask = new Map();
@@ -17048,6 +17054,27 @@ test("workflow_artifact lists visible sources, reads by source name, and records
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
+});
+
+test("artifact graph source context warns that capped workflow_artifact reads need paths", () => {
+	const prompt = formatArtifactGraphSourceContext(
+		[
+			{
+				source: "plan",
+				taskId: "task-1",
+				specId: "plan.main",
+				stageId: "plan",
+				status: "completed",
+				statusDetail: "completed",
+				digest: "planned work",
+				artifacts: { control: { path: "/tmp/control.json" } },
+			},
+		],
+		[],
+	);
+	assert.match(prompt, /Projected reads must include a JSON path/);
+	assert.match(prompt, /\"path\":\"\$\.factSlots\"/);
+	assert.match(prompt, /For a whole artifact read, omit maxItems\/maxChars/);
 });
 
 test("workflow_artifact can read deterministic JSON projections with caps", async () => {

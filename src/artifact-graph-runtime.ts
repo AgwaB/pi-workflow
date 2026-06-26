@@ -880,6 +880,7 @@ export function formatArtifactGraphSourceContext(
 	return [
 		"# Workflow Artifact Inputs",
 		"Use workflow_artifact to list/read upstream workflow artifacts. Inline controlProjection fields are authoritative for the projected data they contain; use artifact reads for declared requiredReads, missing fields, or debug detail.",
+		"Projected reads must include a JSON path when using maxItems or maxChars, for example {\"action\":\"read\",\"source\":\"plan\",\"artifact\":\"control\",\"path\":\"$.factSlots\",\"maxItems\":8,\"maxChars\":2000}. For a whole artifact read, omit maxItems/maxChars.",
 		requiredReads.length > 0
 			? [
 					"Required reads before final output:",
