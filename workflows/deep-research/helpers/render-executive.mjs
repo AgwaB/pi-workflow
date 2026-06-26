@@ -20,6 +20,15 @@ function asArray(value) {
 	return Array.isArray(value) ? value : [];
 }
 
+function isRecord(value) {
+	return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function numberOrFallback(value, fallback) {
+	const number = Number(value);
+	return Number.isFinite(number) ? number : fallback;
+}
+
 function words(text) {
 	return (
 		String(text ?? "")
@@ -112,6 +121,32 @@ function itemText(item, kind) {
 	return cleanText(JSON.stringify(item));
 }
 
+function isRenderableItem(value, kind) {
+	if (typeof value === "string") return value.trim().length > 0;
+	if (!isRecord(value)) return false;
+	const fields =
+		kind === "recommendation"
+			? ["recommendation", "step", "action", "note", "finding", "gap"]
+			: kind === "gap"
+				? ["gap", "note", "finding", "whyItMatters", "parentImpact"]
+				: ["finding", "summary", "bestValue", "recommendation", "step", "note"];
+	return fields.some(
+		(field) => typeof value[field] === "string" && value[field].trim(),
+	);
+}
+
+function collectRenderableItems(value, kind) {
+	if (Array.isArray(value))
+		return value.flatMap((item) => collectRenderableItems(item, kind));
+	if (isRenderableItem(value, kind)) return [value];
+	if (isRecord(value)) {
+		return Object.values(value).flatMap((item) =>
+			collectRenderableItems(item, kind),
+		);
+	}
+	return [];
+}
+
 function sourceSuffix(item, state, options) {
 	const urls = [...new Set(collectUrls(item))].filter(Boolean);
 	const selected = [];
@@ -126,13 +161,25 @@ function sourceSuffix(item, state, options) {
 	return ` (${selected.map((url) => hostOf(url)).join(", ")}: ${selected.join(" ")})`;
 }
 
+function evidenceLabelSuffix(item, kind, sourceText) {
+	if (sourceText || kind !== "recommendation") return "";
+	if (isRecord(item)) {
+		for (const field of ["evidenceStatus", "status", "confidence", "sourceStatus"]) {
+			if (typeof item[field] === "string" && item[field].trim())
+				return ` (evidence: ${cleanText(item[field])})`;
+		}
+	}
+	return " (evidence: not explicitly cited)";
+}
+
 function bulletLines(items, kind, limit, state, options, perItemWords = 34) {
 	const out = [];
-	for (const item of asArray(items)) {
+	for (const item of collectRenderableItems(items, kind)) {
 		if (out.length >= limit) break;
 		const text = truncateWords(itemText(item, kind), perItemWords);
 		if (!text) continue;
-		out.push(`- ${text}${sourceSuffix(item, state, options)}`);
+		const sources = sourceSuffix(item, state, options);
+		out.push(`- ${text}${sources}${evidenceLabelSuffix(item, kind, sources)}`);
 	}
 	return out;
 }
@@ -153,18 +200,17 @@ function claimCounts(control) {
 	const coverage = control?.finalReport?.coverageSummary;
 	if (coverage && typeof coverage === "object") {
 		return {
-			total:
-				Number(coverage.verificationCandidates ?? counts.total) || counts.total,
-			verified: Number(coverage.verified ?? counts.verified) || counts.verified,
-			partially_supported:
-				Number(coverage.partiallySupported ?? counts.partially_supported) ||
+			total: numberOrFallback(
+				coverage.verificationCandidates ?? counts.total,
+				counts.total,
+			),
+			verified: numberOrFallback(coverage.verified, counts.verified),
+			partially_supported: numberOrFallback(
+				coverage.partiallySupported,
 				counts.partially_supported,
-			unsupported:
-				Number(coverage.unsupported ?? counts.unsupported) ||
-				counts.unsupported,
-			conflicting:
-				Number(coverage.conflicting ?? counts.conflicting) ||
-				counts.conflicting,
+			),
+			unsupported: numberOrFallback(coverage.unsupported, counts.unsupported),
+			conflicting: numberOrFallback(coverage.conflicting, counts.conflicting),
 		};
 	}
 	return counts;
@@ -222,9 +268,9 @@ function renderExecutiveMarkdown(control, options) {
 	}
 
 	const caveatItems = [
-		...asArray(report.caveatedFindings),
-		...asArray(report.remainingGaps),
-		...asArray(report.parentDecisionNotes),
+		...collectRenderableItems(report.caveatedFindings, "gap"),
+		...collectRenderableItems(report.remainingGaps, "gap"),
+		...collectRenderableItems(report.parentDecisionNotes, "gap"),
 	];
 	const gaps = bulletLines(
 		caveatItems,
@@ -260,6 +306,7 @@ function renderExecutiveMarkdown(control, options) {
 	return {
 		markdown,
 		truncated,
+		truncatedWithOpenGaps: truncated && gaps.length > 0,
 		sourceUrls: [...state.urls],
 		counts,
 		factSlots: {
@@ -302,11 +349,14 @@ export default async function renderExecutive({
 	const rendered = renderExecutiveMarkdown(control, opts);
 	const wordCount = countWords(rendered.markdown);
 	const sourceUrlCount = rendered.sourceUrls.length;
-	const passed = wordCount <= opts.maxWords && sourceUrlCount <= opts.maxUrls;
+	const passed =
+		wordCount <= opts.maxWords &&
+		sourceUrlCount <= opts.maxUrls &&
+		!rendered.truncatedWithOpenGaps;
 
 	// Best-effort sidecar for local inspection. The control field is still the
 	// authoritative workflow artifact; this file is a convenience view.
-	let sidecarPath;
+	let sidecarWritten = false;
 	try {
 		if (context.cwd && context.runId && context.taskId) {
 			const taskDir = join(
@@ -318,8 +368,9 @@ export default async function renderExecutive({
 				context.taskId,
 			);
 			await mkdir(taskDir, { recursive: true });
-			sidecarPath = join(taskDir, "executive.md");
+			const sidecarPath = join(taskDir, "executive.md");
 			await writeFile(sidecarPath, `${rendered.markdown}\n`, "utf8");
+			sidecarWritten = true;
 		}
 	} catch {
 		// Sidecar is non-authoritative; keep control output deterministic.
@@ -345,9 +396,10 @@ export default async function renderExecutive({
 			maxRecommendations: opts.maxRecommendations,
 			maxGaps: opts.maxGaps,
 			truncated: rendered.truncated,
+			truncatedWithOpenGaps: rendered.truncatedWithOpenGaps,
 			passed,
 		},
 		auditArtifact: "final-audit.control.json",
-		...(sidecarPath ? { sidecarPath } : {}),
+		...(sidecarWritten ? { sidecarPath: "executive.md" } : {}),
 	};
 }

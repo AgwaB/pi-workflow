@@ -11475,6 +11475,8 @@ test("deep-research executive renderer emits bounded final and sidecar", async (
 		assert.match(result.executiveMarkdown, /Audit trail/);
 		assert.equal(result.claimSummary.verified, 1);
 		assert.equal(result.factSlotSummary.missingOrConflicting, 1);
+		assert.equal(result.sidecarPath, "executive.md");
+		assert.doesNotMatch(JSON.stringify(result), /\/Users\/|\.pi\/workflows|web-source-cache/);
 		assert.equal(
 			readFileSync(
 				join(
@@ -11493,6 +11495,110 @@ test("deep-research executive renderer emits bounded final and sidecar", async (
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
+});
+
+test("deep-research executive renderer preserves object gaps zeros and recommendation labels", async () => {
+	const cwd = makeProject();
+	try {
+		const helperPath = join(
+			dirname(fileURLToPath(import.meta.url)),
+			"..",
+			"..",
+			"workflows",
+			"deep-research",
+			"helpers",
+			"render-executive.mjs",
+		);
+		const helper = (
+			await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)
+		).default;
+		const result = await helper({
+			sources: {
+				"final-audit.main": {
+					digest: "Zero-count audit digest",
+					finalReport: {
+						summary: "No claims were promoted after deterministic checks.",
+						coverageSummary: {
+							verificationCandidates: 0,
+							verified: 0,
+							partiallySupported: 0,
+							unsupported: 0,
+							conflicting: 0,
+						},
+						recommendations: [
+							{ recommendation: "Use measured telemetry before estimates." },
+							{
+								recommendation: "Keep cited methodology in the audit trail.",
+								sourceUrls: ["https://example.test/method"],
+							},
+						],
+						remainingGaps: {
+							blocking: [{ gap: "Verify any claim before promoting it." }],
+							nonBlocking: ["Keep a human domain review before public claims."],
+						},
+					},
+					claimVerdictIndex: {
+						claims: [{ id: "claim-legacy", status: "verified" }],
+					},
+				},
+			},
+			options: {
+				maxWords: 160,
+				maxUrls: 2,
+				maxFindings: 0,
+				maxRecommendations: 2,
+				maxGaps: 2,
+			},
+			context: { cwd, runId: "workflow_exec", taskId: "task-final" },
+		});
+
+		assert.equal(result.status, "passed");
+		assert.equal(result.claimSummary.total, 0);
+		assert.equal(result.claimSummary.verified, 0);
+		assert.match(result.executiveMarkdown, /evidence: not explicitly cited/);
+		assert.match(result.executiveMarkdown, /Verify any claim before promoting it/);
+		assert.match(result.executiveMarkdown, /human domain review/);
+		assert.equal(result.sidecarPath, "executive.md");
+		assert.doesNotMatch(JSON.stringify(result), /\/Users\/|\.pi\/workflows|web-source-cache/);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("deep-research executive renderer fails gate when truncating open gaps", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"render-executive.mjs",
+	);
+	const helper = (
+		await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)
+	).default;
+	const result = await helper({
+		sources: {
+			"final-audit.main": {
+				digest:
+					"This summary is intentionally verbose so the bounded renderer truncates before all caveats can be displayed safely to the parent consumer.",
+				finalReport: {
+					summary:
+						"This summary is intentionally verbose so the bounded renderer truncates before all caveats can be displayed safely to the parent consumer.",
+					remainingGaps: [{ gap: "This open gap must not be silently hidden." }],
+				},
+				claimVerdictIndex: { claims: [] },
+			},
+		},
+		options: { maxWords: 12, maxUrls: 1, maxFindings: 0, maxRecommendations: 0, maxGaps: 1 },
+		context: {},
+	});
+
+	assert.equal(result.status, "failed");
+	assert.equal(result.gates.truncated, true);
+	assert.equal(result.gates.truncatedWithOpenGaps, true);
+	assert.equal(result.gates.passed, false);
 });
 
 test("deep-research executive renderer blocks without audit control", async () => {
