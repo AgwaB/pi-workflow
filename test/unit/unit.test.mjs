@@ -12947,7 +12947,13 @@ test("workflow web-source extension returns source cards and narrow reads withou
 		assert.equal(fetchedBatchBody.status, "ok");
 		assert.equal(fetchedBatchBody.cards.length, 2);
 		assert.equal(fetchedBatchBody.results.length, 2);
+		assert.equal(fetchedBatchBody.results[0].card, undefined);
+		assert.equal(fetchedBatchBody.results[0].cardIndex, 0);
+		assert.equal(fetchedBatchBody.results[0].sourceRef, fetchedBatchBody.cards[0].sourceRef);
+		assert.equal(fetchedBatchBody.results[1].cardIndex, 1);
+		assert.equal(fetchedBatchBody.results[1].sourceRef, fetchedBatchBody.cards[1].sourceRef);
 		assert.match(fetchedBatch.content[0].text, /sourceRef/);
+		assert.doesNotMatch(fetchedBatch.content[0].text, /\n  \"cards\"/);
 		assert.doesNotMatch(fetchedBatch.content[0].text, /web-source-cache/);
 
 		const read = await registered.get("workflow_web_source_read").execute("call-read", {
@@ -12995,7 +13001,7 @@ test("workflow web-source extension returns source cards and narrow reads withou
 		const duplicate = await registered
 			.get("workflow_web_fetch_source")
 			.execute("call-fetch-2", { url: "https://example.test/report?token=secret#quote" });
-		assert.match(duplicate.content[0].text, /"duplicate": true/);
+		assert.equal(JSON.parse(duplicate.content[0].text).card.duplicate, true);
 		assert.equal(existsSync(join(cacheDir, "events.jsonl")), true);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
@@ -13040,7 +13046,7 @@ test("workflow web-source fetch single-flights duplicate URLs and caches transie
 			registered.get("workflow_web_fetch_source").execute("fetch-b", { url: "https://example.test/same#section" }),
 		]);
 		assert.match(first.content[0].text, /sourceRef/);
-		assert.match(second.content[0].text, /"duplicate": true/);
+		assert.equal(JSON.parse(second.content[0].text).card.duplicate, true);
 		assert.equal(callsByUrl.get("https://example.test/same"), 1);
 
 		const registeredCrossTask = new Map();

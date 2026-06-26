@@ -196,7 +196,8 @@ export function registerWorkflowWebSourceExtension(
 						"workflow_web_fetch_source requires url, urls, or sources parameters.",
 					);
 				}
-				const results = [];
+				const results: Array<Record<string, unknown>> = [];
+				const cards: Record<string, unknown>[] = [];
 				for (const [index, request] of requests.entries()) {
 					const result = await fetchWorkflowWebSourceOnce(
 						`${toolCallId}-${index}`,
@@ -206,16 +207,18 @@ export function registerWorkflowWebSourceExtension(
 						ctx,
 					);
 					const payload = payloadFromToolResult(result);
+					const card = isRecord(payload.card) ? payload.card : null;
+					if (card) cards.push(card);
 					results.push({
 						index,
 						url: sanitizeUrlForModel(request.url),
 						status: typeof payload.status === "string" ? payload.status : "unknown",
 						...(typeof payload.code === "string" ? { code: payload.code } : {}),
 						...(typeof payload.message === "string" ? { message: payload.message } : {}),
-						...(isRecord(payload.card) ? { card: payload.card } : {}),
+						...(typeof card?.sourceRef === "string" ? { sourceRef: card.sourceRef } : {}),
+						...(card ? { cardIndex: cards.length - 1 } : {}),
 					});
 				}
-				const cards = results.map((result) => result.card).filter(isRecord);
 				const status =
 					cards.length === results.length
 						? "ok"

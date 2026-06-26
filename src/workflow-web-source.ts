@@ -620,7 +620,7 @@ export function toolResultFromJson(value: unknown): {
 	details: Record<string, unknown>;
 } {
 	return {
-		content: [{ type: "text", text: `${JSON.stringify(value, null, 2)}\n` }],
+		content: [{ type: "text", text: `${JSON.stringify(value)}\n` }],
 		details: { workflowWebSource: true },
 	};
 }
