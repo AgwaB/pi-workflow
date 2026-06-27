@@ -15016,6 +15016,22 @@ test("notifyUnfinishedRuns reports recent failed root runs with resume hint", as
 			/workflow_old|workflow_child|workflow_done/,
 		);
 
+		const duplicate = [];
+		await notifyUnfinishedRuns(
+			cwd,
+			(message, type) => duplicate.push({ message, type }),
+			nowMs + 60_000,
+		);
+		assert.equal(duplicate.length, 0);
+
+		const later = [];
+		await notifyUnfinishedRuns(
+			cwd,
+			(message, type) => later.push({ message, type }),
+			nowMs + 7 * 60 * 60 * 1000,
+		);
+		assert.equal(later.length, 1);
+
 		const silent = [];
 		await notifyUnfinishedRuns(
 			join(cwd, "no-such"),

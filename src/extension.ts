@@ -5,7 +5,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
 import { closeSync, openSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -42,6 +42,7 @@ import {
 
 const UNFINISHED_RUN_NOTICE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const UNFINISHED_RUN_NOTICE_MAX_RUNS = 5;
+const UNFINISHED_RUN_NOTICE_DEDUPE_MS = 6 * 60 * 60 * 1000;
 const RUN_FEEDBACK_POLL_MS = 2_000;
 const runFeedbackTimers = new Map<string, ReturnType<typeof setInterval>>();
 
@@ -659,6 +660,8 @@ export async function notifyUnfinishedRuns(
 		if (resumableDynamicApproval) unfinished.push(run);
 	}
 	if (unfinished.length === 0) return;
+	const noticeKey = unfinishedNoticeKey(unfinished);
+	if (await shouldSuppressUnfinishedNotice(cwd, noticeKey, nowMs)) return;
 
 	const lines = unfinished
 		.slice(0, UNFINISHED_RUN_NOTICE_MAX_RUNS)
@@ -683,6 +686,48 @@ export async function notifyUnfinishedRuns(
 		].join("\n"),
 		"warning",
 	);
+}
+
+function unfinishedNoticeKey(
+	runs: Array<{ runId: string; status: string; updatedAt?: string }>,
+): string {
+	return runs
+		.map((run) => `${run.runId}:${run.status}:${run.updatedAt ?? ""}`)
+		.sort()
+		.join("|");
+}
+
+async function shouldSuppressUnfinishedNotice(
+	cwd: string,
+	noticeKey: string,
+	nowMs: number,
+): Promise<boolean> {
+	if (!noticeKey) return true;
+	const dir = join(cwd, ".pi", "workflows");
+	const file = join(dir, "unfinished-notices.json");
+	let state: { notices?: Record<string, { lastNotifiedAt?: string }> } = {};
+	try {
+		state = JSON.parse(await readFile(file, "utf8"));
+	} catch {
+		state = {};
+	}
+	const notices = state.notices ?? {};
+	const previousMs = Date.parse(notices[noticeKey]?.lastNotifiedAt ?? "");
+	if (
+		Number.isFinite(previousMs) &&
+		nowMs - previousMs < UNFINISHED_RUN_NOTICE_DEDUPE_MS
+	) {
+		return true;
+	}
+	const cutoff = nowMs - UNFINISHED_RUN_NOTICE_MAX_AGE_MS;
+	for (const [key, item] of Object.entries(notices)) {
+		const itemMs = Date.parse(item.lastNotifiedAt ?? "");
+		if (!Number.isFinite(itemMs) || itemMs < cutoff) delete notices[key];
+	}
+	notices[noticeKey] = { lastNotifiedAt: new Date(nowMs).toISOString() };
+	await mkdir(dir, { recursive: true });
+	await writeFile(file, `${JSON.stringify({ notices }, null, 2)}\n`, "utf8");
+	return false;
 }
 
 async function handleWorkflowCommand(
