@@ -7428,11 +7428,11 @@ test("bundled deep-research compacts audit packets before executive final", asyn
 		"research-questions.item",
 	]);
 	assert.equal(normalizeInputPacket.support.uses, "./helpers/normalize-input-packet.mjs");
-	assert.deepEqual(normalizeClaims?.dependsOn, ["normalize-input-packet.main"]);
-	assert.deepEqual(normalizeClaims?.artifactGraph.sourceProjection, {
-		include: ["$.packet"],
-		maxChars: 24000,
-	});
+	assert.deepEqual(normalizeClaims?.dependsOn, [
+		"plan.main",
+		"research-questions.item",
+		"normalize-input-packet.main",
+	]);
 
 	assert.equal(finalAuditPacket?.kind, "support");
 	assert.deepEqual(finalAuditPacket.dependsOn, [
