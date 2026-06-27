@@ -7447,10 +7447,7 @@ test("bundled deep-research compacts audit packets before executive final", asyn
 	assert.deepEqual(finalAudit.artifactGraph.requiredReads, [
 		"final-audit-packet.control",
 	]);
-	assert.deepEqual(finalAudit.artifactGraph.sourceProjection, {
-		include: ["$.packet"],
-		maxChars: 24000,
-	});
+	assert.equal(finalAudit.artifactGraph.sourceProjection, undefined);
 	assert.ok(
 		finalAudit.artifactGraph.output.controlSchemaPath.endsWith(
 			join(
@@ -17152,6 +17149,22 @@ test("workflow_artifact can read deterministic JSON projections with caps", asyn
 		assert.equal(ledger[0].path, "$.claims");
 		assert.equal(ledger[0].maxItems, 2);
 		assert.equal(ledger[0].maxChars, 200);
+
+		const sourcePrefixed = await handleWorkflowArtifactToolCall(
+			{
+				action: "read",
+				source: "normalize",
+				artifact: "control",
+				path: "$.normalize.claims",
+				maxItems: 1,
+			},
+			{ runId, taskId: "task-2", manifestPath, ledgerPath, runDir },
+		);
+		assert.match(
+			sourcePrefixed.content[0].text,
+			/# workflow_artifact: normalize\.control path=\$\.claims/,
+		);
+		assert.match(sourcePrefixed.content[0].text, /"id": "claim-1"/);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}

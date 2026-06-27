@@ -427,18 +427,29 @@ async function readProjectedWorkflowArtifact(options: {
 	maxChars?: number;
 }): Promise<WorkflowArtifactReadResult> {
 	const parsed = JSON.parse(await readFile(options.artifactPath, "utf8"));
-	const resolved = readSimpleJsonPath(parsed, options.path);
+	let effectivePath = options.path;
+	let resolved = readSimpleJsonPath(parsed, effectivePath);
+	if (resolved === undefined) {
+		const sourcePrefixedPath = stripSourcePathPrefix(options.path, options.source);
+		if (sourcePrefixedPath !== options.path) {
+			effectivePath = sourcePrefixedPath;
+			resolved = readSimpleJsonPath(parsed, effectivePath);
+		}
+	}
 	if (resolved === undefined) {
 		throw new Error(`workflow_artifact path did not resolve: ${options.path}`);
 	}
-	const sliced = applyProjectionItemLimit(resolved, options);
+	const sliced = applyProjectionItemLimit(resolved, {
+		...options,
+		path: effectivePath,
+	});
 	const serialized = JSON.stringify(sliced.value, null, 2);
 	const preview =
 		options.maxChars !== undefined && serialized.length > options.maxChars
 			? serialized.slice(0, options.maxChars)
 			: serialized;
 	const projection: WorkflowArtifactProjectionMetadata = {
-		path: options.path,
+		path: effectivePath,
 		valueType: jsonValueType(resolved),
 		...(options.maxItems === undefined ? {} : { maxItems: options.maxItems }),
 		...(options.maxChars === undefined ? {} : { maxChars: options.maxChars }),
@@ -469,6 +480,12 @@ async function readProjectedWorkflowArtifact(options: {
 		mediaType: options.mediaType,
 		projection,
 	};
+}
+
+function stripSourcePathPrefix(path: string, source: string): string {
+	const sourcePrefix = `$.${source}.`;
+	if (!path.startsWith(sourcePrefix)) return path;
+	return `$.${path.slice(sourcePrefix.length)}`;
 }
 
 function applyProjectionItemLimit(
