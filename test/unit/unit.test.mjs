@@ -17093,10 +17093,15 @@ test("workflow_artifact can read deterministic JSON projections with caps", asyn
 						{ id: "claim-2", text: "second" },
 						{ id: "claim-3", text: "third" },
 					],
+					sourcePolicy: { preferred: ["primary"] },
 				},
 				null,
 				2,
 			),
+		);
+		writeFileSync(
+			join(producerDir, "refs.json"),
+			JSON.stringify([{ url: "https://example.test/ref" }], null, 2),
 		);
 		const manifestPath = join(consumerDir, "source-manifest.json");
 		const ledgerPath = join(consumerDir, "read-ledger.jsonl");
@@ -17111,6 +17116,7 @@ test("workflow_artifact can read deterministic JSON projections with caps", asyn
 						source: "normalize",
 						artifacts: {
 							control: { path: join(producerDir, "control.json") },
+							refs: { path: join(producerDir, "refs.json") },
 						},
 					},
 				],
@@ -17155,7 +17161,7 @@ test("workflow_artifact can read deterministic JSON projections with caps", asyn
 				action: "read",
 				source: "normalize",
 				artifact: "control",
-				path: "$.normalize.claims",
+				path: "$.normalize.claims[0]",
 				maxItems: 1,
 			},
 			{ runId, taskId: "task-2", manifestPath, ledgerPath, runDir },
@@ -17165,6 +17171,52 @@ test("workflow_artifact can read deterministic JSON projections with caps", asyn
 			/# workflow_artifact: normalize\.control path=\$\.claims/,
 		);
 		assert.match(sourcePrefixed.content[0].text, /"id": "claim-1"/);
+
+		const artifactPrefixed = await handleWorkflowArtifactToolCall(
+			{
+				action: "read",
+				source: "normalize",
+				artifact: "control",
+				path: "$.control.claims",
+				maxItems: 1,
+			},
+			{ runId, taskId: "task-2", manifestPath, ledgerPath, runDir },
+		);
+		assert.match(
+			artifactPrefixed.content[0].text,
+			/# workflow_artifact: normalize\.control path=\$\.claims/,
+		);
+
+		const rootAlias = await handleWorkflowArtifactToolCall(
+			{
+				action: "read",
+				source: "normalize",
+				artifact: "refs",
+				path: "$.refs",
+				maxChars: 200,
+			},
+			{ runId, taskId: "task-2", manifestPath, ledgerPath, runDir },
+		);
+		assert.match(
+			rootAlias.content[0].text,
+			/# workflow_artifact: normalize\.refs path=\$/,
+		);
+
+		const fieldAlias = await handleWorkflowArtifactToolCall(
+			{
+				action: "read",
+				source: "normalize",
+				artifact: "control",
+				path: "$.sourceRequirements",
+				maxChars: 200,
+			},
+			{ runId, taskId: "task-2", manifestPath, ledgerPath, runDir },
+		);
+		assert.match(
+			fieldAlias.content[0].text,
+			/# workflow_artifact: normalize\.control path=\$\.sourcePolicy/,
+		);
+		assert.match(fieldAlias.content[0].text, /"primary"/);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
