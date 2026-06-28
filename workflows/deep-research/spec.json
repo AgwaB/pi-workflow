@@ -141,25 +141,15 @@
         }
       },
       {
-        "id": "final-audit-scaffold",
+        "id": "final-audit",
+        "type": "reduce",
         "from": [
           "final-audit-packet"
         ],
         "sourcePolicy": "partial",
-        "support": {
-          "uses": "./helpers/final-audit-scaffold.mjs"
-        }
-      },
-      {
-        "id": "final-audit",
-        "type": "reduce",
-        "from": [
-          "final-audit-scaffold"
-        ],
-        "sourcePolicy": "partial",
         "inputPolicy": {
           "requiredReads": [
-            "final-audit-scaffold.control"
+            "final-audit-packet.control"
           ],
           "enforcement": "fail"
         },
@@ -173,7 +163,7 @@
           "maxDigestChars": 1200,
           "controlSchema": "./schemas/deep-research-final-control.schema.json"
         },
-        "prompt": "Produce the bounded parent-facing research handoff from the deterministic final-audit scaffold. Before final output, satisfy requiredReads by reading final-audit-scaffold.control, preferably path=$.draft with maxChars. The scaffold draft is already shaped as finalReport plus claimVerdictIndex and is authoritative for claim verdict counts, factSlotCoverage rows, caveated/unsupported/conflicting partitions, preserved material, researchScopeCoverage, and remaining gaps. Treat this as a short editorial pass: improve clarity and task fit, but do not re-verify claims, do not add new factual claims, do not promote partially_supported/unsupported/conflicting claims to verified, and do not smooth away source or verifier integrity gaps. Put machine-readable JSON in <control> with finalReport and claimVerdictIndex. finalReport must answer the runtime task directly and include summary, researchMetadata, coverageSummary, factSlotCoverage, mainFindings, recommendations, actionPlan, caveatedFindings, contestedAreas, notableUnsupportedClaims, unverifiedButRelevant, parentDecisionNotes, researchScopeCoverage, and remainingGaps. Copy every draft.finalReport.factSlotCoverage row into finalReport.factSlotCoverage; do not drop missing/partial/not_applicable slots even if they are less important. Preserve coverageSummary verified, partiallySupported, unsupported, conflicting, verificationCandidates, preserved, unverifiedButRelevant, and coverageGaps exactly from the scaffold unless the scaffold is structurally invalid. Use verified claims for mainFindings; partially_supported claims may support caveatedFindings/recommendations only with explicit caveats; conflicting claims go to contestedAreas; unsupported claims go to notableUnsupportedClaims; preserved/unverified material goes to unverifiedButRelevant or remainingGaps. Tie recommendations/action items to URLs, named sources, or explicit evidenceStatus labels; do not rely on internal claim ids as parent-visible support. Do not present exact quantitative claims as hard action thresholds unless scaffold evidence includes a URL/source for the exact value. parentDecisionNotes must be objects with note, whyItMatters, evidenceStatus, and suggestedParentDecision. claimVerdictIndex must remain {claims:[...]} with compact rows for claims used in mainFindings/recommendations/actionPlan or important caveats: id, status, confidence, essential sourceUrls, factSlotIds, support, caveat, and correctionOrCounterclaim. Keep long quotes/evidence out of finalReport; per-task artifacts remain the audit trail. Preserve blocking vs non-blocking gaps and why each matters."
+        "prompt": "Produce the bounded parent-facing research handoff from the audited packet. Before final output, satisfy requiredReads by reading final-audit-packet.control, preferably path=$.packet with maxChars. The packet is authoritative for verdictCounts, statusPartitions, claimVerdictLedger, factSlotCoverage, remainingGaps, sourceRefJoinFailures, verifierIntegrity, preservedClaims, researchScopeCoverage, and invariant/overflow ledgers. Do not re-verify claims, do not promote partially_supported/unsupported/conflicting claims to verified, and do not smooth away source or verifier integrity gaps. Put machine-readable JSON in <control> with finalReport and claimVerdictIndex. finalReport must answer the runtime task directly and include summary, researchMetadata, coverageSummary, factSlotCoverage, mainFindings, recommendations, actionPlan, caveatedFindings, contestedAreas, notableUnsupportedClaims, unverifiedButRelevant, parentDecisionNotes, researchScopeCoverage, and remainingGaps. Copy every packet.factSlotCoverage row into finalReport.factSlotCoverage; do not drop missing/partial/not_applicable slots even if they are less important. Use verified claims for mainFindings; partially_supported claims may support caveatedFindings/recommendations only with explicit caveats; conflicting claims go to contestedAreas; unsupported claims go to notableUnsupportedClaims; preserved/unverified material goes to unverifiedButRelevant or remainingGaps. Tie recommendations/action items to URLs, named sources, or explicit evidenceStatus labels; do not rely on internal claim ids as parent-visible support. Do not present exact quantitative claims as hard action thresholds unless packet evidence includes a URL/source for the exact value. coverageSummary must copy verified, partiallySupported, unsupported, and conflicting from packet.verdictCounts and include depth, researchQuestions, verificationCandidates, preserved, unverifiedButRelevant, and coverageGaps. parentDecisionNotes must be objects with note, whyItMatters, evidenceStatus, and suggestedParentDecision. claimVerdictIndex must be {claims:[...]} with compact rows for claims used in mainFindings/recommendations/actionPlan or important caveats: id, status, confidence, essential sourceUrls, factSlotIds, support, caveat, and correctionOrCounterclaim. Keep long quotes/evidence out of finalReport; per-task artifacts remain the audit trail. Preserve blocking vs non-blocking gaps and why each matters."
       },
       {
         "id": "final",
