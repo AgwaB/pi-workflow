@@ -7419,6 +7419,7 @@ test("bundled deep-research compacts audit packets before executive final", asyn
 	const normalizeInputPacket = byStage.get("normalize-input-packet");
 	const normalizeClaims = byStage.get("normalize-claims");
 	const finalAuditPacket = byStage.get("final-audit-packet");
+	const finalAuditScaffold = byStage.get("final-audit-scaffold");
 	const finalAudit = byStage.get("final-audit");
 	const final = byStage.get("final");
 
@@ -7442,10 +7443,17 @@ test("bundled deep-research compacts audit packets before executive final", asyn
 	]);
 	assert.equal(finalAuditPacket.support.uses, "./helpers/final-audit-packet.mjs");
 
+	assert.equal(finalAuditScaffold?.kind, "support");
+	assert.deepEqual(finalAuditScaffold.dependsOn, ["final-audit-packet.main"]);
+	assert.equal(
+		finalAuditScaffold.support.uses,
+		"./helpers/final-audit-scaffold.mjs",
+	);
+
 	assert.equal(finalAudit?.kind, "reduce");
-	assert.deepEqual(finalAudit.dependsOn, ["final-audit-packet.main"]);
+	assert.deepEqual(finalAudit.dependsOn, ["final-audit-scaffold.main"]);
 	assert.deepEqual(finalAudit.artifactGraph.requiredReads, [
-		"final-audit-packet.control",
+		"final-audit-scaffold.control",
 	]);
 	assert.equal(finalAudit.artifactGraph.sourceProjection, undefined);
 	assert.ok(
@@ -11408,6 +11416,82 @@ test("deep-research final-audit packet compacts deterministic ledgers", async ()
 	assert.equal(result.packet.verifierIntegrity.duplicateVerifierRows[0].claimId, "claim-001");
 	assert.equal(result.packet.overflowLedger.omittedVerificationCandidateCount, 1);
 	assert.equal(result.packet.overflowLedger.invalidVerifierRowCount, 1);
+});
+
+test("deep-research final-audit scaffold preserves audited counts and slots", async () => {
+	const { default: helper } = await import(
+		`../../workflows/deep-research/helpers/final-audit-scaffold.mjs?test=${Date.now()}`
+	);
+	const result = await helper({
+		sources: {
+			"final-audit-packet.main": {
+				schema: "deep-research-final-audit-packet-v1",
+				packet: {
+					researchMetadataSeed: {
+						depth: "standard",
+						taskType: "decision_memo",
+						expectedFinalShape: "decision_memo",
+						researchQuestions: 2,
+						plannedFactSlots: 2,
+						filledFactSlots: 1,
+						partialFactSlots: 1,
+						missingFactSlots: 0,
+					},
+					verdictCounts: {
+						verified: 1,
+						partiallySupported: 1,
+						unsupported: 0,
+						conflicting: 0,
+					},
+					factSlotCoverage: [
+						{ slotId: "slot-001", status: "filled", bestValue: "Use X" },
+						{ slotId: "slot-002", status: "partial", gapReason: "needs primary source" },
+					],
+					claimVerdictLedger: [
+						{
+							id: "claim-001",
+							claim: "X is supported by the official guide.",
+							status: "verified",
+							confidence: "high",
+							sourceUrls: ["https://example.test/guide", ".pi/workflows/local-cache"],
+							factSlotIds: ["slot-001"],
+							support: "Official guide states the supported behavior.",
+						},
+						{
+							id: "claim-002",
+							claim: "Y may be needed for edge cases.",
+							status: "partially_supported",
+							confidence: "medium",
+							sourceUrls: ["https://example.test/edge"],
+							factSlotIds: ["slot-002"],
+							caveat: "Source supports the edge case, not the full generalization.",
+						},
+					],
+					remainingGaps: [
+						{ claimId: "claim-002", evidenceState: "insufficient_for_verified", nextStep: "Find primary evidence." },
+					],
+					coverageGaps: [{ slotId: "slot-002", reason: "partial source" }],
+					preservedClaims: [{ id: "claim-003", claim: "Later follow-up", whyItMatters: "Useful backlog" }],
+					invariantChecks: { candidateCount: 2 },
+					overflowLedger: { preservedClaimCount: 1 },
+				},
+			},
+		},
+	});
+	assert.equal(result.schema, "deep-research-final-audit-scaffold-v1");
+	assert.equal(result.draft.schema, "deep-research-final-control-v1");
+	assert.equal(result.draft.finalReport.coverageSummary.verified, 1);
+	assert.equal(result.draft.finalReport.coverageSummary.partiallySupported, 1);
+	assert.equal(result.draft.finalReport.factSlotCoverage.length, 2);
+	assert.equal(result.draft.claimVerdictIndex.claims.length, 2);
+	assert.equal(result.draft.finalReport.mainFindings[0].claimId, "claim-001");
+	assert.match(result.draft.finalReport.mainFindings[0].finding, /official guide/);
+	assert.equal(result.draft.finalReport.caveatedFindings[0].claimId, "claim-002");
+	assert.deepEqual(result.draft.claimVerdictIndex.claims[0].sourceUrls, [
+		"https://example.test/guide",
+	]);
+	assert.ok(result.draft.finalReport.parentDecisionNotes.length > 0);
+	assert.equal(result.guardrails.mustPreserveFactSlotCoverage, true);
 });
 
 test("deep-research executive renderer emits bounded final and sidecar", async () => {
