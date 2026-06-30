@@ -11343,12 +11343,176 @@ test("deep-research normalize input packet compacts research context", async () 
 			},
 		},
 	});
-	assert.equal(result.schema, "deep-research-normalize-input-packet-v1");
+	assert.equal(result.schema, "deep-research-normalize-input-packet-v2");
 	assert.equal(result.packet.plan.factSlots.length, 1);
 	assert.equal(result.packet.research.extractedFacts[0].slotId, "slot-001");
 	assert.deepEqual(result.packet.research.claims[0].sourceRefs, ["wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]);
 	assert.equal(result.packet.ledgers.sourceRefCoverage.claimsWithSourceRefs, 1);
 	assert.equal(result.packet.ledgers.slotFactCounts["slot-001"], 1);
+});
+
+test("deep-research normalize input packet preserves slots and flags precision risks", async () => {
+	const { default: helper } = await import(
+		`../../workflows/deep-research/helpers/normalize-input-packet.mjs?test=${Date.now()}`
+	);
+	const result = await helper({
+		sources: {
+			"plan.main": {
+				depth: "standard",
+				taskType: "vendor_comparison",
+				expectedFinalShape: "side_by_side_comparison",
+				factSlots: [
+					{
+						id: "slot-latency",
+						label: "Provider A latency",
+						type: "numeric",
+						required: true,
+						entities: ["Provider A"],
+						sourcePriority: "primary_required",
+					},
+					{
+						id: "slot-price",
+						label: "Provider B price",
+						type: "pricing",
+						required: true,
+						entities: ["Provider B"],
+						sourcePriority: "primary_required",
+					},
+				],
+			},
+			"research-questions.item-001": {
+				extractedFacts: [
+					{
+						slotId: "slot-latency",
+						value: "42 ms",
+						sourceUrls: ["https://example.test/latency"],
+						sourceRefs: ["wsrc_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+					},
+					{
+						slotId: "slot-price",
+						value: "$9/month",
+						sourceUrls: ["https://example.test/pricing"],
+						sourceRefs: ["wsrc_cccccccccccccccccccccccccccccccc"],
+					},
+				],
+				claims: [
+					{
+						claim:
+							"Provider A is the best and always cheaper than Provider B because latency is 42 ms and price is $9/month.",
+						factSlotIds: ["slot-latency", "slot-price"],
+						sourceUrls: ["https://example.test/latency"],
+						sourceRefs: ["wsrc_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+					},
+					{
+						claim: "Provider B costs $9/month.",
+						factSlotIds: ["slot-price"],
+					},
+				],
+			},
+		},
+	});
+
+	assert.deepEqual(result.packet.slotPreservation.slotsWithEvidence.sort(), [
+		"slot-latency",
+		"slot-price",
+	]);
+	assert.deepEqual(result.packet.slotPreservation.missingRequiredOrCriticalSlots, []);
+	const priceSlot = result.packet.slotPreservation.requiredOrCriticalSlots.find(
+		(slot) => slot.slotId === "slot-price",
+	);
+	assert.equal(priceSlot.observationCount, 1);
+	assert.deepEqual(priceSlot.sourceRefs, ["wsrc_cccccccccccccccccccccccccccccccc"]);
+
+	assert.equal(result.packet.precisionGuard.summary.totalClaims, 2);
+	assert.equal(result.packet.precisionGuard.summary.flaggedClaims, 2);
+	const bundled = result.packet.precisionGuard.claims.find((claim) =>
+		claim.issues.includes("bundled_slots"),
+	);
+	assert(bundled);
+	assert.equal(bundled.action, "split_or_narrow_before_verification");
+	assert(bundled.issues.includes("compound_or_bundled_text"));
+	assert(bundled.issues.includes("normative_language"));
+	assert(bundled.issues.includes("overbroad_quantifier"));
+	assert(bundled.issues.includes("entity_blend_risk"));
+	const sourceWeak = result.packet.precisionGuard.claims.find((claim) =>
+		claim.issues.includes("quantitative_without_visible_source"),
+	);
+	assert.equal(sourceWeak.action, "preserve_or_gap_until_source_backed");
+});
+
+test("deep-research normalize input packet distinguishes P1 gap and recommendation risks", async () => {
+	const { default: helper } = await import(
+		`../../workflows/deep-research/helpers/normalize-input-packet.mjs?test=${Date.now()}`
+	);
+	const result = await helper({
+		sources: {
+			"plan.main": {
+				depth: "standard",
+				taskType: "implementation_guidance",
+				expectedFinalShape: "implementation_checklist",
+				factSlots: [
+					{ id: "slot-provider", label: "Provider carbon export granularity", type: "policy", required: true },
+					{ id: "slot-tier", label: "Implementation tiering", type: "policy", required: true },
+					{ id: "slot-power", label: "GPU power telemetry", type: "numeric", required: true },
+				],
+			},
+			"research-questions.item-001": {
+				extractedFacts: [
+					{
+						slotId: "slot-provider",
+						value: "resource-level emissions",
+						sourceRefs: ["wsrc_dddddddddddddddddddddddddddddddd"],
+						sourceUrls: ["https://example.test/provider-carbon"],
+					},
+					{
+						slotId: "slot-power",
+						value: "milliwatts with architecture caveats",
+						sourceRefs: ["wsrc_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"],
+						sourceUrls: ["https://example.test/nvml"],
+					},
+				],
+				claims: [
+					{
+						claim: "Azure exact carbon-export granularity was not established by retrieved evidence.",
+						factSlotIds: ["slot-provider"],
+						sourceRefs: ["wsrc_dddddddddddddddddddddddddddddddd"],
+						sourceUrls: ["https://example.test/provider-carbon"],
+					},
+					{
+						claim:
+							"A feasible small-SaaS tiering is API-only proxy logging, provider carbon exports, and self-hosted telemetry.",
+						factSlotIds: ["slot-tier"],
+						sourceRefs: ["wsrc_dddddddddddddddddddddddddddddddd"],
+						sourceUrls: ["https://example.test/provider-carbon"],
+					},
+					{
+						claim:
+							"NVML reports GPU power in milliwatts and Ampere except GA100 returns one-second averaged readings.",
+						factSlotIds: ["slot-power"],
+						sourceRefs: ["wsrc_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"],
+						sourceUrls: ["https://example.test/nvml"],
+					},
+				],
+			},
+		},
+	});
+
+	const retrievalGap = result.packet.precisionGuard.claims.find((claim) =>
+		claim.issues.includes("retrieval_gap_inference"),
+	);
+	assert(retrievalGap);
+	assert.equal(retrievalGap.action, "verify_only_if_doc_scoped_or_replace_with_positive_source_claim");
+
+	const derivedRecommendation = result.packet.precisionGuard.claims.find((claim) =>
+		claim.issues.includes("derived_recommendation"),
+	);
+	assert(derivedRecommendation);
+	assert.equal(derivedRecommendation.action, "split_source_atoms_keep_recommendation_caveated");
+
+	assert.equal(
+		result.packet.precisionGuard.claims.some((claim) => claim.claim?.startsWith("NVML reports GPU power")),
+		false,
+	);
 });
 
 test("deep-research final-audit packet compacts deterministic ledgers", async () => {
@@ -11408,6 +11572,135 @@ test("deep-research final-audit packet compacts deterministic ledgers", async ()
 	assert.equal(result.packet.verifierIntegrity.duplicateVerifierRows[0].claimId, "claim-001");
 	assert.equal(result.packet.overflowLedger.omittedVerificationCandidateCount, 1);
 	assert.equal(result.packet.overflowLedger.invalidVerifierRowCount, 1);
+});
+
+test("deep-research P3 final-audit replay fixture preserves guardrail floors", async () => {
+	const fixturePath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"internal",
+		"eval",
+		"deep-research-web-source-20260626",
+		"fixtures",
+		"p3-final-audit-replay.json",
+	);
+	const fixture = JSON.parse(readFileSync(fixturePath, "utf8"));
+	const expectations = fixture.expectations;
+	assert.equal(fixture.provenance.sourceRunId, "workflow_mqyrg95t_740b57");
+
+	const { default: finalAuditPacket } = await import(
+		`../../workflows/deep-research/helpers/final-audit-packet.mjs?test=${Date.now()}`
+	);
+	const packetResult = await finalAuditPacket({ sources: fixture.sources });
+	const packet = packetResult.packet;
+
+	assert.equal(packet.verdictCounts.verified, expectations.verified);
+	assert.equal(
+		packet.verdictCounts.partiallySupported,
+		expectations.partiallySupported,
+	);
+	assert.equal(packet.verdictCounts.unsupported, expectations.unsupported);
+	assert.equal(packet.verdictCounts.conflicting, expectations.conflicting);
+	assert.ok(packet.verdictCounts.verified >= expectations.verifiedFloor);
+	assert.equal(packet.factSlotCoverage.length, expectations.plannedFactSlots);
+	assert.equal(
+		packet.factSlotCoverage.filter((slot) => slot.status === "filled").length,
+		expectations.filledFactSlots,
+	);
+	assert.equal(
+		packet.factSlotCoverage.filter((slot) => slot.status === "partial").length,
+		expectations.partialFactSlots,
+	);
+	assert.equal(
+		packet.factSlotCoverage.filter((slot) => slot.status === "missing").length,
+		expectations.missingFactSlots,
+	);
+	assert.deepEqual(packet.invariantChecks.omittedCandidateIds, []);
+	assert.deepEqual(packet.invariantChecks.droppedSlotIds, []);
+	assert.equal(
+		packet.invariantChecks.sourceRefCoverage.sourceRefJoinFailures,
+		expectations.sourceRefJoinFailures,
+	);
+	assert.equal(packet.invariantChecks.verifierIntegrity.invalidVerifierRows, 0);
+	assert.equal(packet.invariantChecks.verifierIntegrity.duplicateVerifierRows, 0);
+	assert.equal(packet.invariantChecks.verifierIntegrity.missingVerifierResults, 0);
+	assert.equal(packet.overflowLedger.omittedVerificationCandidateCount, 0);
+
+	const plannedSlotIds = fixture.sources["plan.main"].factSlots.map(
+		(slot) => slot.id,
+	);
+	const normalizeSlotIds = fixture.sources[
+		"normalize-claims.main"
+	].factSlotCoverage.map((slot) => slot.slotId);
+	const finalSlotIds = fixture.finalAudit.finalReport.factSlotCoverage.map(
+		(slot) => slot.slotId,
+	);
+	assert.deepEqual(
+		plannedSlotIds.filter((slotId) => !normalizeSlotIds.includes(slotId)),
+		[],
+	);
+	assert.deepEqual(
+		plannedSlotIds.filter((slotId) => !finalSlotIds.includes(slotId)),
+		[],
+	);
+	assert.deepEqual(finalSlotIds, packet.factSlotCoverage.map((slot) => slot.slotId));
+	assert.equal(
+		fixture.finalAudit.finalReport.coverageSummary.verified,
+		expectations.verified,
+	);
+	assert.equal(
+		fixture.finalAudit.claimVerdictIndex.claims.length,
+		expectations.verified,
+	);
+	assert.equal(
+		fixture.finalAudit.claimVerdictIndex.claims.every(
+			(claim) => claim.status === "verified",
+		),
+		true,
+	);
+
+	const cwd = makeProject();
+	try {
+		const helperPath = join(
+			dirname(fileURLToPath(import.meta.url)),
+			"..",
+			"..",
+			"workflows",
+			"deep-research",
+			"helpers",
+			"render-executive.mjs",
+		);
+		const renderExecutive = (
+			await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)
+		).default;
+		const rendered = await renderExecutive({
+			sources: { "final-audit.main": fixture.finalAudit },
+			options: {
+				maxWords: 600,
+				maxUrls: 5,
+				maxFindings: 3,
+				maxRecommendations: 3,
+				maxGaps: 2,
+			},
+			context: { cwd, runId: "workflow_p3_fixture", taskId: "task-final" },
+		});
+		assert.equal(rendered.status, "passed");
+		assert.equal(rendered.gates.passed, true);
+		assert.equal(rendered.claimSummary.verified, expectations.verified);
+		assert.equal(rendered.factSlotSummary.total, expectations.plannedFactSlots);
+		assert.equal(
+			rendered.factSlotSummary.missingOrConflicting,
+			expectations.missingFactSlots,
+		);
+		assert.equal(rendered.sourceUrlCount <= rendered.gates.maxUrls, true);
+		assert.doesNotMatch(
+			JSON.stringify(rendered),
+			/\/Users\/|\.pi\/workflows|web-source-cache/,
+		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
 });
 
 test("deep-research executive renderer emits bounded final and sidecar", async () => {
