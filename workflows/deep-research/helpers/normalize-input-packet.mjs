@@ -238,6 +238,13 @@ function precisionIssuesForClaim(claim, slotMetaById) {
 		issues.push("normative_language");
 	if (includesAny(text, [/\b(?:all|always|never|any|every|guarantees?|proves?|only)\b/i]))
 		issues.push("overbroad_quantifier");
+	if (
+		includesAny(text, [
+			/\b(?:guidance|recommend(?:s|ed|ation)?|requires?|should|must|only|safe\s+only|intended\s+only)\b/i,
+		]) &&
+		includesAny(text, [/;/, /\b(?:and|or|plus|with|while|whereas|but)\b/i])
+	)
+		issues.push("multi_obligation_claim");
 	if (looksQuantitative(text) && sourceRefs.length === 0 && sourceUrls.length === 0)
 		issues.push("quantitative_without_visible_source");
 	if (looksRetrievalGapInference(text)) issues.push("retrieval_gap_inference");
@@ -253,7 +260,12 @@ function precisionAction(issues, { sourceBacked } = {}) {
 	if (issues.includes("retrieval_gap_inference"))
 		return sourceBacked ? "verify_only_if_doc_scoped_or_replace_with_positive_source_claim" : "preserve_as_gap_not_claim";
 	if (issues.includes("derived_recommendation")) return "split_source_atoms_keep_recommendation_caveated";
-	if (issues.includes("bundled_slots") || issues.includes("compound_or_bundled_text") || issues.includes("entity_blend_risk"))
+	if (
+		issues.includes("bundled_slots") ||
+		issues.includes("compound_or_bundled_text") ||
+		issues.includes("multi_obligation_claim") ||
+		issues.includes("entity_blend_risk")
+	)
 		return "split_or_narrow_before_verification";
 	if (issues.includes("normative_language") || issues.includes("overbroad_quantifier")) return "narrow_or_demote";
 	return "eligible_if_slot_relevant";
@@ -316,7 +328,7 @@ function buildPrecisionGuard({ claims, planSlots }) {
 		claims: guardedClaims.filter((claim) => claim.issues.length > 0),
 		instructions: {
 			split:
-				"Claims flagged bundled_slots, compound_or_bundled_text, or entity_blend_risk should be split into atomic slot/entity-specific candidates before verification, while preserving source-backed measurement atoms needed for required slots.",
+				"Claims flagged bundled_slots, compound_or_bundled_text, multi_obligation_claim, or entity_blend_risk should be split into atomic slot/entity-specific candidates before verification, while preserving source-backed measurement atoms needed for required slots.",
 			demote:
 				"Claims flagged normative_language or overbroad_quantifier should be narrowed to a source-backed factual statement or preserved as unverified context rather than promoted as a core recommendation.",
 			sourceGuard:

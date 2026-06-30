@@ -7418,6 +7418,7 @@ test("bundled deep-research compacts audit packets before executive final", asyn
 	const byStage = new Map(compiled.tasks.map((task) => [task.stageId, task]));
 	const normalizeInputPacket = byStage.get("normalize-input-packet");
 	const normalizeClaims = byStage.get("normalize-claims");
+	const auditClaims = byStage.get("audit-claims");
 	const finalAuditPacket = byStage.get("final-audit-packet");
 	const finalAudit = byStage.get("final-audit");
 	const final = byStage.get("final");
@@ -7432,6 +7433,14 @@ test("bundled deep-research compacts audit packets before executive final", asyn
 		"plan.main",
 		"research-questions.item",
 		"normalize-input-packet.main",
+	]);
+
+	assert.equal(auditClaims?.kind, "support");
+	assert.deepEqual(auditClaims.dependsOn, [
+		"plan.main",
+		"normalize-input-packet.main",
+		"normalize-claims.main",
+		"verify-claims.item",
 	]);
 
 	assert.equal(finalAuditPacket?.kind, "support");
@@ -11492,6 +11501,13 @@ test("deep-research normalize input packet distinguishes P1 gap and recommendati
 						sourceRefs: ["wsrc_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"],
 						sourceUrls: ["https://example.test/nvml"],
 					},
+					{
+						claim:
+							"Vendor guidance recommends separating untrusted data and requiring human approval for high-impact actions.",
+						factSlotIds: ["slot-provider"],
+						sourceRefs: ["wsrc_dddddddddddddddddddddddddddddddd"],
+						sourceUrls: ["https://example.test/provider-carbon"],
+					},
 				],
 			},
 		},
@@ -11508,6 +11524,14 @@ test("deep-research normalize input packet distinguishes P1 gap and recommendati
 	);
 	assert(derivedRecommendation);
 	assert.equal(derivedRecommendation.action, "split_source_atoms_keep_recommendation_caveated");
+
+	const multiObligation = result.packet.precisionGuard.claims.find(
+		(claim) =>
+			claim.issues.includes("multi_obligation_claim") &&
+			claim.claim?.startsWith("Vendor guidance recommends"),
+	);
+	assert(multiObligation);
+	assert.equal(multiObligation.action, "split_or_narrow_before_verification");
 
 	assert.equal(
 		result.packet.precisionGuard.claims.some((claim) => claim.claim?.startsWith("NVML reports GPU power")),
@@ -17074,6 +17098,73 @@ test("deep-research claim-evidence-gate enforces structured evidence, rejoins id
 	assert.equal(out.claimDigests.length, 3);
 	assert.deepEqual(out.claimDigests[0].sourceRefs, ["wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]);
 	assert.ok(!("evidence" in out.claimDigests[0]));
+});
+
+test("deep-research claim-evidence-gate backfills sourceRefs from normalize packet source cards", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"claim-evidence-gate.mjs",
+	);
+	const helper = (await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)).default;
+	const out = await helper({
+		sources: {
+			"plan.main": {
+				factSlots: [{ id: "slot-001" }],
+			},
+			"normalize-input-packet.main": {
+				packet: {
+					research: {
+						sources: [
+							{
+								url: "https://Example.test/docs/source/",
+								sourceRef: "wsrc_cccccccccccccccccccccccccccccccc",
+							},
+						],
+					},
+				},
+			},
+			"normalize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [
+						{
+							id: "claim-001",
+							claim: "Official docs support the source-card mapping.",
+							factSlotIds: ["slot-001"],
+							sourceUrls: ["https://example.test/docs/source"],
+						},
+					],
+				},
+				factSlotCoverage: [{ slotId: "slot-001" }],
+			},
+			"verify-claims.claim-001": {
+				id: "claim-001",
+				status: "verified",
+				evidence: [
+					{
+						url: "https://example.test/docs/source,",
+						quote: "Official docs support the source-card mapping.",
+					},
+				],
+			},
+		},
+		options: {
+			requireFetchedEvidenceForVerified: true,
+			downgradeExactQuantitativeWithoutSource: true,
+		},
+	});
+
+	assert.deepEqual(out.statusPartitions.verified, ["claim-001"]);
+	assert.deepEqual(out.auditedClaims[0].sourceRefs, [
+		"wsrc_cccccccccccccccccccccccccccccccc",
+	]);
+	assert.equal(out.gateSummary.sourceRefsBackfilledFromUrls, 1);
+	assert.equal(out.gateSummary.sourceRefJoinFailures, 0);
+	assert.deepEqual(out.sourceRefJoinFailures, []);
 });
 
 test("deep-research verifier schema allows omitted identity echoes", () => {

@@ -93,6 +93,70 @@ function sourceUrlArray(value) {
 	return value.filter((item) => typeof item === "string" && item.trim()).map((item) => item.trim());
 }
 
+function stripCitationUrlPunctuation(value) {
+	return String(value ?? "")
+		.trim()
+		.replace(/[.,;:]+$/u, "");
+}
+
+function canonicalUrlKeys(value) {
+	const raw = stripCitationUrlPunctuation(value);
+	if (!/^https?:\/\//i.test(raw)) return [];
+	const keys = new Set([raw]);
+	try {
+		const url = new URL(raw);
+		url.protocol = url.protocol.toLowerCase();
+		url.hostname = url.hostname.toLowerCase();
+		url.hash = "";
+		const serialized = stripCitationUrlPunctuation(url.toString());
+		keys.add(serialized);
+		if (url.pathname !== "/" && url.pathname.endsWith("/")) {
+			url.pathname = url.pathname.replace(/\/+$/u, "");
+			keys.add(stripCitationUrlPunctuation(url.toString()));
+		}
+	} catch {
+		// Keep the trimmed raw URL key only; malformed strings should not throw from
+		// the evidence gate.
+	}
+	return [...keys].filter(Boolean);
+}
+
+function addUrlSourceRef(urlToSourceRef, url, sourceRef) {
+	if (!isWorkflowSourceRef(sourceRef)) return;
+	for (const key of canonicalUrlKeys(url)) {
+		if (!urlToSourceRef.has(key)) urlToSourceRef.set(key, sourceRef.trim());
+	}
+}
+
+function buildUrlSourceRefLookup(normalizeInputPacket) {
+	const urlToSourceRef = new Map();
+	const sourceCards = asArray(normalizeInputPacket?.packet?.research?.sources);
+	for (const source of sourceCards) {
+		if (!source || typeof source !== "object") continue;
+		addUrlSourceRef(urlToSourceRef, source.url, source.sourceRef);
+	}
+	const sourceRefIndex = asArray(normalizeInputPacket?.packet?.research?.sourceRefIndex);
+	for (const source of sourceRefIndex) {
+		if (!source || typeof source !== "object") continue;
+		addUrlSourceRef(urlToSourceRef, source.url, source.sourceRef);
+	}
+	return urlToSourceRef;
+}
+
+function sourceRefsForUrls(urls, urlToSourceRef) {
+	const refs = [];
+	const seen = new Set();
+	for (const url of urls) {
+		for (const key of canonicalUrlKeys(url)) {
+			const sourceRef = urlToSourceRef.get(key);
+			if (!sourceRef || seen.has(sourceRef)) continue;
+			seen.add(sourceRef);
+			refs.push(sourceRef);
+		}
+	}
+	return refs;
+}
+
 // Structured evidence check: at least one evidence row carrying both a source
 // reference (HTTP URL or local repository file path) and a quote/excerpt. Unlike
 // a keyword scan over the serialized claim, this cannot be satisfied by merely
@@ -292,6 +356,8 @@ function findSource(sources, stageId) {
 export default async function claimEvidenceGate({ sources, options = {} }) {
 	const plan = findSource(sources, "plan");
 	const normalized = findSource(sources, "normalize-claims");
+	const normalizeInputPacket = findSource(sources, "normalize-input-packet");
+	const urlToSourceRef = buildUrlSourceRefLookup(normalizeInputPacket);
 	const candidateRecords = [];
 	const candidatesById = new Map();
 	const invalidNormalizedCandidates = [];
@@ -341,7 +407,8 @@ export default async function claimEvidenceGate({ sources, options = {} }) {
 					.filter(
 						([specId]) =>
 							!specId.startsWith("plan") &&
-							!specId.startsWith("normalize-claims"),
+							!specId.startsWith("normalize-claims") &&
+							!specId.startsWith("normalize-input-packet"),
 					)
 					.flatMap(([sourceId, source]) =>
 						asArray(source).map((claim, index) => ({ sourceId, claim, index })),
@@ -359,6 +426,7 @@ export default async function claimEvidenceGate({ sources, options = {} }) {
 		downgraded: 0,
 		identityRejoined: 0,
 		sourceRefsRejoined: 0,
+		sourceRefsBackfilledFromUrls: 0,
 		sourceRefJoinFailures: 0,
 		verifierRowsTotal: verifierClaims.length,
 		validVerifierRows: 0,
@@ -458,6 +526,20 @@ export default async function claimEvidenceGate({ sources, options = {} }) {
 				workflowSourceRefs.add(sourceRef);
 			if (workflowSourceRefs.size > beforeSourceRefCount)
 				gateSummary.sourceRefsRejoined += 1;
+		}
+		const beforeUrlBackfillSourceRefCount = workflowSourceRefs.size;
+		for (const sourceRef of sourceRefsForUrls(
+			[
+				...sourceUrlArray(candidate?.sourceUrls),
+				...evidenceRefs.filter((ref) => /^https?:\/\//i.test(ref)),
+			],
+			urlToSourceRef,
+		))
+			workflowSourceRefs.add(sourceRef);
+		if (workflowSourceRefs.size > beforeUrlBackfillSourceRefCount) {
+			gateSummary.sourceRefsRejoined += 1;
+			gateSummary.sourceRefsBackfilledFromUrls +=
+				workflowSourceRefs.size - beforeUrlBackfillSourceRefCount;
 		}
 		if (workflowSourceRefs.size > 0) next.sourceRefs = [...workflowSourceRefs];
 		if (
