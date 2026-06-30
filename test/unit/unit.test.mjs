@@ -17167,6 +17167,71 @@ test("deep-research claim-evidence-gate backfills sourceRefs from normalize pack
 	assert.deepEqual(out.sourceRefJoinFailures, []);
 });
 
+test("deep-research claim-evidence-gate does not backfill near-miss source URLs", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"claim-evidence-gate.mjs",
+	);
+	const helper = (await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)).default;
+	const out = await helper({
+		sources: {
+			"plan.main": {
+				factSlots: [{ id: "slot-001" }],
+			},
+			"normalize-input-packet.main": {
+				packet: {
+					research: {
+						sources: [
+							{
+								url: "https://docs.example.test/cli/v10/using-tool/scripts",
+								sourceRef: "wsrc_dddddddddddddddddddddddddddddddd",
+							},
+						],
+					},
+				},
+			},
+			"normalize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [
+						{
+							id: "claim-001",
+							claim: "Versionless docs support the claim.",
+							factSlotIds: ["slot-001"],
+							sourceUrls: ["https://docs.example.test/cli/using-tool/scripts"],
+						},
+					],
+				},
+				factSlotCoverage: [{ slotId: "slot-001" }],
+			},
+			"verify-claims.claim-001": {
+				id: "claim-001",
+				status: "verified",
+				evidence: [
+					{
+						url: "https://docs.example.test/cli/using-tool/scripts",
+						quote: "Versionless docs support the claim.",
+					},
+				],
+			},
+		},
+		options: {
+			requireFetchedEvidenceForVerified: true,
+			downgradeExactQuantitativeWithoutSource: true,
+		},
+	});
+
+	assert.equal(out.statusPartitions.verified.length, 1);
+	assert.equal(out.auditedClaims[0].sourceRefs, undefined);
+	assert.equal(out.gateSummary.sourceRefsBackfilledFromUrls, 0);
+	assert.equal(out.gateSummary.sourceRefJoinFailures, 1);
+	assert.deepEqual(out.sourceRefJoinFailures.map((gap) => gap.claimId), ["claim-001"]);
+});
+
 test("deep-research verifier schema allows omitted identity echoes", () => {
 	const schemaPath = join(
 		dirname(fileURLToPath(import.meta.url)),
