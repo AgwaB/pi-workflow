@@ -11577,6 +11577,11 @@ test("deep-research final-audit packet compacts deterministic ledgers", async ()
 				invalidVerifierRows: [{ sourceId: "verify-claims.bad", reason: "missing_claim_id", status: "verified" }],
 				duplicateVerifierRows: [{ claimId: "claim-001", rowCount: 2, sourceIds: ["verify-claims.a", "verify-claims.b"], statusInputs: ["verified", "verified"], selectedStatus: "verified" }],
 				gateSummary: { missingVerifierResults: 1 },
+				precisionGuardDiagnostics: {
+					totalClaims: 2,
+					flaggedClaims: 1,
+					issueCounts: { multi_obligation_claim: 1 },
+				},
 				slotCoverageCheck: { droppedSlotIds: ["slot-002"] },
 			},
 		},
@@ -11594,6 +11599,9 @@ test("deep-research final-audit packet compacts deterministic ledgers", async ()
 	assert.equal(result.packet.invariantChecks.verifierIntegrity.missingVerifierResults, 1);
 	assert.equal(result.packet.verifierIntegrity.invalidVerifierRows[0].reason, "missing_claim_id");
 	assert.equal(result.packet.verifierIntegrity.duplicateVerifierRows[0].claimId, "claim-001");
+	assert.deepEqual(result.packet.normalizerDiagnostics.precisionGuard.issueCounts, {
+		multi_obligation_claim: 1,
+	});
 	assert.equal(result.packet.overflowLedger.omittedVerificationCandidateCount, 1);
 	assert.equal(result.packet.overflowLedger.invalidVerifierRowCount, 1);
 });
@@ -17030,6 +17038,13 @@ test("deep-research claim-evidence-gate enforces structured evidence, rejoins id
 			"plan.main": {
 				factSlots: [{ id: "slot-001" }, { id: "slot-002" }, { id: "slot-003" }],
 			},
+			"normalize-input-packet.main": {
+				packet: {
+					precisionGuard: {
+						summary: { totalClaims: 3, flaggedClaims: 1, issueCounts: { multi_obligation_claim: 1 } },
+					},
+				},
+			},
 			"normalize-claims.main": {
 				claimInventory: {
 					verificationCandidates: [
@@ -17098,6 +17113,74 @@ test("deep-research claim-evidence-gate enforces structured evidence, rejoins id
 	assert.equal(out.claimDigests.length, 3);
 	assert.deepEqual(out.claimDigests[0].sourceRefs, ["wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]);
 	assert.ok(!("evidence" in out.claimDigests[0]));
+	assert.deepEqual(out.precisionGuardDiagnostics.issueCounts, {
+		multi_obligation_claim: 1,
+	});
+});
+
+test("deep-research claim-evidence-gate enriches downgrade reasons without changing strong-evidence claims", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"claim-evidence-gate.mjs",
+	);
+	const helper = (await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)).default;
+	const out = await helper({
+		sources: {
+			"normalize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [
+						{ id: "claim-001", claim: "Strong source-backed claim." },
+						{ id: "claim-002", claim: "Candidate-only evidence should stay partial." },
+						{ id: "claim-003", claim: "Latency improved by 42 ms." },
+					],
+				},
+				factSlotCoverage: [],
+			},
+			"verify-claims.claim-001": {
+				id: "claim-001",
+				status: "verified",
+				evidence: [{ url: "https://example.test/strong", quote: "Strong source-backed claim." }],
+			},
+			"verify-claims.claim-002": {
+				id: "claim-002",
+				status: "verified",
+				evidence: [
+					{
+						url: "https://example.test/candidate",
+						quote: "Candidate-only evidence should stay partial.",
+						matchType: "terms",
+						candidateOnly: true,
+					},
+				],
+			},
+			"verify-claims.claim-003": {
+				id: "claim-003",
+				status: "verified",
+				evidence: [],
+			},
+		},
+		options: {
+			requireFetchedEvidenceForVerified: true,
+			downgradeExactQuantitativeWithoutSource: true,
+		},
+	});
+
+	assert.deepEqual(out.statusPartitions.verified, ["claim-001"]);
+	assert.deepEqual(out.statusPartitions.partiallySupported, ["claim-002", "claim-003"]);
+	assert.equal(out.verdictCounts.verified, 1);
+	assert.deepEqual(
+		out.remainingGaps.map((gap) => gap.evidenceState).sort(),
+		["candidate_only_evidence_not_strong", "exact_quantitative_without_source_reference"],
+	);
+	assert.equal(
+		out.auditedClaims.find((claim) => claim.id === "claim-001").evidenceGate,
+		undefined,
+	);
 });
 
 test("deep-research claim-evidence-gate backfills sourceRefs from normalize packet source cards", async () => {

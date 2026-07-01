@@ -144,6 +144,7 @@ export default async function finalAuditPacket({ sources }) {
 	const invalidVerifierRows = asArray(audit.invalidVerifierRows).map(compactVerifierIssue);
 	const duplicateVerifierRows = asArray(audit.duplicateVerifierRows).map(compactDuplicateVerifierRow);
 	const gateSummary = asObject(audit.gateSummary);
+	const precisionGuardDiagnostics = asObject(audit.precisionGuardDiagnostics);
 	const sourceRefCoverage = {
 		verificationCandidatesWithSourceRefs: verificationCandidates.filter(
 			(candidate) => compactStrings(candidate?.sourceRefs, 1).length > 0,
@@ -180,6 +181,9 @@ export default async function finalAuditPacket({ sources }) {
 				gateSummary,
 				invalidVerifierRows,
 				duplicateVerifierRows,
+			},
+			normalizerDiagnostics: {
+				precisionGuard: precisionGuardDiagnostics,
 			},
 			preservedClaims: preservedClaims.map((claim) => ({
 				id: idOf(claim),

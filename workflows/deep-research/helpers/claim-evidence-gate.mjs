@@ -186,6 +186,13 @@ function isCandidateEvidenceRow(row) {
 	return row?.candidateOnly === true || row?.matchType === "terms" || row?.sourceRead?.matchType === "terms";
 }
 
+function strongEvidenceIssue(claim) {
+	const rows = Array.isArray(claim?.evidence) ? claim.evidence : [];
+	if (rows.length === 0) return "missing_structured_evidence_rows";
+	if (rows.some(isCandidateEvidenceRow)) return "candidate_only_evidence_not_strong";
+	return "evidence_rows_missing_source_or_quote";
+}
+
 function hasExactQuantitativeClaim(value) {
 	const text = JSON.stringify(value ?? "");
 	return /\b\d+(?:\.\d+)?\s*(?:%|percent|ms|s|sec|seconds|minutes|hours|x|×|usd|\$|k|m|b|tokens?|users?|samples?|n\s*=)\b/i.test(
@@ -203,9 +210,9 @@ function verdictOf(claim) {
 	);
 }
 
-function withVerdict(claim, verdict, reason) {
+function withVerdict(claim, verdict, reason, details = {}) {
 	const previous = verdictOf(claim);
-	const gate = { previous, verdict, reason };
+	const gate = { previous, verdict, reason, ...details };
 	return {
 		...claim,
 		status: verdict,
@@ -566,15 +573,23 @@ export default async function claimEvidenceGate({ sources, options = {} }) {
 		}
 
 		const verdict = verdictOf(next);
+		const exactQuantitativeForGate = exactQuantitative || hasExactQuantitativeClaim(next);
 		if (
 			verdict === "verified" &&
 			options.requireFetchedEvidenceForVerified !== false &&
 			!fetched
 		) {
+			const reasonCode =
+				options.downgradeExactQuantitativeWithoutSource !== false &&
+				exactQuantitativeForGate &&
+				evidenceRefs.length === 0
+					? "exact_quantitative_without_source_reference"
+					: strongEvidenceIssue(next);
 			next = withVerdict(
 				next,
 				"partially_supported",
 				"verified claim lacked structured evidence rows with both source reference and quote",
+				{ reasonCode },
 			);
 		}
 		if (
@@ -587,6 +602,7 @@ export default async function claimEvidenceGate({ sources, options = {} }) {
 				next,
 				"partially_supported",
 				"exact quantitative claim lacked structured source reference evidence",
+				{ reasonCode: "exact_quantitative_without_source_reference" },
 			);
 		}
 
@@ -594,7 +610,8 @@ export default async function claimEvidenceGate({ sources, options = {} }) {
 			gateSummary.downgraded += 1;
 			remainingGaps.push({
 				claimId: next.id ?? next.claimId,
-				evidenceState: "insufficient_for_verified",
+				evidenceState: next.evidenceGate?.reasonCode ?? "insufficient_for_verified",
+				reason: next.evidenceGate?.reason,
 				sourceUrls: evidenceRefs,
 				nextStep:
 					"Fetch or inspect primary source evidence for the exact claim before using it as verified.",
@@ -747,5 +764,6 @@ export default async function claimEvidenceGate({ sources, options = {} }) {
 			droppedSlotIds,
 		},
 		identityJoinNotes,
+		precisionGuardDiagnostics: normalizeInputPacket?.packet?.precisionGuard?.summary,
 	};
 }
