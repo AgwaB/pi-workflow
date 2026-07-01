@@ -10,6 +10,11 @@ import {
 	readRunRecord,
 } from "./store.js";
 import {
+	diagnoseWorkflowRunHealth,
+	diagnoseWorkflowTaskHealth,
+	type WorkflowProgressHealth,
+} from "./workflow-progress-health.js";
+import {
 	type WorkflowIndexRecord,
 	type WorkflowRunRecord,
 	type WorkflowRunStatus,
@@ -341,7 +346,8 @@ export class WorkflowView implements Component {
 	}
 
 	private renderDrilldownHeader(width: number): string[] {
-		const taskSummary = this.mode !== "runs" ? this.detailRun?.taskSummary : undefined;
+		const taskSummary =
+			this.mode !== "runs" ? this.detailRun?.taskSummary : undefined;
 		const active = taskSummary
 			? taskSummary.running
 			: this.flows.filter((flow) => flow.status === "running").length;
@@ -371,6 +377,10 @@ export class WorkflowView implements Component {
 
 	private renderRunsScreen(width: number): string[] {
 		const selected = this.flows[this.selectedFlow];
+		const selectedDetail =
+			selected && this.detailRun?.runId === selected.runId
+				? this.detailRun
+				: undefined;
 		const sideLines = [
 			accent(this.theme, "All runs"),
 			kvRow(this.theme, "total", String(this.flows.length)),
@@ -379,10 +389,19 @@ export class WorkflowView implements Component {
 				"running",
 				String(this.flows.filter((flow) => flow.status === "running").length),
 			),
+			kvRow(
+				this.theme,
+				"needs action",
+				String(
+					this.flows.filter((flow) =>
+						["failed", "blocked", "interrupted"].includes(flow.status),
+					).length,
+				),
+			),
 			"",
 			accent(this.theme, "Selected"),
 			...(selected
-				? this.runSummaryLines(selected)
+				? this.runSummaryLines(selected, selectedDetail)
 				: [placeholder(this.theme, "none")]),
 		];
 		return this.renderTwoPane(
@@ -480,13 +499,14 @@ export class WorkflowView implements Component {
 		run: WorkflowRunRecord,
 		task: WorkflowTaskRunRecord,
 	): string[] {
+		const taskHealth = diagnoseWorkflowTaskHealth(task, run);
 		const lines = [
 			...boxed(
 				this.theme,
 				"Task Detail",
 				width,
 				[
-					`${statusGlyph(this.theme, task.status)} ${strong(this.theme, task.displayName)} ${statusBadge(this.theme, task.status)} ${muted(this.theme, this.breadcrumbText())}`,
+					`${statusGlyph(this.theme, task.status)} ${strong(this.theme, task.displayName)} ${statusBadge(this.theme, task.status)} ${healthInline(this.theme, taskHealth)} ${muted(this.theme, this.breadcrumbText())}`,
 					taskMetaLine(this.theme, [
 						["agent", task.agent],
 						["stage", task.stageId ?? "(none)"],
@@ -498,6 +518,20 @@ export class WorkflowView implements Component {
 			),
 			"",
 		];
+
+		const healthLines = this.taskHealthLines(taskHealth, width - 4);
+		if (healthLines.length > 0) {
+			lines.push(
+				...boxed(
+					this.theme,
+					"Health",
+					width,
+					healthLines,
+					healthColor(taskHealth),
+				),
+				"",
+			);
+		}
 
 		const validationLines = this.taskValidationStripLines(task, width - 4);
 		if (validationLines.length > 0) {
@@ -578,7 +612,9 @@ export class WorkflowView implements Component {
 			);
 		const statusWidth = Math.max(
 			7,
-			...window.rows.map(({ item }) => visibleWidth(statusLabelText(runStatusLabel(item)))),
+			...window.rows.map(({ item }) =>
+				visibleWidth(statusLabelText(runStatusLabel(item))),
+			),
 		);
 		for (const { item: flow, index } of window.rows) {
 			const selected = index === this.selectedFlow;
@@ -587,21 +623,19 @@ export class WorkflowView implements Component {
 			const name = flow.name ?? flow.type;
 			const left = `${prefix}${marker} ${selected ? strong(this.theme, name) : name}`;
 			const runIdText = shortId(flow.runId).slice(0, 16).padEnd(16, " ");
-			const runningText =
-				flow.taskSummary.running > 0
-					? ` ${muted(this.theme, "·")} ${metaLabel(this.theme, "running")} ${metaValue(this.theme, String(flow.taskSummary.running))}`
-					: "";
+			const detailRun =
+				this.detailRun?.runId === flow.runId ? this.detailRun : undefined;
+			const health = diagnoseWorkflowRunHealth(detailRun ?? flow);
+			const healthText =
+				health.state === "completed"
+					? ""
+					: ` ${muted(this.theme, "·")} ${healthLabel(this.theme, health)}`;
 			const baseRight = `${statusColumn(this.theme, flow.status, runStatusLabel(flow), statusWidth)}  ${progressBar(this.theme, flow.taskSummary, 5)} ${metaValue(this.theme, runIdText)}`;
 			const right =
 				width >= 90
-					? `${baseRight} ${muted(this.theme, "·")} ${metaLabel(this.theme, "start")} ${metaValue(this.theme, timestampText(flow.createdAt))}${runningText}`
-					: `${baseRight}${runningText}`;
-			const line = joinColumns(
-				left,
-				right,
-				width,
-				17,
-			);
+					? `${baseRight} ${muted(this.theme, "·")} ${metaLabel(this.theme, "start")} ${metaValue(this.theme, timestampText(flow.createdAt))}${healthText}`
+					: `${baseRight}${healthText}`;
+			const line = joinColumns(left, right, width, 17);
 			lines.push(selectedLine(this.theme, line, width, selected, true));
 		}
 		if (window.hiddenAfter > 0)
@@ -667,7 +701,11 @@ export class WorkflowView implements Component {
 			const selected = index === this.selectedTask;
 			const prefix = selected ? accent(this.theme, "› ") : "  ";
 			const left = `${prefix}${statusGlyph(this.theme, task.status)} ${selected ? strong(this.theme, task.displayName) : task.displayName}`;
-			const right = taskListStatusLabel(this.theme, task);
+			const right = taskListStatusLabel(
+				this.theme,
+				task,
+				diagnoseWorkflowTaskHealth(task, run),
+			);
 			const line = joinColumns(
 				left,
 				metaByStatus(this.theme, task.status, right),
@@ -684,7 +722,6 @@ export class WorkflowView implements Component {
 			? lines
 			: [placeholder(this.theme, "  no tasks in selected stage")];
 	}
-
 
 	private taskIdentityLines(
 		run: WorkflowRunRecord,
@@ -762,6 +799,48 @@ export class WorkflowView implements Component {
 		return lines.map((line) => fit(line, width));
 	}
 
+	private taskHealthLines(
+		health: WorkflowProgressHealth,
+		width: number,
+	): string[] {
+		if (health.state === "completed" || health.state === "pending") return [];
+		const lines = [
+			`${healthGlyph(this.theme, health)} ${healthLabel(this.theme, health)} ${muted(this.theme, health.summary)}`,
+			kvRow(this.theme, "suggested", health.suggestion, healthColor(health)),
+			kvRow(this.theme, "why", health.reason),
+		];
+		if (health.currentTask?.elapsedMs !== undefined)
+			lines.splice(
+				1,
+				0,
+				kvRow(
+					this.theme,
+					"elapsed",
+					formatDuration(health.currentTask.elapsedMs),
+				),
+			);
+		if (health.durationClass)
+			lines.push(
+				kvRow(this.theme, "duration", `${health.durationClass} expected`),
+			);
+		if (health.heartbeatAgeMs !== undefined)
+			lines.push(
+				kvRow(
+					this.theme,
+					"heartbeat",
+					`${formatDuration(health.heartbeatAgeMs)} ago`,
+				),
+			);
+		if (health.lastActivityAgeMs !== undefined)
+			lines.push(
+				kvRow(
+					this.theme,
+					"activity",
+					`${formatDuration(health.lastActivityAgeMs)} ago`,
+				),
+			);
+		return lines.map((line) => fit(line, width));
+	}
 
 	private taskValidationStripLines(
 		task: WorkflowTaskRunRecord,
@@ -770,10 +849,7 @@ export class WorkflowView implements Component {
 		const summary = taskValidationSummary(task);
 		if (!summary) return [];
 		return [
-			fit(
-				validationLine(this.theme, summary.status, summary.message),
-				width,
-			),
+			fit(validationLine(this.theme, summary.status, summary.message), width),
 		];
 	}
 
@@ -790,9 +866,7 @@ export class WorkflowView implements Component {
 		const maxStart = Math.max(0, total - TASK_ARTIFACT_VIEW_LINES);
 		const start = Math.min(this.artifactScrollLine, maxStart);
 		const end =
-			total === 0
-				? 0
-				: Math.min(total, start + TASK_ARTIFACT_VIEW_LINES);
+			total === 0 ? 0 : Math.min(total, start + TASK_ARTIFACT_VIEW_LINES);
 		const visible =
 			total === 0
 				? [
@@ -861,7 +935,6 @@ export class WorkflowView implements Component {
 	private resetArtifactScroll(): void {
 		this.artifactScrollLine = 0;
 	}
-
 
 	private moveModeSelection(delta: number): void {
 		if (this.mode === "runs") {
@@ -1005,10 +1078,10 @@ export class WorkflowView implements Component {
 
 	private syncSelectedTaskId(tasks?: WorkflowTaskRunRecord[]): void {
 		const stageTasks =
-			tasks ?? (this.detailRun ? this.tasksForSelectedStage(this.detailRun) : []);
+			tasks ??
+			(this.detailRun ? this.tasksForSelectedStage(this.detailRun) : []);
 		this.selectedTaskId = stageTasks[this.selectedTask]?.taskId ?? "";
 	}
-
 
 	private breadcrumbText(): string {
 		const parts = ["workflow"];
@@ -1025,7 +1098,11 @@ export class WorkflowView implements Component {
 		return parts.join(" › ");
 	}
 
-	private runSummaryLines(flow: WorkflowSummary): string[] {
+	private runSummaryLines(
+		flow: WorkflowSummary,
+		detailRun?: WorkflowRunRecord,
+	): string[] {
+		const health = diagnoseWorkflowRunHealth(detailRun ?? flow);
 		return [
 			`${statusGlyph(this.theme, flow.status)} ${strong(this.theme, flow.name ?? flow.type)} ${statusBadge(this.theme, flow.status, runStatusLabel(flow))}`,
 			progressBar(this.theme, flow.taskSummary, 8),
@@ -1048,10 +1125,43 @@ export class WorkflowView implements Component {
 					),
 				],
 			]),
+			...this.runHealthLines(health),
 		];
 	}
 
+	private runHealthLines(health: WorkflowProgressHealth): string[] {
+		if (health.state === "completed") return [];
+		const lines = [
+			"",
+			accent(this.theme, "Health"),
+			`${healthGlyph(this.theme, health)} ${healthLabel(this.theme, health)} ${muted(this.theme, health.summary)}`,
+		];
+		if (health.currentTask?.displayName)
+			lines.push(kvRow(this.theme, "current", health.currentTask.displayName));
+		if (health.lastActivityAgeMs !== undefined)
+			lines.push(
+				kvRow(
+					this.theme,
+					"activity",
+					`${formatDuration(health.lastActivityAgeMs)} ago`,
+				),
+			);
+		if (health.heartbeatAgeMs !== undefined)
+			lines.push(
+				kvRow(
+					this.theme,
+					"heartbeat",
+					`${formatDuration(health.heartbeatAgeMs)} ago`,
+				),
+			);
+		lines.push(
+			kvRow(this.theme, "suggested", health.suggestion, healthColor(health)),
+		);
+		return lines;
+	}
+
 	private runDetailSummaryLines(run: WorkflowRunRecord): string[] {
+		const health = diagnoseWorkflowRunHealth(run);
 		const lines = [
 			`${statusGlyph(this.theme, run.status)} ${strong(this.theme, run.name ?? run.type)} ${statusBadge(this.theme, run.status)}`,
 			progressBar(this.theme, run.taskSummary, 10),
@@ -1071,6 +1181,7 @@ export class WorkflowView implements Component {
 				["updated", timestampText(run.updatedAt)],
 			]),
 			kvRow(this.theme, "run", shortId(run.runId)),
+			...this.runHealthLines(health),
 		];
 		if (run.fanout && run.fanout.length > 0) {
 			lines.push("", accent(this.theme, "Fanout"));
@@ -1197,7 +1308,6 @@ function runToSummary(cwd: string, run: WorkflowRunRecord): WorkflowSummary {
 	};
 }
 
-
 async function readFileLinesBounded(
 	cwd: string,
 	projectPath: string | undefined,
@@ -1255,7 +1365,9 @@ function summarizeTasks(tasks: WorkflowTaskRunRecord[]): TaskSummary {
 	return summary;
 }
 
-function statusForSummary(summary: TaskSummary): WorkflowRunStatus | TaskRunStatus {
+function statusForSummary(
+	summary: TaskSummary,
+): WorkflowRunStatus | TaskRunStatus {
 	if (summary.running > 0) return "running";
 	if (summary.blocked > 0) return "blocked";
 	if (summary.failed > 0 || summary.interrupted > 0) return "failed";
@@ -1364,7 +1476,10 @@ function statusColumn(
 	width: number,
 ): string {
 	const normalized = statusLabelText(label);
-	return padAnsi(fg(theme, statusColor(status), strong(theme, normalized)), width);
+	return padAnsi(
+		fg(theme, statusColor(status), strong(theme, normalized)),
+		width,
+	);
 }
 
 function statusLabelText(label: string): string {
@@ -1384,9 +1499,10 @@ function progressBar(
 	cells: number,
 ): string {
 	const safeCells = Math.max(1, cells);
-	const visibleProgress = summary.running > 0
-		? summary.completed + summary.running
-		: summary.completed;
+	const visibleProgress =
+		summary.running > 0
+			? summary.completed + summary.running
+			: summary.completed;
 	const filled =
 		summary.total <= 0
 			? 0
@@ -1420,9 +1536,31 @@ function statusText(status: WorkflowRunStatus | TaskRunStatus): string {
 	return status;
 }
 
+function healthColor(health: WorkflowProgressHealth): string {
+	return health.tone;
+}
+
+function healthGlyph(theme: Theme, health: WorkflowProgressHealth): string {
+	if (health.tone === "success") return success(theme, "✓");
+	if (health.tone === "warning") return warning(theme, "●");
+	if (health.tone === "error") return errorText(theme, "●");
+	if (health.tone === "dim") return muted(theme, "•");
+	return accent(theme, "●");
+}
+
+function healthLabel(theme: Theme, health: WorkflowProgressHealth): string {
+	return fg(theme, healthColor(health), strong(theme, health.label));
+}
+
+function healthInline(theme: Theme, health: WorkflowProgressHealth): string {
+	if (health.state === "completed" || health.state === "pending") return "";
+	return `${healthGlyph(theme, health)} ${healthLabel(theme, health)}`;
+}
+
 function taskListStatusLabel(
 	theme: Theme,
 	task: WorkflowTaskRunRecord,
+	health: WorkflowProgressHealth,
 ): string {
 	const validation = taskValidationSummary(task);
 	const label =
@@ -1432,8 +1570,14 @@ function taskListStatusLabel(
 				? "valid"
 				: task.status === "completed"
 					? "done"
-					: statusText(task.status);
-	return fg(theme, statusColor(task.status), strong(theme, label));
+					: task.status === "running"
+						? health.label
+						: statusText(task.status);
+	const suffix =
+		task.status === "running" && health.currentTask?.elapsedMs !== undefined
+			? ` ${muted(theme, "·")} ${metaValue(theme, formatDuration(health.currentTask.elapsedMs))}`
+			: "";
+	return `${fg(theme, task.status === "running" ? healthColor(health) : statusColor(task.status), strong(theme, label))}${suffix}`;
 }
 
 function compactStatusLabel(
@@ -1451,7 +1595,6 @@ function runStatusLabel(flow: WorkflowSummary): string {
 function shortId(runId: string): string {
 	return runId.replace(/^workflow_/, "workflow_").slice(0, 24);
 }
-
 
 function visibleWindow<T>(
 	items: T[],
@@ -1518,7 +1661,7 @@ function taskValidationSummary(
 	const issueMessage =
 		typeof issue === "string"
 			? issue
-			: issue?.message ?? issue?.path ?? issue?.code ?? "";
+			: (issue?.message ?? issue?.path ?? issue?.code ?? "");
 	const message = validation.message ?? validation.reason ?? issueMessage;
 	if (status === "valid" && !message) return undefined;
 	return { status, message };
@@ -1726,7 +1869,10 @@ function truncateToWidth(text: string, width: number): string {
 	if (safeWidth === 0) return "";
 	if (visibleWidth(text) <= safeWidth) return text;
 
-	const hasAnsi = text.includes("\u001b[") || text.includes("\u001b]") || text.includes("\u001b_");
+	const hasAnsi =
+		text.includes("\u001b[") ||
+		text.includes("\u001b]") ||
+		text.includes("\u001b_");
 	const ellipsis = "…";
 	const ellipsisWidth = visibleWidth(ellipsis);
 	const limit = Math.max(0, safeWidth - ellipsisWidth);
@@ -1904,7 +2050,6 @@ function pathText(theme: Theme, projectPath: string): string {
 	if (lastSlash < 0) return fg(theme, "mdLinkUrl", projectPath);
 	return `${dim(theme, projectPath.slice(0, lastSlash + 1))}${metaValue(theme, projectPath.slice(lastSlash + 1))}`;
 }
-
 
 function navHint(theme: Theme, text: string): string {
 	return text

@@ -43,6 +43,10 @@ import {
 	listWorkflows,
 	resolveWorkflowRef,
 } from "../../.tmp/unit/workflow-specs.js";
+import {
+	diagnoseWorkflowRunHealth,
+	diagnoseWorkflowTaskHealth,
+} from "../../.tmp/unit/workflow-progress-health.js";
 import { WorkflowView } from "../../.tmp/unit/workflow-view.js";
 import { resolveWorkflowRuntime } from "../../.tmp/unit/workflow-runtime.js";
 import {
@@ -20507,12 +20511,17 @@ function workflowViewTask(overrides = {}) {
 			warning: null,
 		},
 		backendTaskId: `backend-${taskId}`,
-		kind: "task",
+		kind: overrides.kind ?? "task",
 		stageId: overrides.stageId ?? "verify",
-		startedAt: "2026-06-17T06:00:00.000Z",
+		startedAt: overrides.startedAt ?? "2026-06-17T06:00:00.000Z",
 		completedAt:
-			overrides.status === "running" ? undefined : "2026-06-17T06:01:00.000Z",
-		elapsedMs: 60_000,
+			overrides.completedAt ??
+			(overrides.status === "running" ? undefined : "2026-06-17T06:01:00.000Z"),
+		elapsedMs: Object.hasOwn(overrides, "elapsedMs")
+			? overrides.elapsedMs
+			: 60_000,
+		backendHandle: overrides.backendHandle,
+		pid: overrides.pid,
 		files: {
 			systemPrompt: `.pi/workflows/workflow_ui/tasks/${taskId}/system.md`,
 			taskPrompt: `.pi/workflows/workflow_ui/tasks/${taskId}/prompt.md`,
@@ -20586,6 +20595,147 @@ function workflowViewFixture(tasks) {
 function workflowViewText(view, width = 118) {
 	return view.render(width).join("\n");
 }
+
+test("workflow progress health classifies fresh long-running audit as long-tail active", () => {
+	const nowMs = Date.parse("2026-07-01T12:20:00.000Z");
+	const task = workflowViewTask({
+		status: "running",
+		displayName: "final-audit.main",
+		stageId: "final-audit",
+		startedAt: "2026-07-01T12:00:00.000Z",
+		lastMessage: "pi-subagent heartbeat 2026-07-01T12:19:30.000Z",
+		backendHandle: { engine: "pi-subagent" },
+	});
+	const run = workflowViewRun([task]);
+	run.updatedAt = "2026-07-01T12:19:30.000Z";
+
+	const health = diagnoseWorkflowRunHealth(run, { nowMs });
+	assert.equal(health.state, "long-tail");
+	assert.equal(health.label, "long-tail active");
+	assert.equal(health.suggestion, "wait");
+	assert.equal(health.heartbeatAgeMs, 30_000);
+});
+
+test("workflow progress health flags stale running task without backend signal", () => {
+	const nowMs = Date.parse("2026-07-01T13:00:00.000Z");
+	const health = diagnoseWorkflowTaskHealth(
+		workflowViewTask({
+			status: "running",
+			displayName: "final-audit.main",
+			stageId: "final-audit",
+			startedAt: "2026-07-01T11:00:00.000Z",
+			lastMessage: undefined,
+		}),
+		{ updatedAt: "2026-07-01T11:30:00.000Z" },
+		{ nowMs },
+	);
+
+	assert.equal(health.state, "likely-stuck");
+	assert.equal(health.suggestion, "resume");
+});
+
+test("workflow TUI renders health in task list and detail", () => {
+	const heartbeat = new Date(Date.now() - 30_000).toISOString();
+	const startedAt = new Date(Date.now() - 10 * 60_000).toISOString();
+	const task = workflowViewTask({
+		status: "running",
+		displayName: "final-audit.main",
+		stageId: "final-audit",
+		startedAt,
+		elapsedMs: undefined,
+		lastMessage: `pi-subagent heartbeat ${heartbeat}`,
+		backendHandle: { engine: "pi-subagent" },
+	});
+	const { view, run } = workflowViewFixture([task]);
+	run.updatedAt = heartbeat;
+
+	view.mode = "tasks";
+	let rendered = workflowViewText(view, 132);
+	assert.match(rendered, /long-tail active/);
+
+	view.mode = "task";
+	rendered = workflowViewText(view, 132);
+	assert.match(rendered, /Health/);
+	assert.match(rendered, /long-tail active/);
+	assert.match(rendered, /suggested:\s+wait/);
+});
+
+test("workflow TUI renders selected run health without status-command detours", () => {
+	const heartbeat = new Date(Date.now() - 25_000).toISOString();
+	const task = workflowViewTask({
+		status: "running",
+		displayName: "final-audit.main",
+		stageId: "final-audit",
+		startedAt: new Date(Date.now() - 12 * 60_000).toISOString(),
+		elapsedMs: undefined,
+		lastMessage: `pi-subagent heartbeat ${heartbeat}`,
+		backendHandle: { engine: "pi-subagent" },
+	});
+	const { view, run } = workflowViewFixture([task]);
+	run.updatedAt = heartbeat;
+	view.flows = [workflowViewSummary(run)];
+	view.mode = "runs";
+
+	const rendered = workflowViewText(view, 132);
+	assert.match(rendered, /needs action:\s+0/);
+	assert.match(rendered, /Health/);
+	assert.match(rendered, /long-tail active/);
+	assert.match(rendered, /current:\s+final-audit\.main/);
+	assert.match(rendered, /suggested:\s+wait/);
+	assert.doesNotMatch(rendered, /workflow status|\/workflow status/);
+});
+
+test("workflow TUI renders likely-stuck guidance and keeps narrow widths bounded", () => {
+	const task = workflowViewTask({
+		status: "running",
+		displayName: "final-audit.main",
+		stageId: "final-audit",
+		startedAt: new Date(Date.now() - 2 * 60 * 60_000).toISOString(),
+		elapsedMs: undefined,
+		lastMessage: undefined,
+	});
+	const { view, run } = workflowViewFixture([task]);
+	run.updatedAt = new Date(Date.now() - 70 * 60_000).toISOString();
+	view.flows = [workflowViewSummary(run)];
+	view.mode = "task";
+
+	const rendered = workflowViewText(view, 132);
+	assert.match(rendered, /likely stuck/);
+	assert.match(rendered, /suggested:\s+resume/);
+	assert.match(rendered, /no fresh backend or activity signal/);
+
+	for (const mode of ["runs", "stages", "tasks", "task"]) {
+		view.mode = mode;
+		for (const width of [132, 86, 40, 20]) {
+			const lines = view.render(width);
+			for (const [index, line] of lines.entries()) {
+				assert.ok(
+					testVisibleWidth(line) <= width,
+					`${mode} line ${index} exceeds width ${width}: ${testVisibleWidth(line)} > ${width}`,
+				);
+			}
+		}
+	}
+});
+
+test("workflow progress health treats runtime budget overrun as resumable", () => {
+	const nowMs = Date.parse("2026-07-01T12:10:00.000Z");
+	const health = diagnoseWorkflowTaskHealth(
+		workflowViewTask({
+			status: "running",
+			displayName: "render-executive.main",
+			stageId: "render",
+			startedAt: "2026-07-01T12:00:00.000Z",
+			runtime: { maxRuntimeMs: 60_000 },
+		}),
+		{ updatedAt: "2026-07-01T12:09:50.000Z" },
+		{ nowMs },
+	);
+
+	assert.equal(health.state, "likely-stuck");
+	assert.equal(health.label, "runtime exceeded");
+	assert.equal(health.suggestion, "resume");
+});
 
 test("workflow task detail switches between output and prompt artifacts", () => {
 	const task = workflowViewTask({
