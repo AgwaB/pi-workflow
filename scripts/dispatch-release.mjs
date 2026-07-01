@@ -41,9 +41,16 @@ if (divergence !== "0\t0") {
 	process.exit(1);
 }
 
+const workflowFile = "publish.yml";
+const headSha = capture("git", ["rev-parse", "HEAD"]).trim();
+const previousRunIds = watch ? listWorkflowDispatchRunIds(workflowFile, headSha) : new Set();
+
 console.log(`Dispatching Publish for ${pkg.name}@${version} on origin/main...`);
-run("gh", ["workflow", "run", "publish.yml", "--ref", "main", "-f", `version=${version}`]);
-if (watch) run("gh", ["run", "watch"]);
+run("gh", ["workflow", "run", workflowFile, "--ref", "main", "-f", `version=${version}`]);
+if (watch) {
+	const runId = waitForNewWorkflowDispatchRunId(workflowFile, headSha, previousRunIds);
+	run("gh", ["run", "watch", runId, "--exit-status"]);
+}
 
 function run(command, args) {
 	console.log(`$ ${[command, ...args].join(" ")}`);
@@ -58,4 +65,43 @@ function capture(command, args) {
 		process.exit(result.status ?? 1);
 	}
 	return result.stdout;
+}
+
+function waitForNewWorkflowDispatchRunId(workflowFile, headSha, previousRunIds) {
+	console.log(`Waiting for dispatched ${workflowFile} run on ${headSha.slice(0, 12)}...`);
+	for (let attempt = 0; attempt < 30; attempt += 1) {
+		const runIds = listWorkflowDispatchRunIds(workflowFile, headSha);
+		for (const runId of runIds) {
+			if (!previousRunIds.has(runId)) return runId;
+		}
+		sleep(2_000);
+	}
+	console.error(`Timed out waiting for dispatched ${workflowFile} run on ${headSha}.`);
+	process.exit(1);
+}
+
+function listWorkflowDispatchRunIds(workflowFile, headSha) {
+	const output = capture("gh", [
+		"run",
+		"list",
+		"--workflow",
+		workflowFile,
+		"--branch",
+		"main",
+		"--limit",
+		"20",
+		"--json",
+		"databaseId,event,headSha,createdAt",
+	]);
+	const runs = JSON.parse(output);
+	return new Set(
+		runs
+			.filter((run) => run.event === "workflow_dispatch" && run.headSha === headSha)
+			.sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)))
+			.map((run) => String(run.databaseId)),
+	);
+}
+
+function sleep(ms) {
+	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
