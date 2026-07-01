@@ -16,7 +16,11 @@ function findSource(sources, stageId) {
 
 function researchSources(sources) {
 	return Object.entries(sources ?? {})
-		.filter(([specId]) => specId === "research-questions" || specId.startsWith("research-questions."))
+		.filter(
+			([specId]) =>
+				specId === "research-questions" ||
+				specId.startsWith("research-questions."),
+		)
 		.map(([sourceId, source]) => ({ sourceId, source: asObject(source) }));
 }
 
@@ -25,7 +29,9 @@ function asArray(value) {
 }
 
 function asObject(value) {
-	return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+	return value && typeof value === "object" && !Array.isArray(value)
+		? value
+		: {};
 }
 
 function stringOf(value) {
@@ -97,7 +103,11 @@ function compactClaim(claim, sourceId, index) {
 	const item = asObject(claim);
 	const id = stringOf(item.id);
 	return {
-		...(id ? { id } : { originLocator: `${sourceId}.claim-${String(index + 1).padStart(3, "0")}` }),
+		...(id
+			? { id }
+			: {
+					originLocator: `${sourceId}.claim-${String(index + 1).padStart(3, "0")}`,
+				}),
 		sourceId,
 		claim: stringOf(item.claim)?.slice(0, 600),
 		sourceUrls: compactStrings(item.sourceUrls, 6),
@@ -114,7 +124,11 @@ function compactSource(source, sourceId, index) {
 	const item = asObject(source);
 	const id = stringOf(item.id);
 	return {
-		...(id ? { id } : { originLocator: `${sourceId}.source-${String(index + 1).padStart(3, "0")}` }),
+		...(id
+			? { id }
+			: {
+					originLocator: `${sourceId}.source-${String(index + 1).padStart(3, "0")}`,
+				}),
 		sourceId,
 		url: stringOf(item.url),
 		sourceRef: stringOf(item.sourceRef),
@@ -129,7 +143,11 @@ function compactGap(gap, sourceId, index) {
 	const item = asObject(gap);
 	const id = stringOf(item.id);
 	return {
-		...(id ? { id } : { originLocator: `${sourceId}.gap-${String(index + 1).padStart(3, "0")}` }),
+		...(id
+			? { id }
+			: {
+					originLocator: `${sourceId}.gap-${String(index + 1).padStart(3, "0")}`,
+				}),
 		sourceId,
 		lead: stringOf(item.lead ?? item.claim ?? item.note)?.slice(0, 500),
 		sourceUrls: compactStrings(item.sourceUrls, 6),
@@ -158,13 +176,24 @@ function countBy(values, keyFn) {
 function overflowBySlot({ extractedFacts, claims, evidenceGaps }) {
 	return {
 		factsBySlot: countBy(extractedFacts, (fact) => fact.slotId),
-		claimsBySlot: countBy(claims.flatMap((claim) => claim.factSlotIds.map((slotId) => ({ slotId }))), (item) => item.slotId),
-		evidenceGapsBySlot: countBy(evidenceGaps.flatMap((gap) => gap.factSlotIds.map((slotId) => ({ slotId }))), (item) => item.slotId),
+		claimsBySlot: countBy(
+			claims.flatMap((claim) =>
+				claim.factSlotIds.map((slotId) => ({ slotId })),
+			),
+			(item) => item.slotId,
+		),
+		evidenceGapsBySlot: countBy(
+			evidenceGaps.flatMap((gap) =>
+				gap.factSlotIds.map((slotId) => ({ slotId })),
+			),
+			(item) => item.slotId,
+		),
 	};
 }
 
 function sourceRefCoverage(items) {
-	return items.filter((item) => compactStrings(item.sourceRefs, 1).length > 0).length;
+	return items.filter((item) => compactStrings(item.sourceRefs, 1).length > 0)
+		.length;
 }
 
 const CRITICAL_SLOT_TYPES = new Set([
@@ -230,13 +259,25 @@ function precisionIssuesForClaim(claim, slotMetaById) {
 	const sourceUrls = compactStrings(claim.sourceUrls, 1);
 	const issues = [];
 	if (factSlotIds.length === 0) issues.push("unslotted_claim");
-	if (factSlotIds.some((slotId) => !slotMetaById.has(slotId))) issues.push("unknown_slot_id");
+	if (factSlotIds.some((slotId) => !slotMetaById.has(slotId)))
+		issues.push("unknown_slot_id");
 	if (factSlotIds.length > 1) issues.push("bundled_slots");
-	if (includesAny(text, [/;/, /\b(?:and|plus|while|whereas|but)\b/i]) && factSlotIds.length > 1)
+	if (
+		includesAny(text, [/;/, /\b(?:and|plus|while|whereas|but)\b/i]) &&
+		factSlotIds.length > 1
+	)
 		issues.push("compound_or_bundled_text");
-	if (includesAny(text, [/\b(?:should|must|best|ideal|recommended|recommendation|prefer|ought)\b/i]))
+	if (
+		includesAny(text, [
+			/\b(?:should|must|best|ideal|recommended|recommendation|prefer|ought)\b/i,
+		])
+	)
 		issues.push("normative_language");
-	if (includesAny(text, [/\b(?:all|always|never|any|every|guarantees?|proves?|only)\b/i]))
+	if (
+		includesAny(text, [
+			/\b(?:all|always|never|any|every|guarantees?|proves?|only)\b/i,
+		])
+	)
 		issues.push("overbroad_quantifier");
 	if (
 		includesAny(text, [
@@ -245,21 +286,34 @@ function precisionIssuesForClaim(claim, slotMetaById) {
 		includesAny(text, [/;/, /\b(?:and|or|plus|with|while|whereas|but)\b/i])
 	)
 		issues.push("multi_obligation_claim");
-	if (looksQuantitative(text) && sourceRefs.length === 0 && sourceUrls.length === 0)
+	if (
+		looksQuantitative(text) &&
+		sourceRefs.length === 0 &&
+		sourceUrls.length === 0
+	)
 		issues.push("quantitative_without_visible_source");
 	if (looksRetrievalGapInference(text)) issues.push("retrieval_gap_inference");
 	if (looksDerivedRecommendation(text)) issues.push("derived_recommendation");
 	const mentionedEntities = entityMentions(text, [...slotMetaById.values()]);
-	if (mentionedEntities.length > 1 && includesAny(text, [/\b(?:better|cheaper|faster|slower|higher|lower|vs\.?|versus|than)\b/i]))
+	if (
+		mentionedEntities.length > 1 &&
+		includesAny(text, [
+			/\b(?:better|cheaper|faster|slower|higher|lower|vs\.?|versus|than)\b/i,
+		])
+	)
 		issues.push("entity_blend_risk");
 	return [...new Set(issues)];
 }
 
 function precisionAction(issues, { sourceBacked } = {}) {
-	if (issues.includes("quantitative_without_visible_source")) return "preserve_or_gap_until_source_backed";
+	if (issues.includes("quantitative_without_visible_source"))
+		return "preserve_or_gap_until_source_backed";
 	if (issues.includes("retrieval_gap_inference"))
-		return sourceBacked ? "verify_only_if_doc_scoped_or_replace_with_positive_source_claim" : "preserve_as_gap_not_claim";
-	if (issues.includes("derived_recommendation")) return "split_source_atoms_keep_recommendation_caveated";
+		return sourceBacked
+			? "verify_only_if_doc_scoped_or_replace_with_positive_source_claim"
+			: "preserve_as_gap_not_claim";
+	if (issues.includes("derived_recommendation"))
+		return "split_source_atoms_keep_recommendation_caveated";
 	if (
 		issues.includes("bundled_slots") ||
 		issues.includes("compound_or_bundled_text") ||
@@ -267,7 +321,11 @@ function precisionAction(issues, { sourceBacked } = {}) {
 		issues.includes("entity_blend_risk")
 	)
 		return "split_or_narrow_before_verification";
-	if (issues.includes("normative_language") || issues.includes("overbroad_quantifier")) return "narrow_or_demote";
+	if (
+		issues.includes("normative_language") ||
+		issues.includes("overbroad_quantifier")
+	)
+		return "narrow_or_demote";
 	return "eligible_if_slot_relevant";
 }
 
@@ -280,35 +338,59 @@ function buildSlotPreservation({ planSlots, extractedFacts }) {
 		facts.push(fact);
 		factsBySlot.set(slotId, facts);
 	}
-	const requiredOrCriticalSlots = planSlots.filter(isRequiredOrCriticalSlot).map((slot) => {
-		const slotId = planSlotKey(slot);
-		const facts = factsBySlot.get(slotId) ?? [];
-		return {
-			slotId,
-			label: stringOf(slot.label),
-			type: stringOf(slot.type),
-			required: slot.required === true,
-			sourcePriority: stringOf(slot.sourcePriority),
-			verificationPriority: stringOf(slot.verificationPriority),
-			observationCount: facts.length,
-			representativeFactIds: compactStrings(facts.map((fact) => fact.id), 4),
-			sourceRefs: compactStrings(facts.flatMap((fact) => fact.sourceRefs), 6),
-			sourceUrls: compactStrings(facts.flatMap((fact) => fact.sourceUrls), 6),
-			preservationNeed: facts.length > 0 ? "select_or_preserve_exact_slot_evidence" : "record_explicit_gap",
-		};
-	});
+	const requiredOrCriticalSlots = planSlots
+		.filter(isRequiredOrCriticalSlot)
+		.map((slot) => {
+			const slotId = planSlotKey(slot);
+			const facts = factsBySlot.get(slotId) ?? [];
+			return {
+				slotId,
+				label: stringOf(slot.label),
+				type: stringOf(slot.type),
+				required: slot.required === true,
+				sourcePriority: stringOf(slot.sourcePriority),
+				verificationPriority: stringOf(slot.verificationPriority),
+				observationCount: facts.length,
+				representativeFactIds: compactStrings(
+					facts.map((fact) => fact.id),
+					4,
+				),
+				sourceRefs: compactStrings(
+					facts.flatMap((fact) => fact.sourceRefs),
+					6,
+				),
+				sourceUrls: compactStrings(
+					facts.flatMap((fact) => fact.sourceUrls),
+					6,
+				),
+				preservationNeed:
+					facts.length > 0
+						? "select_or_preserve_exact_slot_evidence"
+						: "record_explicit_gap",
+			};
+		});
 	return {
 		requiredOrCriticalSlots,
-		slotsWithEvidence: requiredOrCriticalSlots.filter((slot) => slot.observationCount > 0).map((slot) => slot.slotId),
-		missingRequiredOrCriticalSlots: requiredOrCriticalSlots.filter((slot) => slot.observationCount === 0).map((slot) => slot.slotId),
+		slotsWithEvidence: requiredOrCriticalSlots
+			.filter((slot) => slot.observationCount > 0)
+			.map((slot) => slot.slotId),
+		missingRequiredOrCriticalSlots: requiredOrCriticalSlots
+			.filter((slot) => slot.observationCount === 0)
+			.map((slot) => slot.slotId),
 	};
 }
 
 function buildPrecisionGuard({ claims, planSlots }) {
-	const slotMetaById = new Map(planSlots.map((slot) => [planSlotKey(slot), slot]).filter(([slotId]) => slotId));
+	const slotMetaById = new Map(
+		planSlots
+			.map((slot) => [planSlotKey(slot), slot])
+			.filter(([slotId]) => slotId),
+	);
 	const guardedClaims = claims.map((claim) => {
 		const issues = precisionIssuesForClaim(claim, slotMetaById);
-		const sourceBacked = compactStrings(claim.sourceRefs, 1).length > 0 || compactStrings(claim.sourceUrls, 1).length > 0;
+		const sourceBacked =
+			compactStrings(claim.sourceRefs, 1).length > 0 ||
+			compactStrings(claim.sourceUrls, 1).length > 0;
 		return {
 			id: stringOf(claim.id) ?? stringOf(claim.originLocator),
 			factSlotIds: compactStrings(claim.factSlotIds, 12),
@@ -322,8 +404,14 @@ function buildPrecisionGuard({ claims, planSlots }) {
 		schema: "deep-research-precision-guard-v1",
 		summary: {
 			totalClaims: guardedClaims.length,
-			flaggedClaims: guardedClaims.filter((claim) => claim.issues.length > 0).length,
-			issueCounts: countBy(guardedClaims.flatMap((claim) => claim.issues.map((issue) => ({ issue }))), (item) => item.issue),
+			flaggedClaims: guardedClaims.filter((claim) => claim.issues.length > 0)
+				.length,
+			issueCounts: countBy(
+				guardedClaims.flatMap((claim) =>
+					claim.issues.map((issue) => ({ issue })),
+				),
+				(item) => item.issue,
+			),
 		},
 		claims: guardedClaims.filter((claim) => claim.issues.length > 0),
 		instructions: {
@@ -360,28 +448,36 @@ export default async function normalizeInputPacket({ sources }) {
 		pushBounded(
 			extractedFacts,
 			overflow,
-			asArray(source.extractedFacts).map((fact, index) => compactExtractedFact(fact, sourceId, index)),
+			asArray(source.extractedFacts).map((fact, index) =>
+				compactExtractedFact(fact, sourceId, index),
+			),
 			limits.extractedFacts,
 			"omittedExtractedFacts",
 		);
 		pushBounded(
 			claims,
 			overflow,
-			asArray(source.claims).map((claim, index) => compactClaim(claim, sourceId, index)),
+			asArray(source.claims).map((claim, index) =>
+				compactClaim(claim, sourceId, index),
+			),
 			limits.claims,
 			"omittedClaims",
 		);
 		pushBounded(
 			sourceCards,
 			overflow,
-			asArray(source.sources).map((item, index) => compactSource(item, sourceId, index)),
+			asArray(source.sources).map((item, index) =>
+				compactSource(item, sourceId, index),
+			),
 			limits.sources,
 			"omittedSources",
 		);
 		pushBounded(
 			evidenceGaps,
 			overflow,
-			asArray(source.additionalUnverifiedLeads).map((item, index) => compactGap(item, sourceId, index)),
+			asArray(source.additionalUnverifiedLeads).map((item, index) =>
+				compactGap(item, sourceId, index),
+			),
 			limits.evidenceGaps,
 			"omittedEvidenceGaps",
 		);
@@ -400,7 +496,9 @@ export default async function normalizeInputPacket({ sources }) {
 				expectedFinalShape: stringOf(plan.expectedFinalShape),
 				sourcePolicy: plan.sourcePolicy,
 				factSlots: planSlots,
-				verificationPriorities: asArray(plan.verificationPriorities).map(compactVerificationPriority),
+				verificationPriorities: asArray(plan.verificationPriorities).map(
+					compactVerificationPriority,
+				),
 				researchScopeCoverage: asArray(plan.researchScopeCoverage),
 			},
 			research: {
@@ -414,13 +512,25 @@ export default async function normalizeInputPacket({ sources }) {
 			precisionGuard,
 			ledgers: {
 				overflow,
-				overflowBySlot: overflowBySlot({ extractedFacts, claims, evidenceGaps }),
+				overflowBySlot: overflowBySlot({
+					extractedFacts,
+					claims,
+					evidenceGaps,
+				}),
 				slotFactCounts: countBy(extractedFacts, (fact) => fact.slotId),
-				claimSlotCounts: countBy(claims.flatMap((claim) => claim.factSlotIds.map((slotId) => ({ slotId }))), (item) => item.slotId),
+				claimSlotCounts: countBy(
+					claims.flatMap((claim) =>
+						claim.factSlotIds.map((slotId) => ({ slotId })),
+					),
+					(item) => item.slotId,
+				),
 				sourceRefCoverage: {
 					extractedFactsWithSourceRefs: sourceRefCoverage(extractedFacts),
 					claimsWithSourceRefs: sourceRefCoverage(claims),
-					sourcesWithSourceRefs: sourceCards.filter((source) => typeof source.sourceRef === "string" && source.sourceRef).length,
+					sourcesWithSourceRefs: sourceCards.filter(
+						(source) =>
+							typeof source.sourceRef === "string" && source.sourceRef,
+					).length,
 				},
 			},
 			instructions: {

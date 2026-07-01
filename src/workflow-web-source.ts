@@ -1,5 +1,12 @@
 import { createHash } from "node:crypto";
-import { appendFile, mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import {
+	appendFile,
+	mkdir,
+	readFile,
+	readdir,
+	rename,
+	writeFile,
+} from "node:fs/promises";
 import { isIP } from "node:net";
 import { dirname, resolve } from "node:path";
 
@@ -171,7 +178,9 @@ export function normalizeWorkflowWebSecurityPolicy(
 	};
 }
 
-export function isWorkflowWebSourceTool(tool: string): tool is WorkflowWebSourceTool {
+export function isWorkflowWebSourceTool(
+	tool: string,
+): tool is WorkflowWebSourceTool {
 	return (WORKFLOW_WEB_SOURCE_TOOLS as readonly string[]).includes(tool);
 }
 
@@ -202,7 +211,9 @@ export function consumeWorkflowWebVisibleBudget(
 export function validateWorkflowWebUrl(
 	url: string,
 	security: WorkflowWebSecurityPolicy = DEFAULT_WORKFLOW_WEB_SECURITY_POLICY,
-): { ok: true; normalizedUrl: string; domain: string } | { ok: false; reason: string } {
+):
+	| { ok: true; normalizedUrl: string; domain: string }
+	| { ok: false; reason: string } {
 	let parsed: URL;
 	try {
 		parsed = new URL(url);
@@ -261,8 +272,8 @@ function sourceUrlDisplayCacheKey(url: string): string {
 	if (parsed.pathname.length > 1 && parsed.pathname.endsWith("/")) {
 		parsed.pathname = parsed.pathname.slice(0, -1);
 	}
-	const sortedParams = [...parsed.searchParams.entries()].sort(([left], [right]) =>
-		left.localeCompare(right),
+	const sortedParams = [...parsed.searchParams.entries()].sort(
+		([left], [right]) => left.localeCompare(right),
 	);
 	parsed.search = "";
 	for (const [key, value] of sortedParams) {
@@ -283,8 +294,8 @@ function canonicalUrlForCache(url: string): string {
 	if (parsed.pathname.length > 1 && parsed.pathname.endsWith("/")) {
 		parsed.pathname = parsed.pathname.slice(0, -1);
 	}
-	const sortedParams = [...parsed.searchParams.entries()].sort(([left], [right]) =>
-		left.localeCompare(right),
+	const sortedParams = [...parsed.searchParams.entries()].sort(
+		([left], [right]) => left.localeCompare(right),
 	);
 	parsed.search = "";
 	for (const [key, value] of sortedParams) {
@@ -392,13 +403,25 @@ export async function findWorkflowWebSourceByUrl(
 	const targetDisplayKey = sourceUrlDisplayCacheKey(redactedUrl);
 	const index = await readWorkflowWebSourceIndex(config);
 	const existing = [...index.sources].reverse().find((entry) => {
-		return sourceIndexEntryMatchesUrl(entry, url, redactedUrl, targetKey, targetDisplayKey);
+		return sourceIndexEntryMatchesUrl(
+			entry,
+			url,
+			redactedUrl,
+			targetKey,
+			targetDisplayKey,
+		);
 	});
 	if (existing) {
 		const source = await readWorkflowWebSource(config, existing.sourceRef);
 		if (source) return source;
 	}
-	return findWorkflowWebSourceByUrlFromSources(config, url, redactedUrl, targetKey, targetDisplayKey);
+	return findWorkflowWebSourceByUrlFromSources(
+		config,
+		url,
+		redactedUrl,
+		targetKey,
+		targetDisplayKey,
+	);
 }
 
 function sourceIndexEntryMatchesUrl(
@@ -409,7 +432,11 @@ function sourceIndexEntryMatchesUrl(
 	targetDisplayKey: string,
 ): boolean {
 	if (entry.urlKey) return entry.urlKey === targetKey;
-	if (redactedUrlIdentityUnsafe(redactedUrl) || redactedUrlIdentityUnsafe(entry.redactedUrl) || redactedUrlIdentityUnsafe(entry.url)) {
+	if (
+		redactedUrlIdentityUnsafe(redactedUrl) ||
+		redactedUrlIdentityUnsafe(entry.redactedUrl) ||
+		redactedUrlIdentityUnsafe(entry.url)
+	) {
 		return false;
 	}
 	return (
@@ -421,7 +448,12 @@ function sourceIndexEntryMatchesUrl(
 }
 
 function redactedUrlIdentityUnsafe(url: string): boolean {
-	return /REDACTED/.test(url) || /[?&#][^=]*(?:token|secret|password|signature|sig|key|auth|session|credential)[^=]*=/i.test(url);
+	return (
+		/REDACTED/.test(url) ||
+		/[?&#][^=]*(?:token|secret|password|signature|sig|key|auth|session|credential)[^=]*=/i.test(
+			url,
+		)
+	);
 }
 
 async function findWorkflowWebSourceByUrlFromSources(
@@ -446,7 +478,11 @@ async function findWorkflowWebSourceByUrlFromSources(
 			if (source.urlKey === targetKey) return source;
 			continue;
 		}
-		if (redactedUrlIdentityUnsafe(redactedUrl) || redactedUrlIdentityUnsafe(source.redactedUrl) || redactedUrlIdentityUnsafe(source.url)) {
+		if (
+			redactedUrlIdentityUnsafe(redactedUrl) ||
+			redactedUrlIdentityUnsafe(source.redactedUrl) ||
+			redactedUrlIdentityUnsafe(source.url)
+		) {
 			continue;
 		}
 		if (
@@ -522,19 +558,21 @@ export function readWorkflowWebSourceSnippet(options: {
 	maxChars: number;
 	budget: WorkflowWebVisibleBudget;
 }): WorkflowWebSourceReadResult {
-	return readWorkflowWebSourceSnippets({
-		source: options.source,
-		requests: [
-			{
-				query: options.query,
-				claim: options.claim,
-				terms: options.terms,
-				maxChars: options.maxChars,
-			},
-		],
-		maxChars: options.maxChars,
-		budget: options.budget,
-	})[0] ?? { status: "not_found", visibleChars: 0 };
+	return (
+		readWorkflowWebSourceSnippets({
+			source: options.source,
+			requests: [
+				{
+					query: options.query,
+					claim: options.claim,
+					terms: options.terms,
+					maxChars: options.maxChars,
+				},
+			],
+			maxChars: options.maxChars,
+			budget: options.budget,
+		})[0] ?? { status: "not_found", visibleChars: 0 }
+	);
 }
 
 export function readWorkflowWebSourceSnippets(options: {
@@ -573,10 +611,13 @@ export function extractTextFromToolResult(result: unknown): string {
 		.join("\n\n");
 }
 
-export function extractTitleFromToolResult(result: unknown): string | undefined {
+export function extractTitleFromToolResult(
+	result: unknown,
+): string | undefined {
 	if (!isRecord(result)) return undefined;
 	const details = result.details;
-	if (isRecord(details) && typeof details.title === "string") return details.title;
+	if (isRecord(details) && typeof details.title === "string")
+		return details.title;
 	const text = extractTextFromToolResult(result);
 	const heading = text.match(/^#\s+(.+)$/m)?.[1]?.trim();
 	return heading ? heading.slice(0, 200) : undefined;
@@ -660,7 +701,9 @@ function shouldKeepFragmentForCache(hash: string): boolean {
 	return raw.startsWith("/") || raw.startsWith("!") || raw.includes("?");
 }
 
-function sourceToIndexEntry(source: WorkflowWebSource): WorkflowWebSourceIndexEntry {
+function sourceToIndexEntry(
+	source: WorkflowWebSource,
+): WorkflowWebSourceIndexEntry {
 	return {
 		sourceRef: source.sourceRef,
 		createdAt: source.createdAt,
@@ -717,7 +760,10 @@ function readWorkflowWebSourceSnippetWithCache(options: {
 			});
 		}
 	}
-	const termNeedles = prepareTermNeedles(options.request.terms, options.request.claim);
+	const termNeedles = prepareTermNeedles(
+		options.request.terms,
+		options.request.claim,
+	);
 	if (termNeedles.length === 0) return { status: "not_found", visibleChars: 0 };
 	return snippetForTerms({
 		text: options.source.text,
@@ -736,10 +782,19 @@ function snippetForTerms(options: {
 	budget: WorkflowWebVisibleBudget;
 }): WorkflowWebSourceReadResult {
 	const needles = options.terms
-		.map((term) => ({ raw: term, normalized: normalizeForSearch(term).normalized }))
+		.map((term) => ({
+			raw: term,
+			normalized: normalizeForSearch(term).normalized,
+		}))
 		.filter((term) => term.normalized.length > 0);
 	if (needles.length === 0) return { status: "not_found", visibleChars: 0 };
-	const candidates: Array<{ start: number; end: number; matchedTerms: string[]; missingTerms: string[]; score: number }> = [];
+	const candidates: Array<{
+		start: number;
+		end: number;
+		matchedTerms: string[];
+		missingTerms: string[];
+		score: number;
+	}> = [];
 	for (const needle of needles) {
 		let fromIndex = 0;
 		let occurrenceCount = 0;
@@ -755,7 +810,9 @@ function snippetForTerms(options: {
 				normalizedIndex + Math.max(0, needle.normalized.length - 1),
 			);
 			const end = (options.normalizedSource.map[endMapIndex] ?? start) + 1;
-			candidates.push(scoreTermWindow(options.text, start, end, options.maxChars, needles));
+			candidates.push(
+				scoreTermWindow(options.text, start, end, options.maxChars, needles),
+			);
 			fromIndex = normalizedIndex + Math.max(1, needle.normalized.length);
 			occurrenceCount += 1;
 		}
@@ -766,7 +823,11 @@ function snippetForTerms(options: {
 		return right.matchedTerms.length - left.matchedTerms.length;
 	})[0]!;
 	const raw = redactInlineSecrets(options.text.slice(best.start, best.end));
-	const consumed = consumeWorkflowWebVisibleBudget(options.budget, raw, options.maxChars);
+	const consumed = consumeWorkflowWebVisibleBudget(
+		options.budget,
+		raw,
+		options.maxChars,
+	);
 	return {
 		status: "matched",
 		matchType: "terms",
@@ -787,7 +848,13 @@ function scoreTermWindow(
 	matchEnd: number,
 	maxChars: number,
 	terms: Array<{ raw: string; normalized: string }>,
-): { start: number; end: number; matchedTerms: string[]; missingTerms: string[]; score: number } {
+): {
+	start: number;
+	end: number;
+	matchedTerms: string[];
+	missingTerms: string[];
+	score: number;
+} {
 	const center = Math.floor((matchStart + matchEnd) / 2);
 	const start = Math.max(0, center - Math.floor(maxChars / 2));
 	const end = Math.min(text.length, start + maxChars);
@@ -799,7 +866,10 @@ function scoreTermWindow(
 		.filter((term) => !windowNorm.includes(term.normalized))
 		.map((term) => term.raw);
 	const occurrenceScore = terms.reduce((score, term) => {
-		return score + (windowNorm.includes(term.normalized) ? term.normalized.length : 0);
+		return (
+			score +
+			(windowNorm.includes(term.normalized) ? term.normalized.length : 0)
+		);
 	}, 0);
 	return {
 		start,
@@ -810,19 +880,27 @@ function scoreTermWindow(
 	};
 }
 
-function prepareTermNeedles(terms: string[] | undefined, claim: string | undefined): string[] {
-	const explicitTerms = dedupeStrings((terms ?? []).map((term) => term.trim()).filter(Boolean));
+function prepareTermNeedles(
+	terms: string[] | undefined,
+	claim: string | undefined,
+): string[] {
+	const explicitTerms = dedupeStrings(
+		(terms ?? []).map((term) => term.trim()).filter(Boolean),
+	);
 	if (explicitTerms.length > 0) return explicitTerms.slice(0, 16);
 	if (!claim?.trim()) return [];
 	return extractClaimTerms(claim).slice(0, 16);
 }
 
 function extractClaimTerms(claim: string): string[] {
-	const tokens = claim
-		.match(/[\p{L}\p{N}][\p{L}\p{N}._/-]{2,}/gu)
-		?.map((token) => token.toLowerCase()) ?? [];
+	const tokens =
+		claim
+			.match(/[\p{L}\p{N}][\p{L}\p{N}._/-]{2,}/gu)
+			?.map((token) => token.toLowerCase()) ?? [];
 	const filtered = tokens.filter((token) => !SOURCE_READ_STOPWORDS.has(token));
-	return dedupeStrings(filtered).sort((left, right) => right.length - left.length);
+	return dedupeStrings(filtered).sort(
+		(left, right) => right.length - left.length,
+	);
 }
 
 function dedupeStrings(values: string[]): string[] {
@@ -889,7 +967,10 @@ function snippetForMatch(options: {
 	const slack = Math.max(0, options.maxChars - matchLength);
 	const before = Math.floor(slack / 2);
 	const snippetStart = Math.max(0, options.start - before);
-	const snippetEnd = Math.min(options.text.length, snippetStart + options.maxChars);
+	const snippetEnd = Math.min(
+		options.text.length,
+		snippetStart + options.maxChars,
+	);
 	const raw = redactInlineSecrets(options.text.slice(snippetStart, snippetEnd));
 	const consumed = consumeWorkflowWebVisibleBudget(
 		options.budget,
@@ -906,7 +987,10 @@ function snippetForMatch(options: {
 	};
 }
 
-function normalizeForSearch(text: string): { normalized: string; map: number[] } {
+function normalizeForSearch(text: string): {
+	normalized: string;
+	map: number[];
+} {
 	let normalized = "";
 	const map: number[] = [];
 	let previousWhitespace = false;
@@ -945,8 +1029,13 @@ async function readWorkflowWebSourceIndexFile(
 	config: WorkflowWebSourceCacheConfig,
 ): Promise<WorkflowWebSourceIndex> {
 	try {
-		const parsed = JSON.parse(await readFile(indexPath(config), "utf8")) as unknown;
-		if (!isRecord(parsed) || parsed.schema !== WORKFLOW_WEB_SOURCE_INDEX_SCHEMA) {
+		const parsed = JSON.parse(
+			await readFile(indexPath(config), "utf8"),
+		) as unknown;
+		if (
+			!isRecord(parsed) ||
+			parsed.schema !== WORKFLOW_WEB_SOURCE_INDEX_SCHEMA
+		) {
 			throw new Error("invalid index");
 		}
 		const sources = Array.isArray(parsed.sources)
@@ -957,7 +1046,10 @@ async function readWorkflowWebSourceIndexFile(
 			: [];
 		return {
 			schema: WORKFLOW_WEB_SOURCE_INDEX_SCHEMA,
-			updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : new Date().toISOString(),
+			updatedAt:
+				typeof parsed.updatedAt === "string"
+					? parsed.updatedAt
+					: new Date().toISOString(),
 			runId: typeof parsed.runId === "string" ? parsed.runId : config.runId,
 			sources: mergeSourceIndexEntries(sources),
 		};
@@ -998,7 +1090,11 @@ async function readWorkflowWebSourceIndexLedger(
 		if (!line.trim()) continue;
 		try {
 			const parsed = JSON.parse(line) as unknown;
-			if (!isRecord(parsed) || parsed.schema !== WORKFLOW_WEB_SOURCE_INDEX_EVENT_SCHEMA) continue;
+			if (
+				!isRecord(parsed) ||
+				parsed.schema !== WORKFLOW_WEB_SOURCE_INDEX_EVENT_SCHEMA
+			)
+				continue;
 			const entry = sourceIndexEntryFromUnknown(parsed.entry);
 			if (entry) entries.push(entry);
 		} catch {
@@ -1008,9 +1104,15 @@ async function readWorkflowWebSourceIndexLedger(
 	return entries;
 }
 
-function sourceIndexEntryFromUnknown(value: unknown): WorkflowWebSourceIndexEntry | undefined {
+function sourceIndexEntryFromUnknown(
+	value: unknown,
+): WorkflowWebSourceIndexEntry | undefined {
 	if (!isRecord(value)) return undefined;
-	if (typeof value.sourceRef !== "string" || !isWorkflowWebSourceRef(value.sourceRef)) return undefined;
+	if (
+		typeof value.sourceRef !== "string" ||
+		!isWorkflowWebSourceRef(value.sourceRef)
+	)
+		return undefined;
 	if (typeof value.createdAt !== "string") return undefined;
 	if (typeof value.url !== "string") return undefined;
 	if (typeof value.redactedUrl !== "string") return undefined;
@@ -1036,7 +1138,9 @@ function mergeSourceIndexEntries(
 ): WorkflowWebSourceIndexEntry[] {
 	const bySourceRef = new Map<string, WorkflowWebSourceIndexEntry>();
 	for (const entry of entries) bySourceRef.set(entry.sourceRef, entry);
-	return [...bySourceRef.values()].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+	return [...bySourceRef.values()].sort((left, right) =>
+		left.createdAt.localeCompare(right.createdAt),
+	);
 }
 
 function emptyWorkflowWebSourceIndex(
@@ -1101,27 +1205,38 @@ function nonPublicIpReason(address: string): string | undefined {
 	if (hexMapped) {
 		const high = Number.parseInt(hexMapped[1]!, 16);
 		const low = Number.parseInt(hexMapped[2]!, 16);
-		return nonPublicIpReason(`${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`);
+		return nonPublicIpReason(
+			`${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`,
+		);
 	}
 	if (isIP(lower) === 4) {
 		const parts = lower.split(".").map((part) => Number(part));
-		if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return "non_public_ip_blocked";
+		if (
+			parts.length !== 4 ||
+			parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)
+		)
+			return "non_public_ip_blocked";
 		const [a, b, c, d] = parts as [number, number, number, number];
-		if (a === 0 || a === 10 || a === 127 || a >= 224) return "non_public_ip_blocked";
+		if (a === 0 || a === 10 || a === 127 || a >= 224)
+			return "non_public_ip_blocked";
 		if (a === 100 && b >= 64 && b <= 127) return "non_public_ip_blocked";
 		if (a === 169 && b === 254) return "non_public_ip_blocked";
 		if (a === 172 && b >= 16 && b <= 31) return "non_public_ip_blocked";
 		if (a === 192 && b === 168) return "non_public_ip_blocked";
-		if (a === 192 && b === 0 && (c === 0 || c === 2)) return "non_public_ip_blocked";
+		if (a === 192 && b === 0 && (c === 0 || c === 2))
+			return "non_public_ip_blocked";
 		if (a === 198 && (b === 18 || b === 19)) return "non_public_ip_blocked";
 		if (a === 198 && b === 51 && c === 100) return "non_public_ip_blocked";
 		if (a === 203 && b === 0 && c === 113) return "non_public_ip_blocked";
-		if (a === 255 && b === 255 && c === 255 && d === 255) return "non_public_ip_blocked";
+		if (a === 255 && b === 255 && c === 255 && d === 255)
+			return "non_public_ip_blocked";
 	}
 	if (isIP(lower) === 6) {
 		if (lower === "::" || lower === "::1") return "non_public_ip_blocked";
-		if (lower.startsWith("fc") || lower.startsWith("fd")) return "non_public_ip_blocked";
-		if (lower.startsWith("fe80") || lower.startsWith("ff")) return "non_public_ip_blocked";
+		if (lower.startsWith("fc") || lower.startsWith("fd"))
+			return "non_public_ip_blocked";
+		if (lower.startsWith("fe80") || lower.startsWith("ff"))
+			return "non_public_ip_blocked";
 		if (lower.startsWith("2001:db8")) return "non_public_ip_blocked";
 	}
 	return undefined;
@@ -1131,13 +1246,18 @@ function redactRecordForModel(
 	value: Record<string, unknown>,
 ): Record<string, unknown> {
 	return Object.fromEntries(
-		Object.entries(value).map(([key, item]) => [key, redactValueForModel(item)]),
+		Object.entries(value).map(([key, item]) => [
+			key,
+			redactValueForModel(item),
+		]),
 	);
 }
 
 function redactValueForModel(value: unknown): unknown {
-	if (typeof value === "string") return redactInlineSecrets(sanitizeUrlMaybe(value));
-	if (Array.isArray(value)) return value.map((item) => redactValueForModel(item));
+	if (typeof value === "string")
+		return redactInlineSecrets(sanitizeUrlMaybe(value));
+	if (Array.isArray(value))
+		return value.map((item) => redactValueForModel(item));
 	if (!isRecord(value)) return value;
 	return redactRecordForModel(value);
 }
@@ -1147,15 +1267,18 @@ function sanitizeUrlMaybe(value: string): string {
 }
 
 function redactInlineSecrets(value: string): string {
-	const withSanitizedUrls = value.replace(/https?:\/\/[^\s)\]}>"']+/gi, (match) => {
-		const trailing = match.match(/[.,;:!?]+$/)?.[0] ?? "";
-		const core = trailing ? match.slice(0, -trailing.length) : match;
-		try {
-			return `${sanitizeParsedUrlForModel(new URL(core))}${trailing}`;
-		} catch {
-			return match;
-		}
-	});
+	const withSanitizedUrls = value.replace(
+		/https?:\/\/[^\s)\]}>"']+/gi,
+		(match) => {
+			const trailing = match.match(/[.,;:!?]+$/)?.[0] ?? "";
+			const core = trailing ? match.slice(0, -trailing.length) : match;
+			try {
+				return `${sanitizeParsedUrlForModel(new URL(core))}${trailing}`;
+			} catch {
+				return match;
+			}
+		},
+	);
 	return redactInlineSecretsNoUrls(withSanitizedUrls);
 }
 
