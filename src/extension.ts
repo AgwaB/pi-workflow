@@ -295,7 +295,9 @@ function watchWorkflowFeedback(
 			try {
 				run = await refreshRun(ctx.cwd, runId);
 			} catch {
-				clear();
+				// Keep polling across transient filesystem/lease/read failures. A
+				// later successful terminal read can still deliver in-session feedback;
+				// startup catch-up remains the backstop if this process exits.
 				return;
 			}
 			if (run.status === "running") return;
@@ -335,7 +337,7 @@ async function deliverMissedWorkflowFeedback(
 		const run = await readRunRecord(ctx.cwd, summary.runId).catch(
 			() => undefined,
 		);
-		if (run) await deliverWorkflowFeedback(ctx, api, run);
+		if (run) await deliverWorkflowFeedback(ctx, api, run).catch(() => undefined);
 	}
 }
 
@@ -355,7 +357,6 @@ async function deliverWorkflowFeedback(
 		: "";
 	const level = run.status === "completed" ? "info" : "error";
 	const notice = `Workflow ${run.runId} ${run.status} (${summary.completed}/${summary.total} completed, ${summary.failed} failed, ${summary.interrupted} interrupted).${problem}\nOpen: /workflow ${run.runId}`;
-	ctx.ui.notify(notice, level);
 
 	const preview = await readWorkflowResultPreview(ctx.cwd, run).catch(
 		() => undefined,
@@ -378,6 +379,7 @@ async function deliverWorkflowFeedback(
 				{ triggerTurn: true, deliverAs: "followUp" },
 			),
 		);
+		ctx.ui.notify(notice, level);
 		await delivery.complete();
 	} catch (error) {
 		await delivery.release();

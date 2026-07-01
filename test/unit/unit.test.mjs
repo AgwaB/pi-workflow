@@ -15161,6 +15161,39 @@ test("runtime model resolver falls back unsupported thinking without UI", async 
 	});
 });
 
+test("runtime model resolver refuses unsupported thinking when only higher levels are available", async () => {
+	await assert.rejects(
+		() =>
+			resolveWorkflowRuntime(
+				{ model: "gpt-5.5", thinking: "low" },
+				{
+					taskKey: "main.main",
+					stageId: "main",
+					taskId: "main",
+					agent: "unit-scout",
+				},
+				{
+					availableModels: [
+						{
+							provider: "openai-codex",
+							id: "gpt-5.5",
+							fullId: "openai-codex/gpt-5.5",
+							reasoning: true,
+							thinkingLevelMap: {
+								off: null,
+								minimal: null,
+								low: null,
+								medium: "medium",
+								high: "high",
+							},
+						},
+					],
+				},
+			),
+		/no lower-or-equal fallback is available/,
+	);
+});
+
 test("runtime model resolver asks before changing unsupported thinking", async () => {
 	const resolved = await resolveWorkflowRuntime(
 		{ model: "gpt-5.5", thinking: "xhigh" },

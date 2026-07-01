@@ -824,13 +824,32 @@ export default async function renderExecutive({
 			blockers: ["missing final-audit control source"],
 			executiveMarkdown: "",
 			reportMarkdown: "",
+			auditMarkdown: "",
 			wordCount: 0,
 			sourceUrlCount: 0,
+			totalSourceUrlCount: 0,
+			sourceUrls: [],
+			sourceIndex: [],
+			claimSummary: {
+				total: 0,
+				verified: 0,
+				partially_supported: 0,
+				unsupported: 0,
+				conflicting: 0,
+			},
+			factSlotSummary: {
+				total: 0,
+				filled: 0,
+				partial: 0,
+				missingOrConflicting: 0,
+			},
+			sectionCounts: {},
 			renderWarnings: [],
 			gates: {
 				renderedAllStructuredItems: false,
 				passed: false,
 			},
+			auditArtifact: "final-audit.control.json",
 		};
 	}
 

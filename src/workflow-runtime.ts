@@ -232,14 +232,16 @@ async function resolveThinking(
 		);
 	}
 
+	const downgradeOptions = lowerOrEqualSupportedThinking(requested, supported);
+	if (downgradeOptions.length === 0) {
+		const modelLabel = modelId ?? "selected model";
+		throw new Error(
+			`${modelLabel} does not support reasoning level "${requested}" for ${context.taskKey}, and no lower-or-equal fallback is available. Supported: ${supported.join(", ") || "none"}`,
+		);
+	}
+
 	if (!options.prompt) {
-		const resolved = nearestLowerSupportedThinking(requested, supported);
-		if (!resolved) {
-			const modelLabel = modelId ?? "selected model";
-			throw new Error(
-				`${modelLabel} does not support reasoning level "${requested}" for ${context.taskKey}. Supported: ${supported.join(", ") || "none"}`,
-			);
-		}
+		const resolved = downgradeOptions[downgradeOptions.length - 1]!;
 		return {
 			requested,
 			resolved,
@@ -248,12 +250,12 @@ async function resolveThinking(
 	}
 
 	const selected = await options.prompt.select(
-		`${modelId ?? "Selected model"} does not support reasoning "${requested}" for ${context.taskKey}. Choose a supported level.`,
-		supported,
+		`${modelId ?? "Selected model"} does not support reasoning "${requested}" for ${context.taskKey}. Choose a supported lower-or-equal level.`,
+		downgradeOptions,
 	);
 	if (!selected)
 		throw new Error(`Reasoning selection cancelled for ${context.taskKey}`);
-	if (!isThinkingLevel(selected))
+	if (!isThinkingLevel(selected) || !downgradeOptions.includes(selected))
 		throw new Error(
 			`Invalid reasoning selection "${selected}" for ${context.taskKey}`,
 		);
@@ -264,16 +266,15 @@ async function resolveThinking(
 	};
 }
 
-function nearestLowerSupportedThinking(
+function lowerOrEqualSupportedThinking(
 	requested: ThinkingLevel,
 	supported: ThinkingLevel[],
-): ThinkingLevel | undefined {
+): ThinkingLevel[] {
 	const requestedIndex = THINKING_LEVELS.indexOf(requested);
-	for (let index = requestedIndex; index >= 0; index -= 1) {
-		const candidate = THINKING_LEVELS[index];
-		if (candidate && supported.includes(candidate)) return candidate;
-	}
-	return supported[0];
+	if (requestedIndex < 0) return [];
+	return THINKING_LEVELS.slice(0, requestedIndex + 1).filter((level) =>
+		supported.includes(level),
+	);
 }
 
 function findModelInfo(
