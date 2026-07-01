@@ -10,8 +10,9 @@ const DIRECT_DYNAMIC_RUNTIME_TOOLS = [
 	"grep",
 	"find",
 	"ls",
-	"web_search",
-	"fetch_content",
+	"workflow_web_search",
+	"workflow_web_fetch_source",
+	"workflow_web_source_read",
 ];
 
 export async function ensureDirectDynamicRuntimeBundle(

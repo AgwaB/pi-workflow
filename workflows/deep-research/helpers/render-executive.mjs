@@ -20,6 +20,35 @@ function asArray(value) {
 	return Array.isArray(value) ? value : [];
 }
 
+function isRecord(value) {
+	return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function flattenItems(value) {
+	if (Array.isArray(value)) return value.flatMap((item) => flattenItems(item));
+	if (typeof value === "string") return value.trim() ? [value] : [];
+	if (!isRecord(value)) return [];
+	const renderFields = [
+		"gap",
+		"finding",
+		"claim",
+		"note",
+		"whyItMatters",
+		"parentImpact",
+		"recommendation",
+		"action",
+		"step",
+	];
+	if (
+		renderFields.some(
+			(field) => typeof value[field] === "string" && value[field].trim(),
+		)
+	) {
+		return [value];
+	}
+	return Object.values(value).flatMap((item) => flattenItems(item));
+}
+
 function words(text) {
 	return (
 		String(text ?? "")
@@ -386,12 +415,12 @@ function caveatText(item) {
 
 function caveatCategories(report) {
 	return [
-		{ kind: "Gap", items: asArray(report.remainingGaps) },
-		{ kind: "Unsupported", items: asArray(report.notableUnsupportedClaims) },
-		{ kind: "Contested", items: asArray(report.contestedAreas) },
-		{ kind: "Caveat", items: asArray(report.caveatedFindings) },
-		{ kind: "Unverified lead", items: asArray(report.unverifiedButRelevant) },
-		{ kind: "Decision note", items: asArray(report.parentDecisionNotes) },
+		{ kind: "Gap", items: flattenItems(report.remainingGaps) },
+		{ kind: "Unsupported", items: flattenItems(report.notableUnsupportedClaims) },
+		{ kind: "Contested", items: flattenItems(report.contestedAreas) },
+		{ kind: "Caveat", items: flattenItems(report.caveatedFindings) },
+		{ kind: "Unverified lead", items: flattenItems(report.unverifiedButRelevant) },
+		{ kind: "Decision note", items: flattenItems(report.parentDecisionNotes) },
 	]
 		.map((category) => ({
 			kind: category.kind,
@@ -492,7 +521,7 @@ function renderWarnings(sectionCounts) {
 		}));
 }
 
-function renderResearchMarkdown(control) {
+function renderResearchMarkdown(control, options = {}) {
 	const report = control?.finalReport ?? {};
 	const claimSummary = claimCounts(control);
 	const factSlots = sortedFactSlots(report);
@@ -514,7 +543,12 @@ function renderResearchMarkdown(control) {
 		report.unverifiedButRelevant,
 		control?.claimVerdictIndex?.claims,
 	);
-	const sourceIndex = allSourceIndex;
+	const maxUrls = Number.isFinite(Number(options.maxUrls))
+		? Math.max(0, Number(options.maxUrls))
+		: Infinity;
+	const sourceIndex = Number.isFinite(maxUrls)
+		? allSourceIndex.slice(0, maxUrls)
+		: allSourceIndex;
 	const sectionCounts = {
 		findings: asArray(report.mainFindings).length,
 		renderedFindings: findings.length,
@@ -523,12 +557,12 @@ function renderResearchMarkdown(control) {
 		actionItems: asArray(report.actionPlan).length,
 		renderedActionItems: actions.length,
 		caveatsAndGaps:
-			asArray(report.remainingGaps).length +
-			asArray(report.notableUnsupportedClaims).length +
-			asArray(report.contestedAreas).length +
-			asArray(report.caveatedFindings).length +
-			asArray(report.unverifiedButRelevant).length +
-			asArray(report.parentDecisionNotes).length,
+			flattenItems(report.remainingGaps).length +
+			flattenItems(report.notableUnsupportedClaims).length +
+			flattenItems(report.contestedAreas).length +
+			flattenItems(report.caveatedFindings).length +
+			flattenItems(report.unverifiedButRelevant).length +
+			flattenItems(report.parentDecisionNotes).length,
 		renderedCaveatsAndGaps: caveats.selected.length,
 		factSlots: asArray(report.factSlotCoverage).length,
 		renderedFactSlots: factSlots.length,
@@ -576,7 +610,7 @@ function stripLeadingHeading(markdown) {
 	return String(markdown ?? "").replace(/^#\s+[^\n]+\n*/i, "");
 }
 
-export default async function renderExecutive({ sources, context = {} }) {
+export default async function renderExecutive({ sources, options = {}, context = {} }) {
 	const control =
 		findSource(sources, "final-audit") ??
 		sources?.[Object.keys(sources ?? {})[0]];
@@ -599,11 +633,39 @@ export default async function renderExecutive({ sources, context = {} }) {
 		};
 	}
 
-	const rendered = renderResearchMarkdown(control);
-	const wordCount = countWords(rendered.markdown);
+	const opts = {
+		maxWords: Number.isFinite(Number(options.maxWords))
+			? Math.max(0, Number(options.maxWords))
+			: Infinity,
+		maxUrls: Number.isFinite(Number(options.maxUrls))
+			? Math.max(0, Number(options.maxUrls))
+			: Infinity,
+		maxFindings: Number.isFinite(Number(options.maxFindings))
+			? Math.max(0, Number(options.maxFindings))
+			: undefined,
+		maxRecommendations: Number.isFinite(Number(options.maxRecommendations))
+			? Math.max(0, Number(options.maxRecommendations))
+			: undefined,
+		maxGaps: Number.isFinite(Number(options.maxGaps))
+			? Math.max(0, Number(options.maxGaps))
+			: undefined,
+	};
+	const rendered = renderResearchMarkdown(control, opts);
+	let markdown = rendered.markdown;
+	let truncated = false;
+	if (Number.isFinite(opts.maxWords) && countWords(markdown) > opts.maxWords) {
+		truncated = true;
+		markdown = truncateWords(markdown, opts.maxWords);
+	}
+	const wordCount = countWords(markdown);
 	const sourceUrlCount = rendered.sourceIndex.length;
-	const renderedAllStructuredItems = rendered.renderWarnings.length === 0;
-	const passed = renderedAllStructuredItems;
+	const substantiveRenderWarnings = rendered.renderWarnings.filter(
+		(warning) => warning.section !== "sourceUrls",
+	);
+	const renderedAllStructuredItems = substantiveRenderWarnings.length === 0;
+	const truncatedWithOpenGaps =
+		truncated && Number(rendered.sectionCounts.caveatsAndGaps ?? 0) > 0;
+	const passed = renderedAllStructuredItems && !truncatedWithOpenGaps;
 
 	let executiveSidecarPath;
 	let reportSidecarPath;
@@ -620,8 +682,8 @@ export default async function renderExecutive({ sources, context = {} }) {
 			await mkdir(taskDir, { recursive: true });
 			executiveSidecarPath = join(taskDir, "executive.md");
 			reportSidecarPath = join(taskDir, "report.md");
-			await writeFile(executiveSidecarPath, `${rendered.markdown}\n`, "utf8");
-			await writeFile(reportSidecarPath, `${rendered.markdown}\n`, "utf8");
+			await writeFile(executiveSidecarPath, `${markdown}\n`, "utf8");
+			await writeFile(reportSidecarPath, `${markdown}\n`, "utf8");
 		}
 	} catch {
 		// Sidecars are non-authoritative; keep control output deterministic.
@@ -629,11 +691,11 @@ export default async function renderExecutive({ sources, context = {} }) {
 
 	return {
 		schema: "deep-research-executive-render-v1",
-		digest: truncateWords(stripLeadingHeading(rendered.markdown), 45),
+		digest: truncateWords(stripLeadingHeading(markdown), 45),
 		status: passed ? "passed" : "failed",
 		renderMode: "evidence-backed-report",
-		executiveMarkdown: rendered.markdown,
-		reportMarkdown: rendered.markdown,
+		executiveMarkdown: markdown,
+		reportMarkdown: markdown,
 		wordCount,
 		sourceUrlCount,
 		totalSourceUrlCount: rendered.allSourceIndex.length,
@@ -648,10 +710,17 @@ export default async function renderExecutive({ sources, context = {} }) {
 		renderWarnings: rendered.renderWarnings,
 		gates: {
 			renderedAllStructuredItems,
+			maxWords: Number.isFinite(opts.maxWords) ? opts.maxWords : null,
+			maxUrls: Number.isFinite(opts.maxUrls) ? opts.maxUrls : null,
+			maxFindings: opts.maxFindings,
+			maxRecommendations: opts.maxRecommendations,
+			maxGaps: opts.maxGaps,
+			truncated,
+			truncatedWithOpenGaps,
 			passed,
 		},
 		auditArtifact: "final-audit.control.json",
-		...(executiveSidecarPath ? { sidecarPath: executiveSidecarPath } : {}),
-		...(reportSidecarPath ? { reportSidecarPath } : {}),
+		...(executiveSidecarPath ? { sidecarPath: "executive.md" } : {}),
+		...(reportSidecarPath ? { reportSidecarPath: "report.md" } : {}),
 	};
 }

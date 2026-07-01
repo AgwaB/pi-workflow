@@ -12,6 +12,7 @@ import {
 	classifyToolCapability,
 	effectiveToolClassification,
 	providersForSelectedTools,
+	toolAllowedByAuthorityCeiling,
 } from "./tool-metadata.js";
 import type {
 	CompiledDynamicWorkflowTask,
@@ -143,8 +144,9 @@ export async function buildDynamicGeneratedCompiledTask(input: {
 		);
 	}
 	if (tools && agentDefinition.tools) {
+		const allowed = new Set(agentDefinition.tools);
 		const missing = tools.filter(
-			(tool) => !agentDefinition.tools?.includes(tool),
+			(tool) => !toolAllowedByAuthorityCeiling(tool, allowed),
 		);
 		if (missing.length > 0) {
 			throw new Error(
@@ -881,7 +883,7 @@ function appendDynamicOutputInstructions(
 		`The control.digest string must be at most ${maxDigestChars} characters; prefer one short sentence.`,
 		"Use schema `dynamic-task-result-v1` unless the dynamic controller asks for a more specific control schema.",
 		refsMinItems !== undefined && refsMinItems > 0
-			? `The <refs> JSON array must include at least ${refsMinItems} item${refsMinItems === 1 ? "" : "s"}. Include URLs or local file paths used by the analysis. Verify external URLs with fetch_content before including them; do not include stale, guessed, or unreachable URLs.`
+			? `The <refs> JSON array must include at least ${refsMinItems} item${refsMinItems === 1 ? "" : "s"}. Include URLs or local file paths used by the analysis. Verify external URLs with available workflow web fetch/source-read tools before including them; do not include stale, guessed, or unreachable URLs.`
 			: undefined,
 		dynamicOutputProfileInstructions(outputProfile),
 	]

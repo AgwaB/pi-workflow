@@ -21,14 +21,34 @@
         "verificationCandidates": {
           "type": "array",
           "items": {
-            "type": "object"
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "claim": { "type": "string" },
+              "sourceUrls": { "type": "array", "items": { "type": "string" } },
+              "sourceRefs": { "type": "array", "items": { "type": "string" } },
+              "sourceQuality": { "type": "string" },
+              "reasonToVerify": { "type": "string" },
+              "scopeItems": { "type": "array", "items": { "type": "string" } },
+              "factSlotIds": { "type": "array", "items": { "type": "string" } },
+              "verificationNeed": { "enum": ["core", "useful", "optional"] }
+            }
           },
           "maxItems": 48
         },
         "preservedClaims": {
           "type": "array",
           "items": {
-            "type": "object"
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "claim": { "type": "string" },
+              "factSlotIds": { "type": "array", "items": { "type": "string" } },
+              "sourceUrls": { "type": "array", "items": { "type": "string" } },
+              "sourceRefs": { "type": "array", "items": { "type": "string" } },
+              "whyItMatters": { "type": "string" },
+              "reason": { "type": "string" }
+            }
           },
           "maxItems": 24
         },
@@ -43,9 +63,30 @@
     "factSlotCoverage": {
       "type": "array",
       "items": {
-        "type": "object"
+        "type": "object",
+        "properties": {
+          "slotId": { "type": "string" },
+          "label": { "type": "string" },
+          "status": { "enum": ["filled", "partial", "conflicting", "missing", "not_applicable"] },
+          "bestValue": {},
+          "sourceUrls": { "type": "array", "items": { "type": "string" } },
+          "sourceQuality": { "type": "string" },
+          "verificationCandidateIds": { "type": "array", "items": { "type": "string" } },
+          "gapReason": { "type": "string" },
+          "parentImpact": { "type": "string" }
+        }
       },
       "maxItems": 64
-    }
+    },
+    "coverageGaps": {
+      "type": "array",
+      "items": { "type": "object" }
+    },
+    "researchScopeCoverage": {
+      "type": "array",
+      "items": { "type": "object" }
+    },
+    "normalizationNotes": {},
+    "precisionGuardNotes": {}
   }
 }

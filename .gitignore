@@ -22,6 +22,10 @@ AGENTS.md
 cache/
 skill-test-runs/
 internal/
+!internal/
+internal/*
+!internal/eval/
+!internal/eval/**
 
 # Recovery/salvage artifacts and local archives
 .recovery/

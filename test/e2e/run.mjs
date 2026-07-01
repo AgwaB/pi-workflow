@@ -179,6 +179,47 @@ function main() {
 	);
 
 	nodeEval(
+		"workflow-web-source-fake-provider",
+		`
+    import { mkdtempSync, rmSync, existsSync } from 'node:fs';
+    import { tmpdir } from 'node:os';
+    import { join } from 'node:path';
+    import { registerWorkflowWebSourceExtension } from './.tmp/unit/workflow-web-source-extension.js';
+    const cwd = mkdtempSync(join(tmpdir(), 'pi-workflow-web-source-e2e-'));
+    try {
+      const cacheDir = join(cwd, '.pi', 'workflows', 'workflow_e2e', 'web-source-cache');
+      const registered = new Map();
+      const appended = [];
+      const pi = { registerTool(tool) { registered.set(tool.name, tool); }, appendEntry(type, data) { appended.push({ type, data }); } };
+      const provider = (providerPi) => providerPi.registerTool({
+        name: 'fetch_content',
+        async execute(_id, params) {
+          providerPi.appendEntry('web-search-results', { urls: [{ url: params.url, content: 'RAW PROVIDER PAYLOAD' }] });
+          return { content: [{ type: 'text', text: 'Exact source quote for ' + params.url + ': alpha beta gamma.' }], details: { successful: 1, finalUrl: params.url } };
+        }
+      });
+      registerWorkflowWebSourceExtension(pi, { schema: 'workflow-web-source-launch-config-v1', runId: 'workflow_e2e', taskId: 'task-1', cwd, cacheDir, provider: { kind: 'extension' }, securityPolicy: { allowPrivateHosts: true }, webSourcePolicy: { previewChars: 32, sourceReadMaxChars: 80, perTaskVisibleCharBudget: 200 } }, provider);
+      if (registered.has('fetch_content')) throw new Error('legacy fetch_content was exposed in normalized-only mode');
+      const fetched = await registered.get('workflow_web_fetch_source').execute('fetch', { url: 'https://example.test/source?token=secret' });
+      const body = fetched.content[0].text;
+      if (!body.includes('sourceRef')) throw new Error('missing sourceRef card');
+      if (body.includes('web-source-cache') || body.includes('secret') || body.includes('RAW PROVIDER PAYLOAD')) throw new Error('model-visible leak in source card');
+      if (appended.length !== 0) throw new Error('provider side effect was forwarded');
+      const sourceRef = JSON.parse(body).card.sourceRef;
+      const read = await registered.get('workflow_web_source_read').execute('read', { sourceRef, query: 'alpha beta gamma' });
+      if (!read.content[0].text.includes('alpha beta gamma')) throw new Error('source-read quote missing');
+      const batch = await registered.get('workflow_web_source_read').execute('read-batch', { sourceRef, reads: [{ query: 'Exact source quote' }, { claim: 'alpha beta gamma source quote', terms: ['alpha beta', 'gamma'] }, { query: 'missing phrase' }] });
+      const batchBody = JSON.parse(batch.content[0].text);
+      if (!Array.isArray(batchBody.results) || batchBody.results.length !== 3) throw new Error('batch source-read results missing');
+      if (batchBody.results[0].status !== 'ok' || batchBody.results[1].status !== 'candidate' || batchBody.results[1].matchType !== 'terms' || batchBody.results[2].status !== 'not_found') throw new Error('batch source-read statuses wrong');
+      if (!existsSync(join(cacheDir, 'events.jsonl'))) throw new Error('missing telemetry events');
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  `,
+	);
+
+	nodeEval(
 		"workflow-run-boundary",
 		`
     import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';

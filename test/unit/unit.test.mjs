@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createServer } from "node:http";
 import {
 	existsSync,
 	mkdirSync,
@@ -88,6 +89,7 @@ import {
 	summarizeWorkflowTelemetry,
 	validateStructuredContract,
 } from "../../.tmp/unit/workflow-artifacts.js";
+import { formatArtifactGraphSourceContext } from "../../.tmp/unit/artifact-graph-runtime.js";
 import {
 	loadWorkflowHelper,
 	resolveWorkflowHelperRef,
@@ -133,6 +135,18 @@ import {
 	writeWorkflowTaskArtifactBundle,
 } from "../../.tmp/unit/workflow-output-artifacts.js";
 import { registerWorkflowFetchCacheExtension } from "../../.tmp/unit/workflow-fetch-cache-extension.js";
+import {
+	createWorkflowWebSource,
+	createWorkflowWebVisibleBudget,
+	findWorkflowWebSourceByUrl,
+	readWorkflowWebSourceSnippet,
+	readWorkflowWebSource,
+	readWorkflowWebSourceIndex,
+	sanitizeUrlForModel,
+	validateWorkflowWebUrl,
+	writeWorkflowWebSource,
+} from "../../.tmp/unit/workflow-web-source.js";
+import { registerWorkflowWebSourceExtension } from "../../.tmp/unit/workflow-web-source-extension.js";
 import { validateJsonSchema } from "../../.tmp/unit/json-schema.js";
 import {
 	launchSubagentTask,
@@ -7389,7 +7403,7 @@ test("bundled artifact graph outputs declare control schemas", () => {
 	}
 });
 
-test("bundled deep-research preserves full audit before executive final", async () => {
+test("bundled deep-research compacts audit packets before executive final", async () => {
 	const specPath = join(
 		process.cwd(),
 		"workflows",
@@ -7403,16 +7417,47 @@ test("bundled deep-research preserves full audit before executive final", async 
 		specPath,
 	});
 	const byStage = new Map(compiled.tasks.map((task) => [task.stageId, task]));
+	const normalizeInputPacket = byStage.get("normalize-input-packet");
+	const normalizeClaims = byStage.get("normalize-claims");
+	const auditClaims = byStage.get("audit-claims");
+	const finalAuditPacket = byStage.get("final-audit-packet");
 	const finalAudit = byStage.get("final-audit");
 	const final = byStage.get("final");
 
-	assert.equal(finalAudit?.kind, "reduce");
-	assert.deepEqual(finalAudit.dependsOn, [
+	assert.equal(normalizeInputPacket?.kind, "support");
+	assert.deepEqual(normalizeInputPacket.dependsOn, [
 		"plan.main",
 		"research-questions.item",
+	]);
+	assert.equal(normalizeInputPacket.support.uses, "./helpers/normalize-input-packet.mjs");
+	assert.deepEqual(normalizeClaims?.dependsOn, [
+		"plan.main",
+		"research-questions.item",
+		"normalize-input-packet.main",
+	]);
+
+	assert.equal(auditClaims?.kind, "support");
+	assert.deepEqual(auditClaims.dependsOn, [
+		"plan.main",
+		"normalize-input-packet.main",
+		"normalize-claims.main",
+		"verify-claims.item",
+	]);
+
+	assert.equal(finalAuditPacket?.kind, "support");
+	assert.deepEqual(finalAuditPacket.dependsOn, [
+		"plan.main",
 		"normalize-claims.main",
 		"audit-claims.main",
 	]);
+	assert.equal(finalAuditPacket.support.uses, "./helpers/final-audit-packet.mjs");
+
+	assert.equal(finalAudit?.kind, "reduce");
+	assert.deepEqual(finalAudit.dependsOn, ["final-audit-packet.main"]);
+	assert.deepEqual(finalAudit.artifactGraph.requiredReads, [
+		"final-audit-packet.control",
+	]);
+	assert.equal(finalAudit.artifactGraph.sourceProjection, undefined);
 	assert.ok(
 		finalAudit.artifactGraph.output.controlSchemaPath.endsWith(
 			join(
@@ -11213,6 +11258,38 @@ test("deep-research claim evidence gate downgrades unsupported verified claims",
 							},
 						],
 					},
+					{
+						id: "claim-003",
+						status: "verified",
+						text: "The release exists with candidate-only weak term evidence.",
+						evidence: [
+							{
+								url: "https://example.com/release",
+								quote: "Release notes",
+								matchType: "terms",
+								candidateOnly: true,
+								matchedTerms: ["release"],
+								missingTerms: ["exists"],
+								coverageRatio: 0.5,
+							},
+						],
+					},
+					{
+						id: "claim-004",
+						status: "verified",
+						text: "The release exists with candidate-only full term evidence.",
+						evidence: [
+							{
+								url: "https://example.com/release",
+								quote: "Release notes confirm it exists.",
+								matchType: "terms",
+								candidateOnly: true,
+								matchedTerms: ["release", "exists"],
+								missingTerms: [],
+								coverageRatio: 1,
+							},
+						],
+					},
 				],
 			},
 		},
@@ -11223,11 +11300,13 @@ test("deep-research claim evidence gate downgrades unsupported verified claims",
 		context: {},
 	});
 
-	assert.equal(result.gateSummary.total, 2);
-	assert.equal(result.gateSummary.downgraded, 1);
+	assert.equal(result.gateSummary.total, 4);
+	assert.equal(result.gateSummary.downgraded, 3);
 	assert.equal(result.auditedClaims[0].status, "partially_supported");
 	assert.equal(result.auditedClaims[0].evidenceGate.previous, "verified");
 	assert.equal(result.auditedClaims[1].status, "verified");
+	assert.equal(result.auditedClaims[2].status, "partially_supported");
+	assert.equal(result.auditedClaims[3].status, "partially_supported");
 	assert.deepEqual(result.auditedClaims[1].sourceUrls, [
 		"https://example.com/release",
 	]);
@@ -11252,6 +11331,424 @@ test("support output analysis preserves field precedence for render helpers", ()
 		),
 		"analysis body",
 	);
+});
+
+test("deep-research normalize input packet compacts research context", async () => {
+	const { default: helper } = await import(
+		`../../workflows/deep-research/helpers/normalize-input-packet.mjs?test=${Date.now()}`
+	);
+	const result = await helper({
+		sources: {
+			"plan.main": {
+				depth: "standard",
+				taskType: "decision_memo",
+				expectedFinalShape: "decision_memo",
+				factSlots: [{ id: "slot-001", label: "Latency", required: true }],
+				verificationPriorities: [{ id: "vp-001", targetSlots: ["slot-001"], priority: "high" }],
+			},
+			"research-questions.item-001": {
+				extractedFacts: [
+					{
+						slotId: "slot-001",
+						value: "42 ms",
+						sourceUrls: ["https://example.test/report"],
+						sourceRefs: ["wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+						quote: "Latency was 42 ms in the benchmark.",
+					},
+				],
+				claims: [
+					{
+						claim: "Latency was 42 ms.",
+						factSlotIds: ["slot-001"],
+						sourceRefs: ["wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+					},
+				],
+				sources: [{ url: "https://example.test/report", sourceRef: "wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }],
+				additionalUnverifiedLeads: [{ lead: "Check p95 latency", factSlotIds: ["slot-001"] }],
+			},
+		},
+	});
+	assert.equal(result.schema, "deep-research-normalize-input-packet-v2");
+	assert.equal(result.packet.plan.factSlots.length, 1);
+	assert.equal(result.packet.research.extractedFacts[0].slotId, "slot-001");
+	assert.deepEqual(result.packet.research.claims[0].sourceRefs, ["wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]);
+	assert.equal(result.packet.ledgers.sourceRefCoverage.claimsWithSourceRefs, 1);
+	assert.equal(result.packet.ledgers.slotFactCounts["slot-001"], 1);
+});
+
+test("deep-research normalize input packet preserves slots and flags precision risks", async () => {
+	const { default: helper } = await import(
+		`../../workflows/deep-research/helpers/normalize-input-packet.mjs?test=${Date.now()}`
+	);
+	const result = await helper({
+		sources: {
+			"plan.main": {
+				depth: "standard",
+				taskType: "vendor_comparison",
+				expectedFinalShape: "side_by_side_comparison",
+				factSlots: [
+					{
+						id: "slot-latency",
+						label: "Provider A latency",
+						type: "numeric",
+						required: true,
+						entities: ["Provider A"],
+						sourcePriority: "primary_required",
+					},
+					{
+						id: "slot-price",
+						label: "Provider B price",
+						type: "pricing",
+						required: true,
+						entities: ["Provider B"],
+						sourcePriority: "primary_required",
+					},
+				],
+			},
+			"research-questions.item-001": {
+				extractedFacts: [
+					{
+						slotId: "slot-latency",
+						value: "42 ms",
+						sourceUrls: ["https://example.test/latency"],
+						sourceRefs: ["wsrc_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+					},
+					{
+						slotId: "slot-price",
+						value: "$9/month",
+						sourceUrls: ["https://example.test/pricing"],
+						sourceRefs: ["wsrc_cccccccccccccccccccccccccccccccc"],
+					},
+				],
+				claims: [
+					{
+						claim:
+							"Provider A is the best and always cheaper than Provider B because latency is 42 ms and price is $9/month.",
+						factSlotIds: ["slot-latency", "slot-price"],
+						sourceUrls: ["https://example.test/latency"],
+						sourceRefs: ["wsrc_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+					},
+					{
+						claim: "Provider B costs $9/month.",
+						factSlotIds: ["slot-price"],
+					},
+				],
+			},
+		},
+	});
+
+	assert.deepEqual(result.packet.slotPreservation.slotsWithEvidence.sort(), [
+		"slot-latency",
+		"slot-price",
+	]);
+	assert.deepEqual(result.packet.slotPreservation.missingRequiredOrCriticalSlots, []);
+	const priceSlot = result.packet.slotPreservation.requiredOrCriticalSlots.find(
+		(slot) => slot.slotId === "slot-price",
+	);
+	assert.equal(priceSlot.observationCount, 1);
+	assert.deepEqual(priceSlot.sourceRefs, ["wsrc_cccccccccccccccccccccccccccccccc"]);
+
+	assert.equal(result.packet.precisionGuard.summary.totalClaims, 2);
+	assert.equal(result.packet.precisionGuard.summary.flaggedClaims, 2);
+	const bundled = result.packet.precisionGuard.claims.find((claim) =>
+		claim.issues.includes("bundled_slots"),
+	);
+	assert(bundled);
+	assert.equal(bundled.action, "split_or_narrow_before_verification");
+	assert(bundled.issues.includes("compound_or_bundled_text"));
+	assert(bundled.issues.includes("normative_language"));
+	assert(bundled.issues.includes("overbroad_quantifier"));
+	assert(bundled.issues.includes("entity_blend_risk"));
+	const sourceWeak = result.packet.precisionGuard.claims.find((claim) =>
+		claim.issues.includes("quantitative_without_visible_source"),
+	);
+	assert.equal(sourceWeak.action, "preserve_or_gap_until_source_backed");
+});
+
+test("deep-research normalize input packet distinguishes P1 gap and recommendation risks", async () => {
+	const { default: helper } = await import(
+		`../../workflows/deep-research/helpers/normalize-input-packet.mjs?test=${Date.now()}`
+	);
+	const result = await helper({
+		sources: {
+			"plan.main": {
+				depth: "standard",
+				taskType: "implementation_guidance",
+				expectedFinalShape: "implementation_checklist",
+				factSlots: [
+					{ id: "slot-provider", label: "Provider carbon export granularity", type: "policy", required: true },
+					{ id: "slot-tier", label: "Implementation tiering", type: "policy", required: true },
+					{ id: "slot-power", label: "GPU power telemetry", type: "numeric", required: true },
+				],
+			},
+			"research-questions.item-001": {
+				extractedFacts: [
+					{
+						slotId: "slot-provider",
+						value: "resource-level emissions",
+						sourceRefs: ["wsrc_dddddddddddddddddddddddddddddddd"],
+						sourceUrls: ["https://example.test/provider-carbon"],
+					},
+					{
+						slotId: "slot-power",
+						value: "milliwatts with architecture caveats",
+						sourceRefs: ["wsrc_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"],
+						sourceUrls: ["https://example.test/nvml"],
+					},
+				],
+				claims: [
+					{
+						claim: "Azure exact carbon-export granularity was not established by retrieved evidence.",
+						factSlotIds: ["slot-provider"],
+						sourceRefs: ["wsrc_dddddddddddddddddddddddddddddddd"],
+						sourceUrls: ["https://example.test/provider-carbon"],
+					},
+					{
+						claim:
+							"A feasible small-SaaS tiering is API-only proxy logging, provider carbon exports, and self-hosted telemetry.",
+						factSlotIds: ["slot-tier"],
+						sourceRefs: ["wsrc_dddddddddddddddddddddddddddddddd"],
+						sourceUrls: ["https://example.test/provider-carbon"],
+					},
+					{
+						claim:
+							"NVML reports GPU power in milliwatts and Ampere except GA100 returns one-second averaged readings.",
+						factSlotIds: ["slot-power"],
+						sourceRefs: ["wsrc_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"],
+						sourceUrls: ["https://example.test/nvml"],
+					},
+					{
+						claim:
+							"Vendor guidance recommends separating untrusted data and requiring human approval for high-impact actions.",
+						factSlotIds: ["slot-provider"],
+						sourceRefs: ["wsrc_dddddddddddddddddddddddddddddddd"],
+						sourceUrls: ["https://example.test/provider-carbon"],
+					},
+				],
+			},
+		},
+	});
+
+	const retrievalGap = result.packet.precisionGuard.claims.find((claim) =>
+		claim.issues.includes("retrieval_gap_inference"),
+	);
+	assert(retrievalGap);
+	assert.equal(retrievalGap.action, "verify_only_if_doc_scoped_or_replace_with_positive_source_claim");
+
+	const derivedRecommendation = result.packet.precisionGuard.claims.find((claim) =>
+		claim.issues.includes("derived_recommendation"),
+	);
+	assert(derivedRecommendation);
+	assert.equal(derivedRecommendation.action, "split_source_atoms_keep_recommendation_caveated");
+
+	const multiObligation = result.packet.precisionGuard.claims.find(
+		(claim) =>
+			claim.issues.includes("multi_obligation_claim") &&
+			claim.claim?.startsWith("Vendor guidance recommends"),
+	);
+	assert(multiObligation);
+	assert.equal(multiObligation.action, "split_or_narrow_before_verification");
+
+	assert.equal(
+		result.packet.precisionGuard.claims.some((claim) => claim.claim?.startsWith("NVML reports GPU power")),
+		false,
+	);
+});
+
+test("deep-research final-audit packet compacts deterministic ledgers", async () => {
+	const { default: helper } = await import(
+		`../../workflows/deep-research/helpers/final-audit-packet.mjs?test=${Date.now()}`
+	);
+	const result = await helper({
+		sources: {
+			"plan.main": {
+				depth: "standard",
+				taskType: "decision_memo",
+				expectedFinalShape: "decision_memo",
+				factSlots: [{ id: "slot-001" }, { id: "slot-002" }],
+				researchQuestions: [{ id: "q1" }],
+			},
+			"normalize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [
+						{ id: "claim-001", sourceRefs: ["wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"] },
+						{ id: "claim-002" },
+					],
+					preservedClaims: [{ id: "claim-003", claim: "Unverified useful lead" }],
+				},
+				factSlotCoverage: [
+					{ slotId: "slot-001", status: "filled", bestValue: "yes" },
+					{ slotId: "slot-002", status: "missing", gapReason: "no primary source" },
+				],
+				coverageGaps: [{ slotId: "slot-002", reason: "missing source" }],
+			},
+			"audit-claims.main": {
+				verdictCounts: { verified: 1, partiallySupported: 1, unsupported: 0, conflicting: 0 },
+				statusPartitions: { verified: ["claim-001"], partiallySupported: ["claim-002"] },
+				claimDigests: [
+					{ id: "claim-001", claim: "Verified", status: "verified", sourceRefs: ["wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"] },
+				],
+				remainingGaps: [{ claimId: "claim-002", evidenceState: "insufficient_for_verified" }],
+				sourceRefJoinFailures: [{ claimId: "claim-002", evidenceState: "source_ref_not_available" }],
+				invalidVerifierRows: [{ sourceId: "verify-claims.bad", reason: "missing_claim_id", status: "verified" }],
+				duplicateVerifierRows: [{ claimId: "claim-001", rowCount: 2, sourceIds: ["verify-claims.a", "verify-claims.b"], statusInputs: ["verified", "verified"], selectedStatus: "verified" }],
+				gateSummary: { missingVerifierResults: 1 },
+				precisionGuardDiagnostics: {
+					totalClaims: 2,
+					flaggedClaims: 1,
+					issueCounts: { multi_obligation_claim: 1 },
+				},
+				slotCoverageCheck: { droppedSlotIds: ["slot-002"] },
+			},
+		},
+	});
+	assert.equal(result.schema, "deep-research-final-audit-packet-v1");
+	assert.equal(result.packet.researchMetadataSeed.depth, "standard");
+	assert.equal(result.packet.verdictCounts.verified, 1);
+	assert.equal(result.packet.claimVerdictLedger.length, 1);
+	assert.deepEqual(result.packet.statusPartitions.verified, ["claim-001"]);
+	assert.deepEqual(result.packet.invariantChecks.omittedCandidateIds, ["claim-002"]);
+	assert.deepEqual(result.packet.invariantChecks.droppedSlotIds, ["slot-002"]);
+	assert.equal(result.packet.invariantChecks.sourceRefCoverage.sourceRefJoinFailures, 1);
+	assert.equal(result.packet.invariantChecks.verifierIntegrity.invalidVerifierRows, 1);
+	assert.equal(result.packet.invariantChecks.verifierIntegrity.duplicateVerifierRows, 1);
+	assert.equal(result.packet.invariantChecks.verifierIntegrity.missingVerifierResults, 1);
+	assert.equal(result.packet.verifierIntegrity.invalidVerifierRows[0].reason, "missing_claim_id");
+	assert.equal(result.packet.verifierIntegrity.duplicateVerifierRows[0].claimId, "claim-001");
+	assert.deepEqual(result.packet.normalizerDiagnostics.precisionGuard.issueCounts, {
+		multi_obligation_claim: 1,
+	});
+	assert.equal(result.packet.overflowLedger.omittedVerificationCandidateCount, 1);
+	assert.equal(result.packet.overflowLedger.invalidVerifierRowCount, 1);
+});
+
+test("deep-research P3 final-audit replay fixture preserves guardrail floors", async () => {
+	const fixturePath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"internal",
+		"eval",
+		"deep-research-web-source-20260626",
+		"fixtures",
+		"p3-final-audit-replay.json",
+	);
+	const fixture = JSON.parse(readFileSync(fixturePath, "utf8"));
+	const expectations = fixture.expectations;
+	assert.equal(fixture.provenance.sourceRunId, "workflow_mqyrg95t_740b57");
+
+	const { default: finalAuditPacket } = await import(
+		`../../workflows/deep-research/helpers/final-audit-packet.mjs?test=${Date.now()}`
+	);
+	const packetResult = await finalAuditPacket({ sources: fixture.sources });
+	const packet = packetResult.packet;
+
+	assert.equal(packet.verdictCounts.verified, expectations.verified);
+	assert.equal(
+		packet.verdictCounts.partiallySupported,
+		expectations.partiallySupported,
+	);
+	assert.equal(packet.verdictCounts.unsupported, expectations.unsupported);
+	assert.equal(packet.verdictCounts.conflicting, expectations.conflicting);
+	assert.ok(packet.verdictCounts.verified >= expectations.verifiedFloor);
+	assert.equal(packet.factSlotCoverage.length, expectations.plannedFactSlots);
+	assert.equal(
+		packet.factSlotCoverage.filter((slot) => slot.status === "filled").length,
+		expectations.filledFactSlots,
+	);
+	assert.equal(
+		packet.factSlotCoverage.filter((slot) => slot.status === "partial").length,
+		expectations.partialFactSlots,
+	);
+	assert.equal(
+		packet.factSlotCoverage.filter((slot) => slot.status === "missing").length,
+		expectations.missingFactSlots,
+	);
+	assert.deepEqual(packet.invariantChecks.omittedCandidateIds, []);
+	assert.deepEqual(packet.invariantChecks.droppedSlotIds, []);
+	assert.equal(
+		packet.invariantChecks.sourceRefCoverage.sourceRefJoinFailures,
+		expectations.sourceRefJoinFailures,
+	);
+	assert.equal(packet.invariantChecks.verifierIntegrity.invalidVerifierRows, 0);
+	assert.equal(packet.invariantChecks.verifierIntegrity.duplicateVerifierRows, 0);
+	assert.equal(packet.invariantChecks.verifierIntegrity.missingVerifierResults, 0);
+	assert.equal(packet.overflowLedger.omittedVerificationCandidateCount, 0);
+
+	const plannedSlotIds = fixture.sources["plan.main"].factSlots.map(
+		(slot) => slot.id,
+	);
+	const normalizeSlotIds = fixture.sources[
+		"normalize-claims.main"
+	].factSlotCoverage.map((slot) => slot.slotId);
+	const finalSlotIds = fixture.finalAudit.finalReport.factSlotCoverage.map(
+		(slot) => slot.slotId,
+	);
+	assert.deepEqual(
+		plannedSlotIds.filter((slotId) => !normalizeSlotIds.includes(slotId)),
+		[],
+	);
+	assert.deepEqual(
+		plannedSlotIds.filter((slotId) => !finalSlotIds.includes(slotId)),
+		[],
+	);
+	assert.deepEqual(finalSlotIds, packet.factSlotCoverage.map((slot) => slot.slotId));
+	assert.equal(
+		fixture.finalAudit.finalReport.coverageSummary.verified,
+		expectations.verified,
+	);
+	assert.equal(
+		fixture.finalAudit.claimVerdictIndex.claims.length,
+		expectations.verified,
+	);
+	assert.equal(
+		fixture.finalAudit.claimVerdictIndex.claims.every(
+			(claim) => claim.status === "verified",
+		),
+		true,
+	);
+
+	const cwd = makeProject();
+	try {
+		const helperPath = join(
+			dirname(fileURLToPath(import.meta.url)),
+			"..",
+			"..",
+			"workflows",
+			"deep-research",
+			"helpers",
+			"render-executive.mjs",
+		);
+		const renderExecutive = (
+			await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)
+		).default;
+		const rendered = await renderExecutive({
+			sources: { "final-audit.main": fixture.finalAudit },
+			options: {
+				maxWords: 5000,
+				maxUrls: 5,
+				maxFindings: 3,
+				maxRecommendations: 3,
+				maxGaps: 2,
+			},
+			context: { cwd, runId: "workflow_p3_fixture", taskId: "task-final" },
+		});
+		assert.equal(rendered.status, "passed");
+		assert.equal(rendered.gates.passed, true);
+		assert.equal(rendered.claimSummary.verified, expectations.verified);
+		assert.equal(rendered.factSlotSummary.total, expectations.plannedFactSlots);
+		assert.equal(
+			rendered.factSlotSummary.missingOrConflicting,
+			expectations.missingFactSlots,
+		);
+		assert.equal(rendered.sourceUrlCount <= rendered.gates.maxUrls, true);
+		assert.doesNotMatch(
+			JSON.stringify(rendered),
+			/\/Users\/|\.pi\/workflows|web-source-cache/,
+		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
 });
 
 test("deep-research renderer emits evidence-backed report and sidecars", async () => {
@@ -11370,6 +11867,75 @@ test("deep-research renderer emits evidence-backed report and sidecars", async (
 			),
 			`${result.executiveMarkdown}\n`,
 		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("deep-research executive renderer preserves object gaps zeros and recommendation labels", async () => {
+	const cwd = makeProject();
+	try {
+		const helperPath = join(
+			dirname(fileURLToPath(import.meta.url)),
+			"..",
+			"..",
+			"workflows",
+			"deep-research",
+			"helpers",
+			"render-executive.mjs",
+		);
+		const helper = (
+			await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)
+		).default;
+		const result = await helper({
+			sources: {
+				"final-audit.main": {
+					digest: "Zero-count audit digest",
+					finalReport: {
+						summary: "No claims were promoted after deterministic checks.",
+						coverageSummary: {
+							verificationCandidates: 0,
+							verified: 0,
+							partiallySupported: 0,
+							unsupported: 0,
+							conflicting: 0,
+						},
+						recommendations: [
+							{ recommendation: "Use measured telemetry before estimates." },
+							{
+								recommendation: "Keep cited methodology in the audit trail.",
+								sourceUrls: ["https://example.test/method"],
+							},
+						],
+						remainingGaps: {
+							blocking: [{ gap: "Verify any claim before promoting it." }],
+							nonBlocking: ["Keep a human domain review before public claims."],
+						},
+					},
+					claimVerdictIndex: {
+						claims: [{ id: "claim-legacy", status: "verified" }],
+					},
+				},
+			},
+			options: {
+				maxWords: 160,
+				maxUrls: 2,
+				maxFindings: 0,
+				maxRecommendations: 2,
+				maxGaps: 2,
+			},
+			context: { cwd, runId: "workflow_exec", taskId: "task-final" },
+		});
+
+		assert.equal(result.status, "passed");
+		assert.equal(result.claimSummary.total, 1);
+		assert.equal(result.claimSummary.verified, 1);
+		assert.ok(result.claimSummary.coverageSummaryMismatch.length > 0);
+		assert.match(result.executiveMarkdown, /Evidence status: not specified/);
+		assert.match(result.executiveMarkdown, /Verify any claim before promoting it/);
+		assert.match(result.executiveMarkdown, /human domain review/);
+		assert.equal(result.sidecarPath, "executive.md");
+		assert.doesNotMatch(JSON.stringify(result), /\/Users\/|\.pi\/workflows|web-source-cache/);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
@@ -11496,6 +12062,42 @@ test("deep-research renderer renders over-cap evidence without omission", async 
 		result.sourceUrls.includes("https://source.test/finding"),
 		"nested url fields should be included and fragments stripped",
 	);
+});
+
+test("deep-research executive renderer fails gate when truncating open gaps", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"render-executive.mjs",
+	);
+	const helper = (
+		await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)
+	).default;
+	const result = await helper({
+		sources: {
+			"final-audit.main": {
+				digest:
+					"This summary is intentionally verbose so the bounded renderer truncates before all caveats can be displayed safely to the parent consumer.",
+				finalReport: {
+					summary:
+						"This summary is intentionally verbose so the bounded renderer truncates before all caveats can be displayed safely to the parent consumer.",
+					remainingGaps: [{ gap: "This open gap must not be silently hidden." }],
+				},
+				claimVerdictIndex: { claims: [] },
+			},
+		},
+		options: { maxWords: 12, maxUrls: 1, maxFindings: 0, maxRecommendations: 0, maxGaps: 1 },
+		context: {},
+	});
+
+	assert.equal(result.status, "failed");
+	assert.equal(result.gates.truncated, true);
+	assert.equal(result.gates.truncatedWithOpenGaps, true);
+	assert.equal(result.gates.passed, false);
 });
 
 test("deep-research executive renderer blocks without audit control", async () => {
@@ -12665,6 +13267,590 @@ test("subagent launch uses generated fetch cache extension by default", async ()
 		if (previousFetchCache === undefined)
 			delete process.env.PI_WORKFLOW_FETCH_CONTENT_CACHE;
 		else process.env.PI_WORKFLOW_FETCH_CONTENT_CACHE = previousFetchCache;
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("workflow web-source core redacts URLs and reads normalized snippets", async () => {
+	const cwd = makeProject();
+	try {
+		const config = {
+			runId: "workflow_unit",
+			taskId: "task-1",
+			cacheDir: join(cwd, ".pi", "workflows", "workflow_unit", "web-source-cache"),
+		};
+		assert.equal(
+			validateWorkflowWebUrl("file:///etc/passwd").ok,
+			false,
+		);
+		assert.equal(
+			validateWorkflowWebUrl("http://169.254.169.254/latest/meta-data").ok,
+			false,
+		);
+		assert.equal(validateWorkflowWebUrl("http://[::1]/").ok, false);
+		assert.equal(validateWorkflowWebUrl("http://[::ffff:7f00:1]/").ok, false);
+		assert.equal(validateWorkflowWebUrl("http://100.64.0.1/").ok, false);
+		assert.equal(validateWorkflowWebUrl("http://198.18.0.1/").ok, false);
+		assert.equal(
+			sanitizeUrlForModel("https://user:pass@example.test/path?token=secret&ok=1#access_token=secret"),
+			"https://example.test/path?token=REDACTED&ok=1#access_token=REDACTED",
+		);
+		const embeddedRedacted = sanitizeUrlForModel("See https://user:pass@example.test/path?token=secret&ok=1 for details");
+		assert.doesNotMatch(embeddedRedacted, /user|pass|secret/);
+		assert.match(embeddedRedacted, /https:\/\/example\.test\/path\?token=REDACTED&ok=1/);
+		const source = createWorkflowWebSource({
+			config,
+			url: "https://example.test/report?signature=secret#section",
+			text: "The quoted value is “forty two” after whitespace.\nSecond line says GPU power is reported in milliwatts by the telemetry API.",
+			title: "Example Report",
+		});
+		const budget = createWorkflowWebVisibleBudget(180);
+		const read = readWorkflowWebSourceSnippet({
+			source,
+			query: "quoted value is \"forty two\"",
+			maxChars: 60,
+			budget,
+		});
+		assert.equal(read.status, "matched");
+		assert.equal(read.matchType, "normalized");
+		assert.match(read.quote, /forty two/);
+		const termRead = readWorkflowWebSourceSnippet({
+			source,
+			claim: "Telemetry reports GPU power in milliwatts",
+			terms: ["GPU power", "milliwatts", "telemetry API"],
+			maxChars: 90,
+			budget,
+		});
+		assert.equal(termRead.status, "matched");
+		assert.equal(termRead.matchType, "terms");
+		assert.match(termRead.quote, /milliwatts/);
+		assert.deepEqual(termRead.matchedTerms, ["GPU power", "milliwatts", "telemetry API"]);
+		assert.deepEqual(termRead.missingTerms, []);
+		assert.equal(termRead.coverageRatio, 1);
+		assert.equal(termRead.candidateOnly, true);
+		assert.equal(source.redactedUrl.includes("secret"), false);
+		assert.equal(await readWorkflowWebSource(config, "../escape"), undefined);
+		await writeWorkflowWebSource(config, source);
+		writeFileSync(join(config.cacheDir, "index.json"), JSON.stringify({
+			schema: "workflow-web-source-index-v1",
+			updatedAt: new Date().toISOString(),
+			runId: config.runId,
+			sources: [],
+		}));
+		const rebuiltIndex = await readWorkflowWebSourceIndex(config);
+		assert.ok(rebuiltIndex.sources.some((entry) => entry.sourceRef === source.sourceRef));
+		const foundByScan = await findWorkflowWebSourceByUrl(config, "https://example.test/report?signature=secret#section");
+		assert.equal(foundByScan.sourceRef, source.sourceRef);
+		const differentSecret = await findWorkflowWebSourceByUrl(config, "https://example.test/report?signature=different#section");
+		assert.equal(differentSecret, undefined);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("workflow web-source extension returns source cards and narrow reads without exposing cache paths", async () => {
+	const cwd = makeProject();
+	try {
+		const cacheDir = join(cwd, ".pi", "workflows", "workflow_unit", "web-source-cache");
+		const registered = new Map();
+		const appended = [];
+		const fakePi = {
+			registerTool(tool) {
+				registered.set(tool.name, tool);
+			},
+			appendEntry(type, data) {
+				appended.push({ type, data });
+			},
+		};
+		const providerExtension = (pi) => {
+			pi.registerTool({
+				name: "web_search",
+				async execute() {
+					return {
+						content: [
+							{
+								type: "text",
+								text: "Example result https://example.test/report?token=secret with useful context",
+							},
+						],
+					};
+				},
+			});
+			pi.registerTool({
+				name: "fetch_content",
+				async execute(_id, params) {
+					pi.appendEntry("web-search-results", {
+						type: "fetch",
+						urls: [{ url: params.url, content: "RAW PROVIDER PAYLOAD" }],
+					});
+					return {
+						content: [
+							{
+								type: "text",
+								text: `# Provider Title\nExact claim: workflow source cards preserve evidence for ${params.url}.`,
+							},
+						],
+						details: { successful: 1 },
+					};
+				},
+			});
+		};
+		registerWorkflowWebSourceExtension(
+			fakePi,
+			{
+				schema: "workflow-web-source-launch-config-v1",
+				runId: "workflow_unit",
+				taskId: "task-1",
+				cwd,
+				cacheDir,
+				provider: { kind: "extension" },
+				securityPolicy: { allowPrivateHosts: true },
+				webSourcePolicy: { previewChars: 48, sourceReadMaxChars: 80, perTaskVisibleCharBudget: 500 },
+			},
+			providerExtension,
+		);
+
+		assert.equal(registered.has("web_search"), false);
+		assert.equal(registered.has("fetch_content"), false);
+		assert.equal(registered.has("workflow_web_search"), true);
+		assert.equal(registered.has("workflow_web_fetch_source"), true);
+		assert.equal(registered.has("workflow_web_source_read"), true);
+		assert.equal(registered.get("workflow_web_search").parameters.type, "object");
+		assert.equal(registered.get("workflow_web_fetch_source").parameters.type, "object");
+		assert.equal(registered.get("workflow_web_source_read").parameters.type, "object");
+
+		const search = await registered
+			.get("workflow_web_search")
+			.execute("call-search", { query: "example" });
+		assert.match(search.content[0].text, /workflow_web_fetch_source/);
+		assert.doesNotMatch(search.content[0].text, /secret/);
+
+		const fetched = await registered
+			.get("workflow_web_fetch_source")
+			.execute("call-fetch", { url: "https://example.test/report?token=secret" });
+		assert.match(fetched.content[0].text, /sourceRef/);
+		assert.doesNotMatch(fetched.content[0].text, /web-source-cache/);
+		assert.doesNotMatch(fetched.content[0].text, /secret/);
+		const card = JSON.parse(fetched.content[0].text).card;
+		const stored = await readWorkflowWebSource({ runId: "workflow_unit", taskId: "task-1", cacheDir }, card.sourceRef);
+		assert.equal(stored.text.includes("Exact claim"), true);
+		assert.equal(stored.url.includes("secret"), false);
+		assert.equal(appended.length, 0);
+
+		const fetchedBatch = await registered.get("workflow_web_fetch_source").execute("call-fetch-batch", {
+			urls: ["https://example.test/batch-a", "https://example.test/batch-b"],
+			titles: ["Batch A", "Batch B"],
+		});
+		const fetchedBatchBody = JSON.parse(fetchedBatch.content[0].text);
+		assert.equal(fetchedBatchBody.status, "ok");
+		assert.equal(fetchedBatchBody.cards.length, 2);
+		assert.equal(fetchedBatchBody.results.length, 2);
+		assert.equal(fetchedBatchBody.results[0].card, undefined);
+		assert.equal(fetchedBatchBody.results[0].cardIndex, 0);
+		assert.equal(fetchedBatchBody.results[0].sourceRef, fetchedBatchBody.cards[0].sourceRef);
+		assert.equal(fetchedBatchBody.results[1].cardIndex, 1);
+		assert.equal(fetchedBatchBody.results[1].sourceRef, fetchedBatchBody.cards[1].sourceRef);
+		assert.match(fetchedBatch.content[0].text, /sourceRef/);
+		assert.doesNotMatch(fetchedBatch.content[0].text, /\n  \"cards\"/);
+		assert.doesNotMatch(fetchedBatch.content[0].text, /web-source-cache/);
+
+		const read = await registered.get("workflow_web_source_read").execute("call-read", {
+			sourceRef: card.sourceRef,
+			query: "Exact claim: workflow source cards preserve evidence",
+		});
+		assert.match(read.content[0].text, /Exact claim/);
+		assert.doesNotMatch(read.content[0].text, /web-source-cache/);
+
+		const termSearch = await registered.get("workflow_web_source_read").execute("call-read-terms", {
+			sourceRef: card.sourceRef,
+			claim: "workflow source cards preserve evidence",
+			terms: ["source cards", "preserve evidence"],
+		});
+		const termBody = JSON.parse(termSearch.content[0].text);
+		assert.equal(termBody.status, "candidate");
+		assert.equal(termBody.matchType, "terms");
+		assert.equal(termBody.candidateOnly, true);
+		assert.deepEqual(termBody.missingTerms, []);
+		assert.match(termBody.quote, /preserve evidence/);
+
+		const batch = await registered.get("workflow_web_source_read").execute("call-read-batch", {
+			sourceRef: card.sourceRef,
+			reads: [
+				{ query: "Exact claim: workflow source cards preserve evidence" },
+				{ claim: "workflow source cards preserve evidence", terms: ["source cards", "preserve evidence"] },
+				{ query: "not present in source" },
+			],
+		});
+		const batchBody = JSON.parse(batch.content[0].text);
+		assert.equal(batchBody.status, "partial");
+		assert.equal(batchBody.results.length, 3);
+		assert.equal(batchBody.results[0].status, "ok");
+		assert.equal(batchBody.results[1].status, "candidate");
+		assert.equal(batchBody.results[1].matchType, "terms");
+		assert.equal(batchBody.results[2].status, "not_found");
+		assert.doesNotMatch(batch.content[0].text, /web-source-cache/);
+
+		const exhausted = await registered.get("workflow_web_source_read").execute("call-read-2", {
+			sourceRef: card.sourceRef,
+			query: "alpha beta gamma that is not present but keeps budget unchanged",
+		});
+		assert.match(exhausted.content[0].text, /not_found/);
+
+		const duplicate = await registered
+			.get("workflow_web_fetch_source")
+			.execute("call-fetch-2", { url: "https://example.test/report?token=secret#quote" });
+		assert.equal(JSON.parse(duplicate.content[0].text).card.duplicate, true);
+		assert.equal(existsSync(join(cacheDir, "events.jsonl")), true);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("workflow web-source fetch single-flights duplicate URLs and caches transient empty results in process", async () => {
+	const cwd = makeProject();
+	try {
+		const cacheDir = join(cwd, ".pi", "workflows", "workflow_unit", "web-source-cache");
+		const registered = new Map();
+		const fakePi = { registerTool(tool) { registered.set(tool.name, tool); } };
+		const callsByUrl = new Map();
+		const providerExtension = (pi) => {
+			pi.registerTool({
+				name: "fetch_content",
+				async execute(_id, params) {
+					callsByUrl.set(params.url, (callsByUrl.get(params.url) ?? 0) + 1);
+					await new Promise((resolve) => setTimeout(resolve, 20));
+					if (params.url.includes("empty")) return { content: [] };
+					return { content: [{ type: "text", text: `Single-flight content for ${params.url}` }] };
+				},
+			});
+		};
+		registerWorkflowWebSourceExtension(
+			fakePi,
+			{
+				schema: "workflow-web-source-launch-config-v1",
+				runId: "workflow_unit",
+				taskId: "task-1",
+				cwd,
+				cacheDir,
+				provider: { kind: "extension" },
+				securityPolicy: { allowPrivateHosts: true },
+				webSourcePolicy: { previewChars: 60, sourceReadMaxChars: 80, perTaskVisibleCharBudget: 500 },
+			},
+			providerExtension,
+		);
+
+		const [first, second] = await Promise.all([
+			registered.get("workflow_web_fetch_source").execute("fetch-a", { url: "https://example.test/same" }),
+			registered.get("workflow_web_fetch_source").execute("fetch-b", { url: "https://example.test/same#section" }),
+		]);
+		assert.match(first.content[0].text, /sourceRef/);
+		const firstCard = JSON.parse(first.content[0].text).card;
+		const secondCard = JSON.parse(second.content[0].text).card;
+		assert.equal(
+			[firstCard.duplicate, secondCard.duplicate].filter(Boolean).length,
+			1,
+		);
+		assert.equal(callsByUrl.get("https://example.test/same"), 1);
+
+		const registeredCrossTask = new Map();
+		registerWorkflowWebSourceExtension(
+			{ registerTool(tool) { registeredCrossTask.set(tool.name, tool); } },
+			{
+				schema: "workflow-web-source-launch-config-v1",
+				runId: "workflow_unit",
+				taskId: "task-2",
+				cwd,
+				cacheDir,
+				provider: { kind: "extension" },
+				securityPolicy: { allowPrivateHosts: true },
+				webSourcePolicy: { previewChars: 60, sourceReadMaxChars: 80, perTaskVisibleCharBudget: 500 },
+			},
+			providerExtension,
+		);
+		const [crossFirst, crossSecond] = await Promise.all([
+			registered.get("workflow_web_fetch_source").execute("fetch-cross-a", { url: "https://example.test/cross" }),
+			registeredCrossTask.get("workflow_web_fetch_source").execute("fetch-cross-b", { url: "https://example.test/cross" }),
+		]);
+		assert.match(crossFirst.content[0].text, /sourceRef/);
+		assert.match(crossSecond.content[0].text, /sourceRef/);
+		assert.equal(callsByUrl.get("https://example.test/cross"), 1);
+
+		const emptyFirst = await registered.get("workflow_web_fetch_source").execute("fetch-empty-a", { url: "https://example.test/empty" });
+		const emptySecond = await registered.get("workflow_web_fetch_source").execute("fetch-empty-b", { url: "https://example.test/empty" });
+		assert.match(emptyFirst.content[0].text, /empty_source/);
+		assert.match(emptySecond.content[0].text, /empty_source/);
+		assert.equal(callsByUrl.get("https://example.test/empty"), 1);
+		const emptyFromOtherTask = await registeredCrossTask.get("workflow_web_fetch_source").execute("fetch-empty-c", { url: "https://example.test/empty" });
+		assert.match(emptyFromOtherTask.content[0].text, /empty_source/);
+		assert.equal(callsByUrl.get("https://example.test/empty"), 2);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("workflow web-source search disables provider curation by default", async () => {
+	const cwd = makeProject();
+	try {
+		const cacheDir = join(cwd, ".pi", "workflows", "workflow_unit", "web-source-cache");
+		const registered = new Map();
+		const fakePi = { registerTool(tool) { registered.set(tool.name, tool); } };
+		const providerExtension = (pi) => {
+			pi.registerTool({
+				name: "web_search",
+				async execute(_id, params) {
+					assert.equal(params.workflow, "none");
+					return { content: [{ type: "text", text: "Result https://example.test/source snippet" }] };
+				},
+			});
+		};
+		registerWorkflowWebSourceExtension(
+			fakePi,
+			{
+				schema: "workflow-web-source-launch-config-v1",
+				runId: "workflow_unit",
+				taskId: "task-1",
+				cwd,
+				cacheDir,
+				provider: { kind: "extension" },
+			},
+			providerExtension,
+		);
+		const search = await registered
+			.get("workflow_web_search")
+			.execute("call-search", { query: "example" });
+		assert.match(search.content[0].text, /workflow_web_fetch_source/);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("workflow web-source extension blocks untrusted custom fetch and reports budget exhaustion", async () => {
+	const cwd = makeProject();
+	try {
+		const cacheDir = join(cwd, ".pi", "workflows", "workflow_unit", "web-source-cache");
+		const registered = new Map();
+		let providerCalls = 0;
+		const fakePi = { registerTool(tool) { registered.set(tool.name, tool); } };
+		const providerExtension = (pi) => {
+			pi.registerTool({
+				name: "fetch_content",
+				async execute(_id, params) {
+					providerCalls += 1;
+					return {
+						content: [{ type: "text", text: `Alpha beta gamma exact quote for ${params.url}.` }],
+						details: { finalUrl: params.url },
+					};
+				},
+			});
+		};
+		registerWorkflowWebSourceExtension(
+			fakePi,
+			{
+				schema: "workflow-web-source-launch-config-v1",
+				runId: "workflow_unit",
+				taskId: "task-1",
+				cwd,
+				cacheDir,
+				provider: { kind: "extension" },
+				webSourcePolicy: { previewChars: 0, sourceReadMaxChars: 80, perTaskVisibleCharBudget: 0 },
+			},
+			providerExtension,
+		);
+		const blocked = await registered
+			.get("workflow_web_fetch_source")
+			.execute("call-untrusted", { url: "http://1.1.1.1/source" });
+		assert.match(blocked.content[0].text, /untrusted_provider_fetch/);
+		assert.equal(providerCalls, 0);
+
+		const trustedRegistered = new Map();
+		registerWorkflowWebSourceExtension(
+			{ registerTool(tool) { trustedRegistered.set(tool.name, tool); } },
+			{
+				schema: "workflow-web-source-launch-config-v1",
+				runId: "workflow_unit_trusted",
+				taskId: "task-1",
+				cwd,
+				cacheDir: join(cwd, ".pi", "workflows", "workflow_unit_trusted", "web-source-cache"),
+				provider: { kind: "extension" },
+				securityPolicy: { allowPrivateHosts: true },
+				webSourcePolicy: { previewChars: 0, sourceReadMaxChars: 80, perTaskVisibleCharBudget: 0 },
+			},
+			providerExtension,
+		);
+		const fetched = await trustedRegistered
+			.get("workflow_web_fetch_source")
+			.execute("call-fetch", { url: "https://example.test/source" });
+		const card = JSON.parse(fetched.content[0].text).card;
+		const read = await trustedRegistered.get("workflow_web_source_read").execute("call-read", {
+			sourceRef: card.sourceRef,
+			query: "Alpha beta gamma",
+		});
+		assert.match(read.content[0].text, /budget_exhausted/);
+		assert.doesNotMatch(read.content[0].text, /"quote": ""/);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("default normalized web fetch uses guarded direct fetch instead of captured fetch_content", async () => {
+	const cwd = makeProject();
+	const server = createServer((_req, res) => {
+		res.writeHead(200, { "content-type": "text/html" });
+		res.end("<html><head><title>Guarded &amp; Direct</title><style>.x{}</style></head><body><script>secret()</script><main>Local direct fetch body &amp; decoded quote for guarded default provider.</main></body></html>");
+	});
+	await new Promise((resolve) => server.listen(0, resolve));
+	try {
+		const address = server.address();
+		assert.equal(typeof address, "object");
+		const url = `http://localhost:${address.port}/source`;
+		const cacheDir = join(cwd, ".pi", "workflows", "workflow_unit", "web-source-cache");
+		const registered = new Map();
+		let providerFetchCalls = 0;
+		const fakePi = { registerTool(tool) { registered.set(tool.name, tool); } };
+		const providerExtension = (pi) => {
+			pi.registerTool({
+				name: "fetch_content",
+				async execute() {
+					providerFetchCalls += 1;
+					throw new Error("captured fetch_content should not be called");
+				},
+			});
+		};
+		registerWorkflowWebSourceExtension(
+			fakePi,
+			{
+				schema: "workflow-web-source-launch-config-v1",
+				runId: "workflow_unit",
+				taskId: "task-1",
+				cwd,
+				cacheDir,
+				provider: { kind: "pi-web-access" },
+				securityPolicy: { allowPrivateHosts: true },
+			},
+			providerExtension,
+		);
+		const fetched = await registered
+			.get("workflow_web_fetch_source")
+			.execute("call-fetch", { url });
+		assert.equal(providerFetchCalls, 0);
+		assert.match(fetched.content[0].text, /Local direct fetch body & decoded quote/);
+		assert.doesNotMatch(fetched.content[0].text, /<main>|secret\(\)/);
+		const card = JSON.parse(fetched.content[0].text).card;
+		const stored = await readWorkflowWebSource({ runId: "workflow_unit", taskId: "task-1", cacheDir }, card.sourceRef);
+		assert.equal(stored.extractionLossy, true);
+		assert.match(stored.text, /Local direct fetch body & decoded quote/);
+	} finally {
+		await new Promise((resolve) => server.close(resolve));
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("subagent launch wires normalized workflow web-source tools through generated extension", async () => {
+	const cwd = makeProject();
+	let captured;
+	try {
+		writeAgent(
+			cwd,
+			"unit-researcher",
+			"read, workflow_web_search, workflow_web_fetch_source, workflow_web_source_read",
+		);
+		setSubagentApiForTests({
+			async runSubagent(options) {
+				captured = options;
+				return { runId: "run_stub", attemptId: "attempt_stub", status: "running" };
+			},
+			async getSubagentStatus() {
+				return null;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+
+		const spec = workflowSpec("unit-researcher", {
+			tools: ["read", "workflow_web_search", "workflow_web_fetch_source", "workflow_web_source_read"],
+			artifactGraph: {
+				stages: [{ id: "main", type: "single", prompt: "Research with normalized web tools." }],
+			},
+		});
+		const compiled = await compileWorkflow(spec, { cwd, task: "Research topic" });
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await writeRunRecord(cwd, run);
+		await scheduleRun(cwd, run.runId);
+
+		assert(captured.tools.includes("workflow_web_search"));
+		assert(
+			captured.extensions.some((entry) =>
+				entry.endsWith("workflow-web-source-extension.ts"),
+			),
+		);
+		assert.equal(captured.extensions.some(isBundledPiWebAccessExtension), false);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("subagent launch captures custom normalized web provider extension instead of exposing it directly", async () => {
+	const cwd = makeProject();
+	let captured;
+	try {
+		const providerPath = "/tmp/custom-workflow-web-provider.mjs";
+		writeAgent(cwd, "unit-researcher", "read, workflow_web_fetch_source");
+		setSubagentApiForTests({
+			async runSubagent(options) {
+				captured = options;
+				return { runId: "run_stub", attemptId: "attempt_stub", status: "running" };
+			},
+			async getSubagentStatus() {
+				return null;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+		const spec = workflowSpec("unit-researcher", {
+			tools: [
+				"read",
+				{
+					name: "workflow_web_fetch_source",
+					extensions: [providerPath],
+					classification: "read-only",
+				},
+			],
+			artifactGraph: {
+				stages: [{ id: "main", type: "single", prompt: "Fetch with custom normalized provider." }],
+			},
+		});
+		const compiled = await compileWorkflow(spec, { cwd, task: "Research topic" });
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await writeRunRecord(cwd, run);
+		await scheduleRun(cwd, run.runId);
+
+		assert.equal(captured.extensions.includes(providerPath), false);
+		const wrapperPath = captured.extensions.find((entry) =>
+			entry.endsWith("workflow-web-source-extension.ts"),
+		);
+		assert(wrapperPath);
+		assert.match(readFileSync(wrapperPath, "utf8"), /custom-workflow-web-provider/);
+	} finally {
 		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
 	}
@@ -14646,16 +15832,24 @@ test("spec-less direct dynamic run records provenance and launches planner", asy
 		assert.equal(launched[0].thinking, "low");
 		assert.deepEqual(
 			launched[0].tools.filter((tool) => tool !== "workflow_artifact"),
-			["read", "grep", "find", "ls", "web_search", "fetch_content"],
+			[
+				"read",
+				"grep",
+				"find",
+				"ls",
+				"workflow_web_search",
+				"workflow_web_fetch_source",
+				"workflow_web_source_read",
+			],
 		);
 		assert.equal(launched[0].tools.includes("get_search_content"), false);
 		assert.match(
 			String(launched[0].systemPrompt),
-			/Only these tools are enabled for this workflow task: read, grep, find, ls, web_search, fetch_content, workflow_artifact\./,
+			/Only these tools are enabled for this workflow task: read, grep, find, ls, workflow_web_search, workflow_web_fetch_source, workflow_web_source_read, workflow_artifact\./,
 		);
 		assert.match(
 			String(launched[0].systemPrompt),
-			/Full cached search-content hydration is unavailable here\./,
+			/Workflow web-source tools return compact source cards\./,
 		);
 		const materializedSpec = JSON.parse(
 			readFileSync(join(cwd, run.provenance.runtimeBundle), "utf8"),
@@ -16192,6 +17386,13 @@ test("deep-research claim-evidence-gate enforces structured evidence, rejoins id
 			"plan.main": {
 				factSlots: [{ id: "slot-001" }, { id: "slot-002" }, { id: "slot-003" }],
 			},
+			"normalize-input-packet.main": {
+				packet: {
+					precisionGuard: {
+						summary: { totalClaims: 3, flaggedClaims: 1, issueCounts: { multi_obligation_claim: 1 } },
+					},
+				},
+			},
 			"normalize-claims.main": {
 				claimInventory: {
 					verificationCandidates: [
@@ -16199,16 +17400,19 @@ test("deep-research claim-evidence-gate enforces structured evidence, rejoins id
 							id: "claim-001",
 							claim: "Original claim text",
 							factSlotIds: ["slot-001"],
+							sourceRefs: ["wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
 						},
 						{
 							id: "claim-002",
 							claim: "Costs 5 usd per 1M tokens",
 							factSlotIds: ["slot-002"],
+							sourceUrls: ["https://example.test/pricing"],
 						},
 						{
 							id: "claim-003",
 							claim: "Local docs claim",
 							factSlotIds: ["slot-001"],
+							sourceRefs: ["wsrc_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
 						},
 					],
 				},
@@ -16242,15 +17446,367 @@ test("deep-research claim-evidence-gate enforces structured evidence, rejoins id
 	assert.deepEqual(out.statusPartitions.verified, ["claim-001", "claim-003"]);
 	assert.deepEqual(out.statusPartitions.partiallySupported, ["claim-002"]);
 	assert.equal(out.verdictCounts.verified, 2);
-	// Identity rejoined from the normalizer, not the verifier echo.
+	// Identity/sourceRefs rejoined from the normalizer, not the verifier echo.
 	assert.equal(out.auditedClaims[0].claim, "Original claim text");
+	assert.deepEqual(out.auditedClaims[0].sourceRefs, ["wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]);
+	assert.deepEqual(out.auditedClaims[2].sourceRefs, ["wsrc_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]);
 	assert.equal(out.gateSummary.identityRejoined, 1);
+	assert.equal(out.gateSummary.sourceRefsRejoined, 2);
+	assert.equal(out.gateSummary.sourceRefJoinFailures, 1);
+	assert.deepEqual(out.sourceRefJoinFailures.map((gap) => gap.claimId), ["claim-002"]);
 	// Planned slot dropped by the normalizer is surfaced as a gap.
 	assert.deepEqual(out.slotCoverageCheck.droppedSlotIds, ["slot-003"]);
 	assert.ok(out.remainingGaps.some((g) => g.slotId === "slot-003"));
 	// Compact digest exists for source-context budgeting.
 	assert.equal(out.claimDigests.length, 3);
+	assert.deepEqual(out.claimDigests[0].sourceRefs, ["wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]);
 	assert.ok(!("evidence" in out.claimDigests[0]));
+	assert.deepEqual(out.precisionGuardDiagnostics.issueCounts, {
+		multi_obligation_claim: 1,
+	});
+});
+
+test("deep-research claim-evidence-gate enriches downgrade reasons without changing strong-evidence claims", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"claim-evidence-gate.mjs",
+	);
+	const helper = (await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)).default;
+	const out = await helper({
+		sources: {
+			"normalize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [
+						{ id: "claim-001", claim: "Strong source-backed claim." },
+						{ id: "claim-002", claim: "Candidate-only evidence should stay partial." },
+						{ id: "claim-003", claim: "Latency improved by 42 ms." },
+					],
+				},
+				factSlotCoverage: [],
+			},
+			"verify-claims.claim-001": {
+				id: "claim-001",
+				status: "verified",
+				evidence: [{ url: "https://example.test/strong", quote: "Strong source-backed claim." }],
+			},
+			"verify-claims.claim-002": {
+				id: "claim-002",
+				status: "verified",
+				evidence: [
+					{
+						url: "https://example.test/candidate",
+						quote: "Candidate-only evidence should stay partial.",
+						matchType: "terms",
+						candidateOnly: true,
+					},
+				],
+			},
+			"verify-claims.claim-003": {
+				id: "claim-003",
+				status: "verified",
+				evidence: [],
+			},
+		},
+		options: {
+			requireFetchedEvidenceForVerified: true,
+			downgradeExactQuantitativeWithoutSource: true,
+		},
+	});
+
+	assert.deepEqual(out.statusPartitions.verified, ["claim-001"]);
+	assert.deepEqual(out.statusPartitions.partiallySupported, ["claim-002", "claim-003"]);
+	assert.equal(out.verdictCounts.verified, 1);
+	assert.deepEqual(
+		out.remainingGaps.map((gap) => gap.evidenceState).sort(),
+		["candidate_only_evidence_not_strong", "exact_quantitative_without_source_reference"],
+	);
+	assert.equal(
+		out.auditedClaims.find((claim) => claim.id === "claim-001").evidenceGate,
+		undefined,
+	);
+});
+
+test("deep-research claim-evidence-gate backfills sourceRefs from normalize packet source cards", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"claim-evidence-gate.mjs",
+	);
+	const helper = (await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)).default;
+	const out = await helper({
+		sources: {
+			"plan.main": {
+				factSlots: [{ id: "slot-001" }],
+			},
+			"normalize-input-packet.main": {
+				packet: {
+					research: {
+						sources: [
+							{
+								url: "https://Example.test/docs/source/",
+								sourceRef: "wsrc_cccccccccccccccccccccccccccccccc",
+							},
+						],
+					},
+				},
+			},
+			"normalize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [
+						{
+							id: "claim-001",
+							claim: "Official docs support the source-card mapping.",
+							factSlotIds: ["slot-001"],
+							sourceUrls: ["https://example.test/docs/source"],
+						},
+					],
+				},
+				factSlotCoverage: [{ slotId: "slot-001" }],
+			},
+			"verify-claims.claim-001": {
+				id: "claim-001",
+				status: "verified",
+				evidence: [
+					{
+						url: "https://example.test/docs/source,",
+						quote: "Official docs support the source-card mapping.",
+					},
+				],
+			},
+		},
+		options: {
+			requireFetchedEvidenceForVerified: true,
+			downgradeExactQuantitativeWithoutSource: true,
+		},
+	});
+
+	assert.deepEqual(out.statusPartitions.verified, ["claim-001"]);
+	assert.deepEqual(out.auditedClaims[0].sourceRefs, [
+		"wsrc_cccccccccccccccccccccccccccccccc",
+	]);
+	assert.equal(out.gateSummary.sourceRefsBackfilledFromUrls, 1);
+	assert.equal(out.gateSummary.sourceRefJoinFailures, 0);
+	assert.deepEqual(out.sourceRefJoinFailures, []);
+});
+
+test("deep-research claim-evidence-gate does not backfill near-miss source URLs", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"claim-evidence-gate.mjs",
+	);
+	const helper = (await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)).default;
+	const out = await helper({
+		sources: {
+			"plan.main": {
+				factSlots: [{ id: "slot-001" }],
+			},
+			"normalize-input-packet.main": {
+				packet: {
+					research: {
+						sources: [
+							{
+								url: "https://docs.example.test/cli/v10/using-tool/scripts",
+								sourceRef: "wsrc_dddddddddddddddddddddddddddddddd",
+							},
+						],
+					},
+				},
+			},
+			"normalize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [
+						{
+							id: "claim-001",
+							claim: "Versionless docs support the claim.",
+							factSlotIds: ["slot-001"],
+							sourceUrls: ["https://docs.example.test/cli/using-tool/scripts"],
+						},
+					],
+				},
+				factSlotCoverage: [{ slotId: "slot-001" }],
+			},
+			"verify-claims.claim-001": {
+				id: "claim-001",
+				status: "verified",
+				evidence: [
+					{
+						url: "https://docs.example.test/cli/using-tool/scripts",
+						quote: "Versionless docs support the claim.",
+					},
+				],
+			},
+		},
+		options: {
+			requireFetchedEvidenceForVerified: true,
+			downgradeExactQuantitativeWithoutSource: true,
+		},
+	});
+
+	assert.equal(out.statusPartitions.verified.length, 1);
+	assert.equal(out.auditedClaims[0].sourceRefs, undefined);
+	assert.equal(out.gateSummary.sourceRefsBackfilledFromUrls, 0);
+	assert.equal(out.gateSummary.sourceRefJoinFailures, 1);
+	assert.deepEqual(out.sourceRefJoinFailures.map((gap) => gap.claimId), ["claim-001"]);
+});
+
+test("deep-research verifier schema allows omitted identity echoes", () => {
+	const schemaPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"schemas",
+		"deep-research-verify-claims-control.schema.json",
+	);
+	const schema = JSON.parse(readFileSync(schemaPath, "utf8"));
+	const valid = validateJsonSchema(
+		{
+			schema: "./schemas/deep-research-verify-claims-control.schema.json",
+			digest: "verified from source-backed evidence",
+			id: "claim-001",
+			status: "verified",
+			verdictDigest: { support: "official source supports it" },
+			evidence: [
+				{
+					url: "https://example.test/source",
+					quote: "source-backed evidence",
+				},
+			],
+		},
+		schema,
+	);
+	assert.equal(valid.valid, true, JSON.stringify(valid.issues));
+	const invalid = validateJsonSchema(
+		{
+			schema: "./schemas/deep-research-verify-claims-control.schema.json",
+			digest: "missing id remains invalid",
+			status: "verified",
+			verdictDigest: { support: "official source supports it" },
+			evidence: [],
+		},
+		schema,
+	);
+	assert.equal(invalid.valid, false);
+	assert.ok(invalid.issues.some((issue) => issue.path === "$.id"));
+});
+
+test("deep-research claim-evidence-gate canonicalizes candidate ids and verifier integrity", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"claim-evidence-gate.mjs",
+	);
+	const helper = (await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)).default;
+	const out = await helper({
+		sources: {
+			"normalize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [
+						{
+							id: "claim-001",
+							claim: "Canonical claim one",
+							factSlotIds: ["slot-001"],
+							sourceRefs: ["wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+						},
+						{
+							id: "claim-002",
+							claim: "Missing verifier result",
+							factSlotIds: ["slot-002"],
+							sourceUrls: ["https://example.test/missing"],
+						},
+						{
+							id: "claim-003",
+							claim: "Latency improved by 42 ms",
+							factSlotIds: ["slot-003"],
+						},
+					],
+				},
+				factSlotCoverage: [],
+			},
+			"verify-claims.claim-001.a": {
+				id: "claim-001",
+				claim: "Verifier restated claim one",
+				status: "verified",
+				evidence: [
+					{
+						sourceRef: "wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+						quote: "Evidence supports claim one.",
+					},
+				],
+			},
+			"verify-claims.claim-001.b": {
+				claimId: "claim-001",
+				status: "unsupported",
+				verdictDigest: { caveat: "second verifier disagreed" },
+			},
+			"verify-claims.claim-003": {
+				id: "claim-003",
+				status: "verified",
+			},
+			"verify-claims.bad-missing": {
+				status: "verified",
+			},
+			"verify-claims.bad-non-string": {
+				id: 123,
+				status: "verified",
+			},
+			"verify-claims.unknown": {
+				id: "claim-999",
+				status: "verified",
+			},
+		},
+		options: {
+			requireFetchedEvidenceForVerified: true,
+			downgradeExactQuantitativeWithoutSource: true,
+		},
+	});
+
+	assert.deepEqual(out.auditedClaims.map((claim) => claim.id), [
+		"claim-001",
+		"claim-002",
+		"claim-003",
+	]);
+	assert.equal(out.gateSummary.total, 3);
+	assert.equal(out.gateSummary.verifierRowsTotal, 6);
+	assert.equal(out.gateSummary.invalidVerifierRows, 3);
+	assert.equal(out.gateSummary.missingVerifierResults, 1);
+	assert.equal(out.gateSummary.duplicateVerifierRows, 1);
+	assert.equal(out.gateSummary.duplicateStatusConflicts, 1);
+	assert.deepEqual(out.statusPartitions.unsupported, ["claim-001"]);
+	assert.deepEqual(out.statusPartitions.partiallySupported, ["claim-003"]);
+	assert.deepEqual(out.statusPartitions.other, ["claim-002"]);
+	assert.equal(out.auditedClaims[0].claim, "Canonical claim one");
+	assert.deepEqual(out.auditedClaims[0].factSlotIds, ["slot-001"]);
+	assert.equal(out.auditedClaims[1].status, "unverified");
+	assert.equal(out.auditedClaims[2].status, "partially_supported");
+	assert.deepEqual(out.invalidVerifierRows.map((row) => row.reason), [
+		"missing_claim_id",
+		"non_string_claim_id",
+		"unknown_claim_id",
+	]);
+	assert.equal(out.duplicateVerifierRows[0].claimId, "claim-001");
+	assert.equal(out.duplicateVerifierRows[0].selectedStatus, "unsupported");
+	assert.ok(out.remainingGaps.some((gap) => gap.evidenceState === "missing_verifier_result"));
+	assert.ok(out.remainingGaps.some((gap) => gap.evidenceState === "duplicate_verifier_rows_conflicting"));
 });
 
 test("workflow_artifact lists visible sources, reads by source name, and records a read ledger", async () => {
@@ -16378,6 +17934,27 @@ test("workflow_artifact lists visible sources, reads by source name, and records
 	}
 });
 
+test("artifact graph source context warns that capped workflow_artifact reads need paths", () => {
+	const prompt = formatArtifactGraphSourceContext(
+		[
+			{
+				source: "plan",
+				taskId: "task-1",
+				specId: "plan.main",
+				stageId: "plan",
+				status: "completed",
+				statusDetail: "completed",
+				digest: "planned work",
+				artifacts: { control: { path: "/tmp/control.json" } },
+			},
+		],
+		[],
+	);
+	assert.match(prompt, /Projected reads must include a JSON path/);
+	assert.match(prompt, /\"path\":\"\$\.factSlots\"/);
+	assert.match(prompt, /For a whole artifact read, omit maxItems\/maxChars/);
+});
+
 test("workflow_artifact can read deterministic JSON projections with caps", async () => {
 	const cwd = makeProject();
 	try {
@@ -16396,10 +17973,15 @@ test("workflow_artifact can read deterministic JSON projections with caps", asyn
 						{ id: "claim-2", text: "second" },
 						{ id: "claim-3", text: "third" },
 					],
+					sourcePolicy: { preferred: ["primary"] },
 				},
 				null,
 				2,
 			),
+		);
+		writeFileSync(
+			join(producerDir, "refs.json"),
+			JSON.stringify([{ url: "https://example.test/ref" }], null, 2),
 		);
 		const manifestPath = join(consumerDir, "source-manifest.json");
 		const ledgerPath = join(consumerDir, "read-ledger.jsonl");
@@ -16414,6 +17996,7 @@ test("workflow_artifact can read deterministic JSON projections with caps", asyn
 						source: "normalize",
 						artifacts: {
 							control: { path: join(producerDir, "control.json") },
+							refs: { path: join(producerDir, "refs.json") },
 						},
 					},
 				],
@@ -16452,6 +18035,68 @@ test("workflow_artifact can read deterministic JSON projections with caps", asyn
 		assert.equal(ledger[0].path, "$.claims");
 		assert.equal(ledger[0].maxItems, 2);
 		assert.equal(ledger[0].maxChars, 200);
+
+		const sourcePrefixed = await handleWorkflowArtifactToolCall(
+			{
+				action: "read",
+				source: "normalize",
+				artifact: "control",
+				path: "$.normalize.claims[0]",
+				maxItems: 1,
+			},
+			{ runId, taskId: "task-2", manifestPath, ledgerPath, runDir },
+		);
+		assert.match(
+			sourcePrefixed.content[0].text,
+			/# workflow_artifact: normalize\.control path=\$\.claims/,
+		);
+		assert.match(sourcePrefixed.content[0].text, /"id": "claim-1"/);
+
+		const artifactPrefixed = await handleWorkflowArtifactToolCall(
+			{
+				action: "read",
+				source: "normalize",
+				artifact: "control",
+				path: "$.control.claims",
+				maxItems: 1,
+			},
+			{ runId, taskId: "task-2", manifestPath, ledgerPath, runDir },
+		);
+		assert.match(
+			artifactPrefixed.content[0].text,
+			/# workflow_artifact: normalize\.control path=\$\.claims/,
+		);
+
+		const rootAlias = await handleWorkflowArtifactToolCall(
+			{
+				action: "read",
+				source: "normalize",
+				artifact: "refs",
+				path: "$.refs",
+				maxChars: 200,
+			},
+			{ runId, taskId: "task-2", manifestPath, ledgerPath, runDir },
+		);
+		assert.match(
+			rootAlias.content[0].text,
+			/# workflow_artifact: normalize\.refs path=\$/,
+		);
+
+		const fieldAlias = await handleWorkflowArtifactToolCall(
+			{
+				action: "read",
+				source: "normalize",
+				artifact: "control",
+				path: "$.sourceRequirements",
+				maxChars: 200,
+			},
+			{ runId, taskId: "task-2", manifestPath, ledgerPath, runDir },
+		);
+		assert.match(
+			fieldAlias.content[0].text,
+			/# workflow_artifact: normalize\.control path=\$\.sourcePolicy/,
+		);
+		assert.match(fieldAlias.content[0].text, /"primary"/);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}

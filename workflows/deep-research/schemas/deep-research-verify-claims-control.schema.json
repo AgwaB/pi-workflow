@@ -4,8 +4,6 @@
     "schema",
     "digest",
     "id",
-    "claim",
-    "factSlotIds",
     "status",
     "verdictDigest",
     "evidence"

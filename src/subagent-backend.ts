@@ -41,6 +41,8 @@ import {
 import type { BackendLaunchResult } from "./backend.js";
 import { readWorkflowArtifactReadLedger } from "./workflow-artifact-tool.js";
 import { writeWorkflowFetchCacheExtensionWrapper } from "./workflow-fetch-cache-extension.js";
+import { writeWorkflowWebSourceExtensionWrapper } from "./workflow-web-source-extension.js";
+import { isWorkflowWebSourceTool } from "./workflow-web-source.js";
 import {
 	buildWorkflowOutputRetryInstructions,
 	parseWorkflowOutputForBundle,
@@ -66,6 +68,10 @@ const BUNDLED_PI_WEB_ACCESS_STORAGE = bundledNodeModulePath(
 const WORKFLOW_FETCH_CACHE_EXTENSION_IMPORT = resolve(
 	MODULE_DIR,
 	`workflow-fetch-cache-extension${extname(MODULE_PATH)}`,
+);
+const WORKFLOW_WEB_SOURCE_EXTENSION_IMPORT = resolve(
+	MODULE_DIR,
+	`workflow-web-source-extension${extname(MODULE_PATH)}`,
 );
 const TOOL_PROVIDER_EXTENSIONS: Record<string, string[]> = {
 	web_search: [BUNDLED_PI_WEB_ACCESS_EXTENSION],
@@ -1240,42 +1246,88 @@ async function workflowTaskExtensions(
 	task: WorkflowTaskRunRecord,
 	compiledTask: CompiledTask,
 ): Promise<string[]> {
-	const baseExtensions = uniqueStrings([
-		...providerExtensionsForTools(
-			compiledTask.runtime.tools,
-			compiledTask.runtime.toolProviders,
-		),
+	const tools = compiledTask.runtime.tools;
+	let extensions = uniqueStrings([
+		...providerExtensionsForTools(tools, compiledTask.runtime.toolProviders),
 		...extraSubagentExtensionsFromEnv(),
 	]);
-	if (!shouldUseFetchContentCache(compiledTask.runtime.tools)) {
-		return baseExtensions;
-	}
 	const taskDir = dirname(fromProjectPath(cwd, task.files.result));
-	const wrapperPath = join(taskDir, "workflow-fetch-cache-extension.ts");
-	await writeWorkflowFetchCacheExtensionWrapper({
-		wrapperPath,
-		importPath: WORKFLOW_FETCH_CACHE_EXTENSION_IMPORT,
-		webAccessExtensionPath: BUNDLED_PI_WEB_ACCESS_EXTENSION,
-		webAccessStoragePath: BUNDLED_PI_WEB_ACCESS_STORAGE,
-		config: {
-			runId: run.runId,
-			taskId: task.taskId,
-			cacheDir: resolve(
-				cwd,
-				".pi",
-				"workflows",
-				run.runId,
-				"source-cache",
-				"fetch-content",
+
+	if (shouldUseFetchContentCache(tools)) {
+		const wrapperPath = join(taskDir, "workflow-fetch-cache-extension.ts");
+		await writeWorkflowFetchCacheExtensionWrapper({
+			wrapperPath,
+			importPath: WORKFLOW_FETCH_CACHE_EXTENSION_IMPORT,
+			webAccessExtensionPath: BUNDLED_PI_WEB_ACCESS_EXTENSION,
+			webAccessStoragePath: BUNDLED_PI_WEB_ACCESS_STORAGE,
+			config: {
+				runId: run.runId,
+				taskId: task.taskId,
+				cacheDir: resolve(
+					cwd,
+					".pi",
+					"workflows",
+					run.runId,
+					"source-cache",
+					"fetch-content",
+				),
+			},
+		});
+		extensions = uniqueStrings([
+			...extensions.filter(
+				(extension) => resolve(extension) !== BUNDLED_PI_WEB_ACCESS_EXTENSION,
 			),
-		},
-	});
-	return uniqueStrings([
-		...baseExtensions.filter(
-			(extension) => resolve(extension) !== BUNDLED_PI_WEB_ACCESS_EXTENSION,
-		),
-		wrapperPath,
-	]);
+			wrapperPath,
+		]);
+	}
+
+	if (shouldUseWorkflowWebSource(tools)) {
+		const providerExtensionPath = workflowWebSourceProviderExtension(
+			tools,
+			compiledTask.runtime.toolProviders,
+		);
+		const wrapperPath = join(taskDir, "workflow-web-source-extension.ts");
+		await writeWorkflowWebSourceExtensionWrapper({
+			wrapperPath,
+			importPath: WORKFLOW_WEB_SOURCE_EXTENSION_IMPORT,
+			providerExtensionPath,
+			config: {
+				schema: "workflow-web-source-launch-config-v1",
+				runId: run.runId,
+				taskId: task.taskId,
+				cwd,
+				cacheDir: resolve(
+					cwd,
+					".pi",
+					"workflows",
+					run.runId,
+					"web-source-cache",
+				),
+				provider: {
+					kind:
+						providerExtensionPath === BUNDLED_PI_WEB_ACCESS_EXTENSION
+							? "pi-web-access"
+							: "extension",
+					extensionPath: providerExtensionPath,
+				},
+				securityPolicy: {
+					allowPrivateHosts: false,
+					cacheRawProviderPayloads: false,
+				},
+			},
+		});
+		const capturedProviderExtensions = new Set(
+			workflowWebSourceProviderExtensions(tools, compiledTask.runtime.toolProviders),
+		);
+		extensions = uniqueStrings([
+			...extensions.filter(
+				(extension) => !capturedProviderExtensions.has(extension),
+			),
+			wrapperPath,
+		]);
+	}
+
+	return extensions;
 }
 
 function shouldUseFetchContentCache(
@@ -1283,6 +1335,35 @@ function shouldUseFetchContentCache(
 ): boolean {
 	if (!(tools ?? []).includes("fetch_content")) return false;
 	return !isExplicitlyDisabled(fetchContentCacheEnvValue());
+}
+
+function shouldUseWorkflowWebSource(
+	tools: readonly string[] | undefined,
+): boolean {
+	return (tools ?? []).some((tool) => isWorkflowWebSourceTool(tool));
+}
+
+function workflowWebSourceProviderExtension(
+	tools: readonly string[] | undefined,
+	toolProviders: Record<string, CompiledToolProvider> | undefined,
+): string {
+	return (
+		workflowWebSourceProviderExtensions(tools, toolProviders)[0] ??
+		BUNDLED_PI_WEB_ACCESS_EXTENSION
+	);
+}
+
+function workflowWebSourceProviderExtensions(
+	tools: readonly string[] | undefined,
+	toolProviders: Record<string, CompiledToolProvider> | undefined,
+): string[] {
+	const providers = new Set<string>();
+	for (const tool of tools ?? []) {
+		if (!isWorkflowWebSourceTool(tool)) continue;
+		for (const provider of toolProviders?.[tool]?.extensions ?? [])
+			providers.add(provider);
+	}
+	return [...providers];
 }
 
 function fetchContentCacheEnvValue(): string | undefined {
@@ -1574,7 +1655,7 @@ function buildSystemPrompt(task: CompiledTask): string {
 					: []),
 				...(workflowRefsUrlValidation
 					? [
-							"External URLs in <refs> are validated before completion. Use fetch_content to verify each URL you cite; replace stale or unreachable URLs with working canonical URLs or omit them.",
+							"External URLs in <refs> are validated before completion. Use available workflow web tools to fetch/cache the URL and read exact evidence before citing it; replace stale or unreachable URLs with working canonical URLs or omit them.",
 						]
 					: []),
 			]
@@ -1588,11 +1669,14 @@ function buildSystemPrompt(task: CompiledTask): string {
 			? `Only these tools are enabled for this workflow task: ${enabledTools.join(", ")}.`
 			: "No tools are enabled for this workflow task.",
 		"If the agent definition below mentions tools that are not in this enabled list, ignore those mentions; unavailable tools cannot be called in this workflow run.",
-		!enabledTools.includes("get_search_content") &&
-		(enabledTools.includes("web_search") ||
-			enabledTools.includes("fetch_content"))
-			? "Full cached search-content hydration is unavailable here. Use web_search/fetch_content results and report evidence gaps instead of broad raw document retrieval."
-			: undefined,
+		enabledTools.includes("workflow_web_fetch_source") ||
+		enabledTools.includes("workflow_web_source_read")
+			? "Workflow web-source tools return compact source cards. Preserve sourceRef values in structured outputs. Use workflow_web_source_read for exact evidence snippets; when several snippets are needed from the same sourceRef, batch them with queries:[...] or reads:[...] instead of making repeated calls. If the exact quote is unknown, pass claim plus 2-6 distinctive terms to harvest a candidate source window and preserve its match metadata. Do not read workflow cache files directly."
+			: !enabledTools.includes("get_search_content") &&
+				  (enabledTools.includes("web_search") ||
+						enabledTools.includes("fetch_content"))
+				? "Full cached search-content hydration is unavailable here. Use web_search/fetch_content results and report evidence gaps instead of broad raw document retrieval."
+				: undefined,
 	].filter((line): line is string => typeof line === "string");
 	return [
 		`You are Pi workflow subagent '${task.agent}'.`,

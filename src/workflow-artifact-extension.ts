@@ -41,7 +41,7 @@ const workflowArtifactParameters = {
 		path: {
 			type: "string",
 			description:
-				"Optional simple JSON path for projected reads, for example $.claims or $.claimIndex.items. Supported only for JSON artifacts.",
+				"Optional simple JSON path for projected reads, for example $.claims or $.claimIndex.items. Required when maxItems or maxChars is provided. Supported only for JSON artifacts.",
 		},
 		maxItems: {
 			type: "integer",
@@ -53,7 +53,7 @@ const workflowArtifactParameters = {
 			type: "integer",
 			minimum: 0,
 			description:
-				"Optional character limit for the projected JSON value after maxItems is applied.",
+				"Optional character limit for the projected JSON value after maxItems is applied. Requires path; omit maxChars for whole-artifact reads.",
 		},
 	},
 	required: ["action"],
@@ -73,6 +73,7 @@ export function registerWorkflowArtifactTool(
 		promptGuidelines: [
 			"Use workflow_artifact to inspect upstream workflow artifacts when the workflow prompt lists available sources or required reads.",
 			"Call workflow_artifact with action=list to see visible source names before reading an artifact if unsure.",
+			"When using maxItems or maxChars, include a JSON path such as $.claims; for whole-artifact reads, omit maxItems/maxChars.",
 			"Do not use repository read for workflow artifacts; workflow_artifact records required-read evidence.",
 		],
 		parameters: workflowArtifactParameters as any,

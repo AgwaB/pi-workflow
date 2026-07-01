@@ -13,7 +13,7 @@
     "schema": { "type": "string", "minLength": 1 },
     "digest": { "type": "string", "minLength": 1 },
     "url": { "type": "string", "minLength": 1 },
-    "fetchToolUsed": { "type": "string", "enum": ["fetch_content", "scrapling_fetch", "none"] },
+    "fetchToolUsed": { "type": "string", "enum": ["workflow_web_fetch_source", "workflow_web_source_read", "fetch_content", "scrapling_fetch", "none"] },
     "fallbackAttempted": { "type": "boolean" },
     "title": { "type": "string" },
     "extractedText": { "type": "string" },

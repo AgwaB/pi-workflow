@@ -147,7 +147,25 @@ const WORKFLOW_ARTIFACT_KIND_SET = new Set<string>(WORKFLOW_ARTIFACT_KINDS);
 const DEFAULT_MAX_BYTES = 50 * 1024;
 const DEFAULT_MAX_LINES = 2000;
 const SOURCE_NAME_PATTERN = /^[A-Za-z0-9_.:-]+$/;
-const SIMPLE_JSON_PATH_PATTERN = /^(\$|\$(\.[A-Za-z0-9_-]+)+)$/;
+const SIMPLE_JSON_PATH_PATTERN =
+	/^(\$|\$(\.[A-Za-z0-9_-]+(\[(\*|\d+|\d*:\d*)\])?)+)$/;
+const JSON_PATH_SEGMENT_ALIASES: Record<string, string> = {
+	axes: "researchAxes",
+	claimVerdicts: "claimVerdictLedger",
+	factSlot: "factSlots",
+	gaps: "remainingGaps",
+	primarySources: "sourcePolicy",
+	priorities: "verificationPriorities",
+	questions: "researchQuestions",
+	requiredSources: "sourcePolicy",
+	scope: "researchScope",
+	slots: "factSlots",
+	sourceQualityRules: "sourcePolicy",
+	sourceRequirements: "sourcePolicy",
+	verification: "verificationPriorities",
+	verificationPriority: "verificationPriorities",
+	verdicts: "claimVerdictLedger",
+};
 
 export async function loadWorkflowSourceManifest(
 	manifestPath: string,
@@ -427,18 +445,33 @@ async function readProjectedWorkflowArtifact(options: {
 	maxChars?: number;
 }): Promise<WorkflowArtifactReadResult> {
 	const parsed = JSON.parse(await readFile(options.artifactPath, "utf8"));
-	const resolved = readSimpleJsonPath(parsed, options.path);
+	let effectivePath = options.path;
+	let resolved: unknown;
+	for (const candidatePath of projectionPathCandidates(
+		options.path,
+		options.source,
+		options.artifact,
+	)) {
+		resolved = readSimpleJsonPath(parsed, candidatePath);
+		if (resolved !== undefined) {
+			effectivePath = candidatePath;
+			break;
+		}
+	}
 	if (resolved === undefined) {
 		throw new Error(`workflow_artifact path did not resolve: ${options.path}`);
 	}
-	const sliced = applyProjectionItemLimit(resolved, options);
+	const sliced = applyProjectionItemLimit(resolved, {
+		...options,
+		path: effectivePath,
+	});
 	const serialized = JSON.stringify(sliced.value, null, 2);
 	const preview =
 		options.maxChars !== undefined && serialized.length > options.maxChars
 			? serialized.slice(0, options.maxChars)
 			: serialized;
 	const projection: WorkflowArtifactProjectionMetadata = {
-		path: options.path,
+		path: effectivePath,
 		valueType: jsonValueType(resolved),
 		...(options.maxItems === undefined ? {} : { maxItems: options.maxItems }),
 		...(options.maxChars === undefined ? {} : { maxChars: options.maxChars }),
@@ -469,6 +502,65 @@ async function readProjectedWorkflowArtifact(options: {
 		mediaType: options.mediaType,
 		projection,
 	};
+}
+
+function projectionPathCandidates(
+	path: string,
+	source: string,
+	artifact: WorkflowArtifactKind,
+): string[] {
+	const candidates: string[] = [];
+	const seen = new Set<string>();
+	const queue = [path];
+	for (let index = 0; index < queue.length && index < 32; index += 1) {
+		const candidate = queue[index];
+		if (seen.has(candidate)) continue;
+		seen.add(candidate);
+		candidates.push(candidate);
+		for (const next of [
+			stripArraySelector(candidate),
+			stripSourcePathPrefix(candidate, source),
+			stripArtifactPathPrefix(candidate, artifact),
+			applyJsonPathSegmentAliases(candidate),
+		]) {
+			if (next !== candidate && !seen.has(next)) queue.push(next);
+		}
+	}
+	return candidates;
+}
+
+function stripArraySelector(path: string): string {
+	return path.replace(/\[(\*|\d+|\d*:\d*)\]/gu, "");
+}
+
+function stripSourcePathPrefix(path: string, source: string): string {
+	const sourcePrefix = `$.${source}.`;
+	if (!path.startsWith(sourcePrefix)) return path;
+	return `$.${path.slice(sourcePrefix.length)}`;
+}
+
+function stripArtifactPathPrefix(
+	path: string,
+	artifact: WorkflowArtifactKind,
+): string {
+	const artifactPath = `$.${artifact}`;
+	if (path === artifactPath) return "$";
+	const artifactPrefix = `${artifactPath}.`;
+	if (!path.startsWith(artifactPrefix)) return path;
+	return `$.${path.slice(artifactPrefix.length)}`;
+}
+
+function applyJsonPathSegmentAliases(path: string): string {
+	if (path === "$") return path;
+	const segments = path
+		.slice(2)
+		.split(".")
+		.map((segment) => segment.replace(/\[(\*|\d+|\d*:\d*)\]$/u, ""));
+	const aliased = segments.map(
+		(segment) => JSON_PATH_SEGMENT_ALIASES[segment] ?? segment,
+	);
+	if (aliased.every((segment, index) => segment === segments[index])) return path;
+	return `$.${aliased.join(".")}`;
 }
 
 function applyProjectionItemLimit(
