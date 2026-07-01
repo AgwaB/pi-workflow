@@ -60,7 +60,7 @@ function capture(command, args) {
 	return spawnSync(command, args, { encoding: "utf8", shell: false });
 }
 
-const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+const pkg = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
 
 if (pkg.private === true) {
 	console.error("package.json has private:true; refusing release check.");

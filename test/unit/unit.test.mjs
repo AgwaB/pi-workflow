@@ -11626,11 +11626,8 @@ test("deep-research P3 final-audit replay fixture preserves guardrail floors", a
 	const fixturePath = join(
 		dirname(fileURLToPath(import.meta.url)),
 		"..",
-		"..",
-		"internal",
-		"eval",
-		"deep-research-web-source-20260626",
 		"fixtures",
+		"deep-research",
 		"p3-final-audit-replay.json",
 	);
 	const fixture = JSON.parse(readFileSync(fixturePath, "utf8"));
@@ -13452,7 +13449,7 @@ test("workflow web-source extension returns source cards and narrow reads withou
 		assert.equal(fetchedBatchBody.results[1].cardIndex, 1);
 		assert.equal(fetchedBatchBody.results[1].sourceRef, fetchedBatchBody.cards[1].sourceRef);
 		assert.match(fetchedBatch.content[0].text, /sourceRef/);
-		assert.doesNotMatch(fetchedBatch.content[0].text, /\n  \"cards\"/);
+		assert.doesNotMatch(fetchedBatch.content[0].text, /\n {2}"cards"/);
 		assert.doesNotMatch(fetchedBatch.content[0].text, /web-source-cache/);
 
 		const read = await registered.get("workflow_web_source_read").execute("call-read", {
@@ -17951,7 +17948,7 @@ test("artifact graph source context warns that capped workflow_artifact reads ne
 		[],
 	);
 	assert.match(prompt, /Projected reads must include a JSON path/);
-	assert.match(prompt, /\"path\":\"\$\.factSlots\"/);
+	assert.match(prompt, /"path":"\$\.factSlots"/);
 	assert.match(prompt, /For a whole artifact read, omit maxItems\/maxChars/);
 });
 

@@ -18,7 +18,7 @@ if (!version || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) {
 	process.exit(1);
 }
 
-const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+const pkg = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
 if (pkg.name !== "@agwab/pi-workflow") {
 	console.error(`Refusing to dispatch release for unexpected package ${pkg.name}`);
 	process.exit(1);

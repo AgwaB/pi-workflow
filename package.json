@@ -43,7 +43,7 @@
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.json --outDir dist --noEmit false",
     "typecheck": "tsc --noEmit",
-    "check:scripts": "node scripts/check-scripts.mjs",
+    "check:scripts": "node tools/release/check-scripts.mjs",
     "validate": "npm run check:scripts && npm run typecheck && npm run test:unit",
     "test": "npm run test:unit",
     "test:build": "rm -rf .tmp/unit && tsc -p tsconfig.json --outDir .tmp/unit --noEmit false",
@@ -51,8 +51,8 @@
     "e2e": "node test/e2e/run.mjs",
     "pack:dry": "npm pack --dry-run --json",
     "prepack": "npm run build",
-    "release:check": "node scripts/release-check.mjs",
-    "release:dispatch": "node scripts/dispatch-release.mjs"
+    "release:check": "node tools/release/release-check.mjs",
+    "release:dispatch": "node tools/release/dispatch-release.mjs"
   },
   "pi": {
     "extensions": [

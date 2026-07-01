@@ -3,7 +3,7 @@ import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 
-const roots = ["scripts", "test"].filter((path) => existsDir(path));
+const roots = ["tools/release", "test"].filter((path) => existsDir(path));
 const files = roots.flatMap((root) => listMjs(root)).sort();
 
 if (files.length === 0) {
