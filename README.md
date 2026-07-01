@@ -167,22 +167,16 @@ Workflow definitions compose a small set of stage patterns and graph shapes.
 
 ![Core workflow stage shapes: single, foreach, reduce, loop, dag, and dynamic](./docs/assets/readme/stage-types.png)
 
-Parallel execution is a graph shape, not a stage type: model parallel branches as multiple roots or with `after: []`. Support helpers are declared with a `support` object, not a stage `type`.
-
-Dynamic workflows are the advanced form of adaptive orchestration. A JSON `type: "dynamic"` stage points at trusted bundle-local `.mjs` controller code; that controller can add official workflow tasks, call helpers, or run nested workflows while preserving replayable run state. See [`docs/usage.md`](./docs/usage.md) for approval, detach, helper retry, nested workflow, and cache details.
-
-New workflows should prefer `workflow_web_search`, `workflow_web_fetch_source`, and `workflow_web_source_read`: search returns compact candidates, fetch returns a source card with an opaque `sourceRef`, and source-read retrieves narrow evidence snippets. Preserve `sourceRef` through workflow outputs; use `urls: [...]` or `sources: [...]` to batch several source fetches, use `queries: [...]` or `reads: [...]` to batch several snippets from one sourceRef, and use `claim` + distinctive `terms` to get candidate quote windows with match metadata when the exact quote is unknown. Normalized web sources are cached under `.pi/workflows/<run-id>/web-source-cache/` without exposing cache paths to agents; same-URL fetches and deterministic terminal failures are coordinated across parallel workers. Legacy `fetch_content` calls still use `.pi/workflows/<run-id>/source-cache/fetch-content/`; set `PI_WORKFLOW_FETCH_CONTENT_CACHE=0` to opt out of that legacy cache.
-
 ## Predefined workflows
 
-The package includes a small starter set. These are practical defaults and authoring examples, not a complete workflow catalog.
+The package includes four bundled workflows for common research and review jobs. They are runnable defaults and authoring examples, not a complete workflow catalog.
 
-| Workflow | Use when |
-|---|---|
-| `deep-research` | Grounded answers or summaries based on source material. |
-| `deep-review` | Careful code or design review from multiple angles. |
-| `spec-review` | Checks that requirements, API specs, or contracts are reflected in implementation and tests. |
-| `impact-review` | Pre-merge or pre-release risk review across affected areas, tests, and docs. |
+| Workflow | Best for | What it does |
+|---|---|---|
+| `deep-research` | Deep, source-grounded research when breadth, verification, and cited recommendations matter. | Plans research questions by depth, fans out question-level research, normalizes and ranks claims, verifies selected claims against evidence, and renders an audited executive handoff. |
+| `deep-review` | Code or design review when one reviewer pass is not enough. | Triage selects review lenses, reviewers produce findings, a deterministic helper deduplicates them, a challenge pass tests the surviving findings, a deterministic helper partitions verdicts, and the final report keeps only evidence-backed issues. |
+| `spec-review` | Requirements-to-implementation traceability for an existing spec, API contract, or acceptance criteria. | Extracts testable requirements, maps implementation and tests, verifies candidate gaps, and reports which requirements are covered, missing, ambiguous, or need human judgment. |
+| `impact-review` | Side-effect and risk review for proposed or applied changes. | Maps change scope and affected surfaces, analyzes contract, state/data, validation, docs, security, and performance impact, then joins those lenses into likely regressions, missing checks, and next actions. |
 
 ![Deep research workflow flow](./docs/assets/readme/deep-research-flow.png)
 
