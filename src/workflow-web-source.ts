@@ -141,7 +141,7 @@ export const DEFAULT_WORKFLOW_WEB_SECURITY_POLICY: WorkflowWebSecurityPolicy = {
 	cacheRawProviderPayloads: false,
 };
 
-const SECRET_QUERY_PARAM_PATTERN =
+const SENSITIVE_QUERY_PARAM_PATTERN =
 	/(^|[-_])(access[-_]?token|auth|code|credential|key|password|secret|session|signature|sig|token)([-_]|$)/i;
 const PRIVATE_HOST_PATTERNS = [
 	/^localhost$/i,
@@ -233,7 +233,7 @@ function sanitizeParsedUrlForModel(parsed: URL): string {
 	parsed.username = "";
 	parsed.password = "";
 	for (const key of [...parsed.searchParams.keys()]) {
-		if (SECRET_QUERY_PARAM_PATTERN.test(key)) {
+		if (SENSITIVE_QUERY_PARAM_PATTERN.test(key)) {
 			parsed.searchParams.set(key, "REDACTED");
 		}
 	}
@@ -641,7 +641,7 @@ function redactUrlFragment(hash: string): string {
 		const params = new URLSearchParams(raw);
 		let changed = false;
 		for (const key of [...params.keys()]) {
-			if (SECRET_QUERY_PARAM_PATTERN.test(key)) {
+			if (SENSITIVE_QUERY_PARAM_PATTERN.test(key)) {
 				params.set(key, "REDACTED");
 				changed = true;
 			}
