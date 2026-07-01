@@ -1387,6 +1387,7 @@ export function createTaskRunRecord(
 		runtime: {
 			model: task.runtime.model,
 			thinking: task.runtime.thinking,
+			thinkingResolution: task.runtime.thinkingResolution,
 			approvalMode: task.runtime.approvalMode,
 			maxRuntimeMs: task.runtime.maxRuntimeMs,
 		},

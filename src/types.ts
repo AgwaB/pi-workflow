@@ -1,3 +1,5 @@
+import type { WorkflowRuntimeThinkingResolution } from "./workflow-runtime.js";
+
 export const THINKING_LEVELS = [
 	"off",
 	"minimal",
@@ -284,6 +286,7 @@ export interface PermissionPreview {
 export interface CompiledTaskRuntime {
 	model?: string;
 	thinking?: ThinkingLevel;
+	thinkingResolution?: WorkflowRuntimeThinkingResolution;
 	fast?: FastMode;
 	approvalMode: ApprovalMode;
 	tools?: string[];
@@ -572,6 +575,7 @@ export interface WorkflowTaskRunRecord {
 	runtime: {
 		model?: string;
 		thinking?: ThinkingLevel;
+		thinkingResolution?: WorkflowRuntimeThinkingResolution;
 		fast?: FastMode;
 		approvalMode: ApprovalMode;
 		maxRuntimeMs?: number;

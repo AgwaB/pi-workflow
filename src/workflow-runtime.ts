@@ -17,9 +17,16 @@ export interface WorkflowRuntimeDefaults {
 	thinking?: ThinkingLevel;
 }
 
+export interface WorkflowRuntimeThinkingResolution {
+	requested?: ThinkingLevel;
+	resolved?: ThinkingLevel;
+	reason?: string;
+}
+
 export interface WorkflowRuntimeResolutionInput {
 	model?: string;
 	thinking?: ThinkingLevel;
+	thinkingResolution?: WorkflowRuntimeThinkingResolution;
 }
 
 export interface WorkflowRuntimeResolutionContext {
@@ -66,7 +73,7 @@ export async function resolveWorkflowRuntime(
 	const model = await resolveModel(baseModel, context, options);
 	const effectiveThinking =
 		runtime.thinking ?? thinking ?? options.defaults?.thinking;
-	const resolvedThinking = await resolveThinking(
+	const thinkingResolution = await resolveThinking(
 		model,
 		effectiveThinking,
 		context,
@@ -74,7 +81,10 @@ export async function resolveWorkflowRuntime(
 	);
 	return {
 		...(model ? { model } : {}),
-		...(resolvedThinking ? { thinking: resolvedThinking } : {}),
+		...(thinkingResolution?.resolved
+			? { thinking: thinkingResolution.resolved }
+			: {}),
+		...(thinkingResolution ? { thinkingResolution } : {}),
 	};
 }
 
@@ -208,23 +218,33 @@ async function resolveThinking(
 	requested: ThinkingLevel | undefined,
 	context: WorkflowRuntimeResolutionContext,
 	options: ResolveWorkflowRuntimeOptions,
-): Promise<ThinkingLevel | undefined> {
+): Promise<WorkflowRuntimeThinkingResolution | undefined> {
 	if (!requested) return undefined;
 	const model = findModelInfo(modelId, options.availableModels ?? []);
 	const supported = getSupportedThinkingLevels(model);
-	if (supported.includes(requested)) return requested;
-
-	if (!options.prompt) {
-		const modelLabel = modelId ?? "selected model";
-		throw new Error(
-			`${modelLabel} does not support reasoning level "${requested}" for ${context.taskKey}. Supported: ${supported.join(", ") || "none"}`,
-		);
+	if (supported.includes(requested)) {
+		return { requested, resolved: requested };
 	}
 
 	if (supported.length === 0) {
 		throw new Error(
 			`${modelId ?? "selected model"} does not expose any supported reasoning levels for ${context.taskKey}`,
 		);
+	}
+
+	if (!options.prompt) {
+		const resolved = nearestLowerSupportedThinking(requested, supported);
+		if (!resolved) {
+			const modelLabel = modelId ?? "selected model";
+			throw new Error(
+				`${modelLabel} does not support reasoning level "${requested}" for ${context.taskKey}. Supported: ${supported.join(", ") || "none"}`,
+			);
+		}
+		return {
+			requested,
+			resolved,
+			reason: `requested ${requested} is unsupported by ${modelId ?? "selected model"}; using ${resolved}`,
+		};
 	}
 
 	const selected = await options.prompt.select(
@@ -237,7 +257,23 @@ async function resolveThinking(
 		throw new Error(
 			`Invalid reasoning selection "${selected}" for ${context.taskKey}`,
 		);
-	return selected;
+	return {
+		requested,
+		resolved: selected,
+		reason: `selected supported reasoning ${selected} for unsupported request ${requested}`,
+	};
+}
+
+function nearestLowerSupportedThinking(
+	requested: ThinkingLevel,
+	supported: ThinkingLevel[],
+): ThinkingLevel | undefined {
+	const requestedIndex = THINKING_LEVELS.indexOf(requested);
+	for (let index = requestedIndex; index >= 0; index -= 1) {
+		const candidate = THINKING_LEVELS[index];
+		if (candidate && supported.includes(candidate)) return candidate;
+	}
+	return supported[0];
 }
 
 function findModelInfo(

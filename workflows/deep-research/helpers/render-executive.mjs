@@ -33,6 +33,9 @@ function flattenItems(value) {
 		"finding",
 		"claim",
 		"note",
+		"reason",
+		"nextStep",
+		"evidenceState",
 		"whyItMatters",
 		"parentImpact",
 		"recommendation",
@@ -81,6 +84,37 @@ function stringifyItem(item) {
 		// Fall through to String below.
 	}
 	return cleanText(String(item)) || "(empty item)";
+}
+
+function summaryText(report, fallback) {
+	const summary = report?.summary;
+	if (typeof summary === "string" && summary.trim()) return cleanText(summary);
+	if (isRecord(summary)) {
+		const parts = [
+			summary.directAnswer,
+			summary.answer,
+			summary.summary,
+			summary.finding,
+		]
+			.filter((value) => typeof value === "string" && value.trim())
+			.map(cleanText);
+		const confidence = cleanText(summary.confidence ?? "");
+		const caveat = cleanText(summary.keyCaveat ?? summary.caveat ?? "");
+		return (
+			[
+				parts[0],
+				confidence ? `Confidence: ${confidence}.` : undefined,
+				caveat ? `Key caveat: ${caveat}.` : undefined,
+			]
+				.filter(Boolean)
+				.join(" ") || stringifyItem(summary)
+		);
+	}
+	return cleanText(fallback ?? "Research completed with audited evidence.");
+}
+
+function hasObjectSerializationArtifact(text) {
+	return /\[object Object\]/.test(String(text ?? ""));
 }
 
 function truncateWords(text, maxWords) {
@@ -154,6 +188,61 @@ function uniqueStructuredUrls(...values) {
 
 function urlsOf(item, limit = 3) {
 	return uniqueStructuredUrls(item).slice(0, limit);
+}
+
+function normalizeLocalRef(value) {
+	if (typeof value !== "string") return null;
+	const text = value.trim();
+	if (!text || /^https?:\/\//i.test(text) || isWorkflowSourceRefText(text))
+		return null;
+	const stripped = text.replace(/^(?:file|repo):/i, "");
+	if (!/[\w./-]+\.[\w]+(?:#L\d+(?:-L?\d+)?)?$/i.test(stripped)) return null;
+	return stripped;
+}
+
+function isWorkflowSourceRefText(value) {
+	return /^wsrc_[a-z0-9]{16,}$/i.test(String(value ?? "").trim());
+}
+
+function collectLocalRefs(value, refs = []) {
+	if (!value || typeof value !== "object") return refs;
+	if (Array.isArray(value)) {
+		for (const item of value) collectLocalRefs(item, refs);
+		return refs;
+	}
+	for (const [key, item] of Object.entries(value)) {
+		if (/^(files?|paths?|sourceRefs?|sourceUrls?|sources?)$/i.test(key)) {
+			for (const candidate of asArray(item).length ? item : [item]) {
+				const ref = normalizeLocalRef(candidate);
+				if (ref) refs.push(ref);
+				else if (candidate && typeof candidate === "object")
+					collectLocalRefs(candidate, refs);
+			}
+			continue;
+		}
+		if (item && typeof item === "object") collectLocalRefs(item, refs);
+	}
+	return refs;
+}
+
+function localRefsOf(item, limit = 3) {
+	const out = [];
+	const seen = new Set();
+	for (const ref of collectLocalRefs(item, [])) {
+		if (seen.has(ref)) continue;
+		seen.add(ref);
+		out.push(ref);
+		if (out.length >= limit) break;
+	}
+	return out;
+}
+
+function referenceList(item, limit = 3) {
+	const urls = markdownLinkList(urlsOf(item, limit), limit);
+	const localRefs = localRefsOf(item, limit)
+		.map((ref) => `\`${ref}\``)
+		.join(", ");
+	return [urls, localRefs].filter(Boolean).join("; ");
 }
 
 function markdownLinkList(urls, maxItems = 3) {
@@ -295,9 +384,7 @@ function renderEvidenceStrength(report) {
 			slot.label ?? slot.slotId ?? slot.bestValue ?? "Evidence area",
 		);
 		const status = escapeTableCell(evidenceStatusOf(slot));
-		const evidence = escapeTableCell(
-			markdownLinkList(urlsOf(slot, 2), 2) || "—",
-		);
+		const evidence = escapeTableCell(referenceList(slot, 2) || "—");
 		const impact = escapeTableCell(
 			slot.parentImpact ?? slot.whyItMatters ?? slot.notes ?? "",
 		);
@@ -353,7 +440,7 @@ function renderMainFindings(report) {
 	findings.forEach(({ item: finding, text }, index) => {
 		const status = evidenceStatusOf(finding);
 		const confidence = confidenceOf(finding);
-		const urls = markdownLinkList(urlsOf(finding, 4), 4);
+		const urls = referenceList(finding, 4);
 		out.push(`### ${index + 1}. ${text}`);
 		out.push("");
 		out.push(
@@ -378,7 +465,7 @@ function renderRecommendations(report) {
 	const out = ["## Recommendations", ""];
 	recommendations.forEach(({ item, text }, index) => {
 		const status = evidenceStatusOf(item);
-		const urls = markdownLinkList(urlsOf(item, 4), 4);
+		const urls = referenceList(item, 4);
 		out.push(`${index + 1}. **${text}**`);
 		out.push(`   - Evidence status: ${status || "not specified"}`);
 		if (urls) out.push(`   - Sources: ${urls}`);
@@ -394,7 +481,7 @@ function renderActionPlan(report) {
 	actions.forEach(({ item, text }, index) => {
 		const numericStep = Number(item?.step);
 		const step = Number.isFinite(numericStep) ? numericStep : index + 1;
-		const urls = markdownLinkList(urlsOf(item, 3), 3);
+		const urls = referenceList(item, 3);
 		const evidence = evidenceStatusOf(item);
 		out.push(`${step}. ${text}`);
 		if (evidence && evidence !== "not specified")
@@ -408,7 +495,17 @@ function renderActionPlan(report) {
 function caveatText(item) {
 	return itemText(
 		item,
-		["gap", "finding", "claim", "note", "whyItMatters", "parentImpact"],
+		[
+			"gap",
+			"finding",
+			"claim",
+			"note",
+			"reason",
+			"nextStep",
+			"evidenceState",
+			"whyItMatters",
+			"parentImpact",
+		],
 		stringifyItem(item),
 	);
 }
@@ -416,10 +513,16 @@ function caveatText(item) {
 function caveatCategories(report) {
 	return [
 		{ kind: "Gap", items: flattenItems(report.remainingGaps) },
-		{ kind: "Unsupported", items: flattenItems(report.notableUnsupportedClaims) },
+		{
+			kind: "Unsupported",
+			items: flattenItems(report.notableUnsupportedClaims),
+		},
 		{ kind: "Contested", items: flattenItems(report.contestedAreas) },
 		{ kind: "Caveat", items: flattenItems(report.caveatedFindings) },
-		{ kind: "Unverified lead", items: flattenItems(report.unverifiedButRelevant) },
+		{
+			kind: "Unverified lead",
+			items: flattenItems(report.unverifiedButRelevant),
+		},
 		{ kind: "Decision note", items: flattenItems(report.parentDecisionNotes) },
 	]
 		.map((category) => ({
@@ -450,7 +553,7 @@ function renderCaveats(report) {
 	if (selection.total === 0) return [];
 	const out = ["## Caveats and remaining gaps", ""];
 	for (const { kind, item, text } of selection.selected) {
-		const urls = markdownLinkList(urlsOf(item, 3), 3);
+		const urls = referenceList(item, 3);
 		out.push(`- **${kind}:** ${text}${urls ? ` (${urls})` : ""}`);
 	}
 	out.push("");
@@ -493,7 +596,7 @@ function renderAuditSummary(control, claimSummary, slots) {
 		...(coverage.researchQuestions != null
 			? [`- Research questions: ${coverage.researchQuestions}.`]
 			: []),
-		"- Audit artifact: `final-audit.control.json`.",
+		"- Audit artifact: `audit.md`.",
 		"",
 	];
 }
@@ -576,11 +679,7 @@ function renderResearchMarkdown(control, options = {}) {
 		"",
 		"## Bottom line",
 		"",
-		cleanText(
-			report.summary ??
-				control.digest ??
-				"Research completed with audited evidence.",
-		),
+		summaryText(report, control.digest),
 		"",
 		...renderEvidenceStrength(report),
 		...renderMainFindings(report),
@@ -610,10 +709,112 @@ function stripLeadingHeading(markdown) {
 	return String(markdown ?? "").replace(/^#\s+[^\n]+\n*/i, "");
 }
 
-export default async function renderExecutive({ sources, options = {}, context = {} }) {
+function renderAuditMarkdown(control, packetSource, rendered) {
+	const packet = packetSource?.packet ?? {};
+	const report = control?.finalReport ?? {};
+	const claims = asArray(control?.claimVerdictIndex?.claims);
+	const ledger = asArray(packet.claimVerdictLedger);
+	const gaps = asArray(packet.remainingGaps).length
+		? asArray(packet.remainingGaps)
+		: asArray(report.remainingGaps);
+	const sourceRefJoinFailures = asArray(packet.sourceRefJoinFailures).filter(
+		(failure) => uniqueStructuredUrls(failure).length > 0,
+	);
+	const factSlots = asArray(packet.factSlotCoverage).length
+		? asArray(packet.factSlotCoverage)
+		: asArray(report.factSlotCoverage);
+	const rows = ledger.length ? ledger : claims;
+	const out = [
+		"# Research audit",
+		"",
+		"This artifact preserves the detailed claim/gap/source ledger behind `executive.md`.",
+		"",
+		"## Claim verdict ledger",
+		"",
+	];
+	if (rows.length > 0) {
+		out.push(
+			"| ID | Status | Claim/support | Caveat/source |",
+			"|---|---|---|---|",
+		);
+		for (const row of rows) {
+			const id = escapeTableCell(row.id ?? row.claimId ?? "—");
+			const status = escapeTableCell(row.status ?? row.confidence ?? "—");
+			const support = escapeTableCell(
+				row.claim ??
+					row.support ??
+					row.verdictDigest?.support ??
+					stringifyItem(row),
+			);
+			const caveat = escapeTableCell(
+				row.caveat ??
+					row.correctionOrCounterclaim ??
+					markdownLinkList(urlsOf(row, 3), 3) ??
+					"—",
+			);
+			out.push(`| ${id} | ${status} | ${support} | ${caveat || "—"} |`);
+		}
+	} else {
+		out.push("No compact claim ledger was provided.");
+	}
+	out.push("", "## Fact slot coverage", "");
+	if (factSlots.length > 0) {
+		out.push(
+			"| Slot | Status | Best value | Gap/impact |",
+			"|---|---|---|---|",
+		);
+		for (const slot of factSlots) {
+			out.push(
+				`| ${escapeTableCell(slot.slotId ?? slot.label ?? "—")} | ${escapeTableCell(slot.status ?? "—")} | ${escapeTableCell(isRecord(slot.bestValue) ? stringifyItem(slot.bestValue) : (slot.bestValue ?? "—"))} | ${escapeTableCell(slot.gapReason || slot.parentImpact || "—")} |`,
+			);
+		}
+	} else {
+		out.push("No fact-slot ledger was provided.");
+	}
+	out.push("", "## Remaining gaps", "");
+	if (gaps.length > 0) {
+		for (const gap of gaps)
+			out.push(`- ${caveatText(gap) || stringifyItem(gap)}`);
+	} else {
+		out.push("No remaining gaps were reported.");
+	}
+	if (claims.length > 0 && ledger.length > 0) {
+		out.push("", "## Claims used in executive synthesis", "");
+		for (const claim of claims) {
+			out.push(
+				`- **${cleanText(claim.id ?? "claim")}** (${cleanText(claim.status ?? "unknown")}): ${cleanText(claim.claim ?? claim.support ?? stringifyItem(claim))}`,
+			);
+		}
+	}
+	if (sourceRefJoinFailures.length > 0) {
+		out.push("", "## Source reference join failures", "");
+		for (const failure of sourceRefJoinFailures)
+			out.push(`- ${caveatText(failure) || stringifyItem(failure)}`);
+	}
+	out.push(
+		"",
+		"## Renderer diagnostics",
+		"",
+		`- Executive word count: ${countWords(rendered.markdown)}.`,
+		`- Rendered source URLs: ${rendered.sourceIndex.length}/${rendered.allSourceIndex.length}.`,
+		`- Render warnings: ${rendered.renderWarnings.length}.`,
+		"",
+	);
+	return out
+		.join("\n")
+		.replace(/\n{3,}/g, "\n\n")
+		.trim();
+}
+
+export default async function renderExecutive({
+	sources,
+	options = {},
+	context = {},
+}) {
 	const control =
 		findSource(sources, "final-audit") ??
 		sources?.[Object.keys(sources ?? {})[0]];
+	const auditPacket = findSource(sources, "final-audit-packet");
 	if (!control || typeof control !== "object") {
 		return {
 			schema: "deep-research-executive-render-v1",
@@ -657,6 +858,10 @@ export default async function renderExecutive({ sources, options = {}, context =
 		truncated = true;
 		markdown = truncateWords(markdown, opts.maxWords);
 	}
+	const auditMarkdown = renderAuditMarkdown(control, auditPacket, rendered);
+	const serializationArtifact =
+		hasObjectSerializationArtifact(markdown) ||
+		hasObjectSerializationArtifact(auditMarkdown);
 	const wordCount = countWords(markdown);
 	const sourceUrlCount = rendered.sourceIndex.length;
 	const substantiveRenderWarnings = rendered.renderWarnings.filter(
@@ -665,10 +870,14 @@ export default async function renderExecutive({ sources, options = {}, context =
 	const renderedAllStructuredItems = substantiveRenderWarnings.length === 0;
 	const truncatedWithOpenGaps =
 		truncated && Number(rendered.sectionCounts.caveatsAndGaps ?? 0) > 0;
-	const passed = renderedAllStructuredItems && !truncatedWithOpenGaps;
+	const passed =
+		renderedAllStructuredItems &&
+		!truncatedWithOpenGaps &&
+		!serializationArtifact;
 
 	let executiveSidecarPath;
 	let reportSidecarPath;
+	let auditSidecarPath;
 	try {
 		if (context.cwd && context.runId && context.taskId) {
 			const taskDir = join(
@@ -682,8 +891,10 @@ export default async function renderExecutive({ sources, options = {}, context =
 			await mkdir(taskDir, { recursive: true });
 			executiveSidecarPath = join(taskDir, "executive.md");
 			reportSidecarPath = join(taskDir, "report.md");
+			auditSidecarPath = join(taskDir, "audit.md");
 			await writeFile(executiveSidecarPath, `${markdown}\n`, "utf8");
 			await writeFile(reportSidecarPath, `${markdown}\n`, "utf8");
+			await writeFile(auditSidecarPath, `${auditMarkdown}\n`, "utf8");
 		}
 	} catch {
 		// Sidecars are non-authoritative; keep control output deterministic.
@@ -696,6 +907,7 @@ export default async function renderExecutive({ sources, options = {}, context =
 		renderMode: "evidence-backed-report",
 		executiveMarkdown: markdown,
 		reportMarkdown: markdown,
+		auditMarkdown,
 		wordCount,
 		sourceUrlCount,
 		totalSourceUrlCount: rendered.allSourceIndex.length,
@@ -717,10 +929,12 @@ export default async function renderExecutive({ sources, options = {}, context =
 			maxGaps: opts.maxGaps,
 			truncated,
 			truncatedWithOpenGaps,
+			serializationArtifact,
 			passed,
 		},
-		auditArtifact: "final-audit.control.json",
+		auditArtifact: auditSidecarPath ? "audit.md" : "final-audit.control.json",
 		...(executiveSidecarPath ? { sidecarPath: "executive.md" } : {}),
 		...(reportSidecarPath ? { reportSidecarPath: "report.md" } : {}),
+		...(auditSidecarPath ? { auditSidecarPath: "audit.md" } : {}),
 	};
 }

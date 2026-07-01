@@ -50,8 +50,11 @@ function collectUrls(value, urls = new Set()) {
 }
 
 function looksLikeLocalSourceRef(value) {
-	const text = String(value ?? "").trim();
-	return /^(?:\.?[\w.-]+\/)?[\w./-]+\.(?:md|json|ya?ml|ts|tsx|js|mjs|cjs|py|go|rs|zig|txt)$/i.test(
+	const text = String(value ?? "")
+		.trim()
+		.replace(/^(?:file|repo):/i, "")
+		.replace(/#L\d+(?:-L?\d+)?$/i, "");
+	return /^(?:\.?[\w.-]+\/)?[\w./-]+\.(?:md|json|ya?ml|ts|tsx|js|mjs|cjs|py|go|rs|zig|txt|sol|java|kt|swift|rb|php|c|cc|cpp|h|hpp)$/i.test(
 		text,
 	);
 }
@@ -60,9 +63,19 @@ function collectEvidenceRefs(claim) {
 	const refs = new Set([...collectUrls(claim)]);
 	for (const row of Array.isArray(claim?.evidence) ? claim.evidence : []) {
 		if (!row || typeof row !== "object") continue;
-		for (const value of [row.url, row.source, row.file, row.path, row.sourceRef]) {
+		for (const value of [
+			row.url,
+			row.source,
+			row.file,
+			row.path,
+			row.sourceRef,
+		]) {
 			if (typeof value !== "string") continue;
-			if (/^https?:\/\//i.test(value) || isWorkflowSourceRef(value) || looksLikeLocalSourceRef(value))
+			if (
+				/^https?:\/\//i.test(value) ||
+				isWorkflowSourceRef(value) ||
+				looksLikeLocalSourceRef(value)
+			)
 				refs.add(value.trim());
 		}
 	}
@@ -71,7 +84,8 @@ function collectEvidenceRefs(claim) {
 
 function collectWorkflowSourceRefs(value, refs = new Set()) {
 	if (typeof value === "string") {
-		for (const match of value.matchAll(/\bwsrc_[a-f0-9]{32}\b/g)) refs.add(match[0]);
+		for (const match of value.matchAll(/\bwsrc_[a-f0-9]{32}\b/g))
+			refs.add(match[0]);
 		return refs;
 	}
 	if (Array.isArray(value)) {
@@ -79,7 +93,8 @@ function collectWorkflowSourceRefs(value, refs = new Set()) {
 		return refs;
 	}
 	if (value && typeof value === "object") {
-		for (const item of Object.values(value)) collectWorkflowSourceRefs(item, refs);
+		for (const item of Object.values(value))
+			collectWorkflowSourceRefs(item, refs);
 	}
 	return refs;
 }
@@ -90,7 +105,9 @@ function isWorkflowSourceRef(value) {
 
 function sourceUrlArray(value) {
 	if (!Array.isArray(value)) return [];
-	return value.filter((item) => typeof item === "string" && item.trim()).map((item) => item.trim());
+	return value
+		.filter((item) => typeof item === "string" && item.trim())
+		.map((item) => item.trim());
 }
 
 function stripCitationUrlPunctuation(value) {
@@ -135,7 +152,9 @@ function buildUrlSourceRefLookup(normalizeInputPacket) {
 		if (!source || typeof source !== "object") continue;
 		addUrlSourceRef(urlToSourceRef, source.url, source.sourceRef);
 	}
-	const sourceRefIndex = asArray(normalizeInputPacket?.packet?.research?.sourceRefIndex);
+	const sourceRefIndex = asArray(
+		normalizeInputPacket?.packet?.research?.sourceRefIndex,
+	);
 	for (const source of sourceRefIndex) {
 		if (!source || typeof source !== "object") continue;
 		addUrlSourceRef(urlToSourceRef, source.url, source.sourceRef);
@@ -162,7 +181,9 @@ function sourceRefsForUrls(urls, urlToSourceRef) {
 // a keyword scan over the serialized claim, this cannot be satisfied by merely
 // mentioning a URL/path in prose.
 function hasFetchedEvidence(claim) {
-	return Array.isArray(claim?.evidence) && claim.evidence.some(hasStrongEvidenceRow);
+	return (
+		Array.isArray(claim?.evidence) && claim.evidence.some(hasStrongEvidenceRow)
+	);
 }
 
 function hasStrongEvidenceRow(row) {
@@ -170,26 +191,51 @@ function hasStrongEvidenceRow(row) {
 	const refs = [row.url, row.source, row.file, row.path, row.sourceRef].filter(
 		(value) => typeof value === "string",
 	);
-	const sourceRef = refs.some(
-		(value) =>
-			/^https?:\/\//i.test(value) ||
-			isWorkflowSourceRef(value) ||
-			looksLikeLocalSourceRef(value),
+	const hasExternalRef = refs.some(
+		(value) => /^https?:\/\//i.test(value) || isWorkflowSourceRef(value),
 	);
+	const hasLocalRef = refs.some((value) => looksLikeLocalSourceRef(value));
+	const hasLocatedLocalRef =
+		hasLocalRef &&
+		(refs.some(hasLineFragment) || hasLocalEvidenceLocation(row));
+	const sourceRef = hasExternalRef || hasLocatedLocalRef;
 	const quote = typeof row.quote === "string" && row.quote.trim().length > 0;
 	if (!sourceRef || !quote) return false;
 	if (isCandidateEvidenceRow(row)) return false;
 	return true;
 }
 
+function hasLineFragment(value) {
+	return /#L\d+(?:-L?\d+)?$/i.test(String(value ?? "").trim());
+}
+
+function hasLocalEvidenceLocation(row) {
+	return [
+		row.line,
+		row.lineStart,
+		row.lineEnd,
+		row.lines,
+		row.excerptLocation,
+	].some(
+		(value) =>
+			typeof value === "number" ||
+			(typeof value === "string" && value.trim().length > 0),
+	);
+}
+
 function isCandidateEvidenceRow(row) {
-	return row?.candidateOnly === true || row?.matchType === "terms" || row?.sourceRead?.matchType === "terms";
+	return (
+		row?.candidateOnly === true ||
+		row?.matchType === "terms" ||
+		row?.sourceRead?.matchType === "terms"
+	);
 }
 
 function strongEvidenceIssue(claim) {
 	const rows = Array.isArray(claim?.evidence) ? claim.evidence : [];
 	if (rows.length === 0) return "missing_structured_evidence_rows";
-	if (rows.some(isCandidateEvidenceRow)) return "candidate_only_evidence_not_strong";
+	if (rows.some(isCandidateEvidenceRow))
+		return "candidate_only_evidence_not_strong";
 	return "evidence_rows_missing_source_or_quote";
 }
 
@@ -275,7 +321,10 @@ function conservativeVerifierStatus(statuses) {
 		if (normalized.includes(status)) return status;
 	}
 	if (normalized.every((status) => status === "verified")) return "verified";
-	return normalized.find((status) => typeof status === "string" && status) ?? "unverified";
+	return (
+		normalized.find((status) => typeof status === "string" && status) ??
+		"unverified"
+	);
 }
 
 function issueForVerifierRow({ sourceId, claim, reason, claimId, index }) {
@@ -303,20 +352,24 @@ function gapForVerifierIssue(issue) {
 
 function mergeVerifierRows(rows) {
 	const first = rows[0];
-	if (rows.length === 1) return { sourceId: first.sourceId, claim: first.claim, duplicate: null };
+	if (rows.length === 1)
+		return { sourceId: first.sourceId, claim: first.claim, duplicate: null };
 	const sourceIds = rows.map((row) => row.sourceId);
 	const statusInputs = rows.map((row) => verdictOf(row.claim));
 	const selectedStatus = conservativeVerifierStatus(statusInputs);
 	const selectedRow =
-		rows.find((row) => canonicalVerifierStatus(verdictOf(row.claim)) === selectedStatus) ??
-		first;
+		rows.find(
+			(row) => canonicalVerifierStatus(verdictOf(row.claim)) === selectedStatus,
+		) ?? first;
 	const merged = { ...selectedRow.claim };
 	const evidence = rows.flatMap((row) =>
 		Array.isArray(row.claim?.evidence) ? row.claim.evidence : [],
 	);
 	if (evidence.length > 0) merged.evidence = evidence;
 	for (const field of ["sourceRefs", "sourceUrls", "factSlotIds"]) {
-		const values = compactStrings(rows.flatMap((row) => row.claim?.[field] ?? []));
+		const values = compactStrings(
+			rows.flatMap((row) => row.claim?.[field] ?? []),
+		);
 		if (values.length > 0) merged[field] = values;
 	}
 	merged.status = selectedStatus;
@@ -488,7 +541,13 @@ export default async function claimEvidenceGate({ sources, options = {} }) {
 		}
 	}
 
-	function auditClaim({ sourceId, claim, candidate, claimId, missingVerifierResult = false }) {
+	function auditClaim({
+		sourceId,
+		claim,
+		candidate,
+		claimId,
+		missingVerifierResult = false,
+	}) {
 		if (!claim || typeof claim !== "object") return;
 		gateSummary.total += 1;
 		const evidenceRefs = [...collectEvidenceRefs(claim)];
@@ -549,22 +608,24 @@ export default async function claimEvidenceGate({ sources, options = {} }) {
 				workflowSourceRefs.size - beforeUrlBackfillSourceRefCount;
 		}
 		if (workflowSourceRefs.size > 0) next.sourceRefs = [...workflowSourceRefs];
+		const httpSourceUrls = [
+			...new Set([
+				...sourceUrlArray(candidate?.sourceUrls).filter((ref) =>
+					/^https?:\/\//i.test(ref),
+				),
+				...evidenceRefs.filter((ref) => /^https?:\/\//i.test(ref)),
+			]),
+		];
 		if (
 			claimId &&
 			candidate &&
 			workflowSourceRefs.size === 0 &&
-			(sourceUrlArray(candidate.sourceUrls).length > 0 ||
-				evidenceRefs.some((ref) => /^https?:\/\//i.test(ref)))
+			httpSourceUrls.length > 0
 		) {
 			const failure = {
 				claimId,
 				evidenceState: "source_ref_not_available",
-				sourceUrls: [
-					...new Set([
-						...sourceUrlArray(candidate?.sourceUrls),
-						...evidenceRefs.filter((ref) => /^https?:\/\//i.test(ref)),
-					]),
-				],
+				sourceUrls: httpSourceUrls,
 				nextStep:
 					"Preserve sourceRefs from workflow_web_fetch_source through research and normalization when available.",
 			};
@@ -573,7 +634,8 @@ export default async function claimEvidenceGate({ sources, options = {} }) {
 		}
 
 		const verdict = verdictOf(next);
-		const exactQuantitativeForGate = exactQuantitative || hasExactQuantitativeClaim(next);
+		const exactQuantitativeForGate =
+			exactQuantitative || hasExactQuantitativeClaim(next);
 		if (
 			verdict === "verified" &&
 			options.requireFetchedEvidenceForVerified !== false &&
@@ -610,7 +672,8 @@ export default async function claimEvidenceGate({ sources, options = {} }) {
 			gateSummary.downgraded += 1;
 			remainingGaps.push({
 				claimId: next.id ?? next.claimId,
-				evidenceState: next.evidenceGate?.reasonCode ?? "insufficient_for_verified",
+				evidenceState:
+					next.evidenceGate?.reasonCode ?? "insufficient_for_verified",
 				reason: next.evidenceGate?.reason,
 				sourceUrls: evidenceRefs,
 				nextStep:
@@ -653,7 +716,10 @@ export default async function claimEvidenceGate({ sources, options = {} }) {
 					status === "partiallySupported" ? "partially_supported" : status,
 				);
 				const hasStatusConflict = new Set(statuses).size > 1;
-				const duplicate = { ...merged.duplicate, statusConflict: hasStatusConflict };
+				const duplicate = {
+					...merged.duplicate,
+					statusConflict: hasStatusConflict,
+				};
 				duplicateVerifierRows.push(duplicate);
 				gateSummary.duplicateVerifierClaims += 1;
 				gateSummary.duplicateVerifierRows += rows.length - 1;
@@ -764,6 +830,7 @@ export default async function claimEvidenceGate({ sources, options = {} }) {
 			droppedSlotIds,
 		},
 		identityJoinNotes,
-		precisionGuardDiagnostics: normalizeInputPacket?.packet?.precisionGuard?.summary,
+		precisionGuardDiagnostics:
+			normalizeInputPacket?.packet?.precisionGuard?.summary,
 	};
 }

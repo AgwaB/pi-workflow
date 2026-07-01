@@ -31,6 +31,10 @@ import {
 	type WorkflowToolSpec,
 	type WorktreePolicy,
 } from "./types.js";
+import {
+	resolveWorkflowRuntime,
+	type WorkflowModelInfo,
+} from "./workflow-runtime.js";
 
 const DELEGATION_TOOLS = new Set([
 	"skill_test_subagent",
@@ -57,6 +61,7 @@ const DEFAULT_DYNAMIC_DECISION_LOOP_MAX_STALLS = 3;
 interface CompileOptions {
 	cwd: string;
 	specPath?: string;
+	availableModels?: WorkflowModelInfo[];
 }
 
 interface ArtifactGraphCompilePlanBuildResult {
@@ -728,6 +733,20 @@ async function compileArtifactGraphPlan(
 				defaultThinking,
 				overrides,
 			);
+			const resolvedDynamicRuntime = await resolveWorkflowRuntime(
+				{ model: defaultModel, thinking: defaultThinking },
+				{
+					taskKey: key,
+					stageId: stage.id,
+					taskId,
+					agent: "dynamic",
+				},
+				{ availableModels: options.availableModels },
+			);
+			dynamicTask.runtime = {
+				...dynamicTask.runtime,
+				...resolvedDynamicRuntime,
+			};
 			if (dynamicToolSelection.tools || dynamicToolSelection.toolProviders) {
 				dynamicTask.runtime = {
 					...dynamicTask.runtime,
@@ -804,11 +823,26 @@ async function compileArtifactGraphPlan(
 		validateToolSubset(toolSelection.tools, stageAgent, issues, toolPath);
 		validateDelegationBoundary(toolSelection.tools, issues, toolPath);
 		const filteredToolSelection = filterToolSelection(toolSelection);
+		const requestedRuntime = {
+			model: stage.model ?? defaultModel,
+			thinking: stage.thinking ?? defaultThinking,
+		};
+		const resolvedRuntime = await resolveWorkflowRuntime(
+			requestedRuntime,
+			{
+				taskKey: key,
+				stageId: stage.id,
+				taskId,
+				agent: stageAgentName,
+			},
+			{
+				availableModels: options.availableModels,
+			},
+		);
 		const runtime = {
 			approvalMode:
 				stage.approvalMode ?? spec.defaults?.approvalMode ?? "non-interactive",
-			model: stage.model ?? defaultModel,
-			thinking: stage.thinking ?? defaultThinking,
+			...resolvedRuntime,
 			tools: filteredToolSelection.tools,
 			...(filteredToolSelection.toolProviders
 				? { toolProviders: filteredToolSelection.toolProviders }

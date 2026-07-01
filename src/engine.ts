@@ -1,11 +1,5 @@
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
-import {
-	dirname,
-	extname,
-	join,
-	relative,
-	resolve,
-} from "node:path";
+import { dirname, extname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
 
@@ -43,7 +37,10 @@ import {
 	workflowBundleFingerprint,
 	workflowBundleSpecPath,
 } from "./workflow-source-context-runtime.js";
-import { readSimpleJsonPath } from "./workflow-runtime.js";
+import {
+	readSimpleJsonPath,
+	type WorkflowModelInfo,
+} from "./workflow-runtime.js";
 import {
 	dynamicRunDir,
 	hashDynamicRequest,
@@ -158,6 +155,7 @@ const supervisorTimers = new Map<string, ReturnType<typeof setInterval>>();
 export interface WorkflowRunOptions {
 	task?: string;
 	runtimeDefaults?: { model?: string; thinking?: ThinkingLevel };
+	availableModels?: WorkflowModelInfo[];
 	dynamicUi?: DynamicWorkflowUi;
 	runId?: string;
 	parentRunId?: string;
@@ -210,6 +208,7 @@ async function runLoadedWorkflowSpec(
 		specPath,
 		task: options.task,
 		runtimeDefaults: options.runtimeDefaults,
+		availableModels: options.availableModels,
 	});
 
 	const { run } = await createRunRecord(cwd, compiled, specPath, {
@@ -860,7 +859,6 @@ async function extractArtifactGraphForeachItems(
 	}
 	return { items };
 }
-
 
 async function launchPendingTaskAt(
 	cwd: string,
@@ -1801,7 +1799,6 @@ function isDynamicReplayInvariantError(error: unknown): boolean {
 	);
 }
 
-
 function requiredDynamicString(
 	value: unknown,
 	field: string,
@@ -2534,9 +2531,6 @@ async function runDynamicAgentRequest(input: {
 	);
 }
 
-
-
-
 interface DynamicControllerOutcome {
 	taskStatus: "completed" | "blocked" | "failed";
 	statusDetail: string;
@@ -2676,7 +2670,6 @@ function dynamicControllerIssueMessage(
 	return `${prefix}: ${first}${suffix}`;
 }
 
-
 function applyExistingLoopWorktree(
 	run: WorkflowRunRecord,
 	task: WorkflowTaskRunRecord,
@@ -2724,11 +2717,9 @@ function recordCreatedLoopWorktree(
 	else run.loopWorktrees[index] = record;
 }
 
-
 function uniqueStrings(values: readonly string[]): string[] {
 	return [...new Set(values.filter((value) => value.trim().length > 0))];
 }
-
 
 async function readCompiledWorkflow(
 	cwd: string,
