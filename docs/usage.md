@@ -211,7 +211,7 @@ Benchmark note: cache-enabled runs are a distinct cohort from older uncached run
 
 | Workflow | Required agents | Mode | Use when |
 |---|---|---|---|
-| `deep-research` | `researcher` | plan + foreach questions + normalize-input packet support + normalize + foreach verifier + audit support + final-audit packet support + full audit reduce + deterministic executive render | Use when you need a grounded answer or summary based on source material. |
+| `deep-research` | `researcher` | plan + foreach questions + normalize-input packet support + normalize + foreach verifier + audit support + final-audit packet support + compact final synthesis reduce + deterministic ledger-backed executive render | Use when you need a grounded answer or summary based on source material. |
 | `deep-review` | `scout` | triage + foreach review lenses + dedup support + foreach devil's advocate + verdict-partition support + reduce | Use when you want code or design reviewed carefully from multiple angles. |
 | `spec-review` | `scout` | extract spec + map implementation + inspect tests -> reduce candidates -> foreach verifier -> reduce report | Use when you want to check whether requirements, an API spec, or a contract are reflected in the implementation and tests. |
 | `impact-review` | `scout` | scope/implementation/validation maps -> impact lenses -> consistency/regression/ship-readiness joins -> final synthesis | Use before merging or releasing a change to check affected areas, risks, missing tests, and missing docs. |

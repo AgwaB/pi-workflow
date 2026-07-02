@@ -20,7 +20,9 @@ function asArray(value) {
 }
 
 function asObject(value) {
-	return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+	return value && typeof value === "object" && !Array.isArray(value)
+		? value
+		: {};
 }
 
 function stringOf(value) {
@@ -56,7 +58,11 @@ function compactClaimDigest(claim) {
 		factSlotIds: compactStrings(digest.factSlotIds, 12),
 		sourceRefs: compactStrings(digest.sourceRefs, 8),
 		sourceUrls: compactStrings(digest.sourceUrls, 8),
-		support: stringOf(digest.verdictDigest?.support ?? digest.verdictDigest?.summary ?? digest.verdictDigest),
+		support: stringOf(
+			digest.verdictDigest?.support ??
+				digest.verdictDigest?.summary ??
+				digest.verdictDigest,
+		),
 		caveat: stringOf(digest.verdictDigest?.caveat ?? digest.caveat),
 		correctionOrCounterclaim: stringOf(digest.correctionOrCounterclaim),
 		...(digest.evidenceGate ? { evidenceGate: digest.evidenceGate } : {}),
@@ -81,6 +87,7 @@ function compactSlot(slot) {
 function compactGap(gap) {
 	const item = asObject(gap);
 	return {
+		id: stringOf(item.id ?? item.gapId),
 		claimId: stringOf(item.claimId),
 		slotId: stringOf(item.slotId),
 		evidenceState: stringOf(item.evidenceState),
@@ -108,7 +115,9 @@ function compactDuplicateVerifierRow(row) {
 	const item = asObject(row);
 	return {
 		claimId: stringOf(item.claimId),
-		rowCount: Number.isFinite(Number(item.rowCount)) ? Number(item.rowCount) : undefined,
+		rowCount: Number.isFinite(Number(item.rowCount))
+			? Number(item.rowCount)
+			: undefined,
 		sourceIds: compactStrings(item.sourceIds, 8),
 		statusInputs: compactStrings(item.statusInputs, 8),
 		selectedStatus: stringOf(item.selectedStatus),
@@ -126,6 +135,113 @@ function countByStatus(slots) {
 	return counts;
 }
 
+function withGeneratedIds(items, prefix) {
+	return items.map((item, index) => ({
+		...item,
+		id: stringOf(item.id) ?? `${prefix}-${String(index + 1).padStart(3, "0")}`,
+	}));
+}
+
+function synthesisClaimDigest(claim) {
+	const item = compactClaimDigest(claim);
+	return {
+		id: item.id,
+		claim: item.claim,
+		status: item.status,
+		confidence: item.confidence,
+		factSlotIds: compactStrings(item.factSlotIds, 8),
+		support: item.support,
+		caveat: item.caveat,
+		correctionOrCounterclaim: item.correctionOrCounterclaim,
+		hasSourceUrls: compactStrings(item.sourceUrls, 1).length > 0,
+		hasSourceRefs: compactStrings(item.sourceRefs, 1).length > 0,
+	};
+}
+
+function synthesisFactSlot(slot) {
+	const item = asObject(slot);
+	return {
+		slotId: stringOf(item.slotId),
+		label: stringOf(item.label),
+		status: stringOf(item.status),
+		bestValue: item.bestValue,
+		gapReason: stringOf(item.gapReason),
+		parentImpact: stringOf(item.parentImpact),
+	};
+}
+
+function synthesisGap(gap) {
+	const item = asObject(gap);
+	return {
+		id: stringOf(item.id),
+		kind: stringOf(item.kind),
+		claimId: stringOf(item.claimId),
+		slotId: stringOf(item.slotId),
+		evidenceState: stringOf(item.evidenceState),
+		reason: stringOf(item.reason),
+		nextStep: stringOf(item.nextStep),
+		scopeItem: stringOf(item.scopeItem),
+		whyItMatters: stringOf(item.whyItMatters),
+	};
+}
+
+function synthesisScopeCoverage(row) {
+	const item = asObject(row);
+	return {
+		scopeItem: stringOf(item.scopeItem ?? item.item ?? item.topic),
+		status: stringOf(item.status ?? item.coverageStatus),
+		evidenceState: stringOf(item.evidenceState),
+		summary: stringOf(item.summary ?? item.reason),
+		whyItMatters: stringOf(item.whyItMatters),
+	};
+}
+
+function buildSynthesisInput({
+	plan,
+	factSlotCoverage,
+	claimDigests,
+	preservedClaims,
+	coverageGaps,
+	remainingGaps,
+	sourceRefJoinFailures,
+	researchScopeCoverage,
+	integritySummary,
+	audit,
+}) {
+	return {
+		researchMetadata: {
+			depth: stringOf(plan.depth),
+			taskType: stringOf(plan.taskType),
+			expectedFinalShape: stringOf(plan.expectedFinalShape),
+			researchQuestions: asArray(plan.researchQuestions).length,
+			plannedFactSlots: asArray(plan.factSlots).length,
+		},
+		verdictCounts: asObject(audit.verdictCounts),
+		factSlotStatusCounts: countByStatus(factSlotCoverage),
+		integritySummary,
+		researchScopeCoverage: asArray(researchScopeCoverage)
+			.slice(0, 24)
+			.map(synthesisScopeCoverage),
+		factSlots: factSlotCoverage.map(synthesisFactSlot),
+		claims: claimDigests.map(synthesisClaimDigest),
+		preservedClaims: preservedClaims.map((claim) => ({
+			id: idOf(claim),
+			claim: stringOf(claim.claim),
+			factSlotIds: compactStrings(claim.factSlotIds, 8),
+			whyItMatters: stringOf(claim.whyItMatters ?? claim.reason),
+		})),
+		gaps: [
+			...remainingGaps.map((gap) =>
+				synthesisGap({ ...gap, kind: "remaining" }),
+			),
+			...coverageGaps.map((gap) => synthesisGap({ ...gap, kind: "coverage" })),
+			...sourceRefJoinFailures.map((gap) =>
+				synthesisGap({ ...gap, kind: "sourceRefJoinFailure" }),
+			),
+		],
+	};
+}
+
 export default async function finalAuditPacket({ sources }) {
 	const plan = asObject(findSource(sources, "plan"));
 	const normalized = asObject(findSource(sources, "normalize-claims"));
@@ -137,12 +253,27 @@ export default async function finalAuditPacket({ sources }) {
 	const auditedIds = new Set(claimDigests.map(idOf).filter(Boolean));
 	const candidateIds = verificationCandidates.map(idOf).filter(Boolean);
 	const omittedCandidateIds = candidateIds.filter((id) => !auditedIds.has(id));
-	const factSlotCoverage = asArray(normalized.factSlotCoverage).map(compactSlot);
-	const coverageGaps = asArray(normalized.coverageGaps).map(compactGap);
-	const remainingGaps = asArray(audit.remainingGaps).map(compactGap);
-	const sourceRefJoinFailures = asArray(audit.sourceRefJoinFailures).map(compactGap);
-	const invalidVerifierRows = asArray(audit.invalidVerifierRows).map(compactVerifierIssue);
-	const duplicateVerifierRows = asArray(audit.duplicateVerifierRows).map(compactDuplicateVerifierRow);
+	const factSlotCoverage = asArray(normalized.factSlotCoverage).map(
+		compactSlot,
+	);
+	const coverageGaps = withGeneratedIds(
+		asArray(normalized.coverageGaps).map(compactGap),
+		"gap-coverage",
+	);
+	const remainingGaps = withGeneratedIds(
+		asArray(audit.remainingGaps).map(compactGap),
+		"gap-remaining",
+	);
+	const sourceRefJoinFailures = withGeneratedIds(
+		asArray(audit.sourceRefJoinFailures).map(compactGap),
+		"gap-source-ref",
+	);
+	const invalidVerifierRows = asArray(audit.invalidVerifierRows).map(
+		compactVerifierIssue,
+	);
+	const duplicateVerifierRows = asArray(audit.duplicateVerifierRows).map(
+		compactDuplicateVerifierRow,
+	);
 	const gateSummary = asObject(audit.gateSummary);
 	const precisionGuardDiagnostics = asObject(audit.precisionGuardDiagnostics);
 	const sourceRefCoverage = {
@@ -154,10 +285,31 @@ export default async function finalAuditPacket({ sources }) {
 		).length,
 		sourceRefJoinFailures: sourceRefJoinFailures.length,
 	};
+	const integritySummary = {
+		omittedVerificationCandidateCount: omittedCandidateIds.length,
+		sourceRefJoinFailures: sourceRefJoinFailures.length,
+		invalidVerifierRows: invalidVerifierRows.length,
+		duplicateVerifierRows: duplicateVerifierRows.length,
+		missingVerifierResults: Number(gateSummary.missingVerifierResults ?? 0),
+		sourceRefCoverage,
+	};
+	const synthesisInput = buildSynthesisInput({
+		plan,
+		factSlotCoverage,
+		claimDigests,
+		preservedClaims,
+		coverageGaps,
+		remainingGaps,
+		sourceRefJoinFailures,
+		researchScopeCoverage: normalized.researchScopeCoverage,
+		integritySummary,
+		audit,
+	});
 
 	return {
 		schema: SCHEMA,
 		packet: {
+			synthesisInput,
 			researchMetadataSeed: {
 				depth: stringOf(plan.depth),
 				taskType: stringOf(plan.taskType),
@@ -165,9 +317,15 @@ export default async function finalAuditPacket({ sources }) {
 				researchQuestions: asArray(plan.researchQuestions).length,
 				sourcePolicy: asObject(plan.sourcePolicy),
 				plannedFactSlots: asArray(plan.factSlots).length,
-				filledFactSlots: factSlotCoverage.filter((slot) => slot.status === "filled").length,
-				partialFactSlots: factSlotCoverage.filter((slot) => slot.status === "partial").length,
-				missingFactSlots: factSlotCoverage.filter((slot) => slot.status === "missing").length,
+				filledFactSlots: factSlotCoverage.filter(
+					(slot) => slot.status === "filled",
+				).length,
+				partialFactSlots: factSlotCoverage.filter(
+					(slot) => slot.status === "partial",
+				).length,
+				missingFactSlots: factSlotCoverage.filter(
+					(slot) => slot.status === "missing",
+				).length,
 			},
 			verdictCounts: asObject(audit.verdictCounts),
 			statusPartitions: asObject(audit.statusPartitions),
@@ -203,7 +361,9 @@ export default async function finalAuditPacket({ sources }) {
 				verifierIntegrity: {
 					invalidVerifierRows: invalidVerifierRows.length,
 					duplicateVerifierRows: duplicateVerifierRows.length,
-					missingVerifierResults: Number(gateSummary.missingVerifierResults ?? 0),
+					missingVerifierResults: Number(
+						gateSummary.missingVerifierResults ?? 0,
+					),
 				},
 			},
 			overflowLedger: {

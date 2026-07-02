@@ -7476,14 +7476,19 @@ test("bundled deep-research compacts audit packets before executive final", asyn
 	assert.deepEqual(finalAudit.artifactGraph.requiredReads, [
 		"final-audit-packet.control",
 	]);
-	assert.equal(finalAudit.artifactGraph.sourceProjection, undefined);
+	assert.deepEqual(finalAudit.artifactGraph.sourceProjection, {
+		include: ["$.packet.synthesisInput"],
+		maxChars: 24000,
+	});
+	assert.match(finalAudit.compiledPrompt, /synthesis overlay/);
+	assert.match(finalAudit.compiledPrompt, /no factSlotCoverage/);
 	assert.ok(
 		finalAudit.artifactGraph.output.controlSchemaPath.endsWith(
 			join(
 				"workflows",
 				"deep-research",
 				"schemas",
-				"deep-research-final-control.schema.json",
+				"deep-research-final-synthesis-control.schema.json",
 			),
 		),
 	);
@@ -11748,6 +11753,23 @@ test("deep-research final-audit packet compacts deterministic ledgers", async ()
 		1,
 	);
 	assert.equal(result.packet.overflowLedger.invalidVerifierRowCount, 1);
+	assert.equal(result.packet.synthesisInput.claims[0].id, "claim-001");
+	assert.equal(result.packet.synthesisInput.claims[0].hasSourceRefs, true);
+	assert.equal(
+		result.packet.synthesisInput.integritySummary.sourceRefJoinFailures,
+		1,
+	);
+	assert.equal(result.packet.synthesisInput.gaps[0].id, "gap-remaining-001");
+	assert.equal(result.packet.synthesisInput.gaps[0].kind, "remaining");
+	assert.equal(result.packet.synthesisInput.gaps[1].id, "gap-coverage-001");
+	assert.equal(result.packet.synthesisInput.gaps[1].kind, "coverage");
+	assert.equal(result.packet.synthesisInput.gaps[2].id, "gap-source-ref-001");
+	assert.equal(
+		result.packet.synthesisInput.gaps[2].kind,
+		"sourceRefJoinFailure",
+	);
+	assert.equal(result.packet.coverageGaps[0].id, "gap-coverage-001");
+	assert.equal(result.packet.remainingGaps[0].id, "gap-remaining-001");
 });
 
 test("deep-research P3 final-audit replay fixture preserves guardrail floors", async () => {
@@ -12036,6 +12058,142 @@ test("deep-research renderer emits evidence-backed report and sidecars", async (
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
+});
+
+test("deep-research renderer joins synthesis overlay against packet ledgers", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"render-executive.mjs",
+	);
+	const helper = (
+		await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)
+	).default;
+	const result = await helper({
+		sources: {
+			"final-audit-packet.main": {
+				packet: {
+					researchMetadataSeed: { depth: "standard", researchQuestions: 2 },
+					verdictCounts: {
+						verified: 1,
+						partiallySupported: 1,
+						unsupported: 1,
+						conflicting: 0,
+					},
+					invariantChecks: { candidateCount: 3 },
+					factSlotCoverage: [
+						{
+							slotId: "slot-001",
+							label: "Primary evidence",
+							status: "filled",
+							sourceUrls: ["https://example.test/source"],
+						},
+					],
+					claimVerdictLedger: [
+						{
+							id: "claim-001",
+							claim: "Verified packet claim",
+							status: "verified",
+							sourceUrls: ["https://example.test/source"],
+							support: "Official source supports the claim.",
+						},
+						{
+							id: "claim-002",
+							claim: "Partially supported packet claim",
+							status: "partially_supported",
+							sourceUrls: ["https://example.test/partial"],
+							caveat: "Exact threshold remains uncertain.",
+						},
+						{
+							id: "claim-003",
+							claim: "Unsupported packet claim",
+							status: "unsupported",
+							caveat: "No primary evidence.",
+						},
+					],
+					preservedClaims: [{ id: "claim-004", claim: "Preserved lead" }],
+					remainingGaps: [
+						{ id: "gap-remaining-001", reason: "Need a dated primary source." },
+					],
+					coverageGaps: [
+						{
+							id: "gap-coverage-001",
+							sourceUrls: ["workflows/deep-research/spec.json"],
+							relatedFactSlotIds: ["slot-002"],
+						},
+					],
+					researchScopeCoverage: [],
+				},
+			},
+			"final-audit.main": {
+				schema: "deep-research-final-synthesis-v1",
+				digest: "Synthesis digest",
+				synthesis: {
+					bottomLine: "Use the verified packet claim, with caveats.",
+					keyFindingIds: ["claim-001"],
+					recommendations: [
+						{
+							recommendation: "Act only on verified and caveated support.",
+							supportingClaimIds: ["claim-001", "claim-002"],
+							evidenceStatus: "verified",
+						},
+					],
+					actionPlan: [
+						{
+							step: 1,
+							action: "Check the dated source before rollout.",
+							supportingClaimIds: ["claim-002"],
+						},
+					],
+					caveatNotes: [
+						{
+							note: "The partial claim should remain caveated.",
+							relatedClaimIds: ["claim-002"],
+							gapIds: ["gap-remaining-001"],
+						},
+					],
+					parentDecisionNotes: [
+						{
+							note: "Do not upgrade partial evidence.",
+							whyItMatters: "The renderer enforces audited statuses.",
+							evidenceStatus: "verified",
+							supportingClaimIds: ["claim-002"],
+						},
+					],
+					notableUnsupportedClaimIds: ["claim-003"],
+				},
+			},
+		},
+		context: {},
+	});
+
+	assert.equal(result.status, "passed");
+	assert.equal(result.claimSummary.total, 3);
+	assert.equal(result.claimSummary.verified, 1);
+	assert.equal(result.claimSummary.partially_supported, 1);
+	assert.equal(result.claimSummary.unsupported, 1);
+	assert.match(result.executiveMarkdown, /Verified packet claim/);
+	assert.match(
+		result.executiveMarkdown,
+		/Evidence status: partially_supported/,
+	);
+	assert.match(result.executiveMarkdown, /Unsupported packet claim/);
+	assert.match(result.executiveMarkdown, /Need a dated primary source/);
+	assert.match(
+		result.executiveMarkdown,
+		/Coverage gap .*gap-coverage-001 .*related slots: slot-002/,
+	);
+	assert.doesNotMatch(
+		result.executiveMarkdown,
+		/- \*\*Gap:\*\* workflows\/deep-research\/spec\.json/,
+	);
+	assert.ok(result.sourceUrls.includes("https://example.test/source"));
+	assert.ok(result.sourceUrls.includes("https://example.test/partial"));
+	assert.doesNotMatch(JSON.stringify(result), /finalReport|claimVerdictIndex/);
 });
 
 test("deep-research executive renderer preserves object gaps zeros and recommendation labels", async () => {

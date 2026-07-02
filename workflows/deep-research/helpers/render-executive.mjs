@@ -10,10 +10,11 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 function findSource(sources, stageId) {
-	for (const [specId, source] of Object.entries(sources ?? {})) {
-		if (specId === stageId || specId.startsWith(`${stageId}.`)) return source;
-	}
-	return null;
+	const entries = Object.entries(sources ?? {});
+	const exact = entries.find(([specId]) => specId === stageId);
+	if (exact) return exact[1];
+	const dotted = entries.find(([specId]) => specId.startsWith(`${stageId}.`));
+	return dotted?.[1] ?? null;
 }
 
 function asArray(value) {
@@ -46,6 +47,16 @@ function flattenItems(value) {
 		renderFields.some(
 			(field) => typeof value[field] === "string" && value[field].trim(),
 		)
+	) {
+		return [value];
+	}
+	if (
+		value.id ||
+		value.gapId ||
+		value.slotId ||
+		Array.isArray(value.relatedFactSlotIds) ||
+		Array.isArray(value.sourceUrls) ||
+		Array.isArray(value.sourceRefs)
 	) {
 		return [value];
 	}
@@ -284,19 +295,54 @@ function finiteNumber(value) {
 	return Number.isFinite(parsed) ? parsed : undefined;
 }
 
+function normalizeClaimStatus(status) {
+	const text = cleanText(status).toLowerCase();
+	if (!text) return "";
+	if (text.includes("conflict")) return "conflicting";
+	if (text.includes("unsupported")) return "unsupported";
+	if (text.includes("partial")) return "partially_supported";
+	if (text.includes("verified")) return "verified";
+	return text;
+}
+
 function coverageCounts(coverage, fallback) {
 	if (!coverage || typeof coverage !== "object") return null;
-	return {
+	const counts = {
 		total: finiteNumber(coverage.verificationCandidates) ?? fallback.total,
 		verified: finiteNumber(coverage.verified) ?? fallback.verified,
 		partially_supported:
-			finiteNumber(coverage.partiallySupported) ?? fallback.partially_supported,
+			finiteNumber(coverage.partiallySupported) ??
+			finiteNumber(coverage.partially_supported) ??
+			fallback.partially_supported,
 		unsupported: finiteNumber(coverage.unsupported) ?? fallback.unsupported,
 		conflicting: finiteNumber(coverage.conflicting) ?? fallback.conflicting,
 	};
+	if (counts.total == null) {
+		counts.total =
+			counts.verified +
+			counts.partially_supported +
+			counts.unsupported +
+			counts.conflicting;
+	}
+	return counts;
 }
 
-function claimCounts(control) {
+function packetVerdictCounts(packet, fallback) {
+	const verdicts = packet?.verdictCounts;
+	if (!isRecord(verdicts)) return null;
+	const counts = coverageCounts(verdicts, fallback);
+	if (!counts) return null;
+	counts.total =
+		finiteNumber(packet?.invariantChecks?.candidateCount) ??
+		finiteNumber(verdicts.total) ??
+		counts.verified +
+			counts.partially_supported +
+			counts.unsupported +
+			counts.conflicting;
+	return counts;
+}
+
+function claimCounts(control, packet) {
 	const claims = asArray(control?.claimVerdictIndex?.claims);
 	const counts = {
 		total: claims.length,
@@ -306,9 +352,12 @@ function claimCounts(control) {
 		conflicting: 0,
 	};
 	for (const claim of claims) {
-		const status = claim?.status;
+		const status = normalizeClaimStatus(claim?.status);
 		if (status && Object.hasOwn(counts, status)) counts[status] += 1;
 	}
+	const packetCounts = packetVerdictCounts(packet, counts);
+	if (packetCounts) return packetCounts;
+
 	const coverage = coverageCounts(
 		control?.finalReport?.coverageSummary,
 		counts,
@@ -345,6 +394,326 @@ function factSlotSummary(factSlots) {
 		missingOrConflicting: factSlots.filter((slot) =>
 			["missing", "gap", "conflicting"].includes(slot?.status),
 		).length,
+	};
+}
+
+function stringArray(value, limit = Infinity) {
+	const out = [];
+	const seen = new Set();
+	for (const item of asArray(value)) {
+		if (typeof item !== "string") continue;
+		const text = item.trim();
+		if (!text || seen.has(text)) continue;
+		seen.add(text);
+		out.push(text);
+		if (out.length >= limit) break;
+	}
+	return out;
+}
+
+function uniqueStrings(values, limit = Infinity) {
+	const out = [];
+	const seen = new Set();
+	for (const value of values) {
+		if (typeof value !== "string") continue;
+		const text = value.trim();
+		if (!text || seen.has(text)) continue;
+		seen.add(text);
+		out.push(text);
+		if (out.length >= limit) break;
+	}
+	return out;
+}
+
+function packetOf(packetSource) {
+	return isRecord(packetSource?.packet) ? packetSource.packet : {};
+}
+
+function claimIdOf(row) {
+	return cleanText(row?.id ?? row?.claimId ?? "");
+}
+
+function gapIdOf(row) {
+	return cleanText(row?.id ?? row?.gapId ?? "");
+}
+
+function claimLedger(packet, control) {
+	const packetLedger = asArray(packet?.claimVerdictLedger);
+	return packetLedger.length
+		? packetLedger
+		: asArray(control?.claimVerdictIndex?.claims);
+}
+
+function mapById(rows, idFn) {
+	const out = new Map();
+	for (const row of rows) {
+		const id = idFn(row);
+		if (id && !out.has(id)) out.set(id, row);
+	}
+	return out;
+}
+
+function numberedId(prefix, index) {
+	return `${prefix}-${String(index + 1).padStart(3, "0")}`;
+}
+
+function packetGapRows(packet) {
+	const remaining = asArray(packet?.remainingGaps).map((gap, index) => ({
+		id: gapIdOf(gap) || numberedId("gap-remaining", index),
+		kind: "Gap",
+		...gap,
+	}));
+	const coverage = asArray(packet?.coverageGaps).map((gap, index) => ({
+		id: gapIdOf(gap) || numberedId("gap-coverage", index),
+		kind: "Coverage gap",
+		...gap,
+	}));
+	return [...remaining, ...coverage];
+}
+
+function rowsForIds(ids, rowById, warnings, label) {
+	const rows = [];
+	for (const id of ids) {
+		const row = rowById.get(id);
+		if (row) {
+			rows.push(row);
+			continue;
+		}
+		warnings.push({
+			section: "references",
+			label,
+			total: 1,
+			rendered: 0,
+			missingId: id,
+		});
+	}
+	return rows;
+}
+
+function claimSourceUrls(rows, limit = 8) {
+	return uniqueStrings(
+		rows.flatMap((row) => [...asArray(row?.sourceUrls), ...urlsOf(row, limit)]),
+		limit,
+	);
+}
+
+function claimSourceRefs(rows, limit = 8) {
+	return uniqueStrings(
+		rows.flatMap((row) => asArray(row?.sourceRefs)),
+		limit,
+	);
+}
+
+function evidenceStrength(status) {
+	switch (normalizeClaimStatus(status)) {
+		case "verified":
+			return 3;
+		case "partially_supported":
+			return 2;
+		case "unsupported":
+			return 1;
+		case "conflicting":
+			return 0;
+		default:
+			return -1;
+	}
+}
+
+function evidenceStatusFromRows(rows, fallback) {
+	if (rows.length === 0) return cleanText(fallback) || "not specified";
+	let weakest = "verified";
+	let weakestScore = Infinity;
+	for (const row of rows) {
+		const status = normalizeClaimStatus(row?.status ?? row?.verdict);
+		const score = evidenceStrength(status);
+		if (score >= 0 && score < weakestScore) {
+			weakest = status;
+			weakestScore = score;
+		}
+	}
+	return weakestScore === Infinity
+		? cleanText(fallback) || "not specified"
+		: weakest;
+}
+
+function claimToFinding(row) {
+	return {
+		id: claimIdOf(row),
+		finding: cleanText(row?.claim ?? row?.support ?? stringifyItem(row)),
+		evidenceStatus: normalizeClaimStatus(row?.status) || row?.status,
+		confidence: row?.confidence,
+		sourceUrls: asArray(row?.sourceUrls),
+		sourceRefs: asArray(row?.sourceRefs),
+		rationale: row?.support,
+		caveat: row?.caveat,
+		correctionOrCounterclaim: row?.correctionOrCounterclaim,
+	};
+}
+
+function supportingClaimIds(item) {
+	return uniqueStrings([
+		...asArray(item?.supportingClaimIds),
+		...asArray(item?.claimIds),
+		...asArray(item?.relatedClaimIds),
+	]);
+}
+
+function withSupportingEvidence(item, claimRows) {
+	return {
+		...item,
+		evidenceStatus: evidenceStatusFromRows(claimRows, item?.evidenceStatus),
+		sourceUrls: uniqueStrings(
+			[...asArray(item?.sourceUrls), ...claimSourceUrls(claimRows)],
+			8,
+		),
+		sourceRefs: uniqueStrings(
+			[...asArray(item?.sourceRefs), ...claimSourceRefs(claimRows)],
+			8,
+		),
+	};
+}
+
+function coverageSummaryFromPacket(packet, fallback = {}) {
+	const counts = packetVerdictCounts(packet, {
+		total: 0,
+		verified: 0,
+		partially_supported: 0,
+		unsupported: 0,
+		conflicting: 0,
+	});
+	if (!counts) return fallback;
+	return {
+		...fallback,
+		verified: counts.verified,
+		partiallySupported: counts.partially_supported,
+		unsupported: counts.unsupported,
+		conflicting: counts.conflicting,
+		verificationCandidates: counts.total,
+		depth: packet?.researchMetadataSeed?.depth ?? fallback.depth,
+		researchQuestions:
+			packet?.researchMetadataSeed?.researchQuestions ??
+			fallback.researchQuestions,
+		preserved:
+			packet?.overflowLedger?.preservedClaimCount ?? fallback.preserved,
+		coverageGaps:
+			packet?.overflowLedger?.coverageGapCount ?? fallback.coverageGaps,
+	};
+}
+
+function composeResearchReport(control, packetSource) {
+	const packet = packetOf(packetSource);
+	const legacyReport = control?.finalReport ?? {};
+	const synthesis = isRecord(control?.synthesis) ? control.synthesis : null;
+	const ledger = claimLedger(packet, control);
+	const claimById = mapById(ledger, claimIdOf);
+	const gapRows = packetGapRows(packet);
+	const gapById = mapById(gapRows, gapIdOf);
+	const warnings = [];
+
+	if (!synthesis) {
+		const report = { ...legacyReport };
+		if (asArray(packet.factSlotCoverage).length > 0)
+			report.factSlotCoverage = packet.factSlotCoverage;
+		if (isRecord(packet.researchMetadataSeed))
+			report.researchMetadata = packet.researchMetadataSeed;
+		if (isRecord(packet.verdictCounts))
+			report.coverageSummary = coverageSummaryFromPacket(
+				packet,
+				report.coverageSummary,
+			);
+		if (asArray(report.remainingGaps).length === 0 && gapRows.length > 0)
+			report.remainingGaps = gapRows;
+		if (
+			asArray(report.researchScopeCoverage).length === 0 &&
+			asArray(packet.researchScopeCoverage).length > 0
+		) {
+			report.researchScopeCoverage = packet.researchScopeCoverage;
+		}
+		return { report, packet, ledger, warnings };
+	}
+
+	const keyFindingIds = stringArray(synthesis.keyFindingIds, 12);
+	const keyFindingRows = keyFindingIds.length
+		? rowsForIds(keyFindingIds, claimById, warnings, "key findings")
+		: ledger
+				.filter((row) => normalizeClaimStatus(row?.status) === "verified")
+				.slice(0, 8);
+	const mapOverlayItems = (items, textField) =>
+		asArray(items).map((item) => {
+			const ids = supportingClaimIds(item);
+			const rows = rowsForIds(ids, claimById, warnings, textField);
+			return withSupportingEvidence(item, rows);
+		});
+	const caveatNotes = asArray(synthesis.caveatNotes).map((item) => {
+		const rows = rowsForIds(
+			supportingClaimIds(item),
+			claimById,
+			warnings,
+			"caveat notes",
+		);
+		const gaps = rowsForIds(
+			stringArray(item?.gapIds, 12),
+			gapById,
+			warnings,
+			"gap notes",
+		);
+		return withSupportingEvidence(
+			{
+				...item,
+				relatedGaps: gaps,
+			},
+			rows,
+		);
+	});
+	const optionalUnsupported = rowsForIds(
+		stringArray(synthesis.notableUnsupportedClaimIds, 12),
+		claimById,
+		warnings,
+		"unsupported claims",
+	).map(claimToFinding);
+	const optionalContested = rowsForIds(
+		stringArray(synthesis.contestedClaimIds, 12),
+		claimById,
+		warnings,
+		"contested claims",
+	).map(claimToFinding);
+	const derivedUnsupported = ledger
+		.filter((row) => normalizeClaimStatus(row?.status) === "unsupported")
+		.map(claimToFinding);
+	const derivedContested = ledger
+		.filter((row) => normalizeClaimStatus(row?.status) === "conflicting")
+		.map(claimToFinding);
+
+	return {
+		report: {
+			summary: synthesis.bottomLine ?? control?.digest,
+			researchMetadata: packet.researchMetadataSeed ?? {},
+			coverageSummary: coverageSummaryFromPacket(packet, {}),
+			factSlotCoverage: asArray(packet.factSlotCoverage),
+			mainFindings: keyFindingRows.map(claimToFinding),
+			recommendations: mapOverlayItems(
+				synthesis.recommendations,
+				"recommendations",
+			),
+			actionPlan: mapOverlayItems(synthesis.actionPlan, "action plan"),
+			caveatedFindings: caveatNotes,
+			contestedAreas: optionalContested.length
+				? optionalContested
+				: derivedContested,
+			notableUnsupportedClaims: optionalUnsupported.length
+				? optionalUnsupported
+				: derivedUnsupported,
+			unverifiedButRelevant: asArray(packet.preservedClaims),
+			parentDecisionNotes: mapOverlayItems(
+				synthesis.parentDecisionNotes,
+				"decision notes",
+			),
+			researchScopeCoverage: asArray(packet.researchScopeCoverage),
+			remainingGaps: gapRows,
+		},
+		packet,
+		ledger,
+		warnings,
 	};
 }
 
@@ -492,6 +861,21 @@ function renderActionPlan(report) {
 	return out;
 }
 
+function fallbackCaveatText(item) {
+	if (!isRecord(item)) return stringifyItem(item);
+	const id = cleanText(item.id ?? item.gapId ?? "");
+	const slotIds = uniqueStrings([
+		item.slotId,
+		...asArray(item.relatedFactSlotIds),
+	]).join(", ");
+	const kind = cleanText(item.kind ?? "gap");
+	return (
+		[kind, id, slotIds ? `related slots: ${slotIds}` : undefined]
+			.filter(Boolean)
+			.join(" — ") || stringifyItem(item)
+	);
+}
+
 function caveatText(item) {
 	return itemText(
 		item,
@@ -506,7 +890,7 @@ function caveatText(item) {
 			"whyItMatters",
 			"parentImpact",
 		],
-		stringifyItem(item),
+		fallbackCaveatText(item),
 	);
 }
 
@@ -578,8 +962,8 @@ function renderSourceIndex(sourceIndex) {
 	return out;
 }
 
-function renderAuditSummary(control, claimSummary, slots) {
-	const coverage = control?.finalReport?.coverageSummary ?? {};
+function renderAuditSummary(report, claimSummary, slots) {
+	const coverage = report?.coverageSummary ?? {};
 	const mismatches = asArray(claimSummary.coverageSummaryMismatch);
 	return [
 		"## Audit summary",
@@ -624,9 +1008,10 @@ function renderWarnings(sectionCounts) {
 		}));
 }
 
-function renderResearchMarkdown(control, options = {}) {
-	const report = control?.finalReport ?? {};
-	const claimSummary = claimCounts(control);
+function renderResearchMarkdown(control, packetSource, options = {}) {
+	const composed = composeResearchReport(control, packetSource);
+	const report = composed.report;
+	const claimSummary = claimCounts(control, composed.packet);
 	const factSlots = sortedFactSlots(report);
 	const slots = factSlotSummary(asArray(report.factSlotCoverage));
 	const findings = mainFindingEntries(report);
@@ -644,7 +1029,7 @@ function renderResearchMarkdown(control, options = {}) {
 		report.remainingGaps,
 		report.parentDecisionNotes,
 		report.unverifiedButRelevant,
-		control?.claimVerdictIndex?.claims,
+		composed.ledger,
 	);
 	const maxUrls = Number.isFinite(Number(options.maxUrls))
 		? Math.max(0, Number(options.maxUrls))
@@ -672,7 +1057,7 @@ function renderResearchMarkdown(control, options = {}) {
 		sourceUrls: allSourceIndex.length,
 		renderedSourceUrls: sourceIndex.length,
 	};
-	const warnings = renderWarnings(sectionCounts);
+	const warnings = [...renderWarnings(sectionCounts), ...composed.warnings];
 
 	const sections = [
 		"# Research report",
@@ -687,7 +1072,7 @@ function renderResearchMarkdown(control, options = {}) {
 		...renderActionPlan(report),
 		...renderCaveats(report),
 		...renderSourceIndex(sourceIndex),
-		...renderAuditSummary(control, claimSummary, slots),
+		...renderAuditSummary(report, claimSummary, slots),
 	];
 
 	const markdown = sections
@@ -709,11 +1094,27 @@ function stripLeadingHeading(markdown) {
 	return String(markdown ?? "").replace(/^#\s+[^\n]+\n*/i, "");
 }
 
+function synthesisClaimRows(control, rows) {
+	const synthesis = isRecord(control?.synthesis) ? control.synthesis : null;
+	if (!synthesis) return asArray(control?.claimVerdictIndex?.claims);
+	const rowById = mapById(rows, claimIdOf);
+	const ids = uniqueStrings([
+		...asArray(synthesis.keyFindingIds),
+		...asArray(synthesis.notableUnsupportedClaimIds),
+		...asArray(synthesis.contestedClaimIds),
+		...asArray(synthesis.recommendations).flatMap(supportingClaimIds),
+		...asArray(synthesis.actionPlan).flatMap(supportingClaimIds),
+		...asArray(synthesis.caveatNotes).flatMap(supportingClaimIds),
+		...asArray(synthesis.parentDecisionNotes).flatMap(supportingClaimIds),
+	]);
+	return ids.map((id) => rowById.get(id)).filter(Boolean);
+}
+
 function renderAuditMarkdown(control, packetSource, rendered) {
 	const packet = packetSource?.packet ?? {};
 	const report = control?.finalReport ?? {};
-	const claims = asArray(control?.claimVerdictIndex?.claims);
 	const ledger = asArray(packet.claimVerdictLedger);
+	const claims = synthesisClaimRows(control, ledger);
 	const gaps = asArray(packet.remainingGaps).length
 		? asArray(packet.remainingGaps)
 		: asArray(report.remainingGaps);
@@ -870,7 +1271,7 @@ export default async function renderExecutive({
 			? Math.max(0, Number(options.maxGaps))
 			: undefined,
 	};
-	const rendered = renderResearchMarkdown(control, opts);
+	const rendered = renderResearchMarkdown(control, auditPacket, opts);
 	let markdown = rendered.markdown;
 	let truncated = false;
 	if (Number.isFinite(opts.maxWords) && countWords(markdown) > opts.maxWords) {
