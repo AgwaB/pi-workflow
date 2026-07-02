@@ -823,9 +823,14 @@ async function compileArtifactGraphPlan(
 		validateToolSubset(toolSelection.tools, stageAgent, issues, toolPath);
 		validateDelegationBoundary(toolSelection.tools, issues, toolPath);
 		const filteredToolSelection = filterToolSelection(toolSelection);
+		// Explicit runtime overrides outrank stage pins; spec defaults fill last.
 		const requestedRuntime = {
-			model: stage.model ?? defaultModel,
-			thinking: stage.thinking ?? defaultThinking,
+			model:
+				options.runtimeDefaults?.model ?? stage.model ?? spec.defaults?.model,
+			thinking:
+				options.runtimeDefaults?.thinking ??
+				stage.thinking ??
+				spec.defaults?.thinking,
 		};
 		const resolvedRuntime = await resolveWorkflowRuntime(
 			requestedRuntime,

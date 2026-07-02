@@ -248,7 +248,6 @@ function looksRetrievalGapInference(text) {
 function looksDerivedRecommendation(text) {
 	return includesAny(text, [
 		/\b(?:feasible|minimum|practical|recommended|recommendation|checklist|tiering|implementation guidance|production-ready|turnkey)\b/i,
-		/\b(?:small[- ]?saas|api-only proxy logging|implementation tiers?)\b/i,
 	]);
 }
 
