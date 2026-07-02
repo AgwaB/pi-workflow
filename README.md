@@ -64,6 +64,8 @@ If you want deterministic manual control, use the slash command form:
 /workflow run deep-research "Research this repository and summarize the architecture tradeoffs."
 ```
 
+For opt-in lower-latency runs, add `--thinking low`; defaults remain conservative pending holdout evidence. See [`docs/usage.md`](./docs/usage.md).
+
 For a one-off adaptive workflow that should plan, fan out, and synthesize without choosing a saved workflow, use:
 
 ```text

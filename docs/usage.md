@@ -187,6 +187,17 @@ A run prints a `workflow_*` id. Use that id for follow-up commands:
 
 The runtime task is not optional. `/workflow run <workflow>` and `/workflow dynamic` without task text fail before launch.
 
+### Opt-in fast mode
+
+For lower-latency runs, pass `--thinking low` explicitly:
+
+```text
+/workflow run --thinking low deep-research "Research this repository and summarize the architecture tradeoffs."
+/workflow dynamic --thinking low "Research this repository and summarize the architecture tradeoffs."
+```
+
+This is an opt-in fast mode. Package defaults remain conservative until a separate holdout evaluation provides enough evidence to change them. Current evidence is limited but encouraging for explicit fast runs: the 2026-07-02 `deep-research` combined gate on P1/P2/P3-style prompts resolved non-support tasks to `low`, completed selected valid runs in about 15-17 minutes, passed the strict gate 9/9, and had zero source-ref join failures across those 9 runs. Treat this as a speed option, not proof that every workflow should default to `low`.
+
 ### Run-scoped web-source cache
 
 Prefer normalized workflow web tools in new workflows:
