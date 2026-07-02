@@ -7427,15 +7427,29 @@ test("bundled deep-research compacts audit packets before executive final", asyn
 		byStage.get("research-questions")?.compiledPrompt ?? "",
 		/Research the deep-research artifact contract/,
 	);
+	assert.match(
+		byStage.get("research-questions")?.compiledPrompt ?? "",
+		/do not use filesystem read\/grep\/find\/ls/,
+	);
 	assert.equal(byStage.get("normalize-claims")?.runtime.thinking, "high");
 	assert.equal(byStage.get("verify-claims")?.runtime.thinking, "high");
+	assert.match(
+		byStage.get("verify-claims")?.compiledPrompt ?? "",
+		/Do not call workflow_artifact/,
+	);
 	assert.equal(byStage.get("final-audit")?.runtime.thinking, "xhigh");
 	const normalizeInputPacket = byStage.get("normalize-input-packet");
 	const normalizeClaims = byStage.get("normalize-claims");
+	const sanitizeClaims = byStage.get("sanitize-claims");
 	const auditClaims = byStage.get("audit-claims");
 	const finalAuditPacket = byStage.get("final-audit-packet");
 	const finalAudit = byStage.get("final-audit");
 	const final = byStage.get("final");
+
+	assert.match(normalizeClaims?.compiledPrompt ?? "", /source-backed surplus/);
+	assert.match(normalizeClaims?.compiledPrompt ?? "", /hard cap 18 total/);
+	assert.match(normalizeClaims?.compiledPrompt ?? "", /quote-gap/);
+	assert.match(normalizeClaims?.compiledPrompt ?? "", /known carve-outs/);
 
 	assert.equal(normalizeInputPacket?.kind, "support");
 	assert.deepEqual(normalizeInputPacket.dependsOn, [
@@ -7452,11 +7466,25 @@ test("bundled deep-research compacts audit packets before executive final", asyn
 		"normalize-input-packet.main",
 	]);
 
+	assert.equal(sanitizeClaims?.kind, "support");
+	assert.deepEqual(sanitizeClaims.dependsOn, [
+		"normalize-claims.main",
+		"normalize-input-packet.main",
+	]);
+	assert.equal(
+		sanitizeClaims.support.uses,
+		"./helpers/sanitize-verification-candidates.mjs",
+	);
+	assert.deepEqual(byStage.get("verify-claims")?.dependsOn, [
+		"sanitize-claims.main",
+	]);
+
 	assert.equal(auditClaims?.kind, "support");
 	assert.deepEqual(auditClaims.dependsOn, [
 		"plan.main",
 		"normalize-input-packet.main",
 		"normalize-claims.main",
+		"sanitize-claims.main",
 		"verify-claims.item",
 	]);
 
@@ -7464,6 +7492,7 @@ test("bundled deep-research compacts audit packets before executive final", asyn
 	assert.deepEqual(finalAuditPacket.dependsOn, [
 		"plan.main",
 		"normalize-claims.main",
+		"sanitize-claims.main",
 		"audit-claims.main",
 	]);
 	assert.equal(
@@ -7481,6 +7510,11 @@ test("bundled deep-research compacts audit packets before executive final", asyn
 		maxChars: 24000,
 	});
 	assert.match(finalAudit.compiledPrompt, /synthesis overlay/);
+	assert.match(finalAudit.compiledPrompt, /exactly one workflow_artifact read/);
+	assert.match(
+		finalAudit.compiledPrompt,
+		/Do not make extra workflow_artifact reads/,
+	);
 	assert.match(finalAudit.compiledPrompt, /no factSlotCoverage/);
 	assert.ok(
 		finalAudit.artifactGraph.output.controlSchemaPath.endsWith(
@@ -7510,6 +7544,473 @@ test("bundled deep-research compacts audit packets before executive final", asyn
 			),
 		),
 	);
+});
+
+test("explicit runtime thinking overrides bundled stage thinking pins", async () => {
+	const specPath = join(
+		process.cwd(),
+		"workflows",
+		"deep-research",
+		"spec.json",
+	);
+	const spec = parsePublicWorkflow(JSON.parse(readFileSync(specPath, "utf8")));
+	const compiled = await compileWorkflow(spec, {
+		cwd: process.cwd(),
+		task: "Research the deep-research artifact contract.",
+		specPath,
+		runtimeDefaults: { thinking: "low" },
+	});
+	const byStage = new Map(compiled.tasks.map((task) => [task.stageId, task]));
+	for (const stageId of [
+		"plan",
+		"research-questions",
+		"normalize-claims",
+		"verify-claims",
+		"final-audit",
+	]) {
+		assert.equal(byStage.get(stageId)?.runtime.thinking, "low");
+	}
+});
+
+test("deep-research verification candidate sanitizer demotes non-verifiable candidates", async () => {
+	const { default: helper } = await import(
+		`../../workflows/deep-research/helpers/sanitize-verification-candidates.mjs?test=${Date.now()}`
+	);
+	const result = await helper({
+		sources: {
+			"normalize-input-packet.main": {
+				packet: {
+					research: {
+						extractedFacts: [
+							{
+								slotId: "slot-001",
+								value:
+									"OWASP documents indirect prompt injection from external content.",
+								sourceRefs: ["wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+								sourceUrls: ["https://example.test/owasp"],
+								sourceTitleOrPublisher: "OWASP",
+								quote:
+									"Indirect prompt injection occurs when LLMs accept external input such as websites or files.",
+								sourceQuality: "primary",
+							},
+						],
+					},
+				},
+			},
+			"normalize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [
+						{
+							id: "claim-001",
+							claim:
+								"OWASP documents indirect prompt injection from external content.",
+							factSlotIds: ["slot-001"],
+							sourceRefs: ["wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+						},
+						{
+							id: "claim-002",
+							claim:
+								"Named tool capability evidence was fetched from official docs on 2026-07-02, but exact package versions were not reliably extracted from PyPI pages.",
+							factSlotIds: ["slot-002"],
+							sourceRefs: ["wsrc_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+						},
+						{
+							id: "claim-003",
+							claim:
+								"A low-overhead small-SaaS baseline can be synthesized from primary controls.",
+							factSlotIds: ["slot-003"],
+							sourceUrls: ["https://example.test/control"],
+						},
+						{
+							id: "claim-004",
+							claim:
+								"Provider-specific egress allowlist evidence was not found in inspected sources.",
+							factSlotIds: ["slot-004"],
+							sourceRefs: ["wsrc_cccccccccccccccccccccccccccccccc"],
+						},
+					],
+					preservedClaims: [
+						{ id: "preserved-001", claim: "Existing preserved lead" },
+					],
+					duplicates: [],
+				},
+				factSlotCoverage: [
+					{
+						slotId: "slot-001",
+						status: "filled",
+						verificationCandidateIds: ["claim-001"],
+					},
+					{
+						slotId: "slot-002",
+						status: "filled",
+						verificationCandidateIds: ["claim-002"],
+					},
+				],
+				coverageGaps: [],
+			},
+		},
+	});
+
+	assert.equal(
+		result.schema,
+		"deep-research-verification-candidate-sanitizer-v1",
+	);
+	assert.deepEqual(
+		result.claimInventory.verificationCandidates.map((claim) => claim.id),
+		["claim-001"],
+	);
+	assert.equal(
+		result.claimInventory.verificationCandidates[0].verifierInputPolicy,
+		"use_sourceRefs_or_sourceUrls_only_do_not_call_workflow_artifact",
+	);
+	assert.equal(result.sanitizerDiagnostics.sourceEvidenceHintRows, 1);
+	assert.deepEqual(
+		result.claimInventory.verificationCandidates[0].sourceEvidenceHints.map(
+			(hint) => hint.quote,
+		),
+		[
+			"Indirect prompt injection occurs when LLMs accept external input such as websites or files.",
+		],
+	);
+	assert.equal(result.sanitizerDiagnostics.demotedCandidateCount, 3);
+	assert.equal(
+		result.sanitizerDiagnostics.demotionReasonCounts
+			.workflow_context_date_claim,
+		1,
+	);
+	assert.equal(
+		result.sanitizerDiagnostics.demotionReasonCounts
+			.synthesized_recommendation_claim,
+		1,
+	);
+	assert.equal(
+		result.sanitizerDiagnostics.demotionReasonCounts.evidence_gap_claim,
+		2,
+	);
+	assert.deepEqual(
+		result.coverageGaps.map((gap) => gap.claimId),
+		["claim-002", "claim-003", "claim-004"],
+	);
+	const slotTwo = result.factSlotCoverage.find(
+		(slot) => slot.slotId === "slot-002",
+	);
+	assert.equal(slotTwo.status, "partial");
+	assert.deepEqual(slotTwo.verificationCandidateIds, []);
+	assert.match(slotTwo.gapReason, /sanitized verifier candidates: claim-002/);
+	assert.ok(
+		result.claimInventory.preservedClaims.some(
+			(claim) => claim.originalCandidateId === "claim-002",
+		),
+	);
+});
+
+test("deep-research verification candidate sanitizer preserves source-stated edge claims", async () => {
+	const { default: helper } = await import(
+		`../../workflows/deep-research/helpers/sanitize-verification-candidates.mjs?test=${Date.now()}`
+	);
+	const githubRef = "wsrc_dddddddddddddddddddddddddddddddd";
+	const pipRef = "wsrc_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+	const result = await helper({
+		sources: {
+			"normalize-input-packet.main": {
+				packet: {
+					research: {
+						sources: [
+							{
+								sourceRef: githubRef,
+								url: "https://docs.github.com/actions-hardening",
+							},
+							{
+								sourceRef: pipRef,
+								url: "https://pip.pypa.io/install",
+							},
+						],
+						extractedFacts: [
+							{
+								slotId: "slot-001",
+								value:
+									"GitHub warns that pull_request_target and workflow_run with checkout of untrusted PR content can expose privileged cache, repository write access, and secrets.",
+								sourceRefs: [githubRef],
+								sourceUrls: ["https://docs.github.com/actions-hardening"],
+								quote:
+									"pull_request_target and workflow_run can expose privileged cache, write permissions, and secrets when untrusted code is checked out.",
+								sourceQuality: "primary",
+							},
+							{
+								slotId: "slot-002",
+								value:
+									"pip searches all configured indexes and find-links with no source priority before selecting a version.",
+								sourceRefs: [pipRef],
+								sourceUrls: ["https://pip.pypa.io/install"],
+								quote:
+									"There is no priority in the locations that are searched. Rather they are all checked, and the best match is selected.",
+								sourceQuality: "primary",
+							},
+							{
+								slotId: "slot-003",
+								value:
+									"A practical baseline can be synthesized from several controls.",
+								sourceRefs: [githubRef],
+								sourceUrls: ["https://docs.github.com/actions-hardening"],
+								quote: "Use least privilege for workflow permissions.",
+								sourceQuality: "synthesis_from_primary_sources",
+							},
+						],
+					},
+				},
+			},
+			"normalize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [
+						{
+							id: "claim-001",
+							claim:
+								"GitHub warns that pull_request_target and workflow_run with checkout of untrusted PR content can expose privileged cache, repository write access, and secrets.",
+							factSlotIds: ["slot-001"],
+							sourceUrls: ["https://docs.github.com/actions-hardening"],
+						},
+						{
+							id: "claim-002",
+							claim:
+								"pip searches PyPI, configured indexes, local filesystem, find-links, and extra indexes with no source priority, selecting the best version across locations.",
+							factSlotIds: ["slot-002"],
+							sourceUrls: ["https://pip.pypa.io/install"],
+						},
+						{
+							id: "claim-003",
+							claim:
+								"A practical small-team baseline can be synthesized from several controls.",
+							factSlotIds: ["slot-003"],
+							sourceRefs: [githubRef],
+							sourceUrls: ["https://docs.github.com/actions-hardening"],
+						},
+					],
+				},
+				factSlotCoverage: [],
+				coverageGaps: [],
+			},
+		},
+	});
+
+	assert.deepEqual(
+		result.claimInventory.verificationCandidates.map((claim) => claim.id),
+		["claim-001", "claim-002"],
+	);
+	assert.deepEqual(result.claimInventory.verificationCandidates[0].sourceRefs, [
+		githubRef,
+	]);
+	assert.deepEqual(result.claimInventory.verificationCandidates[1].sourceRefs, [
+		pipRef,
+	]);
+	assert.equal(result.sanitizerDiagnostics.demotedCandidateCount, 1);
+	assert.equal(result.sanitizerDiagnostics.rewrittenCandidateCount, 0);
+	assert.equal(
+		result.sanitizerDiagnostics.demotionReasonCounts
+			.synthesized_recommendation_claim,
+		1,
+	);
+});
+
+test("deep-research verification candidate sanitizer rewrites only quote-backed broad claims", async () => {
+	const { default: helper } = await import(
+		`../../workflows/deep-research/helpers/sanitize-verification-candidates.mjs?test=${Date.now()}`
+	);
+	const nistRef = "wsrc_ffffffffffffffffffffffffffffffff";
+	const sciRef = "wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+	const result = await helper({
+		sources: {
+			"normalize-input-packet.main": {
+				packet: {
+					research: {
+						sources: [
+							{
+								sourceRef: nistRef,
+								url: "https://csrc.nist.gov/pubs/sp/800/61/r2/final",
+							},
+							{
+								sourceRef: sciRef,
+								url: "https://sci.greensoftware.foundation/",
+							},
+						],
+						extractedFacts: [
+							{
+								slotId: "slot-001",
+								value:
+									"Use the NIST incident handling lifecycle as a lightweight checklist: preparation; detection and analysis; containment, eradication and recovery; post-incident activity.",
+								sourceRefs: [nistRef],
+								sourceUrls: ["https://csrc.nist.gov/pubs/sp/800/61/r2/final"],
+								quote:
+									"Publication: 800-61 Rev. 2... Computer Security Incident Handling Guide",
+								sourceQuality: "primary_government_guidance",
+								notes:
+									"Exact lifecycle quote was not available from cached page text; cite cautiously.",
+							},
+							{
+								slotId: "slot-002",
+								value:
+									"Aggregate software carbon scores require consistent functional units; component scores with different units must be converted before aggregation.",
+								sourceRefs: [sciRef],
+								sourceUrls: ["https://sci.greensoftware.foundation/"],
+								quote:
+									"To sum multiple component SCI scores into one aggregate score, the functional unit R shall be the same across all components. If the functional unit of a software component is not the same as the aggregate functional unit, then the component SCI score needs to be converted to match that of the aggregate SCI functional unit.",
+								sourceQuality: "primary_standard",
+							},
+						],
+					},
+				},
+			},
+			"normalize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [
+						{
+							id: "claim-001",
+							claim:
+								"NIST SP 800-61 Rev. 2 is the primary Computer Security Incident Handling Guide source used for preparation, detection/analysis, containment/eradication/recovery, and post-incident activity framing.",
+							factSlotIds: ["slot-001"],
+							sourceRefs: [nistRef],
+							sourceUrls: ["https://csrc.nist.gov/pubs/sp/800/61/r2/final"],
+						},
+						{
+							id: "claim-002",
+							claim:
+								"A defensible allocation should define the software boundary and a consistent functional unit; request, 1k tokens, tenant-month, or model invocation can be used if consistently applied.",
+							factSlotIds: ["slot-002"],
+							sourceRefs: [sciRef],
+							sourceUrls: ["https://sci.greensoftware.foundation/"],
+						},
+					],
+				},
+				factSlotCoverage: [],
+				coverageGaps: [],
+			},
+		},
+	});
+
+	assert.deepEqual(
+		result.claimInventory.verificationCandidates.map((claim) => claim.id),
+		["claim-001", "claim-002"],
+	);
+	assert.equal(result.sanitizerDiagnostics.rewrittenCandidateCount, 2);
+	assert.equal(
+		result.claimInventory.verificationCandidates[0].claim,
+		"Publication: 800-61 Rev. 2... Computer Security Incident Handling Guide",
+	);
+	assert.equal(
+		result.claimInventory.verificationCandidates[1].claim,
+		"To sum multiple component SCI scores into one aggregate score, the functional unit R shall be the same across all components. If the functional unit of a software component is not the same as the aggregate functional unit, then the component SCI score needs to be converted to match that of the aggregate SCI functional unit.",
+	);
+	assert.ok(
+		!result.claimInventory.verificationCandidates[0].sourceEvidenceHints[0]
+			.value,
+	);
+	assert.deepEqual(result.sanitizerDiagnostics.rewriteReasonCounts, {
+		source_broader_than_evidence_claim: 1,
+		synthesized_recommendation_claim: 1,
+	});
+});
+
+test("deep-research sanitizer demotes url-only candidates and promotes source-backed preserved claims", async () => {
+	const sanitize = (
+		await import(
+			pathToFileURL(
+				join(
+					process.cwd(),
+					"workflows",
+					"deep-research",
+					"helpers",
+					"sanitize-verification-candidates.mjs",
+				),
+			).href
+		)
+	).default;
+	const wsrc = `wsrc_${"b".repeat(32)}`;
+	const result = await sanitize({
+		sources: {
+			"normalize-claims": {
+				claimInventory: {
+					verificationCandidates: [
+						{
+							id: "claim-001",
+							claim:
+								"OWASP lists prompt injection as LLM01 in its 2025 GenAI risk list.",
+							sourceUrls: [
+								"https://genai.owasp.org/llmrisk/llm01-prompt-injection.",
+							],
+							factSlotIds: ["slot-001"],
+						},
+						{
+							id: "claim-002",
+							claim: "NVML exposes GPU power draw via nvmlDeviceGetPowerUsage.",
+							sourceRefs: [`wsrc_${"a".repeat(32)}`],
+							sourceUrls: ["https://docs.nvidia.com/nvml"],
+							factSlotIds: ["slot-002"],
+						},
+					],
+					preservedClaims: [
+						{
+							id: "claim-009",
+							claim:
+								"GitHub secret scanning push protection blocks pushes containing detected secrets.",
+							sourceUrls: ["https://docs.github.com/secret-scanning"],
+							factSlotIds: ["slot-001"],
+							whyItMatters: "covers slot-001",
+						},
+					],
+					duplicates: [],
+				},
+				factSlotCoverage: [
+					{
+						slotId: "slot-001",
+						status: "filled",
+						verificationCandidateIds: ["claim-001"],
+					},
+					{
+						slotId: "slot-002",
+						status: "filled",
+						verificationCandidateIds: ["claim-002"],
+					},
+				],
+				coverageGaps: [],
+			},
+			"normalize-input-packet": {
+				packet: {
+					research: {
+						sources: [
+							{
+								sourceRef: `wsrc_${"a".repeat(32)}`,
+								url: "https://docs.nvidia.com/nvml",
+							},
+							{
+								sourceRef: wsrc,
+								url: "https://docs.github.com/secret-scanning/",
+							},
+						],
+						extractedFacts: [
+							{
+								slotId: "slot-001",
+								value:
+									"push protection blocks pushes containing detected secrets",
+								quote:
+									"Push protection blocks pushes that contain detected secrets before they reach the repository.",
+								sourceRefs: [wsrc],
+								sourceUrls: ["https://docs.github.com/secret-scanning/"],
+							},
+						],
+					},
+				},
+			},
+		},
+	});
+	const diagnostics = result.sanitizerDiagnostics;
+	assert.deepEqual(diagnostics.webUrlOnlyDemotedIds, ["claim-001"]);
+	assert.deepEqual(diagnostics.promotedCandidateIds, ["claim-009"]);
+	const kept = result.claimInventory.verificationCandidates;
+	assert.ok(!kept.some((claim) => claim.id === "claim-001"));
+	const promoted = kept.find((claim) => claim.id === "claim-009");
+	assert.ok(promoted);
+	assert.ok(promoted.sourceRefs.length > 0);
+	const slot = result.factSlotCoverage.find((row) => row.slotId === "slot-001");
+	assert.deepEqual(slot.verificationCandidateIds, ["claim-009"]);
 });
 
 test("non-dynamic artifact graph compile/run golden preserves static structure", async () => {
@@ -11789,7 +12290,15 @@ test("deep-research P3 final-audit replay fixture preserves guardrail floors", a
 	);
 	const packetResult = await finalAuditPacket({ sources: fixture.sources });
 	const packet = packetResult.packet;
+	const synthesisInputBytes = Buffer.byteLength(
+		JSON.stringify(packet.synthesisInput),
+		"utf8",
+	);
 
+	assert.ok(
+		synthesisInputBytes < 24000,
+		`synthesisInput should fit final-audit required read budget, got ${synthesisInputBytes}`,
+	);
 	assert.equal(packet.verdictCounts.verified, expectations.verified);
 	assert.equal(
 		packet.verdictCounts.partiallySupported,

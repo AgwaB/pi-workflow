@@ -48,6 +48,14 @@ function compactStrings(values, limit = 5) {
 	return out;
 }
 
+function truncateText(value, limit = 240) {
+	const text = stringOf(value);
+	if (!text) return undefined;
+	const normalized = text.replace(/\s+/g, " ").trim();
+	if (normalized.length <= limit) return normalized;
+	return `${normalized.slice(0, Math.max(0, limit - 1)).trimEnd()}…`;
+}
+
 function compactClaimDigest(claim) {
 	const digest = asObject(claim);
 	return {
@@ -146,13 +154,13 @@ function synthesisClaimDigest(claim) {
 	const item = compactClaimDigest(claim);
 	return {
 		id: item.id,
-		claim: item.claim,
+		claim: truncateText(item.claim, 260),
 		status: item.status,
 		confidence: item.confidence,
 		factSlotIds: compactStrings(item.factSlotIds, 8),
-		support: item.support,
-		caveat: item.caveat,
-		correctionOrCounterclaim: item.correctionOrCounterclaim,
+		support: truncateText(item.support, 240),
+		caveat: truncateText(item.caveat, 180),
+		correctionOrCounterclaim: truncateText(item.correctionOrCounterclaim, 180),
 		hasSourceUrls: compactStrings(item.sourceUrls, 1).length > 0,
 		hasSourceRefs: compactStrings(item.sourceRefs, 1).length > 0,
 	};
@@ -162,11 +170,10 @@ function synthesisFactSlot(slot) {
 	const item = asObject(slot);
 	return {
 		slotId: stringOf(item.slotId),
-		label: stringOf(item.label),
+		label: truncateText(item.label, 120),
 		status: stringOf(item.status),
-		bestValue: item.bestValue,
-		gapReason: stringOf(item.gapReason),
-		parentImpact: stringOf(item.parentImpact),
+		gapReason: truncateText(item.gapReason, 120),
+		parentImpact: truncateText(item.parentImpact, 120),
 	};
 }
 
@@ -178,21 +185,21 @@ function synthesisGap(gap) {
 		claimId: stringOf(item.claimId),
 		slotId: stringOf(item.slotId),
 		evidenceState: stringOf(item.evidenceState),
-		reason: stringOf(item.reason),
-		nextStep: stringOf(item.nextStep),
-		scopeItem: stringOf(item.scopeItem),
-		whyItMatters: stringOf(item.whyItMatters),
+		reason: truncateText(item.reason, 220),
+		nextStep: truncateText(item.nextStep, 180),
+		scopeItem: truncateText(item.scopeItem, 160),
+		whyItMatters: truncateText(item.whyItMatters, 180),
 	};
 }
 
 function synthesisScopeCoverage(row) {
 	const item = asObject(row);
 	return {
-		scopeItem: stringOf(item.scopeItem ?? item.item ?? item.topic),
+		scopeItem: truncateText(item.scopeItem ?? item.item ?? item.topic, 160),
 		status: stringOf(item.status ?? item.coverageStatus),
 		evidenceState: stringOf(item.evidenceState),
-		summary: stringOf(item.summary ?? item.reason),
-		whyItMatters: stringOf(item.whyItMatters),
+		summary: truncateText(item.summary ?? item.reason, 220),
+		whyItMatters: truncateText(item.whyItMatters, 180),
 	};
 }
 
@@ -224,11 +231,11 @@ function buildSynthesisInput({
 			.map(synthesisScopeCoverage),
 		factSlots: factSlotCoverage.map(synthesisFactSlot),
 		claims: claimDigests.map(synthesisClaimDigest),
-		preservedClaims: preservedClaims.map((claim) => ({
+		preservedClaims: preservedClaims.slice(0, 12).map((claim) => ({
 			id: idOf(claim),
-			claim: stringOf(claim.claim),
+			claim: truncateText(claim.claim, 240),
 			factSlotIds: compactStrings(claim.factSlotIds, 8),
-			whyItMatters: stringOf(claim.whyItMatters ?? claim.reason),
+			whyItMatters: truncateText(claim.whyItMatters ?? claim.reason, 180),
 		})),
 		gaps: [
 			...remainingGaps.map((gap) =>
@@ -244,7 +251,16 @@ function buildSynthesisInput({
 
 export default async function finalAuditPacket({ sources }) {
 	const plan = asObject(findSource(sources, "plan"));
-	const normalized = asObject(findSource(sources, "normalize-claims"));
+	const normalizeClaims = asObject(findSource(sources, "normalize-claims"));
+	const sanitizedCandidates = asObject(
+		findSource(sources, "sanitize-claims") ??
+			findSource(sources, "sanitize-verification-candidates"),
+	);
+	const normalized =
+		Object.keys(sanitizedCandidates).length > 0
+			? sanitizedCandidates
+			: normalizeClaims;
+	const sanitizerDiagnostics = asObject(normalized.sanitizerDiagnostics);
 	const audit = asObject(findSource(sources, "audit-claims"));
 	const claimInventory = asObject(normalized.claimInventory);
 	const verificationCandidates = asArray(claimInventory.verificationCandidates);
@@ -342,6 +358,7 @@ export default async function finalAuditPacket({ sources }) {
 			},
 			normalizerDiagnostics: {
 				precisionGuard: precisionGuardDiagnostics,
+				sanitizer: sanitizerDiagnostics,
 			},
 			preservedClaims: preservedClaims.map((claim) => ({
 				id: idOf(claim),

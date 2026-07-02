@@ -415,7 +415,11 @@ function findSource(sources, stageId) {
 
 export default async function claimEvidenceGate({ sources, options = {} }) {
 	const plan = findSource(sources, "plan");
-	const normalized = findSource(sources, "normalize-claims");
+	const normalizeClaims = findSource(sources, "normalize-claims");
+	const sanitizedCandidates =
+		findSource(sources, "sanitize-claims") ??
+		findSource(sources, "sanitize-verification-candidates");
+	const normalized = sanitizedCandidates ?? normalizeClaims;
 	const normalizeInputPacket = findSource(sources, "normalize-input-packet");
 	const urlToSourceRef = buildUrlSourceRefLookup(normalizeInputPacket);
 	const candidateRecords = [];
@@ -459,7 +463,8 @@ export default async function claimEvidenceGate({ sources, options = {} }) {
 		);
 	// Legacy layout: when no verify-claims.* source ids exist (for example a
 	// single from: string dependency), fall back to every non-plan/non-normalize
-	// source.
+	// source. Exclude sanitizer sources because they are canonicalizer inputs, not
+	// verifier verdict rows.
 	const verifierClaims =
 		claims.length > 0
 			? claims
@@ -468,7 +473,9 @@ export default async function claimEvidenceGate({ sources, options = {} }) {
 						([specId]) =>
 							!specId.startsWith("plan") &&
 							!specId.startsWith("normalize-claims") &&
-							!specId.startsWith("normalize-input-packet"),
+							!specId.startsWith("normalize-input-packet") &&
+							!specId.startsWith("sanitize-claims") &&
+							!specId.startsWith("sanitize-verification-candidates"),
 					)
 					.flatMap(([sourceId, source]) =>
 						asArray(source).map((claim, index) => ({ sourceId, claim, index })),
