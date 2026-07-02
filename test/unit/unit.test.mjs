@@ -119,6 +119,7 @@ import {
 	writeDynamicDecisionArtifacts,
 } from "../../.tmp/unit/dynamic-decision.js";
 import { runDynamicDecisionLoop } from "../../.tmp/unit/dynamic-decision-loop.js";
+import { buildDynamicGeneratedCompiledTask } from "../../.tmp/unit/dynamic-generated-task-runtime.js";
 import {
 	assembleDynamicStateIndex,
 	extractDynamicStateArtifact,
@@ -1252,7 +1253,7 @@ test("compiler defaults dynamic decision repair to two re-asks and maxStalls to 
 	}
 });
 
-test("compiler applies runtime defaults to dynamic stages and decision-loop profiles", async () => {
+test("compiler keeps dynamic stage and decision-loop pins above runtime defaults", async () => {
 	const cwd = makeProject();
 	try {
 		const compiled = await compileWorkflow(
@@ -1262,6 +1263,8 @@ test("compiler applies runtime defaults to dynamic stages and decision-loop prof
 						{
 							id: "adaptive",
 							type: "dynamic",
+							model: "stage/model",
+							thinking: "high",
 							dynamic: {
 								uses: "./helpers/controller.mjs",
 								decisionLoop: {
@@ -1283,17 +1286,171 @@ test("compiler applies runtime defaults to dynamic stages and decision-loop prof
 		);
 
 		const controller = compiled.tasks[0];
-		assert.equal(controller.runtime.model, "runtime/model");
+		assert.equal(controller.runtime.model, "stage/model");
+		assert.equal(controller.runtime.thinking, "high");
+		const loop = controller.dynamic.decisionLoop;
+		assert.equal(loop.planner.model, "stage/model");
+		assert.equal(loop.planner.thinking, "high");
+		assert.equal(loop.workerDefaults.model, "profile/model");
+		assert.equal(loop.workerDefaults.thinking, "high");
+		assert.equal(loop.verifier.model, "stage/model");
+		assert.equal(loop.verifier.thinking, "medium");
+		assert.equal(loop.synthesis.model, "stage/model");
+		assert.equal(loop.synthesis.thinking, "high");
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("compiler applies runtime overrides above dynamic stage and decision-loop pins", async () => {
+	const cwd = makeProject();
+	try {
+		const compiled = await compileWorkflow(
+			artifactGraphWorkflowSpec({
+				artifactGraph: {
+					stages: [
+						{
+							id: "adaptive",
+							type: "dynamic",
+							model: "stage/model",
+							thinking: "high",
+							dynamic: {
+								uses: "./helpers/controller.mjs",
+								decisionLoop: {
+									planner: { model: "planner/model" },
+									workerDefaults: { thinking: "medium" },
+									verifier: { model: "verifier/model", thinking: "xhigh" },
+									synthesis: {},
+								},
+							},
+						},
+					],
+				},
+			}),
+			{
+				cwd,
+				task: "Review dynamically.",
+				runtimeOverrides: { model: "override/model", thinking: "low" },
+				runtimeDefaults: { model: "runtime/model", thinking: "minimal" },
+			},
+		);
+
+		const controller = compiled.tasks[0];
+		assert.equal(controller.runtime.model, "override/model");
 		assert.equal(controller.runtime.thinking, "low");
 		const loop = controller.dynamic.decisionLoop;
-		assert.equal(loop.planner.model, "runtime/model");
-		assert.equal(loop.planner.thinking, "low");
-		assert.equal(loop.workerDefaults.model, "profile/model");
-		assert.equal(loop.workerDefaults.thinking, "low");
-		assert.equal(loop.verifier.model, "runtime/model");
-		assert.equal(loop.verifier.thinking, "medium");
-		assert.equal(loop.synthesis.model, "runtime/model");
-		assert.equal(loop.synthesis.thinking, "low");
+		for (const profile of [
+			loop.planner,
+			loop.workerDefaults,
+			loop.verifier,
+			loop.synthesis,
+		]) {
+			assert.equal(profile.model, "override/model");
+			assert.equal(profile.thinking, "low");
+		}
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("dynamic generated tasks apply runtime overrides above profile pins and resolve thinking", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const controllerCompiledTask = {
+			id: "adaptive.controller",
+			key: "adaptive.controller",
+			specId: "adaptive.controller",
+			taskId: "controller",
+			stageId: "adaptive",
+			agent: "dynamic",
+			agentPath: "./helpers/controller.mjs",
+			agentSystemPrompt: "",
+			roleNames: [],
+			task: "Run controller.",
+			cwd,
+			explicitCwd: false,
+			explicitWorktreePolicy: false,
+			runtime: {
+				approvalMode: "non-interactive",
+				model: "controller/model",
+				thinking: "high",
+			},
+			safety: {
+				readOnlyDeclared: false,
+				capability: "mutation-capable",
+				sharedCwdSafe: false,
+				worktreePolicy: "off",
+				requiresWorktree: false,
+				permission: { status: "pending" },
+			},
+			compiledPrompt: "Run controller.",
+			kind: "dynamic",
+		};
+		const generated = await buildDynamicGeneratedCompiledTask({
+			cwd,
+			run: {
+				runId: "workflow_dynamic_runtime",
+				provenance: {},
+				tasks: [
+					{
+						specId: "adaptive.controller",
+						stageId: "adaptive",
+						taskId: "controller",
+						status: "running",
+					},
+				],
+			},
+			compiledFlow: { tasks: [controllerCompiledTask] },
+			controllerCompiledTask,
+			controllerSpecId: "adaptive.controller",
+			controllerStageId: "adaptive",
+			generatedSpecId: "adaptive.worker",
+			opId: "op-1",
+			requestHash: "hash-1",
+			request: {
+				id: "worker",
+				agent: "unit-scout",
+				profile: "worker",
+				prompt: "Inspect the target.",
+				inputs: [],
+			},
+			dynamic: {
+				uses: "./helpers/controller.mjs",
+				mode: "graph-splice",
+				runtimeOverrides: { model: "override/model", thinking: "xhigh" },
+				availableModels: [
+					{
+						provider: "override",
+						id: "model",
+						fullId: "override/model",
+						thinkingLevelMap: { xhigh: null },
+					},
+				],
+				budget: { maxAgents: 10, maxConcurrency: 2, maxRuntimeMs: 1000 },
+				permissions: {
+					approval: "auto",
+					allowDynamicRoles: true,
+					allowDynamicTools: true,
+				},
+				helpers: {},
+				workflows: {},
+				decisionLoop: {
+					workerDefaults: {
+						model: "profile/model",
+						thinking: "medium",
+						tools: ["read"],
+					},
+					allowedAgents: [],
+					allowedOutputProfiles: [],
+				},
+			},
+		});
+
+		assert.equal(generated.runtime.model, "override/model");
+		assert.equal(generated.runtime.thinking, "high");
+		assert.equal(generated.runtime.thinkingResolution?.requested, "xhigh");
+		assert.equal(generated.runtime.thinkingResolution?.resolved, "high");
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
@@ -7576,7 +7733,7 @@ test("bundled deep-research compacts audit packets before executive final", asyn
 	);
 });
 
-test("explicit runtime thinking overrides bundled stage thinking pins", async () => {
+test("ambient runtime defaults do not override bundled stage thinking pins", async () => {
 	const specPath = join(
 		process.cwd(),
 		"workflows",
@@ -7589,6 +7746,27 @@ test("explicit runtime thinking overrides bundled stage thinking pins", async ()
 		task: "Research the deep-research artifact contract.",
 		specPath,
 		runtimeDefaults: { thinking: "low" },
+	});
+	const byStage = new Map(compiled.tasks.map((task) => [task.stageId, task]));
+	assert.equal(byStage.get("plan")?.runtime.thinking, "high");
+	assert.equal(byStage.get("normalize-claims")?.runtime.thinking, "high");
+	assert.equal(byStage.get("verify-claims")?.runtime.thinking, "high");
+	assert.equal(byStage.get("final-audit")?.runtime.thinking, "xhigh");
+});
+
+test("explicit runtime thinking overrides bundled stage thinking pins", async () => {
+	const specPath = join(
+		process.cwd(),
+		"workflows",
+		"deep-research",
+		"spec.json",
+	);
+	const spec = parsePublicWorkflow(JSON.parse(readFileSync(specPath, "utf8")));
+	const compiled = await compileWorkflow(spec, {
+		cwd: process.cwd(),
+		task: "Research the deep-research artifact contract.",
+		specPath,
+		runtimeOverrides: { thinking: "low" },
 	});
 	const byStage = new Map(compiled.tasks.map((task) => [task.stageId, task]));
 	for (const stageId of [
@@ -16175,7 +16353,7 @@ test("run boundary requires runtime task", async () => {
 	}
 });
 
-test("workflow run runtime defaults reach launched subagents", async () => {
+test("workflow run runtime overrides reach launched subagents", async () => {
 	const cwd = makeProject();
 	const captured = [];
 	try {
@@ -16206,7 +16384,7 @@ test("workflow run runtime defaults reach launched subagents", async () => {
 
 		const run = await runWorkflowSpec("workflow.json", cwd, {
 			task: "Review the diff",
-			runtimeDefaults: {
+			runtimeOverrides: {
 				model: "kimi-coding/kimi-for-coding",
 				thinking: "low",
 			},
@@ -17135,7 +17313,7 @@ test("spec-less direct dynamic run records provenance and launches planner", asy
 
 		const run = await runDynamicTask(cwd, {
 			task: "Research dynamic workflow evaluation methods.",
-			runtimeDefaults: { model: "openai-codex/gpt-5.5", thinking: "low" },
+			runtimeOverrides: { model: "openai-codex/gpt-5.5", thinking: "low" },
 		});
 		assert.equal(run.status, "running");
 		assert.equal(run.name, "dynamic");

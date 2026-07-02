@@ -1,5 +1,5 @@
 import { appendFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import { dirname, extname, join, relative, resolve } from "node:path";
+import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
 
@@ -23,7 +23,6 @@ import {
 	toProjectPath,
 	updateIndex,
 	withRunLease,
-	workflowRunDir,
 	workflowRunPath,
 	writeJsonAtomic,
 	writeRunRecord,
@@ -41,6 +40,7 @@ import {
 import {
 	readSimpleJsonPath,
 	type WorkflowModelInfo,
+	type WorkflowRuntimeDefaults,
 } from "./workflow-runtime.js";
 import {
 	dynamicRunDir,
@@ -75,7 +75,6 @@ import {
 	isDynamicCompiledTaskPayload,
 	normalizeDynamicAgentRequest,
 	readDynamicGeneratedTaskResult,
-	type DynamicAgentRequest,
 } from "./dynamic-generated-task-runtime.js";
 import {
 	optionalEventString,
@@ -118,10 +117,6 @@ import {
 	writeArtifactGraphDynamicResult,
 } from "./artifact-graph-runtime.js";
 import {
-	isDynamicOutputProfile,
-	type DynamicOutputProfile,
-} from "./dynamic-profiles.js";
-import {
 	DIRECT_DYNAMIC_RUNTIME_VERSION,
 	ensureDirectDynamicRuntimeBundle,
 } from "./dynamic-runtime-bundle.js";
@@ -129,7 +124,6 @@ import {
 	type CompiledDynamicWorkflowTask,
 	type CompiledTask,
 	type CompiledWorkflow,
-	type ThinkingLevel,
 	WORKFLOW_RUN_TYPE,
 	type WorkflowIndexRecord,
 	type WorkflowRunRecord,
@@ -156,7 +150,8 @@ const supervisorRunMtimes = new Map<string, number>();
 
 export interface WorkflowRunOptions {
 	task?: string;
-	runtimeDefaults?: { model?: string; thinking?: ThinkingLevel };
+	runtimeOverrides?: WorkflowRuntimeDefaults;
+	runtimeDefaults?: WorkflowRuntimeDefaults;
 	availableModels?: WorkflowModelInfo[];
 	dynamicUi?: DynamicWorkflowUi;
 	runId?: string;
@@ -165,6 +160,7 @@ export interface WorkflowRunOptions {
 
 interface WorkflowScheduleOptions {
 	dynamicUi?: DynamicWorkflowUi;
+	availableModels?: WorkflowModelInfo[];
 }
 
 export async function runWorkflowSpec(
@@ -209,6 +205,7 @@ async function runLoadedWorkflowSpec(
 		cwd,
 		specPath,
 		task: options.task,
+		runtimeOverrides: options.runtimeOverrides,
 		runtimeDefaults: options.runtimeDefaults,
 		availableModels: options.availableModels,
 	});
@@ -224,12 +221,15 @@ async function runLoadedWorkflowSpec(
 		await writeRunRecord(cwd, run);
 	});
 
+	const scheduleOptions = {
+		dynamicUi: options.dynamicUi,
+		availableModels: options.availableModels,
+	};
 	const scheduled =
-		(await scheduleRun(cwd, run.runId, compiled, {
-			dynamicUi: options.dynamicUi,
-		})) ?? (await readRunRecord(cwd, run.runId));
+		(await scheduleRun(cwd, run.runId, compiled, scheduleOptions)) ??
+		(await readRunRecord(cwd, run.runId));
 	if (scheduled.status === "running")
-		watchRun(cwd, scheduled.runId, { dynamicUi: options.dynamicUi });
+		watchRun(cwd, scheduled.runId, scheduleOptions);
 	return scheduled;
 }
 
@@ -1073,6 +1073,7 @@ async function executeDynamicControllerTask(
 			sources,
 			dynamic: compiledTask.dynamic,
 			dynamicUi: options.dynamicUi,
+			availableModels: options.availableModels,
 		});
 		await assertDynamicGeneratedTasksSettled({
 			cwd,
@@ -1082,6 +1083,7 @@ async function executeDynamicControllerTask(
 			controllerTask: task,
 			controllerCompiledTask: compiledTask,
 			dynamic: compiledTask.dynamic,
+			availableModels: options.availableModels,
 		});
 		await recordActiveRuntime();
 		const unrunBranchBlockers = await dynamicUnrunBranchBlockers(
@@ -1214,6 +1216,7 @@ async function runDynamicControllerWorker(input: {
 	sources: Record<string, unknown>;
 	dynamic: CompiledDynamicWorkflowTask;
 	dynamicUi?: DynamicWorkflowUi;
+	availableModels?: WorkflowModelInfo[];
 }): Promise<unknown> {
 	const resolved = await resolveWorkflowHelperRef(
 		input.dynamic.uses,
@@ -1836,65 +1839,6 @@ function requiredDynamicString(
 	return value.trim();
 }
 
-function optionalDynamicString(
-	value: unknown,
-	field: string,
-): string | undefined {
-	if (value === undefined) return undefined;
-	return requiredDynamicString(value, field);
-}
-
-function optionalDynamicStringArray(
-	value: unknown,
-	field: string,
-): string[] | undefined {
-	if (value === undefined) return undefined;
-	if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
-		throw new Error(`ctx.agent() ${field} must be an array of strings`);
-	}
-	return value.map((item) => item.trim()).filter(Boolean);
-}
-
-function isPlainDynamicRecord(
-	value: unknown,
-): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function optionalDynamicPositiveInteger(
-	value: unknown,
-	field: string,
-): number | undefined {
-	if (value === undefined) return undefined;
-	if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
-		throw new Error(`ctx.agent() ${field} must be a positive integer`);
-	}
-	return value;
-}
-
-function requiredDynamicOutputProfile(
-	value: unknown,
-	field: string,
-	api: string,
-): DynamicOutputProfile {
-	const profile = requiredDynamicString(value, field, api);
-	if (!isDynamicOutputProfile(profile)) {
-		throw new Error(`${api} ${field} has an unsupported output profile`);
-	}
-	return profile;
-}
-
-function requiredDynamicNonNegativeInteger(
-	value: unknown,
-	field: string,
-	api: string,
-): number {
-	if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
-		throw new Error(`${api} ${field} must be a non-negative integer`);
-	}
-	return value;
-}
-
 function requiredDynamicPositiveInteger(
 	value: unknown,
 	field: string,
@@ -1904,17 +1848,6 @@ function requiredDynamicPositiveInteger(
 		throw new Error(`${api} ${field} must be a positive integer`);
 	}
 	return value;
-}
-
-function optionalDynamicStringField(value: unknown): string | undefined {
-	return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
-function optionalDynamicOutputProfile(
-	value: unknown,
-): DynamicOutputProfile | undefined {
-	if (value === undefined) return undefined;
-	return requiredDynamicOutputProfile(value, "outputProfile", "ctx.agent()");
 }
 
 async function currentDynamicBudgetRemaining(input: {
@@ -2289,6 +2222,7 @@ async function assertDynamicGeneratedTasksSettled(input: {
 	controllerTask: WorkflowTaskRunRecord;
 	controllerCompiledTask: CompiledTask;
 	dynamic: CompiledDynamicWorkflowTask;
+	availableModels?: WorkflowModelInfo[];
 }): Promise<void> {
 	const state = await readOrRebuildDynamicState(input.cwd, input.run.runId);
 	const generatedTaskIds =
@@ -2315,6 +2249,7 @@ async function repairMissingDynamicGeneratedTask(
 		controllerTask: WorkflowTaskRunRecord;
 		controllerCompiledTask: CompiledTask;
 		dynamic: CompiledDynamicWorkflowTask;
+		availableModels?: WorkflowModelInfo[];
 	},
 	specId: string,
 ): Promise<WorkflowTaskRunRecord> {
@@ -2351,6 +2286,7 @@ async function repairMissingDynamicGeneratedTask(
 				branchId: optionalEventString(event.payload.branchId),
 				request,
 				dynamic: input.dynamic,
+				availableModels: input.availableModels,
 			});
 	assertDynamicGeneratedMetadataMatches(compiledTask, {
 		controllerSpecId: input.controllerTask.specId,
@@ -2400,6 +2336,7 @@ async function runDynamicAgentRequest(input: {
 	request: unknown;
 	generatedTaskIds: string[];
 	isSettled?: () => boolean;
+	availableModels?: WorkflowModelInfo[];
 }): Promise<unknown> {
 	await assertDynamicRuntimeBudgetAvailable({
 		cwd: input.cwd,
@@ -2485,6 +2422,7 @@ async function runDynamicAgentRequest(input: {
 					branchId: generationBranchId,
 					request: generationRequest,
 					dynamic: input.dynamic,
+					availableModels: input.availableModels,
 				});
 		assertDynamicGeneratedMetadataMatches(compiledTask, {
 			controllerSpecId: input.controllerTask.specId,

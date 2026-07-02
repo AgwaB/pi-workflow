@@ -46,6 +46,41 @@ export interface ResolveWorkflowRuntimeOptions {
 	prompt?: WorkflowRuntimePrompt;
 }
 
+export type WorkflowRuntimeLayer = WorkflowRuntimeDefaults | undefined;
+
+export function selectWorkflowRuntime(
+	...layers: WorkflowRuntimeLayer[]
+): WorkflowRuntimeResolutionInput {
+	const modelLayer = layers.find((layer) => modelOf(layer));
+	const model = modelOf(modelLayer);
+	let thinking: ThinkingLevel | undefined;
+	for (const layer of layers) {
+		if (!layer) continue;
+		if (layer.thinking) {
+			thinking = layer.thinking;
+			break;
+		}
+		const layerModel = modelOf(layer);
+		const modelThinking = layerModel
+			? splitKnownThinkingSuffix(layerModel).thinking
+			: undefined;
+		if (modelThinking) {
+			thinking = modelThinking;
+			break;
+		}
+	}
+	return {
+		...(model ? { model } : {}),
+		...(thinking ? { thinking } : {}),
+	};
+}
+
+function modelOf(layer: WorkflowRuntimeLayer): string | undefined {
+	return typeof layer?.model === "string" && layer.model.trim()
+		? layer.model.trim()
+		: undefined;
+}
+
 export function toWorkflowModelInfo(model: {
 	provider: string;
 	id: string;

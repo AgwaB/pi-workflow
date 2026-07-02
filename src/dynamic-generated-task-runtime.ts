@@ -24,6 +24,11 @@ import type {
 	WorkflowRunRecord,
 	WorkflowTaskRunRecord,
 } from "./types.js";
+import {
+	resolveWorkflowRuntime,
+	selectWorkflowRuntime,
+	type WorkflowModelInfo,
+} from "./workflow-runtime.js";
 
 const DYNAMIC_OUTPUT_MAX_DIGEST_CHARS = 1000;
 const DYNAMIC_DELEGATION_TOOLS = new Set([
@@ -92,6 +97,7 @@ export async function buildDynamicGeneratedCompiledTask(input: {
 	branchId?: string;
 	request: DynamicAgentRequest;
 	dynamic: CompiledDynamicWorkflowTask;
+	availableModels?: WorkflowModelInfo[];
 }): Promise<CompiledTask> {
 	if (input.dynamic.budget.maxAgents <= 0) {
 		throw new Error("dynamic agent budget is exhausted");
@@ -172,6 +178,23 @@ export async function buildDynamicGeneratedCompiledTask(input: {
 				),
 			),
 		);
+	const selectedRuntime = selectWorkflowRuntime(
+		input.dynamic.runtimeOverrides,
+		runtimeSettings(input.request),
+		runtimeSettings(executionProfile),
+		runtimeSettings(input.controllerCompiledTask.runtime),
+		runtimeSettings(agentDefinition),
+	);
+	const resolvedRuntime = await resolveWorkflowRuntime(
+		selectedRuntime,
+		{
+			taskKey: input.generatedSpecId,
+			stageId: input.controllerStageId,
+			taskId: input.request.id,
+			agent: requestedAgent,
+		},
+		{ availableModels: input.availableModels ?? input.dynamic.availableModels },
+	);
 	const unknownTools = (tools ?? []).filter(
 		(tool) => effectiveToolClassification(tool, toolProviders) === undefined,
 	);
@@ -253,16 +276,7 @@ export async function buildDynamicGeneratedCompiledTask(input: {
 		explicitWorktreePolicy: requiresWorktree,
 		runtime: {
 			approvalMode: "non-interactive",
-			model:
-				input.request.model ??
-				executionProfile?.model ??
-				input.controllerCompiledTask.runtime.model ??
-				agentDefinition.model,
-			thinking:
-				input.request.thinking ??
-				executionProfile?.thinking ??
-				input.controllerCompiledTask.runtime.thinking ??
-				agentDefinition.thinking,
+			...resolvedRuntime,
 			tools,
 			...(toolProviders ? { toolProviders } : {}),
 			maxRuntimeMs:
@@ -419,7 +433,9 @@ function dynamicDecisionLoopProfile(
 	);
 }
 
-export function isDynamicCompiledTaskPayload(value: unknown): value is CompiledTask {
+export function isDynamicCompiledTaskPayload(
+	value: unknown,
+): value is CompiledTask {
 	return (
 		!!value &&
 		typeof value === "object" &&
@@ -679,7 +695,9 @@ export async function readDynamicGeneratedTaskResult(
 	};
 }
 
-export function normalizeDynamicAgentRequest(value: unknown): DynamicAgentRequest {
+export function normalizeDynamicAgentRequest(
+	value: unknown,
+): DynamicAgentRequest {
 	if (!value || typeof value !== "object" || Array.isArray(value)) {
 		throw new Error("ctx.agent() request must be an object");
 	}
@@ -728,6 +746,23 @@ function requiredDynamicString(
 		throw new Error(`${api} ${field} must be a non-empty string`);
 	}
 	return value.trim();
+}
+
+function runtimeSettings(
+	value: unknown,
+): { model?: string; thinking?: ThinkingLevel } | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value))
+		return undefined;
+	const record = value as Record<string, unknown>;
+	const model =
+		typeof record.model === "string" && record.model.trim()
+			? record.model.trim()
+			: undefined;
+	const thinking =
+		typeof record.thinking === "string" && record.thinking.trim()
+			? (record.thinking.trim() as ThinkingLevel)
+			: undefined;
+	return model || thinking ? { model, thinking } : undefined;
 }
 
 function optionalDynamicString(

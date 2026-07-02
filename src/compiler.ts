@@ -33,7 +33,10 @@ import {
 } from "./types.js";
 import {
 	resolveWorkflowRuntime,
+	selectWorkflowRuntime,
 	type WorkflowModelInfo,
+	type WorkflowRuntimeDefaults,
+	type WorkflowRuntimeResolutionInput,
 } from "./workflow-runtime.js";
 
 const DELEGATION_TOOLS = new Set([
@@ -549,7 +552,8 @@ export async function compileWorkflow(
 	spec: ArtifactGraphWorkflowSpec,
 	options: CompileOptions & {
 		task?: string;
-		runtimeDefaults?: { model?: string; thinking?: ThinkingLevel };
+		runtimeOverrides?: WorkflowRuntimeDefaults;
+		runtimeDefaults?: WorkflowRuntimeDefaults;
 	},
 ): Promise<any> {
 	const compilePlan = buildArtifactGraphCompilePlan(spec, options);
@@ -615,11 +619,25 @@ async function collectForeachPathWarnings(
 	return warnings;
 }
 
+function runtimeSettings(value: unknown): WorkflowRuntimeDefaults | undefined {
+	if (!isPlainRecord(value)) return undefined;
+	const model =
+		typeof value.model === "string" && value.model.trim()
+			? value.model.trim()
+			: undefined;
+	const thinking =
+		typeof value.thinking === "string" && value.thinking.trim()
+			? (value.thinking.trim() as ThinkingLevel)
+			: undefined;
+	return model || thinking ? { model, thinking } : undefined;
+}
+
 async function compileArtifactGraphPlan(
 	spec: any,
 	options: CompileOptions & {
 		task?: string;
-		runtimeDefaults?: { model?: string; thinking?: ThinkingLevel };
+		runtimeOverrides?: WorkflowRuntimeDefaults;
+		runtimeDefaults?: WorkflowRuntimeDefaults;
 	},
 ): Promise<any> {
 	const stages = spec.stages;
@@ -665,9 +683,9 @@ async function compileArtifactGraphPlan(
 		Object.keys(workflowInput).length > 0
 			? `# Workflow Input\n\n${JSON.stringify(workflowInput, null, 2)}`
 			: "";
-	const defaultModel = options.runtimeDefaults?.model ?? spec.defaults?.model;
-	const defaultThinking =
-		options.runtimeDefaults?.thinking ?? spec.defaults?.thinking;
+	const runtimeOverrides = options.runtimeOverrides;
+	const runtimeDefaults = options.runtimeDefaults;
+	const specRuntimeDefaults = runtimeSettings(spec.defaults);
 	const tasks: any[] = [];
 	const stageRecords: any[] = [];
 	const issues: ValidationIssue[] = [];
@@ -719,6 +737,22 @@ async function compileArtifactGraphPlan(
 				dynamicToolPath,
 			);
 			const dynamicToolSelection = filterToolSelection(rawDynamicToolSelection);
+			const requestedRuntime = selectWorkflowRuntime(
+				runtimeOverrides,
+				runtimeSettings(stage),
+				runtimeDefaults,
+				specRuntimeDefaults,
+			);
+			const resolvedDynamicRuntime = await resolveWorkflowRuntime(
+				requestedRuntime,
+				{
+					taskKey: key,
+					stageId: stage.id,
+					taskId,
+					agent: "dynamic",
+				},
+				{ availableModels: options.availableModels },
+			);
 			const dynamicTask = buildDynamicTask(
 				stage,
 				taskId,
@@ -729,24 +763,22 @@ async function compileArtifactGraphPlan(
 				specDir,
 				workflowInputText,
 				options.task,
-				defaultModel,
-				defaultThinking,
-				overrides,
-			);
-			const resolvedDynamicRuntime = await resolveWorkflowRuntime(
-				{ model: defaultModel, thinking: defaultThinking },
+				resolvedDynamicRuntime,
 				{
-					taskKey: key,
-					stageId: stage.id,
-					taskId,
-					agent: "dynamic",
+					runtimeOverrides,
+					runtimeDefaults,
+					specRuntimeDefaults,
+					stageRuntime: runtimeSettings(stage),
 				},
-				{ availableModels: options.availableModels },
+				overrides,
 			);
 			dynamicTask.runtime = {
 				...dynamicTask.runtime,
 				...resolvedDynamicRuntime,
 			};
+			if (options.availableModels?.length) {
+				dynamicTask.dynamic.availableModels = options.availableModels;
+			}
 			if (dynamicToolSelection.tools || dynamicToolSelection.toolProviders) {
 				dynamicTask.runtime = {
 					...dynamicTask.runtime,
@@ -823,15 +855,12 @@ async function compileArtifactGraphPlan(
 		validateToolSubset(toolSelection.tools, stageAgent, issues, toolPath);
 		validateDelegationBoundary(toolSelection.tools, issues, toolPath);
 		const filteredToolSelection = filterToolSelection(toolSelection);
-		// Explicit runtime overrides outrank stage pins; spec defaults fill last.
-		const requestedRuntime = {
-			model:
-				options.runtimeDefaults?.model ?? stage.model ?? spec.defaults?.model,
-			thinking:
-				options.runtimeDefaults?.thinking ??
-				stage.thinking ??
-				spec.defaults?.thinking,
-		};
+		const requestedRuntime = selectWorkflowRuntime(
+			runtimeOverrides,
+			runtimeSettings(stage),
+			runtimeDefaults,
+			specRuntimeDefaults,
+		);
 		const resolvedRuntime = await resolveWorkflowRuntime(
 			requestedRuntime,
 			{
@@ -1208,10 +1237,32 @@ async function compileArtifactGraphPlan(
 		tasks,
 		warnings,
 		budget: {
-			models: defaultModel ? [{ model: defaultModel }] : [],
+			models: budgetModelRows(tasks),
 			unratedModels: [],
 		},
 	};
+}
+
+function budgetModelRows(tasks: any[]): Array<{ model: string }> {
+	const models = new Set<string>();
+	for (const task of tasks) {
+		if (typeof task?.runtime?.model === "string" && task.runtime.model.trim()) {
+			models.add(task.runtime.model.trim());
+		}
+		const loop = task?.dynamic?.decisionLoop;
+		if (!loop || typeof loop !== "object") continue;
+		for (const profile of [
+			loop.planner,
+			loop.workerDefaults,
+			loop.verifier,
+			loop.synthesis,
+		]) {
+			if (typeof profile?.model === "string" && profile.model.trim()) {
+				models.add(profile.model.trim());
+			}
+		}
+	}
+	return [...models].sort().map((model) => ({ model }));
 }
 
 function isSupportStage(stage: any): boolean {
@@ -1301,8 +1352,13 @@ function buildDynamicTask(
 	specDir: string,
 	workflowInputText: string,
 	runtimeTask: string | undefined,
-	defaultModel: string | undefined,
-	defaultThinking: ThinkingLevel | undefined,
+	controllerRuntime: WorkflowRuntimeResolutionInput,
+	runtimePriority: {
+		runtimeOverrides?: WorkflowRuntimeDefaults;
+		runtimeDefaults?: WorkflowRuntimeDefaults;
+		specRuntimeDefaults?: WorkflowRuntimeDefaults;
+		stageRuntime?: WorkflowRuntimeDefaults;
+	},
 	overrides: Partial<CompiledTask> & Record<string, unknown>,
 ): any {
 	const dynamic = stage.dynamic ?? {};
@@ -1365,8 +1421,7 @@ function buildDynamicTask(
 	}
 	const decisionLoop = compileDynamicDecisionLoop(
 		dynamic.decisionLoop,
-		defaultModel,
-		defaultThinking,
+		runtimePriority,
 	);
 
 	return {
@@ -1386,8 +1441,7 @@ function buildDynamicTask(
 		explicitWorktreePolicy: false,
 		runtime: {
 			approvalMode: "non-interactive",
-			model: defaultModel,
-			thinking: defaultThinking,
+			...controllerRuntime,
 			maxRuntimeMs:
 				dynamic.budget?.maxRuntimeMs ?? DEFAULT_DYNAMIC_MAX_RUNTIME_MS,
 		},
@@ -1431,6 +1485,9 @@ function buildDynamicTask(
 			helpers,
 			workflows,
 			...(decisionLoop ? { decisionLoop } : {}),
+			...(runtimePriority.runtimeOverrides
+				? { runtimeOverrides: runtimePriority.runtimeOverrides }
+				: {}),
 		},
 		...overrides,
 	};
@@ -1438,8 +1495,12 @@ function buildDynamicTask(
 
 function compileDynamicDecisionLoop(
 	value: unknown,
-	defaultModel?: string,
-	defaultThinking?: ThinkingLevel,
+	runtimePriority: {
+		runtimeOverrides?: WorkflowRuntimeDefaults;
+		runtimeDefaults?: WorkflowRuntimeDefaults;
+		specRuntimeDefaults?: WorkflowRuntimeDefaults;
+		stageRuntime?: WorkflowRuntimeDefaults;
+	},
 ): any | undefined {
 	if (!isPlainRecord(value)) return undefined;
 	const allowedToolSelection = filterToolSelection(
@@ -1455,25 +1516,18 @@ function compileDynamicDecisionLoop(
 		recordValue(value.stateIndex, "requiredFindingIds"),
 	);
 	return {
-		planner: compileDynamicDecisionLoopProfile(
-			value.planner,
-			defaultModel,
-			defaultThinking,
-		),
+		planner: compileDynamicDecisionLoopProfile(value.planner, runtimePriority),
 		workerDefaults: compileDynamicDecisionLoopProfile(
 			value.workerDefaults,
-			defaultModel,
-			defaultThinking,
+			runtimePriority,
 		),
 		verifier: compileDynamicDecisionLoopProfile(
 			value.verifier,
-			defaultModel,
-			defaultThinking,
+			runtimePriority,
 		),
 		synthesis: compileDynamicDecisionLoopProfile(
 			value.synthesis,
-			defaultModel,
-			defaultThinking,
+			runtimePriority,
 		),
 		allowedAgents: stringArray(value.allowedAgents),
 		...(allowedToolSelection.tools
@@ -1528,8 +1582,12 @@ function compileDynamicDecisionLoop(
 
 function compileDynamicDecisionLoopProfile(
 	value: unknown,
-	defaultModel?: string,
-	defaultThinking?: ThinkingLevel,
+	runtimePriority: {
+		runtimeOverrides?: WorkflowRuntimeDefaults;
+		runtimeDefaults?: WorkflowRuntimeDefaults;
+		specRuntimeDefaults?: WorkflowRuntimeDefaults;
+		stageRuntime?: WorkflowRuntimeDefaults;
+	},
 ): any | undefined {
 	if (!isPlainRecord(value)) return undefined;
 	const toolSelection = filterToolSelection(
@@ -1538,20 +1596,18 @@ function compileDynamicDecisionLoopProfile(
 			undefined,
 		),
 	);
-	const model =
-		typeof value.model === "string" && value.model.trim()
-			? value.model.trim()
-			: defaultModel;
-	const thinking =
-		typeof value.thinking === "string" && value.thinking.trim()
-			? value.thinking.trim()
-			: defaultThinking;
+	const runtime = selectWorkflowRuntime(
+		runtimePriority.runtimeOverrides,
+		runtimeSettings(value),
+		runtimePriority.stageRuntime,
+		runtimePriority.runtimeDefaults,
+		runtimePriority.specRuntimeDefaults,
+	);
 	return {
 		...(typeof value.agent === "string" && value.agent.trim()
 			? { agent: value.agent.trim() }
 			: {}),
-		...(model ? { model } : {}),
-		...(thinking ? { thinking } : {}),
+		...runtime,
 		...(toolSelection.tools ? { tools: toolSelection.tools } : {}),
 		...(toolSelection.toolProviders
 			? { toolProviders: toolSelection.toolProviders }

@@ -39,7 +39,10 @@ import {
 	type ThinkingLevel,
 	WorkflowValidationError,
 } from "./types.js";
-import { toWorkflowModelInfo } from "./workflow-runtime.js";
+import {
+	toWorkflowModelInfo,
+	type WorkflowRuntimeDefaults,
+} from "./workflow-runtime.js";
 
 const UNFINISHED_RUN_NOTICE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const UNFINISHED_RUN_NOTICE_MAX_RUNS = 5;
@@ -337,7 +340,8 @@ async function deliverMissedWorkflowFeedback(
 		const run = await readRunRecord(ctx.cwd, summary.runId).catch(
 			() => undefined,
 		);
-		if (run) await deliverWorkflowFeedback(ctx, api, run).catch(() => undefined);
+		if (run)
+			await deliverWorkflowFeedback(ctx, api, run).catch(() => undefined);
 	}
 }
 
@@ -548,13 +552,13 @@ interface WorkflowRunToolRequest {
 	workflow: string;
 	task: string;
 	detach: boolean;
-	runtimeDefaults?: { model?: string; thinking?: ThinkingLevel };
+	runtimeOverrides?: WorkflowRuntimeDefaults;
 }
 
 interface WorkflowDynamicToolRequest {
 	task: string;
 	detach: boolean;
-	runtimeDefaults?: { model?: string; thinking?: ThinkingLevel };
+	runtimeOverrides?: WorkflowRuntimeDefaults;
 }
 
 function parseWorkflowListToolParams(params: unknown): void {
@@ -602,9 +606,9 @@ function parseWorkflowDynamicToolParams(
 		"workflow_dynamic",
 	)?.trim();
 	const thinking = rawThinking ? parseThinkingLevel(rawThinking) : undefined;
-	const runtimeDefaults =
+	const runtimeOverrides =
 		model || thinking ? { model: model || undefined, thinking } : undefined;
-	return { task, detach: detachValue === true, runtimeDefaults };
+	return { task, detach: detachValue === true, runtimeOverrides };
 }
 
 function stringParam(
@@ -704,8 +708,8 @@ async function startWorkflowRunFromRequest(
 		);
 	const run = await runWorkflowSpec(workflow, ctx.cwd, {
 		task,
-		runtimeDefaults:
-			request.runtimeDefaults ?? currentRuntimeDefaults(ctx, api),
+		runtimeOverrides: request.runtimeOverrides,
+		runtimeDefaults: currentRuntimeDefaults(ctx, api),
 		availableModels: availableWorkflowModels(ctx),
 		dynamicUi: dynamicUiFromContext(ctx),
 	});
@@ -736,8 +740,8 @@ async function startDynamicRunFromRequest(
 		);
 	const run = await runDynamicTask(ctx.cwd, {
 		task,
-		runtimeDefaults:
-			request.runtimeDefaults ?? currentRuntimeDefaults(ctx, api),
+		runtimeOverrides: request.runtimeOverrides,
+		runtimeDefaults: currentRuntimeDefaults(ctx, api),
 		availableModels: availableWorkflowModels(ctx),
 		dynamicUi: dynamicUiFromContext(ctx),
 	});
@@ -1047,7 +1051,7 @@ async function handleWorkflowCommand(
 			const specPath =
 				parsed.specPath ||
 				requireArg(tokens, 1, '/workflow run <workflow-name-or-path> "<task>"');
-			const runtimeDefaults =
+			const runtimeOverrides =
 				parsed.model || parsed.thinking
 					? { model: parsed.model, thinking: parsed.thinking }
 					: undefined;
@@ -1056,7 +1060,7 @@ async function handleWorkflowCommand(
 					workflow: specPath,
 					task: parsed.task,
 					detach: parsed.detach,
-					runtimeDefaults,
+					runtimeOverrides,
 				},
 				ctx,
 				api,
@@ -1067,7 +1071,7 @@ async function handleWorkflowCommand(
 
 		if (action === "dynamic") {
 			const parsed = parseWorkflowDynamicArgs(args);
-			const runtimeDefaults =
+			const runtimeOverrides =
 				parsed.model || parsed.thinking
 					? { model: parsed.model, thinking: parsed.thinking }
 					: undefined;
@@ -1075,7 +1079,7 @@ async function handleWorkflowCommand(
 				{
 					task: parsed.task,
 					detach: parsed.detach,
-					runtimeDefaults,
+					runtimeOverrides,
 				},
 				ctx,
 				api,

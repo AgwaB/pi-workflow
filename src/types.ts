@@ -1,4 +1,8 @@
-import type { WorkflowRuntimeThinkingResolution } from "./workflow-runtime.js";
+import type {
+	WorkflowModelInfo,
+	WorkflowRuntimeDefaults,
+	WorkflowRuntimeThinkingResolution,
+} from "./workflow-runtime.js";
 
 export const THINKING_LEVELS = [
 	"off",
@@ -472,6 +476,8 @@ export interface CompiledDynamicWorkflowTask {
 	helpers: Record<string, CompiledDynamicWorkflowHelper>;
 	workflows: Record<string, CompiledDynamicNestedWorkflow>;
 	decisionLoop?: CompiledDynamicDecisionLoop;
+	runtimeOverrides?: WorkflowRuntimeDefaults;
+	availableModels?: WorkflowModelInfo[];
 }
 
 export interface CompiledArtifactGraphTask {
