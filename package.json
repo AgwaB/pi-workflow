@@ -1,6 +1,6 @@
 {
   "name": "@agwab/pi-workflow",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Workflow orchestration for Pi subagents.",
   "private": false,
   "type": "module",
