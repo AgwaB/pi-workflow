@@ -43,6 +43,12 @@ const TERMINAL_INDEX_LIMIT = 50;
 const LEASE_STALE_MS = 30_000;
 const INDEX_LOCK_WAIT_MS = 5_000;
 const INDEX_LOCK_RETRY_MS = 50;
+const DEFAULT_INDEX_UPDATE_DEBOUNCE_MS = 500;
+let indexUpdateDebounceMs = DEFAULT_INDEX_UPDATE_DEBOUNCE_MS;
+const pendingIndexUpdates = new Map<
+	string,
+	{ cwd: string; runId: string; timer: ReturnType<typeof setTimeout> }
+>();
 const runLeaseContext = new AsyncLocalStorage<{
 	cwd: string;
 	runId: string;
@@ -350,7 +356,56 @@ export async function writeRunRecord(
 	const derived = deriveRunStatus(run);
 	Object.assign(run, derived);
 	await writeJsonAtomic(workflowRunPath(cwd, run.runId), run);
-	await updateIndex(cwd).catch(() => undefined);
+	scheduleIndexUpdate(cwd, run.runId, {
+		immediate: isTerminalWorkflowStatus(run.status),
+	});
+}
+
+function indexUpdateKey(cwd: string, runId: string): string {
+	return `${cwd}\0${runId}`;
+}
+
+function scheduleIndexUpdate(
+	cwd: string,
+	runId: string,
+	options: { immediate: boolean },
+): void {
+	const key = indexUpdateKey(cwd, runId);
+	const existing = pendingIndexUpdates.get(key);
+	if (existing) {
+		clearTimeout(existing.timer);
+		pendingIndexUpdates.delete(key);
+	}
+
+	const runUpdate = (): void => {
+		pendingIndexUpdates.delete(key);
+		void updateIndex(cwd, runId).catch(() => undefined);
+	};
+
+	if (options.immediate) {
+		runUpdate();
+		return;
+	}
+
+	// Pending debounced index writes are intentionally not flushed on process exit:
+	// the next explicit index rebuild/read path self-heals from run.json records.
+	const timer = setTimeout(runUpdate, indexUpdateDebounceMs);
+	timer.unref?.();
+	pendingIndexUpdates.set(key, { cwd, runId, timer });
+}
+
+export async function flushPendingIndexUpdatesForTests(): Promise<void> {
+	const pending = [...pendingIndexUpdates.values()];
+	pendingIndexUpdates.clear();
+	for (const item of pending) clearTimeout(item.timer);
+	await Promise.all(pending.map((item) => updateIndex(item.cwd, item.runId)));
+}
+
+export function setIndexUpdateDebounceMsForTests(value?: number): void {
+	indexUpdateDebounceMs =
+		value === undefined
+			? DEFAULT_INDEX_UPDATE_DEBOUNCE_MS
+			: Math.max(0, Math.floor(value));
 }
 
 export async function writeCompiledRunArtifact(
@@ -1088,60 +1143,140 @@ function isRunRecordLike(value: unknown): value is WorkflowRunRecord {
 	);
 }
 
-export async function updateIndex(cwd: string): Promise<WorkflowIndexRecord> {
+export async function updateIndex(
+	cwd: string,
+	changedRunId?: string,
+): Promise<WorkflowIndexRecord> {
 	const lockFile = join(workflowsRoot(cwd), "index.lock");
 	const ownerId = `${process.pid}-${randomBytes(3).toString("hex")}`;
 	await ensureDir(workflowsRoot(cwd));
 	await acquireLockWithWait(lockFile, ownerId);
 
 	try {
-		const runs = (await listRunRecords(cwd)).sort((left, right) =>
-			right.updatedAt.localeCompare(left.updatedAt),
-		);
-		const active = runs.filter((run) => !isTerminalWorkflowStatus(run.status));
-		const terminal = runs
-			.filter((run) => isTerminalWorkflowStatus(run.status))
-			.slice(0, TERMINAL_INDEX_LIMIT);
-		const selected = [...active, ...terminal].sort((left, right) =>
-			right.updatedAt.localeCompare(left.updatedAt),
-		);
-
-		const index: WorkflowIndexRecord = {
-			schemaVersion: 1,
-			updatedAt: nowIso(),
-			runs: selected.map((run) => ({
-				runId: run.runId,
-				name: run.name,
-				type: run.type,
-				artifactGraph: run.artifactGraph,
-				status: run.status,
-				taskSummary: run.taskSummary,
-				createdAt: run.createdAt,
-				updatedAt: run.updatedAt,
-				parentRunId: run.parentRunId,
-				rootRunId: run.rootRunId,
-				round: run.round,
-				fanout: run.fanout,
-				runJson: toProjectPath(cwd, workflowRunPath(cwd, run.runId)),
-				tasks: run.tasks.map((task) => ({
-					taskId: task.taskId,
-					displayName: task.displayName,
-					agent: task.agent,
-					kind: task.kind,
-					stageId: task.stageId,
-					backendHandle: task.backendHandle,
-					status: task.status,
-					statusDetail: task.statusDetail,
-					lastMessage: task.lastMessage,
-				})),
-			})),
-		};
-
+		const index = changedRunId
+			? await updateIndexIncremental(cwd, changedRunId)
+			: await rebuildIndex(cwd);
 		await writeJsonAtomic(workflowIndexPath(cwd), index);
 		return index;
 	} finally {
 		await releaseLock(lockFile, ownerId);
 	}
+}
+
+type WorkflowIndexRunEntry = WorkflowIndexRecord["runs"][number];
+
+async function updateIndexIncremental(
+	cwd: string,
+	changedRunId: string,
+): Promise<WorkflowIndexRecord> {
+	const existing = await readIndexForIncremental(cwd);
+	if (!existing) return rebuildIndex(cwd);
+
+	let changedRun: WorkflowRunRecord;
+	try {
+		changedRun = await readRunRecord(cwd, changedRunId);
+	} catch {
+		return rebuildIndex(cwd);
+	}
+
+	const changedEntry = buildIndexEntry(cwd, changedRun);
+	const entries = existing.runs
+		.filter((entry) => entry.runId !== changedRun.runId)
+		.concat(changedEntry);
+	return {
+		schemaVersion: 1,
+		updatedAt: nowIso(),
+		runs: selectIndexEntries(entries),
+	};
+}
+
+async function readIndexForIncremental(
+	cwd: string,
+): Promise<WorkflowIndexRecord | undefined> {
+	let index: WorkflowIndexRecord | undefined;
+	try {
+		index = await readIndex(cwd);
+	} catch {
+		return undefined;
+	}
+	if (!isIndexRecordLike(index)) return undefined;
+	return index;
+}
+
+async function rebuildIndex(cwd: string): Promise<WorkflowIndexRecord> {
+	const runs = await listRunRecords(cwd);
+	return {
+		schemaVersion: 1,
+		updatedAt: nowIso(),
+		runs: selectIndexEntries(runs.map((run) => buildIndexEntry(cwd, run))),
+	};
+}
+
+function selectIndexEntries(
+	entries: WorkflowIndexRunEntry[],
+): WorkflowIndexRunEntry[] {
+	const sorted = [...entries].sort((left, right) =>
+		right.updatedAt.localeCompare(left.updatedAt),
+	);
+	const active = sorted.filter(
+		(entry) => !isTerminalWorkflowStatus(entry.status),
+	);
+	const terminal = sorted
+		.filter((entry) => isTerminalWorkflowStatus(entry.status))
+		.slice(0, TERMINAL_INDEX_LIMIT);
+	return [...active, ...terminal].sort((left, right) =>
+		right.updatedAt.localeCompare(left.updatedAt),
+	);
+}
+
+function buildIndexEntry(
+	cwd: string,
+	run: WorkflowRunRecord,
+): WorkflowIndexRunEntry {
+	return {
+		runId: run.runId,
+		name: run.name,
+		type: run.type,
+		artifactGraph: run.artifactGraph,
+		status: run.status,
+		taskSummary: run.taskSummary,
+		createdAt: run.createdAt,
+		updatedAt: run.updatedAt,
+		parentRunId: run.parentRunId,
+		rootRunId: run.rootRunId,
+		round: run.round,
+		fanout: run.fanout,
+		runJson: toProjectPath(cwd, workflowRunPath(cwd, run.runId)),
+		tasks: run.tasks.map((task) => ({
+			taskId: task.taskId,
+			displayName: task.displayName,
+			agent: task.agent,
+			kind: task.kind,
+			stageId: task.stageId,
+			backendHandle: task.backendHandle,
+			status: task.status,
+			statusDetail: task.statusDetail,
+			lastMessage: task.lastMessage,
+		})),
+	};
+}
+
+function isIndexRecordLike(
+	value: WorkflowIndexRecord | undefined,
+): value is WorkflowIndexRecord {
+	return (
+		value?.schemaVersion === 1 &&
+		Array.isArray(value.runs) &&
+		value.runs.every(
+			(entry) =>
+				entry &&
+				typeof entry === "object" &&
+				typeof entry.runId === "string" &&
+				typeof entry.updatedAt === "string" &&
+				typeof entry.status === "string" &&
+				Array.isArray(entry.tasks),
+		)
+	);
 }
 
 export function deriveRunStatus(run: WorkflowRunRecord): WorkflowRunRecord {

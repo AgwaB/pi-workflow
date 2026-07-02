@@ -17,6 +17,7 @@ import {
 	resolve,
 	sep,
 } from "node:path";
+import { availableParallelism } from "node:os";
 import { fileURLToPath } from "node:url";
 
 import type {
@@ -55,6 +56,10 @@ const FETCH_CONTENT_CACHE_ENV = "PI_WORKFLOW_FETCH_CONTENT_CACHE";
 const LEGACY_FETCH_CACHE_ENV = "PI_WORKFLOW_FETCH_CACHE";
 const DEFAULT_TRANSIENT_MODEL_FAILURE_RETRIES = 5;
 const DEFAULT_ARTIFACT_OUTPUT_RETRIES = 2;
+const MAX_CONCURRENT_LAUNCHES_ENV = "PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES";
+const DEFAULT_LAUNCH_SLOT_RELEASE_DELAY_MS = 3_000;
+const MIN_TRANSIENT_RETRY_JITTER_MS = 1_000;
+const MAX_TRANSIENT_RETRY_JITTER_MS = 5_000;
 const MODULE_PATH = fileURLToPath(import.meta.url);
 const MODULE_DIR = dirname(MODULE_PATH);
 const BUNDLED_PI_WEB_ACCESS_EXTENSION = bundledNodeModulePath(
@@ -175,6 +180,103 @@ async function loadSubagentApi(): Promise<SubagentApi> {
 	return cachedSubagentApi;
 }
 
+let launchSlotReleaseDelayMs = DEFAULT_LAUNCH_SLOT_RELEASE_DELAY_MS;
+let transientRetryJitterForTests: (() => number) | undefined;
+const launchWaitQueue: Array<() => void> = [];
+let activeLaunchSlots = 0;
+
+function resolveMaxConcurrentLaunches(): number {
+	const override = Number.parseInt(
+		process.env[MAX_CONCURRENT_LAUNCHES_ENV] ?? "",
+		10,
+	);
+	if (Number.isFinite(override)) return Math.max(1, Math.floor(override));
+	return Math.max(2, Math.floor(availableParallelism() / 2));
+}
+
+function isLaunchGateSaturated(): boolean {
+	return activeLaunchSlots >= resolveMaxConcurrentLaunches();
+}
+
+async function acquireLaunchSlot(): Promise<() => void> {
+	if (!isLaunchGateSaturated()) {
+		activeLaunchSlots += 1;
+		return releaseLaunchSlot;
+	}
+	await new Promise<void>((resolveWait) => launchWaitQueue.push(resolveWait));
+	return releaseLaunchSlot;
+}
+
+function releaseLaunchSlot(): void {
+	const next = launchWaitQueue.shift();
+	if (next) {
+		// Transfer the occupied slot directly to the queued launcher.
+		next();
+		return;
+	}
+	activeLaunchSlots = Math.max(0, activeLaunchSlots - 1);
+}
+
+function releaseLaunchSlotAfterDelay(
+	delayMs: number,
+	release: () => void,
+): void {
+	if (delayMs <= 0) {
+		release();
+		return;
+	}
+	const timer = setTimeout(release, delayMs);
+	timer.unref?.();
+}
+
+async function runWithLaunchSlot<T>(action: () => Promise<T>): Promise<T> {
+	const release = await acquireLaunchSlot();
+	let holdAfterReturn = false;
+	try {
+		const result = await action();
+		holdAfterReturn = true;
+		return result;
+	} finally {
+		releaseLaunchSlotAfterDelay(
+			holdAfterReturn ? launchSlotReleaseDelayMs : 0,
+			release,
+		);
+	}
+}
+
+function transientRetryJitterMs(): number {
+	if (transientRetryJitterForTests) return transientRetryJitterForTests();
+	return (
+		MIN_TRANSIENT_RETRY_JITTER_MS +
+		Math.floor(
+			Math.random() *
+				(MAX_TRANSIENT_RETRY_JITTER_MS - MIN_TRANSIENT_RETRY_JITTER_MS + 1),
+		)
+	);
+}
+
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export function setSubagentLaunchControlsForTests(options?: {
+	releaseDelayMs?: number;
+	retryJitterMs?: number | (() => number);
+}): void {
+	launchSlotReleaseDelayMs =
+		options?.releaseDelayMs === undefined
+			? DEFAULT_LAUNCH_SLOT_RELEASE_DELAY_MS
+			: Math.max(0, Math.floor(options.releaseDelayMs));
+	transientRetryJitterForTests =
+		options?.retryJitterMs === undefined
+			? undefined
+			: typeof options.retryJitterMs === "function"
+				? options.retryJitterMs
+				: () => Math.max(0, Math.floor(options.retryJitterMs as number));
+	activeLaunchSlots = 0;
+	while (launchWaitQueue.length > 0) launchWaitQueue.shift()?.();
+}
+
 export async function cleanupSubagentRun(
 	_cwd: string,
 	run: WorkflowRunRecord,
@@ -210,6 +312,14 @@ export async function launchSubagentTask(
 			kind: "fatal",
 			message: "fast:on is not supported for pi-workflow execution.",
 		};
+	}
+
+	if ((task.launchRetry?.attempts ?? 0) > 0) {
+		const jitterMs = transientRetryJitterMs();
+		task.statusDetail = "retry_model_failure";
+		task.lastMessage = `waiting ${jitterMs}ms before retrying transient-model launch`;
+		await writeRunRecord(cwd, run);
+		if (jitterMs > 0) await sleep(jitterMs);
 	}
 
 	const systemPromptFile = fromProjectPath(cwd, task.files.systemPrompt);
@@ -267,7 +377,11 @@ export async function launchSubagentTask(
 		};
 		subagentOptions.extensions = extensions;
 		if (captureToolCallsEnabled()) subagentOptions.captureToolCalls = true;
-		launched = await api.runSubagent(subagentOptions);
+		if (isLaunchGateSaturated()) {
+			task.lastMessage = `waiting for pi-subagent launch slot (${resolveMaxConcurrentLaunches()} max)`;
+			await writeRunRecord(cwd, run).catch(() => undefined);
+		}
+		launched = await runWithLaunchSlot(() => api.runSubagent(subagentOptions));
 	} catch (error) {
 		task.status = "pending";
 		task.statusDetail = "pending";
@@ -432,12 +546,29 @@ async function materializeTerminalSubagentResult(
 		artifactRoot,
 	);
 	const outputText = await readFile(outputFile, "utf8").catch(() => "");
+	const stderrText = await readFile(stderrFile, "utf8").catch(() => "");
 	const outputBytes = Buffer.byteLength(outputText, "utf8");
-	const statusInfo = workflowStatusFromSubagent(
+	let statusInfo = workflowStatusFromSubagent(
 		snapshot,
 		subagentResult,
 		outputBytes,
 	);
+	const deterministicBootFailure = classifyDeterministicBootFailure({
+		statusInfo,
+		stderrText,
+		outputBytes,
+		contextLengthExceeded: Boolean(
+			(subagentResult?.metadata as any)?.contextLengthExceeded ??
+				snapshot.metadata?.contextLengthExceeded,
+		),
+	});
+	if (deterministicBootFailure) {
+		statusInfo = {
+			status: "failed",
+			failureKind: "deterministic_boot",
+			errorMessage: deterministicBootFailure,
+		};
+	}
 	const completedAt =
 		typeof subagentResult?.completedAt === "string"
 			? subagentResult.completedAt
@@ -1005,6 +1136,36 @@ function failArtifactGraphTask(
 	return true;
 }
 
+function classifyDeterministicBootFailure(options: {
+	statusInfo: {
+		status: WorkflowTaskRunRecord["status"];
+		failureKind?: string;
+		errorMessage?: string;
+	};
+	stderrText: string;
+	outputBytes: number;
+	contextLengthExceeded: boolean;
+}): string | undefined {
+	if (
+		options.statusInfo.status !== "failed" ||
+		options.statusInfo.failureKind !== "model" ||
+		options.outputBytes !== 0 ||
+		options.contextLengthExceeded
+	) {
+		return undefined;
+	}
+	const text = options.stderrText;
+	const deterministicPattern =
+		/(Failed to load extension|Cannot find module|(?:failed to load|invalid|missing) (?:workflow )?config(?:uration)?|config(?:uration)? (?:error|failed|invalid))/i;
+	if (!deterministicPattern.test(text)) return undefined;
+	const excerpt =
+		text
+			.split(/\r?\n/)
+			.map((line) => line.trim())
+			.find((line) => deterministicPattern.test(line)) ?? text.trim();
+	return `deterministic-boot failure: ${excerpt.slice(0, 500)}`;
+}
+
 function shouldRetryTransientModelFailure(
 	statusInfo: {
 		status: WorkflowTaskRunRecord["status"];
@@ -1056,14 +1217,14 @@ function retryOrFailTransientSubagentFailure(
 	if (!exhausted) {
 		task.status = "pending";
 		task.statusDetail = "retry_model_failure";
-		task.lastMessage = `${options.message}; retrying transient model failure (${attempt}/${maxAttempts})`;
+		task.lastMessage = `${options.message}; retrying transient-model failure (${attempt}/${maxAttempts})`;
 		return true;
 	}
 	task.status = "failed";
 	task.statusDetail = task.launchRetry.reason ?? "model_exhausted";
 	task.exitCode = 1;
 	task.completedAt = nowIso();
-	task.lastMessage = `${options.message}; transient model failure retries exhausted (${maxAttempts})`;
+	task.lastMessage = `${options.message}; transient-model failure retries exhausted (${maxAttempts})`;
 	return true;
 }
 
@@ -1317,7 +1478,10 @@ async function workflowTaskExtensions(
 			},
 		});
 		const capturedProviderExtensions = new Set(
-			workflowWebSourceProviderExtensions(tools, compiledTask.runtime.toolProviders),
+			workflowWebSourceProviderExtensions(
+				tools,
+				compiledTask.runtime.toolProviders,
+			),
 		);
 		extensions = uniqueStrings([
 			...extensions.filter(
@@ -1673,7 +1837,7 @@ function buildSystemPrompt(task: CompiledTask): string {
 		enabledTools.includes("workflow_web_source_read")
 			? "Workflow web-source tools return compact source cards. Preserve sourceRef values in structured outputs. Use workflow_web_source_read for exact evidence snippets; when several snippets are needed from the same sourceRef, batch them with queries:[...] or reads:[...] instead of making repeated calls. If the exact quote is unknown, pass claim plus 2-6 distinctive terms to harvest a candidate source window and preserve its match metadata. Do not read workflow cache files directly."
 			: !enabledTools.includes("get_search_content") &&
-				  (enabledTools.includes("web_search") ||
+					(enabledTools.includes("web_search") ||
 						enabledTools.includes("fetch_content"))
 				? "Full cached search-content hydration is unavailable here. Use web_search/fetch_content results and report evidence gaps instead of broad raw document retrieval."
 				: undefined,

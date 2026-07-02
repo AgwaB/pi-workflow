@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, extname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
@@ -24,6 +24,7 @@ import {
 	updateIndex,
 	withRunLease,
 	workflowRunDir,
+	workflowRunPath,
 	writeJsonAtomic,
 	writeRunRecord,
 	writeCompiledRunArtifact,
@@ -151,6 +152,7 @@ const DYNAMIC_CONTROLLER_ENGINE_CAPABILITIES = Object.freeze({
 const DYNAMIC_CONTROLLER_ENGINE_INTEGRITY_ERROR_MESSAGE =
 	"incompatible or stale pi-workflow engine: dynamic controller context is missing runDecisionLoop (rebuild dist / reload workflow engine)";
 const supervisorTimers = new Map<string, ReturnType<typeof setInterval>>();
+const supervisorRunMtimes = new Map<string, number>();
 
 export interface WorkflowRunOptions {
 	task?: string;
@@ -366,15 +368,27 @@ export function watchRun(
 
 	const timer = setInterval(() => {
 		void (async () => {
+			const previousMtime = supervisorRunMtimes.get(key);
+			const beforeMtime = await readRunMtimeMs(cwd, runId);
 			const refreshed = await refreshRun(cwd, runId);
+			const afterMtime = await readRunMtimeMs(cwd, runId);
+			const currentMtime = afterMtime ?? beforeMtime;
+			if (currentMtime !== undefined)
+				supervisorRunMtimes.set(key, currentMtime);
+
 			if (refreshed.status === "running") {
-				await scheduleRun(cwd, runId, undefined, options);
+				const unchanged =
+					previousMtime !== undefined &&
+					currentMtime !== undefined &&
+					currentMtime <= previousMtime;
+				if (!unchanged) await scheduleRun(cwd, runId, undefined, options);
 				return;
 			}
 
 			const existing = supervisorTimers.get(key);
 			if (existing) clearInterval(existing);
 			supervisorTimers.delete(key);
+			supervisorRunMtimes.delete(key);
 		})().catch((error) => {
 			void recordSupervisorError(cwd, runId, error);
 		});
@@ -382,6 +396,18 @@ export function watchRun(
 
 	timer.unref?.();
 	supervisorTimers.set(key, timer);
+}
+
+async function readRunMtimeMs(
+	cwd: string,
+	runId: string,
+): Promise<number | undefined> {
+	try {
+		return (await stat(workflowRunPath(cwd, runId))).mtimeMs;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		throw error;
+	}
 }
 
 export async function scheduleRun(

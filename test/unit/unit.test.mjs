@@ -58,10 +58,12 @@ import {
 	createRunRecord,
 	createWorkflowRunRecord,
 	deriveRunStatus,
+	flushPendingIndexUpdatesForTests,
 	heartbeatSupervisorLease,
 	readRunRecord,
 	resetTaskForResume,
 	resolveFlowsCwd,
+	setIndexUpdateDebounceMsForTests,
 	setTaskTerminal,
 	supervisorLeasePath,
 	updateIndex,
@@ -156,10 +158,38 @@ import {
 	launchSubagentTask,
 	refreshRunFromSubagentArtifacts,
 	setSubagentApiForTests,
+	setSubagentLaunchControlsForTests,
 } from "../../.tmp/unit/subagent-backend.js";
+
+setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
 
 function makeProject() {
 	return mkdtempSync(join(tmpdir(), "workflow-unit-"));
+}
+
+function sleep(ms) {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function eventually(action, timeoutMs = 750) {
+	const deadline = Date.now() + timeoutMs;
+	let lastError;
+	while (Date.now() <= deadline) {
+		try {
+			return action();
+		} catch (error) {
+			lastError = error;
+			await sleep(25);
+		}
+	}
+	if (lastError) throw lastError;
+	return action();
+}
+
+function readWorkflowIndexFile(cwd) {
+	return JSON.parse(
+		readFileSync(join(cwd, ".pi", "workflows", "index.json"), "utf8"),
+	);
 }
 
 function writeAgent(cwd, name, tools = "read, grep, find, ls") {
@@ -15525,6 +15555,131 @@ test("refresh retries zero-output transient subagent model failures", async () =
 	}
 });
 
+test("refresh does not retry deterministic boot or config failures", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const compiled = await compileWorkflow(
+			workflowSpec("unit-scout", {
+				artifactGraph: {
+					stages: [{ id: "main", type: "single", prompt: "Do work." }],
+				},
+			}),
+			{ cwd, task: "Review topic" },
+		);
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(
+			cwd,
+			run,
+			compiled,
+			workflowSpec("unit-scout"),
+		);
+		const task = run.tasks[0];
+		task.status = "running";
+		task.statusDetail = "running";
+		task.startedAt = new Date().toISOString();
+		task.backendHandle = {
+			engine: "pi-subagent",
+			backend: "headless",
+			runId: "run_boot_failure",
+			attemptId: "attempt_boot_failure",
+			cwd,
+			runsDir: ".pi/workflow-subagents/boot-failure",
+			display: "pi-subagent/headless run_boot_failure/attempt_boot_failure",
+		};
+
+		const artifactDir = join(cwd, ".fake-boot-subagent");
+		mkdirSync(artifactDir, { recursive: true });
+		writeFileSync(join(artifactDir, "output.log"), "");
+		writeFileSync(
+			join(artifactDir, "stderr.log"),
+			"Failed to load extension ./missing.ts\nCannot find module 'missing'\n",
+		);
+		writeFileSync(
+			join(artifactDir, "result.json"),
+			JSON.stringify({
+				status: "failed",
+				failureKind: "model",
+				exitCode: 1,
+				completedAt: new Date().toISOString(),
+				startedAt: task.startedAt,
+				errorMessage: "pi-subagent run failed: model",
+				metadata: { contextLengthExceeded: false },
+			}),
+		);
+
+		setSubagentApiForTests({
+			async runSubagent() {
+				throw new Error("not expected");
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async getSubagentStatus() {
+				return {
+					runId: "run_boot_failure",
+					attemptId: "attempt_boot_failure",
+					backend: "headless",
+					status: "failed",
+					failureKind: "model",
+					startedAt: task.startedAt,
+					completedAt: new Date().toISOString(),
+					logs: [
+						{
+							type: "output",
+							path: ".fake-boot-subagent/output.log",
+							artifactCwd: cwd,
+						},
+						{
+							type: "stderr",
+							path: ".fake-boot-subagent/stderr.log",
+							artifactCwd: cwd,
+						},
+						{
+							type: "result",
+							path: ".fake-boot-subagent/result.json",
+							artifactCwd: cwd,
+						},
+					],
+					metadata: { contextLengthExceeded: false, stopReason: "error" },
+					attempts: [
+						{
+							attemptId: "attempt_boot_failure",
+							status: "failed",
+							pid: 99999999,
+						},
+					],
+				};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+
+		await writeRunRecord(cwd, run);
+		const refreshed = await refreshRunFromSubagentArtifacts(
+			cwd,
+			await readRunRecord(cwd, run.runId),
+		);
+		const refreshedTask = refreshed.tasks[0];
+		assert.equal(refreshedTask.status, "failed");
+		assert.equal(refreshedTask.launchRetry, undefined);
+		assert.match(refreshedTask.lastMessage, /deterministic-boot failure/);
+		assert.match(refreshedTask.lastMessage, /Failed to load extension/);
+		const result = JSON.parse(
+			readFileSync(join(cwd, refreshedTask.files.result), "utf8"),
+		);
+		assert.equal(result.failureKind, "deterministic_boot");
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("refresh adopts handle-less running subagent from deterministic runsDir", async () => {
 	const cwd = makeProject();
 	try {
@@ -17145,6 +17300,145 @@ test("workflow index preserves run linkage and task metadata", async () => {
 		assert.equal(indexed.tasks[0].kind, run.tasks[0].kind);
 		assert.equal(indexed.tasks[0].stageId, run.tasks[0].stageId);
 	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("workflow index incrementally replaces only the changed run entry", async () => {
+	const cwd = makeProject();
+	setIndexUpdateDebounceMsForTests(10_000);
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const spec = artifactGraphWorkflowSpec();
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Index incremental",
+		});
+		const { run: first } = await createRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "first.json"),
+			{ runId: "workflow_index_first" },
+		);
+		const { run: second } = await createRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "second.json"),
+			{ runId: "workflow_index_second" },
+		);
+		first.tasks[0].lastMessage = "first original";
+		second.tasks[0].lastMessage = "second original";
+		await writeRunRecord(cwd, first);
+		await writeRunRecord(cwd, second);
+		await flushPendingIndexUpdatesForTests();
+		const before = readWorkflowIndexFile(cwd);
+		const secondBefore = before.runs.find(
+			(entry) => entry.runId === second.runId,
+		);
+		assert.ok(secondBefore);
+
+		first.tasks[0].lastMessage = "first updated";
+		await writeRunRecord(cwd, first);
+		await flushPendingIndexUpdatesForTests();
+		const after = readWorkflowIndexFile(cwd);
+		const firstAfter = after.runs.find((entry) => entry.runId === first.runId);
+		const secondAfter = after.runs.find(
+			(entry) => entry.runId === second.runId,
+		);
+		assert.equal(firstAfter?.tasks[0].lastMessage, "first updated");
+		assert.deepEqual(secondAfter, secondBefore);
+	} finally {
+		setIndexUpdateDebounceMsForTests(undefined);
+		await flushPendingIndexUpdatesForTests().catch(() => undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("workflow index incremental update falls back when index is corrupt", async () => {
+	const cwd = makeProject();
+	setIndexUpdateDebounceMsForTests(10_000);
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const spec = artifactGraphWorkflowSpec();
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Index fallback",
+		});
+		const { run: first } = await createRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "first.json"),
+			{ runId: "workflow_index_corrupt_first" },
+		);
+		const { run: second } = await createRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "second.json"),
+			{ runId: "workflow_index_corrupt_second" },
+		);
+		await writeRunRecord(cwd, first);
+		await writeRunRecord(cwd, second);
+		await flushPendingIndexUpdatesForTests();
+		writeFileSync(join(cwd, ".pi", "workflows", "index.json"), "{not json");
+
+		first.tasks[0].lastMessage = "rebuilt from run json";
+		await writeRunRecord(cwd, first);
+		await flushPendingIndexUpdatesForTests();
+		const rebuilt = readWorkflowIndexFile(cwd);
+		assert.equal(rebuilt.runs.length, 2);
+		assert.equal(
+			rebuilt.runs.find((entry) => entry.runId === first.runId)?.tasks[0]
+				.lastMessage,
+			"rebuilt from run json",
+		);
+		assert.ok(rebuilt.runs.some((entry) => entry.runId === second.runId));
+	} finally {
+		setIndexUpdateDebounceMsForTests(undefined);
+		await flushPendingIndexUpdatesForTests().catch(() => undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("workflow index debounces nonterminal updates but publishes terminal runs immediately", async () => {
+	const cwd = makeProject();
+	setIndexUpdateDebounceMsForTests(10_000);
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const spec = artifactGraphWorkflowSpec();
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Index debounce",
+		});
+		const { run } = await createRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "debounce.json"),
+			{ runId: "workflow_index_debounce" },
+		);
+		run.tasks[0].lastMessage = "nonterminal one";
+		await writeRunRecord(cwd, run);
+		run.tasks[0].lastMessage = "nonterminal two";
+		await writeRunRecord(cwd, run);
+		await sleep(50);
+		assert.equal(
+			existsSync(join(cwd, ".pi", "workflows", "index.json")),
+			false,
+		);
+
+		setTaskTerminal(run.tasks[0], "completed", "completed", {
+			lastMessage: "terminal now",
+		});
+		await writeRunRecord(cwd, run);
+		await eventually(() => {
+			const index = readWorkflowIndexFile(cwd);
+			const indexed = index.runs.find((entry) => entry.runId === run.runId);
+			assert.equal(indexed?.status, "completed");
+			assert.equal(indexed?.tasks[0].lastMessage, "terminal now");
+			return index;
+		});
+	} finally {
+		setIndexUpdateDebounceMsForTests(undefined);
+		await flushPendingIndexUpdatesForTests().catch(() => undefined);
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });
@@ -20197,6 +20491,166 @@ test("recovered artifact graph subagent handle preserves same-session retry", as
 		assert.equal(relaunched.sessionId, expectedSessionId);
 	} finally {
 		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("subagent launch gate honors env override and recovers slots after throw", async () => {
+	const cwd = makeProject();
+	const originalLimit = process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES;
+	process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES = "2";
+	setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const now = new Date().toISOString();
+		const makeFixture = (suffix) => {
+			const task = {
+				taskId: "task-1",
+				specId: `launch-${suffix}.main`,
+				displayName: `launch-${suffix}.main`,
+				agent: "unit-scout",
+				agentFile: ".pi/agents/unit-scout.md",
+				roles: [],
+				status: "pending",
+				statusDetail: "pending",
+				runtime: { approvalMode: "non-interactive" },
+				cwd,
+				worktree: {
+					enabled: false,
+					path: null,
+					branch: null,
+					baseCwd: null,
+					warning: null,
+				},
+				backendTaskId: "",
+				files: {
+					systemPrompt: `.pi/workflows/workflow_launch_${suffix}/tasks/task-1/system.md`,
+					taskPrompt: `.pi/workflows/workflow_launch_${suffix}/tasks/task-1/task.md`,
+					output: `.pi/workflows/workflow_launch_${suffix}/tasks/task-1/output.log`,
+					stderr: `.pi/workflows/workflow_launch_${suffix}/tasks/task-1/stderr.log`,
+					result: `.pi/workflows/workflow_launch_${suffix}/tasks/task-1/result.json`,
+				},
+			};
+			const run = {
+				schemaVersion: 1,
+				runId: `workflow_launch_${suffix}`,
+				type: WORKFLOW_RUN_TYPE,
+				status: "running",
+				taskSummary: {
+					pending: 1,
+					running: 0,
+					blocked: 0,
+					completed: 0,
+					failed: 0,
+					skipped: 0,
+					interrupted: 0,
+					total: 1,
+				},
+				cwd,
+				backend: { type: "local-pi", mode: "headless" },
+				createdAt: now,
+				updatedAt: now,
+				specPath: "workflow.json",
+				tasks: [task],
+			};
+			const compiledTask = {
+				id: `launch-${suffix}.main`,
+				agent: "unit-scout",
+				agentPath: ".pi/agents/unit-scout.md",
+				agentSystemPrompt: "Launch agent.",
+				roleNames: [],
+				task: "Do the work.",
+				cwd,
+				explicitCwd: false,
+				explicitWorktreePolicy: false,
+				runtime: {
+					fast: "off",
+					approvalMode: "non-interactive",
+					tools: ["read"],
+				},
+				safety: { capability: "read-only", reason: "test" },
+				compiledPrompt: "Launch prompt.",
+			};
+			return { run, task, compiledTask };
+		};
+
+		let active = 0;
+		let maxActive = 0;
+		let sequence = 0;
+		const releaseRunSubagent = [];
+		setSubagentApiForTests({
+			async runSubagent() {
+				active += 1;
+				maxActive = Math.max(maxActive, active);
+				await new Promise((resolve) => releaseRunSubagent.push(resolve));
+				active -= 1;
+				sequence += 1;
+				return {
+					runId: `run_launch_${sequence}`,
+					attemptId: `attempt_launch_${sequence}`,
+					status: "running",
+				};
+			},
+		});
+
+		const fixtures = [makeFixture("a"), makeFixture("b"), makeFixture("c")];
+		const launches = fixtures.map((fixture) =>
+			launchSubagentTask(cwd, fixture.run, fixture.task, fixture.compiledTask),
+		);
+		await eventually(() => assert.equal(releaseRunSubagent.length, 2));
+		assert.equal(maxActive, 2);
+		releaseRunSubagent.shift()();
+		await eventually(() => assert.equal(releaseRunSubagent.length, 2));
+		assert.equal(maxActive, 2);
+		while (releaseRunSubagent.length > 0) releaseRunSubagent.shift()();
+		await Promise.all(launches);
+		assert.equal(maxActive, 2);
+
+		process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES = "1";
+		setSubagentApiForTests({
+			async runSubagent() {
+				throw new Error("boom");
+			},
+		});
+		const failing = makeFixture("fail");
+		await assert.rejects(
+			() =>
+				launchSubagentTask(
+					cwd,
+					failing.run,
+					failing.task,
+					failing.compiledTask,
+				),
+			/boom/,
+		);
+
+		setSubagentApiForTests({
+			async runSubagent() {
+				return {
+					runId: "run_after_throw",
+					attemptId: "attempt_after_throw",
+					status: "running",
+				};
+			},
+		});
+		const afterThrow = makeFixture("after_throw");
+		await Promise.race([
+			launchSubagentTask(
+				cwd,
+				afterThrow.run,
+				afterThrow.task,
+				afterThrow.compiledTask,
+			),
+			sleep(250).then(() => {
+				throw new Error("launch slot was not released after throw");
+			}),
+		]);
+	} finally {
+		setSubagentApiForTests(undefined);
+		setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
+		if (originalLimit === undefined)
+			delete process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES;
+		else process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES = originalLimit;
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });
