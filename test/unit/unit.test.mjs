@@ -29,6 +29,7 @@ import {
 	runWorkflowSpec,
 	scheduleRun,
 	waitForRun,
+	watchRun,
 } from "../../.tmp/unit/engine.js";
 import {
 	deliverMissedWorkflowFeedback,
@@ -68,6 +69,7 @@ import {
 	setIndexUpdateDebounceMsForTests,
 	setTaskTerminal,
 	supervisorLeasePath,
+	supervisorPath,
 	updateIndex,
 	workflowProcessRoleForTests,
 	workflowSupervisorOwnerIdForTests,
@@ -18149,6 +18151,20 @@ test("resolveFlowsCwd finds ancestor workflow state root", async () => {
 		const nested = join(cwd, "a", "b");
 		mkdirSync(nested, { recursive: true });
 		assert.equal(await resolveFlowsCwd(nested), cwd);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("watchRun drops missing runs without recreating supervisor artifacts", async () => {
+	const cwd = makeProject();
+	try {
+		const runId = "workflow_missing_run";
+		watchRun(cwd, runId);
+		await new Promise((resolve) => setTimeout(resolve, 1_100));
+		assert.equal(existsSync(supervisorPath(cwd, runId)), false);
+		await new Promise((resolve) => setTimeout(resolve, 1_100));
+		assert.equal(existsSync(supervisorPath(cwd, runId)), false);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}

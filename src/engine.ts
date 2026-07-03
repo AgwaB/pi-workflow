@@ -148,6 +148,8 @@ const DYNAMIC_CONTROLLER_ENGINE_INTEGRITY_ERROR_MESSAGE =
 	"incompatible or stale pi-workflow engine: dynamic controller context is missing runDecisionLoop (rebuild dist / reload workflow engine)";
 const supervisorTimers = new Map<string, ReturnType<typeof setInterval>>();
 const supervisorRunMtimes = new Map<string, number>();
+const supervisorErrorCounts = new Map<string, number>();
+const MAX_SUPERVISOR_CONSECUTIVE_ERRORS = 3;
 
 export interface WorkflowRunOptions {
 	task?: string;
@@ -422,6 +424,7 @@ function unwatchRun(cwd: string, runId: string): void {
 	if (existing) clearInterval(existing);
 	supervisorTimers.delete(key);
 	supervisorRunMtimes.delete(key);
+	supervisorErrorCounts.delete(key);
 }
 
 export function watchRun(
@@ -441,6 +444,7 @@ export function watchRun(
 			const currentMtime = afterMtime ?? beforeMtime;
 			if (currentMtime !== undefined)
 				supervisorRunMtimes.set(key, currentMtime);
+			supervisorErrorCounts.delete(key);
 
 			if (hasActiveSchedulerWork(refreshed)) {
 				const unchanged =
@@ -453,7 +457,16 @@ export function watchRun(
 
 			unwatchRun(cwd, runId);
 		})().catch((error) => {
-			void recordSupervisorError(cwd, runId, error);
+			if (isMissingRunError(error)) {
+				unwatchRun(cwd, runId);
+				return;
+			}
+			const failures = (supervisorErrorCounts.get(key) ?? 0) + 1;
+			supervisorErrorCounts.set(key, failures);
+			void recordSupervisorError(cwd, runId, error).finally(() => {
+				if (failures >= MAX_SUPERVISOR_CONSECUTIVE_ERRORS)
+					unwatchRun(cwd, runId);
+			});
 		});
 	}, POLL_INTERVAL_MS);
 
@@ -468,9 +481,20 @@ async function readRunMtimeMs(
 	try {
 		return (await stat(workflowRunPath(cwd, runId))).mtimeMs;
 	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		if (isEnoentError(error)) return undefined;
 		throw error;
 	}
+}
+
+function isEnoentError(error: unknown): boolean {
+	return (error as NodeJS.ErrnoException | undefined)?.code === "ENOENT";
+}
+
+function isMissingRunError(error: unknown): boolean {
+	return (
+		isEnoentError(error) ||
+		(error instanceof Error && /^Flow run not found: /.test(error.message))
+	);
 }
 
 export async function scheduleRun(
