@@ -147,8 +147,7 @@ const WORKFLOW_ARTIFACT_KIND_SET = new Set<string>(WORKFLOW_ARTIFACT_KINDS);
 const DEFAULT_MAX_BYTES = 50 * 1024;
 const DEFAULT_MAX_LINES = 2000;
 const SOURCE_NAME_PATTERN = /^[A-Za-z0-9_.:-]+$/;
-const SIMPLE_JSON_PATH_PATTERN =
-	/^(\$|\$(\.[A-Za-z0-9_-]+(\[(\*|\d+|\d*:\d*)\])?)+)$/;
+const SIMPLE_JSON_PATH_PATTERN = /^(\$|\$(\.[A-Za-z0-9_-]+)+)$/;
 const JSON_PATH_SEGMENT_ALIASES: Record<string, string> = {
 	axes: "researchAxes",
 	claimVerdicts: "claimVerdictLedger",
@@ -466,15 +465,14 @@ async function readProjectedWorkflowArtifact(options: {
 		path: effectivePath,
 	});
 	const serialized = JSON.stringify(sliced.value, null, 2);
+	const maxChars = options.maxChars ?? DEFAULT_MAX_BYTES;
 	const preview =
-		options.maxChars !== undefined && serialized.length > options.maxChars
-			? serialized.slice(0, options.maxChars)
-			: serialized;
+		serialized.length > maxChars ? serialized.slice(0, maxChars) : serialized;
 	const projection: WorkflowArtifactProjectionMetadata = {
 		path: effectivePath,
 		valueType: jsonValueType(resolved),
 		...(options.maxItems === undefined ? {} : { maxItems: options.maxItems }),
-		...(options.maxChars === undefined ? {} : { maxChars: options.maxChars }),
+		maxChars,
 		...(sliced.totalItems === undefined
 			? {}
 			: { totalItems: sliced.totalItems }),
@@ -810,7 +808,7 @@ function normalizeProjectionPath(value: unknown): string | undefined {
 	if (path === undefined) return undefined;
 	if (!SIMPLE_JSON_PATH_PATTERN.test(path)) {
 		throw new Error(
-			"path must be $ or a simple dot JSON path like $.claims.items",
+			"path must be $ or a simple dot JSON path like $.claims.items; array selectors are not supported",
 		);
 	}
 	return path;

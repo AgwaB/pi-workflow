@@ -594,12 +594,23 @@ export async function refreshRunFromSubagentArtifacts(
 			snapshot.attempts?.find(
 				(attempt) => attempt.attemptId === handle.attemptId,
 			) ?? snapshot.attempts?.at(-1);
-		task.pid = activeAttempt?.workerPid ?? activeAttempt?.pid ?? task.pid;
+		const nextPid = activeAttempt?.workerPid ?? activeAttempt?.pid ?? task.pid;
+		if (task.pid !== nextPid) {
+			task.pid = nextPid;
+			changed = true;
+		}
 		if (snapshot.status === "running" || snapshot.status === "pending") {
-			task.statusDetail = "running";
-			task.lastMessage = activeAttempt?.heartbeatAt
+			if (task.statusDetail !== "running") {
+				task.statusDetail = "running";
+				changed = true;
+			}
+			const nextLastMessage = activeAttempt?.heartbeatAt
 				? `pi-subagent heartbeat ${activeAttempt.heartbeatAt}`
 				: "pi-subagent running";
+			if (task.lastMessage !== nextLastMessage) {
+				task.lastMessage = nextLastMessage;
+				changed = true;
+			}
 			if (isTaskTimedOut(task)) {
 				await interruptTimedOutSubagent(api, handle);
 				markSubagentTaskTimedOut(task);

@@ -14780,6 +14780,106 @@ test("workflow fetch_content cache wrapper replays run-scoped hits with fresh re
 	}
 });
 
+test("workflow fetch_content cache correlates concurrent stored data by response id", async () => {
+	const cwd = makeProject();
+	try {
+		const cacheDir = join(
+			cwd,
+			".pi",
+			"workflows",
+			"workflow_unit",
+			"source-cache",
+			"fetch-content",
+		);
+		const registered = new Map();
+		const stored = new Map();
+		let generatedIds = 0;
+		const storage = {
+			generateId() {
+				generatedIds += 1;
+				return `cached-${generatedIds}`;
+			},
+			storeResult(id, data) {
+				stored.set(id, data);
+			},
+		};
+		const fakePi = {
+			registerTool(tool) {
+				registered.set(tool.name, tool);
+			},
+			appendEntry() {},
+		};
+		const webAccessExtension = (pi) => {
+			pi.registerTool({
+				name: "fetch_content",
+				async execute(_toolCallId, params) {
+					const isSlow = params.url.includes("slow");
+					const responseId = isSlow ? "origin-slow" : "origin-fast";
+					await new Promise((resolve) => setTimeout(resolve, isSlow ? 30 : 0));
+					const data = {
+						id: responseId,
+						type: "fetch",
+						timestamp: Date.now(),
+						urls: [
+							{
+								url: params.url,
+								title: params.url,
+								content: `cached body for ${params.url}`,
+							},
+						],
+					};
+					storage.storeResult(responseId, data);
+					pi.appendEntry("web-search-results", data);
+					return {
+						content: [
+							{ type: "text", text: `body for ${params.url} via ${responseId}` },
+						],
+						details: {
+							urls: [params.url],
+							urlCount: 1,
+							successful: 1,
+							responseId,
+						},
+					};
+				},
+			});
+		};
+		registerWorkflowFetchCacheExtension(
+			fakePi,
+			{ runId: "workflow_unit", taskId: "task-1", cacheDir },
+			webAccessExtension,
+			storage,
+		);
+
+		const tool = registered.get("fetch_content");
+		await Promise.all([
+			tool.execute("call-slow", { url: "https://slow.example.test" }),
+			tool.execute("call-fast", { url: "https://fast.example.test" }),
+		]);
+		const slowHit = await tool.execute("call-slow-hit", {
+			url: "https://slow.example.test",
+		});
+		const fastHit = await tool.execute("call-fast-hit", {
+			url: "https://fast.example.test",
+		});
+
+		assert.equal(slowHit.details.cache.hit, true);
+		assert.equal(fastHit.details.cache.hit, true);
+		assert.match(slowHit.content[0].text, /slow\.example\.test/);
+		assert.match(fastHit.content[0].text, /fast\.example\.test/);
+		assert.equal(
+			stored.get(slowHit.details.responseId).urls[0].url,
+			"https://slow.example.test",
+		);
+		assert.equal(
+			stored.get(fastHit.details.responseId).urls[0].url,
+			"https://fast.example.test",
+		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("subagent launch can opt out of fetch cache and keep built-in provider mappings", async () => {
 	const cwd = makeProject();
 	let captured;
@@ -14962,6 +15062,12 @@ test("workflow web-source core redacts URLs and reads normalized snippets", asyn
 			),
 			"https://example.test/path?token=REDACTED&ok=1#access_token=REDACTED",
 		);
+		assert.equal(
+			sanitizeUrlForModel(
+				"https://example.test/path?jwt=abc&sid=def&sessionid=ghi&ok=1",
+			),
+			"https://example.test/path?jwt=REDACTED&sid=REDACTED&sessionid=REDACTED&ok=1",
+		);
 		const embeddedRedacted = sanitizeUrlForModel(
 			"See https://user:pass@example.test/path?token=secret&ok=1 for details",
 		);
@@ -14974,8 +15080,9 @@ test("workflow web-source core redacts URLs and reads normalized snippets", asyn
 			config,
 			url: "https://example.test/report?signature=secret#section",
 			text: "The quoted value is “forty two” after whitespace.\nSecond line says GPU power is reported in milliwatts by the telemetry API.",
-			title: "Example Report",
+			title: "Example Report jwt=title-secret",
 		});
+		assert.equal(source.title, "Example Report jwt=REDACTED");
 		const budget = createWorkflowWebVisibleBudget(180);
 		const read = readWorkflowWebSourceSnippet({
 			source,
@@ -21032,7 +21139,7 @@ test("workflow_artifact can read deterministic JSON projections with caps", asyn
 				action: "read",
 				source: "normalize",
 				artifact: "control",
-				path: "$.normalize.claims[0]",
+				path: "$.normalize.claims",
 				maxItems: 1,
 			},
 			{ runId, taskId: "task-2", manifestPath, ledgerPath, runDir },
@@ -21042,6 +21149,19 @@ test("workflow_artifact can read deterministic JSON projections with caps", asyn
 			/# workflow_artifact: normalize\.control path=\$\.claims/,
 		);
 		assert.match(sourcePrefixed.content[0].text, /"id": "claim-1"/);
+
+		await assert.rejects(
+			handleWorkflowArtifactToolCall(
+				{
+					action: "read",
+					source: "normalize",
+					artifact: "control",
+					path: "$.normalize.claims[0]",
+				},
+				{ runId, taskId: "task-2", manifestPath, ledgerPath, runDir },
+			),
+			/array selectors are not supported/,
+		);
 
 		const artifactPrefixed = await handleWorkflowArtifactToolCall(
 			{
@@ -21088,6 +21208,23 @@ test("workflow_artifact can read deterministic JSON projections with caps", asyn
 			/# workflow_artifact: normalize\.control path=\$\.sourcePolicy/,
 		);
 		assert.match(fieldAlias.content[0].text, /"primary"/);
+
+		writeFileSync(
+			join(producerDir, "control.json"),
+			JSON.stringify({ huge: "x".repeat(80_000) }, null, 2),
+		);
+		const cappedRoot = await handleWorkflowArtifactToolCall(
+			{
+				action: "read",
+				source: "normalize",
+				artifact: "control",
+				path: "$",
+			},
+			{ runId, taskId: "task-2", manifestPath, ledgerPath, runDir },
+		);
+		assert.equal(cappedRoot.details.truncated, true);
+		assert.equal(cappedRoot.details.projection.maxChars, 50 * 1024);
+		assert.ok(cappedRoot.details.returnedBytes < 60 * 1024);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
@@ -23268,6 +23405,89 @@ test("workflow progress health flags stale running task without backend signal",
 		{ nowMs },
 	);
 
+	assert.equal(health.state, "likely-stuck");
+	assert.equal(health.suggestion, "resume");
+});
+
+test("workflow progress health ignores stale backend handles without fresh heartbeat", () => {
+	const nowMs = Date.parse("2026-07-01T13:00:00.000Z");
+	const health = diagnoseWorkflowTaskHealth(
+		workflowViewTask({
+			status: "running",
+			displayName: "final-audit.main",
+			stageId: "final-audit",
+			startedAt: "2026-07-01T11:00:00.000Z",
+			lastMessage: undefined,
+			backendHandle: { engine: "pi-subagent" },
+		}),
+		{ updatedAt: "2026-07-01T11:30:00.000Z" },
+		{ nowMs },
+	);
+
+	assert.equal(health.state, "likely-stuck");
+	assert.equal(health.suggestion, "resume");
+});
+
+test("workflow progress health classifies reviewer fanout as long running", () => {
+	const nowMs = Date.parse("2026-07-01T12:12:00.000Z");
+	const health = diagnoseWorkflowTaskHealth(
+		workflowViewTask({
+			status: "running",
+			displayName: "reviewers.rq-001",
+			stageId: "reviewers",
+			startedAt: "2026-07-01T12:00:00.000Z",
+			lastMessage: "pi-subagent heartbeat 2026-07-01T12:11:50.000Z",
+			backendHandle: { engine: "pi-subagent" },
+		}),
+		{ updatedAt: "2026-07-01T12:11:50.000Z" },
+		{ nowMs },
+	);
+
+	assert.equal(health.durationClass, "long");
+	assert.equal(health.state, "long-tail");
+});
+
+test("workflow progress health surfaces failed fanout before running siblings", () => {
+	const nowMs = Date.parse("2026-07-01T12:12:00.000Z");
+	const failed = workflowViewTask({
+		status: "failed",
+		displayName: "reviewers.rq-001",
+		stageId: "reviewers",
+		lastMessage: "output validation failed",
+	});
+	const running = workflowViewTask({
+		status: "running",
+		displayName: "reviewers.rq-002",
+		stageId: "reviewers",
+		startedAt: "2026-07-01T12:00:00.000Z",
+		lastMessage: "pi-subagent heartbeat 2026-07-01T12:11:50.000Z",
+	});
+	const run = workflowViewRun([running, failed]);
+	const health = diagnoseWorkflowRunHealth(run, { nowMs });
+
+	assert.equal(health.state, "needs-action");
+	assert.equal(health.currentTask.taskId, failed.taskId);
+	assert.match(health.reason, /output validation failed/);
+});
+
+test("workflow progress health flags stale pending-only runs", () => {
+	const nowMs = Date.parse("2026-07-01T13:00:00.000Z");
+	const run = workflowViewRun([
+		workflowViewTask({ status: "pending", displayName: "verify-claims" }),
+	]);
+	run.taskSummary = {
+		total: 1,
+		pending: 1,
+		running: 0,
+		completed: 0,
+		failed: 0,
+		skipped: 0,
+		blocked: 0,
+		interrupted: 0,
+	};
+	run.updatedAt = "2026-07-01T12:00:00.000Z";
+
+	const health = diagnoseWorkflowRunHealth(run, { nowMs });
 	assert.equal(health.state, "likely-stuck");
 	assert.equal(health.suggestion, "resume");
 });

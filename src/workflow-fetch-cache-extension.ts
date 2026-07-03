@@ -83,7 +83,7 @@ export function registerWorkflowFetchCacheExtension(
 	webAccessExtension: WebAccessExtension,
 	storage: WebAccessStorage,
 ): void {
-	let capturedFetchData: Record<string, unknown> | undefined;
+	const capturedFetchDataByResponseId = new Map<string, Record<string, unknown>>();
 	const adapter = new Proxy(pi, {
 		get(target, property, receiver) {
 			if (property === "registerTool") {
@@ -110,15 +110,17 @@ export function registerWorkflowFetchCacheExtension(
 								return materializeCacheHit(pi, storage, hit);
 							}
 							await recordCacheEvent(config, "miss", cacheKey);
-							capturedFetchData = undefined;
 							const result = await tool.execute!(
 								toolCallId,
 								params,
 								signal,
 								onUpdate,
 							);
-							const storedData = capturedFetchData;
-							capturedFetchData = undefined;
+							const responseId = stringValue(result.details?.responseId);
+							const storedData = responseId
+								? capturedFetchDataByResponseId.get(responseId)
+								: undefined;
+							if (responseId) capturedFetchDataByResponseId.delete(responseId);
 							const writeReason = cacheWriteSkipReason(result, storedData);
 							if (writeReason) {
 								await recordCacheEvent(config, "skip", cacheKey, writeReason);
@@ -142,7 +144,10 @@ export function registerWorkflowFetchCacheExtension(
 			if (property === "appendEntry") {
 				return (type: string, data: unknown) => {
 					if (type === "web-search-results" && isFetchStoredData(data)) {
-						capturedFetchData = cloneJsonObject(data);
+						const cloned = cloneJsonObject(data);
+						const responseId = stringValue(cloned?.id);
+						if (responseId && cloned)
+							capturedFetchDataByResponseId.set(responseId, cloned);
 					}
 					return pi.appendEntry?.(type, data);
 				};
@@ -364,6 +369,10 @@ function cacheObjectPath(
 function cloneJsonObject(value: unknown): Record<string, unknown> | undefined {
 	if (!isRecord(value)) return undefined;
 	return JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
+}
+
+function stringValue(value: unknown): string | undefined {
+	return typeof value === "string" && value ? value : undefined;
 }
 
 function isFetchStoredData(value: unknown): value is Record<string, unknown> {

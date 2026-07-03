@@ -942,8 +942,8 @@ async function cachedFetchFailureResult(
 	return errorToolResult(failure.code, failure.message, failure.extra);
 }
 
-const FETCH_LOCK_STALE_MS = 60_000;
-const FETCH_LOCK_WAIT_MS = 75_000;
+const FETCH_LOCK_STALE_MS = 4 * 60_000;
+const FETCH_LOCK_WAIT_MS = 5 * 60_000;
 
 async function withWorkflowWebFetchLock<T>(
 	config: WorkflowWebSourceCacheConfig,
@@ -970,14 +970,15 @@ async function acquireWorkflowWebFetchLock(
 	for (;;) {
 		if (signal?.aborted) throw new Error("aborted");
 		try {
+			const ownerId = `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
 			await mkdir(lockDir);
 			await writeFile(
 				resolve(lockDir, "owner.json"),
-				`${JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString(), key }, null, 2)}\n`,
+				`${JSON.stringify({ ownerId, pid: process.pid, createdAt: new Date().toISOString(), key }, null, 2)}\n`,
 				"utf8",
 			);
 			return async () => {
-				await rm(lockDir, { recursive: true, force: true });
+				await releaseWorkflowWebFetchLock(lockDir, ownerId);
 			};
 		} catch (error) {
 			if (!isFileExistsError(error)) throw error;
@@ -990,6 +991,19 @@ async function acquireWorkflowWebFetchLock(
 	}
 }
 
+async function releaseWorkflowWebFetchLock(
+	lockDir: string,
+	ownerId: string,
+): Promise<void> {
+	try {
+		const current = await readFetchLockOwner(lockDir);
+		if (current?.ownerId !== ownerId) return;
+		await rm(lockDir, { recursive: true, force: true });
+	} catch {
+		// Missing or unreadable lock will be retried by the caller.
+	}
+}
+
 async function removeStaleFetchLock(lockDir: string): Promise<void> {
 	try {
 		const current = await stat(lockDir);
@@ -998,6 +1012,21 @@ async function removeStaleFetchLock(lockDir: string): Promise<void> {
 		}
 	} catch {
 		// Missing or unreadable lock will be retried by the caller.
+	}
+}
+
+async function readFetchLockOwner(
+	lockDir: string,
+): Promise<{ ownerId?: string } | undefined> {
+	try {
+		const parsed = JSON.parse(
+			await readFile(resolve(lockDir, "owner.json"), "utf8"),
+		) as unknown;
+		return isRecord(parsed) && typeof parsed.ownerId === "string"
+			? { ownerId: parsed.ownerId }
+			: undefined;
+	} catch {
+		return undefined;
 	}
 }
 

@@ -104,16 +104,16 @@ export function diagnoseWorkflowRunHealth(
 	options: WorkflowHealthOptions = {},
 ): WorkflowProgressHealth {
 	const nowMs = options.nowMs ?? Date.now();
-	const runningTask = currentRunningTask(run.tasks ?? []);
-	if (runningTask)
-		return diagnoseWorkflowTaskHealth(runningTask, run, { nowMs });
-
 	const problem = (run.tasks ?? []).find((task) =>
 		isProblemStatus(task.status),
 	);
 	if (problem) return problemRunHealth(problem, nowMs);
 	if (isProblemStatus(run.status)) return problemWorkflowHealth(run.status);
 	if (run.status === "completed") return completedWorkflowHealth();
+
+	const runningTask = currentRunningTask(run.tasks ?? []);
+	if (runningTask)
+		return diagnoseWorkflowTaskHealth(runningTask, run, { nowMs });
 	return waitingWorkflowHealth(run, nowMs);
 }
 
@@ -143,19 +143,20 @@ export function classifyWorkflowTaskDuration(
 		.filter(Boolean)
 		.join(" ")
 		.toLowerCase();
-	if (/\b(render|helper|support|schema|partition|gate)\b/.test(text))
-		return "short";
-	if (
-		/\b(research|audit|synthesis|review|verify|verifier|normalize|plan|impact|spec)\b/.test(
-			text,
-		)
-	)
-		return "long";
 	const maxRuntimeMs = task.runtime?.maxRuntimeMs;
 	if (maxRuntimeMs !== undefined && Number.isFinite(maxRuntimeMs)) {
 		if (maxRuntimeMs <= 5 * 60_000) return "short";
 		if (maxRuntimeMs >= 60 * 60_000) return "long";
 	}
+	if (task.kind === "support") return "short";
+	if (
+		/\b(research|audit|synthesi[sz]e?r?|review(?:er|ers|ing|s)?|verif(?:y|ier|iers|ication)|normaliz(?:e|er|ing|ation)?|plan(?:ning)?|impact|spec)\b/.test(
+			text,
+		)
+	)
+		return "long";
+	if (/\b(render|helper|support|schema|partition|gate)\b/.test(text))
+		return "short";
 	return "medium";
 }
 
@@ -215,6 +216,33 @@ function waitingWorkflowHealth(
 	nowMs: number,
 ): WorkflowProgressHealth {
 	const hasPending = run.taskSummary.pending > 0;
+	const lastActivityAgeMs = ageMs(run.updatedAt, nowMs);
+	if (hasPending && lastActivityAgeMs !== undefined) {
+		if (lastActivityAgeMs >= STUCK_BY_DURATION.medium) {
+			return {
+				state: "likely-stuck",
+				label: "scheduler stuck",
+				summary: "pending tasks have not scheduled",
+				tone: "error",
+				suggestion: "resume",
+				reason: "no task is running and run activity is stale",
+				lastActivityAt: run.updatedAt,
+				lastActivityAgeMs,
+			};
+		}
+		if (lastActivityAgeMs >= STALL_BY_DURATION.medium) {
+			return {
+				state: "stalled",
+				label: "scheduler quiet",
+				summary: "pending tasks are waiting without recent activity",
+				tone: "warning",
+				suggestion: "inspect",
+				reason: "no task is running and run activity is stale",
+				lastActivityAt: run.updatedAt,
+				lastActivityAgeMs,
+			};
+		}
+	}
 	return {
 		state: hasPending ? "pending" : "active",
 		label: hasPending ? "pending" : "active",
@@ -227,7 +255,7 @@ function waitingWorkflowHealth(
 			? "no task is currently running"
 			: "workflow is still in progress",
 		lastActivityAt: run.updatedAt,
-		lastActivityAgeMs: ageMs(run.updatedAt, nowMs),
+		lastActivityAgeMs,
 	};
 }
 
@@ -335,8 +363,12 @@ function runningContext(
 	const durationClass = classifyWorkflowTaskDuration(task);
 	const startedAtMs = parseTime(task.startedAt);
 	const heartbeatAt = parseHeartbeatAt(task.lastMessage);
+	const heartbeatAgeMs = ageMs(heartbeatAt, nowMs);
 	const activityAt = latestIso([heartbeatAt, run?.updatedAt, task.startedAt]);
 	const lastActivityAgeMs = ageMs(activityAt, nowMs);
+	const hasFreshHeartbeat =
+		heartbeatAgeMs !== undefined &&
+		heartbeatAgeMs <= STALL_BY_DURATION[durationClass];
 	return {
 		task,
 		nowMs,
@@ -346,8 +378,8 @@ function runningContext(
 		activityAt,
 		lastActivityAgeMs,
 		heartbeatAt,
-		heartbeatAgeMs: ageMs(heartbeatAt, nowMs),
-		hasBackendSignal: Boolean(task.backendHandle || task.pid || heartbeatAt),
+		heartbeatAgeMs,
+		hasBackendSignal: Boolean(task.pid || hasFreshHeartbeat),
 		staleMs: lastActivityAgeMs ?? Number.POSITIVE_INFINITY,
 	};
 }

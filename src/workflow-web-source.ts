@@ -150,7 +150,7 @@ export const DEFAULT_WORKFLOW_WEB_SECURITY_POLICY: WorkflowWebSecurityPolicy = {
 };
 
 const SENSITIVE_QUERY_PARAM_PATTERN =
-	/(^|[-_])(access[-_]?token|auth|code|credential|key|password|secret|session|signature|sig|token)([-_]|$)/i;
+	/(^|[-_])(access[-_]?token|auth|code|credential|key|password|secret|session|session[-_]?id|sessionid|signature|sig|sid|jwt|token)([-_]|$)/i;
 const PRIVATE_HOST_PATTERNS = [
 	/^localhost$/i,
 	/^127\./,
@@ -331,7 +331,7 @@ export function createWorkflowWebSource(options: {
 		redactedUrl,
 		urlKey: sourceUrlCacheKey(options.url),
 		domain,
-		...(options.title ? { title: options.title } : {}),
+		...(options.title ? { title: redactInlineSecrets(options.title) } : {}),
 		...(options.provider ? { provider: options.provider } : {}),
 		contentHash,
 		text: options.text,
@@ -712,7 +712,7 @@ function sourceToIndexEntry(
 		redactedUrl: source.redactedUrl,
 		...(source.urlKey ? { urlKey: source.urlKey } : {}),
 		domain: source.domain,
-		...(source.title ? { title: source.title } : {}),
+		...(source.title ? { title: redactInlineSecrets(source.title) } : {}),
 		contentHash: source.contentHash,
 		textChars: source.textChars,
 		...(source.provider ? { provider: source.provider } : {}),
@@ -1105,7 +1105,15 @@ function normalizeForSearch(text: string): {
 			map.push(index);
 		}
 	}
-	return { normalized: normalized.trim(), map };
+	while (normalized.startsWith(" ")) {
+		normalized = normalized.slice(1);
+		map.shift();
+	}
+	while (normalized.endsWith(" ")) {
+		normalized = normalized.slice(0, -1);
+		map.pop();
+	}
+	return { normalized, map };
 }
 
 function nearbySnippet(text: string, needle: string, maxChars: number): string {
@@ -1216,7 +1224,9 @@ function sourceIndexEntryFromUnknown(
 		redactedUrl: value.redactedUrl,
 		...(typeof value.urlKey === "string" ? { urlKey: value.urlKey } : {}),
 		domain: value.domain,
-		...(typeof value.title === "string" ? { title: value.title } : {}),
+		...(typeof value.title === "string"
+			? { title: redactInlineSecrets(value.title) }
+			: {}),
 		contentHash: value.contentHash,
 		textChars: Number(value.textChars),
 		...(typeof value.provider === "string" ? { provider: value.provider } : {}),
@@ -1375,7 +1385,10 @@ function redactInlineSecrets(value: string): string {
 function redactInlineSecretsNoUrls(value: string): string {
 	return value
 		.replace(/(authorization|cookie|set-cookie):\s*[^\n\r]+/gi, "$1: REDACTED")
-		.replace(/(token|secret|password|api[-_]?key)=([^\s&]+)/gi, "$1=REDACTED")
+		.replace(
+			/(token|secret|password|api[-_]?key|jwt|sid|sessionid|session[-_]?id)=([^\s&]+)/gi,
+			"$1=REDACTED",
+		)
 		.replace(/\/Users\/[^\s:'")]+/g, "/Users/REDACTED");
 }
 
