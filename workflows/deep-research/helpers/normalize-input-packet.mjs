@@ -157,6 +157,60 @@ function compactGap(gap, sourceId, index) {
 	};
 }
 
+function compactBudgetLedger(source, sourceId) {
+	const ledger = asObject(source.budgetLedger);
+	if (Object.keys(ledger).length === 0) return undefined;
+	const searchBudget = Number(ledger.searchBudget);
+	const searchCallsUsed = Number(ledger.searchCallsUsed);
+	return {
+		sourceId,
+		question: stringOf(source.question)?.slice(0, 300),
+		...(Number.isFinite(searchBudget) ? { searchBudget } : {}),
+		...(Number.isFinite(searchCallsUsed) ? { searchCallsUsed } : {}),
+		searchQueriesAttempted: compactStrings(ledger.searchQueriesAttempted, 12),
+		omittedSearchQueries: compactStrings(ledger.omittedSearchQueries, 12),
+		budgetExhausted: ledger.budgetExhausted === true,
+		gapRecorded: ledger.gapRecorded === true,
+	};
+}
+
+function sourceStatusesOf(context) {
+	return asArray(context?.sourceStatuses).map(asObject);
+}
+
+function isResearchQuestionStatus(status) {
+	return [status.source, status.specId, status.displayName, status.stageId]
+		.map((value) => String(value ?? ""))
+		.some(
+			(value) =>
+				value === "research-questions" ||
+				value.startsWith("research-questions."),
+		);
+}
+
+function compactSourceStatusGap(status, index) {
+	const sourceId =
+		stringOf(status.specId) ??
+		stringOf(status.source) ??
+		stringOf(status.displayName) ??
+		`research-questions.status-${String(index + 1).padStart(3, "0")}`;
+	const detail = compactStrings(
+		[status.statusDetail, status.errorType, status.lastMessage],
+		3,
+	).join("; ");
+	return {
+		originLocator: `${sourceId}.status-gap`,
+		sourceId,
+		lead: `Research question source ${sourceId} ended with status ${String(status.status ?? "unknown")}${detail ? ` (${detail.slice(0, 300)})` : ""}.`,
+		sourceUrls: [],
+		sourceRefs: [],
+		factSlotIds: [],
+		reason: "research_question_non_completed",
+		status: String(status.status ?? "unknown"),
+		...(stringOf(status.taskId) ? { taskId: stringOf(status.taskId) } : {}),
+	};
+}
+
 function pushBounded(target, overflow, items, limit, overflowKind) {
 	for (const item of items) {
 		if (target.length < limit) target.push(item);
@@ -428,19 +482,21 @@ function buildPrecisionGuard({ claims, planSlots }) {
 	};
 }
 
-export default async function normalizeInputPacket({ sources }) {
+export default async function normalizeInputPacket({ sources, context } = {}) {
 	const plan = asObject(findSource(sources, "plan"));
 	const research = researchSources(sources);
 	const extractedFacts = [];
 	const claims = [];
 	const sourceCards = [];
 	const evidenceGaps = [];
+	const questionBudgetLedger = [];
 	const overflow = {};
 	const limits = {
 		extractedFacts: 240,
 		claims: 240,
 		sources: 160,
 		evidenceGaps: 120,
+		questionBudgetLedger: 80,
 	};
 
 	for (const { sourceId, source } of research) {
@@ -480,7 +536,29 @@ export default async function normalizeInputPacket({ sources }) {
 			limits.evidenceGaps,
 			"omittedEvidenceGaps",
 		);
+		const budgetLedger = compactBudgetLedger(source, sourceId);
+		if (budgetLedger) {
+			pushBounded(
+				questionBudgetLedger,
+				overflow,
+				[budgetLedger],
+				limits.questionBudgetLedger,
+				"omittedQuestionBudgetLedgers",
+			);
+		}
 	}
+	pushBounded(
+		evidenceGaps,
+		overflow,
+		sourceStatusesOf(context)
+			.filter(
+				(status) =>
+					isResearchQuestionStatus(status) && status.status !== "completed",
+			)
+			.map(compactSourceStatusGap),
+		limits.evidenceGaps,
+		"omittedEvidenceGaps",
+	);
 
 	const planSlots = asArray(plan.factSlots).map(compactPlanSlot);
 	const precisionGuard = buildPrecisionGuard({ claims, planSlots });
@@ -506,6 +584,7 @@ export default async function normalizeInputPacket({ sources }) {
 				claims,
 				sources: sourceCards,
 				evidenceGaps,
+				questionBudgetLedger,
 			},
 			slotPreservation,
 			precisionGuard,

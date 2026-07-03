@@ -7856,7 +7856,8 @@ test("bundled deep-research compacts audit packets before executive final", asyn
 		"deep-research",
 		"spec.json",
 	);
-	const spec = parsePublicWorkflow(JSON.parse(readFileSync(specPath, "utf8")));
+	const rawSpec = JSON.parse(readFileSync(specPath, "utf8"));
+	const spec = parsePublicWorkflow(rawSpec);
 	const compiled = await compileWorkflow(spec, {
 		cwd: process.cwd(),
 		task: "Research the deep-research artifact contract.",
@@ -7873,11 +7874,23 @@ test("bundled deep-research compacts audit packets before executive final", asyn
 		byStage.get("research-questions")?.compiledPrompt ?? "",
 		/do not use filesystem read\/grep\/find\/ls/,
 	);
+	assert.match(
+		byStage.get("research-questions")?.compiledPrompt ?? "",
+		/searchBudget=3/,
+	);
 	assert.equal(byStage.get("normalize-claims")?.runtime.thinking, "high");
 	assert.equal(byStage.get("verify-claims")?.runtime.thinking, "high");
 	assert.match(
 		byStage.get("verify-claims")?.compiledPrompt ?? "",
 		/Do not call workflow_artifact/,
+	);
+	assert.match(
+		byStage.get("verify-claims")?.compiledPrompt ?? "",
+		/candidateOnly=true cannot verify/,
+	);
+	assert.match(
+		byStage.get("verify-claims")?.compiledPrompt ?? "",
+		/verified requires structured source evidence plus quote/,
 	);
 	assert.equal(byStage.get("final-audit")?.runtime.thinking, "xhigh");
 	const normalizeInputPacket = byStage.get("normalize-input-packet");
@@ -7892,6 +7905,20 @@ test("bundled deep-research compacts audit packets before executive final", asyn
 	assert.match(normalizeClaims?.compiledPrompt ?? "", /hard cap 18 total/);
 	assert.match(normalizeClaims?.compiledPrompt ?? "", /quote-gap/);
 	assert.match(normalizeClaims?.compiledPrompt ?? "", /known carve-outs/);
+	const rawNormalizePrompt = rawSpec.artifactGraph.stages.find(
+		(stage) => stage.id === "normalize-claims",
+	).prompt;
+	const rawVerifyPrompt = rawSpec.artifactGraph.stages.find(
+		(stage) => stage.id === "verify-claims",
+	).each.prompt;
+	assert(
+		rawNormalizePrompt.length < 7200,
+		"normalize prompt should stay below the T6 compression ceiling",
+	);
+	assert(
+		rawVerifyPrompt.length < 5400,
+		"verify prompt should stay below the T6 compression ceiling",
+	);
 
 	assert.equal(normalizeInputPacket?.kind, "support");
 	assert.deepEqual(normalizeInputPacket.dependsOn, [
@@ -12608,6 +12635,73 @@ test("deep-research normalize input packet compacts research context", async () 
 	]);
 	assert.equal(result.packet.ledgers.sourceRefCoverage.claimsWithSourceRefs, 1);
 	assert.equal(result.packet.ledgers.slotFactCounts["slot-001"], 1);
+});
+
+test("deep-research normalize input packet preserves RQ budget and timeout gaps", async () => {
+	const { default: helper } = await import(
+		`../../workflows/deep-research/helpers/normalize-input-packet.mjs?test=${Date.now()}`
+	);
+	const result = await helper({
+		sources: {
+			"plan.main": {
+				factSlots: [{ id: "slot-001", label: "Latency", required: true }],
+			},
+			"research-questions.item-001": {
+				question: "What is the latency?",
+				budgetLedger: {
+					searchBudget: 3,
+					searchCallsUsed: 3,
+					searchQueriesAttempted: ["latency docs", "latency benchmark"],
+					omittedSearchQueries: ["latency forum thread"],
+					budgetExhausted: true,
+					gapRecorded: true,
+				},
+				additionalUnverifiedLeads: [
+					{ lead: "p99 latency still unknown", factSlotIds: ["slot-001"] },
+				],
+			},
+		},
+		context: {
+			sourceStatuses: [
+				{
+					source: "research-questions.item-001",
+					specId: "research-questions.item-001",
+					status: "completed",
+				},
+				{
+					source: "research-questions.item-002",
+					specId: "research-questions.item-002",
+					stageId: "research-questions",
+					taskId: "task-18",
+					status: "failed",
+					statusDetail: "timeout",
+				},
+			],
+		},
+	});
+
+	assert.deepEqual(result.packet.research.questionBudgetLedger, [
+		{
+			sourceId: "research-questions.item-001",
+			question: "What is the latency?",
+			searchBudget: 3,
+			searchCallsUsed: 3,
+			searchQueriesAttempted: ["latency docs", "latency benchmark"],
+			omittedSearchQueries: ["latency forum thread"],
+			budgetExhausted: true,
+			gapRecorded: true,
+		},
+	]);
+	assert(
+		result.packet.research.evidenceGaps.some(
+			(gap) => gap.reason === "research_question_non_completed",
+		),
+	);
+	assert(
+		result.packet.research.evidenceGaps.some(
+			(gap) => gap.reason === "research_question_non_completed" && gap.taskId === "task-18",
+		),
+	);
 });
 
 test("deep-research normalize input packet preserves slots and flags precision risks", async () => {
