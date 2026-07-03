@@ -74,6 +74,8 @@ For a one-off adaptive workflow that should plan, fan out, and synthesize withou
 
 `/workflow dynamic` uses pi-workflow's built-in trusted dynamic controller and records a normal workflow run under `.pi/workflows/`. Use it when you explicitly want adaptive orchestration rather than a named reusable workflow.
 
+To interrupt a non-terminal run and stop its local supervisor watch, use `/workflow stop <run-id>`. Resume later with `/workflow resume <run-id>` if unfinished tasks should be retried.
+
 ## Usage: choose an execution mode
 
 Use the bundled `execution-router` skill when you are not sure whether a task should be handled directly, by a targeted verifier/subagent, by an existing workflow, or by a new workflow:

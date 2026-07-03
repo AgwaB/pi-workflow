@@ -114,6 +114,7 @@ For reusable workflow authoring, `workflow-guide` includes validated scaffold bu
 | `/workflow show <run-id-or-workflow-name>` | If the ref starts with `workflow_`, show run details; otherwise show the raw workflow spec. |
 | `/workflow logs <run-id> [task-id] [lines]` | Print captured logs for a workflow task. Defaults to `task-1`. |
 | `/workflow wait <run-id> [timeout-ms]` | Poll until the run finishes or the optional timeout elapses. |
+| `/workflow stop <run-id>` | Interrupt a non-terminal run, best-effort interrupt active subagents, mark unfinished tasks interrupted, and stop the local supervisor watch. Use `/workflow resume <run-id>` if you want to restart unfinished work later. |
 | `/workflow resume <run-id>` | Resume a failed, interrupted, or resumable blocked run (including dynamic approval blocked in headless mode): completed tasks are preserved; failed/interrupted/skipped or resumable blocked tasks reset to pending and reschedule. Loop workflows are not supported yet. |
 | `/workflow stop <run-id>` | Stop a non-terminal run: best-effort interrupt of active subagent workers, then mark unfinished tasks `interrupted`. Completed task artifacts are preserved, and the stopped run can be restarted later with `/workflow resume` (resumed tasks start fresh sessions). |
 
