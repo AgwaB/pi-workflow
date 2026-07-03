@@ -30,6 +30,7 @@ import {
 	waitForRun,
 } from "../../.tmp/unit/engine.js";
 import {
+	deliverMissedWorkflowFeedback,
 	notifyUnfinishedRuns,
 	registerWorkflowNaturalLanguageTools,
 	WORKFLOW_DYNAMIC_TOOL,
@@ -18071,6 +18072,59 @@ test("resumeRun rejects completed and loop runs", async () => {
 			setTaskTerminal(task, "skipped", "skipped", {});
 		await writeRunRecord(cwd, loopRun);
 		await assert.rejects(() => resumeRun(cwd, loopRun.runId), /loop workflows/);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("deliverMissedWorkflowFeedback does not auto-trigger an agent turn on startup", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const workflowRoot = join(cwd, "workflows");
+		writeDefaultStageControlSchema(workflowRoot);
+		const spec = artifactGraphWorkflowSpec();
+		const specPath = join(workflowRoot, "unit.json");
+		writeFileSync(specPath, JSON.stringify(spec));
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Startup feedback target",
+		});
+		const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await completeTask(cwd, taskBySpec(run, "main.main"), {
+			executiveMarkdown: "# Executive\n\nDone.",
+		});
+		run.status = deriveRunStatus(run);
+		await writeRunRecord(cwd, run);
+		await updateIndex(cwd);
+
+		const sent = [];
+		await deliverMissedWorkflowFeedback(
+			{
+				cwd,
+				hasUI: true,
+				ui: { notify() {} },
+			},
+			{
+				sendMessage(message, options) {
+					sent.push({ message, options });
+				},
+			},
+		);
+
+		assert.equal(sent.length, 1);
+		assert.equal(sent[0].message.customType, "workflow-completion");
+		assert.equal(sent[0].options.triggerTurn, false);
+		assert.equal(sent[0].options.deliverAs, "followUp");
+		assert.doesNotMatch(
+			sent[0].message.content,
+			/Summarize the completed workflow result/,
+		);
+		assert.match(
+			sent[0].message.content,
+			/Open the workflow for the full result/,
+		);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
