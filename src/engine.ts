@@ -732,7 +732,7 @@ async function scheduleDag(
 			index,
 			options,
 		);
-		if (launched) running += 1;
+		if (launched && run.tasks[index]?.status === "running") running += 1;
 	}
 }
 

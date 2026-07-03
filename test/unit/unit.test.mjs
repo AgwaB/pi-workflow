@@ -13652,6 +13652,72 @@ test("artifactGraph runtime support marks helper errors as failed", async () => 
 	}
 });
 
+test("artifactGraph scheduler does not consume concurrency for synchronous support tasks", async () => {
+	const cwd = makeProject();
+	const prompts = [];
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const workflowDir = join(cwd, "workflows", "bundle");
+		mkdirSync(join(workflowDir, "helpers"), { recursive: true });
+		const specPath = join(workflowDir, "spec.json");
+		writeFileSync(
+			join(workflowDir, "helpers", "audit.mjs"),
+			"export default async function helper() { return { analysis: 'Support helper summary.' }; }\n",
+		);
+		setSubagentApiForTests({
+			async runSubagent(options) {
+				prompts.push(String(options.task ?? ""));
+				return {
+					runId: `run_stub_${prompts.length}`,
+					attemptId: `attempt_stub_${prompts.length}`,
+					status: "running",
+				};
+			},
+			async getSubagentStatus() {
+				return null;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+		const spec = workflowSpec("unit-scout", {
+			artifactGraph: {
+				maxConcurrency: 1,
+				stages: [
+					{
+						id: "audit",
+						support: { uses: "./helpers/audit.mjs" },
+					},
+					{ id: "scan", type: "single", after: [], prompt: "Scan." },
+				],
+			},
+		});
+		writeFileSync(specPath, JSON.stringify(spec));
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Check support scheduling",
+			specPath,
+		});
+		const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await writeRunRecord(cwd, run);
+
+		await scheduleRun(cwd, run.runId);
+
+		const updated = await readRunRecord(cwd, run.runId);
+		assert.equal(taskBySpec(updated, "audit.main").status, "completed");
+		assert.equal(taskBySpec(updated, "scan.main").status, "running");
+		assert.equal(prompts.length, 1);
+		assert(prompts[0].includes("stage=scan"));
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("artifactGraph runtime scheduler launches empty-after roots in parallel", async () => {
 	const cwd = makeProject();
 	const prompts = [];
@@ -18214,10 +18280,7 @@ test("stopRun interrupts non-terminal tasks and best-effort cleans up backend ha
 			assert.equal(interrupts.length, 1);
 			assert.equal(interrupts[0].runId, "run_stop");
 			assert.equal(interrupts[0].attemptId, "attempt_stop");
-			await assert.rejects(
-				() => stopRun(cwd, run.runId),
-				/non-terminal run/,
-			);
+			await assert.rejects(() => stopRun(cwd, run.runId), /non-terminal run/);
 		} finally {
 			setSubagentApiForTests(undefined);
 		}
