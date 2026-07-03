@@ -30,6 +30,7 @@ import {
 	waitForRun,
 } from "../../.tmp/unit/engine.js";
 import {
+	deliverMissedWorkflowFeedback,
 	notifyUnfinishedRuns,
 	registerWorkflowNaturalLanguageTools,
 	WORKFLOW_DYNAMIC_TOOL,
@@ -8788,9 +8789,19 @@ test("compiler injects runtime task for single stages only", async () => {
 	const cwd = makeProject();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
+		writeFileSync(
+			join(cwd, ".pi", "agents", "lens-agent.md"),
+			`---\ndescription: lens-agent\ntools: ["read"]\nreadOnly: true\n---\n# Core Principles\n\nUse domain evidence.\n\n# Output Format\n\nDo not include this output rule.\n`,
+		);
 		const compiled = await compileWorkflow(
 			workflowSpec("unit-scout", {
-				roles: { lens: { prompt: "Role context marker." } },
+				roles: {
+					lens: {
+						fromAgent: "lens-agent",
+						prompt: "Role context marker.",
+						includeSections: ["Core Principles"],
+					},
+				},
 				artifactGraph: {
 					stages: [
 						{ id: "entry", type: "single", prompt: "Entry instructions." },
@@ -8836,12 +8847,14 @@ test("compiler injects runtime task for single stages only", async () => {
 		);
 		assert.match(
 			byKey["entry.main"].compiledPrompt,
-			/# Role Context\n\n## Role: lens\nRole context marker\./,
+			/# Role Context\n\n## Role: lens\n# Core Principles\n\nUse domain evidence\.\n\nRole context marker\./,
 		);
-		assert.match(
+		assert.doesNotMatch(
 			byKey["entry.main"].compiledPrompt,
-			/# Role Context\n\n## Role: lens\nRole context marker\./,
+			/Do not include this output rule/,
 		);
+		assert.equal(compiled.roles[0].fromAgent, "lens-agent");
+		assert.match(compiled.roles[0].sourcePath, /lens-agent\.md$/);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
@@ -18327,6 +18340,59 @@ test("resumeRun rejects completed and loop runs", async () => {
 	}
 });
 
+test("deliverMissedWorkflowFeedback does not auto-trigger an agent turn on startup", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const workflowRoot = join(cwd, "workflows");
+		writeDefaultStageControlSchema(workflowRoot);
+		const spec = artifactGraphWorkflowSpec();
+		const specPath = join(workflowRoot, "unit.json");
+		writeFileSync(specPath, JSON.stringify(spec));
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Startup feedback target",
+		});
+		const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await completeTask(cwd, taskBySpec(run, "main.main"), {
+			executiveMarkdown: "# Executive\n\nDone.",
+		});
+		run.status = deriveRunStatus(run);
+		await writeRunRecord(cwd, run);
+		await updateIndex(cwd);
+
+		const sent = [];
+		await deliverMissedWorkflowFeedback(
+			{
+				cwd,
+				hasUI: true,
+				ui: { notify() {} },
+			},
+			{
+				sendMessage(message, options) {
+					sent.push({ message, options });
+				},
+			},
+		);
+
+		assert.equal(sent.length, 1);
+		assert.equal(sent[0].message.customType, "workflow-completion");
+		assert.equal(sent[0].options.triggerTurn, false);
+		assert.equal(sent[0].options.deliverAs, "followUp");
+		assert.doesNotMatch(
+			sent[0].message.content,
+			/Summarize the completed workflow result/,
+		);
+		assert.match(
+			sent[0].message.content,
+			/Open the workflow for the full result/,
+		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("notifyUnfinishedRuns reports recent failed root runs with resume hint", async () => {
 	const cwd = makeProject();
 	try {
@@ -19834,6 +19900,68 @@ test("deep-research claim-evidence-gate backfills sourceRefs from normalize pack
 	assert.equal(out.gateSummary.sourceRefsBackfilledFromUrls, 1);
 	assert.equal(out.gateSummary.sourceRefJoinFailures, 0);
 	assert.deepEqual(out.sourceRefJoinFailures, []);
+});
+
+test("deep-research claim-evidence-gate backfills npm docs sourceRefs across CLI doc versions", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"claim-evidence-gate.mjs",
+	);
+	const helper = (
+		await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)
+	).default;
+	const out = await helper({
+		sources: {
+			"plan.main": { factSlots: [{ id: "slot-001" }] },
+			"normalize-input-packet.main": {
+				packet: {
+					research: {
+						sources: [
+							{
+								url: "https://docs.npmjs.com/cli/v10/using-npm/scripts",
+								sourceRef: "wsrc_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+							},
+						],
+					},
+				},
+			},
+			"normalize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [
+						{
+							id: "claim-001",
+							claim: "npm lifecycle scripts can execute during install.",
+							factSlotIds: ["slot-001"],
+							sourceUrls: ["https://docs.npmjs.com/cli/using-npm/scripts"],
+						},
+					],
+				},
+				factSlotCoverage: [{ slotId: "slot-001" }],
+			},
+			"verify-claims.claim-001": {
+				id: "claim-001",
+				status: "verified",
+				evidence: [
+					{
+						url: "https://docs.npmjs.com/cli/v11/using-npm/scripts.",
+						quote: "npm lifecycle scripts can execute during install.",
+					},
+				],
+			},
+		},
+		options: { requireFetchedEvidenceForVerified: true },
+	});
+
+	assert.deepEqual(out.auditedClaims[0].sourceRefs, [
+		"wsrc_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+	]);
+	assert.equal(out.gateSummary.sourceRefsBackfilledFromUrls, 1);
+	assert.equal(out.gateSummary.sourceRefJoinFailures, 0);
 });
 
 test("deep-research claim-evidence-gate suppresses sourceRef join failures for local evidence", async () => {

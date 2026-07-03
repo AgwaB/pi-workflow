@@ -159,15 +159,25 @@ function canonicalUrlKeys(value) {
 		url.hash = "";
 		const serialized = stripCitationUrlPunctuation(url.toString());
 		keys.add(serialized);
+		addNpmDocsVersionAgnosticKey(keys, url);
 		if (url.pathname !== "/" && url.pathname.endsWith("/")) {
 			url.pathname = url.pathname.replace(/\/+$/u, "");
 			keys.add(stripCitationUrlPunctuation(url.toString()));
+			addNpmDocsVersionAgnosticKey(keys, url);
 		}
 	} catch {
 		// Keep the trimmed raw URL key only; malformed strings should not throw from
 		// the evidence gate.
 	}
 	return [...keys].filter(Boolean);
+}
+
+function addNpmDocsVersionAgnosticKey(keys, url) {
+	if (url.hostname !== "docs.npmjs.com") return;
+	if (!/^\/cli\/(?:v\d+\/)?using-npm\//u.test(url.pathname)) return;
+	const versionless = new URL(url.toString());
+	versionless.pathname = versionless.pathname.replace(/^\/cli\/v\d+\//u, "/cli/");
+	keys.add(stripCitationUrlPunctuation(versionless.toString()));
 }
 
 function addUrlSourceRef(urlToSourceRef, url, sourceRef) {
