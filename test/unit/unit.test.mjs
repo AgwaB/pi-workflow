@@ -19573,6 +19573,68 @@ test("deep-research claim-evidence-gate backfills sourceRefs from normalize pack
 	assert.deepEqual(out.sourceRefJoinFailures, []);
 });
 
+test("deep-research claim-evidence-gate backfills npm docs sourceRefs across CLI doc versions", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"claim-evidence-gate.mjs",
+	);
+	const helper = (
+		await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)
+	).default;
+	const out = await helper({
+		sources: {
+			"plan.main": { factSlots: [{ id: "slot-001" }] },
+			"normalize-input-packet.main": {
+				packet: {
+					research: {
+						sources: [
+							{
+								url: "https://docs.npmjs.com/cli/v10/using-npm/scripts",
+								sourceRef: "wsrc_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+							},
+						],
+					},
+				},
+			},
+			"normalize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [
+						{
+							id: "claim-001",
+							claim: "npm lifecycle scripts can execute during install.",
+							factSlotIds: ["slot-001"],
+							sourceUrls: ["https://docs.npmjs.com/cli/using-npm/scripts"],
+						},
+					],
+				},
+				factSlotCoverage: [{ slotId: "slot-001" }],
+			},
+			"verify-claims.claim-001": {
+				id: "claim-001",
+				status: "verified",
+				evidence: [
+					{
+						url: "https://docs.npmjs.com/cli/v11/using-npm/scripts.",
+						quote: "npm lifecycle scripts can execute during install.",
+					},
+				],
+			},
+		},
+		options: { requireFetchedEvidenceForVerified: true },
+	});
+
+	assert.deepEqual(out.auditedClaims[0].sourceRefs, [
+		"wsrc_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+	]);
+	assert.equal(out.gateSummary.sourceRefsBackfilledFromUrls, 1);
+	assert.equal(out.gateSummary.sourceRefJoinFailures, 0);
+});
+
 test("deep-research claim-evidence-gate suppresses sourceRef join failures for local evidence", async () => {
 	const helperPath = join(
 		dirname(fileURLToPath(import.meta.url)),
