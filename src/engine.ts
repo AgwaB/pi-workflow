@@ -96,6 +96,7 @@ import {
 	markDagDependentsSkipped,
 	nextTaskRecordIndex,
 	reconcileDynamicGeneratedRunRecords,
+	reconcileForeachGeneratedRunRecords,
 	recoverStaleRunningDynamicControllers,
 	replaceDependencyList,
 	sourceStageIdsForFrom,
@@ -228,7 +229,7 @@ async function runLoadedWorkflowSpec(
 	const scheduled =
 		(await scheduleRun(cwd, run.runId, compiled, scheduleOptions)) ??
 		(await readRunRecord(cwd, run.runId));
-	if (scheduled.status === "running")
+	if (shouldWatchRun(scheduled))
 		watchRun(cwd, scheduled.runId, scheduleOptions);
 	return scheduled;
 }
@@ -245,6 +246,22 @@ export async function refreshRun(
 	return refreshed ?? current;
 }
 
+function hasActiveSchedulerWork(
+	run: Pick<WorkflowRunRecord, "status" | "taskSummary">,
+): boolean {
+	return (
+		run.status === "running" ||
+		run.taskSummary.running > 0 ||
+		run.taskSummary.pending > 0
+	);
+}
+
+function shouldWatchRun(
+	run: Pick<WorkflowRunRecord, "status" | "taskSummary">,
+): boolean {
+	return hasActiveSchedulerWork(run);
+}
+
 export async function waitForRun(
 	cwd: string,
 	runIdOrPrefix: string,
@@ -255,7 +272,7 @@ export async function waitForRun(
 	const deadline = Date.now() + timeout;
 	let run = await refreshRun(cwd, runIdOrPrefix);
 
-	while (run.status === "running") {
+	while (hasActiveSchedulerWork(run)) {
 		const beforeScheduleRemaining = deadline - Date.now();
 		if (beforeScheduleRemaining <= 0)
 			throw new Error(
@@ -265,7 +282,7 @@ export async function waitForRun(
 		run = await refreshRun(cwd, run.runId);
 		const remaining = deadline - Date.now();
 		if (remaining <= 0) {
-			if (run.status !== "running") return run;
+			if (!hasActiveSchedulerWork(run)) return run;
 			throw new Error(
 				`Flow run still running after ${timeout}ms: ${run.runId}`,
 			);
@@ -332,7 +349,7 @@ export async function resumeRun(
 	const scheduled =
 		(await scheduleRun(cwd, current.runId, undefined, options)) ??
 		(await readRunRecord(cwd, current.runId));
-	if (scheduled.status === "running") watchRun(cwd, scheduled.runId, options);
+	if (shouldWatchRun(scheduled)) watchRun(cwd, scheduled.runId, options);
 	return { run: scheduled, resetTaskIds };
 }
 
@@ -343,7 +360,7 @@ export async function resumeSupervisors(
 	try {
 		const runs = await listRunRecords(cwd);
 		for (const run of runs) {
-			if (run.status === "running") {
+			if (hasActiveSchedulerWork(run)) {
 				await scheduleRun(cwd, run.runId, undefined, options).catch((error) =>
 					recordSupervisorError(cwd, run.runId, error),
 				);
@@ -376,7 +393,7 @@ export function watchRun(
 			if (currentMtime !== undefined)
 				supervisorRunMtimes.set(key, currentMtime);
 
-			if (refreshed.status === "running") {
+			if (hasActiveSchedulerWork(refreshed)) {
 				const unchanged =
 					previousMtime !== undefined &&
 					currentMtime !== undefined &&
@@ -419,7 +436,12 @@ export async function scheduleRun(
 	return withRunLease(cwd, runId, async () => {
 		let run = await readRunRecord(cwd, runId);
 		run = await resolveWorkflowBackend(run).refreshRun(cwd, run);
-		if (run.taskSummary.blocked > 0 || isTerminalWorkflowStatus(run.status))
+		if (isTerminalWorkflowStatus(run.status)) return run;
+		if (
+			run.taskSummary.blocked > 0 &&
+			run.taskSummary.pending === 0 &&
+			run.taskSummary.running === 0
+		)
 			return run;
 
 		const compiledFlow =
@@ -518,7 +540,7 @@ export function formatRun(
 async function reconcileActiveRuns(cwd: string): Promise<void> {
 	const runs = await listRunRecords(cwd);
 	for (const run of runs) {
-		if (run.status === "running")
+		if (hasActiveSchedulerWork(run))
 			await refreshRun(cwd, run.runId).catch((error) =>
 				recordSupervisorError(cwd, run.runId, error),
 			);
@@ -530,7 +552,7 @@ async function reconcileIndexedActiveRuns(
 	index: WorkflowIndexRecord,
 ): Promise<void> {
 	for (const run of index.runs) {
-		if (run.status === "running")
+		if (hasActiveSchedulerWork(run))
 			await refreshRun(cwd, run.runId).catch((error) =>
 				recordSupervisorError(cwd, run.runId, error),
 			);
@@ -569,6 +591,16 @@ async function scheduleDag(
 			compiledFlow,
 		);
 		if (loopReconciled) return;
+		const foreachReconciled = reconcileForeachGeneratedRunRecords(
+			cwd,
+			run,
+			compiledFlow,
+		);
+		if (foreachReconciled) {
+			await writeJsonAtomic(compiledWorkflowPath(cwd, run.runId), compiledFlow);
+			await writeRunRecord(cwd, run);
+			return;
+		}
 		const dynamicReconciled = reconcileDynamicGeneratedRunRecords(
 			cwd,
 			run,
@@ -906,12 +938,15 @@ async function launchPendingTaskAt(
 		return false;
 	}
 
-	let launchTask = await prepareDagTask(cwd, run, compiledFlow, index);
-	if (task.outputRetry) {
-		launchTask = await prepareArtifactGraphRetryTask(cwd, task, launchTask);
-	}
-
+	let launchTask: CompiledWorkflow["tasks"][number] | undefined;
+	let prepareComplete = false;
 	try {
+		launchTask = await prepareDagTask(cwd, run, compiledFlow, index);
+		if (task.outputRetry) {
+			launchTask = await prepareArtifactGraphRetryTask(cwd, task, launchTask);
+		}
+		prepareComplete = true;
+
 		if (launchTask.kind === "support") {
 			return await executeSupportTask(cwd, run, task, launchTask);
 		}
@@ -939,10 +974,11 @@ async function launchPendingTaskAt(
 		if (launch.kind === "fatal") throw new Error(launch.message);
 		return launch.kind === "launched";
 	} catch (error) {
-		const statusDetail =
-			launchTask.kind === "support"
+		const statusDetail = !prepareComplete
+			? "prepare_failed"
+			: launchTask?.kind === "support"
 				? "support_failed"
-				: launchTask.safety.requiresWorktree
+				: launchTask?.safety.requiresWorktree
 					? "worktree_failed"
 					: "launch_failed";
 		setTaskTerminal(task, "failed", statusDetail, {

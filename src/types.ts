@@ -542,6 +542,9 @@ export interface CompiledTask {
 		branchId?: string;
 		outputProfile?: string;
 	};
+	foreachGenerated?: {
+		placeholderSpecId: string;
+	};
 	loopChild?: CompiledLoopChildTaskRef;
 	loopPlaceholder?: {
 		loopId: string;
@@ -633,6 +636,9 @@ export interface WorkflowTaskRunRecord {
 		requestHash: string;
 		branchId?: string;
 		outputProfile?: string;
+	};
+	foreachGenerated?: {
+		placeholderSpecId: string;
 	};
 	launchRetry?: {
 		attempts: number;

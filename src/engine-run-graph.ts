@@ -127,6 +127,135 @@ export function reconcileDynamicGeneratedRunRecords(
 	return changed;
 }
 
+export function reconcileForeachGeneratedRunRecords(
+	cwd: string,
+	run: WorkflowRunRecord,
+	compiledFlow: CompiledWorkflow,
+): boolean {
+	let changed = false;
+	const compiledSpecIds = new Set(
+		compiledFlow.tasks.map((task) => compiledTaskSpecId(task)),
+	);
+	const placeholderToGeneratedSpecIds = new Map<string, string[]>();
+
+	for (const compiledTask of compiledFlow.tasks) {
+		const specId = compiledTaskSpecId(compiledTask);
+		const placeholderSpecId = foreachGeneratedPlaceholderSpecId(
+			compiledTask,
+			compiledFlow,
+			specId,
+		);
+		if (!placeholderSpecId) continue;
+		if (
+			compiledTask.foreachGenerated?.placeholderSpecId !== placeholderSpecId
+		) {
+			compiledTask.foreachGenerated = { placeholderSpecId };
+			changed = true;
+		}
+		const generated =
+			placeholderToGeneratedSpecIds.get(placeholderSpecId) ?? [];
+		generated.push(specId);
+		placeholderToGeneratedSpecIds.set(placeholderSpecId, generated);
+	}
+
+	if (placeholderToGeneratedSpecIds.size === 0) return changed;
+
+	const filteredRunTasks: WorkflowTaskRunRecord[] = [];
+	const seenGeneratedSpecIds = new Set<string>();
+	for (const task of run.tasks) {
+		const generatedSpecIds = placeholderToGeneratedSpecIds.get(task.specId);
+		let placeholderSpecId = foreachGeneratedPlaceholderSpecId(
+			task,
+			compiledFlow,
+			task.specId,
+		);
+		if (generatedSpecIds && !placeholderSpecId) {
+			if (generatedSpecIds.includes(task.specId)) {
+				placeholderSpecId = task.specId;
+				task.foreachGenerated = { placeholderSpecId };
+				changed = true;
+			} else {
+				changed = true;
+				continue;
+			}
+		}
+		if (placeholderSpecId && !compiledSpecIds.has(task.specId)) {
+			changed = true;
+			continue;
+		}
+		if (placeholderSpecId && seenGeneratedSpecIds.has(task.specId)) {
+			changed = true;
+			continue;
+		}
+		if (placeholderSpecId) {
+			seenGeneratedSpecIds.add(task.specId);
+			if (task.foreachGenerated?.placeholderSpecId !== placeholderSpecId) {
+				task.foreachGenerated = { placeholderSpecId };
+				changed = true;
+			}
+		}
+		filteredRunTasks.push(task);
+	}
+
+	const runTaskBySpecId = new Map<string, WorkflowTaskRunRecord>();
+	for (const task of filteredRunTasks) {
+		if (!runTaskBySpecId.has(task.specId))
+			runTaskBySpecId.set(task.specId, task);
+	}
+
+	const reordered: WorkflowTaskRunRecord[] = [];
+	const usedSpecIds = new Set<string>();
+	let nextIndex = nextTaskRecordIndex({ ...run, tasks: filteredRunTasks });
+	for (const compiledTask of compiledFlow.tasks) {
+		const specId = compiledTaskSpecId(compiledTask);
+		const existing = runTaskBySpecId.get(specId);
+		if (existing) {
+			const placeholderSpecId =
+				compiledTask.foreachGenerated?.placeholderSpecId;
+			if (
+				placeholderSpecId &&
+				existing.foreachGenerated?.placeholderSpecId !== placeholderSpecId
+			) {
+				existing.foreachGenerated = { placeholderSpecId };
+				changed = true;
+			}
+			reordered.push(existing);
+			usedSpecIds.add(specId);
+			continue;
+		}
+		if (!compiledTask.foreachGenerated) continue;
+		const created = createTaskRunRecord(
+			cwd,
+			run.runId,
+			compiledTask,
+			nextIndex,
+		);
+		nextIndex += 1;
+		reordered.push(created);
+		usedSpecIds.add(specId);
+		changed = true;
+	}
+
+	for (const task of filteredRunTasks) {
+		if (!usedSpecIds.has(task.specId)) reordered.push(task);
+	}
+
+	if (!sameTaskRecordOrder(run.tasks, reordered)) changed = true;
+	for (const task of reordered) {
+		if (!task.dependsOn) continue;
+		const replaced = replaceForeachGeneratedDependencies(
+			task.dependsOn,
+			placeholderToGeneratedSpecIds,
+		);
+		if (!sameStringList(task.dependsOn, replaced)) {
+			task.dependsOn = replaced;
+			changed = true;
+		}
+	}
+	if (changed) run.tasks = reordered;
+	return changed;
+}
+
 export function assertRunTaskPositionalAlignment(
 	run: WorkflowRunRecord,
 	compiledFlow: CompiledWorkflow,
@@ -207,6 +336,54 @@ export function upsertCompiledLoopTasksAtInsertion(
 export function compiledTaskSpecId(task: CompiledTask): string {
 	const specId = (task as CompiledTask & { specId?: unknown }).specId;
 	return typeof specId === "string" && specId.trim() !== "" ? specId : task.id;
+}
+
+function foreachGeneratedPlaceholderSpecId(
+	task: CompiledTask | WorkflowTaskRunRecord,
+	compiledFlow: CompiledWorkflow,
+	specId: string,
+): string | undefined {
+	const explicit = task.foreachGenerated?.placeholderSpecId;
+	if (typeof explicit === "string" && explicit.trim() !== "") return explicit;
+	if ((task as CompiledTask).foreach) return undefined;
+	if (task.kind !== "foreach" || !task.stageId) return undefined;
+	const placeholderSpecId = foreachPlaceholderSpecId(
+		compiledFlow,
+		task.stageId,
+	);
+	if (!placeholderSpecId || specId === placeholderSpecId) return undefined;
+	return placeholderSpecId;
+}
+
+function foreachPlaceholderSpecId(
+	compiledFlow: CompiledWorkflow,
+	stageId: string,
+): string | undefined {
+	const stage = ((compiledFlow as any).stages ?? []).find(
+		(candidate: any) => candidate?.id === stageId,
+	);
+	if (stage?.type !== "foreach") return undefined;
+	return `${stageId}.item`;
+}
+
+function replaceForeachGeneratedDependencies(
+	dependsOn: string[],
+	placeholderToGeneratedSpecIds: Map<string, string[]>,
+): string[] {
+	const replaced: string[] = [];
+	for (const dep of dependsOn) {
+		const generatedSpecIds = placeholderToGeneratedSpecIds.get(dep);
+		if (generatedSpecIds) replaced.push(...generatedSpecIds);
+		else replaced.push(dep);
+	}
+	return [...new Set(replaced)];
+}
+
+function sameStringList(left: string[], right: string[]): boolean {
+	return (
+		left.length === right.length &&
+		left.every((value, index) => value === right[index])
+	);
 }
 
 function isLoopGeneratedCompiledTask(
@@ -330,7 +507,7 @@ export function buildForeachGeneratedTasks(
 		const itemText = formatForeachItem(item);
 		const instructions = template.foreach!.prompt.replace(
 			/\$\{item\}/g,
-			escapeReplacementText(itemText),
+			itemText,
 		);
 		const compiledPrompt = [
 			template.foreach!.injectRuntimeTask && runtimeTask
@@ -352,6 +529,7 @@ export function buildForeachGeneratedTasks(
 			compiledPrompt,
 			dependsOn: [...(template.dependsOn ?? [])],
 			foreach: undefined,
+			foreachGenerated: { placeholderSpecId: template.id },
 		} as CompiledTask);
 	}
 	return { tasks };
@@ -380,10 +558,6 @@ export function sanitizeTaskId(value: string): string {
 
 function formatForeachItem(item: unknown): string {
 	return typeof item === "string" ? item : JSON.stringify(item);
-}
-
-function escapeReplacementText(value: string): string {
-	return value.replace(/\$/g, "$$$$");
 }
 
 export function sourceStageIdsForFrom(from: unknown): string[] {
@@ -457,7 +631,8 @@ export function markDagDependentsSkipped(
 				return (
 					status === "failed" ||
 					status === "interrupted" ||
-					status === "skipped"
+					status === "skipped" ||
+					status === "blocked"
 				);
 			});
 			if (!failedDep) continue;

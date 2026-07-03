@@ -83,7 +83,10 @@ import {
 	readSimpleJsonPath,
 	shouldScheduleAfterStageFailure,
 } from "../../.tmp/unit/workflow-runtime.js";
-import { buildForeachGeneratedTasks } from "../../.tmp/unit/engine-run-graph.js";
+import {
+	buildForeachGeneratedTasks,
+	markDagDependentsSkipped,
+} from "../../.tmp/unit/engine-run-graph.js";
 import { deriveWorkflowStatus, summarizeTasks } from "../../.tmp/unit/store.js";
 import {
 	assertWorkflowActionAllowedForRole,
@@ -624,6 +627,42 @@ test("shared status helpers derive canonical task summaries", () => {
 		}),
 		"blocked",
 	);
+});
+
+test("blocked dependencies skip only dependent pending tasks", () => {
+	const run = {
+		tasks: [
+			{
+				specId: "gate.main",
+				status: "blocked",
+				statusDetail: "needs_attention",
+			},
+			{
+				specId: "dependent.main",
+				status: "pending",
+				statusDetail: "pending",
+			},
+			{
+				specId: "independent.main",
+				status: "pending",
+				statusDetail: "pending",
+			},
+		],
+	};
+	const compiledFlow = {
+		type: WORKFLOW_RUN_TYPE,
+		stages: [],
+		tasks: [
+			{ id: "gate.main" },
+			{ id: "dependent.main", dependsOn: ["gate.main"] },
+			{ id: "independent.main" },
+		],
+	};
+
+	assert.equal(markDagDependentsSkipped(run, compiledFlow), true);
+	assert.equal(run.tasks[1].status, "skipped");
+	assert.equal(run.tasks[1].statusDetail, "skipped_after_dependency_failure");
+	assert.equal(run.tasks[2].status, "pending");
 });
 
 test("workflow process role helpers default to supervisor and honor worker/disabled", () => {
@@ -9863,13 +9902,86 @@ test("artifactGraph runtime foreach materializes source array into generated tas
 			"pending",
 		);
 		assert.deepEqual(
-			JSON.parse(
-				readFileSync(
-					join(cwd, ".pi", "workflows", materialized.runId, "compiled.json"),
-					"utf8",
-				),
-			).tasks.find((task) => task.id === "summary.main").dependsOn,
+			materialized.tasks.find((task) => task.specId === "verify.claim_a")
+				?.foreachGenerated,
+			{ placeholderSpecId: "verify.item" },
+		);
+		const materializedCompiled = JSON.parse(
+			readFileSync(
+				join(cwd, ".pi", "workflows", materialized.runId, "compiled.json"),
+				"utf8",
+			),
+		);
+		assert.deepEqual(
+			materializedCompiled.tasks.find((task) => task.id === "verify.claim_a")
+				.foreachGenerated,
+			{ placeholderSpecId: "verify.item" },
+		);
+		assert.deepEqual(
+			materializedCompiled.tasks.find((task) => task.id === "summary.main")
+				.dependsOn,
 			["verify.claim_a", "verify.item-002"],
+		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("artifactGraph runtime foreach repairs compiled/run mismatch after materialization crash", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const spec = workflowSpec("unit-scout", {
+			artifactGraph: {
+				stages: [
+					{ id: "extract", type: "single", prompt: "Extract" },
+					{
+						id: "verify",
+						type: "foreach",
+						from: { source: "extract", path: "$.claims" },
+						each: { prompt: "Verify ${item}" },
+					},
+					{ id: "summary", type: "reduce", from: "verify", prompt: "Sum" },
+				],
+			},
+		});
+		const compiled = await compileWorkflow(spec, { cwd, task: "Check claims" });
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await completeTask(cwd, run.tasks[0], { claims: ["a", "b"] });
+		const staleRun = JSON.parse(JSON.stringify(run));
+		await writeRunRecord(cwd, run);
+
+		await scheduleRun(cwd, run.runId);
+		const materialized = await readRunRecord(cwd, run.runId);
+		assert.deepEqual(
+			materialized.tasks.map((task) => task.specId),
+			["extract.main", "verify.item-001", "verify.item-002", "summary.main"],
+		);
+
+		await writeRunRecord(cwd, staleRun);
+		await scheduleRun(cwd, run.runId);
+		const repaired = await readRunRecord(cwd, run.runId);
+		assert.deepEqual(
+			repaired.tasks.map((task) => task.specId),
+			["extract.main", "verify.item-001", "verify.item-002", "summary.main"],
+		);
+		assert.deepEqual(
+			repaired.tasks
+				.filter((task) => task.stageId === "verify")
+				.map((task) => task.foreachGenerated),
+			[
+				{ placeholderSpecId: "verify.item" },
+				{ placeholderSpecId: "verify.item" },
+			],
+		);
+		assert.deepEqual(
+			repaired.tasks.find((task) => task.specId === "summary.main").dependsOn,
+			["verify.item-001", "verify.item-002"],
 		);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
@@ -10055,6 +10167,50 @@ test("artifactGraph runtime foreach blocks when maxItems is exceeded", async () 
 		const blocked = await readRunRecord(cwd, run.runId);
 		assert.equal(blocked.tasks[1].status, "blocked");
 		assert.match(blocked.tasks[1].lastMessage, /exceeding maxItems=1/);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("artifactGraph scheduler marks prepare failures terminal", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const spec = workflowSpec("unit-scout", {
+			artifactGraph: {
+				stages: [
+					{ id: "extract", type: "single", prompt: "Extract" },
+					{
+						id: "review",
+						type: "single",
+						after: "extract",
+						prompt: "Review",
+					},
+				],
+			},
+		});
+		const compiled = await compileWorkflow(spec, { cwd, task: "Check claims" });
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await completeTask(cwd, run.tasks[0], { claims: ["a"] });
+		writeFileSync(join(cwd, "artifact-parent-file"), "not a directory");
+		run.tasks[1].files.result = "artifact-parent-file/result.json";
+		await writeRunRecord(cwd, run);
+
+		await scheduleRun(cwd, run.runId);
+		const updated = await readRunRecord(cwd, run.runId);
+		const review = updated.tasks.find((task) => task.specId === "review.main");
+		assert.equal(review.status, "failed");
+		assert.equal(review.statusDetail, "prepare_failed");
+		assert.match(
+			review.lastMessage,
+			/file already exists|not a directory|EEXIST|ENOTDIR/,
+		);
+		assert.equal(updated.status, "failed");
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}

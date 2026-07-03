@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import {
 	cp,
+	link,
 	mkdir,
 	open,
 	readdir,
@@ -41,6 +42,7 @@ import {
 
 const TERMINAL_INDEX_LIMIT = 50;
 const LEASE_STALE_MS = 30_000;
+const LEASE_ABSOLUTE_STALE_MS = 7 * 24 * 60 * 60 * 1000;
 const INDEX_LOCK_WAIT_MS = 5_000;
 const INDEX_LOCK_RETRY_MS = 50;
 const DEFAULT_INDEX_UPDATE_DEBOUNCE_MS = 500;
@@ -220,34 +222,93 @@ async function acquireLock(
 async function reclaimStaleLock(lockFile: string): Promise<boolean> {
 	const snapshot = await readLockSnapshot(lockFile);
 	if (!snapshot) return true;
-	if (Date.now() - snapshot.mtimeMs <= LEASE_STALE_MS) return false;
-	if (snapshot.pid !== undefined && isProcessAlive(snapshot.pid)) return false;
+	if (!isReclaimableLockSnapshot(snapshot)) return false;
 
-	const latest = await readLockSnapshot(lockFile);
-	if (!latest) return true;
-	if (latest.ownerId !== snapshot.ownerId || latest.pid !== snapshot.pid)
+	const reclaimFile = `${lockFile}.reclaim-${process.pid}-${randomBytes(3).toString("hex")}`;
+	try {
+		await rename(lockFile, reclaimFile);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
 		return false;
-	if (Date.now() - latest.mtimeMs <= LEASE_STALE_MS) return false;
-	if (latest.pid !== undefined && isProcessAlive(latest.pid)) return false;
+	}
 
-	await unlink(lockFile).catch(() => undefined);
+	const claimed = await readLockSnapshot(reclaimFile);
+	if (!claimed) return true;
+	if (!sameLockOwnerSnapshot(snapshot, claimed)) {
+		await restoreReclaimFile(reclaimFile, lockFile);
+		return false;
+	}
+	if (!isReclaimableLockSnapshot(claimed)) {
+		await restoreReclaimFile(reclaimFile, lockFile);
+		return false;
+	}
+
+	await unlink(reclaimFile).catch(() => undefined);
 	return true;
 }
 
+async function restoreReclaimFile(
+	reclaimFile: string,
+	lockFile: string,
+): Promise<void> {
+	try {
+		await link(reclaimFile, lockFile);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+	} finally {
+		await unlink(reclaimFile).catch(() => undefined);
+	}
+}
+
+function isReclaimableLockSnapshot(snapshot: LockSnapshot): boolean {
+	const now = Date.now();
+	const leaseStale = now - snapshot.mtimeMs > LEASE_STALE_MS;
+	const absoluteStale =
+		now - (snapshot.createdAtMs ?? snapshot.mtimeMs) > LEASE_ABSOLUTE_STALE_MS;
+	if (!leaseStale && !absoluteStale) return false;
+	if (
+		snapshot.pid !== undefined &&
+		isProcessAlive(snapshot.pid) &&
+		!absoluteStale
+	)
+		return false;
+	return true;
+}
+
+function sameLockOwnerSnapshot(
+	left: LockSnapshot,
+	right: LockSnapshot,
+): boolean {
+	return (
+		left.ownerId === right.ownerId &&
+		left.pid === right.pid &&
+		left.createdAtMs === right.createdAtMs
+	);
+}
+
+type LockSnapshot = {
+	ownerId: string;
+	pid?: number;
+	mtimeMs: number;
+	createdAtMs?: number;
+};
+
 async function readLockSnapshot(
 	lockFile: string,
-): Promise<{ ownerId: string; pid?: number; mtimeMs: number } | undefined> {
+): Promise<LockSnapshot | undefined> {
 	try {
 		const [fileStat, text] = await Promise.all([
 			stat(lockFile),
 			readFile(lockFile, "utf8"),
 		]);
-		const [ownerId = "", pidText] = text.split(/\r?\n/);
+		const [ownerId = "", pidText, createdAtText] = text.split(/\r?\n/);
 		const pid = Number.parseInt(pidText ?? "", 10);
+		const createdAtMs = Date.parse(createdAtText ?? "");
 		return {
 			ownerId,
 			pid: Number.isFinite(pid) ? pid : undefined,
 			mtimeMs: fileStat.mtimeMs,
+			createdAtMs: Number.isFinite(createdAtMs) ? createdAtMs : undefined,
 		};
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
@@ -1541,6 +1602,7 @@ export function createTaskRunRecord(
 		dependsOn: task.dependsOn,
 		artifactGraph: taskArtifactGraph,
 		dynamicGenerated: task.dynamicGenerated,
+		foreachGenerated: task.foreachGenerated,
 		files,
 		lastMessage: blocked ? task.safety.permission.reason : undefined,
 	};
