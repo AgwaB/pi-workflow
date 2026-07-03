@@ -575,13 +575,13 @@ export async function formatStatus(cwd: string): Promise<string> {
 		await reconcileIndexedActiveRuns(cwd, cached);
 		const refreshed = (await readIndex(cwd).catch(() => cached)) ?? cached;
 		if (refreshed.runs.length === 0) return "No workflow runs found.";
-		return formatIndex(refreshed);
+		return formatIndex(cwd, refreshed);
 	}
 
 	await reconcileActiveRuns(cwd);
 	const rebuilt = await updateIndex(cwd).catch(() => readIndex(cwd));
 	if (!rebuilt || rebuilt.runs.length === 0) return "No workflow runs found.";
-	return formatIndex(rebuilt);
+	return formatIndex(cwd, rebuilt);
 }
 
 export async function formatRunDetails(
@@ -3039,14 +3039,17 @@ async function readCompiledWorkflow(
 	return readJson<CompiledWorkflow>(compiledWorkflowPath(cwd, runId));
 }
 
-function formatIndex(index: WorkflowIndexRecord): string {
-	return index.runs
-		.map((run) => {
+async function formatIndex(
+	cwd: string,
+	index: WorkflowIndexRecord,
+): Promise<string> {
+	const blocks = await Promise.all(
+		index.runs.map(async (run) => {
 			const lines = [
 				`${run.runId} [${run.status}] type=${run.type} updated=${run.updatedAt}`,
 				`tasks=${run.taskSummary.completed}/${run.taskSummary.total} completed, running=${run.taskSummary.running}, pending=${run.taskSummary.pending}, blocked=${run.taskSummary.blocked}, failed=${run.taskSummary.failed}, skipped=${run.taskSummary.skipped}, interrupted=${run.taskSummary.interrupted}`,
 			];
-			for (const task of run.tasks) {
+			for (const task of await indexTasksForStatus(cwd, run)) {
 				const message = task.lastMessage ? ` — ${task.lastMessage}` : "";
 				const kind = task.kind && task.kind !== "main" ? ` ${task.kind}` : "";
 				lines.push(
@@ -3054,8 +3057,34 @@ function formatIndex(index: WorkflowIndexRecord): string {
 				);
 			}
 			return lines.join("\n");
-		})
-		.join("\n\n");
+		}),
+	);
+	return blocks.join("\n\n");
+}
+
+type WorkflowIndexTaskEntry = NonNullable<
+	WorkflowIndexRecord["runs"][number]["tasks"]
+>[number];
+
+async function indexTasksForStatus(
+	cwd: string,
+	run: WorkflowIndexRecord["runs"][number],
+): Promise<WorkflowIndexTaskEntry[]> {
+	if (Array.isArray(run.tasks)) return run.tasks;
+	const fullRun = await readRunRecord(cwd, run.runId).catch(() => undefined);
+	return (
+		fullRun?.tasks.map((task) => ({
+			taskId: task.taskId,
+			displayName: task.displayName,
+			agent: task.agent,
+			kind: task.kind,
+			stageId: task.stageId,
+			backendHandle: task.backendHandle,
+			status: task.status,
+			statusDetail: task.statusDetail,
+			lastMessage: task.lastMessage,
+		})) ?? []
+	);
 }
 
 function formatTask(

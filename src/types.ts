@@ -737,7 +737,11 @@ export interface WorkflowIndexRecord {
 		rootRunId?: string;
 		round?: number;
 		fanout?: unknown[];
-		tasks: Array<{
+		/**
+		 * Deprecated compatibility projection. New index writes omit task rows;
+		 * consumers that need task-level details should load runJson/run.json.
+		 */
+		tasks?: Array<{
 			taskId: string;
 			displayName: string;
 			agent: string;

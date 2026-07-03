@@ -25,6 +25,7 @@ import {
 	buildRunSourceContext,
 	evaluateLoopUntilCondition,
 	formatRun,
+	formatStatus,
 	resumeRun,
 	runDynamicControllerEngineIntegrityCheckForTests,
 	stopRun,
@@ -19407,7 +19408,7 @@ test("workflow_dynamic tool starts spec-less direct dynamic runs", async () => {
 	}
 });
 
-test("workflow index preserves run linkage and task metadata", async () => {
+test("workflow index preserves run linkage without embedding task rows", async () => {
 	const cwd = makeProject();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
@@ -19430,8 +19431,12 @@ test("workflow index preserves run linkage and task metadata", async () => {
 		assert.ok(indexed);
 		assert.equal(indexed.parentRunId, "workflow_parent");
 		assert.equal(indexed.rootRunId, "workflow_root");
-		assert.equal(indexed.tasks[0].kind, run.tasks[0].kind);
-		assert.equal(indexed.tasks[0].stageId, run.tasks[0].stageId);
+		assert.equal(indexed.taskSummary.total, run.tasks.length);
+		assert.equal(
+			indexed.runJson,
+			join(".pi", "workflows", run.runId, "run.json"),
+		);
+		assert.equal(Object.hasOwn(indexed, "tasks"), false);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
@@ -19459,8 +19464,8 @@ test("workflow index incrementally replaces only the changed run entry", async (
 			join(cwd, "second.json"),
 			{ runId: "workflow_index_second" },
 		);
-		first.tasks[0].lastMessage = "first original";
-		second.tasks[0].lastMessage = "second original";
+		first.name = "first original";
+		second.name = "second original";
 		await writeRunRecord(cwd, first);
 		await writeRunRecord(cwd, second);
 		await flushPendingIndexUpdatesForTests();
@@ -19469,8 +19474,9 @@ test("workflow index incrementally replaces only the changed run entry", async (
 			(entry) => entry.runId === second.runId,
 		);
 		assert.ok(secondBefore);
+		assert.equal(Object.hasOwn(secondBefore, "tasks"), false);
 
-		first.tasks[0].lastMessage = "first updated";
+		first.name = "first updated";
 		await writeRunRecord(cwd, first);
 		await flushPendingIndexUpdatesForTests();
 		const after = readWorkflowIndexFile(cwd);
@@ -19478,8 +19484,76 @@ test("workflow index incrementally replaces only the changed run entry", async (
 		const secondAfter = after.runs.find(
 			(entry) => entry.runId === second.runId,
 		);
-		assert.equal(firstAfter?.tasks[0].lastMessage, "first updated");
+		assert.ok(firstAfter);
+		assert.equal(firstAfter.name, "first updated");
+		assert.equal(Object.hasOwn(firstAfter, "tasks"), false);
 		assert.deepEqual(secondAfter, secondBefore);
+	} finally {
+		setIndexUpdateDebounceMsForTests(undefined);
+		await flushPendingIndexUpdatesForTests().catch(() => undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("workflow index incremental update reads and slims legacy task arrays", async () => {
+	const cwd = makeProject();
+	setIndexUpdateDebounceMsForTests(10_000);
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const spec = artifactGraphWorkflowSpec();
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Index legacy compatibility",
+		});
+		const { run: first } = await createRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "first.json"),
+			{ runId: "workflow_index_legacy_first" },
+		);
+		const { run: second } = await createRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "second.json"),
+			{ runId: "workflow_index_legacy_second" },
+		);
+		await writeRunRecord(cwd, first);
+		await writeRunRecord(cwd, second);
+		await flushPendingIndexUpdatesForTests();
+
+		const seeded = readWorkflowIndexFile(cwd);
+		const legacy = seeded.runs.find((entry) => entry.runId === second.runId);
+		assert.ok(legacy);
+		legacy.name = "legacy-only summary";
+		legacy.tasks = second.tasks.map((task) => ({
+			taskId: task.taskId,
+			displayName: task.displayName,
+			agent: task.agent,
+			kind: task.kind,
+			stageId: task.stageId,
+			status: task.status,
+			statusDetail: task.statusDetail,
+			lastMessage: "legacy index row",
+		}));
+		writeFileSync(
+			join(cwd, ".pi", "workflows", "index.json"),
+			`${JSON.stringify(seeded, null, 2)}\n`,
+		);
+
+		first.name = "changed without tasks";
+		await writeRunRecord(cwd, first);
+		await flushPendingIndexUpdatesForTests();
+		const after = readWorkflowIndexFile(cwd);
+		const changed = after.runs.find((entry) => entry.runId === first.runId);
+		const unchangedLegacy = after.runs.find(
+			(entry) => entry.runId === second.runId,
+		);
+		assert.ok(changed);
+		assert.ok(unchangedLegacy);
+		assert.equal(changed.name, "changed without tasks");
+		assert.equal(Object.hasOwn(changed, "tasks"), false);
+		assert.equal(unchangedLegacy.name, "legacy-only summary");
+		assert.equal(Object.hasOwn(unchangedLegacy, "tasks"), false);
 	} finally {
 		setIndexUpdateDebounceMsForTests(undefined);
 		await flushPendingIndexUpdatesForTests().catch(() => undefined);
@@ -19514,16 +19588,17 @@ test("workflow index incremental update falls back when index is corrupt", async
 		await flushPendingIndexUpdatesForTests();
 		writeFileSync(join(cwd, ".pi", "workflows", "index.json"), "{not json");
 
-		first.tasks[0].lastMessage = "rebuilt from run json";
+		first.name = "rebuilt from run json";
 		await writeRunRecord(cwd, first);
 		await flushPendingIndexUpdatesForTests();
 		const rebuilt = readWorkflowIndexFile(cwd);
-		assert.equal(rebuilt.runs.length, 2);
-		assert.equal(
-			rebuilt.runs.find((entry) => entry.runId === first.runId)?.tasks[0]
-				.lastMessage,
-			"rebuilt from run json",
+		const rebuiltFirst = rebuilt.runs.find(
+			(entry) => entry.runId === first.runId,
 		);
+		assert.equal(rebuilt.runs.length, 2);
+		assert.ok(rebuiltFirst);
+		assert.equal(rebuiltFirst.name, "rebuilt from run json");
+		assert.equal(Object.hasOwn(rebuiltFirst, "tasks"), false);
 		assert.ok(rebuilt.runs.some((entry) => entry.runId === second.runId));
 	} finally {
 		setIndexUpdateDebounceMsForTests(undefined);
@@ -19565,12 +19640,50 @@ test("workflow index debounces nonterminal updates but publishes terminal runs i
 		await eventually(() => {
 			const index = readWorkflowIndexFile(cwd);
 			const indexed = index.runs.find((entry) => entry.runId === run.runId);
-			assert.equal(indexed?.status, "completed");
-			assert.equal(indexed?.tasks[0].lastMessage, "terminal now");
+			assert.ok(indexed);
+			assert.equal(indexed.status, "completed");
+			assert.equal(Object.hasOwn(indexed, "tasks"), false);
 			return index;
 		});
+		const persisted = await readRunRecord(cwd, run.runId);
+		assert.equal(persisted.tasks[0].lastMessage, "terminal now");
 	} finally {
 		setIndexUpdateDebounceMsForTests(undefined);
+		await flushPendingIndexUpdatesForTests().catch(() => undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("workflow status hydrates task details from run.json for slim index entries", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const spec = artifactGraphWorkflowSpec();
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Index status hydration",
+		});
+		const { run } = await createRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "status-hydration.json"),
+			{ runId: "workflow_index_status_hydration" },
+		);
+		setTaskTerminal(run.tasks[0], "completed", "completed", {
+			lastMessage: "status from run json detail",
+		});
+		await writeRunRecord(cwd, run);
+		await updateIndex(cwd);
+		const index = readWorkflowIndexFile(cwd);
+		const indexed = index.runs.find((entry) => entry.runId === run.runId);
+		assert.ok(indexed);
+		assert.equal(Object.hasOwn(indexed, "tasks"), false);
+
+		const status = await formatStatus(cwd);
+		assert.match(status, /workflow_index_status_hydration/);
+		assert.match(status, /- task-1/);
+		assert.match(status, /status from run json detail/);
+	} finally {
 		await flushPendingIndexUpdatesForTests().catch(() => undefined);
 		rmSync(cwd, { recursive: true, force: true });
 	}
@@ -24441,6 +24554,30 @@ test("workflow progress health flags stale pending-only runs", () => {
 	assert.equal(health.suggestion, "resume");
 });
 
+test("workflow progress health handles slim index summaries without task rows", () => {
+	const nowMs = Date.parse("2026-07-01T13:00:00.000Z");
+	const run = workflowViewRun([
+		workflowViewTask({ status: "pending", displayName: "verify-claims" }),
+	]);
+	run.taskSummary = {
+		total: 1,
+		pending: 1,
+		running: 0,
+		completed: 0,
+		failed: 0,
+		skipped: 0,
+		blocked: 0,
+		interrupted: 0,
+	};
+	run.updatedAt = "2026-07-01T12:00:00.000Z";
+	const summary = workflowViewSummary(run);
+	delete summary.tasks;
+
+	const health = diagnoseWorkflowRunHealth(summary, { nowMs });
+	assert.equal(health.state, "likely-stuck");
+	assert.equal(health.suggestion, "resume");
+});
+
 test("workflow TUI renders health in task list and detail", () => {
 	const heartbeat = new Date(Date.now() - 30_000).toISOString();
 	const startedAt = new Date(Date.now() - 10 * 60_000).toISOString();
@@ -24480,7 +24617,9 @@ test("workflow TUI renders selected run health without status-command detours", 
 	});
 	const { view, run } = workflowViewFixture([task]);
 	run.updatedAt = heartbeat;
-	view.flows = [workflowViewSummary(run)];
+	const slimSummary = workflowViewSummary(run);
+	delete slimSummary.tasks;
+	view.flows = [slimSummary];
 	view.mode = "runs";
 
 	const rendered = workflowViewText(view, 132);

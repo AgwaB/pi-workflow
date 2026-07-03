@@ -1330,6 +1330,7 @@ async function updateIndexIncremental(
 	const changedEntry = buildIndexEntry(cwd, changedRun);
 	const entries = existing.runs
 		.filter((entry) => entry.runId !== changedRun.runId)
+		.map(stripIndexTaskRows)
 		.concat(changedEntry);
 	return {
 		schemaVersion: 1,
@@ -1377,6 +1378,11 @@ function selectIndexEntries(
 	);
 }
 
+function stripIndexTaskRows(entry: WorkflowIndexRunEntry): WorkflowIndexRunEntry {
+	const { tasks: _tasks, ...slim } = entry;
+	return slim;
+}
+
 function buildIndexEntry(
 	cwd: string,
 	run: WorkflowRunRecord,
@@ -1395,17 +1401,6 @@ function buildIndexEntry(
 		round: run.round,
 		fanout: run.fanout,
 		runJson: toProjectPath(cwd, workflowRunPath(cwd, run.runId)),
-		tasks: run.tasks.map((task) => ({
-			taskId: task.taskId,
-			displayName: task.displayName,
-			agent: task.agent,
-			kind: task.kind,
-			stageId: task.stageId,
-			backendHandle: task.backendHandle,
-			status: task.status,
-			statusDetail: task.statusDetail,
-			lastMessage: task.lastMessage,
-		})),
 	};
 }
 
@@ -1415,15 +1410,16 @@ function isIndexRecordLike(
 	return (
 		value?.schemaVersion === 1 &&
 		Array.isArray(value.runs) &&
-		value.runs.every(
-			(entry) =>
-				entry &&
-				typeof entry === "object" &&
+		value.runs.every((entry) => {
+			if (!entry || typeof entry !== "object") return false;
+			const tasks = (entry as { tasks?: unknown }).tasks;
+			return (
 				typeof entry.runId === "string" &&
 				typeof entry.updatedAt === "string" &&
 				typeof entry.status === "string" &&
-				Array.isArray(entry.tasks),
-		)
+				(tasks === undefined || Array.isArray(tasks))
+			);
+		})
 	);
 }
 
