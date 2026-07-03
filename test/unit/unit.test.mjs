@@ -8761,9 +8761,19 @@ test("compiler injects runtime task for single stages only", async () => {
 	const cwd = makeProject();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
+		writeFileSync(
+			join(cwd, ".pi", "agents", "lens-agent.md"),
+			`---\ndescription: lens-agent\ntools: ["read"]\nreadOnly: true\n---\n# Core Principles\n\nUse domain evidence.\n\n# Output Format\n\nDo not include this output rule.\n`,
+		);
 		const compiled = await compileWorkflow(
 			workflowSpec("unit-scout", {
-				roles: { lens: { prompt: "Role context marker." } },
+				roles: {
+					lens: {
+						fromAgent: "lens-agent",
+						prompt: "Role context marker.",
+						includeSections: ["Core Principles"],
+					},
+				},
 				artifactGraph: {
 					stages: [
 						{ id: "entry", type: "single", prompt: "Entry instructions." },
@@ -8809,12 +8819,14 @@ test("compiler injects runtime task for single stages only", async () => {
 		);
 		assert.match(
 			byKey["entry.main"].compiledPrompt,
-			/# Role Context\n\n## Role: lens\nRole context marker\./,
+			/# Role Context\n\n## Role: lens\n# Core Principles\n\nUse domain evidence\.\n\nRole context marker\./,
 		);
-		assert.match(
+		assert.doesNotMatch(
 			byKey["entry.main"].compiledPrompt,
-			/# Role Context\n\n## Role: lens\nRole context marker\./,
+			/Do not include this output rule/,
 		);
+		assert.equal(compiled.roles[0].fromAgent, "lens-agent");
+		assert.match(compiled.roles[0].sourcePath, /lens-agent\.md$/);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}

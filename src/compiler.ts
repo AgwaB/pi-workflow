@@ -3,6 +3,7 @@ import { dirname, resolve } from "node:path";
 
 import { loadAgentByName } from "./agents.js";
 import { DYNAMIC_OUTPUT_PROFILES } from "./dynamic-profiles.js";
+import { compileRole } from "./roles.js";
 import {
 	classifyToolCapability,
 	effectiveToolClassification,
@@ -663,15 +664,19 @@ async function compileArtifactGraphPlan(
 		return defaultAgent;
 	};
 	const roleEntries = Object.entries(spec.roles ?? {});
-	const roles = roleEntries.map(([name, role]: [string, any]) => ({
-		name,
-		fromAgent: role.fromAgent,
-		content: role.prompt ?? "",
-		maxChars: role.maxChars ?? 8000,
-		truncated: false,
-		includedSections: [],
-		excludedSections: [],
-	}));
+	const roles = await Promise.all(
+		roleEntries.map(async ([name, role]: [string, any]) => {
+			const sourceAgent = role.fromAgent
+				? await loadWorkflowAgent(
+						role.fromAgent,
+						options.cwd,
+						agentCache,
+						`$.roles.${name}.fromAgent`,
+					)
+				: undefined;
+			return compileRole(name, role, sourceAgent);
+		}),
+	);
 	const roleText = roles.length
 		? `# Role Context\n\n${roles.map((r) => `## Role: ${r.name}\n${r.content}`).join("\n\n")}`
 		: "";
