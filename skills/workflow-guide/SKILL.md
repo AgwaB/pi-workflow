@@ -29,6 +29,7 @@ Resolve paths relative to this skill directory. Treat those docs as the source o
 - For deterministic local post-processing, declare a `support` object with `support.uses` pointing to a bundle-local `./*.mjs` helper; support is trusted local code, not sandboxed subagent work and does not use a separate `type` value.
 - For bounded iteration, use `loop` with fixed child stages, `maxRounds`, and deterministic `until`.
 - Agent-declared tools are the authority ceiling; workflow `tools` can only narrow them.
+- To reuse agent knowledge across stages, declare top-level `roles` (`fromAgent` extracts safe agent sections; `prompt` appends literal text). Compiled role text is injected as a `# Role Context` block; check the result with `/workflow roles <workflow>`. See "Roles" in `docs/usage.md`.
 - Keep review/research workflows read-only unless the workflow explicitly documents managed-worktree mutation.
 - Write-capable workflows need explicit worktree policy, validation/check stages, and protected-path awareness.
 - In non-git workspaces with `worktreePolicy: "off"`, writes mutate the live directory.
