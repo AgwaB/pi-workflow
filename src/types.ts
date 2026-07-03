@@ -203,7 +203,14 @@ export interface ArtifactGraphStageSpec {
 	maxRuntimeMs?: number;
 	maxConcurrency?: number;
 	maxItems?: number;
-	from?: string | string[] | { source: string; path: string };
+	from?:
+		| string
+		| string[]
+		| {
+				source: string;
+				path: string;
+				streaming?: { enabled: true; minChunk?: number };
+			};
 	after?: string | string[];
 	sourcePolicy?: "success" | "partial" | "require-success";
 	sourceProjection?: {

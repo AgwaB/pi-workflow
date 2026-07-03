@@ -95,6 +95,8 @@ import {
 	assertRunTaskPositionalAlignment,
 	buildForeachGeneratedTasks,
 	dependenciesReady,
+	foreachStreamingEnabled,
+	foreachStreamingMinChunk,
 	markDagDependentsSkipped,
 	nextTaskRecordIndex,
 	reconcileDynamicGeneratedRunRecords,
@@ -776,6 +778,7 @@ async function scheduleDag(
 				compiledTask,
 			);
 			if (changed) return;
+			if (foreachStreamingEnabled(compiledTask)) continue;
 		}
 
 		if (compiledTask.stageMaxConcurrency !== undefined) {
@@ -926,12 +929,14 @@ async function materializeForeachTask(
 	const sourceTasks = run.tasks.filter((task) =>
 		sourceStageIds.includes(task.stageId ?? ""),
 	);
+	const streaming = foreachStreamingEnabled(template);
 	const extracted = await extractArtifactGraphForeachItems(
 		cwd,
 		{
 			from: template.foreach.from,
 			sourcePolicy: stageSourcePolicy(compiledFlow, template.stageId),
 			maxItems: template.foreach.maxItems,
+			streaming,
 		},
 		sourceTasks,
 	);
@@ -959,6 +964,21 @@ async function materializeForeachTask(
 	}
 
 	const placeholderSpecId = template.id;
+	if (streaming) {
+		return await materializeStreamingForeachTask({
+			cwd,
+			run,
+			compiledFlow,
+			index,
+			templateRunTask,
+			placeholderSpecId,
+			sourceTaskSpecIds: sourceTasks.map((task) => task.specId),
+			itemSourceSpecIds: extracted.itemSourceSpecIds ?? [],
+			generatedTasks: generated.tasks,
+			waitingForSources: extracted.waitingForSources ?? false,
+			minChunk: foreachStreamingMinChunk(template),
+		});
+	}
 	const generatedSpecIds = generated.tasks.map((task) => task.id);
 	const hasDownstreamDependents = compiledFlow.tasks.some(
 		(task, taskIndex) =>
@@ -997,20 +1017,183 @@ async function materializeForeachTask(
 	return true;
 }
 
+async function materializeStreamingForeachTask(input: {
+	cwd: string;
+	run: WorkflowRunRecord;
+	compiledFlow: CompiledWorkflow;
+	index: number;
+	templateRunTask: WorkflowTaskRunRecord;
+	placeholderSpecId: string;
+	sourceTaskSpecIds: string[];
+	itemSourceSpecIds: string[];
+	generatedTasks: CompiledTask[];
+	waitingForSources: boolean;
+	minChunk: number;
+}): Promise<boolean> {
+	const sourceTaskSpecIdSet = new Set(input.sourceTaskSpecIds);
+	const generatedTasksWithItemDeps = input.generatedTasks.map((task, index) => {
+		const itemSourceSpecId = input.itemSourceSpecIds[index];
+		if (!itemSourceSpecId) return task;
+		return {
+			...task,
+			dependsOn: replaceSourceDependenciesWithItemSource(
+				task.dependsOn ?? [],
+				sourceTaskSpecIdSet,
+				itemSourceSpecId,
+			),
+		};
+	});
+	const existingGeneratedSpecIds = input.compiledFlow.tasks
+		.filter(
+			(task) =>
+				task.foreachGenerated?.placeholderSpecId === input.placeholderSpecId,
+		)
+		.map((task) => task.id);
+	const existingGeneratedSpecIdSet = new Set(existingGeneratedSpecIds);
+	const newGeneratedTasks = generatedTasksWithItemDeps.filter(
+		(task) => !existingGeneratedSpecIdSet.has(task.id),
+	);
+	const allGeneratedSpecIds = [
+		...existingGeneratedSpecIds,
+		...newGeneratedTasks.map((task) => task.id),
+	];
+	const shouldHoldForMinChunk =
+		input.waitingForSources &&
+		newGeneratedTasks.length > 0 &&
+		newGeneratedTasks.length < input.minChunk;
+	if (shouldHoldForMinChunk) return false;
+
+	let changed = false;
+	if (newGeneratedTasks.length > 0) {
+		let compiledInsertIndex = input.index + 1;
+		while (
+			input.compiledFlow.tasks[compiledInsertIndex]?.foreachGenerated
+				?.placeholderSpecId === input.placeholderSpecId
+		) {
+			compiledInsertIndex += 1;
+		}
+		input.compiledFlow.tasks.splice(compiledInsertIndex, 0, ...newGeneratedTasks);
+
+		let runInsertIndex = input.index + 1;
+		while (
+			input.run.tasks[runInsertIndex]?.foreachGenerated?.placeholderSpecId ===
+			input.placeholderSpecId
+		) {
+			runInsertIndex += 1;
+		}
+		const nextIndex = nextTaskRecordIndex(input.run);
+		const generatedRunTasks = newGeneratedTasks.map((task, offset) =>
+			createTaskRunRecord(input.cwd, input.run.runId, task, nextIndex + offset),
+		);
+		input.run.tasks.splice(runInsertIndex, 0, ...generatedRunTasks);
+		changed = true;
+	}
+
+	const dependencyTargets = [input.placeholderSpecId, ...allGeneratedSpecIds];
+	for (const task of input.compiledFlow.tasks) {
+		if (!task.dependsOn) continue;
+		const replaced = replaceDependencyList(
+			task.dependsOn,
+			input.placeholderSpecId,
+			dependencyTargets,
+		);
+		if (JSON.stringify(task.dependsOn) !== JSON.stringify(replaced)) {
+			task.dependsOn = replaced;
+			changed = true;
+		}
+	}
+	for (const task of input.run.tasks) {
+		if (!task.dependsOn) continue;
+		const replaced = replaceDependencyList(
+			task.dependsOn,
+			input.placeholderSpecId,
+			dependencyTargets,
+		);
+		if (JSON.stringify(task.dependsOn) !== JSON.stringify(replaced)) {
+			task.dependsOn = replaced;
+			changed = true;
+		}
+	}
+
+	if (!input.waitingForSources) {
+		const statusDetail =
+			allGeneratedSpecIds.length === 0
+				? "foreach_empty"
+				: "foreach_streaming_complete";
+		const lastMessage =
+			allGeneratedSpecIds.length === 0
+				? "foreach produced 0 item(s)"
+				: `foreach streaming materialized ${allGeneratedSpecIds.length} item(s)`;
+		setTaskTerminal(input.templateRunTask, "completed", statusDetail, {
+			lastMessage,
+		});
+		changed = true;
+	} else if (newGeneratedTasks.length > 0) {
+		input.templateRunTask.statusDetail = "foreach_streaming_waiting";
+		input.templateRunTask.lastMessage = `foreach streaming materialized ${allGeneratedSpecIds.length} item(s); waiting for more source tasks`;
+		changed = true;
+	}
+
+	if (!changed) return false;
+	await writeJsonAtomic(
+		compiledWorkflowPath(input.cwd, input.run.runId),
+		input.compiledFlow,
+	);
+	await writeRunRecord(input.cwd, input.run);
+	return true;
+}
+
+function replaceSourceDependenciesWithItemSource(
+	dependsOn: string[],
+	sourceTaskSpecIds: Set<string>,
+	itemSourceSpecId: string,
+): string[] {
+	const replaced: string[] = [];
+	let inserted = false;
+	for (const dep of dependsOn) {
+		if (!sourceTaskSpecIds.has(dep)) {
+			replaced.push(dep);
+			continue;
+		}
+		if (!inserted) {
+			replaced.push(itemSourceSpecId);
+			inserted = true;
+		}
+	}
+	if (!inserted) replaced.push(itemSourceSpecId);
+	return [...new Set(replaced)];
+}
+
 async function extractArtifactGraphForeachItems(
 	cwd: string,
-	stage: { from: unknown; sourcePolicy?: string; maxItems?: number },
+	stage: {
+		from: unknown;
+		sourcePolicy?: string;
+		maxItems?: number;
+		streaming?: boolean;
+	},
 	sourceTasks: WorkflowTaskRunRecord[],
-): Promise<{ items?: unknown[]; error?: string }> {
+): Promise<{
+	items?: unknown[];
+	itemSourceSpecIds?: string[];
+	error?: string;
+	waitingForSources?: boolean;
+}> {
 	const items: unknown[] = [];
+	const itemSourceSpecIds: string[] = [];
 	const path = (stage.from as any)?.path;
 	if (typeof path !== "string" || !path.startsWith("$.")) {
 		return {
 			error: "foreach.from.path must be a control JSONPath like $.items",
 		};
 	}
+	let waitingForSources = false;
 	for (const task of sourceTasks) {
 		if (task.status !== "completed") {
+			if (stage.streaming && !isTerminalTaskStatus(task.status)) {
+				waitingForSources = true;
+				continue;
+			}
 			if (stage.sourcePolicy !== "partial")
 				return { error: `${task.taskId} did not complete` };
 			continue;
@@ -1026,7 +1209,10 @@ async function extractArtifactGraphForeachItems(
 				}
 				continue;
 			}
-			items.push(...value);
+			for (const item of value) {
+				items.push(item);
+				itemSourceSpecIds.push(task.specId);
+			}
 		} catch (error) {
 			if (stage.sourcePolicy !== "partial") {
 				return {
@@ -1040,7 +1226,7 @@ async function extractArtifactGraphForeachItems(
 			error: `foreach extracted ${items.length} items, exceeding maxItems=${stage.maxItems}`,
 		};
 	}
-	return { items };
+	return { items, itemSourceSpecIds, waitingForSources };
 }
 
 async function launchPendingTaskAt(

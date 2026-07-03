@@ -136,10 +136,17 @@ export function reconcileForeachGeneratedRunRecords(
 	const compiledSpecIds = new Set(
 		compiledFlow.tasks.map((task) => compiledTaskSpecId(task)),
 	);
+	const compiledTaskBySpecId = new Map(
+		compiledFlow.tasks.map((task) => [compiledTaskSpecId(task), task]),
+	);
 	const placeholderToGeneratedSpecIds = new Map<string, string[]>();
+	const streamingPlaceholderSpecIds = new Set<string>();
 
 	for (const compiledTask of compiledFlow.tasks) {
 		const specId = compiledTaskSpecId(compiledTask);
+		if (compiledTask.foreach && foreachStreamingEnabled(compiledTask)) {
+			streamingPlaceholderSpecIds.add(specId);
+		}
 		const placeholderSpecId = foreachGeneratedPlaceholderSpecId(
 			compiledTask,
 			compiledFlow,
@@ -170,6 +177,14 @@ export function reconcileForeachGeneratedRunRecords(
 			task.specId,
 		);
 		if (generatedSpecIds && !placeholderSpecId) {
+			const compiledTask = compiledTaskBySpecId.get(task.specId);
+			if (
+				compiledTask?.foreach &&
+				streamingPlaceholderSpecIds.has(task.specId)
+			) {
+				filteredRunTasks.push(task);
+				continue;
+			}
 			if (generatedSpecIds.includes(task.specId)) {
 				placeholderSpecId = task.specId;
 				task.foreachGenerated = { placeholderSpecId };
@@ -246,6 +261,7 @@ export function reconcileForeachGeneratedRunRecords(
 		const replaced = replaceForeachGeneratedDependencies(
 			task.dependsOn,
 			placeholderToGeneratedSpecIds,
+			streamingPlaceholderSpecIds,
 		);
 		if (!sameStringList(task.dependsOn, replaced)) {
 			task.dependsOn = replaced;
@@ -369,12 +385,15 @@ function foreachPlaceholderSpecId(
 function replaceForeachGeneratedDependencies(
 	dependsOn: string[],
 	placeholderToGeneratedSpecIds: Map<string, string[]>,
+	keepPlaceholderSpecIds = new Set<string>(),
 ): string[] {
 	const replaced: string[] = [];
 	for (const dep of dependsOn) {
 		const generatedSpecIds = placeholderToGeneratedSpecIds.get(dep);
-		if (generatedSpecIds) replaced.push(...generatedSpecIds);
-		else replaced.push(dep);
+		if (generatedSpecIds) {
+			if (keepPlaceholderSpecIds.has(dep)) replaced.push(dep);
+			replaced.push(...generatedSpecIds);
+		} else replaced.push(dep);
 	}
 	return [...new Set(replaced)];
 }
@@ -480,12 +499,45 @@ export function dependenciesReady(
 	if (deps.length === 0) return true;
 	const partial =
 		stageSourcePolicy(compiledFlow, compiledTask.stageId ?? "") === "partial";
+	if (foreachStreamingEnabled(compiledTask)) {
+		let completedDependencyReady = false;
+		let allKnownDependenciesTerminal = true;
+		for (const dep of deps) {
+			const status = bySpecId.get(dep)?.status;
+			if (status === "completed") {
+				completedDependencyReady = true;
+				continue;
+			}
+			if (status && isTerminalTaskStatus(status)) {
+				if (!partial) return false;
+				continue;
+			}
+			allKnownDependenciesTerminal = false;
+		}
+		return completedDependencyReady || allKnownDependenciesTerminal;
+	}
 	return deps.every((dep) => {
 		const status = bySpecId.get(dep)?.status;
 		if (status === "completed") return true;
 		if (partial && status && isTerminalTaskStatus(status)) return true;
 		return false;
 	});
+}
+
+export function foreachStreamingEnabled(compiledTask: CompiledTask): boolean {
+	const streaming = (compiledTask.foreach?.from as any)?.streaming;
+	return Boolean(
+		streaming &&
+			typeof streaming === "object" &&
+			(streaming as { enabled?: unknown }).enabled === true,
+	);
+}
+
+export function foreachStreamingMinChunk(compiledTask: CompiledTask): number {
+	const value = (compiledTask.foreach?.from as any)?.streaming?.minChunk;
+	return typeof value === "number" && Number.isFinite(value) && value > 0
+		? Math.floor(value)
+		: 1;
 }
 
 export function buildForeachGeneratedTasks(

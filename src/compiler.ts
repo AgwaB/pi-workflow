@@ -179,7 +179,13 @@ function lowerArtifactGraphFrom(from: ArtifactGraphStageSpec["from"]): unknown {
 		!Array.isArray(from) &&
 		typeof from.source === "string"
 	) {
-		return { stage: from.source, path: from.path };
+		return {
+			stage: from.source,
+			path: from.path,
+			...((from as { streaming?: unknown }).streaming !== undefined
+				? { streaming: (from as { streaming?: unknown }).streaming }
+				: {}),
+		};
 	}
 	return from;
 }

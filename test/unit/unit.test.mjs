@@ -8769,6 +8769,72 @@ test("schema and compiler accept partial sourcePolicy on foreach", async () => {
 	}
 });
 
+test("schema and compiler accept opt-in streaming foreach refs", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const spec = artifactGraphWorkflowSpec({
+			artifactGraph: {
+				stages: [
+					{ id: "extract", type: "single", prompt: "Extract" },
+					{
+						id: "verify",
+						type: "foreach",
+						from: {
+							source: "extract",
+							path: "$.items",
+							streaming: { enabled: true, minChunk: 2 },
+						},
+						each: { prompt: "Verify ${item}" },
+					},
+				],
+			},
+		});
+		assert.deepEqual(parseWorkflow(spec).artifactGraph.stages[1].from, {
+			source: "extract",
+			path: "$.items",
+			streaming: { enabled: true, minChunk: 2 },
+		});
+		const compiled = await compileWorkflow(spec, { cwd, task: "Review" });
+		assert.deepEqual(compiled.tasks[1].foreach.from, {
+			stage: "extract",
+			path: "$.items",
+			streaming: { enabled: true, minChunk: 2 },
+		});
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("schema rejects inert streaming foreach refs", () => {
+	const error = assertThrowsFlow(() =>
+		parsePublicWorkflow(
+			artifactGraphWorkflowSpec({
+				artifactGraph: {
+					stages: [
+						{ id: "extract", type: "single", prompt: "Extract" },
+						{
+							id: "verify",
+							type: "foreach",
+							from: {
+								source: "extract",
+								path: "$.items",
+								streaming: { enabled: false },
+							},
+							each: { prompt: "Verify ${item}" },
+						},
+					],
+				},
+			}),
+		),
+	);
+	assertIssue(
+		error,
+		"$.artifactGraph.stages[1].from.streaming.enabled",
+		"must be true",
+	);
+});
+
 test("compiler warns when readOnly stage keeps mutation-capable tools", async () => {
 	const cwd = makeProject();
 	try {
@@ -10421,6 +10487,173 @@ test("successive foreach materialization keeps task ids unique", async () => {
 				.filter((task) => task.stageId === "verify")
 				.map((task) => task.specId),
 			["verify.item-001", "verify.item-002"],
+		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("streaming foreach appends items before all upstream siblings finish", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const spec = workflowSpec("unit-scout", {
+			artifactGraph: {
+				stages: [
+					{ id: "extract", type: "single", prompt: "Extract" },
+					{
+						id: "review",
+						type: "foreach",
+						from: { source: "extract", path: "$.claims" },
+						each: { prompt: "Review ${item}" },
+					},
+					{
+						id: "verify",
+						type: "foreach",
+						from: {
+							source: "review",
+							path: "$.findings",
+							streaming: { enabled: true },
+						},
+						each: { prompt: "Verify ${item}" },
+					},
+					{ id: "summary", type: "reduce", from: "verify", prompt: "Sum" },
+				],
+			},
+		});
+		const compiled = await compileWorkflow(spec, { cwd, task: "Check claims" });
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await completeTask(cwd, run.tasks[0], { claims: ["a", "b"] });
+		await writeRunRecord(cwd, run);
+
+		await scheduleRun(cwd, run.runId);
+		let current = await readRunRecord(cwd, run.runId);
+		await completeTask(cwd, taskBySpec(current, "review.item-001"), {
+			findings: [{ id: "FINDING_A", text: "A" }],
+		});
+		await writeRunRecord(cwd, current);
+
+		await scheduleRun(cwd, run.runId);
+		current = await readRunRecord(cwd, run.runId);
+		assert.deepEqual(
+			current.tasks.map((task) => task.specId),
+			[
+				"extract.main",
+				"review.item-001",
+				"review.item-002",
+				"verify.item",
+				"verify.finding_a",
+				"summary.main",
+			],
+		);
+		assert.equal(taskBySpec(current, "verify.item").status, "pending");
+		assert.equal(
+			taskBySpec(current, "verify.item").statusDetail,
+			"foreach_streaming_waiting",
+		);
+		assert.deepEqual(taskBySpec(current, "summary.main").dependsOn, [
+			"verify.item",
+			"verify.finding_a",
+		]);
+		assert.deepEqual(taskBySpec(current, "verify.finding_a").dependsOn, [
+			"review.item-001",
+		]);
+
+		await completeTask(cwd, taskBySpec(current, "review.item-002"), {
+			findings: [{ id: "FINDING_B", text: "B" }],
+		});
+		await writeRunRecord(cwd, current);
+		await scheduleRun(cwd, run.runId);
+		current = await readRunRecord(cwd, run.runId);
+		assert.deepEqual(
+			current.tasks
+				.filter((task) => task.stageId === "verify")
+				.map((task) => task.specId),
+			["verify.item", "verify.finding_a", "verify.finding_b"],
+		);
+		assert.equal(taskBySpec(current, "verify.item").status, "completed");
+		assert.equal(
+			taskBySpec(current, "verify.item").statusDetail,
+			"foreach_streaming_complete",
+		);
+		assert.deepEqual(taskBySpec(current, "summary.main").dependsOn, [
+			"verify.item",
+			"verify.finding_a",
+			"verify.finding_b",
+		]);
+		assert.deepEqual(taskBySpec(current, "verify.finding_b").dependsOn, [
+			"review.item-002",
+		]);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("streaming foreach minChunk holds small batches until enough items arrive", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const spec = workflowSpec("unit-scout", {
+			artifactGraph: {
+				stages: [
+					{ id: "extract", type: "single", prompt: "Extract" },
+					{
+						id: "review",
+						type: "foreach",
+						from: { source: "extract", path: "$.claims" },
+						each: { prompt: "Review ${item}" },
+					},
+					{
+						id: "verify",
+						type: "foreach",
+						from: {
+							source: "review",
+							path: "$.findings",
+							streaming: { enabled: true, minChunk: 2 },
+						},
+						each: { prompt: "Verify ${item}" },
+					},
+				],
+			},
+		});
+		const compiled = await compileWorkflow(spec, { cwd, task: "Check claims" });
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await completeTask(cwd, run.tasks[0], { claims: ["a", "b"] });
+		await writeRunRecord(cwd, run);
+		await scheduleRun(cwd, run.runId);
+		let current = await readRunRecord(cwd, run.runId);
+		await completeTask(cwd, taskBySpec(current, "review.item-001"), {
+			findings: [{ id: "FINDING_A", text: "A" }],
+		});
+		await writeRunRecord(cwd, current);
+		await scheduleRun(cwd, run.runId);
+		current = await readRunRecord(cwd, run.runId);
+		assert.equal(
+			current.tasks.some((task) => task.specId === "verify.finding_a"),
+			false,
+		);
+
+		await completeTask(cwd, taskBySpec(current, "review.item-002"), {
+			findings: [{ id: "FINDING_B", text: "B" }],
+		});
+		await writeRunRecord(cwd, current);
+		await scheduleRun(cwd, run.runId);
+		current = await readRunRecord(cwd, run.runId);
+		assert.deepEqual(
+			current.tasks
+				.filter((task) => task.stageId === "verify")
+				.map((task) => task.specId),
+			["verify.item", "verify.finding_a", "verify.finding_b"],
 		);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });

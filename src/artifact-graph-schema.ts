@@ -185,7 +185,8 @@ const UNTIL_KEYS = new Set([
 	"all",
 	"any",
 ]);
-const FOREACH_FROM_KEYS = new Set(["source", "path"]);
+const FOREACH_FROM_KEYS = new Set(["source", "path", "streaming"]);
+const FOREACH_STREAMING_KEYS = new Set(["enabled", "minChunk"]);
 const NORMAL_ARTIFACT_KINDS = new Set<WorkflowArtifactKind>([
 	"control",
 	"analysis",
@@ -611,6 +612,27 @@ function validateControlPathRef(
 			message: "must be a control JSONPath starting with $.",
 		});
 	}
+	if (value.streaming !== undefined) {
+		validateForeachStreaming(
+			value.streaming,
+			`${path}.streaming`,
+			issues,
+		);
+	}
+}
+
+function validateForeachStreaming(
+	value: unknown,
+	path: string,
+	issues: ValidationIssue[],
+): void {
+	const streaming = recordAt(value, path, issues);
+	if (!streaming) return;
+	rejectUnknownKeys(streaming, FOREACH_STREAMING_KEYS, path, issues);
+	if (streaming.enabled !== true) {
+		issues.push({ path: `${path}.enabled`, message: "must be true" });
+	}
+	optionalPositiveInteger(streaming.minChunk, `${path}.minChunk`, issues);
 }
 
 function validateKnownStageRef(
