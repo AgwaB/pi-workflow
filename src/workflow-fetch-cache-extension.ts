@@ -18,6 +18,7 @@ export interface WorkflowFetchCacheConfig {
 	runId: string;
 	taskId: string;
 	cacheDir: string;
+	maxInlineChars?: number;
 }
 
 export interface WorkflowFetchCacheExtensionWrapperOptions {
@@ -97,17 +98,23 @@ export function registerWorkflowFetchCacheExtension(
 						execute: async (toolCallId, params, signal, onUpdate) => {
 							const cacheKey = cacheKeyForParams(params);
 							if (!cacheKey) {
-								return await tool.execute!(
-									toolCallId,
-									params,
-									signal,
-									onUpdate,
+								return capFetchContentInlineResult(
+									await tool.execute!(
+										toolCallId,
+										params,
+										signal,
+										onUpdate,
+									),
+									config.maxInlineChars,
 								);
 							}
 							const hit = await readCacheRecord(config, cacheKey.key);
 							if (hit) {
 								await recordCacheEvent(config, "hit", cacheKey);
-								return materializeCacheHit(pi, storage, hit);
+								return capFetchContentInlineResult(
+									materializeCacheHit(pi, storage, hit),
+									config.maxInlineChars,
+								);
 							}
 							await recordCacheEvent(config, "miss", cacheKey);
 							const result = await tool.execute!(
@@ -124,7 +131,10 @@ export function registerWorkflowFetchCacheExtension(
 							const writeReason = cacheWriteSkipReason(result, storedData);
 							if (writeReason) {
 								await recordCacheEvent(config, "skip", cacheKey, writeReason);
-								return result;
+								return capFetchContentInlineResult(
+									result,
+									config.maxInlineChars,
+								);
 							}
 							await writeCacheRecord(config, {
 								schema: WORKFLOW_FETCH_CONTENT_CACHE_SCHEMA,
@@ -136,7 +146,10 @@ export function registerWorkflowFetchCacheExtension(
 								storedData: storedData!,
 							});
 							await recordCacheEvent(config, "write", cacheKey);
-							return withCacheDetails(result, { hit: false });
+							return capFetchContentInlineResult(
+								withCacheDetails(result, { hit: false }),
+								config.maxInlineChars,
+							);
 						},
 					});
 				};
@@ -303,6 +316,49 @@ function withCacheDetails(
 			},
 		},
 	};
+}
+
+function capFetchContentInlineResult(
+	result: ToolResult,
+	maxInlineChars: number | undefined,
+): ToolResult {
+	const maxChars = normalizeInlineCharCap(maxInlineChars);
+	if (maxChars === undefined || !Array.isArray(result.content)) return result;
+
+	let truncated = false;
+	const content = result.content.map((entry) => {
+		if (entry.type !== "text" || typeof entry.text !== "string")
+			return entry;
+		if (entry.text.length <= maxChars) return entry;
+		truncated = true;
+		return {
+			...entry,
+			text:
+				entry.text.slice(0, maxChars) +
+				`\n\n[Workflow inline fetch content capped at ${maxChars} chars; full source content remains in workflow source cache.]`,
+		};
+	});
+	if (!truncated) return result;
+
+	return {
+		...result,
+		content,
+		details: {
+			...(result.details ?? {}),
+			truncated: true,
+			workflowInlineContentCap: {
+				type: "fetch_content",
+				maxChars,
+				truncated: true,
+			},
+		},
+	};
+}
+
+function normalizeInlineCharCap(value: number | undefined): number | undefined {
+	if (value === undefined || !Number.isFinite(value)) return undefined;
+	const cap = Math.floor(value);
+	return cap > 0 ? cap : undefined;
 }
 
 function cacheWriteSkipReason(

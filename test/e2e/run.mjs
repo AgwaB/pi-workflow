@@ -100,6 +100,20 @@ function main() {
 	run("cli-unknown-command", process.execPath, ["src/cli.mjs", "nope"], {
 		expectFailure: true,
 	});
+	run("cli-inspect-reliability", "bash", [
+		"-lc",
+		`set -euo pipefail
+        tmp="$(mktemp -d)"
+        mkdir -p "$tmp/.pi/workflows/workflow_e2e"
+        cat > "$tmp/.pi/workflows/workflow_e2e/run.json" <<'JSON'
+{"runId":"workflow_e2e","name":"unit","type":"artifact-graph","status":"completed","tasks":[{"taskId":"task-1","status":"completed","statusDetail":"completed","outputRetry":{"attempts":1,"reason":"workflow_output_invalid"},"resumeEvents":[{"at":"2026-06-08T00:00:00.000Z","fromStatus":"failed","fromStatusDetail":"context_or_request_too_large"}]}]}
+JSON
+        cd "$tmp"
+        output="$(${process.execPath} ${JSON.stringify(join(root, "src", "cli.mjs"))} inspect workflow_e2e)"
+        printf '%s\n' "$output"
+        grep -q 'completion: repaired' <<<"$output"
+        grep -q 'retries: output=1, launch=0, resumes=1, contextLimitFailures=1' <<<"$output"`,
+	]);
 	run("consumer-install-cli", "bash", [
 		"-lc",
 		`set -euo pipefail

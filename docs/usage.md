@@ -216,6 +216,12 @@ The normalized cache is stored under the workflow run directory:
 
 Do not instruct agents to read that directory directly; source cards intentionally expose only opaque refs and short previews. The cache also writes an append-only index ledger plus same-URL fetch locks/negative-cache files so duplicate lookup and deterministic terminal failures can recover across parallel worker processes. Custom extension `fetch_content` providers are treated as trusted fetchers and are disabled under the default private-host policy; use the default safe fetch path or opt into trusted private-host behavior only for controlled providers. Legacy workflow tasks that still use `fetch_content` keep the older run-scoped file cache under `.pi/workflows/<run-id>/source-cache/fetch-content/`. Set `PI_WORKFLOW_FETCH_CONTENT_CACHE=0` to disable that legacy fetch cache for a run.
 
+To reduce worker context pressure for legacy `fetch_content` tasks, the bundled
+workflow fetch wrapper caps inline response text while preserving full stored
+source content. Override with `PI_WORKFLOW_FETCH_CONTENT_INLINE_CHARS=<n>` or
+disable the inline cap with `PI_WORKFLOW_FETCH_CONTENT_INLINE_CHARS=0` when you
+intentionally need the provider's full inline response.
+
 ## Bundled workflows
 
 `pi-workflow` ships a small official starter set, not a comprehensive workflow catalog. More official workflows are planned; create project-local or repo-shared workflows under `.pi/workflows/` or `workflows/` when your team needs patterns that are not bundled.

@@ -9,6 +9,7 @@ interface WorkflowTelemetryAccumulator {
 	launchRetries: number;
 	resumeEvents: number;
 	resumedTasks: number;
+	contextLimitFailures: number;
 	retryReasons: WorkflowTelemetrySummary["retryReasons"];
 	resumeStatusCounts: StatusCounts;
 	outputRepairCounts: OutputRepairCounts;
@@ -18,6 +19,13 @@ export interface WorkflowTelemetrySummary {
 	taskCount: number;
 	wallClockMs: number | null;
 	statusCounts: StatusCounts;
+	completion: {
+		health: "clean" | "repaired" | "incomplete";
+		clean: boolean;
+		repaired: boolean;
+		repairEvents: number;
+		contextLimitFailures: number;
+	};
 	retryCounts: { output: number; launch: number };
 	retryReasons: {
 		output: Record<string, number>;
@@ -77,10 +85,23 @@ export function summarizeWorkflowTelemetry(
 		stage.outputBytes += taskOutputBytes;
 	}
 
+	const repairEvents =
+		accumulator.outputRetries +
+		accumulator.launchRetries +
+		accumulator.resumeEvents;
+	const health = completionHealth(tasks, repairEvents, accumulator);
+
 	return {
 		taskCount: tasks.length,
 		wallClockMs: durationBetween(run.createdAt, run.updatedAt),
 		statusCounts,
+		completion: {
+			health,
+			clean: health === "clean",
+			repaired: health === "repaired",
+			repairEvents,
+			contextLimitFailures: accumulator.contextLimitFailures,
+		},
 		retryCounts: {
 			output: accumulator.outputRetries,
 			launch: accumulator.launchRetries,
@@ -103,6 +124,7 @@ function createWorkflowTelemetryAccumulator(): WorkflowTelemetryAccumulator {
 		launchRetries: 0,
 		resumeEvents: 0,
 		resumedTasks: 0,
+		contextLimitFailures: 0,
 		retryReasons: { output: {}, launch: {} },
 		resumeStatusCounts: {},
 		outputRepairCounts: { sameSession: 0, newSession: 0, unknown: 0 },
@@ -113,6 +135,7 @@ function accumulateTaskReliability(
 	task: Partial<WorkflowTaskRunRecord>,
 	accumulator: WorkflowTelemetryAccumulator,
 ): void {
+	if (taskHasContextLimitFailure(task)) accumulator.contextLimitFailures += 1;
 	const currentOutputAttempts = positiveCount(task.outputRetry?.attempts);
 	accumulator.outputRetries += currentOutputAttempts;
 	if (currentOutputAttempts > 0) {
@@ -137,17 +160,40 @@ function accumulateTaskReliability(
 	for (const event of resumeEvents) accumulateResumeEvent(event, accumulator);
 }
 
+function completionHealth(
+	tasks: Array<Partial<WorkflowTaskRunRecord>>,
+	repairEvents: number,
+	accumulator: WorkflowTelemetryAccumulator,
+): WorkflowTelemetrySummary["completion"]["health"] {
+	const allCompleted =
+		tasks.length > 0 && tasks.every((task) => task.status === "completed");
+	if (!allCompleted) return "incomplete";
+	return repairEvents === 0 && accumulator.contextLimitFailures === 0
+		? "clean"
+		: "repaired";
+}
+
 function accumulateResumeEvent(
 	event: NonNullable<WorkflowTaskRunRecord["resumeEvents"]>[number],
 	accumulator: WorkflowTelemetryAccumulator,
 ): void {
 	accumulator.resumeStatusCounts[event.fromStatus] =
 		(accumulator.resumeStatusCounts[event.fromStatus] ?? 0) + 1;
+	if (resumeEventHasContextLimitFailure(event))
+		accumulator.contextLimitFailures += 1;
 	const previousOutputAttempts = positiveCount(event.outputRetryAttempts);
 	accumulator.outputRetries += previousOutputAttempts;
-	if (previousOutputAttempts === 0) return;
-	countReason(accumulator.retryReasons.output, event.outputRetryReason);
-	countRepairMode(accumulator.outputRepairCounts, event.outputRetryRepairMode);
+	if (previousOutputAttempts > 0) {
+		countReason(accumulator.retryReasons.output, event.outputRetryReason);
+		countRepairMode(
+			accumulator.outputRepairCounts,
+			event.outputRetryRepairMode,
+		);
+	}
+	const previousLaunchAttempts = positiveCount(event.launchRetryAttempts);
+	accumulator.launchRetries += previousLaunchAttempts;
+	if (previousLaunchAttempts > 0)
+		countReason(accumulator.retryReasons.launch, event.launchRetryReason);
 }
 
 function positiveCount(value: number | undefined): number {
@@ -170,6 +216,40 @@ function countRepairMode(
 	if (mode === "same_session") counts.sameSession += 1;
 	else if (mode === "new_session") counts.newSession += 1;
 	else counts.unknown += 1;
+}
+
+function taskHasContextLimitFailure(
+	task: Partial<WorkflowTaskRunRecord>,
+): boolean {
+	return [
+		task.statusDetail,
+		task.lastMessage,
+		task.outputRetry?.reason,
+		task.outputRetry?.message,
+		task.launchRetry?.reason,
+		task.launchRetry?.message,
+	].some(isContextLimitText);
+}
+
+function resumeEventHasContextLimitFailure(
+	event: NonNullable<WorkflowTaskRunRecord["resumeEvents"]>[number],
+): boolean {
+	return [
+		event.fromStatusDetail,
+		event.lastMessage,
+		event.outputRetryReason,
+		event.launchRetryReason,
+	].some(isContextLimitText);
+}
+
+function isContextLimitText(value: string | undefined): boolean {
+	const text = value?.toLowerCase() ?? "";
+	return (
+		text.includes("context_or_request_too_large") ||
+		/context (window|length)|maximum context|request too large|token limit/.test(
+			text,
+		)
+	);
 }
 
 export interface SourceContextPacket {

@@ -11831,6 +11831,8 @@ test("workflow artifact telemetry summarizes stage status, retries, wall clock, 
 			{
 				stageId: "verify",
 				status: "completed",
+				statusDetail: "context_or_request_too_large",
+				lastMessage: "child Pi exceeded the model context window",
 				startedAt: "2026-06-08T00:00:15.000Z",
 				completedAt: "2026-06-08T00:00:45.000Z",
 				outputRetry: {
@@ -11867,6 +11869,11 @@ test("workflow artifact telemetry summarizes stage status, retries, wall clock, 
 	assert.equal(summary.taskCount, 3);
 	assert.equal(summary.statusCounts.completed, 2);
 	assert.equal(summary.statusCounts.interrupted, 1);
+	assert.equal(summary.completion.health, "incomplete");
+	assert.equal(summary.completion.clean, false);
+	assert.equal(summary.completion.repaired, false);
+	assert.equal(summary.completion.repairEvents, 5);
+	assert.equal(summary.completion.contextLimitFailures, 1);
 	assert.equal(summary.retryCounts.output, 3);
 	assert.equal(summary.retryCounts.launch, 1);
 	assert.equal(summary.retryReasons.output.workflow_output_invalid, 1);
@@ -11882,6 +11889,22 @@ test("workflow artifact telemetry summarizes stage status, retries, wall clock, 
 	assert.equal(summary.outputBytes, 30);
 	assert.equal(summary.stages.verify.taskCount, 2);
 	assert.equal(summary.stages.verify.durationMs, 35000);
+
+	const clean = summarizeWorkflowTelemetry({
+		createdAt: "2026-06-08T00:00:00.000Z",
+		updatedAt: "2026-06-08T00:00:01.000Z",
+		tasks: [{ status: "completed" }],
+	});
+	assert.equal(clean.completion.health, "clean");
+	assert.equal(clean.completion.clean, true);
+
+	const repaired = summarizeWorkflowTelemetry({
+		createdAt: "2026-06-08T00:00:00.000Z",
+		updatedAt: "2026-06-08T00:00:01.000Z",
+		tasks: [{ status: "completed", outputRetry: { attempts: 1 } }],
+	});
+	assert.equal(repaired.completion.health, "repaired");
+	assert.equal(repaired.completion.repaired, true);
 });
 
 test("workflow resume reset preserves retry accounting metadata", () => {
@@ -15015,6 +15038,104 @@ test("workflow fetch_content cache correlates concurrent stored data by response
 	}
 });
 
+test("workflow fetch_content cache wrapper caps inline text but preserves stored source data", async () => {
+	const cwd = makeProject();
+	try {
+		const cacheDir = join(
+			cwd,
+			".pi",
+			"workflows",
+			"workflow_unit",
+			"source-cache",
+			"fetch-content",
+		);
+		const registered = new Map();
+		const stored = new Map();
+		let generatedIds = 0;
+		const storage = {
+			generateId() {
+				generatedIds += 1;
+				return `cached-${generatedIds}`;
+			},
+			storeResult(id, data) {
+				stored.set(id, data);
+			},
+		};
+		const fakePi = {
+			registerTool(tool) {
+				registered.set(tool.name, tool);
+			},
+			appendEntry() {},
+		};
+		const webAccessExtension = (pi) => {
+			pi.registerTool({
+				name: "fetch_content",
+				async execute(_toolCallId, params) {
+					const responseId = "origin-1";
+					const fullContent = "abcdefghij";
+					const data = {
+						id: responseId,
+						type: "fetch",
+						timestamp: Date.now(),
+						urls: [
+							{
+								url: params.url,
+								title: "Example",
+								content: fullContent,
+							},
+						],
+					};
+					storage.storeResult(responseId, data);
+					pi.appendEntry("web-search-results", data);
+					return {
+						content: [{ type: "text", text: fullContent }],
+						details: {
+							responseId,
+							successful: 1,
+							totalChars: fullContent.length,
+						},
+					};
+				},
+			});
+		};
+		registerWorkflowFetchCacheExtension(
+			fakePi,
+			{
+				runId: "workflow_unit",
+				taskId: "task-1",
+				cacheDir,
+				maxInlineChars: 4,
+			},
+			webAccessExtension,
+			storage,
+		);
+
+		const tool = registered.get("fetch_content");
+		const first = await tool.execute("call-1", {
+			url: "https://example.test",
+		});
+		const second = await tool.execute("call-2", {
+			url: "https://example.test",
+		});
+
+		assert.match(
+			first.content[0].text,
+			/^abcd\n\n\[Workflow inline fetch content capped at 4 chars/,
+		);
+		assert.equal(first.details.workflowInlineContentCap.maxChars, 4);
+		assert.equal(first.details.cache.hit, false);
+		assert.match(
+			second.content[0].text,
+			/^abcd\n\n\[Workflow inline fetch content capped at 4 chars/,
+		);
+		assert.equal(second.details.cache.hit, true);
+		assert.equal(stored.get("origin-1").urls[0].content, "abcdefghij");
+		assert.equal(stored.get("cached-1").urls[0].content, "abcdefghij");
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("subagent launch can opt out of fetch cache and keep built-in provider mappings", async () => {
 	const cwd = makeProject();
 	let captured;
@@ -15101,8 +15222,10 @@ test("subagent launch uses generated fetch cache extension by default", async ()
 	const cwd = makeProject();
 	let captured;
 	const previousFetchCache = process.env.PI_WORKFLOW_FETCH_CONTENT_CACHE;
+	const previousInlineCap = process.env.PI_WORKFLOW_FETCH_CONTENT_INLINE_CHARS;
 	try {
 		delete process.env.PI_WORKFLOW_FETCH_CONTENT_CACHE;
+		delete process.env.PI_WORKFLOW_FETCH_CONTENT_INLINE_CHARS;
 		writeAgent(cwd, "unit-researcher", "read, fetch_content, web_search");
 		setSubagentApiForTests({
 			async runSubagent(options) {
@@ -15154,15 +15277,21 @@ test("subagent launch uses generated fetch cache extension by default", async ()
 			captured.extensions.some(isBundledPiWebAccessExtension),
 			false,
 		);
-		assert(
-			captured.extensions.some((entry) =>
-				entry.endsWith("workflow-fetch-cache-extension.ts"),
-			),
+		const wrapperPath = captured.extensions.find((entry) =>
+			entry.endsWith("workflow-fetch-cache-extension.ts"),
+		);
+		assert(wrapperPath);
+		assert.match(
+			readFileSync(wrapperPath, "utf8"),
+			/"maxInlineChars": 12000/,
 		);
 	} finally {
 		if (previousFetchCache === undefined)
 			delete process.env.PI_WORKFLOW_FETCH_CONTENT_CACHE;
 		else process.env.PI_WORKFLOW_FETCH_CONTENT_CACHE = previousFetchCache;
+		if (previousInlineCap === undefined)
+			delete process.env.PI_WORKFLOW_FETCH_CONTENT_INLINE_CHARS;
+		else process.env.PI_WORKFLOW_FETCH_CONTENT_INLINE_CHARS = previousInlineCap;
 		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
 	}

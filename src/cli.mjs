@@ -53,6 +53,7 @@ const tasks = Array.isArray(run.tasks) ? run.tasks : [];
 const selected = options.has("--failures")
   ? tasks.filter((task) => ["failed", "blocked", "interrupted"].includes(task.status))
   : tasks;
+const reliability = summarizeReliability(tasks);
 
 const lines = [
   `runId: ${run.runId}`,
@@ -60,6 +61,8 @@ const lines = [
   `type: ${run.type}`,
   `status: ${run.status}`,
   `tasks: ${tasks.length}`,
+  `completion: ${reliability.health}`,
+  `retries: output=${reliability.outputRetries}, launch=${reliability.launchRetries}, resumes=${reliability.resumeEvents}, contextLimitFailures=${reliability.contextLimitFailures}`,
 ];
 
 for (const task of selected) {
@@ -183,4 +186,53 @@ async function readJson(path) {
 
 function indent(text, prefix) {
   return text.split(/\r?\n/).map((line) => `${prefix}${line}`).join("\n");
+}
+
+function summarizeReliability(tasks) {
+  let outputRetries = 0;
+  let launchRetries = 0;
+  let resumeEvents = 0;
+  let contextLimitFailures = 0;
+  for (const task of tasks) {
+    outputRetries += positiveCount(task.outputRetry?.attempts);
+    launchRetries += positiveCount(task.launchRetry?.attempts);
+    if (hasContextLimitFailure(task)) contextLimitFailures += 1;
+    for (const event of Array.isArray(task.resumeEvents) ? task.resumeEvents : []) {
+      resumeEvents += 1;
+      outputRetries += positiveCount(event.outputRetryAttempts);
+      launchRetries += positiveCount(event.launchRetryAttempts);
+      if (hasContextLimitFailure(event)) contextLimitFailures += 1;
+    }
+  }
+  const allCompleted = tasks.length > 0 && tasks.every((task) => task.status === "completed");
+  const repairEvents = outputRetries + launchRetries + resumeEvents;
+  const health = !allCompleted
+    ? "incomplete"
+    : repairEvents === 0 && contextLimitFailures === 0
+      ? "clean"
+      : "repaired";
+  return { health, outputRetries, launchRetries, resumeEvents, contextLimitFailures };
+}
+
+function positiveCount(value) {
+  return Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+}
+
+function hasContextLimitFailure(value) {
+  return [
+    value?.statusDetail,
+    value?.fromStatusDetail,
+    value?.lastMessage,
+    value?.outputRetry?.reason,
+    value?.outputRetry?.message,
+    value?.launchRetry?.reason,
+    value?.launchRetry?.message,
+    value?.outputRetryReason,
+    value?.launchRetryReason,
+  ].some(isContextLimitText);
+}
+
+function isContextLimitText(value) {
+  const text = String(value ?? "").toLowerCase();
+  return text.includes("context_or_request_too_large") || /context (window|length)|maximum context|request too large|token limit/.test(text);
 }

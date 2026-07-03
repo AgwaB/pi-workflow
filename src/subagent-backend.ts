@@ -54,6 +54,8 @@ const DEFAULT_SUBAGENT_RUNS_ROOT = ".pi/workflow-subagents";
 const EXTRA_SUBAGENT_EXTENSIONS_ENV = "PI_WORKFLOW_SUBAGENT_EXTRA_EXTENSIONS";
 const FETCH_CONTENT_CACHE_ENV = "PI_WORKFLOW_FETCH_CONTENT_CACHE";
 const LEGACY_FETCH_CACHE_ENV = "PI_WORKFLOW_FETCH_CACHE";
+const FETCH_CONTENT_INLINE_CHARS_ENV = "PI_WORKFLOW_FETCH_CONTENT_INLINE_CHARS";
+const DEFAULT_WORKFLOW_FETCH_CONTENT_INLINE_CHARS = 12_000;
 const DEFAULT_TRANSIENT_MODEL_FAILURE_RETRIES = 5;
 const DEFAULT_ARTIFACT_OUTPUT_RETRIES = 2;
 const MAX_CONCURRENT_LAUNCHES_ENV = "PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES";
@@ -1593,6 +1595,7 @@ async function workflowTaskExtensions(
 					"source-cache",
 					"fetch-content",
 				),
+				maxInlineChars: fetchContentInlineCharsEnvValue(),
 			},
 		});
 		extensions = uniqueStrings([
@@ -1695,6 +1698,16 @@ function fetchContentCacheEnvValue(): string | undefined {
 	return (
 		process.env[FETCH_CONTENT_CACHE_ENV] ?? process.env[LEGACY_FETCH_CACHE_ENV]
 	);
+}
+
+function fetchContentInlineCharsEnvValue(): number | undefined {
+	const raw = process.env[FETCH_CONTENT_INLINE_CHARS_ENV];
+	if (raw === undefined || raw.trim() === "")
+		return DEFAULT_WORKFLOW_FETCH_CONTENT_INLINE_CHARS;
+	if (isExplicitlyDisabled(raw)) return undefined;
+	const parsed = Number(raw);
+	if (!Number.isFinite(parsed)) return DEFAULT_WORKFLOW_FETCH_CONTENT_INLINE_CHARS;
+	return Math.max(1, Math.floor(parsed));
 }
 
 function isExplicitlyDisabled(value: string | undefined): boolean {

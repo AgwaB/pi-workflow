@@ -49,4 +49,6 @@ Artifact-graph workflows use `from` for data edges, `after` for order-only edges
 
 Support nodes run bundle-local `.mjs` helper code inline instead of launching a subagent (deep-research uses them to compact normalize inputs and preserve audited verdict/sourceRef ledgers). Bundled workflows prefer the normalized web-source tools (`workflow_web_search`, `workflow_web_fetch_source`, `workflow_web_source_read`) over legacy web tools.
 
+Legacy `fetch_content` workflow tasks use a run-scoped cache and a configurable inline text cap to reduce worker context pressure.
+
 See `docs/usage.md` for the support helper API and path-containment rules ("Support helpers") and for web tool semantics, batching, cache layout, and the `fetch_content` security policy ("Run-scoped web-source cache" and "Web tools").

@@ -34,6 +34,7 @@ import { resolveWorkflowBackend } from "./backend.js";
 import { ensureManagedWorktree } from "./worktree.js";
 import { resolveWorkflowHelperRef } from "./workflow-helpers.js";
 import { buildAvailableToolView } from "./tool-metadata.js";
+import { summarizeWorkflowTelemetry } from "./workflow-artifacts.js";
 import {
 	workflowBundleFingerprint,
 	workflowBundleSpecPath,
@@ -630,10 +631,12 @@ export function formatRun(
 	run: WorkflowRunRecord,
 	detail: "summary" | "full" = "summary",
 ): string {
+	const telemetry = summarizeWorkflowTelemetry(run);
 	const lines = [
 		`${run.runId} [${run.status}] type=${run.type} backend=${run.backend.type}/${run.backend.mode}`,
 		`created=${run.createdAt} updated=${run.updatedAt}`,
 		`tasks=${run.taskSummary.completed}/${run.taskSummary.total} completed, running=${run.taskSummary.running}, pending=${run.taskSummary.pending}, blocked=${run.taskSummary.blocked}, failed=${run.taskSummary.failed}, interrupted=${run.taskSummary.interrupted}`,
+		`completion=${telemetry.completion.health}, outputRetries=${telemetry.retryCounts.output}, launchRetries=${telemetry.retryCounts.launch}, resumeEvents=${telemetry.resumeCounts.events}, contextLimitFailures=${telemetry.completion.contextLimitFailures}`,
 	];
 
 	for (const task of run.tasks) {
