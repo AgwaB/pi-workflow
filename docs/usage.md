@@ -205,7 +205,7 @@ Prefer normalized workflow web tools in new workflows:
 
 - `workflow_web_search` returns compact candidate cards.
 - `workflow_web_fetch_source` caches one or more URLs and returns compact source cards with `sourceRef` values; pass `urls: [...]` or `sources: [{ url, title }]` to batch several fetches in one tool call.
-- `workflow_web_source_read` reads narrow exact/fuzzy/term-matched evidence snippets by `sourceRef`; pass `queries: [...]` or `reads: [...]` to batch several snippets from the same source in one tool call, or `claim` + distinctive `terms` when the exact quote is unknown. Term/claim reads return candidate metadata (`matchedTerms`, `missingTerms`, `coverageRatio`) rather than a proof verdict.
+- `workflow_web_source_read` reads narrow exact/fuzzy/term-matched evidence snippets by `sourceRef`; pass `queries: [...]` or `reads: [...]` to batch several snippets from the same source in one tool call, or `claim` + distinctive `terms` when the exact quote is unknown. Term/claim reads return candidate metadata (`matchedTerms`, `missingTerms`, `coverageRatio`) rather than a proof verdict. Snippet windows are anchored to the match: a result may report `status: "truncated"` when the per-task visible budget or `maxChars` clips the window (the returned quote still starts at the match), and `status: "budget_exhausted"` when no visible budget remains; both include a `next` hint suggesting smaller queries or a fresh task.
 
 The normalized cache is stored under the workflow run directory:
 
@@ -543,6 +543,15 @@ Authoring checklist:
 7. Add JSON output contracts for model-produced data that later stages depend on.
 8. Run `/workflow validate <workflow-or-file>` before using the workflow.
 
+### Roles
+
+A workflow can declare reusable role context under top-level `roles`. Compiled role text is injected into subagent task prompts as a `# Role Context` block, and `/workflow roles <workflow>` shows the compiled result per role. Role fields:
+
+- `fromAgent`: extract sections from a discoverable Pi agent's markdown body. By default only safe knowledge sections are included (`Core Principles`, `Domain Expertise`, `Safety Review`, `Rules`, `Research Manifest`); orchestration and output-format sections are always excluded.
+- `includeSections` / `excludeSections`: override which agent sections are extracted.
+- `prompt`: literal role text, appended after any extracted agent sections.
+- `maxChars`: compiled role budget (default 12000). Longer content is truncated and flagged in `/workflow roles` output.
+
 ### Tool allowlists
 
 Workflow `tools` are still the child-worker allowlist. Entries can be strings:
@@ -579,6 +588,7 @@ Scope order is agent frontmatter fallback < `defaults.tools` < stage `tools`: th
 - Write-capable workflows should use managed worktrees in git repositories.
 - In non-git workspaces with `worktreePolicy: "off"`, writes mutate the live directory.
 - No backend fallback exists. The compiled backend/strategy is fixed for the run.
+- Subagent process launches are gated per Pi process to avoid boot storms: at most `max(2, floor(cpu cores / 2))` concurrent launches, overridable with the `PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES` environment variable. Queued tasks report a waiting message in their status. Deterministic boot failures (extension load or configuration errors) fail fast instead of consuming transient-failure retries.
 - External content, source files, and web pages used by workflow workers are untrusted data, not instructions.
 
 ## Web tools
