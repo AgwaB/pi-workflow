@@ -16525,6 +16525,95 @@ test("refresh adopts handle-less running subagent from deterministic runsDir", a
 	}
 });
 
+test("refresh ignores pre-claim subagent records during handle recovery", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const compiled = await compileWorkflow(
+			workflowSpec("unit-scout", {
+				artifactGraph: {
+					stages: [{ id: "main", type: "single", prompt: "Do work." }],
+				},
+			}),
+			{ cwd, task: "Review topic" },
+		);
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(
+			cwd,
+			run,
+			compiled,
+			workflowSpec("unit-scout"),
+		);
+		const task = run.tasks[0];
+		const oldStartedAt = new Date(Date.now() - 60_000).toISOString();
+		task.status = "running";
+		task.statusDetail = "launching";
+		task.startedAt = new Date().toISOString();
+		delete task.backendHandle;
+
+		const runsDir = join(
+			cwd,
+			".pi",
+			"workflow-subagents",
+			run.runId,
+			task.taskId,
+		);
+		const subRunDir = join(runsDir, "run_old_attempt");
+		mkdirSync(subRunDir, { recursive: true });
+		writeFileSync(
+			join(subRunDir, "run.json"),
+			JSON.stringify({
+				runId: "run_old_attempt",
+				correlationId: `${run.runId}:${task.taskId}`,
+				status: "completed",
+				backend: "headless",
+				startedAt: oldStartedAt,
+				updatedAt: oldStartedAt,
+				latestAttemptId: "attempt_old_attempt",
+				attempts: [
+					{
+						attemptId: "attempt_old_attempt",
+						status: "completed",
+						startedAt: oldStartedAt,
+						updatedAt: oldStartedAt,
+					},
+				],
+			}),
+		);
+		setSubagentApiForTests({
+			async runSubagent() {
+				throw new Error("not expected");
+			},
+			async reconcileSubagentRun() {
+				throw new Error("old run should not be adopted");
+			},
+			async getSubagentStatus() {
+				throw new Error("old run should not be adopted");
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+		await writeRunRecord(cwd, run);
+
+		const refreshed = await refreshRunFromSubagentArtifacts(
+			cwd,
+			await readRunRecord(cwd, run.runId),
+		);
+
+		assert.equal(refreshed.tasks[0].status, "running");
+		assert.equal(refreshed.tasks[0].backendHandle, undefined);
+		assert.equal(refreshed.tasks[0].lastMessage, undefined);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("refresh interrupts timed-out running subagents and clears stale handles", async () => {
 	const cwd = makeProject();
 	const interrupts = [];

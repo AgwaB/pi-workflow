@@ -1678,6 +1678,7 @@ async function recoverSubagentHandle(
 	const runsDir = subagentRunsDir(run, task);
 	const absoluteRunsDir = resolve(task.cwd, runsDir);
 	const expectedCorrelationId = `${run.runId}:${task.taskId}`;
+	const claimStartedAtMs = timestampMs(task.startedAt);
 	const entries = await readdir(absoluteRunsDir, { withFileTypes: true }).catch(
 		() => [],
 	);
@@ -1692,6 +1693,7 @@ async function recoverSubagentHandle(
 			join(absoluteRunsDir, entry.name, "run.json"),
 		);
 		if (!record || record.correlationId !== expectedCorrelationId) continue;
+		if (isPreClaimSubagentRecord(record, claimStartedAtMs)) continue;
 		const attemptId =
 			record.activeAttemptId ??
 			record.latestAttemptId ??
@@ -1716,6 +1718,18 @@ async function recoverSubagentHandle(
 
 	candidates.sort((left, right) => right.updatedAtMs - left.updatedAtMs);
 	return candidates[0]?.handle;
+}
+
+function isPreClaimSubagentRecord(
+	record: SubagentRunRecordLike,
+	claimStartedAtMs: number | undefined,
+): boolean {
+	if (claimStartedAtMs === undefined) return false;
+	const recordStartedAtMs =
+		timestampMs(record.startedAt) ??
+		timestampMs(record.attempts?.[0]?.startedAt) ??
+		timestampMs(record.updatedAt);
+	return recordStartedAtMs !== undefined && recordStartedAtMs < claimStartedAtMs;
 }
 
 function timestampMs(value: string | undefined): number | undefined {
