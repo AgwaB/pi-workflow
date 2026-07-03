@@ -12,7 +12,7 @@
 
 `pi-workflow` lets Pi run named, repeatable multi-step workflows: research, code review, spec conformance checks, impact review, and project-specific team routines.
 
-Built on [`@agwab/pi-subagent`](https://github.com/AgwaB/pi-subagent), it coordinates Pi subagent workers across workflow steps, passes results between them, and records the run so it can be inspected or resumed.
+Built on [`@agwab/pi-subagent`](https://github.com/AgwaB/pi-subagent), it coordinates Pi subagent workers across workflow steps, passes results between them, and records the run so it can be inspected, stopped, or resumed.
 
 You choose a workflow and describe the task in natural language.
 

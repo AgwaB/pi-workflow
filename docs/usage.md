@@ -115,8 +115,9 @@ For reusable workflow authoring, `workflow-guide` includes validated scaffold bu
 | `/workflow logs <run-id> [task-id] [lines]` | Print captured logs for a workflow task. Defaults to `task-1`. |
 | `/workflow wait <run-id> [timeout-ms]` | Poll until the run finishes or the optional timeout elapses. |
 | `/workflow resume <run-id>` | Resume a failed, interrupted, or resumable blocked run (including dynamic approval blocked in headless mode): completed tasks are preserved; failed/interrupted/skipped or resumable blocked tasks reset to pending and reschedule. Loop workflows are not supported yet. |
+| `/workflow stop <run-id>` | Stop a non-terminal run: best-effort interrupt of active subagent workers, then mark unfinished tasks `interrupted`. Completed task artifacts are preserved, and the stopped run can be restarted later with `/workflow resume` (resumed tasks start fresh sessions). |
 
-Not implemented: `/workflow continue` and `/workflow delegate`. Use `status`, `show`, `logs`, `wait`, `resume`, and `pi-workflow inspect` for text/CLI inspection. The standalone CLI also offers `pi-workflow supervise <run-id>|--all` to drive scheduling from outside a Pi session (unfinished failed/interrupted or resumable blocked runs within the last 7 days are announced at session start with resume hints).
+Not implemented: `/workflow continue` and `/workflow delegate`. Use `status`, `show`, `logs`, `wait`, `stop`, `resume`, and `pi-workflow inspect` for text/CLI inspection. The standalone CLI also offers `pi-workflow supervise <run-id>|--all` to drive scheduling from outside a Pi session (unfinished failed/interrupted or resumable blocked runs within the last 7 days are announced at session start with resume hints).
 
 ### Workflow board controls
 
@@ -214,8 +215,6 @@ The normalized cache is stored under the workflow run directory:
 
 Do not instruct agents to read that directory directly; source cards intentionally expose only opaque refs and short previews. The cache also writes an append-only index ledger plus same-URL fetch locks/negative-cache files so duplicate lookup and deterministic terminal failures can recover across parallel worker processes. Custom extension `fetch_content` providers are treated as trusted fetchers and are disabled under the default private-host policy; use the default safe fetch path or opt into trusted private-host behavior only for controlled providers. Legacy workflow tasks that still use `fetch_content` keep the older run-scoped file cache under `.pi/workflows/<run-id>/source-cache/fetch-content/`. Set `PI_WORKFLOW_FETCH_CONTENT_CACHE=0` to disable that legacy fetch cache for a run.
 
-Benchmark note: cache-enabled runs are a distinct cohort from older uncached runs. Do not compare wall-clock numbers directly unless the task set, model, and cache policy are controlled and recorded.
-
 ## Bundled workflows
 
 `pi-workflow` ships a small official starter set, not a comprehensive workflow catalog. More official workflows are planned; create project-local or repo-shared workflows under `.pi/workflows/` or `workflows/` when your team needs patterns that are not bundled.
@@ -284,7 +283,15 @@ Dynamic workflows keep JSON as the source of truth while allowing trusted bundle
 }
 ```
 
-Controller/helper/nested workflow refs must be bundle-local `./...` paths. Nested workflow specs are intentionally self-contained at their own directory level: refs inside a nested spec may point to files in that nested spec's subtree, but not to parent-level shared files via `../`. Put shared helpers/schemas under each nested workflow subtree or expose them through the parent controller/helper layer. Controller/helper code is trusted Node.js code for orchestration and timeout isolation, not a security sandbox. Generated agents are real workflow tasks: `ctx.agent({ id, agent, prompt, tools })` inserts a deterministic `stageId.id` task into `compiled.json` and `run.json`, persists a request hash in `dynamic/events.jsonl`, and replays fail-closed if the same id later changes request shape. On resume, controllers must re-issue previously recorded `ctx.agent`, `ctx.helper`, and `ctx.workflow` operations in the same order before issuing new operations; omitted or out-of-order replay fails closed with an explicit replay-invariant error. Use `ctx.parallel([() => ctx.agent(...), ...])` for dynamic fan-out; the runtime records queued sibling generation ops before the controller suspends, and non-suspension operation failures make the controller fail closed. Generated dependency cycles are rejected. `ctx.helper(name, input)` can call only helpers declared in `dynamic.helpers`; pure/retry-safe helpers may set `idempotent: true` so a crash after `helper.started` but before `helper.completed` can retry the helper instead of permanently failing closed. `ctx.workflow(name, input)` can call only nested specs declared in `dynamic.workflows`.
+Controller/helper/nested workflow refs must be bundle-local `./...` paths. Nested workflow specs are intentionally self-contained at their own directory level: refs inside a nested spec may point to files in that nested spec's subtree, but not to parent-level shared files via `../` — put shared helpers/schemas under each nested workflow subtree or expose them through the parent controller/helper layer. Controller/helper code is trusted Node.js code for orchestration and timeout isolation, not a security sandbox.
+
+Controller context rules:
+
+- Generated agents are real workflow tasks: `ctx.agent({ id, agent, prompt, tools })` inserts a deterministic `stageId.id` task into `compiled.json` and `run.json`, persists a request hash in `dynamic/events.jsonl`, and replays fail-closed if the same id later changes request shape.
+- On resume, controllers must re-issue previously recorded `ctx.agent`, `ctx.helper`, and `ctx.workflow` operations in the same order before issuing new operations; omitted or out-of-order replay fails closed with an explicit replay-invariant error.
+- Use `ctx.parallel([() => ctx.agent(...), ...])` for dynamic fan-out; the runtime records queued sibling generation ops before the controller suspends, and non-suspension operation failures make the controller fail closed. Generated dependency cycles are rejected.
+- `ctx.helper(name, input)` can call only helpers declared in `dynamic.helpers`; pure/retry-safe helpers may set `idempotent: true` so a crash after `helper.started` but before `helper.completed` can retry the helper instead of permanently failing closed.
+- `ctx.workflow(name, input)` can call only nested specs declared in `dynamic.workflows`.
 
 Dynamic outputs should be compact typed artifacts. The controller returns normal workflow sections through `{ control, analysis, refs }`; generated child agents must return the same `<control>`, `<analysis>`, `<refs>` protocol as other artifact-graph tasks. When a controller result includes `outputTasks`/`outputTaskIds` (the built-in decision loop sets this from accepted `synthesize` actions), downstream `from: "<dynamic-stage>"` reducers also receive those exported task artifacts as stable sources such as `<dynamic-stage>.output`. Runtime state is stored under `.pi/workflows/<run-id>/dynamic/`:
 
@@ -301,13 +308,7 @@ Budgets bound controller behavior (`maxAgents`, `maxConcurrency`, `maxRuntimeMs`
 
 ### DAG authoring
 
-Top-level `artifactGraph.stages` is DAG-capable by default. A nested `type: "dag"` is a workflow/control container, not a leaf subagent task: it must contain child `stages` and should not have its own prompt. The runtime lowers public graph relationships onto the internal dependency scheduler while preserving artifact/data boundaries.
-
-Keep these layers distinct:
-
-- **Workflow layer**: graph/control/data-dependency semantics such as `id`, `from`, `after`, `sourcePolicy`, `sourceProjection`, scheduling, and artifacts.
-- **Subagent layer**: model-backed execution patterns such as `single`, `foreach`, `reduce`, and loop child stages.
-- **Support layer**: deterministic local helper execution through `support: { uses, options }`.
+Top-level `artifactGraph.stages` is DAG-capable by default. A nested `type: "dag"` is a workflow/control container, not a leaf subagent task: it must contain child `stages` and should not have its own prompt. The runtime lowers public graph relationships onto the internal dependency scheduler while preserving artifact/data boundaries. Keep the authoring layers described under "Stage model" distinct when composing DAGs.
 
 DAG rules:
 
@@ -583,21 +584,11 @@ Scope order is agent frontmatter fallback < `defaults.tools` < stage `tools`: th
 ## Web tools
 
 New workflows should use `workflow_web_search`, `workflow_web_fetch_source`, and
-`workflow_web_source_read`. These tools route through a workflow web-source
-adapter, return compact model-visible cards/snippets, and preserve full source
-text in a run-scoped cache when safe. Fetch accepts `urls: [...]` and
-`sources: [{ url, title }]` so agents can cache several source cards in one call.
-Source-read accepts `queries: [...]` and `reads: [...]` so agents can retrieve
-several snippets from one `sourceRef` in a single call, and accepts `claim` +
-distinctive `terms` for deterministic quote
-candidate harvesting when the exact quote is unknown. Term/claim matches are
-candidate evidence and include matched/missing term metadata; they are not a
-verdict by themselves. The bundled `pi-web-access` adapter remains
-available as the default compatibility provider for this release scope.
+`workflow_web_source_read` — tool semantics, batching forms, and the run-scoped
+cache are documented under "Run-scoped web-source cache" above. The bundled
+`pi-web-access` adapter remains the default compatibility provider for this
+release scope.
 
-Legacy workflows that use `web_search`, `fetch_content`, `get_search_content`, or
-`code_search` still use the bundled `pi-web-access` dependency packaged with
-pi-workflow. Object-form custom tool `extensions` are merged with built-in
-mappings and deduplicated for the subagent launch. Web calls can still fail when
-network access, provider credentials, browser state, or quota are unavailable;
-research workflows should report those limits instead of guessing.
+- Legacy workflows that use `web_search`, `fetch_content`, `get_search_content`, or `code_search` still use the bundled `pi-web-access` dependency packaged with pi-workflow.
+- Object-form custom tool `extensions` are merged with built-in mappings and deduplicated for the subagent launch.
+- Web calls can still fail when network access, provider credentials, browser state, or quota are unavailable; research workflows should report those limits instead of guessing.
