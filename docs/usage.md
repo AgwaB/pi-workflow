@@ -413,6 +413,28 @@ Use workflow-local JSON Schema files when the control plane needs stronger valid
 
 The built-in validator supports the subset used by bundled workflows: `type`, `required`, `properties`, `items`, `enum`, `const`, length/item/number bounds, `additionalProperties`, and simple `allOf`/`anyOf`/`oneOf`. Unsupported keywords such as `$ref`, `$defs`, `definitions`, and `pattern` are rejected when the workflow is loaded.
 
+### Opt-in partial output for streaming foreach
+
+A producer stage can declare stable array paths that may be published before terminal completion:
+
+```json
+"output": {
+  "partial": { "paths": ["$.items"] }
+}
+```
+
+A downstream `foreach` may then opt in on the matching `from` edge:
+
+```json
+"from": {
+  "source": "plan",
+  "path": "$.items",
+  "streaming": { "enabled": true, "minChunk": 2 }
+}
+```
+
+The runtime accepts only partial items for declared paths. Published partial items must be final/stable JSON objects with a non-empty string `id`; the producer may emit them as `<partial-control>{"schema":"workflow-partial-output-v1","path":"$.items","items":[...]}</partial-control>` before the final workflow output. If the final `control.json` later changes a published item with the same id, the streaming foreach placeholder blocks fail-closed. Downstream reducers still wait for the foreach placeholder plus all generated item tasks, so partial output overlaps item work without relaxing final fan-in gates.
+
 ## Support helpers
 
 A support node runs local helper code inline instead of launching a subagent. It is declared by adding a `support` object; it does not use a separate `type` value:

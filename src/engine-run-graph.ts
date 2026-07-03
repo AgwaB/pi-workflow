@@ -501,6 +501,7 @@ export function dependenciesReady(
 		stageSourcePolicy(compiledFlow, compiledTask.stageId ?? "") === "partial";
 	if (foreachStreamingEnabled(compiledTask)) {
 		let completedDependencyReady = false;
+		let runningDependencyMayHavePartialItems = false;
 		let allKnownDependenciesTerminal = true;
 		for (const dep of deps) {
 			const status = bySpecId.get(dep)?.status;
@@ -512,9 +513,14 @@ export function dependenciesReady(
 				if (!partial) return false;
 				continue;
 			}
+			if (status === "running") runningDependencyMayHavePartialItems = true;
 			allKnownDependenciesTerminal = false;
 		}
-		return completedDependencyReady || allKnownDependenciesTerminal;
+		return (
+			completedDependencyReady ||
+			runningDependencyMayHavePartialItems ||
+			allKnownDependenciesTerminal
+		);
 	}
 	return deps.every((dep) => {
 		const status = bySpecId.get(dep)?.status;

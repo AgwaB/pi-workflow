@@ -126,6 +126,12 @@ import {
 	ensureDirectDynamicRuntimeBundle,
 } from "./dynamic-runtime-bundle.js";
 import {
+	hasFatalPartialOutputIssue,
+	readWorkflowPartialOutputLedger,
+	writeWorkflowPartialOutputLedgerFromFile,
+	type WorkflowPartialOutputItem,
+} from "./workflow-partial-output.js";
+import {
 	type CompiledDynamicWorkflowTask,
 	type CompiledTask,
 	type CompiledWorkflow,
@@ -973,7 +979,7 @@ async function materializeForeachTask(
 			templateRunTask,
 			placeholderSpecId,
 			sourceTaskSpecIds: sourceTasks.map((task) => task.specId),
-			itemSourceSpecIds: extracted.itemSourceSpecIds ?? [],
+			itemMetas: extracted.itemMetas ?? [],
 			generatedTasks: generated.tasks,
 			waitingForSources: extracted.waitingForSources ?? false,
 			minChunk: foreachStreamingMinChunk(template),
@@ -1025,31 +1031,81 @@ async function materializeStreamingForeachTask(input: {
 	templateRunTask: WorkflowTaskRunRecord;
 	placeholderSpecId: string;
 	sourceTaskSpecIds: string[];
-	itemSourceSpecIds: string[];
+	itemMetas: ForeachExtractedItemMeta[];
 	generatedTasks: CompiledTask[];
 	waitingForSources: boolean;
 	minChunk: number;
 }): Promise<boolean> {
 	const sourceTaskSpecIdSet = new Set(input.sourceTaskSpecIds);
 	const generatedTasksWithItemDeps = input.generatedTasks.map((task, index) => {
-		const itemSourceSpecId = input.itemSourceSpecIds[index];
-		if (!itemSourceSpecId) return task;
+		const itemMeta = input.itemMetas[index];
+		if (!itemMeta) return task;
 		return {
 			...task,
 			dependsOn: replaceSourceDependenciesWithItemSource(
 				task.dependsOn ?? [],
 				sourceTaskSpecIdSet,
-				itemSourceSpecId,
+				itemMeta,
 			),
+			foreachGenerated: {
+				...(task.foreachGenerated ?? {
+					placeholderSpecId: input.placeholderSpecId,
+				}),
+				itemHash: itemMeta.itemHash,
+				itemSourceSpecId: itemMeta.sourceSpecId,
+				itemSourceKind: itemMeta.sourceKind,
+				itemRef: itemMeta.itemRef,
+			},
 		};
 	});
-	const existingGeneratedSpecIds = input.compiledFlow.tasks
-		.filter(
-			(task) =>
-				task.foreachGenerated?.placeholderSpecId === input.placeholderSpecId,
-		)
-		.map((task) => task.id);
+	const existingGeneratedTasks = input.compiledFlow.tasks.filter(
+		(task) =>
+			task.foreachGenerated?.placeholderSpecId === input.placeholderSpecId,
+	);
+	const existingGeneratedSpecIds = existingGeneratedTasks.map((task) => task.id);
+	const existingGeneratedTaskBySpecId = new Map(
+		existingGeneratedTasks.map((task) => [task.id, task]),
+	);
+	for (const task of generatedTasksWithItemDeps) {
+		const existing = existingGeneratedTaskBySpecId.get(task.id);
+		const existingHash = existing?.foreachGenerated?.itemHash;
+		const nextHash = task.foreachGenerated?.itemHash;
+		if (existing && existingHash && nextHash && existingHash !== nextHash) {
+			setTaskTerminal(
+				input.templateRunTask,
+				"blocked",
+				"foreach_expansion_blocked",
+				{
+					lastMessage: `foreach streaming item ${task.id} changed after materialization`,
+				},
+			);
+			await writeRunRecord(input.cwd, input.run);
+			return true;
+		}
+	}
 	const existingGeneratedSpecIdSet = new Set(existingGeneratedSpecIds);
+	const finalGeneratedSpecIdSet = new Set(
+		generatedTasksWithItemDeps.map((task) => task.id),
+	);
+	if (!input.waitingForSources) {
+		const withdrawn = existingGeneratedTasks.find(
+			(task) =>
+				task.foreachGenerated?.itemSourceKind === "partial" &&
+				!finalGeneratedSpecIdSet.has(task.id),
+		);
+		if (withdrawn) {
+			setTaskTerminal(
+				input.templateRunTask,
+				"blocked",
+				"foreach_expansion_blocked",
+				{
+					lastMessage: `foreach streaming item ${withdrawn.id} was published as partial output but is missing from final control`,
+				},
+			);
+			await writeRunRecord(input.cwd, input.run);
+			return true;
+		}
+	}
 	const newGeneratedTasks = generatedTasksWithItemDeps.filter(
 		(task) => !existingGeneratedSpecIdSet.has(task.id),
 	);
@@ -1146,7 +1202,7 @@ async function materializeStreamingForeachTask(input: {
 function replaceSourceDependenciesWithItemSource(
 	dependsOn: string[],
 	sourceTaskSpecIds: Set<string>,
-	itemSourceSpecId: string,
+	itemMeta: ForeachExtractedItemMeta,
 ): string[] {
 	const replaced: string[] = [];
 	let inserted = false;
@@ -1155,13 +1211,23 @@ function replaceSourceDependenciesWithItemSource(
 			replaced.push(dep);
 			continue;
 		}
+		if (itemMeta.sourceKind === "partial") continue;
 		if (!inserted) {
-			replaced.push(itemSourceSpecId);
+			replaced.push(itemMeta.sourceSpecId);
 			inserted = true;
 		}
 	}
-	if (!inserted) replaced.push(itemSourceSpecId);
+	if (!inserted && itemMeta.sourceKind !== "partial") {
+		replaced.push(itemMeta.sourceSpecId);
+	}
 	return [...new Set(replaced)];
+}
+
+interface ForeachExtractedItemMeta {
+	sourceSpecId: string;
+	sourceKind: "control" | "partial";
+	itemHash: string;
+	itemRef: string;
 }
 
 async function extractArtifactGraphForeachItems(
@@ -1175,12 +1241,12 @@ async function extractArtifactGraphForeachItems(
 	sourceTasks: WorkflowTaskRunRecord[],
 ): Promise<{
 	items?: unknown[];
-	itemSourceSpecIds?: string[];
+	itemMetas?: ForeachExtractedItemMeta[];
 	error?: string;
 	waitingForSources?: boolean;
 }> {
 	const items: unknown[] = [];
-	const itemSourceSpecIds: string[] = [];
+	const itemMetas: ForeachExtractedItemMeta[] = [];
 	const path = (stage.from as any)?.path;
 	if (typeof path !== "string" || !path.startsWith("$.")) {
 		return {
@@ -1191,6 +1257,17 @@ async function extractArtifactGraphForeachItems(
 	for (const task of sourceTasks) {
 		if (task.status !== "completed") {
 			if (stage.streaming && !isTerminalTaskStatus(task.status)) {
+				const partial = await extractPartialForeachItems(cwd, task, path);
+				if (partial.error) return { error: partial.error };
+				for (const item of partial.items) {
+					items.push(item.item);
+					itemMetas.push({
+						sourceSpecId: task.specId,
+						sourceKind: "partial",
+						itemHash: item.itemHash,
+						itemRef: `${task.specId}:${item.itemRef}`,
+					});
+				}
 				waitingForSources = true;
 				continue;
 			}
@@ -1209,9 +1286,14 @@ async function extractArtifactGraphForeachItems(
 				}
 				continue;
 			}
-			for (const item of value) {
+			for (const [index, item] of value.entries()) {
 				items.push(item);
-				itemSourceSpecIds.push(task.specId);
+				itemMetas.push({
+					sourceSpecId: task.specId,
+					sourceKind: "control",
+					itemHash: hashDynamicRequest(item),
+					itemRef: `${task.specId}:control:${path}[${index}]`,
+				});
 			}
 		} catch (error) {
 			if (stage.sourcePolicy !== "partial") {
@@ -1226,7 +1308,31 @@ async function extractArtifactGraphForeachItems(
 			error: `foreach extracted ${items.length} items, exceeding maxItems=${stage.maxItems}`,
 		};
 	}
-	return { items, itemSourceSpecIds, waitingForSources };
+	return { items, itemMetas, waitingForSources };
+}
+
+async function extractPartialForeachItems(
+	cwd: string,
+	task: WorkflowTaskRunRecord,
+	path: string,
+): Promise<{ items: WorkflowPartialOutputItem[]; error?: string }> {
+	const partialPaths = task.artifactGraph?.output.partial?.paths ?? [];
+	if (!partialPaths.includes(path)) return { items: [] };
+	const taskDir = dirname(fromProjectPath(cwd, task.files.result));
+	let ledger = await readWorkflowPartialOutputLedger(taskDir).catch(
+		() => undefined,
+	);
+	if (!ledger) {
+		ledger = await writeWorkflowPartialOutputLedgerFromFile({
+			taskDir,
+			outputFile: fromProjectPath(cwd, task.files.output),
+			allowedPaths: partialPaths,
+		}).catch(() => undefined);
+	}
+	if (!ledger) return { items: [] };
+	const fatal = hasFatalPartialOutputIssue(ledger);
+	if (fatal) return { items: [], error: fatal.message };
+	return { items: ledger.items.filter((item) => item.path === path) };
 }
 
 async function launchPendingTaskAt(

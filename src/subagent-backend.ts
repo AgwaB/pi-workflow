@@ -49,6 +49,7 @@ import {
 	parseWorkflowOutputForBundle,
 	writeWorkflowTaskArtifactBundle,
 } from "./workflow-output-artifacts.js";
+import { writeWorkflowPartialOutputLedgerFromFile } from "./workflow-partial-output.js";
 
 const DEFAULT_SUBAGENT_RUNS_ROOT = ".pi/workflow-subagents";
 const EXTRA_SUBAGENT_EXTENSIONS_ENV = "PI_WORKFLOW_SUBAGENT_EXTRA_EXTENSIONS";
@@ -602,6 +603,9 @@ export async function refreshRunFromSubagentArtifacts(
 			changed = true;
 		}
 		if (snapshot.status === "running" || snapshot.status === "pending") {
+			await refreshRunningArtifactGraphPartialOutput(cwd, task, snapshot).catch(
+				() => undefined,
+			);
 			if (task.statusDetail !== "running") {
 				task.statusDetail = "running";
 				changed = true;
@@ -627,6 +631,26 @@ export async function refreshRunFromSubagentArtifacts(
 
 	if (changed) await writeRunRecord(cwd, run);
 	return run;
+}
+
+async function refreshRunningArtifactGraphPartialOutput(
+	cwd: string,
+	task: WorkflowTaskRunRecord,
+	snapshot: SubagentRunStatusSnapshot,
+): Promise<void> {
+	const partial = task.artifactGraph?.output.partial;
+	if (!partial || partial.paths.length === 0) return;
+	const outputRef = findLog(snapshot, "output");
+	const outputFile = fromProjectPath(cwd, task.files.output);
+	const artifactRoot = task.backendFiles?.runsDir
+		? fromProjectPath(task.cwd, task.backendFiles.runsDir)
+		: undefined;
+	await copyLogOrEmpty(snapshot, outputRef, outputFile, artifactRoot);
+	await writeWorkflowPartialOutputLedgerFromFile({
+		taskDir: dirname(fromProjectPath(cwd, task.files.result)),
+		outputFile,
+		allowedPaths: partial.paths,
+	});
 }
 
 async function interruptTimedOutSubagent(
@@ -900,6 +924,13 @@ async function materializeTerminalArtifactGraphResult(
 ): Promise<boolean> {
 	const rawOutput = await readFile(options.outputFile, "utf8").catch(() => "");
 	const artifactOptions = task.artifactGraph?.output;
+	if (artifactOptions?.partial && artifactOptions.partial.paths.length > 0) {
+		await writeWorkflowPartialOutputLedgerFromFile({
+			taskDir: dirname(options.resultFile),
+			outputFile: options.outputFile,
+			allowedPaths: artifactOptions.partial.paths,
+		}).catch(() => undefined);
+	}
 	let controlJsonSchema: JsonSchema | undefined;
 	try {
 		controlJsonSchema = await readTaskControlJsonSchema(task);

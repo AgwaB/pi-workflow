@@ -71,7 +71,9 @@ const OUTPUT_KEYS = new Set([
 	"analysis",
 	"refs",
 	"maxDigestChars",
+	"partial",
 ]);
+const OUTPUT_PARTIAL_KEYS = new Set(["paths"]);
 const REQUIRED_FLAG_KEYS = new Set(["required"]);
 const REFS_OUTPUT_KEYS = new Set(["required", "minItems"]);
 const INPUT_POLICY_KEYS = new Set(["requiredReads", "enforcement"]);
@@ -297,7 +299,45 @@ function validateStageArray(
 	for (const [index, item] of value.entries()) {
 		validateStage(item, `${path}[${index}]`, ids, sourceIds, issues);
 	}
+	validateStreamingProducerDeclarations(value, path, issues);
 	validateStageDependencyGraph(value, path, issues);
+}
+
+function validateStreamingProducerDeclarations(
+	stages: readonly unknown[],
+	path: string,
+	issues: ValidationIssue[],
+): void {
+	const byId = new Map<string, Record<string, unknown>>();
+	for (const stage of stages) {
+		if (isRecord(stage) && typeof stage.id === "string") {
+			byId.set(stage.id, stage);
+		}
+	}
+	for (const [index, stage] of stages.entries()) {
+		if (!isRecord(stage) || !isRecord(stage.from)) continue;
+		const from = stage.from;
+		if (!isRecord(from.streaming) || from.streaming.enabled !== true) continue;
+		const source = typeof from.source === "string" ? from.source : undefined;
+		const controlPath = typeof from.path === "string" ? from.path : undefined;
+		if (!source || !controlPath) continue;
+		const sourceStage = byId.get(source);
+		const partialPaths = outputPartialPaths(sourceStage);
+		if (!partialPaths.includes(controlPath)) {
+			issues.push({
+				path: `${path}[${index}].from.streaming`,
+				message: `source stage "${source}" must declare output.partial.paths including "${controlPath}" to use streaming`,
+			});
+		}
+	}
+}
+
+function outputPartialPaths(stage: Record<string, unknown> | undefined): string[] {
+	const output = isRecord(stage?.output) ? stage.output : undefined;
+	const partial = isRecord(output?.partial) ? output.partial : undefined;
+	return Array.isArray(partial?.paths)
+		? partial.paths.filter((item): item is string => typeof item === "string")
+		: [];
 }
 
 function validateStageDependencyGraph(
@@ -671,6 +711,42 @@ function validateOutput(
 	);
 	validateRequiredFlagObject(output.analysis, `${path}.analysis`, issues);
 	validateRefsOutputObject(output.refs, `${path}.refs`, issues);
+	validatePartialOutput(output.partial, `${path}.partial`, issues);
+}
+
+function validatePartialOutput(
+	value: unknown,
+	path: string,
+	issues: ValidationIssue[],
+): void {
+	if (value === undefined) return;
+	const partial = recordAt(value, path, issues);
+	if (!partial) return;
+	rejectUnknownKeys(partial, OUTPUT_PARTIAL_KEYS, path, issues);
+	if (!Array.isArray(partial.paths)) {
+		issues.push({ path: `${path}.paths`, message: "must be an array" });
+		return;
+	}
+	if (partial.paths.length === 0) {
+		issues.push({ path: `${path}.paths`, message: "must not be empty" });
+	}
+	const seen = new Set<string>();
+	for (const [index, item] of partial.paths.entries()) {
+		const itemPath = `${path}.paths[${index}]`;
+		if (typeof item !== "string" || item.trim() === "") {
+			issues.push({ path: itemPath, message: "must be a non-empty string" });
+			continue;
+		}
+		if (!item.startsWith("$.")) {
+			issues.push({
+				path: itemPath,
+				message: "must be a control JSONPath starting with $.",
+			});
+		}
+		if (seen.has(item))
+			issues.push({ path: itemPath, message: `duplicate value "${item}"` });
+		seen.add(item);
+	}
 }
 
 function validateControlSchemaRef(

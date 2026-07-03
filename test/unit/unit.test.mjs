@@ -160,6 +160,7 @@ import {
 	parseWorkflowOutput,
 	writeWorkflowTaskArtifactBundle,
 } from "../../.tmp/unit/workflow-output-artifacts.js";
+import { parseWorkflowPartialOutput } from "../../.tmp/unit/workflow-partial-output.js";
 import { registerWorkflowFetchCacheExtension } from "../../.tmp/unit/workflow-fetch-cache-extension.js";
 import {
 	createWorkflowWebSource,
@@ -8777,7 +8778,12 @@ test("schema and compiler accept opt-in streaming foreach refs", async () => {
 		const spec = artifactGraphWorkflowSpec({
 			artifactGraph: {
 				stages: [
-					{ id: "extract", type: "single", prompt: "Extract" },
+					{
+						id: "extract",
+						type: "single",
+						prompt: "Extract",
+						output: { partial: { paths: ["$.items"] } },
+					},
 					{
 						id: "verify",
 						type: "foreach",
@@ -8802,9 +8808,45 @@ test("schema and compiler accept opt-in streaming foreach refs", async () => {
 			path: "$.items",
 			streaming: { enabled: true, minChunk: 2 },
 		});
+		assert.deepEqual(compiled.tasks[0].artifactGraph.output.partial, {
+			paths: ["$.items"],
+		});
+		assert.match(
+			compiled.tasks[0].compiledPrompt,
+			/Workflow Partial Output Protocol/,
+		);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
+});
+
+test("schema rejects streaming foreach refs without producer partial output", () => {
+	const error = assertThrowsFlow(() =>
+		parsePublicWorkflow(
+			artifactGraphWorkflowSpec({
+				artifactGraph: {
+					stages: [
+						{ id: "extract", type: "single", prompt: "Extract" },
+						{
+							id: "verify",
+							type: "foreach",
+							from: {
+								source: "extract",
+								path: "$.items",
+								streaming: { enabled: true },
+							},
+							each: { prompt: "Verify ${item}" },
+						},
+					],
+				},
+			}),
+		),
+	);
+	assertIssue(
+		error,
+		"$.artifactGraph.stages[1].from.streaming",
+		"must declare output.partial.paths",
+	);
 });
 
 test("schema rejects inert streaming foreach refs", () => {
@@ -10506,6 +10548,7 @@ test("streaming foreach appends items before all upstream siblings finish", asyn
 						id: "review",
 						type: "foreach",
 						from: { source: "extract", path: "$.claims" },
+						output: { partial: { paths: ["$.findings"] } },
 						each: { prompt: "Review ${item}" },
 					},
 					{
@@ -10607,6 +10650,7 @@ test("streaming foreach minChunk holds small batches until enough items arrive",
 						id: "review",
 						type: "foreach",
 						from: { source: "extract", path: "$.claims" },
+						output: { partial: { paths: ["$.findings"] } },
 						each: { prompt: "Review ${item}" },
 					},
 					{
@@ -10655,6 +10699,272 @@ test("streaming foreach minChunk holds small batches until enough items arrive",
 				.filter((task) => task.stageId === "verify")
 				.map((task) => task.specId),
 			["verify.item", "verify.finding_a", "verify.finding_b"],
+		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("partial output sections are parsed separately from final workflow output", () => {
+	const raw = [
+		'<partial-control>{"schema":"workflow-partial-output-v1","path":"$.items","items":[{"id":"ITEM_A","text":"A"}]}</partial-control>',
+		"<control>",
+		JSON.stringify({ schema: "stage-control-v1", digest: "done", items: [] }),
+		"</control>",
+		"<analysis>",
+		"done",
+		"</analysis>",
+		"<refs>",
+		"[]",
+		"</refs>",
+	].join("\n");
+	const partial = parseWorkflowPartialOutput(raw, {
+		allowedPaths: ["$.items"],
+	});
+	assert.equal(partial.issues.length, 0);
+	assert.deepEqual(
+		partial.items.map((item) => ({
+			path: item.path,
+			itemId: item.itemId,
+			item: item.item,
+		})),
+		[{ path: "$.items", itemId: "item_a", item: { id: "ITEM_A", text: "A" } }],
+	);
+	assert.equal(parseWorkflowOutput(raw).valid, true);
+});
+
+test("streaming foreach consumes producer partial output before terminal completion", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const spec = workflowSpec("unit-scout", {
+			artifactGraph: {
+				stages: [
+					{
+						id: "produce",
+						type: "single",
+						prompt: "Produce items",
+						output: { partial: { paths: ["$.items"] } },
+					},
+					{
+						id: "verify",
+						type: "foreach",
+						from: {
+							source: "produce",
+							path: "$.items",
+							streaming: { enabled: true },
+						},
+						each: { prompt: "Verify ${item}" },
+					},
+					{ id: "summary", type: "reduce", from: "verify", prompt: "Sum" },
+				],
+			},
+		});
+		const compiled = await compileWorkflow(spec, { cwd, task: "Check items" });
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		const producer = taskBySpec(run, "produce.main");
+		producer.status = "running";
+		producer.statusDetail = "running";
+		producer.startedAt = new Date().toISOString();
+		mkdirSync(dirname(join(cwd, producer.files.output)), { recursive: true });
+		writeFileSync(
+			join(cwd, producer.files.output),
+			'<partial-control>{"schema":"workflow-partial-output-v1","path":"$.items","items":[{"id":"ITEM_A","text":"A"}]}</partial-control>',
+			"utf8",
+		);
+		await writeRunRecord(cwd, run);
+
+		await scheduleRun(cwd, run.runId);
+		let current = await readRunRecord(cwd, run.runId);
+		assert.deepEqual(
+			current.tasks.map((task) => task.specId),
+			["produce.main", "verify.item", "verify.item_a", "summary.main"],
+		);
+		assert.equal(taskBySpec(current, "verify.item").status, "pending");
+		assert.equal(
+			taskBySpec(current, "verify.item").statusDetail,
+			"foreach_streaming_waiting",
+		);
+		assert.deepEqual(taskBySpec(current, "verify.item_a").dependsOn, []);
+		assert.equal(
+			taskBySpec(current, "verify.item_a").foreachGenerated.itemSourceKind,
+			"partial",
+		);
+		assert.deepEqual(taskBySpec(current, "summary.main").dependsOn, [
+			"verify.item",
+			"verify.item_a",
+		]);
+
+		await completeTask(cwd, taskBySpec(current, "produce.main"), {
+			items: [
+				{ id: "ITEM_A", text: "A" },
+				{ id: "ITEM_B", text: "B" },
+			],
+		});
+		await writeRunRecord(cwd, current);
+		await scheduleRun(cwd, run.runId);
+		current = await readRunRecord(cwd, run.runId);
+		assert.deepEqual(
+			current.tasks
+				.filter((task) => task.stageId === "verify")
+				.map((task) => task.specId),
+			["verify.item", "verify.item_a", "verify.item_b"],
+		);
+		assert.equal(taskBySpec(current, "verify.item").status, "completed");
+		assert.equal(
+			taskBySpec(current, "verify.item_b").foreachGenerated.itemSourceKind,
+			"control",
+		);
+		assert.deepEqual(taskBySpec(current, "verify.item_b").dependsOn, [
+			"produce.main",
+		]);
+		assert.deepEqual(taskBySpec(current, "summary.main").dependsOn, [
+			"verify.item",
+			"verify.item_a",
+			"verify.item_b",
+		]);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("streaming foreach blocks if a producer changes a published partial item", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const spec = workflowSpec("unit-scout", {
+			artifactGraph: {
+				stages: [
+					{
+						id: "produce",
+						type: "single",
+						prompt: "Produce items",
+						output: { partial: { paths: ["$.items"] } },
+					},
+					{
+						id: "verify",
+						type: "foreach",
+						from: {
+							source: "produce",
+							path: "$.items",
+							streaming: { enabled: true },
+						},
+						each: { prompt: "Verify ${item}" },
+					},
+				],
+			},
+		});
+		const compiled = await compileWorkflow(spec, { cwd, task: "Check items" });
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		const producer = taskBySpec(run, "produce.main");
+		producer.status = "running";
+		producer.statusDetail = "running";
+		producer.startedAt = new Date().toISOString();
+		mkdirSync(dirname(join(cwd, producer.files.output)), { recursive: true });
+		writeFileSync(
+			join(cwd, producer.files.output),
+			'<partial-control>{"schema":"workflow-partial-output-v1","path":"$.items","items":[{"id":"ITEM_A","text":"old"}]}</partial-control>',
+			"utf8",
+		);
+		await writeRunRecord(cwd, run);
+		await scheduleRun(cwd, run.runId);
+		let current = await readRunRecord(cwd, run.runId);
+		assert.equal(
+			current.tasks.some((task) => task.specId === "verify.item_a"),
+			true,
+		);
+
+		await completeTask(cwd, taskBySpec(current, "produce.main"), {
+			items: [{ id: "ITEM_A", text: "new" }],
+		});
+		await writeRunRecord(cwd, current);
+		await scheduleRun(cwd, run.runId);
+		current = await readRunRecord(cwd, run.runId);
+		assert.equal(taskBySpec(current, "verify.item").status, "blocked");
+		assert.equal(
+			taskBySpec(current, "verify.item").statusDetail,
+			"foreach_expansion_blocked",
+		);
+		assert.match(
+			taskBySpec(current, "verify.item").lastMessage,
+			/changed after materialization/,
+		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("streaming foreach blocks if a producer withdraws a published partial item", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const spec = workflowSpec("unit-scout", {
+			artifactGraph: {
+				stages: [
+					{
+						id: "produce",
+						type: "single",
+						prompt: "Produce items",
+						output: { partial: { paths: ["$.items"] } },
+					},
+					{
+						id: "verify",
+						type: "foreach",
+						from: {
+							source: "produce",
+							path: "$.items",
+							streaming: { enabled: true },
+						},
+						each: { prompt: "Verify ${item}" },
+					},
+				],
+			},
+		});
+		const compiled = await compileWorkflow(spec, { cwd, task: "Check items" });
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		const producer = taskBySpec(run, "produce.main");
+		producer.status = "running";
+		producer.statusDetail = "running";
+		producer.startedAt = new Date().toISOString();
+		mkdirSync(dirname(join(cwd, producer.files.output)), { recursive: true });
+		writeFileSync(
+			join(cwd, producer.files.output),
+			'<partial-control>{"schema":"workflow-partial-output-v1","path":"$.items","items":[{"id":"ITEM_A","text":"A"}]}</partial-control>',
+			"utf8",
+		);
+		await writeRunRecord(cwd, run);
+		await scheduleRun(cwd, run.runId);
+		let current = await readRunRecord(cwd, run.runId);
+		assert.equal(
+			current.tasks.some((task) => task.specId === "verify.item_a"),
+			true,
+		);
+
+		await completeTask(cwd, taskBySpec(current, "produce.main"), {
+			items: [],
+		});
+		await writeRunRecord(cwd, current);
+		await scheduleRun(cwd, run.runId);
+		current = await readRunRecord(cwd, run.runId);
+		assert.equal(taskBySpec(current, "verify.item").status, "blocked");
+		assert.match(
+			taskBySpec(current, "verify.item").lastMessage,
+			/missing from final control/,
 		);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });

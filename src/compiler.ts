@@ -216,9 +216,22 @@ function appendWorkflowOutputInstructions(
 			: "Use schema `stage-control-v1` unless the workflow asks for a more specific control schema.",
 		"Put detailed prose, reasoning, and evidence discussion in <analysis> only.",
 		"Put structured evidence pointers in <refs> as a JSON array; use [] if none.",
+		...partialOutputInstructions(stage.output?.partial?.paths),
 	]
 		.filter(Boolean)
 		.join("\n\n");
+}
+
+function partialOutputInstructions(paths: readonly string[] | undefined): string[] {
+	if (!paths || paths.length === 0) return [];
+	return [
+		"# Workflow Partial Output Protocol (optional)",
+		`If a complete stable array item is ready before your final answer for one of these control paths (${paths.join(", ")}), you may emit a partial-control section before the final output:`,
+		'<partial-control>{"schema":"workflow-partial-output-v1","path":"$.items","items":[{"id":"stable-id","...":"..."}]}</partial-control>',
+		"Use the actual declared path, not the example path, and include only items that are final/stable enough to appear unchanged in your final <control> at that path.",
+		"Every partial item must be the exact JSON object that will appear in the final array and must include a stable non-empty string `id`; never revise or withdraw a published partial item.",
+		"If an item might change, do not publish it partially; wait for the final workflow output. The final answer must still include the normal <control>, <analysis>, and <refs> sections exactly once.",
+	];
 }
 
 function artifactGraphTaskMetadata(
@@ -237,6 +250,9 @@ function artifactGraphTaskMetadata(
 				? resolve(specDir, controlSchema)
 				: undefined,
 			maxDigestChars: stage.output?.maxDigestChars,
+			partial: stage.output?.partial
+				? { paths: [...stage.output.partial.paths] }
+				: undefined,
 		},
 		requiredReads: stage.inputPolicy?.requiredReads ?? [],
 		sourceProjection: stage.sourceProjection,

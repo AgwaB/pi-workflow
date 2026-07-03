@@ -226,6 +226,7 @@ export interface ArtifactGraphStageSpec {
 		analysis?: { required?: boolean };
 		refs?: { required?: boolean; minItems?: number };
 		maxDigestChars?: number;
+		partial?: { paths: string[] };
 	};
 	each?: Record<string, unknown>;
 	stages?: ArtifactGraphStageSpec[];
@@ -497,6 +498,7 @@ export interface CompiledArtifactGraphTask {
 		controlSchema?: string;
 		controlSchemaPath?: string;
 		maxDigestChars?: number;
+		partial?: { paths: string[] };
 	};
 	requiredReads: string[];
 	sourceProjection?: {
@@ -551,6 +553,10 @@ export interface CompiledTask {
 	};
 	foreachGenerated?: {
 		placeholderSpecId: string;
+		itemHash?: string;
+		itemSourceSpecId?: string;
+		itemSourceKind?: "control" | "partial";
+		itemRef?: string;
 	};
 	loopChild?: CompiledLoopChildTaskRef;
 	loopPlaceholder?: {
@@ -646,6 +652,10 @@ export interface WorkflowTaskRunRecord {
 	};
 	foreachGenerated?: {
 		placeholderSpecId: string;
+		itemHash?: string;
+		itemSourceSpecId?: string;
+		itemSourceKind?: "control" | "partial";
+		itemRef?: string;
 	};
 	launchRetry?: {
 		attempts: number;

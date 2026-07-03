@@ -7,6 +7,7 @@ import {
 	type StructuredContract,
 	type StructuredContractIssue,
 } from "./workflow-artifacts.js";
+import { stripWorkflowPartialOutputSections } from "./workflow-partial-output.js";
 import {
 	validateJsonSchema,
 	type JsonSchema,
@@ -157,10 +158,11 @@ export function parseWorkflowOutput(
 	raw: string,
 	options: ParseWorkflowOutputOptions = {},
 ): ParsedWorkflowOutput {
+	const protocolRaw = stripWorkflowPartialOutputSections(raw);
 	const issues: WorkflowOutputIssue[] = [];
 	const requirements = sectionRequirements(options);
-	const sections = collectSections(raw, requirements);
-	validateSectionLayout(raw, sections, issues, requirements);
+	const sections = collectSections(protocolRaw, requirements);
+	validateSectionLayout(protocolRaw, sections, issues, requirements);
 
 	const control = parseControlSection(
 		sectionText(sections, SECTION_CONTROL),
@@ -181,7 +183,7 @@ export function parseWorkflowOutput(
 	validateControlJsonSchema(control, issues, options.controlJsonSchema);
 
 	return buildParsedOutput(
-		raw,
+		protocolRaw,
 		issues,
 		{ control, analysis, refs },
 		requirements,
