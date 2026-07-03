@@ -2,12 +2,16 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import {
+	closeSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
+	openSync,
 	readFileSync,
 	rmSync,
 	symlinkSync,
+	unlinkSync,
+	utimesSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -67,12 +71,14 @@ import {
 	resetTaskForResume,
 	resolveFlowsCwd,
 	setIndexUpdateDebounceMsForTests,
+	setRunLeaseTestHooksForTests,
 	setTaskTerminal,
 	supervisorLeasePath,
 	supervisorPath,
 	updateIndex,
 	workflowProcessRoleForTests,
 	workflowSupervisorOwnerIdForTests,
+	withRunLease,
 	writeJsonAtomic,
 	writeRunRecord,
 	writeStaticRunArtifacts,
@@ -174,6 +180,26 @@ setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
 
 function makeProject() {
 	return mkdtempSync(join(tmpdir(), "workflow-unit-"));
+}
+
+function supervisorLockPath(cwd, runId) {
+	return join(cwd, ".pi", "workflows", runId, "supervisor.lock");
+}
+
+function writeSupervisorLock(
+	cwd,
+	runId,
+	{ ownerId = "stale-owner", pid = 99999999, createdAt, mtime } = {},
+) {
+	const lockFile = supervisorLockPath(cwd, runId);
+	mkdirSync(dirname(lockFile), { recursive: true });
+	writeFileSync(
+		lockFile,
+		`${ownerId}\n${pid}\n${createdAt ?? new Date().toISOString()}\n`,
+		"utf8",
+	);
+	if (mtime) utimesSync(lockFile, mtime, mtime);
+	return lockFile;
 }
 
 function sleep(ms) {
@@ -851,6 +877,119 @@ test("supervisor lease honors live foreign owners and stale reclaim; workers can
 	} finally {
 		if (originalRole === undefined) delete process.env.PI_WORKFLOW_ROLE;
 		else process.env.PI_WORKFLOW_ROLE = originalRole;
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("run lease stale reclaim admits exactly one concurrent owner", async () => {
+	const cwd = makeProject();
+	try {
+		const runId = "workflow_unit_lock_reclaim_race";
+		writeSupervisorLock(cwd, runId, {
+			createdAt: "2000-01-01T00:00:00.000Z",
+			mtime: new Date(Date.now() - 60_000),
+		});
+
+		const results = await Promise.all([
+			withRunLease(cwd, runId, async () => {
+				await sleep(100);
+				return "first";
+			}),
+			withRunLease(cwd, runId, async () => {
+				await sleep(100);
+				return "second";
+			}),
+		]);
+
+		assert.equal(results.filter(Boolean).length, 1);
+		assert.equal(results.filter((value) => value === undefined).length, 1);
+	} finally {
+		setRunLeaseTestHooksForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("run lease restore fails clearly if another owner appears during reclaim restore", async () => {
+	const cwd = makeProject();
+	let thirdPartyFd;
+	try {
+		const runId = "workflow_unit_lock_restore_race";
+		const lockFile = writeSupervisorLock(cwd, runId, {
+			createdAt: "2000-01-01T00:00:00.000Z",
+			mtime: new Date(Date.now() - 60_000),
+		});
+		setRunLeaseTestHooksForTests({
+			onAfterReclaimRename({ reclaimFile }) {
+				writeFileSync(
+					reclaimFile,
+					`fresh-owner\n${process.pid}\n${new Date().toISOString()}\n`,
+					"utf8",
+				);
+			},
+			onBeforeRestoreReclaimFile({ lockFile: path }) {
+				thirdPartyFd = openSync(path, "wx");
+				writeFileSync(
+					thirdPartyFd,
+					`third-party\n${process.pid}\n${new Date().toISOString()}\n`,
+					"utf8",
+				);
+				closeSync(thirdPartyFd);
+				thirdPartyFd = undefined;
+			},
+		});
+
+		await assert.rejects(
+			() => withRunLease(cwd, runId, async () => "unreachable"),
+			/Could not restore reclaimed lock/,
+		);
+		assert.match(readFileSync(lockFile, "utf8"), /^third-party\n/);
+	} finally {
+		if (thirdPartyFd !== undefined) closeSync(thirdPartyFd);
+		setRunLeaseTestHooksForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("run lease absolute staleness can reclaim a live-pid old lock", async () => {
+	const cwd = makeProject();
+	try {
+		const runId = "workflow_unit_lock_absolute_stale";
+		writeSupervisorLock(cwd, runId, {
+			ownerId: "ancient-live-owner",
+			pid: process.pid,
+			createdAt: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString(),
+			mtime: new Date(),
+		});
+
+		const result = await withRunLease(cwd, runId, async () => "reacquired");
+		assert.equal(result, "reacquired");
+	} finally {
+		setRunLeaseTestHooksForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("run lease release does not unlink a replacement lock", async () => {
+	const cwd = makeProject();
+	try {
+		const runId = "workflow_unit_lock_release_race";
+		const lockFile = supervisorLockPath(cwd, runId);
+		setRunLeaseTestHooksForTests({
+			onBeforeReleaseLockRename({ lockFile: path }) {
+				unlinkSync(path);
+				writeFileSync(
+					path,
+					`third-party-release\n${process.pid}\n${new Date().toISOString()}\n`,
+					"utf8",
+				);
+			},
+		});
+
+		const result = await withRunLease(cwd, runId, async () => "released");
+		assert.equal(result, "released");
+		assert.match(readFileSync(lockFile, "utf8"), /^third-party-release\n/);
+	} finally {
+		setRunLeaseTestHooksForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });
@@ -14355,9 +14494,7 @@ test("subagent backend records parent child lifecycle events when parent env is 
 				{ type: "stderr", path: "stderr.log", artifactCwd: artifactDir },
 				{ type: "result", path: "result.json", artifactCwd: artifactDir },
 			],
-			attempts: [
-				{ attemptId: "attempt_child_lifecycle", status: "completed" },
-			],
+			attempts: [{ attemptId: "attempt_child_lifecycle", status: "completed" }],
 		};
 
 		const refreshed = await refreshRunFromSubagentArtifacts(cwd, running);
@@ -14450,9 +14587,7 @@ test("subagent terminal failure records parent child failed when parent env is s
 						{ type: "stderr", path: "stderr.log", artifactCwd: artifactDir },
 						{ type: "result", path: "result.json", artifactCwd: artifactDir },
 					],
-					attempts: [
-						{ attemptId: "attempt_child_failed", status: "failed" },
-					],
+					attempts: [{ attemptId: "attempt_child_failed", status: "failed" }],
 				};
 			},
 			async interruptSubagent() {
@@ -18783,6 +18918,70 @@ test("watchRun drops missing runs without recreating supervisor artifacts", asyn
 	}
 });
 
+test("scheduleRun aborts after heartbeat observes supervisor lease loss", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout");
+		const spec = workflowSpec("unit-scout", {
+			maxConcurrency: 1,
+			artifactGraph: {
+				stages: [
+					{ id: "one", type: "single", prompt: "Step one." },
+					{ id: "two", type: "single", prompt: "Step two." },
+				],
+			},
+		});
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Lease loss target",
+		});
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await writeRunRecord(cwd, run);
+		setRunLeaseTestHooksForTests({ heartbeatIntervalMs: 20 });
+
+		let launchCount = 0;
+		setSubagentApiForTests({
+			async runSubagent() {
+				launchCount += 1;
+				unlinkSync(supervisorLockPath(cwd, run.runId));
+				await sleep(120);
+				return {
+					runId: `run_lease_loss_${launchCount}`,
+					attemptId: `attempt_lease_loss_${launchCount}`,
+					status: "running",
+				};
+			},
+			async getSubagentStatus() {
+				return null;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+
+		await assert.rejects(
+			() => scheduleRun(cwd, run.runId, compiled),
+			/Lost supervisor lease/,
+		);
+		assert.equal(launchCount, 1);
+		const current = await readRunRecord(cwd, run.runId);
+		assert.equal(taskBySpec(current, "one.main").status, "running");
+		assert.equal(taskBySpec(current, "two.main").status, "pending");
+	} finally {
+		setSubagentApiForTests(undefined);
+		setRunLeaseTestHooksForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("resumeRun resets failed and skipped tasks, preserves completed work, and relaunches", async () => {
 	const cwd = makeProject();
 	try {
@@ -18882,6 +19081,64 @@ test("resumeRun resets failed and skipped tasks, preserves completed work, and r
 		} finally {
 			setSubagentApiForTests(undefined);
 		}
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("resumeRun rejects non-resumable blocked runs without resetting skipped dependents", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout");
+		const spec = workflowSpec("unit-scout", {
+			artifactGraph: {
+				stages: [
+					{ id: "gate", type: "single", prompt: "Needs attention." },
+					{ id: "approval", type: "single", prompt: "Needs approval." },
+					{ id: "after", type: "reduce", from: "gate", prompt: "After gate." },
+				],
+			},
+		});
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Blocked resume target",
+		});
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		setTaskTerminal(
+			taskBySpec(run, "gate.main"),
+			"blocked",
+			"needs_attention",
+			{
+				lastMessage: "manual attention required",
+			},
+		);
+		setTaskTerminal(
+			taskBySpec(run, "approval.main"),
+			"blocked",
+			"pending_approval",
+			{ lastMessage: "manual approval required" },
+		);
+		setTaskTerminal(
+			taskBySpec(run, "after.main"),
+			"skipped",
+			"skipped_after_dependency_failure",
+			{ lastMessage: "blocked upstream" },
+		);
+		await writeRunRecord(cwd, run);
+
+		await assert.rejects(
+			() => resumeRun(cwd, run.runId),
+			/non-resumable blocked task\(s\): gate\.main statusDetail=needs_attention, approval\.main statusDetail=pending_approval/,
+		);
+		const current = await readRunRecord(cwd, run.runId);
+		assert.equal(taskBySpec(current, "gate.main").status, "blocked");
+		assert.equal(taskBySpec(current, "approval.main").status, "blocked");
+		assert.equal(taskBySpec(current, "after.main").status, "skipped");
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}

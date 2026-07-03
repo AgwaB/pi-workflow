@@ -55,7 +55,25 @@ const runLeaseContext = new AsyncLocalStorage<{
 	cwd: string;
 	runId: string;
 	ownerId: string;
+	abortSignal: AbortSignal;
 }>();
+type RunLeaseTestHooks = {
+	heartbeatIntervalMs?: number;
+	onAfterReclaimRename?: (context: {
+		lockFile: string;
+		reclaimFile: string;
+	}) => void | Promise<void>;
+	onBeforeRestoreReclaimFile?: (context: {
+		lockFile: string;
+		reclaimFile: string;
+	}) => void | Promise<void>;
+	onBeforeReleaseLockRename?: (context: {
+		lockFile: string;
+		releaseFile: string;
+		ownerId: string;
+	}) => void | Promise<void>;
+};
+let runLeaseTestHooks: RunLeaseTestHooks = {};
 const TASK_STATUSES: Array<keyof Omit<TaskSummary, "total">> = [
 	"pending",
 	"running",
@@ -148,10 +166,14 @@ export async function writeJsonAtomic(
 	await rename(temp, file);
 }
 
+export function setRunLeaseTestHooksForTests(hooks?: RunLeaseTestHooks): void {
+	runLeaseTestHooks = hooks ?? {};
+}
+
 export async function withRunLease<T>(
 	cwd: string,
 	runId: string,
-	action: () => Promise<T>,
+	action: (abortSignal: AbortSignal) => Promise<T>,
 ): Promise<T | undefined> {
 	const dir = workflowRunDir(cwd, runId);
 	await ensureDir(dir);
@@ -160,8 +182,14 @@ export async function withRunLease<T>(
 	const lock = await acquireLock(lockFile, ownerId);
 	if (!lock) return undefined;
 
+	const abortController = new AbortController();
+	const abortLease = (error: unknown): void => {
+		if (abortController.signal.aborted) return;
+		abortController.abort(asLeaseError(error));
+	};
 	const supervisorFile = join(dir, "supervisor.json");
 	const heartbeat = async (): Promise<void> => {
+		assertLeaseNotAborted(abortController.signal);
 		await assertLockOwner(lockFile, ownerId);
 		const timestamp = nowIso();
 		const now = new Date();
@@ -176,20 +204,49 @@ export async function withRunLease<T>(
 	};
 
 	await heartbeat();
-	const heartbeatTimer = setInterval(
-		() => {
-			void heartbeat().catch(() => undefined);
-		},
-		Math.max(1000, Math.floor(LEASE_STALE_MS / 3)),
-	);
+	const heartbeatTimer = setInterval(() => {
+		void heartbeat().catch(abortLease);
+	}, runLeaseHeartbeatIntervalMs());
 	heartbeatTimer.unref?.();
 
 	try {
-		return await runLeaseContext.run({ cwd, runId, ownerId }, action);
+		const result = await runLeaseContext.run(
+			{ cwd, runId, ownerId, abortSignal: abortController.signal },
+			() => action(abortController.signal),
+		);
+		assertLeaseNotAborted(abortController.signal);
+		return result;
 	} finally {
 		clearInterval(heartbeatTimer);
 		await releaseLock(lockFile, ownerId);
 	}
+}
+
+function runLeaseHeartbeatIntervalMs(): number {
+	return Math.max(
+		1,
+		Math.floor(
+			runLeaseTestHooks.heartbeatIntervalMs ??
+				Math.max(1000, Math.floor(LEASE_STALE_MS / 3)),
+		),
+	);
+}
+
+function assertLeaseNotAborted(signal: AbortSignal): void {
+	if (signal.aborted) throw abortSignalError(signal);
+}
+
+function abortSignalError(signal: AbortSignal): Error {
+	return asLeaseError((signal as AbortSignal & { reason?: unknown }).reason);
+}
+
+function asLeaseError(error: unknown): Error {
+	if (error instanceof Error) return error;
+	return new Error(
+		error === undefined
+			? "Lost supervisor lease"
+			: `Lost supervisor lease: ${String(error)}`,
+	);
 }
 
 async function acquireLock(
@@ -231,6 +288,7 @@ async function reclaimStaleLock(lockFile: string): Promise<boolean> {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
 		return false;
 	}
+	await runLeaseTestHooks.onAfterReclaimRename?.({ lockFile, reclaimFile });
 
 	const claimed = await readLockSnapshot(reclaimFile);
 	if (!claimed) return true;
@@ -251,13 +309,22 @@ async function restoreReclaimFile(
 	reclaimFile: string,
 	lockFile: string,
 ): Promise<void> {
+	await runLeaseTestHooks.onBeforeRestoreReclaimFile?.({
+		lockFile,
+		reclaimFile,
+	});
 	try {
 		await link(reclaimFile, lockFile);
 	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-	} finally {
-		await unlink(reclaimFile).catch(() => undefined);
+		if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+			throw new Error(
+				`Could not restore reclaimed lock because another owner acquired ${lockFile}`,
+				{ cause: error },
+			);
+		}
+		throw error;
 	}
+	await unlink(reclaimFile).catch(() => undefined);
 }
 
 function isReclaimableLockSnapshot(snapshot: LockSnapshot): boolean {
@@ -339,8 +406,27 @@ async function acquireLockWithWait(
 }
 
 async function releaseLock(lockFile: string, ownerId: string): Promise<void> {
-	if (await ownsLock(lockFile, ownerId))
-		await unlink(lockFile).catch(() => undefined);
+	const snapshot = await readLockSnapshot(lockFile);
+	if (!snapshot || snapshot.ownerId !== ownerId) return;
+	const releaseFile = `${lockFile}.release-${process.pid}-${randomBytes(3).toString("hex")}`;
+	await runLeaseTestHooks.onBeforeReleaseLockRename?.({
+		lockFile,
+		releaseFile,
+		ownerId,
+	});
+	try {
+		await rename(lockFile, releaseFile);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+		throw error;
+	}
+	const claimed = await readLockSnapshot(releaseFile);
+	if (!claimed) return;
+	if (sameLockOwnerSnapshot(snapshot, claimed)) {
+		await unlink(releaseFile).catch(() => undefined);
+		return;
+	}
+	await restoreReclaimFile(releaseFile, lockFile);
 }
 
 async function assertLockOwner(
@@ -1095,6 +1181,7 @@ async function assertActiveRunLease(cwd: string, runId: string): Promise<void> {
 	const context = runLeaseContext.getStore();
 	if (!context) return;
 	if (context.cwd !== cwd || context.runId !== runId) return;
+	assertLeaseNotAborted(context.abortSignal);
 	await assertLockOwner(
 		join(workflowRunDir(cwd, runId), "supervisor.lock"),
 		context.ownerId,
@@ -1411,13 +1498,19 @@ const RESUMABLE_BLOCKED_STATUS_DETAILS = new Set([
 	"dynamic_approval_timeout",
 ]);
 
+export function isBlockedTaskResumableForResume(
+	task: Pick<WorkflowTaskRunRecord, "status" | "statusDetail">,
+): boolean {
+	return (
+		task.status === "blocked" &&
+		RESUMABLE_BLOCKED_STATUS_DETAILS.has(task.statusDetail)
+	);
+}
+
 export function resetTaskForResume(task: WorkflowTaskRunRecord): boolean {
 	if (
 		!RESUMABLE_TASK_STATUSES.has(task.status) &&
-		!(
-			task.status === "blocked" &&
-			RESUMABLE_BLOCKED_STATUS_DETAILS.has(task.statusDetail)
-		)
+		!isBlockedTaskResumableForResume(task)
 	) {
 		return false;
 	}

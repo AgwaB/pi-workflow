@@ -11,6 +11,7 @@ import {
 	compiledWorkflowPath,
 	fromProjectPath,
 	indexSupervisorErrorPath,
+	isBlockedTaskResumableForResume,
 	isTerminalWorkflowStatus,
 	isTerminalTaskStatus,
 	listRunRecords,
@@ -306,6 +307,22 @@ export interface StopRunSummary {
 	interruptedTaskIds: string[];
 }
 
+function assertBlockedRunResumable(run: WorkflowRunRecord): void {
+	if (run.status !== "blocked") return;
+	const blockers = run.tasks.filter(
+		(task) =>
+			task.status === "blocked" && !isBlockedTaskResumableForResume(task),
+	);
+	if (blockers.length === 0) return;
+	const details = blockers
+		.slice(0, 3)
+		.map((task) => `${task.specId} statusDetail=${task.statusDetail}`)
+		.join(", ");
+	throw new Error(
+		`Cannot resume blocked run ${run.runId}: non-resumable blocked task(s): ${details}. Resolve the attention/approval blocker before resuming.`,
+	);
+}
+
 export async function stopRun(
 	cwd: string,
 	runIdOrPrefix: string,
@@ -358,6 +375,7 @@ export async function resumeRun(
 			`resume requires a failed, interrupted, or resumable blocked run; ${current.runId} is ${current.status}`,
 		);
 	}
+	assertBlockedRunResumable(current);
 	const compiledFlow = await readCompiledWorkflow(cwd, current.runId);
 	const hasLoopTasks =
 		compiledFlow?.tasks.some(
@@ -375,6 +393,7 @@ export async function resumeRun(
 	const resetTaskIds: string[] = [];
 	const updated = await withRunLease(cwd, current.runId, async () => {
 		const run = await readRunRecord(cwd, current.runId);
+		assertBlockedRunResumable(run);
 		await resolveWorkflowBackend(run)
 			.cleanupRun(cwd, run)
 			.catch(() => undefined);
@@ -501,13 +520,25 @@ function isMissingRunError(error: unknown): boolean {
 	);
 }
 
+function assertScheduleLeaseActive(signal?: AbortSignal): void {
+	if (!signal?.aborted) return;
+	const reason = (signal as AbortSignal & { reason?: unknown }).reason;
+	if (reason instanceof Error) throw reason;
+	throw new Error(
+		reason === undefined
+			? "Lost supervisor lease"
+			: `Lost supervisor lease: ${String(reason)}`,
+	);
+}
+
 export async function scheduleRun(
 	cwd: string,
 	runId: string,
 	compiled?: CompiledWorkflow,
 	options: WorkflowScheduleOptions = {},
 ): Promise<WorkflowRunRecord | undefined> {
-	return withRunLease(cwd, runId, async () => {
+	return withRunLease(cwd, runId, async (leaseSignal) => {
+		assertScheduleLeaseActive(leaseSignal);
 		let run = await readRunRecord(cwd, runId);
 		run = await resolveWorkflowBackend(run).refreshRun(cwd, run);
 		if (isTerminalWorkflowStatus(run.status)) return run;
@@ -527,7 +558,8 @@ export async function scheduleRun(
 				`unsupported compiled workflow type: ${compiledFlow.type}`,
 			);
 		}
-		await scheduleDag(cwd, run, compiledFlow, options);
+		await scheduleDag(cwd, run, compiledFlow, options, leaseSignal);
+		assertScheduleLeaseActive(leaseSignal);
 
 		run = await readRunRecord(cwd, run.runId);
 		return run;
@@ -657,7 +689,9 @@ async function scheduleDag(
 	run: WorkflowRunRecord,
 	compiledFlow: CompiledWorkflow,
 	options: WorkflowScheduleOptions = {},
+	leaseSignal?: AbortSignal,
 ): Promise<void> {
+	assertScheduleLeaseActive(leaseSignal);
 	if (compiledFlow.type === WORKFLOW_RUN_TYPE) {
 		const loopReconciled = await reconcileLoopTaskMaterialization(
 			cwd,
@@ -707,6 +741,7 @@ async function scheduleDag(
 		index < run.tasks.length && running < maxConcurrency;
 		index += 1
 	) {
+		assertScheduleLeaseActive(leaseSignal);
 		const task = run.tasks[index];
 		const compiledTask = compiledFlow.tasks[index];
 		if (!task || !compiledTask || task.status !== "pending") continue;
@@ -753,6 +788,7 @@ async function scheduleDag(
 				continue;
 		}
 
+		assertScheduleLeaseActive(leaseSignal);
 		const launched = await launchPendingTaskAt(
 			cwd,
 			run,
@@ -760,6 +796,7 @@ async function scheduleDag(
 			index,
 			options,
 		);
+		assertScheduleLeaseActive(leaseSignal);
 		if (launched && run.tasks[index]?.status === "running") running += 1;
 	}
 }
