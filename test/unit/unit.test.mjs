@@ -14604,6 +14604,31 @@ test("workflow web-source core redacts URLs and reads normalized snippets", asyn
 		assert.deepEqual(termRead.missingTerms, []);
 		assert.equal(termRead.coverageRatio, 1);
 		assert.equal(termRead.candidateOnly, true);
+		const lateNeedle = "TARGET_MATCH_VALUE";
+		const lateSource = createWorkflowWebSource({
+			config,
+			url: "https://example.test/late-match",
+			text: `${"A".repeat(240)} ${lateNeedle} ${"B".repeat(240)}`,
+		});
+		const anchoredBudget = createWorkflowWebVisibleBudget(40);
+		const anchoredRead = readWorkflowWebSourceSnippet({
+			source: lateSource,
+			query: lateNeedle,
+			maxChars: 100,
+			budget: anchoredBudget,
+		});
+		assert.equal(anchoredRead.status, "matched");
+		assert.match(anchoredRead.quote, /TARGET_MATCH_VALUE/);
+		assert.equal(anchoredBudget.used <= 40, true);
+		const truncatedBudget = createWorkflowWebVisibleBudget(6);
+		const truncatedRead = readWorkflowWebSourceSnippet({
+			source: lateSource,
+			query: lateNeedle,
+			maxChars: 100,
+			budget: truncatedBudget,
+		});
+		assert.equal(truncatedRead.status, "truncated");
+		assert.match(truncatedRead.quote, /^TARGET/);
 		assert.equal(source.redactedUrl.includes("secret"), false);
 		assert.equal(await readWorkflowWebSource(config, "../escape"), undefined);
 		await writeWorkflowWebSource(config, source);
@@ -14836,6 +14861,88 @@ test("workflow web-source extension returns source cards and narrow reads withou
 			});
 		assert.equal(JSON.parse(duplicate.content[0].text).card.duplicate, true);
 		assert.equal(existsSync(join(cacheDir, "events.jsonl")), true);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("workflow web-source extension anchors late matches within remaining read budget", async () => {
+	const cwd = makeProject();
+	try {
+		const lateNeedle = "TARGET_MATCH_VALUE";
+		const longText = `${"A".repeat(220)} ${lateNeedle} ${"B".repeat(220)}`;
+		function registerLateReader(cacheName, visibleBudget) {
+			const registered = new Map();
+			registerWorkflowWebSourceExtension(
+				{
+					registerTool(tool) {
+						registered.set(tool.name, tool);
+					},
+				},
+				{
+					schema: "workflow-web-source-launch-config-v1",
+					runId: `workflow_unit_${cacheName}`,
+					taskId: "task-1",
+					cwd,
+					cacheDir: join(
+						cwd,
+						".pi",
+						"workflows",
+						`workflow_unit_${cacheName}`,
+						"web-source-cache",
+					),
+					provider: { kind: "extension" },
+					securityPolicy: { allowPrivateHosts: true },
+					webSourcePolicy: {
+						previewChars: 24,
+						sourceReadMaxChars: 120,
+						perTaskVisibleCharBudget: visibleBudget,
+					},
+				},
+				(pi) =>
+					pi.registerTool({
+						name: "fetch_content",
+						async execute(_id, params) {
+							return {
+								content: [{ type: "text", text: `# Late Match\n${longText}` }],
+								details: { successful: 1, finalUrl: params.url },
+							};
+						},
+					}),
+			);
+			return registered;
+		}
+
+		const anchoredRegistered = registerLateReader("anchored", 120);
+		const anchoredFetched = await anchoredRegistered
+			.get("workflow_web_fetch_source")
+			.execute("fetch-anchored", { url: "https://example.test/late-match" });
+		const anchoredCard = JSON.parse(anchoredFetched.content[0].text).card;
+		const anchoredRead = await anchoredRegistered
+			.get("workflow_web_source_read")
+			.execute("read-anchored", {
+				sourceRef: anchoredCard.sourceRef,
+				query: lateNeedle,
+			});
+		const anchoredBody = JSON.parse(anchoredRead.content[0].text);
+		assert.equal(anchoredBody.status, "ok");
+		assert.match(anchoredBody.quote, /TARGET_MATCH_VALUE/);
+
+		const truncatedRegistered = registerLateReader("truncated", 40);
+		const truncatedFetched = await truncatedRegistered
+			.get("workflow_web_fetch_source")
+			.execute("fetch-truncated", { url: "https://example.test/late-match" });
+		const truncatedCard = JSON.parse(truncatedFetched.content[0].text).card;
+		const truncatedRead = await truncatedRegistered
+			.get("workflow_web_source_read")
+			.execute("read-truncated", {
+				sourceRef: truncatedCard.sourceRef,
+				query: lateNeedle,
+			});
+		const truncatedBody = JSON.parse(truncatedRead.content[0].text);
+		assert.equal(truncatedBody.status, "truncated");
+		assert.equal(truncatedBody.budget.truncated, true);
+		assert.match(truncatedBody.quote, /^TARGET/);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}

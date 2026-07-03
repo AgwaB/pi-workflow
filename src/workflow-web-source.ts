@@ -98,7 +98,7 @@ export interface WorkflowWebSourceReadRequest {
 }
 
 export interface WorkflowWebSourceReadResult {
-	status: "matched" | "not_found";
+	status: "matched" | "truncated" | "not_found";
 	matchType?: "exact" | "normalized" | "terms";
 	quote?: string;
 	startOffset?: number;
@@ -108,6 +108,7 @@ export interface WorkflowWebSourceReadResult {
 	missingTerms?: string[];
 	coverageRatio?: number;
 	candidateOnly?: boolean;
+	truncated?: boolean;
 }
 
 export interface WorkflowWebSourceCard {
@@ -791,6 +792,8 @@ function snippetForTerms(options: {
 	const candidates: Array<{
 		start: number;
 		end: number;
+		anchorStart: number;
+		anchorEnd: number;
 		matchedTerms: string[];
 		missingTerms: string[];
 		score: number;
@@ -822,23 +825,34 @@ function snippetForTerms(options: {
 		if (right.score !== left.score) return right.score - left.score;
 		return right.matchedTerms.length - left.matchedTerms.length;
 	})[0]!;
-	const raw = redactInlineSecrets(options.text.slice(best.start, best.end));
-	const consumed = consumeWorkflowWebVisibleBudget(
-		options.budget,
-		raw,
-		options.maxChars,
-	);
+	const consumed = consumeAnchoredSnippet({
+		text: options.text,
+		anchorStart: best.anchorStart,
+		anchorEnd: best.anchorEnd,
+		maxChars: options.maxChars,
+		budget: options.budget,
+	});
+	const returnedWindowNorm = normalizeForSearch(
+		options.text.slice(consumed.sourceStart, consumed.sourceEnd),
+	).normalized;
+	const matchedTerms = needles
+		.filter((term) => returnedWindowNorm.includes(term.normalized))
+		.map((term) => term.raw);
+	const missingTerms = needles
+		.filter((term) => !returnedWindowNorm.includes(term.normalized))
+		.map((term) => term.raw);
 	return {
-		status: "matched",
+		status: consumed.status,
 		matchType: "terms",
-		quote: consumed.text,
-		startOffset: best.start,
-		endOffset: best.end,
-		visibleChars: consumed.text.length,
-		matchedTerms: best.matchedTerms,
-		missingTerms: best.missingTerms,
-		coverageRatio: best.matchedTerms.length / Math.max(1, needles.length),
+		quote: consumed.quote || undefined,
+		startOffset: consumed.sourceStart,
+		endOffset: consumed.sourceEnd,
+		visibleChars: consumed.visibleChars,
+		matchedTerms,
+		missingTerms,
+		coverageRatio: matchedTerms.length / Math.max(1, needles.length),
 		candidateOnly: true,
+		truncated: consumed.truncated || undefined,
 	};
 }
 
@@ -854,6 +868,8 @@ function scoreTermWindow(
 	matchedTerms: string[];
 	missingTerms: string[];
 	score: number;
+	anchorStart: number;
+	anchorEnd: number;
 } {
 	const center = Math.floor((matchStart + matchEnd) / 2);
 	const start = Math.max(0, center - Math.floor(maxChars / 2));
@@ -874,6 +890,8 @@ function scoreTermWindow(
 	return {
 		start,
 		end,
+		anchorStart: matchStart,
+		anchorEnd: matchEnd,
 		matchedTerms,
 		missingTerms,
 		score: matchedTerms.length * 1_000 + occurrenceScore,
@@ -963,27 +981,99 @@ function snippetForMatch(options: {
 	maxChars: number;
 	budget: WorkflowWebVisibleBudget;
 }): WorkflowWebSourceReadResult {
-	const matchLength = Math.max(0, options.end - options.start);
-	const slack = Math.max(0, options.maxChars - matchLength);
-	const before = Math.floor(slack / 2);
-	const snippetStart = Math.max(0, options.start - before);
-	const snippetEnd = Math.min(
-		options.text.length,
-		snippetStart + options.maxChars,
+	const consumed = consumeAnchoredSnippet({
+		text: options.text,
+		anchorStart: options.start,
+		anchorEnd: options.end,
+		maxChars: options.maxChars,
+		budget: options.budget,
+	});
+	return {
+		status: consumed.status,
+		matchType: options.matchType,
+		quote: consumed.quote || undefined,
+		startOffset: options.start,
+		endOffset: options.end,
+		visibleChars: consumed.visibleChars,
+		truncated: consumed.truncated || undefined,
+	};
+}
+
+type AnchoredSnippetResult = {
+	status: "matched" | "truncated";
+	quote: string;
+	visibleChars: number;
+	sourceStart: number;
+	sourceEnd: number;
+	truncated: boolean;
+};
+
+function consumeAnchoredSnippet(options: {
+	text: string;
+	anchorStart: number;
+	anchorEnd: number;
+	maxChars: number;
+	budget: WorkflowWebVisibleBudget;
+}): AnchoredSnippetResult {
+	const maxChars = Math.max(0, Math.floor(options.maxChars));
+	const remainingBefore = Math.max(
+		0,
+		options.budget.limit - options.budget.used,
 	);
-	const raw = redactInlineSecrets(options.text.slice(snippetStart, snippetEnd));
+	const visibleLimit = Math.max(0, Math.min(maxChars, remainingBefore));
+	const anchorStart = Math.max(
+		0,
+		Math.min(options.text.length, Math.floor(options.anchorStart)),
+	);
+	const anchorEnd = Math.max(
+		anchorStart,
+		Math.min(options.text.length, Math.floor(options.anchorEnd)),
+	);
+	const anchorLength = Math.max(0, anchorEnd - anchorStart);
+	if (visibleLimit <= 0) {
+		return {
+			status: "truncated",
+			quote: "",
+			visibleChars: 0,
+			sourceStart: anchorStart,
+			sourceEnd: anchorStart,
+			truncated: true,
+		};
+	}
+
+	let sourceStart: number;
+	let sourceEnd: number;
+	let status: "matched" | "truncated" = "matched";
+	if (anchorLength > visibleLimit) {
+		sourceStart = anchorStart;
+		sourceEnd = Math.min(options.text.length, sourceStart + visibleLimit);
+		status = "truncated";
+	} else {
+		const slack = Math.max(0, visibleLimit - anchorLength);
+		sourceStart = Math.max(0, anchorStart - Math.floor(slack / 2));
+		sourceEnd = Math.min(options.text.length, sourceStart + visibleLimit);
+		if (sourceEnd < anchorEnd) {
+			sourceEnd = anchorEnd;
+			sourceStart = Math.max(0, sourceEnd - visibleLimit);
+		} else if (sourceEnd === options.text.length) {
+			sourceStart = Math.max(0, sourceEnd - visibleLimit);
+		}
+	}
+
+	const raw = redactInlineSecrets(options.text.slice(sourceStart, sourceEnd));
 	const consumed = consumeWorkflowWebVisibleBudget(
 		options.budget,
 		raw,
-		options.maxChars,
+		visibleLimit,
 	);
+	const truncated = status === "truncated" || consumed.truncated;
 	return {
-		status: "matched",
-		matchType: options.matchType,
+		status,
 		quote: consumed.text,
-		startOffset: options.start,
-		endOffset: options.end,
 		visibleChars: consumed.text.length,
+		sourceStart,
+		sourceEnd,
+		truncated,
 	};
 }
 

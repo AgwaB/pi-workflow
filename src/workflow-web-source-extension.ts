@@ -11,7 +11,6 @@ import {
 	buildWorkflowWebSourceCard,
 	createWorkflowWebSource,
 	createWorkflowWebVisibleBudget,
-	DEFAULT_WORKFLOW_WEB_SECURITY_POLICY,
 	errorToolResult,
 	extractSearchCandidates,
 	extractTextFromToolResult,
@@ -43,7 +42,8 @@ export interface WorkflowWebProviderLaunchConfig {
 	extensionPath?: string;
 }
 
-export interface WorkflowWebSourceLaunchConfig extends WorkflowWebSourceCacheConfig {
+export interface WorkflowWebSourceLaunchConfig
+	extends WorkflowWebSourceCacheConfig {
 	schema: typeof WORKFLOW_WEB_SOURCE_LAUNCH_CONFIG_SCHEMA;
 	workflowName?: string;
 	stageId?: string;
@@ -111,14 +111,21 @@ export function registerWorkflowWebSourceExtension(
 ): void {
 	const policy = normalizeWorkflowWebSourcePolicy(config.webSourcePolicy);
 	const security = normalizeWorkflowWebSecurityPolicy(config.securityPolicy);
-	const budget = createWorkflowWebVisibleBudget(policy.perTaskVisibleCharBudget);
+	const budget = createWorkflowWebVisibleBudget(
+		policy.perTaskVisibleCharBudget,
+	);
 	const providerTools: CapturedProviderTools = new Map();
 	const sourceCache: Map<string, WorkflowWebSource> = new Map();
-	const fetchInFlight: Map<string, Promise<ReturnType<typeof toolResultFromJson>>> = new Map();
+	const fetchInFlight: Map<
+		string,
+		Promise<ReturnType<typeof toolResultFromJson>>
+	> = new Map();
 	const fetchFailures: Map<string, FetchFailure> = new Map();
 
 	if (providerExtension) {
-		providerExtension(providerCapturePi(pi, providerTools, Boolean(config.exposeLegacyTools)));
+		providerExtension(
+			providerCapturePi(pi, providerTools, Boolean(config.exposeLegacyTools)),
+		);
 	}
 
 	pi.registerTool({
@@ -126,9 +133,15 @@ export function registerWorkflowWebSourceExtension(
 		description:
 			"Search the web through the workflow web-source provider and return compact candidate cards only.",
 		parameters: Type.Object({
-			query: Type.Optional(Type.String({ description: "Single search query." })),
-			queries: Type.Optional(Type.Array(Type.String(), { description: "Multiple search queries." })),
-			numResults: Type.Optional(Type.Number({ description: "Results per query." })),
+			query: Type.Optional(
+				Type.String({ description: "Single search query." }),
+			),
+			queries: Type.Optional(
+				Type.Array(Type.String(), { description: "Multiple search queries." }),
+			),
+			numResults: Type.Optional(
+				Type.Number({ description: "Results per query." }),
+			),
 		}),
 		execute: async (toolCallId, params, signal, onUpdate, ctx) => {
 			const providerTool = providerTools.get("web_search");
@@ -150,14 +163,19 @@ export function registerWorkflowWebSourceExtension(
 				onUpdate,
 				ctx,
 			);
-			const candidates = extractSearchCandidates(result, policy).map((candidate) => {
-				const consumed = consumeText(candidate.snippet, policy.searchSnippetChars);
-				return {
-					...candidate,
-					snippet: consumed.text,
-					budget: consumed.budget,
-				};
-			});
+			const candidates = extractSearchCandidates(result, policy).map(
+				(candidate) => {
+					const consumed = consumeText(
+						candidate.snippet,
+						policy.searchSnippetChars,
+					);
+					return {
+						...candidate,
+						snippet: consumed.text,
+						budget: consumed.budget,
+					};
+				},
+			);
 			await recordWorkflowWebSourceEvent(config, "search", {
 				candidateCount: candidates.length,
 				visibleChars: budget.used,
@@ -177,14 +195,44 @@ export function registerWorkflowWebSourceExtension(
 		description:
 			"Fetch one or more URLs into the workflow web-source cache and return compact source cards with sourceRefs.",
 		parameters: Type.Object({
-			url: Type.Optional(Type.String({ description: "Single URL to fetch into the workflow web-source cache." })),
-			urls: Type.Optional(Type.Array(Type.String(), { description: "Multiple URLs to fetch in one tool call. Prefer this over repeated fetch calls when caching several promising sources." })),
-			sources: Type.Optional(Type.Array(Type.Object({
-				url: Type.String({ description: "URL to fetch into the workflow web-source cache." }),
-				title: Type.Optional(Type.String({ description: "Optional source title override." })),
-			}), { description: "Multiple URL/title objects to fetch in one tool call." })),
-			title: Type.Optional(Type.String({ description: "Optional source title override for single-url fetches." })),
-			titles: Type.Optional(Type.Array(Type.String(), { description: "Optional title overrides paired by index with urls." })),
+			url: Type.Optional(
+				Type.String({
+					description:
+						"Single URL to fetch into the workflow web-source cache.",
+				}),
+			),
+			urls: Type.Optional(
+				Type.Array(Type.String(), {
+					description:
+						"Multiple URLs to fetch in one tool call. Prefer this over repeated fetch calls when caching several promising sources.",
+				}),
+			),
+			sources: Type.Optional(
+				Type.Array(
+					Type.Object({
+						url: Type.String({
+							description: "URL to fetch into the workflow web-source cache.",
+						}),
+						title: Type.Optional(
+							Type.String({ description: "Optional source title override." }),
+						),
+					}),
+					{
+						description:
+							"Multiple URL/title objects to fetch in one tool call.",
+					},
+				),
+			),
+			title: Type.Optional(
+				Type.String({
+					description: "Optional source title override for single-url fetches.",
+				}),
+			),
+			titles: Type.Optional(
+				Type.Array(Type.String(), {
+					description: "Optional title overrides paired by index with urls.",
+				}),
+			),
 		}),
 		execute: async (toolCallId, params, signal, onUpdate, ctx) => {
 			const batchRequested = fetchSourceBatchRequested(params);
@@ -212,10 +260,15 @@ export function registerWorkflowWebSourceExtension(
 					results.push({
 						index,
 						url: sanitizeUrlForModel(request.url),
-						status: typeof payload.status === "string" ? payload.status : "unknown",
+						status:
+							typeof payload.status === "string" ? payload.status : "unknown",
 						...(typeof payload.code === "string" ? { code: payload.code } : {}),
-						...(typeof payload.message === "string" ? { message: payload.message } : {}),
-						...(typeof card?.sourceRef === "string" ? { sourceRef: card.sourceRef } : {}),
+						...(typeof payload.message === "string"
+							? { message: payload.message }
+							: {}),
+						...(typeof card?.sourceRef === "string"
+							? { sourceRef: card.sourceRef }
+							: {}),
 						...(card ? { cardIndex: cards.length - 1 } : {}),
 					});
 				}
@@ -239,7 +292,13 @@ export function registerWorkflowWebSourceExtension(
 					next: "Use returned sourceRefs with workflow_web_source_read; batch snippets with reads:[...] or queries:[...] when possible.",
 				});
 			}
-			return await fetchWorkflowWebSourceOnce(toolCallId, params, signal, onUpdate, ctx);
+			return await fetchWorkflowWebSourceOnce(
+				toolCallId,
+				params,
+				signal,
+				onUpdate,
+				ctx,
+			);
 		},
 	});
 
@@ -250,85 +309,132 @@ export function registerWorkflowWebSourceExtension(
 		onUpdate?: unknown,
 		ctx?: unknown,
 	): Promise<ToolResult> {
-			const url = urlFromParams(params);
-			if (!url) {
-				return errorToolResult(
-					"invalid_params",
-					"workflow_web_fetch_source requires a url string parameter.",
+		const url = urlFromParams(params);
+		if (!url) {
+			return errorToolResult(
+				"invalid_params",
+				"workflow_web_fetch_source requires a url string parameter.",
+			);
+		}
+		const checked = validateWorkflowWebUrl(url, security);
+		if (!checked.ok) {
+			await recordWorkflowWebSourceEvent(config, "blocked_url", {
+				url: sanitizeUrlForModel(url),
+				reason: checked.reason,
+			});
+			return errorToolResult(
+				"blocked_url",
+				"URL blocked by workflow web-source security policy.",
+				{
+					reason: checked.reason,
+					url: sanitizeUrlForModel(url),
+				},
+			);
+		}
+		const fetchUrl = canonicalWorkflowWebFetchUrl(checked.normalizedUrl);
+		const existing = await findWorkflowWebSourceByUrl(config, fetchUrl);
+		if (existing) {
+			sourceCache.set(existing.sourceRef, existing);
+			const card = buildWorkflowWebSourceCard({
+				source: existing,
+				policy,
+				budget,
+				duplicate: true,
+			});
+			await recordWorkflowWebSourceEvent(config, "fetch_duplicate", {
+				sourceRef: existing.sourceRef,
+				url: existing.redactedUrl,
+				visibleChars: budget.used,
+			});
+			return toolResultFromJson({
+				status: "ok",
+				tool: "workflow_web_fetch_source",
+				card,
+			});
+		}
+		const fetchKey = sourceUrlCacheKey(fetchUrl);
+		const cachedFailure =
+			fetchFailures.get(fetchKey) ??
+			(await readDurableFetchFailure(config, fetchKey));
+		if (cachedFailure) {
+			fetchFailures.set(fetchKey, cachedFailure);
+			await recordWorkflowWebSourceEvent(config, "fetch_negative_cache_hit", {
+				url: sanitizeUrlForModel(fetchUrl),
+				code: cachedFailure.code,
+			});
+			return errorToolResult(
+				cachedFailure.code,
+				cachedFailure.message,
+				cachedFailure.extra,
+			);
+		}
+		const inFlight = fetchInFlight.get(fetchKey);
+		if (inFlight) {
+			const result = await inFlight;
+			const source = await findWorkflowWebSourceByUrl(config, fetchUrl);
+			if (!source) return result;
+			sourceCache.set(source.sourceRef, source);
+			const card = buildWorkflowWebSourceCard({
+				source,
+				policy,
+				budget,
+				duplicate: true,
+			});
+			await recordWorkflowWebSourceEvent(config, "fetch_duplicate", {
+				sourceRef: source.sourceRef,
+				url: source.redactedUrl,
+				visibleChars: budget.used,
+			});
+			return toolResultFromJson({
+				status: "ok",
+				tool: "workflow_web_fetch_source",
+				card,
+			});
+		}
+		const fetchPromise = withWorkflowWebFetchLock(
+			config,
+			fetchKey,
+			signal,
+			async () => {
+				const lockedExisting = await findWorkflowWebSourceByUrl(
+					config,
+					fetchUrl,
 				);
-			}
-			const checked = validateWorkflowWebUrl(url, security);
-			if (!checked.ok) {
-				await recordWorkflowWebSourceEvent(config, "blocked_url", {
-					url: sanitizeUrlForModel(url),
-					reason: checked.reason,
-				});
-				return errorToolResult("blocked_url", "URL blocked by workflow web-source security policy.", {
-					reason: checked.reason,
-					url: sanitizeUrlForModel(url),
-				});
-			}
-			const fetchUrl = canonicalWorkflowWebFetchUrl(checked.normalizedUrl);
-			const existing = await findWorkflowWebSourceByUrl(config, fetchUrl);
-			if (existing) {
-				sourceCache.set(existing.sourceRef, existing);
-				const card = buildWorkflowWebSourceCard({
-					source: existing,
-					policy,
-					budget,
-					duplicate: true,
-				});
-				await recordWorkflowWebSourceEvent(config, "fetch_duplicate", {
-					sourceRef: existing.sourceRef,
-					url: existing.redactedUrl,
-					visibleChars: budget.used,
-				});
-				return toolResultFromJson({ status: "ok", tool: "workflow_web_fetch_source", card });
-			}
-			const fetchKey = sourceUrlCacheKey(fetchUrl);
-			const cachedFailure = fetchFailures.get(fetchKey) ?? await readDurableFetchFailure(config, fetchKey);
-			if (cachedFailure) {
-				fetchFailures.set(fetchKey, cachedFailure);
-				await recordWorkflowWebSourceEvent(config, "fetch_negative_cache_hit", {
-					url: sanitizeUrlForModel(fetchUrl),
-					code: cachedFailure.code,
-				});
-				return errorToolResult(cachedFailure.code, cachedFailure.message, cachedFailure.extra);
-			}
-			const inFlight = fetchInFlight.get(fetchKey);
-			if (inFlight) {
-				const result = await inFlight;
-				const source = await findWorkflowWebSourceByUrl(config, fetchUrl);
-				if (!source) return result;
-				sourceCache.set(source.sourceRef, source);
-				const card = buildWorkflowWebSourceCard({ source, policy, budget, duplicate: true });
-				await recordWorkflowWebSourceEvent(config, "fetch_duplicate", {
-					sourceRef: source.sourceRef,
-					url: source.redactedUrl,
-					visibleChars: budget.used,
-				});
-				return toolResultFromJson({ status: "ok", tool: "workflow_web_fetch_source", card });
-			}
-			const fetchPromise = withWorkflowWebFetchLock(config, fetchKey, signal, async () => {
-				const lockedExisting = await findWorkflowWebSourceByUrl(config, fetchUrl);
 				if (lockedExisting) {
 					sourceCache.set(lockedExisting.sourceRef, lockedExisting);
-					const card = buildWorkflowWebSourceCard({ source: lockedExisting, policy, budget, duplicate: true });
+					const card = buildWorkflowWebSourceCard({
+						source: lockedExisting,
+						policy,
+						budget,
+						duplicate: true,
+					});
 					await recordWorkflowWebSourceEvent(config, "fetch_duplicate", {
 						sourceRef: lockedExisting.sourceRef,
 						url: lockedExisting.redactedUrl,
 						visibleChars: budget.used,
 					});
-					return toolResultFromJson({ status: "ok", tool: "workflow_web_fetch_source", card });
+					return toolResultFromJson({
+						status: "ok",
+						tool: "workflow_web_fetch_source",
+						card,
+					});
 				}
 				const lockedFailure = await readDurableFetchFailure(config, fetchKey);
 				if (lockedFailure) {
 					fetchFailures.set(fetchKey, lockedFailure);
-					await recordWorkflowWebSourceEvent(config, "fetch_negative_cache_hit", {
-						url: sanitizeUrlForModel(fetchUrl),
-						code: lockedFailure.code,
-					});
-					return errorToolResult(lockedFailure.code, lockedFailure.message, lockedFailure.extra);
+					await recordWorkflowWebSourceEvent(
+						config,
+						"fetch_negative_cache_hit",
+						{
+							url: sanitizeUrlForModel(fetchUrl),
+							code: lockedFailure.code,
+						},
+					);
+					return errorToolResult(
+						lockedFailure.code,
+						lockedFailure.message,
+						lockedFailure.extra,
+					);
 				}
 				let text: string;
 				let title = titleFromParams(params);
@@ -345,13 +451,21 @@ export function registerWorkflowWebSourceExtension(
 							url: sanitizeUrlForModel(safeFetch.url),
 							reason: safeFetch.reason,
 						});
-						return await cachedFetchFailureResult(config, fetchFailures, fetchKey, {
-							code: "blocked_url",
-							message:
-								"URL was blocked by workflow web-source security policy before content fetch.",
-							extra: { reason: safeFetch.reason, url: sanitizeUrlForModel(safeFetch.url) },
-							reason: safeFetch.reason,
-						});
+						return await cachedFetchFailureResult(
+							config,
+							fetchFailures,
+							fetchKey,
+							{
+								code: "blocked_url",
+								message:
+									"URL was blocked by workflow web-source security policy before content fetch.",
+								extra: {
+									reason: safeFetch.reason,
+									url: sanitizeUrlForModel(safeFetch.url),
+								},
+								reason: safeFetch.reason,
+							},
+						);
 					}
 					text = safeFetch.text;
 					title = title ?? safeFetch.title;
@@ -368,31 +482,44 @@ export function registerWorkflowWebSourceExtension(
 						return errorToolResult(missing.code, missing.message);
 					}
 					if (!security.allowPrivateHosts) {
-						await recordWorkflowWebSourceEvent(config, "blocked_provider_fetch", {
-							url: sanitizeUrlForModel(fetchUrl),
-							reason: "untrusted_provider_fetch",
-						});
+						await recordWorkflowWebSourceEvent(
+							config,
+							"blocked_provider_fetch",
+							{
+								url: sanitizeUrlForModel(fetchUrl),
+								reason: "untrusted_provider_fetch",
+							},
+						);
 						return errorToolResult(
 							"untrusted_provider_fetch",
 							"Custom provider fetch_content is disabled unless securityPolicy.allowPrivateHosts is true; use the default safe fetch provider or a trusted provider configuration.",
 							{ url: sanitizeUrlForModel(fetchUrl) },
 						);
 					}
-					const providerHostCheck = await validateResolvedHost(fetchUrl, security);
+					const providerHostCheck = await validateResolvedHost(
+						fetchUrl,
+						security,
+					);
 					if (!providerHostCheck.ok) {
 						await recordWorkflowWebSourceEvent(config, "blocked_provider_url", {
 							url: sanitizeUrlForModel(providerHostCheck.url),
 							reason: providerHostCheck.reason,
 						});
-						return await cachedFetchFailureResult(config, fetchFailures, fetchKey, {
-							code: "blocked_url",
-							message: "URL was blocked by workflow web-source security policy before provider fetch.",
-							extra: {
+						return await cachedFetchFailureResult(
+							config,
+							fetchFailures,
+							fetchKey,
+							{
+								code: "blocked_url",
+								message:
+									"URL was blocked by workflow web-source security policy before provider fetch.",
+								extra: {
+									reason: providerHostCheck.reason,
+									url: sanitizeUrlForModel(providerHostCheck.url),
+								},
 								reason: providerHostCheck.reason,
-								url: sanitizeUrlForModel(providerHostCheck.url),
 							},
-							reason: providerHostCheck.reason,
-						});
+						);
 					}
 					const result = await providerTool.execute(
 						toolCallId,
@@ -401,21 +528,30 @@ export function registerWorkflowWebSourceExtension(
 						onUpdate,
 						ctx,
 					);
-					const providerUrlCheck = await validateProviderResultUrls(result, security);
+					const providerUrlCheck = await validateProviderResultUrls(
+						result,
+						security,
+					);
 					if (!providerUrlCheck.ok) {
 						await recordWorkflowWebSourceEvent(config, "blocked_provider_url", {
 							url: sanitizeUrlForModel(providerUrlCheck.url),
 							reason: providerUrlCheck.reason,
 						});
-						return await cachedFetchFailureResult(config, fetchFailures, fetchKey, {
-							code: "blocked_url",
-							message: "Provider result URL was blocked by workflow web-source security policy.",
-							extra: {
+						return await cachedFetchFailureResult(
+							config,
+							fetchFailures,
+							fetchKey,
+							{
+								code: "blocked_url",
+								message:
+									"Provider result URL was blocked by workflow web-source security policy.",
+								extra: {
+									reason: providerUrlCheck.reason,
+									url: sanitizeUrlForModel(providerUrlCheck.url),
+								},
 								reason: providerUrlCheck.reason,
-								url: sanitizeUrlForModel(providerUrlCheck.url),
 							},
-							reason: providerUrlCheck.reason,
-						});
+						);
 					}
 					text = extractTextFromToolResult(result);
 					title = title ?? extractTitleFromToolResult(result);
@@ -424,12 +560,17 @@ export function registerWorkflowWebSourceExtension(
 					await recordWorkflowWebSourceEvent(config, "fetch_empty", {
 						url: sanitizeUrlForModel(fetchUrl),
 					});
-					return await cachedFetchFailureResult(config, fetchFailures, fetchKey, {
-						code: "empty_source",
-						message: "Provider returned no extractable text for this URL.",
-						extra: { url: sanitizeUrlForModel(fetchUrl) },
-						reason: "empty_source",
-					});
+					return await cachedFetchFailureResult(
+						config,
+						fetchFailures,
+						fetchKey,
+						{
+							code: "empty_source",
+							message: "Provider returned no extractable text for this URL.",
+							extra: { url: sanitizeUrlForModel(fetchUrl) },
+							reason: "empty_source",
+						},
+					);
 				}
 				const source = createWorkflowWebSource({
 					config,
@@ -448,24 +589,37 @@ export function registerWorkflowWebSourceExtension(
 					textChars: source.textChars,
 					visibleChars: budget.used,
 				});
-				return toolResultFromJson({ status: "ok", tool: "workflow_web_fetch_source", card });
-			}).catch(async (error: unknown) => {
-				const message = error instanceof Error ? error.message : "workflow_web_fetch_failed";
-				const code = message === "fetch_lock_timeout" ? "fetch_lock_timeout" : "workflow_web_fetch_failed";
-				await recordWorkflowWebSourceEvent(config, "fetch_failed", {
-					url: sanitizeUrlForModel(fetchUrl),
-					code,
+				return toolResultFromJson({
+					status: "ok",
+					tool: "workflow_web_fetch_source",
+					card,
 				});
-				return errorToolResult(code, "Workflow web-source fetch failed before a source could be cached.", {
-					url: sanitizeUrlForModel(fetchUrl),
-				});
+			},
+		).catch(async (error: unknown) => {
+			const message =
+				error instanceof Error ? error.message : "workflow_web_fetch_failed";
+			const code =
+				message === "fetch_lock_timeout"
+					? "fetch_lock_timeout"
+					: "workflow_web_fetch_failed";
+			await recordWorkflowWebSourceEvent(config, "fetch_failed", {
+				url: sanitizeUrlForModel(fetchUrl),
+				code,
 			});
-			fetchInFlight.set(fetchKey, fetchPromise);
-			try {
-				return await fetchPromise;
-			} finally {
-				fetchInFlight.delete(fetchKey);
-			}
+			return errorToolResult(
+				code,
+				"Workflow web-source fetch failed before a source could be cached.",
+				{
+					url: sanitizeUrlForModel(fetchUrl),
+				},
+			);
+		});
+		fetchInFlight.set(fetchKey, fetchPromise);
+		try {
+			return await fetchPromise;
+		} finally {
+			fetchInFlight.delete(fetchKey);
+		}
 	}
 
 	pi.registerTool({
@@ -473,26 +627,90 @@ export function registerWorkflowWebSourceExtension(
 		description:
 			"Read one or more narrow exact/fuzzy/term-matched snippets from a cached workflow web source by sourceRef.",
 		parameters: Type.Object({
-			sourceRef: Type.String({ description: "Opaque sourceRef returned by workflow_web_fetch_source." }),
-			query: Type.Optional(Type.String({ description: "Exact or fuzzy text to locate in the cached source." })),
-			queries: Type.Optional(Type.Array(Type.String(), { description: "Multiple exact/fuzzy texts to locate in one cached source. Prefer this over repeated calls when reading several snippets from the same sourceRef." })),
-			exact: Type.Optional(Type.String({ description: "Exact text to locate in the cached source." })),
-			exactTexts: Type.Optional(Type.Array(Type.String(), { description: "Multiple exact texts to locate in one cached source." })),
-			claim: Type.Optional(Type.String({ description: "Claim to locate when the exact quote is not known. Use with terms for deterministic quote harvesting." })),
-			terms: Type.Optional(Type.Array(Type.String(), { description: "Important terms that should co-occur in the returned source window." })),
-			reads: Type.Optional(Type.Array(Type.Object({
-				query: Type.Optional(Type.String({ description: "Exact or fuzzy text to locate." })),
-				exact: Type.Optional(Type.String({ description: "Exact text to locate." })),
-				exactText: Type.Optional(Type.String({ description: "Exact text to locate." })),
-				text: Type.Optional(Type.String({ description: "Text to locate." })),
-				claim: Type.Optional(Type.String({ description: "Claim to locate when exact quote is unknown." })),
-				terms: Type.Optional(Type.Array(Type.String(), { description: "Important terms for deterministic quote harvesting." })),
-				maxChars: Type.Optional(Type.Number({ description: "Maximum visible snippet characters for this read." })),
-			}), { description: "Mixed batch reads for one sourceRef; each item can use query or claim+terms." })),
-			maxChars: Type.Optional(Type.Number({ description: "Maximum visible snippet characters per query." })),
+			sourceRef: Type.String({
+				description: "Opaque sourceRef returned by workflow_web_fetch_source.",
+			}),
+			query: Type.Optional(
+				Type.String({
+					description: "Exact or fuzzy text to locate in the cached source.",
+				}),
+			),
+			queries: Type.Optional(
+				Type.Array(Type.String(), {
+					description:
+						"Multiple exact/fuzzy texts to locate in one cached source. Prefer this over repeated calls when reading several snippets from the same sourceRef.",
+				}),
+			),
+			exact: Type.Optional(
+				Type.String({
+					description: "Exact text to locate in the cached source.",
+				}),
+			),
+			exactTexts: Type.Optional(
+				Type.Array(Type.String(), {
+					description: "Multiple exact texts to locate in one cached source.",
+				}),
+			),
+			claim: Type.Optional(
+				Type.String({
+					description:
+						"Claim to locate when the exact quote is not known. Use with terms for deterministic quote harvesting.",
+				}),
+			),
+			terms: Type.Optional(
+				Type.Array(Type.String(), {
+					description:
+						"Important terms that should co-occur in the returned source window.",
+				}),
+			),
+			reads: Type.Optional(
+				Type.Array(
+					Type.Object({
+						query: Type.Optional(
+							Type.String({ description: "Exact or fuzzy text to locate." }),
+						),
+						exact: Type.Optional(
+							Type.String({ description: "Exact text to locate." }),
+						),
+						exactText: Type.Optional(
+							Type.String({ description: "Exact text to locate." }),
+						),
+						text: Type.Optional(
+							Type.String({ description: "Text to locate." }),
+						),
+						claim: Type.Optional(
+							Type.String({
+								description: "Claim to locate when exact quote is unknown.",
+							}),
+						),
+						terms: Type.Optional(
+							Type.Array(Type.String(), {
+								description:
+									"Important terms for deterministic quote harvesting.",
+							}),
+						),
+						maxChars: Type.Optional(
+							Type.Number({
+								description:
+									"Maximum visible snippet characters for this read.",
+							}),
+						),
+					}),
+					{
+						description:
+							"Mixed batch reads for one sourceRef; each item can use query or claim+terms.",
+					},
+				),
+			),
+			maxChars: Type.Optional(
+				Type.Number({
+					description: "Maximum visible snippet characters per query.",
+				}),
+			),
 		}),
 		execute: async (_toolCallId, params) => {
-			const sourceRef = stringParam(params, "sourceRef") ?? stringParam(params, "source_ref");
+			const sourceRef =
+				stringParam(params, "sourceRef") ?? stringParam(params, "source_ref");
 			const requests = sourceReadRequestsFromParams(params);
 			if (!sourceRef || requests.length === 0) {
 				return errorToolResult(
@@ -502,18 +720,28 @@ export function registerWorkflowWebSourceExtension(
 			}
 			const source = await readCachedWorkflowWebSource(sourceRef);
 			if (!source) {
-				await recordWorkflowWebSourceEvent(config, "source_read_missing", { sourceRef });
-				return errorToolResult("source_not_found", "No cached workflow web source exists for sourceRef.", {
+				await recordWorkflowWebSourceEvent(config, "source_read_missing", {
 					sourceRef,
 				});
+				return errorToolResult(
+					"source_not_found",
+					"No cached workflow web source exists for sourceRef.",
+					{
+						sourceRef,
+					},
+				);
 			}
-			const maxChars = positiveIntParam(params, "maxChars") ?? policy.sourceReadMaxChars;
+			const maxChars =
+				positiveIntParam(params, "maxChars") ?? policy.sourceReadMaxChars;
 			const perQueryMaxChars = Math.min(maxChars, policy.sourceReadMaxChars);
 			const reads = readWorkflowWebSourceSnippets({
 				source,
 				requests: requests.map((request) => ({
 					...request,
-					maxChars: Math.min(request.maxChars ?? perQueryMaxChars, policy.sourceReadMaxChars),
+					maxChars: Math.min(
+						request.maxChars ?? perQueryMaxChars,
+						policy.sourceReadMaxChars,
+					),
 				})),
 				maxChars: perQueryMaxChars,
 				budget,
@@ -532,14 +760,20 @@ export function registerWorkflowWebSourceExtension(
 					missingTerms: read.missingTerms,
 					coverageRatio: read.coverageRatio,
 					candidateOnly: read.candidateOnly,
+					truncated: read.truncated,
 					quote: status === "budget_exhausted" ? undefined : read.quote,
 					startOffset: read.startOffset,
 					endOffset: read.endOffset,
 					visibleChars: read.visibleChars,
 				};
 			});
-			const responseStatus = aggregateSourceReadStatus(results.map((result) => result.status));
-			const visibleChars = results.reduce((total, result) => total + result.visibleChars, 0);
+			const responseStatus = aggregateSourceReadStatus(
+				results.map((result) => result.status),
+			);
+			const visibleChars = results.reduce(
+				(total, result) => total + result.visibleChars,
+				0,
+			);
 			await recordWorkflowWebSourceEvent(config, "source_read", {
 				sourceRef,
 				status: responseStatus,
@@ -561,14 +795,21 @@ export function registerWorkflowWebSourceExtension(
 					missingTerms: result.missingTerms,
 					coverageRatio: result.coverageRatio,
 					candidateOnly: result.candidateOnly,
-					quote: result.status === "budget_exhausted" ? undefined : result.quote,
+					truncated: result.truncated,
+					quote:
+						result.status === "budget_exhausted" ? undefined : result.quote,
 					startOffset: result.startOffset,
 					endOffset: result.endOffset,
-					budget: budgetSnapshot(result.status === "budget_exhausted"),
+					budget: budgetSnapshot(
+						result.status === "budget_exhausted" ||
+							result.status === "truncated",
+					),
 					next:
 						result.status === "budget_exhausted"
 							? "Visible web-source budget is exhausted for this task; cite the sourceRef as an evidence gap or use a smaller query in a fresh task."
-							: undefined,
+							: result.status === "truncated"
+								? "The matched web-source snippet was truncated by the visible budget or maxChars; use a smaller exact query or a fresh task if the full quote is required."
+								: undefined,
 				});
 			}
 			return toolResultFromJson({
@@ -577,16 +818,26 @@ export function registerWorkflowWebSourceExtension(
 				sourceRef,
 				url: source.redactedUrl,
 				results,
-				budget: budgetSnapshot(results.some((result) => result.status === "budget_exhausted")),
+				budget: budgetSnapshot(
+					results.some(
+						(result) =>
+							result.status === "budget_exhausted" ||
+							result.status === "truncated",
+					),
+				),
 				next:
 					responseStatus === "budget_exhausted"
 						? "Visible web-source budget is exhausted for this task; cite missing quotes as evidence gaps or use smaller query batches in a fresh task."
-						: undefined,
+						: responseStatus === "truncated"
+							? "One or more matched web-source snippets were truncated by the visible budget or maxChars; use smaller exact queries or a fresh task if full quotes are required."
+							: undefined,
 			});
 		},
 	});
 
-	async function readCachedWorkflowWebSource(sourceRef: string): Promise<WorkflowWebSource | undefined> {
+	async function readCachedWorkflowWebSource(
+		sourceRef: string,
+	): Promise<WorkflowWebSource | undefined> {
 		const cached = sourceCache.get(sourceRef);
 		if (cached) return cached;
 		const source = await readWorkflowWebSource(config, sourceRef);
@@ -669,7 +920,12 @@ async function cachedFetchFailureResult(
 	config: WorkflowWebSourceCacheConfig,
 	cache: Map<string, FetchFailure>,
 	key: string,
-	failure: { code: string; message: string; extra: Record<string, unknown>; reason: string },
+	failure: {
+		code: string;
+		message: string;
+		extra: Record<string, unknown>;
+		reason: string;
+	},
 ): Promise<ReturnType<typeof toolResultFromJson>> {
 	const cached = {
 		code: failure.code,
@@ -751,7 +1007,9 @@ async function readDurableFetchFailure(
 	key: string,
 ): Promise<FetchFailure | undefined> {
 	try {
-		const parsed = JSON.parse(await readFile(fetchFailurePath(config, key), "utf8")) as unknown;
+		const parsed = JSON.parse(
+			await readFile(fetchFailurePath(config, key), "utf8"),
+		) as unknown;
 		return normalizeFetchFailure(parsed);
 	} catch {
 		return undefined;
@@ -773,23 +1031,36 @@ async function writeDurableFetchFailure(
 
 function normalizeFetchFailure(value: unknown): FetchFailure | undefined {
 	if (!isRecord(value)) return undefined;
-	if (typeof value.code !== "string" || typeof value.message !== "string") return undefined;
+	if (typeof value.code !== "string" || typeof value.message !== "string")
+		return undefined;
 	const extra = isRecord(value.extra) ? value.extra : {};
 	return {
 		code: value.code,
 		message: value.message,
 		extra,
 		...(typeof value.reason === "string" ? { reason: value.reason } : {}),
-		...(typeof value.createdAt === "string" ? { createdAt: value.createdAt } : {}),
+		...(typeof value.createdAt === "string"
+			? { createdAt: value.createdAt }
+			: {}),
 	};
 }
 
-function fetchLockPath(config: WorkflowWebSourceCacheConfig, key: string): string {
+function fetchLockPath(
+	config: WorkflowWebSourceCacheConfig,
+	key: string,
+): string {
 	return resolve(config.cacheDir, "fetch-locks", fetchCacheFileKey(key));
 }
 
-function fetchFailurePath(config: WorkflowWebSourceCacheConfig, key: string): string {
-	return resolve(config.cacheDir, "fetch-negative-cache", `${fetchCacheFileKey(key)}.json`);
+function fetchFailurePath(
+	config: WorkflowWebSourceCacheConfig,
+	key: string,
+): string {
+	return resolve(
+		config.cacheDir,
+		"fetch-negative-cache",
+		`${fetchCacheFileKey(key)}.json`,
+	);
 }
 
 function fetchCacheFileKey(key: string): string {
@@ -813,7 +1084,11 @@ function shouldCacheFetchFailure(reason: string): boolean {
 }
 
 function shouldCacheFetchFailureInMemory(reason: string): boolean {
-	return reason === "empty_source" || reason === "dns_resolution_failed" || reason.includes("ENOTFOUND");
+	return (
+		reason === "empty_source" ||
+		reason === "dns_resolution_failed" ||
+		reason.includes("ENOTFOUND")
+	);
 }
 
 const WORKFLOW_WEB_FETCH_TIMEOUT_MS = 30_000;
@@ -824,25 +1099,46 @@ async function safeFetchWorkflowWebText(
 	security: WorkflowWebSecurityPolicy,
 	signal?: AbortSignal,
 ): Promise<
-	| { ok: true; url: string; text: string; title?: string; extractionLossy?: boolean }
+	| {
+			ok: true;
+			url: string;
+			text: string;
+			title?: string;
+			extractionLossy?: boolean;
+	  }
 	| { ok: false; reason: string; url: string }
 > {
 	let current = url;
 	for (let redirectCount = 0; redirectCount < 6; redirectCount += 1) {
 		const checked = validateWorkflowWebUrl(current, security);
 		if (!checked.ok) return { ok: false, reason: checked.reason, url: current };
-		const response = await safeFetchOnce(checked.normalizedUrl, security, signal);
+		const response = await safeFetchOnce(
+			checked.normalizedUrl,
+			security,
+			signal,
+		);
 		if (!response.ok) return response;
 		if (response.status >= 300 && response.status < 400) {
 			if (!response.location)
-				return { ok: false, reason: "redirect_without_location", url: checked.normalizedUrl };
+				return {
+					ok: false,
+					reason: "redirect_without_location",
+					url: checked.normalizedUrl,
+				};
 			current = new URL(response.location, checked.normalizedUrl).href;
 			continue;
 		}
 		if (response.status < 200 || response.status >= 300) {
-			return { ok: false, reason: `http_${response.status}`, url: checked.normalizedUrl };
+			return {
+				ok: false,
+				reason: `http_${response.status}`,
+				url: checked.normalizedUrl,
+			};
 		}
-		const extracted = extractWorkflowWebResponseText(response.text, response.contentType);
+		const extracted = extractWorkflowWebResponseText(
+			response.text,
+			response.contentType,
+		);
 		return {
 			ok: true,
 			url: checked.normalizedUrl,
@@ -859,7 +1155,14 @@ function safeFetchOnce(
 	security: WorkflowWebSecurityPolicy,
 	signal?: AbortSignal,
 ): Promise<
-	| { ok: true; status: number; location?: string; text: string; contentType?: string; truncated?: boolean }
+	| {
+			ok: true;
+			status: number;
+			location?: string;
+			text: string;
+			contentType?: string;
+			truncated?: boolean;
+	  }
 	| { ok: false; reason: string; url: string }
 > {
 	const parsed = new URL(url);
@@ -868,7 +1171,14 @@ function safeFetchOnce(
 		let settled = false;
 		const settle = (
 			result:
-				| { ok: true; status: number; location?: string; text: string; contentType?: string; truncated?: boolean }
+				| {
+						ok: true;
+						status: number;
+						location?: string;
+						text: string;
+						contentType?: string;
+						truncated?: boolean;
+				  }
 				| { ok: false; reason: string; url: string },
 		) => {
 			if (settled) return;
@@ -880,20 +1190,26 @@ function safeFetchOnce(
 			{
 				method: "GET",
 				headers: {
-					accept: "text/plain,text/html,application/json,application/xml;q=0.9,*/*;q=0.1",
+					accept:
+						"text/plain,text/html,application/json,application/xml;q=0.9,*/*;q=0.1",
 					"user-agent": "pi-workflow-web-source/1",
 				},
 				lookup(hostname, options, callback) {
 					lookupPublicAddress(hostname, security)
 						.then((address) => {
 							if (isLookupAllOptions(options)) {
-								callback(null, [{ address: address.address, family: address.family }]);
+								callback(null, [
+									{ address: address.address, family: address.family },
+								]);
 								return;
 							}
 							callback(null, address.address, address.family);
 						})
 						.catch((error: unknown) => {
-							const reason = error instanceof Error ? error.message : "dns_resolution_failed";
+							const reason =
+								error instanceof Error
+									? error.message
+									: "dns_resolution_failed";
 							callback(new Error(reason), "", 4);
 						});
 				},
@@ -906,7 +1222,12 @@ function safeFetchOnce(
 					? res.headers["content-type"][0]
 					: res.headers["content-type"];
 				const status = res.statusCode ?? 0;
-				if (status >= 200 && status < 300 && contentType && !isWorkflowWebTextContentType(contentType)) {
+				if (
+					status >= 200 &&
+					status < 300 &&
+					contentType &&
+					!isWorkflowWebTextContentType(contentType)
+				) {
 					res.resume();
 					settle({ ok: false, reason: "unsupported_content_type", url });
 					return;
@@ -914,7 +1235,10 @@ function safeFetchOnce(
 				res.on("data", (chunk: string) => {
 					if (settled) return;
 					if (text.length + chunk.length > WORKFLOW_WEB_FETCH_MAX_CHARS) {
-						text += chunk.slice(0, Math.max(0, WORKFLOW_WEB_FETCH_MAX_CHARS - text.length));
+						text += chunk.slice(
+							0,
+							Math.max(0, WORKFLOW_WEB_FETCH_MAX_CHARS - text.length),
+						);
 						truncated = true;
 						req.destroy(new Error("workflow_fetch_truncated"));
 						return;
@@ -977,7 +1301,9 @@ async function lookupPublicAddress(
 			: privateIpReason(address.address);
 		if (!reason) return address;
 	}
-	throw new Error(addresses.length > 0 ? "private_host_blocked" : "dns_resolution_failed");
+	throw new Error(
+		addresses.length > 0 ? "private_host_blocked" : "dns_resolution_failed",
+	);
 }
 
 async function validateResolvedHost(
@@ -992,7 +1318,10 @@ async function validateResolvedHost(
 		return { ok: false, reason: "invalid_url", url };
 	}
 	try {
-		const addresses = await lookup(parsed.hostname, { all: true, verbatim: true });
+		const addresses = await lookup(parsed.hostname, {
+			all: true,
+			verbatim: true,
+		});
 		for (const address of addresses) {
 			const reason = privateIpReason(address.address);
 			if (reason) return { ok: false, reason, url };
@@ -1015,27 +1344,38 @@ function privateIpReason(address: string): string | undefined {
 	if (hexMapped) {
 		const high = Number.parseInt(hexMapped[1]!, 16);
 		const low = Number.parseInt(hexMapped[2]!, 16);
-		return privateIpReason(`${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`);
+		return privateIpReason(
+			`${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`,
+		);
 	}
 	if (isIP(lower) === 4) {
 		const parts = lower.split(".").map((part) => Number(part));
-		if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return "private_host_blocked";
+		if (
+			parts.length !== 4 ||
+			parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)
+		)
+			return "private_host_blocked";
 		const [a, b, c, d] = parts as [number, number, number, number];
-		if (a === 0 || a === 10 || a === 127 || a >= 224) return "private_host_blocked";
+		if (a === 0 || a === 10 || a === 127 || a >= 224)
+			return "private_host_blocked";
 		if (a === 100 && b >= 64 && b <= 127) return "private_host_blocked";
 		if (a === 169 && b === 254) return "private_host_blocked";
 		if (a === 172 && b >= 16 && b <= 31) return "private_host_blocked";
 		if (a === 192 && b === 168) return "private_host_blocked";
-		if (a === 192 && b === 0 && (c === 0 || c === 2)) return "private_host_blocked";
+		if (a === 192 && b === 0 && (c === 0 || c === 2))
+			return "private_host_blocked";
 		if (a === 198 && (b === 18 || b === 19)) return "private_host_blocked";
 		if (a === 198 && b === 51 && c === 100) return "private_host_blocked";
 		if (a === 203 && b === 0 && c === 113) return "private_host_blocked";
-		if (a === 255 && b === 255 && c === 255 && d === 255) return "private_host_blocked";
+		if (a === 255 && b === 255 && c === 255 && d === 255)
+			return "private_host_blocked";
 	}
 	if (isIP(lower) === 6) {
 		if (lower === "::" || lower === "::1") return "private_host_blocked";
-		if (lower.startsWith("fc") || lower.startsWith("fd")) return "private_host_blocked";
-		if (lower.startsWith("fe80") || lower.startsWith("ff")) return "private_host_blocked";
+		if (lower.startsWith("fc") || lower.startsWith("fd"))
+			return "private_host_blocked";
+		if (lower.startsWith("fe80") || lower.startsWith("ff"))
+			return "private_host_blocked";
 		if (lower.startsWith("2001:db8")) return "private_host_blocked";
 	}
 	return undefined;
@@ -1048,7 +1388,10 @@ async function validateProviderResultUrls(
 	for (const url of providerResultUrls(result)) {
 		const checked = validateWorkflowWebUrl(url, security);
 		if (!checked.ok) return { ok: false, reason: checked.reason, url };
-		const resolved = await validateResolvedHost(checked.normalizedUrl, security);
+		const resolved = await validateResolvedHost(
+			checked.normalizedUrl,
+			security,
+		);
 		if (!resolved.ok) return resolved;
 	}
 	if (!security.allowPrivateHosts) {
@@ -1151,11 +1494,12 @@ function canonicalWorkflowWebFetchUrl(url: string): string {
 	if (parsed.pathname.length > 1 && parsed.pathname.endsWith("/")) {
 		parsed.pathname = parsed.pathname.slice(0, -1);
 	}
-	const sortedParams = [...parsed.searchParams.entries()].sort(([left], [right]) =>
-		left.localeCompare(right),
+	const sortedParams = [...parsed.searchParams.entries()].sort(
+		([left], [right]) => left.localeCompare(right),
 	);
 	parsed.search = "";
-	for (const [key, value] of sortedParams) parsed.searchParams.append(key, value);
+	for (const [key, value] of sortedParams)
+		parsed.searchParams.append(key, value);
 	return parsed.href;
 }
 
@@ -1165,13 +1509,20 @@ function shouldKeepWorkflowWebFragment(hash: string): boolean {
 	return raw.startsWith("/") || raw.startsWith("!") || raw.includes("?");
 }
 
-function fetchSourceRequestsFromParams(params: unknown): WorkflowWebFetchSourceRequest[] {
+function fetchSourceRequestsFromParams(
+	params: unknown,
+): WorkflowWebFetchSourceRequest[] {
 	if (!isRecord(params)) return [];
 	const requests: WorkflowWebFetchSourceRequest[] = [];
 	const titles = Array.isArray(params.titles) ? params.titles : [];
 	if (Array.isArray(params.sources)) {
 		for (const source of params.sources) {
-			if (!isRecord(source) || typeof source.url !== "string" || !source.url.trim()) continue;
+			if (
+				!isRecord(source) ||
+				typeof source.url !== "string" ||
+				!source.url.trim()
+			)
+				continue;
 			requests.push({
 				url: source.url.trim(),
 				...(typeof source.title === "string" && source.title.trim()
@@ -1186,7 +1537,9 @@ function fetchSourceRequestsFromParams(params: unknown): WorkflowWebFetchSourceR
 			const title = titles[index];
 			requests.push({
 				url: url.trim(),
-				...(typeof title === "string" && title.trim() ? { title: title.trim() } : {}),
+				...(typeof title === "string" && title.trim()
+					? { title: title.trim() }
+					: {}),
 			});
 		}
 	}
@@ -1201,7 +1554,9 @@ function fetchSourceRequestsFromParams(params: unknown): WorkflowWebFetchSourceR
 	return dedupeFetchSourceRequests(requests).slice(0, 20);
 }
 
-function dedupeFetchSourceRequests(requests: WorkflowWebFetchSourceRequest[]): WorkflowWebFetchSourceRequest[] {
+function dedupeFetchSourceRequests(
+	requests: WorkflowWebFetchSourceRequest[],
+): WorkflowWebFetchSourceRequest[] {
 	const deduped: WorkflowWebFetchSourceRequest[] = [];
 	const seen = new Set<string>();
 	for (const request of requests) {
@@ -1214,7 +1569,9 @@ function dedupeFetchSourceRequests(requests: WorkflowWebFetchSourceRequest[]): W
 }
 
 function payloadFromToolResult(result: ToolResult): Record<string, unknown> {
-	const text = result.content?.find((item) => typeof item.text === "string")?.text;
+	const text = result.content?.find(
+		(item) => typeof item.text === "string",
+	)?.text;
 	if (typeof text !== "string") return {};
 	try {
 		const payload = JSON.parse(text);
@@ -1237,7 +1594,9 @@ function titleFromParams(params: unknown): string | undefined {
 	return stringParam(params, "title");
 }
 
-function sourceReadRequestsFromParams(params: unknown): WorkflowWebSourceReadRequest[] {
+function sourceReadRequestsFromParams(
+	params: unknown,
+): WorkflowWebSourceReadRequest[] {
 	const requests: WorkflowWebSourceReadRequest[] = [];
 	if (isRecord(params) && Array.isArray(params.reads)) {
 		for (const item of params.reads) {
@@ -1245,9 +1604,12 @@ function sourceReadRequestsFromParams(params: unknown): WorkflowWebSourceReadReq
 			if (request) requests.push(request);
 		}
 	}
-	for (const query of stringArrayParam(params, "queries")) requests.push({ query });
-	for (const query of stringArrayParam(params, "exactTexts")) requests.push({ query });
-	for (const query of stringArrayParam(params, "texts")) requests.push({ query });
+	for (const query of stringArrayParam(params, "queries"))
+		requests.push({ query });
+	for (const query of stringArrayParam(params, "exactTexts"))
+		requests.push({ query });
+	for (const query of stringArrayParam(params, "texts"))
+		requests.push({ query });
 	const query =
 		stringParam(params, "query") ??
 		stringParam(params, "exactText") ??
@@ -1255,11 +1617,14 @@ function sourceReadRequestsFromParams(params: unknown): WorkflowWebSourceReadReq
 		stringParam(params, "text");
 	const claim = stringParam(params, "claim");
 	const terms = stringArrayParam(params, "terms");
-	if (query || claim || terms.length > 0) requests.push({ query, claim, terms });
+	if (query || claim || terms.length > 0)
+		requests.push({ query, claim, terms });
 	return dedupeSourceReadRequests(requests).slice(0, 20);
 }
 
-function sourceReadRequestFromRecord(value: unknown): WorkflowWebSourceReadRequest | undefined {
+function sourceReadRequestFromRecord(
+	value: unknown,
+): WorkflowWebSourceReadRequest | undefined {
 	if (!isRecord(value)) return undefined;
 	const query =
 		stringParam(value, "query") ??
@@ -1273,7 +1638,9 @@ function sourceReadRequestFromRecord(value: unknown): WorkflowWebSourceReadReque
 	return { query, claim, terms, maxChars };
 }
 
-function dedupeSourceReadRequests(requests: WorkflowWebSourceReadRequest[]): WorkflowWebSourceReadRequest[] {
+function dedupeSourceReadRequests(
+	requests: WorkflowWebSourceReadRequest[],
+): WorkflowWebSourceReadRequest[] {
 	const deduped: WorkflowWebSourceReadRequest[] = [];
 	const seen = new Set<string>();
 	for (const request of requests) {
@@ -1292,18 +1659,27 @@ function dedupeSourceReadRequests(requests: WorkflowWebSourceReadRequest[]): Wor
 
 function sourceReadBatchRequested(params: unknown): boolean {
 	return (
-		(isRecord(params) && Array.isArray(params.reads) && params.reads.length > 0) ||
+		(isRecord(params) &&
+			Array.isArray(params.reads) &&
+			params.reads.length > 0) ||
 		stringArrayParam(params, "queries").length > 0 ||
 		stringArrayParam(params, "exactTexts").length > 0 ||
 		stringArrayParam(params, "texts").length > 0
 	);
 }
 
-type SourceReadToolStatus = "ok" | "candidate" | "budget_exhausted" | "not_found";
+type SourceReadToolStatus =
+	| "ok"
+	| "candidate"
+	| "truncated"
+	| "budget_exhausted"
+	| "not_found";
 
 function sourceReadResponseStatus(
 	read: WorkflowWebSourceReadResult,
 ): SourceReadToolStatus {
+	if (read.status === "truncated" && !read.quote) return "budget_exhausted";
+	if (read.status === "truncated") return "truncated";
 	if (read.status === "matched" && !read.quote) return "budget_exhausted";
 	if (read.status === "matched" && read.candidateOnly) return "candidate";
 	if (read.status === "matched") return "ok";
@@ -1312,11 +1688,19 @@ function sourceReadResponseStatus(
 
 function aggregateSourceReadStatus(
 	statuses: SourceReadToolStatus[],
-): "ok" | "candidate" | "partial" | "budget_exhausted" | "not_found" {
+):
+	| "ok"
+	| "candidate"
+	| "partial"
+	| "truncated"
+	| "budget_exhausted"
+	| "not_found" {
 	if (statuses.every((status) => status === "ok")) return "ok";
 	if (statuses.every((status) => status === "candidate")) return "candidate";
+	if (statuses.every((status) => status === "truncated")) return "truncated";
 	if (statuses.every((status) => status === "not_found")) return "not_found";
-	if (statuses.every((status) => status === "budget_exhausted")) return "budget_exhausted";
+	if (statuses.every((status) => status === "budget_exhausted"))
+		return "budget_exhausted";
 	return "partial";
 }
 
@@ -1345,18 +1729,25 @@ function positiveIntParam(params: unknown, key: string): number | undefined {
 }
 
 function isWorkflowWebTextContentType(contentType: string): boolean {
-	return /^(text\/|application\/(json|xml|xhtml\+xml|ld\+json)|[^;]+\+json\b|[^;]+\+xml\b)/i.test(contentType.trim());
+	return /^(text\/|application\/(json|xml|xhtml\+xml|ld\+json)|[^;]+\+json\b|[^;]+\+xml\b)/i.test(
+		contentType.trim(),
+	);
 }
 
 function extractWorkflowWebResponseText(
 	text: string,
 	contentType?: string,
 ): { text: string; title?: string; lossy?: boolean } {
-	const looksHtml = /html/i.test(contentType ?? "") || /<html[\s>]|<body[\s>]|<title[\s>]/i.test(text);
+	const looksHtml =
+		/html/i.test(contentType ?? "") ||
+		/<html[\s>]|<body[\s>]|<title[\s>]/i.test(text);
 	if (!looksHtml) {
 		return { text, title: titleFromPlainText(text) };
 	}
-	const title = decodeHtmlEntities(text.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.trim() ?? "").slice(0, 200) || undefined;
+	const title =
+		decodeHtmlEntities(
+			text.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.trim() ?? "",
+		).slice(0, 200) || undefined;
 	const body = text
 		.replace(/<script\b[\s\S]*?<\/script>/gi, " ")
 		.replace(/<style\b[\s\S]*?<\/style>/gi, " ")
@@ -1407,5 +1798,8 @@ function extensionImportSpecifier(importPath: string): string {
 }
 
 export function workflowWebSourceModuleImportPath(modulePath: string): string {
-	return resolve(dirname(modulePath), `workflow-web-source-extension${extname(modulePath)}`);
+	return resolve(
+		dirname(modulePath),
+		`workflow-web-source-extension${extname(modulePath)}`,
+	);
 }

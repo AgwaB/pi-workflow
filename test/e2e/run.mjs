@@ -198,7 +198,7 @@ function main() {
           return { content: [{ type: 'text', text: 'Exact source quote for ' + params.url + ': alpha beta gamma.' }], details: { successful: 1, finalUrl: params.url } };
         }
       });
-      registerWorkflowWebSourceExtension(pi, { schema: 'workflow-web-source-launch-config-v1', runId: 'workflow_e2e', taskId: 'task-1', cwd, cacheDir, provider: { kind: 'extension' }, securityPolicy: { allowPrivateHosts: true }, webSourcePolicy: { previewChars: 32, sourceReadMaxChars: 80, perTaskVisibleCharBudget: 200 } }, provider);
+      registerWorkflowWebSourceExtension(pi, { schema: 'workflow-web-source-launch-config-v1', runId: 'workflow_e2e', taskId: 'task-1', cwd, cacheDir, provider: { kind: 'extension' }, securityPolicy: { allowPrivateHosts: true }, webSourcePolicy: { previewChars: 32, sourceReadMaxChars: 80, perTaskVisibleCharBudget: 320 } }, provider);
       if (registered.has('fetch_content')) throw new Error('legacy fetch_content was exposed in normalized-only mode');
       const fetched = await registered.get('workflow_web_fetch_source').execute('fetch', { url: 'https://example.test/source?token=secret' });
       const body = fetched.content[0].text;
