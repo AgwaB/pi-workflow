@@ -56,7 +56,6 @@
     },
     "auditArtifact": { "type": "string" },
     "sidecarPath": { "type": "string" },
-    "reportSidecarPath": { "type": "string" },
     "auditSidecarPath": { "type": "string" },
     "reportMarkdown": { "type": "string" },
     "auditMarkdown": { "type": "string" },

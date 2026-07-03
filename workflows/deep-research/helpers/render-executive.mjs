@@ -468,7 +468,14 @@ function packetGapRows(packet) {
 		kind: "Coverage gap",
 		...gap,
 	}));
-	return [...remaining, ...coverage];
+	const sourceRefJoinFailures = asArray(packet?.sourceRefJoinFailures).map(
+		(gap, index) => ({
+			id: gapIdOf(gap) || numberedId("gap-source-ref", index),
+			kind: "Source reference gap",
+			...gap,
+		}),
+	);
+	return [...remaining, ...coverage, ...sourceRefJoinFailures];
 }
 
 function rowsForIds(ids, rowById, warnings, label) {
@@ -987,11 +994,7 @@ function renderAuditSummary(report, claimSummary, slots) {
 
 function renderWarnings(sectionCounts) {
 	const checks = [
-		["findings", "renderedFindings", "findings"],
-		["recommendations", "renderedRecommendations", "recommendations"],
-		["actionItems", "renderedActionItems", "action items"],
 		["caveatsAndGaps", "renderedCaveatsAndGaps", "caveats/gaps"],
-		["factSlots", "renderedFactSlots", "fact slots"],
 		["sourceUrls", "renderedSourceUrls", "source URLs"],
 	];
 	return checks
@@ -1261,15 +1264,6 @@ export default async function renderExecutive({
 		maxUrls: Number.isFinite(Number(options.maxUrls))
 			? Math.max(0, Number(options.maxUrls))
 			: Infinity,
-		maxFindings: Number.isFinite(Number(options.maxFindings))
-			? Math.max(0, Number(options.maxFindings))
-			: undefined,
-		maxRecommendations: Number.isFinite(Number(options.maxRecommendations))
-			? Math.max(0, Number(options.maxRecommendations))
-			: undefined,
-		maxGaps: Number.isFinite(Number(options.maxGaps))
-			? Math.max(0, Number(options.maxGaps))
-			: undefined,
 	};
 	const rendered = renderResearchMarkdown(control, auditPacket, opts);
 	let markdown = rendered.markdown;
@@ -1296,7 +1290,6 @@ export default async function renderExecutive({
 		!serializationArtifact;
 
 	let executiveSidecarPath;
-	let reportSidecarPath;
 	let auditSidecarPath;
 	try {
 		if (context.cwd && context.runId && context.taskId) {
@@ -1310,10 +1303,8 @@ export default async function renderExecutive({
 			);
 			await mkdir(taskDir, { recursive: true });
 			executiveSidecarPath = join(taskDir, "executive.md");
-			reportSidecarPath = join(taskDir, "report.md");
 			auditSidecarPath = join(taskDir, "audit.md");
 			await writeFile(executiveSidecarPath, `${markdown}\n`, "utf8");
-			await writeFile(reportSidecarPath, `${markdown}\n`, "utf8");
 			await writeFile(auditSidecarPath, `${auditMarkdown}\n`, "utf8");
 		}
 	} catch {
@@ -1344,9 +1335,6 @@ export default async function renderExecutive({
 			renderedAllStructuredItems,
 			maxWords: Number.isFinite(opts.maxWords) ? opts.maxWords : null,
 			maxUrls: Number.isFinite(opts.maxUrls) ? opts.maxUrls : null,
-			maxFindings: opts.maxFindings,
-			maxRecommendations: opts.maxRecommendations,
-			maxGaps: opts.maxGaps,
 			truncated,
 			truncatedWithOpenGaps,
 			serializationArtifact,
@@ -1354,7 +1342,6 @@ export default async function renderExecutive({
 		},
 		auditArtifact: auditSidecarPath ? "audit.md" : "final-audit.control.json",
 		...(executiveSidecarPath ? { sidecarPath: "executive.md" } : {}),
-		...(reportSidecarPath ? { reportSidecarPath: "report.md" } : {}),
 		...(auditSidecarPath ? { auditSidecarPath: "audit.md" } : {}),
 	};
 }

@@ -152,13 +152,6 @@ function buildUrlSourceRefLookup(normalizeInputPacket) {
 		if (!source || typeof source !== "object") continue;
 		addUrlSourceRef(urlToSourceRef, source.url, source.sourceRef);
 	}
-	const sourceRefIndex = asArray(
-		normalizeInputPacket?.packet?.research?.sourceRefIndex,
-	);
-	for (const source of sourceRefIndex) {
-		if (!source || typeof source !== "object") continue;
-		addUrlSourceRef(urlToSourceRef, source.url, source.sourceRef);
-	}
 	return urlToSourceRef;
 }
 
@@ -241,19 +234,19 @@ function strongEvidenceIssue(claim) {
 
 function hasExactQuantitativeClaim(value) {
 	const text = JSON.stringify(value ?? "");
-	return /\b\d+(?:\.\d+)?\s*(?:%|percent|ms|s|sec|seconds|minutes|hours|x|×|usd|\$|k|m|b|tokens?|users?|samples?|n\s*=)\b/i.test(
+	return /\b\d+(?:\.\d+)?\s*(?:(?:%|×|\$|n\s*=)|(?:percent|ms|s|sec|seconds|minutes|hours|x|usd|k|m|b|tokens?|users?|samples?)\b)/i.test(
 		text,
 	);
 }
 
 function verdictOf(claim) {
-	return (
+	const status =
 		claim?.status ??
 		claim?.verdict ??
 		claim?.verdictDigest?.status ??
 		claim?.verdictDigest?.verdict ??
-		"unverified"
-	);
+		"unverified";
+	return canonicalVerifierStatus(status);
 }
 
 function withVerdict(claim, verdict, reason, details = {}) {
@@ -416,9 +409,7 @@ function findSource(sources, stageId) {
 export default async function claimEvidenceGate({ sources, options = {} }) {
 	const plan = findSource(sources, "plan");
 	const normalizeClaims = findSource(sources, "normalize-claims");
-	const sanitizedCandidates =
-		findSource(sources, "sanitize-claims") ??
-		findSource(sources, "sanitize-verification-candidates");
+	const sanitizedCandidates = findSource(sources, "sanitize-claims");
 	const normalized = sanitizedCandidates ?? normalizeClaims;
 	const normalizeInputPacket = findSource(sources, "normalize-input-packet");
 	const urlToSourceRef = buildUrlSourceRefLookup(normalizeInputPacket);
@@ -474,8 +465,7 @@ export default async function claimEvidenceGate({ sources, options = {} }) {
 							!specId.startsWith("plan") &&
 							!specId.startsWith("normalize-claims") &&
 							!specId.startsWith("normalize-input-packet") &&
-							!specId.startsWith("sanitize-claims") &&
-							!specId.startsWith("sanitize-verification-candidates"),
+							!specId.startsWith("sanitize-claims"),
 					)
 					.flatMap(([sourceId, source]) =>
 						asArray(source).map((claim, index) => ({ sourceId, claim, index })),

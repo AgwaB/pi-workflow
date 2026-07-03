@@ -12718,7 +12718,7 @@ test("deep-research renderer emits evidence-backed report and sidecars", async (
 			`${result.executiveMarkdown}\n`,
 		);
 		assert.equal(
-			readFileSync(
+			existsSync(
 				join(
 					cwd,
 					".pi",
@@ -12728,9 +12728,8 @@ test("deep-research renderer emits evidence-backed report and sidecars", async (
 					"task-final",
 					"report.md",
 				),
-				"utf8",
 			),
-			`${result.executiveMarkdown}\n`,
+			false,
 		);
 		const auditMarkdown = readFileSync(
 			join(
@@ -19124,7 +19123,7 @@ test("deep-research claim-evidence-gate enriches downgrade reasons without chang
 							id: "claim-002",
 							claim: "Candidate-only evidence should stay partial.",
 						},
-						{ id: "claim-003", claim: "Latency improved by 42 ms." },
+						{ id: "claim-003", claim: "Latency improved by 42%." },
 					],
 				},
 				factSlotCoverage: [],
@@ -19358,6 +19357,19 @@ test("deep-research verifier schema allows omitted identity echoes", () => {
 	);
 	assert.equal(invalid.valid, false);
 	assert.ok(invalid.issues.some((issue) => issue.path === "$.id"));
+	const camelCaseStatus = validateJsonSchema(
+		{
+			schema: "./schemas/deep-research-verify-claims-control.schema.json",
+			digest: "camelCase status should be repaired before gate join",
+			id: "claim-001",
+			status: "partiallySupported",
+			verdictDigest: { support: "legacy echo" },
+			evidence: [],
+		},
+		schema,
+	);
+	assert.equal(camelCaseStatus.valid, false);
+	assert.ok(camelCaseStatus.issues.some((issue) => issue.path === "$.status"));
 });
 
 test("deep-research claim-evidence-gate canonicalizes candidate ids and verifier integrity", async () => {
@@ -19392,7 +19404,7 @@ test("deep-research claim-evidence-gate canonicalizes candidate ids and verifier
 						},
 						{
 							id: "claim-003",
-							claim: "Latency improved by 42 ms",
+							claim: "Latency improved by 42%",
 							factSlotIds: ["slot-003"],
 						},
 					],

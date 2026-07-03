@@ -20,7 +20,10 @@
     "id": {},
     "claim": {},
     "factSlotIds": {},
-    "status": {},
+    "status": {
+      "type": "string",
+      "enum": ["verified", "partially_supported", "unsupported", "conflicting"]
+    },
     "verdictDigest": {},
     "evidence": {
       "type": "array",

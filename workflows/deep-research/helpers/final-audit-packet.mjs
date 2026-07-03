@@ -252,10 +252,7 @@ function buildSynthesisInput({
 export default async function finalAuditPacket({ sources }) {
 	const plan = asObject(findSource(sources, "plan"));
 	const normalizeClaims = asObject(findSource(sources, "normalize-claims"));
-	const sanitizedCandidates = asObject(
-		findSource(sources, "sanitize-claims") ??
-			findSource(sources, "sanitize-verification-candidates"),
-	);
+	const sanitizedCandidates = asObject(findSource(sources, "sanitize-claims"));
 	const normalized =
 		Object.keys(sanitizedCandidates).length > 0
 			? sanitizedCandidates

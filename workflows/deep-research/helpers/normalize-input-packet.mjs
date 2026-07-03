@@ -221,7 +221,7 @@ function isRequiredOrCriticalSlot(slot) {
 }
 
 function looksQuantitative(text) {
-	return /\b\d+(?:\.\d+)?\s*(?:%|percent|ms|s|sec|seconds|minutes|hours|x|×|usd|\$|k|m|b|tokens?|users?|samples?|n\s*=|gb|mb|tb|requests?|qps|rps|per\s+month|\/month)\b/i.test(
+	return /\b\d+(?:\.\d+)?\s*(?:(?:%|×|\$|n\s*=)|(?:percent|ms|s|sec|seconds|minutes|hours|x|usd|k|m|b|tokens?|users?|samples?|gb|mb|tb|requests?|qps|rps|per\s+month|\/month)\b)/i.test(
 		String(text ?? ""),
 	);
 }
