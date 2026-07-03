@@ -57,6 +57,10 @@ import {
 import { WorkflowView } from "../../.tmp/unit/workflow-view.js";
 import { resolveWorkflowRuntime } from "../../.tmp/unit/workflow-runtime.js";
 import {
+	assertValidDynamicDecision,
+	dynamicOutputProfileValues,
+} from "../../.tmp/unit/index.js";
+import {
 	loadWorkflow,
 	parseWorkflow as parsePublicWorkflow,
 } from "../../.tmp/unit/schema.js";
@@ -1925,6 +1929,34 @@ function assertDynamicDecisionRejects(decision, pattern, context = {}) {
 	assert.match(result.errors.join("\n"), pattern);
 	return result;
 }
+
+test("public dynamic helpers expose validated decisions and profile copies", () => {
+	const decision = assertValidDynamicDecision(canonicalDynamicDecision(), {
+		expectedRound: 0,
+		maxActions: 1,
+	});
+	assert.equal(decision.schema, "dynamic-decision-v1");
+	assert.equal(decision.nextActions[0].type, "add_work_item");
+
+	assert.throws(
+		() =>
+			assertValidDynamicDecision(canonicalDynamicDecision({ round: 1 }), {
+				expectedRound: 0,
+			}),
+		/invalid dynamic decision: round must match expected round 0/,
+	);
+
+	const profiles = dynamicOutputProfileValues();
+	assert.deepEqual(profiles, [
+		"candidate_findings_v1",
+		"verification_result_v1",
+		"coverage_assessment_v1",
+		"generic_summary_v1",
+		"synthesis_v1",
+	]);
+	profiles.push("mutated_test_value");
+	assert.equal(dynamicOutputProfileValues().includes("mutated_test_value"), false);
+});
 
 test("dynamic-decision-v1 rejects top-level actions alias", () => {
 	const canonical = canonicalDynamicDecision();

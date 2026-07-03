@@ -53,6 +53,20 @@ export type {
 	DynamicDecisionLoopRunResult,
 	RunDynamicDecisionLoopOptions,
 } from "./dynamic-decision-loop.js";
+export {
+	assertValidDynamicDecision,
+	validateDynamicDecision,
+} from "./dynamic-decision.js";
+export type {
+	DynamicDecisionAction,
+	DynamicDecisionPhase,
+	DynamicDecisionStatus,
+	DynamicDecisionValidationContext,
+	DynamicDecisionValidationResult,
+	NormalizedDynamicDecision,
+} from "./dynamic-decision.js";
+export { dynamicOutputProfileValues } from "./dynamic-profiles.js";
+export type { DynamicOutputProfile } from "./dynamic-profiles.js";
 
 export const WORKFLOW_COMMAND = "workflow";
 
