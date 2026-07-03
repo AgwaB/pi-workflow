@@ -15304,6 +15304,100 @@ test("workflow web-source core redacts URLs and reads normalized snippets", asyn
 	}
 });
 
+test("workflow web-source core anchors CJK normalized snippets and multi-match term windows", async () => {
+	const cwd = makeProject();
+	try {
+		const config = {
+			runId: "workflow_unit",
+			taskId: "task-1",
+			cacheDir: join(
+				cwd,
+				".pi",
+				"workflows",
+				"workflow_unit",
+				"web-source-cache",
+			),
+		};
+		const koreanText = `${"서론 ".repeat(18)}핵심 지표는 ＧＰＵ 전력 45㎿ 입니다. 결론은 같습니다. ${"부록 ".repeat(18)}`;
+		const koreanSource = createWorkflowWebSource({
+			config,
+			url: "https://example.test/korean-report",
+			text: koreanText,
+		});
+
+		const exactBudget = createWorkflowWebVisibleBudget(22);
+		const exactRead = readWorkflowWebSourceSnippet({
+			source: koreanSource,
+			query: "GPU 전력",
+			maxChars: 100,
+			budget: exactBudget,
+		});
+		assert.equal(exactRead.status, "matched");
+		assert.equal(exactRead.matchType, "normalized");
+		assert.match(exactRead.quote, /ＧＰＵ 전력/);
+		assert.equal(exactBudget.used, 22);
+
+		const termBudget = createWorkflowWebVisibleBudget(28);
+		const termRead = readWorkflowWebSourceSnippet({
+			source: koreanSource,
+			claim: "GPU 전력은 45MW로 기록됐다",
+			terms: ["GPU 전력", "45MW"],
+			maxChars: 100,
+			budget: termBudget,
+		});
+		assert.equal(termRead.status, "matched");
+		assert.equal(termRead.matchType, "terms");
+		assert.match(termRead.quote, /ＧＰＵ 전력/);
+		assert.match(termRead.quote, /45㎿/);
+		assert.deepEqual(termRead.matchedTerms, ["GPU 전력", "45MW"]);
+		assert.deepEqual(termRead.missingTerms, []);
+		assert.equal(termBudget.used, 28);
+
+		const multiText = `첫 anchor 조각은 혼자 있습니다. ${"중간 ".repeat(12)}두번째 anchor companion 조각은 더 완전합니다.`;
+		const multiSource = createWorkflowWebSource({
+			config,
+			url: "https://example.test/multi-match",
+			text: multiText,
+		});
+		const multiRead = readWorkflowWebSourceSnippet({
+			source: multiSource,
+			claim: "anchor companion",
+			terms: ["anchor", "companion"],
+			maxChars: 42,
+			budget: createWorkflowWebVisibleBudget(42),
+		});
+		const firstAnchor = multiText.indexOf("anchor");
+		const selectedAnchor = multiText.lastIndexOf("anchor");
+		assert.equal(multiRead.status, "matched");
+		assert.deepEqual(multiRead.matchedTerms, ["anchor", "companion"]);
+		assert.match(multiRead.quote, /anchor companion/);
+		assert.doesNotMatch(multiRead.quote, /첫 anchor/);
+		assert.equal(multiRead.startOffset > firstAnchor, true);
+		assert.equal(multiRead.startOffset <= selectedAnchor, true);
+		assert.equal(
+			multiRead.endOffset >= selectedAnchor + "anchor companion".length,
+			true,
+		);
+
+		const secretSource = createWorkflowWebSource({
+			config,
+			url: "https://example.test/redaction-expansion",
+			text: "token=x",
+		});
+		const secretRead = readWorkflowWebSourceSnippet({
+			source: secretSource,
+			query: "token=x",
+			maxChars: "token=x".length,
+			budget: createWorkflowWebVisibleBudget("token=x".length),
+		});
+		assert.equal(secretRead.status, "truncated");
+		assert.equal(secretRead.truncated, true);
+		assert.equal(secretRead.quote, "token=R");
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("workflow web-source extension returns source cards and narrow reads without exposing cache paths", async () => {
 	const cwd = makeProject();
 	try {
@@ -15608,6 +15702,116 @@ test("workflow web-source extension anchors late matches within remaining read b
 			batchBody.results.map((result) => result.status),
 			["ok", "truncated"],
 		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("workflow web-source extension aggregates mixed source read statuses", async () => {
+	const cwd = makeProject();
+	try {
+		async function registerReadFixture(name, text, visibleBudget) {
+			const runId = `workflow_unit_${name}`;
+			const cacheDir = join(cwd, ".pi", "workflows", runId, "web-source-cache");
+			const sourceConfig = { runId, taskId: "task-1", cacheDir };
+			const source = createWorkflowWebSource({
+				config: sourceConfig,
+				url: `https://example.test/${name}`,
+				text,
+			});
+			await writeWorkflowWebSource(sourceConfig, source);
+			const registered = new Map();
+			registerWorkflowWebSourceExtension(
+				{
+					registerTool(tool) {
+						registered.set(tool.name, tool);
+					},
+				},
+				{
+					schema: "workflow-web-source-launch-config-v1",
+					runId,
+					taskId: "task-1",
+					cwd,
+					cacheDir,
+					provider: { kind: "none" },
+					securityPolicy: { allowPrivateHosts: true },
+					webSourcePolicy: {
+						previewChars: 0,
+						duplicatePreviewChars: 0,
+						sourceReadMaxChars: 80,
+						perTaskVisibleCharBudget: visibleBudget,
+					},
+				},
+			);
+			return { registered, source };
+		}
+
+		const aggregateText = "short ok LONG_NEEDLE_MATCH follows";
+		const truncatedFixture = await registerReadFixture(
+			"aggregate-truncated",
+			aggregateText,
+			11,
+		);
+		const truncatedBatch = await truncatedFixture.registered
+			.get("workflow_web_source_read")
+			.execute("read-truncated-batch", {
+				sourceRef: truncatedFixture.source.sourceRef,
+				reads: [
+					{ query: "short ok", maxChars: "short ok".length },
+					{ query: "LONG_NEEDLE_MATCH" },
+				],
+			});
+		const truncatedBody = JSON.parse(truncatedBatch.content[0].text);
+		assert.equal(truncatedBody.status, "partial");
+		assert.deepEqual(
+			truncatedBody.results.map((result) => result.status),
+			["ok", "truncated"],
+		);
+		assert.match(truncatedBody.results[1].quote, /^LON/);
+		assert.match(truncatedBody.next, /truncated/);
+		assert.equal(truncatedBody.budget.truncated, true);
+
+		const exhaustedFixture = await registerReadFixture(
+			"aggregate-exhausted",
+			aggregateText,
+			"short ok".length,
+		);
+		const exhaustedBatch = await exhaustedFixture.registered
+			.get("workflow_web_source_read")
+			.execute("read-exhausted-batch", {
+				sourceRef: exhaustedFixture.source.sourceRef,
+				reads: [
+					{ query: "short ok", maxChars: "short ok".length },
+					{ query: "LONG_NEEDLE_MATCH" },
+				],
+			});
+		const exhaustedBody = JSON.parse(exhaustedBatch.content[0].text);
+		assert.equal(exhaustedBody.status, "partial");
+		assert.deepEqual(
+			exhaustedBody.results.map((result) => result.status),
+			["ok", "budget_exhausted"],
+		);
+		assert.equal(exhaustedBody.results[1].quote, undefined);
+		assert.match(exhaustedBody.next, /budget is exhausted/);
+		assert.equal(exhaustedBody.budget.truncated, true);
+
+		const redactionFixture = await registerReadFixture(
+			"redaction-expansion",
+			"token=x",
+			"token=x".length,
+		);
+		const redactionRead = await redactionFixture.registered
+			.get("workflow_web_source_read")
+			.execute("read-redaction-expansion", {
+				sourceRef: redactionFixture.source.sourceRef,
+				query: "token=x",
+				maxChars: "token=x".length,
+			});
+		const redactionBody = JSON.parse(redactionRead.content[0].text);
+		assert.equal(redactionBody.status, "truncated");
+		assert.equal(redactionBody.truncated, true);
+		assert.equal(redactionBody.quote, "token=R");
+		assert.match(redactionBody.next, /truncated/);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}

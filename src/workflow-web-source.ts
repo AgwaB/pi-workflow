@@ -1066,9 +1066,18 @@ function consumeAnchoredSnippet(options: {
 		raw,
 		visibleLimit,
 	);
+	// Redaction can expand secrets. Promote only when the redacted anchor
+	// itself no longer fits; clipping trailing context can remain a match.
+	const redactedThroughAnchorLength = consumed.truncated
+		? redactInlineSecrets(
+				options.text.slice(sourceStart, Math.min(sourceEnd, anchorEnd)),
+			).length
+		: 0;
+	const anchorTruncated =
+		status === "truncated" || redactedThroughAnchorLength > visibleLimit;
 	const truncated = status === "truncated" || consumed.truncated;
 	return {
-		status,
+		status: anchorTruncated ? "truncated" : status,
 		quote: consumed.text,
 		visibleChars: consumed.text.length,
 		sourceStart,
