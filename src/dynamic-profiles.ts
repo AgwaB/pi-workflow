@@ -44,7 +44,3 @@ export function isTerminalDynamicOutputProfile(
 ): value is (typeof DYNAMIC_TERMINAL_OUTPUT_PROFILES)[number] {
 	return typeof value === "string" && TERMINAL_OUTPUT_PROFILE_SET.has(value);
 }
-
-export function dynamicOutputProfileValues(): string[] {
-	return [...DYNAMIC_OUTPUT_PROFILES];
-}

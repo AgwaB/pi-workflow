@@ -169,14 +169,7 @@ export default async function specReviewPipeline({ sources, options }) {
 
 function findAnalysisOutput(sources) {
 	return (
-		sources["analysis.candidate-findings"] ??
-		sources["analysis.candidate-findings.main"] ??
-		sources["candidate-findings"] ??
-		sources["candidate-findings.main"] ??
-		Object.entries(sources).find(([key]) =>
-			key.includes("candidate-findings"),
-		)?.[1] ??
-		{}
+		sources["candidate-findings"] ?? sources["candidate-findings.main"] ?? {}
 	);
 }
 

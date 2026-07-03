@@ -92,7 +92,7 @@
             ],
             "sourcePolicy": "require-success",
             "output": {
-              "controlSchema": "./schemas/state-data-impact-control.schema.json",
+              "controlSchema": "./schemas/api-contract-impact-control.schema.json",
               "analysis": {
                 "required": true
               },
@@ -131,7 +131,7 @@
             ],
             "sourcePolicy": "require-success",
             "output": {
-              "controlSchema": "./schemas/docs-release-impact-control.schema.json",
+              "controlSchema": "./schemas/api-contract-impact-control.schema.json",
               "analysis": {
                 "required": true
               },
@@ -150,7 +150,7 @@
             ],
             "sourcePolicy": "require-success",
             "output": {
-              "controlSchema": "./schemas/security-performance-impact-control.schema.json",
+              "controlSchema": "./schemas/api-contract-impact-control.schema.json",
               "analysis": {
                 "required": true
               },

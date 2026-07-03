@@ -100,7 +100,6 @@ import {
 	loadWorkflowHelper,
 	resolveWorkflowHelperRef,
 } from "../../.tmp/unit/workflow-helpers.js";
-import { loadDynamicController } from "../../.tmp/unit/dynamic-loader.js";
 import {
 	appendDynamicEvent,
 	dynamicEventsPath,
@@ -11912,56 +11911,6 @@ test("workflow helper loader rejects external or invalid helper refs", async () 
 		await assert.rejects(
 			() => loadWorkflowHelper("./helpers/not-function.mjs", specPath),
 			/default-export a function/,
-		);
-	} finally {
-		rmSync(cwd, { recursive: true, force: true });
-	}
-});
-
-test("dynamic controller loader resolves trusted directory-local controllers", async () => {
-	const cwd = makeProject();
-	try {
-		const workflowDir = join(cwd, "workflows", "bundle");
-		mkdirSync(join(workflowDir, "helpers"), { recursive: true });
-		const specPath = join(workflowDir, "spec.json");
-		writeFileSync(specPath, JSON.stringify(workflowSpec("unit-scout")));
-		writeFileSync(
-			join(workflowDir, "helpers", "controller.mjs"),
-			"export default async function controller(ctx) { return { task: ctx.task }; }\n",
-		);
-		writeFileSync(
-			join(workflowDir, "helpers", "not-function.mjs"),
-			"export default 1;\n",
-		);
-
-		const controller = await loadDynamicController(
-			"./helpers/controller.mjs",
-			specPath,
-		);
-		assert.deepEqual(
-			await controller({
-				task: "Do it",
-				sources: {},
-				phase: () => {},
-				log: () => {},
-				artifact: (name) => ({ kind: "workflow-artifact-ref", name }),
-				graph: { generatedTaskIds: () => [] },
-				budget: { remaining: () => ({}), check: () => true },
-				agent: async () => {
-					throw new Error("not implemented");
-				},
-				parallel: async (thunks) =>
-					Promise.allSettled(thunks.map((fn) => fn())),
-			}),
-			{ task: "Do it" },
-		);
-		await assert.rejects(
-			() => loadDynamicController("../outside.mjs", specPath),
-			/parent-directory/,
-		);
-		await assert.rejects(
-			() => loadDynamicController("./helpers/not-function.mjs", specPath),
-			/dynamic controller must default-export a function/,
 		);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });

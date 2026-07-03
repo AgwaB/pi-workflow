@@ -283,17 +283,6 @@ export function validateDynamicDecision(
 	};
 }
 
-export function assertValidDynamicDecision(
-	value: unknown,
-	context: DynamicDecisionValidationContext = {},
-): NormalizedDynamicDecision {
-	const result = validateDynamicDecision(value, context);
-	if (!result.ok || !result.decision) {
-		throw new Error(`invalid dynamic decision: ${result.errors.join("; ")}`);
-	}
-	return result.decision;
-}
-
 export function hashDynamicDecision(value: unknown): string {
 	return createHash("sha256")
 		.update(stableStringify(toJsonNormalizedValue(value)))
