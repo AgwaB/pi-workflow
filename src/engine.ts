@@ -314,11 +314,13 @@ export async function stopRun(
 	const stopped = await withRunLease(cwd, current.runId, async () => {
 		const run = await readRunRecord(cwd, current.runId);
 		if (isTerminalWorkflowStatus(run.status)) {
-			throw new Error(`stop requires a non-terminal run; ${run.runId} is ${run.status}`);
+			throw new Error(
+				`stop requires a non-terminal run; ${run.runId} is ${run.status}`,
+			);
 		}
-		await resolveWorkflowBackend(run).cleanupRun(cwd, run).catch(
-			() => undefined,
-		);
+		await resolveWorkflowBackend(run)
+			.cleanupRun(cwd, run)
+			.catch(() => undefined);
 		const interruptedTaskIds: string[] = [];
 		for (const task of run.tasks) {
 			if (
@@ -335,7 +337,9 @@ export async function stopRun(
 		return { run, interruptedTaskIds };
 	});
 	if (!stopped)
-		throw new Error(`Could not acquire workflow run lease for ${current.runId}`);
+		throw new Error(
+			`Could not acquire workflow run lease for ${current.runId}`,
+		);
 	return stopped;
 }
 
@@ -371,9 +375,9 @@ export async function resumeRun(
 	const resetTaskIds: string[] = [];
 	const updated = await withRunLease(cwd, current.runId, async () => {
 		const run = await readRunRecord(cwd, current.runId);
-		await resolveWorkflowBackend(run).cleanupRun(cwd, run).catch(
-			() => undefined,
-		);
+		await resolveWorkflowBackend(run)
+			.cleanupRun(cwd, run)
+			.catch(() => undefined);
 		for (const task of run.tasks) {
 			if (resetTaskForResume(task)) resetTaskIds.push(task.taskId);
 		}

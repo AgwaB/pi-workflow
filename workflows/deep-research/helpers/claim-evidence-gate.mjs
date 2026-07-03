@@ -176,7 +176,10 @@ function addNpmDocsVersionAgnosticKey(keys, url) {
 	if (url.hostname !== "docs.npmjs.com") return;
 	if (!/^\/cli\/(?:v\d+\/)?using-npm\//u.test(url.pathname)) return;
 	const versionless = new URL(url.toString());
-	versionless.pathname = versionless.pathname.replace(/^\/cli\/v\d+\//u, "/cli/");
+	versionless.pathname = versionless.pathname.replace(
+		/^\/cli\/v\d+\//u,
+		"/cli/",
+	);
 	keys.add(stripCitationUrlPunctuation(versionless.toString()));
 }
 

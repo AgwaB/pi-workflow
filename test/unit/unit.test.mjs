@@ -16670,7 +16670,10 @@ test("refresh resets stale launch claims without backend runs", async () => {
 		assert.equal(refreshedTask.startedAt, undefined);
 		assert.equal(refreshedTask.backendFiles, undefined);
 		assert.equal(refreshedTask.backendTaskId, refreshedTask.taskId);
-		assert.equal(refreshedTask.lastMessage, "stale pi-subagent launch claim reset");
+		assert.equal(
+			refreshedTask.lastMessage,
+			"stale pi-subagent launch claim reset",
+		);
 	} finally {
 		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
@@ -16687,7 +16690,10 @@ test("refresh interrupts timed-out running subagents and clears stale handles", 
 				stages: [{ id: "main", type: "single", prompt: "Do work." }],
 			},
 		});
-		const compiled = await compileWorkflow(spec, { cwd, task: "Timeout topic" });
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Timeout topic",
+		});
 		const { run } = await createWorkflowRunRecord(
 			cwd,
 			compiled,

@@ -1755,7 +1755,9 @@ function isPreClaimSubagentRecord(
 		timestampMs(record.startedAt) ??
 		timestampMs(record.attempts?.[0]?.startedAt) ??
 		timestampMs(record.updatedAt);
-	return recordStartedAtMs !== undefined && recordStartedAtMs < claimStartedAtMs;
+	return (
+		recordStartedAtMs !== undefined && recordStartedAtMs < claimStartedAtMs
+	);
 }
 
 function timestampMs(value: string | undefined): number | undefined {
