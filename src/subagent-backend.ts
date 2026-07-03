@@ -57,6 +57,10 @@ const LEGACY_FETCH_CACHE_ENV = "PI_WORKFLOW_FETCH_CACHE";
 const DEFAULT_TRANSIENT_MODEL_FAILURE_RETRIES = 5;
 const DEFAULT_ARTIFACT_OUTPUT_RETRIES = 2;
 const MAX_CONCURRENT_LAUNCHES_ENV = "PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES";
+const PARENT_SUBAGENT_CWD_ENV = "PI_WORKFLOW_PARENT_SUBAGENT_CWD";
+const PARENT_SUBAGENT_RUNS_DIR_ENV = "PI_WORKFLOW_PARENT_SUBAGENT_RUNS_DIR";
+const PARENT_SUBAGENT_RUN_ID_ENV = "PI_WORKFLOW_PARENT_SUBAGENT_RUN_ID";
+const PARENT_SUBAGENT_ATTEMPT_ID_ENV = "PI_WORKFLOW_PARENT_SUBAGENT_ATTEMPT_ID";
 const DEFAULT_LAUNCH_SLOT_RELEASE_DELAY_MS = 3_000;
 const MIN_TRANSIENT_RETRY_JITTER_MS = 1_000;
 const MAX_TRANSIENT_RETRY_JITTER_MS = 5_000;
@@ -161,7 +165,30 @@ interface SubagentApi {
 	): Promise<SubagentRunStatusSnapshot | null>;
 	interruptSubagent(options: Record<string, unknown>): Promise<unknown>;
 	reconcileSubagentRun(options: Record<string, unknown>): Promise<unknown>;
+	recordSubagentChildEvent?(
+		options: Record<string, unknown>,
+	): Promise<unknown>;
 }
+
+type ParentSubagentChildEvent =
+	| "started"
+	| "completed"
+	| "failed"
+	| "cancelled";
+
+interface ParentSubagentRef {
+	cwd: string;
+	runsDir: string;
+	runId: string;
+	attemptId?: string;
+}
+
+const GENERIC_TASK_STATUS_DETAILS = new Set([
+	"completed",
+	"failed",
+	"interrupted",
+	"running",
+]);
 
 const subagentApiSpecifier = "@agwab/pi-subagent/api";
 let cachedSubagentApi: Promise<SubagentApi> | undefined;
@@ -178,6 +205,85 @@ async function loadSubagentApi(): Promise<SubagentApi> {
 		(mod) => mod as SubagentApi,
 	);
 	return cachedSubagentApi;
+}
+
+function nonEmptyEnv(
+	env: Record<string, string | undefined>,
+	key: string,
+): string | undefined {
+	const value = env[key]?.trim();
+	return value ? value : undefined;
+}
+
+function parentSubagentRefFromEnv(
+	env: Record<string, string | undefined> = process.env,
+): ParentSubagentRef | undefined {
+	const cwd = nonEmptyEnv(env, PARENT_SUBAGENT_CWD_ENV);
+	const runsDir = nonEmptyEnv(env, PARENT_SUBAGENT_RUNS_DIR_ENV);
+	const runId = nonEmptyEnv(env, PARENT_SUBAGENT_RUN_ID_ENV);
+	if (!cwd || !runsDir || !runId) return undefined;
+	const attemptId = nonEmptyEnv(env, PARENT_SUBAGENT_ATTEMPT_ID_ENV);
+	return { cwd, runsDir, runId, ...(attemptId ? { attemptId } : {}) };
+}
+
+function terminalChildEventForTaskStatus(
+	status: WorkflowTaskRunRecord["status"],
+): ParentSubagentChildEvent | undefined {
+	if (status === "completed") return "completed";
+	if (status === "failed") return "failed";
+	if (status === "interrupted") return "cancelled";
+	return undefined;
+}
+
+async function recordParentSubagentChildEvent(options: {
+	event: ParentSubagentChildEvent;
+	childRunId: string;
+	run: WorkflowRunRecord;
+	task: WorkflowTaskRunRecord;
+	failureKind?: string | null;
+	message?: string;
+}): Promise<void> {
+	const parent = parentSubagentRefFromEnv();
+	if (!parent) return;
+	const api = await loadSubagentApi().catch(() => undefined);
+	if (!api?.recordSubagentChildEvent) return;
+	await api
+		.recordSubagentChildEvent({
+			...parent,
+			event: options.event,
+			childRunId: options.childRunId,
+			workflowRunId: options.run.runId,
+			childTaskId: options.task.taskId,
+			...(options.failureKind === undefined
+				? {}
+				: { failureKind: options.failureKind }),
+			...(options.message === undefined ? {} : { message: options.message }),
+		})
+		.catch(() => undefined);
+}
+
+async function recordTerminalParentSubagentChildEvent(
+	run: WorkflowRunRecord,
+	task: WorkflowTaskRunRecord,
+	snapshot: SubagentRunStatusSnapshot,
+): Promise<void> {
+	const event = terminalChildEventForTaskStatus(task.status);
+	if (!event) return;
+	const taskFailureKind =
+		task.statusDetail && !GENERIC_TASK_STATUS_DETAILS.has(task.statusDetail)
+			? task.statusDetail
+			: undefined;
+	await recordParentSubagentChildEvent({
+		event,
+		childRunId: snapshot.runId,
+		run,
+		task,
+		failureKind:
+			event === "completed"
+				? undefined
+				: (snapshot.failureKind ?? taskFailureKind ?? task.statusDetail),
+		message: task.lastMessage,
+	});
 }
 
 let launchSlotReleaseDelayMs = DEFAULT_LAUNCH_SLOT_RELEASE_DELAY_MS;
@@ -408,6 +514,13 @@ export async function launchSubagentTask(
 	task.statusDetail = "running";
 	task.lastMessage = "launched via pi-subagent/headless";
 	await writeRunRecord(cwd, run).catch(() => undefined);
+	await recordParentSubagentChildEvent({
+		event: "started",
+		childRunId: launched.runId,
+		run,
+		task,
+		message: task.lastMessage,
+	});
 	return { kind: "launched" };
 }
 
@@ -592,7 +705,7 @@ async function materializeTerminalSubagentResult(
 			snapshot.metadata?.contextLengthExceeded,
 	);
 	if (task.artifactGraph?.enabled && statusInfo.status === "completed") {
-		return await materializeTerminalArtifactGraphResult(cwd, run, task, {
+		const changed = await materializeTerminalArtifactGraphResult(cwd, run, task, {
 			outputFile,
 			stderrFile,
 			resultFile,
@@ -601,6 +714,8 @@ async function materializeTerminalSubagentResult(
 			exitCode,
 			subagentResult,
 		});
+		await recordTerminalParentSubagentChildEvent(run, task, snapshot);
+		return changed;
 	}
 	if (
 		shouldAttemptArtifactGraphSalvage({
@@ -614,7 +729,7 @@ async function materializeTerminalSubagentResult(
 			snapshot,
 		})
 	) {
-		return await materializeTerminalArtifactGraphResult(cwd, run, task, {
+		const changed = await materializeTerminalArtifactGraphResult(cwd, run, task, {
 			outputFile,
 			stderrFile,
 			resultFile,
@@ -628,6 +743,8 @@ async function materializeTerminalSubagentResult(
 				subagentFailureKind: snapshot.failureKind,
 			},
 		});
+		await recordTerminalParentSubagentChildEvent(run, task, snapshot);
+		return changed;
 	}
 	const workflowResult = {
 		status: statusInfo.status,
@@ -663,10 +780,12 @@ async function materializeTerminalSubagentResult(
 			),
 			workflowResult,
 		);
-		return retryOrFailTransientSubagentFailure(task, {
+		const changed = retryOrFailTransientSubagentFailure(task, {
 			reason: statusInfo.failureKind ?? "model",
 			message: errorMessage ?? "pi-subagent run failed before producing output",
 		});
+		await recordTerminalParentSubagentChildEvent(run, task, snapshot);
+		return changed;
 	}
 	await writeJson(resultFile, workflowResult);
 
@@ -681,6 +800,7 @@ async function materializeTerminalSubagentResult(
 		delete task.backendHandle;
 		delete task.backendFiles;
 	}
+	await recordTerminalParentSubagentChildEvent(run, task, snapshot);
 	return changed;
 }
 

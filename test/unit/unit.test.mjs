@@ -176,6 +176,33 @@ function sleep(ms) {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+const parentSubagentEnvKeys = [
+	"PI_WORKFLOW_PARENT_SUBAGENT_CWD",
+	"PI_WORKFLOW_PARENT_SUBAGENT_RUNS_DIR",
+	"PI_WORKFLOW_PARENT_SUBAGENT_RUN_ID",
+	"PI_WORKFLOW_PARENT_SUBAGENT_ATTEMPT_ID",
+];
+
+function captureParentSubagentEnv() {
+	return Object.fromEntries(
+		parentSubagentEnvKeys.map((key) => [key, process.env[key]]),
+	);
+}
+
+function restoreParentSubagentEnv(previous) {
+	for (const key of parentSubagentEnvKeys) {
+		if (previous[key] === undefined) delete process.env[key];
+		else process.env[key] = previous[key];
+	}
+}
+
+function setParentSubagentEnv(cwd) {
+	process.env.PI_WORKFLOW_PARENT_SUBAGENT_CWD = cwd;
+	process.env.PI_WORKFLOW_PARENT_SUBAGENT_RUNS_DIR = ".pi/agent/runs";
+	process.env.PI_WORKFLOW_PARENT_SUBAGENT_RUN_ID = "parent_run";
+	process.env.PI_WORKFLOW_PARENT_SUBAGENT_ATTEMPT_ID = "parent_attempt";
+}
+
 async function eventually(action, timeoutMs = 750) {
 	const deadline = Date.now() + timeoutMs;
 	let lastError;
@@ -14085,6 +14112,242 @@ test("resumeRun resets failed dag container children and relaunches roots", asyn
 		assert.match(prompts[0], /stage=analysis\.scan/);
 		assert.match(prompts[0], /setup completed/);
 	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("subagent backend records parent child lifecycle events when parent env is set", async () => {
+	const cwd = makeProject();
+	const previousEnv = captureParentSubagentEnv();
+	const childEvents = [];
+	let statusSnapshot = null;
+	try {
+		setParentSubagentEnv(cwd);
+		writeAgent(cwd, "unit-scout", "read");
+		setSubagentApiForTests({
+			async runSubagent() {
+				return {
+					runId: "run_child_lifecycle",
+					attemptId: "attempt_child_lifecycle",
+					status: "running",
+				};
+			},
+			async getSubagentStatus() {
+				return statusSnapshot;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+			async recordSubagentChildEvent(options) {
+				childEvents.push(options);
+				return { type: `child.${options.event}` };
+			},
+		});
+
+		const spec = workflowSpec("unit-scout", {
+			artifactGraph: {
+				stages: [{ id: "main", type: "single", prompt: "Do work." }],
+			},
+		});
+		const compiled = await compileWorkflow(spec, { cwd, task: "Review topic" });
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await writeRunRecord(cwd, run);
+		await scheduleRun(cwd, run.runId);
+
+		assert.equal(childEvents.length, 1);
+		assert.deepEqual(childEvents[0], {
+			cwd,
+			runsDir: ".pi/agent/runs",
+			runId: "parent_run",
+			attemptId: "parent_attempt",
+			event: "started",
+			childRunId: "run_child_lifecycle",
+			workflowRunId: run.runId,
+			childTaskId: "task-1",
+			message: "launched via pi-subagent/headless",
+		});
+
+		const running = await readRunRecord(cwd, run.runId);
+		const task = running.tasks[0];
+		const artifactDir = join(cwd, task.backendFiles.runsDir);
+		mkdirSync(artifactDir, { recursive: true });
+		writeFileSync(
+			join(artifactDir, "output.log"),
+			[
+				"<control>",
+				JSON.stringify({ schema: "stage-control-v1", digest: "ok" }),
+				"</control>",
+				"<analysis>",
+				"done",
+				"</analysis>",
+				"<refs>",
+				"[]",
+				"</refs>",
+			].join("\n"),
+		);
+		writeFileSync(join(artifactDir, "stderr.log"), "");
+		writeFileSync(
+			join(artifactDir, "result.json"),
+			JSON.stringify({
+				status: "completed",
+				completedAt: new Date().toISOString(),
+				startedAt: task.startedAt,
+				exitCode: 0,
+				cwd,
+			}),
+		);
+		statusSnapshot = {
+			runId: "run_child_lifecycle",
+			attemptId: "attempt_child_lifecycle",
+			backend: "headless",
+			status: "completed",
+			failureKind: null,
+			startedAt: task.startedAt,
+			completedAt: new Date().toISOString(),
+			logs: [
+				{ type: "output", path: "output.log", artifactCwd: artifactDir },
+				{ type: "stderr", path: "stderr.log", artifactCwd: artifactDir },
+				{ type: "result", path: "result.json", artifactCwd: artifactDir },
+			],
+			attempts: [
+				{ attemptId: "attempt_child_lifecycle", status: "completed" },
+			],
+		};
+
+		const refreshed = await refreshRunFromSubagentArtifacts(cwd, running);
+		assert.equal(refreshed.tasks[0].status, "completed");
+		assert.equal(childEvents.length, 2);
+		assert.deepEqual(childEvents[1], {
+			cwd,
+			runsDir: ".pi/agent/runs",
+			runId: "parent_run",
+			attemptId: "parent_attempt",
+			event: "completed",
+			childRunId: "run_child_lifecycle",
+			workflowRunId: run.runId,
+			childTaskId: "task-1",
+			message: "completed",
+		});
+	} finally {
+		restoreParentSubagentEnv(previousEnv);
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("subagent terminal failure records parent child failed when parent env is set", async () => {
+	const cwd = makeProject();
+	const previousEnv = captureParentSubagentEnv();
+	const childEvents = [];
+	try {
+		setParentSubagentEnv(cwd);
+		writeAgent(cwd, "unit-scout", "read");
+		const spec = workflowSpec("unit-scout", {
+			artifactGraph: {
+				stages: [{ id: "main", type: "single", prompt: "Do work." }],
+			},
+		});
+		const compiled = await compileWorkflow(spec, { cwd, task: "Review topic" });
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		const task = run.tasks[0];
+		task.status = "running";
+		task.statusDetail = "running";
+		task.startedAt = new Date().toISOString();
+		task.backendHandle = {
+			engine: "pi-subagent",
+			backend: "headless",
+			runId: "run_child_failed",
+			attemptId: "attempt_child_failed",
+			cwd,
+			runsDir: ".pi/workflow-subagents/failed",
+			display: "pi-subagent/headless run_child_failed/attempt_child_failed",
+		};
+
+		const artifactDir = join(cwd, ".fake-parent-child-failed-subagent");
+		mkdirSync(artifactDir, { recursive: true });
+		writeFileSync(join(artifactDir, "output.log"), "");
+		writeFileSync(join(artifactDir, "stderr.log"), "guard failed\n");
+		writeFileSync(
+			join(artifactDir, "result.json"),
+			JSON.stringify({
+				status: "failed",
+				failureKind: "guard_failure",
+				completedAt: new Date().toISOString(),
+				startedAt: task.startedAt,
+				exitCode: 1,
+				cwd,
+			}),
+		);
+		setSubagentApiForTests({
+			async runSubagent() {
+				throw new Error("not expected");
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async getSubagentStatus() {
+				return {
+					runId: "run_child_failed",
+					attemptId: "attempt_child_failed",
+					backend: "headless",
+					status: "failed",
+					failureKind: "guard_failure",
+					startedAt: task.startedAt,
+					completedAt: new Date().toISOString(),
+					logs: [
+						{ type: "output", path: "output.log", artifactCwd: artifactDir },
+						{ type: "stderr", path: "stderr.log", artifactCwd: artifactDir },
+						{ type: "result", path: "result.json", artifactCwd: artifactDir },
+					],
+					attempts: [
+						{ attemptId: "attempt_child_failed", status: "failed" },
+					],
+				};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+			async recordSubagentChildEvent(options) {
+				childEvents.push(options);
+				return { type: `child.${options.event}` };
+			},
+		});
+
+		await writeRunRecord(cwd, run);
+		const refreshed = await refreshRunFromSubagentArtifacts(
+			cwd,
+			await readRunRecord(cwd, run.runId),
+		);
+		assert.equal(refreshed.tasks[0].status, "failed");
+		assert.equal(childEvents.length, 1);
+		assert.deepEqual(childEvents[0], {
+			cwd,
+			runsDir: ".pi/agent/runs",
+			runId: "parent_run",
+			attemptId: "parent_attempt",
+			event: "failed",
+			childRunId: "run_child_failed",
+			workflowRunId: run.runId,
+			childTaskId: "task-1",
+			failureKind: "guard_failure",
+			message: "pi-subagent run failed: guard_failure",
+		});
+	} finally {
+		restoreParentSubagentEnv(previousEnv);
 		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
 	}

@@ -76,7 +76,7 @@
     "node": ">=22.19.0"
   },
   "dependencies": {
-    "@agwab/pi-subagent": "^0.3.6",
+    "@agwab/pi-subagent": "^0.4.0",
     "pi-web-access": "^0.10.7",
     "typebox": "^1.1.39"
   },
