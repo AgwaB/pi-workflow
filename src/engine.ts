@@ -892,6 +892,17 @@ async function materializeForeachTask(
 
 	const placeholderSpecId = template.id;
 	const generatedSpecIds = generated.tasks.map((task) => task.id);
+	const hasDownstreamDependents = compiledFlow.tasks.some(
+		(task, taskIndex) =>
+			taskIndex !== index && (task.dependsOn ?? []).includes(placeholderSpecId),
+	);
+	if (generatedSpecIds.length === 0 && !hasDownstreamDependents) {
+		setTaskTerminal(templateRunTask, "completed", "foreach_empty", {
+			lastMessage: "foreach produced 0 item(s)",
+		});
+		await writeRunRecord(cwd, run);
+		return true;
+	}
 	compiledFlow.tasks.splice(index, 1, ...generated.tasks);
 	updateDownstreamDependencies(
 		compiledFlow,

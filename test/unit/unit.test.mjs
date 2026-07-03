@@ -9954,6 +9954,48 @@ test("artifactGraph runtime foreach materializes source array into generated tas
 	}
 });
 
+test("artifactGraph runtime foreach empty fanout completes terminal placeholder", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const spec = workflowSpec("unit-scout", {
+			artifactGraph: {
+				stages: [
+					{ id: "extract", type: "single", prompt: "Extract" },
+					{
+						id: "verify",
+						type: "foreach",
+						from: { source: "extract", path: "$.claims" },
+						each: { prompt: "Verify ${item}" },
+					},
+				],
+			},
+		});
+		const compiled = await compileWorkflow(spec, { cwd, task: "Check claims" });
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await completeTask(cwd, run.tasks[0], { claims: [] });
+		await writeRunRecord(cwd, run);
+
+		await scheduleRun(cwd, run.runId);
+
+		const updated = await readRunRecord(cwd, run.runId);
+		assert.equal(updated.status, "completed");
+		assert.equal(updated.taskSummary.completed, 2);
+		assert.equal(updated.taskSummary.total, 2);
+		const placeholder = taskBySpec(updated, "verify.item");
+		assert.equal(placeholder.status, "completed");
+		assert.equal(placeholder.statusDetail, "foreach_empty");
+		assert.equal(placeholder.lastMessage, "foreach produced 0 item(s)");
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("artifactGraph runtime foreach repairs compiled/run mismatch after materialization crash", async () => {
 	const cwd = makeProject();
 	try {
