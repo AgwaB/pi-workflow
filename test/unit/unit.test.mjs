@@ -23,11 +23,13 @@ import {
 	formatRun,
 	resumeRun,
 	runDynamicControllerEngineIntegrityCheckForTests,
+	stopRun,
 	runDynamicTask,
 	runWorkflow,
 	runWorkflowSpec,
 	scheduleRun,
 	waitForRun,
+	watchRun,
 } from "../../.tmp/unit/engine.js";
 import {
 	deliverMissedWorkflowFeedback,
@@ -67,6 +69,7 @@ import {
 	setIndexUpdateDebounceMsForTests,
 	setTaskTerminal,
 	supervisorLeasePath,
+	supervisorPath,
 	updateIndex,
 	workflowProcessRoleForTests,
 	workflowSupervisorOwnerIdForTests,
@@ -654,6 +657,19 @@ test("shared status helpers derive canonical task summaries", () => {
 			interrupted: 0,
 		}),
 		"blocked",
+	);
+	assert.equal(
+		deriveWorkflowStatus({
+			total: 2,
+			pending: 0,
+			running: 0,
+			blocked: 0,
+			completed: 1,
+			failed: 0,
+			skipped: 0,
+			interrupted: 1,
+		}),
+		"interrupted",
 	);
 });
 
@@ -9967,6 +9983,48 @@ test("artifactGraph runtime foreach materializes source array into generated tas
 	}
 });
 
+test("artifactGraph runtime foreach empty fanout completes terminal placeholder", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const spec = workflowSpec("unit-scout", {
+			artifactGraph: {
+				stages: [
+					{ id: "extract", type: "single", prompt: "Extract" },
+					{
+						id: "verify",
+						type: "foreach",
+						from: { source: "extract", path: "$.claims" },
+						each: { prompt: "Verify ${item}" },
+					},
+				],
+			},
+		});
+		const compiled = await compileWorkflow(spec, { cwd, task: "Check claims" });
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await completeTask(cwd, run.tasks[0], { claims: [] });
+		await writeRunRecord(cwd, run);
+
+		await scheduleRun(cwd, run.runId);
+
+		const updated = await readRunRecord(cwd, run.runId);
+		assert.equal(updated.status, "completed");
+		assert.equal(updated.taskSummary.completed, 2);
+		assert.equal(updated.taskSummary.total, 2);
+		const placeholder = taskBySpec(updated, "verify.item");
+		assert.equal(placeholder.status, "completed");
+		assert.equal(placeholder.statusDetail, "foreach_empty");
+		assert.equal(placeholder.lastMessage, "foreach produced 0 item(s)");
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("artifactGraph runtime foreach repairs compiled/run mismatch after materialization crash", async () => {
 	const cwd = makeProject();
 	try {
@@ -13665,6 +13723,72 @@ test("artifactGraph runtime support marks helper errors as failed", async () => 
 	}
 });
 
+test("artifactGraph scheduler does not consume concurrency for synchronous support tasks", async () => {
+	const cwd = makeProject();
+	const prompts = [];
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const workflowDir = join(cwd, "workflows", "bundle");
+		mkdirSync(join(workflowDir, "helpers"), { recursive: true });
+		const specPath = join(workflowDir, "spec.json");
+		writeFileSync(
+			join(workflowDir, "helpers", "audit.mjs"),
+			"export default async function helper() { return { analysis: 'Support helper summary.' }; }\n",
+		);
+		setSubagentApiForTests({
+			async runSubagent(options) {
+				prompts.push(String(options.task ?? ""));
+				return {
+					runId: `run_stub_${prompts.length}`,
+					attemptId: `attempt_stub_${prompts.length}`,
+					status: "running",
+				};
+			},
+			async getSubagentStatus() {
+				return null;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+		const spec = workflowSpec("unit-scout", {
+			artifactGraph: {
+				maxConcurrency: 1,
+				stages: [
+					{
+						id: "audit",
+						support: { uses: "./helpers/audit.mjs" },
+					},
+					{ id: "scan", type: "single", after: [], prompt: "Scan." },
+				],
+			},
+		});
+		writeFileSync(specPath, JSON.stringify(spec));
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Check support scheduling",
+			specPath,
+		});
+		const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await writeRunRecord(cwd, run);
+
+		await scheduleRun(cwd, run.runId);
+
+		const updated = await readRunRecord(cwd, run.runId);
+		assert.equal(taskBySpec(updated, "audit.main").status, "completed");
+		assert.equal(taskBySpec(updated, "scan.main").status, "running");
+		assert.equal(prompts.length, 1);
+		assert(prompts[0].includes("stage=scan"));
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("artifactGraph runtime scheduler launches empty-after roots in parallel", async () => {
 	const cwd = makeProject();
 	const prompts = [];
@@ -15219,6 +15343,29 @@ test("workflow web-source extension anchors late matches within remaining read b
 		assert.equal(truncatedBody.status, "truncated");
 		assert.equal(truncatedBody.budget.truncated, true);
 		assert.match(truncatedBody.quote, /^TARGET/);
+
+		const batchRegistered = registerLateReader("batch", 200);
+		const batchFetched = await batchRegistered
+			.get("workflow_web_fetch_source")
+			.execute("fetch-batch", { url: "https://example.test/late-match" });
+		const batchCard = JSON.parse(batchFetched.content[0].text).card;
+		const batchRead = await batchRegistered
+			.get("workflow_web_source_read")
+			.execute("read-batch", {
+				sourceRef: batchCard.sourceRef,
+				reads: [
+					{ query: lateNeedle, maxChars: 80 },
+					{ query: "B".repeat(80), maxChars: 6 },
+				],
+			});
+		const batchBody = JSON.parse(batchRead.content[0].text);
+		assert.equal(batchBody.status, "partial");
+		assert.equal(batchBody.budget.truncated, true);
+		assert.match(batchBody.next, /truncated/);
+		assert.deepEqual(
+			batchBody.results.map((result) => result.status),
+			["ok", "truncated"],
+		);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
@@ -16310,6 +16457,59 @@ test("refresh retries zero-output transient subagent model failures", async () =
 	}
 });
 
+test("subagent launch retries rotate artifact-graph session ids", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const spec = workflowSpec("unit-scout", {
+			artifactGraph: {
+				stages: [{ id: "main", type: "single", prompt: "Do work." }],
+			},
+		});
+		const compiled = await compileWorkflow(spec, { cwd, task: "Retry topic" });
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		const task = run.tasks[0];
+		task.launchRetry = { attempts: 1, maxAttempts: 5, reason: "model" };
+		const launches = [];
+		setSubagentApiForTests({
+			async runSubagent(options) {
+				launches.push(options);
+				return {
+					runId: "run_retry_session",
+					attemptId: "attempt_retry_session",
+					status: "running",
+				};
+			},
+			async getSubagentStatus() {
+				return null;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+		try {
+			await writeRunRecord(cwd, run);
+			await launchSubagentTask(cwd, run, task, compiled.tasks[0]);
+			assert.equal(launches.length, 1);
+			assert.match(launches[0].sessionId, /:launch-retry-1$/);
+			assert.equal(task.backendHandle.sessionId, launches[0].sessionId);
+			assert.equal(task.backendFiles.sessionId, launches[0].sessionId);
+		} finally {
+			setSubagentApiForTests(undefined);
+		}
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("refresh does not retry deterministic boot or config failures", async () => {
 	const cwd = makeProject();
 	try {
@@ -16582,6 +16782,249 @@ test("refresh adopts handle-less running subagent from deterministic runsDir", a
 			readFileSync(join(cwd, refreshed.tasks[0].files.output), "utf8"),
 			adoptedOutput,
 		);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("refresh ignores pre-claim subagent records during handle recovery", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const compiled = await compileWorkflow(
+			workflowSpec("unit-scout", {
+				artifactGraph: {
+					stages: [{ id: "main", type: "single", prompt: "Do work." }],
+				},
+			}),
+			{ cwd, task: "Review topic" },
+		);
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(
+			cwd,
+			run,
+			compiled,
+			workflowSpec("unit-scout"),
+		);
+		const task = run.tasks[0];
+		const oldStartedAt = new Date(Date.now() - 60_000).toISOString();
+		task.status = "running";
+		task.statusDetail = "launching";
+		task.startedAt = new Date().toISOString();
+		delete task.backendHandle;
+
+		const runsDir = join(
+			cwd,
+			".pi",
+			"workflow-subagents",
+			run.runId,
+			task.taskId,
+		);
+		const subRunDir = join(runsDir, "run_old_attempt");
+		mkdirSync(subRunDir, { recursive: true });
+		writeFileSync(
+			join(subRunDir, "run.json"),
+			JSON.stringify({
+				runId: "run_old_attempt",
+				correlationId: `${run.runId}:${task.taskId}`,
+				status: "completed",
+				backend: "headless",
+				startedAt: oldStartedAt,
+				updatedAt: oldStartedAt,
+				latestAttemptId: "attempt_old_attempt",
+				attempts: [
+					{
+						attemptId: "attempt_old_attempt",
+						status: "completed",
+						startedAt: oldStartedAt,
+						updatedAt: oldStartedAt,
+					},
+				],
+			}),
+		);
+		setSubagentApiForTests({
+			async runSubagent() {
+				throw new Error("not expected");
+			},
+			async reconcileSubagentRun() {
+				throw new Error("old run should not be adopted");
+			},
+			async getSubagentStatus() {
+				throw new Error("old run should not be adopted");
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+		await writeRunRecord(cwd, run);
+
+		const refreshed = await refreshRunFromSubagentArtifacts(
+			cwd,
+			await readRunRecord(cwd, run.runId),
+		);
+
+		assert.equal(refreshed.tasks[0].status, "running");
+		assert.equal(refreshed.tasks[0].backendHandle, undefined);
+		assert.equal(refreshed.tasks[0].lastMessage, undefined);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("refresh resets stale launch claims without backend runs", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const spec = workflowSpec("unit-scout", {
+			artifactGraph: {
+				stages: [{ id: "main", type: "single", prompt: "Do work." }],
+			},
+		});
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Relaunch topic",
+		});
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		const task = run.tasks[0];
+		task.status = "running";
+		task.statusDetail = "launching";
+		task.startedAt = new Date(Date.now() - 60_000).toISOString();
+		task.backendTaskId = "run_missing_claim";
+		task.backendFiles = {
+			runsDir: ".pi/workflow-subagents/missing-claim",
+			correlationId: `${run.runId}:${task.taskId}`,
+		};
+		delete task.backendHandle;
+		setSubagentApiForTests({
+			async runSubagent() {
+				throw new Error("not expected");
+			},
+			async reconcileSubagentRun() {
+				throw new Error("missing run should not be reconciled");
+			},
+			async getSubagentStatus() {
+				throw new Error("missing run should not be queried");
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+		await writeRunRecord(cwd, run);
+
+		const refreshed = await refreshRunFromSubagentArtifacts(
+			cwd,
+			await readRunRecord(cwd, run.runId),
+		);
+
+		const refreshedTask = refreshed.tasks[0];
+		assert.equal(refreshedTask.status, "pending");
+		assert.equal(refreshedTask.statusDetail, "pending");
+		assert.equal(refreshedTask.startedAt, undefined);
+		assert.equal(refreshedTask.backendFiles, undefined);
+		assert.equal(refreshedTask.backendTaskId, refreshedTask.taskId);
+		assert.equal(
+			refreshedTask.lastMessage,
+			"stale pi-subagent launch claim reset",
+		);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("refresh interrupts timed-out running subagents and clears stale handles", async () => {
+	const cwd = makeProject();
+	const interrupts = [];
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const spec = workflowSpec("unit-scout", {
+			artifactGraph: {
+				stages: [{ id: "main", type: "single", prompt: "Do work." }],
+			},
+		});
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Timeout topic",
+		});
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		const task = run.tasks[0];
+		task.status = "running";
+		task.statusDetail = "running";
+		task.startedAt = new Date(Date.now() - 10_000).toISOString();
+		task.runtime.maxRuntimeMs = 1;
+		task.backendTaskId = "run_timeout";
+		task.pid = 12345;
+		task.backendHandle = {
+			engine: "pi-subagent",
+			backend: "headless",
+			runId: "run_timeout",
+			attemptId: "attempt_timeout",
+			cwd,
+			runsDir: ".pi/workflow-subagents/timeout",
+			display: "pi-subagent/headless run_timeout/attempt_timeout",
+		};
+		setSubagentApiForTests({
+			async runSubagent() {
+				throw new Error("not expected");
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async getSubagentStatus() {
+				return {
+					runId: "run_timeout",
+					attemptId: "attempt_timeout",
+					backend: "headless",
+					status: "running",
+					startedAt: task.startedAt,
+					logs: [],
+					attempts: [
+						{
+							attemptId: "attempt_timeout",
+							status: "running",
+							pid: 12345,
+							heartbeatAt: new Date().toISOString(),
+						},
+					],
+				};
+			},
+			async interruptSubagent(options) {
+				interrupts.push(options);
+				return {};
+			},
+		});
+		await writeRunRecord(cwd, run);
+
+		const refreshed = await refreshRunFromSubagentArtifacts(
+			cwd,
+			await readRunRecord(cwd, run.runId),
+		);
+
+		const refreshedTask = refreshed.tasks[0];
+		assert.equal(refreshedTask.status, "failed");
+		assert.equal(refreshedTask.statusDetail, "timeout");
+		assert.equal(refreshedTask.backendHandle, undefined);
+		assert.equal(refreshedTask.backendTaskId, refreshedTask.taskId);
+		assert.equal(refreshedTask.pid, undefined);
+		assert.equal(interrupts.length, 1);
+		assert.equal(interrupts[0].runId, "run_timeout");
+		assert.equal(interrupts[0].attemptId, "attempt_timeout");
 	} finally {
 		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
@@ -17535,6 +17978,7 @@ test("workflow command completions and run arg parsing preserve task text", () =
 			"logs",
 			"wait",
 			"resume",
+			"stop",
 		],
 	);
 	assert.deepEqual(
@@ -18218,6 +18662,20 @@ test("resolveFlowsCwd finds ancestor workflow state root", async () => {
 	}
 });
 
+test("watchRun drops missing runs without recreating supervisor artifacts", async () => {
+	const cwd = makeProject();
+	try {
+		const runId = "workflow_missing_run";
+		watchRun(cwd, runId);
+		await new Promise((resolve) => setTimeout(resolve, 1_100));
+		assert.equal(existsSync(supervisorPath(cwd, runId)), false);
+		await new Promise((resolve) => setTimeout(resolve, 1_100));
+		assert.equal(existsSync(supervisorPath(cwd, runId)), false);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("resumeRun resets failed and skipped tasks, preserves completed work, and relaunches", async () => {
 	const cwd = makeProject();
 	try {
@@ -18258,6 +18716,15 @@ test("resumeRun resets failed and skipped tasks, preserves completed work, and r
 			exitCode: 1,
 			lastMessage: "boom",
 		});
+		taskBySpec(run, "two.main").backendHandle = {
+			engine: "pi-subagent",
+			backend: "headless",
+			runId: "run_resume_stale",
+			attemptId: "attempt_resume_stale",
+			cwd,
+			runsDir: ".pi/workflow-subagents",
+			display: "pi-subagent/headless run_resume_stale/attempt_resume_stale",
+		};
 		setTaskTerminal(
 			taskBySpec(run, "three.main"),
 			"skipped",
@@ -18268,9 +18735,12 @@ test("resumeRun resets failed and skipped tasks, preserves completed work, and r
 		assert.equal((await readRunRecord(cwd, run.runId)).status, "failed");
 
 		const launchedTasks = [];
+		const launchOptions = [];
+		const interrupted = [];
 		setSubagentApiForTests({
 			async runSubagent(options) {
 				launchedTasks.push(String(options.task ?? "").slice(0, 40));
+				launchOptions.push(options);
 				return {
 					runId: "run_stub",
 					attemptId: "attempt_stub",
@@ -18283,7 +18753,8 @@ test("resumeRun resets failed and skipped tasks, preserves completed work, and r
 			async reconcileSubagentRun() {
 				return {};
 			},
-			async interruptSubagent() {
+			async interruptSubagent(options) {
+				interrupted.push(options);
 				return {};
 			},
 		});
@@ -18298,6 +18769,82 @@ test("resumeRun resets failed and skipped tasks, preserves completed work, and r
 			assert.equal(taskBySpec(resumed, "two.main").status, "running");
 			assert.equal(taskBySpec(resumed, "three.main").status, "pending");
 			assert.equal(launchedTasks.length, 1);
+			assert.match(launchOptions[0].sessionId, /:resume-1$/);
+			assert.equal(interrupted.length, 1);
+			assert.equal(interrupted[0].runId, "run_resume_stale");
+		} finally {
+			setSubagentApiForTests(undefined);
+		}
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("stopRun interrupts non-terminal tasks and best-effort cleans up backend handles", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout");
+		const spec = workflowSpec("unit-scout", {
+			artifactGraph: {
+				stages: [
+					{ id: "one", type: "single", prompt: "Step one." },
+					{ id: "two", type: "reduce", from: "one", prompt: "Step two." },
+				],
+			},
+		});
+		const compiled = await compileWorkflow(spec, { cwd, task: "Stop target" });
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		const runningTask = taskBySpec(run, "one.main");
+		runningTask.status = "running";
+		runningTask.statusDetail = "running";
+		runningTask.startedAt = new Date().toISOString();
+		runningTask.backendHandle = {
+			engine: "pi-subagent",
+			backend: "headless",
+			runId: "run_stop",
+			attemptId: "attempt_stop",
+			cwd,
+			runsDir: ".pi/workflow-subagents",
+		};
+		await writeRunRecord(cwd, run);
+
+		const interrupts = [];
+		setSubagentApiForTests({
+			async runSubagent() {
+				throw new Error("stopRun should not launch tasks");
+			},
+			async getSubagentStatus() {
+				return null;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent(options) {
+				interrupts.push(options);
+				return {};
+			},
+		});
+		try {
+			const { run: stopped, interruptedTaskIds } = await stopRun(
+				cwd,
+				run.runId,
+			);
+			assert.equal(stopped.status, "interrupted");
+			assert.deepEqual(interruptedTaskIds, [
+				taskBySpec(run, "one.main").taskId,
+				taskBySpec(run, "two.main").taskId,
+			]);
+			assert.equal(taskBySpec(stopped, "one.main").status, "interrupted");
+			assert.equal(taskBySpec(stopped, "two.main").status, "interrupted");
+			assert.equal(interrupts.length, 1);
+			assert.equal(interrupts[0].runId, "run_stop");
+			assert.equal(interrupts[0].attemptId, "attempt_stop");
+			await assert.rejects(() => stopRun(cwd, run.runId), /non-terminal run/);
 		} finally {
 			setSubagentApiForTests(undefined);
 		}

@@ -1370,10 +1370,11 @@ function statusForSummary(
 ): WorkflowRunStatus | TaskRunStatus {
 	if (summary.running > 0) return "running";
 	if (summary.blocked > 0) return "blocked";
-	if (summary.failed > 0 || summary.interrupted > 0) return "failed";
+	if (summary.failed > 0) return "failed";
 	if (summary.pending > 0) return "pending";
 	if (summary.total > 0 && summary.completed === summary.total)
 		return "completed";
+	if (summary.interrupted > 0) return "interrupted";
 	return "interrupted";
 }
 

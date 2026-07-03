@@ -1361,7 +1361,8 @@ export function deriveWorkflowStatus(summary: TaskSummary): WorkflowRunStatus {
 	if (summary.running > 0 || summary.pending > 0) return "running";
 	if (summary.total > 0 && summary.completed === summary.total)
 		return "completed";
-	if (summary.failed > 0 || summary.interrupted > 0) return "failed";
+	if (summary.failed > 0) return "failed";
+	if (summary.interrupted > 0) return "interrupted";
 	return "interrupted";
 }
 

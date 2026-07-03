@@ -19,6 +19,7 @@ import {
 	refreshRun,
 	resumeRun,
 	resumeSupervisors,
+	stopRun,
 	runDynamicTask,
 	runWorkflowSpec,
 	waitForRun,
@@ -1185,6 +1186,20 @@ async function handleWorkflowCommand(
 			return;
 		}
 
+		if (action === "stop") {
+			const runId = requireArg(tokens, 1, "/workflow stop <run-id>");
+			const { run, interruptedTaskIds } = await stopRun(ctx.cwd, runId);
+			emit(
+				ctx,
+				[
+					`Stopped workflow ${run.runId}; interrupted ${interruptedTaskIds.length} task(s): ${interruptedTaskIds.join(", ")}`,
+					formatRun(run, "full"),
+				].join("\n"),
+				"warning",
+			);
+			return;
+		}
+
 		throw new Error(
 			`Unknown /workflow action "${action}". Try /workflow help.`,
 		);
@@ -1668,6 +1683,11 @@ const WORKFLOW_ACTION_COMPLETIONS = [
 		value: "resume",
 		label: "resume",
 		description: "Resume a failed, interrupted, or resumable blocked run",
+	},
+	{
+		value: "stop",
+		label: "stop",
+		description: "Stop a non-terminal workflow run",
 	},
 ];
 

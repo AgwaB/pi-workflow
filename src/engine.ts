@@ -148,6 +148,8 @@ const DYNAMIC_CONTROLLER_ENGINE_INTEGRITY_ERROR_MESSAGE =
 	"incompatible or stale pi-workflow engine: dynamic controller context is missing runDecisionLoop (rebuild dist / reload workflow engine)";
 const supervisorTimers = new Map<string, ReturnType<typeof setInterval>>();
 const supervisorRunMtimes = new Map<string, number>();
+const supervisorErrorCounts = new Map<string, number>();
+const MAX_SUPERVISOR_CONSECUTIVE_ERRORS = 3;
 
 export interface WorkflowRunOptions {
 	task?: string;
@@ -299,6 +301,48 @@ export interface ResumeRunSummary {
 	resetTaskIds: string[];
 }
 
+export interface StopRunSummary {
+	run: WorkflowRunRecord;
+	interruptedTaskIds: string[];
+}
+
+export async function stopRun(
+	cwd: string,
+	runIdOrPrefix: string,
+): Promise<StopRunSummary> {
+	const current = await readRunRecord(cwd, runIdOrPrefix);
+	const stopped = await withRunLease(cwd, current.runId, async () => {
+		const run = await readRunRecord(cwd, current.runId);
+		if (isTerminalWorkflowStatus(run.status)) {
+			throw new Error(
+				`stop requires a non-terminal run; ${run.runId} is ${run.status}`,
+			);
+		}
+		await resolveWorkflowBackend(run)
+			.cleanupRun(cwd, run)
+			.catch(() => undefined);
+		const interruptedTaskIds: string[] = [];
+		for (const task of run.tasks) {
+			if (
+				setTaskTerminal(task, "interrupted", "workflow_stopped", {
+					exitCode: 130,
+					lastMessage: "Workflow stopped by user request",
+				})
+			) {
+				interruptedTaskIds.push(task.taskId);
+			}
+		}
+		await writeRunRecord(cwd, run);
+		unwatchRun(cwd, run.runId);
+		return { run, interruptedTaskIds };
+	});
+	if (!stopped)
+		throw new Error(
+			`Could not acquire workflow run lease for ${current.runId}`,
+		);
+	return stopped;
+}
+
 export async function resumeRun(
 	cwd: string,
 	runIdOrPrefix: string,
@@ -331,6 +375,9 @@ export async function resumeRun(
 	const resetTaskIds: string[] = [];
 	const updated = await withRunLease(cwd, current.runId, async () => {
 		const run = await readRunRecord(cwd, current.runId);
+		await resolveWorkflowBackend(run)
+			.cleanupRun(cwd, run)
+			.catch(() => undefined);
 		for (const task of run.tasks) {
 			if (resetTaskForResume(task)) resetTaskIds.push(task.taskId);
 		}
@@ -375,6 +422,15 @@ export async function resumeSupervisors(
 	}
 }
 
+function unwatchRun(cwd: string, runId: string): void {
+	const key = `${cwd}\0${runId}`;
+	const existing = supervisorTimers.get(key);
+	if (existing) clearInterval(existing);
+	supervisorTimers.delete(key);
+	supervisorRunMtimes.delete(key);
+	supervisorErrorCounts.delete(key);
+}
+
 export function watchRun(
 	cwd: string,
 	runId: string,
@@ -392,6 +448,7 @@ export function watchRun(
 			const currentMtime = afterMtime ?? beforeMtime;
 			if (currentMtime !== undefined)
 				supervisorRunMtimes.set(key, currentMtime);
+			supervisorErrorCounts.delete(key);
 
 			if (hasActiveSchedulerWork(refreshed)) {
 				const unchanged =
@@ -402,12 +459,18 @@ export function watchRun(
 				return;
 			}
 
-			const existing = supervisorTimers.get(key);
-			if (existing) clearInterval(existing);
-			supervisorTimers.delete(key);
-			supervisorRunMtimes.delete(key);
+			unwatchRun(cwd, runId);
 		})().catch((error) => {
-			void recordSupervisorError(cwd, runId, error);
+			if (isMissingRunError(error)) {
+				unwatchRun(cwd, runId);
+				return;
+			}
+			const failures = (supervisorErrorCounts.get(key) ?? 0) + 1;
+			supervisorErrorCounts.set(key, failures);
+			void recordSupervisorError(cwd, runId, error).finally(() => {
+				if (failures >= MAX_SUPERVISOR_CONSECUTIVE_ERRORS)
+					unwatchRun(cwd, runId);
+			});
 		});
 	}, POLL_INTERVAL_MS);
 
@@ -422,9 +485,20 @@ async function readRunMtimeMs(
 	try {
 		return (await stat(workflowRunPath(cwd, runId))).mtimeMs;
 	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		if (isEnoentError(error)) return undefined;
 		throw error;
 	}
+}
+
+function isEnoentError(error: unknown): boolean {
+	return (error as NodeJS.ErrnoException | undefined)?.code === "ENOENT";
+}
+
+function isMissingRunError(error: unknown): boolean {
+	return (
+		isEnoentError(error) ||
+		(error instanceof Error && /^Flow run not found: /.test(error.message))
+	);
 }
 
 export async function scheduleRun(
@@ -686,7 +760,7 @@ async function scheduleDag(
 			index,
 			options,
 		);
-		if (launched) running += 1;
+		if (launched && run.tasks[index]?.status === "running") running += 1;
 	}
 }
 
@@ -846,6 +920,17 @@ async function materializeForeachTask(
 
 	const placeholderSpecId = template.id;
 	const generatedSpecIds = generated.tasks.map((task) => task.id);
+	const hasDownstreamDependents = compiledFlow.tasks.some(
+		(task, taskIndex) =>
+			taskIndex !== index && (task.dependsOn ?? []).includes(placeholderSpecId),
+	);
+	if (generatedSpecIds.length === 0 && !hasDownstreamDependents) {
+		setTaskTerminal(templateRunTask, "completed", "foreach_empty", {
+			lastMessage: "foreach produced 0 item(s)",
+		});
+		await writeRunRecord(cwd, run);
+		return true;
+	}
 	compiledFlow.tasks.splice(index, 1, ...generated.tasks);
 	updateDownstreamDependencies(
 		compiledFlow,

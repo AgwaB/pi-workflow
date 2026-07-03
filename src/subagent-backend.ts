@@ -62,6 +62,7 @@ const PARENT_SUBAGENT_RUNS_DIR_ENV = "PI_WORKFLOW_PARENT_SUBAGENT_RUNS_DIR";
 const PARENT_SUBAGENT_RUN_ID_ENV = "PI_WORKFLOW_PARENT_SUBAGENT_RUN_ID";
 const PARENT_SUBAGENT_ATTEMPT_ID_ENV = "PI_WORKFLOW_PARENT_SUBAGENT_ATTEMPT_ID";
 const DEFAULT_LAUNCH_SLOT_RELEASE_DELAY_MS = 3_000;
+const STALE_LAUNCH_CLAIM_GRACE_MS = 30_000;
 const MIN_TRANSIENT_RETRY_JITTER_MS = 1_000;
 const MAX_TRANSIENT_RETRY_JITTER_MS = 5_000;
 const MODULE_PATH = fileURLToPath(import.meta.url);
@@ -387,7 +388,6 @@ export async function cleanupSubagentRun(
 	run: WorkflowRunRecord,
 ): Promise<void> {
 	for (const task of run.tasks) {
-		if (isTerminalTaskStatus(task.status)) continue;
 		const handle = getSubagentHandle(task);
 		if (!handle) continue;
 		const api = await loadSubagentApi();
@@ -552,8 +552,13 @@ export async function refreshRunFromSubagentArtifacts(
 			}
 		}
 		if (!handle) {
+			if (isStaleLaunchClaim(task)) {
+				resetStaleLaunchClaim(task);
+				changed = true;
+				continue;
+			}
 			if (isTaskTimedOut(task)) {
-				markTaskTimedOut(task);
+				markSubagentTaskTimedOut(task);
 				changed = true;
 			}
 			continue;
@@ -578,16 +583,8 @@ export async function refreshRunFromSubagentArtifacts(
 
 		if (snapshot === null) {
 			if (isTaskTimedOut(task)) {
-				await api
-					.interruptSubagent({
-						cwd: handle.cwd,
-						runsDir: handle.runsDir,
-						runId: handle.runId,
-						attemptId: handle.attemptId,
-						reason: "workflow timeout",
-					})
-					.catch(() => undefined);
-				markTaskTimedOut(task);
+				await interruptTimedOutSubagent(api, handle);
+				markSubagentTaskTimedOut(task);
 				changed = true;
 			}
 			continue;
@@ -604,16 +601,8 @@ export async function refreshRunFromSubagentArtifacts(
 				? `pi-subagent heartbeat ${activeAttempt.heartbeatAt}`
 				: "pi-subagent running";
 			if (isTaskTimedOut(task)) {
-				await api
-					.interruptSubagent({
-						cwd: handle.cwd,
-						runsDir: handle.runsDir,
-						runId: handle.runId,
-						attemptId: handle.attemptId,
-						reason: "workflow timeout",
-					})
-					.catch(() => undefined);
-				markTaskTimedOut(task);
+				await interruptTimedOutSubagent(api, handle);
+				markSubagentTaskTimedOut(task);
 				changed = true;
 			}
 			continue;
@@ -625,6 +614,48 @@ export async function refreshRunFromSubagentArtifacts(
 
 	if (changed) await writeRunRecord(cwd, run);
 	return run;
+}
+
+async function interruptTimedOutSubagent(
+	api: Awaited<ReturnType<typeof loadSubagentApi>>,
+	handle: NonNullable<WorkflowTaskRunRecord["backendHandle"]>,
+): Promise<void> {
+	await api
+		.interruptSubagent({
+			cwd: handle.cwd,
+			runsDir: handle.runsDir,
+			runId: handle.runId,
+			attemptId: handle.attemptId,
+			reason: "workflow timeout",
+		})
+		.catch(() => undefined);
+}
+
+function markSubagentTaskTimedOut(task: WorkflowTaskRunRecord): void {
+	markTaskTimedOut(task);
+	task.backendHandle = undefined;
+	task.backendTaskId = task.taskId;
+	task.pid = undefined;
+}
+
+function isStaleLaunchClaim(task: WorkflowTaskRunRecord): boolean {
+	if (task.statusDetail !== "launching" || !task.startedAt) return false;
+	const startedAtMs = Date.parse(task.startedAt);
+	return (
+		Number.isFinite(startedAtMs) &&
+		Date.now() - startedAtMs > STALE_LAUNCH_CLAIM_GRACE_MS
+	);
+}
+
+function resetStaleLaunchClaim(task: WorkflowTaskRunRecord): void {
+	task.status = "pending";
+	task.statusDetail = "pending";
+	task.startedAt = undefined;
+	task.backendHandle = undefined;
+	task.backendFiles = undefined;
+	task.backendTaskId = task.taskId;
+	task.pid = undefined;
+	task.lastMessage = "stale pi-subagent launch claim reset";
 }
 
 async function materializeTerminalSubagentResult(
@@ -1793,6 +1824,7 @@ async function recoverSubagentHandle(
 	const runsDir = subagentRunsDir(run, task);
 	const absoluteRunsDir = resolve(task.cwd, runsDir);
 	const expectedCorrelationId = `${run.runId}:${task.taskId}`;
+	const claimStartedAtMs = timestampMs(task.startedAt);
 	const entries = await readdir(absoluteRunsDir, { withFileTypes: true }).catch(
 		() => [],
 	);
@@ -1807,6 +1839,7 @@ async function recoverSubagentHandle(
 			join(absoluteRunsDir, entry.name, "run.json"),
 		);
 		if (!record || record.correlationId !== expectedCorrelationId) continue;
+		if (isPreClaimSubagentRecord(record, claimStartedAtMs)) continue;
 		const attemptId =
 			record.activeAttemptId ??
 			record.latestAttemptId ??
@@ -1831,6 +1864,20 @@ async function recoverSubagentHandle(
 
 	candidates.sort((left, right) => right.updatedAtMs - left.updatedAtMs);
 	return candidates[0]?.handle;
+}
+
+function isPreClaimSubagentRecord(
+	record: SubagentRunRecordLike,
+	claimStartedAtMs: number | undefined,
+): boolean {
+	if (claimStartedAtMs === undefined) return false;
+	const recordStartedAtMs =
+		timestampMs(record.startedAt) ??
+		timestampMs(record.attempts?.[0]?.startedAt) ??
+		timestampMs(record.updatedAt);
+	return (
+		recordStartedAtMs !== undefined && recordStartedAtMs < claimStartedAtMs
+	);
 }
 
 function timestampMs(value: string | undefined): number | undefined {
@@ -1893,7 +1940,14 @@ function subagentSessionId(
 	task: WorkflowTaskRunRecord,
 ): string | undefined {
 	if (!task.artifactGraph?.enabled) return undefined;
-	return task.outputRetry?.sessionId ?? baseSubagentSessionId(run, task);
+	const baseSessionId = baseSubagentSessionId(run, task);
+	if (task.outputRetry?.sessionId) return task.outputRetry.sessionId;
+	const launchAttempt = task.launchRetry?.attempts ?? 0;
+	if (launchAttempt > 0)
+		return `${baseSessionId}:launch-retry-${launchAttempt}`;
+	const resumeAttempt = task.resumeEvents?.length ?? 0;
+	if (resumeAttempt > 0) return `${baseSessionId}:resume-${resumeAttempt}`;
+	return baseSessionId;
 }
 
 function baseSubagentSessionId(
