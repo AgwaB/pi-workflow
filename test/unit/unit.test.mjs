@@ -80,8 +80,10 @@ import {
 import { supportOutputAnalysis } from "../../.tmp/unit/artifact-graph-runtime.js";
 import {
 	canStageProceedAfterPreviousFailure,
+	readSimpleJsonPath,
 	shouldScheduleAfterStageFailure,
 } from "../../.tmp/unit/workflow-runtime.js";
+import { buildForeachGeneratedTasks } from "../../.tmp/unit/engine-run-graph.js";
 import { deriveWorkflowStatus, summarizeTasks } from "../../.tmp/unit/store.js";
 import {
 	assertWorkflowActionAllowedForRole,
@@ -8626,6 +8628,31 @@ test("dependency-aware skip lets explicit partial sources bypass unrelated previ
 		),
 		true,
 	);
+});
+
+test("foreach item interpolation preserves dollar replacement tokens", () => {
+	const { tasks } = buildForeachGeneratedTasks(
+		{
+			stageId: "verify",
+			foreach: { prompt: "Verify ${item}", injectRuntimeTask: false },
+		},
+		undefined,
+		["price is $1 per unit"],
+	);
+	assert.equal(tasks.length, 1);
+	assert.match(tasks[0].task, /price is \$1 per unit/);
+	assert.match(tasks[0].compiledPrompt, /price is \$1 per unit/);
+});
+
+test("simple JSON path reads own properties only", () => {
+	const inherited = { secret: "prototype-value" };
+	const value = Object.create(inherited);
+	value.safe = { answer: 42 };
+	value.constructor = { answer: "blocked" };
+
+	assert.equal(readSimpleJsonPath(value, "$.safe.answer"), 42);
+	assert.equal(readSimpleJsonPath(value, "$.secret"), undefined);
+	assert.equal(readSimpleJsonPath(value, "$.constructor.answer"), undefined);
 });
 
 test("compiler injects runtime task for single stages only", async () => {

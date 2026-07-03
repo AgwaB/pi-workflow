@@ -345,9 +345,25 @@ export function readSimpleJsonPath(value: unknown, path: string): unknown {
 	const parts = path.slice(2).split(".").filter(Boolean);
 	let current = value as any;
 	for (const part of parts) {
-		if (current === null || typeof current !== "object" || !(part in current))
-			return undefined;
+		if (!canReadJsonPathPart(current, part)) return undefined;
 		current = current[part];
 	}
 	return current;
+}
+
+function canReadJsonPathPart(
+	value: unknown,
+	part: string,
+): value is Record<string, unknown> {
+	return (
+		isSafeJsonPathPart(part) && isRecord(value) && Object.hasOwn(value, part)
+	);
+}
+
+function isSafeJsonPathPart(part: string): boolean {
+	return part !== "__proto__" && part !== "prototype" && part !== "constructor";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
 }
