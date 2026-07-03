@@ -225,8 +225,7 @@ function releaseLaunchSlotAfterDelay(
 		release();
 		return;
 	}
-	const timer = setTimeout(release, delayMs);
-	timer.unref?.();
+	setTimeout(release, delayMs);
 }
 
 async function runWithLaunchSlot<T>(action: () => Promise<T>): Promise<T> {

@@ -21151,6 +21151,41 @@ test("subagent launch gate honors env override and recovers slots after throw", 
 		assert.equal(maxActive, 2);
 
 		process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES = "1";
+		setSubagentLaunchControlsForTests({ releaseDelayMs: 25, retryJitterMs: 0 });
+		let delayedLaunches = 0;
+		setSubagentApiForTests({
+			async runSubagent() {
+				delayedLaunches += 1;
+				return {
+					runId: `run_delayed_${delayedLaunches}`,
+					attemptId: `attempt_delayed_${delayedLaunches}`,
+					status: "running",
+				};
+			},
+		});
+		const delayedFirst = makeFixture("delayed_first");
+		const delayedSecond = makeFixture("delayed_second");
+		await launchSubagentTask(
+			cwd,
+			delayedFirst.run,
+			delayedFirst.task,
+			delayedFirst.compiledTask,
+		);
+		assert.equal(delayedLaunches, 1);
+		await Promise.race([
+			launchSubagentTask(
+				cwd,
+				delayedSecond.run,
+				delayedSecond.task,
+				delayedSecond.compiledTask,
+			),
+			sleep(500).then(() => {
+				throw new Error("delayed launch slot was not released");
+			}),
+		]);
+		assert.equal(delayedLaunches, 2);
+
+		setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
 		setSubagentApiForTests({
 			async runSubagent() {
 				throw new Error("boom");
