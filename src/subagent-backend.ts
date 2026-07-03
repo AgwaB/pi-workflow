@@ -58,6 +58,7 @@ const DEFAULT_TRANSIENT_MODEL_FAILURE_RETRIES = 5;
 const DEFAULT_ARTIFACT_OUTPUT_RETRIES = 2;
 const MAX_CONCURRENT_LAUNCHES_ENV = "PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES";
 const DEFAULT_LAUNCH_SLOT_RELEASE_DELAY_MS = 3_000;
+const STALE_LAUNCH_CLAIM_GRACE_MS = 30_000;
 const MIN_TRANSIENT_RETRY_JITTER_MS = 1_000;
 const MAX_TRANSIENT_RETRY_JITTER_MS = 5_000;
 const MODULE_PATH = fileURLToPath(import.meta.url);
@@ -438,6 +439,11 @@ export async function refreshRunFromSubagentArtifacts(
 			}
 		}
 		if (!handle) {
+			if (isStaleLaunchClaim(task)) {
+				resetStaleLaunchClaim(task);
+				changed = true;
+				continue;
+			}
 			if (isTaskTimedOut(task)) {
 				markSubagentTaskTimedOut(task);
 				changed = true;
@@ -517,6 +523,26 @@ function markSubagentTaskTimedOut(task: WorkflowTaskRunRecord): void {
 	task.backendHandle = undefined;
 	task.backendTaskId = task.taskId;
 	task.pid = undefined;
+}
+
+function isStaleLaunchClaim(task: WorkflowTaskRunRecord): boolean {
+	if (task.statusDetail !== "launching" || !task.startedAt) return false;
+	const startedAtMs = Date.parse(task.startedAt);
+	return (
+		Number.isFinite(startedAtMs) &&
+		Date.now() - startedAtMs > STALE_LAUNCH_CLAIM_GRACE_MS
+	);
+}
+
+function resetStaleLaunchClaim(task: WorkflowTaskRunRecord): void {
+	task.status = "pending";
+	task.statusDetail = "pending";
+	task.startedAt = undefined;
+	task.backendHandle = undefined;
+	task.backendFiles = undefined;
+	task.backendTaskId = task.taskId;
+	task.pid = undefined;
+	task.lastMessage = "stale pi-subagent launch claim reset";
 }
 
 async function materializeTerminalSubagentResult(

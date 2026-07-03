@@ -16614,6 +16614,69 @@ test("refresh ignores pre-claim subagent records during handle recovery", async 
 	}
 });
 
+test("refresh resets stale launch claims without backend runs", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const spec = workflowSpec("unit-scout", {
+			artifactGraph: {
+				stages: [{ id: "main", type: "single", prompt: "Do work." }],
+			},
+		});
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Relaunch topic",
+		});
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		const task = run.tasks[0];
+		task.status = "running";
+		task.statusDetail = "launching";
+		task.startedAt = new Date(Date.now() - 60_000).toISOString();
+		task.backendTaskId = "run_missing_claim";
+		task.backendFiles = {
+			runsDir: ".pi/workflow-subagents/missing-claim",
+			correlationId: `${run.runId}:${task.taskId}`,
+		};
+		delete task.backendHandle;
+		setSubagentApiForTests({
+			async runSubagent() {
+				throw new Error("not expected");
+			},
+			async reconcileSubagentRun() {
+				throw new Error("missing run should not be reconciled");
+			},
+			async getSubagentStatus() {
+				throw new Error("missing run should not be queried");
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+		await writeRunRecord(cwd, run);
+
+		const refreshed = await refreshRunFromSubagentArtifacts(
+			cwd,
+			await readRunRecord(cwd, run.runId),
+		);
+
+		const refreshedTask = refreshed.tasks[0];
+		assert.equal(refreshedTask.status, "pending");
+		assert.equal(refreshedTask.statusDetail, "pending");
+		assert.equal(refreshedTask.startedAt, undefined);
+		assert.equal(refreshedTask.backendFiles, undefined);
+		assert.equal(refreshedTask.backendTaskId, refreshedTask.taskId);
+		assert.equal(refreshedTask.lastMessage, "stale pi-subagent launch claim reset");
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("refresh interrupts timed-out running subagents and clears stale handles", async () => {
 	const cwd = makeProject();
 	const interrupts = [];
