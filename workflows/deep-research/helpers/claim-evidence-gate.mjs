@@ -82,6 +82,38 @@ function collectEvidenceRefs(claim) {
 	return refs;
 }
 
+function addLocalEvidenceRef(refs, value) {
+	if (typeof value !== "string") return;
+	const text = value.trim();
+	if (!text || /^https?:\/\//i.test(text) || isWorkflowSourceRef(text)) return;
+	if (looksLikeLocalSourceRef(text)) refs.add(text);
+}
+
+function collectLocalEvidenceRefs(claim) {
+	const refs = new Set();
+	if (!claim || typeof claim !== "object") return refs;
+	for (const key of ["file", "path", "repoPath", "localPath", "sourceRef"]) {
+		addLocalEvidenceRef(refs, claim[key]);
+	}
+	for (const value of Array.isArray(claim.sourceRefs) ? claim.sourceRefs : []) {
+		addLocalEvidenceRef(refs, value);
+	}
+	for (const row of Array.isArray(claim.evidence) ? claim.evidence : []) {
+		if (!row || typeof row !== "object") continue;
+		for (const key of [
+			"file",
+			"path",
+			"repoPath",
+			"localPath",
+			"source",
+			"sourceRef",
+		]) {
+			addLocalEvidenceRef(refs, row[key]);
+		}
+	}
+	return refs;
+}
+
 function collectWorkflowSourceRefs(value, refs = new Set()) {
 	if (typeof value === "string") {
 		for (const match of value.matchAll(/\bwsrc_[a-f0-9]{32}\b/g))
@@ -548,6 +580,10 @@ export default async function claimEvidenceGate({ sources, options = {} }) {
 		if (!claim || typeof claim !== "object") return;
 		gateSummary.total += 1;
 		const evidenceRefs = [...collectEvidenceRefs(claim)];
+		const localEvidenceRefs = new Set([
+			...collectLocalEvidenceRefs(claim),
+			...collectLocalEvidenceRefs(candidate),
+		]);
 		const workflowSourceRefs = new Set([...collectWorkflowSourceRefs(claim)]);
 		const exactQuantitative = hasExactQuantitativeClaim(claim);
 		const fetched = hasFetchedEvidence(claim);
@@ -617,6 +653,7 @@ export default async function claimEvidenceGate({ sources, options = {} }) {
 			claimId &&
 			candidate &&
 			workflowSourceRefs.size === 0 &&
+			localEvidenceRefs.size === 0 &&
 			httpSourceUrls.length > 0
 		) {
 			const failure = {

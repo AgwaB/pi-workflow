@@ -8118,6 +8118,62 @@ test("deep-research verification candidate sanitizer rewrites only quote-backed 
 	});
 });
 
+test("deep-research sanitizer uses Unicode tokens for Korean quote-backed rewrites", async () => {
+	const { default: helper } = await import(
+		`../../workflows/deep-research/helpers/sanitize-verification-candidates.mjs?test=${Date.now()}`
+	);
+	const sourceRef = "wsrc_99999999999999999999999999999999";
+	const value = "푸시 보호는 감지된 비밀이 포함된 푸시를 차단합니다.";
+	const quote =
+		"푸시 보호는 감지된 비밀이 포함된 푸시를 저장소에 도달하기 전에 차단합니다.";
+	const result = await helper({
+		sources: {
+			"normalize-input-packet.main": {
+				packet: {
+					research: {
+						extractedFacts: [
+							{
+								slotId: "slot-ko",
+								value,
+								quote,
+								sourceRefs: [sourceRef],
+								sourceUrls: ["https://docs.github.com/ko/secret-scanning"],
+								sourceTitleOrPublisher: "GitHub Docs 한국어",
+								sourceQuality: "primary",
+							},
+						],
+					},
+				},
+			},
+			"normalize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [
+						{
+							id: "claim-ko-001",
+							claim: `Teams should use the Korean source-stated control: ${value}`,
+							factSlotIds: ["slot-ko"],
+							sourceRefs: [sourceRef],
+							sourceUrls: ["https://docs.github.com/ko/secret-scanning"],
+						},
+					],
+				},
+				factSlotCoverage: [],
+				coverageGaps: [],
+			},
+		},
+	});
+
+	assert.deepEqual(
+		result.claimInventory.verificationCandidates.map((claim) => claim.id),
+		["claim-ko-001"],
+	);
+	assert.equal(result.sanitizerDiagnostics.rewrittenCandidateCount, 1);
+	const rewritten = result.claimInventory.verificationCandidates[0];
+	assert.equal(rewritten.claim, value);
+	assert.equal(rewritten.sourceEvidenceHints[0].value, value);
+	assert.equal(rewritten.sourceEvidenceHints[0].quote, quote);
+});
+
 test("deep-research sanitizer demotes url-only candidates and promotes source-backed preserved claims", async () => {
 	const sanitize = (
 		await import(
@@ -8218,8 +8274,15 @@ test("deep-research sanitizer demotes url-only candidates and promotes source-ba
 	const promoted = kept.find((claim) => claim.id === "claim-009");
 	assert.ok(promoted);
 	assert.ok(promoted.sourceRefs.length > 0);
+	assert.ok(
+		!result.claimInventory.preservedClaims.some(
+			(claim) => claim.id === "claim-009",
+		),
+	);
 	const slot = result.factSlotCoverage.find((row) => row.slotId === "slot-001");
 	assert.deepEqual(slot.verificationCandidateIds, ["claim-009"]);
+	assert.equal(slot.status, "filled");
+	assert.equal(slot.gapReason, undefined);
 });
 
 test("non-dynamic artifact graph compile/run golden preserves static structure", async () => {
@@ -19243,6 +19306,58 @@ test("deep-research claim-evidence-gate backfills sourceRefs from normalize pack
 		"wsrc_cccccccccccccccccccccccccccccccc",
 	]);
 	assert.equal(out.gateSummary.sourceRefsBackfilledFromUrls, 1);
+	assert.equal(out.gateSummary.sourceRefJoinFailures, 0);
+	assert.deepEqual(out.sourceRefJoinFailures, []);
+});
+
+test("deep-research claim-evidence-gate suppresses sourceRef join failures for local evidence", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"claim-evidence-gate.mjs",
+	);
+	const helper = (
+		await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)
+	).default;
+	const out = await helper({
+		sources: {
+			"plan.main": { factSlots: [{ id: "slot-001" }] },
+			"normalize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [
+						{
+							id: "claim-001",
+							claim:
+								"Local repository evidence supports the implementation detail.",
+							factSlotIds: ["slot-001"],
+							sourceUrls: ["https://example.test/missing-card"],
+						},
+					],
+				},
+				factSlotCoverage: [{ slotId: "slot-001" }],
+			},
+			"verify-claims.claim-001": {
+				id: "claim-001",
+				status: "verified",
+				evidence: [
+					{
+						url: "https://example.test/missing-card",
+						path: "src/engine.ts#L10",
+						quote:
+							"Local repository evidence supports the implementation detail.",
+					},
+				],
+			},
+		},
+		options: { requireFetchedEvidenceForVerified: true },
+	});
+
+	assert.deepEqual(out.statusPartitions.verified, ["claim-001"]);
+	assert.equal(out.gateSummary.sourceRefsBackfilledFromUrls, 0);
 	assert.equal(out.gateSummary.sourceRefJoinFailures, 0);
 	assert.deepEqual(out.sourceRefJoinFailures, []);
 });

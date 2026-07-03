@@ -89,12 +89,55 @@ function matchesAny(text, patterns) {
 	return patterns.some((pattern) => pattern.test(text));
 }
 
+const WORD_TOKEN_RE =
+	/[\p{Letter}\p{Number}][\p{Letter}\p{Number}\p{Mark}_-]*/gu;
+const ASCII_TOKEN_RE = /^[a-z0-9][a-z0-9_-]{2,}$/iu;
+const ASCII_RUN_RE = /[a-z0-9][a-z0-9_-]{2,}/giu;
+const CJK_RUN_RE =
+	/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]+/gu;
+const ASCII_CHAR_RE = /[a-z0-9]/iu;
+
+function addCjkRunTokens(tokens, run) {
+	const chars = [...run];
+	if (chars.length === 0) return;
+	if (chars.length === 1) {
+		tokens.add(chars[0]);
+		return;
+	}
+	tokens.add(run);
+	for (const size of [2, 3]) {
+		if (chars.length < size) continue;
+		for (let index = 0; index <= chars.length - size; index += 1) {
+			tokens.add(chars.slice(index, index + size).join(""));
+		}
+	}
+}
+
 function tokenSet(value) {
-	return new Set(
-		String(value ?? "")
-			.toLowerCase()
-			.match(/[a-z0-9][a-z0-9_-]{2,}/g) ?? [],
-	);
+	const tokens = new Set();
+	const normalized = String(value ?? "")
+		.normalize("NFKC")
+		.toLocaleLowerCase();
+	for (const match of normalized.matchAll(WORD_TOKEN_RE)) {
+		const token = match[0].replace(/^[_-]+|[_-]+$/gu, "");
+		if (!token) continue;
+		for (const asciiMatch of token.matchAll(ASCII_RUN_RE)) {
+			tokens.add(asciiMatch[0]);
+		}
+		if (ASCII_TOKEN_RE.test(token)) continue;
+		let cjkMatched = false;
+		for (const cjkMatch of token.matchAll(CJK_RUN_RE)) {
+			cjkMatched = true;
+			addCjkRunTokens(tokens, cjkMatch[0]);
+		}
+		if (!cjkMatched && [...token].length >= 3) tokens.add(token);
+	}
+	return tokens;
+}
+
+function hasAsciiToken(tokens) {
+	for (const token of tokens) if (ASCII_CHAR_RE.test(token)) return true;
+	return false;
 }
 
 function setIntersectionCount(left, right) {
@@ -235,10 +278,15 @@ function evidenceHintsForCandidate(candidate, hintRows) {
 			candidateSlots,
 		);
 		const tokenHits = setIntersectionCount(row._tokens, candidateTokens);
+		const unicodeSlotOnlyFallback =
+			slotHits > 0 &&
+			tokenHits < 2 &&
+			!hasAsciiToken(candidateTokens) &&
+			!hasAsciiToken(row._tokens);
 		if (slotHits === 0 && tokenHits < 2) continue;
 		const score =
 			refHits * 6 + urlHits * 5 + slotHits * 2 + Math.min(tokenHits, 5);
-		if (score < 7) continue;
+		if (score < 7 && !unicodeSlotOnlyFallback) continue;
 		scored.push({ score, row });
 	}
 	scored.sort((left, right) => right.score - left.score);
@@ -376,11 +424,14 @@ function rewrittenCandidate(candidate, reasons, hints, urlToSourceRef) {
 	if (!hint) return null;
 	const replacement = stringOf(hint.value) || stringOf(hint.quote);
 	if (!replacement || replacement === claimText(candidate)) return null;
+	const refs = backfillSourceRefs(candidate, [hint], urlToSourceRef);
+	if (refs.length === 0 && localEvidenceRefs(candidate).length === 0)
+		return null;
 	return {
 		...candidate,
 		originalClaim: claimText(candidate),
 		claim: replacement,
-		sourceRefs: backfillSourceRefs(candidate, [hint], urlToSourceRef),
+		sourceRefs: refs,
 		sourceUrls: hint.url ? [hint.url] : sourceUrls(candidate),
 		sanitizerRewriteReasons: rewriteReasons,
 		reasonToVerify: `Deterministically rewritten to a source-backed atom from ${hint.sourceTitleOrPublisher ?? hint.url ?? hint.sourceRef ?? "source evidence"}.`,
@@ -397,6 +448,16 @@ function sanitizedCandidate(candidate, hints, urlToSourceRef) {
 		...(hints.length > 0 ? { sourceEvidenceHints: hints } : {}),
 		verifierInputPolicy: VERIFIER_INPUT_POLICY,
 	};
+}
+
+function withoutSanitizerGapReason(value) {
+	return stringOf(value)
+		.split(";")
+		.map((part) => part.trim())
+		.filter(
+			(part) => part && !part.startsWith("sanitized verifier candidates:"),
+		)
+		.join("; ");
 }
 
 function adjustFactSlotCoverage(rows, demotedBySlot, keptIds) {
@@ -484,6 +545,7 @@ export default async function sanitizeVerificationCandidates({ sources }) {
 	const webUrlOnlyDemotedIds = [];
 	const promotedCandidateIds = [];
 	const promotedBySlot = new Map();
+	const promotedPreservedClaims = new Set();
 	const retainedCandidates = [];
 	for (const [index, candidate] of keptCandidates.entries()) {
 		const hasRefs = sourceRefs(candidate).length > 0;
@@ -550,6 +612,7 @@ export default async function sanitizeVerificationCandidates({ sources }) {
 		for (const entry of promotable.slice(0, webUrlOnlyDemotedIds.length)) {
 			takenIds.add(entry.id);
 			promotedCandidateIds.push(entry.id);
+			promotedPreservedClaims.add(entry.preserved);
 			for (const slotId of entry.slots) {
 				const list = promotedBySlot.get(slotId) ?? [];
 				list.push(entry.id);
@@ -584,19 +647,30 @@ export default async function sanitizeVerificationCandidates({ sources }) {
 		const slotId = stringOf(row.slotId ?? row.id);
 		const promoted = promotedBySlot.get(slotId) ?? [];
 		if (promoted.length === 0) return row;
-		return {
-			...row,
-			verificationCandidateIds: compactStrings(
-				[...asArray(row.verificationCandidateIds), ...promoted],
-				24,
-			),
-		};
+		const verificationCandidateIds = compactStrings(
+			[...asArray(row.verificationCandidateIds), ...promoted],
+			24,
+		);
+		const next = { ...row, verificationCandidateIds };
+		if (verificationCandidateIds.length > 0) {
+			if (next.status === "partial" || next.status === "missing") {
+				next.status = "filled";
+			}
+			const gapReason = withoutSanitizerGapReason(next.gapReason);
+			if (gapReason) next.gapReason = gapReason;
+			else delete next.gapReason;
+		}
+		return next;
 	});
+	const outputPreservedClaims =
+		promotedPreservedClaims.size === 0
+			? preservedClaims
+			: preservedClaims.filter((claim) => !promotedPreservedClaims.has(claim));
 	return {
 		schema: SCHEMA,
 		claimInventory: {
 			verificationCandidates: keptCandidates,
-			preservedClaims,
+			preservedClaims: outputPreservedClaims,
 			duplicates: asArray(claimInventory.duplicates),
 		},
 		factSlotCoverage: factSlotCoverageRows,
