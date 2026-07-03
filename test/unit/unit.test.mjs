@@ -23,6 +23,7 @@ import {
 	formatRun,
 	resumeRun,
 	runDynamicControllerEngineIntegrityCheckForTests,
+	stopRun,
 	runDynamicTask,
 	runWorkflow,
 	runWorkflowSpec,
@@ -627,6 +628,19 @@ test("shared status helpers derive canonical task summaries", () => {
 			interrupted: 0,
 		}),
 		"blocked",
+	);
+	assert.equal(
+		deriveWorkflowStatus({
+			total: 2,
+			pending: 0,
+			running: 0,
+			blocked: 0,
+			completed: 1,
+			failed: 0,
+			skipped: 0,
+			interrupted: 1,
+		}),
+		"interrupted",
 	);
 });
 
@@ -17295,6 +17309,7 @@ test("workflow command completions and run arg parsing preserve task text", () =
 			"logs",
 			"wait",
 			"resume",
+			"stop",
 		],
 	);
 	assert.deepEqual(
@@ -18058,6 +18073,82 @@ test("resumeRun resets failed and skipped tasks, preserves completed work, and r
 			assert.equal(taskBySpec(resumed, "two.main").status, "running");
 			assert.equal(taskBySpec(resumed, "three.main").status, "pending");
 			assert.equal(launchedTasks.length, 1);
+		} finally {
+			setSubagentApiForTests(undefined);
+		}
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("stopRun interrupts non-terminal tasks and best-effort cleans up backend handles", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout");
+		const spec = workflowSpec("unit-scout", {
+			artifactGraph: {
+				stages: [
+					{ id: "one", type: "single", prompt: "Step one." },
+					{ id: "two", type: "reduce", from: "one", prompt: "Step two." },
+				],
+			},
+		});
+		const compiled = await compileWorkflow(spec, { cwd, task: "Stop target" });
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		const runningTask = taskBySpec(run, "one.main");
+		runningTask.status = "running";
+		runningTask.statusDetail = "running";
+		runningTask.startedAt = new Date().toISOString();
+		runningTask.backendHandle = {
+			engine: "pi-subagent",
+			backend: "headless",
+			runId: "run_stop",
+			attemptId: "attempt_stop",
+			cwd,
+			runsDir: ".pi/workflow-subagents",
+		};
+		await writeRunRecord(cwd, run);
+
+		const interrupts = [];
+		setSubagentApiForTests({
+			async runSubagent() {
+				throw new Error("stopRun should not launch tasks");
+			},
+			async getSubagentStatus() {
+				return null;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent(options) {
+				interrupts.push(options);
+				return {};
+			},
+		});
+		try {
+			const { run: stopped, interruptedTaskIds } = await stopRun(
+				cwd,
+				run.runId,
+			);
+			assert.equal(stopped.status, "interrupted");
+			assert.deepEqual(interruptedTaskIds, [
+				taskBySpec(run, "one.main").taskId,
+				taskBySpec(run, "two.main").taskId,
+			]);
+			assert.equal(taskBySpec(stopped, "one.main").status, "interrupted");
+			assert.equal(taskBySpec(stopped, "two.main").status, "interrupted");
+			assert.equal(interrupts.length, 1);
+			assert.equal(interrupts[0].runId, "run_stop");
+			assert.equal(interrupts[0].attemptId, "attempt_stop");
+			await assert.rejects(
+				() => stopRun(cwd, run.runId),
+				/non-terminal run/,
+			);
 		} finally {
 			setSubagentApiForTests(undefined);
 		}

@@ -12,11 +12,12 @@ export {
 	resumeRun,
 	resumeSupervisors,
 	runDynamicTask,
+	stopRun,
 	runWorkflow,
 	runWorkflowSpec,
 	waitForRun,
 } from "./engine.js";
-export type { ResumeRunSummary } from "./engine.js";
+export type { ResumeRunSummary, StopRunSummary } from "./engine.js";
 export { listWorkflows, resolveWorkflowRef } from "./workflow-specs.js";
 export type {
 	ResolvedWorkflowSpecRef,
@@ -71,6 +72,7 @@ Usage:
   /workflow logs <run-id> [task-id] [lines]
   /workflow wait <run-id> [timeout-ms]
   /workflow resume <run-id>
+  /workflow stop <run-id>
 
 /workflow opens the read-only workflow board TUI.
 /workflow <run-id> opens the board focused on that run.

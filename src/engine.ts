@@ -299,6 +299,44 @@ export interface ResumeRunSummary {
 	resetTaskIds: string[];
 }
 
+export interface StopRunSummary {
+	run: WorkflowRunRecord;
+	interruptedTaskIds: string[];
+}
+
+export async function stopRun(
+	cwd: string,
+	runIdOrPrefix: string,
+): Promise<StopRunSummary> {
+	const current = await readRunRecord(cwd, runIdOrPrefix);
+	const stopped = await withRunLease(cwd, current.runId, async () => {
+		const run = await readRunRecord(cwd, current.runId);
+		if (isTerminalWorkflowStatus(run.status)) {
+			throw new Error(`stop requires a non-terminal run; ${run.runId} is ${run.status}`);
+		}
+		await resolveWorkflowBackend(run).cleanupRun(cwd, run).catch(
+			() => undefined,
+		);
+		const interruptedTaskIds: string[] = [];
+		for (const task of run.tasks) {
+			if (
+				setTaskTerminal(task, "interrupted", "workflow_stopped", {
+					exitCode: 130,
+					lastMessage: "Workflow stopped by user request",
+				})
+			) {
+				interruptedTaskIds.push(task.taskId);
+			}
+		}
+		await writeRunRecord(cwd, run);
+		unwatchRun(cwd, run.runId);
+		return { run, interruptedTaskIds };
+	});
+	if (!stopped)
+		throw new Error(`Could not acquire workflow run lease for ${current.runId}`);
+	return stopped;
+}
+
 export async function resumeRun(
 	cwd: string,
 	runIdOrPrefix: string,
@@ -375,6 +413,14 @@ export async function resumeSupervisors(
 	}
 }
 
+function unwatchRun(cwd: string, runId: string): void {
+	const key = `${cwd}\0${runId}`;
+	const existing = supervisorTimers.get(key);
+	if (existing) clearInterval(existing);
+	supervisorTimers.delete(key);
+	supervisorRunMtimes.delete(key);
+}
+
 export function watchRun(
 	cwd: string,
 	runId: string,
@@ -402,10 +448,7 @@ export function watchRun(
 				return;
 			}
 
-			const existing = supervisorTimers.get(key);
-			if (existing) clearInterval(existing);
-			supervisorTimers.delete(key);
-			supervisorRunMtimes.delete(key);
+			unwatchRun(cwd, runId);
 		})().catch((error) => {
 			void recordSupervisorError(cwd, runId, error);
 		});
