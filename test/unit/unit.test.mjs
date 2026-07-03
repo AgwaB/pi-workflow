@@ -16084,6 +16084,59 @@ test("refresh retries zero-output transient subagent model failures", async () =
 	}
 });
 
+test("subagent launch retries rotate artifact-graph session ids", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const spec = workflowSpec("unit-scout", {
+			artifactGraph: {
+				stages: [{ id: "main", type: "single", prompt: "Do work." }],
+			},
+		});
+		const compiled = await compileWorkflow(spec, { cwd, task: "Retry topic" });
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		const task = run.tasks[0];
+		task.launchRetry = { attempts: 1, maxAttempts: 5, reason: "model" };
+		const launches = [];
+		setSubagentApiForTests({
+			async runSubagent(options) {
+				launches.push(options);
+				return {
+					runId: "run_retry_session",
+					attemptId: "attempt_retry_session",
+					status: "running",
+				};
+			},
+			async getSubagentStatus() {
+				return null;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+		try {
+			await writeRunRecord(cwd, run);
+			await launchSubagentTask(cwd, run, task, compiled.tasks[0]);
+			assert.equal(launches.length, 1);
+			assert.match(launches[0].sessionId, /:launch-retry-1$/);
+			assert.equal(task.backendHandle.sessionId, launches[0].sessionId);
+			assert.equal(task.backendFiles.sessionId, launches[0].sessionId);
+		} finally {
+			setSubagentApiForTests(undefined);
+		}
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("refresh does not retry deterministic boot or config failures", async () => {
 	const cwd = makeProject();
 	try {

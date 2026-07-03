@@ -1773,7 +1773,12 @@ function subagentSessionId(
 	task: WorkflowTaskRunRecord,
 ): string | undefined {
 	if (!task.artifactGraph?.enabled) return undefined;
-	return task.outputRetry?.sessionId ?? baseSubagentSessionId(run, task);
+	const baseSessionId = baseSubagentSessionId(run, task);
+	if (task.outputRetry?.sessionId) return task.outputRetry.sessionId;
+	const launchAttempt = task.launchRetry?.attempts ?? 0;
+	if (launchAttempt > 0)
+		return `${baseSessionId}:launch-retry-${launchAttempt}`;
+	return baseSessionId;
 }
 
 function baseSubagentSessionId(
