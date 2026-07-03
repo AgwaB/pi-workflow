@@ -8739,11 +8739,11 @@ test("foreach item interpolation preserves dollar replacement tokens", () => {
 			foreach: { prompt: "Verify ${item}", injectRuntimeTask: false },
 		},
 		undefined,
-		["price is $1 per unit"],
+		["price is $1 and $& per unit"],
 	);
 	assert.equal(tasks.length, 1);
-	assert.match(tasks[0].task, /price is \$1 per unit/);
-	assert.match(tasks[0].compiledPrompt, /price is \$1 per unit/);
+	assert.match(tasks[0].task, /price is \$1 and \$& per unit/);
+	assert.match(tasks[0].compiledPrompt, /price is \$1 and \$& per unit/);
 });
 
 test("simple JSON path reads own properties only", () => {

@@ -507,7 +507,7 @@ export function buildForeachGeneratedTasks(
 		const itemText = formatForeachItem(item);
 		const instructions = template.foreach!.prompt.replace(
 			/\$\{item\}/g,
-			itemText,
+			escapeReplacementText(itemText),
 		);
 		const compiledPrompt = [
 			template.foreach!.injectRuntimeTask && runtimeTask
@@ -558,6 +558,10 @@ export function sanitizeTaskId(value: string): string {
 
 function formatForeachItem(item: unknown): string {
 	return typeof item === "string" ? item : JSON.stringify(item);
+}
+
+function escapeReplacementText(value: string): string {
+	return value.replace(/\$/g, "$$$$");
 }
 
 export function sourceStageIdsForFrom(from: unknown): string[] {
