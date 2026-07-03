@@ -369,6 +369,9 @@ export async function resumeRun(
 	const resetTaskIds: string[] = [];
 	const updated = await withRunLease(cwd, current.runId, async () => {
 		const run = await readRunRecord(cwd, current.runId);
+		await resolveWorkflowBackend(run).cleanupRun(cwd, run).catch(
+			() => undefined,
+		);
 		for (const task of run.tasks) {
 			if (resetTaskForResume(task)) resetTaskIds.push(task.taskId);
 		}

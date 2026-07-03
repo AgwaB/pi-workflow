@@ -18086,6 +18086,15 @@ test("resumeRun resets failed and skipped tasks, preserves completed work, and r
 			exitCode: 1,
 			lastMessage: "boom",
 		});
+		taskBySpec(run, "two.main").backendHandle = {
+			engine: "pi-subagent",
+			backend: "headless",
+			runId: "run_resume_stale",
+			attemptId: "attempt_resume_stale",
+			cwd,
+			runsDir: ".pi/workflow-subagents",
+			display: "pi-subagent/headless run_resume_stale/attempt_resume_stale",
+		};
 		setTaskTerminal(
 			taskBySpec(run, "three.main"),
 			"skipped",
@@ -18096,9 +18105,12 @@ test("resumeRun resets failed and skipped tasks, preserves completed work, and r
 		assert.equal((await readRunRecord(cwd, run.runId)).status, "failed");
 
 		const launchedTasks = [];
+		const launchOptions = [];
+		const interrupted = [];
 		setSubagentApiForTests({
 			async runSubagent(options) {
 				launchedTasks.push(String(options.task ?? "").slice(0, 40));
+				launchOptions.push(options);
 				return {
 					runId: "run_stub",
 					attemptId: "attempt_stub",
@@ -18111,7 +18123,8 @@ test("resumeRun resets failed and skipped tasks, preserves completed work, and r
 			async reconcileSubagentRun() {
 				return {};
 			},
-			async interruptSubagent() {
+			async interruptSubagent(options) {
+				interrupted.push(options);
 				return {};
 			},
 		});
@@ -18126,6 +18139,9 @@ test("resumeRun resets failed and skipped tasks, preserves completed work, and r
 			assert.equal(taskBySpec(resumed, "two.main").status, "running");
 			assert.equal(taskBySpec(resumed, "three.main").status, "pending");
 			assert.equal(launchedTasks.length, 1);
+			assert.match(launchOptions[0].sessionId, /:resume-1$/);
+			assert.equal(interrupted.length, 1);
+			assert.equal(interrupted[0].runId, "run_resume_stale");
 		} finally {
 			setSubagentApiForTests(undefined);
 		}

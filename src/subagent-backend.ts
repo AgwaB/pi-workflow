@@ -281,7 +281,6 @@ export async function cleanupSubagentRun(
 	run: WorkflowRunRecord,
 ): Promise<void> {
 	for (const task of run.tasks) {
-		if (isTerminalTaskStatus(task.status)) continue;
 		const handle = getSubagentHandle(task);
 		if (!handle) continue;
 		const api = await loadSubagentApi();
@@ -1778,6 +1777,8 @@ function subagentSessionId(
 	const launchAttempt = task.launchRetry?.attempts ?? 0;
 	if (launchAttempt > 0)
 		return `${baseSessionId}:launch-retry-${launchAttempt}`;
+	const resumeAttempt = task.resumeEvents?.length ?? 0;
+	if (resumeAttempt > 0) return `${baseSessionId}:resume-${resumeAttempt}`;
 	return baseSessionId;
 }
 
