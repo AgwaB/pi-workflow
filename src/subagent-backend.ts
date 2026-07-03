@@ -439,7 +439,7 @@ export async function refreshRunFromSubagentArtifacts(
 		}
 		if (!handle) {
 			if (isTaskTimedOut(task)) {
-				markTaskTimedOut(task);
+				markSubagentTaskTimedOut(task);
 				changed = true;
 			}
 			continue;
@@ -464,16 +464,8 @@ export async function refreshRunFromSubagentArtifacts(
 
 		if (snapshot === null) {
 			if (isTaskTimedOut(task)) {
-				await api
-					.interruptSubagent({
-						cwd: handle.cwd,
-						runsDir: handle.runsDir,
-						runId: handle.runId,
-						attemptId: handle.attemptId,
-						reason: "workflow timeout",
-					})
-					.catch(() => undefined);
-				markTaskTimedOut(task);
+				await interruptTimedOutSubagent(api, handle);
+				markSubagentTaskTimedOut(task);
 				changed = true;
 			}
 			continue;
@@ -490,16 +482,8 @@ export async function refreshRunFromSubagentArtifacts(
 				? `pi-subagent heartbeat ${activeAttempt.heartbeatAt}`
 				: "pi-subagent running";
 			if (isTaskTimedOut(task)) {
-				await api
-					.interruptSubagent({
-						cwd: handle.cwd,
-						runsDir: handle.runsDir,
-						runId: handle.runId,
-						attemptId: handle.attemptId,
-						reason: "workflow timeout",
-					})
-					.catch(() => undefined);
-				markTaskTimedOut(task);
+				await interruptTimedOutSubagent(api, handle);
+				markSubagentTaskTimedOut(task);
 				changed = true;
 			}
 			continue;
@@ -511,6 +495,28 @@ export async function refreshRunFromSubagentArtifacts(
 
 	if (changed) await writeRunRecord(cwd, run);
 	return run;
+}
+
+async function interruptTimedOutSubagent(
+	api: Awaited<ReturnType<typeof loadSubagentApi>>,
+	handle: NonNullable<WorkflowTaskRunRecord["backendHandle"]>,
+): Promise<void> {
+	await api
+		.interruptSubagent({
+			cwd: handle.cwd,
+			runsDir: handle.runsDir,
+			runId: handle.runId,
+			attemptId: handle.attemptId,
+			reason: "workflow timeout",
+		})
+		.catch(() => undefined);
+}
+
+function markSubagentTaskTimedOut(task: WorkflowTaskRunRecord): void {
+	markTaskTimedOut(task);
+	task.backendHandle = undefined;
+	task.backendTaskId = task.taskId;
+	task.pid = undefined;
 }
 
 async function materializeTerminalSubagentResult(

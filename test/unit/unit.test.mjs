@@ -16525,6 +16525,91 @@ test("refresh adopts handle-less running subagent from deterministic runsDir", a
 	}
 });
 
+test("refresh interrupts timed-out running subagents and clears stale handles", async () => {
+	const cwd = makeProject();
+	const interrupts = [];
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const spec = workflowSpec("unit-scout", {
+			artifactGraph: {
+				stages: [{ id: "main", type: "single", prompt: "Do work." }],
+			},
+		});
+		const compiled = await compileWorkflow(spec, { cwd, task: "Timeout topic" });
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		const task = run.tasks[0];
+		task.status = "running";
+		task.statusDetail = "running";
+		task.startedAt = new Date(Date.now() - 10_000).toISOString();
+		task.runtime.maxRuntimeMs = 1;
+		task.backendTaskId = "run_timeout";
+		task.pid = 12345;
+		task.backendHandle = {
+			engine: "pi-subagent",
+			backend: "headless",
+			runId: "run_timeout",
+			attemptId: "attempt_timeout",
+			cwd,
+			runsDir: ".pi/workflow-subagents/timeout",
+			display: "pi-subagent/headless run_timeout/attempt_timeout",
+		};
+		setSubagentApiForTests({
+			async runSubagent() {
+				throw new Error("not expected");
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async getSubagentStatus() {
+				return {
+					runId: "run_timeout",
+					attemptId: "attempt_timeout",
+					backend: "headless",
+					status: "running",
+					startedAt: task.startedAt,
+					logs: [],
+					attempts: [
+						{
+							attemptId: "attempt_timeout",
+							status: "running",
+							pid: 12345,
+							heartbeatAt: new Date().toISOString(),
+						},
+					],
+				};
+			},
+			async interruptSubagent(options) {
+				interrupts.push(options);
+				return {};
+			},
+		});
+		await writeRunRecord(cwd, run);
+
+		const refreshed = await refreshRunFromSubagentArtifacts(
+			cwd,
+			await readRunRecord(cwd, run.runId),
+		);
+
+		const refreshedTask = refreshed.tasks[0];
+		assert.equal(refreshedTask.status, "failed");
+		assert.equal(refreshedTask.statusDetail, "timeout");
+		assert.equal(refreshedTask.backendHandle, undefined);
+		assert.equal(refreshedTask.backendTaskId, refreshedTask.taskId);
+		assert.equal(refreshedTask.pid, undefined);
+		assert.equal(interrupts.length, 1);
+		assert.equal(interrupts[0].runId, "run_timeout");
+		assert.equal(interrupts[0].attemptId, "attempt_timeout");
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("runtime model resolver defaults to current model and thinking", async () => {
 	const resolved = await resolveWorkflowRuntime(
 		{},
