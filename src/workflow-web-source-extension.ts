@@ -812,25 +812,24 @@ export function registerWorkflowWebSourceExtension(
 								: undefined,
 				});
 			}
+			const hasBudgetExhaustedRead = results.some(
+				(result) => result.status === "budget_exhausted",
+			);
+			const hasTruncatedRead = results.some(
+				(result) => result.status === "truncated",
+			);
 			return toolResultFromJson({
 				status: responseStatus,
 				tool: "workflow_web_source_read",
 				sourceRef,
 				url: source.redactedUrl,
 				results,
-				budget: budgetSnapshot(
-					results.some(
-						(result) =>
-							result.status === "budget_exhausted" ||
-							result.status === "truncated",
-					),
-				),
-				next:
-					responseStatus === "budget_exhausted"
-						? "Visible web-source budget is exhausted for this task; cite missing quotes as evidence gaps or use smaller query batches in a fresh task."
-						: responseStatus === "truncated"
-							? "One or more matched web-source snippets were truncated by the visible budget or maxChars; use smaller exact queries or a fresh task if full quotes are required."
-							: undefined,
+				budget: budgetSnapshot(hasBudgetExhaustedRead || hasTruncatedRead),
+				next: hasBudgetExhaustedRead
+					? "Visible web-source budget is exhausted for this task; cite missing quotes as evidence gaps or use smaller query batches in a fresh task."
+					: hasTruncatedRead
+						? "One or more matched web-source snippets were truncated by the visible budget or maxChars; use smaller exact queries or a fresh task if full quotes are required."
+						: undefined,
 			});
 		},
 	});

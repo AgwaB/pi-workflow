@@ -14956,6 +14956,29 @@ test("workflow web-source extension anchors late matches within remaining read b
 		assert.equal(truncatedBody.status, "truncated");
 		assert.equal(truncatedBody.budget.truncated, true);
 		assert.match(truncatedBody.quote, /^TARGET/);
+
+		const batchRegistered = registerLateReader("batch", 200);
+		const batchFetched = await batchRegistered
+			.get("workflow_web_fetch_source")
+			.execute("fetch-batch", { url: "https://example.test/late-match" });
+		const batchCard = JSON.parse(batchFetched.content[0].text).card;
+		const batchRead = await batchRegistered
+			.get("workflow_web_source_read")
+			.execute("read-batch", {
+				sourceRef: batchCard.sourceRef,
+				reads: [
+					{ query: lateNeedle, maxChars: 80 },
+					{ query: "B".repeat(80), maxChars: 6 },
+				],
+			});
+		const batchBody = JSON.parse(batchRead.content[0].text);
+		assert.equal(batchBody.status, "partial");
+		assert.equal(batchBody.budget.truncated, true);
+		assert.match(batchBody.next, /truncated/);
+		assert.deepEqual(
+			batchBody.results.map((result) => result.status),
+			["ok", "truncated"],
+		);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
