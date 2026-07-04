@@ -200,6 +200,17 @@ For lower-latency runs, pass `--thinking low` explicitly:
 
 This is an opt-in fast mode. Package defaults remain conservative until a separate holdout evaluation provides enough evidence to change them. Current evidence is limited but encouraging for explicit fast runs: the 2026-07-02 `deep-research` combined gate on P1/P2/P3-style prompts resolved non-support tasks to `low`, completed selected valid runs in about 15-17 minutes, passed the strict gate 9/9, and had zero source-ref join failures across those 9 runs. Treat this as a speed option, not proof that every workflow should default to `low`.
 
+### Opt-in batched verification for deep-research
+
+`deep-research` still verifies one claim per verifier task by default. For controlled runs where verifier batching is acceptable, use the explicit path-ref variant:
+
+```text
+/workflow validate ./workflows/deep-research/batched-verification.spec.json
+/workflow run ./workflows/deep-research/batched-verification.spec.json "Research this repository and verify the key claims."
+```
+
+This path-ref variant keeps the same planner/research/normalization/audit/final stages, but feeds `verify-claims` from `verification-batches` and requires each verifier task to return one `results[]` row per claim id. It is not registered as an official bundled workflow name and does not change package defaults. Treat speed/cost results as task-specific: claim a win only when the run's audit reports zero missing/duplicate/invalid verifier rows, zero sourceRef join failures, and no verified-floor regression.
+
 ### Run-scoped web-source cache
 
 Prefer normalized workflow web tools in new workflows:

@@ -22,7 +22,7 @@ For spec-less direct dynamic execution, use `/workflow dynamic "<task>"`; it doe
 | `spec-review` | `scout` | Use when you want to check whether requirements, an API spec, or a contract are reflected in the implementation and tests. |
 | `impact-review` | `scout` | Use before merging or releasing a change to check affected areas, risks, missing tests, and missing docs. |
 
-Experimental or candidate workflows should live outside the bundled `workflows/` directory until their task fit is validated.
+Experimental or candidate workflows should live outside the bundled `workflows/` directory until their task fit is validated. `deep-research` also ships a path-ref-only batched verification variant at `workflows/deep-research/batched-verification.spec.json`; it is intentionally not registered as an official workflow name and must be invoked by explicit path after validation.
 
 ## Bundle layout
 
