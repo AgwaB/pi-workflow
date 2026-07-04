@@ -2,6 +2,7 @@ import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { stringifyPromptJson } from "./prompt-json.js";
 import { loadWorkflowHelper } from "./workflow-helpers.js";
 import {
 	WORKFLOW_ARTIFACT_TOOL_NAME,
@@ -13,7 +14,7 @@ import {
 	type WorkflowSourceManifestSource,
 } from "./workflow-artifact-tool.js";
 import { writeWorkflowTaskArtifactBundle } from "./workflow-output-artifacts.js";
-import { type JsonSchema } from "./json-schema.js";
+import type { JsonSchema } from "./json-schema.js";
 import {
 	buildRunSourceContext,
 	readOutputText,
@@ -29,11 +30,11 @@ import {
 	writeJsonAtomic,
 	writeRunRecord,
 } from "./store.js";
-import {
-	type CompiledTask,
-	type CompiledWorkflow,
-	type WorkflowRunRecord,
-	type WorkflowTaskRunRecord,
+import type {
+	CompiledTask,
+	CompiledWorkflow,
+	WorkflowRunRecord,
+	WorkflowTaskRunRecord,
 } from "./types.js";
 
 export async function executeSupportTask(
@@ -372,7 +373,9 @@ export function normalizeDynamicControllerOutput(value: unknown): {
 		refs: [],
 	};
 }
-export function normalizeSupportControl(value: unknown): Record<string, unknown> {
+export function normalizeSupportControl(
+	value: unknown,
+): Record<string, unknown> {
 	if (value && typeof value === "object" && !Array.isArray(value)) {
 		const record = value as Record<string, unknown>;
 		return {
@@ -474,7 +477,7 @@ export async function prepareDagTask(
 			compiledTask.compiledPrompt,
 			"# Source Stage Context",
 			"Use this deterministic source context packet. Prefer structuredOutput over outputPreview. Do not assume dependencies beyond this explicit packet.",
-			JSON.stringify({ ...context, missingDependencies: missing }, null, 2),
+			stringifyPromptJson({ ...context, missingDependencies: missing }),
 		].join("\n\n"),
 	};
 }
@@ -880,7 +883,7 @@ export function formatArtifactGraphSourceContext(
 	return [
 		"# Workflow Artifact Inputs",
 		"Use workflow_artifact to list/read upstream workflow artifacts. Inline controlProjection fields are authoritative for the projected data they contain; use artifact reads for declared requiredReads, missing fields, or debug detail.",
-		"Projected reads must include a JSON path when using maxItems or maxChars, for example {\"action\":\"read\",\"source\":\"plan\",\"artifact\":\"control\",\"path\":\"$.factSlots\",\"maxItems\":8,\"maxChars\":2000}. For a whole artifact read, omit maxItems/maxChars.",
+		'Projected reads must include a JSON path when using maxItems or maxChars, for example {"action":"read","source":"plan","artifact":"control","path":"$.factSlots","maxItems":8,"maxChars":2000}. For a whole artifact read, omit maxItems/maxChars.',
 		requiredReads.length > 0
 			? [
 					"Required reads before final output:",
@@ -888,7 +891,7 @@ export function formatArtifactGraphSourceContext(
 				].join("\n")
 			: "No hard requiredReads are declared for this stage.",
 		"Available sources:",
-		JSON.stringify(
+		stringifyPromptJson(
 			sources.map((source) => ({
 				source: source.source,
 				taskId: source.taskId,
@@ -904,8 +907,6 @@ export function formatArtifactGraphSourceContext(
 				projectionTruncated: source.projectionTruncated,
 				availableArtifacts: Object.keys(source.artifacts),
 			})),
-			null,
-			2,
 		),
 	].join("\n\n");
 }

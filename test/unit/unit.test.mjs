@@ -9219,6 +9219,42 @@ test("compiler injects runtime task for single stages only", async () => {
 	}
 });
 
+test("compiler serializes workflow input compactly in prompts", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const input = {
+			topic: "context transfer",
+			filters: ["json", "prompt"],
+			nested: { enabled: true, limit: 3 },
+		};
+		const compiled = await compileWorkflow(
+			workflowSpec("unit-scout", {
+				input,
+				artifactGraph: {
+					stages: [
+						{ id: "entry", type: "single", prompt: "Use workflow input." },
+					],
+				},
+			}),
+			{ cwd },
+		);
+
+		const prompt = compiled.tasks[0].compiledPrompt;
+		const marker = "# Workflow Input\n\n";
+		const start = prompt.indexOf(marker);
+		assert.notEqual(start, -1);
+		const remainder = prompt.slice(start + marker.length);
+		const end = remainder.indexOf("\n\n# Workflow Stage");
+		assert.notEqual(end, -1);
+		const jsonText = remainder.slice(0, end);
+		assert.equal(jsonText, JSON.stringify(input));
+		assert.deepEqual(JSON.parse(jsonText), input);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("compiler omits runtime task injection from foreach templates", async () => {
 	const cwd = makeProject();
 	try {
@@ -22526,6 +22562,32 @@ test("artifact graph source context warns that capped workflow_artifact reads ne
 	assert.match(prompt, /Projected reads must include a JSON path/);
 	assert.match(prompt, /"path":"\$\.factSlots"/);
 	assert.match(prompt, /For a whole artifact read, omit maxItems\/maxChars/);
+});
+
+test("artifact graph source context serializes source list compactly", () => {
+	const prompt = formatArtifactGraphSourceContext(
+		[
+			{
+				source: "plan",
+				taskId: "task-1",
+				specId: "plan.main",
+				stageId: "plan",
+				status: "completed",
+				digest: "planned work",
+				controlProjection: { factSlots: [{ id: "fact-1" }] },
+				artifacts: { control: { path: "/tmp/control.json" } },
+			},
+		],
+		[],
+	);
+	const marker = "Available sources:\n\n";
+	const start = prompt.indexOf(marker);
+	assert.notEqual(start, -1);
+	const jsonText = prompt.slice(start + marker.length);
+	assert.equal(JSON.stringify(JSON.parse(jsonText)), jsonText);
+	assert.match(jsonText, /"source":"plan"/);
+	assert.doesNotMatch(jsonText, /"source": "plan"/);
+	assert.doesNotMatch(jsonText, /\n\s/);
 });
 
 test("workflow_artifact can read deterministic JSON projections with caps", async () => {

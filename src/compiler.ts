@@ -3,6 +3,7 @@ import { dirname, resolve } from "node:path";
 
 import { loadAgentByName } from "./agents.js";
 import { DYNAMIC_OUTPUT_PROFILES } from "./dynamic-profiles.js";
+import { stringifyPromptJson } from "./prompt-json.js";
 import { compileRole } from "./roles.js";
 import {
 	classifyToolCapability,
@@ -222,7 +223,9 @@ function appendWorkflowOutputInstructions(
 		.join("\n\n");
 }
 
-function partialOutputInstructions(paths: readonly string[] | undefined): string[] {
+function partialOutputInstructions(
+	paths: readonly string[] | undefined,
+): string[] {
 	if (!paths || paths.length === 0) return [];
 	return [
 		"# Workflow Partial Output Protocol (optional)",
@@ -708,7 +711,7 @@ async function compileArtifactGraphPlan(
 		typeof workflowInput === "object" &&
 		!Array.isArray(workflowInput) &&
 		Object.keys(workflowInput).length > 0
-			? `# Workflow Input\n\n${JSON.stringify(workflowInput, null, 2)}`
+			? `# Workflow Input\n\n${stringifyPromptJson(workflowInput)}`
 			: "";
 	const runtimeOverrides = options.runtimeOverrides;
 	const runtimeDefaults = options.runtimeDefaults;
