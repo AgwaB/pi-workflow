@@ -1241,6 +1241,7 @@ function partialGeneratedTaskNeedsCompletedSourceContext(
 	task: CompiledTask,
 ): boolean {
 	const artifactGraph = task.artifactGraph;
+	if (artifactGraph?.artifactAccess === "none") return false;
 	return Boolean(
 		artifactGraph?.sourceProjection !== undefined ||
 			(artifactGraph?.requiredReads?.length ?? 0) > 0,

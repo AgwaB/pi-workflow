@@ -210,7 +210,7 @@ export interface ArtifactGraphStageSpec {
 				source: string;
 				path: string;
 				streaming?: { enabled: true; minChunk?: number };
-			};
+		  };
 	after?: string | string[];
 	sourcePolicy?: "success" | "partial" | "require-success";
 	sourceProjection?: {
@@ -220,6 +220,7 @@ export interface ArtifactGraphStageSpec {
 	inputPolicy?: {
 		requiredReads?: string[];
 		enforcement?: "fail";
+		artifactAccess?: "enabled" | "none";
 	};
 	output?: {
 		controlSchema?: string;
@@ -501,6 +502,7 @@ export interface CompiledArtifactGraphTask {
 		partial?: { paths: string[] };
 	};
 	requiredReads: string[];
+	artifactAccess: "enabled" | "none";
 	sourceProjection?: {
 		include?: string[];
 		maxChars?: number;

@@ -308,6 +308,7 @@ export async function buildDynamicGeneratedCompiledTask(input: {
 				maxDigestChars: DYNAMIC_OUTPUT_MAX_DIGEST_CHARS,
 			},
 			requiredReads: input.request.requiredReads,
+			artifactAccess: "enabled",
 			sourceProjection: dynamicInputSourceProjection(input.request.inputs),
 		},
 		dynamicGenerated: {

@@ -490,6 +490,10 @@ async function prepareArtifactGraphTask(
 	task: WorkflowTaskRunRecord,
 	contextDependsOn: readonly string[],
 ): Promise<CompiledTask> {
+	if (compiledTask.artifactGraph?.artifactAccess === "none") {
+		return { ...compiledTask, cwd: task.cwd };
+	}
+
 	const taskDir = dirname(fromProjectPath(cwd, task.files.result));
 	const manifestPath = join(taskDir, "source-manifest.json");
 	const ledgerPath = join(taskDir, "read-ledger.jsonl");

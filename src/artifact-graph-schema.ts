@@ -77,7 +77,11 @@ const OUTPUT_KEYS = new Set([
 const OUTPUT_PARTIAL_KEYS = new Set(["paths"]);
 const REQUIRED_FLAG_KEYS = new Set(["required"]);
 const REFS_OUTPUT_KEYS = new Set(["required", "minItems"]);
-const INPUT_POLICY_KEYS = new Set(["requiredReads", "enforcement"]);
+const INPUT_POLICY_KEYS = new Set([
+	"requiredReads",
+	"enforcement",
+	"artifactAccess",
+]);
 const SOURCE_PROJECTION_KEYS = new Set(["include", "maxChars"]);
 const SUPPORT_KEYS = new Set(["uses", "options"]);
 const DYNAMIC_STAGE_FORBIDDEN_KEYS = new Set([
@@ -571,6 +575,7 @@ function validateStage(
 		`${path}.inputPolicy`,
 		sourceIds,
 		issues,
+		stage.sourceProjection,
 	);
 	validateOutput(stage.output, `${path}.output`, issues);
 	validateSupportStage(stage, type, path, issues);
@@ -801,6 +806,7 @@ function validateInputPolicy(
 	path: string,
 	siblingIds: ReadonlySet<string>,
 	issues: ValidationIssue[],
+	sourceProjection: unknown,
 ): void {
 	if (value === undefined) return;
 	const policy = recordAt(value, path, issues);
@@ -814,6 +820,33 @@ function validateInputPolicy(
 	);
 	if (policy.enforcement !== undefined && policy.enforcement !== "fail") {
 		issues.push({ path: `${path}.enforcement`, message: 'must be "fail"' });
+	}
+	if (
+		policy.artifactAccess !== undefined &&
+		policy.artifactAccess !== "enabled" &&
+		policy.artifactAccess !== "none"
+	) {
+		issues.push({
+			path: `${path}.artifactAccess`,
+			message: 'must be "enabled" or "none"',
+		});
+	}
+	if (policy.artifactAccess === "none") {
+		if (
+			Array.isArray(policy.requiredReads) &&
+			policy.requiredReads.length > 0
+		) {
+			issues.push({
+				path: `${path}.requiredReads`,
+				message: 'must be empty when artifactAccess is "none"',
+			});
+		}
+		if (sourceProjection !== undefined) {
+			issues.push({
+				path: `${path}.artifactAccess`,
+				message: 'cannot be "none" when sourceProjection is declared',
+			});
+		}
 	}
 }
 
