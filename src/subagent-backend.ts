@@ -25,6 +25,11 @@ import type {
 	CompiledTask,
 	CompiledToolProvider,
 	WorkflowRunRecord,
+	WorkflowTaskTimingAttemptRecord,
+	WorkflowTaskTimingRecord,
+	WorkflowTaskUsageAttemptRecord,
+	WorkflowTaskUsageRecord,
+	WorkflowTaskUsageValues,
 	WorkflowTaskRunRecord,
 } from "./types.js";
 import type { JsonSchema } from "./json-schema.js";
@@ -150,6 +155,7 @@ interface SubagentRunStatusSnapshot {
 	failureKind: string | null;
 	startedAt: string;
 	completedAt: string | null;
+	durationMs?: number | null;
 	logs: SubagentRunLogRef[];
 	metadata?: { contextLengthExceeded?: boolean; [key: string]: unknown };
 	completion?: unknown;
@@ -173,9 +179,7 @@ interface SubagentApi {
 	): Promise<SubagentRunStatusSnapshot | null>;
 	interruptSubagent(options: Record<string, unknown>): Promise<unknown>;
 	reconcileSubagentRun(options: Record<string, unknown>): Promise<unknown>;
-	recordSubagentChildEvent?(
-		options: Record<string, unknown>,
-	): Promise<unknown>;
+	recordSubagentChildEvent?(options: Record<string, unknown>): Promise<unknown>;
 }
 
 type ParentSubagentChildEvent =
@@ -354,8 +358,12 @@ function releaseLaunchSlotAfterDelay(
 	setTimeout(release, delayMs);
 }
 
-async function runWithLaunchSlot<T>(action: () => Promise<T>): Promise<T> {
+async function runWithLaunchSlot<T>(
+	action: () => Promise<T>,
+	onAcquired?: () => void,
+): Promise<T> {
 	const release = await acquireLaunchSlot();
+	onAcquired?.();
 	let holdAfterReturn = false;
 	try {
 		const result = await action();
@@ -382,6 +390,564 @@ function transientRetryJitterMs(): number {
 
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+type UsageMetricKey = keyof WorkflowTaskUsageValues;
+const USAGE_METRIC_KEYS: UsageMetricKey[] = [
+	"inputTokens",
+	"outputTokens",
+	"totalTokens",
+	"cachedInputTokens",
+	"cacheCreationInputTokens",
+	"cacheReadInputTokens",
+	"reasoningTokens",
+	"costUsd",
+];
+const USAGE_FIELD_ALIASES: Record<
+	UsageMetricKey,
+	readonly (readonly string[])[]
+> = {
+	inputTokens: [
+		["inputTokens"],
+		["input_tokens"],
+		["input"],
+		["promptTokens"],
+		["prompt_tokens"],
+	],
+	outputTokens: [
+		["outputTokens"],
+		["output_tokens"],
+		["output"],
+		["completionTokens"],
+		["completion_tokens"],
+	],
+	totalTokens: [["totalTokens"], ["total_tokens"], ["tokens"], ["total"]],
+	cachedInputTokens: [
+		["cachedInputTokens"],
+		["cached_input_tokens"],
+		["prompt_tokens_details", "cached_tokens"],
+		["input_tokens_details", "cached_tokens"],
+	],
+	cacheCreationInputTokens: [
+		["cacheCreationInputTokens"],
+		["cacheCreationTokens"],
+		["cacheWriteTokens"],
+		["cache_creation_input_tokens"],
+		["cache_write_input_tokens"],
+		["cacheWrite"],
+		["cache_write"],
+	],
+	cacheReadInputTokens: [
+		["cacheReadInputTokens"],
+		["cacheReadTokens"],
+		["cache_read_input_tokens"],
+		["cacheRead"],
+		["cache_read"],
+	],
+	reasoningTokens: [
+		["reasoningTokens"],
+		["reasoning_tokens"],
+		["reasoning"],
+		["completion_tokens_details", "reasoning_tokens"],
+		["output_tokens_details", "reasoning_tokens"],
+	],
+	costUsd: [
+		["costUsd"],
+		["cost_usd"],
+		["totalCostUsd"],
+		["total_cost_usd"],
+		["estimatedCostUsd"],
+		["estimated_cost_usd"],
+		["cost", "total"],
+		["cost", "totalUsd"],
+		["cost", "total_usd"],
+	],
+};
+
+type TimingAggregateKey =
+	| "launchWaitMs"
+	| "launchDurationMs"
+	| "executionMs"
+	| "totalMs";
+const TIMING_AGGREGATE_KEYS: TimingAggregateKey[] = [
+	"launchWaitMs",
+	"launchDurationMs",
+	"executionMs",
+	"totalMs",
+];
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasOwnValue(record: object, key: string): boolean {
+	return Object.hasOwn(record, key);
+}
+
+function valueAtPath(
+	record: Record<string, unknown>,
+	path: readonly string[],
+): { found: boolean; value: unknown } {
+	let current: unknown = record;
+	for (const part of path) {
+		if (!isPlainRecord(current) || !hasOwnValue(current, part)) {
+			return { found: false, value: undefined };
+		}
+		current = current[part];
+	}
+	return { found: true, value: current };
+}
+
+function usageNumberOrNull(value: unknown): number | null | undefined {
+	if (value === null) return null;
+	if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+		return value;
+	}
+	return undefined;
+}
+
+function normalizedUsageValues(raw: unknown): WorkflowTaskUsageValues {
+	const record = isPlainRecord(raw) ? raw : undefined;
+	const values: WorkflowTaskUsageValues = {};
+	if (!record) return values;
+	for (const key of USAGE_METRIC_KEYS) {
+		for (const path of USAGE_FIELD_ALIASES[key]) {
+			const candidate = valueAtPath(record, path);
+			if (!candidate.found) continue;
+			const value = usageNumberOrNull(candidate.value);
+			if (value === undefined) continue;
+			values[key] = value;
+			break;
+		}
+	}
+	return values;
+}
+
+function firstStringValue(
+	records: Array<Record<string, unknown> | undefined>,
+	keys: string[],
+): string | undefined {
+	for (const record of records) {
+		if (!record) continue;
+		for (const key of keys) {
+			const value = record[key];
+			if (typeof value === "string" && value.trim()) return value;
+		}
+	}
+	return undefined;
+}
+
+function metadataRecord(value: unknown): Record<string, unknown> | undefined {
+	if (!isPlainRecord(value)) return undefined;
+	return isPlainRecord(value.metadata) ? value.metadata : undefined;
+}
+
+function usageObservation(
+	subagentResult: Record<string, unknown> | undefined,
+	snapshot: SubagentRunStatusSnapshot,
+): { source: string; raw: unknown; present: true } | undefined {
+	const resultMetadata = metadataRecord(subagentResult);
+	if (resultMetadata && hasOwnValue(resultMetadata, "usage")) {
+		return {
+			source: "subagent-result-metadata",
+			raw: resultMetadata.usage,
+			present: true,
+		};
+	}
+	const snapshotMetadata = isPlainRecord(snapshot.metadata)
+		? snapshot.metadata
+		: undefined;
+	if (snapshotMetadata && hasOwnValue(snapshotMetadata, "usage")) {
+		return {
+			source: "subagent-snapshot-metadata",
+			raw: snapshotMetadata.usage,
+			present: true,
+		};
+	}
+	if (subagentResult && hasOwnValue(subagentResult, "usage")) {
+		return {
+			source: "subagent-result",
+			raw: subagentResult.usage,
+			present: true,
+		};
+	}
+	const snapshotRecord = snapshot as unknown as Record<string, unknown>;
+	if (hasOwnValue(snapshotRecord, "usage")) {
+		return {
+			source: "subagent-snapshot",
+			raw: snapshotRecord.usage,
+			present: true,
+		};
+	}
+	return undefined;
+}
+
+function buildTaskUsageAttempt(options: {
+	task: WorkflowTaskRunRecord;
+	snapshot: SubagentRunStatusSnapshot;
+	subagentResult?: Record<string, unknown>;
+	capturedAt: string;
+}): WorkflowTaskUsageAttemptRecord {
+	const resultMetadata = metadataRecord(options.subagentResult);
+	const snapshotMetadata = isPlainRecord(options.snapshot.metadata)
+		? options.snapshot.metadata
+		: undefined;
+	const resultRecord = options.subagentResult;
+	const snapshotRecord = options.snapshot as unknown as Record<string, unknown>;
+	const records = [
+		resultMetadata,
+		snapshotMetadata,
+		resultRecord,
+		snapshotRecord,
+	];
+	const observed = usageObservation(options.subagentResult, options.snapshot);
+	const raw = observed?.raw;
+	const unavailable = !observed || raw === null || raw === undefined;
+	const provider = firstStringValue(records, ["provider"]);
+	const model =
+		firstStringValue(records, ["model"]) ?? options.task.runtime.model;
+	const thinking =
+		firstStringValue(records, [
+			"thinking",
+			"thinkingLevel",
+			"reasoningLevel",
+		]) ??
+		options.task.runtime.thinkingResolution?.resolved ??
+		options.task.runtime.thinking;
+	return {
+		source: observed?.source ?? "subagent-usage-unavailable",
+		capturedAt: options.capturedAt,
+		backendRunId: options.snapshot.runId,
+		backendAttemptId: options.snapshot.attemptId,
+		...(provider === undefined ? {} : { provider }),
+		...(model === undefined ? {} : { model }),
+		...(thinking === undefined ? {} : { thinking }),
+		...(unavailable ? { unavailable: true as const } : {}),
+		...(observed?.present && raw !== undefined ? { raw } : {}),
+		...normalizedUsageValues(raw),
+	};
+}
+
+function usageAttemptKey(attempt: WorkflowTaskUsageAttemptRecord): string {
+	return `${attempt.backendRunId ?? ""}\0${attempt.backendAttemptId ?? ""}\0${attempt.source}`;
+}
+
+function upsertUsageAttempt(
+	attempts: WorkflowTaskUsageAttemptRecord[],
+	attempt: WorkflowTaskUsageAttemptRecord,
+): WorkflowTaskUsageAttemptRecord[] {
+	const key = usageAttemptKey(attempt);
+	const index = attempts.findIndex(
+		(candidate) => usageAttemptKey(candidate) === key,
+	);
+	if (index < 0) return [...attempts, attempt];
+	return attempts.map((candidate, candidateIndex) =>
+		candidateIndex === index ? attempt : candidate,
+	);
+}
+
+function aggregateUsageAttempts(attempts: WorkflowTaskUsageAttemptRecord[]): {
+	values: WorkflowTaskUsageValues;
+	incomplete: boolean;
+} {
+	const values: WorkflowTaskUsageValues = {};
+	let incomplete = attempts.some((attempt) => attempt.unavailable === true);
+	for (const key of USAGE_METRIC_KEYS) {
+		const anyPresent = attempts.some((attempt) => hasOwnValue(attempt, key));
+		if (!anyPresent) continue;
+		let total = 0;
+		let complete = true;
+		for (const attempt of attempts) {
+			if (!hasOwnValue(attempt, key)) {
+				complete = false;
+				break;
+			}
+			const value = attempt[key];
+			if (typeof value !== "number") {
+				complete = false;
+				break;
+			}
+			total += value;
+		}
+		values[key] = complete ? total : null;
+		if (!complete) incomplete = true;
+	}
+	return { values, incomplete };
+}
+
+function latestUsageString(
+	attempts: WorkflowTaskUsageAttemptRecord[],
+	key: "provider" | "model" | "thinking",
+): string | undefined {
+	for (let index = attempts.length - 1; index >= 0; index -= 1) {
+		const value = attempts[index]?.[key];
+		if (typeof value === "string" && value.trim()) return value;
+	}
+	return undefined;
+}
+
+function recordTaskUsageObservation(options: {
+	task: WorkflowTaskRunRecord;
+	snapshot: SubagentRunStatusSnapshot;
+	subagentResult?: Record<string, unknown>;
+	capturedAt: string;
+}): void {
+	const attempt = buildTaskUsageAttempt(options);
+	const attempts = upsertUsageAttempt(
+		options.task.usage?.attempts ?? [],
+		attempt,
+	);
+	const aggregate = aggregateUsageAttempts(attempts);
+	const usage: WorkflowTaskUsageRecord = {
+		source: "pi-subagent",
+		capturedAt: options.capturedAt,
+		...(latestUsageString(attempts, "provider") === undefined
+			? {}
+			: { provider: latestUsageString(attempts, "provider") }),
+		...(latestUsageString(attempts, "model") === undefined
+			? {}
+			: { model: latestUsageString(attempts, "model") }),
+		...(latestUsageString(attempts, "thinking") === undefined
+			? {}
+			: { thinking: latestUsageString(attempts, "thinking") }),
+		...(aggregate.incomplete ? { incomplete: true } : {}),
+		...aggregate.values,
+		aggregate: {
+			attempts: attempts.length,
+			...(aggregate.incomplete ? { incomplete: true } : {}),
+			...aggregate.values,
+		},
+		attempts,
+	};
+	options.task.usage = usage;
+}
+
+function isoTimestampMs(timestamp: string | undefined): number | undefined {
+	if (!timestamp) return undefined;
+	const parsed = Date.parse(timestamp);
+	return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function durationBetween(
+	startedAt: string | undefined,
+	completedAt: string | undefined,
+): number | undefined {
+	const startedAtMs = isoTimestampMs(startedAt);
+	const completedAtMs = isoTimestampMs(completedAt);
+	if (startedAtMs === undefined || completedAtMs === undefined)
+		return undefined;
+	return Math.max(0, completedAtMs - startedAtMs);
+}
+
+function durationNumber(value: unknown): number | null | undefined {
+	if (value === null) return null;
+	if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+		return value;
+	}
+	return undefined;
+}
+
+function recordTaskLaunchTiming(
+	task: WorkflowTaskRunRecord,
+	observation: {
+		launchQueuedAt: string;
+		launchStartedAt?: string;
+		launchCompletedAt?: string;
+	},
+): void {
+	const capturedAt = observation.launchCompletedAt ?? nowIso();
+	const launchWaitMs = durationBetween(
+		observation.launchQueuedAt,
+		observation.launchStartedAt,
+	);
+	const launchDurationMs = durationBetween(
+		observation.launchStartedAt,
+		observation.launchCompletedAt,
+	);
+	task.timing = {
+		source: "pi-workflow",
+		capturedAt,
+		launchQueuedAt: observation.launchQueuedAt,
+		...(observation.launchStartedAt === undefined
+			? {}
+			: { launchStartedAt: observation.launchStartedAt }),
+		...(observation.launchCompletedAt === undefined
+			? {}
+			: { launchCompletedAt: observation.launchCompletedAt }),
+		...(launchWaitMs === undefined ? {} : { launchWaitMs }),
+		...(launchDurationMs === undefined ? {} : { launchDurationMs }),
+		launchSlotReleaseDelayMs: resolveLaunchSlotReleaseDelayMs(),
+		...(task.timing?.aggregate === undefined
+			? {}
+			: { aggregate: task.timing.aggregate }),
+		...(task.timing?.attempts === undefined
+			? {}
+			: { attempts: task.timing.attempts }),
+	};
+}
+
+function buildTaskTimingAttempt(options: {
+	task: WorkflowTaskRunRecord;
+	snapshot: SubagentRunStatusSnapshot;
+	subagentResult?: Record<string, unknown>;
+	startedAt?: string;
+	completedAt?: string;
+	capturedAt: string;
+}): WorkflowTaskTimingAttemptRecord {
+	const resultDuration = options.subagentResult?.durationMs;
+	let executionMs = durationNumber(
+		resultDuration === undefined ? options.snapshot.durationMs : resultDuration,
+	);
+	if (executionMs === undefined || executionMs === null) {
+		executionMs =
+			durationBetween(options.startedAt, options.completedAt) ?? executionMs;
+	}
+	const totalMs = durationBetween(
+		options.task.startedAt ?? options.task.timing?.launchQueuedAt,
+		options.completedAt,
+	);
+	return {
+		source: "pi-subagent",
+		capturedAt: options.capturedAt,
+		backendRunId: options.snapshot.runId,
+		backendAttemptId: options.snapshot.attemptId,
+		...(options.task.timing?.launchQueuedAt === undefined
+			? {}
+			: { launchQueuedAt: options.task.timing.launchQueuedAt }),
+		...(options.task.timing?.launchStartedAt === undefined
+			? {}
+			: { launchStartedAt: options.task.timing.launchStartedAt }),
+		...(options.task.timing?.launchCompletedAt === undefined
+			? {}
+			: { launchCompletedAt: options.task.timing.launchCompletedAt }),
+		...(options.task.timing?.launchWaitMs === undefined
+			? {}
+			: { launchWaitMs: options.task.timing.launchWaitMs }),
+		...(options.task.timing?.launchDurationMs === undefined
+			? {}
+			: { launchDurationMs: options.task.timing.launchDurationMs }),
+		...(options.startedAt === undefined
+			? {}
+			: { executionStartedAt: options.startedAt }),
+		...(options.completedAt === undefined
+			? {}
+			: { executionCompletedAt: options.completedAt }),
+		...(executionMs === undefined ? {} : { executionMs }),
+		...(totalMs === undefined ? {} : { totalMs }),
+	};
+}
+
+function timingAttemptKey(attempt: WorkflowTaskTimingAttemptRecord): string {
+	return `${attempt.backendRunId ?? ""}\0${attempt.backendAttemptId ?? ""}`;
+}
+
+function upsertTimingAttempt(
+	attempts: WorkflowTaskTimingAttemptRecord[],
+	attempt: WorkflowTaskTimingAttemptRecord,
+): WorkflowTaskTimingAttemptRecord[] {
+	const key = timingAttemptKey(attempt);
+	const index = attempts.findIndex(
+		(candidate) => timingAttemptKey(candidate) === key,
+	);
+	if (index < 0) return [...attempts, attempt];
+	return attempts.map((candidate, candidateIndex) =>
+		candidateIndex === index ? attempt : candidate,
+	);
+}
+
+function aggregateTimingAttempts(
+	attempts: WorkflowTaskTimingAttemptRecord[],
+): NonNullable<WorkflowTaskTimingRecord["aggregate"]> {
+	const aggregate: NonNullable<WorkflowTaskTimingRecord["aggregate"]> = {
+		attempts: attempts.length,
+	};
+	let incomplete = false;
+	for (const key of TIMING_AGGREGATE_KEYS) {
+		const anyPresent = attempts.some((attempt) => hasOwnValue(attempt, key));
+		if (!anyPresent) continue;
+		let total = 0;
+		let complete = true;
+		for (const attempt of attempts) {
+			if (!hasOwnValue(attempt, key)) {
+				complete = false;
+				break;
+			}
+			const value = attempt[key];
+			if (typeof value !== "number") {
+				complete = false;
+				break;
+			}
+			total += value;
+		}
+		aggregate[key] = complete ? total : null;
+		if (!complete) incomplete = true;
+	}
+	if (incomplete) aggregate.incomplete = true;
+	return aggregate;
+}
+
+function recordTaskTerminalTiming(options: {
+	task: WorkflowTaskRunRecord;
+	snapshot: SubagentRunStatusSnapshot;
+	subagentResult?: Record<string, unknown>;
+	startedAt?: string;
+	completedAt?: string;
+	capturedAt: string;
+}): void {
+	const attempt = buildTaskTimingAttempt(options);
+	const attempts = upsertTimingAttempt(
+		options.task.timing?.attempts ?? [],
+		attempt,
+	);
+	options.task.timing = {
+		source: "pi-workflow",
+		capturedAt: options.capturedAt,
+		...(attempt.launchQueuedAt === undefined
+			? {}
+			: { launchQueuedAt: attempt.launchQueuedAt }),
+		...(attempt.launchStartedAt === undefined
+			? {}
+			: { launchStartedAt: attempt.launchStartedAt }),
+		...(attempt.launchCompletedAt === undefined
+			? {}
+			: { launchCompletedAt: attempt.launchCompletedAt }),
+		...(attempt.launchWaitMs === undefined
+			? {}
+			: { launchWaitMs: attempt.launchWaitMs }),
+		...(attempt.launchDurationMs === undefined
+			? {}
+			: { launchDurationMs: attempt.launchDurationMs }),
+		...(options.task.timing?.launchSlotReleaseDelayMs === undefined
+			? {}
+			: {
+					launchSlotReleaseDelayMs:
+						options.task.timing.launchSlotReleaseDelayMs,
+				}),
+		...(attempt.executionStartedAt === undefined
+			? {}
+			: { executionStartedAt: attempt.executionStartedAt }),
+		...(attempt.executionCompletedAt === undefined
+			? {}
+			: { executionCompletedAt: attempt.executionCompletedAt }),
+		...(attempt.executionMs === undefined
+			? {}
+			: { executionMs: attempt.executionMs }),
+		...(attempt.totalMs === undefined ? {} : { totalMs: attempt.totalMs }),
+		aggregate: aggregateTimingAttempts(attempts),
+		attempts,
+	};
+}
+
+function recordTerminalTaskObservability(options: {
+	task: WorkflowTaskRunRecord;
+	snapshot: SubagentRunStatusSnapshot;
+	subagentResult?: Record<string, unknown>;
+	startedAt?: string;
+	completedAt?: string;
+}): void {
+	const capturedAt = nowIso();
+	recordTaskUsageObservation({ ...options, capturedAt });
+	recordTaskTerminalTiming({ ...options, capturedAt });
 }
 
 export function setSubagentLaunchControlsForTests(options?: {
@@ -501,11 +1067,25 @@ export async function launchSubagentTask(
 		};
 		subagentOptions.extensions = extensions;
 		if (captureToolCallsEnabled()) subagentOptions.captureToolCalls = true;
+		const launchQueuedAt = nowIso();
+		let launchStartedAt: string | undefined;
+		recordTaskLaunchTiming(task, { launchQueuedAt });
 		if (isLaunchGateSaturated()) {
 			task.lastMessage = `waiting for pi-subagent launch slot (${resolveMaxConcurrentLaunches()} max)`;
 			await writeRunRecord(cwd, run).catch(() => undefined);
 		}
-		launched = await runWithLaunchSlot(() => api.runSubagent(subagentOptions));
+		launched = await runWithLaunchSlot(
+			() => api.runSubagent(subagentOptions),
+			() => {
+				launchStartedAt = nowIso();
+				recordTaskLaunchTiming(task, { launchQueuedAt, launchStartedAt });
+			},
+		);
+		recordTaskLaunchTiming(task, {
+			launchQueuedAt,
+			launchStartedAt,
+			launchCompletedAt: nowIso(),
+		});
 	} catch (error) {
 		task.status = "pending";
 		task.statusDetail = "pending";
@@ -788,16 +1368,28 @@ async function materializeTerminalSubagentResult(
 		(subagentResult?.metadata as any)?.contextLengthExceeded ??
 			snapshot.metadata?.contextLengthExceeded,
 	);
+	recordTerminalTaskObservability({
+		task,
+		snapshot,
+		subagentResult,
+		startedAt,
+		completedAt,
+	});
 	if (task.artifactGraph?.enabled && statusInfo.status === "completed") {
-		const changed = await materializeTerminalArtifactGraphResult(cwd, run, task, {
-			outputFile,
-			stderrFile,
-			resultFile,
-			completedAt,
-			startedAt,
-			exitCode,
-			subagentResult,
-		});
+		const changed = await materializeTerminalArtifactGraphResult(
+			cwd,
+			run,
+			task,
+			{
+				outputFile,
+				stderrFile,
+				resultFile,
+				completedAt,
+				startedAt,
+				exitCode,
+				subagentResult,
+			},
+		);
 		await recordTerminalParentSubagentChildEvent(run, task, snapshot);
 		return changed;
 	}
@@ -813,20 +1405,26 @@ async function materializeTerminalSubagentResult(
 			snapshot,
 		})
 	) {
-		const changed = await materializeTerminalArtifactGraphResult(cwd, run, task, {
-			outputFile,
-			stderrFile,
-			resultFile,
-			completedAt,
-			startedAt,
-			exitCode,
-			subagentResult,
-			salvage: {
-				failureKind: statusInfo.failureKind ?? snapshot.failureKind ?? "model",
-				subagentStatus: snapshot.status,
-				subagentFailureKind: snapshot.failureKind,
+		const changed = await materializeTerminalArtifactGraphResult(
+			cwd,
+			run,
+			task,
+			{
+				outputFile,
+				stderrFile,
+				resultFile,
+				completedAt,
+				startedAt,
+				exitCode,
+				subagentResult,
+				salvage: {
+					failureKind:
+						statusInfo.failureKind ?? snapshot.failureKind ?? "model",
+					subagentStatus: snapshot.status,
+					subagentFailureKind: snapshot.failureKind,
+				},
 			},
-		});
+		);
 		await recordTerminalParentSubagentChildEvent(run, task, snapshot);
 		return changed;
 	}
@@ -1753,7 +2351,8 @@ function fetchContentInlineCharsEnvValue(): number | undefined {
 		return DEFAULT_WORKFLOW_FETCH_CONTENT_INLINE_CHARS;
 	if (isExplicitlyDisabled(raw)) return undefined;
 	const parsed = Number(raw);
-	if (!Number.isFinite(parsed)) return DEFAULT_WORKFLOW_FETCH_CONTENT_INLINE_CHARS;
+	if (!Number.isFinite(parsed))
+		return DEFAULT_WORKFLOW_FETCH_CONTENT_INLINE_CHARS;
 	return Math.max(1, Math.floor(parsed));
 }
 

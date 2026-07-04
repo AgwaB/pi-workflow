@@ -584,6 +584,89 @@ export type WorkflowRunStatus =
 	| "failed"
 	| "interrupted";
 
+export interface WorkflowTaskUsageValues {
+	inputTokens?: number | null;
+	outputTokens?: number | null;
+	totalTokens?: number | null;
+	cachedInputTokens?: number | null;
+	cacheCreationInputTokens?: number | null;
+	cacheReadInputTokens?: number | null;
+	reasoningTokens?: number | null;
+	costUsd?: number | null;
+}
+
+export interface WorkflowTaskUsageAttemptRecord
+	extends WorkflowTaskUsageValues {
+	source: string;
+	capturedAt: string;
+	provider?: string;
+	model?: string;
+	thinking?: ThinkingLevel | string;
+	backendRunId?: string;
+	backendAttemptId?: string;
+	unavailable?: true;
+	raw?: unknown;
+}
+
+export interface WorkflowTaskUsageAggregateRecord
+	extends WorkflowTaskUsageValues {
+	attempts: number;
+	incomplete?: boolean;
+}
+
+export interface WorkflowTaskUsageRecord extends WorkflowTaskUsageValues {
+	source: "pi-subagent";
+	capturedAt: string;
+	provider?: string;
+	model?: string;
+	thinking?: ThinkingLevel | string;
+	incomplete?: boolean;
+	aggregate?: WorkflowTaskUsageAggregateRecord;
+	attempts?: WorkflowTaskUsageAttemptRecord[];
+}
+
+export interface WorkflowTaskTimingAttemptRecord {
+	source: string;
+	capturedAt: string;
+	backendRunId?: string;
+	backendAttemptId?: string;
+	launchQueuedAt?: string;
+	launchStartedAt?: string;
+	launchCompletedAt?: string;
+	launchWaitMs?: number;
+	launchDurationMs?: number;
+	executionStartedAt?: string;
+	executionCompletedAt?: string;
+	executionMs?: number | null;
+	totalMs?: number;
+}
+
+export interface WorkflowTaskTimingAggregateRecord {
+	attempts: number;
+	launchWaitMs?: number | null;
+	launchDurationMs?: number | null;
+	executionMs?: number | null;
+	totalMs?: number | null;
+	incomplete?: boolean;
+}
+
+export interface WorkflowTaskTimingRecord {
+	source: "pi-workflow";
+	capturedAt: string;
+	launchQueuedAt?: string;
+	launchStartedAt?: string;
+	launchCompletedAt?: string;
+	launchWaitMs?: number;
+	launchDurationMs?: number;
+	launchSlotReleaseDelayMs?: number;
+	executionStartedAt?: string;
+	executionCompletedAt?: string;
+	executionMs?: number | null;
+	totalMs?: number;
+	aggregate?: WorkflowTaskTimingAggregateRecord;
+	attempts?: WorkflowTaskTimingAttemptRecord[];
+}
+
 export interface WorkflowTaskRunRecord {
 	taskId: string;
 	specId: string;
@@ -622,6 +705,8 @@ export interface WorkflowTaskRunRecord {
 	startedAt?: string;
 	completedAt?: string;
 	elapsedMs?: number;
+	usage?: WorkflowTaskUsageRecord;
+	timing?: WorkflowTaskTimingRecord;
 	exitCode?: number;
 	files: {
 		systemPrompt: string;

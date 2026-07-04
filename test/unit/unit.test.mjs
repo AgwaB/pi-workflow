@@ -1957,7 +1957,10 @@ test("public dynamic helpers expose validated decisions and profile copies", () 
 		"synthesis_v1",
 	]);
 	profiles.push("mutated_test_value");
-	assert.equal(dynamicOutputProfileValues().includes("mutated_test_value"), false);
+	assert.equal(
+		dynamicOutputProfileValues().includes("mutated_test_value"),
+		false,
+	);
 });
 
 test("dynamic-decision-v1 rejects top-level actions alias", () => {
@@ -13382,7 +13385,9 @@ test("deep-research normalize input packet preserves RQ budget and timeout gaps"
 	);
 	assert(
 		result.packet.research.evidenceGaps.some(
-			(gap) => gap.reason === "research_question_non_completed" && gap.taskId === "task-18",
+			(gap) =>
+				gap.reason === "research_question_non_completed" &&
+				gap.taskId === "task-18",
 		),
 	);
 });
@@ -15457,6 +15462,154 @@ test("subagent terminal failure records parent child failed when parent env is s
 	}
 });
 
+test("subagent terminal observability captures usage and separates launch timing", async () => {
+	const cwd = makeProject();
+	let statusSnapshot = null;
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		setSubagentApiForTests({
+			async runSubagent() {
+				return {
+					runId: "run_usage_observable",
+					attemptId: "attempt_usage_observable",
+					status: "running",
+				};
+			},
+			async getSubagentStatus() {
+				return statusSnapshot;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+
+		const spec = workflowSpec("unit-scout", {
+			model: "unit-provider/requested-model",
+			thinking: "low",
+		});
+		const compiled = await compileWorkflow(spec, { cwd, task: "Review topic" });
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await writeRunRecord(cwd, run);
+		await launchSubagentTask(cwd, run, run.tasks[0], compiled.tasks[0]);
+
+		const task = run.tasks[0];
+		const startedAt = task.startedAt;
+		const completedAt = new Date(Date.parse(startedAt) + 1250).toISOString();
+		const artifactDir = join(cwd, task.backendFiles.runsDir);
+		mkdirSync(artifactDir, { recursive: true });
+		writeFileSync(
+			join(artifactDir, "output.log"),
+			[
+				"<control>",
+				JSON.stringify({ schema: "stage-control-v1", digest: "ok" }),
+				"</control>",
+				"<analysis>",
+				"done",
+				"</analysis>",
+				"<refs>",
+				"[]",
+				"</refs>",
+			].join("\n"),
+		);
+		writeFileSync(join(artifactDir, "stderr.log"), "");
+		writeFileSync(
+			join(artifactDir, "result.json"),
+			JSON.stringify({
+				status: "completed",
+				completedAt,
+				startedAt,
+				durationMs: 1250,
+				exitCode: 0,
+				cwd,
+				metadata: {
+					provider: "unit-provider",
+					model: "unit-provider/actual-model",
+					thinking: "low",
+					usage: {
+						input: 0,
+						output: null,
+						total_tokens: 0,
+						cacheRead: 0,
+						cacheWrite: 2,
+						reasoning: 0,
+						cost: { total: 1.25 },
+						prompt_tokens_details: { cached_tokens: 0 },
+					},
+				},
+			}),
+		);
+		statusSnapshot = {
+			runId: "run_usage_observable",
+			attemptId: "attempt_usage_observable",
+			backend: "headless",
+			status: "completed",
+			failureKind: null,
+			startedAt,
+			completedAt,
+			durationMs: 1250,
+			logs: [
+				{ type: "output", path: "output.log", artifactCwd: artifactDir },
+				{ type: "stderr", path: "stderr.log", artifactCwd: artifactDir },
+				{ type: "result", path: "result.json", artifactCwd: artifactDir },
+			],
+			metadata: {
+				provider: "snapshot-provider",
+				model: "snapshot-model",
+				usage: { input_tokens: 99, output_tokens: 99 },
+			},
+			attempts: [
+				{ attemptId: "attempt_usage_observable", status: "completed" },
+			],
+		};
+
+		const refreshed = await refreshRunFromSubagentArtifacts(cwd, run);
+		const refreshedTask = refreshed.tasks[0];
+		assert.equal(refreshedTask.status, "completed");
+		assert.equal(refreshedTask.usage.provider, "unit-provider");
+		assert.equal(refreshedTask.usage.model, "unit-provider/actual-model");
+		assert.equal(refreshedTask.usage.thinking, "low");
+		assert.equal(refreshedTask.usage.inputTokens, 0);
+		assert.equal(refreshedTask.usage.outputTokens, null);
+		assert.equal(refreshedTask.usage.totalTokens, 0);
+		assert.equal(refreshedTask.usage.cachedInputTokens, 0);
+		assert.equal(refreshedTask.usage.cacheReadInputTokens, 0);
+		assert.equal(refreshedTask.usage.cacheCreationInputTokens, 2);
+		assert.equal(refreshedTask.usage.reasoningTokens, 0);
+		assert.equal(refreshedTask.usage.costUsd, 1.25);
+		assert.equal(refreshedTask.usage.incomplete, true);
+		assert.equal(refreshedTask.usage.aggregate.attempts, 1);
+		assert.equal(refreshedTask.usage.aggregate.inputTokens, 0);
+		assert.equal(refreshedTask.usage.aggregate.outputTokens, null);
+		assert.equal(refreshedTask.usage.attempts.length, 1);
+		assert.equal(refreshedTask.usage.attempts[0].raw.output, null);
+		assert.equal(refreshedTask.timing.source, "pi-workflow");
+		assert.equal(refreshedTask.timing.executionStartedAt, startedAt);
+		assert.equal(refreshedTask.timing.executionCompletedAt, completedAt);
+		assert.equal(refreshedTask.timing.executionMs, 1250);
+		assert.equal(refreshedTask.timing.aggregate.executionMs, 1250);
+		assert.equal(refreshedTask.timing.aggregate.attempts, 1);
+		assert.equal(refreshedTask.timing.launchSlotReleaseDelayMs, 0);
+		assert.equal(typeof refreshedTask.timing.launchWaitMs, "number");
+		assert.equal(typeof refreshedTask.timing.launchDurationMs, "number");
+		assert.equal(refreshedTask.timing.attempts.length, 1);
+		assert.equal(
+			refreshedTask.timing.attempts[0].backendRunId,
+			"run_usage_observable",
+		);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("subagent launch forwards tool-call capture only when env is enabled", async () => {
 	const cwd = makeProject();
 	const previous = process.env.PI_WORKFLOW_CAPTURE_TOOL_CALLS;
@@ -15799,7 +15952,10 @@ test("workflow fetch_content cache correlates concurrent stored data by response
 					pi.appendEntry("web-search-results", data);
 					return {
 						content: [
-							{ type: "text", text: `body for ${params.url} via ${responseId}` },
+							{
+								type: "text",
+								text: `body for ${params.url} via ${responseId}`,
+							},
 						],
 						details: {
 							urls: [params.url],
@@ -16090,10 +16246,7 @@ test("subagent launch uses generated fetch cache extension by default", async ()
 			entry.endsWith("workflow-fetch-cache-extension.ts"),
 		);
 		assert(wrapperPath);
-		assert.match(
-			readFileSync(wrapperPath, "utf8"),
-			/"maxInlineChars": 12000/,
-		);
+		assert.match(readFileSync(wrapperPath, "utf8"), /"maxInlineChars": 12000/);
 	} finally {
 		if (previousFetchCache === undefined)
 			delete process.env.PI_WORKFLOW_FETCH_CONTENT_CACHE;
