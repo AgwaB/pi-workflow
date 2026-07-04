@@ -3,6 +3,7 @@ import { dirname, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { stringifyPromptJson } from "./prompt-json.js";
+import { compactStrings } from "./strings.js";
 import { loadWorkflowHelper } from "./workflow-helpers.js";
 import {
 	WORKFLOW_ARTIFACT_TOOL_NAME,
@@ -911,7 +912,7 @@ export function formatArtifactGraphSourceContext(
 	].join("\n\n");
 }
 function uniqueStrings(values: readonly string[]): string[] {
-	return [...new Set(values.filter((value) => value.trim().length > 0))];
+	return compactStrings(values, { trim: false, dropWhitespaceOnly: true });
 }
 
 export async function readArtifactGraphControl(

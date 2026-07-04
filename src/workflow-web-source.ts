@@ -10,6 +10,8 @@ import {
 import { isIP } from "node:net";
 import { dirname, resolve } from "node:path";
 
+import { compactStrings } from "./strings.js";
+
 export const WORKFLOW_WEB_SOURCE_CACHE_SCHEMA =
 	"workflow-web-source-cache-v1" as const;
 export const WORKFLOW_WEB_SOURCE_INDEX_SCHEMA =
@@ -602,14 +604,14 @@ export function extractTextFromToolResult(result: unknown): string {
 	if (!isRecord(result)) return "";
 	const content = result.content;
 	if (!Array.isArray(content)) return "";
-	return content
-		.map((entry) => {
+	return compactStrings(
+		content.map((entry) => {
 			if (!isRecord(entry)) return "";
 			const text = entry.text;
 			return typeof text === "string" ? text : "";
-		})
-		.filter(Boolean)
-		.join("\n\n");
+		}),
+		{ trim: false, unique: false },
+	).join("\n\n");
 }
 
 export function extractTitleFromToolResult(

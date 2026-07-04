@@ -1,4 +1,5 @@
-import { AgentDefinition, CompiledRole, RoleSpec } from "./types.js";
+import { compactStrings } from "./strings.js";
+import type { AgentDefinition, CompiledRole, RoleSpec } from "./types.js";
 
 export const DEFAULT_SAFE_SECTIONS = [
   "Core Principles",
@@ -24,14 +25,10 @@ export function compileRole(name: string, spec: RoleSpec, sourceAgent?: AgentDef
   const maxChars = spec.maxChars ?? DEFAULT_MAX_ROLE_CHARS;
   const includeSections = spec.includeSections ?? [...DEFAULT_SAFE_SECTIONS];
   const excludedSections = [...ALWAYS_EXCLUDED_SECTIONS, ...(spec.excludeSections ?? [])];
-  const parts: string[] = [];
-
-  if (sourceAgent) {
-    const extracted = extractMarkdownSections(sourceAgent.body, includeSections, excludedSections);
-    if (extracted.trim() !== "") parts.push(extracted.trim());
-  }
-
-  if (spec.prompt?.trim()) parts.push(spec.prompt.trim());
+  const parts = compactStrings([
+    sourceAgent ? extractMarkdownSections(sourceAgent.body, includeSections, excludedSections) : undefined,
+    spec.prompt,
+  ], { unique: false });
 
   const fullContent = parts.join("\n\n");
   const truncated = fullContent.length > maxChars;

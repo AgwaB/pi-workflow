@@ -7,6 +7,7 @@ import {
 } from "./dynamic-profiles.js";
 import { readOrRebuildDynamicState } from "./dynamic-state.js";
 import { sanitizeTaskId } from "./engine-run-graph.js";
+import { compactStrings } from "./strings.js";
 import { fromProjectPath, isTerminalTaskStatus, readJson } from "./store.js";
 import {
 	classifyToolCapability,
@@ -966,5 +967,5 @@ function dynamicOutputProfileInstructions(
 }
 
 function uniqueStrings(values: readonly string[]): string[] {
-	return [...new Set(values.filter((value) => value.trim().length > 0))];
+	return compactStrings(values, { trim: false, dropWhitespaceOnly: true });
 }

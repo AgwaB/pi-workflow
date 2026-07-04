@@ -57,6 +57,7 @@ import {
 } from "../../.tmp/unit/workflow-progress-health.js";
 import { WorkflowView } from "../../.tmp/unit/workflow-view.js";
 import { resolveWorkflowRuntime } from "../../.tmp/unit/workflow-runtime.js";
+import { compactStrings } from "../../.tmp/unit/strings.js";
 import {
 	assertValidDynamicDecision,
 	dynamicOutputProfileValues,
@@ -253,6 +254,26 @@ async function eventually(action, timeoutMs = 750) {
 	if (lastError) throw lastError;
 	return action();
 }
+
+test("compactStrings trims, filters, and optionally preserves duplicates", () => {
+	assert.deepEqual(compactStrings([" alpha ", "", "alpha", " beta ", null]), [
+		"alpha",
+		"beta",
+	]);
+	assert.deepEqual(compactStrings([" a ", " a ", ""], { unique: false }), [
+		"a",
+		"a",
+	]);
+	assert.deepEqual(
+		compactStrings([" ", "x", "x"], {
+			trim: false,
+			unique: false,
+			dropEmpty: false,
+			dropWhitespaceOnly: false,
+		}),
+		[" ", "x", "x"],
+	);
+});
 
 function readWorkflowIndexFile(cwd) {
 	return JSON.parse(

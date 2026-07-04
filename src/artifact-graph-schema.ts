@@ -1,6 +1,7 @@
 import { isAbsolute } from "node:path";
 
 import { DYNAMIC_OUTPUT_PROFILES } from "./dynamic-profiles.js";
+import { compactStrings } from "./strings.js";
 import {
 	APPROVAL_MODES,
 	FAST_MODES,
@@ -332,11 +333,18 @@ function validateStreamingProducerDeclarations(
 	}
 }
 
-function outputPartialPaths(stage: Record<string, unknown> | undefined): string[] {
+function outputPartialPaths(
+	stage: Record<string, unknown> | undefined,
+): string[] {
 	const output = isRecord(stage?.output) ? stage.output : undefined;
 	const partial = isRecord(output?.partial) ? output.partial : undefined;
 	return Array.isArray(partial?.paths)
-		? partial.paths.filter((item): item is string => typeof item === "string")
+		? compactStrings(partial.paths, {
+				trim: false,
+				unique: false,
+				dropEmpty: false,
+				dropWhitespaceOnly: false,
+			})
 		: [];
 }
 
@@ -413,7 +421,12 @@ function extractDependencyRefs(value: unknown): string[] {
 	if (value === undefined) return [];
 	if (typeof value === "string") return [value];
 	if (Array.isArray(value))
-		return value.filter((item): item is string => typeof item === "string");
+		return compactStrings(value, {
+			trim: false,
+			unique: false,
+			dropEmpty: false,
+			dropWhitespaceOnly: false,
+		});
 	if (isRecord(value) && typeof value.source === "string")
 		return [value.source];
 	return [];
@@ -653,11 +666,7 @@ function validateControlPathRef(
 		});
 	}
 	if (value.streaming !== undefined) {
-		validateForeachStreaming(
-			value.streaming,
-			`${path}.streaming`,
-			issues,
-		);
+		validateForeachStreaming(value.streaming, `${path}.streaming`, issues);
 	}
 }
 
