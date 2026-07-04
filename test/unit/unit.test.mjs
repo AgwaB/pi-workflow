@@ -17883,7 +17883,9 @@ test("subagent launch retries rotate artifact-graph session ids", async () => {
 			await writeRunRecord(cwd, run);
 			await launchSubagentTask(cwd, run, task, compiled.tasks[0]);
 			assert.equal(launches.length, 1);
-			assert.match(launches[0].sessionId, /:launch-retry-1$/);
+			assert.match(launches[0].sessionId, /\.launch-retry-1$/);
+			assert.ok(launches[0].sessionId.length <= 64);
+			assert.match(launches[0].sessionId, /^[A-Za-z0-9._-]+$/);
 			assert.equal(task.backendHandle.sessionId, launches[0].sessionId);
 			assert.equal(task.backendFiles.sessionId, launches[0].sessionId);
 		} finally {
@@ -20329,7 +20331,9 @@ test("resumeRun resets failed and skipped tasks, preserves completed work, and r
 			assert.equal(taskBySpec(resumed, "two.main").status, "running");
 			assert.equal(taskBySpec(resumed, "three.main").status, "pending");
 			assert.equal(launchedTasks.length, 1);
-			assert.match(launchOptions[0].sessionId, /:resume-1$/);
+			assert.match(launchOptions[0].sessionId, /\.resume-1$/);
+			assert.ok(launchOptions[0].sessionId.length <= 64);
+			assert.match(launchOptions[0].sessionId, /^[A-Za-z0-9._-]+$/);
 			assert.equal(interrupted.length, 1);
 			assert.equal(interrupted[0].runId, "run_resume_stale");
 		} finally {

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import {
 	copyFile,
@@ -52,6 +53,7 @@ import {
 import { writeWorkflowPartialOutputLedgerFromFile } from "./workflow-partial-output.js";
 
 const DEFAULT_SUBAGENT_RUNS_ROOT = ".pi/workflow-subagents";
+const MAX_SUBAGENT_SESSION_ID_LENGTH = 64;
 const EXTRA_SUBAGENT_EXTENSIONS_ENV = "PI_WORKFLOW_SUBAGENT_EXTRA_EXTENSIONS";
 const FETCH_CONTENT_CACHE_ENV = "PI_WORKFLOW_FETCH_CONTENT_CACHE";
 const LEGACY_FETCH_CACHE_ENV = "PI_WORKFLOW_FETCH_CACHE";
@@ -1999,9 +2001,12 @@ function subagentSessionId(
 	if (task.outputRetry?.sessionId) return task.outputRetry.sessionId;
 	const launchAttempt = task.launchRetry?.attempts ?? 0;
 	if (launchAttempt > 0)
-		return `${baseSessionId}:launch-retry-${launchAttempt}`;
+		return boundedSubagentSessionId(
+			`${baseSessionId}.launch-retry-${launchAttempt}`,
+		);
 	const resumeAttempt = task.resumeEvents?.length ?? 0;
-	if (resumeAttempt > 0) return `${baseSessionId}:resume-${resumeAttempt}`;
+	if (resumeAttempt > 0)
+		return boundedSubagentSessionId(`${baseSessionId}.resume-${resumeAttempt}`);
 	return baseSessionId;
 }
 
@@ -2009,10 +2014,7 @@ function baseSubagentSessionId(
 	run: WorkflowRunRecord,
 	task: WorkflowTaskRunRecord,
 ): string {
-	return `pi-workflow.${run.runId}.${task.taskId}`.replace(
-		/[^A-Za-z0-9._-]/g,
-		"-",
-	);
+	return boundedSubagentSessionId(`pi-workflow.${run.runId}.${task.taskId}`);
 }
 
 function retrySubagentSessionId(
@@ -2020,7 +2022,23 @@ function retrySubagentSessionId(
 	task: WorkflowTaskRunRecord,
 	attempt: number,
 ): string {
-	return `${baseSubagentSessionId(run, task)}.retry-${attempt}`;
+	return boundedSubagentSessionId(
+		`${baseSubagentSessionId(run, task)}.retry-${attempt}`,
+	);
+}
+
+function boundedSubagentSessionId(value: string): string {
+	const sanitized = value.replace(/[^A-Za-z0-9._-]/g, "-");
+	if (sanitized.length <= MAX_SUBAGENT_SESSION_ID_LENGTH) return sanitized;
+	const digest = createHash("sha256")
+		.update(sanitized)
+		.digest("hex")
+		.slice(0, 16);
+	const suffix = sanitized.split(".").at(-1) || "session";
+	const prefix = `piwf.${digest}`;
+	const maxSuffixLength = MAX_SUBAGENT_SESSION_ID_LENGTH - prefix.length - 1;
+	const boundedSuffix = suffix.slice(-Math.max(1, maxSuffixLength));
+	return `${prefix}.${boundedSuffix}`;
 }
 
 function buildSystemPrompt(task: CompiledTask): string {
