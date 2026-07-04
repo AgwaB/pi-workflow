@@ -1,36 +1,94 @@
 {
-  "type": "object",
-  "required": [
-    "schema",
-    "digest",
-    "id",
-    "status",
-    "verdictDigest",
-    "evidence"
-  ],
-  "properties": {
-    "schema": {
-      "type": "string",
-      "minLength": 1
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "schema",
+        "digest",
+        "id",
+        "status",
+        "verdictDigest",
+        "evidence"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        },
+        "digest": {
+          "type": "string",
+          "minLength": 1
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "claim": {},
+        "factSlotIds": {},
+        "status": {
+          "type": "string",
+          "enum": ["verified", "partially_supported", "unsupported", "conflicting"]
+        },
+        "confidence": {},
+        "verdictDigest": {},
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "maxItems": 5
+        },
+        "caveats": {},
+        "correctionOrCounterclaim": {}
+      }
     },
-    "digest": {
-      "type": "string",
-      "minLength": 1
-    },
-    "id": {},
-    "claim": {},
-    "factSlotIds": {},
-    "status": {
-      "type": "string",
-      "enum": ["verified", "partially_supported", "unsupported", "conflicting"]
-    },
-    "verdictDigest": {},
-    "evidence": {
-      "type": "array",
-      "items": {
-        "type": "object"
-      },
-      "maxItems": 5
+    {
+      "type": "object",
+      "required": ["schema", "digest", "results"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        },
+        "digest": {
+          "type": "string",
+          "minLength": 1
+        },
+        "results": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["id", "status", "verdictDigest", "evidence"],
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "claim": {},
+              "factSlotIds": {},
+              "status": {
+                "type": "string",
+                "enum": ["verified", "partially_supported", "unsupported", "conflicting"]
+              },
+              "confidence": {},
+              "verdictDigest": {},
+              "evidence": {
+                "type": "array",
+                "items": {
+                  "type": "object"
+                },
+                "maxItems": 5
+              },
+              "caveats": {},
+              "correctionOrCounterclaim": {}
+            }
+          }
+        }
+      }
     }
-  }
+  ]
 }

@@ -16,10 +16,6 @@ function asArray(value) {
 	if (Array.isArray(value)) return value;
 	if (value && typeof value === "object") {
 		if (Array.isArray(value.auditedClaims)) return value.auditedClaims;
-		if (Array.isArray(value.claims)) return value.claims;
-		if (Array.isArray(value.claimVerdicts)) return value.claimVerdicts;
-		if (Array.isArray(value.verdicts)) return value.verdicts;
-		if (Array.isArray(value.items)) return value.items;
 		if (
 			"status" in value ||
 			"verdict" in value ||
@@ -28,6 +24,11 @@ function asArray(value) {
 			"id" in value
 		)
 			return [value];
+		if (Array.isArray(value.results)) return value.results;
+		if (Array.isArray(value.claims)) return value.claims;
+		if (Array.isArray(value.claimVerdicts)) return value.claimVerdicts;
+		if (Array.isArray(value.verdicts)) return value.verdicts;
+		if (Array.isArray(value.items)) return value.items;
 		return Object.values(value).flatMap(asArray);
 	}
 	return [];
@@ -365,18 +366,109 @@ function conservativeVerifierStatus(statuses) {
 	);
 }
 
-function issueForVerifierRow({ sourceId, claim, reason, claimId, index }) {
+function issueForVerifierRow({
+	sourceId,
+	claim,
+	reason,
+	claimId,
+	index,
+	...details
+}) {
 	return {
 		sourceId,
 		...(Number.isInteger(index) ? { index } : {}),
 		...(claimId ? { claimId } : {}),
+		...details,
 		reason,
 		status: verdictOf(claim),
 		nextStep:
 			reason === "unknown_claim_id"
 				? "Verify-claims output did not match any normalized verification candidate; quarantine it from claim counts."
-				: "Verifier output is missing a usable string id/claimId; rerun or repair the verifier row before counting it.",
+				: reason === "batch_result_id_not_in_source_batch"
+					? "Verifier batch output included a claim id outside the source batch; rerun or repair the batch before counting any row."
+					: reason === "unknown_verification_batch_id"
+						? "Verifier batch output came from an unknown batch id; rerun or repair the batch before counting any row."
+						: "Verifier output is missing a usable string id/claimId; rerun or repair the verifier row before counting it.",
 	};
+}
+
+function asBatchArray(value) {
+	if (Array.isArray(value?.batches)) return value.batches;
+	if (Array.isArray(value)) return value;
+	return [];
+}
+
+function buildBatchMembershipById(verificationBatches) {
+	const batches = new Map();
+	for (const batch of asBatchArray(verificationBatches)) {
+		const id = typeof batch?.id === "string" ? batch.id.trim() : "";
+		if (!id) continue;
+		const claimIds = Array.isArray(batch.claimIds)
+			? batch.claimIds
+			: Array.isArray(batch.claims)
+				? batch.claims.map(
+						(claim, index) =>
+							claimIdOf(claim).id ??
+							`candidate-${String(index + 1).padStart(3, "0")}`,
+					)
+				: [];
+		batches.set(
+			id,
+			new Set(
+				claimIds
+					.filter((claimId) => typeof claimId === "string")
+					.map((claimId) => claimId.trim())
+					.filter(Boolean),
+			),
+		);
+	}
+	return batches;
+}
+
+function verifierBatchId(sourceId) {
+	const prefix = "verify-claims.";
+	if (typeof sourceId !== "string" || !sourceId.startsWith(prefix)) return null;
+	const id = sourceId.slice(prefix.length).trim();
+	return id || null;
+}
+
+function buildBatchIdBySourceName(sourceStatuses) {
+	const bySource = new Map();
+	for (const status of Array.isArray(sourceStatuses) ? sourceStatuses : []) {
+		const source = typeof status?.source === "string" ? status.source : "";
+		const batchId = verifierBatchId(status?.specId);
+		if (source && batchId) bySource.set(source, batchId);
+	}
+	return bySource;
+}
+
+function batchMembershipIssue({
+	sourceId,
+	claimId,
+	batchMembershipById,
+	batchIdBySourceName,
+}) {
+	if (!(batchMembershipById instanceof Map) || batchMembershipById.size === 0)
+		return null;
+	const batchId =
+		verifierBatchId(sourceId) ?? batchIdBySourceName?.get(sourceId);
+	if (!batchId) return null;
+	const expectedClaimIds = batchMembershipById.get(batchId);
+	if (!expectedClaimIds) {
+		return {
+			reason: "unknown_verification_batch_id",
+			batchId,
+			expectedBatchIds: [...batchMembershipById.keys()],
+		};
+	}
+	if (!expectedClaimIds.has(claimId)) {
+		return {
+			reason: "batch_result_id_not_in_source_batch",
+			batchId,
+			expectedClaimIds: [...expectedClaimIds],
+		};
+	}
+	return null;
 }
 
 function gapForVerifierIssue(issue) {
@@ -437,6 +529,32 @@ function mergeVerifierRows(rows) {
 	};
 }
 
+function buildBatchAdoptionReadiness({ gateSummary, candidateCount }) {
+	const checks = [
+		["invalid_verifier_rows", gateSummary.invalidVerifierRows],
+		["missing_verifier_results", gateSummary.missingVerifierResults],
+		["duplicate_verifier_rows", gateSummary.duplicateVerifierRows],
+		["duplicate_status_conflicts", gateSummary.duplicateStatusConflicts],
+		["invalid_normalized_candidates", gateSummary.invalidNormalizedCandidates],
+		["source_ref_join_failures", gateSummary.sourceRefJoinFailures],
+	];
+	const blockers = checks
+		.filter(([, count]) => Number(count ?? 0) > 0)
+		.map(([reason, count]) => ({ reason, count }));
+	if (candidateCount === 0)
+		blockers.push({ reason: "no_verification_candidates", count: 0 });
+	return {
+		status: blockers.length === 0 ? "eligible_for_canary" : "blocked",
+		adopted: false,
+		canaryRequired: true,
+		reason:
+			blockers.length === 0
+				? "Verifier identity/sourceRef integrity is clean; batch adoption still requires a non-holdout canary before use."
+				: "Batch adoption is blocked until verifier identity/sourceRef integrity issues are resolved.",
+		blockers,
+	};
+}
+
 const STATUS_BUCKETS = {
 	verified: "verified",
 	partially_supported: "partiallySupported",
@@ -451,11 +569,18 @@ function findSource(sources, stageId) {
 	return null;
 }
 
-export default async function claimEvidenceGate({ sources, options = {} }) {
+export default async function claimEvidenceGate({
+	sources,
+	options = {},
+	context = {},
+}) {
 	const plan = findSource(sources, "plan");
 	const normalizeClaims = findSource(sources, "normalize-claims");
 	const sanitizedCandidates = findSource(sources, "sanitize-claims");
 	const normalized = sanitizedCandidates ?? normalizeClaims;
+	const verificationBatches = findSource(sources, "verification-batches");
+	const batchMembershipById = buildBatchMembershipById(verificationBatches);
+	const batchIdBySourceName = buildBatchIdBySourceName(context.sourceStatuses);
 	const normalizeInputPacket = findSource(sources, "normalize-input-packet");
 	const urlToSourceRef = buildUrlSourceRefLookup(normalizeInputPacket);
 	const candidateRecords = [];
@@ -562,6 +687,25 @@ export default async function claimEvidenceGate({ sources, options = {} }) {
 				index,
 				claimId: idCheck.id,
 				reason: "unknown_claim_id",
+			});
+			invalidVerifierRows.push(issue);
+			remainingGaps.push(gapForVerifierIssue(issue));
+			gateSummary.invalidVerifierRows += 1;
+			continue;
+		}
+		const batchIssue = batchMembershipIssue({
+			sourceId,
+			claimId: idCheck.id,
+			batchMembershipById,
+			batchIdBySourceName,
+		});
+		if (batchIssue) {
+			const issue = issueForVerifierRow({
+				sourceId,
+				claim,
+				index,
+				claimId: idCheck.id,
+				...batchIssue,
 			});
 			invalidVerifierRows.push(issue);
 			remainingGaps.push(gapForVerifierIssue(issue));
@@ -859,11 +1003,16 @@ export default async function claimEvidenceGate({ sources, options = {} }) {
 		verdictDigest: claim.verdictDigest,
 		correctionOrCounterclaim: claim.correctionOrCounterclaim,
 	}));
+	const batchAdoptionReadiness = buildBatchAdoptionReadiness({
+		gateSummary,
+		candidateCount: candidateRecords.length,
+	});
 
 	return {
 		auditedClaims,
 		claimDigests,
 		gateSummary,
+		batchAdoptionReadiness,
 		remainingGaps,
 		sourceRefJoinFailures,
 		invalidVerifierRows,
