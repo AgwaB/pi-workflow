@@ -7878,7 +7878,6 @@ test("bundled deep-research compacts audit packets before executive final", asyn
 	assert.deepEqual(byStage.get("research-questions")?.foreach?.from, {
 		stage: "plan",
 		path: "$.researchQuestions",
-		streaming: { enabled: true, minChunk: 1 },
 	});
 	assert.match(
 		byStage.get("research-questions")?.compiledPrompt ?? "",
@@ -7967,7 +7966,6 @@ test("bundled deep-research compacts audit packets before executive final", asyn
 	assert.deepEqual(byStage.get("verify-claims")?.foreach?.from, {
 		stage: "sanitize-claims",
 		path: "$.claimInventory.verificationCandidates",
-		streaming: { enabled: true, minChunk: 2 },
 	});
 
 	assert.equal(auditClaims?.kind, "support");

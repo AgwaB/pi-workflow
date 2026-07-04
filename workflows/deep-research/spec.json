@@ -48,11 +48,7 @@
         "type": "foreach",
         "from": {
           "source": "plan",
-          "path": "$.researchQuestions",
-          "streaming": {
-            "enabled": true,
-            "minChunk": 1
-          }
+          "path": "$.researchQuestions"
         },
         "maxConcurrency": 12,
         "sourceProjection": {
@@ -138,11 +134,7 @@
         "type": "foreach",
         "from": {
           "source": "sanitize-claims",
-          "path": "$.claimInventory.verificationCandidates",
-          "streaming": {
-            "enabled": true,
-            "minChunk": 2
-          }
+          "path": "$.claimInventory.verificationCandidates"
         },
         "maxConcurrency": 16,
         "output": {
