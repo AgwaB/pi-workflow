@@ -10851,6 +10851,66 @@ test("streaming foreach consumes producer partial output before terminal complet
 	}
 });
 
+test("streaming foreach keeps producer dependency for partial children that need source context", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const spec = workflowSpec("unit-scout", {
+			artifactGraph: {
+				stages: [
+					{
+						id: "produce",
+						type: "single",
+						prompt: "Produce items",
+						output: { partial: { paths: ["$.items"] } },
+					},
+					{
+						id: "verify",
+						type: "foreach",
+						from: {
+							source: "produce",
+							path: "$.items",
+							streaming: { enabled: true },
+						},
+						sourceProjection: { include: ["$.sharedContext"] },
+						each: { prompt: "Verify ${item}" },
+					},
+				],
+			},
+		});
+		const compiled = await compileWorkflow(spec, { cwd, task: "Check items" });
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		const producer = taskBySpec(run, "produce.main");
+		producer.status = "running";
+		producer.statusDetail = "running";
+		producer.startedAt = new Date().toISOString();
+		mkdirSync(dirname(join(cwd, producer.files.output)), { recursive: true });
+		writeFileSync(
+			join(cwd, producer.files.output),
+			'<partial-control>{"schema":"workflow-partial-output-v1","path":"$.items","items":[{"id":"ITEM_A","text":"A"}]}</partial-control>',
+			"utf8",
+		);
+		await writeRunRecord(cwd, run);
+
+		await scheduleRun(cwd, run.runId);
+		const current = await readRunRecord(cwd, run.runId);
+		assert.deepEqual(taskBySpec(current, "verify.item_a").dependsOn, [
+			"produce.main",
+		]);
+		assert.equal(
+			taskBySpec(current, "verify.item_a").foreachGenerated.itemSourceKind,
+			"partial",
+		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("streaming foreach blocks if a producer changes a published partial item", async () => {
 	const cwd = makeProject();
 	try {

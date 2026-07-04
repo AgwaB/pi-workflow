@@ -1046,6 +1046,10 @@ async function materializeStreamingForeachTask(input: {
 				task.dependsOn ?? [],
 				sourceTaskSpecIdSet,
 				itemMeta,
+				{
+					keepPartialSourceDependency:
+						partialGeneratedTaskNeedsCompletedSourceContext(task),
+				},
 			),
 			foreachGenerated: {
 				...(task.foreachGenerated ?? {
@@ -1062,7 +1066,9 @@ async function materializeStreamingForeachTask(input: {
 		(task) =>
 			task.foreachGenerated?.placeholderSpecId === input.placeholderSpecId,
 	);
-	const existingGeneratedSpecIds = existingGeneratedTasks.map((task) => task.id);
+	const existingGeneratedSpecIds = existingGeneratedTasks.map(
+		(task) => task.id,
+	);
 	const existingGeneratedTaskBySpecId = new Map(
 		existingGeneratedTasks.map((task) => [task.id, task]),
 	);
@@ -1128,7 +1134,11 @@ async function materializeStreamingForeachTask(input: {
 		) {
 			compiledInsertIndex += 1;
 		}
-		input.compiledFlow.tasks.splice(compiledInsertIndex, 0, ...newGeneratedTasks);
+		input.compiledFlow.tasks.splice(
+			compiledInsertIndex,
+			0,
+			...newGeneratedTasks,
+		);
 
 		let runInsertIndex = input.index + 1;
 		while (
@@ -1203,24 +1213,38 @@ function replaceSourceDependenciesWithItemSource(
 	dependsOn: string[],
 	sourceTaskSpecIds: Set<string>,
 	itemMeta: ForeachExtractedItemMeta,
+	options: { keepPartialSourceDependency?: boolean } = {},
 ): string[] {
 	const replaced: string[] = [];
 	let inserted = false;
+	const shouldReplaceWithSource =
+		itemMeta.sourceKind !== "partial" ||
+		options.keepPartialSourceDependency === true;
 	for (const dep of dependsOn) {
 		if (!sourceTaskSpecIds.has(dep)) {
 			replaced.push(dep);
 			continue;
 		}
-		if (itemMeta.sourceKind === "partial") continue;
+		if (!shouldReplaceWithSource) continue;
 		if (!inserted) {
 			replaced.push(itemMeta.sourceSpecId);
 			inserted = true;
 		}
 	}
-	if (!inserted && itemMeta.sourceKind !== "partial") {
+	if (!inserted && shouldReplaceWithSource) {
 		replaced.push(itemMeta.sourceSpecId);
 	}
 	return [...new Set(replaced)];
+}
+
+function partialGeneratedTaskNeedsCompletedSourceContext(
+	task: CompiledTask,
+): boolean {
+	const artifactGraph = task.artifactGraph;
+	return Boolean(
+		artifactGraph?.sourceProjection !== undefined ||
+			(artifactGraph?.requiredReads?.length ?? 0) > 0,
+	);
 }
 
 interface ForeachExtractedItemMeta {
