@@ -60,6 +60,7 @@ import { resolveWorkflowRuntime } from "../../.tmp/unit/workflow-runtime.js";
 import { compactStrings } from "../../.tmp/unit/strings.js";
 import {
 	assertValidDynamicDecision,
+	buildWorkflowRunMetrics,
 	dynamicOutputProfileValues,
 } from "../../.tmp/unit/index.js";
 import {
@@ -93,7 +94,10 @@ import {
 	WorkflowValidationError,
 	WORKFLOW_RUN_TYPE,
 } from "../../.tmp/unit/types.js";
-import { supportOutputAnalysis } from "../../.tmp/unit/artifact-graph-runtime.js";
+import {
+	prepareDagTask,
+	supportOutputAnalysis,
+} from "../../.tmp/unit/artifact-graph-runtime.js";
 import {
 	canStageProceedAfterPreviousFailure,
 	readSimpleJsonPath,
@@ -1109,6 +1113,71 @@ test("public schemaVersion 1 parser accepts artifact graph and rejects non-artif
 	assert.equal(
 		parsed.artifactGraph.stages[1].inputPolicy.requiredReads[0],
 		"risk.analysis",
+	);
+
+	assert.doesNotThrow(() =>
+		parsePublicWorkflow(
+			artifactGraphWorkflowSpec({
+				artifactGraph: {
+					stages: [
+						{
+							id: "verify",
+							type: "single",
+							prompt: "Verify without artifact access.",
+							inputPolicy: { artifactAccess: "none" },
+						},
+					],
+				},
+			}),
+		),
+	);
+	const artifactAccessWithRead = assertThrowsFlow(() =>
+		parsePublicWorkflow(
+			artifactGraphWorkflowSpec({
+				artifactGraph: {
+					stages: [
+						{ id: "risk", type: "single", prompt: "Assess risk." },
+						{
+							id: "verify",
+							type: "reduce",
+							from: ["risk"],
+							prompt: "Verify without artifact access.",
+							inputPolicy: {
+								artifactAccess: "none",
+								requiredReads: ["risk.control"],
+							},
+						},
+					],
+				},
+			}),
+		),
+	);
+	assertIssue(
+		artifactAccessWithRead,
+		"$.artifactGraph.stages[1].inputPolicy.requiredReads",
+		"must be empty",
+	);
+	const artifactAccessWithProjection = assertThrowsFlow(() =>
+		parsePublicWorkflow(
+			artifactGraphWorkflowSpec({
+				artifactGraph: {
+					stages: [
+						{
+							id: "verify",
+							type: "single",
+							prompt: "Verify without artifact access.",
+							sourceProjection: {},
+							inputPolicy: { artifactAccess: "none" },
+						},
+					],
+				},
+			}),
+		),
+	);
+	assertIssue(
+		artifactAccessWithProjection,
+		"$.artifactGraph.stages[0].inputPolicy.artifactAccess",
+		"sourceProjection",
 	);
 
 	const invalidTopLevel = assertThrowsFlow(() =>
@@ -7917,6 +7986,10 @@ test("bundled deep-research compacts audit packets before executive final", asyn
 	);
 	assert.equal(byStage.get("normalize-claims")?.runtime.thinking, "high");
 	assert.equal(byStage.get("verify-claims")?.runtime.thinking, "high");
+	assert.equal(
+		byStage.get("verify-claims")?.artifactGraph.artifactAccess,
+		"none",
+	);
 	assert.match(
 		byStage.get("verify-claims")?.compiledPrompt ?? "",
 		/Do not call workflow_artifact/,
@@ -7984,6 +8057,8 @@ test("bundled deep-research compacts audit packets before executive final", asyn
 		sanitizeClaims.support.uses,
 		"./helpers/sanitize-verification-candidates.mjs",
 	);
+	assert.equal(byStage.has("verification-batches"), false);
+	assert.equal(byStage.has("verification-shadow-selector"), false);
 	assert.deepEqual(byStage.get("verify-claims")?.dependsOn, [
 		"sanitize-claims.main",
 	]);
@@ -8000,7 +8075,6 @@ test("bundled deep-research compacts audit packets before executive final", asyn
 		"sanitize-claims.main",
 		"verify-claims.item",
 	]);
-
 	assert.equal(finalAuditPacket?.kind, "support");
 	assert.deepEqual(finalAuditPacket.dependsOn, [
 		"plan.main",
@@ -8018,10 +8092,7 @@ test("bundled deep-research compacts audit packets before executive final", asyn
 	assert.deepEqual(finalAudit.artifactGraph.requiredReads, [
 		"final-audit-packet.control",
 	]);
-	assert.deepEqual(finalAudit.artifactGraph.sourceProjection, {
-		include: ["$.packet.synthesisInput"],
-		maxChars: 24000,
-	});
+	assert.equal(finalAudit.artifactGraph.sourceProjection, undefined);
 	assert.match(finalAudit.compiledPrompt, /synthesis overlay/);
 	assert.match(finalAudit.compiledPrompt, /exactly one workflow_artifact read/);
 	assert.match(
@@ -8057,6 +8128,107 @@ test("bundled deep-research compacts audit packets before executive final", asyn
 			),
 		),
 	);
+});
+
+test("deep-research batched verification variant is path-ref opt-in", async () => {
+	const specPath = join(
+		process.cwd(),
+		"workflows",
+		"deep-research",
+		"batched-verification.spec.json",
+	);
+	const spec = parsePublicWorkflow(JSON.parse(readFileSync(specPath, "utf8")));
+	const compiled = await compileWorkflow(spec, {
+		cwd: process.cwd(),
+		task: "Research the deep-research artifact contract.",
+		specPath,
+	});
+	const byStage = new Map(compiled.tasks.map((task) => [task.stageId, task]));
+	const verificationBatches = byStage.get("verification-batches");
+	const verifyClaims = byStage.get("verify-claims");
+	const auditClaims = byStage.get("audit-claims");
+
+	assert.equal(spec.name, "deep-research-batched-verification-opt-in");
+	assert.equal(verificationBatches?.kind, "support");
+	assert.deepEqual(verificationBatches.dependsOn, ["sanitize-claims.main"]);
+	assert.equal(
+		verificationBatches.support.uses,
+		"./helpers/batch-verification-candidates.mjs",
+	);
+	assert.deepEqual(verificationBatches.support.options, { maxBatchSize: 2 });
+	assert.deepEqual(verifyClaims?.dependsOn, ["verification-batches.main"]);
+	assert.deepEqual(verifyClaims?.foreach?.from, {
+		stage: "verification-batches",
+		path: "$.batches",
+	});
+	assert.match(verifyClaims?.compiledPrompt ?? "", /results\[\]/);
+	assert.equal(verifyClaims?.artifactGraph.artifactAccess, "none");
+	assert.deepEqual(auditClaims?.dependsOn, [
+		"plan.main",
+		"normalize-input-packet.main",
+		"normalize-claims.main",
+		"sanitize-claims.main",
+		"verification-batches.main",
+		"verify-claims.item",
+	]);
+	assert.equal(byStage.has("verification-shadow-selector"), false);
+});
+
+test("artifactAccess none omits workflow artifact runtime affordances", async () => {
+	const cwd = makeProject();
+	try {
+		const compiledTask = {
+			id: "task-1",
+			specId: "verify",
+			taskId: "task-1",
+			stageId: "verify",
+			kind: "single",
+			agent: "scout",
+			agentPath: "agents/scout.md",
+			agentSystemPrompt: "",
+			roleNames: [],
+			cwd,
+			runtime: {
+				tools: ["workflow_web_source_read"],
+				toolProviders: {},
+			},
+			compiledPrompt: "Verify only.",
+			artifactGraph: {
+				enabled: true,
+				output: {
+					analysisRequired: true,
+					refsRequired: true,
+				},
+				requiredReads: [],
+				artifactAccess: "none",
+			},
+		};
+		const run = {
+			runId: "workflow_artifact_access_none",
+			tasks: [
+				{
+					taskId: "task-1",
+					specId: "verify",
+					cwd,
+					files: {
+						result:
+							".pi/workflows/workflow_artifact_access_none/tasks/task-1/result.json",
+					},
+				},
+			],
+		};
+		const prepared = await prepareDagTask(
+			cwd,
+			run,
+			{ tasks: [compiledTask] },
+			0,
+		);
+		assert.deepEqual(prepared.runtime.tools, ["workflow_web_source_read"]);
+		assert.equal(prepared.runtime.toolProviders.workflow_artifact, undefined);
+		assert.doesNotMatch(prepared.compiledPrompt, /Workflow Artifact Inputs/);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
 });
 
 test("ambient runtime defaults do not override bundled stage thinking pins", async () => {
@@ -15820,6 +15992,333 @@ test("subagent terminal observability aggregates distinct retry attempts", async
 	}
 });
 
+test("workflow run metrics roll up provider-reported usage without mutation", () => {
+	const run = {
+		schemaVersion: 1,
+		runId: "metrics_run",
+		name: "metrics workflow",
+		type: WORKFLOW_RUN_TYPE,
+		status: "completed",
+		taskSummary: {
+			pending: 0,
+			running: 0,
+			blocked: 0,
+			completed: 2,
+			failed: 0,
+			skipped: 1,
+			interrupted: 0,
+			total: 3,
+		},
+		cwd: "/tmp/metrics",
+		backend: { type: "local-pi", mode: "headless" },
+		createdAt: "2026-06-08T00:00:00.000Z",
+		updatedAt: "2026-06-08T00:03:00.000Z",
+		specPath: "/tmp/metrics/workflow.json",
+		tasks: [
+			{
+				taskId: "task-a",
+				specId: "plan.a",
+				displayName: "Plan A",
+				agent: "planner",
+				agentFile: "agents/planner.md",
+				roles: [],
+				status: "completed",
+				statusDetail: "completed",
+				stageId: "plan",
+				kind: "task",
+				runtime: { approvalMode: "never", model: "requested-model" },
+				cwd: "/tmp/metrics",
+				worktree: {
+					enabled: false,
+					path: null,
+					branch: null,
+					baseCwd: null,
+					warning: null,
+				},
+				backendTaskId: "backend-a",
+				files: {
+					output: "",
+					stderr: "",
+					result: "",
+					systemPrompt: "",
+					taskPrompt: "",
+				},
+				launchRetry: { attempts: 1, reason: "model" },
+				resumeEvents: [
+					{
+						at: "2026-06-08T00:01:00.000Z",
+						fromStatus: "failed",
+						fromStatusDetail: "model",
+						launchRetryAttempts: 2,
+						outputRetryAttempts: 3,
+					},
+				],
+				usage: {
+					source: "pi-subagent",
+					capturedAt: "2026-06-08T00:01:30.000Z",
+					provider: "provider-a",
+					model: "actual-model-a",
+					thinking: "low",
+					aggregate: {
+						attempts: 1,
+						inputTokens: 0,
+						outputTokens: 2,
+						totalTokens: 2,
+						cachedInputTokens: 0,
+						cacheCreationInputTokens: 0,
+						cacheReadInputTokens: 0,
+						reasoningTokens: 0,
+						costUsd: 0,
+					},
+				},
+				timing: {
+					source: "pi-workflow",
+					capturedAt: "2026-06-08T00:01:30.000Z",
+					launchSlotReleaseDelayMs: 0,
+					aggregate: {
+						attempts: 1,
+						launchWaitMs: 0,
+						launchDurationMs: 5,
+						executionMs: 10,
+						totalMs: 15,
+					},
+				},
+			},
+			{
+				taskId: "task-b",
+				specId: "plan.b",
+				displayName: "Plan B",
+				agent: "planner",
+				agentFile: "agents/planner.md",
+				roles: [],
+				status: "completed",
+				statusDetail: "completed",
+				stageId: "plan",
+				runtime: { approvalMode: "never" },
+				cwd: "/tmp/metrics",
+				worktree: {
+					enabled: false,
+					path: null,
+					branch: null,
+					baseCwd: null,
+					warning: null,
+				},
+				backendTaskId: "backend-b",
+				files: {
+					output: "",
+					stderr: "",
+					result: "",
+					systemPrompt: "",
+					taskPrompt: "",
+				},
+				outputRetry: { attempts: 2, reason: "invalid_json" },
+				usage: {
+					source: "pi-subagent",
+					capturedAt: "2026-06-08T00:02:00.000Z",
+					incomplete: true,
+					aggregate: {
+						attempts: 1,
+						incomplete: true,
+						inputTokens: 3,
+						outputTokens: null,
+						totalTokens: 3,
+						cachedInputTokens: 1,
+						cacheCreationInputTokens: 0,
+						cacheReadInputTokens: 1,
+						reasoningTokens: 0,
+						costUsd: null,
+					},
+				},
+				timing: {
+					source: "pi-workflow",
+					capturedAt: "2026-06-08T00:02:00.000Z",
+					aggregate: {
+						attempts: 1,
+						incomplete: true,
+						launchWaitMs: 4,
+						launchDurationMs: null,
+						executionMs: 8,
+						totalMs: 12,
+					},
+				},
+			},
+			{
+				taskId: "task-c",
+				specId: "execute.c",
+				displayName: "Execute C",
+				agent: "worker",
+				agentFile: "agents/worker.md",
+				roles: [],
+				status: "skipped",
+				statusDetail: "dependency_failed",
+				stageId: "execute",
+				runtime: { approvalMode: "never" },
+				cwd: "/tmp/metrics",
+				worktree: {
+					enabled: false,
+					path: null,
+					branch: null,
+					baseCwd: null,
+					warning: null,
+				},
+				backendTaskId: "backend-c",
+				files: {
+					output: "",
+					stderr: "",
+					result: "",
+					systemPrompt: "",
+					taskPrompt: "",
+				},
+			},
+		],
+	};
+	const before = JSON.stringify(run);
+
+	const metrics = buildWorkflowRunMetrics(run);
+	const serialized = JSON.parse(JSON.stringify(metrics));
+
+	assert.deepEqual(serialized, metrics);
+	assert.equal(JSON.stringify(run), before);
+	assert.equal(metrics.schemaVersion, 1);
+	assert.equal(metrics.pricingModelVersion, "provider-reported-v1");
+	assert.equal(metrics.pricingSource, "provider-reported");
+	assert.equal(metrics.costsAreProviderReported, true);
+	assert.equal(
+		metrics.byTask.find((task) => task.taskId === "task-a").usage.inputTokens,
+		0,
+	);
+	assert.equal(
+		metrics.byTask.find((task) => task.taskId === "task-a").usage.costUsd,
+		0,
+	);
+	assert.equal(
+		metrics.byTask.find((task) => task.taskId === "task-a").launchTiming
+			.launchSlotReleaseDelayMs,
+		0,
+	);
+	assert.equal(
+		metrics.byTask.find((task) => task.taskId === "task-b").usage.outputTokens,
+		null,
+	);
+	assert.equal(
+		metrics.byTask.find((task) => task.taskId === "task-c").usage.unavailable,
+		true,
+	);
+	assert.deepEqual(metrics.metadata.usageUnavailableTaskIds, ["task-c"]);
+	assert.deepEqual(metrics.metadata.launchTimingUnavailableTaskIds, ["task-c"]);
+	assert.equal(metrics.totals.statusCounts.completed, 2);
+	assert.equal(metrics.totals.statusCounts.skipped, 1);
+	assert.equal(metrics.totals.usage.inputTokens, null);
+	assert.equal(metrics.totals.usage.outputTokens, null);
+	assert.equal(metrics.totals.usage.costUsd, null);
+	assert.equal(metrics.totals.usage.attempts, 2);
+	assert.equal(metrics.totals.launchTiming.launchWaitMs, null);
+	assert.equal(metrics.totals.launchTiming.launchDurationMs, null);
+	assert.equal(metrics.totals.retries.launchRetries, 3);
+	assert.equal(metrics.totals.retries.outputRetries, 5);
+	assert.equal(metrics.totals.retries.resumeEvents, 1);
+	assert.equal(metrics.totals.retries.totalRetryEvents, 9);
+	const plan = metrics.byStage.find((stage) => stage.stageId === "plan");
+	assert.equal(plan.usage.inputTokens, 3);
+	assert.equal(plan.usage.outputTokens, null);
+	assert.equal(plan.usage.costUsd, null);
+	assert.equal(plan.launchTiming.launchWaitMs, 4);
+	assert.equal(plan.launchTiming.launchDurationMs, null);
+	assert.equal(plan.retries.launchRetries, 3);
+	assert.equal(plan.retries.outputRetries, 5);
+	assert.equal(plan.retries.totalRetryEvents, 9);
+	const execute = metrics.byStage.find((stage) => stage.stageId === "execute");
+	assert.equal(execute.usage.unavailable, true);
+	assert.equal(execute.usage.inputTokens, null);
+});
+
+test("workflow run metrics do not infer missing prices from token counts", () => {
+	const run = {
+		schemaVersion: 1,
+		runId: "metrics_price_run",
+		type: WORKFLOW_RUN_TYPE,
+		status: "completed",
+		taskSummary: {
+			pending: 0,
+			running: 0,
+			blocked: 0,
+			completed: 1,
+			failed: 0,
+			skipped: 0,
+			interrupted: 0,
+			total: 1,
+		},
+		cwd: "/tmp/metrics",
+		backend: { type: "local-pi", mode: "headless" },
+		createdAt: "2026-06-08T00:00:00.000Z",
+		updatedAt: "2026-06-08T00:01:00.000Z",
+		specPath: "/tmp/metrics/workflow.json",
+		tasks: [
+			{
+				taskId: "task-price",
+				specId: "main.price",
+				displayName: "Price",
+				agent: "worker",
+				agentFile: "agents/worker.md",
+				roles: [],
+				status: "completed",
+				statusDetail: "completed",
+				runtime: { approvalMode: "never" },
+				cwd: "/tmp/metrics",
+				worktree: {
+					enabled: false,
+					path: null,
+					branch: null,
+					baseCwd: null,
+					warning: null,
+				},
+				backendTaskId: "backend-price",
+				files: {
+					output: "",
+					stderr: "",
+					result: "",
+					systemPrompt: "",
+					taskPrompt: "",
+				},
+				usage: {
+					source: "pi-subagent",
+					capturedAt: "2026-06-08T00:01:00.000Z",
+					aggregate: {
+						attempts: 1,
+						inputTokens: 100,
+						outputTokens: 50,
+						totalTokens: 150,
+						cachedInputTokens: 0,
+						cacheCreationInputTokens: 0,
+						cacheReadInputTokens: 0,
+						reasoningTokens: 0,
+					},
+				},
+				timing: {
+					source: "pi-workflow",
+					capturedAt: "2026-06-08T00:01:00.000Z",
+					launchSlotReleaseDelayMs: 0,
+					aggregate: {
+						attempts: 1,
+						launchWaitMs: 1,
+						launchDurationMs: 2,
+						executionMs: 3,
+						totalMs: 6,
+					},
+				},
+			},
+		],
+	};
+
+	const metrics = buildWorkflowRunMetrics(run);
+
+	assert.equal(metrics.totals.usage.inputTokens, 100);
+	assert.equal(metrics.totals.usage.totalTokens, 150);
+	assert.equal(metrics.totals.usage.costUsd, null);
+	assert.equal(metrics.byTask[0].usage.costUsd, null);
+	assert.equal(metrics.pricingModelVersion, "provider-reported-v1");
+});
+
 test("subagent launch forwards tool-call capture only when env is enabled", async () => {
 	const cwd = makeProject();
 	const previous = process.env.PI_WORKFLOW_CAPTURE_TOOL_CALLS;
@@ -22707,6 +23206,27 @@ test("deep-research verifier schema allows omitted identity echoes", () => {
 		schema,
 	);
 	assert.equal(valid.valid, true, JSON.stringify(valid.issues));
+	const batchValid = validateJsonSchema(
+		{
+			schema: "./schemas/deep-research-verify-claims-control.schema.json",
+			digest: "batched verifier results",
+			results: [
+				{
+					id: "claim-001",
+					status: "verified",
+					verdictDigest: { support: "official source supports it" },
+					evidence: [
+						{
+							url: "https://example.test/source",
+							quote: "source-backed evidence",
+						},
+					],
+				},
+			],
+		},
+		schema,
+	);
+	assert.equal(batchValid.valid, true, JSON.stringify(batchValid.issues));
 	const invalid = validateJsonSchema(
 		{
 			schema: "./schemas/deep-research-verify-claims-control.schema.json",
@@ -22718,7 +23238,34 @@ test("deep-research verifier schema allows omitted identity echoes", () => {
 		schema,
 	);
 	assert.equal(invalid.valid, false);
-	assert.ok(invalid.issues.some((issue) => issue.path === "$.id"));
+	assert.ok(invalid.issues.some((issue) => issue.path === "$"));
+	const invalidBatch = validateJsonSchema(
+		{
+			schema: "./schemas/deep-research-verify-claims-control.schema.json",
+			digest: "missing result id remains invalid",
+			results: [
+				{
+					status: "verified",
+					verdictDigest: { support: "official source supports it" },
+					evidence: [],
+				},
+			],
+		},
+		schema,
+	);
+	assert.equal(invalidBatch.valid, false);
+	const invalidNumericId = validateJsonSchema(
+		{
+			schema: "./schemas/deep-research-verify-claims-control.schema.json",
+			digest: "numeric id remains invalid",
+			id: 123,
+			status: "verified",
+			verdictDigest: { support: "official source supports it" },
+			evidence: [],
+		},
+		schema,
+	);
+	assert.equal(invalidNumericId.valid, false);
 	const camelCaseStatus = validateJsonSchema(
 		{
 			schema: "./schemas/deep-research-verify-claims-control.schema.json",
@@ -22731,7 +23278,235 @@ test("deep-research verifier schema allows omitted identity echoes", () => {
 		schema,
 	);
 	assert.equal(camelCaseStatus.valid, false);
-	assert.ok(camelCaseStatus.issues.some((issue) => issue.path === "$.status"));
+	assert.ok(camelCaseStatus.issues.some((issue) => issue.path === "$"));
+});
+
+test("deep-research shadow selector reports would-skip without skipping verification", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"shadow-select-verification.mjs",
+	);
+	const helper = (
+		await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)
+	).default;
+	const out = await helper({
+		sources: {
+			"sanitize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [
+						{
+							id: "claim-safe",
+							claim: "The docs recommend watch mode for local reruns.",
+							sourceEvidenceHints: [
+								{
+									sourceRef: "wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+									quote: "Use watch mode for local reruns.",
+								},
+							],
+						},
+						{
+							id: "claim-critical",
+							claim: "The timeout is 42 seconds.",
+							factSlotIds: ["slot-critical-timeout"],
+							sourceEvidenceHints: [
+								{
+									sourceRef: "wsrc_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+									quote: "Timeout is 42 seconds.",
+								},
+							],
+						},
+					],
+				},
+			},
+			"audit-claims.main": {
+				auditedClaims: [
+					{ id: "claim-safe", status: "verified" },
+					{ id: "claim-critical", status: "verified" },
+				],
+			},
+		},
+	});
+
+	assert.equal(out.schema, "deep-research-verification-shadow-selector-v1");
+	assert.equal(out.realSkippingEnabled, false);
+	assert.equal(out.summary.wouldSkip, 1);
+	assert.equal(out.summary.wouldVerify, 1);
+	assert.equal(out.summary.skippedButVerified, 1);
+	assert.equal(out.summary.wouldSkipWithoutAudit, 0);
+	assert.equal(out.realSkipReadiness.status, "blocked");
+	assert.deepEqual(out.realSkipReadiness.blockers, [
+		{ reason: "would_skip_verified_claims", count: 1 },
+	]);
+	assert.equal(out.w8FastProfilePrerequisite.status, "not_met");
+	assert.deepEqual(
+		out.decisions.map(({ id, decision }) => [id, decision]),
+		[
+			["claim-safe", "would_skip_shadow_only"],
+			["claim-critical", "would_verify"],
+		],
+	);
+});
+
+test("deep-research shadow selector marks clean shadow skips eligible for canary", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"shadow-select-verification.mjs",
+	);
+	const helper = (
+		await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)
+	).default;
+	const out = await helper({
+		sources: {
+			"sanitize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [
+						{
+							id: "claim-safe",
+							claim: "The docs recommend watch mode for local reruns.",
+							sourceEvidenceHints: [
+								{
+									sourceRef: "wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+									quote: "Use watch mode for local reruns.",
+								},
+							],
+						},
+					],
+				},
+			},
+			"audit-claims.main": {
+				auditedClaims: [{ id: "claim-safe", status: "unsupported" }],
+			},
+		},
+	});
+
+	assert.equal(out.realSkippingEnabled, false);
+	assert.equal(out.realSkipReadiness.status, "eligible_for_canary");
+	assert.equal(out.realSkipReadiness.adopted, false);
+	assert.equal(out.realSkipReadiness.canaryRequired, true);
+	assert.deepEqual(out.realSkipReadiness.blockers, []);
+	assert.equal(out.w8FastProfilePrerequisite.status, "not_met");
+});
+
+test("deep-research shadow selector blocks real skip readiness on audit integrity failures", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"shadow-select-verification.mjs",
+	);
+	const helper = (
+		await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)
+	).default;
+	const out = await helper({
+		sources: {
+			"sanitize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [
+						{
+							id: "claim-safe",
+							claim: "The docs recommend watch mode for local reruns.",
+							sourceEvidenceHints: [
+								{
+									sourceRef: "wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+									quote: "Use watch mode for local reruns.",
+								},
+							],
+						},
+					],
+				},
+			},
+			"audit-claims.main": {
+				auditedClaims: [{ id: "claim-safe", status: "unsupported" }],
+				gateSummary: {
+					sourceRefJoinFailures: 1,
+					invalidVerifierRows: 1,
+				},
+			},
+		},
+	});
+
+	assert.equal(out.realSkipReadiness.status, "blocked");
+	assert.deepEqual(out.realSkipReadiness.blockers, [
+		{ reason: "audit_invalid_verifier_rows", count: 1 },
+		{ reason: "audit_source_ref_join_failures", count: 1 },
+	]);
+});
+
+test("deep-research verification batch planner preserves ids and source hints", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"batch-verification-candidates.mjs",
+	);
+	const helper = (
+		await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)
+	).default;
+	const out = await helper({
+		sources: {
+			"sanitize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [
+						{
+							id: "claim-002",
+							claim: "Second claim",
+							sourceRefs: ["wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+							sourceEvidenceHints: [
+								{
+									sourceRef: "wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+									quote: "Second claim quote",
+								},
+							],
+						},
+						{
+							id: "claim-001",
+							claim: "First claim",
+							sourceRefs: ["wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+						},
+						{
+							id: "claim-003",
+							claim: "Third claim",
+							sourceRefs: ["wsrc_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+						},
+					],
+				},
+			},
+		},
+		options: { maxBatchSize: 2 },
+	});
+
+	assert.equal(out.schema, "deep-research-verification-batches-v1");
+	assert.equal(out.maxBatchSize, 2);
+	assert.equal(out.candidateCount, 3);
+	const sameRefBatch = out.batches.find(
+		(batch) => batch.sourceKey === "refs:wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	);
+	assert.deepEqual(sameRefBatch.claimIds, ["claim-001", "claim-002"]);
+	assert.equal(
+		sameRefBatch.claims[1].sourceEvidenceHints[0].quote,
+		"Second claim quote",
+	);
+	assert.deepEqual(out.batches.flatMap((batch) => batch.claimIds).sort(), [
+		"claim-001",
+		"claim-002",
+		"claim-003",
+	]);
 });
 
 test("deep-research claim-evidence-gate canonicalizes candidate ids and verifier integrity", async () => {
@@ -22769,6 +23544,12 @@ test("deep-research claim-evidence-gate canonicalizes candidate ids and verifier
 							claim: "Latency improved by 42%",
 							factSlotIds: ["slot-003"],
 						},
+						{
+							id: "claim-004",
+							claim: "Batch verifier result is source backed",
+							factSlotIds: ["slot-004"],
+							sourceRefs: ["wsrc_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+						},
 					],
 				},
 				factSlotCoverage: [],
@@ -22804,6 +23585,29 @@ test("deep-research claim-evidence-gate canonicalizes candidate ids and verifier
 				id: "claim-999",
 				status: "verified",
 			},
+			"verify-claims.batch": {
+				schema: "deep-research-verify-claims-batch-v1",
+				digest: "batched verifier output",
+				results: [
+					{
+						id: "claim-004",
+						status: "verified",
+						verdictDigest: { support: "source-backed batch row" },
+						evidence: [
+							{
+								sourceRef: "wsrc_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+								quote: "Batch verifier result is source backed.",
+							},
+						],
+					},
+					{
+						id: "claim-999",
+						status: "verified",
+						verdictDigest: { support: "unknown claim should be rejected" },
+						evidence: [],
+					},
+				],
+			},
 		},
 		options: {
 			requireFetchedEvidenceForVerified: true,
@@ -22813,15 +23617,27 @@ test("deep-research claim-evidence-gate canonicalizes candidate ids and verifier
 
 	assert.deepEqual(
 		out.auditedClaims.map((claim) => claim.id),
-		["claim-001", "claim-002", "claim-003"],
+		["claim-001", "claim-002", "claim-003", "claim-004"],
 	);
-	assert.equal(out.gateSummary.total, 3);
-	assert.equal(out.gateSummary.verifierRowsTotal, 6);
-	assert.equal(out.gateSummary.invalidVerifierRows, 3);
+	assert.equal(out.gateSummary.total, 4);
+	assert.equal(out.gateSummary.verifierRowsTotal, 8);
+	assert.equal(out.gateSummary.invalidVerifierRows, 4);
 	assert.equal(out.gateSummary.missingVerifierResults, 1);
 	assert.equal(out.gateSummary.duplicateVerifierRows, 1);
 	assert.equal(out.gateSummary.duplicateStatusConflicts, 1);
+	assert.equal(out.batchAdoptionReadiness.status, "blocked");
+	assert.deepEqual(
+		out.batchAdoptionReadiness.blockers.map((blocker) => blocker.reason),
+		[
+			"invalid_verifier_rows",
+			"missing_verifier_results",
+			"duplicate_verifier_rows",
+			"duplicate_status_conflicts",
+			"source_ref_join_failures",
+		],
+	);
 	assert.deepEqual(out.statusPartitions.unsupported, ["claim-001"]);
+	assert.deepEqual(out.statusPartitions.verified, ["claim-004"]);
 	assert.deepEqual(out.statusPartitions.partiallySupported, ["claim-003"]);
 	assert.deepEqual(out.statusPartitions.other, ["claim-002"]);
 	assert.equal(out.auditedClaims[0].claim, "Canonical claim one");
@@ -22830,7 +23646,12 @@ test("deep-research claim-evidence-gate canonicalizes candidate ids and verifier
 	assert.equal(out.auditedClaims[2].status, "partially_supported");
 	assert.deepEqual(
 		out.invalidVerifierRows.map((row) => row.reason),
-		["missing_claim_id", "non_string_claim_id", "unknown_claim_id"],
+		[
+			"missing_claim_id",
+			"non_string_claim_id",
+			"unknown_claim_id",
+			"unknown_claim_id",
+		],
 	);
 	assert.equal(out.duplicateVerifierRows[0].claimId, "claim-001");
 	assert.equal(out.duplicateVerifierRows[0].selectedStatus, "unsupported");
@@ -22844,6 +23665,250 @@ test("deep-research claim-evidence-gate canonicalizes candidate ids and verifier
 			(gap) => gap.evidenceState === "duplicate_verifier_rows_conflicting",
 		),
 	);
+});
+
+test("deep-research claim-evidence-gate preserves row-shaped results and clean batch joins", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"claim-evidence-gate.mjs",
+	);
+	const helper = (
+		await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)
+	).default;
+	const out = await helper({
+		sources: {
+			"normalize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [
+						{
+							id: "claim-row",
+							claim: "Row-shaped verifier is preserved.",
+							sourceRefs: ["wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+						},
+						{
+							id: "claim-batch",
+							claim: "Batch verifier joins source refs.",
+							sourceRefs: ["wsrc_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+						},
+					],
+				},
+				factSlotCoverage: [],
+			},
+			"verify-claims.row": {
+				id: "claim-row",
+				status: "verified",
+				results: [],
+				verdictDigest: { support: "row shape wins over incidental results" },
+				evidence: [
+					{
+						sourceRef: "wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+						quote: "Row-shaped verifier is preserved.",
+					},
+				],
+			},
+			"verify-claims.batch": {
+				schema: "deep-research-verify-claims-batch-v1",
+				digest: "duplicate same-status batch rows",
+				results: [
+					{
+						id: "claim-batch",
+						status: "verified",
+						verdictDigest: { support: "first batch row" },
+						evidence: [
+							{
+								sourceRef: "wsrc_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+								quote: "Batch verifier joins source refs.",
+							},
+						],
+					},
+					{
+						id: "claim-batch",
+						status: "verified",
+						verdictDigest: { support: "duplicate same-status row" },
+						evidence: [
+							{
+								sourceRef: "wsrc_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+								quote: "Batch verifier joins source refs.",
+							},
+						],
+					},
+				],
+			},
+		},
+		options: {
+			requireFetchedEvidenceForVerified: true,
+			downgradeExactQuantitativeWithoutSource: true,
+		},
+	});
+
+	assert.equal(out.gateSummary.sourceRefJoinFailures, 0);
+	assert.equal(out.gateSummary.missingVerifierResults, 0);
+	assert.equal(out.gateSummary.duplicateVerifierRows, 1);
+	assert.equal(out.gateSummary.duplicateStatusConflicts, 0);
+	assert.equal(out.batchAdoptionReadiness.status, "blocked");
+	assert.deepEqual(out.batchAdoptionReadiness.blockers, [
+		{ reason: "duplicate_verifier_rows", count: 1 },
+	]);
+	assert.deepEqual(out.statusPartitions.verified, ["claim-row", "claim-batch"]);
+});
+
+test("deep-research claim-evidence-gate blocks batch rows outside their source batch", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"claim-evidence-gate.mjs",
+	);
+	const helper = (
+		await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)
+	).default;
+	const out = await helper({
+		sources: {
+			"sanitize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [
+						{
+							id: "claim-a",
+							claim: "Claim A belongs to batch one.",
+							sourceRefs: ["wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+						},
+						{
+							id: "claim-b",
+							claim: "Claim B belongs to batch two.",
+							sourceRefs: ["wsrc_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+						},
+					],
+				},
+			},
+			"verification-batches.main": {
+				batches: [
+					{ id: "vbatch-001", claimIds: ["claim-a"] },
+					{ id: "vbatch-002", claimIds: ["claim-b"] },
+				],
+			},
+			"verify-claims": {
+				schema: "deep-research-verify-claims-batch-v1",
+				digest: "mis-bound row",
+				results: [
+					{
+						id: "claim-b",
+						status: "verified",
+						verdictDigest: { support: "wrong batch" },
+						evidence: [
+							{
+								sourceRef: "wsrc_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+								quote: "Claim B belongs to batch two.",
+							},
+						],
+					},
+				],
+			},
+			"verify-claims.vbatch-002": {
+				schema: "deep-research-verify-claims-batch-v1",
+				digest: "mis-bound row",
+				results: [
+					{
+						id: "claim-a",
+						status: "verified",
+						verdictDigest: { support: "wrong batch" },
+						evidence: [
+							{
+								sourceRef: "wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+								quote: "Claim A belongs to batch one.",
+							},
+						],
+					},
+				],
+			},
+		},
+		options: {
+			requireFetchedEvidenceForVerified: true,
+			downgradeExactQuantitativeWithoutSource: true,
+		},
+		context: {
+			sourceStatuses: [
+				{ source: "verify-claims", specId: "verify-claims.vbatch-001" },
+				{
+					source: "verify-claims.vbatch-002",
+					specId: "verify-claims.vbatch-002",
+				},
+			],
+		},
+	});
+
+	assert.equal(out.gateSummary.invalidVerifierRows, 2);
+	assert.equal(out.gateSummary.missingVerifierResults, 2);
+	assert.deepEqual(
+		out.invalidVerifierRows.map((row) => row.reason),
+		[
+			"batch_result_id_not_in_source_batch",
+			"batch_result_id_not_in_source_batch",
+		],
+	);
+	assert.equal(out.batchAdoptionReadiness.status, "blocked");
+	assert.ok(
+		out.batchAdoptionReadiness.blockers.some(
+			(blocker) => blocker.reason === "invalid_verifier_rows",
+		),
+	);
+});
+
+test("deep-research claim-evidence-gate marks clean verifier joins eligible for batch canary", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"claim-evidence-gate.mjs",
+	);
+	const helper = (
+		await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)
+	).default;
+	const out = await helper({
+		sources: {
+			"normalize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [
+						{
+							id: "claim-clean",
+							claim: "Clean verifier row is source backed.",
+							sourceRefs: ["wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+						},
+					],
+				},
+				factSlotCoverage: [],
+			},
+			"verify-claims.clean": {
+				id: "claim-clean",
+				status: "verified",
+				evidence: [
+					{
+						sourceRef: "wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+						quote: "Clean verifier row is source backed.",
+					},
+				],
+			},
+		},
+		options: {
+			requireFetchedEvidenceForVerified: true,
+			downgradeExactQuantitativeWithoutSource: true,
+		},
+	});
+
+	assert.equal(out.batchAdoptionReadiness.status, "eligible_for_canary");
+	assert.equal(out.batchAdoptionReadiness.adopted, false);
+	assert.equal(out.batchAdoptionReadiness.canaryRequired, true);
+	assert.deepEqual(out.batchAdoptionReadiness.blockers, []);
 });
 
 test("workflow_artifact lists visible sources, reads by source name, and records a read ledger", async () => {
