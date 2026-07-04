@@ -211,13 +211,7 @@
           "controlSchema": "./schemas/deep-research-final-synthesis-control.schema.json"
         },
         "prompt": "Produce a compact parent-facing synthesis overlay from the audited packet. Before final output, satisfy requiredReads with exactly one workflow_artifact read of final-audit-packet.control at path=$.packet.synthesisInput with maxChars=24000. Do not make extra workflow_artifact reads, and do not use filesystem read, ls, find, grep, or direct .pi paths for this stage. The packet is authoritative for verdictCounts, factSlotCoverage, claimVerdictLedger, preservedClaims, remainingGaps, coverageGaps, researchScopeCoverage, and verifier integrity; do not copy those ledgers into your control output. Do not re-verify claims, do not promote partially_supported/unsupported/conflicting claims to verified, and do not smooth away source or verifier integrity gaps. Put machine-readable JSON in <control> with schema=\"deep-research-final-synthesis-v1\", digest, and synthesis. synthesis.bottomLine must directly answer the runtime task. synthesis.keyFindingIds must be an ordered list of claim ids from packet.synthesisInput.claims that should drive the main findings; select verified claims first and include partially_supported claims only when explicitly caveated. synthesis.recommendations and synthesis.actionPlan must contain concise parent-facing objects with recommendation/action text and supportingClaimIds; reference claim ids instead of copying claim rows or URLs. synthesis.caveatNotes must frame important limitations using relatedClaimIds and/or gapIds from packet.synthesisInput.gaps. synthesis.parentDecisionNotes must contain note, whyItMatters, evidenceStatus, and suggestedParentDecision. Optional notableUnsupportedClaimIds and contestedClaimIds may identify unsupported or conflicting claims that deserve emphasis. Keep the control output small: no factSlotCoverage, no claimVerdictIndex, no copied preservedClaims, no copied gap ledger, no long quotes, and no source URL lists. The deterministic final renderer will join your ids against final-audit-packet and enforce evidenceStatus from audited verdicts.",
-        "thinking": "xhigh",
-        "sourceProjection": {
-          "include": [
-            "$.packet.synthesisInput"
-          ],
-          "maxChars": 24000
-        }
+        "thinking": "xhigh"
       },
       {
         "id": "final",
