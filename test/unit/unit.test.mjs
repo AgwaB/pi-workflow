@@ -15631,6 +15631,195 @@ test("subagent terminal observability captures usage and separates launch timing
 	}
 });
 
+test("subagent terminal observability aggregates distinct retry attempts", async () => {
+	const cwd = makeProject();
+	let statusSnapshot = null;
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		setSubagentApiForTests({
+			async runSubagent() {
+				return {
+					runId: "run_usage_retry_current",
+					attemptId: "attempt_usage_retry_current",
+					status: "running",
+				};
+			},
+			async getSubagentStatus() {
+				return statusSnapshot;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+
+		const spec = workflowSpec("unit-scout", { thinking: "low" });
+		const compiled = await compileWorkflow(spec, { cwd, task: "Review topic" });
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await writeRunRecord(cwd, run);
+		await launchSubagentTask(cwd, run, run.tasks[0], compiled.tasks[0]);
+
+		const task = run.tasks[0];
+		assert.equal(task.timing.source, "pi-workflow");
+		assert.ok(task.timing.launchQueuedAt);
+		assert.ok(task.timing.launchStartedAt);
+		assert.ok(task.timing.launchCompletedAt);
+		assert.equal(typeof task.timing.launchWaitMs, "number");
+		assert.equal(typeof task.timing.launchDurationMs, "number");
+
+		const firstCapturedAt = new Date(
+			Date.parse(task.startedAt) - 1000,
+		).toISOString();
+		task.launchRetry = { attempts: 2, reason: "retry_model_failure" };
+		task.outputRetry = { attempts: 1, reason: "invalid_json" };
+		task.usage = {
+			source: "pi-subagent",
+			capturedAt: firstCapturedAt,
+			inputTokens: 4,
+			outputTokens: 5,
+			totalTokens: 9,
+			costUsd: 0.1,
+			aggregate: {
+				attempts: 1,
+				inputTokens: 4,
+				outputTokens: 5,
+				totalTokens: 9,
+				costUsd: 0.1,
+			},
+			attempts: [
+				{
+					source: "seed",
+					capturedAt: firstCapturedAt,
+					backendRunId: "run_usage_retry_previous",
+					backendAttemptId: "attempt_usage_retry_previous",
+					inputTokens: 4,
+					outputTokens: 5,
+					totalTokens: 9,
+					costUsd: 0.1,
+				},
+			],
+		};
+		task.timing = {
+			...task.timing,
+			aggregate: {
+				attempts: 1,
+				launchWaitMs: 2,
+				launchDurationMs: 3,
+				executionMs: 100,
+				totalMs: 120,
+			},
+			attempts: [
+				{
+					source: "seed",
+					capturedAt: firstCapturedAt,
+					backendRunId: "run_usage_retry_previous",
+					backendAttemptId: "attempt_usage_retry_previous",
+					launchWaitMs: 2,
+					launchDurationMs: 3,
+					executionStartedAt: firstCapturedAt,
+					executionCompletedAt: new Date(
+						Date.parse(firstCapturedAt) + 100,
+					).toISOString(),
+					executionMs: 100,
+					totalMs: 120,
+				},
+			],
+		};
+
+		const startedAt = task.startedAt;
+		const completedAt = new Date(Date.parse(startedAt) + 50).toISOString();
+		const artifactDir = join(cwd, task.backendFiles.runsDir);
+		mkdirSync(artifactDir, { recursive: true });
+		writeFileSync(
+			join(artifactDir, "output.log"),
+			[
+				"<control>",
+				JSON.stringify({ schema: "stage-control-v1", digest: "ok" }),
+				"</control>",
+				"<analysis>",
+				"done",
+				"</analysis>",
+				"<refs>",
+				"[]",
+				"</refs>",
+			].join("\n"),
+		);
+		writeFileSync(join(artifactDir, "stderr.log"), "");
+		writeFileSync(
+			join(artifactDir, "result.json"),
+			JSON.stringify({
+				status: "completed",
+				startedAt,
+				completedAt,
+				durationMs: 50,
+				exitCode: 0,
+				metadata: {
+					usage: {
+						input: 6,
+						output: 7,
+						total_tokens: 13,
+						cost: { total: 0.2 },
+					},
+				},
+			}),
+		);
+		statusSnapshot = {
+			runId: "run_usage_retry_current",
+			attemptId: "attempt_usage_retry_current",
+			backend: "headless",
+			status: "completed",
+			failureKind: null,
+			startedAt,
+			completedAt,
+			durationMs: 50,
+			logs: [
+				{ type: "output", path: "output.log", artifactCwd: artifactDir },
+				{ type: "stderr", path: "stderr.log", artifactCwd: artifactDir },
+				{ type: "result", path: "result.json", artifactCwd: artifactDir },
+			],
+			attempts: [
+				{ attemptId: "attempt_usage_retry_current", status: "completed" },
+			],
+		};
+
+		const refreshed = await refreshRunFromSubagentArtifacts(cwd, run);
+		const refreshedTask = refreshed.tasks[0];
+		assert.equal(refreshedTask.launchRetry.attempts, 2);
+		assert.equal(refreshedTask.outputRetry.attempts, 1);
+		assert.equal(refreshedTask.usage.inputTokens, 10);
+		assert.equal(refreshedTask.usage.outputTokens, 12);
+		assert.equal(refreshedTask.usage.totalTokens, 22);
+		assert.equal(refreshedTask.usage.attempts.at(-1).inputTokens, 6);
+		assert.equal(refreshedTask.usage.attempts.at(-1).outputTokens, 7);
+		assert.equal(refreshedTask.usage.attempts.at(-1).totalTokens, 13);
+		assert.equal(refreshedTask.usage.aggregate.attempts, 2);
+		assert.equal(refreshedTask.usage.aggregate.inputTokens, 10);
+		assert.equal(refreshedTask.usage.aggregate.outputTokens, 12);
+		assert.equal(refreshedTask.usage.aggregate.totalTokens, 22);
+		assert.equal(refreshedTask.usage.aggregate.costUsd.toFixed(1), "0.3");
+		assert.equal(refreshedTask.usage.attempts.length, 2);
+		assert.deepEqual(
+			refreshedTask.usage.attempts.map((attempt) => attempt.backendAttemptId),
+			["attempt_usage_retry_previous", "attempt_usage_retry_current"],
+		);
+		assert.equal(refreshedTask.timing.executionMs, 50);
+		assert.equal(refreshedTask.timing.aggregate.attempts, 2);
+		assert.equal(refreshedTask.timing.aggregate.executionMs, 150);
+		assert.equal(refreshedTask.timing.aggregate.totalMs, 170);
+		assert.equal(refreshedTask.timing.attempts.length, 2);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("subagent launch forwards tool-call capture only when env is enabled", async () => {
 	const cwd = makeProject();
 	const previous = process.env.PI_WORKFLOW_CAPTURE_TOOL_CALLS;
@@ -23935,12 +24124,25 @@ test("subagent launch gate honors env override and recovers slots after throw", 
 		);
 		await eventually(() => assert.equal(releaseRunSubagent.length, 2));
 		assert.equal(maxActive, 2);
+		const queuedFixture = fixtures.find(
+			(fixture) => fixture.task.timing?.launchStartedAt === undefined,
+		);
+		assert.ok(queuedFixture);
+		assert.ok(queuedFixture.task.timing.launchQueuedAt);
+		assert.equal(queuedFixture.task.timing.launchCompletedAt, undefined);
 		releaseRunSubagent.shift()();
 		await eventually(() => assert.equal(releaseRunSubagent.length, 2));
 		assert.equal(maxActive, 2);
+		assert.ok(queuedFixture.task.timing.launchStartedAt);
+		assert.equal(typeof queuedFixture.task.timing.launchWaitMs, "number");
+		assert.equal(queuedFixture.task.timing.launchCompletedAt, undefined);
+		assert.equal(queuedFixture.task.timing.launchDurationMs, undefined);
 		while (releaseRunSubagent.length > 0) releaseRunSubagent.shift()();
 		await Promise.all(launches);
 		assert.equal(maxActive, 2);
+		assert.ok(queuedFixture.task.timing.launchCompletedAt);
+		assert.equal(typeof queuedFixture.task.timing.launchDurationMs, "number");
+		assert.equal(queuedFixture.task.timing.attempts, undefined);
 
 		process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES = "1";
 		process.env.PI_WORKFLOW_LAUNCH_SLOT_RELEASE_DELAY_MS = "25";
