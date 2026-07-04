@@ -7867,7 +7867,19 @@ test("bundled deep-research compacts audit packets before executive final", asyn
 	});
 	const byStage = new Map(compiled.tasks.map((task) => [task.stageId, task]));
 	assert.equal(byStage.get("plan")?.runtime.thinking, "high");
+	assert.deepEqual(byStage.get("plan")?.artifactGraph.output.partial, {
+		paths: ["$.researchQuestions"],
+	});
+	assert.match(
+		byStage.get("plan")?.compiledPrompt ?? "",
+		/Workflow Partial Output Protocol/,
+	);
 	assert.equal(byStage.get("research-questions")?.runtime.thinking, "medium");
+	assert.deepEqual(byStage.get("research-questions")?.foreach?.from, {
+		stage: "plan",
+		path: "$.researchQuestions",
+		streaming: { enabled: true, minChunk: 1 },
+	});
 	assert.match(
 		byStage.get("research-questions")?.compiledPrompt ?? "",
 		/Research the deep-research artifact contract/,
@@ -7938,6 +7950,9 @@ test("bundled deep-research compacts audit packets before executive final", asyn
 	]);
 
 	assert.equal(sanitizeClaims?.kind, "support");
+	assert.deepEqual(sanitizeClaims?.artifactGraph.output.partial, {
+		paths: ["$.claimInventory.verificationCandidates"],
+	});
 	assert.deepEqual(sanitizeClaims.dependsOn, [
 		"normalize-claims.main",
 		"normalize-input-packet.main",
@@ -7949,6 +7964,11 @@ test("bundled deep-research compacts audit packets before executive final", asyn
 	assert.deepEqual(byStage.get("verify-claims")?.dependsOn, [
 		"sanitize-claims.main",
 	]);
+	assert.deepEqual(byStage.get("verify-claims")?.foreach?.from, {
+		stage: "sanitize-claims",
+		path: "$.claimInventory.verificationCandidates",
+		streaming: { enabled: true, minChunk: 2 },
+	});
 
 	assert.equal(auditClaims?.kind, "support");
 	assert.deepEqual(auditClaims.dependsOn, [

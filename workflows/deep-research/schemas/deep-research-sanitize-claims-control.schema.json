@@ -1,0 +1,63 @@
+{
+  "type": "object",
+  "required": [
+    "schema",
+    "claimInventory",
+    "factSlotCoverage"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "minLength": 1
+    },
+    "claimInventory": {
+      "type": "object",
+      "required": [
+        "verificationCandidates",
+        "preservedClaims",
+        "duplicates"
+      ],
+      "properties": {
+        "verificationCandidates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "claim": { "type": "string" },
+              "sourceUrls": { "type": "array", "items": { "type": "string" } },
+              "sourceRefs": { "type": "array", "items": { "type": "string" } },
+              "sourceQuality": { "type": "string" },
+              "reasonToVerify": { "type": "string" },
+              "scopeItems": { "type": "array", "items": { "type": "string" } },
+              "factSlotIds": { "type": "array", "items": { "type": "string" } },
+              "verificationNeed": { "enum": ["core", "useful", "optional"] }
+            }
+          },
+          "maxItems": 48
+        },
+        "preservedClaims": {
+          "type": "array",
+          "items": { "type": "object" },
+          "maxItems": 24
+        },
+        "duplicates": {}
+      }
+    },
+    "factSlotCoverage": {
+      "type": "array",
+      "items": { "type": "object" },
+      "maxItems": 64
+    },
+    "coverageGaps": {
+      "type": "array",
+      "items": { "type": "object" }
+    },
+    "researchScopeCoverage": {
+      "type": "array",
+      "items": { "type": "object" }
+    },
+    "normalizationNotes": {},
+    "sanitizerDiagnostics": {}
+  }
+}
