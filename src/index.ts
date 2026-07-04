@@ -67,6 +67,26 @@ export type {
 } from "./dynamic-decision.js";
 export { dynamicOutputProfileValues } from "./dynamic-profiles.js";
 export type { DynamicOutputProfile } from "./dynamic-profiles.js";
+export {
+	buildWorkflowRunMetrics,
+	WORKFLOW_METRICS_PRICING_MODEL_VERSION,
+	WORKFLOW_METRICS_SCHEMA_VERSION,
+} from "./workflow-metrics.js";
+export type {
+	WorkflowLaunchTimingMetrics,
+	WorkflowMetricValue,
+	WorkflowMetricsPricingModelVersion,
+	WorkflowMetricsPricingSource,
+	WorkflowMetricsSchemaVersion,
+	WorkflowRetryMetrics,
+	WorkflowRunMetrics,
+	WorkflowRunMetricsMetadata,
+	WorkflowRunMetricsRollup,
+	WorkflowStageMetrics,
+	WorkflowTaskMetrics,
+	WorkflowTaskStatusCounts,
+	WorkflowUsageMetrics,
+} from "./workflow-metrics.js";
 
 export const WORKFLOW_COMMAND = "workflow";
 
