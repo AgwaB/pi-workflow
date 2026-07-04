@@ -62,6 +62,8 @@ const DEFAULT_WORKFLOW_FETCH_CONTENT_INLINE_CHARS = 12_000;
 const DEFAULT_TRANSIENT_MODEL_FAILURE_RETRIES = 5;
 const DEFAULT_ARTIFACT_OUTPUT_RETRIES = 2;
 const MAX_CONCURRENT_LAUNCHES_ENV = "PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES";
+const LAUNCH_SLOT_RELEASE_DELAY_MS_ENV =
+	"PI_WORKFLOW_LAUNCH_SLOT_RELEASE_DELAY_MS";
 const PARENT_SUBAGENT_CWD_ENV = "PI_WORKFLOW_PARENT_SUBAGENT_CWD";
 const PARENT_SUBAGENT_RUNS_DIR_ENV = "PI_WORKFLOW_PARENT_SUBAGENT_RUNS_DIR";
 const PARENT_SUBAGENT_RUN_ID_ENV = "PI_WORKFLOW_PARENT_SUBAGENT_RUN_ID";
@@ -292,7 +294,7 @@ async function recordTerminalParentSubagentChildEvent(
 	});
 }
 
-let launchSlotReleaseDelayMs = DEFAULT_LAUNCH_SLOT_RELEASE_DELAY_MS;
+let launchSlotReleaseDelayMsForTests: number | undefined;
 let transientRetryJitterForTests: (() => number) | undefined;
 const launchWaitQueue: Array<() => void> = [];
 let activeLaunchSlots = 0;
@@ -329,6 +331,18 @@ function releaseLaunchSlot(): void {
 	activeLaunchSlots = Math.max(0, activeLaunchSlots - 1);
 }
 
+function resolveLaunchSlotReleaseDelayMs(): number {
+	if (launchSlotReleaseDelayMsForTests !== undefined) {
+		return launchSlotReleaseDelayMsForTests;
+	}
+	const override = Number.parseInt(
+		process.env[LAUNCH_SLOT_RELEASE_DELAY_MS_ENV] ?? "",
+		10,
+	);
+	if (Number.isFinite(override)) return Math.max(0, Math.floor(override));
+	return DEFAULT_LAUNCH_SLOT_RELEASE_DELAY_MS;
+}
+
 function releaseLaunchSlotAfterDelay(
 	delayMs: number,
 	release: () => void,
@@ -349,7 +363,7 @@ async function runWithLaunchSlot<T>(action: () => Promise<T>): Promise<T> {
 		return result;
 	} finally {
 		releaseLaunchSlotAfterDelay(
-			holdAfterReturn ? launchSlotReleaseDelayMs : 0,
+			holdAfterReturn ? resolveLaunchSlotReleaseDelayMs() : 0,
 			release,
 		);
 	}
@@ -374,9 +388,9 @@ export function setSubagentLaunchControlsForTests(options?: {
 	releaseDelayMs?: number;
 	retryJitterMs?: number | (() => number);
 }): void {
-	launchSlotReleaseDelayMs =
+	launchSlotReleaseDelayMsForTests =
 		options?.releaseDelayMs === undefined
-			? DEFAULT_LAUNCH_SLOT_RELEASE_DELAY_MS
+			? undefined
 			: Math.max(0, Math.floor(options.releaseDelayMs));
 	transientRetryJitterForTests =
 		options?.retryJitterMs === undefined

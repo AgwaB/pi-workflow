@@ -23658,6 +23658,8 @@ test("recovered artifact graph subagent handle preserves same-session retry", as
 test("subagent launch gate honors env override and recovers slots after throw", async () => {
 	const cwd = makeProject();
 	const originalLimit = process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES;
+	const originalReleaseDelay =
+		process.env.PI_WORKFLOW_LAUNCH_SLOT_RELEASE_DELAY_MS;
 	process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES = "2";
 	setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
 	try {
@@ -23767,7 +23769,8 @@ test("subagent launch gate honors env override and recovers slots after throw", 
 		assert.equal(maxActive, 2);
 
 		process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES = "1";
-		setSubagentLaunchControlsForTests({ releaseDelayMs: 25, retryJitterMs: 0 });
+		process.env.PI_WORKFLOW_LAUNCH_SLOT_RELEASE_DELAY_MS = "25";
+		setSubagentLaunchControlsForTests({ retryJitterMs: 0 });
 		let delayedLaunches = 0;
 		setSubagentApiForTests({
 			async runSubagent() {
@@ -23846,6 +23849,11 @@ test("subagent launch gate honors env override and recovers slots after throw", 
 		if (originalLimit === undefined)
 			delete process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES;
 		else process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES = originalLimit;
+		if (originalReleaseDelay === undefined)
+			delete process.env.PI_WORKFLOW_LAUNCH_SLOT_RELEASE_DELAY_MS;
+		else
+			process.env.PI_WORKFLOW_LAUNCH_SLOT_RELEASE_DELAY_MS =
+				originalReleaseDelay;
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });
