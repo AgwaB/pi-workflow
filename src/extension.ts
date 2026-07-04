@@ -114,7 +114,7 @@ const WORKFLOW_DYNAMIC_TOOL_PARAMETERS = {
 
 export default function workflowExtension(pi: ExtensionAPI): void {
 	let workflowCompletionCache: Array<{ name: string }> = [];
-	pi.on("session_start", async (_event, ctx) => {
+	pi.on("session_start", async (event, ctx) => {
 		if (!isWorkflowSupervisorEnabled()) return;
 		workflowCompletionCache = await listWorkflows(ctx.cwd).catch(
 			() => workflowCompletionCache,
@@ -125,7 +125,8 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 		await notifyUnfinishedRuns(ctx.cwd, (message, type) =>
 			ctx.ui.notify(message, type),
 		).catch(() => undefined);
-		await deliverMissedWorkflowFeedback(ctx, pi).catch(() => undefined);
+		if (event.reason !== "reload")
+			await deliverMissedWorkflowFeedback(ctx, pi).catch(() => undefined);
 	});
 
 	registerWorkflowNaturalLanguageTools(pi);

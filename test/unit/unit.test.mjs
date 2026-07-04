@@ -36,7 +36,7 @@ import {
 	waitForRun,
 	watchRun,
 } from "../../.tmp/unit/engine.js";
-import {
+import workflowExtension, {
 	deliverMissedWorkflowFeedback,
 	notifyUnfinishedRuns,
 	registerWorkflowNaturalLanguageTools,
@@ -20921,6 +20921,67 @@ test("deliverMissedWorkflowFeedback does not auto-trigger an agent turn on start
 			/Open the workflow for the full result/,
 		);
 	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("workflow extension skips missed completion feedback during session reload", async () => {
+	const cwd = makeProject();
+	const originalRole = process.env.PI_WORKFLOW_ROLE;
+	try {
+		process.env.PI_WORKFLOW_ROLE = "supervisor";
+		writeAgent(cwd, "unit-scout", "read");
+		const workflowRoot = join(cwd, "workflows");
+		writeDefaultStageControlSchema(workflowRoot);
+		const spec = artifactGraphWorkflowSpec();
+		const specPath = join(workflowRoot, "unit.json");
+		writeFileSync(specPath, JSON.stringify(spec));
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Reload feedback target",
+		});
+		const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await completeTask(cwd, taskBySpec(run, "main.main"), {
+			executiveMarkdown: "# Executive\n\nDone.",
+		});
+		run.status = deriveRunStatus(run);
+		await writeRunRecord(cwd, run);
+		await updateIndex(cwd);
+
+		const handlers = new Map();
+		const sent = [];
+		workflowExtension({
+			on(event, handler) {
+				handlers.set(event, handler);
+			},
+			registerCommand() {},
+			registerTool() {},
+			sendMessage(message, options) {
+				sent.push({ message, options });
+			},
+		});
+		const ctx = {
+			cwd,
+			hasUI: true,
+			ui: { notify() {}, confirm: async () => true },
+		};
+
+		await handlers.get("session_start")?.(
+			{ type: "session_start", reason: "reload" },
+			ctx,
+		);
+		assert.equal(sent.length, 0);
+
+		await handlers.get("session_start")?.(
+			{ type: "session_start", reason: "startup" },
+			ctx,
+		);
+		assert.equal(sent.length, 1);
+		assert.equal(sent[0].message.customType, "workflow-completion");
+	} finally {
+		if (originalRole === undefined) delete process.env.PI_WORKFLOW_ROLE;
+		else process.env.PI_WORKFLOW_ROLE = originalRole;
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });
