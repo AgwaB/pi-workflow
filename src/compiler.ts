@@ -858,15 +858,29 @@ async function compileArtifactGraphPlan(
 			/\$\{item\}/g,
 			"the relevant item from the dependency context",
 		);
-		const compiledPrompt = [
+		const instructionText = `# Instructions\n\n${normalizedPrompt}`;
+		const stageText = `# Workflow Stage\n\nstage=${stage.id}\ntype=${runtimeStageKind}`;
+		const taskText =
 			injectRuntimeTaskInPrompt && options.task
 				? `# Task\n\n${options.task}`
-				: undefined,
-			workflowInputText || undefined,
-			`# Workflow Stage\n\nstage=${stage.id}\ntype=${runtimeStageKind}`,
-			`# Instructions\n\n${normalizedPrompt}`,
-			roleText || undefined,
-		]
+				: undefined;
+		const compiledPrompt = (
+			runtimeStageKind === "foreach"
+				? [
+						taskText,
+						workflowInputText || undefined,
+						stageText,
+						roleText || undefined,
+						instructionText,
+					]
+				: [
+						taskText,
+						workflowInputText || undefined,
+						stageText,
+						instructionText,
+						roleText || undefined,
+					]
+		)
 			.filter(Boolean)
 			.join("\n\n");
 		const toolSelection = resolveToolSelection(

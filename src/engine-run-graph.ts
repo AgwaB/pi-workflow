@@ -571,9 +571,10 @@ export function buildForeachGeneratedTasks(
 			template.foreach!.injectRuntimeTask && runtimeTask
 				? `# Task\n\n${runtimeTask}`
 				: undefined,
-			`# Workflow Stage\n\nstage=${template.stageId}\ntype=foreach\nitem=${taskId}`,
-			`# Instructions\n\n${instructions}`,
+			`# Workflow Stage\n\nstage=${template.stageId}\ntype=foreach`,
 			template.foreach!.roleText || undefined,
+			`# Workflow Item\n\nitem=${taskId}`,
+			`# Instructions\n\n${instructions}`,
 		]
 			.filter(Boolean)
 			.join("\n\n");

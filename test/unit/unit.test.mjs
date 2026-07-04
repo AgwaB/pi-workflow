@@ -9105,7 +9105,11 @@ test("foreach item interpolation preserves dollar replacement tokens", () => {
 	const { tasks } = buildForeachGeneratedTasks(
 		{
 			stageId: "verify",
-			foreach: { prompt: "Verify ${item}", injectRuntimeTask: false },
+			foreach: {
+				prompt: "Verify ${item}",
+				injectRuntimeTask: false,
+				roleText: "Use repository evidence.",
+			},
 		},
 		undefined,
 		["price is $1 and $& per unit"],
@@ -9113,6 +9117,20 @@ test("foreach item interpolation preserves dollar replacement tokens", () => {
 	assert.equal(tasks.length, 1);
 	assert.match(tasks[0].task, /price is \$1 and \$& per unit/);
 	assert.match(tasks[0].compiledPrompt, /price is \$1 and \$& per unit/);
+	const roleIndex = tasks[0].compiledPrompt.indexOf("Use repository evidence.");
+	assert.ok(
+		roleIndex < tasks[0].compiledPrompt.indexOf("item=item-001"),
+		"materialized foreach prompts keep stable role text before item-varying metadata",
+	);
+	assert.ok(
+		roleIndex < tasks[0].compiledPrompt.indexOf("price is $1 and $& per unit"),
+		"materialized foreach prompts keep stable role text before item-varying instructions",
+	);
+	assert.doesNotMatch(
+		tasks[0].compiledPrompt.slice(0, roleIndex),
+		/item=item-001/,
+	);
+	assert.match(tasks[0].compiledPrompt, /# Workflow Item\n\nitem=item-001/);
 });
 
 test("simple JSON path reads own properties only", () => {
@@ -9234,6 +9252,13 @@ test("compiler omits runtime task injection from foreach templates", async () =>
 		assert.match(
 			compiled.tasks[1].compiledPrompt,
 			/Verify the relevant item from the dependency context/,
+		);
+		assert.ok(
+			compiled.tasks[1].compiledPrompt.indexOf("Use repository evidence.") <
+				compiled.tasks[1].compiledPrompt.indexOf(
+					"Verify the relevant item from the dependency context",
+				),
+			"foreach prompts keep stable role text before item-varying instructions",
 		);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
