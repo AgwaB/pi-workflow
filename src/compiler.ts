@@ -29,6 +29,7 @@ import {
 	type TaskCapability,
 	type ThinkingLevel,
 	type ValidationIssue,
+	type WorkflowFailurePolicy,
 	type WorkflowToolObjectSpec,
 	type WorkflowToolSpec,
 	type WorktreePolicy,
@@ -72,6 +73,24 @@ interface CompileOptions {
 interface ArtifactGraphCompilePlanBuildResult {
 	plan: any;
 	stageMetadata: Map<string, NonNullable<CompiledTask["artifactGraph"]>>;
+}
+
+function compileWorkflowFailurePolicy(
+	policy: WorkflowFailurePolicy | undefined,
+): Required<WorkflowFailurePolicy> | undefined {
+	if (
+		policy?.failFast === undefined &&
+		policy?.cancelSiblingsOnFailure === undefined &&
+		policy?.cancelDescendantsOnParentFailure === undefined
+	) {
+		return undefined;
+	}
+	return {
+		failFast: policy.failFast === true,
+		cancelSiblingsOnFailure: policy.cancelSiblingsOnFailure === true,
+		cancelDescendantsOnParentFailure:
+			policy.cancelDescendantsOnParentFailure === true,
+	};
 }
 
 function buildArtifactGraphCompilePlan(
@@ -595,6 +614,8 @@ export async function compileWorkflow(
 			foreachSpecDir,
 		)),
 	);
+	const failurePolicy = compileWorkflowFailurePolicy(spec.artifactGraph);
+	if (failurePolicy) compiled.failurePolicy = failurePolicy;
 	return compiled;
 }
 
@@ -1268,6 +1289,7 @@ async function compileArtifactGraphPlan(
 	}
 	if (issues.length > 0) throw new WorkflowValidationError(issues);
 
+	const failurePolicy = compileWorkflowFailurePolicy(spec.artifactGraph);
 	return {
 		schemaVersion: 1,
 		name: spec.name,
@@ -1277,6 +1299,7 @@ async function compileArtifactGraphPlan(
 		cwd: options.cwd,
 		backend: { type: "local-pi", mode: "headless" },
 		maxConcurrency: spec.defaults?.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY,
+		...(failurePolicy ? { failurePolicy } : {}),
 		roles,
 		stages: stageRecords,
 		tasks,

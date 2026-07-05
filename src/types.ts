@@ -89,6 +89,12 @@ export type ArtifactGraphStageType =
 
 export type WorkflowArtifactKind = "control" | "analysis" | "refs" | "raw";
 
+export interface WorkflowFailurePolicy {
+	failFast?: boolean;
+	cancelSiblingsOnFailure?: boolean;
+	cancelDescendantsOnParentFailure?: boolean;
+}
+
 export interface ArtifactGraphWorkflowSpec {
 	schemaVersion: 1;
 	name?: string;
@@ -96,7 +102,7 @@ export interface ArtifactGraphWorkflowSpec {
 	input?: unknown;
 	defaults?: WorkflowDefaults;
 	roles?: Record<string, RoleSpec>;
-	artifactGraph: {
+	artifactGraph: WorkflowFailurePolicy & {
 		stages: ArtifactGraphStageSpec[];
 		maxConcurrency?: number;
 	};
@@ -799,6 +805,7 @@ export interface WorkflowRunRecord {
 	taskSummary: TaskSummary;
 	cwd: string;
 	backend: { type: "local-pi"; mode: "headless" };
+	failurePolicy?: Required<WorkflowFailurePolicy>;
 	parentRunId?: string;
 	rootRunId?: string;
 	round?: number;
@@ -873,6 +880,7 @@ export interface CompiledWorkflow {
 	cwd: string;
 	backend: { type: "local-pi"; mode: "headless" };
 	maxConcurrency: number;
+	failurePolicy?: Required<WorkflowFailurePolicy>;
 	roles: CompiledRole[];
 	tasks: CompiledTask[];
 	stages?: Array<Record<string, unknown> | CompiledLoopStageRecord>;

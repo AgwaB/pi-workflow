@@ -113,7 +113,11 @@ import {
 	buildForeachGeneratedTasks,
 	markDagDependentsSkipped,
 } from "../../.tmp/unit/engine-run-graph.js";
-import { deriveWorkflowStatus, summarizeTasks } from "../../.tmp/unit/store.js";
+import {
+	deriveWorkflowStatus,
+	summarizeTaskFailureClasses,
+	summarizeTasks,
+} from "../../.tmp/unit/store.js";
 import {
 	assertWorkflowActionAllowedForRole,
 	assertWorkflowToolAllowedForRole,
@@ -494,6 +498,61 @@ async function createLoopRun(cwd, spec = loopWorkflowSpec()) {
 	return { compiled, run };
 }
 
+async function createFailFastPolicyRun(cwd, policy = {}) {
+	writeAgent(cwd, "unit-scout", "read");
+	const specPath = join(cwd, "workflows", "fail-fast.json");
+	const spec = workflowSpec("unit-scout", {
+		artifactGraph: {
+			maxConcurrency: 1,
+			...policy,
+			stages: [
+				{ id: "failed", type: "single", prompt: "Fail." },
+				{ id: "running", type: "single", prompt: "Run." },
+				{ id: "pending", type: "single", prompt: "Wait." },
+				{
+					id: "partial-child",
+					type: "single",
+					after: "failed",
+					sourcePolicy: "partial",
+					prompt: "Partial child.",
+				},
+				{
+					id: "require-child",
+					type: "single",
+					after: "failed",
+					prompt: "Require-success child.",
+				},
+			],
+		},
+	});
+	const compiled = await compileWorkflow(spec, {
+		cwd,
+		task: "Exercise fail-fast policy",
+		specPath,
+	});
+	const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
+	await writeStaticRunArtifacts(cwd, run, compiled, spec);
+	setTaskTerminal(taskBySpec(run, "failed.main"), "failed", "model", {
+		exitCode: 1,
+		lastMessage: "model failure",
+	});
+	const running = taskBySpec(run, "running.main");
+	running.status = "running";
+	running.statusDetail = "running";
+	running.startedAt = new Date().toISOString();
+	running.backendHandle = {
+		engine: "pi-subagent",
+		backend: "headless",
+		runId: "child-running",
+		attemptId: "attempt-running",
+		cwd,
+		runsDir: ".pi/subagents/fail-fast",
+	};
+	running.backendTaskId = "child-running";
+	await writeRunRecord(cwd, run);
+	return { compiled, run, spec };
+}
+
 async function completeTask(
 	cwd,
 	task,
@@ -770,6 +829,158 @@ test("blocked dependencies skip only dependent pending tasks", () => {
 	assert.equal(run.tasks[1].status, "skipped");
 	assert.equal(run.tasks[1].statusDetail, "skipped_after_dependency_failure");
 	assert.equal(run.tasks[2].status, "pending");
+});
+
+test("formatRun stays byte-identical when fail-fast policy is unset", () => {
+	const run = {
+		schemaVersion: 1,
+		runId: "run-fixed",
+		name: "unit",
+		type: WORKFLOW_RUN_TYPE,
+		artifactGraph: { enabled: true },
+		status: "completed",
+		taskSummary: {
+			total: 1,
+			pending: 0,
+			running: 0,
+			completed: 1,
+			failed: 0,
+			interrupted: 0,
+			blocked: 0,
+			skipped: 0,
+		},
+		cwd: "/tmp/pi-workflow-unit",
+		backend: { type: "local-pi", mode: "headless" },
+		createdAt: "2026-01-02T03:04:05.000Z",
+		updatedAt: "2026-01-02T03:04:06.000Z",
+		specPath: "workflows/unit.json",
+		tasks: [
+			{
+				taskId: "task-1",
+				specId: "main.main",
+				agent: "unit-scout",
+				status: "completed",
+				statusDetail: "completed",
+				runtime: { model: "test-model", thinking: "none" },
+				worktree: { enabled: false },
+				files: {
+					output: ".pi/workflows/run-fixed/tasks/task-1/output.md",
+					stderr: ".pi/workflows/run-fixed/tasks/task-1/stderr.log",
+					result: ".pi/workflows/run-fixed/tasks/task-1/result.json",
+				},
+				tools: ["read"],
+			},
+		],
+	};
+
+	assert.equal(
+		formatRun(run),
+		`run-fixed [completed] type=artifact-graph backend=local-pi/headless
+created=2026-01-02T03:04:05.000Z updated=2026-01-02T03:04:06.000Z
+tasks=1/1 completed, running=0, pending=0, blocked=0, failed=0, interrupted=0
+completion=clean, outputRetries=0, launchRetries=0, resumeEvents=0, contextLimitFailures=0
+- task-1 spec=main.main agent=unit-scout [completed/completed] model=test-model thinking=none output=.pi/workflows/run-fixed/tasks/task-1/output.md`,
+	);
+});
+
+test("fail-fast flags off preserve failed-run scheduling without sibling cancellation", async () => {
+	const cwd = makeProject();
+	const interrupts = [];
+	try {
+		setSubagentApiForTests({
+			async runSubagent() {
+				throw new Error("unexpected launch");
+			},
+			async getSubagentStatus() {
+				return null;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent(options) {
+				interrupts.push(options);
+				return {};
+			},
+		});
+		const { run, compiled } = await createFailFastPolicyRun(cwd);
+		assert.equal(compiled.failurePolicy, undefined);
+		assert.equal(Object.hasOwn(compiled, "failurePolicy"), false);
+		assert.equal(JSON.stringify(compiled).includes('"failurePolicy"'), false);
+
+		await scheduleRun(cwd, run.runId);
+		const updated = await readRunRecord(cwd, run.runId);
+		assert.equal(taskBySpec(updated, "running.main").status, "running");
+		assert.equal(taskBySpec(updated, "pending.main").status, "pending");
+		assert.equal(taskBySpec(updated, "partial-child.main").status, "pending");
+		assert.equal(taskBySpec(updated, "require-child.main").status, "skipped");
+		assert.equal(
+			taskBySpec(updated, "require-child.main").statusDetail,
+			"skipped_after_dependency_failure",
+		);
+		assert.equal(interrupts.length, 0);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("fail-fast flags on cancel pending siblings and interrupt running siblings distinctly", async () => {
+	const cwd = makeProject();
+	const interrupts = [];
+	try {
+		setSubagentApiForTests({
+			async runSubagent() {
+				throw new Error("unexpected launch");
+			},
+			async getSubagentStatus() {
+				return null;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent(options) {
+				interrupts.push(options);
+				return {};
+			},
+		});
+		const { run } = await createFailFastPolicyRun(cwd, {
+			failFast: true,
+			cancelSiblingsOnFailure: true,
+			cancelDescendantsOnParentFailure: true,
+		});
+
+		await scheduleRun(cwd, run.runId);
+		const updated = await readRunRecord(cwd, run.runId);
+		for (const specId of [
+			"running.main",
+			"pending.main",
+			"partial-child.main",
+		]) {
+			const task = taskBySpec(updated, specId);
+			assert.equal(task.status, "interrupted", specId);
+			assert.equal(task.statusDetail, "fail_fast_cancelled", specId);
+		}
+		assert.equal(taskBySpec(updated, "require-child.main").status, "skipped");
+		assert.equal(
+			taskBySpec(updated, "require-child.main").statusDetail,
+			"skipped_after_dependency_failure",
+		);
+		assert.equal(interrupts.length, 1);
+		assert.equal(interrupts[0].runId, "child-running");
+		assert.equal(interrupts[0].reason, "workflow fail-fast cancellation");
+		assert.deepEqual(summarizeTaskFailureClasses(updated.tasks), {
+			failed: 1,
+			failFastCancelled: 3,
+			otherInterrupted: 0,
+		});
+		assert.match(
+			formatRun(updated),
+			/failureClasses=failed=1, failFastCancelled=3, otherInterrupted=0/,
+		);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
 });
 
 test("workflow process role helpers default to supervisor and honor worker/disabled", () => {
@@ -1301,6 +1512,34 @@ test("artifact graph schema validates sourcePolicy maxItems and schema refs", ()
 		"$.artifactGraph.stages[0].output.controlSchema",
 		"must stay inside the workflow bundle",
 	);
+});
+
+test("artifact graph schema accepts default-off fail-fast policy booleans", () => {
+	const parsed = parsePublicWorkflow(
+		workflowSpec("unit-scout", {
+			artifactGraph: {
+				failFast: true,
+				cancelSiblingsOnFailure: true,
+				cancelDescendantsOnParentFailure: true,
+				stages: [{ id: "main", type: "single", prompt: "Do work." }],
+			},
+		}),
+	);
+	assert.equal(parsed.artifactGraph.failFast, true);
+	assert.equal(parsed.artifactGraph.cancelSiblingsOnFailure, true);
+	assert.equal(parsed.artifactGraph.cancelDescendantsOnParentFailure, true);
+
+	const error = assertThrowsFlow(() =>
+		parsePublicWorkflow(
+			workflowSpec("unit-scout", {
+				artifactGraph: {
+					failFast: "yes",
+					stages: [{ id: "main", type: "single", prompt: "Do work." }],
+				},
+			}),
+		),
+	);
+	assertIssue(error, "$.artifactGraph.failFast", "must be a boolean");
 });
 
 test("artifact graph schema accepts dynamic stages and validates helper refs", () => {

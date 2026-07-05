@@ -20,6 +20,7 @@ import {
 	readRunRecord,
 	resetTaskForResume,
 	setTaskTerminal,
+	summarizeTaskFailureClasses,
 	supervisorPath,
 	toProjectPath,
 	updateIndex,
@@ -98,6 +99,7 @@ import {
 	foreachStreamingEnabled,
 	foreachStreamingMinChunk,
 	markDagDependentsSkipped,
+	markFailFastCancellations,
 	nextTaskRecordIndex,
 	reconcileDynamicGeneratedRunRecords,
 	reconcileForeachGeneratedRunRecords,
@@ -111,6 +113,7 @@ import {
 	reconcileLoopTaskMaterialization,
 	scheduleLoop,
 } from "./loop-runtime.js";
+import { interruptSubagentTask } from "./subagent-backend.js";
 import {
 	executeSupportTask,
 	normalizeDynamicControllerOutput,
@@ -635,17 +638,34 @@ export async function formatLogs(
 	return `${run.runId}/${task.taskId} output=${task.files.output}\n${tail || "(empty log)"}`;
 }
 
+function runFailurePolicyEnabled(run: WorkflowRunRecord): boolean {
+	const policy = run.failurePolicy;
+	return (
+		policy?.failFast === true &&
+		(policy.cancelSiblingsOnFailure === true ||
+			policy.cancelDescendantsOnParentFailure === true)
+	);
+}
+
 export function formatRun(
 	run: WorkflowRunRecord,
 	detail: "summary" | "full" = "summary",
 ): string {
 	const telemetry = summarizeWorkflowTelemetry(run);
+	const failureClasses = summarizeTaskFailureClasses(run.tasks);
 	const lines = [
 		`${run.runId} [${run.status}] type=${run.type} backend=${run.backend.type}/${run.backend.mode}`,
 		`created=${run.createdAt} updated=${run.updatedAt}`,
 		`tasks=${run.taskSummary.completed}/${run.taskSummary.total} completed, running=${run.taskSummary.running}, pending=${run.taskSummary.pending}, blocked=${run.taskSummary.blocked}, failed=${run.taskSummary.failed}, interrupted=${run.taskSummary.interrupted}`,
-		`completion=${telemetry.completion.health}, outputRetries=${telemetry.retryCounts.output}, launchRetries=${telemetry.retryCounts.launch}, resumeEvents=${telemetry.resumeCounts.events}, contextLimitFailures=${telemetry.completion.contextLimitFailures}`,
 	];
+	if (failureClasses.failFastCancelled > 0 || runFailurePolicyEnabled(run)) {
+		lines.push(
+			`failureClasses=failed=${failureClasses.failed}, failFastCancelled=${failureClasses.failFastCancelled}, otherInterrupted=${failureClasses.otherInterrupted}`,
+		);
+	}
+	lines.push(
+		`completion=${telemetry.completion.health}, outputRetries=${telemetry.retryCounts.output}, launchRetries=${telemetry.retryCounts.launch}, resumeEvents=${telemetry.resumeCounts.events}, contextLimitFailures=${telemetry.completion.contextLimitFailures}`,
+	);
 
 	for (const task of run.tasks) {
 		lines.push(formatTask(task, detail));
@@ -739,6 +759,7 @@ async function scheduleDag(
 		await writeRunRecord(cwd, run);
 		run = await readRunRecord(cwd, run.runId);
 	}
+	if (await applyFailFastCancellation(cwd, run, compiledFlow)) return;
 
 	const maxConcurrency = Math.max(
 		1,
@@ -809,8 +830,27 @@ async function scheduleDag(
 			options,
 		);
 		assertScheduleLeaseActive(leaseSignal);
+		if (await applyFailFastCancellation(cwd, run, compiledFlow)) return;
 		if (launched && run.tasks[index]?.status === "running") running += 1;
 	}
+}
+
+async function applyFailFastCancellation(
+	cwd: string,
+	run: WorkflowRunRecord,
+	compiledFlow: CompiledWorkflow,
+): Promise<boolean> {
+	const summary = markFailFastCancellations(run, compiledFlow);
+	if (summary.cancelledTaskIds.length === 0) return false;
+	await Promise.all(
+		summary.interruptedTaskIds.map(async (taskId) => {
+			const task = run.tasks.find((candidate) => candidate.taskId === taskId);
+			if (!task) return;
+			await interruptSubagentTask(task, "workflow fail-fast cancellation");
+		}),
+	);
+	await writeRunRecord(cwd, run);
+	return true;
 }
 
 function isResumableDynamicApprovalBlockedRun(run: WorkflowRunRecord): boolean {

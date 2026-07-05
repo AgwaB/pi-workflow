@@ -973,19 +973,26 @@ export async function cleanupSubagentRun(
 	run: WorkflowRunRecord,
 ): Promise<void> {
 	for (const task of run.tasks) {
-		const handle = getSubagentHandle(task);
-		if (!handle) continue;
-		const api = await loadSubagentApi();
-		await api
-			.interruptSubagent({
-				cwd: handle.cwd,
-				runsDir: handle.runsDir,
-				runId: handle.runId,
-				attemptId: handle.attemptId,
-				reason: "workflow cleanup",
-			})
-			.catch(() => undefined);
+		await interruptSubagentTask(task, "workflow cleanup");
 	}
+}
+
+export async function interruptSubagentTask(
+	task: WorkflowTaskRunRecord,
+	reason: string,
+): Promise<void> {
+	const handle = getSubagentHandle(task);
+	if (!handle) return;
+	const api = await loadSubagentApi();
+	await api
+		.interruptSubagent({
+			cwd: handle.cwd,
+			runsDir: handle.runsDir,
+			runId: handle.runId,
+			attemptId: handle.attemptId,
+			reason,
+		})
+		.catch(() => undefined);
 }
 
 export async function launchSubagentTask(

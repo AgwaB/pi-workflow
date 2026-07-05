@@ -24,7 +24,13 @@ const TOP_LEVEL_KEYS = new Set([
 	"roles",
 	"artifactGraph",
 ]);
-const ARTIFACT_GRAPH_KEYS = new Set(["stages", "maxConcurrency"]);
+const ARTIFACT_GRAPH_KEYS = new Set([
+	"stages",
+	"maxConcurrency",
+	"failFast",
+	"cancelSiblingsOnFailure",
+	"cancelDescendantsOnParentFailure",
+]);
 const STAGE_TYPES = new Set<ArtifactGraphStageType>([
 	"single",
 	"reduce",
@@ -284,6 +290,17 @@ function validateArtifactGraphBody(
 	optionalPositiveInteger(
 		graph.maxConcurrency,
 		`${path}.maxConcurrency`,
+		issues,
+	);
+	optionalBoolean(graph.failFast, `${path}.failFast`, issues);
+	optionalBoolean(
+		graph.cancelSiblingsOnFailure,
+		`${path}.cancelSiblingsOnFailure`,
+		issues,
+	);
+	optionalBoolean(
+		graph.cancelDescendantsOnParentFailure,
+		`${path}.cancelDescendantsOnParentFailure`,
 		issues,
 	);
 	validateStageArray(graph.stages, `${path}.stages`, issues);
