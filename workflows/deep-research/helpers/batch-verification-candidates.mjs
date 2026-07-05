@@ -42,19 +42,127 @@ function stableId(value, fallback) {
 	return id || fallback;
 }
 
-function sourceKey(candidate) {
-	const refs = Array.isArray(candidate?.sourceRefs)
-		? candidate.sourceRefs.filter(
-				(ref) => typeof ref === "string" && ref.trim(),
-			)
-		: [];
-	if (refs.length > 0) return `refs:${refs.slice().sort().join("|")}`;
-	const urls = Array.isArray(candidate?.sourceUrls)
-		? candidate.sourceUrls.filter(
-				(url) => typeof url === "string" && url.trim(),
-			)
-		: [];
-	if (urls.length > 0) return `urls:${urls.slice().sort().join("|")}`;
+function compactSourceStrings(values) {
+	const out = [];
+	const seen = new Set();
+	for (const value of values) {
+		if (typeof value !== "string") continue;
+		const text = value.trim();
+		if (!text || seen.has(text)) continue;
+		seen.add(text);
+		out.push(text);
+	}
+	return out;
+}
+
+function looksLikeLocalSourceRef(value) {
+	const text = String(value ?? "")
+		.trim()
+		.replace(/^(?:file|repo):/i, "")
+		.replace(/#L\d+(?:-L?\d+)?$/i, "");
+	return /^(?:\.?[\w.-]+\/)?[\w./-]+\.(?:md|json|ya?ml|ts|tsx|js|mjs|cjs|py|go|rs|zig|txt|sol|java|kt|swift|rb|php|c|cc|cpp|h|hpp)$/i.test(
+		text,
+	);
+}
+
+function isWorkflowSourceRef(value) {
+	return /^wsrc_[a-f0-9]{32}$/.test(String(value ?? "").trim());
+}
+
+function addSourceToken(value, tokens) {
+	if (Array.isArray(value)) {
+		for (const item of value) addSourceToken(item, tokens);
+		return;
+	}
+	if (typeof value !== "string") return;
+	const text = value.trim();
+	if (!text) return;
+	if (isWorkflowSourceRef(text)) tokens.refs.push(text);
+	else if (/^https?:\/\//i.test(text)) tokens.urls.push(text);
+	else if (looksLikeLocalSourceRef(text)) tokens.local.push(text);
+}
+
+function collectHintSourceTokens(value, tokens) {
+	if (Array.isArray(value)) {
+		for (const item of value) collectHintSourceTokens(item, tokens);
+		return tokens;
+	}
+	if (!value || typeof value !== "object") return tokens;
+	for (const key of [
+		"sourceRef",
+		"sourceRefs",
+		"source",
+		"url",
+		"sourceUrl",
+		"sourceUrls",
+		"file",
+		"path",
+		"repo",
+		"repoPath",
+		"localPath",
+	]) {
+		addSourceToken(value[key], tokens);
+	}
+	for (const key of [
+		"sourceRead",
+		"sourceCard",
+		"sourceEvidence",
+		"sourceEvidenceHints",
+		"evidence",
+	]) {
+		collectHintSourceTokens(value[key], tokens);
+	}
+	return tokens;
+}
+
+export function candidateSourceTokens(candidate) {
+	const tokens = { refs: [], urls: [], local: [] };
+	for (const ref of Array.isArray(candidate?.sourceRefs)
+		? candidate.sourceRefs
+		: []) {
+		if (typeof ref !== "string") continue;
+		const text = ref.trim();
+		if (isWorkflowSourceRef(text)) tokens.refs.push(text);
+		else if (looksLikeLocalSourceRef(text)) tokens.local.push(text);
+	}
+	for (const url of Array.isArray(candidate?.sourceUrls)
+		? candidate.sourceUrls
+		: []) {
+		if (typeof url === "string" && /^https?:\/\//i.test(url.trim()))
+			tokens.urls.push(url.trim());
+	}
+	collectHintSourceTokens(candidate?.sourceEvidenceHints, tokens);
+	collectHintSourceTokens(candidate?.evidence, tokens);
+	collectHintSourceTokens(
+		candidate && typeof candidate === "object"
+			? {
+					sourceRef: candidate.sourceRef,
+					sourceRefs: candidate.sourceRefs,
+					source: candidate.source,
+					url: candidate.url,
+					sourceUrl: candidate.sourceUrl,
+					sourceUrls: candidate.sourceUrls,
+					file: candidate.file,
+					path: candidate.path,
+					repo: candidate.repo,
+					repoPath: candidate.repoPath,
+					localPath: candidate.localPath,
+				}
+			: null,
+		tokens,
+	);
+	return {
+		refs: compactSourceStrings(tokens.refs).sort(),
+		urls: compactSourceStrings(tokens.urls).sort(),
+		local: compactSourceStrings(tokens.local).sort(),
+	};
+}
+
+export function sourceKey(candidate) {
+	const tokens = candidateSourceTokens(candidate);
+	if (tokens.refs.length > 0) return `refs:${tokens.refs.join("|")}`;
+	if (tokens.urls.length > 0) return `urls:${tokens.urls.join("|")}`;
+	if (tokens.local.length > 0) return `local:${tokens.local.join("|")}`;
 	return "refs:none";
 }
 
@@ -104,15 +212,21 @@ export default async function batchVerificationCandidates({
 	const groups = new Map();
 	for (const item of candidates) {
 		const key = sourceKey(item.candidate);
-		const group = groups.get(key) ?? [];
-		group.push(item);
-		groups.set(key, group);
+		// Never create a multi-claim refs:none batch: without explicit source
+		// refs/URLs/local hints, the audit gate cannot deterministically prove that
+		// a source-backed verifier row belongs to this candidate rather than a
+		// neighbour in the batch.
+		const groupKey = key === "refs:none" ? `${key}:${item.id}` : key;
+		const group = groups.get(groupKey) ?? { sourceKey: key, items: [] };
+		group.items.push(item);
+		groups.set(groupKey, group);
 	}
 
 	const batches = [];
-	for (const [key, items] of [...groups.entries()].sort(([a], [b]) =>
+	for (const [groupKey, group] of [...groups.entries()].sort(([a], [b]) =>
 		a.localeCompare(b),
 	)) {
+		const { sourceKey: key, items } = group;
 		for (let offset = 0; offset < items.length; offset += maxBatchSize) {
 			const slice = items.slice(offset, offset + maxBatchSize);
 			const claimIds = slice.map((item) => item.id);
@@ -121,6 +235,11 @@ export default async function batchVerificationCandidates({
 				sourceKey: key,
 				claimIds,
 				claims: slice.map((item) => cloneCandidate(item.candidate, item.id)),
+				compatibilityGate: {
+					explicitSourceHints: key !== "refs:none",
+					refsNoneMultiClaimBlocked: key === "refs:none" && claimIds.length > 1,
+					plannerGroupKey: groupKey,
+				},
 			});
 		}
 	}

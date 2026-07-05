@@ -221,6 +221,216 @@ function sourceRefsForUrls(urls, urlToSourceRef) {
 	return refs;
 }
 
+function emptySourceIdentities() {
+	return { workflowRefs: new Set(), urlKeys: new Set(), localRefs: new Set() };
+}
+
+function normalizeLocalSourceRef(value) {
+	const text = String(value ?? "")
+		.trim()
+		.replace(/^(?:file|repo):/i, "")
+		.replace(/#L\d+(?:-L?\d+)?$/i, "")
+		.replace(/^\.\//u, "");
+	return text || null;
+}
+
+function addSourceIdentity(identities, value, urlToSourceRef) {
+	if (Array.isArray(value)) {
+		for (const item of value)
+			addSourceIdentity(identities, item, urlToSourceRef);
+		return;
+	}
+	if (typeof value !== "string") return;
+	const text = value.trim();
+	if (!text) return;
+	if (/^https?:\/\//i.test(text)) {
+		for (const key of canonicalUrlKeys(text)) identities.urlKeys.add(key);
+		for (const sourceRef of sourceRefsForUrls([text], urlToSourceRef))
+			identities.workflowRefs.add(sourceRef);
+		return;
+	}
+	if (isWorkflowSourceRef(text)) {
+		identities.workflowRefs.add(text);
+		return;
+	}
+	if (looksLikeLocalSourceRef(text)) {
+		const local = normalizeLocalSourceRef(text);
+		if (local) identities.localRefs.add(local);
+	}
+}
+
+function collectSourceIdentitiesFromObject(value, identities, urlToSourceRef) {
+	if (Array.isArray(value)) {
+		for (const item of value)
+			collectSourceIdentitiesFromObject(item, identities, urlToSourceRef);
+		return identities;
+	}
+	if (!value || typeof value !== "object") return identities;
+	for (const key of [
+		"sourceRef",
+		"sourceRefs",
+		"source",
+		"url",
+		"sourceUrl",
+		"sourceUrls",
+		"file",
+		"path",
+		"repo",
+		"repoPath",
+		"localPath",
+	]) {
+		addSourceIdentity(identities, value[key], urlToSourceRef);
+	}
+	for (const key of ["sourceRead", "sourceCard", "sourceEvidence"])
+		collectSourceIdentitiesFromObject(value[key], identities, urlToSourceRef);
+	return identities;
+}
+
+function candidateSourceIdentities(candidate, urlToSourceRef) {
+	const identities = emptySourceIdentities();
+	if (!candidate || typeof candidate !== "object") return identities;
+	for (const ref of Array.isArray(candidate.sourceRefs)
+		? candidate.sourceRefs
+		: [])
+		addSourceIdentity(identities, ref, urlToSourceRef);
+	for (const url of Array.isArray(candidate.sourceUrls)
+		? candidate.sourceUrls
+		: [])
+		addSourceIdentity(identities, url, urlToSourceRef);
+	collectSourceIdentitiesFromObject(
+		candidate.sourceEvidenceHints,
+		identities,
+		urlToSourceRef,
+	);
+	collectSourceIdentitiesFromObject(
+		candidate.evidence,
+		identities,
+		urlToSourceRef,
+	);
+	for (const key of [
+		"sourceRef",
+		"sourceRefs",
+		"source",
+		"url",
+		"sourceUrl",
+		"sourceUrls",
+		"file",
+		"path",
+		"repo",
+		"repoPath",
+		"localPath",
+	])
+		addSourceIdentity(identities, candidate[key], urlToSourceRef);
+	return identities;
+}
+
+function evidenceRowSourceIdentities(row, urlToSourceRef) {
+	const identities = emptySourceIdentities();
+	collectSourceIdentitiesFromObject(row, identities, urlToSourceRef);
+	return identities;
+}
+
+function hasSourceIdentities(identities) {
+	return (
+		identities.workflowRefs.size > 0 ||
+		identities.urlKeys.size > 0 ||
+		identities.localRefs.size > 0
+	);
+}
+
+function identityIntersection(left, right) {
+	const matched = { workflowRefs: [], urlKeys: [], localRefs: [] };
+	for (const key of Object.keys(matched)) {
+		for (const value of left[key]) {
+			if (right[key].has(value)) matched[key].push(value);
+		}
+	}
+	return matched;
+}
+
+function hasIdentityIntersection(left, right) {
+	const matched = identityIntersection(left, right);
+	return Object.values(matched).some((values) => values.length > 0);
+}
+
+function summarizeSourceIdentities(identities) {
+	return {
+		workflowRefs: [...identities.workflowRefs].sort(),
+		urlKeys: [...identities.urlKeys].sort(),
+		localRefs: [...identities.localRefs].sort(),
+	};
+}
+
+function evaluateSourceCompatibility({
+	claim,
+	candidate,
+	urlToSourceRef,
+	refsNoneMultiClaimBlocked = false,
+	allowAdditionalEvidenceSources = false,
+}) {
+	const candidateIdentities = candidateSourceIdentities(
+		candidate,
+		urlToSourceRef,
+	);
+	const strongRows = (
+		Array.isArray(claim?.evidence) ? claim.evidence : []
+	).filter(hasStrongEvidenceRow);
+	if (refsNoneMultiClaimBlocked && !hasSourceIdentities(candidateIdentities)) {
+		return {
+			decision: "downgrade",
+			reasonCode: "refs_none_multi_claim_batch_without_explicit_source_hints",
+			reason:
+				"verified batch row came from a refs:none multi-claim batch without explicit source hints",
+			candidateSources: summarizeSourceIdentities(candidateIdentities),
+		};
+	}
+	if (!hasSourceIdentities(candidateIdentities) || strongRows.length === 0) {
+		return { decision: "allow" };
+	}
+	const compatibleRows = [];
+	const unmatchedRows = [];
+	for (const [index, row] of strongRows.entries()) {
+		const rowIdentities = evidenceRowSourceIdentities(row, urlToSourceRef);
+		const rowSummary = summarizeSourceIdentities(rowIdentities);
+		if (hasIdentityIntersection(rowIdentities, candidateIdentities)) {
+			compatibleRows.push({ index, sources: rowSummary });
+		} else {
+			unmatchedRows.push({ index, sources: rowSummary });
+		}
+	}
+	if (compatibleRows.length === 0) {
+		return {
+			decision: "downgrade",
+			reasonCode: "evidence_source_mismatch",
+			reason:
+				"verified claim evidence did not overlap the candidate's source refs, URLs, hints, or local refs",
+			candidateSources: summarizeSourceIdentities(candidateIdentities),
+			unmatchedEvidenceSources: unmatchedRows,
+		};
+	}
+	if (unmatchedRows.length > 0 && !allowAdditionalEvidenceSources) {
+		return {
+			decision: "downgrade",
+			reasonCode: "additional_evidence_source_requires_review",
+			reason:
+				"verified claim used additional source-backed evidence outside the candidate source set; keep it for human review instead of silently adopting verified",
+			candidateSources: summarizeSourceIdentities(candidateIdentities),
+			compatibleEvidenceSources: compatibleRows,
+			unmatchedEvidenceSources: unmatchedRows,
+		};
+	}
+	return {
+		decision: "allow",
+		...(unmatchedRows.length > 0
+			? {
+					exception: "additional_evidence_sources_explicitly_allowed",
+					compatibleEvidenceSources: compatibleRows,
+					unmatchedEvidenceSources: unmatchedRows,
+				}
+			: {}),
+	};
+}
+
 // Structured evidence check: at least one evidence row carrying both a source
 // reference (HTTP URL or local repository file path) and a quote/excerpt. Unlike
 // a keyword scan over the serialized claim, this cannot be satisfied by merely
@@ -406,31 +616,79 @@ function asBatchArray(value) {
 	return [];
 }
 
+function batchClaimIds(batch) {
+	return Array.isArray(batch?.claimIds)
+		? batch.claimIds
+		: Array.isArray(batch?.claims)
+			? batch.claims.map(
+					(claim, index) =>
+						claimIdOf(claim).id ??
+						`candidate-${String(index + 1).padStart(3, "0")}`,
+				)
+			: [];
+}
+
+function normalizedBatchClaimIds(batch) {
+	return batchClaimIds(batch)
+		.filter((claimId) => typeof claimId === "string")
+		.map((claimId) => claimId.trim())
+		.filter(Boolean);
+}
+
 function buildBatchMembershipById(verificationBatches) {
 	const batches = new Map();
 	for (const batch of asBatchArray(verificationBatches)) {
 		const id = typeof batch?.id === "string" ? batch.id.trim() : "";
 		if (!id) continue;
-		const claimIds = Array.isArray(batch.claimIds)
-			? batch.claimIds
-			: Array.isArray(batch.claims)
-				? batch.claims.map(
-						(claim, index) =>
-							claimIdOf(claim).id ??
-							`candidate-${String(index + 1).padStart(3, "0")}`,
-					)
-				: [];
-		batches.set(
-			id,
-			new Set(
-				claimIds
-					.filter((claimId) => typeof claimId === "string")
-					.map((claimId) => claimId.trim())
-					.filter(Boolean),
-			),
-		);
+		batches.set(id, new Set(normalizedBatchClaimIds(batch)));
 	}
 	return batches;
+}
+
+function buildBatchInfoByClaimId(verificationBatches) {
+	const byClaimId = new Map();
+	for (const batch of asBatchArray(verificationBatches)) {
+		const batchId = typeof batch?.id === "string" ? batch.id.trim() : "";
+		if (!batchId) continue;
+		const claimIds = normalizedBatchClaimIds(batch);
+		const info = {
+			batchId,
+			sourceKey: typeof batch?.sourceKey === "string" ? batch.sourceKey : null,
+			claimCount: claimIds.length,
+		};
+		for (const claimId of claimIds) byClaimId.set(claimId, info);
+	}
+	return byClaimId;
+}
+
+function refsNoneMultiClaimBatchIssues({
+	verificationBatches,
+	candidatesById,
+	urlToSourceRef,
+}) {
+	const issues = [];
+	for (const batch of asBatchArray(verificationBatches)) {
+		const batchId = typeof batch?.id === "string" ? batch.id.trim() : "";
+		const sourceKey =
+			typeof batch?.sourceKey === "string" ? batch.sourceKey : "";
+		const claimIds = normalizedBatchClaimIds(batch);
+		if (!batchId || sourceKey !== "refs:none" || claimIds.length <= 1) continue;
+		const claimIdsWithoutExplicitSources = claimIds.filter((claimId) => {
+			const candidate = candidatesById?.get(claimId);
+			return !hasSourceIdentities(
+				candidateSourceIdentities(candidate, urlToSourceRef),
+			);
+		});
+		if (claimIdsWithoutExplicitSources.length === 0) continue;
+		issues.push({
+			batchId,
+			sourceKey,
+			claimIds,
+			claimIdsWithoutExplicitSources,
+			reason: "refs_none_multi_claim_batch_without_explicit_source_hints",
+		});
+	}
+	return issues;
 }
 
 function verifierBatchId(sourceId) {
@@ -545,6 +803,11 @@ function buildBatchAdoptionReadiness({ gateSummary, candidateCount }) {
 		["duplicate_status_conflicts", gateSummary.duplicateStatusConflicts],
 		["invalid_normalized_candidates", gateSummary.invalidNormalizedCandidates],
 		["source_ref_join_failures", gateSummary.sourceRefJoinFailures],
+		["refs_none_multi_claim_batches", gateSummary.refsNoneMultiClaimBatches],
+		[
+			"source_evidence_compatibility_failures",
+			gateSummary.sourceEvidenceCompatibilityFailures,
+		],
 	];
 	const blockers = checks
 		.filter(([, count]) => Number(count ?? 0) > 0)
@@ -583,6 +846,7 @@ export default async function claimEvidenceGate({
 	const normalized = sanitizedCandidates ?? normalizeClaims;
 	const verificationBatches = findSource(sources, "verification-batches");
 	const batchMembershipById = buildBatchMembershipById(verificationBatches);
+	const batchInfoByClaimId = buildBatchInfoByClaimId(verificationBatches);
 	const batchIdBySourceName = buildBatchIdBySourceName(context.sourceStatuses);
 	const normalizeInputPacket = findSource(sources, "normalize-input-packet");
 	const urlToSourceRef = buildUrlSourceRefLookup(normalizeInputPacket);
@@ -616,6 +880,16 @@ export default async function claimEvidenceGate({
 		candidateRecords.push(normalizedCandidate);
 		candidatesById.set(idCheck.id, normalizedCandidate);
 	}
+	const refsNoneBatchIssues = refsNoneMultiClaimBatchIssues({
+		verificationBatches,
+		candidatesById,
+		urlToSourceRef,
+	});
+	const refsNoneMultiClaimBlockedClaimIds = new Set(
+		refsNoneBatchIssues.flatMap(
+			(issue) => issue.claimIdsWithoutExplicitSources,
+		),
+	);
 
 	const claims = Object.entries(sources ?? {})
 		.filter(
@@ -666,7 +940,22 @@ export default async function claimEvidenceGate({
 		duplicateVerifierRows: 0,
 		duplicateStatusConflicts: 0,
 		invalidNormalizedCandidates: invalidNormalizedCandidates.length,
+		refsNoneMultiClaimBatches: refsNoneBatchIssues.length,
+		sourceEvidenceCompatibilityFailures: 0,
+		sourceEvidenceCompatibilityMismatches: 0,
+		additionalEvidenceSourceDowngrades: 0,
 	};
+	for (const issue of refsNoneBatchIssues) {
+		remainingGaps.push({
+			evidenceState: issue.reason,
+			reason:
+				"verification-batches emitted a refs:none multi-claim batch without explicit per-claim source hints",
+			batchId: issue.batchId,
+			claimIds: issue.claimIds,
+			nextStep:
+				"Split refs:none candidates into single-claim verifier tasks or preserve sourceRefs/sourceUrls/sourceEvidenceHints/local refs before batching.",
+		});
+	}
 	const verifierRowsById = new Map();
 	const legacyVerifierRows = [];
 	for (const { sourceId, claim, index } of verifierClaims) {
@@ -861,6 +1150,48 @@ export default async function claimEvidenceGate({
 				{ reasonCode: "exact_quantitative_without_source_reference" },
 			);
 		}
+		if (verdictOf(next) === VERIFICATION_STATUS.VERIFIED) {
+			const batchInfo = claimId ? batchInfoByClaimId.get(claimId) : null;
+			const compatibility = evaluateSourceCompatibility({
+				claim: next,
+				candidate,
+				urlToSourceRef,
+				refsNoneMultiClaimBlocked:
+					!!claimId && refsNoneMultiClaimBlockedClaimIds.has(claimId),
+				allowAdditionalEvidenceSources:
+					options.allowAdditionalCorroboratingSourcesForVerified === true,
+			});
+			if (compatibility.decision === "downgrade") {
+				gateSummary.sourceEvidenceCompatibilityFailures += 1;
+				if (compatibility.reasonCode === "evidence_source_mismatch")
+					gateSummary.sourceEvidenceCompatibilityMismatches += 1;
+				if (
+					compatibility.reasonCode ===
+					"additional_evidence_source_requires_review"
+				)
+					gateSummary.additionalEvidenceSourceDowngrades += 1;
+				next = withVerdict(
+					next,
+					VERIFICATION_STATUS.PARTIALLY_SUPPORTED,
+					compatibility.reason,
+					{
+						reasonCode: compatibility.reasonCode,
+						sourceCompatibility: {
+							...compatibility,
+							...(batchInfo ? { batchInfo } : {}),
+						},
+					},
+				);
+			} else if (compatibility.exception) {
+				next.verdictDigest = {
+					...(next.verdictDigest ?? {}),
+					sourceCompatibility: {
+						...compatibility,
+						...(batchInfo ? { batchInfo } : {}),
+					},
+				};
+			}
+		}
 
 		if (verdictOf(next) !== verdict) {
 			gateSummary.downgraded += 1;
@@ -1022,6 +1353,7 @@ export default async function claimEvidenceGate({
 		invalidVerifierRows,
 		duplicateVerifierRows,
 		invalidNormalizedCandidates,
+		refsNoneMultiClaimBatchIssues: refsNoneBatchIssues,
 		statusPartitions,
 		verdictCounts,
 		slotCoverageCheck: {
