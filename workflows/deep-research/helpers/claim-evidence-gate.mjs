@@ -1,3 +1,9 @@
+import {
+	VERIFICATION_STATUS,
+	VERIFICATION_STATUS_BUCKETS,
+	canonicalVerificationStatus,
+} from "./verification-ontology.mjs";
+
 // Deterministic claim audit for deep-research.
 //
 // Sources: plan (optional), normalize-claims (optional), verify-claims foreach
@@ -346,23 +352,25 @@ function compactStrings(values) {
 }
 
 function canonicalVerifierStatus(status) {
-	return status === "partiallySupported" ? "partially_supported" : status;
+	return canonicalVerificationStatus(status);
 }
 
 function conservativeVerifierStatus(statuses) {
 	const normalized = statuses.map(canonicalVerifierStatus);
 	for (const status of [
-		"conflicting",
-		"unsupported",
-		"partially_supported",
-		"unverified",
+		VERIFICATION_STATUS.CONFLICTING,
+		VERIFICATION_STATUS.UNSUPPORTED,
+		VERIFICATION_STATUS.VERIFICATION_BLOCKED,
+		VERIFICATION_STATUS.PARTIALLY_SUPPORTED,
+		VERIFICATION_STATUS.UNVERIFIED,
 	]) {
 		if (normalized.includes(status)) return status;
 	}
-	if (normalized.every((status) => status === "verified")) return "verified";
+	if (normalized.every((status) => status === VERIFICATION_STATUS.VERIFIED))
+		return VERIFICATION_STATUS.VERIFIED;
 	return (
 		normalized.find((status) => typeof status === "string" && status) ??
-		"unverified"
+		VERIFICATION_STATUS.UNVERIFIED
 	);
 }
 
@@ -555,12 +563,7 @@ function buildBatchAdoptionReadiness({ gateSummary, candidateCount }) {
 	};
 }
 
-const STATUS_BUCKETS = {
-	verified: "verified",
-	partially_supported: "partiallySupported",
-	unsupported: "unsupported",
-	conflicting: "conflicting",
-};
+const STATUS_BUCKETS = VERIFICATION_STATUS_BUCKETS;
 
 function findSource(sources, stageId) {
 	for (const [specId, source] of Object.entries(sources ?? {})) {
@@ -950,6 +953,7 @@ export default async function claimEvidenceGate({
 		partiallySupported: [],
 		unsupported: [],
 		conflicting: [],
+		verificationBlocked: [],
 		other: [],
 	};
 	for (const claim of auditedClaims) {

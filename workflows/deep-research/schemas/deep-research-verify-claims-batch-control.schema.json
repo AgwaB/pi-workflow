@@ -1,0 +1,47 @@
+{
+  "type": "object",
+  "required": ["schema", "digest", "results"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "minLength": 1
+    },
+    "digest": {
+      "type": "string",
+      "minLength": 1
+    },
+    "results": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "status", "verdictDigest", "evidence"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "claim": {},
+          "factSlotIds": {},
+          "status": {
+            "type": "string",
+            "enum": ["verified", "partially_supported", "unsupported", "conflicting", "verification_blocked"]
+          },
+          "confidence": {},
+          "verdictDigest": {},
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "maxItems": 5
+          },
+          "caveats": {},
+          "correctionOrCounterclaim": {}
+        }
+      }
+    }
+  }
+}

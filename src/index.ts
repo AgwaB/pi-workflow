@@ -72,6 +72,21 @@ export {
 	WORKFLOW_METRICS_PRICING_MODEL_VERSION,
 	WORKFLOW_METRICS_SCHEMA_VERSION,
 } from "./workflow-metrics.js";
+export {
+	VERIFICATION_STATUS,
+	VERIFICATION_STATUS_BUCKETS,
+	VERIFICATION_STATUS_LABELS,
+	VERIFICATION_STATUS_VALUES,
+	canonicalVerificationStatus,
+	isNonVerifiedTerminalStatus,
+	isVerificationBlockedStatus,
+	isVerifiedStatus,
+	verificationStatusBucket,
+} from "./verification-ontology.js";
+export type {
+	TerminalVerificationStatus,
+	VerificationStatus,
+} from "./verification-ontology.js";
 export type {
 	WorkflowLaunchTimingMetrics,
 	WorkflowMetricValue,

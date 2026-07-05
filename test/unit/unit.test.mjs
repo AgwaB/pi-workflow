@@ -61,7 +61,13 @@ import { compactStrings } from "../../.tmp/unit/strings.js";
 import {
 	assertValidDynamicDecision,
 	buildWorkflowRunMetrics,
+	canonicalVerificationStatus as canonicalPackageVerificationStatus,
 	dynamicOutputProfileValues,
+	isNonVerifiedTerminalStatus as isPackageNonVerifiedTerminalStatus,
+	isVerificationBlockedStatus as isPackageVerificationBlockedStatus,
+	isVerifiedStatus as isPackageVerifiedStatus,
+	verificationStatusBucket as packageVerificationStatusBucket,
+	VERIFICATION_STATUS_VALUES as PACKAGE_VERIFICATION_STATUS_VALUES,
 } from "../../.tmp/unit/index.js";
 import {
 	loadWorkflow,
@@ -8162,6 +8168,16 @@ test("deep-research batched verification variant is path-ref opt-in", async () =
 		path: "$.batches",
 	});
 	assert.match(verifyClaims?.compiledPrompt ?? "", /results\[\]/);
+	assert.ok(
+		verifyClaims?.artifactGraph.output.controlSchemaPath.endsWith(
+			join(
+				"workflows",
+				"deep-research",
+				"schemas",
+				"deep-research-verify-claims-batch-control.schema.json",
+			),
+		),
+	);
 	assert.equal(verifyClaims?.artifactGraph.artifactAccess, "none");
 	assert.deepEqual(auditClaims?.dependsOn, [
 		"plan.main",
@@ -13835,10 +13851,12 @@ test("deep-research final-audit packet compacts deterministic ledgers", async ()
 					partiallySupported: 1,
 					unsupported: 0,
 					conflicting: 0,
+					verificationBlocked: 1,
 				},
 				statusPartitions: {
 					verified: ["claim-001"],
 					partiallySupported: ["claim-002"],
+					verificationBlocked: ["claim-003"],
 				},
 				claimDigests: [
 					{
@@ -13883,8 +13901,16 @@ test("deep-research final-audit packet compacts deterministic ledgers", async ()
 	assert.equal(result.schema, "deep-research-final-audit-packet-v1");
 	assert.equal(result.packet.researchMetadataSeed.depth, "standard");
 	assert.equal(result.packet.verdictCounts.verified, 1);
+	assert.equal(result.packet.verdictCounts.verificationBlocked, 1);
+	assert.equal(
+		result.packet.synthesisInput.verdictCounts.verificationBlocked,
+		1,
+	);
 	assert.equal(result.packet.claimVerdictLedger.length, 1);
 	assert.deepEqual(result.packet.statusPartitions.verified, ["claim-001"]);
+	assert.deepEqual(result.packet.statusPartitions.verificationBlocked, [
+		"claim-003",
+	]);
 	assert.deepEqual(result.packet.invariantChecks.omittedCandidateIds, [
 		"claim-002",
 	]);
@@ -14261,8 +14287,9 @@ test("deep-research renderer joins synthesis overlay against packet ledgers", as
 						partiallySupported: 1,
 						unsupported: 1,
 						conflicting: 0,
+						verificationBlocked: 1,
 					},
-					invariantChecks: { candidateCount: 3 },
+					invariantChecks: { candidateCount: 4 },
 					factSlotCoverage: [
 						{
 							slotId: "slot-001",
@@ -14292,6 +14319,12 @@ test("deep-research renderer joins synthesis overlay against packet ledgers", as
 							status: "unsupported",
 							caveat: "No primary evidence.",
 						},
+						{
+							id: "claim-004",
+							claim: "Blocked packet claim",
+							status: "verification_blocked",
+							caveat: "Source access blocked.",
+						},
 					],
 					preservedClaims: [{ id: "claim-004", claim: "Preserved lead" }],
 					remainingGaps: [
@@ -14319,6 +14352,12 @@ test("deep-research renderer joins synthesis overlay against packet ledgers", as
 							supportingClaimIds: ["claim-001", "claim-002"],
 							evidenceStatus: "verified",
 						},
+						{
+							recommendation:
+								"Do not treat blocked verification as verified support.",
+							supportingClaimIds: ["claim-004"],
+							evidenceStatus: "verified",
+						},
 					],
 					actionPlan: [
 						{
@@ -14341,6 +14380,12 @@ test("deep-research renderer joins synthesis overlay against packet ledgers", as
 							evidenceStatus: "verified",
 							supportingClaimIds: ["claim-002"],
 						},
+						{
+							note: "Blocked support must stay blocked.",
+							whyItMatters: "Blocked claims are not verified support.",
+							evidenceStatus: "verified",
+							supportingClaimIds: ["claim-004"],
+						},
 					],
 					notableUnsupportedClaimIds: ["claim-003"],
 				},
@@ -14350,16 +14395,24 @@ test("deep-research renderer joins synthesis overlay against packet ledgers", as
 	});
 
 	assert.equal(result.status, "passed");
-	assert.equal(result.claimSummary.total, 3);
+	assert.equal(result.claimSummary.total, 4);
 	assert.equal(result.claimSummary.verified, 1);
 	assert.equal(result.claimSummary.partially_supported, 1);
 	assert.equal(result.claimSummary.unsupported, 1);
+	assert.equal(result.claimSummary.verification_blocked, 1);
 	assert.match(result.executiveMarkdown, /Verified packet claim/);
 	assert.match(
 		result.executiveMarkdown,
 		/Evidence status: partially_supported/,
 	);
 	assert.match(result.executiveMarkdown, /Unsupported packet claim/);
+	assert.match(result.executiveMarkdown, /1 verification blocked/);
+	assert.match(result.executiveMarkdown, /Blocked support must stay blocked/);
+	assert.match(
+		result.executiveMarkdown,
+		/Evidence status: verification_blocked/,
+	);
+	assert.doesNotMatch(result.executiveMarkdown, /Blocked packet claim/);
 	assert.match(result.executiveMarkdown, /Need a dated primary source/);
 	assert.match(
 		result.executiveMarkdown,
@@ -14372,6 +14425,58 @@ test("deep-research renderer joins synthesis overlay against packet ledgers", as
 	assert.ok(result.sourceUrls.includes("https://example.test/source"));
 	assert.ok(result.sourceUrls.includes("https://example.test/partial"));
 	assert.doesNotMatch(JSON.stringify(result), /finalReport|claimVerdictIndex/);
+});
+
+test("deep-research renderer does not promote unverified fallback findings", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"render-executive.mjs",
+	);
+	const helper = (
+		await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)
+	).default;
+	const result = await helper({
+		sources: {
+			"final-audit-packet.main": {
+				packet: {
+					verdictCounts: {
+						verified: 0,
+						partiallySupported: 0,
+						unsupported: 0,
+						conflicting: 0,
+						verificationBlocked: 0,
+					},
+					invariantChecks: { candidateCount: 1 },
+					claimVerdictLedger: [
+						{
+							id: "claim-unverified",
+							claim: "Unverified packet claim",
+							status: "unverified",
+						},
+					],
+				},
+			},
+			"final-audit.main": {
+				synthesis: {
+					bottomLine: "No verified findings.",
+					keyFindingIds: [],
+				},
+			},
+		},
+		context: {},
+	});
+
+	assert.equal(result.status, "passed");
+	assert.doesNotMatch(result.executiveMarkdown, /Unverified packet claim/);
+	assert.doesNotMatch(
+		result.executiveMarkdown,
+		/Evidence status: \*\*verified\*\*/,
+	);
 });
 
 test("deep-research executive renderer preserves object gaps zeros and recommendation labels", async () => {
@@ -23178,55 +23283,99 @@ test("deep-research claim-evidence-gate does not backfill near-miss source URLs"
 	);
 });
 
-test("deep-research verifier schema allows omitted identity echoes", () => {
-	const schemaPath = join(
+test("deep-research verifier schemas separate default single-row and batched results", () => {
+	const workflowDir = join(
 		dirname(fileURLToPath(import.meta.url)),
 		"..",
 		"..",
 		"workflows",
 		"deep-research",
-		"schemas",
-		"deep-research-verify-claims-control.schema.json",
 	);
-	const schema = JSON.parse(readFileSync(schemaPath, "utf8"));
-	const valid = validateJsonSchema(
-		{
-			schema: "./schemas/deep-research-verify-claims-control.schema.json",
-			digest: "verified from source-backed evidence",
-			id: "claim-001",
-			status: "verified",
-			verdictDigest: { support: "official source supports it" },
-			evidence: [
-				{
-					url: "https://example.test/source",
-					quote: "source-backed evidence",
-				},
-			],
-		},
-		schema,
+	const schemaDir = join(workflowDir, "schemas");
+	const schema = JSON.parse(
+		readFileSync(
+			join(schemaDir, "deep-research-verify-claims-control.schema.json"),
+			"utf8",
+		),
 	);
+	const batchSchema = JSON.parse(
+		readFileSync(
+			join(schemaDir, "deep-research-verify-claims-batch-control.schema.json"),
+			"utf8",
+		),
+	);
+	const defaultSpec = JSON.parse(
+		readFileSync(join(workflowDir, "spec.json"), "utf8"),
+	);
+	const batchedSpec = JSON.parse(
+		readFileSync(join(workflowDir, "batched-verification.spec.json"), "utf8"),
+	);
+	const defaultVerifyStage = defaultSpec.artifactGraph.stages.find(
+		(stage) => stage.id === "verify-claims",
+	);
+	const batchedVerifyStage = batchedSpec.artifactGraph.stages.find(
+		(stage) => stage.id === "verify-claims",
+	);
+	assert.equal(
+		defaultVerifyStage.output.controlSchema,
+		"./schemas/deep-research-verify-claims-control.schema.json",
+	);
+	assert.equal(
+		batchedVerifyStage.output.controlSchema,
+		"./schemas/deep-research-verify-claims-batch-control.schema.json",
+	);
+	const singleRow = {
+		schema: "./schemas/deep-research-verify-claims-control.schema.json",
+		digest: "verified from source-backed evidence",
+		id: "claim-001",
+		status: "verified",
+		verdictDigest: { support: "official source supports it" },
+		evidence: [
+			{
+				url: "https://example.test/source",
+				quote: "source-backed evidence",
+			},
+		],
+	};
+	const batchedRows = {
+		schema: "./schemas/deep-research-verify-claims-batch-control.schema.json",
+		digest: "batched verifier results",
+		results: [
+			{
+				id: "claim-001",
+				status: "verified",
+				verdictDigest: { support: "official source supports it" },
+				evidence: [
+					{
+						url: "https://example.test/source",
+						quote: "source-backed evidence",
+					},
+				],
+			},
+		],
+	};
+
+	const valid = validateJsonSchema(singleRow, schema);
 	assert.equal(valid.valid, true, JSON.stringify(valid.issues));
-	const batchValid = validateJsonSchema(
+	const defaultRejectsBatchCarrier = validateJsonSchema(batchedRows, schema);
+	assert.equal(defaultRejectsBatchCarrier.valid, false);
+	const batchValid = validateJsonSchema(batchedRows, batchSchema);
+	assert.equal(batchValid.valid, true, JSON.stringify(batchValid.issues));
+	const batchRejectsSingleRow = validateJsonSchema(singleRow, batchSchema);
+	assert.equal(batchRejectsSingleRow.valid, false);
+	const blockedValid = validateJsonSchema(
 		{
 			schema: "./schemas/deep-research-verify-claims-control.schema.json",
-			digest: "batched verifier results",
-			results: [
-				{
-					id: "claim-001",
-					status: "verified",
-					verdictDigest: { support: "official source supports it" },
-					evidence: [
-						{
-							url: "https://example.test/source",
-							quote: "source-backed evidence",
-						},
-					],
-				},
-			],
+			digest: "verifier could not evaluate due blocked source access",
+			id: "claim-blocked",
+			status: "verification_blocked",
+			verdictDigest: { support: "verification blocked by source access" },
+			evidence: [],
+			caveats: ["source access blocked"],
 		},
 		schema,
 	);
-	assert.equal(batchValid.valid, true, JSON.stringify(batchValid.issues));
+	assert.equal(blockedValid.valid, true, JSON.stringify(blockedValid.issues));
 	const invalid = validateJsonSchema(
 		{
 			schema: "./schemas/deep-research-verify-claims-control.schema.json",
@@ -23238,10 +23387,10 @@ test("deep-research verifier schema allows omitted identity echoes", () => {
 		schema,
 	);
 	assert.equal(invalid.valid, false);
-	assert.ok(invalid.issues.some((issue) => issue.path === "$"));
+	assert.ok(invalid.issues.length > 0);
 	const invalidBatch = validateJsonSchema(
 		{
-			schema: "./schemas/deep-research-verify-claims-control.schema.json",
+			schema: "./schemas/deep-research-verify-claims-batch-control.schema.json",
 			digest: "missing result id remains invalid",
 			results: [
 				{
@@ -23251,7 +23400,7 @@ test("deep-research verifier schema allows omitted identity echoes", () => {
 				},
 			],
 		},
-		schema,
+		batchSchema,
 	);
 	assert.equal(invalidBatch.valid, false);
 	const invalidNumericId = validateJsonSchema(
@@ -23278,7 +23427,62 @@ test("deep-research verifier schema allows omitted identity echoes", () => {
 		schema,
 	);
 	assert.equal(camelCaseStatus.valid, false);
-	assert.ok(camelCaseStatus.issues.some((issue) => issue.path === "$"));
+	assert.ok(camelCaseStatus.issues.length > 0);
+});
+
+test("package and deep-research verification ontology canonicalize blocked outcomes", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"verification-ontology.mjs",
+	);
+	const ontology = await import(
+		`${pathToFileURL(helperPath).href}?test=${Date.now()}`
+	);
+
+	assert.deepEqual(ontology.VERIFICATION_STATUS_VALUES, [
+		"verified",
+		"partially_supported",
+		"unsupported",
+		"conflicting",
+		"verification_blocked",
+	]);
+	assert.deepEqual(
+		ontology.VERIFICATION_STATUS_VALUES,
+		PACKAGE_VERIFICATION_STATUS_VALUES,
+	);
+	assert.equal(
+		ontology.canonicalVerificationStatus("verificationBlocked"),
+		"verification_blocked",
+	);
+	assert.equal(
+		canonicalPackageVerificationStatus("verificationBlocked"),
+		"verification_blocked",
+	);
+	assert.equal(
+		ontology.verificationStatusBucket("verification_blocked"),
+		"verificationBlocked",
+	);
+	assert.equal(
+		packageVerificationStatusBucket("verification_blocked"),
+		"verificationBlocked",
+	);
+	assert.equal(ontology.isVerifiedStatus("verification_blocked"), false);
+	assert.equal(isPackageVerifiedStatus("verification_blocked"), false);
+	assert.equal(ontology.isVerificationBlockedStatus("blocked"), true);
+	assert.equal(isPackageVerificationBlockedStatus("blocked"), true);
+	assert.equal(
+		ontology.isNonVerifiedTerminalStatus("verification_blocked"),
+		true,
+	);
+	assert.equal(
+		isPackageNonVerifiedTerminalStatus("verification_blocked"),
+		true,
+	);
 });
 
 test("deep-research shadow selector reports would-skip without skipping verification", async () => {
@@ -23909,6 +24113,70 @@ test("deep-research claim-evidence-gate marks clean verifier joins eligible for 
 	assert.equal(out.batchAdoptionReadiness.adopted, false);
 	assert.equal(out.batchAdoptionReadiness.canaryRequired, true);
 	assert.deepEqual(out.batchAdoptionReadiness.blockers, []);
+});
+
+test("deep-research claim-evidence-gate partitions verification_blocked separately", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"claim-evidence-gate.mjs",
+	);
+	const helper = (
+		await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)
+	).default;
+	const out = await helper({
+		sources: {
+			"normalize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [
+						{
+							id: "claim-blocked",
+							claim: "The source could not be reached for verification.",
+							sourceRefs: ["wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+						},
+						{
+							id: "claim-verified",
+							claim: "The source was reached for verification.",
+							sourceRefs: ["wsrc_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+						},
+					],
+				},
+				factSlotCoverage: [],
+			},
+			"verify-claims.blocked": {
+				id: "claim-blocked",
+				status: "verification_blocked",
+				verdictDigest: { support: "verification was blocked" },
+				evidence: [],
+				caveats: ["source access blocked"],
+			},
+			"verify-claims.verified": {
+				id: "claim-verified",
+				status: "verified",
+				evidence: [
+					{
+						sourceRef: "wsrc_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+						quote: "The source was reached for verification.",
+					},
+				],
+			},
+		},
+		options: {
+			requireFetchedEvidenceForVerified: true,
+			downgradeExactQuantitativeWithoutSource: true,
+		},
+	});
+
+	assert.deepEqual(out.statusPartitions.verified, ["claim-verified"]);
+	assert.deepEqual(out.statusPartitions.verificationBlocked, ["claim-blocked"]);
+	assert.equal(out.verdictCounts.verified, 1);
+	assert.equal(out.verdictCounts.verificationBlocked, 1);
+	assert.equal(out.gateSummary.missingVerifierResults, 0);
+	assert.equal(out.auditedClaims[0].status, "verification_blocked");
 });
 
 test("workflow_artifact lists visible sources, reads by source name, and records a read ledger", async () => {

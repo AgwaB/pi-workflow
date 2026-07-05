@@ -211,6 +211,12 @@ This is an opt-in fast mode. Package defaults remain conservative until a separa
 
 This path-ref variant keeps the same planner/research/normalization/audit/final stages, but feeds `verify-claims` from `verification-batches` and requires each verifier task to return one `results[]` row per claim id. It is not registered as an official bundled workflow name and does not change package defaults. Treat speed/cost results as task-specific: claim a win only when the run's audit reports zero missing/duplicate/invalid verifier rows, zero sourceRef join failures, and no verified-floor regression.
 
+### Verification outcome ontology
+
+The package exports a small verification outcome vocabulary for workflows that verify source-backed claims: `verified`, `partially_supported`, `unsupported`, `conflicting`, and `verification_blocked`. Bundled workflow helpers must use bundle-local shims that stay in parity with the package export, because helper imports are bundled from the workflow spec directory. `verification_blocked` means the verifier could not evaluate the claim because required evidence, source access, tool execution, or policy constraints blocked verification. It is not a weaker form of `verified`, never counts toward verified floors, and should remain visible in audit summaries so operators can decide whether to rerun, change source access, or treat the claim as unresolved.
+
+Adopt this vocabulary only for evidence-verification outcomes. Do not force it onto workflow-control, finding-disposition, or ship-readiness verdicts such as `KEEP`, `DROP`, `READY`, or `NEEDS_WORK`. Deep-diff-review revival is not part of this ontology change.
+
 ### Run-scoped web-source cache
 
 Prefer normalized workflow web tools in new workflows:

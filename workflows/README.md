@@ -24,6 +24,8 @@ For spec-less direct dynamic execution, use `/workflow dynamic "<task>"`; it doe
 
 Experimental or candidate workflows should live outside the bundled `workflows/` directory until their task fit is validated. `deep-research` also ships a path-ref-only batched verification variant at `workflows/deep-research/batched-verification.spec.json`; it is intentionally not registered as an official workflow name and must be invoked by explicit path after validation.
 
+Bundled workflows that verify source-backed claims can share the verification outcome ontology exported by the package: `verified`, `partially_supported`, `unsupported`, `conflicting`, and `verification_blocked`. Workflow helpers should keep dependency-free bundle-local shims in parity with that package export, because helper imports are bundled from the workflow spec directory. `verification_blocked` means verification could not complete because evidence, tool, source-access, or policy conditions blocked evaluation; it is never counted as verified. Deep-research adopts this ontology now. Workflows with different verdict models, such as finding disposition or ship readiness, should not be forced into it. Deep-diff-review revival is intentionally out of scope for this ontology update.
+
 ## Bundle layout
 
 Bundled workflows use directory-local bundles:

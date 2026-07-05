@@ -8,6 +8,7 @@
 
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { canonicalVerificationStatus } from "./verification-ontology.mjs";
 
 function findSource(sources, stageId) {
 	const entries = Object.entries(sources ?? {});
@@ -298,11 +299,24 @@ function finiteNumber(value) {
 function normalizeClaimStatus(status) {
 	const text = cleanText(status).toLowerCase();
 	if (!text) return "";
+	const canonical = canonicalVerificationStatus(text);
+	if (canonical !== "unverified") return canonical;
+	if (
+		text === "unverified" ||
+		text.includes("not verified") ||
+		text.includes("not_verified")
+	)
+		return "unverified";
+	if (
+		text.includes("verification_blocked") ||
+		text.includes("verification blocked")
+	)
+		return "verification_blocked";
 	if (text.includes("conflict")) return "conflicting";
 	if (text.includes("unsupported")) return "unsupported";
 	if (text.includes("partial")) return "partially_supported";
-	if (text.includes("verified")) return "verified";
-	return text;
+	if (/\bverified\b/.test(text)) return "verified";
+	return canonical;
 }
 
 function coverageCounts(coverage, fallback) {
@@ -316,13 +330,18 @@ function coverageCounts(coverage, fallback) {
 			fallback.partially_supported,
 		unsupported: finiteNumber(coverage.unsupported) ?? fallback.unsupported,
 		conflicting: finiteNumber(coverage.conflicting) ?? fallback.conflicting,
+		verification_blocked:
+			finiteNumber(coverage.verificationBlocked) ??
+			finiteNumber(coverage.verification_blocked) ??
+			fallback.verification_blocked,
 	};
 	if (counts.total == null) {
 		counts.total =
 			counts.verified +
 			counts.partially_supported +
 			counts.unsupported +
-			counts.conflicting;
+			counts.conflicting +
+			counts.verification_blocked;
 	}
 	return counts;
 }
@@ -338,7 +357,8 @@ function packetVerdictCounts(packet, fallback) {
 		counts.verified +
 			counts.partially_supported +
 			counts.unsupported +
-			counts.conflicting;
+			counts.conflicting +
+			counts.verification_blocked;
 	return counts;
 }
 
@@ -350,6 +370,7 @@ function claimCounts(control, packet) {
 		partially_supported: 0,
 		unsupported: 0,
 		conflicting: 0,
+		verification_blocked: 0,
 	};
 	for (const claim of claims) {
 		const status = normalizeClaimStatus(claim?.status);
@@ -372,6 +393,7 @@ function claimCounts(control, packet) {
 		"partially_supported",
 		"unsupported",
 		"conflicting",
+		"verification_blocked",
 	]) {
 		if (coverage[key] !== counts[key]) {
 			mismatches.push({
@@ -520,6 +542,8 @@ function evidenceStrength(status) {
 		case "unsupported":
 			return 1;
 		case "conflicting":
+		case "verification_blocked":
+		case "unverified":
 			return 0;
 		default:
 			return -1;
@@ -587,6 +611,7 @@ function coverageSummaryFromPacket(packet, fallback = {}) {
 		partially_supported: 0,
 		unsupported: 0,
 		conflicting: 0,
+		verification_blocked: 0,
 	});
 	if (!counts) return fallback;
 	return {
@@ -595,6 +620,7 @@ function coverageSummaryFromPacket(packet, fallback = {}) {
 		partiallySupported: counts.partially_supported,
 		unsupported: counts.unsupported,
 		conflicting: counts.conflicting,
+		verificationBlocked: counts.verification_blocked,
 		verificationCandidates: counts.total,
 		depth: packet?.researchMetadataSeed?.depth ?? fallback.depth,
 		researchQuestions:
@@ -975,7 +1001,7 @@ function renderAuditSummary(report, claimSummary, slots) {
 	return [
 		"## Audit summary",
 		"",
-		`- Claims: ${claimSummary.verified} verified, ${claimSummary.partially_supported} partially supported, ${claimSummary.unsupported} unsupported, ${claimSummary.conflicting} conflicting.`,
+		`- Claims: ${claimSummary.verified} verified, ${claimSummary.partially_supported} partially supported, ${claimSummary.unsupported} unsupported, ${claimSummary.conflicting} conflicting, ${claimSummary.verification_blocked} verification blocked.`,
 		`- Fact slots: ${slots.filled} filled, ${slots.partial} partial, ${slots.missingOrConflicting} missing/conflicting, ${slots.total} total.`,
 		...(mismatches.length > 0
 			? [
@@ -1240,6 +1266,7 @@ export default async function renderExecutive({
 				partially_supported: 0,
 				unsupported: 0,
 				conflicting: 0,
+				verification_blocked: 0,
 			},
 			factSlotSummary: {
 				total: 0,

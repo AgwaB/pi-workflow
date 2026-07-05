@@ -24,13 +24,14 @@
     "sourceUrls": { "type": "array", "items": { "type": "string" } },
     "claimSummary": {
       "type": "object",
-      "required": ["total", "verified", "partially_supported", "unsupported", "conflicting"],
+      "required": ["total", "verified", "partially_supported", "unsupported", "conflicting", "verification_blocked"],
       "properties": {
         "total": { "type": "number" },
         "verified": { "type": "number" },
         "partially_supported": { "type": "number" },
         "unsupported": { "type": "number" },
-        "conflicting": { "type": "number" }
+        "conflicting": { "type": "number" },
+        "verification_blocked": { "type": "number" }
       },
       "additionalProperties": true
     },
