@@ -665,6 +665,14 @@ export interface WorkflowTaskTimingRecord {
 	executionCompletedAt?: string;
 	executionMs?: number | null;
 	totalMs?: number;
+	refreshReconcileMs?: number;
+	refreshStatusPollMs?: number;
+	terminalOutputCopyMs?: number;
+	terminalStderrCopyMs?: number;
+	terminalOutputBytes?: number;
+	terminalStderrBytes?: number;
+	terminalArtifactMaterializeMs?: number;
+	terminalArtifactBundleWriteMs?: number;
 	aggregate?: WorkflowTaskTimingAggregateRecord;
 	attempts?: WorkflowTaskTimingAttemptRecord[];
 }

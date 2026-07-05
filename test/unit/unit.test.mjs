@@ -169,6 +169,7 @@ import {
 import {
 	buildWorkflowOutputRetryInstructions,
 	parseWorkflowOutput,
+	setWorkflowOutputArtifactWriteHookForTests,
 	writeWorkflowTaskArtifactBundle,
 } from "../../.tmp/unit/workflow-output-artifacts.js";
 import { parseWorkflowPartialOutput } from "../../.tmp/unit/workflow-partial-output.js";
@@ -7246,7 +7247,7 @@ test("artifactGraph dynamic runtime budget excludes suspended child wait time", 
 						type: "dynamic",
 						dynamic: {
 							uses: "./helpers/controller.mjs",
-							budget: { maxRuntimeMs: 100 },
+							budget: { maxRuntimeMs: 1_000 },
 						},
 					},
 				],
@@ -15908,6 +15909,443 @@ test("subagent terminal observability captures usage and separates launch timing
 	}
 });
 
+test("refresh polls subagent status in a bounded pool and records latency telemetry", async () => {
+	const cwd = makeProject();
+	let activeStatusCalls = 0;
+	let maxActiveStatusCalls = 0;
+	const statusCallOrder = [];
+	const reconcileCalls = [];
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const spec = workflowSpec("unit-scout");
+		const compiled = await compileWorkflow(spec, { cwd, task: "Review topic" });
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		const baseTask = run.tasks[0];
+		const secondTask = structuredClone(baseTask);
+		secondTask.taskId = "task-2";
+		secondTask.specId = "main.task-2";
+		secondTask.displayName = "Task 2";
+		secondTask.backendTaskId = "run_pool_b";
+		secondTask.files = {
+			output: join(
+				".pi",
+				"workflows",
+				run.runId,
+				"tasks",
+				"task-2",
+				"output.md",
+			),
+			stderr: join(
+				".pi",
+				"workflows",
+				run.runId,
+				"tasks",
+				"task-2",
+				"stderr.log",
+			),
+			result: join(
+				".pi",
+				"workflows",
+				run.runId,
+				"tasks",
+				"task-2",
+				"result.json",
+			),
+			systemPrompt: join(
+				".pi",
+				"workflows",
+				run.runId,
+				"tasks",
+				"task-2",
+				"system-prompt.md",
+			),
+			taskPrompt: join(
+				".pi",
+				"workflows",
+				run.runId,
+				"tasks",
+				"task-2",
+				"prompt.md",
+			),
+		};
+		run.tasks = [baseTask, secondTask];
+
+		const startedAt = new Date().toISOString();
+		const completedAt = new Date(Date.parse(startedAt) + 25).toISOString();
+		const snapshots = new Map();
+		for (const [task, runId, attemptId, outputText] of [
+			[baseTask, "run_pool_a", "attempt_pool_a", "alpha output"],
+			[secondTask, "run_pool_b", "attempt_pool_b", "bravo output"],
+		]) {
+			task.status = "running";
+			task.statusDetail = "running";
+			task.startedAt = startedAt;
+			task.artifactGraph = undefined;
+			task.backendHandle = {
+				engine: "pi-subagent",
+				backend: "headless",
+				runId,
+				attemptId,
+				cwd,
+				runsDir: `.pi/workflow-subagents/${runId}`,
+				display: `pi-subagent/headless ${runId}/${attemptId}`,
+			};
+			const artifactDir = join(cwd, `.fake-refresh-pool-${runId}`);
+			mkdirSync(artifactDir, { recursive: true });
+			writeFileSync(join(artifactDir, "output.log"), outputText, "utf8");
+			writeFileSync(join(artifactDir, "stderr.log"), `${runId} stderr`, "utf8");
+			writeFileSync(
+				join(artifactDir, "result.json"),
+				JSON.stringify({
+					status: "completed",
+					startedAt,
+					completedAt,
+					durationMs: 25,
+					exitCode: 0,
+				}),
+				"utf8",
+			);
+			snapshots.set(runId, {
+				runId,
+				attemptId,
+				backend: "headless",
+				status: "completed",
+				failureKind: null,
+				startedAt,
+				completedAt,
+				durationMs: 25,
+				logs: [
+					{ type: "output", path: "output.log", artifactCwd: artifactDir },
+					{ type: "stderr", path: "stderr.log", artifactCwd: artifactDir },
+					{ type: "result", path: "result.json", artifactCwd: artifactDir },
+				],
+				attempts: [{ attemptId, status: "completed" }],
+			});
+		}
+
+		setSubagentApiForTests({
+			async runSubagent() {
+				throw new Error("not expected");
+			},
+			async reconcileSubagentRun(options) {
+				reconcileCalls.push(options.runId);
+				await sleep(5);
+				return {};
+			},
+			async getSubagentStatus(options) {
+				activeStatusCalls += 1;
+				maxActiveStatusCalls = Math.max(
+					maxActiveStatusCalls,
+					activeStatusCalls,
+				);
+				try {
+					await sleep(options.runId === "run_pool_a" ? 40 : 10);
+					statusCallOrder.push(options.runId);
+					return snapshots.get(options.runId);
+				} finally {
+					activeStatusCalls -= 1;
+				}
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+
+		await writeRunRecord(cwd, run);
+		const refreshed = await refreshRunFromSubagentArtifacts(
+			cwd,
+			await readRunRecord(cwd, run.runId),
+		);
+		assert.equal(maxActiveStatusCalls, 2);
+		assert.deepEqual(reconcileCalls.sort(), ["run_pool_a", "run_pool_b"]);
+		assert.deepEqual(statusCallOrder, ["run_pool_b", "run_pool_a"]);
+		assert.deepEqual(
+			refreshed.tasks.map((task) => task.status),
+			["completed", "completed"],
+		);
+		for (const task of refreshed.tasks) {
+			assert.equal(typeof task.timing.refreshReconcileMs, "number");
+			assert.equal(typeof task.timing.refreshStatusPollMs, "number");
+			assert.equal(typeof task.timing.terminalOutputCopyMs, "number");
+			assert.equal(typeof task.timing.terminalStderrCopyMs, "number");
+			assert.ok(task.timing.terminalOutputBytes > 0);
+			assert.ok(task.timing.terminalStderrBytes > 0);
+		}
+		const metrics = buildWorkflowRunMetrics(refreshed);
+		assert.ok(metrics.totals.launchTiming.refreshStatusPollMs >= 50);
+		assert.ok(metrics.totals.launchTiming.terminalOutputBytes > 0);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("refresh surfaces poll API errors after processing sibling tasks", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const spec = workflowSpec("unit-scout");
+		const compiled = await compileWorkflow(spec, { cwd, task: "Review topic" });
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+
+		const startedAt = new Date().toISOString();
+		const completedAt = new Date(Date.parse(startedAt) + 25).toISOString();
+		const baseTask = run.tasks[0];
+		const makeRunningTask = (index, specId, runId, attemptId) => {
+			const task = index === 0 ? baseTask : structuredClone(baseTask);
+			task.taskId = `task-refresh-error-${index}`;
+			task.specId = specId;
+			task.displayName = specId;
+			task.status = "running";
+			task.statusDetail = "running";
+			task.startedAt = startedAt;
+			task.artifactGraph = undefined;
+			task.files = {
+				output: join(
+					".pi",
+					"workflows",
+					run.runId,
+					"tasks",
+					task.taskId,
+					"output.md",
+				),
+				stderr: join(
+					".pi",
+					"workflows",
+					run.runId,
+					"tasks",
+					task.taskId,
+					"stderr.log",
+				),
+				result: join(
+					".pi",
+					"workflows",
+					run.runId,
+					"tasks",
+					task.taskId,
+					"result.json",
+				),
+				systemPrompt: join(
+					".pi",
+					"workflows",
+					run.runId,
+					"tasks",
+					task.taskId,
+					"system-prompt.md",
+				),
+				taskPrompt: join(
+					".pi",
+					"workflows",
+					run.runId,
+					"tasks",
+					task.taskId,
+					"prompt.md",
+				),
+			};
+			task.backendTaskId = runId;
+			task.backendHandle = {
+				engine: "pi-subagent",
+				backend: "headless",
+				runId,
+				attemptId,
+				cwd,
+				runsDir: `.pi/workflow-subagents/${runId}`,
+				display: `pi-subagent/headless ${runId}/${attemptId}`,
+			};
+			return task;
+		};
+		run.tasks = [
+			makeRunningTask(
+				0,
+				"main.reconcile-fails",
+				"run_reconcile_fail",
+				"attempt_reconcile_fail",
+			),
+			makeRunningTask(
+				1,
+				"main.status-fails",
+				"run_status_fail",
+				"attempt_status_fail",
+			),
+			makeRunningTask(
+				2,
+				"main.sibling",
+				"run_refresh_sibling",
+				"attempt_refresh_sibling",
+			),
+		];
+
+		const artifactDir = join(cwd, ".fake-refresh-error-sibling");
+		mkdirSync(artifactDir, { recursive: true });
+		writeFileSync(join(artifactDir, "output.log"), "sibling output", "utf8");
+		writeFileSync(join(artifactDir, "stderr.log"), "sibling stderr", "utf8");
+		writeFileSync(
+			join(artifactDir, "result.json"),
+			JSON.stringify({
+				status: "completed",
+				startedAt,
+				completedAt,
+				durationMs: 25,
+				exitCode: 0,
+			}),
+			"utf8",
+		);
+
+		setSubagentApiForTests({
+			async runSubagent() {
+				throw new Error("not expected");
+			},
+			async reconcileSubagentRun(options) {
+				if (options.runId === "run_reconcile_fail") {
+					throw new Error("reconcile boom");
+				}
+				return {};
+			},
+			async getSubagentStatus(options) {
+				if (options.runId === "run_status_fail") {
+					throw new Error("status boom");
+				}
+				return {
+					runId: "run_refresh_sibling",
+					attemptId: "attempt_refresh_sibling",
+					backend: "headless",
+					status: "completed",
+					failureKind: null,
+					startedAt,
+					completedAt,
+					durationMs: 25,
+					logs: [
+						{ type: "output", path: "output.log", artifactCwd: artifactDir },
+						{ type: "stderr", path: "stderr.log", artifactCwd: artifactDir },
+						{ type: "result", path: "result.json", artifactCwd: artifactDir },
+					],
+					attempts: [
+						{ attemptId: "attempt_refresh_sibling", status: "completed" },
+					],
+				};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+
+		await writeRunRecord(cwd, run);
+		const error = await refreshRunFromSubagentArtifacts(
+			cwd,
+			await readRunRecord(cwd, run.runId),
+		).then(
+			() => null,
+			(reason) => reason,
+		);
+
+		assert(error instanceof AggregateError);
+		assert.equal(error.errors.length, 2);
+		const errorText = error.errors.map((entry) => entry.message).join("\n");
+		assert.match(
+			errorText,
+			/reconcile.*run_reconcile_fail\/attempt_reconcile_fail/,
+		);
+		assert.match(errorText, /status.*run_status_fail\/attempt_status_fail/);
+		assert(
+			error.errors.some((entry) => entry.cause?.message === "reconcile boom"),
+		);
+		assert(
+			error.errors.some((entry) => entry.cause?.message === "status boom"),
+		);
+
+		const persisted = await readRunRecord(cwd, run.runId);
+		assert.equal(taskBySpec(persisted, "main.sibling").status, "completed");
+		assert.equal(
+			readFileSync(
+				join(cwd, taskBySpec(persisted, "main.sibling").files.output),
+				"utf8",
+			),
+			"sibling output",
+		);
+		assert.equal(
+			taskBySpec(persisted, "main.reconcile-fails").status,
+			"running",
+		);
+		assert.equal(taskBySpec(persisted, "main.status-fails").status, "running");
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("refresh persists telemetry-only null status polls", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const spec = workflowSpec("unit-scout");
+		const compiled = await compileWorkflow(spec, { cwd, task: "Review topic" });
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		const task = run.tasks[0];
+		task.status = "running";
+		task.statusDetail = "running";
+		task.startedAt = new Date().toISOString();
+		task.timing = undefined;
+		task.backendTaskId = "run_telemetry_only";
+		task.backendHandle = {
+			engine: "pi-subagent",
+			backend: "headless",
+			runId: "run_telemetry_only",
+			attemptId: "attempt_telemetry_only",
+			cwd,
+			runsDir: ".pi/workflow-subagents/run_telemetry_only",
+			display: "pi-subagent/headless run_telemetry_only/attempt_telemetry_only",
+		};
+
+		setSubagentApiForTests({
+			async runSubagent() {
+				throw new Error("not expected");
+			},
+			async reconcileSubagentRun() {
+				await sleep(1);
+				return {};
+			},
+			async getSubagentStatus() {
+				await sleep(1);
+				return null;
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+
+		await writeRunRecord(cwd, run);
+		await refreshRunFromSubagentArtifacts(
+			cwd,
+			await readRunRecord(cwd, run.runId),
+		);
+		const persistedTask = taskBySpec(
+			await readRunRecord(cwd, run.runId),
+			task.specId,
+		);
+		assert.equal(persistedTask.status, "running");
+		assert.equal(typeof persistedTask.timing.refreshReconcileMs, "number");
+		assert.equal(typeof persistedTask.timing.refreshStatusPollMs, "number");
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("subagent terminal observability aggregates distinct retry attempts", async () => {
 	const cwd = makeProject();
 	let statusSnapshot = null;
@@ -18792,6 +19230,8 @@ test("refresh retries zero-output transient subagent model failures", async () =
 		assert.equal(refreshedTask.launchRetry?.attempts, 1);
 		assert.equal(refreshedTask.launchRetry?.reason, "model");
 		assert.equal(refreshedTask.backendHandle, undefined);
+		assert.equal(typeof refreshedTask.timing.refreshStatusPollMs, "number");
+		assert.ok(refreshedTask.timing.terminalStderrBytes > 0);
 		assert.equal(
 			existsSync(
 				join(
@@ -19375,6 +19815,7 @@ test("refresh interrupts timed-out running subagents and clears stale handles", 
 		assert.equal(refreshedTask.backendHandle, undefined);
 		assert.equal(refreshedTask.backendTaskId, refreshedTask.taskId);
 		assert.equal(refreshedTask.pid, undefined);
+		assert.equal(typeof refreshedTask.timing.refreshStatusPollMs, "number");
 		assert.equal(interrupts.length, 1);
 		assert.equal(interrupts[0].runId, "run_timeout");
 		assert.equal(interrupts[0].attemptId, "attempt_timeout");
@@ -26492,6 +26933,12 @@ test("workflow artifact bundle writer writes sidecars before result envelope", a
 			"[]",
 			"</refs>",
 		].join("\n");
+		const writeEvents = [];
+		setWorkflowOutputArtifactWriteHookForTests(async ({ phase, file }) => {
+			const name = file.split(/[\\/]/).at(-1);
+			writeEvents.push(`${phase}:${name}`);
+			if (phase === "before" && name === "analysis.md") await sleep(20);
+		});
 		const written = await writeWorkflowTaskArtifactBundle({
 			taskDir,
 			rawOutput: raw,
@@ -26533,7 +26980,71 @@ test("workflow artifact bundle writer writes sidecars before result envelope", a
 		assert.equal(result.artifacts.control, "control.json");
 		assert.equal(result.artifacts.analysis, "analysis.md");
 		assert.equal(result.artifacts["system-prompt"], "system-prompt.md");
+		const resultBegin = writeEvents.indexOf("before:result.json");
+		assert.ok(resultBegin > -1);
+		for (const sidecar of [
+			"control.json",
+			"analysis.md",
+			"refs.json",
+			"raw.md",
+			"prompt.md",
+			"system-prompt.md",
+			"stderr.log",
+		]) {
+			assert.ok(
+				writeEvents.indexOf(`after:${sidecar}`) < resultBegin,
+				`${sidecar} should finish before result.json starts`,
+			);
+		}
 	} finally {
+		setWorkflowOutputArtifactWriteHookForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("workflow artifact bundle writer does not commit result when a parallel sidecar fails", async () => {
+	const cwd = makeProject();
+	try {
+		const taskDir = join(
+			cwd,
+			".pi",
+			"workflows",
+			"workflow_unit",
+			"tasks",
+			"task-sidecar-failure",
+		);
+		const raw = [
+			"<control>",
+			JSON.stringify({ schema: "stage-control-v1", digest: "bundle digest" }),
+			"</control>",
+			"<analysis>",
+			"Bundle analysis",
+			"</analysis>",
+			"<refs>",
+			"[]",
+			"</refs>",
+		].join("\n");
+		setWorkflowOutputArtifactWriteHookForTests(({ phase, file }) => {
+			const name = file.split(/[\\/]/).at(-1);
+			if (phase === "before" && name === "refs.json") {
+				throw new Error("refs sidecar failed");
+			}
+		});
+		await assert.rejects(
+			() =>
+				writeWorkflowTaskArtifactBundle({
+					taskDir,
+					rawOutput: raw,
+					completedAt: "2026-06-14T00:00:01.000Z",
+				}),
+			/refs sidecar failed/,
+		);
+		assert.throws(
+			() => readFileSync(join(taskDir, "result.json"), "utf8"),
+			/ENOENT/,
+		);
+	} finally {
+		setWorkflowOutputArtifactWriteHookForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });
@@ -26549,6 +27060,10 @@ test("workflow artifact bundle writer stores invalid attempts without commit res
 			"tasks",
 			"task-1",
 		);
+		const writeEvents = [];
+		setWorkflowOutputArtifactWriteHookForTests(({ phase, file }) => {
+			writeEvents.push(`${phase}:${file.split(/[\\/]/).at(-1)}`);
+		});
 		const written = await writeWorkflowTaskArtifactBundle({
 			taskDir,
 			rawOutput: "<control>{}</control><analysis></analysis><refs>{}</refs>",
@@ -26573,7 +27088,13 @@ test("workflow artifact bundle writer stores invalid attempts without commit res
 			() => readFileSync(join(taskDir, "result.json"), "utf8"),
 			/ENOENT/,
 		);
+		assert.ok(
+			writeEvents.indexOf("after:raw.invalid-attempt-2.md") <
+				writeEvents.indexOf("before:result.invalid-attempt-2.json"),
+			"invalid raw attempt should finish before invalid result commit starts",
+		);
 	} finally {
+		setWorkflowOutputArtifactWriteHookForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });
