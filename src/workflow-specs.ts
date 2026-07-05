@@ -43,10 +43,12 @@ interface WorkflowCandidate {
 	name: string;
 	file: string;
 	root: string;
+	priority: number;
 }
 
 interface WorkflowRoot {
 	path: string;
+	priority: number;
 }
 
 export async function resolveWorkflowRef(
@@ -118,23 +120,45 @@ export async function listWorkflows(
 					aliases,
 					specPath: file,
 					workflowRoot: workflowRootFor(file, root.path),
+					priority: root.priority,
 				};
 			});
 		}),
 	);
 
-	return nested.flat().sort((left, right) => {
+	return dedupeWorkflowRecords(nested.flat()).sort((left, right) => {
 		const byName = left.name.localeCompare(right.name);
 		return byName !== 0 ? byName : left.specPath.localeCompare(right.specPath);
 	});
 }
 
+function dedupeWorkflowRecords(
+	records: Array<WorkflowSpecRecord & { priority: number }>,
+): WorkflowSpecRecord[] {
+	const byName = new Map<
+		string,
+		Array<WorkflowSpecRecord & { priority: number }>
+	>();
+	for (const record of records) {
+		const group = byName.get(record.name) ?? [];
+		group.push(record);
+		byName.set(record.name, group);
+	}
+
+	return [...byName.values()].flatMap((group) => {
+		const bestPriority = Math.min(...group.map((record) => record.priority));
+		return group
+			.filter((record) => record.priority === bestPriority)
+			.map(({ priority: _priority, ...record }) => record);
+	});
+}
+
 function workflowRoots(cwd: string): WorkflowRoot[] {
 	return uniqueWorkflowRoots([
-		{ path: resolve(cwd, ".pi", "workflows") },
-		{ path: resolve(cwd, "workflows") },
-		{ path: PACKAGE_WORKFLOW_ROOT },
-		{ path: join(homedir(), ".pi", "agent", "workflows") },
+		{ path: resolve(cwd, "workflows"), priority: 0 },
+		{ path: resolve(cwd, ".pi", "workflows"), priority: 1 },
+		{ path: join(homedir(), ".pi", "agent", "workflows"), priority: 2 },
+		{ path: PACKAGE_WORKFLOW_ROOT, priority: 3 },
 	]);
 }
 
@@ -160,13 +184,23 @@ async function findWorkflowCandidates(
 			const files = await listSpecFiles(root.path);
 			return files.flatMap((file) =>
 				aliasesFor(file, root.path).includes(name)
-					? [{ name, file, root: workflowRootFor(file, root.path) }]
+					? [
+							{
+								name,
+								file,
+								root: workflowRootFor(file, root.path),
+								priority: root.priority,
+							},
+						]
 					: [],
 			);
 		}),
 	);
-	return nested
-		.flat()
+	const matches = nested.flat();
+	if (matches.length === 0) return [];
+	const bestPriority = Math.min(...matches.map((match) => match.priority));
+	return matches
+		.filter((match) => match.priority === bestPriority)
 		.sort((left, right) => left.file.localeCompare(right.file));
 }
 
