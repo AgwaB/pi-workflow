@@ -11359,8 +11359,28 @@ test("artifactGraph runtime foreach empty fanout completes terminal placeholder"
 
 test("artifactGraph runtime foreach repairs compiled/run mismatch after materialization crash", async () => {
 	const cwd = makeProject();
+	let launched = 0;
 	try {
 		writeAgent(cwd, "unit-scout", "read");
+		setSubagentApiForTests({
+			async runSubagent() {
+				launched += 1;
+				return {
+					runId: `run_foreach_repair_${launched}`,
+					attemptId: `attempt_foreach_repair_${launched}`,
+					status: "running",
+				};
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async getSubagentStatus() {
+				return null;
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
 		const spec = workflowSpec("unit-scout", {
 			artifactGraph: {
 				stages: [
@@ -11414,6 +11434,7 @@ test("artifactGraph runtime foreach repairs compiled/run mismatch after material
 			["verify.item-001", "verify.item-002"],
 		);
 	} finally {
+		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });

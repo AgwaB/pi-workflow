@@ -486,9 +486,7 @@ function rollupLaunchTiming(
 			key,
 			REQUIRED_TIMING_METRIC_KEYS.includes(key)
 				? sumMetricValues(tasks.map((task) => task.launchTiming[key]))
-				: sumOptionalMetricValues(
-					tasks.map((task) => task.launchTiming[key]),
-					),
+				: sumOptionalMetricValues(tasks.map((task) => task.launchTiming[key])),
 		]),
 	) as Record<TimingMetricKey, ReturnType<typeof sumMetricValues>>;
 	const unavailableTaskIds = tasks.flatMap(

@@ -278,6 +278,25 @@ function shouldWatchRun(
 	return hasActiveSchedulerWork(run);
 }
 
+function isRefreshPollAggregateError(error: unknown): error is AggregateError {
+	return error instanceof AggregateError;
+}
+
+async function refreshRunOrRecordPollError(
+	cwd: string,
+	runIdOrPrefix: string,
+	fallbackRun?: WorkflowRunRecord,
+): Promise<WorkflowRunRecord> {
+	try {
+		return await refreshRun(cwd, runIdOrPrefix);
+	} catch (error) {
+		if (!isRefreshPollAggregateError(error)) throw error;
+		const run = fallbackRun ?? (await readRunRecord(cwd, runIdOrPrefix));
+		await recordSupervisorError(cwd, run.runId, error);
+		return run;
+	}
+}
+
 export async function waitForRun(
 	cwd: string,
 	runIdOrPrefix: string,
@@ -286,7 +305,7 @@ export async function waitForRun(
 ): Promise<WorkflowRunRecord> {
 	const timeout = clampTimeout(timeoutMs);
 	const deadline = Date.now() + timeout;
-	let run = await refreshRun(cwd, runIdOrPrefix);
+	let run = await refreshRunOrRecordPollError(cwd, runIdOrPrefix);
 
 	while (hasActiveSchedulerWork(run)) {
 		const beforeScheduleRemaining = deadline - Date.now();
@@ -294,17 +313,19 @@ export async function waitForRun(
 			throw new Error(
 				`Flow run still running after ${timeout}ms: ${run.runId}`,
 			);
-		await scheduleRun(cwd, run.runId, undefined, options);
-		run = await refreshRun(cwd, run.runId);
+		const scheduled = await scheduleRun(cwd, run.runId, undefined, options);
+		if (scheduled) run = scheduled;
+		if (!hasActiveSchedulerWork(run)) return run;
+		run = await refreshRunOrRecordPollError(cwd, run.runId, run);
+		if (!hasActiveSchedulerWork(run)) return run;
 		const remaining = deadline - Date.now();
 		if (remaining <= 0) {
-			if (!hasActiveSchedulerWork(run)) return run;
 			throw new Error(
 				`Flow run still running after ${timeout}ms: ${run.runId}`,
 			);
 		}
 		await sleep(Math.min(POLL_INTERVAL_MS, remaining));
-		run = await refreshRun(cwd, run.runId);
+		run = await refreshRunOrRecordPollError(cwd, run.runId, run);
 	}
 
 	return run;
@@ -553,7 +574,12 @@ export async function scheduleRun(
 	return withRunLease(cwd, runId, async (leaseSignal) => {
 		assertScheduleLeaseActive(leaseSignal);
 		let run = await readRunRecord(cwd, runId);
-		run = await resolveWorkflowBackend(run).refreshRun(cwd, run);
+		try {
+			run = await resolveWorkflowBackend(run).refreshRun(cwd, run);
+		} catch (error) {
+			if (!isRefreshPollAggregateError(error)) throw error;
+			await recordSupervisorError(cwd, run.runId, error);
+		}
 		if (isTerminalWorkflowStatus(run.status)) return run;
 		if (
 			run.taskSummary.blocked > 0 &&
@@ -594,20 +620,46 @@ export async function formatStatus(cwd: string): Promise<string> {
 	return formatIndex(cwd, rebuilt);
 }
 
+interface FormatRefreshResult {
+	run: WorkflowRunRecord;
+	warning?: string;
+}
+
+async function refreshRunForFormat(
+	cwd: string,
+	runIdOrPrefix: string,
+): Promise<FormatRefreshResult> {
+	try {
+		return { run: await refreshRun(cwd, runIdOrPrefix) };
+	} catch (error) {
+		if (!isRefreshPollAggregateError(error)) throw error;
+		const run = await readRunRecord(cwd, runIdOrPrefix);
+		await recordSupervisorError(cwd, run.runId, error);
+		return {
+			run,
+			warning: `Warning: refresh poll failed; showing last cached workflow run state (${error.message}).`,
+		};
+	}
+}
+
+function prependRefreshWarning(text: string, warning?: string): string {
+	return warning ? `${warning}\n\n${text}` : text;
+}
+
 export async function formatRunDetails(
 	cwd: string,
 	runIdOrPrefix: string,
 ): Promise<string> {
-	const run = await refreshRun(cwd, runIdOrPrefix);
-	return formatRun(run, "full");
+	const { run, warning } = await refreshRunForFormat(cwd, runIdOrPrefix);
+	return prependRefreshWarning(formatRun(run, "full"), warning);
 }
 
 export async function formatRunStatus(
 	cwd: string,
 	runIdOrPrefix: string,
 ): Promise<string> {
-	const run = await refreshRun(cwd, runIdOrPrefix);
-	return formatRun(run, "summary");
+	const { run, warning } = await refreshRunForFormat(cwd, runIdOrPrefix);
+	return prependRefreshWarning(formatRun(run, "summary"), warning);
 }
 
 export async function formatLogs(
@@ -616,7 +668,7 @@ export async function formatLogs(
 	taskId = "task-1",
 	lineCount = LOG_LINES_DEFAULT,
 ): Promise<string> {
-	const run = await refreshRun(cwd, runIdOrPrefix);
+	const { run, warning } = await refreshRunForFormat(cwd, runIdOrPrefix);
 	const task = run.tasks.find(
 		(item) => item.taskId === taskId || item.specId === taskId,
 	);
@@ -636,7 +688,10 @@ export async function formatLogs(
 	}
 
 	const tail = text.split(/\r?\n/).slice(-count).join("\n").trim();
-	return `${run.runId}/${task.taskId} output=${task.files.output}\n${tail || "(empty log)"}`;
+	return prependRefreshWarning(
+		`${run.runId}/${task.taskId} output=${task.files.output}\n${tail || "(empty log)"}`,
+		warning,
+	);
 }
 
 function runFailurePolicyEnabled(run: WorkflowRunRecord): boolean {
