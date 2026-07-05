@@ -42,6 +42,7 @@ Copy their proven conventions (see "Quality design patterns"), not just their st
 - Write-capable workflows need explicit worktree policy, validation/check stages, and protected-path awareness.
 - In non-git workspaces with `worktreePolicy: "off"`, writes mutate the live directory.
 - Project workflows should be saved under `.pi/workflows/<name>.json` or a bundle directory with `spec.json`, schemas, and helpers.
+- If the user asks to create a workflow but does not specify storage scope, ask where to save it before writing: project-local `.pi/workflows/` or user/global `~/.pi/agent/workflows/`. Use bundled/package `workflows/<name>/spec.json` only when explicitly requested for package distribution.
 - For natural-language execution of existing workflows, prefer `workflow_list` and `workflow_run` when those tools are available; use `/workflow ...` commands as the deterministic manual fallback.
 - Always run `/workflow validate <workflow-or-file>` before handing off or running a reusable workflow.
 
@@ -50,24 +51,29 @@ Copy their proven conventions (see "Quality design patterns"), not just their st
 When the workflow-definition request is vague, broad, or self-contradictory, do not write a spec yet. Clarify the authoring target first, then build collaboratively.
 
 1. Identify the requested workflow-definition action: create new, modify existing, review existing, validate existing, or explain authoring rules.
-2. Identify the workflow target path/name when known. Project workflows should start under `.pi/workflows/`; bundled/reusable workflows should use `workflows/<name>/spec.json` only when explicitly intended for the package.
+2. Identify the workflow target path/name and storage scope. If not explicit, ask the user to choose project-local `.pi/workflows/` or user/global `~/.pi/agent/workflows/` before writing files. Use bundled/package `workflows/<name>/spec.json` only when explicitly requested for package distribution.
 3. Ask only for decisions that determine the workflow graph and safety posture:
    - What runtime task will the workflow handle, and what final artifact should it produce?
    - What downstream decision depends on the output?
+   - Where should the workflow live: project-local or user/global? Use bundled/package only when the user explicitly wants to ship it with the package.
    - Is the workflow read-only, or write-capable with managed worktree expectations?
    - Is the graph a fixed DAG, static fan-out (`foreach`), synthesis (`reduce`), bounded `loop`, nested `dag`, support-helper pipeline, or trusted adaptive dynamic stage?
    - Which agents must exist, and what tool ceiling do they allow?
    - Which stage outputs are machine-read by later stages and therefore need control schemas?
-4. Survey existing workflows only when choosing a base template, adapting a known workflow, or checking whether a requested new workflow is unnecessary. Do not invent a new topology when an existing workflow definition already satisfies the authoring request.
-5. If the request is contradictory (for example "read-only" plus "edit and commit"), name the conflict and offer concrete alternatives rather than silently resolving it. Workflow workers do not commit; mutation goes through a managed worktree for human review with no auto-merge.
-6. Before writing a new or revised spec, agree the stage graph (nodes, `from`/`foreach.from`/`reduce.from`/support edges, read/write policy, schemas, and helpers) with the user when those choices are not already explicit.
+4. For storage scope, prefer Pi's `question` tool when available instead of free-text. Use descriptions so the user can choose without knowing workflow internals:
+   - `project-local`: save under the current project's `.pi/workflows/<name>/`; best for workflows tied to this repo, local absolute paths, or team/project context. Discoverable from this project and ignored by git.
+   - `global`: save under `~/.pi/agent/workflows/<name>/`; best for personal workflows reused across projects. Avoid hard-coded project paths unless intentional.
+   Example `question` tool shape: `question({questions:[{id:"workflow_storage_scope",label:"Storage",prompt:"Where should I save this workflow?",options:[{value:"project-local",label:"Project-local",description:"Use in this project; saved under .pi/workflows/<name>/ and discoverable here."},{value:"global",label:"Global/user",description:"Reuse from any project; saved under ~/.pi/agent/workflows/<name>/."}],allowOther:true}]})`.
+5. Survey existing workflows only when choosing a base template, adapting a known workflow, or checking whether a requested new workflow is unnecessary. Do not invent a new topology when an existing workflow definition already satisfies the authoring request.
+6. If the request is contradictory (for example "read-only" plus "edit and commit"), name the conflict and offer concrete alternatives rather than silently resolving it. Workflow workers do not commit; mutation goes through a managed worktree for human review with no auto-merge.
+7. Before writing a new or revised spec, briefly note the chosen stage graph (nodes, `from`/`foreach.from`/`reduce.from`/support edges, read/write policy, schemas/helpers, and storage path) when it materially affects cost, safety, or output shape. Do not ask the user to approve internal graph details unless the choice changes user-visible behavior, cost, storage scope, or mutation risk.
 
 ## Authoring workflow
 
 When creating or changing a workflow:
 
 1. Identify the workflow goal and whether an existing workflow definition can be reused or adapted.
-2. Choose the workflow graph first: subagent stages plus support nodes where needed. Use `type: "dynamic"` only when static `foreach`/`dag`/`reduce` shapes cannot know the child work until runtime.
+2. Choose the workflow graph first: subagent stages plus support nodes where needed. Use `type: "dynamic"` only when static `foreach`/`dag`/`reduce` shapes cannot know the child work until runtime. If the graph choice materially affects cost, safety, output shape, or storage, state the chosen approach briefly before writing; otherwise proceed without asking about internal implementation details.
 3. If one of the local scaffolds fits, copy it from `./scaffolds/` to the target workflow directory and adapt the copied files. Available scaffolds: `foreach-reduce`, `support-partition`, `dag-required-reads`, `matrix-dag`, `object-tool-fallback`, and `analysis-dossier`.
 4. Define every data dependency explicitly.
 5. Add `output.controlSchema` JSON Schema files for model outputs consumed by later stages; long prose belongs in `<analysis>`, not `<control>`.
@@ -170,7 +176,7 @@ Before handing off or recommending a reusable workflow run, verify or report as 
 
 For a workflow promoted from local experiment to bundled/reusable package workflow:
 
-- Move from `.pi/workflows/<name>.json` or a scratch bundle to `workflows/<name>/spec.json` with schemas/helpers in the bundle directory.
+- Move from a local `.pi/workflows/<name>.json` or `.pi/workflows/<name>/spec.json` experiment to `workflows/<name>/spec.json` with schemas/helpers in the bundle directory.
 - Update `workflows/README.md` and `docs/usage.md`; update `README.md` if the workflow is user-facing.
 - Add or update tests when the bundled workflow list, package contents, schema behavior, helper behavior, or docs examples are expected to remain stable.
 - Run at least `/workflow validate <name-or-path>` and the relevant project checks (`npm test`, `npm run typecheck`, `npm run e2e`, or `npm run pack:dry`) when package surface changes require them.
