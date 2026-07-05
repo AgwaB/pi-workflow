@@ -28,6 +28,8 @@ const CANONICAL_SECTION_ORDER = [
 const DEFAULT_MAX_DIGEST_CHARS = 1000;
 const DEFAULT_REFS_URL_VALIDATION_TIMEOUT_MS = 8_000;
 const DEFAULT_REFS_URL_VALIDATION_MAX_URLS = 25;
+const REFS_URL_VALIDATION_CONCURRENCY = 4;
+const REFS_URL_VALIDATION_PER_HOST_CONCURRENCY = 1;
 
 type WorkflowOutputSectionName = (typeof CANONICAL_SECTION_ORDER)[number];
 
@@ -912,11 +914,9 @@ async function validateRefsUrlAvailability(
 ): Promise<WorkflowOutputIssue[]> {
 	const config = refsUrlValidationConfig(option);
 	if (!config) return [];
-	const issues: WorkflowOutputIssue[] = [];
-	const checks = new Map<
-		string,
-		Promise<{ ok: true } | { ok: false; reason: string }>
-	>();
+	const selectedRefs: Array<{ index: number; href: string }> = [];
+	const uniqueHrefs: string[] = [];
+	const queuedHrefs = new Set<string>();
 	let checkedUrls = 0;
 	for (const [index, ref] of refs.entries()) {
 		const locator = refLocator(ref);
@@ -924,13 +924,22 @@ async function validateRefsUrlAvailability(
 		if (href === undefined) continue;
 		if (checkedUrls >= config.maxUrls) break;
 		checkedUrls += 1;
-		let check = checks.get(href);
-		if (!check) {
-			check = checkRefUrlAvailability(href, config.timeoutMs);
-			checks.set(href, check);
+		selectedRefs.push({ index, href });
+		if (!queuedHrefs.has(href)) {
+			queuedHrefs.add(href);
+			uniqueHrefs.push(href);
 		}
-		const result = await check;
-		if (result.ok) continue;
+	}
+	if (selectedRefs.length === 0) return [];
+
+	const results = await checkRefUrlsAvailabilityBounded(
+		uniqueHrefs,
+		config.timeoutMs,
+	);
+	const issues: WorkflowOutputIssue[] = [];
+	for (const { index, href } of selectedRefs) {
+		const result = results.get(href);
+		if (result === undefined || result.ok) continue;
 		issues.push({
 			code: "unavailable_ref_locator",
 			section: SECTION_REFS,
@@ -975,10 +984,68 @@ function httpRefHref(locator: string): string | undefined {
 	}
 }
 
+type RefUrlAvailabilityResult = { ok: true } | { ok: false; reason: string };
+
+async function checkRefUrlsAvailabilityBounded(
+	hrefs: readonly string[],
+	timeoutMs: number,
+): Promise<Map<string, RefUrlAvailabilityResult>> {
+	const results = new Map<string, RefUrlAvailabilityResult>();
+	const pending = [...hrefs];
+	const activeByHost = new Map<string, number>();
+	let active = 0;
+
+	return await new Promise<Map<string, RefUrlAvailabilityResult>>((resolve) => {
+		const pump = (): void => {
+			if (pending.length === 0 && active === 0) {
+				resolve(results);
+				return;
+			}
+			while (active < REFS_URL_VALIDATION_CONCURRENCY) {
+				const pendingIndex = pending.findIndex(
+					(href) =>
+						(activeByHost.get(refUrlHostKey(href)) ?? 0) <
+						REFS_URL_VALIDATION_PER_HOST_CONCURRENCY,
+				);
+				if (pendingIndex < 0) return;
+				const [href] = pending.splice(pendingIndex, 1);
+				if (href === undefined) return;
+				const hostKey = refUrlHostKey(href);
+				active += 1;
+				activeByHost.set(hostKey, (activeByHost.get(hostKey) ?? 0) + 1);
+				void checkRefUrlAvailability(href, timeoutMs)
+					.then((result) => {
+						results.set(href, result);
+					})
+					.catch((error: unknown) => {
+						const reason =
+							error instanceof Error
+								? error.message || error.name
+								: String(error);
+						results.set(href, { ok: false, reason });
+					})
+					.finally(() => {
+						active -= 1;
+						const hostActive = (activeByHost.get(hostKey) ?? 1) - 1;
+						if (hostActive > 0) activeByHost.set(hostKey, hostActive);
+						else activeByHost.delete(hostKey);
+						pump();
+					});
+			}
+		};
+		pump();
+	});
+}
+
+function refUrlHostKey(href: string): string {
+	const parsed = new URL(href);
+	return parsed.host;
+}
+
 async function checkRefUrlAvailability(
 	href: string,
 	timeoutMs: number,
-): Promise<{ ok: true } | { ok: false; reason: string }> {
+): Promise<RefUrlAvailabilityResult> {
 	const headers = { "user-agent": "pi-workflow-ref-validator/0.1" };
 	for (const attempt of [
 		{ method: "HEAD", headers },
