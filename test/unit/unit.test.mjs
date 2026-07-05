@@ -10692,10 +10692,11 @@ test("dynamic generated tasks reject maxSubagentDepth on target agents", async (
 	}
 });
 
-test("artifactGraph runtime foreach materializes source array into generated tasks", async () => {
+test("artifactGraph runtime foreach materializes and launches generated tasks in one scheduleRun", async () => {
 	const cwd = makeProject();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
+		const prompts = captureSubagentPrompts();
 		const spec = workflowSpec("unit-scout", {
 			artifactGraph: {
 				stages: [
@@ -10745,13 +10746,15 @@ test("artifactGraph runtime foreach materializes source array into generated tas
 		assert.equal(
 			materialized.tasks.find((task) => task.specId === "verify.claim_a")
 				?.status,
-			"pending",
+			"running",
 		);
 		assert.equal(
 			materialized.tasks.find((task) => task.specId === "verify.item-002")
 				?.status,
-			"pending",
+			"running",
 		);
+		assert.equal(prompts.length, 2);
+		assert(prompts.every((prompt) => prompt.includes("Verify")));
 		assert.deepEqual(
 			materialized.tasks.find((task) => task.specId === "verify.claim_a")
 				?.foreachGenerated,
@@ -10774,6 +10777,7 @@ test("artifactGraph runtime foreach materializes source array into generated tas
 			["verify.claim_a", "verify.item-002"],
 		);
 	} finally {
+		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });
@@ -11026,6 +11030,7 @@ test("successive foreach materialization keeps task ids unique", async () => {
 
 test("streaming foreach appends items before all upstream siblings finish", async () => {
 	const cwd = makeProject();
+	captureSubagentPrompts();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
 		const spec = workflowSpec("unit-scout", {
@@ -11122,12 +11127,14 @@ test("streaming foreach appends items before all upstream siblings finish", asyn
 			"review.item-002",
 		]);
 	} finally {
+		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
 test("streaming foreach minChunk holds small batches until enough items arrive", async () => {
 	const cwd = makeProject();
+	captureSubagentPrompts();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
 		const spec = workflowSpec("unit-scout", {
@@ -11189,6 +11196,7 @@ test("streaming foreach minChunk holds small batches until enough items arrive",
 			["verify.item", "verify.finding_a", "verify.finding_b"],
 		);
 	} finally {
+		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });
@@ -11223,6 +11231,7 @@ test("partial output sections are parsed separately from final workflow output",
 
 test("streaming foreach consumes producer partial output before terminal completion", async () => {
 	const cwd = makeProject();
+	captureSubagentPrompts();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
 		const spec = workflowSpec("unit-scout", {
@@ -11317,12 +11326,14 @@ test("streaming foreach consumes producer partial output before terminal complet
 			"verify.item_b",
 		]);
 	} finally {
+		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
 test("streaming foreach keeps producer dependency for partial children that need source context", async () => {
 	const cwd = makeProject();
+	captureSubagentPrompts();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
 		const spec = workflowSpec("unit-scout", {
@@ -11377,12 +11388,14 @@ test("streaming foreach keeps producer dependency for partial children that need
 			"partial",
 		);
 	} finally {
+		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
 test("streaming foreach blocks if a producer changes a published partial item", async () => {
 	const cwd = makeProject();
+	captureSubagentPrompts();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
 		const spec = workflowSpec("unit-scout", {
@@ -11448,12 +11461,14 @@ test("streaming foreach blocks if a producer changes a published partial item", 
 			/changed after materialization/,
 		);
 	} finally {
+		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
 test("streaming foreach blocks if a producer withdraws a published partial item", async () => {
 	const cwd = makeProject();
+	captureSubagentPrompts();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
 		const spec = workflowSpec("unit-scout", {
@@ -11515,6 +11530,7 @@ test("streaming foreach blocks if a producer withdraws a published partial item"
 			/missing from final control/,
 		);
 	} finally {
+		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });
@@ -11663,10 +11679,11 @@ test("loop compiles to a loop stage record with no premature child tasks", async
 	}
 });
 
-test("loop round 1 materializes child tasks with deterministic ids", async () => {
+test("loop round 1 materializes and launches ready child tasks in one scheduleRun", async () => {
 	const cwd = makeProject();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
+		const prompts = captureSubagentPrompts();
 		const { run } = await createLoopRun(cwd);
 
 		await scheduleRun(cwd, run.runId);
@@ -11690,6 +11707,48 @@ test("loop round 1 materializes child tasks with deterministic ids", async () =>
 			taskBySpec(materialized, "fix-loop.r01.check").artifactGraph?.enabled,
 			true,
 		);
+		assert.equal(
+			taskBySpec(materialized, "fix-loop.r01.implement").status,
+			"running",
+		);
+		assert.equal(
+			taskBySpec(materialized, "fix-loop.r01.check").status,
+			"pending",
+		);
+		assert.equal(prompts.length, 1);
+		assert.match(prompts[0], /Implement the requested fix/);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("same-lease rescan keeps positional alignment failures fatal", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const spec = workflowSpec("unit-scout", {
+			artifactGraph: {
+				stages: [
+					{ id: "first", type: "single", prompt: "First" },
+					{ id: "second", type: "single", after: "first", prompt: "Second" },
+				],
+			},
+		});
+		const compiled = await compileWorkflow(spec, { cwd, task: "Check" });
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		run.tasks[0].specId = "stale.main";
+		await writeRunRecord(cwd, run);
+
+		await assert.rejects(
+			() => scheduleRun(cwd, run.runId),
+			/Workflow task materialization is misaligned at index 0: expected first\.main, found stale\.main/,
+		);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
@@ -11699,6 +11758,7 @@ test("loop resume reconciliation backfills missing run records for compiled roun
 	const cwd = makeProject();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
+		captureSubagentPrompts();
 		const loopStage = loopWorkflowSpec().artifactGraph.stages[0];
 		const spec = workflowSpec("unit-scout", {
 			artifactGraph: {
@@ -11761,8 +11821,9 @@ test("loop resume reconciliation backfills missing run records for compiled roun
 		current = await readRunRecord(cwd, run.runId);
 		assert.equal(taskBySpec(current, "fix-loop.loop").status, "completed");
 		assert.equal(current.loopResults[0].status, "completed");
-		assert.equal(taskBySpec(current, "after.main").status, "pending");
+		assert.equal(taskBySpec(current, "after.main").status, "running");
 	} finally {
+		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });
@@ -11805,6 +11866,7 @@ test("loop until satisfied after a round marks loop completed and stops material
 	const cwd = makeProject();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
+		captureSubagentPrompts();
 		const { run } = await createLoopRun(cwd);
 		await scheduleRun(cwd, run.runId);
 		let current = await readRunRecord(cwd, run.runId);
@@ -11835,6 +11897,7 @@ test("loop until satisfied after a round marks loop completed and stops material
 			false,
 		);
 	} finally {
+		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });
@@ -12053,7 +12116,7 @@ test("loop maxRounds exhaustion materializes and waits for onExhausted", async (
 		await scheduleRun(cwd, run.runId);
 		current = await readRunRecord(cwd, run.runId);
 		const exhausted = taskBySpec(current, "fix-loop.onExhausted.loop-summary");
-		assert.equal(exhausted.status, "pending");
+		assert.equal(exhausted.status, "running");
 		assert.equal(taskBySpec(current, "fix-loop.loop").status, "pending");
 
 		await completeTask(cwd, exhausted, { summary: "human follow-up needed" });

@@ -148,6 +148,7 @@ export type { DynamicWorkflowUi } from "./dynamic-controller-policy.js";
 const DEFAULT_WAIT_TIMEOUT_MS = 60_000;
 const MAX_WAIT_TIMEOUT_MS = 14_400_000;
 const POLL_INTERVAL_MS = 1_000;
+const MAX_SAME_LEASE_SCHEDULE_RESCANS = 8;
 const LOG_LINES_DEFAULT = 80;
 const LOG_LINES_MAX = 400;
 const MAX_CONCURRENCY = 16;
@@ -702,6 +703,39 @@ async function scheduleDag(
 	options: WorkflowScheduleOptions = {},
 	leaseSignal?: AbortSignal,
 ): Promise<void> {
+	let currentRun = run;
+	let currentCompiledFlow = compiledFlow;
+	let rescans = 0;
+	for (;;) {
+		assertScheduleLeaseActive(leaseSignal);
+		const needsRescan = await scheduleDagPass(
+			cwd,
+			currentRun,
+			currentCompiledFlow,
+			options,
+			leaseSignal,
+		);
+		if (!needsRescan) return;
+		if (rescans >= MAX_SAME_LEASE_SCHEDULE_RESCANS) return;
+		rescans += 1;
+		assertScheduleLeaseActive(leaseSignal);
+		currentRun = await readRunRecord(cwd, currentRun.runId);
+		const refreshedCompiledFlow = await readCompiledWorkflow(
+			cwd,
+			currentRun.runId,
+		);
+		if (!refreshedCompiledFlow) return;
+		currentCompiledFlow = refreshedCompiledFlow;
+	}
+}
+
+async function scheduleDagPass(
+	cwd: string,
+	run: WorkflowRunRecord,
+	compiledFlow: CompiledWorkflow,
+	options: WorkflowScheduleOptions = {},
+	leaseSignal?: AbortSignal,
+): Promise<boolean> {
 	assertScheduleLeaseActive(leaseSignal);
 	if (compiledFlow.type === WORKFLOW_RUN_TYPE) {
 		const loopReconciled = await reconcileLoopTaskMaterialization(
@@ -709,7 +743,7 @@ async function scheduleDag(
 			run,
 			compiledFlow,
 		);
-		if (loopReconciled) return;
+		if (loopReconciled) return true;
 		const foreachReconciled = reconcileForeachGeneratedRunRecords(
 			cwd,
 			run,
@@ -718,7 +752,7 @@ async function scheduleDag(
 		if (foreachReconciled) {
 			await writeJsonAtomic(compiledWorkflowPath(cwd, run.runId), compiledFlow);
 			await writeRunRecord(cwd, run);
-			return;
+			return true;
 		}
 		const dynamicReconciled = reconcileDynamicGeneratedRunRecords(
 			cwd,
@@ -771,7 +805,7 @@ async function scheduleDag(
 				index,
 				compiledTask,
 			);
-			if (changed) return;
+			if (changed) return true;
 			continue;
 		}
 
@@ -783,7 +817,7 @@ async function scheduleDag(
 				index,
 				compiledTask,
 			);
-			if (changed) return;
+			if (changed) return true;
 			if (foreachStreamingEnabled(compiledTask)) continue;
 		}
 
@@ -811,6 +845,7 @@ async function scheduleDag(
 		assertScheduleLeaseActive(leaseSignal);
 		if (launched && run.tasks[index]?.status === "running") running += 1;
 	}
+	return false;
 }
 
 function isResumableDynamicApprovalBlockedRun(run: WorkflowRunRecord): boolean {
