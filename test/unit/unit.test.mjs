@@ -12311,6 +12311,7 @@ test("loop until satisfied after a round marks loop completed and stops material
 
 test("loop until unmet materializes round 2 with unique ids and carry-forward context", async () => {
 	const cwd = makeProject();
+	captureSubagentPrompts();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
 		const { run } = await createLoopRun(cwd);
@@ -12355,12 +12356,14 @@ test("loop until unmet materializes round 2 with unique ids and carry-forward co
 			/"blockingFailures":\["a","b"\]/,
 		);
 	} finally {
+		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
 test("loop no-progress stops early with stopped_no_progress", async () => {
 	const cwd = makeProject();
+	captureSubagentPrompts();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
 		const { run } = await createLoopRun(cwd);
@@ -12401,12 +12404,14 @@ test("loop no-progress stops early with stopped_no_progress", async () => {
 			"loop_stopped_no_progress",
 		);
 	} finally {
+		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
 test("loop invalid progressPath value records a warning", async () => {
 	const cwd = makeProject();
+	captureSubagentPrompts();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
 		const { run } = await createLoopRun(
@@ -12448,12 +12453,14 @@ test("loop invalid progressPath value records a warning", async () => {
 			true,
 		);
 	} finally {
+		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
 test("loop explicit missing progressPath records a warning", async () => {
 	const cwd = makeProject();
+	captureSubagentPrompts();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
 		const { run } = await createLoopRun(
@@ -12491,12 +12498,14 @@ test("loop explicit missing progressPath records a warning", async () => {
 			/progressPath \$\.missingProgress resolved to unsupported undefined/,
 		);
 	} finally {
+		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
 test("loop maxRounds exhaustion materializes and waits for onExhausted", async () => {
 	const cwd = makeProject();
+	captureSubagentPrompts();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
 		const spec = loopWorkflowSpec({
@@ -12534,12 +12543,14 @@ test("loop maxRounds exhaustion materializes and waits for onExhausted", async (
 		assert.equal(current.loopResults[0].roundsUsed, 1);
 		assert.equal(taskBySpec(current, "fix-loop.loop").status, "completed");
 	} finally {
+		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
 test("loop onExhausted context includes bounded prior round check outputs", async () => {
 	const cwd = makeProject();
+	captureSubagentPrompts();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
 		const spec = loopWorkflowSpec({
@@ -12602,6 +12613,7 @@ test("loop onExhausted context includes bounded prior round check outputs", asyn
 		assert.match(exhaustedTask.compiledPrompt, /Round 2/);
 		assert.match(exhaustedTask.compiledPrompt, /"blockingFailures":\["a"\]/);
 	} finally {
+		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });
@@ -17460,7 +17472,18 @@ test("workflow run metrics roll up provider-reported usage without mutation", ()
 		metrics.metadata.launchTimingMissingMetricsByTask.find(
 			(entry) => entry.taskId === "task-b",
 		).metrics,
-		["launchDurationMs", "launchSlotReleaseDelayMs"],
+		[
+			"launchDurationMs",
+			"launchSlotReleaseDelayMs",
+			"refreshReconcileMs",
+			"refreshStatusPollMs",
+			"terminalOutputCopyMs",
+			"terminalStderrCopyMs",
+			"terminalOutputBytes",
+			"terminalStderrBytes",
+			"terminalArtifactMaterializeMs",
+			"terminalArtifactBundleWriteMs",
+		],
 	);
 	assert.equal(metrics.totals.statusCounts.completed, 2);
 	assert.equal(metrics.totals.statusCounts.skipped, 1);
