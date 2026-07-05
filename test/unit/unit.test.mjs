@@ -187,6 +187,7 @@ import {
 import { registerWorkflowWebSourceExtension } from "../../.tmp/unit/workflow-web-source-extension.js";
 import { validateJsonSchema } from "../../.tmp/unit/json-schema.js";
 import {
+	checkRequiredArtifactReads,
 	launchSubagentTask,
 	refreshRunFromSubagentArtifacts,
 	setSubagentApiForTests,
@@ -1209,6 +1210,99 @@ test("public schemaVersion 1 parser accepts artifact graph and rejects non-artif
 		legacyTaskType,
 		"$.artifactGraph.stages[0].type",
 		"must be one of: single, reduce, foreach, loop, dag, dynamic",
+	);
+});
+
+test("artifact graph schema validates structured requiredReadPolicy path contracts", () => {
+	const cappedWithoutPath = assertThrowsFlow(() =>
+		parsePublicWorkflow(
+			artifactGraphWorkflowSpec({
+				artifactGraph: {
+					stages: [
+						{ id: "risk", type: "single", prompt: "Assess risk." },
+						{
+							id: "final",
+							type: "reduce",
+							from: ["risk"],
+							prompt: "Synthesize.",
+							inputPolicy: {
+								requiredReadPolicy: [
+									{ source: "risk", artifact: "control", maxChars: 200 },
+								],
+							},
+						},
+					],
+				},
+			}),
+		),
+	);
+	assertIssue(
+		cappedWithoutPath,
+		"$.artifactGraph.stages[1].inputPolicy.requiredReadPolicy[0].path",
+		"required when maxItems or maxChars",
+	);
+
+	const invalidPath = assertThrowsFlow(() =>
+		parsePublicWorkflow(
+			artifactGraphWorkflowSpec({
+				artifactGraph: {
+					stages: [
+						{ id: "risk", type: "single", prompt: "Assess risk." },
+						{
+							id: "final",
+							type: "reduce",
+							from: ["risk"],
+							prompt: "Synthesize.",
+							inputPolicy: {
+								requiredReadPolicy: [
+									{
+										source: "risk",
+										artifact: "control",
+										path: "$.claims[0]",
+										maxChars: 200,
+									},
+								],
+							},
+						},
+					],
+				},
+			}),
+		),
+	);
+	assertIssue(
+		invalidPath,
+		"$.artifactGraph.stages[1].inputPolicy.requiredReadPolicy[0].path",
+		"simple dot JSON path",
+	);
+
+	const parsed = parsePublicWorkflow(
+		artifactGraphWorkflowSpec({
+			artifactGraph: {
+				stages: [
+					{ id: "risk", type: "single", prompt: "Assess risk." },
+					{
+						id: "final",
+						type: "reduce",
+						from: ["risk"],
+						prompt: "Synthesize.",
+						inputPolicy: {
+							requiredReadPolicy: [
+								{
+									source: "risk",
+									artifact: "control",
+									path: "$.claims",
+									maxItems: 2,
+								},
+							],
+						},
+					},
+				],
+			},
+		}),
+	);
+	assert.equal(
+		parsed.artifactGraph.stages[1].inputPolicy.requiredReadPolicy[0].path,
+		"$.claims",
 	);
 });
 
@@ -12654,6 +12748,35 @@ test("bundled deep-review workflow leaves reviewer fanout unconstrained by stage
 		);
 		assert.equal(reviewers?.stageMaxConcurrency, undefined);
 		assert.equal(devilAdvocate?.stageMaxConcurrency, undefined);
+		const triage = compiled.tasks.find((task) => task.key === "triage.main");
+		for (const task of [triage, reviewers, devilAdvocate]) {
+			assert.ok(task);
+			assert.equal(task.artifactGraph.artifactAccess, "none");
+			const prepared = await prepareDagTask(
+				cwd,
+				{
+					runId: `deep_review_${task.key}`,
+					tasks: [
+						{
+							taskId: "task-1",
+							specId: task.key,
+							cwd,
+							files: {
+								result: `.pi/workflows/deep_review_${task.key}/tasks/task-1/result.json`,
+							},
+						},
+					],
+				},
+				{ tasks: [{ ...task, taskId: "task-1" }] },
+				0,
+			);
+			assert.equal(
+				prepared.runtime.toolProviders?.workflow_artifact,
+				undefined,
+			);
+			assert.equal(prepared.runtime.tools.includes("workflow_artifact"), false);
+			assert.doesNotMatch(prepared.compiledPrompt, /Workflow Artifact Inputs/);
+		}
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
@@ -20149,8 +20272,11 @@ test("workflow registry resolves exact names", async () => {
 		);
 
 		const workflows = await listWorkflows(cwd);
+		const projectWorkflows = workflows.filter((item) =>
+			item.specPath.startsWith(cwd),
+		);
 		assert.deepEqual(
-			workflows.map((item) => item.name),
+			projectWorkflows.map((item) => item.name),
 			["review"],
 		);
 		const resolved = await resolveWorkflowRef("review", cwd);
@@ -20185,8 +20311,11 @@ test("workflow specs are JSON-only and YAML files are rejected", async () => {
 		);
 
 		const workflows = await listWorkflows(cwd);
+		const projectWorkflows = workflows.filter((item) =>
+			item.specPath.startsWith(cwd),
+		);
 		assert.deepEqual(
-			workflows.map((item) => item.name),
+			projectWorkflows.map((item) => item.name),
 			[],
 		);
 		await assert.rejects(
@@ -20490,7 +20619,9 @@ test("natural-language workflow tools list and start workflows", async () => {
 		);
 		assert.match(listResult.content[0].text, /research-lite/);
 		assert.equal(
-			listResult.details.workflows[0].description,
+			listResult.details.workflows.find(
+				(workflow) => workflow.name === "research-lite",
+			)?.description,
 			"Research lite workflow",
 		);
 
@@ -20606,7 +20737,9 @@ test("natural-language workflow tools list and start workflows", async () => {
 		);
 		assert.match(listResult.content[0].text, /research-lite/);
 		assert.equal(
-			listResult.details.workflows[0].description,
+			listResult.details.workflows.find(
+				(workflow) => workflow.name === "research-lite",
+			)?.description,
 			"Research lite workflow",
 		);
 
@@ -24351,6 +24484,16 @@ test("artifact graph source context serializes source list compactly", () => {
 	assert.doesNotMatch(jsonText, /\n\s/);
 });
 
+function workflowArtifactJsonPayload(result) {
+	const text = result.content[0].text;
+	const body = text.slice(text.indexOf("\n\n") + 2);
+	const warningMarker = "\n\n[workflow_artifact output truncated:";
+	const jsonText = body.includes(warningMarker)
+		? body.slice(0, body.indexOf(warningMarker))
+		: body;
+	return { jsonText, payload: JSON.parse(jsonText) };
+}
+
 test("workflow_artifact can read deterministic JSON projections with caps", async () => {
 	const cwd = makeProject();
 	try {
@@ -24415,17 +24558,49 @@ test("workflow_artifact can read deterministic JSON projections with caps", asyn
 			result.content[0].text,
 			/# workflow_artifact: normalize\.control path=\$\.claims/,
 		);
-		assert.match(result.content[0].text, /"id": "claim-1"/);
-		assert.match(result.content[0].text, /"id": "claim-2"/);
+		const { jsonText, payload } = workflowArtifactJsonPayload(result);
+		assert.doesNotMatch(jsonText, /\n\s/);
+		assert.deepEqual(
+			payload.value.map((claim) => claim.id),
+			["claim-1", "claim-2"],
+		);
 		assert.doesNotMatch(result.content[0].text, /claim-3/);
 		assert.equal(result.details.projection.path, "$.claims");
 		assert.equal(result.details.projection.totalItems, 3);
 		assert.equal(result.details.projection.itemsReturned, 2);
 		assert.equal(result.details.projection.itemsTruncated, true);
 		assert.equal(result.details.truncated, true);
+		assert.equal(
+			result.details.projection.originalChars,
+			JSON.stringify(payload.value).length,
+		);
+		assert.ok(
+			result.details.projection.originalChars <
+				JSON.stringify(payload.value, null, 2).length,
+		);
+
+		const compactClaims = JSON.stringify({ claims: payload.value });
+		const prettyClaims = JSON.stringify({ claims: payload.value }, null, 2);
+		assert.ok(compactClaims.length < prettyClaims.length);
+		const compactBudget = await handleWorkflowArtifactToolCall(
+			{
+				action: "read",
+				source: "normalize",
+				artifact: "control",
+				path: "$.claims",
+				maxItems: 2,
+				maxChars: JSON.stringify(payload.value).length,
+			},
+			{ runId, taskId: "task-2", manifestPath, ledgerPath, runDir },
+		);
+		assert.equal(compactBudget.details.projection.charsTruncated, false);
+		assert.equal(
+			workflowArtifactJsonPayload(compactBudget).payload.value[1].id,
+			"claim-2",
+		);
 
 		const ledger = await readWorkflowArtifactReadLedger(ledgerPath);
-		assert.equal(ledger.length, 1);
+		assert.equal(ledger.length, 2);
 		assert.equal(ledger[0].source, "normalize");
 		assert.equal(ledger[0].artifact, "control");
 		assert.equal(ledger[0].path, "$.claims");
@@ -24446,7 +24621,10 @@ test("workflow_artifact can read deterministic JSON projections with caps", asyn
 			sourcePrefixed.content[0].text,
 			/# workflow_artifact: normalize\.control path=\$\.claims/,
 		);
-		assert.match(sourcePrefixed.content[0].text, /"id": "claim-1"/);
+		assert.equal(
+			workflowArtifactJsonPayload(sourcePrefixed).payload.value[0].id,
+			"claim-1",
+		);
 
 		await assert.rejects(
 			handleWorkflowArtifactToolCall(
@@ -24505,7 +24683,9 @@ test("workflow_artifact can read deterministic JSON projections with caps", asyn
 			fieldAlias.content[0].text,
 			/# workflow_artifact: normalize\.control path=\$\.sourcePolicy/,
 		);
-		assert.match(fieldAlias.content[0].text, /"primary"/);
+		assert.deepEqual(workflowArtifactJsonPayload(fieldAlias).payload.value, {
+			preferred: ["primary"],
+		});
 
 		writeFileSync(
 			join(producerDir, "control.json"),
@@ -24741,6 +24921,192 @@ test("workflow_artifact extension registers and activates the tool", async () =>
 		assert.equal(ledger.length, 1);
 		assert.equal(ledger[0].source, "plan");
 		assert.equal(ledger[0].artifact, "analysis");
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("structured required read policy enforces projection ledger rows separately from string reads", async () => {
+	const cwd = makeProject();
+	try {
+		const taskDir = join(cwd, "task");
+		mkdirSync(taskDir, { recursive: true });
+		const ledgerPath = join(taskDir, "read-ledger.jsonl");
+		const base = {
+			schema: "workflow-artifact-read-v1",
+			runId: "run",
+			taskId: "task",
+			source: "plan",
+			artifact: "control",
+			at: new Date().toISOString(),
+			bytes: 1000,
+		};
+		writeFileSync(
+			ledgerPath,
+			[
+				{
+					...base,
+					returnedBytes: 0,
+					truncated: false,
+					path: "$.items",
+					maxChars: 0,
+				},
+				{
+					...base,
+					returnedBytes: 120,
+					truncated: false,
+					path: "$.wrong",
+					maxChars: 200,
+				},
+				{
+					...base,
+					returnedBytes: 120,
+					truncated: true,
+					path: "$.items",
+					maxChars: 200,
+				},
+			]
+				.map((row) => JSON.stringify(row))
+				.join("\n") + "\n",
+		);
+
+		const stringOnly = await checkRequiredArtifactReads(taskDir, [
+			"plan.control",
+		]);
+		assert.deepEqual(stringOnly.missing, []);
+		assert.deepEqual(stringOnly.projectionFailures, []);
+
+		const maxCharsFailed = await checkRequiredArtifactReads(
+			taskDir,
+			[],
+			[
+				{
+					source: "plan",
+					artifact: "control",
+					path: "$.items",
+					maxChars: 200,
+					minReturnedBytes: 1,
+				},
+			],
+		);
+		assert.deepEqual(maxCharsFailed.missing, []);
+		assert.match(maxCharsFailed.projectionFailures[0], /maxChars=200/);
+
+		const cappedPolicyWithoutPathFailed = await checkRequiredArtifactReads(
+			taskDir,
+			[],
+			[
+				{
+					source: "plan",
+					artifact: "control",
+					maxChars: 200,
+				},
+			],
+		);
+		assert.deepEqual(cappedPolicyWithoutPathFailed.missing, []);
+		assert.match(
+			cappedPolicyWithoutPathFailed.projectionFailures[0],
+			/maxChars=200/,
+		);
+
+		const wrongPathFailed = await checkRequiredArtifactReads(
+			taskDir,
+			[],
+			[
+				{
+					source: "plan",
+					artifact: "control",
+					path: "$.missing",
+					maxChars: 200,
+				},
+			],
+		);
+		assert.match(wrongPathFailed.projectionFailures[0], /path=\$\.missing/);
+
+		const truncatedFailed = await checkRequiredArtifactReads(
+			taskDir,
+			[],
+			[
+				{
+					source: "plan",
+					artifact: "control",
+					path: "$.items",
+					maxChars: 200,
+					mustNotTruncate: true,
+				},
+			],
+		);
+		assert.match(truncatedFailed.projectionFailures[0], /mustNotTruncate=true/);
+
+		const minReturnedBytesFailed = await checkRequiredArtifactReads(
+			taskDir,
+			[],
+			[
+				{
+					source: "plan",
+					artifact: "control",
+					path: "$.wrong",
+					maxChars: 200,
+					minReturnedBytes: 200,
+				},
+			],
+		);
+		assert.match(
+			minReturnedBytesFailed.projectionFailures[0],
+			/minReturnedBytes=200/,
+		);
+
+		const missing = await checkRequiredArtifactReads(
+			taskDir,
+			[],
+			[{ source: "missing", artifact: "control", path: "$.items" }],
+		);
+		assert.deepEqual(missing.missing, ["missing.control"]);
+		assert.deepEqual(missing.projectionFailures, []);
+
+		writeFileSync(
+			ledgerPath,
+			[
+				{
+					...base,
+					returnedBytes: 120,
+					truncated: false,
+					path: "$.wrong",
+					maxChars: 200,
+				},
+				{
+					...base,
+					returnedBytes: 120,
+					truncated: true,
+					path: "$.items",
+					maxChars: 200,
+				},
+				{
+					...base,
+					returnedBytes: 160,
+					truncated: false,
+					path: "$.items",
+					maxChars: 200,
+				},
+			]
+				.map((row) => JSON.stringify(row))
+				.join("\n") + "\n",
+		);
+		const passes = await checkRequiredArtifactReads(
+			taskDir,
+			[],
+			[
+				{
+					source: "plan",
+					artifact: "control",
+					path: "$.items",
+					maxChars: 200,
+					mustNotTruncate: true,
+					minReturnedBytes: 120,
+				},
+			],
+		);
+		assert.deepEqual(passes, { missing: [], projectionFailures: [] });
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}

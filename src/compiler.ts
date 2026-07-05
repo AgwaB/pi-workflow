@@ -258,6 +258,7 @@ function artifactGraphTaskMetadata(
 				: undefined,
 		},
 		requiredReads: stage.inputPolicy?.requiredReads ?? [],
+		requiredReadPolicy: stage.inputPolicy?.requiredReadPolicy,
 		artifactAccess: stage.inputPolicy?.artifactAccess ?? "enabled",
 		sourceProjection: stage.sourceProjection,
 	};

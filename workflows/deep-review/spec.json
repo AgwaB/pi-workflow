@@ -17,6 +17,9 @@
       {
         "id": "triage",
         "type": "single",
+        "inputPolicy": {
+          "artifactAccess": "none"
+        },
         "output": {
           "analysis": {
             "required": true
@@ -33,6 +36,9 @@
         "id": "reviewers",
         "type": "foreach",
         "injectRuntimeTask": true,
+        "inputPolicy": {
+          "artifactAccess": "none"
+        },
         "from": {
           "source": "triage",
           "path": "$.reviewLenses"
@@ -76,6 +82,9 @@
         "id": "devil-advocate",
         "type": "foreach",
         "injectRuntimeTask": true,
+        "inputPolicy": {
+          "artifactAccess": "none"
+        },
         "from": {
           "source": "dedup-findings",
           "path": "$.findings"

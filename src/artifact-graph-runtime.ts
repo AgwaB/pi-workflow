@@ -34,6 +34,7 @@ import {
 import type {
 	CompiledTask,
 	CompiledWorkflow,
+	RequiredWorkflowArtifactReadPolicy,
 	WorkflowRunRecord,
 	WorkflowTaskRunRecord,
 } from "./types.js";
@@ -526,9 +527,12 @@ async function prepareArtifactGraphTask(
 	});
 
 	const requiredReads = compiledTask.artifactGraph?.requiredReads ?? [];
+	const requiredReadPolicy =
+		compiledTask.artifactGraph?.requiredReadPolicy ?? [];
 	const requiredReadContext = formatRequiredArtifactReadReferences({
 		sources,
 		requiredReads,
+		requiredReadPolicy,
 	});
 	return {
 		...compiledTask,
@@ -549,7 +553,11 @@ async function prepareArtifactGraphTask(
 		},
 		compiledPrompt: [
 			compiledTask.compiledPrompt,
-			formatArtifactGraphSourceContext(sources, requiredReads),
+			formatArtifactGraphSourceContext(
+				sources,
+				requiredReads,
+				requiredReadPolicy,
+			),
 			requiredReadContext || undefined,
 		]
 			.filter(Boolean)
@@ -560,8 +568,11 @@ async function prepareArtifactGraphTask(
 function formatRequiredArtifactReadReferences(options: {
 	sources: WorkflowSourceManifestSource[];
 	requiredReads: readonly string[];
+	requiredReadPolicy?: readonly RequiredWorkflowArtifactReadPolicy[];
 }): string {
-	if (options.requiredReads.length === 0) return "";
+	const requiredReadPolicy = options.requiredReadPolicy ?? [];
+	if (options.requiredReads.length === 0 && requiredReadPolicy.length === 0)
+		return "";
 	const sections = options.requiredReads.map((required) => {
 		const parsed = parseRequiredArtifactRead(required);
 		if (!parsed) {
@@ -576,11 +587,44 @@ function formatRequiredArtifactReadReferences(options: {
 		}
 		return `- ${required}: available via workflow_artifact read with source=${JSON.stringify(parsed.source)}, artifact=${JSON.stringify(parsed.artifact)}.`;
 	});
+	const structuredSections = requiredReadPolicy.map((policy) =>
+		formatRequiredArtifactReadPolicyReference(options.sources, policy),
+	);
 	return [
 		"# Required Workflow Artifact Reads",
 		"The workflow runtime does not preload requiredReads into this prompt. To satisfy the required-read gate, call workflow_artifact for each listed source/artifact before producing the final answer. The read ledger, not this prompt, proves access.",
 		...sections,
+		...structuredSections,
 	].join("\n");
+}
+
+function formatRequiredArtifactReadPolicyReference(
+	sources: WorkflowSourceManifestSource[],
+	policy: RequiredWorkflowArtifactReadPolicy,
+): string {
+	const source = sources.find(
+		(candidate) => candidate.source === policy.source,
+	);
+	const artifact = source?.artifacts?.[policy.artifact];
+	const readName = `${policy.source}.${policy.artifact}`;
+	if (!source || !artifact?.path) {
+		return `- ${readName}: required artifact is not available in the source manifest.`;
+	}
+	const toolInput = {
+		action: "read",
+		source: policy.source,
+		artifact: policy.artifact,
+		...(policy.path === undefined ? {} : { path: policy.path }),
+		...(policy.maxItems === undefined ? {} : { maxItems: policy.maxItems }),
+		...(policy.maxChars === undefined ? {} : { maxChars: policy.maxChars }),
+	};
+	const constraints = [
+		"must produce a non-truncated ledger row",
+		policy.minReturnedBytes === undefined
+			? undefined
+			: `returnedBytes >= ${policy.minReturnedBytes}`,
+	].filter(Boolean);
+	return `- ${readName}: call workflow_artifact with ${stringifyPromptJson(toolInput)}; ${constraints.join(", ")}.`;
 }
 
 function parseRequiredArtifactRead(value: string): {
@@ -884,16 +928,21 @@ export function sourceNameForTask(
 export function formatArtifactGraphSourceContext(
 	sources: readonly WorkflowSourceManifestSource[],
 	requiredReads: readonly string[],
+	requiredReadPolicy: readonly RequiredWorkflowArtifactReadPolicy[] = [],
 ): string {
+	const requiredReadLines = [
+		...requiredReads.map((read) => `- ${read}`),
+		...requiredReadPolicy.map(
+			(policy) =>
+				`- ${policy.source}.${policy.artifact}${policy.path ? ` path=${policy.path}` : ""}`,
+		),
+	];
 	return [
 		"# Workflow Artifact Inputs",
 		"Use workflow_artifact to list/read upstream workflow artifacts. Inline controlProjection fields are authoritative for the projected data they contain; use artifact reads for declared requiredReads, missing fields, or debug detail.",
 		'Projected reads must include a JSON path when using maxItems or maxChars, for example {"action":"read","source":"plan","artifact":"control","path":"$.factSlots","maxItems":8,"maxChars":2000}. For a whole artifact read, omit maxItems/maxChars.',
-		requiredReads.length > 0
-			? [
-					"Required reads before final output:",
-					...requiredReads.map((read) => `- ${read}`),
-				].join("\n")
+		requiredReadLines.length > 0
+			? ["Required reads before final output:", ...requiredReadLines].join("\n")
 			: "No hard requiredReads are declared for this stage.",
 		"Available sources:",
 		stringifyPromptJson(

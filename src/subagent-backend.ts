@@ -24,6 +24,7 @@ import { fileURLToPath } from "node:url";
 import type {
 	CompiledTask,
 	CompiledToolProvider,
+	RequiredWorkflowArtifactReadPolicy,
 	WorkflowRunRecord,
 	WorkflowTaskTimingAttemptRecord,
 	WorkflowTaskTimingRecord,
@@ -46,7 +47,10 @@ import {
 	markTaskTimedOut,
 } from "./result.js";
 import type { BackendLaunchResult } from "./backend.js";
-import { readWorkflowArtifactReadLedger } from "./workflow-artifact-tool.js";
+import {
+	readWorkflowArtifactReadLedger,
+	type WorkflowArtifactReadLedgerRecord,
+} from "./workflow-artifact-tool.js";
 import { writeWorkflowFetchCacheExtensionWrapper } from "./workflow-fetch-cache-extension.js";
 import { writeWorkflowWebSourceExtensionWrapper } from "./workflow-web-source-extension.js";
 import { isWorkflowWebSourceTool } from "./workflow-web-source.js";
@@ -1596,24 +1600,40 @@ async function materializeTerminalArtifactGraphResult(
 	const readCheck = await checkRequiredArtifactReads(
 		dirname(options.resultFile),
 		task.artifactGraph?.requiredReads ?? [],
+		task.artifactGraph?.requiredReadPolicy ?? [],
 	);
-	if (readCheck.missing.length > 0 || readCheck.ledgerError) {
+	if (
+		readCheck.missing.length > 0 ||
+		readCheck.projectionFailures.length > 0 ||
+		readCheck.ledgerError
+	) {
 		const reason = readCheck.ledgerError
 			? "required_reads_ledger_unavailable"
-			: "required_reads_missing";
+			: readCheck.projectionFailures.length > 0
+				? "required_read_projection_failed"
+				: "required_reads_missing";
 		const artifacts = readCheck.ledgerError
-			? (task.artifactGraph?.requiredReads ?? [])
-			: readCheck.missing;
+			? [
+					...(task.artifactGraph?.requiredReads ?? []),
+					...(task.artifactGraph?.requiredReadPolicy ?? []).map(
+						formatRequiredReadPolicyName,
+					),
+				]
+			: [...readCheck.missing, ...readCheck.projectionFailures];
 		const message = readCheck.ledgerError
 			? `required workflow artifact read ledger was unavailable or corrupt: ${readCheck.ledgerError}; required reads could not be verified: ${artifacts.join(", ")}`
-			: `missing required workflow artifact reads: ${readCheck.missing.join(", ")}`;
+			: formatRequiredReadFailureMessage(readCheck);
 		await writeArtifactGraphMissingReadsAttempt(
 			dirname(options.resultFile),
 			rawOutput,
 			attempt,
-			artifacts,
+			readCheck.missing,
 			options.completedAt,
-			{ failureKind: reason, errorMessage: message },
+			{
+				failureKind: reason,
+				errorMessage: message,
+				projectionFailures: readCheck.projectionFailures,
+			},
 		);
 		return retryOrFailArtifactGraphTask(task, {
 			reason,
@@ -1876,26 +1896,120 @@ function workflowRefLocator(ref: unknown): string | undefined {
 	return undefined;
 }
 
-async function checkRequiredArtifactReads(
+export interface RequiredArtifactReadCheckResult {
+	missing: string[];
+	projectionFailures: string[];
+	ledgerError?: string;
+}
+
+export async function checkRequiredArtifactReads(
 	taskDir: string,
 	requiredReads: readonly string[],
-): Promise<{ missing: string[]; ledgerError?: string }> {
-	if (requiredReads.length === 0) return { missing: [] };
-	let ledger;
+	requiredReadPolicy: readonly RequiredWorkflowArtifactReadPolicy[] = [],
+): Promise<RequiredArtifactReadCheckResult> {
+	if (requiredReads.length === 0 && requiredReadPolicy.length === 0) {
+		return { missing: [], projectionFailures: [] };
+	}
+	let ledger: WorkflowArtifactReadLedgerRecord[];
 	try {
 		ledger = await readWorkflowArtifactReadLedger(
 			join(taskDir, "read-ledger.jsonl"),
 		);
 	} catch (error) {
 		return {
-			missing: [...requiredReads],
+			missing: [
+				...requiredReads,
+				...requiredReadPolicy.map(formatRequiredReadPolicyName),
+			],
+			projectionFailures: [],
 			ledgerError: error instanceof Error ? error.message : String(error),
 		};
 	}
 	const actual = new Set(
 		ledger.map((entry) => `${entry.source}.${entry.artifact}`),
 	);
-	return { missing: requiredReads.filter((required) => !actual.has(required)) };
+	const missing = requiredReads.filter((required) => !actual.has(required));
+	const projectionFailures: string[] = [];
+	for (const policy of requiredReadPolicy) {
+		const name = `${policy.source}.${policy.artifact}`;
+		const sourceArtifactRows = ledger.filter(
+			(entry) =>
+				entry.source === policy.source && entry.artifact === policy.artifact,
+		);
+		if (sourceArtifactRows.length === 0) {
+			if (!missing.includes(name)) missing.push(name);
+			continue;
+		}
+		if (
+			!sourceArtifactRows.some((entry) =>
+				requiredReadPolicyMatches(entry, policy),
+			)
+		) {
+			projectionFailures.push(formatRequiredReadPolicyName(policy));
+		}
+	}
+	return { missing, projectionFailures };
+}
+
+function requiredReadPolicyMatches(
+	entry: WorkflowArtifactReadLedgerRecord,
+	policy: RequiredWorkflowArtifactReadPolicy,
+): boolean {
+	if (entry.truncated) return false;
+	if (
+		policy.path === undefined &&
+		(policy.maxItems !== undefined || policy.maxChars !== undefined)
+	) {
+		return false;
+	}
+	if (policy.path !== undefined && entry.path !== policy.path) return false;
+	if (policy.maxItems !== undefined && entry.maxItems !== policy.maxItems)
+		return false;
+	if (policy.maxChars !== undefined && entry.maxChars !== policy.maxChars)
+		return false;
+	if (
+		policy.minReturnedBytes !== undefined &&
+		entry.returnedBytes < policy.minReturnedBytes
+	) {
+		return false;
+	}
+	return true;
+}
+
+function formatRequiredReadPolicyName(
+	policy: RequiredWorkflowArtifactReadPolicy,
+): string {
+	const constraints = [
+		policy.path === undefined ? undefined : `path=${policy.path}`,
+		policy.maxItems === undefined ? undefined : `maxItems=${policy.maxItems}`,
+		policy.maxChars === undefined ? undefined : `maxChars=${policy.maxChars}`,
+		policy.mustNotTruncate === undefined
+			? undefined
+			: `mustNotTruncate=${policy.mustNotTruncate}`,
+		policy.minReturnedBytes === undefined
+			? undefined
+			: `minReturnedBytes=${policy.minReturnedBytes}`,
+	].filter(Boolean);
+	return constraints.length === 0
+		? `${policy.source}.${policy.artifact}`
+		: `${policy.source}.${policy.artifact} (${constraints.join(", ")})`;
+}
+
+function formatRequiredReadFailureMessage(
+	check: RequiredArtifactReadCheckResult,
+): string {
+	const parts: string[] = [];
+	if (check.missing.length > 0) {
+		parts.push(
+			`missing required workflow artifact reads: ${check.missing.join(", ")}`,
+		);
+	}
+	if (check.projectionFailures.length > 0) {
+		parts.push(
+			`required workflow artifact read projection policy failures: ${check.projectionFailures.join(", ")}`,
+		);
+	}
+	return parts.join("; ");
 }
 
 async function writeArtifactGraphMissingReadsAttempt(
@@ -1907,6 +2021,7 @@ async function writeArtifactGraphMissingReadsAttempt(
 	options: {
 		failureKind?: string;
 		errorMessage?: string;
+		projectionFailures?: readonly string[];
 	} = {},
 ): Promise<void> {
 	await writeFile(
@@ -1925,6 +2040,9 @@ async function writeArtifactGraphMissingReadsAttempt(
 			options.errorMessage ??
 			`missing required workflow artifact reads: ${missingReads.join(", ")}`,
 		missingRequiredReads: [...missingReads],
+		...(options.projectionFailures && options.projectionFailures.length > 0
+			? { requiredReadProjectionFailures: [...options.projectionFailures] }
+			: {}),
 		outputValidation: { valid: true, issues: [] },
 	});
 }

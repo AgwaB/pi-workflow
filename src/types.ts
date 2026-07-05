@@ -89,6 +89,25 @@ export type ArtifactGraphStageType =
 
 export type WorkflowArtifactKind = "control" | "analysis" | "refs" | "raw";
 
+interface RequiredWorkflowArtifactReadPolicyBase {
+	source: string;
+	artifact: WorkflowArtifactKind;
+	mustNotTruncate?: boolean;
+	minReturnedBytes?: number;
+}
+
+export type RequiredWorkflowArtifactReadPolicy =
+	| (RequiredWorkflowArtifactReadPolicyBase & {
+			path: string;
+			maxItems?: number;
+			maxChars?: number;
+	  })
+	| (RequiredWorkflowArtifactReadPolicyBase & {
+			path?: string;
+			maxItems?: undefined;
+			maxChars?: undefined;
+	  });
+
 export interface ArtifactGraphWorkflowSpec {
 	schemaVersion: 1;
 	name?: string;
@@ -219,6 +238,7 @@ export interface ArtifactGraphStageSpec {
 	};
 	inputPolicy?: {
 		requiredReads?: string[];
+		requiredReadPolicy?: RequiredWorkflowArtifactReadPolicy[];
 		enforcement?: "fail";
 		artifactAccess?: "enabled" | "none";
 	};
@@ -502,6 +522,7 @@ export interface CompiledArtifactGraphTask {
 		partial?: { paths: string[] };
 	};
 	requiredReads: string[];
+	requiredReadPolicy?: RequiredWorkflowArtifactReadPolicy[];
 	artifactAccess: "enabled" | "none";
 	sourceProjection?: {
 		include?: string[];
