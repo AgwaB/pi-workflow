@@ -6,6 +6,7 @@ import {
 	readFile,
 	readdir,
 	rm,
+	stat,
 	writeFile,
 } from "node:fs/promises";
 import {
@@ -77,6 +78,7 @@ const PARENT_SUBAGENT_RUN_ID_ENV = "PI_WORKFLOW_PARENT_SUBAGENT_RUN_ID";
 const PARENT_SUBAGENT_ATTEMPT_ID_ENV = "PI_WORKFLOW_PARENT_SUBAGENT_ATTEMPT_ID";
 const DEFAULT_LAUNCH_SLOT_RELEASE_DELAY_MS = 3_000;
 const STALE_LAUNCH_CLAIM_GRACE_MS = 30_000;
+const REFRESH_STATUS_RECONCILE_CONCURRENCY = 8;
 const MIN_TRANSIENT_RETRY_JITTER_MS = 1_000;
 const MAX_TRANSIENT_RETRY_JITTER_MS = 5_000;
 const MODULE_PATH = fileURLToPath(import.meta.url);
@@ -643,6 +645,18 @@ const TIMING_AGGREGATE_KEYS: TimingAggregateKey[] = [
 	"totalMs",
 ];
 
+type TimingTelemetryKey =
+	| "refreshReconcileMs"
+	| "refreshStatusPollMs"
+	| "terminalOutputCopyMs"
+	| "terminalStderrCopyMs"
+	| "terminalOutputBytes"
+	| "terminalStderrBytes"
+	| "terminalArtifactMaterializeMs"
+	| "terminalArtifactBundleWriteMs";
+
+type TimingTelemetryValues = Partial<Record<TimingTelemetryKey, number>>;
+
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
 	return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -914,6 +928,70 @@ function durationNumber(value: unknown): number | null | undefined {
 	return undefined;
 }
 
+function elapsedSince(startedAtMs: number): number {
+	return Math.max(0, Date.now() - startedAtMs);
+}
+
+function recordTaskTimingTelemetry(
+	task: WorkflowTaskRunRecord,
+	values: TimingTelemetryValues,
+): void {
+	const sanitized = Object.fromEntries(
+		Object.entries(values).filter(
+			(entry): entry is [TimingTelemetryKey, number] =>
+				typeof entry[1] === "number" &&
+				Number.isFinite(entry[1]) &&
+				entry[1] >= 0,
+		),
+	) as TimingTelemetryValues;
+	if (Object.keys(sanitized).length === 0) return;
+	task.timing = {
+		...(task.timing ?? {
+			source: "pi-workflow" as const,
+			capturedAt: nowIso(),
+		}),
+		source: "pi-workflow",
+		capturedAt: nowIso(),
+		...sanitized,
+	};
+}
+
+function taskTimingTelemetry(
+	timing: WorkflowTaskTimingRecord | undefined,
+): TimingTelemetryValues {
+	if (!timing) return {};
+	return {
+		...(timing.refreshReconcileMs === undefined
+			? {}
+			: { refreshReconcileMs: timing.refreshReconcileMs }),
+		...(timing.refreshStatusPollMs === undefined
+			? {}
+			: { refreshStatusPollMs: timing.refreshStatusPollMs }),
+		...(timing.terminalOutputCopyMs === undefined
+			? {}
+			: { terminalOutputCopyMs: timing.terminalOutputCopyMs }),
+		...(timing.terminalStderrCopyMs === undefined
+			? {}
+			: { terminalStderrCopyMs: timing.terminalStderrCopyMs }),
+		...(timing.terminalOutputBytes === undefined
+			? {}
+			: { terminalOutputBytes: timing.terminalOutputBytes }),
+		...(timing.terminalStderrBytes === undefined
+			? {}
+			: { terminalStderrBytes: timing.terminalStderrBytes }),
+		...(timing.terminalArtifactMaterializeMs === undefined
+			? {}
+			: {
+					terminalArtifactMaterializeMs: timing.terminalArtifactMaterializeMs,
+				}),
+		...(timing.terminalArtifactBundleWriteMs === undefined
+			? {}
+			: {
+					terminalArtifactBundleWriteMs: timing.terminalArtifactBundleWriteMs,
+				}),
+	};
+}
+
 function recordTaskLaunchTiming(
 	task: WorkflowTaskRunRecord,
 	observation: {
@@ -1101,6 +1179,7 @@ function recordTaskTerminalTiming(options: {
 					launchSlotReleaseDelayMs:
 						options.task.timing.launchSlotReleaseDelayMs,
 				}),
+		...taskTimingTelemetry(options.task.timing),
 		...(attempt.executionStartedAt === undefined
 			? {}
 			: { executionStartedAt: attempt.executionStartedAt }),
@@ -1350,14 +1429,31 @@ export async function launchSubagentTask(
 	return { kind: "launched" };
 }
 
+interface RefreshPollItem {
+	order: number;
+	workflowRunId: string;
+	task: WorkflowTaskRunRecord;
+	handle: SubagentBackendHandle;
+}
+
+interface RefreshPollResult extends RefreshPollItem {
+	snapshot: SubagentRunStatusSnapshot | null;
+	reconcileMs: number;
+	statusPollMs: number;
+}
+
+type RefreshPollOperation = "reconcile" | "status";
+
 export async function refreshRunFromSubagentArtifacts(
 	cwd: string,
 	run: WorkflowRunRecord,
 ): Promise<WorkflowRunRecord> {
 	let changed = false;
+	let telemetryChanged = false;
+	const pollItems: RefreshPollItem[] = [];
 	reconcileLiveModelWorkerSlots(run);
 
-	for (const task of run.tasks) {
+	for (const [order, task] of run.tasks.entries()) {
 		if (isTerminalTaskStatus(task.status) || task.status !== "running")
 			continue;
 		let handle = getSubagentHandle(task);
@@ -1391,27 +1487,35 @@ export async function refreshRunFromSubagentArtifacts(
 			}
 			continue;
 		}
+		pollItems.push({ order, workflowRunId: run.runId, task, handle });
+	}
 
-		const api = await loadSubagentApi();
-		await api
-			.reconcileSubagentRun({
-				cwd: handle.cwd,
-				runsDir: handle.runsDir,
-				runId: handle.runId,
-			})
-			.catch(() => undefined);
-		const snapshot = await api
-			.getSubagentStatus({
-				cwd: handle.cwd,
-				runsDir: handle.runsDir,
-				runId: handle.runId,
-				attemptId: handle.attemptId,
-			})
-			.catch(() => null);
+	const api = pollItems.length > 0 ? await loadSubagentApi() : undefined;
+	const pollResults = api
+		? await allSettledBounded(
+				pollItems,
+				REFRESH_STATUS_RECONCILE_CONCURRENCY,
+				(item) => pollSubagentForRefresh(api, item),
+			)
+		: [];
+	const refreshErrors: unknown[] = [];
+
+	for (const pollResult of pollResults) {
+		if (pollResult.status === "rejected") {
+			refreshErrors.push(pollResult.reason);
+			continue;
+		}
+		const { task, handle, snapshot, reconcileMs, statusPollMs } =
+			pollResult.value;
+		recordTaskTimingTelemetry(task, {
+			refreshReconcileMs: reconcileMs,
+			refreshStatusPollMs: statusPollMs,
+		});
+		telemetryChanged = true;
 
 		if (snapshot === null) {
 			if (isTaskTimedOut(task)) {
-				await interruptTimedOutSubagent(api, handle);
+				await interruptTimedOutSubagent(api!, handle);
 				markSubagentTaskTimedOut(task);
 				releaseLiveModelWorkerSlotForTask(run, task);
 				changed = true;
@@ -1444,7 +1548,7 @@ export async function refreshRunFromSubagentArtifacts(
 				changed = true;
 			}
 			if (isTaskTimedOut(task)) {
-				await interruptTimedOutSubagent(api, handle);
+				await interruptTimedOutSubagent(api!, handle);
 				markSubagentTaskTimedOut(task);
 				releaseLiveModelWorkerSlotForTask(run, task);
 				changed = true;
@@ -1458,8 +1562,86 @@ export async function refreshRunFromSubagentArtifacts(
 		}
 	}
 
-	if (changed) await writeRunRecord(cwd, run);
+	if (changed || telemetryChanged) await writeRunRecord(cwd, run);
+	if (refreshErrors.length > 0) {
+		throw new AggregateError(
+			refreshErrors,
+			"one or more subagent refresh polls failed",
+		);
+	}
 	return run;
+}
+
+async function pollSubagentForRefresh(
+	api: SubagentApi,
+	item: RefreshPollItem,
+): Promise<RefreshPollResult> {
+	const { handle } = item;
+	const reconcileStartedAtMs = Date.now();
+	try {
+		await api.reconcileSubagentRun({
+			cwd: handle.cwd,
+			runsDir: handle.runsDir,
+			runId: handle.runId,
+		});
+	} catch (error) {
+		throw refreshPollError(item, "reconcile", error);
+	}
+	const reconcileMs = elapsedSince(reconcileStartedAtMs);
+	const statusPollStartedAtMs = Date.now();
+	let snapshot: SubagentRunStatusSnapshot | null;
+	try {
+		snapshot = await api.getSubagentStatus({
+			cwd: handle.cwd,
+			runsDir: handle.runsDir,
+			runId: handle.runId,
+			attemptId: handle.attemptId,
+		});
+	} catch (error) {
+		throw refreshPollError(item, "status", error);
+	}
+	const statusPollMs = elapsedSince(statusPollStartedAtMs);
+	return { ...item, snapshot, reconcileMs, statusPollMs };
+}
+
+function refreshPollError(
+	item: RefreshPollItem,
+	operation: RefreshPollOperation,
+	error: unknown,
+): Error {
+	const { task, handle } = item;
+	return new Error(
+		`subagent refresh ${operation} failed for workflow run ${item.workflowRunId} task ${task.taskId} (${task.specId}) subagent run ${handle.runId}/${handle.attemptId}`,
+		{ cause: error },
+	);
+}
+
+async function allSettledBounded<T, R>(
+	items: readonly T[],
+	limit: number,
+	worker: (item: T, index: number) => Promise<R>,
+): Promise<PromiseSettledResult<R>[]> {
+	const results = new Array<PromiseSettledResult<R>>(items.length);
+	let nextIndex = 0;
+	const workerCount = Math.min(Math.max(1, Math.floor(limit)), items.length);
+	await Promise.all(
+		Array.from({ length: workerCount }, async () => {
+			while (true) {
+				const index = nextIndex;
+				nextIndex += 1;
+				if (index >= items.length) return;
+				try {
+					results[index] = {
+						status: "fulfilled",
+						value: await worker(items[index]!, index),
+					};
+				} catch (reason) {
+					results[index] = { status: "rejected", reason };
+				}
+			}
+		}),
+	);
+	return results;
 }
 
 async function refreshRunningArtifactGraphPartialOutput(
@@ -1541,8 +1723,16 @@ async function materializeTerminalSubagentResult(
 		: undefined;
 
 	await mkdir(dirname(outputFile), { recursive: true });
-	await copyLogOrEmpty(snapshot, outputRef, outputFile, artifactRoot);
-	await copyLogOrEmpty(snapshot, stderrRef, stderrFile, artifactRoot);
+	const [outputCopy, stderrCopy] = await Promise.all([
+		copyLogOrEmptyMeasured(snapshot, outputRef, outputFile, artifactRoot),
+		copyLogOrEmptyMeasured(snapshot, stderrRef, stderrFile, artifactRoot),
+	]);
+	recordTaskTimingTelemetry(task, {
+		terminalOutputCopyMs: outputCopy.durationMs,
+		terminalStderrCopyMs: stderrCopy.durationMs,
+		terminalOutputBytes: outputCopy.bytes,
+		terminalStderrBytes: stderrCopy.bytes,
+	});
 
 	const subagentResult = resultRef
 		? await readJsonLoose<Record<string, unknown>>(
@@ -1554,8 +1744,10 @@ async function materializeTerminalSubagentResult(
 		subagentResult,
 		artifactRoot,
 	);
-	const outputText = await readFile(outputFile, "utf8").catch(() => "");
-	const stderrText = await readFile(stderrFile, "utf8").catch(() => "");
+	const [outputText, stderrText] = await Promise.all([
+		readFile(outputFile, "utf8").catch(() => ""),
+		readFile(stderrFile, "utf8").catch(() => ""),
+	]);
 	const outputBytes = Buffer.byteLength(outputText, "utf8");
 	let statusInfo = workflowStatusFromSubagent(
 		snapshot,
@@ -1750,7 +1942,55 @@ function artifactGraphRetrySession(
 	};
 }
 
+async function measureTerminalArtifactBundleWrite<T>(
+	task: WorkflowTaskRunRecord,
+	write: () => Promise<T>,
+): Promise<T> {
+	const startedAtMs = Date.now();
+	try {
+		return await write();
+	} finally {
+		recordTaskTimingTelemetry(task, {
+			terminalArtifactBundleWriteMs: elapsedSince(startedAtMs),
+		});
+	}
+}
+
 async function materializeTerminalArtifactGraphResult(
+	cwd: string,
+	run: WorkflowRunRecord,
+	task: WorkflowTaskRunRecord,
+	options: {
+		outputFile: string;
+		stderrFile: string;
+		resultFile: string;
+		completedAt: string;
+		startedAt?: string;
+		exitCode: number;
+		subagentResult?: Record<string, unknown>;
+		salvage?: {
+			failureKind: string;
+			subagentStatus: string;
+			subagentFailureKind: string | null;
+		};
+	},
+): Promise<boolean> {
+	const startedAtMs = Date.now();
+	try {
+		return await materializeTerminalArtifactGraphResultInner(
+			cwd,
+			run,
+			task,
+			options,
+		);
+	} finally {
+		recordTaskTimingTelemetry(task, {
+			terminalArtifactMaterializeMs: elapsedSince(startedAtMs),
+		});
+	}
+}
+
+async function materializeTerminalArtifactGraphResultInner(
 	cwd: string,
 	run: WorkflowRunRecord,
 	task: WorkflowTaskRunRecord,
@@ -1811,13 +2051,15 @@ async function materializeTerminalArtifactGraphResult(
 		attempt,
 	);
 	if (!parsed.valid) {
-		await writeWorkflowTaskArtifactBundle({
-			taskDir: dirname(options.resultFile),
-			rawOutput,
-			attempt,
-			completedAt: options.completedAt,
-			...parseOptions,
-		});
+		await measureTerminalArtifactBundleWrite(task, () =>
+			writeWorkflowTaskArtifactBundle({
+				taskDir: dirname(options.resultFile),
+				rawOutput,
+				attempt,
+				completedAt: options.completedAt,
+				...parseOptions,
+			}),
+		);
 		return retryOrFailArtifactGraphTask(task, {
 			reason: "workflow_output_invalid",
 			attempt,
@@ -1843,13 +2085,15 @@ async function materializeTerminalArtifactGraphResult(
 		const message = readCheck.ledgerError
 			? `required workflow artifact read ledger was unavailable or corrupt: ${readCheck.ledgerError}; required reads could not be verified: ${artifacts.join(", ")}`
 			: `missing required workflow artifact reads: ${readCheck.missing.join(", ")}`;
-		await writeArtifactGraphMissingReadsAttempt(
-			dirname(options.resultFile),
-			rawOutput,
-			attempt,
-			artifacts,
-			options.completedAt,
-			{ failureKind: reason, errorMessage: message },
+		await measureTerminalArtifactBundleWrite(task, () =>
+			writeArtifactGraphMissingReadsAttempt(
+				dirname(options.resultFile),
+				rawOutput,
+				attempt,
+				artifacts,
+				options.completedAt,
+				{ failureKind: reason, errorMessage: message },
+			),
 		);
 		return retryOrFailArtifactGraphTask(task, {
 			reason,
@@ -1860,24 +2104,27 @@ async function materializeTerminalArtifactGraphResult(
 		});
 	}
 
-	const written = await writeWorkflowTaskArtifactBundle({
-		taskDir: dirname(options.resultFile),
-		rawOutput,
-		startedAt: options.startedAt,
-		completedAt: options.completedAt,
-		exitCode: options.exitCode,
-		stderr: await readFile(options.stderrFile, "utf8").catch(() => ""),
-		...(options.salvage
-			? {
-					salvagedFromFailureKind: options.salvage.failureKind,
-					subagentWarning:
-						"pi-subagent reported failure before a valid final workflow output was salvaged",
-					subagentStatus: options.salvage.subagentStatus,
-					subagentFailureKind: options.salvage.subagentFailureKind,
-				}
-			: {}),
-		...parseOptions,
-	});
+	const stderr = await readFile(options.stderrFile, "utf8").catch(() => "");
+	const written = await measureTerminalArtifactBundleWrite(task, () =>
+		writeWorkflowTaskArtifactBundle({
+			taskDir: dirname(options.resultFile),
+			rawOutput,
+			startedAt: options.startedAt,
+			completedAt: options.completedAt,
+			exitCode: options.exitCode,
+			stderr,
+			...(options.salvage
+				? {
+						salvagedFromFailureKind: options.salvage.failureKind,
+						subagentWarning:
+							"pi-subagent reported failure before a valid final workflow output was salvaged",
+						subagentStatus: options.salvage.subagentStatus,
+						subagentFailureKind: options.salvage.subagentFailureKind,
+					}
+				: {}),
+			...parseOptions,
+		}),
+	);
 	if (!written.valid) {
 		return retryOrFailArtifactGraphTask(task, {
 			reason: "workflow_output_invalid",
@@ -2815,22 +3062,39 @@ async function copyLogOrEmpty(
 	ref: SubagentRunLogRef | undefined,
 	target: string,
 	artifactRoot: string | undefined,
-): Promise<void> {
+): Promise<number> {
 	await mkdir(dirname(target), { recursive: true });
 	if (!ref) {
 		await writeFile(target, "", "utf8");
-		return;
+		return 0;
 	}
 	let source: string;
 	try {
 		source = safeArtifactPath(snapshot, ref, artifactRoot);
 	} catch {
 		await writeFile(target, "", "utf8");
-		return;
+		return 0;
 	}
+	let copied = true;
 	await copyFile(source, target).catch(async () => {
+		copied = false;
 		await writeFile(target, "", "utf8");
 	});
+	if (!copied) return 0;
+	return stat(target)
+		.then((value) => value.size)
+		.catch(() => 0);
+}
+
+async function copyLogOrEmptyMeasured(
+	snapshot: SubagentRunStatusSnapshot,
+	ref: SubagentRunLogRef | undefined,
+	target: string,
+	artifactRoot: string | undefined,
+): Promise<{ durationMs: number; bytes: number }> {
+	const startedAtMs = Date.now();
+	const bytes = await copyLogOrEmpty(snapshot, ref, target, artifactRoot);
+	return { durationMs: elapsedSince(startedAtMs), bytes };
 }
 
 function safeArtifactPath(

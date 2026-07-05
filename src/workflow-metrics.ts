@@ -57,6 +57,14 @@ export interface WorkflowLaunchTimingMetrics {
 	executionMs: WorkflowMetricValue;
 	totalMs: WorkflowMetricValue;
 	launchSlotReleaseDelayMs: WorkflowMetricValue;
+	refreshReconcileMs: WorkflowMetricValue;
+	refreshStatusPollMs: WorkflowMetricValue;
+	terminalOutputCopyMs: WorkflowMetricValue;
+	terminalStderrCopyMs: WorkflowMetricValue;
+	terminalOutputBytes: WorkflowMetricValue;
+	terminalStderrBytes: WorkflowMetricValue;
+	terminalArtifactMaterializeMs: WorkflowMetricValue;
+	terminalArtifactBundleWriteMs: WorkflowMetricValue;
 	attempts: number;
 	unavailable: boolean;
 	incomplete: boolean;
@@ -153,7 +161,15 @@ type TimingMetricKey =
 	| "launchDurationMs"
 	| "executionMs"
 	| "totalMs"
-	| "launchSlotReleaseDelayMs";
+	| "launchSlotReleaseDelayMs"
+	| "refreshReconcileMs"
+	| "refreshStatusPollMs"
+	| "terminalOutputCopyMs"
+	| "terminalStderrCopyMs"
+	| "terminalOutputBytes"
+	| "terminalStderrBytes"
+	| "terminalArtifactMaterializeMs"
+	| "terminalArtifactBundleWriteMs";
 
 const USAGE_METRIC_KEYS: UsageMetricKey[] = [
 	"inputTokens",
@@ -172,7 +188,35 @@ const TIMING_METRIC_KEYS: TimingMetricKey[] = [
 	"executionMs",
 	"totalMs",
 	"launchSlotReleaseDelayMs",
+	"refreshReconcileMs",
+	"refreshStatusPollMs",
+	"terminalOutputCopyMs",
+	"terminalStderrCopyMs",
+	"terminalOutputBytes",
+	"terminalStderrBytes",
+	"terminalArtifactMaterializeMs",
+	"terminalArtifactBundleWriteMs",
 ];
+
+const REQUIRED_TIMING_METRIC_KEYS: TimingMetricKey[] = [
+	"launchWaitMs",
+	"launchDurationMs",
+	"executionMs",
+	"totalMs",
+	"launchSlotReleaseDelayMs",
+];
+
+const DIRECT_TIMING_METRIC_KEYS = new Set<TimingMetricKey>([
+	"launchSlotReleaseDelayMs",
+	"refreshReconcileMs",
+	"refreshStatusPollMs",
+	"terminalOutputCopyMs",
+	"terminalStderrCopyMs",
+	"terminalOutputBytes",
+	"terminalStderrBytes",
+	"terminalArtifactMaterializeMs",
+	"terminalArtifactBundleWriteMs",
+]);
 
 function hasOwnValue(record: object, key: string): boolean {
 	return Object.hasOwn(record, key);
@@ -258,6 +302,20 @@ function observedUsageForTasks(
 	};
 }
 
+function sumOptionalMetricValues(values: WorkflowMetricValue[]): {
+	value: WorkflowMetricValue;
+	incomplete: boolean;
+} {
+	let total = 0;
+	let observed = false;
+	for (const value of values) {
+		if (value === null) continue;
+		observed = true;
+		total += value;
+	}
+	return { value: observed ? total : null, incomplete: false };
+}
+
 function usageAttempts(task: WorkflowTaskRunRecord): number {
 	return task.usage?.aggregate?.attempts ?? task.usage?.attempts?.length ?? 0;
 }
@@ -313,7 +371,7 @@ function taskLaunchTimingMetrics(
 		TIMING_METRIC_KEYS.map((key) => [
 			key,
 			metricValue(
-				key === "launchSlotReleaseDelayMs" ? timing : aggregateSource,
+				DIRECT_TIMING_METRIC_KEYS.has(key) ? timing : aggregateSource,
 				key,
 			),
 		]),
@@ -321,13 +379,21 @@ function taskLaunchTimingMetrics(
 	const incomplete =
 		unavailable ||
 		timing?.aggregate?.incomplete === true ||
-		TIMING_METRIC_KEYS.some((key) => metrics[key] === null);
+		REQUIRED_TIMING_METRIC_KEYS.some((key) => metrics[key] === null);
 	return {
 		launchWaitMs: metrics.launchWaitMs,
 		launchDurationMs: metrics.launchDurationMs,
 		executionMs: metrics.executionMs,
 		totalMs: metrics.totalMs,
 		launchSlotReleaseDelayMs: metrics.launchSlotReleaseDelayMs,
+		refreshReconcileMs: metrics.refreshReconcileMs,
+		refreshStatusPollMs: metrics.refreshStatusPollMs,
+		terminalOutputCopyMs: metrics.terminalOutputCopyMs,
+		terminalStderrCopyMs: metrics.terminalStderrCopyMs,
+		terminalOutputBytes: metrics.terminalOutputBytes,
+		terminalStderrBytes: metrics.terminalStderrBytes,
+		terminalArtifactMaterializeMs: metrics.terminalArtifactMaterializeMs,
+		terminalArtifactBundleWriteMs: metrics.terminalArtifactBundleWriteMs,
 		attempts: timingAttempts(task),
 		unavailable,
 		incomplete,
@@ -418,7 +484,11 @@ function rollupLaunchTiming(
 	const rollup = Object.fromEntries(
 		TIMING_METRIC_KEYS.map((key) => [
 			key,
-			sumMetricValues(tasks.map((task) => task.launchTiming[key])),
+			REQUIRED_TIMING_METRIC_KEYS.includes(key)
+				? sumMetricValues(tasks.map((task) => task.launchTiming[key]))
+				: sumOptionalMetricValues(
+					tasks.map((task) => task.launchTiming[key]),
+					),
 		]),
 	) as Record<TimingMetricKey, ReturnType<typeof sumMetricValues>>;
 	const unavailableTaskIds = tasks.flatMap(
@@ -433,6 +503,14 @@ function rollupLaunchTiming(
 		executionMs: rollup.executionMs.value,
 		totalMs: rollup.totalMs.value,
 		launchSlotReleaseDelayMs: rollup.launchSlotReleaseDelayMs.value,
+		refreshReconcileMs: rollup.refreshReconcileMs.value,
+		refreshStatusPollMs: rollup.refreshStatusPollMs.value,
+		terminalOutputCopyMs: rollup.terminalOutputCopyMs.value,
+		terminalStderrCopyMs: rollup.terminalStderrCopyMs.value,
+		terminalOutputBytes: rollup.terminalOutputBytes.value,
+		terminalStderrBytes: rollup.terminalStderrBytes.value,
+		terminalArtifactMaterializeMs: rollup.terminalArtifactMaterializeMs.value,
+		terminalArtifactBundleWriteMs: rollup.terminalArtifactBundleWriteMs.value,
 		attempts: tasks.reduce(
 			(total, task) => total + task.launchTiming.attempts,
 			0,
@@ -440,7 +518,7 @@ function rollupLaunchTiming(
 		unavailable: unavailableTaskIds.length > 0,
 		incomplete:
 			incompleteTaskIds.length > 0 ||
-			TIMING_METRIC_KEYS.some((key) => rollup[key].incomplete),
+			REQUIRED_TIMING_METRIC_KEYS.some((key) => rollup[key].incomplete),
 		unavailableTaskIds,
 		incompleteTaskIds,
 	};

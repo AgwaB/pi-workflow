@@ -1071,6 +1071,28 @@ function parsedOutputValid(
 	return true;
 }
 
+type WorkflowOutputArtifactWriteHook = (event: {
+	phase: "before" | "after";
+	file: string;
+}) => void | Promise<void>;
+
+let workflowOutputArtifactWriteHookForTests:
+	| WorkflowOutputArtifactWriteHook
+	| undefined;
+
+export function setWorkflowOutputArtifactWriteHookForTests(
+	hook: WorkflowOutputArtifactWriteHook | undefined,
+): void {
+	workflowOutputArtifactWriteHookForTests = hook;
+}
+
+async function emitWorkflowOutputArtifactWriteHook(event: {
+	phase: "before" | "after";
+	file: string;
+}): Promise<void> {
+	await workflowOutputArtifactWriteHookForTests?.(event);
+}
+
 async function writeInvalidWorkflowOutputAttempt(
 	taskDir: string,
 	parsed: ParsedWorkflowOutput,
@@ -1124,16 +1146,18 @@ async function writeSidecars(
 	parsed: ValidParsedWorkflowOutput,
 	options: WorkflowTaskArtifactBundleOptions,
 ): Promise<void> {
-	await writeJsonAtomic(files.control!, parsed.control);
-	await writeTextAtomic(
-		files.analysis!,
-		ensureTrailingNewline(parsed.analysis),
-	);
-	await writeJsonAtomic(files.refs!, parsed.refs);
-	await writeTextAtomic(files.raw!, options.rawOutput);
-	await writeOptionalText(files.prompt, options.prompt);
-	await writeOptionalText(files["system-prompt"], options.systemPrompt);
-	await writeOptionalText(files.stderr, options.stderr);
+	await Promise.all([
+		writeJsonAtomic(files.control!, parsed.control),
+		writeTextAtomic(
+			files.analysis!,
+			ensureTrailingNewline(parsed.analysis),
+		),
+		writeJsonAtomic(files.refs!, parsed.refs),
+		writeTextAtomic(files.raw!, options.rawOutput),
+		writeOptionalText(files.prompt, options.prompt),
+		writeOptionalText(files["system-prompt"], options.systemPrompt),
+		writeOptionalText(files.stderr, options.stderr),
+	]);
 }
 
 async function writeOptionalText(
@@ -1436,6 +1460,7 @@ async function writeJsonAtomic(file: string, value: unknown): Promise<void> {
 }
 
 async function writeTextAtomic(file: string, value: string): Promise<void> {
+	await emitWorkflowOutputArtifactWriteHook({ phase: "before", file });
 	await mkdir(dirname(file), { recursive: true });
 	const temp = join(
 		dirname(file),
@@ -1443,4 +1468,5 @@ async function writeTextAtomic(file: string, value: string): Promise<void> {
 	);
 	await writeFile(temp, value, "utf8");
 	await rename(temp, file);
+	await emitWorkflowOutputArtifactWriteHook({ phase: "after", file });
 }
