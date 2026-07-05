@@ -1,0 +1,64 @@
+{
+  "type": "object",
+  "required": ["sources", "excludeGlobs", "analysisAxes", "shards"],
+  "additionalProperties": true,
+  "properties": {
+    "sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "rootPath", "role", "whatItIs"],
+        "additionalProperties": true,
+        "properties": {
+          "id": { "type": "string" },
+          "rootPath": { "type": "string" },
+          "role": { "type": "string" },
+          "whatItIs": { "type": "string" }
+        }
+      }
+    },
+    "excludeGlobs": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "analysisAxes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "axis", "whyItMatters"],
+        "additionalProperties": true,
+        "properties": {
+          "id": { "type": "string" },
+          "axis": { "type": "string" },
+          "whyItMatters": { "type": "string" }
+        }
+      }
+    },
+    "shards": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "sourceId", "axis", "title", "targetPaths", "keyQuestions", "priority"],
+        "additionalProperties": true,
+        "properties": {
+          "id": { "type": "string" },
+          "sourceId": { "type": "string" },
+          "axis": { "type": "string" },
+          "title": { "type": "string" },
+          "targetPaths": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "keyQuestions": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "priority": {
+            "type": "string",
+            "enum": ["high", "medium", "low"]
+          }
+        }
+      }
+    }
+  }
+}

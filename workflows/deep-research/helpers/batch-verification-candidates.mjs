@@ -21,8 +21,7 @@ function asArray(value) {
 function findCandidates(sources) {
 	for (const [specId, source] of Object.entries(sources ?? {})) {
 		if (specId === "sanitize-claims" || specId.startsWith("sanitize-claims.")) {
-			const candidates = asArray(source);
-			if (candidates.length > 0) return candidates;
+			return asArray(source);
 		}
 	}
 	for (const [specId, source] of Object.entries(sources ?? {})) {
@@ -37,9 +36,21 @@ function findCandidates(sources) {
 	return [];
 }
 
-function stableId(value, fallback) {
+function allocateFallbackId(usedIds, index) {
+	let next = index + 1;
+	while (true) {
+		const id = `candidate-${String(next).padStart(3, "0")}`;
+		if (!usedIds.has(id)) {
+			usedIds.add(id);
+			return id;
+		}
+		next += 1;
+	}
+}
+
+function explicitId(value) {
 	const id = typeof value?.id === "string" ? value.id.trim() : "";
-	return id || fallback;
+	return id || null;
 }
 
 function sourceKey(candidate) {
@@ -90,16 +101,20 @@ export default async function batchVerificationCandidates({
 }) {
 	const maxBatchSize = normalizeMaxBatchSize(options.maxBatchSize);
 	const rawCandidates = findCandidates(sources);
+	const usedIds = new Set(
+		rawCandidates.map(explicitId).filter((id) => typeof id === "string"),
+	);
+	const idCounts = new Map();
 	const candidates = rawCandidates
-		.map((candidate, index) => ({
-			candidate,
-			id: stableId(
-				candidate,
-				`candidate-${String(index + 1).padStart(3, "0")}`,
-			),
-			index,
-		}))
+		.map((candidate, index) => {
+			const id = explicitId(candidate) ?? allocateFallbackId(usedIds, index);
+			idCounts.set(id, (idCounts.get(id) ?? 0) + 1);
+			return { candidate, id, index };
+		})
 		.sort((left, right) => left.id.localeCompare(right.id));
+	const duplicateCandidateIds = [...idCounts.entries()]
+		.filter(([, count]) => count > 1)
+		.map(([id, count]) => ({ id, count }));
 
 	const groups = new Map();
 	for (const item of candidates) {
@@ -131,6 +146,7 @@ export default async function batchVerificationCandidates({
 		maxBatchSize,
 		candidateCount: candidates.length,
 		batchCount: batches.length,
+		...(duplicateCandidateIds.length > 0 ? { duplicateCandidateIds } : {}),
 		batches,
 	};
 }

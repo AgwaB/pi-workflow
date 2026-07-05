@@ -21,8 +21,7 @@ function asArray(value) {
 function findCandidates(sources) {
 	for (const [specId, source] of Object.entries(sources ?? {})) {
 		if (specId === "sanitize-claims" || specId.startsWith("sanitize-claims.")) {
-			const candidates = asArray(source);
-			if (candidates.length > 0) return candidates;
+			return asArray(source);
 		}
 	}
 	for (const [specId, source] of Object.entries(sources ?? {})) {
@@ -161,7 +160,7 @@ export default async function shadowSelectVerification({ sources }) {
 			actualStatus:
 				typeof audited?.status === "string" ? audited.status : undefined,
 			actualVerified: audited?.status === "verified",
-			factSlotIds: Array.isArray(candidate.factSlotIds)
+			factSlotIds: Array.isArray(candidate?.factSlotIds)
 				? [...candidate.factSlotIds]
 				: [],
 		};

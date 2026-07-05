@@ -13,6 +13,7 @@ These scaffolds are skill resources, not bundled starter workflows. Do not run t
 | `dag-required-reads/` | A nested analysis DAG must expose one child output and force downstream artifact reads. | `type: "dag"`, `outputFrom`, `inputPolicy.requiredReads` |
 | `matrix-dag/` | Multiple review lenses should run in parallel and then join through reducers. | nested DAG, parallel roots, join reducers, `outputFrom`, final required read |
 | `object-tool-fallback/` | A read-only workflow needs an optional custom/web extraction fallback. | object-form tool metadata, fallback tool, artifact-read gates |
+| `analysis-dossier/` | Expensive read-only corpus analysis that should be produced once and reused by a cheaper downstream workflow. | plan -> `foreach` shard analysis with file:line evidence, `partial` fan-in synthesis, `requiredReads` dossier render |
 
 ## Copy pattern
 

@@ -22,6 +22,7 @@ import { availableParallelism } from "node:os";
 import { fileURLToPath } from "node:url";
 
 import type {
+	ArtifactGraphRequiredRead,
 	CompiledTask,
 	CompiledToolProvider,
 	WorkflowRunRecord,
@@ -629,7 +630,7 @@ function buildTaskUsageAttempt(options: {
 }
 
 function usageAttemptKey(attempt: WorkflowTaskUsageAttemptRecord): string {
-	return `${attempt.backendRunId ?? ""}\0${attempt.backendAttemptId ?? ""}\0${attempt.source}`;
+	return `${attempt.backendRunId ?? ""}\0${attempt.backendAttemptId ?? ""}`;
 }
 
 function upsertUsageAttempt(
@@ -1596,13 +1597,16 @@ async function materializeTerminalArtifactGraphResult(
 	const readCheck = await checkRequiredArtifactReads(
 		dirname(options.resultFile),
 		task.artifactGraph?.requiredReads ?? [],
+		{ startedAt: options.startedAt },
 	);
 	if (readCheck.missing.length > 0 || readCheck.ledgerError) {
 		const reason = readCheck.ledgerError
 			? "required_reads_ledger_unavailable"
 			: "required_reads_missing";
 		const artifacts = readCheck.ledgerError
-			? (task.artifactGraph?.requiredReads ?? [])
+			? (task.artifactGraph?.requiredReads ?? []).map(
+					formatRequiredArtifactRead,
+				)
 			: readCheck.missing;
 		const message = readCheck.ledgerError
 			? `required workflow artifact read ledger was unavailable or corrupt: ${readCheck.ledgerError}; required reads could not be verified: ${artifacts.join(", ")}`
@@ -1878,7 +1882,8 @@ function workflowRefLocator(ref: unknown): string | undefined {
 
 async function checkRequiredArtifactReads(
 	taskDir: string,
-	requiredReads: readonly string[],
+	requiredReads: readonly ArtifactGraphRequiredRead[],
+	options: { startedAt?: string } = {},
 ): Promise<{ missing: string[]; ledgerError?: string }> {
 	if (requiredReads.length === 0) return { missing: [] };
 	let ledger;
@@ -1888,14 +1893,174 @@ async function checkRequiredArtifactReads(
 		);
 	} catch (error) {
 		return {
-			missing: [...requiredReads],
+			missing: requiredReads.map(formatRequiredArtifactRead),
 			ledgerError: error instanceof Error ? error.message : String(error),
 		};
 	}
-	const actual = new Set(
-		ledger.map((entry) => `${entry.source}.${entry.artifact}`),
+	const attemptStartedAt =
+		options.startedAt === undefined ? NaN : Date.parse(options.startedAt);
+	const attemptLedger = Number.isFinite(attemptStartedAt)
+		? ledger.filter((entry) => {
+				const readAt = Date.parse(entry.at);
+				return Number.isFinite(readAt) && readAt >= attemptStartedAt;
+			})
+		: ledger;
+	return {
+		missing: requiredReads
+			.filter(
+				(required) => !requiredArtifactReadSatisfied(required, attemptLedger),
+			)
+			.map(formatRequiredArtifactRead),
+	};
+}
+
+function requiredArtifactReadSatisfied(
+	required: ArtifactGraphRequiredRead,
+	ledger: Awaited<ReturnType<typeof readWorkflowArtifactReadLedger>>,
+): boolean {
+	const normalized = normalizeRequiredArtifactRead(required);
+	if (!normalized) return false;
+	const matches = ledger.filter(
+		(entry) =>
+			entry.source === normalized.source &&
+			entry.artifact === normalized.artifact &&
+			requiredArtifactReadPathSatisfied(normalized, entry.path) &&
+			(normalized.maxChars === undefined ||
+				entry.maxChars === normalized.maxChars) &&
+			(normalized.maxItems === undefined ||
+				entry.maxItems === normalized.maxItems),
 	);
-	return { missing: requiredReads.filter((required) => !actual.has(required)) };
+	return normalized.count === undefined
+		? matches.length > 0
+		: matches.length === normalized.count;
+}
+
+function requiredArtifactReadPathSatisfied(
+	required: {
+		source: string;
+		artifact: string;
+		path?: string;
+	},
+	entryPath: string | undefined,
+): boolean {
+	if (required.path === undefined) return true;
+	if (entryPath === undefined) return false;
+	return requiredArtifactReadPathCandidates(
+		required.path,
+		required.source,
+		required.artifact,
+	).includes(entryPath);
+}
+
+function requiredArtifactReadPathCandidates(
+	path: string,
+	source: string,
+	artifact: string,
+): string[] {
+	const candidates: string[] = [];
+	const seen = new Set<string>();
+	const queue = [path];
+	for (let index = 0; index < queue.length && index < 32; index += 1) {
+		const candidate = queue[index];
+		if (seen.has(candidate)) continue;
+		seen.add(candidate);
+		candidates.push(candidate);
+		for (const next of [
+			stripRequiredReadSourcePathPrefix(candidate, source),
+			stripRequiredReadArtifactPathPrefix(candidate, artifact),
+			applyRequiredReadJsonPathSegmentAliases(candidate),
+		]) {
+			if (next !== candidate && !seen.has(next)) queue.push(next);
+		}
+	}
+	return candidates;
+}
+
+function stripRequiredReadSourcePathPrefix(
+	path: string,
+	source: string,
+): string {
+	const sourcePrefix = `$.${source}.`;
+	if (!path.startsWith(sourcePrefix)) return path;
+	return `$.${path.slice(sourcePrefix.length)}`;
+}
+
+function stripRequiredReadArtifactPathPrefix(
+	path: string,
+	artifact: string,
+): string {
+	const artifactPath = `$.${artifact}`;
+	if (path === artifactPath) return "$";
+	const artifactPrefix = `${artifactPath}.`;
+	if (!path.startsWith(artifactPrefix)) return path;
+	return `$.${path.slice(artifactPrefix.length)}`;
+}
+
+const REQUIRED_READ_JSON_PATH_SEGMENT_ALIASES: Record<string, string> = {
+	axes: "researchAxes",
+	claimVerdicts: "claimVerdictLedger",
+	factSlot: "factSlots",
+	gaps: "remainingGaps",
+	primarySources: "sourcePolicy",
+	priorities: "verificationPriorities",
+	questions: "researchQuestions",
+	requiredSources: "sourcePolicy",
+	scope: "researchScope",
+	slots: "factSlots",
+	sourceQualityRules: "sourcePolicy",
+	sourceRequirements: "sourcePolicy",
+	verification: "verificationPriorities",
+	verificationPriority: "verificationPriorities",
+	verdicts: "claimVerdictLedger",
+};
+
+function applyRequiredReadJsonPathSegmentAliases(path: string): string {
+	if (path === "$") return path;
+	const segments = path.slice(2).split(".");
+	const aliased = segments.map(
+		(segment) => REQUIRED_READ_JSON_PATH_SEGMENT_ALIASES[segment] ?? segment,
+	);
+	if (aliased.every((segment, index) => segment === segments[index]))
+		return path;
+	return `$.${aliased.join(".")}`;
+}
+
+function normalizeRequiredArtifactRead(required: ArtifactGraphRequiredRead): {
+	source: string;
+	artifact: string;
+	path?: string;
+	maxChars?: number;
+	maxItems?: number;
+	count?: number;
+} | null {
+	if (typeof required === "string") {
+		const match = required.match(
+			/^([A-Za-z0-9_.-]+)\.(control|analysis|refs|raw)$/,
+		);
+		if (!match) return null;
+		return { source: match[1]!, artifact: match[2]! };
+	}
+	return required;
+}
+
+function formatRequiredArtifactRead(
+	required: ArtifactGraphRequiredRead,
+): string {
+	return typeof required === "string"
+		? required
+		: [
+				`${required.source}.${required.artifact}`,
+				required.path === undefined ? undefined : `path=${required.path}`,
+				required.maxChars === undefined
+					? undefined
+					: `maxChars=${required.maxChars}`,
+				required.maxItems === undefined
+					? undefined
+					: `maxItems=${required.maxItems}`,
+				required.count === undefined ? undefined : `count=${required.count}`,
+			]
+				.filter(Boolean)
+				.join(" ");
 }
 
 async function writeArtifactGraphMissingReadsAttempt(

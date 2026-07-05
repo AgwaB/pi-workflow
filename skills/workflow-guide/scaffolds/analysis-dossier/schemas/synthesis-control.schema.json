@@ -1,0 +1,52 @@
+{
+  "type": "object",
+  "required": ["conceptMap", "keywordIndex", "evidenceIndex", "openQuestions"],
+  "additionalProperties": true,
+  "properties": {
+    "conceptMap": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["concept", "definition"],
+        "additionalProperties": true,
+        "properties": {
+          "concept": { "type": "string" },
+          "definition": { "type": "string" },
+          "evidenceRefs": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "keywordIndex": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["term", "gloss"],
+        "additionalProperties": true,
+        "properties": {
+          "term": { "type": "string" },
+          "gloss": { "type": "string" }
+        }
+      }
+    },
+    "evidenceIndex": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "file", "claim"],
+        "additionalProperties": true,
+        "properties": {
+          "id": { "type": "string" },
+          "file": { "type": "string" },
+          "lineStart": { "type": "number" },
+          "lineEnd": { "type": "number" },
+          "symbol": { "type": "string" },
+          "claim": { "type": "string" }
+        }
+      }
+    },
+    "openQuestions": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}

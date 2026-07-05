@@ -82,6 +82,14 @@ const INPUT_POLICY_KEYS = new Set([
 	"enforcement",
 	"artifactAccess",
 ]);
+const REQUIRED_READ_OBJECT_KEYS = new Set([
+	"source",
+	"artifact",
+	"path",
+	"maxChars",
+	"maxItems",
+	"count",
+]);
 const SOURCE_PROJECTION_KEYS = new Set(["include", "maxChars"]);
 const SUPPORT_KEYS = new Set(["uses", "options"]);
 const DYNAMIC_STAGE_FORBIDDEN_KEYS = new Set([
@@ -200,8 +208,13 @@ const NORMAL_ARTIFACT_KINDS = new Set<WorkflowArtifactKind>([
 	"refs",
 	"raw",
 ]);
+const JSON_PROJECTABLE_ARTIFACT_KINDS = new Set<WorkflowArtifactKind>([
+	"control",
+	"refs",
+]);
 const SOURCE_POLICY_VALUES = new Set(["success", "partial", "require-success"]);
 const STAGE_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
+const SIMPLE_JSON_PATH_PATTERN = /^(\$|\$(\.[A-Za-z0-9_-]+)+)$/;
 
 const TOOL_OBJECT_KEYS = new Set([
 	"name",
@@ -559,6 +572,7 @@ function validateStage(
 	validateSourcePolicy(stage.sourcePolicy, `${path}.sourcePolicy`, issues);
 	validateRole(stage.role, `${path}.role`, issues);
 	validateWorkflowToolArray(stage.tools, `${path}.tools`, issues);
+	validateArtifactAccessToolPolicy(stage, type, path, issues);
 	validateStageRefs(stage.from, `${path}.from`, siblingIds, issues, {
 		allowControlPath: type === "foreach",
 	});
@@ -864,44 +878,135 @@ function validateRequiredReads(
 	const seen = new Set<string>();
 	for (const [index, item] of value.entries()) {
 		const itemPath = `${path}[${index}]`;
-		if (typeof item !== "string" || item.trim() === "") {
+		const normalized = normalizeRequiredReadForValidation(
+			item,
+			itemPath,
+			issues,
+		);
+		if (!normalized) continue;
+		const key = [
+			normalized.source,
+			normalized.artifact,
+			normalized.path ?? "",
+			normalized.maxChars ?? "",
+			normalized.maxItems ?? "",
+			normalized.count ?? "",
+		].join("\0");
+		if (seen.has(key))
 			issues.push({
 				path: itemPath,
-				message: "must be a source.artifact string",
+				message: `duplicate required read "${key}"`,
 			});
-			continue;
-		}
-		if (seen.has(item))
-			issues.push({ path: itemPath, message: `duplicate value "${item}"` });
-		seen.add(item);
-		validateRequiredRead(item, itemPath, sourceIds, issues);
+		seen.add(key);
+		validateRequiredRead(normalized, itemPath, sourceIds, issues);
 	}
 }
 
+function normalizeRequiredReadForValidation(
+	value: unknown,
+	path: string,
+	issues: ValidationIssue[],
+):
+	| {
+			source: string;
+			artifact: string;
+			path?: string;
+			maxChars?: number;
+			maxItems?: number;
+			count?: number;
+	  }
+	| undefined {
+	if (typeof value === "string") {
+		if (value.trim() === "") {
+			issues.push({ path, message: "must be a source.artifact string" });
+			return undefined;
+		}
+		const dot = value.lastIndexOf(".");
+		return {
+			source: dot > 0 ? value.slice(0, dot) : "",
+			artifact: dot > 0 ? value.slice(dot + 1) : "",
+		};
+	}
+	const record = recordAt(value, path, issues);
+	if (!record) return undefined;
+	rejectUnknownKeys(record, REQUIRED_READ_OBJECT_KEYS, path, issues);
+	const source = requiredString(record.source, `${path}.source`, issues) ?? "";
+	const artifact =
+		requiredString(record.artifact, `${path}.artifact`, issues) ?? "";
+	optionalString(record.path, `${path}.path`, issues);
+	const readPath = typeof record.path === "string" ? record.path : undefined;
+	optionalPositiveInteger(record.maxChars, `${path}.maxChars`, issues);
+	optionalPositiveInteger(record.maxItems, `${path}.maxItems`, issues);
+	optionalPositiveInteger(record.count, `${path}.count`, issues);
+	if (
+		(record.maxChars !== undefined || record.maxItems !== undefined) &&
+		record.path === undefined
+	) {
+		issues.push({
+			path,
+			message: "path is required when maxChars or maxItems is declared",
+		});
+	}
+	return {
+		source,
+		artifact,
+		...(typeof readPath === "string" ? { path: readPath } : {}),
+		...(typeof record.maxChars === "number"
+			? { maxChars: record.maxChars }
+			: {}),
+		...(typeof record.maxItems === "number"
+			? { maxItems: record.maxItems }
+			: {}),
+		...(typeof record.count === "number" ? { count: record.count } : {}),
+	};
+}
+
 function validateRequiredRead(
-	value: string,
+	value: {
+		source: string;
+		artifact: string;
+		path?: string;
+		maxChars?: number;
+		maxItems?: number;
+		count?: number;
+	},
 	path: string,
 	sourceIds: ReadonlySet<string>,
 	issues: ValidationIssue[],
 ): void {
-	const dot = value.lastIndexOf(".");
-	const source = dot > 0 ? value.slice(0, dot) : "";
-	const artifact = dot > 0 ? value.slice(dot + 1) : "";
-	if (source.trim() === "" || artifact.trim() === "") {
+	if (value.source.trim() === "" || value.artifact.trim() === "") {
 		issues.push({ path, message: "must use source.artifact form" });
 		return;
 	}
-	if (!sourceIds.has(source)) {
+	if (!sourceIds.has(value.source)) {
 		issues.push({
 			path,
-			message: `required read source "${source}" is not an available upstream artifact source`,
+			message: `required read source "${value.source}" is not an available upstream artifact source`,
 		});
 	}
-	if (!NORMAL_ARTIFACT_KINDS.has(artifact as WorkflowArtifactKind)) {
+	const artifact = value.artifact as WorkflowArtifactKind;
+	if (!NORMAL_ARTIFACT_KINDS.has(artifact)) {
 		issues.push({
 			path,
 			message: "artifact must be one of: control, analysis, refs, raw",
 		});
+		return;
+	}
+	if (value.path !== undefined) {
+		if (!SIMPLE_JSON_PATH_PATTERN.test(value.path)) {
+			issues.push({
+				path: `${path}.path`,
+				message:
+					"must be $ or a simple dot JSON path like $.claims.items; array selectors are not supported",
+			});
+		}
+		if (!JSON_PROJECTABLE_ARTIFACT_KINDS.has(artifact)) {
+			issues.push({
+				path: `${path}.artifact`,
+				message:
+					"path/maxChars/maxItems projections are only supported for JSON artifacts: control, refs",
+			});
+		}
 	}
 }
 
@@ -1719,6 +1824,50 @@ function validateWorkflowToolArray(
 	const seen = new Set<string>();
 	for (const [index, item] of value.entries()) {
 		validateWorkflowToolEntry(item, `${path}[${index}]`, seen, issues);
+	}
+}
+
+function workflowToolArrayIncludes(value: unknown, name: string): boolean {
+	return (
+		Array.isArray(value) &&
+		value.some((item) => workflowToolName(item) === name)
+	);
+}
+
+function validateArtifactAccessToolPolicy(
+	stage: Record<string, unknown>,
+	type: ArtifactGraphStageType | undefined,
+	path: string,
+	issues: ValidationIssue[],
+): void {
+	const inputPolicy = isRecord(stage.inputPolicy)
+		? stage.inputPolicy
+		: undefined;
+	if (
+		inputPolicy?.artifactAccess !== undefined &&
+		(type === "dynamic" || stage.support !== undefined)
+	) {
+		issues.push({
+			path: `${path}.inputPolicy.artifactAccess`,
+			message:
+				"artifactAccess is only supported for task stages that provision workflow_artifact",
+		});
+	}
+	if (inputPolicy?.artifactAccess !== "none") return;
+	if (workflowToolArrayIncludes(stage.tools, "workflow_artifact")) {
+		issues.push({
+			path: `${path}.tools`,
+			message:
+				'must not include workflow_artifact when inputPolicy.artifactAccess is "none"',
+		});
+	}
+	const each = isRecord(stage.each) ? stage.each : undefined;
+	if (workflowToolArrayIncludes(each?.tools, "workflow_artifact")) {
+		issues.push({
+			path: `${path}.each.tools`,
+			message:
+				'must not include workflow_artifact when inputPolicy.artifactAccess is "none"',
+		});
 	}
 }
 

@@ -27,6 +27,14 @@ pi install /absolute/path/to/pi-workflow
 
 You can also test for a single run with Pi's package/extension loading options, but a normal `pi install` mirrors the intended release path.
 
+For Node consumers, import from the package root after installing the npm package:
+
+```js
+import { listWorkflows, resolveWorkflowRef } from "@agwab/pi-workflow";
+```
+
+Do not import private `src/`, `dist/`, or bundled workflow helper paths directly; those paths are package internals except for the documented `./extension` Pi entrypoint.
+
 ## Command surface
 
 Pi command:
@@ -340,7 +348,7 @@ DAG rules:
 - `after` is order-only. It accepts a string or string array, waits for those stages, and does not make their artifacts available as source data.
 - `after: []` is an explicit parallel root. It opts out of the implicit previous-stage chain while documenting that the stage intentionally has no ordering dependency.
 - Parse-time graph validation rejects unknown stage references, self-dependencies, duplicate stage ids, dependency cycles, unsupported output fields, and unsafe `controlSchema` paths.
-- `inputPolicy.requiredReads` is fail-closed: if declared, the task must read each listed `source.artifact` via `workflow_artifact` before its final output is accepted. The runtime does not preload required artifact contents into the prompt; it exposes source refs and checks the read ledger. Direct repo `read`/`grep` calls do not satisfy this proof; the ledger proves artifact access, not semantic use. DAG container outputs use the selected child source name, for example `analysis.final.analysis` for `id: "analysis", outputFrom: "final"`.
+- `inputPolicy.requiredReads` is fail-closed: if declared, the task must read each listed `source.artifact` via `workflow_artifact` before its final output is accepted. String entries require any read of that source/artifact. Object entries can additionally require exact `count`; JSON artifacts (`control`, `refs`) can require `path`, `maxChars`, and `maxItems` using `$` or simple dot paths such as `$.items`. When `maxChars` or `maxItems` is declared, `path` is required. The runtime does not preload required artifact contents into the prompt; it exposes source refs and checks the read ledger. Direct repo `read`/`grep` calls do not satisfy this proof; the ledger proves artifact access, not semantic use. DAG container outputs use the selected child source name, for example `analysis.final.analysis` for `id: "analysis", outputFrom: "final"`.
 - `sourceProjection.include` can inline small selected simple dot paths from upstream `control.json` (for example `$.digest` or `$.items`); full artifacts remain available through `workflow_artifact`.
 - A `type: "dag"` stage may contain `single`, `foreach`, `reduce`, support nodes, or nested `dag` stages. Loops are top-level workflow/control stages in v1. Child `from`/`after` references resolve only to siblings inside the same container.
 - `outputFrom` names the child whose task keys represent the container for downstream `from: "containerId"` edges. If omitted, exactly one sink child defaults as the output; multiple sink children require explicit `outputFrom`.
@@ -396,8 +404,19 @@ Example diamond plus a DAG container consumed downstream:
         "id": "report",
         "type": "reduce",
         "from": "analysis",
-        "inputPolicy": { "requiredReads": ["analysis.final.analysis"], "enforcement": "fail" },
-        "prompt": "Write the final report using analysis artifacts."
+        "inputPolicy": {
+          "requiredReads": [
+            {
+              "source": "analysis.final",
+              "artifact": "control",
+              "path": "$.summary",
+              "maxChars": 4000,
+              "count": 1
+            }
+          ],
+          "enforcement": "fail"
+        },
+        "prompt": "Write the final report using the analysis control artifact."
       }
     ]
   }

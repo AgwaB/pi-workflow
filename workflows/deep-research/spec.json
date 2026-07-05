@@ -196,7 +196,13 @@
         "sourcePolicy": "partial",
         "inputPolicy": {
           "requiredReads": [
-            "final-audit-packet.control"
+            {
+              "source": "final-audit-packet",
+              "artifact": "control",
+              "path": "$.packet.synthesisInput",
+              "maxChars": 24000,
+              "count": 1
+            }
           ],
           "enforcement": "fail"
         },

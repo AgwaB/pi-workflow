@@ -1,0 +1,46 @@
+{
+  "type": "object",
+  "required": ["schema", "title", "sources", "sections", "evidenceIndex"],
+  "additionalProperties": true,
+  "properties": {
+    "schema": { "type": "string", "const": "analysis-dossier-v1" },
+    "title": { "type": "string" },
+    "sources": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "sections": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "heading", "summary", "points"],
+        "additionalProperties": true,
+        "properties": {
+          "id": { "type": "string" },
+          "heading": { "type": "string" },
+          "summary": { "type": "string" },
+          "points": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        }
+      }
+    },
+    "evidenceIndex": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "file", "claim"],
+        "additionalProperties": true,
+        "properties": {
+          "id": { "type": "string" },
+          "file": { "type": "string" },
+          "lineStart": { "type": "number" },
+          "lineEnd": { "type": "number" },
+          "symbol": { "type": "string" },
+          "claim": { "type": "string" }
+        }
+      }
+    }
+  }
+}

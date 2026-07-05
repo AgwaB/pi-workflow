@@ -406,19 +406,30 @@ function asBatchArray(value) {
 	return [];
 }
 
+function sanitizeTaskId(value) {
+	return String(value ?? "")
+		.trim()
+		.toLowerCase()
+		.replace(/[^a-z0-9_.-]+/g, "-")
+		.replace(/^-+|-+$/g, "")
+		.slice(0, 64);
+}
+
 function buildBatchMembershipById(verificationBatches) {
 	const batches = new Map();
+	let fallbackIndex = 1;
 	for (const batch of asBatchArray(verificationBatches)) {
-		const id = typeof batch?.id === "string" ? batch.id.trim() : "";
+		const id = sanitizeTaskId(batch?.id);
 		if (!id) continue;
 		const claimIds = Array.isArray(batch.claimIds)
 			? batch.claimIds
 			: Array.isArray(batch.claims)
-				? batch.claims.map(
-						(claim, index) =>
-							claimIdOf(claim).id ??
-							`candidate-${String(index + 1).padStart(3, "0")}`,
-					)
+				? batch.claims.map((claim) => {
+						const claimId = claimIdOf(claim).id;
+						return (
+							claimId ?? `candidate-${String(fallbackIndex++).padStart(3, "0")}`
+						);
+					})
 				: [];
 		batches.set(
 			id,
@@ -436,8 +447,7 @@ function buildBatchMembershipById(verificationBatches) {
 function verifierBatchId(sourceId) {
 	const prefix = "verify-claims.";
 	if (typeof sourceId !== "string" || !sourceId.startsWith(prefix)) return null;
-	const id = sourceId.slice(prefix.length).trim();
-	return id || null;
+	return sanitizeTaskId(sourceId.slice(prefix.length)) || null;
 }
 
 function buildBatchIdBySourceName(sourceStatuses) {
@@ -460,7 +470,12 @@ function batchMembershipIssue({
 		return null;
 	const batchId =
 		verifierBatchId(sourceId) ?? batchIdBySourceName?.get(sourceId);
-	if (!batchId) return null;
+	if (!batchId) {
+		return {
+			reason: "unknown_verification_batch_id",
+			expectedBatchIds: [...batchMembershipById.keys()],
+		};
+	}
 	const expectedClaimIds = batchMembershipById.get(batchId);
 	if (!expectedClaimIds) {
 		return {

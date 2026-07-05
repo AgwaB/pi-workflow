@@ -17,6 +17,19 @@ export type WorkflowMetricsPricingModelVersion =
 export type WorkflowMetricsPricingSource = "provider-reported";
 export type WorkflowMetricValue = number | null;
 
+export interface WorkflowObservedUsageMetrics {
+	inputTokens: WorkflowMetricValue;
+	outputTokens: WorkflowMetricValue;
+	totalTokens: WorkflowMetricValue;
+	cachedInputTokens: WorkflowMetricValue;
+	cacheCreationInputTokens: WorkflowMetricValue;
+	cacheReadInputTokens: WorkflowMetricValue;
+	reasoningTokens: WorkflowMetricValue;
+	costUsd: WorkflowMetricValue;
+	contributingTaskIds: string[];
+	omittedTaskIds: string[];
+}
+
 export interface WorkflowUsageMetrics {
 	inputTokens: WorkflowMetricValue;
 	outputTokens: WorkflowMetricValue;
@@ -30,6 +43,7 @@ export interface WorkflowUsageMetrics {
 	 * from token counts or model names.
 	 */
 	costUsd: WorkflowMetricValue;
+	observed: WorkflowObservedUsageMetrics;
 	attempts: number;
 	unavailable: boolean;
 	incomplete: boolean;
@@ -98,11 +112,18 @@ export interface WorkflowStageMetrics extends WorkflowRunMetricsRollup {
 	stageId: string | null;
 }
 
+export interface WorkflowMissingMetricEntry {
+	taskId: string;
+	metrics: string[];
+}
+
 export interface WorkflowRunMetricsMetadata {
 	usageUnavailableTaskIds: string[];
 	usageIncompleteTaskIds: string[];
+	usageMissingMetricsByTask: WorkflowMissingMetricEntry[];
 	launchTimingUnavailableTaskIds: string[];
 	launchTimingIncompleteTaskIds: string[];
+	launchTimingMissingMetricsByTask: WorkflowMissingMetricEntry[];
 	incomplete: boolean;
 	unavailable: boolean;
 }
@@ -163,7 +184,9 @@ function metricValue(
 ): WorkflowMetricValue {
 	if (!record || !hasOwnValue(record, key)) return null;
 	const value = (record as Record<string, unknown>)[key];
-	return typeof value === "number" && Number.isFinite(value) ? value : null;
+	return typeof value === "number" && Number.isFinite(value) && value >= 0
+		? value
+		: null;
 }
 
 function metricString(value: unknown): string | null {
@@ -181,6 +204,58 @@ function sumMetricValues(values: WorkflowMetricValue[]): {
 		total += value;
 	}
 	return { value: total, incomplete: false };
+}
+
+function sumObservedMetricValues(
+	values: WorkflowMetricValue[],
+): WorkflowMetricValue {
+	let total = 0;
+	let count = 0;
+	for (const value of values) {
+		if (value === null) continue;
+		total += value;
+		count += 1;
+	}
+	return count > 0 ? total : null;
+}
+
+function observedUsageForTasks(
+	tasks: Array<{ taskId: string; usage: WorkflowUsageMetrics }>,
+): WorkflowObservedUsageMetrics {
+	const contributingTaskIds = tasks
+		.filter((task) => USAGE_METRIC_KEYS.some((key) => task.usage[key] !== null))
+		.map((task) => task.taskId);
+	const omittedTaskIds = tasks
+		.filter((task) =>
+			USAGE_METRIC_KEYS.every((key) => task.usage[key] === null),
+		)
+		.map((task) => task.taskId);
+	return {
+		inputTokens: sumObservedMetricValues(
+			tasks.map((task) => task.usage.inputTokens),
+		),
+		outputTokens: sumObservedMetricValues(
+			tasks.map((task) => task.usage.outputTokens),
+		),
+		totalTokens: sumObservedMetricValues(
+			tasks.map((task) => task.usage.totalTokens),
+		),
+		cachedInputTokens: sumObservedMetricValues(
+			tasks.map((task) => task.usage.cachedInputTokens),
+		),
+		cacheCreationInputTokens: sumObservedMetricValues(
+			tasks.map((task) => task.usage.cacheCreationInputTokens),
+		),
+		cacheReadInputTokens: sumObservedMetricValues(
+			tasks.map((task) => task.usage.cacheReadInputTokens),
+		),
+		reasoningTokens: sumObservedMetricValues(
+			tasks.map((task) => task.usage.reasoningTokens),
+		),
+		costUsd: sumObservedMetricValues(tasks.map((task) => task.usage.costUsd)),
+		contributingTaskIds,
+		omittedTaskIds,
+	};
 }
 
 function usageAttempts(task: WorkflowTaskRunRecord): number {
@@ -205,6 +280,7 @@ function taskUsageMetrics(task: WorkflowTaskRunRecord): WorkflowUsageMetrics {
 		usage?.incomplete === true ||
 		usage?.aggregate?.incomplete === true ||
 		USAGE_METRIC_KEYS.some((key) => metrics[key] === null);
+	const hasObserved = USAGE_METRIC_KEYS.some((key) => metrics[key] !== null);
 	return {
 		inputTokens: metrics.inputTokens,
 		outputTokens: metrics.outputTokens,
@@ -214,6 +290,11 @@ function taskUsageMetrics(task: WorkflowTaskRunRecord): WorkflowUsageMetrics {
 		cacheReadInputTokens: metrics.cacheReadInputTokens,
 		reasoningTokens: metrics.reasoningTokens,
 		costUsd: metrics.costUsd,
+		observed: {
+			...metrics,
+			contributingTaskIds: hasObserved ? [task.taskId] : [],
+			omittedTaskIds: hasObserved ? [] : [task.taskId],
+		},
 		attempts: usageAttempts(task),
 		unavailable,
 		incomplete,
@@ -320,6 +401,7 @@ function rollupUsage(tasks: WorkflowTaskMetrics[]): WorkflowUsageMetrics {
 		cacheReadInputTokens: rollup.cacheReadInputTokens.value,
 		reasoningTokens: rollup.reasoningTokens.value,
 		costUsd: rollup.costUsd.value,
+		observed: observedUsageForTasks(tasks),
 		attempts: tasks.reduce((total, task) => total + task.usage.attempts, 0),
 		unavailable: unavailableTaskIds.length > 0,
 		incomplete:
@@ -392,7 +474,9 @@ function rollupRetries(tasks: WorkflowTaskMetrics[]): WorkflowRetryMetrics {
 function statusCounts(tasks: WorkflowTaskMetrics[]): WorkflowTaskStatusCounts {
 	const counts = emptyStatusCounts();
 	for (const task of tasks) {
-		counts[task.status] += 1;
+		if (Object.hasOwn(counts, task.status)) {
+			counts[task.status] += 1;
+		}
 		counts.total += 1;
 	}
 	return counts;
@@ -406,6 +490,26 @@ function rollupTasks(tasks: WorkflowTaskMetrics[]): WorkflowRunMetricsRollup {
 		launchTiming: rollupLaunchTiming(tasks),
 		retries: rollupRetries(tasks),
 	};
+}
+
+function missingUsageMetricsByTask(
+	tasks: WorkflowTaskMetrics[],
+): WorkflowMissingMetricEntry[] {
+	return tasks.flatMap((task) => {
+		const metrics = USAGE_METRIC_KEYS.filter((key) => task.usage[key] === null);
+		return metrics.length === 0 ? [] : [{ taskId: task.taskId, metrics }];
+	});
+}
+
+function missingLaunchTimingMetricsByTask(
+	tasks: WorkflowTaskMetrics[],
+): WorkflowMissingMetricEntry[] {
+	return tasks.flatMap((task) => {
+		const metrics = TIMING_METRIC_KEYS.filter(
+			(key) => task.launchTiming[key] === null,
+		);
+		return metrics.length === 0 ? [] : [{ taskId: task.taskId, metrics }];
+	});
 }
 
 function stageMetrics(tasks: WorkflowTaskMetrics[]): WorkflowStageMetrics[] {
@@ -467,10 +571,13 @@ export function buildWorkflowRunMetrics(
 		metadata: {
 			usageUnavailableTaskIds: [...totals.usage.unavailableTaskIds],
 			usageIncompleteTaskIds: [...totals.usage.incompleteTaskIds],
+			usageMissingMetricsByTask: missingUsageMetricsByTask(byTask),
 			launchTimingUnavailableTaskIds: [
 				...totals.launchTiming.unavailableTaskIds,
 			],
 			launchTimingIncompleteTaskIds: [...totals.launchTiming.incompleteTaskIds],
+			launchTimingMissingMetricsByTask:
+				missingLaunchTimingMetricsByTask(byTask),
 			incomplete: totals.usage.incomplete || totals.launchTiming.incomplete,
 			unavailable: totals.usage.unavailable || totals.launchTiming.unavailable,
 		},

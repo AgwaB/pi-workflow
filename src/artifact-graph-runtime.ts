@@ -32,6 +32,7 @@ import {
 	writeRunRecord,
 } from "./store.js";
 import type {
+	ArtifactGraphRequiredRead,
 	CompiledTask,
 	CompiledWorkflow,
 	WorkflowRunRecord,
@@ -491,7 +492,21 @@ async function prepareArtifactGraphTask(
 	contextDependsOn: readonly string[],
 ): Promise<CompiledTask> {
 	if (compiledTask.artifactGraph?.artifactAccess === "none") {
-		return { ...compiledTask, cwd: task.cwd };
+		const {
+			[WORKFLOW_ARTIFACT_TOOL_NAME]: _workflowArtifact,
+			...toolProviders
+		} = compiledTask.runtime.toolProviders ?? {};
+		return {
+			...compiledTask,
+			cwd: task.cwd,
+			runtime: {
+				...compiledTask.runtime,
+				tools: (compiledTask.runtime.tools ?? []).filter(
+					(tool) => tool !== WORKFLOW_ARTIFACT_TOOL_NAME,
+				),
+				toolProviders,
+			},
+		};
 	}
 
 	const taskDir = dirname(fromProjectPath(cwd, task.files.result));
@@ -559,22 +574,31 @@ async function prepareArtifactGraphTask(
 
 function formatRequiredArtifactReadReferences(options: {
 	sources: WorkflowSourceManifestSource[];
-	requiredReads: readonly string[];
+	requiredReads: readonly ArtifactGraphRequiredRead[];
 }): string {
 	if (options.requiredReads.length === 0) return "";
 	const sections = options.requiredReads.map((required) => {
 		const parsed = parseRequiredArtifactRead(required);
+		const label = formatRequiredArtifactRead(required);
 		if (!parsed) {
-			return `- ${required}: invalid required read name; expected source.artifact.`;
+			return `- ${label}: invalid required read; expected source.artifact or {source,artifact}.`;
 		}
 		const source = options.sources.find(
 			(candidate) => candidate.source === parsed.source,
 		);
 		const artifact = source?.artifacts?.[parsed.artifact];
 		if (!source || !artifact?.path) {
-			return `- ${required}: required artifact is not available in the source manifest.`;
+			return `- ${label}: required artifact is not available in the source manifest.`;
 		}
-		return `- ${required}: available via workflow_artifact read with source=${JSON.stringify(parsed.source)}, artifact=${JSON.stringify(parsed.artifact)}.`;
+		const projection = [
+			parsed.path === undefined ? undefined : `path=${parsed.path}`,
+			parsed.maxItems === undefined ? undefined : `maxItems=${parsed.maxItems}`,
+			parsed.maxChars === undefined ? undefined : `maxChars=${parsed.maxChars}`,
+			parsed.count === undefined ? undefined : `count=${parsed.count}`,
+		]
+			.filter(Boolean)
+			.join(", ");
+		return `- ${label}: available via workflow_artifact read with source=${JSON.stringify(parsed.source)}, artifact=${JSON.stringify(parsed.artifact)}${projection ? ` (${projection})` : ""}.`;
 	});
 	return [
 		"# Required Workflow Artifact Reads",
@@ -583,18 +607,38 @@ function formatRequiredArtifactReadReferences(options: {
 	].join("\n");
 }
 
-function parseRequiredArtifactRead(value: string): {
+function parseRequiredArtifactRead(value: ArtifactGraphRequiredRead): {
 	source: string;
 	artifact: keyof WorkflowSourceManifestSource["artifacts"];
+	path?: string;
+	maxChars?: number;
+	maxItems?: number;
+	count?: number;
 } | null {
-	const match = String(value).match(
-		/^([A-Za-z0-9_.-]+)\.(control|analysis|refs|raw)$/,
-	);
-	if (!match) return null;
+	if (typeof value === "string") {
+		const match = value.match(
+			/^([A-Za-z0-9_.-]+)\.(control|analysis|refs|raw)$/,
+		);
+		if (!match) return null;
+		return {
+			source: match[1] ?? "",
+			artifact: match[2] as keyof WorkflowSourceManifestSource["artifacts"],
+		};
+	}
 	return {
-		source: match[1] ?? "",
-		artifact: match[2] as keyof WorkflowSourceManifestSource["artifacts"],
+		source: value.source,
+		artifact: value.artifact as keyof WorkflowSourceManifestSource["artifacts"],
+		...(value.path === undefined ? {} : { path: value.path }),
+		...(value.maxChars === undefined ? {} : { maxChars: value.maxChars }),
+		...(value.maxItems === undefined ? {} : { maxItems: value.maxItems }),
+		...(value.count === undefined ? {} : { count: value.count }),
 	};
+}
+
+function formatRequiredArtifactRead(value: ArtifactGraphRequiredRead): string {
+	return typeof value === "string"
+		? value
+		: `${value.source}.${value.artifact}`;
 }
 
 export async function buildArtifactGraphSourceManifestSources(
@@ -883,7 +927,7 @@ export function sourceNameForTask(
 
 export function formatArtifactGraphSourceContext(
 	sources: readonly WorkflowSourceManifestSource[],
-	requiredReads: readonly string[],
+	requiredReads: readonly ArtifactGraphRequiredRead[],
 ): string {
 	return [
 		"# Workflow Artifact Inputs",
@@ -892,7 +936,9 @@ export function formatArtifactGraphSourceContext(
 		requiredReads.length > 0
 			? [
 					"Required reads before final output:",
-					...requiredReads.map((read) => `- ${read}`),
+					...requiredReads.map(
+						(read) => `- ${formatRequiredArtifactRead(read)}`,
+					),
 				].join("\n")
 			: "No hard requiredReads are declared for this stage.",
 		"Available sources:",
@@ -954,6 +1000,10 @@ export async function prepareArtifactGraphRetryTask(
 			].join("\n")
 		: (task.outputRetry?.message ?? "workflow output was invalid");
 
+	const readRetryHint =
+		preparedTask.artifactGraph?.artifactAccess === "none"
+			? undefined
+			: "If the retry is for missing required workflow_artifact reads, use workflow_artifact before the final answer. Prefer projected reads with path/maxItems/maxChars when only a JSON slice is needed.";
 	return {
 		...preparedTask,
 		cwd: task.cwd,
@@ -962,9 +1012,11 @@ export async function prepareArtifactGraphRetryTask(
 			"# Workflow Output Retry Instructions",
 			issueText,
 			"Return the final answer again using exactly <control>, <analysis>, and <refs> sections. The first byte must be '<' in <control>; do not include apologies, status text, Markdown headings, or prose outside the required sections.",
-			"If the retry is for missing required workflow_artifact reads, use workflow_artifact before the final answer. Prefer projected reads with path/maxItems/maxChars when only a JSON slice is needed.",
+			readRetryHint,
 			"# Previous Attempt Preview",
 			previousOutput.slice(0, 4000) || "(empty or unavailable)",
-		].join("\n\n"),
+		]
+			.filter(Boolean)
+			.join("\n\n"),
 	};
 }

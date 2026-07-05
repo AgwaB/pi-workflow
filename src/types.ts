@@ -186,6 +186,17 @@ export interface DynamicWorkflowStageSpec {
 	decisionLoop?: DynamicDecisionLoopSpec;
 }
 
+export interface ArtifactGraphRequiredReadSpec {
+	source: string;
+	artifact: WorkflowArtifactKind;
+	path?: string;
+	maxChars?: number;
+	maxItems?: number;
+	count?: number;
+}
+
+export type ArtifactGraphRequiredRead = string | ArtifactGraphRequiredReadSpec;
+
 export interface ArtifactGraphStageSpec {
 	id: string;
 	type?: ArtifactGraphStageType;
@@ -218,7 +229,7 @@ export interface ArtifactGraphStageSpec {
 		maxChars?: number;
 	};
 	inputPolicy?: {
-		requiredReads?: string[];
+		requiredReads?: ArtifactGraphRequiredRead[];
 		enforcement?: "fail";
 		artifactAccess?: "enabled" | "none";
 	};
@@ -501,7 +512,7 @@ export interface CompiledArtifactGraphTask {
 		maxDigestChars?: number;
 		partial?: { paths: string[] };
 	};
-	requiredReads: string[];
+	requiredReads: ArtifactGraphRequiredRead[];
 	artifactAccess: "enabled" | "none";
 	sourceProjection?: {
 		include?: string[];

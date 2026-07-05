@@ -193,6 +193,10 @@ import {
 	setSubagentLaunchControlsForTests,
 } from "../../.tmp/unit/subagent-backend.js";
 
+const UNIT_TEST_HOME = mkdtempSync(join(tmpdir(), "workflow-unit-home-"));
+process.env.HOME = UNIT_TEST_HOME;
+process.env.USERPROFILE = UNIT_TEST_HOME;
+
 setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
 
 function makeProject() {
@@ -7730,6 +7734,127 @@ test("artifact graph schema rejects unknown output fields and invalid required r
 		"$.artifactGraph.stages[1].inputPolicy.requiredReads[0]",
 		"artifact must be one of",
 	);
+
+	assert.doesNotThrow(() =>
+		parsePublicWorkflow(
+			artifactGraphWorkflowSpec({
+				artifactGraph: {
+					stages: [
+						{
+							id: "extract",
+							type: "single",
+							prompt: "Extract.",
+						},
+						{
+							id: "review",
+							type: "reduce",
+							from: ["extract"],
+							inputPolicy: {
+								requiredReads: [
+									{
+										source: "extract",
+										artifact: "control",
+										path: "$.items",
+										maxChars: 1000,
+										count: 1,
+									},
+								],
+							},
+							prompt: "Review.",
+						},
+					],
+				},
+			}),
+		),
+	);
+
+	const missingPathForProjection = assertThrowsFlow(() =>
+		parsePublicWorkflow(
+			artifactGraphWorkflowSpec({
+				artifactGraph: {
+					stages: [
+						{ id: "extract", type: "single", prompt: "Extract." },
+						{
+							id: "review",
+							type: "reduce",
+							from: ["extract"],
+							inputPolicy: {
+								requiredReads: [
+									{ source: "extract", artifact: "control", maxChars: 1000 },
+								],
+							},
+							prompt: "Review.",
+						},
+					],
+				},
+			}),
+		),
+	);
+	assertIssue(
+		missingPathForProjection,
+		"$.artifactGraph.stages[1].inputPolicy.requiredReads[0]",
+		"path is required",
+	);
+
+	const invalidProjectionPath = assertThrowsFlow(() =>
+		parsePublicWorkflow(
+			artifactGraphWorkflowSpec({
+				artifactGraph: {
+					stages: [
+						{ id: "extract", type: "single", prompt: "Extract." },
+						{
+							id: "review",
+							type: "reduce",
+							from: ["extract"],
+							inputPolicy: {
+								requiredReads: [
+									{
+										source: "extract",
+										artifact: "control",
+										path: "$.items[0]",
+									},
+								],
+							},
+							prompt: "Review.",
+						},
+					],
+				},
+			}),
+		),
+	);
+	assertIssue(
+		invalidProjectionPath,
+		"$.artifactGraph.stages[1].inputPolicy.requiredReads[0].path",
+		"simple dot JSON path",
+	);
+
+	const markdownProjection = assertThrowsFlow(() =>
+		parsePublicWorkflow(
+			artifactGraphWorkflowSpec({
+				artifactGraph: {
+					stages: [
+						{ id: "extract", type: "single", prompt: "Extract." },
+						{
+							id: "review",
+							type: "reduce",
+							from: ["extract"],
+							inputPolicy: {
+								requiredReads: [
+									{ source: "extract", artifact: "analysis", path: "$.items" },
+								],
+							},
+							prompt: "Review.",
+						},
+					],
+				},
+			}),
+		),
+	);
+	assertIssue(
+		markdownProjection,
+		"$.artifactGraph.stages[1].inputPolicy.requiredReads[0].artifact",
+		"JSON artifacts",
+	);
 });
 
 test("artifact graph schema enforces launch-time invariants", () => {
@@ -8096,7 +8221,13 @@ test("bundled deep-research compacts audit packets before executive final", asyn
 	assert.equal(finalAudit?.kind, "reduce");
 	assert.deepEqual(finalAudit.dependsOn, ["final-audit-packet.main"]);
 	assert.deepEqual(finalAudit.artifactGraph.requiredReads, [
-		"final-audit-packet.control",
+		{
+			source: "final-audit-packet",
+			artifact: "control",
+			path: "$.packet.synthesisInput",
+			maxChars: 24000,
+			count: 1,
+		},
 	]);
 	assert.equal(finalAudit.artifactGraph.sourceProjection, undefined);
 	assert.match(finalAudit.compiledPrompt, /synthesis overlay/);
@@ -8205,8 +8336,13 @@ test("artifactAccess none omits workflow artifact runtime affordances", async ()
 			roleNames: [],
 			cwd,
 			runtime: {
-				tools: ["workflow_web_source_read"],
-				toolProviders: {},
+				tools: ["workflow_web_source_read", "workflow_artifact"],
+				toolProviders: {
+					workflow_artifact: {
+						classification: "read-only",
+						extensions: ["stale-wrapper.ts"],
+					},
+				},
 			},
 			compiledPrompt: "Verify only.",
 			artifactGraph: {
@@ -8245,6 +8381,67 @@ test("artifactAccess none omits workflow artifact runtime affordances", async ()
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
+});
+
+test("artifactAccess none rejects explicit workflow_artifact tools", () => {
+	assert.throws(
+		() =>
+			parsePublicWorkflow({
+				schemaVersion: 1,
+				name: "invalid-artifact-access-tools",
+				artifactGraph: {
+					stages: [
+						{
+							id: "verify",
+							type: "single",
+							tools: ["workflow_artifact"],
+							inputPolicy: { artifactAccess: "none" },
+							output: { analysis: { required: true } },
+							prompt: "Verify without artifact access.",
+						},
+					],
+				},
+			}),
+		/error|workflow_artifact|artifactAccess/i,
+	);
+});
+
+test("artifactAccess rejects dynamic and support stage policy scope", () => {
+	assert.throws(
+		() =>
+			parsePublicWorkflow({
+				schemaVersion: 1,
+				name: "invalid-dynamic-artifact-access",
+				artifactGraph: {
+					stages: [
+						{
+							id: "decide",
+							type: "dynamic",
+							dynamic: { uses: "./helpers/controller.mjs" },
+							inputPolicy: { artifactAccess: "none" },
+						},
+					],
+				},
+			}),
+		/error|artifactAccess|dynamic/i,
+	);
+	assert.throws(
+		() =>
+			parsePublicWorkflow({
+				schemaVersion: 1,
+				name: "invalid-support-artifact-access",
+				artifactGraph: {
+					stages: [
+						{
+							id: "support-packet",
+							support: { uses: "./helpers/support.mjs" },
+							inputPolicy: { artifactAccess: "none" },
+						},
+					],
+				},
+			}),
+		/error|artifactAccess|support/i,
+	);
 });
 
 test("ambient runtime defaults do not override bundled stage thinking pins", async () => {
@@ -12392,6 +12589,12 @@ test("bundled artifact graph workflows are public runnable", async () => {
 			name,
 		);
 	}
+	assert(
+		!workflows.some(
+			(workflow) => workflow.name === "batched-verification.spec",
+		),
+		"path-ref-only batched variant must not be listed as a bundled workflow name",
+	);
 	const resolved = await resolveWorkflowRef("spec-review", process.cwd());
 	assert(resolved.specPath.endsWith("workflows/spec-review/spec.json"));
 });
@@ -16310,12 +16513,31 @@ test("workflow run metrics roll up provider-reported usage without mutation", ()
 		true,
 	);
 	assert.deepEqual(metrics.metadata.usageUnavailableTaskIds, ["task-c"]);
+	assert.deepEqual(
+		metrics.metadata.usageMissingMetricsByTask.find(
+			(entry) => entry.taskId === "task-b",
+		).metrics,
+		["outputTokens", "costUsd"],
+	);
 	assert.deepEqual(metrics.metadata.launchTimingUnavailableTaskIds, ["task-c"]);
+	assert.deepEqual(
+		metrics.metadata.launchTimingMissingMetricsByTask.find(
+			(entry) => entry.taskId === "task-b",
+		).metrics,
+		["launchDurationMs", "launchSlotReleaseDelayMs"],
+	);
 	assert.equal(metrics.totals.statusCounts.completed, 2);
 	assert.equal(metrics.totals.statusCounts.skipped, 1);
 	assert.equal(metrics.totals.usage.inputTokens, null);
 	assert.equal(metrics.totals.usage.outputTokens, null);
 	assert.equal(metrics.totals.usage.costUsd, null);
+	assert.equal(metrics.totals.usage.observed.inputTokens, 3);
+	assert.equal(metrics.totals.usage.observed.costUsd, 0);
+	assert.deepEqual(metrics.totals.usage.observed.contributingTaskIds, [
+		"task-a",
+		"task-b",
+	]);
+	assert.deepEqual(metrics.totals.usage.observed.omittedTaskIds, ["task-c"]);
 	assert.equal(metrics.totals.usage.attempts, 2);
 	assert.equal(metrics.totals.launchTiming.launchWaitMs, null);
 	assert.equal(metrics.totals.launchTiming.launchDurationMs, null);
@@ -16335,6 +16557,131 @@ test("workflow run metrics roll up provider-reported usage without mutation", ()
 	const execute = metrics.byStage.find((stage) => stage.stageId === "execute");
 	assert.equal(execute.usage.unavailable, true);
 	assert.equal(execute.usage.inputTokens, null);
+});
+
+test("workflow run metrics reject negative provider values and keep partial observed sums separate", () => {
+	const run = {
+		schemaVersion: 1,
+		runId: "metrics_negative_run",
+		type: WORKFLOW_RUN_TYPE,
+		status: "completed",
+		taskSummary: {
+			pending: 0,
+			running: 0,
+			blocked: 0,
+			completed: 2,
+			failed: 0,
+			skipped: 0,
+			interrupted: 0,
+			total: 2,
+		},
+		cwd: "/tmp/metrics",
+		backend: { type: "local-pi", mode: "headless" },
+		createdAt: "2026-06-08T00:00:00.000Z",
+		updatedAt: "2026-06-08T00:01:00.000Z",
+		specPath: "/tmp/metrics/workflow.json",
+		tasks: [
+			{
+				taskId: "task-good",
+				specId: "good",
+				displayName: "Good",
+				agent: "worker",
+				agentFile: "agents/worker.md",
+				roles: [],
+				status: "completed",
+				statusDetail: "completed",
+				runtime: { approvalMode: "never" },
+				cwd: "/tmp/metrics",
+				worktree: {
+					enabled: false,
+					path: null,
+					branch: null,
+					baseCwd: null,
+					warning: null,
+				},
+				backendTaskId: "backend-good",
+				files: {
+					output: "",
+					stderr: "",
+					result: "",
+					systemPrompt: "",
+					taskPrompt: "",
+				},
+				usage: {
+					source: "pi-subagent",
+					capturedAt: "2026-06-08T00:00:30.000Z",
+					aggregate: {
+						attempts: 1,
+						inputTokens: 10,
+						outputTokens: 5,
+						totalTokens: 15,
+						cachedInputTokens: 0,
+						cacheCreationInputTokens: 0,
+						cacheReadInputTokens: 0,
+						reasoningTokens: 0,
+						costUsd: 0.02,
+					},
+				},
+			},
+			{
+				taskId: "task-negative",
+				specId: "negative",
+				displayName: "Negative",
+				agent: "worker",
+				agentFile: "agents/worker.md",
+				roles: [],
+				status: "completed",
+				statusDetail: "completed",
+				runtime: { approvalMode: "never" },
+				cwd: "/tmp/metrics",
+				worktree: {
+					enabled: false,
+					path: null,
+					branch: null,
+					baseCwd: null,
+					warning: null,
+				},
+				backendTaskId: "backend-negative",
+				files: {
+					output: "",
+					stderr: "",
+					result: "",
+					systemPrompt: "",
+					taskPrompt: "",
+				},
+				usage: {
+					source: "pi-subagent",
+					capturedAt: "2026-06-08T00:00:45.000Z",
+					aggregate: {
+						attempts: 1,
+						inputTokens: -1,
+						outputTokens: 1,
+						totalTokens: 0,
+						cachedInputTokens: 0,
+						cacheCreationInputTokens: 0,
+						cacheReadInputTokens: 0,
+						reasoningTokens: 0,
+						costUsd: -0.01,
+					},
+				},
+			},
+		],
+	};
+	const metrics = buildWorkflowRunMetrics(run);
+	assert.equal(
+		metrics.byTask.find((task) => task.taskId === "task-negative").usage
+			.inputTokens,
+		null,
+	);
+	assert.equal(
+		metrics.byTask.find((task) => task.taskId === "task-negative").usage
+			.costUsd,
+		null,
+	);
+	assert.equal(metrics.totals.usage.inputTokens, null);
+	assert.equal(metrics.totals.usage.costUsd, null);
+	assert.equal(metrics.totals.usage.observed.inputTokens, 10);
+	assert.equal(metrics.totals.usage.observed.costUsd, 0.02);
 });
 
 test("workflow run metrics do not infer missing prices from token counts", () => {
@@ -23457,6 +23804,11 @@ test("deep-research verifier schemas separate default single-row and batched res
 		schema,
 	);
 	assert.equal(invalidNumericId.valid, false);
+	const strayRootKey = validateJsonSchema(
+		{ ...singleRow, extraVerifierNarrative: "not part of the contract" },
+		schema,
+	);
+	assert.equal(strayRootKey.valid, false);
 	const camelCaseStatus = validateJsonSchema(
 		{
 			schema: "./schemas/deep-research-verify-claims-control.schema.json",
@@ -23753,6 +24105,142 @@ test("deep-research verification batch planner preserves ids and source hints", 
 		"claim-002",
 		"claim-003",
 	]);
+});
+
+test("deep-research verification batch planner honors empty sanitizer and avoids fallback id collisions", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"batch-verification-candidates.mjs",
+	);
+	const helper = (
+		await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)
+	).default;
+	const emptySanitized = await helper({
+		sources: {
+			"sanitize-claims.main": {
+				claimInventory: { verificationCandidates: [] },
+			},
+			"normalize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [{ id: "claim-should-not-run" }],
+				},
+			},
+		},
+	});
+	assert.equal(emptySanitized.candidateCount, 0);
+	assert.equal(emptySanitized.batchCount, 0);
+
+	const withFallbackCollision = await helper({
+		sources: {
+			"normalize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [
+						{ id: "candidate-001", claim: "Explicit id." },
+						{ claim: "Fallback id must not collide." },
+					],
+				},
+			},
+		},
+	});
+	assert.deepEqual(
+		withFallbackCollision.batches.flatMap((batch) => batch.claimIds).sort(),
+		["candidate-001", "candidate-002"],
+	);
+});
+
+test("deep-research shadow selector tolerates malformed candidate entries", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"shadow-select-verification.mjs",
+	);
+	const helper = (
+		await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)
+	).default;
+	const out = await helper({
+		sources: {
+			"sanitize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [null, { id: "claim-001", claim: "Safe." }],
+				},
+			},
+			"audit-claims.main": { auditedClaims: [] },
+		},
+	});
+	assert.equal(out.candidateCount, 2);
+	assert.deepEqual(
+		out.decisions.map((decision) => decision.id),
+		["candidate-001", "claim-001"],
+	);
+});
+
+test("deep-research claim-evidence-gate blocks unattributed batch rows without source status context", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"claim-evidence-gate.mjs",
+	);
+	const helper = (
+		await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)
+	).default;
+	const out = await helper({
+		sources: {
+			"sanitize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [
+						{
+							id: "claim-a",
+							claim: "Claim A belongs to batch one.",
+							sourceRefs: ["wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+						},
+					],
+				},
+			},
+			"verification-batches.main": {
+				batches: [{ id: "vbatch-001", claimIds: ["claim-a"] }],
+			},
+			"verify-claims": {
+				schema: "deep-research-verify-claims-batch-v1",
+				digest: "unattributed bare source row",
+				results: [
+					{
+						id: "claim-a",
+						status: "verified",
+						verdictDigest: {
+							support: "must not join without batch attribution",
+						},
+						evidence: [
+							{
+								sourceRef: "wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+								quote: "Claim A belongs to batch one.",
+							},
+						],
+					},
+				],
+			},
+		},
+		options: { requireFetchedEvidenceForVerified: true },
+	});
+	assert.equal(out.gateSummary.invalidVerifierRows, 1);
+	assert.equal(out.gateSummary.missingVerifierResults, 1);
+	assert.deepEqual(
+		out.invalidVerifierRows.map((row) => row.reason),
+		["unknown_verification_batch_id"],
+	);
+	assert.deepEqual(out.statusPartitions.verified, []);
 });
 
 test("deep-research claim-evidence-gate canonicalizes candidate ids and verifier integrity", async () => {
@@ -24818,7 +25306,15 @@ test("artifact graph workflow runs workflow artifacts and enforces required read
 									maxChars: 200,
 								},
 								inputPolicy: {
-									requiredReads: ["analyze.analysis"],
+									requiredReads: [
+										{
+											source: "analyze",
+											artifact: "control",
+											path: "$.control.items",
+											maxChars: 200,
+											count: 1,
+										},
+									],
 									enforcement: "fail",
 								},
 								prompt: "Finalize.",
@@ -24845,6 +25341,7 @@ test("artifact graph workflow runs workflow artifacts and enforces required read
 				);
 				mkdirSync(artifactDir, { recursive: true });
 				const isFinal = launchCount === 2;
+				const attemptStartedAt = new Date(Date.now() - 1000).toISOString();
 				if (isFinal) {
 					const [workflowRunId, taskId] = String(options.correlationId).split(
 						":",
@@ -24873,17 +25370,36 @@ test("artifact graph workflow runs workflow artifacts and enforces required read
 					assert.doesNotMatch(String(options.task), /Detailed analysis\./);
 					writeFileSync(
 						ledgerPath,
-						`${JSON.stringify({
-							schema: "workflow-artifact-read-v1",
-							runId: workflowRunId,
-							taskId,
-							source: "analyze",
-							artifact: "analysis",
-							at: new Date().toISOString(),
-							bytes: 18,
-							returnedBytes: 18,
-							truncated: false,
-						})}\n`,
+						[
+							{
+								schema: "workflow-artifact-read-v1",
+								runId: workflowRunId,
+								taskId,
+								source: "analyze",
+								artifact: "control",
+								at: "2000-01-01T00:00:00.000Z",
+								bytes: 18,
+								returnedBytes: 18,
+								truncated: false,
+								path: "$.items",
+								maxChars: 200,
+							},
+							{
+								schema: "workflow-artifact-read-v1",
+								runId: workflowRunId,
+								taskId,
+								source: "analyze",
+								artifact: "control",
+								at: new Date().toISOString(),
+								bytes: 18,
+								returnedBytes: 18,
+								truncated: false,
+								path: "$.items",
+								maxChars: 200,
+							},
+						]
+							.map((record) => JSON.stringify(record))
+							.join("\n") + "\n",
 					);
 				}
 				const control = isFinal
@@ -24913,7 +25429,7 @@ test("artifact graph workflow runs workflow artifacts and enforces required read
 					JSON.stringify({
 						status: "completed",
 						completedAt: new Date().toISOString(),
-						startedAt: new Date().toISOString(),
+						startedAt: attemptStartedAt,
 						exitCode: 0,
 					}),
 				);
@@ -24981,7 +25497,10 @@ test("artifact graph workflow runs workflow artifacts and enforces required read
 		const finalTaskPrompt = readFileSync(join(finalDir, "task.md"), "utf8");
 		assert.ok(finalTaskPrompt.includes("Required reads before final output"));
 		assert.ok(finalTaskPrompt.includes("# Required Workflow Artifact Reads"));
-		assert.ok(finalTaskPrompt.includes("- analyze.analysis:"));
+		assert.ok(finalTaskPrompt.includes("- analyze.control:"));
+		assert.ok(finalTaskPrompt.includes("path=$.control.items"));
+		assert.ok(finalTaskPrompt.includes("maxChars=200"));
+		assert.ok(finalTaskPrompt.includes("count=1"));
 		assert.doesNotMatch(finalTaskPrompt, /Detailed analysis\./);
 		const finalManifest = JSON.parse(
 			readFileSync(join(finalDir, "source-manifest.json"), "utf8"),

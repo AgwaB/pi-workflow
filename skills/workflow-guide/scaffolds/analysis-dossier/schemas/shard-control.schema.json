@@ -1,0 +1,60 @@
+{
+  "type": "object",
+  "required": ["shardId", "sourceId", "axis", "observations", "keywords", "coverage"],
+  "additionalProperties": true,
+  "properties": {
+    "shardId": { "type": "string" },
+    "sourceId": { "type": "string" },
+    "axis": { "type": "string" },
+    "observations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["claim", "evidence", "confidence"],
+        "additionalProperties": true,
+        "properties": {
+          "claim": { "type": "string" },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["file"],
+              "additionalProperties": true,
+              "properties": {
+                "file": { "type": "string" },
+                "lineStart": { "type": "number" },
+                "lineEnd": { "type": "number" },
+                "symbol": { "type": "string" },
+                "quote": { "type": "string" }
+              }
+            }
+          },
+          "confidence": { "type": "string", "enum": ["high", "medium", "low"] }
+        }
+      }
+    },
+    "keywords": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "openQuestions": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "coverage": {
+      "type": "object",
+      "required": ["pathsInspected"],
+      "additionalProperties": true,
+      "properties": {
+        "pathsInspected": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "anyPathsSkipped": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    }
+  }
+}
