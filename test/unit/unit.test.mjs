@@ -27227,6 +27227,27 @@ test("structured required read policy enforces projection ledger rows separately
 		);
 		assert.match(truncatedFailed.projectionFailures[0], /mustNotTruncate=true/);
 
+		// mustNotTruncate is always enforced: a truncated read fails the projection
+		// even when the policy does NOT set mustNotTruncate. The only matching ledger
+		// row for $.items at maxChars=200 is truncated, so the read must be rejected.
+		const truncatedFailsWithoutFlag = await checkRequiredArtifactReads(
+			taskDir,
+			[],
+			[
+				{
+					source: "plan",
+					artifact: "control",
+					path: "$.items",
+					maxChars: 200,
+				},
+			],
+		);
+		assert.deepEqual(truncatedFailsWithoutFlag.missing, []);
+		assert.match(
+			truncatedFailsWithoutFlag.projectionFailures[0],
+			/path=\$\.items/,
+		);
+
 		const minReturnedBytesFailed = await checkRequiredArtifactReads(
 			taskDir,
 			[],
@@ -28539,6 +28560,97 @@ test("cleanupSubagentRun releases global live model worker cap keys", async () =
 		]);
 		assert.equal(secondLaunch.kind, "launched");
 		assert.equal(launches, 2);
+	} finally {
+		setSubagentApiForTests(undefined);
+		setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
+		if (originalLaunchLimit === undefined)
+			delete process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES;
+		else process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES = originalLaunchLimit;
+		if (originalLiveLimit === undefined)
+			delete process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS;
+		else process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS = originalLiveLimit;
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("fail-fast cleanup releases the global live model worker cap slot for other runs", async () => {
+	// Cross-interaction guard: fail-fast cancellation must not leak the live-model
+	// worker-cap slot. This is the untested interaction class that let PB1 slip
+	// through. With the cap at 1, a first run occupies the only slot; a second
+	// fail-fast run that interrupts+cleans up must free that slot so a third run
+	// can launch without hanging.
+	const cwd = makeProject();
+	const originalLaunchLimit = process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES;
+	const originalLiveLimit = process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS;
+	process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES = "2";
+	process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS = "1";
+	setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
+	const interrupts = [];
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		let launches = 0;
+		setSubagentApiForTests({
+			async runSubagent() {
+				launches += 1;
+				return {
+					runId: `run_ff_cap_${launches}`,
+					attemptId: `attempt_ff_cap_${launches}`,
+					status: "running",
+				};
+			},
+			async getSubagentStatus() {
+				return null;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent(options) {
+				interrupts.push(options);
+				return {};
+			},
+		});
+
+		// First run occupies the single global worker-cap slot.
+		const occupying = makeSubagentLaunchFixture(cwd, "ff_cap_occupying");
+		assert.equal(
+			(
+				await launchSubagentTask(
+					cwd,
+					occupying.run,
+					occupying.task,
+					occupying.compiledTask,
+				)
+			).kind,
+			"launched",
+		);
+		assert.equal(launches, 1);
+
+		// A fail-fast run with a running child that holds a backend handle; cleanup
+		// must interrupt it and release its worker-cap slot.
+		const { run: failFastRun } = await createFailFastPolicyRun(cwd, {
+			failFast: true,
+			cancelSiblingsOnFailure: true,
+			cancelDescendantsOnParentFailure: true,
+		});
+		await cleanupSubagentRun(cwd, failFastRun);
+		assert.ok(
+			interrupts.some((entry) => entry.runId === "child-running"),
+			"fail-fast cleanup did not interrupt the running child",
+		);
+
+		// Release the occupying run's slot as well, then a fresh run must be able to
+		// launch without being blocked by a leaked slot.
+		await cleanupSubagentRun(cwd, occupying.run);
+		const third = makeSubagentLaunchFixture(cwd, "ff_cap_third");
+		const thirdLaunch = await Promise.race([
+			launchSubagentTask(cwd, third.run, third.task, third.compiledTask),
+			sleep(250).then(() => {
+				throw new Error(
+					"fail-fast cleanup leaked the global worker-cap slot",
+				);
+			}),
+		]);
+		assert.equal(thirdLaunch.kind, "launched");
 	} finally {
 		setSubagentApiForTests(undefined);
 		setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });

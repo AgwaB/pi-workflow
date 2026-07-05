@@ -24,6 +24,34 @@ const RESERVED_WORKFLOW_FILES = new Set([
 	"index.json",
 	"index-supervisor-error.json",
 ]);
+const SPEC_SCAN_CONCURRENCY = 16;
+
+// Order-preserving bounded-concurrency map: keeps result[i] aligned with
+// items[i] while capping simultaneous filesystem operations so large workflow
+// roots do not spawn an unbounded Promise.all fan-out.
+async function mapBounded<T, R>(
+	items: readonly T[],
+	limit: number,
+	worker: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+	const results = new Array<R>(items.length);
+	let nextIndex = 0;
+	const workerCount = Math.min(
+		Math.max(1, Math.floor(limit)),
+		items.length || 1,
+	);
+	await Promise.all(
+		Array.from({ length: workerCount }, async () => {
+			while (true) {
+				const index = nextIndex;
+				nextIndex += 1;
+				if (index >= items.length) return;
+				results[index] = await worker(items[index]!, index);
+			}
+		}),
+	);
+	return results;
+}
 export interface ResolvedWorkflowSpecRef {
 	inputRef: string;
 	specPath: string;
@@ -217,15 +245,16 @@ async function listSpecFiles(root: string): Promise<string[]> {
 		.filter((entry) => entry.isFile() && isSpecFileName(entry.name))
 		.map((entry) => join(root, entry.name));
 
-	const bundleSpecs = await Promise.all(
-		entries
-			.filter((entry) => entry.isDirectory())
-			.map(async (entry) => {
-				const bundleRoot = join(root, entry.name);
-				if (await isWorkflowRunStateDirectory(bundleRoot)) return null;
-				const bundleSpec = join(bundleRoot, "spec.json");
-				return (await isFile(bundleSpec)) ? bundleSpec : null;
-			}),
+	const directoryEntries = entries.filter((entry) => entry.isDirectory());
+	const bundleSpecs = await mapBounded(
+		directoryEntries,
+		SPEC_SCAN_CONCURRENCY,
+		async (entry) => {
+			const bundleRoot = join(root, entry.name);
+			if (await isWorkflowRunStateDirectory(bundleRoot)) return null;
+			const bundleSpec = join(bundleRoot, "spec.json");
+			return (await isFile(bundleSpec)) ? bundleSpec : null;
+		},
 	);
 
 	return await filterRunnableSpecFiles([
@@ -237,8 +266,10 @@ async function listSpecFiles(root: string): Promise<string[]> {
 async function filterRunnableSpecFiles(
 	files: readonly string[],
 ): Promise<string[]> {
-	const checked = await Promise.all(
-		files.map(async (file) => ((await isRunnableSpecFile(file)) ? file : null)),
+	const checked = await mapBounded(
+		files,
+		SPEC_SCAN_CONCURRENCY,
+		async (file) => ((await isRunnableSpecFile(file)) ? file : null),
 	);
 	return checked.filter((file): file is string => file !== null);
 }
