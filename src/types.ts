@@ -648,6 +648,7 @@ export interface WorkflowTaskTimingAttemptRecord {
 	launchCompletedAt?: string;
 	launchWaitMs?: number;
 	launchDurationMs?: number;
+	waiting_for_global_worker_slot?: boolean;
 	executionStartedAt?: string;
 	executionCompletedAt?: string;
 	executionMs?: number | null;
@@ -671,6 +672,7 @@ export interface WorkflowTaskTimingRecord {
 	launchCompletedAt?: string;
 	launchWaitMs?: number;
 	launchDurationMs?: number;
+	waiting_for_global_worker_slot?: boolean;
 	launchSlotReleaseDelayMs?: number;
 	executionStartedAt?: string;
 	executionCompletedAt?: string;

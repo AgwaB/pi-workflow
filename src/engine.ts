@@ -841,6 +841,7 @@ async function scheduleDagPass(
 			compiledFlow,
 			index,
 			options,
+			leaseSignal,
 		);
 		assertScheduleLeaseActive(leaseSignal);
 		if (launched && run.tasks[index]?.status === "running") running += 1;
@@ -1401,6 +1402,7 @@ async function launchPendingTaskAt(
 	compiledFlow: CompiledWorkflow,
 	index: number,
 	options: WorkflowScheduleOptions = {},
+	leaseSignal?: AbortSignal,
 ): Promise<boolean> {
 	const task = run.tasks[index];
 	if (!task || task.status !== "pending") return false;
@@ -1447,10 +1449,13 @@ async function launchPendingTaskAt(
 			run,
 			task,
 			worktreeLaunchTask,
+			leaseSignal,
 		);
 		if (launch.kind === "fatal") throw new Error(launch.message);
+		if (launch.kind === "capacity") return false;
 		return launch.kind === "launched";
 	} catch (error) {
+		if (leaseSignal?.aborted) throw error;
 		const statusDetail = !prepareComplete
 			? "prepare_failed"
 			: launchTask?.kind === "support"

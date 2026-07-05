@@ -187,6 +187,7 @@ import {
 import { registerWorkflowWebSourceExtension } from "../../.tmp/unit/workflow-web-source-extension.js";
 import { validateJsonSchema } from "../../.tmp/unit/json-schema.js";
 import {
+	cleanupSubagentRun,
 	launchSubagentTask,
 	refreshRunFromSubagentArtifacts,
 	setSubagentApiForTests,
@@ -601,6 +602,78 @@ test("dynamic controller engine guard reports stale missing runDecisionLoop wiri
 		},
 	);
 });
+
+function makeSubagentLaunchFixture(cwd, suffix) {
+	const now = new Date().toISOString();
+	const task = {
+		taskId: "task-1",
+		specId: `launch-${suffix}.main`,
+		displayName: `launch-${suffix}.main`,
+		agent: "unit-scout",
+		agentFile: ".pi/agents/unit-scout.md",
+		roles: [],
+		status: "pending",
+		statusDetail: "pending",
+		runtime: { approvalMode: "non-interactive" },
+		cwd,
+		worktree: {
+			enabled: false,
+			path: null,
+			branch: null,
+			baseCwd: null,
+			warning: null,
+		},
+		backendTaskId: "",
+		files: {
+			systemPrompt: `.pi/workflows/workflow_launch_${suffix}/tasks/task-1/system.md`,
+			taskPrompt: `.pi/workflows/workflow_launch_${suffix}/tasks/task-1/task.md`,
+			output: `.pi/workflows/workflow_launch_${suffix}/tasks/task-1/output.log`,
+			stderr: `.pi/workflows/workflow_launch_${suffix}/tasks/task-1/stderr.log`,
+			result: `.pi/workflows/workflow_launch_${suffix}/tasks/task-1/result.json`,
+		},
+	};
+	const run = {
+		schemaVersion: 1,
+		runId: `workflow_launch_${suffix}`,
+		type: WORKFLOW_RUN_TYPE,
+		status: "running",
+		taskSummary: {
+			pending: 1,
+			running: 0,
+			blocked: 0,
+			completed: 0,
+			failed: 0,
+			skipped: 0,
+			interrupted: 0,
+			total: 1,
+		},
+		cwd,
+		backend: { type: "local-pi", mode: "headless" },
+		createdAt: now,
+		updatedAt: now,
+		specPath: "workflow.json",
+		tasks: [task],
+	};
+	const compiledTask = {
+		id: `launch-${suffix}.main`,
+		agent: "unit-scout",
+		agentPath: ".pi/agents/unit-scout.md",
+		agentSystemPrompt: "Launch agent.",
+		roleNames: [],
+		task: "Do the work.",
+		cwd,
+		explicitCwd: false,
+		explicitWorktreePolicy: false,
+		runtime: {
+			fast: "off",
+			approvalMode: "non-interactive",
+			tools: ["read"],
+		},
+		safety: { capability: "read-only", reason: "test" },
+		compiledPrompt: "Launch prompt.",
+	};
+	return { run, task, compiledTask };
+}
 
 function captureSubagentPrompts(prompts = []) {
 	let launchCount = 0;
@@ -26289,6 +26362,434 @@ test("subagent launch gate honors env override and recovers slots after throw", 
 		else
 			process.env.PI_WORKFLOW_LAUNCH_SLOT_RELEASE_DELAY_MS =
 				originalReleaseDelay;
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("subagent launch slot wait abort removes queued waiter", async () => {
+	const cwd = makeProject();
+	const originalLaunchLimit = process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES;
+	const originalLiveLimit = process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS;
+	process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES = "1";
+	delete process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS;
+	setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		let launches = 0;
+		const releases = [];
+		setSubagentApiForTests({
+			async runSubagent() {
+				launches += 1;
+				await new Promise((resolve) => releases.push(resolve));
+				return {
+					runId: `run_abort_queued_${launches}`,
+					attemptId: `attempt_abort_queued_${launches}`,
+					status: "running",
+				};
+			},
+		});
+		const first = makeSubagentLaunchFixture(cwd, "abort_queued_first");
+		const second = makeSubagentLaunchFixture(cwd, "abort_queued_second");
+		const firstLaunch = launchSubagentTask(
+			cwd,
+			first.run,
+			first.task,
+			first.compiledTask,
+		);
+		await eventually(() => assert.equal(releases.length, 1));
+		const controller = new AbortController();
+		const secondLaunch = launchSubagentTask(
+			cwd,
+			second.run,
+			second.task,
+			second.compiledTask,
+			controller.signal,
+		);
+		await eventually(() => assert.ok(second.task.timing?.launchQueuedAt));
+		await sleep(50);
+		controller.abort(new Error("lease lost while queued"));
+		await assert.rejects(secondLaunch, /lease lost while queued/);
+		assert.equal(launches, 1);
+		releases.shift()();
+		await firstLaunch;
+
+		setSubagentApiForTests({
+			async runSubagent() {
+				launches += 1;
+				return {
+					runId: `run_abort_queued_${launches}`,
+					attemptId: `attempt_abort_queued_${launches}`,
+					status: "running",
+				};
+			},
+		});
+		const third = makeSubagentLaunchFixture(cwd, "abort_queued_third");
+		await Promise.race([
+			launchSubagentTask(cwd, third.run, third.task, third.compiledTask),
+			sleep(250).then(() => {
+				throw new Error("launch slot leaked after queued abort");
+			}),
+		]);
+		assert.equal(launches, 2);
+	} finally {
+		setSubagentApiForTests(undefined);
+		setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
+		if (originalLaunchLimit === undefined)
+			delete process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES;
+		else process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES = originalLaunchLimit;
+		if (originalLiveLimit === undefined)
+			delete process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS;
+		else process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS = originalLiveLimit;
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("subagent launch slot abort after acquisition releases slot before action", async () => {
+	const cwd = makeProject();
+	const originalLaunchLimit = process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES;
+	const originalLiveLimit = process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS;
+	process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES = "1";
+	delete process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS;
+	const controller = new AbortController();
+	let slotAcquisitions = 0;
+	let resolveSecondAcquired;
+	const secondAcquired = new Promise((resolve) => {
+		resolveSecondAcquired = resolve;
+	});
+	setSubagentLaunchControlsForTests({
+		releaseDelayMs: 0,
+		retryJitterMs: 0,
+		onLaunchSlotAcquired: () => {
+			slotAcquisitions += 1;
+			if (slotAcquisitions === 2) {
+				resolveSecondAcquired();
+				controller.abort(new Error("lease lost after acquire"));
+			}
+		},
+	});
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		let launches = 0;
+		let releaseFirst;
+		setSubagentApiForTests({
+			async runSubagent() {
+				launches += 1;
+				if (launches === 1) {
+					await new Promise((resolve) => {
+						releaseFirst = resolve;
+					});
+				}
+				return {
+					runId: `run_abort_acquired_${launches}`,
+					attemptId: `attempt_abort_acquired_${launches}`,
+					status: "running",
+				};
+			},
+		});
+		const first = makeSubagentLaunchFixture(cwd, "abort_acquired_first");
+		const second = makeSubagentLaunchFixture(cwd, "abort_acquired_second");
+		const firstLaunch = launchSubagentTask(
+			cwd,
+			first.run,
+			first.task,
+			first.compiledTask,
+		);
+		await eventually(() => assert.equal(typeof releaseFirst, "function"));
+		const secondLaunch = launchSubagentTask(
+			cwd,
+			second.run,
+			second.task,
+			second.compiledTask,
+			controller.signal,
+		);
+		await eventually(() =>
+			assert.match(second.task.lastMessage, /launch slot/),
+		);
+		releaseFirst();
+		await Promise.race([
+			secondAcquired,
+			sleep(250).then(() => {
+				throw new Error("second launch slot was not acquired before abort");
+			}),
+		]);
+		await assert.rejects(secondLaunch, /lease lost after acquire/);
+		await firstLaunch;
+		assert.equal(slotAcquisitions, 2);
+		assert.equal(launches, 1);
+
+		const third = makeSubagentLaunchFixture(cwd, "abort_acquired_third");
+		await Promise.race([
+			launchSubagentTask(cwd, third.run, third.task, third.compiledTask),
+			sleep(250).then(() => {
+				throw new Error("launch slot leaked after acquired abort");
+			}),
+		]);
+		assert.equal(launches, 2);
+	} finally {
+		setSubagentApiForTests(undefined);
+		setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
+		if (originalLaunchLimit === undefined)
+			delete process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES;
+		else process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES = originalLaunchLimit;
+		if (originalLiveLimit === undefined)
+			delete process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS;
+		else process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS = originalLiveLimit;
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("global live model worker cap unset does not gate launches", async () => {
+	const cwd = makeProject();
+	const originalLaunchLimit = process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES;
+	const originalLiveLimit = process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS;
+	process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES = "2";
+	delete process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS;
+	setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		let active = 0;
+		let maxActive = 0;
+		const releases = [];
+		setSubagentApiForTests({
+			async runSubagent() {
+				active += 1;
+				maxActive = Math.max(maxActive, active);
+				await new Promise((resolve) => releases.push(resolve));
+				active -= 1;
+				return {
+					runId: `run_cap_unset_${maxActive}`,
+					attemptId: `attempt_cap_unset_${maxActive}`,
+					status: "running",
+				};
+			},
+		});
+		const first = makeSubagentLaunchFixture(cwd, "cap_unset_first");
+		const second = makeSubagentLaunchFixture(cwd, "cap_unset_second");
+		const launches = [
+			launchSubagentTask(cwd, first.run, first.task, first.compiledTask),
+			launchSubagentTask(cwd, second.run, second.task, second.compiledTask),
+		];
+		await eventually(() => assert.equal(releases.length, 2));
+		assert.equal(maxActive, 2);
+		while (releases.length > 0) releases.shift()();
+		await Promise.all(launches);
+	} finally {
+		setSubagentApiForTests(undefined);
+		setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
+		if (originalLaunchLimit === undefined)
+			delete process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES;
+		else process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES = originalLaunchLimit;
+		if (originalLiveLimit === undefined)
+			delete process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS;
+		else process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS = originalLiveLimit;
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("global live model worker cap defers saturated launches without waiting", async () => {
+	const cwd = makeProject();
+	const originalLaunchLimit = process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES;
+	const originalLiveLimit = process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS;
+	process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES = "2";
+	process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS = "1";
+	setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		let launches = 0;
+		setSubagentApiForTests({
+			async runSubagent() {
+				launches += 1;
+				return {
+					runId: `run_cap_set_${launches}`,
+					attemptId: `attempt_cap_set_${launches}`,
+					status: "running",
+				};
+			},
+		});
+		const first = makeSubagentLaunchFixture(cwd, "cap_set_first");
+		const second = makeSubagentLaunchFixture(cwd, "cap_set_second");
+		assert.equal(
+			(await launchSubagentTask(cwd, first.run, first.task, first.compiledTask))
+				.kind,
+			"launched",
+		);
+		assert.equal(launches, 1);
+		const secondLaunch = await Promise.race([
+			launchSubagentTask(cwd, second.run, second.task, second.compiledTask),
+			sleep(250).then(() => {
+				throw new Error(
+					"global worker cap admission blocked instead of deferring",
+				);
+			}),
+		]);
+		assert.equal(secondLaunch.kind, "capacity");
+		assert.equal(launches, 1);
+		assert.equal(second.task.status, "pending");
+		assert.match(second.task.lastMessage, /global pi-subagent worker slot/);
+		assert.equal(second.task.timing.waiting_for_global_worker_slot, true);
+
+		first.task.status = "completed";
+		first.task.statusDetail = "completed";
+		await refreshRunFromSubagentArtifacts(cwd, first.run);
+		const retryLaunch = await Promise.race([
+			launchSubagentTask(cwd, second.run, second.task, second.compiledTask),
+			sleep(250).then(() => {
+				throw new Error("global worker slot was not released for retry");
+			}),
+		]);
+		assert.equal(retryLaunch.kind, "launched");
+		assert.equal(launches, 2);
+	} finally {
+		setSubagentApiForTests(undefined);
+		setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
+		if (originalLaunchLimit === undefined)
+			delete process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES;
+		else process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES = originalLaunchLimit;
+		if (originalLiveLimit === undefined)
+			delete process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS;
+		else process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS = originalLiveLimit;
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("cleanupSubagentRun releases global live model worker cap keys", async () => {
+	const cwd = makeProject();
+	const originalLaunchLimit = process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES;
+	const originalLiveLimit = process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS;
+	process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES = "2";
+	process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS = "1";
+	setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		let launches = 0;
+		let interrupts = 0;
+		setSubagentApiForTests({
+			async runSubagent() {
+				launches += 1;
+				return {
+					runId: `run_cap_cleanup_${launches}`,
+					attemptId: `attempt_cap_cleanup_${launches}`,
+					status: "running",
+				};
+			},
+			async interruptSubagent() {
+				interrupts += 1;
+				return {};
+			},
+		});
+		const first = makeSubagentLaunchFixture(cwd, "cap_cleanup_first");
+		const second = makeSubagentLaunchFixture(cwd, "cap_cleanup_second");
+		await launchSubagentTask(cwd, first.run, first.task, first.compiledTask);
+		assert.equal(launches, 1);
+		await cleanupSubagentRun(cwd, first.run);
+		assert.equal(interrupts, 1);
+		const secondLaunch = await Promise.race([
+			launchSubagentTask(cwd, second.run, second.task, second.compiledTask),
+			sleep(250).then(() => {
+				throw new Error("cleanup did not release global worker slot");
+			}),
+		]);
+		assert.equal(secondLaunch.kind, "launched");
+		assert.equal(launches, 2);
+	} finally {
+		setSubagentApiForTests(undefined);
+		setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
+		if (originalLaunchLimit === undefined)
+			delete process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES;
+		else process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES = originalLaunchLimit;
+		if (originalLiveLimit === undefined)
+			delete process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS;
+		else process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS = originalLiveLimit;
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("global live model worker cap defers in leased scheduler without hanging", async () => {
+	const cwd = makeProject();
+	const originalLaunchLimit = process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES;
+	const originalLiveLimit = process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS;
+	process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES = "2";
+	process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS = "1";
+	setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		let launches = 0;
+		setSubagentApiForTests({
+			async runSubagent() {
+				launches += 1;
+				return {
+					runId: `run_cap_scheduler_${launches}`,
+					attemptId: `attempt_cap_scheduler_${launches}`,
+					status: "running",
+				};
+			},
+			async getSubagentStatus() {
+				return null;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+		const spec = workflowSpec("unit-scout", {
+			artifactGraph: {
+				stages: [
+					{ id: "a", type: "single", prompt: "A." },
+					{ id: "b", type: "single", after: [], prompt: "B." },
+				],
+			},
+		});
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Check global cap scheduling",
+		});
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "cap-scheduler.json"),
+		);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await writeRunRecord(cwd, run);
+
+		await Promise.race([
+			scheduleRun(cwd, run.runId),
+			sleep(1000).then(() => {
+				throw new Error("leased scheduler hung on saturated global worker cap");
+			}),
+		]);
+		let updated = await readRunRecord(cwd, run.runId);
+		assert.equal(launches, 1);
+		assert.equal(taskBySpec(updated, "a.main").status, "running");
+		const deferred = taskBySpec(updated, "b.main");
+		assert.equal(deferred.status, "pending");
+		assert.match(deferred.lastMessage, /global pi-subagent worker slot/);
+		assert.equal(deferred.timing.waiting_for_global_worker_slot, true);
+
+		await completeTask(cwd, taskBySpec(updated, "a.main"), {
+			digest: "a done",
+		});
+		await writeRunRecord(cwd, updated);
+		await Promise.race([
+			scheduleRun(cwd, run.runId),
+			sleep(1000).then(() => {
+				throw new Error("leased scheduler hung retrying global worker cap");
+			}),
+		]);
+		updated = await readRunRecord(cwd, run.runId);
+		assert.equal(launches, 2);
+		assert.equal(taskBySpec(updated, "a.main").status, "completed");
+		assert.equal(taskBySpec(updated, "b.main").status, "running");
+	} finally {
+		setSubagentApiForTests(undefined);
+		setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
+		if (originalLaunchLimit === undefined)
+			delete process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES;
+		else process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES = originalLaunchLimit;
+		if (originalLiveLimit === undefined)
+			delete process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS;
+		else process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS = originalLiveLimit;
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });

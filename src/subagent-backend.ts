@@ -68,6 +68,7 @@ const DEFAULT_WORKFLOW_FETCH_CONTENT_INLINE_CHARS = 12_000;
 const DEFAULT_TRANSIENT_MODEL_FAILURE_RETRIES = 5;
 const DEFAULT_ARTIFACT_OUTPUT_RETRIES = 2;
 const MAX_CONCURRENT_LAUNCHES_ENV = "PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES";
+const MAX_LIVE_MODEL_WORKERS_ENV = "PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS";
 const LAUNCH_SLOT_RELEASE_DELAY_MS_ENV =
 	"PI_WORKFLOW_LAUNCH_SLOT_RELEASE_DELAY_MS";
 const PARENT_SUBAGENT_CWD_ENV = "PI_WORKFLOW_PARENT_SUBAGENT_CWD";
@@ -301,8 +302,16 @@ async function recordTerminalParentSubagentChildEvent(
 
 let launchSlotReleaseDelayMsForTests: number | undefined;
 let transientRetryJitterForTests: (() => number) | undefined;
-const launchWaitQueue: Array<() => void> = [];
+let launchSlotAcquiredHookForTests: (() => void) | undefined;
+let launchSlotReleaseGeneration = 0;
+interface WaitQueueEntry {
+	resolveWait: () => void;
+	rejectWait: (error: Error) => void;
+}
+
+const launchWaitQueue: WaitQueueEntry[] = [];
 let activeLaunchSlots = 0;
+const activeLiveModelWorkerKeys = new Set<string>();
 
 function resolveMaxConcurrentLaunches(): number {
 	const override = Number.parseInt(
@@ -317,12 +326,68 @@ function isLaunchGateSaturated(): boolean {
 	return activeLaunchSlots >= resolveMaxConcurrentLaunches();
 }
 
-async function acquireLaunchSlot(): Promise<() => void> {
+function abortSignalError(signal: AbortSignal): Error {
+	const reason = (signal as AbortSignal & { reason?: unknown }).reason;
+	if (reason instanceof Error) return reason;
+	return new Error(
+		reason === undefined
+			? "Lost supervisor lease"
+			: `Lost supervisor lease: ${String(reason)}`,
+	);
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+	if (signal?.aborted) throw abortSignalError(signal);
+}
+
+function removeWaiter(queue: WaitQueueEntry[], waiter: WaitQueueEntry): void {
+	const index = queue.indexOf(waiter);
+	if (index >= 0) queue.splice(index, 1);
+}
+
+function waitForQueueTurn(
+	queue: WaitQueueEntry[],
+	signal?: AbortSignal,
+): Promise<void> {
+	throwIfAborted(signal);
+	return new Promise<void>((resolveWait, rejectWait) => {
+		const waiter: WaitQueueEntry = {
+			resolveWait: () => {
+				cleanup();
+				resolveWait();
+			},
+			rejectWait: (error) => {
+				cleanup();
+				rejectWait(error);
+			},
+		};
+		const cleanup = (): void => {
+			if (signal) signal.removeEventListener("abort", onAbort);
+		};
+		const onAbort = (): void => {
+			removeWaiter(queue, waiter);
+			waiter.rejectWait(abortSignalError(signal!));
+		};
+		if (signal) signal.addEventListener("abort", onAbort, { once: true });
+		if (signal?.aborted) {
+			onAbort();
+			return;
+		}
+		queue.push(waiter);
+	});
+}
+
+async function acquireLaunchSlot(signal?: AbortSignal): Promise<() => void> {
+	throwIfAborted(signal);
 	if (!isLaunchGateSaturated()) {
 		activeLaunchSlots += 1;
 		return releaseLaunchSlot;
 	}
-	await new Promise<void>((resolveWait) => launchWaitQueue.push(resolveWait));
+	await waitForQueueTurn(launchWaitQueue, signal);
+	if (signal?.aborted) {
+		releaseLaunchSlot();
+		throw abortSignalError(signal);
+	}
 	return releaseLaunchSlot;
 }
 
@@ -330,10 +395,100 @@ function releaseLaunchSlot(): void {
 	const next = launchWaitQueue.shift();
 	if (next) {
 		// Transfer the occupied slot directly to the queued launcher.
-		next();
+		next.resolveWait();
 		return;
 	}
 	activeLaunchSlots = Math.max(0, activeLaunchSlots - 1);
+}
+
+function resolveMaxLiveModelWorkers(): number | undefined {
+	const override = Number.parseInt(
+		process.env[MAX_LIVE_MODEL_WORKERS_ENV] ?? "",
+		10,
+	);
+	if (!Number.isFinite(override) || override <= 0) return undefined;
+	return Math.floor(override);
+}
+
+function liveModelWorkerKey(
+	run: WorkflowRunRecord,
+	task: WorkflowTaskRunRecord,
+): string {
+	return `${run.cwd}\0${run.runId}\0${task.taskId}`;
+}
+
+function liveModelWorkerKeysForRun(run: WorkflowRunRecord): Set<string> {
+	const keys = new Set<string>();
+	for (const task of run.tasks) {
+		if (isTerminalTaskStatus(task.status)) continue;
+		if (!getSubagentHandle(task)) continue;
+		keys.add(liveModelWorkerKey(run, task));
+	}
+	return keys;
+}
+
+function releaseLiveModelWorkerSlotForKey(key: string): void {
+	activeLiveModelWorkerKeys.delete(key);
+}
+
+function releaseLiveModelWorkerSlotForTask(
+	run: WorkflowRunRecord,
+	task: WorkflowTaskRunRecord,
+): void {
+	releaseLiveModelWorkerSlotForKey(liveModelWorkerKey(run, task));
+}
+
+function reconcileLiveModelWorkerSlots(run: WorkflowRunRecord): void {
+	for (const task of run.tasks) {
+		if (!isTerminalTaskStatus(task.status)) continue;
+		releaseLiveModelWorkerSlotForTask(run, task);
+	}
+}
+
+function isLiveModelWorkerGateSaturated(run: WorkflowRunRecord): boolean {
+	const maxLiveModelWorkers = resolveMaxLiveModelWorkers();
+	if (maxLiveModelWorkers === undefined) return false;
+	const liveKeys = liveModelWorkerKeysForRun(run);
+	for (const key of activeLiveModelWorkerKeys) liveKeys.add(key);
+	return liveKeys.size >= maxLiveModelWorkers;
+}
+
+type LiveModelWorkerSlotAdmission =
+	| { kind: "acquired"; release: () => void }
+	| { kind: "deferred"; message: string; retryAfterMs: number };
+
+function liveModelWorkerWaitingMessage(maxLiveModelWorkers: number): string {
+	return `waiting for global pi-subagent worker slot (${maxLiveModelWorkers} max)`;
+}
+
+function makeLiveModelWorkerSlotRelease(key: string): () => void {
+	let released = false;
+	return () => {
+		if (released) return;
+		released = true;
+		releaseLiveModelWorkerSlotForKey(key);
+	};
+}
+
+function tryAcquireLiveModelWorkerSlot(options: {
+	run: WorkflowRunRecord;
+	task: WorkflowTaskRunRecord;
+}): LiveModelWorkerSlotAdmission {
+	const maxLiveModelWorkers = resolveMaxLiveModelWorkers();
+	if (maxLiveModelWorkers === undefined) {
+		return { kind: "acquired", release: () => undefined };
+	}
+	reconcileLiveModelWorkerSlots(options.run);
+	if (isLiveModelWorkerGateSaturated(options.run)) {
+		return {
+			kind: "deferred",
+			message: liveModelWorkerWaitingMessage(maxLiveModelWorkers),
+			retryAfterMs: 0,
+		};
+	}
+	const key = liveModelWorkerKey(options.run, options.task);
+	activeLiveModelWorkerKeys.add(key);
+	return { kind: "acquired", release: makeLiveModelWorkerSlotRelease(key) };
 }
 
 function resolveLaunchSlotReleaseDelayMs(): number {
@@ -356,17 +511,28 @@ function releaseLaunchSlotAfterDelay(
 		release();
 		return;
 	}
-	setTimeout(release, delayMs);
+	const releaseGeneration = launchSlotReleaseGeneration;
+	setTimeout(() => {
+		if (releaseGeneration !== launchSlotReleaseGeneration) return;
+		release();
+	}, delayMs);
 }
 
 async function runWithLaunchSlot<T>(
 	action: () => Promise<T>,
 	onAcquired?: () => void,
+	signal?: AbortSignal,
 ): Promise<T> {
-	const release = await acquireLaunchSlot();
+	const release = await acquireLaunchSlot(signal);
+	if (signal?.aborted) {
+		release();
+		throw abortSignalError(signal);
+	}
 	onAcquired?.();
 	let holdAfterReturn = false;
 	try {
+		launchSlotAcquiredHookForTests?.();
+		throwIfAborted(signal);
 		const result = await action();
 		holdAfterReturn = true;
 		return result;
@@ -754,6 +920,7 @@ function recordTaskLaunchTiming(
 		launchQueuedAt: string;
 		launchStartedAt?: string;
 		launchCompletedAt?: string;
+		waitingForGlobalWorkerSlot?: boolean;
 	},
 ): void {
 	const capturedAt = observation.launchCompletedAt ?? nowIso();
@@ -777,6 +944,10 @@ function recordTaskLaunchTiming(
 			: { launchCompletedAt: observation.launchCompletedAt }),
 		...(launchWaitMs === undefined ? {} : { launchWaitMs }),
 		...(launchDurationMs === undefined ? {} : { launchDurationMs }),
+		...(observation.waitingForGlobalWorkerSlot ||
+		task.timing?.waiting_for_global_worker_slot
+			? { waiting_for_global_worker_slot: true }
+			: {}),
 		launchSlotReleaseDelayMs: resolveLaunchSlotReleaseDelayMs(),
 		...(task.timing?.aggregate === undefined
 			? {}
@@ -827,6 +998,12 @@ function buildTaskTimingAttempt(options: {
 		...(options.task.timing?.launchDurationMs === undefined
 			? {}
 			: { launchDurationMs: options.task.timing.launchDurationMs }),
+		...(options.task.timing?.waiting_for_global_worker_slot === undefined
+			? {}
+			: {
+					waiting_for_global_worker_slot:
+						options.task.timing.waiting_for_global_worker_slot,
+				}),
 		...(options.startedAt === undefined
 			? {}
 			: { executionStartedAt: options.startedAt }),
@@ -954,6 +1131,7 @@ function recordTerminalTaskObservability(options: {
 export function setSubagentLaunchControlsForTests(options?: {
 	releaseDelayMs?: number;
 	retryJitterMs?: number | (() => number);
+	onLaunchSlotAcquired?: () => void;
 }): void {
 	launchSlotReleaseDelayMsForTests =
 		options?.releaseDelayMs === undefined
@@ -965,27 +1143,34 @@ export function setSubagentLaunchControlsForTests(options?: {
 			: typeof options.retryJitterMs === "function"
 				? options.retryJitterMs
 				: () => Math.max(0, Math.floor(options.retryJitterMs as number));
+	launchSlotAcquiredHookForTests = options?.onLaunchSlotAcquired;
+	launchSlotReleaseGeneration += 1;
 	activeLaunchSlots = 0;
-	while (launchWaitQueue.length > 0) launchWaitQueue.shift()?.();
+	activeLiveModelWorkerKeys.clear();
+	while (launchWaitQueue.length > 0) launchWaitQueue.shift()?.resolveWait();
 }
 
 export async function cleanupSubagentRun(
 	_cwd: string,
 	run: WorkflowRunRecord,
 ): Promise<void> {
-	for (const task of run.tasks) {
-		const handle = getSubagentHandle(task);
-		if (!handle) continue;
-		const api = await loadSubagentApi();
-		await api
-			.interruptSubagent({
-				cwd: handle.cwd,
-				runsDir: handle.runsDir,
-				runId: handle.runId,
-				attemptId: handle.attemptId,
-				reason: "workflow cleanup",
-			})
-			.catch(() => undefined);
+	try {
+		for (const task of run.tasks) {
+			const handle = getSubagentHandle(task);
+			if (!handle) continue;
+			const api = await loadSubagentApi();
+			await api
+				.interruptSubagent({
+					cwd: handle.cwd,
+					runsDir: handle.runsDir,
+					runId: handle.runId,
+					attemptId: handle.attemptId,
+					reason: "workflow cleanup",
+				})
+				.catch(() => undefined);
+		}
+	} finally {
+		for (const task of run.tasks) releaseLiveModelWorkerSlotForTask(run, task);
 	}
 }
 
@@ -994,6 +1179,7 @@ export async function launchSubagentTask(
 	run: WorkflowRunRecord,
 	task: WorkflowTaskRunRecord,
 	compiledTask: CompiledTask,
+	leaseSignal?: AbortSignal,
 ): Promise<BackendLaunchResult> {
 	if (task.status !== "pending") return { kind: "launched" };
 	if (task.backendHandle || task.pid) return { kind: "launched" };
@@ -1018,29 +1204,56 @@ export async function launchSubagentTask(
 	const outputFile = fromProjectPath(cwd, task.files.output);
 	const stderrFile = fromProjectPath(cwd, task.files.stderr);
 	const resultFile = fromProjectPath(cwd, task.files.result);
-	await mkdir(dirname(systemPromptFile), { recursive: true });
-	await rm(resultFile, { force: true });
-	await writeFile(systemPromptFile, buildSystemPrompt(compiledTask), "utf8");
-	await writeFile(taskPromptFile, compiledTask.compiledPrompt, "utf8");
-	await writeFile(outputFile, "", "utf8");
-	await writeFile(stderrFile, "", "utf8");
-
 	const runsDir = subagentRunsDir(run, task);
 	const correlationId = `${run.runId}:${task.taskId}`;
 	const sessionId = subagentSessionId(run, task);
-	task.status = "running";
-	task.statusDetail = "launching";
-	task.startedAt = nowIso();
-	task.backendFiles = {
-		runsDir: toProjectPath(task.cwd, resolve(task.cwd, runsDir)),
-		correlationId,
-		...(sessionId === undefined ? {} : { sessionId }),
-	};
-	task.lastMessage = "pi-subagent launch claim recorded";
-	await writeRunRecord(cwd, run);
 
 	let launched: SubagentResultEnvelope;
+	let releaseLiveModelWorkerSlot: (() => void) | undefined;
 	try {
+		throwIfAborted(leaseSignal);
+		const liveModelWorkerAdmission = tryAcquireLiveModelWorkerSlot({
+			run,
+			task,
+		});
+		if (liveModelWorkerAdmission.kind === "deferred") {
+			const launchQueuedAt = task.timing?.launchQueuedAt ?? nowIso();
+			task.status = "pending";
+			task.statusDetail = "pending";
+			task.startedAt = undefined;
+			task.lastMessage = liveModelWorkerAdmission.message;
+			recordTaskLaunchTiming(task, {
+				launchQueuedAt,
+				waitingForGlobalWorkerSlot: true,
+			});
+			await writeRunRecord(cwd, run).catch(() => undefined);
+			return {
+				kind: "capacity",
+				message: liveModelWorkerAdmission.message,
+				retryAfterMs: liveModelWorkerAdmission.retryAfterMs,
+			};
+		}
+		releaseLiveModelWorkerSlot = liveModelWorkerAdmission.release;
+
+		await mkdir(dirname(systemPromptFile), { recursive: true });
+		await rm(resultFile, { force: true });
+		await writeFile(systemPromptFile, buildSystemPrompt(compiledTask), "utf8");
+		await writeFile(taskPromptFile, compiledTask.compiledPrompt, "utf8");
+		await writeFile(outputFile, "", "utf8");
+		await writeFile(stderrFile, "", "utf8");
+
+		task.status = "running";
+		task.statusDetail = "launching";
+		task.startedAt = nowIso();
+		task.backendFiles = {
+			runsDir: toProjectPath(task.cwd, resolve(task.cwd, runsDir)),
+			correlationId,
+			...(sessionId === undefined ? {} : { sessionId }),
+		};
+		task.lastMessage = "pi-subagent launch claim recorded";
+		await writeRunRecord(cwd, run);
+
+		throwIfAborted(leaseSignal);
 		const api = await loadSubagentApi();
 		const extensions = await workflowTaskExtensions(
 			cwd,
@@ -1076,11 +1289,15 @@ export async function launchSubagentTask(
 			await writeRunRecord(cwd, run).catch(() => undefined);
 		}
 		launched = await runWithLaunchSlot(
-			() => api.runSubagent(subagentOptions),
+			() => {
+				throwIfAborted(leaseSignal);
+				return api.runSubagent(subagentOptions);
+			},
 			() => {
 				launchStartedAt = nowIso();
 				recordTaskLaunchTiming(task, { launchQueuedAt, launchStartedAt });
 			},
+			leaseSignal,
 		);
 		recordTaskLaunchTiming(task, {
 			launchQueuedAt,
@@ -1088,6 +1305,8 @@ export async function launchSubagentTask(
 			launchCompletedAt: nowIso(),
 		});
 	} catch (error) {
+		releaseLiveModelWorkerSlot?.();
+		if (leaseSignal?.aborted) throw error;
 		task.status = "pending";
 		task.statusDetail = "pending";
 		task.startedAt = undefined;
@@ -1129,6 +1348,7 @@ export async function refreshRunFromSubagentArtifacts(
 	run: WorkflowRunRecord,
 ): Promise<WorkflowRunRecord> {
 	let changed = false;
+	reconcileLiveModelWorkerSlots(run);
 
 	for (const task of run.tasks) {
 		if (isTerminalTaskStatus(task.status) || task.status !== "running")
@@ -1159,6 +1379,7 @@ export async function refreshRunFromSubagentArtifacts(
 			}
 			if (isTaskTimedOut(task)) {
 				markSubagentTaskTimedOut(task);
+				releaseLiveModelWorkerSlotForTask(run, task);
 				changed = true;
 			}
 			continue;
@@ -1185,6 +1406,7 @@ export async function refreshRunFromSubagentArtifacts(
 			if (isTaskTimedOut(task)) {
 				await interruptTimedOutSubagent(api, handle);
 				markSubagentTaskTimedOut(task);
+				releaseLiveModelWorkerSlotForTask(run, task);
 				changed = true;
 			}
 			continue;
@@ -1217,13 +1439,16 @@ export async function refreshRunFromSubagentArtifacts(
 			if (isTaskTimedOut(task)) {
 				await interruptTimedOutSubagent(api, handle);
 				markSubagentTaskTimedOut(task);
+				releaseLiveModelWorkerSlotForTask(run, task);
 				changed = true;
 			}
 			continue;
 		}
 
-		if (await materializeTerminalSubagentResult(cwd, run, task, snapshot))
+		if (await materializeTerminalSubagentResult(cwd, run, task, snapshot)) {
+			releaseLiveModelWorkerSlotForTask(run, task);
 			changed = true;
+		}
 	}
 
 	if (changed) await writeRunRecord(cwd, run);
