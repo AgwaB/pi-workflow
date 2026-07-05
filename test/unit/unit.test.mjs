@@ -22670,6 +22670,185 @@ test("deep-review finding-pipeline preserves structured locations through dedup 
 	);
 });
 
+test("deep-review finding-pipeline opt-in batch planner flattens results with strict membership gates", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-review",
+		"helpers",
+		"finding-pipeline.mjs",
+	);
+	const helper = (
+		await import(`${pathToFileURL(helperPath).href}?batch=${Date.now()}`)
+	).default;
+	const findings = [
+		"Alpha runtime regression",
+		"Beta authorization bypass",
+		"Gamma data loss",
+		"Delta cache poisoning",
+		"Epsilon schema drift",
+		"Alpha runtime regression",
+	].map((title, index) => ({
+		id: `F-${String(index + 1).padStart(3, "0")}`,
+		findingId: `F-${String(index + 1).padStart(3, "0")}`,
+		rootCauseId: `R-${String(index + 1).padStart(3, "0")}`,
+		severity: index === 1 ? "critical" : "medium",
+		title,
+		file: `src/file-${index + 1}.ts`,
+		locations: [{ file: `src/file-${index + 1}.ts`, line: index + 10 }],
+		evidenceQuotes: [`quote-${index + 1}`],
+	}));
+
+	const batches = await helper({
+		sources: { "dedup-findings.main": { findings } },
+		options: {
+			mode: "batch-devil-advocate",
+			dedupStage: "dedup-findings",
+			maxBatchSize: 3,
+		},
+	});
+	assert.equal(batches.schema, "deep-review-devil-advocate-batches-v1");
+	assert.equal(batches.batchCount, 2);
+	assert.deepEqual(
+		batches.batches.map((batch) => batch.findingIds),
+		[
+			["F-001", "F-002", "F-003"],
+			["F-004", "F-005", "F-006"],
+		],
+	);
+
+	const validRow = (findingId, title, verdict) => ({
+		findingId,
+		title,
+		verdict,
+		evidence: [`${findingId} evidence`],
+		counterEvidence: [],
+		recommendedAction: `Handle ${findingId}`,
+	});
+	const partition = await helper({
+		sources: {
+			"dedup-findings.main": { findings },
+			"devil-advocate-batches.main": batches,
+			"devil-advocate.dabatch-001": {
+				schema: "deep-review-devil-advocate-batch-v1",
+				digest: "batch one",
+				results: [
+					validRow("F-001", "Alpha runtime regression", "KEEP"),
+					validRow("F-002", "Beta authorization bypass", "WEAKEN"),
+					validRow("F-003", "Gamma data loss", "DROP"),
+					validRow("F-999", "Out of batch", "KEEP"),
+					{
+						...validRow("F-998", "Extra row field", "KEEP"),
+						unexpected: true,
+					},
+				],
+			},
+			"devil-advocate.dabatch-002": {
+				schema: "deep-review-devil-advocate-batch-v1",
+				digest: "batch two",
+				results: [
+					validRow("F-004", "Delta cache poisoning", "KEEP"),
+					validRow("F-004", "Delta cache poisoning", "WEAKEN"),
+					validRow("F-005", "Wrong epsilon title", "KEEP"),
+					validRow("F-005", "Epsilon schema drift", "keep"),
+					{
+						findingId: "",
+						title: "Malformed row",
+						verdict: "KEEP",
+						evidence: [],
+						counterEvidence: [],
+						recommendedAction: "",
+					},
+				],
+			},
+			"devil-advocate.dabatch-999": {
+				schema: "deep-review-devil-advocate-batch-v1",
+				digest: "unknown batch",
+				results: [validRow("F-997", "Unknown batch row", "KEEP")],
+			},
+		},
+		options: {
+			mode: "partition",
+			dedupStage: "dedup-findings",
+			devilAdvocateBatchStage: "devil-advocate-batches",
+		},
+	});
+
+	assert.deepEqual(
+		partition.partitions.keep.map((finding) => finding.findingId),
+		["F-001"],
+	);
+	assert.deepEqual(
+		partition.partitions.weaken.map((finding) => finding.findingId),
+		["F-002"],
+	);
+	assert.deepEqual(
+		partition.partitions.drop.map((finding) => finding.findingId),
+		["F-003"],
+	);
+	assert.equal(partition.partitionSummary.batchIntegrityIssues, 7);
+	assert.equal(partition.partitionSummary.missingVerdicts, 1);
+	assert.equal(partition.partitionSummary.needsHuman, 8);
+	assert.ok(
+		partition.partitions.needsHuman.some(
+			(finding) =>
+				finding.batchIntegrityIssue?.reason ===
+				"batch_result_finding_not_in_source_batch",
+		),
+	);
+	assert.ok(
+		partition.partitions.needsHuman.some(
+			(finding) =>
+				finding.batchIntegrityIssue?.reason ===
+				"duplicate_batch_result_for_finding",
+		),
+	);
+	assert.ok(
+		partition.partitions.needsHuman.some(
+			(finding) =>
+				finding.batchIntegrityIssue?.reason === "batch_result_title_mismatch",
+		),
+	);
+	assert.ok(
+		partition.partitions.needsHuman.some(
+			(finding) =>
+				finding.batchIntegrityIssue?.reason ===
+				"malformed_batch_result_invalid_verdict",
+		),
+	);
+	assert.ok(
+		partition.partitions.needsHuman.some(
+			(finding) =>
+				finding.batchIntegrityIssue?.reason ===
+				"malformed_batch_result_extra_fields",
+		),
+	);
+	assert.ok(
+		partition.partitions.needsHuman.some(
+			(finding) =>
+				finding.batchIntegrityIssue?.reason ===
+				"unknown_devil_advocate_batch_id",
+		),
+	);
+	assert.ok(
+		partition.partitions.needsHuman.some(
+			(finding) =>
+				finding.batchIntegrityIssue?.reason ===
+				"malformed_batch_result_missing_findingId",
+		),
+	);
+	assert.ok(
+		partition.partitions.needsHuman.some(
+			(finding) =>
+				finding.findingId === "F-006" &&
+				finding.title === "Alpha runtime regression" &&
+				finding.note === "no devil-advocate verdict received for this finding",
+		),
+	);
+});
+
 test("deep-review render-review-report emits finding cards from partition ledger", async () => {
 	const cwd = makeProject();
 	try {

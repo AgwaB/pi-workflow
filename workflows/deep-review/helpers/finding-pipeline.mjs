@@ -10,6 +10,10 @@
 //                 partitions findings into keep/weaken/drop/needsHuman in code,
 //                 and joins reviewer severity back onto KEEP findings so the
 //                 report stage cannot silently drop findings or drift severity.
+//   "batch-devil-advocate" — opt-in only. Plans deterministic batches of
+//                 deduped findings for a batched devil-advocate foreach. The
+//                 default deep-review workflow still uses one verifier per
+//                 finding.
 
 const VERDICTS = ["KEEP", "WEAKEN", "DROP", "NEEDS_HUMAN"];
 
@@ -383,6 +387,78 @@ function dedupFindings(sources, context = {}) {
 			duplicateCount: duplicates.length,
 			duplicates,
 		},
+	};
+}
+
+function findSource(sources, stageId) {
+	for (const [specId, source] of Object.entries(sources ?? {})) {
+		if (specId === stageId || specId.startsWith(`${stageId}.`)) return source;
+	}
+	return null;
+}
+
+function findingIdOf(finding) {
+	const id =
+		typeof finding?.findingId === "string" && finding.findingId.trim()
+			? finding.findingId.trim()
+			: typeof finding?.id === "string" && finding.id.trim()
+				? finding.id.trim()
+				: "";
+	return id || null;
+}
+
+function normalizeMaxBatchSize(value) {
+	const parsed = Number(value ?? 4);
+	if (!Number.isInteger(parsed) || parsed < 1) return 4;
+	return Math.min(parsed, 8);
+}
+
+function cloneFindingForBatch(finding, id) {
+	return {
+		...finding,
+		id: typeof finding.id === "string" && finding.id.trim() ? finding.id : id,
+		findingId: id,
+		locations: Array.isArray(finding.locations)
+			? finding.locations.map((location) => ({ ...location }))
+			: [],
+		evidenceQuotes: Array.isArray(finding.evidenceQuotes)
+			? [...finding.evidenceQuotes]
+			: evidenceQuotesOf(finding),
+	};
+}
+
+function batchDevilAdvocateFindings(sources, options = {}) {
+	const dedupStageId = String(options.dedupStage ?? "dedup-findings");
+	const maxBatchSize = normalizeMaxBatchSize(options.maxBatchSize);
+	const reviewerFindings = findingsOf(findSource(sources, dedupStageId));
+	const findings = reviewerFindings
+		.map((finding, index) => {
+			const id =
+				findingIdOf(finding) ?? `finding-${String(index + 1).padStart(3, "0")}`;
+			return { id, index, finding };
+		})
+		.sort((left, right) => left.id.localeCompare(right.id));
+
+	const batches = [];
+	for (let offset = 0; offset < findings.length; offset += maxBatchSize) {
+		const slice = findings.slice(offset, offset + maxBatchSize);
+		const findingIds = slice.map((item) => item.id);
+		batches.push({
+			id: `dabatch-${String(batches.length + 1).padStart(3, "0")}`,
+			findingIds,
+			findings: slice.map((item) =>
+				cloneFindingForBatch(item.finding, item.id),
+			),
+		});
+	}
+
+	return {
+		schema: "deep-review-devil-advocate-batches-v1",
+		digest: `${batches.length} devil-advocate batch(es), ${findings.length} finding(s), maxBatchSize=${maxBatchSize}`,
+		maxBatchSize,
+		findingCount: findings.length,
+		batchCount: batches.length,
+		batches,
 	};
 }
 
@@ -968,6 +1044,260 @@ function buildReportContext(
 	};
 }
 
+function asBatchArray(value) {
+	if (Array.isArray(value?.batches)) return value.batches;
+	if (Array.isArray(value)) return value;
+	return [];
+}
+
+function buildDevilAdvocateBatchMembershipById(batchSource) {
+	const batches = new Map();
+	for (const batch of asBatchArray(batchSource)) {
+		const batchId = typeof batch?.id === "string" ? batch.id.trim() : "";
+		if (!batchId) continue;
+		const fromIds = Array.isArray(batch.findingIds) ? batch.findingIds : [];
+		const fromFindings = Array.isArray(batch.findings) ? batch.findings : [];
+		const members = new Map();
+		for (const finding of fromFindings) {
+			const id = findingIdOf(finding);
+			if (!id) continue;
+			members.set(id, {
+				findingId: id,
+				title: String(finding.title ?? "").trim(),
+				titleKey: normalizeText(finding.title),
+			});
+		}
+		for (const idValue of fromIds) {
+			const id = typeof idValue === "string" ? idValue.trim() : "";
+			if (!id || members.has(id)) continue;
+			members.set(id, { findingId: id, title: "", titleKey: "" });
+		}
+		batches.set(batchId, members);
+	}
+	return batches;
+}
+
+function hydrateDevilAdvocateBatchMembershipTitles(
+	batchMembershipById,
+	byFindingId,
+) {
+	for (const members of batchMembershipById.values()) {
+		for (const [findingId, member] of members.entries()) {
+			if (member.titleKey) continue;
+			const finding = byFindingId.get(findingId);
+			const title = String(finding?.title ?? "").trim();
+			if (!title) continue;
+			members.set(findingId, {
+				...member,
+				title,
+				titleKey: normalizeText(title),
+			});
+		}
+	}
+	return batchMembershipById;
+}
+
+function devilAdvocateBatchId(sourceId) {
+	const prefix = "devil-advocate.";
+	if (typeof sourceId !== "string" || !sourceId.startsWith(prefix)) return null;
+	const id = sourceId.slice(prefix.length).trim();
+	return id || null;
+}
+
+function buildDevilAdvocateBatchIdBySourceName(sourceStatuses) {
+	const bySource = new Map();
+	for (const status of sourceStatusesOf({ sourceStatuses })) {
+		const source = typeof status.source === "string" ? status.source : "";
+		const batchId = devilAdvocateBatchId(status.specId);
+		if (source && batchId) bySource.set(source, batchId);
+	}
+	return bySource;
+}
+
+const BATCH_RESULT_KEYS = new Set([
+	"findingId",
+	"title",
+	"verdict",
+	"evidence",
+	"counterEvidence",
+	"recommendedAction",
+]);
+
+function malformedBatchResultReason(row) {
+	if (!row || typeof row !== "object" || Array.isArray(row))
+		return "malformed_batch_result_not_object";
+	const extraKeys = Object.keys(row).filter(
+		(key) => !BATCH_RESULT_KEYS.has(key),
+	);
+	if (extraKeys.length > 0) return "malformed_batch_result_extra_fields";
+	if (typeof row.findingId !== "string" || !row.findingId.trim())
+		return "malformed_batch_result_missing_findingId";
+	if (typeof row.title !== "string" || !row.title.trim())
+		return "malformed_batch_result_missing_title";
+	if (typeof row.verdict !== "string" || !row.verdict.trim())
+		return "malformed_batch_result_missing_verdict";
+	if (!VERDICTS.includes(row.verdict))
+		return "malformed_batch_result_invalid_verdict";
+	if (!Array.isArray(row.evidence))
+		return "malformed_batch_result_missing_evidence_array";
+	if (!Array.isArray(row.counterEvidence))
+		return "malformed_batch_result_missing_counterEvidence_array";
+	if (typeof row.recommendedAction !== "string")
+		return "malformed_batch_result_missing_recommendedAction";
+	return null;
+}
+
+function collectBatchVerdictRows({
+	sourceId,
+	source,
+	batchMembershipById,
+	batchIdBySourceName,
+}) {
+	const batchId =
+		devilAdvocateBatchId(sourceId) ?? batchIdBySourceName.get(sourceId);
+	const rows = [];
+	const issues = [];
+	if (!source || typeof source !== "object" || !Array.isArray(source.results)) {
+		issues.push({
+			sourceId,
+			batchId,
+			reason: "malformed_batch_output_missing_results",
+			title: "Malformed devil-advocate batch output",
+		});
+		return { rows, issues };
+	}
+	const expectedMembers = batchId ? batchMembershipById.get(batchId) : null;
+	for (const [index, result] of source.results.entries()) {
+		const base = { sourceId, batchId, index };
+		const malformed = malformedBatchResultReason(result);
+		if (malformed) {
+			issues.push({
+				...base,
+				reason: malformed,
+				findingId:
+					typeof result?.findingId === "string" && result.findingId.trim()
+						? result.findingId.trim()
+						: undefined,
+				title:
+					typeof result?.title === "string" && result.title.trim()
+						? result.title.trim()
+						: "Malformed devil-advocate batch result",
+				entry: result && typeof result === "object" ? result : {},
+			});
+			continue;
+		}
+		const findingId = result.findingId.trim();
+		const title = result.title.trim();
+		if (!batchId || !expectedMembers) {
+			issues.push({
+				...base,
+				findingId,
+				title,
+				reason: "unknown_devil_advocate_batch_id",
+				expectedBatchIds: [...batchMembershipById.keys()],
+				entry: result,
+			});
+			continue;
+		}
+		const expected = expectedMembers.get(findingId);
+		if (!expected) {
+			issues.push({
+				...base,
+				findingId,
+				title,
+				reason: "batch_result_finding_not_in_source_batch",
+				expectedFindingIds: [...expectedMembers.keys()],
+				entry: result,
+			});
+			continue;
+		}
+		if (!expected.titleKey) {
+			issues.push({
+				...base,
+				findingId,
+				title,
+				reason: "batch_membership_missing_title",
+				entry: result,
+			});
+			continue;
+		}
+		if (expected.titleKey !== normalizeText(title)) {
+			issues.push({
+				...base,
+				findingId,
+				title,
+				expectedTitle: expected.title,
+				reason: "batch_result_title_mismatch",
+				entry: result,
+			});
+			continue;
+		}
+		rows.push({
+			...base,
+			findingId,
+			title,
+			batchKey: `${batchId}|${findingId}|${normalizeText(title)}`,
+			entry: result,
+		});
+	}
+	return { rows, issues };
+}
+
+function batchIssueNeedsHumanItem(issue, reviewerFinding, fallbackId) {
+	const entry =
+		issue.entry && typeof issue.entry === "object" ? issue.entry : {};
+	const findingId =
+		reviewerFinding?.findingId ??
+		reviewerFinding?.id ??
+		issue.findingId ??
+		fallbackId;
+	return {
+		findingId,
+		rootCauseId:
+			reviewerFinding?.rootCauseId ??
+			reviewerFinding?.findingId ??
+			reviewerFinding?.id ??
+			findingId,
+		title: reviewerFinding?.title ?? issue.title ?? findingTitleOf(entry),
+		verdict: "NEEDS_HUMAN",
+		severity:
+			reviewerFinding?.severity ??
+			(entry.finding && typeof entry.finding === "object"
+				? String(entry.finding.severity ?? "unknown")
+				: "unknown"),
+		file: reviewerFinding?.file,
+		locations: reviewerFinding
+			? (reviewerFinding.locations ?? locationsOf(reviewerFinding))
+			: [],
+		evidenceQuotes: reviewerFinding
+			? (reviewerFinding.evidenceQuotes ?? evidenceQuotesOf(reviewerFinding))
+			: [],
+		evidence: Array.isArray(entry.evidence) ? entry.evidence : [],
+		counterEvidence: Array.isArray(entry.counterEvidence)
+			? entry.counterEvidence
+			: [],
+		recommendedAction:
+			typeof entry.recommendedAction === "string"
+				? entry.recommendedAction
+				: "",
+		note: `devil-advocate batch integrity issue: ${issue.reason}`,
+		batchIntegrityIssue: {
+			reason: issue.reason,
+			...(issue.sourceId ? { sourceId: issue.sourceId } : {}),
+			...(issue.batchId ? { batchId: issue.batchId } : {}),
+			...(Number.isInteger(issue.index) ? { index: issue.index } : {}),
+			...(Number.isInteger(issue.rowCount) ? { rowCount: issue.rowCount } : {}),
+			...(issue.expectedTitle ? { expectedTitle: issue.expectedTitle } : {}),
+			...(issue.expectedBatchIds
+				? { expectedBatchIds: issue.expectedBatchIds }
+				: {}),
+			...(issue.expectedFindingIds
+				? { expectedFindingIds: issue.expectedFindingIds }
+				: {}),
+		},
+	};
+}
+
 function partitionVerdicts(sources, options = {}, context = {}) {
 	const dedupStageId = String(options.dedupStage ?? "dedup-findings");
 	const directStatusSummary = sourceStatusSummary(sourceStatusesOf(context));
@@ -976,19 +1306,22 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 		...Object.values(sources ?? {}).map(partialFailuresFromSource),
 	);
 	let reviewerFindings = [];
-	const verdictEntries = [];
+	const verdictRows = [];
+	const batchIssues = [];
+	const devilAdvocateBatchStage = String(
+		options.devilAdvocateBatchStage ?? "devil-advocate-batches",
+	);
 	for (const [specId, source] of Object.entries(sources ?? {})) {
-		if (specId.startsWith(`${dedupStageId}.`) || specId === dedupStageId) {
+		if (specId.startsWith(`${dedupStageId}.`) || specId === dedupStageId)
 			reviewerFindings = findingsOf(source);
-			continue;
-		}
-		const entry = verdictEntryOf(source);
-		if (entry) verdictEntries.push(entry);
 	}
 
 	const byTitle = new Map();
+	const byFindingId = new Map();
 	for (const finding of reviewerFindings) {
 		byTitle.set(normalizeText(finding.title), finding);
+		const findingId = findingIdOf(finding);
+		if (findingId) byFindingId.set(findingId, finding);
 	}
 	const findMatch = (title) => {
 		const key = normalizeText(title);
@@ -1003,17 +1336,124 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 		return { finding: null, key };
 	};
 
+	const batchMembershipById = hydrateDevilAdvocateBatchMembershipTitles(
+		buildDevilAdvocateBatchMembershipById(
+			findSource(sources, devilAdvocateBatchStage),
+		),
+		byFindingId,
+	);
+	const batchMode = batchMembershipById.size > 0;
+	const batchIdBySourceName = buildDevilAdvocateBatchIdBySourceName(
+		context.sourceStatuses,
+	);
+	for (const [specId, source] of Object.entries(sources ?? {})) {
+		if (specId.startsWith(`${dedupStageId}.`) || specId === dedupStageId) {
+			continue;
+		}
+		if (
+			specId.startsWith(`${devilAdvocateBatchStage}.`) ||
+			specId === devilAdvocateBatchStage
+		) {
+			continue;
+		}
+		if (
+			batchMode &&
+			(specId === "devil-advocate" || specId.startsWith("devil-advocate."))
+		) {
+			const collected = collectBatchVerdictRows({
+				sourceId: specId,
+				source,
+				batchMembershipById,
+				batchIdBySourceName,
+			});
+			for (const row of collected.rows)
+				verdictRows.push({ ...row, batched: true });
+			batchIssues.push(...collected.issues);
+			continue;
+		}
+		const entry = verdictEntryOf(source);
+		if (entry) verdictRows.push({ entry, batched: false });
+	}
+
 	const partitions = { keep: [], weaken: [], drop: [], needsHuman: [] };
 	const normalizationNotes = [];
 	const matchedTitles = new Set();
+	const matchedFindingIds = new Set();
+	const issueCoveredFindingIds = new Set();
 	let missingVerdicts = 0;
 
+	const duplicateBatchKeys = new Set();
+	const batchKeyCounts = new Map();
+	for (const row of verdictRows.filter((candidate) => candidate.batched)) {
+		batchKeyCounts.set(
+			row.batchKey,
+			(batchKeyCounts.get(row.batchKey) ?? 0) + 1,
+		);
+	}
+	for (const [key, count] of batchKeyCounts) {
+		if (count > 1) duplicateBatchKeys.add(key);
+	}
+	for (const key of duplicateBatchKeys) {
+		const rows = verdictRows.filter(
+			(candidate) => candidate.batched && candidate.batchKey === key,
+		);
+		const first = rows[0];
+		batchIssues.push({
+			sourceId: first.sourceId,
+			batchId: first.batchId,
+			index: first.index,
+			findingId: first.findingId,
+			title: first.title,
+			reason: "duplicate_batch_result_for_finding",
+			rowCount: rows.length,
+			entry: first.entry,
+		});
+	}
+
+	let batchIssueIndex = 0;
+	for (const issue of batchIssues) {
+		batchIssueIndex += 1;
+		const reviewerFinding = issue.findingId
+			? byFindingId.get(issue.findingId)
+			: null;
+		if (reviewerFinding) {
+			const id = findingIdOf(reviewerFinding);
+			if (id) issueCoveredFindingIds.add(id);
+			if (!batchMode) matchedTitles.add(normalizeText(reviewerFinding.title));
+		}
+		partitions.needsHuman.push(
+			batchIssueNeedsHumanItem(
+				issue,
+				reviewerFinding,
+				`batch-verdict-${String(batchIssueIndex).padStart(3, "0")}`,
+			),
+		);
+		normalizationNotes.push(
+			`devil-advocate batch integrity issue ${issue.reason} for "${issue.title ?? issue.findingId ?? "unknown"}" routed to NEEDS_HUMAN`,
+		);
+	}
+
 	let verdictIndex = 0;
-	for (const entry of verdictEntries) {
+	for (const row of verdictRows) {
+		if (row.batched && duplicateBatchKeys.has(row.batchKey)) continue;
+		if (row.batched && issueCoveredFindingIds.has(row.findingId)) continue;
 		verdictIndex += 1;
-		const title = findingTitleOf(entry);
-		const { finding: reviewerFinding, key: titleKey } = findMatch(title);
-		if (reviewerFinding) matchedTitles.add(titleKey);
+		const entry = row.entry;
+		const title = row.batched ? row.title : findingTitleOf(entry);
+		const reviewerFinding = row.batched
+			? byFindingId.get(row.findingId)
+			: findMatch(title).finding;
+		const titleKey = reviewerFinding
+			? normalizeText(reviewerFinding.title)
+			: normalizeText(title);
+		if (reviewerFinding) {
+			if (row.batched) {
+				const findingId = findingIdOf(reviewerFinding);
+				if (findingId) matchedFindingIds.add(findingId);
+			} else {
+				matchedTitles.add(titleKey);
+			}
+		}
 		const { verdict, normalized, invalid } = normalizeVerdict(entry.verdict);
 		const fallbackId = `verdict-${String(verdictIndex).padStart(3, "0")}`;
 		if (invalid !== undefined) {
@@ -1091,7 +1531,20 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 	// vanish silently: route them to needsHuman.
 	for (const finding of reviewerFindings) {
 		const titleKey = normalizeText(finding.title);
-		if (matchedTitles.has(titleKey)) continue;
+		const findingId = findingIdOf(finding);
+		if (batchMode) {
+			if (
+				findingId &&
+				(matchedFindingIds.has(findingId) ||
+					issueCoveredFindingIds.has(findingId))
+			)
+				continue;
+		} else if (
+			matchedTitles.has(titleKey) ||
+			(findingId && issueCoveredFindingIds.has(findingId))
+		) {
+			continue;
+		}
 		missingVerdicts += 1;
 		partitions.needsHuman.push({
 			findingId: finding.findingId ?? finding.id,
@@ -1125,7 +1578,8 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 		needsHuman: partitions.needsHuman.length,
 		supportNotes: supportNotes.length,
 		mergedFindings,
-		verdictsReceived: verdictEntries.length,
+		verdictsReceived: verdictRows.length,
+		batchIntegrityIssues: batchIssues.length,
 		reviewerFindings: reviewerFindings.length,
 		missingVerdicts,
 		partialFailures: partialFailures.length,
@@ -1159,8 +1613,10 @@ export default async function findingPipeline({
 }) {
 	const mode = String(options.mode ?? "");
 	if (mode === "dedup") return dedupFindings(sources, context);
+	if (mode === "batch-devil-advocate")
+		return batchDevilAdvocateFindings(sources, options);
 	if (mode === "partition") return partitionVerdicts(sources, options, context);
 	throw new Error(
-		`finding-pipeline: unknown mode "${mode}" (expected "dedup" or "partition")`,
+		`finding-pipeline: unknown mode "${mode}" (expected "dedup", "batch-devil-advocate", or "partition")`,
 	);
 }
