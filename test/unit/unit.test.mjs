@@ -24265,6 +24265,9 @@ test("deep-research claim-evidence-gate enforces structured evidence, rejoins id
 							claim: "Local docs claim",
 							factSlotIds: ["slot-001"],
 							sourceRefs: ["wsrc_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+							sourceEvidenceHints: [
+								{ path: "docs/usage.md#L12-L16", quote: "local file evidence" },
+							],
 						},
 					],
 				},
@@ -24274,7 +24277,13 @@ test("deep-research claim-evidence-gate enforces structured evidence, rejoins id
 				id: "claim-001",
 				claim: "Restated by verifier",
 				status: "verified",
-				evidence: [{ url: "https://example.test/a", quote: "supports it" }],
+				evidence: [
+					{
+						sourceRef: "wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+						url: "https://example.test/a",
+						quote: "supports it",
+					},
+				],
 			},
 			"verify-claims.claim-002": {
 				id: "claim-002",
@@ -24314,7 +24323,7 @@ test("deep-research claim-evidence-gate enforces structured evidence, rejoins id
 		"wsrc_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 	]);
 	assert.equal(out.gateSummary.identityRejoined, 1);
-	assert.equal(out.gateSummary.sourceRefsRejoined, 2);
+	assert.equal(out.gateSummary.sourceRefsRejoined, 1);
 	assert.equal(out.gateSummary.sourceRefJoinFailures, 1);
 	assert.deepEqual(
 		out.sourceRefJoinFailures.map((gap) => gap.claimId),
@@ -25234,6 +25243,447 @@ test("deep-research claim-evidence-gate blocks unattributed batch rows without s
 		["unknown_verification_batch_id"],
 	);
 	assert.deepEqual(out.statusPartitions.verified, []);
+});
+
+test("deep-research verification batch planner splits refs:none and keys explicit source hints", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"batch-verification-candidates.mjs",
+	);
+	const helper = (
+		await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)
+	).default;
+	const out = await helper({
+		sources: {
+			"sanitize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [
+						{ id: "claim-no-ref-b", claim: "No refs B" },
+						{ id: "claim-no-ref-a", claim: "No refs A" },
+						{
+							id: "claim-hinted",
+							claim: "Hinted source claim",
+							sourceEvidenceHints: [
+								{
+									sourceRef: "wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+									quote: "Hinted source quote",
+								},
+							],
+						},
+						{
+							id: "claim-source-url-hinted",
+							claim: "Singular sourceUrl hint claim",
+							sourceEvidenceHints: [
+								{ sourceUrl: "https://example.test/source-url-hint" },
+							],
+						},
+						{
+							id: "claim-source-urls-hinted",
+							claim: "Plural sourceUrls hint claim",
+							sourceEvidenceHints: [
+								{ sourceUrls: ["https://example.test/source-urls-hint"] },
+							],
+						},
+						{
+							id: "claim-local-evidence",
+							claim: "Candidate evidence row source claim",
+							evidence: [{ file: "docs/evidence-source.md#L1-L3" }],
+						},
+						{
+							id: "claim-repo-path",
+							claim: "Top-level repo path claim",
+							repoPath: "docs/repo-source.md",
+						},
+						{
+							id: "claim-local-path",
+							claim: "Top-level local path claim",
+							localPath: "docs/local-source.md",
+						},
+					],
+				},
+			},
+		},
+		options: { maxBatchSize: 2 },
+	});
+
+	const refsNoneBatches = out.batches.filter(
+		(batch) => batch.sourceKey === "refs:none",
+	);
+	assert.equal(refsNoneBatches.length, 2);
+	assert.ok(refsNoneBatches.every((batch) => batch.claimIds.length === 1));
+	assert.ok(
+		refsNoneBatches.every(
+			(batch) => batch.compatibilityGate.refsNoneMultiClaimBlocked === false,
+		),
+	);
+	const hintedBatch = out.batches.find(
+		(batch) => batch.sourceKey === "refs:wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	);
+	assert.deepEqual(hintedBatch.claimIds, ["claim-hinted"]);
+	assert.equal(hintedBatch.compatibilityGate.explicitSourceHints, true);
+	assert.deepEqual(
+		out.batches.find(
+			(batch) =>
+				batch.sourceKey === "urls:https://example.test/source-url-hint",
+		).claimIds,
+		["claim-source-url-hinted"],
+	);
+	assert.deepEqual(
+		out.batches.find(
+			(batch) =>
+				batch.sourceKey === "urls:https://example.test/source-urls-hint",
+		).claimIds,
+		["claim-source-urls-hinted"],
+	);
+	assert.deepEqual(
+		out.batches.find(
+			(batch) => batch.sourceKey === "local:docs/evidence-source.md#L1-L3",
+		).claimIds,
+		["claim-local-evidence"],
+	);
+	assert.deepEqual(
+		out.batches.find((batch) => batch.sourceKey === "local:docs/repo-source.md")
+			.claimIds,
+		["claim-repo-path"],
+	);
+	assert.deepEqual(
+		out.batches.find(
+			(batch) => batch.sourceKey === "local:docs/local-source.md",
+		).claimIds,
+		["claim-local-path"],
+	);
+});
+
+test("deep-research claim-evidence-gate allows compatible source evidence and catches cross-source contamination", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"claim-evidence-gate.mjs",
+	);
+	const helper = (
+		await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)
+	).default;
+	const out = await helper({
+		sources: {
+			"normalize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [
+						{
+							id: "claim-compatible",
+							claim: "Source A supports claim A.",
+							sourceRefs: ["wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+						},
+						{
+							id: "claim-contaminated",
+							claim: "Source B supports claim B.",
+							sourceRefs: ["wsrc_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+						},
+					],
+				},
+				factSlotCoverage: [],
+			},
+			"verify-claims.compatible": {
+				id: "claim-compatible",
+				status: "verified",
+				evidence: [
+					{
+						sourceRef: "wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+						quote: "Source A supports claim A.",
+					},
+				],
+			},
+			"verify-claims.cross-source": {
+				id: "claim-contaminated",
+				status: "verified",
+				evidence: [
+					{
+						sourceRef: "wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+						quote: "Source A text was incorrectly reused for claim B.",
+					},
+				],
+			},
+		},
+		options: { requireFetchedEvidenceForVerified: true },
+	});
+
+	assert.deepEqual(out.statusPartitions.verified, ["claim-compatible"]);
+	assert.deepEqual(out.statusPartitions.partiallySupported, [
+		"claim-contaminated",
+	]);
+	const contaminated = out.auditedClaims.find(
+		(claim) => claim.id === "claim-contaminated",
+	);
+	assert.equal(
+		contaminated.evidenceGate.reasonCode,
+		"evidence_source_mismatch",
+	);
+	assert.equal(out.gateSummary.sourceEvidenceCompatibilityMismatches, 1);
+	assert.equal(out.batchAdoptionReadiness.status, "blocked");
+	assert.ok(
+		out.batchAdoptionReadiness.blockers.some(
+			(blocker) => blocker.reason === "source_evidence_compatibility_failures",
+		),
+	);
+});
+
+test("deep-research claim-evidence-gate extracts candidate identities from evidence rows, sourceUrl hints, and local paths", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"claim-evidence-gate.mjs",
+	);
+	const helper = (
+		await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)
+	).default;
+	const out = await helper({
+		sources: {
+			"normalize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [
+						{
+							id: "claim-evidence-row-ref",
+							claim:
+								"Candidate-local evidence should bind the verifier source.",
+							evidence: [{ file: "docs/candidate-source.md#L10-L12" }],
+						},
+						{
+							id: "claim-source-url-hint",
+							claim:
+								"Singular sourceUrl hints should bind the verifier source.",
+							sourceEvidenceHints: [
+								{ sourceUrl: "https://example.test/source-url-hint" },
+							],
+						},
+						{
+							id: "claim-repo-path",
+							claim: "Top-level repoPath should bind the verifier source.",
+							repoPath: "docs/repo-source.md#L1-L3",
+						},
+						{
+							id: "claim-local-path",
+							claim: "Top-level localPath should bind the verifier source.",
+							localPath: "docs/local-source.md#L1-L3",
+						},
+					],
+				},
+				factSlotCoverage: [],
+			},
+			"verify-claims.evidence-row-ref": {
+				id: "claim-evidence-row-ref",
+				status: "verified",
+				evidence: [
+					{
+						path: "docs/different-candidate-source.md#L20-L21",
+						quote: "A different local source was used.",
+					},
+				],
+			},
+			"verify-claims.source-url-hint": {
+				id: "claim-source-url-hint",
+				status: "verified",
+				evidence: [
+					{
+						url: "https://example.test/different-source-url-hint",
+						quote: "A different URL source was used.",
+					},
+				],
+			},
+			"verify-claims.repo-path": {
+				id: "claim-repo-path",
+				status: "verified",
+				evidence: [
+					{
+						file: "repo:docs/different-repo-source.md#L4-L5",
+						quote: "A different repo file was used.",
+					},
+				],
+			},
+			"verify-claims.local-path": {
+				id: "claim-local-path",
+				status: "verified",
+				evidence: [
+					{
+						file: "docs/different-local-source.md#L4-L5",
+						quote: "A different local file was used.",
+					},
+				],
+			},
+		},
+		options: { requireFetchedEvidenceForVerified: true },
+	});
+
+	assert.deepEqual(out.statusPartitions.verified, []);
+	assert.deepEqual(out.statusPartitions.partiallySupported, [
+		"claim-evidence-row-ref",
+		"claim-source-url-hint",
+		"claim-repo-path",
+		"claim-local-path",
+	]);
+	assert.equal(out.invalidVerifierRows.length, 0);
+	assert.equal(out.gateSummary.sourceEvidenceCompatibilityMismatches, 4);
+	for (const claim of out.auditedClaims) {
+		assert.equal(claim.evidenceGate.reasonCode, "evidence_source_mismatch");
+	}
+});
+
+test("deep-research claim-evidence-gate routes extra corroborating sources to review unless explicitly allowed", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"claim-evidence-gate.mjs",
+	);
+	const helper = (
+		await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)
+	).default;
+	const sources = {
+		"normalize-claims.main": {
+			claimInventory: {
+				verificationCandidates: [
+					{
+						id: "claim-extra-source",
+						claim: "Primary source plus corroboration supports the claim.",
+						sourceRefs: ["wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+					},
+				],
+			},
+			factSlotCoverage: [],
+		},
+		"verify-claims.extra": {
+			id: "claim-extra-source",
+			status: "verified",
+			evidence: [
+				{
+					sourceRef: "wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+					quote: "Primary source plus corroboration supports the claim.",
+				},
+				{
+					sourceRef: "wsrc_cccccccccccccccccccccccccccccccc",
+					quote: "Independent corroborating source also supports it.",
+				},
+			],
+		},
+	};
+
+	const needsReview = await helper({
+		sources,
+		options: { requireFetchedEvidenceForVerified: true },
+	});
+	assert.deepEqual(needsReview.statusPartitions.partiallySupported, [
+		"claim-extra-source",
+	]);
+	assert.equal(needsReview.invalidVerifierRows.length, 0);
+	assert.equal(
+		needsReview.auditedClaims[0].evidenceGate.reasonCode,
+		"additional_evidence_source_requires_review",
+	);
+
+	const explicitlyAllowed = await helper({
+		sources,
+		options: {
+			requireFetchedEvidenceForVerified: true,
+			allowAdditionalCorroboratingSourcesForVerified: true,
+		},
+	});
+	assert.deepEqual(explicitlyAllowed.statusPartitions.verified, [
+		"claim-extra-source",
+	]);
+	assert.equal(
+		explicitlyAllowed.auditedClaims[0].verdictDigest.sourceCompatibility
+			.exception,
+		"additional_evidence_sources_explicitly_allowed",
+	);
+});
+
+test("deep-research claim-evidence-gate downgrades refs:none multi-claim batch rows", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"claim-evidence-gate.mjs",
+	);
+	const helper = (
+		await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)
+	).default;
+	const out = await helper({
+		sources: {
+			"sanitize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [
+						{ id: "claim-no-ref-a", claim: "No source refs A." },
+						{ id: "claim-no-ref-b", claim: "No source refs B." },
+					],
+				},
+			},
+			"verification-batches.main": {
+				batches: [
+					{
+						id: "vbatch-refs-none",
+						sourceKey: "refs:none",
+						claimIds: ["claim-no-ref-a", "claim-no-ref-b"],
+					},
+				],
+			},
+			"verify-claims.vbatch-refs-none": {
+				schema: "deep-research-verify-claims-batch-v1",
+				digest: "legacy refs:none multi batch",
+				results: [
+					{
+						id: "claim-no-ref-a",
+						status: "verified",
+						evidence: [
+							{
+								url: "https://example.test/source-a",
+								quote: "No source refs A.",
+							},
+						],
+					},
+					{
+						id: "claim-no-ref-b",
+						status: "verification_blocked",
+						caveats: ["source unavailable"],
+					},
+				],
+			},
+		},
+		options: { requireFetchedEvidenceForVerified: true },
+	});
+
+	assert.deepEqual(out.statusPartitions.verified, []);
+	assert.deepEqual(out.statusPartitions.partiallySupported, ["claim-no-ref-a"]);
+	assert.deepEqual(out.statusPartitions.verificationBlocked, [
+		"claim-no-ref-b",
+	]);
+	assert.equal(
+		out.auditedClaims[0].evidenceGate.reasonCode,
+		"refs_none_multi_claim_batch_without_explicit_source_hints",
+	);
+	assert.equal(out.gateSummary.refsNoneMultiClaimBatches, 1);
+	assert.equal(out.batchAdoptionReadiness.status, "blocked");
+	assert.ok(
+		out.batchAdoptionReadiness.blockers.some(
+			(blocker) => blocker.reason === "refs_none_multi_claim_batches",
+		),
+	);
 });
 
 test("deep-research claim-evidence-gate canonicalizes candidate ids and verifier integrity", async () => {
