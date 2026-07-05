@@ -185,11 +185,11 @@ async function listSpecFiles(root: string): Promise<string[]> {
 
 	const bundleSpecs = await Promise.all(
 		entries
-			.filter(
-				(entry) => entry.isDirectory() && !isWorkflowRunDirName(entry.name),
-			)
+			.filter((entry) => entry.isDirectory())
 			.map(async (entry) => {
-				const bundleSpec = join(root, entry.name, "spec.json");
+				const bundleRoot = join(root, entry.name);
+				if (await isWorkflowRunStateDirectory(bundleRoot)) return null;
+				const bundleSpec = join(bundleRoot, "spec.json");
 				return (await isFile(bundleSpec)) ? bundleSpec : null;
 			}),
 	);
@@ -222,8 +222,10 @@ async function isRunnableSpecFile(file: string): Promise<boolean> {
 
 // Run-state directories under .pi/workflows/ contain a spec.json snapshot of
 // the workflow that produced them; they are records, not registrable bundles.
-function isWorkflowRunDirName(name: string): boolean {
-	return /^workflow_[a-z0-9]+_[a-f0-9]+$/.test(name);
+// Older dogfood/eval run ids used descriptive workflow_* names, so prefer the
+// run.json marker over run-id shape when filtering registry candidates.
+async function isWorkflowRunStateDirectory(path: string): Promise<boolean> {
+	return await isFile(join(path, "run.json"));
 }
 
 function isBundleSpec(file: string, searchRoot: string): boolean {

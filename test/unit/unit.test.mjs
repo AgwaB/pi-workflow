@@ -20273,10 +20273,52 @@ test("workflow registry resolves bundle specs and sets correct workflowRoot", as
 			join(cwd, ".pi", "workflows", "workflow_mq99zzzz_abc123", "spec.json"),
 			JSON.stringify(workflowSpec("unit-scout", { name: "bundle-wf" })),
 		);
+		writeFileSync(
+			join(cwd, ".pi", "workflows", "workflow_mq99zzzz_abc123", "run.json"),
+			JSON.stringify({ runId: "workflow_mq99zzzz_abc123" }),
+		);
+		mkdirSync(
+			join(
+				cwd,
+				".pi",
+				"workflows",
+				"workflow_deep_research_current_tree_pins_1_1783181619439",
+			),
+			{ recursive: true },
+		);
+		writeFileSync(
+			join(
+				cwd,
+				".pi",
+				"workflows",
+				"workflow_deep_research_current_tree_pins_1_1783181619439",
+				"spec.json",
+			),
+			JSON.stringify(workflowSpec("unit-scout", { name: "deep-research" })),
+		);
+		writeFileSync(
+			join(
+				cwd,
+				".pi",
+				"workflows",
+				"workflow_deep_research_current_tree_pins_1_1783181619439",
+				"run.json",
+			),
+			JSON.stringify({
+				runId: "workflow_deep_research_current_tree_pins_1_1783181619439",
+			}),
+		);
 		const withRunState = await listWorkflows(cwd);
 		assert.ok(
 			!withRunState.some((workflow) =>
 				workflow.specPath.includes("workflow_mq99zzzz_abc123"),
+			),
+		);
+		assert.ok(
+			!withRunState.some((workflow) =>
+				workflow.specPath.includes(
+					"workflow_deep_research_current_tree_pins_1_1783181619439",
+				),
 			),
 		);
 	} finally {
