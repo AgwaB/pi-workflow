@@ -28120,6 +28120,297 @@ test("workflow artifact bundle can validate strict ref URL availability", async 
 	}
 });
 
+function workflowOutputRawWithRefs(refs) {
+	return [
+		"<control>",
+		JSON.stringify({ schema: "stage-control-v1", digest: "ready" }),
+		"</control>",
+		"<analysis>",
+		"Detailed reasoning with cited refs.",
+		"</analysis>",
+		"<refs>",
+		JSON.stringify(refs),
+		"</refs>",
+	].join("\n");
+}
+
+test("workflow artifact bundle validates unique ref URLs concurrently", async () => {
+	const taskDir = mkdtempSync(join(tmpdir(), "workflow-ref-url-concurrent-"));
+	const originalFetch = globalThis.fetch;
+	const delayMs = 120;
+	const refs = [
+		{ url: "https://a.example.test/one" },
+		{ url: "https://b.example.test/two" },
+		{ url: "https://c.example.test/three" },
+		{ url: "https://d.example.test/four" },
+	];
+	let inFlight = 0;
+	let maxInFlight = 0;
+	let callCount = 0;
+	try {
+		globalThis.fetch = async () => {
+			callCount += 1;
+			inFlight += 1;
+			maxInFlight = Math.max(maxInFlight, inFlight);
+			try {
+				await sleep(delayMs);
+				return {
+					ok: true,
+					status: 200,
+					url: "https://example.test/ok",
+					arrayBuffer: async () => new ArrayBuffer(0),
+				};
+			} finally {
+				inFlight -= 1;
+			}
+		};
+
+		const startedAt = Date.now();
+		const written = await writeWorkflowTaskArtifactBundle({
+			taskDir,
+			rawOutput: workflowOutputRawWithRefs(refs),
+			refsMinItems: 1,
+			refsUrlValidation: { timeoutMs: 1_000, maxUrls: refs.length },
+		});
+		const elapsedMs = Date.now() - startedAt;
+
+		assert.equal(written.valid, true, JSON.stringify(written.parsed.issues));
+		assert.equal(callCount, refs.length);
+		assert.ok(
+			maxInFlight > 1,
+			`expected concurrent fetches, saw ${maxInFlight}`,
+		);
+		assert.ok(
+			elapsedMs < delayMs * refs.length,
+			`expected concurrent validation below serial lower bound, elapsed ${elapsedMs}ms`,
+		);
+	} finally {
+		globalThis.fetch = originalFetch;
+		rmSync(taskDir, { recursive: true, force: true });
+	}
+});
+
+test("workflow artifact bundle keeps ref URL validation serial per host", async () => {
+	const taskDir = mkdtempSync(join(tmpdir(), "workflow-ref-url-per-host-"));
+	const originalFetch = globalThis.fetch;
+	const refs = [
+		{ url: "https://same.example.test/one" },
+		{ url: "http://same.example.test/two" },
+		{ url: "https://same.example.test/three" },
+		{ url: "https://other.example.test/one" },
+		{ url: "https://other.example.test/two" },
+	];
+	const inFlightByHost = new Map();
+	const maxInFlightByHost = new Map();
+	let inFlightTotal = 0;
+	let maxInFlightTotal = 0;
+	let callCount = 0;
+	try {
+		globalThis.fetch = async (url) => {
+			const host = new URL(String(url)).host;
+			callCount += 1;
+			inFlightTotal += 1;
+			maxInFlightTotal = Math.max(maxInFlightTotal, inFlightTotal);
+			const hostInFlight = (inFlightByHost.get(host) ?? 0) + 1;
+			inFlightByHost.set(host, hostInFlight);
+			maxInFlightByHost.set(
+				host,
+				Math.max(maxInFlightByHost.get(host) ?? 0, hostInFlight),
+			);
+			try {
+				await sleep(80);
+				return {
+					ok: true,
+					status: 200,
+					url: String(url),
+					arrayBuffer: async () => new ArrayBuffer(0),
+				};
+			} finally {
+				const remainingForHost = (inFlightByHost.get(host) ?? 1) - 1;
+				if (remainingForHost > 0) inFlightByHost.set(host, remainingForHost);
+				else inFlightByHost.delete(host);
+				inFlightTotal -= 1;
+			}
+		};
+
+		const written = await writeWorkflowTaskArtifactBundle({
+			taskDir,
+			rawOutput: workflowOutputRawWithRefs(refs),
+			refsMinItems: 1,
+			refsUrlValidation: { timeoutMs: 1_000, maxUrls: refs.length },
+		});
+
+		assert.equal(written.valid, true, JSON.stringify(written.parsed.issues));
+		assert.equal(callCount, refs.length);
+		assert.ok(
+			maxInFlightTotal > 1,
+			`expected different hosts to validate concurrently, saw ${maxInFlightTotal}`,
+		);
+		assert.deepEqual([...maxInFlightByHost.entries()].sort(), [
+			["other.example.test", 1],
+			["same.example.test", 1],
+		]);
+	} finally {
+		globalThis.fetch = originalFetch;
+		rmSync(taskDir, { recursive: true, force: true });
+	}
+});
+
+test("workflow artifact bundle validates duplicate ref URLs once", async () => {
+	const taskDir = mkdtempSync(join(tmpdir(), "workflow-ref-url-duplicate-"));
+	const originalFetch = globalThis.fetch;
+	const calls = [];
+	try {
+		globalThis.fetch = async (url, init = {}) => {
+			await sleep(10);
+			calls.push({
+				href: String(url),
+				method: init.method ?? "GET",
+				redirect: init.redirect,
+				range: init.headers?.range,
+				hasSignal: init.signal instanceof AbortSignal,
+			});
+			return {
+				ok: false,
+				status: init.method === "GET" ? 404 : 405,
+				url: String(url),
+				arrayBuffer: async () => new ArrayBuffer(0),
+			};
+		};
+
+		const written = await writeWorkflowTaskArtifactBundle({
+			taskDir,
+			rawOutput: workflowOutputRawWithRefs([
+				{ url: "https://example.test/duplicate" },
+				{ url: "https://example.test/duplicate" },
+			]),
+			refsMinItems: 1,
+			refsUrlValidation: { timeoutMs: 1_000, maxUrls: 5 },
+		});
+		const unavailableIssues = written.parsed.issues.filter(
+			(issue) => issue.code === "unavailable_ref_locator",
+		);
+
+		assert.equal(written.valid, false);
+		assert.deepEqual(
+			calls.map((call) => call.method),
+			["HEAD", "GET"],
+		);
+		assert.deepEqual(
+			calls.map((call) => call.href),
+			["https://example.test/duplicate", "https://example.test/duplicate"],
+		);
+		assert.ok(calls.every((call) => call.redirect === "follow"));
+		assert.ok(calls.every((call) => call.hasSignal));
+		assert.equal(calls[1].range, "bytes=0-2047");
+		assert.deepEqual(
+			unavailableIssues.map((issue) => issue.path),
+			["refs[0]", "refs[1]"],
+		);
+		assert.match(unavailableIssues[0].message, /HTTP 404/);
+		assert.match(
+			buildWorkflowOutputRetryInstructions(unavailableIssues),
+			/Ref repair guidance/,
+		);
+	} finally {
+		globalThis.fetch = originalFetch;
+		rmSync(taskDir, { recursive: true, force: true });
+	}
+});
+
+test("workflow artifact bundle counts duplicate ref URLs toward maxUrls", async () => {
+	const taskDir = mkdtempSync(join(tmpdir(), "workflow-ref-url-maxurls-"));
+	const originalFetch = globalThis.fetch;
+	const calls = [];
+	try {
+		globalThis.fetch = async (url, init = {}) => {
+			await sleep(10);
+			calls.push({ href: String(url), method: init.method ?? "GET" });
+			return {
+				ok: false,
+				status: 404,
+				url: String(url),
+				arrayBuffer: async () => new ArrayBuffer(0),
+			};
+		};
+
+		const written = await writeWorkflowTaskArtifactBundle({
+			taskDir,
+			rawOutput: workflowOutputRawWithRefs([
+				{ url: "https://example.test/first" },
+				{ url: "https://example.test/first" },
+				{ url: "https://example.test/third" },
+			]),
+			refsMinItems: 1,
+			refsUrlValidation: { timeoutMs: 1_000, maxUrls: 2 },
+		});
+		const unavailableIssues = written.parsed.issues.filter(
+			(issue) => issue.code === "unavailable_ref_locator",
+		);
+
+		assert.equal(written.valid, false);
+		assert.deepEqual(
+			calls.map((call) => call.href),
+			["https://example.test/first", "https://example.test/first"],
+		);
+		assert.deepEqual(
+			calls.map((call) => call.method),
+			["HEAD", "GET"],
+		);
+		assert.deepEqual(
+			unavailableIssues.map((issue) => issue.path),
+			["refs[0]", "refs[1]"],
+		);
+	} finally {
+		globalThis.fetch = originalFetch;
+		rmSync(taskDir, { recursive: true, force: true });
+	}
+});
+
+test("workflow artifact bundle orders concurrent ref URL issues by ref index", async () => {
+	const taskDir = mkdtempSync(join(tmpdir(), "workflow-ref-url-order-"));
+	const originalFetch = globalThis.fetch;
+	const delays = new Map([
+		["https://slow.example.test/ref", 80],
+		["https://fast.example.test/ref", 5],
+		["https://mid.example.test/ref", 30],
+	]);
+	try {
+		globalThis.fetch = async (url, init = {}) => {
+			await sleep(delays.get(String(url)) ?? 10);
+			return {
+				ok: false,
+				status: init.method === "GET" ? 404 : 405,
+				url: String(url),
+				arrayBuffer: async () => new ArrayBuffer(0),
+			};
+		};
+
+		const written = await writeWorkflowTaskArtifactBundle({
+			taskDir,
+			rawOutput: workflowOutputRawWithRefs([
+				{ url: "https://slow.example.test/ref" },
+				{ url: "https://fast.example.test/ref" },
+				{ url: "https://mid.example.test/ref" },
+			]),
+			refsMinItems: 1,
+			refsUrlValidation: { timeoutMs: 1_000, maxUrls: 5 },
+		});
+		const unavailableIssues = written.parsed.issues.filter(
+			(issue) => issue.code === "unavailable_ref_locator",
+		);
+
+		assert.equal(written.valid, false);
+		assert.deepEqual(
+			unavailableIssues.map((issue) => issue.path),
+			["refs[0]", "refs[1]", "refs[2]"],
+		);
+	} finally {
+		globalThis.fetch = originalFetch;
+		rmSync(taskDir, { recursive: true, force: true });
+	}
+});
+
 test("workflow artifact bundle can restrict refs to an upstream source ledger", async () => {
 	const taskDir = mkdtempSync(join(tmpdir(), "workflow-ref-ledger-"));
 	try {
