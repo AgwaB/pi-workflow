@@ -42,6 +42,7 @@ import {
 
 const TERMINAL_INDEX_LIMIT = 50;
 const LEASE_STALE_MS = 30_000;
+export const FAIL_FAST_CANCELLED_STATUS_DETAIL = "fail_fast_cancelled";
 const LEASE_ABSOLUTE_STALE_MS = 7 * 24 * 60 * 60 * 1000;
 const INDEX_LOCK_WAIT_MS = 5_000;
 const INDEX_LOCK_RETRY_MS = 50;
@@ -475,6 +476,9 @@ export async function createRunRecord(
 		taskSummary: emptySummary(),
 		cwd: compiled.cwd,
 		backend: compiled.backend,
+		...(compiled.failurePolicy
+			? { failurePolicy: compiled.failurePolicy }
+			: {}),
 		...(options.parentRunId ? { parentRunId: options.parentRunId } : {}),
 		...(options.rootRunId ? { rootRunId: options.rootRunId } : {}),
 		...(hasDynamicController
@@ -1378,7 +1382,9 @@ function selectIndexEntries(
 	);
 }
 
-function stripIndexTaskRows(entry: WorkflowIndexRunEntry): WorkflowIndexRunEntry {
+function stripIndexTaskRows(
+	entry: WorkflowIndexRunEntry,
+): WorkflowIndexRunEntry {
 	const { tasks: _tasks, ...slim } = entry;
 	return slim;
 }
@@ -1435,6 +1441,33 @@ export function summarizeTasks(tasks: WorkflowTaskRunRecord[]): TaskSummary {
 	for (const task of tasks) {
 		summary[task.status] += 1;
 		summary.total += 1;
+	}
+	return summary;
+}
+
+export interface TaskFailureClassSummary {
+	failed: number;
+	failFastCancelled: number;
+	otherInterrupted: number;
+}
+
+export function summarizeTaskFailureClasses(
+	tasks: Pick<WorkflowTaskRunRecord, "status" | "statusDetail">[],
+): TaskFailureClassSummary {
+	const summary: TaskFailureClassSummary = {
+		failed: 0,
+		failFastCancelled: 0,
+		otherInterrupted: 0,
+	};
+	for (const task of tasks) {
+		if (task.status === "failed") {
+			summary.failed += 1;
+			continue;
+		}
+		if (task.status !== "interrupted") continue;
+		if (task.statusDetail === FAIL_FAST_CANCELLED_STATUS_DETAIL)
+			summary.failFastCancelled += 1;
+		else summary.otherInterrupted += 1;
 	}
 	return summary;
 }

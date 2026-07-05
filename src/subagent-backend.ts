@@ -1156,22 +1156,29 @@ export async function cleanupSubagentRun(
 ): Promise<void> {
 	try {
 		for (const task of run.tasks) {
-			const handle = getSubagentHandle(task);
-			if (!handle) continue;
-			const api = await loadSubagentApi();
-			await api
-				.interruptSubagent({
-					cwd: handle.cwd,
-					runsDir: handle.runsDir,
-					runId: handle.runId,
-					attemptId: handle.attemptId,
-					reason: "workflow cleanup",
-				})
-				.catch(() => undefined);
+			await interruptSubagentTask(task, "workflow cleanup");
 		}
 	} finally {
 		for (const task of run.tasks) releaseLiveModelWorkerSlotForTask(run, task);
 	}
+}
+
+export async function interruptSubagentTask(
+	task: WorkflowTaskRunRecord,
+	reason: string,
+): Promise<void> {
+	const handle = getSubagentHandle(task);
+	if (!handle) return;
+	const api = await loadSubagentApi();
+	await api
+		.interruptSubagent({
+			cwd: handle.cwd,
+			runsDir: handle.runsDir,
+			runId: handle.runId,
+			attemptId: handle.attemptId,
+			reason,
+		})
+		.catch(() => undefined);
 }
 
 export async function launchSubagentTask(

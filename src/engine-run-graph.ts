@@ -1,5 +1,6 @@
 import {
 	createTaskRunRecord,
+	FAIL_FAST_CANCELLED_STATUS_DETAIL,
 	isTerminalTaskStatus,
 	setTaskTerminal,
 } from "./store.js";
@@ -673,6 +674,88 @@ export function replaceDependencyList(
 		else replaced.push(dep);
 	}
 	return [...new Set(replaced)];
+}
+
+export interface FailFastCancellationSummary {
+	cancelledTaskIds: string[];
+	interruptedTaskIds: string[];
+}
+
+export function failFastPolicyEnabled(compiledFlow: CompiledWorkflow): boolean {
+	const policy = compiledFlow.failurePolicy;
+	return (
+		policy?.failFast === true &&
+		(policy.cancelSiblingsOnFailure === true ||
+			policy.cancelDescendantsOnParentFailure === true)
+	);
+}
+
+export function markFailFastCancellations(
+	run: WorkflowRunRecord,
+	compiledFlow: CompiledWorkflow,
+): FailFastCancellationSummary {
+	if (!failFastPolicyEnabled(compiledFlow)) {
+		return { cancelledTaskIds: [], interruptedTaskIds: [] };
+	}
+	const failedSpecIds = new Set(
+		run.tasks
+			.filter((task) => task.status === "failed")
+			.map((task) => task.specId),
+	);
+	if (failedSpecIds.size === 0) {
+		return { cancelledTaskIds: [], interruptedTaskIds: [] };
+	}
+
+	const descendantSpecIds = descendantSpecIdsFor(compiledFlow, failedSpecIds);
+	const cancelledTaskIds: string[] = [];
+	const interruptedTaskIds: string[] = [];
+	for (const [index, task] of run.tasks.entries()) {
+		if (task.status !== "pending" && task.status !== "running") continue;
+		const compiledTask = compiledFlow.tasks[index];
+		if (!compiledTask) continue;
+		const isDescendant = descendantSpecIds.has(task.specId);
+		const eligible = isDescendant
+			? compiledFlow.failurePolicy?.cancelDescendantsOnParentFailure === true
+			: compiledFlow.failurePolicy?.cancelSiblingsOnFailure === true;
+		if (!eligible) continue;
+		const wasRunning = task.status === "running";
+		if (
+			setTaskTerminal(task, "interrupted", FAIL_FAST_CANCELLED_STATUS_DETAIL, {
+				exitCode: 130,
+				lastMessage: "cancelled by workflow fail-fast policy",
+			})
+		) {
+			cancelledTaskIds.push(task.taskId);
+			if (wasRunning) interruptedTaskIds.push(task.taskId);
+		}
+	}
+	return { cancelledTaskIds, interruptedTaskIds };
+}
+
+function descendantSpecIdsFor(
+	compiledFlow: CompiledWorkflow,
+	rootSpecIds: ReadonlySet<string>,
+): Set<string> {
+	const childrenByDependency = new Map<string, string[]>();
+	for (const task of compiledFlow.tasks) {
+		for (const dependency of task.dependsOn ?? []) {
+			const children = childrenByDependency.get(dependency) ?? [];
+			children.push(task.id);
+			childrenByDependency.set(dependency, children);
+		}
+	}
+	const descendants = new Set<string>();
+	const queue = [...rootSpecIds];
+	while (queue.length > 0) {
+		const specId = queue.shift()!;
+		for (const childSpecId of childrenByDependency.get(specId) ?? []) {
+			if (rootSpecIds.has(childSpecId) || descendants.has(childSpecId))
+				continue;
+			descendants.add(childSpecId);
+			queue.push(childSpecId);
+		}
+	}
+	return descendants;
 }
 
 export function markDagDependentsSkipped(
