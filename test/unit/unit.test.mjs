@@ -9833,6 +9833,132 @@ test("compiler warns when a foreach path is absent from the source control schem
 	}
 });
 
+test("compiler warns about workflow-quality risks before runtime", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		mkdirSync(join(cwd, "schemas"), { recursive: true });
+		writeFileSync(
+			join(cwd, "schemas", "plan.schema.json"),
+			JSON.stringify({
+				type: "object",
+				required: ["items"],
+				properties: { items: { type: "array" } },
+			}),
+		);
+		writeFileSync(
+			join(cwd, "schemas", "shard.schema.json"),
+			JSON.stringify({
+				type: "object",
+				required: ["mechanisms", "strategyDecisions", "coverage"],
+				properties: {
+					mechanisms: {
+						type: "array",
+						items: {
+							type: "object",
+							required: ["mechanism"],
+							properties: { mechanism: { type: "string" } },
+						},
+					},
+					strategyDecisions: {
+						type: "array",
+						items: {
+							type: "object",
+							required: ["decision"],
+							properties: { decision: { type: "string" } },
+						},
+					},
+					coverage: {
+						type: "object",
+						properties: {
+							anyPathsSkipped: { type: "array", items: { type: "string" } },
+						},
+					},
+				},
+			}),
+		);
+		writeFileSync(
+			join(cwd, "schemas", "synthesis.schema.json"),
+			JSON.stringify({
+				type: "object",
+				properties: {
+					conceptMap: { type: "array" },
+					architecture: { type: "array" },
+					controlFlows: { type: "array" },
+					strategyDecisions: { type: "array" },
+					internalResearch: { type: "array" },
+					crossRepoRelationships: { type: "array" },
+					evidenceIndex: { type: "array" },
+				},
+			}),
+		);
+		const spec = artifactGraphWorkflowSpec({
+			artifactGraph: {
+				stages: [
+					{
+						id: "plan",
+						type: "single",
+						prompt: "Plan items.",
+						output: { controlSchema: "./schemas/plan.schema.json" },
+					},
+					{
+						id: "shard",
+						type: "foreach",
+						from: { source: "plan", path: "$.items" },
+						each: {
+							prompt:
+								"Analyze mechanisms and strategyDecisions. coverage must include anyPathsSkipped array with reason.",
+						},
+						output: { controlSchema: "./schemas/shard.schema.json" },
+					},
+					{
+						id: "synthesize",
+						type: "reduce",
+						from: ["plan", "shard"],
+						sourceProjection: {
+							include: [
+								"$.items",
+								"$.observations",
+								"$.mechanisms",
+								"$.strategyDecisions",
+								"$.researchNotes",
+								"$.coverage",
+							],
+							maxChars: 60000,
+						},
+						prompt: "Synthesize everything.",
+						output: { controlSchema: "./schemas/synthesis.schema.json" },
+					},
+				],
+			},
+		});
+
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			specPath: "spec.json",
+			task: "Analyze",
+		});
+		assert.ok(
+			compiled.warnings.some((w) =>
+				/anyPathsSkipped as an array with reason/.test(w),
+			),
+			`expected prompt/schema drift warning, got: ${JSON.stringify(compiled.warnings)}`,
+		);
+		assert.ok(
+			compiled.warnings.some((w) =>
+				/requires \$\.mechanisms\[\]\.mechanism/.test(w),
+			),
+			`expected fragile mechanism warning, got: ${JSON.stringify(compiled.warnings)}`,
+		);
+		assert.ok(
+			compiled.warnings.some((w) => /reduce stage "synthesize"/.test(w)),
+			`expected huge reducer warning, got: ${JSON.stringify(compiled.warnings)}`,
+		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("partial foreach continues scheduling after an item failure", () => {
 	assert.equal(
 		shouldScheduleAfterStageFailure({

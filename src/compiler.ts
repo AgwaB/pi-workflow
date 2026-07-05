@@ -614,6 +614,10 @@ export async function compileWorkflow(
 			spec.artifactGraph?.stages ?? [],
 			foreachSpecDir,
 		)),
+		...(await collectWorkflowQualityWarnings(
+			spec.artifactGraph?.stages ?? [],
+			foreachSpecDir,
+		)),
 	);
 	const failurePolicy = compileWorkflowFailurePolicy(spec.artifactGraph);
 	if (failurePolicy) compiled.failurePolicy = failurePolicy;
@@ -666,6 +670,167 @@ async function collectForeachPathWarnings(
 		}
 	}
 	return warnings;
+}
+
+async function collectWorkflowQualityWarnings(
+	stages: any[],
+	specDir: string,
+): Promise<string[]> {
+	const warnings: string[] = [];
+	const stageById = new Map<string, any>();
+	const schemaByStageId = new Map<string, any>();
+	for (const stage of stages) {
+		if (stage && typeof stage.id === "string") stageById.set(stage.id, stage);
+	}
+
+	for (const stage of stages) {
+		if (!stage || typeof stage.id !== "string") continue;
+		const controlSchema = stage.output?.controlSchema;
+		if (typeof controlSchema !== "string") continue;
+		let schema: any;
+		try {
+			schema = JSON.parse(
+				await readFile(resolve(specDir, controlSchema), "utf8"),
+			);
+		} catch {
+			continue;
+		}
+		schemaByStageId.set(stage.id, schema);
+		const prompt = stagePromptText(stage);
+
+		if (
+			hasStringArrayProperty(schema, ["coverage", "anyPathsSkipped"]) &&
+			/array\s+with\s+reason|with\s+reason/i.test(prompt)
+		) {
+			warnings.push(
+				`stage "${stage.id}" prompt asks for anyPathsSkipped as an array with reason, but ${controlSchema} defines coverage.anyPathsSkipped as string[]. Align the prompt/schema (for example string messages, or object items with path/reason) before running.`,
+			);
+		}
+
+		for (const field of fragileRequiredItemFields(schema)) {
+			if (!promptMentionsJsonKey(prompt, field.key)) {
+				warnings.push(
+					`stage "${stage.id}" requires ${field.path} but the prompt does not show the exact JSON key "${field.key}". Add a small <control> JSON skeleton or few-shot example using that key to avoid model drift to aliases such as name/claim/title.`,
+				);
+			}
+		}
+	}
+
+	for (const stage of stages) {
+		if (stage?.type !== "reduce" || typeof stage.id !== "string") continue;
+		const sourceIds = normalizeStageRefs(stage.from);
+		if (
+			!sourceIds.some((sourceId) => stageById.get(sourceId)?.type === "foreach")
+		) {
+			continue;
+		}
+		const schema = schemaByStageId.get(stage.id);
+		if (!schema) continue;
+		const arrayFields = topLevelArrayPropertyNames(schema);
+		const includeCount = Array.isArray(stage.sourceProjection?.include)
+			? stage.sourceProjection.include.length
+			: 0;
+		const maxChars =
+			typeof stage.sourceProjection?.maxChars === "number"
+				? stage.sourceProjection.maxChars
+				: 0;
+		if (includeCount >= 5 && maxChars >= 50000 && arrayFields.length >= 5) {
+			warnings.push(
+				`reduce stage "${stage.id}" fans in foreach outputs with ${includeCount} projected paths (maxChars ${maxChars}) and a large control schema (${arrayFields.length} top-level arrays: ${arrayFields.slice(0, 6).join(", ")}). High length-cutoff/control-bloat risk: split into intermediate reducers/support helpers, cap evidence indexes, and keep large narrative in <analysis>.`,
+			);
+		}
+	}
+
+	return warnings;
+}
+
+function stagePromptText(stage: any): string {
+	const parts: string[] = [];
+	if (typeof stage.prompt === "string") parts.push(stage.prompt);
+	if (typeof stage.each?.prompt === "string") parts.push(stage.each.prompt);
+	return parts.join("\n");
+}
+
+function promptMentionsJsonKey(prompt: string, key: string): boolean {
+	return prompt.includes(`"${key}":`) || prompt.includes(`"${key}" :`);
+}
+
+function hasStringArrayProperty(schema: any, path: string[]): boolean {
+	let node = schema;
+	for (const segment of path) {
+		node = node?.properties?.[segment];
+		if (!node) return false;
+	}
+	return node?.type === "array" && node.items?.type === "string";
+}
+
+function fragileRequiredItemFields(
+	schema: any,
+	parentPath = "$",
+): Array<{ path: string; key: string }> {
+	const findings: Array<{ path: string; key: string }> = [];
+	const properties = schema?.properties;
+	if (!properties || typeof properties !== "object") return findings;
+	for (const [key, value] of Object.entries(properties)) {
+		const child: any = value;
+		const childPath = `${parentPath}.${key}`;
+		if (child?.type === "array" && child.items?.type === "object") {
+			const required = Array.isArray(child.items.required)
+				? child.items.required.filter(
+						(item: unknown) => typeof item === "string",
+					)
+				: [];
+			for (const requiredKey of required) {
+				if (isDriftProneRequiredItemKey(String(key), requiredKey)) {
+					findings.push({
+						path: `${childPath}[].${requiredKey}`,
+						key: requiredKey,
+					});
+				}
+			}
+			findings.push(
+				...fragileRequiredItemFields(child.items, `${childPath}[]`),
+			);
+		} else if (child?.type === "object") {
+			findings.push(...fragileRequiredItemFields(child, childPath));
+		}
+	}
+	return findings;
+}
+
+function isDriftProneRequiredItemKey(
+	parentKey: string,
+	requiredKey: string,
+): boolean {
+	const lowerParent = parentKey.toLowerCase();
+	const lowerRequired = requiredKey.toLowerCase();
+	if (["name", "title", "id", "claim"].includes(lowerRequired)) return false;
+	if (lowerParent === `${lowerRequired}s`) return true;
+	if (
+		lowerParent.endsWith("ies") &&
+		`${lowerRequired.slice(0, -1)}ies` === lowerParent
+	)
+		return true;
+	return ["mechanism", "decision"].includes(lowerRequired);
+}
+
+function topLevelArrayPropertyNames(schema: any): string[] {
+	const properties = schema?.properties;
+	if (!properties || typeof properties !== "object") return [];
+	return Object.entries(properties)
+		.filter(([, value]: [string, any]) => value?.type === "array")
+		.map(([key]) => key);
+}
+
+function normalizeStageRefs(value: unknown): string[] {
+	if (typeof value === "string") return [value];
+	if (Array.isArray(value))
+		return value.filter((item): item is string => typeof item === "string");
+	if (value && typeof value === "object") {
+		const source = (value as any).source ?? (value as any).stage;
+		return typeof source === "string" ? [source] : [];
+	}
+	return [];
 }
 
 function runtimeSettings(value: unknown): WorkflowRuntimeDefaults | undefined {
