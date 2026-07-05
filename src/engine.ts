@@ -793,7 +793,7 @@ async function scheduleDagPass(
 		await writeRunRecord(cwd, run);
 		run = await readRunRecord(cwd, run.runId);
 	}
-	if (await applyFailFastCancellation(cwd, run, compiledFlow)) return;
+	if (await applyFailFastCancellation(cwd, run, compiledFlow)) return false;
 
 	const maxConcurrency = Math.max(
 		1,
@@ -865,7 +865,7 @@ async function scheduleDagPass(
 			leaseSignal,
 		);
 		assertScheduleLeaseActive(leaseSignal);
-		if (await applyFailFastCancellation(cwd, run, compiledFlow)) return;
+		if (await applyFailFastCancellation(cwd, run, compiledFlow)) return false;
 		if (launched && run.tasks[index]?.status === "running") running += 1;
 	}
 	return false;

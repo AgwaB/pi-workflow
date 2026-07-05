@@ -85,6 +85,7 @@ const REQUIRED_FLAG_KEYS = new Set(["required"]);
 const REFS_OUTPUT_KEYS = new Set(["required", "minItems"]);
 const INPUT_POLICY_KEYS = new Set([
 	"requiredReads",
+	"requiredReadPolicy",
 	"enforcement",
 	"artifactAccess",
 ]);
@@ -95,6 +96,15 @@ const REQUIRED_READ_OBJECT_KEYS = new Set([
 	"maxChars",
 	"maxItems",
 	"count",
+]);
+const REQUIRED_READ_POLICY_KEYS = new Set([
+	"source",
+	"artifact",
+	"path",
+	"maxItems",
+	"maxChars",
+	"mustNotTruncate",
+	"minReturnedBytes",
 ]);
 const SOURCE_PROJECTION_KEYS = new Set(["include", "maxChars"]);
 const SUPPORT_KEYS = new Set(["uses", "options"]);
@@ -849,6 +859,12 @@ function validateInputPolicy(
 		siblingIds,
 		issues,
 	);
+	validateRequiredReadPolicy(
+		policy.requiredReadPolicy,
+		`${path}.requiredReadPolicy`,
+		siblingIds,
+		issues,
+	);
 	if (policy.enforcement !== undefined && policy.enforcement !== "fail") {
 		issues.push({ path: `${path}.enforcement`, message: 'must be "fail"' });
 	}
@@ -869,6 +885,15 @@ function validateInputPolicy(
 		) {
 			issues.push({
 				path: `${path}.requiredReads`,
+				message: 'must be empty when artifactAccess is "none"',
+			});
+		}
+		if (
+			Array.isArray(policy.requiredReadPolicy) &&
+			policy.requiredReadPolicy.length > 0
+		) {
+			issues.push({
+				path: `${path}.requiredReadPolicy`,
 				message: 'must be empty when artifactAccess is "none"',
 			});
 		}
@@ -976,6 +1001,92 @@ function normalizeRequiredReadForValidation(
 			: {}),
 		...(typeof record.count === "number" ? { count: record.count } : {}),
 	};
+}
+
+function validateRequiredReadPolicy(
+	value: unknown,
+	path: string,
+	sourceIds: ReadonlySet<string>,
+	issues: ValidationIssue[],
+): void {
+	if (value === undefined) return;
+	if (!Array.isArray(value)) {
+		issues.push({ path, message: "must be an array" });
+		return;
+	}
+	const seen = new Set<string>();
+	for (const [index, item] of value.entries()) {
+		const itemPath = `${path}[${index}]`;
+		const policy = recordAt(item, itemPath, issues);
+		if (!policy) continue;
+		rejectUnknownKeys(policy, REQUIRED_READ_POLICY_KEYS, itemPath, issues);
+		const source = requiredString(policy.source, `${itemPath}.source`, issues);
+		const artifact = requiredString(
+			policy.artifact,
+			`${itemPath}.artifact`,
+			issues,
+		);
+		if (source !== undefined && artifact !== undefined) {
+			const readName = `${source}.${artifact}`;
+			const key = JSON.stringify({
+				source,
+				artifact,
+				path: policy.path,
+				maxItems: policy.maxItems,
+				maxChars: policy.maxChars,
+				mustNotTruncate: policy.mustNotTruncate,
+				minReturnedBytes: policy.minReturnedBytes,
+			});
+			if (seen.has(key))
+				issues.push({
+					path: itemPath,
+					message: `duplicate policy for ${readName}`,
+				});
+			seen.add(key);
+			validateRequiredRead({ source, artifact }, itemPath, sourceIds, issues);
+		}
+		validateRequiredReadPolicyPath(policy.path, `${itemPath}.path`, issues);
+		optionalPositiveInteger(policy.maxItems, `${itemPath}.maxItems`, issues);
+		optionalPositiveInteger(policy.maxChars, `${itemPath}.maxChars`, issues);
+		if (
+			policy.path === undefined &&
+			(policy.maxItems !== undefined || policy.maxChars !== undefined)
+		) {
+			issues.push({
+				path: `${itemPath}.path`,
+				message: "is required when maxItems or maxChars is set",
+			});
+		}
+		optionalBoolean(
+			policy.mustNotTruncate,
+			`${itemPath}.mustNotTruncate`,
+			issues,
+		);
+		optionalPositiveInteger(
+			policy.minReturnedBytes,
+			`${itemPath}.minReturnedBytes`,
+			issues,
+		);
+	}
+}
+
+function validateRequiredReadPolicyPath(
+	value: unknown,
+	path: string,
+	issues: ValidationIssue[],
+): void {
+	if (value === undefined) return;
+	if (typeof value !== "string" || value.trim() === "") {
+		issues.push({ path, message: "must be a non-empty string" });
+		return;
+	}
+	if (!SIMPLE_JSON_PATH_PATTERN.test(value)) {
+		issues.push({
+			path,
+			message:
+				"must be $ or a simple dot JSON path like $.claims.items; array selectors are not supported",
+		});
+	}
 }
 
 function validateRequiredRead(

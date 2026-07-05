@@ -9,6 +9,7 @@ import {
 } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 
+import { stringifyPromptJson } from "./prompt-json.js";
 import { readSimpleJsonPath } from "./workflow-runtime.js";
 
 export const WORKFLOW_SOURCE_MANIFEST_SCHEMA =
@@ -464,7 +465,7 @@ async function readProjectedWorkflowArtifact(options: {
 		...options,
 		path: effectivePath,
 	});
-	const serialized = JSON.stringify(sliced.value, null, 2);
+	const serialized = stringifyPromptJson(sliced.value);
 	const maxChars = options.maxChars ?? DEFAULT_MAX_BYTES;
 	const preview =
 		serialized.length > maxChars ? serialized.slice(0, maxChars) : serialized;
@@ -489,7 +490,7 @@ async function readProjectedWorkflowArtifact(options: {
 	const envelope = projection.charsTruncated
 		? { projection, preview }
 		: { projection, value: sliced.value };
-	const content = JSON.stringify(envelope, null, 2);
+	const content = stringifyPromptJson(envelope);
 	return {
 		source: options.source,
 		artifact: options.artifact,
@@ -557,7 +558,8 @@ function applyJsonPathSegmentAliases(path: string): string {
 	const aliased = segments.map(
 		(segment) => JSON_PATH_SEGMENT_ALIASES[segment] ?? segment,
 	);
-	if (aliased.every((segment, index) => segment === segments[index])) return path;
+	if (aliased.every((segment, index) => segment === segments[index]))
+		return path;
 	return `$.${aliased.join(".")}`;
 }
 
