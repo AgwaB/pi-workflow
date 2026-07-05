@@ -20496,16 +20496,57 @@ test("workflow registry resolves exact names", async () => {
 		);
 
 		const workflows = await listWorkflows(cwd);
-		assert.deepEqual(
-			workflows.map((item) => item.name),
-			["review"],
-		);
+		assert.ok(workflows.some((item) => item.name === "review"));
 		const resolved = await resolveWorkflowRef("review", cwd);
 		assert.equal(resolved.workflowName, "review");
 		const loaded = await loadWorkflow("review", cwd);
 		assert.equal(loaded.spec.name, "review");
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("workflow registry prefers project workflow over local state and bundled duplicates", async () => {
+	const cwd = makeProject();
+	const packageWorkflowRoot = join(process.cwd(), ".tmp", "workflows");
+	const packageDuplicateRoot = join(packageWorkflowRoot, "priority-test");
+	try {
+		mkdirSync(join(cwd, "workflows", "priority-test"), { recursive: true });
+		writeFileSync(
+			join(cwd, "workflows", "priority-test", "spec.json"),
+			JSON.stringify(artifactGraphWorkflowSpec({ name: "priority-test" })),
+		);
+		mkdirSync(join(cwd, ".pi", "workflows", "priority-test"), {
+			recursive: true,
+		});
+		writeFileSync(
+			join(cwd, ".pi", "workflows", "priority-test", "spec.json"),
+			JSON.stringify(artifactGraphWorkflowSpec({ name: "priority-test" })),
+		);
+		mkdirSync(packageDuplicateRoot, { recursive: true });
+		writeFileSync(
+			join(packageDuplicateRoot, "spec.json"),
+			JSON.stringify(artifactGraphWorkflowSpec({ name: "priority-test" })),
+		);
+
+		const workflows = await listWorkflows(cwd);
+		const duplicates = workflows.filter(
+			(workflow) => workflow.name === "priority-test",
+		);
+		assert.equal(duplicates.length, 1);
+		assert.equal(
+			duplicates[0].specPath,
+			join(cwd, "workflows", "priority-test", "spec.json"),
+		);
+
+		const resolved = await resolveWorkflowRef("priority-test", cwd);
+		assert.equal(
+			resolved.specPath,
+			join(cwd, "workflows", "priority-test", "spec.json"),
+		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+		rmSync(packageDuplicateRoot, { recursive: true, force: true });
 	}
 });
 
