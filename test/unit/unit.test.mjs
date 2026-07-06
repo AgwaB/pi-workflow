@@ -30076,6 +30076,54 @@ test("workflow output parser repairs known workflow control schema slips before 
 	assert.deepEqual(researchQuestion.control.additionalUnverifiedLeads, [
 		{ note: "gVisor/Firecracker comparison needs a follow-up query" },
 	]);
+
+	const normalizeClaimsSchema = JSON.parse(
+		readFileSync(
+			join(
+				repoRoot,
+				"workflows",
+				"deep-research",
+				"schemas",
+				"deep-research-normalize-claims-control.schema.json",
+			),
+			"utf8",
+		),
+	);
+	const normalizeClaims = parseWorkflowOutput(
+		[
+			"<control>",
+			JSON.stringify({
+				schema: "deep-research-normalize-claims-control.v1",
+				digest: "gap reason null from model should be omitted",
+				claimInventory: {
+					verificationCandidates: [],
+					preservedClaims: [],
+					duplicates: [],
+				},
+				factSlotCoverage: [
+					{
+						slotId: "slot-001",
+						status: "partial",
+						verificationCandidateIds: [],
+						gapReason: null,
+					},
+				],
+			}),
+			"</control>",
+			"<analysis>",
+			"analysis",
+			"</analysis>",
+			"<refs>",
+			"[]",
+			"</refs>",
+		].join("\n"),
+		{ controlJsonSchema: normalizeClaimsSchema },
+	);
+	assert.equal(normalizeClaims.valid, true, JSON.stringify(normalizeClaims.issues));
+	assert.equal(
+		"gapReason" in normalizeClaims.control.factSlotCoverage[0],
+		false,
+	);
 });
 
 test("workflow output parser rejects missing sections, bad control, outside prose, and contract failures", () => {

@@ -636,6 +636,15 @@ function normalizeKnownWorkflowControlSchema(
 				additionalUnverifiedLeads: repairedLeads,
 			};
 	}
+	if (Array.isArray(control.factSlotCoverage)) {
+		const repairedCoverage = normalizeObjectArrayStringFields(
+			control.factSlotCoverage,
+			properties.factSlotCoverage,
+			["gapReason"],
+		);
+		if (repairedCoverage !== control.factSlotCoverage)
+			normalized = { ...normalized, factSlotCoverage: repairedCoverage };
+	}
 	return normalized;
 }
 
@@ -735,6 +744,68 @@ function normalizeObjectArrayRows(rows: unknown[], textKey: string): unknown[] {
 		}
 	}
 	return normalized ?? rows;
+}
+
+function normalizeObjectArrayStringFields(
+	rows: unknown[],
+	arraySchema: JsonSchema | undefined,
+	fieldNames: string[],
+): unknown[] {
+	if (!isJsonSchemaObject(arraySchema) || !schemaHasType(arraySchema, "array"))
+		return rows;
+	const itemSchema = !Array.isArray(arraySchema.items)
+		? arraySchema.items
+		: undefined;
+	if (!isJsonSchemaObject(itemSchema) || !schemaHasType(itemSchema, "object"))
+		return rows;
+	const itemProperties = itemSchema.properties ?? {};
+	const itemRequired = Array.isArray(itemSchema.required)
+		? itemSchema.required
+		: [];
+	let normalized: unknown[] | undefined;
+	for (const [index, row] of rows.entries()) {
+		if (!isPlainRecord(row)) continue;
+		let repaired = row;
+		for (const field of fieldNames) {
+			if (!isStringJsonSchema(itemProperties[field])) continue;
+			if (!(field in row)) continue;
+			const value = row[field];
+			if (typeof value === "string") continue;
+			if (value == null && !itemRequired.includes(field)) {
+				if (repaired === row) repaired = { ...row };
+				delete repaired[field];
+				continue;
+			}
+			const text = stringFromStructuredFieldValue(value);
+			if (text !== undefined) {
+				if (repaired === row) repaired = { ...row };
+				repaired[field] = text;
+			}
+		}
+		if (repaired !== row) {
+			if (normalized === undefined) normalized = [...rows];
+			normalized[index] = repaired;
+		}
+	}
+	return normalized ?? rows;
+}
+
+function isStringJsonSchema(schema: JsonSchema | undefined): boolean {
+	if (!isJsonSchemaObject(schema)) return false;
+	return schemaHasType(schema, "string");
+}
+
+function stringFromStructuredFieldValue(value: unknown): string | undefined {
+	if (typeof value === "number" || typeof value === "boolean")
+		return String(value);
+	if (isPlainRecord(value)) {
+		for (const key of ["reason", "message", "summary", "note", "text"]) {
+			const candidate = value[key];
+			if (typeof candidate === "string" && candidate.trim())
+				return candidate.trim();
+		}
+	}
+	return undefined;
 }
 
 function schemaHasType(schema: JsonSchemaObject, type: string): boolean {
