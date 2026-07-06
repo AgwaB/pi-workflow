@@ -4,6 +4,10 @@ import {
 	isTerminalTaskStatus,
 	setTaskTerminal,
 } from "./store.js";
+import {
+	EXPERIMENTAL_CACHE_STABLE_FOREACH_ENV,
+	workflowExperimentalFlagEnabled,
+} from "./experimental-speed-flags.js";
 import type {
 	CompiledTask,
 	CompiledWorkflow,
@@ -501,26 +505,44 @@ export function dependenciesReady(
 	const partial =
 		stageSourcePolicy(compiledFlow, compiledTask.stageId ?? "") === "partial";
 	if (foreachStreamingEnabled(compiledTask)) {
-		let completedDependencyReady = false;
-		let runningDependencyMayHavePartialItems = false;
-		let allKnownDependenciesTerminal = true;
+		const sourceStageIds = new Set(
+			sourceStageIdsForFrom(compiledTask.foreach?.from),
+		);
+		const tasksBySpecId = new Map(
+			compiledFlow.tasks.map((task) => [task.id, task]),
+		);
+		let hasStreamingSourceDependency = false;
+		let completedSourceDependencyReady = false;
+		let runningSourceDependencyMayHavePartialItems = false;
+		let allKnownSourceDependenciesTerminal = true;
 		for (const dep of deps) {
 			const status = bySpecId.get(dep)?.status;
+			const depTask = tasksBySpecId.get(dep);
+			const isStreamingSourceDependency = Boolean(
+				depTask?.stageId && sourceStageIds.has(depTask.stageId),
+			);
+			if (!isStreamingSourceDependency) {
+				if (status === "completed") continue;
+				if (partial && status && isTerminalTaskStatus(status)) continue;
+				return false;
+			}
+			hasStreamingSourceDependency = true;
 			if (status === "completed") {
-				completedDependencyReady = true;
+				completedSourceDependencyReady = true;
 				continue;
 			}
 			if (status && isTerminalTaskStatus(status)) {
 				if (!partial) return false;
 				continue;
 			}
-			if (status === "running") runningDependencyMayHavePartialItems = true;
-			allKnownDependenciesTerminal = false;
+			if (status === "running") runningSourceDependencyMayHavePartialItems = true;
+			allKnownSourceDependenciesTerminal = false;
 		}
 		return (
-			completedDependencyReady ||
-			runningDependencyMayHavePartialItems ||
-			allKnownDependenciesTerminal
+			hasStreamingSourceDependency &&
+			(completedSourceDependencyReady ||
+				runningSourceDependencyMayHavePartialItems ||
+				allKnownSourceDependenciesTerminal)
 		);
 	}
 	return deps.every((dep) => {
@@ -564,18 +586,40 @@ export function buildForeachGeneratedTasks(
 		seen.add(taskId);
 		const specId = `${template.stageId}.${taskId}`;
 		const itemText = formatForeachItem(item);
-		const instructions = template.foreach!.prompt.replace(
-			/\$\{item\}/g,
-			escapeReplacementText(itemText),
+		const cacheStableForeach = workflowExperimentalFlagEnabled(
+			EXPERIMENTAL_CACHE_STABLE_FOREACH_ENV,
 		);
-		const compiledPrompt = [
+		const instructions = cacheStableForeach
+			? template.foreach!.prompt.replace(
+					/\$\{item\}/g,
+					"the workflow item payload below",
+				)
+			: template.foreach!.prompt.replace(
+					/\$\{item\}/g,
+					escapeReplacementText(itemText),
+				);
+		const itemPayloadSection = cacheStableForeach
+			? `# Workflow Item Payload\n\n${itemText}`
+			: undefined;
+		const stablePromptPrefix = [
 			template.foreach!.injectRuntimeTask && runtimeTask
 				? `# Task\n\n${runtimeTask}`
 				: undefined,
 			`# Workflow Stage\n\nstage=${template.stageId}\ntype=foreach`,
 			template.foreach!.roleText || undefined,
-			`# Workflow Item\n\nitem=${taskId}`,
-			`# Instructions\n\n${instructions}`,
+		];
+		const compiledPrompt = [
+			...stablePromptPrefix,
+			...(cacheStableForeach
+				? [
+						`# Instructions\n\n${instructions}`,
+						`# Workflow Item\n\nitem=${taskId}`,
+						itemPayloadSection,
+					]
+				: [
+						`# Workflow Item\n\nitem=${taskId}`,
+						`# Instructions\n\n${instructions}`,
+					]),
 		]
 			.filter(Boolean)
 			.join("\n\n");

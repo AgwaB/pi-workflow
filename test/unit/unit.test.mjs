@@ -8,7 +8,7 @@ import {
 	mkdtempSync,
 	openSync,
 	readFileSync,
-	rmSync,
+	rmSync as nodeRmSync,
 	symlinkSync,
 	unlinkSync,
 	utimesSync,
@@ -111,6 +111,7 @@ import {
 } from "../../.tmp/unit/workflow-runtime.js";
 import {
 	buildForeachGeneratedTasks,
+	dependenciesReady,
 	markDagDependentsSkipped,
 } from "../../.tmp/unit/engine-run-graph.js";
 import {
@@ -178,6 +179,16 @@ import {
 	writeWorkflowTaskArtifactBundle,
 } from "../../.tmp/unit/workflow-output-artifacts.js";
 import { parseWorkflowPartialOutput } from "../../.tmp/unit/workflow-partial-output.js";
+import {
+	CACHE_SHAPE_METRICS_ENV,
+	EXPERIMENTAL_CACHE_STABLE_FOREACH_ENV,
+	EXPERIMENTAL_DEPTH_ROUTER_ENV,
+	EXPERIMENTAL_LAUNCH_RAMP_ENV,
+	EXPERIMENTAL_SAME_SESSION_REPAIR_ENV,
+	EXPERIMENTAL_TOOL_DEDUP_ENV,
+	enabledWorkflowExperimentalSpeedFlags,
+	workflowExperimentalFlagEnabled,
+} from "../../.tmp/unit/experimental-speed-flags.js";
 import { registerWorkflowFetchCacheExtension } from "../../.tmp/unit/workflow-fetch-cache-extension.js";
 import {
 	createWorkflowWebSource,
@@ -197,9 +208,22 @@ import {
 	cleanupSubagentRun,
 	launchSubagentTask,
 	refreshRunFromSubagentArtifacts,
+	resolveLaunchControlTelemetryForTests,
 	setSubagentApiForTests,
 	setSubagentLaunchControlsForTests,
 } from "../../.tmp/unit/subagent-backend.js";
+
+function rmSync(path, options) {
+	const retryOptions =
+		options?.recursive && options?.force
+			? {
+					...options,
+					maxRetries: options.maxRetries ?? 5,
+					retryDelay: options.retryDelay ?? 20,
+				}
+			: options;
+	return nodeRmSync(path, retryOptions);
+}
 
 const UNIT_TEST_HOME = mkdtempSync(join(tmpdir(), "workflow-unit-home-"));
 process.env.HOME = UNIT_TEST_HOME;
@@ -10295,35 +10319,126 @@ test("dependency-aware skip lets explicit partial sources bypass unrelated previ
 });
 
 test("foreach item interpolation preserves dollar replacement tokens", () => {
-	const { tasks } = buildForeachGeneratedTasks(
-		{
-			stageId: "verify",
-			foreach: {
-				prompt: "Verify ${item}",
-				injectRuntimeTask: false,
-				roleText: "Use repository evidence.",
+	const previous = process.env[EXPERIMENTAL_CACHE_STABLE_FOREACH_ENV];
+	delete process.env[EXPERIMENTAL_CACHE_STABLE_FOREACH_ENV];
+	try {
+		const { tasks } = buildForeachGeneratedTasks(
+			{
+				stageId: "verify",
+				foreach: {
+					prompt: "Verify ${item}",
+					injectRuntimeTask: false,
+					roleText: "Use repository evidence.",
+				},
 			},
-		},
-		undefined,
-		["price is $1 and $& per unit"],
+			undefined,
+			["price is $1 and $& per unit"],
+		);
+		assert.equal(tasks.length, 1);
+		assert.match(tasks[0].task, /price is \$1 and \$& per unit/);
+		assert.match(tasks[0].compiledPrompt, /price is \$1 and \$& per unit/);
+		const roleIndex = tasks[0].compiledPrompt.indexOf("Use repository evidence.");
+		assert.ok(
+			roleIndex < tasks[0].compiledPrompt.indexOf("item=item-001"),
+			"materialized foreach prompts keep stable role text before item-varying metadata",
+		);
+		assert.ok(
+			roleIndex < tasks[0].compiledPrompt.indexOf("price is $1 and $& per unit"),
+			"materialized foreach prompts keep stable role text before item-varying instructions",
+		);
+		assert.doesNotMatch(
+			tasks[0].compiledPrompt.slice(0, roleIndex),
+			/item=item-001/,
+		);
+		assert.match(tasks[0].compiledPrompt, /# Workflow Item\n\nitem=item-001/);
+	} finally {
+		if (previous === undefined) delete process.env[EXPERIMENTAL_CACHE_STABLE_FOREACH_ENV];
+		else process.env[EXPERIMENTAL_CACHE_STABLE_FOREACH_ENV] = previous;
+	}
+});
+
+test("experimental foreach cache-stable flag moves item payload after stable instructions", () => {
+	const previous = process.env[EXPERIMENTAL_CACHE_STABLE_FOREACH_ENV];
+	process.env[EXPERIMENTAL_CACHE_STABLE_FOREACH_ENV] = "1";
+	try {
+		const { tasks } = buildForeachGeneratedTasks(
+			{
+				stageId: "verify",
+				foreach: {
+					prompt: "Verify ${item} using the rubric.",
+					injectRuntimeTask: false,
+					roleText: "Use repository evidence.",
+				},
+			},
+			undefined,
+			["price is $1 and $& per unit"],
+		);
+		assert.equal(tasks.length, 1);
+		assert.match(tasks[0].task, /workflow item payload below/);
+		assert.doesNotMatch(tasks[0].task, /price is \$1 and \$& per unit/);
+		const instructionsIndex = tasks[0].compiledPrompt.indexOf("# Instructions");
+		const itemIndex = tasks[0].compiledPrompt.indexOf("# Workflow Item");
+		const payloadIndex = tasks[0].compiledPrompt.indexOf("# Workflow Item Payload");
+		assert.ok(instructionsIndex >= 0);
+		assert.ok(itemIndex > instructionsIndex);
+		assert.ok(payloadIndex > itemIndex);
+		assert.match(tasks[0].compiledPrompt, /price is \$1 and \$& per unit/);
+	} finally {
+		if (previous === undefined) delete process.env[EXPERIMENTAL_CACHE_STABLE_FOREACH_ENV];
+		else process.env[EXPERIMENTAL_CACHE_STABLE_FOREACH_ENV] = previous;
+	}
+});
+
+test("experimental speed flags default off and parse explicit truthy values", () => {
+	assert.equal(workflowExperimentalFlagEnabled("PI_WORKFLOW_TEST_FLAG", {}), false);
+	assert.equal(
+		workflowExperimentalFlagEnabled("PI_WORKFLOW_TEST_FLAG", {
+			PI_WORKFLOW_TEST_FLAG: "on",
+		}),
+		true,
 	);
-	assert.equal(tasks.length, 1);
-	assert.match(tasks[0].task, /price is \$1 and \$& per unit/);
-	assert.match(tasks[0].compiledPrompt, /price is \$1 and \$& per unit/);
-	const roleIndex = tasks[0].compiledPrompt.indexOf("Use repository evidence.");
-	assert.ok(
-		roleIndex < tasks[0].compiledPrompt.indexOf("item=item-001"),
-		"materialized foreach prompts keep stable role text before item-varying metadata",
+	assert.deepEqual(
+		enabledWorkflowExperimentalSpeedFlags({
+			[EXPERIMENTAL_TOOL_DEDUP_ENV]: "true",
+			[EXPERIMENTAL_CACHE_STABLE_FOREACH_ENV]: "0",
+		}),
+		[EXPERIMENTAL_TOOL_DEDUP_ENV],
 	);
-	assert.ok(
-		roleIndex < tasks[0].compiledPrompt.indexOf("price is $1 and $& per unit"),
-		"materialized foreach prompts keep stable role text before item-varying instructions",
+	assert.deepEqual(
+		enabledWorkflowExperimentalSpeedFlags({
+			[CACHE_SHAPE_METRICS_ENV]: "true",
+			[EXPERIMENTAL_DEPTH_ROUTER_ENV]: "true",
+			[EXPERIMENTAL_SAME_SESSION_REPAIR_ENV]: "true",
+		}),
+		[EXPERIMENTAL_SAME_SESSION_REPAIR_ENV],
 	);
-	assert.doesNotMatch(
-		tasks[0].compiledPrompt.slice(0, roleIndex),
-		/item=item-001/,
-	);
-	assert.match(tasks[0].compiledPrompt, /# Workflow Item\n\nitem=item-001/);
+});
+
+test("experimental launch ramp shortens default release delay telemetry", () => {
+	const previousRamp = process.env[EXPERIMENTAL_LAUNCH_RAMP_ENV];
+	const previousReleaseDelay = process.env.PI_WORKFLOW_LAUNCH_SLOT_RELEASE_DELAY_MS;
+	const previousLiveWorkers = process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS;
+	setSubagentLaunchControlsForTests({ retryJitterMs: 0 });
+	process.env[EXPERIMENTAL_LAUNCH_RAMP_ENV] = "true";
+	delete process.env.PI_WORKFLOW_LAUNCH_SLOT_RELEASE_DELAY_MS;
+	process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS = "3";
+	try {
+		const telemetry = resolveLaunchControlTelemetryForTests();
+		assert.equal(telemetry.launchSlotReleaseDelayMs, 250);
+		assert.equal(telemetry.maxLiveModelWorkers, 3);
+		assert.equal(telemetry.experimentalLaunchRampEnabled, true);
+		assert.equal(typeof telemetry.maxConcurrentLaunches, "number");
+	} finally {
+		if (previousRamp === undefined) delete process.env[EXPERIMENTAL_LAUNCH_RAMP_ENV];
+		else process.env[EXPERIMENTAL_LAUNCH_RAMP_ENV] = previousRamp;
+		if (previousReleaseDelay === undefined)
+			delete process.env.PI_WORKFLOW_LAUNCH_SLOT_RELEASE_DELAY_MS;
+		else process.env.PI_WORKFLOW_LAUNCH_SLOT_RELEASE_DELAY_MS = previousReleaseDelay;
+		if (previousLiveWorkers === undefined)
+			delete process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS;
+		else process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS = previousLiveWorkers;
+		setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
+	}
 });
 
 test("simple JSON path reads own properties only", () => {
@@ -11831,6 +11946,52 @@ test("successive foreach materialization keeps task ids unique", async () => {
 	} finally {
 		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
+});
+
+test("streaming foreach waits for unresolved non-source dependencies", () => {
+	const compiledFlow = {
+		stages: [{ id: "verify", sourcePolicy: "require-success" }],
+		tasks: [
+			{ id: "review.item", stageId: "review" },
+			{ id: "gate.main", stageId: "gate" },
+			{ id: "verify.item", stageId: "verify" },
+		],
+	};
+	const compiledTask = {
+		specId: "verify.item",
+		stageId: "verify",
+		dependsOn: ["review.item", "gate.main"],
+		foreach: {
+			from: {
+				stage: "review",
+				path: "$.findings",
+				streaming: { enabled: true },
+			},
+		},
+	};
+
+	assert.equal(
+		dependenciesReady(
+			compiledTask,
+			new Map([
+				["review.item", { status: "completed" }],
+				["gate.main", { status: "pending" }],
+			]),
+			compiledFlow,
+		),
+		false,
+	);
+	assert.equal(
+		dependenciesReady(
+			compiledTask,
+			new Map([
+				["review.item", { status: "completed" }],
+				["gate.main", { status: "completed" }],
+			]),
+			compiledFlow,
+		),
+		true,
+	);
 });
 
 test("streaming foreach appends items before all upstream siblings finish", async () => {
@@ -27477,6 +27638,66 @@ test("workflow_artifact lists visible sources, reads by source name, and records
 	}
 });
 
+test("experimental workflow_artifact dedup suppresses exact duplicate read content", async () => {
+	const previous = process.env[EXPERIMENTAL_TOOL_DEDUP_ENV];
+	process.env[EXPERIMENTAL_TOOL_DEDUP_ENV] = "1";
+	const cwd = makeProject();
+	try {
+		const runId = "workflow_dedup_unit";
+		const runDir = join(cwd, ".pi", "workflows", runId);
+		const producerDir = join(runDir, "tasks", "task-1");
+		const consumerDir = join(runDir, "tasks", "task-2");
+		mkdirSync(producerDir, { recursive: true });
+		mkdirSync(consumerDir, { recursive: true });
+		writeFileSync(join(producerDir, "analysis.md"), "Repeated content\n");
+		const manifestPath = join(consumerDir, "source-manifest.json");
+		const ledgerPath = join(consumerDir, "read-ledger.jsonl");
+		writeFileSync(
+			manifestPath,
+			JSON.stringify({
+				schema: "workflow-source-manifest-v1",
+				runId,
+				taskId: "task-2",
+				sources: [
+					{
+						source: "plan",
+						taskId: "task-1",
+						specId: "plan",
+						stageId: "plan",
+						status: "completed",
+						artifacts: {
+							analysis: { path: join(producerDir, "analysis.md") },
+						},
+					},
+				],
+			}),
+		);
+
+		const config = { runId, taskId: "task-2", manifestPath, ledgerPath, runDir };
+		const first = await handleWorkflowArtifactToolCall(
+			{ action: "read", source: "plan", artifact: "analysis" },
+			config,
+		);
+		const second = await handleWorkflowArtifactToolCall(
+			{ action: "read", source: "plan", artifact: "analysis" },
+			config,
+		);
+
+		assert.match(first.content[0].text, /Repeated content/);
+		assert.doesNotMatch(second.content[0].text, /Repeated content/);
+		assert.match(second.content[0].text, /duplicate read suppressed/);
+		assert.equal(second.details.duplicate, true);
+		const ledger = await readWorkflowArtifactReadLedger(ledgerPath);
+		assert.equal(ledger.length, 2);
+		assert.equal(ledger[0].returnedBytes > 0, true);
+		assert.equal(ledger[1].returnedBytes, 0);
+	} finally {
+		if (previous === undefined) delete process.env[EXPERIMENTAL_TOOL_DEDUP_ENV];
+		else process.env[EXPERIMENTAL_TOOL_DEDUP_ENV] = previous;
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("artifact graph source context warns that capped workflow_artifact reads need paths", () => {
 	const prompt = formatArtifactGraphSourceContext(
 		[
@@ -28168,6 +28389,25 @@ test("structured required read policy enforces projection ledger rows separately
 			],
 		);
 		assert.deepEqual(passes, { missing: [], projectionFailures: [] });
+
+		writeFileSync(
+			ledgerPath,
+			JSON.stringify({
+				...base,
+				returnedBytes: 160,
+				truncated: false,
+				path: "$.researchQuestions",
+			}) + "\n",
+		);
+		const aliasPolicyPasses = await checkRequiredArtifactReads(
+			taskDir,
+			[],
+			[{ source: "plan", artifact: "control", path: "$.questions" }],
+		);
+		assert.deepEqual(aliasPolicyPasses, {
+			missing: [],
+			projectionFailures: [],
+		});
 	} finally {
 		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
@@ -28418,6 +28658,9 @@ test("artifact graph workflow runs workflow artifacts and enforces required read
 
 test("artifact graph output retry reuses confirmed subagent session", async () => {
 	const cwd = makeProject();
+	const previousSameSessionRepair =
+		process.env[EXPERIMENTAL_SAME_SESSION_REPAIR_ENV];
+	process.env[EXPERIMENTAL_SAME_SESSION_REPAIR_ENV] = "1";
 	try {
 		writeAgent(cwd, "unit-scout", "read");
 		mkdirSync(join(cwd, "workflows"), { recursive: true });
@@ -28539,14 +28782,158 @@ test("artifact graph output retry reuses confirmed subagent session", async () =
 		assert.equal(task.outputRetry.repairMode, "same_session");
 		assert.equal(task.outputRetry.sessionId, expectedSessionId);
 	} finally {
+		if (previousSameSessionRepair === undefined)
+			delete process.env[EXPERIMENTAL_SAME_SESSION_REPAIR_ENV];
+		else
+			process.env[EXPERIMENTAL_SAME_SESSION_REPAIR_ENV] =
+				previousSameSessionRepair;
 		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
+test("artifact graph output retry defaults to new session when same-session flag is disabled", async () => {
+	const cwd = makeProject();
+	const previousSameSessionRepair =
+		process.env[EXPERIMENTAL_SAME_SESSION_REPAIR_ENV];
+	delete process.env[EXPERIMENTAL_SAME_SESSION_REPAIR_ENV];
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		mkdirSync(join(cwd, "workflows"), { recursive: true });
+		writeFileSync(
+			join(cwd, "workflows", "session-default-off.json"),
+			JSON.stringify(
+				workflowSpec("unit-scout", {
+					artifactGraph: {
+						stages: [{ id: "main", type: "single", prompt: "Analyze." }],
+					},
+				}),
+			),
+		);
+
+		const launched = [];
+		const runs = new Map();
+		setSubagentApiForTests({
+			async runSubagent(options) {
+				launched.push(options);
+				const runId = `run_default_off_${launched.length}`;
+				const attemptId = `attempt_default_off_${launched.length}`;
+				const artifactDir = join(
+					cwd,
+					String(options.runsDir),
+					runId,
+					"attempts",
+					attemptId,
+				);
+				mkdirSync(artifactDir, { recursive: true });
+				const output =
+					launched.length === 1
+						? "not workflow output"
+						: [
+								"<control>",
+								JSON.stringify({ schema: "stage-control-v1", digest: "ok" }),
+								"</control>",
+								"<analysis>",
+								"retry succeeded",
+								"</analysis>",
+								"<refs>",
+								"[]",
+								"</refs>",
+							].join("\n");
+				writeFileSync(join(artifactDir, "output.log"), output);
+				writeFileSync(join(artifactDir, "stderr.log"), "");
+				writeFileSync(
+					join(artifactDir, "result.json"),
+					JSON.stringify({
+						status: "completed",
+						completedAt: new Date().toISOString(),
+						startedAt: new Date().toISOString(),
+						exitCode: 0,
+						metadata: {
+							contextLengthExceeded: false,
+							sessionId: options.sessionId,
+							session: {
+								id: options.sessionId,
+								requested: true,
+								disposition: launched.length === 1 ? "created" : "resumed",
+							},
+						},
+					}),
+				);
+				runs.set(runId, { runId, attemptId, artifactDir });
+				return { runId, attemptId, status: "running" };
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async getSubagentStatus({ runId }) {
+				const run = runs.get(runId);
+				return {
+					runId,
+					attemptId: run.attemptId,
+					backend: "headless",
+					status: "completed",
+					failureKind: null,
+					startedAt: new Date().toISOString(),
+					completedAt: new Date().toISOString(),
+					logs: [
+						{
+							type: "output",
+							path: "output.log",
+							artifactCwd: run.artifactDir,
+						},
+						{
+							type: "stderr",
+							path: "stderr.log",
+							artifactCwd: run.artifactDir,
+						},
+						{
+							type: "result",
+							path: "result.json",
+							artifactCwd: run.artifactDir,
+						},
+					],
+					metadata: { contextLengthExceeded: false },
+					attempts: [
+						{ attemptId: run.attemptId, status: "completed", pid: 12345 },
+					],
+				};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+
+		const started = await runWorkflow("session-default-off", cwd, {
+			task: "Run artifact graph",
+		});
+		const completed = await waitForRun(cwd, started.runId, 5_000);
+		assert.equal(completed.status, "completed");
+		assert.equal(launched.length, 2);
+		const baseSessionId = `pi-workflow.${started.runId}.task-1`;
+		const retrySessionId = `${baseSessionId}.retry-1`;
+		assert.equal(launched[0].sessionId, baseSessionId);
+		assert.equal(launched[1].sessionId, retrySessionId);
+		const task = taskBySpec(completed, "main.main");
+		assert.equal(task.outputRetry.maxAttempts, 2);
+		assert.equal(task.outputRetry.repairMode, "new_session");
+		assert.equal(task.outputRetry.sessionId, retrySessionId);
+	} finally {
+		if (previousSameSessionRepair === undefined)
+			delete process.env[EXPERIMENTAL_SAME_SESSION_REPAIR_ENV];
+		else
+			process.env[EXPERIMENTAL_SAME_SESSION_REPAIR_ENV] =
+				previousSameSessionRepair;
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
+	}
+});
 
 test("artifact graph output retry falls back to new session after same-session repair fails", async () => {
 	const cwd = makeProject();
+	const previousSameSessionRepair =
+		process.env[EXPERIMENTAL_SAME_SESSION_REPAIR_ENV];
+	process.env[EXPERIMENTAL_SAME_SESSION_REPAIR_ENV] = "1";
 	try {
 		writeAgent(cwd, "unit-scout", "read");
 		mkdirSync(join(cwd, "workflows"), { recursive: true });
@@ -28671,6 +29058,11 @@ test("artifact graph output retry falls back to new session after same-session r
 		assert.equal(task.outputRetry.repairMode, "new_session");
 		assert.equal(task.outputRetry.sessionId, retrySessionId);
 	} finally {
+		if (previousSameSessionRepair === undefined)
+			delete process.env[EXPERIMENTAL_SAME_SESSION_REPAIR_ENV];
+		else
+			process.env[EXPERIMENTAL_SAME_SESSION_REPAIR_ENV] =
+				previousSameSessionRepair;
 		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
@@ -28678,6 +29070,9 @@ test("artifact graph output retry falls back to new session after same-session r
 
 test("artifact graph output retry starts new session when subagent session is unconfirmed", async () => {
 	const cwd = makeProject();
+	const previousSameSessionRepair =
+		process.env[EXPERIMENTAL_SAME_SESSION_REPAIR_ENV];
+	process.env[EXPERIMENTAL_SAME_SESSION_REPAIR_ENV] = "1";
 	try {
 		writeAgent(cwd, "unit-scout", "read");
 		mkdirSync(join(cwd, "workflows"), { recursive: true });
@@ -28802,6 +29197,11 @@ test("artifact graph output retry starts new session when subagent session is un
 		assert.equal(task.outputRetry.repairMode, "new_session");
 		assert.equal(task.outputRetry.sessionId, retrySessionId);
 	} finally {
+		if (previousSameSessionRepair === undefined)
+			delete process.env[EXPERIMENTAL_SAME_SESSION_REPAIR_ENV];
+		else
+			process.env[EXPERIMENTAL_SAME_SESSION_REPAIR_ENV] =
+				previousSameSessionRepair;
 		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
@@ -28809,6 +29209,9 @@ test("artifact graph output retry starts new session when subagent session is un
 
 test("recovered artifact graph subagent handle preserves same-session retry", async () => {
 	const cwd = makeProject();
+	const previousSameSessionRepair =
+		process.env[EXPERIMENTAL_SAME_SESSION_REPAIR_ENV];
+	process.env[EXPERIMENTAL_SAME_SESSION_REPAIR_ENV] = "1";
 	try {
 		const now = new Date().toISOString();
 		const expectedSessionId = "pi-workflow.workflow_recovery.task-1";
@@ -28999,6 +29402,11 @@ test("recovered artifact graph subagent handle preserves same-session retry", as
 		await launchSubagentTask(cwd, refreshed, refreshed.tasks[0], compiledTask);
 		assert.equal(relaunched.sessionId, expectedSessionId);
 	} finally {
+		if (previousSameSessionRepair === undefined)
+			delete process.env[EXPERIMENTAL_SAME_SESSION_REPAIR_ENV];
+		else
+			process.env[EXPERIMENTAL_SAME_SESSION_REPAIR_ENV] =
+				previousSameSessionRepair;
 		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}

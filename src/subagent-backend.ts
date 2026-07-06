@@ -61,6 +61,11 @@ import {
 	parseWorkflowOutputForBundle,
 	writeWorkflowTaskArtifactBundle,
 } from "./workflow-output-artifacts.js";
+import {
+	EXPERIMENTAL_LAUNCH_RAMP_ENV,
+	EXPERIMENTAL_SAME_SESSION_REPAIR_ENV,
+	workflowExperimentalFlagEnabled,
+} from "./experimental-speed-flags.js";
 import { writeWorkflowPartialOutputLedgerFromFile } from "./workflow-partial-output.js";
 
 const DEFAULT_SUBAGENT_RUNS_ROOT = ".pi/workflow-subagents";
@@ -81,6 +86,7 @@ const PARENT_SUBAGENT_RUNS_DIR_ENV = "PI_WORKFLOW_PARENT_SUBAGENT_RUNS_DIR";
 const PARENT_SUBAGENT_RUN_ID_ENV = "PI_WORKFLOW_PARENT_SUBAGENT_RUN_ID";
 const PARENT_SUBAGENT_ATTEMPT_ID_ENV = "PI_WORKFLOW_PARENT_SUBAGENT_ATTEMPT_ID";
 const DEFAULT_LAUNCH_SLOT_RELEASE_DELAY_MS = 3_000;
+const EXPERIMENTAL_LAUNCH_RAMP_RELEASE_DELAY_MS = 250;
 const STALE_LAUNCH_CLAIM_GRACE_MS = 30_000;
 const REFRESH_STATUS_RECONCILE_CONCURRENCY = 8;
 const MIN_TRANSIENT_RETRY_JITTER_MS = 1_000;
@@ -499,6 +505,10 @@ function tryAcquireLiveModelWorkerSlot(options: {
 	return { kind: "acquired", release: makeLiveModelWorkerSlotRelease(key) };
 }
 
+function launchRampEnabled(): boolean {
+	return workflowExperimentalFlagEnabled(EXPERIMENTAL_LAUNCH_RAMP_ENV);
+}
+
 function resolveLaunchSlotReleaseDelayMs(): number {
 	if (launchSlotReleaseDelayMsForTests !== undefined) {
 		return launchSlotReleaseDelayMsForTests;
@@ -508,7 +518,30 @@ function resolveLaunchSlotReleaseDelayMs(): number {
 		10,
 	);
 	if (Number.isFinite(override)) return Math.max(0, Math.floor(override));
-	return DEFAULT_LAUNCH_SLOT_RELEASE_DELAY_MS;
+	return launchRampEnabled()
+		? EXPERIMENTAL_LAUNCH_RAMP_RELEASE_DELAY_MS
+		: DEFAULT_LAUNCH_SLOT_RELEASE_DELAY_MS;
+}
+
+interface LaunchControlTelemetry {
+	maxConcurrentLaunches: number;
+	maxLiveModelWorkers?: number;
+	launchSlotReleaseDelayMs: number;
+	experimentalLaunchRampEnabled?: boolean;
+}
+
+function launchControlTelemetry(): LaunchControlTelemetry {
+	const maxLiveModelWorkers = resolveMaxLiveModelWorkers();
+	return {
+		maxConcurrentLaunches: resolveMaxConcurrentLaunches(),
+		...(maxLiveModelWorkers === undefined ? {} : { maxLiveModelWorkers }),
+		launchSlotReleaseDelayMs: resolveLaunchSlotReleaseDelayMs(),
+		...(launchRampEnabled() ? { experimentalLaunchRampEnabled: true } : {}),
+	};
+}
+
+export function resolveLaunchControlTelemetryForTests(): LaunchControlTelemetry {
+	return launchControlTelemetry();
 }
 
 function releaseLaunchSlotAfterDelay(
@@ -1016,6 +1049,7 @@ function recordTaskLaunchTiming(
 		observation.launchStartedAt,
 		observation.launchCompletedAt,
 	);
+	const launchControls = launchControlTelemetry();
 	task.timing = {
 		source: "pi-workflow",
 		capturedAt,
@@ -1032,7 +1066,14 @@ function recordTaskLaunchTiming(
 		task.timing?.waiting_for_global_worker_slot
 			? { waiting_for_global_worker_slot: true }
 			: {}),
-		launchSlotReleaseDelayMs: resolveLaunchSlotReleaseDelayMs(),
+		launchSlotReleaseDelayMs: launchControls.launchSlotReleaseDelayMs,
+		maxConcurrentLaunches: launchControls.maxConcurrentLaunches,
+		...(launchControls.maxLiveModelWorkers === undefined
+			? {}
+			: { maxLiveModelWorkers: launchControls.maxLiveModelWorkers }),
+		...(launchControls.experimentalLaunchRampEnabled
+			? { experimentalLaunchRampEnabled: true }
+			: {}),
 		...(task.timing?.aggregate === undefined
 			? {}
 			: { aggregate: task.timing.aggregate }),
@@ -1185,6 +1226,15 @@ function recordTaskTerminalTiming(options: {
 					launchSlotReleaseDelayMs:
 						options.task.timing.launchSlotReleaseDelayMs,
 				}),
+		...(options.task.timing?.maxConcurrentLaunches === undefined
+			? {}
+			: { maxConcurrentLaunches: options.task.timing.maxConcurrentLaunches }),
+		...(options.task.timing?.maxLiveModelWorkers === undefined
+			? {}
+			: { maxLiveModelWorkers: options.task.timing.maxLiveModelWorkers }),
+		...(options.task.timing?.experimentalLaunchRampEnabled
+			? { experimentalLaunchRampEnabled: true }
+			: {}),
 		...taskTimingTelemetry(options.task.timing),
 		...(attempt.executionStartedAt === undefined
 			? {}
@@ -1990,6 +2040,7 @@ function artifactGraphRetrySession(
 	const sessionId = sessionRecord?.id;
 	const sessionRequested = sessionRecord?.requested;
 	if (
+		workflowExperimentalFlagEnabled(EXPERIMENTAL_SAME_SESSION_REPAIR_ENV) &&
 		typeof actualSessionId === "string" &&
 		actualSessionId === expectedSessionId &&
 		(typeof sessionId !== "string" || sessionId === expectedSessionId) &&
@@ -2662,7 +2713,18 @@ function requiredReadPolicyMatches(
 	) {
 		return false;
 	}
-	if (policy.path !== undefined && entry.path !== policy.path) return false;
+	if (policy.path !== undefined) {
+		if (entry.path === undefined) return false;
+		if (
+			!requiredArtifactReadPathCandidates(
+				policy.path,
+				policy.source,
+				policy.artifact,
+			).includes(entry.path)
+		) {
+			return false;
+		}
+	}
 	if (policy.maxItems !== undefined && entry.maxItems !== policy.maxItems)
 		return false;
 	if (policy.maxChars !== undefined && entry.maxChars !== policy.maxChars)
