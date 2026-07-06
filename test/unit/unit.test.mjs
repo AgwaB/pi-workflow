@@ -9407,6 +9407,79 @@ test("deep-research verification candidate sanitizer demotes non-verifiable cand
 	);
 });
 
+test("deep-research sanitizer clamps preserved claims to schema cap with diagnostics", async () => {
+	const { default: helper } = await import(
+		`../../workflows/deep-research/helpers/sanitize-verification-candidates.mjs?test=${Date.now()}`
+	);
+	const preservedClaims = Array.from({ length: 30 }, (_, index) => ({
+		id: `preserved-${String(index + 1).padStart(3, "0")}`,
+		claim: `Preserved backlog claim ${index + 1}`,
+	}));
+	const result = await helper({
+		sources: {
+			"normalize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [],
+					preservedClaims,
+					duplicates: [],
+				},
+				factSlotCoverage: [],
+				coverageGaps: [],
+			},
+		},
+	});
+
+	assert.equal(result.claimInventory.preservedClaims.length, 24);
+	assert.equal(result.sanitizerDiagnostics.degraded, true);
+	assert.deepEqual(result.sanitizerDiagnostics.schemaCaps, {
+		verificationCandidates: 48,
+		preservedClaims: 24,
+		factSlotCoverage: 64,
+	});
+	assert.deepEqual(result.sanitizerDiagnostics.schemaCapDrops, [
+		{
+			path: "claimInventory.preservedClaims",
+			maxItems: 24,
+			inputCount: 30,
+			outputCount: 24,
+			droppedCount: 6,
+			droppedIds: [
+				"preserved-025",
+				"preserved-026",
+				"preserved-027",
+				"preserved-028",
+				"preserved-029",
+				"preserved-030",
+			],
+		},
+	]);
+	assert.deepEqual(result.sanitizerDiagnostics.degradationReasons, [
+		"claimInventory.preservedClaims exceeded maxItems 24; dropped 6",
+	]);
+	assert.ok(
+		result.coverageGaps.some(
+			(gap) =>
+				gap.evidenceState === "deterministically_clamped" &&
+				gap.claimId === "claimInventory.preservedClaims" &&
+				gap.omittedIds.includes("preserved-030"),
+		),
+	);
+	const schema = JSON.parse(
+		readFileSync(
+			join(
+				process.cwd(),
+				"workflows",
+				"deep-research",
+				"schemas",
+				"deep-research-sanitize-claims-control.schema.json",
+			),
+			"utf8",
+		),
+	);
+	const valid = validateJsonSchema(result, schema);
+	assert.equal(valid.valid, true, JSON.stringify(valid.issues));
+});
+
 test("deep-research verification candidate sanitizer backfills sourceRefs from web source cache", async () => {
 	const { default: helper } = await import(
 		`../../workflows/deep-research/helpers/sanitize-verification-candidates.mjs?test=${Date.now()}`

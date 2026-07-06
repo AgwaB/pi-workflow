@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // Deterministic sanitizer between normalize-claims and verify-claims.
 //
@@ -13,6 +14,19 @@ import { join } from "node:path";
 const SCHEMA = "deep-research-verification-candidate-sanitizer-v1";
 const VERIFIER_INPUT_POLICY =
 	"use_sourceRefs_or_sourceUrls_only_do_not_call_workflow_artifact";
+const HELPER_DIR = dirname(fileURLToPath(import.meta.url));
+const SANITIZE_SCHEMA_PATH = join(
+	HELPER_DIR,
+	"..",
+	"schemas",
+	"deep-research-sanitize-claims-control.schema.json",
+);
+const FALLBACK_SCHEMA_CAPS = {
+	verificationCandidates: 48,
+	preservedClaims: 24,
+	factSlotCoverage: 64,
+};
+let schemaCapsCache;
 
 function asArray(value) {
 	return Array.isArray(value) ? value : [];
@@ -22,6 +36,34 @@ function asObject(value) {
 	return value && typeof value === "object" && !Array.isArray(value)
 		? value
 		: {};
+}
+
+async function loadSchemaCaps() {
+	if (schemaCapsCache) return schemaCapsCache;
+	try {
+		const schema = JSON.parse(await readFile(SANITIZE_SCHEMA_PATH, "utf8"));
+		const claimInventory = asObject(asObject(schema.properties).claimInventory);
+		const claimProperties = asObject(claimInventory.properties);
+		schemaCapsCache = {
+			verificationCandidates:
+				arrayMaxItems(claimProperties.verificationCandidates) ??
+				FALLBACK_SCHEMA_CAPS.verificationCandidates,
+			preservedClaims:
+				arrayMaxItems(claimProperties.preservedClaims) ??
+				FALLBACK_SCHEMA_CAPS.preservedClaims,
+			factSlotCoverage:
+				arrayMaxItems(asObject(schema.properties).factSlotCoverage) ??
+				FALLBACK_SCHEMA_CAPS.factSlotCoverage,
+		};
+	} catch {
+		schemaCapsCache = { ...FALLBACK_SCHEMA_CAPS };
+	}
+	return schemaCapsCache;
+}
+
+function arrayMaxItems(schema) {
+	const value = asObject(schema).maxItems;
+	return Number.isFinite(value) && value >= 0 ? Math.floor(value) : undefined;
 }
 
 function stringOf(value) {
@@ -55,6 +97,50 @@ function claimText(candidate) {
 
 function candidateId(candidate) {
 	return stringOf(candidate?.id ?? candidate?.claimId);
+}
+
+function diagnosticRowId(row, index) {
+	return (
+		candidateId(row) ||
+		stringOf(row?.originalCandidateId) ||
+		stringOf(row?.slotId ?? row?.id) ||
+		`index-${index}`
+	);
+}
+
+function clampArrayToSchemaCap(value, maxItems, path) {
+	const rows = asArray(value);
+	if (!Number.isFinite(maxItems) || rows.length <= maxItems) {
+		return { rows, drop: null };
+	}
+	const kept = rows.slice(0, maxItems);
+	const dropped = rows.slice(maxItems);
+	return {
+		rows: kept,
+		drop: {
+			path,
+			maxItems,
+			inputCount: rows.length,
+			outputCount: kept.length,
+			droppedCount: dropped.length,
+			droppedIds: compactStrings(
+				dropped.map((row, index) => diagnosticRowId(row, maxItems + index)),
+				24,
+			),
+		},
+	};
+}
+
+function schemaCapGap(drop) {
+	return {
+		id: `sanitizer-cap-${drop.path.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}`,
+		claimId: drop.path,
+		evidenceState: "deterministically_clamped",
+		reason: `${drop.path} exceeded schema maxItems ${drop.maxItems}; ${drop.droppedCount} row(s) omitted from helper output to keep the workflow degradable instead of failed.`,
+		nextStep:
+			"Review sanitizerDiagnostics.schemaCapDrops for omitted ids; increase the schema cap or reduce upstream preserved/demoted rows if these omissions are material.",
+		omittedIds: drop.droppedIds,
+	};
 }
 
 function sourceRefs(candidate) {
@@ -656,6 +742,7 @@ export default async function sanitizeVerificationCandidates({
 	options = {},
 	context = {},
 }) {
+	const schemaCaps = await loadSchemaCaps();
 	const normalized = asObject(findSource(sources, "normalize-claims"));
 	const normalizeInputPacket = asObject(
 		findSource(sources, "normalize-input-packet"),
@@ -847,15 +934,39 @@ export default async function sanitizeVerificationCandidates({
 		promotedPreservedClaims.size === 0
 			? preservedClaims
 			: preservedClaims.filter((claim) => !promotedPreservedClaims.has(claim));
+	const cappedVerificationCandidates = clampArrayToSchemaCap(
+		keptCandidates,
+		schemaCaps.verificationCandidates,
+		"claimInventory.verificationCandidates",
+	);
+	const cappedPreservedClaims = clampArrayToSchemaCap(
+		outputPreservedClaims,
+		schemaCaps.preservedClaims,
+		"claimInventory.preservedClaims",
+	);
+	const cappedFactSlotCoverage = clampArrayToSchemaCap(
+		factSlotCoverageRows,
+		schemaCaps.factSlotCoverage,
+		"factSlotCoverage",
+	);
+	const schemaCapDrops = [
+		cappedVerificationCandidates.drop,
+		cappedPreservedClaims.drop,
+		cappedFactSlotCoverage.drop,
+	].filter(Boolean);
+	const outputCoverageGaps =
+		schemaCapDrops.length === 0
+			? coverageGaps
+			: [...coverageGaps, ...schemaCapDrops.map(schemaCapGap)];
 	return {
 		schema: SCHEMA,
 		claimInventory: {
-			verificationCandidates: keptCandidates,
-			preservedClaims: outputPreservedClaims,
+			verificationCandidates: cappedVerificationCandidates.rows,
+			preservedClaims: cappedPreservedClaims.rows,
 			duplicates: asArray(claimInventory.duplicates),
 		},
-		factSlotCoverage: factSlotCoverageRows,
-		coverageGaps,
+		factSlotCoverage: cappedFactSlotCoverage.rows,
+		coverageGaps: outputCoverageGaps,
 		researchScopeCoverage: asArray(normalized.researchScopeCoverage),
 		normalizationNotes: normalized.normalizationNotes,
 		sanitizerDiagnostics: {
@@ -874,6 +985,13 @@ export default async function sanitizeVerificationCandidates({
 			rewrittenCandidateIds,
 			verifierInputPolicy: VERIFIER_INPUT_POLICY,
 			sourceEvidenceHintRows: evidenceHintRows.length,
+			schemaCaps,
+			schemaCapDrops,
+			degraded: schemaCapDrops.length > 0,
+			degradationReasons: schemaCapDrops.map(
+				(drop) =>
+					`${drop.path} exceeded maxItems ${drop.maxItems}; dropped ${drop.droppedCount}`,
+			),
 		},
 	};
 }
