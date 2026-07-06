@@ -616,6 +616,10 @@ export async function compileWorkflow(
 			spec.artifactGraph?.stages ?? [],
 			foreachSpecDir,
 		)),
+		...(await collectSourceProjectionWarnings(
+			spec.artifactGraph?.stages ?? [],
+			foreachSpecDir,
+		)),
 		...(await collectWorkflowQualityWarnings(
 			spec.artifactGraph?.stages ?? [],
 			foreachSpecDir,
@@ -672,6 +676,112 @@ async function collectForeachPathWarnings(
 		}
 	}
 	return warnings;
+}
+
+// Static check for `sourceProjection.include` paths: when a projecting stage's
+// sources declare object control schemas, warn if a path resolves in none of
+// them (a likely typo that would silently project nothing at runtime — the
+// stage then runs on an empty projection and only survives via requiredReads
+// or model improvisation). Conservative by design: bracketed/complex segments,
+// dag-container sources, schemas without a `properties` map at the failing
+// level, explicit `additionalProperties`, and unreadable files are skipped.
+async function collectSourceProjectionWarnings(
+	stages: any[],
+	specDir: string,
+): Promise<string[]> {
+	const warnings: string[] = [];
+	const stageById = new Map<string, any>();
+	for (const stage of stages) {
+		if (stage && typeof stage.id === "string") stageById.set(stage.id, stage);
+	}
+	const schemaCache = new Map<string, any | undefined>();
+	const loadSchema = async (source: any): Promise<any | undefined> => {
+		const controlSchema = source?.output?.controlSchema;
+		if (typeof controlSchema !== "string") return undefined;
+		if (schemaCache.has(controlSchema)) return schemaCache.get(controlSchema);
+		let schema: any;
+		try {
+			schema = JSON.parse(
+				await readFile(resolve(specDir, controlSchema), "utf8"),
+			);
+		} catch {
+			schema = undefined;
+		}
+		schemaCache.set(controlSchema, schema);
+		return schema;
+	};
+	for (const stage of stages) {
+		const include = stage?.sourceProjection?.include;
+		if (!Array.isArray(include) || include.length === 0) continue;
+		const sourceIds: string[] = [];
+		const from = stage.from ?? stage.foreach?.from;
+		if (typeof from === "string") sourceIds.push(from);
+		else if (Array.isArray(from)) {
+			for (const ref of from) if (typeof ref === "string") sourceIds.push(ref);
+		} else if (from && typeof from === "object") {
+			const sourceId = (from as any).source ?? (from as any).stage;
+			if (typeof sourceId === "string") sourceIds.push(sourceId);
+		}
+		if (stage.type === "foreach" && stage.from && typeof stage.from === "object") {
+			const sourceId = (stage.from as any).source ?? (stage.from as any).stage;
+			if (typeof sourceId === "string" && !sourceIds.includes(sourceId))
+				sourceIds.push(sourceId);
+		}
+		const schemas: Array<{ id: string; schema: any }> = [];
+		for (const sourceId of sourceIds) {
+			const source = stageById.get(sourceId);
+			if (!source || source.type === "dag") continue;
+			const schema = await loadSchema(source);
+			if (schema?.properties && typeof schema.properties === "object")
+				schemas.push({ id: sourceId, schema });
+		}
+		if (schemas.length === 0) continue;
+		for (const path of include) {
+			if (typeof path !== "string" || !path.startsWith("$.")) continue;
+			const segments = path.slice(2).split(".");
+			if (segments.some((segment) => !/^[A-Za-z0-9_-]+$/.test(segment)))
+				continue;
+			const resolvable = schemas.some(({ schema }) =>
+				projectionPathResolvable(schema, segments),
+			);
+			if (!resolvable) {
+				warnings.push(
+					`stage "${stage.id}" projects "${path}" via sourceProjection, but it does not match any declared control schema of its sources (${schemas.map((entry) => entry.id).join(", ")}). The projection will silently be empty at runtime if the path is wrong.`,
+				);
+			}
+		}
+	}
+	return warnings;
+}
+
+function projectionPathResolvable(schema: any, segments: string[]): boolean {
+	let node: any = schema;
+	for (const segment of segments) {
+		while (
+			node &&
+			typeof node === "object" &&
+			node.type === "array" &&
+			node.items &&
+			!Array.isArray(node.items)
+		) {
+			node = node.items;
+		}
+		if (!node || typeof node !== "object") return true;
+		const properties = node.properties;
+		if (!properties || typeof properties !== "object") return true;
+		if (Object.hasOwn(properties, segment)) {
+			node = properties[segment];
+			continue;
+		}
+		if (
+			node.additionalProperties === true ||
+			(node.additionalProperties && typeof node.additionalProperties === "object")
+		) {
+			return true;
+		}
+		return false;
+	}
+	return true;
 }
 
 async function collectWorkflowQualityWarnings(
