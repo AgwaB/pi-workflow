@@ -1,3 +1,6 @@
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+
 // Deterministic sanitizer between normalize-claims and verify-claims.
 //
 // This helper does not decide truth. It only keeps verifier fanout focused on
@@ -229,7 +232,36 @@ function canonicalUrl(value) {
 	}
 }
 
-function buildUrlSourceRefLookup(normalizeInputPacket) {
+function addUrlSourceRef(lookup, url, sourceRef) {
+	const ref = stringOf(sourceRef);
+	if (!/^wsrc_[a-f0-9]{32}$/u.test(ref)) return;
+	const key = canonicalUrl(url);
+	if (key && !lookup.has(key)) lookup.set(key, ref);
+}
+
+async function addWebSourceCacheSourceRefs(lookup, context) {
+	const cwd = stringOf(context?.cwd);
+	const runId = stringOf(context?.runId);
+	if (!cwd || !runId) return;
+	let parsed;
+	try {
+		parsed = JSON.parse(
+			await readFile(
+				join(cwd, ".pi", "workflows", runId, "web-source-cache", "index.json"),
+				"utf8",
+			),
+		);
+	} catch {
+		return;
+	}
+	for (const source of asArray(parsed?.sources)) {
+		const ref = stringOf(source?.sourceRef);
+		addUrlSourceRef(lookup, source?.url, ref);
+		addUrlSourceRef(lookup, source?.redactedUrl, ref);
+	}
+}
+
+async function buildUrlSourceRefLookup(normalizeInputPacket, context) {
 	const lookup = new Map();
 	const sources = asArray(normalizeInputPacket?.packet?.research?.sources);
 	for (const source of sources) {
@@ -238,10 +270,10 @@ function buildUrlSourceRefLookup(normalizeInputPacket) {
 		for (const url of sourceUrls(source).length > 0
 			? sourceUrls(source)
 			: [source?.url]) {
-			const key = canonicalUrl(url);
-			if (key && !lookup.has(key)) lookup.set(key, ref);
+			addUrlSourceRef(lookup, url, ref);
 		}
 	}
+	await addWebSourceCacheSourceRefs(lookup, context);
 	return lookup;
 }
 
@@ -480,13 +512,19 @@ function adjustFactSlotCoverage(rows, demotedBySlot, keptIds) {
 	});
 }
 
-export default async function sanitizeVerificationCandidates({ sources }) {
+export default async function sanitizeVerificationCandidates({
+	sources,
+	context = {},
+}) {
 	const normalized = asObject(findSource(sources, "normalize-claims"));
 	const normalizeInputPacket = asObject(
 		findSource(sources, "normalize-input-packet"),
 	);
 	const evidenceHintRows = buildEvidenceHintRows(normalizeInputPacket);
-	const urlToSourceRef = buildUrlSourceRefLookup(normalizeInputPacket);
+	const urlToSourceRef = await buildUrlSourceRefLookup(
+		normalizeInputPacket,
+		context,
+	);
 	const claimInventory = asObject(normalized.claimInventory);
 	const originalCandidates = asArray(claimInventory.verificationCandidates);
 	const keptCandidates = [];

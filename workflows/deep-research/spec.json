@@ -170,7 +170,8 @@
           "uses": "./helpers/claim-evidence-gate.mjs",
           "options": {
             "downgradeExactQuantitativeWithoutSource": true,
-            "requireFetchedEvidenceForVerified": true
+            "requireFetchedEvidenceForVerified": true,
+            "allowAdditionalCorroboratingSourcesForVerified": true
           }
         }
       },

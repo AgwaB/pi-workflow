@@ -1,3 +1,6 @@
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+
 import {
 	VERIFICATION_STATUS,
 	VERIFICATION_STATUS_BUCKETS,
@@ -197,13 +200,36 @@ function addUrlSourceRef(urlToSourceRef, url, sourceRef) {
 	}
 }
 
-function buildUrlSourceRefLookup(normalizeInputPacket) {
+async function addWebSourceCacheSourceRefs(urlToSourceRef, context) {
+	const cwd = typeof context?.cwd === "string" ? context.cwd.trim() : "";
+	const runId = typeof context?.runId === "string" ? context.runId.trim() : "";
+	if (!cwd || !runId) return;
+	let parsed;
+	try {
+		parsed = JSON.parse(
+			await readFile(
+				join(cwd, ".pi", "workflows", runId, "web-source-cache", "index.json"),
+				"utf8",
+			),
+		);
+	} catch {
+		return;
+	}
+	for (const source of asArray(parsed?.sources)) {
+		if (!source || typeof source !== "object") continue;
+		addUrlSourceRef(urlToSourceRef, source.url, source.sourceRef);
+		addUrlSourceRef(urlToSourceRef, source.redactedUrl, source.sourceRef);
+	}
+}
+
+async function buildUrlSourceRefLookup(normalizeInputPacket, context) {
 	const urlToSourceRef = new Map();
 	const sourceCards = asArray(normalizeInputPacket?.packet?.research?.sources);
 	for (const source of sourceCards) {
 		if (!source || typeof source !== "object") continue;
 		addUrlSourceRef(urlToSourceRef, source.url, source.sourceRef);
 	}
+	await addWebSourceCacheSourceRefs(urlToSourceRef, context);
 	return urlToSourceRef;
 }
 
@@ -862,7 +888,10 @@ export default async function claimEvidenceGate({
 	const batchInfoByClaimId = buildBatchInfoByClaimId(verificationBatches);
 	const batchIdBySourceName = buildBatchIdBySourceName(context.sourceStatuses);
 	const normalizeInputPacket = findSource(sources, "normalize-input-packet");
-	const urlToSourceRef = buildUrlSourceRefLookup(normalizeInputPacket);
+	const urlToSourceRef = await buildUrlSourceRefLookup(
+		normalizeInputPacket,
+		context,
+	);
 	const candidateRecords = [];
 	const candidatesById = new Map();
 	const invalidNormalizedCandidates = [];

@@ -9032,6 +9032,86 @@ test("deep-research verification candidate sanitizer demotes non-verifiable cand
 	);
 });
 
+test("deep-research verification candidate sanitizer backfills sourceRefs from web source cache", async () => {
+	const { default: helper } = await import(
+		`../../workflows/deep-research/helpers/sanitize-verification-candidates.mjs?test=${Date.now()}`
+	);
+	const cwd = mkdtempSync(join(tmpdir(), "piwf-web-cache-"));
+	const runId = "workflow_cache_sanitizer";
+	const cacheDir = join(cwd, ".pi", "workflows", runId, "web-source-cache");
+	mkdirSync(cacheDir, { recursive: true });
+	const sourceRef = "wsrc_1234567890abcdef1234567890abcdef";
+	writeFileSync(
+		join(cacheDir, "index.json"),
+		JSON.stringify({
+			schema: "workflow-web-source-index-v1",
+			sources: [
+				{
+					sourceRef,
+					url: "https://docs.example.test/cache-backed",
+					redactedUrl: "https://docs.example.test/cache-backed",
+				},
+			],
+		}),
+	);
+	try {
+		const result = await helper({
+			context: { cwd, runId },
+			sources: {
+				"normalize-input-packet.main": {
+					packet: {
+						research: {
+							extractedFacts: [
+								{
+									slotId: "slot-cache",
+									value:
+										"Cache-backed documentation states the exact source-backed fact.",
+									sourceUrls: ["https://docs.example.test/cache-backed"],
+									quote:
+										"Cache-backed documentation states the exact source-backed fact.",
+									sourceQuality: "primary",
+								},
+							],
+						},
+					},
+				},
+				"normalize-claims.main": {
+					claimInventory: {
+						verificationCandidates: [
+							{
+								id: "claim-cache",
+								claim:
+									"Cache-backed documentation states the exact source-backed fact.",
+								factSlotIds: ["slot-cache"],
+								sourceUrls: ["https://docs.example.test/cache-backed"],
+							},
+						],
+					},
+					factSlotCoverage: [],
+					coverageGaps: [],
+				},
+			},
+		});
+
+		assert.deepEqual(
+			result.claimInventory.verificationCandidates.map((claim) => claim.id),
+			["claim-cache"],
+		);
+		assert.deepEqual(
+			result.claimInventory.verificationCandidates[0].sourceRefs,
+			[sourceRef],
+		);
+		assert.equal(result.sanitizerDiagnostics.webUrlOnlyDemotedCount, 0);
+	} finally {
+		rmSync(cwd, {
+			force: true,
+			maxRetries: 5,
+			recursive: true,
+			retryDelay: 50,
+		});
+	}
+});
+
 test("deep-research verification candidate sanitizer preserves source-stated edge claims", async () => {
 	const { default: helper } = await import(
 		`../../workflows/deep-research/helpers/sanitize-verification-candidates.mjs?test=${Date.now()}`
@@ -24839,6 +24919,87 @@ test("deep-research claim-evidence-gate backfills sourceRefs from normalize pack
 	assert.equal(out.gateSummary.sourceRefsBackfilledFromUrls, 1);
 	assert.equal(out.gateSummary.sourceRefJoinFailures, 0);
 	assert.deepEqual(out.sourceRefJoinFailures, []);
+});
+
+test("deep-research claim-evidence-gate backfills sourceRefs from web source cache", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"claim-evidence-gate.mjs",
+	);
+	const helper = (
+		await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)
+	).default;
+	const cwd = mkdtempSync(join(tmpdir(), "piwf-web-cache-"));
+	const runId = "workflow_cache_gate";
+	const cacheDir = join(cwd, ".pi", "workflows", runId, "web-source-cache");
+	mkdirSync(cacheDir, { recursive: true });
+	writeFileSync(
+		join(cacheDir, "index.json"),
+		JSON.stringify({
+			schema: "workflow-web-source-index-v1",
+			sources: [
+				{
+					sourceRef: "wsrc_abcdefabcdefabcdefabcdefabcdefab",
+					url: "https://docs.example.test/cache-gate/",
+					redactedUrl: "https://docs.example.test/cache-gate/",
+				},
+			],
+		}),
+	);
+	try {
+		const out = await helper({
+			context: { cwd, runId },
+			sources: {
+				"plan.main": { factSlots: [{ id: "slot-001" }] },
+				"normalize-input-packet.main": {
+					packet: { research: { sources: [] } },
+				},
+				"normalize-claims.main": {
+					claimInventory: {
+						verificationCandidates: [
+							{
+								id: "claim-cache-gate",
+								claim: "Cached docs support the gate claim.",
+								factSlotIds: ["slot-001"],
+								sourceUrls: ["https://docs.example.test/cache-gate"],
+							},
+						],
+					},
+					factSlotCoverage: [{ slotId: "slot-001" }],
+				},
+				"verify-claims.claim-cache-gate": {
+					id: "claim-cache-gate",
+					status: "verified",
+					evidence: [
+						{
+							url: "https://docs.example.test/cache-gate",
+							quote: "Cached docs support the gate claim.",
+						},
+					],
+				},
+			},
+			options: { requireFetchedEvidenceForVerified: true },
+		});
+
+		assert.deepEqual(out.statusPartitions.verified, ["claim-cache-gate"]);
+		assert.deepEqual(out.auditedClaims[0].sourceRefs, [
+			"wsrc_abcdefabcdefabcdefabcdefabcdefab",
+		]);
+		assert.equal(out.gateSummary.sourceRefsBackfilledFromUrls, 1);
+		assert.equal(out.gateSummary.sourceRefJoinFailures, 0);
+	} finally {
+		rmSync(cwd, {
+			force: true,
+			maxRetries: 5,
+			recursive: true,
+			retryDelay: 50,
+		});
+	}
 });
 
 test("deep-research claim-evidence-gate backfills npm docs sourceRefs across CLI doc versions", async () => {
