@@ -139,7 +139,7 @@
                 "required": true
               }
             },
-            "prompt": "Using Source Stage Context, analyze docs, examples, package metadata, release, publish, migration, and operational artifact impact. Do not modify files. Put machine-readable JSON in <control> with status, impacts, and assumptions. Focus on user-facing documentation drift, packaging/release hazards, migration notes, and CI/publish implications."
+            "prompt": "Using Source Stage Context, analyze docs, examples, package metadata, release, publish, migration, and operational artifact impact. Do not modify files. Put machine-readable JSON in <control> with status, impacts, and assumptions. status is an impact severity enum only: none, low, medium, high, or unknown; do not use lifecycle words such as completed, passed, or failed. Focus on user-facing documentation drift, packaging/release hazards, migration notes, and CI/publish implications."
           },
           {
             "id": "security-performance-impact",
@@ -158,7 +158,7 @@
                 "required": true
               }
             },
-            "prompt": "Using Source Stage Context, analyze security, privacy, performance, reliability, and observability impact. Do not modify files. Put machine-readable JSON in <control> with status, impacts, and assumptions. Focus on realistic risks introduced by the change, not generic checklist items."
+            "prompt": "Using Source Stage Context, analyze security, privacy, performance, reliability, and observability impact. Do not modify files. Put machine-readable JSON in <control> with status, impacts, and assumptions. status is an impact severity enum only: none, low, medium, high, or unknown; do not use lifecycle words such as completed, passed, or failed. Focus on realistic risks introduced by the change, not generic checklist items."
           },
           {
             "id": "contract-consistency",

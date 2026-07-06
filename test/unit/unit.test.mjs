@@ -173,6 +173,7 @@ import {
 import {
 	buildWorkflowOutputRetryInstructions,
 	parseWorkflowOutput,
+	parseWorkflowOutputForBundle,
 	setWorkflowOutputArtifactWriteHookForTests,
 	writeWorkflowTaskArtifactBundle,
 } from "../../.tmp/unit/workflow-output-artifacts.js";
@@ -28645,9 +28646,7 @@ test("fail-fast cleanup releases the global live model worker cap slot for other
 		const thirdLaunch = await Promise.race([
 			launchSubagentTask(cwd, third.run, third.task, third.compiledTask),
 			sleep(250).then(() => {
-				throw new Error(
-					"fail-fast cleanup leaked the global worker-cap slot",
-				);
+				throw new Error("fail-fast cleanup leaked the global worker-cap slot");
 			}),
 		]);
 		assert.equal(thirdLaunch.kind, "launched");
@@ -29814,6 +29813,100 @@ test("workflow output parser normalizes reviewer location ranges before schema v
 	assert.deepEqual(stringLineRange.control.findings[0].locations, [
 		{ file: "core/txpool/locals/tx_tracker.go", line: 175, lineEnd: 178 },
 		{ file: "core/txpool/locals/journal.go", line: 140 },
+	]);
+});
+
+test("workflow output parser repairs known workflow control schema slips before validation", () => {
+	const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+	const impactSchema = JSON.parse(
+		readFileSync(
+			join(
+				repoRoot,
+				"workflows",
+				"impact-review",
+				"schemas",
+				"api-contract-impact-control.schema.json",
+			),
+			"utf8",
+		),
+	);
+	const impact = parseWorkflowOutput(
+		[
+			"<control>",
+			JSON.stringify({
+				schema: "./schemas/api-contract-impact-control.schema.json",
+				digest: "model used lifecycle status for severity",
+				status: "completed",
+				impacts: [],
+				assumptions: [],
+			}),
+			"</control>",
+			"<analysis>",
+			"analysis",
+			"</analysis>",
+			"<refs>",
+			"[]",
+			"</refs>",
+		].join("\n"),
+		{ controlJsonSchema: impactSchema },
+	);
+	assert.equal(impact.valid, true, JSON.stringify(impact.issues));
+	assert.equal(impact.control.status, "unknown");
+
+	const researchQuestionSchema = JSON.parse(
+		readFileSync(
+			join(
+				repoRoot,
+				"workflows",
+				"deep-research",
+				"schemas",
+				"deep-research-research-questions-control.schema.json",
+			),
+			"utf8",
+		),
+	);
+	const researchQuestion = parseWorkflowOutputForBundle(
+		[
+			"Here is the result.",
+			"<control>",
+			JSON.stringify({
+				schema:
+					"./schemas/deep-research-research-questions-control.schema.json",
+				digest: "missing sources and scalar query count",
+				question: { id: "rq-001", question: "What should be researched?" },
+				extractedFacts: [],
+				claims: [],
+				budgetLedger: {
+					searchBudget: 3,
+					searchCallsUsed: 1,
+					searchQueriesAttempted: 3,
+					omittedSearchQueries: "extra query",
+					budgetExhausted: false,
+					gapRecorded: true,
+				},
+			}),
+			"</control>",
+			"<analysis>",
+			"analysis",
+			"</analysis>",
+			"<refs>",
+			"[]",
+			"</refs>",
+		].join("\n"),
+		{ controlJsonSchema: researchQuestionSchema },
+	);
+	assert.equal(
+		researchQuestion.valid,
+		true,
+		JSON.stringify(researchQuestion.issues),
+	);
+	assert.deepEqual(researchQuestion.control.sources, []);
+	assert.deepEqual(
+		researchQuestion.control.budgetLedger.searchQueriesAttempted,
+		[],
+	);
+	assert.deepEqual(researchQuestion.control.budgetLedger.omittedSearchQueries, [
+		"extra query",
 	]);
 });
 

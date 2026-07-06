@@ -12,6 +12,7 @@ import {
 	validateJsonSchema,
 	type JsonSchema,
 	type JsonSchemaIssue,
+	type JsonSchemaObject,
 } from "./json-schema.js";
 
 export const VNEXT_OUTPUT_PROTOCOL = "workflow-output-sections-v1" as const;
@@ -572,16 +573,133 @@ function parseControlSection(
 		});
 		return undefined;
 	}
-	const normalized = normalizeWorkflowControl(parsed);
+	const normalized = normalizeWorkflowControl(
+		parsed,
+		options.controlJsonSchema,
+	);
 	validateBaseControl(normalized, issues, options);
 	return normalized;
 }
 
 function normalizeWorkflowControl(
 	control: Record<string, unknown>,
+	schema?: JsonSchema,
 ): Record<string, unknown> {
 	const normalized = normalizeControlValue(control);
-	return isPlainRecord(normalized) ? normalized : control;
+	const record = isPlainRecord(normalized) ? normalized : control;
+	return normalizeKnownWorkflowControlSchema(record, schema);
+}
+
+function normalizeKnownWorkflowControlSchema(
+	control: Record<string, unknown>,
+	schema: JsonSchema | undefined,
+): Record<string, unknown> {
+	if (!isJsonSchemaObject(schema)) return control;
+	let normalized = control;
+	const properties = schema.properties ?? {};
+	if (isSeverityStatusSchema(properties.status)) {
+		const repairedStatus = severityStatusFromLifecycle(control.status);
+		if (repairedStatus !== undefined)
+			normalized = { ...normalized, status: repairedStatus };
+	}
+	if (
+		control.sources === undefined &&
+		Array.isArray(schema.required) &&
+		schema.required.includes("sources") &&
+		isArrayJsonSchema(properties.sources)
+	) {
+		normalized = { ...normalized, sources: [] };
+	}
+	if (isPlainRecord(control.budgetLedger)) {
+		const budgetLedgerSchema = properties.budgetLedger;
+		const budgetLedgerProperties = isJsonSchemaObject(budgetLedgerSchema)
+			? (budgetLedgerSchema.properties ?? {})
+			: {};
+		const repairedBudgetLedger = normalizeBudgetLedgerArrays(
+			control.budgetLedger,
+			budgetLedgerProperties,
+		);
+		if (repairedBudgetLedger !== control.budgetLedger)
+			normalized = { ...normalized, budgetLedger: repairedBudgetLedger };
+	}
+	return normalized;
+}
+
+function isJsonSchemaObject(
+	schema: JsonSchema | undefined,
+): schema is JsonSchemaObject {
+	return (
+		typeof schema === "object" && schema !== null && !Array.isArray(schema)
+	);
+}
+
+function isArrayJsonSchema(schema: JsonSchema | undefined): boolean {
+	if (!isJsonSchemaObject(schema)) return false;
+	return schemaHasType(schema, "array");
+}
+
+function isSeverityStatusSchema(schema: JsonSchema | undefined): boolean {
+	if (!isJsonSchemaObject(schema) || !Array.isArray(schema.enum)) return false;
+	const values = new Set(schema.enum);
+	return ["none", "low", "medium", "high", "unknown"].every((value) =>
+		values.has(value),
+	);
+}
+
+function severityStatusFromLifecycle(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const normalized = value.trim().toLowerCase();
+	if (
+		[
+			"complete",
+			"completed",
+			"done",
+			"ok",
+			"pass",
+			"passed",
+			"success",
+			"succeeded",
+		].includes(normalized)
+	) {
+		return "unknown";
+	}
+	return undefined;
+}
+
+function normalizeBudgetLedgerArrays(
+	budgetLedger: Record<string, unknown>,
+	properties: Record<string, JsonSchema>,
+): Record<string, unknown> {
+	let normalized = budgetLedger;
+	for (const key of ["searchQueriesAttempted", "omittedSearchQueries"]) {
+		if (!isArrayJsonSchema(properties[key])) continue;
+		const repaired = stringArrayFromLedgerValue(budgetLedger[key]);
+		if (repaired === undefined) continue;
+		if (normalized === budgetLedger) normalized = { ...budgetLedger };
+		normalized[key] = repaired;
+	}
+	return normalized;
+}
+
+function stringArrayFromLedgerValue(value: unknown): string[] | undefined {
+	if (value === undefined || Array.isArray(value)) return undefined;
+	if (typeof value === "string") {
+		const trimmed = value.trim();
+		return trimmed.length > 0 ? [trimmed] : [];
+	}
+	if (isPlainRecord(value)) {
+		return Object.values(value)
+			.filter((item): item is string => typeof item === "string")
+			.map((item) => item.trim())
+			.filter((item) => item.length > 0);
+	}
+	return [];
+}
+
+function schemaHasType(schema: JsonSchemaObject, type: string): boolean {
+	return Array.isArray(schema.type)
+		? schema.type.includes(type)
+		: schema.type === type;
 }
 
 function normalizeControlValue(value: unknown): unknown {
@@ -1215,10 +1333,7 @@ async function writeSidecars(
 ): Promise<void> {
 	await Promise.all([
 		writeJsonAtomic(files.control!, parsed.control),
-		writeTextAtomic(
-			files.analysis!,
-			ensureTrailingNewline(parsed.analysis),
-		),
+		writeTextAtomic(files.analysis!, ensureTrailingNewline(parsed.analysis)),
 		writeJsonAtomic(files.refs!, parsed.refs),
 		writeTextAtomic(files.raw!, options.rawOutput),
 		writeOptionalText(files.prompt, options.prompt),
