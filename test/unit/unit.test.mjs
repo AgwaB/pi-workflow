@@ -8681,6 +8681,20 @@ test("bundled deep-research compacts audit packets before executive final", asyn
 			),
 		),
 	);
+	const finalAuditSchema = JSON.parse(
+		readFileSync(finalAudit.artifactGraph.output.controlSchemaPath, "utf8"),
+	);
+	const finalSynthesisProps = finalAuditSchema.properties.synthesis.properties;
+	assert.equal(finalSynthesisProps.keyFindingIds.maxItems, 12);
+	assert.equal(finalSynthesisProps.recommendations.maxItems, 12);
+	assert.equal(
+		finalSynthesisProps.recommendations.items.properties.supportingClaimIds
+			.maxItems,
+		8,
+	);
+	assert.equal(finalSynthesisProps.actionPlan.maxItems, 12);
+	assert.equal(finalSynthesisProps.caveatNotes.maxItems, 16);
+	assert.equal(finalSynthesisProps.parentDecisionNotes.maxItems, 12);
 
 	assert.equal(final?.kind, "support");
 	assert.deepEqual(final.dependsOn, [
@@ -31284,6 +31298,10 @@ test("workflow output parser repairs known workflow control schema slips before 
 	);
 	assert.equal(impact.valid, true, JSON.stringify(impact.issues));
 	assert.equal(impact.control.status, "unknown");
+	assert.deepEqual(
+		impact.repairs?.map((repair) => repair.code),
+		["control_status_lifecycle_to_unknown"],
+	);
 
 	const researchQuestionSchema = JSON.parse(
 		readFileSync(
@@ -31346,6 +31364,14 @@ test("workflow output parser repairs known workflow control schema slips before 
 	assert.deepEqual(researchQuestion.control.additionalUnverifiedLeads, [
 		{ note: "gVisor/Firecracker comparison needs a follow-up query" },
 	]);
+	assert.deepEqual(
+		researchQuestion.repairs?.map((repair) => repair.code),
+		[
+			"control_missing_required_sources_empty_array",
+			"control_budget_ledger_array_fields",
+			"control_additional_unverified_leads_objects",
+		],
+	);
 
 	const normalizeClaimsSchema = JSON.parse(
 		readFileSync(
@@ -31394,6 +31420,80 @@ test("workflow output parser repairs known workflow control schema slips before 
 		"gapReason" in normalizeClaims.control.factSlotCoverage[0],
 		false,
 	);
+	assert.deepEqual(
+		normalizeClaims.repairs?.map((repair) => repair.code),
+		["control_fact_slot_coverage_string_fields"],
+	);
+});
+
+test("workflow artifact bundle records schema-slip repair telemetry", async () => {
+	const cwd = makeProject();
+	try {
+		const taskDir = join(
+			cwd,
+			".pi",
+			"workflows",
+			"workflow_repair",
+			"tasks",
+			"task-1",
+		);
+		const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+		const schema = JSON.parse(
+			readFileSync(
+				join(
+					repoRoot,
+					"workflows",
+					"deep-research",
+					"schemas",
+					"deep-research-normalize-claims-control.schema.json",
+				),
+				"utf8",
+			),
+		);
+		const written = await writeWorkflowTaskArtifactBundle({
+			taskDir,
+			rawOutput: [
+				"<control>",
+				JSON.stringify({
+					schema: "deep-research-normalize-claims-control.v1",
+					digest: "gap reason null from model should be omitted",
+					claimInventory: {
+						verificationCandidates: [],
+						preservedClaims: [],
+						duplicates: [],
+					},
+					factSlotCoverage: [
+						{
+							factSlotId: "fs-1",
+							covered: false,
+							gapReason: null,
+						},
+					],
+				}),
+				"</control>",
+				"<analysis>",
+				"Schema-slip repair telemetry should stay visible.",
+				"</analysis>",
+			].join("\n"),
+			taskId: "task-1",
+			stageId: "normalize-claims",
+			status: "completed",
+			exitCode: 0,
+			controlJsonSchema: schema,
+		});
+		assert.equal(written.valid, true);
+		const result = JSON.parse(readFileSync(join(taskDir, "result.json"), "utf8"));
+		assert.equal(result.outputValidation.valid, true);
+		assert.equal(result.outputValidation.repairCount, 1);
+		assert.deepEqual(
+			result.outputValidation.repairs.map((repair) => repair.code),
+			["control_fact_slot_coverage_string_fields"],
+		);
+		const control = JSON.parse(readFileSync(join(taskDir, "control.json"), "utf8"));
+		assert.equal(control.factSlotCoverage[0].gapReason, undefined);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
+	}
 });
 
 test("workflow output parser rejects missing sections, bad control, outside prose, and contract failures", () => {

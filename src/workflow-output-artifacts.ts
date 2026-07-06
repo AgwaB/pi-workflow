@@ -59,6 +59,20 @@ export interface WorkflowOutputIssue {
 	path?: string;
 }
 
+export type WorkflowOutputRepairCode =
+	| "control_status_lifecycle_to_unknown"
+	| "control_missing_required_sources_empty_array"
+	| "control_budget_ledger_array_fields"
+	| "control_additional_unverified_leads_objects"
+	| "control_fact_slot_coverage_string_fields";
+
+export interface WorkflowOutputRepair {
+	code: WorkflowOutputRepairCode;
+	message: string;
+	section?: WorkflowOutputSectionName;
+	path?: string;
+}
+
 export interface ParsedWorkflowOutput {
 	protocol: typeof VNEXT_OUTPUT_PROTOCOL;
 	valid: boolean;
@@ -67,6 +81,7 @@ export interface ParsedWorkflowOutput {
 	analysis?: string;
 	refs?: unknown[];
 	issues: WorkflowOutputIssue[];
+	repairs?: WorkflowOutputRepair[];
 }
 
 export interface ParseWorkflowOutputOptions {
@@ -117,6 +132,8 @@ export interface WorkflowTaskResultEnvelope {
 	outputValidation: {
 		valid: boolean;
 		issues: WorkflowOutputIssue[];
+		repairCount?: number;
+		repairs?: WorkflowOutputRepair[];
 	};
 	salvagedFromFailureKind?: string;
 	subagentWarning?: string;
@@ -163,6 +180,7 @@ export function parseWorkflowOutput(
 ): ParsedWorkflowOutput {
 	const protocolRaw = stripWorkflowPartialOutputSections(raw);
 	const issues: WorkflowOutputIssue[] = [];
+	const repairs: WorkflowOutputRepair[] = [];
 	const requirements = sectionRequirements(options);
 	const sections = collectSections(protocolRaw, requirements);
 	validateSectionLayout(protocolRaw, sections, issues, requirements);
@@ -170,6 +188,7 @@ export function parseWorkflowOutput(
 	const control = parseControlSection(
 		sectionText(sections, SECTION_CONTROL),
 		issues,
+		repairs,
 		options,
 	);
 	const analysis = parseAnalysisSection(
@@ -190,6 +209,7 @@ export function parseWorkflowOutput(
 		issues,
 		{ control, analysis, refs },
 		requirements,
+		repairs,
 	);
 }
 
@@ -560,6 +580,7 @@ function validateNoOutsideText(
 function parseControlSection(
 	text: string | undefined,
 	issues: WorkflowOutputIssue[],
+	repairs: WorkflowOutputRepair[],
 	options: ParseWorkflowOutputOptions,
 ): Record<string, unknown> | undefined {
 	if (text === undefined) return undefined;
@@ -576,6 +597,7 @@ function parseControlSection(
 	const normalized = normalizeWorkflowControl(
 		parsed,
 		options.controlJsonSchema,
+		repairs,
 	);
 	validateBaseControl(normalized, issues, options);
 	return normalized;
@@ -583,24 +605,33 @@ function parseControlSection(
 
 function normalizeWorkflowControl(
 	control: Record<string, unknown>,
-	schema?: JsonSchema,
+	schema: JsonSchema | undefined,
+	repairs: WorkflowOutputRepair[],
 ): Record<string, unknown> {
 	const normalized = normalizeControlValue(control);
 	const record = isPlainRecord(normalized) ? normalized : control;
-	return normalizeKnownWorkflowControlSchema(record, schema);
+	return normalizeKnownWorkflowControlSchema(record, schema, repairs);
 }
 
 function normalizeKnownWorkflowControlSchema(
 	control: Record<string, unknown>,
 	schema: JsonSchema | undefined,
+	repairs: WorkflowOutputRepair[],
 ): Record<string, unknown> {
 	if (!isJsonSchemaObject(schema)) return control;
 	let normalized = control;
 	const properties = schema.properties ?? {};
 	if (isSeverityStatusSchema(properties.status)) {
 		const repairedStatus = severityStatusFromLifecycle(control.status);
-		if (repairedStatus !== undefined)
+		if (repairedStatus !== undefined) {
 			normalized = { ...normalized, status: repairedStatus };
+			repairs.push({
+				code: "control_status_lifecycle_to_unknown",
+				section: SECTION_CONTROL,
+				path: "$.status",
+				message: "normalized lifecycle status text to unknown severity status",
+			});
+		}
 	}
 	if (
 		control.sources === undefined &&
@@ -609,6 +640,12 @@ function normalizeKnownWorkflowControlSchema(
 		isArrayJsonSchema(properties.sources)
 	) {
 		normalized = { ...normalized, sources: [] };
+		repairs.push({
+			code: "control_missing_required_sources_empty_array",
+			section: SECTION_CONTROL,
+			path: "$.sources",
+			message: "inserted empty required sources array",
+		});
 	}
 	if (isPlainRecord(control.budgetLedger)) {
 		const budgetLedgerSchema = properties.budgetLedger;
@@ -619,8 +656,15 @@ function normalizeKnownWorkflowControlSchema(
 			control.budgetLedger,
 			budgetLedgerProperties,
 		);
-		if (repairedBudgetLedger !== control.budgetLedger)
+		if (repairedBudgetLedger !== control.budgetLedger) {
 			normalized = { ...normalized, budgetLedger: repairedBudgetLedger };
+			repairs.push({
+				code: "control_budget_ledger_array_fields",
+				section: SECTION_CONTROL,
+				path: "$.budgetLedger",
+				message: "normalized budget ledger query fields to arrays",
+			});
+		}
 	}
 	if (
 		Array.isArray(control.additionalUnverifiedLeads) &&
@@ -630,11 +674,18 @@ function normalizeKnownWorkflowControlSchema(
 			control.additionalUnverifiedLeads,
 			"note",
 		);
-		if (repairedLeads !== control.additionalUnverifiedLeads)
+		if (repairedLeads !== control.additionalUnverifiedLeads) {
 			normalized = {
 				...normalized,
 				additionalUnverifiedLeads: repairedLeads,
 			};
+			repairs.push({
+				code: "control_additional_unverified_leads_objects",
+				section: SECTION_CONTROL,
+				path: "$.additionalUnverifiedLeads",
+				message: "normalized additional unverified leads to objects",
+			});
+		}
 	}
 	if (Array.isArray(control.factSlotCoverage)) {
 		const repairedCoverage = normalizeObjectArrayStringFields(
@@ -642,8 +693,15 @@ function normalizeKnownWorkflowControlSchema(
 			properties.factSlotCoverage,
 			["gapReason"],
 		);
-		if (repairedCoverage !== control.factSlotCoverage)
+		if (repairedCoverage !== control.factSlotCoverage) {
 			normalized = { ...normalized, factSlotCoverage: repairedCoverage };
+			repairs.push({
+				code: "control_fact_slot_coverage_string_fields",
+				section: SECTION_CONTROL,
+				path: "$.factSlotCoverage",
+				message: "normalized fact slot coverage string fields",
+			});
+		}
 	}
 	return normalized;
 }
@@ -1339,6 +1397,7 @@ function buildParsedOutput(
 		refs?: unknown[];
 	},
 	requirements: SectionRequirements,
+	repairs: WorkflowOutputRepair[] = [],
 ): ParsedWorkflowOutput {
 	const parsed: ParsedWorkflowOutput = {
 		protocol: VNEXT_OUTPUT_PROTOCOL,
@@ -1349,6 +1408,7 @@ function buildParsedOutput(
 	if (sections.control !== undefined) parsed.control = sections.control;
 	if (sections.analysis !== undefined) parsed.analysis = sections.analysis;
 	if (sections.refs !== undefined) parsed.refs = sections.refs;
+	if (repairs.length > 0) parsed.repairs = repairs;
 	return parsed;
 }
 
@@ -1462,6 +1522,22 @@ async function writeOptionalText(
 		await writeTextAtomic(file, content);
 }
 
+function outputValidationEnvelope(
+	valid: boolean,
+	issues: WorkflowOutputIssue[],
+	repairs?: WorkflowOutputRepair[],
+): WorkflowTaskResultEnvelope["outputValidation"] {
+	const outputValidation: WorkflowTaskResultEnvelope["outputValidation"] = {
+		valid,
+		issues,
+	};
+	if (repairs !== undefined && repairs.length > 0) {
+		outputValidation.repairCount = repairs.length;
+		outputValidation.repairs = repairs;
+	}
+	return outputValidation;
+}
+
 function invalidResultEnvelope(
 	parsed: ParsedWorkflowOutput,
 	options: WorkflowTaskArtifactBundleOptions,
@@ -1473,7 +1549,11 @@ function invalidResultEnvelope(
 		artifacts: {},
 		completedAt: options.completedAt ?? new Date().toISOString(),
 		exitCode: 1,
-		outputValidation: { valid: false, issues: parsed.issues },
+		outputValidation: outputValidationEnvelope(
+			false,
+			parsed.issues,
+			parsed.repairs,
+		),
 	};
 }
 
@@ -1492,7 +1572,7 @@ function validResultEnvelope(
 		startedAt: options.startedAt,
 		completedAt: options.completedAt ?? new Date().toISOString(),
 		exitCode: options.exitCode ?? (status === "completed" ? 0 : 1),
-		outputValidation: { valid: true, issues: [] },
+		outputValidation: outputValidationEnvelope(true, [], parsed.repairs),
 	};
 	if (options.salvagedFromFailureKind !== undefined)
 		result.salvagedFromFailureKind = options.salvagedFromFailureKind;
