@@ -269,12 +269,14 @@ test("workflow-invalid output triggers exactly one bounded repair launch, then n
 		assert.equal(task.status, "completed");
 
 		// The July-4 evidence signature: the first process-level success failed
-		// workflow output validation and was retried as a fresh launch, recorded
-		// in outputRetry — this is designed behavior, and it must stay bounded.
+		// workflow output validation and was retried as a bounded repair, recorded
+		// in outputRetry. This fake subagent does not confirm a resumable session,
+		// so it exercises the new-session fallback path.
 		assert.equal(launchCount, 2);
 		assert.ok(task.outputRetry, "outputRetry record must be preserved");
 		assert.equal(task.outputRetry.attempts, 1);
 		assert.equal(task.outputRetry.reason, "workflow_output_invalid");
+		assert.equal(task.outputRetry.repairMode, "new_session");
 
 		// Once the repair attempt validates, the task is terminal: further
 		// refreshes must not dispatch a third run.

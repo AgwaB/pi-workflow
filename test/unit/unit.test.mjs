@@ -28049,7 +28049,7 @@ test("artifact graph output retry reuses confirmed subagent session", async () =
 							session: {
 								id: options.sessionId,
 								requested: true,
-								disposition: "resumed",
+								disposition: launched.length === 1 ? "created" : "resumed",
 							},
 						},
 					}),
@@ -28117,6 +28117,138 @@ test("artifact graph output retry reuses confirmed subagent session", async () =
 	}
 });
 
+
+test("artifact graph output retry falls back to new session after same-session repair fails", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		mkdirSync(join(cwd, "workflows"), { recursive: true });
+		writeFileSync(
+			join(cwd, "workflows", "session-retry-fallback.json"),
+			JSON.stringify(
+				workflowSpec("unit-scout", {
+					artifactGraph: {
+						stages: [{ id: "main", type: "single", prompt: "Analyze." }],
+					},
+				}),
+			),
+		);
+
+		const launched = [];
+		const runs = new Map();
+		setSubagentApiForTests({
+			async runSubagent(options) {
+				launched.push(options);
+				const runId = `run_session_fallback_${launched.length}`;
+				const attemptId = `attempt_session_fallback_${launched.length}`;
+				const artifactDir = join(
+					cwd,
+					String(options.runsDir),
+					runId,
+					"attempts",
+					attemptId,
+				);
+				mkdirSync(artifactDir, { recursive: true });
+				const output =
+					launched.length < 3
+						? "not workflow output"
+						: [
+								"<control>",
+								JSON.stringify({ schema: "stage-control-v1", digest: "ok" }),
+								"</control>",
+								"<analysis>",
+								"new-session fallback succeeded",
+								"</analysis>",
+								"<refs>",
+								"[]",
+								"</refs>",
+							].join("\n");
+				writeFileSync(join(artifactDir, "output.log"), output);
+				writeFileSync(join(artifactDir, "stderr.log"), "");
+				writeFileSync(
+					join(artifactDir, "result.json"),
+					JSON.stringify({
+						status: "completed",
+						completedAt: new Date().toISOString(),
+						startedAt: new Date().toISOString(),
+						exitCode: 0,
+						metadata: {
+							contextLengthExceeded: false,
+							sessionId: options.sessionId,
+							session: {
+								id: options.sessionId,
+								requested: true,
+								disposition: launched.length === 2 ? "resumed" : "created",
+							},
+						},
+					}),
+				);
+				runs.set(runId, { runId, attemptId, artifactDir });
+				return { runId, attemptId, status: "running" };
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async getSubagentStatus({ runId }) {
+				const run = runs.get(runId);
+				return {
+					runId,
+					attemptId: run.attemptId,
+					backend: "headless",
+					status: "completed",
+					failureKind: null,
+					startedAt: new Date().toISOString(),
+					completedAt: new Date().toISOString(),
+					logs: [
+						{
+							type: "output",
+							path: "output.log",
+							artifactCwd: run.artifactDir,
+						},
+						{
+							type: "stderr",
+							path: "stderr.log",
+							artifactCwd: run.artifactDir,
+						},
+						{
+							type: "result",
+							path: "result.json",
+							artifactCwd: run.artifactDir,
+						},
+					],
+					metadata: { contextLengthExceeded: false },
+					attempts: [
+						{ attemptId: run.attemptId, status: "completed", pid: 12345 },
+					],
+				};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+
+		const started = await runWorkflow("session-retry-fallback", cwd, {
+			task: "Run artifact graph",
+		});
+		const completed = await waitForRun(cwd, started.runId, 5_000);
+		assert.equal(completed.status, "completed");
+		assert.equal(launched.length, 3);
+		const baseSessionId = `pi-workflow.${started.runId}.task-1`;
+		const retrySessionId = `${baseSessionId}.retry-2`;
+		assert.equal(launched[0].sessionId, baseSessionId);
+		assert.equal(launched[1].sessionId, baseSessionId);
+		assert.equal(launched[2].sessionId, retrySessionId);
+		const task = taskBySpec(completed, "main.main");
+		assert.equal(task.outputRetry.maxAttempts, 2);
+		assert.equal(task.outputRetry.attempts, 2);
+		assert.equal(task.outputRetry.repairMode, "new_session");
+		assert.equal(task.outputRetry.sessionId, retrySessionId);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
+	}
+});
+
 test("artifact graph output retry starts new session when subagent session is unconfirmed", async () => {
 	const cwd = makeProject();
 	try {
@@ -28162,6 +28294,8 @@ test("artifact graph output retry starts new session when subagent session is un
 								"[]",
 								"</refs>",
 							].join("\n");
+				const recordedSessionId =
+					launched.length === 1 ? "unconfirmed-session" : options.sessionId;
 				writeFileSync(join(artifactDir, "output.log"), output);
 				writeFileSync(join(artifactDir, "stderr.log"), "");
 				writeFileSync(
@@ -28173,9 +28307,9 @@ test("artifact graph output retry starts new session when subagent session is un
 						exitCode: 0,
 						metadata: {
 							contextLengthExceeded: false,
-							sessionId: options.sessionId,
+							sessionId: recordedSessionId,
 							session: {
-								id: options.sessionId,
+								id: recordedSessionId,
 								requested: true,
 								disposition: launched.length === 1 ? "created" : "resumed",
 							},

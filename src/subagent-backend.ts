@@ -1921,6 +1921,12 @@ function artifactGraphRetrySession(
 	subagentResult: Record<string, unknown> | undefined,
 	attempt: number,
 ): { repairMode: "same_session" | "new_session"; sessionId: string } {
+	if (task.outputRetry?.repairMode === "same_session") {
+		return {
+			repairMode: "new_session",
+			sessionId: retrySubagentSessionId(run, task, attempt),
+		};
+	}
 	const expectedSessionId = subagentSessionId(run, task);
 	const metadata = subagentResult?.metadata;
 	const metadataRecord =
@@ -1929,14 +1935,19 @@ function artifactGraphRetrySession(
 			: undefined;
 	const actualSessionId = metadataRecord?.sessionId;
 	const session = metadataRecord?.session;
-	const sessionDisposition =
+	const sessionRecord =
 		session && typeof session === "object" && !Array.isArray(session)
-			? (session as Record<string, unknown>).disposition
+			? (session as Record<string, unknown>)
 			: undefined;
+	const sessionDisposition = sessionRecord?.disposition;
+	const sessionId = sessionRecord?.id;
+	const sessionRequested = sessionRecord?.requested;
 	if (
 		typeof actualSessionId === "string" &&
 		actualSessionId === expectedSessionId &&
-		sessionDisposition === "resumed"
+		(typeof sessionId !== "string" || sessionId === expectedSessionId) &&
+		sessionRequested !== false &&
+		(sessionDisposition === "created" || sessionDisposition === "resumed")
 	) {
 		return { repairMode: "same_session", sessionId: expectedSessionId };
 	}
