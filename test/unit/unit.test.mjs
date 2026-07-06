@@ -7,6 +7,7 @@ import {
 	mkdirSync,
 	mkdtempSync,
 	openSync,
+	readdirSync,
 	readFileSync,
 	rmSync as nodeRmSync,
 	symlinkSync,
@@ -71,6 +72,7 @@ import {
 } from "../../.tmp/unit/index.js";
 import {
 	loadWorkflow,
+	loadWorkflowSpec,
 	parseWorkflow as parsePublicWorkflow,
 } from "../../.tmp/unit/schema.js";
 import {
@@ -33834,3 +33836,33 @@ function isTestWideCodePoint(codePoint) {
 		(codePoint >= 0x2b50 && codePoint <= 0x2b55)
 	);
 }
+
+test("workflow-guide scaffolds load and compile without warnings", async () => {
+	const scaffoldsRoot = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"skills",
+		"workflow-guide",
+		"scaffolds",
+	);
+	const names = readdirSync(scaffoldsRoot, { withFileTypes: true })
+		.filter((entry) => entry.isDirectory())
+		.map((entry) => entry.name)
+		.sort();
+	assert.ok(names.length >= 6, "expected at least six scaffold bundles");
+	for (const name of names) {
+		const specPath = join(scaffoldsRoot, name, "spec.json");
+		const loaded = await loadWorkflowSpec(specPath, scaffoldsRoot);
+		const compiled = await compileWorkflow(loaded.spec, {
+			cwd: scaffoldsRoot,
+			specPath: loaded.specPath,
+			task: "scaffold regression task",
+		});
+		assert.deepEqual(
+			compiled.warnings ?? [],
+			[],
+			`scaffold ${name} must compile without validation warnings`,
+		);
+	}
+});

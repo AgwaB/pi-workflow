@@ -10,22 +10,56 @@
     "limitations"
   ],
   "properties": {
-    "schema": { "type": "string", "minLength": 1 },
-    "digest": { "type": "string", "minLength": 1 },
-    "url": { "type": "string", "minLength": 1 },
-    "fetchToolUsed": { "type": "string", "enum": ["workflow_web_fetch_source", "workflow_web_source_read", "fetch_content", "scrapling_fetch", "none"] },
-    "fallbackAttempted": { "type": "boolean" },
-    "title": { "type": "string" },
-    "extractedText": { "type": "string" },
+    "schema": {
+      "type": "string",
+      "minLength": 1
+    },
+    "digest": {
+      "type": "string",
+      "minLength": 1
+    },
+    "url": {
+      "type": "string",
+      "minLength": 1
+    },
+    "fetchToolUsed": {
+      "type": "string",
+      "enum": [
+        "workflow_web_fetch_source",
+        "workflow_web_source_read",
+        "fetch_content",
+        "none"
+      ]
+    },
+    "fallbackAttempted": {
+      "type": "boolean"
+    },
+    "title": {
+      "type": "string"
+    },
+    "extractedText": {
+      "type": "string"
+    },
     "keyData": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": {
+        "type": "string"
+      },
       "maxItems": 20
     },
-    "sourceStatus": { "type": "string", "enum": ["fetched", "partial", "failed"] },
+    "sourceStatus": {
+      "type": "string",
+      "enum": [
+        "fetched",
+        "partial",
+        "failed"
+      ]
+    },
     "limitations": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": {
+        "type": "string"
+      },
       "maxItems": 10
     }
   },

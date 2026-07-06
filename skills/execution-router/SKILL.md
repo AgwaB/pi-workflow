@@ -218,7 +218,7 @@ Apply these before scoring.
 - Multiple agents would edit the same files/state without ownership boundaries or worktree isolation.
 - Side effects are irreversible/high-impact and there is no approval/sandbox/audit plan.
 
-Recommendation should be `single-agent`, `deterministic workflow`, or `targeted subagent/verifier` until the missing gate exists.
+Recommendation should be `single-agent`, `use existing workflow`/`create new workflow` (deterministic stages), or `add targeted subagent/verifier` until the missing gate exists.
 
 ### Prefer deterministic workflow over agentic/multi-agent if
 
