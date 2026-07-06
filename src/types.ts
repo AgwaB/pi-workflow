@@ -797,6 +797,8 @@ export interface WorkflowTaskRunRecord {
 		maxAttempts?: number;
 		reason?: string;
 		message?: string;
+		nextEligibleAt?: string;
+		retryAfterMs?: number;
 	};
 }
 

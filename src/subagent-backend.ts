@@ -85,6 +85,8 @@ const STALE_LAUNCH_CLAIM_GRACE_MS = 30_000;
 const REFRESH_STATUS_RECONCILE_CONCURRENCY = 8;
 const MIN_TRANSIENT_RETRY_JITTER_MS = 1_000;
 const MAX_TRANSIENT_RETRY_JITTER_MS = 5_000;
+const RATE_LIMIT_TRANSIENT_RETRY_BACKOFF_BASE_MS = 60_000;
+const RATE_LIMIT_TRANSIENT_RETRY_BACKOFF_MAX_MS = 5 * 60_000;
 const MODULE_PATH = fileURLToPath(import.meta.url);
 const MODULE_DIR = dirname(MODULE_PATH);
 const BUNDLED_PI_WEB_ACCESS_EXTENSION = bundledNodeModulePath(
@@ -1282,6 +1284,25 @@ export async function launchSubagentTask(
 	}
 
 	if ((task.launchRetry?.attempts ?? 0) > 0) {
+		const backoffRemainingMs = launchRetryBackoffRemainingMs(task);
+		if (backoffRemainingMs !== undefined && backoffRemainingMs > 0) {
+			const message = `waiting until ${task.launchRetry?.nextEligibleAt} before retrying transient-model launch after rate-limit backoff`;
+			const shouldWriteBackoffState =
+				task.statusDetail !== "retry_model_failure" ||
+				task.lastMessage !== message;
+			task.statusDetail = "retry_model_failure";
+			task.lastMessage = message;
+			if (shouldWriteBackoffState) await writeRunRecord(cwd, run);
+			return {
+				kind: "capacity",
+				message,
+				retryAfterMs: backoffRemainingMs,
+			};
+		}
+		if (backoffRemainingMs !== undefined && task.launchRetry) {
+			delete task.launchRetry.nextEligibleAt;
+			delete task.launchRetry.retryAfterMs;
+		}
 		const jitterMs = transientRetryJitterMs();
 		task.statusDetail = "retry_model_failure";
 		task.lastMessage = `waiting ${jitterMs}ms before retrying transient-model launch`;
@@ -1901,16 +1922,25 @@ async function materializeTerminalSubagentResult(
 	if (
 		shouldRetryTransientModelFailure(statusInfo, workflowResult, outputBytes)
 	) {
+		const retryAttempt = (task.launchRetry?.attempts ?? 0) + 1;
+		const rateLimitBackoffMs = transientModelRateLimitBackoffMs({
+			attempt: retryAttempt,
+			errorMessage,
+			stderrText,
+			subagentResult,
+			snapshotMetadata: snapshot.metadata,
+		});
 		await writeJson(
-			transientFailureAttemptPath(
-				resultFile,
-				(task.launchRetry?.attempts ?? 0) + 1,
-			),
+			transientFailureAttemptPath(resultFile, retryAttempt),
 			workflowResult,
 		);
 		const changed = retryOrFailTransientSubagentFailure(task, {
-			reason: statusInfo.failureKind ?? "model",
+			reason:
+				rateLimitBackoffMs === undefined
+					? (statusInfo.failureKind ?? "model")
+					: "model_rate_limit",
 			message: errorMessage ?? "pi-subagent run failed before producing output",
+			backoffMs: rateLimitBackoffMs,
 		});
 		await recordTerminalParentSubagentChildEvent(run, task, snapshot);
 		return changed;
@@ -2830,10 +2860,105 @@ function classifyPermanentModelFailure(options: {
 		options.stderrText,
 		...metadataTextValues(options.subagentResult?.metadata),
 		...metadataTextValues(options.snapshotMetadata),
-	].filter((value): value is string => typeof value === "string" && value.length > 0);
+	].filter(
+		(value): value is string => typeof value === "string" && value.length > 0,
+	);
 	const matched = candidates.find(providerInputValidationFailure);
 	if (!matched) return undefined;
 	return `permanent-model failure: ${matched.trim().slice(0, 500)}`;
+}
+
+function isRateLimitModelFailureText(text: string): boolean {
+	return /(?:\bhttp(?:\/\d(?:\.\d)?)?[ \/]?429\b|\bstatus(?: code)?[:= ]+429\b|\b429\s+(?:too many requests|rate[_ -]?limit)|rate[_ -]?limit|too many requests|quota exceeded)/i.test(
+		text,
+	);
+}
+
+type RateLimitRetryAfterUnit = "millisecond" | "second" | "minute";
+
+function rateLimitRetryAfterUnit(unit: string | undefined): RateLimitRetryAfterUnit {
+	const lower = (unit ?? "").toLowerCase();
+	if (lower === "ms" || lower.startsWith("millisecond")) return "millisecond";
+	if (lower === "m" || lower.startsWith("min") || lower.startsWith("minute")) {
+		return "minute";
+	}
+	return "second";
+}
+
+function boundedRateLimitRetryAfterMs(
+	value: number,
+	unit: RateLimitRetryAfterUnit,
+): number | undefined {
+	if (!Number.isFinite(value) || value <= 0) return undefined;
+	const multiplier =
+		unit === "millisecond" ? 1 : unit === "minute" ? 60_000 : 1000;
+	return Math.min(
+		RATE_LIMIT_TRANSIENT_RETRY_BACKOFF_MAX_MS,
+		Math.ceil(value * multiplier),
+	);
+}
+
+function retryAfterMsFromRateLimitText(text: string): number | undefined {
+	const retryAfterHeaderMatch = text.match(
+		/\bretry[-_ ]?after\b\s*[:=]\s*(\d{1,6})(?:\s*(ms|milliseconds?|s|sec|secs|seconds?|m|min|mins|minutes?))?\b/i,
+	);
+	if (retryAfterHeaderMatch) {
+		return boundedRateLimitRetryAfterMs(
+			Number.parseInt(retryAfterHeaderMatch[1] ?? "", 10),
+			rateLimitRetryAfterUnit(retryAfterHeaderMatch[2]),
+		);
+	}
+	const tryAgainMatch = text.match(
+		/\btry again in\s+(\d{1,6})\s*(ms|milliseconds?|s|sec|secs|seconds?|m|min|mins|minutes?)\b/i,
+	);
+	if (!tryAgainMatch) return undefined;
+	return boundedRateLimitRetryAfterMs(
+		Number.parseInt(tryAgainMatch[1] ?? "", 10),
+		rateLimitRetryAfterUnit(tryAgainMatch[2]),
+	);
+}
+
+function defaultRateLimitBackoffMs(attempt: number): number {
+	const exponent = Math.max(0, Math.min(4, Math.floor(attempt) - 1));
+	return Math.min(
+		RATE_LIMIT_TRANSIENT_RETRY_BACKOFF_MAX_MS,
+		RATE_LIMIT_TRANSIENT_RETRY_BACKOFF_BASE_MS * 2 ** exponent,
+	);
+}
+
+function transientModelRateLimitBackoffMs(options: {
+	attempt: number;
+	errorMessage?: string;
+	stderrText: string;
+	subagentResult?: Record<string, unknown>;
+	snapshotMetadata?: Record<string, unknown> | null;
+}): number | undefined {
+	const candidates = [
+		options.errorMessage,
+		options.stderrText,
+		...metadataTextValues(options.subagentResult?.metadata),
+		...metadataTextValues(options.snapshotMetadata),
+	].filter(
+		(value): value is string => typeof value === "string" && value.length > 0,
+	);
+	const matched = candidates.find(isRateLimitModelFailureText);
+	if (!matched) return undefined;
+	return (
+		retryAfterMsFromRateLimitText(matched) ??
+		defaultRateLimitBackoffMs(options.attempt)
+	);
+}
+
+function launchRetryBackoffRemainingMs(
+	task: WorkflowTaskRunRecord,
+): number | undefined {
+	const nextEligibleAt = task.launchRetry?.nextEligibleAt;
+	if (typeof nextEligibleAt !== "string" || nextEligibleAt.length === 0) {
+		return undefined;
+	}
+	const nextEligibleAtMs = Date.parse(nextEligibleAt);
+	if (!Number.isFinite(nextEligibleAtMs)) return undefined;
+	return Math.max(0, nextEligibleAtMs - Date.now());
 }
 
 function shouldRetryTransientModelFailure(
@@ -2866,17 +2991,28 @@ function transientFailureAttemptPath(
 
 function retryOrFailTransientSubagentFailure(
 	task: WorkflowTaskRunRecord,
-	options: { reason: string; message: string },
+	options: { reason: string; message: string; backoffMs?: number },
 ): boolean {
 	const attempt = (task.launchRetry?.attempts ?? 0) + 1;
 	const maxAttempts =
 		task.launchRetry?.maxAttempts ?? DEFAULT_TRANSIENT_MODEL_FAILURE_RETRIES;
 	const exhausted = attempt > maxAttempts;
+	const backoffMs =
+		options.backoffMs === undefined
+			? undefined
+			: Math.max(0, Math.floor(options.backoffMs));
+	const nextEligibleAt =
+		!exhausted && backoffMs !== undefined && backoffMs > 0
+			? new Date(Date.now() + backoffMs).toISOString()
+			: undefined;
 	task.launchRetry = {
 		attempts: attempt,
 		maxAttempts,
 		reason: exhausted ? `${options.reason}_exhausted` : options.reason,
 		message: options.message,
+		...(nextEligibleAt === undefined
+			? {}
+			: { nextEligibleAt, retryAfterMs: backoffMs }),
 	};
 	delete task.backendHandle;
 	delete task.backendFiles;
@@ -2887,7 +3023,10 @@ function retryOrFailTransientSubagentFailure(
 	if (!exhausted) {
 		task.status = "pending";
 		task.statusDetail = "retry_model_failure";
-		task.lastMessage = `${options.message}; retrying transient-model failure (${attempt}/${maxAttempts})`;
+		task.lastMessage =
+			nextEligibleAt === undefined
+				? `${options.message}; retrying transient-model failure (${attempt}/${maxAttempts})`
+				: `${options.message}; rate-limit backoff until ${nextEligibleAt} before retrying transient-model failure (${attempt}/${maxAttempts})`;
 		return true;
 	}
 	task.status = "failed";

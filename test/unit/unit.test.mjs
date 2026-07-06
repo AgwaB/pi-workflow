@@ -20494,6 +20494,7 @@ test("refresh retries zero-output transient subagent model failures", async () =
 		assert.equal(refreshedTask.statusDetail, "retry_model_failure");
 		assert.equal(refreshedTask.launchRetry?.attempts, 1);
 		assert.equal(refreshedTask.launchRetry?.reason, "model");
+		assert.equal(refreshedTask.launchRetry?.nextEligibleAt, undefined);
 		assert.equal(refreshedTask.backendHandle, undefined);
 		assert.equal(typeof refreshedTask.timing.refreshStatusPollMs, "number");
 		assert.ok(refreshedTask.timing.terminalStderrBytes > 0);
@@ -20552,6 +20553,7 @@ async function refreshZeroOutputModelFailure(cwd, options) {
 	task.status = "running";
 	task.statusDetail = "running";
 	task.startedAt = new Date().toISOString();
+	if (options.launchRetry) task.launchRetry = options.launchRetry;
 	task.backendHandle = {
 		engine: "pi-subagent",
 		backend: "headless",
@@ -20640,7 +20642,7 @@ async function refreshZeroOutputModelFailure(cwd, options) {
 		cwd,
 		await readRunRecord(cwd, run.runId),
 	);
-	return { refreshedTask: refreshed.tasks[0] };
+	return { compiled, run: refreshed, refreshedTask: refreshed.tasks[0] };
 }
 
 function firstTransientModelFailureAttemptPath(cwd, refreshedTask) {
@@ -20696,24 +20698,6 @@ test("refresh fails fast on maximum-length provider validation with 5xx-sized li
 	}
 });
 
-test("refresh retries provider rate-limit model failures", async () => {
-	const cwd = makeProject();
-	try {
-		const providerError =
-			`Anthropic request failed: HTTP 429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account's rate limit. Please try again later."},"request_id":"req_unit_rate_limit"}`;
-		const { refreshedTask } = await refreshZeroOutputModelFailure(cwd, {
-			runId: "run_provider_rate_limit",
-			attemptId: "attempt_provider_rate_limit",
-			artifactDirName: ".fake-provider-rate-limit-subagent",
-			streamErrors: [providerError],
-		});
-		assertFirstTransientModelRetry(cwd, refreshedTask);
-	} finally {
-		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
-	}
-});
-
 test("refresh retries truncated-stream model failures", async () => {
 	const cwd = makeProject();
 	try {
@@ -20728,6 +20712,227 @@ test("refresh retries truncated-stream model failures", async () => {
 			],
 		});
 		assertFirstTransientModelRetry(cwd, refreshedTask);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
+	}
+});
+
+test("refresh backs off zero-output rate-limit model failures", async () => {
+	const cwd = makeProject();
+	try {
+		const beforeRefreshMs = Date.now();
+		const providerError =
+			`Anthropic request failed: HTTP 429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account's rate limit. Please try again later."},"request_id":"req_unit_rate_limit"}`;
+		const { refreshedTask } = await refreshZeroOutputModelFailure(cwd, {
+			runId: "run_rate_limit_backoff",
+			attemptId: "attempt_rate_limit_backoff",
+			artifactDirName: ".fake-rate-limit-subagent",
+			streamErrors: [providerError],
+		});
+		assert.equal(refreshedTask.status, "pending");
+		assert.equal(refreshedTask.statusDetail, "retry_model_failure");
+		assert.equal(refreshedTask.launchRetry?.attempts, 1);
+		assert.equal(refreshedTask.launchRetry?.maxAttempts, 5);
+		assert.equal(refreshedTask.launchRetry?.reason, "model_rate_limit");
+		assert.equal(refreshedTask.launchRetry?.retryAfterMs, 60_000);
+		assert.ok(
+			Date.parse(refreshedTask.launchRetry?.nextEligibleAt ?? "") >=
+				beforeRefreshMs + 59_000,
+		);
+		assert.match(refreshedTask.lastMessage, /rate-limit backoff/);
+		assert.equal(
+			existsSync(firstTransientModelFailureAttemptPath(cwd, refreshedTask)),
+			true,
+		);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
+	}
+});
+
+test("refresh parses rate-limit Retry-After units", async () => {
+	const cases = [
+		{
+			name: "seconds suffix",
+			text: "Rate limit reached. Please try again in 20s.",
+			expectedMs: 20_000,
+		},
+		{
+			name: "milliseconds suffix",
+			text: "Rate limit reached. Please try again in 379ms.",
+			expectedMs: 379,
+		},
+		{
+			name: "bare retry-after header seconds",
+			text: "HTTP 429 rate_limit_error. Retry-After: 30",
+			expectedMs: 30_000,
+		},
+		{
+			name: "minutes suffix",
+			text: "Rate limit reached. Please try again in 2 minutes.",
+			expectedMs: 120_000,
+		},
+		{
+			name: "no numeric retry hint",
+			text: "HTTP 429 rate_limit_error. Please try again later.",
+			expectedMs: 60_000,
+		},
+		{
+			name: "http-date retry-after fallback",
+			text: "HTTP 429 rate_limit_error. Retry-After: Wed, 21 Oct 2015 07:28:00 GMT",
+			expectedMs: 60_000,
+		},
+	];
+	for (const scenario of cases) {
+		const cwd = makeProject();
+		try {
+			const { refreshedTask } = await refreshZeroOutputModelFailure(cwd, {
+				runId: `run_retry_after_${scenario.name.replace(/\W+/g, "_")}`,
+				attemptId: `attempt_retry_after_${scenario.name.replace(/\W+/g, "_")}`,
+				artifactDirName: `.fake-retry-after-${scenario.name.replace(/\W+/g, "-")}`,
+				streamErrors: [scenario.text],
+			});
+			assert.equal(
+				refreshedTask.launchRetry?.retryAfterMs,
+				scenario.expectedMs,
+				scenario.name,
+			);
+			assert.equal(refreshedTask.launchRetry?.reason, "model_rate_limit");
+		} finally {
+			setSubagentApiForTests(undefined);
+			rmSync(cwd, {
+				recursive: true,
+				force: true,
+				maxRetries: 5,
+				retryDelay: 10,
+			});
+		}
+	}
+});
+
+test("refresh escalates and exhausts rate-limit backoff attempts", async () => {
+	const cwd = makeProject();
+	try {
+		const providerError = "HTTP 429 rate_limit_error. Please try again later.";
+		const { refreshedTask } = await refreshZeroOutputModelFailure(cwd, {
+			runId: "run_rate_limit_escalate",
+			attemptId: "attempt_rate_limit_escalate",
+			artifactDirName: ".fake-rate-limit-escalate-subagent",
+			streamErrors: [providerError],
+			launchRetry: { attempts: 2, maxAttempts: 5, reason: "model_rate_limit" },
+		});
+		assert.equal(refreshedTask.status, "pending");
+		assert.equal(refreshedTask.launchRetry?.attempts, 3);
+		assert.equal(refreshedTask.launchRetry?.retryAfterMs, 240_000);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
+	}
+
+	const exhaustedCwd = makeProject();
+	try {
+		const providerError = "HTTP 429 rate_limit_error. Please try again later.";
+		const { refreshedTask } = await refreshZeroOutputModelFailure(exhaustedCwd, {
+			runId: "run_rate_limit_exhausted",
+			attemptId: "attempt_rate_limit_exhausted",
+			artifactDirName: ".fake-rate-limit-exhausted-subagent",
+			streamErrors: [providerError],
+			launchRetry: { attempts: 5, maxAttempts: 5, reason: "model_rate_limit" },
+		});
+		assert.equal(refreshedTask.status, "failed");
+		assert.equal(refreshedTask.launchRetry?.attempts, 6);
+		assert.equal(refreshedTask.launchRetry?.reason, "model_rate_limit_exhausted");
+		assert.equal(refreshedTask.launchRetry?.nextEligibleAt, undefined);
+		assert.equal(refreshedTask.launchRetry?.retryAfterMs, undefined);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(exhaustedCwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+	}
+});
+
+test("refresh detects rate-limit text from stderr", async () => {
+	const cwd = makeProject();
+	try {
+		const { refreshedTask } = await refreshZeroOutputModelFailure(cwd, {
+			runId: "run_rate_limit_stderr",
+			attemptId: "attempt_rate_limit_stderr",
+			artifactDirName: ".fake-rate-limit-stderr-subagent",
+			stderrText: "HTTP 429 rate_limit_error. Retry-After: 30\n",
+		});
+		assert.equal(refreshedTask.launchRetry?.reason, "model_rate_limit");
+		assert.equal(refreshedTask.launchRetry?.retryAfterMs, 30_000);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
+	}
+});
+
+test("launch skips rate-limited retry until nextEligibleAt", async () => {
+	const cwd = makeProject();
+	try {
+		const providerError =
+			`Anthropic request failed: HTTP 429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account's rate limit. Please try again later."},"request_id":"req_unit_rate_limit"}`;
+		const { compiled, run, refreshedTask } = await refreshZeroOutputModelFailure(
+			cwd,
+			{
+				runId: "run_rate_limit_gate",
+				attemptId: "attempt_rate_limit_gate",
+				artifactDirName: ".fake-rate-limit-gate-subagent",
+				streamErrors: [providerError],
+			},
+		);
+		let launches = 0;
+		setSubagentApiForTests({
+			async runSubagent() {
+				launches += 1;
+				return {
+					runId: "run_after_rate_limit",
+					attemptId: "attempt_after_rate_limit",
+					status: "running",
+				};
+			},
+			async getSubagentStatus() {
+				return null;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+
+		const deferred = await launchSubagentTask(
+			cwd,
+			run,
+			refreshedTask,
+			compiled.tasks[0],
+		);
+		assert.equal(deferred.kind, "capacity");
+		assert.equal(launches, 0);
+		assert.match(refreshedTask.lastMessage, /rate-limit backoff/);
+
+		refreshedTask.launchRetry.nextEligibleAt = new Date(
+			Date.now() - 1_000,
+		).toISOString();
+		await writeRunRecord(cwd, run);
+		const launched = await launchSubagentTask(
+			cwd,
+			run,
+			refreshedTask,
+			compiled.tasks[0],
+		);
+		assert.equal(launched.kind, "launched");
+		assert.equal(launches, 1);
+		assert.equal(refreshedTask.status, "running");
+		assert.equal(refreshedTask.launchRetry?.nextEligibleAt, undefined);
+		assert.equal(refreshedTask.launchRetry?.retryAfterMs, undefined);
 	} finally {
 		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
