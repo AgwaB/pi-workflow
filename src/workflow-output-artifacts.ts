@@ -64,7 +64,8 @@ export type WorkflowOutputRepairCode =
 	| "control_missing_required_sources_empty_array"
 	| "control_budget_ledger_array_fields"
 	| "control_additional_unverified_leads_objects"
-	| "control_fact_slot_coverage_string_fields";
+	| "control_fact_slot_coverage_string_fields"
+	| "control_final_synthesis_array_caps";
 
 export interface WorkflowOutputRepair {
 	code: WorkflowOutputRepairCode;
@@ -703,7 +704,92 @@ function normalizeKnownWorkflowControlSchema(
 			});
 		}
 	}
+	if (isDeepResearchFinalSynthesisSchema(schema)) {
+		const repairedSynthesis = normalizeFinalSynthesisArrayCaps(control.synthesis);
+		if (repairedSynthesis !== control.synthesis) {
+			normalized = { ...normalized, synthesis: repairedSynthesis };
+			repairs.push({
+				code: "control_final_synthesis_array_caps",
+				section: SECTION_CONTROL,
+				path: "$.synthesis",
+				message: "clamped final synthesis arrays to schema caps",
+			});
+		}
+	}
 	return normalized;
+}
+
+function isDeepResearchFinalSynthesisSchema(schema: JsonSchemaObject): boolean {
+	const schemaProperty = schema.properties?.schema;
+	return (
+		isJsonSchemaObject(schemaProperty) &&
+		schemaProperty.const === "deep-research-final-synthesis-v1"
+	);
+}
+
+function normalizeFinalSynthesisArrayCaps(synthesis: unknown): unknown {
+	if (!isPlainRecord(synthesis)) return synthesis;
+	let normalized = synthesis;
+	const cappedKeyFindingIds = cappedArray(synthesis.keyFindingIds, 12);
+	if (cappedKeyFindingIds !== synthesis.keyFindingIds) {
+		normalized = { ...normalized, keyFindingIds: cappedKeyFindingIds };
+	}
+	for (const key of ["notableUnsupportedClaimIds", "contestedClaimIds"]) {
+		const capped = cappedArray(synthesis[key], 12);
+		if (capped !== synthesis[key]) {
+			if (normalized === synthesis) normalized = { ...normalized };
+			normalized[key] = capped;
+		}
+	}
+	for (const key of ["recommendations", "actionPlan", "parentDecisionNotes"]) {
+		const cappedRows = normalizeFinalSynthesisRows(synthesis[key], 12, [
+			"supportingClaimIds",
+		]);
+		if (cappedRows !== synthesis[key]) {
+			if (normalized === synthesis) normalized = { ...normalized };
+			normalized[key] = cappedRows;
+		}
+	}
+	const cappedCaveats = normalizeFinalSynthesisRows(synthesis.caveatNotes, 16, [
+		"relatedClaimIds",
+		"gapIds",
+	]);
+	if (cappedCaveats !== synthesis.caveatNotes) {
+		if (normalized === synthesis) normalized = { ...normalized };
+		normalized.caveatNotes = cappedCaveats;
+	}
+	return normalized;
+}
+
+function normalizeFinalSynthesisRows(
+	value: unknown,
+	maxRows: number,
+	arrayFields: string[],
+): unknown {
+	if (!Array.isArray(value)) return value;
+	let normalized: unknown[] | undefined;
+	const cappedRows = value.length > maxRows ? value.slice(0, maxRows) : value;
+	for (const [index, row] of cappedRows.entries()) {
+		if (!isPlainRecord(row)) continue;
+		let repaired = row;
+		for (const field of arrayFields) {
+			const capped = cappedArray(row[field], 8);
+			if (capped === row[field]) continue;
+			if (repaired === row) repaired = { ...row };
+			repaired[field] = capped;
+		}
+		if (repaired !== row) {
+			if (normalized === undefined) normalized = [...cappedRows];
+			normalized[index] = repaired;
+		}
+	}
+	if (normalized !== undefined) return normalized;
+	return cappedRows === value ? value : cappedRows;
+}
+
+function cappedArray(value: unknown, maxItems: number): unknown {
+	if (!Array.isArray(value) || value.length <= maxItems) return value;
+	return value.slice(0, maxItems);
 }
 
 function isJsonSchemaObject(

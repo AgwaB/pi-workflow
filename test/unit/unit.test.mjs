@@ -32776,6 +32776,107 @@ test("workflow output parser repairs known workflow control schema slips before 
 		normalizeClaims.repairs?.map((repair) => repair.code),
 		["control_fact_slot_coverage_string_fields"],
 	);
+
+	const finalSynthesisSchema = JSON.parse(
+		readFileSync(
+			join(
+				repoRoot,
+				"workflows",
+				"deep-research",
+				"schemas",
+				"deep-research-final-synthesis-control.schema.json",
+			),
+			"utf8",
+		),
+	);
+	const manyClaimIds = Array.from(
+		{ length: 18 },
+		(_, index) => `claim-${String(index + 1).padStart(3, "0")}`,
+	);
+	const finalSynthesis = parseWorkflowOutput(
+		[
+			"<control>",
+			JSON.stringify({
+				schema: "deep-research-final-synthesis-v1",
+				digest: "model overproduced capped synthesis arrays",
+				synthesis: {
+					bottomLine: "Use the capped synthesis subset.",
+					keyFindingIds: manyClaimIds,
+					recommendations: [
+						{
+							recommendation: "Prioritize the verified subset.",
+							supportingClaimIds: manyClaimIds,
+						},
+					],
+					actionPlan: [
+						{
+							action: "Review the highest-value claims first.",
+							supportingClaimIds: manyClaimIds,
+						},
+					],
+					caveatNotes: [
+						{
+							note: "Only a subset is parent-facing.",
+							relatedClaimIds: manyClaimIds,
+							gapIds: manyClaimIds,
+						},
+					],
+					parentDecisionNotes: [
+						{
+							note: "Decide from the strongest evidence.",
+							whyItMatters: "The renderer joins claim ids to evidence.",
+							evidenceStatus: "verified",
+							suggestedParentDecision: "Proceed with caveats.",
+							supportingClaimIds: manyClaimIds,
+						},
+					],
+					notableUnsupportedClaimIds: manyClaimIds,
+					contestedClaimIds: manyClaimIds,
+				},
+			}),
+			"</control>",
+			"<analysis>",
+			"analysis",
+			"</analysis>",
+			"<refs>",
+			"[]",
+			"</refs>",
+		].join("\n"),
+		{ controlJsonSchema: finalSynthesisSchema },
+	);
+	assert.equal(finalSynthesis.valid, true, JSON.stringify(finalSynthesis.issues));
+	assert.equal(finalSynthesis.control.synthesis.keyFindingIds.length, 12);
+	assert.equal(
+		finalSynthesis.control.synthesis.recommendations[0].supportingClaimIds
+			.length,
+		8,
+	);
+	assert.equal(
+		finalSynthesis.control.synthesis.actionPlan[0].supportingClaimIds.length,
+		8,
+	);
+	assert.equal(
+		finalSynthesis.control.synthesis.caveatNotes[0].relatedClaimIds.length,
+		8,
+	);
+	assert.equal(
+		finalSynthesis.control.synthesis.caveatNotes[0].gapIds.length,
+		8,
+	);
+	assert.equal(
+		finalSynthesis.control.synthesis.parentDecisionNotes[0]
+			.supportingClaimIds.length,
+		8,
+	);
+	assert.equal(
+		finalSynthesis.control.synthesis.notableUnsupportedClaimIds.length,
+		12,
+	);
+	assert.equal(finalSynthesis.control.synthesis.contestedClaimIds.length, 12);
+	assert.deepEqual(
+		finalSynthesis.repairs?.map((repair) => repair.code),
+		["control_final_synthesis_array_caps"],
+	);
 });
 
 test("workflow artifact bundle records schema-slip repair telemetry", async () => {
