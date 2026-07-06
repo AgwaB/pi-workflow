@@ -20752,6 +20752,7 @@ test("refresh fails fast on permanent provider input-validation model failures",
 async function refreshZeroOutputModelFailure(cwd, options) {
 	writeAgent(cwd, "unit-scout", "read");
 	const spec = workflowSpec("unit-scout", {
+		...(options.model === undefined ? {} : { model: options.model }),
 		artifactGraph: {
 			stages: [{ id: "main", type: "single", prompt: "Do work." }],
 		},
@@ -20859,6 +20860,24 @@ async function refreshZeroOutputModelFailure(cwd, options) {
 		await readRunRecord(cwd, run.runId),
 	);
 	return { compiled, run: refreshed, refreshedTask: refreshed.tasks[0] };
+}
+
+async function createPendingSingleTaskRun(cwd, options = {}) {
+	writeAgent(cwd, "unit-scout", "read");
+	const spec = workflowSpec("unit-scout", {
+		...(options.model === undefined ? {} : { model: options.model }),
+		artifactGraph: {
+			stages: [{ id: "main", type: "single", prompt: "Do work." }],
+		},
+	});
+	const compiled = await compileWorkflow(spec, { cwd, task: "Review topic" });
+	const { run } = await createWorkflowRunRecord(
+		cwd,
+		compiled,
+		join(cwd, "workflows", `${options.specName ?? "unit"}.json`),
+	);
+	await writeStaticRunArtifacts(cwd, run, compiled, spec);
+	return { compiled, run, task: run.tasks[0] };
 }
 
 function firstTransientModelFailureAttemptPath(cwd, refreshedTask) {
@@ -21149,6 +21168,73 @@ test("launch skips rate-limited retry until nextEligibleAt", async () => {
 		assert.equal(refreshedTask.status, "running");
 		assert.equal(refreshedTask.launchRetry?.nextEligibleAt, undefined);
 		assert.equal(refreshedTask.launchRetry?.retryAfterMs, undefined);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
+	}
+});
+
+test("shared rate-limit backoff defers same-provider launches only", async () => {
+	const cwd = makeProject();
+	try {
+		const providerError =
+			"Anthropic request failed: HTTP 429 rate_limit_error. Retry-After: 30";
+		await refreshZeroOutputModelFailure(cwd, {
+			runId: "run_shared_rate_limit_seed",
+			attemptId: "attempt_shared_rate_limit_seed",
+			artifactDirName: ".fake-shared-rate-limit-seed-subagent",
+			model: "anthropic/claude-opus-4-7",
+			streamErrors: [providerError],
+		});
+
+		let launches = 0;
+		setSubagentApiForTests({
+			async runSubagent() {
+				launches += 1;
+				return {
+					runId: `run_shared_rate_limit_${launches}`,
+					attemptId: `attempt_shared_rate_limit_${launches}`,
+					status: "running",
+				};
+			},
+			async getSubagentStatus() {
+				return null;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+
+		const sameProvider = await createPendingSingleTaskRun(cwd, {
+			model: "anthropic/claude-sonnet-4-5",
+			specName: "same-provider",
+		});
+		const deferred = await launchSubagentTask(
+			cwd,
+			sameProvider.run,
+			sameProvider.task,
+			sameProvider.compiled.tasks[0],
+		);
+		assert.equal(deferred.kind, "capacity");
+		assert.equal(launches, 0);
+		assert.match(deferred.message, /shared anthropic provider rate-limit backoff/);
+		assert.match(sameProvider.task.lastMessage, /shared anthropic provider/);
+
+		const otherProvider = await createPendingSingleTaskRun(cwd, {
+			model: "openai-codex/gpt-5.5",
+			specName: "other-provider",
+		});
+		const launched = await launchSubagentTask(
+			cwd,
+			otherProvider.run,
+			otherProvider.task,
+			otherProvider.compiled.tasks[0],
+		);
+		assert.equal(launched.kind, "launched");
+		assert.equal(launches, 1);
 	} finally {
 		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });

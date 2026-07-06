@@ -225,6 +225,7 @@ let injectedSubagentApi: SubagentApi | undefined;
 export function setSubagentApiForTests(api: unknown | undefined): void {
 	injectedSubagentApi = api === undefined ? undefined : (api as SubagentApi);
 	cachedSubagentApi = undefined;
+	if (api === undefined) sharedModelRateLimitBackoffs.clear();
 }
 
 async function loadSubagentApi(): Promise<SubagentApi> {
@@ -318,6 +319,16 @@ let launchSlotReleaseDelayMsForTests: number | undefined;
 let transientRetryJitterForTests: (() => number) | undefined;
 let launchSlotAcquiredHookForTests: (() => void) | undefined;
 let launchSlotReleaseGeneration = 0;
+
+interface SharedModelRateLimitBackoffState {
+	nextEligibleAtMs: number;
+	retryAfterMs: number;
+	updatedAt: string;
+}
+
+const sharedModelRateLimitBackoffs =
+	new Map<string, SharedModelRateLimitBackoffState>();
+
 interface WaitQueueEntry {
 	resolveWait: () => void;
 	rejectWait: (error: Error) => void;
@@ -1282,6 +1293,7 @@ export function setSubagentLaunchControlsForTests(options?: {
 	launchSlotReleaseGeneration += 1;
 	activeLaunchSlots = 0;
 	activeLiveModelWorkerKeys.clear();
+	sharedModelRateLimitBackoffs.clear();
 	while (launchWaitQueue.length > 0) launchWaitQueue.shift()?.resolveWait();
 }
 
@@ -1333,6 +1345,9 @@ export async function launchSubagentTask(
 		};
 	}
 
+	const taskHasRateLimitRetry =
+		(task.launchRetry?.attempts ?? 0) > 0 &&
+		(task.launchRetry?.reason ?? "").startsWith("model_rate_limit");
 	if ((task.launchRetry?.attempts ?? 0) > 0) {
 		const backoffRemainingMs = launchRetryBackoffRemainingMs(task);
 		if (backoffRemainingMs !== undefined && backoffRemainingMs > 0) {
@@ -1358,6 +1373,33 @@ export async function launchSubagentTask(
 		task.lastMessage = `waiting ${jitterMs}ms before retrying transient-model launch`;
 		await writeRunRecord(cwd, run);
 		if (jitterMs > 0) await sleep(jitterMs);
+	}
+
+	const sharedRateLimitBackoff = taskHasRateLimitRetry
+		? undefined
+		: sharedModelRateLimitBackoffRemaining(
+				modelRateLimitBackoffKey(task, compiledTask),
+			);
+	if (sharedRateLimitBackoff) {
+		const message = sharedModelRateLimitBackoffWaitingMessage(
+			sharedRateLimitBackoff.key,
+			sharedRateLimitBackoff.nextEligibleAt,
+		);
+		const shouldWriteBackoffState =
+			task.status !== "pending" ||
+			task.statusDetail !== "pending" ||
+			task.startedAt !== undefined ||
+			task.lastMessage !== message;
+		task.status = "pending";
+		task.statusDetail = "pending";
+		task.startedAt = undefined;
+		task.lastMessage = message;
+		if (shouldWriteBackoffState) await writeRunRecord(cwd, run);
+		return {
+			kind: "capacity",
+			message,
+			retryAfterMs: sharedRateLimitBackoff.remainingMs,
+		};
 	}
 
 	const systemPromptFile = fromProjectPath(cwd, task.files.systemPrompt);
@@ -1980,6 +2022,7 @@ async function materializeTerminalSubagentResult(
 			subagentResult,
 			snapshotMetadata: snapshot.metadata,
 		});
+		recordSharedModelRateLimitBackoff(task, rateLimitBackoffMs);
 		await writeJson(
 			transientFailureAttemptPath(resultFile, retryAttempt),
 			workflowResult,
@@ -2928,6 +2971,73 @@ function classifyPermanentModelFailure(options: {
 	const matched = candidates.find(providerInputValidationFailure);
 	if (!matched) return undefined;
 	return `permanent-model failure: ${matched.trim().slice(0, 500)}`;
+}
+
+function modelRateLimitBackoffKeyForModel(model: string | undefined): string {
+	const trimmed = model?.trim();
+	if (!trimmed) return "default";
+	const provider = trimmed.includes("/") ? trimmed.split("/", 1)[0] : trimmed;
+	return (provider ?? trimmed).toLowerCase();
+}
+
+function modelRateLimitBackoffKey(
+	task: WorkflowTaskRunRecord,
+	compiledTask?: CompiledTask,
+): string {
+	return modelRateLimitBackoffKeyForModel(
+		compiledTask?.runtime.model ?? task.runtime.model,
+	);
+}
+
+function sharedModelRateLimitBackoffScope(key: string): string {
+	return key === "default" ? "model provider" : `${key} provider`;
+}
+
+function sharedModelRateLimitBackoffWaitingMessage(
+	key: string,
+	nextEligibleAt: string,
+): string {
+	return `waiting until ${nextEligibleAt} before launching pi-subagent after shared ${sharedModelRateLimitBackoffScope(key)} rate-limit backoff`;
+}
+
+function recordSharedModelRateLimitBackoff(
+	task: WorkflowTaskRunRecord,
+	backoffMs: number | undefined,
+): void {
+	if (backoffMs === undefined || backoffMs <= 0) return;
+	const key = modelRateLimitBackoffKey(task);
+	const nowMs = Date.now();
+	const nextEligibleAtMs = nowMs + Math.max(0, Math.floor(backoffMs));
+	const existing = sharedModelRateLimitBackoffs.get(key);
+	const boundedNextEligibleAtMs = Math.max(
+		existing?.nextEligibleAtMs ?? 0,
+		nextEligibleAtMs,
+	);
+	sharedModelRateLimitBackoffs.set(key, {
+		nextEligibleAtMs: boundedNextEligibleAtMs,
+		retryAfterMs: Math.max(0, boundedNextEligibleAtMs - nowMs),
+		updatedAt: nowIso(),
+	});
+}
+
+function sharedModelRateLimitBackoffRemaining(
+	key: string,
+):
+	| { key: string; nextEligibleAt: string; remainingMs: number; retryAfterMs: number }
+	| undefined {
+	const backoff = sharedModelRateLimitBackoffs.get(key);
+	if (!backoff) return undefined;
+	const remainingMs = Math.max(0, backoff.nextEligibleAtMs - Date.now());
+	if (remainingMs <= 0) {
+		sharedModelRateLimitBackoffs.delete(key);
+		return undefined;
+	}
+	return {
+		key,
+		nextEligibleAt: new Date(backoff.nextEligibleAtMs).toISOString(),
+		remainingMs,
+		retryAfterMs: backoff.retryAfterMs,
+	};
 }
 
 function isRateLimitModelFailureText(text: string): boolean {
