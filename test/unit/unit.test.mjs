@@ -235,6 +235,7 @@ function sleep(ms) {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+
 const parentSubagentEnvKeys = [
 	"PI_WORKFLOW_PARENT_SUBAGENT_CWD",
 	"PI_WORKFLOW_PARENT_SUBAGENT_RUNS_DIR",
@@ -1000,7 +1001,7 @@ test("fail-fast flags off preserve failed-run scheduling without sibling cancell
 		assert.equal(interrupts.length, 0);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -1059,7 +1060,7 @@ test("fail-fast flags on cancel pending siblings and interrupt running siblings 
 		);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -1147,7 +1148,7 @@ test("supervisor lease ignores orphaned reclaim mutex from dead owner", async ()
 	} finally {
 		if (originalRole === undefined) delete process.env.PI_WORKFLOW_ROLE;
 		else process.env.PI_WORKFLOW_ROLE = originalRole;
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -1205,7 +1206,7 @@ test("supervisor lease honors live foreign owners and stale reclaim; workers can
 	} finally {
 		if (originalRole === undefined) delete process.env.PI_WORKFLOW_ROLE;
 		else process.env.PI_WORKFLOW_ROLE = originalRole;
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -1233,7 +1234,7 @@ test("run lease stale reclaim admits exactly one concurrent owner", async () => 
 		assert.equal(results.filter((value) => value === undefined).length, 1);
 	} finally {
 		setRunLeaseTestHooksForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -1274,7 +1275,7 @@ test("run lease restore fails clearly if another owner appears during reclaim re
 	} finally {
 		if (thirdPartyFd !== undefined) closeSync(thirdPartyFd);
 		setRunLeaseTestHooksForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -1293,7 +1294,7 @@ test("run lease absolute staleness can reclaim a live-pid old lock", async () =>
 		assert.equal(result, "reacquired");
 	} finally {
 		setRunLeaseTestHooksForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -1318,7 +1319,7 @@ test("run lease release does not unlink a replacement lock", async () => {
 		assert.match(readFileSync(lockFile, "utf8"), /^third-party-release\n/);
 	} finally {
 		setRunLeaseTestHooksForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -1369,7 +1370,7 @@ test("bundled common agents are fallback after project-local agents", async () =
 	} finally {
 		if (previousHome === undefined) delete process.env.HOME;
 		else process.env.HOME = previousHome;
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 		rmSync(home, { recursive: true, force: true });
 	}
 });
@@ -1957,7 +1958,7 @@ test("compiler lowers dynamic stages to controller placeholders", async () => {
 			),
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -1986,7 +1987,7 @@ test("compiler defaults dynamic decision repair to two re-asks and maxStalls to 
 		assert.equal(loop.repair.maxAttempts, 2);
 		assert.equal(loop.stopPolicy.maxStalls, 3);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -2035,7 +2036,7 @@ test("compiler keeps dynamic stage and decision-loop pins above runtime defaults
 		assert.equal(loop.synthesis.model, "stage/model");
 		assert.equal(loop.synthesis.thinking, "high");
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -2086,7 +2087,7 @@ test("compiler applies runtime overrides above dynamic stage and decision-loop p
 			assert.equal(profile.thinking, "low");
 		}
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -2189,7 +2190,7 @@ test("dynamic generated tasks apply runtime overrides above profile pins and res
 		assert.equal(generated.runtime.thinkingResolution?.requested, "xhigh");
 		assert.equal(generated.runtime.thinkingResolution?.resolved, "high");
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -2232,7 +2233,7 @@ test("compiler accepts deprecated dynamic decision-loop no-op fields", async () 
 		assert.equal(loop.stopPolicy.maxStalls, 5);
 		assert.equal(loop.stopPolicy.failOnDroppedRequiredBranch, true);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -2292,7 +2293,7 @@ test("dynamic event ledger writes monotonic events and rebuilds state", async ()
 		assert.deepEqual(controller.waitingNestedWorkflowRunIds, []);
 		assert.equal(controller.lastEventSeq, 5);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -2670,7 +2671,7 @@ test("dynamic-decision artifacts persist raw validation and accepted canonical d
 		assert.equal(accepted.decisionHash, validation.hash);
 		assert.equal(accepted.decision.decisionId, "decide-r2");
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -3003,7 +3004,7 @@ test("dynamic-state-index artifacts reject divergent rewrites", async () => {
 			/divergent digest/,
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -3040,7 +3041,7 @@ test("dynamic-state-index artifacts persist extracts and canonical index", async
 		assert.equal(saved.digest, index.digest);
 		assert.equal(saved.findings[0].id, "AUTH-1");
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -3081,7 +3082,7 @@ test("dynamic-decision artifacts reject divergent accepted rewrites", async () =
 			/divergent hash/,
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -3288,7 +3289,7 @@ test("deterministic dynamic decision-loop fixture persists decisions and state i
 
 		assert.equal(existsSync(finalDecision.acceptedPath), true);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -4270,7 +4271,7 @@ test("runDynamicDecisionLoop persists and recomputes stall/replan counters deter
 			{ stallCount: 3, replanCount: 1 },
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -4466,7 +4467,7 @@ test("dynamic state cache rebuilds when state.json is missing or corrupt", async
 		assert.equal(state.controllers["adaptive.controller"].status, "running");
 		assert.equal(state.controllers["adaptive.controller"].lastEventSeq, 2);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -4551,7 +4552,7 @@ test("artifactGraph runtime dynamic executes trusted controller and writes aggre
 		assert.equal(control.digest, "done");
 		assert.equal(control.sourceCount, 0);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -4683,7 +4684,7 @@ test("artifactGraph dynamic surfaces unintended zero-fanout omissions as dropped
 			"round 0 accepted no executable work actions",
 		]);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -4729,7 +4730,7 @@ test("artifactGraph dynamic treats explicit stopped result as clean completion",
 		assert.equal(state.controllers["adaptive.controller"].status, "complete");
 		assert.deepEqual(state.controllers["adaptive.controller"].omissions, []);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -4776,7 +4777,7 @@ test("artifactGraph dynamic surfaces invalid fail-open decision result as blocke
 			"round 0 decision invalid: missing nextActions",
 		]);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -4923,7 +4924,7 @@ test("artifactGraph dynamic decision-loop failOnInvalidDecision surfaces blocker
 		);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -5159,7 +5160,7 @@ test("artifactGraph dynamic decision-loop plans fanout once and dedupes partial 
 		);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -5311,7 +5312,7 @@ test("artifactGraph dynamic decision-loop status replay does not append duplicat
 		});
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -5362,7 +5363,7 @@ test("artifactGraph dynamic replay fails closed when a reused branchId changes r
 		);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -5417,7 +5418,7 @@ test("artifactGraph dynamic blocks completion when planned branch is never gener
 			/planned but never generated/,
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -5463,7 +5464,7 @@ test("artifactGraph runtime dynamic requires immutable run bundle", async () => 
 		const state = await readOrRebuildDynamicState(cwd, run.runId);
 		assert.equal(state.controllers["adaptive.controller"].status, "failed");
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -5509,7 +5510,7 @@ test("artifactGraph runtime dynamic recovers stale running controller", async ()
 			"completed",
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -5561,7 +5562,7 @@ test("artifactGraph runtime dynamic does not let controllers catch suspension an
 		assert.equal(taskBySpec(updated, "adaptive.review").status, "running");
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -5672,7 +5673,7 @@ test("artifactGraph runtime dynamic agent splices official task and replays resu
 		assert.deepEqual(control.child.result, "ok");
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -5862,7 +5863,7 @@ test("artifactGraph dynamic decision and state-index bridge persists replayable 
 		assert.deepEqual(control.generated, ["adaptive.review"]);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -5981,7 +5982,7 @@ test("artifactGraph dynamic ctx.result returns scoped content-bound fields", asy
 		);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -6050,7 +6051,7 @@ test("artifactGraph dynamic rejects generated sibling dependency cycles", async 
 		);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -6156,7 +6157,7 @@ test("artifactGraph dynamic replay rejects new operations before omitted prior o
 		assert.equal(events.match(/task\.generated/g)?.length, 1);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -6268,7 +6269,7 @@ test("artifactGraph dynamic agent repairs graph projection from existing event",
 		assert.equal(launched.length, 2);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -6348,7 +6349,7 @@ test("artifactGraph runtime dynamic parallel splices multiple tasks before suspe
 		assert.deepEqual(control.statuses, ["fulfilled", "fulfilled"]);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -6425,7 +6426,7 @@ test("artifactGraph dynamic budget API reflects running generated agents and cap
 		assert.equal(budgetLog.args[2], false);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -6522,7 +6523,7 @@ test("artifactGraph dynamic helper API uses declared helpers and replays cached 
 		assert.equal(control.digest, "normalized:review done");
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -6613,7 +6614,7 @@ test("artifactGraph dynamic idempotent helper retries dangling started event", a
 		);
 		assert.equal(control.digest, "normalized");
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -6707,7 +6708,7 @@ test("artifactGraph dynamic helper replay detects schema changes", async () => {
 		);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -6776,7 +6777,7 @@ test("artifactGraph dynamic helper budget blocks excess helper calls", async () 
 			"budget_blocked",
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -6838,7 +6839,7 @@ test("artifactGraph dynamic budget blocks cannot be caught by controller", async
 		assert.equal(controller.statusDetail, "dynamic_budget_blocked");
 		assert.equal(existsSync(join(cwd, controller.files.result)), false);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -6904,7 +6905,7 @@ test("artifactGraph dynamic agents without explicit tools require managed worktr
 		assert.equal(generatedCompiled.safety.sharedCwdSafe, false);
 		assert.equal(generatedCompiled.safety.worktreePolicy, "on");
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -6965,7 +6966,7 @@ test("artifactGraph dynamic ctx.parallel fails closed on non-suspension errors",
 		);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -7040,7 +7041,7 @@ test("artifactGraph dynamic agent budget blocks additional generated tasks", asy
 		);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -7123,7 +7124,7 @@ test("artifactGraph dynamic permissions enforce role and tool restrictions", asy
 		assert.equal(controller.status, "failed");
 		assert.match(controller.lastMessage, /tool overrides are not allowed/);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -7204,7 +7205,7 @@ test("artifactGraph dynamic agent inputs build source manifest and required read
 		assert.deepEqual(generatedCompiled.contextDependsOn, ["scope.main"]);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -7284,7 +7285,7 @@ test("artifactGraph dynamic generated input sources use generated spec ids", asy
 		);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -7364,7 +7365,7 @@ test("artifactGraph downstream reduce sees exported dynamic output source", asyn
 		assert.deepEqual(manifest.sources[1].controlProjection, undefined);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -7458,7 +7459,7 @@ test("artifactGraph dynamic approval ask uses interactive UI decisions", async (
 			"dynamic_approval_rejected",
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -7523,7 +7524,7 @@ test("artifactGraph dynamic approval ask blocks when no UI is available", async 
 			"dynamic_completed",
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -7578,7 +7579,7 @@ test("artifactGraph dynamic approval detects changed pending approval request", 
 			"dynamic_approval_changed",
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -7629,7 +7630,7 @@ test("artifactGraph dynamic runtime budget blocks slow controller", async () => 
 		assert.equal(controller.statusDetail, "dynamic_budget_blocked");
 		assert.match(controller.lastMessage, /maxRuntimeMs=1/);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -7706,7 +7707,7 @@ test("artifactGraph dynamic runtime budget excludes suspended child wait time", 
 		);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -7751,7 +7752,7 @@ test("artifactGraph dynamic runtime budget terminates synchronous controller loo
 		assert.equal(controller.status, "blocked");
 		assert.equal(controller.statusDetail, "dynamic_budget_blocked");
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -7830,7 +7831,7 @@ test("artifactGraph dynamic optional missing artifact input is skipped", async (
 		assert.deepEqual(generatedCompiled.artifactGraph.requiredReads, []);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -7912,7 +7913,7 @@ test("artifactGraph dynamic nested workflow runs declared workflow from bundle",
 			1,
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -8021,7 +8022,7 @@ test("artifactGraph dynamic nested workflow wait false replays first snapshot", 
 		assert.equal(control.nestedStatus, "running");
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -8060,7 +8061,7 @@ test("artifact graph loader rejects unsupported controlSchema keywords", async (
 				/pattern is not supported/.test(String(error)),
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -8092,7 +8093,7 @@ test("artifact graph loader rejects missing controlSchema files", async () => {
 				/controlSchema not readable JSON/.test(String(error)),
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -8787,7 +8788,7 @@ test("artifactAccess none omits workflow artifact runtime affordances", async ()
 		assert.equal(prepared.runtime.toolProviders.workflow_artifact, undefined);
 		assert.doesNotMatch(prepared.compiledPrompt, /Workflow Artifact Inputs/);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -9569,7 +9570,7 @@ test("non-dynamic artifact graph compile/run golden preserves static structure",
 		});
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -9602,7 +9603,7 @@ test("schema and compiler accept partial sourcePolicy on foreach", async () => {
 		const compiled = await compileWorkflow(spec, { cwd, task: "Review" });
 		assert.equal(compiled.stages[1].sourcePolicy, "partial");
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -9651,7 +9652,7 @@ test("schema and compiler accept opt-in streaming foreach refs", async () => {
 			/Workflow Partial Output Protocol/,
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -9741,7 +9742,7 @@ test("compiler warns when readOnly stage keeps mutation-capable tools", async ()
 			`expected readOnly+bash warning, got: ${JSON.stringify(compiled.warnings)}`,
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -9768,7 +9769,7 @@ test("compiler does not warn when read-only stage uses only read-only tools", as
 			0,
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -9830,7 +9831,7 @@ test("compiler warns when a foreach path is absent from the source control schem
 			`expected foreach path warning, got: ${JSON.stringify(bad.warnings)}`,
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -9956,7 +9957,7 @@ test("compiler warns about workflow-quality risks before runtime", async () => {
 			`expected huge reducer warning, got: ${JSON.stringify(compiled.warnings)}`,
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -10158,7 +10159,7 @@ test("compiler injects runtime task for single stages only", async () => {
 		assert.equal(compiled.roles[0].fromAgent, "lens-agent");
 		assert.match(compiled.roles[0].sourcePath, /lens-agent\.md$/);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -10194,7 +10195,7 @@ test("compiler serializes workflow input compactly in prompts", async () => {
 		assert.equal(jsonText, JSON.stringify(input));
 		assert.deepEqual(JSON.parse(jsonText), input);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -10240,7 +10241,7 @@ test("compiler omits runtime task injection from foreach templates", async () =>
 			"foreach prompts keep stable role text before item-varying instructions",
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -10285,7 +10286,7 @@ test("compiler injects runtime task into foreach and reduce stages that opt in",
 			/# Task\n\nOPT_IN_CONSTRAINT_MARKER/,
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -10336,7 +10337,7 @@ test("compiler applies explicit stage from dependencies and stage runtime defaul
 		assert.deepEqual(byKey["final.main"].runtime.tools, ["read", "grep"]);
 		assert.equal(byKey["final.main"].runtime.maxRuntimeMs, 12345);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -10389,7 +10390,7 @@ test("compiler separates order-only after dependencies from source context", asy
 		]);
 		assert.equal(byKey["fromOnly.main"].contextDependsOn, undefined);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -10418,7 +10419,7 @@ test("compiler treats empty after as an explicit parallel root", async () => {
 		assert.deepEqual(byKey["c.main"].dependsOn, ["a.main", "b.main"]);
 		assert.deepEqual(byKey["d.main"].dependsOn, ["c.main"]);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -10502,7 +10503,7 @@ test("compiler lowers dag containers to namespaced child tasks", async () => {
 		assert.deepEqual(byKey["implicit.main"].dependsOn, ["box.d.main"]);
 		assert.deepEqual(byKey["down.main"].dependsOn, ["box.d.main"]);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -10567,7 +10568,7 @@ test("compiler lowers foreach and support children inside dag containers", async
 			options: undefined,
 		});
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -10613,7 +10614,7 @@ test("compiler lowers nested dag containers with composed namespaces", async () 
 		]);
 		assert.deepEqual(byKey["next.main"].dependsOn, ["outer.inner.leaf.main"]);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -10660,7 +10661,7 @@ test("compiler keeps dag namespace prefixes distinct from loop ids", async () =>
 			undefined,
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -10752,7 +10753,7 @@ test("compiler normalizes object-form tools and treats classified custom read-on
 		assert.equal(task.safety.capability, "read-only");
 		assert.equal(task.safety.permission.status, "pending");
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -10773,7 +10774,7 @@ test("compiler keeps unclassified custom tools blocked for explicit review", asy
 			"unknown/custom tools require explicit review: custom_external_tool",
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -10796,7 +10797,7 @@ test("object-form tools cannot expand beyond agent-declared tool ceilings", asyn
 			},
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -10860,7 +10861,7 @@ test("narrow tool scopes inherit metadata for strings and override it for object
 			},
 		});
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -10878,7 +10879,7 @@ test("tool metadata cannot downgrade known mutating tools", async () => {
 		assert.equal(compiled.tasks[0].safety.capability, "mutation-capable");
 		assert.equal(compiled.tasks[0].safety.permission.reason, undefined);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -10914,7 +10915,7 @@ test("compiler rejects delegation tools on dynamic stage metadata before filteri
 			},
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -10988,7 +10989,7 @@ test("dynamic controllers expose a deterministic available tool view", async () 
 		assert.equal(byName.bash.classification, "mutation-capable");
 		assert.equal(byName.bash.floor, "mutation-capable");
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -11064,7 +11065,7 @@ test("dynamic generated tasks propagate toolProviders and enforce tool ceilings"
 		assert.equal(generated.safety.capability, "read-only");
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -11120,7 +11121,7 @@ test("dynamic generated tasks reject explicit tools for agents without ceilings"
 			/does not declare a tools authority ceiling/,
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -11170,7 +11171,7 @@ test("dynamic generated tasks reject delegation tools on target agents", async (
 			/invalid delegation\/orchestration tools: workflow/,
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -11222,7 +11223,7 @@ test("dynamic generated tasks reject maxSubagentDepth on target agents", async (
 		assert.equal(controller.status, "failed");
 		assert.match(controller.lastMessage, /maxSubagentDepth > 0/);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -11312,7 +11313,7 @@ test("artifactGraph runtime foreach materializes and launches generated tasks in
 		);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -11354,7 +11355,7 @@ test("artifactGraph runtime foreach empty fanout completes terminal placeholder"
 		assert.equal(placeholder.statusDetail, "foreach_empty");
 		assert.equal(placeholder.lastMessage, "foreach produced 0 item(s)");
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -11436,7 +11437,7 @@ test("artifactGraph runtime foreach repairs compiled/run mismatch after material
 		);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -11516,7 +11517,7 @@ test("artifactGraph runtime foreach materializes items from a dag container outp
 			["verify.item_a", "verify.item_b"],
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -11579,7 +11580,7 @@ test("successive foreach materialization keeps task ids unique", async () => {
 			["verify.item-001", "verify.item-002"],
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -11683,7 +11684,7 @@ test("streaming foreach appends items before all upstream siblings finish", asyn
 		]);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -11752,7 +11753,7 @@ test("streaming foreach minChunk holds small batches until enough items arrive",
 		);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -11882,7 +11883,7 @@ test("streaming foreach consumes producer partial output before terminal complet
 		]);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -11944,7 +11945,7 @@ test("streaming foreach keeps producer dependency for partial children that need
 		);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -12017,7 +12018,7 @@ test("streaming foreach blocks if a producer changes a published partial item", 
 		);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -12086,7 +12087,7 @@ test("streaming foreach blocks if a producer withdraws a published partial item"
 		);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -12127,7 +12128,7 @@ test("artifactGraph runtime foreach blocks when maxItems is exceeded", async () 
 		assert.equal(blocked.tasks[1].status, "blocked");
 		assert.match(blocked.tasks[1].lastMessage, /exceeding maxItems=1/);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -12171,7 +12172,7 @@ test("artifactGraph scheduler marks prepare failures terminal", async () => {
 		);
 		assert.equal(updated.status, "failed");
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -12230,7 +12231,7 @@ test("loop compiles to a loop stage record with no premature child tasks", async
 		);
 		assert.equal(compiled.tasks.filter((task) => task.loopChild).length, 0);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -12274,7 +12275,7 @@ test("loop round 1 materializes and launches ready child tasks in one scheduleRu
 		assert.match(prompts[0], /Implement the requested fix/);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -12305,7 +12306,7 @@ test("same-lease rescan keeps positional alignment failures fatal", async () => 
 			/Workflow task materialization is misaligned at index 0: expected first\.main, found stale\.main/,
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -12379,7 +12380,7 @@ test("loop resume reconciliation backfills missing run records for compiled roun
 		assert.equal(taskBySpec(current, "after.main").status, "running");
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -12413,7 +12414,7 @@ test("artifactGraph runtime scheduler fails closed on compiled run positional mi
 			/materialization is misaligned/,
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -12453,7 +12454,7 @@ test("loop until satisfied after a round marks loop completed and stops material
 		);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -12505,7 +12506,7 @@ test("loop until unmet materializes round 2 with unique ids and carry-forward co
 		);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -12553,7 +12554,7 @@ test("loop no-progress stops early with stopped_no_progress", async () => {
 		);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -12602,7 +12603,7 @@ test("loop invalid progressPath value records a warning", async () => {
 		);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -12647,7 +12648,7 @@ test("loop explicit missing progressPath records a warning", async () => {
 		);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -12692,7 +12693,7 @@ test("loop maxRounds exhaustion materializes and waits for onExhausted", async (
 		assert.equal(taskBySpec(current, "fix-loop.loop").status, "completed");
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -12762,7 +12763,7 @@ test("loop onExhausted context includes bounded prior round check outputs", asyn
 		assert.match(exhaustedTask.compiledPrompt, /"blockingFailures":\["a"\]/);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -12900,7 +12901,7 @@ test("loop until evaluator supports equals notEquals lengthEquals all and any", 
 			false,
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -12941,7 +12942,7 @@ test("loop completed task with unreadable result records a warning", async () =>
 		);
 		assert.match(check.lastMessage, /completed loop task result unreadable/);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -13101,7 +13102,7 @@ test("bundled spec-review workflow compiles flat analysis and verification fanou
 		assert.equal(report.kind, "reduce");
 		assert.deepEqual(report.dependsOn, ["partition-findings.main"]);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -13120,7 +13121,7 @@ test("artifact graph compiler propagates graph maxConcurrency", async () => {
 		);
 		assert.equal(compiled.maxConcurrency, 3);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -13202,7 +13203,7 @@ test("bundled impact-review artifact graph workflow compiles multi-join DAG", as
 			),
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -13456,7 +13457,7 @@ if (
 			/dynamic decision-loop helper is unavailable in controller context/,
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -13517,7 +13518,7 @@ test("bundled deep-review workflow leaves reviewer fanout unconstrained by stage
 			assert.doesNotMatch(prepared.compiledPrompt, /Workflow Artifact Inputs/);
 		}
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -13628,7 +13629,7 @@ test("bundled spec-review workflow materializes verifier and partitions verified
 		});
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -14041,7 +14042,7 @@ test("engine source context reads structured outputs and telemetry from task art
 		assert.equal(context.packet.tasks[0].outputPreview, undefined);
 		assert.equal(context.packet.byStage.verify.statusCounts.completed, 1);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -14087,7 +14088,7 @@ test("schema and compiler support pi-subagent headless backend", async () => {
 			),
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -14132,7 +14133,7 @@ test("schema and compiler accept artifactGraph support nodes", async () => {
 			options: { strict: true },
 		});
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -14190,7 +14191,7 @@ test("workflow helper loader resolves directory-local helpers", async () => {
 			},
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -14235,7 +14236,7 @@ test("workflow helper loader rejects external or invalid helper refs", async () 
 			/default-export a function/,
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -14970,7 +14971,7 @@ test("deep-research P3 final-audit replay fixture preserves guardrail floors", a
 			/\/Users\/|\.pi\/workflows|web-source-cache/,
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -15122,7 +15123,7 @@ test("deep-research renderer emits evidence-backed report and sidecars", async (
 		assert.match(auditMarkdown, /Packet-only gap/);
 		assert.notEqual(auditMarkdown, `${result.executiveMarkdown}\n`);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -15424,7 +15425,7 @@ test("deep-research executive renderer preserves object gaps zeros and recommend
 			/\/Users\/|\.pi\/workflows|web-source-cache/,
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -15690,7 +15691,7 @@ test("artifactGraph runtime support executes helper and writes artifacts", async
 			["README.md"],
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -15797,7 +15798,7 @@ test("artifactGraph runtime support omits failed control sources but passes stat
 			],
 		});
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -15855,7 +15856,7 @@ test("artifactGraph runtime support marks helper errors as failed", async () => 
 		assert.equal(support?.statusDetail, "support_failed");
 		assert.match(support?.lastMessage ?? "", /helper boom/);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -15921,7 +15922,7 @@ test("artifactGraph scheduler does not consume concurrency for synchronous suppo
 		assert(prompts[0].includes("stage=scan"));
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -15982,7 +15983,7 @@ test("artifactGraph runtime scheduler launches empty-after roots in parallel", a
 		assert(!prompts.some((prompt) => prompt.includes("stage=c")));
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -16089,7 +16090,7 @@ test("artifactGraph runtime after dependencies do not inject order-only source c
 		assert.doesNotMatch(mixedPrompt, /after-source-content/);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -16184,7 +16185,7 @@ test("artifactGraph runtime diamond fan-out launches branches in parallel and jo
 		assert.doesNotMatch(joinPrompt, /a completed/);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -16248,7 +16249,7 @@ test("artifactGraph runtime dag container waits for outer sources and skips stri
 		assert.equal(current.status, "failed");
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -16322,7 +16323,7 @@ test("artifactGraph runtime partial dag join proceeds and exposes outputFrom dow
 		assert.doesNotMatch(reportPrompt, /analysis.scan.main/);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -16386,7 +16387,7 @@ test("resumeRun resets failed dag container children and relaunches roots", asyn
 		assert.match(prompts[0], /setup completed/);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -16511,7 +16512,7 @@ test("subagent backend records parent child lifecycle events when parent env is 
 	} finally {
 		restoreParentSubagentEnv(previousEnv);
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -16618,7 +16619,7 @@ test("subagent terminal failure records parent child failed when parent env is s
 	} finally {
 		restoreParentSubagentEnv(previousEnv);
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -16766,7 +16767,7 @@ test("subagent terminal observability captures usage and separates launch timing
 		);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -16942,7 +16943,7 @@ test("refresh polls subagent status in a bounded pool and records latency teleme
 		assert.ok(metrics.totals.launchTiming.terminalOutputBytes > 0);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -17140,7 +17141,7 @@ test("refresh surfaces poll API errors after processing sibling tasks", async ()
 		assert.equal(taskBySpec(persisted, "main.status-fails").status, "running");
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -17203,7 +17204,7 @@ test("refresh persists telemetry-only null status polls", async () => {
 		assert.equal(typeof persistedTask.timing.refreshStatusPollMs, "number");
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -17392,7 +17393,7 @@ test("subagent terminal observability aggregates distinct retry attempts", async
 		assert.equal(refreshedTask.timing.attempts.length, 2);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -17937,7 +17938,7 @@ test("subagent launch forwards tool-call capture only when env is enabled", asyn
 			delete process.env.PI_WORKFLOW_CAPTURE_TOOL_CALLS;
 		else process.env.PI_WORKFLOW_CAPTURE_TOOL_CALLS = previous;
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -18003,7 +18004,7 @@ test("subagent launch loads provider extensions for extension-backed tools", asy
 		);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -18072,7 +18073,7 @@ test("subagent launch appends extra extensions from env", async () => {
 			delete process.env.PI_WORKFLOW_SUBAGENT_EXTRA_EXTENSIONS;
 		else process.env.PI_WORKFLOW_SUBAGENT_EXTRA_EXTENSIONS = previous;
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -18164,7 +18165,7 @@ test("workflow fetch_content cache wrapper replays run-scoped hits with fresh re
 		assert.equal(appended.at(-1).data.id, "cached-1");
 		assert.equal(existsSync(join(cacheDir, "events.jsonl")), true);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -18267,7 +18268,7 @@ test("workflow fetch_content cache correlates concurrent stored data by response
 			"https://fast.example.test",
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -18365,7 +18366,7 @@ test("workflow fetch_content cache wrapper caps inline text but preserves stored
 		assert.equal(stored.get("origin-1").urls[0].content, "abcdefghij");
 		assert.equal(stored.get("cached-1").urls[0].content, "abcdefghij");
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -18447,7 +18448,7 @@ test("subagent launch can opt out of fetch cache and keep built-in provider mapp
 			delete process.env.PI_WORKFLOW_FETCH_CONTENT_CACHE;
 		else process.env.PI_WORKFLOW_FETCH_CONTENT_CACHE = previousFetchCache;
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -18523,7 +18524,7 @@ test("subagent launch uses generated fetch cache extension by default", async ()
 			delete process.env.PI_WORKFLOW_FETCH_CONTENT_INLINE_CHARS;
 		else process.env.PI_WORKFLOW_FETCH_CONTENT_INLINE_CHARS = previousInlineCap;
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -18659,7 +18660,7 @@ test("workflow web-source core redacts URLs and reads normalized snippets", asyn
 		);
 		assert.equal(differentSecret, undefined);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -18753,7 +18754,7 @@ test("workflow web-source core anchors CJK normalized snippets and multi-match t
 		assert.equal(secretRead.truncated, true);
 		assert.equal(secretRead.quote, "token=R");
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -18957,7 +18958,7 @@ test("workflow web-source extension returns source cards and narrow reads withou
 		assert.equal(JSON.parse(duplicate.content[0].text).card.duplicate, true);
 		assert.equal(existsSync(join(cacheDir, "events.jsonl")), true);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -19062,7 +19063,7 @@ test("workflow web-source extension anchors late matches within remaining read b
 			["ok", "truncated"],
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -19172,7 +19173,7 @@ test("workflow web-source extension aggregates mixed source read statuses", asyn
 		assert.equal(redactionBody.quote, "token=R");
 		assert.match(redactionBody.next, /truncated/);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -19294,7 +19295,7 @@ test("workflow web-source fetch single-flights duplicate URLs and caches transie
 		assert.match(emptyFromOtherTask.content[0].text, /empty_source/);
 		assert.equal(callsByUrl.get("https://example.test/empty"), 2);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -19347,7 +19348,7 @@ test("workflow web-source search disables provider curation by default", async (
 			.execute("call-search", { query: "example" });
 		assert.match(search.content[0].text, /workflow_web_fetch_source/);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -19450,7 +19451,7 @@ test("workflow web-source extension blocks untrusted custom fetch and reports bu
 		assert.match(read.content[0].text, /budget_exhausted/);
 		assert.doesNotMatch(read.content[0].text, /"quote": ""/);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -19521,7 +19522,7 @@ test("default normalized web fetch uses guarded direct fetch instead of captured
 		assert.match(stored.text, /Local direct fetch body & decoded quote/);
 	} finally {
 		await new Promise((resolve) => server.close(resolve));
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -19596,7 +19597,7 @@ test("subagent launch wires normalized workflow web-source tools through generat
 		);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -19668,7 +19669,7 @@ test("subagent launch captures custom normalized web provider extension instead 
 		);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -19835,7 +19836,7 @@ test("completed subagent with contextLengthExceeded and valid output remains com
 		);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -19978,7 +19979,7 @@ test("failed context-window subagent with valid artifactGraph output is salvaged
 		assert.equal(workflowResult.outputValidation.valid, true);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -20126,7 +20127,7 @@ test("failed model subagent with valid artifactGraph output is salvaged", async 
 		);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -20260,7 +20261,7 @@ test("refresh retries zero-output transient subagent model failures", async () =
 		);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -20315,7 +20316,7 @@ test("subagent launch retries rotate artifact-graph session ids", async () => {
 			setSubagentApiForTests(undefined);
 		}
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -20440,7 +20441,7 @@ test("refresh does not retry deterministic boot or config failures", async () =>
 		assert.equal(result.failureKind, "deterministic_boot");
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -20593,7 +20594,7 @@ test("refresh adopts handle-less running subagent from deterministic runsDir", a
 		);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -20682,7 +20683,7 @@ test("refresh ignores pre-claim subagent records during handle recovery", async 
 		assert.equal(refreshed.tasks[0].lastMessage, undefined);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -20748,7 +20749,7 @@ test("refresh resets stale launch claims without backend runs", async () => {
 		);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -20837,7 +20838,7 @@ test("refresh interrupts timed-out running subagents and clears stale handles", 
 		assert.equal(interrupts[0].attemptId, "attempt_timeout");
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -21158,7 +21159,7 @@ test("compiler applies runtime defaults before budget estimates", async () => {
 		assert.equal(compiled.budget.models[0].model, "openai-codex/gpt-5.5");
 		assert.equal(compiled.budget.unratedModels.length, 0);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -21179,7 +21180,7 @@ test("run boundary requires runtime task", async () => {
 			/This workflow needs a task/,
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -21226,7 +21227,7 @@ test("workflow run runtime overrides reach launched subagents", async () => {
 		assert.equal(captured[0].thinking, "low");
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -21394,7 +21395,7 @@ test("static run artifacts preserve declared workflow bundle files only", async 
 			/export default/,
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -21519,7 +21520,7 @@ test("static run artifacts reject escaping discovered bundle refs", async () => 
 			/support\.uses|workflow bundle ref/,
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -21557,7 +21558,7 @@ test("run records use artifact-graph type and preserve artifact graph discrimina
 		);
 		assert.deepEqual(artifactRun.artifactGraph, { enabled: true });
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -21587,7 +21588,7 @@ test("run records create dynamic state paths for dynamic loop onExhausted templa
 			true,
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -21618,7 +21619,7 @@ test("workflow registry resolves exact names", async () => {
 		const loaded = await loadWorkflow("review", cwd);
 		assert.equal(loaded.spec.name, "review");
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -21661,7 +21662,7 @@ test("workflow registry prefers project workflow over local state and bundled du
 			join(cwd, "workflows", "priority-test", "spec.json"),
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 		rmSync(packageDuplicateRoot, { recursive: true, force: true });
 	}
 });
@@ -21709,7 +21710,7 @@ test("workflow specs are JSON-only and YAML files are rejected", async () => {
 			/YAML workflow specs are not supported; use JSON \(\.json\)\./,
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -21727,7 +21728,7 @@ test("workflow registry does not resolve prelaunch renamed workflow aliases", as
 			/workflow name or spec file not found/,
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -21829,7 +21830,7 @@ test("workflow registry resolves bundle specs and sets correct workflowRoot", as
 			),
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -21851,7 +21852,7 @@ test("workflow registry fails closed when flat and bundle specs conflict", async
 			/ambiguous workflow name/,
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -22092,7 +22093,7 @@ test("natural-language workflow tools list and start workflows", async () => {
 		setSubagentApiForTests(undefined);
 		if (originalRole === undefined) delete process.env.PI_WORKFLOW_ROLE;
 		else process.env.PI_WORKFLOW_ROLE = originalRole;
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -22210,7 +22211,7 @@ test("natural-language workflow tools list and start workflows", async () => {
 		setSubagentApiForTests(undefined);
 		if (originalRole === undefined) delete process.env.PI_WORKFLOW_ROLE;
 		else process.env.PI_WORKFLOW_ROLE = originalRole;
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -22292,7 +22293,7 @@ test("spec-less direct dynamic run records provenance and launches planner", asy
 		);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -22375,7 +22376,7 @@ test("workflow_dynamic tool starts spec-less direct dynamic runs", async () => {
 		setSubagentApiForTests(undefined);
 		if (originalRole === undefined) delete process.env.PI_WORKFLOW_ROLE;
 		else process.env.PI_WORKFLOW_ROLE = originalRole;
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -22409,7 +22410,7 @@ test("workflow index preserves run linkage without embedding task rows", async (
 		);
 		assert.equal(Object.hasOwn(indexed, "tasks"), false);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -22462,7 +22463,7 @@ test("workflow index incrementally replaces only the changed run entry", async (
 	} finally {
 		setIndexUpdateDebounceMsForTests(undefined);
 		await flushPendingIndexUpdatesForTests().catch(() => undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -22528,7 +22529,7 @@ test("workflow index incremental update reads and slims legacy task arrays", asy
 	} finally {
 		setIndexUpdateDebounceMsForTests(undefined);
 		await flushPendingIndexUpdatesForTests().catch(() => undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -22574,7 +22575,7 @@ test("workflow index incremental update falls back when index is corrupt", async
 	} finally {
 		setIndexUpdateDebounceMsForTests(undefined);
 		await flushPendingIndexUpdatesForTests().catch(() => undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -22621,7 +22622,7 @@ test("workflow index debounces nonterminal updates but publishes terminal runs i
 	} finally {
 		setIndexUpdateDebounceMsForTests(undefined);
 		await flushPendingIndexUpdatesForTests().catch(() => undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -22656,7 +22657,7 @@ test("workflow status hydrates task details from run.json for slim index entries
 		assert.match(status, /status from run json detail/);
 	} finally {
 		await flushPendingIndexUpdatesForTests().catch(() => undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -22676,7 +22677,7 @@ test("resolveFlowsCwd finds ancestor workflow state root", async () => {
 		mkdirSync(nested, { recursive: true });
 		assert.equal(await resolveFlowsCwd(nested), cwd);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -22690,7 +22691,7 @@ test("watchRun drops missing runs without recreating supervisor artifacts", asyn
 		await new Promise((resolve) => setTimeout(resolve, 1_100));
 		assert.equal(existsSync(supervisorPath(cwd, runId)), false);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -22754,7 +22755,7 @@ test("scheduleRun aborts after heartbeat observes supervisor lease loss", async 
 	} finally {
 		setSubagentApiForTests(undefined);
 		setRunLeaseTestHooksForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -22860,7 +22861,7 @@ test("resumeRun resets failed and skipped tasks, preserves completed work, and r
 			setSubagentApiForTests(undefined);
 		}
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -22918,7 +22919,7 @@ test("resumeRun rejects non-resumable blocked runs without resetting skipped dep
 		assert.equal(taskBySpec(current, "approval.main").status, "blocked");
 		assert.equal(taskBySpec(current, "after.main").status, "skipped");
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -22991,7 +22992,7 @@ test("stopRun interrupts non-terminal tasks and best-effort cleans up backend ha
 			setSubagentApiForTests(undefined);
 		}
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -23025,7 +23026,7 @@ test("resumeRun rejects completed and loop runs", async () => {
 		await writeRunRecord(cwd, loopRun);
 		await assert.rejects(() => resumeRun(cwd, loopRun.runId), /loop workflows/);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -23078,7 +23079,7 @@ test("deliverMissedWorkflowFeedback does not auto-trigger an agent turn on start
 			/Open the workflow for the full result/,
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -23139,7 +23140,7 @@ test("workflow extension skips missed completion feedback during session reload"
 	} finally {
 		if (originalRole === undefined) delete process.env.PI_WORKFLOW_ROLE;
 		else process.env.PI_WORKFLOW_ROLE = originalRole;
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -23253,7 +23254,7 @@ test("notifyUnfinishedRuns reports recent failed root runs with resume hint", as
 		);
 		assert.equal(silent.length, 0);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -24518,7 +24519,7 @@ test("deep-review render-review-report emits finding cards from partition ledger
 			`${result.markdown}\n`,
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -26623,7 +26624,7 @@ test("workflow_artifact lists visible sources, reads by source name, and records
 		assert.equal(ledger[0].artifact, "analysis");
 		assert.equal(ledger[0].truncated, false);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -26894,7 +26895,7 @@ test("workflow_artifact can read deterministic JSON projections with caps", asyn
 		assert.equal(cappedRoot.details.projection.maxChars, 50 * 1024);
 		assert.ok(cappedRoot.details.returnedBytes < 60 * 1024);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -27032,7 +27033,7 @@ test("workflow_artifact rejects path injection, unknown artifacts, and debug rea
 		assert.equal(large.details.returnedBytes, 32);
 		assert.equal(large.details.truncated, true);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -27112,7 +27113,7 @@ test("workflow_artifact extension registers and activates the tool", async () =>
 		assert.equal(ledger[0].source, "plan");
 		assert.equal(ledger[0].artifact, "analysis");
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -27319,7 +27320,7 @@ test("structured required read policy enforces projection ledger rows separately
 		);
 		assert.deepEqual(passes, { missing: [], projectionFailures: [] });
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -27562,7 +27563,7 @@ test("artifact graph workflow runs workflow artifacts and enforces required read
 		);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -27690,7 +27691,7 @@ test("artifact graph output retry reuses confirmed subagent session", async () =
 		assert.equal(task.outputRetry.sessionId, expectedSessionId);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -27819,7 +27820,7 @@ test("artifact graph output retry starts new session when subagent session is un
 		assert.equal(task.outputRetry.sessionId, retrySessionId);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -28016,7 +28017,7 @@ test("recovered artifact graph subagent handle preserves same-session retry", as
 		assert.equal(relaunched.sessionId, expectedSessionId);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -28232,7 +28233,7 @@ test("subagent launch gate honors env override and recovers slots after throw", 
 		else
 			process.env.PI_WORKFLOW_LAUNCH_SLOT_RELEASE_DELAY_MS =
 				originalReleaseDelay;
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -28310,7 +28311,7 @@ test("subagent launch slot wait abort removes queued waiter", async () => {
 		if (originalLiveLimit === undefined)
 			delete process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS;
 		else process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS = originalLiveLimit;
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -28404,7 +28405,7 @@ test("subagent launch slot abort after acquisition releases slot before action",
 		if (originalLiveLimit === undefined)
 			delete process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS;
 		else process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS = originalLiveLimit;
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -28452,7 +28453,7 @@ test("global live model worker cap unset does not gate launches", async () => {
 		if (originalLiveLimit === undefined)
 			delete process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS;
 		else process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS = originalLiveLimit;
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -28518,7 +28519,7 @@ test("global live model worker cap defers saturated launches without waiting", a
 		if (originalLiveLimit === undefined)
 			delete process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS;
 		else process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS = originalLiveLimit;
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -28570,7 +28571,7 @@ test("cleanupSubagentRun releases global live model worker cap keys", async () =
 		if (originalLiveLimit === undefined)
 			delete process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS;
 		else process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS = originalLiveLimit;
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -28659,7 +28660,7 @@ test("fail-fast cleanup releases the global live model worker cap slot for other
 		if (originalLiveLimit === undefined)
 			delete process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS;
 		else process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS = originalLiveLimit;
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -28749,7 +28750,7 @@ test("global live model worker cap defers in leased scheduler without hanging", 
 		if (originalLiveLimit === undefined)
 			delete process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS;
 		else process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS = originalLiveLimit;
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -28839,7 +28840,7 @@ test("non artifact graph subagent launches do not request child sessions", async
 		assert.equal(captured.sessionId, undefined);
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -28894,7 +28895,7 @@ test("workflow_artifact generated extension wrapper embeds config without prompt
 		});
 		assert.equal(readFileSync(wrapperPath, "utf8"), content);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -29876,6 +29877,9 @@ test("workflow output parser repairs known workflow control schema slips before 
 				question: { id: "rq-001", question: "What should be researched?" },
 				extractedFacts: [],
 				claims: [],
+				additionalUnverifiedLeads: [
+					"gVisor/Firecracker comparison needs a follow-up query",
+				],
 				budgetLedger: {
 					searchBudget: 3,
 					searchCallsUsed: 1,
@@ -29907,6 +29911,9 @@ test("workflow output parser repairs known workflow control schema slips before 
 	);
 	assert.deepEqual(researchQuestion.control.budgetLedger.omittedSearchQueries, [
 		"extra query",
+	]);
+	assert.deepEqual(researchQuestion.control.additionalUnverifiedLeads, [
+		{ note: "gVisor/Firecracker comparison needs a follow-up query" },
 	]);
 });
 
@@ -30067,7 +30074,7 @@ test("workflow artifact bundle writer writes sidecars before result envelope", a
 		}
 	} finally {
 		setWorkflowOutputArtifactWriteHookForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -30114,7 +30121,7 @@ test("workflow artifact bundle writer does not commit result when a parallel sid
 		);
 	} finally {
 		setWorkflowOutputArtifactWriteHookForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 
@@ -30164,7 +30171,7 @@ test("workflow artifact bundle writer stores invalid attempts without commit res
 		);
 	} finally {
 		setWorkflowOutputArtifactWriteHookForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
 

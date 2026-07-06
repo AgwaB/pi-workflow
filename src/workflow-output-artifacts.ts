@@ -622,6 +622,20 @@ function normalizeKnownWorkflowControlSchema(
 		if (repairedBudgetLedger !== control.budgetLedger)
 			normalized = { ...normalized, budgetLedger: repairedBudgetLedger };
 	}
+	if (
+		Array.isArray(control.additionalUnverifiedLeads) &&
+		isArrayOfObjectJsonSchema(properties.additionalUnverifiedLeads)
+	) {
+		const repairedLeads = normalizeObjectArrayRows(
+			control.additionalUnverifiedLeads,
+			"note",
+		);
+		if (repairedLeads !== control.additionalUnverifiedLeads)
+			normalized = {
+				...normalized,
+				additionalUnverifiedLeads: repairedLeads,
+			};
+	}
 	return normalized;
 }
 
@@ -636,6 +650,17 @@ function isJsonSchemaObject(
 function isArrayJsonSchema(schema: JsonSchema | undefined): boolean {
 	if (!isJsonSchemaObject(schema)) return false;
 	return schemaHasType(schema, "array");
+}
+
+function isArrayOfObjectJsonSchema(schema: JsonSchema | undefined): boolean {
+	if (!isJsonSchemaObject(schema) || !schemaHasType(schema, "array"))
+		return false;
+	const items = schema.items;
+	return (
+		!Array.isArray(items) &&
+		isJsonSchemaObject(items) &&
+		schemaHasType(items, "object")
+	);
 }
 
 function isSeverityStatusSchema(schema: JsonSchema | undefined): boolean {
@@ -694,6 +719,22 @@ function stringArrayFromLedgerValue(value: unknown): string[] | undefined {
 			.filter((item) => item.length > 0);
 	}
 	return [];
+}
+
+function normalizeObjectArrayRows(rows: unknown[], textKey: string): unknown[] {
+	let normalized: unknown[] | undefined;
+	for (const [index, row] of rows.entries()) {
+		let repaired = row;
+		if (typeof row === "string") {
+			const trimmed = row.trim();
+			repaired = trimmed.length > 0 ? { [textKey]: trimmed } : {};
+		}
+		if (repaired !== row) {
+			if (normalized === undefined) normalized = [...rows];
+			normalized[index] = repaired;
+		}
+	}
+	return normalized ?? rows;
 }
 
 function schemaHasType(schema: JsonSchemaObject, type: string): boolean {
