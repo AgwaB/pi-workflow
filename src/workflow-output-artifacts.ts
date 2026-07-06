@@ -65,7 +65,8 @@ export type WorkflowOutputRepairCode =
 	| "control_budget_ledger_array_fields"
 	| "control_additional_unverified_leads_objects"
 	| "control_fact_slot_coverage_string_fields"
-	| "control_final_synthesis_array_caps";
+	| "control_final_synthesis_array_caps"
+	| "control_enum_near_miss";
 
 export interface WorkflowOutputRepair {
 	code: WorkflowOutputRepairCode;
@@ -716,7 +717,119 @@ function normalizeKnownWorkflowControlSchema(
 			});
 		}
 	}
+	const enumRepaired = normalizeEnumNearMisses(normalized, schema, "$", repairs);
+	if (isPlainRecord(enumRepaired)) normalized = enumRepaired;
 	return normalized;
+}
+
+// Schema-driven repair for enum near-misses: a string value that fails an enum
+// is replaced only when it maps to exactly one allowed value via (tier 1)
+// case/separator-insensitive equality — e.g. "cf-001" vs "CF-001", "keep" vs
+// "KEEP" — or (tier 2) a unique token-subset match — e.g.
+// "declared-but-unused-dependency" vs "declared-unused-dependency". Ambiguous
+// or distant values are left untouched so validation still fails closed, and
+// every replacement is recorded as a typed repair.
+function normalizeEnumNearMisses(
+	value: unknown,
+	schema: JsonSchema | undefined,
+	path: string,
+	repairs: WorkflowOutputRepair[],
+): unknown {
+	if (!isJsonSchemaObject(schema)) return value;
+	if (
+		typeof value === "string" &&
+		Array.isArray(schema.enum) &&
+		schema.enum.every((option) => typeof option === "string")
+	) {
+		const options = schema.enum as string[];
+		if (options.includes(value)) return value;
+		const match = uniqueEnumNearMiss(value, options);
+		if (match !== undefined) {
+			repairs.push({
+				code: "control_enum_near_miss",
+				section: SECTION_CONTROL,
+				path,
+				message: `normalized enum near miss ${JSON.stringify(value)} to ${JSON.stringify(match)}`,
+			});
+			return match;
+		}
+		return value;
+	}
+	if (Array.isArray(value)) {
+		const itemSchema = Array.isArray(schema.items) ? undefined : schema.items;
+		if (!isJsonSchemaObject(itemSchema)) return value;
+		let normalized: unknown[] | undefined;
+		for (const [index, item] of value.entries()) {
+			const repaired = normalizeEnumNearMisses(
+				item,
+				itemSchema,
+				`${path}[${index}]`,
+				repairs,
+			);
+			if (repaired !== item) {
+				if (normalized === undefined) normalized = [...value];
+				normalized[index] = repaired;
+			}
+		}
+		return normalized ?? value;
+	}
+	if (isPlainRecord(value) && schemaHasType(schema, "object")) {
+		const properties = schema.properties ?? {};
+		let normalized: Record<string, unknown> | undefined;
+		for (const [key, child] of Object.entries(properties)) {
+			if (!(key in value)) continue;
+			const repaired = normalizeEnumNearMisses(
+				value[key],
+				child,
+				`${path}.${key}`,
+				repairs,
+			);
+			if (repaired !== value[key]) {
+				if (normalized === undefined) normalized = { ...value };
+				normalized[key] = repaired;
+			}
+		}
+		return normalized ?? value;
+	}
+	return value;
+}
+
+function enumComparableForm(value: string): string {
+	return value.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function enumTokens(value: string): string[] {
+	return value
+		.toLowerCase()
+		.split(/[^a-z0-9]+/)
+		.filter((token) => token.length > 0);
+}
+
+function uniqueEnumNearMiss(
+	value: string,
+	options: string[],
+): string | undefined {
+	const comparable = enumComparableForm(value);
+	if (comparable.length === 0) return undefined;
+	const exact = options.filter(
+		(option) => enumComparableForm(option) === comparable,
+	);
+	if (exact.length === 1) return exact[0];
+	if (exact.length > 1) return undefined;
+	const valueTokens = new Set(enumTokens(value));
+	if (valueTokens.size === 0) return undefined;
+	const subsetMatches = options.filter((option) => {
+		const optionTokens = new Set(enumTokens(option));
+		if (optionTokens.size === 0) return false;
+		const [smaller, larger] =
+			optionTokens.size <= valueTokens.size
+				? [optionTokens, valueTokens]
+				: [valueTokens, optionTokens];
+		if (larger.size - smaller.size > 2) return false;
+		for (const token of smaller) if (!larger.has(token)) return false;
+		return smaller.size >= 2;
+	});
+	return subsetMatches.length === 1 ? subsetMatches[0] : undefined;
 }
 
 function isDeepResearchFinalSynthesisSchema(schema: JsonSchemaObject): boolean {
