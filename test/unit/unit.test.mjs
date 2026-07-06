@@ -9216,6 +9216,15 @@ test("deep-research verification candidate sanitizer rewrites mismatched and ove
 				coverageGaps: [],
 			},
 		},
+		options: {
+			overclaimedSourceInferencePhrases: [
+				"canonical audit log primitive",
+				"gen_ai.system",
+				"gen_ai.request.model",
+				"interrupt()",
+				"before or after specified nodes",
+			],
+		},
 	});
 
 	const rewritten = result.claimInventory.verificationCandidates;
@@ -10037,6 +10046,37 @@ test("compiler does not warn when read-only stage uses only read-only tools", as
 			},
 		});
 		const compiled = await compileWorkflow(spec, { cwd, task: "Scan" });
+		assert.equal(
+			compiled.warnings.filter((w) => /declares readOnly: true/.test(w)).length,
+			0,
+		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
+	}
+});
+
+test("compiler treats explicit empty tool allowlist as no-tool safe", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const spec = artifactGraphWorkflowSpec({
+			artifactGraph: {
+				stages: [
+					{
+						id: "plan",
+						type: "single",
+						readOnly: true,
+						tools: [],
+						prompt: "Plan without tools.",
+					},
+				],
+			},
+		});
+		const compiled = await compileWorkflow(spec, { cwd, task: "Plan" });
+		assert.deepEqual(compiled.tasks[0].runtime.tools, []);
+		assert.equal(compiled.tasks[0].safety.capability, "read-only");
+		assert.equal(compiled.tasks[0].safety.sharedCwdSafe, true);
+		assert.equal(compiled.tasks[0].safety.permission.status, "pending");
 		assert.equal(
 			compiled.warnings.filter((w) => /declares readOnly: true/.test(w)).length,
 			0,

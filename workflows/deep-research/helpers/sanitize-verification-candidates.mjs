@@ -65,22 +65,6 @@ function sourceUrls(candidate) {
 	return compactStrings(candidate?.sourceUrls, 16);
 }
 
-function expandedSourceUrls(candidate) {
-	const urls = sourceUrls(candidate);
-	const claim = claimText(candidate);
-	const add = (url) => {
-		const key = canonicalUrl(url);
-		if (key && !urls.some((item) => canonicalUrl(item) === key)) urls.push(url);
-	};
-	if (/--read-only\b/u.test(claim)) {
-		add("https://docs.docker.com/reference/cli/docker/container/run/");
-	}
-	if (/--tmpfs\b/u.test(claim)) {
-		add("https://docs.docker.com/engine/storage/tmpfs/");
-	}
-	return urls.slice(0, 16);
-}
-
 function localEvidenceRefs(candidate) {
 	const refs = [];
 	for (const key of ["file", "path", "repoPath", "localPath"]) {
@@ -299,7 +283,7 @@ function backfillSourceRefs(candidate, hints, urlToSourceRef) {
 		if (hint.sourceRef && !refs.includes(hint.sourceRef))
 			refs.push(hint.sourceRef);
 	}
-	for (const url of expandedSourceUrls(candidate)) {
+	for (const url of sourceUrls(candidate)) {
 		const ref = urlToSourceRef.get(canonicalUrl(url));
 		if (ref && !refs.includes(ref)) refs.push(ref);
 	}
@@ -373,15 +357,25 @@ function isPlaceholderHint(hint) {
 	]);
 }
 
-function hasOverclaimedSourceInference(claim) {
-	return matchesAny(claim, [
-		/\bprimary\s+viable\s+defen[cs]e\b/i,
-		/\bcanonical\s+(?:audit\s+log\s+)?primitive\b/i,
-		/\bregardless\s+of\s+prompt\s+instructions\b/i,
-		/\bgen_ai\.(?:system|request\.model)\b/i,
-		/\binterrupt\(\)\b/i,
-		/\bbefore\s+or\s+after\s+specified\s+nodes\b/i,
-	]);
+function optionStrings(options, key, limit = 24) {
+	return compactStrings(asArray(asObject(options)?.[key]), limit);
+}
+
+function includesLiteralPhrase(text, phrase) {
+	const haystack = String(text ?? "")
+		.normalize("NFKC")
+		.toLocaleLowerCase();
+	const needle = String(phrase ?? "")
+		.normalize("NFKC")
+		.toLocaleLowerCase()
+		.trim();
+	return needle.length > 0 && haystack.includes(needle);
+}
+
+function hasOverclaimedSourceInference(claim, options) {
+	return optionStrings(options, "overclaimedSourceInferencePhrases").some(
+		(phrase) => includesLiteralPhrase(claim, phrase),
+	);
 }
 
 function combinedHintText(hints) {
@@ -400,10 +394,12 @@ function hasUnsupportedNormativePrerequisite(claim, hints) {
 	return !/\bmust\s+pre-?configure\b/i.test(combinedHintText(hints));
 }
 
-function hasUnquotedNamedMitigation(claim, hints) {
+function hasUnquotedNamedMitigation(claim, hints, options) {
 	const evidenceText = combinedHintText(hints);
-	return (
-		/\bdelimiters?\b/i.test(claim) && !/\bdelimiters?\b/i.test(evidenceText)
+	return optionStrings(options, "unquotedNamedMitigationTerms").some(
+		(term) =>
+			includesLiteralPhrase(claim, term) &&
+			!includesLiteralPhrase(evidenceText, term),
 	);
 }
 
@@ -413,7 +409,7 @@ function hasImperativeMultiStepRecommendation(claim) {
 	]);
 }
 
-function classifyCandidate(candidate, seenIds, hints = []) {
+function classifyCandidate(candidate, seenIds, hints = [], options = {}) {
 	const id = candidateId(candidate);
 	const claim = claimText(candidate);
 	const reasons = [];
@@ -435,13 +431,13 @@ function classifyCandidate(candidate, seenIds, hints = []) {
 		) {
 			reasons.push("source_hint_claim_mismatch");
 		}
-		if (hasOverclaimedSourceInference(claim)) {
+		if (hasOverclaimedSourceInference(claim, options)) {
 			reasons.push("overclaimed_source_inference");
 		}
 		if (hasUnsupportedNormativePrerequisite(claim, hints)) {
 			reasons.push("unsupported_normative_prerequisite");
 		}
-		if (hasUnquotedNamedMitigation(claim, hints)) {
+		if (hasUnquotedNamedMitigation(claim, hints, options)) {
 			reasons.push("unquoted_named_mitigation");
 		}
 
@@ -607,7 +603,7 @@ function rewrittenCandidate(candidate, reasons, hints, urlToSourceRef) {
 		originalClaim: claimText(candidate),
 		claim: replacement,
 		sourceRefs: refs,
-		sourceUrls: hint.url ? [hint.url] : expandedSourceUrls(candidate),
+		sourceUrls: hint.url ? [hint.url] : sourceUrls(candidate),
 		sanitizerRewriteReasons: rewriteReasons,
 		reasonToVerify: `Deterministically rewritten to a source-backed atom from ${hint.sourceTitleOrPublisher ?? hint.url ?? hint.sourceRef ?? "source evidence"}.`,
 	};
@@ -619,7 +615,7 @@ function sanitizedCandidate(candidate, hints, urlToSourceRef) {
 		id: candidateId(candidate),
 		claim: claimText(candidate),
 		sourceRefs: backfillSourceRefs(candidate, hints, urlToSourceRef),
-		sourceUrls: expandedSourceUrls(candidate),
+		sourceUrls: sourceUrls(candidate),
 		...(hints.length > 0 ? { sourceEvidenceHints: hints } : {}),
 		verifierInputPolicy: VERIFIER_INPUT_POLICY,
 	};
@@ -657,6 +653,7 @@ function adjustFactSlotCoverage(rows, demotedBySlot, keptIds) {
 
 export default async function sanitizeVerificationCandidates({
 	sources,
+	options = {},
 	context = {},
 }) {
 	const normalized = asObject(findSource(sources, "normalize-claims"));
@@ -683,7 +680,7 @@ export default async function sanitizeVerificationCandidates({
 	for (const [index, candidate] of originalCandidates.entries()) {
 		const id = candidateId(candidate);
 		const hints = evidenceHintsForCandidate(candidate, evidenceHintRows);
-		const reasons = classifyCandidate(candidate, seenIds, hints);
+		const reasons = classifyCandidate(candidate, seenIds, hints, options);
 		if (id) seenIds.add(id);
 		if (reasons.length === 0) {
 			keptCandidates.push(sanitizedCandidate(candidate, hints, urlToSourceRef));
@@ -778,7 +775,8 @@ export default async function sanitizeVerificationCandidates({
 			if (refs.length === 0) continue;
 			if (!hints.some((hint) => stringOf(hint.quote))) continue;
 			if (
-				classifyCandidate({ ...preserved, id }, new Set(), hints).length > 0
+				classifyCandidate({ ...preserved, id }, new Set(), hints, options)
+					.length > 0
 			) {
 				continue;
 			}

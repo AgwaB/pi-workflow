@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-test("deep-research sanitizer rewrites unquoted obligations and augments exact Docker option sources", async () => {
+test("deep-research sanitizer rewrites configured unquoted obligations without synthesizing source URLs", async () => {
 	const { default: helper } = await import(
 		`../../workflows/deep-research/helpers/sanitize-verification-candidates.mjs?test=${Date.now()}`
 	);
@@ -83,6 +83,9 @@ test("deep-research sanitizer rewrites unquoted obligations and augments exact D
 				coverageGaps: [],
 			},
 		},
+		options: {
+			unquotedNamedMitigationTerms: ["delimiters"],
+		},
 	});
 
 	const claims = result.claimInventory.verificationCandidates;
@@ -98,14 +101,9 @@ test("deep-research sanitizer rewrites unquoted obligations and augments exact D
 		claims[1].claim,
 		"Segregate and identify external content. Separate and clearly denote untrusted content to limit its influence on user prompts.",
 	);
-	assert.ok(
-		claims[2].sourceUrls.includes(
-			"https://docs.docker.com/reference/cli/docker/container/run/",
-		),
-	);
-	assert.ok(
-		claims[2].sourceUrls.includes("https://docs.docker.com/engine/storage/tmpfs/"),
-	);
+	assert.deepEqual(claims[2].sourceUrls, [
+		"https://docs.docker.com/engine/containers/run/",
+	]);
 	assert.deepEqual(result.sanitizerDiagnostics.rewriteReasonCounts, {
 		unsupported_normative_prerequisite: 1,
 		source_hint_claim_mismatch: 1,

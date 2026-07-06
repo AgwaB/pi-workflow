@@ -149,9 +149,12 @@ export interface WorkflowArtifactToolResult {
 type JsonRecord = Record<string, unknown>;
 
 const WORKFLOW_ARTIFACT_KIND_SET = new Set<string>(WORKFLOW_ARTIFACT_KINDS);
+// This cache is intentionally process-local: workflow workers load this tool
+// inside the subagent task process, so duplicate-read suppression cannot carry
+// across attempts unless the tool host is deliberately hoisted in the future.
 const workflowArtifactReadDedupCache = new Map<
 	string,
-	WorkflowArtifactReadResult & { firstReadAt: string }
+	WorkflowArtifactReadResult
 >();
 const DEFAULT_MAX_BYTES = 50 * 1024;
 const DEFAULT_MAX_LINES = 2000;
@@ -726,7 +729,7 @@ export async function handleWorkflowArtifactToolCall(
 			content: [
 				{
 					type: "text",
-					text: `# workflow_artifact duplicate read suppressed: ${cachedRead.source}.${cachedRead.artifact}${projectionLabel}\n\n<system-reminder>\nYou repeated the same workflow_artifact read in this task. Reuse the earlier result from ${cachedRead.firstReadAt}; do not call this exact workflow_artifact read again unless you need a different source, artifact, path, maxItems, or maxChars.\n</system-reminder>`,
+					text: `# workflow_artifact duplicate read suppressed: ${cachedRead.source}.${cachedRead.artifact}${projectionLabel}\n\n<system-reminder>\nYou repeated the same workflow_artifact read in this task. Reuse the earlier result from this task; do not call this exact workflow_artifact read again unless you need a different source, artifact, path, maxItems, or maxChars.\n</system-reminder>`,
 				},
 			],
 			details: {
@@ -779,10 +782,7 @@ export async function handleWorkflowArtifactToolCall(
 			: { maxChars: read.projection.maxChars }),
 	});
 	if (workflowExperimentalFlagEnabled(EXPERIMENTAL_TOOL_DEDUP_ENV)) {
-		workflowArtifactReadDedupCache.set(dedupKey, {
-			...read,
-			firstReadAt: new Date().toISOString(),
-		});
+		workflowArtifactReadDedupCache.set(dedupKey, read);
 	}
 	const projectionLabel = read.projection
 		? ` path=${read.projection.path}`

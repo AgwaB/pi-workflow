@@ -527,6 +527,7 @@ function classifySafety(
 		tools,
 		toolProviders,
 		readOnlyDeclared,
+		{ emptyToolsCapability: "read-only" },
 	);
 	const sharedCwdSafe = Boolean(
 		readOnlyDeclared &&
@@ -560,7 +561,7 @@ function permissionPreview(
 	capability: TaskCapability,
 	approvalMode: ApprovalMode,
 ): PermissionPreview {
-	if (!tools || tools.length === 0) {
+	if (!tools) {
 		return {
 			status: "blocked",
 			statusDetail: "needs_attention",
@@ -568,6 +569,7 @@ function permissionPreview(
 				"effective tools are unspecified; background permission surface is unknown",
 		};
 	}
+	if (tools.length === 0) return { status: "pending" };
 
 	const unknownTools = tools.filter(
 		(tool) => effectiveToolClassification(tool, toolProviders) === undefined,
