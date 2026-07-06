@@ -149,7 +149,8 @@ JSON
       writeFileSync(join(cwd, 'workflows', 'invalid.json'), JSON.stringify({ schemaVersion: 1, unsupported: true }));
       const workflows = await listWorkflows(cwd);
       const names = workflows.map((item) => item.name).sort();
-      if (names.join(',') !== 'review-artifact') throw new Error('unexpected workflows: ' + names.join(','));
+      if (!names.includes('review-artifact')) throw new Error('missing local workflow: ' + names.join(','));
+      if (names.includes('invalid')) throw new Error('invalid workflow should be hidden: ' + names.join(','));
       const resolved = await resolveWorkflowRef('review-artifact', cwd);
       if (!resolved.specPath.endsWith('workflows/review-artifact.json')) throw new Error('bad resolved path: ' + resolved.specPath);
       await resolveWorkflowRef('invalid', cwd).then(() => { throw new Error('invalid workflow should not resolve'); }, (error) => { if (!/workflow name or spec file not found/.test(String(error))) throw error; });

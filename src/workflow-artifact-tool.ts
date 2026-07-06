@@ -9,6 +9,10 @@ import {
 } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 
+import {
+	EXPERIMENTAL_TOOL_DEDUP_ENV,
+	workflowExperimentalFlagEnabled,
+} from "./experimental-speed-flags.js";
 import { stringifyPromptJson } from "./prompt-json.js";
 import { readSimpleJsonPath } from "./workflow-runtime.js";
 
@@ -145,6 +149,10 @@ export interface WorkflowArtifactToolResult {
 type JsonRecord = Record<string, unknown>;
 
 const WORKFLOW_ARTIFACT_KIND_SET = new Set<string>(WORKFLOW_ARTIFACT_KINDS);
+const workflowArtifactReadDedupCache = new Map<
+	string,
+	WorkflowArtifactReadResult & { firstReadAt: string }
+>();
 const DEFAULT_MAX_BYTES = 50 * 1024;
 const DEFAULT_MAX_LINES = 2000;
 const SOURCE_NAME_PATTERN = /^[A-Za-z0-9_.:-]+$/;
@@ -619,6 +627,31 @@ export async function readWorkflowArtifactReadLedger(
 		);
 }
 
+function workflowArtifactReadDedupKey(
+	config: WorkflowArtifactToolConfig,
+	accessMode: WorkflowArtifactAccessMode,
+	input: {
+		action: "read";
+		source?: string;
+		artifact?: string;
+		path?: string;
+		maxItems?: number;
+		maxChars?: number;
+	},
+): string {
+	return JSON.stringify({
+		runId: config.runId,
+		taskId: config.taskId,
+		manifestPath: resolve(config.manifestPath),
+		accessMode,
+		source: input.source,
+		artifact: input.artifact,
+		path: input.path,
+		maxItems: input.maxItems,
+		maxChars: input.maxChars,
+	});
+}
+
 export async function handleWorkflowArtifactToolCall(
 	params: unknown,
 	config: WorkflowArtifactToolConfig,
@@ -661,6 +694,56 @@ export async function handleWorkflowArtifactToolCall(
 	if (!input.source) throw new Error("workflow_artifact read requires source");
 	if (!input.artifact)
 		throw new Error("workflow_artifact read requires artifact");
+	const dedupKey = workflowArtifactReadDedupKey(config, accessMode, input);
+	const cachedRead = workflowExperimentalFlagEnabled(EXPERIMENTAL_TOOL_DEDUP_ENV)
+		? workflowArtifactReadDedupCache.get(dedupKey)
+		: undefined;
+	if (cachedRead !== undefined) {
+		await appendWorkflowArtifactReadLedger(config.ledgerPath, {
+			schema: WORKFLOW_ARTIFACT_READ_SCHEMA,
+			runId: config.runId,
+			taskId: config.taskId,
+			source: cachedRead.source,
+			artifact: cachedRead.artifact,
+			at: new Date().toISOString(),
+			bytes: cachedRead.bytes,
+			returnedBytes: 0,
+			truncated: cachedRead.truncated,
+			...(cachedRead.projection?.path === undefined
+				? {}
+				: { path: cachedRead.projection.path }),
+			...(cachedRead.projection?.maxItems === undefined
+				? {}
+				: { maxItems: cachedRead.projection.maxItems }),
+			...(cachedRead.projection?.maxChars === undefined
+				? {}
+				: { maxChars: cachedRead.projection.maxChars }),
+		});
+		const projectionLabel = cachedRead.projection
+			? ` path=${cachedRead.projection.path}`
+			: "";
+		return {
+			content: [
+				{
+					type: "text",
+					text: `# workflow_artifact duplicate read suppressed: ${cachedRead.source}.${cachedRead.artifact}${projectionLabel}\n\n<system-reminder>\nYou repeated the same workflow_artifact read in this task. Reuse the earlier result from ${cachedRead.firstReadAt}; do not call this exact workflow_artifact read again unless you need a different source, artifact, path, maxItems, or maxChars.\n</system-reminder>`,
+				},
+			],
+			details: {
+				action: "read",
+				runId: config.runId,
+				taskId: config.taskId,
+				source: cachedRead.source,
+				artifact: cachedRead.artifact,
+				bytes: cachedRead.bytes,
+				returnedBytes: 0,
+				truncated: cachedRead.truncated,
+				mediaType: cachedRead.mediaType,
+				projection: cachedRead.projection,
+				duplicate: true,
+			},
+		};
+	}
 	const read = await readWorkflowArtifact(
 		manifest,
 		input.source,
@@ -695,6 +778,12 @@ export async function handleWorkflowArtifactToolCall(
 			? {}
 			: { maxChars: read.projection.maxChars }),
 	});
+	if (workflowExperimentalFlagEnabled(EXPERIMENTAL_TOOL_DEDUP_ENV)) {
+		workflowArtifactReadDedupCache.set(dedupKey, {
+			...read,
+			firstReadAt: new Date().toISOString(),
+		});
+	}
 	const projectionLabel = read.projection
 		? ` path=${read.projection.path}`
 		: "";

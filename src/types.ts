@@ -701,6 +701,9 @@ export interface WorkflowTaskTimingRecord {
 	launchDurationMs?: number;
 	waiting_for_global_worker_slot?: boolean;
 	launchSlotReleaseDelayMs?: number;
+	maxConcurrentLaunches?: number;
+	maxLiveModelWorkers?: number;
+	experimentalLaunchRampEnabled?: boolean;
 	executionStartedAt?: string;
 	executionCompletedAt?: string;
 	executionMs?: number | null;
