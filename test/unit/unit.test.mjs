@@ -20513,6 +20513,227 @@ test("refresh retries zero-output transient subagent model failures", async () =
 	}
 });
 
+
+test("refresh fails fast on permanent provider input-validation model failures", async () => {
+	const cwd = makeProject();
+	try {
+		const providerError =
+			"Codex error: [StringParam] [prompt_cache_key] [string_above_max_length] Invalid 'prompt_cache_key': string too long. Expected a string with maximum length 64, but got a string with length 67 instead.";
+		const { refreshedTask } = await refreshZeroOutputModelFailure(cwd, {
+			runId: "run_provider_invalid",
+			attemptId: "attempt_provider_invalid",
+			artifactDirName: ".fake-provider-invalid-subagent",
+			streamErrors: [providerError],
+		});
+		assertPermanentModelFailure(cwd, refreshedTask, /prompt_cache_key/);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
+	}
+});
+
+async function refreshZeroOutputModelFailure(cwd, options) {
+	writeAgent(cwd, "unit-scout", "read");
+	const spec = workflowSpec("unit-scout", {
+		artifactGraph: {
+			stages: [{ id: "main", type: "single", prompt: "Do work." }],
+		},
+	});
+	const compiled = await compileWorkflow(spec, { cwd, task: "Review topic" });
+	const { run } = await createWorkflowRunRecord(
+		cwd,
+		compiled,
+		join(cwd, "workflows", "unit.json"),
+	);
+	await writeStaticRunArtifacts(cwd, run, compiled, spec);
+	const task = run.tasks[0];
+	const runId = options.runId;
+	const attemptId = options.attemptId;
+	task.status = "running";
+	task.statusDetail = "running";
+	task.startedAt = new Date().toISOString();
+	task.backendHandle = {
+		engine: "pi-subagent",
+		backend: "headless",
+		runId,
+		attemptId,
+		cwd,
+		runsDir: `.pi/workflow-subagents/${runId}`,
+		display: `pi-subagent/headless ${runId}/${attemptId}`,
+	};
+
+	const artifactDirName = options.artifactDirName;
+	const artifactDir = join(cwd, artifactDirName);
+	const streamErrors = options.streamErrors ?? [];
+	const statusMetadata = {
+		contextLengthExceeded: false,
+		stopReason: "error",
+		...(options.metadata ?? {}),
+	};
+	if (streamErrors.length > 0) statusMetadata.streamErrors = streamErrors;
+	mkdirSync(artifactDir, { recursive: true });
+	writeFileSync(join(artifactDir, "output.log"), "");
+	writeFileSync(join(artifactDir, "stderr.log"), options.stderrText ?? "");
+	writeFileSync(
+		join(artifactDir, "result.json"),
+		JSON.stringify({
+			status: "failed",
+			failureKind: "model",
+			exitCode: 0,
+			completedAt: new Date().toISOString(),
+			startedAt: task.startedAt,
+			errorMessage: options.errorMessage ?? "pi-subagent run failed: model",
+			metadata: statusMetadata,
+		}),
+	);
+
+	setSubagentApiForTests({
+		async runSubagent() {
+			throw new Error("not expected");
+		},
+		async reconcileSubagentRun() {
+			return {};
+		},
+		async getSubagentStatus() {
+			return {
+				runId,
+				attemptId,
+				backend: "headless",
+				status: "failed",
+				failureKind: "model",
+				startedAt: task.startedAt,
+				completedAt: new Date().toISOString(),
+				logs: [
+					{
+						type: "output",
+						path: `${artifactDirName}/output.log`,
+						artifactCwd: cwd,
+					},
+					{
+						type: "stderr",
+						path: `${artifactDirName}/stderr.log`,
+						artifactCwd: cwd,
+					},
+					{
+						type: "result",
+						path: `${artifactDirName}/result.json`,
+						artifactCwd: cwd,
+					},
+				],
+				metadata: statusMetadata,
+				attempts: [
+					{
+						attemptId,
+						status: "failed",
+						pid: 99999999,
+					},
+				],
+			};
+		},
+		async interruptSubagent() {
+			return {};
+		},
+	});
+
+	await writeRunRecord(cwd, run);
+	const refreshed = await refreshRunFromSubagentArtifacts(
+		cwd,
+		await readRunRecord(cwd, run.runId),
+	);
+	return { refreshedTask: refreshed.tasks[0] };
+}
+
+function firstTransientModelFailureAttemptPath(cwd, refreshedTask) {
+	return join(
+		cwd,
+		dirname(refreshedTask.files.result),
+		"result.transient-model-failure-1.json",
+	);
+}
+
+function assertFirstTransientModelRetry(cwd, refreshedTask) {
+	assert.equal(refreshedTask.status, "pending");
+	assert.equal(refreshedTask.statusDetail, "retry_model_failure");
+	assert.equal(refreshedTask.launchRetry?.attempts, 1);
+	assert.equal(refreshedTask.launchRetry?.reason, "model");
+	assert.equal(refreshedTask.backendHandle, undefined);
+	assert.equal(
+		existsSync(firstTransientModelFailureAttemptPath(cwd, refreshedTask)),
+		true,
+	);
+}
+
+function assertPermanentModelFailure(cwd, refreshedTask, messagePattern) {
+	assert.equal(refreshedTask.status, "failed");
+	assert.equal(refreshedTask.launchRetry, undefined);
+	assert.match(refreshedTask.lastMessage, /permanent-model failure/);
+	assert.match(refreshedTask.lastMessage, messagePattern);
+	assert.equal(
+		existsSync(firstTransientModelFailureAttemptPath(cwd, refreshedTask)),
+		false,
+	);
+	const result = JSON.parse(
+		readFileSync(join(cwd, refreshedTask.files.result), "utf8"),
+	);
+	assert.equal(result.failureKind, "permanent_model_failure");
+}
+
+test("refresh fails fast on maximum-length provider validation with 5xx-sized limits", async () => {
+	const cwd = makeProject();
+	try {
+		const providerError =
+			"Invalid 'metadata.key': string too long. Expected a string with maximum length 512, but got a string with length 530";
+		const { refreshedTask } = await refreshZeroOutputModelFailure(cwd, {
+			runId: "run_provider_length_512",
+			attemptId: "attempt_provider_length_512",
+			artifactDirName: ".fake-provider-length-512-subagent",
+			streamErrors: [providerError],
+		});
+		assertPermanentModelFailure(cwd, refreshedTask, /maximum length 512/);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
+	}
+});
+
+test("refresh retries provider rate-limit model failures", async () => {
+	const cwd = makeProject();
+	try {
+		const providerError =
+			`Anthropic request failed: HTTP 429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account's rate limit. Please try again later."},"request_id":"req_unit_rate_limit"}`;
+		const { refreshedTask } = await refreshZeroOutputModelFailure(cwd, {
+			runId: "run_provider_rate_limit",
+			attemptId: "attempt_provider_rate_limit",
+			artifactDirName: ".fake-provider-rate-limit-subagent",
+			streamErrors: [providerError],
+		});
+		assertFirstTransientModelRetry(cwd, refreshedTask);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
+	}
+});
+
+test("refresh retries truncated-stream model failures", async () => {
+	const cwd = makeProject();
+	try {
+		const { refreshedTask } = await refreshZeroOutputModelFailure(cwd, {
+			runId: "run_truncated_stream",
+			attemptId: "attempt_truncated_stream",
+			artifactDirName: ".fake-truncated-stream-subagent",
+			stderrText: "Unexpected end of JSON input\n",
+			streamErrors: [
+				"Unexpected end of JSON input",
+				"stream disconnected before completion; expected additional input",
+			],
+		});
+		assertFirstTransientModelRetry(cwd, refreshedTask);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
+	}
+});
+
 test("subagent launch retries rotate artifact-graph session ids", async () => {
 	const cwd = makeProject();
 	try {

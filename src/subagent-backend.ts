@@ -1788,7 +1788,7 @@ async function materializeTerminalSubagentResult(
 			: statusInfo.status === "completed"
 				? 0
 				: 1;
-	const errorMessage =
+	let errorMessage =
 		statusInfo.errorMessage ??
 		(typeof subagentResult?.errorMessage === "string"
 			? subagentResult.errorMessage
@@ -1797,6 +1797,23 @@ async function materializeTerminalSubagentResult(
 		(subagentResult?.metadata as any)?.contextLengthExceeded ??
 			snapshot.metadata?.contextLengthExceeded,
 	);
+	const permanentModelFailure = classifyPermanentModelFailure({
+		statusInfo,
+		errorMessage,
+		stderrText,
+		outputBytes,
+		contextLengthExceeded,
+		subagentResult,
+		snapshotMetadata: snapshot.metadata,
+	});
+	if (permanentModelFailure) {
+		statusInfo = {
+			status: "failed",
+			failureKind: "permanent_model_failure",
+			errorMessage: permanentModelFailure,
+		};
+		errorMessage = permanentModelFailure;
+	}
 	recordTerminalTaskObservability({
 		task,
 		snapshot,
@@ -2743,6 +2760,80 @@ function classifyDeterministicBootFailure(options: {
 			.map((line) => line.trim())
 			.find((line) => deterministicPattern.test(line)) ?? text.trim();
 	return `deterministic-boot failure: ${excerpt.slice(0, 500)}`;
+}
+
+function metadataTextValues(metadata: unknown): string[] {
+	if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+		return [];
+	}
+	const record = metadata as Record<string, unknown>;
+	const values: string[] = [];
+	for (const key of ["error", "errorMessage", "message", "stopReason"]) {
+		const value = record[key];
+		if (typeof value === "string") values.push(value);
+	}
+	const streamErrors = record.streamErrors;
+	if (Array.isArray(streamErrors)) {
+		for (const value of streamErrors) {
+			if (typeof value === "string") values.push(value);
+		}
+	}
+	return values;
+}
+
+function providerInputValidationFailure(text: string): boolean {
+	const lower = text.toLowerCase();
+	if (
+		/(?:\b429\b|rate_limit|rate limit|temporar(?:y|ily)|overloaded|timeout|timed out|\b5xx\b|\bhttp(?:\/\d(?:\.\d)?)?[ \/]?5\d\d\b|\bstatus(?: code)?[:= ]+5\d\d\b|\b5\d\d\s+(?:internal|bad gateway|service unavailable|gateway timeout|server error)\b)/.test(
+			lower,
+		)
+	) {
+		return false;
+	}
+	return (
+		/string_above_max_length|string_below_min_length|string_too_long|string_too_short/.test(
+			lower,
+		) ||
+		/\b(?:invalid|expected)\b.{0,120}(?:prompt_cache_key|max(?:imum)?[ _-]?length)/.test(
+			lower,
+		) ||
+		/(?:invalid_request_error|bad_request|http 400|\b400 bad request\b)/.test(
+			lower,
+		)
+	);
+}
+
+function classifyPermanentModelFailure(options: {
+	statusInfo: {
+		status: WorkflowTaskRunRecord["status"];
+		failureKind?: string;
+		errorMessage?: string;
+	};
+	errorMessage?: string;
+	stderrText: string;
+	outputBytes: number;
+	contextLengthExceeded: boolean;
+	subagentResult?: Record<string, unknown>;
+	snapshotMetadata?: Record<string, unknown> | null;
+}): string | undefined {
+	if (
+		options.statusInfo.status !== "failed" ||
+		options.statusInfo.failureKind !== "model" ||
+		options.outputBytes !== 0 ||
+		options.contextLengthExceeded
+	) {
+		return undefined;
+	}
+	const candidates = [
+		options.statusInfo.errorMessage,
+		options.errorMessage,
+		options.stderrText,
+		...metadataTextValues(options.subagentResult?.metadata),
+		...metadataTextValues(options.snapshotMetadata),
+	].filter((value): value is string => typeof value === "string" && value.length > 0);
+	const matched = candidates.find(providerInputValidationFailure);
+	if (!matched) return undefined;
+	return `permanent-model failure: ${matched.trim().slice(0, 500)}`;
 }
 
 function shouldRetryTransientModelFailure(
