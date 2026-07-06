@@ -335,7 +335,46 @@ function evidenceHintsForCandidate(candidate, hintRows) {
 	}));
 }
 
-function classifyCandidate(candidate, seenIds) {
+function hintEvidenceText(hint) {
+	return `${stringOf(hint?.value)} ${stringOf(hint?.quote)}`.trim();
+}
+
+function hintSupportsCandidate(candidate, hint) {
+	const evidenceTokens = tokenSet(hintEvidenceText(hint));
+	const candidateTokens = tokenSet(claimText(candidate));
+	if (candidateTokens.size === 0 || evidenceTokens.size === 0) return false;
+	const hits = setIntersectionCount(candidateTokens, evidenceTokens);
+	return hits >= 4 && hits / candidateTokens.size >= 0.18;
+}
+
+function isPlaceholderHint(hint) {
+	const text = hintEvidenceText(hint);
+	return matchesAny(text, [
+		/^redirecting(?:\.\.\.)?$/i,
+		/^moved:?(?:\s|$)/i,
+		/\b(?:page|document)\s+(?:moved|redirected|not found|blocked)\b/i,
+		/\b(?:404|403|access denied|forbidden)\b/i,
+	]);
+}
+
+function hasOverclaimedSourceInference(claim) {
+	return matchesAny(claim, [
+		/\bprimary\s+viable\s+defen[cs]e\b/i,
+		/\bcanonical\s+(?:audit\s+log\s+)?primitive\b/i,
+		/\bregardless\s+of\s+prompt\s+instructions\b/i,
+		/\bgen_ai\.(?:system|request\.model)\b/i,
+		/\binterrupt\(\)\b/i,
+		/\bbefore\s+or\s+after\s+specified\s+nodes\b/i,
+	]);
+}
+
+function hasImperativeMultiStepRecommendation(claim) {
+	return matchesAny(claim, [
+		/^(?:enforce|apply|defend|instrument|implement|migrate|pin|layer|require|adopt|configure|validate|verify)\b(?=[\s\S]{48,})(?=[\s\S]*(?:;|\band\b|\bnever\s+rely\b|\bno\s+input\s+filter\b|\bconsider\b))/i,
+	]);
+}
+
+function classifyCandidate(candidate, seenIds, hints = []) {
 	const id = candidateId(candidate);
 	const claim = claimText(candidate);
 	const reasons = [];
@@ -346,6 +385,21 @@ function classifyCandidate(candidate, seenIds) {
 	if (!hasSourceLocator(candidate)) reasons.push("missing_candidate_source");
 
 	if (claim) {
+		if (hints.length > 0 && hints.every(isPlaceholderHint)) {
+			reasons.push("placeholder_source_hint");
+		}
+		if (
+			hints.length > 0 &&
+			hasSourceLocator(candidate) &&
+			!hints.every(isPlaceholderHint) &&
+			!hints.some((hint) => hintSupportsCandidate(candidate, hint))
+		) {
+			reasons.push("source_hint_claim_mismatch");
+		}
+		if (hasOverclaimedSourceInference(claim)) {
+			reasons.push("overclaimed_source_inference");
+		}
+
 		if (
 			matchesAny(claim, [
 				/\b(?:fetched|retrieved|accessed|inspected|collected|reviewed|cached)\b[^.]{0,80}\b20\d{2}-\d{2}-\d{2}\b/i,
@@ -378,6 +432,7 @@ function classifyCandidate(candidate, seenIds) {
 		}
 
 		if (
+			hasImperativeMultiStepRecommendation(claim) ||
 			matchesAny(claim, [
 				/\bcan\s+be\s+(?:synthesized|derived|combined)\b/i,
 				/\b(?:feasible|pragmatic|low-overhead|small[- ]team|small[- ]SaaS|baseline|tiering|action plan|implementation plan)\b[^.]{0,120}\b(?:use|combine|adopt|implement|separate|prioriti[sz]e|choose|form)\b/i,
@@ -443,7 +498,23 @@ function preservedClaim(candidate, reasons, fallbackIndex) {
 const REWRITEABLE_REASONS = new Set([
 	"synthesized_recommendation_claim",
 	"source_broader_than_evidence_claim",
+	"source_hint_claim_mismatch",
+	"overclaimed_source_inference",
 ]);
+
+function rewriteShouldPreferQuote(reasons) {
+	return reasons.some((reason) =>
+		["source_hint_claim_mismatch", "overclaimed_source_inference"].includes(
+			reason,
+		),
+	);
+}
+
+function rewriteReplacementFromHint(hint, reasons) {
+	if (rewriteShouldPreferQuote(reasons))
+		return stringOf(hint?.quote) || stringOf(hint?.value);
+	return stringOf(hint?.value) || stringOf(hint?.quote);
+}
 
 function rewrittenCandidate(candidate, reasons, hints, urlToSourceRef) {
 	const rewriteReasons = reasons.filter((reason) =>
@@ -451,10 +522,12 @@ function rewrittenCandidate(candidate, reasons, hints, urlToSourceRef) {
 	);
 	if (rewriteReasons.length === 0 || rewriteReasons.length !== reasons.length)
 		return null;
+	const usableHints = hints.filter((hint) => !isPlaceholderHint(hint));
 	const hint =
-		hints.find((item) => item.value) ?? hints.find((item) => item.quote);
+		usableHints.find((item) => item.value) ??
+		usableHints.find((item) => item.quote);
 	if (!hint) return null;
-	const replacement = stringOf(hint.value) || stringOf(hint.quote);
+	const replacement = rewriteReplacementFromHint(hint, reasons);
 	if (!replacement || replacement === claimText(candidate)) return null;
 	const refs = backfillSourceRefs(candidate, [hint], urlToSourceRef);
 	if (refs.length === 0 && localEvidenceRefs(candidate).length === 0)
@@ -540,7 +613,7 @@ export default async function sanitizeVerificationCandidates({
 	for (const [index, candidate] of originalCandidates.entries()) {
 		const id = candidateId(candidate);
 		const hints = evidenceHintsForCandidate(candidate, evidenceHintRows);
-		const reasons = classifyCandidate(candidate, seenIds);
+		const reasons = classifyCandidate(candidate, seenIds, hints);
 		if (id) seenIds.add(id);
 		if (reasons.length === 0) {
 			keptCandidates.push(sanitizedCandidate(candidate, hints, urlToSourceRef));
@@ -634,7 +707,9 @@ export default async function sanitizeVerificationCandidates({
 			const refs = backfillSourceRefs(preserved, hints, urlToSourceRef);
 			if (refs.length === 0) continue;
 			if (!hints.some((hint) => stringOf(hint.quote))) continue;
-			if (classifyCandidate({ ...preserved, id }, new Set()).length > 0) {
+			if (
+				classifyCandidate({ ...preserved, id }, new Set(), hints).length > 0
+			) {
 				continue;
 			}
 			const slots = compactStrings(preserved?.factSlotIds, 12);

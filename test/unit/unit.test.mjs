@@ -9112,6 +9112,113 @@ test("deep-research verification candidate sanitizer backfills sourceRefs from w
 	}
 });
 
+test("deep-research verification candidate sanitizer rewrites mismatched and overclaimed candidates to source atoms", async () => {
+	const { default: helper } = await import(
+		`../../workflows/deep-research/helpers/sanitize-verification-candidates.mjs?test=${Date.now()}`
+	);
+	const seccompRef = "wsrc_11111111111111111111111111111111";
+	const otelRef = "wsrc_22222222222222222222222222222222";
+	const redirectRef = "wsrc_33333333333333333333333333333333";
+	const result = await helper({
+		sources: {
+			"normalize-input-packet.main": {
+				packet: {
+					research: {
+						extractedFacts: [
+							{
+								slotId: "slot-sandbox",
+								value:
+									"Docker's default seccomp profile blocks selected Linux system calls for containers.",
+								sourceRefs: [seccompRef],
+								sourceUrls: ["https://docs.docker.test/seccomp"],
+								quote:
+									"The default seccomp profile provides a sane default for running containers with seccomp and disables around 44 system calls.",
+								sourceQuality: "primary",
+							},
+							{
+								slotId: "slot-audit",
+								value:
+									"Each span has a trace_id, span_id, parent span ID, start and end timestamps, and attributes.",
+								sourceRefs: [otelRef],
+								sourceUrls: ["https://opentelemetry.test/traces"],
+								quote:
+									"Each Span contains a trace ID, span ID, parent span ID, start and end timestamps, and attributes.",
+								sourceQuality: "primary",
+							},
+							{
+								slotId: "slot-hitl",
+								sourceRefs: [redirectRef],
+								sourceUrls: ["https://langchain-ai.test/langgraph/hitl"],
+								quote: "Redirecting...",
+								sourceQuality: "redirect",
+							},
+						],
+					},
+				},
+			},
+			"normalize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [
+						{
+							id: "claim-mismatch",
+							claim:
+								"Passing --network=none to a Docker container fully disables all network access for that container.",
+							factSlotIds: ["slot-sandbox"],
+							sourceRefs: [seccompRef],
+							sourceUrls: ["https://docs.docker.test/seccomp"],
+						},
+						{
+							id: "claim-overclaim",
+							claim:
+								"OpenTelemetry spans are the canonical audit log primitive for agent actions and gen_ai.system/gen_ai.request.model attributes provide cross-tool interoperability.",
+							factSlotIds: ["slot-audit"],
+							sourceRefs: [otelRef],
+							sourceUrls: ["https://opentelemetry.test/traces"],
+						},
+						{
+							id: "claim-redirect",
+							claim:
+								"LangGraph interrupt() pauses graph execution before or after specified nodes for human review.",
+							factSlotIds: ["slot-hitl"],
+							sourceRefs: [redirectRef],
+							sourceUrls: ["https://langchain-ai.test/langgraph/hitl"],
+						},
+					],
+					preservedClaims: [],
+					duplicates: [],
+				},
+				factSlotCoverage: [],
+				coverageGaps: [],
+			},
+		},
+	});
+
+	const rewritten = result.claimInventory.verificationCandidates;
+	assert.deepEqual(
+		rewritten.map((claim) => claim.id),
+		["claim-mismatch", "claim-overclaim"],
+	);
+	assert.equal(
+		rewritten[0].claim,
+		"The default seccomp profile provides a sane default for running containers with seccomp and disables around 44 system calls.",
+	);
+	assert.equal(
+		rewritten[1].claim,
+		"Each Span contains a trace ID, span ID, parent span ID, start and end timestamps, and attributes.",
+	);
+	assert.deepEqual(result.sanitizerDiagnostics.rewriteReasonCounts, {
+		source_hint_claim_mismatch: 2,
+		overclaimed_source_inference: 1,
+	});
+	assert.equal(
+		result.sanitizerDiagnostics.demotionReasonCounts.placeholder_source_hint,
+		1,
+	);
+	assert.deepEqual(result.sanitizerDiagnostics.demotedCandidateIds, [
+		"claim-redirect",
+	]);
+});
+
 test("deep-research verification candidate sanitizer preserves source-stated edge claims", async () => {
 	const { default: helper } = await import(
 		`../../workflows/deep-research/helpers/sanitize-verification-candidates.mjs?test=${Date.now()}`
@@ -9315,6 +9422,67 @@ test("deep-research verification candidate sanitizer rewrites only quote-backed 
 		source_broader_than_evidence_claim: 1,
 		synthesized_recommendation_claim: 1,
 	});
+});
+
+test("deep-research verification candidate sanitizer rewrites imperative multi-step recommendations", async () => {
+	const { default: helper } = await import(
+		`../../workflows/deep-research/helpers/sanitize-verification-candidates.mjs?test=${Date.now()}`
+	);
+	const sourceRef = "wsrc_11112222333344445555666677778888";
+	const result = await helper({
+		sources: {
+			"normalize-input-packet.main": {
+				packet: {
+					research: {
+						extractedFacts: [
+							{
+								slotId: "slot-tools",
+								value:
+									"Tool definitions include a name, description, and input schema for model-controlled tool calls.",
+								sourceRefs: [sourceRef],
+								sourceUrls: ["https://modelcontextprotocol.test/tools"],
+								quote:
+									"Tools are model-controlled; tool definitions include a name, description, and input schema.",
+								sourceQuality: "primary",
+							},
+						],
+					},
+				},
+			},
+			"normalize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [
+						{
+							id: "claim-tools",
+							claim:
+								"Enforce tool allowlisting via the per-request tools array; apply JSON Schema constraints on MCP inputSchema; never rely on MCP tool annotations as a security boundary.",
+							factSlotIds: ["slot-tools"],
+							sourceRefs: [sourceRef],
+							sourceUrls: ["https://modelcontextprotocol.test/tools"],
+						},
+					],
+					preservedClaims: [],
+					duplicates: [],
+				},
+				factSlotCoverage: [],
+				coverageGaps: [],
+			},
+		},
+	});
+
+	assert.deepEqual(
+		result.claimInventory.verificationCandidates.map((claim) => claim.id),
+		["claim-tools"],
+	);
+	assert.equal(
+		result.claimInventory.verificationCandidates[0].claim,
+		"Tools are model-controlled; tool definitions include a name, description, and input schema.",
+	);
+	assert.deepEqual(result.sanitizerDiagnostics.rewriteReasonCounts, {
+		source_hint_claim_mismatch: 1,
+		synthesized_recommendation_claim: 1,
+	});
+	assert.equal(result.sanitizerDiagnostics.rewrittenCandidateCount, 1);
 });
 
 test("deep-research sanitizer uses Unicode tokens for Korean quote-backed rewrites", async () => {
