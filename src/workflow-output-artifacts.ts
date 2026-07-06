@@ -66,7 +66,8 @@ export type WorkflowOutputRepairCode =
 	| "control_additional_unverified_leads_objects"
 	| "control_fact_slot_coverage_string_fields"
 	| "control_final_synthesis_array_caps"
-	| "control_enum_near_miss";
+	| "control_enum_near_miss"
+	| "control_object_row_from_string";
 
 export interface WorkflowOutputRepair {
 	code: WorkflowOutputRepairCode;
@@ -717,9 +718,120 @@ function normalizeKnownWorkflowControlSchema(
 			});
 		}
 	}
+	const rowRepaired = normalizeBareStringObjectRows(
+		normalized,
+		schema,
+		"$",
+		repairs,
+	);
+	if (isPlainRecord(rowRepaired)) normalized = rowRepaired;
 	const enumRepaired = normalizeEnumNearMisses(normalized, schema, "$", repairs);
 	if (isPlainRecord(enumRepaired)) normalized = enumRepaired;
 	return normalized;
+}
+
+// Schema-driven repair for bare-string rows in arrays whose items must be
+// objects — the dominant retry class measured on impact-review (~11 output
+// retries/run, "value must be of type object"). A string row is wrapped into
+// an object only when the wrap is valid by construction: free-form object
+// items (no required properties) wrap as { note: <string> } (or a preferred
+// declared string property), and items with exactly one required string
+// property wrap into that property. Rows whose schemas require multiple
+// properties are left untouched so validation still fails closed.
+const OBJECT_ROW_TEXT_KEY_PREFERENCE = [
+	"note",
+	"text",
+	"summary",
+	"description",
+	"message",
+	"reason",
+	"title",
+	"item",
+];
+
+function normalizeBareStringObjectRows(
+	value: unknown,
+	schema: JsonSchema | undefined,
+	path: string,
+	repairs: WorkflowOutputRepair[],
+): unknown {
+	if (!isJsonSchemaObject(schema)) return value;
+	if (Array.isArray(value)) {
+		const itemSchema = Array.isArray(schema.items) ? undefined : schema.items;
+		if (!isJsonSchemaObject(itemSchema)) return value;
+		let normalized: unknown[] | undefined;
+		for (const [index, item] of value.entries()) {
+			let repaired = item;
+			if (typeof item === "string" && schemaHasType(itemSchema, "object")) {
+				const textKey = objectRowTextKey(itemSchema);
+				if (textKey !== undefined && item.trim().length > 0) {
+					repaired = { [textKey]: item.trim() };
+					repairs.push({
+						code: "control_object_row_from_string",
+						section: SECTION_CONTROL,
+						path: `${path}[${index}]`,
+						message: `wrapped bare string row into { ${JSON.stringify(textKey)}: ... }`,
+					});
+				}
+			} else {
+				repaired = normalizeBareStringObjectRows(
+					item,
+					itemSchema,
+					`${path}[${index}]`,
+					repairs,
+				);
+			}
+			if (repaired !== item) {
+				if (normalized === undefined) normalized = [...value];
+				normalized[index] = repaired;
+			}
+		}
+		return normalized ?? value;
+	}
+	if (isPlainRecord(value) && schemaHasType(schema, "object")) {
+		const properties = schema.properties ?? {};
+		let normalized: Record<string, unknown> | undefined;
+		for (const [key, child] of Object.entries(properties)) {
+			if (!(key in value)) continue;
+			const repaired = normalizeBareStringObjectRows(
+				value[key],
+				child,
+				`${path}.${key}`,
+				repairs,
+			);
+			if (repaired !== value[key]) {
+				if (normalized === undefined) normalized = { ...value };
+				normalized[key] = repaired;
+			}
+		}
+		return normalized ?? value;
+	}
+	return value;
+}
+
+function objectRowTextKey(itemSchema: JsonSchemaObject): string | undefined {
+	const properties = itemSchema.properties ?? {};
+	const required = Array.isArray(itemSchema.required)
+		? itemSchema.required
+		: [];
+	const stringProps = Object.entries(properties)
+		.filter(
+			([, child]) => isJsonSchemaObject(child) && isStringJsonSchema(child),
+		)
+		.map(([key]) => key);
+	if (required.length === 1) {
+		const key = required[0];
+		return typeof key === "string" && stringProps.includes(key)
+			? key
+			: undefined;
+	}
+	if (required.length > 1) return undefined;
+	for (const preferred of OBJECT_ROW_TEXT_KEY_PREFERENCE) {
+		if (Object.keys(properties).length === 0) return "note";
+		if (stringProps.includes(preferred)) return preferred;
+	}
+	if (Object.keys(properties).length === 0) return "note";
+	return stringProps[0];
 }
 
 // Schema-driven repair for enum near-misses: a string value that fails an enum

@@ -34053,3 +34053,118 @@ test("workflow output repair leaves ambiguous or distant enum values failing clo
 		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
+
+test("workflow output repair wraps bare string object rows only when valid by construction", async () => {
+	const cwd = makeProject();
+	try {
+		const taskDir = join(cwd, ".pi", "workflows", "workflow_rows", "tasks", "task-1");
+		const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+		const impactSchema = JSON.parse(
+			readFileSync(
+				join(repoRoot, "workflows", "impact-review", "schemas", "api-contract-impact-control.schema.json"),
+				"utf8",
+			),
+		);
+		const written = await writeWorkflowTaskArtifactBundle({
+			taskDir,
+			rawOutput: [
+				"<control>",
+				JSON.stringify({
+					schema: "impact-api-contract-v1",
+					digest: "bare string rows from the measured impact-review class",
+					status: "low",
+					impacts: [
+						"Breaking change risk in workflow_artifact read paths",
+						{ area: "cli", detail: "flag rename", severity: "low" },
+					],
+					assumptions: ["No consumers rely on the removed enum value"],
+				}),
+				"</control>",
+				"<analysis>",
+				"Impact rows emitted as strings should be wrapped, matching a020359's leads salvage.",
+				"</analysis>",
+				"<refs>[]</refs>",
+			].join("\n"),
+			taskId: "task-1",
+			stageId: "api-contract-impact",
+			status: "completed",
+			exitCode: 0,
+			controlJsonSchema: impactSchema,
+		});
+		assert.equal(written.valid, true, JSON.stringify(written.parsed?.issues ?? []));
+		const result = JSON.parse(readFileSync(join(taskDir, "result.json"), "utf8"));
+		const rowRepairs = result.outputValidation.repairs.filter(
+			(repair) => repair.code === "control_object_row_from_string",
+		);
+		assert.equal(rowRepairs.length, 2, JSON.stringify(result.outputValidation.repairs));
+		assert.ok(rowRepairs.some((r) => r.path === "$.impacts[0]"));
+		assert.ok(rowRepairs.some((r) => r.path === "$.assumptions[0]"));
+		const control = JSON.parse(readFileSync(join(taskDir, "control.json"), "utf8"));
+		assert.deepEqual(control.impacts[0], {
+			note: "Breaking change risk in workflow_artifact read paths",
+		});
+		assert.deepEqual(control.impacts[1], { area: "cli", detail: "flag rename", severity: "low" });
+		assert.deepEqual(control.assumptions[0], {
+			note: "No consumers rely on the removed enum value",
+		});
+	} finally {
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
+	}
+});
+
+test("workflow output repair leaves string rows untouched when items require multiple properties", async () => {
+	const cwd = makeProject();
+	try {
+		const taskDir = join(cwd, ".pi", "workflows", "workflow_rows2", "tasks", "task-1");
+		const schema = {
+			type: "object",
+			required: ["schema", "findings"],
+			properties: {
+				schema: { type: "string" },
+				digest: { type: "string" },
+				findings: {
+					type: "array",
+					items: {
+						type: "object",
+						required: ["title", "severity"],
+						properties: {
+							title: { type: "string" },
+							severity: { type: "string" },
+						},
+					},
+				},
+			},
+		};
+		const written = await writeWorkflowTaskArtifactBundle({
+			taskDir,
+			rawOutput: [
+				"<control>",
+				JSON.stringify({
+					schema: "multi-required-v1",
+					digest: "wrapping cannot satisfy multi-required rows",
+					findings: ["just a string"],
+				}),
+				"</control>",
+				"<analysis>",
+				"Multi-required rows must fail closed rather than be half-wrapped.",
+				"</analysis>",
+				"<refs>[]</refs>",
+			].join("\n"),
+			taskId: "task-1",
+			stageId: "verify",
+			status: "completed",
+			exitCode: 0,
+			controlJsonSchema: schema,
+		});
+		assert.equal(written.valid, false);
+		const invalid = JSON.parse(
+			readFileSync(join(taskDir, "result.invalid-attempt-1.json"), "utf8"),
+		);
+		const rowRepairs = (invalid.outputValidation.repairs ?? []).filter(
+			(repair) => repair.code === "control_object_row_from_string",
+		);
+		assert.equal(rowRepairs.length, 0);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
+	}
+});
