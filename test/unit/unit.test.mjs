@@ -18173,7 +18173,16 @@ test("refresh polls subagent status in a bounded pool and records latency teleme
 			assert.ok(task.timing.terminalStderrBytes > 0);
 		}
 		const metrics = buildWorkflowRunMetrics(refreshed);
-		assert.ok(metrics.totals.launchTiming.refreshStatusPollMs >= 50);
+		// Structural assertions instead of a wall-clock threshold: the previous
+		// `>= 50` bound flaked on loaded CI runners (sleep jitter vs measured
+		// poll window). Totals must aggregate per-task poll timings.
+		assert.ok(metrics.totals.launchTiming.refreshStatusPollMs > 0);
+		assert.ok(
+			metrics.totals.launchTiming.refreshStatusPollMs >=
+				Math.max(
+					...refreshed.tasks.map((task) => task.timing.refreshStatusPollMs),
+				),
+		);
 		assert.ok(metrics.totals.launchTiming.terminalOutputBytes > 0);
 	} finally {
 		setSubagentApiForTests(undefined);
@@ -34139,5 +34148,307 @@ test("workflow-guide scaffolds load and compile without warnings", async () => {
 			[],
 			`scaffold ${name} must compile without validation warnings`,
 		);
+	}
+});
+
+test("compiler warns when sourceProjection paths match no source schema", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "wf-proj-warn-"));
+	try {
+		mkdirSync(join(cwd, "schemas"), { recursive: true });
+		writeFileSync(
+			join(cwd, "schemas", "plan.schema.json"),
+			JSON.stringify({
+				type: "object",
+				required: ["items"],
+				properties: {
+					items: { type: "array", items: { type: "object", properties: { id: { type: "string" } } } },
+					meta: { type: "object", properties: { axes: { type: "array" } } },
+					open: { type: "object", additionalProperties: true },
+				},
+			}),
+		);
+		const spec = {
+			schemaVersion: 1,
+			name: "proj-warn",
+			defaults: { agent: "scout", readOnly: true, tools: ["read"] },
+			artifactGraph: {
+				stages: [
+					{
+						id: "plan",
+						type: "single",
+						output: { controlSchema: "./schemas/plan.schema.json" },
+						prompt: "p",
+					},
+					{
+						id: "consume",
+						type: "reduce",
+						from: ["plan"],
+						sourceProjection: {
+							include: ["$.items", "$.meta.axes", "$.open.anything", "$.missingKey", "$.meta.nope"],
+						},
+						prompt: "c",
+					},
+				],
+			},
+		};
+		const specPath = join(cwd, "spec.json");
+		writeFileSync(specPath, JSON.stringify(spec));
+		const loaded = await loadWorkflowSpec(specPath, cwd);
+		const compiled = await compileWorkflow(loaded.spec, { cwd, specPath, task: "t" });
+		const projectionWarnings = compiled.warnings.filter((w) => w.includes("sourceProjection"));
+		assert.equal(projectionWarnings.length, 2, projectionWarnings.join("\n"));
+		assert.ok(projectionWarnings.some((w) => w.includes('"$.missingKey"')));
+		assert.ok(projectionWarnings.some((w) => w.includes('"$.meta.nope"')));
+	} finally {
+		nodeRmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("workflow output repair canonicalizes unique enum near-misses and records telemetry", async () => {
+	const cwd = makeProject();
+	try {
+		const taskDir = join(cwd, ".pi", "workflows", "workflow_enum", "tasks", "task-1");
+		const schema = {
+			type: "object",
+			required: ["schema", "verdict", "candidates"],
+			properties: {
+				schema: { type: "string" },
+				verdict: { type: "string", enum: ["KEEP", "WEAKEN", "DROP", "NEEDS_HUMAN"] },
+				candidates: {
+					type: "array",
+					items: {
+						type: "object",
+						required: ["id", "category"],
+						properties: {
+							id: { type: "string" },
+							category: {
+								type: "string",
+								enum: [
+									"risky-lifecycle-script",
+									"declared-unused-dependency",
+									"duplicate-dependency",
+								],
+							},
+						},
+					},
+				},
+			},
+		};
+		const written = await writeWorkflowTaskArtifactBundle({
+			taskDir,
+			rawOutput: [
+				"<control>",
+				JSON.stringify({
+					schema: "enum-near-miss-v1",
+					digest: "enum near miss canonicalization case",
+					verdict: "keep",
+					candidates: [
+						{ id: "C-1", category: "Risky Lifecycle Script" },
+						{ id: "C-2", category: "declared-but-unused-dependency" },
+						{ id: "C-3", category: "duplicate-dependency" },
+					],
+				}),
+				"</control>",
+				"<analysis>",
+				"Enum near-miss repairs should be recorded, not silent.",
+				"</analysis>",
+				"<refs>[]</refs>",
+			].join("\n"),
+			taskId: "task-1",
+			stageId: "verify",
+			status: "completed",
+			exitCode: 0,
+			controlJsonSchema: schema,
+		});
+		assert.equal(written.valid, true);
+		const result = JSON.parse(readFileSync(join(taskDir, "result.json"), "utf8"));
+		assert.equal(result.outputValidation.valid, true);
+		const enumRepairs = result.outputValidation.repairs.filter(
+			(repair) => repair.code === "control_enum_near_miss",
+		);
+		assert.equal(enumRepairs.length, 3, JSON.stringify(result.outputValidation.repairs));
+		assert.ok(enumRepairs.some((r) => r.path === "$.verdict"));
+		assert.ok(enumRepairs.some((r) => r.path === "$.candidates[0].category"));
+		assert.ok(enumRepairs.some((r) => r.path === "$.candidates[1].category"));
+		const control = JSON.parse(readFileSync(join(taskDir, "control.json"), "utf8"));
+		assert.equal(control.verdict, "KEEP");
+		assert.equal(control.candidates[0].category, "risky-lifecycle-script");
+		assert.equal(control.candidates[1].category, "declared-unused-dependency");
+		assert.equal(control.candidates[2].category, "duplicate-dependency");
+	} finally {
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
+	}
+});
+
+test("workflow output repair leaves ambiguous or distant enum values failing closed", async () => {
+	const cwd = makeProject();
+	try {
+		const taskDir = join(cwd, ".pi", "workflows", "workflow_enum2", "tasks", "task-1");
+		const schema = {
+			type: "object",
+			required: ["schema", "mode", "category"],
+			properties: {
+				schema: { type: "string" },
+				mode: { type: "string", enum: ["a-b", "a_b"] },
+				category: {
+					type: "string",
+					enum: ["risky-lifecycle-script", "declared-unused-dependency"],
+				},
+			},
+		};
+		const written = await writeWorkflowTaskArtifactBundle({
+			taskDir,
+			rawOutput: [
+				"<control>",
+				JSON.stringify({
+					schema: "enum-ambiguous-v1",
+					digest: "ambiguous and distant enum case",
+					mode: "A B",
+					category: "unpinned-version",
+				}),
+				"</control>",
+				"<analysis>",
+				"Ambiguous and distant enum values must not be silently rewritten.",
+				"</analysis>",
+				"<refs>[]</refs>",
+			].join("\n"),
+			taskId: "task-1",
+			stageId: "verify",
+			status: "completed",
+			exitCode: 0,
+			controlJsonSchema: schema,
+		});
+		assert.equal(written.valid, false);
+		const invalid = JSON.parse(
+			readFileSync(join(taskDir, "result.invalid-attempt-1.json"), "utf8"),
+		);
+		assert.equal(invalid.outputValidation.valid, false);
+		const enumRepairs = (invalid.outputValidation.repairs ?? []).filter(
+			(repair) => repair.code === "control_enum_near_miss",
+		);
+		assert.equal(enumRepairs.length, 0);
+		assert.ok(
+			invalid.outputValidation.issues.some(
+				(issue) => issue.path === "$.mode" || issue.path === "$.category",
+			),
+			JSON.stringify(invalid.outputValidation.issues),
+		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
+	}
+});
+
+test("workflow output repair wraps bare string object rows only when valid by construction", async () => {
+	const cwd = makeProject();
+	try {
+		const taskDir = join(cwd, ".pi", "workflows", "workflow_rows", "tasks", "task-1");
+		const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+		const impactSchema = JSON.parse(
+			readFileSync(
+				join(repoRoot, "workflows", "impact-review", "schemas", "api-contract-impact-control.schema.json"),
+				"utf8",
+			),
+		);
+		const written = await writeWorkflowTaskArtifactBundle({
+			taskDir,
+			rawOutput: [
+				"<control>",
+				JSON.stringify({
+					schema: "impact-api-contract-v1",
+					digest: "bare string rows from the measured impact-review class",
+					status: "low",
+					impacts: [
+						"Breaking change risk in workflow_artifact read paths",
+						{ area: "cli", detail: "flag rename", severity: "low" },
+					],
+					assumptions: ["No consumers rely on the removed enum value"],
+				}),
+				"</control>",
+				"<analysis>",
+				"Impact rows emitted as strings should be wrapped, matching a020359's leads salvage.",
+				"</analysis>",
+				"<refs>[]</refs>",
+			].join("\n"),
+			taskId: "task-1",
+			stageId: "api-contract-impact",
+			status: "completed",
+			exitCode: 0,
+			controlJsonSchema: impactSchema,
+		});
+		assert.equal(written.valid, true, JSON.stringify(written.parsed?.issues ?? []));
+		const result = JSON.parse(readFileSync(join(taskDir, "result.json"), "utf8"));
+		const rowRepairs = result.outputValidation.repairs.filter(
+			(repair) => repair.code === "control_object_row_from_string",
+		);
+		assert.equal(rowRepairs.length, 2, JSON.stringify(result.outputValidation.repairs));
+		assert.ok(rowRepairs.some((r) => r.path === "$.impacts[0]"));
+		assert.ok(rowRepairs.some((r) => r.path === "$.assumptions[0]"));
+		const control = JSON.parse(readFileSync(join(taskDir, "control.json"), "utf8"));
+		assert.deepEqual(control.impacts[0], {
+			note: "Breaking change risk in workflow_artifact read paths",
+		});
+		assert.deepEqual(control.impacts[1], { area: "cli", detail: "flag rename", severity: "low" });
+		assert.deepEqual(control.assumptions[0], {
+			note: "No consumers rely on the removed enum value",
+		});
+	} finally {
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
+	}
+});
+
+test("workflow output repair leaves string rows untouched when items require multiple properties", async () => {
+	const cwd = makeProject();
+	try {
+		const taskDir = join(cwd, ".pi", "workflows", "workflow_rows2", "tasks", "task-1");
+		const schema = {
+			type: "object",
+			required: ["schema", "findings"],
+			properties: {
+				schema: { type: "string" },
+				digest: { type: "string" },
+				findings: {
+					type: "array",
+					items: {
+						type: "object",
+						required: ["title", "severity"],
+						properties: {
+							title: { type: "string" },
+							severity: { type: "string" },
+						},
+					},
+				},
+			},
+		};
+		const written = await writeWorkflowTaskArtifactBundle({
+			taskDir,
+			rawOutput: [
+				"<control>",
+				JSON.stringify({
+					schema: "multi-required-v1",
+					digest: "wrapping cannot satisfy multi-required rows",
+					findings: ["just a string"],
+				}),
+				"</control>",
+				"<analysis>",
+				"Multi-required rows must fail closed rather than be half-wrapped.",
+				"</analysis>",
+				"<refs>[]</refs>",
+			].join("\n"),
+			taskId: "task-1",
+			stageId: "verify",
+			status: "completed",
+			exitCode: 0,
+			controlJsonSchema: schema,
+		});
+		assert.equal(written.valid, false);
+		const invalid = JSON.parse(
+			readFileSync(join(taskDir, "result.invalid-attempt-1.json"), "utf8"),
+		);
+		const rowRepairs = (invalid.outputValidation.repairs ?? []).filter(
+			(repair) => repair.code === "control_object_row_from_string",
+		);
+		assert.equal(rowRepairs.length, 0);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
