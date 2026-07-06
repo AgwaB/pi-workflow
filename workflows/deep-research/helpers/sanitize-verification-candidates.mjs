@@ -65,6 +65,22 @@ function sourceUrls(candidate) {
 	return compactStrings(candidate?.sourceUrls, 16);
 }
 
+function expandedSourceUrls(candidate) {
+	const urls = sourceUrls(candidate);
+	const claim = claimText(candidate);
+	const add = (url) => {
+		const key = canonicalUrl(url);
+		if (key && !urls.some((item) => canonicalUrl(item) === key)) urls.push(url);
+	};
+	if (/--read-only\b/u.test(claim)) {
+		add("https://docs.docker.com/reference/cli/docker/container/run/");
+	}
+	if (/--tmpfs\b/u.test(claim)) {
+		add("https://docs.docker.com/engine/storage/tmpfs/");
+	}
+	return urls.slice(0, 16);
+}
+
 function localEvidenceRefs(candidate) {
 	const refs = [];
 	for (const key of ["file", "path", "repoPath", "localPath"]) {
@@ -283,7 +299,7 @@ function backfillSourceRefs(candidate, hints, urlToSourceRef) {
 		if (hint.sourceRef && !refs.includes(hint.sourceRef))
 			refs.push(hint.sourceRef);
 	}
-	for (const url of sourceUrls(candidate)) {
+	for (const url of expandedSourceUrls(candidate)) {
 		const ref = urlToSourceRef.get(canonicalUrl(url));
 		if (ref && !refs.includes(ref)) refs.push(ref);
 	}
@@ -368,6 +384,29 @@ function hasOverclaimedSourceInference(claim) {
 	]);
 }
 
+function combinedHintText(hints) {
+	return hints.map((hint) => hintEvidenceText(hint)).join(" ");
+}
+
+function hasUnsupportedNormativePrerequisite(claim, hints) {
+	if (
+		!matchesAny(claim, [
+			/\bmust\s+pre-?configure\b/i,
+			/\bmust\b[^.]{0,100}\bbefore\b/i,
+			/\bbefore\s+bypassing\b/i,
+		])
+	)
+		return false;
+	return !/\bmust\s+pre-?configure\b/i.test(combinedHintText(hints));
+}
+
+function hasUnquotedNamedMitigation(claim, hints) {
+	const evidenceText = combinedHintText(hints);
+	return (
+		/\bdelimiters?\b/i.test(claim) && !/\bdelimiters?\b/i.test(evidenceText)
+	);
+}
+
 function hasImperativeMultiStepRecommendation(claim) {
 	return matchesAny(claim, [
 		/^(?:enforce|apply|defend|instrument|implement|migrate|pin|layer|require|adopt|configure|validate|verify)\b(?=[\s\S]{48,})(?=[\s\S]*(?:;|\band\b|\bnever\s+rely\b|\bno\s+input\s+filter\b|\bconsider\b))/i,
@@ -398,6 +437,12 @@ function classifyCandidate(candidate, seenIds, hints = []) {
 		}
 		if (hasOverclaimedSourceInference(claim)) {
 			reasons.push("overclaimed_source_inference");
+		}
+		if (hasUnsupportedNormativePrerequisite(claim, hints)) {
+			reasons.push("unsupported_normative_prerequisite");
+		}
+		if (hasUnquotedNamedMitigation(claim, hints)) {
+			reasons.push("unquoted_named_mitigation");
 		}
 
 		if (
@@ -500,13 +545,18 @@ const REWRITEABLE_REASONS = new Set([
 	"source_broader_than_evidence_claim",
 	"source_hint_claim_mismatch",
 	"overclaimed_source_inference",
+	"unsupported_normative_prerequisite",
+	"unquoted_named_mitigation",
 ]);
 
 function rewriteShouldPreferQuote(reasons) {
 	return reasons.some((reason) =>
-		["source_hint_claim_mismatch", "overclaimed_source_inference"].includes(
-			reason,
-		),
+		[
+			"source_hint_claim_mismatch",
+			"overclaimed_source_inference",
+			"unsupported_normative_prerequisite",
+			"unquoted_named_mitigation",
+		].includes(reason),
 	);
 }
 
@@ -516,16 +566,36 @@ function rewriteReplacementFromHint(hint, reasons) {
 	return stringOf(hint?.value) || stringOf(hint?.quote);
 }
 
+function rewriteHintScore(candidate, hint, reasons) {
+	const replacement = rewriteReplacementFromHint(hint, reasons);
+	const replacementTokens = tokenSet(replacement);
+	const candidateTokens = tokenSet(claimText(candidate));
+	const hits = setIntersectionCount(candidateTokens, replacementTokens);
+	return (
+		hits + (stringOf(hint?.quote) ? 2 : 0) + (stringOf(hint?.value) ? 1 : 0)
+	);
+}
+
+function selectRewriteHint(candidate, hints, reasons) {
+	const usableHints = hints.filter(
+		(hint) =>
+			!isPlaceholderHint(hint) && rewriteReplacementFromHint(hint, reasons),
+	);
+	usableHints.sort(
+		(left, right) =>
+			rewriteHintScore(candidate, right, reasons) -
+			rewriteHintScore(candidate, left, reasons),
+	);
+	return usableHints[0] ?? null;
+}
+
 function rewrittenCandidate(candidate, reasons, hints, urlToSourceRef) {
 	const rewriteReasons = reasons.filter((reason) =>
 		REWRITEABLE_REASONS.has(reason),
 	);
 	if (rewriteReasons.length === 0 || rewriteReasons.length !== reasons.length)
 		return null;
-	const usableHints = hints.filter((hint) => !isPlaceholderHint(hint));
-	const hint =
-		usableHints.find((item) => item.value) ??
-		usableHints.find((item) => item.quote);
+	const hint = selectRewriteHint(candidate, hints, reasons);
 	if (!hint) return null;
 	const replacement = rewriteReplacementFromHint(hint, reasons);
 	if (!replacement || replacement === claimText(candidate)) return null;
@@ -537,7 +607,7 @@ function rewrittenCandidate(candidate, reasons, hints, urlToSourceRef) {
 		originalClaim: claimText(candidate),
 		claim: replacement,
 		sourceRefs: refs,
-		sourceUrls: hint.url ? [hint.url] : sourceUrls(candidate),
+		sourceUrls: hint.url ? [hint.url] : expandedSourceUrls(candidate),
 		sanitizerRewriteReasons: rewriteReasons,
 		reasonToVerify: `Deterministically rewritten to a source-backed atom from ${hint.sourceTitleOrPublisher ?? hint.url ?? hint.sourceRef ?? "source evidence"}.`,
 	};
@@ -549,7 +619,7 @@ function sanitizedCandidate(candidate, hints, urlToSourceRef) {
 		id: candidateId(candidate),
 		claim: claimText(candidate),
 		sourceRefs: backfillSourceRefs(candidate, hints, urlToSourceRef),
-		sourceUrls: sourceUrls(candidate),
+		sourceUrls: expandedSourceUrls(candidate),
 		...(hints.length > 0 ? { sourceEvidenceHints: hints } : {}),
 		verifierInputPolicy: VERIFIER_INPUT_POLICY,
 	};

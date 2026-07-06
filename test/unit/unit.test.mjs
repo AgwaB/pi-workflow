@@ -26291,6 +26291,99 @@ test("deep-research claim-evidence-gate routes extra corroborating sources to re
 	);
 });
 
+test("deep-research claim-evidence-gate allows same-host evidence only with explicit overlap", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"claim-evidence-gate.mjs",
+	);
+	const helper = (
+		await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)
+	).default;
+	const sources = {
+		"normalize-claims.main": {
+			claimInventory: {
+				verificationCandidates: [
+					{
+						id: "claim-same-host",
+						claim:
+							"Docker read-only containers keep the root filesystem immutable.",
+						sourceUrls: ["https://docs.example.test/engine/containers/run"],
+					},
+					{
+						id: "claim-same-host-no-overlap",
+						claim: "Token buckets rate limit API traffic.",
+						sourceUrls: ["https://docs.example.test/rate-limits"],
+					},
+				],
+			},
+			factSlotCoverage: [],
+		},
+		"verify-claims.same-host": {
+			id: "claim-same-host",
+			status: "verified",
+			evidence: [
+				{
+					url: "https://docs.example.test/reference/cli/docker/container/run",
+					quote:
+						"The docker run --read-only option mounts the container root filesystem as read only.",
+				},
+			],
+		},
+		"verify-claims.same-host-no-overlap": {
+			id: "claim-same-host-no-overlap",
+			status: "verified",
+			evidence: [
+				{
+					url: "https://docs.example.test/unrelated",
+					quote: "An unrelated page describes release channels.",
+				},
+			],
+		},
+	};
+
+	const explicitlyAllowed = await helper({
+		sources,
+		options: {
+			requireFetchedEvidenceForVerified: true,
+			allowAdditionalCorroboratingSourcesForVerified: true,
+		},
+	});
+
+	assert.deepEqual(explicitlyAllowed.statusPartitions.verified, [
+		"claim-same-host",
+	]);
+	assert.deepEqual(explicitlyAllowed.statusPartitions.partiallySupported, [
+		"claim-same-host-no-overlap",
+	]);
+	assert.equal(
+		explicitlyAllowed.auditedClaims.find(
+			(claim) => claim.id === "claim-same-host",
+		).verdictDigest.sourceCompatibility.exception,
+		"same_host_evidence_sources_explicitly_allowed",
+	);
+	assert.equal(
+		explicitlyAllowed.auditedClaims.find(
+			(claim) => claim.id === "claim-same-host-no-overlap",
+		).evidenceGate.reasonCode,
+		"evidence_source_mismatch",
+	);
+
+	const needsReview = await helper({
+		sources,
+		options: { requireFetchedEvidenceForVerified: true },
+	});
+	assert.deepEqual(needsReview.statusPartitions.verified, []);
+	assert.deepEqual(needsReview.statusPartitions.partiallySupported, [
+		"claim-same-host",
+		"claim-same-host-no-overlap",
+	]);
+});
+
 test("deep-research claim-evidence-gate downgrades refs:none multi-claim batch rows", async () => {
 	const helperPath = join(
 		dirname(fileURLToPath(import.meta.url)),

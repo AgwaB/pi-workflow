@@ -379,6 +379,83 @@ function hasIdentityIntersection(left, right) {
 	return Object.values(matched).some((values) => values.length > 0);
 }
 
+function sourceIdentityHosts(identities) {
+	const hosts = new Set();
+	for (const key of identities.urlKeys) {
+		try {
+			const url = new URL(key);
+			if (url.hostname) hosts.add(url.hostname.toLowerCase());
+		} catch {
+			// Ignore malformed keys; exact URL matching already handled them.
+		}
+	}
+	return hosts;
+}
+
+function hasHostIntersection(left, right) {
+	const leftHosts = sourceIdentityHosts(left);
+	if (leftHosts.size === 0) return false;
+	for (const host of sourceIdentityHosts(right)) {
+		if (leftHosts.has(host)) return true;
+	}
+	return false;
+}
+
+const SOURCE_COMPATIBILITY_STOPWORDS = new Set([
+	"about",
+	"after",
+	"also",
+	"and",
+	"are",
+	"but",
+	"can",
+	"for",
+	"from",
+	"has",
+	"into",
+	"its",
+	"not",
+	"only",
+	"should",
+	"that",
+	"the",
+	"their",
+	"then",
+	"this",
+	"with",
+	"without",
+]);
+
+function sourceCompatibilityTokens(value) {
+	const tokens = String(value ?? "")
+		.toLowerCase()
+		.match(/[a-z0-9][a-z0-9-]{2,}/gu);
+	return new Set(
+		(tokens ?? []).filter(
+			(token) => !SOURCE_COMPATIBILITY_STOPWORDS.has(token),
+		),
+	);
+}
+
+function evidenceRowText(row) {
+	return [row?.quote, row?.excerpt, row?.title, row?.url, row?.source]
+		.filter((value) => typeof value === "string" && value.trim())
+		.join("\n");
+}
+
+function hasClaimEvidenceTokenOverlap(claim, candidate, row) {
+	const claimTokens = sourceCompatibilityTokens(
+		[candidate?.claim, claim?.claim].filter(Boolean).join("\n"),
+	);
+	const evidenceTokens = sourceCompatibilityTokens(evidenceRowText(row));
+	let overlap = 0;
+	for (const token of claimTokens) {
+		if (evidenceTokens.has(token)) overlap += 1;
+		if (overlap >= 3) return true;
+	}
+	return false;
+}
+
 function summarizeSourceIdentities(identities) {
 	return {
 		workflowRefs: [...identities.workflowRefs].sort(),
@@ -415,6 +492,7 @@ function evaluateSourceCompatibility({
 	}
 	const compatibleRows = [];
 	const unmatchedRows = [];
+	const sameHostRows = [];
 	for (const [index, row] of strongRows.entries()) {
 		const rowIdentities = evidenceRowSourceIdentities(row, urlToSourceRef);
 		const rowSummary = summarizeSourceIdentities(rowIdentities);
@@ -422,9 +500,27 @@ function evaluateSourceCompatibility({
 			compatibleRows.push({ index, sources: rowSummary });
 		} else {
 			unmatchedRows.push({ index, sources: rowSummary });
+			if (hasHostIntersection(rowIdentities, candidateIdentities)) {
+				sameHostRows.push({ index, sources: rowSummary, row });
+			}
 		}
 	}
 	if (compatibleRows.length === 0) {
+		if (
+			allowAdditionalEvidenceSources &&
+			unmatchedRows.length > 0 &&
+			sameHostRows.length === unmatchedRows.length &&
+			sameHostRows.some(({ row }) =>
+				hasClaimEvidenceTokenOverlap(claim, candidate, row),
+			)
+		) {
+			return {
+				decision: "allow",
+				exception: "same_host_evidence_sources_explicitly_allowed",
+				candidateSources: summarizeSourceIdentities(candidateIdentities),
+				unmatchedEvidenceSources: unmatchedRows,
+			};
+		}
 		return {
 			decision: "downgrade",
 			reasonCode: "evidence_source_mismatch",
