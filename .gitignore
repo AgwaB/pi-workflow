@@ -21,10 +21,13 @@ AGENTS.md
 .harness-project/
 cache/
 skill-test-runs/
-internal/
+
+# Local-only internal analysis/eval/research docs.
+# Never commit this tree; keep future LLM navigation links in ignored AGENTS.md.
+/internal/
 
 # Recovery/salvage artifacts and local archives
 .recovery/
 .harness-archive/
 *.tar.gz
-.worktrees
+.worktrees/
