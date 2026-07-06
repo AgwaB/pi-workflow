@@ -105,6 +105,21 @@ export interface RefsUrlValidationOptions {
 	maxUrls?: number;
 }
 
+export interface WorkflowTaskFailedToolCallSummary {
+	toolCallId?: string;
+	toolName?: string;
+	category?: string;
+	status?: string;
+	startedAt?: string;
+	completedAt?: string | null;
+	durationMs?: number | null;
+	isError?: boolean;
+	argsSummary?: unknown;
+	resultSummary?: unknown;
+	failedArgs?: unknown;
+	failedResult?: unknown;
+}
+
 export interface WorkflowTaskArtifactBundleOptions
 	extends ParseWorkflowOutputOptions {
 	taskDir: string;
@@ -121,6 +136,10 @@ export interface WorkflowTaskArtifactBundleOptions
 	subagentWarning?: string;
 	subagentStatus?: string;
 	subagentFailureKind?: string | null;
+	subagentToolCallsPath?: string;
+	subagentToolCallsSummaryPath?: string;
+	subagentToolCallsArtifactCwd?: string;
+	subagentFailedToolCalls?: WorkflowTaskFailedToolCallSummary[];
 }
 
 export interface WorkflowTaskResultEnvelope {
@@ -142,6 +161,10 @@ export interface WorkflowTaskResultEnvelope {
 	subagentWarning?: string;
 	subagentStatus?: string;
 	subagentFailureKind?: string | null;
+	subagentToolCallsPath?: string;
+	subagentToolCallsSummaryPath?: string;
+	subagentToolCallsArtifactCwd?: string;
+	subagentFailedToolCalls?: WorkflowTaskFailedToolCallSummary[];
 }
 
 type ValidParsedWorkflowOutput = ParsedWorkflowOutput & {
@@ -707,14 +730,17 @@ function normalizeKnownWorkflowControlSchema(
 		}
 	}
 	if (isDeepResearchFinalSynthesisSchema(schema)) {
-		const repairedSynthesis = normalizeFinalSynthesisArrayCaps(control.synthesis);
-		if (repairedSynthesis !== control.synthesis) {
-			normalized = { ...normalized, synthesis: repairedSynthesis };
+		const repairedSynthesis = normalizeFinalSynthesisArrayCaps(
+			control.synthesis,
+			schema,
+		);
+		if (repairedSynthesis.value !== control.synthesis) {
+			normalized = { ...normalized, synthesis: repairedSynthesis.value };
 			repairs.push({
 				code: "control_final_synthesis_array_caps",
 				section: SECTION_CONTROL,
 				path: "$.synthesis",
-				message: "clamped final synthesis arrays to schema caps",
+				message: finalSynthesisCapRepairMessage(repairedSynthesis.dropped),
 			});
 		}
 	}
@@ -952,56 +978,153 @@ function isDeepResearchFinalSynthesisSchema(schema: JsonSchemaObject): boolean {
 	);
 }
 
-function normalizeFinalSynthesisArrayCaps(synthesis: unknown): unknown {
-	if (!isPlainRecord(synthesis)) return synthesis;
-	let normalized = synthesis;
-	const cappedKeyFindingIds = cappedArray(synthesis.keyFindingIds, 12);
-	if (cappedKeyFindingIds !== synthesis.keyFindingIds) {
-		normalized = { ...normalized, keyFindingIds: cappedKeyFindingIds };
-	}
-	for (const key of ["notableUnsupportedClaimIds", "contestedClaimIds"]) {
-		const capped = cappedArray(synthesis[key], 12);
-		if (capped !== synthesis[key]) {
+type FinalSynthesisRepair = {
+	value: unknown;
+	dropped: Record<string, number>;
+};
+
+type FinalSynthesisRowCaps = {
+	maxRows: number | undefined;
+	arrayFields: Record<string, number>;
+};
+
+type FinalSynthesisCaps = {
+	arrays: Record<string, number>;
+	rows: Record<string, FinalSynthesisRowCaps>;
+};
+
+function normalizeFinalSynthesisArrayCaps(
+	synthesis: unknown,
+	schema: JsonSchemaObject,
+): FinalSynthesisRepair {
+	if (!isPlainRecord(synthesis)) return { value: synthesis, dropped: {} };
+	const caps = finalSynthesisCapsFromSchema(schema);
+	let normalized: Record<string, unknown> = synthesis;
+	const dropped: Record<string, number> = {};
+	for (const [key, maxItems] of Object.entries(caps.arrays)) {
+		const capped = cappedArray(synthesis[key], maxItems);
+		if (capped.value !== synthesis[key]) {
 			if (normalized === synthesis) normalized = { ...normalized };
-			normalized[key] = capped;
+			normalized[key] = capped.value;
+			dropped[key] = (dropped[key] ?? 0) + capped.dropped;
 		}
 	}
-	for (const key of ["recommendations", "actionPlan", "parentDecisionNotes"]) {
-		const cappedRows = normalizeFinalSynthesisRows(synthesis[key], 12, [
-			"supportingClaimIds",
-		]);
+	for (const [key, rowCaps] of Object.entries(caps.rows)) {
+		const cappedRows = normalizeFinalSynthesisRows(
+			synthesis[key],
+			key,
+			rowCaps,
+			dropped,
+		);
 		if (cappedRows !== synthesis[key]) {
 			if (normalized === synthesis) normalized = { ...normalized };
 			normalized[key] = cappedRows;
 		}
 	}
-	const cappedCaveats = normalizeFinalSynthesisRows(synthesis.caveatNotes, 16, [
-		"relatedClaimIds",
-		"gapIds",
-	]);
-	if (cappedCaveats !== synthesis.caveatNotes) {
-		if (normalized === synthesis) normalized = { ...normalized };
-		normalized.caveatNotes = cappedCaveats;
+	return { value: normalized, dropped };
+}
+
+function finalSynthesisCapsFromSchema(schema: JsonSchemaObject): FinalSynthesisCaps {
+	const synthesisSchema = schema.properties?.synthesis;
+	const properties = isJsonSchemaObject(synthesisSchema)
+		? (synthesisSchema.properties ?? {})
+		: {};
+	return {
+		arrays: compactNumberRecord({
+			keyFindingIds: arrayMaxItems(properties.keyFindingIds),
+			notableUnsupportedClaimIds: arrayMaxItems(
+				properties.notableUnsupportedClaimIds,
+			),
+			contestedClaimIds: arrayMaxItems(properties.contestedClaimIds),
+		}),
+		rows: compactRowCaps({
+			recommendations: rowCaps(properties.recommendations, [
+				"supportingClaimIds",
+			]),
+			actionPlan: rowCaps(properties.actionPlan, ["supportingClaimIds"]),
+			parentDecisionNotes: rowCaps(properties.parentDecisionNotes, [
+				"supportingClaimIds",
+			]),
+			caveatNotes: rowCaps(properties.caveatNotes, [
+				"relatedClaimIds",
+				"gapIds",
+			]),
+		}),
+	};
+}
+
+function rowCaps(
+	schema: JsonSchema | undefined,
+	arrayFields: string[],
+): FinalSynthesisRowCaps | undefined {
+	if (!isJsonSchemaObject(schema)) return undefined;
+	const itemSchema = !Array.isArray(schema.items) ? schema.items : undefined;
+	const itemProperties = isJsonSchemaObject(itemSchema)
+		? (itemSchema.properties ?? {})
+		: {};
+	const fields: Record<string, number> = {};
+	for (const field of arrayFields) {
+		const maxItems = arrayMaxItems(itemProperties[field]);
+		if (maxItems !== undefined) fields[field] = maxItems;
 	}
-	return normalized;
+	const maxRows = arrayMaxItems(schema);
+	if (maxRows === undefined && Object.keys(fields).length === 0) return undefined;
+	return { maxRows, arrayFields: fields };
+}
+
+function compactNumberRecord(
+	values: Record<string, number | undefined>,
+): Record<string, number> {
+	const compacted: Record<string, number> = {};
+	for (const [key, value] of Object.entries(values)) {
+		if (value !== undefined) compacted[key] = value;
+	}
+	return compacted;
+}
+
+function compactRowCaps(
+	values: Record<string, FinalSynthesisRowCaps | undefined>,
+): Record<string, FinalSynthesisRowCaps> {
+	const compacted: Record<string, FinalSynthesisRowCaps> = {};
+	for (const [key, value] of Object.entries(values)) {
+		if (value !== undefined) compacted[key] = value;
+	}
+	return compacted;
+}
+
+function arrayMaxItems(schema: JsonSchema | undefined): number | undefined {
+	if (!isJsonSchemaObject(schema) || typeof schema.maxItems !== "number")
+		return undefined;
+	return Number.isFinite(schema.maxItems) && schema.maxItems >= 0
+		? Math.floor(schema.maxItems)
+		: undefined;
 }
 
 function normalizeFinalSynthesisRows(
 	value: unknown,
-	maxRows: number,
-	arrayFields: string[],
+	key: string,
+	caps: FinalSynthesisRowCaps,
+	dropped: Record<string, number>,
 ): unknown {
 	if (!Array.isArray(value)) return value;
 	let normalized: unknown[] | undefined;
-	const cappedRows = value.length > maxRows ? value.slice(0, maxRows) : value;
+	const cappedRows =
+		caps.maxRows !== undefined && value.length > caps.maxRows
+			? value.slice(0, caps.maxRows)
+			: value;
+	if (cappedRows !== value && caps.maxRows !== undefined) {
+		dropped[key] = (dropped[key] ?? 0) + value.length - caps.maxRows;
+	}
 	for (const [index, row] of cappedRows.entries()) {
 		if (!isPlainRecord(row)) continue;
 		let repaired = row;
-		for (const field of arrayFields) {
-			const capped = cappedArray(row[field], 8);
-			if (capped === row[field]) continue;
+		for (const [field, maxItems] of Object.entries(caps.arrayFields)) {
+			const capped = cappedArray(row[field], maxItems);
+			if (capped.value === row[field]) continue;
 			if (repaired === row) repaired = { ...row };
-			repaired[field] = capped;
+			repaired[field] = capped.value;
+			const dropKey = `${key}.${field}`;
+			dropped[dropKey] = (dropped[dropKey] ?? 0) + capped.dropped;
 		}
 		if (repaired !== row) {
 			if (normalized === undefined) normalized = [...cappedRows];
@@ -1012,9 +1135,24 @@ function normalizeFinalSynthesisRows(
 	return cappedRows === value ? value : cappedRows;
 }
 
-function cappedArray(value: unknown, maxItems: number): unknown {
-	if (!Array.isArray(value) || value.length <= maxItems) return value;
-	return value.slice(0, maxItems);
+function cappedArray(
+	value: unknown,
+	maxItems: number,
+): { value: unknown; dropped: number } {
+	if (!Array.isArray(value) || value.length <= maxItems)
+		return { value, dropped: 0 };
+	return { value: value.slice(0, maxItems), dropped: value.length - maxItems };
+}
+
+function finalSynthesisCapRepairMessage(dropped: Record<string, number>): string {
+	const entries = Object.entries(dropped).filter(([, count]) => count > 0);
+	if (entries.length === 0) return "clamped final synthesis arrays to schema caps";
+	const detail = entries
+		.slice(0, 8)
+		.map(([path, count]) => `${path}:-${count}`)
+		.join(", ");
+	const suffix = entries.length > 8 ? ", …" : "";
+	return `clamped final synthesis arrays to schema caps (${detail}${suffix})`;
 }
 
 function isJsonSchemaObject(
@@ -1893,6 +2031,18 @@ function validResultEnvelope(
 		result.subagentStatus = options.subagentStatus;
 	if (options.subagentFailureKind !== undefined)
 		result.subagentFailureKind = options.subagentFailureKind;
+	if (options.subagentToolCallsPath !== undefined)
+		result.subagentToolCallsPath = options.subagentToolCallsPath;
+	if (options.subagentToolCallsSummaryPath !== undefined)
+		result.subagentToolCallsSummaryPath = options.subagentToolCallsSummaryPath;
+	if (options.subagentToolCallsArtifactCwd !== undefined)
+		result.subagentToolCallsArtifactCwd = options.subagentToolCallsArtifactCwd;
+	if (
+		options.subagentFailedToolCalls !== undefined &&
+		options.subagentFailedToolCalls.length > 0
+	) {
+		result.subagentFailedToolCalls = options.subagentFailedToolCalls;
+	}
 	if (result.startedAt === undefined) delete result.startedAt;
 	return result;
 }
