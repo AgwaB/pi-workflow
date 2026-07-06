@@ -60,6 +60,7 @@ import {
 	buildWorkflowOutputRetryInstructions,
 	parseWorkflowOutputForBundle,
 	writeWorkflowTaskArtifactBundle,
+	type WorkflowTaskFailedToolCallSummary,
 } from "./workflow-output-artifacts.js";
 import {
 	EXPERIMENTAL_LAUNCH_RAMP_ENV,
@@ -77,6 +78,7 @@ const FETCH_CONTENT_INLINE_CHARS_ENV = "PI_WORKFLOW_FETCH_CONTENT_INLINE_CHARS";
 const DEFAULT_WORKFLOW_FETCH_CONTENT_INLINE_CHARS = 12_000;
 const DEFAULT_TRANSIENT_MODEL_FAILURE_RETRIES = 5;
 const DEFAULT_ARTIFACT_OUTPUT_RETRIES = 2;
+const MAX_FAILED_TOOL_CALL_RECORDS = 20;
 const MAX_CONCURRENT_LAUNCHES_ENV = "PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES";
 const MAX_LIVE_MODEL_WORKERS_ENV = "PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS";
 const LAUNCH_SLOT_RELEASE_DELAY_MS_ENV =
@@ -1861,6 +1863,11 @@ async function materializeTerminalSubagentResult(
 		subagentResult,
 		artifactRoot,
 	);
+	const failedToolCalls = await readFailedToolCalls(
+		snapshot,
+		subagentResult,
+		artifactRoot,
+	);
 	const [outputText, stderrText] = await Promise.all([
 		readFile(outputFile, "utf8").catch(() => ""),
 		readFile(stderrFile, "utf8").catch(() => ""),
@@ -1947,6 +1954,8 @@ async function materializeTerminalSubagentResult(
 				startedAt,
 				exitCode,
 				subagentResult,
+				subagentToolCalls: failedToolCalls,
+				subagentToolCallsSummary: toolCalls,
 			},
 		);
 		await recordTerminalParentSubagentChildEvent(run, task, snapshot);
@@ -1976,6 +1985,8 @@ async function materializeTerminalSubagentResult(
 				startedAt,
 				exitCode,
 				subagentResult,
+				subagentToolCalls: failedToolCalls,
+				subagentToolCallsSummary: toolCalls,
 				salvage: {
 					failureKind:
 						statusInfo.failureKind ?? snapshot.failureKind ?? "model",
@@ -2007,8 +2018,11 @@ async function materializeTerminalSubagentResult(
 			completion: snapshot.completion,
 			toolsConfigured: task.tools,
 			toolCalls: toolCalls?.summary,
+			toolCallsPath: failedToolCalls?.ref.path,
 			toolCallsSummaryPath: toolCalls?.ref.path,
-			toolCallsArtifactCwd: toolCalls?.ref.artifactCwd,
+			toolCallsArtifactCwd:
+				failedToolCalls?.ref.artifactCwd ?? toolCalls?.ref.artifactCwd,
+			failedToolCalls: failedToolCalls?.records,
 		},
 	};
 	if (
@@ -2124,6 +2138,11 @@ async function materializeTerminalArtifactGraphResult(
 		startedAt?: string;
 		exitCode: number;
 		subagentResult?: Record<string, unknown>;
+		subagentToolCalls?: {
+			ref: SubagentArtifactRef;
+			records: WorkflowTaskFailedToolCallSummary[];
+		};
+		subagentToolCallsSummary?: { ref: SubagentArtifactRef; summary: unknown };
 		salvage?: {
 			failureKind: string;
 			subagentStatus: string;
@@ -2158,6 +2177,11 @@ async function materializeTerminalArtifactGraphResultInner(
 		startedAt?: string;
 		exitCode: number;
 		subagentResult?: Record<string, unknown>;
+		subagentToolCalls?: {
+			ref: SubagentArtifactRef;
+			records: WorkflowTaskFailedToolCallSummary[];
+		};
+		subagentToolCallsSummary?: { ref: SubagentArtifactRef; summary: unknown };
 		salvage?: {
 			failureKind: string;
 			subagentStatus: string;
@@ -2285,6 +2309,13 @@ async function materializeTerminalArtifactGraphResultInner(
 			completedAt: options.completedAt,
 			exitCode: options.exitCode,
 			stderr,
+			subagentToolCallsPath: options.subagentToolCalls?.ref.path,
+			subagentToolCallsSummaryPath:
+				options.subagentToolCallsSummary?.ref.path,
+			subagentToolCallsArtifactCwd:
+				options.subagentToolCalls?.ref.artifactCwd ??
+				options.subagentToolCallsSummary?.ref.artifactCwd,
+			subagentFailedToolCalls: options.subagentToolCalls?.records,
 			...(options.salvage
 				? {
 						salvagedFromFailureKind: options.salvage.failureKind,
@@ -3565,6 +3596,48 @@ async function readToolCallsSummary(
 	subagentResult: Record<string, unknown> | undefined,
 	artifactRoot: string | undefined,
 ): Promise<{ ref: SubagentArtifactRef; summary: unknown } | undefined> {
+	const artifactRef = toolCallArtifactRef(subagentResult, "tool-calls-summary");
+	if (!artifactRef) return undefined;
+	const summary = await readJsonLoose<unknown>(
+		safeArtifactPath(snapshot, artifactRef, artifactRoot),
+	);
+	return summary === undefined ? undefined : { ref: artifactRef, summary };
+}
+
+async function readFailedToolCalls(
+	snapshot: SubagentRunStatusSnapshot,
+	subagentResult: Record<string, unknown> | undefined,
+	artifactRoot: string | undefined,
+): Promise<
+	| { ref: SubagentArtifactRef; records: WorkflowTaskFailedToolCallSummary[] }
+	| undefined
+> {
+	const artifactRef = toolCallArtifactRef(subagentResult, "tool-calls");
+	if (!artifactRef) return undefined;
+	const text = await readFile(
+		safeArtifactPath(snapshot, artifactRef, artifactRoot),
+		"utf8",
+	).catch(() => "");
+	const records: WorkflowTaskFailedToolCallSummary[] = [];
+	for (const line of text.split(/\r?\n/)) {
+		if (records.length >= MAX_FAILED_TOOL_CALL_RECORDS) break;
+		if (line.trim() === "") continue;
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(line);
+		} catch {
+			continue;
+		}
+		const record = failedToolCallSummary(parsed);
+		if (record) records.push(record);
+	}
+	return { ref: artifactRef, records };
+}
+
+function toolCallArtifactRef(
+	subagentResult: Record<string, unknown> | undefined,
+	type: "tool-calls" | "tool-calls-summary",
+): SubagentArtifactRef | undefined {
 	const artifacts = Array.isArray(subagentResult?.artifacts)
 		? subagentResult.artifacts
 		: [];
@@ -3574,16 +3647,43 @@ async function readToolCallsSummary(
 		return (
 			typeof artifact === "object" &&
 			artifact !== null &&
-			(artifact as SubagentArtifactRef).type === "tool-calls-summary" &&
+			(artifact as SubagentArtifactRef).type === type &&
 			typeof (artifact as SubagentArtifactRef).path === "string"
 		);
 	});
-	if (!ref) return undefined;
-	const artifactRef = { ...ref, artifactCwd: ref.artifactCwd ?? resultCwd };
-	const summary = await readJsonLoose<unknown>(
-		safeArtifactPath(snapshot, artifactRef, artifactRoot),
-	);
-	return summary === undefined ? undefined : { ref: artifactRef, summary };
+	return ref ? { ...ref, artifactCwd: ref.artifactCwd ?? resultCwd } : undefined;
+}
+
+function failedToolCallSummary(
+	value: unknown,
+): WorkflowTaskFailedToolCallSummary | undefined {
+	if (typeof value !== "object" || value === null || Array.isArray(value))
+		return undefined;
+	const record = value as Record<string, unknown>;
+	const status = stringValue(record.status);
+	const isError = record.isError === true;
+	if (status !== "failed" && status !== "incomplete" && !isError)
+		return undefined;
+	return {
+		toolCallId: stringValue(record.toolCallId),
+		toolName: stringValue(record.toolName),
+		category: stringValue(record.category),
+		status,
+		startedAt: stringValue(record.startedAt),
+		completedAt:
+			record.completedAt === null ? null : stringValue(record.completedAt),
+		durationMs:
+			typeof record.durationMs === "number" ? record.durationMs : undefined,
+		isError,
+		argsSummary: record.argsSummary,
+		resultSummary: record.resultSummary,
+		failedArgs: record.failedArgs,
+		failedResult: record.failedResult,
+	};
+}
+
+function stringValue(value: unknown): string | undefined {
+	return typeof value === "string" ? value : undefined;
 }
 
 async function copyLogOrEmpty(

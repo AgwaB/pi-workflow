@@ -21086,15 +21086,54 @@ test("completed subagent with contextLengthExceeded and valid output remains com
 			join(artifactDir, "tool-calls-summary.json"),
 			JSON.stringify({
 				enabled: true,
-				totalCalls: 1,
-				callsByTool: { fetch_content: 1 },
-				callsByCategory: { network: 1 },
-				errorsByTool: {},
+				totalCalls: 2,
+				callsByTool: { fetch_content: 1, read: 1 },
+				callsByCategory: { network: 1, filesystem: 1 },
+				errorsByTool: { read: 1 },
 				resources: {
 					urls: ["https://docs.example.test/a"],
 					hosts: ["docs.example.test"],
 				},
 			}),
+		);
+		writeFileSync(
+			join(artifactDir, "tool-calls.jsonl"),
+			`${JSON.stringify({
+				schemaVersion: 1,
+				type: "tool_call",
+				toolCallId: "call_read_failed",
+				toolName: "read",
+				category: "filesystem",
+				status: "failed",
+				startedAt: task.startedAt,
+				completedAt: new Date().toISOString(),
+				durationMs: 2,
+				isError: true,
+				argsSummary: {
+					type: "object",
+					keys: ["path", "limit"],
+					stringCount: 1,
+					stringChars: 24,
+					resources: [],
+					truncated: false,
+				},
+				resultSummary: {
+					type: "object",
+					keys: ["content", "details"],
+					stringCount: 2,
+					stringChars: 80,
+					resources: [],
+					truncated: false,
+				},
+				failedArgs: {
+					value: { path: "/tmp/missing-evidence.json", limit: 20 },
+					truncated: false,
+				},
+				failedResult: {
+					value: { content: "File not found: /tmp/missing-evidence.json" },
+					truncated: false,
+				},
+			})}\n`,
 		);
 		writeFileSync(
 			join(artifactDir, "result.json"),
@@ -21106,6 +21145,10 @@ test("completed subagent with contextLengthExceeded and valid output remains com
 				cwd,
 				metadata: { contextLengthExceeded: true, stopReason: "stop" },
 				artifacts: [
+					{
+						type: "tool-calls",
+						path: ".fake-context-subagent/tool-calls.jsonl",
+					},
 					{
 						type: "tool-calls-summary",
 						path: ".fake-context-subagent/tool-calls-summary.json",
@@ -21174,6 +21217,50 @@ test("completed subagent with contextLengthExceeded and valid output remains com
 		assert.equal(refreshedTask.status, "completed");
 		assert.equal(workflowResult.outputValidation.valid, true);
 		assert.equal(workflowResult.failureKind, undefined);
+		assert.equal(
+			workflowResult.subagentToolCallsPath,
+			".fake-context-subagent/tool-calls.jsonl",
+		);
+		assert.equal(
+			workflowResult.subagentToolCallsSummaryPath,
+			".fake-context-subagent/tool-calls-summary.json",
+		);
+		assert.deepEqual(workflowResult.subagentFailedToolCalls, [
+			{
+				toolCallId: "call_read_failed",
+				toolName: "read",
+				category: "filesystem",
+				status: "failed",
+				startedAt: task.startedAt,
+				completedAt: workflowResult.subagentFailedToolCalls[0].completedAt,
+				durationMs: 2,
+				isError: true,
+				argsSummary: {
+					type: "object",
+					keys: ["path", "limit"],
+					stringCount: 1,
+					stringChars: 24,
+					resources: [],
+					truncated: false,
+				},
+				resultSummary: {
+					type: "object",
+					keys: ["content", "details"],
+					stringCount: 2,
+					stringChars: 80,
+					resources: [],
+					truncated: false,
+				},
+				failedArgs: {
+					value: { path: "/tmp/missing-evidence.json", limit: 20 },
+					truncated: false,
+				},
+				failedResult: {
+					value: { content: "File not found: /tmp/missing-evidence.json" },
+					truncated: false,
+				},
+			},
+		]);
 		assert.deepEqual(
 			JSON.parse(
 				readFileSync(
@@ -32791,6 +32878,39 @@ test("workflow output parser repairs known workflow control schema slips before 
 			"utf8",
 		),
 	);
+	const finalSynthesisProperties =
+		finalSynthesisSchema.properties.synthesis.properties;
+	assert.equal(finalSynthesisProperties.keyFindingIds.maxItems, 12);
+	assert.equal(finalSynthesisProperties.recommendations.maxItems, 12);
+	assert.equal(
+		finalSynthesisProperties.recommendations.items.properties.supportingClaimIds
+			.maxItems,
+		8,
+	);
+	assert.equal(finalSynthesisProperties.actionPlan.maxItems, 12);
+	assert.equal(
+		finalSynthesisProperties.actionPlan.items.properties.supportingClaimIds
+			.maxItems,
+		8,
+	);
+	assert.equal(finalSynthesisProperties.caveatNotes.maxItems, 16);
+	assert.equal(
+		finalSynthesisProperties.caveatNotes.items.properties.relatedClaimIds
+			.maxItems,
+		8,
+	);
+	assert.equal(
+		finalSynthesisProperties.caveatNotes.items.properties.gapIds.maxItems,
+		8,
+	);
+	assert.equal(finalSynthesisProperties.parentDecisionNotes.maxItems, 12);
+	assert.equal(
+		finalSynthesisProperties.parentDecisionNotes.items.properties
+			.supportingClaimIds.maxItems,
+		8,
+	);
+	assert.equal(finalSynthesisProperties.notableUnsupportedClaimIds.maxItems, 12);
+	assert.equal(finalSynthesisProperties.contestedClaimIds.maxItems, 12);
 	const manyClaimIds = Array.from(
 		{ length: 18 },
 		(_, index) => `claim-${String(index + 1).padStart(3, "0")}`,
@@ -32878,6 +32998,161 @@ test("workflow output parser repairs known workflow control schema slips before 
 	assert.deepEqual(
 		finalSynthesis.repairs?.map((repair) => repair.code),
 		["control_final_synthesis_array_caps"],
+	);
+	assert.match(
+		finalSynthesis.repairs?.[0]?.message ?? "",
+		/keyFindingIds:-6/,
+	);
+	assert.match(
+		finalSynthesis.repairs?.[0]?.message ?? "",
+		/recommendations\.supportingClaimIds:-10/,
+	);
+
+	const manyRows = Array.from({ length: 20 }, (_, index) => ({
+		recommendation: `Recommendation ${index + 1}`,
+		supportingClaimIds: ["claim-001"],
+	}));
+	const finalSynthesisRows = parseWorkflowOutput(
+		[
+			"<control>",
+			JSON.stringify({
+				schema: "deep-research-final-synthesis-v1",
+				digest: "model overproduced row-capped synthesis arrays",
+				synthesis: {
+					bottomLine: "Use the capped synthesis subset.",
+					keyFindingIds: ["claim-001"],
+					recommendations: manyRows,
+					actionPlan: manyRows.map((row, index) => ({
+						action: `Action ${index + 1}`,
+						supportingClaimIds: row.supportingClaimIds,
+					})),
+					caveatNotes: manyRows.map((_, index) => ({
+						note: `Caveat ${index + 1}`,
+						relatedClaimIds: ["claim-001"],
+						gapIds: ["gap-001"],
+					})),
+					parentDecisionNotes: manyRows.map((row, index) => ({
+						note: `Parent note ${index + 1}`,
+						whyItMatters: "Decision support.",
+						evidenceStatus: "verified",
+						suggestedParentDecision: "Proceed.",
+						supportingClaimIds: row.supportingClaimIds,
+					})),
+				},
+			}),
+			"</control>",
+			"<analysis>",
+			"analysis",
+			"</analysis>",
+			"<refs>",
+			"[]",
+			"</refs>",
+		].join("\n"),
+		{ controlJsonSchema: finalSynthesisSchema },
+	);
+	assert.equal(
+		finalSynthesisRows.valid,
+		true,
+		JSON.stringify(finalSynthesisRows.issues),
+	);
+	assert.equal(finalSynthesisRows.control.synthesis.recommendations.length, 12);
+	assert.equal(finalSynthesisRows.control.synthesis.actionPlan.length, 12);
+	assert.equal(finalSynthesisRows.control.synthesis.caveatNotes.length, 16);
+	assert.equal(
+		finalSynthesisRows.control.synthesis.parentDecisionNotes.length,
+		12,
+	);
+	assert.match(
+		finalSynthesisRows.repairs?.[0]?.message ?? "",
+		/recommendations:-8/,
+	);
+	assert.match(
+		finalSynthesisRows.repairs?.[0]?.message ?? "",
+		/caveatNotes:-4/,
+	);
+
+	const alreadyValidFinalSynthesis = parseWorkflowOutput(
+		[
+			"<control>",
+			JSON.stringify({
+				schema: "deep-research-final-synthesis-v1",
+				digest: "already valid synthesis arrays",
+				synthesis: {
+					bottomLine: "No repair required.",
+					keyFindingIds: ["claim-001"],
+					recommendations: [
+						{
+							recommendation: "Keep valid data unchanged.",
+							supportingClaimIds: ["claim-001"],
+						},
+					],
+					actionPlan: [
+						{
+							action: "Ship the valid output.",
+							supportingClaimIds: ["claim-001"],
+						},
+					],
+					caveatNotes: [{ note: "No caveat." }],
+					parentDecisionNotes: [
+						{
+							note: "Decision note.",
+							whyItMatters: "No repair telemetry should appear.",
+							evidenceStatus: "verified",
+							suggestedParentDecision: "Proceed.",
+							supportingClaimIds: ["claim-001"],
+						},
+					],
+				},
+			}),
+			"</control>",
+			"<analysis>",
+			"analysis",
+			"</analysis>",
+			"<refs>",
+			"[]",
+			"</refs>",
+		].join("\n"),
+		{ controlJsonSchema: finalSynthesisSchema },
+	);
+	assert.equal(
+		alreadyValidFinalSynthesis.valid,
+		true,
+		JSON.stringify(alreadyValidFinalSynthesis.issues),
+	);
+	assert.equal(alreadyValidFinalSynthesis.repairs, undefined);
+
+	const nonFinalSynthesisSchema = structuredClone(finalSynthesisSchema);
+	nonFinalSynthesisSchema.properties.schema.const = "not-final-synthesis-v1";
+	const nonFinalOverCap = parseWorkflowOutput(
+		[
+			"<control>",
+			JSON.stringify({
+				schema: "not-final-synthesis-v1",
+				digest: "over-cap non-final schema should not be repaired",
+				synthesis: {
+					bottomLine: "This schema must fail validation rather than repair.",
+					keyFindingIds: manyClaimIds,
+					recommendations: [],
+					actionPlan: [],
+					caveatNotes: [],
+					parentDecisionNotes: [],
+				},
+			}),
+			"</control>",
+			"<analysis>",
+			"analysis",
+			"</analysis>",
+			"<refs>",
+			"[]",
+			"</refs>",
+		].join("\n"),
+		{ controlJsonSchema: nonFinalSynthesisSchema },
+	);
+	assert.equal(nonFinalOverCap.valid, false);
+	assert.equal(nonFinalOverCap.repairs, undefined);
+	assert.match(
+		JSON.stringify(nonFinalOverCap.issues),
+		/\$\.synthesis\.keyFindingIds/,
 	);
 });
 
