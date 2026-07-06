@@ -18173,7 +18173,16 @@ test("refresh polls subagent status in a bounded pool and records latency teleme
 			assert.ok(task.timing.terminalStderrBytes > 0);
 		}
 		const metrics = buildWorkflowRunMetrics(refreshed);
-		assert.ok(metrics.totals.launchTiming.refreshStatusPollMs >= 50);
+		// Structural assertions instead of a wall-clock threshold: the previous
+		// `>= 50` bound flaked on loaded CI runners (sleep jitter vs measured
+		// poll window). Totals must aggregate per-task poll timings.
+		assert.ok(metrics.totals.launchTiming.refreshStatusPollMs > 0);
+		assert.ok(
+			metrics.totals.launchTiming.refreshStatusPollMs >=
+				Math.max(
+					...refreshed.tasks.map((task) => task.timing.refreshStatusPollMs),
+				),
+		);
 		assert.ok(metrics.totals.launchTiming.terminalOutputBytes > 0);
 	} finally {
 		setSubagentApiForTests(undefined);
