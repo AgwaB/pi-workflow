@@ -8500,6 +8500,7 @@ test("bundled deep-research compacts audit packets before executive final", asyn
 	});
 	const byStage = new Map(compiled.tasks.map((task) => [task.stageId, task]));
 	assert.equal(byStage.get("plan")?.runtime.thinking, "high");
+	assert.deepEqual(byStage.get("plan")?.runtime.tools, []);
 	assert.deepEqual(byStage.get("plan")?.artifactGraph.output.partial, {
 		paths: ["$.researchQuestions"],
 	});

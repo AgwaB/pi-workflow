@@ -25,6 +25,7 @@
       {
         "id": "plan",
         "type": "single",
+        "tools": [],
         "output": {
           "analysis": {
             "required": true
