@@ -82,6 +82,14 @@ const DEFAULT_ARTIFACT_OUTPUT_RETRIES = 2;
 const MAX_FAILED_TOOL_CALL_RECORDS = 20;
 const MAX_CONCURRENT_LAUNCHES_ENV = "PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES";
 const MAX_LIVE_MODEL_WORKERS_ENV = "PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS";
+const ADAPTIVE_LIVE_MODEL_WORKERS_ENV = "PI_WORKFLOW_ADAPTIVE_LIVE_WORKERS";
+const ADAPTIVE_LIVE_MODEL_WORKER_FLOOR = 4;
+const ADAPTIVE_LIVE_MODEL_WORKER_DEFAULT_CEILING = 16;
+const ADAPTIVE_LIVE_MODEL_WORKER_GROW_STEP = 2;
+const ADAPTIVE_LIVE_MODEL_WORKER_WINDOW_SIZE = 20;
+const ADAPTIVE_LIVE_MODEL_WORKER_BASELINE_SAMPLES = 5;
+const ADAPTIVE_LIVE_MODEL_WORKER_GROW_RATIO = 1.5;
+const ADAPTIVE_LIVE_MODEL_WORKER_SHRINK_RATIO = 2.5;
 const LAUNCH_SLOT_RELEASE_DELAY_MS_ENV =
 	"PI_WORKFLOW_LAUNCH_SLOT_RELEASE_DELAY_MS";
 const PARENT_SUBAGENT_CWD_ENV = "PI_WORKFLOW_PARENT_SUBAGENT_CWD";
@@ -547,6 +555,133 @@ function resolveMaxLiveModelWorkers(): number | undefined {
 	return Math.floor(override);
 }
 
+type AdaptiveLiveModelWorkerDecision =
+	| "start"
+	| "grow"
+	| "hold"
+	| "shrink"
+	| "backoff_shrink";
+
+interface AdaptiveLiveModelWorkerState {
+	limit: number;
+	recentExecutionMs: number[];
+	baselineMs?: number;
+	lastDecision: AdaptiveLiveModelWorkerDecision;
+}
+
+const adaptiveLiveModelWorkerStates = new Map<
+	string,
+	AdaptiveLiveModelWorkerState
+>();
+
+function adaptiveLiveModelWorkersEnabled(): boolean {
+	return workflowExperimentalFlagEnabled(ADAPTIVE_LIVE_MODEL_WORKERS_ENV);
+}
+
+function adaptiveLiveModelWorkerCeiling(): number {
+	return (
+		resolveMaxLiveModelWorkers() ?? ADAPTIVE_LIVE_MODEL_WORKER_DEFAULT_CEILING
+	);
+}
+
+function adaptiveLiveModelWorkerState(
+	providerKey: string,
+): AdaptiveLiveModelWorkerState {
+	let state = adaptiveLiveModelWorkerStates.get(providerKey);
+	if (!state) {
+		state = {
+			limit: ADAPTIVE_LIVE_MODEL_WORKER_FLOOR,
+			recentExecutionMs: [],
+			lastDecision: "start",
+		};
+		adaptiveLiveModelWorkerStates.set(providerKey, state);
+	}
+	return state;
+}
+
+function medianOfDurations(values: number[]): number {
+	const sorted = [...values].sort((a, b) => a - b);
+	const middle = Math.floor(sorted.length / 2);
+	return sorted.length % 2 === 0
+		? (sorted[middle - 1]! + sorted[middle]!) / 2
+		: sorted[middle]!;
+}
+
+function halveAdaptiveLiveModelWorkerLimit(
+	state: AdaptiveLiveModelWorkerState,
+	decision: AdaptiveLiveModelWorkerDecision,
+): void {
+	state.limit = Math.max(
+		ADAPTIVE_LIVE_MODEL_WORKER_FLOOR,
+		Math.floor(state.limit / 2),
+	);
+	state.lastDecision = decision;
+}
+
+export function observeLiveModelWorkerCompletion(
+	providerKey: string,
+	executionMs: number | null | undefined,
+): void {
+	if (!adaptiveLiveModelWorkersEnabled()) return;
+	if (
+		typeof executionMs !== "number" ||
+		!Number.isFinite(executionMs) ||
+		executionMs <= 0
+	) {
+		return;
+	}
+	const state = adaptiveLiveModelWorkerState(providerKey);
+	state.recentExecutionMs.push(executionMs);
+	if (state.recentExecutionMs.length > ADAPTIVE_LIVE_MODEL_WORKER_WINDOW_SIZE) {
+		state.recentExecutionMs.shift();
+	}
+	if (state.baselineMs === undefined) {
+		if (
+			state.recentExecutionMs.length <
+			ADAPTIVE_LIVE_MODEL_WORKER_BASELINE_SAMPLES
+		) {
+			return;
+		}
+		state.baselineMs = medianOfDurations(
+			state.recentExecutionMs.slice(
+				0,
+				ADAPTIVE_LIVE_MODEL_WORKER_BASELINE_SAMPLES,
+			),
+		);
+	}
+	const recentMedianMs = medianOfDurations(state.recentExecutionMs);
+	if (recentMedianMs > state.baselineMs * ADAPTIVE_LIVE_MODEL_WORKER_SHRINK_RATIO) {
+		halveAdaptiveLiveModelWorkerLimit(state, "shrink");
+		return;
+	}
+	if (recentMedianMs < state.baselineMs * ADAPTIVE_LIVE_MODEL_WORKER_GROW_RATIO) {
+		state.limit = Math.min(
+			adaptiveLiveModelWorkerCeiling(),
+			state.limit + ADAPTIVE_LIVE_MODEL_WORKER_GROW_STEP,
+		);
+		state.lastDecision = "grow";
+		return;
+	}
+	state.lastDecision = "hold";
+}
+
+function shrinkAdaptiveLiveModelWorkersForBackoff(providerKey: string): void {
+	if (!adaptiveLiveModelWorkersEnabled()) return;
+	halveAdaptiveLiveModelWorkerLimit(
+		adaptiveLiveModelWorkerState(providerKey),
+		"backoff_shrink",
+	);
+}
+
+function resolveEffectiveMaxLiveModelWorkers(
+	providerKey: string,
+): number | undefined {
+	const configured = resolveMaxLiveModelWorkers();
+	if (!adaptiveLiveModelWorkersEnabled()) return configured;
+	const adaptive = adaptiveLiveModelWorkerState(providerKey).limit;
+	return configured === undefined ? adaptive : Math.min(configured, adaptive);
+}
+
 function liveModelWorkerKey(
 	run: WorkflowRunRecord,
 	task: WorkflowTaskRunRecord,
@@ -582,9 +717,10 @@ function reconcileLiveModelWorkerSlots(run: WorkflowRunRecord): void {
 	}
 }
 
-function isLiveModelWorkerGateSaturated(run: WorkflowRunRecord): boolean {
-	const maxLiveModelWorkers = resolveMaxLiveModelWorkers();
-	if (maxLiveModelWorkers === undefined) return false;
+function isLiveModelWorkerGateSaturated(
+	run: WorkflowRunRecord,
+	maxLiveModelWorkers: number,
+): boolean {
 	const liveKeys = liveModelWorkerKeysForRun(run);
 	for (const key of activeLiveModelWorkerKeys) liveKeys.add(key);
 	return liveKeys.size >= maxLiveModelWorkers;
@@ -610,13 +746,16 @@ function makeLiveModelWorkerSlotRelease(key: string): () => void {
 function tryAcquireLiveModelWorkerSlot(options: {
 	run: WorkflowRunRecord;
 	task: WorkflowTaskRunRecord;
+	compiledTask?: CompiledTask;
 }): LiveModelWorkerSlotAdmission {
-	const maxLiveModelWorkers = resolveMaxLiveModelWorkers();
+	const maxLiveModelWorkers = resolveEffectiveMaxLiveModelWorkers(
+		modelRateLimitBackoffKey(options.task, options.compiledTask),
+	);
 	if (maxLiveModelWorkers === undefined) {
 		return { kind: "acquired", release: () => undefined };
 	}
 	reconcileLiveModelWorkerSlots(options.run);
-	if (isLiveModelWorkerGateSaturated(options.run)) {
+	if (isLiveModelWorkerGateSaturated(options.run, maxLiveModelWorkers)) {
 		return {
 			kind: "deferred",
 			message: liveModelWorkerWaitingMessage(maxLiveModelWorkers),
@@ -646,11 +785,38 @@ function resolveLaunchSlotReleaseDelayMs(): number {
 		: DEFAULT_LAUNCH_SLOT_RELEASE_DELAY_MS;
 }
 
+interface AdaptiveLiveModelWorkerTelemetry {
+	limit: number;
+	lastDecision: AdaptiveLiveModelWorkerDecision;
+	baselineMs?: number;
+	samples: number;
+}
+
 interface LaunchControlTelemetry {
 	maxConcurrentLaunches: number;
 	maxLiveModelWorkers?: number;
 	launchSlotReleaseDelayMs: number;
 	experimentalLaunchRampEnabled?: boolean;
+	adaptiveLiveModelWorkersEnabled?: boolean;
+	adaptiveLiveModelWorkers?: Record<string, AdaptiveLiveModelWorkerTelemetry>;
+}
+
+function adaptiveLiveModelWorkerTelemetry(): Record<
+	string,
+	AdaptiveLiveModelWorkerTelemetry
+> {
+	const providers: Record<string, AdaptiveLiveModelWorkerTelemetry> = {};
+	for (const [key, state] of adaptiveLiveModelWorkerStates) {
+		providers[key] = {
+			limit: state.limit,
+			lastDecision: state.lastDecision,
+			...(state.baselineMs === undefined
+				? {}
+				: { baselineMs: state.baselineMs }),
+			samples: state.recentExecutionMs.length,
+		};
+	}
+	return providers;
 }
 
 function launchControlTelemetry(): LaunchControlTelemetry {
@@ -660,6 +826,12 @@ function launchControlTelemetry(): LaunchControlTelemetry {
 		...(maxLiveModelWorkers === undefined ? {} : { maxLiveModelWorkers }),
 		launchSlotReleaseDelayMs: resolveLaunchSlotReleaseDelayMs(),
 		...(launchRampEnabled() ? { experimentalLaunchRampEnabled: true } : {}),
+		...(adaptiveLiveModelWorkersEnabled()
+			? {
+					adaptiveLiveModelWorkersEnabled: true,
+					adaptiveLiveModelWorkers: adaptiveLiveModelWorkerTelemetry(),
+				}
+			: {}),
 	};
 }
 
@@ -1197,6 +1369,17 @@ function recordTaskLaunchTiming(
 		...(launchControls.experimentalLaunchRampEnabled
 			? { experimentalLaunchRampEnabled: true }
 			: {}),
+		...(launchControls.adaptiveLiveModelWorkersEnabled
+			? {
+					adaptiveLiveModelWorkersEnabled: true,
+					...(launchControls.adaptiveLiveModelWorkers === undefined
+						? {}
+						: {
+								adaptiveLiveModelWorkers:
+									launchControls.adaptiveLiveModelWorkers,
+							}),
+				}
+			: {}),
 		...(task.timing?.aggregate === undefined
 			? {}
 			: { aggregate: task.timing.aggregate }),
@@ -1358,6 +1541,15 @@ function recordTaskTerminalTiming(options: {
 		...(options.task.timing?.experimentalLaunchRampEnabled
 			? { experimentalLaunchRampEnabled: true }
 			: {}),
+		...(options.task.timing?.adaptiveLiveModelWorkersEnabled
+			? { adaptiveLiveModelWorkersEnabled: true }
+			: {}),
+		...(options.task.timing?.adaptiveLiveModelWorkers === undefined
+			? {}
+			: {
+					adaptiveLiveModelWorkers:
+						options.task.timing.adaptiveLiveModelWorkers,
+				}),
 		...taskTimingTelemetry(options.task.timing),
 		...(attempt.executionStartedAt === undefined
 			? {}
@@ -1406,7 +1598,18 @@ export function setSubagentLaunchControlsForTests(options?: {
 	activeLaunchSlots = 0;
 	activeLiveModelWorkerKeys.clear();
 	sharedModelRateLimitBackoffs.clear();
+	adaptiveLiveModelWorkerStates.clear();
 	while (launchWaitQueue.length > 0) launchWaitQueue.shift()?.resolveWait();
+}
+
+export async function recordSharedModelRateLimitBackoffForTests(
+	model: string | undefined,
+	backoffMs: number | undefined,
+): Promise<void> {
+	await recordSharedModelRateLimitBackoff(
+		{ runtime: { model } } as WorkflowTaskRunRecord,
+		backoffMs,
+	);
 }
 
 export async function cleanupSubagentRun(
@@ -1530,6 +1733,7 @@ export async function launchSubagentTask(
 		const liveModelWorkerAdmission = tryAcquireLiveModelWorkerSlot({
 			run,
 			task,
+			compiledTask,
 		});
 		if (liveModelWorkerAdmission.kind === "deferred") {
 			const launchQueuedAt = task.timing?.launchQueuedAt ?? nowIso();
@@ -2051,6 +2255,12 @@ async function materializeTerminalSubagentResult(
 		startedAt,
 		completedAt,
 	});
+	if (statusInfo.status === "completed") {
+		observeLiveModelWorkerCompletion(
+			modelRateLimitBackoffKey(task),
+			task.timing?.executionMs,
+		);
+	}
 	if (task.artifactGraph?.enabled && statusInfo.status === "completed") {
 		const changed = await materializeTerminalArtifactGraphResult(
 			cwd,
@@ -3147,6 +3357,7 @@ async function recordSharedModelRateLimitBackoff(
 ): Promise<void> {
 	if (backoffMs === undefined || backoffMs <= 0) return;
 	const key = modelRateLimitBackoffKey(task);
+	shrinkAdaptiveLiveModelWorkersForBackoff(key);
 	const nowMs = Date.now();
 	const nextEligibleAtMs = nowMs + Math.max(0, Math.floor(backoffMs));
 	const existing = sharedModelRateLimitBackoffs.get(key);
