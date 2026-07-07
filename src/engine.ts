@@ -142,6 +142,7 @@ import {
 	WORKFLOW_RUN_TYPE,
 	type WorkflowIndexRecord,
 	type WorkflowRunRecord,
+	type WorkflowRunRouting,
 	type WorkflowTaskRunRecord,
 } from "./types.js";
 
@@ -174,6 +175,13 @@ export interface WorkflowRunOptions {
 	dynamicUi?: DynamicWorkflowUi;
 	runId?: string;
 	parentRunId?: string;
+	/** Router-pass audit record persisted on the run record (opt-in --route). */
+	routing?: WorkflowRunRouting;
+	/**
+	 * Overrides for inputs the workflow spec declares (for example depth).
+	 * Keys the spec does not declare are ignored.
+	 */
+	inputOverrides?: Record<string, unknown>;
 }
 
 interface WorkflowScheduleOptions {
@@ -219,6 +227,7 @@ async function runLoadedWorkflowSpec(
 	options: WorkflowRunOptions,
 	provenance?: WorkflowRunRecord["provenance"],
 ): Promise<WorkflowRunRecord> {
+	spec = applyDeclaredWorkflowInputOverrides(spec, options.inputOverrides);
 	const compiled = await compileWorkflow(spec, {
 		cwd,
 		specPath,
@@ -234,6 +243,7 @@ async function runLoadedWorkflowSpec(
 		rootRunId: options.parentRunId,
 	});
 	if (provenance) run.provenance = provenance;
+	if (options.routing) run.routing = options.routing;
 	await withRunLease(cwd, run.runId, async () => {
 		await writeStaticRunArtifacts(cwd, run, compiled, spec);
 		await writeRunRecord(cwd, run);
@@ -249,6 +259,26 @@ async function runLoadedWorkflowSpec(
 	if (shouldWatchRun(scheduled))
 		watchRun(cwd, scheduled.runId, scheduleOptions);
 	return scheduled;
+}
+
+function applyDeclaredWorkflowInputOverrides<Spec>(
+	spec: Spec,
+	overrides: Record<string, unknown> | undefined,
+): Spec {
+	if (!overrides) return spec;
+	const input = (spec as { input?: unknown }).input;
+	if (!input || typeof input !== "object" || Array.isArray(input)) return spec;
+	const declared = Object.entries(overrides).filter(
+		([key]) => key in (input as Record<string, unknown>),
+	);
+	if (declared.length === 0) return spec;
+	return {
+		...spec,
+		input: {
+			...(input as Record<string, unknown>),
+			...Object.fromEntries(declared),
+		},
+	};
 }
 
 export async function refreshRun(
