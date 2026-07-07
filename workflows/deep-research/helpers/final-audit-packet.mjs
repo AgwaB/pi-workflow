@@ -134,6 +134,29 @@ function compactDuplicateVerifierRow(row) {
 	};
 }
 
+function compactReadinessBlocker(blocker) {
+	const item = asObject(blocker);
+	return {
+		reason: stringOf(item.reason),
+		count: Number.isFinite(Number(item.count)) ? Number(item.count) : undefined,
+	};
+}
+
+function compactBatchAdoptionReadiness(readiness) {
+	const item = asObject(readiness);
+	const blockers = asArray(item.blockers).map(compactReadinessBlocker);
+	if (!stringOf(item.status) && blockers.length === 0) return {};
+	return {
+		status: stringOf(item.status),
+		...(typeof item.adopted === "boolean" ? { adopted: item.adopted } : {}),
+		...(typeof item.canaryRequired === "boolean"
+			? { canaryRequired: item.canaryRequired }
+			: {}),
+		reason: stringOf(item.reason),
+		blockers,
+	};
+}
+
 function countByStatus(slots) {
 	const counts = {};
 	for (const slot of slots) {
@@ -288,6 +311,17 @@ export default async function finalAuditPacket({ sources }) {
 		compactDuplicateVerifierRow,
 	);
 	const gateSummary = asObject(audit.gateSummary);
+	const batchAdoptionReadiness = compactBatchAdoptionReadiness(
+		audit.batchAdoptionReadiness,
+	);
+	const zeroCandidateFloorBlockerInput = Number(
+		gateSummary.zeroCandidateFloorBlockers ?? 0,
+	);
+	const zeroCandidateFloorBlockers = Number.isFinite(
+		zeroCandidateFloorBlockerInput,
+	)
+		? zeroCandidateFloorBlockerInput
+		: 0;
 	const precisionGuardDiagnostics = asObject(audit.precisionGuardDiagnostics);
 	const sourceRefCoverage = {
 		verificationCandidatesWithSourceRefs: verificationCandidates.filter(
@@ -304,6 +338,9 @@ export default async function finalAuditPacket({ sources }) {
 		invalidVerifierRows: invalidVerifierRows.length,
 		duplicateVerifierRows: duplicateVerifierRows.length,
 		missingVerifierResults: Number(gateSummary.missingVerifierResults ?? 0),
+		zeroCandidateFloorBlockers,
+		batchAdoptionStatus: stringOf(batchAdoptionReadiness.status),
+		batchAdoptionBlockers: asArray(batchAdoptionReadiness.blockers),
 		sourceRefCoverage,
 	};
 	const synthesisInput = buildSynthesisInput({
@@ -352,6 +389,9 @@ export default async function finalAuditPacket({ sources }) {
 				gateSummary,
 				invalidVerifierRows,
 				duplicateVerifierRows,
+				...(stringOf(batchAdoptionReadiness.status)
+					? { batchAdoptionReadiness }
+					: {}),
 			},
 			normalizerDiagnostics: {
 				precisionGuard: precisionGuardDiagnostics,
@@ -378,6 +418,8 @@ export default async function finalAuditPacket({ sources }) {
 					missingVerifierResults: Number(
 						gateSummary.missingVerifierResults ?? 0,
 					),
+					zeroCandidateFloorBlockers,
+					batchAdoptionStatus: stringOf(batchAdoptionReadiness.status),
 				},
 			},
 			overflowLedger: {

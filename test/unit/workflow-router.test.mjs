@@ -233,6 +233,8 @@ test("--route with high-confidence direct answers without starting a workflow ru
 		assert.equal(entries[0].routing.confidence, 0.9);
 		assert.equal(entries[0].routing.reason, "single documented fact");
 		assert.equal(entries[0].routing.routerThinking, "low");
+		assert.equal(Number.isInteger(entries[0].routing.routerElapsedMs), true);
+		assert.equal(entries[0].routing.routerElapsedMs >= 0, true);
 	} finally {
 		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
@@ -261,15 +263,15 @@ test("--route with high-confidence workflow starts the workflow with routed dept
 		assert.ok(calls.launches >= 1);
 
 		const run = await readRunRecord(cwd, outcome.run.runId);
-		assert.deepEqual(run.routing, {
-			requested: "route-target",
-			decided: "workflow",
-			depth: "quick",
-			confidence: 0.95,
-			reason: "multi-source synthesis is warranted",
-			routerModel: "session-default",
-			routerThinking: "low",
-		});
+		assert.equal(run.routing.requested, "route-target");
+		assert.equal(run.routing.decided, "workflow");
+		assert.equal(run.routing.depth, "quick");
+		assert.equal(run.routing.confidence, 0.95);
+		assert.equal(run.routing.reason, "multi-source synthesis is warranted");
+		assert.equal(run.routing.routerModel, "session-default");
+		assert.equal(run.routing.routerThinking, "low");
+		assert.equal(Number.isInteger(run.routing.routerElapsedMs), true);
+		assert.equal(run.routing.routerElapsedMs >= 0, true);
 		assert.equal(readRunDirSpec(cwd, run.runId).input.depth, "quick");
 	} finally {
 		setSubagentApiForTests(undefined);
@@ -300,6 +302,8 @@ test("--route escalates low-confidence decisions to the requested workflow at st
 		assert.equal(run.routing.decided, "workflow");
 		assert.equal(run.routing.depth, "standard");
 		assert.equal(run.routing.confidence, 0.4);
+		assert.equal(Number.isInteger(run.routing.routerElapsedMs), true);
+		assert.equal(run.routing.routerElapsedMs >= 0, true);
 		assert.match(run.routing.reason, /confidence 0\.4 below 0\.6/);
 		assert.match(run.routing.reason, /escalated to workflow at standard depth/);
 		assert.equal(readRunDirSpec(cwd, run.runId).input.depth, "standard");
@@ -327,6 +331,8 @@ test("--route escalates invalid router JSON to the requested workflow at standar
 		assert.equal(run.routing.decided, "workflow");
 		assert.equal(run.routing.depth, "standard");
 		assert.equal(run.routing.confidence, 0);
+		assert.equal(Number.isInteger(run.routing.routerElapsedMs), true);
+		assert.equal(run.routing.routerElapsedMs >= 0, true);
 		assert.match(run.routing.reason, /not valid control JSON/);
 		assert.equal(readRunDirSpec(cwd, run.runId).input.depth, "standard");
 
@@ -368,13 +374,19 @@ test("runs without --route never invoke the router subagent", async () => {
 			}),
 		});
 
-		assert.equal(parseWorkflowRunArgs('run route-target "Task"').route, undefined);
+		assert.equal(
+			parseWorkflowRunArgs('run route-target "Task"').route,
+			undefined,
+		);
 		assert.equal(parseWorkflowDynamicArgs('dynamic "Task"').route, undefined);
 		assert.equal(
 			parseWorkflowRunArgs('run --route route-target "Task"').route,
 			true,
 		);
-		assert.equal(parseWorkflowDynamicArgs('dynamic --route "Task"').route, true);
+		assert.equal(
+			parseWorkflowDynamicArgs('dynamic --route "Task"').route,
+			true,
+		);
 		assert.equal(
 			parseWorkflowRunArgs('run route-target "Keep literal --route inside"')
 				.route,

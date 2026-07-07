@@ -57,6 +57,8 @@ export function dynamicSynthesisHandoffPrompt(
 		[
 			"## Boundaries",
 			"- Produce a compact final synthesis; reference large supporting material by artifact ref.",
+			"- For schema dynamic-task-result-v1, include a top-level claims or keyFindings array for final source-backed assertions.",
+			"- Each source-backed claims/keyFindings entry must carry joinable sourceRefs or evidenceRefs (URL/path/taskId/workflow_artifact locator) from inputRefs or upstream refs.",
 			"- Surface blockers, omissions, and caveats explicitly.",
 		].join("\n"),
 		dynamicRefsSection(action.inputRefs),

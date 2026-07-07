@@ -975,7 +975,13 @@ function dynamicOutputProfileInstructions(
 		].join("\n");
 	}
 	if (outputProfile === "synthesis_v1") {
-		return "# Dynamic Output Profile: synthesis_v1\nYour <control> JSON should include a compact final synthesis summary, caveats, and any remaining blockers or omissions. Final refs must come from verified upstream source ledgers; prefer sources with positive claimSupports and do not introduce new URL refs in synthesis.";
+		return [
+			"# Dynamic Output Profile: synthesis_v1",
+			"Your <control> JSON must include a compact final synthesis summary, caveats, and any remaining blockers or omissions.",
+			"For schema `dynamic-task-result-v1`, include a top-level `claims` or `keyFindings` array for final source-backed assertions; use an empty array only when no source-backed claims are made.",
+			"Each source-backed `claims`/`keyFindings` entry must include stable `id`, `text` or `summary`, and joinable `sourceRefs` or `evidenceRefs` values (URL/path/taskId/workflow_artifact locator) matching <refs> or upstream input refs.",
+			"Final refs must come from verified upstream source ledgers; prefer sources with positive claimSupports and do not introduce new URL refs in synthesis.",
+		].join("\n");
 	}
 	if (outputProfile === "generic_summary_v1") {
 		return "# Dynamic Output Profile: generic_summary_v1\nYour <control> JSON may be a compact summary, but include gaps/blockers/omissions if the result needs manual review.";

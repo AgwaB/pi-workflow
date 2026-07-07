@@ -8,6 +8,8 @@ import {
 	auditDynamicClaimSupport,
 	formatDynamicAuditSummary,
 } from "../../.tmp/unit/dynamic-audit.js";
+import { buildDynamicGeneratedCompiledTask } from "../../.tmp/unit/dynamic-generated-task-runtime.js";
+import { dynamicSynthesisHandoffPrompt } from "../../.tmp/unit/dynamic-loop-prompts.js";
 import { compileWorkflow } from "../../.tmp/unit/compiler.js";
 import { formatRun, scheduleRun } from "../../.tmp/unit/engine.js";
 import {
@@ -66,6 +68,31 @@ test("auditDynamicClaimSupport counts sourced claims via URL and ref-id joins", 
 		formatDynamicAuditSummary(audit),
 		"audit: 2/2 claims sourced, joins 0",
 	);
+});
+
+test("auditDynamicClaimSupport joins keyFindings evidenceRefs to generated task refs", () => {
+	const audit = auditDynamicClaimSupport({
+		synthesis: [
+			{
+				taskId: "adaptive.synthesis",
+				control: {
+					keyFindings: [
+						{
+							id: "f-evidence-ref",
+							summary: "artifact-ref-backed finding",
+							evidenceRefs: ["workflow_artifact:adaptive.research.refs"],
+						},
+					],
+				},
+			},
+		],
+		collected: [{ taskId: "research", specId: "adaptive.research" }],
+	});
+	assert.equal(audit.claimsTotal, 1);
+	assert.equal(audit.claimsWithSources, 1);
+	assert.equal(audit.claimsWithoutSources, 0);
+	assert.equal(audit.sourceRefJoinFailures, 0);
+	assert.deepEqual(audit.countedClaimKeys, ["keyFindings"]);
 });
 
 test("auditDynamicClaimSupport counts unsourced claims and join failures", () => {
@@ -189,6 +216,124 @@ function writeAgent(cwd, name) {
 		`---\ndescription: ${name}\ntools: ["read"]\nreadOnly: true\n---\n# ${name}\n\nUse repository evidence.\n`,
 	);
 }
+
+test("dynamic synthesis prompts require structured claim source refs", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "workflow-dynamic-contract-"));
+	try {
+		writeAgent(cwd, "unit-scout");
+		const handoff = dynamicSynthesisHandoffPrompt(
+			{
+				type: "synthesize",
+				actionId: "act-synthesize",
+				prompt: "Synthesize accepted findings.",
+				inputRefs: [
+					{
+						taskId: "adaptive.research",
+						artifact: "refs",
+						digest: "sha256:research",
+					},
+				],
+			},
+			"synthesis_v1",
+		);
+		assert.match(handoff, /claims or keyFindings/);
+		assert.match(handoff, /sourceRefs or evidenceRefs/);
+
+		const controllerCompiledTask = {
+			id: "adaptive.controller",
+			key: "adaptive.controller",
+			specId: "adaptive.controller",
+			taskId: "controller",
+			stageId: "adaptive",
+			agent: "dynamic",
+			agentPath: "./controller.mjs",
+			agentSystemPrompt: "",
+			roleNames: [],
+			task: "Run controller.",
+			cwd,
+			explicitCwd: false,
+			explicitWorktreePolicy: false,
+			runtime: { approvalMode: "non-interactive" },
+			safety: {
+				readOnlyDeclared: true,
+				capability: "read-only",
+				sharedCwdSafe: true,
+				worktreePolicy: "off",
+				requiresWorktree: false,
+				permission: { status: "pending" },
+			},
+			compiledPrompt: "Run controller.",
+			kind: "dynamic",
+		};
+		const generated = await buildDynamicGeneratedCompiledTask({
+			cwd,
+			run: {
+				runId: "workflow_dynamic_contract",
+				provenance: { mode: "direct-dynamic" },
+				tasks: [
+					{
+						specId: "adaptive.controller",
+						stageId: "adaptive",
+						taskId: "controller",
+						status: "running",
+					},
+				],
+			},
+			compiledFlow: { tasks: [controllerCompiledTask] },
+			controllerCompiledTask,
+			controllerSpecId: "adaptive.controller",
+			controllerStageId: "adaptive",
+			generatedSpecId: "adaptive.synthesis",
+			opId: "op-synthesis",
+			requestHash: "hash-synthesis",
+			request: {
+				id: "synthesis",
+				agent: "unit-scout",
+				prompt: "Synthesize the final answer.",
+				tools: ["read"],
+				outputProfile: "synthesis_v1",
+				inputs: [],
+				requiredReads: [],
+				compact: false,
+			},
+			dynamic: {
+				uses: "./controller.mjs",
+				mode: "graph-splice",
+				budget: {
+					maxAgents: 10,
+					maxConcurrency: 2,
+					maxRuntimeMs: 1000,
+					maxGraphMutations: 10,
+				},
+				permissions: {
+					approval: "auto",
+					allowDynamicRoles: true,
+					allowDynamicTools: true,
+				},
+				helpers: {},
+				workflows: {},
+				decisionLoop: {
+					allowedAgents: ["unit-scout"],
+					allowedTools: ["read"],
+					allowedOutputProfiles: ["synthesis_v1"],
+				},
+			},
+		});
+		assert.match(generated.compiledPrompt, /dynamic-task-result-v1/);
+		assert.match(generated.compiledPrompt, /claims` or `keyFindings/);
+		assert.match(generated.compiledPrompt, /sourceRefs` or `evidenceRefs/);
+		assert.match(generated.compiledPrompt, /joinable/);
+		assert.equal(generated.artifactGraph.output.refsMinItems, 1);
+		assert.equal(generated.artifactGraph.output.refsUrlValidation, true);
+	} finally {
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+	}
+});
 
 async function completeGeneratedTask(cwd, task, control, refs) {
 	setTaskTerminal(task, "completed", "completed", {

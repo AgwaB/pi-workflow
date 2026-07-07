@@ -871,6 +871,8 @@ export interface WorkflowRunRouting {
 	depth: WorkflowRouteDepth;
 	confidence: number;
 	reason: string;
+	/** Wall-clock duration of the opt-in router classifier pass in milliseconds. */
+	routerElapsedMs?: number;
 	routerModel?: string;
 	routerThinking?: string;
 }

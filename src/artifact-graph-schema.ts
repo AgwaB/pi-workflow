@@ -2,6 +2,7 @@ import { isAbsolute } from "node:path";
 
 import { DYNAMIC_OUTPUT_PROFILES } from "./dynamic-profiles.js";
 import { compactStrings } from "./strings.js";
+import { isSimpleJsonPath } from "./workflow-runtime.js";
 import {
 	APPROVAL_MODES,
 	FAST_MODES,
@@ -230,7 +231,8 @@ const JSON_PROJECTABLE_ARTIFACT_KINDS = new Set<WorkflowArtifactKind>([
 ]);
 const SOURCE_POLICY_VALUES = new Set(["success", "partial", "require-success"]);
 const STAGE_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
-const SIMPLE_JSON_PATH_PATTERN = /^(\$|\$(\.[A-Za-z0-9_-]+)+)$/;
+const SIMPLE_JSON_PATH_DIAGNOSTIC =
+	"must be $ or a simple dot JSON path with optional array selectors/slices like $.claims[0], $.claims[0:2], $.claims[*], or $[0:2]";
 
 const TOOL_OBJECT_KEYS = new Set([
 	"name",
@@ -1080,12 +1082,8 @@ function validateRequiredReadPolicyPath(
 		issues.push({ path, message: "must be a non-empty string" });
 		return;
 	}
-	if (!SIMPLE_JSON_PATH_PATTERN.test(value)) {
-		issues.push({
-			path,
-			message:
-				"must be $ or a simple dot JSON path like $.claims.items; array selectors are not supported",
-		});
+	if (!isSimpleJsonPath(value)) {
+		issues.push({ path, message: SIMPLE_JSON_PATH_DIAGNOSTIC });
 	}
 }
 
@@ -1121,11 +1119,10 @@ function validateRequiredRead(
 		return;
 	}
 	if (value.path !== undefined) {
-		if (!SIMPLE_JSON_PATH_PATTERN.test(value.path)) {
+		if (!isSimpleJsonPath(value.path)) {
 			issues.push({
 				path: `${path}.path`,
-				message:
-					"must be $ or a simple dot JSON path like $.claims.items; array selectors are not supported",
+				message: SIMPLE_JSON_PATH_DIAGNOSTIC,
 			});
 		}
 		if (!JSON_PROJECTABLE_ARTIFACT_KINDS.has(artifact)) {

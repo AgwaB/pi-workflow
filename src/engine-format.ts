@@ -260,8 +260,17 @@ function formatRunUsageLine(run: WorkflowRunRecord): string | undefined {
 		`tokens=${observed.totalTokens ?? "n/a"}`,
 		`in=${observed.inputTokens ?? "n/a"}`,
 		`out=${observed.outputTokens ?? "n/a"}`,
-		`tasksReporting=${observed.contributingTaskIds.length}/${run.tasks.length}`,
 	];
+	if (
+		observed.cacheReadInputTokens !== null ||
+		observed.cacheCreationInputTokens !== null
+	) {
+		parts.push(`cacheRead=${observed.cacheReadInputTokens ?? "n/a"}`);
+		parts.push(`cacheWrite=${observed.cacheCreationInputTokens ?? "n/a"}`);
+	}
+	parts.push(
+		`tasksReporting=${observed.contributingTaskIds.length}/${run.tasks.length}`,
+	);
 	return `usage=${parts.join(", ")}`;
 }
 

@@ -69,6 +69,7 @@ import {
 	workflowExperimentalFlagEnabled,
 } from "./experimental-speed-flags.js";
 import { writeWorkflowPartialOutputLedgerFromFile } from "./workflow-partial-output.js";
+import { PI_WORKFLOW_ROLE_ENV } from "./process-role.js";
 
 const DEFAULT_SUBAGENT_RUNS_ROOT = ".pi/workflow-subagents";
 const MAX_SUBAGENT_SESSION_ID_LENGTH = 64;
@@ -276,6 +277,56 @@ export async function runOneShotSubagentCall(
 	return (await api.runSubagent(options)) as OneShotSubagentEnvelope;
 }
 
+// @agwab/pi-subagent 0.4.x does not expose a supported per-run env option.
+// Scope the process env around its async launch so the durable worker (and the
+// Pi process it spawns) inherit worker role without external driver injection.
+let workflowWorkerRoleLaunchDepth = 0;
+let workflowWorkerRolePreviousValue: string | undefined;
+let workflowWorkerRolePreviouslySet = false;
+
+async function runSubagentWithWorkflowWorkerRole(
+	api: SubagentApi,
+	options: Record<string, unknown>,
+): Promise<SubagentResultEnvelope> {
+	enterWorkflowWorkerRoleEnv();
+	try {
+		return await api.runSubagent(options);
+	} finally {
+		exitWorkflowWorkerRoleEnv();
+	}
+}
+
+function enterWorkflowWorkerRoleEnv(): void {
+	if (workflowWorkerRoleLaunchDepth === 0) {
+		workflowWorkerRolePreviouslySet = Object.hasOwn(
+			process.env,
+			PI_WORKFLOW_ROLE_ENV,
+		);
+		workflowWorkerRolePreviousValue = process.env[PI_WORKFLOW_ROLE_ENV];
+	}
+	workflowWorkerRoleLaunchDepth += 1;
+	process.env[PI_WORKFLOW_ROLE_ENV] = "worker";
+}
+
+function exitWorkflowWorkerRoleEnv(): void {
+	workflowWorkerRoleLaunchDepth = Math.max(
+		0,
+		workflowWorkerRoleLaunchDepth - 1,
+	);
+	if (workflowWorkerRoleLaunchDepth > 0) {
+		process.env[PI_WORKFLOW_ROLE_ENV] = "worker";
+		return;
+	}
+	if (
+		workflowWorkerRolePreviouslySet &&
+		workflowWorkerRolePreviousValue !== undefined
+	)
+		process.env[PI_WORKFLOW_ROLE_ENV] = workflowWorkerRolePreviousValue;
+	else delete process.env[PI_WORKFLOW_ROLE_ENV];
+	workflowWorkerRolePreviouslySet = false;
+	workflowWorkerRolePreviousValue = undefined;
+}
+
 function nonEmptyEnv(
 	env: Record<string, string | undefined>,
 	key: string,
@@ -332,7 +383,9 @@ async function recordParentSubagentChildEvent(options: {
 	// Usage rides along on terminal events so a parent subagent can aggregate
 	// nested workflow spend. Engines older than 0.4.8 ignore the extra field.
 	const usage =
-		options.event === "started" ? undefined : childEventUsageSummary(options.task);
+		options.event === "started"
+			? undefined
+			: childEventUsageSummary(options.task);
 	await api
 		.recordSubagentChildEvent({
 			...parent,
@@ -384,8 +437,10 @@ interface SharedModelRateLimitBackoffState {
 	updatedAt: string;
 }
 
-const sharedModelRateLimitBackoffs =
-	new Map<string, SharedModelRateLimitBackoffState>();
+const sharedModelRateLimitBackoffs = new Map<
+	string,
+	SharedModelRateLimitBackoffState
+>();
 
 // Cross-process persistence for shared rate-limit backoffs. Provider rate
 // limits are account-level, so concurrent Pi processes (e.g. parallel eval
@@ -408,7 +463,10 @@ function validPersistedSharedBackoff(
 		return undefined;
 	const record = value as Record<string, unknown>;
 	const nextEligibleAtMs = record.nextEligibleAtMs;
-	if (typeof nextEligibleAtMs !== "number" || !Number.isFinite(nextEligibleAtMs))
+	if (
+		typeof nextEligibleAtMs !== "number" ||
+		!Number.isFinite(nextEligibleAtMs)
+	)
 		return undefined;
 	if (nextEligibleAtMs <= nowMs) return undefined;
 	if (nextEligibleAtMs - nowMs > RATE_LIMIT_TRANSIENT_RETRY_BACKOFF_MAX_MS)
@@ -694,11 +752,17 @@ export function observeLiveModelWorkerCompletion(
 		);
 	}
 	const recentMedianMs = medianOfDurations(state.recentExecutionMs);
-	if (recentMedianMs > state.baselineMs * ADAPTIVE_LIVE_MODEL_WORKER_SHRINK_RATIO) {
+	if (
+		recentMedianMs >
+		state.baselineMs * ADAPTIVE_LIVE_MODEL_WORKER_SHRINK_RATIO
+	) {
 		halveAdaptiveLiveModelWorkerLimit(state, "shrink");
 		return;
 	}
-	if (recentMedianMs < state.baselineMs * ADAPTIVE_LIVE_MODEL_WORKER_GROW_RATIO) {
+	if (
+		recentMedianMs <
+		state.baselineMs * ADAPTIVE_LIVE_MODEL_WORKER_GROW_RATIO
+	) {
 		state.limit = Math.min(
 			adaptiveLiveModelWorkerCeiling(),
 			state.limit + ADAPTIVE_LIVE_MODEL_WORKER_GROW_STEP,
@@ -1860,7 +1924,7 @@ export async function launchSubagentTask(
 		launched = await runWithLaunchSlot(
 			() => {
 				throwIfAborted(leaseSignal);
-				return api.runSubagent(subagentOptions);
+				return runSubagentWithWorkflowWorkerRole(api, subagentOptions);
 			},
 			() => {
 				launchStartedAt = nowIso();
@@ -2680,8 +2744,7 @@ async function materializeTerminalArtifactGraphResultInner(
 			exitCode: options.exitCode,
 			stderr,
 			subagentToolCallsPath: options.subagentToolCalls?.ref.path,
-			subagentToolCallsSummaryPath:
-				options.subagentToolCallsSummary?.ref.path,
+			subagentToolCallsSummaryPath: options.subagentToolCallsSummary?.ref.path,
 			subagentToolCallsArtifactCwd:
 				options.subagentToolCalls?.ref.artifactCwd ??
 				options.subagentToolCallsSummary?.ref.artifactCwd,
@@ -3320,7 +3383,7 @@ function metadataTextValues(metadata: unknown): string[] {
 function providerInputValidationFailure(text: string): boolean {
 	const lower = text.toLowerCase();
 	if (
-		/(?:\b429\b|rate_limit|rate limit|temporar(?:y|ily)|overloaded|timeout|timed out|\b5xx\b|\bhttp(?:\/\d(?:\.\d)?)?[ \/]?5\d\d\b|\bstatus(?: code)?[:= ]+5\d\d\b|\b5\d\d\s+(?:internal|bad gateway|service unavailable|gateway timeout|server error)\b)/.test(
+		/(?:\b429\b|rate_limit|rate limit|temporar(?:y|ily)|overloaded|timeout|timed out|\b5xx\b|\bhttp(?:\/\d(?:\.\d)?)?[ /]?5\d\d\b|\bstatus(?: code)?[:= ]+5\d\d\b|\b5\d\d\s+(?:internal|bad gateway|service unavailable|gateway timeout|server error)\b)/.test(
 			lower,
 		)
 	) {
@@ -3426,7 +3489,12 @@ async function recordSharedModelRateLimitBackoff(
 async function sharedModelRateLimitBackoffRemaining(
 	key: string,
 ): Promise<
-	| { key: string; nextEligibleAt: string; remainingMs: number; retryAfterMs: number }
+	| {
+			key: string;
+			nextEligibleAt: string;
+			remainingMs: number;
+			retryAfterMs: number;
+	  }
 	| undefined
 > {
 	await loadPersistedSharedModelRateLimitBackoffs();
@@ -3446,14 +3514,16 @@ async function sharedModelRateLimitBackoffRemaining(
 }
 
 function isRateLimitModelFailureText(text: string): boolean {
-	return /(?:\bhttp(?:\/\d(?:\.\d)?)?[ \/]?429\b|\bstatus(?: code)?[:= ]+429\b|\b429\s+(?:too many requests|rate[_ -]?limit)|rate[_ -]?limit|too many requests|quota exceeded)/i.test(
+	return /(?:\bhttp(?:\/\d(?:\.\d)?)?[ /]?429\b|\bstatus(?: code)?[:= ]+429\b|\b429\s+(?:too many requests|rate[_ -]?limit)|rate[_ -]?limit|too many requests|quota exceeded)/i.test(
 		text,
 	);
 }
 
 type RateLimitRetryAfterUnit = "millisecond" | "second" | "minute";
 
-function rateLimitRetryAfterUnit(unit: string | undefined): RateLimitRetryAfterUnit {
+function rateLimitRetryAfterUnit(
+	unit: string | undefined,
+): RateLimitRetryAfterUnit {
 	const lower = (unit ?? "").toLowerCase();
 	if (lower === "ms" || lower.startsWith("millisecond")) return "millisecond";
 	if (lower === "m" || lower.startsWith("min") || lower.startsWith("minute")) {
@@ -4038,7 +4108,9 @@ function toolCallArtifactRef(
 			typeof (artifact as SubagentArtifactRef).path === "string"
 		);
 	});
-	return ref ? { ...ref, artifactCwd: ref.artifactCwd ?? resultCwd } : undefined;
+	return ref
+		? { ...ref, artifactCwd: ref.artifactCwd ?? resultCwd }
+		: undefined;
 }
 
 function failedToolCallSummary(

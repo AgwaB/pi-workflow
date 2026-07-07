@@ -863,8 +863,7 @@ export async function duplicateRunGuardNotice(
 	const startedAgo = Number.isFinite(startedAgoMs)
 		? ` (started ${formatApproxDuration(startedAgoMs)} ago)`
 		: "";
-	const what =
-		target.kind === "dynamic" ? "dynamic task" : "workflow and task";
+	const what = target.kind === "dynamic" ? "dynamic task" : "workflow and task";
 	return [
 		`Duplicate launch guard: run ${existing.runId} is already active with the same ${what}${startedAgo}.`,
 		`Not starting a new run. Check /workflow status ${existing.runId}, or rerun with --force-new to really start another run.`,
@@ -939,7 +938,15 @@ async function handleRoutedRunRequest(
 }
 
 function formatRoutingLine(routing: WorkflowRunRouting): string {
-	return `Routing: ${routing.requested} → ${routing.decided} (depth ${routing.depth}, confidence ${routing.confidence}) — ${routing.reason}`;
+	const elapsed =
+		routing.routerElapsedMs === undefined
+			? ""
+			: `, router ${formatRoutingElapsed(routing.routerElapsedMs)}`;
+	return `Routing: ${routing.requested} → ${routing.decided} (depth ${routing.depth}, confidence ${routing.confidence}${elapsed}) — ${routing.reason}`;
+}
+
+function formatRoutingElapsed(ms: number): string {
+	return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
 }
 
 function workflowRunStartVerb(status: string): string {
