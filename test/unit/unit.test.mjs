@@ -13454,6 +13454,311 @@ test("streaming foreach keeps producer dependency for partial children that need
 	}
 });
 
+function perItemDispatchStreamingSpec(extraStages = []) {
+	return workflowSpec("unit-scout", {
+		artifactGraph: {
+			stages: [
+				{
+					id: "produce",
+					type: "single",
+					prompt: "Produce items",
+					output: { partial: { paths: ["$.items", "$.slots"] } },
+				},
+				{
+					id: "verify",
+					type: "foreach",
+					from: {
+						source: "produce",
+						path: "$.items",
+						streaming: { enabled: true },
+					},
+					sourceProjection: { include: ["$.slots"] },
+					each: { prompt: "Verify ${item}" },
+				},
+				...extraStages,
+			],
+		},
+	});
+}
+
+async function createRunningPartialProducerRun(cwd, spec, outputText) {
+	const compiled = await compileWorkflow(spec, { cwd, task: "Check items" });
+	const { run } = await createWorkflowRunRecord(
+		cwd,
+		compiled,
+		join(cwd, "workflows", "unit.json"),
+	);
+	await writeStaticRunArtifacts(cwd, run, compiled, spec);
+	const producer = taskBySpec(run, "produce.main");
+	producer.status = "running";
+	producer.statusDetail = "running";
+	producer.startedAt = new Date().toISOString();
+	mkdirSync(dirname(join(cwd, producer.files.output)), { recursive: true });
+	writeFileSync(join(cwd, producer.files.output), outputText, "utf8");
+	await writeRunRecord(cwd, run);
+	return { compiled, run, producer };
+}
+
+const PARTIAL_ITEM_A_SECTION =
+	'<partial-control>{"schema":"workflow-partial-output-v1","path":"$.items","items":[{"id":"ITEM_A","text":"A"}]}</partial-control>';
+const PARTIAL_SLOT_A_SECTION =
+	'<partial-control>{"schema":"workflow-partial-output-v1","path":"$.slots","items":[{"id":"SLOT_A","fact":"answer-42"}]}</partial-control>';
+
+test("per-item dispatch flag leaves non-streaming foreach scheduling identical", async () => {
+	async function runScenario(flagOn) {
+		const cwd = makeProject();
+		const prompts = captureSubagentPrompts();
+		const previousFlag = process.env.PI_WORKFLOW_PER_ITEM_DISPATCH;
+		if (flagOn) process.env.PI_WORKFLOW_PER_ITEM_DISPATCH = "1";
+		else delete process.env.PI_WORKFLOW_PER_ITEM_DISPATCH;
+		try {
+			writeAgent(cwd, "unit-scout", "read");
+			const spec = workflowSpec("unit-scout", {
+				artifactGraph: {
+					stages: [
+						{ id: "extract", type: "single", prompt: "Extract" },
+						{
+							id: "verify",
+							type: "foreach",
+							from: { source: "extract", path: "$.claims" },
+							each: { prompt: "Verify ${item}" },
+						},
+						{ id: "summary", type: "reduce", from: "verify", prompt: "Sum" },
+					],
+				},
+			});
+			const compiled = await compileWorkflow(spec, {
+				cwd,
+				task: "Check claims",
+			});
+			const { run } = await createWorkflowRunRecord(
+				cwd,
+				compiled,
+				join(cwd, "workflows", "unit.json"),
+			);
+			await writeStaticRunArtifacts(cwd, run, compiled, spec);
+			await completeTask(cwd, run.tasks[0], { claims: ["a", "b"] });
+			await writeRunRecord(cwd, run);
+			await scheduleRun(cwd, run.runId);
+			await scheduleRun(cwd, run.runId);
+			const current = await readRunRecord(cwd, run.runId);
+			return {
+				tasks: current.tasks.map((task) => ({
+					specId: task.specId,
+					status: task.status,
+					dependsOn: task.dependsOn ?? null,
+				})),
+				prompts: [...prompts],
+			};
+		} finally {
+			if (previousFlag === undefined)
+				delete process.env.PI_WORKFLOW_PER_ITEM_DISPATCH;
+			else process.env.PI_WORKFLOW_PER_ITEM_DISPATCH = previousFlag;
+			setSubagentApiForTests(undefined);
+			rmSync(cwd, {
+				recursive: true,
+				force: true,
+				maxRetries: 5,
+				retryDelay: 10,
+			});
+		}
+	}
+
+	const flagOff = await runScenario(false);
+	const flagOn = await runScenario(true);
+	assert.deepEqual(flagOn.tasks, flagOff.tasks);
+	assert.deepEqual(flagOn.prompts, flagOff.prompts);
+	assert.equal(flagOff.prompts.length, 2);
+});
+
+test("per-item dispatch launches projection-dependent partial children before producer completion", async () => {
+	const cwd = makeProject();
+	const prompts = captureSubagentPrompts();
+	const previousFlag = process.env.PI_WORKFLOW_PER_ITEM_DISPATCH;
+	process.env.PI_WORKFLOW_PER_ITEM_DISPATCH = "1";
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const { run } = await createRunningPartialProducerRun(
+			cwd,
+			perItemDispatchStreamingSpec(),
+			[PARTIAL_ITEM_A_SECTION, PARTIAL_SLOT_A_SECTION].join("\n"),
+		);
+
+		await scheduleRun(cwd, run.runId);
+		await scheduleRun(cwd, run.runId);
+		const current = await readRunRecord(cwd, run.runId);
+		assert.equal(taskBySpec(current, "produce.main").status, "running");
+		const child = taskBySpec(current, "verify.item_a");
+		assert.deepEqual(child.dependsOn, []);
+		assert.equal(child.foreachGenerated.itemSourceKind, "partial");
+		assert.equal(child.foreachGenerated.perItemDispatch, true);
+		assert.equal(child.status, "running");
+		assert.equal(
+			taskBySpec(current, "verify.item").statusDetail,
+			"foreach_streaming_waiting",
+		);
+		assert.equal(prompts.length, 1);
+		assert.match(prompts[0], /answer-42/);
+		assert.match(prompts[0], /"projectionSource":"partial-ledger"/);
+	} finally {
+		if (previousFlag === undefined)
+			delete process.env.PI_WORKFLOW_PER_ITEM_DISPATCH;
+		else process.env.PI_WORKFLOW_PER_ITEM_DISPATCH = previousFlag;
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+	}
+});
+
+test("per-item dispatch defers projection-dependent children until projection paths are published", async () => {
+	const cwd = makeProject();
+	const prompts = captureSubagentPrompts();
+	const previousFlag = process.env.PI_WORKFLOW_PER_ITEM_DISPATCH;
+	process.env.PI_WORKFLOW_PER_ITEM_DISPATCH = "1";
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const { run, producer } = await createRunningPartialProducerRun(
+			cwd,
+			perItemDispatchStreamingSpec(),
+			PARTIAL_ITEM_A_SECTION,
+		);
+
+		await scheduleRun(cwd, run.runId);
+		await scheduleRun(cwd, run.runId);
+		let current = await readRunRecord(cwd, run.runId);
+		const deferred = taskBySpec(current, "verify.item_a");
+		assert.deepEqual(deferred.dependsOn, ["produce.main"]);
+		assert.equal(deferred.foreachGenerated.perItemDispatch, undefined);
+		assert.equal(deferred.status, "pending");
+		assert.equal(prompts.length, 0);
+
+		const producerDir = dirname(join(cwd, producer.files.result));
+		writeFileSync(
+			join(cwd, producer.files.output),
+			[
+				PARTIAL_ITEM_A_SECTION,
+				PARTIAL_SLOT_A_SECTION,
+				'<partial-control>{"schema":"workflow-partial-output-v1","path":"$.items","items":[{"id":"ITEM_B","text":"B"}]}</partial-control>',
+			].join("\n"),
+			"utf8",
+		);
+		// The live backend refreshes the ledger from the streamed output; unit
+		// tests bypass the backend, so force a re-parse of the updated output.
+		rmSync(join(producerDir, "partial-control.json"), { force: true });
+
+		await scheduleRun(cwd, run.runId);
+		await scheduleRun(cwd, run.runId);
+		current = await readRunRecord(cwd, run.runId);
+		const stillDeferred = taskBySpec(current, "verify.item_a");
+		assert.deepEqual(stillDeferred.dependsOn, ["produce.main"]);
+		assert.equal(stillDeferred.status, "pending");
+		const activated = taskBySpec(current, "verify.item_b");
+		assert.deepEqual(activated.dependsOn, []);
+		assert.equal(activated.foreachGenerated.perItemDispatch, true);
+		assert.equal(activated.status, "running");
+		assert.equal(prompts.length, 1);
+		assert.match(prompts[0], /answer-42/);
+	} finally {
+		if (previousFlag === undefined)
+			delete process.env.PI_WORKFLOW_PER_ITEM_DISPATCH;
+		else process.env.PI_WORKFLOW_PER_ITEM_DISPATCH = previousFlag;
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+	}
+});
+
+test("per-item dispatch keeps launched items and applies sourcePolicy after producer failure", async () => {
+	const cwd = makeProject();
+	captureSubagentPrompts();
+	const previousFlag = process.env.PI_WORKFLOW_PER_ITEM_DISPATCH;
+	process.env.PI_WORKFLOW_PER_ITEM_DISPATCH = "1";
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const { run } = await createRunningPartialProducerRun(
+			cwd,
+			perItemDispatchStreamingSpec([
+				{ id: "summary", type: "reduce", from: "verify", prompt: "Sum" },
+			]),
+			[PARTIAL_ITEM_A_SECTION, PARTIAL_SLOT_A_SECTION].join("\n"),
+		);
+
+		await scheduleRun(cwd, run.runId);
+		await scheduleRun(cwd, run.runId);
+		let current = await readRunRecord(cwd, run.runId);
+		assert.equal(taskBySpec(current, "verify.item_a").status, "running");
+
+		await completeTask(cwd, taskBySpec(current, "verify.item_a"), {
+			verdict: "ok",
+		});
+		await completeTask(cwd, taskBySpec(current, "produce.main"), {}, "failed");
+		await writeRunRecord(cwd, current);
+		await scheduleRun(cwd, run.runId);
+		current = await readRunRecord(cwd, run.runId);
+		assert.equal(taskBySpec(current, "verify.item_a").status, "completed");
+		assert.equal(taskBySpec(current, "verify.item").status, "skipped");
+		assert.equal(
+			taskBySpec(current, "verify.item").statusDetail,
+			"skipped_after_dependency_failure",
+		);
+		assert.equal(taskBySpec(current, "summary.main").status, "skipped");
+	} finally {
+		if (previousFlag === undefined)
+			delete process.env.PI_WORKFLOW_PER_ITEM_DISPATCH;
+		else process.env.PI_WORKFLOW_PER_ITEM_DISPATCH = previousFlag;
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+	}
+});
+
+test("per-item dispatch requires the env flag even when projection paths are published", async () => {
+	const cwd = makeProject();
+	const prompts = captureSubagentPrompts();
+	const previousFlag = process.env.PI_WORKFLOW_PER_ITEM_DISPATCH;
+	delete process.env.PI_WORKFLOW_PER_ITEM_DISPATCH;
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const { run } = await createRunningPartialProducerRun(
+			cwd,
+			perItemDispatchStreamingSpec(),
+			[PARTIAL_ITEM_A_SECTION, PARTIAL_SLOT_A_SECTION].join("\n"),
+		);
+
+		await scheduleRun(cwd, run.runId);
+		await scheduleRun(cwd, run.runId);
+		const current = await readRunRecord(cwd, run.runId);
+		const child = taskBySpec(current, "verify.item_a");
+		assert.deepEqual(child.dependsOn, ["produce.main"]);
+		assert.equal(child.foreachGenerated.perItemDispatch, undefined);
+		assert.equal(child.status, "pending");
+		assert.equal(prompts.length, 0);
+	} finally {
+		if (previousFlag === undefined)
+			delete process.env.PI_WORKFLOW_PER_ITEM_DISPATCH;
+		else process.env.PI_WORKFLOW_PER_ITEM_DISPATCH = previousFlag;
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+	}
+});
+
 test("streaming foreach blocks if a producer changes a published partial item", async () => {
 	const cwd = makeProject();
 	captureSubagentPrompts();

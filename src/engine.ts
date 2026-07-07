@@ -147,6 +147,10 @@ import {
 	type WorkflowPartialOutputItem,
 } from "./workflow-partial-output.js";
 import {
+	PER_ITEM_DISPATCH_ENV,
+	workflowExperimentalFlagEnabled,
+} from "./experimental-speed-flags.js";
+import {
 	type CompiledDynamicWorkflowTask,
 	type CompiledTask,
 	type CompiledWorkflow,
@@ -1266,6 +1270,8 @@ async function materializeForeachTask(
 			generatedTasks: generated.tasks,
 			waitingForSources: extracted.waitingForSources ?? false,
 			minChunk: foreachStreamingMinChunk(template),
+			partialLedgerPathsBySourceSpecId:
+				extracted.partialLedgerPathsBySourceSpecId ?? new Map(),
 		});
 	}
 	const generatedSpecIds = generated.tasks.map((task) => task.id);
@@ -1318,22 +1324,48 @@ async function materializeStreamingForeachTask(input: {
 	generatedTasks: CompiledTask[];
 	waitingForSources: boolean;
 	minChunk: number;
+	partialLedgerPathsBySourceSpecId: Map<string, ReadonlySet<string>>;
 }): Promise<boolean> {
 	const sourceTaskSpecIdSet = new Set(input.sourceTaskSpecIds);
+	const perItemDispatch = workflowExperimentalFlagEnabled(PER_ITEM_DISPATCH_ENV);
 	const generatedTasksWithItemDeps = input.generatedTasks.map((task, index) => {
 		const itemMeta = input.itemMetas[index];
 		if (!itemMeta) return task;
+		const needsCompletedSourceContext =
+			partialGeneratedTaskNeedsCompletedSourceContext(task);
+		// Opt-in per-item dispatch: a partial child whose stage needs a
+		// sourceProjection of the producer control may still activate before the
+		// producer completes, but only when every projection path is already
+		// satisfiable from the producer's published partial output ledger.
+		// Otherwise the child defers on the completed producer (default W4-safe
+		// behavior). The decision is made once at materialization and persisted.
+		const perItemActivated =
+			perItemDispatch &&
+			itemMeta.sourceKind === "partial" &&
+			needsCompletedSourceContext &&
+			perItemProjectionSatisfiableFromPartials(
+				task,
+				input.partialLedgerPathsBySourceSpecId.get(itemMeta.sourceSpecId),
+			);
+		const dependsOn = replaceSourceDependenciesWithItemSource(
+			task.dependsOn ?? [],
+			sourceTaskSpecIdSet,
+			itemMeta,
+			{
+				keepPartialSourceDependency:
+					needsCompletedSourceContext && !perItemActivated,
+			},
+		);
 		return {
 			...task,
-			dependsOn: replaceSourceDependenciesWithItemSource(
-				task.dependsOn ?? [],
-				sourceTaskSpecIdSet,
-				itemMeta,
-				{
-					keepPartialSourceDependency:
-						partialGeneratedTaskNeedsCompletedSourceContext(task),
-				},
-			),
+			dependsOn,
+			...(perItemActivated
+				? {
+						contextDependsOn: [
+							...new Set([...dependsOn, itemMeta.sourceSpecId]),
+						],
+					}
+				: {}),
 			foreachGenerated: {
 				...(task.foreachGenerated ?? {
 					placeholderSpecId: input.placeholderSpecId,
@@ -1342,6 +1374,7 @@ async function materializeStreamingForeachTask(input: {
 				itemSourceSpecId: itemMeta.sourceSpecId,
 				itemSourceKind: itemMeta.sourceKind,
 				itemRef: itemMeta.itemRef,
+				...(perItemActivated ? { perItemDispatch: true as const } : {}),
 			},
 		};
 	});
@@ -1531,6 +1564,26 @@ function partialGeneratedTaskNeedsCompletedSourceContext(
 	);
 }
 
+// Per-item dispatch eligibility (PI_WORKFLOW_PER_ITEM_DISPATCH only): the
+// projection a partial child needs must be fully satisfiable from the
+// producer's published partial output ledger. requiredReads can never be
+// satisfied before producer completion because the producer artifacts do not
+// exist on disk yet, so any required read defers the child to the default
+// completed-producer barrier.
+function perItemProjectionSatisfiableFromPartials(
+	task: CompiledTask,
+	publishedPartialPaths: ReadonlySet<string> | undefined,
+): boolean {
+	const artifactGraph = task.artifactGraph;
+	if (!artifactGraph || artifactGraph.artifactAccess === "none") return false;
+	if ((artifactGraph.requiredReads?.length ?? 0) > 0) return false;
+	if ((artifactGraph.requiredReadPolicy?.length ?? 0) > 0) return false;
+	const include = artifactGraph.sourceProjection?.include ?? [];
+	if (include.length === 0) return false;
+	if (!publishedPartialPaths || publishedPartialPaths.size === 0) return false;
+	return include.every((path) => publishedPartialPaths.has(path));
+}
+
 interface ForeachExtractedItemMeta {
 	sourceSpecId: string;
 	sourceKind: "control" | "partial";
@@ -1552,9 +1605,14 @@ async function extractArtifactGraphForeachItems(
 	itemMetas?: ForeachExtractedItemMeta[];
 	error?: string;
 	waitingForSources?: boolean;
+	partialLedgerPathsBySourceSpecId?: Map<string, ReadonlySet<string>>;
 }> {
 	const items: unknown[] = [];
 	const itemMetas: ForeachExtractedItemMeta[] = [];
+	const partialLedgerPathsBySourceSpecId = new Map<
+		string,
+		ReadonlySet<string>
+	>();
 	const path = (stage.from as any)?.path;
 	if (typeof path !== "string" || !path.startsWith("$.")) {
 		return {
@@ -1567,6 +1625,9 @@ async function extractArtifactGraphForeachItems(
 			if (stage.streaming && !isTerminalTaskStatus(task.status)) {
 				const partial = await extractPartialForeachItems(cwd, task, path);
 				if (partial.error) return { error: partial.error };
+				if (partial.ledgerPaths) {
+					partialLedgerPathsBySourceSpecId.set(task.specId, partial.ledgerPaths);
+				}
 				for (const item of partial.items) {
 					items.push(item.item);
 					itemMetas.push({
@@ -1616,14 +1677,23 @@ async function extractArtifactGraphForeachItems(
 			error: `foreach extracted ${items.length} items, exceeding maxItems=${stage.maxItems}`,
 		};
 	}
-	return { items, itemMetas, waitingForSources };
+	return {
+		items,
+		itemMetas,
+		waitingForSources,
+		partialLedgerPathsBySourceSpecId,
+	};
 }
 
 async function extractPartialForeachItems(
 	cwd: string,
 	task: WorkflowTaskRunRecord,
 	path: string,
-): Promise<{ items: WorkflowPartialOutputItem[]; error?: string }> {
+): Promise<{
+	items: WorkflowPartialOutputItem[];
+	ledgerPaths?: ReadonlySet<string>;
+	error?: string;
+}> {
 	const partialPaths = task.artifactGraph?.output.partial?.paths ?? [];
 	if (!partialPaths.includes(path)) return { items: [] };
 	const taskDir = dirname(fromProjectPath(cwd, task.files.result));
@@ -1640,7 +1710,10 @@ async function extractPartialForeachItems(
 	if (!ledger) return { items: [] };
 	const fatal = hasFatalPartialOutputIssue(ledger);
 	if (fatal) return { items: [], error: fatal.message };
-	return { items: ledger.items.filter((item) => item.path === path) };
+	return {
+		items: ledger.items.filter((item) => item.path === path),
+		ledgerPaths: new Set(ledger.items.map((item) => item.path)),
+	};
 }
 
 async function launchPendingTaskAt(
