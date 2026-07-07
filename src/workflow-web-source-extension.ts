@@ -3,7 +3,7 @@ import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { isIP } from "node:net";
-import { dirname, extname, isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Type } from "typebox";
 
@@ -1825,9 +1825,3 @@ function extensionImportSpecifier(importPath: string): string {
 	return importPath;
 }
 
-export function workflowWebSourceModuleImportPath(modulePath: string): string {
-	return resolve(
-		dirname(modulePath),
-		`workflow-web-source-extension${extname(modulePath)}`,
-	);
-}
