@@ -704,6 +704,16 @@ export interface WorkflowTaskTimingRecord {
 	maxConcurrentLaunches?: number;
 	maxLiveModelWorkers?: number;
 	experimentalLaunchRampEnabled?: boolean;
+	adaptiveLiveModelWorkersEnabled?: boolean;
+	adaptiveLiveModelWorkers?: Record<
+		string,
+		{
+			limit: number;
+			lastDecision: string;
+			baselineMs?: number;
+			samples: number;
+		}
+	>;
 	executionStartedAt?: string;
 	executionCompletedAt?: string;
 	executionMs?: number | null;

@@ -212,6 +212,8 @@ import {
 	checkRequiredArtifactReads,
 	cleanupSubagentRun,
 	launchSubagentTask,
+	observeLiveModelWorkerCompletion,
+	recordSharedModelRateLimitBackoffForTests,
 	refreshRunFromSubagentArtifacts,
 	resolveLaunchControlTelemetryForTests,
 	setSubagentApiForTests,
@@ -11181,6 +11183,132 @@ test("experimental launch ramp shortens default release delay telemetry", () => 
 		else process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS = previousLiveWorkers;
 		setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
 	}
+});
+
+function withAdaptiveLiveWorkerEnv(overrides, run) {
+	const previousAdaptive = process.env.PI_WORKFLOW_ADAPTIVE_LIVE_WORKERS;
+	const previousLiveWorkers = process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS;
+	if (overrides.adaptive === undefined)
+		delete process.env.PI_WORKFLOW_ADAPTIVE_LIVE_WORKERS;
+	else process.env.PI_WORKFLOW_ADAPTIVE_LIVE_WORKERS = overrides.adaptive;
+	if (overrides.maxLiveWorkers === undefined)
+		delete process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS;
+	else process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS = overrides.maxLiveWorkers;
+	setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
+	const restore = () => {
+		if (previousAdaptive === undefined)
+			delete process.env.PI_WORKFLOW_ADAPTIVE_LIVE_WORKERS;
+		else process.env.PI_WORKFLOW_ADAPTIVE_LIVE_WORKERS = previousAdaptive;
+		if (previousLiveWorkers === undefined)
+			delete process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS;
+		else process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS = previousLiveWorkers;
+		setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
+	};
+	const result = run();
+	if (result && typeof result.finally === "function") {
+		return result.finally(restore);
+	}
+	restore();
+	return result;
+}
+
+test("adaptive live workers flag off keeps configured launch controls untouched", () => {
+	withAdaptiveLiveWorkerEnv({ maxLiveWorkers: "3" }, () => {
+		for (let i = 0; i < 10; i += 1) {
+			observeLiveModelWorkerCompletion("openai", 1_000);
+		}
+		const telemetry = resolveLaunchControlTelemetryForTests();
+		assert.equal(telemetry.maxLiveModelWorkers, 3);
+		assert.equal(telemetry.adaptiveLiveModelWorkersEnabled, undefined);
+		assert.equal(telemetry.adaptiveLiveModelWorkers, undefined);
+	});
+});
+
+test("adaptive live workers grow limit after healthy completions", () => {
+	withAdaptiveLiveWorkerEnv({ adaptive: "1" }, () => {
+		for (let i = 0; i < 4; i += 1) {
+			observeLiveModelWorkerCompletion("openai", 1_000);
+		}
+		let telemetry = resolveLaunchControlTelemetryForTests();
+		assert.equal(telemetry.adaptiveLiveModelWorkersEnabled, true);
+		assert.equal(telemetry.adaptiveLiveModelWorkers.openai.limit, 4);
+		assert.equal(
+			telemetry.adaptiveLiveModelWorkers.openai.lastDecision,
+			"start",
+		);
+		observeLiveModelWorkerCompletion("openai", 1_000);
+		telemetry = resolveLaunchControlTelemetryForTests();
+		assert.equal(telemetry.adaptiveLiveModelWorkers.openai.baselineMs, 1_000);
+		assert.equal(telemetry.adaptiveLiveModelWorkers.openai.limit, 6);
+		assert.equal(telemetry.adaptiveLiveModelWorkers.openai.lastDecision, "grow");
+		for (let i = 0; i < 6; i += 1) {
+			observeLiveModelWorkerCompletion("openai", 1_100);
+		}
+		telemetry = resolveLaunchControlTelemetryForTests();
+		assert.equal(telemetry.adaptiveLiveModelWorkers.openai.limit, 16);
+		assert.equal(telemetry.adaptiveLiveModelWorkers.openai.lastDecision, "grow");
+		assert.equal(telemetry.adaptiveLiveModelWorkers.openai.samples, 11);
+	});
+});
+
+test("adaptive live workers cap growth at configured live-worker limit", () => {
+	withAdaptiveLiveWorkerEnv({ adaptive: "1", maxLiveWorkers: "5" }, () => {
+		for (let i = 0; i < 10; i += 1) {
+			observeLiveModelWorkerCompletion("anthropic", 1_000);
+		}
+		const telemetry = resolveLaunchControlTelemetryForTests();
+		assert.equal(telemetry.maxLiveModelWorkers, 5);
+		assert.equal(telemetry.adaptiveLiveModelWorkers.anthropic.limit, 5);
+	});
+});
+
+test("adaptive live workers shrink limit on degraded completions", () => {
+	withAdaptiveLiveWorkerEnv({ adaptive: "1" }, () => {
+		for (let i = 0; i < 5; i += 1) {
+			observeLiveModelWorkerCompletion("openai", 1_000);
+		}
+		assert.equal(
+			resolveLaunchControlTelemetryForTests().adaptiveLiveModelWorkers.openai
+				.limit,
+			6,
+		);
+		for (let i = 0; i < 10; i += 1) {
+			observeLiveModelWorkerCompletion("openai", 10_000);
+		}
+		const telemetry = resolveLaunchControlTelemetryForTests();
+		assert.equal(telemetry.adaptiveLiveModelWorkers.openai.limit, 4);
+		assert.equal(
+			telemetry.adaptiveLiveModelWorkers.openai.lastDecision,
+			"shrink",
+		);
+	});
+});
+
+test("adaptive live workers shrink on shared rate-limit backoff", async () => {
+	await withAdaptiveLiveWorkerEnv({ adaptive: "1" }, async () => {
+		try {
+			for (let i = 0; i < 8; i += 1) {
+				observeLiveModelWorkerCompletion("openai", 1_000);
+			}
+			assert.equal(
+				resolveLaunchControlTelemetryForTests().adaptiveLiveModelWorkers
+					.openai.limit,
+				12,
+			);
+			await recordSharedModelRateLimitBackoffForTests(
+				"openai/gpt-large",
+				60_000,
+			);
+			const telemetry = resolveLaunchControlTelemetryForTests();
+			assert.equal(telemetry.adaptiveLiveModelWorkers.openai.limit, 6);
+			assert.equal(
+				telemetry.adaptiveLiveModelWorkers.openai.lastDecision,
+				"backoff_shrink",
+			);
+		} finally {
+			setSubagentApiForTests(undefined);
+		}
+	});
 });
 
 test("simple JSON path reads own properties only", () => {
