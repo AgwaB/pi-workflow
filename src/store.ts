@@ -32,6 +32,7 @@ import {
 	type CompiledLoopStageRecord,
 	WORKFLOW_RUN_TYPE,
 	type WorkflowIndexRecord,
+	type WorkflowRunProvenance,
 	type WorkflowRunRecord,
 	type WorkflowRunStatus,
 	type WorkflowTaskRunRecord,
@@ -1218,6 +1219,20 @@ export async function findRunRecordPath(
 	}
 	const runId = matches.includes(runIdOrPrefix) ? runIdOrPrefix : matches[0]!;
 	return workflowRunPath(cwd, runId);
+}
+
+/**
+ * True when a run was produced by a mock/fixture pipeline (for example
+ * `provenance.mode: "mock-screenshot"`) rather than a real execution. Mock
+ * runs must never surface in unfinished-run notices and are annotated in
+ * status listings.
+ */
+export function isMockRunProvenance(
+	provenance: WorkflowRunProvenance | undefined,
+): boolean {
+	const mode = provenance?.mode;
+	if (typeof mode !== "string") return false;
+	return mode === "mock" || mode.startsWith("mock-");
 }
 
 export async function readRunRecord(

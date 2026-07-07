@@ -12,6 +12,7 @@ import {
 	fromProjectPath,
 	indexSupervisorErrorPath,
 	isBlockedTaskResumableForResume,
+	isMockRunProvenance,
 	isTerminalWorkflowStatus,
 	isTerminalTaskStatus,
 	listRunRecords,
@@ -3311,11 +3312,17 @@ async function formatIndex(
 ): Promise<string> {
 	const blocks = await Promise.all(
 		index.runs.map(async (run) => {
+			const fullRun = await readRunRecord(cwd, run.runId).catch(
+				() => undefined,
+			);
+			const mockTag = isMockRunProvenance(fullRun?.provenance)
+				? ` mock(${fullRun?.provenance?.mode})`
+				: "";
 			const lines = [
-				`${run.runId} [${run.status}] type=${run.type} updated=${run.updatedAt}`,
+				`${run.runId} [${run.status}]${mockTag} type=${run.type} updated=${run.updatedAt}`,
 				`tasks=${run.taskSummary.completed}/${run.taskSummary.total} completed, running=${run.taskSummary.running}, pending=${run.taskSummary.pending}, blocked=${run.taskSummary.blocked}, failed=${run.taskSummary.failed}, skipped=${run.taskSummary.skipped}, interrupted=${run.taskSummary.interrupted}`,
 			];
-			for (const task of await indexTasksForStatus(cwd, run)) {
+			for (const task of indexTasksForStatus(run, fullRun)) {
 				const message = task.lastMessage ? ` — ${task.lastMessage}` : "";
 				const kind = task.kind && task.kind !== "main" ? ` ${task.kind}` : "";
 				lines.push(
@@ -3332,12 +3339,11 @@ type WorkflowIndexTaskEntry = NonNullable<
 	WorkflowIndexRecord["runs"][number]["tasks"]
 >[number];
 
-async function indexTasksForStatus(
-	cwd: string,
+function indexTasksForStatus(
 	run: WorkflowIndexRecord["runs"][number],
-): Promise<WorkflowIndexTaskEntry[]> {
+	fullRun: WorkflowRunRecord | undefined,
+): WorkflowIndexTaskEntry[] {
 	if (Array.isArray(run.tasks)) return run.tasks;
-	const fullRun = await readRunRecord(cwd, run.runId).catch(() => undefined);
 	return (
 		fullRun?.tasks.map((task) => ({
 			taskId: task.taskId,
