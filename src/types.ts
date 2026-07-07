@@ -869,6 +869,25 @@ export interface WorkflowRunProvenance {
 }
 
 /**
+ * Deterministic claim-support accounting computed after a direct dynamic
+ * run's synthesis completes. Fail-open: audit computation errors are recorded
+ * as `{ error }` on the run record instead of failing the run.
+ */
+export interface WorkflowDynamicRunAudit {
+	claimsTotal: number;
+	claimsWithSources: number;
+	claimsWithoutSources: number;
+	refsTotal: number;
+	uniqueSourceUrls: number;
+	sourceRefJoinFailures: number;
+	/** Bounded to 24 entries. */
+	unsupportedClaimIds: string[];
+	/** Which claim-bearing synthesis control arrays were counted. */
+	countedClaimKeys: string[];
+	synthesisTaskIds: string[];
+}
+
+/**
  * Optional degradation metadata computed when a run reaches a terminal
  * "completed" or "failed" status. Present only when the terminal status hides
  * a partial outcome: work was delivered despite task failures (final-stage
@@ -907,6 +926,8 @@ export interface WorkflowRunRecord {
 		events: string;
 		state: string;
 	};
+	/** Claim-support audit for direct dynamic runs (fail-open accounting). */
+	dynamicAudit?: WorkflowDynamicRunAudit | { error: string };
 	createdAt: string;
 	updatedAt: string;
 	specPath: string;

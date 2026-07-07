@@ -47,6 +47,12 @@ import {
 	type WorkflowRuntimeDefaults,
 } from "./workflow-runtime.js";
 import {
+	auditDynamicClaimSupport,
+	formatDynamicAuditSummary,
+	type DynamicAuditCollectedRefsInput,
+	type DynamicAuditSynthesisInput,
+} from "./dynamic-audit.js";
+import {
 	dynamicRunDir,
 	hashDynamicRequest,
 	readDynamicEvents,
@@ -753,6 +759,7 @@ export function formatRun(
 	lines.push(
 		`completion=${telemetry.completion.health}, outputRetries=${telemetry.retryCounts.output}, launchRetries=${telemetry.retryCounts.launch}, resumeEvents=${telemetry.resumeCounts.events}, contextLimitFailures=${telemetry.completion.contextLimitFailures}`,
 	);
+	if (run.dynamicAudit) lines.push(formatDynamicAuditSummary(run.dynamicAudit));
 
 	for (const task of run.tasks) {
 		lines.push(formatTask(task, detail));
@@ -1777,6 +1784,17 @@ async function executeDynamicControllerTask(
 		setTaskTerminal(task, outcome.taskStatus, outcome.statusDetail, {
 			lastMessage: outcome.message,
 		});
+		if (
+			outcome.taskStatus === "completed" &&
+			run.provenance?.mode === "direct-dynamic"
+		) {
+			run.dynamicAudit = await auditDirectDynamicControllerRun(
+				cwd,
+				run,
+				task,
+				outputForOutcome,
+			);
+		}
 		await writeRunRecord(cwd, run);
 		return outcome.taskStatus === "completed";
 	} catch (error) {
@@ -3257,6 +3275,62 @@ function dynamicControllerOutcomeFromOutput(
 		blockers,
 		omissions,
 	};
+}
+
+/**
+ * Fail-open claim-support audit for the built-in direct dynamic path. Runs
+ * after the controller's synthesis result is finalized; errors are recorded
+ * as `{ error }` on the run record and never fail the run.
+ */
+async function auditDirectDynamicControllerRun(
+	cwd: string,
+	run: WorkflowRunRecord,
+	controllerTask: WorkflowTaskRunRecord,
+	structuredOutput: unknown,
+): Promise<WorkflowRunRecord["dynamicAudit"]> {
+	try {
+		const { control } = normalizeDynamicControllerOutput(structuredOutput);
+		const outputTaskIds = new Set(
+			dynamicControlStringArray(control.outputTasks),
+		);
+		const generated = run.tasks.filter(
+			(candidate) =>
+				candidate.dynamicGenerated?.controllerSpecId === controllerTask.specId,
+		);
+		const synthesisTasks = generated.filter((candidate) =>
+			outputTaskIds.size > 0
+				? outputTaskIds.has(candidate.specId)
+				: candidate.dynamicGenerated?.outputProfile === "synthesis_v1",
+		);
+		const synthesisSpecIds = new Set(
+			synthesisTasks.map((candidate) => candidate.specId),
+		);
+		const synthesis: DynamicAuditSynthesisInput[] = [];
+		for (const candidate of synthesisTasks) {
+			if (candidate.status !== "completed") continue;
+			synthesis.push({
+				taskId: candidate.specId,
+				control: await readArtifactGraphControl(cwd, candidate).catch(
+					() => undefined,
+				),
+			});
+		}
+		const collected: DynamicAuditCollectedRefsInput[] = [];
+		for (const candidate of generated) {
+			if (candidate.status !== "completed") continue;
+			if (synthesisSpecIds.has(candidate.specId)) continue;
+			collected.push({
+				taskId: candidate.taskId,
+				specId: candidate.specId,
+				refs: await readJson(
+					join(dirname(fromProjectPath(cwd, candidate.files.result)), "refs.json"),
+				).catch(() => undefined),
+			});
+		}
+		return auditDynamicClaimSupport({ synthesis, collected });
+	} catch (error) {
+		return { error: error instanceof Error ? error.message : String(error) };
+	}
 }
 
 function dynamicControlStringArray(value: unknown): string[] {
