@@ -3492,9 +3492,7 @@ async function recordSharedModelRateLimitBackoff(
 	await persistSharedModelRateLimitBackoffs();
 }
 
-async function sharedModelRateLimitBackoffRemaining(
-	key: string,
-): Promise<
+async function sharedModelRateLimitBackoffRemaining(key: string): Promise<
 	| {
 			key: string;
 			nextEligibleAt: string;
@@ -3582,7 +3580,9 @@ function workflowAuthFile(): string {
 	return override ? override : join(homedir(), ".pi", "agent", "auth.json");
 }
 
-function providerAuthType(modelBackoffKey: string | undefined): string | undefined {
+function providerAuthType(
+	modelBackoffKey: string | undefined,
+): string | undefined {
 	const key = modelBackoffKey?.trim().toLowerCase();
 	if (!key || key === "default") return undefined;
 	try {

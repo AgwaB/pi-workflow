@@ -11101,18 +11101,18 @@ test("compiler warns when complex control fields lack prompt JSON skeletons", as
 			}),
 			{ cwd, specPath: "spec.json", task: "Report" },
 		);
-		assert.ok(
-			bad.warnings.some((w) =>
-				/requires \$\.sections\[\]\.points as a JSON array/.test(w),
-			),
-			`expected section points shape warning, got: ${JSON.stringify(bad.warnings)}`,
-		);
-		assert.ok(
-			bad.warnings.some((w) =>
-				/defines \$\.coverageGaps as a JSON object/.test(w),
-			),
-			`expected coverageGaps shape warning, got: ${JSON.stringify(bad.warnings)}`,
-		);
+		for (const expected of [
+			/requires \$\.sections as a JSON array/,
+			/requires \$\.evidenceIndex as a JSON array/,
+			/requires \$\.openQuestions as a JSON array/,
+			/requires \$\.sections\[\]\.points as a JSON array/,
+			/defines \$\.coverageGaps as a JSON object/,
+		]) {
+			assert.ok(
+				bad.warnings.some((w) => expected.test(w)),
+				`expected ${expected} shape warning, got: ${JSON.stringify(bad.warnings)}`,
+			);
+		}
 
 		const good = await compileWorkflow(
 			artifactGraphWorkflowSpec({
@@ -22944,10 +22944,7 @@ test("oauth provider rate-limit without retry hint uses subscription-window back
 	const previousAuthFile = process.env.PI_WORKFLOW_AUTH_FILE;
 	try {
 		const authFile = join(cwd, "auth.json");
-		writeFileSync(
-			authFile,
-			JSON.stringify({ anthropic: { type: "oauth" } }),
-		);
+		writeFileSync(authFile, JSON.stringify({ anthropic: { type: "oauth" } }));
 		process.env.PI_WORKFLOW_AUTH_FILE = authFile;
 		const beforeRefreshMs = Date.now();
 		const providerError = `Anthropic request failed: HTTP 429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account's rate limit. Please try again later."},"request_id":"req_unit_oauth_rate_limit"}`;
@@ -22979,7 +22976,8 @@ test("oauth provider rate-limit without retry hint uses subscription-window back
 			`persisted anthropic OAuth cooldown expected: ${JSON.stringify(persisted)}`,
 		);
 	} finally {
-		if (previousAuthFile === undefined) delete process.env.PI_WORKFLOW_AUTH_FILE;
+		if (previousAuthFile === undefined)
+			delete process.env.PI_WORKFLOW_AUTH_FILE;
 		else process.env.PI_WORKFLOW_AUTH_FILE = previousAuthFile;
 		setSubagentApiForTests(undefined);
 		rmSync(cwd, {

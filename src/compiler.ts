@@ -987,9 +987,8 @@ function shouldWarnForControlShape(input: {
 }): input is typeof input & { expectedShape: "array" | "object" } {
 	if (!input.expectedShape) return false;
 	if (isProtocolControlKey(input.parentPath, input.key)) return false;
-	if (input.isRequired && input.parentPath.includes("[]")) return true;
+	if (input.isRequired) return true;
 	return (
-		!input.isRequired &&
 		input.parentPath === "$" &&
 		input.expectedShape === "object" &&
 		promptMentionsControlKey(input.prompt, input.key)
@@ -1014,7 +1013,7 @@ function expectedJsonContainerShape(
 	schema: any,
 ): "array" | "object" | undefined {
 	if (schema?.type === "object") return "object";
-	if (isObjectArraySchema(schema)) return "array";
+	if (schema?.type === "array") return "array";
 	return undefined;
 }
 
