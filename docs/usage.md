@@ -228,6 +228,17 @@ This path-ref variant keeps the same planner/research/normalization/audit/final 
 
 Before claiming any speedup or flipping a default, see [Speed guardrails](speed-guardrails.md) for shortcuts that are blocked (e.g. verifier tiering, verifier-row skipping, default streaming) and the [speed-change release checklist](speed-change-checklist.md).
 
+### Opt-in tiered verification for deep-research
+
+`deep-research` still runs every verifier task at the same pinned thinking level by default; verifier tiering as a default remains a blocked shortcut under [Speed guardrails](speed-guardrails.md). For controlled experiments where tiered verifier effort is acceptable, use the explicit path-ref variant:
+
+```text
+/workflow validate ./workflows/deep-research/tiered-verification.spec.json
+/workflow run ./workflows/deep-research/tiered-verification.spec.json "Research this repository and verify the key claims."
+```
+
+The spec schema pins thinking per stage, not per foreach item, so this variant splits verification into two stages: a deterministic `verification-tiers` helper partitions sanitized candidates by their existing `verificationNeed` signal (`core` feeds `verify-core-claims` at high thinking; `useful`/`optional` feed `verify-tail-claims` at medium; candidates without a signal fall back to position order, first 8 to the core tier). Both stages use the same single-claim verifier prompt, the same control schema, `artifactAccess: none`, and the same verified-requires-url-plus-quote rule, and the audit gate consumes both stages' verifier rows. It is not registered as an official bundled workflow name and does not change package defaults. Treat speed/cost results as task-specific: claim a win only when the run's audit reports zero missing/duplicate/invalid verifier rows, zero sourceRef join failures, and no verified-floor regression. Any default adoption additionally requires a paired canary (same tasks, defaults vs variant, serial runs) before flipping anything.
+
 ### Verification outcome ontology
 
 The package exports a small verification outcome vocabulary for workflows that verify source-backed claims: `verified`, `partially_supported`, `unsupported`, `conflicting`, and `verification_blocked`. Bundled workflow helpers must use bundle-local shims that stay in parity with the package export, because helper imports are bundled from the workflow spec directory. `verification_blocked` means the verifier could not evaluate the claim because required evidence, source access, tool execution, or policy constraints blocked verification. It is not a weaker form of `verified`, never counts toward verified floors, and should remain visible in audit summaries so operators can decide whether to rerun, change source access, or treat the claim as unresolved.
