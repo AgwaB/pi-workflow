@@ -988,12 +988,6 @@ export interface WorkflowIndexRecord {
 	}>;
 }
 
-export interface WorkflowStructuredOutputContract {
-	requiredPaths?: string[];
-	arrays?: Array<{ path: string; minItems?: number; maxItems?: number }>;
-	maxStringChars?: Array<{ path: string; maxChars: number }>;
-}
-
 export interface WorktreeSnapshotRecord {
 	files?: string[];
 	hash?: string;

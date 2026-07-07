@@ -2084,10 +2084,6 @@ function metaValue(theme: Theme, text: string): string {
 	return fg(theme, "text", text);
 }
 
-function agentText(theme: Theme, text: string): string {
-	return fg(theme, "syntaxType", text);
-}
-
 function kvRow(
 	theme: Theme,
 	key: string,
@@ -2101,10 +2097,6 @@ function taskMetaLine(theme: Theme, pairs: Array<[string, string]>): string {
 	return pairs
 		.map(([key, value]) => kvRow(theme, key, value))
 		.join(` ${muted(theme, "·")} `);
-}
-
-function pathRow(theme: Theme, label: string, projectPath: string): string {
-	return `${metaLabel(theme, label)} ${pathText(theme, projectPath)}`;
 }
 
 function pathText(theme: Theme, projectPath: string): string {

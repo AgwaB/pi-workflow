@@ -14,14 +14,6 @@ const ACTIVE_EXPERIMENTAL_SPEED_FLAGS = [
 	EXPERIMENTAL_SAME_SESSION_REPAIR_ENV,
 ] as const;
 
-// Exported for compatibility with earlier experiments, but intentionally not
-// returned by enabledWorkflowExperimentalSpeedFlags because no flag-gated
-// runtime behavior is currently implemented for these deferred ideas.
-export const DEFERRED_EXPERIMENTAL_SPEED_FLAGS = [
-	CACHE_SHAPE_METRICS_ENV,
-	EXPERIMENTAL_DEPTH_ROUTER_ENV,
-] as const;
-
 const TRUE_PATTERN = /^(1|true|yes|on)$/i;
 
 export function workflowExperimentalFlagEnabled(

@@ -28,15 +28,6 @@ export type DynamicDecisionActionType =
 	| "synthesize"
 	| "stop";
 
-/**
- * @deprecated Planner criteria prose is no longer part of validated
- * dynamic-decision-v1 control JSON; put it in <analysis> instead.
- */
-export interface DynamicDecisionCriterion {
-	id: string;
-	description: string;
-}
-
 export interface DynamicDecisionArtifactRef {
 	kind: "workflow-artifact-ref";
 	taskId: string;
