@@ -826,6 +826,22 @@ export interface TaskSummary {
 	total: number;
 }
 
+/**
+ * Shape of `.pi/workflows/<runId>/supervisor.json` written by the run-lease
+ * heartbeat. `lastTaskTransitionAt`/`taskStatusCounts` are progress signals:
+ * `updatedAt` proves the supervisor process is alive, while
+ * `lastTaskTransitionAt` proves the run is actually making task progress.
+ */
+export interface WorkflowSupervisorRecord {
+	schemaVersion?: number;
+	ownerId?: string;
+	pid?: number;
+	updatedAt?: string;
+	lockFile?: string;
+	lastTaskTransitionAt?: string;
+	taskStatusCounts?: TaskSummary;
+}
+
 export interface WorkflowTaskResumeEvent {
 	at: string;
 	fromStatus: TaskRunStatus;

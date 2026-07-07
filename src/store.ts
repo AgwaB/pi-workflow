@@ -36,6 +36,7 @@ import {
 	type WorkflowRunProvenance,
 	type WorkflowRunRecord,
 	type WorkflowRunStatus,
+	type WorkflowSupervisorRecord,
 	type WorkflowTaskRunRecord,
 	type WorkflowTaskResumeEvent,
 	type TaskRunStatus,
@@ -43,7 +44,7 @@ import {
 } from "./types.js";
 
 const TERMINAL_INDEX_LIMIT = 50;
-const LEASE_STALE_MS = 30_000;
+export const LEASE_STALE_MS = 30_000;
 export const FAIL_FAST_CANCELLED_STATUS_DETAIL = "fail_fast_cancelled";
 const LEASE_ABSOLUTE_STALE_MS = 7 * 24 * 60 * 60 * 1000;
 const INDEX_LOCK_WAIT_MS = 5_000;
@@ -77,6 +78,18 @@ type RunLeaseTestHooks = {
 	}) => void | Promise<void>;
 };
 let runLeaseTestHooks: RunLeaseTestHooks = {};
+type RunProgressSnapshot = {
+	lastTaskTransitionAt?: string;
+	taskStatusCounts?: TaskSummary;
+};
+// In-memory per-(cwd,runId) task-progress registry. Heartbeats and run-record
+// writes happen in the same supervisor process, so writeRunRecord stamps a
+// transition timestamp here whenever any task status changes and the run-lease
+// heartbeat mirrors it into supervisor.json.
+const runProgressByRun = new Map<
+	string,
+	RunProgressSnapshot & { taskStatuses: Map<string, TaskRunStatus> }
+>();
 const TASK_STATUSES: Array<keyof Omit<TaskSummary, "total">> = [
 	"pending",
 	"running",
@@ -173,6 +186,47 @@ export function setRunLeaseTestHooksForTests(hooks?: RunLeaseTestHooks): void {
 	runLeaseTestHooks = hooks ?? {};
 }
 
+function runProgressKey(cwd: string, runId: string): string {
+	return `${cwd}\0${runId}`;
+}
+
+function recordRunProgress(cwd: string, run: WorkflowRunRecord): void {
+	const key = runProgressKey(cwd, run.runId);
+	const taskStatuses = new Map(
+		run.tasks.map((task) => [task.taskId, task.status]),
+	);
+	const taskStatusCounts: TaskSummary = { ...run.taskSummary };
+	const previous = runProgressByRun.get(key);
+	if (!previous) {
+		// First write in this process establishes the baseline only; a
+		// transition timestamp is recorded once a later write changes a status.
+		runProgressByRun.set(key, { taskStatuses, taskStatusCounts });
+		return;
+	}
+	const changed =
+		taskStatuses.size !== previous.taskStatuses.size ||
+		[...taskStatuses].some(
+			([taskId, status]) => previous.taskStatuses.get(taskId) !== status,
+		);
+	runProgressByRun.set(key, {
+		taskStatuses,
+		taskStatusCounts,
+		lastTaskTransitionAt: changed ? nowIso() : previous.lastTaskTransitionAt,
+	});
+}
+
+export function runProgressSnapshot(
+	cwd: string,
+	runId: string,
+): RunProgressSnapshot | undefined {
+	const entry = runProgressByRun.get(runProgressKey(cwd, runId));
+	if (!entry) return undefined;
+	return {
+		lastTaskTransitionAt: entry.lastTaskTransitionAt,
+		taskStatusCounts: entry.taskStatusCounts,
+	};
+}
+
 export async function withRunLease<T>(
 	cwd: string,
 	runId: string,
@@ -191,18 +245,38 @@ export async function withRunLease<T>(
 		abortController.abort(asLeaseError(error));
 	};
 	const supervisorFile = join(dir, "supervisor.json");
+	// Progress fields written by a previous lease owner are carried forward so
+	// short-lived lease holders (for example status refreshers in another
+	// process) never erase the run's last known task-progress signal.
+	const carriedProgress = await readJson<WorkflowSupervisorRecord>(
+		supervisorFile,
+	)
+		.then(
+			(record): RunProgressSnapshot => ({
+				lastTaskTransitionAt: record?.lastTaskTransitionAt,
+				taskStatusCounts: record?.taskStatusCounts,
+			}),
+		)
+		.catch((): RunProgressSnapshot => ({}));
 	const heartbeat = async (): Promise<void> => {
 		assertLeaseNotAborted(abortController.signal);
 		await assertLockOwner(lockFile, ownerId);
 		const timestamp = nowIso();
 		const now = new Date();
 		await utimes(lockFile, now, now);
+		const progress = runProgressSnapshot(cwd, runId);
+		const lastTaskTransitionAt =
+			progress?.lastTaskTransitionAt ?? carriedProgress.lastTaskTransitionAt;
+		const taskStatusCounts =
+			progress?.taskStatusCounts ?? carriedProgress.taskStatusCounts;
 		await writeJsonAtomic(supervisorFile, {
 			schemaVersion: 1,
 			ownerId,
 			pid: process.pid,
 			updatedAt: timestamp,
 			lockFile: toProjectPath(cwd, lockFile),
+			...(lastTaskTransitionAt ? { lastTaskTransitionAt } : {}),
+			...(taskStatusCounts ? { taskStatusCounts } : {}),
 		});
 	};
 
@@ -509,6 +583,9 @@ export async function writeRunRecord(
 	const derived = deriveRunStatus(run);
 	Object.assign(run, derived);
 	await writeJsonAtomic(workflowRunPath(cwd, run.runId), run);
+	if (isTerminalWorkflowStatus(run.status))
+		runProgressByRun.delete(runProgressKey(cwd, run.runId));
+	else recordRunProgress(cwd, run);
 	scheduleIndexUpdate(cwd, run.runId, {
 		immediate: isTerminalWorkflowStatus(run.status),
 	});

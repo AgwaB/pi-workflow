@@ -15,6 +15,7 @@ import {
 	isMockRunProvenance,
 	isTerminalWorkflowStatus,
 	isTerminalTaskStatus,
+	LEASE_STALE_MS,
 	listRunRecords,
 	readIndex,
 	readJson,
@@ -143,6 +144,7 @@ import {
 	type WorkflowIndexRecord,
 	type WorkflowRunRecord,
 	type WorkflowRunRouting,
+	type WorkflowSupervisorRecord,
 	type WorkflowTaskRunRecord,
 } from "./types.js";
 
@@ -636,6 +638,82 @@ export async function scheduleRun(
 	});
 }
 
+/** A running run counts as making no task progress after this long. */
+export const TASK_PROGRESS_STALL_MS = 10 * 60_000;
+/** Supervisor heartbeat older than 2x the lease-stale threshold is lost. */
+const SUPERVISOR_HEARTBEAT_LOST_MS = 2 * LEASE_STALE_MS;
+
+export interface WorkflowRunStallInfo {
+	kind: "no-progress" | "heartbeat-lost";
+	ageMs: number;
+}
+
+/**
+ * Detects the two silent-stall shapes of a `running` run:
+ * - `heartbeat-lost`: supervisor.json stopped updating (supervisor gone).
+ * - `no-progress`: heartbeat is fresh (supervisor alive) but no task status
+ *   has transitioned for TASK_PROGRESS_STALL_MS — liveness without progress.
+ */
+export function detectRunStall(
+	run: Pick<WorkflowRunRecord, "status" | "createdAt">,
+	supervisor: WorkflowSupervisorRecord | undefined,
+	nowMs = Date.now(),
+): WorkflowRunStallInfo | undefined {
+	if (run.status !== "running" || !supervisor) return undefined;
+	const heartbeatMs = parseIsoTimeMs(supervisor.updatedAt);
+	if (heartbeatMs === undefined) return undefined;
+	const heartbeatAgeMs = Math.max(0, nowMs - heartbeatMs);
+	if (heartbeatAgeMs >= SUPERVISOR_HEARTBEAT_LOST_MS)
+		return { kind: "heartbeat-lost", ageMs: heartbeatAgeMs };
+	const progressCapable =
+		supervisor.lastTaskTransitionAt !== undefined ||
+		supervisor.taskStatusCounts !== undefined;
+	if (!progressCapable) return undefined;
+	const transitionMs =
+		parseIsoTimeMs(supervisor.lastTaskTransitionAt) ??
+		parseIsoTimeMs(run.createdAt);
+	if (transitionMs === undefined) return undefined;
+	const ageMs = Math.max(0, nowMs - transitionMs);
+	if (ageMs < TASK_PROGRESS_STALL_MS) return undefined;
+	return { kind: "no-progress", ageMs };
+}
+
+export function formatRunStallWarning(
+	run: Pick<WorkflowRunRecord, "runId" | "status" | "createdAt">,
+	supervisor: WorkflowSupervisorRecord | undefined,
+	nowMs = Date.now(),
+): string | undefined {
+	const stall = detectRunStall(run, supervisor, nowMs);
+	if (!stall) return undefined;
+	if (stall.kind === "heartbeat-lost")
+		return `⚠ supervisor heartbeat lost (last heartbeat ${formatStallAge(stall.ageMs)} ago while run says running; inspect /workflow logs ${run.runId})`;
+	return `⚠ no task progress for ${formatStallAge(stall.ageMs)} (heartbeat alive — possible stall; inspect /workflow logs ${run.runId})`;
+}
+
+function formatStallAge(ms: number): string {
+	const minutes = Math.floor(ms / 60_000);
+	if (minutes >= 60) return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+	if (minutes >= 1) return `${minutes}m`;
+	return `${Math.max(0, Math.floor(ms / 1000))}s`;
+}
+
+function parseIsoTimeMs(value: string | undefined): number | undefined {
+	if (!value) return undefined;
+	const parsed = Date.parse(value);
+	return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+async function readRunSupervisor(
+	cwd: string,
+	runId: string,
+): Promise<WorkflowSupervisorRecord | undefined> {
+	try {
+		return await readJson<WorkflowSupervisorRecord>(supervisorPath(cwd, runId));
+	} catch {
+		return undefined;
+	}
+}
+
 export async function formatStatus(cwd: string): Promise<string> {
 	const cached = await readIndex(cwd);
 	if (cached) {
@@ -682,7 +760,8 @@ export async function formatRunDetails(
 	runIdOrPrefix: string,
 ): Promise<string> {
 	const { run, warning } = await refreshRunForFormat(cwd, runIdOrPrefix);
-	return prependRefreshWarning(formatRun(run, "full"), warning);
+	const supervisor = await readRunSupervisor(cwd, run.runId);
+	return prependRefreshWarning(formatRun(run, "full", { supervisor }), warning);
 }
 
 export async function formatRunStatus(
@@ -690,7 +769,11 @@ export async function formatRunStatus(
 	runIdOrPrefix: string,
 ): Promise<string> {
 	const { run, warning } = await refreshRunForFormat(cwd, runIdOrPrefix);
-	return prependRefreshWarning(formatRun(run, "summary"), warning);
+	const supervisor = await readRunSupervisor(cwd, run.runId);
+	return prependRefreshWarning(
+		formatRun(run, "summary", { supervisor }),
+		warning,
+	);
 }
 
 export async function formatLogs(
@@ -737,6 +820,7 @@ function runFailurePolicyEnabled(run: WorkflowRunRecord): boolean {
 export function formatRun(
 	run: WorkflowRunRecord,
 	detail: "summary" | "full" = "summary",
+	options: { supervisor?: WorkflowSupervisorRecord; nowMs?: number } = {},
 ): string {
 	const telemetry = summarizeWorkflowTelemetry(run);
 	const failureClasses = summarizeTaskFailureClasses(run.tasks);
@@ -753,6 +837,12 @@ export function formatRun(
 	lines.push(
 		`completion=${telemetry.completion.health}, outputRetries=${telemetry.retryCounts.output}, launchRetries=${telemetry.retryCounts.launch}, resumeEvents=${telemetry.resumeCounts.events}, contextLimitFailures=${telemetry.completion.contextLimitFailures}`,
 	);
+	const stallWarning = formatRunStallWarning(
+		run,
+		options.supervisor,
+		options.nowMs ?? Date.now(),
+	);
+	if (stallWarning) lines.push(stallWarning);
 
 	for (const task of run.tasks) {
 		lines.push(formatTask(task, detail));
@@ -3352,6 +3442,14 @@ async function formatIndex(
 				`${run.runId} [${run.status}]${mockTag} type=${run.type} updated=${run.updatedAt}`,
 				`tasks=${run.taskSummary.completed}/${run.taskSummary.total} completed, running=${run.taskSummary.running}, pending=${run.taskSummary.pending}, blocked=${run.taskSummary.blocked}, failed=${run.taskSummary.failed}, skipped=${run.taskSummary.skipped}, interrupted=${run.taskSummary.interrupted}`,
 			];
+			const stallWarning =
+				run.status === "running"
+					? formatRunStallWarning(
+							run,
+							await readRunSupervisor(cwd, run.runId),
+						)
+					: undefined;
+			if (stallWarning) lines.push(stallWarning);
 			for (const task of indexTasksForStatus(run, fullRun)) {
 				const message = task.lastMessage ? ` — ${task.lastMessage}` : "";
 				const kind = task.kind && task.kind !== "main" ? ` ${task.kind}` : "";

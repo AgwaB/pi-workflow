@@ -7,8 +7,14 @@ import {
 	fromProjectPath,
 	listRunRecords,
 	readIndex,
+	readJson,
 	readRunRecord,
+	supervisorPath,
 } from "./store.js";
+import {
+	detectRunStall,
+	type WorkflowRunStallInfo,
+} from "./engine.js";
 import {
 	diagnoseWorkflowRunHealth,
 	diagnoseWorkflowTaskHealth,
@@ -22,6 +28,7 @@ import {
 	WORKFLOW_RUN_TYPE,
 	type TaskRunStatus,
 	type TaskSummary,
+	type WorkflowSupervisorRecord,
 } from "./types.js";
 
 const REFRESH_INTERVAL_MS = 1_000;
@@ -72,6 +79,7 @@ export async function showWorkflowView(
 export class WorkflowView implements Component {
 	private mode: ViewMode = "runs";
 	private flows: WorkflowSummary[] = [];
+	private supervisors = new Map<string, WorkflowSupervisorRecord>();
 	private selectedFlow = 0;
 	private selectedStage = 0;
 	private selectedTask = 0;
@@ -238,6 +246,7 @@ export class WorkflowView implements Component {
 		try {
 			const flows = await loadFlowSummaries(this.cwd, this.initialRunId);
 			this.flows = flows;
+			this.supervisors = await loadRunSupervisors(this.cwd, flows);
 			this.selectedFlow = clampIndex(this.selectedFlow, flows.length);
 			const initialRunId = this.initialRunId;
 			if (initialRunId && this.loading) {
@@ -630,11 +639,13 @@ export class WorkflowView implements Component {
 				health.state === "completed"
 					? ""
 					: ` ${muted(this.theme, "·")} ${healthLabel(this.theme, health)}`;
+			const stallBadge = this.stallBadge(flow);
+			const stallText = stallBadge ? ` ${stallBadge}` : "";
 			const baseRight = `${statusColumn(this.theme, flow.status, runStatusLabel(flow), statusWidth)}  ${progressBar(this.theme, flow.taskSummary, 5)} ${metaValue(this.theme, runIdText)}`;
 			const right =
 				width >= 90
-					? `${baseRight} ${muted(this.theme, "·")} ${metaLabel(this.theme, "start")} ${metaValue(this.theme, timestampText(flow.createdAt))}${healthText}`
-					: `${baseRight}${healthText}`;
+					? `${baseRight} ${muted(this.theme, "·")} ${metaLabel(this.theme, "start")} ${metaValue(this.theme, timestampText(flow.createdAt))}${healthText}${stallText}`
+					: `${baseRight}${healthText}${stallText}`;
 			const line = joinColumns(left, right, width, 17);
 			lines.push(selectedLine(this.theme, line, width, selected, true));
 		}
@@ -1103,8 +1114,10 @@ export class WorkflowView implements Component {
 		detailRun?: WorkflowRunRecord,
 	): string[] {
 		const health = diagnoseWorkflowRunHealth(detailRun ?? flow);
+		const stallBadge = this.stallBadge(flow);
 		return [
 			`${statusGlyph(this.theme, flow.status)} ${strong(this.theme, flow.name ?? flow.type)} ${statusBadge(this.theme, flow.status, runStatusLabel(flow))}`,
+			...(stallBadge ? [stallBadge] : []),
 			progressBar(this.theme, flow.taskSummary, 8),
 			taskMetaLine(this.theme, [
 				["run", shortId(flow.runId)],
@@ -1127,6 +1140,14 @@ export class WorkflowView implements Component {
 			]),
 			...this.runHealthLines(health),
 		];
+	}
+
+	private stallBadge(
+		flow: Pick<WorkflowSummary, "runId" | "status" | "createdAt">,
+	): string {
+		const stall = detectRunStall(flow, this.supervisors.get(flow.runId));
+		if (!stall) return "";
+		return stallBadgeText(this.theme, stall);
 	}
 
 	private runHealthLines(health: WorkflowProgressHealth): string[] {
@@ -1162,8 +1183,10 @@ export class WorkflowView implements Component {
 
 	private runDetailSummaryLines(run: WorkflowRunRecord): string[] {
 		const health = diagnoseWorkflowRunHealth(run);
+		const stallBadge = this.stallBadge(run);
 		const lines = [
 			`${statusGlyph(this.theme, run.status)} ${strong(this.theme, run.name ?? run.type)} ${statusBadge(this.theme, run.status)}`,
+			...(stallBadge ? [stallBadge] : []),
 			progressBar(this.theme, run.taskSummary, 10),
 			taskMetaLine(this.theme, [
 				["tasks", `${run.taskSummary.completed}/${run.taskSummary.total}`],
@@ -1278,6 +1301,24 @@ async function loadFlowSummaries(
 	}
 
 	return flows;
+}
+
+async function loadRunSupervisors(
+	cwd: string,
+	flows: WorkflowSummary[],
+): Promise<Map<string, WorkflowSupervisorRecord>> {
+	const supervisors = new Map<string, WorkflowSupervisorRecord>();
+	await Promise.all(
+		flows
+			.filter((flow) => flow.status === "running")
+			.map(async (flow) => {
+				const record = await readJson<WorkflowSupervisorRecord>(
+					supervisorPath(cwd, flow.runId),
+				).catch(() => undefined);
+				if (record) supervisors.set(flow.runId, record);
+			}),
+	);
+	return supervisors;
 }
 
 function runToSummary(cwd: string, run: WorkflowRunRecord): WorkflowSummary {
@@ -1535,6 +1576,26 @@ function statusColor(status: WorkflowRunStatus | TaskRunStatus): string {
 
 function statusText(status: WorkflowRunStatus | TaskRunStatus): string {
 	return status;
+}
+
+function stallBadgeText(theme: Theme, stall: WorkflowRunStallInfo): string {
+	const label =
+		stall.kind === "heartbeat-lost"
+			? `HB LOST ${stallAgeText(stall.ageMs)}`
+			: `STALL ${stallAgeText(stall.ageMs)}`;
+	return fg(
+		theme,
+		stall.kind === "heartbeat-lost" ? "error" : "warning",
+		strong(theme, label),
+	);
+}
+
+function stallAgeText(ms: number): string {
+	const minutes = Math.floor(ms / 60_000);
+	if (minutes >= 60)
+		return `${Math.floor(minutes / 60)}h${minutes % 60 > 0 ? ` ${minutes % 60}m` : ""}`;
+	if (minutes >= 1) return `${minutes}m`;
+	return `${Math.max(0, Math.floor(ms / 1000))}s`;
 }
 
 function healthColor(health: WorkflowProgressHealth): string {

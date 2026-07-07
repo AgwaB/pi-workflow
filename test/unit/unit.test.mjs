@@ -35525,3 +35525,249 @@ test("workflow output repair leaves string rows untouched when items require mul
 		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 	}
 });
+
+function stallProgressTask(runId, status) {
+	return {
+		taskId: "task-1",
+		specId: "main.main",
+		agent: "unit-scout",
+		status,
+		statusDetail: status,
+		runtime: { model: "test-model", thinking: "none" },
+		worktree: { enabled: false },
+		files: {
+			output: `.pi/workflows/${runId}/tasks/task-1/output.md`,
+			stderr: `.pi/workflows/${runId}/tasks/task-1/stderr.log`,
+			result: `.pi/workflows/${runId}/tasks/task-1/result.json`,
+		},
+		tools: ["read"],
+	};
+}
+
+function stallProgressRun(cwd, runId, status, createdAt) {
+	const tasks = [stallProgressTask(runId, status)];
+	return {
+		schemaVersion: 1,
+		runId,
+		name: "stall-unit",
+		type: WORKFLOW_RUN_TYPE,
+		status: deriveWorkflowStatus(summarizeTasks(tasks)),
+		taskSummary: summarizeTasks(tasks),
+		cwd,
+		backend: { type: "local-pi", mode: "headless" },
+		createdAt,
+		updatedAt: createdAt,
+		specPath: "workflows/stall-unit.json",
+		tasks,
+	};
+}
+
+test("run lease heartbeat carries task progress fields after a task transition", async () => {
+	const cwd = makeProject();
+	const runId = "workflow_unit_heartbeat_progress";
+	setRunLeaseTestHooksForTests({ heartbeatIntervalMs: 25 });
+	try {
+		const run = stallProgressRun(
+			cwd,
+			runId,
+			"pending",
+			new Date().toISOString(),
+		);
+		await withRunLease(cwd, runId, async () => {
+			await writeRunRecord(cwd, run);
+			run.tasks[0].status = "running";
+			run.tasks[0].statusDetail = "running";
+			await writeRunRecord(cwd, run);
+			await sleep(120);
+		});
+		const supervisor = JSON.parse(
+			readFileSync(supervisorPath(cwd, runId), "utf8"),
+		);
+		assert.ok(
+			supervisor.lastTaskTransitionAt,
+			"heartbeat records lastTaskTransitionAt after a task transition",
+		);
+		assert.ok(
+			Number.isFinite(Date.parse(supervisor.lastTaskTransitionAt)),
+			"lastTaskTransitionAt is a valid timestamp",
+		);
+		assert.ok(
+			Date.now() - Date.parse(supervisor.lastTaskTransitionAt) < 60_000,
+			"lastTaskTransitionAt is recent",
+		);
+		assert.equal(supervisor.taskStatusCounts.running, 1);
+		assert.equal(supervisor.taskStatusCounts.pending, 0);
+		assert.equal(supervisor.taskStatusCounts.total, 1);
+		assert.ok(supervisor.updatedAt, "heartbeat still records updatedAt");
+	} finally {
+		setRunLeaseTestHooksForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
+	}
+});
+
+async function stallFormatterFixture(cwd, runId, supervisor) {
+	const createdAt = new Date(Date.now() - 60 * 60_000).toISOString();
+	const run = stallProgressRun(cwd, runId, "running", createdAt);
+	await writeJsonAtomic(join(cwd, ".pi", "workflows", runId, "run.json"), run);
+	await writeJsonAtomic(supervisorPath(cwd, runId), supervisor);
+	const loadedRun = await readRunRecord(cwd, runId);
+	const loadedSupervisor = JSON.parse(
+		readFileSync(supervisorPath(cwd, runId), "utf8"),
+	);
+	return { loadedRun, loadedSupervisor };
+}
+
+test("formatRun appends stall warning when heartbeat is fresh but task transitions are stale", async () => {
+	const cwd = makeProject();
+	const runId = "workflow_unit_stall_warn";
+	try {
+		const nowMs = Date.now();
+		const { loadedRun, loadedSupervisor } = await stallFormatterFixture(
+			cwd,
+			runId,
+			{
+				schemaVersion: 1,
+				ownerId: "123-abc",
+				pid: 123,
+				updatedAt: new Date(nowMs - 5_000).toISOString(),
+				lockFile: `.pi/workflows/${runId}/supervisor.lock`,
+				lastTaskTransitionAt: new Date(nowMs - 14 * 60_000).toISOString(),
+				taskStatusCounts: {
+					pending: 0,
+					running: 1,
+					blocked: 0,
+					completed: 0,
+					failed: 0,
+					skipped: 0,
+					interrupted: 0,
+					total: 1,
+				},
+			},
+		);
+		const text = formatRun(loadedRun, "summary", {
+			supervisor: loadedSupervisor,
+			nowMs,
+		});
+		assert.match(
+			text,
+			/⚠ no task progress for 14m \(heartbeat alive — possible stall; inspect \/workflow logs workflow_unit_stall_warn\)/,
+		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
+	}
+});
+
+test("formatRun omits stall warning when task transitions are recent", async () => {
+	const cwd = makeProject();
+	const runId = "workflow_unit_stall_fresh";
+	try {
+		const nowMs = Date.now();
+		const { loadedRun, loadedSupervisor } = await stallFormatterFixture(
+			cwd,
+			runId,
+			{
+				schemaVersion: 1,
+				ownerId: "123-abc",
+				pid: 123,
+				updatedAt: new Date(nowMs - 5_000).toISOString(),
+				lockFile: `.pi/workflows/${runId}/supervisor.lock`,
+				lastTaskTransitionAt: new Date(nowMs - 2 * 60_000).toISOString(),
+				taskStatusCounts: {
+					pending: 0,
+					running: 1,
+					blocked: 0,
+					completed: 0,
+					failed: 0,
+					skipped: 0,
+					interrupted: 0,
+					total: 1,
+				},
+			},
+		);
+		const text = formatRun(loadedRun, "summary", {
+			supervisor: loadedSupervisor,
+			nowMs,
+		});
+		assert.doesNotMatch(text, /no task progress/);
+		assert.doesNotMatch(text, /heartbeat lost/);
+		assert.doesNotMatch(text, /⚠/);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
+	}
+});
+
+test("formatRun surfaces supervisor heartbeat lost while run says running", async () => {
+	const cwd = makeProject();
+	const runId = "workflow_unit_stall_hb_lost";
+	try {
+		const nowMs = Date.now();
+		const { loadedRun, loadedSupervisor } = await stallFormatterFixture(
+			cwd,
+			runId,
+			{
+				schemaVersion: 1,
+				ownerId: "123-abc",
+				pid: 123,
+				updatedAt: new Date(nowMs - 3 * 60_000).toISOString(),
+				lockFile: `.pi/workflows/${runId}/supervisor.lock`,
+			},
+		);
+		const text = formatRun(loadedRun, "summary", {
+			supervisor: loadedSupervisor,
+			nowMs,
+		});
+		assert.match(
+			text,
+			/⚠ supervisor heartbeat lost \(last heartbeat 3m ago while run says running; inspect \/workflow logs workflow_unit_stall_hb_lost\)/,
+		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
+	}
+});
+
+test("workflow board shows stall badge on run rows and detail header", () => {
+	const now = Date.now();
+	const task = workflowViewTask({
+		status: "running",
+		startedAt: new Date(now - 20 * 60_000).toISOString(),
+	});
+	const { view, run } = workflowViewFixture([task]);
+	view.supervisors.set(run.runId, {
+		schemaVersion: 1,
+		updatedAt: new Date(now - 5_000).toISOString(),
+		lastTaskTransitionAt: new Date(now - 14 * 60_000).toISOString(),
+		taskStatusCounts: run.taskSummary,
+	});
+
+	const runsText = view.render(150).join("\n");
+	assert.match(runsText, /STALL 14m/);
+
+	view.mode = "stages";
+	const detailText = view.render(150).join("\n");
+	assert.match(detailText, /STALL 14m/);
+
+	view.supervisors.set(run.runId, {
+		schemaVersion: 1,
+		updatedAt: new Date(now - 5_000).toISOString(),
+		lastTaskTransitionAt: new Date(now - 60_000).toISOString(),
+		taskStatusCounts: run.taskSummary,
+	});
+	view.mode = "runs";
+	assert.doesNotMatch(view.render(150).join("\n"), /STALL/);
+	view.mode = "stages";
+	assert.doesNotMatch(view.render(150).join("\n"), /STALL/);
+});
+
+test("workflow board shows heartbeat-lost badge when supervisor heartbeat is stale", () => {
+	const now = Date.now();
+	const task = workflowViewTask({
+		status: "running",
+		startedAt: new Date(now - 20 * 60_000).toISOString(),
+	});
+	const { view, run } = workflowViewFixture([task]);
+	view.supervisors.set(run.runId, {
+		schemaVersion: 1,
+		updatedAt: new Date(now - 3 * 60_000).toISOString(),
+	});
+	assert.match(view.render(150).join("\n"), /HB LOST 3m/);
+});
