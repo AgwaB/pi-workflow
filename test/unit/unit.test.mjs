@@ -26065,6 +26065,288 @@ test("notifyUnfinishedRuns labels degraded failed runs as final rendered", async
 	}
 });
 
+const UNFINISHED_NOTICE_TEST_SUMMARY = {
+	pending: 0,
+	running: 0,
+	blocked: 0,
+	completed: 1,
+	failed: 1,
+	skipped: 3,
+	interrupted: 0,
+	total: 5,
+};
+
+function writeUnfinishedNoticeIndexRun(overrides) {
+	return {
+		type: "artifact-graph",
+		status: "failed",
+		taskSummary: UNFINISHED_NOTICE_TEST_SUMMARY,
+		createdAt: "2026-06-11T00:00:00.000Z",
+		updatedAt: "2026-06-11T00:00:00.000Z",
+		runJson: "x",
+		tasks: [],
+		...overrides,
+	};
+}
+
+function writeUnfinishedNoticeIndex(cwd, runs) {
+	const indexDir = join(cwd, ".pi", "workflows");
+	mkdirSync(indexDir, { recursive: true });
+	writeFileSync(
+		join(indexDir, "index.json"),
+		JSON.stringify({
+			schemaVersion: 1,
+			updatedAt: "2026-06-12T11:00:00.000Z",
+			runs,
+		}),
+	);
+	return indexDir;
+}
+
+function writeUnfinishedNoticeRunRecord(cwd, runId, provenance) {
+	const runDir = join(cwd, ".pi", "workflows", runId);
+	mkdirSync(runDir, { recursive: true });
+	writeFileSync(
+		join(runDir, "run.json"),
+		JSON.stringify({
+			schemaVersion: 1,
+			runId,
+			type: "artifact-graph",
+			status: "failed",
+			taskSummary: UNFINISHED_NOTICE_TEST_SUMMARY,
+			cwd,
+			backend: { type: "local-pi", mode: "headless" },
+			createdAt: "2026-06-11T00:00:00.000Z",
+			updatedAt: "2026-06-11T00:00:00.000Z",
+			specPath: "x",
+			...(provenance ? { provenance } : {}),
+			tasks: [],
+		}),
+	);
+}
+
+test("notifyUnfinishedRuns never notifies runs with mock provenance and formatStatus annotates them", async () => {
+	const cwd = makeProject();
+	try {
+		const nowMs = Date.parse("2026-06-12T12:00:00.000Z");
+		writeUnfinishedNoticeIndex(cwd, [
+			writeUnfinishedNoticeIndexRun({
+				runId: "workflow_mockrun",
+				name: "mock-fixture",
+			}),
+			writeUnfinishedNoticeIndexRun({
+				runId: "workflow_realrun",
+				name: "real-run",
+			}),
+		]);
+		writeUnfinishedNoticeRunRecord(cwd, "workflow_mockrun", {
+			mode: "mock-screenshot",
+		});
+		writeUnfinishedNoticeRunRecord(cwd, "workflow_realrun", {
+			mode: "direct-dynamic",
+		});
+
+		const notices = [];
+		await notifyUnfinishedRuns(
+			cwd,
+			(message, type) => notices.push({ message, type }),
+			nowMs,
+		);
+		assert.equal(notices.length, 1);
+		assert.match(notices[0].message, /workflow_realrun/);
+		assert.doesNotMatch(notices[0].message, /workflow_mockrun/);
+
+		const state = JSON.parse(
+			readFileSync(join(cwd, ".pi", "workflows", "unfinished-notices.json")),
+		);
+		assert.deepEqual(Object.keys(state.notices), ["workflow_realrun"]);
+
+		const status = await formatStatus(cwd);
+		assert.match(status, /workflow_mockrun \[failed\] mock\(mock-screenshot\)/);
+		assert.doesNotMatch(status, /workflow_realrun \[failed\] mock/);
+	} finally {
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+	}
+});
+
+test("notifyUnfinishedRuns re-notifies only runs whose own state changed", async () => {
+	const cwd = makeProject();
+	try {
+		const nowMs = Date.parse("2026-06-12T12:00:00.000Z");
+		const runA = writeUnfinishedNoticeIndexRun({
+			runId: "workflow_alpha",
+			name: "alpha",
+		});
+		writeUnfinishedNoticeIndex(cwd, [runA]);
+
+		const first = [];
+		await notifyUnfinishedRuns(
+			cwd,
+			(message, type) => first.push({ message, type }),
+			nowMs,
+		);
+		assert.equal(first.length, 1);
+		assert.match(first[0].message, /workflow_alpha/);
+
+		writeUnfinishedNoticeIndex(cwd, [
+			runA,
+			writeUnfinishedNoticeIndexRun({
+				runId: "workflow_beta",
+				name: "beta",
+				updatedAt: "2026-06-12T11:30:00.000Z",
+			}),
+		]);
+
+		const second = [];
+		await notifyUnfinishedRuns(
+			cwd,
+			(message, type) => second.push({ message, type }),
+			nowMs + 60_000,
+		);
+		assert.equal(second.length, 1);
+		assert.match(second[0].message, /workflow_beta/);
+		assert.doesNotMatch(second[0].message, /workflow_alpha/);
+	} finally {
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+	}
+});
+
+test("notifyUnfinishedRuns migrates legacy composite notice keys without crashing", async () => {
+	const cwd = makeProject();
+	try {
+		const nowMs = Date.parse("2026-06-12T12:00:00.000Z");
+		const indexDir = writeUnfinishedNoticeIndex(cwd, [
+			writeUnfinishedNoticeIndexRun({
+				runId: "workflow_recent",
+				name: "deep-research",
+			}),
+		]);
+		const legacyKey =
+			"workflow_recent:failed:2026-06-11T00:00:00.000Z|workflow_gone:failed:2026-06-10T00:00:00.000Z";
+		writeFileSync(
+			join(indexDir, "unfinished-notices.json"),
+			JSON.stringify({
+				notices: {
+					[legacyKey]: {
+						lastNotifiedAt: new Date(nowMs - 60_000).toISOString(),
+					},
+				},
+			}),
+		);
+
+		const notices = [];
+		await notifyUnfinishedRuns(
+			cwd,
+			(message, type) => notices.push({ message, type }),
+			nowMs,
+		);
+		assert.equal(notices.length, 1);
+		assert.match(notices[0].message, /workflow_recent/);
+
+		const state = JSON.parse(
+			readFileSync(join(indexDir, "unfinished-notices.json")),
+		);
+		assert.deepEqual(Object.keys(state.notices), ["workflow_recent"]);
+		assert.equal(state.notices.workflow_recent.status, "failed");
+		assert.equal(
+			state.notices.workflow_recent.updatedAt,
+			"2026-06-11T00:00:00.000Z",
+		);
+		assert.equal(
+			state.notices.workflow_recent.lastNotifiedAt,
+			new Date(nowMs).toISOString(),
+		);
+	} finally {
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+	}
+});
+
+test("notifyUnfinishedRuns prunes stale and orphaned notice entries on write", async () => {
+	const cwd = makeProject();
+	try {
+		const nowMs = Date.parse("2026-06-12T12:00:00.000Z");
+		const indexDir = writeUnfinishedNoticeIndex(cwd, [
+			writeUnfinishedNoticeIndexRun({
+				runId: "workflow_active",
+				name: "active",
+			}),
+			writeUnfinishedNoticeIndexRun({
+				runId: "workflow_done",
+				name: "done",
+				status: "completed",
+			}),
+			writeUnfinishedNoticeIndexRun({
+				runId: "workflow_ancient",
+				name: "ancient",
+				status: "completed",
+			}),
+		]);
+		writeFileSync(
+			join(indexDir, "unfinished-notices.json"),
+			JSON.stringify({
+				notices: {
+					workflow_gone: {
+						status: "failed",
+						updatedAt: "2026-06-11T00:00:00.000Z",
+						lastNotifiedAt: new Date(nowMs - 60_000).toISOString(),
+					},
+					workflow_ancient: {
+						status: "failed",
+						updatedAt: "2026-06-01T00:00:00.000Z",
+						lastNotifiedAt: new Date(
+							nowMs - 8 * 24 * 60 * 60 * 1000,
+						).toISOString(),
+					},
+					workflow_done: {
+						status: "failed",
+						updatedAt: "2026-06-11T00:00:00.000Z",
+						lastNotifiedAt: new Date(nowMs - 60_000).toISOString(),
+					},
+				},
+			}),
+		);
+
+		const notices = [];
+		await notifyUnfinishedRuns(
+			cwd,
+			(message, type) => notices.push({ message, type }),
+			nowMs,
+		);
+		assert.equal(notices.length, 1);
+		assert.match(notices[0].message, /workflow_active/);
+
+		const state = JSON.parse(
+			readFileSync(join(indexDir, "unfinished-notices.json")),
+		);
+		assert.deepEqual(Object.keys(state.notices).sort(), [
+			"workflow_active",
+			"workflow_done",
+		]);
+	} finally {
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+	}
+});
+
 test("deep-review finding-pipeline dedups by file+title-token overlap and partitions verdicts with severity join", async () => {
 	const helperPath = join(
 		dirname(fileURLToPath(import.meta.url)),

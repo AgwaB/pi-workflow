@@ -32,7 +32,12 @@ import {
 	assertWorkflowToolAllowedForRole,
 	isWorkflowSupervisorEnabled,
 } from "./process-role.js";
-import { fromProjectPath, readIndex, readRunRecord } from "./store.js";
+import {
+	fromProjectPath,
+	isMockRunProvenance,
+	readIndex,
+	readRunRecord,
+} from "./store.js";
 import { loadWorkflowSpec } from "./schema.js";
 import { listWorkflows, resolveWorkflowRef } from "./workflow-specs.js";
 import {
@@ -893,11 +898,16 @@ export async function notifyUnfinishedRuns(
 			!run.parentRunId &&
 			(run.status === "failed" || run.status === "interrupted")
 		) {
+			const fullRun = await readRunRecord(cwd, run.runId).catch(
+				() => undefined,
+			);
+			if (isMockRunProvenance(fullRun?.provenance)) continue;
 			unfinished.push(run);
 			continue;
 		}
 		if (run.status !== "blocked") continue;
 		const fullRun = await readRunRecord(cwd, run.runId).catch(() => undefined);
+		if (isMockRunProvenance(fullRun?.provenance)) continue;
 		const resumableDynamicApproval = fullRun?.tasks.some(
 			(task) =>
 				task.status === "blocked" &&
@@ -907,10 +917,16 @@ export async function notifyUnfinishedRuns(
 		if (resumableDynamicApproval) unfinished.push(run);
 	}
 	if (unfinished.length === 0) return;
-	const noticeKey = unfinishedNoticeKey(unfinished);
-	if (await shouldSuppressUnfinishedNotice(cwd, noticeKey, nowMs)) return;
+	const indexRunIds = new Set(index.runs.map((run) => run.runId));
+	const needingNotice = await selectRunsNeedingUnfinishedNotice(
+		cwd,
+		unfinished,
+		indexRunIds,
+		nowMs,
+	);
+	if (needingNotice.length === 0) return;
 
-	const lines = unfinished
+	const lines = needingNotice
 		.slice(0, UNFINISHED_RUN_NOTICE_MAX_RUNS)
 		.map((run) => {
 			const summary = run.taskSummary;
@@ -925,59 +941,98 @@ export async function notifyUnfinishedRuns(
 				: run.status;
 			return `- ${run.name ?? "(unnamed)"} ${run.runId}${parent}: ${statusLabel}${counts} — /workflow resume ${run.runId}`;
 		});
-	if (unfinished.length > UNFINISHED_RUN_NOTICE_MAX_RUNS)
+	if (needingNotice.length > UNFINISHED_RUN_NOTICE_MAX_RUNS)
 		lines.push(
-			`- … and ${unfinished.length - UNFINISHED_RUN_NOTICE_MAX_RUNS} more (/workflow status)`,
+			`- … and ${needingNotice.length - UNFINISHED_RUN_NOTICE_MAX_RUNS} more (/workflow status)`,
 		);
 	notify(
 		[
-			`Unfinished workflow run${unfinished.length > 1 ? "s" : ""} in this project:`,
+			`Unfinished workflow run${needingNotice.length > 1 ? "s" : ""} in this project:`,
 			...lines,
 		].join("\n"),
 		"warning",
 	);
 }
 
-function unfinishedNoticeKey(
-	runs: Array<{ runId: string; status: string; updatedAt?: string }>,
-): string {
-	return runs
-		.map((run) => `${run.runId}:${run.status}:${run.updatedAt ?? ""}`)
-		.sort()
-		.join("|");
+interface UnfinishedNoticeEntry {
+	status?: string;
+	updatedAt?: string;
+	lastNotifiedAt?: string;
 }
 
-async function shouldSuppressUnfinishedNotice(
+/**
+ * Per-run notice bookkeeping for unfinished-run warnings. State lives in
+ * `.pi/workflows/unfinished-notices.json` keyed by runId. A run re-notifies
+ * only when its own status/updatedAt changed since the last notice or the
+ * re-notify interval elapsed. On write, entries for runs no longer in the
+ * index, entries older than the max age, and legacy composite keys (the old
+ * `runId:status:updatedAt|…` format) are pruned so the file stays bounded.
+ */
+async function selectRunsNeedingUnfinishedNotice<
+	Run extends { runId: string; status: string; updatedAt?: string },
+>(
 	cwd: string,
-	noticeKey: string,
+	unfinished: Run[],
+	indexRunIds: Set<string>,
 	nowMs: number,
-): Promise<boolean> {
-	if (!noticeKey) return true;
+): Promise<Run[]> {
 	const dir = join(cwd, ".pi", "workflows");
 	const file = join(dir, "unfinished-notices.json");
-	let state: { notices?: Record<string, { lastNotifiedAt?: string }> } = {};
+	let state: { notices?: Record<string, UnfinishedNoticeEntry> } = {};
 	try {
 		state = JSON.parse(await readFile(file, "utf8"));
 	} catch {
 		state = {};
 	}
-	const notices = state.notices ?? {};
-	const previousMs = Date.parse(notices[noticeKey]?.lastNotifiedAt ?? "");
-	if (
-		Number.isFinite(previousMs) &&
-		nowMs - previousMs < UNFINISHED_RUN_NOTICE_DEDUPE_MS
-	) {
-		return true;
+	const previous =
+		state.notices && typeof state.notices === "object" ? state.notices : {};
+	const notices: Record<string, UnfinishedNoticeEntry> = {};
+	for (const [key, entry] of Object.entries(previous)) {
+		// Migration: legacy keys concatenated every unfinished run as
+		// `runId:status:updatedAt|…`; drop them (worst case one extra notice).
+		if (key.includes("|") || key.includes(":")) continue;
+		if (!entry || typeof entry !== "object") continue;
+		notices[key] = entry;
 	}
+
+	const needing: Run[] = [];
+	for (const run of unfinished) {
+		const entry = notices[run.runId];
+		const lastNotifiedMs = Date.parse(entry?.lastNotifiedAt ?? "");
+		const unchanged =
+			entry !== undefined &&
+			entry.status === run.status &&
+			(entry.updatedAt ?? "") === (run.updatedAt ?? "");
+		if (
+			unchanged &&
+			Number.isFinite(lastNotifiedMs) &&
+			nowMs - lastNotifiedMs < UNFINISHED_RUN_NOTICE_DEDUPE_MS
+		) {
+			continue;
+		}
+		needing.push(run);
+		notices[run.runId] = {
+			status: run.status,
+			updatedAt: run.updatedAt ?? "",
+			lastNotifiedAt: new Date(nowMs).toISOString(),
+		};
+	}
+	if (needing.length === 0) return needing;
+
 	const cutoff = nowMs - UNFINISHED_RUN_NOTICE_MAX_AGE_MS;
-	for (const [key, item] of Object.entries(notices)) {
-		const itemMs = Date.parse(item.lastNotifiedAt ?? "");
-		if (!Number.isFinite(itemMs) || itemMs < cutoff) delete notices[key];
+	for (const [runId, entry] of Object.entries(notices)) {
+		const lastNotifiedMs = Date.parse(entry.lastNotifiedAt ?? "");
+		if (
+			!indexRunIds.has(runId) ||
+			!Number.isFinite(lastNotifiedMs) ||
+			lastNotifiedMs < cutoff
+		) {
+			delete notices[runId];
+		}
 	}
-	notices[noticeKey] = { lastNotifiedAt: new Date(nowMs).toISOString() };
 	await mkdir(dir, { recursive: true });
 	await writeFile(file, `${JSON.stringify({ notices }, null, 2)}\n`, "utf8");
-	return false;
+	return needing;
 }
 
 async function handleWorkflowCommand(
