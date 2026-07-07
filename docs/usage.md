@@ -206,7 +206,14 @@ For lower-latency runs, pass `--thinking low` explicitly:
 /workflow dynamic --thinking low "Research this repository and summarize the architecture tradeoffs."
 ```
 
-This is an opt-in fast mode. Package defaults remain conservative until a separate holdout evaluation provides enough evidence to change them. Current evidence is limited but encouraging for explicit fast runs: the 2026-07-02 `deep-research` combined gate on P1/P2/P3-style prompts resolved non-support tasks to `low`, completed selected valid runs in about 15-17 minutes, passed the strict gate 9/9, and had zero source-ref join failures across those 9 runs. Treat this as a speed option, not proof that every workflow should default to `low`.
+This is the supported **speed profile**: an explicit, owner-approved opt-in for latency-sensitive runs. Package defaults remain unchanged — the profile is never applied implicitly.
+
+What the measured evidence says (2026-07-06 serial paired canary, no concurrency confound, guard 6/6 on both arms):
+
+- `--thinking low` ran the full `deep-research` pipeline about **1.8x faster** than the pinned defaults (mean 15.95 vs 28.70 minutes) with zero failed tools and zero source-ref join failures.
+- The tradeoff is real: the low arm produced **fewer fully verified claims** on two of three prompts (mean 16.67 vs 18.00 verified, with the difference shifting to partially-supported), and blinded judging showed no stable quality winner in either direction.
+
+Use the speed profile when turnaround matters more than maximum verified coverage. Keep the defaults when the run feeds decisions that depend on every claim being fully verified. In both modes the evidence guardrails are identical and non-negotiable: verified-floor checks, `partially_supported` never counted as `verified`, and source-ref join integrity are enforced by the same audit stages regardless of thinking level.
 
 ### Opt-in batched verification for deep-research
 
