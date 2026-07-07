@@ -920,7 +920,10 @@ export async function notifyUnfinishedRuns(
 				? ` (${summary.completed}/${summary.total} tasks completed, ${summary.failed} failed, ${summary.interrupted} interrupted${blocked ? `, ${blocked} blocked` : ""})`
 				: "";
 			const parent = run.parentRunId ? ` parent=${run.parentRunId}` : "";
-			return `- ${run.name ?? "(unnamed)"} ${run.runId}${parent}: ${run.status}${counts} — /workflow resume ${run.runId}`;
+			const statusLabel = run.degradation?.finalOutputRendered
+				? `${run.status} (final rendered — degraded)`
+				: run.status;
+			return `- ${run.name ?? "(unnamed)"} ${run.runId}${parent}: ${statusLabel}${counts} — /workflow resume ${run.runId}`;
 		});
 	if (unfinished.length > UNFINISHED_RUN_NOTICE_MAX_RUNS)
 		lines.push(

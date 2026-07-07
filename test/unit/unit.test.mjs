@@ -25879,6 +25879,192 @@ test("notifyUnfinishedRuns reports recent failed root runs with resume hint", as
 	}
 });
 
+function degradationWorkflowSpec() {
+	return workflowSpec("unit-scout", {
+		artifactGraph: {
+			stages: [
+				{ id: "research", type: "single", prompt: "Research." },
+				{ id: "verify", type: "single", prompt: "Verify." },
+				{ id: "report", type: "single", prompt: "Report." },
+			],
+		},
+	});
+}
+
+function taskByStage(run, stageId) {
+	const task = run.tasks.find((item) => item.stageId === stageId);
+	assert.ok(task, `task for stage ${stageId}`);
+	return task;
+}
+
+test("failed run with completed final stage records degradation and formats it", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const compiled = await compileWorkflow(degradationWorkflowSpec(), {
+			cwd,
+			task: "Degraded delivery",
+		});
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflow.json"),
+		);
+		setTaskTerminal(taskByStage(run, "research"), "completed", "completed");
+		setTaskTerminal(taskByStage(run, "verify"), "failed", "failed", {
+			exitCode: 1,
+		});
+		setTaskTerminal(taskByStage(run, "report"), "completed", "completed");
+		const derived = deriveRunStatus(run);
+		assert.equal(derived.status, "failed");
+		assert.ok(derived.degradation);
+		assert.equal(derived.degradation.finalOutputRendered, true);
+		assert.deepEqual(derived.degradation.failedTaskIds, [
+			taskByStage(run, "verify").taskId,
+		]);
+		assert.deepEqual(derived.degradation.degradedHelperTaskIds, []);
+		assert.equal(
+			derived.degradation.summary,
+			"final rendered, 1/3 tasks failed",
+		);
+		assert.match(
+			formatRun(derived),
+			/\[failed\].*— degraded: final rendered, 1\/3 tasks failed/,
+		);
+	} finally {
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+	}
+});
+
+test("fully successful run has no degradation field", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const compiled = await compileWorkflow(degradationWorkflowSpec(), {
+			cwd,
+			task: "Clean delivery",
+		});
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflow.json"),
+		);
+		for (const task of run.tasks)
+			setTaskTerminal(task, "completed", "completed");
+		const derived = deriveRunStatus(run);
+		assert.equal(derived.status, "completed");
+		assert.equal(derived.degradation, undefined);
+		assert.doesNotMatch(formatRun(derived), /degraded:/);
+	} finally {
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+	}
+});
+
+test("run that failed at the final stage records no degradation", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const compiled = await compileWorkflow(degradationWorkflowSpec(), {
+			cwd,
+			task: "Total loss",
+		});
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflow.json"),
+		);
+		setTaskTerminal(taskByStage(run, "research"), "completed", "completed");
+		setTaskTerminal(taskByStage(run, "verify"), "completed", "completed");
+		setTaskTerminal(taskByStage(run, "report"), "failed", "failed", {
+			exitCode: 1,
+		});
+		const derived = deriveRunStatus(run);
+		assert.equal(derived.status, "failed");
+		assert.equal(derived.degradation, undefined);
+		assert.doesNotMatch(formatRun(derived), /degraded:/);
+	} finally {
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+	}
+});
+
+test("notifyUnfinishedRuns labels degraded failed runs as final rendered", async () => {
+	const cwd = makeProject();
+	try {
+		const nowMs = Date.parse("2026-06-12T12:00:00.000Z");
+		const indexDir = join(cwd, ".pi", "workflows");
+		mkdirSync(indexDir, { recursive: true });
+		writeFileSync(
+			join(indexDir, "index.json"),
+			JSON.stringify({
+				schemaVersion: 1,
+				updatedAt: "2026-06-12T11:00:00.000Z",
+				runs: [
+					{
+						runId: "workflow_degraded",
+						name: "deep-research",
+						type: "artifact-graph",
+						status: "failed",
+						degradation: {
+							finalOutputRendered: true,
+							failedTaskIds: ["task-3"],
+							degradedHelperTaskIds: [],
+							summary: "final rendered, 1/15 tasks failed",
+						},
+						taskSummary: {
+							pending: 0,
+							running: 0,
+							blocked: 0,
+							completed: 14,
+							failed: 1,
+							skipped: 0,
+							interrupted: 0,
+							total: 15,
+						},
+						createdAt: "2026-06-11T00:00:00.000Z",
+						updatedAt: "2026-06-11T00:00:00.000Z",
+						runJson: "x",
+						tasks: [],
+					},
+				],
+			}),
+		);
+
+		const notices = [];
+		await notifyUnfinishedRuns(
+			cwd,
+			(message, type) => notices.push({ message, type }),
+			nowMs,
+		);
+		assert.equal(notices.length, 1);
+		assert.match(
+			notices[0].message,
+			/deep-research workflow_degraded: failed \(final rendered — degraded\)/,
+		);
+	} finally {
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+	}
+});
+
 test("deep-review finding-pipeline dedups by file+title-token overlap and partitions verdicts with severity join", async () => {
 	const helperPath = join(
 		dirname(fileURLToPath(import.meta.url)),

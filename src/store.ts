@@ -32,6 +32,7 @@ import {
 	type CompiledLoopStageRecord,
 	WORKFLOW_RUN_TYPE,
 	type WorkflowIndexRecord,
+	type WorkflowRunDegradation,
 	type WorkflowRunRecord,
 	type WorkflowRunStatus,
 	type WorkflowTaskRunRecord,
@@ -1399,6 +1400,7 @@ function buildIndexEntry(
 		type: run.type,
 		artifactGraph: run.artifactGraph,
 		status: run.status,
+		...(run.degradation ? { degradation: run.degradation } : {}),
 		taskSummary: run.taskSummary,
 		createdAt: run.createdAt,
 		updatedAt: run.updatedAt,
@@ -1433,7 +1435,79 @@ export function deriveRunStatus(run: WorkflowRunRecord): WorkflowRunRecord {
 	const next = { ...run, tasks: run.tasks };
 	next.taskSummary = summarizeTasks(next.tasks);
 	next.status = deriveWorkflowStatus(next.taskSummary);
+	next.degradation = computeRunDegradation(next);
 	return next;
+}
+
+/**
+ * Final-stage tasks are structural graph leaves: tasks whose specId no other
+ * task depends on. Helper leaves (support/dynamic controller tasks) are
+ * excluded when at least one regular leaf exists, so a trailing sanitizer or
+ * controller never masquerades as the run's final output.
+ */
+function finalStageTasks(
+	tasks: WorkflowTaskRunRecord[],
+): WorkflowTaskRunRecord[] {
+	const dependedOn = new Set<string>();
+	for (const task of tasks) {
+		for (const dependency of task.dependsOn ?? []) dependedOn.add(dependency);
+	}
+	const leaves = tasks.filter((task) => !dependedOn.has(task.specId));
+	const regularLeaves = leaves.filter(
+		(task) => task.kind !== "support" && task.kind !== "dynamic",
+	);
+	return regularLeaves.length > 0 ? regularLeaves : leaves;
+}
+
+/**
+ * Computes degradation metadata for a run in a terminal "completed" or
+ * "failed" status. Returns undefined (no degradation field) when the status
+ * already tells the whole story: a clean success, or a failure where the
+ * final-stage tasks did not complete either. Helper degradation is detected
+ * from what the run record already knows (completed support tasks that needed
+ * output repair, `outputRetry.attempts > 0`); artifact files such as
+ * control.json are intentionally not read here — this runs synchronously on
+ * every run-record write and read.
+ */
+export function computeRunDegradation(
+	run: WorkflowRunRecord,
+): WorkflowRunDegradation | undefined {
+	if (run.status !== "failed" && run.status !== "completed") return undefined;
+	const failedTaskIds = run.tasks
+		.filter((task) => task.status === "failed")
+		.map((task) => task.taskId);
+	const degradedHelperTaskIds = run.tasks
+		.filter(
+			(task) =>
+				task.kind === "support" &&
+				task.status === "completed" &&
+				(task.outputRetry?.attempts ?? 0) > 0,
+		)
+		.map((task) => task.taskId);
+	const finalTasks = finalStageTasks(run.tasks);
+	const finalOutputRendered =
+		finalTasks.length > 0 &&
+		finalTasks.every((task) => task.status === "completed");
+	const degradedDelivery = failedTaskIds.length > 0 && finalOutputRendered;
+	if (!degradedDelivery && degradedHelperTaskIds.length === 0)
+		return undefined;
+	const parts = [
+		finalOutputRendered ? "final rendered" : "final not rendered",
+	];
+	if (failedTaskIds.length > 0)
+		parts.push(
+			`${failedTaskIds.length}/${run.tasks.length} task${run.tasks.length === 1 ? "" : "s"} failed`,
+		);
+	if (degradedHelperTaskIds.length > 0)
+		parts.push(
+			`${degradedHelperTaskIds.length} helper task${degradedHelperTaskIds.length === 1 ? "" : "s"} degraded`,
+		);
+	return {
+		finalOutputRendered,
+		failedTaskIds,
+		degradedHelperTaskIds,
+		summary: parts.join(", "),
+	};
 }
 
 export function summarizeTasks(tasks: WorkflowTaskRunRecord[]): TaskSummary {
