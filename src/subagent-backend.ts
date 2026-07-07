@@ -250,6 +250,25 @@ async function loadSubagentApi(): Promise<SubagentApi> {
 	return cachedSubagentApi;
 }
 
+export interface OneShotSubagentEnvelope {
+	runId: string;
+	attemptId: string;
+	status: string;
+	cwd?: string;
+	artifacts?: Array<{ type: string; path: string; artifactCwd?: string }>;
+}
+
+/**
+ * Shared entry point for one-off synchronous subagent calls (workflow router
+ * pass and routed direct answers). Honors `setSubagentApiForTests`.
+ */
+export async function runOneShotSubagentCall(
+	options: Record<string, unknown>,
+): Promise<OneShotSubagentEnvelope> {
+	const api = await loadSubagentApi();
+	return (await api.runSubagent(options)) as OneShotSubagentEnvelope;
+}
+
 function nonEmptyEnv(
 	env: Record<string, string | undefined>,
 	key: string,

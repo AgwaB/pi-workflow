@@ -114,8 +114,8 @@ Usage:
   /workflow roles <workflow-name-or-path>
   /workflow agents
   /workflow list
-  /workflow run [--model MODEL] [--thinking LEVEL] <workflow-name-or-path> "<task>" [--detach]
-  /workflow dynamic [--model MODEL] [--thinking LEVEL] "<task>" [--detach]
+  /workflow run [--route] [--model MODEL] [--thinking LEVEL] <workflow-name-or-path> "<task>" [--detach]
+  /workflow dynamic [--route] [--model MODEL] [--thinking LEVEL] "<task>" [--detach]
   /workflow status [run-id]
   /workflow show <run-id-or-workflow-name>
   /workflow logs <run-id> [task-id] [lines]
@@ -130,4 +130,9 @@ user-selected spec, or generated workflow spec is required.
 
 With --detach, a standalone supervisor process (pi-workflow supervise) keeps
 the run progressing after this session exits.
+
+With --route, a low-cost router pass first decides direct answer vs dynamic
+vs the requested workflow (with quick/standard/max depth). On low confidence
+or router failure it escalates to the requested path at standard depth; the
+decision is recorded on the run record (or routing-log.jsonl for direct).
 `;

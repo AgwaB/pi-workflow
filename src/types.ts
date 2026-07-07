@@ -840,6 +840,23 @@ export interface WorkflowTaskResumeEvent {
 	backendAttemptId?: string;
 }
 
+export type WorkflowRouteDecision = "direct" | "dynamic" | "workflow";
+export type WorkflowRouteDepth = "quick" | "standard" | "max";
+
+/**
+ * Audit record for the opt-in `--route` router pass. Present only on runs
+ * started through routing; default runs never carry this field.
+ */
+export interface WorkflowRunRouting {
+	requested: string;
+	decided: WorkflowRouteDecision;
+	depth: WorkflowRouteDepth;
+	confidence: number;
+	reason: string;
+	routerModel?: string;
+	routerThinking?: string;
+}
+
 export interface WorkflowRunProvenance {
 	mode?: string;
 	requestedWorkflow?: string | null;
@@ -894,6 +911,7 @@ export interface WorkflowRunRecord {
 	updatedAt: string;
 	specPath: string;
 	provenance?: WorkflowRunProvenance;
+	routing?: WorkflowRunRouting;
 	tasks: WorkflowTaskRunRecord[];
 }
 

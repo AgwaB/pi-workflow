@@ -43,8 +43,13 @@ import { listWorkflows, resolveWorkflowRef } from "./workflow-specs.js";
 import {
 	type CompiledWorkflow,
 	type ThinkingLevel,
+	type WorkflowRunRouting,
 	WorkflowValidationError,
 } from "./types.js";
+import {
+	executeRoutedWorkflowRequest,
+	WORKFLOW_ROUTING_LOG_RELATIVE_PATH,
+} from "./workflow-router.js";
 import {
 	toWorkflowModelInfo,
 	type WorkflowRuntimeDefaults,
@@ -776,6 +781,74 @@ async function startDynamicRunFromRequest(
 	};
 }
 
+async function handleRoutedRunRequest(
+	request: {
+		requestedWorkflow?: string;
+		task: string;
+		detach: boolean;
+		runtimeOverrides?: WorkflowRuntimeDefaults;
+		usage: string;
+	},
+	ctx: ExtensionCommandContext,
+	api: ExtensionAPI,
+): Promise<void> {
+	const task = request.task.trim();
+	if (!task)
+		throw new Error(`This workflow needs a task. Usage: ${request.usage}`);
+	const outcome = await executeRoutedWorkflowRequest({
+		cwd: ctx.cwd,
+		task,
+		requestedWorkflow: request.requestedWorkflow,
+		runtimeOverrides: request.runtimeOverrides,
+		runtimeDefaults: currentRuntimeDefaults(ctx, api),
+		availableModels: availableWorkflowModels(ctx),
+		dynamicUi: dynamicUiFromContext(ctx),
+	});
+	const routingLine = formatRoutingLine(outcome.routing);
+
+	if (outcome.mode === "direct") {
+		const rerun = request.requestedWorkflow
+			? `/workflow run ${request.requestedWorkflow} "<task>"`
+			: `/workflow dynamic "<task>"`;
+		emit(
+			ctx,
+			[
+				"Router chose a direct answer instead of running the workflow.",
+				routingLine,
+				`Routing recorded in ${WORKFLOW_ROUTING_LOG_RELATIVE_PATH}. For the full workflow, rerun without --route: ${rerun}`,
+				"",
+				outcome.answer,
+			].join("\n"),
+			"info",
+		);
+		return;
+	}
+
+	const run = outcome.run;
+	const verb = workflowRunStartVerb(run.status);
+	if (run.status === "running") watchWorkflowFeedback(ctx, api, run.runId);
+
+	let detachNote = "";
+	if (request.detach && run.status === "running") {
+		const supervisor = spawnDetachedSupervisor(ctx.cwd, run.runId);
+		detachNote = `\nDetached supervisor pid ${supervisor.pid ?? "?"} — survives this session; log: ${toDisplayPath(supervisor.logPath, ctx.cwd)}`;
+	}
+
+	const headline =
+		outcome.mode === "dynamic"
+			? `Dynamic workflow run ${run.runId} ${verb}.\nMode: direct-dynamic (spec-less)`
+			: `Workflow run ${run.runId} ${verb}.\nSpec: ${toDisplayPath(run.specPath, ctx.cwd)}`;
+	emitRunStartResult(
+		ctx,
+		run.status,
+		`${headline}\n${routingLine}\n${formatRun(run)}${detachNote}\nOpen: /workflow ${run.runId}`,
+	);
+}
+
+function formatRoutingLine(routing: WorkflowRunRouting): string {
+	return `Routing: ${routing.requested} → ${routing.decided} (depth ${routing.depth}, confidence ${routing.confidence}) — ${routing.reason}`;
+}
+
 function workflowRunStartVerb(status: string): string {
 	return status === "blocked"
 		? "created but blocked"
@@ -1124,6 +1197,20 @@ async function handleWorkflowCommand(
 				parsed.model || parsed.thinking
 					? { model: parsed.model, thinking: parsed.thinking }
 					: undefined;
+			if (parsed.route) {
+				await handleRoutedRunRequest(
+					{
+						requestedWorkflow: specPath,
+						task: parsed.task,
+						detach: parsed.detach,
+						runtimeOverrides,
+						usage: '/workflow run --route <workflow-name-or-path> "<task>"',
+					},
+					ctx,
+					api,
+				);
+				return;
+			}
 			const result = await startWorkflowRunFromRequest(
 				{
 					workflow: specPath,
@@ -1144,6 +1231,19 @@ async function handleWorkflowCommand(
 				parsed.model || parsed.thinking
 					? { model: parsed.model, thinking: parsed.thinking }
 					: undefined;
+			if (parsed.route) {
+				await handleRoutedRunRequest(
+					{
+						task: parsed.task,
+						detach: parsed.detach,
+						runtimeOverrides,
+						usage: '/workflow dynamic --route "<task>"',
+					},
+					ctx,
+					api,
+				);
+				return;
+			}
 			const result = await startDynamicRunFromRequest(
 				{
 					task: parsed.task,
@@ -1430,6 +1530,7 @@ export function parseWorkflowRunArgs(args: string): {
 	specPath: string;
 	task: string;
 	detach: boolean;
+	route?: boolean;
 	model?: string;
 	thinking?: ThinkingLevel;
 } {
@@ -1473,6 +1574,7 @@ export function parseWorkflowRunArgs(args: string): {
 export function parseWorkflowDynamicArgs(args: string): {
 	task: string;
 	detach: boolean;
+	route?: boolean;
 	model?: string;
 	thinking?: ThinkingLevel;
 } {
@@ -1510,6 +1612,7 @@ export function parseWorkflowDynamicArgs(args: string): {
 
 type WorkflowRunParsedOptions = {
 	detach: boolean;
+	route?: boolean;
 	model?: string;
 	thinking?: ThinkingLevel;
 };
@@ -1595,6 +1698,11 @@ function consumeLeadingRunOptionTokens(
 		return 1;
 	}
 
+	if (token.text === "--route") {
+		parsed.route = true;
+		return 1;
+	}
+
 	const model = optionValueFromEquals(token.text, "--model");
 	if (model !== undefined) {
 		parsed.model = model;
@@ -1632,6 +1740,11 @@ function consumeTrailingRunOptionTokens(
 
 	if (!last.quoted && last.text === "--detach") {
 		parsed.detach = true;
+		return end - 1;
+	}
+
+	if (!last.quoted && last.text === "--route") {
+		parsed.route = true;
 		return end - 1;
 	}
 
