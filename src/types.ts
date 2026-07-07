@@ -841,6 +841,21 @@ export interface WorkflowRunProvenance {
 	[key: string]: unknown;
 }
 
+/**
+ * Optional degradation metadata computed when a run reaches a terminal
+ * "completed" or "failed" status. Present only when the terminal status hides
+ * a partial outcome: work was delivered despite task failures (final-stage
+ * tasks completed while other tasks failed), or a completed run leaned on
+ * degraded helper output. The run `status` enum is intentionally unchanged;
+ * consumers that need the distinction read this field.
+ */
+export interface WorkflowRunDegradation {
+	finalOutputRendered: boolean;
+	failedTaskIds: string[];
+	degradedHelperTaskIds: string[];
+	summary: string;
+}
+
 export interface WorkflowRunRecord {
 	schemaVersion: 1;
 	runId: string;
@@ -849,6 +864,7 @@ export interface WorkflowRunRecord {
 	type: WorkflowRunType;
 	artifactGraph?: { enabled: true };
 	status: WorkflowRunStatus;
+	degradation?: WorkflowRunDegradation;
 	taskSummary: TaskSummary;
 	cwd: string;
 	backend: { type: "local-pi"; mode: "headless" };
@@ -880,6 +896,7 @@ export interface WorkflowIndexRecord {
 		type: WorkflowRunType;
 		artifactGraph?: { enabled: true };
 		status: WorkflowRunStatus;
+		degradation?: WorkflowRunDegradation;
 		taskSummary: TaskSummary;
 		createdAt: string;
 		updatedAt: string;
