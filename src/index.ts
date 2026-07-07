@@ -18,6 +18,16 @@ export {
 	waitForRun,
 } from "./engine.js";
 export type { ResumeRunSummary, StopRunSummary } from "./engine.js";
+export {
+	estimateWorkflowDurationMs,
+	findDuplicateActiveRun,
+	formatApproxDuration,
+} from "./run-estimates.js";
+export type {
+	DuplicateActiveRunMatch,
+	DuplicateRunTarget,
+	WorkflowDurationEstimate,
+} from "./run-estimates.js";
 export { listWorkflows, resolveWorkflowRef } from "./workflow-specs.js";
 export type {
 	ResolvedWorkflowSpecRef,
@@ -114,8 +124,8 @@ Usage:
   /workflow roles <workflow-name-or-path>
   /workflow agents
   /workflow list
-  /workflow run [--route] [--model MODEL] [--thinking LEVEL] <workflow-name-or-path> "<task>" [--detach]
-  /workflow dynamic [--route] [--model MODEL] [--thinking LEVEL] "<task>" [--detach]
+  /workflow run [--route] [--model MODEL] [--thinking LEVEL] <workflow-name-or-path> "<task>" [--detach] [--force-new]
+  /workflow dynamic [--route] [--model MODEL] [--thinking LEVEL] "<task>" [--detach] [--force-new]
   /workflow status [run-id]
   /workflow show <run-id-or-workflow-name>
   /workflow logs <run-id> [task-id] [lines]
@@ -130,6 +140,10 @@ user-selected spec, or generated workflow spec is required.
 
 With --detach, a standalone supervisor process (pi-workflow supervise) keeps
 the run progressing after this session exits.
+
+Interactive run/dynamic starts skip launching when an active run with the
+same workflow and identical task started within the last 10 minutes;
+--force-new starts another run anyway.
 
 With --route, a low-cost router pass first decides direct answer vs dynamic
 vs the requested workflow (with quick/standard/max depth). On low confidence
