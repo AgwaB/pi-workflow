@@ -384,7 +384,7 @@ export class WorkflowView implements Component {
 		];
 		if (this.mode !== "tasks")
 			lines.push(
-				`${metaLabel(this.theme, "path")} ${metaValue(this.theme, this.breadcrumbText())} ${muted(this.theme, "·")} ${metaLabel(this.theme, "source")} ${pathText(this.theme, `${this.cwd}/.pi/workflows/index.json`)}`,
+				`${metaLabel(this.theme, "workflow")} ${metaValue(this.theme, this.breadcrumbText())}`,
 			);
 		return [
 			...boxed(this.theme, "✦ Flow Board", width, lines, "borderAccent"),
@@ -639,7 +639,6 @@ export class WorkflowView implements Component {
 			const marker = statusGlyph(this.theme, flow.status);
 			const name = flow.name ?? flow.type;
 			const left = `${prefix}${marker} ${selected ? strong(this.theme, name) : name}`;
-			const runIdText = shortId(flow.runId).slice(0, 16).padEnd(16, " ");
 			const detailRun =
 				this.detailRun?.runId === flow.runId ? this.detailRun : undefined;
 			const health = diagnoseWorkflowRunHealth(detailRun ?? flow);
@@ -649,11 +648,8 @@ export class WorkflowView implements Component {
 					: ` ${muted(this.theme, "·")} ${healthLabel(this.theme, health)}`;
 			const stallBadge = this.stallBadge(flow);
 			const stallText = stallBadge ? ` ${stallBadge}` : "";
-			const baseRight = `${statusColumn(this.theme, flow.status, runStatusLabel(flow), statusWidth)}  ${progressBar(this.theme, flow.taskSummary, 5)} ${metaValue(this.theme, runIdText)}`;
-			const right =
-				width >= 90
-					? `${baseRight} ${muted(this.theme, "·")} ${metaLabel(this.theme, "start")} ${metaValue(this.theme, timestampText(flow.createdAt))}${healthText}${stallText}`
-					: `${baseRight}${healthText}${stallText}`;
+			const baseRight = `${statusColumn(this.theme, flow.status, runStatusLabel(flow), statusWidth)}  ${progressBar(this.theme, flow.taskSummary, 5)}`;
+			const right = `${baseRight}${healthText}${stallText}`;
 			const line = joinColumns(left, right, width, 17);
 			lines.push(selectedLine(this.theme, line, width, selected, true));
 		}
@@ -761,15 +757,14 @@ export class WorkflowView implements Component {
 	): string[] {
 		const lines = [
 			`${statusGlyph(this.theme, task.status)} ${strong(this.theme, task.displayName)}`,
-			kvRow(this.theme, "run", run.runId),
+			kvRow(this.theme, "status", task.status),
 			kvRow(this.theme, "stage", task.stageId ?? "(none)"),
-			kvRow(this.theme, "task", task.taskId),
 			"",
 			accent(this.theme, "Runtime"),
 			kvRow(this.theme, "agent", task.agent, "syntaxType"),
 			kvRow(this.theme, "model", task.runtime.model ?? "(not recorded)"),
 			kvRow(this.theme, "thinking", task.runtime.thinking ?? "(not recorded)"),
-			kvRow(this.theme, "tools", (task.tools ?? []).join(",") || "(default)"),
+			kvRow(this.theme, "logs", `/workflow logs ${run.runId} ${task.specId || task.taskId}`),
 			...this.taskUsageLines(task),
 		];
 		return lines.map((line) => fit(line, width));
@@ -949,9 +944,6 @@ export class WorkflowView implements Component {
 			`${metaLabel(this.theme, "lines")} ${metaValue(
 				this.theme,
 				total === 0 ? "0-0 / 0" : `${start + 1}-${end} / ${total}`,
-			)} ${muted(this.theme, "·")} ${pathText(
-				this.theme,
-				this.currentArtifactPath(task),
 			)}`,
 			"",
 			...visible.map((line) => fit(previewText(this.theme, line), width)),

@@ -168,9 +168,14 @@ export type { DynamicWorkflowUi } from "./dynamic-controller-policy.js";
 export { refreshRun } from "./engine-wait.js";
 export {
 	detectRunStall,
+	formatHumanRunLaunch,
+	formatHumanRunOutcome,
+	formatHumanRunResume,
+	formatHumanRunStop,
 	formatLogs,
 	formatRun,
 	formatRunDetails,
+	formatRawRunDetails,
 	formatRunStallWarning,
 	formatRunStatus,
 	formatStatus,
