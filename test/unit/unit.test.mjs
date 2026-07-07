@@ -11034,6 +11034,115 @@ test("compiler warns about workflow-quality risks before runtime", async () => {
 	}
 });
 
+test("compiler warns when complex control fields lack prompt JSON skeletons", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		mkdirSync(join(cwd, "schemas"), { recursive: true });
+		writeFileSync(
+			join(cwd, "schemas", "report.schema.json"),
+			JSON.stringify({
+				type: "object",
+				required: [
+					"schema",
+					"digest",
+					"sections",
+					"evidenceIndex",
+					"openQuestions",
+				],
+				properties: {
+					schema: { type: "string", const: "report-v1" },
+					digest: { type: "string" },
+					sections: {
+						type: "array",
+						items: {
+							type: "object",
+							required: ["id", "heading", "points"],
+							properties: {
+								id: { type: "string" },
+								heading: { type: "string" },
+								points: { type: "array", items: { type: "object" } },
+							},
+						},
+					},
+					evidenceIndex: {
+						type: "array",
+						items: {
+							type: "object",
+							required: ["id", "file", "claim"],
+							properties: {
+								id: { type: "string" },
+								file: { type: "string" },
+								claim: { type: "string" },
+							},
+						},
+					},
+					coverageGaps: { type: "object", additionalProperties: true },
+					openQuestions: { type: "array", items: { type: "string" } },
+				},
+			}),
+		);
+		const baseStage = {
+			id: "report",
+			type: "single",
+			output: { controlSchema: "./schemas/report.schema.json" },
+		};
+		const bad = await compileWorkflow(
+			artifactGraphWorkflowSpec({
+				artifactGraph: {
+					stages: [
+						{
+							...baseStage,
+							prompt:
+								"Put machine-readable JSON in <control> with schema, digest, sections, evidenceIndex, coverageGaps, and openQuestions. Every important point should cite evidence ids.",
+						},
+					],
+				},
+			}),
+			{ cwd, specPath: "spec.json", task: "Report" },
+		);
+		assert.ok(
+			bad.warnings.some((w) =>
+				/requires \$\.sections\[\]\.points as a JSON array/.test(w),
+			),
+			`expected section points shape warning, got: ${JSON.stringify(bad.warnings)}`,
+		);
+		assert.ok(
+			bad.warnings.some((w) =>
+				/defines \$\.coverageGaps as a JSON object/.test(w),
+			),
+			`expected coverageGaps shape warning, got: ${JSON.stringify(bad.warnings)}`,
+		);
+
+		const good = await compileWorkflow(
+			artifactGraphWorkflowSpec({
+				artifactGraph: {
+					stages: [
+						{
+							...baseStage,
+							prompt:
+								'Put machine-readable JSON in <control> with schema, digest, sections, evidenceIndex, coverageGaps, and openQuestions. Example control excerpt: {"sections":[{"id":"overview","heading":"Overview","points":[{}]}],"evidenceIndex":[{"id":"E1","file":"src/x.ts","claim":"..."}],"coverageGaps":{},"openQuestions":["..."]}.',
+						},
+					],
+				},
+			}),
+			{ cwd, specPath: "spec.json", task: "Report" },
+		);
+		assert.equal(
+			good.warnings.filter((w) => /control shape/.test(w)).length,
+			0,
+			`unexpected control shape warning: ${JSON.stringify(good.warnings)}`,
+		);
+	} finally {
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+	}
+});
+
 test("partial foreach continues scheduling after an item failure", () => {
 	assert.equal(
 		shouldScheduleAfterStageFailure({
