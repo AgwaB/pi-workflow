@@ -22939,6 +22939,58 @@ test("refresh backs off zero-output rate-limit model failures", async () => {
 	}
 });
 
+test("oauth provider rate-limit without retry hint uses subscription-window backoff", async () => {
+	const cwd = makeProject();
+	const previousAuthFile = process.env.PI_WORKFLOW_AUTH_FILE;
+	try {
+		const authFile = join(cwd, "auth.json");
+		writeFileSync(
+			authFile,
+			JSON.stringify({ anthropic: { type: "oauth" } }),
+		);
+		process.env.PI_WORKFLOW_AUTH_FILE = authFile;
+		const beforeRefreshMs = Date.now();
+		const providerError = `Anthropic request failed: HTTP 429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account's rate limit. Please try again later."},"request_id":"req_unit_oauth_rate_limit"}`;
+		const { refreshedTask } = await refreshZeroOutputModelFailure(cwd, {
+			runId: "run_oauth_rate_limit_backoff",
+			attemptId: "attempt_oauth_rate_limit_backoff",
+			artifactDirName: ".fake-oauth-rate-limit-subagent",
+			model: "anthropic/claude-sonnet-4-6",
+			streamErrors: [providerError],
+		});
+
+		assert.equal(refreshedTask.status, "pending");
+		assert.equal(refreshedTask.launchRetry?.reason, "model_rate_limit");
+		assert.equal(refreshedTask.launchRetry?.retryAfterMs, 15 * 60_000);
+		assert.ok(
+			Date.parse(refreshedTask.launchRetry?.nextEligibleAt ?? "") >=
+				beforeRefreshMs + 14 * 60_000,
+		);
+
+		const backoffFile = join(
+			process.env.HOME,
+			".pi",
+			"agent",
+			"model-rate-limit-backoff.json",
+		);
+		const persisted = JSON.parse(readFileSync(backoffFile, "utf8"));
+		assert.ok(
+			persisted.anthropic?.nextEligibleAtMs >= beforeRefreshMs + 14 * 60_000,
+			`persisted anthropic OAuth cooldown expected: ${JSON.stringify(persisted)}`,
+		);
+	} finally {
+		if (previousAuthFile === undefined) delete process.env.PI_WORKFLOW_AUTH_FILE;
+		else process.env.PI_WORKFLOW_AUTH_FILE = previousAuthFile;
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+	}
+});
+
 test("refresh parses rate-limit Retry-After units", async () => {
 	const cases = [
 		{

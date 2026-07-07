@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import {
 	copyFile,
 	mkdir,
@@ -112,6 +112,11 @@ const DYNAMIC_TOOL_RESULT_BUDGET_ENV =
 const DEFAULT_DYNAMIC_TOOL_RESULT_BUDGET_CHARS = 320_000;
 const RATE_LIMIT_TRANSIENT_RETRY_BACKOFF_BASE_MS = 60_000;
 const RATE_LIMIT_TRANSIENT_RETRY_BACKOFF_MAX_MS = 5 * 60_000;
+const OAUTH_RATE_LIMIT_TRANSIENT_RETRY_BACKOFF_BASE_MS = 15 * 60_000;
+const OAUTH_RATE_LIMIT_TRANSIENT_RETRY_BACKOFF_MAX_MS = 60 * 60_000;
+const MAX_PERSISTED_RATE_LIMIT_BACKOFF_MS =
+	OAUTH_RATE_LIMIT_TRANSIENT_RETRY_BACKOFF_MAX_MS;
+const WORKFLOW_AUTH_FILE_ENV = "PI_WORKFLOW_AUTH_FILE";
 const MODULE_PATH = fileURLToPath(import.meta.url);
 const MODULE_DIR = dirname(MODULE_PATH);
 const BUNDLED_PI_WEB_ACCESS_EXTENSION = bundledNodeModulePath(
@@ -469,7 +474,7 @@ function validPersistedSharedBackoff(
 	)
 		return undefined;
 	if (nextEligibleAtMs <= nowMs) return undefined;
-	if (nextEligibleAtMs - nowMs > RATE_LIMIT_TRANSIENT_RETRY_BACKOFF_MAX_MS)
+	if (nextEligibleAtMs - nowMs > MAX_PERSISTED_RATE_LIMIT_BACKOFF_MS)
 		return undefined;
 	return {
 		nextEligibleAtMs,
@@ -2465,6 +2470,7 @@ async function materializeTerminalSubagentResult(
 		const retryAttempt = (task.launchRetry?.attempts ?? 0) + 1;
 		const rateLimitBackoffMs = transientModelRateLimitBackoffMs({
 			attempt: retryAttempt,
+			modelBackoffKey: modelRateLimitBackoffKey(task),
 			errorMessage,
 			stderrText,
 			subagentResult,
@@ -3535,17 +3541,21 @@ function rateLimitRetryAfterUnit(
 function boundedRateLimitRetryAfterMs(
 	value: number,
 	unit: RateLimitRetryAfterUnit,
+	modelBackoffKey?: string,
 ): number | undefined {
 	if (!Number.isFinite(value) || value <= 0) return undefined;
 	const multiplier =
 		unit === "millisecond" ? 1 : unit === "minute" ? 60_000 : 1000;
 	return Math.min(
-		RATE_LIMIT_TRANSIENT_RETRY_BACKOFF_MAX_MS,
+		rateLimitBackoffProfile(modelBackoffKey).maxMs,
 		Math.ceil(value * multiplier),
 	);
 }
 
-function retryAfterMsFromRateLimitText(text: string): number | undefined {
+function retryAfterMsFromRateLimitText(
+	text: string,
+	modelBackoffKey?: string,
+): number | undefined {
 	const retryAfterHeaderMatch = text.match(
 		/\bretry[-_ ]?after\b\s*[:=]\s*(\d{1,6})(?:\s*(ms|milliseconds?|s|sec|secs|seconds?|m|min|mins|minutes?))?\b/i,
 	);
@@ -3553,6 +3563,7 @@ function retryAfterMsFromRateLimitText(text: string): number | undefined {
 		return boundedRateLimitRetryAfterMs(
 			Number.parseInt(retryAfterHeaderMatch[1] ?? "", 10),
 			rateLimitRetryAfterUnit(retryAfterHeaderMatch[2]),
+			modelBackoffKey,
 		);
 	}
 	const tryAgainMatch = text.match(
@@ -3562,19 +3573,56 @@ function retryAfterMsFromRateLimitText(text: string): number | undefined {
 	return boundedRateLimitRetryAfterMs(
 		Number.parseInt(tryAgainMatch[1] ?? "", 10),
 		rateLimitRetryAfterUnit(tryAgainMatch[2]),
+		modelBackoffKey,
 	);
 }
 
-function defaultRateLimitBackoffMs(attempt: number): number {
+function workflowAuthFile(): string {
+	const override = process.env[WORKFLOW_AUTH_FILE_ENV]?.trim();
+	return override ? override : join(homedir(), ".pi", "agent", "auth.json");
+}
+
+function providerAuthType(modelBackoffKey: string | undefined): string | undefined {
+	const key = modelBackoffKey?.trim().toLowerCase();
+	if (!key || key === "default") return undefined;
+	try {
+		const parsed = JSON.parse(readFileSync(workflowAuthFile(), "utf8"));
+		const provider = parsed?.[key];
+		return typeof provider?.type === "string"
+			? provider.type.toLowerCase()
+			: undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function rateLimitBackoffProfile(modelBackoffKey: string | undefined): {
+	baseMs: number;
+	maxMs: number;
+} {
+	return providerAuthType(modelBackoffKey) === "oauth"
+		? {
+				baseMs: OAUTH_RATE_LIMIT_TRANSIENT_RETRY_BACKOFF_BASE_MS,
+				maxMs: OAUTH_RATE_LIMIT_TRANSIENT_RETRY_BACKOFF_MAX_MS,
+			}
+		: {
+				baseMs: RATE_LIMIT_TRANSIENT_RETRY_BACKOFF_BASE_MS,
+				maxMs: RATE_LIMIT_TRANSIENT_RETRY_BACKOFF_MAX_MS,
+			};
+}
+
+function defaultRateLimitBackoffMs(
+	attempt: number,
+	modelBackoffKey?: string,
+): number {
 	const exponent = Math.max(0, Math.min(4, Math.floor(attempt) - 1));
-	return Math.min(
-		RATE_LIMIT_TRANSIENT_RETRY_BACKOFF_MAX_MS,
-		RATE_LIMIT_TRANSIENT_RETRY_BACKOFF_BASE_MS * 2 ** exponent,
-	);
+	const profile = rateLimitBackoffProfile(modelBackoffKey);
+	return Math.min(profile.maxMs, profile.baseMs * 2 ** exponent);
 }
 
 function transientModelRateLimitBackoffMs(options: {
 	attempt: number;
+	modelBackoffKey?: string;
 	errorMessage?: string;
 	stderrText: string;
 	subagentResult?: Record<string, unknown>;
@@ -3591,8 +3639,8 @@ function transientModelRateLimitBackoffMs(options: {
 	const matched = candidates.find(isRateLimitModelFailureText);
 	if (!matched) return undefined;
 	return (
-		retryAfterMsFromRateLimitText(matched) ??
-		defaultRateLimitBackoffMs(options.attempt)
+		retryAfterMsFromRateLimitText(matched, options.modelBackoffKey) ??
+		defaultRateLimitBackoffMs(options.attempt, options.modelBackoffKey)
 	);
 }
 
