@@ -34,6 +34,10 @@ import {
 	writeStaticRunArtifacts,
 } from "./store.js";
 import { resolveWorkflowBackend } from "./backend.js";
+import {
+	estimateWorkflowDurationMs,
+	formatApproxDuration,
+} from "./run-estimates.js";
 import { ensureManagedWorktree } from "./worktree.js";
 import { resolveWorkflowHelperRef } from "./workflow-helpers.js";
 import { buildAvailableToolView } from "./tool-metadata.js";
@@ -336,6 +340,30 @@ async function refreshRunOrRecordPollError(
 	}
 }
 
+/**
+ * Wait-timeout message. Messaging only: the run keeps progressing via the
+ * in-session/detached supervisor after this error is thrown. Includes elapsed
+ * wall time and, when recent completed same-name runs exist, an expected
+ * duration so users know whether the run is actually late.
+ */
+async function stillRunningAfterWaitMessage(
+	cwd: string,
+	run: WorkflowRunRecord,
+	timeoutMs: number,
+): Promise<string> {
+	const createdAtMs = Date.parse(run.createdAt);
+	const elapsed = formatApproxDuration(
+		Number.isFinite(createdAtMs) ? Date.now() - createdAtMs : timeoutMs,
+	);
+	const estimate = await estimateWorkflowDurationMs(cwd, run.name).catch(
+		() => undefined,
+	);
+	const detail = estimate
+		? `(${elapsed} elapsed, ~${formatApproxDuration(estimate.medianMs)} expected from recent runs)`
+		: `(${elapsed} elapsed) after ${timeoutMs}ms wait`;
+	return `Flow run ${run.runId} still running ${detail} — will keep supervising; check /workflow status ${run.runId}`;
+}
+
 export async function waitForRun(
 	cwd: string,
 	runIdOrPrefix: string,
@@ -349,9 +377,7 @@ export async function waitForRun(
 	while (hasActiveSchedulerWork(run)) {
 		const beforeScheduleRemaining = deadline - Date.now();
 		if (beforeScheduleRemaining <= 0)
-			throw new Error(
-				`Flow run still running after ${timeout}ms: ${run.runId}`,
-			);
+			throw new Error(await stillRunningAfterWaitMessage(cwd, run, timeout));
 		const scheduled = await scheduleRun(cwd, run.runId, undefined, options);
 		if (scheduled) run = scheduled;
 		if (!hasActiveSchedulerWork(run)) return run;
@@ -359,9 +385,7 @@ export async function waitForRun(
 		if (!hasActiveSchedulerWork(run)) return run;
 		const remaining = deadline - Date.now();
 		if (remaining <= 0) {
-			throw new Error(
-				`Flow run still running after ${timeout}ms: ${run.runId}`,
-			);
+			throw new Error(await stillRunningAfterWaitMessage(cwd, run, timeout));
 		}
 		await sleep(Math.min(POLL_INTERVAL_MS, remaining));
 		run = await refreshRunOrRecordPollError(cwd, run.runId, run);

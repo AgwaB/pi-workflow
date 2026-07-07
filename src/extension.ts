@@ -33,6 +33,12 @@ import {
 	isWorkflowSupervisorEnabled,
 } from "./process-role.js";
 import {
+	estimateWorkflowDurationMs,
+	findDuplicateActiveRun,
+	formatApproxDuration,
+	type DuplicateRunTarget,
+} from "./run-estimates.js";
+import {
 	fromProjectPath,
 	isMockRunProvenance,
 	readIndex,
@@ -742,11 +748,29 @@ async function startWorkflowRunFromRequest(
 		const supervisor = spawnDetachedSupervisor(ctx.cwd, run.runId);
 		detachNote = `\nDetached supervisor pid ${supervisor.pid ?? "?"} — survives this session; log: ${toDisplayPath(supervisor.logPath, ctx.cwd)}`;
 	}
+	const estimateNote = await runDurationEstimateNote(ctx.cwd, run);
 
 	return {
 		run,
-		text: `Workflow run ${run.runId} ${verb}.\nSpec: ${toDisplayPath(run.specPath, ctx.cwd)}\n${formatRun(run)}${detachNote}\nOpen: /workflow ${run.runId}`,
+		text: `Workflow run ${run.runId} ${verb}.\nSpec: ${toDisplayPath(run.specPath, ctx.cwd)}\n${formatRun(run)}${estimateNote}${detachNote}\nOpen: /workflow ${run.runId}`,
 	};
+}
+
+/**
+ * Upfront duration expectation for a freshly started run, from recent
+ * completed runs of the same workflow. Empty string when fewer than two
+ * samples exist or the run did not start.
+ */
+async function runDurationEstimateNote(
+	cwd: string,
+	run: { status: string; name?: string },
+): Promise<string> {
+	if (run.status !== "running") return "";
+	const estimate = await estimateWorkflowDurationMs(cwd, run.name).catch(
+		() => undefined,
+	);
+	if (!estimate) return "";
+	return `\nExpected ~${formatApproxDuration(estimate.medianMs)} based on ${estimate.samples} recent runs.`;
 }
 
 async function startDynamicRunFromRequest(
@@ -774,11 +798,58 @@ async function startDynamicRunFromRequest(
 		const supervisor = spawnDetachedSupervisor(ctx.cwd, run.runId);
 		detachNote = `\nDetached supervisor pid ${supervisor.pid ?? "?"} — survives this session; log: ${toDisplayPath(supervisor.logPath, ctx.cwd)}`;
 	}
+	const estimateNote = await runDurationEstimateNote(ctx.cwd, run);
 
 	return {
 		run,
-		text: `Dynamic workflow run ${run.runId} ${verb}.\nMode: direct-dynamic (spec-less)\n${formatRun(run)}${detachNote}\nOpen: /workflow ${run.runId}`,
+		text: `Dynamic workflow run ${run.runId} ${verb}.\nMode: direct-dynamic (spec-less)\n${formatRun(run)}${estimateNote}${detachNote}\nOpen: /workflow ${run.runId}`,
 	};
+}
+
+/**
+ * Launch idempotence guard for interactive non-detached starts. Returns a
+ * user-facing notice (and starts nothing) when an active top-level run with
+ * the same workflow identity and byte-identical task text was created within
+ * the last 10 minutes; returns undefined when the launch should proceed.
+ * `--force-new` bypasses this guard at the call sites.
+ */
+export async function duplicateRunGuardNotice(
+	cwd: string,
+	target: { kind: "spec"; specRef: string } | { kind: "dynamic" },
+	task: string,
+): Promise<string | undefined> {
+	const trimmedTask = task.trim();
+	if (!trimmedTask) return undefined;
+	let guardTarget: DuplicateRunTarget;
+	if (target.kind === "dynamic") {
+		guardTarget = { kind: "dynamic" };
+	} else {
+		let name: string | undefined;
+		try {
+			name = (await loadWorkflowSpec(target.specRef, cwd)).spec.name;
+		} catch {
+			// Unresolvable workflow refs fail in the normal start path with the
+			// canonical error; the guard must not mask it.
+			return undefined;
+		}
+		guardTarget = { kind: "spec", name };
+	}
+	const existing = await findDuplicateActiveRun(
+		cwd,
+		guardTarget,
+		trimmedTask,
+	).catch(() => undefined);
+	if (!existing) return undefined;
+	const startedAgoMs = Date.now() - Date.parse(existing.createdAt);
+	const startedAgo = Number.isFinite(startedAgoMs)
+		? ` (started ${formatApproxDuration(startedAgoMs)} ago)`
+		: "";
+	const what =
+		target.kind === "dynamic" ? "dynamic task" : "workflow and task";
+	return [
+		`Duplicate launch guard: run ${existing.runId} is already active with the same ${what}${startedAgo}.`,
+		`Not starting a new run. Check /workflow status ${existing.runId}, or rerun with --force-new to really start another run.`,
+	].join("\n");
 }
 
 async function handleRoutedRunRequest(
@@ -1211,6 +1282,17 @@ async function handleWorkflowCommand(
 				);
 				return;
 			}
+			if (!parsed.detach && !parsed.forceNew) {
+				const guardNotice = await duplicateRunGuardNotice(
+					ctx.cwd,
+					{ kind: "spec", specRef: specPath },
+					parsed.task,
+				);
+				if (guardNotice) {
+					emit(ctx, guardNotice, "warning");
+					return;
+				}
+			}
 			const result = await startWorkflowRunFromRequest(
 				{
 					workflow: specPath,
@@ -1243,6 +1325,17 @@ async function handleWorkflowCommand(
 					api,
 				);
 				return;
+			}
+			if (!parsed.detach && !parsed.forceNew) {
+				const guardNotice = await duplicateRunGuardNotice(
+					ctx.cwd,
+					{ kind: "dynamic" },
+					parsed.task,
+				);
+				if (guardNotice) {
+					emit(ctx, guardNotice, "warning");
+					return;
+				}
 			}
 			const result = await startDynamicRunFromRequest(
 				{
@@ -1531,6 +1624,7 @@ export function parseWorkflowRunArgs(args: string): {
 	task: string;
 	detach: boolean;
 	route?: boolean;
+	forceNew?: boolean;
 	model?: string;
 	thinking?: ThinkingLevel;
 } {
@@ -1575,6 +1669,7 @@ export function parseWorkflowDynamicArgs(args: string): {
 	task: string;
 	detach: boolean;
 	route?: boolean;
+	forceNew?: boolean;
 	model?: string;
 	thinking?: ThinkingLevel;
 } {
@@ -1613,6 +1708,7 @@ export function parseWorkflowDynamicArgs(args: string): {
 type WorkflowRunParsedOptions = {
 	detach: boolean;
 	route?: boolean;
+	forceNew?: boolean;
 	model?: string;
 	thinking?: ThinkingLevel;
 };
@@ -1703,6 +1799,11 @@ function consumeLeadingRunOptionTokens(
 		return 1;
 	}
 
+	if (token.text === "--force-new") {
+		parsed.forceNew = true;
+		return 1;
+	}
+
 	const model = optionValueFromEquals(token.text, "--model");
 	if (model !== undefined) {
 		parsed.model = model;
@@ -1745,6 +1846,11 @@ function consumeTrailingRunOptionTokens(
 
 	if (!last.quoted && last.text === "--route") {
 		parsed.route = true;
+		return end - 1;
+	}
+
+	if (!last.quoted && last.text === "--force-new") {
+		parsed.forceNew = true;
 		return end - 1;
 	}
 
