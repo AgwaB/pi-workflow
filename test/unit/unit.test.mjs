@@ -9231,6 +9231,76 @@ test("deep-research batched verification variant is path-ref opt-in", async () =
 	assert.equal(byStage.has("verification-shadow-selector"), false);
 });
 
+test("deep-research tiered verification variant is path-ref opt-in", async () => {
+	const specPath = join(
+		process.cwd(),
+		"workflows",
+		"deep-research",
+		"tiered-verification.spec.json",
+	);
+	const spec = parsePublicWorkflow(JSON.parse(readFileSync(specPath, "utf8")));
+	const compiled = await compileWorkflow(spec, {
+		cwd: process.cwd(),
+		task: "Research the deep-research artifact contract.",
+		specPath,
+	});
+	const byStage = new Map(compiled.tasks.map((task) => [task.stageId, task]));
+	const verificationTiers = byStage.get("verification-tiers");
+	const verifyCore = byStage.get("verify-core-claims");
+	const verifyTail = byStage.get("verify-tail-claims");
+	const auditClaims = byStage.get("audit-claims");
+
+	assert.equal(spec.name, "deep-research-tiered-verification-opt-in");
+	assert.equal(verificationTiers?.kind, "support");
+	assert.deepEqual(verificationTiers.dependsOn, ["sanitize-claims.main"]);
+	assert.equal(
+		verificationTiers.support.uses,
+		"./helpers/tier-verification-candidates.mjs",
+	);
+	assert.deepEqual(verificationTiers.support.options, { coreTierSize: 8 });
+	for (const [stage, path, thinking] of [
+		[verifyCore, "$.coreCandidates", "high"],
+		[verifyTail, "$.tailCandidates", "medium"],
+	]) {
+		assert.deepEqual(stage?.dependsOn, ["verification-tiers.main"]);
+		assert.deepEqual(stage?.foreach?.from, {
+			stage: "verification-tiers",
+			path,
+		});
+		assert.equal(stage?.runtime.thinking, thinking);
+		assert.ok(
+			stage?.artifactGraph.output.controlSchemaPath.endsWith(
+				join(
+					"workflows",
+					"deep-research",
+					"schemas",
+					"deep-research-verify-claims-control.schema.json",
+				),
+			),
+		);
+		assert.equal(stage?.artifactGraph.artifactAccess, "none");
+	}
+	// Both single-claim verifier stages keep the default one-claim prompt, not
+	// the batched results[] carrier.
+	assert.doesNotMatch(verifyCore?.compiledPrompt ?? "", /results\[\]/);
+	assert.doesNotMatch(verifyTail?.compiledPrompt ?? "", /results\[\]/);
+	// The audit gate must see all verifier outputs from both tiers. The
+	// verification-tiers planning stage is intentionally not an audit source:
+	// the gate's fallback verifier-row collection would otherwise misread its
+	// candidate arrays as verdict rows.
+	assert.deepEqual(auditClaims?.dependsOn, [
+		"plan.main",
+		"normalize-input-packet.main",
+		"normalize-claims.main",
+		"sanitize-claims.main",
+		"verify-core-claims.item",
+		"verify-tail-claims.item",
+	]);
+	assert.equal(byStage.has("verify-claims"), false);
+	assert.equal(byStage.has("verification-batches"), false);
+	assert.equal(byStage.has("verification-shadow-selector"), false);
+});
+
 test("artifactAccess none omits workflow artifact runtime affordances", async () => {
 	const cwd = makeProject();
 	try {
@@ -14765,6 +14835,12 @@ test("bundled artifact graph workflows are public runnable", async () => {
 			(workflow) => workflow.name === "batched-verification.spec",
 		),
 		"path-ref-only batched variant must not be listed as a bundled workflow name",
+	);
+	assert(
+		!workflows.some(
+			(workflow) => workflow.name === "tiered-verification.spec",
+		),
+		"path-ref-only tiered variant must not be listed as a bundled workflow name",
 	);
 	const resolved = await resolveWorkflowRef("spec-review", process.cwd());
 	assert(resolved.specPath.endsWith("workflows/spec-review/spec.json"));
@@ -28807,6 +28883,174 @@ test("deep-research verification batch planner honors empty sanitizer and avoids
 		withFallbackCollision.batches.flatMap((batch) => batch.claimIds).sort(),
 		["candidate-001", "candidate-002"],
 	);
+});
+
+test("deep-research verification tier planner splits by verificationNeed with position fallback", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"tier-verification-candidates.mjs",
+	);
+	const helper = (
+		await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)
+	).default;
+
+	const signalSources = {
+		sources: {
+			"sanitize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [
+						{
+							id: "claim-001",
+							claim: "Core claim.",
+							verificationNeed: "core",
+							sourceRefs: ["wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+							sourceEvidenceHints: [
+								{
+									sourceRef: "wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+									quote: "Core claim quote",
+								},
+							],
+						},
+						{
+							id: "claim-002",
+							claim: "Useful claim.",
+							verificationNeed: "useful",
+						},
+						{
+							id: "claim-003",
+							claim: "Optional claim.",
+							verificationNeed: "optional",
+						},
+						{ id: "claim-004", claim: "Second core claim.", verificationNeed: "core" },
+					],
+				},
+			},
+		},
+	};
+	const out = await helper(signalSources);
+	assert.equal(out.schema, "deep-research-verification-tiers-v1");
+	assert.equal(out.tieringMode, "verificationNeed");
+	assert.equal(out.candidateCount, 4);
+	assert.deepEqual(
+		out.coreCandidates.map((candidate) => candidate.id),
+		["claim-001", "claim-004"],
+	);
+	assert.deepEqual(
+		out.tailCandidates.map((candidate) => candidate.id),
+		["claim-002", "claim-003"],
+	);
+	assert.equal(out.coreCandidates[0].verifierTier, "core");
+	assert.equal(out.tailCandidates[0].verifierTier, "tail");
+	// Source evidence hints and claim text survive tiering untouched.
+	assert.equal(
+		out.coreCandidates[0].sourceEvidenceHints[0].quote,
+		"Core claim quote",
+	);
+	assert.equal(out.coreCandidates[0].claim, "Core claim.");
+	// Deterministic: identical inputs produce identical outputs.
+	assert.deepEqual(await helper(signalSources), out);
+
+	// Position fallback: no verificationNeed signals means first coreTierSize
+	// candidates are core, remainder tail, preserving sanitizer order.
+	const unsignalled = Array.from({ length: 10 }, (_, index) => ({
+		id: `claim-${String(index + 1).padStart(3, "0")}`,
+		claim: `Claim ${index + 1}.`,
+	}));
+	const positioned = await helper({
+		sources: {
+			"sanitize-claims.main": {
+				claimInventory: { verificationCandidates: unsignalled },
+			},
+		},
+	});
+	assert.equal(positioned.tieringMode, "position");
+	assert.equal(positioned.coreTierSize, 8);
+	assert.deepEqual(
+		positioned.coreCandidates.map((candidate) => candidate.id),
+		unsignalled.slice(0, 8).map((candidate) => candidate.id),
+	);
+	assert.deepEqual(
+		positioned.tailCandidates.map((candidate) => candidate.id),
+		["claim-009", "claim-010"],
+	);
+});
+
+test("deep-research verification tier planner enforces sanitize schema caps", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"tier-verification-candidates.mjs",
+	);
+	const helper = (
+		await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)
+	).default;
+	const sanitizeSchema = JSON.parse(
+		readFileSync(
+			join(
+				process.cwd(),
+				"workflows",
+				"deep-research",
+				"schemas",
+				"deep-research-sanitize-claims-control.schema.json",
+			),
+			"utf8",
+		),
+	);
+	const schemaCap =
+		sanitizeSchema.properties.claimInventory.properties.verificationCandidates
+			.maxItems;
+	assert.equal(schemaCap, 48);
+
+	const overflow = Array.from({ length: schemaCap + 2 }, (_, index) => ({
+		id: `claim-${String(index + 1).padStart(3, "0")}`,
+		claim: `Claim ${index + 1}.`,
+	}));
+	const out = await helper({
+		sources: {
+			"sanitize-claims.main": {
+				claimInventory: { verificationCandidates: overflow },
+			},
+		},
+		options: { coreTierSize: 999 },
+	});
+	// coreTierSize is clamped to the schema-derived candidate cap.
+	assert.equal(out.candidateCap, schemaCap);
+	assert.equal(out.coreTierSize, schemaCap);
+	assert.equal(out.candidateCount, schemaCap);
+	assert.equal(out.coreCandidates.length + out.tailCandidates.length, schemaCap);
+	assert.equal(out.capExceeded, true);
+	assert.deepEqual(out.droppedCandidateIds, ["claim-049", "claim-050"]);
+
+	// Invalid coreTierSize falls back to the default of 8; fallback ids do not
+	// collide with explicit ids.
+	const fallback = await helper({
+		sources: {
+			"sanitize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [
+						{ id: "candidate-001", claim: "Explicit id." },
+						{ claim: "Fallback id must not collide." },
+					],
+				},
+			},
+		},
+		options: { coreTierSize: 0 },
+	});
+	assert.equal(fallback.coreTierSize, 8);
+	assert.deepEqual(
+		fallback.coreCandidates.map((candidate) => candidate.id),
+		["candidate-001", "candidate-002"],
+	);
+	assert.deepEqual(fallback.tailCandidates, []);
 });
 
 test("deep-research shadow selector tolerates malformed candidate entries", async () => {
