@@ -943,6 +943,18 @@ function enumTokens(value: string): string[] {
 		.filter((token) => token.length > 0);
 }
 
+// Tokens that flip the meaning of an enum value. A tier-2 subset match must
+// never bridge a negation difference: repairing "verification-needed" into
+// "verification-not-needed" would silently invert the model's statement.
+const ENUM_NEGATION_TOKENS = new Set([
+	"not",
+	"no",
+	"non",
+	"never",
+	"none",
+	"without",
+]);
+
 function uniqueEnumNearMiss(
 	value: string,
 	options: string[],
@@ -965,7 +977,11 @@ function uniqueEnumNearMiss(
 				: [valueTokens, optionTokens];
 		if (larger.size - smaller.size > 2) return false;
 		for (const token of smaller) if (!larger.has(token)) return false;
-		return smaller.size >= 2;
+		if (smaller.size < 2) return false;
+		for (const token of larger) {
+			if (!smaller.has(token) && ENUM_NEGATION_TOKENS.has(token)) return false;
+		}
+		return true;
 	});
 	return subsetMatches.length === 1 ? subsetMatches[0] : undefined;
 }

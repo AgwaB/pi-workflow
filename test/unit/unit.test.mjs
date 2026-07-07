@@ -10606,6 +10606,102 @@ test("compiler warns when a foreach path is absent from the source control schem
 	}
 });
 
+test("compiler warns when sourceProjection paths match no source control schema", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		mkdirSync(join(cwd, "schemas"), { recursive: true });
+		writeFileSync(
+			join(cwd, "schemas", "plan.schema.json"),
+			JSON.stringify({
+				type: "object",
+				required: ["schema", "digest", "factSlots"],
+				properties: {
+					schema: { type: "string" },
+					digest: { type: "string" },
+					factSlots: {
+						type: "array",
+						items: {
+							type: "object",
+							properties: { id: { type: "string" } },
+						},
+					},
+					sourcePolicy: {
+						type: "object",
+						properties: { mode: { type: "string" } },
+					},
+					extras: { type: "object", additionalProperties: true },
+				},
+			}),
+		);
+		const baseSpec = (include) =>
+			artifactGraphWorkflowSpec({
+				artifactGraph: {
+					stages: [
+						{
+							id: "plan",
+							type: "single",
+							prompt: "Plan.",
+							output: { controlSchema: "./schemas/plan.schema.json" },
+						},
+						{
+							id: "research",
+							type: "foreach",
+							from: { source: "plan", path: "$.factSlots" },
+							sourceProjection: { include },
+							each: { prompt: "Research ${item}" },
+						},
+					],
+				},
+			});
+
+		const good = await compileWorkflow(
+			baseSpec([
+				"$.factSlots",
+				"$.sourcePolicy.mode",
+				// resolves through array items
+				"$.factSlots.id",
+				// additionalProperties: true is skipped conservatively
+				"$.extras.anythingGoes",
+				// bracketed segments are skipped conservatively
+				"$.factSlots[0].id",
+			]),
+			{ cwd, task: "Research" },
+		);
+		assert.equal(
+			good.warnings.filter((w) => /sourceProjection/.test(w)).length,
+			0,
+			`unexpected sourceProjection warning: ${JSON.stringify(good.warnings)}`,
+		);
+
+		const bad = await compileWorkflow(
+			baseSpec(["$.factSlots", "$.sourcePolicyTYPO.mode"]),
+			{ cwd, task: "Research" },
+		);
+		const projectionWarnings = bad.warnings.filter((w) =>
+			/sourceProjection/.test(w),
+		);
+		assert.equal(
+			projectionWarnings.length,
+			1,
+			`expected exactly one sourceProjection warning: ${JSON.stringify(bad.warnings)}`,
+		);
+		assert.ok(
+			/stage "research"/.test(projectionWarnings[0]) &&
+				/\$\.sourcePolicyTYPO\.mode/.test(projectionWarnings[0]) &&
+				/plan/.test(projectionWarnings[0]),
+			`warning should name the stage, path, and source: ${projectionWarnings[0]}`,
+		);
+	} finally {
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+	}
+});
+
 test("compiler warns about workflow-quality risks before runtime", async () => {
 	const cwd = makeProject();
 	try {
@@ -22354,6 +22450,109 @@ test("shared rate-limit backoff defers same-provider launches only", async () =>
 		assert.equal(launches, 1);
 	} finally {
 		setSubagentApiForTests(undefined);
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+	}
+});
+
+test("shared rate-limit backoff survives process restarts via persisted state", async () => {
+	const cwd = makeProject();
+	try {
+		const providerError =
+			"Anthropic request failed: HTTP 429 rate_limit_error. Retry-After: 30";
+		await refreshZeroOutputModelFailure(cwd, {
+			runId: "run_persisted_rate_limit_seed",
+			attemptId: "attempt_persisted_rate_limit_seed",
+			artifactDirName: ".fake-persisted-rate-limit-seed-subagent",
+			model: "anthropic/claude-opus-4-7",
+			streamErrors: [providerError],
+		});
+
+		const backoffFile = join(
+			process.env.HOME,
+			".pi",
+			"agent",
+			"model-rate-limit-backoff.json",
+		);
+		assert.ok(
+			existsSync(backoffFile),
+			"recording a rate-limit backoff must persist it for other processes",
+		);
+		const persisted = JSON.parse(readFileSync(backoffFile, "utf8"));
+		assert.ok(
+			persisted.anthropic?.nextEligibleAtMs > Date.now(),
+			`persisted anthropic cooldown expected: ${JSON.stringify(persisted)}`,
+		);
+
+		// Simulate a fresh process: clear in-memory shared state; only the
+		// persisted file remains to carry the cooldown across processes.
+		setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
+
+		let launches = 0;
+		setSubagentApiForTests({
+			async runSubagent() {
+				launches += 1;
+				return {
+					runId: `run_persisted_rate_limit_${launches}`,
+					attemptId: `attempt_persisted_rate_limit_${launches}`,
+					status: "running",
+				};
+			},
+			async getSubagentStatus() {
+				return null;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+
+		const sameProvider = await createPendingSingleTaskRun(cwd, {
+			model: "anthropic/claude-sonnet-4-5",
+			specName: "restart-same-provider",
+		});
+		const deferred = await launchSubagentTask(
+			cwd,
+			sameProvider.run,
+			sameProvider.task,
+			sameProvider.compiled.tasks[0],
+		);
+		assert.equal(deferred.kind, "capacity");
+		assert.equal(launches, 0);
+		assert.match(
+			deferred.message,
+			/shared anthropic provider rate-limit backoff/,
+		);
+
+		// An expired persisted cooldown must not defer after another restart.
+		writeFileSync(
+			backoffFile,
+			JSON.stringify({
+				anthropic: {
+					nextEligibleAtMs: Date.now() - 1_000,
+					retryAfterMs: 0,
+					updatedAt: new Date().toISOString(),
+				},
+			}),
+		);
+		setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
+		const launched = await launchSubagentTask(
+			cwd,
+			sameProvider.run,
+			sameProvider.task,
+			sameProvider.compiled.tasks[0],
+		);
+		assert.equal(launched.kind, "launched");
+		assert.equal(launches, 1);
+	} finally {
+		setSubagentApiForTests(undefined);
+		setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
 		rmSync(cwd, {
 			recursive: true,
 			force: true,
@@ -34403,6 +34602,82 @@ test("workflow output repair leaves ambiguous or distant enum values failing clo
 		assert.ok(
 			invalid.outputValidation.issues.some(
 				(issue) => issue.path === "$.mode" || issue.path === "$.category",
+			),
+			JSON.stringify(invalid.outputValidation.issues),
+		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
+	}
+});
+
+test("workflow output repair never bridges a negation difference in enum near-misses", async () => {
+	const cwd = makeProject();
+	try {
+		const taskDir = join(cwd, ".pi", "workflows", "workflow_enum3", "tasks", "task-1");
+		const schema = {
+			type: "object",
+			required: ["schema", "decision", "applicability"],
+			properties: {
+				schema: { type: "string" },
+				decision: {
+					type: "string",
+					enum: ["verification-not-needed", "escalate-review"],
+				},
+				applicability: {
+					type: "string",
+					enum: ["not_applicable", "fully_applicable"],
+				},
+			},
+		};
+		const written = await writeWorkflowTaskArtifactBundle({
+			taskDir,
+			rawOutput: [
+				"<control>",
+				JSON.stringify({
+					schema: "enum-negation-v1",
+					digest: "negation guard case",
+					// Subset-matches "verification-not-needed" except for the
+					// negation token: repairing this would invert the meaning.
+					decision: "verification-needed",
+					// Negation token present on BOTH sides: this benign subset
+					// match must still repair to "not_applicable".
+					applicability: "not applicable here",
+				}),
+				"</control>",
+				"<analysis>",
+				"Negation differences must fail closed; shared negations may repair.",
+				"</analysis>",
+				"<refs>[]</refs>",
+			].join("\n"),
+			taskId: "task-1",
+			stageId: "verify",
+			status: "completed",
+			exitCode: 0,
+			controlJsonSchema: schema,
+		});
+		assert.equal(written.valid, false);
+		const invalid = JSON.parse(
+			readFileSync(join(taskDir, "result.invalid-attempt-1.json"), "utf8"),
+		);
+		assert.equal(invalid.outputValidation.valid, false);
+		const enumRepairs = (invalid.outputValidation.repairs ?? []).filter(
+			(repair) => repair.code === "control_enum_near_miss",
+		);
+		assert.equal(
+			enumRepairs.length,
+			1,
+			JSON.stringify(invalid.outputValidation.repairs),
+		);
+		assert.equal(enumRepairs[0].path, "$.applicability");
+		assert.ok(
+			invalid.outputValidation.issues.some(
+				(issue) => issue.path === "$.decision",
+			),
+			JSON.stringify(invalid.outputValidation.issues),
+		);
+		assert.ok(
+			!invalid.outputValidation.issues.some(
+				(issue) => issue.path === "$.applicability",
 			),
 			JSON.stringify(invalid.outputValidation.issues),
 		);

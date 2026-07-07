@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import {
 	copyFile,
 	mkdir,
 	readFile,
 	readdir,
+	rename,
 	rm,
 	stat,
 	writeFile,
@@ -19,7 +20,7 @@ import {
 	resolve,
 	sep,
 } from "node:path";
-import { availableParallelism } from "node:os";
+import { availableParallelism, homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 import type {
@@ -227,7 +228,10 @@ let injectedSubagentApi: SubagentApi | undefined;
 export function setSubagentApiForTests(api: unknown | undefined): void {
 	injectedSubagentApi = api === undefined ? undefined : (api as SubagentApi);
 	cachedSubagentApi = undefined;
-	if (api === undefined) sharedModelRateLimitBackoffs.clear();
+	if (api === undefined) {
+		sharedModelRateLimitBackoffs.clear();
+		removePersistedSharedModelRateLimitBackoffsForTests();
+	}
 }
 
 async function loadSubagentApi(): Promise<SubagentApi> {
@@ -330,6 +334,112 @@ interface SharedModelRateLimitBackoffState {
 
 const sharedModelRateLimitBackoffs =
 	new Map<string, SharedModelRateLimitBackoffState>();
+
+// Cross-process persistence for shared rate-limit backoffs. Provider rate
+// limits are account-level, so concurrent Pi processes (e.g. parallel eval
+// batches) should honor each other's cooldowns. The file is an advisory hint:
+// every read/write failure is swallowed, entries are ignored unless they
+// expire in the future and within the max backoff bound, and writes merge
+// monotonically so a racing process can only lengthen a cooldown, not
+// shorten it.
+const SHARED_RATE_LIMIT_BACKOFF_MAX_PERSISTED_KEYS = 32;
+
+function sharedModelRateLimitBackoffFile(): string {
+	return join(homedir(), ".pi", "agent", "model-rate-limit-backoff.json");
+}
+
+function validPersistedSharedBackoff(
+	value: unknown,
+	nowMs: number,
+): SharedModelRateLimitBackoffState | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value))
+		return undefined;
+	const record = value as Record<string, unknown>;
+	const nextEligibleAtMs = record.nextEligibleAtMs;
+	if (typeof nextEligibleAtMs !== "number" || !Number.isFinite(nextEligibleAtMs))
+		return undefined;
+	if (nextEligibleAtMs <= nowMs) return undefined;
+	if (nextEligibleAtMs - nowMs > RATE_LIMIT_TRANSIENT_RETRY_BACKOFF_MAX_MS)
+		return undefined;
+	return {
+		nextEligibleAtMs,
+		retryAfterMs: Math.max(0, nextEligibleAtMs - nowMs),
+		updatedAt:
+			typeof record.updatedAt === "string" ? record.updatedAt : nowIso(),
+	};
+}
+
+async function loadPersistedSharedModelRateLimitBackoffs(): Promise<void> {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(
+			await readFile(sharedModelRateLimitBackoffFile(), "utf8"),
+		);
+	} catch {
+		return;
+	}
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+	const nowMs = Date.now();
+	for (const [key, value] of Object.entries(
+		parsed as Record<string, unknown>,
+	)) {
+		const state = validPersistedSharedBackoff(value, nowMs);
+		if (!state) continue;
+		const existing = sharedModelRateLimitBackoffs.get(key);
+		if (existing && existing.nextEligibleAtMs >= state.nextEligibleAtMs)
+			continue;
+		sharedModelRateLimitBackoffs.set(key, state);
+	}
+}
+
+async function persistSharedModelRateLimitBackoffs(): Promise<void> {
+	try {
+		const file = sharedModelRateLimitBackoffFile();
+		const nowMs = Date.now();
+		const merged = new Map<string, SharedModelRateLimitBackoffState>();
+		let onDisk: unknown;
+		try {
+			onDisk = JSON.parse(await readFile(file, "utf8"));
+		} catch {
+			onDisk = undefined;
+		}
+		if (onDisk && typeof onDisk === "object" && !Array.isArray(onDisk)) {
+			for (const [key, value] of Object.entries(
+				onDisk as Record<string, unknown>,
+			)) {
+				const state = validPersistedSharedBackoff(value, nowMs);
+				if (state) merged.set(key, state);
+			}
+		}
+		for (const [key, state] of sharedModelRateLimitBackoffs) {
+			if (state.nextEligibleAtMs <= nowMs) continue;
+			const existing = merged.get(key);
+			if (!existing || state.nextEligibleAtMs > existing.nextEligibleAtMs)
+				merged.set(key, state);
+		}
+		const entries = [...merged.entries()]
+			.sort((a, b) => b[1].nextEligibleAtMs - a[1].nextEligibleAtMs)
+			.slice(0, SHARED_RATE_LIMIT_BACKOFF_MAX_PERSISTED_KEYS);
+		const tmpFile = `${file}.tmp-${process.pid}-${Date.now().toString(36)}`;
+		await mkdir(dirname(file), { recursive: true });
+		await writeFile(
+			tmpFile,
+			`${JSON.stringify(Object.fromEntries(entries), null, 2)}\n`,
+			"utf8",
+		);
+		await rename(tmpFile, file);
+	} catch {
+		// advisory cross-process hint only; never fail the caller
+	}
+}
+
+function removePersistedSharedModelRateLimitBackoffsForTests(): void {
+	try {
+		rmSync(sharedModelRateLimitBackoffFile(), { force: true });
+	} catch {
+		// best-effort test hygiene
+	}
+}
 
 interface WaitQueueEntry {
 	resolveWait: () => void;
@@ -1379,7 +1489,7 @@ export async function launchSubagentTask(
 
 	const sharedRateLimitBackoff = taskHasRateLimitRetry
 		? undefined
-		: sharedModelRateLimitBackoffRemaining(
+		: await sharedModelRateLimitBackoffRemaining(
 				modelRateLimitBackoffKey(task, compiledTask),
 			);
 	if (sharedRateLimitBackoff) {
@@ -2036,7 +2146,7 @@ async function materializeTerminalSubagentResult(
 			subagentResult,
 			snapshotMetadata: snapshot.metadata,
 		});
-		recordSharedModelRateLimitBackoff(task, rateLimitBackoffMs);
+		await recordSharedModelRateLimitBackoff(task, rateLimitBackoffMs);
 		await writeJson(
 			transientFailureAttemptPath(resultFile, retryAttempt),
 			workflowResult,
@@ -3031,10 +3141,10 @@ function sharedModelRateLimitBackoffWaitingMessage(
 	return `waiting until ${nextEligibleAt} before launching pi-subagent after shared ${sharedModelRateLimitBackoffScope(key)} rate-limit backoff`;
 }
 
-function recordSharedModelRateLimitBackoff(
+async function recordSharedModelRateLimitBackoff(
 	task: WorkflowTaskRunRecord,
 	backoffMs: number | undefined,
-): void {
+): Promise<void> {
 	if (backoffMs === undefined || backoffMs <= 0) return;
 	const key = modelRateLimitBackoffKey(task);
 	const nowMs = Date.now();
@@ -3049,13 +3159,16 @@ function recordSharedModelRateLimitBackoff(
 		retryAfterMs: Math.max(0, boundedNextEligibleAtMs - nowMs),
 		updatedAt: nowIso(),
 	});
+	await persistSharedModelRateLimitBackoffs();
 }
 
-function sharedModelRateLimitBackoffRemaining(
+async function sharedModelRateLimitBackoffRemaining(
 	key: string,
-):
+): Promise<
 	| { key: string; nextEligibleAt: string; remainingMs: number; retryAfterMs: number }
-	| undefined {
+	| undefined
+> {
+	await loadPersistedSharedModelRateLimitBackoffs();
 	const backoff = sharedModelRateLimitBackoffs.get(key);
 	if (!backoff) return undefined;
 	const remainingMs = Math.max(0, backoff.nextEligibleAtMs - Date.now());
