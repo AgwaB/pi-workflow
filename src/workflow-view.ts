@@ -49,7 +49,7 @@ type Component = {
 };
 
 type TUI = {
-	requestRender(): void;
+	requestRender(force?: boolean): void;
 };
 
 type WorkflowSummary = WorkflowIndexRecord["runs"][number];
@@ -97,6 +97,7 @@ export class WorkflowView implements Component {
 	private error = "";
 	private loading = true;
 	private reloadActive = false;
+	private closed = false;
 	private timer?: ReturnType<typeof setInterval>;
 
 	constructor(
@@ -776,7 +777,17 @@ export class WorkflowView implements Component {
 
 	private taskUsageLines(task: WorkflowTaskRunRecord): string[] {
 		const usage = task.usage?.aggregate ?? task.usage;
-		if (!usage) return [];
+		if (!usage) {
+			const reason =
+				task.agent === "support" || task.kind === "support"
+					? "n/a (support helper)"
+					: "(not reported)";
+			return [
+				"",
+				accent(this.theme, "Usage"),
+				kvRow(this.theme, "tokens", reason),
+			];
+		}
 		const tokens = formatTokenCount(usage.totalTokens);
 		const inputTokens = formatTokenCount(usage.inputTokens);
 		const outputTokens = formatTokenCount(usage.outputTokens);
@@ -1198,12 +1209,22 @@ export class WorkflowView implements Component {
 			lines.push(taskMetaLine(this.theme, [["tokens", tokens]]));
 			const inputTokens = formatTokenCount(observed.inputTokens);
 			const outputTokens = formatTokenCount(observed.outputTokens);
+			const cacheRead = formatTokenCount(observed.cacheReadInputTokens);
+			const cacheWrite = formatTokenCount(observed.cacheCreationInputTokens);
 			if (inputTokens || outputTokens)
 				lines.push(
 					taskMetaLine(this.theme, [
 						["in", inputTokens ?? "n/a"],
 						["out", outputTokens ?? "n/a"],
 					]),
+				);
+			if (cacheRead || cacheWrite)
+				lines.push(
+					kvRow(
+						this.theme,
+						"cache r/w",
+						`${cacheRead ?? "n/a"} / ${cacheWrite ?? "n/a"}`,
+					),
 				);
 			if (observed.omittedTaskIds.length > 0)
 				lines.push(
@@ -1353,8 +1374,13 @@ export class WorkflowView implements Component {
 	}
 
 	private close(): void {
+		if (this.closed) return;
+		this.closed = true;
 		this.dispose();
 		this.done();
+		// Closing replaces a tall custom panel with the normal editor. Force a full
+		// repaint so terminals do not leave stale workflow-board rows behind.
+		this.tui.requestRender(true);
 	}
 }
 

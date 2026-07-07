@@ -151,12 +151,19 @@ export async function resolveWorkflowRouting(
 		routerModel: routerModel ?? "session-default",
 		routerThinking: ROUTER_THINKING,
 	};
-	const escalate = (confidence: number, reason: string): WorkflowRunRouting => ({
+	const routerStartedAt = Date.now();
+	const routerElapsedMs = (): number =>
+		Math.max(0, Date.now() - routerStartedAt);
+	const escalate = (
+		confidence: number,
+		reason: string,
+	): WorkflowRunRouting => ({
 		...base,
 		decided: escalatedDecision,
 		depth: "standard",
 		confidence,
 		reason,
+		routerElapsedMs: routerElapsedMs(),
 	});
 
 	let output: string;
@@ -202,6 +209,7 @@ export async function resolveWorkflowRouting(
 		depth: decision.depth,
 		confidence: decision.confidence,
 		reason: decision.reason,
+		routerElapsedMs: routerElapsedMs(),
 	};
 }
 

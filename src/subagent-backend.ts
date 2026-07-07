@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import {
 	copyFile,
 	mkdir,
@@ -69,6 +69,7 @@ import {
 	workflowExperimentalFlagEnabled,
 } from "./experimental-speed-flags.js";
 import { writeWorkflowPartialOutputLedgerFromFile } from "./workflow-partial-output.js";
+import { PI_WORKFLOW_ROLE_ENV } from "./process-role.js";
 
 const DEFAULT_SUBAGENT_RUNS_ROOT = ".pi/workflow-subagents";
 const MAX_SUBAGENT_SESSION_ID_LENGTH = 64;
@@ -111,6 +112,11 @@ const DYNAMIC_TOOL_RESULT_BUDGET_ENV =
 const DEFAULT_DYNAMIC_TOOL_RESULT_BUDGET_CHARS = 320_000;
 const RATE_LIMIT_TRANSIENT_RETRY_BACKOFF_BASE_MS = 60_000;
 const RATE_LIMIT_TRANSIENT_RETRY_BACKOFF_MAX_MS = 5 * 60_000;
+const OAUTH_RATE_LIMIT_TRANSIENT_RETRY_BACKOFF_BASE_MS = 15 * 60_000;
+const OAUTH_RATE_LIMIT_TRANSIENT_RETRY_BACKOFF_MAX_MS = 60 * 60_000;
+const MAX_PERSISTED_RATE_LIMIT_BACKOFF_MS =
+	OAUTH_RATE_LIMIT_TRANSIENT_RETRY_BACKOFF_MAX_MS;
+const WORKFLOW_AUTH_FILE_ENV = "PI_WORKFLOW_AUTH_FILE";
 const MODULE_PATH = fileURLToPath(import.meta.url);
 const MODULE_DIR = dirname(MODULE_PATH);
 const BUNDLED_PI_WEB_ACCESS_EXTENSION = bundledNodeModulePath(
@@ -276,6 +282,56 @@ export async function runOneShotSubagentCall(
 	return (await api.runSubagent(options)) as OneShotSubagentEnvelope;
 }
 
+// @agwab/pi-subagent 0.4.x does not expose a supported per-run env option.
+// Scope the process env around its async launch so the durable worker (and the
+// Pi process it spawns) inherit worker role without external driver injection.
+let workflowWorkerRoleLaunchDepth = 0;
+let workflowWorkerRolePreviousValue: string | undefined;
+let workflowWorkerRolePreviouslySet = false;
+
+async function runSubagentWithWorkflowWorkerRole(
+	api: SubagentApi,
+	options: Record<string, unknown>,
+): Promise<SubagentResultEnvelope> {
+	enterWorkflowWorkerRoleEnv();
+	try {
+		return await api.runSubagent(options);
+	} finally {
+		exitWorkflowWorkerRoleEnv();
+	}
+}
+
+function enterWorkflowWorkerRoleEnv(): void {
+	if (workflowWorkerRoleLaunchDepth === 0) {
+		workflowWorkerRolePreviouslySet = Object.hasOwn(
+			process.env,
+			PI_WORKFLOW_ROLE_ENV,
+		);
+		workflowWorkerRolePreviousValue = process.env[PI_WORKFLOW_ROLE_ENV];
+	}
+	workflowWorkerRoleLaunchDepth += 1;
+	process.env[PI_WORKFLOW_ROLE_ENV] = "worker";
+}
+
+function exitWorkflowWorkerRoleEnv(): void {
+	workflowWorkerRoleLaunchDepth = Math.max(
+		0,
+		workflowWorkerRoleLaunchDepth - 1,
+	);
+	if (workflowWorkerRoleLaunchDepth > 0) {
+		process.env[PI_WORKFLOW_ROLE_ENV] = "worker";
+		return;
+	}
+	if (
+		workflowWorkerRolePreviouslySet &&
+		workflowWorkerRolePreviousValue !== undefined
+	)
+		process.env[PI_WORKFLOW_ROLE_ENV] = workflowWorkerRolePreviousValue;
+	else delete process.env[PI_WORKFLOW_ROLE_ENV];
+	workflowWorkerRolePreviouslySet = false;
+	workflowWorkerRolePreviousValue = undefined;
+}
+
 function nonEmptyEnv(
 	env: Record<string, string | undefined>,
 	key: string,
@@ -332,7 +388,9 @@ async function recordParentSubagentChildEvent(options: {
 	// Usage rides along on terminal events so a parent subagent can aggregate
 	// nested workflow spend. Engines older than 0.4.8 ignore the extra field.
 	const usage =
-		options.event === "started" ? undefined : childEventUsageSummary(options.task);
+		options.event === "started"
+			? undefined
+			: childEventUsageSummary(options.task);
 	await api
 		.recordSubagentChildEvent({
 			...parent,
@@ -384,8 +442,10 @@ interface SharedModelRateLimitBackoffState {
 	updatedAt: string;
 }
 
-const sharedModelRateLimitBackoffs =
-	new Map<string, SharedModelRateLimitBackoffState>();
+const sharedModelRateLimitBackoffs = new Map<
+	string,
+	SharedModelRateLimitBackoffState
+>();
 
 // Cross-process persistence for shared rate-limit backoffs. Provider rate
 // limits are account-level, so concurrent Pi processes (e.g. parallel eval
@@ -408,10 +468,13 @@ function validPersistedSharedBackoff(
 		return undefined;
 	const record = value as Record<string, unknown>;
 	const nextEligibleAtMs = record.nextEligibleAtMs;
-	if (typeof nextEligibleAtMs !== "number" || !Number.isFinite(nextEligibleAtMs))
+	if (
+		typeof nextEligibleAtMs !== "number" ||
+		!Number.isFinite(nextEligibleAtMs)
+	)
 		return undefined;
 	if (nextEligibleAtMs <= nowMs) return undefined;
-	if (nextEligibleAtMs - nowMs > RATE_LIMIT_TRANSIENT_RETRY_BACKOFF_MAX_MS)
+	if (nextEligibleAtMs - nowMs > MAX_PERSISTED_RATE_LIMIT_BACKOFF_MS)
 		return undefined;
 	return {
 		nextEligibleAtMs,
@@ -694,11 +757,17 @@ export function observeLiveModelWorkerCompletion(
 		);
 	}
 	const recentMedianMs = medianOfDurations(state.recentExecutionMs);
-	if (recentMedianMs > state.baselineMs * ADAPTIVE_LIVE_MODEL_WORKER_SHRINK_RATIO) {
+	if (
+		recentMedianMs >
+		state.baselineMs * ADAPTIVE_LIVE_MODEL_WORKER_SHRINK_RATIO
+	) {
 		halveAdaptiveLiveModelWorkerLimit(state, "shrink");
 		return;
 	}
-	if (recentMedianMs < state.baselineMs * ADAPTIVE_LIVE_MODEL_WORKER_GROW_RATIO) {
+	if (
+		recentMedianMs <
+		state.baselineMs * ADAPTIVE_LIVE_MODEL_WORKER_GROW_RATIO
+	) {
 		state.limit = Math.min(
 			adaptiveLiveModelWorkerCeiling(),
 			state.limit + ADAPTIVE_LIVE_MODEL_WORKER_GROW_STEP,
@@ -1860,7 +1929,7 @@ export async function launchSubagentTask(
 		launched = await runWithLaunchSlot(
 			() => {
 				throwIfAborted(leaseSignal);
-				return api.runSubagent(subagentOptions);
+				return runSubagentWithWorkflowWorkerRole(api, subagentOptions);
 			},
 			() => {
 				launchStartedAt = nowIso();
@@ -2401,6 +2470,7 @@ async function materializeTerminalSubagentResult(
 		const retryAttempt = (task.launchRetry?.attempts ?? 0) + 1;
 		const rateLimitBackoffMs = transientModelRateLimitBackoffMs({
 			attempt: retryAttempt,
+			modelBackoffKey: modelRateLimitBackoffKey(task),
 			errorMessage,
 			stderrText,
 			subagentResult,
@@ -2680,8 +2750,7 @@ async function materializeTerminalArtifactGraphResultInner(
 			exitCode: options.exitCode,
 			stderr,
 			subagentToolCallsPath: options.subagentToolCalls?.ref.path,
-			subagentToolCallsSummaryPath:
-				options.subagentToolCallsSummary?.ref.path,
+			subagentToolCallsSummaryPath: options.subagentToolCallsSummary?.ref.path,
 			subagentToolCallsArtifactCwd:
 				options.subagentToolCalls?.ref.artifactCwd ??
 				options.subagentToolCallsSummary?.ref.artifactCwd,
@@ -3320,7 +3389,7 @@ function metadataTextValues(metadata: unknown): string[] {
 function providerInputValidationFailure(text: string): boolean {
 	const lower = text.toLowerCase();
 	if (
-		/(?:\b429\b|rate_limit|rate limit|temporar(?:y|ily)|overloaded|timeout|timed out|\b5xx\b|\bhttp(?:\/\d(?:\.\d)?)?[ \/]?5\d\d\b|\bstatus(?: code)?[:= ]+5\d\d\b|\b5\d\d\s+(?:internal|bad gateway|service unavailable|gateway timeout|server error)\b)/.test(
+		/(?:\b429\b|rate_limit|rate limit|temporar(?:y|ily)|overloaded|timeout|timed out|\b5xx\b|\bhttp(?:\/\d(?:\.\d)?)?[ /]?5\d\d\b|\bstatus(?: code)?[:= ]+5\d\d\b|\b5\d\d\s+(?:internal|bad gateway|service unavailable|gateway timeout|server error)\b)/.test(
 			lower,
 		)
 	) {
@@ -3423,10 +3492,13 @@ async function recordSharedModelRateLimitBackoff(
 	await persistSharedModelRateLimitBackoffs();
 }
 
-async function sharedModelRateLimitBackoffRemaining(
-	key: string,
-): Promise<
-	| { key: string; nextEligibleAt: string; remainingMs: number; retryAfterMs: number }
+async function sharedModelRateLimitBackoffRemaining(key: string): Promise<
+	| {
+			key: string;
+			nextEligibleAt: string;
+			remainingMs: number;
+			retryAfterMs: number;
+	  }
 	| undefined
 > {
 	await loadPersistedSharedModelRateLimitBackoffs();
@@ -3446,14 +3518,16 @@ async function sharedModelRateLimitBackoffRemaining(
 }
 
 function isRateLimitModelFailureText(text: string): boolean {
-	return /(?:\bhttp(?:\/\d(?:\.\d)?)?[ \/]?429\b|\bstatus(?: code)?[:= ]+429\b|\b429\s+(?:too many requests|rate[_ -]?limit)|rate[_ -]?limit|too many requests|quota exceeded)/i.test(
+	return /(?:\bhttp(?:\/\d(?:\.\d)?)?[ /]?429\b|\bstatus(?: code)?[:= ]+429\b|\b429\s+(?:too many requests|rate[_ -]?limit)|rate[_ -]?limit|too many requests|quota exceeded)/i.test(
 		text,
 	);
 }
 
 type RateLimitRetryAfterUnit = "millisecond" | "second" | "minute";
 
-function rateLimitRetryAfterUnit(unit: string | undefined): RateLimitRetryAfterUnit {
+function rateLimitRetryAfterUnit(
+	unit: string | undefined,
+): RateLimitRetryAfterUnit {
 	const lower = (unit ?? "").toLowerCase();
 	if (lower === "ms" || lower.startsWith("millisecond")) return "millisecond";
 	if (lower === "m" || lower.startsWith("min") || lower.startsWith("minute")) {
@@ -3465,17 +3539,21 @@ function rateLimitRetryAfterUnit(unit: string | undefined): RateLimitRetryAfterU
 function boundedRateLimitRetryAfterMs(
 	value: number,
 	unit: RateLimitRetryAfterUnit,
+	modelBackoffKey?: string,
 ): number | undefined {
 	if (!Number.isFinite(value) || value <= 0) return undefined;
 	const multiplier =
 		unit === "millisecond" ? 1 : unit === "minute" ? 60_000 : 1000;
 	return Math.min(
-		RATE_LIMIT_TRANSIENT_RETRY_BACKOFF_MAX_MS,
+		rateLimitBackoffProfile(modelBackoffKey).maxMs,
 		Math.ceil(value * multiplier),
 	);
 }
 
-function retryAfterMsFromRateLimitText(text: string): number | undefined {
+function retryAfterMsFromRateLimitText(
+	text: string,
+	modelBackoffKey?: string,
+): number | undefined {
 	const retryAfterHeaderMatch = text.match(
 		/\bretry[-_ ]?after\b\s*[:=]\s*(\d{1,6})(?:\s*(ms|milliseconds?|s|sec|secs|seconds?|m|min|mins|minutes?))?\b/i,
 	);
@@ -3483,6 +3561,7 @@ function retryAfterMsFromRateLimitText(text: string): number | undefined {
 		return boundedRateLimitRetryAfterMs(
 			Number.parseInt(retryAfterHeaderMatch[1] ?? "", 10),
 			rateLimitRetryAfterUnit(retryAfterHeaderMatch[2]),
+			modelBackoffKey,
 		);
 	}
 	const tryAgainMatch = text.match(
@@ -3492,19 +3571,58 @@ function retryAfterMsFromRateLimitText(text: string): number | undefined {
 	return boundedRateLimitRetryAfterMs(
 		Number.parseInt(tryAgainMatch[1] ?? "", 10),
 		rateLimitRetryAfterUnit(tryAgainMatch[2]),
+		modelBackoffKey,
 	);
 }
 
-function defaultRateLimitBackoffMs(attempt: number): number {
+function workflowAuthFile(): string {
+	const override = process.env[WORKFLOW_AUTH_FILE_ENV]?.trim();
+	return override ? override : join(homedir(), ".pi", "agent", "auth.json");
+}
+
+function providerAuthType(
+	modelBackoffKey: string | undefined,
+): string | undefined {
+	const key = modelBackoffKey?.trim().toLowerCase();
+	if (!key || key === "default") return undefined;
+	try {
+		const parsed = JSON.parse(readFileSync(workflowAuthFile(), "utf8"));
+		const provider = parsed?.[key];
+		return typeof provider?.type === "string"
+			? provider.type.toLowerCase()
+			: undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function rateLimitBackoffProfile(modelBackoffKey: string | undefined): {
+	baseMs: number;
+	maxMs: number;
+} {
+	return providerAuthType(modelBackoffKey) === "oauth"
+		? {
+				baseMs: OAUTH_RATE_LIMIT_TRANSIENT_RETRY_BACKOFF_BASE_MS,
+				maxMs: OAUTH_RATE_LIMIT_TRANSIENT_RETRY_BACKOFF_MAX_MS,
+			}
+		: {
+				baseMs: RATE_LIMIT_TRANSIENT_RETRY_BACKOFF_BASE_MS,
+				maxMs: RATE_LIMIT_TRANSIENT_RETRY_BACKOFF_MAX_MS,
+			};
+}
+
+function defaultRateLimitBackoffMs(
+	attempt: number,
+	modelBackoffKey?: string,
+): number {
 	const exponent = Math.max(0, Math.min(4, Math.floor(attempt) - 1));
-	return Math.min(
-		RATE_LIMIT_TRANSIENT_RETRY_BACKOFF_MAX_MS,
-		RATE_LIMIT_TRANSIENT_RETRY_BACKOFF_BASE_MS * 2 ** exponent,
-	);
+	const profile = rateLimitBackoffProfile(modelBackoffKey);
+	return Math.min(profile.maxMs, profile.baseMs * 2 ** exponent);
 }
 
 function transientModelRateLimitBackoffMs(options: {
 	attempt: number;
+	modelBackoffKey?: string;
 	errorMessage?: string;
 	stderrText: string;
 	subagentResult?: Record<string, unknown>;
@@ -3521,8 +3639,8 @@ function transientModelRateLimitBackoffMs(options: {
 	const matched = candidates.find(isRateLimitModelFailureText);
 	if (!matched) return undefined;
 	return (
-		retryAfterMsFromRateLimitText(matched) ??
-		defaultRateLimitBackoffMs(options.attempt)
+		retryAfterMsFromRateLimitText(matched, options.modelBackoffKey) ??
+		defaultRateLimitBackoffMs(options.attempt, options.modelBackoffKey)
 	);
 }
 
@@ -4038,7 +4156,9 @@ function toolCallArtifactRef(
 			typeof (artifact as SubagentArtifactRef).path === "string"
 		);
 	});
-	return ref ? { ...ref, artifactCwd: ref.artifactCwd ?? resultCwd } : undefined;
+	return ref
+		? { ...ref, artifactCwd: ref.artifactCwd ?? resultCwd }
+		: undefined;
 }
 
 function failedToolCallSummary(

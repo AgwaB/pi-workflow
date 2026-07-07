@@ -930,6 +930,145 @@ function mergeVerifierRows(rows) {
 	};
 }
 
+const REPO_LOCAL_SIGNAL_RE =
+	/\b(?:local[_ -]?repo|repo(?:sitory)?|codebase|source tree|workspace|filesystem|local file|file path|static analysis|static audit)\b/iu;
+const COMMON_REPO_PATH_RE =
+	/(?:^|[\s"'`()])(?:\.\/|\.\.\/|src\/|test\/|tests\/|workflows\/|internal\/|docs\/|agents\/|skills\/|tools\/|package\.json|tsconfig\.json|README\.md)(?:[\s"'`),.:;]|\/|$)/iu;
+
+function hasRepoLocalSignal(
+	value,
+	seen = new Set(),
+	budget = { remaining: 200 },
+) {
+	if (budget.remaining <= 0) return false;
+	if (typeof value === "string") {
+		budget.remaining -= 1;
+		const text = value.trim();
+		return (
+			looksLikeLocalSourceRef(text) ||
+			REPO_LOCAL_SIGNAL_RE.test(text) ||
+			COMMON_REPO_PATH_RE.test(text)
+		);
+	}
+	if (Array.isArray(value)) {
+		if (seen.has(value)) return false;
+		seen.add(value);
+		for (const item of value) {
+			if (hasRepoLocalSignal(item, seen, budget)) return true;
+		}
+		return false;
+	}
+	if (!value || typeof value !== "object") return false;
+	if (seen.has(value)) return false;
+	seen.add(value);
+	for (const [key, item] of Object.entries(value)) {
+		budget.remaining -= 1;
+		if (budget.remaining <= 0) return false;
+		if (
+			[
+				"sourceType",
+				"sourceQuality",
+				"sourcePriority",
+				"expectedSourceTypes",
+			].includes(key) &&
+			hasRepoLocalSignal(item, seen, budget)
+		)
+			return true;
+		if (
+			["file", "path", "repo", "repoPath", "localPath", "sourceRef"].includes(
+				key,
+			) &&
+			(typeof item === "string" || Array.isArray(item)) &&
+			hasRepoLocalSignal(item, seen, budget)
+		)
+			return true;
+		if (hasRepoLocalSignal(item, seen, budget)) return true;
+	}
+	return false;
+}
+
+function plannedFactSlotIds(plan) {
+	return asArray(plan?.factSlots)
+		.map((slot) =>
+			slot && typeof slot === "object" && typeof slot.id === "string"
+				? slot.id
+				: null,
+		)
+		.filter(Boolean);
+}
+
+function factSlotIdsForFloor(plan, normalized) {
+	return compactStrings([
+		...plannedFactSlotIds(plan),
+		...asArray(normalized?.factSlotCoverage).flatMap((slot) =>
+			slot && typeof slot === "object" ? [slot.slotId ?? slot.id] : [],
+		),
+	]);
+}
+
+function hasClaimBearingPlan(plan, normalized) {
+	return (
+		plannedFactSlotIds(plan).length > 0 ||
+		asArray(plan?.verificationPriorities).length > 0 ||
+		asArray(normalized?.factSlotCoverage).length > 0 ||
+		asArray(normalized?.coverageGaps).length > 0 ||
+		asArray(normalized?.claimInventory?.preservedClaims).length > 0
+	);
+}
+
+function collectRepoLocalHints(value, hints = new Set(), seen = new Set()) {
+	if (hints.size >= 6) return hints;
+	if (typeof value === "string") {
+		const text = value.trim();
+		if (looksLikeLocalSourceRef(text)) hints.add(text);
+		return hints;
+	}
+	if (Array.isArray(value)) {
+		if (seen.has(value)) return hints;
+		seen.add(value);
+		for (const item of value) collectRepoLocalHints(item, hints, seen);
+		return hints;
+	}
+	if (!value || typeof value !== "object") return hints;
+	if (seen.has(value)) return hints;
+	seen.add(value);
+	for (const item of Object.values(value))
+		collectRepoLocalHints(item, hints, seen);
+	return hints;
+}
+
+function buildZeroCandidateFloorGap({
+	plan,
+	normalized,
+	normalizeInputPacket,
+}) {
+	const explicitCandidateList = Array.isArray(
+		normalized?.claimInventory?.verificationCandidates,
+	);
+	if (!explicitCandidateList) return null;
+	if (!hasClaimBearingPlan(plan, normalized)) return null;
+	if (
+		!hasRepoLocalSignal(plan) &&
+		!hasRepoLocalSignal(normalized) &&
+		!hasRepoLocalSignal(normalizeInputPacket?.packet)
+	)
+		return null;
+	return {
+		evidenceState: "no_verification_candidates",
+		reason:
+			"repo-local/static claim-bearing research produced zero verification candidates; the verification floor did not run",
+		sourceUrls: compactStrings(
+			[...collectRepoLocalHints(plan), ...collectRepoLocalHints(normalized)],
+			6,
+		),
+		relatedFactSlotIds: factSlotIdsForFloor(plan, normalized),
+		whyItMatters:
+			"Repo-local findings must be backed by verified local file evidence or exposed as an explicit gap.",
+		nextStep:
+			"Extract at least one source-backed local_repo verification candidate, or explicitly mark the task as non-claim/no-verification with tested justification.",
+	};
+}
+
 function buildBatchAdoptionReadiness({ gateSummary, candidateCount }) {
 	const checks = [
 		["invalid_verifier_rows", gateSummary.invalidVerifierRows],
@@ -988,12 +1127,13 @@ export default async function claimEvidenceGate({
 		normalizeInputPacket,
 		context,
 	);
+	const rawVerificationCandidates = asArray(
+		normalized?.claimInventory?.verificationCandidates,
+	);
 	const candidateRecords = [];
 	const candidatesById = new Map();
 	const invalidNormalizedCandidates = [];
-	for (const [index, candidate] of asArray(
-		normalized?.claimInventory?.verificationCandidates,
-	).entries()) {
+	for (const [index, candidate] of rawVerificationCandidates.entries()) {
 		const idCheck = claimIdOf(candidate);
 		if (!idCheck.id) {
 			invalidNormalizedCandidates.push({
@@ -1082,7 +1222,23 @@ export default async function claimEvidenceGate({
 		sourceEvidenceCompatibilityFailures: 0,
 		sourceEvidenceCompatibilityMismatches: 0,
 		additionalEvidenceSourceDowngrades: 0,
+		zeroCandidateFloorBlockers: 0,
 	};
+	if (
+		candidateRecords.length === 0 &&
+		rawVerificationCandidates.length === 0 &&
+		verifierClaims.length === 0
+	) {
+		const gap = buildZeroCandidateFloorGap({
+			plan,
+			normalized,
+			normalizeInputPacket,
+		});
+		if (gap) {
+			remainingGaps.push(gap);
+			gateSummary.zeroCandidateFloorBlockers += 1;
+		}
+	}
 	for (const issue of refsNoneBatchIssues) {
 		remainingGaps.push({
 			evidenceState: issue.reason,

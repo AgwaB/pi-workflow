@@ -14,7 +14,7 @@ import {
 	workflowExperimentalFlagEnabled,
 } from "./experimental-speed-flags.js";
 import { stringifyPromptJson } from "./prompt-json.js";
-import { readSimpleJsonPath } from "./workflow-runtime.js";
+import { isSimpleJsonPath, readSimpleJsonPath } from "./workflow-runtime.js";
 
 export const WORKFLOW_SOURCE_MANIFEST_SCHEMA =
 	"workflow-source-manifest-v1" as const;
@@ -161,7 +161,8 @@ const workflowArtifactReadDedupCache = new Map<
 const DEFAULT_MAX_BYTES = 50 * 1024;
 const DEFAULT_MAX_LINES = 2000;
 const SOURCE_NAME_PATTERN = /^[A-Za-z0-9_.:-]+$/;
-const SIMPLE_JSON_PATH_PATTERN = /^(\$|\$(\.[A-Za-z0-9_-]+)+)$/;
+const SIMPLE_JSON_PATH_DIAGNOSTIC =
+	"path must be $ or a simple dot JSON path with optional array selectors/slices like $.claims[0], $.claims[0:2], $.claims[*], or $[0:2]";
 const JSON_PATH_SEGMENT_ALIASES: Record<string, string> = {
 	axes: "researchAxes",
 	claimVerdicts: "claimVerdictLedger",
@@ -561,23 +562,44 @@ function stripArtifactPathPrefix(
 ): string {
 	const artifactPath = `$.${artifact}`;
 	if (path === artifactPath) return "$";
+	if (path.startsWith(`${artifactPath}[`)) {
+		return `$${path.slice(artifactPath.length)}`;
+	}
 	const artifactPrefix = `${artifactPath}.`;
 	if (!path.startsWith(artifactPrefix)) return path;
 	return `$.${path.slice(artifactPrefix.length)}`;
 }
 
 function applyJsonPathSegmentAliases(path: string): string {
-	if (path === "$") return path;
-	const segments = path
-		.slice(2)
-		.split(".")
-		.map((segment) => segment.replace(/\[(\*|\d+|\d*:\d*)\]$/u, ""));
-	const aliased = segments.map(
-		(segment) => JSON_PATH_SEGMENT_ALIASES[segment] ?? segment,
+	if (path === "$" || !path.startsWith("$.")) return path;
+	const parsedSegments: Array<{ name: string; selectors: string }> = [];
+	for (const segment of path.slice(2).split(".")) {
+		const parsed = parseJsonPathAliasSegment(segment);
+		if (!parsed) return path;
+		parsedSegments.push(parsed);
+	}
+	const aliased = parsedSegments.map((segment) => {
+		const alias = JSON_PATH_SEGMENT_ALIASES[segment.name];
+		return {
+			name: alias ?? segment.name,
+			selectors: segment.selectors,
+			changed: alias !== undefined && alias !== segment.name,
+		};
+	});
+	if (!aliased.some((segment) => segment.changed)) return path;
+	return `$.${aliased
+		.map((segment) => `${segment.name}${segment.selectors}`)
+		.join(".")}`;
+}
+
+function parseJsonPathAliasSegment(
+	segment: string,
+): { name: string; selectors: string } | undefined {
+	const match = /^([A-Za-z0-9_-]+)((?:\[(?:\*|\d+|\d*:\d*)\])*)$/u.exec(
+		segment,
 	);
-	if (aliased.every((segment, index) => segment === segments[index]))
-		return path;
-	return `$.${aliased.join(".")}`;
+	if (!match) return undefined;
+	return { name: match[1]!, selectors: match[2] ?? "" };
 }
 
 function applyProjectionItemLimit(
@@ -704,7 +726,9 @@ export async function handleWorkflowArtifactToolCall(
 	if (!input.artifact)
 		throw new Error("workflow_artifact read requires artifact");
 	const dedupKey = workflowArtifactReadDedupKey(config, accessMode, input);
-	const cachedRead = workflowExperimentalFlagEnabled(EXPERIMENTAL_TOOL_DEDUP_ENV)
+	const cachedRead = workflowExperimentalFlagEnabled(
+		EXPERIMENTAL_TOOL_DEDUP_ENV,
+	)
 		? workflowArtifactReadDedupCache.get(dedupKey)
 		: undefined;
 	if (cachedRead !== undefined) {
@@ -903,11 +927,7 @@ function normalizeToolInput(value: unknown):
 function normalizeProjectionPath(value: unknown): string | undefined {
 	const path = optionalString(value, "path");
 	if (path === undefined) return undefined;
-	if (!SIMPLE_JSON_PATH_PATTERN.test(path)) {
-		throw new Error(
-			"path must be $ or a simple dot JSON path like $.claims.items; array selectors are not supported",
-		);
-	}
+	if (!isSimpleJsonPath(path)) throw new Error(SIMPLE_JSON_PATH_DIAGNOSTIC);
 	return path;
 }
 

@@ -722,7 +722,11 @@ async function collectSourceProjectionWarnings(
 			const sourceId = (from as any).source ?? (from as any).stage;
 			if (typeof sourceId === "string") sourceIds.push(sourceId);
 		}
-		if (stage.type === "foreach" && stage.from && typeof stage.from === "object") {
+		if (
+			stage.type === "foreach" &&
+			stage.from &&
+			typeof stage.from === "object"
+		) {
 			const sourceId = (stage.from as any).source ?? (stage.from as any).stage;
 			if (typeof sourceId === "string" && !sourceIds.includes(sourceId))
 				sourceIds.push(sourceId);
@@ -775,7 +779,8 @@ function projectionPathResolvable(schema: any, segments: string[]): boolean {
 		}
 		if (
 			node.additionalProperties === true ||
-			(node.additionalProperties && typeof node.additionalProperties === "object")
+			(node.additionalProperties &&
+				typeof node.additionalProperties === "object")
 		) {
 			return true;
 		}
@@ -808,6 +813,7 @@ async function collectWorkflowQualityWarnings(
 			continue;
 		}
 		schemaByStageId.set(stage.id, schema);
+		if (stage.support && typeof stage.support === "object") continue;
 		const prompt = stagePromptText(stage);
 
 		if (
@@ -823,6 +829,18 @@ async function collectWorkflowQualityWarnings(
 			if (!promptMentionsJsonKey(prompt, field.key)) {
 				warnings.push(
 					`stage "${stage.id}" requires ${field.path} but the prompt does not show the exact JSON key "${field.key}". Add a small <control> JSON skeleton or few-shot example using that key to avoid model drift to aliases such as name/claim/title.`,
+				);
+			}
+		}
+
+		for (const field of complexControlShapeFields(schema, prompt)) {
+			if (!promptShowsJsonKeyShape(prompt, field.key, field.expectedShape)) {
+				const example = field.expectedShape === "object" ? "{}" : "[]";
+				const source = field.required
+					? `requires ${field.path}`
+					: `defines ${field.path}`;
+				warnings.push(
+					`stage "${stage.id}" ${source} as a JSON ${field.expectedShape}, but the prompt does not show an exact "${field.key}": ${example} control shape. Add a small schema-valid <control> JSON skeleton so model output does not drift to the wrong type or alias nested fields.`,
 				);
 			}
 		}
@@ -867,6 +885,35 @@ function promptMentionsJsonKey(prompt: string, key: string): boolean {
 	return prompt.includes(`"${key}":`) || prompt.includes(`"${key}" :`);
 }
 
+function promptMentionsControlKey(prompt: string, key: string): boolean {
+	return prompt.includes(key);
+}
+
+function promptShowsJsonKeyShape(
+	prompt: string,
+	key: string,
+	expectedShape: "array" | "object",
+): boolean {
+	const quotedKey = `"${key}"`;
+	const expectedOpener = expectedShape === "object" ? "{" : "[";
+	let offset = 0;
+	while (offset < prompt.length) {
+		const keyIndex = prompt.indexOf(quotedKey, offset);
+		if (keyIndex === -1) return false;
+		let cursor = keyIndex + quotedKey.length;
+		while (/\s/.test(prompt[cursor] ?? "")) cursor += 1;
+		if (prompt[cursor] !== ":") {
+			offset = cursor + 1;
+			continue;
+		}
+		cursor += 1;
+		while (/\s/.test(prompt[cursor] ?? "")) cursor += 1;
+		if (prompt[cursor] === expectedOpener) return true;
+		offset = cursor + 1;
+	}
+	return false;
+}
+
 function hasStringArrayProperty(schema: any, path: string[]): boolean {
 	let node = schema;
 	for (const segment of path) {
@@ -874,6 +921,113 @@ function hasStringArrayProperty(schema: any, path: string[]): boolean {
 		if (!node) return false;
 	}
 	return node?.type === "array" && node.items?.type === "string";
+}
+
+type ComplexControlShapeField = {
+	path: string;
+	key: string;
+	expectedShape: "array" | "object";
+	required: boolean;
+};
+
+function complexControlShapeFields(
+	schema: any,
+	prompt: string,
+	parentPath = "$",
+): ComplexControlShapeField[] {
+	const properties = schema?.properties;
+	if (!properties || typeof properties !== "object") return [];
+	const findings: ComplexControlShapeField[] = [];
+	const required = requiredStringSet(schema);
+	for (const [key, value] of Object.entries(properties)) {
+		const child: any = value;
+		const childPath = `${parentPath}.${key}`;
+		const isRequired = required.has(key);
+		const expectedShape = expectedJsonContainerShape(child);
+		if (
+			expectedShape &&
+			shouldWarnForControlShape({
+				parentPath,
+				key,
+				isRequired,
+				expectedShape,
+				prompt,
+			})
+		) {
+			findings.push({
+				path: childPath,
+				key,
+				expectedShape,
+				required: isRequired,
+			});
+		}
+		if (isRequired) {
+			findings.push(
+				...nestedComplexControlShapeFields(child, prompt, childPath),
+			);
+		}
+	}
+	return findings;
+}
+
+function requiredStringSet(schema: any): Set<string> {
+	return new Set(
+		Array.isArray(schema?.required)
+			? schema.required.filter((item: unknown) => typeof item === "string")
+			: [],
+	);
+}
+
+function shouldWarnForControlShape(input: {
+	parentPath: string;
+	key: string;
+	isRequired: boolean;
+	expectedShape: "array" | "object" | undefined;
+	prompt: string;
+}): input is typeof input & { expectedShape: "array" | "object" } {
+	if (!input.expectedShape) return false;
+	if (isProtocolControlKey(input.parentPath, input.key)) return false;
+	if (input.isRequired) return true;
+	return (
+		input.parentPath === "$" &&
+		input.expectedShape === "object" &&
+		promptMentionsControlKey(input.prompt, input.key)
+	);
+}
+
+function nestedComplexControlShapeFields(
+	schema: any,
+	prompt: string,
+	parentPath: string,
+): ComplexControlShapeField[] {
+	if (schema?.type === "object") {
+		return complexControlShapeFields(schema, prompt, parentPath);
+	}
+	if (isObjectArraySchema(schema)) {
+		return complexControlShapeFields(schema.items, prompt, `${parentPath}[]`);
+	}
+	return [];
+}
+
+function expectedJsonContainerShape(
+	schema: any,
+): "array" | "object" | undefined {
+	if (schema?.type === "object") return "object";
+	if (schema?.type === "array") return "array";
+	return undefined;
+}
+
+function isObjectArraySchema(schema: any): boolean {
+	return (
+		schema?.type === "array" &&
+		schema.items &&
+		!Array.isArray(schema.items) &&
+		schema.items.type === "object"
+	);
+}
+
+function isProtocolControlKey(parentPath: string, key: string): boolean {
+	return parentPath === "$" && (key === "schema" || key === "digest");
 }
 
 function fragileRequiredItemFields(

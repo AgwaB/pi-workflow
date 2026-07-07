@@ -1624,7 +1624,7 @@ test("artifact graph schema validates structured requiredReadPolicy path contrac
 									{
 										source: "risk",
 										artifact: "control",
-										path: "$.claims[0]",
+										path: "$.claims[-1]",
 										maxChars: 200,
 									},
 								],
@@ -1638,7 +1638,7 @@ test("artifact graph schema validates structured requiredReadPolicy path contrac
 	assertIssue(
 		invalidPath,
 		"$.artifactGraph.stages[1].inputPolicy.requiredReadPolicy[0].path",
-		"simple dot JSON path",
+		"optional array selectors/slices",
 	);
 
 	const parsed = parsePublicWorkflow(
@@ -1656,7 +1656,7 @@ test("artifact graph schema validates structured requiredReadPolicy path contrac
 								{
 									source: "risk",
 									artifact: "control",
-									path: "$.claims",
+									path: "$.claims[0:2]",
 									maxItems: 2,
 								},
 							],
@@ -1668,7 +1668,7 @@ test("artifact graph schema validates structured requiredReadPolicy path contrac
 	);
 	assert.equal(
 		parsed.artifactGraph.stages[1].inputPolicy.requiredReadPolicy[0].path,
-		"$.claims",
+		"$.claims[0:2]",
 	);
 });
 
@@ -8706,7 +8706,7 @@ test("artifact graph schema rejects unknown output fields and invalid required r
 									{
 										source: "extract",
 										artifact: "control",
-										path: "$.items[0]",
+										path: "$.items[-1]",
 									},
 								],
 							},
@@ -8720,7 +8720,7 @@ test("artifact graph schema rejects unknown output fields and invalid required r
 	assertIssue(
 		invalidProjectionPath,
 		"$.artifactGraph.stages[1].inputPolicy.requiredReads[0].path",
-		"simple dot JSON path",
+		"optional array selectors/slices",
 	);
 
 	const markdownProjection = assertThrowsFlow(() =>
@@ -11034,6 +11034,115 @@ test("compiler warns about workflow-quality risks before runtime", async () => {
 	}
 });
 
+test("compiler warns when complex control fields lack prompt JSON skeletons", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		mkdirSync(join(cwd, "schemas"), { recursive: true });
+		writeFileSync(
+			join(cwd, "schemas", "report.schema.json"),
+			JSON.stringify({
+				type: "object",
+				required: [
+					"schema",
+					"digest",
+					"sections",
+					"evidenceIndex",
+					"openQuestions",
+				],
+				properties: {
+					schema: { type: "string", const: "report-v1" },
+					digest: { type: "string" },
+					sections: {
+						type: "array",
+						items: {
+							type: "object",
+							required: ["id", "heading", "points"],
+							properties: {
+								id: { type: "string" },
+								heading: { type: "string" },
+								points: { type: "array", items: { type: "object" } },
+							},
+						},
+					},
+					evidenceIndex: {
+						type: "array",
+						items: {
+							type: "object",
+							required: ["id", "file", "claim"],
+							properties: {
+								id: { type: "string" },
+								file: { type: "string" },
+								claim: { type: "string" },
+							},
+						},
+					},
+					coverageGaps: { type: "object", additionalProperties: true },
+					openQuestions: { type: "array", items: { type: "string" } },
+				},
+			}),
+		);
+		const baseStage = {
+			id: "report",
+			type: "single",
+			output: { controlSchema: "./schemas/report.schema.json" },
+		};
+		const bad = await compileWorkflow(
+			artifactGraphWorkflowSpec({
+				artifactGraph: {
+					stages: [
+						{
+							...baseStage,
+							prompt:
+								"Put machine-readable JSON in <control> with schema, digest, sections, evidenceIndex, coverageGaps, and openQuestions. Every important point should cite evidence ids.",
+						},
+					],
+				},
+			}),
+			{ cwd, specPath: "spec.json", task: "Report" },
+		);
+		for (const expected of [
+			/requires \$\.sections as a JSON array/,
+			/requires \$\.evidenceIndex as a JSON array/,
+			/requires \$\.openQuestions as a JSON array/,
+			/requires \$\.sections\[\]\.points as a JSON array/,
+			/defines \$\.coverageGaps as a JSON object/,
+		]) {
+			assert.ok(
+				bad.warnings.some((w) => expected.test(w)),
+				`expected ${expected} shape warning, got: ${JSON.stringify(bad.warnings)}`,
+			);
+		}
+
+		const good = await compileWorkflow(
+			artifactGraphWorkflowSpec({
+				artifactGraph: {
+					stages: [
+						{
+							...baseStage,
+							prompt:
+								'Put machine-readable JSON in <control> with schema, digest, sections, evidenceIndex, coverageGaps, and openQuestions. Example control excerpt: {"sections":[{"id":"overview","heading":"Overview","points":[{}]}],"evidenceIndex":[{"id":"E1","file":"src/x.ts","claim":"..."}],"coverageGaps":{},"openQuestions":["..."]}.',
+						},
+					],
+				},
+			}),
+			{ cwd, specPath: "spec.json", task: "Report" },
+		);
+		assert.equal(
+			good.warnings.filter((w) => /control shape/.test(w)).length,
+			0,
+			`unexpected control shape warning: ${JSON.stringify(good.warnings)}`,
+		);
+	} finally {
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+	}
+});
+
 test("partial foreach continues scheduling after an item failure", () => {
 	assert.equal(
 		shouldScheduleAfterStageFailure({
@@ -11263,7 +11372,8 @@ function withAdaptiveLiveWorkerEnv(overrides, run) {
 	else process.env.PI_WORKFLOW_ADAPTIVE_LIVE_WORKERS = overrides.adaptive;
 	if (overrides.maxLiveWorkers === undefined)
 		delete process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS;
-	else process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS = overrides.maxLiveWorkers;
+	else
+		process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS = overrides.maxLiveWorkers;
 	setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
 	const restore = () => {
 		if (previousAdaptive === undefined)
@@ -11310,13 +11420,19 @@ test("adaptive live workers grow limit after healthy completions", () => {
 		telemetry = resolveLaunchControlTelemetryForTests();
 		assert.equal(telemetry.adaptiveLiveModelWorkers.openai.baselineMs, 1_000);
 		assert.equal(telemetry.adaptiveLiveModelWorkers.openai.limit, 6);
-		assert.equal(telemetry.adaptiveLiveModelWorkers.openai.lastDecision, "grow");
+		assert.equal(
+			telemetry.adaptiveLiveModelWorkers.openai.lastDecision,
+			"grow",
+		);
 		for (let i = 0; i < 6; i += 1) {
 			observeLiveModelWorkerCompletion("openai", 1_100);
 		}
 		telemetry = resolveLaunchControlTelemetryForTests();
 		assert.equal(telemetry.adaptiveLiveModelWorkers.openai.limit, 16);
-		assert.equal(telemetry.adaptiveLiveModelWorkers.openai.lastDecision, "grow");
+		assert.equal(
+			telemetry.adaptiveLiveModelWorkers.openai.lastDecision,
+			"grow",
+		);
 		assert.equal(telemetry.adaptiveLiveModelWorkers.openai.samples, 11);
 	});
 });
@@ -11361,8 +11477,8 @@ test("adaptive live workers shrink on shared rate-limit backoff", async () => {
 				observeLiveModelWorkerCompletion("openai", 1_000);
 			}
 			assert.equal(
-				resolveLaunchControlTelemetryForTests().adaptiveLiveModelWorkers
-					.openai.limit,
+				resolveLaunchControlTelemetryForTests().adaptiveLiveModelWorkers.openai
+					.limit,
 				12,
 			);
 			await recordSharedModelRateLimitBackoffForTests(
@@ -11381,15 +11497,28 @@ test("adaptive live workers shrink on shared rate-limit backoff", async () => {
 	});
 });
 
-test("simple JSON path reads own properties only", () => {
+test("simple JSON path reads own properties only and supports safe array selectors", () => {
 	const inherited = { secret: "prototype-value" };
 	const value = Object.create(inherited);
 	value.safe = { answer: 42 };
+	value.items = [
+		{ id: "item-1", answer: 1 },
+		{ id: "item-2", answer: 2 },
+		{ id: "item-3", answer: 3 },
+	];
 	value.constructor = { answer: "blocked" };
 
 	assert.equal(readSimpleJsonPath(value, "$.safe.answer"), 42);
 	assert.equal(readSimpleJsonPath(value, "$.secret"), undefined);
 	assert.equal(readSimpleJsonPath(value, "$.constructor.answer"), undefined);
+	assert.equal(readSimpleJsonPath(value, "$.items[0].id"), "item-1");
+	assert.deepEqual(readSimpleJsonPath(value, "$.items[1:3]"), [
+		{ id: "item-2", answer: 2 },
+		{ id: "item-3", answer: 3 },
+	]);
+	assert.deepEqual(readSimpleJsonPath(value, "$.items[*].answer"), [1, 2, 3]);
+	assert.equal(readSimpleJsonPath(value.items, "$[1].id"), "item-2");
+	assert.equal(readSimpleJsonPath(value, "$.items[-1]"), undefined);
 });
 
 test("compiler injects runtime task for single stages only", async () => {
@@ -15142,9 +15271,7 @@ test("bundled artifact graph workflows are public runnable", async () => {
 		"path-ref-only batched variant must not be listed as a bundled workflow name",
 	);
 	assert(
-		!workflows.some(
-			(workflow) => workflow.name === "tiered-verification.spec",
-		),
+		!workflows.some((workflow) => workflow.name === "tiered-verification.spec"),
 		"path-ref-only tiered variant must not be listed as a bundled workflow name",
 	);
 	const resolved = await resolveWorkflowRef("spec-review", process.cwd());
@@ -22812,6 +22939,56 @@ test("refresh backs off zero-output rate-limit model failures", async () => {
 	}
 });
 
+test("oauth provider rate-limit without retry hint uses subscription-window backoff", async () => {
+	const cwd = makeProject();
+	const previousAuthFile = process.env.PI_WORKFLOW_AUTH_FILE;
+	try {
+		const authFile = join(cwd, "auth.json");
+		writeFileSync(authFile, JSON.stringify({ anthropic: { type: "oauth" } }));
+		process.env.PI_WORKFLOW_AUTH_FILE = authFile;
+		const beforeRefreshMs = Date.now();
+		const providerError = `Anthropic request failed: HTTP 429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account's rate limit. Please try again later."},"request_id":"req_unit_oauth_rate_limit"}`;
+		const { refreshedTask } = await refreshZeroOutputModelFailure(cwd, {
+			runId: "run_oauth_rate_limit_backoff",
+			attemptId: "attempt_oauth_rate_limit_backoff",
+			artifactDirName: ".fake-oauth-rate-limit-subagent",
+			model: "anthropic/claude-sonnet-4-6",
+			streamErrors: [providerError],
+		});
+
+		assert.equal(refreshedTask.status, "pending");
+		assert.equal(refreshedTask.launchRetry?.reason, "model_rate_limit");
+		assert.equal(refreshedTask.launchRetry?.retryAfterMs, 15 * 60_000);
+		assert.ok(
+			Date.parse(refreshedTask.launchRetry?.nextEligibleAt ?? "") >=
+				beforeRefreshMs + 14 * 60_000,
+		);
+
+		const backoffFile = join(
+			process.env.HOME,
+			".pi",
+			"agent",
+			"model-rate-limit-backoff.json",
+		);
+		const persisted = JSON.parse(readFileSync(backoffFile, "utf8"));
+		assert.ok(
+			persisted.anthropic?.nextEligibleAtMs >= beforeRefreshMs + 14 * 60_000,
+			`persisted anthropic OAuth cooldown expected: ${JSON.stringify(persisted)}`,
+		);
+	} finally {
+		if (previousAuthFile === undefined)
+			delete process.env.PI_WORKFLOW_AUTH_FILE;
+		else process.env.PI_WORKFLOW_AUTH_FILE = previousAuthFile;
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+	}
+});
+
 test("refresh parses rate-limit Retry-After units", async () => {
 	const cases = [
 		{
@@ -23155,7 +23332,12 @@ test("dynamic generated tasks launch with a tool-result budget and static tasks 
 		});
 	} finally {
 		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
 	}
 });
 
@@ -29293,7 +29475,11 @@ test("deep-research verification tier planner splits by verificationNeed with po
 							claim: "Optional claim.",
 							verificationNeed: "optional",
 						},
-						{ id: "claim-004", claim: "Second core claim.", verificationNeed: "core" },
+						{
+							id: "claim-004",
+							claim: "Second core claim.",
+							verificationNeed: "core",
+						},
 					],
 				},
 			},
@@ -29393,7 +29579,10 @@ test("deep-research verification tier planner enforces sanitize schema caps", as
 	assert.equal(out.candidateCap, schemaCap);
 	assert.equal(out.coreTierSize, schemaCap);
 	assert.equal(out.candidateCount, schemaCap);
-	assert.equal(out.coreCandidates.length + out.tailCandidates.length, schemaCap);
+	assert.equal(
+		out.coreCandidates.length + out.tailCandidates.length,
+		schemaCap,
+	);
 	assert.equal(out.capExceeded, true);
 	assert.deepEqual(out.droppedCandidateIds, ["claim-049", "claim-050"]);
 
@@ -30895,17 +31084,38 @@ test("workflow_artifact can read deterministic JSON projections with caps", asyn
 			"claim-1",
 		);
 
-		await assert.rejects(
-			handleWorkflowArtifactToolCall(
-				{
-					action: "read",
-					source: "normalize",
-					artifact: "control",
-					path: "$.normalize.claims[0]",
-				},
-				{ runId, taskId: "task-2", manifestPath, ledgerPath, runDir },
+		const selectedClaim = await handleWorkflowArtifactToolCall(
+			{
+				action: "read",
+				source: "normalize",
+				artifact: "control",
+				path: "$.normalize.claims[1]",
+			},
+			{ runId, taskId: "task-2", manifestPath, ledgerPath, runDir },
+		);
+		assert.match(
+			selectedClaim.content[0].text,
+			/# workflow_artifact: normalize\.control path=\$\.claims\[1\]/,
+		);
+		assert.equal(
+			workflowArtifactJsonPayload(selectedClaim).payload.value.id,
+			"claim-2",
+		);
+
+		const slicedClaims = await handleWorkflowArtifactToolCall(
+			{
+				action: "read",
+				source: "normalize",
+				artifact: "control",
+				path: "$.claims[1:3]",
+			},
+			{ runId, taskId: "task-2", manifestPath, ledgerPath, runDir },
+		);
+		assert.deepEqual(
+			workflowArtifactJsonPayload(slicedClaims).payload.value.map(
+				(claim) => claim.id,
 			),
-			/array selectors are not supported/,
+			["claim-2", "claim-3"],
 		);
 
 		const artifactPrefixed = await handleWorkflowArtifactToolCall(
@@ -34526,7 +34736,10 @@ test("workflow output parser repairs known workflow control schema slips before 
 			.supportingClaimIds.maxItems,
 		8,
 	);
-	assert.equal(finalSynthesisProperties.notableUnsupportedClaimIds.maxItems, 12);
+	assert.equal(
+		finalSynthesisProperties.notableUnsupportedClaimIds.maxItems,
+		12,
+	);
 	assert.equal(finalSynthesisProperties.contestedClaimIds.maxItems, 12);
 	const manyClaimIds = Array.from(
 		{ length: 18 },
@@ -34583,7 +34796,11 @@ test("workflow output parser repairs known workflow control schema slips before 
 		].join("\n"),
 		{ controlJsonSchema: finalSynthesisSchema },
 	);
-	assert.equal(finalSynthesis.valid, true, JSON.stringify(finalSynthesis.issues));
+	assert.equal(
+		finalSynthesis.valid,
+		true,
+		JSON.stringify(finalSynthesis.issues),
+	);
 	assert.equal(finalSynthesis.control.synthesis.keyFindingIds.length, 12);
 	assert.equal(
 		finalSynthesis.control.synthesis.recommendations[0].supportingClaimIds
@@ -34603,8 +34820,8 @@ test("workflow output parser repairs known workflow control schema slips before 
 		8,
 	);
 	assert.equal(
-		finalSynthesis.control.synthesis.parentDecisionNotes[0]
-			.supportingClaimIds.length,
+		finalSynthesis.control.synthesis.parentDecisionNotes[0].supportingClaimIds
+			.length,
 		8,
 	);
 	assert.equal(
@@ -34616,10 +34833,7 @@ test("workflow output parser repairs known workflow control schema slips before 
 		finalSynthesis.repairs?.map((repair) => repair.code),
 		["control_final_synthesis_array_caps"],
 	);
-	assert.match(
-		finalSynthesis.repairs?.[0]?.message ?? "",
-		/keyFindingIds:-6/,
-	);
+	assert.match(finalSynthesis.repairs?.[0]?.message ?? "", /keyFindingIds:-6/);
 	assert.match(
 		finalSynthesis.repairs?.[0]?.message ?? "",
 		/recommendations\.supportingClaimIds:-10/,
@@ -35769,7 +35983,10 @@ test("compiler warns when sourceProjection paths match no source schema", async 
 				type: "object",
 				required: ["items"],
 				properties: {
-					items: { type: "array", items: { type: "object", properties: { id: { type: "string" } } } },
+					items: {
+						type: "array",
+						items: { type: "object", properties: { id: { type: "string" } } },
+					},
 					meta: { type: "object", properties: { axes: { type: "array" } } },
 					open: { type: "object", additionalProperties: true },
 				},
@@ -35792,7 +36009,13 @@ test("compiler warns when sourceProjection paths match no source schema", async 
 						type: "reduce",
 						from: ["plan"],
 						sourceProjection: {
-							include: ["$.items", "$.meta.axes", "$.open.anything", "$.missingKey", "$.meta.nope"],
+							include: [
+								"$.items",
+								"$.meta.axes",
+								"$.open.anything",
+								"$.missingKey",
+								"$.meta.nope",
+							],
 						},
 						prompt: "c",
 					},
@@ -35802,8 +36025,14 @@ test("compiler warns when sourceProjection paths match no source schema", async 
 		const specPath = join(cwd, "spec.json");
 		writeFileSync(specPath, JSON.stringify(spec));
 		const loaded = await loadWorkflowSpec(specPath, cwd);
-		const compiled = await compileWorkflow(loaded.spec, { cwd, specPath, task: "t" });
-		const projectionWarnings = compiled.warnings.filter((w) => w.includes("sourceProjection"));
+		const compiled = await compileWorkflow(loaded.spec, {
+			cwd,
+			specPath,
+			task: "t",
+		});
+		const projectionWarnings = compiled.warnings.filter((w) =>
+			w.includes("sourceProjection"),
+		);
 		assert.equal(projectionWarnings.length, 2, projectionWarnings.join("\n"));
 		assert.ok(projectionWarnings.some((w) => w.includes('"$.missingKey"')));
 		assert.ok(projectionWarnings.some((w) => w.includes('"$.meta.nope"')));
@@ -35815,13 +36044,23 @@ test("compiler warns when sourceProjection paths match no source schema", async 
 test("workflow output repair canonicalizes unique enum near-misses and records telemetry", async () => {
 	const cwd = makeProject();
 	try {
-		const taskDir = join(cwd, ".pi", "workflows", "workflow_enum", "tasks", "task-1");
+		const taskDir = join(
+			cwd,
+			".pi",
+			"workflows",
+			"workflow_enum",
+			"tasks",
+			"task-1",
+		);
 		const schema = {
 			type: "object",
 			required: ["schema", "verdict", "candidates"],
 			properties: {
 				schema: { type: "string" },
-				verdict: { type: "string", enum: ["KEEP", "WEAKEN", "DROP", "NEEDS_HUMAN"] },
+				verdict: {
+					type: "string",
+					enum: ["KEEP", "WEAKEN", "DROP", "NEEDS_HUMAN"],
+				},
 				candidates: {
 					type: "array",
 					items: {
@@ -35869,29 +36108,49 @@ test("workflow output repair canonicalizes unique enum near-misses and records t
 			controlJsonSchema: schema,
 		});
 		assert.equal(written.valid, true);
-		const result = JSON.parse(readFileSync(join(taskDir, "result.json"), "utf8"));
+		const result = JSON.parse(
+			readFileSync(join(taskDir, "result.json"), "utf8"),
+		);
 		assert.equal(result.outputValidation.valid, true);
 		const enumRepairs = result.outputValidation.repairs.filter(
 			(repair) => repair.code === "control_enum_near_miss",
 		);
-		assert.equal(enumRepairs.length, 3, JSON.stringify(result.outputValidation.repairs));
+		assert.equal(
+			enumRepairs.length,
+			3,
+			JSON.stringify(result.outputValidation.repairs),
+		);
 		assert.ok(enumRepairs.some((r) => r.path === "$.verdict"));
 		assert.ok(enumRepairs.some((r) => r.path === "$.candidates[0].category"));
 		assert.ok(enumRepairs.some((r) => r.path === "$.candidates[1].category"));
-		const control = JSON.parse(readFileSync(join(taskDir, "control.json"), "utf8"));
+		const control = JSON.parse(
+			readFileSync(join(taskDir, "control.json"), "utf8"),
+		);
 		assert.equal(control.verdict, "KEEP");
 		assert.equal(control.candidates[0].category, "risky-lifecycle-script");
 		assert.equal(control.candidates[1].category, "declared-unused-dependency");
 		assert.equal(control.candidates[2].category, "duplicate-dependency");
 	} finally {
-		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
 	}
 });
 
 test("workflow output repair leaves ambiguous or distant enum values failing closed", async () => {
 	const cwd = makeProject();
 	try {
-		const taskDir = join(cwd, ".pi", "workflows", "workflow_enum2", "tasks", "task-1");
+		const taskDir = join(
+			cwd,
+			".pi",
+			"workflows",
+			"workflow_enum2",
+			"tasks",
+			"task-1",
+		);
 		const schema = {
 			type: "object",
 			required: ["schema", "mode", "category"],
@@ -35942,14 +36201,26 @@ test("workflow output repair leaves ambiguous or distant enum values failing clo
 			JSON.stringify(invalid.outputValidation.issues),
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
 	}
 });
 
 test("workflow output repair never bridges a negation difference in enum near-misses", async () => {
 	const cwd = makeProject();
 	try {
-		const taskDir = join(cwd, ".pi", "workflows", "workflow_enum3", "tasks", "task-1");
+		const taskDir = join(
+			cwd,
+			".pi",
+			"workflows",
+			"workflow_enum3",
+			"tasks",
+			"task-1",
+		);
 		const schema = {
 			type: "object",
 			required: ["schema", "decision", "applicability"],
@@ -36018,18 +36289,36 @@ test("workflow output repair never bridges a negation difference in enum near-mi
 			JSON.stringify(invalid.outputValidation.issues),
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
 	}
 });
 
 test("workflow output repair wraps bare string object rows only when valid by construction", async () => {
 	const cwd = makeProject();
 	try {
-		const taskDir = join(cwd, ".pi", "workflows", "workflow_rows", "tasks", "task-1");
+		const taskDir = join(
+			cwd,
+			".pi",
+			"workflows",
+			"workflow_rows",
+			"tasks",
+			"task-1",
+		);
 		const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 		const impactSchema = JSON.parse(
 			readFileSync(
-				join(repoRoot, "workflows", "impact-review", "schemas", "api-contract-impact-control.schema.json"),
+				join(
+					repoRoot,
+					"workflows",
+					"impact-review",
+					"schemas",
+					"api-contract-impact-control.schema.json",
+				),
 				"utf8",
 			),
 		);
@@ -36059,31 +36348,59 @@ test("workflow output repair wraps bare string object rows only when valid by co
 			exitCode: 0,
 			controlJsonSchema: impactSchema,
 		});
-		assert.equal(written.valid, true, JSON.stringify(written.parsed?.issues ?? []));
-		const result = JSON.parse(readFileSync(join(taskDir, "result.json"), "utf8"));
+		assert.equal(
+			written.valid,
+			true,
+			JSON.stringify(written.parsed?.issues ?? []),
+		);
+		const result = JSON.parse(
+			readFileSync(join(taskDir, "result.json"), "utf8"),
+		);
 		const rowRepairs = result.outputValidation.repairs.filter(
 			(repair) => repair.code === "control_object_row_from_string",
 		);
-		assert.equal(rowRepairs.length, 2, JSON.stringify(result.outputValidation.repairs));
+		assert.equal(
+			rowRepairs.length,
+			2,
+			JSON.stringify(result.outputValidation.repairs),
+		);
 		assert.ok(rowRepairs.some((r) => r.path === "$.impacts[0]"));
 		assert.ok(rowRepairs.some((r) => r.path === "$.assumptions[0]"));
-		const control = JSON.parse(readFileSync(join(taskDir, "control.json"), "utf8"));
+		const control = JSON.parse(
+			readFileSync(join(taskDir, "control.json"), "utf8"),
+		);
 		assert.deepEqual(control.impacts[0], {
 			note: "Breaking change risk in workflow_artifact read paths",
 		});
-		assert.deepEqual(control.impacts[1], { area: "cli", detail: "flag rename", severity: "low" });
+		assert.deepEqual(control.impacts[1], {
+			area: "cli",
+			detail: "flag rename",
+			severity: "low",
+		});
 		assert.deepEqual(control.assumptions[0], {
 			note: "No consumers rely on the removed enum value",
 		});
 	} finally {
-		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
 	}
 });
 
 test("workflow output repair leaves string rows untouched when items require multiple properties", async () => {
 	const cwd = makeProject();
 	try {
-		const taskDir = join(cwd, ".pi", "workflows", "workflow_rows2", "tasks", "task-1");
+		const taskDir = join(
+			cwd,
+			".pi",
+			"workflows",
+			"workflow_rows2",
+			"tasks",
+			"task-1",
+		);
 		const schema = {
 			type: "object",
 			required: ["schema", "findings"],
@@ -36133,7 +36450,12 @@ test("workflow output repair leaves string rows untouched when items require mul
 		);
 		assert.equal(rowRepairs.length, 0);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
 	}
 });
 
@@ -36212,7 +36534,12 @@ test("run lease heartbeat carries task progress fields after a task transition",
 		assert.ok(supervisor.updatedAt, "heartbeat still records updatedAt");
 	} finally {
 		setRunLeaseTestHooksForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
 	}
 });
 
@@ -36264,7 +36591,12 @@ test("formatRun appends stall warning when heartbeat is fresh but task transitio
 			/⚠ no task progress for 14m \(heartbeat alive — possible stall; inspect \/workflow logs workflow_unit_stall_warn\)/,
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
 	}
 });
 
@@ -36303,7 +36635,12 @@ test("formatRun omits stall warning when task transitions are recent", async () 
 		assert.doesNotMatch(text, /heartbeat lost/);
 		assert.doesNotMatch(text, /⚠/);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
 	}
 });
 
@@ -36332,7 +36669,12 @@ test("formatRun surfaces supervisor heartbeat lost while run says running", asyn
 			/⚠ supervisor heartbeat lost \(last heartbeat 3m ago while run says running; inspect \/workflow logs workflow_unit_stall_hb_lost\)/,
 		);
 	} finally {
-		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
 	}
 });
 

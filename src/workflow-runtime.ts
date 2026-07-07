@@ -341,14 +341,179 @@ export function canStageProceedAfterPreviousFailure(
 	return stage.sourcePolicy === "partial";
 }
 
+type SimpleJsonPathToken =
+	| { type: "property"; key: string }
+	| { type: "index"; index: number }
+	| { type: "slice"; start?: number; end?: number }
+	| { type: "wildcard" };
+
+const SIMPLE_JSON_PATH_SELECTION = Symbol("simpleJsonPathSelection");
+
+interface SimpleJsonPathSelection {
+	[SIMPLE_JSON_PATH_SELECTION]: true;
+	values: unknown[];
+}
+
+export function isSimpleJsonPath(path: string): boolean {
+	return parseSimpleJsonPath(path) !== undefined;
+}
+
 export function readSimpleJsonPath(value: unknown, path: string): unknown {
-	const parts = path.slice(2).split(".").filter(Boolean);
-	let current = value as any;
-	for (const part of parts) {
-		if (!canReadJsonPathPart(current, part)) return undefined;
-		current = current[part];
+	const tokens = parseSimpleJsonPath(path);
+	if (!tokens) return undefined;
+	let current: unknown = value;
+	for (const token of tokens) {
+		current = applySimpleJsonPathToken(current, token);
+		if (current === undefined) return undefined;
 	}
-	return current;
+	return unwrapJsonPathSelection(current);
+}
+
+function parseSimpleJsonPath(path: string): SimpleJsonPathToken[] | undefined {
+	if (path === "$" || path.length === 1) return path === "$" ? [] : undefined;
+	if (!path.startsWith("$")) return undefined;
+	const tokens: SimpleJsonPathToken[] = [];
+	let index = 1;
+	while (index < path.length) {
+		const char = path[index];
+		if (char === ".") {
+			index += 1;
+			const keyStart = index;
+			while (index < path.length && isJsonPathKeyChar(path[index]!)) {
+				index += 1;
+			}
+			if (index === keyStart) return undefined;
+			const key = path.slice(keyStart, index);
+			if (!isSafeJsonPathPart(key)) return undefined;
+			tokens.push({ type: "property", key });
+			continue;
+		}
+		if (char === "[") {
+			const end = path.indexOf("]", index + 1);
+			if (end === -1) return undefined;
+			const selector = path.slice(index + 1, end);
+			const token = parseSimpleJsonPathArraySelector(selector);
+			if (!token) return undefined;
+			tokens.push(token);
+			index = end + 1;
+			continue;
+		}
+		return undefined;
+	}
+	return tokens;
+}
+
+function parseSimpleJsonPathArraySelector(
+	selector: string,
+): SimpleJsonPathToken | undefined {
+	if (selector === "*") return { type: "wildcard" };
+	if (/^\d+$/u.test(selector)) {
+		const index = parseSafeJsonPathInteger(selector);
+		return index === undefined ? undefined : { type: "index", index };
+	}
+	const slice = /^(\d*):(\d*)$/u.exec(selector);
+	if (!slice) return undefined;
+	const start = slice[1] ? parseSafeJsonPathInteger(slice[1]) : undefined;
+	const end = slice[2] ? parseSafeJsonPathInteger(slice[2]) : undefined;
+	if ((slice[1] && start === undefined) || (slice[2] && end === undefined)) {
+		return undefined;
+	}
+	return {
+		type: "slice",
+		...(start === undefined ? {} : { start }),
+		...(end === undefined ? {} : { end }),
+	};
+}
+
+function parseSafeJsonPathInteger(value: string): number | undefined {
+	const parsed = Number(value);
+	return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
+function applySimpleJsonPathToken(
+	value: unknown,
+	token: SimpleJsonPathToken,
+): unknown {
+	if (token.type === "property") return readJsonPathProperty(value, token.key);
+	if (token.type === "index") return readJsonPathIndex(value, token.index);
+	if (token.type === "wildcard") return readJsonPathSlice(value, 0);
+	return readJsonPathSlice(value, token.start ?? 0, token.end);
+}
+
+function readJsonPathProperty(value: unknown, key: string): unknown {
+	if (isJsonPathSelection(value)) {
+		return mapJsonPathSelection(value, (item) =>
+			readOwnJsonPathPart(item, key),
+		);
+	}
+	return readOwnJsonPathPart(value, key);
+}
+
+function readJsonPathIndex(value: unknown, index: number): unknown {
+	if (isJsonPathSelection(value)) {
+		return mapJsonPathSelection(value, (item) =>
+			readOwnJsonPathIndex(item, index),
+		);
+	}
+	return readOwnJsonPathIndex(value, index);
+}
+
+function readJsonPathSlice(
+	value: unknown,
+	start: number,
+	end?: number,
+): unknown {
+	if (isJsonPathSelection(value)) {
+		const values: unknown[] = [];
+		for (const item of value.values) {
+			if (!Array.isArray(item)) return undefined;
+			values.push(...item.slice(start, end));
+		}
+		return makeJsonPathSelection(values);
+	}
+	if (!Array.isArray(value)) return undefined;
+	return makeJsonPathSelection(value.slice(start, end));
+}
+
+function readOwnJsonPathPart(value: unknown, part: string): unknown {
+	if (!canReadJsonPathPart(value, part)) return undefined;
+	return value[part];
+}
+
+function readOwnJsonPathIndex(value: unknown, index: number): unknown {
+	if (!Array.isArray(value) || index >= value.length) return undefined;
+	return value[index];
+}
+
+function mapJsonPathSelection(
+	selection: SimpleJsonPathSelection,
+	read: (value: unknown) => unknown,
+): unknown {
+	const values: unknown[] = [];
+	for (const item of selection.values) {
+		const next = read(item);
+		if (next === undefined) return undefined;
+		values.push(next);
+	}
+	return makeJsonPathSelection(values);
+}
+
+function makeJsonPathSelection(values: unknown[]): SimpleJsonPathSelection {
+	return { [SIMPLE_JSON_PATH_SELECTION]: true, values };
+}
+
+function unwrapJsonPathSelection(value: unknown): unknown {
+	return isJsonPathSelection(value) ? value.values : value;
+}
+
+function isJsonPathSelection(value: unknown): value is SimpleJsonPathSelection {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		(value as Partial<SimpleJsonPathSelection>)[SIMPLE_JSON_PATH_SELECTION] ===
+			true &&
+		Array.isArray((value as { values?: unknown }).values)
+	);
 }
 
 function canReadJsonPathPart(
@@ -358,6 +523,10 @@ function canReadJsonPathPart(
 	return (
 		isSafeJsonPathPart(part) && isRecord(value) && Object.hasOwn(value, part)
 	);
+}
+
+function isJsonPathKeyChar(value: string): boolean {
+	return /[A-Za-z0-9_-]/u.test(value);
 }
 
 function isSafeJsonPathPart(part: string): boolean {

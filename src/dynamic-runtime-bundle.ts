@@ -160,6 +160,8 @@ function directDynamicPlannerPrompt(input) {
       'Synthesis action requirements:',
       '- The synthesis worker is the final user-facing answer for this direct dynamic run.',
       '- Its prompt must ask for a cited decision memo or dossier that answers the original Runtime task directly.',
+      '- It must require schema dynamic-task-result-v1 control to include a top-level claims or keyFindings array for source-backed final assertions.',
+      '- Each source-backed claim/finding must carry joinable sourceRefs or evidenceRefs (URL/path/taskId/workflow_artifact locator) from inputRefs or upstream refs; sources must not exist only in prose.',
       '- It must include caveats, source references, and actionable recommendations when relevant.',
       '- It must not say that a later reducer will complete the answer; there is no later reducer.',
     ].join('\\n'),
