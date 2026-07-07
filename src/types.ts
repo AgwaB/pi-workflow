@@ -951,7 +951,22 @@ export interface WorkflowRunRecord {
 	specPath: string;
 	provenance?: WorkflowRunProvenance;
 	routing?: WorkflowRunRouting;
+	/** Task-usage rollup persisted when the run reaches a terminal status. */
+	usage?: WorkflowRunUsageRollup;
 	tasks: WorkflowTaskRunRecord[];
+}
+
+/**
+ * Run-level sum of per-task provider-reported usage. Values cover only tasks
+ * that reported usage (`tasksReporting`); no cost is ever derived from token
+ * counts. Parent-session usage lives in the parent-usage.json sidecar, not
+ * here, because the parent session does not own run.json.
+ */
+export interface WorkflowRunUsageRollup extends WorkflowTaskUsageValues {
+	source: "task-rollup";
+	capturedAt: string;
+	taskCount: number;
+	tasksReporting: number;
 }
 
 export interface WorkflowIndexRecord {

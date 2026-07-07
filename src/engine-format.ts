@@ -1,8 +1,6 @@
 import { readFile } from "node:fs/promises";
 
-import {
-	formatDynamicAuditSummary,
-} from "./dynamic-audit.js";
+import { formatDynamicAuditSummary } from "./dynamic-audit.js";
 import {
 	hasActiveSchedulerWork,
 	isRefreshPollAggregateError,
@@ -22,11 +20,12 @@ import {
 	updateIndex,
 } from "./store.js";
 import { summarizeWorkflowTelemetry } from "./workflow-artifacts.js";
-import {
-	type WorkflowIndexRecord,
-	type WorkflowRunRecord,
-	type WorkflowSupervisorRecord,
-	type WorkflowTaskRunRecord,
+import { buildWorkflowRunMetrics } from "./workflow-metrics.js";
+import type {
+	WorkflowIndexRecord,
+	WorkflowRunRecord,
+	WorkflowSupervisorRecord,
+	WorkflowTaskRunRecord,
 } from "./types.js";
 
 const LOG_LINES_DEFAULT = 80;
@@ -231,6 +230,8 @@ export function formatRun(
 	lines.push(
 		`completion=${telemetry.completion.health}, outputRetries=${telemetry.retryCounts.output}, launchRetries=${telemetry.retryCounts.launch}, resumeEvents=${telemetry.resumeCounts.events}, contextLimitFailures=${telemetry.completion.contextLimitFailures}`,
 	);
+	const usageLine = formatRunUsageLine(run);
+	if (usageLine) lines.push(usageLine);
 	if (run.dynamicAudit) lines.push(formatDynamicAuditSummary(run.dynamicAudit));
 	const stallWarning = formatRunStallWarning(
 		run,
@@ -244,6 +245,24 @@ export function formatRun(
 	}
 
 	return lines.join("\n");
+}
+
+function formatRunUsageLine(run: WorkflowRunRecord): string | undefined {
+	const usage = buildWorkflowRunMetrics(run).totals.usage;
+	const observed = usage.observed;
+	if (
+		observed.totalTokens === null &&
+		observed.inputTokens === null &&
+		observed.outputTokens === null
+	)
+		return undefined;
+	const parts = [
+		`tokens=${observed.totalTokens ?? "n/a"}`,
+		`in=${observed.inputTokens ?? "n/a"}`,
+		`out=${observed.outputTokens ?? "n/a"}`,
+		`tasksReporting=${observed.contributingTaskIds.length}/${run.tasks.length}`,
+	];
+	return `usage=${parts.join(", ")}`;
 }
 
 async function reconcileActiveRuns(cwd: string): Promise<void> {
@@ -286,10 +305,7 @@ async function formatIndex(
 			];
 			const stallWarning =
 				run.status === "running"
-					? formatRunStallWarning(
-							run,
-							await readRunSupervisor(cwd, run.runId),
-						)
+					? formatRunStallWarning(run, await readRunSupervisor(cwd, run.runId))
 					: undefined;
 			if (stallWarning) lines.push(stallWarning);
 			for (const task of indexTasksForStatus(run, fullRun)) {

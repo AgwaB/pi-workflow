@@ -11,15 +11,17 @@ import {
 	readRunRecord,
 	supervisorPath,
 } from "./store.js";
-import {
-	detectRunStall,
-	type WorkflowRunStallInfo,
-} from "./engine.js";
+import { detectRunStall, type WorkflowRunStallInfo } from "./engine.js";
 import {
 	diagnoseWorkflowRunHealth,
 	diagnoseWorkflowTaskHealth,
 	type WorkflowProgressHealth,
 } from "./workflow-progress-health.js";
+import { buildWorkflowRunMetrics } from "./workflow-metrics.js";
+import {
+	readParentUsage,
+	type WorkflowParentUsageRecord,
+} from "./workflow-parent-usage.js";
 import {
 	type WorkflowIndexRecord,
 	type WorkflowRunRecord,
@@ -85,6 +87,7 @@ export class WorkflowView implements Component {
 	private selectedTask = 0;
 	private selectedTaskId = "";
 	private detailRun?: WorkflowRunRecord;
+	private parentUsage?: WorkflowParentUsageRecord;
 	private taskArtifactView: TaskArtifactView = "output";
 	private artifactScrollLine = 0;
 	private outputLines: string[] = [];
@@ -271,6 +274,10 @@ export class WorkflowView implements Component {
 				const selected = flows[this.selectedFlow];
 				if (selected) {
 					this.detailRun = await readRunRecord(this.cwd, selected.runId);
+					this.parentUsage = await readParentUsage(
+						this.cwd,
+						selected.runId,
+					).catch(() => undefined);
 					this.clampStageAndTask();
 					await this.updateTaskPreviews();
 				}
@@ -762,8 +769,44 @@ export class WorkflowView implements Component {
 			kvRow(this.theme, "model", task.runtime.model ?? "(not recorded)"),
 			kvRow(this.theme, "thinking", task.runtime.thinking ?? "(not recorded)"),
 			kvRow(this.theme, "tools", (task.tools ?? []).join(",") || "(default)"),
+			...this.taskUsageLines(task),
 		];
 		return lines.map((line) => fit(line, width));
+	}
+
+	private taskUsageLines(task: WorkflowTaskRunRecord): string[] {
+		const usage = task.usage?.aggregate ?? task.usage;
+		if (!usage) return [];
+		const tokens = formatTokenCount(usage.totalTokens);
+		const inputTokens = formatTokenCount(usage.inputTokens);
+		const outputTokens = formatTokenCount(usage.outputTokens);
+		const cacheRead = formatTokenCount(usage.cacheReadInputTokens);
+		const cacheWrite = formatTokenCount(usage.cacheCreationInputTokens);
+		const lines = [
+			"",
+			accent(this.theme, "Usage"),
+			kvRow(this.theme, "tokens", tokens ?? "(not reported)"),
+		];
+		if (inputTokens || outputTokens)
+			lines.push(
+				kvRow(
+					this.theme,
+					"in / out",
+					`${inputTokens ?? "n/a"} / ${outputTokens ?? "n/a"}`,
+				),
+			);
+		if (cacheRead || cacheWrite)
+			lines.push(
+				kvRow(
+					this.theme,
+					"cache r/w",
+					`${cacheRead ?? "n/a"} / ${cacheWrite ?? "n/a"}`,
+				),
+			);
+		const attempts = task.usage?.aggregate?.attempts;
+		if (attempts !== undefined && attempts > 1)
+			lines.push(kvRow(this.theme, "attempts", String(attempts)));
+		return lines;
 	}
 
 	private taskTimelineLines(
@@ -1138,8 +1181,46 @@ export class WorkflowView implements Component {
 					),
 				],
 			]),
+			...(detailRun ? this.runUsageLines(detailRun) : []),
 			...this.runHealthLines(health),
 		];
+	}
+
+	private runUsageLines(run: WorkflowRunRecord): string[] {
+		const observed = buildWorkflowRunMetrics(run).totals.usage.observed;
+		const tokens = formatTokenCount(observed.totalTokens);
+		const parent =
+			this.parentUsage?.runId === run.runId ? this.parentUsage : undefined;
+		if (!tokens && !parent) return [];
+
+		const lines = ["", accent(this.theme, "Usage")];
+		if (tokens) {
+			lines.push(taskMetaLine(this.theme, [["tokens", tokens]]));
+			const inputTokens = formatTokenCount(observed.inputTokens);
+			const outputTokens = formatTokenCount(observed.outputTokens);
+			if (inputTokens || outputTokens)
+				lines.push(
+					taskMetaLine(this.theme, [
+						["in", inputTokens ?? "n/a"],
+						["out", outputTokens ?? "n/a"],
+					]),
+				);
+			if (observed.omittedTaskIds.length > 0)
+				lines.push(
+					muted(
+						this.theme,
+						`${observed.omittedTaskIds.length} task(s) without usage`,
+					),
+				);
+		}
+		if (parent) {
+			lines.push(
+				taskMetaLine(this.theme, [
+					["parent", formatTokenCount(parent.totalTokens) ?? "0"],
+				]),
+			);
+		}
+		return lines;
 	}
 
 	private stallBadge(
@@ -1204,6 +1285,7 @@ export class WorkflowView implements Component {
 				["updated", timestampText(run.updatedAt)],
 			]),
 			kvRow(this.theme, "run", shortId(run.runId)),
+			...this.runUsageLines(run),
 			...this.runHealthLines(health),
 		];
 		if (run.fanout && run.fanout.length > 0) {
@@ -1639,7 +1721,12 @@ function taskListStatusLabel(
 		task.status === "running" && health.currentTask?.elapsedMs !== undefined
 			? ` ${muted(theme, "·")} ${metaValue(theme, formatDuration(health.currentTask.elapsedMs))}`
 			: "";
-	return `${fg(theme, task.status === "running" ? healthColor(health) : statusColor(task.status), strong(theme, label))}${suffix}`;
+	const usage = task.usage?.aggregate ?? task.usage;
+	const usageTokens = formatTokenCount(usage?.totalTokens);
+	const usageSuffix = usageTokens
+		? ` ${muted(theme, "·")} ${metaValue(theme, usageTokens)}`
+		: "";
+	return `${fg(theme, task.status === "running" ? healthColor(health) : statusColor(task.status), strong(theme, label))}${suffix}${usageSuffix}`;
 }
 
 function compactStatusLabel(
@@ -2062,6 +2149,17 @@ function isWideCodePoint(codePoint: number): boolean {
 		(codePoint >= 0xff00 && codePoint <= 0xff60) ||
 		(codePoint >= 0xffe0 && codePoint <= 0xffe6)
 	);
+}
+
+function formatTokenCount(
+	value: number | null | undefined,
+): string | undefined {
+	if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+	if (value >= 1_000_000)
+		return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 2)}M`;
+	if (value >= 1_000)
+		return `${(value / 1_000).toFixed(value >= 100_000 ? 0 : 1)}k`;
+	return String(Math.round(value));
 }
 
 function placeholder(theme: Theme, text: string): string {

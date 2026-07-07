@@ -581,6 +581,39 @@ Important files:
 
 Subagent worker artifacts are stored under `.pi/workflow-subagents/` by default and are referenced from the workflow run record.
 
+## Token usage tracking
+
+Usage is provider-reported only. Displayed totals focus on token counts; cost
+is not shown because provider cost coverage and semantics vary, and no cost is
+ever derived from token counts or model names. Usage is recorded at three levels:
+
+- **Per task** (`run.json` → `tasks[].usage`): each subagent attempt's usage is
+  captured from the pi-subagent result envelope and aggregated across retries.
+  Requires `@agwab/pi-subagent` >= 0.4.7, which sums per-request usage across
+  every turn of a run; older engines reported only the final request, so token
+  counts recorded before the upgrade undercount multi-turn tasks.
+- **Per run** (`run.json` → `usage`): when a run reaches a terminal status, a
+  `task-rollup` record is persisted with summed token totals and
+  `tasksReporting`/`taskCount` so partial coverage is visible.
+- **Parent session** (`.pi/workflows/<run-id>/parent-usage.json`): the pi
+  session that started the run records its own assistant-turn usage (routing,
+  waiting, summarizing) into this sidecar while the run is active, finalizing
+  on the wrap-up turn after the run turns terminal. It is a separate file
+  because a detached supervisor owns `run.json`. When several runs are active
+  in one session, each run's sidecar attributes the same parent turns, so
+  sidecars of overlapping runs should not be summed blindly.
+
+Where it surfaces:
+
+- The workflow board (`/workflow`) shows run totals plus the parent-session
+  line in the run summary panes, a per-task token suffix in task lists, and a
+  full token breakdown (in/out, cache read/write, attempts) in task detail.
+- `/workflow status <run-id>` and run-start/terminal text output include a
+  `usage=` line with `tasksReporting=N/M`.
+- Nested workflows (a workflow running inside a subagent) attach the child
+  task's usage totals to terminal `child.*` events on the parent subagent run
+  (persisted by `@agwab/pi-subagent` >= 0.4.8; older engines ignore the field).
+
 ## CLI inspect
 
 The terminal CLI reads local `.pi/workflows` run records without launching Pi commands:

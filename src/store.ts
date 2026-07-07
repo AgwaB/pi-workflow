@@ -36,12 +36,14 @@ import {
 	type WorkflowRunProvenance,
 	type WorkflowRunRecord,
 	type WorkflowRunStatus,
+	type WorkflowRunUsageRollup,
 	type WorkflowSupervisorRecord,
 	type WorkflowTaskRunRecord,
 	type WorkflowTaskResumeEvent,
 	type TaskRunStatus,
 	type TaskSummary,
 } from "./types.js";
+import { buildWorkflowRunMetrics } from "./workflow-metrics.js";
 
 const TERMINAL_INDEX_LIMIT = 50;
 export const LEASE_STALE_MS = 30_000;
@@ -574,6 +576,38 @@ export async function createRunRecord(
 	return { run, runDir };
 }
 
+function runUsageRollup(run: WorkflowRunRecord): WorkflowRunUsageRollup {
+	const observed = buildWorkflowRunMetrics(run).totals.usage.observed;
+	return {
+		source: "task-rollup",
+		capturedAt: nowIso(),
+		taskCount: run.tasks.length,
+		tasksReporting: observed.contributingTaskIds.length,
+		...(observed.inputTokens === null
+			? {}
+			: { inputTokens: observed.inputTokens }),
+		...(observed.outputTokens === null
+			? {}
+			: { outputTokens: observed.outputTokens }),
+		...(observed.totalTokens === null
+			? {}
+			: { totalTokens: observed.totalTokens }),
+		...(observed.cachedInputTokens === null
+			? {}
+			: { cachedInputTokens: observed.cachedInputTokens }),
+		...(observed.cacheCreationInputTokens === null
+			? {}
+			: { cacheCreationInputTokens: observed.cacheCreationInputTokens }),
+		...(observed.cacheReadInputTokens === null
+			? {}
+			: { cacheReadInputTokens: observed.cacheReadInputTokens }),
+		...(observed.reasoningTokens === null
+			? {}
+			: { reasoningTokens: observed.reasoningTokens }),
+		...(observed.costUsd === null ? {} : { costUsd: observed.costUsd }),
+	};
+}
+
 export async function writeRunRecord(
 	cwd: string,
 	run: WorkflowRunRecord,
@@ -582,6 +616,7 @@ export async function writeRunRecord(
 	run.updatedAt = nowIso();
 	const derived = deriveRunStatus(run);
 	Object.assign(run, derived);
+	if (isTerminalWorkflowStatus(run.status)) run.usage = runUsageRollup(run);
 	await writeJsonAtomic(workflowRunPath(cwd, run.runId), run);
 	if (isTerminalWorkflowStatus(run.status))
 		runProgressByRun.delete(runProgressKey(cwd, run.runId));

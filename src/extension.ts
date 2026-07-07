@@ -60,6 +60,11 @@ import {
 	toWorkflowModelInfo,
 	type WorkflowRuntimeDefaults,
 } from "./workflow-runtime.js";
+import {
+	beginParentUsageTracking,
+	recordParentSessionUsage,
+	resumeParentUsageTracking,
+} from "./workflow-parent-usage.js";
 
 const UNFINISHED_RUN_NOTICE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const UNFINISHED_RUN_NOTICE_MAX_RUNS = 5;
@@ -135,6 +140,7 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 		workflowCompletionCache = await listWorkflows(ctx.cwd).catch(
 			() => workflowCompletionCache,
 		);
+		await resumeParentUsageTracking(ctx.cwd).catch(() => undefined);
 		await resumeSupervisors(ctx.cwd, {
 			dynamicUi: dynamicUiFromContext(ctx),
 		}).catch(() => undefined);
@@ -143,6 +149,13 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 		).catch(() => undefined);
 		if (event.reason !== "reload")
 			await deliverMissedWorkflowFeedback(ctx, pi).catch(() => undefined);
+	});
+
+	pi.on("message_end", async (event, ctx) => {
+		if (!isWorkflowSupervisorEnabled()) return;
+		await recordParentSessionUsage(ctx.cwd, event.message).catch(
+			() => undefined,
+		);
 	});
 
 	registerWorkflowNaturalLanguageTools(pi);
@@ -741,7 +754,10 @@ async function startWorkflowRunFromRequest(
 		dynamicUi: dynamicUiFromContext(ctx),
 	});
 	const verb = workflowRunStartVerb(run.status);
-	if (run.status === "running") watchWorkflowFeedback(ctx, api, run.runId);
+	if (run.status === "running") {
+		watchWorkflowFeedback(ctx, api, run.runId);
+		beginParentUsageTracking(ctx.cwd, run.runId);
+	}
 
 	let detachNote = "";
 	if (request.detach && run.status === "running") {
@@ -791,7 +807,10 @@ async function startDynamicRunFromRequest(
 		dynamicUi: dynamicUiFromContext(ctx),
 	});
 	const verb = workflowRunStartVerb(run.status);
-	if (run.status === "running") watchWorkflowFeedback(ctx, api, run.runId);
+	if (run.status === "running") {
+		watchWorkflowFeedback(ctx, api, run.runId);
+		beginParentUsageTracking(ctx.cwd, run.runId);
+	}
 
 	let detachNote = "";
 	if (request.detach && run.status === "running") {
@@ -897,7 +916,10 @@ async function handleRoutedRunRequest(
 
 	const run = outcome.run;
 	const verb = workflowRunStartVerb(run.status);
-	if (run.status === "running") watchWorkflowFeedback(ctx, api, run.runId);
+	if (run.status === "running") {
+		watchWorkflowFeedback(ctx, api, run.runId);
+		beginParentUsageTracking(ctx.cwd, run.runId);
+	}
 
 	let detachNote = "";
 	if (request.detach && run.status === "running") {
@@ -1423,6 +1445,7 @@ async function handleWorkflowCommand(
 			const { run, resetTaskIds } = await resumeRun(ctx.cwd, runId, {
 				dynamicUi: dynamicUiFromContext(ctx),
 			});
+			if (run.status === "running") beginParentUsageTracking(ctx.cwd, runId);
 			emit(
 				ctx,
 				[

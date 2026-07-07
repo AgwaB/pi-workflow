@@ -304,6 +304,19 @@ function terminalChildEventForTaskStatus(
 	return undefined;
 }
 
+function childEventUsageSummary(
+	task: WorkflowTaskRunRecord,
+): Record<string, number> | undefined {
+	const source = task.usage?.aggregate ?? task.usage;
+	if (!source) return undefined;
+	const summary: Record<string, number> = {};
+	for (const key of USAGE_METRIC_KEYS) {
+		const value = source[key];
+		if (typeof value === "number") summary[key] = value;
+	}
+	return Object.keys(summary).length > 0 ? summary : undefined;
+}
+
 async function recordParentSubagentChildEvent(options: {
 	event: ParentSubagentChildEvent;
 	childRunId: string;
@@ -316,6 +329,10 @@ async function recordParentSubagentChildEvent(options: {
 	if (!parent) return;
 	const api = await loadSubagentApi().catch(() => undefined);
 	if (!api?.recordSubagentChildEvent) return;
+	// Usage rides along on terminal events so a parent subagent can aggregate
+	// nested workflow spend. Engines older than 0.4.8 ignore the extra field.
+	const usage =
+		options.event === "started" ? undefined : childEventUsageSummary(options.task);
 	await api
 		.recordSubagentChildEvent({
 			...parent,
@@ -327,6 +344,7 @@ async function recordParentSubagentChildEvent(options: {
 				? {}
 				: { failureKind: options.failureKind }),
 			...(options.message === undefined ? {} : { message: options.message }),
+			...(usage === undefined ? {} : { usage }),
 		})
 		.catch(() => undefined);
 }
@@ -1047,7 +1065,7 @@ function usageNumberOrNull(value: unknown): number | null | undefined {
 	return undefined;
 }
 
-function normalizedUsageValues(raw: unknown): WorkflowTaskUsageValues {
+export function normalizedUsageValues(raw: unknown): WorkflowTaskUsageValues {
 	const record = isPlainRecord(raw) ? raw : undefined;
 	const values: WorkflowTaskUsageValues = {};
 	if (!record) return values;
