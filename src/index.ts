@@ -127,8 +127,8 @@ Usage:
   /workflow run [--route] [--model MODEL] [--thinking LEVEL] <workflow-name-or-path> "<task>" [--detach] [--force-new]
   /workflow dynamic [--route] [--model MODEL] [--thinking LEVEL] "<task>" [--detach] [--force-new]
   /workflow status [run-id]
-  /workflow show <run-id-or-workflow-name>
-  /workflow logs <run-id> [task-id] [lines]
+  /workflow show [--raw] <run-id-or-workflow-name>
+  /workflow logs <run-id> [task-id-or-spec-id] [lines]
   /workflow wait <run-id> [timeout-ms]
   /workflow resume <run-id>
   /workflow stop <run-id>

@@ -25359,7 +25359,8 @@ test("natural-language workflow tools list and start workflows", async () => {
 			undefined,
 			ctx,
 		);
-		assert.match(runResult.content[0].text, /Workflow run workflow_/);
+		assert.match(runResult.content[0].text, /Workflow started: research-lite/);
+		assert.match(runResult.content[0].text, /Run: workflow_/);
 		assert.match(runResult.content[0].text, /Open: \/workflow workflow_/);
 		assert.equal(runResult.details.status, "running");
 		assert.match(launchedTask, /Investigate the repo/);
@@ -25482,7 +25483,8 @@ test("natural-language workflow tools list and start workflows", async () => {
 			undefined,
 			ctx,
 		);
-		assert.match(runResult.content[0].text, /Workflow run workflow_/);
+		assert.match(runResult.content[0].text, /Workflow started: research-lite/);
+		assert.match(runResult.content[0].text, /Run: workflow_/);
 		assert.match(runResult.content[0].text, /Open: \/workflow workflow_/);
 		assert.equal(runResult.details.status, "running");
 		assert.match(launchedTask, /Investigate the repo/);
@@ -25652,8 +25654,8 @@ test("workflow_dynamic tool starts spec-less direct dynamic runs", async () => {
 			undefined,
 			ctx,
 		);
-		assert.match(result.content[0].text, /Dynamic workflow run workflow_/);
-		assert.match(result.content[0].text, /Mode: direct-dynamic/);
+		assert.match(result.content[0].text, /Dynamic workflow started/);
+		assert.match(result.content[0].text, /Run: workflow_/);
 		assert.equal(result.details.mode, "direct-dynamic");
 		assert.equal(result.details.provenance.userSelectedWorkflow, false);
 		assert.equal(launched.length, 1);
@@ -25972,8 +25974,9 @@ test("workflow status hydrates task details from run.json for slim index entries
 
 		const status = await formatStatus(cwd);
 		assert.match(status, /workflow_index_status_hydration/);
-		assert.match(status, /- task-1/);
-		assert.match(status, /status from run json detail/);
+		assert.match(status, /unit-artifact-graph/);
+		assert.match(status, /1\/1 completed/);
+		assert.doesNotMatch(status, /- task-1/);
 	} finally {
 		await flushPendingIndexUpdatesForTests().catch(() => undefined);
 		rmSync(cwd, {
@@ -26915,8 +26918,8 @@ test("notifyUnfinishedRuns never notifies runs with mock provenance and formatSt
 		assert.deepEqual(Object.keys(state.notices), ["workflow_realrun"]);
 
 		const status = await formatStatus(cwd);
-		assert.match(status, /workflow_mockrun \[failed\] mock\(mock-screenshot\)/);
-		assert.doesNotMatch(status, /workflow_realrun \[failed\] mock/);
+		assert.match(status, /mock-fixture — failed mock\(mock-screenshot\)/);
+		assert.doesNotMatch(status, /real-run — failed mock/);
 	} finally {
 		rmSync(cwd, {
 			recursive: true,

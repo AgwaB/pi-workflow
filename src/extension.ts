@@ -13,6 +13,11 @@ import { discoverAgents } from "./agents.js";
 import { compileWorkflow } from "./compiler.js";
 import {
 	formatLogs,
+	formatHumanRunLaunch,
+	formatHumanRunOutcome,
+	formatHumanRunResume,
+	formatHumanRunStop,
+	formatRawRunDetails,
 	formatRunDetails,
 	formatRunStatus,
 	formatStatus,
@@ -23,7 +28,6 @@ import {
 	runDynamicTask,
 	runWorkflowSpec,
 	waitForRun,
-	formatRun,
 } from "./engine.js";
 import { WORKFLOW_COMMAND, WORKFLOW_HELP } from "./index.js";
 import { showWorkflowView } from "./workflow-view.js";
@@ -305,6 +309,14 @@ function spawnDetachedSupervisor(
 	} finally {
 		closeSync(fd);
 	}
+}
+
+function formatDetachedSupervisorNote(runId: string): string {
+	return [
+		"",
+		"You can keep working or close this session.",
+		`Check progress: /workflow ${runId}`,
+	].join("\n");
 }
 
 function watchWorkflowFeedback(
@@ -761,14 +773,14 @@ async function startWorkflowRunFromRequest(
 
 	let detachNote = "";
 	if (request.detach && run.status === "running") {
-		const supervisor = spawnDetachedSupervisor(ctx.cwd, run.runId);
-		detachNote = `\nDetached supervisor pid ${supervisor.pid ?? "?"} — survives this session; log: ${toDisplayPath(supervisor.logPath, ctx.cwd)}`;
+		spawnDetachedSupervisor(ctx.cwd, run.runId);
+		detachNote = formatDetachedSupervisorNote(run.runId);
 	}
 	const estimateNote = await runDurationEstimateNote(ctx.cwd, run);
 
 	return {
 		run,
-		text: `Workflow run ${run.runId} ${verb}.\nSpec: ${toDisplayPath(run.specPath, ctx.cwd)}\n${formatRun(run)}${estimateNote}${detachNote}\nOpen: /workflow ${run.runId}`,
+		text: `Workflow ${verb}: ${run.name ?? "workflow"}\n${formatHumanRunLaunch(run)}${estimateNote}${detachNote}\nOpen: /workflow ${run.runId}`,
 	};
 }
 
@@ -814,14 +826,14 @@ async function startDynamicRunFromRequest(
 
 	let detachNote = "";
 	if (request.detach && run.status === "running") {
-		const supervisor = spawnDetachedSupervisor(ctx.cwd, run.runId);
-		detachNote = `\nDetached supervisor pid ${supervisor.pid ?? "?"} — survives this session; log: ${toDisplayPath(supervisor.logPath, ctx.cwd)}`;
+		spawnDetachedSupervisor(ctx.cwd, run.runId);
+		detachNote = formatDetachedSupervisorNote(run.runId);
 	}
 	const estimateNote = await runDurationEstimateNote(ctx.cwd, run);
 
 	return {
 		run,
-		text: `Dynamic workflow run ${run.runId} ${verb}.\nMode: direct-dynamic (spec-less)\n${formatRun(run)}${estimateNote}${detachNote}\nOpen: /workflow ${run.runId}`,
+		text: `Dynamic workflow ${verb}\n${formatHumanRunLaunch(run)}${estimateNote}${detachNote}\nOpen: /workflow ${run.runId}`,
 	};
 }
 
@@ -884,6 +896,18 @@ async function handleRoutedRunRequest(
 	const task = request.task.trim();
 	if (!task)
 		throw new Error(`This workflow needs a task. Usage: ${request.usage}`);
+	if (request.requestedWorkflow) {
+		emitWorkflowLaunchNotice(ctx, {
+			kind: "routed-workflow",
+			workflow: request.requestedWorkflow,
+			detach: request.detach,
+		});
+	} else {
+		emitWorkflowLaunchNotice(ctx, {
+			kind: "routed-dynamic",
+			detach: request.detach,
+		});
+	}
 	const outcome = await executeRoutedWorkflowRequest({
 		cwd: ctx.cwd,
 		task,
@@ -922,18 +946,18 @@ async function handleRoutedRunRequest(
 
 	let detachNote = "";
 	if (request.detach && run.status === "running") {
-		const supervisor = spawnDetachedSupervisor(ctx.cwd, run.runId);
-		detachNote = `\nDetached supervisor pid ${supervisor.pid ?? "?"} — survives this session; log: ${toDisplayPath(supervisor.logPath, ctx.cwd)}`;
+		spawnDetachedSupervisor(ctx.cwd, run.runId);
+		detachNote = formatDetachedSupervisorNote(run.runId);
 	}
 
 	const headline =
 		outcome.mode === "dynamic"
-			? `Dynamic workflow run ${run.runId} ${verb}.\nMode: direct-dynamic (spec-less)`
-			: `Workflow run ${run.runId} ${verb}.\nSpec: ${toDisplayPath(run.specPath, ctx.cwd)}`;
+			? `Dynamic workflow ${verb}`
+			: `Workflow ${verb}: ${run.name ?? "workflow"}`;
 	emitRunStartResult(
 		ctx,
 		run.status,
-		`${headline}\n${routingLine}\n${formatRun(run)}${detachNote}\nOpen: /workflow ${run.runId}`,
+		`${headline}\n${routingLine}\n${formatHumanRunLaunch(run)}${detachNote}\nOpen: /workflow ${run.runId}`,
 	);
 }
 
@@ -1322,6 +1346,11 @@ async function handleWorkflowCommand(
 					return;
 				}
 			}
+			emitWorkflowLaunchNotice(ctx, {
+				kind: "workflow",
+				workflow: specPath,
+				detach: parsed.detach,
+			});
 			const result = await startWorkflowRunFromRequest(
 				{
 					workflow: specPath,
@@ -1366,6 +1395,10 @@ async function handleWorkflowCommand(
 					return;
 				}
 			}
+			emitWorkflowLaunchNotice(ctx, {
+				kind: "dynamic",
+				detach: parsed.detach,
+			});
 			const result = await startDynamicRunFromRequest(
 				{
 					task: parsed.task,
@@ -1388,12 +1421,17 @@ async function handleWorkflowCommand(
 		}
 
 		if (action === "show") {
+			const raw = tokens[1] === "--raw";
 			const ref = requireArg(
 				tokens,
-				1,
-				"/workflow show <run-id-or-workflow-name>",
+				raw ? 2 : 1,
+				raw
+					? "/workflow show --raw <run-id>"
+					: "/workflow show <run-id-or-workflow-name>",
 			);
-			if (ref.startsWith("workflow_")) {
+			if (raw) {
+				emit(ctx, await formatRawRunDetails(ctx.cwd, ref), "info");
+			} else if (ref.startsWith("workflow_")) {
 				emit(ctx, await formatRunDetails(ctx.cwd, ref), "info");
 			} else {
 				const resolved = await resolveWorkflowRef(ref, ctx.cwd);
@@ -1437,7 +1475,7 @@ async function handleWorkflowCommand(
 			);
 			emit(
 				ctx,
-				formatRun(run, "full"),
+				formatHumanRunOutcome(run),
 				run.status === "completed"
 					? "info"
 					: run.status === "blocked"
@@ -1455,10 +1493,7 @@ async function handleWorkflowCommand(
 			if (run.status === "running") beginParentUsageTracking(ctx.cwd, runId);
 			emit(
 				ctx,
-				[
-					`Reset ${resetTaskIds.length} task(s) to pending: ${resetTaskIds.join(", ")}`,
-					formatRun(run, "full"),
-				].join("\n"),
+				formatHumanRunResume(run, resetTaskIds.length),
 				run.status === "completed"
 					? "info"
 					: run.status === "blocked"
@@ -1470,15 +1505,9 @@ async function handleWorkflowCommand(
 
 		if (action === "stop") {
 			const runId = requireArg(tokens, 1, "/workflow stop <run-id>");
+			emit(ctx, `Stopping ${runId}…`, "warning");
 			const { run, interruptedTaskIds } = await stopRun(ctx.cwd, runId);
-			emit(
-				ctx,
-				[
-					`Stopped workflow ${run.runId}; interrupted ${interruptedTaskIds.length} task(s): ${interruptedTaskIds.join(", ")}`,
-					formatRun(run, "full"),
-				].join("\n"),
-				"warning",
-			);
+			emit(ctx, formatHumanRunStop(run, interruptedTaskIds.length), "warning");
 			return;
 		}
 
@@ -1612,6 +1641,28 @@ function formatAgents(
 				.join("\n");
 		})
 		.join("\n\n");
+}
+
+function emitWorkflowLaunchNotice(
+	ctx: ExtensionCommandContext,
+	request:
+		| { kind: "workflow"; workflow: string; detach: boolean }
+		| { kind: "dynamic"; detach: boolean }
+		| { kind: "routed-workflow"; workflow: string | undefined; detach: boolean }
+		| { kind: "routed-dynamic"; workflow?: undefined; detach: boolean },
+): void {
+	const label =
+		request.kind === "dynamic"
+			? "dynamic workflow"
+			: request.kind === "routed-dynamic"
+				? "routed dynamic workflow"
+				: request.kind === "routed-workflow"
+					? `routed workflow: ${request.workflow ?? "workflow"}`
+					: `workflow: ${request.workflow}`;
+	const preparation = request.kind.startsWith("routed")
+		? "Routing request and preparing run…"
+		: "Preparing run and scheduling first task…";
+	emit(ctx, `Starting ${label}\n${preparation}`, "info");
 }
 
 function formatError(error: unknown): string {

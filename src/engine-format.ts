@@ -113,13 +113,13 @@ export async function formatStatus(cwd: string): Promise<string> {
 		await reconcileIndexedActiveRuns(cwd, cached);
 		const refreshed = (await readIndex(cwd).catch(() => cached)) ?? cached;
 		if (refreshed.runs.length === 0) return "No workflow runs found.";
-		return formatIndex(cwd, refreshed);
+		return formatHumanRunList(cwd, refreshed);
 	}
 
 	await reconcileActiveRuns(cwd);
 	const rebuilt = await updateIndex(cwd).catch(() => readIndex(cwd));
 	if (!rebuilt || rebuilt.runs.length === 0) return "No workflow runs found.";
-	return formatIndex(cwd, rebuilt);
+	return formatHumanRunList(cwd, rebuilt);
 }
 
 interface FormatRefreshResult {
@@ -154,6 +154,15 @@ export async function formatRunDetails(
 ): Promise<string> {
 	const { run, warning } = await refreshRunForFormat(cwd, runIdOrPrefix);
 	const supervisor = await readRunSupervisor(cwd, run.runId);
+	return prependRefreshWarning(formatHumanRunDetails(run, { supervisor }), warning);
+}
+
+export async function formatRawRunDetails(
+	cwd: string,
+	runIdOrPrefix: string,
+): Promise<string> {
+	const { run, warning } = await refreshRunForFormat(cwd, runIdOrPrefix);
+	const supervisor = await readRunSupervisor(cwd, run.runId);
 	return prependRefreshWarning(formatRun(run, "full", { supervisor }), warning);
 }
 
@@ -163,10 +172,7 @@ export async function formatRunStatus(
 ): Promise<string> {
 	const { run, warning } = await refreshRunForFormat(cwd, runIdOrPrefix);
 	const supervisor = await readRunSupervisor(cwd, run.runId);
-	return prependRefreshWarning(
-		formatRun(run, "summary", { supervisor }),
-		warning,
-	);
+	return prependRefreshWarning(formatHumanRunStatus(run, { supervisor }), warning);
 }
 
 export async function formatLogs(
@@ -196,9 +202,287 @@ export async function formatLogs(
 
 	const tail = text.split(/\r?\n/).slice(-count).join("\n").trim();
 	return prependRefreshWarning(
-		`${run.runId}/${task.taskId} output=${task.files.output}\n${tail || "(empty log)"}`,
+		[
+			`Logs: ${task.displayName || task.specId}`,
+			`Run: ${run.runId}`,
+			`Task: ${task.specId || task.taskId}`,
+			`Output: ${task.files.output}`,
+			"",
+			tail || "(empty log)",
+		].join("\n"),
 		warning,
 	);
+}
+
+export function formatHumanRunStatus(
+	run: WorkflowRunRecord,
+	options: { supervisor?: WorkflowSupervisorRecord; nowMs?: number } = {},
+): string {
+	return formatHumanRunCard(run, { ...options, mode: "status" });
+}
+
+export function formatHumanRunDetails(
+	run: WorkflowRunRecord,
+	options: { supervisor?: WorkflowSupervisorRecord; nowMs?: number } = {},
+): string {
+	return formatHumanRunCard(run, { ...options, mode: "details", includeUsage: true });
+}
+
+export function formatHumanRunOutcome(
+	run: WorkflowRunRecord,
+	options: { supervisor?: WorkflowSupervisorRecord; nowMs?: number } = {},
+): string {
+	return formatHumanRunCard(run, { ...options, mode: "outcome", includeUsage: true });
+}
+
+export function formatHumanRunResume(
+	run: WorkflowRunRecord,
+	resetCount: number,
+	options: { supervisor?: WorkflowSupervisorRecord; nowMs?: number } = {},
+): string {
+	return [
+		`Workflow ${run.status === "running" ? "resumed" : "resume result"}: ${workflowName(run)}`,
+		`Run: ${run.runId}`,
+		"",
+		resetCount === 0
+			? "No tasks were reset."
+			: `Reset ${resetCount} task(s) and scheduled remaining work.`,
+		`Progress: ${formatHumanProgress(run)}`,
+		...formatWarnings(run, options),
+		...taskSections(run),
+		"",
+		`Open: /workflow ${run.runId}`,
+	].join("\n");
+}
+
+export function formatHumanRunStop(
+	run: WorkflowRunRecord,
+	interruptedCount: number,
+): string {
+	return [
+		`Workflow stopped: ${workflowName(run)}`,
+		`Run: ${run.runId}`,
+		"",
+		interruptedCount === 0
+			? "Nothing was interrupted."
+			: `Interrupted ${interruptedCount} task(s).`,
+		`Progress: ${formatHumanProgress(run)}`,
+		"",
+		`Open: /workflow ${run.runId}`,
+		`Resume: /workflow resume ${run.runId}`,
+	].join("\n");
+}
+
+export function formatHumanRunLaunch(
+	run: WorkflowRunRecord,
+	options: { supervisor?: WorkflowSupervisorRecord; nowMs?: number } = {},
+): string {
+	return [
+		`Run: ${run.runId}`,
+		"",
+		`Progress: ${formatHumanProgress(run)}`,
+		...formatWarnings(run, options),
+		...taskSections(run),
+	].join("\n");
+}
+
+function formatHumanRunCard(
+	run: WorkflowRunRecord,
+	options: {
+		supervisor?: WorkflowSupervisorRecord;
+		nowMs?: number;
+		mode: "status" | "details" | "outcome";
+		includeUsage?: boolean;
+	},
+): string {
+	const heading =
+		options.mode === "outcome"
+			? `Workflow ${run.status}: ${workflowName(run)}`
+			: `Workflow: ${workflowName(run)}`;
+	const lines = [heading, `Run: ${run.runId}`];
+	if (options.mode !== "outcome") lines.push(`Status: ${run.status}`);
+	if (options.mode === "details") {
+		lines.push(`Started: ${friendlyTimestamp(run.createdAt)}`);
+		lines.push(`Updated: ${friendlyTimestamp(run.updatedAt)}`);
+	}
+	lines.push("", `Progress: ${formatHumanProgress(run)}`);
+	const usage = options.includeUsage ? formatHumanUsageLine(run) : undefined;
+	if (usage) lines.push(usage);
+	lines.push(...formatWarnings(run, options));
+	const problem = firstProblemTask(run);
+	if (problem) lines.push("", "Needs attention:", `  • ${formatTaskHuman(problem, true)}`, `    ${taskReason(problem)}`);
+	if (options.mode === "details") {
+		const completed = run.tasks.filter((task) => task.status === "completed").slice(0, 5);
+		if (completed.length > 0) {
+			lines.push("", "Completed:", ...completed.map((task) => `  ✓ ${task.displayName || task.specId}`));
+		}
+	}
+	lines.push(...taskSections(run));
+	lines.push("", `Open: /workflow ${run.runId}`);
+	if (["failed", "blocked", "interrupted"].includes(run.status))
+		lines.push(`Resume: /workflow resume ${run.runId}`);
+	if (options.mode === "details") {
+		lines.push(`Logs: /workflow logs ${run.runId} <task-or-spec-id>`);
+		lines.push(`Raw: /workflow show --raw ${run.runId}`);
+	}
+	return lines.join("\n");
+}
+
+function taskSections(run: WorkflowRunRecord): string[] {
+	const sections: string[] = [];
+	appendTaskSection(sections, "Now", run.tasks.filter((task) => task.status === "running").slice(0, 3), true);
+	appendTaskSection(sections, "Waiting", waitingTasks(run).slice(0, 3), true);
+	appendTaskSection(sections, "Next", nextReadyTasks(run).slice(0, 3), false);
+	return sections;
+}
+
+function appendTaskSection(
+	lines: string[],
+	label: string,
+	tasks: WorkflowTaskRunRecord[],
+	includeRuntime: boolean,
+): void {
+	if (tasks.length === 0) return;
+	lines.push("", `${label}:`, ...tasks.map((task) => `  • ${formatTaskHuman(task, includeRuntime)}`));
+}
+
+function waitingTasks(run: WorkflowRunRecord): WorkflowTaskRunRecord[] {
+	return run.tasks.filter(isWaitingTask);
+}
+
+function nextReadyTasks(run: WorkflowRunRecord): WorkflowTaskRunRecord[] {
+	const completed = new Set(run.tasks.filter((task) => task.status === "completed").map((task) => task.specId));
+	return run.tasks.filter((task) => {
+		if (task.status !== "pending" || isWaitingTask(task)) return false;
+		return (task.dependsOn ?? []).every((dep) => completed.has(dep));
+	});
+}
+
+function isWaitingTask(task: WorkflowTaskRunRecord): boolean {
+	const nextEligibleAt = task.launchRetry?.nextEligibleAt;
+	if (typeof nextEligibleAt === "string" && Number.isFinite(Date.parse(nextEligibleAt)) && Date.parse(nextEligibleAt) > Date.now()) return true;
+	const text = `${task.statusDetail} ${task.lastMessage ?? ""} ${task.launchRetry?.reason ?? ""} ${task.launchRetry?.message ?? ""}`.toLowerCase();
+	return text.includes("backoff") || text.includes("waiting until") || text.includes("retry_model_failure") || text.includes("rate-limit");
+}
+
+function firstProblemTask(run: WorkflowRunRecord): WorkflowTaskRunRecord | undefined {
+	return run.tasks.find((task) => ["failed", "blocked", "interrupted"].includes(task.status));
+}
+
+function taskReason(task: WorkflowTaskRunRecord): string {
+	return task.lastMessage || task.launchRetry?.message || task.outputRetry?.message || task.statusDetail || task.status;
+}
+
+function formatTaskHuman(task: WorkflowTaskRunRecord, includeRuntime: boolean): string {
+	const reason = isWaitingTask(task) ? ` — ${formatWaitingReason(task)}` : "";
+	const runtime = includeRuntime ? ` · ${taskRuntime(task)}` : "";
+	return `${task.displayName || task.specId} — ${task.agent}${runtime}${reason}`;
+}
+
+function formatWaitingReason(task: WorkflowTaskRunRecord): string {
+	const nextEligibleAt = task.launchRetry?.nextEligibleAt;
+	if (nextEligibleAt) return `retry at ${friendlyTimestamp(nextEligibleAt)}`;
+	return task.lastMessage || task.launchRetry?.message || task.statusDetail || "waiting";
+}
+
+function taskRuntime(task: WorkflowTaskRunRecord): string {
+	if (task.kind === "support") return "local support";
+	const model = task.runtime.model ?? "model unknown";
+	const thinking = task.runtime.thinking ? `${task.runtime.thinking} reasoning` : "reasoning unknown";
+	return `${model} · ${thinking}`;
+}
+
+function formatWarnings(
+	run: WorkflowRunRecord,
+	options: { supervisor?: WorkflowSupervisorRecord; nowMs?: number },
+): string[] {
+	const lines: string[] = [];
+	if (run.degradation?.summary) lines.push(`⚠ Degraded: ${run.degradation.summary}`);
+	const stall = formatRunStallWarning(run, options.supervisor, options.nowMs ?? Date.now());
+	if (stall) lines.push(stall);
+	return lines.length > 0 ? ["", ...lines] : [];
+}
+
+function formatHumanProgress(run: WorkflowRunRecord): string {
+	const summary = run.taskSummary;
+	const parts = [`${summary.completed}/${summary.total} completed`, `${summary.running} running`, `${summary.pending} queued`];
+	if (summary.blocked > 0) parts.push(`${summary.blocked} blocked`);
+	if (summary.failed > 0) parts.push(`${summary.failed} failed`);
+	if (summary.interrupted > 0) parts.push(`${summary.interrupted} interrupted`);
+	return parts.join(" · ");
+}
+
+function workflowName(run: Pick<WorkflowRunRecord, "name" | "type">): string {
+	return run.name ?? run.type;
+}
+
+function friendlyTimestamp(value: string): string {
+	const date = new Date(value);
+	if (Number.isNaN(date.getTime())) return value;
+	return date.toISOString().replace("T", " ").replace(/:\d{2}\.\d{3}Z$/, "Z");
+}
+
+function formatHumanUsageLine(run: WorkflowRunRecord): string | undefined {
+	const usage = buildWorkflowRunMetrics(run).totals.usage.observed;
+	if (usage.totalTokens === null && usage.inputTokens === null && usage.outputTokens === null) return undefined;
+	const parts = [`Usage: ${usage.totalTokens ?? "n/a"} tokens`, `in ${usage.inputTokens ?? "n/a"}`, `out ${usage.outputTokens ?? "n/a"}`];
+	if (usage.cacheReadInputTokens !== null || usage.cacheCreationInputTokens !== null)
+		parts.push(`cache r/w ${usage.cacheReadInputTokens ?? "n/a"} / ${usage.cacheCreationInputTokens ?? "n/a"}`);
+	parts.push(`${usage.contributingTaskIds.length}/${run.tasks.length} tasks reporting`);
+	return parts.join(" · ");
+}
+
+async function formatHumanRunList(
+	cwd: string,
+	index: WorkflowIndexRecord,
+): Promise<string> {
+	const active = index.runs.filter((run) => ["running", "blocked", "failed", "interrupted"].includes(run.status));
+	const completed = index.runs.filter((run) => run.status === "completed").slice(0, 5);
+	const mockTags = await mockTagMap(cwd, [...active, ...completed]);
+	const lines = ["Workflow runs"];
+	appendRunGroup(lines, "Active", active.filter((run) => run.status === "running"), mockTags);
+	appendRunGroup(lines, "Needs attention", active.filter((run) => run.status !== "running"), mockTags);
+	appendRunGroup(lines, "Recently completed", completed, mockTags);
+	if (lines.length === 1) lines.push("", "No active workflow runs.");
+	return lines.join("\n");
+}
+
+async function mockTagMap(
+	cwd: string,
+	runs: WorkflowIndexRecord["runs"],
+): Promise<Map<string, string>> {
+	const entries = await Promise.all(
+		runs.map(async (run) => {
+			const fullRun = await readRunRecord(cwd, run.runId).catch(() => undefined);
+			const mode = isMockRunProvenance(fullRun?.provenance)
+				? fullRun?.provenance?.mode
+				: undefined;
+			return [run.runId, mode ? ` mock(${mode})` : ""] as const;
+		}),
+	);
+	return new Map(entries);
+}
+
+function appendRunGroup(
+	lines: string[],
+	label: string,
+	runs: WorkflowIndexRecord["runs"],
+	mockTags: Map<string, string>,
+): void {
+	if (runs.length === 0) return;
+	lines.push("", label);
+	for (const run of runs) {
+		lines.push(`  • ${run.name ?? run.type} — ${run.status}${mockTags.get(run.runId) ?? ""} · ${formatSummaryProgress(run.taskSummary)}`);
+		lines.push(`    /workflow ${run.runId}`);
+	}
+}
+
+function formatSummaryProgress(summary: WorkflowRunRecord["taskSummary"]): string {
+	const parts = [`${summary.completed}/${summary.total} completed`, `${summary.running} running`, `${summary.pending} queued`];
+	if (summary.blocked > 0) parts.push(`${summary.blocked} blocked`);
+	if (summary.failed > 0) parts.push(`${summary.failed} failed`);
+	if (summary.interrupted > 0) parts.push(`${summary.interrupted} interrupted`);
+	return parts.join(" · ");
 }
 
 function runFailurePolicyEnabled(run: WorkflowRunRecord): boolean {

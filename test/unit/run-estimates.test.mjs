@@ -507,7 +507,7 @@ test("duplicate /workflow run start is blocked with the existing run id; --force
 		await handler('run --force-new guard-target "Same task"', ctx);
 		assert.ok(
 			notices.some((notice) =>
-				/Workflow run workflow_\w+ started\./.test(notice.message),
+				/Workflow started: guard-target/.test(notice.message),
 			),
 		);
 		assert.ok(
@@ -522,7 +522,7 @@ test("duplicate /workflow run start is blocked with the existing run id; --force
 		await handler('run guard-target "A different task"', ctx);
 		assert.ok(
 			notices.some((notice) =>
-				/Workflow run workflow_\w+ started\./.test(notice.message),
+				/Workflow started: guard-target/.test(notice.message),
 			),
 		);
 		assert.ok(
