@@ -1,8 +1,5 @@
 import { resolveWorkflowBackend } from "./backend.js";
-import {
-	estimateWorkflowDurationMs,
-	formatApproxDuration,
-} from "./run-estimates.js";
+import { formatApproxDuration } from "./run-estimates.js";
 import {
 	indexSupervisorErrorPath,
 	readRunRecord,
@@ -10,7 +7,7 @@ import {
 	withRunLease,
 	writeJsonAtomic,
 } from "./store.js";
-import { type WorkflowRunRecord } from "./types.js";
+import type { WorkflowRunRecord } from "./types.js";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 60_000;
 const MAX_WAIT_TIMEOUT_MS = 14_400_000;
@@ -44,7 +41,9 @@ export function shouldWatchRun(
 	return hasActiveSchedulerWork(run);
 }
 
-export function isRefreshPollAggregateError(error: unknown): error is AggregateError {
+export function isRefreshPollAggregateError(
+	error: unknown,
+): error is AggregateError {
 	return error instanceof AggregateError;
 }
 
@@ -66,8 +65,7 @@ export async function refreshRunOrRecordPollError(
 /**
  * Wait-timeout message. Messaging only: the run keeps progressing via the
  * in-session/detached supervisor after this error is thrown. Includes elapsed
- * wall time and, when recent completed same-name runs exist, an expected
- * duration so users know whether the run is actually late.
+ * wall time without deriving expectations from prior runs.
  */
 export async function stillRunningAfterWaitMessage(
 	cwd: string,
@@ -78,13 +76,7 @@ export async function stillRunningAfterWaitMessage(
 	const elapsed = formatApproxDuration(
 		Number.isFinite(createdAtMs) ? Date.now() - createdAtMs : timeoutMs,
 	);
-	const estimate = await estimateWorkflowDurationMs(cwd, run.name).catch(
-		() => undefined,
-	);
-	const detail = estimate
-		? `(${elapsed} elapsed, ~${formatApproxDuration(estimate.medianMs)} expected from recent runs)`
-		: `(${elapsed} elapsed) after ${timeoutMs}ms wait`;
-	return `Flow run ${run.runId} still running ${detail} — will keep supervising; check /workflow status ${run.runId}`;
+	return `Flow run ${run.runId} still running (${elapsed} elapsed) after ${timeoutMs}ms wait — will keep supervising; check /workflow status ${run.runId}`;
 }
 
 export async function recordSupervisorError(

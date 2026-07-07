@@ -37,7 +37,6 @@ import {
 	isWorkflowSupervisorEnabled,
 } from "./process-role.js";
 import {
-	estimateWorkflowDurationMs,
 	findDuplicateActiveRun,
 	formatApproxDuration,
 	type DuplicateRunTarget,
@@ -776,29 +775,10 @@ async function startWorkflowRunFromRequest(
 		spawnDetachedSupervisor(ctx.cwd, run.runId);
 		detachNote = formatDetachedSupervisorNote(run.runId);
 	}
-	const estimateNote = await runDurationEstimateNote(ctx.cwd, run);
-
 	return {
 		run,
-		text: `Workflow ${verb}: ${run.name ?? "workflow"}\n${formatHumanRunLaunch(run)}${estimateNote}${detachNote}\nOpen: /workflow ${run.runId}`,
+		text: `Workflow ${verb}: ${run.name ?? "workflow"}\n${formatHumanRunLaunch(run)}${detachNote}\nOpen: /workflow ${run.runId}`,
 	};
-}
-
-/**
- * Upfront duration expectation for a freshly started run, from recent
- * completed runs of the same workflow. Empty string when fewer than two
- * samples exist or the run did not start.
- */
-async function runDurationEstimateNote(
-	cwd: string,
-	run: { status: string; name?: string },
-): Promise<string> {
-	if (run.status !== "running") return "";
-	const estimate = await estimateWorkflowDurationMs(cwd, run.name).catch(
-		() => undefined,
-	);
-	if (!estimate) return "";
-	return `\nExpected ~${formatApproxDuration(estimate.medianMs)} based on ${estimate.samples} recent runs.`;
 }
 
 async function startDynamicRunFromRequest(
@@ -829,11 +809,9 @@ async function startDynamicRunFromRequest(
 		spawnDetachedSupervisor(ctx.cwd, run.runId);
 		detachNote = formatDetachedSupervisorNote(run.runId);
 	}
-	const estimateNote = await runDurationEstimateNote(ctx.cwd, run);
-
 	return {
 		run,
-		text: `Dynamic workflow ${verb}\n${formatHumanRunLaunch(run)}${estimateNote}${detachNote}\nOpen: /workflow ${run.runId}`,
+		text: `Dynamic workflow ${verb}\n${formatHumanRunLaunch(run)}${detachNote}\nOpen: /workflow ${run.runId}`,
 	};
 }
 
