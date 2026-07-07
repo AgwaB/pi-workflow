@@ -22792,6 +22792,68 @@ test("shared rate-limit backoff defers same-provider launches only", async () =>
 	}
 });
 
+test("dynamic generated tasks launch with a tool-result budget and static tasks do not", async () => {
+	const cwd = makeProject();
+	try {
+		const captured = [];
+		setSubagentApiForTests({
+			async runSubagent(options) {
+				captured.push(options);
+				return {
+					runId: `run_budget_${captured.length}`,
+					attemptId: `attempt_budget_${captured.length}`,
+					status: "running",
+				};
+			},
+			async getSubagentStatus() {
+				return null;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+
+		const staticRun = await createPendingSingleTaskRun(cwd, {
+			model: "openai-codex/gpt-5.5",
+			specName: "budget-static",
+		});
+		await launchSubagentTask(
+			cwd,
+			staticRun.run,
+			staticRun.task,
+			staticRun.compiled.tasks[0],
+		);
+		assert.equal(captured.length, 1);
+		assert.equal(captured[0].toolResultBudget, undefined);
+
+		const dynamicRun = await createPendingSingleTaskRun(cwd, {
+			model: "openai-codex/gpt-5.5",
+			specName: "budget-dynamic",
+		});
+		dynamicRun.task.dynamicGenerated = {
+			controllerSpecId: "controller.main",
+			opId: "op-1",
+			requestHash: "hash-1",
+		};
+		await launchSubagentTask(
+			cwd,
+			dynamicRun.run,
+			dynamicRun.task,
+			dynamicRun.compiled.tasks[0],
+		);
+		assert.equal(captured.length, 2);
+		assert.deepEqual(captured[1].toolResultBudget, {
+			maxTotalChars: 320_000,
+		});
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
+	}
+});
+
 test("shared rate-limit backoff survives process restarts via persisted state", async () => {
 	const cwd = makeProject();
 	try {

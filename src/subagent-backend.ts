@@ -102,6 +102,13 @@ const STALE_LAUNCH_CLAIM_GRACE_MS = 30_000;
 const REFRESH_STATUS_RECONCILE_CONCURRENCY = 8;
 const MIN_TRANSIENT_RETRY_JITTER_MS = 1_000;
 const MAX_TRANSIENT_RETRY_JITTER_MS = 5_000;
+// Transcript hygiene for dynamically generated children (June-22 evidence:
+// children died on context overflow from accumulated tool results). Applied
+// only to dynamic generated tasks; static stages keep their spec-authored
+// budgets. Set the env to 0 (or any non-positive value) to disable.
+const DYNAMIC_TOOL_RESULT_BUDGET_ENV =
+	"PI_WORKFLOW_DYNAMIC_TOOL_RESULT_BUDGET_CHARS";
+const DEFAULT_DYNAMIC_TOOL_RESULT_BUDGET_CHARS = 320_000;
 const RATE_LIMIT_TRANSIENT_RETRY_BACKOFF_BASE_MS = 60_000;
 const RATE_LIMIT_TRANSIENT_RETRY_BACKOFF_MAX_MS = 5 * 60_000;
 const MODULE_PATH = fileURLToPath(import.meta.url);
@@ -1819,6 +1826,12 @@ export async function launchSubagentTask(
 		};
 		subagentOptions.extensions = extensions;
 		if (captureToolCallsEnabled()) subagentOptions.captureToolCalls = true;
+		const toolResultBudgetChars = dynamicTaskToolResultBudgetChars(task);
+		if (toolResultBudgetChars !== undefined) {
+			subagentOptions.toolResultBudget = {
+				maxTotalChars: toolResultBudgetChars,
+			};
+		}
 		const launchQueuedAt = nowIso();
 		let launchStartedAt: string | undefined;
 		recordTaskLaunchTiming(task, { launchQueuedAt });
@@ -3533,6 +3546,19 @@ function transientFailureAttemptPath(
 		dirname(resultFile),
 		`result.transient-model-failure-${attempt}.json`,
 	);
+}
+
+function dynamicTaskToolResultBudgetChars(
+	task: WorkflowTaskRunRecord,
+): number | undefined {
+	if (!task.dynamicGenerated) return undefined;
+	const raw = process.env[DYNAMIC_TOOL_RESULT_BUDGET_ENV];
+	if (raw !== undefined && raw.trim() !== "") {
+		const parsed = Number.parseInt(raw, 10);
+		if (!Number.isFinite(parsed) || parsed <= 0) return undefined;
+		return Math.floor(parsed);
+	}
+	return DEFAULT_DYNAMIC_TOOL_RESULT_BUDGET_CHARS;
 }
 
 function retryOrFailTransientSubagentFailure(
