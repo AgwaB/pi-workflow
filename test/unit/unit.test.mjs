@@ -156,7 +156,10 @@ import {
 	writeDynamicDecisionArtifacts,
 } from "../../.tmp/unit/dynamic-decision.js";
 import { runDynamicDecisionLoop } from "../../.tmp/unit/dynamic-decision-loop.js";
-import { buildDynamicGeneratedCompiledTask } from "../../.tmp/unit/dynamic-generated-task-runtime.js";
+import {
+	buildDynamicGeneratedCompiledTask,
+	DYNAMIC_WEB_SEARCH_BUDGET,
+} from "../../.tmp/unit/dynamic-generated-task-runtime.js";
 import {
 	assembleDynamicStateIndex,
 	extractDynamicStateArtifact,
@@ -2279,6 +2282,132 @@ test("dynamic generated tasks apply runtime overrides above profile pins and res
 		assert.equal(generated.runtime.thinking, "high");
 		assert.equal(generated.runtime.thinkingResolution?.requested, "xhigh");
 		assert.equal(generated.runtime.thinkingResolution?.resolved, "high");
+	} finally {
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+	}
+});
+
+async function buildDynamicGeneratedTaskWithTools(cwd, tools) {
+	writeAgent(cwd, "unit-scout", tools.join(", "));
+	const controllerCompiledTask = {
+		id: "adaptive.controller",
+		key: "adaptive.controller",
+		specId: "adaptive.controller",
+		taskId: "controller",
+		stageId: "adaptive",
+		agent: "dynamic",
+		agentPath: "./helpers/controller.mjs",
+		agentSystemPrompt: "",
+		roleNames: [],
+		task: "Run controller.",
+		cwd,
+		explicitCwd: false,
+		explicitWorktreePolicy: false,
+		runtime: { approvalMode: "non-interactive" },
+		safety: {
+			readOnlyDeclared: false,
+			capability: "mutation-capable",
+			sharedCwdSafe: false,
+			worktreePolicy: "off",
+			requiresWorktree: false,
+			permission: { status: "pending" },
+		},
+		compiledPrompt: "Run controller.",
+		kind: "dynamic",
+	};
+	return await buildDynamicGeneratedCompiledTask({
+		cwd,
+		run: {
+			runId: "workflow_dynamic_web_budget",
+			provenance: {},
+			tasks: [
+				{
+					specId: "adaptive.controller",
+					stageId: "adaptive",
+					taskId: "controller",
+					status: "running",
+				},
+			],
+		},
+		compiledFlow: { tasks: [controllerCompiledTask] },
+		controllerCompiledTask,
+		controllerSpecId: "adaptive.controller",
+		controllerStageId: "adaptive",
+		generatedSpecId: "adaptive.worker",
+		opId: "op-1",
+		requestHash: "hash-1",
+		request: {
+			id: "worker",
+			agent: "unit-scout",
+			profile: "worker",
+			prompt: "Inspect the target.",
+			inputs: [],
+		},
+		dynamic: {
+			uses: "./helpers/controller.mjs",
+			mode: "graph-splice",
+			budget: { maxAgents: 10, maxConcurrency: 2, maxRuntimeMs: 1000 },
+			permissions: {
+				approval: "auto",
+				allowDynamicRoles: true,
+				allowDynamicTools: true,
+			},
+			helpers: {},
+			workflows: {},
+			decisionLoop: {
+				workerDefaults: { tools },
+				allowedAgents: [],
+				allowedOutputProfiles: [],
+			},
+		},
+	});
+}
+
+test("dynamic generated tasks with web tools receive the web budget block", async () => {
+	const cwd = makeProject();
+	try {
+		const generated = await buildDynamicGeneratedTaskWithTools(cwd, [
+			"read",
+			"workflow_web_search",
+			"workflow_web_fetch_source",
+			"workflow_web_source_read",
+		]);
+		assert.ok(generated.compiledPrompt.includes("# Web Tool Budget"));
+		assert.ok(
+			generated.compiledPrompt.includes(
+				`use at most ${DYNAMIC_WEB_SEARCH_BUDGET} workflow_web_search calls`,
+			),
+		);
+		assert.ok(
+			generated.compiledPrompt.includes(
+				"stop discovery and record the gap in your output",
+			),
+		);
+	} finally {
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+	}
+});
+
+test("dynamic generated tasks without web tools omit the web budget block", async () => {
+	const cwd = makeProject();
+	try {
+		const generated = await buildDynamicGeneratedTaskWithTools(cwd, [
+			"read",
+			"grep",
+		]);
+		assert.ok(!generated.compiledPrompt.includes("# Web Tool Budget"));
+		assert.ok(!generated.compiledPrompt.includes("Search budget"));
+		assert.ok(!generated.compiledPrompt.includes("workflow_web_search"));
 	} finally {
 		rmSync(cwd, {
 			recursive: true,

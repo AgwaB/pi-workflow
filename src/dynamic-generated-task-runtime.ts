@@ -37,6 +37,12 @@ const DYNAMIC_DELEGATION_TOOLS = new Set([
 	"workflow",
 	"/workflow",
 ]);
+export const DYNAMIC_WEB_SEARCH_BUDGET = 3;
+const DYNAMIC_WEB_TOOLS = new Set([
+	"workflow_web_search",
+	"workflow_web_fetch_source",
+	"workflow_web_source_read",
+]);
 
 export interface DynamicArtifactInput {
 	kind: "workflow-artifact-ref";
@@ -251,6 +257,7 @@ export async function buildDynamicGeneratedCompiledTask(input: {
 	const compiledPrompt = [
 		`# Workflow Stage\n\nstage=${input.controllerStageId}\ntype=dynamic-agent\nitem=${input.request.id}`,
 		`# Instructions\n\n${appendDynamicOutputInstructions(input.request.prompt, effectiveOutputProfile, DYNAMIC_OUTPUT_MAX_DIGEST_CHARS, refsMinItems)}`,
+		dynamicWebToolBudgetSection(tools),
 		input.request.compact
 			? "# Output Scope\n\nReturn compact typed output. Prefer concise control JSON and artifact refs over pasted context."
 			: undefined,
@@ -321,6 +328,15 @@ export async function buildDynamicGeneratedCompiledTask(input: {
 				: {}),
 		},
 	} as CompiledTask;
+}
+
+// No controller-provided web budget exists in the dynamic-decision schema today;
+// extend the schema before making this budget overridable per decision.
+function dynamicWebToolBudgetSection(
+	tools: string[] | undefined,
+): string | undefined {
+	if (!tools?.some((tool) => DYNAMIC_WEB_TOOLS.has(tool))) return undefined;
+	return `# Web Tool Budget\n\nSearch budget: use at most ${DYNAMIC_WEB_SEARCH_BUDGET} workflow_web_search calls for this task; prefer one batched workflow_web_search call with multiple queries. Do not compensate with broad extra fetches; fetch/read only promising URLs discovered within this budget or already-known sourceRefs/URLs. If evidence remains insufficient after the budget, stop discovery and record the gap in your output instead of expanding the search.`;
 }
 
 function dynamicGeneratedTaskRefsMinItems(input: {
