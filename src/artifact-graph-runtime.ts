@@ -15,6 +15,11 @@ import {
 	type WorkflowSourceManifestSource,
 } from "./workflow-artifact-tool.js";
 import { writeWorkflowTaskArtifactBundle } from "./workflow-output-artifacts.js";
+import {
+	hasFatalPartialOutputIssue,
+	readWorkflowPartialOutputLedger,
+	writeWorkflowPartialOutputLedgerFromFile,
+} from "./workflow-partial-output.js";
 import type { JsonSchema } from "./json-schema.js";
 import {
 	buildRunSourceContext,
@@ -519,6 +524,14 @@ async function prepareArtifactGraphTask(
 		run,
 		contextDependsOn,
 		compiledTask.artifactGraph?.sourceProjection,
+		{
+			// Per-item dispatched foreach children (opt-in, marker persisted at
+			// materialization) may launch while their producer is still running;
+			// their sourceProjection is then served from the producer's partial
+			// output ledger instead of the not-yet-written control artifact.
+			partialLedgerProjection:
+				compiledTask.foreachGenerated?.perItemDispatch === true,
+		},
 	);
 	const manifest: WorkflowSourceManifest = {
 		schema: WORKFLOW_SOURCE_MANIFEST_SCHEMA,
@@ -690,6 +703,7 @@ export async function buildArtifactGraphSourceManifestSources(
 	run: WorkflowRunRecord,
 	contextDependsOn: readonly string[],
 	projection?: NonNullable<CompiledTask["artifactGraph"]>["sourceProjection"],
+	options?: { partialLedgerProjection?: boolean },
 ): Promise<WorkflowSourceManifestSource[]> {
 	const bySpecId = new Map(
 		run.tasks.map((sourceTask) => [sourceTask.specId, sourceTask]),
@@ -702,6 +716,33 @@ export async function buildArtifactGraphSourceManifestSources(
 		const source = sourceNameForTask(sourceTask, usedNames);
 		const status = sourceStatusForTask(sourceTask);
 		if (sourceTask.status !== "completed") {
+			if (options?.partialLedgerProjection) {
+				const partialProjection = await partialLedgerSourceProjection(
+					cwd,
+					sourceTask,
+					projection,
+				);
+				if (partialProjection) {
+					sources.push({
+						source,
+						displayName: sourceTask.displayName,
+						taskId: sourceTask.taskId,
+						specId: sourceTask.specId,
+						stageId: sourceTask.stageId,
+						...status,
+						controlProjection: partialProjection.value,
+						...(partialProjection.missingPaths.length > 0
+							? { projectionMissingPaths: partialProjection.missingPaths }
+							: {}),
+						...(partialProjection.truncated
+							? { projectionTruncated: true }
+							: {}),
+						projectionSource: "partial-ledger",
+						artifacts: {},
+					});
+					continue;
+				}
+			}
 			sources.push({
 				source,
 				displayName: sourceTask.displayName,
@@ -747,6 +788,52 @@ export async function buildArtifactGraphSourceManifestSources(
 		});
 	}
 	return sources;
+}
+
+// Serve a sourceProjection for a still-running producer from its durable
+// partial output ledger (per-item dispatch only). Each declared partial path
+// with published items becomes an array on a pseudo-control object, which is
+// then projected exactly like a completed control. Returns undefined when no
+// projection value can be built so the caller falls back to the default
+// empty-artifacts source entry.
+async function partialLedgerSourceProjection(
+	cwd: string,
+	sourceTask: WorkflowTaskRunRecord,
+	projection:
+		| NonNullable<CompiledTask["artifactGraph"]>["sourceProjection"]
+		| undefined,
+): Promise<
+	{ value?: unknown; missingPaths: string[]; truncated: boolean } | undefined
+> {
+	if (!projection?.include || projection.include.length === 0) return undefined;
+	const allowedPaths = sourceTask.artifactGraph?.output.partial?.paths ?? [];
+	if (allowedPaths.length === 0) return undefined;
+	const taskDir = dirname(fromProjectPath(cwd, sourceTask.files.result));
+	let ledger = await readWorkflowPartialOutputLedger(taskDir).catch(
+		() => undefined,
+	);
+	if (!ledger) {
+		ledger = await writeWorkflowPartialOutputLedgerFromFile({
+			taskDir,
+			outputFile: fromProjectPath(cwd, sourceTask.files.output),
+			allowedPaths,
+		}).catch(() => undefined);
+	}
+	if (!ledger || hasFatalPartialOutputIssue(ledger)) return undefined;
+	const itemsByPath = new Map<string, unknown[]>();
+	for (const item of ledger.items) {
+		const bucket = itemsByPath.get(item.path) ?? [];
+		bucket.push(item.item);
+		itemsByPath.set(item.path, bucket);
+	}
+	if (itemsByPath.size === 0) return undefined;
+	const partialControl: Record<string, unknown> = {};
+	for (const [path, items] of itemsByPath) {
+		setProjectedJsonPath(partialControl, path, items);
+	}
+	const projected = projectArtifactGraphControl(partialControl, projection);
+	if (projected.value === undefined) return undefined;
+	return projected;
 }
 
 export async function appendDynamicOutputSources(input: {
@@ -1003,6 +1090,7 @@ export function formatArtifactGraphSourceContext(
 				controlProjection: source.controlProjection,
 				projectionMissingPaths: source.projectionMissingPaths,
 				projectionTruncated: source.projectionTruncated,
+				projectionSource: source.projectionSource,
 				availableArtifacts: Object.keys(source.artifacts),
 			})),
 		),

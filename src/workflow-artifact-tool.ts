@@ -60,6 +60,7 @@ export interface WorkflowSourceManifestSource {
 	controlProjection?: unknown;
 	projectionMissingPaths?: string[];
 	projectionTruncated?: boolean;
+	projectionSource?: "partial-ledger";
 	artifacts: Partial<Record<WorkflowArtifactKind, WorkflowArtifactRef>>;
 }
 
@@ -114,6 +115,7 @@ export interface WorkflowArtifactListEntry {
 	controlProjection?: unknown;
 	projectionMissingPaths?: string[];
 	projectionTruncated?: boolean;
+	projectionSource?: "partial-ledger";
 	artifacts: WorkflowArtifactKind[];
 }
 
@@ -280,6 +282,9 @@ export function normalizeWorkflowSourceManifest(
 				sourceValue.projectionTruncated,
 				`sources[${index}].projectionTruncated`,
 			),
+			...(sourceValue.projectionSource === "partial-ledger"
+				? { projectionSource: "partial-ledger" as const }
+				: {}),
 			artifacts,
 		};
 	});
@@ -328,6 +333,7 @@ export function listWorkflowArtifactSources(
 			controlProjection: source.controlProjection,
 			projectionMissingPaths: source.projectionMissingPaths,
 			projectionTruncated: source.projectionTruncated,
+			projectionSource: source.projectionSource,
 			artifacts,
 		};
 	});

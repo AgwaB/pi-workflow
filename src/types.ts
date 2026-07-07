@@ -597,6 +597,7 @@ export interface CompiledTask {
 		itemSourceSpecId?: string;
 		itemSourceKind?: "control" | "partial";
 		itemRef?: string;
+		perItemDispatch?: true;
 	};
 	loopChild?: CompiledLoopChildTaskRef;
 	loopPlaceholder?: {
@@ -804,6 +805,7 @@ export interface WorkflowTaskRunRecord {
 		itemSourceSpecId?: string;
 		itemSourceKind?: "control" | "partial";
 		itemRef?: string;
+		perItemDispatch?: true;
 	};
 	launchRetry?: {
 		attempts: number;
