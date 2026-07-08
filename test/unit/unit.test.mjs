@@ -15669,6 +15669,9 @@ test("batched deep-review devil-advocate prompt and schema require evidence sour
 	);
 	assert.match(prompt, /never emit either field as a string/);
 	assert.match(prompt, /evidenceSourceType must be exactly one of/);
+	assert.match(prompt, /row-local contextPacket/);
+	assert.match(prompt, /mirror the same row-local context refs/);
+	assert.match(prompt, /CTX-F-001-1/);
 	assert.match(prompt, /summary-only KEEP/);
 	assert.match(prompt, /Example one-row <control>/);
 	assert.match(prompt, /"schema":"deep-review-devil-advocate-batch-v2"/);
@@ -15695,6 +15698,189 @@ test("batched deep-review devil-advocate prompt and schema require evidence sour
 			"unknown",
 		],
 	});
+});
+
+test("deep-review batched devil-advocate builds and enforces row-local context packets", async () => {
+	const cwd = makeProject();
+	const previousCwd = process.cwd();
+	try {
+		mkdirSync(join(cwd, "src"), { recursive: true });
+		writeFileSync(
+			join(cwd, "src", "context-packet.ts"),
+			[
+				"export function userKey(user) {",
+				"\treturn user.id;",
+				"}",
+			].join("\n"),
+		);
+		process.chdir(previousCwd);
+		const helperPath = join(
+			previousCwd,
+			"workflows",
+			"deep-review",
+			"helpers",
+			"finding-pipeline.mjs",
+		);
+		const helper = (
+			await import(`${pathToFileURL(helperPath).href}?contextPacket=${Date.now()}`)
+		).default;
+		const finding = {
+			id: "F-001",
+			findingId: "F-001",
+			rootCauseId: "R-001",
+			severity: "high",
+			title: "User key uses raw id",
+			file: "src/context-packet.ts",
+			locations: [{ file: "src/context-packet.ts", line: 2, symbol: "userKey" }],
+			evidenceQuotes: ["return user.id;"],
+		};
+		const batches = await helper({
+			sources: { "dedup-findings.main": { findings: [finding] } },
+			options: {
+				mode: "batch-devil-advocate",
+				dedupStage: "dedup-findings",
+				maxBatchSize: 4,
+			},
+			context: { cwd },
+		});
+		const packet = batches.batches[0].findings[0].contextPacket;
+		assert.equal(packet.schema, "deep-review-finding-context-v1");
+		assert.equal(packet.groundingStatus, "concrete");
+		assert.equal(packet.concreteEvidence[0].ref, "CTX-F-001-1");
+		assert.match(packet.concreteEvidence[0].snippet, /return user\.id/);
+		const edgeBatches = await helper({
+			sources: {
+				"dedup-findings.main": {
+					findings: [
+						{
+							id: "F-002",
+							findingId: "F-002",
+							title: "Unsafe path is not read",
+							file: "../outside.ts",
+							locations: [{ file: "../outside.ts", line: 1 }],
+							evidenceQuotes: ["secret"],
+						},
+						{
+							id: "F-003",
+							findingId: "F-003",
+							title: "Quote fallback without line",
+							file: "src/context-packet.ts",
+							locations: [{ file: "src/context-packet.ts", symbol: "userKey" }],
+							evidenceQuotes: ["return user.id;"],
+						},
+						{
+							id: "F-004",
+							findingId: "F-004",
+							title: "Existing packet clone",
+							contextPacket: {
+								schema: "deep-review-finding-context-v1",
+								findingId: "F-004",
+								title: "Existing packet clone",
+								groundingStatus: "concrete",
+								concreteEvidence: [{ ref: "CTX-existing-1" }],
+								missingEvidence: [],
+							},
+						},
+					],
+				},
+			},
+			options: {
+				mode: "batch-devil-advocate",
+				dedupStage: "dedup-findings",
+				maxBatchSize: 4,
+			},
+			context: { cwd },
+		});
+		const edgePackets = new Map(
+			edgeBatches.batches[0].findings.map((candidate) => [
+				candidate.findingId,
+				candidate.contextPacket,
+			]),
+		);
+		assert.equal(edgePackets.get("F-002").groundingStatus, "missing_context");
+		assert.ok(
+			edgePackets
+				.get("F-002")
+				.missingEvidence.some(
+					(entry) => entry.reason === "file_not_found_or_outside_repository",
+				),
+		);
+		assert.equal(edgePackets.get("F-003").groundingStatus, "concrete");
+		assert.equal(edgePackets.get("F-003").concreteEvidence[0].type, "repository_quote_match");
+		assert.equal(edgePackets.get("F-004").concreteEvidence[0].ref, "CTX-existing-1");
+		const accepted = await helper({
+			sources: {
+				"dedup-findings.main": { findings: [finding] },
+				"devil-advocate-batches.main": batches,
+				"devil-advocate.dabatch-001": {
+					schema: "deep-review-devil-advocate-batch-v2",
+					digest: "grounded",
+					results: [
+						{
+							findingId: "F-001",
+							title: "User key uses raw id",
+							verdict: "KEEP",
+							evidenceSourceType: "repository_context",
+							evidence: ["CTX-F-001-1: return user.id;"],
+							counterEvidence: [],
+							recommendedAction: "Keep finding.",
+						},
+					],
+				},
+			},
+			options: {
+				mode: "partition",
+				dedupStage: "dedup-findings",
+				devilAdvocateBatchStage: "devil-advocate-batches",
+			},
+		});
+		assert.deepEqual(
+			accepted.partitions.keep.map((item) => item.findingId),
+			["F-001"],
+		);
+		const demoted = await helper({
+			sources: {
+				"dedup-findings.main": { findings: [finding] },
+				"devil-advocate-batches.main": batches,
+				"devil-advocate.dabatch-001": {
+					schema: "deep-review-devil-advocate-batch-v2",
+					digest: "ungrounded",
+					results: [
+						{
+							findingId: "F-001",
+							title: "User key uses raw id",
+							verdict: "KEEP",
+							evidenceSourceType: "repository_context",
+							evidence: ["Repository context supports this."],
+							counterEvidence: [],
+							recommendedAction: "Keep finding.",
+						},
+					],
+				},
+			},
+			options: {
+				mode: "partition",
+				dedupStage: "dedup-findings",
+				devilAdvocateBatchStage: "devil-advocate-batches",
+			},
+		});
+		assert.equal(demoted.partitions.keep.length, 0);
+		assert.ok(
+			demoted.partitions.needsHuman.some((candidate) =>
+				candidate.batchEvidenceIssue?.reason.includes(
+					"did not cite row-local contextPacket",
+				),
+			),
+		);
+	} finally {
+		process.chdir(previousCwd);
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+	}
 });
 
 test("bundled spec-review workflow materializes verifier and partitions verified findings", async () => {
@@ -28957,6 +29143,22 @@ test("deep-review batch partition demotes summary-only KEEP verdicts", async () 
 			file: "src/cache.ts",
 			locations: [{ file: "src/cache.ts", line: 40 }],
 			evidenceQuotes: ["return cache.get(userId);"],
+			contextPacket: {
+				schema: "deep-review-finding-context-v1",
+				findingId: "F-004",
+				title: "Repository context with missing tests",
+				groundingStatus: "concrete",
+				concreteEvidence: [
+					{
+						ref: "CTX-F-004-1",
+						type: "repository_snippet",
+						file: "src/cache.ts",
+						line: 40,
+						snippet: "40: return cache.get(userId);",
+					},
+				],
+				missingEvidence: [],
+			},
 		},
 		{
 			id: "F-005",
@@ -29027,7 +29229,7 @@ test("deep-review batch partition demotes summary-only KEEP verdicts", async () 
 						title: "Repository context with missing tests",
 						verdict: "KEEP",
 						evidenceSourceType: "repository_context",
-						evidence: ["Repository context shows cache lookup by userId."],
+						evidence: ["CTX-F-004-1: Repository context shows cache lookup by userId."],
 						counterEvidence: [
 							"The change is missing test coverage and does not contain tests for cache expiry.",
 							"Repository search found only no in-repo callers for this public API compatibility path.",

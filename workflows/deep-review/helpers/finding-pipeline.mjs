@@ -15,6 +15,9 @@
 //                 default deep-review workflow still uses one verifier per
 //                 finding.
 
+import fs from "node:fs";
+import path from "node:path";
+
 const VERDICTS = ["KEEP", "WEAKEN", "DROP", "NEEDS_HUMAN"];
 
 function asObjects(value) {
@@ -413,7 +416,210 @@ function normalizeMaxBatchSize(value) {
 	return Math.min(parsed, 8);
 }
 
-function cloneFindingForBatch(finding, id) {
+const CONTEXT_PACKET_SCHEMA = "deep-review-finding-context-v1";
+const DEFAULT_CONTEXT_MAX_LOCATIONS = 4;
+const DEFAULT_CONTEXT_MAX_QUOTES = 10;
+const DEFAULT_CONTEXT_MAX_SNIPPETS = 4;
+const DEFAULT_CONTEXT_SNIPPET_RADIUS = 3;
+const DEFAULT_CONTEXT_SNIPPET_MAX_CHARS = 2000;
+
+function repoRootFromContext(context = {}) {
+	const cwd = typeof context.cwd === "string" ? context.cwd.trim() : "";
+	return cwd ? path.resolve(cwd) : process.cwd();
+}
+
+function safeRepoRelativePath(file, repoRoot = process.cwd()) {
+	const normalized = String(file ?? "")
+		.trim()
+		.replace(/^\.\//, "");
+	if (!normalized || path.isAbsolute(normalized)) return null;
+	const root = path.resolve(repoRoot);
+	const absolute = path.resolve(root, normalized);
+	const relative = path.relative(root, absolute);
+	if (relative.startsWith("..") || path.isAbsolute(relative)) return null;
+	return relative.split(path.sep).join("/");
+}
+
+function readRepoText(file, repoRoot = process.cwd()) {
+	const relative = safeRepoRelativePath(file, repoRoot);
+	if (!relative) return { relative: null, exists: false, text: "" };
+	const root = path.resolve(repoRoot);
+	const absolute = path.resolve(root, relative);
+	try {
+		const stat = fs.statSync(absolute);
+		if (!stat.isFile()) return { relative, exists: false, text: "" };
+		return { relative, exists: true, text: fs.readFileSync(absolute, "utf8") };
+	} catch {
+		return { relative, exists: false, text: "" };
+	}
+}
+
+function contextRefId(findingId, index) {
+	const safeId =
+		String(findingId ?? "finding")
+			.replace(/[^A-Za-z0-9_-]+/g, "-")
+			.replace(/^-+|-+$/g, "") || "finding";
+	return `CTX-${safeId}-${index}`;
+}
+
+function boundedSnippet(text, line, lineEnd, radius, maxChars) {
+	const lines = String(text ?? "").split(/\r?\n/);
+	if (lines.length === 0) return null;
+	const startLine = Number.isFinite(Number(line))
+		? Math.max(1, Number(line))
+		: 1;
+	const rawEnd = Number.isFinite(Number(lineEnd))
+		? Math.max(startLine, Number(lineEnd))
+		: startLine;
+	const endLine = Math.min(lines.length, rawEnd);
+	const start = Math.max(1, startLine - radius);
+	const end = Math.min(lines.length, endLine + radius);
+	const snippet = lines
+		.slice(start - 1, end)
+		.map((value, index) => `${start + index}: ${value}`)
+		.join("\n");
+	return snippet.length > maxChars
+		? `${snippet.slice(0, maxChars)}\n...<truncated>`
+		: snippet;
+}
+
+function lineNumberOfOffset(text, offset) {
+	return String(text ?? "")
+		.slice(0, offset)
+		.split(/\r?\n/).length;
+}
+
+function quoteMatchLine(text, quote) {
+	const candidate = String(quote ?? "").trim();
+	if (!candidate || candidate.length < 8) return null;
+	const offset = String(text ?? "").indexOf(candidate);
+	return offset >= 0 ? lineNumberOfOffset(text, offset) : null;
+}
+
+function cloneExistingContextPacket(packet) {
+	if (!packet || typeof packet !== "object" || Array.isArray(packet))
+		return null;
+	return JSON.parse(JSON.stringify(packet));
+}
+
+function buildFindingContextPacket(finding, id, options = {}, context = {}) {
+	const existing = cloneExistingContextPacket(finding.contextPacket);
+	if (existing) return existing;
+	const repoRoot = repoRootFromContext(context);
+	const maxLocations = Number.isInteger(options.maxContextLocations)
+		? Math.max(1, options.maxContextLocations)
+		: DEFAULT_CONTEXT_MAX_LOCATIONS;
+	const maxQuotes = Number.isInteger(options.maxContextQuotes)
+		? Math.max(1, options.maxContextQuotes)
+		: DEFAULT_CONTEXT_MAX_QUOTES;
+	const maxSnippets = Number.isInteger(options.maxContextSnippets)
+		? Math.max(1, options.maxContextSnippets)
+		: DEFAULT_CONTEXT_MAX_SNIPPETS;
+	const radius = Number.isInteger(options.contextSnippetRadius)
+		? Math.max(0, options.contextSnippetRadius)
+		: DEFAULT_CONTEXT_SNIPPET_RADIUS;
+	const maxChars = Number.isInteger(options.contextSnippetMaxChars)
+		? Math.max(200, options.contextSnippetMaxChars)
+		: DEFAULT_CONTEXT_SNIPPET_MAX_CHARS;
+	const concreteEvidence = [];
+	const missingEvidence = [];
+	const files = new Map();
+	const quotes = evidenceQuotesOf(finding).slice(0, maxQuotes);
+	const addConcreteEvidence = (entry) => {
+		if (concreteEvidence.length >= maxSnippets) return;
+		concreteEvidence.push({
+			ref: contextRefId(id, concreteEvidence.length + 1),
+			...entry,
+		});
+	};
+	const readFileOnce = (file) => {
+		const relative = safeRepoRelativePath(file, repoRoot);
+		if (!relative) return { relative: null, exists: false, text: "" };
+		if (!files.has(relative))
+			files.set(relative, readRepoText(relative, repoRoot));
+		return files.get(relative);
+	};
+	for (const location of locationsOf(finding).slice(0, maxLocations)) {
+		const read = readFileOnce(location.file);
+		if (!read.relative || !read.exists) {
+			missingEvidence.push({
+				type: "repository_file",
+				file: location.file,
+				reason: "file_not_found_or_outside_repository",
+			});
+			continue;
+		}
+		if (!Number.isFinite(Number(location.line))) {
+			missingEvidence.push({
+				type: "repository_file",
+				file: read.relative,
+				reason: "line_not_available_for_snippet",
+			});
+			continue;
+		}
+		const snippet = boundedSnippet(
+			read.text,
+			location.line,
+			location.lineEnd,
+			radius,
+			maxChars,
+		);
+		if (!snippet) continue;
+		addConcreteEvidence({
+			type: "repository_snippet",
+			file: read.relative,
+			line: Number(location.line),
+			...(Number.isFinite(Number(location.lineEnd))
+				? { lineEnd: Number(location.lineEnd) }
+				: {}),
+			...(location.symbol ? { symbol: location.symbol } : {}),
+			snippet,
+			matchedQuotes: quotes
+				.filter((quote) => snippet.includes(quote))
+				.slice(0, 3),
+		});
+	}
+	for (const quote of quotes) {
+		if (concreteEvidence.length >= maxSnippets) break;
+		let matched = false;
+		for (const location of locationsOf(finding).slice(0, maxLocations)) {
+			const read = readFileOnce(location.file);
+			if (!read.exists) continue;
+			const line = quoteMatchLine(read.text, quote);
+			if (!line) continue;
+			addConcreteEvidence({
+				type: "repository_quote_match",
+				file: read.relative,
+				line,
+				quote,
+				snippet: boundedSnippet(read.text, line, line, radius, maxChars),
+				matchedQuotes: [quote],
+			});
+			matched = true;
+			break;
+		}
+		if (!matched) {
+			missingEvidence.push({
+				type: "evidence_quote",
+				quote,
+				reason: "quote_not_found_in_bounded_location_files",
+			});
+		}
+	}
+	return {
+		schema: CONTEXT_PACKET_SCHEMA,
+		findingId: id,
+		title: String(finding.title ?? "").trim(),
+		groundingStatus:
+			concreteEvidence.length > 0 ? "concrete" : "missing_context",
+		locationsChecked: locationsOf(finding).slice(0, maxLocations),
+		evidenceQuotesChecked: quotes,
+		concreteEvidence,
+		missingEvidence,
+	};
+}
+
+function cloneFindingForBatch(finding, id, options = {}, context = {}) {
 	return {
 		...finding,
 		id: typeof finding.id === "string" && finding.id.trim() ? finding.id : id,
@@ -424,10 +630,11 @@ function cloneFindingForBatch(finding, id) {
 		evidenceQuotes: Array.isArray(finding.evidenceQuotes)
 			? [...finding.evidenceQuotes]
 			: evidenceQuotesOf(finding),
+		contextPacket: buildFindingContextPacket(finding, id, options, context),
 	};
 }
 
-function batchDevilAdvocateFindings(sources, options = {}) {
+function batchDevilAdvocateFindings(sources, options = {}, context = {}) {
 	const dedupStageId = String(options.dedupStage ?? "dedup-findings");
 	const maxBatchSize = normalizeMaxBatchSize(options.maxBatchSize);
 	const reviewerFindings = findingsOf(findSource(sources, dedupStageId));
@@ -447,7 +654,7 @@ function batchDevilAdvocateFindings(sources, options = {}) {
 			id: `dabatch-${String(batches.length + 1).padStart(3, "0")}`,
 			findingIds,
 			findings: slice.map((item) =>
-				cloneFindingForBatch(item.finding, item.id),
+				cloneFindingForBatch(item.finding, item.id, options, context),
 			),
 		});
 	}
@@ -1065,6 +1272,7 @@ function buildDevilAdvocateBatchMembershipById(batchSource) {
 				findingId: id,
 				title: String(finding.title ?? "").trim(),
 				titleKey: normalizeText(finding.title),
+				contextPacket: cloneExistingContextPacket(finding.contextPacket),
 			});
 		}
 		for (const idValue of fromIds) {
@@ -1091,6 +1299,7 @@ function hydrateDevilAdvocateBatchMembershipTitles(
 				...member,
 				title,
 				titleKey: normalizeText(title),
+				contextPacket: member.contextPacket,
 			});
 		}
 	}
@@ -1172,7 +1381,33 @@ function hasMissingContextCounterEvidence(row) {
 	);
 }
 
-function conservativeBatchKeepDemotionReason(row) {
+function contextPacketHasConcreteEvidence(contextPacket) {
+	return (
+		contextPacket?.schema === CONTEXT_PACKET_SCHEMA &&
+		contextPacket.groundingStatus === "concrete" &&
+		asObjects(contextPacket.concreteEvidence).length > 0
+	);
+}
+
+function batchEvidenceText(row) {
+	return dedupeStrings(quoteStrings(row?.evidence)).join("\n");
+}
+
+function evidenceCitesContextPacket(row, contextPacket) {
+	const evidenceText = batchEvidenceText(row);
+	const refs = asObjects(contextPacket?.concreteEvidence)
+		.map((entry) => String(entry.ref ?? "").trim())
+		.filter(Boolean);
+	return refs.some((ref) => evidenceText.includes(ref));
+}
+
+function evidenceCitesConcreteRepositoryPointer(row) {
+	return /\b[\w./-]+\.(?:ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|rb|c|h|cpp|hpp|json|ya?ml|md)(?::\d+|[^\n]{0,80}\bline\s+\d+)/i.test(
+		batchEvidenceText(row),
+	);
+}
+
+function conservativeBatchKeepDemotionReason(row, contextPacket = null) {
 	if (row?.verdict !== "KEEP") return null;
 	const evidenceSourceType = batchEvidenceSourceType(row);
 	if (!CONCRETE_BATCH_EVIDENCE_SOURCE_TYPES.has(evidenceSourceType)) {
@@ -1186,6 +1421,20 @@ function conservativeBatchKeepDemotionReason(row) {
 		hasMissingContextCounterEvidence(row)
 	) {
 		return "batch KEEP had missing-context counterEvidence without concrete_artifact evidence";
+	}
+	if (evidenceSourceType !== "concrete_artifact") {
+		const citesPlannedContext = evidenceCitesContextPacket(row, contextPacket);
+		const citesAdditionalRepositoryRead =
+			evidenceCitesConcreteRepositoryPointer(row);
+		if (
+			!contextPacketHasConcreteEvidence(contextPacket) &&
+			!citesAdditionalRepositoryRead
+		) {
+			return "batch KEEP lacked planned concrete contextPacket evidence";
+		}
+		if (!citesPlannedContext && !citesAdditionalRepositoryRead) {
+			return "batch KEEP did not cite row-local contextPacket evidence";
+		}
 	}
 	return null;
 }
@@ -1321,6 +1570,7 @@ function collectBatchVerdictRows({
 			findingId,
 			title,
 			batchKey: `${batchId}|${findingId}|${normalizeText(title)}`,
+			contextPacket: expected.contextPacket,
 			entry: result,
 		});
 	}
@@ -1590,7 +1840,7 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 				: {}),
 		};
 		const batchDemotionReason = row.batched
-			? conservativeBatchKeepDemotionReason(entry)
+			? conservativeBatchKeepDemotionReason(entry, row.contextPacket)
 			: null;
 		if (batchDemotionReason) {
 			partitions.needsHuman.push({
@@ -1719,7 +1969,7 @@ export default async function findingPipeline({
 	const mode = String(options.mode ?? "");
 	if (mode === "dedup") return dedupFindings(sources, context);
 	if (mode === "batch-devil-advocate")
-		return batchDevilAdvocateFindings(sources, options);
+		return batchDevilAdvocateFindings(sources, options, context);
 	if (mode === "partition") return partitionVerdicts(sources, options, context);
 	throw new Error(
 		`finding-pipeline: unknown mode "${mode}" (expected "dedup", "batch-devil-advocate", or "partition")`,
