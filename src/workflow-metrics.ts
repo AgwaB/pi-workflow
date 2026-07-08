@@ -183,6 +183,13 @@ const USAGE_METRIC_KEYS: UsageMetricKey[] = [
 	"costUsd",
 ];
 
+const REQUIRED_USAGE_METRIC_KEYS: UsageMetricKey[] = [
+	"inputTokens",
+	"outputTokens",
+	"totalTokens",
+	"costUsd",
+];
+
 const TIMING_METRIC_KEYS: TimingMetricKey[] = [
 	"launchWaitMs",
 	"launchDurationMs",
@@ -263,14 +270,12 @@ function sumObservedMetricValues(
 function observedUsageForTasks(
 	tasks: Array<{ taskId: string; usage: WorkflowUsageMetrics }>,
 ): WorkflowObservedUsageMetrics {
-	const contributingTaskIds = tasks
-		.filter((task) => USAGE_METRIC_KEYS.some((key) => task.usage[key] !== null))
-		.map((task) => task.taskId);
-	const omittedTaskIds = tasks
-		.filter((task) =>
-			USAGE_METRIC_KEYS.every((key) => task.usage[key] === null),
-		)
-		.map((task) => task.taskId);
+	const contributingTaskIds = tasks.flatMap(
+		(task) => task.usage.observed.contributingTaskIds,
+	);
+	const omittedTaskIds = tasks.flatMap(
+		(task) => task.usage.observed.omittedTaskIds,
+	);
 	return {
 		inputTokens: sumObservedMetricValues(
 			tasks.map((task) => task.usage.inputTokens),
@@ -333,7 +338,39 @@ function terminalCaptureLagMs(
 	return lagMs >= 0 ? lagMs : null;
 }
 
+function zeroProviderUsageMetrics(): WorkflowUsageMetrics {
+	return {
+		inputTokens: 0,
+		outputTokens: 0,
+		totalTokens: 0,
+		cachedInputTokens: 0,
+		cacheCreationInputTokens: 0,
+		cacheReadInputTokens: 0,
+		reasoningTokens: 0,
+		costUsd: 0,
+		observed: {
+			inputTokens: 0,
+			outputTokens: 0,
+			totalTokens: 0,
+			cachedInputTokens: 0,
+			cacheCreationInputTokens: 0,
+			cacheReadInputTokens: 0,
+			reasoningTokens: 0,
+			costUsd: 0,
+			contributingTaskIds: [],
+			omittedTaskIds: [],
+		},
+		attempts: 0,
+		unavailable: false,
+		incomplete: false,
+		unavailableTaskIds: [],
+		incompleteTaskIds: [],
+	};
+}
+
 function taskUsageMetrics(task: WorkflowTaskRunRecord): WorkflowUsageMetrics {
+	if (task.kind === "support" && task.usage === undefined)
+		return zeroProviderUsageMetrics();
 	const usage = task.usage;
 	const source = usage?.aggregate ?? usage;
 	const unavailable =
@@ -346,7 +383,7 @@ function taskUsageMetrics(task: WorkflowTaskRunRecord): WorkflowUsageMetrics {
 		unavailable ||
 		usage?.incomplete === true ||
 		usage?.aggregate?.incomplete === true ||
-		USAGE_METRIC_KEYS.some((key) => metrics[key] === null);
+		REQUIRED_USAGE_METRIC_KEYS.some((key) => metrics[key] === null);
 	const hasObserved = USAGE_METRIC_KEYS.some((key) => metrics[key] !== null);
 	return {
 		inputTokens: metrics.inputTokens,
@@ -482,7 +519,7 @@ function rollupUsage(tasks: WorkflowTaskMetrics[]): WorkflowUsageMetrics {
 		unavailable: unavailableTaskIds.length > 0,
 		incomplete:
 			incompleteTaskIds.length > 0 ||
-			USAGE_METRIC_KEYS.some((key) => rollup[key].incomplete),
+			REQUIRED_USAGE_METRIC_KEYS.some((key) => rollup[key].incomplete),
 		unavailableTaskIds,
 		incompleteTaskIds,
 	};

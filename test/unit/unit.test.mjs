@@ -20048,6 +20048,125 @@ test("formatRun surfaces terminal capture lag separately from execution time", (
 	assert.match(output, /model execution may have completed earlier/);
 });
 
+test("workflow run metrics treat local support tasks as zero provider usage", () => {
+	const supportTask = {
+		taskId: "task-support",
+		specId: "support.main",
+		displayName: "Support",
+		agent: "support",
+		agentFile: null,
+		roles: [],
+		kind: "support",
+		status: "completed",
+		statusDetail: "support_completed",
+		stageId: "support",
+		runtime: { approvalMode: "never" },
+		cwd: "/tmp/metrics",
+		worktree: {
+			enabled: false,
+			path: null,
+			branch: null,
+			baseCwd: null,
+			warning: null,
+		},
+		backendTaskId: null,
+		files: {
+			output: "",
+			stderr: "",
+			result: "",
+			systemPrompt: "",
+			taskPrompt: "",
+		},
+	};
+	const run = {
+		schemaVersion: 1,
+		runId: "metrics_support_run",
+		type: WORKFLOW_RUN_TYPE,
+		status: "completed",
+		taskSummary: {
+			pending: 0,
+			running: 0,
+			blocked: 0,
+			completed: 2,
+			failed: 0,
+			skipped: 0,
+			interrupted: 0,
+			total: 2,
+		},
+		cwd: "/tmp/metrics",
+		backend: { type: "local-pi", mode: "headless" },
+		createdAt: "2026-06-08T00:00:00.000Z",
+		updatedAt: "2026-06-08T00:01:00.000Z",
+		specPath: "/tmp/metrics/workflow.json",
+		tasks: [
+			{
+				taskId: "task-model",
+				specId: "model.main",
+				displayName: "Model",
+				agent: "worker",
+				agentFile: "agents/worker.md",
+				roles: [],
+				status: "completed",
+				statusDetail: "completed",
+				stageId: "model",
+				runtime: { approvalMode: "never" },
+				cwd: "/tmp/metrics",
+				worktree: {
+					enabled: false,
+					path: null,
+					branch: null,
+					baseCwd: null,
+					warning: null,
+				},
+				backendTaskId: "backend-model",
+				files: {
+					output: "",
+					stderr: "",
+					result: "",
+					systemPrompt: "",
+					taskPrompt: "",
+				},
+				usage: {
+					source: "pi-subagent",
+					capturedAt: "2026-06-08T00:00:30.000Z",
+					aggregate: {
+						attempts: 1,
+						inputTokens: 10,
+						outputTokens: 5,
+						totalTokens: 15,
+						cachedInputTokens: 0,
+						cacheCreationInputTokens: 0,
+						cacheReadInputTokens: 0,
+						reasoningTokens: 0,
+						costUsd: 0.02,
+					},
+				},
+			},
+			supportTask,
+		],
+	};
+
+	const metrics = buildWorkflowRunMetrics(run);
+	const support = metrics.byTask.find((task) => task.taskId === "task-support");
+
+	assert.equal(support.usage.totalTokens, 0);
+	assert.equal(support.usage.costUsd, 0);
+	assert.equal(support.usage.unavailable, false);
+	assert.equal(support.usage.incomplete, false);
+	assert.deepEqual(support.usage.observed.contributingTaskIds, []);
+	assert.deepEqual(support.usage.observed.omittedTaskIds, []);
+	assert.equal(metrics.totals.usage.totalTokens, 15);
+	assert.equal(metrics.totals.usage.costUsd, 0.02);
+	assert.equal(metrics.totals.usage.unavailable, false);
+	assert.equal(metrics.totals.usage.incomplete, false);
+	assert.deepEqual(metrics.totals.usage.observed.contributingTaskIds, [
+		"task-model",
+	]);
+	assert.deepEqual(metrics.totals.usage.observed.omittedTaskIds, []);
+	assert.deepEqual(metrics.metadata.usageUnavailableTaskIds, []);
+	assert.deepEqual(metrics.metadata.usageIncompleteTaskIds, []);
+});
+
 test("workflow run metrics reject negative provider values and keep partial observed sums separate", () => {
 	const run = {
 		schemaVersion: 1,
