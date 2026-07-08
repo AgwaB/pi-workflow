@@ -142,14 +142,19 @@ Needed before adoption/default claims:
 5. Replay with row-local refs prompt after the latest prompt follow-up.
 6. Higher-N repeated repo-grounded replay after variance baseline is known.
 
-## Suggested next implementation options
+## Follow-up implementation status
 
-1. **Reducer path verification:** verify cited repo paths exist before accepting file-pointer grounding.
-2. **Missing-context DROP demotion:** demote `DROP` rows when context is missing/unverifiable.
-3. **Primary-file quote search:** search `finding.file` when locations are missing/incomplete.
-4. **Conservative fallback:** route missing-context rows to `NEEDS_HUMAN`; optionally route high-severity/API rows to single DA in a separate policy change.
-5. **Batch size cap:** reduce max batch size from 4 to 2 only after variance baseline.
-6. **Policy rubric:** add explicit verdict calibration rules for stale fixes, optimization-only findings, missing historical artifacts, and support-only issues.
+Completed in the follow-up hardening pass:
+
+1. **Reducer path verification:** cited file-line pointers must resolve inside the repo before they count as grounding.
+2. **Missing-context DROP demotion:** non-`concrete_artifact` `DROP` rows without concrete packet evidence or verified independent file-line evidence route to `NEEDS_HUMAN`.
+3. **Symlink realpath containment:** context-packet file reads reject repo symlinks that resolve outside the repository.
+
+Still open:
+
+1. **Conservative fallback policy:** route missing-context rows to `NEEDS_HUMAN` earlier, before model calls; optionally route high-severity/API rows to single DA in a separate policy change.
+2. **Batch size / policy tuning:** use eval results before changing max batch size or verdict rubrics.
+3. **Policy rubric:** add explicit verdict calibration rules for stale fixes, optimization-only findings, missing historical artifacts, and support-only issues.
 
 ## Do not do yet
 

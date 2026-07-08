@@ -428,6 +428,11 @@ function repoRootFromContext(context = {}) {
 	return cwd ? path.resolve(cwd) : process.cwd();
 }
 
+function pathIsInsideRoot(root, absolute) {
+	const relative = path.relative(root, absolute);
+	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
 function safeRepoRelativePath(file, repoRoot = process.cwd()) {
 	const normalized = String(file ?? "")
 		.trim()
@@ -435,9 +440,8 @@ function safeRepoRelativePath(file, repoRoot = process.cwd()) {
 	if (!normalized || path.isAbsolute(normalized)) return null;
 	const root = path.resolve(repoRoot);
 	const absolute = path.resolve(root, normalized);
-	const relative = path.relative(root, absolute);
-	if (relative.startsWith("..") || path.isAbsolute(relative)) return null;
-	return relative.split(path.sep).join("/");
+	if (!pathIsInsideRoot(root, absolute)) return null;
+	return path.relative(root, absolute).split(path.sep).join("/");
 }
 
 function readRepoText(file, repoRoot = process.cwd()) {
@@ -446,9 +450,18 @@ function readRepoText(file, repoRoot = process.cwd()) {
 	const root = path.resolve(repoRoot);
 	const absolute = path.resolve(root, relative);
 	try {
-		const stat = fs.statSync(absolute);
+		const realRoot = fs.realpathSync(root);
+		const realAbsolute = fs.realpathSync(absolute);
+		if (!pathIsInsideRoot(realRoot, realAbsolute)) {
+			return { relative, exists: false, text: "" };
+		}
+		const stat = fs.statSync(realAbsolute);
 		if (!stat.isFile()) return { relative, exists: false, text: "" };
-		return { relative, exists: true, text: fs.readFileSync(absolute, "utf8") };
+		return {
+			relative,
+			exists: true,
+			text: fs.readFileSync(realAbsolute, "utf8"),
+		};
 	} catch {
 		return { relative, exists: false, text: "" };
 	}
@@ -1401,15 +1414,63 @@ function evidenceCitesContextPacket(row, contextPacket) {
 	return refs.some((ref) => evidenceText.includes(ref));
 }
 
-function evidenceCitesConcreteRepositoryPointer(row) {
-	return /\b[\w./-]+\.(?:ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|rb|c|h|cpp|hpp|json|ya?ml|md)(?::\d+|[^\n]{0,80}\bline\s+\d+)/i.test(
-		batchEvidenceText(row),
+const REPOSITORY_POINTER_PATTERN =
+	/\b([\w./-]+\.(?:ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|rb|c|h|cpp|hpp|json|ya?ml|md))(?::(\d+)|[^\n]{0,80}\bline\s+(\d+))/gi;
+
+function evidencePointerIsNegativeContext(segment) {
+	return /\b(?:no match|not found|could not find|did not find|unable to find|could not locate|did not locate|no evidence|missing context)\b/i.test(
+		segment,
 	);
 }
 
-function conservativeBatchKeepDemotionReason(row, contextPacket = null) {
-	if (row?.verdict !== "KEEP") return null;
+function repositoryPointersFromEvidence(row) {
+	const pointers = [];
+	for (const segment of batchEvidenceText(row).split(/\n+/)) {
+		REPOSITORY_POINTER_PATTERN.lastIndex = 0;
+		if (evidencePointerIsNegativeContext(segment)) continue;
+		for (const match of segment.matchAll(REPOSITORY_POINTER_PATTERN)) {
+			pointers.push({ file: match[1], line: Number(match[2] ?? match[3]) });
+		}
+	}
+	return pointers;
+}
+
+function repositoryPointerExists(pointer, repoRoot) {
+	const read = readRepoText(pointer?.file, repoRoot);
+	if (!read.exists) return false;
+	if (!Number.isInteger(pointer.line) || pointer.line < 1) return false;
+	return pointer.line <= String(read.text ?? "").split(/\r?\n/).length;
+}
+
+function evidenceCitesConcreteRepositoryPointer(row, context = {}) {
+	const repoRoot = repoRootFromContext(context);
+	return repositoryPointersFromEvidence(row).some((pointer) =>
+		repositoryPointerExists(pointer, repoRoot),
+	);
+}
+
+function conservativeBatchVerdictDemotionReason(
+	row,
+	contextPacket = null,
+	context = {},
+) {
+	const verdict = row?.verdict;
 	const evidenceSourceType = batchEvidenceSourceType(row);
+	const citesAdditionalRepositoryRead = evidenceCitesConcreteRepositoryPointer(
+		row,
+		context,
+	);
+	if (verdict === "DROP") {
+		if (
+			evidenceSourceType !== "concrete_artifact" &&
+			!contextPacketHasConcreteEvidence(contextPacket) &&
+			!citesAdditionalRepositoryRead
+		) {
+			return "batch DROP lacked concrete context to rule out finding";
+		}
+		return null;
+	}
+	if (verdict !== "KEEP") return null;
 	if (!CONCRETE_BATCH_EVIDENCE_SOURCE_TYPES.has(evidenceSourceType)) {
 		return `batch KEEP used non-concrete evidenceSourceType=${evidenceSourceType || "missing"}`;
 	}
@@ -1424,8 +1485,6 @@ function conservativeBatchKeepDemotionReason(row, contextPacket = null) {
 	}
 	if (evidenceSourceType !== "concrete_artifact") {
 		const citesPlannedContext = evidenceCitesContextPacket(row, contextPacket);
-		const citesAdditionalRepositoryRead =
-			evidenceCitesConcreteRepositoryPointer(row);
 		if (
 			!contextPacketHasConcreteEvidence(contextPacket) &&
 			!citesAdditionalRepositoryRead
@@ -1840,7 +1899,11 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 				: {}),
 		};
 		const batchDemotionReason = row.batched
-			? conservativeBatchKeepDemotionReason(entry, row.contextPacket)
+			? conservativeBatchVerdictDemotionReason(
+					entry,
+					row.contextPacket,
+					context,
+				)
 			: null;
 		if (batchDemotionReason) {
 			partitions.needsHuman.push({
@@ -1853,7 +1916,7 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 				},
 			});
 			normalizationNotes.push(
-				`batched KEEP for "${title}" routed to NEEDS_HUMAN: ${batchDemotionReason}`,
+				`batched ${verdict} for "${title}" routed to NEEDS_HUMAN: ${batchDemotionReason}`,
 			);
 			continue;
 		}

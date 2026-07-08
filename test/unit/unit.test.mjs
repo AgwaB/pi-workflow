@@ -15702,6 +15702,7 @@ test("batched deep-review devil-advocate prompt and schema require evidence sour
 
 test("deep-review batched devil-advocate builds and enforces row-local context packets", async () => {
 	const cwd = makeProject();
+	const outsideCwd = makeProject();
 	const previousCwd = process.cwd();
 	try {
 		mkdirSync(join(cwd, "src"), { recursive: true });
@@ -15712,6 +15713,11 @@ test("deep-review batched devil-advocate builds and enforces row-local context p
 				"\treturn user.id;",
 				"}",
 			].join("\n"),
+		);
+		writeFileSync(join(outsideCwd, "secret.ts"), "export const secret = true;\n");
+		symlinkSync(
+			join(outsideCwd, "secret.ts"),
+			join(cwd, "src", "outside-link.ts"),
 		);
 		process.chdir(previousCwd);
 		const helperPath = join(
@@ -15781,6 +15787,14 @@ test("deep-review batched devil-advocate builds and enforces row-local context p
 								missingEvidence: [],
 							},
 						},
+						{
+							id: "F-005",
+							findingId: "F-005",
+							title: "Symlink outside repo is not read",
+							file: "src/outside-link.ts",
+							locations: [{ file: "src/outside-link.ts", line: 1 }],
+							evidenceQuotes: ["export const secret = true;"],
+						},
 					],
 				},
 			},
@@ -15806,64 +15820,95 @@ test("deep-review batched devil-advocate builds and enforces row-local context p
 				),
 		);
 		assert.equal(edgePackets.get("F-003").groundingStatus, "concrete");
-		assert.equal(edgePackets.get("F-003").concreteEvidence[0].type, "repository_quote_match");
+		assert.equal(
+			edgePackets.get("F-003").concreteEvidence[0].type,
+			"repository_quote_match",
+		);
 		assert.equal(edgePackets.get("F-004").concreteEvidence[0].ref, "CTX-existing-1");
-		const accepted = await helper({
-			sources: {
-				"dedup-findings.main": { findings: [finding] },
-				"devil-advocate-batches.main": batches,
-				"devil-advocate.dabatch-001": {
-					schema: "deep-review-devil-advocate-batch-v2",
-					digest: "grounded",
-					results: [
-						{
-							findingId: "F-001",
-							title: "User key uses raw id",
-							verdict: "KEEP",
-							evidenceSourceType: "repository_context",
-							evidence: ["CTX-F-001-1: return user.id;"],
-							counterEvidence: [],
-							recommendedAction: "Keep finding.",
-						},
-					],
+		assert.equal(edgePackets.get("F-005").groundingStatus, "missing_context");
+		const partitionWith = (rows, batchSource = batches, findings = [finding]) =>
+			helper({
+				sources: {
+					"dedup-findings.main": { findings },
+					"devil-advocate-batches.main": batchSource,
+					"devil-advocate.dabatch-001": {
+						schema: "deep-review-devil-advocate-batch-v2",
+						digest: "test-batch",
+						results: rows,
+					},
 				},
+				options: {
+					mode: "partition",
+					dedupStage: "dedup-findings",
+					devilAdvocateBatchStage: "devil-advocate-batches",
+				},
+				context: { cwd },
+			});
+		const accepted = await partitionWith([
+			{
+				findingId: "F-001",
+				title: "User key uses raw id",
+				verdict: "KEEP",
+				evidenceSourceType: "repository_context",
+				evidence: ["CTX-F-001-1: return user.id;"],
+				counterEvidence: [],
+				recommendedAction: "Keep finding.",
 			},
-			options: {
-				mode: "partition",
-				dedupStage: "dedup-findings",
-				devilAdvocateBatchStage: "devil-advocate-batches",
-			},
-		});
+		]);
 		assert.deepEqual(
 			accepted.partitions.keep.map((item) => item.findingId),
 			["F-001"],
 		);
-		const demoted = await helper({
-			sources: {
-				"dedup-findings.main": { findings: [finding] },
-				"devil-advocate-batches.main": batches,
-				"devil-advocate.dabatch-001": {
-					schema: "deep-review-devil-advocate-batch-v2",
-					digest: "ungrounded",
-					results: [
-						{
-							findingId: "F-001",
-							title: "User key uses raw id",
-							verdict: "KEEP",
-							evidenceSourceType: "repository_context",
-							evidence: ["Repository context supports this."],
-							counterEvidence: [],
-							recommendedAction: "Keep finding.",
-						},
-					],
-				},
+		const independentReadAccepted = await partitionWith([
+			{
+				findingId: "F-001",
+				title: "User key uses raw id",
+				verdict: "KEEP",
+				evidenceSourceType: "repository_context",
+				evidence: ["src/context-packet.ts:2 shows return user.id;"],
+				counterEvidence: [],
+				recommendedAction: "Keep finding.",
 			},
-			options: {
-				mode: "partition",
-				dedupStage: "dedup-findings",
-				devilAdvocateBatchStage: "devil-advocate-batches",
+		]);
+		assert.deepEqual(
+			independentReadAccepted.partitions.keep.map((item) => item.findingId),
+			["F-001"],
+		);
+		const fabricatedPointerDemoted = await partitionWith([
+			{
+				findingId: "F-001",
+				title: "User key uses raw id",
+				verdict: "KEEP",
+				evidenceSourceType: "repository_context",
+				evidence: ["missing.ts:123 supposedly supports this."],
+				counterEvidence: [],
+				recommendedAction: "Keep finding.",
 			},
-		});
+		]);
+		assert.equal(fabricatedPointerDemoted.partitions.keep.length, 0);
+		const negativePointerDemoted = await partitionWith([
+			{
+				findingId: "F-001",
+				title: "User key uses raw id",
+				verdict: "KEEP",
+				evidenceSourceType: "repository_context",
+				evidence: ["no match found at src/context-packet.ts:2"],
+				counterEvidence: [],
+				recommendedAction: "Keep finding.",
+			},
+		]);
+		assert.equal(negativePointerDemoted.partitions.keep.length, 0);
+		const demoted = await partitionWith([
+			{
+				findingId: "F-001",
+				title: "User key uses raw id",
+				verdict: "KEEP",
+				evidenceSourceType: "repository_context",
+				evidence: ["Repository context supports this."],
+				counterEvidence: [],
+				recommendedAction: "Keep finding.",
+			},
+		]);
 		assert.equal(demoted.partitions.keep.length, 0);
 		assert.ok(
 			demoted.partitions.needsHuman.some((candidate) =>
@@ -15872,9 +15917,47 @@ test("deep-review batched devil-advocate builds and enforces row-local context p
 				),
 			),
 		);
+		const dropDemoted = await partitionWith(
+			[
+				{
+					findingId: "F-002",
+					title: "Unsafe path is not read",
+					verdict: "DROP",
+					evidenceSourceType: "repository_context",
+					evidence: ["No repository context could be inspected."],
+					counterEvidence: [],
+					recommendedAction: "Drop finding.",
+				},
+			],
+			edgeBatches,
+			[
+				{
+					id: "F-002",
+					findingId: "F-002",
+					title: "Unsafe path is not read",
+					file: "../outside.ts",
+					locations: [{ file: "../outside.ts", line: 1 }],
+					evidenceQuotes: ["secret"],
+				},
+			],
+		);
+		assert.equal(dropDemoted.partitions.drop.length, 0);
+		assert.ok(
+			dropDemoted.partitions.needsHuman.some((candidate) =>
+				candidate.batchEvidenceIssue?.reason.includes(
+					"DROP lacked concrete context",
+				),
+			),
+		);
 	} finally {
 		process.chdir(previousCwd);
 		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+		rmSync(outsideCwd, {
 			recursive: true,
 			force: true,
 			maxRetries: 5,
