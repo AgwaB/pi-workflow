@@ -15643,7 +15643,7 @@ test("batched deep-review workflow preserves artifact denial on independent revi
 	}
 });
 
-test("batched deep-review devil-advocate prompt and schema require evidence arrays of strings", () => {
+test("batched deep-review devil-advocate prompt and schema require evidence source and string arrays", () => {
 	const specPath = join(
 		process.cwd(),
 		"workflows",
@@ -15668,13 +15668,15 @@ test("batched deep-review devil-advocate prompt and schema require evidence arra
 		/evidence and counterEvidence must be JSON arrays of strings/,
 	);
 	assert.match(prompt, /never emit either field as a string/);
+	assert.match(prompt, /evidenceSourceType must be exactly one of/);
+	assert.match(prompt, /summary-only KEEP/);
 	assert.match(prompt, /Example one-row <control>/);
-	assert.match(
-		prompt,
-		/"evidence":\["Exact supporting quote or file evidence\."\]/,
-	);
+	assert.match(prompt, /"schema":"deep-review-devil-advocate-batch-v2"/);
+	assert.match(prompt, /"evidenceSourceType":"concrete_artifact"/);
 	assert.match(prompt, /"counterEvidence":\[\]/);
-	const rowProperties = schema.properties.results.items.properties;
+	const rowSchema = schema.properties.results.items;
+	assert.ok(rowSchema.required.includes("evidenceSourceType"));
+	const rowProperties = rowSchema.properties;
 	assert.deepEqual(rowProperties.evidence, {
 		type: "array",
 		items: { type: "string" },
@@ -15682,6 +15684,16 @@ test("batched deep-review devil-advocate prompt and schema require evidence arra
 	assert.deepEqual(rowProperties.counterEvidence, {
 		type: "array",
 		items: { type: "string" },
+	});
+	assert.deepEqual(rowProperties.evidenceSourceType, {
+		type: "string",
+		enum: [
+			"concrete_artifact",
+			"repository_context",
+			"finding_payload_only",
+			"unverified_summary",
+			"unknown",
+		],
 	});
 });
 
@@ -28425,6 +28437,7 @@ test("deep-review finding-pipeline opt-in batch planner flattens results with st
 		findingId,
 		title,
 		verdict,
+		evidenceSourceType: "concrete_artifact",
 		evidence: [`${findingId} evidence`],
 		counterEvidence: [],
 		recommendedAction: `Handle ${findingId}`,
@@ -28434,7 +28447,7 @@ test("deep-review finding-pipeline opt-in batch planner flattens results with st
 			"dedup-findings.main": { findings },
 			"devil-advocate-batches.main": batches,
 			"devil-advocate.dabatch-001": {
-				schema: "deep-review-devil-advocate-batch-v1",
+				schema: "deep-review-devil-advocate-batch-v2",
 				digest: "batch one",
 				results: [
 					validRow("F-001", "Alpha runtime regression", "KEEP"),
@@ -28448,7 +28461,7 @@ test("deep-review finding-pipeline opt-in batch planner flattens results with st
 				],
 			},
 			"devil-advocate.dabatch-002": {
-				schema: "deep-review-devil-advocate-batch-v1",
+				schema: "deep-review-devil-advocate-batch-v2",
 				digest: "batch two",
 				results: [
 					validRow("F-004", "Delta cache poisoning", "KEEP"),
@@ -28466,7 +28479,7 @@ test("deep-review finding-pipeline opt-in batch planner flattens results with st
 				],
 			},
 			"devil-advocate.dabatch-999": {
-				schema: "deep-review-devil-advocate-batch-v1",
+				schema: "deep-review-devil-advocate-batch-v2",
 				digest: "unknown batch",
 				results: [validRow("F-997", "Unknown batch row", "KEEP")],
 			},
@@ -28589,13 +28602,14 @@ test("deep-review batch partition routes string evidence rows to NEEDS_HUMAN", a
 			"dedup-findings.main": { findings: [finding] },
 			"devil-advocate-batches.main": batches,
 			"devil-advocate.dabatch-001": {
-				schema: "deep-review-devil-advocate-batch-v1",
+				schema: "deep-review-devil-advocate-batch-v2",
 				digest: "string evidence",
 				results: [
 					{
 						findingId: "F-001",
 						title: "String evidence row",
 						verdict: "KEEP",
+						evidenceSourceType: "concrete_artifact",
 						evidence: "string should be an array",
 						counterEvidence: [],
 						recommendedAction: "Keep it",
@@ -28671,13 +28685,14 @@ test("deep-review batch partition routes non-string evidence array items to NEED
 			"dedup-findings.main": { findings },
 			"devil-advocate-batches.main": batches,
 			"devil-advocate.dabatch-001": {
-				schema: "deep-review-devil-advocate-batch-v1",
+				schema: "deep-review-devil-advocate-batch-v2",
 				digest: "non-string evidence",
 				results: [
 					{
 						findingId: "F-001",
 						title: "Object evidence item",
 						verdict: "KEEP",
+						evidenceSourceType: "concrete_artifact",
 						evidence: [{ quote: "object should be a string" }],
 						counterEvidence: [],
 						recommendedAction: "Keep it",
@@ -28686,6 +28701,7 @@ test("deep-review batch partition routes non-string evidence array items to NEED
 						findingId: "F-002",
 						title: "Object counter item",
 						verdict: "KEEP",
+						evidenceSourceType: "concrete_artifact",
 						evidence: ["valid string"],
 						counterEvidence: [{ quote: "object should be a string" }],
 						recommendedAction: "Keep it",
@@ -28715,6 +28731,380 @@ test("deep-review batch partition routes non-string evidence array items to NEED
 				candidate.findingId === "F-002" &&
 				candidate.batchIntegrityIssue?.reason ===
 					"malformed_batch_result_invalid_counterEvidence_item",
+		),
+	);
+});
+
+test("deep-review batch partition routes missing or invalid evidenceSourceType to NEEDS_HUMAN", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-review",
+		"helpers",
+		"finding-pipeline.mjs",
+	);
+	const helper = (
+		await import(
+			`${pathToFileURL(helperPath).href}?invalidEvidenceSource=${Date.now()}`
+		)
+	).default;
+	const findings = [
+		{
+			id: "F-001",
+			findingId: "F-001",
+			rootCauseId: "R-001",
+			severity: "medium",
+			title: "Whitespace evidence source",
+			file: "src/example.ts",
+			locations: [{ file: "src/example.ts", line: 1 }],
+			evidenceQuotes: ["quote"],
+		},
+		{
+			id: "F-002",
+			findingId: "F-002",
+			rootCauseId: "R-002",
+			severity: "medium",
+			title: "Missing evidence source",
+			file: "src/example.ts",
+			locations: [{ file: "src/example.ts", line: 2 }],
+			evidenceQuotes: ["quote"],
+		},
+	];
+	const batches = await helper({
+		sources: { "dedup-findings.main": { findings } },
+		options: {
+			mode: "batch-devil-advocate",
+			dedupStage: "dedup-findings",
+			maxBatchSize: 4,
+		},
+	});
+	const partition = await helper({
+		sources: {
+			"dedup-findings.main": { findings },
+			"devil-advocate-batches.main": batches,
+			"devil-advocate.dabatch-001": {
+				schema: "deep-review-devil-advocate-batch-v2",
+				digest: "invalid evidence source types",
+				results: [
+					{
+						findingId: "F-001",
+						title: "Whitespace evidence source",
+						verdict: "KEEP",
+						evidenceSourceType: " concrete_artifact ",
+						evidence: ["valid evidence"],
+						counterEvidence: [],
+						recommendedAction: "Keep it",
+					},
+					{
+						findingId: "F-002",
+						title: "Missing evidence source",
+						verdict: "KEEP",
+						evidence: ["valid evidence"],
+						counterEvidence: [],
+						recommendedAction: "Keep it",
+					},
+				],
+			},
+		},
+		options: {
+			mode: "partition",
+			dedupStage: "dedup-findings",
+			devilAdvocateBatchStage: "devil-advocate-batches",
+		},
+	});
+	assert.equal(partition.partitions.keep.length, 0);
+	assert.equal(partition.partitionSummary.batchIntegrityIssues, 2);
+	assert.ok(
+		partition.partitions.needsHuman.some(
+			(candidate) =>
+				candidate.findingId === "F-001" &&
+				candidate.batchIntegrityIssue?.reason ===
+					"malformed_batch_result_invalid_evidenceSourceType",
+		),
+	);
+	assert.ok(
+		partition.partitions.needsHuman.some(
+			(candidate) =>
+				candidate.findingId === "F-002" &&
+				candidate.batchIntegrityIssue?.reason ===
+					"malformed_batch_result_invalid_evidenceSourceType",
+		),
+	);
+});
+
+test("deep-review batch partition rejects stale batch control schema labels", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-review",
+		"helpers",
+		"finding-pipeline.mjs",
+	);
+	const helper = (
+		await import(`${pathToFileURL(helperPath).href}?staleSchema=${Date.now()}`)
+	).default;
+	const finding = {
+		id: "F-001",
+		findingId: "F-001",
+		rootCauseId: "R-001",
+		severity: "medium",
+		title: "Stale schema row",
+		file: "src/example.ts",
+		locations: [{ file: "src/example.ts", line: 1 }],
+		evidenceQuotes: ["quote"],
+	};
+	const batches = await helper({
+		sources: { "dedup-findings.main": { findings: [finding] } },
+		options: {
+			mode: "batch-devil-advocate",
+			dedupStage: "dedup-findings",
+			maxBatchSize: 4,
+		},
+	});
+	const partition = await helper({
+		sources: {
+			"dedup-findings.main": { findings: [finding] },
+			"devil-advocate-batches.main": batches,
+			"devil-advocate.dabatch-001": {
+				schema: "deep-review-devil-advocate-batch-v1",
+				digest: "stale schema",
+				results: [
+					{
+						findingId: "F-001",
+						title: "Stale schema row",
+						verdict: "KEEP",
+						evidenceSourceType: "concrete_artifact",
+						evidence: ["valid evidence"],
+						counterEvidence: [],
+						recommendedAction: "Keep it",
+					},
+				],
+			},
+		},
+		options: {
+			mode: "partition",
+			dedupStage: "dedup-findings",
+			devilAdvocateBatchStage: "devil-advocate-batches",
+		},
+	});
+	assert.equal(partition.partitions.keep.length, 0);
+	assert.equal(partition.partitionSummary.batchIntegrityIssues, 1);
+	assert.ok(
+		partition.partitions.needsHuman.some(
+			(candidate) =>
+				candidate.batchIntegrityIssue?.reason ===
+				"malformed_batch_output_invalid_schema",
+		),
+	);
+});
+
+test("deep-review batch partition demotes summary-only KEEP verdicts", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-review",
+		"helpers",
+		"finding-pipeline.mjs",
+	);
+	const helper = (
+		await import(
+			`${pathToFileURL(helperPath).href}?conservativeBatch=${Date.now()}`
+		)
+	).default;
+	const findings = [
+		{
+			id: "F-001",
+			findingId: "F-001",
+			rootCauseId: "R-001",
+			severity: "high",
+			title: "Summary-only cache finding",
+			file: "src/cache.ts",
+			locations: [{ file: "src/cache.ts", line: 10 }],
+			evidenceQuotes: ["patch summary says cache key is constant"],
+		},
+		{
+			id: "F-002",
+			findingId: "F-002",
+			rootCauseId: "R-002",
+			severity: "high",
+			title: "Repository context missing finding",
+			file: "src/auth.ts",
+			locations: [{ file: "src/auth.ts", line: 20 }],
+			evidenceQuotes: ["auth check removed"],
+		},
+		{
+			id: "F-003",
+			findingId: "F-003",
+			rootCauseId: "R-003",
+			severity: "critical",
+			title: "Concrete patch artifact finding",
+			file: "src/payments.ts",
+			locations: [{ file: "src/payments.ts", line: 30 }],
+			evidenceQuotes: ["+ return { status: 'success' };"],
+		},
+		{
+			id: "F-004",
+			findingId: "F-004",
+			rootCauseId: "R-004",
+			severity: "medium",
+			title: "Repository context with missing tests",
+			file: "src/cache.ts",
+			locations: [{ file: "src/cache.ts", line: 40 }],
+			evidenceQuotes: ["return cache.get(userId);"],
+		},
+		{
+			id: "F-005",
+			findingId: "F-005",
+			rootCauseId: "R-005",
+			severity: "medium",
+			title: "Mixed support and missing context",
+			file: "src/missing.ts",
+			locations: [{ file: "src/missing.ts", line: 50 }],
+			evidenceQuotes: ["missing context"],
+		},
+		{
+			id: "F-006",
+			findingId: "F-006",
+			rootCauseId: "R-006",
+			severity: "medium",
+			title: "Concrete source with empty evidence",
+			file: "src/empty.ts",
+			locations: [{ file: "src/empty.ts", line: 60 }],
+			evidenceQuotes: [],
+		},
+	];
+	const batches = await helper({
+		sources: { "dedup-findings.main": { findings } },
+		options: {
+			mode: "batch-devil-advocate",
+			dedupStage: "dedup-findings",
+			maxBatchSize: 6,
+		},
+	});
+	const partition = await helper({
+		sources: {
+			"dedup-findings.main": { findings },
+			"devil-advocate-batches.main": batches,
+			"devil-advocate.dabatch-001": {
+				schema: "deep-review-devil-advocate-batch-v2",
+				digest: "conservative evidence",
+				results: [
+					{
+						findingId: "F-001",
+						title: "Summary-only cache finding",
+						verdict: "KEEP",
+						evidenceSourceType: "finding_payload_only",
+						evidence: ["Patch summary says cache key is constant."],
+						counterEvidence: [],
+						recommendedAction: "Keep it",
+					},
+					{
+						findingId: "F-002",
+						title: "Repository context missing finding",
+						verdict: "KEEP",
+						evidenceSourceType: "repository_context",
+						evidence: ["Repository search suggests auth checks changed."],
+						counterEvidence: ["No src/auth.ts file could be found."],
+						recommendedAction: "Keep it",
+					},
+					{
+						findingId: "F-003",
+						title: "Concrete patch artifact finding",
+						verdict: "KEEP",
+						evidenceSourceType: "concrete_artifact",
+						evidence: ["Patch artifact shows + return { status: 'success' };"],
+						counterEvidence: ["No src/payments.ts file in current checkout."],
+						recommendedAction: "Keep concrete artifact finding",
+					},
+					{
+						findingId: "F-004",
+						title: "Repository context with missing tests",
+						verdict: "KEEP",
+						evidenceSourceType: "repository_context",
+						evidence: ["Repository context shows cache lookup by userId."],
+						counterEvidence: [
+							"The change is missing test coverage and does not contain tests for cache expiry.",
+							"Repository search found only no in-repo callers for this public API compatibility path.",
+						],
+						recommendedAction: "Keep finding but add tests.",
+					},
+					{
+						findingId: "F-005",
+						title: "Mixed support and missing context",
+						verdict: "KEEP",
+						evidenceSourceType: "repository_context",
+						evidence: ["Repository context claims missing source change."],
+						counterEvidence: [
+							"The change is missing test coverage and no src/missing.ts file could be found.",
+						],
+						recommendedAction: "Keep finding but add tests.",
+					},
+					{
+						findingId: "F-006",
+						title: "Concrete source with empty evidence",
+						verdict: "KEEP",
+						evidenceSourceType: "concrete_artifact",
+						evidence: [],
+						counterEvidence: [],
+						recommendedAction: "Keep finding.",
+					},
+				],
+			},
+		},
+		options: {
+			mode: "partition",
+			dedupStage: "dedup-findings",
+			devilAdvocateBatchStage: "devil-advocate-batches",
+		},
+	});
+	assert.deepEqual(
+		partition.partitions.keep.map((finding) => finding.findingId),
+		["F-003", "F-004"],
+	);
+	assert.equal(partition.partitionSummary.batchIntegrityIssues, 0);
+	assert.ok(
+		partition.partitions.needsHuman.some(
+			(candidate) =>
+				candidate.findingId === "F-001" &&
+				candidate.batchEvidenceIssue?.reason.includes(
+					"non-concrete evidenceSourceType=finding_payload_only",
+				),
+		),
+	);
+	assert.ok(
+		partition.partitions.needsHuman.some(
+			(candidate) =>
+				candidate.findingId === "F-002" &&
+				candidate.batchEvidenceIssue?.reason.includes(
+					"missing-context counterEvidence",
+				),
+		),
+	);
+	assert.ok(
+		partition.partitions.needsHuman.some(
+			(candidate) =>
+				candidate.findingId === "F-005" &&
+				candidate.batchEvidenceIssue?.reason.includes(
+					"missing-context counterEvidence",
+				),
+		),
+	);
+	assert.ok(
+		partition.partitions.needsHuman.some(
+			(candidate) =>
+				candidate.findingId === "F-006" &&
+				candidate.batchEvidenceIssue?.reason.includes("lacked non-empty evidence"),
+		),
+	);
+	assert.ok(
+		partition.normalizationNotes.some((note) =>
+			note.includes("batched KEEP for"),
 		),
 	);
 });

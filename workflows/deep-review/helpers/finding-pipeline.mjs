@@ -1114,14 +1114,81 @@ function buildDevilAdvocateBatchIdBySourceName(sourceStatuses) {
 	return bySource;
 }
 
+const BATCH_CONTROL_SCHEMA = "deep-review-devil-advocate-batch-v2";
+// Conservative evidence-source gating is intentionally scoped to the opt-in
+// batched devil-advocate path. The default single-finding path keeps its
+// existing semantics until a separate policy/default-flip decision is made.
+
 const BATCH_RESULT_KEYS = new Set([
 	"findingId",
 	"title",
 	"verdict",
+	"evidenceSourceType",
 	"evidence",
 	"counterEvidence",
 	"recommendedAction",
 ]);
+
+const BATCH_EVIDENCE_SOURCE_TYPES = new Set([
+	"concrete_artifact",
+	"repository_context",
+	"finding_payload_only",
+	"unverified_summary",
+	"unknown",
+]);
+const CONCRETE_BATCH_EVIDENCE_SOURCE_TYPES = new Set([
+	"concrete_artifact",
+	"repository_context",
+]);
+
+function batchEvidenceSourceType(row) {
+	return typeof row?.evidenceSourceType === "string"
+		? row.evidenceSourceType
+		: "";
+}
+
+function hasMissingContextCounterEvidence(row) {
+	const text = dedupeStrings(quoteStrings(row?.counterEvidence))
+		.join("\n")
+		.toLowerCase();
+	const supportQualityPattern =
+		/\b(?:missing|absent|lack(?:s|ing)?|no|does not contain)\b[^\n]{0,80}\b(?:tests?|test coverage|coverage|docs?|documentation)\b|\b(?:tests?|test coverage|coverage|docs?|documentation)\b[^\n]{0,80}\b(?:missing|absent|not found|unavailable)\b/;
+	const contextSegments = text
+		.split(/\n+|[!?]\s+|\.\s+|;\s+|\s+and\s+|\s+but\s+/)
+		.map((segment) => segment.trim())
+		.filter(Boolean)
+		.filter((segment) => !supportQualityPattern.test(segment));
+	if (contextSegments.length === 0) return false;
+	return contextSegments.some((segment) =>
+		[
+			/\bno\b[^\n]{0,100}\b(?:file|diff|patch|repository|repo|artifact|context|source)\b[^\n]{0,100}\b(?:found|inspected|available|exists?|located)\b/,
+			/\b(?:file|diff|patch|repository|repo|artifact|context|source|checkout)\b[^\n]{0,100}\b(?:missing|not found|could not be found|could not be inspected|unable to inspect|unavailable)\b/,
+			/\b(?:could not be found|not found|could not be inspected|unable to inspect|did not locate)\b[^\n]{0,100}\b(?:file|diff|patch|repository|repo|artifact|context|source)\b/,
+			/\b(?:repository search|search)\b[^\n]{0,100}\b(?:did not locate|could not find)\b/,
+			/\b(?:repository search|search)\b[^\n]{0,100}\bfound no\b[^\n]{0,100}\b(?:file|diff|patch|repository evidence|repo evidence|artifact|context|source|code)\b/,
+			/\b(?:moved|drifted)\b[^\n]{0,80}\b(?:file|function|line|context|symbol)\b/,
+			/\b(?:file|function|line|context|symbol)\b[^\n]{0,80}\b(?:moved|drifted)\b/,
+		].some((pattern) => pattern.test(segment)),
+	);
+}
+
+function conservativeBatchKeepDemotionReason(row) {
+	if (row?.verdict !== "KEEP") return null;
+	const evidenceSourceType = batchEvidenceSourceType(row);
+	if (!CONCRETE_BATCH_EVIDENCE_SOURCE_TYPES.has(evidenceSourceType)) {
+		return `batch KEEP used non-concrete evidenceSourceType=${evidenceSourceType || "missing"}`;
+	}
+	if (dedupeStrings(quoteStrings(row?.evidence)).length === 0) {
+		return "batch KEEP lacked non-empty evidence";
+	}
+	if (
+		evidenceSourceType !== "concrete_artifact" &&
+		hasMissingContextCounterEvidence(row)
+	) {
+		return "batch KEEP had missing-context counterEvidence without concrete_artifact evidence";
+	}
+	return null;
+}
 
 function malformedBatchResultReason(row) {
 	if (!row || typeof row !== "object" || Array.isArray(row))
@@ -1138,6 +1205,8 @@ function malformedBatchResultReason(row) {
 		return "malformed_batch_result_missing_verdict";
 	if (!VERDICTS.includes(row.verdict))
 		return "malformed_batch_result_invalid_verdict";
+	if (!BATCH_EVIDENCE_SOURCE_TYPES.has(batchEvidenceSourceType(row)))
+		return "malformed_batch_result_invalid_evidenceSourceType";
 	if (!Array.isArray(row.evidence))
 		return "malformed_batch_result_missing_evidence_array";
 	if (row.evidence.some((item) => typeof item !== "string"))
@@ -1167,6 +1236,17 @@ function collectBatchVerdictRows({
 			batchId,
 			reason: "malformed_batch_output_missing_results",
 			title: "Malformed devil-advocate batch output",
+		});
+		return { rows, issues };
+	}
+	if (source.schema !== BATCH_CONTROL_SCHEMA) {
+		issues.push({
+			sourceId,
+			batchId,
+			reason: "malformed_batch_output_invalid_schema",
+			title: "Malformed devil-advocate batch output",
+			schema: source.schema,
+			expectedSchema: BATCH_CONTROL_SCHEMA,
 		});
 		return { rows, issues };
 	}
@@ -1505,7 +1585,28 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 			evidence: entry.evidence ?? [],
 			counterEvidence: dedupeStrings(quoteStrings(entry.counterEvidence)),
 			recommendedAction: entry.recommendedAction ?? "",
+			...(row.batched
+				? { evidenceSourceType: batchEvidenceSourceType(entry) }
+				: {}),
 		};
+		const batchDemotionReason = row.batched
+			? conservativeBatchKeepDemotionReason(entry)
+			: null;
+		if (batchDemotionReason) {
+			partitions.needsHuman.push({
+				...item,
+				verdict: "NEEDS_HUMAN",
+				note: batchDemotionReason,
+				batchEvidenceIssue: {
+					reason: batchDemotionReason,
+					evidenceSourceType: batchEvidenceSourceType(entry),
+				},
+			});
+			normalizationNotes.push(
+				`batched KEEP for "${title}" routed to NEEDS_HUMAN: ${batchDemotionReason}`,
+			);
+			continue;
+		}
 		const isSupportItem = Boolean(supportReasonOf(item));
 		const lacksIdentityEvidence =
 			!isSupportItem &&

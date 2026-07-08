@@ -5,7 +5,7 @@
   "properties": {
     "schema": {
       "type": "string",
-      "minLength": 1
+      "enum": ["deep-review-devil-advocate-batch-v2"]
     },
     "digest": {
       "type": "string",
@@ -20,6 +20,7 @@
           "findingId",
           "title",
           "verdict",
+          "evidenceSourceType",
           "evidence",
           "counterEvidence",
           "recommendedAction"
@@ -37,6 +38,16 @@
           "verdict": {
             "type": "string",
             "enum": ["KEEP", "WEAKEN", "DROP", "NEEDS_HUMAN"]
+          },
+          "evidenceSourceType": {
+            "type": "string",
+            "enum": [
+              "concrete_artifact",
+              "repository_context",
+              "finding_payload_only",
+              "unverified_summary",
+              "unknown"
+            ]
           },
           "evidence": {
             "type": "array",
