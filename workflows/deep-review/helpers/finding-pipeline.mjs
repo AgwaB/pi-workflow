@@ -1406,8 +1406,21 @@ function batchEvidenceText(row) {
 	return dedupeStrings(quoteStrings(row?.evidence)).join("\n");
 }
 
-function evidenceCitesContextPacket(row, contextPacket) {
-	const evidenceText = batchEvidenceText(row);
+function batchEvidenceAndCounterEvidenceText(row) {
+	return dedupeStrings([
+		...quoteStrings(row?.evidence),
+		...quoteStrings(row?.counterEvidence),
+	]).join("\n");
+}
+
+function evidenceCitesContextPacket(
+	row,
+	contextPacket,
+	includeCounterEvidence = false,
+) {
+	const evidenceText = includeCounterEvidence
+		? batchEvidenceAndCounterEvidenceText(row)
+		: batchEvidenceText(row);
 	const refs = asObjects(contextPacket?.concreteEvidence)
 		.map((entry) => String(entry.ref ?? "").trim())
 		.filter(Boolean);
@@ -1423,9 +1436,12 @@ function evidencePointerIsNegativeContext(segment) {
 	);
 }
 
-function repositoryPointersFromEvidence(row) {
+function repositoryPointersFromEvidence(row, includeCounterEvidence = false) {
 	const pointers = [];
-	for (const segment of batchEvidenceText(row).split(/\n+/)) {
+	const text = includeCounterEvidence
+		? batchEvidenceAndCounterEvidenceText(row)
+		: batchEvidenceText(row);
+	for (const segment of text.split(/\n+/)) {
 		REPOSITORY_POINTER_PATTERN.lastIndex = 0;
 		if (evidencePointerIsNegativeContext(segment)) continue;
 		for (const match of segment.matchAll(REPOSITORY_POINTER_PATTERN)) {
@@ -1442,9 +1458,13 @@ function repositoryPointerExists(pointer, repoRoot) {
 	return pointer.line <= String(read.text ?? "").split(/\r?\n/).length;
 }
 
-function evidenceCitesConcreteRepositoryPointer(row, context = {}) {
+function evidenceCitesConcreteRepositoryPointer(
+	row,
+	context = {},
+	includeCounterEvidence = false,
+) {
 	const repoRoot = repoRootFromContext(context);
-	return repositoryPointersFromEvidence(row).some((pointer) =>
+	return repositoryPointersFromEvidence(row, includeCounterEvidence).some((pointer) =>
 		repositoryPointerExists(pointer, repoRoot),
 	);
 }
@@ -1460,13 +1480,58 @@ function conservativeBatchVerdictDemotionReason(
 		row,
 		context,
 	);
+	const citesAnyAdditionalRepositoryRead = evidenceCitesConcreteRepositoryPointer(
+		row,
+		context,
+		true,
+	);
+	const hasConcreteContextPacket = contextPacketHasConcreteEvidence(contextPacket);
+	const citesAnyPlannedContext = evidenceCitesContextPacket(
+		row,
+		contextPacket,
+		true,
+	);
+	const citesConcreteRepositoryContext =
+		citesAnyAdditionalRepositoryRead ||
+		(hasConcreteContextPacket && citesAnyPlannedContext);
 	if (verdict === "DROP") {
+		if (evidenceSourceType === "concrete_artifact") return null;
+		if (!CONCRETE_BATCH_EVIDENCE_SOURCE_TYPES.has(evidenceSourceType)) {
+			return `batch DROP used non-concrete evidenceSourceType=${evidenceSourceType || "missing"}`;
+		}
+		if (!hasConcreteContextPacket && !citesAnyAdditionalRepositoryRead) {
+			return "batch DROP lacked concrete context to rule out finding";
+		}
+		if (!citesConcreteRepositoryContext) {
+			return "batch DROP did not cite row-local contextPacket evidence";
+		}
+		return null;
+	}
+	if (verdict === "WEAKEN") {
+		if (!CONCRETE_BATCH_EVIDENCE_SOURCE_TYPES.has(evidenceSourceType)) {
+			return `batch WEAKEN used non-concrete evidenceSourceType=${evidenceSourceType || "missing"}`;
+		}
+		if (
+			dedupeStrings([
+				...quoteStrings(row?.evidence),
+				...quoteStrings(row?.counterEvidence),
+			]).length === 0
+		) {
+			return "batch WEAKEN lacked evidence or counterEvidence";
+		}
 		if (
 			evidenceSourceType !== "concrete_artifact" &&
-			!contextPacketHasConcreteEvidence(contextPacket) &&
-			!citesAdditionalRepositoryRead
+			hasMissingContextCounterEvidence(row)
 		) {
-			return "batch DROP lacked concrete context to rule out finding";
+			return "batch WEAKEN had missing-context counterEvidence without concrete_artifact evidence";
+		}
+		if (evidenceSourceType !== "concrete_artifact") {
+			if (!hasConcreteContextPacket && !citesAnyAdditionalRepositoryRead) {
+				return "batch WEAKEN lacked planned concrete contextPacket evidence";
+			}
+			if (!citesConcreteRepositoryContext) {
+				return "batch WEAKEN did not cite row-local contextPacket evidence";
+			}
 		}
 		return null;
 	}
@@ -1485,10 +1550,7 @@ function conservativeBatchVerdictDemotionReason(
 	}
 	if (evidenceSourceType !== "concrete_artifact") {
 		const citesPlannedContext = evidenceCitesContextPacket(row, contextPacket);
-		if (
-			!contextPacketHasConcreteEvidence(contextPacket) &&
-			!citesAdditionalRepositoryRead
-		) {
+		if (!hasConcreteContextPacket && !citesAdditionalRepositoryRead) {
 			return "batch KEEP lacked planned concrete contextPacket evidence";
 		}
 		if (!citesPlannedContext && !citesAdditionalRepositoryRead) {

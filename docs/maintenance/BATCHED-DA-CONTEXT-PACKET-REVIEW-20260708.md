@@ -10,7 +10,7 @@ Reviewer response source: `.tmp/batched-da-context-packet-review-response-202607
 
 ## Status
 
-Implemented but **not committed**.
+Implemented, committed, and pushed as grounding infrastructure. A later follow-up also tightened opt-in batched `WEAKEN`/`DROP` evidence gates; do not frame either change as quality parity.
 
 Changed files:
 
@@ -150,11 +150,16 @@ Completed in the follow-up hardening pass:
 2. **Missing-context DROP demotion:** non-`concrete_artifact` `DROP` rows without concrete packet evidence or verified independent file-line evidence route to `NEEDS_HUMAN`.
 3. **Symlink realpath containment:** context-packet file reads reject repo symlinks that resolve outside the repository.
 
+Additional completed follow-up after post-gate continuation:
+
+1. **WEAKEN/DROP citation gate:** opt-in batched `repository_context` `WEAKEN` and `DROP` rows now require row-local CTX refs or verified file:line evidence, with CTX/file:line citations accepted from evidence or counterEvidence. Unsupported rows route to `NEEDS_HUMAN`.
+2. **Post-gate evals:** batch-size-1 N=3 canary and size 2/4 sweep completed. Results remain faster/cheaper but still show risky rows, so quality parity is not proven.
+
 Still open:
 
 1. **Conservative fallback policy:** route missing-context rows to `NEEDS_HUMAN` earlier, before model calls; optionally route high-severity/API rows to single DA in a separate policy change.
-2. **Batch size / policy tuning:** use eval results before changing max batch size or verdict rubrics.
-3. **Policy rubric:** add explicit verdict calibration rules for stale fixes, optimization-only findings, missing historical artifacts, and support-only issues.
+2. **Verdict calibration:** add explicit rules for stale fixes, optimization-only findings, missing historical artifacts, and support-only issues before changing max batch size or adoption posture.
+3. **Quality parity:** unresolved. Current post-gate evals still block default flip and speed+quality claims.
 
 ## Do not do yet
 

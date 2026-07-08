@@ -15671,6 +15671,9 @@ test("batched deep-review devil-advocate prompt and schema require evidence sour
 	assert.match(prompt, /evidenceSourceType must be exactly one of/);
 	assert.match(prompt, /row-local contextPacket/);
 	assert.match(prompt, /mirror the same row-local context refs/);
+	assert.match(prompt, /KEEP, WEAKEN, and DROP require concrete evidence/);
+	assert.match(prompt, /repository_context WEAKEN or DROP/);
+	assert.match(prompt, /evidence or counterEvidence must cite/);
 	assert.match(prompt, /CTX-F-001-1/);
 	assert.match(prompt, /summary-only KEEP/);
 	assert.match(prompt, /Example one-row <control>/);
@@ -15916,6 +15919,78 @@ test("deep-review batched devil-advocate builds and enforces row-local context p
 					"did not cite row-local contextPacket",
 				),
 			),
+		);
+		const weakenWithoutCitationDemoted = await partitionWith([
+			{
+				findingId: "F-001",
+				title: "User key uses raw id",
+				verdict: "WEAKEN",
+				evidenceSourceType: "repository_context",
+				evidence: ["Plausible, but impact may be smaller."],
+				counterEvidence: [],
+				recommendedAction: "Weaken finding.",
+			},
+		]);
+		assert.equal(weakenWithoutCitationDemoted.partitions.weaken.length, 0);
+		assert.ok(
+			weakenWithoutCitationDemoted.partitions.needsHuman.some((candidate) =>
+				candidate.batchEvidenceIssue?.reason.includes(
+					"WEAKEN did not cite row-local contextPacket",
+				),
+			),
+		);
+		const weakenWithCounterPointerAccepted = await partitionWith([
+			{
+				findingId: "F-001",
+				title: "User key uses raw id",
+				verdict: "WEAKEN",
+				evidenceSourceType: "repository_context",
+				evidence: [],
+				counterEvidence: ["src/context-packet.ts:2 narrows the issue."],
+				recommendedAction: "Weaken finding.",
+			},
+		]);
+		assert.deepEqual(
+			weakenWithCounterPointerAccepted.partitions.weaken.map(
+				(item) => item.findingId,
+			),
+			["F-001"],
+		);
+		const dropWithoutCitationDemoted = await partitionWith([
+			{
+				findingId: "F-001",
+				title: "User key uses raw id",
+				verdict: "DROP",
+				evidenceSourceType: "repository_context",
+				evidence: ["Repository context refutes this."],
+				counterEvidence: [],
+				recommendedAction: "Drop finding.",
+			},
+		]);
+		assert.equal(dropWithoutCitationDemoted.partitions.drop.length, 0);
+		assert.ok(
+			dropWithoutCitationDemoted.partitions.needsHuman.some((candidate) =>
+				candidate.batchEvidenceIssue?.reason.includes(
+					"DROP did not cite row-local contextPacket",
+				),
+			),
+		);
+		const dropWithCounterPointerAccepted = await partitionWith([
+			{
+				findingId: "F-001",
+				title: "User key uses raw id",
+				verdict: "DROP",
+				evidenceSourceType: "repository_context",
+				evidence: [],
+				counterEvidence: ["src/context-packet.ts:2 is a verified repository read."],
+				recommendedAction: "Drop finding.",
+			},
+		]);
+		assert.deepEqual(
+			dropWithCounterPointerAccepted.partitions.drop.map(
+				(item) => item.findingId,
+			),
+			["F-001"],
 		);
 		const dropDemoted = await partitionWith(
 			[
