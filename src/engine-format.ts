@@ -30,6 +30,7 @@ import type {
 
 const LOG_LINES_DEFAULT = 80;
 const LOG_LINES_MAX = 400;
+const TERMINAL_CAPTURE_LAG_WARNING_MS = 2 * 60_000;
 
 /** A running run counts as making no task progress after this long. */
 export const TASK_PROGRESS_STALL_MS = 10 * 60_000;
@@ -154,7 +155,10 @@ export async function formatRunDetails(
 ): Promise<string> {
 	const { run, warning } = await refreshRunForFormat(cwd, runIdOrPrefix);
 	const supervisor = await readRunSupervisor(cwd, run.runId);
-	return prependRefreshWarning(formatHumanRunDetails(run, { supervisor }), warning);
+	return prependRefreshWarning(
+		formatHumanRunDetails(run, { supervisor }),
+		warning,
+	);
 }
 
 export async function formatRawRunDetails(
@@ -172,7 +176,10 @@ export async function formatRunStatus(
 ): Promise<string> {
 	const { run, warning } = await refreshRunForFormat(cwd, runIdOrPrefix);
 	const supervisor = await readRunSupervisor(cwd, run.runId);
-	return prependRefreshWarning(formatHumanRunStatus(run, { supervisor }), warning);
+	return prependRefreshWarning(
+		formatHumanRunStatus(run, { supervisor }),
+		warning,
+	);
 }
 
 export async function formatLogs(
@@ -225,14 +232,22 @@ export function formatHumanRunDetails(
 	run: WorkflowRunRecord,
 	options: { supervisor?: WorkflowSupervisorRecord; nowMs?: number } = {},
 ): string {
-	return formatHumanRunCard(run, { ...options, mode: "details", includeUsage: true });
+	return formatHumanRunCard(run, {
+		...options,
+		mode: "details",
+		includeUsage: true,
+	});
 }
 
 export function formatHumanRunOutcome(
 	run: WorkflowRunRecord,
 	options: { supervisor?: WorkflowSupervisorRecord; nowMs?: number } = {},
 ): string {
-	return formatHumanRunCard(run, { ...options, mode: "outcome", includeUsage: true });
+	return formatHumanRunCard(run, {
+		...options,
+		mode: "outcome",
+		includeUsage: true,
+	});
 }
 
 export function formatHumanRunResume(
@@ -310,11 +325,23 @@ function formatHumanRunCard(
 	if (usage) lines.push(usage);
 	lines.push(...formatWarnings(run, options));
 	const problem = firstProblemTask(run);
-	if (problem) lines.push("", "Needs attention:", `  • ${formatTaskHuman(problem, true)}`, `    ${taskReason(problem)}`);
+	if (problem)
+		lines.push(
+			"",
+			"Needs attention:",
+			`  • ${formatTaskHuman(problem, true)}`,
+			`    ${taskReason(problem)}`,
+		);
 	if (options.mode === "details") {
-		const completed = run.tasks.filter((task) => task.status === "completed").slice(0, 5);
+		const completed = run.tasks
+			.filter((task) => task.status === "completed")
+			.slice(0, 5);
 		if (completed.length > 0) {
-			lines.push("", "Completed:", ...completed.map((task) => `  ✓ ${task.displayName || task.specId}`));
+			lines.push(
+				"",
+				"Completed:",
+				...completed.map((task) => `  ✓ ${task.displayName || task.specId}`),
+			);
 		}
 	}
 	lines.push(...taskSections(run));
@@ -330,7 +357,12 @@ function formatHumanRunCard(
 
 function taskSections(run: WorkflowRunRecord): string[] {
 	const sections: string[] = [];
-	appendTaskSection(sections, "Now", run.tasks.filter((task) => task.status === "running").slice(0, 3), true);
+	appendTaskSection(
+		sections,
+		"Now",
+		run.tasks.filter((task) => task.status === "running").slice(0, 3),
+		true,
+	);
 	appendTaskSection(sections, "Waiting", waitingTasks(run).slice(0, 3), true);
 	appendTaskSection(sections, "Next", nextReadyTasks(run).slice(0, 3), false);
 	return sections;
@@ -343,7 +375,11 @@ function appendTaskSection(
 	includeRuntime: boolean,
 ): void {
 	if (tasks.length === 0) return;
-	lines.push("", `${label}:`, ...tasks.map((task) => `  • ${formatTaskHuman(task, includeRuntime)}`));
+	lines.push(
+		"",
+		`${label}:`,
+		...tasks.map((task) => `  • ${formatTaskHuman(task, includeRuntime)}`),
+	);
 }
 
 function waitingTasks(run: WorkflowRunRecord): WorkflowTaskRunRecord[] {
@@ -351,7 +387,11 @@ function waitingTasks(run: WorkflowRunRecord): WorkflowTaskRunRecord[] {
 }
 
 function nextReadyTasks(run: WorkflowRunRecord): WorkflowTaskRunRecord[] {
-	const completed = new Set(run.tasks.filter((task) => task.status === "completed").map((task) => task.specId));
+	const completed = new Set(
+		run.tasks
+			.filter((task) => task.status === "completed")
+			.map((task) => task.specId),
+	);
 	return run.tasks.filter((task) => {
 		if (task.status !== "pending" || isWaitingTask(task)) return false;
 		return (task.dependsOn ?? []).every((dep) => completed.has(dep));
@@ -360,20 +400,44 @@ function nextReadyTasks(run: WorkflowRunRecord): WorkflowTaskRunRecord[] {
 
 function isWaitingTask(task: WorkflowTaskRunRecord): boolean {
 	const nextEligibleAt = task.launchRetry?.nextEligibleAt;
-	if (typeof nextEligibleAt === "string" && Number.isFinite(Date.parse(nextEligibleAt)) && Date.parse(nextEligibleAt) > Date.now()) return true;
-	const text = `${task.statusDetail} ${task.lastMessage ?? ""} ${task.launchRetry?.reason ?? ""} ${task.launchRetry?.message ?? ""}`.toLowerCase();
-	return text.includes("backoff") || text.includes("waiting until") || text.includes("retry_model_failure") || text.includes("rate-limit");
+	if (
+		typeof nextEligibleAt === "string" &&
+		Number.isFinite(Date.parse(nextEligibleAt)) &&
+		Date.parse(nextEligibleAt) > Date.now()
+	)
+		return true;
+	const text =
+		`${task.statusDetail} ${task.lastMessage ?? ""} ${task.launchRetry?.reason ?? ""} ${task.launchRetry?.message ?? ""}`.toLowerCase();
+	return (
+		text.includes("backoff") ||
+		text.includes("waiting until") ||
+		text.includes("retry_model_failure") ||
+		text.includes("rate-limit")
+	);
 }
 
-function firstProblemTask(run: WorkflowRunRecord): WorkflowTaskRunRecord | undefined {
-	return run.tasks.find((task) => ["failed", "blocked", "interrupted"].includes(task.status));
+function firstProblemTask(
+	run: WorkflowRunRecord,
+): WorkflowTaskRunRecord | undefined {
+	return run.tasks.find((task) =>
+		["failed", "blocked", "interrupted"].includes(task.status),
+	);
 }
 
 function taskReason(task: WorkflowTaskRunRecord): string {
-	return task.lastMessage || task.launchRetry?.message || task.outputRetry?.message || task.statusDetail || task.status;
+	return (
+		task.lastMessage ||
+		task.launchRetry?.message ||
+		task.outputRetry?.message ||
+		task.statusDetail ||
+		task.status
+	);
 }
 
-function formatTaskHuman(task: WorkflowTaskRunRecord, includeRuntime: boolean): string {
+function formatTaskHuman(
+	task: WorkflowTaskRunRecord,
+	includeRuntime: boolean,
+): string {
 	const reason = isWaitingTask(task) ? ` — ${formatWaitingReason(task)}` : "";
 	const runtime = includeRuntime ? ` · ${taskRuntime(task)}` : "";
 	return `${task.displayName || task.specId} — ${task.agent}${runtime}${reason}`;
@@ -382,13 +446,20 @@ function formatTaskHuman(task: WorkflowTaskRunRecord, includeRuntime: boolean): 
 function formatWaitingReason(task: WorkflowTaskRunRecord): string {
 	const nextEligibleAt = task.launchRetry?.nextEligibleAt;
 	if (nextEligibleAt) return `retry at ${friendlyTimestamp(nextEligibleAt)}`;
-	return task.lastMessage || task.launchRetry?.message || task.statusDetail || "waiting";
+	return (
+		task.lastMessage ||
+		task.launchRetry?.message ||
+		task.statusDetail ||
+		"waiting"
+	);
 }
 
 function taskRuntime(task: WorkflowTaskRunRecord): string {
 	if (task.kind === "support") return "local support";
 	const model = task.runtime.model ?? "model unknown";
-	const thinking = task.runtime.thinking ? `${task.runtime.thinking} reasoning` : "reasoning unknown";
+	const thinking = task.runtime.thinking
+		? `${task.runtime.thinking} reasoning`
+		: "reasoning unknown";
 	return `${model} · ${thinking}`;
 }
 
@@ -397,15 +468,57 @@ function formatWarnings(
 	options: { supervisor?: WorkflowSupervisorRecord; nowMs?: number },
 ): string[] {
 	const lines: string[] = [];
-	if (run.degradation?.summary) lines.push(`⚠ Degraded: ${run.degradation.summary}`);
-	const stall = formatRunStallWarning(run, options.supervisor, options.nowMs ?? Date.now());
+	if (run.degradation?.summary)
+		lines.push(`⚠ Degraded: ${run.degradation.summary}`);
+	const captureLag = formatTerminalCaptureLagWarning(run);
+	if (captureLag) lines.push(captureLag);
+	const stall = formatRunStallWarning(
+		run,
+		options.supervisor,
+		options.nowMs ?? Date.now(),
+	);
 	if (stall) lines.push(stall);
 	return lines.length > 0 ? ["", ...lines] : [];
 }
 
+function formatTerminalCaptureLagWarning(
+	run: WorkflowRunRecord,
+): string | undefined {
+	const metricsByTask = new Map(
+		buildWorkflowRunMetrics(run).byTask.map((task) => [task.taskId, task]),
+	);
+	const lagged = run.tasks
+		.map((task) => ({ task, metrics: metricsByTask.get(task.taskId) }))
+		.filter(
+			(entry) =>
+				entry.metrics?.launchTiming.terminalCaptureLagMs !== null &&
+				(entry.metrics?.launchTiming.terminalCaptureLagMs ?? 0) >=
+					TERMINAL_CAPTURE_LAG_WARNING_MS,
+		)
+		.sort(
+			(left, right) =>
+				(right.metrics?.launchTiming.terminalCaptureLagMs ?? 0) -
+				(left.metrics?.launchTiming.terminalCaptureLagMs ?? 0),
+		);
+	if (lagged.length === 0) return undefined;
+	const first = lagged[0];
+	const lagMs = first.metrics?.launchTiming.terminalCaptureLagMs ?? 0;
+	const completedAt = first.task.timing?.executionCompletedAt;
+	const capturedAt = first.task.timing?.capturedAt;
+	const timing =
+		completedAt && capturedAt
+			? `; completed ${friendlyTimestamp(completedAt)}, captured ${friendlyTimestamp(capturedAt)}`
+			: "";
+	return `⚠ terminal capture lag ${formatStallAge(lagMs)} on ${first.task.taskId}/${first.task.specId}${timing} (${lagged.length} task${lagged.length === 1 ? "" : "s"} over 2m; model execution may have completed earlier)`;
+}
+
 function formatHumanProgress(run: WorkflowRunRecord): string {
 	const summary = run.taskSummary;
-	const parts = [`${summary.completed}/${summary.total} completed`, `${summary.running} running`, `${summary.pending} queued`];
+	const parts = [
+		`${summary.completed}/${summary.total} completed`,
+		`${summary.running} running`,
+		`${summary.pending} queued`,
+	];
 	if (summary.blocked > 0) parts.push(`${summary.blocked} blocked`);
 	if (summary.failed > 0) parts.push(`${summary.failed} failed`);
 	if (summary.interrupted > 0) parts.push(`${summary.interrupted} interrupted`);
@@ -419,16 +532,35 @@ function workflowName(run: Pick<WorkflowRunRecord, "name" | "type">): string {
 function friendlyTimestamp(value: string): string {
 	const date = new Date(value);
 	if (Number.isNaN(date.getTime())) return value;
-	return date.toISOString().replace("T", " ").replace(/:\d{2}\.\d{3}Z$/, "Z");
+	return date
+		.toISOString()
+		.replace("T", " ")
+		.replace(/:\d{2}\.\d{3}Z$/, "Z");
 }
 
 function formatHumanUsageLine(run: WorkflowRunRecord): string | undefined {
 	const usage = buildWorkflowRunMetrics(run).totals.usage.observed;
-	if (usage.totalTokens === null && usage.inputTokens === null && usage.outputTokens === null) return undefined;
-	const parts = [`Usage: ${usage.totalTokens ?? "n/a"} tokens`, `in ${usage.inputTokens ?? "n/a"}`, `out ${usage.outputTokens ?? "n/a"}`];
-	if (usage.cacheReadInputTokens !== null || usage.cacheCreationInputTokens !== null)
-		parts.push(`cache r/w ${usage.cacheReadInputTokens ?? "n/a"} / ${usage.cacheCreationInputTokens ?? "n/a"}`);
-	parts.push(`${usage.contributingTaskIds.length}/${run.tasks.length} tasks reporting`);
+	if (
+		usage.totalTokens === null &&
+		usage.inputTokens === null &&
+		usage.outputTokens === null
+	)
+		return undefined;
+	const parts = [
+		`Usage: ${usage.totalTokens ?? "n/a"} tokens`,
+		`in ${usage.inputTokens ?? "n/a"}`,
+		`out ${usage.outputTokens ?? "n/a"}`,
+	];
+	if (
+		usage.cacheReadInputTokens !== null ||
+		usage.cacheCreationInputTokens !== null
+	)
+		parts.push(
+			`cache r/w ${usage.cacheReadInputTokens ?? "n/a"} / ${usage.cacheCreationInputTokens ?? "n/a"}`,
+		);
+	parts.push(
+		`${usage.contributingTaskIds.length}/${run.tasks.length} tasks reporting`,
+	);
 	return parts.join(" · ");
 }
 
@@ -436,12 +568,26 @@ async function formatHumanRunList(
 	cwd: string,
 	index: WorkflowIndexRecord,
 ): Promise<string> {
-	const active = index.runs.filter((run) => ["running", "blocked", "failed", "interrupted"].includes(run.status));
-	const completed = index.runs.filter((run) => run.status === "completed").slice(0, 5);
+	const active = index.runs.filter((run) =>
+		["running", "blocked", "failed", "interrupted"].includes(run.status),
+	);
+	const completed = index.runs
+		.filter((run) => run.status === "completed")
+		.slice(0, 5);
 	const mockTags = await mockTagMap(cwd, [...active, ...completed]);
 	const lines = ["Workflow runs"];
-	appendRunGroup(lines, "Active", active.filter((run) => run.status === "running"), mockTags);
-	appendRunGroup(lines, "Needs attention", active.filter((run) => run.status !== "running"), mockTags);
+	appendRunGroup(
+		lines,
+		"Active",
+		active.filter((run) => run.status === "running"),
+		mockTags,
+	);
+	appendRunGroup(
+		lines,
+		"Needs attention",
+		active.filter((run) => run.status !== "running"),
+		mockTags,
+	);
 	appendRunGroup(lines, "Recently completed", completed, mockTags);
 	if (lines.length === 1) lines.push("", "No active workflow runs.");
 	return lines.join("\n");
@@ -453,7 +599,9 @@ async function mockTagMap(
 ): Promise<Map<string, string>> {
 	const entries = await Promise.all(
 		runs.map(async (run) => {
-			const fullRun = await readRunRecord(cwd, run.runId).catch(() => undefined);
+			const fullRun = await readRunRecord(cwd, run.runId).catch(
+				() => undefined,
+			);
 			const mode = isMockRunProvenance(fullRun?.provenance)
 				? fullRun?.provenance?.mode
 				: undefined;
@@ -472,13 +620,21 @@ function appendRunGroup(
 	if (runs.length === 0) return;
 	lines.push("", label);
 	for (const run of runs) {
-		lines.push(`  • ${run.name ?? run.type} — ${run.status}${mockTags.get(run.runId) ?? ""} · ${formatSummaryProgress(run.taskSummary)}`);
+		lines.push(
+			`  • ${run.name ?? run.type} — ${run.status}${mockTags.get(run.runId) ?? ""} · ${formatSummaryProgress(run.taskSummary)}`,
+		);
 		lines.push(`    /workflow ${run.runId}`);
 	}
 }
 
-function formatSummaryProgress(summary: WorkflowRunRecord["taskSummary"]): string {
-	const parts = [`${summary.completed}/${summary.total} completed`, `${summary.running} running`, `${summary.pending} queued`];
+function formatSummaryProgress(
+	summary: WorkflowRunRecord["taskSummary"],
+): string {
+	const parts = [
+		`${summary.completed}/${summary.total} completed`,
+		`${summary.running} running`,
+		`${summary.pending} queued`,
+	];
 	if (summary.blocked > 0) parts.push(`${summary.blocked} blocked`);
 	if (summary.failed > 0) parts.push(`${summary.failed} failed`);
 	if (summary.interrupted > 0) parts.push(`${summary.interrupted} interrupted`);
@@ -516,6 +672,8 @@ export function formatRun(
 	);
 	const usageLine = formatRunUsageLine(run);
 	if (usageLine) lines.push(usageLine);
+	const captureLagWarning = formatTerminalCaptureLagWarning(run);
+	if (captureLagWarning) lines.push(captureLagWarning);
 	if (run.dynamicAudit) lines.push(formatDynamicAuditSummary(run.dynamicAudit));
 	const stallWarning = formatRunStallWarning(
 		run,
@@ -562,9 +720,7 @@ async function reconcileActiveRuns(cwd: string): Promise<void> {
 	const runs = await listRunRecords(cwd);
 	for (const run of runs) {
 		if (hasActiveSchedulerWork(run))
-			await refreshRun(cwd, run.runId).catch((error) =>
-				recordSupervisorError(cwd, run.runId, error),
-			);
+			await refreshRunRecordingSupervisorError(cwd, run.runId);
 	}
 }
 
@@ -574,100 +730,64 @@ async function reconcileIndexedActiveRuns(
 ): Promise<void> {
 	for (const run of index.runs) {
 		if (hasActiveSchedulerWork(run))
-			await refreshRun(cwd, run.runId).catch((error) =>
-				recordSupervisorError(cwd, run.runId, error),
-			);
+			await refreshRunRecordingSupervisorError(cwd, run.runId);
 	}
 }
 
-async function formatIndex(
+async function refreshRunRecordingSupervisorError(
 	cwd: string,
-	index: WorkflowIndexRecord,
-): Promise<string> {
-	const blocks = await Promise.all(
-		index.runs.map(async (run) => {
-			const fullRun = await readRunRecord(cwd, run.runId).catch(
-				() => undefined,
-			);
-			const mockTag = isMockRunProvenance(fullRun?.provenance)
-				? ` mock(${fullRun?.provenance?.mode})`
-				: "";
-			const lines = [
-				`${run.runId} [${run.status}]${mockTag} type=${run.type} updated=${run.updatedAt}`,
-				`tasks=${run.taskSummary.completed}/${run.taskSummary.total} completed, running=${run.taskSummary.running}, pending=${run.taskSummary.pending}, blocked=${run.taskSummary.blocked}, failed=${run.taskSummary.failed}, skipped=${run.taskSummary.skipped}, interrupted=${run.taskSummary.interrupted}`,
-			];
-			const stallWarning =
-				run.status === "running"
-					? formatRunStallWarning(run, await readRunSupervisor(cwd, run.runId))
-					: undefined;
-			if (stallWarning) lines.push(stallWarning);
-			for (const task of indexTasksForStatus(run, fullRun)) {
-				const message = task.lastMessage ? ` — ${task.lastMessage}` : "";
-				const kind = task.kind && task.kind !== "main" ? ` ${task.kind}` : "";
-				lines.push(
-					`- ${task.taskId}${kind} ${task.agent} [${task.status}/${task.statusDetail}]${message}`,
-				);
-			}
-			return lines.join("\n");
-		}),
-	);
-	return blocks.join("\n\n");
-}
-
-type WorkflowIndexTaskEntry = NonNullable<
-	WorkflowIndexRecord["runs"][number]["tasks"]
->[number];
-
-function indexTasksForStatus(
-	run: WorkflowIndexRecord["runs"][number],
-	fullRun: WorkflowRunRecord | undefined,
-): WorkflowIndexTaskEntry[] {
-	if (Array.isArray(run.tasks)) return run.tasks;
-	return (
-		fullRun?.tasks.map((task) => ({
-			taskId: task.taskId,
-			displayName: task.displayName,
-			agent: task.agent,
-			kind: task.kind,
-			stageId: task.stageId,
-			backendHandle: task.backendHandle,
-			status: task.status,
-			statusDetail: task.statusDetail,
-			lastMessage: task.lastMessage,
-		})) ?? []
-	);
+	runId: string,
+): Promise<void> {
+	try {
+		await refreshRun(cwd, runId);
+	} catch (error) {
+		await recordSupervisorError(cwd, runId, error);
+	}
 }
 
 function formatTask(
 	task: WorkflowTaskRunRecord,
 	detail: "summary" | "full",
 ): string {
-	const elapsed =
-		task.elapsedMs !== undefined
-			? ` elapsed=${Math.round(task.elapsedMs / 1000)}s`
-			: "";
+	const elapsed = formatTaskElapsed(task);
 	const pid = task.pid ? ` pid=${task.pid}` : "";
-	const runtime =
-		task.kind === "support"
-			? "runtime=local-support"
-			: `model=${task.runtime.model ?? "(not recorded)"} thinking=${task.runtime.thinking ?? "(not recorded)"}`;
+	const runtime = formatTaskRuntime(task);
+	const full = formatTaskDetail(task, detail);
 	const message = task.lastMessage ? `\n  last=${task.lastMessage}` : "";
-	const worktree = task.worktree.enabled
-		? `\n  worktree=${task.worktree.path}`
-		: "";
-	const deps =
-		task.dependsOn && task.dependsOn.length > 0
-			? `\n  dependsOn=${task.dependsOn.join(",")}`
-			: "";
-	const tools =
-		task.kind === "support"
-			? "(support helper; not subagent tools)"
-			: (task.tools?.join(",") ?? "(Pi default)");
-	const full =
-		detail === "full"
-			? `\n  agentFile=${task.agentFile}\n  cwd=${task.cwd}${worktree}${deps}\n  tools=${tools}\n  output=${task.files.output}\n  stderr=${task.files.stderr}\n  result=${task.files.result}`
-			: ` output=${task.files.output}`;
-
 	const kind = task.kind && task.kind !== "main" ? ` kind=${task.kind}` : "";
 	return `- ${task.taskId}${kind} spec=${task.specId} agent=${task.agent} [${task.status}/${task.statusDetail}]${elapsed}${pid} ${runtime}${full}${message}`;
+}
+
+function formatTaskElapsed(task: WorkflowTaskRunRecord): string {
+	return task.elapsedMs !== undefined
+		? ` elapsed=${Math.round(task.elapsedMs / 1000)}s`
+		: "";
+}
+
+function formatTaskRuntime(task: WorkflowTaskRunRecord): string {
+	if (task.kind === "support") return "runtime=local-support";
+	return `model=${task.runtime.model ?? "(not recorded)"} thinking=${task.runtime.thinking ?? "(not recorded)"}`;
+}
+
+function formatTaskDetail(
+	task: WorkflowTaskRunRecord,
+	detail: "summary" | "full",
+): string {
+	if (detail !== "full") return ` output=${task.files.output}`;
+	return `\n  agentFile=${task.agentFile}\n  cwd=${task.cwd}${formatTaskWorktree(task)}${formatTaskDependencies(task)}\n  tools=${formatTaskTools(task)}\n  output=${task.files.output}\n  stderr=${task.files.stderr}\n  result=${task.files.result}`;
+}
+
+function formatTaskWorktree(task: WorkflowTaskRunRecord): string {
+	return task.worktree.enabled ? `\n  worktree=${task.worktree.path}` : "";
+}
+
+function formatTaskDependencies(task: WorkflowTaskRunRecord): string {
+	return task.dependsOn && task.dependsOn.length > 0
+		? `\n  dependsOn=${task.dependsOn.join(",")}`
+		: "";
+}
+
+function formatTaskTools(task: WorkflowTaskRunRecord): string {
+	if (task.kind === "support") return "(support helper; not subagent tools)";
+	return task.tools?.join(",") ?? "(Pi default)";
 }

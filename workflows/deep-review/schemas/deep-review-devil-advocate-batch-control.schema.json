@@ -40,11 +40,15 @@
           },
           "evidence": {
             "type": "array",
-            "items": {}
+            "items": {
+              "type": "string"
+            }
           },
           "counterEvidence": {
             "type": "array",
-            "items": {}
+            "items": {
+              "type": "string"
+            }
           },
           "recommendedAction": {
             "type": "string"

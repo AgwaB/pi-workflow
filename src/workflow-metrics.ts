@@ -56,6 +56,7 @@ export interface WorkflowLaunchTimingMetrics {
 	launchDurationMs: WorkflowMetricValue;
 	executionMs: WorkflowMetricValue;
 	totalMs: WorkflowMetricValue;
+	terminalCaptureLagMs: WorkflowMetricValue;
 	launchSlotReleaseDelayMs: WorkflowMetricValue;
 	refreshReconcileMs: WorkflowMetricValue;
 	refreshStatusPollMs: WorkflowMetricValue;
@@ -218,15 +219,11 @@ const DIRECT_TIMING_METRIC_KEYS = new Set<TimingMetricKey>([
 	"terminalArtifactBundleWriteMs",
 ]);
 
-function hasOwnValue(record: object, key: string): boolean {
-	return Object.hasOwn(record, key);
-}
-
 function metricValue(
 	record: object | undefined,
 	key: string,
 ): WorkflowMetricValue {
-	if (!record || !hasOwnValue(record, key)) return null;
+	if (!record || !Object.hasOwn(record, key)) return null;
 	const value = (record as Record<string, unknown>)[key];
 	return typeof value === "number" && Number.isFinite(value) && value >= 0
 		? value
@@ -324,6 +321,18 @@ function timingAttempts(task: WorkflowTaskRunRecord): number {
 	return task.timing?.aggregate?.attempts ?? task.timing?.attempts?.length ?? 0;
 }
 
+function terminalCaptureLagMs(
+	timing: WorkflowTaskRunRecord["timing"],
+): WorkflowMetricValue {
+	if (!timing?.capturedAt || !timing.executionCompletedAt) return null;
+	const capturedAt = Date.parse(timing.capturedAt);
+	const completedAt = Date.parse(timing.executionCompletedAt);
+	if (!Number.isFinite(capturedAt) || !Number.isFinite(completedAt))
+		return null;
+	const lagMs = capturedAt - completedAt;
+	return lagMs >= 0 ? lagMs : null;
+}
+
 function taskUsageMetrics(task: WorkflowTaskRunRecord): WorkflowUsageMetrics {
 	const usage = task.usage;
 	const source = usage?.aggregate ?? usage;
@@ -385,6 +394,7 @@ function taskLaunchTimingMetrics(
 		launchDurationMs: metrics.launchDurationMs,
 		executionMs: metrics.executionMs,
 		totalMs: metrics.totalMs,
+		terminalCaptureLagMs: terminalCaptureLagMs(timing),
 		launchSlotReleaseDelayMs: metrics.launchSlotReleaseDelayMs,
 		refreshReconcileMs: metrics.refreshReconcileMs,
 		refreshStatusPollMs: metrics.refreshStatusPollMs,
@@ -500,6 +510,9 @@ function rollupLaunchTiming(
 		launchDurationMs: rollup.launchDurationMs.value,
 		executionMs: rollup.executionMs.value,
 		totalMs: rollup.totalMs.value,
+		terminalCaptureLagMs: sumOptionalMetricValues(
+			tasks.map((task) => task.launchTiming.terminalCaptureLagMs),
+		).value,
 		launchSlotReleaseDelayMs: rollup.launchSlotReleaseDelayMs.value,
 		refreshReconcileMs: rollup.refreshReconcileMs.value,
 		refreshStatusPollMs: rollup.refreshStatusPollMs.value,

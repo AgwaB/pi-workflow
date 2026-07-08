@@ -1140,8 +1140,12 @@ function malformedBatchResultReason(row) {
 		return "malformed_batch_result_invalid_verdict";
 	if (!Array.isArray(row.evidence))
 		return "malformed_batch_result_missing_evidence_array";
+	if (row.evidence.some((item) => typeof item !== "string"))
+		return "malformed_batch_result_invalid_evidence_item";
 	if (!Array.isArray(row.counterEvidence))
 		return "malformed_batch_result_missing_counterEvidence_array";
+	if (row.counterEvidence.some((item) => typeof item !== "string"))
+		return "malformed_batch_result_invalid_counterEvidence_item";
 	if (typeof row.recommendedAction !== "string")
 		return "malformed_batch_result_missing_recommendedAction";
 	return null;

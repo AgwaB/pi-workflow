@@ -15580,6 +15580,111 @@ test("bundled deep-review workflow leaves reviewer fanout unconstrained by stage
 	}
 });
 
+test("batched deep-review workflow preserves artifact denial on independent review stages", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "scout", "read, grep, find, ls");
+		const specPath = join(
+			process.cwd(),
+			"workflows",
+			"deep-review",
+			"batched-devil-advocate.spec.json",
+		);
+		const spec = JSON.parse(readFileSync(specPath, "utf8"));
+		for (const stageId of ["triage", "reviewers", "devil-advocate"]) {
+			const stage = spec.artifactGraph.stages.find(
+				(candidate) => candidate.id === stageId,
+			);
+			assert.equal(stage?.inputPolicy?.artifactAccess, "none");
+		}
+		const compiled = await compileWorkflow(spec, { cwd, specPath });
+		const triage = compiled.tasks.find((task) => task.key === "triage.main");
+		const reviewers = compiled.tasks.find(
+			(task) => task.key === "reviewers.item",
+		);
+		const devilAdvocate = compiled.tasks.find(
+			(task) => task.key === "devil-advocate.item",
+		);
+		for (const task of [triage, reviewers, devilAdvocate]) {
+			assert.ok(task);
+			assert.equal(task.artifactGraph.artifactAccess, "none");
+			const prepared = await prepareDagTask(
+				cwd,
+				{
+					runId: `batched_deep_review_${task.key}`,
+					tasks: [
+						{
+							taskId: "task-1",
+							specId: task.key,
+							cwd,
+							files: {
+								result: `.pi/workflows/batched_deep_review_${task.key}/tasks/task-1/result.json`,
+							},
+						},
+					],
+				},
+				{ tasks: [{ ...task, taskId: "task-1" }] },
+				0,
+			);
+			assert.equal(
+				prepared.runtime.toolProviders?.workflow_artifact,
+				undefined,
+			);
+			assert.equal(prepared.runtime.tools.includes("workflow_artifact"), false);
+			assert.doesNotMatch(prepared.compiledPrompt, /Workflow Artifact Inputs/);
+		}
+	} finally {
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+	}
+});
+
+test("batched deep-review devil-advocate prompt and schema require evidence arrays of strings", () => {
+	const specPath = join(
+		process.cwd(),
+		"workflows",
+		"deep-review",
+		"batched-devil-advocate.spec.json",
+	);
+	const schemaPath = join(
+		process.cwd(),
+		"workflows",
+		"deep-review",
+		"schemas",
+		"deep-review-devil-advocate-batch-control.schema.json",
+	);
+	const spec = JSON.parse(readFileSync(specPath, "utf8"));
+	const schema = JSON.parse(readFileSync(schemaPath, "utf8"));
+	const stage = spec.artifactGraph.stages.find(
+		(candidate) => candidate.id === "devil-advocate",
+	);
+	const prompt = stage?.each?.prompt ?? "";
+	assert.match(
+		prompt,
+		/evidence and counterEvidence must be JSON arrays of strings/,
+	);
+	assert.match(prompt, /never emit either field as a string/);
+	assert.match(prompt, /Example one-row <control>/);
+	assert.match(
+		prompt,
+		/"evidence":\["Exact supporting quote or file evidence\."\]/,
+	);
+	assert.match(prompt, /"counterEvidence":\[\]/);
+	const rowProperties = schema.properties.results.items.properties;
+	assert.deepEqual(rowProperties.evidence, {
+		type: "array",
+		items: { type: "string" },
+	});
+	assert.deepEqual(rowProperties.counterEvidence, {
+		type: "array",
+		items: { type: "string" },
+	});
+});
+
 test("bundled spec-review workflow materializes verifier and partitions verified findings", async () => {
 	const cwd = makeProject();
 	try {
@@ -19676,6 +19781,7 @@ test("workflow run metrics roll up provider-reported usage without mutation", ()
 				timing: {
 					source: "pi-workflow",
 					capturedAt: "2026-06-08T00:01:30.000Z",
+					executionCompletedAt: "2026-06-08T00:00:00.000Z",
 					launchSlotReleaseDelayMs: 0,
 					aggregate: {
 						attempts: 1,
@@ -19799,6 +19905,11 @@ test("workflow run metrics roll up provider-reported usage without mutation", ()
 		0,
 	);
 	assert.equal(
+		metrics.byTask.find((task) => task.taskId === "task-a").launchTiming
+			.terminalCaptureLagMs,
+		90_000,
+	);
+	assert.equal(
 		metrics.byTask.find((task) => task.taskId === "task-b").usage.outputTokens,
 		null,
 	);
@@ -19846,6 +19957,7 @@ test("workflow run metrics roll up provider-reported usage without mutation", ()
 	assert.equal(metrics.totals.usage.attempts, 2);
 	assert.equal(metrics.totals.launchTiming.launchWaitMs, null);
 	assert.equal(metrics.totals.launchTiming.launchDurationMs, null);
+	assert.equal(metrics.totals.launchTiming.terminalCaptureLagMs, 90_000);
 	assert.equal(metrics.totals.retries.launchRetries, 3);
 	assert.equal(metrics.totals.retries.outputRetries, 5);
 	assert.equal(metrics.totals.retries.resumeEvents, 1);
@@ -19862,6 +19974,78 @@ test("workflow run metrics roll up provider-reported usage without mutation", ()
 	const execute = metrics.byStage.find((stage) => stage.stageId === "execute");
 	assert.equal(execute.usage.unavailable, true);
 	assert.equal(execute.usage.inputTokens, null);
+});
+
+test("formatRun surfaces terminal capture lag separately from execution time", () => {
+	const run = {
+		schemaVersion: 1,
+		runId: "workflow_capture_lag",
+		type: WORKFLOW_RUN_TYPE,
+		status: "completed",
+		taskSummary: {
+			pending: 0,
+			running: 0,
+			blocked: 0,
+			completed: 1,
+			failed: 0,
+			skipped: 0,
+			interrupted: 0,
+			total: 1,
+		},
+		cwd: "/tmp/capture-lag",
+		backend: { type: "local-pi", mode: "headless" },
+		createdAt: "2026-06-08T00:00:00.000Z",
+		updatedAt: "2026-06-08T00:05:00.000Z",
+		tasks: [
+			{
+				taskId: "task-lag",
+				specId: "lag.main",
+				displayName: "Lag",
+				agent: "scout",
+				agentFile: "agents/scout.md",
+				roles: [],
+				status: "completed",
+				statusDetail: "completed",
+				stageId: "lag",
+				runtime: { approvalMode: "never" },
+				cwd: "/tmp/capture-lag",
+				worktree: {
+					enabled: false,
+					path: null,
+					branch: null,
+					baseCwd: null,
+					warning: null,
+				},
+				files: {
+					output: "out.log",
+					stderr: "err.log",
+					result: "result.json",
+					systemPrompt: "system.md",
+					taskPrompt: "task.md",
+				},
+				timing: {
+					source: "pi-workflow",
+					capturedAt: "2026-06-08T00:05:00.000Z",
+					executionCompletedAt: "2026-06-08T00:00:00.000Z",
+					aggregate: {
+						attempts: 1,
+						launchWaitMs: 0,
+						launchDurationMs: 5,
+						executionMs: 10,
+						totalMs: 15,
+					},
+				},
+			},
+		],
+	};
+
+	const output = formatRun(run, "summary");
+	assert.match(output, /terminal capture lag 5m on task-lag\/lag\.main/);
+	assert.match(
+		output,
+		/completed 2026-06-08 00:00Z, captured 2026-06-08 00:05Z/,
+	);
+	assert.match(output, /model execution may have completed earlier/);
 });
 
 test("workflow run metrics reject negative provider values and keep partial observed sums separate", () => {
@@ -28244,6 +28428,174 @@ test("deep-review finding-pipeline opt-in batch planner flattens results with st
 				finding.findingId === "F-006" &&
 				finding.title === "Alpha runtime regression" &&
 				finding.note === "no devil-advocate verdict received for this finding",
+		),
+	);
+});
+
+test("deep-review batch partition routes string evidence rows to NEEDS_HUMAN", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-review",
+		"helpers",
+		"finding-pipeline.mjs",
+	);
+	const helper = (
+		await import(
+			`${pathToFileURL(helperPath).href}?stringEvidence=${Date.now()}`
+		)
+	).default;
+	const finding = {
+		id: "F-001",
+		findingId: "F-001",
+		rootCauseId: "R-001",
+		severity: "medium",
+		title: "String evidence row",
+		file: "src/example.ts",
+		locations: [{ file: "src/example.ts", line: 1 }],
+		evidenceQuotes: ["quote"],
+	};
+	const batches = await helper({
+		sources: { "dedup-findings.main": { findings: [finding] } },
+		options: {
+			mode: "batch-devil-advocate",
+			dedupStage: "dedup-findings",
+			maxBatchSize: 4,
+		},
+	});
+	const partition = await helper({
+		sources: {
+			"dedup-findings.main": { findings: [finding] },
+			"devil-advocate-batches.main": batches,
+			"devil-advocate.dabatch-001": {
+				schema: "deep-review-devil-advocate-batch-v1",
+				digest: "string evidence",
+				results: [
+					{
+						findingId: "F-001",
+						title: "String evidence row",
+						verdict: "KEEP",
+						evidence: "string should be an array",
+						counterEvidence: [],
+						recommendedAction: "Keep it",
+					},
+				],
+			},
+		},
+		options: {
+			mode: "partition",
+			dedupStage: "dedup-findings",
+			devilAdvocateBatchStage: "devil-advocate-batches",
+		},
+	});
+	assert.equal(partition.partitions.keep.length, 0);
+	assert.equal(partition.partitionSummary.batchIntegrityIssues, 1);
+	assert.ok(
+		partition.partitions.needsHuman.some(
+			(candidate) =>
+				candidate.findingId === "F-001" &&
+				candidate.batchIntegrityIssue?.reason ===
+					"malformed_batch_result_missing_evidence_array",
+		),
+	);
+});
+
+test("deep-review batch partition routes non-string evidence array items to NEEDS_HUMAN", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-review",
+		"helpers",
+		"finding-pipeline.mjs",
+	);
+	const helper = (
+		await import(
+			`${pathToFileURL(helperPath).href}?nonStringEvidence=${Date.now()}`
+		)
+	).default;
+	const findings = [
+		{
+			id: "F-001",
+			findingId: "F-001",
+			rootCauseId: "R-001",
+			severity: "medium",
+			title: "Object evidence item",
+			file: "src/example.ts",
+			locations: [{ file: "src/example.ts", line: 1 }],
+			evidenceQuotes: ["quote"],
+		},
+		{
+			id: "F-002",
+			findingId: "F-002",
+			rootCauseId: "R-002",
+			severity: "medium",
+			title: "Object counter item",
+			file: "src/example.ts",
+			locations: [{ file: "src/example.ts", line: 2 }],
+			evidenceQuotes: ["quote"],
+		},
+	];
+	const batches = await helper({
+		sources: { "dedup-findings.main": { findings } },
+		options: {
+			mode: "batch-devil-advocate",
+			dedupStage: "dedup-findings",
+			maxBatchSize: 4,
+		},
+	});
+	const partition = await helper({
+		sources: {
+			"dedup-findings.main": { findings },
+			"devil-advocate-batches.main": batches,
+			"devil-advocate.dabatch-001": {
+				schema: "deep-review-devil-advocate-batch-v1",
+				digest: "non-string evidence",
+				results: [
+					{
+						findingId: "F-001",
+						title: "Object evidence item",
+						verdict: "KEEP",
+						evidence: [{ quote: "object should be a string" }],
+						counterEvidence: [],
+						recommendedAction: "Keep it",
+					},
+					{
+						findingId: "F-002",
+						title: "Object counter item",
+						verdict: "KEEP",
+						evidence: ["valid string"],
+						counterEvidence: [{ quote: "object should be a string" }],
+						recommendedAction: "Keep it",
+					},
+				],
+			},
+		},
+		options: {
+			mode: "partition",
+			dedupStage: "dedup-findings",
+			devilAdvocateBatchStage: "devil-advocate-batches",
+		},
+	});
+	assert.equal(partition.partitions.keep.length, 0);
+	assert.equal(partition.partitionSummary.batchIntegrityIssues, 2);
+	assert.ok(
+		partition.partitions.needsHuman.some(
+			(candidate) =>
+				candidate.findingId === "F-001" &&
+				candidate.batchIntegrityIssue?.reason ===
+					"malformed_batch_result_invalid_evidence_item",
+		),
+	);
+	assert.ok(
+		partition.partitions.needsHuman.some(
+			(candidate) =>
+				candidate.findingId === "F-002" &&
+				candidate.batchIntegrityIssue?.reason ===
+					"malformed_batch_result_invalid_counterEvidence_item",
 		),
 	);
 });
