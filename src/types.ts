@@ -666,6 +666,83 @@ export interface WorkflowTaskUsageRecord extends WorkflowTaskUsageValues {
 	attempts?: WorkflowTaskUsageAttemptRecord[];
 }
 
+export type WorkflowToolResultBudgetConfigurationSource =
+	| "default"
+	| "environment"
+	| "disabled";
+
+export interface WorkflowTaskToolResultBudgetAttemptRecord {
+	source: string;
+	capturedAt: string;
+	configuredAt?: string;
+	backendRunId?: string;
+	backendAttemptId?: string;
+	configured?: boolean;
+	configurationSource?: WorkflowToolResultBudgetConfigurationSource;
+	configuredMaxTotalChars?: number;
+	terminal?: true;
+	reported?: true;
+	enabled?: boolean;
+	maxTotalChars?: number;
+	warning?: string;
+	toolResults?: number;
+	retainedChars?: number;
+	evictedCount?: number;
+	evictedChars?: number;
+	evictableCount?: number;
+	forcedEvictionApplied?: boolean;
+	contextLengthExceeded?: boolean;
+	contextOverflowRecovered?: boolean;
+	contextRecovered?: boolean;
+	unavailable?: true;
+}
+
+export interface WorkflowTaskToolResultBudgetConfigurationRecord {
+	configuredAt: string;
+	configured: boolean;
+	configurationSource: WorkflowToolResultBudgetConfigurationSource;
+	configuredMaxTotalChars?: number;
+}
+
+export interface WorkflowTaskToolResultBudgetAggregateRecord {
+	attempts: number;
+	terminalAttempts: number;
+	pendingAttempts: number;
+	reportingAttempts: number;
+	unavailableAttempts: number;
+	configuredAttempts: number;
+	disabledConfigurationAttempts: number;
+	backendEnabledAttempts: number;
+	backendDisabledAttempts: number;
+	evictionCounterExpectedAttempts: number;
+	evictionCounterReportingAttempts: number;
+	observedEvictedCount: number;
+	observedEvictedChars: number;
+	evictionAttempts: number;
+	warningAttempts: number;
+	forcedEvictionAttempts: number;
+	contextRecoveryAttempts: number;
+	contextRecoveredAttempts: number;
+	contextOverflowRecoveredAttempts: number;
+	contextLengthExceededAttempts: number;
+	configuredMaxTotalChars?: number | null;
+	backendMaxTotalChars?: number | null;
+	maxToolResults?: number;
+	maxRetainedChars?: number;
+	maxEvictableCount?: number;
+	maxUtilization?: number;
+	incomplete?: boolean;
+}
+
+export interface WorkflowTaskToolResultBudgetRecord {
+	source: "pi-subagent";
+	capturedAt: string;
+	incomplete?: boolean;
+	pendingConfiguration?: WorkflowTaskToolResultBudgetConfigurationRecord;
+	aggregate: WorkflowTaskToolResultBudgetAggregateRecord;
+	attempts: WorkflowTaskToolResultBudgetAttemptRecord[];
+}
+
 export interface WorkflowTaskTimingAttemptRecord {
 	source: string;
 	capturedAt: string;
@@ -770,6 +847,7 @@ export interface WorkflowTaskRunRecord {
 	completedAt?: string;
 	elapsedMs?: number;
 	usage?: WorkflowTaskUsageRecord;
+	toolResultBudget?: WorkflowTaskToolResultBudgetRecord;
 	timing?: WorkflowTaskTimingRecord;
 	exitCode?: number;
 	files: {

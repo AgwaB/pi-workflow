@@ -31,12 +31,20 @@ import type {
 	WorkflowRunRecord,
 	WorkflowTaskTimingAttemptRecord,
 	WorkflowTaskTimingRecord,
+	WorkflowTaskToolResultBudgetAttemptRecord,
+	WorkflowTaskToolResultBudgetConfigurationRecord,
+	WorkflowTaskToolResultBudgetRecord,
 	WorkflowTaskUsageAttemptRecord,
 	WorkflowTaskUsageRecord,
 	WorkflowTaskUsageValues,
 	WorkflowTaskRunRecord,
+	WorkflowToolResultBudgetConfigurationSource,
 } from "./types.js";
 import type { JsonSchema } from "./json-schema.js";
+import {
+	normalizedToolResultBudgetValues,
+	summarizeToolResultBudgetAttempts,
+} from "./dynamic-tool-result-budget-metrics.js";
 import {
 	fromProjectPath,
 	isTerminalTaskStatus,
@@ -1475,6 +1483,325 @@ function recordTaskUsageObservation(options: {
 	options.task.usage = usage;
 }
 
+interface DynamicTaskToolResultBudgetConfiguration {
+	configured: boolean;
+	source: WorkflowToolResultBudgetConfigurationSource;
+	maxTotalChars?: number;
+}
+
+function toolResultBudgetObservation(
+	subagentResult: Record<string, unknown> | undefined,
+	snapshot: SubagentRunStatusSnapshot,
+): { source: string; raw: unknown } | undefined {
+	const resultMetadata = metadataRecord(subagentResult);
+	if (resultMetadata && hasOwnValue(resultMetadata, "toolResultBudget")) {
+		return {
+			source: "subagent-result-metadata",
+			raw: resultMetadata.toolResultBudget,
+		};
+	}
+	const snapshotMetadata = isPlainRecord(snapshot.metadata)
+		? snapshot.metadata
+		: undefined;
+	if (snapshotMetadata && hasOwnValue(snapshotMetadata, "toolResultBudget")) {
+		return {
+			source: "subagent-snapshot-metadata",
+			raw: snapshotMetadata.toolResultBudget,
+		};
+	}
+	if (subagentResult && hasOwnValue(subagentResult, "toolResultBudget")) {
+		return {
+			source: "subagent-result",
+			raw: subagentResult.toolResultBudget,
+		};
+	}
+	const snapshotRecord = snapshot as unknown as Record<string, unknown>;
+	if (hasOwnValue(snapshotRecord, "toolResultBudget")) {
+		return {
+			source: "subagent-snapshot",
+			raw: snapshotRecord.toolResultBudget,
+		};
+	}
+	return undefined;
+}
+
+function firstBooleanValue(
+	records: Array<Record<string, unknown> | undefined>,
+	key: string,
+): boolean | undefined {
+	for (const record of records) {
+		if (!record || !hasOwnValue(record, key)) continue;
+		const value = record[key];
+		if (typeof value === "boolean") return value;
+	}
+	return undefined;
+}
+
+function buildTaskToolResultBudgetAttempt(options: {
+	task: WorkflowTaskRunRecord;
+	snapshot: SubagentRunStatusSnapshot;
+	subagentResult?: Record<string, unknown>;
+	capturedAt: string;
+}): WorkflowTaskToolResultBudgetAttemptRecord {
+	const resultMetadata = metadataRecord(options.subagentResult);
+	const snapshotMetadata = isPlainRecord(options.snapshot.metadata)
+		? options.snapshot.metadata
+		: undefined;
+	const resultRecord = options.subagentResult;
+	const snapshotRecord = options.snapshot as unknown as Record<string, unknown>;
+	const metadataRecords = [
+		resultMetadata,
+		snapshotMetadata,
+		resultRecord,
+		snapshotRecord,
+	];
+	const observed = toolResultBudgetObservation(
+		options.subagentResult,
+		options.snapshot,
+	);
+	const reported = observed !== undefined && isPlainRecord(observed.raw);
+	const contextLengthExceeded = firstBooleanValue(
+		metadataRecords,
+		"contextLengthExceeded",
+	);
+	const contextOverflowRecovered = firstBooleanValue(
+		metadataRecords,
+		"contextOverflowRecovered",
+	);
+	const contextRecovered = firstBooleanValue(
+		metadataRecords,
+		"contextRecovered",
+	);
+	return {
+		source: observed?.source ?? "subagent-tool-result-budget-unavailable",
+		capturedAt: options.capturedAt,
+		backendRunId: options.snapshot.runId,
+		backendAttemptId: options.snapshot.attemptId,
+		terminal: true,
+		...(reported ? { reported: true as const } : { unavailable: true as const }),
+		...normalizedToolResultBudgetValues(observed?.raw),
+		...(contextLengthExceeded === undefined ? {} : { contextLengthExceeded }),
+		...(contextOverflowRecovered === undefined
+			? {}
+			: { contextOverflowRecovered }),
+		...(contextRecovered === undefined ? {} : { contextRecovered }),
+	};
+}
+
+function toolResultBudgetAttemptKey(
+	attempt: WorkflowTaskToolResultBudgetAttemptRecord,
+): string {
+	return `${attempt.backendRunId ?? ""}\0${attempt.backendAttemptId ?? ""}`;
+}
+
+function configuredAttemptFields(
+	configuration: WorkflowTaskToolResultBudgetConfigurationRecord,
+): Pick<
+	WorkflowTaskToolResultBudgetAttemptRecord,
+	"configuredAt" | "configured" | "configurationSource"
+> &
+	Partial<
+		Pick<WorkflowTaskToolResultBudgetAttemptRecord, "configuredMaxTotalChars">
+	> {
+	return {
+		configuredAt: configuration.configuredAt,
+		configured: configuration.configured,
+		configurationSource: configuration.configurationSource,
+		...(configuration.configuredMaxTotalChars === undefined
+			? {}
+			: {
+					configuredMaxTotalChars:
+						configuration.configuredMaxTotalChars,
+				}),
+	};
+}
+
+function normalizedToolResultBudgetAttempt(
+	attempt: WorkflowTaskToolResultBudgetAttemptRecord,
+): WorkflowTaskToolResultBudgetAttemptRecord {
+	const normalized = { ...attempt };
+	if (normalized.reported === true) delete normalized.unavailable;
+	if (normalized.configured === false && normalized.reported !== true) {
+		delete normalized.unavailable;
+		normalized.source = "pi-workflow-budget-disabled";
+	}
+	return normalized;
+}
+
+function upsertToolResultBudgetAttempt(
+	attempts: WorkflowTaskToolResultBudgetAttemptRecord[],
+	attempt: WorkflowTaskToolResultBudgetAttemptRecord,
+): WorkflowTaskToolResultBudgetAttemptRecord[] {
+	const key = toolResultBudgetAttemptKey(attempt);
+	const index = attempts.findIndex(
+		(candidate) => toolResultBudgetAttemptKey(candidate) === key,
+	);
+	if (index < 0) {
+		return [...attempts, normalizedToolResultBudgetAttempt(attempt)];
+	}
+	return attempts.map((candidate, candidateIndex) => {
+		if (candidateIndex !== index) return candidate;
+		if (attempt.terminal !== true) {
+			return normalizedToolResultBudgetAttempt({ ...candidate, ...attempt });
+		}
+		const configuration: Partial<WorkflowTaskToolResultBudgetAttemptRecord> = {
+			...(candidate.configuredAt === undefined
+				? {}
+				: { configuredAt: candidate.configuredAt }),
+			...(candidate.configured === undefined
+				? {}
+				: { configured: candidate.configured }),
+			...(candidate.configurationSource === undefined
+				? {}
+				: { configurationSource: candidate.configurationSource }),
+			...(candidate.configuredMaxTotalChars === undefined
+				? {}
+				: {
+						configuredMaxTotalChars:
+							candidate.configuredMaxTotalChars,
+					}),
+		};
+		return normalizedToolResultBudgetAttempt({
+			...configuration,
+			...attempt,
+		});
+	});
+}
+
+function writeTaskToolResultBudgetRecord(options: {
+	task: WorkflowTaskRunRecord;
+	attempts: WorkflowTaskToolResultBudgetAttemptRecord[];
+	capturedAt: string;
+	pendingConfiguration?: WorkflowTaskToolResultBudgetConfigurationRecord;
+}): void {
+	const aggregate = summarizeToolResultBudgetAttempts(options.attempts);
+	const record: WorkflowTaskToolResultBudgetRecord = {
+		source: "pi-subagent",
+		capturedAt: options.capturedAt,
+		...(aggregate.incomplete ? { incomplete: true } : {}),
+		...(options.pendingConfiguration === undefined
+			? {}
+			: { pendingConfiguration: options.pendingConfiguration }),
+		aggregate,
+		attempts: options.attempts,
+	};
+	options.task.toolResultBudget = record;
+}
+
+function updateTaskToolResultBudget(options: {
+	task: WorkflowTaskRunRecord;
+	attempt: WorkflowTaskToolResultBudgetAttemptRecord;
+	clearPendingConfiguration?: boolean;
+}): void {
+	const attempts = upsertToolResultBudgetAttempt(
+		options.task.toolResultBudget?.attempts ?? [],
+		options.attempt,
+	);
+	writeTaskToolResultBudgetRecord({
+		task: options.task,
+		attempts,
+		capturedAt: options.attempt.capturedAt,
+		...(options.clearPendingConfiguration
+			? {}
+			: {
+					pendingConfiguration:
+						options.task.toolResultBudget?.pendingConfiguration,
+				}),
+	});
+}
+
+function recordTaskToolResultBudgetPendingConfiguration(options: {
+	task: WorkflowTaskRunRecord;
+	configuration: DynamicTaskToolResultBudgetConfiguration;
+	capturedAt: string;
+}): void {
+	const pendingConfiguration: WorkflowTaskToolResultBudgetConfigurationRecord = {
+		configuredAt: options.capturedAt,
+		configured: options.configuration.configured,
+		configurationSource: options.configuration.source,
+		...(options.configuration.maxTotalChars === undefined
+			? {}
+			: { configuredMaxTotalChars: options.configuration.maxTotalChars }),
+	};
+	writeTaskToolResultBudgetRecord({
+		task: options.task,
+		attempts: options.task.toolResultBudget?.attempts ?? [],
+		capturedAt: options.capturedAt,
+		pendingConfiguration,
+	});
+}
+
+function bindTaskToolResultBudgetPendingConfiguration(options: {
+	task: WorkflowTaskRunRecord;
+	backendRunId: string;
+	backendAttemptId: string;
+	capturedAt: string;
+}): void {
+	const pendingConfiguration =
+		options.task.toolResultBudget?.pendingConfiguration;
+	if (!pendingConfiguration) return;
+	updateTaskToolResultBudget({
+		task: options.task,
+		attempt: {
+			source: "pi-workflow-launch",
+			capturedAt: options.capturedAt,
+			backendRunId: options.backendRunId,
+			backendAttemptId: options.backendAttemptId,
+			...configuredAttemptFields(pendingConfiguration),
+		},
+		clearPendingConfiguration: true,
+	});
+}
+
+function clearTaskToolResultBudgetPendingConfiguration(
+	task: WorkflowTaskRunRecord,
+): void {
+	const record = task.toolResultBudget;
+	if (!record?.pendingConfiguration) return;
+	if (record.attempts.length === 0) {
+		delete task.toolResultBudget;
+		return;
+	}
+	writeTaskToolResultBudgetRecord({
+		task,
+		attempts: record.attempts,
+		capturedAt: nowIso(),
+	});
+}
+
+function recordTaskToolResultBudgetObservation(options: {
+	task: WorkflowTaskRunRecord;
+	snapshot: SubagentRunStatusSnapshot;
+	subagentResult?: Record<string, unknown>;
+	capturedAt: string;
+}): void {
+	const observed = toolResultBudgetObservation(
+		options.subagentResult,
+		options.snapshot,
+	);
+	if (
+		!options.task.dynamicGenerated &&
+		options.task.toolResultBudget === undefined &&
+		observed === undefined
+	) {
+		return;
+	}
+	const pendingConfiguration =
+		options.task.toolResultBudget?.pendingConfiguration;
+	const attempt = buildTaskToolResultBudgetAttempt(options);
+	updateTaskToolResultBudget({
+		task: options.task,
+		attempt:
+			pendingConfiguration === undefined
+				? attempt
+				: {
+						...configuredAttemptFields(pendingConfiguration),
+						...attempt,
+					},
+		clearPendingConfiguration: pendingConfiguration !== undefined,
+	});
+}
+
 function isoTimestampMs(timestamp: string | undefined): number | undefined {
 	if (!timestamp) return undefined;
 	const parsed = Date.parse(timestamp);
@@ -1813,6 +2140,7 @@ function recordTerminalTaskObservability(options: {
 }): void {
 	const capturedAt = nowIso();
 	recordTaskUsageObservation({ ...options, capturedAt });
+	recordTaskToolResultBudgetObservation({ ...options, capturedAt });
 	recordTaskTerminalTiming({ ...options, capturedAt });
 }
 
@@ -1981,6 +2309,8 @@ export async function launchSubagentTask(
 	const sessionId = subagentSessionId(run, task);
 
 	let launched: SubagentResultEnvelope;
+	const toolResultBudgetConfiguration =
+		dynamicTaskToolResultBudgetConfiguration(task);
 	let releaseLiveModelWorkerSlot: (() => void) | undefined;
 	try {
 		throwIfAborted(leaseSignal);
@@ -2015,6 +2345,13 @@ export async function launchSubagentTask(
 		await writeFile(outputFile, "", "utf8");
 		await writeFile(stderrFile, "", "utf8");
 
+		if (toolResultBudgetConfiguration) {
+			recordTaskToolResultBudgetPendingConfiguration({
+				task,
+				configuration: toolResultBudgetConfiguration,
+				capturedAt: nowIso(),
+			});
+		}
 		task.status = "running";
 		task.statusDetail = "launching";
 		task.startedAt = nowIso();
@@ -2054,10 +2391,9 @@ export async function launchSubagentTask(
 		};
 		subagentOptions.extensions = extensions;
 		if (captureToolCallsEnabled()) subagentOptions.captureToolCalls = true;
-		const toolResultBudgetChars = dynamicTaskToolResultBudgetChars(task);
-		if (toolResultBudgetChars !== undefined) {
+		if (toolResultBudgetConfiguration?.maxTotalChars !== undefined) {
 			subagentOptions.toolResultBudget = {
-				maxTotalChars: toolResultBudgetChars,
+				maxTotalChars: toolResultBudgetConfiguration.maxTotalChars,
 			};
 		}
 		const launchQueuedAt = nowIso();
@@ -2112,6 +2448,7 @@ export async function launchSubagentTask(
 			};
 		}
 		releaseLiveModelWorkerSlot?.();
+		clearTaskToolResultBudgetPendingConfiguration(task);
 		task.status = "pending";
 		task.statusDetail = "pending";
 		task.startedAt = undefined;
@@ -2130,6 +2467,14 @@ export async function launchSubagentTask(
 	);
 	task.backendHandle = handle;
 	task.backendTaskId = launched.runId;
+	if (toolResultBudgetConfiguration) {
+		bindTaskToolResultBudgetPendingConfiguration({
+			task,
+			backendRunId: launched.runId,
+			backendAttemptId: launched.attemptId,
+			capturedAt: nowIso(),
+		});
+	}
 	task.backendFiles = {
 		runsDir: toProjectPath(task.cwd, resolve(task.cwd, runsDir)),
 		correlationId,
@@ -2192,6 +2537,15 @@ export async function refreshRunFromSubagentArtifacts(
 				task.lastMessage = `adopted pi-subagent run ${handle.runId}/${handle.attemptId}`;
 				changed = true;
 			}
+		}
+		if (handle && task.toolResultBudget?.pendingConfiguration) {
+			bindTaskToolResultBudgetPendingConfiguration({
+				task,
+				backendRunId: handle.runId,
+				backendAttemptId: handle.attemptId,
+				capturedAt: nowIso(),
+			});
+			changed = true;
 		}
 		if (!handle) {
 			if (isStaleLaunchClaim(task)) {
@@ -2464,6 +2818,7 @@ function isStaleLaunchClaim(task: WorkflowTaskRunRecord): boolean {
 }
 
 function resetStaleLaunchClaim(task: WorkflowTaskRunRecord): void {
+	clearTaskToolResultBudgetPendingConfiguration(task);
 	task.status = "pending";
 	task.statusDetail = "pending";
 	task.startedAt = undefined;
@@ -3900,17 +4255,27 @@ function transientFailureAttemptPath(
 	);
 }
 
-function dynamicTaskToolResultBudgetChars(
+function dynamicTaskToolResultBudgetConfiguration(
 	task: WorkflowTaskRunRecord,
-): number | undefined {
+): DynamicTaskToolResultBudgetConfiguration | undefined {
 	if (!task.dynamicGenerated) return undefined;
 	const raw = process.env[DYNAMIC_TOOL_RESULT_BUDGET_ENV];
 	if (raw !== undefined && raw.trim() !== "") {
-		const parsed = Number.parseInt(raw, 10);
-		if (!Number.isFinite(parsed) || parsed <= 0) return undefined;
-		return Math.floor(parsed);
+		const parsed = Number(raw.trim());
+		if (!Number.isInteger(parsed) || parsed <= 0) {
+			return { configured: false, source: "disabled" };
+		}
+		return {
+			configured: true,
+			source: "environment",
+			maxTotalChars: Math.floor(parsed),
+		};
 	}
-	return DEFAULT_DYNAMIC_TOOL_RESULT_BUDGET_CHARS;
+	return {
+		configured: true,
+		source: "default",
+		maxTotalChars: DEFAULT_DYNAMIC_TOOL_RESULT_BUDGET_CHARS,
+	};
 }
 
 function retryOrFailTransientSubagentFailure(

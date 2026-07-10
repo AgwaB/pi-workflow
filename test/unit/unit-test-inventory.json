@@ -198,13 +198,13 @@
     {
       "name": "dynamic-decision-v1 accepts strict executable decisions and canonicalizes hashes",
       "occurrence": 1,
-      "sha256": "d48102d4445967d667f13fe86ebb0e1497ac5faa7c6c5493c7aee47f95cf1ecc",
+      "sha256": "252282e2cddd76756a5a07e724396faa90768542ee623b6a29d0bcbd2dad0a71",
       "domain": "dynamic-runtime"
     },
     {
       "name": "dynamic-decision-v1 rejects schema, invariant, ref, id, and tool violations",
       "occurrence": 1,
-      "sha256": "2c2ed4b06ea538cb84ad5b9eb6d3465dc368b0c2f23a8666578e09571cb380d7",
+      "sha256": "b02276a806f79e455ad60a903d5cc0262184167a71c318eb6aebd744c5b47907",
       "domain": "dynamic-runtime"
     },
     {
@@ -390,7 +390,7 @@
     {
       "name": "runDynamicDecisionLoop repairs unknown dynamic inputRefs before fanout",
       "occurrence": 1,
-      "sha256": "293053737c4c96c423c59782268637f27df61b1ba6b8566f15bf051bca00dc4d",
+      "sha256": "4a693b3b61a55a6cd2be0b91f70b83de5cd4be8a29aff9fece680addfd71fdbd",
       "domain": "dynamic-runtime"
     },
     {

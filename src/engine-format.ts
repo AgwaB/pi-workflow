@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 
 import { formatDynamicAuditSummary } from "./dynamic-audit.js";
+import { buildDynamicToolResultBudgetMetrics } from "./dynamic-tool-result-budget-metrics.js";
 import {
 	hasActiveSchedulerWork,
 	isRefreshPollAggregateError,
@@ -473,6 +474,8 @@ function formatWarnings(
 		lines.push(`⚠ Degraded: ${run.degradation.summary}`);
 	const captureLag = formatTerminalCaptureLagWarning(run);
 	if (captureLag) lines.push(captureLag);
+	const toolResultBudget = formatHumanToolResultBudgetSignal(run);
+	if (toolResultBudget) lines.push(toolResultBudget);
 	const stall = formatRunStallWarning(
 		run,
 		options.supervisor,
@@ -511,6 +514,69 @@ function formatTerminalCaptureLagWarning(
 			? `; completed ${friendlyTimestamp(completedAt)}, captured ${friendlyTimestamp(capturedAt)}`
 			: "";
 	return `⚠ terminal capture lag ${formatStallAge(lagMs)} on ${first.task.taskId}/${first.task.specId}${timing} (${lagged.length} task${lagged.length === 1 ? "" : "s"} over 2m; model execution may have completed earlier)`;
+}
+
+function hasToolResultBudgetSignal(run: WorkflowRunRecord): boolean {
+	const totals = buildDynamicToolResultBudgetMetrics(run).totals;
+	return (
+		totals.evictionAttempts > 0 ||
+		totals.forcedEvictionAttempts > 0 ||
+		totals.contextRecoveryAttempts > 0 ||
+		totals.contextLengthExceededAttempts > 0 ||
+		totals.warningAttempts > 0
+	);
+}
+
+function formatHumanToolResultBudgetSignal(
+	run: WorkflowRunRecord,
+): string | undefined {
+	if (!hasToolResultBudgetSignal(run)) return undefined;
+	const totals = buildDynamicToolResultBudgetMetrics(run).totals;
+	const parts: string[] = [];
+	if (totals.evictionAttempts > 0) {
+		parts.push(
+			`${totals.evictionAttempts} eviction attempt${totals.evictionAttempts === 1 ? "" : "s"}`,
+			`${totals.observedEvictedCount} observed results / ${totals.observedEvictedChars} observed chars evicted`,
+		);
+	}
+	if (totals.forcedEvictionAttempts > 0) {
+		parts.push(`${totals.forcedEvictionAttempts} forced-eviction attempts`);
+	}
+	if (totals.maxUtilization !== null) {
+		parts.push(`peak retained/cap ${Math.round(totals.maxUtilization * 100)}%`);
+	}
+	if (totals.contextRecoveryAttempts > 0) {
+		parts.push(`${totals.contextRecoveryAttempts} context recoveries`);
+	}
+	if (totals.contextLengthExceededAttempts > 0) {
+		parts.push(
+			`${totals.contextLengthExceededAttempts} context-limit attempts`,
+		);
+	}
+	if (totals.warningAttempts > 0) {
+		parts.push(`${totals.warningAttempts} backend warnings`);
+	}
+	const telemetryDenominator =
+		totals.fullyReportingTasks +
+		totals.partiallyReportingTasks +
+		totals.unavailableTasks;
+	parts.push(
+		`telemetry ${totals.fullyReportingTasks}/${telemetryDenominator} complete${totals.partiallyReportingTasks > 0 ? `, ${totals.partiallyReportingTasks} partial` : ""}`,
+		`eviction counters ${totals.evictionCounterReportingAttempts}/${totals.evictionCounterExpectedAttempts} attempts`,
+	);
+	return `⚠ Tool-result budget: ${parts.join(" · ")}`;
+}
+
+function formatRawToolResultBudgetSignal(
+	run: WorkflowRunRecord,
+): string | undefined {
+	if (!hasToolResultBudgetSignal(run)) return undefined;
+	const totals = buildDynamicToolResultBudgetMetrics(run).totals;
+	const telemetryDenominator =
+		totals.fullyReportingTasks +
+		totals.partiallyReportingTasks +
+		totals.unavailableTasks;
+	return `toolResultBudget=evictionAttempts=${totals.evictionAttempts}, observedEvictedCount=${totals.observedEvictedCount}, observedEvictedChars=${totals.observedEvictedChars}, forcedEvictionAttempts=${totals.forcedEvictionAttempts}, maxUtilization=${totals.maxUtilization ?? "n/a"}, contextRecoveryAttempts=${totals.contextRecoveryAttempts}, contextLengthExceededAttempts=${totals.contextLengthExceededAttempts}, warningAttempts=${totals.warningAttempts}, tasksFullyReporting=${totals.fullyReportingTasks}/${telemetryDenominator}, tasksPartiallyReporting=${totals.partiallyReportingTasks}, evictionCountersReporting=${totals.evictionCounterReportingAttempts}/${totals.evictionCounterExpectedAttempts}`;
 }
 
 function formatHumanProgress(run: WorkflowRunRecord): string {
@@ -675,6 +741,8 @@ export function formatRun(
 	if (usageLine) lines.push(usageLine);
 	const captureLagWarning = formatTerminalCaptureLagWarning(run);
 	if (captureLagWarning) lines.push(captureLagWarning);
+	const toolResultBudgetSignal = formatRawToolResultBudgetSignal(run);
+	if (toolResultBudgetSignal) lines.push(toolResultBudgetSignal);
 	if (run.dynamicAudit) lines.push(formatDynamicAuditSummary(run.dynamicAudit));
 	const stallWarning = formatRunStallWarning(
 		run,
