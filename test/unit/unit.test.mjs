@@ -15677,6 +15677,8 @@ test("batched deep-review devil-advocate prompt and schema require evidence sour
 	assert.match(prompt, /CTX-F-001-1/);
 	assert.match(prompt, /summary-only KEEP/);
 	assert.match(prompt, /Example one-row <control>/);
+	assert.match(prompt, /root schema value must be exactly/);
+	assert.match(prompt, /never use the controlSchema file path/);
 	assert.match(prompt, /"schema":"deep-review-devil-advocate-batch-v2"/);
 	assert.match(prompt, /"evidenceSourceType":"concrete_artifact"/);
 	assert.match(prompt, /"counterEvidence":\[\]/);
@@ -27900,6 +27902,36 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 		),
 	);
 
+	const idStringVerdict = await helper({
+		sources: {
+			"dedup-findings.main": {
+				findings: [
+					{
+						id: "F-ID-001",
+						findingId: "F-ID-001",
+						severity: "high",
+						title: "Exact reviewer title for id echo",
+						file: "src/id.ts",
+						locations: [{ file: "src/id.ts", line: 7 }],
+						evidenceQuotes: ["doThing()"],
+					},
+				],
+			},
+			"devil-advocate.item-001": {
+				finding: "F-ID-001",
+				verdict: "KEEP",
+				evidence: ["src/id.ts:7 doThing()"],
+				recommendedAction: "Keep the finding.",
+			},
+		},
+		options: { mode: "partition", dedupStage: "dedup-findings" },
+	});
+	assert.deepEqual(
+		idStringVerdict.partitions.keep.map((finding) => finding.findingId),
+		["F-ID-001"],
+	);
+	assert.equal(idStringVerdict.partitionSummary.missingVerdicts, 0);
+
 	const sparseUnmatchedVerdict = await helper({
 		sources: {
 			"dedup-findings.main": { findings: [] },
@@ -30232,12 +30264,13 @@ test("deep-research verifier schemas separate default single-row and batched res
 		],
 	};
 	const batchedRows = {
-		schema: "./schemas/deep-research-verify-claims-batch-control.schema.json",
+		schema: "deep-research-verify-claims-batch-v1",
 		digest: "batched verifier results",
 		results: [
 			{
 				id: "claim-001",
 				status: "verified",
+				confidence: 0.9,
 				verdictDigest: { support: "official source supports it" },
 				evidence: [
 					{
@@ -30245,6 +30278,8 @@ test("deep-research verifier schemas separate default single-row and batched res
 						quote: "source-backed evidence",
 					},
 				],
+				caveats: [],
+				correctionOrCounterclaim: "",
 			},
 		],
 	};
@@ -30284,7 +30319,7 @@ test("deep-research verifier schemas separate default single-row and batched res
 	assert.ok(invalid.issues.length > 0);
 	const invalidBatch = validateJsonSchema(
 		{
-			schema: "./schemas/deep-research-verify-claims-batch-control.schema.json",
+			schema: "deep-research-verify-claims-batch-v1",
 			digest: "missing result id remains invalid",
 			results: [
 				{
@@ -30297,6 +30332,59 @@ test("deep-research verifier schemas separate default single-row and batched res
 		batchSchema,
 	);
 	assert.equal(invalidBatch.valid, false);
+	const missingBatchConfidence = validateJsonSchema(
+		{
+			schema: "deep-research-verify-claims-batch-v1",
+			digest: "missing required row fields remains invalid",
+			results: [
+				{
+					id: "claim-001",
+					status: "verified",
+					verdictDigest: { support: "official source supports it" },
+					evidence: [],
+					caveats: [],
+					correctionOrCounterclaim: "",
+				},
+			],
+		},
+		batchSchema,
+	);
+	assert.equal(missingBatchConfidence.valid, false);
+	const bareEvidenceObject = validateJsonSchema(
+		{
+			schema: "deep-research-verify-claims-batch-v1",
+			digest: "bare evidence object remains invalid",
+			results: [
+				{
+					id: "claim-001",
+					status: "partially_supported",
+					confidence: "medium",
+					verdictDigest: { support: "source partially supports it" },
+					evidence: [{}],
+					caveats: ["only partial support"],
+					correctionOrCounterclaim: "",
+				},
+			],
+		},
+		batchSchema,
+	);
+	assert.equal(bareEvidenceObject.valid, false);
+	const invalidBatchSchemaPath = validateJsonSchema(
+		{
+			schema: "./schemas/deep-research-verify-claims-batch-control.schema.json",
+			digest: "schema path must not be accepted as the control schema literal",
+			results: [
+				{
+					id: "claim-001",
+					status: "verified",
+					verdictDigest: { support: "official source supports it" },
+					evidence: [],
+				},
+			],
+		},
+		batchSchema,
+	);
+	assert.equal(invalidBatchSchemaPath.valid, false);
 	const invalidNumericId = validateJsonSchema(
 		{
 			schema: "./schemas/deep-research-verify-claims-control.schema.json",
