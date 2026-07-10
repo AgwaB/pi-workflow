@@ -97,6 +97,40 @@ workflow-output retry path. When positive verifier `claimSupports` are present,
 final URL refs are restricted to those supported source locators rather than
 every upstream URL.
 
+### Dynamic child transcript budget telemetry
+
+Dynamic-generated children receive a cumulative tool-result transcript cap of
+`320_000` characters by default. This cap is separate from dynamic-controller
+orchestration budgets such as `maxAgents`, `maxConcurrency`, and
+`maxRuntimeMs`; it is also separate from the direct-dynamic `dynamicAudit`
+claim/source accounting record. Character counts are not token counts.
+
+Set `PI_WORKFLOW_DYNAMIC_TOOL_RESULT_BUDGET_CHARS` to a positive integer to
+override the child transcript cap. Set it to `0`, a negative value, or a
+non-number to disable the cap. Static tasks do not receive this dynamic-child
+default.
+
+Each launched dynamic child records the effective configuration and, when the
+backend reports it, per-attempt retained characters, eviction counters,
+warnings, and context-recovery flags under the task's optional
+`toolResultBudget` field in `run.json`. Retry attempts remain separate. Missing
+metadata from an old or interrupted backend is recorded as unavailable rather
+than as zero pressure. Existing run files without this optional field remain
+valid.
+
+From a source checkout, aggregate one or more explicit project workflow roots
+without starting workflows or making provider calls:
+
+```bash
+npm run build
+node tools/dynamic-tool-result-budget-cohort.mjs /path/to/project [...]
+```
+
+The collector reads only the supplied project, `.pi/workflows`, run-directory,
+or `run.json` paths, writes no files, and emits JSON to stdout. Treat its
+utilization values as final observed retained-character pressure, not peak
+token-context usage.
+
 ## Bundled skills
 
 | Skill | Use when |

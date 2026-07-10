@@ -78,6 +78,18 @@ export type {
 export { dynamicOutputProfileValues } from "./dynamic-profiles.js";
 export type { DynamicOutputProfile } from "./dynamic-profiles.js";
 export {
+	buildDynamicToolResultBudgetMetrics,
+	DYNAMIC_TOOL_RESULT_BUDGET_METRICS_SCHEMA_VERSION,
+} from "./dynamic-tool-result-budget-metrics.js";
+export type {
+	DynamicToolResultBudgetControllerMetrics,
+	DynamicToolResultBudgetMetricsSchemaVersion,
+	DynamicToolResultBudgetRollup,
+	DynamicToolResultBudgetRunMetrics,
+	DynamicToolResultBudgetStatusCounts,
+	DynamicToolResultBudgetTaskMetrics,
+} from "./dynamic-tool-result-budget-metrics.js";
+export {
 	buildWorkflowRunMetrics,
 	WORKFLOW_METRICS_PRICING_MODEL_VERSION,
 	WORKFLOW_METRICS_SCHEMA_VERSION,
