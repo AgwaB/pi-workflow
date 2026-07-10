@@ -53,11 +53,15 @@ test("release checker is shell-free and requires all official/opt-in/scaffold bu
 });
 
 test("npm dry-run package contains every local asset referenced by official, opt-in, and scaffold specs", () => {
-	const output = execFileSync("npm", ["pack", "--dry-run", "--json"], {
-		cwd: root,
-		encoding: "utf8",
-		timeout: 180_000,
-	});
+	const output = execFileSync(
+		"npm",
+		["pack", "--dry-run", "--json", "--ignore-scripts"],
+		{
+			cwd: root,
+			encoding: "utf8",
+			timeout: 180_000,
+		},
+	);
 	const [summary] = JSON.parse(output);
 	const packed = new Set(summary.files.map((file) => file.path));
 	for (const required of [

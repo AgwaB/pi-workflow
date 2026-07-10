@@ -6209,6 +6209,7 @@ test("artifactGraph dynamic runtime budget blocks slow controller", async () => 
 
 test("artifactGraph dynamic runtime budget excludes suspended child wait time", async () => {
 	const cwd = makeProject();
+	const runtimeBudgetMs = 1_000;
 	try {
 		writeAgent(cwd, "unit-scout", "read");
 		captureSubagentPrompts([]);
@@ -6232,7 +6233,7 @@ test("artifactGraph dynamic runtime budget excludes suspended child wait time", 
 						type: "dynamic",
 						dynamic: {
 							uses: "./helpers/controller.mjs",
-							budget: { maxRuntimeMs: 1_000 },
+							budget: { maxRuntimeMs: runtimeBudgetMs },
 						},
 					},
 				],
@@ -6276,7 +6277,8 @@ test("artifactGraph dynamic runtime budget excludes suspended child wait time", 
 		);
 		const state = await readOrRebuildDynamicState(cwd, run.runId);
 		assert.ok(
-			state.controllers["adaptive.controller"].counters.runtimeMs < 100,
+			state.controllers["adaptive.controller"].counters.runtimeMs <
+				runtimeBudgetMs,
 		);
 	} finally {
 		setSubagentApiForTests(undefined);

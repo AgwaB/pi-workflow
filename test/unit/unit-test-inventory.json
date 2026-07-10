@@ -726,7 +726,7 @@
     {
       "name": "artifactGraph dynamic runtime budget excludes suspended child wait time",
       "occurrence": 1,
-      "sha256": "9dc07b1f4f225ce248f7f331cb391c410eef1aca2128e1bb969c7f42bd7b925a",
+      "sha256": "1c54c67c402d38a33eb056540e82b7e885ab7983b6813378d482b838e0d33342",
       "domain": "dynamic-runtime"
     },
     {
