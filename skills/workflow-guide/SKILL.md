@@ -30,7 +30,7 @@ Copy their proven conventions (see "Quality design patterns"), not just their st
 - When authoring a new workflow and a scaffold topology fits, start from `./scaffolds/<name>/` rather than inventing the JSON shape from scratch.
 - Public `schemaVersion: 1` workflow specs use `artifactGraph.stages`.
 - Stage order controls scheduling only; it does **not** pass prior output into a later plain `single` stage.
-- If a stage needs prior artifacts, use `reduce.from`, `foreach.from`, or support `from`.
+- If a model stage needs prior artifacts, use `single.from` or `reduce.from`; use `foreach.from` for array fan-out and support `from` for deterministic helpers. `after` is order-only.
 - For static data-driven fan-out, use `foreach.from` with a simple dot path into upstream `control.json`.
 - Use `type: "dynamic"` only for trusted adaptive orchestration that must create official child tasks at runtime with `ctx.agent()`, `ctx.helper()`, or `ctx.workflow()`.
 - For synthesis/fan-in, use `reduce.from` and require/encourage `workflow_artifact` reads for detailed upstream artifacts.
@@ -41,8 +41,9 @@ Copy their proven conventions (see "Quality design patterns"), not just their st
 - Keep review/research workflows read-only unless the workflow explicitly documents managed-worktree mutation.
 - Write-capable workflows need explicit worktree policy, validation/check stages, and protected-path awareness.
 - In non-git workspaces with `worktreePolicy: "off"`, writes mutate the live directory.
-- Project workflows should be saved under `.pi/workflows/<name>.json` or a bundle directory with `spec.json`, schemas, and helpers.
-- If the user asks to create a workflow but does not specify storage scope, ask where to save it before writing: project-local `.pi/workflows/` or user/global `~/.pi/agent/workflows/`. Use bundled/package `workflows/<name>/spec.json` only when explicitly requested for package distribution.
+- Choose one of three user workflow scopes: project-private `.pi/workflows/<name>/spec.json`, project-shared/tracked `workflows/<name>/spec.json`, or user/global `~/.pi/agent/workflows/<name>/spec.json`. Flat `<name>.json` is fine only when no local schemas/helpers are needed.
+- Name priority is project-shared `workflows/`, project-private `.pi/workflows/`, user/global, then the installed package bundle; higher roots shadow lower ones and ambiguity is fail-closed only within the winning priority.
+- If the user asks to create a workflow but does not specify storage scope, ask them to choose project-private, project-shared/tracked, or user/global before writing. Treat changes to pi-workflow's official package `workflows/` as a separate promotion step requiring an explicit package-distribution request.
 - For natural-language execution of existing workflows, prefer `workflow_list` and `workflow_run` when those tools are available; use `/workflow ...` commands as the deterministic manual fallback.
 - Always run `/workflow validate <workflow-or-file>` before handing off or running a reusable workflow.
 
@@ -51,19 +52,20 @@ Copy their proven conventions (see "Quality design patterns"), not just their st
 When the workflow-definition request is vague, broad, or self-contradictory, do not write a spec yet. Clarify the authoring target first, then build collaboratively.
 
 1. Identify the requested workflow-definition action: create new, modify existing, review existing, validate existing, or explain authoring rules.
-2. Identify the workflow target path/name and storage scope. If not explicit, ask the user to choose project-local `.pi/workflows/` or user/global `~/.pi/agent/workflows/` before writing files. Use bundled/package `workflows/<name>/spec.json` only when explicitly requested for package distribution.
+2. Identify the workflow target path/name and storage scope. If not explicit, ask the user to choose project-private `.pi/workflows/`, project-shared/tracked `workflows/`, or user/global `~/.pi/agent/workflows/` before writing files. Modifying pi-workflow's official package bundle is a distinct, explicit package-distribution choice.
 3. Ask only for decisions that determine the workflow graph and safety posture:
    - What runtime task will the workflow handle, and what final artifact should it produce?
    - What downstream decision depends on the output?
-   - Where should the workflow live: project-local or user/global? Use bundled/package only when the user explicitly wants to ship it with the package.
+   - Where should the workflow live: project-private, project-shared/tracked, or user/global? Treat official package distribution as a later explicit promotion decision.
    - Is the workflow read-only, or write-capable with managed worktree expectations?
    - Is the graph a fixed DAG, static fan-out (`foreach`), synthesis (`reduce`), bounded `loop`, nested `dag`, support-helper pipeline, or trusted adaptive dynamic stage?
    - Which agents must exist, and what tool ceiling do they allow?
    - Which stage outputs are machine-read by later stages and therefore need control schemas?
 4. For storage scope, prefer Pi's `question` tool when available instead of free-text. Use descriptions so the user can choose without knowing workflow internals:
-   - `project-local`: save under the current project's `.pi/workflows/<name>/`; best for workflows tied to this repo, local absolute paths, or team/project context. Discoverable from this project and ignored by git.
+   - `project-private`: save under the current project's `.pi/workflows/<name>/`; best for local paths or experiments. Discoverable only from this project and usually ignored by git.
+   - `project-shared`: save under `workflows/<name>/`; best for a repo-committed workflow shared with the team.
    - `global`: save under `~/.pi/agent/workflows/<name>/`; best for personal workflows reused across projects. Avoid hard-coded project paths unless intentional.
-   Example `question` tool shape: `question({questions:[{id:"workflow_storage_scope",label:"Storage",prompt:"Where should I save this workflow?",options:[{value:"project-local",label:"Project-local",description:"Use in this project; saved under .pi/workflows/<name>/ and discoverable here."},{value:"global",label:"Global/user",description:"Reuse from any project; saved under ~/.pi/agent/workflows/<name>/."}],allowOther:true}]})`.
+   Example `question` tool shape: `question({questions:[{id:"workflow_storage_scope",label:"Storage",prompt:"Where should I save this workflow?",options:[{value:"project-private",label:"Project-private",description:"Use only in this project; save under .pi/workflows/<name>/."},{value:"project-shared",label:"Project-shared/tracked",description:"Commit with this repo under workflows/<name>/."},{value:"global",label:"Global/user",description:"Reuse from any project; save under ~/.pi/agent/workflows/<name>/."}],allowOther:true}]})`.
 5. Survey existing workflows only when choosing a base template, adapting a known workflow, or checking whether a requested new workflow is unnecessary. Do not invent a new topology when an existing workflow definition already satisfies the authoring request.
 6. If the request is contradictory (for example "read-only" plus "edit and commit"), name the conflict and offer concrete alternatives rather than silently resolving it. Workflow workers do not commit; mutation goes through a managed worktree for human review with no auto-merge.
 7. Before writing a new or revised spec, briefly note the chosen stage graph (nodes, `from`/`foreach.from`/`reduce.from`/support edges, read/write policy, schemas/helpers, and storage path) when it materially affects cost, safety, or output shape. Do not ask the user to approve internal graph details unless the choice changes user-visible behavior, cost, storage scope, or mutation risk.
@@ -221,7 +223,7 @@ Before handing off or recommending a reusable workflow run, verify or report as 
 - `/workflow validate <workflow-or-file>` result and all warnings.
 - Required agents exist and their declared tool ceilings allow the workflow tools.
 - `readOnly` and tool lists match the intended side-effect policy.
-- Every `foreach.from`, `reduce.from`, support `from`, and `dag.outputFrom` reference resolves.
+- Every `single.from`, `foreach.from`, `reduce.from`, support `from`, and `dag.outputFrom` reference resolves.
 - Every downstream-consumed control field has a schema and a bounded prompt contract.
 - Support helper paths are bundle-local, `.mjs`, and trusted.
 - No orphaned `schemas/*.json` or `helpers/*.mjs` files remain that the spec does not reference (common after adapting a scaffold).
@@ -232,9 +234,10 @@ Before handing off or recommending a reusable workflow run, verify or report as 
 
 ## Promotion checklist
 
-For a workflow promoted from local experiment to bundled/reusable package workflow:
+For a workflow promoted from a private experiment to a shared or official package workflow:
 
-- Move from a local `.pi/workflows/<name>.json` or `.pi/workflows/<name>/spec.json` experiment to `workflows/<name>/spec.json` with schemas/helpers in the bundle directory.
+- Promote a private `.pi/workflows/<name>.json` or `.pi/workflows/<name>/spec.json` experiment to the owning project's `workflows/<name>/spec.json` with schemas/helpers in that bundle directory.
+- When the target is pi-workflow's official installed bundle, require an explicit package-distribution request, prefer a new project-scoped fork name while experimenting, and only then update the official package bundle.
 - Update `workflows/README.md` and `docs/usage.md`; update `README.md` if the workflow is user-facing.
 - Add or update tests when the bundled workflow list, package contents, schema behavior, helper behavior, or docs examples are expected to remain stable.
 - Run at least `/workflow validate <name-or-path>` and the relevant project checks (`npm test`, `npm run typecheck`, `npm run e2e`, or `npm run pack:dry`) when package surface changes require them.
@@ -245,7 +248,7 @@ When authoring or reviewing a workflow, report:
 
 - which existing workflow was used or why none fit,
 - the stage graph,
-- every `foreach.from`, `reduce.from`, and support `from` data dependency,
+- every `single.from`, `foreach.from`, `reduce.from`, and support `from` data dependency,
 - write-capable stages and worktree policy,
 - required agents and tool ceilings,
 - `output.controlSchema` files and workflow control fields used by downstream stages,

@@ -466,13 +466,14 @@ function readJsonPathSlice(
 	if (isJsonPathSelection(value)) {
 		const values: unknown[] = [];
 		for (const item of value.values) {
-			if (!Array.isArray(item)) return undefined;
-			values.push(...item.slice(start, end));
+			const sliced = readOwnJsonPathSlice(item, start, end);
+			if (!sliced) return undefined;
+			values.push(...sliced);
 		}
 		return makeJsonPathSelection(values);
 	}
-	if (!Array.isArray(value)) return undefined;
-	return makeJsonPathSelection(value.slice(start, end));
+	const sliced = readOwnJsonPathSlice(value, start, end);
+	return sliced ? makeJsonPathSelection(sliced) : undefined;
 }
 
 function readOwnJsonPathPart(value: unknown, part: string): unknown {
@@ -482,7 +483,22 @@ function readOwnJsonPathPart(value: unknown, part: string): unknown {
 
 function readOwnJsonPathIndex(value: unknown, index: number): unknown {
 	if (!Array.isArray(value) || index >= value.length) return undefined;
+	if (!Object.hasOwn(value, index)) return undefined;
 	return value[index];
+}
+
+function readOwnJsonPathSlice(
+	value: unknown,
+	start: number,
+	end?: number,
+): unknown[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const boundedEnd = Math.min(end ?? value.length, value.length);
+	const values: unknown[] = [];
+	for (let index = start; index < boundedEnd; index += 1) {
+		if (Object.hasOwn(value, index)) values.push(value[index]);
+	}
+	return values;
 }
 
 function mapJsonPathSelection(

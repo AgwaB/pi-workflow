@@ -64,7 +64,7 @@ If you want deterministic manual control, use the slash command form:
 /workflow run deep-research "Research this repository and summarize the architecture tradeoffs."
 ```
 
-For opt-in lower-latency runs, add `--thinking low`; defaults remain conservative pending holdout evidence. See [`docs/usage.md`](./docs/usage.md).
+For opt-in lower-latency `deep-research` runs, add `--thinking low`. The measured deep-research pairs show a latency/verified-coverage tradeoff, not a general quality result; package defaults remain conservative. See [`docs/usage.md`](./docs/usage.md).
 
 For a one-off adaptive workflow that should plan, fan out, and synthesize without choosing a saved workflow, use:
 
@@ -75,6 +75,18 @@ For a one-off adaptive workflow that should plan, fan out, and synthesize withou
 `/workflow dynamic` uses pi-workflow's built-in trusted dynamic controller and records a normal workflow run under `.pi/workflows/`. Use it when you explicitly want adaptive orchestration rather than a named reusable workflow.
 
 To interrupt a non-terminal run and stop its local supervisor watch, use `/workflow stop <run-id>`. Resume later with `/workflow resume <run-id>` if unfinished tasks should be retried.
+
+### Diagnose a failed run
+
+Start with the run summary, then inspect only the failing task before resuming:
+
+```text
+/workflow status <run-id>
+/workflow logs <run-id> <task-id-or-spec-id> 120
+/workflow show <run-id>
+```
+
+For a terminal-friendly evidence view, run `pi-workflow inspect <run-id> --failures --results`. After fixing the reported access, configuration, output, or code problem, use `/workflow resume <run-id>`; completed task artifacts are preserved.
 
 ## Usage: choose an execution mode
 

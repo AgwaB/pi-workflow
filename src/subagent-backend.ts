@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import {
 	copyFile,
@@ -101,6 +101,9 @@ const DEFAULT_LAUNCH_SLOT_RELEASE_DELAY_MS = 3_000;
 const EXPERIMENTAL_LAUNCH_RAMP_RELEASE_DELAY_MS = 250;
 const STALE_LAUNCH_CLAIM_GRACE_MS = 30_000;
 const REFRESH_STATUS_RECONCILE_CONCURRENCY = 8;
+const SUBAGENT_LAUNCH_ACK_TIMEOUT_MS = 30_000;
+const SUBAGENT_REFRESH_OPERATION_TIMEOUT_MS = 10_000;
+const SUBAGENT_INTERRUPT_TIMEOUT_MS = 10_000;
 const MIN_TRANSIENT_RETRY_JITTER_MS = 1_000;
 const MAX_TRANSIENT_RETRY_JITTER_MS = 5_000;
 // Transcript hygiene for dynamically generated children (June-22 evidence:
@@ -449,12 +452,28 @@ const sharedModelRateLimitBackoffs = new Map<
 
 // Cross-process persistence for shared rate-limit backoffs. Provider rate
 // limits are account-level, so concurrent Pi processes (e.g. parallel eval
-// batches) should honor each other's cooldowns. The file is an advisory hint:
-// every read/write failure is swallowed, entries are ignored unless they
-// expire in the future and within the max backoff bound, and writes merge
-// monotonically so a racing process can only lengthen a cooldown, not
-// shorten it.
+// batches) should honor each other's cooldowns. The file is an advisory hint;
+// writes serialize through a dedicated lock and merge maxima under that lock.
 const SHARED_RATE_LIMIT_BACKOFF_MAX_PERSISTED_KEYS = 32;
+const SHARED_RATE_LIMIT_BACKOFF_LOCK_WAIT_MS = 5_000;
+const SHARED_RATE_LIMIT_BACKOFF_LOCK_RETRY_MS = 25;
+const SHARED_RATE_LIMIT_BACKOFF_LOCK_STALE_MS = 30_000;
+
+interface SharedRateLimitPersistenceTelemetry {
+	failures: number;
+	lastFailureAt?: string;
+	lastError?: string;
+	lastFile?: string;
+	lastKey?: string;
+}
+
+let sharedRateLimitPersistenceTelemetry: SharedRateLimitPersistenceTelemetry = {
+	failures: 0,
+};
+
+export function sharedRateLimitPersistenceTelemetryForTests(): SharedRateLimitPersistenceTelemetry {
+	return { ...sharedRateLimitPersistenceTelemetry };
+}
 
 function sharedModelRateLimitBackoffFile(): string {
 	return join(homedir(), ".pi", "agent", "model-rate-limit-backoff.json");
@@ -507,50 +526,102 @@ async function loadPersistedSharedModelRateLimitBackoffs(): Promise<void> {
 	}
 }
 
-async function persistSharedModelRateLimitBackoffs(): Promise<void> {
-	try {
-		const file = sharedModelRateLimitBackoffFile();
-		const nowMs = Date.now();
-		const merged = new Map<string, SharedModelRateLimitBackoffState>();
-		let onDisk: unknown;
+async function withSharedRateLimitBackoffLock<T>(
+	file: string,
+	action: () => Promise<T>,
+): Promise<T> {
+	const lockDir = `${file}.lock`;
+	await mkdir(dirname(file), { recursive: true });
+	const deadline = Date.now() + SHARED_RATE_LIMIT_BACKOFF_LOCK_WAIT_MS;
+	while (true) {
 		try {
-			onDisk = JSON.parse(await readFile(file, "utf8"));
-		} catch {
-			onDisk = undefined;
-		}
-		if (onDisk && typeof onDisk === "object" && !Array.isArray(onDisk)) {
-			for (const [key, value] of Object.entries(
-				onDisk as Record<string, unknown>,
-			)) {
-				const state = validPersistedSharedBackoff(value, nowMs);
-				if (state) merged.set(key, state);
+			await mkdir(lockDir);
+			break;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+			const lockStat = await stat(lockDir).catch(() => undefined);
+			if (
+				lockStat &&
+				Date.now() - lockStat.mtimeMs > SHARED_RATE_LIMIT_BACKOFF_LOCK_STALE_MS
+			) {
+				await rm(lockDir, { recursive: true, force: true });
+				continue;
 			}
+			if (Date.now() >= deadline) {
+				throw new Error(`timed out acquiring shared rate-limit lock: ${lockDir}`);
+			}
+			await sleep(SHARED_RATE_LIMIT_BACKOFF_LOCK_RETRY_MS);
 		}
-		for (const [key, state] of sharedModelRateLimitBackoffs) {
-			if (state.nextEligibleAtMs <= nowMs) continue;
-			const existing = merged.get(key);
-			if (!existing || state.nextEligibleAtMs > existing.nextEligibleAtMs)
-				merged.set(key, state);
-		}
-		const entries = [...merged.entries()]
-			.sort((a, b) => b[1].nextEligibleAtMs - a[1].nextEligibleAtMs)
-			.slice(0, SHARED_RATE_LIMIT_BACKOFF_MAX_PERSISTED_KEYS);
-		const tmpFile = `${file}.tmp-${process.pid}-${Date.now().toString(36)}`;
-		await mkdir(dirname(file), { recursive: true });
-		await writeFile(
-			tmpFile,
-			`${JSON.stringify(Object.fromEntries(entries), null, 2)}\n`,
-			"utf8",
-		);
-		await rename(tmpFile, file);
-	} catch {
-		// advisory cross-process hint only; never fail the caller
+	}
+	try {
+		return await action();
+	} finally {
+		await rm(lockDir, { recursive: true, force: true });
+	}
+}
+
+async function persistSharedModelRateLimitBackoffs(
+	changedKey: string,
+): Promise<void> {
+	const file = sharedModelRateLimitBackoffFile();
+	try {
+		await withSharedRateLimitBackoffLock(file, async () => {
+			const nowMs = Date.now();
+			const merged = new Map<string, SharedModelRateLimitBackoffState>();
+			let onDisk: unknown;
+			try {
+				onDisk = JSON.parse(await readFile(file, "utf8"));
+			} catch {
+				onDisk = undefined;
+			}
+			if (onDisk && typeof onDisk === "object" && !Array.isArray(onDisk)) {
+				for (const [key, value] of Object.entries(
+					onDisk as Record<string, unknown>,
+				)) {
+					const state = validPersistedSharedBackoff(value, nowMs);
+					if (state) merged.set(key, state);
+				}
+			}
+			for (const [key, state] of sharedModelRateLimitBackoffs) {
+				if (state.nextEligibleAtMs <= nowMs) continue;
+				const existing = merged.get(key);
+				if (!existing || state.nextEligibleAtMs > existing.nextEligibleAtMs)
+					merged.set(key, state);
+			}
+			const entries = [...merged.entries()]
+				.sort((a, b) => b[1].nextEligibleAtMs - a[1].nextEligibleAtMs)
+				.slice(0, SHARED_RATE_LIMIT_BACKOFF_MAX_PERSISTED_KEYS);
+			const tmpFile = `${file}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`;
+			try {
+				await writeFile(
+					tmpFile,
+					`${JSON.stringify(Object.fromEntries(entries), null, 2)}\n`,
+					"utf8",
+				);
+				await rename(tmpFile, file);
+			} finally {
+				await rm(tmpFile, { force: true });
+			}
+		});
+	} catch (error) {
+		sharedRateLimitPersistenceTelemetry = {
+			failures: sharedRateLimitPersistenceTelemetry.failures + 1,
+			lastFailureAt: nowIso(),
+			lastError: error instanceof Error ? error.message : String(error),
+			lastFile: file,
+			lastKey: changedKey,
+		};
+		// Advisory cross-process hint only: retain the local cooldown and let the
+		// caller continue, while exposing structured failure telemetry.
 	}
 }
 
 function removePersistedSharedModelRateLimitBackoffsForTests(): void {
 	try {
-		rmSync(sharedModelRateLimitBackoffFile(), { force: true });
+		const file = sharedModelRateLimitBackoffFile();
+		rmSync(file, { force: true });
+		rmSync(`${file}.lock`, { recursive: true, force: true });
+		sharedRateLimitPersistenceTelemetry = { failures: 0 };
 	} catch {
 		// best-effort test hygiene
 	}
@@ -590,6 +661,60 @@ function abortSignalError(signal: AbortSignal): Error {
 
 function throwIfAborted(signal?: AbortSignal): void {
 	if (signal?.aborted) throw abortSignalError(signal);
+}
+
+export class SubagentOperationTimeoutError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "SubagentOperationTimeoutError";
+	}
+}
+
+export async function awaitSubagentOperation<T>(
+	operation: () => Promise<T>,
+	options: {
+		operation: string;
+		context: string;
+		timeoutMs: number;
+		signal?: AbortSignal;
+	},
+): Promise<T> {
+	throwIfAborted(options.signal);
+	const timeoutMs = Math.max(1, Math.floor(options.timeoutMs));
+	return new Promise<T>((resolveOperation, rejectOperation) => {
+		let settled = false;
+		let abortListener: (() => void) | undefined;
+		const finish = (callback: () => void) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			if (options.signal && abortListener) {
+				options.signal.removeEventListener("abort", abortListener);
+			}
+			callback();
+		};
+		const timer = setTimeout(() => {
+			finish(() =>
+				rejectOperation(
+					new SubagentOperationTimeoutError(
+						`subagent ${options.operation} timed out after ${timeoutMs}ms (${options.context})`,
+					),
+				),
+			);
+		}, timeoutMs);
+		if (options.signal) {
+			abortListener = () => {
+				finish(() => rejectOperation(abortSignalError(options.signal!)));
+			};
+			options.signal.addEventListener("abort", abortListener, { once: true });
+		}
+		Promise.resolve()
+			.then(operation)
+			.then(
+				(value) => finish(() => resolveOperation(value)),
+				(error: unknown) => finish(() => rejectOperation(error)),
+			);
+	});
 }
 
 function removeWaiter(queue: WaitQueueEntry[], waiter: WaitQueueEntry): void {
@@ -1729,12 +1854,22 @@ export async function cleanupSubagentRun(
 	_cwd: string,
 	run: WorkflowRunRecord,
 ): Promise<void> {
-	try {
-		for (const task of run.tasks) {
+	const errors: unknown[] = [];
+	for (const task of run.tasks) {
+		if (task.status !== "running") continue;
+		try {
 			await interruptSubagentTask(task, "workflow cleanup");
+			task.statusDetail = "cancellation_acknowledged";
+			task.lastMessage = "backend cancellation acknowledged";
+			releaseLiveModelWorkerSlotForTask(run, task);
+		} catch (error) {
+			task.statusDetail = "cancellation_failed";
+			task.lastMessage = `backend cancellation failed: ${error instanceof Error ? error.message : String(error)}`;
+			errors.push(error);
 		}
-	} finally {
-		for (const task of run.tasks) releaseLiveModelWorkerSlotForTask(run, task);
+	}
+	if (errors.length > 0) {
+		throw new AggregateError(errors, "one or more backend cancellations failed");
 	}
 }
 
@@ -1745,15 +1880,21 @@ export async function interruptSubagentTask(
 	const handle = getSubagentHandle(task);
 	if (!handle) return;
 	const api = await loadSubagentApi();
-	await api
-		.interruptSubagent({
-			cwd: handle.cwd,
-			runsDir: handle.runsDir,
-			runId: handle.runId,
-			attemptId: handle.attemptId,
-			reason,
-		})
-		.catch(() => undefined);
+	await awaitSubagentOperation(
+		() =>
+			api.interruptSubagent({
+				cwd: handle.cwd,
+				runsDir: handle.runsDir,
+				runId: handle.runId,
+				attemptId: handle.attemptId,
+				reason,
+			}),
+		{
+			operation: "interrupt",
+			context: `task ${task.taskId} (${task.specId}) subagent run ${handle.runId}/${handle.attemptId}`,
+			timeoutMs: SUBAGENT_INTERRUPT_TIMEOUT_MS,
+		},
+	);
 }
 
 export async function launchSubagentTask(
@@ -1929,7 +2070,15 @@ export async function launchSubagentTask(
 		launched = await runWithLaunchSlot(
 			() => {
 				throwIfAborted(leaseSignal);
-				return runSubagentWithWorkflowWorkerRole(api, subagentOptions);
+				return awaitSubagentOperation(
+					() => runSubagentWithWorkflowWorkerRole(api, subagentOptions),
+					{
+						operation: "launch acknowledgement",
+						context: `workflow run ${run.runId} task ${task.taskId} (${task.specId})`,
+						timeoutMs: SUBAGENT_LAUNCH_ACK_TIMEOUT_MS,
+						signal: leaseSignal,
+					},
+				);
 			},
 			() => {
 				launchStartedAt = nowIso();
@@ -1943,8 +2092,26 @@ export async function launchSubagentTask(
 			launchCompletedAt: nowIso(),
 		});
 	} catch (error) {
+		if (leaseSignal?.aborted) {
+			task.status = "running";
+			task.statusDetail = "launch_ack_aborted";
+			task.lastMessage =
+				"launch acknowledgement wait aborted; retaining claim for correlation-based recovery";
+			await writeRunRecord(cwd, run).catch(() => undefined);
+			throw error;
+		}
+		if (error instanceof SubagentOperationTimeoutError) {
+			task.status = "running";
+			task.statusDetail = "launch_ack_timeout";
+			task.lastMessage = `${error.message}; retaining launch claim for correlation-based recovery`;
+			await writeRunRecord(cwd, run).catch(() => undefined);
+			return {
+				kind: "capacity",
+				message: task.lastMessage,
+				retryAfterMs: STALE_LAUNCH_CLAIM_GRACE_MS,
+			};
+		}
 		releaseLiveModelWorkerSlot?.();
-		if (leaseSignal?.aborted) throw error;
 		task.status = "pending";
 		task.statusDetail = "pending";
 		task.startedAt = undefined;
@@ -2029,6 +2196,7 @@ export async function refreshRunFromSubagentArtifacts(
 		if (!handle) {
 			if (isStaleLaunchClaim(task)) {
 				resetStaleLaunchClaim(task);
+				releaseLiveModelWorkerSlotForTask(run, task);
 				changed = true;
 				continue;
 			}
@@ -2067,9 +2235,14 @@ export async function refreshRunFromSubagentArtifacts(
 
 		if (snapshot === null) {
 			if (isTaskTimedOut(task)) {
-				await interruptTimedOutSubagent(api!, handle);
-				markSubagentTaskTimedOut(task);
-				releaseLiveModelWorkerSlotForTask(run, task);
+				try {
+					await interruptTimedOutSubagent(api!, task, handle);
+					markSubagentTaskTimedOut(task);
+					releaseLiveModelWorkerSlotForTask(run, task);
+				} catch (error) {
+					markCancellationFailed(task, "timeout", error);
+					refreshErrors.push(error);
+				}
 				changed = true;
 			}
 			continue;
@@ -2100,9 +2273,14 @@ export async function refreshRunFromSubagentArtifacts(
 				changed = true;
 			}
 			if (isTaskTimedOut(task)) {
-				await interruptTimedOutSubagent(api!, handle);
-				markSubagentTaskTimedOut(task);
-				releaseLiveModelWorkerSlotForTask(run, task);
+				try {
+					await interruptTimedOutSubagent(api!, task, handle);
+					markSubagentTaskTimedOut(task);
+					releaseLiveModelWorkerSlotForTask(run, task);
+				} catch (error) {
+					markCancellationFailed(task, "timeout", error);
+					refreshErrors.push(error);
+				}
 				changed = true;
 			}
 			continue;
@@ -2131,11 +2309,19 @@ async function pollSubagentForRefresh(
 	const { handle } = item;
 	const reconcileStartedAtMs = Date.now();
 	try {
-		await api.reconcileSubagentRun({
-			cwd: handle.cwd,
-			runsDir: handle.runsDir,
-			runId: handle.runId,
-		});
+		await awaitSubagentOperation(
+			() =>
+				api.reconcileSubagentRun({
+					cwd: handle.cwd,
+					runsDir: handle.runsDir,
+					runId: handle.runId,
+				}),
+			{
+				operation: "reconcile",
+				context: `workflow run ${item.workflowRunId} task ${item.task.taskId} subagent run ${handle.runId}/${handle.attemptId}`,
+				timeoutMs: SUBAGENT_REFRESH_OPERATION_TIMEOUT_MS,
+			},
+		);
 	} catch (error) {
 		throw refreshPollError(item, "reconcile", error);
 	}
@@ -2143,12 +2329,20 @@ async function pollSubagentForRefresh(
 	const statusPollStartedAtMs = Date.now();
 	let snapshot: SubagentRunStatusSnapshot | null;
 	try {
-		snapshot = await api.getSubagentStatus({
-			cwd: handle.cwd,
-			runsDir: handle.runsDir,
-			runId: handle.runId,
-			attemptId: handle.attemptId,
-		});
+		snapshot = await awaitSubagentOperation(
+			() =>
+				api.getSubagentStatus({
+					cwd: handle.cwd,
+					runsDir: handle.runsDir,
+					runId: handle.runId,
+					attemptId: handle.attemptId,
+				}),
+			{
+				operation: "status",
+				context: `workflow run ${item.workflowRunId} task ${item.task.taskId} subagent run ${handle.runId}/${handle.attemptId}`,
+				timeoutMs: SUBAGENT_REFRESH_OPERATION_TIMEOUT_MS,
+			},
+		);
 	} catch (error) {
 		throw refreshPollError(item, "status", error);
 	}
@@ -2218,17 +2412,33 @@ async function refreshRunningArtifactGraphPartialOutput(
 
 async function interruptTimedOutSubagent(
 	api: Awaited<ReturnType<typeof loadSubagentApi>>,
+	task: WorkflowTaskRunRecord,
 	handle: NonNullable<WorkflowTaskRunRecord["backendHandle"]>,
 ): Promise<void> {
-	await api
-		.interruptSubagent({
-			cwd: handle.cwd,
-			runsDir: handle.runsDir,
-			runId: handle.runId,
-			attemptId: handle.attemptId,
-			reason: "workflow timeout",
-		})
-		.catch(() => undefined);
+	await awaitSubagentOperation(
+		() =>
+			api.interruptSubagent({
+				cwd: handle.cwd,
+				runsDir: handle.runsDir,
+				runId: handle.runId,
+				attemptId: handle.attemptId,
+				reason: "workflow timeout",
+			}),
+		{
+			operation: "timeout interrupt",
+			context: `task ${task.taskId} (${task.specId}) subagent run ${handle.runId}/${handle.attemptId}`,
+			timeoutMs: SUBAGENT_INTERRUPT_TIMEOUT_MS,
+		},
+	);
+}
+
+function markCancellationFailed(
+	task: WorkflowTaskRunRecord,
+	reason: string,
+	error: unknown,
+): void {
+	task.statusDetail = "cancellation_failed";
+	task.lastMessage = `${reason} cancellation failed; backend handle preserved: ${error instanceof Error ? error.message : String(error)}`;
 }
 
 function markSubagentTaskTimedOut(task: WorkflowTaskRunRecord): void {
@@ -2239,7 +2449,13 @@ function markSubagentTaskTimedOut(task: WorkflowTaskRunRecord): void {
 }
 
 function isStaleLaunchClaim(task: WorkflowTaskRunRecord): boolean {
-	if (task.statusDetail !== "launching" || !task.startedAt) return false;
+	if (
+		(task.statusDetail !== "launching" &&
+			task.statusDetail !== "launch_ack_timeout" &&
+			task.statusDetail !== "launch_ack_aborted") ||
+		!task.startedAt
+	)
+		return false;
 	const startedAtMs = Date.parse(task.startedAt);
 	return (
 		Number.isFinite(startedAtMs) &&
@@ -3489,7 +3705,7 @@ async function recordSharedModelRateLimitBackoff(
 		retryAfterMs: Math.max(0, boundedNextEligibleAtMs - nowMs),
 		updatedAt: nowIso(),
 	});
-	await persistSharedModelRateLimitBackoffs();
+	await persistSharedModelRateLimitBackoffs(key);
 }
 
 async function sharedModelRateLimitBackoffRemaining(key: string): Promise<

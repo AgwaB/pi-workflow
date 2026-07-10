@@ -4,31 +4,35 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to publish, e.g. 0.1.1 or 0.2.0"
+        description: "Version to publish, e.g. 0.7.3 or 0.8.0"
         required: true
         type: string
 
-permissions:
-  contents: write
-  id-token: write
+permissions: {}
 
 concurrency:
   group: publish-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  npm:
+  build:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
+      package-sha: ${{ steps.package.outputs.package-sha }}
+      version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: 24
-          registry-url: https://registry.npmjs.org
           package-manager-cache: false
 
       - name: Show Node/npm versions
@@ -36,83 +40,226 @@ jobs:
           node --version
           npm --version
 
-      - run: npm ci --legacy-peer-deps
-
-      - name: Configure git author
+      - name: Prepare requested version without lifecycle scripts
+        id: version
+        env:
+          TARGET_VERSION: ${{ inputs.version }}
         run: |
+          set -euo pipefail
+          if ! [[ "$TARGET_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "version must be an exact semver without a v prefix" >&2
+            exit 1
+          fi
+          current="$(node -p "require('./package.json').version")"
+          if [ "$current" != "$TARGET_VERSION" ]; then
+            npm version "$TARGET_VERSION" --no-git-tag-version --ignore-scripts
+          fi
+          test "$(node -p "require('./package.json').version")" = "$TARGET_VERSION"
+          test "$(node -p "require('./package-lock.json').version")" = "$TARGET_VERSION"
+          echo "version=$TARGET_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Install locked dependencies without lifecycle scripts
+        run: npm ci --legacy-peer-deps --ignore-scripts
+
+      - name: Release validation in read-only privilege context
+        env:
+          PI_WORKFLOW_ALLOW_PUBLISHED_VERSION: "1"
+        run: npm run release:check
+
+      - name: Create exact validated release commit, tag, package, and metadata
+        id: package
+        env:
+          TARGET_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Prepare release version
-        id: prepare
+          git diff --exit-code -- . ':(exclude)package.json' ':(exclude)package-lock.json'
+          test -z "$(git ls-files --others --exclude-standard)"
+          git add package.json package-lock.json
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(release): v$TARGET_VERSION"
+          fi
+          if git rev-parse -q --verify "refs/tags/v$TARGET_VERSION" >/dev/null; then
+            test "$(git rev-list -n 1 "refs/tags/v$TARGET_VERSION")" = "$(git rev-parse HEAD)"
+          else
+            git tag "v$TARGET_VERSION"
+          fi
+          test -z "$(git status --porcelain)"
+
+          pack_json="$(npm pack --ignore-scripts --json)"
+          package_file="$(node -e 'const [p]=JSON.parse(process.argv[1]); process.stdout.write(p.filename)' "$pack_json")"
+          package_sha="$(sha256sum "$package_file" | awk '{print $1}')"
+          echo "package-sha=$package_sha" >> "$GITHUB_OUTPUT"
+          git bundle create release.bundle HEAD "refs/tags/v$TARGET_VERSION"
+
+          export PACKAGE_FILE="$package_file"
+          export PACKAGE_SHA="$package_sha"
+          export BASE_SHA="${{ github.sha }}"
+          export RELEASE_COMMIT="$(git rev-parse HEAD)"
+          export RELEASE_TREE="$(git rev-parse HEAD^{tree})"
+          node <<'NODE'
+          const fs = require('node:fs');
+          const pkg = require('./package.json');
+          fs.writeFileSync('release-metadata.json', `${JSON.stringify({
+            schema: 'pi-workflow-release-metadata-v1',
+            name: pkg.name,
+            version: process.env.TARGET_VERSION,
+            baseSha: process.env.BASE_SHA,
+            releaseCommit: process.env.RELEASE_COMMIT,
+            releaseTree: process.env.RELEASE_TREE,
+            packageFile: process.env.PACKAGE_FILE,
+            packageSha256: process.env.PACKAGE_SHA,
+          }, null, 2)}\n`);
+          NODE
+          test "$(node -p "require('./release-metadata.json').version")" = "$TARGET_VERSION"
+
+      - name: Upload exact release artifact
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-artifact
+          path: |
+            release.bundle
+            release-metadata.json
+            *.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: release-artifact
+          path: release-artifact
+
+      - name: Verify and publish exact tarball without lifecycle scripts
         env:
-          TARGET_VERSION: ${{ inputs.version }}
+          BUILD_PACKAGE_SHA: ${{ needs.build.outputs.package-sha }}
+          TARGET_VERSION: ${{ needs.build.outputs.version }}
         run: |
           set -euo pipefail
-          target="$TARGET_VERSION"
-          current="$(node -p "require('./package.json').version")"
-          needs_push=false
+          metadata=release-artifact/release-metadata.json
+          test "$(node -p "require('./$metadata').version")" = "$TARGET_VERSION"
+          name="$(node -p "require('./$metadata').name")"
+          package_file="$(node -p "require('./$metadata').packageFile")"
+          expected_sha="$(node -p "require('./$metadata').packageSha256")"
+          actual_sha="$(sha256sum "release-artifact/$package_file" | awk '{print $1}')"
+          test "$expected_sha" = "$BUILD_PACKAGE_SHA"
+          test "$actual_sha" = "$BUILD_PACKAGE_SHA"
 
-          if [ "$current" = "$target" ]; then
-            echo "package.json is already at $target; skipping npm version."
-            if ! git rev-parse -q --verify "refs/tags/v$target" >/dev/null 2>&1; then
-              git tag "v$target"
-            fi
-            if ! git ls-remote --exit-code --tags origin "refs/tags/v$target" >/dev/null 2>&1; then
-              needs_push=true
-            fi
+          integrity="$(npm view "$name@$TARGET_VERSION" dist.integrity 2>/dev/null || true)"
+          if [ -n "$integrity" ]; then
+            export PACKAGE_PATH="release-artifact/$package_file" EXPECTED_INTEGRITY="$integrity"
+            node --input-type=commonjs --eval '
+            const crypto = require("node:crypto");
+            const fs = require("node:fs");
+            const actual = `sha512-${crypto.createHash("sha512").update(fs.readFileSync(process.env.PACKAGE_PATH)).digest("base64")}`;
+            if (actual !== process.env.EXPECTED_INTEGRITY) {
+              throw new Error(`published package integrity mismatch: expected ${process.env.EXPECTED_INTEGRITY}, got ${actual}`);
+            }
+            '
+            echo "$name@$TARGET_VERSION already exists with identical integrity; skipping publish."
           else
-            npm version "$target" -m "chore(release): %s"
-            needs_push=true
+            npm publish "release-artifact/$package_file" --access public --provenance --ignore-scripts
           fi
 
-          echo "needs_push=$needs_push" >> "$GITHUB_OUTPUT"
+  release:
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+      id-token: none
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
 
-      - name: Check npm package version
-        id: npm_version
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: release-artifact
+          path: release-artifact
+
+      - name: Verify exact commit, package identity, and unchanged main
+        id: verify
         env:
-          TARGET_VERSION: ${{ inputs.version }}
+          BUILD_PACKAGE_SHA: ${{ needs.build.outputs.package-sha }}
+          TARGET_VERSION: ${{ needs.build.outputs.version }}
         run: |
           set -euo pipefail
-          name="$(node -p "require('./package.json').name")"
-          version="$TARGET_VERSION"
-          if npm view "$name@$version" version >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "$name@$version already exists on npm; publish will be skipped."
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
+          metadata=release-artifact/release-metadata.json
+          test "$(node -p "require('./$metadata').baseSha")" = "${{ github.sha }}"
+          test "$(node -p "require('./$metadata').version")" = "$TARGET_VERSION"
+          release_commit="$(node -p "require('./$metadata').releaseCommit")"
+          release_tree="$(node -p "require('./$metadata').releaseTree")"
+          package_file="$(node -p "require('./$metadata').packageFile")"
+          package_sha="$(node -p "require('./$metadata').packageSha256")"
+          test "$package_sha" = "$BUILD_PACKAGE_SHA"
+          test "$(sha256sum "release-artifact/$package_file" | awk '{print $1}')" = "$BUILD_PACKAGE_SHA"
+
+          git bundle verify release-artifact/release.bundle
+          git fetch release-artifact/release.bundle "refs/tags/v$TARGET_VERSION:refs/tags/release-candidate"
+          test "$(git rev-list -n 1 refs/tags/release-candidate)" = "$release_commit"
+          test "$(git rev-parse "$release_commit^{tree}")" = "$release_tree"
+          if [ "$release_commit" != "${{ github.sha }}" ]; then
+            test "$(git rev-parse "$release_commit^")" = "${{ github.sha }}"
           fi
 
-      - name: Release validation
-        if: steps.npm_version.outputs.exists != 'true'
-        run: npm run release:check
+          remote_main="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
+          test "$remote_main" = "${{ github.sha }}"
 
-      - name: Validation for already-published version
-        if: steps.npm_version.outputs.exists == 'true'
-        run: |
-          npm run validate
-          npm run e2e
-          npm run pack:dry
+          name="$(node -p "require('./$metadata').name")"
+          integrity="$(npm view "$name@$TARGET_VERSION" dist.integrity)"
+          export PACKAGE_PATH="release-artifact/$package_file" EXPECTED_INTEGRITY="$integrity"
+          node <<'NODE'
+          const crypto = require('node:crypto');
+          const fs = require('node:fs');
+          const actual = `sha512-${crypto.createHash('sha512').update(fs.readFileSync(process.env.PACKAGE_PATH)).digest('base64')}`;
+          if (actual !== process.env.EXPECTED_INTEGRITY) throw new Error('registry/package artifact integrity mismatch');
+          NODE
+          echo "release_commit=$release_commit" >> "$GITHUB_OUTPUT"
 
-      - name: Publish to npm
-        if: steps.npm_version.outputs.exists != 'true'
-        run: npm publish --access public --provenance
-
-      - name: Push release commit and tag
-        if: steps.prepare.outputs.needs_push == 'true'
+      - name: Push the exact validated release commit and tag
         env:
-          TARGET_VERSION: ${{ inputs.version }}
+          GITHUB_TOKEN: ${{ github.token }}
+          TARGET_VERSION: ${{ needs.build.outputs.version }}
+          RELEASE_COMMIT: ${{ steps.verify.outputs.release_commit }}
         run: |
-          git push origin HEAD:main
-          git push origin "refs/tags/v$TARGET_VERSION"
+          set -euo pipefail
+          remote="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push "$remote" "$RELEASE_COMMIT:refs/heads/main" "$RELEASE_COMMIT:refs/tags/v$TARGET_VERSION"
 
-      - name: Create GitHub release
+      - name: Create GitHub release for the exact published commit
         env:
           GH_TOKEN: ${{ github.token }}
-          TARGET_VERSION: ${{ inputs.version }}
+          TARGET_VERSION: ${{ needs.build.outputs.version }}
+          RELEASE_COMMIT: ${{ steps.verify.outputs.release_commit }}
         run: |
+          set -euo pipefail
           if gh release view "v$TARGET_VERSION" >/dev/null 2>&1; then
-            echo "GitHub release v$TARGET_VERSION already exists."
+            test "$(gh release view "v$TARGET_VERSION" --json targetCommitish --jq .targetCommitish)" = "$RELEASE_COMMIT"
           else
-            gh release create "v$TARGET_VERSION" --title "v$TARGET_VERSION" --generate-notes
+            gh release create "v$TARGET_VERSION" --target "$RELEASE_COMMIT" --title "v$TARGET_VERSION" --generate-notes
           fi

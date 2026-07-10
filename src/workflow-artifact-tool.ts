@@ -1,3 +1,4 @@
+import { constants as fsConstants, type Stats } from "node:fs";
 import {
 	appendFile,
 	lstat,
@@ -6,6 +7,7 @@ import {
 	readFile,
 	realpath,
 	stat,
+	type FileHandle,
 } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 
@@ -158,9 +160,25 @@ const workflowArtifactReadDedupCache = new Map<
 	string,
 	WorkflowArtifactReadResult
 >();
+const completedWorkflowArtifactReadCache = new Map<
+	string,
+	WorkflowArtifactReadResult
+>();
+const COMPLETED_ARTIFACT_READ_CACHE_MAX = 128;
 const DEFAULT_MAX_BYTES = 50 * 1024;
 const DEFAULT_MAX_LINES = 2000;
 const SOURCE_NAME_PATTERN = /^[A-Za-z0-9_.:-]+$/;
+let artifactValidatedHookForTests: (() => void | Promise<void>) | undefined;
+
+export function setArtifactValidatedHookForTests(
+	hook: (() => void | Promise<void>) | undefined,
+): void {
+	artifactValidatedHookForTests = hook;
+}
+
+export function clearCompletedArtifactReadCacheForTests(): void {
+	completedWorkflowArtifactReadCache.clear();
+}
 const SIMPLE_JSON_PATH_DIAGNOSTIC =
 	"path must be $ or a simple dot JSON path with optional array selectors/slices like $.claims[0], $.claims[0:2], $.claims[*], or $[0:2]";
 const JSON_PATH_SEGMENT_ALIASES: Record<string, string> = {
@@ -393,76 +411,115 @@ export async function readWorkflowArtifact(
 		options,
 	);
 	const artifactPath = resolved.ref.path;
-	const linkStat = await lstat(artifactPath);
+	const opened = await openValidatedArtifactFile({
+		artifactPath,
+		runDir: options.runDir,
+		label: `${sourceName}.${artifact}`,
+	});
+	try {
+		if (options.path !== undefined) {
+			return readProjectedWorkflowArtifact({
+				source: resolved.source.source,
+				artifact: resolved.artifact,
+				file: opened.file,
+				bytes: opened.fileStat.size,
+				mediaType: resolved.ref.mediaType,
+				path: options.path,
+				maxItems: options.maxItems,
+				maxChars: options.maxChars,
+			});
+		}
+		if (options.maxItems !== undefined || options.maxChars !== undefined) {
+			throw new Error("workflow_artifact maxItems/maxChars require path");
+		}
+		const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
+		const maxLines = options.maxLines ?? DEFAULT_MAX_LINES;
+		const sizeTruncated = opened.fileStat.size > maxBytes;
+		const text = sizeTruncated
+			? await readUtf8Prefix(opened.file, maxBytes)
+			: await opened.file.readFile({ encoding: "utf8" });
+		const bytes = opened.fileStat.size;
+		const truncated = truncateHead(text, {
+			maxBytes,
+			maxLines,
+		});
+		return {
+			source: resolved.source.source,
+			artifact: resolved.artifact,
+			content: truncated.content,
+			bytes,
+			returnedBytes: Buffer.byteLength(truncated.content, "utf8"),
+			truncated: truncated.truncated || sizeTruncated,
+			mediaType: resolved.ref.mediaType,
+		};
+	} finally {
+		await opened.file.close();
+	}
+}
+
+async function openValidatedArtifactFile(options: {
+	artifactPath: string;
+	runDir?: string;
+	label: string;
+}): Promise<{ file: FileHandle; fileStat: Stats }> {
+	const linkStat = await lstat(options.artifactPath);
 	if (linkStat.isSymbolicLink()) {
+		throw new Error(`workflow artifact must not be a symlink: ${options.label}`);
+	}
+	const validatedStat = await stat(options.artifactPath);
+	if (!validatedStat.isFile()) {
 		throw new Error(
-			`workflow artifact must not be a symlink: ${sourceName}.${artifact}`,
+			`workflow artifact is not a regular file: ${options.label}`,
 		);
 	}
-	const fileStat = await stat(artifactPath);
-	if (!fileStat.isFile())
-		throw new Error(
-			`workflow artifact is not a regular file: ${sourceName}.${artifact}`,
-		);
+	if (validatedStat.nlink > 1) {
+		throw new Error(`workflow artifact must not be hard-linked: ${options.label}`);
+	}
 	if (options.runDir) {
 		const [realRunDir, realArtifactPath] = await Promise.all([
 			realpath(resolve(options.runDir)),
-			realpath(artifactPath),
+			realpath(options.artifactPath),
 		]);
 		if (!isInsidePath(realRunDir, realArtifactPath)) {
 			throw new Error(
-				`workflow artifact must stay inside the workflow run directory: ${sourceName}.${artifact}`,
+				`workflow artifact must stay inside the workflow run directory: ${options.label}`,
 			);
 		}
 	}
-	if (options.path !== undefined) {
-		return readProjectedWorkflowArtifact({
-			source: resolved.source.source,
-			artifact: resolved.artifact,
-			artifactPath,
-			bytes: fileStat.size,
-			mediaType: resolved.ref.mediaType,
-			path: options.path,
-			maxItems: options.maxItems,
-			maxChars: options.maxChars,
-		});
+	await artifactValidatedHookForTests?.();
+	const file = await open(
+		options.artifactPath,
+		fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+	);
+	try {
+		const fileStat = await file.stat();
+		if (
+			!fileStat.isFile() ||
+			fileStat.dev !== validatedStat.dev ||
+			fileStat.ino !== validatedStat.ino
+		) {
+			throw new Error(
+				`workflow artifact changed during validation: ${options.label}`,
+			);
+		}
+		return { file, fileStat };
+	} catch (error) {
+		await file.close();
+		throw error;
 	}
-	if (options.maxItems !== undefined || options.maxChars !== undefined) {
-		throw new Error("workflow_artifact maxItems/maxChars require path");
-	}
-	const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
-	const maxLines = options.maxLines ?? DEFAULT_MAX_LINES;
-	const sizeTruncated = fileStat.size > maxBytes;
-	const text = sizeTruncated
-		? await readUtf8Prefix(artifactPath, maxBytes)
-		: await readFile(artifactPath, "utf8");
-	const bytes = fileStat.size;
-	const truncated = truncateHead(text, {
-		maxBytes,
-		maxLines,
-	});
-	return {
-		source: resolved.source.source,
-		artifact: resolved.artifact,
-		content: truncated.content,
-		bytes,
-		returnedBytes: Buffer.byteLength(truncated.content, "utf8"),
-		truncated: truncated.truncated || sizeTruncated,
-		mediaType: resolved.ref.mediaType,
-	};
 }
 
 async function readProjectedWorkflowArtifact(options: {
 	source: string;
 	artifact: WorkflowArtifactKind;
-	artifactPath: string;
+	file: FileHandle;
 	bytes: number;
 	mediaType?: string;
 	path: string;
 	maxItems?: number;
 	maxChars?: number;
 }): Promise<WorkflowArtifactReadResult> {
-	const parsed = JSON.parse(await readFile(options.artifactPath, "utf8"));
+	const parsed = JSON.parse(await options.file.readFile({ encoding: "utf8" }));
 	let effectivePath = options.path;
 	let resolved: unknown;
 	for (const candidatePath of projectionPathCandidates(
@@ -658,6 +715,43 @@ export async function readWorkflowArtifactReadLedger(
 		);
 }
 
+function completedArtifactReadCacheKey(
+	config: WorkflowArtifactToolConfig,
+	accessMode: WorkflowArtifactAccessMode,
+	input: {
+		action: "read";
+		source?: string;
+		artifact?: string;
+		path?: string;
+		maxItems?: number;
+		maxChars?: number;
+	},
+	artifactPath: string,
+): string {
+	return JSON.stringify({
+		base: workflowArtifactReadDedupKey(config, accessMode, input),
+		artifactPath: resolve(artifactPath),
+		maxBytes: config.maxBytes,
+		maxLines: config.maxLines,
+	});
+}
+
+function rememberCompletedArtifactRead(
+	key: string,
+	read: WorkflowArtifactReadResult,
+): void {
+	if (completedWorkflowArtifactReadCache.has(key))
+		completedWorkflowArtifactReadCache.delete(key);
+	completedWorkflowArtifactReadCache.set(key, read);
+	while (
+		completedWorkflowArtifactReadCache.size > COMPLETED_ARTIFACT_READ_CACHE_MAX
+	) {
+		const oldest = completedWorkflowArtifactReadCache.keys().next().value;
+		if (typeof oldest !== "string") break;
+		completedWorkflowArtifactReadCache.delete(oldest);
+	}
+}
+
 function workflowArtifactReadDedupKey(
 	config: WorkflowArtifactToolConfig,
 	accessMode: WorkflowArtifactAccessMode,
@@ -777,20 +871,43 @@ export async function handleWorkflowArtifactToolCall(
 			},
 		};
 	}
-	const read = await readWorkflowArtifact(
+	const resolvedArtifact = resolveWorkflowArtifact(
 		manifest,
 		input.source,
 		input.artifact,
-		{
-			accessMode,
-			maxBytes: config.maxBytes,
-			maxLines: config.maxLines,
-			runDir,
-			path: input.path,
-			maxItems: input.maxItems,
-			maxChars: input.maxChars,
-		},
+		{ accessMode },
 	);
+	const completedCacheKey =
+		resolvedArtifact.source.status === "completed"
+			? completedArtifactReadCacheKey(
+					config,
+					accessMode,
+					input,
+					resolvedArtifact.ref.path,
+				)
+			: undefined;
+	let read =
+		completedCacheKey === undefined
+			? undefined
+			: completedWorkflowArtifactReadCache.get(completedCacheKey);
+	if (read === undefined) {
+		read = await readWorkflowArtifact(
+			manifest,
+			input.source,
+			input.artifact,
+			{
+				accessMode,
+				maxBytes: config.maxBytes,
+				maxLines: config.maxLines,
+				runDir,
+				path: input.path,
+				maxItems: input.maxItems,
+				maxChars: input.maxChars,
+			},
+		);
+		if (completedCacheKey !== undefined)
+			rememberCompletedArtifactRead(completedCacheKey, read);
+	}
 	await appendWorkflowArtifactReadLedger(config.ledgerPath, {
 		schema: WORKFLOW_ARTIFACT_READ_SCHEMA,
 		runId: config.runId,
@@ -993,16 +1110,14 @@ function isInsidePath(parent: string, child: string): boolean {
 	return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
-async function readUtf8Prefix(path: string, maxBytes: number): Promise<string> {
+async function readUtf8Prefix(
+	file: FileHandle,
+	maxBytes: number,
+): Promise<string> {
 	if (maxBytes <= 0) return "";
-	const file = await open(path, "r");
-	try {
-		const buffer = Buffer.alloc(maxBytes);
-		const { bytesRead } = await file.read(buffer, 0, maxBytes, 0);
-		return buffer.subarray(0, bytesRead).toString("utf8");
-	} finally {
-		await file.close();
-	}
+	const buffer = Buffer.alloc(maxBytes);
+	const { bytesRead } = await file.read(buffer, 0, maxBytes, 0);
+	return buffer.subarray(0, bytesRead).toString("utf8");
 }
 
 function truncateHead(

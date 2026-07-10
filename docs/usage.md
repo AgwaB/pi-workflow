@@ -116,15 +116,14 @@ For reusable workflow authoring, `workflow-guide` includes validated scaffold bu
 | `/workflow validate <workflow-name-or-path>` | Load and compile a workflow without starting a run. Reports blocked permission previews and warnings. |
 | `/workflow roles <workflow-name-or-path>` | Show the compiled role context included for each workflow role. |
 | `/workflow agents` | List discoverable Pi agents, model/thinking defaults, tool ceilings, and source paths. |
-| `/workflow run [--model MODEL] [--thinking LEVEL] <workflow-name-or-path> "<task>" [--detach]` | Start a named workflow run with the supplied runtime task. `--detach` spawns a standalone supervisor process after the initial scheduling pass so the run keeps progressing after this Pi session exits (log: `.pi/workflows/<run-id>/supervise.log`). Dynamic controllers and `approval: "ask"` prompts in that first pass can still run inline; later detached/headless approval blocks require an interactive `/workflow resume <run-id>`. |
-| `/workflow dynamic [--model MODEL] [--thinking LEVEL] "<task>" [--detach]` | Start a spec-less direct dynamic run. The runtime uses a built-in trusted controller to plan/fan out/synthesize dynamically; no workflow name, user-selected spec, or generated spec is required. Supports the same `--model` and `--thinking` overrides as `/workflow run`. |
+| `/workflow run [--route] [--model MODEL] [--thinking LEVEL] <workflow-name-or-path> "<task>" [--detach] [--force-new]` | Start a named workflow run with the supplied runtime task. `--route` first runs a low-cost direct-vs-dynamic-vs-requested-workflow router and records its decision. `--detach` spawns a standalone supervisor process after the initial scheduling pass so the run keeps progressing after this Pi session exits (log: `.pi/workflows/<run-id>/supervise.log`). Dynamic controllers and `approval: "ask"` prompts in that first pass can still run inline; later detached/headless approval blocks require an interactive `/workflow resume <run-id>`. An identical active launch within 10 minutes is skipped unless `--force-new` is present. |
+| `/workflow dynamic [--route] [--model MODEL] [--thinking LEVEL] "<task>" [--detach] [--force-new]` | Start a spec-less direct dynamic run. The runtime uses a built-in trusted controller to plan/fan out/synthesize dynamically; no workflow name, user-selected spec, or generated spec is required. Supports the same routing, model, thinking, detach, duplicate-guard, and force-new controls as `/workflow run`. |
 | `/workflow status [run-id]` | Show all workflow runs in the current project, or one run. |
-| `/workflow show <run-id-or-workflow-name>` | If the ref starts with `workflow_`, show run details; otherwise show the raw workflow spec. |
-| `/workflow logs <run-id> [task-id] [lines]` | Print captured logs for a workflow task. Defaults to `task-1`. |
+| `/workflow show [--raw] <run-id-or-workflow-name>` | If the ref starts with `workflow_`, show formatted run details; otherwise show the workflow spec. `/workflow show --raw <run-id>` shows raw run details. |
+| `/workflow logs <run-id> [task-id-or-spec-id] [lines]` | Print captured logs for a workflow task. Defaults to `task-1`; a stage/spec id resolves when it identifies a task unambiguously. |
 | `/workflow wait <run-id> [timeout-ms]` | Poll until the run finishes or the optional timeout elapses. |
 | `/workflow stop <run-id>` | Interrupt a non-terminal run, best-effort interrupt active subagents, mark unfinished tasks interrupted, and stop the local supervisor watch. Use `/workflow resume <run-id>` if you want to restart unfinished work later. |
 | `/workflow resume <run-id>` | Resume a failed, interrupted, or resumable blocked run (including dynamic approval blocked in headless mode): completed tasks are preserved; failed/interrupted/skipped or resumable blocked tasks reset to pending and reschedule. Loop workflows are not supported yet. |
-| `/workflow stop <run-id>` | Stop a non-terminal run: best-effort interrupt of active subagent workers, then mark unfinished tasks `interrupted`. Completed task artifacts are preserved, and the stopped run can be restarted later with `/workflow resume` (resumed tasks start fresh sessions). |
 
 Not implemented: `/workflow continue` and `/workflow delegate`. Use `status`, `show`, `logs`, `wait`, `stop`, `resume`, and `pi-workflow inspect` for text/CLI inspection. The standalone CLI also offers `pi-workflow supervise <run-id>|--all` to drive scheduling from outside a Pi session (unfinished failed/interrupted or resumable blocked runs within the last 7 days are announced at session start with resume hints).
 
@@ -153,12 +152,14 @@ Path refs:
 /workflow run ./workflows/my-workflow.json "Do the task."
 ```
 
-Name refs are resolved from these roots:
+Name refs use the first priority root that contains a match:
 
-1. `<cwd>/.pi/workflows/`
-2. `<cwd>/workflows/`
-3. bundled package `workflows/`
-4. `~/.pi/agent/workflows/`
+1. `<cwd>/workflows/` — repo-tracked, project-shared workflows
+2. `<cwd>/.pi/workflows/` — project-private workflows
+3. `~/.pi/agent/workflows/` — user/global workflows
+4. bundled package `workflows/`
+
+A higher-priority name shadows matches in lower-priority roots. Resolution fails closed as ambiguous only when more than one matching spec exists at the winning priority (for example both flat and bundle forms for the same name in one root); a lower-priority duplicate does not make the name ambiguous.
 
 Workflow specs are JSON-only. Use `.json` for direct path refs, named discovery, and bundle `spec.json` files; `.yaml` and `.yml` workflow specs are not supported.
 
@@ -174,7 +175,7 @@ workflows/deep-research/
     claim-evidence-gate.mjs
 ```
 
-Bundle names resolve from the directory name. If two specs expose the same name, resolution fails closed as ambiguous.
+Bundle names resolve from the directory name. Multiple matching forms at the winning root fail closed as ambiguous; duplicates in lower-priority roots are shadowed according to the order above.
 
 ## Running workflows
 
@@ -196,6 +197,10 @@ A run prints a `workflow_*` id. Use that id for follow-up commands:
 ```
 
 The runtime task is not optional. `/workflow run <workflow>` and `/workflow dynamic` without task text fail before launch.
+
+### Speed and quality guardrails
+
+Performance changes must preserve final prompt/state/error semantics and the evidence gates that define output quality. Do not claim general speed or quality parity from one workflow, fixture, model, or concurrency regime. Default changes require candidate-matched paired runs with the same task, model/thinking, and serial-or-parallel regime; zero missing/duplicate verifier rows and source-ref join failures; no verified-floor regression; and explicit owner/release approval. Do not obtain a speed result by weakening verification, reclassifying partially supported claims as verified, skipping rows, shortening correctness timeouts/retries, or enabling opt-in streaming/batching/tiering by default.
 
 ### Opt-in fast mode
 
@@ -226,11 +231,11 @@ Use the speed profile when turnaround matters more than maximum verified coverag
 
 This path-ref variant keeps the same planner/research/normalization/audit/final stages, but feeds `verify-claims` from `verification-batches` and requires each verifier task to return one `results[]` row per claim id. It is not registered as an official bundled workflow name and does not change package defaults. Treat speed/cost results as task-specific: claim a win only when the run's audit reports zero missing/duplicate/invalid verifier rows, zero sourceRef join failures, and no verified-floor regression.
 
-Before claiming any speedup or flipping a default, see [Speed guardrails](speed-guardrails.md) for shortcuts that are blocked (e.g. verifier tiering, verifier-row skipping, default streaming) and the [speed-change release checklist](speed-change-checklist.md).
+Before claiming any speedup or flipping a default, apply the [speed and quality guardrails](#speed-and-quality-guardrails). Batched verification remains an explicit, workflow-specific experiment until its own candidate-matched non-inferiority gates pass.
 
 ### Opt-in tiered verification for deep-research
 
-`deep-research` still runs every verifier task at the same pinned thinking level by default; verifier tiering as a default remains a blocked shortcut under [Speed guardrails](speed-guardrails.md). For controlled experiments where tiered verifier effort is acceptable, use the explicit path-ref variant:
+`deep-research` still runs every verifier task at the same pinned thinking level by default; verifier tiering as a default remains blocked by the [speed and quality guardrails](#speed-and-quality-guardrails). For controlled experiments where tiered verifier effort is acceptable, use the explicit path-ref variant:
 
 ```text
 /workflow validate ./workflows/deep-research/tiered-verification.spec.json
@@ -245,10 +250,12 @@ The spec schema pins thinking per stage, not per foreach item, so this variant s
 
 ```text
 /workflow validate ./workflows/spec-review/batched-verification.spec.json
-/workflow run ./workflows/spec-review/batched-verification.spec.json "Compare docs/API_SPEC.md to the implementation and tests."
+/workflow run ./workflows/spec-review/batched-verification.spec.json "Review this spec against the implementation and tests."
 ```
 
-This path-ref variant keeps the same extract/map/inspect/candidate/report stages, but feeds `verify-findings` from a deterministic `verification-batches` helper stage (up to 4 candidates per verifier task) and requires each verifier task to return one strict `results[]` row per candidate id with the exact candidate title echoed. The deterministic partition gate flattens `results[]` before the id join and fails closed: missing, duplicate, orphan, out-of-batch, title-mismatched, or malformed rows are routed to NEEDS_HUMAN, never to reportable findings, and the report stage cannot return CONFORMS while such rows or missing verifications exist. It is not registered as an official bundled workflow name and does not change package defaults. Treat speed/cost results as task-specific: claim a win only when the run's partition reports zero missing/duplicate/orphan/invalid verifier rows and no final-finding quality regression, and see the speed-change checklist before claiming any speedup or proposing a default flip.
+This path-ref variant keeps the same extract-spec/map-implementation/inspect-tests/candidate-findings/partition-findings/report structure, but inserts a deterministic `verification-batches` support stage and feeds `verify-findings` one batch at a time. Each verifier task must return a `results[]` row for every input candidate, preserving the original candidate id and title exactly. The partition gate flattens `results[]` and rejoins candidates by id and title; missing, duplicate, orphan, out-of-batch, title-mismatched, or malformed rows are routed to `NEEDS_HUMAN`, never `KEEP`. The report stage cannot return `CONFORMS` while missing verifications or needs-human rows remain.
+
+It is not registered as an official bundled workflow name and does not change package defaults. Treat speed/cost results as task-specific: claim a win only after candidate-matched non-inferiority gates pass, including zero missing/duplicate/orphan/out-of-batch/title-mismatched/malformed verifier rows and no weakening of the final findings or needs-human accounting. Before claiming any speedup or proposing a default flip, apply the [speed and quality guardrails](#speed-and-quality-guardrails).
 
 ### Verification outcome ontology
 

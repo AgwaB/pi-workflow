@@ -27,7 +27,7 @@ import {
 	sourceContextOptions,
 	workflowBundleSpecPath,
 } from "./workflow-source-context-runtime.js";
-import { readSimpleJsonPath } from "./workflow-runtime.js";
+import { isSimpleJsonPath, readSimpleJsonPath } from "./workflow-runtime.js";
 import {
 	fromProjectPath,
 	readJson,
@@ -827,7 +827,7 @@ async function partialLedgerSourceProjection(
 		itemsByPath.set(item.path, bucket);
 	}
 	if (itemsByPath.size === 0) return undefined;
-	const partialControl: Record<string, unknown> = {};
+	const partialControl = createProjectionContainer();
 	for (const [path, items] of itemsByPath) {
 		setProjectedJsonPath(partialControl, path, items);
 	}
@@ -980,7 +980,7 @@ export function projectArtifactGraphControl(
 	if (!projection?.include || projection.include.length === 0) {
 		return { missingPaths: [], truncated: false };
 	}
-	const projected: Record<string, unknown> = {};
+	const projected = createProjectionContainer();
 	const missingPaths: string[] = [];
 	for (const path of projection.include) {
 		const resolved = readSimpleJsonPath(control, path);
@@ -1022,23 +1022,58 @@ export function setProjectedJsonPath(
 	path: string,
 	value: unknown,
 ): void {
-	const tokens = path
-		.replace(/^\$\.?/, "")
-		.split(".")
-		.map((token) => token.trim())
-		.filter(Boolean);
+	const tokens = projectionContainerPathTokens(path);
+	if (!tokens || tokens.length === 0) return;
 	let current = target;
 	for (const [index, token] of tokens.entries()) {
 		if (index === tokens.length - 1) {
 			current[token] = value;
 			return;
 		}
-		const existing = current[token];
-		if (!existing || typeof existing !== "object" || Array.isArray(existing)) {
-			current[token] = {};
+		const existing = Object.hasOwn(current, token)
+			? current[token]
+			: undefined;
+		if (!isProjectionContainer(existing)) {
+			current[token] = createProjectionContainer();
 		}
 		current = current[token] as Record<string, unknown>;
 	}
+}
+
+const PROJECTION_PATH_TOKEN_PATTERN = /^(?:[A-Za-z0-9_-]+)?(?:\[(?:\*|\d+|\d*:\d*)\])*$/u;
+const UNSAFE_JSON_PATH_PARTS = new Set([
+	"__proto__",
+	"prototype",
+	"constructor",
+]);
+
+function createProjectionContainer(): Record<string, unknown> {
+	return Object.create(null) as Record<string, unknown>;
+}
+
+function projectionContainerPathTokens(path: string): string[] | undefined {
+	if (!isSimpleJsonPath(path)) return undefined;
+	if (path === "$") return [];
+	const body = path.slice(1).replace(/^\./u, "");
+	const tokens = body.split(".");
+	if (tokens.length === 0) return undefined;
+	for (const token of tokens) {
+		if (!token || !PROJECTION_PATH_TOKEN_PATTERN.test(token)) return undefined;
+		const key = /^[A-Za-z0-9_-]+/u.exec(token)?.[0];
+		if (key && UNSAFE_JSON_PATH_PARTS.has(key)) return undefined;
+	}
+	return tokens;
+}
+
+function isProjectionContainer(
+	value: unknown,
+): value is Record<string, unknown> {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		return false;
+	}
+	if (value === Object.prototype) return false;
+	const prototype = Object.getPrototypeOf(value);
+	return prototype === null || prototype === Object.prototype;
 }
 
 export function sourceNameForTask(

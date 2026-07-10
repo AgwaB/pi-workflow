@@ -41,6 +41,23 @@ export function shouldWatchRun(
 	return hasActiveSchedulerWork(run);
 }
 
+export function schedulerPollDelayMs(
+	run: Pick<WorkflowRunRecord, "tasks">,
+	remainingMs: number,
+	nowMs = Date.now(),
+): number {
+	let delayMs = Math.max(0, Math.min(POLL_INTERVAL_MS, remainingMs));
+	for (const task of run.tasks) {
+		if (task.status !== "pending") continue;
+		const value = task.launchRetry?.nextEligibleAt;
+		if (typeof value !== "string") continue;
+		const deadlineMs = Date.parse(value);
+		if (!Number.isFinite(deadlineMs) || deadlineMs <= nowMs) continue;
+		delayMs = Math.min(delayMs, Math.max(1, Math.ceil(deadlineMs - nowMs)));
+	}
+	return delayMs;
+}
+
 export function isRefreshPollAggregateError(
 	error: unknown,
 ): error is AggregateError {
