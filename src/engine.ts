@@ -9,6 +9,7 @@ import {
 	createRunRecord,
 	createTaskRunRecord,
 	compiledWorkflowPath,
+	FAIL_FAST_CANCELLED_STATUS_DETAIL,
 	fromProjectPath,
 	isBlockedTaskResumableForResume,
 	isTerminalWorkflowStatus,
@@ -157,6 +158,7 @@ import {
 	recordSupervisorError,
 	refreshRun,
 	refreshRunOrRecordPollError,
+	schedulerPollDelayMs,
 	shouldWatchRun,
 	sleep,
 	stillRunningAfterWaitMessage,
@@ -332,7 +334,7 @@ export async function waitForRun(
 		if (remaining <= 0) {
 			throw new Error(await stillRunningAfterWaitMessage(cwd, run, timeout));
 		}
-		await sleep(Math.min(POLL_INTERVAL_MS, remaining));
+		await sleep(schedulerPollDelayMs(run, remaining));
 		run = await refreshRunOrRecordPollError(cwd, run.runId, run);
 	}
 
@@ -377,11 +379,22 @@ export async function stopRun(
 				`stop requires a non-terminal run; ${run.runId} is ${run.status}`,
 			);
 		}
-		await resolveWorkflowBackend(run)
-			.cleanupRun(cwd, run)
-			.catch(() => undefined);
+		for (const task of run.tasks) {
+			if (task.status !== "running") continue;
+			task.statusDetail = "cancellation_pending";
+			task.lastMessage = "awaiting backend stop cancellation acknowledgement";
+		}
+		await writeRunRecord(cwd, run);
+		let cleanupError: unknown;
+		try {
+			await resolveWorkflowBackend(run).cleanupRun(cwd, run);
+		} catch (error) {
+			cleanupError = error;
+		}
 		const interruptedTaskIds: string[] = [];
 		for (const task of run.tasks) {
+			if (task.status === "running" && task.statusDetail === "cancellation_failed")
+				continue;
 			if (
 				setTaskTerminal(task, "interrupted", "workflow_stopped", {
 					exitCode: 130,
@@ -392,6 +405,12 @@ export async function stopRun(
 			}
 		}
 		await writeRunRecord(cwd, run);
+		if (cleanupError) {
+			throw new Error(
+				`Workflow stop could not confirm cancellation for ${run.runId}; worker state remains observable`,
+				{ cause: cleanupError },
+			);
+		}
 		unwatchRun(cwd, run.runId);
 		return { run, interruptedTaskIds };
 	});
@@ -676,13 +695,13 @@ async function scheduleDagPass(
 			run,
 			compiledFlow,
 		);
+		assertRunTaskPositionalAlignment(run, compiledFlow);
 		const staleDynamicRecovered = recoverStaleRunningDynamicControllers(
 			run,
 			compiledFlow,
 		);
 		if (dynamicReconciled || staleDynamicRecovered)
 			await writeRunRecord(cwd, run);
-		assertRunTaskPositionalAlignment(run, compiledFlow);
 	}
 
 	const changed = markDagDependentsSkipped(run, compiledFlow);
@@ -775,14 +794,37 @@ async function applyFailFastCancellation(
 ): Promise<boolean> {
 	const summary = markFailFastCancellations(run, compiledFlow);
 	if (summary.cancelledTaskIds.length === 0) return false;
+	await writeRunRecord(cwd, run);
+	const cancellationErrors: unknown[] = [];
 	await Promise.all(
 		summary.interruptedTaskIds.map(async (taskId) => {
 			const task = run.tasks.find((candidate) => candidate.taskId === taskId);
 			if (!task) return;
-			await interruptSubagentTask(task, "workflow fail-fast cancellation");
+			try {
+				await interruptSubagentTask(task, "workflow fail-fast cancellation");
+				setTaskTerminal(
+					task,
+					"interrupted",
+					FAIL_FAST_CANCELLED_STATUS_DETAIL,
+					{
+						exitCode: 130,
+						lastMessage: "cancelled by workflow fail-fast policy",
+					},
+				);
+			} catch (error) {
+				task.statusDetail = "cancellation_failed";
+				task.lastMessage = `fail-fast cancellation failed; backend handle preserved: ${error instanceof Error ? error.message : String(error)}`;
+				cancellationErrors.push(error);
+			}
 		}),
 	);
 	await writeRunRecord(cwd, run);
+	if (cancellationErrors.length > 0) {
+		throw new AggregateError(
+			cancellationErrors,
+			"one or more fail-fast backend cancellations failed",
+		);
+	}
 	return true;
 }
 

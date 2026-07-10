@@ -430,7 +430,10 @@ function repoRootFromContext(context = {}) {
 
 function pathIsInsideRoot(root, absolute) {
 	const relative = path.relative(root, absolute);
-	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+	return (
+		relative === "" ||
+		(!relative.startsWith("..") && !path.isAbsolute(relative))
+	);
 }
 
 function safeRepoRelativePath(file, repoRoot = process.cwd()) {
@@ -1464,8 +1467,8 @@ function evidenceCitesConcreteRepositoryPointer(
 	includeCounterEvidence = false,
 ) {
 	const repoRoot = repoRootFromContext(context);
-	return repositoryPointersFromEvidence(row, includeCounterEvidence).some((pointer) =>
-		repositoryPointerExists(pointer, repoRoot),
+	return repositoryPointersFromEvidence(row, includeCounterEvidence).some(
+		(pointer) => repositoryPointerExists(pointer, repoRoot),
 	);
 }
 
@@ -1480,12 +1483,10 @@ function conservativeBatchVerdictDemotionReason(
 		row,
 		context,
 	);
-	const citesAnyAdditionalRepositoryRead = evidenceCitesConcreteRepositoryPointer(
-		row,
-		context,
-		true,
-	);
-	const hasConcreteContextPacket = contextPacketHasConcreteEvidence(contextPacket);
+	const citesAnyAdditionalRepositoryRead =
+		evidenceCitesConcreteRepositoryPointer(row, context, true);
+	const hasConcreteContextPacket =
+		contextPacketHasConcreteEvidence(contextPacket);
 	const citesAnyPlannedContext = evidenceCitesContextPacket(
 		row,
 		contextPacket,
@@ -1675,7 +1676,7 @@ function collectBatchVerdictRows({
 			});
 			continue;
 		}
-		if (expected.titleKey !== normalizeText(title)) {
+		if (String(title ?? "").trim() !== expected.title) {
 			issues.push({
 				...base,
 				findingId,
@@ -1779,7 +1780,10 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 		if (findingId) byFindingId.set(findingId, finding);
 	}
 	const findMatch = (title) => {
-		const key = normalizeText(title);
+		const rawTitle = String(title ?? "");
+		const exactId = byFindingId.get(rawTitle);
+		if (exactId) return { finding: exactId, key: normalizeText(exactId.title) };
+		const key = normalizeText(rawTitle);
 		const exact = byTitle.get(key);
 		if (exact) return { finding: exact, key: normalizeText(exact.title) };
 		const tokens = titleTokens({ title });

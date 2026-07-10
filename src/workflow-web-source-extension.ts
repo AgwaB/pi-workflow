@@ -2,7 +2,6 @@ import { lookup } from "node:dns/promises";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { isIP } from "node:net";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Type } from "typebox";
@@ -33,6 +32,7 @@ import {
 	type WorkflowWebSourceReadRequest,
 	type WorkflowWebSourceReadResult,
 } from "./workflow-web-source.js";
+import { nonPublicIpReason } from "./workflow-network-policy.js";
 
 export const WORKFLOW_WEB_SOURCE_LAUNCH_CONFIG_SCHEMA =
 	"workflow-web-source-launch-config-v1" as const;
@@ -1122,10 +1122,11 @@ function shouldCacheFetchFailureInMemory(reason: string): boolean {
 const WORKFLOW_WEB_FETCH_TIMEOUT_MS = 30_000;
 const WORKFLOW_WEB_FETCH_MAX_CHARS = 1_000_000;
 
-async function safeFetchWorkflowWebText(
+export async function safeFetchWorkflowWebText(
 	url: string,
 	security: WorkflowWebSecurityPolicy,
 	signal?: AbortSignal,
+	deadlineMs = WORKFLOW_WEB_FETCH_TIMEOUT_MS,
 ): Promise<
 	| {
 			ok: true;
@@ -1136,14 +1137,19 @@ async function safeFetchWorkflowWebText(
 	  }
 	| { ok: false; reason: string; url: string }
 > {
+	const deadlineAt = Date.now() + Math.max(1, Math.floor(deadlineMs));
 	let current = url;
 	for (let redirectCount = 0; redirectCount < 6; redirectCount += 1) {
+		if (Date.now() >= deadlineAt) {
+			return { ok: false, reason: "fetch_deadline_exceeded", url: current };
+		}
 		const checked = validateWorkflowWebUrl(current, security);
 		if (!checked.ok) return { ok: false, reason: checked.reason, url: current };
 		const response = await safeFetchOnce(
 			checked.normalizedUrl,
 			security,
 			signal,
+			deadlineAt,
 		);
 		if (!response.ok) return response;
 		if (response.status >= 300 && response.status < 400) {
@@ -1181,7 +1187,8 @@ async function safeFetchWorkflowWebText(
 function safeFetchOnce(
 	url: string,
 	security: WorkflowWebSecurityPolicy,
-	signal?: AbortSignal,
+	signal: AbortSignal | undefined,
+	deadlineAt: number,
 ): Promise<
 	| {
 			ok: true;
@@ -1193,10 +1200,20 @@ function safeFetchOnce(
 	  }
 	| { ok: false; reason: string; url: string }
 > {
+	const remainingMs = deadlineAt - Date.now();
+	if (remainingMs <= 0) {
+		return Promise.resolve({
+			ok: false,
+			reason: "fetch_deadline_exceeded",
+			url,
+		});
+	}
 	const parsed = new URL(url);
 	const request = parsed.protocol === "https:" ? httpsRequest : httpRequest;
 	return new Promise((resolveResult) => {
 		let settled = false;
+		let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+		let abortListener: (() => void) | undefined;
 		const settle = (
 			result:
 				| {
@@ -1211,6 +1228,10 @@ function safeFetchOnce(
 		) => {
 			if (settled) return;
 			settled = true;
+			if (deadlineTimer) clearTimeout(deadlineTimer);
+			if (signal && abortListener) {
+				signal.removeEventListener("abort", abortListener);
+			}
 			resolveResult(result);
 		};
 		const req = request(
@@ -1301,18 +1322,19 @@ function safeFetchOnce(
 		req.setTimeout(WORKFLOW_WEB_FETCH_TIMEOUT_MS, () => {
 			req.destroy(new Error("fetch_timeout"));
 		});
+		deadlineTimer = setTimeout(() => {
+			req.destroy(new Error("fetch_deadline_exceeded"));
+		}, remainingMs);
 		req.on("error", (error: Error) => {
 			if (error.message === "workflow_fetch_truncated") return;
 			settle({ ok: false, reason: error.message || "url_fetch_failed", url });
 		});
 		if (signal) {
-			signal.addEventListener(
-				"abort",
-				() => {
-					req.destroy(new Error("aborted"));
-				},
-				{ once: true },
-			);
+			abortListener = () => {
+				req.destroy(new Error("aborted"));
+			};
+			if (signal.aborted) abortListener();
+			else signal.addEventListener("abort", abortListener, { once: true });
 		}
 		req.end();
 	});
@@ -1326,7 +1348,7 @@ async function lookupPublicAddress(
 	for (const address of addresses) {
 		const reason = security.allowPrivateHosts
 			? undefined
-			: privateIpReason(address.address);
+			: nonPublicIpReason(address.address);
 		if (!reason) return address;
 	}
 	throw new Error(
@@ -1351,7 +1373,7 @@ async function validateResolvedHost(
 			verbatim: true,
 		});
 		for (const address of addresses) {
-			const reason = privateIpReason(address.address);
+			const reason = nonPublicIpReason(address.address);
 			if (reason) return { ok: false, reason, url };
 		}
 		return { ok: true };
@@ -1362,51 +1384,6 @@ async function validateResolvedHost(
 
 function isLookupAllOptions(options: unknown): boolean {
 	return isRecord(options) && options.all === true;
-}
-
-function privateIpReason(address: string): string | undefined {
-	const lower = address.toLowerCase().replace(/^\[|\]$/g, "");
-	const mappedIpv4 = lower.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/)?.[1];
-	if (mappedIpv4) return privateIpReason(mappedIpv4);
-	const hexMapped = lower.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
-	if (hexMapped) {
-		const high = Number.parseInt(hexMapped[1]!, 16);
-		const low = Number.parseInt(hexMapped[2]!, 16);
-		return privateIpReason(
-			`${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`,
-		);
-	}
-	if (isIP(lower) === 4) {
-		const parts = lower.split(".").map((part) => Number(part));
-		if (
-			parts.length !== 4 ||
-			parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)
-		)
-			return "private_host_blocked";
-		const [a, b, c, d] = parts as [number, number, number, number];
-		if (a === 0 || a === 10 || a === 127 || a >= 224)
-			return "private_host_blocked";
-		if (a === 100 && b >= 64 && b <= 127) return "private_host_blocked";
-		if (a === 169 && b === 254) return "private_host_blocked";
-		if (a === 172 && b >= 16 && b <= 31) return "private_host_blocked";
-		if (a === 192 && b === 168) return "private_host_blocked";
-		if (a === 192 && b === 0 && (c === 0 || c === 2))
-			return "private_host_blocked";
-		if (a === 198 && (b === 18 || b === 19)) return "private_host_blocked";
-		if (a === 198 && b === 51 && c === 100) return "private_host_blocked";
-		if (a === 203 && b === 0 && c === 113) return "private_host_blocked";
-		if (a === 255 && b === 255 && c === 255 && d === 255)
-			return "private_host_blocked";
-	}
-	if (isIP(lower) === 6) {
-		if (lower === "::" || lower === "::1") return "private_host_blocked";
-		if (lower.startsWith("fc") || lower.startsWith("fd"))
-			return "private_host_blocked";
-		if (lower.startsWith("fe80") || lower.startsWith("ff"))
-			return "private_host_blocked";
-		if (lower.startsWith("2001:db8")) return "private_host_blocked";
-	}
-	return undefined;
 }
 
 async function validateProviderResultUrls(
@@ -1424,7 +1401,7 @@ async function validateProviderResultUrls(
 	}
 	if (!security.allowPrivateHosts) {
 		for (const address of providerResolvedIps(result)) {
-			const reason = privateIpReason(address);
+			const reason = nonPublicIpReason(address);
 			if (reason) return { ok: false, reason, url: address };
 		}
 	}

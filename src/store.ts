@@ -55,7 +55,7 @@ const DEFAULT_INDEX_UPDATE_DEBOUNCE_MS = 500;
 let indexUpdateDebounceMs = DEFAULT_INDEX_UPDATE_DEBOUNCE_MS;
 const pendingIndexUpdates = new Map<
 	string,
-	{ cwd: string; runId: string; timer: ReturnType<typeof setTimeout> }
+	{ cwd: string; runIds: Set<string>; timer: ReturnType<typeof setTimeout> }
 >();
 const runLeaseContext = new AsyncLocalStorage<{
 	cwd: string;
@@ -613,57 +613,72 @@ export async function writeRunRecord(
 	run: WorkflowRunRecord,
 ): Promise<void> {
 	await assertActiveRunLease(cwd, run.runId);
+	const runFile = workflowRunPath(cwd, run.runId);
+	let firstWrite = false;
+	try {
+		await stat(runFile);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		firstWrite = true;
+	}
 	run.updatedAt = nowIso();
 	const derived = deriveRunStatus(run);
 	Object.assign(run, derived);
 	if (isTerminalWorkflowStatus(run.status)) run.usage = runUsageRollup(run);
-	await writeJsonAtomic(workflowRunPath(cwd, run.runId), run);
+	await writeJsonAtomic(runFile, run);
 	if (isTerminalWorkflowStatus(run.status))
 		runProgressByRun.delete(runProgressKey(cwd, run.runId));
 	else recordRunProgress(cwd, run);
-	scheduleIndexUpdate(cwd, run.runId, {
-		immediate: isTerminalWorkflowStatus(run.status),
-	});
-}
-
-function indexUpdateKey(cwd: string, runId: string): string {
-	return `${cwd}\0${runId}`;
-}
-
-function scheduleIndexUpdate(
-	cwd: string,
-	runId: string,
-	options: { immediate: boolean },
-): void {
-	const key = indexUpdateKey(cwd, runId);
-	const existing = pendingIndexUpdates.get(key);
-	if (existing) {
-		clearTimeout(existing.timer);
-		pendingIndexUpdates.delete(key);
+	if (firstWrite || isTerminalWorkflowStatus(run.status)) {
+		cancelScheduledIndexUpdate(cwd, run.runId);
+		await updateIndex(cwd, run.runId);
+	} else {
+		scheduleIndexUpdate(cwd, run.runId);
 	}
+}
+
+function indexUpdateKey(cwd: string): string {
+	return resolve(cwd);
+}
+
+function cancelScheduledIndexUpdate(cwd: string, runId: string): void {
+	const key = indexUpdateKey(cwd);
+	const existing = pendingIndexUpdates.get(key);
+	if (!existing) return;
+	existing.runIds.delete(runId);
+	if (existing.runIds.size > 0) return;
+	clearTimeout(existing.timer);
+	pendingIndexUpdates.delete(key);
+}
+
+function scheduleIndexUpdate(cwd: string, runId: string): void {
+	const key = indexUpdateKey(cwd);
+	const existing = pendingIndexUpdates.get(key);
+	const runIds = existing?.runIds ?? new Set<string>();
+	runIds.add(runId);
+	if (existing) clearTimeout(existing.timer);
 
 	const runUpdate = (): void => {
 		pendingIndexUpdates.delete(key);
-		void updateIndex(cwd, runId).catch(() => undefined);
+		void updateIndex(cwd, [...runIds]).catch(() => undefined);
 	};
 
-	if (options.immediate) {
-		runUpdate();
-		return;
-	}
-
-	// Pending debounced index writes are intentionally not flushed on process exit:
-	// the next explicit index rebuild/read path self-heals from run.json records.
+	// Hot nonterminal updates share one per-cwd dirty set. Correctness-sensitive
+	// readers use readFreshIndex(), which reconciles from run.json if this advisory
+	// rebuild is delayed or lost. First and terminal writes remain awaited above.
 	const timer = setTimeout(runUpdate, indexUpdateDebounceMs);
 	timer.unref?.();
-	pendingIndexUpdates.set(key, { cwd, runId, timer });
+	pendingIndexUpdates.set(key, { cwd, runIds, timer });
 }
 
-export async function flushPendingIndexUpdatesForTests(): Promise<void> {
+export async function flushPendingIndexUpdatesForTests(): Promise<number> {
 	const pending = [...pendingIndexUpdates.values()];
 	pendingIndexUpdates.clear();
 	for (const item of pending) clearTimeout(item.timer);
-	await Promise.all(pending.map((item) => updateIndex(item.cwd, item.runId)));
+	await Promise.all(
+		pending.map((item) => updateIndex(item.cwd, [...item.runIds])),
+	);
+	return pending.length;
 }
 
 export function setIndexUpdateDebounceMsForTests(value?: number): void {
@@ -1361,10 +1376,33 @@ export async function readRunRecord(
 	return deriveRunStatus(run);
 }
 
-export async function readIndex(
+async function readIndexUnchecked(
 	cwd: string,
 ): Promise<WorkflowIndexRecord | undefined> {
 	return readJson<WorkflowIndexRecord>(workflowIndexPath(cwd));
+}
+
+export async function readIndex(
+	cwd: string,
+): Promise<WorkflowIndexRecord | undefined> {
+	return readIndexUnchecked(cwd);
+}
+
+export async function readFreshIndex(
+	cwd: string,
+): Promise<WorkflowIndexRecord | undefined> {
+	let current: WorkflowIndexRecord | undefined;
+	try {
+		current = await readIndexUnchecked(cwd);
+	} catch {
+		current = undefined;
+	}
+	const rebuilt = await rebuildIndex(cwd);
+	if (isIndexRecordLike(current) && indexEntriesEqual(current, rebuilt)) {
+		return current;
+	}
+	if (!current && rebuilt.runs.length === 0) return undefined;
+	return updateIndex(cwd);
 }
 
 export async function listRunRecords(
@@ -1425,7 +1463,7 @@ function isRunRecordLike(value: unknown): value is WorkflowRunRecord {
 
 export async function updateIndex(
 	cwd: string,
-	changedRunId?: string,
+	changedRunId?: string | readonly string[],
 ): Promise<WorkflowIndexRecord> {
 	const lockFile = join(workflowsRoot(cwd), "index.lock");
 	const ownerId = `${process.pid}-${randomBytes(3).toString("hex")}`;
@@ -1433,9 +1471,12 @@ export async function updateIndex(
 	await acquireLockWithWait(lockFile, ownerId);
 
 	try {
-		const index = changedRunId
-			? await updateIndexIncremental(cwd, changedRunId)
-			: await rebuildIndex(cwd);
+		const changedRunIds =
+			typeof changedRunId === "string" ? [changedRunId] : changedRunId;
+		const index =
+			changedRunIds && changedRunIds.length > 0
+				? await updateIndexIncremental(cwd, changedRunIds)
+				: await rebuildIndex(cwd);
 		await writeJsonAtomic(workflowIndexPath(cwd), index);
 		return index;
 	} finally {
@@ -1447,23 +1488,25 @@ type WorkflowIndexRunEntry = WorkflowIndexRecord["runs"][number];
 
 async function updateIndexIncremental(
 	cwd: string,
-	changedRunId: string,
+	changedRunIds: readonly string[],
 ): Promise<WorkflowIndexRecord> {
 	const existing = await readIndexForIncremental(cwd);
 	if (!existing) return rebuildIndex(cwd);
 
-	let changedRun: WorkflowRunRecord;
+	let changedRuns: WorkflowRunRecord[];
 	try {
-		changedRun = await readRunRecord(cwd, changedRunId);
+		changedRuns = await Promise.all(
+			[...new Set(changedRunIds)].map((runId) => readRunRecord(cwd, runId)),
+		);
 	} catch {
 		return rebuildIndex(cwd);
 	}
 
-	const changedEntry = buildIndexEntry(cwd, changedRun);
+	const changedIds = new Set(changedRuns.map((run) => run.runId));
 	const entries = existing.runs
-		.filter((entry) => entry.runId !== changedRun.runId)
+		.filter((entry) => !changedIds.has(entry.runId))
 		.map(stripIndexTaskRows)
-		.concat(changedEntry);
+		.concat(changedRuns.map((run) => buildIndexEntry(cwd, run)));
 	return {
 		schemaVersion: 1,
 		updatedAt: nowIso(),
@@ -1476,7 +1519,7 @@ async function readIndexForIncremental(
 ): Promise<WorkflowIndexRecord | undefined> {
 	let index: WorkflowIndexRecord | undefined;
 	try {
-		index = await readIndex(cwd);
+		index = await readIndexUnchecked(cwd);
 	} catch {
 		return undefined;
 	}
@@ -1537,6 +1580,13 @@ function buildIndexEntry(
 		fanout: run.fanout,
 		runJson: toProjectPath(cwd, workflowRunPath(cwd, run.runId)),
 	};
+}
+
+function indexEntriesEqual(
+	left: WorkflowIndexRecord,
+	right: WorkflowIndexRecord,
+): boolean {
+	return JSON.stringify(left.runs) === JSON.stringify(right.runs);
 }
 
 function isIndexRecordLike(

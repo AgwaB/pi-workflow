@@ -90,6 +90,198 @@ function safeReadJson(file) {
 		return undefined;
 	}
 }
+function taskArtifactDir(sessionRoot, run, task) {
+	return path.join(
+		sessionRoot,
+		".pi",
+		"workflows",
+		run.runId || "",
+		"tasks",
+		task.taskId || "",
+	);
+}
+function invalidAttemptIndex(file) {
+	const base = path.basename(file);
+	const match = base.match(/invalid-attempt[-_](\d+)/i);
+	return match ? Number(match[1]) : undefined;
+}
+function issuePath(issue = {}) {
+	const raw =
+		issue.instancePath ??
+		issue.schemaPath ??
+		issue.path ??
+		issue.keywordLocation ??
+		issue.absoluteKeywordLocation ??
+		issue.dataPath;
+	if (Array.isArray(raw)) return raw.map(String).join(".") || "/";
+	if (typeof raw === "string" && raw.trim()) return raw.trim();
+	return "/";
+}
+function issueMessage(issue = {}) {
+	return String(
+		issue.message ??
+			issue.error ??
+			issue.reason ??
+			issue.summary ??
+			"validation failure",
+	).slice(0, 240);
+}
+function validationIssuesFrom(value) {
+	if (!value || typeof value !== "object") return [];
+	const candidates = [
+		value.issues,
+		value.errors,
+		value.validationErrors,
+		value.diagnostics,
+		value.error?.issues,
+		value.error?.errors,
+		value.validation?.issues,
+		value.validation?.errors,
+		value.outputValidation?.issues,
+		value.outputValidation?.errors,
+	].filter(Array.isArray);
+	const issues = candidates.flat();
+	if (issues.length) return issues.filter((x) => x && typeof x === "object");
+	const message =
+		value.message ??
+		value.error?.message ??
+		value.validationError ??
+		value.outputValidation?.message;
+	return message ? [{ message }] : [];
+}
+function invalidAttemptFiles(taskDir) {
+	try {
+		return readdirSync(taskDir)
+			.filter((name) => /invalid-attempt.*\.json$/i.test(name))
+			.map((name) => path.join(taskDir, name))
+			.sort((a, b) => {
+				const ai = invalidAttemptIndex(a);
+				const bi = invalidAttemptIndex(b);
+				if (Number.isFinite(ai) && Number.isFinite(bi)) return ai - bi;
+				if (Number.isFinite(ai)) return -1;
+				if (Number.isFinite(bi)) return 1;
+				return a.localeCompare(b);
+			});
+	} catch {
+		return [];
+	}
+}
+function taskValidationFailures(run, task, sessionRoot) {
+	const taskDir = taskArtifactDir(sessionRoot, run, task);
+	const files = invalidAttemptFiles(taskDir);
+	const firstIndex = minDefined(files.map(invalidAttemptIndex));
+	const firstFiles = Number.isFinite(firstIndex)
+		? files.filter((file) => invalidAttemptIndex(file) === firstIndex)
+		: files.slice(0, 1);
+	const failures = [];
+	for (const file of firstFiles) {
+		const json = safeReadJson(file);
+		for (const issue of validationIssuesFrom(json)) {
+			failures.push({
+				workflow: run.name || "unknown",
+				runId: run.runId,
+				taskId: task.taskId,
+				specId: task.specId,
+				stageId:
+					task.stageId || String(task.specId || "").split(".")[0] || "unknown",
+				attemptIndex: invalidAttemptIndex(file),
+				schemaPath: issuePath(issue),
+				message: issueMessage(issue),
+				evidencePath: file,
+			});
+		}
+	}
+	return failures;
+}
+function validationFailureTriage(signature = {}) {
+	const schemaPath = String(signature.schemaPath || "").toLowerCase();
+	const message = String(signature.message || "").toLowerCase();
+	if (schemaPath.endsWith("schema") || schemaPath === "$.schema") {
+		return {
+			triageCategory: "schema-contract-drift",
+			benchmarkValiditySignal: "agent-output-contract",
+			recommendedAction:
+				"Make the required schema literal unambiguous in the prompt or schema contract; keep validation fail-closed.",
+		};
+	}
+	if (message.includes("array length") || message.includes("must be <=")) {
+		return {
+			triageCategory: "over-strict-output-limit",
+			benchmarkValiditySignal: "overly-strict-test",
+			recommendedAction:
+				"Review whether the cap measures task quality or only output-shape compliance before using it as benchmark evidence.",
+		};
+	}
+	if (message.includes("required") || message.includes("missing")) {
+		return {
+			triageCategory: "underspecified-required-field",
+			benchmarkValiditySignal: "underspecified-prompt-or-contract",
+			recommendedAction:
+				"Clarify the required field in the prompt/schema and add focused validation coverage.",
+		};
+	}
+	if (message.includes("type object") || message.includes("must be of type")) {
+		return {
+			triageCategory: "schema-shape-mismatch",
+			benchmarkValiditySignal: "agent-output-contract",
+			recommendedAction:
+				"Inspect examples for repeated shape confusion and harden the prompt/schema without weakening validation.",
+		};
+	}
+	return {
+		triageCategory: "triage-needed",
+		benchmarkValiditySignal: "unknown",
+		recommendedAction:
+			"Inspect representative invalid attempts before treating this as benchmark or model quality evidence.",
+	};
+}
+function aggregateValidationFailures(records) {
+	const by = new Map();
+	for (const rec of records) {
+		for (const failure of rec.validationFailures || []) {
+			const key = [
+				rec.name,
+				failure.stageId,
+				failure.schemaPath,
+				failure.message,
+			].join("\u0000");
+			const cur = by.get(key) || {
+				workflow: rec.name,
+				stageId: failure.stageId,
+				schemaPath: failure.schemaPath,
+				message: failure.message,
+				count: 0,
+				runIds: new Set(),
+				taskIds: new Set(),
+				examples: [],
+			};
+			cur.count += 1;
+			cur.runIds.add(rec.runId);
+			cur.taskIds.add(failure.taskId);
+			if (cur.examples.length < 5) cur.examples.push(failure);
+			by.set(key, cur);
+		}
+	}
+	return [...by.values()]
+		.map((x) => {
+			const signature = {
+				workflow: x.workflow,
+				stageId: x.stageId,
+				schemaPath: x.schemaPath,
+				message: x.message,
+				count: x.count,
+				runCount: x.runIds.size,
+				taskCount: x.taskIds.size,
+				validitySignal:
+					x.runIds.size >= 2 || x.count >= 2
+						? "repeated-validation-signature"
+						: "single-validation-signature",
+				examples: x.examples,
+			};
+			return { ...signature, ...validationFailureTriage(signature) };
+		})
+		.sort((a, b) => b.count - a.count || b.runCount - a.runCount);
+}
 function walkIndexes(root) {
 	const out = [];
 	function rec(dir, depth = 0) {
@@ -611,6 +803,9 @@ for (const indexPath of indexes) {
 		const gaps = idleGaps(run);
 		const caps = captureGaps(run, sessionRoot);
 		const usage = usageSummary(run);
+		const validationFailures = (run.tasks || []).flatMap((task) =>
+			taskValidationFailures(run, task, sessionRoot),
+		);
 		const failedTasks = (run.tasks || []).filter((t) =>
 			["failed", "interrupted"].includes(t.status),
 		).length;
@@ -646,6 +841,8 @@ for (const indexPath of indexes) {
 			maxCaptureGapFmt: fmt(caps[0]?.ms || 0),
 			topCaptureGaps: caps.slice(0, 5).map((g) => ({ ...g, fmt: fmt(g.ms) })),
 			usage,
+			validationFailures,
+			validationFailureCount: validationFailures.length,
 			stageSummaries: stageSummary(run),
 			longestTasks: longestTasks(run),
 			activeIntervals: taskIntervals(run),
@@ -773,6 +970,7 @@ const nonSuccessTop = nonSuccess
 	}))
 	.sort((a, b) => (b.sortMs || 0) - (a.sortMs || 0))
 	.slice(0, 40);
+const validationFailureSignatures = aggregateValidationFailures(all);
 
 const out = {
 	generatedAt: new Date().toISOString(),
@@ -797,6 +995,7 @@ const out = {
 	topCaptureGaps,
 	topTasks,
 	nonSuccessTop,
+	validationFailureSignatures,
 };
 writeFileSync(OUT_JSON, JSON.stringify(out, null, 2));
 
@@ -921,6 +1120,32 @@ lines.push(
 		["cost", (r) => (r.costUsd ? `$${Number(r.costUsd).toFixed(3)}` : "")],
 	]),
 );
+lines.push(``);
+lines.push(`## Repeated output-validation failure signatures`);
+if (validationFailureSignatures.length) {
+	lines.push(
+		mdTable(validationFailureSignatures.slice(0, 25), [
+			["count", (r) => r.count],
+			["runs", (r) => r.runCount],
+			["workflow", (r) => r.workflow],
+			["stage", (r) => r.stageId],
+			["schema path", (r) => r.schemaPath],
+			["signal", (r) => r.validitySignal],
+			["triage", (r) => r.triageCategory],
+			["benchmark signal", (r) => r.benchmarkValiditySignal],
+			["message", (r) => r.message],
+			[
+				"examples",
+				(r) =>
+					(r.examples || [])
+						.map((x) => `${x.runId}/${x.taskId}: ${x.evidencePath}`)
+						.join("<br>"),
+			],
+		]),
+	);
+} else {
+	lines.push(`No invalid-attempt validation failure artifacts found.`);
+}
 lines.push(``);
 lines.push(`## Non-success / potentially stale`);
 lines.push(

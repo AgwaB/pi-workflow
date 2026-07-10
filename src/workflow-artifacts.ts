@@ -526,12 +526,17 @@ function projectStructuredOutput(
 	const projected: Record<string, unknown> = {};
 	const missingPaths: string[] = [];
 	for (const path of paths) {
-		const resolved = resolvePath(value, path);
+		const tokens = parsePath(path);
+		if (!tokens) {
+			missingPaths.push(path);
+			continue;
+		}
+		const resolved = resolvePathTokens(value, tokens);
 		if (!resolved.exists) {
 			missingPaths.push(path);
 			continue;
 		}
-		setProjectedPath(projected, tokenizePath(path), resolved.value);
+		setProjectedPath(projected, tokens, resolved.value);
 	}
 	return {
 		value: Object.keys(projected).length > 0 ? projected : undefined,
@@ -547,18 +552,28 @@ function setProjectedPath(
 	let current: Record<string, unknown> = target;
 	for (let index = 0; index < tokens.length; index += 1) {
 		const token = tokens[index];
-		if (typeof token === "number") return;
+		if (typeof token === "number" || !isSafePathToken(token)) return;
 		if (index === tokens.length - 1) {
 			current[token] = value;
 			return;
 		}
 		const nextToken = tokens[index + 1];
 		if (typeof nextToken === "number") return;
-		const next = current[token];
-		if (!next || typeof next !== "object" || Array.isArray(next))
-			current[token] = {};
+		const next = Object.hasOwn(current, token) ? current[token] : undefined;
+		if (!isProjectionTargetContainer(next)) current[token] = {};
 		current = current[token] as Record<string, unknown>;
 	}
+}
+
+function isProjectionTargetContainer(
+	value: unknown,
+): value is Record<string, unknown> {
+	return (
+		!!value &&
+		typeof value === "object" &&
+		!Array.isArray(value) &&
+		value !== Object.prototype
+	);
 }
 
 function capStructuredOutput(
@@ -584,17 +599,30 @@ function resolvePath(
 	value: unknown,
 	path: string,
 ): { exists: boolean; value?: unknown } {
-	if (!path.startsWith("$")) return { exists: false };
-	const tokens = tokenizePath(path);
+	const tokens = parsePath(path);
+	if (!tokens) return { exists: false };
+	return resolvePathTokens(value, tokens);
+}
+
+function resolvePathTokens(
+	value: unknown,
+	tokens: Array<string | number>,
+): { exists: boolean; value?: unknown } {
 	let current: unknown = value;
 	for (const token of tokens) {
 		if (typeof token === "number") {
-			if (!Array.isArray(current) || token < 0 || token >= current.length)
+			if (
+				!Array.isArray(current) ||
+				token < 0 ||
+				token >= current.length ||
+				!Object.hasOwn(current, token)
+			)
 				return { exists: false };
 			current = current[token];
 			continue;
 		}
 		if (
+			!isSafePathToken(token) ||
 			!current ||
 			typeof current !== "object" ||
 			!Object.hasOwn(current, token)
@@ -605,13 +633,54 @@ function resolvePath(
 	return { exists: true, value: current };
 }
 
-function tokenizePath(path: string): Array<string | number> {
+function parsePath(path: string): Array<string | number> | undefined {
+	if (path === "$") return [];
+	if (!path.startsWith("$")) return undefined;
 	const tokens: Array<string | number> = [];
-	const pattern = /\.([A-Za-z_][A-Za-z0-9_-]*)|\[(\d+)\]/g;
-	let match: RegExpExecArray | null;
-	while ((match = pattern.exec(path)) !== null) {
-		if (match[1] !== undefined) tokens.push(match[1]);
-		else if (match[2] !== undefined) tokens.push(Number(match[2]));
+	let index = 1;
+	while (index < path.length) {
+		const char = path[index];
+		if (char === ".") {
+			index += 1;
+			const keyStart = index;
+			if (!isPathKeyStart(path[index])) return undefined;
+			index += 1;
+			while (index < path.length && isPathKeyPart(path[index]!)) {
+				index += 1;
+			}
+			const key = path.slice(keyStart, index);
+			if (!isSafePathToken(key)) return undefined;
+			tokens.push(key);
+			continue;
+		}
+		if (char === "[") {
+			const end = path.indexOf("]", index + 1);
+			if (end === -1) return undefined;
+			const selector = path.slice(index + 1, end);
+			if (!/^\d+$/u.test(selector)) return undefined;
+			const token = Number(selector);
+			if (!Number.isSafeInteger(token)) return undefined;
+			tokens.push(token);
+			index = end + 1;
+			continue;
+		}
+		return undefined;
 	}
 	return tokens;
+}
+
+function isPathKeyStart(value: string | undefined): boolean {
+	return value !== undefined && /[A-Za-z_]/u.test(value);
+}
+
+function isPathKeyPart(value: string): boolean {
+	return /[A-Za-z0-9_-]/u.test(value);
+}
+
+function isSafePathToken(token: string): boolean {
+	return (
+		token !== "__proto__" &&
+		token !== "prototype" &&
+		token !== "constructor"
+	);
 }

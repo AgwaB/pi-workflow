@@ -8,7 +8,9 @@ Tracked copy: `docs/maintenance/BATCHED-DA-CONTEXT-PACKET-REVIEW-20260708.md`
 
 Reviewer response source: `.tmp/batched-da-context-packet-review-response-20260708.md`
 
-## Status
+## Status (historical record)
+
+This document records the 2026-07-08 context-packet campaign and is not the current merge-readiness ledger. As of 2026-07-10, batched variants remain explicit path-ref opt-ins and the current disposition is `do_not_merge_default_yet`; do not reuse the single replay below as present-day parity evidence. Open work belongs in the local-only `internal/maintenance/ROADMAP.md`, not in the dated agenda sections of this file.
 
 Implemented, committed, and pushed as grounding infrastructure. A later follow-up also tightened opt-in batched `WEAKEN`/`DROP` evidence gates; do not frame either change as quality parity.
 
@@ -76,7 +78,7 @@ Preconditions before commit:
 2. Commit message must frame the change as infrastructure, e.g. `feat: add row-local context packets for batched review evidence`.
 3. No commit message, docs, release notes, or public claim may imply quality parity/improvement.
 
-## Review needed before wider adoption
+## Historical review agenda before wider adoption
 
 ### P0 — Verdict calibration / semantic policy
 
@@ -142,7 +144,7 @@ Needed before adoption/default claims:
 5. Replay with row-local refs prompt after the latest prompt follow-up.
 6. Higher-N repeated repo-grounded replay after variance baseline is known.
 
-## Follow-up implementation status
+## Historical follow-up implementation status
 
 Completed in the follow-up hardening pass:
 

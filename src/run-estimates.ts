@@ -1,6 +1,7 @@
 import {
 	compiledWorkflowPath,
 	isMockRunProvenance,
+	listRunRecords,
 	readIndex,
 	readJson,
 	workflowRunPath,
@@ -113,10 +114,24 @@ export async function findDuplicateActiveRun(
 	if (!task) return undefined;
 	const windowMs = options.windowMs ?? DUPLICATE_RUN_WINDOW_MS;
 	const now = options.now ?? Date.now();
-	const index = await readIndex(cwd).catch(() => undefined);
-	if (!index) return undefined;
-
-	const candidates = index.runs
+	const records = await listRunRecords(cwd).catch(() => []);
+	const cached = await readIndex(cwd).catch(() => undefined);
+	const cachedByRunId = new Map(
+		(cached?.runs ?? []).map((entry) => [entry.runId, entry]),
+	);
+	const sourceCandidates = records.map((record) => {
+		const cachedEntry = cachedByRunId.get(record.runId);
+		if (!cachedEntry) return record;
+		return {
+			...record,
+			name: record.name ?? cachedEntry.name,
+			createdAt: record.createdAt ?? cachedEntry.createdAt,
+			updatedAt: record.updatedAt ?? cachedEntry.updatedAt,
+			parentRunId: record.parentRunId ?? cachedEntry.parentRunId,
+			status: record.tasks.length === 0 ? cachedEntry.status : record.status,
+		};
+	});
+	const candidates = sourceCandidates
 		.filter((run) => {
 			if (run.parentRunId) return false;
 			if (!ACTIVE_RUN_STATUSES.has(run.status)) return false;
@@ -127,11 +142,8 @@ export async function findDuplicateActiveRun(
 		.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
 
 	for (const candidate of candidates) {
-		const record = await readJson<WorkflowRunRecord>(
-			workflowRunPath(cwd, candidate.runId),
-		).catch(() => undefined);
-		if (record && isMockRunProvenance(record.provenance)) continue;
-		const isDynamicRun = record?.provenance?.mode === "direct-dynamic";
+		if (isMockRunProvenance(candidate.provenance)) continue;
+		const isDynamicRun = candidate.provenance?.mode === "direct-dynamic";
 		if (target.kind === "dynamic" && !isDynamicRun) continue;
 		if (target.kind === "spec" && isDynamicRun) continue;
 		const compiled = await readJson<CompiledWorkflow>(

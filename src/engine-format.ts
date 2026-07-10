@@ -12,6 +12,7 @@ import {
 	isMockRunProvenance,
 	LEASE_STALE_MS,
 	listRunRecords,
+	readFreshIndex,
 	readIndex,
 	readJson,
 	readRunRecord,
@@ -109,10 +110,10 @@ async function readRunSupervisor(
 }
 
 export async function formatStatus(cwd: string): Promise<string> {
-	const cached = await readIndex(cwd);
+	const cached = await readFreshIndex(cwd);
 	if (cached) {
 		await reconcileIndexedActiveRuns(cwd, cached);
-		const refreshed = (await readIndex(cwd).catch(() => cached)) ?? cached;
+		const refreshed = (await readFreshIndex(cwd).catch(() => cached)) ?? cached;
 		if (refreshed.runs.length === 0) return "No workflow runs found.";
 		return formatHumanRunList(cwd, refreshed);
 	}

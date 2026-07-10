@@ -1,16 +1,10 @@
 import { createHash } from "node:crypto";
-import {
-	appendFile,
-	mkdir,
-	readFile,
-	readdir,
-	rename,
-	writeFile,
-} from "node:fs/promises";
-import { isIP } from "node:net";
+import { appendFile, mkdir, readFile, readdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
+import { writePrivateFileAtomic } from "./secure-atomic-write.js";
 import { compactStrings } from "./strings.js";
+import { nonPublicIpReason } from "./workflow-network-policy.js";
 
 export const WORKFLOW_WEB_SOURCE_CACHE_SCHEMA =
 	"workflow-web-source-cache-v1" as const;
@@ -1293,10 +1287,7 @@ function isWorkflowWebSourceRef(sourceRef: string): boolean {
 }
 
 async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
-	await mkdir(dirname(path), { recursive: true });
-	const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
-	await writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-	await rename(tmp, path);
+	await writePrivateFileAtomic(path, `${JSON.stringify(value, null, 2)}\n`);
 }
 
 function hashString(value: string): string {
@@ -1306,51 +1297,6 @@ function hashString(value: string): string {
 function isPrivateHostname(host: string): boolean {
 	if (PRIVATE_HOST_PATTERNS.some((pattern) => pattern.test(host))) return true;
 	return nonPublicIpReason(host) !== undefined;
-}
-
-function nonPublicIpReason(address: string): string | undefined {
-	const lower = address.toLowerCase().replace(/^\[|\]$/g, "");
-	const mappedIpv4 = lower.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/)?.[1];
-	if (mappedIpv4) return nonPublicIpReason(mappedIpv4);
-	const hexMapped = lower.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
-	if (hexMapped) {
-		const high = Number.parseInt(hexMapped[1]!, 16);
-		const low = Number.parseInt(hexMapped[2]!, 16);
-		return nonPublicIpReason(
-			`${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`,
-		);
-	}
-	if (isIP(lower) === 4) {
-		const parts = lower.split(".").map((part) => Number(part));
-		if (
-			parts.length !== 4 ||
-			parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)
-		)
-			return "non_public_ip_blocked";
-		const [a, b, c, d] = parts as [number, number, number, number];
-		if (a === 0 || a === 10 || a === 127 || a >= 224)
-			return "non_public_ip_blocked";
-		if (a === 100 && b >= 64 && b <= 127) return "non_public_ip_blocked";
-		if (a === 169 && b === 254) return "non_public_ip_blocked";
-		if (a === 172 && b >= 16 && b <= 31) return "non_public_ip_blocked";
-		if (a === 192 && b === 168) return "non_public_ip_blocked";
-		if (a === 192 && b === 0 && (c === 0 || c === 2))
-			return "non_public_ip_blocked";
-		if (a === 198 && (b === 18 || b === 19)) return "non_public_ip_blocked";
-		if (a === 198 && b === 51 && c === 100) return "non_public_ip_blocked";
-		if (a === 203 && b === 0 && c === 113) return "non_public_ip_blocked";
-		if (a === 255 && b === 255 && c === 255 && d === 255)
-			return "non_public_ip_blocked";
-	}
-	if (isIP(lower) === 6) {
-		if (lower === "::" || lower === "::1") return "non_public_ip_blocked";
-		if (lower.startsWith("fc") || lower.startsWith("fd"))
-			return "non_public_ip_blocked";
-		if (lower.startsWith("fe80") || lower.startsWith("ff"))
-			return "non_public_ip_blocked";
-		if (lower.startsWith("2001:db8")) return "non_public_ip_blocked";
-	}
-	return undefined;
 }
 
 function redactRecordForModel(

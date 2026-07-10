@@ -5,7 +5,7 @@
   "properties": {
     "schema": {
       "type": "string",
-      "minLength": 1
+      "enum": ["deep-research-verify-claims-batch-v1"]
     },
     "digest": {
       "type": "string",
@@ -16,30 +16,139 @@
       "minItems": 1,
       "items": {
         "type": "object",
-        "required": ["id", "status", "verdictDigest", "evidence"],
+        "required": [
+          "id",
+          "status",
+          "confidence",
+          "verdictDigest",
+          "evidence",
+          "caveats",
+          "correctionOrCounterclaim"
+        ],
         "additionalProperties": false,
         "properties": {
           "id": {
             "type": "string",
             "minLength": 1
           },
-          "claim": {},
-          "factSlotIds": {},
+          "claim": {
+            "type": "string"
+          },
+          "factSlotIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
           "status": {
             "type": "string",
             "enum": ["verified", "partially_supported", "unsupported", "conflicting", "verification_blocked"]
           },
-          "confidence": {},
-          "verdictDigest": {},
+          "confidence": {
+            "oneOf": [
+              {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              {
+                "type": "string",
+                "enum": ["low", "medium", "high"]
+              }
+            ]
+          },
+          "verdictDigest": {
+            "type": "object",
+            "required": ["support"],
+            "additionalProperties": false,
+            "properties": {
+              "support": {
+                "type": "string",
+                "minLength": 1
+              },
+              "sourceUrls": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "maxItems": 3
+              },
+              "caveat": {
+                "type": "string"
+              },
+              "correctionOrCounterclaim": {
+                "type": "string"
+              }
+            }
+          },
           "evidence": {
             "type": "array",
             "items": {
-              "type": "object"
+              "type": "object",
+              "required": ["quote"],
+              "additionalProperties": false,
+              "properties": {
+                "source": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string"
+                },
+                "sourceRef": {
+                  "type": "string"
+                },
+                "file": {
+                  "type": "string"
+                },
+                "repo": {
+                  "type": "string"
+                },
+                "dateOrYear": {
+                  "type": "string"
+                },
+                "quote": {
+                  "type": "string"
+                },
+                "relevance": {
+                  "type": "string"
+                },
+                "matchType": {
+                  "type": "string"
+                },
+                "matchedTerms": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "missingTerms": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "coverageRatio": {
+                  "type": "number"
+                },
+                "candidateOnly": {
+                  "type": "boolean"
+                }
+              }
             },
             "maxItems": 5
           },
-          "caveats": {},
-          "correctionOrCounterclaim": {}
+          "caveats": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 5
+          },
+          "correctionOrCounterclaim": {
+            "type": "string"
+          }
         }
       }
     }

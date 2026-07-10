@@ -1,6 +1,24 @@
 #!/usr/bin/env node
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import { posix } from "node:path";
+
+const BUNDLE_SPEC_FILES = [
+	"workflows/deep-research/spec.json",
+	"workflows/deep-review/spec.json",
+	"workflows/spec-review/spec.json",
+	"workflows/impact-review/spec.json",
+	"workflows/deep-research/batched-verification.spec.json",
+	"workflows/deep-research/tiered-verification.spec.json",
+	"workflows/deep-review/batched-devil-advocate.spec.json",
+	"workflows/spec-review/batched-verification.spec.json",
+	"skills/workflow-guide/scaffolds/analysis-dossier/spec.json",
+	"skills/workflow-guide/scaffolds/dag-required-reads/spec.json",
+	"skills/workflow-guide/scaffolds/foreach-reduce/spec.json",
+	"skills/workflow-guide/scaffolds/matrix-dag/spec.json",
+	"skills/workflow-guide/scaffolds/object-tool-fallback/spec.json",
+	"skills/workflow-guide/scaffolds/support-partition/spec.json",
+];
 
 const REQUIRED_FILES = [
 	"README.md",
@@ -18,11 +36,10 @@ const REQUIRED_FILES = [
 	"agents/researcher.md",
 	"agents/scout.md",
 	"skills/workflow-guide/SKILL.md",
+	"skills/workflow-guide/scaffolds/README.md",
 	"skills/execution-router/SKILL.md",
-	"workflows/deep-research/spec.json",
-	"workflows/deep-review/spec.json",
-	"workflows/spec-review/spec.json",
-	"workflows/impact-review/spec.json",
+	"workflows/README.md",
+	...BUNDLE_SPEC_FILES,
 	"src/extension.ts",
 	"src/index.ts",
 	"dist/index.js",
@@ -139,6 +156,23 @@ if (missing.length > 0) {
 	process.exit(1);
 }
 
+const missingBundleAssets = [];
+for (const specPath of BUNDLE_SPEC_FILES) {
+	const spec = JSON.parse(readFileSync(specPath, "utf8"));
+	for (const relativeRef of localFileRefs(spec)) {
+		const assetPath = posix.normalize(
+			posix.join(posix.dirname(specPath), relativeRef),
+		);
+		if (!files.includes(assetPath)) missingBundleAssets.push(assetPath);
+	}
+}
+if (missingBundleAssets.length > 0) {
+	console.error(
+		`Package is missing referenced workflow/scaffold assets: ${[...new Set(missingBundleAssets)].join(", ")}`,
+	);
+	process.exit(1);
+}
+
 const forbidden = files.filter((path) =>
 	FORBIDDEN_PACKAGE_PREFIXES.some((prefix) => path.startsWith(prefix)),
 );
@@ -176,3 +210,22 @@ if (versionAlreadyPublished) {
 	run("npm", ["publish", "--dry-run", "--access", "public"]);
 }
 console.log("\nRelease check passed. Prefer the GitHub Actions Publish workflow for real releases.");
+
+function localFileRefs(value) {
+	const refs = [];
+	visit(value);
+	return refs;
+
+	function visit(candidate) {
+		if (typeof candidate === "string") {
+			if (/^\.\/.+\.(?:json|mjs|js)$/.test(candidate)) refs.push(candidate);
+			return;
+		}
+		if (Array.isArray(candidate)) {
+			for (const item of candidate) visit(item);
+			return;
+		}
+		if (!candidate || typeof candidate !== "object") return;
+		for (const item of Object.values(candidate)) visit(item);
+	}
+}

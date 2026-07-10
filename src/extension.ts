@@ -44,7 +44,7 @@ import {
 import {
 	fromProjectPath,
 	isMockRunProvenance,
-	readIndex,
+	readFreshIndex,
 	readRunRecord,
 } from "./store.js";
 import { loadWorkflowSpec } from "./schema.js";
@@ -366,7 +366,7 @@ export async function deliverMissedWorkflowFeedback(
 	api: ExtensionAPI,
 ): Promise<void> {
 	if (!canDeliverWorkflowFeedback(ctx)) return;
-	const index = await readIndex(ctx.cwd);
+	const index = await readFreshIndex(ctx.cwd);
 	const recent = (index?.runs ?? [])
 		.filter((run) => {
 			const updatedAtMs = Date.parse(run.updatedAt ?? "");
@@ -1057,7 +1057,7 @@ export async function notifyUnfinishedRuns(
 	notify: (message: string, type?: "info" | "warning" | "error") => void,
 	nowMs: number = Date.now(),
 ): Promise<void> {
-	const index = await readIndex(cwd);
+	const index = await readFreshIndex(cwd);
 	if (!index?.runs?.length) return;
 	const unfinished = [];
 	for (const run of index.runs) {

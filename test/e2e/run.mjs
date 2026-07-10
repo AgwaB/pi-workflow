@@ -1,28 +1,43 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const resultRoot = join(root, ".tmp", "test-results", "e2e");
-const stamp = new Date()
-	.toISOString()
-	.replace(/[-:]/g, "")
-	.replace(/\.\d{3}Z$/, "Z");
-const resultDir = join(resultRoot, `run-${stamp}`);
+const stamp = new Date().toISOString().replace(/[-:.]/g, "");
+const resultDir = join(
+	resultRoot,
+	`run-${stamp}-${randomUUID().slice(0, 8)}`,
+);
 mkdirSync(resultDir, { recursive: true });
 
 const rows = [];
 let failed = false;
 
-function record(label, command, status, expectFailure = false) {
-	const pass = expectFailure ? status !== 0 : status === 0;
+function record(label, command, result, options) {
+	const expectedExitCodes = options.expectedExitCodes ?? [0];
+	const statusMatches =
+		result.status !== null && expectedExitCodes.includes(result.status);
+	const stderrMatches =
+		!options.stderrPattern || options.stderrPattern.test(result.stderr ?? "");
+	const pass = statusMatches && stderrMatches && !result.error;
+	const excerptSource = (result.stderr || result.stdout || result.error?.message || "")
+		.trim()
+		.replace(/\s+/g, " ");
 	rows.push({
 		label,
 		command: command.join(" "),
-		status,
-		expected: expectFailure ? "failure" : "success",
+		status: result.status,
+		signal: result.signal,
+		error: result.error?.code ?? "",
+		durationMs: options.durationMs,
+		expected: expectedExitCodes.join(" or "),
+		stdout: relative(root, options.stdoutPath),
+		stderr: relative(root, options.stderrPath),
+		excerpt: excerptSource.slice(0, 240),
 		result: pass ? "PASS" : "FAIL",
 	});
 	if (!pass) failed = true;
@@ -31,9 +46,13 @@ function record(label, command, status, expectFailure = false) {
 function run(label, command, args = [], options = {}) {
 	const out = join(resultDir, `${label}.out`);
 	const err = join(resultDir, `${label}.err`);
+	const startedAt = Date.now();
 	const result = spawnSync(command, args, {
-		cwd: root,
+		cwd: options.cwd ?? root,
 		encoding: "utf8",
+		timeout: options.timeoutMs ?? 120_000,
+		killSignal: "SIGTERM",
+		maxBuffer: 10 * 1024 * 1024,
 		env: {
 			...process.env,
 			PI_WORKFLOW_ROLE:
@@ -42,12 +61,12 @@ function run(label, command, args = [], options = {}) {
 	});
 	writeFileSync(out, result.stdout ?? "");
 	writeFileSync(err, result.stderr ?? "");
-	record(
-		label,
-		[command, ...args],
-		result.status ?? 1,
-		Boolean(options.expectFailure),
-	);
+	record(label, [command, ...args], result, {
+		...options,
+		durationMs: Date.now() - startedAt,
+		stdoutPath: out,
+		stderrPath: err,
+	});
 	return result;
 }
 
@@ -61,8 +80,9 @@ function nodeEval(label, code, options = {}) {
 }
 
 function ensureCompiledArtifacts() {
-	if (existsSync(join(root, ".tmp", "unit", "workflow-specs.js"))) return;
-	run("test-build", "npm", ["run", "test:build"]);
+	run("test-build", "npm", ["run", "test:build"], {
+		timeoutMs: 180_000,
+	});
 }
 
 function assertNoLegacyTerms() {
@@ -85,7 +105,7 @@ function assertNoLegacyTerms() {
 			"-lc",
 			`grep -RInE '${forbidden.join("|")}' src test README.md docs workflows package.json 2>/dev/null`,
 		],
-		{ expectFailure: true },
+		{ expectedExitCodes: [1] },
 	);
 	return result;
 }
@@ -98,7 +118,8 @@ function main() {
 	assertNoLegacyTerms();
 	run("cli-help", process.execPath, ["src/cli.mjs", "--help"]);
 	run("cli-unknown-command", process.execPath, ["src/cli.mjs", "nope"], {
-		expectFailure: true,
+		expectedExitCodes: [1],
+		stderrPattern: /unknown command/i,
 	});
 	run("cli-inspect-reliability", "bash", [
 		"-lc",
@@ -114,20 +135,28 @@ JSON
         grep -q 'completion: repaired' <<<"$output"
         grep -q 'retries: output=1, launch=0, resumes=1, contextLimitFailures=1' <<<"$output"`,
 	]);
-	run("consumer-install-cli", "bash", [
-		"-lc",
-		`set -euo pipefail
+	run(
+		"consumer-install-cli",
+		"bash",
+		[
+			"-lc",
+			`set -euo pipefail
         tmp="$(mktemp -d)"
+        trap 'rm -rf "$tmp"' EXIT
         tarball="$(npm pack --pack-destination "$tmp" --silent | tail -1)"
         cd "$tmp"
         npm init -y >/dev/null
         peer_flag="--leg""acy-peer-deps"
-        npm install "$peer_flag" "./$tarball" >/dev/null
+        npm install "$peer_flag" --ignore-scripts "./$tarball" >/dev/null
         node node_modules/@agwab/pi-workflow/src/cli.mjs --help >/dev/null
         ./node_modules/.bin/pi-workflow --help >/dev/null
         PI_WORKFLOW_ROLE=supervisor ./node_modules/.bin/pi-workflow supervise --all --poll-ms 250 --max-runtime-ms 1000 >/dev/null
-        node --input-type=module -e "import { parseWorkflow, WORKFLOW_COMMAND } from '@agwab/pi-workflow'; if (typeof parseWorkflow !== 'function' || WORKFLOW_COMMAND !== 'workflow') throw new Error('bad public import')"`,
-	]);
+        node --input-type=module -e "import { parseWorkflow, WORKFLOW_COMMAND } from '@agwab/pi-workflow'; if (typeof parseWorkflow !== 'function' || WORKFLOW_COMMAND !== 'workflow') throw new Error('bad public import')"
+        mkdir -p "$tmp/home"
+        HOME="$tmp/home" node ${JSON.stringify(join(root, "test", "e2e", "cases", "packed-workflows.mjs"))} "$tmp/node_modules/@agwab/pi-workflow" "$tmp"`,
+		],
+		{ timeoutMs: 300_000 },
+	);
 
 	nodeEval(
 		"workflow-registry",
@@ -265,18 +294,23 @@ function writeReport() {
 		"",
 		`Result: ${failed ? "FAIL" : "PASS"}`,
 		"",
-		"| Check | Expected | Status | Result |",
-		"|---|---:|---:|---|",
-		...rows.map(
-			(row) =>
-				`| ${row.label} | ${row.expected} | ${row.status} | ${row.result} |`,
-		),
+		"| Check | Expected exit | Status | Signal/error | Duration | Result | Evidence | Excerpt |",
+		"|---|---:|---:|---|---:|---|---|---|",
+		...rows.map((row) => {
+			const signalError = [row.signal, row.error].filter(Boolean).join("/") || "—";
+			const evidence = `\`${row.stdout}\` / \`${row.stderr}\``;
+			return `| ${reportCell(row.label)} | ${row.expected} | ${row.status ?? "null"} | ${reportCell(signalError)} | ${row.durationMs}ms | ${row.result} | ${evidence} | ${reportCell(row.excerpt || "—")} |`;
+		}),
 	];
 	writeFileSync(join(resultDir, "report.md"), `${lines.join("\n")}\n`);
 	writeFileSync(
 		join(root, ".tmp", "test-results", "e2e-report.md"),
 		`${lines.join("\n")}\n`,
 	);
+}
+
+function reportCell(value) {
+	return String(value).replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
 }
 
 main();

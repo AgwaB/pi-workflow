@@ -22,7 +22,7 @@ For spec-less direct dynamic execution, use `/workflow dynamic "<task>"`; it doe
 | `spec-review` | `scout` | Use when you want to check whether requirements, an API spec, or a contract are reflected in the implementation and tests. |
 | `impact-review` | `scout` | Use before merging or releasing a change to check affected areas, risks, missing tests, and missing docs. |
 
-Experimental or candidate workflows should live outside the bundled `workflows/` directory until their task fit is validated. `deep-research` also ships a path-ref-only batched verification variant at `workflows/deep-research/batched-verification.spec.json`; it is intentionally not registered as an official workflow name and must be invoked by explicit path after validation.
+Experimental or candidate workflows should live outside the bundled `workflows/` directory until their task fit is validated. `deep-research` ships a path-ref-only batched verification variant at `workflows/deep-research/batched-verification.spec.json`, and `spec-review` ships one at `workflows/spec-review/batched-verification.spec.json`; both variants are intentionally not registered as official workflow names and must be invoked by explicit path after validation.
 
 Bundled workflows that verify source-backed claims can share the verification outcome ontology exported by the package: `verified`, `partially_supported`, `unsupported`, `conflicting`, and `verification_blocked`. Workflow helpers should keep dependency-free bundle-local shims in parity with that package export, because helper imports are bundled from the workflow spec directory. `verification_blocked` means verification could not complete because evidence, tool, source-access, or policy conditions blocked evaluation; it is never counted as verified. Deep-research adopts this ontology now. Workflows with different verdict models, such as finding disposition or ship readiness, should not be forced into it. Deep-diff-review revival is intentionally out of scope for this ontology update.
 
@@ -39,7 +39,7 @@ workflows/name/
     support-helper.mjs
 ```
 
-Bundle names resolve from the directory name (`/workflow run name ...`). If two specs expose the same workflow name, resolution fails closed as ambiguous.
+Bundle names resolve from the directory name (`/workflow run name ...`). Name priority is project-shared `<cwd>/workflows/`, then project-private `<cwd>/.pi/workflows/`, then user/global `~/.pi/agent/workflows/`, then this bundled package root. A higher-priority match shadows lower roots. Multiple matching forms at the winning priority fail closed as ambiguous.
 
 `output.controlSchema` in a bundle is resolved relative to the workflow spec file, for example `./schemas/final-control.schema.json`.
 

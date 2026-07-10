@@ -92,7 +92,7 @@ Discover available workflows when the user asks to choose a workflow or when pro
 Routing rules:
 
 1. If an existing workflow fits, recommend `run workflow:<name>` and state the exact task packet it should receive.
-2. If an existing workflow almost fits but lacks a verifier/refuter/reducer/gate, recommend `add stage to workflow:<name>` and describe the smallest stage to add.
+2. If an existing workflow almost fits but lacks a verifier/refuter/reducer/gate, recommend `add stage to workflow:<name>` and describe the smallest stage to add. For an installed official workflow, create a project-private or project-shared fork under a new name by default; do not edit the installed package bundle in place.
 3. If no workflow fits but the process is repeatable with clear stages, recommend `create workflow:<name>` with proposed stages, file location, validation command, and a sample `/workflow run` command.
 4. If only one bounded check or bulk read is needed, recommend `add targeted subagent/verifier`, not a full workflow.
 5. If the task is small, linear, or edit-conflict-prone, recommend `single-agent` and explicitly say not to use workflow.
@@ -127,11 +127,12 @@ When recommending `create workflow:<name>`, include a concrete creation-and-use 
 
 ### 1. Choose the target location
 
-- For a local experiment or scratch workflow: `.pi/workflows/<name>.json`.
-  - This is ignored by git and is appropriate before task fit is validated.
-- For a tracked/bundled workflow after explicit approval: `workflows/<name>/spec.json`.
-  - Also update `workflows/README.md` and `docs/usage.md` if it becomes user-facing.
-  - Add tests only when the workflow is intended to be maintained as a bundled starter.
+- Project-private experiment: `.pi/workflows/<name>/spec.json` (usually ignored by git and suitable before task fit is validated).
+- Project-shared/tracked workflow: `workflows/<name>/spec.json` (committed with the owning repository for team use).
+- User/global workflow: `~/.pi/agent/workflows/<name>/spec.json` (personal reuse across projects; avoid accidental project-specific paths).
+- Official pi-workflow package bundle: also uses `workflows/<name>/spec.json` inside this package repository, but only after an explicit package-distribution decision. Fork an installed official workflow to a new project-scoped name by default instead of editing it in place.
+
+Use the directory form whenever the workflow has schemas or helpers. Name resolution priority is project-shared, project-private, user/global, then installed package.
 
 ### 2. Provide the proposed stage graph
 
@@ -139,7 +140,7 @@ List stages in execution order or DAG form. For each stage include:
 
 ```text
 id:
-type: single | foreach | reduce | dag | support helper
+shape: single | foreach | reduce | dag | loop | dynamic | support
 depends/from:
 purpose:
 agent/tools/readOnly:
@@ -147,6 +148,8 @@ input:
 output/control fields:
 validation/gate:
 ```
+
+For a support stage, show the real JSON shape: omit `type` and declare `support: { "uses": "./helpers/<name>.mjs" }`. `loop` and `dynamic` are supported but escalation-only choices: use a bounded loop for deterministic repeated child stages, and dynamic only when trusted bundle-local code must discover official child work at runtime and fixed DAG/foreach cannot express it.
 
 Prefer the smallest useful workflow. If one verifier stage is enough, recommend adding a targeted verifier instead of creating a full workflow.
 
@@ -156,8 +159,8 @@ Specify:
 
 - Runtime task packet expected from the user.
 - Required artifacts per stage: `<control>`, `<analysis>`, `<refs>` when using artifact graph outputs.
-- Control schema files if needed: `workflows/<name>/schemas/<stage>-control.schema.json`.
-- Support helper files if needed: `workflows/<name>/helpers/<helper>.mjs`.
+- Control schema files under the selected bundle root: `<bundle-root>/<name>/schemas/<stage>-control.schema.json`.
+- Support helper files under the same selected bundle: `<bundle-root>/<name>/helpers/<helper>.mjs`.
 - Reducer/dedup/provenance rules when fan-out exists.
 
 ### 4. Provide exact validation and run commands

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { appendFile, readFile } from "node:fs/promises";
+import { appendFile, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 
 import { ensureDir, nowIso, workflowRunDir } from "./store.js";
@@ -33,6 +33,32 @@ export interface DynamicWorkflowEvent {
 	type: DynamicWorkflowEventType;
 	timestamp: string;
 	payload: Record<string, unknown>;
+}
+
+interface DynamicEventAppendCursor {
+	size: number;
+	lastSeq: number;
+}
+
+const dynamicEventAppendCursors = new Map<string, DynamicEventAppendCursor>();
+const DYNAMIC_EVENT_CURSOR_MAX = 256;
+const dynamicEventAppendQueues = new Map<string, Promise<void>>();
+let dynamicEventFullLedgerReadsForTests = 0;
+
+export function resetDynamicEventAppendStateForTests(): void {
+	dynamicEventAppendCursors.clear();
+	dynamicEventAppendQueues.clear();
+	dynamicEventFullLedgerReadsForTests = 0;
+}
+
+export function dynamicEventAppendStatsForTests(): {
+	cursors: number;
+	fullLedgerReads: number;
+} {
+	return {
+		cursors: dynamicEventAppendCursors.size,
+		fullLedgerReads: dynamicEventFullLedgerReadsForTests,
+	};
 }
 
 export interface AppendDynamicWorkflowEventInput {
@@ -80,15 +106,45 @@ export async function readDynamicEvents(
 	return events;
 }
 
-export async function appendDynamicEvent(
+export function appendDynamicEvent(
 	cwd: string,
 	runId: string,
 	input: AppendDynamicWorkflowEventInput,
 ): Promise<DynamicWorkflowEvent> {
-	const previous = await readDynamicEvents(cwd, runId);
+	const file = dynamicEventsPath(cwd, runId);
+	const previous = dynamicEventAppendQueues.get(file) ?? Promise.resolve();
+	const operation = previous.then(() => appendDynamicEventIncremental(cwd, runId, input));
+	const tail = operation.then(
+		() => undefined,
+		() => undefined,
+	);
+	dynamicEventAppendQueues.set(file, tail);
+	return operation.finally(() => {
+		if (dynamicEventAppendQueues.get(file) === tail)
+			dynamicEventAppendQueues.delete(file);
+	});
+}
+
+async function appendDynamicEventIncremental(
+	cwd: string,
+	runId: string,
+	input: AppendDynamicWorkflowEventInput,
+): Promise<DynamicWorkflowEvent> {
+	await ensureDir(dynamicRunDir(cwd, runId));
+	const file = dynamicEventsPath(cwd, runId);
+	const currentSize = await dynamicEventFileSize(file);
+	let cursor = dynamicEventAppendCursors.get(file);
+	if (!cursor || cursor.size !== currentSize) {
+		const previous = await readDynamicEvents(cwd, runId);
+		dynamicEventFullLedgerReadsForTests += 1;
+		cursor = {
+			size: await dynamicEventFileSize(file),
+			lastSeq: previous.reduce((max, item) => Math.max(max, item.seq), 0),
+		};
+	}
 	const event: DynamicWorkflowEvent = {
 		schema: DYNAMIC_EVENT_SCHEMA,
-		seq: previous.reduce((max, item) => Math.max(max, item.seq), 0) + 1,
+		seq: cursor.lastSeq + 1,
 		opId: input.opId ?? `${input.controllerSpecId}:${input.type}`,
 		requestHash:
 			input.requestHash ??
@@ -103,13 +159,35 @@ export async function appendDynamicEvent(
 		timestamp: input.timestamp ?? nowIso(),
 		payload: normalizePayload(input.payload ?? {}),
 	};
-	await ensureDir(dynamicRunDir(cwd, runId));
-	await appendFile(
-		dynamicEventsPath(cwd, runId),
-		`${JSON.stringify(event)}\n`,
-		"utf8",
-	);
+	const line = `${JSON.stringify(event)}\n`;
+	await appendFile(file, line, "utf8");
+	rememberDynamicEventAppendCursor(file, {
+		size: cursor.size + Buffer.byteLength(line),
+		lastSeq: event.seq,
+	});
 	return event;
+}
+
+function rememberDynamicEventAppendCursor(
+	file: string,
+	cursor: DynamicEventAppendCursor,
+): void {
+	if (dynamicEventAppendCursors.has(file)) dynamicEventAppendCursors.delete(file);
+	dynamicEventAppendCursors.set(file, cursor);
+	while (dynamicEventAppendCursors.size > DYNAMIC_EVENT_CURSOR_MAX) {
+		const oldest = dynamicEventAppendCursors.keys().next().value;
+		if (typeof oldest !== "string") break;
+		dynamicEventAppendCursors.delete(oldest);
+	}
+}
+
+async function dynamicEventFileSize(file: string): Promise<number> {
+	try {
+		return (await stat(file)).size;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0;
+		throw error;
+	}
 }
 
 export function hashDynamicRequest(value: unknown): string {

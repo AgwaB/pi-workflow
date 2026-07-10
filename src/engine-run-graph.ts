@@ -85,6 +85,7 @@ export function recoverStaleRunningDynamicControllers(
 	run: WorkflowRunRecord,
 	compiledFlow: CompiledWorkflow,
 ): boolean {
+	assertRunTaskPositionalAlignment(run, compiledFlow);
 	let changed = false;
 	for (const [index, task] of run.tasks.entries()) {
 		const compiledTask = compiledFlow.tasks[index];
@@ -763,6 +764,13 @@ export function markFailFastCancellations(
 			: compiledFlow.failurePolicy?.cancelSiblingsOnFailure === true;
 		if (!eligible) continue;
 		const wasRunning = task.status === "running";
+		if (wasRunning) {
+			task.statusDetail = "cancellation_pending";
+			task.lastMessage = "awaiting backend fail-fast cancellation acknowledgement";
+			cancelledTaskIds.push(task.taskId);
+			interruptedTaskIds.push(task.taskId);
+			continue;
+		}
 		if (
 			setTaskTerminal(task, "interrupted", FAIL_FAST_CANCELLED_STATUS_DETAIL, {
 				exitCode: 130,
@@ -770,7 +778,6 @@ export function markFailFastCancellations(
 			})
 		) {
 			cancelledTaskIds.push(task.taskId);
-			if (wasRunning) interruptedTaskIds.push(task.taskId);
 		}
 	}
 	return { cancelledTaskIds, interruptedTaskIds };

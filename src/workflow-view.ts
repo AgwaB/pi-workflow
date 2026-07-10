@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { readFile } from "node:fs/promises";
+import { open } from "node:fs/promises";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
 import {
@@ -1449,22 +1449,44 @@ function runToSummary(cwd: string, run: WorkflowRunRecord): WorkflowSummary {
 	};
 }
 
-async function readFileLinesBounded(
+export async function readFileLinesBounded(
 	cwd: string,
 	projectPath: string | undefined,
 	maxLines: number,
+	options: { chunkBytes?: number; onRead?: (bytes: number) => void } = {},
 ): Promise<string[]> {
-	if (!projectPath) return [];
-	const text = await readFile(fromProjectPath(cwd, projectPath), "utf8").catch(
+	if (!projectPath || maxLines <= 0) return [];
+	const file = await open(fromProjectPath(cwd, projectPath), "r").catch(
 		(error) => {
-			if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
 			throw error;
 		},
 	);
-	if (!text) return [];
-	const lines = text.split(/\r?\n/);
-	if (lines[lines.length - 1] === "") lines.pop();
-	return lines.slice(-maxLines);
+	if (!file) return [];
+	try {
+		const { size } = await file.stat();
+		if (size === 0) return [];
+		const chunkBytes = Math.max(1, options.chunkBytes ?? 64 * 1024);
+		const chunks: Buffer[] = [];
+		let position = size;
+		let newlineCount = 0;
+		while (position > 0 && newlineCount <= maxLines) {
+			const length = Math.min(chunkBytes, position);
+			position -= length;
+			const buffer = Buffer.allocUnsafe(length);
+			const result = await file.read(buffer, 0, length, position);
+			const chunk = buffer.subarray(0, result.bytesRead);
+			chunks.unshift(chunk);
+			options.onRead?.(result.bytesRead);
+			for (const byte of chunk) if (byte === 0x0a) newlineCount += 1;
+		}
+		const text = Buffer.concat(chunks).toString("utf8");
+		const lines = text.split(/\r?\n/);
+		if (lines[lines.length - 1] === "") lines.pop();
+		return lines.slice(-maxLines);
+	} finally {
+		await file.close();
+	}
 }
 
 function stageSummaries(

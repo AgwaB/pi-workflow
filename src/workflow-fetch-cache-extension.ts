@@ -1,13 +1,9 @@
 import { createHash } from "node:crypto";
-import {
-	appendFile,
-	mkdir,
-	readFile,
-	rename,
-	writeFile,
-} from "node:fs/promises";
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+
+import { writePrivateFileAtomic } from "./secure-atomic-write.js";
 
 export const WORKFLOW_FETCH_CONTENT_CACHE_SCHEMA =
 	"workflow-fetch-content-cache-v1" as const;
@@ -261,10 +257,7 @@ async function writeCacheRecord(
 	record: CacheRecord,
 ): Promise<void> {
 	const target = cacheObjectPath(config, record.key);
-	await mkdir(dirname(target), { recursive: true });
-	const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
-	await writeFile(tmp, `${JSON.stringify(record, null, 2)}\n`, "utf8");
-	await rename(tmp, target);
+	await writePrivateFileAtomic(target, `${JSON.stringify(record, null, 2)}\n`);
 }
 
 function materializeCacheHit(
