@@ -28,10 +28,19 @@ export type DynamicDecisionActionType =
 	| "synthesize"
 	| "stop";
 
+export const DYNAMIC_DECISION_ARTIFACT_NAMES = [
+	"control",
+	"analysis",
+	"refs",
+	"raw",
+] as const;
+export type DynamicDecisionArtifactName =
+	(typeof DYNAMIC_DECISION_ARTIFACT_NAMES)[number];
+
 export interface DynamicDecisionArtifactRef {
 	kind: "workflow-artifact-ref";
 	taskId: string;
-	artifact?: string;
+	artifact?: DynamicDecisionArtifactName;
 	digest?: string;
 }
 
@@ -634,11 +643,25 @@ function optionalArtifactRefs(
 		) {
 			errors.push(`${refPath}.taskId references unknown artifact task`);
 		}
-		const artifact = optionalString(
+		const artifactValue = optionalString(
 			ref.artifact,
 			`${refPath}.artifact`,
 			errors,
 		);
+		let artifact: DynamicDecisionArtifactName | undefined;
+		if (artifactValue) {
+			if (
+				DYNAMIC_DECISION_ARTIFACT_NAMES.includes(
+					artifactValue as DynamicDecisionArtifactName,
+				)
+			) {
+				artifact = artifactValue as DynamicDecisionArtifactName;
+			} else {
+				errors.push(
+					`${refPath}.artifact must be one of ${DYNAMIC_DECISION_ARTIFACT_NAMES.join(", ")}`,
+				);
+			}
+		}
 		const digest = optionalString(ref.digest, `${refPath}.digest`, errors);
 		if (taskId)
 			refs.push(

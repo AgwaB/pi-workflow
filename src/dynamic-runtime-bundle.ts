@@ -166,7 +166,8 @@ function directDynamicPlannerPrompt(input) {
       '- It must not say that a later reducer will complete the answer; there is no later reducer.',
     ].join('\\n'),
     [
-      'inputRefs rules: each ref MUST be { "kind": "workflow-artifact-ref", "taskId": <known task id>, optional "artifact": str, optional "digest": str }.',
+      'inputRefs rules: each ref MUST be { "kind": "workflow-artifact-ref", "taskId": <known task id>, optional "artifact": "control" | "analysis" | "refs" | "raw", optional "digest": str }.',
+      'Omit artifact to reference the upstream task as a whole. "result" is not a supported artifact.',
       \`Only reference a taskId you actually know from Generated tasks (\${generated}). If unknown, omit inputRefs rather than inventing one.\`,
     ].join('\\n'),
     'Keep <control> limited to controller-consumed fields; put rationale, strategy, criteria descriptions, gaps, and evidence discussion in <analysis> only.',

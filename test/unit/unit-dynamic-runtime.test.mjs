@@ -1000,6 +1000,26 @@ test("dynamic-decision-v1 accepts strict executable decisions and canonicalizes 
 		}).hash,
 		result.hash,
 	);
+
+	for (const artifact of [undefined, "control", "analysis", "refs", "raw"]) {
+		const supported = structuredClone(decision);
+		if (artifact === undefined)
+			delete supported.nextActions[0].inputRefs[0].artifact;
+		else supported.nextActions[0].inputRefs[0].artifact = artifact;
+		const supportedResult = validateDynamicDecision(supported, {
+			expectedRound: 0,
+			allowedTools: ["read", "custom_external_tool"],
+			toolProviders: {
+				custom_external_tool: { classification: "read-only" },
+			},
+			knownArtifactTaskIds: ["seed"],
+		});
+		assert.equal(
+			supportedResult.ok,
+			true,
+			`${artifact ?? "omitted"}: ${supportedResult.errors.join("\n")}`,
+		);
+	}
 });
 
 test("dynamic-decision-v1 rejects schema, invariant, ref, id, and tool violations", () => {
@@ -1016,7 +1036,14 @@ test("dynamic-decision-v1 rejects schema, invariant, ref, id, and tool violation
 					type: "synthesize",
 					actionId: "decide-r0",
 					outputProfile: "unknown_profile",
-					inputRefs: [{ kind: "workflow-artifact-ref", taskId: "missing" }],
+					inputRefs: [
+						{ kind: "workflow-artifact-ref", taskId: "missing" },
+						{
+							kind: "workflow-artifact-ref",
+							taskId: "seed",
+							artifact: "result",
+						},
+					],
 				},
 				{
 					type: "add_work_item",
@@ -1045,6 +1072,10 @@ test("dynamic-decision-v1 rejects schema, invariant, ref, id, and tool violation
 	);
 	assert.match(invalid.errors.join("\n"), /nextActions exceeds maxActions 1/);
 	assert.match(invalid.errors.join("\n"), /references unknown artifact task/);
+	assert.match(
+		invalid.errors.join("\n"),
+		/nextActions\[0\]\.inputRefs\[1\]\.artifact must be one of control, analysis, refs, raw/,
+	);
 	assert.match(invalid.errors.join("\n"), /outputProfile is unknown/);
 	assert.match(invalid.errors.join("\n"), /outside the allowed tool ceiling/);
 	assert.match(invalid.errors.join("\n"), /collides|duplicated/);
@@ -2091,14 +2122,39 @@ test("runDynamicDecisionLoop repairs unknown dynamic inputRefs before fanout", a
 			},
 		],
 	};
+	const unsupportedArtifactDecision = {
+		...dynamicLoopValidWorkDecision(),
+		phase: "final",
+		status: "synthesize",
+		nextActions: [
+			{
+				type: "synthesize",
+				actionId: "act-synthesize",
+				prompt: "Synthesize the declared scope.",
+				outputProfile: "synthesis_v1",
+				inputRefs: [
+					{
+						kind: "workflow-artifact-ref",
+						taskId: "known-task",
+						artifact: "result",
+					},
+				],
+			},
+		],
+	};
 	const config = dynamicLoopConfig({
 		maxDecisionRounds: 1,
-		repair: { maxAttempts: 1 },
+		repair: { maxAttempts: 2 },
 		stopPolicy: { failOnInvalidDecision: true },
 	});
 	const { ctx, calls } = makeValidatingDynamicDecisionLoopCtx({
 		config,
-		plannerControls: [invalidRefDecision, dynamicLoopValidWorkDecision()],
+		generatedTaskIds: ["known-task"],
+		plannerControls: [
+			invalidRefDecision,
+			unsupportedArtifactDecision,
+			dynamicLoopValidWorkDecision(),
+		],
 		agentResults: { review: { taskId: "review", specId: "adaptive.review" } },
 	});
 
@@ -2106,15 +2162,19 @@ test("runDynamicDecisionLoop repairs unknown dynamic inputRefs before fanout", a
 
 	assert.deepEqual(
 		calls.validationResults.map((validation) => validation.ok),
-		[false, true],
+		[false, false, true],
 	);
 	assert.match(
 		calls.validationResults[0].errors.join("\n"),
 		/\.inputRefs\[0\]\.taskId references unknown artifact task/,
 	);
+	assert.match(
+		calls.validationResults[1].errors.join("\n"),
+		/\.inputRefs\[0\]\.artifact must be one of control, analysis, refs, raw/,
+	);
 	assert.deepEqual(
 		plannerCalls(calls).map((request) => request.id),
-		["decide-r0", "decide-r0-repair-1"],
+		["decide-r0", "decide-r0-repair-1", "decide-r0-repair-2"],
 	);
 	assert.equal(dispatchedCalls(calls).length, 1);
 });

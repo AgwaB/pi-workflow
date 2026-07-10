@@ -132,6 +132,7 @@ export function defaultPlannerPrompt(input: DynamicPlannerPromptInput): string {
 		`Maximum actions this round: ${input.config.maxActionsPerRound}`,
 		"Keep <control> limited to controller-consumed fields; put rationale, strategy, criteria descriptions, gaps, and evidence discussion in <analysis> only.",
 		"Use nextActions to add work, verify findings, synthesize, stop, or block. Do not include unknown fields.",
+		'For inputRefs, omit artifact to reference the upstream task as a whole; when present, artifact must be one of "control" | "analysis" | "refs" | "raw". "result" is not a supported artifact.',
 		"Keep generated-worker prompts compact: describe objective/key facts/boundaries, and put bulky source material in inputRefs artifact references instead of inline prompt text.",
 	]
 		.filter(Boolean)
