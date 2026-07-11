@@ -19,6 +19,10 @@ import {
 } from "./workflow-progress-health.js";
 import { buildWorkflowRunMetrics } from "./workflow-metrics.js";
 import {
+	buildDynamicToolResultBudgetMetrics,
+	type DynamicToolResultBudgetRollup,
+} from "./dynamic-tool-result-budget-metrics.js";
+import {
 	readParentUsage,
 	type WorkflowParentUsageRecord,
 } from "./workflow-parent-usage.js";
@@ -764,8 +768,13 @@ export class WorkflowView implements Component {
 			kvRow(this.theme, "agent", task.agent, "syntaxType"),
 			kvRow(this.theme, "model", task.runtime.model ?? "(not recorded)"),
 			kvRow(this.theme, "thinking", task.runtime.thinking ?? "(not recorded)"),
-			kvRow(this.theme, "logs", `/workflow logs ${run.runId} ${task.specId || task.taskId}`),
+			kvRow(
+				this.theme,
+				"logs",
+				`/workflow logs ${run.runId} ${task.specId || task.taskId}`,
+			),
 			...this.taskUsageLines(task),
+			...this.taskToolResultBudgetLines(run, task),
 		];
 		return lines.map((line) => fit(line, width));
 	}
@@ -812,6 +821,61 @@ export class WorkflowView implements Component {
 		const attempts = task.usage?.aggregate?.attempts;
 		if (attempts !== undefined && attempts > 1)
 			lines.push(kvRow(this.theme, "attempts", String(attempts)));
+		return lines;
+	}
+
+	private taskToolResultBudgetLines(
+		run: WorkflowRunRecord,
+		task: WorkflowTaskRunRecord,
+	): string[] {
+		if (task.dynamicGenerated === undefined) return [];
+		const metrics = buildDynamicToolResultBudgetMetrics(run).byTask.find(
+			(candidate) => candidate.taskId === task.taskId,
+		);
+		if (!metrics) return [];
+		const lines = toolResultBudgetMetricLines(this.theme, metrics, false);
+		lines.push(
+			kvRow(
+				this.theme,
+				"coverage",
+				toolResultBudgetCoverageLabel(metrics, false),
+			),
+		);
+		const attemptTotal = metrics.terminalAttempts || metrics.attempts;
+		if (attemptTotal > 0)
+			lines.push(
+				taskMetaLine(this.theme, [
+					["telemetry", `${metrics.reportingAttempts}/${attemptTotal}`],
+					[
+						"counters",
+						`${metrics.evictionCounterReportingAttempts}/${metrics.evictionCounterExpectedAttempts}`,
+					],
+				]),
+			);
+		return lines;
+	}
+
+	private runToolResultBudgetLines(run: WorkflowRunRecord): string[] {
+		const totals = buildDynamicToolResultBudgetMetrics(run).totals;
+		if (totals.tasks === 0 || !hasToolResultBudgetViewSignal(totals)) return [];
+		const lines = [
+			...toolResultBudgetMetricLines(this.theme, totals, true),
+			kvRow(
+				this.theme,
+				"coverage",
+				toolResultBudgetCoverageLabel(totals, true),
+			),
+		];
+		const other = toolResultBudgetOtherCoverageLabel(totals);
+		if (other) lines.push(kvRow(this.theme, "other", other));
+		if (totals.evictionCounterExpectedAttempts > 0)
+			lines.push(
+				kvRow(
+					this.theme,
+					"counters",
+					`${totals.evictionCounterReportingAttempts}/${totals.evictionCounterExpectedAttempts}`,
+				),
+			);
 		return lines;
 	}
 
@@ -1185,6 +1249,7 @@ export class WorkflowView implements Component {
 				],
 			]),
 			...(detailRun ? this.runUsageLines(detailRun) : []),
+			...(detailRun ? this.runToolResultBudgetLines(detailRun) : []),
 			...this.runHealthLines(health),
 		];
 	}
@@ -1299,6 +1364,7 @@ export class WorkflowView implements Component {
 			]),
 			kvRow(this.theme, "run", shortId(run.runId)),
 			...this.runUsageLines(run),
+			...this.runToolResultBudgetLines(run),
 			...this.runHealthLines(health),
 		];
 		if (run.fanout && run.fanout.length > 0) {
@@ -2189,6 +2255,151 @@ function isWideCodePoint(codePoint: number): boolean {
 		(codePoint >= 0xff00 && codePoint <= 0xff60) ||
 		(codePoint >= 0xffe0 && codePoint <= 0xffe6)
 	);
+}
+
+function hasToolResultBudgetViewSignal(
+	metrics: DynamicToolResultBudgetRollup,
+): boolean {
+	return (
+		metrics.evictionAttempts > 0 ||
+		metrics.forcedEvictionAttempts > 0 ||
+		metrics.contextRecoveryAttempts > 0 ||
+		metrics.contextLengthExceededAttempts > 0 ||
+		metrics.warningAttempts > 0 ||
+		metrics.incomplete ||
+		metrics.disabledTasks > 0
+	);
+}
+
+function toolResultBudgetMetricLines(
+	theme: Theme,
+	metrics: DynamicToolResultBudgetRollup,
+	compact: boolean,
+): string[] {
+	const lines = [
+		"",
+		accent(theme, "Tool-result budget"),
+		kvRow(theme, "cap chars", toolResultBudgetCapLabel(metrics)),
+	];
+	if (metrics.maxRetainedChars !== null)
+		lines.push(
+			kvRow(
+				theme,
+				compact ? "peak" : "retained chars",
+				toolResultBudgetRetainedLabel(
+					metrics.maxRetainedChars,
+					metrics.maxUtilization,
+				),
+			),
+		);
+	else if (compact) lines.push(kvRow(theme, "peak", "unavailable"));
+
+	const countersComplete =
+		metrics.evictionCounterExpectedAttempts > 0 &&
+		metrics.evictionCounterReportingAttempts ===
+			metrics.evictionCounterExpectedAttempts;
+	const rows: Array<[boolean, string, string, string?]> = [
+		[
+			metrics.evictionAttempts > 0 || (!compact && countersComplete),
+			"evicted",
+			compact
+				? `${metrics.observedEvictedCount} / ${formatCharacterCount(metrics.observedEvictedChars)} chars`
+				: `${metrics.observedEvictedCount} results / ${formatCharacterCount(metrics.observedEvictedChars)} chars`,
+			metrics.evictionAttempts > 0 ? "warning" : "text",
+		],
+		[
+			metrics.forcedEvictionAttempts > 0,
+			"forced",
+			formatAttemptCount(metrics.forcedEvictionAttempts),
+			"warning",
+		],
+		[
+			metrics.contextRecoveryAttempts > 0 || (!compact && countersComplete),
+			"recovery",
+			metrics.contextRecoveryAttempts > 0
+				? compact
+					? formatAttemptCount(metrics.contextRecoveryAttempts)
+					: `${formatAttemptCount(metrics.contextRecoveryAttempts)} (${metrics.contextOverflowRecoveredAttempts} overflow)`
+				: "none observed",
+			metrics.contextRecoveryAttempts > 0 ? "warning" : "text",
+		],
+		[
+			metrics.contextLengthExceededAttempts > 0,
+			"context limit",
+			formatAttemptCount(metrics.contextLengthExceededAttempts),
+			"error",
+		],
+		[
+			metrics.warningAttempts > 0,
+			"warnings",
+			formatAttemptCount(metrics.warningAttempts),
+			"warning",
+		],
+	];
+	for (const [visible, key, value, color] of rows)
+		if (visible) lines.push(kvRow(theme, key, value, color));
+	return lines;
+}
+
+function formatCharacterCount(value: number): string {
+	return Math.round(value).toLocaleString("en-US");
+}
+
+function formatAttemptCount(value: number): string {
+	return `${value} attempt${value === 1 ? "" : "s"}`;
+}
+
+function toolResultBudgetRetainedLabel(
+	retainedChars: number,
+	utilization: number | null,
+): string {
+	const percentage =
+		utilization === null
+			? ""
+			: ` (${(utilization * 100).toFixed(utilization >= 0.1 ? 1 : 2)}%)`;
+	return `${formatCharacterCount(retainedChars)}${percentage}`;
+}
+
+function toolResultBudgetCapLabel(
+	metrics: DynamicToolResultBudgetRollup,
+): string {
+	const values =
+		metrics.backendCapValues.length > 0
+			? metrics.backendCapValues
+			: metrics.configuredCapValues;
+	if (values.length === 0)
+		return metrics.disabledTasks > 0 ? "disabled" : "unavailable";
+	if (values.length === 1) return formatCharacterCount(values[0]!);
+	return `mixed (${values.map(formatCharacterCount).join(", ")})`;
+}
+
+function toolResultBudgetCoverageLabel(
+	metrics: DynamicToolResultBudgetRollup,
+	compact: boolean,
+): string {
+	if (!compact && metrics.disabledTasks > 0) return "disabled";
+	if (!compact && metrics.pendingTelemetryTasks > 0) return "pending";
+	const total = metrics.tasks || 1;
+	if (compact) return `complete ${metrics.fullyReportingTasks}/${total}`;
+	if (metrics.fullyReportingTasks === total)
+		return `complete ${metrics.fullyReportingTasks}/${total} tasks`;
+	if (metrics.partiallyReportingTasks > 0)
+		return `partial ${metrics.partiallyReportingTasks}/${total} tasks`;
+	return `unavailable ${metrics.unavailableTasks}/${total} tasks`;
+}
+
+function toolResultBudgetOtherCoverageLabel(
+	metrics: DynamicToolResultBudgetRollup,
+): string {
+	return [
+		[metrics.partiallyReportingTasks, "partial"],
+		[metrics.unavailableTasks, "unavailable"],
+		[metrics.disabledTasks, "disabled"],
+		[metrics.pendingTelemetryTasks, "pending"],
+	]
+		.filter(([count]) => Number(count) > 0)
+		.map(([count, label]) => `${label} ${count}`)
+		.join(" · ");
 }
 
 function formatTokenCount(

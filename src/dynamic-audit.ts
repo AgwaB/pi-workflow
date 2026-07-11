@@ -94,6 +94,8 @@ interface CollectedRefIndex {
  *   against the collected worker refs: exact locator match, normalized URL
  *   match, or generated-task ref-id match (taskId/specId, optionally with an
  *   `.control/.analysis/.refs/.raw` suffix or `workflow_artifact:` prefix).
+ *   A matched collected locator may carry a non-empty `#` or `:` deep-link
+ *   suffix (for example `.control#finding` or `task-3:src/file.ts:10-20`).
  * - sourceRefJoinFailures: carried locators (across all claims) that failed
  *   to resolve against the collected refs.
  * - refsTotal / uniqueSourceUrls: entry count and unique normalized URL count
@@ -225,8 +227,7 @@ function entryLocators(entry: unknown): string[] {
 	const locators: string[] = [];
 	for (const key of LOCATOR_OBJECT_KEYS) {
 		const value = entry[key];
-		if (typeof value === "string" && value.trim())
-			locators.push(value.trim());
+		if (typeof value === "string" && value.trim()) locators.push(value.trim());
 	}
 	return locators;
 }
@@ -234,7 +235,22 @@ function entryLocators(entry: unknown): string[] {
 function locatorResolves(locator: string, index: CollectedRefIndex): boolean {
 	if (index.locators.has(locator)) return true;
 	const url = normalizeUrl(locator);
-	return url !== undefined && index.urls.has(url);
+	if (url !== undefined && index.urls.has(url)) return true;
+	return resolvesIndexedSublocator(locator, index.locators);
+}
+
+function resolvesIndexedSublocator(
+	locator: string,
+	indexedLocators: ReadonlySet<string>,
+): boolean {
+	for (const indexed of indexedLocators) {
+		if (!locator.startsWith(indexed) || locator.length <= indexed.length + 1)
+			continue;
+		const boundary = locator[indexed.length];
+		if (boundary !== "#" && boundary !== ":") continue;
+		if (locator.slice(indexed.length + 1).trim()) return true;
+	}
+	return false;
 }
 
 function extractUrls(value: unknown, urls = new Set<string>()): Set<string> {
