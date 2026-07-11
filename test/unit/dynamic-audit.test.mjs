@@ -95,6 +95,62 @@ test("auditDynamicClaimSupport joins keyFindings evidenceRefs to generated task 
 	assert.deepEqual(audit.countedClaimKeys, ["keyFindings"]);
 });
 
+test("auditDynamicClaimSupport resolves only bounded deep links below indexed locators", () => {
+	const audit = auditDynamicClaimSupport({
+		synthesis: [
+			{
+				taskId: "adaptive.synthesis",
+				control: {
+					keyFindings: [
+						{
+							id: "fragment",
+							summary: "artifact fragment",
+							sourceRefs: ["adaptive.research.control#finding-one"],
+						},
+						{
+							id: "artifact-path",
+							summary: "artifact JSON path",
+							evidenceRefs: [
+								"workflow_artifact:adaptive.research.control:findings.two",
+							],
+						},
+						{
+							id: "task-path",
+							summary: "task-local evidence path",
+							evidenceRefs: ["task-3:src/file.ts:10-20"],
+						},
+						{
+							id: "standalone-path",
+							summary: "unindexed local path",
+							evidenceRefs: ["src/file.ts:10-20"],
+						},
+						{
+							id: "prefix-lookalike",
+							summary: "unindexed lookalike",
+							sourceRefs: ["adaptive.research-evil#finding"],
+						},
+						{
+							id: "empty-suffix",
+							summary: "empty deep link",
+							sourceRefs: ["adaptive.research:"],
+						},
+					],
+				},
+			},
+		],
+		collected: [{ taskId: "task-3", specId: "adaptive.research" }],
+	});
+	assert.equal(audit.claimsTotal, 6);
+	assert.equal(audit.claimsWithSources, 3);
+	assert.equal(audit.claimsWithoutSources, 3);
+	assert.equal(audit.sourceRefJoinFailures, 3);
+	assert.deepEqual(audit.unsupportedClaimIds, [
+		"standalone-path",
+		"prefix-lookalike",
+		"empty-suffix",
+	]);
+});
+
 test("auditDynamicClaimSupport counts unsourced claims and join failures", () => {
 	const audit = auditDynamicClaimSupport({
 		synthesis: [
