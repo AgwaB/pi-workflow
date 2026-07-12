@@ -444,6 +444,28 @@ type DescendantRunRecord = {
 	depth: number;
 };
 
+async function listRegisteredDynamicChildRunIds(
+	cwd: string,
+	parentRunId: string,
+): Promise<string[]> {
+	const runIds = new Set<string>();
+	for (const event of await readDynamicEvents(cwd, parentRunId)) {
+		if (event.type !== "workflow.started") continue;
+		const runId = optionalEventString(event.payload.runId);
+		if (!runId) continue;
+		if (
+			runId.length > 128 ||
+			!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(runId)
+		) {
+			throw new Error(
+				`invalid nested workflow run id registered by ${parentRunId}`,
+			);
+		}
+		if (runId !== parentRunId) runIds.add(runId);
+	}
+	return [...runIds];
+}
+
 async function listDescendantRunRecords(
 	cwd: string,
 	parentRunId: string,
@@ -493,6 +515,24 @@ async function cascadeWorkflowStopToDescendants(
 ): Promise<DescendantStopResult> {
 	const errors: string[] = [];
 	const pendingRunIds = new Set<string>();
+	const registeredChildRunIds = new Set(
+		(await listRegisteredDynamicChildRunIds(cwd, parentRunId)).filter(
+			(runId) => !excludedRunIds.has(runId),
+		),
+	);
+	// A workflow.started event durably reserves the child run id before run.json
+	// exists. Fence every registered id first so a concurrent nested launch sees
+	// its own stop intent during its first scheduler pass.
+	for (const runId of registeredChildRunIds) {
+		try {
+			await requestWorkflowStop(cwd, runId);
+		} catch (error) {
+			pendingRunIds.add(runId);
+			errors.push(
+				`${runId}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
 	const descendants = await listDescendantRunRecords(
 		cwd,
 		parentRunId,
@@ -502,6 +542,7 @@ async function cascadeWorkflowStopToDescendants(
 		({ run }) => !isTerminalWorkflowStatus(run.status),
 	);
 	for (const { run } of activeDescendants) {
+		if (registeredChildRunIds.has(run.runId)) continue;
 		try {
 			await requestWorkflowStop(cwd, run.runId);
 		} catch (error) {

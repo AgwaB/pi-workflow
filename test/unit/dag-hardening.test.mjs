@@ -11,6 +11,7 @@ import test from "node:test";
 
 import { compileWorkflow } from "../../.tmp/unit/compiler.js";
 import { setSupportHelperPreparedHookForTests } from "../../.tmp/unit/artifact-graph-runtime.js";
+import { appendDynamicEvent } from "../../.tmp/unit/dynamic-events.js";
 import { setDynamicControllerHooksForTests } from "../../.tmp/unit/engine.js";
 import { markFailFastCancellations } from "../../.tmp/unit/engine-run-graph.js";
 import {
@@ -33,6 +34,7 @@ import {
 	eventually,
 	makeProject,
 	makeSubagentLaunchFixture,
+	runWorkflowSpec,
 	scheduleRun,
 	setSubagentApiForTests,
 	setSubagentLaunchControlsForTests,
@@ -901,6 +903,76 @@ test("existing stop intent prevents dynamic nested workflow launch", async () =>
 		writeFileSync(join(cwd, "release-nested-call"), "release", "utf8");
 		if (scheduling)
 			await Promise.race([scheduling.catch(() => undefined), sleep(500)]);
+		cleanup(cwd);
+	}
+});
+
+test("parent stop fences a registered nested child before its run record exists", async () => {
+	const cwd = makeProject();
+	try {
+		const { run } = await createDynamicControllerRun(
+			cwd,
+			"export default async function controller() { return { control: { schema: 'dynamic-controller-result-v1', summary: 'unused' }, analysis: 'unused', refs: [] }; }",
+		);
+		const childRunId = "workflow_prelaunch_child";
+		await appendDynamicEvent(cwd, run.runId, {
+			controllerSpecId: "adaptive.controller",
+			type: "workflow.started",
+			opId: "adaptive.controller:workflow:child:001",
+			requestHash: "registered-child-request",
+			payload: {
+				workflowId: "child",
+				runId: childRunId,
+				wait: false,
+				status: "starting",
+			},
+		});
+
+		const stoppedParent = await stopRun(cwd, run.runId);
+		assert.equal(stoppedParent.run.status, "interrupted");
+		assert.equal(
+			(await listRunRecords(cwd)).some(
+				(candidate) => candidate.runId === childRunId,
+			),
+			false,
+		);
+		assert.ok(await readWorkflowStopIntent(cwd, childRunId));
+
+		const nestedDir = join(cwd, "workflows", "registered-child");
+		mkdirSync(join(nestedDir, "helpers"), { recursive: true });
+		writeFileSync(
+			join(nestedDir, "helpers", "side-effect.mjs"),
+			`import { writeFile } from "node:fs/promises";\nexport default async function helper() { await writeFile(${JSON.stringify(join(cwd, "registered-child-launched"))}, "launched", "utf8"); return { schema: "stage-control-v1", digest: "launched" }; }\n`,
+		);
+		const nestedSpecPath = join(nestedDir, "spec.json");
+		writeFileSync(
+			nestedSpecPath,
+			JSON.stringify(
+				artifactGraphWorkflowSpec({
+					name: "registered-child",
+					artifactGraph: {
+						stages: [
+							{
+								id: "side",
+								support: { uses: "./helpers/side-effect.mjs" },
+							},
+						],
+					},
+				}),
+			),
+		);
+
+		const child = await runWorkflowSpec(nestedSpecPath, cwd, {
+			task: "Must remain stopped.",
+			runId: childRunId,
+			parentRunId: run.runId,
+		});
+		assert.equal(child.status, "interrupted");
+		assert.equal(child.tasks[0].status, "interrupted");
+		assert.equal(child.tasks[0].statusDetail, "workflow_stopped");
+		assert.equal(existsSync(join(cwd, "registered-child-launched")), false);
+		assert.equal(await readWorkflowStopIntent(cwd, childRunId), undefined);
+	} finally {
 		cleanup(cwd);
 	}
 });
