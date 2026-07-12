@@ -88,6 +88,7 @@ const DEFAULT_SUBAGENT_RUNS_ROOT = ".pi/workflow-subagents";
 const MAX_SUBAGENT_SESSION_ID_LENGTH = 64;
 const EXTRA_SUBAGENT_EXTENSIONS_ENV = "PI_WORKFLOW_SUBAGENT_EXTRA_EXTENSIONS";
 const CAMPAIGN_CONTEXT_ENV = "PI_WORKFLOW_CAMPAIGN_CONTEXT";
+const PAID_APPROVAL_SHA256_ENV = "PI_WORKFLOW_PAID_APPROVAL_SHA256";
 const CAMPAIGN_CONFIGURATION_ENV = {
 	campaignId: "PI_WORKFLOW_CAMPAIGN_ID",
 	packetHash: "PI_WORKFLOW_CAMPAIGN_PACKET_HASH",
@@ -387,6 +388,10 @@ interface CampaignAccountingConfiguration {
 	frozenSettings: CampaignFrozenSettings;
 	caps: { provider_request: number; model_attempt: number; repair: number };
 	scorerHash: string;
+	approvalPath?: string;
+	approvalSha256?: string;
+	subjectHash?: string;
+	maxCostUsd?: number;
 }
 
 interface CampaignTaskLaunchFiles {
@@ -399,6 +404,187 @@ function requiredAbsolutePath(value: string, label: string): string {
 	if (!isAbsolute(value) || resolve(value) !== value)
 		throw new Error(`campaign_configuration_relative_path:${label}`);
 	return value;
+}
+
+function isCampaignPaidMode(packet: Record<string, unknown>): boolean {
+	const authority = packet.authority as Record<string, unknown> | undefined;
+	return (
+		isPlainRecord(authority) &&
+		authority.noSend === false &&
+		authority.providerSend === true &&
+		authority.childLaunch === "paid-approved" &&
+		authority.approval === true &&
+		authority.productChange === false &&
+		typeof authority.paidModeApprovalArtifact === "string" &&
+		authority.paidModeApprovalArtifact === packet.approvalArtifactPath
+	);
+}
+
+function isCampaignAuthorityAllowed(packet: Record<string, unknown>): boolean {
+	const authority = packet.authority as Record<string, unknown> | undefined;
+	if (!isPlainRecord(authority)) return false;
+	const noSend =
+		authority.noSend === true &&
+		authority.providerSend === false &&
+		authority.childLaunch === "offline-NO_SEND-only" &&
+		authority.approval === false &&
+		authority.paidModeApprovalArtifact === null;
+	return noSend || isCampaignPaidMode(packet);
+}
+
+function isCampaignSettingsAllowed(
+	settings: Record<string, unknown>,
+	frozenSettings: CampaignFrozenSettings,
+): boolean {
+	if (frozenSettings.noSend)
+		return (
+			settings.noSend === true &&
+			settings.providerCalls === 0 &&
+			settings.network === "forbidden" &&
+			settings.execution === "offline-NO_SEND-only" &&
+			settings.providerSend === false
+		);
+	const { sha256: embeddedSettingsHash, ...unsignedSettings } = settings;
+	const calculatedSettingsHash = createHash("sha256")
+		.update(canonicalCampaignPacketBytes(unsignedSettings))
+		.digest("hex");
+	return (
+		settings.noSend === false &&
+		settings.providerSend === true &&
+		settings.network === "provider-only" &&
+		settings.execution === "paid-approved" &&
+		settings.providerCalls === null &&
+		settings.approvalArtifact === "required" &&
+		Number.isFinite(settings.maxCostUsd) &&
+		Number(settings.maxCostUsd) > 0 &&
+		embeddedSettingsHash === calculatedSettingsHash
+	);
+}
+
+function paidSubjectSeededBundles(packet: Record<string, unknown>): unknown {
+	const seeded = packet.seededBundles as Record<string, unknown>;
+	const arms = seeded?.arms as Record<string, Record<string, unknown>>;
+	return {
+		manifestPath: seeded?.manifestPath,
+		manifestSha256: seeded?.manifestSha256,
+		builderPath: seeded?.builderPath,
+		builderSha256: seeded?.builderSha256,
+		sourcePacketPath: seeded?.sourcePacketPath,
+		sourcePacketHash: seeded?.sourcePacketHash,
+		sourcePacketFileSha256: seeded?.sourcePacketFileSha256,
+		arms: Object.fromEntries(
+			(["default", "batched"] as const).map((name) => [
+				name,
+				{
+					bundlePath: arms?.[name]?.bundlePath,
+					specSha256: arms?.[name]?.specSha256,
+					topologySha256: arms?.[name]?.topologySha256,
+					compiledSha256: arms?.[name]?.compiledSha256,
+					stageIds: arms?.[name]?.stageIds,
+				},
+			]),
+		),
+	};
+}
+
+function paidApprovalSubjectFromPacket(
+	packet: Record<string, unknown>,
+): Record<string, unknown> {
+	return {
+		schema: "pi-workflow-paid-campaign-approval-subject-core-v1",
+		authority: "paid-approved",
+		source: packet.source,
+		sourceInventorySha256: createHash("sha256")
+			.update(stableCampaignJson(packet.sourceInventory))
+			.digest("hex"),
+		fixture: packet.fixture,
+		settings: packet.settings,
+		scorerAndRubric: packet.scorerAndRubric,
+		integrations: packet.integrations,
+		seededBundles: paidSubjectSeededBundles(packet),
+		replayFidelitySha256: createHash("sha256")
+			.update(stableCampaignJson(packet.replayFidelity))
+			.digest("hex"),
+		sourceFreeze: packet.sourceFreeze,
+		maxCostUsd: (packet.settings as Record<string, unknown>)?.maxCostUsd,
+	};
+}
+
+async function assertPaidApprovalArtifactIfRequired(
+	packet: Record<string, unknown>,
+	packetHash: string,
+	expectedApprovalSha256?: string,
+): Promise<{
+	approvalPath?: string;
+	approvalSha256?: string;
+	subjectHash?: string;
+	maxCostUsd?: number;
+}> {
+	if (!isCampaignPaidMode(packet)) return {};
+	if (!/^[a-f0-9]{64}$/.test(expectedApprovalSha256 ?? ""))
+		throw new Error("campaign_configuration_invalid:paid_approval_sha256");
+	const authority = packet.authority as Record<string, unknown>;
+	const approvalPath = requiredAbsolutePath(
+		String(packet.approvalArtifactPath),
+		"paid_approval",
+	);
+	if (authority.paidModeApprovalArtifact !== approvalPath)
+		throw new Error("campaign_configuration_drift:paid_approval_path");
+	if ((await realpath(approvalPath)) !== approvalPath)
+		throw new Error("campaign_configuration_drifting_path:paid_approval");
+	const mode = (await stat(approvalPath)).mode & 0o777;
+	if ((mode & 0o222) !== 0)
+		throw new Error("campaign_configuration_mutable_permissions:paid_approval");
+	const approvalBytes = await readFile(approvalPath);
+	const approvalSha256 = createHash("sha256")
+		.update(approvalBytes)
+		.digest("hex");
+	if (approvalSha256 !== expectedApprovalSha256)
+		throw new Error("campaign_configuration_drift:paid_approval_hash");
+	const approval = JSON.parse(approvalBytes.toString("utf8")) as Record<
+		string,
+		unknown
+	>;
+	const expectedSubject = paidApprovalSubjectFromPacket(packet);
+	if (
+		stableCampaignJson(packet.approvalSubjectCore) !==
+		stableCampaignJson(expectedSubject)
+	)
+		throw new Error("campaign_configuration_drift:approval_subject");
+	const subjectHash = createHash("sha256")
+		.update(stableCampaignJson(expectedSubject))
+		.digest("hex");
+	const approved = approval.approved as Record<string, unknown>;
+	const settings = packet.settings as Record<string, unknown>;
+	if (
+		packet.subjectHash !== subjectHash ||
+		approval.schema !== "pi-workflow-paid-campaign-approval-v1" ||
+		approval.template !== false ||
+		approval.approval !== true ||
+		approval.packetHash !== packetHash ||
+		approval.subjectHash !== subjectHash ||
+		typeof approval.owner !== "string" ||
+		approval.owner.trim() === "" ||
+		approval.owner === "<fill externally>" ||
+		typeof approval.approvedAt !== "string" ||
+		Number.isNaN(Date.parse(approval.approvedAt)) ||
+		!isPlainRecord(approved) ||
+		stableCampaignJson(approved) !==
+			stableCampaignJson({
+				maxCostUsd: settings.maxCostUsd,
+				caps: settings.caps,
+				model: "openai-codex/gpt-5.5",
+				thinking: "low",
+				arms: ["batched", "default"],
+			})
+	)
+		throw new Error("campaign_configuration_drift:paid_approval");
+	return {
+		approvalPath,
+		approvalSha256,
+		subjectHash,
+		maxCostUsd: Number(settings.maxCostUsd),
+	};
 }
 
 function parseCampaignFrozenSettings(value: string): CampaignFrozenSettings {
@@ -532,11 +718,7 @@ async function resolveCampaignAccountingConfiguration(
 		packet.schemaVersion !== 2 ||
 		packet.schema !== "pi-workflow-campaign-packet-v1" ||
 		!isPlainRecord(packet.authority) ||
-		packet.authority.noSend !== true ||
-		packet.authority.providerSend !== false ||
-		packet.authority.childLaunch !== "offline-NO_SEND-only" ||
-		packet.authority.approval !== false ||
-		packet.authority.paidModeApprovalArtifact !== null ||
+		!isCampaignAuthorityAllowed(packet) ||
 		!isPlainRecord(packet.settings) ||
 		!isPlainRecord(packet.integrations) ||
 		!isPlainRecord(packet.scorerAndRubric)
@@ -557,6 +739,7 @@ async function resolveCampaignAccountingConfiguration(
 		"campaignExtension",
 		"driver",
 		"ledger",
+		...(isCampaignPaidMode(packet) ? (["paidAuthority"] as const) : []),
 		"product",
 	] as const;
 	if (
@@ -600,13 +783,7 @@ async function resolveCampaignAccountingConfiguration(
 		throw new Error("campaign_configuration_dirty_source");
 	const scorerHash = (packet.scorerAndRubric as Record<string, unknown>).sha256;
 	if (
-		frozenSettings.noSend !== true ||
-		settings.noSend !== true ||
-		settings.noSend !== frozenSettings.noSend ||
-		settings.providerCalls !== 0 ||
-		settings.network !== "forbidden" ||
-		settings.execution !== "offline-NO_SEND-only" ||
-		settings.providerSend !== false ||
+		!isCampaignSettingsAllowed(settings, frozenSettings) ||
 		Object.hasOwn(settings, "launch") ||
 		settings.model !== `${frozenSettings.provider}/${frozenSettings.model}` ||
 		settings.thinking !== frozenSettings.thinking ||
@@ -625,6 +802,16 @@ async function resolveCampaignAccountingConfiguration(
 		!/^[a-f0-9]{64}$/.test(scorerHash)
 	)
 		throw new Error("campaign_configuration_drift:frozen_settings");
+	const paidApproval = await assertPaidApprovalArtifactIfRequired(
+		packet,
+		packetHash,
+		env[PAID_APPROVAL_SHA256_ENV],
+	);
+	if (
+		!isCampaignPaidMode(packet) &&
+		env[PAID_APPROVAL_SHA256_ENV] !== undefined
+	)
+		throw new Error("campaign_configuration_no_send_forbids_paid_approval_env");
 	const ledger = JSON.parse(await readFile(ledgerPath, "utf8")) as Record<
 		string,
 		unknown
@@ -634,6 +821,10 @@ async function resolveCampaignAccountingConfiguration(
 		ledger.packetHash !== packetHash ||
 		ledger.scorerHash !== scorerHash ||
 		stableCampaignJson(ledger.caps) !== stableCampaignJson(caps) ||
+		(isCampaignPaidMode(packet) &&
+			(ledger.maxCostUsd !== paidApproval.maxCostUsd ||
+				ledger.approvalSha256 !== paidApproval.approvalSha256 ||
+				ledger.subjectHash !== paidApproval.subjectHash)) ||
 		ledger.terminal !== null ||
 		ledger.cancelled !== false
 	)
@@ -648,6 +839,7 @@ async function resolveCampaignAccountingConfiguration(
 		frozenSettings,
 		caps,
 		scorerHash,
+		...paidApproval,
 	};
 }
 
@@ -691,6 +883,14 @@ async function writeCampaignTaskContext(
 		launchRetryIndex,
 		outputRetryIndex,
 		frozenSettings: configuration.frozenSettings,
+		...(configuration.approvalPath === undefined
+			? {}
+			: {
+					approvalPath: configuration.approvalPath,
+					approvalSha256: configuration.approvalSha256,
+					subjectHash: configuration.subjectHash,
+					maxCostUsd: configuration.maxCostUsd,
+				}),
 	};
 	const context = {
 		...unsignedContext,

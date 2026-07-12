@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
 import {
 	mkdirSync,
+	chmodSync,
 	existsSync,
 	mkdtempSync,
 	readFileSync,
@@ -32,6 +33,7 @@ const CAMPAIGN_KEYS = [
 	"PI_WORKFLOW_CAMPAIGN_EXTENSION",
 	"PI_WORKFLOW_CAMPAIGN_EXTENSION_SHA256",
 	"PI_WORKFLOW_CAMPAIGN_FROZEN_SETTINGS",
+	"PI_WORKFLOW_PAID_APPROVAL_SHA256",
 	"PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES",
 	"PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS",
 	"PI_WORKFLOW_ADAPTIVE_LIVE_WORKERS",
@@ -291,6 +293,157 @@ function installRealOfflineNoSendCampaignEnvironment(root) {
 		PI_WORKFLOW_ARTIFACT_OUTPUT_RETRIES: "0",
 	});
 	return { packetPath, ledgerPath, extensionPath, packetHash, scorerHash };
+}
+
+async function installPaidCampaignEnvironment(root) {
+	root = realpathSync(root);
+	const paidAuthority = await import(
+		`${new URL(`file://${RUNNER_ROOT}/paid-authority.mjs`).href}?test=${Date.now()}`
+	);
+	const packetPath = resolve(root, "paid-packet.json");
+	const approvalPath = resolve(root, "paid-approval.json");
+	const ledgerPath = resolve(root, "campaign-ledger.json");
+	const extensionPath = realCampaignExtensionPath();
+	const integrationPaths = {
+		product: PRODUCT_PATH,
+		campaignExtension: extensionPath,
+		ledger: realpathSync(join(RUNNER_ROOT, "ledger.mjs")),
+		adapter: realpathSync(join(RUNNER_ROOT, "adapter.mjs")),
+		driver: realpathSync(join(RUNNER_ROOT, "paid-driver.mjs")),
+		paidAuthority: realpathSync(join(RUNNER_ROOT, "paid-authority.mjs")),
+	};
+	const scorerHash = sha256("paid-campaign-unit-scorer");
+	const caps = { provider_request: 4, model_attempt: 4, repair: 0 };
+	const basePacket = {
+		schema: "pi-workflow-campaign-packet-v1",
+		schemaVersion: 2,
+		authority: {
+			noSend: true,
+			providerSend: false,
+			childLaunch: "offline-NO_SEND-only",
+			approval: false,
+			productChange: false,
+			paidModeApprovalArtifact: null,
+		},
+		source: {
+			head: "0".repeat(40),
+			tree: "0".repeat(40),
+			statusPorcelainV1Z: "",
+			statusPorcelainV1ZSha256: sha256(""),
+		},
+		sourceInventory: { files: [] },
+		fixture: { path: "fixture.json", fixtureSha256: sha256("fixture") },
+		sourceFreeze: {
+			path: resolve(root, "source-freeze.json"),
+			packetHash: sha256("source-freeze"),
+			fileSha256: sha256("source-freeze-file"),
+		},
+		replayFidelity: {
+			sourceRepo: resolve(root, "source"),
+			targetRepo: resolve(root, "target"),
+			cwd: resolve(root, "target"),
+			task: "paid unit fixture",
+		},
+		scorerAndRubric: {
+			sha256: scorerHash,
+			inputsSha256: sha256("inputs"),
+			privateInputsPath: resolve(root, "inputs.json"),
+			implementation: {},
+		},
+		settings: {
+			noSend: true,
+			providerSend: false,
+			providerCalls: 0,
+			network: "forbidden",
+			execution: "offline-NO_SEND-only",
+			model: "openai-codex/gpt-5.5",
+			thinking: "low",
+			concurrency: {
+				mode: "serial",
+				workflowRuns: 1,
+				providerRequestsInFlight: 1,
+				adaptive: false,
+			},
+			retries: {
+				PI_WORKFLOW_TRANSIENT_MODEL_FAILURE_RETRIES: 0,
+				PI_WORKFLOW_ARTIFACT_OUTPUT_RETRIES: 0,
+			},
+			caps,
+		},
+		integrations: integrationEntries(integrationPaths),
+		seededBundles: {
+			manifestPath: resolve(root, "manifest.json"),
+			manifestSha256: sha256("manifest"),
+			builderPath: resolve(root, "builder.mjs"),
+			builderSha256: sha256("builder"),
+			sourcePacketPath: resolve(root, "source-packet.json"),
+			sourcePacketHash: sha256("source-packet-hash"),
+			sourcePacketFileSha256: sha256("source-packet-file"),
+			arms: {
+				default: {
+					bundlePath: resolve(root, "default"),
+					specSha256: sha256("default-spec"),
+					topologySha256: sha256("default-topology"),
+					compiledSha256: sha256("default-compiled"),
+					stageIds: ["verify-claims"],
+				},
+				batched: {
+					bundlePath: resolve(root, "batched"),
+					specSha256: sha256("batched-spec"),
+					topologySha256: sha256("batched-topology"),
+					compiledSha256: sha256("batched-compiled"),
+					stageIds: ["verification-batches", "verify-claims"],
+				},
+			},
+		},
+	};
+	const subjectCore = paidAuthority.canonicalPaidApprovalSubjectCore(
+		basePacket,
+		1.25,
+	);
+	const packetCore = paidAuthority.paidPacketCore(
+		basePacket,
+		subjectCore,
+		approvalPath,
+	);
+	const packetHash = paidAuthority.packetHash(packetCore);
+	const packet = { ...packetCore, packetHash };
+	const approval = paidAuthority.approvalArtifact({
+		packetHash,
+		subjectHash: paidAuthority.subjectHash(subjectCore),
+		subjectCore,
+		owner: "unit-test-owner",
+		approvedAt: "2030-01-01T00:00:00.000Z",
+	});
+	const approvalBytes = `${JSON.stringify(approval, null, 2)}\n`;
+	writeFileSync(packetPath, `${JSON.stringify(packet, null, 2)}\n`, { mode: 0o400 });
+	chmodSync(packetPath, 0o400);
+	writeFileSync(approvalPath, approvalBytes, { mode: 0o400 });
+	chmodSync(approvalPath, 0o400);
+	writeFileSync(
+		ledgerPath,
+		`${JSON.stringify({ schemaVersion: 2, packetHash, scorerHash, caps, maxCostUsd: 1.25, approvalSha256: sha256(approvalBytes), subjectHash: paidAuthority.subjectHash(subjectCore), sequence: 0, cancelled: false, terminal: null, events: [], reservations: [] }, null, 2)}\n`,
+		{ mode: 0o600 },
+	);
+	Object.assign(process.env, {
+		PI_WORKFLOW_CAMPAIGN_ID: "campaign-paid-unit",
+		PI_WORKFLOW_CAMPAIGN_PACKET_HASH: packetHash,
+		PI_WORKFLOW_CAMPAIGN_PACKET_PATH: packetPath,
+		PI_WORKFLOW_CAMPAIGN_LEDGER_PATH: ledgerPath,
+		PI_WORKFLOW_CAMPAIGN_EXTENSION: extensionPath,
+		PI_WORKFLOW_CAMPAIGN_EXTENSION_SHA256: sha256(readFileSync(extensionPath)),
+		PI_WORKFLOW_CAMPAIGN_FROZEN_SETTINGS: JSON.stringify({
+			...FROZEN_SETTINGS,
+			noSend: false,
+		}),
+		PI_WORKFLOW_PAID_APPROVAL_SHA256: sha256(approvalBytes),
+		PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES: "1",
+		PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS: "1",
+		PI_WORKFLOW_ADAPTIVE_LIVE_WORKERS: "0",
+		PI_WORKFLOW_TRANSIENT_MODEL_FAILURE_RETRIES: "0",
+		PI_WORKFLOW_ARTIFACT_OUTPUT_RETRIES: "0",
+	});
+	return { packetPath, approvalPath, ledgerPath, packet, approval, approvalBytes };
 }
 
 function prepareLaunch(root, suffix, retry = {}) {
@@ -798,6 +951,75 @@ test("distinct campaign launches receive unique wrappers and cannot exchange con
 		);
 	} finally {
 		setSubagentApiForTests(undefined);
+		restoreEnvironment(saved);
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("paid campaign authority is packet, approval, context, and ledger bound", async () => {
+	const saved = saveEnvironment();
+	const root = mkdtempSync(join(tmpdir(), "workflow-campaign-paid-"));
+	try {
+		for (const key of CAMPAIGN_KEYS) delete process.env[key];
+		const fixture = await installPaidCampaignEnvironment(root);
+		const resolved = await resolveCampaignAccountingConfigurationForTests();
+		assert.equal(resolved?.maxCostUsd, 1.25);
+		assert.equal(resolved?.approvalPath, fixture.approvalPath);
+		assert.equal(resolved?.approvalSha256, sha256(fixture.approvalBytes));
+		assert.equal(resolved?.subjectHash, fixture.packet.subjectHash);
+
+		chmodSync(fixture.approvalPath, 0o600);
+		await assert.rejects(
+			resolveCampaignAccountingConfigurationForTests(),
+			/mutable_permissions:paid_approval/,
+		);
+		chmodSync(fixture.approvalPath, 0o400);
+
+		const template = { ...fixture.approval, template: true, approval: false };
+		const templateBytes = `${JSON.stringify(template, null, 2)}\n`;
+		chmodSync(fixture.approvalPath, 0o600);
+		writeFileSync(fixture.approvalPath, templateBytes);
+		chmodSync(fixture.approvalPath, 0o400);
+		process.env.PI_WORKFLOW_PAID_APPROVAL_SHA256 = sha256(templateBytes);
+		await assert.rejects(
+			resolveCampaignAccountingConfigurationForTests(),
+			/drift:paid_approval/,
+		);
+
+		chmodSync(fixture.approvalPath, 0o600);
+		writeFileSync(fixture.approvalPath, fixture.approvalBytes);
+		chmodSync(fixture.approvalPath, 0o400);
+		process.env.PI_WORKFLOW_PAID_APPROVAL_SHA256 = sha256(
+			fixture.approvalBytes,
+		);
+		const ledger = JSON.parse(readFileSync(fixture.ledgerPath, "utf8"));
+		ledger.maxCostUsd = 9;
+		writeFileSync(
+			fixture.ledgerPath,
+			`${JSON.stringify(ledger, null, 2)}\n`,
+		);
+		await assert.rejects(
+			resolveCampaignAccountingConfigurationForTests(),
+			/drift:ledger/,
+		);
+	} finally {
+		restoreEnvironment(saved);
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("NO_SEND campaign rejects paid approval authority environment", async () => {
+	const saved = saveEnvironment();
+	const root = mkdtempSync(join(tmpdir(), "workflow-campaign-nosend-paid-env-"));
+	try {
+		for (const key of CAMPAIGN_KEYS) delete process.env[key];
+		installCampaignEnvironment(root);
+		process.env.PI_WORKFLOW_PAID_APPROVAL_SHA256 = "0".repeat(64);
+		await assert.rejects(
+			resolveCampaignAccountingConfigurationForTests(),
+			/no_send_forbids_paid_approval_env/,
+		);
+	} finally {
 		restoreEnvironment(saved);
 		rmSync(root, { recursive: true, force: true });
 	}
