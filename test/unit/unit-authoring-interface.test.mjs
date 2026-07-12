@@ -498,8 +498,8 @@ test("bundled deep-research compacts audit packets before executive final", asyn
 		"normalize prompt should stay below the T6 compression ceiling",
 	);
 	assert(
-		rawVerifyPrompt.length < 5400,
-		"verify prompt should stay below the T6 compression ceiling",
+		rawVerifyPrompt.length < 6000,
+		"verify prompt with the local-evidence location contract should stay below 6000 characters",
 	);
 
 	assert.equal(normalizeInputPacket?.kind, "support");
@@ -3761,6 +3761,40 @@ test("deep-research verifier schemas separate default single-row and batched res
 	assert.equal(defaultRejectsBatchCarrier.valid, false);
 	const batchValid = validateJsonSchema(batchedRows, batchSchema);
 	assert.equal(batchValid.valid, true, JSON.stringify(batchValid.issues));
+	for (const location of [
+		{ line: 78 },
+		{ lineStart: 78, lineEnd: 78 },
+		{ lines: "78" },
+		{ excerptLocation: "package.json line 78" },
+	]) {
+		const localBatchRows = structuredClone(batchedRows);
+		localBatchRows.results[0].evidence = [
+			{
+				file: "package.json",
+				...location,
+				quote: '"node": ">=22.19.0"',
+				relevance: "Exact repo-local contract evidence.",
+			},
+		];
+		const localBatchValid = validateJsonSchema(localBatchRows, batchSchema);
+		assert.equal(
+			localBatchValid.valid,
+			true,
+			JSON.stringify(localBatchValid.issues),
+		);
+	}
+	const invalidLocalBatchRows = structuredClone(batchedRows);
+	invalidLocalBatchRows.results[0].evidence = [
+		{
+			file: "package.json",
+			lineStart: { value: 78 },
+			quote: '"node": ">=22.19.0"',
+		},
+	];
+	assert.equal(
+		validateJsonSchema(invalidLocalBatchRows, batchSchema).valid,
+		false,
+	);
 	const batchRejectsSingleRow = validateJsonSchema(singleRow, batchSchema);
 	assert.equal(batchRejectsSingleRow.valid, false);
 	const blockedValid = validateJsonSchema(
