@@ -10,6 +10,11 @@ import {
 	runSynthesisActions,
 	runWorkActions,
 } from "./dynamic-loop-actions.js";
+import {
+	addRoundToCoordinationLedger,
+	buildPlannerCoordination,
+	createCoordinationLedger,
+} from "./dynamic-state-projection.js";
 import { defaultPlannerPrompt } from "./dynamic-loop-prompts.js";
 import type {
 	DynamicDecisionLoopControllerContext,
@@ -62,6 +67,7 @@ export async function runDynamicDecisionLoop(
 	const caveats: string[] = [];
 	const seenDecisionLoopSignatures = new Set<string>();
 	let latestStateIndex: DynamicStateIndexPersistResult | undefined;
+	let coordinationLedger = createCoordinationLedger();
 	let stallCount = 0;
 	let roundsWithoutProgress = 0;
 	let replanCount = 0;
@@ -70,11 +76,16 @@ export async function runDynamicDecisionLoop(
 	for (let round = 0; round < maxRounds; round += 1) {
 		const replan = pendingReplan;
 		pendingReplan = undefined;
+		const coordination = buildPlannerCoordination(coordinationLedger, {
+			digest: latestStateIndex?.digest,
+			artifactPath: dynamicStateIndexArtifactPath(latestStateIndex),
+		});
 		const persisted = await requestValidDecision(ctx, {
 			round,
 			config,
 			previousDecisions: decisions,
 			latestStateIndex,
+			coordination,
 			generatedTaskIds: [...generatedTasks],
 			buildPlannerPrompt: options.buildPlannerPrompt,
 			replan,
@@ -164,6 +175,11 @@ export async function runDynamicDecisionLoop(
 				maxFindings: config.stateIndex.maxFindings,
 			});
 			stateIndexes.push({ round, digest: latestStateIndex.digest });
+			coordinationLedger = addRoundToCoordinationLedger(
+				coordinationLedger,
+				round,
+				latestStateIndex.index,
+			);
 		}
 
 		const hasNewGeneratedTask = generatedTasks.size > generatedCountBeforeRound;
@@ -239,6 +255,7 @@ async function requestValidDecision(
 		config: CompiledDynamicDecisionLoop;
 		previousDecisions: LoopDecisionRecord[];
 		latestStateIndex?: DynamicStateIndexPersistResult;
+		coordination?: DynamicPlannerPromptInput["coordination"];
 		generatedTaskIds: string[];
 		buildPlannerPrompt?: (input: DynamicPlannerPromptInput) => string;
 		replan?: DynamicPlannerPromptInput["replan"];
@@ -257,6 +274,7 @@ async function requestValidDecision(
 			config: input.config,
 			previousDecisions: input.previousDecisions,
 			latestStateIndex: input.latestStateIndex,
+			coordination: input.coordination,
 			generatedTaskIds: input.generatedTaskIds,
 			...(input.replan ? { replan: input.replan } : {}),
 			...(lastPersisted && !lastPersisted.ok
@@ -320,6 +338,19 @@ async function recordFanoutPlan(
 			decisionHash: input.decisionHash,
 			branches,
 		});
+	}
+}
+
+function dynamicStateIndexArtifactPath(
+	latestStateIndex: DynamicStateIndexPersistResult | undefined,
+): string | undefined {
+	// Never-throw: `artifacts` comes from provider-controlled results and a
+	// hostile/faked getter must not crash the loop; degrade to no locator.
+	try {
+		const path = latestStateIndex?.artifacts?.index;
+		return typeof path === "string" ? path : undefined;
+	} catch {
+		return undefined;
 	}
 }
 

@@ -968,6 +968,7 @@ function makeDynamicDecisionLoopCtx({
 	agentResults = {},
 	generatedTaskIds = [],
 	stateIndexDigests = [],
+	stateIndexResults = [],
 } = {}) {
 	const calls = {
 		agent: [],
@@ -1002,12 +1003,13 @@ function makeDynamicDecisionLoopCtx({
 		stateIndex: {
 			async extractAndPersist(request) {
 				calls.stateIndexRequests.push(request);
+				const i = calls.stateIndexRequests.length - 1;
+				const override = stateIndexResults[i];
 				return {
 					digest:
-						stateIndexDigests[calls.stateIndexRequests.length - 1] ??
-						`index-${calls.stateIndexRequests.length}`,
-					index: {},
-					artifacts: {},
+						override?.digest ?? stateIndexDigests[i] ?? `index-${i + 1}`,
+					index: override?.index ?? {},
+					artifacts: override?.artifacts ?? {},
 				};
 			},
 		},

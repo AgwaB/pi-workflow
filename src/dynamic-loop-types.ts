@@ -150,6 +150,7 @@ export interface DynamicPlannerPromptInput {
 	config: CompiledDynamicDecisionLoop;
 	previousDecisions: DynamicDecisionPersistResult[];
 	latestStateIndex?: DynamicStateIndexPersistResult;
+	coordination?: { summary: string; artifactPath?: string; digest?: string };
 	generatedTaskIds: string[];
 	repair?: { errors: string[]; attempt: number };
 	replan?: {
