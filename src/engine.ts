@@ -401,6 +401,29 @@ function assertBlockedRunResumable(run: WorkflowRunRecord): void {
 	);
 }
 
+type StopRunConfirmation = {
+	stopped?: StopRunSummary;
+	latest: WorkflowRunRecord;
+};
+
+async function confirmStopRunUntil(
+	cwd: string,
+	runId: string,
+	deadline: number,
+	latest: WorkflowRunRecord,
+): Promise<StopRunConfirmation> {
+	if (Date.now() > deadline) return { latest };
+	const stopped = await finalizeStopRunWithLease(cwd, runId);
+	if (stopped) return { stopped, latest: stopped.run };
+	const refreshed = await readRunRecord(cwd, runId).catch(() => latest);
+	const intentPending = await readWorkflowStopIntent(cwd, runId);
+	if (!hasActiveSchedulerWork(refreshed) && !intentPending) {
+		return { latest: refreshed };
+	}
+	await sleep(STOP_RUN_LEASE_RETRY_MS);
+	return confirmStopRunUntil(cwd, runId, deadline, refreshed);
+}
+
 export async function stopRun(
 	cwd: string,
 	runIdOrPrefix: string,
@@ -412,17 +435,16 @@ export async function stopRun(
 		);
 	}
 	await requestWorkflowStop(cwd, current.runId);
-	const deadline = Date.now() + STOP_RUN_LEASE_WAIT_MS;
-	let latest = current;
-	while (Date.now() <= deadline) {
-		const stopped = await finalizeStopRunWithLease(cwd, current.runId);
-		if (stopped) return stopped;
-		latest = await readRunRecord(cwd, current.runId).catch(() => latest);
-		const intentPending = await readWorkflowStopIntent(cwd, current.runId);
-		if (!hasActiveSchedulerWork(latest) && !intentPending) break;
-		await sleep(STOP_RUN_LEASE_RETRY_MS);
-	}
-	latest = await readRunRecord(cwd, current.runId).catch(() => latest);
+	const confirmation = await confirmStopRunUntil(
+		cwd,
+		current.runId,
+		Date.now() + STOP_RUN_LEASE_WAIT_MS,
+		current,
+	);
+	if (confirmation.stopped) return confirmation.stopped;
+	const latest = await readRunRecord(cwd, current.runId).catch(
+		() => confirmation.latest,
+	);
 	if (
 		hasActiveSchedulerWork(latest) ||
 		(await readWorkflowStopIntent(cwd, current.runId))
