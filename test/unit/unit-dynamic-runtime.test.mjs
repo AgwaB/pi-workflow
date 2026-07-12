@@ -8884,7 +8884,7 @@ test("spec-less direct dynamic run records provenance and launches planner", asy
 		assert.equal(run.provenance.generatedSpec, false);
 		assert.match(
 			run.provenance.runtimeBundle,
-			/\.pi\/workflow-runtime\/direct-dynamic-runtime-v2\/spec\.json$/,
+			/\.pi\/workflow-runtime\/direct-dynamic-runtime-v3\/spec\.json$/,
 		);
 		assert.equal(run.tasks[0].kind, "dynamic");
 		assert.equal(launched.length, 1);
