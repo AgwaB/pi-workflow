@@ -18,6 +18,7 @@ import {
 import {
 	type AgentDefinition,
 	type ApprovalMode,
+	type ArtifactGraphRequiredRead,
 	type ArtifactGraphStageSpec,
 	type ArtifactGraphWorkflowSpec,
 	type CompiledTask,
@@ -25,6 +26,7 @@ import {
 	type CompiledToolProvider,
 	WorkflowValidationError,
 	type PermissionPreview,
+	type RequiredWorkflowArtifactReadPolicy,
 	WORKFLOW_RUN_TYPE,
 	type TaskCapability,
 	type ThinkingLevel,
@@ -186,7 +188,7 @@ function lowerArtifactGraphStage(
 	if (runtimeStageKindFor(stage) !== "dag") {
 		context.metadata.set(
 			stageId,
-			artifactGraphTaskMetadata(stage, context.specDir),
+			artifactGraphTaskMetadata(stage, context.specDir, context.namespace),
 		);
 	}
 	return lowered;
@@ -259,6 +261,7 @@ function partialOutputInstructions(
 function artifactGraphTaskMetadata(
 	stage: ArtifactGraphStageSpec,
 	specDir: string,
+	sourceNamespace?: string,
 ): NonNullable<CompiledTask["artifactGraph"]> {
 	const controlSchema = stage.output?.controlSchema;
 	return {
@@ -276,11 +279,48 @@ function artifactGraphTaskMetadata(
 				? { paths: [...stage.output.partial.paths] }
 				: undefined,
 		},
-		requiredReads: stage.inputPolicy?.requiredReads ?? [],
-		requiredReadPolicy: stage.inputPolicy?.requiredReadPolicy,
+		requiredReads: namespaceRequiredReads(
+			stage.inputPolicy?.requiredReads ?? [],
+			sourceNamespace,
+		),
+		requiredReadPolicy: namespaceRequiredReadPolicy(
+			stage.inputPolicy?.requiredReadPolicy,
+			sourceNamespace,
+		),
 		artifactAccess: stage.inputPolicy?.artifactAccess ?? "enabled",
 		sourceProjection: stage.sourceProjection,
 	};
+}
+
+function namespaceRequiredReads(
+	reads: readonly ArtifactGraphRequiredRead[],
+	namespace: string | undefined,
+): ArtifactGraphRequiredRead[] {
+	if (!namespace) return [...reads];
+	return reads.map((read) => namespaceRequiredRead(read, namespace));
+}
+
+function namespaceRequiredRead(
+	read: ArtifactGraphRequiredRead,
+	namespace: string,
+): ArtifactGraphRequiredRead {
+	if (typeof read !== "string")
+		return { ...read, source: `${namespace}.${read.source}` };
+	const match = read.match(/^([A-Za-z0-9_.-]+)\.(control|analysis|refs|raw)$/);
+	if (!match) return read;
+	return `${namespace}.${match[1]}.${match[2]}`;
+}
+
+function namespaceRequiredReadPolicy(
+	policy: readonly RequiredWorkflowArtifactReadPolicy[] | undefined,
+	namespace: string | undefined,
+): RequiredWorkflowArtifactReadPolicy[] | undefined {
+	if (!policy) return undefined;
+	if (!namespace) return [...policy];
+	return policy.map((entry) => ({
+		...entry,
+		source: `${namespace}.${entry.source}`,
+	}));
 }
 
 function annotateArtifactGraphCompiledWorkflow(

@@ -102,6 +102,27 @@ export function recoverStaleRunningDynamicControllers(
 	return changed;
 }
 
+export function recoverStaleRunningSupportTasks(
+	run: WorkflowRunRecord,
+	compiledFlow: CompiledWorkflow,
+): boolean {
+	assertRunTaskPositionalAlignment(run, compiledFlow);
+	let changed = false;
+	for (const [index, task] of run.tasks.entries()) {
+		const compiledTask = compiledFlow.tasks[index];
+		if (compiledTask?.kind !== "support") continue;
+		if (task.status !== "running") continue;
+		setTaskTerminal(task, "failed", "recovered_stale_support_task", {
+			lastMessage:
+				"failed closed: recovered stale in-process support helper after scheduler restart; helper side effects were not replayed",
+		});
+		task.pid = undefined;
+		task.backendHandle = undefined;
+		changed = true;
+	}
+	return changed;
+}
+
 export function reconcileDynamicGeneratedRunRecords(
 	cwd: string,
 	run: WorkflowRunRecord,
@@ -272,6 +293,30 @@ export function reconcileForeachGeneratedRunRecords(
 		if (!sameStringList(task.dependsOn, replaced)) {
 			task.dependsOn = replaced;
 			changed = true;
+		}
+	}
+	for (const task of compiledFlow.tasks) {
+		if (task.dependsOn) {
+			const replaced = replaceForeachGeneratedDependencies(
+				task.dependsOn,
+				placeholderToGeneratedSpecIds,
+				streamingPlaceholderSpecIds,
+			);
+			if (!sameStringList(task.dependsOn, replaced)) {
+				task.dependsOn = replaced;
+				changed = true;
+			}
+		}
+		if (task.contextDependsOn) {
+			const replaced = replaceForeachGeneratedDependencies(
+				task.contextDependsOn,
+				placeholderToGeneratedSpecIds,
+				streamingPlaceholderSpecIds,
+			);
+			if (!sameStringList(task.contextDependsOn, replaced)) {
+				task.contextDependsOn = replaced;
+				changed = true;
+			}
 		}
 	}
 	if (changed) run.tasks = reordered;
@@ -536,7 +581,8 @@ export function dependenciesReady(
 				if (!partial) return false;
 				continue;
 			}
-			if (status === "running") runningSourceDependencyMayHavePartialItems = true;
+			if (status === "running")
+				runningSourceDependencyMayHavePartialItems = true;
 			allKnownSourceDependenciesTerminal = false;
 		}
 		return (
@@ -699,12 +745,20 @@ export function updateDownstreamDependencies(
 	generatedSpecIds: string[],
 ): void {
 	for (const task of compiledFlow.tasks) {
-		if (!task.dependsOn) continue;
-		task.dependsOn = replaceDependencyList(
-			task.dependsOn,
-			placeholderSpecId,
-			generatedSpecIds,
-		);
+		if (task.dependsOn) {
+			task.dependsOn = replaceDependencyList(
+				task.dependsOn,
+				placeholderSpecId,
+				generatedSpecIds,
+			);
+		}
+		if (task.contextDependsOn) {
+			task.contextDependsOn = replaceDependencyList(
+				task.contextDependsOn,
+				placeholderSpecId,
+				generatedSpecIds,
+			);
+		}
 	}
 }
 
@@ -756,6 +810,11 @@ export function markFailFastCancellations(
 	const interruptedTaskIds: string[] = [];
 	for (const [index, task] of run.tasks.entries()) {
 		if (task.status !== "pending" && task.status !== "running") continue;
+		if (
+			task.status === "running" &&
+			task.statusDetail === "cancellation_failed"
+		)
+			continue;
 		const compiledTask = compiledFlow.tasks[index];
 		if (!compiledTask) continue;
 		const isDescendant = descendantSpecIds.has(task.specId);
@@ -766,7 +825,8 @@ export function markFailFastCancellations(
 		const wasRunning = task.status === "running";
 		if (wasRunning) {
 			task.statusDetail = "cancellation_pending";
-			task.lastMessage = "awaiting backend fail-fast cancellation acknowledgement";
+			task.lastMessage =
+				"awaiting backend fail-fast cancellation acknowledgement";
 			cancelledTaskIds.push(task.taskId);
 			interruptedTaskIds.push(task.taskId);
 			continue;

@@ -8,6 +8,7 @@ import {
 	launchSubagentTask,
 	refreshRunFromSubagentArtifacts,
 } from "./subagent-backend.js";
+import { isWorkflowStopRequestedError } from "./workflow-stop.js";
 
 export type BackendLaunchResult =
 	| { kind: "launched" }
@@ -23,6 +24,7 @@ export interface WorkflowBackend {
 		task: WorkflowTaskRunRecord,
 		compiledTask: CompiledTask,
 		leaseSignal?: AbortSignal,
+		workflowStopSignal?: AbortSignal,
 	): Promise<BackendLaunchResult>;
 	cleanupRun(cwd: string, run: WorkflowRunRecord): Promise<void>;
 }
@@ -31,7 +33,14 @@ const subagentHeadlessBackend: WorkflowBackend = {
 	id: "pi-subagent/headless",
 	refreshRun: refreshRunFromSubagentArtifacts,
 	cleanupRun: cleanupSubagentRun,
-	async launchTask(cwd, run, task, compiledTask, leaseSignal) {
+	async launchTask(
+		cwd,
+		run,
+		task,
+		compiledTask,
+		leaseSignal,
+		workflowStopSignal,
+	) {
 		try {
 			return await launchSubagentTask(
 				cwd,
@@ -39,9 +48,16 @@ const subagentHeadlessBackend: WorkflowBackend = {
 				task,
 				compiledTask,
 				leaseSignal,
+				workflowStopSignal,
 			);
 		} catch (error) {
-			if (leaseSignal?.aborted) throw error;
+			if (
+				leaseSignal?.aborted ||
+				workflowStopSignal?.aborted ||
+				isWorkflowStopRequestedError(error)
+			) {
+				throw error;
+			}
 			return {
 				kind: "fatal",
 				message: error instanceof Error ? error.message : String(error),

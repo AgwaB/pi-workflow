@@ -105,6 +105,33 @@
                 "repo": {
                   "type": "string"
                 },
+                "line": {
+                  "oneOf": [
+                    { "type": "number" },
+                    { "type": "string" }
+                  ]
+                },
+                "lineStart": {
+                  "oneOf": [
+                    { "type": "number" },
+                    { "type": "string" }
+                  ]
+                },
+                "lineEnd": {
+                  "oneOf": [
+                    { "type": "number" },
+                    { "type": "string" }
+                  ]
+                },
+                "lines": {
+                  "oneOf": [
+                    { "type": "number" },
+                    { "type": "string" }
+                  ]
+                },
+                "excerptLocation": {
+                  "type": "string"
+                },
                 "dateOrYear": {
                   "type": "string"
                 },

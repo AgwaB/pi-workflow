@@ -209,6 +209,8 @@ import {
 import { registerWorkflowWebSourceExtension } from "../../.tmp/unit/workflow-web-source-extension.js";
 import { validateJsonSchema } from "../../.tmp/unit/json-schema.js";
 import {
+	ARTIFACT_OUTPUT_RETRIES_ENV,
+	TRANSIENT_MODEL_FAILURE_RETRIES_ENV,
 	checkRequiredArtifactReads,
 	cleanupSubagentRun,
 	launchSubagentTask,
@@ -216,6 +218,7 @@ import {
 	recordSharedModelRateLimitBackoffForTests,
 	refreshRunFromSubagentArtifacts,
 	resolveLaunchControlTelemetryForTests,
+	resolveWorkflowRetryLimit,
 	setSubagentApiForTests,
 	setSubagentLaunchControlsForTests,
 } from "../../.tmp/unit/subagent-backend.js";
@@ -1785,6 +1788,7 @@ async function stallFormatterFixture(cwd, runId, supervisor) {
 }
 
 export {
+	ARTIFACT_OUTPUT_RETRIES_ENV,
 	CACHE_SHAPE_METRICS_ENV,
 	DYNAMIC_WEB_SEARCH_BUDGET,
 	EXPERIMENTAL_CACHE_STABLE_FOREACH_ENV,
@@ -1795,6 +1799,7 @@ export {
 	PACKAGE_VERIFICATION_STATUS_VALUES,
 	PARTIAL_ITEM_A_SECTION,
 	PARTIAL_SLOT_A_SECTION,
+	TRANSIENT_MODEL_FAILURE_RETRIES_ENV,
 	UNFINISHED_NOTICE_TEST_SUMMARY,
 	UNIT_TEST_HOME,
 	WORKFLOW_DYNAMIC_TOOL,
@@ -1949,6 +1954,7 @@ export {
 	resolveFlowsCwd,
 	resolveLaunchControlTelemetryForTests,
 	resolveWorkflowHelperRef,
+	resolveWorkflowRetryLimit,
 	resolveWorkflowRef,
 	resolveWorkflowRuntime,
 	restoreParentSubagentEnv,

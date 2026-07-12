@@ -202,6 +202,45 @@ test("batched verifier schemas and prompts preserve strict row identity contract
 				["quote"],
 			);
 			assert.match(prompt, /confidence to be a number from 0 to 1/);
+			const evidenceProperties =
+				schema.properties.results.items.properties.evidence.items.properties;
+			for (const field of [
+				"line",
+				"lineStart",
+				"lineEnd",
+				"lines",
+				"excerptLocation",
+			]) {
+				assert.ok(evidenceProperties[field], `deep-research schema missing ${field}`);
+				assert.match(prompt, new RegExp(`\\b${field}\\b`));
+			}
+			assert.ok(prompt.includes('"results":['));
+			assert.ok(prompt.includes('"verdictDigest":{'));
+			assert.match(prompt, /"evidence"\s*:\s*\[\]/);
+			assert.ok(prompt.includes('"caveats":[]'));
+			assert.doesNotMatch(
+				prompt,
+				/objects with source, url, dateOrYear, quote, and relevance/,
+			);
+			assert.match(
+				prompt,
+				/schema-aligned fields source, url, sourceRef, file, repo, line, lineStart, lineEnd, lines, excerptLocation/,
+			);
+			const defaultPrompt =
+				stageMap(
+					readJson("workflows", "deep-research", "spec.json"),
+				).get("verify-claims")?.each?.prompt ?? "";
+			assert.ok(defaultPrompt.includes('"verdictDigest":{'));
+			assert.match(defaultPrompt, /"evidence"\s*:\s*\[\]/);
+			assert.ok(defaultPrompt.includes('"caveats":[]'));
+			assert.doesNotMatch(
+				defaultPrompt,
+				/objects with source, url, dateOrYear, quote, and relevance/,
+			);
+			assert.match(
+				defaultPrompt,
+				/schema-aligned fields source, url, sourceRef, file, repo, line, lineStart, lineEnd, lines, excerptLocation/,
+			);
 		}
 		assert.match(prompt, /root schema value must be exactly/, item.id);
 		assert.match(prompt, /never use the controlSchema file path/, item.id);

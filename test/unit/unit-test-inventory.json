@@ -1,7 +1,7 @@
 {
   "schema": "pi-workflow-unit-test-inventory-v1",
   "source": "unit.test.mjs",
-  "count": 501,
+  "count": 503,
   "tests": [
     {
       "name": "compactStrings trims, filters, and optionally preserves duplicates",
@@ -792,7 +792,7 @@
     {
       "name": "bundled deep-research compacts audit packets before executive final",
       "occurrence": 1,
-      "sha256": "b993858c24f7d5654e49a72b242269aa1c8e66e4f94e861e5d9eb33d63c57d41",
+      "sha256": "750a488e7b029586733863ef381faa4ae6326e382f336992e05cc78ad587160e",
       "domain": "authoring-interface"
     },
     {
@@ -2394,7 +2394,7 @@
     {
       "name": "deep-research verifier schemas separate default single-row and batched results",
       "occurrence": 1,
-      "sha256": "7543af02a692edf0b4c8f3654af8a534973cd7abbc834893151a03302b7187db",
+      "sha256": "6942d33f8bc5045ae394ee3b701cc5e4bd42e2d3306fddd68078da956936cd65",
       "domain": "authoring-interface"
     },
     {
@@ -3008,6 +3008,18 @@
       "occurrence": 1,
       "sha256": "0dffd431bbc16501f9ad75b299e1bfb24e7f6c66b2c607f16c6531c53a42dbf2",
       "domain": "engine-store"
+    },
+    {
+      "name": "workflow retry limit overrides accept zero and reject malformed values",
+      "occurrence": 1,
+      "sha256": "1c77bd717b3fdb536e3eb6e928d370088a5d3e1d956a395c6134403b40debdc9",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "zero transient retry override fails the first transient model failure",
+      "occurrence": 1,
+      "sha256": "5d31656fbb69db33c908775975608abee805318471f6e8c0a6780f38996f463f",
+      "domain": "core-runtime"
     }
   ]
 }
