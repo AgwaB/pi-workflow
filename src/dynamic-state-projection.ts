@@ -68,6 +68,22 @@ export function addRoundToCoordinationLedger(
 	round: number,
 	index: unknown,
 ): CoordinationLedger {
+	// Never-throw contract (plan Risk 5): custom or faked state-index
+	// providers must not be able to crash the decision loop, even with
+	// hostile shapes such as throwing property getters. A throwing round
+	// contributes nothing, exactly like a malformed one.
+	try {
+		return foldRoundIntoCoordinationLedger(ledger, round, index);
+	} catch {
+		return ledger;
+	}
+}
+
+function foldRoundIntoCoordinationLedger(
+	ledger: CoordinationLedger,
+	round: number,
+	index: unknown,
+): CoordinationLedger {
 	if (!isPlainObject(index)) {
 		return ledger;
 	}

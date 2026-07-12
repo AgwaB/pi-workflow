@@ -165,6 +165,32 @@ test("degradation: undefined/non-object/{}/missing-array index contributes nothi
 	}
 });
 
+test("degradation: throwing property getters degrade to a no-op round instead of crashing", () => {
+	const base = createCoordinationLedger();
+	const throwingTopLevel = Object.defineProperty({}, "gaps", {
+		enumerable: true,
+		get() {
+			throw new Error("hostile top-level getter");
+		},
+	});
+	const throwingItem = {
+		blockers: [
+			Object.defineProperty({ id: "B1" }, "message", {
+				enumerable: true,
+				get() {
+					throw new Error("hostile item getter");
+				},
+			}),
+		],
+	};
+	for (const hostile of [throwingTopLevel, throwingItem]) {
+		const next = addRoundToCoordinationLedger(base, 0, hostile);
+		assert.equal(next.entries.length, 0);
+		assert.equal(next.failedTaskIds.length, 0);
+		assert.equal(renderCoordinationSummary(next), undefined);
+	}
+});
+
 test("ledger dedupe: re-observed (kind,id) keeps latest message/severity but preserves firstSeenRound", () => {
 	let ledger = createCoordinationLedger();
 	ledger = addRoundToCoordinationLedger(ledger, 0, {

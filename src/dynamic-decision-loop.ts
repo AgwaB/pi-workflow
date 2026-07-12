@@ -344,8 +344,14 @@ async function recordFanoutPlan(
 function dynamicStateIndexArtifactPath(
 	latestStateIndex: DynamicStateIndexPersistResult | undefined,
 ): string | undefined {
-	const path = latestStateIndex?.artifacts?.index;
-	return typeof path === "string" ? path : undefined;
+	// Never-throw: `artifacts` comes from provider-controlled results and a
+	// hostile/faked getter must not crash the loop; degrade to no locator.
+	try {
+		const path = latestStateIndex?.artifacts?.index;
+		return typeof path === "string" ? path : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 function dynamicLoopInitialGeneratedTaskIds(
