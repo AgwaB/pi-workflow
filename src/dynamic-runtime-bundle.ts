@@ -3,7 +3,7 @@ import { join } from "node:path";
 
 import type { ArtifactGraphWorkflowSpec } from "./types.js";
 
-export const DIRECT_DYNAMIC_RUNTIME_VERSION = "direct-dynamic-runtime-v1";
+export const DIRECT_DYNAMIC_RUNTIME_VERSION = "direct-dynamic-runtime-v2";
 const DIRECT_DYNAMIC_RUNTIME_MAX_RUNTIME_MS = 7_200_000;
 const DIRECT_DYNAMIC_RUNTIME_TOOLS = [
 	"read",
@@ -111,7 +111,7 @@ function directDynamicSpec(): ArtifactGraphWorkflowSpec {
 	};
 }
 
-function directDynamicControllerSource(): string {
+export function directDynamicControllerSource(): string {
 	return `export default function controller(ctx) {
   if (typeof ctx?.dynamic?.runDecisionLoop !== 'function') {
     throw new Error('dynamic decision-loop helper is unavailable in controller context');
@@ -119,7 +119,7 @@ function directDynamicControllerSource(): string {
   return ctx.dynamic.runDecisionLoop({ buildPlannerPrompt: directDynamicPlannerPrompt });
 }
 
-function directDynamicPlannerPrompt(input) {
+export function directDynamicPlannerPrompt(input) {
   const generated = input.generatedTaskIds.join(', ') || 'none';
   return [
     'You are the planner for a request-only direct dynamic research run.',
@@ -130,6 +130,9 @@ function directDynamicPlannerPrompt(input) {
     \`Round: \${input.round}\`,
     \`Generated tasks: \${generated}\`,
     input.latestStateIndex ? \`Latest state index digest: \${input.latestStateIndex.digest}\` : 'No state index yet.',
+    input.coordination?.summary,
+    input.coordination?.artifactPath ? \`If you have read access, the full state index is at \${input.coordination.artifactPath}\${input.coordination.digest ? \` (digest \${input.coordination.digest})\` : ''}. This locator is advisory; do not treat it as a required read.\` : undefined,
+    input.coordination ? 'Coordination remediation policy: prefer exactly one focused action this round for the highest-ranked unresolved issue. Missing evidence/context -> add_work_item naming the issue id. Unverified high-risk finding -> verify, only when the projected line shows an explicit finding id. Id-less omissions -> a focused add_work_item, or synthesize with an explicit caveat when policy allows. Reserve blocked for approval, external-access, budget, or safety issues, naming the irreducible issue. Weigh \`since r<N>\` staleness against tasks already listed in Generated tasks.' : undefined,
     input.replan ? [
       \`Replan requested after stalled progress (attempt \${input.replan.attempt}/\${input.replan.maxAttempts}).\`,
       \`Rounds without progress: \${input.replan.roundsWithoutProgress}.\`,
