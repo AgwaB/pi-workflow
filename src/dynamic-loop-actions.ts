@@ -14,6 +14,7 @@ import {
 	dynamicSynthesisHandoffPrompt,
 	dynamicWorkerHandoffPrompt,
 } from "./dynamic-loop-prompts.js";
+import { sanitizeTaskId } from "./engine-run-graph.js";
 
 const DEFAULT_OUTPUT_PROFILE_BY_ACTION: Record<string, string> = {
 	add_work_item: "candidate_findings_v1",
@@ -34,7 +35,12 @@ export function buildFanoutBranchPlanRequests(
 		branches.push({
 			branchId: built.branchId,
 			actionId: action.actionId,
-			requestId: built.request.id,
+			// The engine records the generated task under the sanitized request id
+			// (normalizeDynamicAgentRequest -> sanitizeTaskId), and fanout-plan
+			// validation compares this declared requestId against that sanitized
+			// id. Declare the sanitized form so planner action ids containing
+			// uppercase (e.g. "act-verify-F1") cannot fail the whole run.
+			requestId: sanitizeTaskId(built.request.id),
 			type: action.type,
 			outputProfile: built.outputProfile,
 			...(built.dependsOn && built.dependsOn.length > 0
