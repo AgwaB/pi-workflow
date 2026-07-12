@@ -5,7 +5,10 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 
 import { refreshRun, runWorkflow, waitForRun } from "../../.tmp/unit/engine.js";
-import { setSubagentApiForTests } from "../../.tmp/unit/subagent-backend.js";
+import {
+	ARTIFACT_OUTPUT_RETRIES_ENV,
+	setSubagentApiForTests,
+} from "../../.tmp/unit/subagent-backend.js";
 
 const UNIT_TEST_HOME = mkdtempSync(join(tmpdir(), "workflow-retry-dispatch-home-"));
 process.env.HOME = UNIT_TEST_HOME;
@@ -236,6 +239,45 @@ test("a completed upstream task is not re-dispatched while downstream stages sti
 		// the already-completed stage "first": exactly one launch per stage.
 		assert.equal(launchCount, 2);
 	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("zero output retry override fails the first invalid workflow output", async () => {
+	const cwd = makeProject();
+	const runs = new Map();
+	const previous = process.env[ARTIFACT_OUTPUT_RETRIES_ENV];
+	let launchCount = 0;
+	process.env[ARTIFACT_OUTPUT_RETRIES_ENV] = "0";
+	try {
+		writeAgent(cwd, "unit-scout");
+		writeWorkflow(cwd, "invalid-no-retry");
+		setSubagentApiForTests(
+			makeFakeSubagentApi({
+				cwd,
+				runs,
+				outputsByLaunch: [INVALID_OUTPUT],
+				onLaunch: () => {
+					launchCount += 1;
+					return launchCount;
+				},
+			}),
+		);
+
+		const started = await runWorkflow("invalid-no-retry", cwd, {
+			task: "Exercise disabled output-invalid retry dispatch.",
+		});
+		const failed = await waitForRun(cwd, started.runId, 20_000);
+		assert.equal(failed.status, "failed");
+		assert.equal(failed.tasks[0].status, "failed");
+		assert.equal(failed.tasks[0].outputRetry?.attempts, 1);
+		assert.equal(failed.tasks[0].outputRetry?.maxAttempts, 0);
+		assert.equal(launchCount, 1);
+	} finally {
+		if (previous === undefined)
+			delete process.env[ARTIFACT_OUTPUT_RETRIES_ENV];
+		else process.env[ARTIFACT_OUTPUT_RETRIES_ENV] = previous;
 		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
 	}

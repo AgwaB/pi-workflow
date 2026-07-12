@@ -92,6 +92,10 @@ const FETCH_CONTENT_INLINE_CHARS_ENV = "PI_WORKFLOW_FETCH_CONTENT_INLINE_CHARS";
 const DEFAULT_WORKFLOW_FETCH_CONTENT_INLINE_CHARS = 12_000;
 const DEFAULT_TRANSIENT_MODEL_FAILURE_RETRIES = 5;
 const DEFAULT_ARTIFACT_OUTPUT_RETRIES = 2;
+export const TRANSIENT_MODEL_FAILURE_RETRIES_ENV =
+	"PI_WORKFLOW_TRANSIENT_MODEL_FAILURE_RETRIES";
+export const ARTIFACT_OUTPUT_RETRIES_ENV =
+	"PI_WORKFLOW_ARTIFACT_OUTPUT_RETRIES";
 const MAX_FAILED_TOOL_CALL_RECORDS = 20;
 const MAX_CONCURRENT_LAUNCHES_ENV = "PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES";
 const MAX_LIVE_MODEL_WORKERS_ENV = "PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS";
@@ -4365,13 +4369,31 @@ function dynamicTaskToolResultBudgetConfiguration(
 	};
 }
 
+export function resolveWorkflowRetryLimit(
+	envName: string,
+	fallback: number,
+	env: NodeJS.ProcessEnv = process.env,
+): number {
+	const raw = env[envName];
+	if (raw === undefined || raw.trim() === "") return fallback;
+	const value = Number(raw);
+	if (!Number.isSafeInteger(value) || value < 0) {
+		throw new Error(`${envName} must be a non-negative safe integer`);
+	}
+	return value;
+}
+
 function retryOrFailTransientSubagentFailure(
 	task: WorkflowTaskRunRecord,
 	options: { reason: string; message: string; backoffMs?: number },
 ): boolean {
 	const attempt = (task.launchRetry?.attempts ?? 0) + 1;
 	const maxAttempts =
-		task.launchRetry?.maxAttempts ?? DEFAULT_TRANSIENT_MODEL_FAILURE_RETRIES;
+		task.launchRetry?.maxAttempts ??
+		resolveWorkflowRetryLimit(
+			TRANSIENT_MODEL_FAILURE_RETRIES_ENV,
+			DEFAULT_TRANSIENT_MODEL_FAILURE_RETRIES,
+		);
 	const exhausted = attempt > maxAttempts;
 	const backoffMs =
 		options.backoffMs === undefined
@@ -4425,7 +4447,11 @@ function retryOrFailArtifactGraphTask(
 	},
 ): boolean {
 	const maxAttempts =
-		task.outputRetry?.maxAttempts ?? DEFAULT_ARTIFACT_OUTPUT_RETRIES;
+		task.outputRetry?.maxAttempts ??
+		resolveWorkflowRetryLimit(
+			ARTIFACT_OUTPUT_RETRIES_ENV,
+			DEFAULT_ARTIFACT_OUTPUT_RETRIES,
+		);
 	const exhausted = options.attempt > maxAttempts;
 	const outputRetry = {
 		attempts: options.attempt,
