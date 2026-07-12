@@ -1,3 +1,12 @@
+import {
+	dispatchedCalls,
+	dynamicLoopConfig,
+	dynamicLoopInvalidDecision,
+	dynamicLoopPersistedDecision,
+	makeDynamicDecisionLoopCtx,
+	plannerCalls,
+	runDynamicDecisionLoop,
+} from "./unit-test-support.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -285,4 +294,411 @@ test("buildPlannerCoordination copies digest/artifactPath from latest and is und
 	const withoutLatest = buildPlannerCoordination(ledger);
 	assert.equal(withoutLatest.digest, undefined);
 	assert.equal(withoutLatest.artifactPath, undefined);
+});
+test("round-0 planner prompt has no coordination block and keeps the digest-absent line", async () => {
+	const config = dynamicLoopConfig({ maxDecisionRounds: 1 });
+	const decideR0 = dynamicLoopPersistedDecision({
+		round: 0,
+		status: "stop",
+		nextActions: [{ type: "stop", actionId: "act-stop", reason: "done" }],
+	});
+	const { ctx, calls } = makeDynamicDecisionLoopCtx({
+		config,
+		persistedDecisions: [decideR0],
+	});
+
+	const outcome = await runDynamicDecisionLoop(ctx);
+	assert.equal(outcome.control.status, "stopped");
+
+	const planners = plannerCalls(calls);
+	assert.equal(planners.length, 1);
+	assert.equal(planners[0].prompt.includes("No state index yet."), true);
+	assert.equal(
+		planners[0].prompt.includes("Coordination state (cumulative)"),
+		false,
+	);
+});
+
+test("round-0 blocker surfaces in round-1 planner prompt with header, advisory locator, and remediation policy", async () => {
+	const config = dynamicLoopConfig({ maxDecisionRounds: 2 });
+	const decideR0 = dynamicLoopPersistedDecision({
+		round: 0,
+		status: "continue",
+		nextActions: [
+			{
+				type: "add_work_item",
+				actionId: "act-r0",
+				workItemId: "t1",
+				agent: "unit-scout",
+				prompt: "Inspect DB schema.",
+				tools: ["read"],
+				outputProfile: "candidate_findings_v1",
+			},
+		],
+	});
+	const decideR1 = dynamicLoopPersistedDecision({
+		round: 1,
+		status: "stop",
+		nextActions: [{ type: "stop", actionId: "act-stop", reason: "done" }],
+	});
+	const { ctx, calls } = makeDynamicDecisionLoopCtx({
+		config,
+		persistedDecisions: [decideR0, decideR1],
+		stateIndexResults: [
+			{
+				digest: "d0",
+				index: {
+					blockers: [
+						{
+							id: "B1",
+							message: "required DB schema artifact is missing",
+							severity: "high",
+							sourceTaskIds: ["t1"],
+						},
+					],
+				},
+				artifacts: { index: "runs/fixture/round-0/index.json" },
+			},
+		],
+	});
+
+	const outcome = await runDynamicDecisionLoop(ctx);
+	assert.equal(outcome.control.status, "stopped");
+
+	const planners = plannerCalls(calls);
+	assert.equal(planners.length, 2);
+	assert.equal(
+		planners[0].prompt.includes("Coordination state (cumulative)"),
+		false,
+	);
+
+	const round1Prompt = planners[1].prompt;
+	assert.equal(
+		round1Prompt.includes(
+			"Coordination state (cumulative): blockers 1, conflicts 0, gaps 0, omissions 0, failed work 0",
+		),
+		true,
+	);
+	assert.equal(round1Prompt.includes("[blocker][high][since r0] B1:"), true);
+	assert.equal(
+		round1Prompt.includes(
+			"If you have read access, the full state index is at runs/fixture/round-0/index.json (digest d0). This locator is advisory; do not treat it as a required read.",
+		),
+		true,
+	);
+	assert.equal(
+		round1Prompt.includes(
+			"Coordination remediation policy: prefer exactly one focused action this round for the highest-ranked unresolved issue.",
+		),
+		true,
+	);
+});
+
+test("a round-0 blocker persists into the round-2 prompt with since r0 even when round 1's index omits it", async () => {
+	const config = dynamicLoopConfig({ maxDecisionRounds: 3 });
+	const decideR0 = dynamicLoopPersistedDecision({
+		round: 0,
+		status: "continue",
+		nextActions: [
+			{
+				type: "add_work_item",
+				actionId: "act-r0",
+				workItemId: "t1",
+				agent: "unit-scout",
+				prompt: "Inspect DB schema.",
+				tools: ["read"],
+				outputProfile: "candidate_findings_v1",
+			},
+		],
+	});
+	const decideR1 = dynamicLoopPersistedDecision({
+		round: 1,
+		status: "continue",
+		nextActions: [
+			{
+				type: "add_work_item",
+				actionId: "act-r1",
+				workItemId: "t2",
+				agent: "unit-scout",
+				prompt: "Inspect unrelated coverage.",
+				tools: ["read"],
+				outputProfile: "candidate_findings_v1",
+			},
+		],
+	});
+	const decideR2 = dynamicLoopPersistedDecision({
+		round: 2,
+		status: "stop",
+		nextActions: [{ type: "stop", actionId: "act-stop", reason: "done" }],
+	});
+	const { ctx, calls } = makeDynamicDecisionLoopCtx({
+		config,
+		persistedDecisions: [decideR0, decideR1, decideR2],
+		stateIndexResults: [
+			{
+				digest: "d0",
+				index: {
+					blockers: [
+						{
+							id: "B1",
+							message: "required DB schema artifact is missing",
+							severity: "high",
+							sourceTaskIds: ["t1"],
+						},
+					],
+				},
+				artifacts: { index: "runs/fixture/round-0/index.json" },
+			},
+			{ digest: "d1", index: {} },
+		],
+	});
+
+	const outcome = await runDynamicDecisionLoop(ctx);
+	assert.equal(outcome.control.status, "stopped");
+
+	const planners = plannerCalls(calls);
+	assert.equal(planners.length, 3);
+	assert.equal(planners[2].prompt.includes("[blocker][high][since r0] B1:"), true);
+});
+
+test("scripted follow-up decision naming a surfaced issue id dispatches exactly one follow-up worker task", async () => {
+	const config = dynamicLoopConfig({ maxDecisionRounds: 3 });
+	const decideR0 = dynamicLoopPersistedDecision({
+		round: 0,
+		status: "continue",
+		nextActions: [
+			{
+				type: "add_work_item",
+				actionId: "act-r0",
+				workItemId: "t1",
+				agent: "unit-scout",
+				prompt: "Inspect DB schema.",
+				tools: ["read"],
+				outputProfile: "candidate_findings_v1",
+			},
+		],
+	});
+	const decideR1 = dynamicLoopPersistedDecision({
+		round: 1,
+		status: "continue",
+		nextActions: [
+			{
+				type: "add_work_item",
+				actionId: "act-r1",
+				workItemId: "resolve-B1",
+				agent: "unit-scout",
+				prompt: "Add the missing DB schema artifact referenced by B1.",
+				tools: ["read"],
+				outputProfile: "candidate_findings_v1",
+			},
+		],
+	});
+	const decideR2 = dynamicLoopPersistedDecision({
+		round: 2,
+		status: "stop",
+		nextActions: [{ type: "stop", actionId: "act-stop", reason: "resolved" }],
+	});
+	const { ctx, calls } = makeDynamicDecisionLoopCtx({
+		config,
+		persistedDecisions: [decideR0, decideR1, decideR2],
+		stateIndexResults: [
+			{
+				digest: "d0",
+				index: {
+					blockers: [
+						{
+							id: "B1",
+							message: "required DB schema artifact is missing",
+							severity: "high",
+							sourceTaskIds: ["t1"],
+						},
+					],
+				},
+				artifacts: { index: "runs/fixture/round-0/index.json" },
+			},
+		],
+	});
+
+	const outcome = await runDynamicDecisionLoop(ctx);
+	assert.equal(outcome.control.status, "stopped");
+
+	const dispatched = dispatchedCalls(calls);
+	assert.equal(dispatched.length, 2);
+	const followUp = dispatched.filter((request) => request.id === "resolve-B1");
+	assert.equal(followUp.length, 1);
+	assert.equal(followUp[0].prompt.includes("B1"), true);
+});
+
+test("repair attempts within the same round reuse a byte-identical coordination block", async () => {
+	const config = dynamicLoopConfig({
+		maxDecisionRounds: 2,
+		repair: { maxAttempts: 1 },
+	});
+	const decideR0 = dynamicLoopPersistedDecision({
+		round: 0,
+		status: "continue",
+		nextActions: [
+			{
+				type: "add_work_item",
+				actionId: "act-r0",
+				workItemId: "t1",
+				agent: "unit-scout",
+				prompt: "Inspect DB schema.",
+				tools: ["read"],
+				outputProfile: "candidate_findings_v1",
+			},
+		],
+	});
+	const invalidR1 = dynamicLoopInvalidDecision(["missing nextActions"]);
+	const decideR1 = dynamicLoopPersistedDecision({
+		round: 1,
+		status: "stop",
+		nextActions: [{ type: "stop", actionId: "act-stop", reason: "done" }],
+	});
+	const { ctx, calls } = makeDynamicDecisionLoopCtx({
+		config,
+		persistedDecisions: [decideR0, invalidR1, decideR1],
+		stateIndexResults: [
+			{
+				digest: "d0",
+				index: {
+					blockers: [
+						{
+							id: "B1",
+							message: "required DB schema artifact is missing",
+							severity: "high",
+							sourceTaskIds: ["t1"],
+						},
+					],
+				},
+				artifacts: { index: "runs/fixture/round-0/index.json" },
+			},
+		],
+	});
+
+	const outcome = await runDynamicDecisionLoop(ctx);
+	assert.equal(outcome.control.status, "stopped");
+
+	const planners = plannerCalls(calls);
+	assert.equal(planners.length, 3);
+	assert.deepEqual(
+		planners.map((request) => request.id),
+		["decide-r0", "decide-r1", "decide-r1-repair-1"],
+	);
+
+	const extractCoordinationBlock = (prompt) => {
+		const start = prompt.indexOf("Coordination state (cumulative)");
+		const markerEnd = "Coordination remediation policy";
+		const end = prompt.indexOf(markerEnd) + markerEnd.length;
+		return prompt.slice(start, end);
+	};
+	const first = extractCoordinationBlock(planners[1].prompt);
+	const second = extractCoordinationBlock(planners[2].prompt);
+	assert.notEqual(first.indexOf("Coordination state (cumulative)"), -1);
+	assert.equal(first, second);
+});
+
+test("a replan prompt contains both the replan block and the coordination block", async () => {
+	const config = dynamicLoopConfig({
+		maxDecisionRounds: 3,
+		stopPolicy: { maxStalls: 1 },
+	});
+	const decideR0 = dynamicLoopPersistedDecision({
+		round: 0,
+		status: "continue",
+		nextActions: [
+			{
+				type: "add_work_item",
+				actionId: "act-r0",
+				workItemId: "t1",
+				agent: "unit-scout",
+				prompt: "Inspect DB schema.",
+				tools: ["read"],
+				outputProfile: "candidate_findings_v1",
+			},
+		],
+	});
+	const decideR1 = dynamicLoopPersistedDecision({
+		round: 1,
+		status: "continue",
+		nextActions: [],
+	});
+	const decideR2 = dynamicLoopPersistedDecision({
+		round: 2,
+		status: "stop",
+		nextActions: [{ type: "stop", actionId: "act-stop", reason: "replanned" }],
+	});
+	const { ctx, calls } = makeDynamicDecisionLoopCtx({
+		config,
+		persistedDecisions: [decideR0, decideR1, decideR2],
+		stateIndexResults: [
+			{
+				digest: "d0",
+				index: {
+					blockers: [
+						{
+							id: "B1",
+							message: "required DB schema artifact is missing",
+							severity: "high",
+							sourceTaskIds: ["t1"],
+						},
+					],
+				},
+				artifacts: { index: "runs/fixture/round-0/index.json" },
+			},
+		],
+	});
+
+	const outcome = await runDynamicDecisionLoop(ctx);
+	assert.equal(outcome.control.status, "stopped");
+
+	const planners = plannerCalls(calls);
+	assert.equal(planners.length, 3);
+	const round2Prompt = planners[2].prompt;
+	assert.equal(round2Prompt.includes("Replan requested"), true);
+	assert.equal(round2Prompt.includes("Coordination state (cumulative)"), true);
+	assert.equal(round2Prompt.includes("[blocker][high][since r0] B1:"), true);
+});
+
+test("digest-only stateIndex results contribute nothing to the coordination block and never throw", async () => {
+	const config = dynamicLoopConfig({ maxDecisionRounds: 2 });
+	const decideR0 = dynamicLoopPersistedDecision({
+		round: 0,
+		status: "continue",
+		nextActions: [
+			{
+				type: "add_work_item",
+				actionId: "act-r0",
+				workItemId: "t1",
+				agent: "unit-scout",
+				prompt: "Inspect DB schema.",
+				tools: ["read"],
+				outputProfile: "candidate_findings_v1",
+			},
+		],
+	});
+	const decideR1 = dynamicLoopPersistedDecision({
+		round: 1,
+		status: "stop",
+		nextActions: [{ type: "stop", actionId: "act-stop", reason: "done" }],
+	});
+	const { ctx, calls } = makeDynamicDecisionLoopCtx({
+		config,
+		persistedDecisions: [decideR0, decideR1],
+		stateIndexResults: [{ digest: "only-digest" }],
+	});
+
+	const outcome = await runDynamicDecisionLoop(ctx);
+	assert.equal(outcome.control.status, "stopped");
+
+	const planners = plannerCalls(calls);
+	assert.equal(planners.length, 2);
+	assert.equal(
+		planners[1].prompt.includes("Latest state index digest: only-digest"),
+		true,
+	);
+	assert.equal(
+		planners[1].prompt.includes("Coordination state (cumulative)"),
+		false,
+	);
 });
