@@ -18,6 +18,7 @@ import {
 } from "./dynamic-state.js";
 import { validateJsonSchema, type JsonSchema } from "./json-schema.js";
 import { makeRunId, readRunRecord } from "./store.js";
+import { throwIfWorkflowStopRequested } from "./workflow-stop.js";
 import type {
 	CompiledDynamicWorkflowTask,
 	WorkflowRunRecord,
@@ -47,6 +48,9 @@ type DynamicHelperWorkerRunner = (input: {
 	specPath: string;
 	callInput: unknown;
 	timeoutMs: number;
+	cwd?: string;
+	runId?: string;
+	stopSignal?: AbortSignal;
 }) => Promise<unknown>;
 
 function requiredDynamicString(
@@ -184,6 +188,8 @@ export async function runDynamicNestedWorkflowCall(input: {
 		() => undefined,
 	);
 	if (!nestedRun) {
+		if (input.isSettled?.()) return undefined;
+		await throwIfWorkflowStopRequested(input.cwd, input.run.runId);
 		nestedRun = await input.runWorkflowSpec(nestedSpecPath, input.cwd, {
 			task: normalizedInput.task,
 			dynamicUi: input.dynamicUi,
@@ -242,7 +248,10 @@ export async function runDynamicNestedWorkflowCall(input: {
 		});
 		return result;
 	}
-	if (input.isResumableDynamicApprovalBlockedRun(nestedRun) && normalizedInput.wait) {
+	if (
+		input.isResumableDynamicApprovalBlockedRun(nestedRun) &&
+		normalizedInput.wait
+	) {
 		throw new DynamicControllerNestedApprovalBlocked(
 			`dynamic nested workflow ${workflowId} (${nestedRun.runId}) is blocked awaiting approval; run /workflow resume ${nestedRun.runId}, then run /workflow resume ${input.run.runId} after the nested workflow completes to continue the parent workflow`,
 			nestedRun.runId,
@@ -363,6 +372,7 @@ export async function runDynamicHelperCall(input: {
 	callIndex: number;
 	helperInput: unknown;
 	isSettled?: () => boolean;
+	stopSignal?: AbortSignal;
 }): Promise<unknown> {
 	await assertDynamicRuntimeBudgetAvailable({
 		cwd: input.cwd,
@@ -432,6 +442,7 @@ export async function runDynamicHelperCall(input: {
 		`dynamic helper ${helperId} input`,
 	);
 	if (input.isSettled?.()) return undefined;
+	if (input.stopSignal?.aborted) throw input.stopSignal.reason;
 	if (!hasDanglingStarted) {
 		await recordDynamicEventAndUpdateState(input.cwd, input.run.runId, {
 			controllerSpecId: input.controllerTask.specId,
@@ -448,6 +459,9 @@ export async function runDynamicHelperCall(input: {
 	const result = await input.runDynamicHelperWorker({
 		ref: helperSpec.uses,
 		specPath: input.helperSpecPath,
+		cwd: input.cwd,
+		runId: input.run.runId,
+		stopSignal: input.stopSignal,
 		callInput: {
 			sources: normalizedInput.sources,
 			options: normalizedInput.options,

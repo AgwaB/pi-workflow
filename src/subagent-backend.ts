@@ -53,6 +53,10 @@ import {
 	writeRunRecord,
 } from "./store.js";
 import {
+	isWorkflowStopRequestedError,
+	throwIfWorkflowStopRequested,
+} from "./workflow-stop.js";
+import {
 	applyTaskResultArtifact,
 	isTaskTimedOut,
 	markTaskTimedOut,
@@ -445,6 +449,7 @@ async function recordTerminalParentSubagentChildEvent(
 let launchSlotReleaseDelayMsForTests: number | undefined;
 let transientRetryJitterForTests: (() => number) | undefined;
 let launchSlotAcquiredHookForTests: (() => void) | undefined;
+let beforeRunSubagentHookForTests: (() => void | Promise<void>) | undefined;
 let launchSlotReleaseGeneration = 0;
 
 interface SharedModelRateLimitBackoffState {
@@ -556,7 +561,9 @@ async function withSharedRateLimitBackoffLock<T>(
 				continue;
 			}
 			if (Date.now() >= deadline) {
-				throw new Error(`timed out acquiring shared rate-limit lock: ${lockDir}`);
+				throw new Error(
+					`timed out acquiring shared rate-limit lock: ${lockDir}`,
+				);
 			}
 			await sleep(SHARED_RATE_LIMIT_BACKOFF_LOCK_RETRY_MS);
 		}
@@ -669,6 +676,28 @@ function abortSignalError(signal: AbortSignal): Error {
 
 function throwIfAborted(signal?: AbortSignal): void {
 	if (signal?.aborted) throw abortSignalError(signal);
+}
+
+async function throwIfLaunchStopped(
+	cwd: string,
+	runId: string,
+	leaseSignal?: AbortSignal,
+	workflowStopSignal?: AbortSignal,
+): Promise<void> {
+	throwIfAborted(leaseSignal);
+	throwIfAborted(workflowStopSignal);
+	await throwIfWorkflowStopRequested(cwd, runId);
+	throwIfAborted(leaseSignal);
+	throwIfAborted(workflowStopSignal);
+}
+
+function combineAbortSignals(
+	left?: AbortSignal,
+	right?: AbortSignal,
+): AbortSignal | undefined {
+	if (!left) return right;
+	if (!right) return left;
+	return AbortSignal.any([left, right]);
 }
 
 export class SubagentOperationTimeoutError extends Error {
@@ -954,6 +983,15 @@ function releaseLiveModelWorkerSlotForTask(
 	task: WorkflowTaskRunRecord,
 ): void {
 	releaseLiveModelWorkerSlotForKey(liveModelWorkerKey(run, task));
+}
+
+export async function acknowledgeSubagentTaskInterrupted(
+	run: WorkflowRunRecord,
+	task: WorkflowTaskRunRecord,
+	reason: string,
+): Promise<void> {
+	await interruptSubagentTask(task, reason);
+	releaseLiveModelWorkerSlotForTask(run, task);
 }
 
 function reconcileLiveModelWorkerSlots(run: WorkflowRunRecord): void {
@@ -1578,7 +1616,9 @@ function buildTaskToolResultBudgetAttempt(options: {
 		backendRunId: options.snapshot.runId,
 		backendAttemptId: options.snapshot.attemptId,
 		terminal: true,
-		...(reported ? { reported: true as const } : { unavailable: true as const }),
+		...(reported
+			? { reported: true as const }
+			: { unavailable: true as const }),
 		...normalizedToolResultBudgetValues(observed?.raw),
 		...(contextLengthExceeded === undefined ? {} : { contextLengthExceeded }),
 		...(contextOverflowRecovered === undefined
@@ -1610,8 +1650,7 @@ function configuredAttemptFields(
 		...(configuration.configuredMaxTotalChars === undefined
 			? {}
 			: {
-					configuredMaxTotalChars:
-						configuration.configuredMaxTotalChars,
+					configuredMaxTotalChars: configuration.configuredMaxTotalChars,
 				}),
 	};
 }
@@ -1657,8 +1696,7 @@ function upsertToolResultBudgetAttempt(
 			...(candidate.configuredMaxTotalChars === undefined
 				? {}
 				: {
-						configuredMaxTotalChars:
-							candidate.configuredMaxTotalChars,
+						configuredMaxTotalChars: candidate.configuredMaxTotalChars,
 					}),
 		};
 		return normalizedToolResultBudgetAttempt({
@@ -1715,14 +1753,15 @@ function recordTaskToolResultBudgetPendingConfiguration(options: {
 	configuration: DynamicTaskToolResultBudgetConfiguration;
 	capturedAt: string;
 }): void {
-	const pendingConfiguration: WorkflowTaskToolResultBudgetConfigurationRecord = {
-		configuredAt: options.capturedAt,
-		configured: options.configuration.configured,
-		configurationSource: options.configuration.source,
-		...(options.configuration.maxTotalChars === undefined
-			? {}
-			: { configuredMaxTotalChars: options.configuration.maxTotalChars }),
-	};
+	const pendingConfiguration: WorkflowTaskToolResultBudgetConfigurationRecord =
+		{
+			configuredAt: options.capturedAt,
+			configured: options.configuration.configured,
+			configurationSource: options.configuration.source,
+			...(options.configuration.maxTotalChars === undefined
+				? {}
+				: { configuredMaxTotalChars: options.configuration.maxTotalChars }),
+		};
 	writeTaskToolResultBudgetRecord({
 		task: options.task,
 		attempts: options.task.toolResultBudget?.attempts ?? [],
@@ -2148,6 +2187,7 @@ export function setSubagentLaunchControlsForTests(options?: {
 	releaseDelayMs?: number;
 	retryJitterMs?: number | (() => number);
 	onLaunchSlotAcquired?: () => void;
+	beforeRunSubagent?: () => void | Promise<void>;
 }): void {
 	launchSlotReleaseDelayMsForTests =
 		options?.releaseDelayMs === undefined
@@ -2160,6 +2200,7 @@ export function setSubagentLaunchControlsForTests(options?: {
 				? options.retryJitterMs
 				: () => Math.max(0, Math.floor(options.retryJitterMs as number));
 	launchSlotAcquiredHookForTests = options?.onLaunchSlotAcquired;
+	beforeRunSubagentHookForTests = options?.beforeRunSubagent;
 	launchSlotReleaseGeneration += 1;
 	activeLaunchSlots = 0;
 	activeLiveModelWorkerKeys.clear();
@@ -2186,10 +2227,9 @@ export async function cleanupSubagentRun(
 	for (const task of run.tasks) {
 		if (task.status !== "running") continue;
 		try {
-			await interruptSubagentTask(task, "workflow cleanup");
+			await acknowledgeSubagentTaskInterrupted(run, task, "workflow cleanup");
 			task.statusDetail = "cancellation_acknowledged";
 			task.lastMessage = "backend cancellation acknowledged";
-			releaseLiveModelWorkerSlotForTask(run, task);
 		} catch (error) {
 			task.statusDetail = "cancellation_failed";
 			task.lastMessage = `backend cancellation failed: ${error instanceof Error ? error.message : String(error)}`;
@@ -2197,7 +2237,10 @@ export async function cleanupSubagentRun(
 		}
 	}
 	if (errors.length > 0) {
-		throw new AggregateError(errors, "one or more backend cancellations failed");
+		throw new AggregateError(
+			errors,
+			"one or more backend cancellations failed",
+		);
 	}
 }
 
@@ -2231,6 +2274,7 @@ export async function launchSubagentTask(
 	task: WorkflowTaskRunRecord,
 	compiledTask: CompiledTask,
 	leaseSignal?: AbortSignal,
+	workflowStopSignal?: AbortSignal,
 ): Promise<BackendLaunchResult> {
 	if (task.status !== "pending") return { kind: "launched" };
 	if (task.backendHandle || task.pid) return { kind: "launched" };
@@ -2241,6 +2285,8 @@ export async function launchSubagentTask(
 			message: "fast:on is not supported for pi-workflow execution.",
 		};
 	}
+
+	await throwIfLaunchStopped(cwd, run.runId, leaseSignal, workflowStopSignal);
 
 	const taskHasRateLimitRetry =
 		(task.launchRetry?.attempts ?? 0) > 0 &&
@@ -2269,7 +2315,16 @@ export async function launchSubagentTask(
 		task.statusDetail = "retry_model_failure";
 		task.lastMessage = `waiting ${jitterMs}ms before retrying transient-model launch`;
 		await writeRunRecord(cwd, run);
-		if (jitterMs > 0) await sleep(jitterMs);
+		await throwIfLaunchStopped(cwd, run.runId, leaseSignal, workflowStopSignal);
+		if (jitterMs > 0) {
+			await sleep(jitterMs);
+			await throwIfLaunchStopped(
+				cwd,
+				run.runId,
+				leaseSignal,
+				workflowStopSignal,
+			);
+		}
 	}
 
 	const sharedRateLimitBackoff = taskHasRateLimitRetry
@@ -2277,6 +2332,7 @@ export async function launchSubagentTask(
 		: await sharedModelRateLimitBackoffRemaining(
 				modelRateLimitBackoffKey(task, compiledTask),
 			);
+	await throwIfLaunchStopped(cwd, run.runId, leaseSignal, workflowStopSignal);
 	if (sharedRateLimitBackoff) {
 		const message = sharedModelRateLimitBackoffWaitingMessage(
 			sharedRateLimitBackoff.key,
@@ -2313,7 +2369,11 @@ export async function launchSubagentTask(
 		dynamicTaskToolResultBudgetConfiguration(task);
 	let releaseLiveModelWorkerSlot: (() => void) | undefined;
 	try {
-		throwIfAborted(leaseSignal);
+		await throwIfLaunchStopped(cwd, run.runId, leaseSignal, workflowStopSignal);
+		const launchAbortSignal = combineAbortSignals(
+			leaseSignal,
+			workflowStopSignal,
+		);
 		const liveModelWorkerAdmission = tryAcquireLiveModelWorkerSlot({
 			run,
 			task,
@@ -2339,11 +2399,17 @@ export async function launchSubagentTask(
 		releaseLiveModelWorkerSlot = liveModelWorkerAdmission.release;
 
 		await mkdir(dirname(systemPromptFile), { recursive: true });
+		await throwIfLaunchStopped(cwd, run.runId, leaseSignal, workflowStopSignal);
 		await rm(resultFile, { force: true });
+		await throwIfLaunchStopped(cwd, run.runId, leaseSignal, workflowStopSignal);
 		await writeFile(systemPromptFile, buildSystemPrompt(compiledTask), "utf8");
+		await throwIfLaunchStopped(cwd, run.runId, leaseSignal, workflowStopSignal);
 		await writeFile(taskPromptFile, compiledTask.compiledPrompt, "utf8");
+		await throwIfLaunchStopped(cwd, run.runId, leaseSignal, workflowStopSignal);
 		await writeFile(outputFile, "", "utf8");
+		await throwIfLaunchStopped(cwd, run.runId, leaseSignal, workflowStopSignal);
 		await writeFile(stderrFile, "", "utf8");
+		await throwIfLaunchStopped(cwd, run.runId, leaseSignal, workflowStopSignal);
 
 		if (toolResultBudgetConfiguration) {
 			recordTaskToolResultBudgetPendingConfiguration({
@@ -2362,15 +2428,17 @@ export async function launchSubagentTask(
 		};
 		task.lastMessage = "pi-subagent launch claim recorded";
 		await writeRunRecord(cwd, run);
+		await throwIfLaunchStopped(cwd, run.runId, leaseSignal, workflowStopSignal);
 
-		throwIfAborted(leaseSignal);
 		const api = await loadSubagentApi();
+		await throwIfLaunchStopped(cwd, run.runId, leaseSignal, workflowStopSignal);
 		const extensions = await workflowTaskExtensions(
 			cwd,
 			run,
 			task,
 			compiledTask,
 		);
+		await throwIfLaunchStopped(cwd, run.runId, leaseSignal, workflowStopSignal);
 		const subagentOptions: Record<string, unknown> = {
 			cwd: task.cwd,
 			backend: "headless",
@@ -2402,12 +2470,26 @@ export async function launchSubagentTask(
 		if (isLaunchGateSaturated()) {
 			task.lastMessage = `waiting for pi-subagent launch slot (${resolveMaxConcurrentLaunches()} max)`;
 			await writeRunRecord(cwd, run).catch(() => undefined);
+			await throwIfLaunchStopped(
+				cwd,
+				run.runId,
+				leaseSignal,
+				workflowStopSignal,
+			);
 		}
 		launched = await runWithLaunchSlot(
-			() => {
+			async () => {
+				await beforeRunSubagentHookForTests?.();
+				await throwIfWorkflowStopRequested(cwd, run.runId);
 				throwIfAborted(leaseSignal);
+				throwIfAborted(workflowStopSignal);
 				return awaitSubagentOperation(
-					() => runSubagentWithWorkflowWorkerRole(api, subagentOptions),
+					async () => {
+						await throwIfWorkflowStopRequested(cwd, run.runId);
+						throwIfAborted(leaseSignal);
+						throwIfAborted(workflowStopSignal);
+						return runSubagentWithWorkflowWorkerRole(api, subagentOptions);
+					},
 					{
 						operation: "launch acknowledgement",
 						context: `workflow run ${run.runId} task ${task.taskId} (${task.specId})`,
@@ -2420,7 +2502,7 @@ export async function launchSubagentTask(
 				launchStartedAt = nowIso();
 				recordTaskLaunchTiming(task, { launchQueuedAt, launchStartedAt });
 			},
-			leaseSignal,
+			launchAbortSignal,
 		);
 		recordTaskLaunchTiming(task, {
 			launchQueuedAt,
@@ -2428,6 +2510,11 @@ export async function launchSubagentTask(
 			launchCompletedAt: nowIso(),
 		});
 	} catch (error) {
+		if (workflowStopSignal?.aborted || isWorkflowStopRequestedError(error)) {
+			releaseLiveModelWorkerSlot?.();
+			clearTaskToolResultBudgetPendingConfiguration(task);
+			throw error;
+		}
 		if (leaseSignal?.aborted) {
 			task.status = "running";
 			task.statusDetail = "launch_ack_aborted";

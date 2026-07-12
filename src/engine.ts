@@ -17,8 +17,11 @@ import {
 	listRunRecords,
 	readJson,
 	readRunRecord,
+	readWorkflowStopIntent,
+	requestWorkflowStop,
 	resetTaskForResume,
 	setTaskTerminal,
+	clearWorkflowStopIntent,
 	toProjectPath,
 	updateIndex,
 	withRunLease,
@@ -105,6 +108,7 @@ import {
 	reconcileDynamicGeneratedRunRecords,
 	reconcileForeachGeneratedRunRecords,
 	recoverStaleRunningDynamicControllers,
+	recoverStaleRunningSupportTasks,
 	replaceDependencyList,
 	sourceStageIdsForFrom,
 	stageSourcePolicy,
@@ -114,7 +118,12 @@ import {
 	reconcileLoopTaskMaterialization,
 	scheduleLoop,
 } from "./loop-runtime.js";
-import { interruptSubagentTask } from "./subagent-backend.js";
+import { acknowledgeSubagentTaskInterrupted } from "./subagent-backend.js";
+import {
+	createWorkflowStopSignal,
+	isWorkflowStopRequestedError,
+	throwIfWorkflowStopRequested,
+} from "./workflow-stop.js";
 import {
 	executeSupportTask,
 	normalizeDynamicControllerOutput,
@@ -144,10 +153,8 @@ import {
 	type CompiledTask,
 	type CompiledWorkflow,
 	WORKFLOW_RUN_TYPE,
-	type WorkflowIndexRecord,
 	type WorkflowRunRecord,
 	type WorkflowRunRouting,
-	type WorkflowSupervisorRecord,
 	type WorkflowTaskRunRecord,
 } from "./types.js";
 import {
@@ -192,6 +199,33 @@ const DYNAMIC_CONTROLLER_ENGINE_CAPABILITIES = Object.freeze({
 });
 const DYNAMIC_CONTROLLER_ENGINE_INTEGRITY_ERROR_MESSAGE =
 	"incompatible or stale pi-workflow engine: dynamic controller context is missing runDecisionLoop (rebuild dist / reload workflow engine)";
+const STOP_RUN_LEASE_WAIT_MS = 1_500;
+const STOP_RUN_LEASE_RETRY_MS = 25;
+
+type DynamicControllerTestHookContext = {
+	cwd: string;
+	runId: string;
+	controllerSpecId: string;
+	taskId: string;
+};
+
+type DynamicControllerTestHooks = {
+	beforeControllerWorkerLaunch?: (
+		context: DynamicControllerTestHookContext,
+	) => void | Promise<void>;
+	beforeDynamicResultCommit?: (
+		context: DynamicControllerTestHookContext,
+	) => void | Promise<void>;
+};
+
+let dynamicControllerTestHooks: DynamicControllerTestHooks = {};
+
+export function setDynamicControllerHooksForTests(
+	hooks: DynamicControllerTestHooks = {},
+): void {
+	dynamicControllerTestHooks = { ...hooks };
+}
+
 const supervisorTimers = new Map<string, ReturnType<typeof setInterval>>();
 const supervisorRunMtimes = new Map<string, number>();
 const supervisorErrorCounts = new Map<string, number>();
@@ -372,12 +406,182 @@ export async function stopRun(
 	runIdOrPrefix: string,
 ): Promise<StopRunSummary> {
 	const current = await readRunRecord(cwd, runIdOrPrefix);
-	const stopped = await withRunLease(cwd, current.runId, async () => {
-		const run = await readRunRecord(cwd, current.runId);
-		if (isTerminalWorkflowStatus(run.status)) {
-			throw new Error(
-				`stop requires a non-terminal run; ${run.runId} is ${run.status}`,
+	if (isTerminalWorkflowStatus(current.status)) {
+		throw new Error(
+			`stop requires a non-terminal run; ${current.runId} is ${current.status}`,
+		);
+	}
+	await requestWorkflowStop(cwd, current.runId);
+	const deadline = Date.now() + STOP_RUN_LEASE_WAIT_MS;
+	let latest = current;
+	while (Date.now() <= deadline) {
+		const stopped = await finalizeStopRunWithLease(cwd, current.runId);
+		if (stopped) return stopped;
+		latest = await readRunRecord(cwd, current.runId).catch(() => latest);
+		const intentPending = await readWorkflowStopIntent(cwd, current.runId);
+		if (!hasActiveSchedulerWork(latest) && !intentPending) break;
+		await sleep(STOP_RUN_LEASE_RETRY_MS);
+	}
+	latest = await readRunRecord(cwd, current.runId).catch(() => latest);
+	if (
+		hasActiveSchedulerWork(latest) ||
+		(await readWorkflowStopIntent(cwd, current.runId))
+	) {
+		throw new Error(
+			`Workflow stop requested for ${current.runId}, but active work or descendant workflow stop could not be confirmed within ${STOP_RUN_LEASE_WAIT_MS}ms; stop intent remains durable and cancellation is still pending`,
+		);
+	}
+	return { run: latest, interruptedTaskIds: [] };
+}
+
+type DescendantStopResult = {
+	pendingRunIds: string[];
+	errors: string[];
+};
+
+type DescendantRunRecord = {
+	run: WorkflowRunRecord;
+	depth: number;
+};
+
+async function listDescendantRunRecords(
+	cwd: string,
+	parentRunId: string,
+	excludedRunIds: ReadonlySet<string> = new Set([parentRunId]),
+): Promise<DescendantRunRecord[]> {
+	const records = await listRunRecords(cwd);
+	const byParent = new Map<string, WorkflowRunRecord[]>();
+	for (const run of records) {
+		if (!run.parentRunId || excludedRunIds.has(run.runId)) continue;
+		const siblings = byParent.get(run.parentRunId) ?? [];
+		siblings.push(run);
+		byParent.set(run.parentRunId, siblings);
+	}
+	const descendants: DescendantRunRecord[] = [];
+	const visited = new Set<string>([...excludedRunIds, parentRunId]);
+	const queue: Array<{ runId: string; depth: number }> = [
+		{ runId: parentRunId, depth: 0 },
+	];
+	while (queue.length > 0 && visited.size <= records.length + 1) {
+		const current = queue.shift();
+		if (!current) break;
+		for (const child of byParent.get(current.runId) ?? []) {
+			if (visited.has(child.runId)) continue;
+			visited.add(child.runId);
+			const depth = current.depth + 1;
+			descendants.push({ run: child, depth });
+			queue.push({ runId: child.runId, depth });
+		}
+	}
+	return descendants;
+}
+
+async function clearTerminalWorkflowStopIntentIfPresent(
+	cwd: string,
+	run: WorkflowRunRecord,
+): Promise<boolean> {
+	if (!isTerminalWorkflowStatus(run.status)) return false;
+	if (!(await readWorkflowStopIntent(cwd, run.runId))) return false;
+	await clearWorkflowStopIntent(cwd, run.runId);
+	return true;
+}
+
+async function cascadeWorkflowStopToDescendants(
+	cwd: string,
+	parentRunId: string,
+	excludedRunIds: ReadonlySet<string> = new Set([parentRunId]),
+): Promise<DescendantStopResult> {
+	const errors: string[] = [];
+	const pendingRunIds = new Set<string>();
+	const descendants = await listDescendantRunRecords(
+		cwd,
+		parentRunId,
+		excludedRunIds,
+	);
+	const activeDescendants = descendants.filter(
+		({ run }) => !isTerminalWorkflowStatus(run.status),
+	);
+	for (const { run } of activeDescendants) {
+		try {
+			await requestWorkflowStop(cwd, run.runId);
+		} catch (error) {
+			pendingRunIds.add(run.runId);
+			errors.push(
+				`${run.runId}: ${error instanceof Error ? error.message : String(error)}`,
 			);
+		}
+	}
+	for (const { run } of [...activeDescendants].sort(
+		(a, b) => b.depth - a.depth,
+	)) {
+		try {
+			const stopped = await finalizeStopRunWithLease(
+				cwd,
+				run.runId,
+				excludedRunIds,
+			);
+			if (!stopped) pendingRunIds.add(run.runId);
+		} catch (error) {
+			pendingRunIds.add(run.runId);
+			errors.push(
+				`${run.runId}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+	for (const { run } of await listDescendantRunRecords(
+		cwd,
+		parentRunId,
+		excludedRunIds,
+	)) {
+		if (!isTerminalWorkflowStatus(run.status)) {
+			pendingRunIds.add(run.runId);
+			continue;
+		}
+		try {
+			await clearTerminalWorkflowStopIntentIfPresent(cwd, run);
+		} catch (error) {
+			pendingRunIds.add(run.runId);
+			errors.push(
+				`${run.runId}: terminal stop-intent cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+	return { pendingRunIds: [...pendingRunIds], errors };
+}
+
+function descendantStopPendingMessage(
+	runId: string,
+	result: DescendantStopResult,
+): string {
+	const pending = result.pendingRunIds.slice(0, 5).join(", ");
+	const suffix = result.pendingRunIds.length > 5 ? ", …" : "";
+	const errors =
+		result.errors.length > 0 ? `; errors: ${result.errors.join("; ")}` : "";
+	return `Workflow stop for ${runId} is waiting for descendant workflow run(s) to stop: ${pending}${suffix}${errors}`;
+}
+
+async function finalizeStopRunWithLease(
+	cwd: string,
+	runId: string,
+	stoppingRunIds: ReadonlySet<string> = new Set(),
+): Promise<StopRunSummary | undefined> {
+	if (stoppingRunIds.has(runId)) return undefined;
+	const nextStoppingRunIds = new Set(stoppingRunIds);
+	nextStoppingRunIds.add(runId);
+	const descendantStop = await cascadeWorkflowStopToDescendants(
+		cwd,
+		runId,
+		nextStoppingRunIds,
+	);
+	if (descendantStop.errors.length > 0) {
+		throw new Error(descendantStopPendingMessage(runId, descendantStop));
+	}
+	if (descendantStop.pendingRunIds.length > 0) return undefined;
+	return await withRunLease(cwd, runId, async () => {
+		const run = await readRunRecord(cwd, runId);
+		if (isTerminalWorkflowStatus(run.status)) {
+			await clearTerminalWorkflowStopIntentIfPresent(cwd, run);
+			return { run, interruptedTaskIds: [] };
 		}
 		for (const task of run.tasks) {
 			if (task.status !== "running") continue;
@@ -391,19 +595,7 @@ export async function stopRun(
 		} catch (error) {
 			cleanupError = error;
 		}
-		const interruptedTaskIds: string[] = [];
-		for (const task of run.tasks) {
-			if (task.status === "running" && task.statusDetail === "cancellation_failed")
-				continue;
-			if (
-				setTaskTerminal(task, "interrupted", "workflow_stopped", {
-					exitCode: 130,
-					lastMessage: "Workflow stopped by user request",
-				})
-			) {
-				interruptedTaskIds.push(task.taskId);
-			}
-		}
+		const interruptedTaskIds = markRunStopped(run);
 		await writeRunRecord(cwd, run);
 		if (cleanupError) {
 			throw new Error(
@@ -411,14 +603,57 @@ export async function stopRun(
 				{ cause: cleanupError },
 			);
 		}
+		await clearWorkflowStopIntent(cwd, run.runId);
 		unwatchRun(cwd, run.runId);
 		return { run, interruptedTaskIds };
 	});
-	if (!stopped)
-		throw new Error(
-			`Could not acquire workflow run lease for ${current.runId}`,
-		);
-	return stopped;
+}
+
+async function finalizeStopIntentIfRequested(
+	cwd: string,
+	run: WorkflowRunRecord,
+): Promise<boolean> {
+	if (!(await readWorkflowStopIntent(cwd, run.runId))) return false;
+	const descendantStop = await cascadeWorkflowStopToDescendants(cwd, run.runId);
+	for (const task of run.tasks) {
+		if (task.status !== "running") continue;
+		task.statusDetail = "cancellation_pending";
+		task.lastMessage = "awaiting backend stop cancellation acknowledgement";
+	}
+	if (
+		descendantStop.pendingRunIds.length > 0 ||
+		descendantStop.errors.length > 0
+	) {
+		await writeRunRecord(cwd, run);
+		return true;
+	}
+	await writeRunRecord(cwd, run);
+	await resolveWorkflowBackend(run).cleanupRun(cwd, run);
+	const interruptedTaskIds = markRunStopped(run);
+	if (interruptedTaskIds.length > 0) await writeRunRecord(cwd, run);
+	await clearWorkflowStopIntent(cwd, run.runId);
+	unwatchRun(cwd, run.runId);
+	return true;
+}
+
+function markRunStopped(run: WorkflowRunRecord): string[] {
+	const interruptedTaskIds: string[] = [];
+	for (const task of run.tasks) {
+		if (
+			task.status === "running" &&
+			task.statusDetail === "cancellation_failed"
+		)
+			continue;
+		if (
+			setTaskTerminal(task, "interrupted", "workflow_stopped", {
+				exitCode: 130,
+				lastMessage: "Workflow stopped by user request",
+			})
+		) {
+			interruptedTaskIds.push(task.taskId);
+		}
+	}
+	return interruptedTaskIds;
 }
 
 export async function resumeRun(
@@ -528,7 +763,6 @@ export function watchRun(
 			const currentMtime = afterMtime ?? beforeMtime;
 			if (currentMtime !== undefined)
 				supervisorRunMtimes.set(key, currentMtime);
-			supervisorErrorCounts.delete(key);
 
 			if (hasActiveSchedulerWork(refreshed)) {
 				const unchanged =
@@ -536,9 +770,11 @@ export function watchRun(
 					currentMtime !== undefined &&
 					currentMtime <= previousMtime;
 				if (!unchanged) await scheduleRun(cwd, runId, undefined, options);
+				supervisorErrorCounts.delete(key);
 				return;
 			}
 
+			supervisorErrorCounts.delete(key);
 			unwatchRun(cwd, runId);
 		})().catch((error) => {
 			if (isMissingRunError(error)) {
@@ -607,7 +843,10 @@ export async function scheduleRun(
 			if (!isRefreshPollAggregateError(error)) throw error;
 			await recordSupervisorError(cwd, run.runId, error);
 		}
-		if (isTerminalWorkflowStatus(run.status)) return run;
+		if (isTerminalWorkflowStatus(run.status)) {
+			await clearTerminalWorkflowStopIntentIfPresent(cwd, run);
+			return run;
+		}
 		if (
 			run.taskSummary.blocked > 0 &&
 			run.taskSummary.pending === 0 &&
@@ -696,13 +935,20 @@ async function scheduleDagPass(
 			compiledFlow,
 		);
 		assertRunTaskPositionalAlignment(run, compiledFlow);
+		if (await finalizeStopIntentIfRequested(cwd, run)) return false;
 		const staleDynamicRecovered = recoverStaleRunningDynamicControllers(
 			run,
 			compiledFlow,
 		);
-		if (dynamicReconciled || staleDynamicRecovered)
+		const staleSupportRecovered = recoverStaleRunningSupportTasks(
+			run,
+			compiledFlow,
+		);
+		if (dynamicReconciled || staleDynamicRecovered || staleSupportRecovered)
 			await writeRunRecord(cwd, run);
 	}
+
+	if (await finalizeStopIntentIfRequested(cwd, run)) return false;
 
 	const changed = markDagDependentsSkipped(run, compiledFlow);
 	if (changed) {
@@ -724,6 +970,7 @@ async function scheduleDagPass(
 		index += 1
 	) {
 		assertScheduleLeaseActive(leaseSignal);
+		if (await finalizeStopIntentIfRequested(cwd, run)) return false;
 		const task = run.tasks[index];
 		const compiledTask = compiledFlow.tasks[index];
 		if (!task || !compiledTask || task.status !== "pending") continue;
@@ -742,6 +989,7 @@ async function scheduleDagPass(
 				index,
 				compiledTask,
 			);
+			if (await finalizeStopIntentIfRequested(cwd, run)) return false;
 			if (changed) return true;
 			continue;
 		}
@@ -754,6 +1002,7 @@ async function scheduleDagPass(
 				index,
 				compiledTask,
 			);
+			if (await finalizeStopIntentIfRequested(cwd, run)) return false;
 			if (changed) return true;
 			if (foreachStreamingEnabled(compiledTask)) continue;
 		}
@@ -781,7 +1030,9 @@ async function scheduleDagPass(
 			leaseSignal,
 		);
 		assertScheduleLeaseActive(leaseSignal);
+		if (await finalizeStopIntentIfRequested(cwd, run)) return false;
 		if (await applyFailFastCancellation(cwd, run, compiledFlow)) return false;
+		if (await finalizeStopIntentIfRequested(cwd, run)) return false;
 		if (launched && run.tasks[index]?.status === "running") running += 1;
 	}
 	return false;
@@ -801,7 +1052,11 @@ async function applyFailFastCancellation(
 			const task = run.tasks.find((candidate) => candidate.taskId === taskId);
 			if (!task) return;
 			try {
-				await interruptSubagentTask(task, "workflow fail-fast cancellation");
+				await acknowledgeSubagentTaskInterrupted(
+					run,
+					task,
+					"workflow fail-fast cancellation",
+				);
 				setTaskTerminal(
 					task,
 					"interrupted",
@@ -1055,7 +1310,9 @@ async function materializeStreamingForeachTask(input: {
 	partialLedgerPathsBySourceSpecId: Map<string, ReadonlySet<string>>;
 }): Promise<boolean> {
 	const sourceTaskSpecIdSet = new Set(input.sourceTaskSpecIds);
-	const perItemDispatch = workflowExperimentalFlagEnabled(PER_ITEM_DISPATCH_ENV);
+	const perItemDispatch = workflowExperimentalFlagEnabled(
+		PER_ITEM_DISPATCH_ENV,
+	);
 	const generatedTasksWithItemDeps = input.generatedTasks.map((task, index) => {
 		const itemMeta = input.itemMetas[index];
 		if (!itemMeta) return task;
@@ -1201,15 +1458,27 @@ async function materializeStreamingForeachTask(input: {
 
 	const dependencyTargets = [input.placeholderSpecId, ...allGeneratedSpecIds];
 	for (const task of input.compiledFlow.tasks) {
-		if (!task.dependsOn) continue;
-		const replaced = replaceDependencyList(
-			task.dependsOn,
-			input.placeholderSpecId,
-			dependencyTargets,
-		);
-		if (JSON.stringify(task.dependsOn) !== JSON.stringify(replaced)) {
-			task.dependsOn = replaced;
-			changed = true;
+		if (task.dependsOn) {
+			const replaced = replaceDependencyList(
+				task.dependsOn,
+				input.placeholderSpecId,
+				dependencyTargets,
+			);
+			if (JSON.stringify(task.dependsOn) !== JSON.stringify(replaced)) {
+				task.dependsOn = replaced;
+				changed = true;
+			}
+		}
+		if (task.contextDependsOn) {
+			const replaced = replaceDependencyList(
+				task.contextDependsOn,
+				input.placeholderSpecId,
+				dependencyTargets,
+			);
+			if (JSON.stringify(task.contextDependsOn) !== JSON.stringify(replaced)) {
+				task.contextDependsOn = replaced;
+				changed = true;
+			}
 		}
 	}
 	for (const task of input.run.tasks) {
@@ -1354,7 +1623,10 @@ async function extractArtifactGraphForeachItems(
 				const partial = await extractPartialForeachItems(cwd, task, path);
 				if (partial.error) return { error: partial.error };
 				if (partial.ledgerPaths) {
-					partialLedgerPathsBySourceSpecId.set(task.specId, partial.ledgerPaths);
+					partialLedgerPathsBySourceSpecId.set(
+						task.specId,
+						partial.ledgerPaths,
+					);
 				}
 				for (const item of partial.items) {
 					items.push(item.item);
@@ -1469,10 +1741,13 @@ async function launchPendingTaskAt(
 	let prepareComplete = false;
 	try {
 		launchTask = await prepareDagTask(cwd, run, compiledFlow, index);
+		await throwIfWorkflowStopRequested(cwd, run.runId);
 		if (task.outputRetry) {
 			launchTask = await prepareArtifactGraphRetryTask(cwd, task, launchTask);
+			await throwIfWorkflowStopRequested(cwd, run.runId);
 		}
 		prepareComplete = true;
+		await throwIfWorkflowStopRequested(cwd, run.runId);
 
 		if (launchTask.kind === "support") {
 			return await executeSupportTask(cwd, run, task, launchTask);
@@ -1490,20 +1765,37 @@ async function launchPendingTaskAt(
 		}
 		const worktreeLaunchTask = applyExistingLoopWorktree(run, task, launchTask);
 		await ensureManagedWorktree(cwd, run, task, worktreeLaunchTask);
+		await throwIfWorkflowStopRequested(cwd, run.runId);
 		recordCreatedLoopWorktree(run, task, worktreeLaunchTask);
 		await writeRunRecord(cwd, run);
-		const launch = await resolveWorkflowBackend(run).launchTask(
-			cwd,
-			run,
-			task,
-			worktreeLaunchTask,
-			leaseSignal,
-		);
+		const stop = createWorkflowStopSignal(cwd, run.runId);
+		let launch;
+		try {
+			await throwIfWorkflowStopRequested(cwd, run.runId);
+			launch = await resolveWorkflowBackend(run).launchTask(
+				cwd,
+				run,
+				task,
+				worktreeLaunchTask,
+				leaseSignal,
+				stop.signal,
+			);
+		} finally {
+			stop.dispose();
+		}
 		if (launch.kind === "fatal") throw new Error(launch.message);
 		if (launch.kind === "capacity") return false;
 		return launch.kind === "launched";
 	} catch (error) {
 		if (leaseSignal?.aborted) throw error;
+		if (isWorkflowStopRequestedError(error)) {
+			setTaskTerminal(task, "interrupted", "workflow_stopped", {
+				exitCode: 130,
+				lastMessage: "Workflow stopped by user request",
+			});
+			await writeRunRecord(cwd, run).catch(() => undefined);
+			return false;
+		}
 		const statusDetail = !prepareComplete
 			? "prepare_failed"
 			: launchTask?.kind === "support"
@@ -1543,15 +1835,32 @@ async function executeDynamicControllerTask(
 		helperSpecPath = await workflowBundleSpecPath(cwd, run, {
 			required: true,
 		});
+		await throwIfWorkflowStopRequested(cwd, run.runId);
+		const contentFingerprint = await workflowBundleFingerprint(cwd, run);
+		await throwIfWorkflowStopRequested(cwd, run.runId);
 		await ensureDynamicControllerInitialized(cwd, run.runId, {
 			controllerSpecId: task.specId,
 			controllerTaskId: task.taskId,
 			stageId: task.stageId,
 			dynamic: compiledTask.dynamic,
-			contentFingerprint: await workflowBundleFingerprint(cwd, run),
+			contentFingerprint,
 		});
+		await throwIfWorkflowStopRequested(cwd, run.runId);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
+		if (isWorkflowStopRequestedError(error)) {
+			await recordDynamicControllerStatus(cwd, run.runId, {
+				controllerSpecId: task.specId,
+				status: "failed",
+				message: "Workflow stopped by user request",
+			}).catch(() => undefined);
+			setTaskTerminal(task, "interrupted", "workflow_stopped", {
+				exitCode: 130,
+				lastMessage: "Workflow stopped by user request",
+			});
+			await writeRunRecord(cwd, run);
+			return false;
+		}
 		await recordDynamicControllerStatus(cwd, run.runId, {
 			controllerSpecId: task.specId,
 			status: "failed",
@@ -1572,6 +1881,7 @@ async function executeDynamicControllerTask(
 			taskText: compiledFlow.task,
 			ui: options.dynamicUi,
 		});
+		await throwIfWorkflowStopRequested(cwd, run.runId);
 		if (!approval.allowed) {
 			setTaskTerminal(task, "blocked", approval.statusDetail, {
 				lastMessage: approval.message,
@@ -1587,6 +1897,7 @@ async function executeDynamicControllerTask(
 			task.specId,
 			compiledTask.dynamic,
 		);
+	await throwIfWorkflowStopRequested(cwd, run.runId);
 	if (runtimeBudgetMessage) {
 		await recordDynamicControllerStatus(cwd, run.runId, {
 			controllerSpecId: task.specId,
@@ -1599,10 +1910,12 @@ async function executeDynamicControllerTask(
 		await writeRunRecord(cwd, run);
 		return false;
 	}
+	await throwIfWorkflowStopRequested(cwd, run.runId);
 	await recordDynamicControllerStatus(cwd, run.runId, {
 		controllerSpecId: task.specId,
 		status: "running",
 	});
+	await throwIfWorkflowStopRequested(cwd, run.runId);
 
 	const sources = compiledTask.artifactGraph?.enabled
 		? await readArtifactGraphSupportSources(
@@ -1611,6 +1924,7 @@ async function executeDynamicControllerTask(
 				compiledTask.dependsOn ?? [],
 			)
 		: await readSupportSources(cwd, run, compiledTask.dependsOn ?? []);
+	await throwIfWorkflowStopRequested(cwd, run.runId);
 
 	const activeRuntimeStartedAt = Date.now();
 	let activeRuntimeRecorded = false;
@@ -1627,6 +1941,7 @@ async function executeDynamicControllerTask(
 		).catch(() => undefined);
 	};
 
+	const stop = createWorkflowStopSignal(cwd, run.runId);
 	try {
 		const structuredOutput = await runDynamicControllerWorker({
 			cwd,
@@ -1640,7 +1955,9 @@ async function executeDynamicControllerTask(
 			dynamic: compiledTask.dynamic,
 			dynamicUi: options.dynamicUi,
 			availableModels: options.availableModels,
+			stopSignal: stop.signal,
 		});
+		await throwIfWorkflowStopRequested(cwd, run.runId);
 		await assertDynamicGeneratedTasksSettled({
 			cwd,
 			run,
@@ -1651,12 +1968,15 @@ async function executeDynamicControllerTask(
 			dynamic: compiledTask.dynamic,
 			availableModels: options.availableModels,
 		});
+		await throwIfWorkflowStopRequested(cwd, run.runId);
 		await recordActiveRuntime();
+		await throwIfWorkflowStopRequested(cwd, run.runId);
 		const unrunBranchBlockers = await dynamicUnrunBranchBlockers(
 			cwd,
 			run.runId,
 			task.specId,
 		);
+		await throwIfWorkflowStopRequested(cwd, run.runId);
 		const outputForOutcome =
 			unrunBranchBlockers.length > 0
 				? dynamicControllerOutputWithBranchBlockers(
@@ -1665,7 +1985,14 @@ async function executeDynamicControllerTask(
 					)
 				: structuredOutput;
 		const outcome = dynamicControllerOutcomeFromOutput(outputForOutcome);
+		await dynamicControllerTestHooks.beforeDynamicResultCommit?.({
+			cwd,
+			runId: run.runId,
+			controllerSpecId: task.specId,
+			taskId: task.taskId,
+		});
 		if (compiledTask.artifactGraph?.enabled) {
+			await throwIfWorkflowStopRequested(cwd, run.runId);
 			await writeArtifactGraphDynamicResult(
 				cwd,
 				task,
@@ -1673,15 +2000,19 @@ async function executeDynamicControllerTask(
 				outcome.lifecycleStatus,
 			);
 		} else {
+			await throwIfWorkflowStopRequested(cwd, run.runId);
 			await mkdir(dirname(fromProjectPath(cwd, task.files.output)), {
 				recursive: true,
 			});
+			await throwIfWorkflowStopRequested(cwd, run.runId);
 			await writeFile(
 				fromProjectPath(cwd, task.files.output),
 				`${JSON.stringify(outputForOutcome, null, 2)}\n`,
 				"utf8",
 			);
+			await throwIfWorkflowStopRequested(cwd, run.runId);
 			await writeFile(fromProjectPath(cwd, task.files.stderr), "", "utf8");
+			await throwIfWorkflowStopRequested(cwd, run.runId);
 			await writeJsonAtomic(fromProjectPath(cwd, task.files.result), {
 				status: outcome.lifecycleStatus,
 				structuredOutput: outputForOutcome,
@@ -1714,6 +2045,20 @@ async function executeDynamicControllerTask(
 		return outcome.taskStatus === "completed";
 	} catch (error) {
 		await recordActiveRuntime();
+		if (stop.signal.aborted || isWorkflowStopRequestedError(error)) {
+			await recordDynamicControllerStatus(cwd, run.runId, {
+				controllerSpecId: task.specId,
+				status: "failed",
+				message: "Workflow stopped by user request",
+			}).catch(() => undefined);
+			setTaskTerminal(task, "interrupted", "workflow_stopped", {
+				exitCode: 130,
+				lastMessage:
+					"Workflow stopped by user request (cooperative dynamic cancellation)",
+			});
+			await writeRunRecord(cwd, run);
+			return false;
+		}
 		if (error instanceof DynamicControllerSuspended) {
 			const message = await dynamicSuspensionMessage(
 				cwd,
@@ -1769,6 +2114,8 @@ async function executeDynamicControllerTask(
 		});
 		await writeRunRecord(cwd, run);
 		return false;
+	} finally {
+		stop.dispose();
 	}
 }
 
@@ -1794,6 +2141,7 @@ async function runDynamicControllerWorker(input: {
 	dynamic: CompiledDynamicWorkflowTask;
 	dynamicUi?: DynamicWorkflowUi;
 	availableModels?: WorkflowModelInfo[];
+	stopSignal?: AbortSignal;
 }): Promise<unknown> {
 	const resolved = await resolveWorkflowHelperRef(
 		input.dynamic.uses,
@@ -1809,6 +2157,18 @@ async function runDynamicControllerWorker(input: {
 	const generatedBranchTaskIds = (controllerState?.branches ?? [])
 		.map((branch) => branch.specId)
 		.filter((specId): specId is string => typeof specId === "string");
+	const budgetRemaining = await currentDynamicBudgetRemaining(input);
+	const replayPrefix = {
+		opIds: await priorDynamicOperationOpIds(input),
+		cursor: 0,
+	};
+	await dynamicControllerTestHooks.beforeControllerWorkerLaunch?.({
+		cwd: input.cwd,
+		runId: input.run.runId,
+		controllerSpecId: input.controllerTask.specId,
+		taskId: input.controllerTask.taskId,
+	});
+	await throwIfWorkflowStopRequested(input.cwd, input.run.runId);
 	const worker = new Worker(DYNAMIC_CONTROLLER_WORKER_SOURCE, {
 		eval: true,
 		workerData: {
@@ -1820,7 +2180,7 @@ async function runDynamicControllerWorker(input: {
 			controllerStageId,
 			generatedTaskIds,
 			generatedBranchTaskIds,
-			budgetRemaining: await currentDynamicBudgetRemaining(input),
+			budgetRemaining,
 			availableTools: buildAvailableToolView(
 				input.controllerCompiledTask.runtime.tools,
 				input.controllerCompiledTask.runtime.toolProviders,
@@ -1832,10 +2192,6 @@ async function runDynamicControllerWorker(input: {
 	const workflowCallCounts = new Map<string, number>();
 	const agentOpIds = new Set<string>();
 	const replayedOpIds = new Set<string>();
-	const replayPrefix = {
-		opIds: await priorDynamicOperationOpIds(input),
-		cursor: 0,
-	};
 	let settled = false;
 	let currentGeneratedTaskIds = generatedTaskIds;
 	const timeoutMs = remainingDynamicRuntimeMs(
@@ -1845,15 +2201,25 @@ async function runDynamicControllerWorker(input: {
 
 	return await new Promise<unknown>((resolvePromise, rejectPromise) => {
 		let opQueue = Promise.resolve();
+		let timer: ReturnType<typeof setTimeout> | undefined;
 		const finish = (callback: () => void): void => {
 			if (settled) return;
 			settled = true;
-			clearTimeout(timer);
+			if (timer) clearTimeout(timer);
+			input.stopSignal?.removeEventListener("abort", abortStop);
 			worker.removeAllListeners();
 			void worker.terminate().catch(() => undefined);
 			callback();
 		};
-		const timer = setTimeout(
+		const abortStop = (): void => {
+			finish(() => rejectPromise(input.stopSignal?.reason));
+		};
+		if (input.stopSignal?.aborted) {
+			abortStop();
+			return;
+		}
+		input.stopSignal?.addEventListener("abort", abortStop, { once: true });
+		timer = setTimeout(
 			() => {
 				finish(() =>
 					rejectPromise(
@@ -1879,13 +2245,15 @@ async function runDynamicControllerWorker(input: {
 						currentGeneratedTaskIds = ids;
 					},
 					isSettled: () => settled,
-					postResult: (id, result) =>
+					postResult: (id, result) => {
+						if (settled) return;
 						worker.postMessage({
 							type: "opResult",
 							id,
 							generatedTaskIds: currentGeneratedTaskIds,
 							...result,
-						}),
+						});
+					},
 					finish,
 					resolve: resolvePromise,
 					reject: rejectPromise,
@@ -1981,6 +2349,7 @@ async function handleDynamicWorkerMessage(
 		helperSpecPath: string;
 		dynamic: CompiledDynamicWorkflowTask;
 		dynamicUi?: DynamicWorkflowUi;
+		stopSignal?: AbortSignal;
 	},
 	message: any,
 	state: {
@@ -2180,6 +2549,7 @@ async function handleDynamicWorkerMessage(
 				callIndex: count,
 				helperInput: message.input,
 				isSettled: state.isSettled,
+				stopSignal: input.stopSignal,
 			});
 		} else if (message.op === "workflow") {
 			const workflowId = requiredDynamicString(
@@ -2216,6 +2586,11 @@ async function handleDynamicWorkerMessage(
 			budgetRemaining: await currentDynamicBudgetRemaining(input),
 		});
 	} catch (error) {
+		if (state.isSettled()) return;
+		if (isWorkflowStopRequestedError(error) || input.stopSignal?.aborted) {
+			state.finish(() => state.reject(error));
+			return;
+		}
 		// Ordinary DynamicControllerSuspended operation errors are returned to the
 		// worker instead of finishing the parent immediately. This lets ctx.parallel()
 		// post and record all sibling generation ops in one scheduling pass before
@@ -2553,8 +2928,17 @@ async function runDynamicHelperWorker(input: {
 	specPath: string;
 	callInput: unknown;
 	timeoutMs: number;
+	cwd?: string;
+	runId?: string;
+	stopSignal?: AbortSignal;
 }): Promise<unknown> {
+	if (input.stopSignal?.aborted) throw input.stopSignal.reason;
 	const resolved = await resolveWorkflowHelperRef(input.ref, input.specPath);
+	if (input.stopSignal?.aborted) throw input.stopSignal.reason;
+	if (input.cwd && input.runId) {
+		await throwIfWorkflowStopRequested(input.cwd, input.runId);
+	}
+	if (input.stopSignal?.aborted) throw input.stopSignal.reason;
 	const worker = new Worker(DYNAMIC_HELPER_WORKER_SOURCE, {
 		eval: true,
 		workerData: {
@@ -2564,15 +2948,25 @@ async function runDynamicHelperWorker(input: {
 	});
 	let settled = false;
 	return await new Promise<unknown>((resolvePromise, rejectPromise) => {
+		let timer: ReturnType<typeof setTimeout> | undefined;
 		const finish = (callback: () => void): void => {
 			if (settled) return;
 			settled = true;
-			clearTimeout(timer);
+			if (timer) clearTimeout(timer);
+			input.stopSignal?.removeEventListener("abort", abortStop);
 			worker.removeAllListeners();
 			void worker.terminate().catch(() => undefined);
 			callback();
 		};
-		const timer = setTimeout(
+		const abortStop = (): void => {
+			finish(() => rejectPromise(input.stopSignal?.reason));
+		};
+		if (input.stopSignal?.aborted) {
+			abortStop();
+			return;
+		}
+		input.stopSignal?.addEventListener("abort", abortStop, { once: true });
+		timer = setTimeout(
 			() => {
 				finish(() =>
 					rejectPromise(
@@ -3238,7 +3632,10 @@ async function auditDirectDynamicControllerRun(
 				taskId: candidate.taskId,
 				specId: candidate.specId,
 				refs: await readJson(
-					join(dirname(fromProjectPath(cwd, candidate.files.result)), "refs.json"),
+					join(
+						dirname(fromProjectPath(cwd, candidate.files.result)),
+						"refs.json",
+					),
 				).catch(() => undefined),
 			});
 		}

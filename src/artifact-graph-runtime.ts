@@ -36,6 +36,11 @@ import {
 	writeJsonAtomic,
 	writeRunRecord,
 } from "./store.js";
+import {
+	createWorkflowStopSignal,
+	isWorkflowStopRequestedError,
+	throwIfWorkflowStopRequested,
+} from "./workflow-stop.js";
 import type {
 	ArtifactGraphRequiredRead,
 	CompiledTask,
@@ -44,6 +49,14 @@ import type {
 	WorkflowRunRecord,
 	WorkflowTaskRunRecord,
 } from "./types.js";
+
+let supportHelperPreparedHookForTests: (() => void | Promise<void>) | undefined;
+
+export function setSupportHelperPreparedHookForTests(
+	hook: (() => void | Promise<void>) | undefined,
+): void {
+	supportHelperPreparedHookForTests = hook;
+}
 
 export async function executeSupportTask(
 	cwd: string,
@@ -59,66 +72,96 @@ export async function executeSupportTask(
 	task.startedAt = task.startedAt ?? new Date().toISOString();
 	await writeRunRecord(cwd, run);
 
-	const sources = compiledTask.artifactGraph?.enabled
-		? await readArtifactGraphSupportSources(
+	const stop = createWorkflowStopSignal(cwd, run.runId);
+	let structuredOutput: unknown;
+	try {
+		await throwIfWorkflowStopRequested(cwd, run.runId);
+		const sources = compiledTask.artifactGraph?.enabled
+			? await readArtifactGraphSupportSources(
+					cwd,
+					run,
+					compiledTask.dependsOn ?? [],
+				)
+			: await readSupportSources(cwd, run, compiledTask.dependsOn ?? []);
+		await throwIfWorkflowStopRequested(cwd, run.runId);
+		const helperSpecPath = await workflowBundleSpecPath(cwd, run);
+		await throwIfWorkflowStopRequested(cwd, run.runId);
+		const helper = await loadWorkflowHelper(
+			compiledTask.support.uses,
+			helperSpecPath,
+		);
+		await supportHelperPreparedHookForTests?.();
+		await throwIfWorkflowStopRequested(cwd, run.runId);
+		structuredOutput = await helper({
+			sources,
+			options: compiledTask.support.options,
+			context: {
+				specPath: helperSpecPath,
+				originalSpecPath: run.specPath,
+				stageId: task.stageId,
+				taskId: task.taskId,
+				runId: run.runId,
 				cwd,
-				run,
-				compiledTask.dependsOn ?? [],
-			)
-		: await readSupportSources(cwd, run, compiledTask.dependsOn ?? []);
-	const helperSpecPath = await workflowBundleSpecPath(cwd, run);
-	const helper = await loadWorkflowHelper(
-		compiledTask.support.uses,
-		helperSpecPath,
-	);
-	const structuredOutput = await helper({
-		sources,
-		options: compiledTask.support.options,
-		context: {
-			specPath: helperSpecPath,
-			originalSpecPath: run.specPath,
-			stageId: task.stageId,
-			taskId: task.taskId,
-			runId: run.runId,
-			cwd,
-			...(compiledTask.artifactGraph?.enabled
-				? {
-						sourceStatuses: buildArtifactGraphSupportSourceStatuses(
-							run,
-							compiledTask.dependsOn ?? [],
-						),
-					}
-				: {}),
-		},
-	});
+				signal: stop.signal,
+				...(compiledTask.artifactGraph?.enabled
+					? {
+							sourceStatuses: buildArtifactGraphSupportSourceStatuses(
+								run,
+								compiledTask.dependsOn ?? [],
+							),
+						}
+					: {}),
+			},
+		});
+		if (stop.signal.aborted) {
+			throw stop.signal.reason instanceof Error
+				? stop.signal.reason
+				: new Error("workflow stop requested");
+		}
 
-	if (compiledTask.artifactGraph?.enabled) {
-		await writeArtifactGraphSupportResult(cwd, task, structuredOutput);
+		if (compiledTask.artifactGraph?.enabled) {
+			await throwIfWorkflowStopRequested(cwd, run.runId);
+			await writeArtifactGraphSupportResult(cwd, task, structuredOutput);
+			setTaskTerminal(task, "completed", "support_completed", {
+				lastMessage: "support completed",
+			});
+			await writeRunRecord(cwd, run);
+			return true;
+		}
+
+		await throwIfWorkflowStopRequested(cwd, run.runId);
+		await mkdir(dirname(fromProjectPath(cwd, task.files.output)), {
+			recursive: true,
+		});
+		await writeFile(
+			fromProjectPath(cwd, task.files.output),
+			`${JSON.stringify(structuredOutput, null, 2)}\n`,
+			"utf8",
+		);
+		await writeFile(fromProjectPath(cwd, task.files.stderr), "", "utf8");
+		await writeJsonAtomic(fromProjectPath(cwd, task.files.result), {
+			status: "completed",
+			structuredOutput,
+		});
 		setTaskTerminal(task, "completed", "support_completed", {
 			lastMessage: "support completed",
 		});
 		await writeRunRecord(cwd, run);
 		return true;
+	} catch (error) {
+		if (stop.signal.aborted || isWorkflowStopRequestedError(error)) {
+			setTaskTerminal(task, "interrupted", "workflow_stopped", {
+				exitCode: 130,
+				lastMessage:
+					"Workflow stopped by user request (cooperative support cancellation)",
+			});
+			await writeRunRecord(cwd, run);
+			return false;
+		}
+		throw error;
+	} finally {
+		stop.dispose();
 	}
-
-	await mkdir(dirname(fromProjectPath(cwd, task.files.output)), {
-		recursive: true,
-	});
-	await writeFile(
-		fromProjectPath(cwd, task.files.output),
-		`${JSON.stringify(structuredOutput, null, 2)}\n`,
-		"utf8",
-	);
-	await writeFile(fromProjectPath(cwd, task.files.stderr), "", "utf8");
-	await writeJsonAtomic(fromProjectPath(cwd, task.files.result), {
-		status: "completed",
-		structuredOutput,
-	});
-	setTaskTerminal(task, "completed", "support_completed", {
-		lastMessage: "support completed",
-	});
-	await writeRunRecord(cwd, run);
-	return true;
 }
 
 export async function readSupportSources(
@@ -557,6 +600,11 @@ async function prepareArtifactGraphTask(
 	const requiredReads = compiledTask.artifactGraph?.requiredReads ?? [];
 	const requiredReadPolicy =
 		compiledTask.artifactGraph?.requiredReadPolicy ?? [];
+	assertRequiredArtifactsInSourceManifest(
+		sources,
+		requiredReads,
+		requiredReadPolicy,
+	);
 	const requiredReadContext = formatRequiredArtifactReadReferences({
 		sources,
 		requiredReads,
@@ -591,6 +639,37 @@ async function prepareArtifactGraphTask(
 			.filter(Boolean)
 			.join("\n\n"),
 	};
+}
+
+function assertRequiredArtifactsInSourceManifest(
+	sources: WorkflowSourceManifestSource[],
+	requiredReads: readonly ArtifactGraphRequiredRead[],
+	requiredReadPolicy: readonly RequiredWorkflowArtifactReadPolicy[],
+): void {
+	const missing: string[] = [];
+	for (const required of requiredReads) {
+		const parsed = parseRequiredArtifactRead(required);
+		if (!parsed) continue;
+		const source = sources.find(
+			(candidate) => candidate.source === parsed.source,
+		);
+		if (!source?.artifacts?.[parsed.artifact]?.path) {
+			missing.push(formatRequiredArtifactRead(required));
+		}
+	}
+	for (const policy of requiredReadPolicy) {
+		const source = sources.find(
+			(candidate) => candidate.source === policy.source,
+		);
+		if (!source?.artifacts?.[policy.artifact]?.path) {
+			missing.push(`${policy.source}.${policy.artifact}`);
+		}
+	}
+	if (missing.length > 0) {
+		throw new Error(
+			`required workflow artifact read is not available in the runtime source manifest: ${[...new Set(missing)].join(", ")}. Add the source to from/input context; after is ordering-only.`,
+		);
+	}
 }
 
 function formatRequiredArtifactReadReferences(options: {
@@ -1030,9 +1109,7 @@ export function setProjectedJsonPath(
 			current[token] = value;
 			return;
 		}
-		const existing = Object.hasOwn(current, token)
-			? current[token]
-			: undefined;
+		const existing = Object.hasOwn(current, token) ? current[token] : undefined;
 		if (!isProjectionContainer(existing)) {
 			current[token] = createProjectionContainer();
 		}
@@ -1040,7 +1117,8 @@ export function setProjectedJsonPath(
 	}
 }
 
-const PROJECTION_PATH_TOKEN_PATTERN = /^(?:[A-Za-z0-9_-]+)?(?:\[(?:\*|\d+|\d*:\d*)\])*$/u;
+const PROJECTION_PATH_TOKEN_PATTERN =
+	/^(?:[A-Za-z0-9_-]+)?(?:\[(?:\*|\d+|\d*:\d*)\])*$/u;
 const UNSAFE_JSON_PATH_PARTS = new Set([
 	"__proto__",
 	"prototype",

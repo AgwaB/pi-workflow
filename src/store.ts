@@ -122,6 +122,10 @@ export function workflowRunPath(cwd: string, runId: string): string {
 	return join(workflowRunDir(cwd, runId), "run.json");
 }
 
+export function workflowStopIntentPath(cwd: string, runId: string): string {
+	return join(workflowRunDir(cwd, runId), "stop-intent.json");
+}
+
 export function workflowIndexPath(cwd: string): string {
 	return join(workflowsRoot(cwd), "index.json");
 }
@@ -182,6 +186,54 @@ export async function writeJsonAtomic(
 	);
 	await writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 	await rename(temp, file);
+}
+
+export interface WorkflowStopIntentRecord {
+	schemaVersion: 1;
+	runId: string;
+	requestedAt: string;
+	reason: "user";
+}
+
+export async function requestWorkflowStop(
+	cwd: string,
+	runId: string,
+): Promise<WorkflowStopIntentRecord> {
+	const intent: WorkflowStopIntentRecord = {
+		schemaVersion: 1,
+		runId,
+		requestedAt: nowIso(),
+		reason: "user",
+	};
+	await writeJsonAtomic(workflowStopIntentPath(cwd, runId), intent);
+	return intent;
+}
+
+export async function readWorkflowStopIntent(
+	cwd: string,
+	runId: string,
+): Promise<WorkflowStopIntentRecord | undefined> {
+	const value = await readJson<Partial<WorkflowStopIntentRecord>>(
+		workflowStopIntentPath(cwd, runId),
+	);
+	if (!value || value.schemaVersion !== 1 || value.runId !== runId)
+		return undefined;
+	return {
+		schemaVersion: 1,
+		runId,
+		requestedAt:
+			typeof value.requestedAt === "string" ? value.requestedAt : nowIso(),
+		reason: "user",
+	};
+}
+
+export async function clearWorkflowStopIntent(
+	cwd: string,
+	runId: string,
+): Promise<void> {
+	await unlink(workflowStopIntentPath(cwd, runId)).catch((error) => {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+	});
 }
 
 export function setRunLeaseTestHooksForTests(hooks?: RunLeaseTestHooks): void {
@@ -1666,11 +1718,8 @@ export function computeRunDegradation(
 		finalTasks.length > 0 &&
 		finalTasks.every((task) => task.status === "completed");
 	const degradedDelivery = failedTaskIds.length > 0 && finalOutputRendered;
-	if (!degradedDelivery && degradedHelperTaskIds.length === 0)
-		return undefined;
-	const parts = [
-		finalOutputRendered ? "final rendered" : "final not rendered",
-	];
+	if (!degradedDelivery && degradedHelperTaskIds.length === 0) return undefined;
+	const parts = [finalOutputRendered ? "final rendered" : "final not rendered"];
 	if (failedTaskIds.length > 0)
 		parts.push(
 			`${failedTaskIds.length}/${run.tasks.length} task${run.tasks.length === 1 ? "" : "s"} failed`,
