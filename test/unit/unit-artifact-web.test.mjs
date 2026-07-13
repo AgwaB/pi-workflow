@@ -1929,69 +1929,6 @@ test("bundled artifact graph workflows are public runnable", async () => {
 	assert(resolved.specPath.endsWith("workflows/spec-review/spec.json"));
 });
 
-test("batched deep-review workflow preserves artifact denial on independent review stages", async () => {
-	const cwd = makeProject();
-	try {
-		writeAgent(cwd, "scout", "read, grep, find, ls");
-		const specPath = join(
-			process.cwd(),
-			"workflows",
-			"deep-review",
-			"batched-devil-advocate.spec.json",
-		);
-		const spec = JSON.parse(readFileSync(specPath, "utf8"));
-		for (const stageId of ["triage", "reviewers", "devil-advocate"]) {
-			const stage = spec.artifactGraph.stages.find(
-				(candidate) => candidate.id === stageId,
-			);
-			assert.equal(stage?.inputPolicy?.artifactAccess, "none");
-		}
-		const compiled = await compileWorkflow(spec, { cwd, specPath });
-		const triage = compiled.tasks.find((task) => task.key === "triage.main");
-		const reviewers = compiled.tasks.find(
-			(task) => task.key === "reviewers.item",
-		);
-		const devilAdvocate = compiled.tasks.find(
-			(task) => task.key === "devil-advocate.item",
-		);
-		for (const task of [triage, reviewers, devilAdvocate]) {
-			assert.ok(task);
-			assert.equal(task.artifactGraph.artifactAccess, "none");
-			const prepared = await prepareDagTask(
-				cwd,
-				{
-					runId: `batched_deep_review_${task.key}`,
-					tasks: [
-						{
-							taskId: "task-1",
-							specId: task.key,
-							cwd,
-							files: {
-								result: `.pi/workflows/batched_deep_review_${task.key}/tasks/task-1/result.json`,
-							},
-						},
-					],
-				},
-				{ tasks: [{ ...task, taskId: "task-1" }] },
-				0,
-			);
-			assert.equal(
-				prepared.runtime.toolProviders?.workflow_artifact,
-				undefined,
-			);
-			assert.equal(prepared.runtime.tools.includes("workflow_artifact"), false);
-			assert.doesNotMatch(prepared.compiledPrompt, /Workflow Artifact Inputs/);
-		}
-	} finally {
-		rmSync(cwd, {
-			recursive: true,
-			force: true,
-			maxRetries: 5,
-			retryDelay: 10,
-		});
-	}
-});
-
 test("workflow artifact telemetry summarizes stage status, retries, wall clock, and output bytes", () => {
 	const run = {
 		createdAt: "2026-06-08T00:00:00.000Z",

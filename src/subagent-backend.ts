@@ -1,11 +1,10 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import {
 	copyFile,
 	mkdir,
 	readFile,
 	readdir,
-	realpath,
 	rename,
 	rm,
 	stat,
@@ -22,7 +21,7 @@ import {
 	sep,
 } from "node:path";
 import { availableParallelism, homedir } from "node:os";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 import type {
 	ArtifactGraphRequiredRead,
@@ -87,17 +86,6 @@ import { PI_WORKFLOW_ROLE_ENV } from "./process-role.js";
 const DEFAULT_SUBAGENT_RUNS_ROOT = ".pi/workflow-subagents";
 const MAX_SUBAGENT_SESSION_ID_LENGTH = 64;
 const EXTRA_SUBAGENT_EXTENSIONS_ENV = "PI_WORKFLOW_SUBAGENT_EXTRA_EXTENSIONS";
-const CAMPAIGN_CONTEXT_ENV = "PI_WORKFLOW_CAMPAIGN_CONTEXT";
-const PAID_APPROVAL_SHA256_ENV = "PI_WORKFLOW_PAID_APPROVAL_SHA256";
-const CAMPAIGN_CONFIGURATION_ENV = {
-	campaignId: "PI_WORKFLOW_CAMPAIGN_ID",
-	packetHash: "PI_WORKFLOW_CAMPAIGN_PACKET_HASH",
-	packetPath: "PI_WORKFLOW_CAMPAIGN_PACKET_PATH",
-	ledgerPath: "PI_WORKFLOW_CAMPAIGN_LEDGER_PATH",
-	extensionPath: "PI_WORKFLOW_CAMPAIGN_EXTENSION",
-	extensionSha256: "PI_WORKFLOW_CAMPAIGN_EXTENSION_SHA256",
-	frozenSettings: "PI_WORKFLOW_CAMPAIGN_FROZEN_SETTINGS",
-} as const;
 const FETCH_CONTENT_CACHE_ENV = "PI_WORKFLOW_FETCH_CONTENT_CACHE";
 const LEGACY_FETCH_CACHE_ENV = "PI_WORKFLOW_FETCH_CACHE";
 const FETCH_CONTENT_INLINE_CHARS_ENV = "PI_WORKFLOW_FETCH_CONTENT_INLINE_CHARS";
@@ -361,550 +349,6 @@ function exitWorkflowWorkerRoleEnv(): void {
 	else delete process.env[PI_WORKFLOW_ROLE_ENV];
 	workflowWorkerRolePreviouslySet = false;
 	workflowWorkerRolePreviousValue = undefined;
-}
-
-interface CampaignFrozenSettings {
-	schema: "campaign-frozen-settings-v1";
-	provider: "openai-codex";
-	model: string;
-	thinking: string;
-	workers: 1;
-	inFlight: 1;
-	adaptive: false;
-	maxRetries: 0;
-	transport: "sse";
-	noSend: boolean;
-	transientModelFailureRetries: 0;
-	artifactOutputRetries: 0;
-}
-
-interface CampaignAccountingConfiguration {
-	campaignId: string;
-	packetHash: string;
-	packetPath: string;
-	ledgerPath: string;
-	extensionPath: string;
-	extensionSha256: string;
-	frozenSettings: CampaignFrozenSettings;
-	caps: { provider_request: number; model_attempt: number; repair: number };
-	scorerHash: string;
-	approvalPath?: string;
-	approvalSha256?: string;
-	subjectHash?: string;
-	maxCostUsd?: number;
-}
-
-interface CampaignTaskLaunchFiles {
-	contextPath: string;
-	wrapperPath: string;
-	campaignLaunchAttemptId: string;
-}
-
-function requiredAbsolutePath(value: string, label: string): string {
-	if (!isAbsolute(value) || resolve(value) !== value)
-		throw new Error(`campaign_configuration_relative_path:${label}`);
-	return value;
-}
-
-function isCampaignPaidMode(packet: Record<string, unknown>): boolean {
-	const authority = packet.authority as Record<string, unknown> | undefined;
-	return (
-		isPlainRecord(authority) &&
-		authority.noSend === false &&
-		authority.providerSend === true &&
-		authority.childLaunch === "paid-approved" &&
-		authority.approval === true &&
-		authority.productChange === false &&
-		typeof authority.paidModeApprovalArtifact === "string" &&
-		authority.paidModeApprovalArtifact === packet.approvalArtifactPath
-	);
-}
-
-function isCampaignAuthorityAllowed(packet: Record<string, unknown>): boolean {
-	const authority = packet.authority as Record<string, unknown> | undefined;
-	if (!isPlainRecord(authority)) return false;
-	const noSend =
-		authority.noSend === true &&
-		authority.providerSend === false &&
-		authority.childLaunch === "offline-NO_SEND-only" &&
-		authority.approval === false &&
-		authority.paidModeApprovalArtifact === null;
-	return noSend || isCampaignPaidMode(packet);
-}
-
-function isCampaignSettingsAllowed(
-	settings: Record<string, unknown>,
-	frozenSettings: CampaignFrozenSettings,
-): boolean {
-	if (frozenSettings.noSend)
-		return (
-			settings.noSend === true &&
-			settings.providerCalls === 0 &&
-			settings.network === "forbidden" &&
-			settings.execution === "offline-NO_SEND-only" &&
-			settings.providerSend === false
-		);
-	const { sha256: embeddedSettingsHash, ...unsignedSettings } = settings;
-	const calculatedSettingsHash = createHash("sha256")
-		.update(canonicalCampaignPacketBytes(unsignedSettings))
-		.digest("hex");
-	return (
-		settings.noSend === false &&
-		settings.providerSend === true &&
-		settings.network === "provider-only" &&
-		settings.execution === "paid-approved" &&
-		settings.providerCalls === null &&
-		settings.approvalArtifact === "required" &&
-		Number.isFinite(settings.maxCostUsd) &&
-		Number(settings.maxCostUsd) > 0 &&
-		embeddedSettingsHash === calculatedSettingsHash
-	);
-}
-
-function paidSubjectSeededBundles(packet: Record<string, unknown>): unknown {
-	const seeded = packet.seededBundles as Record<string, unknown>;
-	const arms = seeded?.arms as Record<string, Record<string, unknown>>;
-	return {
-		manifestPath: seeded?.manifestPath,
-		manifestSha256: seeded?.manifestSha256,
-		builderPath: seeded?.builderPath,
-		builderSha256: seeded?.builderSha256,
-		sourcePacketPath: seeded?.sourcePacketPath,
-		sourcePacketHash: seeded?.sourcePacketHash,
-		sourcePacketFileSha256: seeded?.sourcePacketFileSha256,
-		arms: Object.fromEntries(
-			(["default", "batched"] as const).map((name) => [
-				name,
-				{
-					bundlePath: arms?.[name]?.bundlePath,
-					specSha256: arms?.[name]?.specSha256,
-					topologySha256: arms?.[name]?.topologySha256,
-					compiledSha256: arms?.[name]?.compiledSha256,
-					stageIds: arms?.[name]?.stageIds,
-				},
-			]),
-		),
-	};
-}
-
-function paidApprovalSubjectFromPacket(
-	packet: Record<string, unknown>,
-): Record<string, unknown> {
-	return {
-		schema: "pi-workflow-paid-campaign-approval-subject-core-v1",
-		authority: "paid-approved",
-		source: packet.source,
-		sourceInventorySha256: createHash("sha256")
-			.update(stableCampaignJson(packet.sourceInventory))
-			.digest("hex"),
-		fixture: packet.fixture,
-		settings: packet.settings,
-		scorerAndRubric: packet.scorerAndRubric,
-		integrations: packet.integrations,
-		seededBundles: paidSubjectSeededBundles(packet),
-		replayFidelitySha256: createHash("sha256")
-			.update(stableCampaignJson(packet.replayFidelity))
-			.digest("hex"),
-		sourceFreeze: packet.sourceFreeze,
-		maxCostUsd: (packet.settings as Record<string, unknown>)?.maxCostUsd,
-	};
-}
-
-async function assertPaidApprovalArtifactIfRequired(
-	packet: Record<string, unknown>,
-	packetHash: string,
-	expectedApprovalSha256?: string,
-): Promise<{
-	approvalPath?: string;
-	approvalSha256?: string;
-	subjectHash?: string;
-	maxCostUsd?: number;
-}> {
-	if (!isCampaignPaidMode(packet)) return {};
-	if (!/^[a-f0-9]{64}$/.test(expectedApprovalSha256 ?? ""))
-		throw new Error("campaign_configuration_invalid:paid_approval_sha256");
-	const authority = packet.authority as Record<string, unknown>;
-	const approvalPath = requiredAbsolutePath(
-		String(packet.approvalArtifactPath),
-		"paid_approval",
-	);
-	if (authority.paidModeApprovalArtifact !== approvalPath)
-		throw new Error("campaign_configuration_drift:paid_approval_path");
-	if ((await realpath(approvalPath)) !== approvalPath)
-		throw new Error("campaign_configuration_drifting_path:paid_approval");
-	const mode = (await stat(approvalPath)).mode & 0o777;
-	if ((mode & 0o222) !== 0)
-		throw new Error("campaign_configuration_mutable_permissions:paid_approval");
-	const approvalBytes = await readFile(approvalPath);
-	const approvalSha256 = createHash("sha256")
-		.update(approvalBytes)
-		.digest("hex");
-	if (approvalSha256 !== expectedApprovalSha256)
-		throw new Error("campaign_configuration_drift:paid_approval_hash");
-	const approval = JSON.parse(approvalBytes.toString("utf8")) as Record<
-		string,
-		unknown
-	>;
-	const expectedSubject = paidApprovalSubjectFromPacket(packet);
-	if (
-		stableCampaignJson(packet.approvalSubjectCore) !==
-		stableCampaignJson(expectedSubject)
-	)
-		throw new Error("campaign_configuration_drift:approval_subject");
-	const subjectHash = createHash("sha256")
-		.update(stableCampaignJson(expectedSubject))
-		.digest("hex");
-	const approved = approval.approved as Record<string, unknown>;
-	const settings = packet.settings as Record<string, unknown>;
-	if (
-		packet.subjectHash !== subjectHash ||
-		approval.schema !== "pi-workflow-paid-campaign-approval-v1" ||
-		approval.template !== false ||
-		approval.approval !== true ||
-		approval.packetHash !== packetHash ||
-		approval.subjectHash !== subjectHash ||
-		typeof approval.owner !== "string" ||
-		approval.owner.trim() === "" ||
-		approval.owner === "<fill externally>" ||
-		typeof approval.approvedAt !== "string" ||
-		Number.isNaN(Date.parse(approval.approvedAt)) ||
-		!isPlainRecord(approved) ||
-		stableCampaignJson(approved) !==
-			stableCampaignJson({
-				maxCostUsd: settings.maxCostUsd,
-				caps: settings.caps,
-				model: "openai-codex/gpt-5.5",
-				thinking: "low",
-				arms: ["batched", "default"],
-			})
-	)
-		throw new Error("campaign_configuration_drift:paid_approval");
-	return {
-		approvalPath,
-		approvalSha256,
-		subjectHash,
-		maxCostUsd: Number(settings.maxCostUsd),
-	};
-}
-
-function parseCampaignFrozenSettings(value: string): CampaignFrozenSettings {
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(value);
-	} catch {
-		throw new Error("campaign_configuration_invalid:frozen_settings_json");
-	}
-	if (!isPlainRecord(parsed))
-		throw new Error("campaign_configuration_invalid:frozen_settings");
-	const settings = parsed as unknown as CampaignFrozenSettings;
-	if (
-		settings.schema !== "campaign-frozen-settings-v1" ||
-		settings.provider !== "openai-codex" ||
-		typeof settings.model !== "string" ||
-		settings.model.length === 0 ||
-		typeof settings.thinking !== "string" ||
-		settings.thinking.length === 0 ||
-		settings.workers !== 1 ||
-		settings.inFlight !== 1 ||
-		settings.adaptive !== false ||
-		settings.maxRetries !== 0 ||
-		settings.transport !== "sse" ||
-		typeof settings.noSend !== "boolean" ||
-		settings.transientModelFailureRetries !== 0 ||
-		settings.artifactOutputRetries !== 0
-	)
-		throw new Error("campaign_configuration_invalid:frozen_settings");
-	return settings;
-}
-
-function assertCampaignSerialPosture(env: NodeJS.ProcessEnv): void {
-	const expected = [
-		[MAX_CONCURRENT_LAUNCHES_ENV, "1"],
-		[MAX_LIVE_MODEL_WORKERS_ENV, "1"],
-		[ADAPTIVE_LIVE_MODEL_WORKERS_ENV, "0"],
-		[TRANSIENT_MODEL_FAILURE_RETRIES_ENV, "0"],
-		[ARTIFACT_OUTPUT_RETRIES_ENV, "0"],
-	] as const;
-	for (const [name, value] of expected) {
-		if (env[name] !== value)
-			throw new Error(`campaign_configuration_not_serial:${name}`);
-	}
-}
-
-async function sha256File(file: string): Promise<string> {
-	return createHash("sha256")
-		.update(await readFile(file))
-		.digest("hex");
-}
-
-function stableCampaignJson(value: unknown): string {
-	if (Array.isArray(value))
-		return `[${value.map((item) => stableCampaignJson(item)).join(",")}]`;
-	if (isPlainRecord(value))
-		return `{${Object.keys(value)
-			.sort()
-			.map((key) => `${JSON.stringify(key)}:${stableCampaignJson(value[key])}`)
-			.join(",")}}`;
-	return JSON.stringify(value);
-}
-
-function canonicalCampaignPacketBytes(value: unknown): string {
-	const canonicalize = (item: unknown): unknown => {
-		if (Array.isArray(item)) return item.map(canonicalize);
-		if (isPlainRecord(item))
-			return Object.fromEntries(
-				Object.keys(item)
-					.sort()
-					.map((key) => [key, canonicalize(item[key])]),
-			);
-		return item;
-	};
-	return `${JSON.stringify(canonicalize(value), null, 2)}\n`;
-}
-
-async function resolveCampaignAccountingConfiguration(
-	env: NodeJS.ProcessEnv = process.env,
-	options: { allowDirtySourceForTests?: boolean } = {},
-): Promise<CampaignAccountingConfiguration | undefined> {
-	const present = Object.values(CAMPAIGN_CONFIGURATION_ENV).filter(
-		(name) => env[name] !== undefined,
-	);
-	if (present.length === 0) {
-		if (env[CAMPAIGN_CONTEXT_ENV] !== undefined)
-			throw new Error("campaign_configuration_orphan_context");
-		return undefined;
-	}
-	if (present.length !== Object.keys(CAMPAIGN_CONFIGURATION_ENV).length)
-		throw new Error("campaign_configuration_partial");
-
-	const campaignId = env[CAMPAIGN_CONFIGURATION_ENV.campaignId]!;
-	const packetHash = env[CAMPAIGN_CONFIGURATION_ENV.packetHash]!;
-	const packetPath = requiredAbsolutePath(
-		env[CAMPAIGN_CONFIGURATION_ENV.packetPath]!,
-		"packet",
-	);
-	const ledgerPath = requiredAbsolutePath(
-		env[CAMPAIGN_CONFIGURATION_ENV.ledgerPath]!,
-		"ledger",
-	);
-	const extensionPath = requiredAbsolutePath(
-		env[CAMPAIGN_CONFIGURATION_ENV.extensionPath]!,
-		"extension",
-	);
-	const extensionSha256 = env[CAMPAIGN_CONFIGURATION_ENV.extensionSha256]!;
-	if (!campaignId || !/^[a-f0-9]{64}$/.test(packetHash))
-		throw new Error("campaign_configuration_invalid:identity");
-	if (!/^[a-f0-9]{64}$/.test(extensionSha256))
-		throw new Error("campaign_configuration_invalid:extension_hash");
-	if ((await realpath(packetPath)) !== packetPath)
-		throw new Error("campaign_configuration_drifting_path:packet");
-	if ((await realpath(ledgerPath)) !== ledgerPath)
-		throw new Error("campaign_configuration_drifting_path:ledger");
-	if ((await realpath(extensionPath)) !== extensionPath)
-		throw new Error("campaign_configuration_drifting_path:extension");
-	if ((await sha256File(extensionPath)) !== extensionSha256)
-		throw new Error("campaign_configuration_drift:extension");
-	const packet = JSON.parse(await readFile(packetPath, "utf8")) as Record<
-		string,
-		unknown
-	>;
-	const { packetHash: embeddedPacketHash, ...unsignedPacket } = packet;
-	const calculatedPacketHash = createHash("sha256")
-		.update(canonicalCampaignPacketBytes(unsignedPacket))
-		.digest("hex");
-	if (
-		embeddedPacketHash !== packetHash ||
-		calculatedPacketHash !== packetHash ||
-		packet.schemaVersion !== 2 ||
-		packet.schema !== "pi-workflow-campaign-packet-v1" ||
-		!isPlainRecord(packet.authority) ||
-		!isCampaignAuthorityAllowed(packet) ||
-		!isPlainRecord(packet.settings) ||
-		!isPlainRecord(packet.integrations) ||
-		!isPlainRecord(packet.scorerAndRubric)
-	)
-		throw new Error("campaign_configuration_drift:packet");
-	assertCampaignSerialPosture(env);
-	const frozenSettings = parseCampaignFrozenSettings(
-		env[CAMPAIGN_CONFIGURATION_ENV.frozenSettings]!,
-	);
-	const settings = packet.settings as Record<string, unknown>;
-	const source = packet.source as Record<string, unknown>;
-	const concurrency = settings.concurrency as Record<string, unknown>;
-	const retries = settings.retries as Record<string, unknown>;
-	const caps = settings.caps as CampaignAccountingConfiguration["caps"];
-	const integrations = packet.integrations as Record<string, unknown>;
-	const expectedIntegrationKeys = [
-		"adapter",
-		"campaignExtension",
-		"driver",
-		"ledger",
-		...(isCampaignPaidMode(packet) ? (["paidAuthority"] as const) : []),
-		"product",
-	] as const;
-	if (
-		stableCampaignJson(Object.keys(integrations).sort()) !==
-		stableCampaignJson([...expectedIntegrationKeys].sort())
-	)
-		throw new Error("campaign_configuration_drift:integrations");
-	const resolvedIntegrations = new Map<
-		string,
-		{ path: string; sha256: string }
-	>();
-	const runtimeProductPath = await realpath(MODULE_PATH);
-	const runtimeProductSha256 = await sha256File(runtimeProductPath);
-	for (const key of expectedIntegrationKeys) {
-		const entry = integrations[key] as Record<string, unknown>;
-		if (
-			!isPlainRecord(entry) ||
-			typeof entry.path !== "string" ||
-			typeof entry.sha256 !== "string" ||
-			!/^[a-f0-9]{64}$/.test(entry.sha256)
-		)
-			throw new Error(`campaign_configuration_drift:integration:${key}`);
-		const entryPath = requiredAbsolutePath(entry.path, `integration:${key}`);
-		if ((await realpath(entryPath)) !== entryPath)
-			throw new Error(
-				`campaign_configuration_drifting_path:integration:${key}`,
-			);
-		if ((await sha256File(entryPath)) !== entry.sha256)
-			throw new Error(`campaign_configuration_drift:integration:${key}`);
-		if (
-			key === "product" &&
-			(entryPath !== runtimeProductPath ||
-				entry.sha256 !== runtimeProductSha256)
-		)
-			throw new Error(`campaign_configuration_drift:integration:${key}`);
-		resolvedIntegrations.set(key, { path: entryPath, sha256: entry.sha256 });
-	}
-	const campaignExtension = resolvedIntegrations.get("campaignExtension")!;
-	const sourceStatus = source?.statusPorcelainV1Z;
-	if (sourceStatus !== "" && !options.allowDirtySourceForTests)
-		throw new Error("campaign_configuration_dirty_source");
-	const scorerHash = (packet.scorerAndRubric as Record<string, unknown>).sha256;
-	if (
-		!isCampaignSettingsAllowed(settings, frozenSettings) ||
-		Object.hasOwn(settings, "launch") ||
-		settings.model !== `${frozenSettings.provider}/${frozenSettings.model}` ||
-		settings.thinking !== frozenSettings.thinking ||
-		concurrency?.mode !== "serial" ||
-		concurrency?.workflowRuns !== frozenSettings.workers ||
-		concurrency?.providerRequestsInFlight !== frozenSettings.inFlight ||
-		concurrency?.adaptive !== frozenSettings.adaptive ||
-		retries?.PI_WORKFLOW_TRANSIENT_MODEL_FAILURE_RETRIES !== 0 ||
-		retries?.PI_WORKFLOW_ARTIFACT_OUTPUT_RETRIES !== 0 ||
-		!Number.isSafeInteger(caps?.provider_request) ||
-		!Number.isSafeInteger(caps?.model_attempt) ||
-		caps?.repair !== 0 ||
-		campaignExtension.path !== extensionPath ||
-		campaignExtension.sha256 !== extensionSha256 ||
-		typeof scorerHash !== "string" ||
-		!/^[a-f0-9]{64}$/.test(scorerHash)
-	)
-		throw new Error("campaign_configuration_drift:frozen_settings");
-	const paidApproval = await assertPaidApprovalArtifactIfRequired(
-		packet,
-		packetHash,
-		env[PAID_APPROVAL_SHA256_ENV],
-	);
-	if (
-		!isCampaignPaidMode(packet) &&
-		env[PAID_APPROVAL_SHA256_ENV] !== undefined
-	)
-		throw new Error("campaign_configuration_no_send_forbids_paid_approval_env");
-	const ledger = JSON.parse(await readFile(ledgerPath, "utf8")) as Record<
-		string,
-		unknown
-	>;
-	if (
-		ledger.schemaVersion !== 2 ||
-		ledger.packetHash !== packetHash ||
-		ledger.scorerHash !== scorerHash ||
-		stableCampaignJson(ledger.caps) !== stableCampaignJson(caps) ||
-		(isCampaignPaidMode(packet) &&
-			(ledger.maxCostUsd !== paidApproval.maxCostUsd ||
-				ledger.approvalSha256 !== paidApproval.approvalSha256 ||
-				ledger.subjectHash !== paidApproval.subjectHash)) ||
-		ledger.terminal !== null ||
-		ledger.cancelled !== false
-	)
-		throw new Error("campaign_configuration_drift:ledger");
-	return {
-		campaignId,
-		packetHash,
-		packetPath,
-		ledgerPath,
-		extensionPath,
-		extensionSha256,
-		frozenSettings,
-		caps,
-		scorerHash,
-		...paidApproval,
-	};
-}
-
-export async function resolveCampaignAccountingConfigurationForTests(
-	env: NodeJS.ProcessEnv = process.env,
-	options: { allowDirtySourceForTests?: boolean } = {},
-): Promise<CampaignAccountingConfiguration | undefined> {
-	return resolveCampaignAccountingConfiguration(env, options);
-}
-
-async function writeCampaignTaskContext(
-	taskDir: string,
-	configuration: CampaignAccountingConfiguration,
-	run: WorkflowRunRecord,
-	task: WorkflowTaskRunRecord,
-	campaignLaunchAttemptId: string,
-): Promise<CampaignTaskLaunchFiles> {
-	const launchRetryIndex = task.launchRetry?.attempts ?? 0;
-	const outputRetryIndex = task.outputRetry?.attempts ?? 0;
-	const contextPath = join(
-		taskDir,
-		`campaign-context-${campaignLaunchAttemptId}.json`,
-	);
-	const wrapperPath = join(
-		taskDir,
-		`campaign-extension-${campaignLaunchAttemptId}.mjs`,
-	);
-	const unsignedContext = {
-		schema: "workflow-campaign-task-context-v2",
-		campaignId: configuration.campaignId,
-		campaignLaunchAttemptId,
-		packetHash: configuration.packetHash,
-		packetPath: configuration.packetPath,
-		ledgerPath: configuration.ledgerPath,
-		scorerHash: configuration.scorerHash,
-		caps: configuration.caps,
-		workflowRunId: run.runId,
-		workflowTaskId: task.taskId,
-		workflowSpecId: task.specId,
-		workflowSpecPath: run.specPath,
-		launchRetryIndex,
-		outputRetryIndex,
-		frozenSettings: configuration.frozenSettings,
-		...(configuration.approvalPath === undefined
-			? {}
-			: {
-					approvalPath: configuration.approvalPath,
-					approvalSha256: configuration.approvalSha256,
-					subjectHash: configuration.subjectHash,
-					maxCostUsd: configuration.maxCostUsd,
-				}),
-	};
-	const context = {
-		...unsignedContext,
-		contextHash: createHash("sha256")
-			.update(stableCampaignJson(unsignedContext))
-			.digest("hex"),
-	};
-	await writeFile(contextPath, `${JSON.stringify(context, null, 2)}\n`, {
-		flag: "wx",
-		mode: 0o400,
-	});
-	const wrapper = `import { createHash } from "node:crypto";\nimport { readFile } from "node:fs/promises";\nconst contextPath = ${JSON.stringify(contextPath)};\nconst extensionPath = ${JSON.stringify(configuration.extensionPath)};\nconst expectedHash = ${JSON.stringify(configuration.extensionSha256)};\nexport default async function campaignTaskExtension(pi) {\n  const actualHash = createHash("sha256").update(await readFile(extensionPath)).digest("hex");\n  if (actualHash !== expectedHash) throw new Error("campaign_extension_hash_drift");\n  const previous = process.env.${CAMPAIGN_CONTEXT_ENV};\n  process.env.${CAMPAIGN_CONTEXT_ENV} = contextPath;\n  try {\n    const imported = await import(${JSON.stringify(pathToFileURL(configuration.extensionPath).href)});\n    return await imported.default(pi);\n  } finally {\n    if (previous === undefined) delete process.env.${CAMPAIGN_CONTEXT_ENV};\n    else process.env.${CAMPAIGN_CONTEXT_ENV} = previous;\n  }\n}\n`;
-	await writeFile(wrapperPath, wrapper, { flag: "wx", mode: 0o400 });
-	return { contextPath, wrapperPath, campaignLaunchAttemptId };
 }
 
 function nonEmptyEnv(
@@ -2846,24 +2290,6 @@ export async function launchSubagentTask(
 		};
 	}
 
-	const campaignConfiguration = await resolveCampaignAccountingConfiguration();
-	if (campaignConfiguration !== undefined) {
-		if (
-			compiledTask.runtime.model !==
-				`${campaignConfiguration.frozenSettings.provider}/${campaignConfiguration.frozenSettings.model}` ||
-			compiledTask.runtime.thinking !==
-				campaignConfiguration.frozenSettings.thinking
-		)
-			throw new Error("campaign_configuration_drift:task_runtime");
-		if (
-			(task.launchRetry?.attempts ?? 0) > 0 ||
-			(task.outputRetry?.attempts ?? 0) > 0 ||
-			(task.launchRetry?.maxAttempts ?? 0) > 0 ||
-			(task.outputRetry?.maxAttempts ?? 0) > 0
-		)
-			throw new Error("campaign_retry_forbidden");
-	}
-
 	await throwIfLaunchStopped(cwd, run.runId, leaseSignal, workflowStopSignal);
 
 	const taskHasRateLimitRetry =
@@ -2939,12 +2365,7 @@ export async function launchSubagentTask(
 	const stderrFile = fromProjectPath(cwd, task.files.stderr);
 	const resultFile = fromProjectPath(cwd, task.files.result);
 	const runsDir = subagentRunsDir(run, task);
-	const campaignLaunchAttemptId =
-		campaignConfiguration === undefined ? undefined : randomUUID();
-	const correlationId =
-		campaignLaunchAttemptId === undefined
-			? `${run.runId}:${task.taskId}`
-			: `${run.runId}:${task.taskId}:${campaignLaunchAttemptId}`;
+	const correlationId = `${run.runId}:${task.taskId}`;
 	const sessionId = subagentSessionId(run, task);
 
 	let launched: SubagentResultEnvelope;
@@ -3007,9 +2428,6 @@ export async function launchSubagentTask(
 		task.backendFiles = {
 			runsDir: toProjectPath(task.cwd, resolve(task.cwd, runsDir)),
 			correlationId,
-			...(campaignLaunchAttemptId === undefined
-				? {}
-				: { campaignLaunchAttemptId }),
 			...(sessionId === undefined ? {} : { sessionId }),
 		};
 		task.lastMessage = "pi-subagent launch claim recorded";
@@ -3018,26 +2436,12 @@ export async function launchSubagentTask(
 
 		const api = await loadSubagentApi();
 		await throwIfLaunchStopped(cwd, run.runId, leaseSignal, workflowStopSignal);
-		const campaignLaunchFiles =
-			campaignConfiguration === undefined
-				? undefined
-				: await writeCampaignTaskContext(
-						dirname(resultFile),
-						campaignConfiguration,
-						run,
-						task,
-						campaignLaunchAttemptId!,
-					);
-		const baseExtensions = await workflowTaskExtensions(
+		const extensions = await workflowTaskExtensions(
 			cwd,
 			run,
 			task,
 			compiledTask,
 		);
-		const extensions =
-			campaignLaunchFiles === undefined
-				? baseExtensions
-				: uniqueStrings([...baseExtensions, campaignLaunchFiles.wrapperPath]);
 		await throwIfLaunchStopped(cwd, run.runId, leaseSignal, workflowStopSignal);
 		const subagentOptions: Record<string, unknown> = {
 			cwd: task.cwd,
@@ -3094,10 +2498,6 @@ export async function launchSubagentTask(
 						operation: "launch acknowledgement",
 						context: `workflow run ${run.runId} task ${task.taskId} (${task.specId})`,
 						timeoutMs: SUBAGENT_LAUNCH_ACK_TIMEOUT_MS,
-						// Deliberately retain the hardened ambiguous-launch semantics:
-						// workflow-stop is checked before the API call, but the ack wait is
-						// not abandoned once a detached launch may be in progress. Dropping
-						// this wait can orphan a late child with no backend claim to reconcile.
 						signal: leaseSignal,
 					},
 				);
@@ -3169,9 +2569,6 @@ export async function launchSubagentTask(
 	task.backendFiles = {
 		runsDir: toProjectPath(task.cwd, resolve(task.cwd, runsDir)),
 		correlationId,
-		...(campaignLaunchAttemptId === undefined
-			? {}
-			: { campaignLaunchAttemptId }),
 		...(sessionId === undefined ? {} : { sessionId }),
 	};
 	task.statusDetail = "running";

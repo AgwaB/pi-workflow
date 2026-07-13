@@ -254,18 +254,9 @@ What the measured evidence says (2026-07-06 serial paired canary, no concurrency
 
 Use the speed profile when turnaround matters more than maximum verified coverage. Keep the defaults when the run feeds decisions that depend on every claim being fully verified. In both modes the evidence guardrails are identical and non-negotiable: verified-floor checks, `partially_supported` never counted as `verified`, and source-ref join integrity are enforced by the same audit stages regardless of thinking level.
 
-### Opt-in batched verification for deep-research
+### Internalized experimental batched verification variants
 
-`deep-research` still verifies one claim per verifier task by default. For controlled runs where verifier batching is acceptable, use the explicit path-ref variant:
-
-```text
-/workflow validate ./workflows/deep-research/batched-verification.spec.json
-/workflow run ./workflows/deep-research/batched-verification.spec.json "Research this repository and verify the key claims."
-```
-
-This path-ref variant keeps the same planner/research/normalization/audit/final stages, but feeds `verify-claims` from `verification-batches` and requires each verifier task to return one `results[]` row per claim id. It is not registered as an official bundled workflow name and does not change package defaults. Treat speed/cost results as task-specific: claim a win only when the run's audit reports zero missing/duplicate/invalid verifier rows, zero sourceRef join failures, and no verified-floor regression.
-
-Before claiming any speedup or flipping a default, apply the [speed and quality guardrails](#speed-and-quality-guardrails). Batched verification remains an explicit, workflow-specific experiment until its own candidate-matched non-inferiority gates pass.
+Workflow-specific experimental path-ref batched variants are not part of the public package surface. Public bundled specs remain default-only; generic batching primitives such as `foreach`, `matrix`, `fanout`, and multi-query web-source tool calls remain supported where documented.
 
 ### Opt-in tiered verification for deep-research
 
@@ -277,19 +268,6 @@ Before claiming any speedup or flipping a default, apply the [speed and quality 
 ```
 
 The spec schema pins thinking per stage, not per foreach item, so this variant splits verification into two stages: a deterministic `verification-tiers` helper partitions sanitized candidates by their existing `verificationNeed` signal (`core` feeds `verify-core-claims` at high thinking; `useful`/`optional` feed `verify-tail-claims` at medium; candidates without a signal fall back to position order, first 8 to the core tier). Both stages use the same single-claim verifier prompt, the same control schema, `artifactAccess: none`, and the same verified-requires-url-plus-quote rule, and the audit gate consumes both stages' verifier rows. It is not registered as an official bundled workflow name and does not change package defaults. Treat speed/cost results as task-specific: claim a win only when the run's audit reports zero missing/duplicate/invalid verifier rows, zero sourceRef join failures, and no verified-floor regression. Any default adoption additionally requires a paired canary (same tasks, defaults vs variant, serial runs) before flipping anything.
-
-### Opt-in batched verification for spec-review
-
-`spec-review` still verifies one candidate finding per verifier task by default. For controlled runs where verifier batching is acceptable, use the explicit path-ref variant:
-
-```text
-/workflow validate ./workflows/spec-review/batched-verification.spec.json
-/workflow run ./workflows/spec-review/batched-verification.spec.json "Review this spec against the implementation and tests."
-```
-
-This path-ref variant keeps the same extract-spec/map-implementation/inspect-tests/candidate-findings/partition-findings/report structure, but inserts a deterministic `verification-batches` support stage and feeds `verify-findings` one batch at a time. Each verifier task must return a `results[]` row for every input candidate, preserving the original candidate id and title exactly. The partition gate flattens `results[]` and rejoins candidates by id and title; missing, duplicate, orphan, out-of-batch, title-mismatched, or malformed rows are routed to `NEEDS_HUMAN`, never `KEEP`. The report stage cannot return `CONFORMS` while missing verifications or needs-human rows remain.
-
-It is not registered as an official bundled workflow name and does not change package defaults. Treat speed/cost results as task-specific: claim a win only after candidate-matched non-inferiority gates pass, including zero missing/duplicate/orphan/out-of-batch/title-mismatched/malformed verifier rows and no weakening of the final findings or needs-human accounting. Before claiming any speedup or proposing a default flip, apply the [speed and quality guardrails](#speed-and-quality-guardrails).
 
 ### Verification outcome ontology
 

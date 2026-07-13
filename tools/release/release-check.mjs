@@ -8,10 +8,7 @@ const BUNDLE_SPEC_FILES = [
 	"workflows/deep-review/spec.json",
 	"workflows/spec-review/spec.json",
 	"workflows/impact-review/spec.json",
-	"workflows/deep-research/batched-verification.spec.json",
 	"workflows/deep-research/tiered-verification.spec.json",
-	"workflows/deep-review/batched-devil-advocate.spec.json",
-	"workflows/spec-review/batched-verification.spec.json",
 	"skills/workflow-guide/scaffolds/analysis-dossier/spec.json",
 	"skills/workflow-guide/scaffolds/dag-required-reads/spec.json",
 	"skills/workflow-guide/scaffolds/foreach-reduce/spec.json",
@@ -60,6 +57,8 @@ const FORBIDDEN_PACKAGE_PREFIXES = [
 	"internal/",
 	"test/",
 ];
+
+const FORBIDDEN_CANDIDATE_PATTERN = /workflows\/(?:deep-research\/batched-verification|deep-review\/batched-devil-advocate|spec-review\/batched-verification)\.spec\.json|deep-research-batched-verification-opt-in|deep-review-batched-devil-advocate-opt-in|spec-review-batched-verification-opt-in|batch-verification-candidates\.mjs|deep-research-verify-claims-batch-control\.schema\.json|deep-review-devil-advocate-batch-control\.schema\.json|spec-review-verify-findings-batch-control\.schema\.json|PI_WORKFLOW_CAMPAIGN/;
 
 const SECRET_PATTERN = /\/Users\/toby|\/var\/folders|Desktop|clipboard|Screenshot|API[_-]?KEY|SECRET|PASSWORD|PRIVATE KEY|BEGIN [A-Z ]*PRIVATE KEY|npm_[A-Za-z0-9]{20,}|(^|[^a-zA-Z])sk-[A-Za-z0-9]{20,}/;
 
@@ -178,6 +177,12 @@ const forbidden = files.filter((path) =>
 );
 if (forbidden.length > 0) {
 	console.error(`Package includes local/internal files:\n${forbidden.join("\n")}`);
+	process.exit(1);
+}
+
+const forbiddenCandidateFiles = files.filter((path) => FORBIDDEN_CANDIDATE_PATTERN.test(path));
+if (forbiddenCandidateFiles.length > 0) {
+	console.error(`Package includes internalized workflow-specific batched candidate assets:\n${forbiddenCandidateFiles.join("\n")}`);
 	process.exit(1);
 }
 

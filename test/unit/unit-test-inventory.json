@@ -1,110 +1,8 @@
 {
   "schema": "pi-workflow-unit-test-inventory-v1",
   "source": "unit.test.mjs",
-  "count": 503,
+  "count": 495,
   "tests": [
-    {
-      "name": "compactStrings trims, filters, and optionally preserves duplicates",
-      "occurrence": 1,
-      "sha256": "6439b950b321bc0e134423dbcd0aeff46fad1d03d7392f297fd37fa4a1780d19",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "dynamic controller engine guard reports stale missing runDecisionLoop wiring",
-      "occurrence": 1,
-      "sha256": "f2f8eb89c396d2db08aa8a60e4ac177d5f1fcb13caaae0e92b7f841eca53443e",
-      "domain": "dynamic-runtime"
-    },
-    {
-      "name": "shared status helpers derive canonical task summaries",
-      "occurrence": 1,
-      "sha256": "2d77991dd2466a27cecd79eb241a28f5e8b86980f93f83394bd215e3c76e215b",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "blocked dependencies skip only dependent pending tasks",
-      "occurrence": 1,
-      "sha256": "f7519c1ba48cd4c40aef278c9ef4755550944f136a6084312a631dbefbf84282",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "formatRun stays byte-identical when fail-fast policy is unset",
-      "occurrence": 1,
-      "sha256": "9a1ee7bf7ed5eb2adf7617e3cf4f97bafc83d002976d5e3542de05e84a830e40",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "fail-fast flags off preserve failed-run scheduling without sibling cancellation",
-      "occurrence": 1,
-      "sha256": "fd14341c19b6bf068cba83294dc654ed3931b96219901b9645e5fd605cacca23",
-      "domain": "engine-store"
-    },
-    {
-      "name": "fail-fast flags on cancel pending siblings and interrupt running siblings distinctly",
-      "occurrence": 1,
-      "sha256": "ac16d9fea089c399244a33dd23d741ab63ee4e92c6c5cff8999019974726d9ed",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "workflow process role helpers default to supervisor and honor worker/disabled",
-      "occurrence": 1,
-      "sha256": "f365bc68b0319ecd587be36d79536e51714e89baf9b7471df7ab0d1fdeb4025d",
-      "domain": "engine-store"
-    },
-    {
-      "name": "worker and disabled roles block supervisor workflow actions",
-      "occurrence": 1,
-      "sha256": "76bd419d77ddb6934acb38341f20b3ea197c4ba9dc4fcccf97aa48607ad57edc",
-      "domain": "engine-store"
-    },
-    {
-      "name": "supervisor lease ignores orphaned reclaim mutex from dead owner",
-      "occurrence": 1,
-      "sha256": "c281357dadf74f0e495a5cf8e78cbf16e5cbe556d9d808920228f055872dfd46",
-      "domain": "engine-store"
-    },
-    {
-      "name": "supervisor lease honors live foreign owners and stale reclaim; workers cannot acquire",
-      "occurrence": 1,
-      "sha256": "f26224d5e6cd6581dd397e529dc55107f7f810f405522aba4e4c0bef3a3eb3d4",
-      "domain": "engine-store"
-    },
-    {
-      "name": "run lease stale reclaim admits exactly one concurrent owner",
-      "occurrence": 1,
-      "sha256": "7d64b545af07e1110433279e726d0c6d0a6f25a55704234562f42cd74856a028",
-      "domain": "engine-store"
-    },
-    {
-      "name": "run lease restore fails clearly if another owner appears during reclaim restore",
-      "occurrence": 1,
-      "sha256": "a3dad896a7d6b8775202b16d8a1f7213adbb08fb3cd20b02b2e3c9959ccd31b1",
-      "domain": "engine-store"
-    },
-    {
-      "name": "run lease absolute staleness can reclaim a live-pid old lock",
-      "occurrence": 1,
-      "sha256": "0be8172c8f19e575058f6a549ffeb0407b983ce0b279cae90cd4d7dc2948026f",
-      "domain": "engine-store"
-    },
-    {
-      "name": "run lease release does not unlink a replacement lock",
-      "occurrence": 1,
-      "sha256": "5bdfb621ef735bfb5e6f00739efc4d0fea1b1da041c309a45ad6e196c3dfa2c1",
-      "domain": "engine-store"
-    },
-    {
-      "name": "agent parser reads frontmatter tool ceilings",
-      "occurrence": 1,
-      "sha256": "21a6ffe22e702de6fb812d8d2d93e0a97da8c8d93a96ee834c3d791960dae78f",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "bundled common agents are fallback after project-local agents",
-      "occurrence": 1,
-      "sha256": "7e2f30c6c2ba31ed7d56c135bb73d067f72e7fad66949c88bfe95d961aab2fee",
-      "domain": "authoring-interface"
-    },
     {
       "name": "public schemaVersion 1 parser accepts artifact graph and rejects non-artifactGraph top-level shapes",
       "occurrence": 1,
@@ -128,6 +26,1704 @@
       "occurrence": 1,
       "sha256": "fb32374722d4fc9ef67dbb77ae623c88218a972dfbfae3229198204c726ea69d",
       "domain": "artifact-web"
+    },
+    {
+      "name": "artifact graph loader rejects unsupported controlSchema keywords",
+      "occurrence": 1,
+      "sha256": "241ace9ead65ba93b060c3b0f29eedd1b57ef845e151fb8655b85ed0f932fd9a",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "artifact graph loader rejects missing controlSchema files",
+      "occurrence": 1,
+      "sha256": "e80bfb0c96e9939e3d1834ec8f874c3da5a8a723c4f2d7f1be372a30148bc9a2",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "artifact graph schema rejects unknown output fields and invalid required reads",
+      "occurrence": 1,
+      "sha256": "fed7606f07d8b572ffa354b79480fe0a6b2c7f0c20b749be9d3765f99ce5ea55",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "artifact graph schema enforces launch-time invariants",
+      "occurrence": 1,
+      "sha256": "9f08d80518fc4982a54d15dfd9c9545344397dddb8b20be8011b5f2e1763d886",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "schema accepts bundled artifact graph workflow fixtures",
+      "occurrence": 1,
+      "sha256": "bf6e2b04896b20ffb25be6acfde60776364d0b52a9e53042f8501c344540bfc7",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "bundled artifact graph outputs declare control schemas",
+      "occurrence": 1,
+      "sha256": "98efc24adb989639690d257618af504f0f6e370662061caf6f6f7c6f443eeb71",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "artifactAccess none omits workflow artifact runtime affordances",
+      "occurrence": 1,
+      "sha256": "55b657474e6ddcddbf73537769ea71d849f0fbbc015d954e45bfa904136cc5c6",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "artifactAccess none rejects explicit workflow_artifact tools",
+      "occurrence": 1,
+      "sha256": "2be83bcc732618839ff3c9033f4981a7574157517385ca61a8c5c3ee34c1e2dd",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "deep-research verification candidate sanitizer backfills sourceRefs from web source cache",
+      "occurrence": 1,
+      "sha256": "d429d9a2367fd5fbb773d55405a2583c962059ebcfadb747a5c8d4b35c6f5495",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "compiler warns when sourceProjection paths match no source control schema",
+      "occurrence": 1,
+      "sha256": "ea457f2ac15d625fb2ac10fe3f9cefdd906553a8d8bb1cbec389b4b7f924959c",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "experimental foreach cache-stable flag moves item payload after stable instructions",
+      "occurrence": 1,
+      "sha256": "9cca11f275c7980ad266db055195265a31d1cc062b16be31e1261f680db307de",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "simple JSON path reads own properties only and supports safe array selectors",
+      "occurrence": 1,
+      "sha256": "52c97adc33dc054af916ac36759eaffdd9ecfc0f975bcf1e92bd4761c92cecea",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "compiler separates order-only after dependencies from source context",
+      "occurrence": 1,
+      "sha256": "9442e1cf958230c5ff906355f68693f993d5d5394efc9a479d7913e39588dbc5",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "artifactGraph runtime foreach empty fanout completes terminal placeholder",
+      "occurrence": 1,
+      "sha256": "83a7eaefaee0a6fb709b359e2018b122a4605ffbadd2a89921db9dc85ee16d87",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "artifactGraph runtime foreach repairs compiled/run mismatch after materialization crash",
+      "occurrence": 1,
+      "sha256": "18e8279b5a017489f252dc0538d8210c4b64ce2c6ba9615b8c639c3bf98f25a3",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "artifactGraph runtime foreach materializes items from a dag container output",
+      "occurrence": 1,
+      "sha256": "626bf30830483cfec410f939dd843d2cf73c64be33bae1bb6707614a4d997872",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "artifactGraph runtime foreach blocks when maxItems is exceeded",
+      "occurrence": 1,
+      "sha256": "5a3fb41c090745464c62452724debffcf19a1365de1d29b1fbf63303d4665b1e",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "artifactGraph scheduler marks prepare failures terminal",
+      "occurrence": 1,
+      "sha256": "16fa16bd1262a31d7c80f173f18115040d985ec9adb7385b7b449accdf3e376e",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "artifactGraph runtime scheduler fails closed on compiled run positional mismatch",
+      "occurrence": 1,
+      "sha256": "7589fc0104ceca1590f08b6cc383995c0a7794d49313ae7371dea9abac756a3f",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "artifact graph compiler propagates graph maxConcurrency",
+      "occurrence": 1,
+      "sha256": "9d1e804d274e80a61f0c9ffcc48268e694266205f76ad47e14764a28d421fabd",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "bundled impact-review artifact graph workflow compiles multi-join DAG",
+      "occurrence": 1,
+      "sha256": "bcc054dabe03b7bfcb06d693890e83186ecf050d96e99276bfb2d8fce3f49b86",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "bundled artifact graph workflows are public runnable",
+      "occurrence": 1,
+      "sha256": "976a509d85a776f65c07452fb5d2b697954be207d3a39ea79fed2c0768330db4",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow artifact telemetry summarizes stage status, retries, wall clock, and output bytes",
+      "occurrence": 1,
+      "sha256": "292044e1c33a7146a2779c63cc6d409b71cd09f9af06f0502d4504b8e59a8da0",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow source context packet prefers structured output and caps raw previews",
+      "occurrence": 1,
+      "sha256": "338b538ef69af9c482229e0bcf6909a2207df315657101226ccc06ae7af4a1e5",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow source context packet can cap oversized structured output",
+      "occurrence": 1,
+      "sha256": "0a9af9b4c1c302b76e38e9a8710d76afd1e747258c7e27f9c88758db3aac633c",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow source context packet applies stage caps and a global packet budget",
+      "occurrence": 1,
+      "sha256": "f3c5f74e820ea98fa62e691ed57302428ab15055492e62659b62f2010b7084a9",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow source context packet can project structured outputs by source stage",
+      "occurrence": 1,
+      "sha256": "93d72dc35e859d33c26a193e5867dea6527196c057618e0462ae7ff40f9dfca6",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "engine source context reads structured outputs and telemetry from task artifacts",
+      "occurrence": 1,
+      "sha256": "65c899f65f3a9179b0f7a32c0b8e8b7e6d74a241ca8c4f460efd6d28ef1455ed",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "schema and compiler accept artifactGraph support nodes",
+      "occurrence": 1,
+      "sha256": "88820b7ee5609f85af36e6de60327e4c4de29b51987d0f253195bea6b5eed687",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "schema rejects invalid artifactGraph support nodes",
+      "occurrence": 1,
+      "sha256": "683fd7611ce7da67a8496659577873f2b36ed70fa65207a4d2e9698188be43b8",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "artifactGraph runtime support executes helper and writes artifacts",
+      "occurrence": 1,
+      "sha256": "649b20ebec7df29365932caf164a24ed604ed81246511f040a7901b4098a3a3e",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "artifactGraph runtime support omits failed control sources but passes status metadata",
+      "occurrence": 1,
+      "sha256": "c9a06ab2da4d7bb0e2e69d01bae81e27526cf728b6eb1286e4fc2bc8600c6ee3",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "artifactGraph runtime support marks helper errors as failed",
+      "occurrence": 1,
+      "sha256": "09eac5605ac396c37a7a72110eb6e98d27f535fa8f73d6667b79eeadf2c77f19",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "artifactGraph scheduler does not consume concurrency for synchronous support tasks",
+      "occurrence": 1,
+      "sha256": "aae0faff74c51147e9624a3b047e90d0a0a1df8cd57c753e4ec6f20693a86ba9",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "artifactGraph runtime scheduler launches empty-after roots in parallel",
+      "occurrence": 1,
+      "sha256": "ecd72917fcb548a120d4689ef93f54b83c8c020f36f13fd077fd8242a86a8337",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "artifactGraph runtime after dependencies do not inject order-only source context",
+      "occurrence": 1,
+      "sha256": "1617a741682142713b58538537e3f491289eda1ac23e649c91bac62648f7c0e6",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "artifactGraph runtime diamond fan-out launches branches in parallel and joins context",
+      "occurrence": 1,
+      "sha256": "c1bb6c55084b4d0e80d641815dfd02a02a18317812899acceb0851082a892596",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "artifactGraph runtime dag container waits for outer sources and skips strict dependents",
+      "occurrence": 1,
+      "sha256": "39001ee3ce27350e9220de72e3380d0abdf1f0e5756a8054dd57c82f2b627fd2",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "artifactGraph runtime partial dag join proceeds and exposes outputFrom downstream",
+      "occurrence": 1,
+      "sha256": "ea6792f3c88700160f2b6d358fe19fe900f73503b709a90aee77b6bb0874e44c",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow fetch_content cache wrapper replays run-scoped hits with fresh response ids",
+      "occurrence": 1,
+      "sha256": "4f6742f81a5b9d97d8c00b1e4fcf7df411523085171f0084cb6ae899caecc513",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow fetch_content cache correlates concurrent stored data by response id",
+      "occurrence": 1,
+      "sha256": "12fba90b93f6fa7e3ee0a2555394c68f1d63a0d2602099e728996263c5ebdcc9",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow fetch_content cache wrapper caps inline text but preserves stored source data",
+      "occurrence": 1,
+      "sha256": "db6307e7a3f659960d63fb3d869dea3bb423006c9b40361e7fc81036edb21f0a",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "subagent launch can opt out of fetch cache and keep built-in provider mappings",
+      "occurrence": 1,
+      "sha256": "1af0354b51557f7baadacb136d77f6ab6ee573a7b28ee5223b65c718b1ff5874",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow web-source core redacts URLs and reads normalized snippets",
+      "occurrence": 1,
+      "sha256": "c93bcfafbf11581ad03a80024f483d6f48233b3549cd26baf1e5d1fb42c82feb",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow web-source core anchors CJK normalized snippets and multi-match term windows",
+      "occurrence": 1,
+      "sha256": "fa678293f10c3b9c597bd6e11f9fc4543705e0ff8b00b904f8421371fe636115",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow web-source extension returns source cards and narrow reads without exposing cache paths",
+      "occurrence": 1,
+      "sha256": "e88bd7b9bd55b0392b7b30763cdb019022968fa3e563d70a91d8f8ba7c0c0ea9",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow web-source extension anchors late matches within remaining read budget",
+      "occurrence": 1,
+      "sha256": "7df7fb40970e452ae74fa93a7d1cefde341247f28e183f3c6b16ec52467804d6",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow web-source extension aggregates mixed source read statuses",
+      "occurrence": 1,
+      "sha256": "68a0b3fa06dc6b341691fe7115ee0ca6f87c7064fdb85b767531002b75a1ef0a",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow web-source fetch single-flights duplicate URLs and caches transient empty results in process",
+      "occurrence": 1,
+      "sha256": "b9e757e49fcd2e1e4babcd48da308729e4286bfca9c3ea58aabee8792ef09a42",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow web-source search disables provider curation by default",
+      "occurrence": 1,
+      "sha256": "cd71b0acc27526cc46f63f5ec8567674e9bedf442ae2e9df86e4a89fdb4a4460",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow web-source extension blocks untrusted custom fetch and reports budget exhaustion",
+      "occurrence": 1,
+      "sha256": "713e4a950121cdf1db353cdffb451404ef47b1b2f22e45d207d4529d1771db11",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "default normalized web fetch uses guarded direct fetch instead of captured fetch_content",
+      "occurrence": 1,
+      "sha256": "a7e9d59de15225b89827ab10b6ee2369578712faec0b085291634579cd0b87f1",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "subagent launch captures custom normalized web provider extension instead of exposing it directly",
+      "occurrence": 1,
+      "sha256": "fe04c8cf1a0e492bff9aba7d7017e64587907b36186d49c7aef02b8000963f01",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "failed context-window subagent with valid artifactGraph output is salvaged",
+      "occurrence": 1,
+      "sha256": "c56605d2b9abee35434a38eddbe94850f259e1f47361709d0af858f2da4189d1",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "failed model subagent with valid artifactGraph output is salvaged",
+      "occurrence": 1,
+      "sha256": "9cf11a1efb2e98a33b02f47730f92f8ae5d1ff50a1ec761f6522c930e0cbc842",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "subagent launch retries rotate artifact-graph session ids",
+      "occurrence": 1,
+      "sha256": "f1362df17f1f7e18d0da7eab11a1be5b80a5672e2189fcdce9dd1619815c928d",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "static run artifacts preserve declared workflow bundle files only",
+      "occurrence": 1,
+      "sha256": "dcb7aaec3f60d0f0ab33e1f245b676995bfa06fd1f278102aedc95230f8a73de",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "static run artifacts reject escaping discovered bundle refs",
+      "occurrence": 1,
+      "sha256": "1513a6839a87feaaaae4b6a5c7987534157ea57515ee070028761181d79f039e",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "run records use artifact-graph type and preserve artifact graph discriminator",
+      "occurrence": 1,
+      "sha256": "ab24f99a4e318af4d54b213175b1cedbec60f142ab1defe5b28f3c443ce28853",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "watchRun drops missing runs without recreating supervisor artifacts",
+      "occurrence": 1,
+      "sha256": "27134da6545e8cff6bb67e2981a4d4eefb77b3d91ec4319fd786154814fc8acd",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "deep-research claim-evidence-gate backfills sourceRefs from normalize packet source cards",
+      "occurrence": 1,
+      "sha256": "d58fbdfb9a3e9c4521f54b76fd11a0307fea280b95b0217b6fd7fea811a1dbc3",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "deep-research claim-evidence-gate backfills sourceRefs from web source cache",
+      "occurrence": 1,
+      "sha256": "8816c148704634dcee52734aeb8b98e4d82dceec4a5ba5719094e52bd0ac56cf",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "deep-research claim-evidence-gate backfills npm docs sourceRefs across CLI doc versions",
+      "occurrence": 1,
+      "sha256": "ccc9595defb6ae257fe195171ca3a1979d957a7de996ad3106d3b1c4131d63b5",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "deep-research claim-evidence-gate suppresses sourceRef join failures for local evidence",
+      "occurrence": 1,
+      "sha256": "3d1f6c0528c72b089a51341b14cbabe776202a64fce97986210ec3bc88efc82c",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow_artifact lists visible sources, reads by source name, and records a read ledger",
+      "occurrence": 1,
+      "sha256": "c81efd44a598d63de6106d4716e74d6692669ad2ce459248441308c60f00c972",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "experimental workflow_artifact dedup suppresses exact duplicate read content",
+      "occurrence": 1,
+      "sha256": "fd5e0f65a5049d7853876facc5b8f9b2df0e5aa3eabaa1e8597cba4eeb15dddc",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "artifact graph source context warns that capped workflow_artifact reads need paths",
+      "occurrence": 1,
+      "sha256": "735db7f0f5bf6d2335c395b536dc9f84497775911fa7ceaac44c93c56278ce58",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "artifact graph source context serializes source list compactly",
+      "occurrence": 1,
+      "sha256": "fe135c04ab93bce39d125cd99457753c52c31ca32340311caef76df531d632dd",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow_artifact can read deterministic JSON projections with caps",
+      "occurrence": 1,
+      "sha256": "35ab18f09c8f1103c4e96b53ae7e3409df02167ca624022a3a025d9f2266de93",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow_artifact rejects path injection, unknown artifacts, and debug reads in workflow-task mode",
+      "occurrence": 1,
+      "sha256": "ca96e0c5f7ce9870306de145c4e81916123caf4dd9d17826746ca3f3b0b89aa5",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow_artifact extension registers and activates the tool",
+      "occurrence": 1,
+      "sha256": "eee76a5ff9e3d44fb1a9c563311c680a55256d21e16e97426cd7a5de404a80eb",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "structured required read policy enforces projection ledger rows separately from string reads",
+      "occurrence": 1,
+      "sha256": "38e5f3b6506df1941c0a5eccb978b1227a316789fe9f39c0813b18da21fd0c4f",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "artifact graph workflow runs workflow artifacts and enforces required reads",
+      "occurrence": 1,
+      "sha256": "45041f66dafc1cf605d4d133c14bbbf3df352c3409f6aeff8b264cb5abae0bd4",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "artifact graph output retry reuses confirmed subagent session",
+      "occurrence": 1,
+      "sha256": "f6650133e86a30d49d8aa11d6406ae4da73f8147785ab0757e3e5335ac99cd1f",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "artifact graph output retry defaults to new session when same-session flag is disabled",
+      "occurrence": 1,
+      "sha256": "2b71f659335bcd2957844c77894131b8aa978e3ef87b5f0a546ab8da8a74a99d",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "artifact graph output retry falls back to new session after same-session repair fails",
+      "occurrence": 1,
+      "sha256": "4a5a606135a51f82e14a2d1eca0f6d3aa3dc60f11be921e56ba18320c4d91009",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "artifact graph output retry starts new session when subagent session is unconfirmed",
+      "occurrence": 1,
+      "sha256": "ebd556d1b71d4b90e463f5aef434a2f2e817ff1eeb7d4375756135b484733af9",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "recovered artifact graph subagent handle preserves same-session retry",
+      "occurrence": 1,
+      "sha256": "69bcc3613dab64227b8315f9d74eef2f85676e70e142cad006404d5db3395f4e",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "non artifact graph subagent launches do not request child sessions",
+      "occurrence": 1,
+      "sha256": "db9c3fe06285a2c82927757c61d3071403451b3016735dade9e51b0b7f27f14a",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow output parser accepts canonical control analysis refs sections",
+      "occurrence": 1,
+      "sha256": "07c00a7487caa5734da4820a845ab0aebab22317000ea3a7cc15fab8406f3702",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow output parser can require non-empty refs",
+      "occurrence": 1,
+      "sha256": "ce65271a1ae76834f1eb361293ebc9bfae1faca4265b77786ee7ad3e2be5c8f2",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow output parser rejects empty strict ref locators",
+      "occurrence": 1,
+      "sha256": "6ce187aa9a307e121b7cf6c9d5a1f638ee6dd7820fbf2c4355070599eec1ab10",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow artifact bundle can validate strict ref URL availability",
+      "occurrence": 1,
+      "sha256": "a7b78838923c713eb67cbced4ddec5c26a9a01496f3e31377b2dc58fadf6234f",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow artifact bundle validates unique ref URLs concurrently",
+      "occurrence": 1,
+      "sha256": "8ab00841d5445f53c04a4baf8918cf44d537515ec37bde071f724e9639e1d532",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow artifact bundle keeps ref URL validation serial per host",
+      "occurrence": 1,
+      "sha256": "1a33f38a290a33cf1995b644c18ec03d1e482287a5a3296ef13bc3c450a06b0a",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow artifact bundle validates duplicate ref URLs once",
+      "occurrence": 1,
+      "sha256": "44a0221afef750e121bd341b565ebc72b55d3bd5338453a442d18748657e7dbb",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow artifact bundle counts duplicate ref URLs toward maxUrls",
+      "occurrence": 1,
+      "sha256": "ab0973ef0ebcd06d8aa84ee19d2c4954eed053a05c34df6b60d881d0265f57e6",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow artifact bundle orders concurrent ref URL issues by ref index",
+      "occurrence": 1,
+      "sha256": "3d412c8bf0388a2ba17aa1f5630c4de8a755551cd6204ed480bce77eef3d3db5",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow artifact bundle can restrict refs to an upstream source ledger",
+      "occurrence": 1,
+      "sha256": "6be3b38f5ed892751890e20773e00bd4e664dc0b30519cd8bab5e1610999dfc6",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow output retry instructions include ref repair guidance",
+      "occurrence": 1,
+      "sha256": "0c52d079239888b165ca9225a13102472133f3f75972c77f7aacc7d3b609f58b",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow output retry instructions include claim-support repair guidance",
+      "occurrence": 1,
+      "sha256": "8ead6335426e6157c8b954aaf5abb6c97aa1db37fcf55529d0f4d6043fa6e838",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow artifact bundle gates positive verifier claim support",
+      "occurrence": 1,
+      "sha256": "38269496bd72e15e78f30f2117181a304734aaed01d62777cb024052f01ab7ec",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow artifact bundle rejects positive verifier support outside refs",
+      "occurrence": 1,
+      "sha256": "f7a0dd4fae26914d39bd81a3734b3b1231570106ec7d4110e6f5c05690725f9b",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow output parser recovers control object followed by one stray closing brace",
+      "occurrence": 1,
+      "sha256": "173af374f8a2641f5b3adf2e49f7c86353182461da428144307e3cd3b2e49caa",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow output parser rejects truncated control JSON with invalid_json",
+      "occurrence": 1,
+      "sha256": "cef6cc89ab7f6344802201e6c4b168370418024209e1e69b2469ec8db47759fc",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow output parser rejects substantive trailing control text after first object",
+      "occurrence": 1,
+      "sha256": "ada5a35ffcae3f0fff16d15c3726b766faaf39ff6dced9d55d7640b90a6a8695",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow output parser balances control braces inside strings during stray-brace recovery",
+      "occurrence": 1,
+      "sha256": "e5647ef0de6f3f056bbc248f823a4c659ebc4a56bb2f099b8e38ac93626c0b94",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow output parser tolerates literal closing tags inside JSON strings",
+      "occurrence": 1,
+      "sha256": "64cdf620853ab72f29c35f59ccabec28e73b48e40adb8199bb486910e89844ea",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow output parser normalizes reviewer location ranges before schema validation",
+      "occurrence": 1,
+      "sha256": "9d87545666b7316fde94534f9456e82301262c6864bca8fa7e405373bfe339e1",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow output parser repairs known workflow control schema slips before validation",
+      "occurrence": 1,
+      "sha256": "f97bd02449d5f496645c89c9ecc4517de1580191cf5b5d2afc296271ebb387cb",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow artifact bundle records schema-slip repair telemetry",
+      "occurrence": 1,
+      "sha256": "cf498f0ff016836229368b45e39123472e7baba0e7feee119410a07979ba9a15",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow output parser rejects missing sections, bad control, outside prose, and contract failures",
+      "occurrence": 1,
+      "sha256": "8b1410aa57f0796959c2d5bdf428c525c8fd65b51f875c864b86c0693bf8b96b",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow artifact bundle writer writes sidecars before result envelope",
+      "occurrence": 1,
+      "sha256": "85b6ebba3c073f0592f17df269225ee016845c19ee77488318765751b1e055ca",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow artifact bundle writer does not commit result when a parallel sidecar fails",
+      "occurrence": 1,
+      "sha256": "c6ba07ff11926c916d8a081e89c9cdd655f0c3bafd1bd70791363cadc04a0a7b",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow artifact bundle writer stores invalid attempts without commit result",
+      "occurrence": 1,
+      "sha256": "053ee41cd87f755b763836f6446a643d9e94d4a223fec944963d14bc2fdcb196",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow task detail switches between output and prompt artifacts",
+      "occurrence": 1,
+      "sha256": "1daf47aaca810bf0c9b46071d0aeb339af18f1c4ee333b3d1ead80ed984794c3",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow task detail scrolls the selected artifact with arrow keys",
+      "occurrence": 1,
+      "sha256": "0395ce13bca8cc9a9a51bf5864d6deae7a39c6634e228c99f76c7237ffafa709",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "compiler warns when sourceProjection paths match no source schema",
+      "occurrence": 1,
+      "sha256": "027ff923332f2a0f50558d74d81a24dd11b715499429c15689b08e42474ededf",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow output repair canonicalizes unique enum near-misses and records telemetry",
+      "occurrence": 1,
+      "sha256": "fab9960605ce5c1afb28814be19b5985c4251aa9938122f9d50f880668ea82d1",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow output repair leaves ambiguous or distant enum values failing closed",
+      "occurrence": 1,
+      "sha256": "be7ff857ae8e06b4386b638ec2fe9d7df15a865654472161a5b548039368a587",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow output repair never bridges a negation difference in enum near-misses",
+      "occurrence": 1,
+      "sha256": "33f31d4908695a4d546874040982c9a5acb564609a0aa7e37857c882a601ff41",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow output repair wraps bare string object rows only when valid by construction",
+      "occurrence": 1,
+      "sha256": "52679c2e11a0d9aa8a36f7067d1b9bb54c3cec12e7210ad50c9beaae8f7ab14a",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "workflow output repair leaves string rows untouched when items require multiple properties",
+      "occurrence": 1,
+      "sha256": "943fa383f473493ef223468441849f0f0c333805e303b78bfda542cf03bed966",
+      "domain": "artifact-web"
+    },
+    {
+      "name": "shared status helpers derive canonical task summaries",
+      "occurrence": 1,
+      "sha256": "2d77991dd2466a27cecd79eb241a28f5e8b86980f93f83394bd215e3c76e215b",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "formatRun stays byte-identical when fail-fast policy is unset",
+      "occurrence": 1,
+      "sha256": "9a1ee7bf7ed5eb2adf7617e3cf4f97bafc83d002976d5e3542de05e84a830e40",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "agent parser reads frontmatter tool ceilings",
+      "occurrence": 1,
+      "sha256": "21a6ffe22e702de6fb812d8d2d93e0a97da8c8d93a96ee834c3d791960dae78f",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "bundled common agents are fallback after project-local agents",
+      "occurrence": 1,
+      "sha256": "7e2f30c6c2ba31ed7d56c135bb73d067f72e7fad66949c88bfe95d961aab2fee",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "bundled deep-research compacts audit packets before executive final",
+      "occurrence": 1,
+      "sha256": "750a488e7b029586733863ef381faa4ae6326e382f336992e05cc78ad587160e",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "ambient runtime defaults do not override bundled stage thinking pins",
+      "occurrence": 1,
+      "sha256": "a9f285acb8bf3334c91f332d3aca25526739725a3f0aaae7ee78155fb9490d81",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "explicit runtime thinking overrides bundled stage thinking pins",
+      "occurrence": 1,
+      "sha256": "67305405588815ab28563a3acba618e2dd2b92b0274842765b9a23fd7d2be550",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "deep-research sanitizer clamps preserved claims to schema cap with diagnostics",
+      "occurrence": 1,
+      "sha256": "6f7e2f377ddbbb380126c8356835a243bfacb25ed23b60d277461a25c5a3372c",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "schema and compiler accept partial sourcePolicy on foreach",
+      "occurrence": 1,
+      "sha256": "ee8ae41388954a5f70f5de64d3e2ac86d13fb7d4ea0184344cfaab7cabca788d",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "compiler warns when readOnly stage keeps mutation-capable tools",
+      "occurrence": 1,
+      "sha256": "1c5c4c13dd51597b7d91c96899a8f8575a1dae011b864505cfcbbc26d56852b1",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "compiler does not warn when read-only stage uses only read-only tools",
+      "occurrence": 1,
+      "sha256": "97c9851e4bd20b638c52997400876a70332f625c95e4fe4ad8159a1d6680f427",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "compiler treats explicit empty tool allowlist as no-tool safe",
+      "occurrence": 1,
+      "sha256": "b97793ab4534690fb1ac299625a9125aa972943d85097a12ec8a968a834dc17c",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "compiler warns when a foreach path is absent from the source control schema",
+      "occurrence": 1,
+      "sha256": "dba50a773826af6410316cca005bc2fbc5ba0aad1b823fc39d91b7e72ae6172c",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "compiler warns about workflow-quality risks before runtime",
+      "occurrence": 1,
+      "sha256": "a8207c9f9b099af871b84b548cc4db2a4d5c0c694c146ee2029ee6d324a8e857",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "compiler warns when complex control fields lack prompt JSON skeletons",
+      "occurrence": 1,
+      "sha256": "79708a48fd35fe9a3a301930a466518cc1b45abab231ffd06755759799b101c9",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "adaptive live workers grow limit after healthy completions",
+      "occurrence": 1,
+      "sha256": "eb01a42c30e3e82b6f7955e463a0a2520875c7911578aca0e8175b678cd2f0a5",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "adaptive live workers shrink limit on degraded completions",
+      "occurrence": 1,
+      "sha256": "b3a2acb2bb1cef36c6d62ee8c550b53d6670904b3f859f3010e275752c6545c9",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "compiler injects runtime task for single stages only",
+      "occurrence": 1,
+      "sha256": "15f3118d6a8915e2c6da6e18c5695c2fd1fe50f4beba15089cd5bc31e14ad263",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "compiler serializes workflow input compactly in prompts",
+      "occurrence": 1,
+      "sha256": "07ad7de697d6eeff494f6c2ef2d6f1318ef92c1594adc167679367c3aac7eabc",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "compiler omits runtime task injection from foreach templates",
+      "occurrence": 1,
+      "sha256": "d4c2a269fb9a1d969f3d76531515625a6b47e9b691cd4a698938de6052769917",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "compiler injects runtime task into foreach and reduce stages that opt in",
+      "occurrence": 1,
+      "sha256": "7a84971456e5103f506dfa333693f3b11243b3f193b8980f76e6dad4eacb9897",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "compiler applies explicit stage from dependencies and stage runtime defaults",
+      "occurrence": 1,
+      "sha256": "a709e677c20350227b62e60f758edca40b12ceaf914cc341a864f4481fbd639d",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "compiler treats empty after as an explicit parallel root",
+      "occurrence": 1,
+      "sha256": "aa162074ee80368e403186f2d54112bbad7be445b77efbd2f462b55080f56223",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "compiler lowers dag containers to namespaced child tasks",
+      "occurrence": 1,
+      "sha256": "548e12273c6ef73977f4c2d44748cea902cf5347894ef4fb564f6fd10e059889",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "compiler lowers foreach and support children inside dag containers",
+      "occurrence": 1,
+      "sha256": "a15e1d84a3de17828dc684591b492f11f84d716290a8728b5e8972101a2fc951",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "compiler lowers nested dag containers with composed namespaces",
+      "occurrence": 1,
+      "sha256": "e6efc3450ad634f73aec336b142d40e4c6d9da9795add9177e5e438d50876413",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "compiler keeps dag namespace prefixes distinct from loop ids",
+      "occurrence": 1,
+      "sha256": "9144a6954a62316a5cb86b7dd7128a086aca94728820ece7c644d8f70271a3e6",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "schema accepts object-form tools and rejects invalid tool objects",
+      "occurrence": 1,
+      "sha256": "13ff6f1a6f0f2de48d3b6c54896330bca814f19b047dee8e73266f36fce94283",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "compiler normalizes object-form tools and treats classified custom read-only tools as safe",
+      "occurrence": 1,
+      "sha256": "ce15ad084b9c2f8686f72e8a1686b07822373a5c69deb1ad9d27bb991de74666",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "compiler keeps unclassified custom tools blocked for explicit review",
+      "occurrence": 1,
+      "sha256": "b346d645eb8c4992babddcb110d717a2d6c2227ee4a7d318aac0214b27e0e929",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "object-form tools cannot expand beyond agent-declared tool ceilings",
+      "occurrence": 1,
+      "sha256": "f276ade6e842cc5352dc5f14f39e5c8f212252d139eacfa40204bce71a277819",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "narrow tool scopes inherit metadata for strings and override it for objects",
+      "occurrence": 1,
+      "sha256": "fdef5b6a8557f2b957c242b34d555149265cc5d35611278583b14526d2f42c21",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "tool metadata cannot downgrade known mutating tools",
+      "occurrence": 1,
+      "sha256": "35df21043244c73f57efd7719891b44956809c492e408d69c4f00aa72df69f8b",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "spec-review partition helper joins verifier results and flags missing coverage",
+      "occurrence": 1,
+      "sha256": "7e75d04b29b45487b9cb916e6e9a8cb1af1e592ca0f6b5ab0fd3127afa039f30",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "bundled spec-review workflow compiles flat analysis and verification fanout",
+      "occurrence": 1,
+      "sha256": "bdd25d7ee3c0dd58db23c0ba48f6ca6d72883d79792e85b01d0a310028aa202c",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "bundled deep-review workflow leaves reviewer fanout unconstrained by stage caps",
+      "occurrence": 1,
+      "sha256": "fe89bb656fafeecf9aa204706d5c0e0f4ed20e2760049bbe5be1c305adb93f8f",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "bundled spec-review workflow materializes verifier and partitions verified findings",
+      "occurrence": 1,
+      "sha256": "97da4ff6d6494d6bf1140f980a2440c5a5d1c5ee89f193d230fe9202b91e11f9",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "workflow helper loader resolves directory-local helpers",
+      "occurrence": 1,
+      "sha256": "a4b69ee5ce469b1fbd95d1fa4196a4f2394ec51d93954b828ad7a4b5da5ef058",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "workflow helper loader rejects external or invalid helper refs",
+      "occurrence": 1,
+      "sha256": "d68f868d54e003dcc3e3d684aa53d477ba1451745b26d6e8aa7c0d2f8f41de2b",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "support output analysis preserves field precedence for render helpers",
+      "occurrence": 1,
+      "sha256": "cbd303e2a06c995f2f718bf3f726bb7555b9a65335ed36832a9ee3aee7ba7f19",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "formatRun surfaces terminal capture lag separately from execution time",
+      "occurrence": 1,
+      "sha256": "29f915c7587e3434f42c902936faaf98aab44584fd2701535c46c05c2f712229",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "compiler applies runtime defaults before budget estimates",
+      "occurrence": 1,
+      "sha256": "4f40b438ec53af3aaf9b6d64fac45f2fcd2951dd76129b0ea1d96a12b39a247f",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "workflow registry resolves exact names",
+      "occurrence": 1,
+      "sha256": "19b229f0eac35313875b17610929b6f629738678b220e55db84771c2ba247bc7",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "workflow registry prefers project workflow over local state and bundled duplicates",
+      "occurrence": 1,
+      "sha256": "fcc3c8f15c3afdbaaf7bdbbc314d18a75bde18984494df3a0c0806f4dc45924e",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "workflow specs are JSON-only and YAML files are rejected",
+      "occurrence": 1,
+      "sha256": "21c8d92496431df0f04b04b17da9c71ee2f4bc7685c5ad3269b4f830149c07f4",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "workflow registry resolves bundle specs and sets correct workflowRoot",
+      "occurrence": 1,
+      "sha256": "75916b1adfa58413dfa8e1e992371fe9d793abc55f6b867720b234cdad0ed7e8",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "workflow registry fails closed when flat and bundle specs conflict",
+      "occurrence": 1,
+      "sha256": "ca9d4ae4d0df7260e2d6836a9796b2aa6039f751c9a0610a8845fa02b18013d6",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "workflow command completions and run arg parsing preserve task text",
+      "occurrence": 1,
+      "sha256": "325ab8b286915561ce2a4fb89a0760f93e7b73c432caa3be301a2c0310bbddcc",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "natural-language workflow tools list and start workflows",
+      "occurrence": 1,
+      "sha256": "5feb4301c9e2721582506640bfad29d0fcc1664dc5d86e880cb2024a0bdc3e5e",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "natural-language workflow tools list and start workflows",
+      "occurrence": 2,
+      "sha256": "5feb4301c9e2721582506640bfad29d0fcc1664dc5d86e880cb2024a0bdc3e5e",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "deliverMissedWorkflowFeedback does not auto-trigger an agent turn on startup",
+      "occurrence": 1,
+      "sha256": "7ab17ddbd59a80297fb17e34aa26730ddbd99d4b110d15f6780ced590b533e16",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "workflow extension skips missed completion feedback during session reload",
+      "occurrence": 1,
+      "sha256": "fdcc647484b87c1904ef7272281daffcabc3e0dd9a002fb49067e396fcaaf48f",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "notifyUnfinishedRuns labels degraded failed runs as final rendered",
+      "occurrence": 1,
+      "sha256": "f609cd81c4fe5499fd6f0fc0717544ba1201c112d8284d3a96b8eeacd1d05d2b",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "notifyUnfinishedRuns never notifies runs with mock provenance and formatStatus annotates them",
+      "occurrence": 1,
+      "sha256": "3c7704bcf767a03c2ddf4434157cfcf0d2fbd38344fe1f09fdaebe578faa3842",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "notifyUnfinishedRuns re-notifies only runs whose own state changed",
+      "occurrence": 1,
+      "sha256": "7a8f3fadfb0b3aa06aceea63dba1cccda05e1e04d4f5afb57f558d480b124cb3",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "notifyUnfinishedRuns migrates legacy composite notice keys without crashing",
+      "occurrence": 1,
+      "sha256": "d1928bfdb248e74a70db0f81779d5f4e1f160acf169c5ad3fc107e938d9925ee",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "deep-research verification tier planner enforces sanitize schema caps",
+      "occurrence": 1,
+      "sha256": "5f508e7b28e755fe82df4a7d6221bfd3b21ee13a3fba80344d15283d61d4d2d0",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "deep-review report schema requires identity evidence for findings",
+      "occurrence": 1,
+      "sha256": "9a7666a469fe7d304ae06ca2c0cc249c5d2d6fb79d33cf716efc747feac98ffd",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "minimal JSON schema validator enforces control schema subset",
+      "occurrence": 1,
+      "sha256": "3a6a5b03b84750944d626850b6b75fc2b3c9d88da86f7593794e6e372ae7a49c",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "workflow TUI renders health in task list and detail",
+      "occurrence": 1,
+      "sha256": "a1e4ebe85337a5c83994f8ea6f3e305de99ab689d81e40294485f879b72cf16f",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "workflow TUI renders selected run health without status-command detours",
+      "occurrence": 1,
+      "sha256": "f5737d6fa3752265c521098ed77b8d06c05b4a8fa833505d2767584b7e516ca7",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "workflow TUI renders likely-stuck guidance and keeps narrow widths bounded",
+      "occurrence": 1,
+      "sha256": "634a45c66e31e1a5fc78a12667f54f83a48bd920d21a98c74c69dcb0e5d98c75",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "workflow board render clamps ANSI and wide glyphs to viewport width",
+      "occurrence": 1,
+      "sha256": "40b65cddeaf49b13358bbc3c2f053d3d3e4b6da12f6fc251bf9cfb69c89d6a8b",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "workflow-guide scaffolds load and compile without warnings",
+      "occurrence": 1,
+      "sha256": "7cb9c5aadadacfb26ae1a5f883a99e64fc429a139308ef5bc1e9bde0810aaf88",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "formatRun omits stall warning when task transitions are recent",
+      "occurrence": 1,
+      "sha256": "3b9c2c4c6cc7043219f06637f491c80243455612cb6e10fd9ef22403bde92cf0",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "workflow board shows stall badge on run rows and detail header",
+      "occurrence": 1,
+      "sha256": "08ff2bdd0ad2db04f2ded85d697cd2a2070cec14410d8736cb7f545143355198",
+      "domain": "authoring-interface"
+    },
+    {
+      "name": "workflow retry limit overrides accept zero and reject malformed values",
+      "occurrence": 1,
+      "sha256": "1c77bd717b3fdb536e3eb6e928d370088a5d3e1d956a395c6134403b40debdc9",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "compactStrings trims, filters, and optionally preserves duplicates",
+      "occurrence": 1,
+      "sha256": "6439b950b321bc0e134423dbcd0aeff46fad1d03d7392f297fd37fa4a1780d19",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "blocked dependencies skip only dependent pending tasks",
+      "occurrence": 1,
+      "sha256": "f7519c1ba48cd4c40aef278c9ef4755550944f136a6084312a631dbefbf84282",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "fail-fast flags on cancel pending siblings and interrupt running siblings distinctly",
+      "occurrence": 1,
+      "sha256": "ac16d9fea089c399244a33dd23d741ab63ee4e92c6c5cff8999019974726d9ed",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research tiered verification variant is path-ref opt-in",
+      "occurrence": 1,
+      "sha256": "2434f3a034531a38456de405d9487635bdb1389cb55f64e515bed7ba9d9832fe",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research verification candidate sanitizer demotes non-verifiable candidates",
+      "occurrence": 1,
+      "sha256": "4285d463c32a766a90413950f8c364dc2ef2fb14b82f9fa5b8d0e0ca0f3e2abd",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research verification candidate sanitizer rewrites mismatched and overclaimed candidates to source atoms",
+      "occurrence": 1,
+      "sha256": "e54796c78f9e63b4085d4c44b806cc99741e82f505a9cafd64fed24d6c851a43",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research verification candidate sanitizer preserves source-stated edge claims",
+      "occurrence": 1,
+      "sha256": "9ffa90c2078dd41dae9a99bb4eefc6d3737faf6b7081f554864d0e5c2c7d072d",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research verification candidate sanitizer rewrites only quote-backed broad claims",
+      "occurrence": 1,
+      "sha256": "5243438faaebba6c675991b27bf353bf24fc7bcf8837f0f88540d540f03ff0fa",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research verification candidate sanitizer rewrites imperative multi-step recommendations",
+      "occurrence": 1,
+      "sha256": "ccd12104ca5f883d27d0235f4813aaabf2ce8de462e677980819ebd46bf153a0",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research sanitizer uses Unicode tokens for Korean quote-backed rewrites",
+      "occurrence": 1,
+      "sha256": "1c251d46d6715afbe260c885c74707df723d39d1fe2082b91c782d342768508f",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research sanitizer demotes url-only candidates and promotes source-backed preserved claims",
+      "occurrence": 1,
+      "sha256": "c299a1b8bcc0e47792e20a1c961adca3a8f1230d50143b775c75dbbc888cc7e7",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "dependency-aware skip lets explicit partial sources bypass unrelated previous failures",
+      "occurrence": 1,
+      "sha256": "c2da8de12baa59793c57f6650e20010e4feb3ad3323e7234c6ae77d6fed62a9e",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "foreach item interpolation preserves dollar replacement tokens",
+      "occurrence": 1,
+      "sha256": "b5f7c313e7f39ff34df267ec31d26b90088415f249af234a571c11b86095c10d",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "experimental speed flags default off and parse explicit truthy values",
+      "occurrence": 1,
+      "sha256": "4112833831a83c3ae9de351701d9245c9ce6a210559986426b0ff766d9d1090b",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "adaptive live workers cap growth at configured live-worker limit",
+      "occurrence": 1,
+      "sha256": "6a1b972c197711bf27dda3a53baa8b1ecd3867f6c99b323575d96d74389dd1d1",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "successive foreach materialization keeps task ids unique",
+      "occurrence": 1,
+      "sha256": "a1307205437596fc94c746a30c5cea6ed6d12265200b4daa23f2d09d2cb1bf0a",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "loop compiles to a loop stage record with no premature child tasks",
+      "occurrence": 1,
+      "sha256": "b4c2976c90fcd1f694a00ccd1d8eae87a06e0938044da6e6d1c09211437921b6",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "loop until satisfied after a round marks loop completed and stops materializing",
+      "occurrence": 1,
+      "sha256": "4833723a72b01dc397184e167ce70be346a8e32f188db0740e753eb8de910e3d",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "loop until unmet materializes round 2 with unique ids and carry-forward context",
+      "occurrence": 1,
+      "sha256": "828b6ed8c14ddacdb926bec52522375b1c80f72c2d6f57a3b08e8e821d32d12f",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "loop no-progress stops early with stopped_no_progress",
+      "occurrence": 1,
+      "sha256": "9e616c9b787741f6d193f0c2cf8c13d88953419d51a3b3ab5bd0e0e1bffcfeba",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "loop invalid progressPath value records a warning",
+      "occurrence": 1,
+      "sha256": "d1fa3ff8360a8ac65ed320e23bdaa4a87c2aab3f9b56db963fa12c69fa264120",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "loop explicit missing progressPath records a warning",
+      "occurrence": 1,
+      "sha256": "52aaea50eb94e589a21058b68399fe401efc66130fb4b93bab0e185af8b35253",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "loop maxRounds exhaustion materializes and waits for onExhausted",
+      "occurrence": 1,
+      "sha256": "8bb87b00d1d93574f527f9a11572039e65cb8ce6a6d556e0dede22fb404a3eff",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "loop onExhausted context includes bounded prior round check outputs",
+      "occurrence": 1,
+      "sha256": "b19ae7092e3fa852453791d65584ea0f303c5d12b02ad284706b582e39722d86",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "loop until evaluator supports equals notEquals lengthEquals all and any",
+      "occurrence": 1,
+      "sha256": "628b9a13c77227dfbd14f592e9619c0d8b744e4cfd583b2ba4cc44a31cdc275e",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "loop completed task with unreadable result records a warning",
+      "occurrence": 1,
+      "sha256": "08ba592b73a7a5e98de1120f3afca831f254c748087a01b5f6e29703dd98108b",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "structured contract validator checks nested paths, arrays, and caps",
+      "occurrence": 1,
+      "sha256": "75ab66f9c578c184e1f1095a45e92308010477d26ed5c6c807ccb67ed7a54a50",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research claim evidence gate downgrades unsupported verified claims",
+      "occurrence": 1,
+      "sha256": "a441a75cdc39f6777c2a1c2185f9893ae7b087aae69f309567209a6428e42067",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research normalize input packet compacts research context",
+      "occurrence": 1,
+      "sha256": "1f46e1f915ba01fa2bb92b50d7029637e1745dc99ca64c714c734fcf51ca3110",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research normalize input packet preserves RQ budget and timeout gaps",
+      "occurrence": 1,
+      "sha256": "b1f5b7da7ecb89b391bf27c7220abd92bdb684b2e6b928d9a6275b88f15c52cc",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research normalize input packet preserves slots and flags precision risks",
+      "occurrence": 1,
+      "sha256": "4acdf9d4f340ec7207bc343018f27b8cb4bc26e65d951bb7e0b3eed790c67267",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research normalize input packet distinguishes P1 gap and recommendation risks",
+      "occurrence": 1,
+      "sha256": "9018c2883e8ccba5f52207c911c663d540b5293168e9e23227bfc14954e8948d",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research final-audit packet compacts deterministic ledgers",
+      "occurrence": 1,
+      "sha256": "8c14a8456427a8661a312364bbfd3c8a4fae44470bb0cc88183b5e8ab8f57cfb",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research P3 final-audit replay fixture preserves guardrail floors",
+      "occurrence": 1,
+      "sha256": "268a069065c0ba0a0d4a515432c36159f2ebd1877f79660c9629a4455292edf1",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research renderer emits evidence-backed report and sidecars",
+      "occurrence": 1,
+      "sha256": "eabbefb2a4caffdb1ea232f3b1128d977cf263c17632293c97de06ebce4f4bfd",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research renderer joins synthesis overlay against packet ledgers",
+      "occurrence": 1,
+      "sha256": "ffdc60dc72b72c93ffa0ef171ea7e01deae87f27b2451904d2843d9220d32637",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research renderer does not promote unverified fallback findings",
+      "occurrence": 1,
+      "sha256": "0db04bc24ffb54a97efe68e2dc22460d50736ee8178de4019c243b9d9127802c",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research executive renderer preserves object gaps zeros and recommendation labels",
+      "occurrence": 1,
+      "sha256": "3867b793b57311f4033f3e54919c244fed45131a57dbda55103a5391284b110f",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research renderer renders over-cap evidence without omission",
+      "occurrence": 1,
+      "sha256": "93fd97f666aed07223dc3cc6a6302e6f245e95d0a976fa5f78bf893aa355bfcb",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research executive renderer fails gate when truncating open gaps",
+      "occurrence": 1,
+      "sha256": "21905345ad62db54e9614e1d11bfa286bdfa4806074907e788c13128384f75c3",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research executive renderer blocks without audit control",
+      "occurrence": 1,
+      "sha256": "da4ab6b6f20d7be9423e88adc59d83f4dfb9d4c5915fff9c9e6de5eeac456eee",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "refresh surfaces poll API errors after processing sibling tasks",
+      "occurrence": 1,
+      "sha256": "5716a59da490fd393022dbb97a744dffac4ff17cd8f8a2212283070d342e8c81",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "refresh persists telemetry-only null status polls",
+      "occurrence": 1,
+      "sha256": "c00986754ec5f5d0b0c31d1e5eeb0a9cd79b5c5c225bf22c5cdf3abc007b5042",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "workflow run metrics roll up provider-reported usage without mutation",
+      "occurrence": 1,
+      "sha256": "07e344c82ebd823d1e24211ac31a70cfe2b4c650145f47b329baa1d2ebd6396a",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "workflow run metrics treat local support tasks as zero provider usage",
+      "occurrence": 1,
+      "sha256": "1ef34ea3e54875b470bd3136e3bb3ad257412c8e9338ef73bf6492a7f66b34d1",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "workflow run metrics reject negative provider values and keep partial observed sums separate",
+      "occurrence": 1,
+      "sha256": "6a62d69b0060792c74693547f591e2dcfc8545de404bf00cdfb7303abfb80ef4",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "workflow run metrics do not infer missing prices from token counts",
+      "occurrence": 1,
+      "sha256": "17fbecff89725cf7ee15a2c5cc8a02bfffd459c9b58ac32e7621a264574e5f73",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "refresh fails fast on permanent provider input-validation model failures",
+      "occurrence": 1,
+      "sha256": "c4d655ea49cdf783b404dd8dab72aba3d4ce28983a79e941b4b16388265b557d",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "refresh fails fast on maximum-length provider validation with 5xx-sized limits",
+      "occurrence": 1,
+      "sha256": "94167c07fa0dd12f04d77b69f16a0e8d5434d3428189a19f378fe60341f51806",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "refresh retries truncated-stream model failures",
+      "occurrence": 1,
+      "sha256": "04cc25e7f20b6bdbab576ac0dc9880eec03c271f63ea17a0fabc731f86472711",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "zero transient retry override fails the first transient model failure",
+      "occurrence": 1,
+      "sha256": "5d31656fbb69db33c908775975608abee805318471f6e8c0a6780f38996f463f",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "refresh backs off zero-output rate-limit model failures",
+      "occurrence": 1,
+      "sha256": "d9ecf795e137759b559e59fd75280938cf6711cff6dd91abddc24aecab630479",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "refresh parses rate-limit Retry-After units",
+      "occurrence": 1,
+      "sha256": "f4a4edc92a8c42bc8dd1e7d3ad812e525d80c99989f8aceca0b59dbbf7d28a65",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "refresh detects rate-limit text from stderr",
+      "occurrence": 1,
+      "sha256": "ac9fcd4b8b9eb61b9dd8ddc605f75b3ae9fd4a1ee46a2b3b20326e414a7f395e",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "refresh does not retry deterministic boot or config failures",
+      "occurrence": 1,
+      "sha256": "fb2345fddc5b1fa47ddf875cc875ba8971949ae0d6f25c175c365446d326de49",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "runtime model resolver defaults to current model and thinking",
+      "occurrence": 1,
+      "sha256": "0f68fddee43c4029524da3983ee2fbfea7f11d8c602be9f0463767eba4ba489d",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "runtime model resolver asks before choosing ambiguous enabled models",
+      "occurrence": 1,
+      "sha256": "65b78668a36d181de3bb238183db17d9bfc057e1a8f23118045a65fa299958e1",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "runtime model resolver asks before choosing an available model when requested model is missing",
+      "occurrence": 1,
+      "sha256": "5f56b15a5ab819bf020ade0914010bbb1e2f31d9a41bb1213816cfd6160b1cc0",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "runtime model resolver falls back unsupported thinking without UI",
+      "occurrence": 1,
+      "sha256": "23e4c5ab70e9d82ddd2d15b7893ac591318d2b1baaaef0105d9355bf062e3cea",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "runtime model resolver refuses unsupported thinking when only higher levels are available",
+      "occurrence": 1,
+      "sha256": "56c51fbd229f0568327b19411206e0cf0661f2692f7e90054994e449094d72e5",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "runtime model resolver asks before changing unsupported thinking",
+      "occurrence": 1,
+      "sha256": "95de8425755980c6205252205730e2f71175b5c9ca51b990d4c2e646c8f6c570",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "runtime model resolver refuses ambiguity or missing model and falls back unsupported thinking without UI",
+      "occurrence": 1,
+      "sha256": "9db7fd9e35c9c75b4148be86fc7d3430e1d2dee9f0ac72ee2acca27665efae69",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "run boundary requires runtime task",
+      "occurrence": 1,
+      "sha256": "9b1b5470847c91f663eaec569c6466995bdaf01a4b6fb07282ed151f1fd3687a",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "resolveFlowsCwd finds ancestor workflow state root",
+      "occurrence": 1,
+      "sha256": "d66342bf3e1a407c4df299efaa1ac76b6eb737092006bfc73bf89f462d384a17",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "failed run with completed final stage records degradation and formats it",
+      "occurrence": 1,
+      "sha256": "f85a263eafdd0ec2c5e556f1b94248f68ae57adc5713b759d734899e24b422e6",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "fully successful run has no degradation field",
+      "occurrence": 1,
+      "sha256": "ba935ba06d02c15c6d184e98e697560e935bab46bcdbcd13ee8d450a1fbda144",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "run that failed at the final stage records no degradation",
+      "occurrence": 1,
+      "sha256": "8a82a5c59a87a366dfe8ebc9d6d26bc9b7313a6b47674bb6027b003f3eb773c3",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-review finding-pipeline dedups by file+title-token overlap and partitions verdicts with severity join",
+      "occurrence": 1,
+      "sha256": "8246877a23285a7289f8085e978b83b48c07532d9186fd1f91c2c13e9f1af8b4",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-review finding-pipeline preserves structured locations through dedup and partition",
+      "occurrence": 1,
+      "sha256": "424d28a323b42eecc53745a593748b29eb3373fdb6a6b0be1199afd7c34bb3a4",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-review finding-pipeline opt-in batch planner flattens results with strict membership gates",
+      "occurrence": 1,
+      "sha256": "4b5f4a44ef10761d7a04d49f415b588feec2f379aa3d57d37301eb6c7880f076",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-review batch partition routes string evidence rows to NEEDS_HUMAN",
+      "occurrence": 1,
+      "sha256": "379d20978193ed0d25da52231e16b6e06943088560df675daec4b4597e0e146b",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-review batch partition routes non-string evidence array items to NEEDS_HUMAN",
+      "occurrence": 1,
+      "sha256": "8b48c9852cc0caac80a044b43ac31412b569c0b8cb572f94c7400fb203395ce8",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-review batch partition routes missing or invalid evidenceSourceType to NEEDS_HUMAN",
+      "occurrence": 1,
+      "sha256": "baab8ded3247f6ded7b97d30fb48c6eac0b54b85dc1484048618aee6ffa71915",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-review batch partition demotes summary-only KEEP verdicts",
+      "occurrence": 1,
+      "sha256": "de4653815070d44d4e4e45def915528075424b5e6d6057bbba21b16c72d0f15a",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-review render-review-report emits finding cards from partition ledger",
+      "occurrence": 1,
+      "sha256": "d505f1bd747d137e4190a6886bffc8d17e8f4d925323787772af9eb39f5b8d00",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-review render-review-report surfaces count mismatches and missing partition",
+      "occurrence": 1,
+      "sha256": "64cfc41510d83f3efb722aab691d43e695e1dbdc39d1e328a5ed6f8294774fb9",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research claim-evidence-gate enforces structured evidence, rejoins identity, and partitions statuses",
+      "occurrence": 1,
+      "sha256": "e3c0c5977048fe0b9f1319bd2eb530efbd32bb6fdb8416e1e58017dd403a3932",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research claim-evidence-gate enriches downgrade reasons without changing strong-evidence claims",
+      "occurrence": 1,
+      "sha256": "7d7735506836149c1c8447229ba394a4d5470a95f3c8d9e51da44187ab82ddae",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research claim-evidence-gate does not backfill near-miss source URLs",
+      "occurrence": 1,
+      "sha256": "e55e77905854db68d085d6a0bd0589ce69b195698cd68dc54926ca5fc1218da2",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "package and deep-research verification ontology canonicalize blocked outcomes",
+      "occurrence": 1,
+      "sha256": "c7c2dd005099076b742b969b01b856291cbc4509c45213d7710bdd4c16961731",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research shadow selector reports would-skip without skipping verification",
+      "occurrence": 1,
+      "sha256": "53c7a188c08cf097411a19b9780a767eb45adb6eed20fc9b824b53a9a381ce79",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research shadow selector marks clean shadow skips eligible for canary",
+      "occurrence": 1,
+      "sha256": "8d55ea92246092364f60ea285cd8058a0ad6903f5af4c9eb4e9f9131a226f886",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research shadow selector blocks real skip readiness on audit integrity failures",
+      "occurrence": 1,
+      "sha256": "b875887e3ced8476464f8713ee3492e4bc703852fa78330d853af569e3fe6a9a",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research verification tier planner splits by verificationNeed with position fallback",
+      "occurrence": 1,
+      "sha256": "df65bc667a062b00670331436c4f6a3c3013b43f8eb6071a8ca64607750b85ca",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research shadow selector tolerates malformed candidate entries",
+      "occurrence": 1,
+      "sha256": "8bf4df20f06f22011d6cabd96589ffdea4860b64b70071e130ae53596bf57d3e",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research claim-evidence-gate blocks unattributed batch rows without source status context",
+      "occurrence": 1,
+      "sha256": "59efdda93cb72f5f2089185ef0cd39c407d34e3ee0190fada4a16a35dd0756d9",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research claim-evidence-gate allows compatible source evidence and catches cross-source contamination",
+      "occurrence": 1,
+      "sha256": "0ef9bd9e1f3e825d1f5303a14e79cfd3659ebbbd545764805f39c8028c99d078",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research claim-evidence-gate extracts candidate identities from evidence rows, sourceUrl hints, and local paths",
+      "occurrence": 1,
+      "sha256": "030fe54190c8954d50e742853ec2dc3e5c3ee879ecac387b41337c64d99f6591",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research claim-evidence-gate routes extra corroborating sources to review unless explicitly allowed",
+      "occurrence": 1,
+      "sha256": "37bcaf12a2cb79e3d6346e83c5b0d72e05afe223959f4f4b191ee77765e83421",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research claim-evidence-gate allows same-host evidence only with explicit overlap",
+      "occurrence": 1,
+      "sha256": "ebd7cb132509eb54f2e7854bc812201aa1cd1d9bfd795239fbc12df8a87e34e4",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research claim-evidence-gate downgrades refs:none multi-claim batch rows",
+      "occurrence": 1,
+      "sha256": "26586dc591832c4d0d6677488fb67699db0ed7d2de2f94ad2b446005b0f374f6",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research claim-evidence-gate canonicalizes candidate ids and verifier integrity",
+      "occurrence": 1,
+      "sha256": "a8fc2e2c50360dfe06e5d7c69ee62205b4f067bf07f57153434fec8d0a7b0889",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research claim-evidence-gate preserves row-shaped results and clean batch joins",
+      "occurrence": 1,
+      "sha256": "63dedd036998dda695b417afb53478f86985809cf21eed2f7c0e5234e4ac85c2",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research claim-evidence-gate blocks batch rows outside their source batch",
+      "occurrence": 1,
+      "sha256": "9c63377fe868b40fdfbc2dd750f3ee2649b4ef60b9e7a927eaa1d5b00a7ce4d0",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research claim-evidence-gate marks clean verifier joins eligible for batch canary",
+      "occurrence": 1,
+      "sha256": "f86e6151bd3b9f56bc2e6624d2d48ca52e67b755193c48d87c88364a37d67425",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "deep-research claim-evidence-gate partitions verification_blocked separately",
+      "occurrence": 1,
+      "sha256": "c827eff88f7f0ba71d8e5d1aac7f0829d34b718ccc54ff8b20f2074c32a11d24",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "workflow progress health classifies fresh long-running audit as long-tail active",
+      "occurrence": 1,
+      "sha256": "43195948bee3becdafa1f8160e7f9970ee2d7cf028868eee5653844bb4a4c50a",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "workflow progress health classifies reviewer fanout as long running",
+      "occurrence": 1,
+      "sha256": "3cd618b66cfd769f3c38b21fdbfe3de86240b03b27ff643c7a6dddb0a832787b",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "workflow progress health surfaces failed fanout before running siblings",
+      "occurrence": 1,
+      "sha256": "ebff662fa3f86eae7724cabdec7d3fd5306fc5e67d76e6b2b4defceb81241d36",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "workflow progress health treats runtime budget overrun as resumable",
+      "occurrence": 1,
+      "sha256": "5e4e039b1f2437e0946d9ecf19e4e58b874fdb1a62bf5f13778c45fc01ff3715",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "workflow task list orders problem tasks before completed tasks",
+      "occurrence": 1,
+      "sha256": "09061f2c932891545ec8b7ea9fce08404910314b7316b80110d1cfba55bc13f9",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "workflow task selection follows task id after problem reordering changes",
+      "occurrence": 1,
+      "sha256": "62354a3cfc3268593ea9b3204ed11d5381d5c942ec9965a3e9f47cb900b42a6b",
+      "domain": "core-runtime"
+    },
+    {
+      "name": "dynamic controller engine guard reports stale missing runDecisionLoop wiring",
+      "occurrence": 1,
+      "sha256": "f2f8eb89c396d2db08aa8a60e4ac177d5f1fcb13caaae0e92b7f841eca53443e",
+      "domain": "dynamic-runtime"
     },
     {
       "name": "artifact graph schema accepts dynamic stages and validates helper refs",
@@ -754,154 +2350,16 @@
       "domain": "dynamic-runtime"
     },
     {
-      "name": "artifact graph loader rejects unsupported controlSchema keywords",
-      "occurrence": 1,
-      "sha256": "241ace9ead65ba93b060c3b0f29eedd1b57ef845e151fb8655b85ed0f932fd9a",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "artifact graph loader rejects missing controlSchema files",
-      "occurrence": 1,
-      "sha256": "e80bfb0c96e9939e3d1834ec8f874c3da5a8a723c4f2d7f1be372a30148bc9a2",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "artifact graph schema rejects unknown output fields and invalid required reads",
-      "occurrence": 1,
-      "sha256": "fed7606f07d8b572ffa354b79480fe0a6b2c7f0c20b749be9d3765f99ce5ea55",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "artifact graph schema enforces launch-time invariants",
-      "occurrence": 1,
-      "sha256": "9f08d80518fc4982a54d15dfd9c9545344397dddb8b20be8011b5f2e1763d886",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "schema accepts bundled artifact graph workflow fixtures",
-      "occurrence": 1,
-      "sha256": "bf6e2b04896b20ffb25be6acfde60776364d0b52a9e53042f8501c344540bfc7",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "bundled artifact graph outputs declare control schemas",
-      "occurrence": 1,
-      "sha256": "98efc24adb989639690d257618af504f0f6e370662061caf6f6f7c6f443eeb71",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "bundled deep-research compacts audit packets before executive final",
-      "occurrence": 1,
-      "sha256": "750a488e7b029586733863ef381faa4ae6326e382f336992e05cc78ad587160e",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "deep-research batched verification variant is path-ref opt-in",
-      "occurrence": 1,
-      "sha256": "caaf9accdc6971d7f30c23090b36e0c9f60a6293fadf3d03fe93ddfb8f456964",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research tiered verification variant is path-ref opt-in",
-      "occurrence": 1,
-      "sha256": "2434f3a034531a38456de405d9487635bdb1389cb55f64e515bed7ba9d9832fe",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "artifactAccess none omits workflow artifact runtime affordances",
-      "occurrence": 1,
-      "sha256": "55b657474e6ddcddbf73537769ea71d849f0fbbc015d954e45bfa904136cc5c6",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "artifactAccess none rejects explicit workflow_artifact tools",
-      "occurrence": 1,
-      "sha256": "2be83bcc732618839ff3c9033f4981a7574157517385ca61a8c5c3ee34c1e2dd",
-      "domain": "artifact-web"
-    },
-    {
       "name": "artifactAccess rejects dynamic and support stage policy scope",
       "occurrence": 1,
       "sha256": "f87d23295abe0d6d0ab1255e63443ddd834c81d2dccdc4ba5e4f7de299af6d8d",
       "domain": "dynamic-runtime"
     },
     {
-      "name": "ambient runtime defaults do not override bundled stage thinking pins",
-      "occurrence": 1,
-      "sha256": "a9f285acb8bf3334c91f332d3aca25526739725a3f0aaae7ee78155fb9490d81",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "explicit runtime thinking overrides bundled stage thinking pins",
-      "occurrence": 1,
-      "sha256": "67305405588815ab28563a3acba618e2dd2b92b0274842765b9a23fd7d2be550",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "deep-research verification candidate sanitizer demotes non-verifiable candidates",
-      "occurrence": 1,
-      "sha256": "4285d463c32a766a90413950f8c364dc2ef2fb14b82f9fa5b8d0e0ca0f3e2abd",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research sanitizer clamps preserved claims to schema cap with diagnostics",
-      "occurrence": 1,
-      "sha256": "6f7e2f377ddbbb380126c8356835a243bfacb25ed23b60d277461a25c5a3372c",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "deep-research verification candidate sanitizer backfills sourceRefs from web source cache",
-      "occurrence": 1,
-      "sha256": "d429d9a2367fd5fbb773d55405a2583c962059ebcfadb747a5c8d4b35c6f5495",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "deep-research verification candidate sanitizer rewrites mismatched and overclaimed candidates to source atoms",
-      "occurrence": 1,
-      "sha256": "e54796c78f9e63b4085d4c44b806cc99741e82f505a9cafd64fed24d6c851a43",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research verification candidate sanitizer preserves source-stated edge claims",
-      "occurrence": 1,
-      "sha256": "9ffa90c2078dd41dae9a99bb4eefc6d3737faf6b7081f554864d0e5c2c7d072d",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research verification candidate sanitizer rewrites only quote-backed broad claims",
-      "occurrence": 1,
-      "sha256": "5243438faaebba6c675991b27bf353bf24fc7bcf8837f0f88540d540f03ff0fa",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research verification candidate sanitizer rewrites imperative multi-step recommendations",
-      "occurrence": 1,
-      "sha256": "ccd12104ca5f883d27d0235f4813aaabf2ce8de462e677980819ebd46bf153a0",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research sanitizer uses Unicode tokens for Korean quote-backed rewrites",
-      "occurrence": 1,
-      "sha256": "1c251d46d6715afbe260c885c74707df723d39d1fe2082b91c782d342768508f",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research sanitizer demotes url-only candidates and promotes source-backed preserved claims",
-      "occurrence": 1,
-      "sha256": "c299a1b8bcc0e47792e20a1c961adca3a8f1230d50143b775c75dbbc888cc7e7",
-      "domain": "core-runtime"
-    },
-    {
       "name": "non-dynamic artifact graph compile/run golden preserves static structure",
       "occurrence": 1,
       "sha256": "b2cf0fa39741d3e49fe810b2ca43ff00adf36fc7b4cc843d21648c5b14d660f0",
       "domain": "dynamic-runtime"
-    },
-    {
-      "name": "schema and compiler accept partial sourcePolicy on foreach",
-      "occurrence": 1,
-      "sha256": "ee8ae41388954a5f70f5de64d3e2ac86d13fb7d4ea0184344cfaab7cabca788d",
-      "domain": "authoring-interface"
     },
     {
       "name": "schema and compiler accept opt-in streaming foreach refs",
@@ -920,222 +2378,6 @@
       "occurrence": 1,
       "sha256": "c5cb4e351adedeb265c1bba9226780ddbb1ca3b561c887d0f25bb0cb087276f5",
       "domain": "dynamic-runtime"
-    },
-    {
-      "name": "compiler warns when readOnly stage keeps mutation-capable tools",
-      "occurrence": 1,
-      "sha256": "1c5c4c13dd51597b7d91c96899a8f8575a1dae011b864505cfcbbc26d56852b1",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "compiler does not warn when read-only stage uses only read-only tools",
-      "occurrence": 1,
-      "sha256": "97c9851e4bd20b638c52997400876a70332f625c95e4fe4ad8159a1d6680f427",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "compiler treats explicit empty tool allowlist as no-tool safe",
-      "occurrence": 1,
-      "sha256": "b97793ab4534690fb1ac299625a9125aa972943d85097a12ec8a968a834dc17c",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "compiler warns when a foreach path is absent from the source control schema",
-      "occurrence": 1,
-      "sha256": "dba50a773826af6410316cca005bc2fbc5ba0aad1b823fc39d91b7e72ae6172c",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "compiler warns when sourceProjection paths match no source control schema",
-      "occurrence": 1,
-      "sha256": "ea457f2ac15d625fb2ac10fe3f9cefdd906553a8d8bb1cbec389b4b7f924959c",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "compiler warns about workflow-quality risks before runtime",
-      "occurrence": 1,
-      "sha256": "a8207c9f9b099af871b84b548cc4db2a4d5c0c694c146ee2029ee6d324a8e857",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "compiler warns when complex control fields lack prompt JSON skeletons",
-      "occurrence": 1,
-      "sha256": "79708a48fd35fe9a3a301930a466518cc1b45abab231ffd06755759799b101c9",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "partial foreach continues scheduling after an item failure",
-      "occurrence": 1,
-      "sha256": "be8f23763938e4261744d8be95f3811b3d99761e1093e9c258075cbf8be6378a",
-      "domain": "engine-store"
-    },
-    {
-      "name": "dependency-aware skip lets explicit partial sources bypass unrelated previous failures",
-      "occurrence": 1,
-      "sha256": "c2da8de12baa59793c57f6650e20010e4feb3ad3323e7234c6ae77d6fed62a9e",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "foreach item interpolation preserves dollar replacement tokens",
-      "occurrence": 1,
-      "sha256": "b5f7c313e7f39ff34df267ec31d26b90088415f249af234a571c11b86095c10d",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "experimental foreach cache-stable flag moves item payload after stable instructions",
-      "occurrence": 1,
-      "sha256": "9cca11f275c7980ad266db055195265a31d1cc062b16be31e1261f680db307de",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "experimental speed flags default off and parse explicit truthy values",
-      "occurrence": 1,
-      "sha256": "4112833831a83c3ae9de351701d9245c9ce6a210559986426b0ff766d9d1090b",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "experimental launch ramp shortens default release delay telemetry",
-      "occurrence": 1,
-      "sha256": "3cc16b3f4f442d8a7a2847f43031df7ac0d2061b721bfb6141d08a9a57bc4b68",
-      "domain": "engine-store"
-    },
-    {
-      "name": "adaptive live workers flag off keeps configured launch controls untouched",
-      "occurrence": 1,
-      "sha256": "ab9abe422a31d7924d410a830a30ebc89ff3d8fc11f4f746bd58e0e5fa9c40a7",
-      "domain": "engine-store"
-    },
-    {
-      "name": "adaptive live workers grow limit after healthy completions",
-      "occurrence": 1,
-      "sha256": "eb01a42c30e3e82b6f7955e463a0a2520875c7911578aca0e8175b678cd2f0a5",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "adaptive live workers cap growth at configured live-worker limit",
-      "occurrence": 1,
-      "sha256": "6a1b972c197711bf27dda3a53baa8b1ecd3867f6c99b323575d96d74389dd1d1",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "adaptive live workers shrink limit on degraded completions",
-      "occurrence": 1,
-      "sha256": "b3a2acb2bb1cef36c6d62ee8c550b53d6670904b3f859f3010e275752c6545c9",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "adaptive live workers shrink on shared rate-limit backoff",
-      "occurrence": 1,
-      "sha256": "b7de3f4e9996daaa51e77c5014aedc8b80a9ae87f3e603083d89816047c0b75b",
-      "domain": "engine-store"
-    },
-    {
-      "name": "simple JSON path reads own properties only and supports safe array selectors",
-      "occurrence": 1,
-      "sha256": "52c97adc33dc054af916ac36759eaffdd9ecfc0f975bcf1e92bd4761c92cecea",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "compiler injects runtime task for single stages only",
-      "occurrence": 1,
-      "sha256": "15f3118d6a8915e2c6da6e18c5695c2fd1fe50f4beba15089cd5bc31e14ad263",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "compiler serializes workflow input compactly in prompts",
-      "occurrence": 1,
-      "sha256": "07ad7de697d6eeff494f6c2ef2d6f1318ef92c1594adc167679367c3aac7eabc",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "compiler omits runtime task injection from foreach templates",
-      "occurrence": 1,
-      "sha256": "d4c2a269fb9a1d969f3d76531515625a6b47e9b691cd4a698938de6052769917",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "compiler injects runtime task into foreach and reduce stages that opt in",
-      "occurrence": 1,
-      "sha256": "7a84971456e5103f506dfa333693f3b11243b3f193b8980f76e6dad4eacb9897",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "compiler applies explicit stage from dependencies and stage runtime defaults",
-      "occurrence": 1,
-      "sha256": "a709e677c20350227b62e60f758edca40b12ceaf914cc341a864f4481fbd639d",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "compiler separates order-only after dependencies from source context",
-      "occurrence": 1,
-      "sha256": "9442e1cf958230c5ff906355f68693f993d5d5394efc9a479d7913e39588dbc5",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "compiler treats empty after as an explicit parallel root",
-      "occurrence": 1,
-      "sha256": "aa162074ee80368e403186f2d54112bbad7be445b77efbd2f462b55080f56223",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "compiler lowers dag containers to namespaced child tasks",
-      "occurrence": 1,
-      "sha256": "548e12273c6ef73977f4c2d44748cea902cf5347894ef4fb564f6fd10e059889",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "compiler lowers foreach and support children inside dag containers",
-      "occurrence": 1,
-      "sha256": "a15e1d84a3de17828dc684591b492f11f84d716290a8728b5e8972101a2fc951",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "compiler lowers nested dag containers with composed namespaces",
-      "occurrence": 1,
-      "sha256": "e6efc3450ad634f73aec336b142d40e4c6d9da9795add9177e5e438d50876413",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "compiler keeps dag namespace prefixes distinct from loop ids",
-      "occurrence": 1,
-      "sha256": "9144a6954a62316a5cb86b7dd7128a086aca94728820ece7c644d8f70271a3e6",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "schema accepts object-form tools and rejects invalid tool objects",
-      "occurrence": 1,
-      "sha256": "13ff6f1a6f0f2de48d3b6c54896330bca814f19b047dee8e73266f36fce94283",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "compiler normalizes object-form tools and treats classified custom read-only tools as safe",
-      "occurrence": 1,
-      "sha256": "ce15ad084b9c2f8686f72e8a1686b07822373a5c69deb1ad9d27bb991de74666",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "compiler keeps unclassified custom tools blocked for explicit review",
-      "occurrence": 1,
-      "sha256": "b346d645eb8c4992babddcb110d717a2d6c2227ee4a7d318aac0214b27e0e929",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "object-form tools cannot expand beyond agent-declared tool ceilings",
-      "occurrence": 1,
-      "sha256": "f276ade6e842cc5352dc5f14f39e5c8f212252d139eacfa40204bce71a277819",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "narrow tool scopes inherit metadata for strings and override it for objects",
-      "occurrence": 1,
-      "sha256": "fdef5b6a8557f2b957c242b34d555149265cc5d35611278583b14526d2f42c21",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "tool metadata cannot downgrade known mutating tools",
-      "occurrence": 1,
-      "sha256": "35df21043244c73f57efd7719891b44956809c492e408d69c4f00aa72df69f8b",
-      "domain": "authoring-interface"
     },
     {
       "name": "compiler rejects delegation tools on dynamic stage metadata before filtering",
@@ -1178,30 +2420,6 @@
       "occurrence": 1,
       "sha256": "91be6455f0619db46c6522d1d0c7cfa406db127f25076827a6ceab19937c52d0",
       "domain": "dynamic-runtime"
-    },
-    {
-      "name": "artifactGraph runtime foreach empty fanout completes terminal placeholder",
-      "occurrence": 1,
-      "sha256": "83a7eaefaee0a6fb709b359e2018b122a4605ffbadd2a89921db9dc85ee16d87",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "artifactGraph runtime foreach repairs compiled/run mismatch after materialization crash",
-      "occurrence": 1,
-      "sha256": "18e8279b5a017489f252dc0538d8210c4b64ce2c6ba9615b8c639c3bf98f25a3",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "artifactGraph runtime foreach materializes items from a dag container output",
-      "occurrence": 1,
-      "sha256": "626bf30830483cfec410f939dd843d2cf73c64be33bae1bb6707614a4d997872",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "successive foreach materialization keeps task ids unique",
-      "occurrence": 1,
-      "sha256": "a1307205437596fc94c746a30c5cea6ed6d12265200b4daa23f2d09d2cb1bf0a",
-      "domain": "core-runtime"
     },
     {
       "name": "streaming foreach waits for unresolved non-source dependencies",
@@ -1282,28 +2500,136 @@
       "domain": "dynamic-runtime"
     },
     {
-      "name": "artifactGraph runtime foreach blocks when maxItems is exceeded",
-      "occurrence": 1,
-      "sha256": "5a3fb41c090745464c62452724debffcf19a1365de1d29b1fbf63303d4665b1e",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "artifactGraph scheduler marks prepare failures terminal",
-      "occurrence": 1,
-      "sha256": "16fa16bd1262a31d7c80f173f18115040d985ec9adb7385b7b449accdf3e376e",
-      "domain": "artifact-web"
-    },
-    {
       "name": "artifact graph schema rejects dynamic loop children",
       "occurrence": 1,
       "sha256": "95b5b7efbbddc0740ad8ccd3562e3c4379ea99eab7f3a9ef88aae18c60054da4",
       "domain": "dynamic-runtime"
     },
     {
-      "name": "loop compiles to a loop stage record with no premature child tasks",
+      "name": "built dist scheduler injects runDecisionLoop on the real dynamic path",
       "occurrence": 1,
-      "sha256": "b4c2976c90fcd1f694a00ccd1d8eae87a06e0938044da6e6d1c09211437921b6",
-      "domain": "core-runtime"
+      "sha256": "586ccc4ce25c082b4c31e158e6bd4b9c8f58a31a42ab66d2b25b22fdfb0bd3c4",
+      "domain": "dynamic-runtime"
+    },
+    {
+      "name": "subagent launch uses generated fetch cache extension by default",
+      "occurrence": 1,
+      "sha256": "eaee3df11a276f48fae401352f9b8d9cd15598dfaa2a9e7d594fbcc0ba9d5d2a",
+      "domain": "dynamic-runtime"
+    },
+    {
+      "name": "subagent launch wires normalized workflow web-source tools through generated extension",
+      "occurrence": 1,
+      "sha256": "69607f3ddaf3391b772ccde9e9eabc4ca8b913835d1feb9d9fd26cd6a73e4aab",
+      "domain": "dynamic-runtime"
+    },
+    {
+      "name": "dynamic generated tasks launch with a tool-result budget and static tasks do not",
+      "occurrence": 1,
+      "sha256": "f80143c6ba53b27d149c19cd99a6740e9226914e563dd6a3b24343dc236087e6",
+      "domain": "dynamic-runtime"
+    },
+    {
+      "name": "run records create dynamic state paths for dynamic loop onExhausted templates",
+      "occurrence": 1,
+      "sha256": "3f9d2c4a3706c9e1388c42bf4822a5a2ca912dc9a4914be98f80c362debd1848",
+      "domain": "dynamic-runtime"
+    },
+    {
+      "name": "spec-less direct dynamic run records provenance and launches planner",
+      "occurrence": 1,
+      "sha256": "d8a9780cac37bac2739c4732266c56ecbb9ce1d77ef004d38a06537dde051406",
+      "domain": "dynamic-runtime"
+    },
+    {
+      "name": "workflow_dynamic tool starts spec-less direct dynamic runs",
+      "occurrence": 1,
+      "sha256": "0677239beb76f7ab2afe67442e5a4aa27906433501dcf840d52454e24656a1eb",
+      "domain": "dynamic-runtime"
+    },
+    {
+      "name": "workflow_artifact generated extension wrapper embeds config without prompt-visible paths",
+      "occurrence": 1,
+      "sha256": "b32c3f180be4294816ad9540a96de1c2efb27274f5cf8c0285f3923ea1e8915d",
+      "domain": "dynamic-runtime"
+    },
+    {
+      "name": "fail-fast flags off preserve failed-run scheduling without sibling cancellation",
+      "occurrence": 1,
+      "sha256": "fd14341c19b6bf068cba83294dc654ed3931b96219901b9645e5fd605cacca23",
+      "domain": "engine-store"
+    },
+    {
+      "name": "workflow process role helpers default to supervisor and honor worker/disabled",
+      "occurrence": 1,
+      "sha256": "f365bc68b0319ecd587be36d79536e51714e89baf9b7471df7ab0d1fdeb4025d",
+      "domain": "engine-store"
+    },
+    {
+      "name": "worker and disabled roles block supervisor workflow actions",
+      "occurrence": 1,
+      "sha256": "76bd419d77ddb6934acb38341f20b3ea197c4ba9dc4fcccf97aa48607ad57edc",
+      "domain": "engine-store"
+    },
+    {
+      "name": "supervisor lease ignores orphaned reclaim mutex from dead owner",
+      "occurrence": 1,
+      "sha256": "c281357dadf74f0e495a5cf8e78cbf16e5cbe556d9d808920228f055872dfd46",
+      "domain": "engine-store"
+    },
+    {
+      "name": "supervisor lease honors live foreign owners and stale reclaim; workers cannot acquire",
+      "occurrence": 1,
+      "sha256": "f26224d5e6cd6581dd397e529dc55107f7f810f405522aba4e4c0bef3a3eb3d4",
+      "domain": "engine-store"
+    },
+    {
+      "name": "run lease stale reclaim admits exactly one concurrent owner",
+      "occurrence": 1,
+      "sha256": "7d64b545af07e1110433279e726d0c6d0a6f25a55704234562f42cd74856a028",
+      "domain": "engine-store"
+    },
+    {
+      "name": "run lease restore fails clearly if another owner appears during reclaim restore",
+      "occurrence": 1,
+      "sha256": "a3dad896a7d6b8775202b16d8a1f7213adbb08fb3cd20b02b2e3c9959ccd31b1",
+      "domain": "engine-store"
+    },
+    {
+      "name": "run lease absolute staleness can reclaim a live-pid old lock",
+      "occurrence": 1,
+      "sha256": "0be8172c8f19e575058f6a549ffeb0407b983ce0b279cae90cd4d7dc2948026f",
+      "domain": "engine-store"
+    },
+    {
+      "name": "run lease release does not unlink a replacement lock",
+      "occurrence": 1,
+      "sha256": "5bdfb621ef735bfb5e6f00739efc4d0fea1b1da041c309a45ad6e196c3dfa2c1",
+      "domain": "engine-store"
+    },
+    {
+      "name": "partial foreach continues scheduling after an item failure",
+      "occurrence": 1,
+      "sha256": "be8f23763938e4261744d8be95f3811b3d99761e1093e9c258075cbf8be6378a",
+      "domain": "engine-store"
+    },
+    {
+      "name": "experimental launch ramp shortens default release delay telemetry",
+      "occurrence": 1,
+      "sha256": "3cc16b3f4f442d8a7a2847f43031df7ac0d2061b721bfb6141d08a9a57bc4b68",
+      "domain": "engine-store"
+    },
+    {
+      "name": "adaptive live workers flag off keeps configured launch controls untouched",
+      "occurrence": 1,
+      "sha256": "ab9abe422a31d7924d410a830a30ebc89ff3d8fc11f4f746bd58e0e5fa9c40a7",
+      "domain": "engine-store"
+    },
+    {
+      "name": "adaptive live workers shrink on shared rate-limit backoff",
+      "occurrence": 1,
+      "sha256": "b7de3f4e9996daaa51e77c5014aedc8b80a9ae87f3e603083d89816047c0b75b",
+      "domain": "engine-store"
     },
     {
       "name": "loop round 1 materializes and launches ready child tasks in one scheduleRun",
@@ -1324,352 +2650,16 @@
       "domain": "engine-store"
     },
     {
-      "name": "artifactGraph runtime scheduler fails closed on compiled run positional mismatch",
-      "occurrence": 1,
-      "sha256": "7589fc0104ceca1590f08b6cc383995c0a7794d49313ae7371dea9abac756a3f",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "loop until satisfied after a round marks loop completed and stops materializing",
-      "occurrence": 1,
-      "sha256": "4833723a72b01dc397184e167ce70be346a8e32f188db0740e753eb8de910e3d",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "loop until unmet materializes round 2 with unique ids and carry-forward context",
-      "occurrence": 1,
-      "sha256": "828b6ed8c14ddacdb926bec52522375b1c80f72c2d6f57a3b08e8e821d32d12f",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "loop no-progress stops early with stopped_no_progress",
-      "occurrence": 1,
-      "sha256": "9e616c9b787741f6d193f0c2cf8c13d88953419d51a3b3ab5bd0e0e1bffcfeba",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "loop invalid progressPath value records a warning",
-      "occurrence": 1,
-      "sha256": "d1fa3ff8360a8ac65ed320e23bdaa4a87c2aab3f9b56db963fa12c69fa264120",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "loop explicit missing progressPath records a warning",
-      "occurrence": 1,
-      "sha256": "52aaea50eb94e589a21058b68399fe401efc66130fb4b93bab0e185af8b35253",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "loop maxRounds exhaustion materializes and waits for onExhausted",
-      "occurrence": 1,
-      "sha256": "8bb87b00d1d93574f527f9a11572039e65cb8ce6a6d556e0dede22fb404a3eff",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "loop onExhausted context includes bounded prior round check outputs",
-      "occurrence": 1,
-      "sha256": "b19ae7092e3fa852453791d65584ea0f303c5d12b02ad284706b582e39722d86",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "loop until evaluator supports equals notEquals lengthEquals all and any",
-      "occurrence": 1,
-      "sha256": "628b9a13c77227dfbd14f592e9619c0d8b744e4cfd583b2ba4cc44a31cdc275e",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "loop completed task with unreadable result records a warning",
-      "occurrence": 1,
-      "sha256": "08ba592b73a7a5e98de1120f3afca831f254c748087a01b5f6e29703dd98108b",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "spec-review partition helper joins verifier results and flags missing coverage",
-      "occurrence": 1,
-      "sha256": "7e75d04b29b45487b9cb916e6e9a8cb1af1e592ca0f6b5ab0fd3127afa039f30",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "bundled spec-review workflow compiles flat analysis and verification fanout",
-      "occurrence": 1,
-      "sha256": "bdd25d7ee3c0dd58db23c0ba48f6ca6d72883d79792e85b01d0a310028aa202c",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "artifact graph compiler propagates graph maxConcurrency",
-      "occurrence": 1,
-      "sha256": "9d1e804d274e80a61f0c9ffcc48268e694266205f76ad47e14764a28d421fabd",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "bundled impact-review artifact graph workflow compiles multi-join DAG",
-      "occurrence": 1,
-      "sha256": "bcc054dabe03b7bfcb06d693890e83186ecf050d96e99276bfb2d8fce3f49b86",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "bundled artifact graph workflows are public runnable",
-      "occurrence": 1,
-      "sha256": "976a509d85a776f65c07452fb5d2b697954be207d3a39ea79fed2c0768330db4",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "built dist scheduler injects runDecisionLoop on the real dynamic path",
-      "occurrence": 1,
-      "sha256": "586ccc4ce25c082b4c31e158e6bd4b9c8f58a31a42ab66d2b25b22fdfb0bd3c4",
-      "domain": "dynamic-runtime"
-    },
-    {
-      "name": "bundled deep-review workflow leaves reviewer fanout unconstrained by stage caps",
-      "occurrence": 1,
-      "sha256": "fe89bb656fafeecf9aa204706d5c0e0f4ed20e2760049bbe5be1c305adb93f8f",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "batched deep-review workflow preserves artifact denial on independent review stages",
-      "occurrence": 1,
-      "sha256": "77fa86e1d6fc221bc9106c35c93a292316000a0099035f3afd900ec712ed3253",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "batched deep-review devil-advocate prompt and schema require evidence source and string arrays",
-      "occurrence": 1,
-      "sha256": "c008c461c7eeae6199376f8905e9358644c4d2b5ba0a95302fd3f4fa4391625a",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "deep-review batched devil-advocate builds and enforces row-local context packets",
-      "occurrence": 1,
-      "sha256": "d2f21cf27da24fac208980a16f460f8fa3ea763f8949e9649acbb7f6c4652265",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "bundled spec-review workflow materializes verifier and partitions verified findings",
-      "occurrence": 1,
-      "sha256": "97da4ff6d6494d6bf1140f980a2440c5a5d1c5ee89f193d230fe9202b91e11f9",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "workflow artifact telemetry summarizes stage status, retries, wall clock, and output bytes",
-      "occurrence": 1,
-      "sha256": "292044e1c33a7146a2779c63cc6d409b71cd09f9af06f0502d4504b8e59a8da0",
-      "domain": "artifact-web"
-    },
-    {
       "name": "workflow resume reset preserves retry accounting metadata",
       "occurrence": 1,
       "sha256": "1d470de0d07c68fd289f4a75d88af57960435520b092cb7294abd084dab91f8e",
       "domain": "engine-store"
     },
     {
-      "name": "workflow source context packet prefers structured output and caps raw previews",
-      "occurrence": 1,
-      "sha256": "338b538ef69af9c482229e0bcf6909a2207df315657101226ccc06ae7af4a1e5",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow source context packet can cap oversized structured output",
-      "occurrence": 1,
-      "sha256": "0a9af9b4c1c302b76e38e9a8710d76afd1e747258c7e27f9c88758db3aac633c",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow source context packet applies stage caps and a global packet budget",
-      "occurrence": 1,
-      "sha256": "f3c5f74e820ea98fa62e691ed57302428ab15055492e62659b62f2010b7084a9",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow source context packet can project structured outputs by source stage",
-      "occurrence": 1,
-      "sha256": "93d72dc35e859d33c26a193e5867dea6527196c057618e0462ae7ff40f9dfca6",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "structured contract validator checks nested paths, arrays, and caps",
-      "occurrence": 1,
-      "sha256": "75ab66f9c578c184e1f1095a45e92308010477d26ed5c6c807ccb67ed7a54a50",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "engine source context reads structured outputs and telemetry from task artifacts",
-      "occurrence": 1,
-      "sha256": "65c899f65f3a9179b0f7a32c0b8e8b7e6d74a241ca8c4f460efd6d28ef1455ed",
-      "domain": "artifact-web"
-    },
-    {
       "name": "schema and compiler support pi-subagent headless backend",
       "occurrence": 1,
       "sha256": "ca1bacf78307dff6e033b4b04789cfb4b33556bbc52263d5752ba370eb45d97b",
       "domain": "engine-store"
-    },
-    {
-      "name": "schema and compiler accept artifactGraph support nodes",
-      "occurrence": 1,
-      "sha256": "88820b7ee5609f85af36e6de60327e4c4de29b51987d0f253195bea6b5eed687",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "schema rejects invalid artifactGraph support nodes",
-      "occurrence": 1,
-      "sha256": "683fd7611ce7da67a8496659577873f2b36ed70fa65207a4d2e9698188be43b8",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow helper loader resolves directory-local helpers",
-      "occurrence": 1,
-      "sha256": "a4b69ee5ce469b1fbd95d1fa4196a4f2394ec51d93954b828ad7a4b5da5ef058",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "workflow helper loader rejects external or invalid helper refs",
-      "occurrence": 1,
-      "sha256": "d68f868d54e003dcc3e3d684aa53d477ba1451745b26d6e8aa7c0d2f8f41de2b",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "deep-research claim evidence gate downgrades unsupported verified claims",
-      "occurrence": 1,
-      "sha256": "a441a75cdc39f6777c2a1c2185f9893ae7b087aae69f309567209a6428e42067",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "support output analysis preserves field precedence for render helpers",
-      "occurrence": 1,
-      "sha256": "cbd303e2a06c995f2f718bf3f726bb7555b9a65335ed36832a9ee3aee7ba7f19",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "deep-research normalize input packet compacts research context",
-      "occurrence": 1,
-      "sha256": "1f46e1f915ba01fa2bb92b50d7029637e1745dc99ca64c714c734fcf51ca3110",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research normalize input packet preserves RQ budget and timeout gaps",
-      "occurrence": 1,
-      "sha256": "b1f5b7da7ecb89b391bf27c7220abd92bdb684b2e6b928d9a6275b88f15c52cc",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research normalize input packet preserves slots and flags precision risks",
-      "occurrence": 1,
-      "sha256": "4acdf9d4f340ec7207bc343018f27b8cb4bc26e65d951bb7e0b3eed790c67267",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research normalize input packet distinguishes P1 gap and recommendation risks",
-      "occurrence": 1,
-      "sha256": "9018c2883e8ccba5f52207c911c663d540b5293168e9e23227bfc14954e8948d",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research final-audit packet compacts deterministic ledgers",
-      "occurrence": 1,
-      "sha256": "8c14a8456427a8661a312364bbfd3c8a4fae44470bb0cc88183b5e8ab8f57cfb",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research P3 final-audit replay fixture preserves guardrail floors",
-      "occurrence": 1,
-      "sha256": "268a069065c0ba0a0d4a515432c36159f2ebd1877f79660c9629a4455292edf1",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research renderer emits evidence-backed report and sidecars",
-      "occurrence": 1,
-      "sha256": "eabbefb2a4caffdb1ea232f3b1128d977cf263c17632293c97de06ebce4f4bfd",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research renderer joins synthesis overlay against packet ledgers",
-      "occurrence": 1,
-      "sha256": "ffdc60dc72b72c93ffa0ef171ea7e01deae87f27b2451904d2843d9220d32637",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research renderer does not promote unverified fallback findings",
-      "occurrence": 1,
-      "sha256": "0db04bc24ffb54a97efe68e2dc22460d50736ee8178de4019c243b9d9127802c",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research executive renderer preserves object gaps zeros and recommendation labels",
-      "occurrence": 1,
-      "sha256": "3867b793b57311f4033f3e54919c244fed45131a57dbda55103a5391284b110f",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research renderer renders over-cap evidence without omission",
-      "occurrence": 1,
-      "sha256": "93fd97f666aed07223dc3cc6a6302e6f245e95d0a976fa5f78bf893aa355bfcb",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research executive renderer fails gate when truncating open gaps",
-      "occurrence": 1,
-      "sha256": "21905345ad62db54e9614e1d11bfa286bdfa4806074907e788c13128384f75c3",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research executive renderer blocks without audit control",
-      "occurrence": 1,
-      "sha256": "da4ab6b6f20d7be9423e88adc59d83f4dfb9d4c5915fff9c9e6de5eeac456eee",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "artifactGraph runtime support executes helper and writes artifacts",
-      "occurrence": 1,
-      "sha256": "649b20ebec7df29365932caf164a24ed604ed81246511f040a7901b4098a3a3e",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "artifactGraph runtime support omits failed control sources but passes status metadata",
-      "occurrence": 1,
-      "sha256": "c9a06ab2da4d7bb0e2e69d01bae81e27526cf728b6eb1286e4fc2bc8600c6ee3",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "artifactGraph runtime support marks helper errors as failed",
-      "occurrence": 1,
-      "sha256": "09eac5605ac396c37a7a72110eb6e98d27f535fa8f73d6667b79eeadf2c77f19",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "artifactGraph scheduler does not consume concurrency for synchronous support tasks",
-      "occurrence": 1,
-      "sha256": "aae0faff74c51147e9624a3b047e90d0a0a1df8cd57c753e4ec6f20693a86ba9",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "artifactGraph runtime scheduler launches empty-after roots in parallel",
-      "occurrence": 1,
-      "sha256": "ecd72917fcb548a120d4689ef93f54b83c8c020f36f13fd077fd8242a86a8337",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "artifactGraph runtime after dependencies do not inject order-only source context",
-      "occurrence": 1,
-      "sha256": "1617a741682142713b58538537e3f491289eda1ac23e649c91bac62648f7c0e6",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "artifactGraph runtime diamond fan-out launches branches in parallel and joins context",
-      "occurrence": 1,
-      "sha256": "c1bb6c55084b4d0e80d641815dfd02a02a18317812899acceb0851082a892596",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "artifactGraph runtime dag container waits for outer sources and skips strict dependents",
-      "occurrence": 1,
-      "sha256": "39001ee3ce27350e9220de72e3380d0abdf1f0e5756a8054dd57c82f2b627fd2",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "artifactGraph runtime partial dag join proceeds and exposes outputFrom downstream",
-      "occurrence": 1,
-      "sha256": "ea6792f3c88700160f2b6d358fe19fe900f73503b709a90aee77b6bb0874e44c",
-      "domain": "artifact-web"
     },
     {
       "name": "resumeRun resets failed dag container children and relaunches roots",
@@ -1702,52 +2692,10 @@
       "domain": "engine-store"
     },
     {
-      "name": "refresh surfaces poll API errors after processing sibling tasks",
-      "occurrence": 1,
-      "sha256": "5716a59da490fd393022dbb97a744dffac4ff17cd8f8a2212283070d342e8c81",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "refresh persists telemetry-only null status polls",
-      "occurrence": 1,
-      "sha256": "c00986754ec5f5d0b0c31d1e5eeb0a9cd79b5c5c225bf22c5cdf3abc007b5042",
-      "domain": "core-runtime"
-    },
-    {
       "name": "subagent terminal observability aggregates distinct retry attempts",
       "occurrence": 1,
       "sha256": "635c45399231bbd5914f96d59c8064ce1139cae49f79a826c1e837c78baa55ee",
       "domain": "engine-store"
-    },
-    {
-      "name": "workflow run metrics roll up provider-reported usage without mutation",
-      "occurrence": 1,
-      "sha256": "07e344c82ebd823d1e24211ac31a70cfe2b4c650145f47b329baa1d2ebd6396a",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "formatRun surfaces terminal capture lag separately from execution time",
-      "occurrence": 1,
-      "sha256": "29f915c7587e3434f42c902936faaf98aab44584fd2701535c46c05c2f712229",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "workflow run metrics treat local support tasks as zero provider usage",
-      "occurrence": 1,
-      "sha256": "1ef34ea3e54875b470bd3136e3bb3ad257412c8e9338ef73bf6492a7f66b34d1",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "workflow run metrics reject negative provider values and keep partial observed sums separate",
-      "occurrence": 1,
-      "sha256": "6a62d69b0060792c74693547f591e2dcfc8545de404bf00cdfb7303abfb80ef4",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "workflow run metrics do not infer missing prices from token counts",
-      "occurrence": 1,
-      "sha256": "17fbecff89725cf7ee15a2c5cc8a02bfffd459c9b58ac32e7621a264574e5f73",
-      "domain": "core-runtime"
     },
     {
       "name": "subagent launch forwards tool-call capture only when env is enabled",
@@ -1768,118 +2716,10 @@
       "domain": "engine-store"
     },
     {
-      "name": "workflow fetch_content cache wrapper replays run-scoped hits with fresh response ids",
-      "occurrence": 1,
-      "sha256": "4f6742f81a5b9d97d8c00b1e4fcf7df411523085171f0084cb6ae899caecc513",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow fetch_content cache correlates concurrent stored data by response id",
-      "occurrence": 1,
-      "sha256": "12fba90b93f6fa7e3ee0a2555394c68f1d63a0d2602099e728996263c5ebdcc9",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow fetch_content cache wrapper caps inline text but preserves stored source data",
-      "occurrence": 1,
-      "sha256": "db6307e7a3f659960d63fb3d869dea3bb423006c9b40361e7fc81036edb21f0a",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "subagent launch can opt out of fetch cache and keep built-in provider mappings",
-      "occurrence": 1,
-      "sha256": "1af0354b51557f7baadacb136d77f6ab6ee573a7b28ee5223b65c718b1ff5874",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "subagent launch uses generated fetch cache extension by default",
-      "occurrence": 1,
-      "sha256": "eaee3df11a276f48fae401352f9b8d9cd15598dfaa2a9e7d594fbcc0ba9d5d2a",
-      "domain": "dynamic-runtime"
-    },
-    {
-      "name": "workflow web-source core redacts URLs and reads normalized snippets",
-      "occurrence": 1,
-      "sha256": "c93bcfafbf11581ad03a80024f483d6f48233b3549cd26baf1e5d1fb42c82feb",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow web-source core anchors CJK normalized snippets and multi-match term windows",
-      "occurrence": 1,
-      "sha256": "fa678293f10c3b9c597bd6e11f9fc4543705e0ff8b00b904f8421371fe636115",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow web-source extension returns source cards and narrow reads without exposing cache paths",
-      "occurrence": 1,
-      "sha256": "e88bd7b9bd55b0392b7b30763cdb019022968fa3e563d70a91d8f8ba7c0c0ea9",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow web-source extension anchors late matches within remaining read budget",
-      "occurrence": 1,
-      "sha256": "7df7fb40970e452ae74fa93a7d1cefde341247f28e183f3c6b16ec52467804d6",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow web-source extension aggregates mixed source read statuses",
-      "occurrence": 1,
-      "sha256": "68a0b3fa06dc6b341691fe7115ee0ca6f87c7064fdb85b767531002b75a1ef0a",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow web-source fetch single-flights duplicate URLs and caches transient empty results in process",
-      "occurrence": 1,
-      "sha256": "b9e757e49fcd2e1e4babcd48da308729e4286bfca9c3ea58aabee8792ef09a42",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow web-source search disables provider curation by default",
-      "occurrence": 1,
-      "sha256": "cd71b0acc27526cc46f63f5ec8567674e9bedf442ae2e9df86e4a89fdb4a4460",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow web-source extension blocks untrusted custom fetch and reports budget exhaustion",
-      "occurrence": 1,
-      "sha256": "713e4a950121cdf1db353cdffb451404ef47b1b2f22e45d207d4529d1771db11",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "default normalized web fetch uses guarded direct fetch instead of captured fetch_content",
-      "occurrence": 1,
-      "sha256": "a7e9d59de15225b89827ab10b6ee2369578712faec0b085291634579cd0b87f1",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "subagent launch wires normalized workflow web-source tools through generated extension",
-      "occurrence": 1,
-      "sha256": "69607f3ddaf3391b772ccde9e9eabc4ca8b913835d1feb9d9fd26cd6a73e4aab",
-      "domain": "dynamic-runtime"
-    },
-    {
-      "name": "subagent launch captures custom normalized web provider extension instead of exposing it directly",
-      "occurrence": 1,
-      "sha256": "fe04c8cf1a0e492bff9aba7d7017e64587907b36186d49c7aef02b8000963f01",
-      "domain": "artifact-web"
-    },
-    {
       "name": "completed subagent with contextLengthExceeded and valid output remains completed",
       "occurrence": 1,
       "sha256": "2d54a7726cc5ff89fa66868b226ec9cc2be06d8f7634c6e34c6d170d535b6cfb",
       "domain": "engine-store"
-    },
-    {
-      "name": "failed context-window subagent with valid artifactGraph output is salvaged",
-      "occurrence": 1,
-      "sha256": "c56605d2b9abee35434a38eddbe94850f259e1f47361709d0af858f2da4189d1",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "failed model subagent with valid artifactGraph output is salvaged",
-      "occurrence": 1,
-      "sha256": "9cf11a1efb2e98a33b02f47730f92f8ae5d1ff50a1ec761f6522c930e0cbc842",
-      "domain": "artifact-web"
     },
     {
       "name": "refresh retries zero-output transient subagent model failures",
@@ -1888,52 +2728,16 @@
       "domain": "engine-store"
     },
     {
-      "name": "refresh fails fast on permanent provider input-validation model failures",
-      "occurrence": 1,
-      "sha256": "c4d655ea49cdf783b404dd8dab72aba3d4ce28983a79e941b4b16388265b557d",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "refresh fails fast on maximum-length provider validation with 5xx-sized limits",
-      "occurrence": 1,
-      "sha256": "94167c07fa0dd12f04d77b69f16a0e8d5434d3428189a19f378fe60341f51806",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "refresh retries truncated-stream model failures",
-      "occurrence": 1,
-      "sha256": "04cc25e7f20b6bdbab576ac0dc9880eec03c271f63ea17a0fabc731f86472711",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "refresh backs off zero-output rate-limit model failures",
-      "occurrence": 1,
-      "sha256": "d9ecf795e137759b559e59fd75280938cf6711cff6dd91abddc24aecab630479",
-      "domain": "core-runtime"
-    },
-    {
       "name": "oauth provider rate-limit without retry hint uses subscription-window backoff",
       "occurrence": 1,
       "sha256": "6e2f51bd9c192327dadd30a3717f31d0c42284ef001e8b83b8e3ee5f41d7f3f7",
       "domain": "engine-store"
     },
     {
-      "name": "refresh parses rate-limit Retry-After units",
-      "occurrence": 1,
-      "sha256": "f4a4edc92a8c42bc8dd1e7d3ad812e525d80c99989f8aceca0b59dbbf7d28a65",
-      "domain": "core-runtime"
-    },
-    {
       "name": "refresh escalates and exhausts rate-limit backoff attempts",
       "occurrence": 1,
       "sha256": "ae07f1a27e015944d46fb3912509afe6ab2793861f002968143dbf40bd26702e",
       "domain": "engine-store"
-    },
-    {
-      "name": "refresh detects rate-limit text from stderr",
-      "occurrence": 1,
-      "sha256": "ac9fcd4b8b9eb61b9dd8ddc605f75b3ae9fd4a1ee46a2b3b20326e414a7f395e",
-      "domain": "core-runtime"
     },
     {
       "name": "launch skips rate-limited retry until nextEligibleAt",
@@ -1948,28 +2752,10 @@
       "domain": "engine-store"
     },
     {
-      "name": "dynamic generated tasks launch with a tool-result budget and static tasks do not",
-      "occurrence": 1,
-      "sha256": "f80143c6ba53b27d149c19cd99a6740e9226914e563dd6a3b24343dc236087e6",
-      "domain": "dynamic-runtime"
-    },
-    {
       "name": "shared rate-limit backoff survives process restarts via persisted state",
       "occurrence": 1,
       "sha256": "bcea699a7d75516d727c68c410e20ee080beeec1da0dfaaae8674d2c5b26d60f",
       "domain": "engine-store"
-    },
-    {
-      "name": "subagent launch retries rotate artifact-graph session ids",
-      "occurrence": 1,
-      "sha256": "f1362df17f1f7e18d0da7eab11a1be5b80a5672e2189fcdce9dd1619815c928d",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "refresh does not retry deterministic boot or config failures",
-      "occurrence": 1,
-      "sha256": "fb2345fddc5b1fa47ddf875cc875ba8971949ae0d6f25c175c365446d326de49",
-      "domain": "core-runtime"
     },
     {
       "name": "refresh adopts handle-less running subagent from deterministic runsDir",
@@ -1996,154 +2782,16 @@
       "domain": "engine-store"
     },
     {
-      "name": "runtime model resolver defaults to current model and thinking",
-      "occurrence": 1,
-      "sha256": "0f68fddee43c4029524da3983ee2fbfea7f11d8c602be9f0463767eba4ba489d",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "runtime model resolver asks before choosing ambiguous enabled models",
-      "occurrence": 1,
-      "sha256": "65b78668a36d181de3bb238183db17d9bfc057e1a8f23118045a65fa299958e1",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "runtime model resolver asks before choosing an available model when requested model is missing",
-      "occurrence": 1,
-      "sha256": "5f56b15a5ab819bf020ade0914010bbb1e2f31d9a41bb1213816cfd6160b1cc0",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "runtime model resolver falls back unsupported thinking without UI",
-      "occurrence": 1,
-      "sha256": "23e4c5ab70e9d82ddd2d15b7893ac591318d2b1baaaef0105d9355bf062e3cea",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "runtime model resolver refuses unsupported thinking when only higher levels are available",
-      "occurrence": 1,
-      "sha256": "56c51fbd229f0568327b19411206e0cf0661f2692f7e90054994e449094d72e5",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "runtime model resolver asks before changing unsupported thinking",
-      "occurrence": 1,
-      "sha256": "95de8425755980c6205252205730e2f71175b5c9ca51b990d4c2e646c8f6c570",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "runtime model resolver refuses ambiguity or missing model and falls back unsupported thinking without UI",
-      "occurrence": 1,
-      "sha256": "9db7fd9e35c9c75b4148be86fc7d3430e1d2dee9f0ac72ee2acca27665efae69",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "compiler applies runtime defaults before budget estimates",
-      "occurrence": 1,
-      "sha256": "4f40b438ec53af3aaf9b6d64fac45f2fcd2951dd76129b0ea1d96a12b39a247f",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "run boundary requires runtime task",
-      "occurrence": 1,
-      "sha256": "9b1b5470847c91f663eaec569c6466995bdaf01a4b6fb07282ed151f1fd3687a",
-      "domain": "core-runtime"
-    },
-    {
       "name": "workflow run runtime overrides reach launched subagents",
       "occurrence": 1,
       "sha256": "faed09267c22920ebc36d13a89bcf9ec6ca75cd7f8e367b1efaeee53da79f11e",
       "domain": "engine-store"
     },
     {
-      "name": "static run artifacts preserve declared workflow bundle files only",
-      "occurrence": 1,
-      "sha256": "dcb7aaec3f60d0f0ab33e1f245b676995bfa06fd1f278102aedc95230f8a73de",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "static run artifacts reject escaping discovered bundle refs",
-      "occurrence": 1,
-      "sha256": "1513a6839a87feaaaae4b6a5c7987534157ea57515ee070028761181d79f039e",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "run records use artifact-graph type and preserve artifact graph discriminator",
-      "occurrence": 1,
-      "sha256": "ab24f99a4e318af4d54b213175b1cedbec60f142ab1defe5b28f3c443ce28853",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "run records create dynamic state paths for dynamic loop onExhausted templates",
-      "occurrence": 1,
-      "sha256": "3f9d2c4a3706c9e1388c42bf4822a5a2ca912dc9a4914be98f80c362debd1848",
-      "domain": "dynamic-runtime"
-    },
-    {
-      "name": "workflow registry resolves exact names",
-      "occurrence": 1,
-      "sha256": "19b229f0eac35313875b17610929b6f629738678b220e55db84771c2ba247bc7",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "workflow registry prefers project workflow over local state and bundled duplicates",
-      "occurrence": 1,
-      "sha256": "fcc3c8f15c3afdbaaf7bdbbc314d18a75bde18984494df3a0c0806f4dc45924e",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "workflow specs are JSON-only and YAML files are rejected",
-      "occurrence": 1,
-      "sha256": "21c8d92496431df0f04b04b17da9c71ee2f4bc7685c5ad3269b4f830149c07f4",
-      "domain": "authoring-interface"
-    },
-    {
       "name": "workflow registry does not resolve prelaunch renamed workflow aliases",
       "occurrence": 1,
       "sha256": "d07b768cfe53e97873f1ed6a6af2bd6b76f1baf7dae7fb7bebc4bf9e58ceab69",
       "domain": "engine-store"
-    },
-    {
-      "name": "workflow registry resolves bundle specs and sets correct workflowRoot",
-      "occurrence": 1,
-      "sha256": "75916b1adfa58413dfa8e1e992371fe9d793abc55f6b867720b234cdad0ed7e8",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "workflow registry fails closed when flat and bundle specs conflict",
-      "occurrence": 1,
-      "sha256": "ca9d4ae4d0df7260e2d6836a9796b2aa6039f751c9a0610a8845fa02b18013d6",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "workflow command completions and run arg parsing preserve task text",
-      "occurrence": 1,
-      "sha256": "325ab8b286915561ce2a4fb89a0760f93e7b73c432caa3be301a2c0310bbddcc",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "natural-language workflow tools list and start workflows",
-      "occurrence": 1,
-      "sha256": "5feb4301c9e2721582506640bfad29d0fcc1664dc5d86e880cb2024a0bdc3e5e",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "natural-language workflow tools list and start workflows",
-      "occurrence": 2,
-      "sha256": "5feb4301c9e2721582506640bfad29d0fcc1664dc5d86e880cb2024a0bdc3e5e",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "spec-less direct dynamic run records provenance and launches planner",
-      "occurrence": 1,
-      "sha256": "d8a9780cac37bac2739c4732266c56ecbb9ce1d77ef004d38a06537dde051406",
-      "domain": "dynamic-runtime"
-    },
-    {
-      "name": "workflow_dynamic tool starts spec-less direct dynamic runs",
-      "occurrence": 1,
-      "sha256": "0677239beb76f7ab2afe67442e5a4aa27906433501dcf840d52454e24656a1eb",
-      "domain": "dynamic-runtime"
     },
     {
       "name": "workflow index preserves run linkage without embedding task rows",
@@ -2182,18 +2830,6 @@
       "domain": "engine-store"
     },
     {
-      "name": "resolveFlowsCwd finds ancestor workflow state root",
-      "occurrence": 1,
-      "sha256": "d66342bf3e1a407c4df299efaa1ac76b6eb737092006bfc73bf89f462d384a17",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "watchRun drops missing runs without recreating supervisor artifacts",
-      "occurrence": 1,
-      "sha256": "27134da6545e8cff6bb67e2981a4d4eefb77b3d91ec4319fd786154814fc8acd",
-      "domain": "artifact-web"
-    },
-    {
       "name": "scheduleRun aborts after heartbeat observes supervisor lease loss",
       "occurrence": 1,
       "sha256": "31483d9c31bb747a65f44e01a003ffd7a489af335882cbde7d6dd0af81a89666",
@@ -2224,64 +2860,10 @@
       "domain": "engine-store"
     },
     {
-      "name": "deliverMissedWorkflowFeedback does not auto-trigger an agent turn on startup",
-      "occurrence": 1,
-      "sha256": "7ab17ddbd59a80297fb17e34aa26730ddbd99d4b110d15f6780ced590b533e16",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "workflow extension skips missed completion feedback during session reload",
-      "occurrence": 1,
-      "sha256": "fdcc647484b87c1904ef7272281daffcabc3e0dd9a002fb49067e396fcaaf48f",
-      "domain": "authoring-interface"
-    },
-    {
       "name": "notifyUnfinishedRuns reports recent failed root runs with resume hint",
       "occurrence": 1,
       "sha256": "cfe06390f365d0a03d64ce1445a67cfdbd2e2c5bf8ad10fd62705e6077beb71e",
       "domain": "engine-store"
-    },
-    {
-      "name": "failed run with completed final stage records degradation and formats it",
-      "occurrence": 1,
-      "sha256": "f85a263eafdd0ec2c5e556f1b94248f68ae57adc5713b759d734899e24b422e6",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "fully successful run has no degradation field",
-      "occurrence": 1,
-      "sha256": "ba935ba06d02c15c6d184e98e697560e935bab46bcdbcd13ee8d450a1fbda144",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "run that failed at the final stage records no degradation",
-      "occurrence": 1,
-      "sha256": "8a82a5c59a87a366dfe8ebc9d6d26bc9b7313a6b47674bb6027b003f3eb773c3",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "notifyUnfinishedRuns labels degraded failed runs as final rendered",
-      "occurrence": 1,
-      "sha256": "f609cd81c4fe5499fd6f0fc0717544ba1201c112d8284d3a96b8eeacd1d05d2b",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "notifyUnfinishedRuns never notifies runs with mock provenance and formatStatus annotates them",
-      "occurrence": 1,
-      "sha256": "3c7704bcf767a03c2ddf4434157cfcf0d2fbd38344fe1f09fdaebe578faa3842",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "notifyUnfinishedRuns re-notifies only runs whose own state changed",
-      "occurrence": 1,
-      "sha256": "7a8f3fadfb0b3aa06aceea63dba1cccda05e1e04d4f5afb57f558d480b124cb3",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "notifyUnfinishedRuns migrates legacy composite notice keys without crashing",
-      "occurrence": 1,
-      "sha256": "d1928bfdb248e74a70db0f81779d5f4e1f160acf169c5ad3fc107e938d9925ee",
-      "domain": "authoring-interface"
     },
     {
       "name": "notifyUnfinishedRuns prunes stale and orphaned notice entries on write",
@@ -2290,322 +2872,10 @@
       "domain": "engine-store"
     },
     {
-      "name": "deep-review finding-pipeline dedups by file+title-token overlap and partitions verdicts with severity join",
-      "occurrence": 1,
-      "sha256": "8246877a23285a7289f8085e978b83b48c07532d9186fd1f91c2c13e9f1af8b4",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-review finding-pipeline preserves structured locations through dedup and partition",
-      "occurrence": 1,
-      "sha256": "424d28a323b42eecc53745a593748b29eb3373fdb6a6b0be1199afd7c34bb3a4",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-review finding-pipeline opt-in batch planner flattens results with strict membership gates",
-      "occurrence": 1,
-      "sha256": "4b5f4a44ef10761d7a04d49f415b588feec2f379aa3d57d37301eb6c7880f076",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-review batch partition routes string evidence rows to NEEDS_HUMAN",
-      "occurrence": 1,
-      "sha256": "379d20978193ed0d25da52231e16b6e06943088560df675daec4b4597e0e146b",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-review batch partition routes non-string evidence array items to NEEDS_HUMAN",
-      "occurrence": 1,
-      "sha256": "8b48c9852cc0caac80a044b43ac31412b569c0b8cb572f94c7400fb203395ce8",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-review batch partition routes missing or invalid evidenceSourceType to NEEDS_HUMAN",
-      "occurrence": 1,
-      "sha256": "baab8ded3247f6ded7b97d30fb48c6eac0b54b85dc1484048618aee6ffa71915",
-      "domain": "core-runtime"
-    },
-    {
       "name": "deep-review batch partition rejects stale batch control schema labels",
       "occurrence": 1,
       "sha256": "69cd02d9f60852033b8e0c01d4641dcc55325b453e0f07ba3b8a0223802a55ff",
       "domain": "engine-store"
-    },
-    {
-      "name": "deep-review batch partition demotes summary-only KEEP verdicts",
-      "occurrence": 1,
-      "sha256": "de4653815070d44d4e4e45def915528075424b5e6d6057bbba21b16c72d0f15a",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-review render-review-report emits finding cards from partition ledger",
-      "occurrence": 1,
-      "sha256": "d505f1bd747d137e4190a6886bffc8d17e8f4d925323787772af9eb39f5b8d00",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-review render-review-report surfaces count mismatches and missing partition",
-      "occurrence": 1,
-      "sha256": "64cfc41510d83f3efb722aab691d43e695e1dbdc39d1e328a5ed6f8294774fb9",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research claim-evidence-gate enforces structured evidence, rejoins identity, and partitions statuses",
-      "occurrence": 1,
-      "sha256": "e3c0c5977048fe0b9f1319bd2eb530efbd32bb6fdb8416e1e58017dd403a3932",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research claim-evidence-gate enriches downgrade reasons without changing strong-evidence claims",
-      "occurrence": 1,
-      "sha256": "7d7735506836149c1c8447229ba394a4d5470a95f3c8d9e51da44187ab82ddae",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research claim-evidence-gate backfills sourceRefs from normalize packet source cards",
-      "occurrence": 1,
-      "sha256": "d58fbdfb9a3e9c4521f54b76fd11a0307fea280b95b0217b6fd7fea811a1dbc3",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "deep-research claim-evidence-gate backfills sourceRefs from web source cache",
-      "occurrence": 1,
-      "sha256": "8816c148704634dcee52734aeb8b98e4d82dceec4a5ba5719094e52bd0ac56cf",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "deep-research claim-evidence-gate backfills npm docs sourceRefs across CLI doc versions",
-      "occurrence": 1,
-      "sha256": "ccc9595defb6ae257fe195171ca3a1979d957a7de996ad3106d3b1c4131d63b5",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "deep-research claim-evidence-gate suppresses sourceRef join failures for local evidence",
-      "occurrence": 1,
-      "sha256": "3d1f6c0528c72b089a51341b14cbabe776202a64fce97986210ec3bc88efc82c",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "deep-research claim-evidence-gate does not backfill near-miss source URLs",
-      "occurrence": 1,
-      "sha256": "e55e77905854db68d085d6a0bd0589ce69b195698cd68dc54926ca5fc1218da2",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research verifier schemas separate default single-row and batched results",
-      "occurrence": 1,
-      "sha256": "6942d33f8bc5045ae394ee3b701cc5e4bd42e2d3306fddd68078da956936cd65",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "package and deep-research verification ontology canonicalize blocked outcomes",
-      "occurrence": 1,
-      "sha256": "c7c2dd005099076b742b969b01b856291cbc4509c45213d7710bdd4c16961731",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research shadow selector reports would-skip without skipping verification",
-      "occurrence": 1,
-      "sha256": "53c7a188c08cf097411a19b9780a767eb45adb6eed20fc9b824b53a9a381ce79",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research shadow selector marks clean shadow skips eligible for canary",
-      "occurrence": 1,
-      "sha256": "8d55ea92246092364f60ea285cd8058a0ad6903f5af4c9eb4e9f9131a226f886",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research shadow selector blocks real skip readiness on audit integrity failures",
-      "occurrence": 1,
-      "sha256": "b875887e3ced8476464f8713ee3492e4bc703852fa78330d853af569e3fe6a9a",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research verification batch planner preserves ids and source hints",
-      "occurrence": 1,
-      "sha256": "8c127f5bd9aaef81a7e872a014c8076c1bfea8167408840fcfed74262970b74e",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research verification batch planner honors empty sanitizer and avoids fallback id collisions",
-      "occurrence": 1,
-      "sha256": "51a3cdfd237aedeb07cfc09cb0ce9d9aac5efc5b9de11b49cf0a5cfaa509679a",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research verification tier planner splits by verificationNeed with position fallback",
-      "occurrence": 1,
-      "sha256": "df65bc667a062b00670331436c4f6a3c3013b43f8eb6071a8ca64607750b85ca",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research verification tier planner enforces sanitize schema caps",
-      "occurrence": 1,
-      "sha256": "5f508e7b28e755fe82df4a7d6221bfd3b21ee13a3fba80344d15283d61d4d2d0",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "deep-research shadow selector tolerates malformed candidate entries",
-      "occurrence": 1,
-      "sha256": "8bf4df20f06f22011d6cabd96589ffdea4860b64b70071e130ae53596bf57d3e",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research claim-evidence-gate blocks unattributed batch rows without source status context",
-      "occurrence": 1,
-      "sha256": "59efdda93cb72f5f2089185ef0cd39c407d34e3ee0190fada4a16a35dd0756d9",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research verification batch planner splits refs:none and keys explicit source hints",
-      "occurrence": 1,
-      "sha256": "8e286a6a77309bf1703aeaeb65bf8f72e1fab6f5b06f8dfc6da7e1f4167dd8b0",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research claim-evidence-gate allows compatible source evidence and catches cross-source contamination",
-      "occurrence": 1,
-      "sha256": "0ef9bd9e1f3e825d1f5303a14e79cfd3659ebbbd545764805f39c8028c99d078",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research claim-evidence-gate extracts candidate identities from evidence rows, sourceUrl hints, and local paths",
-      "occurrence": 1,
-      "sha256": "030fe54190c8954d50e742853ec2dc3e5c3ee879ecac387b41337c64d99f6591",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research claim-evidence-gate routes extra corroborating sources to review unless explicitly allowed",
-      "occurrence": 1,
-      "sha256": "37bcaf12a2cb79e3d6346e83c5b0d72e05afe223959f4f4b191ee77765e83421",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research claim-evidence-gate allows same-host evidence only with explicit overlap",
-      "occurrence": 1,
-      "sha256": "ebd7cb132509eb54f2e7854bc812201aa1cd1d9bfd795239fbc12df8a87e34e4",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research claim-evidence-gate downgrades refs:none multi-claim batch rows",
-      "occurrence": 1,
-      "sha256": "26586dc591832c4d0d6677488fb67699db0ed7d2de2f94ad2b446005b0f374f6",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research claim-evidence-gate canonicalizes candidate ids and verifier integrity",
-      "occurrence": 1,
-      "sha256": "a8fc2e2c50360dfe06e5d7c69ee62205b4f067bf07f57153434fec8d0a7b0889",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research claim-evidence-gate preserves row-shaped results and clean batch joins",
-      "occurrence": 1,
-      "sha256": "63dedd036998dda695b417afb53478f86985809cf21eed2f7c0e5234e4ac85c2",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research claim-evidence-gate blocks batch rows outside their source batch",
-      "occurrence": 1,
-      "sha256": "9c63377fe868b40fdfbc2dd750f3ee2649b4ef60b9e7a927eaa1d5b00a7ce4d0",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research claim-evidence-gate marks clean verifier joins eligible for batch canary",
-      "occurrence": 1,
-      "sha256": "f86e6151bd3b9f56bc2e6624d2d48ca52e67b755193c48d87c88364a37d67425",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "deep-research claim-evidence-gate partitions verification_blocked separately",
-      "occurrence": 1,
-      "sha256": "c827eff88f7f0ba71d8e5d1aac7f0829d34b718ccc54ff8b20f2074c32a11d24",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "workflow_artifact lists visible sources, reads by source name, and records a read ledger",
-      "occurrence": 1,
-      "sha256": "c81efd44a598d63de6106d4716e74d6692669ad2ce459248441308c60f00c972",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "experimental workflow_artifact dedup suppresses exact duplicate read content",
-      "occurrence": 1,
-      "sha256": "fd5e0f65a5049d7853876facc5b8f9b2df0e5aa3eabaa1e8597cba4eeb15dddc",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "artifact graph source context warns that capped workflow_artifact reads need paths",
-      "occurrence": 1,
-      "sha256": "735db7f0f5bf6d2335c395b536dc9f84497775911fa7ceaac44c93c56278ce58",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "artifact graph source context serializes source list compactly",
-      "occurrence": 1,
-      "sha256": "fe135c04ab93bce39d125cd99457753c52c31ca32340311caef76df531d632dd",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow_artifact can read deterministic JSON projections with caps",
-      "occurrence": 1,
-      "sha256": "35ab18f09c8f1103c4e96b53ae7e3409df02167ca624022a3a025d9f2266de93",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow_artifact rejects path injection, unknown artifacts, and debug reads in workflow-task mode",
-      "occurrence": 1,
-      "sha256": "ca96e0c5f7ce9870306de145c4e81916123caf4dd9d17826746ca3f3b0b89aa5",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow_artifact extension registers and activates the tool",
-      "occurrence": 1,
-      "sha256": "eee76a5ff9e3d44fb1a9c563311c680a55256d21e16e97426cd7a5de404a80eb",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "structured required read policy enforces projection ledger rows separately from string reads",
-      "occurrence": 1,
-      "sha256": "38e5f3b6506df1941c0a5eccb978b1227a316789fe9f39c0813b18da21fd0c4f",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "artifact graph workflow runs workflow artifacts and enforces required reads",
-      "occurrence": 1,
-      "sha256": "45041f66dafc1cf605d4d133c14bbbf3df352c3409f6aeff8b264cb5abae0bd4",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "artifact graph output retry reuses confirmed subagent session",
-      "occurrence": 1,
-      "sha256": "f6650133e86a30d49d8aa11d6406ae4da73f8147785ab0757e3e5335ac99cd1f",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "artifact graph output retry defaults to new session when same-session flag is disabled",
-      "occurrence": 1,
-      "sha256": "2b71f659335bcd2957844c77894131b8aa978e3ef87b5f0a546ab8da8a74a99d",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "artifact graph output retry falls back to new session after same-session repair fails",
-      "occurrence": 1,
-      "sha256": "4a5a606135a51f82e14a2d1eca0f6d3aa3dc60f11be921e56ba18320c4d91009",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "artifact graph output retry starts new session when subagent session is unconfirmed",
-      "occurrence": 1,
-      "sha256": "ebd556d1b71d4b90e463f5aef434a2f2e817ff1eeb7d4375756135b484733af9",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "recovered artifact graph subagent handle preserves same-session retry",
-      "occurrence": 1,
-      "sha256": "69bcc3613dab64227b8315f9d74eef2f85676e70e142cad006404d5db3395f4e",
-      "domain": "artifact-web"
     },
     {
       "name": "subagent launch gate honors env override and recovers slots after throw",
@@ -2656,192 +2926,6 @@
       "domain": "engine-store"
     },
     {
-      "name": "non artifact graph subagent launches do not request child sessions",
-      "occurrence": 1,
-      "sha256": "db9c3fe06285a2c82927757c61d3071403451b3016735dade9e51b0b7f27f14a",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow_artifact generated extension wrapper embeds config without prompt-visible paths",
-      "occurrence": 1,
-      "sha256": "b32c3f180be4294816ad9540a96de1c2efb27274f5cf8c0285f3923ea1e8915d",
-      "domain": "dynamic-runtime"
-    },
-    {
-      "name": "workflow output parser accepts canonical control analysis refs sections",
-      "occurrence": 1,
-      "sha256": "07c00a7487caa5734da4820a845ab0aebab22317000ea3a7cc15fab8406f3702",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow output parser can require non-empty refs",
-      "occurrence": 1,
-      "sha256": "ce65271a1ae76834f1eb361293ebc9bfae1faca4265b77786ee7ad3e2be5c8f2",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow output parser rejects empty strict ref locators",
-      "occurrence": 1,
-      "sha256": "6ce187aa9a307e121b7cf6c9d5a1f638ee6dd7820fbf2c4355070599eec1ab10",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow artifact bundle can validate strict ref URL availability",
-      "occurrence": 1,
-      "sha256": "a7b78838923c713eb67cbced4ddec5c26a9a01496f3e31377b2dc58fadf6234f",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow artifact bundle validates unique ref URLs concurrently",
-      "occurrence": 1,
-      "sha256": "8ab00841d5445f53c04a4baf8918cf44d537515ec37bde071f724e9639e1d532",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow artifact bundle keeps ref URL validation serial per host",
-      "occurrence": 1,
-      "sha256": "1a33f38a290a33cf1995b644c18ec03d1e482287a5a3296ef13bc3c450a06b0a",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow artifact bundle validates duplicate ref URLs once",
-      "occurrence": 1,
-      "sha256": "44a0221afef750e121bd341b565ebc72b55d3bd5338453a442d18748657e7dbb",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow artifact bundle counts duplicate ref URLs toward maxUrls",
-      "occurrence": 1,
-      "sha256": "ab0973ef0ebcd06d8aa84ee19d2c4954eed053a05c34df6b60d881d0265f57e6",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow artifact bundle orders concurrent ref URL issues by ref index",
-      "occurrence": 1,
-      "sha256": "3d412c8bf0388a2ba17aa1f5630c4de8a755551cd6204ed480bce77eef3d3db5",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow artifact bundle can restrict refs to an upstream source ledger",
-      "occurrence": 1,
-      "sha256": "6be3b38f5ed892751890e20773e00bd4e664dc0b30519cd8bab5e1610999dfc6",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow output retry instructions include ref repair guidance",
-      "occurrence": 1,
-      "sha256": "0c52d079239888b165ca9225a13102472133f3f75972c77f7aacc7d3b609f58b",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow output retry instructions include claim-support repair guidance",
-      "occurrence": 1,
-      "sha256": "8ead6335426e6157c8b954aaf5abb6c97aa1db37fcf55529d0f4d6043fa6e838",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow artifact bundle gates positive verifier claim support",
-      "occurrence": 1,
-      "sha256": "38269496bd72e15e78f30f2117181a304734aaed01d62777cb024052f01ab7ec",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow artifact bundle rejects positive verifier support outside refs",
-      "occurrence": 1,
-      "sha256": "f7a0dd4fae26914d39bd81a3734b3b1231570106ec7d4110e6f5c05690725f9b",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow output parser recovers control object followed by one stray closing brace",
-      "occurrence": 1,
-      "sha256": "173af374f8a2641f5b3adf2e49f7c86353182461da428144307e3cd3b2e49caa",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow output parser rejects truncated control JSON with invalid_json",
-      "occurrence": 1,
-      "sha256": "cef6cc89ab7f6344802201e6c4b168370418024209e1e69b2469ec8db47759fc",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow output parser rejects substantive trailing control text after first object",
-      "occurrence": 1,
-      "sha256": "ada5a35ffcae3f0fff16d15c3726b766faaf39ff6dced9d55d7640b90a6a8695",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow output parser balances control braces inside strings during stray-brace recovery",
-      "occurrence": 1,
-      "sha256": "e5647ef0de6f3f056bbc248f823a4c659ebc4a56bb2f099b8e38ac93626c0b94",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow output parser tolerates literal closing tags inside JSON strings",
-      "occurrence": 1,
-      "sha256": "64cdf620853ab72f29c35f59ccabec28e73b48e40adb8199bb486910e89844ea",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "deep-review report schema requires identity evidence for findings",
-      "occurrence": 1,
-      "sha256": "9a7666a469fe7d304ae06ca2c0cc249c5d2d6fb79d33cf716efc747feac98ffd",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "minimal JSON schema validator enforces control schema subset",
-      "occurrence": 1,
-      "sha256": "3a6a5b03b84750944d626850b6b75fc2b3c9d88da86f7593794e6e372ae7a49c",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "workflow output parser normalizes reviewer location ranges before schema validation",
-      "occurrence": 1,
-      "sha256": "9d87545666b7316fde94534f9456e82301262c6864bca8fa7e405373bfe339e1",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow output parser repairs known workflow control schema slips before validation",
-      "occurrence": 1,
-      "sha256": "f97bd02449d5f496645c89c9ecc4517de1580191cf5b5d2afc296271ebb387cb",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow artifact bundle records schema-slip repair telemetry",
-      "occurrence": 1,
-      "sha256": "cf498f0ff016836229368b45e39123472e7baba0e7feee119410a07979ba9a15",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow output parser rejects missing sections, bad control, outside prose, and contract failures",
-      "occurrence": 1,
-      "sha256": "8b1410aa57f0796959c2d5bdf428c525c8fd65b51f875c864b86c0693bf8b96b",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow artifact bundle writer writes sidecars before result envelope",
-      "occurrence": 1,
-      "sha256": "85b6ebba3c073f0592f17df269225ee016845c19ee77488318765751b1e055ca",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow artifact bundle writer does not commit result when a parallel sidecar fails",
-      "occurrence": 1,
-      "sha256": "c6ba07ff11926c916d8a081e89c9cdd655f0c3bafd1bd70791363cadc04a0a7b",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow artifact bundle writer stores invalid attempts without commit result",
-      "occurrence": 1,
-      "sha256": "053ee41cd87f755b763836f6446a643d9e94d4a223fec944963d14bc2fdcb196",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow progress health classifies fresh long-running audit as long-tail active",
-      "occurrence": 1,
-      "sha256": "43195948bee3becdafa1f8160e7f9970ee2d7cf028868eee5653844bb4a4c50a",
-      "domain": "core-runtime"
-    },
-    {
       "name": "workflow progress health flags stale running task without backend signal",
       "occurrence": 1,
       "sha256": "68348b24cbbe1720b1d1472bc66d89c68c7260d93bbb2a316f77b6f56f6c95ed",
@@ -2852,18 +2936,6 @@
       "occurrence": 1,
       "sha256": "cd34667aee3afa48492ae341b1148fd3aee25e09219fc5ee822f914b3273de05",
       "domain": "engine-store"
-    },
-    {
-      "name": "workflow progress health classifies reviewer fanout as long running",
-      "occurrence": 1,
-      "sha256": "3cd618b66cfd769f3c38b21fdbfe3de86240b03b27ff643c7a6dddb0a832787b",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "workflow progress health surfaces failed fanout before running siblings",
-      "occurrence": 1,
-      "sha256": "ebff662fa3f86eae7724cabdec7d3fd5306fc5e67d76e6b2b4defceb81241d36",
-      "domain": "core-runtime"
     },
     {
       "name": "workflow progress health flags stale pending-only runs",
@@ -2878,102 +2950,6 @@
       "domain": "engine-store"
     },
     {
-      "name": "workflow TUI renders health in task list and detail",
-      "occurrence": 1,
-      "sha256": "a1e4ebe85337a5c83994f8ea6f3e305de99ab689d81e40294485f879b72cf16f",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "workflow TUI renders selected run health without status-command detours",
-      "occurrence": 1,
-      "sha256": "f5737d6fa3752265c521098ed77b8d06c05b4a8fa833505d2767584b7e516ca7",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "workflow TUI renders likely-stuck guidance and keeps narrow widths bounded",
-      "occurrence": 1,
-      "sha256": "634a45c66e31e1a5fc78a12667f54f83a48bd920d21a98c74c69dcb0e5d98c75",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "workflow progress health treats runtime budget overrun as resumable",
-      "occurrence": 1,
-      "sha256": "5e4e039b1f2437e0946d9ecf19e4e58b874fdb1a62bf5f13778c45fc01ff3715",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "workflow task detail switches between output and prompt artifacts",
-      "occurrence": 1,
-      "sha256": "1daf47aaca810bf0c9b46071d0aeb339af18f1c4ee333b3d1ead80ed984794c3",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow task detail scrolls the selected artifact with arrow keys",
-      "occurrence": 1,
-      "sha256": "0395ce13bca8cc9a9a51bf5864d6deae7a39c6634e228c99f76c7237ffafa709",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow task list orders problem tasks before completed tasks",
-      "occurrence": 1,
-      "sha256": "09061f2c932891545ec8b7ea9fce08404910314b7316b80110d1cfba55bc13f9",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "workflow task selection follows task id after problem reordering changes",
-      "occurrence": 1,
-      "sha256": "62354a3cfc3268593ea9b3204ed11d5381d5c942ec9965a3e9f47cb900b42a6b",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "workflow board render clamps ANSI and wide glyphs to viewport width",
-      "occurrence": 1,
-      "sha256": "40b65cddeaf49b13358bbc3c2f053d3d3e4b6da12f6fc251bf9cfb69c89d6a8b",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "workflow-guide scaffolds load and compile without warnings",
-      "occurrence": 1,
-      "sha256": "7cb9c5aadadacfb26ae1a5f883a99e64fc429a139308ef5bc1e9bde0810aaf88",
-      "domain": "authoring-interface"
-    },
-    {
-      "name": "compiler warns when sourceProjection paths match no source schema",
-      "occurrence": 1,
-      "sha256": "027ff923332f2a0f50558d74d81a24dd11b715499429c15689b08e42474ededf",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow output repair canonicalizes unique enum near-misses and records telemetry",
-      "occurrence": 1,
-      "sha256": "fab9960605ce5c1afb28814be19b5985c4251aa9938122f9d50f880668ea82d1",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow output repair leaves ambiguous or distant enum values failing closed",
-      "occurrence": 1,
-      "sha256": "be7ff857ae8e06b4386b638ec2fe9d7df15a865654472161a5b548039368a587",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow output repair never bridges a negation difference in enum near-misses",
-      "occurrence": 1,
-      "sha256": "33f31d4908695a4d546874040982c9a5acb564609a0aa7e37857c882a601ff41",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow output repair wraps bare string object rows only when valid by construction",
-      "occurrence": 1,
-      "sha256": "52679c2e11a0d9aa8a36f7067d1b9bb54c3cec12e7210ad50c9beaae8f7ab14a",
-      "domain": "artifact-web"
-    },
-    {
-      "name": "workflow output repair leaves string rows untouched when items require multiple properties",
-      "occurrence": 1,
-      "sha256": "943fa383f473493ef223468441849f0f0c333805e303b78bfda542cf03bed966",
-      "domain": "artifact-web"
-    },
-    {
       "name": "run lease heartbeat carries task progress fields after a task transition",
       "occurrence": 1,
       "sha256": "a941ffc5ef860b26a587ca04f85205897e00332bfb4f2021cc98f19d214f84e2",
@@ -2986,40 +2962,16 @@
       "domain": "engine-store"
     },
     {
-      "name": "formatRun omits stall warning when task transitions are recent",
-      "occurrence": 1,
-      "sha256": "3b9c2c4c6cc7043219f06637f491c80243455612cb6e10fd9ef22403bde92cf0",
-      "domain": "authoring-interface"
-    },
-    {
       "name": "formatRun surfaces supervisor heartbeat lost while run says running",
       "occurrence": 1,
       "sha256": "76b278bf70721b72047d6271f33735193d3f6e72fe2ed7768845e924c0a650bd",
       "domain": "engine-store"
     },
     {
-      "name": "workflow board shows stall badge on run rows and detail header",
-      "occurrence": 1,
-      "sha256": "08ff2bdd0ad2db04f2ded85d697cd2a2070cec14410d8736cb7f545143355198",
-      "domain": "authoring-interface"
-    },
-    {
       "name": "workflow board shows heartbeat-lost badge when supervisor heartbeat is stale",
       "occurrence": 1,
       "sha256": "0dffd431bbc16501f9ad75b299e1bfb24e7f6c66b2c607f16c6531c53a42dbf2",
       "domain": "engine-store"
-    },
-    {
-      "name": "workflow retry limit overrides accept zero and reject malformed values",
-      "occurrence": 1,
-      "sha256": "1c77bd717b3fdb536e3eb6e928d370088a5d3e1d956a395c6134403b40debdc9",
-      "domain": "core-runtime"
-    },
-    {
-      "name": "zero transient retry override fails the first transient model failure",
-      "occurrence": 1,
-      "sha256": "5d31656fbb69db33c908775975608abee805318471f6e8c0a6780f38996f463f",
-      "domain": "core-runtime"
     }
   ]
 }

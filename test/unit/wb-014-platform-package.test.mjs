@@ -12,10 +12,7 @@ const bundleSpecs = [
 	"workflows/deep-review/spec.json",
 	"workflows/spec-review/spec.json",
 	"workflows/impact-review/spec.json",
-	"workflows/deep-research/batched-verification.spec.json",
 	"workflows/deep-research/tiered-verification.spec.json",
-	"workflows/deep-review/batched-devil-advocate.spec.json",
-	"workflows/spec-review/batched-verification.spec.json",
 	"skills/workflow-guide/scaffolds/analysis-dossier/spec.json",
 	"skills/workflow-guide/scaffolds/dag-required-reads/spec.json",
 	"skills/workflow-guide/scaffolds/foreach-reduce/spec.json",
@@ -42,14 +39,22 @@ test("CI validates the complete package surface on macOS and Linux with pinned a
 	assert.match(readRoot("README.md"), /macOS or Linux/);
 });
 
-test("release checker is shell-free and requires all official/opt-in/scaffold bundle specs", () => {
+test("release checker is shell-free and requires all official default, public variant, and scaffold bundle specs", () => {
 	const source = readRoot("tools/release/release-check.mjs");
 	assert.match(source, /shell: false/);
 	assert.doesNotMatch(source, /sha256sum|readlink|\bstat\s|\bsed\s|\bxargs\s/);
 	assert.match(source, /workflows\/README\.md/);
 	assert.match(source, /skills\/workflow-guide\/scaffolds\/README\.md/);
 	for (const specPath of bundleSpecs) assert.ok(source.includes(specPath), specPath);
+	for (const forbidden of [
+		"workflows/deep-research/batched-verification.spec.json",
+		"workflows/deep-review/batched-devil-advocate.spec.json",
+		"workflows/spec-review/batched-verification.spec.json",
+	]) {
+		assert.doesNotMatch(source, new RegExp(`\\"${forbidden.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\"`), forbidden);
+	}
 	assert.match(source, /missing referenced workflow\/scaffold assets/i);
+	assert.match(source, /FORBIDDEN_CANDIDATE_PATTERN/);
 });
 
 test("npm dry-run package contains every local asset referenced by official, opt-in, and scaffold specs", () => {
@@ -70,6 +75,10 @@ test("npm dry-run package contains every local asset referenced by official, opt
 		...bundleSpecs,
 	]) {
 		assert.ok(packed.has(required), `package missing ${required}`);
+	}
+	for (const file of packed) {
+		assert.ok(!file.startsWith("internal/"), `package must not include ${file}`);
+		assert.doesNotMatch(file, /workflows\/(?:deep-research\/batched-verification|deep-review\/batched-devil-advocate|spec-review\/batched-verification)\.spec\.json|batch-verification-candidates\.mjs|batch-control\.schema\.json/);
 	}
 	for (const specPath of bundleSpecs) {
 		const spec = JSON.parse(readRoot(specPath));
