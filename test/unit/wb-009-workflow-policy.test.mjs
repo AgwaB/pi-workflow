@@ -11,7 +11,10 @@ const expectedPins = new Map([
 ]);
 
 async function workflow(name) {
-	return readFile(new URL(`../../.github/workflows/${name}`, import.meta.url), "utf8");
+	return readFile(
+		new URL(`../../.github/workflows/${name}`, import.meta.url),
+		"utf8",
+	);
 }
 
 function assertYamlParses(name) {
@@ -60,7 +63,13 @@ STDOUT.write(JSON.generate(runs))
 		{ encoding: "utf8" },
 	);
 	assert.equal(result.status, 0, result.stderr);
-	return JSON.parse(result.stdout);
+	try {
+		return JSON.parse(result.stdout);
+	} catch (error) {
+		throw new Error(
+			`failed to parse decoded workflow scripts: ${error.message}`,
+		);
+	}
 }
 
 function shellScriptForSyntaxCheck(script) {
@@ -108,31 +117,53 @@ test("WB-009 decoded workflow run scripts pass Bash syntax", () => {
 test("WB-009 CI and release checkout never persist credentials", async () => {
 	const ci = await workflow("ci.yml");
 	const publish = await workflow("publish.yml");
-	assert.match(ci, /actions\/checkout@[0-9a-f]{40}[^]*persist-credentials: false/);
+	assert.match(
+		ci,
+		/actions\/checkout@[0-9a-f]{40}[^]*persist-credentials: false/,
+	);
 	for (const checkout of publish.split(/- uses: actions\/checkout@/).slice(1)) {
-		assert.match(checkout.split(/\n\s*- (?:uses|name):/)[0], /persist-credentials: false/);
+		assert.match(
+			checkout.split(/\n\s*- (?:uses|name):/)[0],
+			/persist-credentials: false/,
+		);
 	}
 });
 
 test("WB-009 privileged jobs consume the exact artifact without install or build lifecycle", async () => {
 	const publishWorkflow = await workflow("publish.yml");
-	const publishJob = publishWorkflow.split("\n  publish:\n")[1].split("\n  release:\n")[0];
+	const publishJob = publishWorkflow
+		.split("\n  publish:\n")[1]
+		.split("\n  release:\n")[0];
 	const releaseJob = publishWorkflow.split("\n  release:\n")[1];
 	assert.match(publishJob, /environment: npm-publish/);
 	assert.match(publishJob, /id-token: write/);
 	assert.match(publishJob, /actions\/download-artifact@[0-9a-f]{40}/);
-	assert.match(publishJob, /BUILD_PACKAGE_SHA: \$\{\{ needs\.build\.outputs\.package-sha \}\}/);
+	assert.match(
+		publishJob,
+		/BUILD_PACKAGE_SHA: \$\{\{ needs\.build\.outputs\.package-sha \}\}/,
+	);
 	assert.match(publishJob, /test "\$expected_sha" = "\$BUILD_PACKAGE_SHA"/);
 	assert.match(publishJob, /test "\$actual_sha" = "\$BUILD_PACKAGE_SHA"/);
 	assert.doesNotMatch(publishJob, /npm (?:ci|install)|npm run|npm pack/);
-	assert.match(publishJob, /npm publish[^\n]+\.tgz|npm publish "release-artifact\/\$package_file"/);
+	assert.match(
+		publishJob,
+		/package_path="\$PWD\/release-artifact\/\$package_file"/,
+	);
+	assert.match(publishJob, /test -f "\$package_path"/);
+	assert.match(publishJob, /npm publish "\$package_path"/);
 	assert.match(publishJob, /--ignore-scripts/);
 
 	assert.match(releaseJob, /contents: write/);
 	assert.match(releaseJob, /id-token: none/);
-	assert.doesNotMatch(releaseJob, /npm (?:ci|install)|npm run|npm pack|npm publish/);
+	assert.doesNotMatch(
+		releaseJob,
+		/npm (?:ci|install)|npm run|npm pack|npm publish/,
+	);
 	assert.match(releaseJob, /git bundle verify/);
-	assert.match(releaseJob, /BUILD_PACKAGE_SHA: \$\{\{ needs\.build\.outputs\.package-sha \}\}/);
+	assert.match(
+		releaseJob,
+		/BUILD_PACKAGE_SHA: \$\{\{ needs\.build\.outputs\.package-sha \}\}/,
+	);
 	assert.match(releaseJob, /test "\$package_sha" = "\$BUILD_PACKAGE_SHA"/);
 	assert.match(releaseJob, /sha256sum[^\n]+BUILD_PACKAGE_SHA/);
 	assert.match(releaseJob, /remote_main[^]*github\.sha/);
@@ -141,13 +172,21 @@ test("WB-009 privileged jobs consume the exact artifact without install or build
 
 test("WB-009 read-only build creates and hashes the only publishable tarball", async () => {
 	const publishWorkflow = await workflow("publish.yml");
-	const buildJob = publishWorkflow.split("\n  build:\n")[1].split("\n  publish:\n")[0];
+	const buildJob = publishWorkflow
+		.split("\n  build:\n")[1]
+		.split("\n  publish:\n")[0];
 	assert.match(buildJob, /permissions:\n\s+contents: read/);
 	assert.doesNotMatch(buildJob, /id-token: write|contents: write/);
 	assert.match(buildJob, /npm ci --legacy-peer-deps --ignore-scripts/);
 	assert.match(buildJob, /npm pack --ignore-scripts --json/);
-	assert.match(buildJob, /package-sha: \$\{\{ steps\.package\.outputs\.package-sha \}\}/);
-	assert.match(buildJob, /id: package[^]*echo "package-sha=\$package_sha" >> "\$GITHUB_OUTPUT"/);
+	assert.match(
+		buildJob,
+		/package-sha: \$\{\{ steps\.package\.outputs\.package-sha \}\}/,
+	);
+	assert.match(
+		buildJob,
+		/id: package[^]*echo "package-sha=\$package_sha" >> "\$GITHUB_OUTPUT"/,
+	);
 	assert.match(buildJob, /packageSha256/);
 	assert.match(buildJob, /release\.bundle/);
 	assert.match(buildJob, /actions\/upload-artifact@[0-9a-f]{40}/);

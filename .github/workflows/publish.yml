@@ -160,14 +160,16 @@ jobs:
           test "$(node -p "require('./$metadata').version")" = "$TARGET_VERSION"
           name="$(node -p "require('./$metadata').name")"
           package_file="$(node -p "require('./$metadata').packageFile")"
+          package_path="$PWD/release-artifact/$package_file"
+          test -f "$package_path"
           expected_sha="$(node -p "require('./$metadata').packageSha256")"
-          actual_sha="$(sha256sum "release-artifact/$package_file" | awk '{print $1}')"
+          actual_sha="$(sha256sum "$package_path" | awk '{print $1}')"
           test "$expected_sha" = "$BUILD_PACKAGE_SHA"
           test "$actual_sha" = "$BUILD_PACKAGE_SHA"
 
           integrity="$(npm view "$name@$TARGET_VERSION" dist.integrity 2>/dev/null || true)"
           if [ -n "$integrity" ]; then
-            export PACKAGE_PATH="release-artifact/$package_file" EXPECTED_INTEGRITY="$integrity"
+            export PACKAGE_PATH="$package_path" EXPECTED_INTEGRITY="$integrity"
             node --input-type=commonjs --eval '
             const crypto = require("node:crypto");
             const fs = require("node:fs");
@@ -178,7 +180,7 @@ jobs:
             '
             echo "$name@$TARGET_VERSION already exists with identical integrity; skipping publish."
           else
-            npm publish "release-artifact/$package_file" --access public --provenance --ignore-scripts
+            npm publish "$package_path" --access public --provenance --ignore-scripts
           fi
 
   release:
