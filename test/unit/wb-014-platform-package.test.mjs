@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, posix, resolve } from "node:path";
@@ -93,6 +93,25 @@ test("publish workflow parses npm pack JSON from a temporary file instead of arg
 	assert.doesNotMatch(publish, /"\$pack_json"/);
 });
 
+// npm treats a bare path with one slash, such as release-artifact/pkg.tgz, as
+// GitHub shorthand. The publish job must hand npm an explicit path instead.
+test("publish workflow passes npm an unambiguous tarball path", () => {
+	const publish = readRoot(".github/workflows/publish.yml");
+	assert.doesNotMatch(
+		publish,
+		/npm publish\s+"release-artifact\/\$package_file"/,
+	);
+	assert.match(
+		publish,
+		/package_path="\$PWD\/release-artifact\/\$package_file"/,
+	);
+	assert.match(publish, /test -f "\$package_path"/);
+	assert.match(
+		publish,
+		/npm publish "\$package_path" --access public --provenance --ignore-scripts/,
+	);
+});
+
 test("release pack JSON parser handles the real dry-run manifest from a file path", () => {
 	const output = execFileSync(
 		"npm",
@@ -119,6 +138,69 @@ test("release pack JSON parser handles the real dry-run manifest from a file pat
 		);
 		assert.equal(actual, expected);
 		assert.ok(output.length > 0, "expected npm pack to emit JSON");
+	} finally {
+		rmSync(tmp, { recursive: true, force: true });
+	}
+});
+
+test("npm publish dry-run accepts the same safe absolute tarball path form", () => {
+	const tmp = mkdtempSync(join(tmpdir(), "pi-workflow-publish-dry-run-"));
+	try {
+		const packageRoot = join(tmp, "package");
+		execFileSync(process.execPath, [
+			"-e",
+			"require('node:fs').mkdirSync(process.argv[1])",
+			packageRoot,
+		]);
+		writeFileSync(
+			join(packageRoot, "package.json"),
+			`${JSON.stringify(
+				{
+					name: `pi-workflow-tarball-path-regression-${process.pid}`,
+					version: "0.0.0",
+					description: "local npm publish dry-run path regression fixture",
+					license: "UNLICENSED",
+				},
+				null,
+				2,
+			)}\n`,
+		);
+		writeFileSync(
+			join(packageRoot, "README.md"),
+			"# tarball path regression fixture\n",
+		);
+		const packOutput = execFileSync(
+			"npm",
+			["pack", "--json", "--ignore-scripts", "--pack-destination", tmp],
+			{ cwd: packageRoot, encoding: "utf8", timeout: 180_000 },
+		);
+		const [summary] = parseJson(packOutput, "npm pack fixture output");
+		const packagePath = join(tmp, summary.filename);
+		assert.ok(packagePath.startsWith(`${tmp}/`), packagePath);
+
+		const publish = spawnSync(
+			"npm",
+			[
+				"publish",
+				packagePath,
+				"--dry-run",
+				"--ignore-scripts",
+				"--access",
+				"public",
+			],
+			{ cwd: root, encoding: "utf8", timeout: 180_000 },
+		);
+		const combinedOutput = `${publish.stdout}\n${publish.stderr}`;
+		assert.equal(
+			publish.status,
+			0,
+			`npm publish --dry-run failed with ${publish.status}: ${combinedOutput}`,
+		);
+		assert.match(
+			combinedOutput,
+			/npm notice Publishing to .* with tag latest and public access \(dry-run\)/,
+		);
+		assert.doesNotMatch(combinedOutput, /\+\s+@agwab\/pi-workflow@/);
 	} finally {
 		rmSync(tmp, { recursive: true, force: true });
 	}

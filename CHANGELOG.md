@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **fix:** Publish workflow now passes npm an absolute tarball path, avoiding GitHub-shorthand parsing of release artifact paths.
 - **fix:** Publish workflow now reads the `npm pack --json` manifest from a temporary
   file instead of argv, avoiding ARG_MAX failures on large package manifests while
   preserving package hash/artifact verification.
