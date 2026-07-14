@@ -1,19 +1,7 @@
 import assert from "node:assert/strict";
-import {
-	mkdirSync,
-	mkdtempSync,
-	readFileSync,
-	readdirSync,
-	rmSync,
-	statSync,
-	symlinkSync,
-	writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { spawnSync } from "node:child_process";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 
 import {
 	buildDynamicToolResultBudgetMetrics,
@@ -27,8 +15,6 @@ import {
 	refreshRunFromSubagentArtifacts,
 	setSubagentApiForTests,
 } from "./unit-test-support.mjs";
-
-const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 function dynamicMetadata(task, overrides = {}) {
 	task.dynamicGenerated = {
@@ -894,96 +880,4 @@ test("normalization rejects invalid counters without treating them as zero", () 
 			forcedEvictionApplied: true,
 		},
 	);
-});
-
-test("cohort collector reads explicit roots, emits coverage, and writes nothing", () => {
-	const project = mkdtempSync(join(tmpdir(), "workflow-budget-cohort-"));
-	try {
-		const runDir = join(project, ".pi", "workflows", "workflow_fixture");
-		mkdirSync(runDir, { recursive: true });
-		const runFile = join(runDir, "run.json");
-		const run = syntheticRun([
-			syntheticTask({
-				taskId: "collector",
-				attempts: [
-					{
-						source: "result",
-						capturedAt: "2026-07-10T00:00:01.000Z",
-						terminal: true,
-						reported: true,
-						enabled: true,
-						maxTotalChars: 200,
-						retainedChars: 100,
-						evictedCount: 1,
-						evictedChars: 25,
-					},
-				],
-			}),
-		], { runId: "workflow_fixture" });
-		writeFileSync(runFile, JSON.stringify(run, null, 2));
-		const before = readFileSync(runFile, "utf8");
-		const beforeMtime = statSync(runFile).mtimeMs;
-		const beforeEntries = readdirSync(runDir).toSorted();
-		const result = spawnSync(
-			process.execPath,
-			[
-				join(repoRoot, "tools", "dynamic-tool-result-budget-cohort.mjs"),
-				project,
-			],
-			{ cwd: repoRoot, encoding: "utf8" },
-		);
-		assert.equal(result.status, 0, result.stderr);
-		const report = JSON.parse(result.stdout);
-		assert.equal(report.runsRead, 1);
-		assert.equal(report.cohort.dynamicTasks, 1);
-		assert.equal(report.cohort.reportingTasks, 1);
-		assert.equal(report.cohort.observedEvictedCount, 1);
-		assert.equal(report.cohort.utilization.p50, 0.5);
-		assert.equal(report.errors.length, 0);
-		assert.equal(readFileSync(runFile, "utf8"), before);
-		assert.equal(statSync(runFile).mtimeMs, beforeMtime);
-		assert.deepEqual(readdirSync(runDir).toSorted(), beforeEntries);
-	} finally {
-		rmSync(project, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
-	}
-});
-
-test("cohort collector requires explicit roots and rejects symlink escapes", () => {
-	const project = mkdtempSync(join(tmpdir(), "workflow-budget-root-"));
-	const outside = mkdtempSync(join(tmpdir(), "workflow-budget-outside-"));
-	try {
-		const tool = join(
-			repoRoot,
-			"tools",
-			"dynamic-tool-result-budget-cohort.mjs",
-		);
-		const noArgs = spawnSync(process.execPath, [tool], {
-			cwd: project,
-			encoding: "utf8",
-		});
-		assert.equal(noArgs.status, 2);
-		assert.match(noArgs.stderr, /Usage:/);
-
-		const workflowRoot = join(project, ".pi", "workflows");
-		const outsideRun = join(outside, "run-escape");
-		mkdirSync(workflowRoot, { recursive: true });
-		mkdirSync(outsideRun, { recursive: true });
-		writeFileSync(
-			join(outsideRun, "run.json"),
-			JSON.stringify(syntheticRun([], { runId: "workflow_escape" })),
-		);
-		symlinkSync(outsideRun, join(workflowRoot, "workflow_escape"));
-		const escaped = spawnSync(process.execPath, [tool, project], {
-			cwd: repoRoot,
-			encoding: "utf8",
-		});
-		assert.equal(escaped.status, 1);
-		const report = JSON.parse(escaped.stdout);
-		assert.equal(report.runsRead, 0);
-		assert.equal(report.errors.length, 1);
-		assert.match(report.errors[0].error, /escapes explicit root/);
-	} finally {
-		rmSync(project, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
-		rmSync(outside, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
-	}
 });

@@ -118,19 +118,6 @@ metadata from an old or interrupted backend is recorded as unavailable rather
 than as zero pressure. Existing run files without this optional field remain
 valid.
 
-From a source checkout, aggregate one or more explicit project workflow roots
-without starting workflows or making provider calls:
-
-```bash
-npm run build
-node tools/dynamic-tool-result-budget-cohort.mjs /path/to/project [...]
-```
-
-The collector reads only the supplied project, `.pi/workflows`, run-directory,
-or `run.json` paths, writes no files, and emits JSON to stdout. Treat its
-utilization values as final observed retained-character pressure, not peak
-token-context usage.
-
 ## Bundled skills
 
 | Skill | Use when |
