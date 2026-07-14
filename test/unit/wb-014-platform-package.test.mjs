@@ -1,12 +1,20 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, posix, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const readRoot = (path) => readFileSync(join(root, path), "utf8");
+const parseJson = (text, label) => {
+	try {
+		return JSON.parse(text);
+	} catch (error) {
+		throw new Error(`failed to parse ${label}: ${error.message}`);
+	}
+};
 const bundleSpecs = [
 	"workflows/deep-research/spec.json",
 	"workflows/deep-review/spec.json",
@@ -29,10 +37,16 @@ test("CI validates the complete package surface on macOS and Linux with pinned a
 	);
 	assert.match(ci, /runs-on: \$\{\{ matrix\.os \}\}/);
 	assert.match(ci, /timeout-minutes: 30/);
-	for (const command of ["npm run validate", "npm run e2e", "npm run pack:dry"]) {
+	for (const command of [
+		"npm run validate",
+		"npm run e2e",
+		"npm run pack:dry",
+	]) {
 		assert.ok(ci.includes(command));
 	}
-	for (const line of ci.split("\n").filter((candidate) => /\buses:/.test(candidate))) {
+	for (const line of ci
+		.split("\n")
+		.filter((candidate) => /\buses:/.test(candidate))) {
 		assert.match(line, /uses:\s+[^@\s]+@[0-9a-f]{40}(?:\s+#\s+v\d+)?$/);
 	}
 	assert.match(ci, /persist-credentials: false/);
@@ -45,16 +59,69 @@ test("release checker is shell-free and requires all official default, public va
 	assert.doesNotMatch(source, /sha256sum|readlink|\bstat\s|\bsed\s|\bxargs\s/);
 	assert.match(source, /workflows\/README\.md/);
 	assert.match(source, /skills\/workflow-guide\/scaffolds\/README\.md/);
-	for (const specPath of bundleSpecs) assert.ok(source.includes(specPath), specPath);
+	for (const specPath of bundleSpecs)
+		assert.ok(source.includes(specPath), specPath);
 	for (const forbidden of [
 		"workflows/deep-research/batched-verification.spec.json",
 		"workflows/deep-review/batched-devil-advocate.spec.json",
 		"workflows/spec-review/batched-verification.spec.json",
 	]) {
-		assert.doesNotMatch(source, new RegExp(`\\"${forbidden.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\"`), forbidden);
+		assert.doesNotMatch(
+			source,
+			new RegExp(`\\"${forbidden.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\"`),
+			forbidden,
+		);
 	}
 	assert.match(source, /missing referenced workflow\/scaffold assets/i);
 	assert.match(source, /FORBIDDEN_CANDIDATE_PATTERN/);
+});
+
+test("publish workflow parses npm pack JSON from a temporary file instead of argv", () => {
+	const publish = readRoot(".github/workflows/publish.yml");
+	assert.match(publish, /pack_json_file="\$\(mktemp\)"/);
+	assert.match(publish, /trap cleanup_pack_json EXIT/);
+	assert.match(
+		publish,
+		/npm pack --ignore-scripts --json > "\$pack_json_file"/,
+	);
+	assert.match(publish, /readFileSync\(process\.argv\[1\], "utf8"\)/);
+	assert.doesNotMatch(
+		publish,
+		/pack_json="\$\(npm pack --ignore-scripts --json\)"/,
+	);
+	assert.doesNotMatch(publish, /JSON\.parse\(process\.argv\[1\]\)/);
+	assert.doesNotMatch(publish, /"\$pack_json"/);
+});
+
+test("release pack JSON parser handles the real dry-run manifest from a file path", () => {
+	const output = execFileSync(
+		"npm",
+		["pack", "--dry-run", "--json", "--ignore-scripts"],
+		{
+			cwd: root,
+			encoding: "utf8",
+			timeout: 180_000,
+		},
+	);
+	const tmp = mkdtempSync(join(tmpdir(), "pi-workflow-pack-json-"));
+	try {
+		const manifestPath = join(tmp, "pack.json");
+		writeFileSync(manifestPath, output);
+		const expected = parseJson(output, "npm pack dry-run output")[0].filename;
+		const actual = execFileSync(
+			process.execPath,
+			[
+				"-e",
+				"const fs=require('node:fs'); const [p]=JSON.parse(fs.readFileSync(process.argv[1], 'utf8')); process.stdout.write(p.filename)",
+				manifestPath,
+			],
+			{ cwd: root, encoding: "utf8" },
+		);
+		assert.equal(actual, expected);
+		assert.ok(output.length > 0, "expected npm pack to emit JSON");
+	} finally {
+		rmSync(tmp, { recursive: true, force: true });
+	}
 });
 
 test("npm dry-run package contains every local asset referenced by official, opt-in, and scaffold specs", () => {
@@ -67,7 +134,7 @@ test("npm dry-run package contains every local asset referenced by official, opt
 			timeout: 180_000,
 		},
 	);
-	const [summary] = JSON.parse(output);
+	const [summary] = parseJson(output, "npm pack dry-run output");
 	const packed = new Set(summary.files.map((file) => file.path));
 	for (const required of [
 		"workflows/README.md",
@@ -77,16 +144,25 @@ test("npm dry-run package contains every local asset referenced by official, opt
 		assert.ok(packed.has(required), `package missing ${required}`);
 	}
 	for (const file of packed) {
-		assert.ok(!file.startsWith("internal/"), `package must not include ${file}`);
-		assert.doesNotMatch(file, /workflows\/(?:deep-research\/batched-verification|deep-review\/batched-devil-advocate|spec-review\/batched-verification)\.spec\.json|batch-verification-candidates\.mjs|batch-control\.schema\.json/);
+		assert.ok(
+			!file.startsWith("internal/"),
+			`package must not include ${file}`,
+		);
+		assert.doesNotMatch(
+			file,
+			/workflows\/(?:deep-research\/batched-verification|deep-review\/batched-devil-advocate|spec-review\/batched-verification)\.spec\.json|batch-verification-candidates\.mjs|batch-control\.schema\.json/,
+		);
 	}
 	for (const specPath of bundleSpecs) {
-		const spec = JSON.parse(readRoot(specPath));
+		const spec = parseJson(readRoot(specPath), specPath);
 		for (const relativeRef of localFileRefs(spec)) {
 			const assetPath = posix.normalize(
 				posix.join(posix.dirname(specPath), relativeRef),
 			);
-			assert.ok(packed.has(assetPath), `${specPath} references unpacked ${assetPath}`);
+			assert.ok(
+				packed.has(assetPath),
+				`${specPath} references unpacked ${assetPath}`,
+			);
 		}
 	}
 });

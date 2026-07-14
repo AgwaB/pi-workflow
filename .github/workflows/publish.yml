@@ -88,8 +88,11 @@ jobs:
           fi
           test -z "$(git status --porcelain)"
 
-          pack_json="$(npm pack --ignore-scripts --json)"
-          package_file="$(node -e 'const [p]=JSON.parse(process.argv[1]); process.stdout.write(p.filename)' "$pack_json")"
+          pack_json_file="$(mktemp)"
+          cleanup_pack_json() { rm -f "$pack_json_file"; }
+          trap cleanup_pack_json EXIT
+          npm pack --ignore-scripts --json > "$pack_json_file"
+          package_file="$(node -e 'const fs=require("node:fs"); const [p]=JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(p.filename)' "$pack_json_file")"
           package_sha="$(sha256sum "$package_file" | awk '{print $1}')"
           echo "package-sha=$package_sha" >> "$GITHUB_OUTPUT"
           git bundle create release.bundle HEAD "refs/tags/v$TARGET_VERSION"
