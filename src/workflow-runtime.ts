@@ -108,12 +108,7 @@ export async function resolveWorkflowRuntime(
 	const model = await resolveModel(baseModel, context, options);
 	const effectiveThinking =
 		runtime.thinking ?? thinking ?? options.defaults?.thinking;
-	const thinkingResolution = await resolveThinking(
-		model,
-		effectiveThinking,
-		context,
-		options,
-	);
+	const thinkingResolution = resolveThinking(model, effectiveThinking, options);
 	return {
 		...(model ? { model } : {}),
 		...(thinkingResolution?.resolved
@@ -137,12 +132,15 @@ export function splitKnownThinkingSuffix(model: string): {
 	};
 }
 
+// Mirrors pi-ai getSupportedThinkingLevels: a non-reasoning model only
+// supports "off", and "xhigh" is opt-in via an explicit thinkingLevelMap
+// entry. When no model info is available (model not in the registry), defer
+// to the child pi CLI clamp by allowing every level.
 export function getSupportedThinkingLevels(
 	model: WorkflowModelInfo | undefined,
 ): ThinkingLevel[] {
 	if (!model) return [...THINKING_LEVELS];
-	if (model.reasoning === false) return ["off"];
-	if (!model.thinkingLevelMap) return [...THINKING_LEVELS];
+	if (!model.reasoning) return ["off"];
 
 	return THINKING_LEVELS.filter((level) => {
 		const mapped = model.thinkingLevelMap?.[level];
@@ -150,6 +148,26 @@ export function getSupportedThinkingLevels(
 		if (level === "xhigh") return mapped !== undefined;
 		return true;
 	});
+}
+
+// Mirrors pi-ai clampThinkingLevel: nearest supported level scanning up
+// from the request first, then down; never throws and never prompts.
+export function clampSupportedThinkingLevel(
+	supported: ThinkingLevel[],
+	requested: ThinkingLevel,
+): ThinkingLevel {
+	if (supported.includes(requested)) return requested;
+	const requestedIndex = THINKING_LEVELS.indexOf(requested);
+	if (requestedIndex === -1) return supported[0] ?? "off";
+	for (let i = requestedIndex; i < THINKING_LEVELS.length; i += 1) {
+		const candidate = THINKING_LEVELS[i]!;
+		if (supported.includes(candidate)) return candidate;
+	}
+	for (let i = requestedIndex - 1; i >= 0; i -= 1) {
+		const candidate = THINKING_LEVELS[i]!;
+		if (supported.includes(candidate)) return candidate;
+	}
+	return supported[0] ?? "off";
 }
 
 async function resolveModel(
@@ -248,68 +266,26 @@ async function chooseAvailableModelForMissing(
 	return selected;
 }
 
-async function resolveThinking(
+// Follows the pi SDK: unsupported thinking requests are deterministically
+// clamped (up first, then down) instead of prompting or throwing, and the
+// adjustment is recorded in thinkingResolution.reason.
+function resolveThinking(
 	modelId: string | undefined,
 	requested: ThinkingLevel | undefined,
-	context: WorkflowRuntimeResolutionContext,
 	options: ResolveWorkflowRuntimeOptions,
-): Promise<WorkflowRuntimeThinkingResolution | undefined> {
+): WorkflowRuntimeThinkingResolution | undefined {
 	if (!requested) return undefined;
 	const model = findModelInfo(modelId, options.availableModels ?? []);
 	const supported = getSupportedThinkingLevels(model);
 	if (supported.includes(requested)) {
 		return { requested, resolved: requested };
 	}
-
-	if (supported.length === 0) {
-		throw new Error(
-			`${modelId ?? "selected model"} does not expose any supported reasoning levels for ${context.taskKey}`,
-		);
-	}
-
-	const downgradeOptions = lowerOrEqualSupportedThinking(requested, supported);
-	if (downgradeOptions.length === 0) {
-		const modelLabel = modelId ?? "selected model";
-		throw new Error(
-			`${modelLabel} does not support reasoning level "${requested}" for ${context.taskKey}, and no lower-or-equal fallback is available. Supported: ${supported.join(", ") || "none"}`,
-		);
-	}
-
-	if (!options.prompt) {
-		const resolved = downgradeOptions[downgradeOptions.length - 1]!;
-		return {
-			requested,
-			resolved,
-			reason: `requested ${requested} is unsupported by ${modelId ?? "selected model"}; using ${resolved}`,
-		};
-	}
-
-	const selected = await options.prompt.select(
-		`${modelId ?? "Selected model"} does not support reasoning "${requested}" for ${context.taskKey}. Choose a supported lower-or-equal level.`,
-		downgradeOptions,
-	);
-	if (!selected)
-		throw new Error(`Reasoning selection cancelled for ${context.taskKey}`);
-	if (!isThinkingLevel(selected) || !downgradeOptions.includes(selected))
-		throw new Error(
-			`Invalid reasoning selection "${selected}" for ${context.taskKey}`,
-		);
+	const resolved = clampSupportedThinkingLevel(supported, requested);
 	return {
 		requested,
-		resolved: selected,
-		reason: `selected supported reasoning ${selected} for unsupported request ${requested}`,
+		resolved,
+		reason: `requested ${requested} is unsupported by ${modelId ?? "selected model"}; using ${resolved}`,
 	};
-}
-
-function lowerOrEqualSupportedThinking(
-	requested: ThinkingLevel,
-	supported: ThinkingLevel[],
-): ThinkingLevel[] {
-	const requestedIndex = THINKING_LEVELS.indexOf(requested);
-	if (requestedIndex < 0) return [];
-	return THINKING_LEVELS.slice(0, requestedIndex + 1).filter((level) =>
-		supported.includes(level),
-	);
 }
 
 function findModelInfo(

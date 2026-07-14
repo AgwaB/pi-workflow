@@ -3779,6 +3779,37 @@ test("minimal JSON schema validator enforces control schema subset", () => {
 	assert.ok(invalid.issues.some((issue) => issue.path === "$.items"));
 });
 
+test("workflow TUI surfaces a Pi thinking clamp in task detail", () => {
+	const task = workflowViewTask({
+		runtime: {
+			thinking: "high",
+			thinkingResolution: {
+				requested: "xhigh",
+				resolved: "high",
+				reason:
+					"requested xhigh is unsupported by kimi-coding/kimi-for-coding; using high",
+			},
+		},
+	});
+	const { view } = workflowViewFixture([task]);
+	view.mode = "task";
+
+	const rendered = workflowViewText(view, 132);
+	assert.match(rendered, /thinking: high/);
+	assert.match(rendered, /Pi clamp: xhigh → high \(unsupported\)/);
+	assert.match(rendered, /runtime: kimi-for-coding\/high \[xhigh→high\]/);
+
+	const unchanged = workflowViewTask({
+		runtime: {
+			thinking: "high",
+			thinkingResolution: { requested: "high", resolved: "high" },
+		},
+	});
+	const { view: unchangedView } = workflowViewFixture([unchanged]);
+	unchangedView.mode = "task";
+	assert.doesNotMatch(workflowViewText(unchangedView, 132), /Pi clamp:/);
+});
+
 test("workflow TUI renders health in task list and detail", () => {
 	const heartbeat = new Date(Date.now() - 30_000).toISOString();
 	const startedAt = new Date(Date.now() - 10 * 60_000).toISOString();

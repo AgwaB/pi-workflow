@@ -737,6 +737,7 @@ test("dynamic generated tasks apply runtime overrides above profile pins and res
 						provider: "override",
 						id: "model",
 						fullId: "override/model",
+						reasoning: true,
 						thinkingLevelMap: { xhigh: null },
 					},
 				],

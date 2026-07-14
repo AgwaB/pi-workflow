@@ -759,6 +759,7 @@ export class WorkflowView implements Component {
 		task: WorkflowTaskRunRecord,
 		width: number,
 	): string[] {
+		const thinkingClamp = taskThinkingClamp(task);
 		const lines = [
 			`${statusGlyph(this.theme, task.status)} ${strong(this.theme, task.displayName)}`,
 			kvRow(this.theme, "status", task.status),
@@ -768,6 +769,16 @@ export class WorkflowView implements Component {
 			kvRow(this.theme, "agent", task.agent, "syntaxType"),
 			kvRow(this.theme, "model", task.runtime.model ?? "(not recorded)"),
 			kvRow(this.theme, "thinking", task.runtime.thinking ?? "(not recorded)"),
+			...(thinkingClamp
+				? [
+						kvRow(
+							this.theme,
+							"Pi clamp",
+							`${thinkingClamp.requested} → ${thinkingClamp.resolved} (unsupported)`,
+							"warning",
+						),
+					]
+				: []),
 			kvRow(
 				this.theme,
 				"logs",
@@ -1619,7 +1630,25 @@ function taskRuntimeSummary(task: WorkflowTaskRunRecord): string {
 		? shortModelName(task.runtime.model)
 		: "not-recorded";
 	const thinking = task.runtime.thinking ?? "not-recorded";
-	return `${model}/${thinking}`;
+	const clamp = taskThinkingClamp(task);
+	return `${model}/${thinking}${clamp ? ` [${clamp.requested}→${clamp.resolved}]` : ""}`;
+}
+
+function taskThinkingClamp(
+	task: WorkflowTaskRunRecord,
+): { requested: string; resolved: string } | undefined {
+	const resolution = task.runtime.thinkingResolution;
+	if (
+		!resolution?.requested ||
+		!resolution.resolved ||
+		resolution.requested === resolution.resolved
+	) {
+		return undefined;
+	}
+	return {
+		requested: resolution.requested,
+		resolved: resolution.resolved,
+	};
 }
 
 function shortModelName(model: string): string {
