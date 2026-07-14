@@ -4761,40 +4761,47 @@ test("runtime model resolver falls back unsupported thinking without UI", async 
 	});
 });
 
-test("runtime model resolver refuses unsupported thinking when only higher levels are available", async () => {
-	await assert.rejects(
-		() =>
-			resolveWorkflowRuntime(
-				{ model: "gpt-5.5", thinking: "low" },
+test("runtime model resolver clamps up like pi when only higher levels are supported", async () => {
+	const resolved = await resolveWorkflowRuntime(
+		{ model: "gpt-5.5", thinking: "low" },
+		{
+			taskKey: "main.main",
+			stageId: "main",
+			taskId: "main",
+			agent: "unit-scout",
+		},
+		{
+			availableModels: [
 				{
-					taskKey: "main.main",
-					stageId: "main",
-					taskId: "main",
-					agent: "unit-scout",
+					provider: "openai-codex",
+					id: "gpt-5.5",
+					fullId: "openai-codex/gpt-5.5",
+					reasoning: true,
+					thinkingLevelMap: {
+						off: null,
+						minimal: null,
+						low: null,
+						medium: "medium",
+						high: "high",
+					},
 				},
-				{
-					availableModels: [
-						{
-							provider: "openai-codex",
-							id: "gpt-5.5",
-							fullId: "openai-codex/gpt-5.5",
-							reasoning: true,
-							thinkingLevelMap: {
-								off: null,
-								minimal: null,
-								low: null,
-								medium: "medium",
-								high: "high",
-							},
-						},
-					],
-				},
-			),
-		/no lower-or-equal fallback is available/,
+			],
+		},
 	);
+
+	assert.deepEqual(resolved, {
+		model: "openai-codex/gpt-5.5",
+		thinking: "medium",
+		thinkingResolution: {
+			requested: "low",
+			resolved: "medium",
+			reason:
+				"requested low is unsupported by openai-codex/gpt-5.5; using medium",
+		},
+	});
 });
 
-test("runtime model resolver asks before changing unsupported thinking", async () => {
+test("runtime model resolver clamps unsupported thinking deterministically without prompting", async () => {
 	const resolved = await resolveWorkflowRuntime(
 		{ model: "gpt-5.5", thinking: "xhigh" },
 		{
@@ -4820,9 +4827,10 @@ test("runtime model resolver asks before changing unsupported thinking", async (
 				},
 			],
 			prompt: {
-				async select(_title, options) {
-					assert.deepEqual(options, ["medium", "high"]);
-					return "high";
+				async select() {
+					throw new Error(
+						"thinking clamp must not prompt; pi clamps deterministically",
+					);
 				},
 			},
 		},
@@ -4834,7 +4842,41 @@ test("runtime model resolver asks before changing unsupported thinking", async (
 		thinkingResolution: {
 			requested: "xhigh",
 			resolved: "high",
-			reason: "selected supported reasoning high for unsupported request xhigh",
+			reason:
+				"requested xhigh is unsupported by openai-codex/gpt-5.5; using high",
+		},
+	});
+});
+
+test("runtime model resolver treats missing thinkingLevelMap as xhigh opt-out like pi", async () => {
+	const resolved = await resolveWorkflowRuntime(
+		{ model: "openai-codex/gpt-5.5", thinking: "xhigh" },
+		{
+			taskKey: "main.main",
+			stageId: "main",
+			taskId: "main",
+			agent: "unit-scout",
+		},
+		{
+			availableModels: [
+				{
+					provider: "openai-codex",
+					id: "gpt-5.5",
+					fullId: "openai-codex/gpt-5.5",
+					reasoning: true,
+				},
+			],
+		},
+	);
+
+	assert.deepEqual(resolved, {
+		model: "openai-codex/gpt-5.5",
+		thinking: "high",
+		thinkingResolution: {
+			requested: "xhigh",
+			resolved: "high",
+			reason:
+				"requested xhigh is unsupported by openai-codex/gpt-5.5; using high",
 		},
 	});
 });
