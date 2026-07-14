@@ -1,7 +1,7 @@
 {
 	"schema": "pi-workflow-unit-test-inventory-v1",
 	"source": "unit.test.mjs",
-	"count": 496,
+	"count": 497,
 	"tests": [
 		{
 			"name": "public schemaVersion 1 parser accepts artifact graph and rejects non-artifactGraph top-level shapes",
@@ -1057,6 +1057,12 @@
 			"name": "minimal JSON schema validator enforces control schema subset",
 			"occurrence": 1,
 			"sha256": "3a6a5b03b84750944d626850b6b75fc2b3c9d88da86f7593794e6e372ae7a49c",
+			"domain": "authoring-interface"
+		},
+		{
+			"name": "workflow TUI surfaces a Pi thinking clamp in task detail",
+			"occurrence": 1,
+			"sha256": "8eefba2f8e56cdb0266b0db76ceb2702950c9067b940e0b3f37a58aa1d9d67fa",
 			"domain": "authoring-interface"
 		},
 		{
