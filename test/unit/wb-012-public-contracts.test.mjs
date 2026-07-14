@@ -100,16 +100,13 @@ test("authoring skills describe all storage scopes and exact edge/support shapes
 });
 
 test("packaged docs have self-contained speed guardrails and no stale local links", async () => {
-	const [usage, packageJson, maintenance] = await Promise.all([
+	const [usage, packageJson] = await Promise.all([
 		readRoot("docs/usage.md"),
 		readRoot("package.json").then(JSON.parse),
-		readRoot("docs/maintenance/BATCHED-DA-CONTEXT-PACKET-REVIEW-20260708.md"),
 	]);
 	assert.match(usage, /### Speed and quality guardrails/);
 	assert.doesNotMatch(usage, /\]\(speed-(?:guardrails|change-checklist)\.md\)/);
 	assert.ok(packageJson.files.includes("docs/usage.md"));
-	assert.match(maintenance, /Status \(historical record\)/);
-	assert.match(maintenance, /do_not_merge_default_yet/);
 });
 
 function escapeRegExp(value) {

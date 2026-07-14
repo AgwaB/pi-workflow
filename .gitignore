@@ -9,7 +9,11 @@ dist/
 .env
 .env.*
 !.env.example
+
+# Local-only agent and maintenance surfaces
 AGENTS.md
+CHANGELOG.md
+/docs/maintenance/
 
 # Pi runtime artifacts and local eval outputs
 .pi/

@@ -137,6 +137,7 @@ if (versionView.status === 0 && versionView.stdout.trim() === pkg.version) {
 }
 
 run("npm", ["run", "check:scripts"]);
+run("npm", ["run", "check:public-surface"]);
 run("npm", ["run", "typecheck"]);
 run("npm", ["run", "test:unit"]);
 run("npm", ["run", "e2e"]);
