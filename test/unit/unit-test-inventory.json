@@ -1,7 +1,7 @@
 {
 	"schema": "pi-workflow-unit-test-inventory-v1",
 	"source": "unit.test.mjs",
-	"count": 497,
+	"count": 502,
 	"tests": [
 		{
 			"name": "public schemaVersion 1 parser accepts artifact graph and rejects non-artifactGraph top-level shapes",
@@ -114,7 +114,7 @@
 		{
 			"name": "artifactGraph runtime foreach repairs compiled/run mismatch after materialization crash",
 			"occurrence": 1,
-			"sha256": "18e8279b5a017489f252dc0538d8210c4b64ce2c6ba9615b8c639c3bf98f25a3",
+			"sha256": "3844e79d4d2c71625fc02925b43156d2b393f991ece779a4fe652c0c10c60267",
 			"domain": "artifact-web"
 		},
 		{
@@ -2608,12 +2608,6 @@
 			"domain": "engine-store"
 		},
 		{
-			"name": "run lease absolute staleness can reclaim a live-pid old lock",
-			"occurrence": 1,
-			"sha256": "0be8172c8f19e575058f6a549ffeb0407b983ce0b279cae90cd4d7dc2948026f",
-			"domain": "engine-store"
-		},
-		{
 			"name": "run lease release does not unlink a replacement lock",
 			"occurrence": 1,
 			"sha256": "5bdfb621ef735bfb5e6f00739efc4d0fea1b1da041c309a45ad6e196c3dfa2c1",
@@ -2868,7 +2862,7 @@
 		{
 			"name": "resumeRun rejects completed and loop runs",
 			"occurrence": 1,
-			"sha256": "cf4e4907a6d09fb37c30931cc44bf991668e1d176cc76bd637aff3e006f0dee4",
+			"sha256": "6abf83034c7602d3cdd544c9370554dee0feae64440cade51dde032062563f39",
 			"domain": "engine-store"
 		},
 		{
@@ -2983,6 +2977,42 @@
 			"name": "workflow board shows heartbeat-lost badge when supervisor heartbeat is stale",
 			"occurrence": 1,
 			"sha256": "0dffd431bbc16501f9ad75b299e1bfb24e7f6c66b2c607f16c6531c53a42dbf2",
+			"domain": "engine-store"
+		},
+		{
+			"name": "artifact graph opt-ins reject malformed or misplaced authoring fields",
+			"occurrence": 1,
+			"sha256": "75b7a523c7a137301eca5917ddcdfd54e6bbffb9adf00634735cd4a5eb7e6d99",
+			"domain": "authoring-interface"
+		},
+		{
+			"name": "artifact graph opt-ins validate and preserve compiled metadata",
+			"occurrence": 1,
+			"sha256": "744515aafcc0be26e88fe071ef3aa81b565b65ee8c28f6d3ccf3fe98887644da",
+			"domain": "authoring-interface"
+		},
+		{
+			"name": "artifact graph sources expose generation-bound dispatch metadata and support fails closed when it is stale",
+			"occurrence": 1,
+			"sha256": "fd49c9644c0e6b4f146a6b26b6d47cc6aff7260bd80fff275552f4a330feb8ca",
+			"domain": "artifact-web"
+		},
+		{
+			"name": "compiler diagnoses foreach item projections only with a known item schema",
+			"occurrence": 1,
+			"sha256": "fa467e56088275742ebd88cdd7ced69e1aa0bb91e2fb509451e4aec8703cb4aa",
+			"domain": "authoring-interface"
+		},
+		{
+			"name": "compiler rejects a static foreach prompt cap below its Unicode boundary",
+			"occurrence": 1,
+			"sha256": "b63141342eaf9da4e7637e062c394621a604b40ef8efb81a61ba53353eb889c4",
+			"domain": "authoring-interface"
+		},
+		{
+			"name": "run lease absolute age does not reclaim a fresh live-pid heartbeat",
+			"occurrence": 1,
+			"sha256": "682a43ecd49ec388a3cef0a255aa2fab4db7f2dbe5db7a4a0db7297072950b5c",
 			"domain": "engine-store"
 		}
 	]

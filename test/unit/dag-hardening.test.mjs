@@ -914,7 +914,7 @@ test("parent stop fences a registered nested child before its run record exists"
 			cwd,
 			"export default async function controller() { return { control: { schema: 'dynamic-controller-result-v1', summary: 'unused' }, analysis: 'unused', refs: [] }; }",
 		);
-		const childRunId = "workflow_prelaunch_child";
+		const childRunId = `${run.runId}_prelaunch_child`;
 		await appendDynamicEvent(cwd, run.runId, {
 			controllerSpecId: "adaptive.controller",
 			type: "workflow.started",

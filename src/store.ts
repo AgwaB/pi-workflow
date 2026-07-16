@@ -62,6 +62,7 @@ const runLeaseContext = new AsyncLocalStorage<{
 	runId: string;
 	ownerId: string;
 	abortSignal: AbortSignal;
+	abortLease: (error: unknown) => void;
 }>();
 type RunLeaseTestHooks = {
 	heartbeatIntervalMs?: number;
@@ -76,6 +77,20 @@ type RunLeaseTestHooks = {
 	onBeforeReleaseLockRename?: (context: {
 		lockFile: string;
 		releaseFile: string;
+		ownerId: string;
+	}) => void | Promise<void>;
+	onBeforeHeartbeat?: (context: {
+		cwd: string;
+		runId: string;
+		initial: boolean;
+	}) => void | Promise<void>;
+	onAfterAtomicRename?: (context: {
+		file: string;
+		abortLease: (error: unknown) => void;
+	}) => void | Promise<void>;
+	onBeforeLeaseOwnershipCheck?: (context: {
+		cwd: string;
+		runId: string;
 		ownerId: string;
 	}) => void | Promise<void>;
 };
@@ -110,11 +125,37 @@ export function makeRunId(): string {
 	return `workflow_${Date.now().toString(36)}_${randomBytes(3).toString("hex")}`;
 }
 
+export function assertSafeRunId(runId: string): void {
+	if (
+		typeof runId !== "string" ||
+		runId.length === 0 ||
+		runId === "." ||
+		runId === ".." ||
+		runId.includes("/") ||
+		runId.includes("\\") ||
+		runId.includes("\0") ||
+		isAbsolute(runId) ||
+		basename(runId) !== runId
+	) {
+		throw new Error(`Invalid workflow run id: ${String(runId)}`);
+	}
+}
+
+function isSafeRunId(runId: unknown): runId is string {
+	try {
+		assertSafeRunId(runId as string);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 export function workflowsRoot(cwd: string): string {
 	return join(cwd, ".pi", "workflows");
 }
 
 export function workflowRunDir(cwd: string, runId: string): string {
+	assertSafeRunId(runId);
 	return join(workflowsRoot(cwd), runId);
 }
 
@@ -163,6 +204,7 @@ export function fromProjectPath(cwd: string, filePath: string): string {
 }
 
 export async function ensureDir(dir: string): Promise<void> {
+	await assertLeaseContextOwnership();
 	await mkdir(dir, { recursive: true });
 }
 
@@ -178,14 +220,32 @@ export async function readJson<T>(file: string): Promise<T | undefined> {
 export async function writeJsonAtomic(
 	file: string,
 	value: unknown,
+	abortSignal?: AbortSignal,
 ): Promise<void> {
+	const lease = runLeaseContext.getStore();
+	const activeAbortSignal = abortSignal ?? lease?.abortSignal;
+	assertLeaseNotAborted(activeAbortSignal);
+	await assertLeaseContextOwnership(lease);
 	await ensureDir(dirname(file));
+	assertLeaseNotAborted(activeAbortSignal);
+	await assertLeaseContextOwnership(lease);
 	const temp = join(
 		dirname(file),
 		`.${Date.now().toString(36)}-${randomBytes(3).toString("hex")}.tmp`,
 	);
+	assertLeaseNotAborted(activeAbortSignal);
+	await assertLeaseContextOwnership(lease);
 	await writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+	assertLeaseNotAborted(activeAbortSignal);
+	await assertLeaseContextOwnership(lease);
 	await rename(temp, file);
+	if (lease) {
+		await runLeaseTestHooks.onAfterAtomicRename?.({
+			file,
+			abortLease: lease.abortLease,
+		});
+	}
+	assertLeaseNotAborted(activeAbortSignal);
 }
 
 export interface WorkflowStopIntentRecord {
@@ -286,69 +346,99 @@ export async function withRunLease<T>(
 	runId: string,
 	action: (abortSignal: AbortSignal) => Promise<T>,
 ): Promise<T | undefined> {
+	assertSafeRunId(runId);
 	const dir = workflowRunDir(cwd, runId);
 	await ensureDir(dir);
 	const lockFile = join(dir, "supervisor.lock");
 	const ownerId = `${process.pid}-${randomBytes(3).toString("hex")}`;
+	let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+	let heartbeatInFlight: Promise<void> | undefined;
 	const lock = await acquireLock(lockFile, ownerId);
 	if (!lock) return undefined;
-
-	const abortController = new AbortController();
-	const abortLease = (error: unknown): void => {
-		if (abortController.signal.aborted) return;
-		abortController.abort(asLeaseError(error));
-	};
-	const supervisorFile = join(dir, "supervisor.json");
-	// Progress fields written by a previous lease owner are carried forward so
-	// short-lived lease holders (for example status refreshers in another
-	// process) never erase the run's last known task-progress signal.
-	const carriedProgress = await readJson<WorkflowSupervisorRecord>(
-		supervisorFile,
-	)
-		.then(
-			(record): RunProgressSnapshot => ({
-				lastTaskTransitionAt: record?.lastTaskTransitionAt,
-				taskStatusCounts: record?.taskStatusCounts,
-			}),
-		)
-		.catch((): RunProgressSnapshot => ({}));
-	const heartbeat = async (): Promise<void> => {
-		assertLeaseNotAborted(abortController.signal);
-		await assertLockOwner(lockFile, ownerId);
-		const timestamp = nowIso();
-		const now = new Date();
-		await utimes(lockFile, now, now);
-		const progress = runProgressSnapshot(cwd, runId);
-		const lastTaskTransitionAt =
-			progress?.lastTaskTransitionAt ?? carriedProgress.lastTaskTransitionAt;
-		const taskStatusCounts =
-			progress?.taskStatusCounts ?? carriedProgress.taskStatusCounts;
-		await writeJsonAtomic(supervisorFile, {
-			schemaVersion: 1,
-			ownerId,
-			pid: process.pid,
-			updatedAt: timestamp,
-			lockFile: toProjectPath(cwd, lockFile),
-			...(lastTaskTransitionAt ? { lastTaskTransitionAt } : {}),
-			...(taskStatusCounts ? { taskStatusCounts } : {}),
-		});
-	};
-
-	await heartbeat();
-	const heartbeatTimer = setInterval(() => {
-		void heartbeat().catch(abortLease);
-	}, runLeaseHeartbeatIntervalMs());
-	heartbeatTimer.unref?.();
-
 	try {
+		const abortController = new AbortController();
+		const abortLease = (error: unknown): void => {
+			if (abortController.signal.aborted) return;
+			abortController.abort(asLeaseError(error));
+		};
+		const supervisorFile = join(dir, "supervisor.json");
+		// Progress fields written by a previous lease owner are carried forward so
+		// short-lived lease holders (for example status refreshers in another
+		// process) never erase the run's last known task-progress signal.
+		const carriedProgress = await readJson<WorkflowSupervisorRecord>(
+			supervisorFile,
+		)
+			.then(
+				(record): RunProgressSnapshot => ({
+					lastTaskTransitionAt: record?.lastTaskTransitionAt,
+					taskStatusCounts: record?.taskStatusCounts,
+				}),
+			)
+			.catch((): RunProgressSnapshot => ({}));
+		let heartbeatCount = 0;
+		const heartbeat = async (): Promise<void> => {
+			const initial = heartbeatCount === 0;
+			heartbeatCount += 1;
+			await runLeaseTestHooks.onBeforeHeartbeat?.({ cwd, runId, initial });
+			assertLeaseNotAborted(abortController.signal);
+			await assertLockOwner(lockFile, ownerId);
+			const timestamp = nowIso();
+			const now = new Date();
+			await utimes(lockFile, now, now);
+			const progress = runProgressSnapshot(cwd, runId);
+			const lastTaskTransitionAt =
+				progress?.lastTaskTransitionAt ?? carriedProgress.lastTaskTransitionAt;
+			const taskStatusCounts =
+				progress?.taskStatusCounts ?? carriedProgress.taskStatusCounts;
+			await assertLockOwner(lockFile, ownerId);
+			await writeJsonAtomic(supervisorFile, {
+				schemaVersion: 1,
+				ownerId,
+				pid: process.pid,
+				updatedAt: timestamp,
+				lockFile: toProjectPath(cwd, lockFile),
+				...(lastTaskTransitionAt ? { lastTaskTransitionAt } : {}),
+				...(taskStatusCounts ? { taskStatusCounts } : {}),
+			});
+		};
+		const runHeartbeat = (): Promise<void> => {
+			const previous = heartbeatInFlight;
+			const next = (async () => {
+				if (previous) await previous;
+				await heartbeat();
+			})();
+			heartbeatInFlight = next;
+			void next.catch(abortLease);
+			return next;
+		};
+
+		await runHeartbeat();
+		heartbeatTimer = setInterval(() => {
+			void runHeartbeat();
+		}, runLeaseHeartbeatIntervalMs());
+		heartbeatTimer.unref?.();
+
 		const result = await runLeaseContext.run(
-			{ cwd, runId, ownerId, abortSignal: abortController.signal },
+			{
+				cwd,
+				runId,
+				ownerId,
+				abortSignal: abortController.signal,
+				abortLease,
+			},
 			() => action(abortController.signal),
 		);
+		if (heartbeatTimer) {
+			clearInterval(heartbeatTimer);
+			heartbeatTimer = undefined;
+		}
+		await heartbeatInFlight;
+		assertLeaseNotAborted(abortController.signal);
+		await assertLockOwner(lockFile, ownerId);
 		assertLeaseNotAborted(abortController.signal);
 		return result;
 	} finally {
-		clearInterval(heartbeatTimer);
+		if (heartbeatTimer) clearInterval(heartbeatTimer);
 		await releaseLock(lockFile, ownerId);
 	}
 }
@@ -363,8 +453,8 @@ function runLeaseHeartbeatIntervalMs(): number {
 	);
 }
 
-function assertLeaseNotAborted(signal: AbortSignal): void {
-	if (signal.aborted) throw abortSignalError(signal);
+function assertLeaseNotAborted(signal?: AbortSignal): void {
+	if (signal?.aborted) throw abortSignalError(signal);
 }
 
 function abortSignalError(signal: AbortSignal): Error {
@@ -463,7 +553,7 @@ function isReclaimableLockSnapshot(snapshot: LockSnapshot): boolean {
 	const leaseStale = now - snapshot.mtimeMs > LEASE_STALE_MS;
 	const absoluteStale =
 		now - (snapshot.createdAtMs ?? snapshot.mtimeMs) > LEASE_ABSOLUTE_STALE_MS;
-	if (!leaseStale && !absoluteStale) return false;
+	if (!leaseStale) return false;
 	if (
 		snapshot.pid !== undefined &&
 		isProcessAlive(snapshot.pid) &&
@@ -578,23 +668,78 @@ async function ownsLock(lockFile: string, ownerId: string): Promise<boolean> {
 	}
 }
 
+export async function assertWorkflowRunAvailable(
+	cwd: string,
+	runId: string,
+): Promise<void> {
+	const runDir = workflowRunDir(cwd, runId);
+	try {
+		await stat(runDir);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+		throw error;
+	}
+	const entries = await readdir(runDir);
+	const validStopIntent = await readWorkflowStopIntent(cwd, runId);
+	const collisionEntries = entries.filter(
+		(entry) =>
+			entry !== "supervisor.lock" &&
+			entry !== "supervisor.json" &&
+			!(entry === "stop-intent.json" && validStopIntent !== undefined),
+	);
+	if (
+		(!entries.includes("supervisor.lock") && validStopIntent === undefined) ||
+		collisionEntries.length > 0
+	) {
+		throw new Error(
+			`Cannot initialize workflow run ${runId}: a persisted run already exists`,
+		);
+	}
+}
+
+async function assertWorkflowRunDoesNotExist(
+	cwd: string,
+	runId: string,
+): Promise<void> {
+	const runDir = workflowRunDir(cwd, runId);
+	try {
+		await stat(runDir);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+		throw error;
+	}
+	throw new Error(`Workflow run directory already exists: ${runId}`);
+}
+
+export async function initializeRunRecordDirectories(
+	cwd: string,
+	run: WorkflowRunRecord,
+): Promise<void> {
+	const runDir = workflowRunDir(cwd, run.runId);
+	await ensureDir(runDir);
+	await ensureDir(join(runDir, "tasks"));
+	if (run.dynamic) await ensureDir(join(runDir, "dynamic"));
+}
+
 export async function createRunRecord(
 	cwd: string,
 	compiled: CompiledWorkflow,
 	specPath: string,
-	options: { runId?: string; parentRunId?: string; rootRunId?: string } = {},
+	options: {
+		runId?: string;
+		parentRunId?: string;
+		rootRunId?: string;
+		initialize?: boolean;
+	} = {},
 ): Promise<{ run: WorkflowRunRecord; runDir: string }> {
 	const runId = options.runId ?? makeRunId();
+	assertSafeRunId(runId);
 	const runDir = workflowRunDir(cwd, runId);
-	await ensureDir(runDir);
-	await ensureDir(join(runDir, "tasks"));
-
 	const createdAt = nowIso();
 	const tasks = compiled.tasks.map((task, index) =>
 		createTaskRunRecord(cwd, runId, task, index),
 	);
 	const hasDynamicController = compiledWorkflowHasDynamicController(compiled);
-	if (hasDynamicController) await ensureDir(join(runDir, "dynamic"));
 	const run = deriveRunStatus({
 		schemaVersion: 1,
 		runId,
@@ -624,7 +769,10 @@ export async function createRunRecord(
 		specPath,
 		tasks,
 	});
-
+	if (options.initialize !== false) {
+		await assertWorkflowRunDoesNotExist(cwd, runId);
+		await initializeRunRecordDirectories(cwd, run);
+	}
 	return { run, runDir };
 }
 
@@ -663,8 +811,10 @@ function runUsageRollup(run: WorkflowRunRecord): WorkflowRunUsageRollup {
 export async function writeRunRecord(
 	cwd: string,
 	run: WorkflowRunRecord,
+	abortSignal?: AbortSignal,
 ): Promise<void> {
-	await assertActiveRunLease(cwd, run.runId);
+	await assertActiveRunLease(cwd, run.runId, abortSignal);
+	assertLeaseNotAborted(abortSignal);
 	const runFile = workflowRunPath(cwd, run.runId);
 	let firstWrite = false;
 	try {
@@ -673,17 +823,20 @@ export async function writeRunRecord(
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 		firstWrite = true;
 	}
+	assertLeaseNotAborted(abortSignal);
 	run.updatedAt = nowIso();
 	const derived = deriveRunStatus(run);
 	Object.assign(run, derived);
 	if (isTerminalWorkflowStatus(run.status)) run.usage = runUsageRollup(run);
-	await writeJsonAtomic(runFile, run);
+	await writeJsonAtomic(runFile, run, abortSignal);
+	assertLeaseNotAborted(abortSignal);
 	if (isTerminalWorkflowStatus(run.status))
 		runProgressByRun.delete(runProgressKey(cwd, run.runId));
 	else recordRunProgress(cwd, run);
 	if (firstWrite || isTerminalWorkflowStatus(run.status)) {
 		cancelScheduledIndexUpdate(cwd, run.runId);
-		await updateIndex(cwd, run.runId);
+		await updateIndex(cwd, run.runId, abortSignal);
+		assertLeaseNotAborted(abortSignal);
 	} else {
 		scheduleIndexUpdate(cwd, run.runId);
 	}
@@ -718,7 +871,9 @@ function scheduleIndexUpdate(cwd: string, runId: string): void {
 	// Hot nonterminal updates share one per-cwd dirty set. Correctness-sensitive
 	// readers use readFreshIndex(), which reconciles from run.json if this advisory
 	// rebuild is delayed or lost. First and terminal writes remain awaited above.
-	const timer = setTimeout(runUpdate, indexUpdateDebounceMs);
+	const timer = runLeaseContext.exit(() =>
+		setTimeout(runUpdate, indexUpdateDebounceMs),
+	);
 	timer.unref?.();
 	pendingIndexUpdates.set(key, { cwd, runIds, timer });
 }
@@ -767,6 +922,8 @@ export async function writeStaticRunArtifacts(
 		join(runDir, "bundle"),
 		originalSpec,
 	);
+	rewriteCompiledBundlePathsInValue(run, join(runDir, "bundle"));
+	rewriteCompiledBundlePathsInValue(compiled, join(runDir, "bundle"));
 }
 
 function rewriteCompiledBundlePaths(
@@ -789,6 +946,13 @@ function rewriteCompiledBundlePathsInValue(
 		return;
 	}
 	const record = value as Record<string, any>;
+	if (Array.isArray(record.extensions)) {
+		record.extensions = record.extensions.map((extension: unknown) =>
+			typeof extension === "string" && extension.startsWith("./")
+				? join(bundleDir, stripBundleRefPrefix(extension))
+				: extension,
+		);
+	}
 	const output = record.artifactGraph?.output;
 	if (output?.controlSchema) {
 		output.controlSchemaPath = join(
@@ -949,7 +1113,8 @@ async function collectNestedWorkflowBundleRefs(
 			}
 		}
 		for (const ref of [...collection.refs]) {
-			if (seenCode.has(ref) || !/\.(mjs|cjs|js)$/.test(ref)) continue;
+			if (seenCode.has(ref) || !/\.(mjs|cjs|js|mts|cts|ts)$/.test(ref))
+				continue;
 			seenCode.add(ref);
 			const source = await readBundleText(sourceRoot, ref);
 			if (source === undefined) continue;
@@ -1050,6 +1215,23 @@ function visitWorkflowBundleRefs(
 		return;
 	}
 	const record = value as Record<string, unknown>;
+	if (Array.isArray(record.extensions)) {
+		for (const extension of record.extensions) {
+			if (typeof extension === "string") {
+				addWorkflowBundleRef(collection, extension, "file");
+			}
+		}
+	}
+	if (
+		record.defaults &&
+		typeof record.defaults === "object" &&
+		!Array.isArray(record.defaults)
+	) {
+		visitWorkflowBundleRefs(record.defaults, collection);
+	}
+	if (Array.isArray(record.tools)) {
+		visitWorkflowBundleRefs(record.tools, collection);
+	}
 	if (typeof record.controlSchema === "string") {
 		addWorkflowBundleRef(collection, record.controlSchema, "schema");
 	}
@@ -1105,6 +1287,28 @@ function visitWorkflowBundleRefs(
 				if (typeof workflowRecord.uses === "string")
 					addWorkflowBundleRef(collection, workflowRecord.uses, "workflow");
 			}
+		}
+		if (
+			dynamic.decisionLoop &&
+			typeof dynamic.decisionLoop === "object" &&
+			!Array.isArray(dynamic.decisionLoop)
+		) {
+			const decisionLoop = dynamic.decisionLoop as Record<string, unknown>;
+			for (const profileName of [
+				"planner",
+				"workerDefaults",
+				"verifier",
+				"synthesis",
+			]) {
+				const profile = decisionLoop[profileName];
+				if (!profile || typeof profile !== "object" || Array.isArray(profile))
+					continue;
+				const tools = (profile as Record<string, unknown>).tools;
+				if (Array.isArray(tools))
+					visitWorkflowBundleRefs(tools, collection);
+			}
+			if (Array.isArray(decisionLoop.allowedTools))
+				visitWorkflowBundleRefs(decisionLoop.allowedTools, collection);
 		}
 	}
 	if (
@@ -1228,13 +1432,21 @@ async function resolveLocalBundleImportRefs(
 	specifier: string,
 	ownerRef: string,
 ): Promise<string[]> {
-	if (/\.(mjs|cjs|js|json)$/.test(ref)) return [ref];
+	if (/\.(mjs|cjs|js|mts|cts|ts|json)$/.test(ref)) return [ref];
 	const candidates = [
 		`${ref}.js`,
 		`${ref}.cjs`,
+		`${ref}.mjs`,
+		`${ref}.ts`,
+		`${ref}.cts`,
+		`${ref}.mts`,
 		`${ref}.json`,
 		join(ref, "index.js"),
 		join(ref, "index.cjs"),
+		join(ref, "index.mjs"),
+		join(ref, "index.ts"),
+		join(ref, "index.cts"),
+		join(ref, "index.mts"),
 		join(ref, "index.json"),
 	].map((candidate) => normalizeBundleRelativeRef(candidate));
 	for (const candidate of candidates) {
@@ -1247,7 +1459,7 @@ async function resolveLocalBundleImportRefs(
 		}
 	}
 	throw new Error(
-		`workflow bundle import cannot be resolved: ${specifier} in ${ownerRef}; use a bundle-local file with an explicit extension or a resolvable .js/.cjs/.json/index file`,
+		`workflow bundle import cannot be resolved: ${specifier} in ${ownerRef}; use a bundle-local file with an explicit extension or a resolvable JavaScript, TypeScript, JSON, or index file`,
 	);
 }
 
@@ -1362,21 +1574,59 @@ async function copyWorkflowBundleFile(
 	await cp(realSource, target, { force: true, errorOnExist: false });
 }
 
-async function assertActiveRunLease(cwd: string, runId: string): Promise<void> {
-	const context = runLeaseContext.getStore();
+async function assertLeaseContextOwnership(
+	context = runLeaseContext.getStore(),
+): Promise<void> {
 	if (!context) return;
-	if (context.cwd !== cwd || context.runId !== runId) return;
+	assertLeaseNotAborted(context.abortSignal);
+	await runLeaseTestHooks.onBeforeLeaseOwnershipCheck?.({
+		cwd: context.cwd,
+		runId: context.runId,
+		ownerId: context.ownerId,
+	});
 	assertLeaseNotAborted(context.abortSignal);
 	await assertLockOwner(
-		join(workflowRunDir(cwd, runId), "supervisor.lock"),
+		join(workflowRunDir(context.cwd, context.runId), "supervisor.lock"),
 		context.ownerId,
 	);
+	assertLeaseNotAborted(context.abortSignal);
+}
+
+export async function assertRunLeaseOwnership(
+	cwd: string,
+	runId: string,
+	abortSignal?: AbortSignal,
+): Promise<void> {
+	assertSafeRunId(runId);
+	assertLeaseNotAborted(abortSignal);
+	const context = runLeaseContext.getStore();
+	if (!context || context.cwd !== cwd || context.runId !== runId) {
+		throw new Error(`Missing supervisor lease for workflow run ${runId}`);
+	}
+	assertLeaseNotAborted(context.abortSignal);
+	await assertLeaseContextOwnership(context);
+	assertLeaseNotAborted(abortSignal);
+	assertLeaseNotAborted(context.abortSignal);
+}
+
+async function assertActiveRunLease(
+	cwd: string,
+	runId: string,
+	abortSignal?: AbortSignal,
+): Promise<void> {
+	assertSafeRunId(runId);
+	assertLeaseNotAborted(abortSignal);
+	const context = runLeaseContext.getStore();
+	if (!context || context.cwd !== cwd || context.runId !== runId) return;
+	await assertLeaseContextOwnership(context);
+	assertLeaseNotAborted(abortSignal);
 }
 
 export async function findRunRecordPath(
 	cwd: string,
 	runIdOrPrefix: string,
 ): Promise<string | undefined> {
+	assertSafeRunId(runIdOrPrefix);
 	const root = workflowsRoot(cwd);
 	let entries: string[];
 	try {
@@ -1388,7 +1638,9 @@ export async function findRunRecordPath(
 
 	const matches = entries
 		.filter(
-			(entry) => entry === runIdOrPrefix || entry.startsWith(runIdOrPrefix),
+			(entry) =>
+				isSafeRunId(entry) &&
+				(entry === runIdOrPrefix || entry.startsWith(runIdOrPrefix)),
 		)
 		.sort();
 	if (matches.length === 0) return undefined;
@@ -1422,9 +1674,16 @@ export async function readRunRecord(
 	const file = await findRunRecordPath(cwd, runIdOrPrefix);
 	if (!file) throw new Error(`Flow run not found: ${runIdOrPrefix}`);
 
+	const containingRunId = basename(dirname(file));
+	assertSafeRunId(containingRunId);
 	const run = await readJson<WorkflowRunRecord>(file);
 	if (!run?.runId || !Array.isArray(run.tasks))
 		throw new Error(`Invalid workflow run record: ${file}`);
+	if (run.runId !== containingRunId) {
+		throw new Error(
+			`Workflow run record identity does not match containing directory: ${file}`,
+		);
+	}
 	return deriveRunStatus(run);
 }
 
@@ -1471,7 +1730,8 @@ export async function listRunRecords(
 
 	const records = await Promise.all(
 		entries.map(async (entry) => {
-			const file = join(root, entry, "run.json");
+			if (!isSafeRunId(entry)) return undefined;
+			const file = workflowRunPath(cwd, entry);
 			try {
 				const fileStat = await stat(file);
 				if (!fileStat.isFile()) return undefined;
@@ -1479,6 +1739,11 @@ export async function listRunRecords(
 					await readFile(file, "utf8"),
 				) as WorkflowRunRecord;
 				if (!isRunRecordLike(parsed)) return undefined;
+				if (parsed.runId !== entry) {
+					throw new Error(
+						`Workflow run record identity does not match containing directory: ${file}`,
+					);
+				}
 				return deriveRunStatus(parsed);
 			} catch (error) {
 				const code = (error as NodeJS.ErrnoException).code;
@@ -1516,20 +1781,26 @@ function isRunRecordLike(value: unknown): value is WorkflowRunRecord {
 export async function updateIndex(
 	cwd: string,
 	changedRunId?: string | readonly string[],
+	abortSignal?: AbortSignal,
 ): Promise<WorkflowIndexRecord> {
+	assertLeaseNotAborted(abortSignal);
 	const lockFile = join(workflowsRoot(cwd), "index.lock");
 	const ownerId = `${process.pid}-${randomBytes(3).toString("hex")}`;
 	await ensureDir(workflowsRoot(cwd));
+	assertLeaseNotAborted(abortSignal);
 	await acquireLockWithWait(lockFile, ownerId);
 
 	try {
+		assertLeaseNotAborted(abortSignal);
 		const changedRunIds =
 			typeof changedRunId === "string" ? [changedRunId] : changedRunId;
 		const index =
 			changedRunIds && changedRunIds.length > 0
 				? await updateIndexIncremental(cwd, changedRunIds)
 				: await rebuildIndex(cwd);
-		await writeJsonAtomic(workflowIndexPath(cwd), index);
+		assertLeaseNotAborted(abortSignal);
+		await writeJsonAtomic(workflowIndexPath(cwd), index, abortSignal);
+		assertLeaseNotAborted(abortSignal);
 		return index;
 	} finally {
 		await releaseLock(lockFile, ownerId);
@@ -1844,6 +2115,20 @@ export function resetTaskForResume(task: WorkflowTaskRunRecord): boolean {
 		return false;
 	}
 	recordTaskResumeEvent(task);
+	resetTaskRuntimeState(task);
+	return true;
+}
+
+export function invalidateTaskForDependencyResume(
+	task: WorkflowTaskRunRecord,
+): boolean {
+	if (task.status === "pending") return false;
+	recordTaskResumeEvent(task);
+	resetTaskRuntimeState(task);
+	return true;
+}
+
+function resetTaskRuntimeState(task: WorkflowTaskRunRecord): void {
 	task.status = "pending";
 	task.statusDetail = "pending";
 	task.startedAt = undefined;
@@ -1856,7 +2141,7 @@ export function resetTaskForResume(task: WorkflowTaskRunRecord): boolean {
 	task.backendFiles = undefined;
 	task.lastMessage = undefined;
 	task.outputRetry = undefined;
-	return true;
+	task.promptMetadata = undefined;
 }
 
 function recordTaskResumeEvent(task: WorkflowTaskRunRecord): void {
@@ -2023,7 +2308,17 @@ export function createTaskRunRecord(
 		kind: task.kind,
 		stageId: task.stageId,
 		dependsOn: task.dependsOn,
+		...(taskArtifactGraph?.inputPolicy?.terminalBarrier === "all-sources"
+			? {
+					terminalBarrier: {
+						mode: "all-sources" as const,
+						sourceSpecIds: [...new Set(task.dependsOn ?? [])],
+					},
+				}
+			: {}),
 		artifactGraph: taskArtifactGraph,
+		...(task.generation === undefined ? {} : { generation: task.generation }),
+		sourceGeneration: task.sourceGeneration,
 		dynamicGenerated: task.dynamicGenerated,
 		foreachGenerated: task.foreachGenerated,
 		files,
@@ -2067,7 +2362,7 @@ export async function createWorkflowRunRecord(
 }
 
 export function supervisorLeasePath(cwd: string, runId: string): string {
-	return join(cwd, ".pi", "workflows", runId, "supervisor-lease.json");
+	return join(workflowRunDir(cwd, runId), "supervisor-lease.json");
 }
 const TEST_OWNER_ID = `pi-workflow-${process.pid}`;
 export function workflowSupervisorOwnerIdForTests(): string {

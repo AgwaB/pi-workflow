@@ -221,6 +221,19 @@ export interface ArtifactGraphRequiredReadSpec {
 }
 
 export type ArtifactGraphRequiredRead = string | ArtifactGraphRequiredReadSpec;
+export interface ArtifactGraphForeachSpec {
+	prompt: string;
+	agent?: string;
+	role?: string | string[];
+	tools?: WorkflowToolSpec[];
+	readOnly?: boolean;
+	model?: string;
+	thinking?: string;
+	maxRuntimeMs?: number;
+	worktreePolicy?: string;
+	itemIdentityPath?: string;
+	itemPayloadPath?: string;
+}
 
 export interface ArtifactGraphStageSpec {
 	id: string;
@@ -258,6 +271,9 @@ export interface ArtifactGraphStageSpec {
 		requiredReadPolicy?: RequiredWorkflowArtifactReadPolicy[];
 		enforcement?: "fail";
 		artifactAccess?: "enabled" | "none";
+		terminalBarrier?: "all-sources";
+		invalidateOnDependencyResume?: true;
+		maxCompiledPromptChars?: number;
 	};
 	output?: {
 		controlSchema?: string;
@@ -266,7 +282,7 @@ export interface ArtifactGraphStageSpec {
 		maxDigestChars?: number;
 		partial?: { paths: string[] };
 	};
-	each?: Record<string, unknown>;
+	each?: ArtifactGraphForeachSpec;
 	stages?: ArtifactGraphStageSpec[];
 	outputFrom?: string;
 	support?: { uses: string; options?: Record<string, unknown> };
@@ -541,6 +557,11 @@ export interface CompiledArtifactGraphTask {
 	requiredReads: ArtifactGraphRequiredRead[];
 	requiredReadPolicy?: RequiredWorkflowArtifactReadPolicy[];
 	artifactAccess: "enabled" | "none";
+	inputPolicy?: {
+		terminalBarrier?: "all-sources";
+		invalidateOnDependencyResume?: true;
+		maxCompiledPromptChars?: number;
+	};
 	sourceProjection?: {
 		include?: string[];
 		maxChars?: number;
@@ -572,10 +593,14 @@ export interface CompiledTask {
 	stageMaxConcurrency?: number;
 	dependsOn?: string[];
 	contextDependsOn?: string[];
+	generation?: number;
+	sourceGeneration?: number;
 	foreach?: {
 		from: unknown;
 		prompt: string;
 		maxItems?: number;
+		itemIdentityPath?: string;
+		itemPayloadPath?: string;
 		injectRuntimeTask: boolean;
 		roleText?: string;
 	};
@@ -593,7 +618,9 @@ export interface CompiledTask {
 	};
 	foreachGenerated?: {
 		placeholderSpecId: string;
+		itemIdentity?: string;
 		itemHash?: string;
+		itemSourceTaskId?: string;
 		itemSourceSpecId?: string;
 		itemSourceKind?: "control" | "partial";
 		itemRef?: string;
@@ -843,6 +870,35 @@ export interface WorkflowTaskRunRecord {
 	kind?: string;
 	stageId?: string;
 	dependsOn?: string[];
+	terminalBarrier?: {
+		mode: "all-sources";
+		sourceSpecIds: string[];
+	};
+	generation?: number;
+	sourceGeneration?: number;
+	dispatchMap?: {
+		version: 1;
+		generation: number;
+		sourceTaskId: string;
+		entries: Array<{
+			itemIdentity: string;
+			taskId: string;
+			specId: string;
+			itemSourceTaskId: string;
+			itemSourceSpecId: string;
+			itemSourceKind: "control" | "partial";
+			itemRef: string;
+			itemHash: string;
+			perItemDispatch?: true;
+		}>;
+		digest: string;
+	};
+	promptMetadata?: {
+		version: 1;
+		chars: number;
+		maxChars?: number;
+		measuredAt: string;
+	};
 	startedAt?: string;
 	completedAt?: string;
 	elapsedMs?: number;
@@ -879,7 +935,9 @@ export interface WorkflowTaskRunRecord {
 	};
 	foreachGenerated?: {
 		placeholderSpecId: string;
+		itemIdentity?: string;
 		itemHash?: string;
+		itemSourceTaskId?: string;
 		itemSourceSpecId?: string;
 		itemSourceKind?: "control" | "partial";
 		itemRef?: string;
@@ -1017,6 +1075,14 @@ export interface WorkflowRunRecord {
 	rootRunId?: string;
 	round?: number;
 	fanout?: unknown[];
+	invalidationJournal?: {
+		generation: number;
+		idempotencyKey: string;
+		sourceTaskIds: string[];
+		invalidatedTaskIds: string[];
+		artifactState: "pending" | "quarantined";
+		status: "prepared" | "applied";
+	};
 	loopStates?: LoopStateRecord[];
 	loopWorktrees?: LoopWorktreeRecord[];
 	loopResults?: LoopResultRecord[];

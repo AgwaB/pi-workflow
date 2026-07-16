@@ -89,6 +89,9 @@ const INPUT_POLICY_KEYS = new Set([
 	"requiredReadPolicy",
 	"enforcement",
 	"artifactAccess",
+	"terminalBarrier",
+	"invalidateOnDependencyResume",
+	"maxCompiledPromptChars",
 ]);
 const REQUIRED_READ_OBJECT_KEYS = new Set([
 	"source",
@@ -205,6 +208,8 @@ const EACH_KEYS = new Set([
 	"thinking",
 	"maxRuntimeMs",
 	"worktreePolicy",
+	"itemIdentityPath",
+	"itemPayloadPath",
 ]);
 const UNTIL_KEYS = new Set([
 	"source",
@@ -231,6 +236,9 @@ const JSON_PROJECTABLE_ARTIFACT_KINDS = new Set<WorkflowArtifactKind>([
 ]);
 const SOURCE_POLICY_VALUES = new Set(["success", "partial", "require-success"]);
 const STAGE_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
+const FOREACH_ITEM_PROPERTY_PATH_PATTERN = /^\$\.[A-Za-z_][A-Za-z0-9_]*$/;
+const FOREACH_ITEM_PROPERTY_PATH_DIAGNOSTIC =
+	"must be a simple item property JSONPath like $.correlationId";
 const SIMPLE_JSON_PATH_DIAGNOSTIC =
 	"must be $ or a simple dot JSON path with optional array selectors/slices like $.claims[0], $.claims[0:2], $.claims[*], or $[0:2]";
 
@@ -867,6 +875,29 @@ function validateInputPolicy(
 		siblingIds,
 		issues,
 	);
+	if (
+		policy.terminalBarrier !== undefined &&
+		policy.terminalBarrier !== "all-sources"
+	) {
+		issues.push({
+			path: `${path}.terminalBarrier`,
+			message: 'must be "all-sources"',
+		});
+	}
+	if (
+		policy.invalidateOnDependencyResume !== undefined &&
+		policy.invalidateOnDependencyResume !== true
+	) {
+		issues.push({
+			path: `${path}.invalidateOnDependencyResume`,
+			message: "must be true",
+		});
+	}
+	optionalPositiveInteger(
+		policy.maxCompiledPromptChars,
+		`${path}.maxCompiledPromptChars`,
+		issues,
+	);
 	if (policy.enforcement !== undefined && policy.enforcement !== "fail") {
 		issues.push({ path: `${path}.enforcement`, message: 'must be "fail"' });
 	}
@@ -1084,6 +1115,23 @@ function validateRequiredReadPolicyPath(
 	}
 	if (!isSimpleJsonPath(value)) {
 		issues.push({ path, message: SIMPLE_JSON_PATH_DIAGNOSTIC });
+	}
+}
+function validateForeachItemPropertyPath(
+	value: unknown,
+	path: string,
+	issues: ValidationIssue[],
+): void {
+	if (value === undefined) return;
+	if (typeof value !== "string" || value.trim() === "") {
+		issues.push({ path, message: "must be a non-empty string" });
+		return;
+	}
+	if (
+		!FOREACH_ITEM_PROPERTY_PATH_PATTERN.test(value) ||
+		!isSimpleJsonPath(value)
+	) {
+		issues.push({ path, message: FOREACH_ITEM_PROPERTY_PATH_DIAGNOSTIC });
 	}
 }
 
@@ -1619,6 +1667,35 @@ function validateForeachStage(
 		issues,
 	);
 	optionalString(each.worktreePolicy, `${path}.each.worktreePolicy`, issues);
+	validateForeachItemPropertyPath(
+		each.itemIdentityPath,
+		`${path}.each.itemIdentityPath`,
+		issues,
+	);
+	validateForeachItemPropertyPath(
+		each.itemPayloadPath,
+		`${path}.each.itemPayloadPath`,
+		issues,
+	);
+	if (
+		typeof each.itemIdentityPath === "string" &&
+		each.itemIdentityPath === each.itemPayloadPath
+	) {
+		issues.push({
+			path: `${path}.each.itemPayloadPath`,
+			message: "must differ from itemIdentityPath",
+		});
+	}
+	if (
+		each.itemIdentityPath !== undefined &&
+		isRecord(stage.from) &&
+		stage.from.streaming !== undefined
+	) {
+		issues.push({
+			path: `${path}.from.streaming`,
+			message: "is not supported when each.itemIdentityPath is declared",
+		});
+	}
 }
 
 function validateLoopStage(

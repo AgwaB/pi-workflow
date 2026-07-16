@@ -2,6 +2,7 @@ import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { hashDynamicRequest } from "./dynamic-events.js";
 import { stringifyPromptJson } from "./prompt-json.js";
 import { compactStrings } from "./strings.js";
 import { loadWorkflowHelper } from "./workflow-helpers.js";
@@ -63,6 +64,7 @@ export async function executeSupportTask(
 	run: WorkflowRunRecord,
 	task: WorkflowTaskRunRecord,
 	compiledTask: CompiledWorkflow["tasks"][number],
+	validationSnapshot: ArtifactGraphRuntimeValidationSnapshot,
 ): Promise<boolean> {
 	if (!compiledTask.support) {
 		throw new Error("support metadata is missing");
@@ -81,6 +83,7 @@ export async function executeSupportTask(
 					cwd,
 					run,
 					compiledTask.dependsOn ?? [],
+					validationSnapshot,
 				)
 			: await readSupportSources(cwd, run, compiledTask.dependsOn ?? []);
 		await throwIfWorkflowStopRequested(cwd, run.runId);
@@ -108,6 +111,7 @@ export async function executeSupportTask(
 							sourceStatuses: buildArtifactGraphSupportSourceStatuses(
 								run,
 								compiledTask.dependsOn ?? [],
+								validationSnapshot,
 							),
 						}
 					: {}),
@@ -205,12 +209,19 @@ export async function readArtifactGraphSupportSources(
 	cwd: string,
 	run: WorkflowRunRecord,
 	dependsOn: string[],
+	validationSnapshot: ArtifactGraphRuntimeValidationSnapshot,
 ): Promise<Record<string, unknown>> {
-	const sources: Record<string, unknown> = {};
 	const sourceNames = supportSourceNamesForDependencies(run, dependsOn);
+	const sources: Record<string, unknown> = {};
 	for (const specId of dependsOn) {
 		const source = run.tasks.find((candidate) => candidate.specId === specId);
-		if (!source || source.status !== "completed") continue;
+		if (!source) continue;
+		assertArtifactGraphSourceRuntimeMetadataCurrent(
+			run,
+			source,
+			validationSnapshot,
+		);
+		if (source.status !== "completed") continue;
 		sources[sourceNames.get(source.specId) ?? source.specId] =
 			await readArtifactGraphControl(cwd, source);
 	}
@@ -220,12 +231,18 @@ export async function readArtifactGraphSupportSources(
 function buildArtifactGraphSupportSourceStatuses(
 	run: WorkflowRunRecord,
 	dependsOn: readonly string[],
+	validationSnapshot: ArtifactGraphRuntimeValidationSnapshot,
 ): Array<Record<string, unknown>> {
 	const statuses: Array<Record<string, unknown>> = [];
 	const sourceNames = supportSourceNamesForDependencies(run, dependsOn);
 	for (const specId of dependsOn) {
 		const source = run.tasks.find((candidate) => candidate.specId === specId);
 		if (!source) continue;
+		assertArtifactGraphSourceRuntimeMetadataCurrent(
+			run,
+			source,
+			validationSnapshot,
+		);
 		statuses.push({
 			source: sourceNames.get(source.specId) ?? source.specId,
 			displayName: source.displayName,
@@ -243,6 +260,9 @@ function sourceStatusForTask(task: WorkflowTaskRunRecord): {
 	statusDetail?: string;
 	lastMessage?: string;
 	errorType?: string;
+	generation?: number;
+	sourceGeneration?: number;
+	dispatchMap?: NonNullable<WorkflowTaskRunRecord["dispatchMap"]>;
 } {
 	const lastMessage = sanitizeSourceLastMessage(task.lastMessage);
 	return {
@@ -252,6 +272,7 @@ function sourceStatusForTask(task: WorkflowTaskRunRecord): {
 		...(task.status !== "completed"
 			? { errorType: sourceErrorType(task) }
 			: {}),
+		...artifactGraphSourceRuntimeMetadata(task),
 	};
 }
 
@@ -279,6 +300,479 @@ function sourceErrorType(task: WorkflowTaskRunRecord): string {
 	if (/skip|skipped/.test(task.status) || /skip|skipped/.test(detail))
 		return "skipped";
 	return task.status === "failed" ? "failed" : task.status;
+}
+type ArtifactGraphDispatchMap = NonNullable<
+	WorkflowTaskRunRecord["dispatchMap"]
+>;
+
+type ArtifactGraphValidationDispatchMap = Readonly<{
+	version: unknown;
+	generation: unknown;
+	sourceTaskId: unknown;
+	entries: unknown;
+	digest: unknown;
+}>;
+
+type ArtifactGraphValidationTask = Readonly<{
+	taskId: string;
+	specId: string;
+	generation?: number;
+	sourceGeneration?: number;
+	foreachGenerated?: Readonly<{
+		placeholderSpecId: string;
+		itemIdentity?: string;
+		itemHash?: string;
+		itemSourceTaskId?: string;
+		itemSourceSpecId?: string;
+		itemSourceKind?: "control" | "partial";
+		itemRef?: string;
+		perItemDispatch?: true;
+	}>;
+	dispatchMap?: ArtifactGraphValidationDispatchMap;
+}>;
+
+type ArtifactGraphValidatedDispatchMap = {
+	entryIdentityByChildKey: ReadonlyMap<string, string>;
+};
+
+type ArtifactGraphDispatchMapValidationResult =
+	| { kind: "valid"; value: ArtifactGraphValidatedDispatchMap }
+	| { kind: "invalid"; error: Error };
+
+export type ArtifactGraphRuntimeValidationSnapshot = {
+	readonly run: WorkflowRunRecord;
+	readonly taskById: ReadonlyMap<
+		string,
+		ArtifactGraphValidationTask | undefined
+	>;
+	readonly parentBySpecId: ReadonlyMap<
+		string,
+		ArtifactGraphValidationTask | undefined
+	>;
+	readonly taskByTaskAndSpec: ReadonlyMap<
+		string,
+		ArtifactGraphValidationTask | undefined
+	>;
+	readonly validatedDispatchMaps: Map<
+		string,
+		ArtifactGraphDispatchMapValidationResult
+	>;
+};
+
+let artifactGraphDispatchMapIndexBuildsForTests = 0;
+let artifactGraphFullDispatchMapValidationsForTests = 0;
+
+export function resetArtifactGraphDispatchMapValidationStatsForTests(): void {
+	artifactGraphDispatchMapIndexBuildsForTests = 0;
+	artifactGraphFullDispatchMapValidationsForTests = 0;
+}
+
+export function artifactGraphDispatchMapValidationStatsForTests(): {
+	indexBuilds: number;
+	fullValidations: number;
+} {
+	return {
+		indexBuilds: artifactGraphDispatchMapIndexBuildsForTests,
+		fullValidations: artifactGraphFullDispatchMapValidationsForTests,
+	};
+}
+
+export function createArtifactGraphRuntimeValidationSnapshot(
+	run: WorkflowRunRecord,
+): ArtifactGraphRuntimeValidationSnapshot {
+	artifactGraphDispatchMapIndexBuildsForTests += 1;
+	const taskById = new Map<
+		string,
+		ArtifactGraphValidationTask | undefined
+	>();
+	const parentBySpecId = new Map<
+		string,
+		ArtifactGraphValidationTask | undefined
+	>();
+	const taskByTaskAndSpec = new Map<
+		string,
+		ArtifactGraphValidationTask | undefined
+	>();
+	for (const task of run.tasks) {
+		const validationTask = cloneArtifactGraphValidationTask(task);
+		setUniqueIndexedTask(taskById, validationTask.taskId, validationTask);
+		setUniqueIndexedTask(parentBySpecId, validationTask.specId, validationTask);
+		setUniqueIndexedTask(
+			taskByTaskAndSpec,
+			dispatchMapChildKey(validationTask.taskId, validationTask.specId),
+			validationTask,
+		);
+	}
+	return {
+		run,
+		taskById,
+		parentBySpecId,
+		taskByTaskAndSpec,
+		validatedDispatchMaps: new Map(),
+	};
+}
+
+function cloneArtifactGraphValidationTask(
+	task: WorkflowTaskRunRecord,
+): ArtifactGraphValidationTask {
+	const dispatchMap = task.dispatchMap
+		? Object.freeze({
+				version: task.dispatchMap.version,
+				generation: task.dispatchMap.generation,
+				sourceTaskId: task.dispatchMap.sourceTaskId,
+				entries: Array.isArray(task.dispatchMap.entries)
+					? Object.freeze(
+							task.dispatchMap.entries.map((entry) =>
+								Object.freeze({ ...entry }),
+							),
+						)
+					: task.dispatchMap.entries,
+				digest: task.dispatchMap.digest,
+			})
+		: undefined;
+	return Object.freeze({
+		taskId: task.taskId,
+		specId: task.specId,
+		...(task.generation === undefined ? {} : { generation: task.generation }),
+		...(task.sourceGeneration === undefined
+			? {}
+			: { sourceGeneration: task.sourceGeneration }),
+		...(task.foreachGenerated === undefined
+			? {}
+			: {
+					foreachGenerated: Object.freeze({
+						placeholderSpecId: task.foreachGenerated.placeholderSpecId,
+						...(task.foreachGenerated.itemIdentity === undefined
+							? {}
+							: { itemIdentity: task.foreachGenerated.itemIdentity }),
+						...(task.foreachGenerated.itemHash === undefined
+							? {}
+							: { itemHash: task.foreachGenerated.itemHash }),
+						...(task.foreachGenerated.itemSourceTaskId === undefined
+							? {}
+							: { itemSourceTaskId: task.foreachGenerated.itemSourceTaskId }),
+						...(task.foreachGenerated.itemSourceSpecId === undefined
+							? {}
+							: { itemSourceSpecId: task.foreachGenerated.itemSourceSpecId }),
+						...(task.foreachGenerated.itemSourceKind === undefined
+							? {}
+							: { itemSourceKind: task.foreachGenerated.itemSourceKind }),
+						...(task.foreachGenerated.itemRef === undefined
+							? {}
+							: { itemRef: task.foreachGenerated.itemRef }),
+						...(task.foreachGenerated.perItemDispatch === undefined
+							? {}
+							: { perItemDispatch: task.foreachGenerated.perItemDispatch }),
+					}),
+				}),
+		...(dispatchMap === undefined ? {} : { dispatchMap }),
+	});
+}
+
+function setUniqueIndexedTask(
+	index: Map<string, ArtifactGraphValidationTask | undefined>,
+	key: string,
+	task: ArtifactGraphValidationTask,
+): void {
+	if (index.has(key)) {
+		index.set(key, undefined);
+		return;
+	}
+	index.set(key, task);
+}
+
+function artifactGraphSourceRuntimeMetadata(
+	task: WorkflowTaskRunRecord,
+): {
+	generation?: number;
+	sourceGeneration?: number;
+	dispatchMap?: ArtifactGraphDispatchMap;
+} {
+	return {
+		...(task.generation === undefined ? {} : { generation: task.generation }),
+		...(task.sourceGeneration === undefined
+			? {}
+			: { sourceGeneration: task.sourceGeneration }),
+		...(task.dispatchMap === undefined
+			? {}
+			: {
+					dispatchMap: {
+						version: task.dispatchMap.version,
+						generation: task.dispatchMap.generation,
+						sourceTaskId: task.dispatchMap.sourceTaskId,
+						entries: task.dispatchMap.entries.map((entry) => ({ ...entry })),
+						digest: task.dispatchMap.digest,
+					},
+				}),
+	};
+}
+
+export function assertArtifactGraphSourceRuntimeMetadataCurrent(
+	run: WorkflowRunRecord,
+	task: WorkflowTaskRunRecord,
+	snapshot: ArtifactGraphRuntimeValidationSnapshot,
+): void {
+	assertValidationSnapshotMatchesRun(run, snapshot);
+	const validationTask = snapshot.taskByTaskAndSpec.get(
+		dispatchMapChildKey(task.taskId, task.specId),
+	);
+	if (!validationTask) {
+		throw new Error(
+			`artifact source ${task.specId} is missing or ambiguous in the validation snapshot`,
+		);
+	}
+	assertTaskGeneration(validationTask.generation, validationTask, "generation");
+	if (validationTask.dispatchMap !== undefined) {
+		assertDispatchMapCurrent(
+			snapshot,
+			validationTask,
+			validationTask.dispatchMap,
+		);
+	}
+	if (validationTask.sourceGeneration === undefined) return;
+
+	assertTaskGeneration(
+		validationTask.sourceGeneration,
+		validationTask,
+		"sourceGeneration",
+	);
+	const placeholderSpecId =
+		validationTask.foreachGenerated?.placeholderSpecId;
+	const itemIdentity = validationTask.foreachGenerated?.itemIdentity;
+	if (!placeholderSpecId || !itemIdentity) {
+		throw new Error(
+			`artifact source ${validationTask.specId} has sourceGeneration without generation-bound foreach identity`,
+		);
+	}
+	const parent = snapshot.parentBySpecId.get(placeholderSpecId);
+	if (!parent) {
+		throw new Error(
+			`artifact source ${validationTask.specId} has ambiguous or missing foreach dispatch-map parent ${placeholderSpecId}`,
+		);
+	}
+	const dispatchMap = parent.dispatchMap;
+	if (!dispatchMap) {
+		throw new Error(
+			`artifact source ${validationTask.specId} references a stale or missing dispatch map`,
+		);
+	}
+	const validatedDispatchMap = assertDispatchMapCurrent(
+		snapshot,
+		parent,
+		dispatchMap,
+	);
+	if (dispatchMap.generation !== validationTask.sourceGeneration) {
+		throw new Error(
+			`artifact source ${validationTask.specId} sourceGeneration does not match its dispatch map`,
+		);
+	}
+	if (
+		validatedDispatchMap.entryIdentityByChildKey.get(
+			dispatchMapChildKey(validationTask.taskId, validationTask.specId),
+		) !== itemIdentity
+	) {
+		throw new Error(
+			`artifact source ${validationTask.specId} is absent from its generation-bound dispatch map`,
+		);
+	}
+}
+
+function assertValidationSnapshotMatchesRun(
+	run: WorkflowRunRecord,
+	snapshot: ArtifactGraphRuntimeValidationSnapshot,
+): void {
+	if (snapshot.run !== run) {
+		throw new Error(
+			"artifact graph validation snapshot does not match the current run",
+		);
+	}
+}
+
+function assertTaskGeneration(
+	generation: number | undefined,
+	task: ArtifactGraphValidationTask,
+	field: "generation" | "sourceGeneration",
+): void {
+	if (
+		generation !== undefined &&
+		(!Number.isSafeInteger(generation) || generation < 0)
+	) {
+		throw new Error(
+			`artifact source ${task.specId} has invalid ${field} metadata`,
+		);
+	}
+}
+
+function assertDispatchMapCurrent(
+	snapshot: ArtifactGraphRuntimeValidationSnapshot,
+	parent: ArtifactGraphValidationTask,
+	dispatchMap: ArtifactGraphValidationDispatchMap,
+): ArtifactGraphValidatedDispatchMap {
+	const cacheKey = `${parent.taskId}\0${String(dispatchMap.digest)}`;
+	const cached = snapshot.validatedDispatchMaps.get(cacheKey);
+	if (cached) {
+		if (cached.kind === "valid") return cached.value;
+		throw cached.error;
+	}
+
+	try {
+		artifactGraphFullDispatchMapValidationsForTests += 1;
+		const version = dispatchMap.version;
+		const generation = dispatchMap.generation;
+		if (
+			version !== 1 ||
+			typeof generation !== "number" ||
+			!Number.isSafeInteger(generation) ||
+			generation < 0 ||
+			typeof dispatchMap.sourceTaskId !== "string" ||
+			dispatchMap.sourceTaskId === "" ||
+			typeof dispatchMap.digest !== "string" ||
+			dispatchMap.digest === "" ||
+			!Array.isArray(dispatchMap.entries)
+		) {
+			throw new Error(
+				`artifact source ${parent.specId} has invalid dispatch-map metadata`,
+			);
+		}
+		const expectedDigest = hashDynamicRequest({
+			version,
+			generation,
+			sourceTaskId: dispatchMap.sourceTaskId,
+			entries: dispatchMap.entries,
+		});
+		if (dispatchMap.digest !== expectedDigest) {
+			throw new Error(
+				`artifact source ${parent.specId} dispatch map digest does not match its current entries`,
+			);
+		}
+
+		const mapSource = snapshot.taskById.get(dispatchMap.sourceTaskId);
+		if (!mapSource) {
+			throw new Error(
+				`artifact source ${parent.specId} dispatch map has an ambiguous or missing source task`,
+			);
+		}
+		assertTaskGeneration(mapSource.generation, mapSource, "generation");
+		if ((mapSource.generation ?? 0) !== generation) {
+			throw new Error(
+				`artifact source ${parent.specId} dispatch map generation is stale`,
+			);
+		}
+
+		const itemIdentities = new Set<string>();
+		const taskIds = new Set<string>();
+		const specIds = new Set<string>();
+		const entryIdentityByChildKey = new Map<string, string>();
+		for (const entry of dispatchMap.entries) {
+			if (
+				!entry ||
+				typeof entry !== "object" ||
+				typeof entry.itemIdentity !== "string" ||
+				entry.itemIdentity === "" ||
+				typeof entry.taskId !== "string" ||
+				entry.taskId === "" ||
+				typeof entry.specId !== "string" ||
+				entry.specId === "" ||
+				typeof entry.itemSourceTaskId !== "string" ||
+				entry.itemSourceTaskId !== dispatchMap.sourceTaskId ||
+				typeof entry.itemSourceSpecId !== "string" ||
+				entry.itemSourceSpecId === "" ||
+				(entry.itemSourceKind !== "control" &&
+					entry.itemSourceKind !== "partial") ||
+				typeof entry.itemRef !== "string" ||
+				entry.itemRef === "" ||
+				typeof entry.itemHash !== "string" ||
+				entry.itemHash === "" ||
+				(entry.perItemDispatch !== undefined &&
+					entry.perItemDispatch !== true) ||
+				itemIdentities.has(entry.itemIdentity) ||
+				taskIds.has(entry.taskId) ||
+				specIds.has(entry.specId)
+			) {
+				throw new Error(
+					`artifact source ${parent.specId} has invalid dispatch-map entries`,
+				);
+			}
+			itemIdentities.add(entry.itemIdentity);
+			taskIds.add(entry.taskId);
+			specIds.add(entry.specId);
+
+			const child = snapshot.taskByTaskAndSpec.get(
+				dispatchMapChildKey(entry.taskId, entry.specId),
+			);
+			if (
+				!child ||
+				snapshot.taskById.get(entry.taskId) !== child ||
+				mapSource.taskId !== entry.itemSourceTaskId ||
+				mapSource.specId !== entry.itemSourceSpecId
+			) {
+				throw new Error(
+					`artifact source ${parent.specId} dispatch map entry is stale, ambiguous, or bound to the wrong source`,
+				);
+			}
+			if (
+				child.sourceGeneration !== generation ||
+				child.foreachGenerated?.placeholderSpecId !== parent.specId ||
+				child.foreachGenerated?.itemIdentity !== entry.itemIdentity ||
+				child.foreachGenerated?.itemHash !== entry.itemHash ||
+				child.foreachGenerated?.itemSourceTaskId !== entry.itemSourceTaskId ||
+				child.foreachGenerated?.itemSourceSpecId !== entry.itemSourceSpecId ||
+				child.foreachGenerated?.itemSourceKind !== entry.itemSourceKind ||
+				child.foreachGenerated?.itemRef !== entry.itemRef ||
+				child.foreachGenerated?.perItemDispatch !== entry.perItemDispatch
+			) {
+				throw new Error(
+					`artifact source ${parent.specId} dispatch map entry does not match the current child identity tuple`,
+				);
+			}
+			entryIdentityByChildKey.set(
+				dispatchMapChildKey(entry.taskId, entry.specId),
+				entry.itemIdentity,
+			);
+		}
+		const value = { entryIdentityByChildKey };
+		snapshot.validatedDispatchMaps.set(cacheKey, { kind: "valid", value });
+		return value;
+	} catch (error) {
+		const normalized =
+			error instanceof Error ? error : new Error(String(error));
+		snapshot.validatedDispatchMaps.set(cacheKey, {
+			kind: "invalid",
+			error: normalized,
+		});
+		throw normalized;
+	}
+}
+
+function dispatchMapChildKey(taskId: string, specId: string): string {
+	return `${taskId.length}:${taskId}${specId}`;
+}
+export function finalCompiledPromptMeasurement(task: CompiledTask): {
+	chars: number;
+	maxChars?: number;
+} {
+	const maxChars = task.artifactGraph?.inputPolicy?.maxCompiledPromptChars;
+	if (maxChars !== undefined && (!Number.isSafeInteger(maxChars) || maxChars < 1)) {
+		throw new Error(
+			`task ${task.id} has invalid maxCompiledPromptChars=${String(maxChars)}`,
+		);
+	}
+	const chars = Array.from(task.compiledPrompt).length;
+	if (maxChars !== undefined && chars > maxChars) {
+		throw new Error(
+			`task ${task.id} final compiled prompt exceeds maxCompiledPromptChars=${maxChars} (actual ${chars})`,
+		);
+	}
+	return {
+		chars,
+		...(maxChars === undefined ? {} : { maxChars }),
+	};
+}
+
+export function assertFinalCompiledPromptWithinCap(task: CompiledTask): void {
+	if (task.artifactGraph?.inputPolicy?.maxCompiledPromptChars === undefined)
+		return;
+	finalCompiledPromptMeasurement(task);
 }
 export async function writeArtifactGraphDynamicResult(
 	cwd: string,
@@ -489,21 +983,30 @@ export async function prepareDagTask(
 	run: WorkflowRunRecord,
 	compiledFlow: CompiledWorkflow,
 	index: number,
+	validationSnapshot: ArtifactGraphRuntimeValidationSnapshot = createArtifactGraphRuntimeValidationSnapshot(
+		run,
+	),
 ): Promise<CompiledWorkflow["tasks"][number]> {
 	const compiledTask = compiledFlow.tasks[index]!;
 	const task = run.tasks[index]!;
 	const contextDependsOn =
 		compiledTask.contextDependsOn ?? compiledTask.dependsOn ?? [];
 	if (compiledTask.artifactGraph?.enabled) {
-		return await prepareArtifactGraphTask(
+		const preparedTask = await prepareArtifactGraphTask(
 			cwd,
 			run,
 			compiledTask,
 			task,
 			contextDependsOn,
+			validationSnapshot,
 		);
+		assertFinalCompiledPromptWithinCap(preparedTask);
+		return preparedTask;
 	}
-	if (contextDependsOn.length === 0) return compiledTask;
+	if (contextDependsOn.length === 0) {
+		assertFinalCompiledPromptWithinCap(compiledTask);
+		return compiledTask;
+	}
 
 	const bySpecId = new Map(
 		run.tasks.map((sourceTask) => [sourceTask.specId, sourceTask]),
@@ -513,6 +1016,13 @@ export async function prepareDagTask(
 		.filter((sourceTask): sourceTask is WorkflowTaskRunRecord =>
 			Boolean(sourceTask),
 		);
+	for (const sourceTask of sourceTasks) {
+		assertArtifactGraphSourceRuntimeMetadataCurrent(
+			run,
+			sourceTask,
+			validationSnapshot,
+		);
+	}
 	const missing = contextDependsOn.filter((dep) => !bySpecId.has(dep));
 	const context = await buildRunSourceContext(
 		cwd,
@@ -521,7 +1031,7 @@ export async function prepareDagTask(
 		sourceContextOptions(compiledTask),
 	);
 
-	return {
+	const preparedTask = {
 		...compiledTask,
 		cwd: task.cwd,
 		compiledPrompt: [
@@ -531,6 +1041,63 @@ export async function prepareDagTask(
 			stringifyPromptJson({ ...context, missingDependencies: missing }),
 		].join("\n\n"),
 	};
+	assertFinalCompiledPromptWithinCap(preparedTask);
+	return preparedTask;
+}
+
+type PerItemLedgerProjection = {
+	placeholderSpecId: string;
+	itemIdentity: string;
+	itemHash: string;
+	itemSourceTaskId: string;
+	itemSourceSpecId: string;
+	itemRef: string;
+};
+
+function perItemLedgerProjectionForPreparation(
+	compiledTask: CompiledTask,
+	runTask: WorkflowTaskRunRecord,
+	contextDependsOn: readonly string[],
+): PerItemLedgerProjection | undefined {
+	const compiled = compiledTask.foreachGenerated;
+	const persisted = runTask.foreachGenerated;
+	const requested =
+		compiled?.perItemDispatch === true || persisted?.perItemDispatch === true;
+	if (!requested) return undefined;
+	if (
+		!compiled ||
+		!persisted ||
+		compiled.perItemDispatch !== true ||
+		persisted.perItemDispatch !== true ||
+		compiled.itemSourceKind !== "partial" ||
+		persisted.itemSourceKind !== "partial" ||
+		!compiled.placeholderSpecId ||
+		!compiled.itemIdentity ||
+		!compiled.itemHash ||
+		!compiled.itemSourceTaskId ||
+		!compiled.itemSourceSpecId ||
+		!compiled.itemRef ||
+		compiled.placeholderSpecId !== persisted.placeholderSpecId ||
+		compiled.itemIdentity !== persisted.itemIdentity ||
+		compiled.itemHash !== persisted.itemHash ||
+		compiled.itemSourceTaskId !== persisted.itemSourceTaskId ||
+		compiled.itemSourceSpecId !== persisted.itemSourceSpecId ||
+		compiled.itemSourceKind !== persisted.itemSourceKind ||
+		compiled.itemRef !== persisted.itemRef ||
+		!contextDependsOn.includes(compiled.itemSourceSpecId)
+	) {
+		throw new Error(
+			`per-item dispatch task ${compiledTask.id} has incomplete or inconsistent persisted foreach identity metadata`,
+		);
+	}
+	return {
+		placeholderSpecId: compiled.placeholderSpecId,
+		itemIdentity: compiled.itemIdentity,
+		itemHash: compiled.itemHash,
+		itemSourceTaskId: compiled.itemSourceTaskId,
+		itemSourceSpecId: compiled.itemSourceSpecId,
+		itemRef: compiled.itemRef,
+	};
 }
 
 async function prepareArtifactGraphTask(
@@ -539,6 +1106,7 @@ async function prepareArtifactGraphTask(
 	compiledTask: CompiledTask,
 	task: WorkflowTaskRunRecord,
 	contextDependsOn: readonly string[],
+	validationSnapshot: ArtifactGraphRuntimeValidationSnapshot,
 ): Promise<CompiledTask> {
 	if (compiledTask.artifactGraph?.artifactAccess === "none") {
 		const {
@@ -557,23 +1125,30 @@ async function prepareArtifactGraphTask(
 			},
 		};
 	}
+	assertArtifactGraphSourceRuntimeMetadataCurrent(
+		run,
+		task,
+		validationSnapshot,
+	);
 
 	const taskDir = dirname(fromProjectPath(cwd, task.files.result));
 	const manifestPath = join(taskDir, "source-manifest.json");
 	const ledgerPath = join(taskDir, "read-ledger.jsonl");
 	const wrapperPath = join(taskDir, "workflow-artifact-extension.ts");
+	const perItemProjection = perItemLedgerProjectionForPreparation(
+		compiledTask,
+		task,
+		contextDependsOn,
+	);
 	const sources = await buildArtifactGraphSourceManifestSources(
 		cwd,
 		run,
 		contextDependsOn,
+		validationSnapshot,
 		compiledTask.artifactGraph?.sourceProjection,
 		{
-			// Per-item dispatched foreach children (opt-in, marker persisted at
-			// materialization) may launch while their producer is still running;
-			// their sourceProjection is then served from the producer's partial
-			// output ledger instead of the not-yet-written control artifact.
-			partialLedgerProjection:
-				compiledTask.foreachGenerated?.perItemDispatch === true,
+			partialLedgerProjection: perItemProjection !== undefined,
+			perItemProjection,
 		},
 	);
 	const manifest: WorkflowSourceManifest = {
@@ -781,46 +1356,78 @@ export async function buildArtifactGraphSourceManifestSources(
 	cwd: string,
 	run: WorkflowRunRecord,
 	contextDependsOn: readonly string[],
+	validationSnapshot: ArtifactGraphRuntimeValidationSnapshot,
 	projection?: NonNullable<CompiledTask["artifactGraph"]>["sourceProjection"],
-	options?: { partialLedgerProjection?: boolean },
+	options?: {
+		partialLedgerProjection?: boolean;
+		perItemProjection?: PerItemLedgerProjection;
+	},
 ): Promise<WorkflowSourceManifestSource[]> {
 	const bySpecId = new Map(
 		run.tasks.map((sourceTask) => [sourceTask.specId, sourceTask]),
 	);
 	const sources: WorkflowSourceManifestSource[] = [];
 	const usedNames = new Set<string>();
+	let foundPerItemSource = false;
 	for (const dep of contextDependsOn) {
 		const sourceTask = bySpecId.get(dep);
-		if (!sourceTask) continue;
+		if (!sourceTask) {
+			if (options?.perItemProjection?.itemSourceSpecId === dep) {
+				throw new Error(
+					`per-item dispatch source ${dep} is missing from the authoritative run task record`,
+				);
+			}
+			continue;
+		}
+		assertArtifactGraphSourceRuntimeMetadataCurrent(
+			run,
+			sourceTask,
+			validationSnapshot,
+		);
 		const source = sourceNameForTask(sourceTask, usedNames);
 		const status = sourceStatusForTask(sourceTask);
+		const perItemProjection =
+			options?.perItemProjection?.itemSourceSpecId === sourceTask.specId
+				? options.perItemProjection
+				: undefined;
+		if (perItemProjection) {
+			if (sourceTask.taskId !== perItemProjection.itemSourceTaskId) {
+				throw new Error(
+					`per-item dispatch source ${sourceTask.specId} does not match the persisted source task identity`,
+				);
+			}
+			foundPerItemSource = true;
+			const partialProjection = await partialLedgerSourceProjection(
+				cwd,
+				sourceTask,
+				projection,
+				perItemProjection,
+			);
+			const artifacts =
+				sourceTask.status === "completed"
+					? await artifactRefsForTask(cwd, sourceTask)
+					: {};
+			sources.push({
+				source,
+				displayName: sourceTask.displayName,
+				taskId: sourceTask.taskId,
+				specId: sourceTask.specId,
+				stageId: sourceTask.stageId,
+				...status,
+				controlProjection: partialProjection.value,
+				...(partialProjection.truncated
+					? { projectionTruncated: true }
+					: {}),
+				projectionSource: "partial-ledger",
+				artifacts,
+			});
+			continue;
+		}
 		if (sourceTask.status !== "completed") {
 			if (options?.partialLedgerProjection) {
-				const partialProjection = await partialLedgerSourceProjection(
-					cwd,
-					sourceTask,
-					projection,
+				throw new Error(
+					`partial-ledger source ${sourceTask.specId} is missing persisted per-item identity metadata`,
 				);
-				if (partialProjection) {
-					sources.push({
-						source,
-						displayName: sourceTask.displayName,
-						taskId: sourceTask.taskId,
-						specId: sourceTask.specId,
-						stageId: sourceTask.stageId,
-						...status,
-						controlProjection: partialProjection.value,
-						...(partialProjection.missingPaths.length > 0
-							? { projectionMissingPaths: partialProjection.missingPaths }
-							: {}),
-						...(partialProjection.truncated
-							? { projectionTruncated: true }
-							: {}),
-						projectionSource: "partial-ledger",
-						artifacts: {},
-					});
-					continue;
-				}
 			}
 			sources.push({
 				source,
@@ -864,55 +1471,111 @@ export async function buildArtifactGraphSourceManifestSources(
 			projection,
 			sources,
 			usedNames,
+			validationSnapshot,
 		});
+	}
+	if (options?.perItemProjection && !foundPerItemSource) {
+		throw new Error(
+			`per-item dispatch source ${options.perItemProjection.itemSourceSpecId} is absent from preparation dependencies`,
+		);
 	}
 	return sources;
 }
 
-// Serve a sourceProjection for a still-running producer from its durable
-// partial output ledger (per-item dispatch only). Each declared partial path
-// with published items becomes an array on a pseudo-control object, which is
-// then projected exactly like a completed control. Returns undefined when no
-// projection value can be built so the caller falls back to the default
-// empty-artifacts source entry.
 async function partialLedgerSourceProjection(
 	cwd: string,
 	sourceTask: WorkflowTaskRunRecord,
 	projection:
 		| NonNullable<CompiledTask["artifactGraph"]>["sourceProjection"]
 		| undefined,
-): Promise<
-	{ value?: unknown; missingPaths: string[]; truncated: boolean } | undefined
-> {
-	if (!projection?.include || projection.include.length === 0) return undefined;
+	identity: PerItemLedgerProjection,
+): Promise<{ value: unknown; truncated: boolean }> {
+	const include = projection?.include ?? [];
+	if (include.length === 0) {
+		throw new Error(
+			`per-item dispatch source ${sourceTask.specId} has no projection paths to verify`,
+		);
+	}
 	const allowedPaths = sourceTask.artifactGraph?.output.partial?.paths ?? [];
-	if (allowedPaths.length === 0) return undefined;
+	if (
+		allowedPaths.length === 0 ||
+		include.some((path) => !allowedPaths.includes(path))
+	) {
+		throw new Error(
+			`per-item dispatch source ${sourceTask.specId} cannot authoritatively serve every projection path`,
+		);
+	}
 	const taskDir = dirname(fromProjectPath(cwd, sourceTask.files.result));
-	let ledger = await readWorkflowPartialOutputLedger(taskDir).catch(
-		() => undefined,
-	);
+	let ledger = await readWorkflowPartialOutputLedger(taskDir);
 	if (!ledger) {
 		ledger = await writeWorkflowPartialOutputLedgerFromFile({
 			taskDir,
 			outputFile: fromProjectPath(cwd, sourceTask.files.output),
 			allowedPaths,
-		}).catch(() => undefined);
+		});
 	}
-	if (!ledger || hasFatalPartialOutputIssue(ledger)) return undefined;
-	const itemsByPath = new Map<string, unknown[]>();
-	for (const item of ledger.items) {
-		const bucket = itemsByPath.get(item.path) ?? [];
-		bucket.push(item.item);
-		itemsByPath.set(item.path, bucket);
+	if (!ledger) {
+		throw new Error(
+			`per-item dispatch source ${sourceTask.specId} has no durable partial-output ledger`,
+		);
 	}
-	if (itemsByPath.size === 0) return undefined;
+	const fatal = hasFatalPartialOutputIssue(ledger);
+	if (fatal) {
+		throw new Error(
+			`per-item dispatch source ${sourceTask.specId} has fatal partial-output evidence: ${fatal.message}`,
+		);
+	}
+	const matchingItems = ledger.items.filter(
+		(item) =>
+			`${sourceTask.specId}:${item.itemRef}` === identity.itemRef &&
+			item.itemHash === identity.itemHash &&
+			item.itemId === identity.itemIdentity,
+	);
+	if (matchingItems.length !== 1) {
+		throw new Error(
+			`per-item dispatch source ${sourceTask.specId} cannot verify the persisted item ref, hash, and identity tuple`,
+		);
+	}
+	const matchingItem = matchingItems[0]!;
+	if (!include.includes(matchingItem.path)) {
+		throw new Error(
+			`per-item dispatch source ${sourceTask.specId} does not project the authoritative item path ${matchingItem.path}`,
+		);
+	}
 	const partialControl = createProjectionContainer();
-	for (const [path, items] of itemsByPath) {
-		setProjectedJsonPath(partialControl, path, items);
+	for (const path of include) {
+		const items = ledger.items.filter((item) => item.path === path);
+		if (items.length === 0) {
+			throw new Error(
+				`per-item dispatch source ${sourceTask.specId} has no durable evidence for projection path ${path}`,
+			);
+		}
+		setProjectedJsonPath(
+			partialControl,
+			path,
+			path === matchingItem.path
+				? [matchingItem.item]
+				: items.map((item) => item.item),
+		);
 	}
 	const projected = projectArtifactGraphControl(partialControl, projection);
-	if (projected.value === undefined) return undefined;
-	return projected;
+	if (
+		projected.value === undefined ||
+		projected.missingPaths.length > 0 ||
+		!hasProjectionEvidence(projected.value)
+	) {
+		throw new Error(
+			`per-item dispatch source ${sourceTask.specId} produced missing or empty projection evidence`,
+		);
+	}
+	return { value: projected.value, truncated: projected.truncated };
+}
+
+function hasProjectionEvidence(value: unknown): boolean {
+	if (typeof value === "string") return value.trim() !== "";
+	if (Array.isArray(value)) return value.length > 0;
+	if (value && typeof value === "object") return Object.keys(value).length > 0;
+	return value !== undefined && value !== null;
 }
 
 export async function appendDynamicOutputSources(input: {
@@ -923,6 +1586,7 @@ export async function appendDynamicOutputSources(input: {
 	projection?: NonNullable<CompiledTask["artifactGraph"]>["sourceProjection"];
 	sources: WorkflowSourceManifestSource[];
 	usedNames: Set<string>;
+	validationSnapshot: ArtifactGraphRuntimeValidationSnapshot;
 }): Promise<void> {
 	if (input.controllerTask.kind !== "dynamic") return;
 	const outputTaskIds = dynamicOutputTaskSpecIds(input.control);
@@ -934,6 +1598,11 @@ export async function appendDynamicOutputSources(input: {
 	for (const outputTaskId of outputTaskIds) {
 		const outputTask = bySpecId.get(outputTaskId);
 		if (!outputTask) continue;
+		assertArtifactGraphSourceRuntimeMetadataCurrent(
+			input.run,
+			outputTask,
+			input.validationSnapshot,
+		);
 		const source = dynamicOutputSourceName(
 			input.controllerTask,
 			outputIndex,
@@ -1169,6 +1838,35 @@ export function sourceNameForTask(
 	return task.specId;
 }
 
+type ArtifactGraphManifestSourceWithRuntimeMetadata =
+	WorkflowSourceManifestSource & {
+		generation?: number;
+		sourceGeneration?: number;
+		dispatchMap?: ArtifactGraphDispatchMap;
+	};
+
+function artifactGraphManifestSourceRuntimeMetadata(
+	source: WorkflowSourceManifestSource,
+): {
+	generation?: number;
+	sourceGeneration?: number;
+	dispatchMap?: ArtifactGraphDispatchMap;
+} {
+	const runtimeSource =
+		source as ArtifactGraphManifestSourceWithRuntimeMetadata;
+	return {
+		...(runtimeSource.generation === undefined
+			? {}
+			: { generation: runtimeSource.generation }),
+		...(runtimeSource.sourceGeneration === undefined
+			? {}
+			: { sourceGeneration: runtimeSource.sourceGeneration }),
+		...(runtimeSource.dispatchMap === undefined
+			? {}
+			: { dispatchMap: runtimeSource.dispatchMap }),
+	};
+}
+
 export function formatArtifactGraphSourceContext(
 	sources: readonly WorkflowSourceManifestSource[],
 	requiredReads: readonly ArtifactGraphRequiredRead[],
@@ -1204,6 +1902,7 @@ export function formatArtifactGraphSourceContext(
 				projectionMissingPaths: source.projectionMissingPaths,
 				projectionTruncated: source.projectionTruncated,
 				projectionSource: source.projectionSource,
+				...artifactGraphManifestSourceRuntimeMetadata(source),
 				availableArtifacts: Object.keys(source.artifacts),
 			})),
 		),
@@ -1252,19 +1951,57 @@ export async function prepareArtifactGraphRetryTask(
 		preparedTask.artifactGraph?.artifactAccess === "none"
 			? undefined
 			: "If the retry is for missing required workflow_artifact reads, use workflow_artifact before the final answer. Prefer projected reads with path/maxItems/maxChars when only a JSON slice is needed.";
-	return {
+	const retrySections = [
+		preparedTask.compiledPrompt,
+		"# Workflow Output Retry Instructions",
+		issueText,
+		"Return the final answer again using exactly <control>, <analysis>, and <refs> sections. The first byte must be '<' in <control>; do not include apologies, status text, Markdown headings, or prose outside the required sections.",
+		readRetryHint,
+		"# Previous Attempt Preview",
+	].filter(Boolean) as string[];
+	const prefix = retrySections.join("\n\n");
+	const previewLimit = remainingPromptChars(
+		preparedTask,
+		`${prefix}\n\n`,
+		"(empty or unavailable)",
+	);
+	const preview =
+		(preparedTask.artifactGraph?.inputPolicy?.maxCompiledPromptChars ===
+		undefined
+			? previousOutput.slice(0, 4000)
+			: truncatePromptToChars(previousOutput, previewLimit)) ||
+		"(empty or unavailable)";
+	const retryTask = {
 		...preparedTask,
 		cwd: task.cwd,
-		compiledPrompt: [
-			preparedTask.compiledPrompt,
-			"# Workflow Output Retry Instructions",
-			issueText,
-			"Return the final answer again using exactly <control>, <analysis>, and <refs> sections. The first byte must be '<' in <control>; do not include apologies, status text, Markdown headings, or prose outside the required sections.",
-			readRetryHint,
-			"# Previous Attempt Preview",
-			previousOutput.slice(0, 4000) || "(empty or unavailable)",
-		]
-			.filter(Boolean)
-			.join("\n\n"),
+		compiledPrompt: [...retrySections, preview].join("\n\n"),
 	};
+	assertFinalCompiledPromptWithinCap(retryTask);
+	return retryTask;
+}
+
+function remainingPromptChars(
+	task: CompiledTask,
+	prefix: string,
+	fallback: string,
+): number {
+	const maxChars = task.artifactGraph?.inputPolicy?.maxCompiledPromptChars;
+	if (maxChars === undefined) return 4000;
+	if (!Number.isSafeInteger(maxChars) || maxChars < 1) {
+		throw new Error(
+			`task ${task.id} has invalid maxCompiledPromptChars=${String(maxChars)}`,
+		);
+	}
+	const mandatoryChars =
+		Array.from(prefix).length + Array.from(fallback).length;
+	if (mandatoryChars > maxChars) {
+		throw new Error(
+			`task ${task.id} retry instructions exceed maxCompiledPromptChars=${maxChars} before any previous-output preview`,
+		);
+	}
+	return Math.max(0, maxChars - Array.from(prefix).length);
+}
+
+function truncatePromptToChars(value: string, maxChars: number): string {
+	return Array.from(value).slice(0, Math.max(0, maxChars)).join("");
 }

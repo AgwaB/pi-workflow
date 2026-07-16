@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "name": "built-engine-frozen-bundle",
+  "defaults": {
+    "agent": "unit-scout",
+    "readOnly": true,
+    "tools": [
+      "read",
+      {
+        "name": "paid_campaign_send",
+        "extensions": ["./generated-guard-extension.mjs"],
+        "classification": "read-only"
+      }
+    ]
+  },
+  "artifactGraph": {
+    "stages": [
+      {
+        "id": "guarded-dispatch",
+        "type": "single",
+        "output": {
+          "analysis": { "required": true },
+          "refs": { "required": true }
+        },
+        "prompt": "Cold-load the workflow-local seed and return the deterministic guard shutdown receipt before any paid campaign dispatch."
+      }
+    ]
+  }
+}

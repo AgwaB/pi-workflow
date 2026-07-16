@@ -32,6 +32,8 @@ Copy their proven conventions (see "Quality design patterns"), not just their st
 - Stage order controls scheduling only; it does **not** pass prior output into a later plain `single` stage.
 - If a model stage needs prior artifacts, use `single.from` or `reduce.from`; use `foreach.from` for array fan-out and support `from` for deterministic helpers. `after` is order-only.
 - For static data-driven fan-out, use `foreach.from` with a simple dot path into upstream `control.json`.
+- Use `each.itemIdentityPath` only for non-streaming foreach items with a stable string identity, and `each.itemPayloadPath` only for a distinct object payload. The runtime rejects missing, duplicate, unsafe, or colliding identities rather than falling back silently.
+- Use `inputPolicy.terminalBarrier: "all-sources"` for an intentional all-terminal fan-in, `invalidateOnDependencyResume: true` only for static graph consumers that must discard stale generated evidence on source resume, and `maxCompiledPromptChars` when the final prompt needs a hard code-point ceiling. All three are opt-in; unsupported replay ownership fails closed.
 - Use `type: "dynamic"` only for trusted adaptive orchestration that must create official child tasks at runtime with `ctx.agent()`, `ctx.helper()`, or `ctx.workflow()`.
 - For synthesis/fan-in, use `reduce.from` and require/encourage `workflow_artifact` reads for detailed upstream artifacts.
 - For deterministic local post-processing, declare a `support` object with `support.uses` pointing to a bundle-local `./*.mjs` helper; support is trusted local code, not sandboxed subagent work and does not use a separate `type` value.

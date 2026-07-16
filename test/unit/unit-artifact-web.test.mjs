@@ -244,6 +244,8 @@ import {
 	writeWorkflowTaskArtifactBundle,
 	writeWorkflowWebSource,
 } from "./unit-test-support.mjs";
+import { setForeachMaterializationPersistenceHookForTests } from "../../.tmp/unit/engine.js";
+
 
 
 test("public schemaVersion 1 parser accepts artifact graph and rejects non-artifactGraph top-level shapes", () => {
@@ -1533,6 +1535,23 @@ test("artifactGraph runtime foreach repairs compiled/run mismatch after material
 		await completeTask(cwd, run.tasks[0], { claims: ["a", "b"] });
 		const staleRun = JSON.parse(JSON.stringify(run));
 		await writeRunRecord(cwd, run);
+		let crashedAfterCompiledPersistence = false;
+		setForeachMaterializationPersistenceHookForTests((boundary) => {
+			if (
+				boundary === "compiled-written" &&
+				!crashedAfterCompiledPersistence
+			) {
+				crashedAfterCompiledPersistence = true;
+				throw new Error("forced foreach materialization crash");
+			}
+		});
+		await assert.rejects(
+			() => scheduleRun(cwd, run.runId),
+			/forced foreach materialization crash/,
+		);
+		setForeachMaterializationPersistenceHookForTests(undefined);
+		const prepared = await readRunRecord(cwd, run.runId);
+		assert.equal(prepared.foreachMaterializationJournal?.status, "prepared");
 
 		await scheduleRun(cwd, run.runId);
 		const materialized = await readRunRecord(cwd, run.runId);
@@ -1540,6 +1559,9 @@ test("artifactGraph runtime foreach repairs compiled/run mismatch after material
 			materialized.tasks.map((task) => task.specId),
 			["extract.main", "verify.item-001", "verify.item-002", "summary.main"],
 		);
+		const materializedGenerated = materialized.tasks
+			.filter((task) => task.stageId === "verify")
+			.map((task) => task.foreachGenerated);
 
 		await writeRunRecord(cwd, staleRun);
 		await scheduleRun(cwd, run.runId);
@@ -1552,10 +1574,7 @@ test("artifactGraph runtime foreach repairs compiled/run mismatch after material
 			repaired.tasks
 				.filter((task) => task.stageId === "verify")
 				.map((task) => task.foreachGenerated),
-			[
-				{ placeholderSpecId: "verify.item" },
-				{ placeholderSpecId: "verify.item" },
-			],
+			materializedGenerated,
 		);
 		assert.deepEqual(
 			repaired.tasks.find((task) => task.specId === "summary.main").dependsOn,
@@ -1563,6 +1582,7 @@ test("artifactGraph runtime foreach repairs compiled/run mismatch after material
 		);
 	} finally {
 		setSubagentApiForTests(undefined);
+		setForeachMaterializationPersistenceHookForTests(undefined);
 		rmSync(cwd, {
 			recursive: true,
 			force: true,
@@ -2397,6 +2417,198 @@ test("artifactGraph runtime support executes helper and writes artifacts", async
 		assert.deepEqual(
 			JSON.parse(readFileSync(join(supportDir, "refs.json"), "utf8")),
 			["README.md"],
+		);
+	} finally {
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+	}
+});
+test("artifact graph sources expose generation-bound dispatch metadata and support fails closed when it is stale", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const workflowDir = join(cwd, "workflows", "bundle");
+		const specPath = join(workflowDir, "spec.json");
+		mkdirSync(join(workflowDir, "helpers"), { recursive: true });
+		writeFileSync(
+			join(workflowDir, "helpers", "metadata.mjs"),
+			"export default async function helper({ context }) { return { sourceStatuses: context.sourceStatuses }; }\n",
+		);
+		const spec = workflowSpec("unit-scout", {
+			artifactGraph: {
+				stages: [
+					{ id: "producer", type: "single", prompt: "Produce." },
+					{ id: "fanout", type: "single", prompt: "Fan out." },
+					{ id: "child", type: "single", prompt: "Check." },
+					{
+						id: "audit",
+						from: ["fanout", "child"],
+						support: { uses: "./helpers/metadata.mjs" },
+					},
+				],
+			},
+		});
+		writeFileSync(specPath, JSON.stringify(spec));
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Check generation metadata",
+			specPath,
+		});
+
+		const createGenerationBoundRun = async () => {
+			const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
+			await writeStaticRunArtifacts(cwd, run, compiled, spec);
+			const producer = taskBySpec(run, "producer.main");
+			const fanout = taskBySpec(run, "fanout.main");
+			const child = taskBySpec(run, "child.main");
+			const compiledFanout = compiled.tasks.find(
+				(task) => task.id === fanout.specId,
+			);
+			const compiledChild = compiled.tasks.find(
+				(task) => task.id === child.specId,
+			);
+			const entries = [
+				{
+					itemIdentity: "C_aaaaaaaaaaaaaaaaaaaaaa",
+					taskId: child.taskId,
+					specId: child.specId,
+					itemHash: "item-hash",
+					itemSourceTaskId: producer.taskId,
+					itemSourceSpecId: producer.specId,
+					itemSourceKind: "control",
+					itemRef: "control:1",
+				},
+			];
+			producer.generation = 7;
+			fanout.generation = 3;
+			fanout.dispatchMap = {
+				version: 1,
+				generation: 7,
+				sourceTaskId: producer.taskId,
+				entries,
+				digest: hashDynamicRequest({
+					version: 1,
+					generation: 7,
+					sourceTaskId: producer.taskId,
+					entries,
+				}),
+			};
+			const foreachGenerated = {
+				placeholderSpecId: fanout.specId,
+				itemIdentity: entries[0].itemIdentity,
+				itemHash: entries[0].itemHash,
+				itemSourceTaskId: entries[0].itemSourceTaskId,
+				itemSourceSpecId: entries[0].itemSourceSpecId,
+				itemSourceKind: entries[0].itemSourceKind,
+				itemRef: entries[0].itemRef,
+			};
+			assert.ok(compiledFanout);
+			assert.ok(compiledChild);
+			compiledFanout.foreach = {
+				from: { streaming: { enabled: true } },
+			};
+			compiledChild.sourceGeneration = 7;
+			compiledChild.foreachGenerated = foreachGenerated;
+			child.generation = 3;
+			child.sourceGeneration = 7;
+			child.foreachGenerated = foreachGenerated;
+			await completeTask(cwd, producer, { items: [] });
+			await completeTask(cwd, fanout, { status: "dispatched" });
+			await completeTask(cwd, child, { status: "checked" });
+			await writeRunRecord(cwd, run);
+			return { run, fanout, child };
+		};
+
+		const current = await createGenerationBoundRun();
+		const auditIndex = compiled.tasks.findIndex(
+			(task) => task.id === "audit.main",
+		);
+		const prepared = await prepareDagTask(
+			cwd,
+			current.run,
+			compiled,
+			auditIndex,
+		);
+		assert.match(prepared.compiledPrompt, /"sourceGeneration":7/);
+		const audit = taskBySpec(current.run, "audit.main");
+		const manifest = JSON.parse(
+			readFileSync(
+				join(dirname(join(cwd, audit.files.result)), "source-manifest.json"),
+				"utf8",
+			),
+		);
+		assert.deepEqual(
+			manifest.sources.map(
+				({ source, generation, sourceGeneration, dispatchMap }) => ({
+					source,
+					generation,
+					sourceGeneration,
+					dispatchMap,
+				}),
+			),
+			[
+				{
+					source: "fanout",
+					generation: 3,
+					sourceGeneration: undefined,
+					dispatchMap: current.fanout.dispatchMap,
+				},
+				{
+					source: "child",
+					generation: 3,
+					sourceGeneration: 7,
+					dispatchMap: undefined,
+				},
+			],
+		);
+
+		await scheduleRun(cwd, current.run.runId, compiled);
+		const completed = await readRunRecord(cwd, current.run.runId);
+		const completedAudit = taskBySpec(completed, "audit.main");
+		const control = JSON.parse(
+			readFileSync(
+				join(dirname(join(cwd, completedAudit.files.result)), "control.json"),
+				"utf8",
+			),
+		);
+		assert.deepEqual(
+			control.sourceStatuses.map(
+				({ source, generation, sourceGeneration, dispatchMap }) => ({
+					source,
+					generation,
+					sourceGeneration,
+					dispatchMap,
+				}),
+			),
+			manifest.sources.map(
+				({ source, generation, sourceGeneration, dispatchMap }) => ({
+					source,
+					generation,
+					sourceGeneration,
+					dispatchMap,
+				}),
+			),
+		);
+
+		const stale = await createGenerationBoundRun();
+		stale.fanout.dispatchMap.generation = 6;
+		stale.fanout.dispatchMap.digest = hashDynamicRequest({
+			version: 1,
+			generation: 6,
+			sourceTaskId: stale.fanout.dispatchMap.sourceTaskId,
+			entries: stale.fanout.dispatchMap.entries,
+		});
+		await writeRunRecord(cwd, stale.run);
+		await scheduleRun(cwd, stale.run.runId, compiled);
+		const failed = await readRunRecord(cwd, stale.run.runId);
+		assert.equal(taskBySpec(failed, "audit.main").status, "failed");
+		assert.match(
+			taskBySpec(failed, "audit.main").lastMessage,
+			/dispatch map generation is stale/,
 		);
 	} finally {
 		rmSync(cwd, {
