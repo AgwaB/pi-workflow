@@ -85,11 +85,13 @@ For explicit dynamic workflow requests that should not require a workflow name o
 /workflow dynamic "Research this repository's architecture tradeoffs."
 ```
 
-`workflow_dynamic` and `/workflow dynamic` use a built-in trusted
-direct-dynamic controller and record normal `.pi/workflows/<run-id>`
-artifacts/events for observability; they do not ask the user to choose,
-generate, preview, approve, or save a workflow spec. Direct dynamic generated
-workers validate external URL refs before completion, verifier outputs are
+`/workflow dynamic` uses pi-workflow's built-in trusted dynamic controller and
+records a normal workflow run under `.pi/workflows/`. Use it when you explicitly
+want adaptive orchestration rather than a named reusable workflow. The
+LLM-callable `workflow_dynamic` tool uses the same controller. Neither form asks
+the user to choose, generate, preview, approve, or save a workflow spec. Direct
+dynamic generated workers validate external URL refs before completion,
+verifier outputs are
 asked to record structured `claimSupports`, and final synthesis additionally
 requires at least one ref plus an upstream source-ledger subset check. Stale,
 unreachable, or newly invented final URL refs trigger the normal
@@ -219,13 +221,34 @@ A run prints a `workflow_*` id. Use that id for follow-up commands:
 
 The runtime task is not optional. `/workflow run <workflow>` and `/workflow dynamic` without task text fail before launch.
 
+To interrupt a non-terminal run and stop its local supervisor watch, use
+`/workflow stop <run-id>`. Resume later with `/workflow resume <run-id>` if
+unfinished tasks should be retried.
+
+### Diagnose a failed run
+
+Start with the run summary, then inspect only the failing task before resuming:
+
+```text
+/workflow status <run-id>
+/workflow logs <run-id> <task-id-or-spec-id> 120
+/workflow show <run-id>
+```
+
+For a terminal-friendly evidence view, run
+`pi-workflow inspect <run-id> --failures --results`. After fixing the reported
+access, configuration, output, or code problem, use
+`/workflow resume <run-id>`; completed task artifacts are preserved.
+
 ### Speed and quality guardrails
 
 Performance changes must preserve final prompt/state/error semantics and the evidence gates that define output quality. Do not claim general speed or quality parity from one workflow, fixture, model, or concurrency regime. Default changes require candidate-matched paired runs with the same task, model/thinking, and serial-or-parallel regime; zero missing/duplicate verifier rows and source-ref join failures; no verified-floor regression; and explicit owner/release approval. Do not obtain a speed result by weakening verification, reclassifying partially supported claims as verified, skipping rows, shortening correctness timeouts/retries, or enabling opt-in streaming/batching/tiering by default.
 
 ### Opt-in fast mode
 
-For lower-latency runs, pass `--thinking low` explicitly:
+For opt-in lower-latency `deep-research` runs, add `--thinking low`. The
+measured deep-research pairs show a latency/verified-coverage tradeoff, not a
+general quality result; package defaults remain conservative.
 
 ```text
 /workflow run --thinking low deep-research "Research this repository and summarize the architecture tradeoffs."

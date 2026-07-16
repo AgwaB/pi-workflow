@@ -67,9 +67,16 @@ test("public command and troubleshooting docs mirror runtime help", async () => 
 		assert.ok(usage.includes(command), `usage missing command: ${command}`);
 	}
 	assert.equal((usage.match(/\| `\/workflow stop <run-id>` \|/g) ?? []).length, 1);
-	assert.match(readme, /### Diagnose a failed run/);
-	assert.match(readme, /inspect <run-id> --failures --results/);
-	assert.match(readme, /deep-research.*latency\/verified-coverage tradeoff/);
+	for (const movedDetail of [
+		/### Diagnose a failed run/,
+		/inspect <run-id> --failures --results/,
+		/latency\/verified-coverage tradeoff/,
+		/built-in trusted dynamic controller/,
+		/interrupt a non-terminal run/,
+	]) {
+		assert.match(usage, movedDetail);
+		assert.doesNotMatch(readme, movedDetail);
+	}
 });
 
 test("authoring skills describe all storage scopes and exact edge/support shapes", async () => {
