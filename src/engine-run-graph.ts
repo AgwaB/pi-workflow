@@ -1,6 +1,9 @@
+import { existsSync } from "node:fs";
+
 import {
 	createTaskRunRecord,
 	FAIL_FAST_CANCELLED_STATUS_DETAIL,
+	fromProjectPath,
 	isTerminalTaskStatus,
 	setTaskTerminal,
 } from "./store.js";
@@ -160,6 +163,11 @@ export function reconcileForeachGeneratedRunRecords(
 	compiledFlow: CompiledWorkflow,
 ): boolean {
 	let changed = false;
+	const compiledOnlyBoundaries = assertExactForeachGeneratedMembership(
+		cwd,
+		run,
+		compiledFlow,
+	);
 	const compiledSpecIds = new Set(
 		compiledFlow.tasks.map((task) => compiledTaskSpecId(task)),
 	);
@@ -174,16 +182,15 @@ export function reconcileForeachGeneratedRunRecords(
 		if (compiledTask.foreach && foreachStreamingEnabled(compiledTask)) {
 			streamingPlaceholderSpecIds.add(specId);
 		}
-		const placeholderSpecId = foreachGeneratedPlaceholderSpecId(
-			compiledTask,
-			compiledFlow,
-			specId,
-		);
+		const placeholderSpecId = foreachGeneratedPlaceholderSpecId(compiledTask);
 		if (!placeholderSpecId) continue;
 		if (
 			compiledTask.foreachGenerated?.placeholderSpecId !== placeholderSpecId
 		) {
-			compiledTask.foreachGenerated = { placeholderSpecId };
+			compiledTask.foreachGenerated = {
+				...compiledTask.foreachGenerated,
+				placeholderSpecId,
+			};
 			changed = true;
 		}
 		const generated =
@@ -192,57 +199,56 @@ export function reconcileForeachGeneratedRunRecords(
 		placeholderToGeneratedSpecIds.set(placeholderSpecId, generated);
 	}
 
-	if (placeholderToGeneratedSpecIds.size === 0) return changed;
+	assertAuthoritativeForeachDispatchMaps(run, compiledFlow);
+	if (placeholderToGeneratedSpecIds.size === 0) {
+		return synchronizeTerminalBarrierSourceSpecIds(run, compiledFlow) || changed;
+	}
 
 	const filteredRunTasks: WorkflowTaskRunRecord[] = [];
 	const seenGeneratedSpecIds = new Set<string>();
 	for (const task of run.tasks) {
 		const generatedSpecIds = placeholderToGeneratedSpecIds.get(task.specId);
-		let placeholderSpecId = foreachGeneratedPlaceholderSpecId(
-			task,
-			compiledFlow,
-			task.specId,
-		);
+		const placeholderSpecId = foreachGeneratedPlaceholderSpecId(task);
 		if (generatedSpecIds && !placeholderSpecId) {
+			if (compiledOnlyBoundaries.has(task.specId)) {
+				changed = true;
+				continue;
+			}
 			const compiledTask = compiledTaskBySpecId.get(task.specId);
 			if (
 				compiledTask?.foreach &&
-				streamingPlaceholderSpecIds.has(task.specId)
+				(streamingPlaceholderSpecIds.has(task.specId) ||
+					task.dispatchMap !== undefined)
 			) {
 				filteredRunTasks.push(task);
 				continue;
 			}
-			if (generatedSpecIds.includes(task.specId)) {
-				placeholderSpecId = task.specId;
-				task.foreachGenerated = { placeholderSpecId };
-				changed = true;
-			} else {
-				changed = true;
-				continue;
-			}
+			throw new Error(
+				`Cannot reconcile foreach generated membership: placeholder ${task.specId} conflicts with its compiled child set`,
+			);
 		}
 		if (placeholderSpecId && !compiledSpecIds.has(task.specId)) {
-			changed = true;
-			continue;
+			throw new Error(
+				`Cannot reconcile foreach generated membership: child ${task.specId} is missing from compiled state`,
+			);
 		}
 		if (placeholderSpecId && seenGeneratedSpecIds.has(task.specId)) {
-			changed = true;
-			continue;
+			throw new Error(
+				`Cannot reconcile foreach generated membership: child ${task.specId} is duplicated`,
+			);
 		}
-		if (placeholderSpecId) {
-			seenGeneratedSpecIds.add(task.specId);
-			if (task.foreachGenerated?.placeholderSpecId !== placeholderSpecId) {
-				task.foreachGenerated = { placeholderSpecId };
-				changed = true;
-			}
-		}
+		if (placeholderSpecId) seenGeneratedSpecIds.add(task.specId);
 		filteredRunTasks.push(task);
 	}
 
 	const runTaskBySpecId = new Map<string, WorkflowTaskRunRecord>();
 	for (const task of filteredRunTasks) {
-		if (!runTaskBySpecId.has(task.specId))
-			runTaskBySpecId.set(task.specId, task);
+		if (runTaskBySpecId.has(task.specId)) {
+			throw new Error(
+				`Cannot reconcile foreach generated membership: run spec id ${task.specId} is duplicated`,
+			);
+		}
+		runTaskBySpecId.set(task.specId, task);
 	}
 
 	const reordered: WorkflowTaskRunRecord[] = [];
@@ -252,20 +258,27 @@ export function reconcileForeachGeneratedRunRecords(
 		const specId = compiledTaskSpecId(compiledTask);
 		const existing = runTaskBySpecId.get(specId);
 		if (existing) {
-			const placeholderSpecId =
-				compiledTask.foreachGenerated?.placeholderSpecId;
 			if (
-				placeholderSpecId &&
-				existing.foreachGenerated?.placeholderSpecId !== placeholderSpecId
+				compiledTask.foreachGenerated &&
+				!sameForeachGeneratedTaskTuple(existing, compiledTask)
 			) {
-				existing.foreachGenerated = { placeholderSpecId };
-				changed = true;
+				throw new Error(
+					`Cannot reconcile foreach generated membership: child ${specId} does not exactly match compiled state`,
+				);
 			}
 			reordered.push(existing);
 			usedSpecIds.add(specId);
 			continue;
 		}
 		if (!compiledTask.foreachGenerated) continue;
+		const boundary = compiledOnlyBoundaries.get(
+			compiledTask.foreachGenerated.placeholderSpecId,
+		);
+		if (!boundary?.generatedSpecIds.has(specId)) {
+			throw new Error(
+				`Cannot reconcile foreach generated membership: compiled child ${specId} has no exact recovery boundary`,
+			);
+		}
 		const created = createTaskRunRecord(
 			cwd,
 			run.runId,
@@ -320,9 +333,258 @@ export function reconcileForeachGeneratedRunRecords(
 		}
 	}
 	if (changed) run.tasks = reordered;
+	if (synchronizeTerminalBarrierSourceSpecIds(run, compiledFlow)) changed = true;
 	return changed;
 }
 
+type CompiledOnlyForeachBoundary = {
+	placeholderSpecId: string;
+	generatedSpecIds: ReadonlySet<string>;
+};
+
+function sameForeachGeneratedTaskTuple(
+	runTask: WorkflowTaskRunRecord,
+	compiledTask: CompiledTask,
+): boolean {
+	return (
+		runTask.specId === compiledTaskSpecId(compiledTask) &&
+		runTask.sourceGeneration === compiledTask.sourceGeneration &&
+		sameForeachGeneratedIdentity(
+			runTask.foreachGenerated,
+			compiledTask.foreachGenerated,
+		)
+	);
+}
+function assertExactForeachGeneratedMembership(
+	cwd: string,
+	run: WorkflowRunRecord,
+	compiledFlow: CompiledWorkflow,
+): ReadonlyMap<string, CompiledOnlyForeachBoundary> {
+	const compiledBySpecId = new Map<string, CompiledTask>();
+	const compiledChildrenByPlaceholder = new Map<string, CompiledTask[]>();
+	for (const compiledTask of compiledFlow.tasks) {
+		const specId = compiledTaskSpecId(compiledTask);
+		if (compiledBySpecId.has(specId)) {
+			throw new Error(
+				`Cannot reconcile foreach generated membership: compiled spec id ${specId} is duplicated`,
+			);
+		}
+		compiledBySpecId.set(specId, compiledTask);
+		const membership = compiledTask.foreachGenerated;
+		if (!membership) continue;
+		if (
+			compiledTask.id !== specId ||
+			typeof membership.placeholderSpecId !== "string" ||
+			membership.placeholderSpecId === "" ||
+			specId === membership.placeholderSpecId
+		) {
+			throw new Error(
+				`Cannot reconcile foreach generated membership: compiled child ${specId} has an invalid placeholder`,
+			);
+		}
+		const children =
+			compiledChildrenByPlaceholder.get(membership.placeholderSpecId) ?? [];
+		children.push(compiledTask);
+		compiledChildrenByPlaceholder.set(membership.placeholderSpecId, children);
+	}
+
+	const runBySpecId = new Map<string, WorkflowTaskRunRecord>();
+	const runTaskIds = new Set<string>();
+	for (const runTask of run.tasks) {
+		if (
+			typeof runTask.taskId !== "string" ||
+			runTask.taskId === "" ||
+			runTaskIds.has(runTask.taskId) ||
+			runBySpecId.has(runTask.specId)
+		) {
+			throw new Error(
+				`Cannot reconcile foreach generated membership: run task/spec identity is globally ambiguous`,
+			);
+		}
+		runTaskIds.add(runTask.taskId);
+		runBySpecId.set(runTask.specId, runTask);
+		const membership = runTask.foreachGenerated;
+		if (!membership) continue;
+		if (
+			typeof membership.placeholderSpecId !== "string" ||
+			membership.placeholderSpecId === "" ||
+			runTask.specId === membership.placeholderSpecId
+		) {
+			throw new Error(
+				`Cannot reconcile foreach generated membership: run child ${runTask.specId} has an invalid placeholder`,
+			);
+		}
+		const compiledTask = compiledBySpecId.get(runTask.specId);
+		if (
+			!compiledTask?.foreachGenerated ||
+			!sameForeachGeneratedTaskTuple(runTask, compiledTask)
+		) {
+			throw new Error(
+				`Cannot reconcile foreach generated membership: run child ${runTask.specId} does not exactly match compiled state`,
+			);
+		}
+	}
+
+	const boundaries = new Map<string, CompiledOnlyForeachBoundary>();
+	for (const [placeholderSpecId, compiledChildren] of compiledChildrenByPlaceholder) {
+		const missingChildren = compiledChildren.filter(
+			(compiledChild) => !runBySpecId.has(compiledTaskSpecId(compiledChild)),
+		);
+		if (missingChildren.length === 0) continue;
+		if (missingChildren.length !== compiledChildren.length) {
+			throw new Error(
+				`Cannot reconcile foreach generated membership: compiled group ${placeholderSpecId} has a partial run child set`,
+			);
+		}
+		const runPlaceholder = runBySpecId.get(placeholderSpecId);
+		if (
+			compiledBySpecId.has(placeholderSpecId) ||
+			!runPlaceholder ||
+			runPlaceholder.kind !== "foreach" ||
+			runPlaceholder.foreachGenerated !== undefined ||
+			runPlaceholder.dispatchMap !== undefined ||
+			run.tasks.some(
+				(task) =>
+					task.foreachGenerated?.placeholderSpecId === placeholderSpecId,
+			)
+		) {
+			throw new Error(
+				`Cannot reconcile foreach generated membership: compiled group ${placeholderSpecId} has no exact recovery boundary`,
+			);
+		}
+		assertPristinePendingForeachPlaceholder(
+			cwd,
+			runPlaceholder,
+			placeholderSpecId,
+		);
+		boundaries.set(placeholderSpecId, {
+			placeholderSpecId,
+			generatedSpecIds: new Set(
+				compiledChildren.map((task) => compiledTaskSpecId(task)),
+			),
+		});
+	}
+	return boundaries;
+}
+function assertPristinePendingForeachPlaceholder(
+	cwd: string,
+	task: WorkflowTaskRunRecord,
+	placeholderSpecId: string,
+): void {
+	const worktree = task.worktree;
+	const hasWorktreeEvidence = Boolean(
+		worktree &&
+			(worktree.enabled ||
+				worktree.path !== null ||
+				worktree.branch !== null ||
+				worktree.baseCwd !== null ||
+				worktree.warning !== null ||
+				worktree.snapshot !== undefined),
+	);
+	const hasTerminalArtifact = [
+		task.files?.output,
+		task.files?.stderr,
+		task.files?.result,
+	]
+		.filter((path): path is string => typeof path === "string")
+		.some((path) => existsSync(fromProjectPath(cwd, path)));
+	const hasPriorSideEffectEvidence =
+		task.launchToken !== undefined ||
+		task.backendHandle !== undefined ||
+		task.pid !== undefined ||
+		task.startedAt !== undefined ||
+		task.completedAt !== undefined ||
+		task.elapsedMs !== undefined ||
+		task.exitCode !== undefined ||
+		task.usage !== undefined ||
+		task.toolResultBudget !== undefined ||
+		task.timing !== undefined ||
+		task.promptMetadata !== undefined ||
+		task.backendFiles !== undefined ||
+		task.outputRetry !== undefined ||
+		task.launchRetry !== undefined ||
+		(task.resumeEvents?.length ?? 0) > 0 ||
+		task.lastMessage !== undefined ||
+		hasWorktreeEvidence ||
+		hasTerminalArtifact;
+	if (
+		task.status !== "pending" ||
+		task.statusDetail !== "pending" ||
+		hasPriorSideEffectEvidence
+	) {
+		throw new Error(
+			`Cannot reconcile foreach generated membership: compiled group ${placeholderSpecId} has no durable prepared journal and its placeholder is not pristine pending`,
+		);
+	}
+}
+function assertAuthoritativeForeachDispatchMaps(
+	run: WorkflowRunRecord,
+	compiledFlow: CompiledWorkflow,
+): void {
+	for (const parent of run.tasks) {
+		const dispatchMap = parent.dispatchMap;
+		if (!dispatchMap) continue;
+		const compiledParent = compiledFlow.tasks.find(
+			(task) => compiledTaskSpecId(task) === parent.specId,
+		);
+		const compiledChildren = compiledFlow.tasks.filter(
+			(task) =>
+				task.foreachGenerated?.placeholderSpecId === parent.specId,
+		);
+		if (!compiledParent?.foreach && compiledChildren.length === 0) continue;
+		if (!Array.isArray(dispatchMap.entries)) {
+			throw new Error(
+				`Cannot reconcile foreach dispatch map for ${parent.specId}: entries are invalid`,
+			);
+		}
+		const entryKeys = new Set<string>();
+		const entryTaskIds = new Set<string>();
+		const entrySpecIds = new Set<string>();
+		for (const entry of dispatchMap.entries) {
+			if (
+				!entry ||
+				typeof entry.taskId !== "string" ||
+				typeof entry.specId !== "string"
+			) {
+				throw new Error(
+					`Cannot reconcile foreach dispatch map for ${parent.specId}: an entry is invalid`,
+				);
+			}
+			const key = `${entry.taskId}\0${entry.specId}`;
+			if (
+				entryKeys.has(key) ||
+				entryTaskIds.has(entry.taskId) ||
+				entrySpecIds.has(entry.specId)
+			) {
+				throw new Error(
+					`Cannot reconcile foreach dispatch map for ${parent.specId}: an entry is duplicated`,
+				);
+			}
+			entryKeys.add(key);
+			entryTaskIds.add(entry.taskId);
+			entrySpecIds.add(entry.specId);
+		}
+		const runChildren = run.tasks.filter(
+			(task) => task.foreachGenerated?.placeholderSpecId === parent.specId,
+		);
+		const compiledSpecIds = new Set(
+			compiledChildren.map((task) => compiledTaskSpecId(task)),
+		);
+		if (
+			runChildren.length !== entryKeys.size ||
+			compiledChildren.length !== entrySpecIds.size ||
+			compiledSpecIds.size !== compiledChildren.length ||
+			runChildren.some(
+				(task) => !entryKeys.has(`${task.taskId}\0${task.specId}`),
+			) ||
+			[...entrySpecIds].some((specId) => !compiledSpecIds.has(specId))
+		) {
+			throw new Error(
+				`Cannot reconcile foreach dispatch map for ${parent.specId}: children do not exactly match the authoritative map`,
+			);
+		}
+	}
+}
 export function assertRunTaskPositionalAlignment(
 	run: WorkflowRunRecord,
 	compiledFlow: CompiledWorkflow,
@@ -407,30 +669,9 @@ export function compiledTaskSpecId(task: CompiledTask): string {
 
 function foreachGeneratedPlaceholderSpecId(
 	task: CompiledTask | WorkflowTaskRunRecord,
-	compiledFlow: CompiledWorkflow,
-	specId: string,
 ): string | undefined {
 	const explicit = task.foreachGenerated?.placeholderSpecId;
-	if (typeof explicit === "string" && explicit.trim() !== "") return explicit;
-	if ((task as CompiledTask).foreach) return undefined;
-	if (task.kind !== "foreach" || !task.stageId) return undefined;
-	const placeholderSpecId = foreachPlaceholderSpecId(
-		compiledFlow,
-		task.stageId,
-	);
-	if (!placeholderSpecId || specId === placeholderSpecId) return undefined;
-	return placeholderSpecId;
-}
-
-function foreachPlaceholderSpecId(
-	compiledFlow: CompiledWorkflow,
-	stageId: string,
-): string | undefined {
-	const stage = ((compiledFlow as any).stages ?? []).find(
-		(candidate: any) => candidate?.id === stageId,
-	);
-	if (stage?.type !== "foreach") return undefined;
-	return `${stageId}.item`;
+	return typeof explicit === "string" && explicit.trim() !== "" ? explicit : undefined;
 }
 
 function replaceForeachGeneratedDependencies(
@@ -453,6 +694,21 @@ function sameStringList(left: string[], right: string[]): boolean {
 	return (
 		left.length === right.length &&
 		left.every((value, index) => value === right[index])
+	);
+}
+function sameForeachGeneratedIdentity(
+	left: CompiledTask["foreachGenerated"] | WorkflowTaskRunRecord["foreachGenerated"],
+	right: CompiledTask["foreachGenerated"] | WorkflowTaskRunRecord["foreachGenerated"],
+): boolean {
+	return (
+		left?.placeholderSpecId === right?.placeholderSpecId &&
+		left?.itemIdentity === right?.itemIdentity &&
+		left?.itemHash === right?.itemHash &&
+		left?.itemSourceTaskId === right?.itemSourceTaskId &&
+		left?.itemSourceSpecId === right?.itemSourceSpecId &&
+		left?.itemSourceKind === right?.itemSourceKind &&
+		left?.itemRef === right?.itemRef &&
+		left?.perItemDispatch === right?.perItemDispatch
 	);
 }
 
@@ -541,12 +797,62 @@ export function nextTaskRecordIndex(run: WorkflowRunRecord): number {
 	return max;
 }
 
+export function synchronizeTerminalBarrierSourceSpecIds(
+	run: WorkflowRunRecord,
+	compiledFlow: CompiledWorkflow,
+): boolean {
+	const compiledTaskBySpecId = new Map(
+		compiledFlow.tasks.map((task) => [compiledTaskSpecId(task), task]),
+	);
+	let changed = false;
+	for (const runTask of run.tasks) {
+		const compiledTask = compiledTaskBySpecId.get(runTask.specId);
+		if (!compiledTask || !terminalBarrierEnabled(compiledTask, runTask)) continue;
+		const sourceSpecIds = [...new Set(compiledTask.dependsOn ?? [])];
+		if (
+			runTask.terminalBarrier?.mode === "all-sources" &&
+			Array.isArray(runTask.terminalBarrier.sourceSpecIds) &&
+			sameStringList(runTask.terminalBarrier.sourceSpecIds, sourceSpecIds)
+		) {
+			continue;
+		}
+		runTask.terminalBarrier = {
+			mode: "all-sources",
+			sourceSpecIds,
+		};
+		changed = true;
+	}
+	return changed;
+}
+
+function terminalBarrierEnabled(
+	compiledTask: CompiledTask,
+	_runTask?: WorkflowTaskRunRecord,
+): boolean {
+	return (
+		compiledTask.artifactGraph?.inputPolicy?.terminalBarrier === "all-sources"
+	);
+}
+
+function terminalBarrierSourceSpecIds(
+	compiledTask: CompiledTask,
+): readonly string[] {
+	return [...new Set(compiledTask.dependsOn ?? [])];
+}
+
 export function dependenciesReady(
 	compiledTask: CompiledTask,
 	bySpecId: Map<string, WorkflowTaskRunRecord>,
 	compiledFlow: CompiledWorkflow,
+	runTask?: WorkflowTaskRunRecord,
 ): boolean {
 	const deps = compiledTask.dependsOn ?? [];
+	if (terminalBarrierEnabled(compiledTask, runTask)) {
+		return terminalBarrierSourceSpecIds(compiledTask).every((dep) => {
+			const status = bySpecId.get(dep)?.status;
+			return status !== undefined && isTerminalTaskStatus(status);
+		});
+	}
 	if (deps.length === 0) return true;
 	const partial =
 		stageSourcePolicy(compiledFlow, compiledTask.stageId ?? "") === "partial";
@@ -624,7 +930,9 @@ export function buildForeachGeneratedTasks(
 	const seen = new Set<string>();
 	const tasks: CompiledTask[] = [];
 	for (const [index, item] of items.entries()) {
-		const taskId = foreachItemTaskId(item, index);
+		const itemIdentity = foreachItemIdentity(template, item, index);
+		if (itemIdentity.error) return { tasks: [], error: itemIdentity.error };
+		const taskId = itemIdentity.taskId;
 		if (seen.has(taskId))
 			return {
 				tasks: [],
@@ -632,7 +940,15 @@ export function buildForeachGeneratedTasks(
 			};
 		seen.add(taskId);
 		const specId = `${template.stageId}.${taskId}`;
-		const itemText = formatForeachItem(item);
+		if (specId === template.id) {
+			return {
+				tasks: [],
+				error: `foreach generated task id "${specId}" collides with its placeholder`,
+			};
+		}
+		const itemPayload = foreachItemPromptPayload(template, item, index);
+		if (itemPayload.error) return { tasks: [], error: itemPayload.error };
+		const itemText = formatForeachItem(itemPayload.value);
 		const cacheStableForeach = workflowExperimentalFlagEnabled(
 			EXPERIMENTAL_CACHE_STABLE_FOREACH_ENV,
 		);
@@ -670,6 +986,14 @@ export function buildForeachGeneratedTasks(
 		]
 			.filter(Boolean)
 			.join("\n\n");
+		const compiledPromptError = compiledForeachPromptError(
+			template,
+			compiledPrompt,
+			index,
+		);
+		if (compiledPromptError) {
+			return { tasks: [], error: compiledPromptError };
+		}
 		tasks.push({
 			...template,
 			id: specId,
@@ -680,22 +1004,147 @@ export function buildForeachGeneratedTasks(
 			compiledPrompt,
 			dependsOn: [...(template.dependsOn ?? [])],
 			foreach: undefined,
-			foreachGenerated: { placeholderSpecId: template.id },
+			foreachGenerated: {
+				placeholderSpecId: template.id,
+				...(itemIdentity.identity &&
+				(template.foreach?.itemIdentityPath !== undefined ||
+					foreachStreamingEnabled(template))
+					? { itemIdentity: itemIdentity.identity }
+					: {}),
+			},
 		} as CompiledTask);
 	}
 	return { tasks };
 }
 
-function foreachItemTaskId(item: unknown, index: number): string {
-	if (
-		item &&
-		typeof item === "object" &&
-		typeof (item as any).id === "string"
-	) {
-		const sanitized = sanitizeTaskId((item as any).id);
-		if (sanitized) return sanitized;
+function foreachItemIdentity(
+	template: CompiledTask,
+	item: unknown,
+	index: number,
+): { taskId: string; identity?: string; error?: string } {
+	const identityPath = template.foreach?.itemIdentityPath;
+	if (identityPath === undefined) {
+		const legacyId =
+			item &&
+			typeof item === "object" &&
+			typeof (item as { id?: unknown }).id === "string"
+				? sanitizeTaskId((item as { id: string }).id)
+				: "";
+		return {
+			taskId:
+				legacyId || `item-${String(index + 1).padStart(3, "0")}`,
+			...(legacyId ? { identity: legacyId } : {}),
+		};
 	}
-	return `item-${String(index + 1).padStart(3, "0")}`;
+	const identity = readForeachItemIdentity(item, identityPath);
+	if (identity === undefined) {
+		return {
+			taskId: "",
+			error: `foreach item ${index + 1} has invalid identity at ${identityPath}`,
+		};
+	}
+	const taskId = sanitizeTaskId(identity);
+	if (!taskId || taskId !== identity.toLowerCase()) {
+		return {
+			taskId: "",
+			error: `foreach item ${index + 1} has invalid identity at ${identityPath}`,
+		};
+	}
+	return { taskId, identity };
+}
+
+function foreachItemPromptPayload(
+	template: CompiledTask,
+	item: unknown,
+	index: number,
+): { value: unknown; error?: string } {
+	const payloadPath = template.foreach?.itemPayloadPath;
+	if (payloadPath === undefined) return { value: item };
+	const payload = readForeachItemProperty(item, payloadPath);
+	if (payload.error === "unsafe_path") {
+		return {
+			value: undefined,
+			error: `foreach item ${index + 1} has unsafe payload path "${payloadPath}"`,
+		};
+	}
+	if (payload.error === "non_object") {
+		return {
+			value: undefined,
+			error: `foreach item ${index + 1} has non-object payload at ${payloadPath}`,
+		};
+	}
+	if (payload.error === "missing") {
+		return {
+			value: undefined,
+			error: `foreach item ${index + 1} has missing payload at ${payloadPath}`,
+		};
+	}
+	if (!isPlainJsonObject(payload.value)) {
+		return {
+			value: undefined,
+			error: `foreach item ${index + 1} has non-object payload at ${payloadPath}`,
+		};
+	}
+	return { value: payload.value };
+}
+
+function compiledForeachPromptError(
+	template: CompiledTask,
+	compiledPrompt: string,
+	index: number,
+): string | undefined {
+	const maxChars = template.artifactGraph?.inputPolicy?.maxCompiledPromptChars;
+	if (maxChars === undefined) return undefined;
+	if (!Number.isSafeInteger(maxChars) || maxChars < 1) {
+		return `foreach item ${index + 1} has invalid maxCompiledPromptChars`;
+	}
+	const actualChars = Array.from(compiledPrompt).length;
+	return actualChars > maxChars
+		? `foreach item ${index + 1} compiled prompt exceeds maxCompiledPromptChars=${maxChars} (actual ${actualChars})`
+		: undefined;
+}
+function isPlainJsonObject(value: unknown): value is Record<string, unknown> {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const prototype = Object.getPrototypeOf(value);
+	return prototype === Object.prototype || prototype === null;
+}
+
+type ForeachItemProperty =
+	| { value: unknown; error?: undefined }
+	| { value?: undefined; error: "unsafe_path" | "non_object" | "missing" };
+
+function readForeachItemProperty(
+	item: unknown,
+	path: string,
+): ForeachItemProperty {
+	const match = /^\$\.([A-Za-z_][A-Za-z0-9_]*)$/.exec(path);
+	const property = match?.[1];
+	if (
+		!property ||
+		property === "__proto__" ||
+		property === "constructor" ||
+		property === "prototype"
+	) {
+		return { error: "unsafe_path" };
+	}
+	if (!item || typeof item !== "object" || Array.isArray(item)) {
+		return { error: "non_object" };
+	}
+	const descriptor = Object.getOwnPropertyDescriptor(item, property);
+	if (!descriptor || !("value" in descriptor) || descriptor.value === undefined) {
+		return { error: "missing" };
+	}
+	return { value: descriptor.value };
+}
+
+function readForeachItemIdentity(
+	item: unknown,
+	path: string,
+): string | undefined {
+	const property = readForeachItemProperty(item, path);
+	return typeof property.value === "string" && property.value.trim() !== ""
+		? property.value
+		: undefined;
 }
 
 export function sanitizeTaskId(value: string): string {
@@ -774,6 +1223,217 @@ export function replaceDependencyList(
 	}
 	return [...new Set(replaced)];
 }
+export type ForeachGeneratedGroupSnapshot = {
+	placeholderSpecId: string;
+	compiledChildren: CompiledTask[];
+	runChildren: WorkflowTaskRunRecord[];
+};
+
+function sameForeachGeneratedGroupSide<T>(
+	current: readonly T[],
+	expected: readonly T[],
+	key: (task: T) => string,
+): boolean {
+	const orderedCurrent = [...current].sort((left, right) =>
+		key(left).localeCompare(key(right)),
+	);
+	const orderedExpected = [...expected].sort((left, right) =>
+		key(left).localeCompare(key(right)),
+	);
+	return (
+		orderedCurrent.length === orderedExpected.length &&
+		orderedCurrent.every(
+			(task, index) =>
+				JSON.stringify(task) === JSON.stringify(orderedExpected[index]),
+		)
+	);
+}
+
+function removeForeachGeneratedTasksFromSnapshots(
+	run: WorkflowRunRecord,
+	compiledFlow: CompiledWorkflow,
+	snapshots: readonly ForeachGeneratedGroupSnapshot[],
+): boolean {
+	const generatedByPlaceholder = new Map<string, string[]>();
+	for (const snapshot of snapshots) {
+		const currentCompiled = compiledFlow.tasks.filter(
+			(task) =>
+				task.foreachGenerated?.placeholderSpecId === snapshot.placeholderSpecId,
+		);
+		const currentRun = run.tasks.filter(
+			(task) =>
+				task.foreachGenerated?.placeholderSpecId === snapshot.placeholderSpecId,
+		);
+		const compiledMatches = sameForeachGeneratedGroupSide(
+			currentCompiled,
+			snapshot.compiledChildren,
+			(task) => compiledTaskSpecId(task),
+		);
+		const runMatches = sameForeachGeneratedGroupSide(
+			currentRun,
+			snapshot.runChildren,
+			(task) => task.specId,
+		);
+		if (
+			(!compiledMatches && currentCompiled.length !== 0) ||
+			(!runMatches && currentRun.length !== 0) ||
+			(!compiledMatches && !runMatches)
+		) {
+			throw new Error(
+				`Cannot remove foreach generated tasks: group ${snapshot.placeholderSpecId} is partial or cross-bound`,
+			);
+		}
+		generatedByPlaceholder.set(
+			snapshot.placeholderSpecId,
+			snapshot.compiledChildren.map((task) => compiledTaskSpecId(task)),
+		);
+	}
+	if (generatedByPlaceholder.size === 0) return false;
+	const generatedSpecIds = new Set(
+		[...generatedByPlaceholder.values()].flat(),
+	);
+	compiledFlow.tasks = compiledFlow.tasks.filter(
+		(task) => !generatedSpecIds.has(compiledTaskSpecId(task)),
+	);
+	run.tasks = run.tasks.filter((task) => !generatedSpecIds.has(task.specId));
+	for (const task of compiledFlow.tasks) {
+		task.dependsOn = restoreForeachPlaceholderDependencies(
+			task.dependsOn,
+			generatedByPlaceholder,
+		);
+		task.contextDependsOn = restoreForeachPlaceholderDependencies(
+			task.contextDependsOn,
+			generatedByPlaceholder,
+		);
+	}
+	for (const task of run.tasks) {
+		task.dependsOn = restoreForeachPlaceholderDependencies(
+			task.dependsOn,
+			generatedByPlaceholder,
+		);
+	}
+	synchronizeTerminalBarrierSourceSpecIds(run, compiledFlow);
+	return true;
+}
+
+export function removeForeachGeneratedTasksForPlaceholders(
+	run: WorkflowRunRecord,
+	compiledFlow: CompiledWorkflow,
+	placeholderSpecIds: ReadonlySet<string>,
+	snapshots?: readonly ForeachGeneratedGroupSnapshot[],
+): boolean {
+	if (snapshots) {
+		return removeForeachGeneratedTasksFromSnapshots(run, compiledFlow, snapshots);
+	}
+	const generatedByPlaceholder = new Map<string, string[]>();
+	const compiledGeneratedBySpecId = new Map<string, CompiledTask>();
+	for (const task of compiledFlow.tasks) {
+		const specId = compiledTaskSpecId(task);
+		const membership = task.foreachGenerated;
+		if (!membership || !placeholderSpecIds.has(membership.placeholderSpecId))
+			continue;
+		if (
+			typeof membership.placeholderSpecId !== "string" ||
+			membership.placeholderSpecId === "" ||
+			specId === membership.placeholderSpecId ||
+			compiledGeneratedBySpecId.has(specId)
+		) {
+			throw new Error(
+				`Cannot remove foreach generated tasks: compiled child ${specId} has ambiguous membership`,
+			);
+		}
+		compiledGeneratedBySpecId.set(specId, task);
+		const generated =
+			generatedByPlaceholder.get(membership.placeholderSpecId) ?? [];
+		generated.push(specId);
+		generatedByPlaceholder.set(membership.placeholderSpecId, generated);
+	}
+
+	const seenRunGeneratedSpecIds = new Set<string>();
+	for (const task of run.tasks) {
+		const expected = compiledGeneratedBySpecId.get(task.specId);
+		const membership = task.foreachGenerated;
+		if (!expected) {
+			if (membership && placeholderSpecIds.has(membership.placeholderSpecId)) {
+				throw new Error(
+					`Cannot remove foreach generated tasks: run child ${task.specId} is absent from its compiled placeholder set`,
+				);
+			}
+			continue;
+		}
+		if (
+			!membership ||
+			task.specId !== compiledTaskSpecId(expected) ||
+			task.sourceGeneration !== expected.sourceGeneration ||
+			task.specId === membership.placeholderSpecId ||
+			seenRunGeneratedSpecIds.has(task.specId) ||
+			!sameForeachGeneratedIdentity(
+				membership,
+				expected.foreachGenerated,
+			)
+		) {
+			throw new Error(
+				`Cannot remove foreach generated tasks: run child ${task.specId} does not exactly match its compiled placeholder`,
+			);
+		}
+		seenRunGeneratedSpecIds.add(task.specId);
+	}
+	for (const specId of compiledGeneratedBySpecId.keys()) {
+		if (seenRunGeneratedSpecIds.has(specId)) continue;
+		throw new Error(
+			`Cannot remove foreach generated tasks: compiled child ${specId} has no exact run record`,
+		);
+	}
+	if (generatedByPlaceholder.size === 0) return false;
+
+	const generatedSpecIds = new Set(
+		[...generatedByPlaceholder.values()].flat(),
+	);
+	compiledFlow.tasks = compiledFlow.tasks.filter(
+		(task) => !generatedSpecIds.has(compiledTaskSpecId(task)),
+	);
+	run.tasks = run.tasks.filter((task) => !generatedSpecIds.has(task.specId));
+
+	for (const task of compiledFlow.tasks) {
+		task.dependsOn = restoreForeachPlaceholderDependencies(
+			task.dependsOn,
+			generatedByPlaceholder,
+		);
+		task.contextDependsOn = restoreForeachPlaceholderDependencies(
+			task.contextDependsOn,
+			generatedByPlaceholder,
+		);
+	}
+	for (const task of run.tasks) {
+		task.dependsOn = restoreForeachPlaceholderDependencies(
+			task.dependsOn,
+			generatedByPlaceholder,
+		);
+	}
+	synchronizeTerminalBarrierSourceSpecIds(run, compiledFlow);
+	return true;
+}
+
+function restoreForeachPlaceholderDependencies(
+	dependsOn: string[] | undefined,
+	generatedByPlaceholder: ReadonlyMap<string, readonly string[]>,
+): string[] | undefined {
+	if (!dependsOn) return undefined;
+	const placeholderByGenerated = new Map<string, string>();
+	for (const [placeholderSpecId, generatedSpecIds] of generatedByPlaceholder) {
+		for (const generatedSpecId of generatedSpecIds) {
+			placeholderByGenerated.set(generatedSpecId, placeholderSpecId);
+		}
+	}
+	return [
+		...new Set(
+			dependsOn.map(
+				(dependsOnSpecId) =>
+					placeholderByGenerated.get(dependsOnSpecId) ?? dependsOnSpecId,
+			),
+		),
+	];
+}
 
 export interface FailFastCancellationSummary {
 	cancelledTaskIds: string[];
@@ -822,6 +1482,7 @@ export function markFailFastCancellations(
 			? compiledFlow.failurePolicy?.cancelDescendantsOnParentFailure === true
 			: compiledFlow.failurePolicy?.cancelSiblingsOnFailure === true;
 		if (!eligible) continue;
+		if (terminalBarrierEnabled(compiledTask, task)) continue;
 		const wasRunning = task.status === "running";
 		if (wasRunning) {
 			task.statusDetail = "cancellation_pending";
@@ -893,6 +1554,7 @@ export function markDagDependentsSkipped(
 				);
 			});
 			if (!failedDep) continue;
+			if (terminalBarrierEnabled(compiledTask, task)) continue;
 			if (
 				stageSourcePolicy(compiledFlow, compiledTask.stageId ?? "") ===
 				"partial"

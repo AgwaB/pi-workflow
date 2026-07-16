@@ -1,0 +1,7 @@
+{
+  "schema": "built-engine-frozen-bundle-seed-v1",
+  "campaignId": "paid-campaign-regression",
+  "holdoutAccess": false,
+  "audience": ["alpha", "bravo"],
+  "nonce": "seed-20260716"
+}

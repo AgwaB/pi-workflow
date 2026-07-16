@@ -527,7 +527,7 @@ test("run lease restore fails clearly if another owner appears during reclaim re
 	}
 });
 
-test("run lease absolute staleness can reclaim a live-pid old lock", async () => {
+test("run lease absolute age does not reclaim a fresh live-pid heartbeat", async () => {
 	const cwd = makeProject();
 	try {
 		const runId = "workflow_unit_lock_absolute_stale";
@@ -538,8 +538,8 @@ test("run lease absolute staleness can reclaim a live-pid old lock", async () =>
 			mtime: new Date(),
 		});
 
-		const result = await withRunLease(cwd, runId, async () => "reacquired");
-		assert.equal(result, "reacquired");
+		const result = await withRunLease(cwd, runId, async () => "must-not-acquire");
+		assert.equal(result, undefined);
 	} finally {
 		setRunLeaseTestHooksForTests(undefined);
 		rmSync(cwd, {
@@ -3909,7 +3909,10 @@ test("resumeRun rejects completed and loop runs", async () => {
 		for (const task of loopRun.tasks.slice(1))
 			setTaskTerminal(task, "skipped", "skipped", {});
 		await writeRunRecord(cwd, loopRun);
-		await assert.rejects(() => resumeRun(cwd, loopRun.runId), /loop workflows/);
+		await assert.rejects(
+			() => resumeRun(cwd, loopRun.runId),
+			/loop workflow ownership/,
+		);
 	} finally {
 		rmSync(cwd, {
 			recursive: true,

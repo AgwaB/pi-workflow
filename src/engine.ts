@@ -1,4 +1,4 @@
-import { appendFile, mkdir, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, rename, stat, writeFile } from "node:fs/promises";
 import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
@@ -6,15 +6,20 @@ import { Worker } from "node:worker_threads";
 import { compileWorkflow } from "./compiler.js";
 import { loadWorkflowSpec } from "./schema.js";
 import {
+	assertRunLeaseOwnership,
+	assertWorkflowRunAvailable,
 	createRunRecord,
 	createTaskRunRecord,
 	compiledWorkflowPath,
 	FAIL_FAST_CANCELLED_STATUS_DETAIL,
 	fromProjectPath,
+	initializeRunRecordDirectories,
 	isBlockedTaskResumableForResume,
+	invalidateTaskForDependencyResume,
 	isTerminalWorkflowStatus,
 	isTerminalTaskStatus,
 	listRunRecords,
+	makeRunId,
 	readJson,
 	readRunRecord,
 	readWorkflowStopIntent,
@@ -103,16 +108,19 @@ import {
 	foreachStreamingEnabled,
 	foreachStreamingMinChunk,
 	markDagDependentsSkipped,
+	compiledTaskSpecId,
 	markFailFastCancellations,
 	nextTaskRecordIndex,
 	reconcileDynamicGeneratedRunRecords,
 	reconcileForeachGeneratedRunRecords,
 	recoverStaleRunningDynamicControllers,
+	removeForeachGeneratedTasksForPlaceholders,
 	recoverStaleRunningSupportTasks,
 	replaceDependencyList,
 	sourceStageIdsForFrom,
 	stageSourcePolicy,
 	updateDownstreamDependencies,
+	synchronizeTerminalBarrierSourceSpecIds,
 } from "./engine-run-graph.js";
 import {
 	reconcileLoopTaskMaterialization,
@@ -125,6 +133,11 @@ import {
 	throwIfWorkflowStopRequested,
 } from "./workflow-stop.js";
 import {
+	assertArtifactGraphSourceRuntimeMetadataCurrent,
+	createArtifactGraphRuntimeValidationSnapshot,
+	type ArtifactGraphRuntimeValidationSnapshot,
+	assertFinalCompiledPromptWithinCap,
+	finalCompiledPromptMeasurement,
 	executeSupportTask,
 	normalizeDynamicControllerOutput,
 	prepareArtifactGraphRetryTask,
@@ -225,6 +238,24 @@ export function setDynamicControllerHooksForTests(
 ): void {
 	dynamicControllerTestHooks = { ...hooks };
 }
+type ForeachMaterializationPersistenceBoundary =
+	| "prepared-run-written"
+	| "compiled-written"
+	| "run-written";
+
+let foreachMaterializationPersistenceHookForTests:
+	| ((boundary: ForeachMaterializationPersistenceBoundary) => void | Promise<void>)
+	| undefined;
+
+export function setForeachMaterializationPersistenceHookForTests(
+	hook:
+		| ((
+				boundary: ForeachMaterializationPersistenceBoundary,
+		  ) => void | Promise<void>)
+		| undefined,
+): void {
+	foreachMaterializationPersistenceHookForTests = hook;
+}
 
 const supervisorTimers = new Map<string, ReturnType<typeof setInterval>>();
 const supervisorRunMtimes = new Map<string, number>();
@@ -301,25 +332,53 @@ async function runLoadedWorkflowSpec(
 		availableModels: options.availableModels,
 	});
 
+	const runId = options.runId ?? makeRunId();
+	await assertWorkflowRunAvailable(cwd, runId);
 	const { run } = await createRunRecord(cwd, compiled, specPath, {
-		runId: options.runId,
+		runId,
 		parentRunId: options.parentRunId,
 		rootRunId: options.parentRunId,
+		initialize: false,
 	});
 	if (provenance) run.provenance = provenance;
 	if (options.routing) run.routing = options.routing;
-	await withRunLease(cwd, run.runId, async () => {
+	const initialized = await withRunLease(cwd, run.runId, async (leaseSignal) => {
+		await assertRunLeaseOwnership(cwd, run.runId, leaseSignal);
+		const existing = await readJson(workflowRunPath(cwd, run.runId));
+		if (existing !== undefined) {
+			throw new Error(
+				`Cannot initialize workflow run ${run.runId}: a persisted run already exists`,
+			);
+		}
+		await assertRunLeaseOwnership(cwd, run.runId, leaseSignal);
+		await initializeRunRecordDirectories(cwd, run);
+		await assertRunLeaseOwnership(cwd, run.runId, leaseSignal);
 		await writeStaticRunArtifacts(cwd, run, compiled, spec);
-		await writeRunRecord(cwd, run);
+		await writeRunRecord(cwd, run, leaseSignal);
+		const persisted = await readRunRecord(cwd, run.runId);
+		if (
+			persisted.runId !== run.runId ||
+			persisted.createdAt !== run.createdAt
+		) {
+			throw new Error(
+				`Cannot initialize workflow run ${run.runId}: persisted run identity changed`,
+			);
+		}
+		return persisted;
 	});
+	if (!initialized) {
+		throw new Error(
+			`Could not acquire supervisor lease to initialize ${run.runId}; another supervisor may be active`,
+		);
+	}
 
 	const scheduleOptions = {
 		dynamicUi: options.dynamicUi,
 		availableModels: options.availableModels,
 	};
 	const scheduled =
-		(await scheduleRun(cwd, run.runId, compiled, scheduleOptions)) ??
-		(await readRunRecord(cwd, run.runId));
+		(await scheduleRun(cwd, initialized.runId, compiled, scheduleOptions)) ??
+		(await readRunRecord(cwd, initialized.runId));
 	if (shouldWatchRun(scheduled))
 		watchRun(cwd, scheduled.runId, scheduleOptions);
 	return scheduled;
@@ -718,6 +777,1153 @@ function markRunStopped(run: WorkflowRunRecord): string[] {
 	}
 	return interruptedTaskIds;
 }
+type ForeachInvalidationGroupSnapshot = {
+	placeholderSpecId: string;
+	parentTaskId: string;
+	dispatchMap: NonNullable<WorkflowTaskRunRecord["dispatchMap"]>;
+	compiledChildren: CompiledTask[];
+	runChildren: WorkflowTaskRunRecord[];
+};
+
+type InvalidationTaskOwnership = {
+	taskId: string;
+	specId: string;
+};
+
+export type ResumeDependencyInvalidationPlan = {
+	generation: number;
+	idempotencyKey: string;
+	sourceTaskIds: string[];
+	invalidatedTaskIds: string[];
+	foreachGroups: ForeachInvalidationGroupSnapshot[];
+	taskOwnership: InvalidationTaskOwnership[];
+	unaffectedRunSignature: string;
+	unaffectedCompiledSignature: string;
+};
+function assertResumeLeaseActive(signal: AbortSignal): void {
+	if (!signal.aborted) return;
+	const reason = (signal as AbortSignal & { reason?: unknown }).reason;
+	if (reason instanceof Error) throw reason;
+	throw new Error(
+		reason === undefined
+			? "Lost supervisor lease"
+			: `Lost supervisor lease: ${String(reason)}`,
+	);
+}
+
+async function resumeLeaseMutation<T>(
+	cwd: string,
+	runId: string,
+	signal: AbortSignal,
+	mutation: () => Promise<T>,
+): Promise<T> {
+	assertResumeLeaseActive(signal);
+	await assertRunLeaseOwnership(cwd, runId, signal);
+	const result = await mutation();
+	assertResumeLeaseActive(signal);
+	await assertRunLeaseOwnership(cwd, runId, signal);
+	return result;
+}
+
+
+function dependencyResumeInvalidationEnabled(
+	compiledTask: CompiledTask | undefined,
+	runTask: WorkflowTaskRunRecord | undefined,
+): boolean {
+	return (
+		compiledTask?.artifactGraph?.inputPolicy?.invalidateOnDependencyResume ===
+			true ||
+		runTask?.artifactGraph?.inputPolicy?.invalidateOnDependencyResume === true
+	);
+}
+
+function hasDurableDependencyInvalidationState(
+	task: WorkflowTaskRunRecord,
+): boolean {
+	return (
+		task.status === "running" ||
+		task.status === "completed" ||
+		task.status === "failed" ||
+		task.status === "interrupted"
+	);
+}
+
+function logicalDependencySpecIdsForResume(
+	run: WorkflowRunRecord,
+	compiledBySpecId: ReadonlyMap<string, CompiledTask>,
+): Map<string, string[]> {
+	const runTaskById = new Map<string, WorkflowTaskRunRecord>();
+	const runTaskBySpecId = new Map<string, WorkflowTaskRunRecord>();
+	for (const task of run.tasks) {
+		if (runTaskById.has(task.taskId) || runTaskBySpecId.has(task.specId)) {
+			throw new Error(
+				`Cannot prepare dependency invalidation for ${run.runId}: task identity is ambiguous`,
+			);
+		}
+		runTaskById.set(task.taskId, task);
+		runTaskBySpecId.set(task.specId, task);
+	}
+
+	const dependenciesBySpecId = new Map<string, string[]>();
+	for (const task of run.tasks) {
+		const compiledTask = compiledBySpecId.get(task.specId);
+		if (!compiledTask) {
+			throw new Error(
+				`Cannot prepare dependency invalidation for ${run.runId}: compiled task ${task.specId} is missing`,
+			);
+		}
+		const dependencies = new Set([
+			...(compiledTask.dependsOn ?? []),
+			...(compiledTask.contextDependsOn ?? []),
+			...(task.dependsOn ?? []),
+		]);
+		const sourceTaskId = task.foreachGenerated?.itemSourceTaskId;
+		const sourceSpecId = task.foreachGenerated?.itemSourceSpecId;
+		if (sourceTaskId !== undefined || sourceSpecId !== undefined) {
+			if (
+				typeof sourceTaskId !== "string" ||
+				sourceTaskId === "" ||
+				typeof sourceSpecId !== "string" ||
+				sourceSpecId === ""
+			) {
+				throw new Error(
+					`Cannot prepare dependency invalidation for ${run.runId}: foreach source identity is incomplete for ${task.specId}`,
+				);
+			}
+			const sourceTask = runTaskById.get(sourceTaskId);
+			if (!sourceTask || sourceTask.specId !== sourceSpecId) {
+				throw new Error(
+					`Cannot prepare dependency invalidation for ${run.runId}: foreach source identity is invalid for ${task.specId}`,
+				);
+			}
+			dependencies.add(sourceSpecId);
+		}
+		dependenciesBySpecId.set(task.specId, [...dependencies]);
+	}
+	return dependenciesBySpecId;
+}
+function cloneInvalidationSnapshot<T>(value: T): T {
+	return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function sameForeachInvalidationChild(
+	compiledTask: CompiledTask,
+	runTask: WorkflowTaskRunRecord,
+	placeholderSpecId: string,
+): boolean {
+	const compiled = compiledTask.foreachGenerated;
+	const persisted = runTask.foreachGenerated;
+	return (
+		compiledTask.id === compiledTaskSpecId(compiledTask) &&
+		runTask.specId === compiledTask.id &&
+		compiledTask.sourceGeneration === runTask.sourceGeneration &&
+		compiled?.placeholderSpecId === placeholderSpecId &&
+		persisted?.placeholderSpecId === placeholderSpecId &&
+		compiled?.itemIdentity === persisted?.itemIdentity &&
+		compiled?.itemHash === persisted?.itemHash &&
+		compiled?.itemSourceTaskId === persisted?.itemSourceTaskId &&
+		compiled?.itemSourceSpecId === persisted?.itemSourceSpecId &&
+		compiled?.itemSourceKind === persisted?.itemSourceKind &&
+		compiled?.itemRef === persisted?.itemRef &&
+		compiled?.perItemDispatch === persisted?.perItemDispatch
+	);
+}
+type ForeachInvalidationOwnership = {
+	placeholderSpecIds: Set<string>;
+	sourceSpecIds: Set<string>;
+};
+
+
+function foreachInvalidationOwnership(
+	run: WorkflowRunRecord,
+	compiledFlow: CompiledWorkflow,
+	logicalDependenciesBySpecId: ReadonlyMap<string, readonly string[]>,
+	resumableSourceSpecIds: ReadonlySet<string>,
+): ForeachInvalidationOwnership {
+	const compiledBySpecId = new Map<string, CompiledTask>();
+	for (const task of compiledFlow.tasks) {
+		const specId = compiledTaskSpecId(task);
+		if (compiledBySpecId.has(specId)) {
+			throw new Error(
+				`Cannot prepare dependency invalidation for ${run.runId}: compiled task identity is ambiguous`,
+			);
+		}
+		compiledBySpecId.set(specId, task);
+	}
+	const runBySpecId = new Map<string, WorkflowTaskRunRecord>();
+	for (const task of run.tasks) {
+		if (runBySpecId.has(task.specId)) {
+			throw new Error(
+				`Cannot prepare dependency invalidation for ${run.runId}: task ${task.specId} is ambiguous`,
+			);
+		}
+		runBySpecId.set(task.specId, task);
+	}
+
+	const dependenciesBySpecId = new Map<string, Set<string>>();
+	for (const [specId, compiledTask] of compiledBySpecId) {
+		dependenciesBySpecId.set(
+			specId,
+			new Set([
+				...(compiledTask.dependsOn ?? []),
+				...(compiledTask.contextDependsOn ?? []),
+				...(typeof compiledTask.foreachGenerated?.itemSourceSpecId === "string"
+					? [compiledTask.foreachGenerated.itemSourceSpecId]
+					: []),
+			]),
+		);
+	}
+	for (const [specId, dependencies] of logicalDependenciesBySpecId) {
+		const current = dependenciesBySpecId.get(specId) ?? new Set<string>();
+		for (const dependency of dependencies) current.add(dependency);
+		dependenciesBySpecId.set(specId, current);
+	}
+	const dependentsBySpecId = new Map<string, string[]>();
+	for (const [specId, dependencies] of dependenciesBySpecId) {
+		for (const dependency of dependencies) {
+			const dependents = dependentsBySpecId.get(dependency) ?? [];
+			dependents.push(specId);
+			dependentsBySpecId.set(dependency, dependents);
+		}
+	}
+
+	const placeholderSpecIds = new Set<string>();
+	const sourceSpecIds = new Set<string>();
+	const recordOwnership = (
+		placeholderSpecId: string | undefined,
+		compiledTask: CompiledTask | undefined,
+		runTask: WorkflowTaskRunRecord | undefined,
+		sourceSpecId: string,
+	): void => {
+		if (
+			!placeholderSpecId ||
+			!dependencyResumeInvalidationEnabled(compiledTask, runTask)
+		)
+			return;
+		placeholderSpecIds.add(placeholderSpecId);
+		sourceSpecIds.add(sourceSpecId);
+	};
+
+	for (const sourceSpecId of resumableSourceSpecIds) {
+		const reachable = new Set<string>([sourceSpecId]);
+		const pending = [sourceSpecId];
+		while (pending.length > 0) {
+			const specId = pending.pop()!;
+			for (const dependentSpecId of dependentsBySpecId.get(specId) ?? []) {
+				if (reachable.has(dependentSpecId)) continue;
+				reachable.add(dependentSpecId);
+				pending.push(dependentSpecId);
+			}
+		}
+		for (const specId of reachable) {
+			const compiledTask = compiledBySpecId.get(specId);
+			const runTask = runBySpecId.get(specId);
+			if (compiledTask?.foreach) {
+				recordOwnership(specId, compiledTask, runTask, sourceSpecId);
+			}
+			recordOwnership(
+				compiledTask?.foreachGenerated?.placeholderSpecId ??
+					runTask?.foreachGenerated?.placeholderSpecId,
+				compiledTask,
+				runTask,
+				sourceSpecId,
+			);
+		}
+		const sourceTaskId = runBySpecId.get(sourceSpecId)?.taskId;
+		if (!sourceTaskId) continue;
+		for (const task of run.tasks) {
+			if (task.dispatchMap?.sourceTaskId !== sourceTaskId) continue;
+			recordOwnership(
+				task.specId,
+				compiledBySpecId.get(task.specId),
+				task,
+				sourceSpecId,
+			);
+		}
+	}
+	return { placeholderSpecIds, sourceSpecIds };
+}
+
+function foreachInvalidationGroups(
+	run: WorkflowRunRecord,
+	compiledFlow: CompiledWorkflow,
+	affectedSpecIds: ReadonlySet<string>,
+	ownedPlaceholderSpecIds: ReadonlySet<string> = new Set<string>(),
+): ForeachInvalidationGroupSnapshot[] {
+	const runBySpecId = new Map<string, WorkflowTaskRunRecord>();
+	const runByTaskId = new Map<string, WorkflowTaskRunRecord>();
+	for (const task of run.tasks) {
+		if (
+			runBySpecId.has(task.specId) ||
+			runByTaskId.has(task.taskId) ||
+			typeof task.taskId !== "string" ||
+			task.taskId === ""
+		) {
+			throw new Error(
+				`Cannot prepare dependency invalidation for ${run.runId}: run task identity is ambiguous`,
+			);
+		}
+		runBySpecId.set(task.specId, task);
+		runByTaskId.set(task.taskId, task);
+	}
+	const compiledBySpecId = new Map<string, CompiledTask>();
+	for (const task of compiledFlow.tasks) {
+		const specId = compiledTaskSpecId(task);
+		if (compiledBySpecId.has(specId)) {
+			throw new Error(
+				`Cannot prepare dependency invalidation for ${run.runId}: compiled task identity is ambiguous`,
+			);
+		}
+		compiledBySpecId.set(specId, task);
+	}
+
+	const placeholderSpecIds = new Set<string>(ownedPlaceholderSpecIds);
+	for (const [specId, compiledTask] of compiledBySpecId) {
+		if (compiledTask.foreach && affectedSpecIds.has(specId))
+			placeholderSpecIds.add(specId);
+	}
+	for (const task of run.tasks) {
+		const placeholderSpecId = task.foreachGenerated?.placeholderSpecId;
+		if (placeholderSpecId && affectedSpecIds.has(task.specId))
+			placeholderSpecIds.add(placeholderSpecId);
+	}
+
+	const groups: ForeachInvalidationGroupSnapshot[] = [];
+	for (const placeholderSpecId of [...placeholderSpecIds].sort()) {
+		const compiledParent = compiledBySpecId.get(placeholderSpecId);
+		const parent = runBySpecId.get(placeholderSpecId);
+		const compiledChildren = compiledFlow.tasks.filter(
+			(task) =>
+				task.foreachGenerated?.placeholderSpecId === placeholderSpecId,
+		);
+		const runChildren = run.tasks.filter(
+			(task) =>
+				task.foreachGenerated?.placeholderSpecId === placeholderSpecId,
+		);
+		if (compiledChildren.length === 0 && runChildren.length === 0) continue;
+		if (
+			!compiledParent?.foreach ||
+			!parent ||
+			(!affectedSpecIds.has(placeholderSpecId) &&
+				!ownedPlaceholderSpecIds.has(placeholderSpecId)) ||
+			foreachStreamingEnabled(compiledParent) ||
+			compiledParent.foreach.itemIdentityPath === undefined ||
+			!parent.dispatchMap
+		) {
+			throw new Error(
+				`Cannot resume dependency invalidation for ${run.runId}: it crosses foreach group ${placeholderSpecId} without transactional rematerialization`,
+			);
+		}
+		if (
+			compiledChildren.length !== runChildren.length ||
+			compiledChildren.length !== parent.dispatchMap.entries.length
+		) {
+			throw new Error(
+				`Cannot resume dependency invalidation for ${run.runId}: foreach group ${placeholderSpecId} has a partial child set`,
+			);
+		}
+		const runChildBySpecId = new Map(
+			runChildren.map((task) => [task.specId, task]),
+		);
+		if (runChildBySpecId.size !== runChildren.length) {
+			throw new Error(
+				`Cannot resume dependency invalidation for ${run.runId}: foreach group ${placeholderSpecId} is ambiguous`,
+			);
+		}
+		for (const compiledChild of compiledChildren) {
+			const child = runChildBySpecId.get(compiledTaskSpecId(compiledChild));
+			if (
+				!child ||
+				!sameForeachInvalidationChild(
+					compiledChild,
+					child,
+					placeholderSpecId,
+				)
+			) {
+				throw new Error(
+					`Cannot resume dependency invalidation for ${run.runId}: foreach group ${placeholderSpecId} does not have exact child membership`,
+				);
+			}
+		}
+		assertArtifactGraphSourceRuntimeMetadataCurrent(
+			run,
+			parent,
+			createArtifactGraphRuntimeValidationSnapshot(run),
+		);
+		groups.push({
+			placeholderSpecId,
+			parentTaskId: parent.taskId,
+			dispatchMap: cloneInvalidationSnapshot(parent.dispatchMap),
+			compiledChildren: cloneInvalidationSnapshot(compiledChildren),
+			runChildren: cloneInvalidationSnapshot(runChildren),
+		});
+	}
+	return groups;
+}
+
+function invalidationIdempotencyKey(
+	generation: number,
+	sourceTaskIds: readonly string[],
+	invalidatedTaskIds: readonly string[],
+	foreachGroups: readonly ForeachInvalidationGroupSnapshot[],
+): string {
+	return hashDynamicRequest({
+		version: 2,
+		generation,
+		sourceTaskIds,
+		invalidatedTaskIds,
+		foreachGroups,
+	});
+}
+function invalidationTaskOwnership(
+	run: WorkflowRunRecord,
+	sourceTaskIds: readonly string[],
+	invalidatedTaskIds: readonly string[],
+): InvalidationTaskOwnership[] {
+	const taskById = new Map<string, WorkflowTaskRunRecord>();
+	for (const task of run.tasks) {
+		if (taskById.has(task.taskId)) {
+			throw new Error(
+				`Cannot prepare dependency invalidation for ${run.runId}: task identity is ambiguous`,
+			);
+		}
+		taskById.set(task.taskId, task);
+	}
+	return [...new Set([...sourceTaskIds, ...invalidatedTaskIds])]
+		.sort()
+		.map((taskId) => {
+			const task = taskById.get(taskId);
+			if (!task) {
+				throw new Error(
+					`Cannot prepare dependency invalidation for ${run.runId}: affected task ${taskId} is missing`,
+				);
+			}
+			return { taskId, specId: task.specId };
+		});
+}
+
+function unaffectedRunStructureSignature(
+	run: WorkflowRunRecord,
+	affectedTaskIds: ReadonlySet<string>,
+): string {
+	return hashDynamicRequest(
+		run.tasks.filter((task) => !affectedTaskIds.has(task.taskId)),
+	);
+}
+
+function unaffectedCompiledStructureSignature(
+	compiledFlow: CompiledWorkflow,
+	affectedSpecIds: ReadonlySet<string>,
+): string {
+	return hashDynamicRequest(
+		compiledFlow.tasks.filter(
+			(task) => !affectedSpecIds.has(compiledTaskSpecId(task)),
+		),
+	);
+}
+
+function dependencyResumeInvalidationPlan(
+	run: WorkflowRunRecord,
+	compiledFlow: CompiledWorkflow,
+): ResumeDependencyInvalidationPlan | undefined {
+	const resumableSourceSpecIds = new Set(
+		run.tasks
+			.filter(
+				(task) =>
+					task.status === "failed" ||
+					task.status === "interrupted" ||
+					task.status === "skipped" ||
+					isBlockedTaskResumableForResume(task),
+			)
+			.map((task) => task.specId),
+	);
+	if (resumableSourceSpecIds.size === 0) return undefined;
+
+	const compiledBySpecId = new Map<string, CompiledTask>();
+	for (const task of compiledFlow.tasks) {
+		const specId = compiledTaskSpecId(task);
+		if (compiledBySpecId.has(specId)) {
+			throw new Error(
+				`Cannot prepare dependency invalidation for ${run.runId}: compiled task ${specId} is ambiguous`,
+			);
+		}
+		compiledBySpecId.set(specId, task);
+	}
+	const runTaskBySpecId = new Map<string, WorkflowTaskRunRecord>();
+	for (const task of run.tasks) {
+		if (runTaskBySpecId.has(task.specId)) {
+			throw new Error(
+				`Cannot prepare dependency invalidation for ${run.runId}: task ${task.specId} is ambiguous`,
+			);
+		}
+		runTaskBySpecId.set(task.specId, task);
+	}
+	const logicalDependenciesBySpecId = logicalDependencySpecIdsForResume(
+		run,
+		compiledBySpecId,
+	);
+	const sourceSpecIds = new Set<string>();
+	const invalidatedSpecIds = new Set<string>();
+	for (const task of run.tasks) {
+		const dependencies = logicalDependenciesBySpecId.get(task.specId) ?? [];
+		if (
+			!hasDurableDependencyInvalidationState(task) ||
+			!dependencies.some((dependency) =>
+				resumableSourceSpecIds.has(dependency),
+			) ||
+			!dependencyResumeInvalidationEnabled(
+				compiledBySpecId.get(task.specId),
+				task,
+			)
+		) {
+			continue;
+		}
+		invalidatedSpecIds.add(task.specId);
+		for (const dependency of dependencies) {
+			if (resumableSourceSpecIds.has(dependency)) sourceSpecIds.add(dependency);
+		}
+	}
+	const foreachOwnership = foreachInvalidationOwnership(
+		run,
+		compiledFlow,
+		logicalDependenciesBySpecId,
+		resumableSourceSpecIds,
+	);
+	if (
+		invalidatedSpecIds.size === 0 &&
+		foreachOwnership.placeholderSpecIds.size === 0
+	)
+		return undefined;
+	for (const sourceSpecId of foreachOwnership.sourceSpecIds)
+		sourceSpecIds.add(sourceSpecId);
+
+	const dependentsBySpecId = new Map<string, string[]>();
+	for (const [specId, dependencies] of logicalDependenciesBySpecId) {
+		for (const dependency of dependencies) {
+			const dependents = dependentsBySpecId.get(dependency) ?? [];
+			dependents.push(specId);
+			dependentsBySpecId.set(dependency, dependents);
+		}
+	}
+	const pending = [...invalidatedSpecIds].sort();
+	while (pending.length > 0) {
+		const sourceSpecId = pending.pop()!;
+		for (const dependentSpecId of [
+			...(dependentsBySpecId.get(sourceSpecId) ?? []),
+		].sort()) {
+			if (invalidatedSpecIds.has(dependentSpecId)) continue;
+			const dependent = runTaskBySpecId.get(dependentSpecId);
+			if (!dependent || !hasDurableDependencyInvalidationState(dependent))
+				continue;
+			invalidatedSpecIds.add(dependentSpecId);
+			pending.push(dependentSpecId);
+		}
+	}
+	const foreachGroups = foreachInvalidationGroups(
+		run,
+		compiledFlow,
+		new Set([...sourceSpecIds, ...invalidatedSpecIds]),
+		foreachOwnership.placeholderSpecIds,
+	);
+	for (const group of foreachGroups) {
+		invalidatedSpecIds.add(group.placeholderSpecId);
+		for (const child of group.runChildren) invalidatedSpecIds.add(child.specId);
+	}
+	const sourceTaskIds = run.tasks
+		.filter((task) => sourceSpecIds.has(task.specId))
+		.map((task) => task.taskId)
+		.sort();
+	const invalidatedTaskIds = run.tasks
+		.filter((task) => invalidatedSpecIds.has(task.specId))
+		.map((task) => task.taskId)
+		.sort();
+	const generations = [
+		run.invalidationJournal?.generation ?? 0,
+		...run.tasks.map((task) => task.generation ?? 0),
+	];
+	if (
+		generations.some(
+			(generation) =>
+				!Number.isSafeInteger(generation) || generation < 0,
+		)
+	) {
+		throw new Error(
+			`Cannot prepare dependency invalidation for ${run.runId}: generation metadata is invalid`,
+		);
+	}
+	const generation = Math.max(...generations) + 1;
+	const taskOwnership = invalidationTaskOwnership(
+		run,
+		sourceTaskIds,
+		invalidatedTaskIds,
+	);
+	const affectedTaskIds = new Set(taskOwnership.map((task) => task.taskId));
+	const affectedSpecIds = new Set(taskOwnership.map((task) => task.specId));
+	return {
+		generation,
+		idempotencyKey: invalidationIdempotencyKey(
+			generation,
+			sourceTaskIds,
+			invalidatedTaskIds,
+			foreachGroups,
+		),
+		sourceTaskIds,
+		invalidatedTaskIds,
+		foreachGroups,
+		taskOwnership,
+		unaffectedRunSignature: unaffectedRunStructureSignature(
+			run,
+			affectedTaskIds,
+		),
+		unaffectedCompiledSignature: unaffectedCompiledStructureSignature(
+			compiledFlow,
+			affectedSpecIds,
+		),
+	};
+}
+
+function sameInvalidationGroupSide<T extends { specId?: string; id?: string }>(
+	current: readonly T[],
+	expected: readonly T[],
+	specId: (value: T) => string,
+): boolean {
+	return (
+		current.length === expected.length &&
+		[...current]
+			.sort((left, right) => specId(left).localeCompare(specId(right)))
+			.every(
+				(value, index) =>
+					hashDynamicRequest(value) ===
+					hashDynamicRequest(
+						[...expected].sort((left, right) =>
+							specId(left).localeCompare(specId(right)),
+						)[index],
+					),
+			)
+	);
+}
+
+function assertDependencyInvalidationRematerializable(
+	run: WorkflowRunRecord,
+	compiledFlow: CompiledWorkflow,
+	journal: ResumeDependencyInvalidationPlan,
+): void {
+	const affectedTaskIds = new Set([
+		...journal.sourceTaskIds,
+		...journal.invalidatedTaskIds,
+	]);
+	const taskById = new Map<string, WorkflowTaskRunRecord>();
+	for (const task of run.tasks) {
+		if (taskById.has(task.taskId)) {
+			throw new Error(
+				`Cannot recover dependency invalidation for ${run.runId}: run task identity is ambiguous`,
+			);
+		}
+		taskById.set(task.taskId, task);
+	}
+	const compiledBySpecId = new Map<string, CompiledTask>();
+	for (const task of compiledFlow.tasks) {
+		const specId = compiledTaskSpecId(task);
+		if (compiledBySpecId.has(specId)) {
+			throw new Error(
+				`Cannot recover dependency invalidation for ${run.runId}: compiled task identity is ambiguous`,
+			);
+		}
+		compiledBySpecId.set(specId, task);
+	}
+	const missingInvalidatedTaskIds = new Set<string>();
+	for (const group of journal.foreachGroups) {
+		const parent = run.tasks.find(
+			(task) => task.taskId === group.parentTaskId,
+		);
+		if (!parent || parent.specId !== group.placeholderSpecId) {
+			throw new Error(
+				`Cannot recover dependency invalidation for ${run.runId}: foreach group ${group.placeholderSpecId} parent changed`,
+			);
+		}
+		const currentCompiledChildren = compiledFlow.tasks.filter(
+			(task) =>
+				task.foreachGenerated?.placeholderSpecId === group.placeholderSpecId,
+		);
+		const currentRunChildren = run.tasks.filter(
+			(task) =>
+				task.foreachGenerated?.placeholderSpecId === group.placeholderSpecId,
+		);
+		const compiledMatches = sameInvalidationGroupSide(
+			currentCompiledChildren,
+			group.compiledChildren,
+			(task) => compiledTaskSpecId(task),
+		);
+		const runMatches = sameInvalidationGroupSide(
+			currentRunChildren,
+			group.runChildren,
+			(task) => task.specId,
+		);
+		if (
+			(!compiledMatches && currentCompiledChildren.length !== 0) ||
+			(!runMatches && currentRunChildren.length !== 0) ||
+			(!compiledMatches && !runMatches)
+		) {
+			throw new Error(
+				`Cannot recover dependency invalidation for ${run.runId}: foreach group ${group.placeholderSpecId} is partial or cross-bound`,
+			);
+		}
+		if (
+			hashDynamicRequest(parent.dispatchMap) !==
+			hashDynamicRequest(group.dispatchMap)
+		) {
+			throw new Error(
+				`Cannot recover dependency invalidation for ${run.runId}: foreach group ${group.placeholderSpecId} dispatch map changed`,
+			);
+		}
+		if (compiledMatches && currentRunChildren.length === 0) {
+			for (const child of group.runChildren)
+				missingInvalidatedTaskIds.add(child.taskId);
+		}
+	}
+	for (const taskId of affectedTaskIds) {
+		const task = taskById.get(taskId);
+		if (!task) {
+			if (
+				missingInvalidatedTaskIds.has(taskId) &&
+				journal.invalidatedTaskIds.includes(taskId)
+			)
+				continue;
+			throw new Error(
+				`Cannot recover dependency invalidation for ${run.runId}: affected task ${taskId} is missing`,
+			);
+		}
+		if (
+			task.kind === "dynamic" ||
+			task.dynamicGenerated !== undefined ||
+			compiledBySpecId.get(task.specId)?.kind === "dynamic"
+		) {
+			throw new Error(
+				`Cannot resume dependency invalidation for ${run.runId}: it crosses dynamic controller ownership at ${task.specId}; generational dynamic replay is not supported`,
+			);
+		}
+	}
+}
+function assertResumeLoopOwnershipSupported(
+	run: WorkflowRunRecord,
+	compiledFlow: CompiledWorkflow,
+): void {
+	if ((run.loopStates?.length ?? 0) > 0) {
+		throw new Error(`resume does not support loop workflows yet: ${run.runId}`);
+	}
+	for (const task of compiledFlow.tasks) {
+		if (
+			task.kind === "loop" ||
+			task.loopPlaceholder !== undefined ||
+			task.loopChild !== undefined ||
+			task.loopExhausted !== undefined
+		) {
+			throw new Error(`resume does not support loop workflow ownership: ${run.runId}`);
+		}
+	}
+	for (const task of run.tasks) {
+		if (task.kind === "loop") {
+			throw new Error(`resume does not support loop workflow ownership: ${run.runId}`);
+		}
+	}
+}
+
+function dependencyInvalidationArtifactTasks(
+	run: WorkflowRunRecord,
+	journal: ResumeDependencyInvalidationPlan,
+): WorkflowTaskRunRecord[] {
+	const affectedTaskIds = new Set([
+		...journal.sourceTaskIds,
+		...journal.invalidatedTaskIds,
+	]);
+	const invalidatedForeachPlaceholders = new Set(
+		run.tasks
+			.filter(
+				(task) =>
+					affectedTaskIds.has(task.taskId) && task.dispatchMap !== undefined,
+			)
+			.map((task) => task.specId),
+	);
+	for (const task of run.tasks) {
+		if (
+			invalidatedForeachPlaceholders.has(
+				task.foreachGenerated?.placeholderSpecId ?? "",
+			)
+		) {
+			affectedTaskIds.add(task.taskId);
+		}
+	}
+	return run.tasks.filter((task) => affectedTaskIds.has(task.taskId));
+}
+
+async function dependencyInvalidationArtifactPathExists(
+	path: string,
+): Promise<boolean> {
+	try {
+		await stat(path);
+		return true;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+		throw error;
+	}
+}
+
+async function quarantineDependencyInvalidationArtifacts(
+	cwd: string,
+	run: WorkflowRunRecord,
+	journal: ResumeDependencyInvalidationPlan,
+	leaseSignal?: AbortSignal,
+): Promise<void> {
+	if (leaseSignal) await assertRunLeaseOwnership(cwd, run.runId, leaseSignal);
+	const paths = await Promise.all(
+		dependencyInvalidationArtifactTasks(run, journal).map(async (task) => {
+			const taskDir = dirname(fromProjectPath(cwd, task.files.result));
+			return {
+				taskId: task.taskId,
+				taskDir,
+				quarantineDir: `${taskDir}.invalidated-generation-${journal.generation}`,
+				active: await dependencyInvalidationArtifactPathExists(taskDir),
+				quarantined: await dependencyInvalidationArtifactPathExists(
+					`${taskDir}.invalidated-generation-${journal.generation}`,
+				),
+			};
+		}),
+	);
+	if (leaseSignal) await assertRunLeaseOwnership(cwd, run.runId, leaseSignal);
+	const mixedState = paths.some((path) => path.active && path.quarantined);
+	if (mixedState) {
+		throw new Error(
+			`Cannot quarantine dependency-invalidated artifacts for ${run.runId}: an artifact directory is both active and quarantined`,
+		);
+	}
+	const active = paths.filter((path) => path.active);
+	if (active.length === 0) return;
+	for (const path of active) {
+		if (leaseSignal)
+			await assertRunLeaseOwnership(cwd, run.runId, leaseSignal);
+		await rename(path.taskDir, path.quarantineDir);
+		if (leaseSignal)
+			await assertRunLeaseOwnership(cwd, run.runId, leaseSignal);
+	}
+}
+export async function quarantineDependencyInvalidationArtifactsForTests(
+	cwd: string,
+	run: WorkflowRunRecord,
+	generation: number,
+	taskIds: string[],
+): Promise<void> {
+	await quarantineDependencyInvalidationArtifacts(cwd, run, {
+		generation,
+		idempotencyKey: invalidationIdempotencyKey(
+			generation,
+			taskIds,
+			[],
+			[],
+		),
+		sourceTaskIds: taskIds,
+		invalidatedTaskIds: [],
+		foreachGroups: [],
+		taskOwnership: taskIds.map((taskId) => ({
+			taskId,
+			specId: run.tasks.find((task) => task.taskId === taskId)?.specId ?? "",
+		})),
+		unaffectedRunSignature: "",
+		unaffectedCompiledSignature: "",
+	});
+}
+
+export function dependencyResumeInvalidationPlanForTests(
+	run: WorkflowRunRecord,
+	compiledFlow: CompiledWorkflow,
+): ResumeDependencyInvalidationPlan | undefined {
+	const plan = dependencyResumeInvalidationPlan(run, compiledFlow);
+	if (plan) assertDependencyInvalidationRematerializable(run, compiledFlow, plan);
+	return plan;
+}
+export function preparedDependencyInvalidationPlanForTests(
+	run: WorkflowRunRecord,
+	compiledFlow: CompiledWorkflow,
+): ResumeDependencyInvalidationPlan | undefined {
+	return preparedInvalidationPlan(run, compiledFlow);
+}
+function applyDependencyResumeInvalidation(
+	run: WorkflowRunRecord,
+	compiledFlow: CompiledWorkflow,
+	journal: ResumeDependencyInvalidationPlan,
+): string[] {
+	const sourceTaskIds = new Set(journal.sourceTaskIds);
+	const invalidatedTaskIds = new Set(journal.invalidatedTaskIds);
+	const affectedTaskIds = new Set([
+		...journal.sourceTaskIds,
+		...journal.invalidatedTaskIds,
+	]);
+	const taskById = new Map(run.tasks.map((task) => [task.taskId, task]));
+	for (const taskId of sourceTaskIds) {
+		if (!taskById.has(taskId)) {
+			throw new Error(
+				`Cannot recover dependency invalidation: source task ${taskId} is missing`,
+			);
+		}
+	}
+
+	const foreachPlaceholderSpecIds = new Set(
+		journal.foreachGroups.map((group) => group.placeholderSpecId),
+	);
+	removeForeachGeneratedTasksForPlaceholders(
+		run,
+		compiledFlow,
+		foreachPlaceholderSpecIds,
+		journal.foreachGroups,
+	);
+	const resetTaskIds: string[] = [];
+	for (const task of run.tasks) {
+		if (!affectedTaskIds.has(task.taskId)) continue;
+		const reset = sourceTaskIds.has(task.taskId)
+			? resetTaskForResume(task)
+			: invalidatedTaskIds.has(task.taskId)
+				? invalidateTaskForDependencyResume(task)
+				: false;
+		if (task.generation !== journal.generation) {
+			task.generation = journal.generation;
+		}
+		task.dispatchMap = undefined;
+		if (reset) resetTaskIds.push(task.taskId);
+	}
+	return resetTaskIds;
+}
+
+function resetRemainingTasksForResume(
+	run: WorkflowRunRecord,
+	alreadyResetTaskIds: ReadonlySet<string>,
+): string[] {
+	const resetTaskIds: string[] = [];
+	for (const task of run.tasks) {
+		if (alreadyResetTaskIds.has(task.taskId)) continue;
+		if (resetTaskForResume(task)) resetTaskIds.push(task.taskId);
+	}
+	return resetTaskIds;
+}
+
+type WorkflowInvalidationJournal = NonNullable<
+	WorkflowRunRecord["invalidationJournal"]
+> & {
+	foreachGroups?: ForeachInvalidationGroupSnapshot[];
+	taskOwnership?: InvalidationTaskOwnership[];
+	unaffectedRunSignature?: string;
+	unaffectedCompiledSignature?: string;
+};
+function isValidForeachInvalidationGroupSnapshot(
+	value: unknown,
+): value is ForeachInvalidationGroupSnapshot {
+	if (!value || typeof value !== "object") return false;
+	const group = value as Partial<ForeachInvalidationGroupSnapshot>;
+	return (
+		typeof group.placeholderSpecId === "string" &&
+		group.placeholderSpecId !== "" &&
+		typeof group.parentTaskId === "string" &&
+		group.parentTaskId !== "" &&
+		group.dispatchMap !== undefined &&
+		Array.isArray(group.compiledChildren) &&
+		Array.isArray(group.runChildren)
+	);
+}
+
+function isValidInvalidationTaskOwnership(
+	value: unknown,
+): value is InvalidationTaskOwnership {
+	if (!value || typeof value !== "object") return false;
+	const ownership = value as Partial<InvalidationTaskOwnership>;
+	return (
+		typeof ownership.taskId === "string" &&
+		ownership.taskId !== "" &&
+		typeof ownership.specId === "string" &&
+		ownership.specId !== ""
+	);
+}
+
+
+function preparedInvalidationPlan(
+	run: WorkflowRunRecord,
+	compiledFlow: CompiledWorkflow,
+): ResumeDependencyInvalidationPlan | undefined {
+	const journal = run.invalidationJournal as
+		| WorkflowInvalidationJournal
+		| undefined;
+	if (journal?.status !== "prepared") return undefined;
+	if (
+		!Number.isSafeInteger(journal.generation) ||
+		journal.generation < 1 ||
+		typeof journal.idempotencyKey !== "string" ||
+		journal.idempotencyKey === "" ||
+		(journal.artifactState !== "pending" &&
+			journal.artifactState !== "quarantined") ||
+		!Array.isArray(journal.sourceTaskIds) ||
+		!journal.sourceTaskIds.every((taskId) => typeof taskId === "string") ||
+		!Array.isArray(journal.invalidatedTaskIds) ||
+		!journal.invalidatedTaskIds.every((taskId) => typeof taskId === "string") ||
+		new Set(journal.sourceTaskIds).size !== journal.sourceTaskIds.length ||
+		new Set(journal.invalidatedTaskIds).size !==
+			journal.invalidatedTaskIds.length ||
+		(!Array.isArray(journal.foreachGroups) ||
+			!journal.foreachGroups.every(isValidForeachInvalidationGroupSnapshot)) ||
+		!Array.isArray(journal.taskOwnership) ||
+		!journal.taskOwnership.every(isValidInvalidationTaskOwnership) ||
+		new Set(journal.taskOwnership.map((task) => task.taskId)).size !==
+			journal.taskOwnership.length ||
+		typeof journal.unaffectedRunSignature !== "string" ||
+		journal.unaffectedRunSignature === "" ||
+		typeof journal.unaffectedCompiledSignature !== "string" ||
+		journal.unaffectedCompiledSignature === ""
+	) {
+		throw new Error(
+			`Cannot recover dependency invalidation for ${run.runId}: journal is invalid`,
+		);
+	}
+	const sourceTaskIds = [...journal.sourceTaskIds].sort();
+	const invalidatedTaskIds = [...journal.invalidatedTaskIds].sort();
+	const taskOwnership = cloneInvalidationSnapshot(journal.taskOwnership);
+	const affectedTaskIds = new Set([
+		...sourceTaskIds,
+		...invalidatedTaskIds,
+	]);
+	if (
+		taskOwnership.length !== affectedTaskIds.size ||
+		taskOwnership.some((task) => !affectedTaskIds.has(task.taskId))
+	) {
+		throw new Error(
+			`Cannot recover dependency invalidation for ${run.runId}: journal task ownership is unbound`,
+		);
+	}
+	const foreachGroups = cloneInvalidationSnapshot(journal.foreachGroups);
+	const expectedIdempotencyKey = invalidationIdempotencyKey(
+		journal.generation,
+		sourceTaskIds,
+		invalidatedTaskIds,
+		foreachGroups,
+	);
+	if (journal.idempotencyKey !== expectedIdempotencyKey) {
+		throw new Error(
+			`Cannot recover dependency invalidation for ${run.runId}: journal idempotency token is invalid`,
+		);
+	}
+
+	const runTasksById = new Map<string, WorkflowTaskRunRecord>();
+	for (const task of run.tasks) {
+		if (runTasksById.has(task.taskId)) {
+			throw new Error(
+				`Cannot recover dependency invalidation for ${run.runId}: run task identity is ambiguous`,
+			);
+		}
+		runTasksById.set(task.taskId, task);
+	}
+	const journalRunChildren = new Map(
+		foreachGroups.flatMap((group) =>
+			group.runChildren.map((task) => [task.taskId, task.specId] as const),
+		),
+	);
+	const journalCompiledChildren = new Set(
+		foreachGroups.flatMap((group) =>
+			group.compiledChildren.map((task) => compiledTaskSpecId(task)),
+		),
+	);
+	const compiledSpecIds = new Set(compiledFlow.tasks.map(compiledTaskSpecId));
+	for (const ownership of taskOwnership) {
+		const currentRunTask = runTasksById.get(ownership.taskId);
+		if (
+			(currentRunTask && currentRunTask.specId !== ownership.specId) ||
+			(!currentRunTask &&
+				journalRunChildren.get(ownership.taskId) !== ownership.specId)
+		) {
+			throw new Error(
+				`Cannot recover dependency invalidation for ${run.runId}: affected task ownership changed`,
+			);
+		}
+		if (
+			!compiledSpecIds.has(ownership.specId) &&
+			!journalCompiledChildren.has(ownership.specId)
+		) {
+			throw new Error(
+				`Cannot recover dependency invalidation for ${run.runId}: affected compiled ownership changed`,
+			);
+		}
+	}
+	const affectedSpecIds = new Set(taskOwnership.map((task) => task.specId));
+	if (
+		unaffectedRunStructureSignature(run, affectedTaskIds) !==
+			journal.unaffectedRunSignature ||
+		unaffectedCompiledStructureSignature(compiledFlow, affectedSpecIds) !==
+			journal.unaffectedCompiledSignature
+	) {
+		throw new Error(
+			`Cannot recover dependency invalidation for ${run.runId}: unaffected task structure or order changed`,
+		);
+	}
+	return {
+		generation: journal.generation,
+		idempotencyKey: journal.idempotencyKey,
+		sourceTaskIds,
+		invalidatedTaskIds,
+		foreachGroups,
+		taskOwnership,
+		unaffectedRunSignature: journal.unaffectedRunSignature,
+		unaffectedCompiledSignature: journal.unaffectedCompiledSignature,
+	};
+}
+function assertUnsupportedLegacyPreparedInvalidation(
+	run: WorkflowRunRecord,
+	compiledFlow: CompiledWorkflow,
+): void {
+	const journal = run.invalidationJournal;
+	if (
+		journal?.status !== "prepared" ||
+		journal.idempotencyKey !== undefined ||
+		journal.artifactState !== undefined ||
+		!Number.isSafeInteger(journal.generation) ||
+		journal.generation < 1 ||
+		!Array.isArray(journal.sourceTaskIds) ||
+		!journal.sourceTaskIds.every((taskId) => typeof taskId === "string") ||
+		!Array.isArray(journal.invalidatedTaskIds) ||
+		!journal.invalidatedTaskIds.every((taskId) => typeof taskId === "string") ||
+		new Set(journal.sourceTaskIds).size !== journal.sourceTaskIds.length ||
+		new Set(journal.invalidatedTaskIds).size !==
+			journal.invalidatedTaskIds.length
+	) {
+		return;
+	}
+	const affectedSpecIds = new Set(
+		[...journal.sourceTaskIds, ...journal.invalidatedTaskIds]
+			.map((taskId) => run.tasks.find((task) => task.taskId === taskId)?.specId)
+			.filter((specId): specId is string => specId !== undefined),
+	);
+	foreachInvalidationGroups(run, compiledFlow, affectedSpecIds);
+	assertDependencyInvalidationRematerializable(run, compiledFlow, {
+		generation: journal.generation,
+		idempotencyKey: "legacy-prepared-invalidation",
+		sourceTaskIds: journal.sourceTaskIds,
+		invalidatedTaskIds: journal.invalidatedTaskIds,
+		foreachGroups: [],
+		taskOwnership: invalidationTaskOwnership(
+			run,
+			journal.sourceTaskIds,
+			journal.invalidatedTaskIds,
+		),
+		unaffectedRunSignature: "legacy-prepared-invalidation",
+		unaffectedCompiledSignature: "legacy-prepared-invalidation",
+	});
+}
+
+function assertRunResumableForResume(run: WorkflowRunRecord): void {
+	if (
+		run.status !== "failed" &&
+		run.status !== "interrupted" &&
+		run.status !== "blocked"
+	) {
+		throw new Error(
+			`resume requires a failed, interrupted, or resumable blocked run; ${run.runId} is ${run.status}`,
+		);
+	}
+	assertBlockedRunResumable(run);
+}
 
 export async function resumeRun(
 	cwd: string,
@@ -725,41 +1931,125 @@ export async function resumeRun(
 	options: WorkflowScheduleOptions = {},
 ): Promise<ResumeRunSummary> {
 	const current = await readRunRecord(cwd, runIdOrPrefix);
-	if (
-		current.status !== "failed" &&
-		current.status !== "interrupted" &&
-		current.status !== "blocked"
-	) {
-		throw new Error(
-			`resume requires a failed, interrupted, or resumable blocked run; ${current.runId} is ${current.status}`,
-		);
-	}
-	assertBlockedRunResumable(current);
-	const compiledFlow = await readCompiledWorkflow(cwd, current.runId);
-	const hasLoopTasks =
-		compiledFlow?.tasks.some(
-			(task) =>
-				task.kind === "loop" ||
-				task.loopPlaceholder !== undefined ||
-				task.loopChild !== undefined,
-		) ?? false;
-	if (hasLoopTasks || (current.loopStates?.length ?? 0) > 0) {
-		throw new Error(
-			`resume does not support loop workflows yet: ${current.runId}`,
-		);
-	}
+	assertRunResumableForResume(current);
 
 	const resetTaskIds: string[] = [];
-	const updated = await withRunLease(cwd, current.runId, async () => {
+	const updated = await withRunLease(cwd, current.runId, async (leaseSignal) => {
+		assertResumeLeaseActive(leaseSignal);
 		const run = await readRunRecord(cwd, current.runId);
-		assertBlockedRunResumable(run);
-		await resolveWorkflowBackend(run)
-			.cleanupRun(cwd, run)
-			.catch(() => undefined);
-		for (const task of run.tasks) {
-			if (resetTaskForResume(task)) resetTaskIds.push(task.taskId);
+		assertRunResumableForResume(run);
+		assertResumeLeaseActive(leaseSignal);
+
+		const activeCompiledFlow = await readCompiledWorkflow(cwd, run.runId);
+		assertResumeLeaseActive(leaseSignal);
+		if (!activeCompiledFlow) {
+			throw new Error(
+				`Cannot resume ${run.runId}: compiled workflow is missing`,
+			);
 		}
-		if (resetTaskIds.length > 0) await writeRunRecord(cwd, run);
+		assertUnsupportedLegacyPreparedInvalidation(run, activeCompiledFlow);
+		const prepared = preparedInvalidationPlan(run, activeCompiledFlow);
+		if (!prepared) assertRunTaskPositionalAlignment(run, activeCompiledFlow);
+		assertResumeLoopOwnershipSupported(run, activeCompiledFlow);
+
+		const planned =
+			prepared ?? dependencyResumeInvalidationPlan(run, activeCompiledFlow);
+		if (planned) {
+			assertDependencyInvalidationRematerializable(
+				run,
+				activeCompiledFlow,
+				planned,
+			);
+		}
+		await resumeLeaseMutation(cwd, run.runId, leaseSignal, () =>
+			resolveWorkflowBackend(run).cleanupRun(cwd, run),
+		);
+		if (!planned) {
+			await resumeLeaseMutation(cwd, run.runId, leaseSignal, async () => {
+				for (const task of run.tasks) {
+					if (resetTaskForResume(task)) resetTaskIds.push(task.taskId);
+				}
+				if (resetTaskIds.length > 0)
+					await writeRunRecord(cwd, run, leaseSignal);
+			});
+			return run;
+		}
+
+		if (!prepared) {
+			await resumeLeaseMutation(cwd, run.runId, leaseSignal, async () => {
+				run.invalidationJournal = {
+					generation: planned.generation,
+					idempotencyKey: planned.idempotencyKey,
+					sourceTaskIds: planned.sourceTaskIds,
+					invalidatedTaskIds: planned.invalidatedTaskIds,
+					foreachGroups: planned.foreachGroups,
+					taskOwnership: planned.taskOwnership,
+					unaffectedRunSignature: planned.unaffectedRunSignature,
+					unaffectedCompiledSignature: planned.unaffectedCompiledSignature,
+					artifactState: "pending",
+					status: "prepared",
+				} as WorkflowInvalidationJournal;
+				await writeRunRecord(cwd, run, leaseSignal);
+			});
+		}
+		await resumeLeaseMutation(cwd, run.runId, leaseSignal, () =>
+			quarantineDependencyInvalidationArtifacts(
+				cwd,
+				run,
+				planned,
+				leaseSignal,
+			),
+		);
+		if (run.invalidationJournal?.artifactState !== "quarantined") {
+			await resumeLeaseMutation(cwd, run.runId, leaseSignal, async () => {
+				run.invalidationJournal = {
+					generation: planned.generation,
+					idempotencyKey: planned.idempotencyKey,
+					sourceTaskIds: planned.sourceTaskIds,
+					invalidatedTaskIds: planned.invalidatedTaskIds,
+					foreachGroups: planned.foreachGroups,
+					taskOwnership: planned.taskOwnership,
+					unaffectedRunSignature: planned.unaffectedRunSignature,
+					unaffectedCompiledSignature: planned.unaffectedCompiledSignature,
+					artifactState: "quarantined",
+					status: "prepared",
+				} as WorkflowInvalidationJournal;
+				await writeRunRecord(cwd, run, leaseSignal);
+			});
+		}
+		await resumeLeaseMutation(cwd, run.runId, leaseSignal, async () => {
+			const invalidatedTaskIds = applyDependencyResumeInvalidation(
+				run,
+				activeCompiledFlow,
+				planned,
+			);
+			const invalidatedTaskIdSet = new Set([
+				...planned.sourceTaskIds,
+				...planned.invalidatedTaskIds,
+			]);
+			resetTaskIds.push(
+				...invalidatedTaskIds,
+				...resetRemainingTasksForResume(run, invalidatedTaskIdSet),
+			);
+			await writeJsonAtomic(
+				compiledWorkflowPath(cwd, run.runId),
+				activeCompiledFlow,
+				leaseSignal,
+			);
+			run.invalidationJournal = {
+				generation: planned.generation,
+				idempotencyKey: planned.idempotencyKey,
+				sourceTaskIds: planned.sourceTaskIds,
+				invalidatedTaskIds: planned.invalidatedTaskIds,
+				foreachGroups: planned.foreachGroups,
+				taskOwnership: planned.taskOwnership,
+				unaffectedRunSignature: planned.unaffectedRunSignature,
+				unaffectedCompiledSignature: planned.unaffectedCompiledSignature,
+				artifactState: "quarantined",
+				status: "applied",
+			} as WorkflowInvalidationJournal;
+			await writeRunRecord(cwd, run, leaseSignal);
+		});
 		return run;
 	});
 	if (!updated)
@@ -967,6 +2257,22 @@ async function scheduleDag(
 	}
 }
 
+function staleForeachDispatchMapMessage(
+	run: WorkflowRunRecord,
+	task: WorkflowTaskRunRecord,
+	validationSnapshot: ArtifactGraphRuntimeValidationSnapshot,
+): string | undefined {
+	try {
+		assertArtifactGraphSourceRuntimeMetadataCurrent(
+			run,
+			task,
+			validationSnapshot,
+		);
+		return undefined;
+	} catch (error) {
+		return error instanceof Error ? error.message : String(error);
+	}
+}
 async function scheduleDagPass(
 	cwd: string,
 	run: WorkflowRunRecord,
@@ -982,6 +2288,8 @@ async function scheduleDagPass(
 			compiledFlow,
 		);
 		if (loopReconciled) return true;
+		if (await recoverPreparedForeachMaterialization(cwd, run, compiledFlow))
+			return true;
 		const foreachReconciled = reconcileForeachGeneratedRunRecords(
 			cwd,
 			run,
@@ -1018,7 +2326,7 @@ async function scheduleDagPass(
 		await writeRunRecord(cwd, run);
 		run = await readRunRecord(cwd, run.runId);
 	}
-	if (await applyFailFastCancellation(cwd, run, compiledFlow)) return false;
+	if (await applyFailFastCancellation(cwd, run, compiledFlow)) return true;
 
 	const maxConcurrency = Math.max(
 		1,
@@ -1026,6 +2334,8 @@ async function scheduleDagPass(
 	);
 	let running = run.tasks.filter((task) => task.status === "running").length;
 	const bySpecId = new Map(run.tasks.map((task) => [task.specId, task]));
+	const dispatchMapValidationSnapshot =
+		createArtifactGraphRuntimeValidationSnapshot(run);
 
 	for (
 		let index = 0;
@@ -1042,7 +2352,19 @@ async function scheduleDagPass(
 		) {
 			continue;
 		}
-		if (!dependenciesReady(compiledTask, bySpecId, compiledFlow)) continue;
+		const staleDispatchMapMessage = staleForeachDispatchMapMessage(
+			run,
+			task,
+			dispatchMapValidationSnapshot,
+		);
+		if (staleDispatchMapMessage) {
+			setTaskTerminal(task, "blocked", "foreach_generation_stale", {
+				lastMessage: staleDispatchMapMessage,
+			});
+			await writeRunRecord(cwd, run);
+			continue;
+		}
+		if (!dependenciesReady(compiledTask, bySpecId, compiledFlow, task)) continue;
 
 		if (compiledTask.kind === "loop" && compiledTask.loopPlaceholder) {
 			const changed = await scheduleLoop(
@@ -1064,6 +2386,7 @@ async function scheduleDagPass(
 				compiledFlow,
 				index,
 				compiledTask,
+				dispatchMapValidationSnapshot,
 			);
 			if (await finalizeStopIntentIfRequested(cwd, run)) return false;
 			if (changed) return true;
@@ -1083,18 +2406,27 @@ async function scheduleDagPass(
 				continue;
 		}
 
+		const taskCountBeforeLaunch = run.tasks.length;
+		const compiledTaskCountBeforeLaunch = compiledFlow.tasks.length;
 		assertScheduleLeaseActive(leaseSignal);
 		const launched = await launchPendingTaskAt(
 			cwd,
 			run,
 			compiledFlow,
 			index,
+			dispatchMapValidationSnapshot,
 			options,
 			leaseSignal,
 		);
+		if (
+			run.tasks.length !== taskCountBeforeLaunch ||
+			compiledFlow.tasks.length !== compiledTaskCountBeforeLaunch
+		) {
+			return true;
+		}
 		assertScheduleLeaseActive(leaseSignal);
 		if (await finalizeStopIntentIfRequested(cwd, run)) return false;
-		if (await applyFailFastCancellation(cwd, run, compiledFlow)) return false;
+		if (await applyFailFastCancellation(cwd, run, compiledFlow)) return true;
 		if (await finalizeStopIntentIfRequested(cwd, run)) return false;
 		if (launched && run.tasks[index]?.status === "running") running += 1;
 	}
@@ -1254,12 +2586,602 @@ async function dynamicSuspensionFingerprint(
 	return hashDynamicRequest({ generated, nested }).slice(0, 16);
 }
 
+type ForeachDispatchMapContext = {
+	generation: number;
+	sourceTaskId: string;
+};
+
+function foreachDispatchMapContext(
+	template: CompiledTask,
+	sourceTasks: WorkflowTaskRunRecord[],
+): ForeachDispatchMapContext | { error: string } | undefined {
+	if (template.foreach?.itemIdentityPath === undefined) return undefined;
+	if (sourceTasks.length !== 1) {
+		return {
+			error:
+				"foreach itemIdentityPath requires exactly one source task for a stable dispatch map",
+		};
+	}
+	const sourceTask = sourceTasks[0];
+	if (
+		sourceTask.generation !== undefined &&
+		(!Number.isSafeInteger(sourceTask.generation) ||
+			sourceTask.generation < 0)
+	) {
+		return {
+			error: "foreach source task has invalid generation metadata",
+		};
+	}
+	return {
+		generation: sourceTask.generation ?? 0,
+		sourceTaskId: sourceTask.taskId,
+	};
+}
+
+function attachForeachDispatchMap(
+	parent: WorkflowTaskRunRecord,
+	context: ForeachDispatchMapContext,
+	generatedTasks: CompiledTask[],
+	generatedRunTasks: WorkflowTaskRunRecord[],
+): string | undefined {
+	const entries = generatedTasks.map((task, index) => {
+		const metadata = task.foreachGenerated;
+		const runTask = generatedRunTasks[index];
+		if (
+			!metadata?.itemIdentity ||
+			!metadata.itemSourceTaskId ||
+			!metadata.itemSourceSpecId ||
+			!metadata.itemSourceKind ||
+			!metadata.itemRef ||
+			!metadata.itemHash ||
+			!runTask ||
+			metadata.itemSourceTaskId !== context.sourceTaskId
+		) {
+			return undefined;
+		}
+		return {
+			itemIdentity: metadata.itemIdentity,
+			taskId: runTask.taskId,
+			specId: task.id,
+			itemSourceTaskId: metadata.itemSourceTaskId,
+			itemSourceSpecId: metadata.itemSourceSpecId,
+			itemSourceKind: metadata.itemSourceKind,
+			itemRef: metadata.itemRef,
+			itemHash: metadata.itemHash,
+			...(metadata.perItemDispatch ? { perItemDispatch: true as const } : {}),
+		};
+	});
+	if (entries.some((entry) => entry === undefined)) {
+		return "foreach dispatch map is missing a complete generated child identity tuple";
+	}
+	const dispatchMap = {
+		version: 1 as const,
+		generation: context.generation,
+		sourceTaskId: context.sourceTaskId,
+		entries: entries as Array<{
+			itemIdentity: string;
+			taskId: string;
+			specId: string;
+			itemSourceTaskId: string;
+			itemSourceSpecId: string;
+			itemSourceKind: "control" | "partial";
+			itemRef: string;
+			itemHash: string;
+			perItemDispatch?: true;
+		}>,
+		digest: hashDynamicRequest({
+			version: 1,
+			generation: context.generation,
+			sourceTaskId: context.sourceTaskId,
+			entries,
+		}),
+	};
+	if (parent.dispatchMap && parent.dispatchMap.digest !== dispatchMap.digest) {
+		return "foreach dispatch map changed within the same source generation";
+	}
+	parent.dispatchMap = dispatchMap;
+	return undefined;
+}
+
+function generatedTasksWithItemMetadata(
+	tasks: CompiledTask[],
+	itemMetas: readonly ForeachExtractedItemMeta[],
+): { tasks?: CompiledTask[]; error?: string } {
+	if (tasks.length !== itemMetas.length) {
+		return { error: "foreach generated task metadata is incomplete" };
+	}
+	return {
+		tasks: tasks.map((task, index) => {
+			const itemMeta = itemMetas[index];
+			if (!itemMeta) return task;
+			return {
+				...task,
+				foreachGenerated: {
+					...(task.foreachGenerated ?? { placeholderSpecId: "" }),
+					itemHash: itemMeta.itemHash,
+					itemSourceTaskId: itemMeta.sourceTaskId,
+					itemSourceSpecId: itemMeta.sourceSpecId,
+					itemSourceKind: itemMeta.sourceKind,
+					itemRef: itemMeta.itemRef,
+				},
+			};
+		}),
+	};
+}
+
+function generatedTasksWithSourceGeneration(
+	tasks: CompiledTask[],
+	context: ForeachDispatchMapContext | undefined,
+): CompiledTask[] {
+	if (!context) return tasks;
+	return tasks.map((task) => ({
+		...task,
+		sourceGeneration: context.generation,
+	}));
+}
+type ForeachMaterializationJournal = {
+	status: "prepared";
+	placeholderSpecId: string;
+	replacePlaceholder: boolean;
+	generatedTasks: CompiledTask[];
+	generatedRunTasks: WorkflowTaskRunRecord[];
+};
+
+type WorkflowRunWithForeachMaterializationJournal = WorkflowRunRecord & {
+	foreachMaterializationJournal?: ForeachMaterializationJournal;
+};
+
+function sameForeachJournalOwnershipTuple(
+	compiledTask: CompiledTask,
+	runTask: WorkflowTaskRunRecord,
+	placeholderSpecId: string,
+): boolean {
+	const compiled = compiledTask.foreachGenerated;
+	const persisted = runTask.foreachGenerated;
+	return (
+		compiledTask.id === compiledTaskSpecId(compiledTask) &&
+		runTask.specId === compiledTask.id &&
+		compiledTask.sourceGeneration === runTask.sourceGeneration &&
+		compiled?.placeholderSpecId === placeholderSpecId &&
+		persisted?.placeholderSpecId === placeholderSpecId &&
+		compiled?.itemIdentity === persisted?.itemIdentity &&
+		compiled?.itemHash === persisted?.itemHash &&
+		compiled?.itemSourceTaskId === persisted?.itemSourceTaskId &&
+		compiled?.itemSourceSpecId === persisted?.itemSourceSpecId &&
+		compiled?.itemSourceKind === persisted?.itemSourceKind &&
+		compiled?.itemRef === persisted?.itemRef &&
+		compiled?.perItemDispatch === persisted?.perItemDispatch
+	);
+}
+
+function foreachMaterializationJournal(
+	run: WorkflowRunRecord,
+	compiledFlow: CompiledWorkflow,
+): ForeachMaterializationJournal | undefined {
+	const journal = (run as WorkflowRunWithForeachMaterializationJournal)
+		.foreachMaterializationJournal;
+	if (!journal) return undefined;
+	if (
+		journal.status !== "prepared" ||
+		typeof journal.placeholderSpecId !== "string" ||
+		journal.placeholderSpecId === "" ||
+		typeof journal.replacePlaceholder !== "boolean" ||
+		!Array.isArray(journal.generatedTasks) ||
+		!Array.isArray(journal.generatedRunTasks) ||
+		journal.generatedTasks.length !== journal.generatedRunTasks.length
+	) {
+		throw new Error(
+			`Cannot recover foreach materialization for ${run.runId}: journal is invalid`,
+		);
+	}
+	const runTaskIds = new Set<string>();
+	const runSpecIds = new Set<string>();
+	for (const task of run.tasks) {
+		if (
+			typeof task.taskId !== "string" ||
+			task.taskId === "" ||
+			runTaskIds.has(task.taskId) ||
+			runSpecIds.has(task.specId)
+		) {
+			throw new Error(
+				`Cannot recover foreach materialization for ${run.runId}: global run identity is invalid`,
+			);
+		}
+		runTaskIds.add(task.taskId);
+		runSpecIds.add(task.specId);
+	}
+	const compiledSpecIds = new Set<string>();
+	for (const task of compiledFlow.tasks) {
+		const specId = compiledTaskSpecId(task);
+		if (compiledSpecIds.has(specId)) {
+			throw new Error(
+				`Cannot recover foreach materialization for ${run.runId}: global compiled identity is invalid`,
+			);
+		}
+		compiledSpecIds.add(specId);
+	}
+	const journalSpecIds = new Set<string>();
+	const journalTaskIds = new Set<string>();
+	for (const [index, task] of journal.generatedTasks.entries()) {
+		const runTask = journal.generatedRunTasks[index];
+		if (
+			!task ||
+			typeof task.id !== "string" ||
+			task.id === "" ||
+			!runTask ||
+			typeof runTask.taskId !== "string" ||
+			runTask.taskId === "" ||
+			journalSpecIds.has(task.id) ||
+			journalTaskIds.has(runTask.taskId) ||
+			!sameForeachJournalOwnershipTuple(
+				task,
+				runTask,
+				journal.placeholderSpecId,
+			)
+		) {
+			throw new Error(
+				`Cannot recover foreach materialization for ${run.runId}: journal task mapping is invalid`,
+			);
+		}
+		const existingRun = run.tasks.find((candidate) => candidate.specId === task.id);
+		if (existingRun && existingRun.taskId !== runTask.taskId) {
+			throw new Error(
+				`Cannot recover foreach materialization for ${run.runId}: journal child ${task.id} collides with run state`,
+			);
+		}
+		const existingTaskId = run.tasks.find(
+			(candidate) => candidate.taskId === runTask.taskId,
+		);
+		if (existingTaskId && existingTaskId.specId !== task.id) {
+			throw new Error(
+				`Cannot recover foreach materialization for ${run.runId}: journal task ${runTask.taskId} collides with run state`,
+			);
+		}
+		journalSpecIds.add(task.id);
+		journalTaskIds.add(runTask.taskId);
+	}
+	return journal;
+}
+
+function assertPreparedForeachReplayOwnership(
+	run: WorkflowRunRecord,
+	compiledFlow: CompiledWorkflow,
+	journal: ForeachMaterializationJournal,
+): void {
+	const expectedSpecIdByTaskId = new Map<string, string>();
+	for (const task of journal.generatedRunTasks) {
+		expectedSpecIdByTaskId.set(task.taskId, task.specId);
+	}
+	const runByTaskId = new Map<string, WorkflowTaskRunRecord>();
+	for (const task of run.tasks) {
+		if (runByTaskId.has(task.taskId)) {
+			throw new Error(
+				`Cannot recover foreach materialization for ${run.runId}: global run identity is invalid`,
+			);
+		}
+		runByTaskId.set(task.taskId, task);
+	}
+	for (const [taskId, expectedSpecId] of expectedSpecIdByTaskId) {
+		const existing = runByTaskId.get(taskId);
+		if (existing && existing.specId !== expectedSpecId) {
+			throw new Error(
+				`Cannot recover foreach materialization for ${run.runId}: journal task ${taskId} is cross-bound to ${existing.specId}`,
+			);
+		}
+	}
+
+	const expectedSpecIds = new Set(
+		journal.generatedTasks.map((task) => task.id),
+	);
+	const compiledOrder = foreachReplayStructuralOrder(
+		compiledFlow.tasks,
+		(task) => compiledTaskSpecId(task),
+		expectedSpecIds,
+		journal.placeholderSpecId,
+	);
+	const runOrder = foreachReplayStructuralOrder(
+		run.tasks,
+		(task) => task.specId,
+		expectedSpecIds,
+		journal.placeholderSpecId,
+	);
+	if (
+		compiledOrder.length !== runOrder.length ||
+		compiledOrder.some((specId, index) => specId !== runOrder[index])
+	) {
+		throw new Error(
+			`Cannot recover foreach materialization for ${run.runId}: unaffected task alignment changed`,
+		);
+	}
+}
+
+function foreachReplayStructuralOrder<T>(
+	tasks: readonly T[],
+	specIdForTask: (task: T) => string,
+	generatedSpecIds: ReadonlySet<string>,
+	placeholderSpecId: string,
+): string[] {
+	const order: string[] = [];
+	const groupMarker = `\0foreach:${placeholderSpecId}`;
+	let groupSeen = false;
+	let groupClosed = false;
+	for (const task of tasks) {
+		const specId = specIdForTask(task);
+		const inReplayGroup =
+			specId === placeholderSpecId || generatedSpecIds.has(specId);
+		if (inReplayGroup) {
+			if (groupClosed) {
+				throw new Error(
+					`Cannot recover foreach materialization: replay group ${placeholderSpecId} is not contiguous`,
+				);
+			}
+			if (!groupSeen) order.push(groupMarker);
+			groupSeen = true;
+			continue;
+		}
+		if (groupSeen) groupClosed = true;
+		order.push(specId);
+	}
+	return order;
+}
+
+function applyForeachMaterializationJournal(
+	run: WorkflowRunRecord,
+	compiledFlow: CompiledWorkflow,
+	journal: ForeachMaterializationJournal,
+): void {
+	const expectedSpecIds = new Set(
+		journal.generatedTasks.map((task) => task.id),
+	);
+	const replacePlaceholder =
+		journal.replacePlaceholder && expectedSpecIds.size > 0;
+	const expectedRunTaskBySpecId = new Map(
+		journal.generatedRunTasks.map((task) => [task.specId, task]),
+	);
+	assertPreparedForeachReplayOwnership(run, compiledFlow, journal);
+	const compiledBySpecId = new Map(
+		compiledFlow.tasks.map((task) => [compiledTaskSpecId(task), task]),
+	);
+	const presentCompiled = journal.generatedTasks.filter((task) =>
+		compiledBySpecId.has(task.id),
+	);
+	if (
+		presentCompiled.length > 0 &&
+		presentCompiled.length !== journal.generatedTasks.length
+	) {
+		throw new Error(
+			`Cannot recover foreach materialization for ${run.runId}: compiled child set is partial`,
+		);
+	}
+	for (const task of presentCompiled) {
+		const existing = compiledBySpecId.get(task.id);
+		if (hashDynamicRequest(existing) !== hashDynamicRequest(task)) {
+			throw new Error(
+				`Cannot recover foreach materialization for ${run.runId}: compiled child ${task.id} changed`,
+			);
+		}
+	}
+
+	const placeholderIndex = compiledFlow.tasks.findIndex(
+		(task) => compiledTaskSpecId(task) === journal.placeholderSpecId,
+	);
+	if (replacePlaceholder) {
+		if (placeholderIndex >= 0) {
+			if (presentCompiled.length > 0) {
+				throw new Error(
+					`Cannot recover foreach materialization for ${run.runId}: placeholder and generated children coexist`,
+				);
+			}
+			compiledFlow.tasks.splice(
+				placeholderIndex,
+				1,
+				...journal.generatedTasks,
+			);
+		} else if (presentCompiled.length !== journal.generatedTasks.length) {
+			throw new Error(
+				`Cannot recover foreach materialization for ${run.runId}: placeholder is missing`,
+			);
+		}
+	} else {
+		if (placeholderIndex < 0) {
+			throw new Error(
+				`Cannot recover foreach materialization for ${run.runId}: retained placeholder is missing`,
+			);
+		}
+		if (presentCompiled.length === 0) {
+			compiledFlow.tasks.splice(
+				placeholderIndex + 1,
+				0,
+				...journal.generatedTasks,
+			);
+		}
+	}
+	const retainEmptyPlaceholderDependency =
+		!replacePlaceholder && expectedSpecIds.size === 0;
+	if (!retainEmptyPlaceholderDependency) {
+		updateDownstreamDependencies(
+			compiledFlow,
+			journal.placeholderSpecId,
+			[...expectedSpecIds],
+		);
+	}
+
+	const runTaskById = new Map(run.tasks.map((task) => [task.taskId, task]));
+	for (const task of journal.generatedRunTasks) {
+		const existing = runTaskById.get(task.taskId);
+		if (existing && existing.specId !== task.specId) {
+			throw new Error(
+				`Cannot recover foreach materialization for ${run.runId}: task id ${task.taskId} is already bound to ${existing.specId}`,
+			);
+		}
+	}
+	const runBySpecId = new Map(run.tasks.map((task) => [task.specId, task]));
+	const presentRunTasks = journal.generatedRunTasks.filter((task) =>
+		runBySpecId.has(task.specId),
+	);
+	if (
+		presentRunTasks.length > 0 &&
+		presentRunTasks.length !== journal.generatedRunTasks.length
+	) {
+		throw new Error(
+			`Cannot recover foreach materialization for ${run.runId}: run child set is partial`,
+		);
+	}
+	for (const task of presentRunTasks) {
+		const existing = runBySpecId.get(task.specId);
+		const compiledTask = journal.generatedTasks.find(
+			(candidate) => candidate.id === task.specId,
+		);
+		if (
+			!existing ||
+			existing.taskId !== task.taskId ||
+			!compiledTask ||
+			!sameForeachJournalOwnershipTuple(
+				compiledTask,
+				existing,
+				journal.placeholderSpecId,
+			)
+		) {
+			throw new Error(
+				`Cannot recover foreach materialization for ${run.runId}: run child ${task.specId} changed`,
+			);
+		}
+	}
+
+	const runPlaceholderIndex = run.tasks.findIndex(
+		(task) => task.specId === journal.placeholderSpecId,
+	);
+	let retainedPlaceholder: WorkflowTaskRunRecord | undefined;
+	if (replacePlaceholder) {
+		if (runPlaceholderIndex >= 0) {
+			if (presentRunTasks.length > 0) {
+				throw new Error(
+					`Cannot recover foreach materialization for ${run.runId}: run placeholder and generated children coexist`,
+				);
+			}
+			run.tasks.splice(
+				runPlaceholderIndex,
+				1,
+				...journal.generatedRunTasks,
+			);
+		} else if (presentRunTasks.length !== journal.generatedRunTasks.length) {
+			throw new Error(
+				`Cannot recover foreach materialization for ${run.runId}: run placeholder is missing`,
+			);
+		}
+	} else {
+		if (runPlaceholderIndex < 0) {
+			throw new Error(
+				`Cannot recover foreach materialization for ${run.runId}: retained run placeholder is missing`,
+			);
+		}
+		retainedPlaceholder = run.tasks[runPlaceholderIndex];
+		if (presentRunTasks.length === 0) {
+			run.tasks.splice(
+				runPlaceholderIndex + 1,
+				0,
+				...journal.generatedRunTasks,
+			);
+		}
+	}
+	if (!retainEmptyPlaceholderDependency) {
+		for (const task of run.tasks) {
+			if (!task.dependsOn) continue;
+			task.dependsOn = replaceDependencyList(
+				task.dependsOn,
+				journal.placeholderSpecId,
+				[...expectedSpecIds],
+			);
+		}
+	}
+	synchronizeTerminalBarrierSourceSpecIds(run, compiledFlow);
+	if (retainedPlaceholder) {
+		setTaskTerminal(
+			retainedPlaceholder,
+			"completed",
+			expectedSpecIds.size === 0 ? "foreach_empty" : "foreach_materialized",
+			{
+				lastMessage:
+					expectedSpecIds.size === 0
+						? "foreach produced 0 item(s)"
+						: `foreach produced ${expectedSpecIds.size} item(s)`,
+			},
+		);
+	}
+	for (const task of run.tasks) {
+		if (!expectedRunTaskBySpecId.has(task.specId)) continue;
+		const expected = expectedRunTaskBySpecId.get(task.specId)!;
+		if (task.taskId !== expected.taskId) {
+			throw new Error(
+				`Cannot recover foreach materialization for ${run.runId}: task mapping changed for ${task.specId}`,
+			);
+		}
+	}
+	const dispatchParent = run.tasks.find(
+		(task) =>
+			task.specId === journal.placeholderSpecId &&
+			task.dispatchMap !== undefined,
+	);
+	if (dispatchParent) {
+		assertArtifactGraphSourceRuntimeMetadataCurrent(
+			run,
+			dispatchParent,
+			createArtifactGraphRuntimeValidationSnapshot(run),
+		);
+	}
+}
+
+export function recoverPreparedForeachMaterializationForTests(
+	run: WorkflowRunRecord,
+	compiledFlow: CompiledWorkflow,
+): boolean {
+	const journal = foreachMaterializationJournal(run, compiledFlow);
+	if (!journal) return false;
+	applyForeachMaterializationJournal(run, compiledFlow, journal);
+	delete (run as WorkflowRunWithForeachMaterializationJournal)
+		.foreachMaterializationJournal;
+	return true;
+}
+async function recoverPreparedForeachMaterialization(
+	cwd: string,
+	run: WorkflowRunRecord,
+	compiledFlow: CompiledWorkflow,
+): Promise<boolean> {
+	const journal = foreachMaterializationJournal(run, compiledFlow);
+	if (!journal) return false;
+	applyForeachMaterializationJournal(run, compiledFlow, journal);
+	await writeJsonAtomic(compiledWorkflowPath(cwd, run.runId), compiledFlow);
+	delete (run as WorkflowRunWithForeachMaterializationJournal)
+		.foreachMaterializationJournal;
+	await writeRunRecord(cwd, run);
+	return true;
+}
+
+async function persistForeachMaterialization(
+	cwd: string,
+	run: WorkflowRunRecord,
+	compiledFlow: CompiledWorkflow,
+	journal: ForeachMaterializationJournal,
+): Promise<void> {
+	(run as WorkflowRunWithForeachMaterializationJournal).foreachMaterializationJournal =
+		journal;
+	await writeRunRecord(cwd, run);
+	await foreachMaterializationPersistenceHookForTests?.("prepared-run-written");
+	applyForeachMaterializationJournal(run, compiledFlow, journal);
+	await writeJsonAtomic(compiledWorkflowPath(cwd, run.runId), compiledFlow);
+	await foreachMaterializationPersistenceHookForTests?.("compiled-written");
+	delete (run as WorkflowRunWithForeachMaterializationJournal)
+		.foreachMaterializationJournal;
+	await writeRunRecord(cwd, run);
+	await foreachMaterializationPersistenceHookForTests?.("run-written");
+}
 async function materializeForeachTask(
 	cwd: string,
 	run: WorkflowRunRecord,
 	compiledFlow: CompiledWorkflow,
 	index: number,
 	template: CompiledTask,
+	validationSnapshot: ArtifactGraphRuntimeValidationSnapshot,
 ): Promise<boolean> {
 	const templateRunTask = run.tasks[index];
 	if (!templateRunTask || !template.foreach || !template.stageId) return false;
@@ -1269,8 +3191,25 @@ async function materializeForeachTask(
 		sourceStageIds.includes(task.stageId ?? ""),
 	);
 	const streaming = foreachStreamingEnabled(template);
+	const dispatchContext = foreachDispatchMapContext(template, sourceTasks);
+	if (dispatchContext && "error" in dispatchContext) {
+		setTaskTerminal(templateRunTask, "blocked", "foreach_expansion_blocked", {
+			lastMessage: dispatchContext.error,
+		});
+		await writeRunRecord(cwd, run);
+		return true;
+	}
+	if (streaming && dispatchContext) {
+		setTaskTerminal(templateRunTask, "blocked", "foreach_expansion_blocked", {
+			lastMessage:
+				"foreach itemIdentityPath does not support streaming materialization",
+		});
+		await writeRunRecord(cwd, run);
+		return true;
+	}
 	const extracted = await extractArtifactGraphForeachItems(
 		cwd,
+		run,
 		{
 			from: template.foreach.from,
 			sourcePolicy: stageSourcePolicy(compiledFlow, template.stageId),
@@ -1278,6 +3217,7 @@ async function materializeForeachTask(
 			streaming,
 		},
 		sourceTasks,
+		validationSnapshot,
 	);
 
 	if (extracted.error) {
@@ -1302,7 +3242,46 @@ async function materializeForeachTask(
 		return true;
 	}
 
+	const generatedWithItemMetadata =
+		streaming || dispatchContext
+			? generatedTasksWithItemMetadata(
+					generated.tasks,
+					extracted.itemMetas ?? [],
+				)
+			: { tasks: generated.tasks };
+	if (generatedWithItemMetadata.error || !generatedWithItemMetadata.tasks) {
+		setTaskTerminal(templateRunTask, "blocked", "foreach_expansion_blocked", {
+			lastMessage:
+				generatedWithItemMetadata.error ??
+				"foreach generated task metadata is incomplete",
+		});
+		await writeRunRecord(cwd, run);
+		return true;
+	}
+	const generatedTasks = generatedTasksWithSourceGeneration(
+		generatedWithItemMetadata.tasks,
+		dispatchContext,
+	);
 	const placeholderSpecId = template.id;
+	const existingCompiledTasksBySpecId = new Map(
+		compiledFlow.tasks.map((task) => [compiledTaskSpecId(task), task]),
+	);
+	const generatedSpecCollision = generatedTasks.find((task) => {
+		const existing = existingCompiledTasksBySpecId.get(task.id);
+		return (
+			task.id === placeholderSpecId ||
+			(existing !== undefined &&
+				(!streaming ||
+					existing.foreachGenerated?.placeholderSpecId !== placeholderSpecId))
+		);
+	});
+	if (generatedSpecCollision) {
+		setTaskTerminal(templateRunTask, "blocked", "foreach_expansion_blocked", {
+			lastMessage: `foreach generated task id "${generatedSpecCollision.id}" collides with an existing compiled task`,
+		});
+		await writeRunRecord(cwd, run);
+		return true;
+	}
 	if (streaming) {
 		return await materializeStreamingForeachTask({
 			cwd,
@@ -1313,51 +3292,217 @@ async function materializeForeachTask(
 			placeholderSpecId,
 			sourceTaskSpecIds: sourceTasks.map((task) => task.specId),
 			itemMetas: extracted.itemMetas ?? [],
-			generatedTasks: generated.tasks,
+			generatedTasks,
 			waitingForSources: extracted.waitingForSources ?? false,
 			minChunk: foreachStreamingMinChunk(template),
 			partialLedgerPathsBySourceSpecId:
 				extracted.partialLedgerPathsBySourceSpecId ?? new Map(),
 		});
 	}
-	const generatedSpecIds = generated.tasks.map((task) => task.id);
+	const generatedSpecIds = generatedTasks.map((task) => task.id);
 	const hasDownstreamDependents = compiledFlow.tasks.some(
 		(task, taskIndex) =>
 			taskIndex !== index && (task.dependsOn ?? []).includes(placeholderSpecId),
 	);
-	if (generatedSpecIds.length === 0 && !hasDownstreamDependents) {
+	if (
+		!dispatchContext &&
+		generatedSpecIds.length === 0 &&
+		!hasDownstreamDependents
+	) {
 		setTaskTerminal(templateRunTask, "completed", "foreach_empty", {
 			lastMessage: "foreach produced 0 item(s)",
 		});
 		await writeRunRecord(cwd, run);
 		return true;
 	}
-	compiledFlow.tasks.splice(index, 1, ...generated.tasks);
-	updateDownstreamDependencies(
-		compiledFlow,
-		placeholderSpecId,
-		generatedSpecIds,
-	);
 
-	const nextIndex = nextTaskRecordIndex(run);
-	const generatedRunTasks = generated.tasks.map((task, offset) =>
-		createTaskRunRecord(cwd, run.runId, task, nextIndex + offset),
-	);
-	run.tasks.splice(index, 1, ...generatedRunTasks);
+function globalForeachDispatchCollision(
+	run: WorkflowRunRecord,
+	compiledFlow: CompiledWorkflow,
+	generatedTasks: readonly CompiledTask[],
+	generatedRunTasks: readonly WorkflowTaskRunRecord[],
+): string | undefined {
+	const taskIdOwner = new Map<string, string>();
 	for (const task of run.tasks) {
-		if (!task.dependsOn) continue;
-		task.dependsOn = replaceDependencyList(
-			task.dependsOn,
-			placeholderSpecId,
-			generatedSpecIds,
-		);
+		const owner = taskIdOwner.get(task.taskId);
+		if (owner !== undefined) {
+			return `workflow task id "${task.taskId}" is globally ambiguous between ${owner} and ${task.specId}`;
+		}
+		taskIdOwner.set(task.taskId, task.specId);
+	}
+	for (const task of generatedRunTasks) {
+		const owner = taskIdOwner.get(task.taskId);
+		if (owner !== undefined) {
+			return `foreach generated task id "${task.taskId}" collides with ${owner}`;
+		}
+		taskIdOwner.set(task.taskId, task.specId);
 	}
 
-	await writeJsonAtomic(compiledWorkflowPath(cwd, run.runId), compiledFlow);
-	await writeRunRecord(cwd, run);
+	const specIdOwner = new Map<string, string>();
+	for (const task of compiledFlow.tasks) {
+		const specId = compiledTaskSpecId(task);
+		const owner = specIdOwner.get(specId);
+		if (owner !== undefined) {
+			return `compiled task spec id "${specId}" is globally ambiguous`;
+		}
+		specIdOwner.set(specId, specId);
+	}
+	for (const task of generatedTasks) {
+		const owner = specIdOwner.get(task.id);
+		if (owner !== undefined) {
+			return `foreach generated spec id "${task.id}" collides with ${owner}`;
+		}
+		specIdOwner.set(task.id, task.id);
+	}
+	return undefined;
+}
+
+	const nextIndex = nextTaskRecordIndex(run);
+	const generatedRunTasks = generatedTasks.map((task, offset) =>
+		createTaskRunRecord(cwd, run.runId, task, nextIndex + offset),
+	);
+	if (dispatchContext) {
+		const collision = globalForeachDispatchCollision(
+			run,
+			compiledFlow,
+			generatedTasks,
+			generatedRunTasks,
+		);
+		if (collision) {
+			setTaskTerminal(templateRunTask, "blocked", "foreach_expansion_blocked", {
+				lastMessage: collision,
+			});
+			await writeRunRecord(cwd, run);
+			return true;
+		}
+	}
+	if (dispatchContext) {
+		const dispatchMapError = attachForeachDispatchMap(
+			templateRunTask,
+			dispatchContext,
+			generatedTasks,
+			generatedRunTasks,
+		);
+		if (dispatchMapError) {
+			setTaskTerminal(templateRunTask, "blocked", "foreach_expansion_blocked", {
+				lastMessage: dispatchMapError,
+			});
+			await writeRunRecord(cwd, run);
+			return true;
+		}
+	}
+	await persistForeachMaterialization(cwd, run, compiledFlow, {
+		status: "prepared",
+		placeholderSpecId,
+		replacePlaceholder: !dispatchContext && generatedTasks.length > 0,
+		generatedTasks,
+		generatedRunTasks,
+	});
 	return true;
 }
 
+function sameForeachIdentityTuple(
+	left: CompiledTask["foreachGenerated"] | undefined,
+	right: CompiledTask["foreachGenerated"] | undefined,
+): boolean {
+	return (
+		left?.placeholderSpecId === right?.placeholderSpecId &&
+		left?.itemIdentity === right?.itemIdentity &&
+		left?.itemHash === right?.itemHash &&
+		left?.itemSourceTaskId === right?.itemSourceTaskId &&
+		left?.itemSourceSpecId === right?.itemSourceSpecId &&
+		left?.itemSourceKind === right?.itemSourceKind &&
+		left?.itemRef === right?.itemRef &&
+		left?.perItemDispatch === right?.perItemDispatch
+	);
+}
+
+function sameStreamingFinalIdentityAndHash(
+	left: CompiledTask["foreachGenerated"] | undefined,
+	right: CompiledTask["foreachGenerated"] | undefined,
+	leftSpecId: string,
+	rightSpecId: string,
+): boolean {
+	const leftHash = left?.itemHash;
+	const rightHash = right?.itemHash;
+	return (
+		left?.itemSourceKind === "partial" &&
+		right?.itemSourceKind === "control" &&
+		left?.placeholderSpecId === right?.placeholderSpecId &&
+		stableForeachItemIdentity(left, leftSpecId) ===
+			stableForeachItemIdentity(right, rightSpecId) &&
+		typeof leftHash === "string" &&
+		leftHash !== "" &&
+		leftHash === rightHash &&
+		typeof left?.itemSourceTaskId === "string" &&
+		left.itemSourceTaskId !== "" &&
+		left.itemSourceTaskId === right?.itemSourceTaskId &&
+		typeof left.itemSourceSpecId === "string" &&
+		left.itemSourceSpecId !== "" &&
+		left.itemSourceSpecId === right?.itemSourceSpecId
+	);
+}
+
+function stableForeachItemIdentity(
+	item: CompiledTask["foreachGenerated"] | undefined,
+	specId: string,
+): string {
+	return item?.itemIdentity ?? specId;
+}
+
+function matchStreamingFinalEvidence(
+	existingTasks: readonly CompiledTask[],
+	finalTasks: readonly CompiledTask[],
+	exactMatches: Map<CompiledTask, CompiledTask>,
+): string | undefined {
+	const finalTasksByIdentity = new Map<string, CompiledTask[]>();
+	for (const finalTask of finalTasks) {
+		const identity = stableForeachItemIdentity(
+			finalTask.foreachGenerated,
+			finalTask.id,
+		);
+		const matches = finalTasksByIdentity.get(identity) ?? [];
+		matches.push(finalTask);
+		finalTasksByIdentity.set(identity, matches);
+	}
+	for (const existingTask of existingTasks) {
+		if (existingTask.foreachGenerated?.itemSourceKind !== "partial") continue;
+		const identity = stableForeachItemIdentity(
+			existingTask.foreachGenerated,
+			existingTask.id,
+		);
+		const matches = finalTasksByIdentity.get(identity) ?? [];
+		if (matches.length === 0) {
+			return `foreach streaming item ${existingTask.id} was published as partial output but is missing from final control`;
+		}
+		if (matches.length !== 1) {
+			return `foreach streaming item ${existingTask.id} has duplicate final control evidence`;
+		}
+		const finalTask = matches[0]!;
+		if (
+			!sameStreamingFinalIdentityAndHash(
+				existingTask.foreachGenerated,
+				finalTask.foreachGenerated,
+				existingTask.id,
+				finalTask.id,
+			)
+		) {
+			return `foreach streaming item ${existingTask.id} changed after materialization`;
+		}
+		if (exactMatches.has(finalTask)) {
+			return `foreach streaming item ${existingTask.id} has duplicate final control evidence`;
+		}
+		exactMatches.set(finalTask, existingTask);
+	}
+	return undefined;
+}
+
+export function streamingFinalEvidenceErrorForTests(
+	existingTasks: readonly CompiledTask[],
+	finalTasks: readonly CompiledTask[],
+): string | undefined {
+	return matchStreamingFinalEvidence(existingTasks, finalTasks, new Map());
+}
 async function materializeStreamingForeachTask(input: {
 	cwd: string;
 	run: WorkflowRunRecord;
@@ -1376,6 +3521,13 @@ async function materializeStreamingForeachTask(input: {
 	const perItemDispatch = workflowExperimentalFlagEnabled(
 		PER_ITEM_DISPATCH_ENV,
 	);
+	const existingGeneratedTasks = input.compiledFlow.tasks.filter(
+		(task) =>
+			task.foreachGenerated?.placeholderSpecId === input.placeholderSpecId,
+	);
+	const existingGeneratedTaskBySpecId = new Map(
+		existingGeneratedTasks.map((task) => [task.id, task]),
+	);
 	const generatedTasksWithItemDeps = input.generatedTasks.map((task, index) => {
 		const itemMeta = input.itemMetas[index];
 		if (!itemMeta) return task;
@@ -1387,14 +3539,18 @@ async function materializeStreamingForeachTask(input: {
 		// satisfiable from the producer's published partial output ledger.
 		// Otherwise the child defers on the completed producer (default W4-safe
 		// behavior). The decision is made once at materialization and persisted.
+		const existingTask = existingGeneratedTaskBySpecId.get(task.id);
 		const perItemActivated =
-			perItemDispatch &&
-			itemMeta.sourceKind === "partial" &&
-			needsCompletedSourceContext &&
-			perItemProjectionSatisfiableFromPartials(
-				task,
-				input.partialLedgerPathsBySourceSpecId.get(itemMeta.sourceSpecId),
-			);
+			existingTask !== undefined
+				? existingTask.foreachGenerated?.perItemDispatch === true
+				: perItemDispatch &&
+					itemMeta.sourceKind === "partial" &&
+					itemMeta.itemId === task.foreachGenerated?.itemIdentity &&
+					needsCompletedSourceContext &&
+					perItemProjectionSatisfiableFromPartials(
+						task,
+						input.partialLedgerPathsBySourceSpecId.get(itemMeta.sourceSpecId),
+					);
 		const dependsOn = replaceSourceDependenciesWithItemSource(
 			task.dependsOn ?? [],
 			sourceTaskSpecIdSet,
@@ -1419,6 +3575,7 @@ async function materializeStreamingForeachTask(input: {
 					placeholderSpecId: input.placeholderSpecId,
 				}),
 				itemHash: itemMeta.itemHash,
+				itemSourceTaskId: itemMeta.sourceTaskId,
 				itemSourceSpecId: itemMeta.sourceSpecId,
 				itemSourceKind: itemMeta.sourceKind,
 				itemRef: itemMeta.itemRef,
@@ -1426,21 +3583,44 @@ async function materializeStreamingForeachTask(input: {
 			},
 		};
 	});
-	const existingGeneratedTasks = input.compiledFlow.tasks.filter(
-		(task) =>
-			task.foreachGenerated?.placeholderSpecId === input.placeholderSpecId,
-	);
 	const existingGeneratedSpecIds = existingGeneratedTasks.map(
 		(task) => task.id,
 	);
-	const existingGeneratedTaskBySpecId = new Map(
-		existingGeneratedTasks.map((task) => [task.id, task]),
-	);
+	const exactPartialMatches = new Map<CompiledTask, CompiledTask>();
+	if (!input.waitingForSources) {
+		const finalEvidenceError = matchStreamingFinalEvidence(
+			existingGeneratedTasks,
+			generatedTasksWithItemDeps,
+			exactPartialMatches,
+		);
+		if (finalEvidenceError) {
+			setTaskTerminal(
+				input.templateRunTask,
+				"blocked",
+				"foreach_expansion_blocked",
+				{ lastMessage: finalEvidenceError },
+			);
+			await writeRunRecord(input.cwd, input.run);
+			return true;
+		}
+	}
 	for (const task of generatedTasksWithItemDeps) {
-		const existing = existingGeneratedTaskBySpecId.get(task.id);
-		const existingHash = existing?.foreachGenerated?.itemHash;
-		const nextHash = task.foreachGenerated?.itemHash;
-		if (existing && existingHash && nextHash && existingHash !== nextHash) {
+		const existing =
+			existingGeneratedTaskBySpecId.get(task.id) ??
+			exactPartialMatches.get(task);
+		if (
+			existing &&
+			!sameForeachIdentityTuple(
+				existing.foreachGenerated,
+				task.foreachGenerated,
+			) &&
+			!sameStreamingFinalIdentityAndHash(
+				existing.foreachGenerated,
+				task.foreachGenerated,
+				existing.id,
+				task.id,
+			)
+		) {
 			setTaskTerminal(
 				input.templateRunTask,
 				"blocked",
@@ -1453,31 +3633,10 @@ async function materializeStreamingForeachTask(input: {
 			return true;
 		}
 	}
-	const existingGeneratedSpecIdSet = new Set(existingGeneratedSpecIds);
-	const finalGeneratedSpecIdSet = new Set(
-		generatedTasksWithItemDeps.map((task) => task.id),
-	);
-	if (!input.waitingForSources) {
-		const withdrawn = existingGeneratedTasks.find(
-			(task) =>
-				task.foreachGenerated?.itemSourceKind === "partial" &&
-				!finalGeneratedSpecIdSet.has(task.id),
-		);
-		if (withdrawn) {
-			setTaskTerminal(
-				input.templateRunTask,
-				"blocked",
-				"foreach_expansion_blocked",
-				{
-					lastMessage: `foreach streaming item ${withdrawn.id} was published as partial output but is missing from final control`,
-				},
-			);
-			await writeRunRecord(input.cwd, input.run);
-			return true;
-		}
-	}
 	const newGeneratedTasks = generatedTasksWithItemDeps.filter(
-		(task) => !existingGeneratedSpecIdSet.has(task.id),
+		(task) =>
+			!existingGeneratedTaskBySpecId.has(task.id) &&
+			!exactPartialMatches.has(task),
 	);
 	const allGeneratedSpecIds = [
 		...existingGeneratedSpecIds,
@@ -1555,6 +3714,11 @@ async function materializeStreamingForeachTask(input: {
 			task.dependsOn = replaced;
 			changed = true;
 		}
+	}
+	if (
+		synchronizeTerminalBarrierSourceSpecIds(input.run, input.compiledFlow)
+	) {
+		changed = true;
 	}
 
 	if (!input.waitingForSources) {
@@ -1645,14 +3809,17 @@ function perItemProjectionSatisfiableFromPartials(
 }
 
 interface ForeachExtractedItemMeta {
+	sourceTaskId: string;
 	sourceSpecId: string;
 	sourceKind: "control" | "partial";
 	itemHash: string;
 	itemRef: string;
+	itemId?: string;
 }
 
 async function extractArtifactGraphForeachItems(
 	cwd: string,
+	run: WorkflowRunRecord,
 	stage: {
 		from: unknown;
 		sourcePolicy?: string;
@@ -1660,6 +3827,7 @@ async function extractArtifactGraphForeachItems(
 		streaming?: boolean;
 	},
 	sourceTasks: WorkflowTaskRunRecord[],
+	validationSnapshot: ArtifactGraphRuntimeValidationSnapshot,
 ): Promise<{
 	items?: unknown[];
 	itemMetas?: ForeachExtractedItemMeta[];
@@ -1681,6 +3849,11 @@ async function extractArtifactGraphForeachItems(
 	}
 	let waitingForSources = false;
 	for (const task of sourceTasks) {
+		assertArtifactGraphSourceRuntimeMetadataCurrent(
+			run,
+			task,
+			validationSnapshot,
+		);
 		if (task.status !== "completed") {
 			if (stage.streaming && !isTerminalTaskStatus(task.status)) {
 				const partial = await extractPartialForeachItems(cwd, task, path);
@@ -1694,10 +3867,12 @@ async function extractArtifactGraphForeachItems(
 				for (const item of partial.items) {
 					items.push(item.item);
 					itemMetas.push({
+						sourceTaskId: task.taskId,
 						sourceSpecId: task.specId,
 						sourceKind: "partial",
 						itemHash: item.itemHash,
 						itemRef: `${task.specId}:${item.itemRef}`,
+						itemId: item.itemId,
 					});
 				}
 				waitingForSources = true;
@@ -1721,10 +3896,16 @@ async function extractArtifactGraphForeachItems(
 			for (const [index, item] of value.entries()) {
 				items.push(item);
 				itemMetas.push({
+					sourceTaskId: task.taskId,
 					sourceSpecId: task.specId,
 					sourceKind: "control",
 					itemHash: hashDynamicRequest(item),
 					itemRef: `${task.specId}:control:${path}[${index}]`,
+					...(item &&
+					typeof item === "object" &&
+					typeof (item as { id?: unknown }).id === "string"
+						? { itemId: (item as { id: string }).id }
+						: {}),
 				});
 			}
 		} catch (error) {
@@ -1779,11 +3960,32 @@ async function extractPartialForeachItems(
 	};
 }
 
+async function persistFinalPromptMetadata(
+	cwd: string,
+	run: WorkflowRunRecord,
+	task: WorkflowTaskRunRecord,
+	launchTask: CompiledTask,
+): Promise<void> {
+	if (launchTask.artifactGraph?.inputPolicy?.maxCompiledPromptChars === undefined)
+		return;
+	const measurement = finalCompiledPromptMeasurement(launchTask);
+	task.promptMetadata = {
+		version: 1,
+		chars: measurement.chars,
+		...(measurement.maxChars === undefined
+			? {}
+			: { maxChars: measurement.maxChars }),
+		measuredAt: new Date().toISOString(),
+	};
+	await writeRunRecord(cwd, run);
+}
+
 async function launchPendingTaskAt(
 	cwd: string,
 	run: WorkflowRunRecord,
 	compiledFlow: CompiledWorkflow,
 	index: number,
+	validationSnapshot: ArtifactGraphRuntimeValidationSnapshot,
 	options: WorkflowScheduleOptions = {},
 	leaseSignal?: AbortSignal,
 ): Promise<boolean> {
@@ -1803,19 +4005,34 @@ async function launchPendingTaskAt(
 	let launchTask: CompiledWorkflow["tasks"][number] | undefined;
 	let prepareComplete = false;
 	try {
-		launchTask = await prepareDagTask(cwd, run, compiledFlow, index);
+		launchTask = await prepareDagTask(
+			cwd,
+			run,
+			compiledFlow,
+			index,
+			validationSnapshot,
+		);
 		await throwIfWorkflowStopRequested(cwd, run.runId);
 		if (task.outputRetry) {
 			launchTask = await prepareArtifactGraphRetryTask(cwd, task, launchTask);
 			await throwIfWorkflowStopRequested(cwd, run.runId);
 		}
+		assertFinalCompiledPromptWithinCap(launchTask);
 		prepareComplete = true;
 		await throwIfWorkflowStopRequested(cwd, run.runId);
 
 		if (launchTask.kind === "support") {
-			return await executeSupportTask(cwd, run, task, launchTask);
+			await persistFinalPromptMetadata(cwd, run, task, launchTask);
+			return await executeSupportTask(
+				cwd,
+				run,
+				task,
+				launchTask,
+				validationSnapshot,
+			);
 		}
 		if (launchTask.kind === "dynamic") {
+			await persistFinalPromptMetadata(cwd, run, task, launchTask);
 			return await executeDynamicControllerTask(
 				cwd,
 				run,
@@ -1824,6 +4041,7 @@ async function launchPendingTaskAt(
 				task,
 				launchTask,
 				options,
+				validationSnapshot,
 			);
 		}
 		const worktreeLaunchTask = applyExistingLoopWorktree(run, task, launchTask);
@@ -1835,6 +4053,7 @@ async function launchPendingTaskAt(
 		let launch;
 		try {
 			await throwIfWorkflowStopRequested(cwd, run.runId);
+			await persistFinalPromptMetadata(cwd, run, task, worktreeLaunchTask);
 			launch = await resolveWorkflowBackend(run).launchTask(
 				cwd,
 				run,
@@ -1884,6 +4103,7 @@ async function executeDynamicControllerTask(
 	task: WorkflowTaskRunRecord,
 	compiledTask: CompiledWorkflow["tasks"][number],
 	options: WorkflowScheduleOptions = {},
+	validationSnapshot: ArtifactGraphRuntimeValidationSnapshot,
 ): Promise<boolean> {
 	if (!compiledTask.dynamic) {
 		throw new Error("dynamic metadata is missing");
@@ -1985,6 +4205,7 @@ async function executeDynamicControllerTask(
 				cwd,
 				run,
 				compiledTask.dependsOn ?? [],
+				validationSnapshot,
 			)
 		: await readSupportSources(cwd, run, compiledTask.dependsOn ?? []);
 	await throwIfWorkflowStopRequested(cwd, run.runId);

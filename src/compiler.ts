@@ -172,10 +172,7 @@ function lowerArtifactGraphStage(
 	if (stage.each && typeof stage.each === "object") {
 		lowered.each = {
 			...stage.each,
-			prompt: appendWorkflowOutputInstructions(
-				String((stage.each as any).prompt ?? stage.prompt ?? ""),
-				stage,
-			),
+			prompt: appendWorkflowOutputInstructions(stage.each.prompt, stage),
 		};
 	}
 	if (stage.onExhausted) {
@@ -264,6 +261,31 @@ function artifactGraphTaskMetadata(
 	sourceNamespace?: string,
 ): NonNullable<CompiledTask["artifactGraph"]> {
 	const controlSchema = stage.output?.controlSchema;
+	const inputPolicy = stage.inputPolicy;
+	let compiledInputPolicy: NonNullable<
+		CompiledTask["artifactGraph"]
+	>["inputPolicy"];
+	if (
+		inputPolicy &&
+		(inputPolicy.terminalBarrier !== undefined ||
+			inputPolicy.invalidateOnDependencyResume !== undefined ||
+			inputPolicy.maxCompiledPromptChars !== undefined)
+	) {
+		compiledInputPolicy = {
+			...(inputPolicy.terminalBarrier !== undefined
+				? { terminalBarrier: inputPolicy.terminalBarrier }
+				: {}),
+			...(inputPolicy.invalidateOnDependencyResume !== undefined
+				? {
+						invalidateOnDependencyResume:
+							inputPolicy.invalidateOnDependencyResume,
+					}
+				: {}),
+			...(inputPolicy.maxCompiledPromptChars !== undefined
+				? { maxCompiledPromptChars: inputPolicy.maxCompiledPromptChars }
+				: {}),
+		};
+	}
 	return {
 		enabled: true,
 		output: {
@@ -288,6 +310,7 @@ function artifactGraphTaskMetadata(
 			sourceNamespace,
 		),
 		artifactAccess: stage.inputPolicy?.artifactAccess ?? "enabled",
+		...(compiledInputPolicy ? { inputPolicy: compiledInputPolicy } : {}),
 		sourceProjection: stage.sourceProjection,
 	};
 }
@@ -375,6 +398,29 @@ function taskStageId(task: any): string | undefined {
 		: typeof task?.id === "string"
 			? task.id
 			: undefined;
+}
+
+function validateStaticCompiledPromptCaps(compiled: any): void {
+	const issues: ValidationIssue[] = [];
+	const validateTask = (task: any) => {
+		const maxChars = task?.artifactGraph?.inputPolicy?.maxCompiledPromptChars;
+		if (!Number.isSafeInteger(maxChars) || maxChars < 1) return;
+		const actualChars = Array.from(String(task.compiledPrompt ?? "")).length;
+		if (actualChars <= maxChars) return;
+		const stageId = taskStageId(task) ?? "unknown";
+		issues.push({
+			path: `$.artifactGraph.stages.${jsonKey(stageId)}.inputPolicy.maxCompiledPromptChars`,
+			message: `must be at least ${actualChars} to accommodate the statically compiled prompt (Unicode code points)`,
+		});
+	};
+
+	for (const task of compiled.tasks ?? []) validateTask(task);
+	for (const stage of compiled.stages ?? []) {
+		if (stage?.type !== "loop") continue;
+		for (const template of stage.childTemplates ?? []) validateTask(template);
+		if (stage.onExhausted?.template) validateTask(stage.onExhausted.template);
+	}
+	if (issues.length > 0) throw new WorkflowValidationError(issues);
 }
 
 function validateAgentRuntime(
@@ -648,6 +694,7 @@ export async function compileWorkflow(
 	const compilePlan = buildArtifactGraphCompilePlan(spec, options);
 	const compiled = await compileArtifactGraphPlan(compilePlan.plan, options);
 	annotateArtifactGraphCompiledWorkflow(compiled, compilePlan.stageMetadata);
+	validateStaticCompiledPromptCaps(compiled);
 	const foreachSpecDir = options.specPath
 		? dirname(resolve(options.cwd, options.specPath))
 		: options.cwd;
@@ -670,21 +717,36 @@ export async function compileWorkflow(
 	return compiled;
 }
 
-// Static check for foreach `from.path`: when the source stage declares an
-// output.controlSchema, warn if the path's top-level key is absent from the
-// schema properties (a likely typo that would silently fan out over nothing at
-// runtime). Conservative by design: only direct task/reduce sources with a
-// loadable object schema are checked; dag-container sources, schemas without a
-// `properties` map, and unreadable files are skipped to avoid false positives.
+// Static checks for foreach paths. When a direct source declares a loadable
+// control schema, verify both the selected array path and optional item
+// identity/payload projections. Schemas that cannot establish the relevant
+// shape are skipped to avoid false positives.
 async function collectForeachPathWarnings(
 	stages: any[],
 	specDir: string,
 ): Promise<string[]> {
 	const warnings: string[] = [];
 	const stageById = new Map<string, any>();
+	const schemaCache = new Map<string, any | undefined>();
 	for (const stage of stages) {
 		if (stage && typeof stage.id === "string") stageById.set(stage.id, stage);
 	}
+	const loadSchema = async (source: any): Promise<any | undefined> => {
+		const controlSchema = source?.output?.controlSchema;
+		if (typeof controlSchema !== "string") return undefined;
+		if (schemaCache.has(controlSchema)) return schemaCache.get(controlSchema);
+		let schema: any;
+		try {
+			schema = JSON.parse(
+				await readFile(resolve(specDir, controlSchema), "utf8"),
+			);
+		} catch {
+			schema = undefined;
+		}
+		schemaCache.set(controlSchema, schema);
+		return schema;
+	};
+
 	for (const stage of stages) {
 		if (stage?.type !== "foreach") continue;
 		const from = stage.from;
@@ -697,25 +759,127 @@ async function collectForeachPathWarnings(
 		if (!source || source.type === "dag") continue;
 		const controlSchema = source.output?.controlSchema;
 		if (typeof controlSchema !== "string") continue;
-		const topKey = path.replace(/^\$\./, "").split(/[.[]/)[0];
-		if (!topKey) continue;
-		let schema: any;
-		try {
-			schema = JSON.parse(
-				await readFile(resolve(specDir, controlSchema), "utf8"),
-			);
-		} catch {
-			continue; // unreadable/invalid schema: skip rather than false-warn
+		const schema = await loadSchema(source);
+		if (!schema) continue;
+
+		const selectedArraySchema = schemaAtSimpleJsonPath(schema, path);
+		if (!selectedArraySchema) {
+			const topKey = path.replace(/^\$\./, "").split(/[.[]/)[0];
+			const properties = schema.properties;
+			if (
+				topKey &&
+				isPlainRecord(properties) &&
+				!Object.hasOwn(properties, topKey)
+			) {
+				warnings.push(
+					`foreach stage "${stage.id}" reads "${path}" from "${sourceId}", but "${topKey}" is not a property of ${sourceId}'s control schema (${controlSchema}). This will fan out over an empty list at runtime if the path is wrong.`,
+				);
+			}
+			continue;
 		}
-		const properties = schema?.properties;
-		if (!properties || typeof properties !== "object") continue;
-		if (!Object.hasOwn(properties, topKey)) {
-			warnings.push(
-				`foreach stage "${stage.id}" reads "${path}" from "${sourceId}", but "${topKey}" is not a property of ${sourceId}'s control schema (${controlSchema}). This will fan out over an empty list at runtime if the path is wrong.`,
-			);
+
+		if (
+			!isPlainRecord(selectedArraySchema) ||
+			(selectedArraySchema.type !== undefined &&
+				selectedArraySchema.type !== "array")
+		) {
+			continue;
 		}
+		const itemSchema = selectedArraySchema.items;
+		if (!isPlainRecord(itemSchema) || !isPlainRecord(itemSchema.properties)) {
+			continue;
+		}
+		collectForeachItemPathWarnings(
+			warnings,
+			stage.id,
+			sourceId,
+			path,
+			controlSchema,
+			itemSchema.properties,
+			stage.each?.itemIdentityPath,
+			"itemIdentityPath",
+			"string",
+		);
+		collectForeachItemPathWarnings(
+			warnings,
+			stage.id,
+			sourceId,
+			path,
+			controlSchema,
+			itemSchema.properties,
+			stage.each?.itemPayloadPath,
+			"itemPayloadPath",
+			"object",
+		);
 	}
 	return warnings;
+}
+
+function schemaAtSimpleJsonPath(schema: any, path: string): any | undefined {
+	if (!isPlainRecord(schema) || !path.startsWith("$")) return undefined;
+	let current: any = schema;
+	let remainder = path.slice(1);
+	while (remainder !== "") {
+		const property = /^\.([A-Za-z_][A-Za-z0-9_]*)/.exec(remainder);
+		if (property) {
+			if (!isPlainRecord(current.properties)) return undefined;
+			const key = property[1]!;
+			if (!Object.hasOwn(current.properties, key)) return undefined;
+			current = current.properties[key];
+			remainder = remainder.slice(property[0].length);
+			continue;
+		}
+		const selector = /^\[(?:\*|\d+|\d*:\d*)\]/.exec(remainder);
+		if (!selector || !isPlainRecord(current.items)) return undefined;
+		current = current.items;
+		remainder = remainder.slice(selector[0].length);
+	}
+	return current;
+}
+
+function collectForeachItemPathWarnings(
+	warnings: string[],
+	stageId: string,
+	sourceId: string,
+	fromPath: string,
+	controlSchema: string,
+	itemProperties: Record<string, unknown>,
+	authoredPath: unknown,
+	field: "itemIdentityPath" | "itemPayloadPath",
+	expectedType: "string" | "object",
+): void {
+	if (typeof authoredPath !== "string") return;
+	const property = /^\$\.([A-Za-z_][A-Za-z0-9_]*)$/.exec(authoredPath)?.[1];
+	if (!property) return;
+	if (!Object.hasOwn(itemProperties, property)) {
+		warnings.push(
+			`foreach stage "${stageId}" ${field} "${authoredPath}" is not a property of items selected by "${fromPath}" from ${sourceId}'s control schema (${controlSchema}).`,
+		);
+		return;
+	}
+	const propertySchema = itemProperties[property];
+	if (!schemaDeclaresExactType(propertySchema, expectedType)) {
+		const requirement =
+			expectedType === "string"
+				? "a string, the only stable scalar supported for foreach identities"
+				: "an object";
+		warnings.push(
+			`foreach stage "${stageId}" ${field} "${authoredPath}" must declare ${requirement} in ${sourceId}'s control schema (${controlSchema}).`,
+		);
+	}
+}
+
+function schemaDeclaresExactType(
+	schema: unknown,
+	expectedType: "string" | "object",
+): boolean {
+	if (!isPlainRecord(schema)) return false;
+	if (schema.type === expectedType) return true;
+	return (
+		Array.isArray(schema.type) &&
+		schema.type.length === 1 &&
+		schema.type[0] === expectedType
+	);
 }
 
 // Static check for `sourceProjection.include` paths: when a projecting stage's
@@ -1455,6 +1619,14 @@ async function compileArtifactGraphPlan(
 				`stage "${stage.id}" declares readOnly: true but has ${safety.capability} tools (${mutatingTools.join(", ") || "unknown"}); readOnly filters tools but does not prevent these from mutating. Remove the tool or rely on worktree isolation.`,
 			);
 		}
+		const itemIdentityPath =
+			typeof stage.each?.itemIdentityPath === "string"
+				? stage.each.itemIdentityPath
+				: undefined;
+		const itemPayloadPath =
+			typeof stage.each?.itemPayloadPath === "string"
+				? stage.each.itemPayloadPath
+				: undefined;
 
 		return {
 			key,
@@ -1487,8 +1659,14 @@ async function compileArtifactGraphPlan(
 				runtimeStageKind === "foreach"
 					? {
 							from: stage.from,
-							prompt: String(stage.each?.prompt ?? stage.prompt ?? ""),
+							prompt: String(stage.each?.prompt ?? ""),
 							maxItems: stage.maxItems,
+							...(itemIdentityPath !== undefined
+								? { itemIdentityPath }
+								: {}),
+							...(itemPayloadPath !== undefined
+								? { itemPayloadPath }
+								: {}),
 							injectRuntimeTask: injectTask,
 							roleText,
 						}
@@ -1573,12 +1751,7 @@ async function compileArtifactGraphPlan(
 			};
 
 			if (childStageKind === "foreach") {
-				await addChildTask(
-					"item",
-					namespacedChildStage.each?.prompt ??
-						namespacedChildStage.prompt ??
-						"",
-				);
+				await addChildTask("item", namespacedChildStage.each?.prompt ?? "");
 			} else if (childStageKind === "support") {
 				await addChildTask(
 					"main",
@@ -1715,10 +1888,7 @@ async function compileArtifactGraphPlan(
 			currentStageTaskKeys.push(task.id);
 		};
 		if (stageKind === "foreach") {
-			await addTask(
-				"item",
-				runtimeStage.each?.prompt ?? runtimeStage.prompt ?? "",
-			);
+			await addTask("item", runtimeStage.each?.prompt ?? "");
 		} else if (stageKind === "support") {
 			await addTask("main", `Run support helper ${runtimeStage.support.uses}.`);
 		} else if (stageKind === "dynamic") {

@@ -1210,7 +1210,7 @@ function perItemDispatchStreamingSpec(extraStages = []) {
 						path: "$.items",
 						streaming: { enabled: true },
 					},
-					sourceProjection: { include: ["$.slots"] },
+					sourceProjection: { include: ["$.items", "$.slots"] },
 					each: { prompt: "Verify ${item}" },
 				},
 				...extraStages,

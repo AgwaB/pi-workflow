@@ -780,6 +780,410 @@ test("schema and compiler accept partial sourcePolicy on foreach", async () => {
 	}
 });
 
+test("artifact graph opt-ins validate and preserve compiled metadata", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const spec = artifactGraphWorkflowSpec({
+			artifactGraph: {
+				stages: [
+					{
+						id: "extract",
+						type: "single",
+						prompt: "Extract review items.",
+					},
+					{
+						id: "routing",
+						type: "single",
+						from: "extract",
+						sourcePolicy: "partial",
+						prompt: "Route terminal results.",
+						inputPolicy: {
+							terminalBarrier: "all-sources",
+							invalidateOnDependencyResume: true,
+							maxCompiledPromptChars: 64_000,
+						},
+					},
+					{
+						id: "verify",
+						type: "foreach",
+						from: { source: "extract", path: "$.items" },
+						each: {
+							prompt: "Verify ${item}.",
+							itemIdentityPath: "$.correlationId",
+							itemPayloadPath: "$.providerFinding",
+						},
+					},
+				],
+			},
+		});
+		const parsed = parseWorkflow(spec);
+		assert.deepEqual(parsed.artifactGraph.stages[1].inputPolicy, {
+			terminalBarrier: "all-sources",
+			invalidateOnDependencyResume: true,
+			maxCompiledPromptChars: 64_000,
+		});
+		assert.equal(
+			parsed.artifactGraph.stages[2].each.itemIdentityPath,
+			"$.correlationId",
+		);
+		assert.equal(
+			parsed.artifactGraph.stages[2].each.itemPayloadPath,
+			"$.providerFinding",
+		);
+
+		const compiled = await compileWorkflow(parsed, { cwd, task: "Review" });
+		const routing = compiled.tasks.find((task) => task.stageId === "routing");
+		const verify = compiled.tasks.find((task) => task.stageId === "verify");
+		assert.deepEqual(routing.artifactGraph.inputPolicy, {
+			terminalBarrier: "all-sources",
+			invalidateOnDependencyResume: true,
+			maxCompiledPromptChars: 64_000,
+		});
+		assert.equal(verify.foreach.itemIdentityPath, "$.correlationId");
+		assert.equal(verify.foreach.itemPayloadPath, "$.providerFinding");
+		const generated = buildForeachGeneratedTasks(verify, "Review", [
+			{
+				correlationId: "Finding-A",
+				providerFinding: { title: "Projected finding" },
+			},
+		]);
+		assert.equal(generated.error, undefined);
+		assert.equal(generated.tasks[0].taskId, "finding-a");
+		assert.equal(generated.tasks[0].foreachGenerated.itemIdentity, "Finding-A");
+		assert.equal(
+			Object.hasOwn(generated.tasks[0].foreachGenerated, "sourceGeneration"),
+			false,
+		);
+		assert.match(generated.tasks[0].compiledPrompt, /Projected finding/);
+		assert.doesNotMatch(generated.tasks[0].compiledPrompt, /Finding-A/);
+
+		const baseline = await compileWorkflow(
+			artifactGraphWorkflowSpec({
+				artifactGraph: {
+					stages: [
+						{ id: "source", type: "single", prompt: "Extract." },
+						{
+							id: "fanout",
+							type: "foreach",
+							from: { source: "source", path: "$.items" },
+							each: { prompt: "Review ${item}." },
+						},
+					],
+				},
+			}),
+			{ cwd, task: "Review" },
+		);
+		const baselineSource = baseline.tasks.find(
+			(task) => task.stageId === "source",
+		);
+		const baselineFanout = baseline.tasks.find(
+			(task) => task.stageId === "fanout",
+		);
+		assert.equal(
+			Object.hasOwn(baselineSource.artifactGraph, "inputPolicy"),
+			false,
+		);
+		assert.equal(Object.hasOwn(baselineFanout.artifactGraph, "inputPolicy"), false);
+		assert.equal(Object.hasOwn(baselineFanout, "sourceGeneration"), false);
+		assert.equal(Object.hasOwn(baselineFanout.foreach, "itemIdentityPath"), false);
+		assert.equal(Object.hasOwn(baselineFanout.foreach, "itemPayloadPath"), false);
+	} finally {
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+	}
+});
+test("compiler rejects a static foreach prompt cap below its Unicode boundary", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const specWithCap = (maxCompiledPromptChars) =>
+			artifactGraphWorkflowSpec({
+				artifactGraph: {
+					stages: [
+						{ id: "source", type: "single", prompt: "Extract." },
+						{
+							id: "fanout",
+							type: "foreach",
+							from: { source: "source", path: "$.items" },
+							...(maxCompiledPromptChars === undefined
+								? {}
+								: {
+										inputPolicy: { maxCompiledPromptChars },
+									}),
+							each: { prompt: "Review 👋 ${item}." },
+						},
+					],
+				},
+			});
+		const uncapped = await compileWorkflow(specWithCap(undefined), {
+			cwd,
+			task: "Review",
+		});
+		const uncappedFanout = uncapped.tasks.find(
+			(task) => task.stageId === "fanout",
+		);
+		const staticChars = Array.from(uncappedFanout.compiledPrompt).length;
+
+		const boundary = await compileWorkflow(specWithCap(staticChars), {
+			cwd,
+			task: "Review",
+		});
+		assert.equal(
+			Array.from(
+				boundary.tasks.find((task) => task.stageId === "fanout").compiledPrompt,
+			).length,
+			staticChars,
+		);
+		await assert.rejects(
+			() => compileWorkflow(specWithCap(staticChars - 1), { cwd, task: "Review" }),
+			/maxCompiledPromptChars: must be at least .*Unicode code points/,
+		);
+	} finally {
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+	}
+});
+
+test("compiler diagnoses foreach item projections only with a known item schema", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		mkdirSync(join(cwd, "schemas"), { recursive: true });
+		writeFileSync(
+			join(cwd, "schemas", "items.schema.json"),
+			JSON.stringify({
+				type: "object",
+				properties: {
+					items: {
+						type: "array",
+						items: {
+							type: "object",
+							properties: {
+								stableId: { type: "string" },
+								numericId: { type: "integer" },
+								payload: { type: "object" },
+								textPayload: { type: "string" },
+							},
+						},
+					},
+				},
+			}),
+		);
+		const specFor = (each, withSchema = true) =>
+			artifactGraphWorkflowSpec({
+				artifactGraph: {
+					stages: [
+						{
+							id: "source",
+							type: "single",
+							prompt: "Extract.",
+							...(withSchema
+								? {
+										output: {
+											controlSchema: "./schemas/items.schema.json",
+										},
+									}
+								: {}),
+						},
+						{
+							id: "fanout",
+							type: "foreach",
+							from: { source: "source", path: "$.items" },
+							each: { prompt: "Review ${item}.", ...each },
+						},
+					],
+				},
+			});
+
+		const valid = await compileWorkflow(
+			specFor({
+				itemIdentityPath: "$.stableId",
+				itemPayloadPath: "$.payload",
+			}),
+			{ cwd, task: "Review" },
+		);
+		assert.equal(
+			valid.warnings.some((warning) => /item(?:Identity|Payload)Path/.test(warning)),
+			false,
+		);
+
+		const missingIdentity = await compileWorkflow(
+			specFor({ itemIdentityPath: "$.missingId" }),
+			{ cwd, task: "Review" },
+		);
+		assert.ok(
+			missingIdentity.warnings.some(
+				(warning) =>
+					/itemIdentityPath/.test(warning) && /missingId/.test(warning),
+			),
+		);
+
+		const wrongIdentityType = await compileWorkflow(
+			specFor({ itemIdentityPath: "$.numericId" }),
+			{ cwd, task: "Review" },
+		);
+		assert.ok(
+			wrongIdentityType.warnings.some(
+				(warning) =>
+					/itemIdentityPath/.test(warning) &&
+					/string, the only stable scalar/.test(warning),
+			),
+		);
+
+		const wrongPayloadType = await compileWorkflow(
+			specFor({ itemPayloadPath: "$.textPayload" }),
+			{ cwd, task: "Review" },
+		);
+		assert.ok(
+			wrongPayloadType.warnings.some(
+				(warning) =>
+					/itemPayloadPath/.test(warning) && /must declare an object/.test(warning),
+			),
+		);
+
+		const unavailableSchema = await compileWorkflow(
+			specFor({ itemIdentityPath: "$.missingId" }, false),
+			{ cwd, task: "Review" },
+		);
+		assert.equal(
+			unavailableSchema.warnings.some((warning) =>
+				/itemIdentityPath/.test(warning),
+			),
+			false,
+		);
+	} finally {
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+	}
+});
+
+test("artifact graph opt-ins reject malformed or misplaced authoring fields", () => {
+	const invalid = assertThrowsFlow(() =>
+		parseWorkflow(
+			artifactGraphWorkflowSpec({
+				artifactGraph: {
+					stages: [
+						{ id: "source", type: "single", prompt: "Extract." },
+						{
+							id: "fanout",
+							type: "foreach",
+							from: {
+								source: "source",
+								path: "$.items",
+								streaming: { enabled: true },
+							},
+							inputPolicy: {
+								terminalBarrier: "first-source",
+								invalidateOnDependencyResume: false,
+								maxCompiledPromptChars: 0,
+								unexpected: true,
+							},
+							each: {
+								prompt: "Review ${item}.",
+								itemIdentityPath: "$[0]",
+								itemPayloadPath: "$.constructor",
+							},
+						},
+						{
+							id: "container",
+							type: "dag",
+							inputPolicy: { terminalBarrier: "all-sources" },
+							stages: [
+								{ id: "child", type: "single", prompt: "Child." },
+							],
+						},
+						{
+							id: "misplaced",
+							type: "single",
+							prompt: "Misplaced.",
+							itemIdentityPath: "$.correlationId",
+							itemPayloadPath: "$.providerFinding",
+						},
+						{
+							id: "same-path",
+							type: "foreach",
+							from: { source: "source", path: "$.items" },
+							each: {
+								prompt: "Review ${item}.",
+								itemIdentityPath: "$.correlationId",
+								itemPayloadPath: "$.correlationId",
+							},
+						},
+					],
+				},
+			}),
+		),
+	);
+	assertIssue(
+		invalid,
+		"$.artifactGraph.stages[1].inputPolicy.terminalBarrier",
+		'must be "all-sources"',
+	);
+	assertIssue(
+		invalid,
+		"$.artifactGraph.stages[1].inputPolicy.invalidateOnDependencyResume",
+		"must be true",
+	);
+	assertIssue(
+		invalid,
+		"$.artifactGraph.stages[1].inputPolicy.maxCompiledPromptChars",
+		"positive integer",
+	);
+	assertIssue(
+		invalid,
+		"$.artifactGraph.stages[1].inputPolicy.unexpected",
+		"unknown field",
+	);
+	assertIssue(
+		invalid,
+		"$.artifactGraph.stages[1].each.itemIdentityPath",
+		"simple item property JSONPath",
+	);
+	assertIssue(
+		invalid,
+		"$.artifactGraph.stages[1].each.itemPayloadPath",
+		"simple item property JSONPath",
+	);
+	assertIssue(
+		invalid,
+		"$.artifactGraph.stages[1].from.streaming",
+		"is not supported when each.itemIdentityPath is declared",
+	);
+	assertIssue(
+		invalid,
+		"$.artifactGraph.stages[2].inputPolicy",
+		"is not valid on dag container stages",
+	);
+	assertIssue(
+		invalid,
+		"$.artifactGraph.stages[3].itemIdentityPath",
+		"unknown field",
+	);
+	assertIssue(
+		invalid,
+		"$.artifactGraph.stages[3].itemPayloadPath",
+		"unknown field",
+	);
+	assertIssue(
+		invalid,
+		"$.artifactGraph.stages[4].each.itemPayloadPath",
+		"must differ from itemIdentityPath",
+	);
+});
+
 test("compiler warns when readOnly stage keeps mutation-capable tools", async () => {
 	const cwd = makeProject();
 	try {
