@@ -384,7 +384,11 @@ export async function withRunLease<T>(
 			await assertLockOwner(lockFile, ownerId);
 			const timestamp = nowIso();
 			const now = new Date();
-			await utimes(lockFile, now, now);
+			await utimes(lockFile, now, now).catch((error: unknown) => {
+				if ((error as NodeJS.ErrnoException).code === "ENOENT")
+					throw new Error(`Lost supervisor lease: ${lockFile}`);
+				throw error;
+			});
 			const progress = runProgressSnapshot(cwd, runId);
 			const lastTaskTransitionAt =
 				progress?.lastTaskTransitionAt ?? carriedProgress.lastTaskTransitionAt;
