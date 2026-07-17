@@ -23,8 +23,10 @@ const TOP_LEVEL_KEYS = new Set([
 	"input",
 	"defaults",
 	"roles",
+	"executionProfiles",
 	"artifactGraph",
 ]);
+const EXECUTION_PROFILE_NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
 const ARTIFACT_GRAPH_KEYS = new Set([
 	"stages",
 	"maxConcurrency",
@@ -310,6 +312,65 @@ function validateArtifactGraphTopLevel(
 	optionalString(spec.description, "$.description", issues);
 	validateDefaults(spec.defaults, "$.defaults", issues);
 	validateRoles(spec.roles, "$.roles", issues);
+	validateExecutionProfiles(
+		spec.executionProfiles,
+		collectDeclaredStageIds(spec),
+		issues,
+	);
+}
+
+/** All stage ids in the graph, including nested dag container children. */
+function collectDeclaredStageIds(spec: Record<string, unknown>): Set<string> {
+	const ids = new Set<string>();
+	const visit = (stages: unknown): void => {
+		if (!Array.isArray(stages)) return;
+		for (const stage of stages) {
+			if (!isRecord(stage)) continue;
+			if (typeof stage.id === "string") ids.add(stage.id);
+			if (stage.type === "dag") visit(stage.stages);
+		}
+	};
+	const graph = spec.artifactGraph;
+	if (isRecord(graph)) visit(graph.stages);
+	return ids;
+}
+
+function validateExecutionProfiles(
+	value: unknown,
+	stageIds: ReadonlySet<string>,
+	issues: ValidationIssue[],
+): void {
+	if (value === undefined) return;
+	const path = "$.executionProfiles";
+	const profiles = recordAt(value, path, issues);
+	if (!profiles) return;
+	for (const [name, mapping] of Object.entries(profiles)) {
+		const profilePath = `${path}.${jsonKey(name)}`;
+		if (!EXECUTION_PROFILE_NAME_PATTERN.test(name)) {
+			issues.push({
+				path: profilePath,
+				message:
+					"profile name must contain only letters, numbers, _ and -",
+			});
+		}
+		const stageMap = recordAt(mapping, profilePath, issues);
+		if (!stageMap) continue;
+		for (const [stageId, thinking] of Object.entries(stageMap)) {
+			const stagePath = `${profilePath}.${jsonKey(stageId)}`;
+			if (!stageIds.has(stageId)) {
+				issues.push({
+					path: stagePath,
+					message: `unknown stage id "${stageId}"`,
+				});
+			}
+			if (!THINKING_LEVELS.includes(thinking as never)) {
+				issues.push({
+					path: stagePath,
+					message: `must be one of: ${THINKING_LEVELS.join(", ")}`,
+				});
+			}
+		}
+	}
 }
 
 function validateArtifactGraphBody(

@@ -20,6 +20,20 @@
   "input": {
     "depth": "standard"
   },
+  "executionProfiles": {
+    "eco": {
+      "plan": "medium",
+      "research-questions": "low",
+      "normalize-claims": "medium",
+      "verify-claims": "high",
+      "final-audit": "high"
+    },
+    "medium": {},
+    "pro": {
+      "research-questions": "high",
+      "verify-claims": "xhigh"
+    }
+  },
   "artifactGraph": {
     "stages": [
       {
