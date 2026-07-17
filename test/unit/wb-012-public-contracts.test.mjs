@@ -58,7 +58,7 @@ test("public command and troubleshooting docs mirror runtime help", async () => 
 		readRoot("src/index.ts"),
 	]);
 	for (const command of [
-		'/workflow run [--route] [--model MODEL] [--thinking LEVEL] <workflow-name-or-path> "<task>" [--detach] [--force-new]',
+		'/workflow run [--no-route] [--model MODEL] [--thinking LEVEL] <workflow-name-or-path> "<task>" [--detach] [--force-new]',
 		'/workflow dynamic [--route] [--model MODEL] [--thinking LEVEL] "<task>" [--detach] [--force-new]',
 		"/workflow show [--raw] <run-id-or-workflow-name>",
 		"/workflow logs <run-id> [task-id-or-spec-id] [lines]",

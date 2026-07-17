@@ -136,7 +136,7 @@ Usage:
   /workflow roles <workflow-name-or-path>
   /workflow agents
   /workflow list
-  /workflow run [--route] [--model MODEL] [--thinking LEVEL] <workflow-name-or-path> "<task>" [--detach] [--force-new]
+  /workflow run [--no-route] [--model MODEL] [--thinking LEVEL] <workflow-name-or-path> "<task>" [--detach] [--force-new]
   /workflow dynamic [--route] [--model MODEL] [--thinking LEVEL] "<task>" [--detach] [--force-new]
   /workflow status [run-id]
   /workflow show [--raw] <run-id-or-workflow-name>
@@ -157,8 +157,11 @@ Interactive run/dynamic starts skip launching when an active run with the
 same workflow and identical task started within the last 10 minutes;
 --force-new starts another run anyway.
 
-With --route, a low-cost router pass first decides direct answer vs dynamic
-vs the requested workflow (with quick/standard/max depth). On low confidence
-or router failure it escalates to the requested path at standard depth; the
-decision is recorded on the run record (or routing-log.jsonl for direct).
+/workflow run routes by default: a low-cost router pass first decides direct
+answer vs dynamic vs the requested workflow (with quick/standard/max depth).
+On low confidence or router failure it escalates to the requested path at
+standard depth; the decision is recorded on the run record (or
+routing-log.jsonl for direct). Use --no-route to skip the router and start
+the requested workflow directly. /workflow dynamic still requires an
+explicit --route to enable the router pass.
 `;
