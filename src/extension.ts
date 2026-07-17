@@ -604,6 +604,7 @@ interface WorkflowRunToolRequest {
 	task: string;
 	detach: boolean;
 	runtimeOverrides?: WorkflowRuntimeDefaults;
+	executionProfile?: string;
 }
 
 interface WorkflowDynamicToolRequest {
@@ -763,6 +764,7 @@ async function startWorkflowRunFromRequest(
 		runtimeDefaults: currentRuntimeDefaults(ctx, api),
 		availableModels: availableWorkflowModels(ctx),
 		dynamicUi: dynamicUiFromContext(ctx),
+		executionProfile: request.executionProfile,
 	});
 	const verb = workflowRunStartVerb(run.status);
 	if (run.status === "running") {
@@ -866,6 +868,7 @@ async function handleRoutedRunRequest(
 		task: string;
 		detach: boolean;
 		runtimeOverrides?: WorkflowRuntimeDefaults;
+		executionProfile?: string;
 		usage: string;
 	},
 	ctx: ExtensionCommandContext,
@@ -894,6 +897,7 @@ async function handleRoutedRunRequest(
 		runtimeDefaults: currentRuntimeDefaults(ctx, api),
 		availableModels: availableWorkflowModels(ctx),
 		dynamicUi: dynamicUiFromContext(ctx),
+		executionProfile: request.executionProfile,
 	});
 	const routingLine = formatRoutingLine(outcome.routing);
 
@@ -1317,6 +1321,7 @@ async function handleWorkflowCommand(
 						task: parsed.task,
 						detach: parsed.detach,
 						runtimeOverrides,
+						executionProfile: parsed.profile,
 						usage: '/workflow run <workflow-name-or-path> "<task>"',
 					},
 					ctx,
@@ -1346,6 +1351,7 @@ async function handleWorkflowCommand(
 					task: parsed.task,
 					detach: parsed.detach,
 					runtimeOverrides,
+					executionProfile: parsed.profile,
 				},
 				ctx,
 				api,
@@ -1697,6 +1703,7 @@ export function parseWorkflowRunArgs(args: string): {
 	forceNew?: boolean;
 	model?: string;
 	thinking?: ThinkingLevel;
+	profile?: string;
 } {
 	const parsed: WorkflowRunParsedOptions = { detach: false };
 	const body = stripWorkflowRunCommand(args.trim());
@@ -1781,6 +1788,7 @@ type WorkflowRunParsedOptions = {
 	forceNew?: boolean;
 	model?: string;
 	thinking?: ThinkingLevel;
+	profile?: string;
 };
 
 interface WorkflowRunArgToken {
@@ -1889,6 +1897,16 @@ function consumeLeadingRunOptionTokens(
 		return 2;
 	}
 
+	const profile = optionValueFromEquals(token.text, "--profile");
+	if (profile !== undefined) {
+		parsed.profile = profile;
+		return 1;
+	}
+	if (token.text === "--profile") {
+		parsed.profile = requiredOptionValue(tokens[index + 1], "--profile");
+		return 2;
+	}
+
 	const thinking =
 		optionValueFromEquals(token.text, "--thinking") ??
 		optionValueFromEquals(token.text, "--reasoning");
@@ -1951,6 +1969,14 @@ function consumeTrailingRunOptionTokens(
 		return end - 1;
 	}
 
+	const profile = !last.quoted
+		? optionValueFromEquals(last.text, "--profile")
+		: undefined;
+	if (profile !== undefined) {
+		parsed.profile = profile;
+		return end - 1;
+	}
+
 	const option = tokens[end - 2];
 	if (!option || option.quoted) return end;
 	if (option.text === "--model") {
@@ -1959,6 +1985,10 @@ function consumeTrailingRunOptionTokens(
 	}
 	if (option.text === "--thinking" || option.text === "--reasoning") {
 		parsed.thinking = parseThinkingLevel(last.text);
+		return end - 2;
+	}
+	if (option.text === "--profile") {
+		parsed.profile = last.text;
 		return end - 2;
 	}
 

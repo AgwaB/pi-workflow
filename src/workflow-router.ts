@@ -66,6 +66,8 @@ export interface RoutedWorkflowRequest {
 	runtimeDefaults?: WorkflowRuntimeDefaults;
 	availableModels?: WorkflowModelInfo[];
 	dynamicUi?: DynamicWorkflowUi;
+	/** Named executionProfiles entry applied when the workflow path is chosen. */
+	executionProfile?: string;
 }
 
 export type RoutedWorkflowOutcome =
@@ -269,6 +271,7 @@ async function startDecidedRun(
 		...commonOptions,
 		routing,
 		inputOverrides: { depth: routing.depth },
+		executionProfile: request.executionProfile,
 	});
 	return { mode: "workflow", routing, run };
 }

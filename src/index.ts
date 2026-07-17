@@ -136,7 +136,7 @@ Usage:
   /workflow roles <workflow-name-or-path>
   /workflow agents
   /workflow list
-  /workflow run [--no-route] [--model MODEL] [--thinking LEVEL] <workflow-name-or-path> "<task>" [--detach] [--force-new]
+  /workflow run [--no-route] [--model MODEL] [--thinking LEVEL] [--profile NAME] <workflow-name-or-path> "<task>" [--detach] [--force-new]
   /workflow dynamic [--route] [--model MODEL] [--thinking LEVEL] "<task>" [--detach] [--force-new]
   /workflow status [run-id]
   /workflow show [--raw] <run-id-or-workflow-name>
@@ -164,4 +164,9 @@ standard depth; the decision is recorded on the run record (or
 routing-log.jsonl for direct). Use --no-route to skip the router and start
 the requested workflow directly. /workflow dynamic still requires an
 explicit --route to enable the router pass.
+
+With --profile NAME, /workflow run applies a named executionProfiles entry
+declared by the workflow spec: per-stage thinking overrides selected
+explicitly (never by heuristic), recorded on the run record. Unknown names
+fail closed and list the declared profiles.
 `;

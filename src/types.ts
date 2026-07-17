@@ -121,6 +121,12 @@ export interface ArtifactGraphWorkflowSpec {
 	input?: unknown;
 	defaults?: WorkflowDefaults;
 	roles?: Record<string, RoleSpec>;
+	/**
+	 * Named execution profiles: per-stage thinking overrides selected explicitly
+	 * at run time (never by heuristic). Keys are profile names; values map stage
+	 * ids to thinking levels. An empty object means "spec pins as written".
+	 */
+	executionProfiles?: Record<string, Record<string, ThinkingLevel>>;
 	artifactGraph: WorkflowFailurePolicy & {
 		stages: ArtifactGraphStageSpec[];
 		maxConcurrency?: number;
@@ -1001,6 +1007,13 @@ export type WorkflowRouteDepth = "quick" | "standard" | "max";
  * Audit record for the opt-in `--route` router pass. Present only on runs
  * started through routing; default runs never carry this field.
  */
+export interface WorkflowRunExecutionProfile {
+	/** Profile name explicitly selected by the user. */
+	name: string;
+	/** Stage-id → thinking overrides applied at compile time. */
+	stageThinking: Record<string, ThinkingLevel>;
+}
+
 export interface WorkflowRunRouting {
 	requested: string;
 	decided: WorkflowRouteDecision;
@@ -1097,6 +1110,7 @@ export interface WorkflowRunRecord {
 	specPath: string;
 	provenance?: WorkflowRunProvenance;
 	routing?: WorkflowRunRouting;
+	executionProfile?: WorkflowRunExecutionProfile;
 	/** Task-usage rollup persisted when the run reaches a terminal status. */
 	usage?: WorkflowRunUsageRollup;
 	tasks: WorkflowTaskRunRecord[];

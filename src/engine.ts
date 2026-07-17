@@ -167,6 +167,7 @@ import {
 	type CompiledWorkflow,
 	WORKFLOW_RUN_TYPE,
 	type WorkflowRunRecord,
+	type WorkflowRunExecutionProfile,
 	type WorkflowRunRouting,
 	type WorkflowTaskRunRecord,
 } from "./types.js";
@@ -277,6 +278,12 @@ export interface WorkflowRunOptions {
 	 * Keys the spec does not declare are ignored.
 	 */
 	inputOverrides?: Record<string, unknown>;
+	/**
+	 * Named execution profile declared in the spec's executionProfiles map.
+	 * Applied as per-stage thinking overrides at compile time and recorded on
+	 * the run record. Unknown names fail closed.
+	 */
+	executionProfile?: string;
 }
 
 interface WorkflowScheduleOptions {
@@ -323,6 +330,11 @@ async function runLoadedWorkflowSpec(
 	provenance?: WorkflowRunRecord["provenance"],
 ): Promise<WorkflowRunRecord> {
 	spec = applyDeclaredWorkflowInputOverrides(spec, options.inputOverrides);
+	const appliedProfile = applyWorkflowExecutionProfile(
+		spec,
+		options.executionProfile,
+	);
+	spec = appliedProfile.spec;
 	const compiled = await compileWorkflow(spec, {
 		cwd,
 		specPath,
@@ -342,6 +354,7 @@ async function runLoadedWorkflowSpec(
 	});
 	if (provenance) run.provenance = provenance;
 	if (options.routing) run.routing = options.routing;
+	if (appliedProfile.record) run.executionProfile = appliedProfile.record;
 	const initialized = await withRunLease(cwd, run.runId, async (leaseSignal) => {
 		await assertRunLeaseOwnership(cwd, run.runId, leaseSignal);
 		const existing = await readJson(workflowRunPath(cwd, run.runId));
@@ -382,6 +395,71 @@ async function runLoadedWorkflowSpec(
 	if (shouldWatchRun(scheduled))
 		watchRun(cwd, scheduled.runId, scheduleOptions);
 	return scheduled;
+}
+
+/**
+ * Resolve a named execution profile into per-stage thinking overrides.
+ * Explicit selection only: no profile name means no change; an unknown name
+ * or a non-artifact-graph spec fails closed. An empty mapping is valid and
+ * means "spec pins as written" (identity), which is still recorded.
+ */
+function applyWorkflowExecutionProfile<Spec>(
+	spec: Spec,
+	profileName: string | undefined,
+): { spec: Spec; record?: WorkflowRunExecutionProfile } {
+	if (!profileName) return { spec };
+	const profiles = (
+		spec as { executionProfiles?: Record<string, Record<string, string>> }
+	).executionProfiles;
+	const mapping = profiles?.[profileName];
+	if (!mapping || typeof mapping !== "object" || Array.isArray(mapping)) {
+		const available = Object.keys(profiles ?? {}).sort();
+		throw new Error(
+			available.length
+				? `unknown execution profile "${profileName}"; spec declares: ${available.join(", ")}`
+				: `unknown execution profile "${profileName}"; this workflow declares no executionProfiles`,
+		);
+	}
+	const graph = (spec as { artifactGraph?: { stages?: unknown[] } })
+		.artifactGraph;
+	if (!graph || !Array.isArray(graph.stages)) {
+		throw new Error(
+			`execution profile "${profileName}" requires an artifact-graph workflow`,
+		);
+	}
+	const applyToStages = (stages: unknown[]): unknown[] =>
+		stages.map((stage) => {
+			if (!stage || typeof stage !== "object" || Array.isArray(stage))
+				return stage;
+			const record = stage as Record<string, unknown>;
+			const id = record.id;
+			const override =
+				typeof id === "string" ? mapping[id] : undefined;
+			const nested =
+				record.type === "dag" && Array.isArray(record.stages)
+					? { stages: applyToStages(record.stages) }
+					: {};
+			if (override === undefined && !("stages" in nested)) return stage;
+			return {
+				...record,
+				...(override === undefined ? {} : { thinking: override }),
+				...nested,
+			};
+		});
+	const nextSpec = {
+		...(spec as Record<string, unknown>),
+		artifactGraph: {
+			...(graph as Record<string, unknown>),
+			stages: applyToStages(graph.stages),
+		},
+	} as Spec;
+	return {
+		spec: nextSpec,
+		record: {
+			name: profileName,
+			stageThinking: { ...mapping } as WorkflowRunExecutionProfile["stageThinking"],
+		},
+	};
 }
 
 function applyDeclaredWorkflowInputOverrides<Spec>(
