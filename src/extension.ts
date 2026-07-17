@@ -1299,14 +1299,25 @@ async function handleWorkflowCommand(
 				parsed.model || parsed.thinking
 					? { model: parsed.model, thinking: parsed.thinking }
 					: undefined;
-			if (parsed.route) {
+			if (parsed.route ?? true) {
+				if (!parsed.detach && !parsed.forceNew) {
+					const guardNotice = await duplicateRunGuardNotice(
+						ctx.cwd,
+						{ kind: "spec", specRef: specPath },
+						parsed.task,
+					);
+					if (guardNotice) {
+						emit(ctx, guardNotice, "warning");
+						return;
+					}
+				}
 				await handleRoutedRunRequest(
 					{
 						requestedWorkflow: specPath,
 						task: parsed.task,
 						detach: parsed.detach,
 						runtimeOverrides,
-						usage: '/workflow run --route <workflow-name-or-path> "<task>"',
+						usage: '/workflow run <workflow-name-or-path> "<task>"',
 					},
 					ctx,
 					api,
@@ -1858,6 +1869,11 @@ function consumeLeadingRunOptionTokens(
 		return 1;
 	}
 
+	if (token.text === "--no-route") {
+		parsed.route = false;
+		return 1;
+	}
+
 	if (token.text === "--force-new") {
 		parsed.forceNew = true;
 		return 1;
@@ -1905,6 +1921,11 @@ function consumeTrailingRunOptionTokens(
 
 	if (!last.quoted && last.text === "--route") {
 		parsed.route = true;
+		return end - 1;
+	}
+
+	if (!last.quoted && last.text === "--no-route") {
+		parsed.route = false;
 		return end - 1;
 	}
 

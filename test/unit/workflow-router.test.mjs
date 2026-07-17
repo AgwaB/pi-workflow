@@ -392,6 +392,24 @@ test("runs without --route never invoke the router subagent", async () => {
 				.route,
 			undefined,
 		);
+		assert.equal(
+			parseWorkflowRunArgs('run --no-route route-target "Task"').route,
+			false,
+		);
+		assert.equal(
+			parseWorkflowRunArgs('run route-target "Task" --no-route').route,
+			false,
+		);
+		assert.equal(
+			parseWorkflowDynamicArgs('dynamic --no-route "Task"').route,
+			false,
+		);
+		assert.equal(
+			parseWorkflowRunArgs(
+				'run route-target "Keep literal --no-route inside"',
+			).route,
+			undefined,
+		);
 
 		const run = await runWorkflow("route-target", cwd, {
 			task: "Plain run without routing.",
@@ -404,6 +422,70 @@ test("runs without --route never invoke the router subagent", async () => {
 		const persisted = await readRunRecord(cwd, run.runId);
 		assert.equal(persisted.routing, undefined);
 		assert.equal(readRunDirSpec(cwd, run.runId).input.depth, "standard");
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("/workflow run routes by default and --no-route skips the router", async () => {
+	const { default: workflowExtension } = await import(
+		"../../.tmp/unit/extension.js"
+	);
+	function captureHandler() {
+		const commands = new Map();
+		workflowExtension({
+			on() {},
+			registerCommand(name, definition) {
+				commands.set(name, definition);
+			},
+			registerTool() {},
+			sendMessage() {},
+			getThinkingLevel() {
+				return undefined;
+			},
+		});
+		const command = commands.get("workflow");
+		assert.ok(command, "workflow command not registered");
+		return command.handler;
+	}
+
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout");
+		writeRoutableWorkflow(cwd);
+		const calls = installFakeSubagentApi(cwd, {
+			routerText: JSON.stringify({
+				route: "workflow",
+				depth: "standard",
+				confidence: 0.9,
+				reason: "workflow warranted",
+			}),
+		});
+		const handler = captureHandler();
+		const notices = [];
+		const ctx = {
+			cwd,
+			hasUI: true,
+			ui: {
+				notify(message, level) {
+					notices.push({ message, level });
+				},
+				confirm: async () => true,
+			},
+		};
+
+		// Default: run without any routing flag invokes the router pass.
+		await handler('run route-target "Routed by default task."', ctx);
+		assert.equal(calls.router, 1);
+
+		// --no-route skips the router entirely.
+		await handler(
+			'run --no-route --force-new route-target "No route task."',
+			ctx,
+		);
+		assert.equal(calls.router, 1);
+		assert.ok(calls.launches >= 2);
 	} finally {
 		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });

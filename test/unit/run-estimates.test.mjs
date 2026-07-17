@@ -504,7 +504,7 @@ test("duplicate /workflow run start is blocked with the existing run id; --force
 		// --force-new bypasses the guard and starts a new run. Assertions scan
 		// notices because the completion-feedback watcher may also notify.
 		notices.length = 0;
-		await handler('run --force-new guard-target "Same task"', ctx);
+		await handler('run --no-route --force-new guard-target "Same task"', ctx);
 		assert.ok(
 			notices.some((notice) =>
 				/Workflow started: guard-target/.test(notice.message),
@@ -519,7 +519,7 @@ test("duplicate /workflow run start is blocked with the existing run id; --force
 
 		// Different task text starts normally without --force-new.
 		notices.length = 0;
-		await handler('run guard-target "A different task"', ctx);
+		await handler('run --no-route guard-target "A different task"', ctx);
 		assert.ok(
 			notices.some((notice) =>
 				/Workflow started: guard-target/.test(notice.message),
