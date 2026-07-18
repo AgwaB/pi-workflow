@@ -105,6 +105,11 @@ const WORKFLOW_RUN_TOOL_PARAMETERS = {
 			description:
 				"Optional. When true, spawn a standalone supervisor so the run keeps progressing after this Pi session exits.",
 		},
+		profile: {
+			type: "string",
+			description:
+				"Optional named execution profile. Omit to ask interactively or use the workflow's medium profile in headless mode.",
+		},
 	},
 	required: ["workflow", "task"],
 } as const;
@@ -634,7 +639,17 @@ function parseWorkflowRunToolParams(params: unknown): WorkflowRunToolRequest {
 	const detachValue = params.detach;
 	if (detachValue !== undefined && typeof detachValue !== "boolean")
 		throw new Error("workflow_run detach must be a boolean when provided");
-	return { workflow, task, detach: detachValue === true };
+	const executionProfile = optionalStringParam(
+		params,
+		"profile",
+		"workflow_run",
+	)?.trim();
+	return {
+		workflow,
+		task,
+		detach: detachValue === true,
+		executionProfile: executionProfile || undefined,
+	};
 }
 
 function parseWorkflowDynamicToolParams(
@@ -746,6 +761,57 @@ function formatWorkflowListToolResult(
 	].join("\n");
 }
 
+type WorkflowProfileSelector = (
+	title: string,
+	options: string[],
+) => Promise<string | undefined>;
+
+const PROFILE_CHOICE_LABELS: Record<string, string> = {
+	medium: "Balanced (medium) — recommended; workflow pins as written",
+	low: "Fast (low) — faster/cheaper; complex reports may lose completeness",
+	high: "Thorough (high) — more reasoning; slower/costlier",
+};
+
+/**
+ * Resolve an explicit or omitted execution profile for one named workflow.
+ * Non-interactive callers default to `medium` when declared. Interactive
+ * callers choose from the spec's declared profiles; cancellation stops launch.
+ */
+export async function selectWorkflowExecutionProfile(
+	workflow: string,
+	cwd: string,
+	explicitProfile: string | undefined,
+	select?: WorkflowProfileSelector,
+): Promise<string | undefined> {
+	if (explicitProfile) return explicitProfile;
+	const loaded = await loadWorkflowSpec(workflow, cwd);
+	const profiles = loaded.spec.executionProfiles;
+	if (!profiles || Object.keys(profiles).length === 0) return undefined;
+	const names = Object.keys(profiles);
+	if (!select) return names.includes("medium") ? "medium" : undefined;
+	if (names.length === 1) return names[0];
+
+	const ordered = [
+		...(["medium", "low", "high"].filter((name) => names.includes(name))),
+		...names
+			.filter((name) => !["medium", "low", "high"].includes(name))
+			.sort(),
+	];
+	const labels = ordered.map(
+		(name) => PROFILE_CHOICE_LABELS[name] ?? `Profile: ${name}`,
+	);
+	const selected = await select(
+		`Choose execution profile for ${loaded.spec.name ?? workflow}`,
+		labels,
+	);
+	if (selected === undefined)
+		throw new Error("Workflow run cancelled before profile selection.");
+	const selectedIndex = labels.indexOf(selected);
+	if (selectedIndex < 0)
+		throw new Error(`Unknown profile selection: ${selected}`);
+	return ordered[selectedIndex];
+}
+
 async function startWorkflowRunFromRequest(
 	request: WorkflowRunToolRequest,
 	ctx: ExtensionContext,
@@ -758,13 +824,19 @@ async function startWorkflowRunFromRequest(
 		throw new Error(
 			'This workflow needs a task. Usage: /workflow run <workflow-name-or-path> "<task>"',
 		);
+	const executionProfile = await selectWorkflowExecutionProfile(
+		workflow,
+		ctx.cwd,
+		request.executionProfile,
+		ctx.hasUI ? (title, options) => ctx.ui.select(title, options) : undefined,
+	);
 	const run = await runWorkflowSpec(workflow, ctx.cwd, {
 		task,
 		runtimeOverrides: request.runtimeOverrides,
 		runtimeDefaults: currentRuntimeDefaults(ctx, api),
 		availableModels: availableWorkflowModels(ctx),
 		dynamicUi: dynamicUiFromContext(ctx),
-		executionProfile: request.executionProfile,
+		executionProfile,
 	});
 	const verb = workflowRunStartVerb(run.status);
 	if (run.status === "running") {
@@ -898,6 +970,18 @@ async function handleRoutedRunRequest(
 		availableModels: availableWorkflowModels(ctx),
 		dynamicUi: dynamicUiFromContext(ctx),
 		executionProfile: request.executionProfile,
+		resolveExecutionProfile:
+			request.executionProfile || !request.requestedWorkflow
+				? undefined
+				: (workflow) =>
+						selectWorkflowExecutionProfile(
+							workflow,
+							ctx.cwd,
+							undefined,
+							ctx.hasUI
+								? (title, options) => ctx.ui.select(title, options)
+								: undefined,
+						),
 	});
 	const routingLine = formatRoutingLine(outcome.routing);
 

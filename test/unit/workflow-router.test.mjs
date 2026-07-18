@@ -57,11 +57,13 @@ function writeRoutableWorkflow(cwd) {
 			name: "route-target",
 			input: { depth: "standard" },
 			defaults: { agent: "unit-scout", readOnly: true, tools: ["read"] },
+			executionProfiles: { medium: {}, low: { main: "low" } },
 			artifactGraph: {
 				stages: [
 					{
 						id: "main",
 						type: "single",
+						thinking: "high",
 						output: {
 							analysis: { required: true },
 							refs: { required: true },
@@ -279,6 +281,72 @@ test("--route with high-confidence workflow starts the workflow with routed dept
 	}
 });
 
+test("routed profile resolver runs only after routing selects the named workflow", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout");
+		writeRoutableWorkflow(cwd);
+		const calls = installFakeSubagentApi(cwd, {
+			routerText: JSON.stringify({
+				route: "workflow",
+				depth: "standard",
+				confidence: 0.95,
+				reason: "workflow needed",
+			}),
+		});
+		let resolved = 0;
+		const outcome = await executeRoutedWorkflowRequest(
+			routedRequest(cwd, {
+				resolveExecutionProfile: async (workflow) => {
+					assert.equal(workflow, "route-target");
+					resolved += 1;
+					return "low";
+				},
+			}),
+		);
+		assert.equal(outcome.mode, "workflow");
+		assert.equal(resolved, 1);
+		const run = await readRunRecord(cwd, outcome.run.runId);
+		assert.deepEqual(run.executionProfile, {
+			name: "low",
+			stageThinking: { main: "low" },
+		});
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("direct routing does not ask for a workflow profile", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout");
+		writeRoutableWorkflow(cwd);
+		installFakeSubagentApi(cwd, {
+			routerText: JSON.stringify({
+				route: "direct",
+				depth: "quick",
+				confidence: 0.95,
+				reason: "direct is enough",
+			}),
+		});
+		let resolved = 0;
+		const outcome = await executeRoutedWorkflowRequest(
+			routedRequest(cwd, {
+				resolveExecutionProfile: async () => {
+					resolved += 1;
+					return "low";
+				},
+			}),
+		);
+		assert.equal(outcome.mode, "direct");
+		assert.equal(resolved, 0);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("--route escalates low-confidence decisions to the requested workflow at standard depth", async () => {
 	const cwd = makeProject();
 	try {
@@ -464,6 +532,7 @@ test("/workflow run routes by default and --no-route skips the router", async ()
 		});
 		const handler = captureHandler();
 		const notices = [];
+		let profilePrompts = 0;
 		const ctx = {
 			cwd,
 			hasUI: true,
@@ -472,6 +541,10 @@ test("/workflow run routes by default and --no-route skips the router", async ()
 					notices.push({ message, level });
 				},
 				confirm: async () => true,
+				select: async (_title, options) => {
+					profilePrompts += 1;
+					return options.find((option) => option.startsWith("Balanced"));
+				},
 			},
 		};
 
@@ -485,6 +558,7 @@ test("/workflow run routes by default and --no-route skips the router", async ()
 			ctx,
 		);
 		assert.equal(calls.router, 1);
+		assert.equal(profilePrompts, 2);
 		assert.ok(calls.launches >= 2);
 	} finally {
 		setSubagentApiForTests(undefined);

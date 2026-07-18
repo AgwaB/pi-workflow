@@ -139,7 +139,7 @@ For reusable workflow authoring, `workflow-guide` includes validated scaffold bu
 | `/workflow validate <workflow-name-or-path>` | Load and compile a workflow without starting a run. Reports blocked permission previews and warnings. |
 | `/workflow roles <workflow-name-or-path>` | Show the compiled role context included for each workflow role. |
 | `/workflow agents` | List discoverable Pi agents, model/thinking defaults, tool ceilings, and source paths. |
-| `/workflow run [--no-route] [--model MODEL] [--thinking LEVEL] [--profile NAME] <workflow-name-or-path> "<task>" [--detach] [--force-new]` | Start a named workflow run with the supplied runtime task. Routing is on by default: a low-cost direct-vs-dynamic-vs-requested-workflow router pass runs first and records its decision; `--no-route` skips it and starts the requested workflow directly (`--route` remains accepted as an explicit opt-in). `--profile NAME` applies a named `executionProfiles` entry declared by the spec (per-stage thinking overrides, explicitly selected, recorded on the run record as `executionProfile`; unknown names fail closed). Bundled deep-research declares `eco` (faster; verification stages keep a high floor), `medium` (spec pins as written), and `pro` (deeper fan-out verification). `--detach` spawns a standalone supervisor process after the initial scheduling pass so the run keeps progressing after this Pi session exits (log: `.pi/workflows/<run-id>/supervise.log`). Dynamic controllers and `approval: "ask"` prompts in that first pass can still run inline; later detached/headless approval blocks require an interactive `/workflow resume <run-id>`. An identical active launch within 10 minutes is skipped unless `--force-new` is present. |
+| `/workflow run [--no-route] [--model MODEL] [--thinking LEVEL] [--profile NAME] <workflow-name-or-path> "<task>" [--detach] [--force-new]` | Start a named workflow run with the supplied runtime task. Routing is on by default: a low-cost direct-vs-dynamic-vs-requested-workflow router pass runs first and records its decision; `--no-route` skips it and starts the requested workflow directly (`--route` remains accepted as an explicit opt-in). `--profile NAME` applies a named `executionProfiles` entry declared by the spec (per-stage thinking overrides, recorded on the run record as `executionProfile`; unknown names fail closed). When a named workflow declares multiple profiles and `--profile` is omitted, interactive TUI/RPC runs ask before the workflow launches; `medium` is shown first as the recommended choice. Explicit `--profile` bypasses the prompt. Print/JSON/headless launches select `medium` when the workflow declares it, preserving automation. Routing asks only after it selects the named workflow, never for direct/dynamic routes. Bundled deep-research declares `low` (faster/cheaper with a measured completeness risk), `medium` (recommended identity profile; spec pins as written), and `high` (more reasoning; quality uplift not yet measured). `--detach` spawns a standalone supervisor process after the initial scheduling pass so the run keeps progressing after this Pi session exits (log: `.pi/workflows/<run-id>/supervise.log`). Dynamic controllers and `approval: "ask"` prompts in that first pass can still run inline; later detached/headless approval blocks require an interactive `/workflow resume <run-id>`. An identical active launch within 10 minutes is skipped unless `--force-new` is present. |
 | `/workflow dynamic [--route] [--model MODEL] [--thinking LEVEL] "<task>" [--detach] [--force-new]` | Start a spec-less direct dynamic run. The runtime uses a built-in trusted controller to plan/fan out/synthesize dynamically; no workflow name, user-selected spec, or generated spec is required. Unlike `/workflow run`, the router pass stays opt-in via `--route`; model, thinking, detach, duplicate-guard, and force-new controls match `/workflow run`. |
 | `/workflow status [run-id]` | Show all workflow runs in the current project, or one run. |
 | `/workflow show [--raw] <run-id-or-workflow-name>` | If the ref starts with `workflow_`, show formatted run details; otherwise show the workflow spec. `/workflow show --raw <run-id>` shows raw run details. |
@@ -244,25 +244,23 @@ access, configuration, output, or code problem, use
 
 Performance changes must preserve final prompt/state/error semantics and the evidence gates that define output quality. Do not claim general speed or quality parity from one workflow, fixture, model, or concurrency regime. Default changes require candidate-matched paired runs with the same task, model/thinking, and serial-or-parallel regime; zero missing/duplicate verifier rows and source-ref join failures; no verified-floor regression; and explicit owner/release approval. Do not obtain a speed result by weakening verification, reclassifying partially supported claims as verified, skipping rows, shortening correctness timeouts/retries, or enabling opt-in streaming/batching/tiering by default.
 
-### Opt-in fast mode
+### Deep-research execution profiles
 
-For opt-in lower-latency `deep-research` runs, add `--thinking low`. The
-measured deep-research pairs show a latency/verified-coverage tradeoff, not a
-general quality result; package defaults remain conservative.
+Interactive deep-research runs ask for one of three profiles when `--profile` is omitted. `medium` is the recommended/default choice; Escape cancels before launch. Automation remains deterministic: print/JSON/headless mode selects `medium`, and an explicit flag bypasses the prompt.
 
 ```text
-/workflow run --thinking low deep-research "Research this repository and summarize the architecture tradeoffs."
-/workflow dynamic --thinking low "Research this repository and summarize the architecture tradeoffs."
+/workflow run --profile low deep-research "Research this repository and summarize the architecture tradeoffs."
+/workflow run --profile medium deep-research "Research this repository and summarize the architecture tradeoffs."
+/workflow run --profile high deep-research "Research this repository and summarize the architecture tradeoffs."
 ```
 
-This is the supported **speed profile**: an explicit, owner-approved opt-in for latency-sensitive runs. Package defaults remain unchanged — the profile is never applied implicitly.
+| Profile | Stage thinking | Intended use |
+|---|---|---|
+| `low` / Fast | plan high; questions low; normalize medium; verify low; final-audit high | Latency/cost-sensitive exploratory work. ECO-4 measured about 35% lower wall time and 25% lower task cost with equal aggregate verified claims, but one of three fresh prompts had a material completeness/actionability regression. This is an explicit quality trade-off, not quality-preserving mode. |
+| `medium` / Balanced | spec pins as written: plan high; questions medium; normalize high; verify high; final-audit xhigh | Recommended/default profile for decision-grade research. `{}` is an identity mapping, so it preserves existing workflow behavior. |
+| `high` / Thorough | medium pins plus questions high and verify xhigh | More reasoning for research and verification. It is expected to be slower/costlier; a quality uplift over medium has not yet been measured. |
 
-What the measured evidence says (2026-07-06 serial paired canary, no concurrency confound, guard 6/6 on both arms):
-
-- `--thinking low` ran the full `deep-research` pipeline about **1.8x faster** than the pinned defaults (mean 15.95 vs 28.70 minutes) with zero failed tools and zero source-ref join failures.
-- The tradeoff is real: the low arm produced **fewer fully verified claims** on two of three prompts (mean 16.67 vs 18.00 verified, with the difference shifting to partially-supported), and blinded judging showed no stable quality winner in either direction.
-
-Use the speed profile when turnaround matters more than maximum verified coverage. Keep the defaults when the run feeds decisions that depend on every claim being fully verified. In both modes the evidence guardrails are identical and non-negotiable: verified-floor checks, `partially_supported` never counted as `verified`, and source-ref join integrity are enforced by the same audit stages regardless of thinking level.
+Do not combine `--profile` with blanket `--thinking` overrides unless you intentionally want the runtime override to replace stage-level profile choices. In every profile, deterministic evidence guardrails remain unchanged: `partially_supported` never counts as `verified`, and source-ref join integrity is still enforced.
 
 ### Internalized experimental batched verification variants
 

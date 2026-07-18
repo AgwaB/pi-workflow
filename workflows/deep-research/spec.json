@@ -21,15 +21,14 @@
     "depth": "standard"
   },
   "executionProfiles": {
-    "eco": {
-      "plan": "medium",
+    "low": {
       "research-questions": "low",
       "normalize-claims": "medium",
-      "verify-claims": "high",
+      "verify-claims": "low",
       "final-audit": "high"
     },
     "medium": {},
-    "pro": {
+    "high": {
       "research-questions": "high",
       "verify-claims": "xhigh"
     }
