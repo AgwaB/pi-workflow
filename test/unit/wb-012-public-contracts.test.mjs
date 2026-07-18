@@ -70,7 +70,7 @@ test("public command and troubleshooting docs mirror runtime help", async () => 
 	for (const movedDetail of [
 		/### Diagnose a failed run/,
 		/inspect <run-id> --failures --results/,
-		/latency\/verified-coverage tradeoff/,
+		/explicit quality trade-off/,
 		/built-in trusted dynamic controller/,
 		/interrupt a non-terminal run/,
 	]) {

@@ -68,6 +68,13 @@ export interface RoutedWorkflowRequest {
 	dynamicUi?: DynamicWorkflowUi;
 	/** Named executionProfiles entry applied when the workflow path is chosen. */
 	executionProfile?: string;
+	/**
+	 * Resolve an omitted profile only after routing chooses the named workflow.
+	 * Interactive callers use this to avoid prompting for direct/dynamic routes.
+	 */
+	resolveExecutionProfile?: (
+		workflowRef: string,
+	) => Promise<string | undefined>;
 }
 
 export type RoutedWorkflowOutcome =
@@ -267,11 +274,14 @@ async function startDecidedRun(
 		});
 		return { mode: "dynamic", routing: dynamicRouting, run };
 	}
+	const executionProfile =
+		request.executionProfile ??
+		(await request.resolveExecutionProfile?.(request.requestedWorkflow));
 	const run = await runWorkflowSpec(request.requestedWorkflow, request.cwd, {
 		...commonOptions,
 		routing,
 		inputOverrides: { depth: routing.depth },
-		executionProfile: request.executionProfile,
+		executionProfile,
 	});
 	return { mode: "workflow", routing, run };
 }

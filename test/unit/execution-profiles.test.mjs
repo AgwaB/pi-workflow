@@ -6,7 +6,10 @@ import { after, test } from "node:test";
 
 import { compileWorkflow } from "../../.tmp/unit/compiler.js";
 import { runWorkflow, waitForRun } from "../../.tmp/unit/engine.js";
-import { parseWorkflowRunArgs } from "../../.tmp/unit/extension.js";
+import {
+	parseWorkflowRunArgs,
+	selectWorkflowExecutionProfile,
+} from "../../.tmp/unit/extension.js";
 import { parseArtifactGraphWorkflowSpec } from "../../.tmp/unit/artifact-graph-schema.js";
 import { loadWorkflowSpec } from "../../.tmp/unit/schema.js";
 import { readRunRecord } from "../../.tmp/unit/store.js";
@@ -204,6 +207,73 @@ test("--profile parses from leading, trailing, and equals forms; quoted stays li
 	);
 });
 
+test("omitted profile defaults to medium without UI and prompts safely with UI", async () => {
+	const cwd = makeProject();
+	try {
+		writeSpec(
+			cwd,
+			profileSpec({
+				executionProfiles: {
+					low: { one: "low" },
+					medium: {},
+					high: { two: "xhigh" },
+				},
+			}),
+		);
+		assert.equal(
+			await selectWorkflowExecutionProfile(
+				"profile-target",
+				cwd,
+				undefined,
+			),
+			"medium",
+		);
+
+		let shownOptions;
+		const selected = await selectWorkflowExecutionProfile(
+			"profile-target",
+			cwd,
+			undefined,
+			async (_title, options) => {
+				shownOptions = options;
+				return options.find((option) => option.startsWith("Fast (low)"));
+			},
+		);
+		assert.equal(selected, "low");
+		assert.match(shownOptions[0], /^Balanced \(medium\)/);
+		assert.match(shownOptions[1], /^Fast \(low\)/);
+		assert.match(shownOptions[2], /^Thorough \(high\)/);
+
+		let prompted = false;
+		assert.equal(
+			await selectWorkflowExecutionProfile(
+				"profile-target",
+				cwd,
+				"high",
+				async () => {
+					prompted = true;
+					return undefined;
+				},
+			),
+			"high",
+		);
+		assert.equal(prompted, false, "explicit --profile must bypass the prompt");
+
+		await assert.rejects(
+			() =>
+				selectWorkflowExecutionProfile(
+					"profile-target",
+					cwd,
+					undefined,
+					async () => undefined,
+				),
+			/Workflow run cancelled before profile selection/,
+		);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("selected profile overrides stage thinking and is recorded on the run", async () => {
 	const cwd = makeProject();
 	try {
@@ -298,7 +368,7 @@ test("unknown profile name fails closed before any launch", async () => {
 	}
 });
 
-test("bundled deep-research profiles: medium is identity and eco keeps the verify/final-audit floor", async () => {
+test("bundled deep-research profiles expose measured low, identity medium, and raised high tiers", async () => {
 	const loaded = await loadWorkflowSpec(
 		join(process.cwd(), "workflows", "deep-research", "spec.json"),
 		process.cwd(),
@@ -311,26 +381,32 @@ test("bundled deep-research profiles: medium is identity and eco keeps the verif
 	const pinsByStage = new Map(
 		spec.artifactGraph.stages.map((stage) => [stage.id, stage.thinking]),
 	);
-	// eco floor: verification stages never drop below high
-	assert.equal(profiles.eco["verify-claims"], "high");
-	assert.equal(profiles.eco["final-audit"], "high");
-	// eco only lowers relative to pins, never raises
+	assert.deepEqual(profiles.low, {
+		"research-questions": "low",
+		"normalize-claims": "medium",
+		"verify-claims": "low",
+		"final-audit": "high",
+	});
+	assert.equal(
+		profiles.low.plan,
+		undefined,
+		"low must preserve the plan=high spec pin",
+	);
 	const order = ["off", "minimal", "low", "medium", "high", "xhigh"];
-	for (const [stageId, level] of Object.entries(profiles.eco)) {
+	for (const [stageId, level] of Object.entries(profiles.low)) {
 		const pin = pinsByStage.get(stageId);
-		assert.ok(pin, `eco references stage ${stageId} without a pin`);
+		assert.ok(pin, `low references stage ${stageId} without a pin`);
 		assert.ok(
 			order.indexOf(level) <= order.indexOf(pin),
-			`eco must not raise ${stageId} above its pin (${level} > ${pin})`,
+			`low must not raise ${stageId} above its pin (${level} > ${pin})`,
 		);
 	}
-	// pro only raises relative to pins, never lowers
-	for (const [stageId, level] of Object.entries(profiles.pro)) {
+	for (const [stageId, level] of Object.entries(profiles.high)) {
 		const pin = pinsByStage.get(stageId);
-		assert.ok(pin, `pro references stage ${stageId} without a pin`);
+		assert.ok(pin, `high references stage ${stageId} without a pin`);
 		assert.ok(
 			order.indexOf(level) >= order.indexOf(pin),
-			`pro must not lower ${stageId} below its pin (${level} < ${pin})`,
+			`high must not lower ${stageId} below its pin (${level} < ${pin})`,
 		);
 	}
 });
