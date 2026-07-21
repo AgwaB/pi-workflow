@@ -70,6 +70,18 @@ For a one-off adaptive workflow that should plan, fan out, and synthesize withou
 /workflow dynamic "Research this repository and summarize the architecture tradeoffs."
 ```
 
+### Execution profiles
+
+A workflow may optionally declare custom-named `executionProfiles` and a
+`defaultExecutionProfile`. Use `/workflow run --profile <name> ...` (or the
+optional `profile` field of `workflow_run`) to select one. If omitted,
+interactive runs offer the declared profiles plus the base workflow;
+non-interactive launches (including tool execution without a selector) use the
+declared default, or the base workflow when there is no default. They do not
+infer a profile called `medium`. `low`, `medium`, and `high` are conventions,
+not reserved names. See [the execution-profile reference](./docs/usage.md#execution-profiles)
+for override precedence and batching constraints.
+
 ## Usage: choose an execution mode
 
 Use the bundled `execution-router` skill when you are not sure whether a task should be handled directly, by a targeted verifier/subagent, by an existing workflow, or by a new workflow:

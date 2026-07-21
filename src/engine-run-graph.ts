@@ -11,6 +11,7 @@ import {
 	EXPERIMENTAL_CACHE_STABLE_FOREACH_ENV,
 	workflowExperimentalFlagEnabled,
 } from "./experimental-speed-flags.js";
+import { readSimpleJsonPath } from "./workflow-runtime.js";
 import type {
 	CompiledTask,
 	CompiledWorkflow,
@@ -201,7 +202,9 @@ export function reconcileForeachGeneratedRunRecords(
 
 	assertAuthoritativeForeachDispatchMaps(run, compiledFlow);
 	if (placeholderToGeneratedSpecIds.size === 0) {
-		return synchronizeTerminalBarrierSourceSpecIds(run, compiledFlow) || changed;
+		return (
+			synchronizeTerminalBarrierSourceSpecIds(run, compiledFlow) || changed
+		);
 	}
 
 	const filteredRunTasks: WorkflowTaskRunRecord[] = [];
@@ -333,7 +336,8 @@ export function reconcileForeachGeneratedRunRecords(
 		}
 	}
 	if (changed) run.tasks = reordered;
-	if (synchronizeTerminalBarrierSourceSpecIds(run, compiledFlow)) changed = true;
+	if (synchronizeTerminalBarrierSourceSpecIds(run, compiledFlow))
+		changed = true;
 	return changed;
 }
 
@@ -426,7 +430,10 @@ function assertExactForeachGeneratedMembership(
 	}
 
 	const boundaries = new Map<string, CompiledOnlyForeachBoundary>();
-	for (const [placeholderSpecId, compiledChildren] of compiledChildrenByPlaceholder) {
+	for (const [
+		placeholderSpecId,
+		compiledChildren,
+	] of compiledChildrenByPlaceholder) {
 		const missingChildren = compiledChildren.filter(
 			(compiledChild) => !runBySpecId.has(compiledTaskSpecId(compiledChild)),
 		);
@@ -528,8 +535,7 @@ function assertAuthoritativeForeachDispatchMaps(
 			(task) => compiledTaskSpecId(task) === parent.specId,
 		);
 		const compiledChildren = compiledFlow.tasks.filter(
-			(task) =>
-				task.foreachGenerated?.placeholderSpecId === parent.specId,
+			(task) => task.foreachGenerated?.placeholderSpecId === parent.specId,
 		);
 		if (!compiledParent?.foreach && compiledChildren.length === 0) continue;
 		if (!Array.isArray(dispatchMap.entries)) {
@@ -671,7 +677,9 @@ function foreachGeneratedPlaceholderSpecId(
 	task: CompiledTask | WorkflowTaskRunRecord,
 ): string | undefined {
 	const explicit = task.foreachGenerated?.placeholderSpecId;
-	return typeof explicit === "string" && explicit.trim() !== "" ? explicit : undefined;
+	return typeof explicit === "string" && explicit.trim() !== ""
+		? explicit
+		: undefined;
 }
 
 function replaceForeachGeneratedDependencies(
@@ -697,8 +705,12 @@ function sameStringList(left: string[], right: string[]): boolean {
 	);
 }
 function sameForeachGeneratedIdentity(
-	left: CompiledTask["foreachGenerated"] | WorkflowTaskRunRecord["foreachGenerated"],
-	right: CompiledTask["foreachGenerated"] | WorkflowTaskRunRecord["foreachGenerated"],
+	left:
+		| CompiledTask["foreachGenerated"]
+		| WorkflowTaskRunRecord["foreachGenerated"],
+	right:
+		| CompiledTask["foreachGenerated"]
+		| WorkflowTaskRunRecord["foreachGenerated"],
 ): boolean {
 	return (
 		left?.placeholderSpecId === right?.placeholderSpecId &&
@@ -708,7 +720,19 @@ function sameForeachGeneratedIdentity(
 		left?.itemSourceSpecId === right?.itemSourceSpecId &&
 		left?.itemSourceKind === right?.itemSourceKind &&
 		left?.itemRef === right?.itemRef &&
-		left?.perItemDispatch === right?.perItemDispatch
+		left?.perItemDispatch === right?.perItemDispatch &&
+		sameForeachBatchGrouping(left?.batch, right?.batch)
+	);
+}
+
+function sameForeachBatchGrouping(
+	left: NonNullable<CompiledTask["foreachGenerated"]>["batch"],
+	right: NonNullable<CompiledTask["foreachGenerated"]>["batch"],
+): boolean {
+	return (
+		left?.enabled === right?.enabled &&
+		left?.groupBy === right?.groupBy &&
+		left?.groupKey === right?.groupKey
 	);
 }
 
@@ -807,7 +831,8 @@ export function synchronizeTerminalBarrierSourceSpecIds(
 	let changed = false;
 	for (const runTask of run.tasks) {
 		const compiledTask = compiledTaskBySpecId.get(runTask.specId);
-		if (!compiledTask || !terminalBarrierEnabled(compiledTask, runTask)) continue;
+		if (!compiledTask || !terminalBarrierEnabled(compiledTask, runTask))
+			continue;
 		const sourceSpecIds = [...new Set(compiledTask.dependsOn ?? [])];
 		if (
 			runTask.terminalBarrier?.mode === "all-sources" &&
@@ -948,6 +973,7 @@ export function buildForeachGeneratedTasks(
 		}
 		const itemPayload = foreachItemPromptPayload(template, item, index);
 		if (itemPayload.error) return { tasks: [], error: itemPayload.error };
+		const batchGrouping = foreachBatchGrouping(template, item);
 		const itemText = formatForeachItem(itemPayload.value);
 		const cacheStableForeach = workflowExperimentalFlagEnabled(
 			EXPERIMENTAL_CACHE_STABLE_FOREACH_ENV,
@@ -1011,10 +1037,79 @@ export function buildForeachGeneratedTasks(
 					foreachStreamingEnabled(template))
 					? { itemIdentity: itemIdentity.identity }
 					: {}),
+				...(batchGrouping === undefined ? {} : { batch: batchGrouping }),
 			},
 		} as CompiledTask);
 	}
 	return { tasks };
+}
+
+function foreachBatchGrouping(
+	template: CompiledTask,
+	item: unknown,
+): NonNullable<CompiledTask["foreachGenerated"]>["batch"] | undefined {
+	const batch = template.foreach?.batch;
+	if (!batch) return undefined;
+	const paths =
+		batch.groupBy === undefined
+			? []
+			: Array.isArray(batch.groupBy)
+				? batch.groupBy
+				: [batch.groupBy];
+	if (paths.length === 0) return { enabled: true, groupBy: false };
+	for (const path of paths) {
+		const value = readSimpleJsonPath(item, path);
+		if (!usableForeachBatchGroupValue(value)) continue;
+		const groupKey = canonicalForeachBatchJson(value);
+		if (groupKey !== undefined)
+			return { enabled: true, groupBy: true, groupKey };
+	}
+	// A configured groupBy with no usable value is deliberately singleton-only.
+	return { enabled: true, groupBy: true };
+}
+
+function usableForeachBatchGroupValue(value: unknown): boolean {
+	if (value === undefined || value === null) return false;
+	if (typeof value === "string") return value.trim().length > 0;
+	if (Array.isArray(value)) return value.length > 0;
+	if (typeof value === "object") return Object.keys(value).length > 0;
+	return typeof value === "boolean" || typeof value === "number";
+}
+
+function canonicalForeachBatchJson(value: unknown): string | undefined {
+	const seen = new Set<object>();
+	const normalize = (current: unknown): unknown => {
+		if (current === null) return null;
+		if (typeof current === "string" || typeof current === "boolean")
+			return current;
+		if (typeof current === "number")
+			return Number.isFinite(current) ? current : undefined;
+		if (Array.isArray(current)) {
+			if (seen.has(current)) return undefined;
+			seen.add(current);
+			const values = current.map(normalize);
+			seen.delete(current);
+			return values.some((item) => item === undefined) ? undefined : values;
+		}
+		if (!current || typeof current !== "object" || seen.has(current))
+			return undefined;
+		seen.add(current);
+		const normalized: Record<string, unknown> = {};
+		for (const key of Object.keys(current).sort((left, right) =>
+			left.localeCompare(right),
+		)) {
+			const item = normalize((current as Record<string, unknown>)[key]);
+			if (item === undefined) {
+				seen.delete(current);
+				return undefined;
+			}
+			normalized[key] = item;
+		}
+		seen.delete(current);
+		return normalized;
+	};
+	const normalized = normalize(value);
+	return normalized === undefined ? undefined : JSON.stringify(normalized);
 }
 
 function foreachItemIdentity(
@@ -1031,8 +1126,7 @@ function foreachItemIdentity(
 				? sanitizeTaskId((item as { id: string }).id)
 				: "";
 		return {
-			taskId:
-				legacyId || `item-${String(index + 1).padStart(3, "0")}`,
+			taskId: legacyId || `item-${String(index + 1).padStart(3, "0")}`,
 			...(legacyId ? { identity: legacyId } : {}),
 		};
 	}
@@ -1131,7 +1225,11 @@ function readForeachItemProperty(
 		return { error: "non_object" };
 	}
 	const descriptor = Object.getOwnPropertyDescriptor(item, property);
-	if (!descriptor || !("value" in descriptor) || descriptor.value === undefined) {
+	if (
+		!descriptor ||
+		!("value" in descriptor) ||
+		descriptor.value === undefined
+	) {
 		return { error: "missing" };
 	}
 	return { value: descriptor.value };
@@ -1289,9 +1387,7 @@ function removeForeachGeneratedTasksFromSnapshots(
 		);
 	}
 	if (generatedByPlaceholder.size === 0) return false;
-	const generatedSpecIds = new Set(
-		[...generatedByPlaceholder.values()].flat(),
-	);
+	const generatedSpecIds = new Set([...generatedByPlaceholder.values()].flat());
 	compiledFlow.tasks = compiledFlow.tasks.filter(
 		(task) => !generatedSpecIds.has(compiledTaskSpecId(task)),
 	);
@@ -1323,7 +1419,11 @@ export function removeForeachGeneratedTasksForPlaceholders(
 	snapshots?: readonly ForeachGeneratedGroupSnapshot[],
 ): boolean {
 	if (snapshots) {
-		return removeForeachGeneratedTasksFromSnapshots(run, compiledFlow, snapshots);
+		return removeForeachGeneratedTasksFromSnapshots(
+			run,
+			compiledFlow,
+			snapshots,
+		);
 	}
 	const generatedByPlaceholder = new Map<string, string[]>();
 	const compiledGeneratedBySpecId = new Map<string, CompiledTask>();
@@ -1367,10 +1467,7 @@ export function removeForeachGeneratedTasksForPlaceholders(
 			task.sourceGeneration !== expected.sourceGeneration ||
 			task.specId === membership.placeholderSpecId ||
 			seenRunGeneratedSpecIds.has(task.specId) ||
-			!sameForeachGeneratedIdentity(
-				membership,
-				expected.foreachGenerated,
-			)
+			!sameForeachGeneratedIdentity(membership, expected.foreachGenerated)
 		) {
 			throw new Error(
 				`Cannot remove foreach generated tasks: run child ${task.specId} does not exactly match its compiled placeholder`,
@@ -1386,9 +1483,7 @@ export function removeForeachGeneratedTasksForPlaceholders(
 	}
 	if (generatedByPlaceholder.size === 0) return false;
 
-	const generatedSpecIds = new Set(
-		[...generatedByPlaceholder.values()].flat(),
-	);
+	const generatedSpecIds = new Set([...generatedByPlaceholder.values()].flat());
 	compiledFlow.tasks = compiledFlow.tasks.filter(
 		(task) => !generatedSpecIds.has(compiledTaskSpecId(task)),
 	);

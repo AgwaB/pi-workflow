@@ -114,6 +114,28 @@ export type RequiredWorkflowArtifactReadPolicy =
 			maxChars?: undefined;
 	  });
 
+export interface ExecutionProfileForeachBatch {
+	/** Fixed v1 batch size for profile-only transparent foreach batching. */
+	maxItems: 2;
+	/** One or more simple JSONPaths evaluated relative to each foreach item. */
+	groupBy?: string | string[];
+}
+
+/** Durable per-item eligibility metadata captured while a foreach item is raw. */
+export interface WorkflowForeachBatchGrouping {
+	enabled: true;
+	/** False means adjacent items may pair without a grouping key. */
+	groupBy: boolean;
+	/** Canonical JSON for the first usable configured groupBy value. */
+	groupKey?: string;
+}
+
+export interface ExecutionProfileStageOverride {
+	model?: string;
+	thinking?: ThinkingLevel;
+	foreachBatch?: ExecutionProfileForeachBatch;
+}
+
 export interface ArtifactGraphWorkflowSpec {
 	schemaVersion: 1;
 	name?: string;
@@ -122,11 +144,15 @@ export interface ArtifactGraphWorkflowSpec {
 	defaults?: WorkflowDefaults;
 	roles?: Record<string, RoleSpec>;
 	/**
-	 * Named execution profiles: per-stage thinking overrides selected explicitly
-	 * at run time (never by heuristic). Keys are profile names; values map stage
-	 * ids to thinking levels. An empty object means "spec pins as written".
+	 * Named execution profiles selected at run time. Stage keys are top-level ids
+	 * or canonical nested dag ids (`container.child`). Empty profiles are identity.
 	 */
-	executionProfiles?: Record<string, Record<string, ThinkingLevel>>;
+	executionProfiles?: Record<
+		string,
+		Record<string, ExecutionProfileStageOverride>
+	>;
+	/** Omitted profile selection uses this declared profile when present. */
+	defaultExecutionProfile?: string;
 	artifactGraph: WorkflowFailurePolicy & {
 		stages: ArtifactGraphStageSpec[];
 		maxConcurrency?: number;
@@ -605,6 +631,8 @@ export interface CompiledTask {
 		from: unknown;
 		prompt: string;
 		maxItems?: number;
+		/** Profile-only v1 batch metadata; base authored stages cannot set it. */
+		batch?: ExecutionProfileForeachBatch;
 		itemIdentityPath?: string;
 		itemPayloadPath?: string;
 		injectRuntimeTask: boolean;
@@ -622,6 +650,10 @@ export interface CompiledTask {
 		branchId?: string;
 		outputProfile?: string;
 	};
+	/** Runtime-only synthetic carrier for one transparent foreach batch launch. */
+	foreachBatchSynthetic?: {
+		schema: "workflow-foreach-batch-v1";
+	};
 	foreachGenerated?: {
 		placeholderSpecId: string;
 		itemIdentity?: string;
@@ -631,6 +663,7 @@ export interface CompiledTask {
 		itemSourceKind?: "control" | "partial";
 		itemRef?: string;
 		perItemDispatch?: true;
+		batch?: WorkflowForeachBatchGrouping;
 	};
 	loopChild?: CompiledLoopChildTaskRef;
 	loopPlaceholder?: {
@@ -938,6 +971,86 @@ export interface WorkflowTaskTimingRecord {
 	attempts?: WorkflowTaskTimingAttemptRecord[];
 }
 
+export type WorkflowForeachBatchPhase =
+	| "prepared"
+	| "launching"
+	| "running"
+	| "terminal_received"
+	| "committing"
+	| "completed"
+	| "fallback_prepared"
+	| "fallback_applied"
+	| "stopped"
+	| "invalidated";
+
+/** Per-task ownership marker for an active or archived transparent foreach batch. */
+export interface WorkflowForeachBatchTaskState {
+	batchId: string;
+	role: "leader" | "member";
+	phase: WorkflowForeachBatchPhase;
+	/** Prevent a malformed/failed batch from being selected again for this item. */
+	batchingDisabled?: true;
+}
+
+export interface WorkflowForeachBatchMember {
+	taskId: string;
+	specId: string;
+	role: "leader" | "member";
+	/** Final singleton prompt prepared before the physical batch launch. */
+	preparedPrompt: string;
+	preparedPromptSha256: string;
+}
+
+/**
+ * Durable ownership and terminal-demux journal for one physical max-2 launch.
+ * Records are retained after completion/fallback so restart never infers members
+ * from list adjacency.
+ */
+export interface WorkflowForeachBatchRecord {
+	version: 1;
+	batchId: string;
+	placeholderSpecId: string;
+	stageId?: string;
+	generation?: number;
+	sourceGeneration?: number;
+	grouping: WorkflowForeachBatchGrouping;
+	executionSurfaceSha256: string;
+	members: [WorkflowForeachBatchMember, WorkflowForeachBatchMember];
+	attempt: number;
+	phase: WorkflowForeachBatchPhase;
+	preparedAt: string;
+	batchPrompt: string;
+	batchPromptSha256: string;
+	terminal?: {
+		receivedAt: string;
+		rawPath: string;
+		receiptPath: string;
+		rawSha256: string;
+		backendRunId?: string;
+		backendAttemptId?: string;
+		status: "completed" | "failed" | "interrupted";
+		completedAt?: string;
+		startedAt?: string;
+		exitCode?: number;
+	};
+	fallback?: {
+		preparedAt: string;
+		appliedAt?: string;
+		reason: string;
+		diagnosticsPath?: string;
+	};
+	commit?: {
+		startedAt: string;
+		completedAt?: string;
+	};
+	/** Physical-call observability; logical members are not double-counted. */
+	physicalExecution?: {
+		leaderTaskId: string;
+		usage?: WorkflowTaskUsageRecord;
+		timing?: WorkflowTaskTimingRecord;
+	};
+}
+
 export interface WorkflowTaskRunRecord {
 	taskId: string;
 	specId: string;
@@ -1049,7 +1162,10 @@ export interface WorkflowTaskRunRecord {
 		itemSourceKind?: "control" | "partial";
 		itemRef?: string;
 		perItemDispatch?: true;
+		batch?: WorkflowForeachBatchGrouping;
 	};
+	/** Internal leader/member ownership for profile-only transparent batching. */
+	foreachBatch?: WorkflowForeachBatchTaskState;
 	launchRetry?: {
 		attempts: number;
 		maxAttempts?: number;
@@ -1109,10 +1225,10 @@ export type WorkflowRouteDepth = "quick" | "standard" | "max";
  * started through routing; default runs never carry this field.
  */
 export interface WorkflowRunExecutionProfile {
-	/** Profile name explicitly selected by the user. */
+	/** Selected declared profile name. */
 	name: string;
-	/** Stage-id → thinking overrides applied at compile time. */
-	stageThinking: Record<string, ThinkingLevel>;
+	/** Canonical stage-id → complete profile overrides applied at compile time. */
+	stageOverrides: Record<string, ExecutionProfileStageOverride>;
 }
 
 export interface WorkflowRunRouting {
@@ -1212,6 +1328,8 @@ export interface WorkflowRunRecord {
 	provenance?: WorkflowRunProvenance;
 	routing?: WorkflowRunRouting;
 	executionProfile?: WorkflowRunExecutionProfile;
+	/** Durable transparent foreach batch journals, including terminal receipts. */
+	foreachBatches?: WorkflowForeachBatchRecord[];
 	/** Task-usage rollup persisted when the run reaches a terminal status. */
 	usage?: WorkflowRunUsageRollup;
 	tasks: WorkflowTaskRunRecord[];

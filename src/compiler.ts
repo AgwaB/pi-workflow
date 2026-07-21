@@ -5,6 +5,7 @@ import { loadAgentByName } from "./agents.js";
 import { DYNAMIC_OUTPUT_PROFILES } from "./dynamic-profiles.js";
 import { stringifyPromptJson } from "./prompt-json.js";
 import { compileRole } from "./roles.js";
+import { EXECUTION_PROFILE_FOREACH_BATCH } from "./execution-profile.js";
 import {
 	classifyToolCapability,
 	effectiveToolClassification,
@@ -24,6 +25,7 @@ import {
 	type CompiledTask,
 	type CompiledTaskSafety,
 	type CompiledToolProvider,
+	type ExecutionProfileForeachBatch,
 	WorkflowValidationError,
 	type PermissionPreview,
 	type RequiredWorkflowArtifactReadPolicy,
@@ -1627,6 +1629,11 @@ async function compileArtifactGraphPlan(
 			typeof stage.each?.itemPayloadPath === "string"
 				? stage.each.itemPayloadPath
 				: undefined;
+		const profileForeachBatch = (
+			stage as {
+				[EXECUTION_PROFILE_FOREACH_BATCH]?: ExecutionProfileForeachBatch;
+			}
+		)[EXECUTION_PROFILE_FOREACH_BATCH];
 
 		return {
 			key,
@@ -1661,12 +1668,22 @@ async function compileArtifactGraphPlan(
 							from: stage.from,
 							prompt: String(stage.each?.prompt ?? ""),
 							maxItems: stage.maxItems,
-							...(itemIdentityPath !== undefined
-								? { itemIdentityPath }
-								: {}),
-							...(itemPayloadPath !== undefined
-								? { itemPayloadPath }
-								: {}),
+							...(profileForeachBatch === undefined
+								? {}
+								: {
+										batch: {
+											maxItems: 2 as const,
+											...(profileForeachBatch.groupBy === undefined
+												? {}
+												: {
+														groupBy: Array.isArray(profileForeachBatch.groupBy)
+															? [...profileForeachBatch.groupBy]
+															: profileForeachBatch.groupBy,
+													}),
+										},
+									}),
+							...(itemIdentityPath !== undefined ? { itemIdentityPath } : {}),
+							...(itemPayloadPath !== undefined ? { itemPayloadPath } : {}),
 							injectRuntimeTask: injectTask,
 							roleText,
 						}

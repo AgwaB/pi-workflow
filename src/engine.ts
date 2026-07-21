@@ -170,9 +170,28 @@ import {
 	workflowExperimentalFlagEnabled,
 } from "./experimental-speed-flags.js";
 import {
+	activeForeachBatchRecordForTask,
+	applyForeachBatchFallback,
+	buildForeachBatchPrompt,
+	foreachBatchExecutionSurfaceSha256,
+	foreachBatchTasks,
+	isActiveForeachBatchPhase,
+	markForeachBatchInvalidated,
+	markForeachBatchStopped,
+	setForeachBatchPhase,
+	sha256Text,
+} from "./foreach-batch-runtime.js";
+import {
+	EXECUTION_PROFILE_FOREACH_BATCH,
+	type ProfiledArtifactGraphStage,
+} from "./execution-profile.js";
+import {
 	type CompiledDynamicWorkflowTask,
 	type CompiledTask,
 	type CompiledWorkflow,
+	type ExecutionProfileForeachBatch,
+	type ExecutionProfileStageOverride,
+	type WorkflowForeachBatchRecord,
 	WORKFLOW_RUN_TYPE,
 	type WorkflowRunRecord,
 	type WorkflowRunExecutionProfile,
@@ -253,7 +272,9 @@ type ForeachMaterializationPersistenceBoundary =
 	| "run-written";
 
 let foreachMaterializationPersistenceHookForTests:
-	| ((boundary: ForeachMaterializationPersistenceBoundary) => void | Promise<void>)
+	| ((
+			boundary: ForeachMaterializationPersistenceBoundary,
+	  ) => void | Promise<void>)
 	| undefined;
 
 export function setForeachMaterializationPersistenceHookForTests(
@@ -288,8 +309,8 @@ export interface WorkflowRunOptions {
 	inputOverrides?: Record<string, unknown>;
 	/**
 	 * Named execution profile declared in the spec's executionProfiles map.
-	 * Applied as per-stage thinking overrides at compile time and recorded on
-	 * the run record. Unknown names fail closed.
+	 * Applied as per-stage model/thinking/batch metadata at compile time and
+	 * recorded on the run record. Unknown names fail closed.
 	 */
 	executionProfile?: string;
 }
@@ -363,7 +384,10 @@ async function runLoadedWorkflowSpec(
 	if (provenance) run.provenance = provenance;
 	if (options.routing) run.routing = options.routing;
 	if (appliedProfile.record) run.executionProfile = appliedProfile.record;
-	const initialized = await withRunLease(cwd, run.runId, async (leaseSignal) => {
+	const initialized = await withRunLease(
+		cwd,
+		run.runId,
+		async (leaseSignal) => {
 		await assertRunLeaseOwnership(cwd, run.runId, leaseSignal);
 		const existing = await readJson(workflowRunPath(cwd, run.runId));
 		if (existing !== undefined) {
@@ -386,7 +410,8 @@ async function runLoadedWorkflowSpec(
 			);
 		}
 		return persisted;
-	});
+		},
+	);
 	if (!initialized) {
 		throw new Error(
 			`Could not acquire supervisor lease to initialize ${run.runId}; another supervisor may be active`,
@@ -406,10 +431,9 @@ async function runLoadedWorkflowSpec(
 }
 
 /**
- * Resolve a named execution profile into per-stage thinking overrides.
- * Explicit selection only: no profile name means no change; an unknown name
- * or a non-artifact-graph spec fails closed. An empty mapping is valid and
- * means "spec pins as written" (identity), which is still recorded.
+ * Resolve a named execution profile into per-stage overrides. Explicit
+ * selection only: no profile name means no change; an empty mapping is
+ * identity and is still recorded. Nested dag children use canonical ids.
  */
 function applyWorkflowExecutionProfile<Spec>(
 	spec: Spec,
@@ -417,11 +441,18 @@ function applyWorkflowExecutionProfile<Spec>(
 ): { spec: Spec; record?: WorkflowRunExecutionProfile } {
 	if (!profileName) return { spec };
 	const profiles = (
-		spec as { executionProfiles?: Record<string, Record<string, string>> }
+		spec as {
+			executionProfiles?: Record<
+				string,
+				Record<string, ExecutionProfileStageOverride>
+			>;
+		}
 	).executionProfiles;
 	const mapping = profiles?.[profileName];
 	if (!mapping || typeof mapping !== "object" || Array.isArray(mapping)) {
-		const available = Object.keys(profiles ?? {}).sort();
+		const available = Object.keys(profiles ?? {}).sort((left, right) =>
+			left.localeCompare(right),
+		);
 		throw new Error(
 			available.length
 				? `unknown execution profile "${profileName}"; spec declares: ${available.join(", ")}`
@@ -435,22 +466,36 @@ function applyWorkflowExecutionProfile<Spec>(
 			`execution profile "${profileName}" requires an artifact-graph workflow`,
 		);
 	}
-	const applyToStages = (stages: unknown[]): unknown[] =>
+	const applyToStages = (stages: unknown[], namespace?: string): unknown[] =>
 		stages.map((stage) => {
 			if (!stage || typeof stage !== "object" || Array.isArray(stage))
 				return stage;
-			const record = stage as Record<string, unknown>;
+			const record = stage as ProfiledArtifactGraphStage;
 			const id = record.id;
-			const override =
-				typeof id === "string" ? mapping[id] : undefined;
+			const canonicalId =
+				typeof id === "string"
+					? namespace
+						? `${namespace}.${id}`
+						: id
+					: undefined;
+			const override = canonicalId ? mapping[canonicalId] : undefined;
 			const nested =
 				record.type === "dag" && Array.isArray(record.stages)
-					? { stages: applyToStages(record.stages) }
+					? { stages: applyToStages(record.stages, canonicalId) }
 					: {};
 			if (override === undefined && !("stages" in nested)) return stage;
 			return {
 				...record,
-				...(override === undefined ? {} : { thinking: override }),
+				...(override?.model === undefined ? {} : { model: override.model }),
+				...(override?.thinking === undefined
+					? {}
+					: { thinking: override.thinking }),
+				...(override?.foreachBatch === undefined
+					? {}
+					: {
+							[EXECUTION_PROFILE_FOREACH_BATCH]:
+								cloneExecutionProfileForeachBatch(override.foreachBatch),
+						}),
 				...nested,
 			};
 		});
@@ -465,8 +510,44 @@ function applyWorkflowExecutionProfile<Spec>(
 		spec: nextSpec,
 		record: {
 			name: profileName,
-			stageThinking: { ...mapping } as WorkflowRunExecutionProfile["stageThinking"],
+			stageOverrides: Object.fromEntries(
+				Object.entries(mapping).map(([stageId, override]) => [
+					stageId,
+					cloneExecutionProfileStageOverride(override),
+				]),
+			),
 		},
+	};
+}
+
+function cloneExecutionProfileStageOverride(
+	override: ExecutionProfileStageOverride,
+): ExecutionProfileStageOverride {
+	return {
+		...(override.model === undefined ? {} : { model: override.model }),
+		...(override.thinking === undefined ? {} : { thinking: override.thinking }),
+		...(override.foreachBatch === undefined
+			? {}
+			: {
+					foreachBatch: cloneExecutionProfileForeachBatch(
+						override.foreachBatch,
+					),
+				}),
+	};
+}
+
+function cloneExecutionProfileForeachBatch(
+	batch: ExecutionProfileForeachBatch,
+): ExecutionProfileForeachBatch {
+	return {
+		maxItems: 2,
+		...(batch.groupBy === undefined
+			? {}
+			: {
+					groupBy: Array.isArray(batch.groupBy)
+						? [...batch.groupBy]
+						: batch.groupBy,
+				}),
 	};
 }
 
@@ -620,10 +701,7 @@ async function listRegisteredDynamicChildRunIds(
 		if (event.type !== "workflow.started") continue;
 		const runId = optionalEventString(event.payload.runId);
 		if (!runId) continue;
-		if (
-			runId.length > 128 ||
-			!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(runId)
-		) {
+		if (runId.length > 128 || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(runId)) {
 			throw new Error(
 				`invalid nested workflow run id registered by ${parentRunId}`,
 			);
@@ -861,6 +939,10 @@ function markRunStopped(run: WorkflowRunRecord): string[] {
 			interruptedTaskIds.push(task.taskId);
 		}
 	}
+	for (const record of run.foreachBatches ?? []) {
+		if (!isActiveForeachBatchPhase(record.phase)) continue;
+		markForeachBatchStopped(run, record);
+	}
 	return interruptedTaskIds;
 }
 type ForeachInvalidationGroupSnapshot = {
@@ -910,7 +992,6 @@ async function resumeLeaseMutation<T>(
 	await assertRunLeaseOwnership(cwd, runId, signal);
 	return result;
 }
-
 
 function dependencyResumeInvalidationEnabled(
 	compiledTask: CompiledTask | undefined,
@@ -1011,14 +1092,16 @@ function sameForeachInvalidationChild(
 		compiled?.itemSourceSpecId === persisted?.itemSourceSpecId &&
 		compiled?.itemSourceKind === persisted?.itemSourceKind &&
 		compiled?.itemRef === persisted?.itemRef &&
-		compiled?.perItemDispatch === persisted?.perItemDispatch
+		compiled?.perItemDispatch === persisted?.perItemDispatch &&
+		compiled?.batch?.enabled === persisted?.batch?.enabled &&
+		compiled?.batch?.groupBy === persisted?.batch?.groupBy &&
+		compiled?.batch?.groupKey === persisted?.batch?.groupKey
 	);
 }
 type ForeachInvalidationOwnership = {
 	placeholderSpecIds: Set<string>;
 	sourceSpecIds: Set<string>;
 };
-
 
 function foreachInvalidationOwnership(
 	run: WorkflowRunRecord,
@@ -1179,12 +1262,10 @@ function foreachInvalidationGroups(
 		const compiledParent = compiledBySpecId.get(placeholderSpecId);
 		const parent = runBySpecId.get(placeholderSpecId);
 		const compiledChildren = compiledFlow.tasks.filter(
-			(task) =>
-				task.foreachGenerated?.placeholderSpecId === placeholderSpecId,
+			(task) => task.foreachGenerated?.placeholderSpecId === placeholderSpecId,
 		);
 		const runChildren = run.tasks.filter(
-			(task) =>
-				task.foreachGenerated?.placeholderSpecId === placeholderSpecId,
+			(task) => task.foreachGenerated?.placeholderSpecId === placeholderSpecId,
 		);
 		if (compiledChildren.length === 0 && runChildren.length === 0) continue;
 		if (
@@ -1220,11 +1301,7 @@ function foreachInvalidationGroups(
 			const child = runChildBySpecId.get(compiledTaskSpecId(compiledChild));
 			if (
 				!child ||
-				!sameForeachInvalidationChild(
-					compiledChild,
-					child,
-					placeholderSpecId,
-				)
+				!sameForeachInvalidationChild(compiledChild, child, placeholderSpecId)
 			) {
 				throw new Error(
 					`Cannot resume dependency invalidation for ${run.runId}: foreach group ${placeholderSpecId} does not have exact child membership`,
@@ -1429,8 +1506,7 @@ function dependencyResumeInvalidationPlan(
 	];
 	if (
 		generations.some(
-			(generation) =>
-				!Number.isSafeInteger(generation) || generation < 0,
+			(generation) => !Number.isSafeInteger(generation) || generation < 0,
 		)
 	) {
 		throw new Error(
@@ -1519,9 +1595,7 @@ function assertDependencyInvalidationRematerializable(
 	}
 	const missingInvalidatedTaskIds = new Set<string>();
 	for (const group of journal.foreachGroups) {
-		const parent = run.tasks.find(
-			(task) => task.taskId === group.parentTaskId,
-		);
+		const parent = run.tasks.find((task) => task.taskId === group.parentTaskId);
 		if (!parent || parent.specId !== group.placeholderSpecId) {
 			throw new Error(
 				`Cannot recover dependency invalidation for ${run.runId}: foreach group ${group.placeholderSpecId} parent changed`,
@@ -1604,12 +1678,16 @@ function assertResumeLoopOwnershipSupported(
 			task.loopChild !== undefined ||
 			task.loopExhausted !== undefined
 		) {
-			throw new Error(`resume does not support loop workflow ownership: ${run.runId}`);
+			throw new Error(
+				`resume does not support loop workflow ownership: ${run.runId}`,
+			);
 		}
 	}
 	for (const task of run.tasks) {
 		if (task.kind === "loop") {
-			throw new Error(`resume does not support loop workflow ownership: ${run.runId}`);
+			throw new Error(
+				`resume does not support loop workflow ownership: ${run.runId}`,
+			);
 		}
 	}
 }
@@ -1685,11 +1763,9 @@ async function quarantineDependencyInvalidationArtifacts(
 	const active = paths.filter((path) => path.active);
 	if (active.length === 0) return;
 	for (const path of active) {
-		if (leaseSignal)
-			await assertRunLeaseOwnership(cwd, run.runId, leaseSignal);
+		if (leaseSignal) await assertRunLeaseOwnership(cwd, run.runId, leaseSignal);
 		await rename(path.taskDir, path.quarantineDir);
-		if (leaseSignal)
-			await assertRunLeaseOwnership(cwd, run.runId, leaseSignal);
+		if (leaseSignal) await assertRunLeaseOwnership(cwd, run.runId, leaseSignal);
 	}
 }
 export async function quarantineDependencyInvalidationArtifactsForTests(
@@ -1700,12 +1776,7 @@ export async function quarantineDependencyInvalidationArtifactsForTests(
 ): Promise<void> {
 	await quarantineDependencyInvalidationArtifacts(cwd, run, {
 		generation,
-		idempotencyKey: invalidationIdempotencyKey(
-			generation,
-			taskIds,
-			[],
-			[],
-		),
+		idempotencyKey: invalidationIdempotencyKey(generation, taskIds, [], []),
 		sourceTaskIds: taskIds,
 		invalidatedTaskIds: [],
 		foreachGroups: [],
@@ -1723,7 +1794,8 @@ export function dependencyResumeInvalidationPlanForTests(
 	compiledFlow: CompiledWorkflow,
 ): ResumeDependencyInvalidationPlan | undefined {
 	const plan = dependencyResumeInvalidationPlan(run, compiledFlow);
-	if (plan) assertDependencyInvalidationRematerializable(run, compiledFlow, plan);
+	if (plan)
+		assertDependencyInvalidationRematerializable(run, compiledFlow, plan);
 	return plan;
 }
 export function preparedDependencyInvalidationPlanForTests(
@@ -1755,6 +1827,14 @@ function applyDependencyResumeInvalidation(
 	const foreachPlaceholderSpecIds = new Set(
 		journal.foreachGroups.map((group) => group.placeholderSpecId),
 	);
+	for (const record of run.foreachBatches ?? []) {
+		if (
+			isActiveForeachBatchPhase(record.phase) &&
+			foreachPlaceholderSpecIds.has(record.placeholderSpecId)
+		) {
+			markForeachBatchInvalidated(record);
+		}
+	}
 	removeForeachGeneratedTasksForPlaceholders(
 		run,
 		compiledFlow,
@@ -1827,7 +1907,6 @@ function isValidInvalidationTaskOwnership(
 	);
 }
 
-
 function preparedInvalidationPlan(
 	run: WorkflowRunRecord,
 	compiledFlow: CompiledWorkflow,
@@ -1850,8 +1929,8 @@ function preparedInvalidationPlan(
 		new Set(journal.sourceTaskIds).size !== journal.sourceTaskIds.length ||
 		new Set(journal.invalidatedTaskIds).size !==
 			journal.invalidatedTaskIds.length ||
-		(!Array.isArray(journal.foreachGroups) ||
-			!journal.foreachGroups.every(isValidForeachInvalidationGroupSnapshot)) ||
+		!Array.isArray(journal.foreachGroups) ||
+		!journal.foreachGroups.every(isValidForeachInvalidationGroupSnapshot) ||
 		!Array.isArray(journal.taskOwnership) ||
 		!journal.taskOwnership.every(isValidInvalidationTaskOwnership) ||
 		new Set(journal.taskOwnership.map((task) => task.taskId)).size !==
@@ -1868,10 +1947,7 @@ function preparedInvalidationPlan(
 	const sourceTaskIds = [...journal.sourceTaskIds].sort();
 	const invalidatedTaskIds = [...journal.invalidatedTaskIds].sort();
 	const taskOwnership = cloneInvalidationSnapshot(journal.taskOwnership);
-	const affectedTaskIds = new Set([
-		...sourceTaskIds,
-		...invalidatedTaskIds,
-	]);
+	const affectedTaskIds = new Set([...sourceTaskIds, ...invalidatedTaskIds]);
 	if (
 		taskOwnership.length !== affectedTaskIds.size ||
 		taskOwnership.some((task) => !affectedTaskIds.has(task.taskId))
@@ -2020,7 +2096,10 @@ export async function resumeRun(
 	assertRunResumableForResume(current);
 
 	const resetTaskIds: string[] = [];
-	const updated = await withRunLease(cwd, current.runId, async (leaseSignal) => {
+	const updated = await withRunLease(
+		cwd,
+		current.runId,
+		async (leaseSignal) => {
 		assertResumeLeaseActive(leaseSignal);
 		const run = await readRunRecord(cwd, current.runId);
 		assertRunResumableForResume(run);
@@ -2137,7 +2216,8 @@ export async function resumeRun(
 			await writeRunRecord(cwd, run, leaseSignal);
 		});
 		return run;
-	});
+		},
+	);
 	if (!updated)
 		throw new Error(
 			`Could not acquire supervisor lease for ${current.runId}; another supervisor may be active`,
@@ -2359,6 +2439,473 @@ function staleForeachDispatchMapMessage(
 		return error instanceof Error ? error.message : String(error);
 	}
 }
+
+type ForeachBatchLaunchPlan = {
+	leaderIndex: number;
+	memberIndex: number;
+	record?: WorkflowForeachBatchRecord;
+};
+
+type ForeachBatchLaunchOutcome =
+	| "launched"
+	| "deferred"
+	| "changed"
+	| "unavailable";
+
+function eligibleForeachBatchChild(
+	task: WorkflowTaskRunRecord,
+	compiledTask: CompiledTask,
+): boolean {
+	const grouping = compiledTask.foreachGenerated?.batch;
+	return Boolean(
+		task.status === "pending" &&
+			!task.backendHandle &&
+			!task.pid &&
+			!task.outputRetry &&
+			!task.foreachBatch?.batchingDisabled &&
+			grouping?.enabled === true &&
+			compiledTask.artifactGraph?.enabled &&
+			compiledTask.artifactGraph.artifactAccess === "none" &&
+			!compiledTask.safety.requiresWorktree &&
+			compiledTask.safety.sharedCwdSafe,
+	);
+}
+
+function sameForeachBatchGrouping(
+	left: CompiledTask,
+	right: CompiledTask,
+): boolean {
+	const leftGrouping = left.foreachGenerated?.batch;
+	const rightGrouping = right.foreachGenerated?.batch;
+	if (!leftGrouping || !rightGrouping) return false;
+	if (leftGrouping.groupBy !== rightGrouping.groupBy) return false;
+	if (!leftGrouping.groupBy) return true;
+	return (
+		leftGrouping.groupKey !== undefined &&
+		leftGrouping.groupKey === rightGrouping.groupKey
+	);
+}
+
+function sameForeachBatchGeneration(
+	leftTask: WorkflowTaskRunRecord,
+	rightTask: WorkflowTaskRunRecord,
+	leftCompiled: CompiledTask,
+	rightCompiled: CompiledTask,
+): boolean {
+	return (
+		leftTask.generation === rightTask.generation &&
+		leftTask.sourceGeneration === rightTask.sourceGeneration &&
+		leftCompiled.generation === rightCompiled.generation &&
+		leftCompiled.sourceGeneration === rightCompiled.sourceGeneration &&
+		leftTask.generation === leftCompiled.generation &&
+		rightTask.generation === rightCompiled.generation &&
+		leftTask.sourceGeneration === leftCompiled.sourceGeneration &&
+		rightTask.sourceGeneration === rightCompiled.sourceGeneration
+	);
+}
+
+function newForeachBatchLaunchPlan(
+	run: WorkflowRunRecord,
+	compiledFlow: CompiledWorkflow,
+	index: number,
+	bySpecId: Map<string, WorkflowTaskRunRecord>,
+): ForeachBatchLaunchPlan | undefined {
+	const leaderTask = run.tasks[index];
+	const leaderCompiled = compiledFlow.tasks[index];
+	if (
+		!leaderTask ||
+		!leaderCompiled ||
+		!eligibleForeachBatchChild(leaderTask, leaderCompiled) ||
+		!dependenciesReady(leaderCompiled, bySpecId, compiledFlow, leaderTask)
+	)
+		return undefined;
+	const memberIndex = index + 1;
+	const memberTask = run.tasks[memberIndex];
+	const memberCompiled = compiledFlow.tasks[memberIndex];
+	if (
+		!memberTask ||
+		!memberCompiled ||
+		!eligibleForeachBatchChild(memberTask, memberCompiled) ||
+		!dependenciesReady(memberCompiled, bySpecId, compiledFlow, memberTask)
+	)
+		return undefined;
+	if (
+		leaderCompiled.foreachGenerated?.placeholderSpecId !==
+			memberCompiled.foreachGenerated?.placeholderSpecId ||
+		leaderTask.foreachGenerated?.placeholderSpecId !==
+			memberTask.foreachGenerated?.placeholderSpecId ||
+		leaderCompiled.stageId !== memberCompiled.stageId ||
+		leaderTask.stageId !== memberTask.stageId ||
+		!sameForeachBatchGeneration(
+			leaderTask,
+			memberTask,
+			leaderCompiled,
+			memberCompiled,
+		) ||
+		!sameForeachBatchGrouping(leaderCompiled, memberCompiled)
+	)
+		return undefined;
+	try {
+		if (
+			foreachBatchExecutionSurfaceSha256(leaderCompiled) !==
+			foreachBatchExecutionSurfaceSha256(memberCompiled)
+		)
+			return undefined;
+	} catch {
+		return undefined;
+	}
+	return { leaderIndex: index, memberIndex };
+}
+
+function preparedForeachBatchLaunchPlan(
+	run: WorkflowRunRecord,
+	compiledFlow: CompiledWorkflow,
+	index: number,
+): ForeachBatchLaunchPlan | undefined {
+	const leaderTask = run.tasks[index];
+	if (!leaderTask || leaderTask.foreachBatch?.role !== "leader")
+		return undefined;
+	const record = activeForeachBatchRecordForTask(run, leaderTask);
+	if (!record || record.phase !== "prepared") return undefined;
+	const [first, second] = foreachBatchTasks(run, record);
+	const leaderIndex = run.tasks.indexOf(first);
+	const memberIndex = run.tasks.indexOf(second);
+	if (leaderIndex !== index || memberIndex < 0) {
+		throw new Error(
+			`foreach batch ${record.batchId} ownership no longer matches run order`,
+		);
+	}
+	const leaderCompiled = compiledFlow.tasks[leaderIndex];
+	const memberCompiled = compiledFlow.tasks[memberIndex];
+	if (
+		!leaderCompiled ||
+		!memberCompiled ||
+		!eligibleForeachBatchChild(first, leaderCompiled) ||
+		!eligibleForeachBatchChild(second, memberCompiled)
+	) {
+		throw new Error(
+			`foreach batch ${record.batchId} prepared members are no longer launchable`,
+		);
+	}
+	return { leaderIndex, memberIndex, record };
+}
+
+function foreachBatchLogicalSlotsAvailable(
+	run: WorkflowRunRecord,
+	compiledTask: CompiledTask,
+	running: number,
+	maxConcurrency: number,
+): boolean {
+	if (running + 2 > maxConcurrency) return false;
+	if (compiledTask.stageMaxConcurrency === undefined) return true;
+	const runningInStage = run.tasks.filter(
+		(candidate) =>
+			candidate.stageId === compiledTask.stageId &&
+			candidate.status === "running",
+	).length;
+	return (
+		runningInStage + 2 <=
+		Math.max(1, Math.min(MAX_CONCURRENCY, compiledTask.stageMaxConcurrency))
+	);
+}
+
+function foreachBatchId(
+	leader: WorkflowTaskRunRecord,
+	member: WorkflowTaskRunRecord,
+): string {
+	const generation = leader.sourceGeneration ?? leader.generation ?? 0;
+	return `foreach-batch-${leader.taskId}-${member.taskId}-g${generation}`;
+}
+
+function batchMemberForTask(
+	record: WorkflowForeachBatchRecord,
+	task: WorkflowTaskRunRecord,
+) {
+	const member = record.members.find(
+		(candidate) => candidate.taskId === task.taskId,
+	);
+	if (!member || member.specId !== task.specId)
+		throw new Error(
+			`foreach batch ${record.batchId} does not own ${task.taskId}/${task.specId}`,
+		);
+	if (sha256Text(member.preparedPrompt) !== member.preparedPromptSha256)
+		throw new Error(
+			`foreach batch ${record.batchId} prepared prompt integrity failed`,
+		);
+	return member;
+}
+
+async function fallbackForeachBatch(
+	cwd: string,
+	run: WorkflowRunRecord,
+	record: WorkflowForeachBatchRecord,
+	reason: string,
+): Promise<void> {
+	setForeachBatchPhase(run, record, "fallback_prepared");
+	record.fallback = {
+		preparedAt: new Date().toISOString(),
+		reason,
+	};
+	await writeRunRecord(cwd, run);
+	applyForeachBatchFallback(run, record, reason);
+	await writeRunRecord(cwd, run);
+}
+
+async function launchForeachBatchAt(
+	cwd: string,
+	run: WorkflowRunRecord,
+	compiledFlow: CompiledWorkflow,
+	plan: ForeachBatchLaunchPlan,
+	validationSnapshot: ArtifactGraphRuntimeValidationSnapshot,
+	leaseSignal?: AbortSignal,
+): Promise<ForeachBatchLaunchOutcome> {
+	const leaderTask = run.tasks[plan.leaderIndex];
+	const memberTask = run.tasks[plan.memberIndex];
+	const leaderCompiled = compiledFlow.tasks[plan.leaderIndex];
+	const memberCompiled = compiledFlow.tasks[plan.memberIndex];
+	if (!leaderTask || !memberTask || !leaderCompiled || !memberCompiled)
+		return "unavailable";
+
+	let record = plan.record;
+	let leaderLaunchTask: CompiledTask;
+	if (record) {
+		const leaderMember = batchMemberForTask(record, leaderTask);
+		const memberMember = batchMemberForTask(record, memberTask);
+		leaderLaunchTask = {
+			...leaderCompiled,
+			cwd: leaderTask.cwd,
+			foreachBatchSynthetic: { schema: "workflow-foreach-batch-v1" },
+			compiledPrompt: record.batchPrompt,
+		};
+		if (
+			leaderMember.role !== "leader" ||
+			memberMember.role !== "member" ||
+			sha256Text(record.batchPrompt) !== record.batchPromptSha256
+		) {
+			throw new Error(
+				`foreach batch ${record.batchId} durable launch integrity failed`,
+			);
+		}
+	} else {
+		let preparedLeader: CompiledTask;
+		let preparedMember: CompiledTask;
+		try {
+			preparedLeader = await prepareDagTask(
+				cwd,
+				run,
+				compiledFlow,
+				plan.leaderIndex,
+				validationSnapshot,
+			);
+			preparedMember = await prepareDagTask(
+				cwd,
+				run,
+				compiledFlow,
+				plan.memberIndex,
+				validationSnapshot,
+			);
+		} catch {
+			// A singleton will surface the same preparation failure through its
+			// established task-level error path; do not create partial ownership.
+			return "unavailable";
+		}
+		const grouping = leaderCompiled.foreachGenerated?.batch;
+		if (!grouping) return "unavailable";
+		const batchPrompt = buildForeachBatchPrompt({
+			leader: preparedLeader,
+			items: [
+				{ id: leaderTask.taskId, prompt: preparedLeader.compiledPrompt },
+				{ id: memberTask.taskId, prompt: preparedMember.compiledPrompt },
+			],
+		});
+		const batchId = foreachBatchId(leaderTask, memberTask);
+		if (
+			(run.foreachBatches ?? []).some(
+				(candidate) => candidate.batchId === batchId,
+			)
+		)
+			throw new Error(`foreach batch ${batchId} already has a durable record`);
+		const preparedAt = new Date().toISOString();
+		record = {
+			version: 1,
+			batchId,
+			placeholderSpecId: leaderCompiled.foreachGenerated!.placeholderSpecId,
+			stageId: leaderTask.stageId,
+			...(leaderTask.generation === undefined
+				? {}
+				: { generation: leaderTask.generation }),
+			...(leaderTask.sourceGeneration === undefined
+				? {}
+				: { sourceGeneration: leaderTask.sourceGeneration }),
+			grouping: { ...grouping },
+			executionSurfaceSha256:
+				foreachBatchExecutionSurfaceSha256(preparedLeader),
+			members: [
+				{
+					taskId: leaderTask.taskId,
+					specId: leaderTask.specId,
+					role: "leader",
+					preparedPrompt: preparedLeader.compiledPrompt,
+					preparedPromptSha256: sha256Text(preparedLeader.compiledPrompt),
+				},
+				{
+					taskId: memberTask.taskId,
+					specId: memberTask.specId,
+					role: "member",
+					preparedPrompt: preparedMember.compiledPrompt,
+					preparedPromptSha256: sha256Text(preparedMember.compiledPrompt),
+				},
+			],
+			attempt: 1,
+			phase: "prepared",
+			preparedAt,
+			batchPrompt,
+			batchPromptSha256: sha256Text(batchPrompt),
+		};
+		run.foreachBatches ??= [];
+		run.foreachBatches.push(record);
+		leaderTask.foreachBatch = {
+			batchId,
+			role: "leader",
+			phase: "prepared",
+		};
+		memberTask.foreachBatch = {
+			batchId,
+			role: "member",
+			phase: "prepared",
+		};
+		await persistFinalPromptMetadata(cwd, run, leaderTask, preparedLeader);
+		await persistFinalPromptMetadata(cwd, run, memberTask, preparedMember);
+		await writeRunRecord(cwd, run);
+		leaderLaunchTask = {
+			...preparedLeader,
+			foreachBatchSynthetic: { schema: "workflow-foreach-batch-v1" },
+			compiledPrompt: batchPrompt,
+		};
+	}
+
+	try {
+		assertFinalCompiledPromptWithinCap(leaderLaunchTask);
+	} catch (error) {
+		await fallbackForeachBatch(
+			cwd,
+			run,
+			record,
+			`batch prompt preparation failed: ${error instanceof Error ? error.message : String(error)}`,
+		);
+		return "changed";
+	}
+
+	setForeachBatchPhase(run, record, "launching");
+	memberTask.status = "running";
+	memberTask.statusDetail = "batch_launching";
+	memberTask.startedAt = new Date().toISOString();
+	memberTask.lastMessage = `awaiting foreach batch leader ${leaderTask.taskId}`;
+	await writeRunRecord(cwd, run);
+
+	const backend = resolveWorkflowBackend(run);
+	const stop = createWorkflowStopSignal(cwd, run.runId);
+	try {
+		await throwIfWorkflowStopRequested(cwd, run.runId);
+		const preparedLaunch = await backend.prepareTaskLaunch(
+			cwd,
+			run,
+			leaderTask,
+			leaderLaunchTask,
+		);
+		const provenance = await createLaunchBootstrapProvenance(
+			cwd,
+			run,
+			leaderTask,
+			leaderLaunchTask,
+			backend.id,
+			preparedLaunch,
+		);
+		recordLaunchBootstrapProvenance(leaderTask, provenance);
+		const authority = createWorkflowLaunchAuthority(
+			run,
+			leaderTask,
+			backend.id,
+			provenance,
+		);
+		issueWorkflowLaunchAuthority(leaderTask, authority);
+		await writeRunRecord(cwd, run);
+		const launch = await backend.launchTask(
+			cwd,
+			run,
+			leaderTask,
+			leaderLaunchTask,
+			leaseSignal,
+			stop.signal,
+			{ ...preparedLaunch, authority },
+		);
+		if (launch.kind === "fatal") {
+			await fallbackForeachBatch(
+				cwd,
+				run,
+				record,
+				`batch launch failed: ${launch.message}`,
+			);
+			return "changed";
+		}
+		if (launch.kind === "capacity" && leaderTask.status !== "running") {
+			setForeachBatchPhase(run, record, "prepared");
+			memberTask.status = "pending";
+			memberTask.statusDetail = "pending";
+			memberTask.startedAt = undefined;
+			memberTask.lastMessage = launch.message;
+			await writeRunRecord(cwd, run);
+			return "deferred";
+		}
+		if (leaderTask.status === "running") {
+			setForeachBatchPhase(
+				run,
+				record,
+				launch.kind === "launched" ? "running" : "launching",
+			);
+			memberTask.status = "running";
+			memberTask.statusDetail =
+				launch.kind === "launched" ? "batch_running" : "batch_launching";
+			memberTask.startedAt ??= leaderTask.startedAt ?? new Date().toISOString();
+			memberTask.backendHandle = undefined;
+			memberTask.backendFiles = undefined;
+			memberTask.backendTaskId = memberTask.taskId;
+			memberTask.lastMessage = `owned by foreach batch leader ${leaderTask.taskId}`;
+			await writeRunRecord(cwd, run);
+			return "launched";
+		}
+		await fallbackForeachBatch(
+			cwd,
+			run,
+			record,
+			"batch launch did not retain a leader claim",
+		);
+		return "changed";
+	} catch (error) {
+		if (leaseSignal?.aborted) throw error;
+		if (isWorkflowStopRequestedError(error)) {
+			const tasks = markForeachBatchStopped(run, record);
+			for (const task of tasks) {
+				setTaskTerminal(task, "interrupted", "workflow_stopped", {
+					exitCode: 130,
+					lastMessage: "Workflow stopped by user request",
+				});
+			}
+			await writeRunRecord(cwd, run).catch(() => undefined);
+			return "changed";
+		}
+		await fallbackForeachBatch(
+			cwd,
+			run,
+			record,
+			`batch launch failed: ${error instanceof Error ? error.message : String(error)}`,
+		);
+		return "changed";
+	} finally {
+		stop.dispose();
+	}
+}
+
 async function scheduleDagPass(
 	cwd: string,
 	run: WorkflowRunRecord,
@@ -2450,7 +2997,8 @@ async function scheduleDagPass(
 			await writeRunRecord(cwd, run);
 			continue;
 		}
-		if (!dependenciesReady(compiledTask, bySpecId, compiledFlow, task)) continue;
+		if (!dependenciesReady(compiledTask, bySpecId, compiledFlow, task))
+			continue;
 
 		if (compiledTask.kind === "loop" && compiledTask.loopPlaceholder) {
 			const changed = await scheduleLoop(
@@ -2477,6 +3025,54 @@ async function scheduleDagPass(
 			if (await finalizeStopIntentIfRequested(cwd, run)) return false;
 			if (changed) return true;
 			if (foreachStreamingEnabled(compiledTask)) continue;
+		}
+
+		const activeBatch = activeForeachBatchRecordForTask(run, task);
+		if (
+			activeBatch &&
+			(task.foreachBatch?.role !== "leader" || activeBatch.phase !== "prepared")
+		)
+			continue;
+		const batchPlan =
+			preparedForeachBatchLaunchPlan(run, compiledFlow, index) ??
+			newForeachBatchLaunchPlan(run, compiledFlow, index, bySpecId);
+		if (batchPlan) {
+			const batchMember = run.tasks[batchPlan.memberIndex];
+			const batchMemberCompiled = compiledFlow.tasks[batchPlan.memberIndex];
+			if (
+				!batchMember ||
+				!batchMemberCompiled ||
+				!dependenciesReady(
+					batchMemberCompiled,
+					bySpecId,
+					compiledFlow,
+					batchMember,
+				)
+			)
+				continue;
+			if (
+				!foreachBatchLogicalSlotsAvailable(
+					run,
+					compiledTask,
+					running,
+					maxConcurrency,
+				)
+			)
+				return false;
+			const batchOutcome = await launchForeachBatchAt(
+				cwd,
+				run,
+				compiledFlow,
+				batchPlan,
+				dispatchMapValidationSnapshot,
+				leaseSignal,
+			);
+			if (batchOutcome === "deferred") return false;
+			if (batchOutcome === "changed") return true;
+			if (batchOutcome === "launched") {
+				running += 2;
+				continue;
+			}
 		}
 
 		if (compiledTask.stageMaxConcurrency !== undefined) {
@@ -2528,16 +3124,48 @@ async function applyFailFastCancellation(
 	if (summary.cancelledTaskIds.length === 0) return false;
 	await writeRunRecord(cwd, run);
 	const cancellationErrors: unknown[] = [];
+	const physicalCancellationTaskIds = new Set<string>();
+	for (const taskId of summary.interruptedTaskIds) {
+		const task = run.tasks.find((candidate) => candidate.taskId === taskId);
+		if (!task) continue;
+		const batch = activeForeachBatchRecordForTask(run, task);
+		if (batch) {
+			const leader = foreachBatchTasks(run, batch).find(
+				(candidate) => candidate.foreachBatch?.role === "leader",
+			);
+			if (!leader)
+				throw new Error(
+					`foreach batch ${batch.batchId} has no leader for cancellation`,
+				);
+			physicalCancellationTaskIds.add(leader.taskId);
+		} else {
+			physicalCancellationTaskIds.add(task.taskId);
+		}
+	}
 	await Promise.all(
-		summary.interruptedTaskIds.map(async (taskId) => {
+		[...physicalCancellationTaskIds].map(async (taskId) => {
 			const task = run.tasks.find((candidate) => candidate.taskId === taskId);
-			if (!task) return;
+			if (!task) return undefined;
+			const batch = activeForeachBatchRecordForTask(run, task);
 			try {
 				await acknowledgeSubagentTaskInterrupted(
 					run,
 					task,
 					"workflow fail-fast cancellation",
 				);
+				if (batch) {
+					for (const member of markForeachBatchStopped(run, batch)) {
+						setTaskTerminal(
+							member,
+							"interrupted",
+							FAIL_FAST_CANCELLED_STATUS_DETAIL,
+							{
+								exitCode: 130,
+								lastMessage: "cancelled by workflow fail-fast policy",
+							},
+						);
+					}
+				} else {
 				setTaskTerminal(
 					task,
 					"interrupted",
@@ -2547,11 +3175,16 @@ async function applyFailFastCancellation(
 						lastMessage: "cancelled by workflow fail-fast policy",
 					},
 				);
+				}
 			} catch (error) {
-				task.statusDetail = "cancellation_failed";
-				task.lastMessage = `fail-fast cancellation failed; backend handle preserved: ${error instanceof Error ? error.message : String(error)}`;
+				const message = `fail-fast cancellation failed; backend handle preserved: ${error instanceof Error ? error.message : String(error)}`;
+				for (const member of batch ? foreachBatchTasks(run, batch) : [task]) {
+					member.statusDetail = "cancellation_failed";
+					member.lastMessage = message;
+				}
 				cancellationErrors.push(error);
 			}
+			return undefined;
 		}),
 	);
 	await writeRunRecord(cwd, run);
@@ -2691,8 +3324,7 @@ function foreachDispatchMapContext(
 	const sourceTask = sourceTasks[0];
 	if (
 		sourceTask.generation !== undefined &&
-		(!Number.isSafeInteger(sourceTask.generation) ||
-			sourceTask.generation < 0)
+		(!Number.isSafeInteger(sourceTask.generation) || sourceTask.generation < 0)
 	) {
 		return {
 			error: "foreach source task has invalid generation metadata",
@@ -2836,7 +3468,10 @@ function sameForeachJournalOwnershipTuple(
 		compiled?.itemSourceSpecId === persisted?.itemSourceSpecId &&
 		compiled?.itemSourceKind === persisted?.itemSourceKind &&
 		compiled?.itemRef === persisted?.itemRef &&
-		compiled?.perItemDispatch === persisted?.perItemDispatch
+		compiled?.perItemDispatch === persisted?.perItemDispatch &&
+		compiled?.batch?.enabled === persisted?.batch?.enabled &&
+		compiled?.batch?.groupBy === persisted?.batch?.groupBy &&
+		compiled?.batch?.groupKey === persisted?.batch?.groupKey
 	);
 }
 
@@ -2909,7 +3544,9 @@ function foreachMaterializationJournal(
 				`Cannot recover foreach materialization for ${run.runId}: journal task mapping is invalid`,
 			);
 		}
-		const existingRun = run.tasks.find((candidate) => candidate.specId === task.id);
+		const existingRun = run.tasks.find(
+			(candidate) => candidate.specId === task.id,
+		);
 		if (existingRun && existingRun.taskId !== runTask.taskId) {
 			throw new Error(
 				`Cannot recover foreach materialization for ${run.runId}: journal child ${task.id} collides with run state`,
@@ -3058,11 +3695,7 @@ function applyForeachMaterializationJournal(
 					`Cannot recover foreach materialization for ${run.runId}: placeholder and generated children coexist`,
 				);
 			}
-			compiledFlow.tasks.splice(
-				placeholderIndex,
-				1,
-				...journal.generatedTasks,
-			);
+			compiledFlow.tasks.splice(placeholderIndex, 1, ...journal.generatedTasks);
 		} else if (presentCompiled.length !== journal.generatedTasks.length) {
 			throw new Error(
 				`Cannot recover foreach materialization for ${run.runId}: placeholder is missing`,
@@ -3085,11 +3718,9 @@ function applyForeachMaterializationJournal(
 	const retainEmptyPlaceholderDependency =
 		!replacePlaceholder && expectedSpecIds.size === 0;
 	if (!retainEmptyPlaceholderDependency) {
-		updateDownstreamDependencies(
-			compiledFlow,
-			journal.placeholderSpecId,
-			[...expectedSpecIds],
-		);
+		updateDownstreamDependencies(compiledFlow, journal.placeholderSpecId, [
+			...expectedSpecIds,
+		]);
 	}
 
 	const runTaskById = new Map(run.tasks.map((task) => [task.taskId, task]));
@@ -3145,11 +3776,7 @@ function applyForeachMaterializationJournal(
 					`Cannot recover foreach materialization for ${run.runId}: run placeholder and generated children coexist`,
 				);
 			}
-			run.tasks.splice(
-				runPlaceholderIndex,
-				1,
-				...journal.generatedRunTasks,
-			);
+			run.tasks.splice(runPlaceholderIndex, 1, ...journal.generatedRunTasks);
 		} else if (presentRunTasks.length !== journal.generatedRunTasks.length) {
 			throw new Error(
 				`Cannot recover foreach materialization for ${run.runId}: run placeholder is missing`,
@@ -3249,8 +3876,9 @@ async function persistForeachMaterialization(
 	compiledFlow: CompiledWorkflow,
 	journal: ForeachMaterializationJournal,
 ): Promise<void> {
-	(run as WorkflowRunWithForeachMaterializationJournal).foreachMaterializationJournal =
-		journal;
+	(
+		run as WorkflowRunWithForeachMaterializationJournal
+	).foreachMaterializationJournal = journal;
 	await writeRunRecord(cwd, run);
 	await foreachMaterializationPersistenceHookForTests?.("prepared-run-written");
 	applyForeachMaterializationJournal(run, compiledFlow, journal);
@@ -3499,7 +4127,10 @@ function sameForeachIdentityTuple(
 		left?.itemSourceSpecId === right?.itemSourceSpecId &&
 		left?.itemSourceKind === right?.itemSourceKind &&
 		left?.itemRef === right?.itemRef &&
-		left?.perItemDispatch === right?.perItemDispatch
+		left?.perItemDispatch === right?.perItemDispatch &&
+		left?.batch?.enabled === right?.batch?.enabled &&
+		left?.batch?.groupBy === right?.batch?.groupBy &&
+		left?.batch?.groupKey === right?.batch?.groupKey
 	);
 }
 
@@ -3801,9 +4432,7 @@ async function materializeStreamingForeachTask(input: {
 			changed = true;
 		}
 	}
-	if (
-		synchronizeTerminalBarrierSourceSpecIds(input.run, input.compiledFlow)
-	) {
+	if (synchronizeTerminalBarrierSourceSpecIds(input.run, input.compiledFlow)) {
 		changed = true;
 	}
 
@@ -4052,7 +4681,9 @@ async function persistFinalPromptMetadata(
 	task: WorkflowTaskRunRecord,
 	launchTask: CompiledTask,
 ): Promise<void> {
-	if (launchTask.artifactGraph?.inputPolicy?.maxCompiledPromptChars === undefined)
+	if (
+		launchTask.artifactGraph?.inputPolicy?.maxCompiledPromptChars === undefined
+	)
 		return;
 	const measurement = finalCompiledPromptMeasurement(launchTask);
 	task.promptMetadata = {

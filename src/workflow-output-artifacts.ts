@@ -167,7 +167,7 @@ export interface WorkflowTaskResultEnvelope {
 	subagentFailedToolCalls?: WorkflowTaskFailedToolCallSummary[];
 }
 
-type ValidParsedWorkflowOutput = ParsedWorkflowOutput & {
+export type ValidParsedWorkflowOutput = ParsedWorkflowOutput & {
 	valid: true;
 	control: Record<string, unknown>;
 	analysis: string;
@@ -248,6 +248,17 @@ export function parseWorkflowOutputForBundle(
 	return parseSanitizedWorkflowOutput(raw, options) ?? parsed;
 }
 
+/** Validate a candidate bundle fully in memory without writing task artifacts. */
+export async function validateWorkflowOutputForBundle(
+	raw: string,
+	options: ParseWorkflowOutputOptions = {},
+): Promise<ParsedWorkflowOutput> {
+	return validateWorkflowOutputRefsForBundle(
+		parseWorkflowOutputForBundle(raw, options),
+		options,
+	);
+}
+
 async function validateWorkflowOutputRefsForBundle(
 	parsed: ParsedWorkflowOutput,
 	options: ParseWorkflowOutputOptions,
@@ -277,17 +288,29 @@ export async function writeWorkflowTaskArtifactBundle(
 ): Promise<WorkflowArtifactBundleWriteResult> {
 	const taskDir = resolve(options.taskDir);
 	await mkdir(taskDir, { recursive: true });
-	const parsed = await validateWorkflowOutputRefsForBundle(
-		parseWorkflowOutputForBundle(options.rawOutput, options),
+	const parsed = await validateWorkflowOutputForBundle(
+		options.rawOutput,
 		options,
 	);
 	if (!parsed.valid)
-		return await writeInvalidWorkflowOutputAttempt(taskDir, parsed, options);
-	return await writeValidWorkflowOutputBundle(
-		taskDir,
-		parsed as ValidParsedWorkflowOutput,
+		return writeInvalidWorkflowOutputAttempt(taskDir, parsed, options);
+	return writeValidatedWorkflowTaskArtifactBundle(
 		options,
+		parsed as ValidParsedWorkflowOutput,
 	);
+}
+
+/**
+ * Write an already fully validated output. Batch demux uses this to validate
+ * every sibling before it writes any per-item artifact bundle.
+ */
+export async function writeValidatedWorkflowTaskArtifactBundle(
+	options: WorkflowTaskArtifactBundleOptions,
+	parsed: ValidParsedWorkflowOutput,
+): Promise<Extract<WorkflowArtifactBundleWriteResult, { valid: true }>> {
+	const taskDir = resolve(options.taskDir);
+	await mkdir(taskDir, { recursive: true });
+	return writeValidWorkflowOutputBundle(taskDir, parsed, options);
 }
 
 export function buildWorkflowOutputRetryInstructions(
@@ -751,7 +774,12 @@ function normalizeKnownWorkflowControlSchema(
 		repairs,
 	);
 	if (isPlainRecord(rowRepaired)) normalized = rowRepaired;
-	const enumRepaired = normalizeEnumNearMisses(normalized, schema, "$", repairs);
+	const enumRepaired = normalizeEnumNearMisses(
+		normalized,
+		schema,
+		"$",
+		repairs,
+	);
 	if (isPlainRecord(enumRepaired)) normalized = enumRepaired;
 	return normalized;
 }
@@ -1040,7 +1068,9 @@ function normalizeFinalSynthesisArrayCaps(
 	return { value: normalized, dropped };
 }
 
-function finalSynthesisCapsFromSchema(schema: JsonSchemaObject): FinalSynthesisCaps {
+function finalSynthesisCapsFromSchema(
+	schema: JsonSchemaObject,
+): FinalSynthesisCaps {
 	const synthesisSchema = schema.properties?.synthesis;
 	const properties = isJsonSchemaObject(synthesisSchema)
 		? (synthesisSchema.properties ?? {})
@@ -1084,7 +1114,8 @@ function rowCaps(
 		if (maxItems !== undefined) fields[field] = maxItems;
 	}
 	const maxRows = arrayMaxItems(schema);
-	if (maxRows === undefined && Object.keys(fields).length === 0) return undefined;
+	if (maxRows === undefined && Object.keys(fields).length === 0)
+		return undefined;
 	return { maxRows, arrayFields: fields };
 }
 
@@ -1160,9 +1191,12 @@ function cappedArray(
 	return { value: value.slice(0, maxItems), dropped: value.length - maxItems };
 }
 
-function finalSynthesisCapRepairMessage(dropped: Record<string, number>): string {
+function finalSynthesisCapRepairMessage(
+	dropped: Record<string, number>,
+): string {
 	const entries = Object.entries(dropped).filter(([, count]) => count > 0);
-	if (entries.length === 0) return "clamped final synthesis arrays to schema caps";
+	if (entries.length === 0)
+		return "clamped final synthesis arrays to schema caps";
 	const detail = entries
 		.slice(0, 8)
 		.map(([path, count]) => `${path}:-${count}`)
@@ -1937,7 +1971,7 @@ async function writeValidWorkflowOutputBundle(
 	taskDir: string,
 	parsed: ValidParsedWorkflowOutput,
 	options: WorkflowTaskArtifactBundleOptions,
-): Promise<WorkflowArtifactBundleWriteResult> {
+): Promise<Extract<WorkflowArtifactBundleWriteResult, { valid: true }>> {
 	const files = artifactFileMap(taskDir, options);
 	await writeSidecars(files, parsed, options);
 	const result = validResultEnvelope(files, parsed, options);
