@@ -709,7 +709,9 @@ function sameForeachGeneratedIdentity(
 		left?.itemSourceSpecId === right?.itemSourceSpecId &&
 		left?.itemSourceKind === right?.itemSourceKind &&
 		left?.itemRef === right?.itemRef &&
-		left?.perItemDispatch === right?.perItemDispatch
+		left?.perItemDispatch === right?.perItemDispatch &&
+		left?.sourceLineageDigest === right?.sourceLineageDigest &&
+		left?.resolvedTaskId === right?.resolvedTaskId
 	);
 }
 
