@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 
 import {
@@ -721,6 +722,8 @@ function sameForeachGeneratedIdentity(
 		left?.itemSourceKind === right?.itemSourceKind &&
 		left?.itemRef === right?.itemRef &&
 		left?.perItemDispatch === right?.perItemDispatch &&
+		left?.sourceLineageDigest === right?.sourceLineageDigest &&
+		left?.resolvedTaskId === right?.resolvedTaskId &&
 		sameForeachBatchGrouping(left?.batch, right?.batch)
 	);
 }
@@ -947,23 +950,99 @@ export function foreachStreamingMinChunk(compiledTask: CompiledTask): number {
 		: 1;
 }
 
+export interface ForeachSourceLineage {
+	canonical: string;
+	digest: string;
+}
+
+export function canonicalForeachSourceLineage(
+	sourceSpecId: string,
+	upstreamLineageDigest?: string,
+): ForeachSourceLineage {
+	const canonical = JSON.stringify({
+		version: 1,
+		sourceSpecId,
+		...(upstreamLineageDigest ? { upstreamLineageDigest } : {}),
+	});
+	return {
+		canonical,
+		digest: createHash("sha256").update(canonical).digest("hex").slice(0, 24),
+	};
+}
+
+export function resolveForeachSiblingSourceIds(
+	legacyTaskIds: readonly string[],
+	lineages: readonly ForeachSourceLineage[],
+	stageId: string,
+	reservedSpecIds: ReadonlySet<string> = new Set(),
+): { taskIds?: string[]; error?: string } {
+	if (legacyTaskIds.length !== lineages.length)
+		return { error: "foreach generated task lineage metadata is incomplete" };
+	const groups = new Map<string, number[]>();
+	for (const [index, candidate] of legacyTaskIds.entries()) {
+		const group = groups.get(candidate) ?? [];
+		group.push(index);
+		groups.set(candidate, group);
+	}
+	const resolved = [...legacyTaskIds];
+	for (const [candidate, indexes] of groups) {
+		const seenLineages = new Set<string>();
+		for (const index of indexes) {
+			const lineage = lineages[index]!;
+			if (seenLineages.has(lineage.canonical))
+				return { error: `duplicate foreach generated task id "${candidate}" within the same source lineage` };
+			seenLineages.add(lineage.canonical);
+		}
+		if (indexes.length === 1) continue;
+		for (const index of indexes) {
+			const suffix = createHash("sha256")
+				.update(lineages[index]!.canonical)
+				.digest("hex")
+				.slice(0, 12);
+			resolved[index] = `${candidate}--${suffix}`;
+		}
+	}
+	const finalSpecIds = new Set<string>();
+	for (const taskId of resolved) {
+		const specId = `${stageId}.${taskId}`;
+		if (reservedSpecIds.has(specId) || finalSpecIds.has(specId))
+			return { error: `foreach generated task id "${specId}" collides with an existing compiled task` };
+		finalSpecIds.add(specId);
+	}
+	return { taskIds: resolved };
+}
+
 export function buildForeachGeneratedTasks(
 	template: CompiledTask,
 	runtimeTask: string | undefined,
 	items: unknown[],
+	options?: {
+		lineages?: readonly ForeachSourceLineage[];
+		reservedSpecIds?: ReadonlySet<string>;
+	},
 ): { tasks: CompiledTask[]; error?: string } {
-	const seen = new Set<string>();
+	const identities = items.map((item, index) => foreachItemIdentity(template, item, index));
+	const invalid = identities.find((identity) => identity.error);
+	if (invalid?.error) return { tasks: [], error: invalid.error };
+	let taskIds = identities.map((identity) => identity.taskId);
+	if (options?.lineages) {
+		const resolution = resolveForeachSiblingSourceIds(
+			taskIds,
+			options.lineages,
+			template.stageId!,
+			options.reservedSpecIds,
+		);
+		if (resolution.error || !resolution.taskIds)
+			return { tasks: [], error: resolution.error };
+		taskIds = resolution.taskIds;
+	} else if (new Set(taskIds).size !== taskIds.length) {
+		const duplicate = taskIds.find((id, index) => taskIds.indexOf(id) !== index)!;
+		return { tasks: [], error: `duplicate foreach generated task id "${duplicate}"` };
+	}
 	const tasks: CompiledTask[] = [];
 	for (const [index, item] of items.entries()) {
-		const itemIdentity = foreachItemIdentity(template, item, index);
-		if (itemIdentity.error) return { tasks: [], error: itemIdentity.error };
-		const taskId = itemIdentity.taskId;
-		if (seen.has(taskId))
-			return {
-				tasks: [],
-				error: `duplicate foreach generated task id "${taskId}"`,
-			};
-		seen.add(taskId);
+		const itemIdentity = identities[index]!;
+		const taskId = taskIds[index]!;
 		const specId = `${template.stageId}.${taskId}`;
 		if (specId === template.id) {
 			return {
@@ -1036,6 +1115,12 @@ export function buildForeachGeneratedTasks(
 				(template.foreach?.itemIdentityPath !== undefined ||
 					foreachStreamingEnabled(template))
 					? { itemIdentity: itemIdentity.identity }
+					: {}),
+				...(taskId !== itemIdentity.taskId
+					? {
+							sourceLineageDigest: options!.lineages![index]!.digest,
+							resolvedTaskId: taskId,
+						}
 					: {}),
 				...(batchGrouping === undefined ? {} : { batch: batchGrouping }),
 			},

@@ -662,6 +662,8 @@ export interface CompiledTask {
 		itemSourceSpecId?: string;
 		itemSourceKind?: "control" | "partial";
 		itemRef?: string;
+		sourceLineageDigest?: string;
+		resolvedTaskId?: string;
 		perItemDispatch?: true;
 		batch?: WorkflowForeachBatchGrouping;
 	};
@@ -1161,6 +1163,8 @@ export interface WorkflowTaskRunRecord {
 		itemSourceSpecId?: string;
 		itemSourceKind?: "control" | "partial";
 		itemRef?: string;
+		sourceLineageDigest?: string;
+		resolvedTaskId?: string;
 		perItemDispatch?: true;
 		batch?: WorkflowForeachBatchGrouping;
 	};
