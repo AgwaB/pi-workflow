@@ -4,6 +4,13 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
 
 import { compileWorkflow } from "./compiler.js";
+import {
+	assertPromptSchemaDiagnosticsAllowRun,
+	buildPromptSchemaDiagnosticNotice,
+	promptSchemaDiagnosticsApply,
+	workflowPromptSchemaDiagnostics,
+	type PromptSchemaDiagnosticsPolicy,
+} from "./prompt-schema-diagnostics.js";
 import { loadWorkflowSpec } from "./schema.js";
 import {
 	assertRunLeaseOwnership,
@@ -112,6 +119,7 @@ import {
 import {
 	assertRunTaskPositionalAlignment,
 	buildForeachGeneratedTasks,
+	canonicalForeachSourceLineage,
 	dependenciesReady,
 	foreachStreamingEnabled,
 	foreachStreamingMinChunk,
@@ -299,13 +307,30 @@ interface WorkflowScheduleOptions {
 	availableModels?: WorkflowModelInfo[];
 }
 
+export const WORKFLOW_PROMPT_SCHEMA_DIAGNOSTIC_SINK: unique symbol = Symbol(
+	"workflowPromptSchemaDiagnosticSink",
+);
+
+type WorkflowRunDiagnosticOptions = WorkflowRunOptions & {
+	[WORKFLOW_PROMPT_SCHEMA_DIAGNOSTIC_SINK]?: (
+		notice: string,
+		digest: string,
+	) => void;
+};
+
 export async function runWorkflowSpec(
 	specPath: string,
 	cwd: string,
-	options: WorkflowRunOptions = {},
+	options: WorkflowRunDiagnosticOptions = {},
 ): Promise<WorkflowRunRecord> {
 	const loaded = await loadWorkflowSpec(specPath, cwd);
-	return runLoadedWorkflowSpec(cwd, loaded.specPath, loaded.spec, options);
+	return runLoadedWorkflowSpec(
+		cwd,
+		loaded.specPath,
+		loaded.spec,
+		options,
+		"named-workflow",
+	);
 }
 
 export async function runDynamicTask(
@@ -319,22 +344,30 @@ export async function runDynamicTask(
 	}
 	const specPath = await ensureDirectDynamicRuntimeBundle(cwd);
 	const loaded = await loadWorkflowSpec(specPath, cwd);
-	return runLoadedWorkflowSpec(cwd, loaded.specPath, loaded.spec, options, {
-		mode: "direct-dynamic",
-		requestedWorkflow: null,
-		specPath: null,
-		userSelectedWorkflow: false,
-		generatedSpec: false,
-		runtimeBundle: toProjectPath(cwd, loaded.specPath),
-		runtimeVersion: DIRECT_DYNAMIC_RUNTIME_VERSION,
-	});
+	return runLoadedWorkflowSpec(
+		cwd,
+		loaded.specPath,
+		loaded.spec,
+		options,
+		"excluded-direct-dynamic",
+		{
+			mode: "direct-dynamic",
+			requestedWorkflow: null,
+			specPath: null,
+			userSelectedWorkflow: false,
+			generatedSpec: false,
+			runtimeBundle: toProjectPath(cwd, loaded.specPath),
+			runtimeVersion: DIRECT_DYNAMIC_RUNTIME_VERSION,
+		},
+	);
 }
 
 async function runLoadedWorkflowSpec(
 	cwd: string,
 	specPath: string,
 	spec: Parameters<typeof compileWorkflow>[0],
-	options: WorkflowRunOptions,
+	options: WorkflowRunDiagnosticOptions,
+	diagnosticsPolicy: PromptSchemaDiagnosticsPolicy,
 	provenance?: WorkflowRunRecord["provenance"],
 ): Promise<WorkflowRunRecord> {
 	spec = applyDeclaredWorkflowInputOverrides(spec, options.inputOverrides);
@@ -351,6 +384,22 @@ async function runLoadedWorkflowSpec(
 		runtimeDefaults: options.runtimeDefaults,
 		availableModels: options.availableModels,
 	});
+
+	// Diagnostics are an explicit named-workflow policy. Direct-dynamic uses its
+	// approved runtime bundle and intentionally does not adopt named-spec warnings.
+	if (promptSchemaDiagnosticsApply(diagnosticsPolicy)) {
+		const diagnostics = workflowPromptSchemaDiagnostics(compiled);
+		assertPromptSchemaDiagnosticsAllowRun(diagnostics);
+		const notice = buildPromptSchemaDiagnosticNotice(diagnostics);
+		if (notice) {
+			// The digest is consumed as the stable identity of this one run-start
+			// presentation. Resume reads the frozen compiled artifact and never
+			// recompiles or re-enters this boundary, so no persistent sidecar is needed.
+			const sink = options[WORKFLOW_PROMPT_SCHEMA_DIAGNOSTIC_SINK];
+			if (sink) sink(notice.text, notice.digest);
+			else process.stderr.write(`${notice.text}\n`);
+		}
+	}
 
 	const runId = options.runId ?? makeRunId();
 	await assertWorkflowRunAvailable(cwd, runId);
@@ -1011,6 +1060,8 @@ function sameForeachInvalidationChild(
 		compiled?.itemSourceSpecId === persisted?.itemSourceSpecId &&
 		compiled?.itemSourceKind === persisted?.itemSourceKind &&
 		compiled?.itemRef === persisted?.itemRef &&
+		compiled?.sourceLineageDigest === persisted?.sourceLineageDigest &&
+		compiled?.resolvedTaskId === persisted?.resolvedTaskId &&
 		compiled?.perItemDispatch === persisted?.perItemDispatch
 	);
 }
@@ -2836,6 +2887,8 @@ function sameForeachJournalOwnershipTuple(
 		compiled?.itemSourceSpecId === persisted?.itemSourceSpecId &&
 		compiled?.itemSourceKind === persisted?.itemSourceKind &&
 		compiled?.itemRef === persisted?.itemRef &&
+		compiled?.sourceLineageDigest === persisted?.sourceLineageDigest &&
+		compiled?.resolvedTaskId === persisted?.resolvedTaskId &&
 		compiled?.perItemDispatch === persisted?.perItemDispatch
 	);
 }
@@ -3315,10 +3368,30 @@ async function materializeForeachTask(
 	}
 
 	const items = extracted.items ?? [];
+	const itemMetas = extracted.itemMetas ?? [];
+	const sourceTaskBySpecId = new Map(sourceTasks.map((task) => [task.specId, task]));
+	const lineages = itemMetas.map((meta) => {
+		const upstream = sourceTaskBySpecId.get(meta.sourceSpecId)?.foreachGenerated
+			?.sourceLineageDigest;
+		return canonicalForeachSourceLineage(meta.sourceSpecId, upstream);
+	});
 	const generated = buildForeachGeneratedTasks(
 		template,
 		compiledFlow.task,
 		items,
+		itemMetas.length === items.length
+			? {
+					lineages,
+					reservedSpecIds: new Set(
+						compiledFlow.tasks
+							.filter(
+								(task) =>
+									task.foreachGenerated?.placeholderSpecId !== template.id,
+							)
+							.map((task) => compiledTaskSpecId(task)),
+					),
+				}
+			: undefined,
 	);
 	if (generated.error) {
 		setTaskTerminal(templateRunTask, "blocked", "foreach_expansion_blocked", {
@@ -3499,6 +3572,8 @@ function sameForeachIdentityTuple(
 		left?.itemSourceSpecId === right?.itemSourceSpecId &&
 		left?.itemSourceKind === right?.itemSourceKind &&
 		left?.itemRef === right?.itemRef &&
+		left?.sourceLineageDigest === right?.sourceLineageDigest &&
+		left?.resolvedTaskId === right?.resolvedTaskId &&
 		left?.perItemDispatch === right?.perItemDispatch
 	);
 }
@@ -3614,6 +3689,31 @@ async function materializeStreamingForeachTask(input: {
 	const existingGeneratedTaskBySpecId = new Map(
 		existingGeneratedTasks.map((task) => [task.id, task]),
 	);
+	const ambiguousLegacy = existingGeneratedTasks.find((existing) => {
+		if (existing.foreachGenerated?.sourceLineageDigest) return false;
+		const legacyIdentity = stableForeachItemIdentity(
+			existing.foreachGenerated,
+			existing.id,
+		);
+		return input.generatedTasks.some(
+			(candidate) =>
+				candidate.foreachGenerated?.resolvedTaskId !== undefined &&
+				stableForeachItemIdentity(candidate.foreachGenerated, candidate.id) ===
+					legacyIdentity,
+		);
+	});
+	if (ambiguousLegacy) {
+		setTaskTerminal(
+			input.templateRunTask,
+			"blocked",
+			"foreach_expansion_blocked",
+			{
+				lastMessage: `foreach legacy item ${ambiguousLegacy.id} has ambiguous sibling-source lineage`,
+			},
+		);
+		await writeRunRecord(input.cwd, input.run);
+		return true;
+	}
 	const generatedTasksWithItemDeps = input.generatedTasks.map((task, index) => {
 		const itemMeta = input.itemMetas[index];
 		if (!itemMeta) return task;
