@@ -27,6 +27,7 @@ import {
 	stopRun,
 	runDynamicTask,
 	runWorkflowSpec,
+	WORKFLOW_PROMPT_SCHEMA_DIAGNOSTIC_SINK,
 	waitForRun,
 } from "./engine.js";
 import { WORKFLOW_COMMAND, WORKFLOW_HELP } from "./index.js";
@@ -830,8 +831,15 @@ async function startWorkflowRunFromRequest(
 		request.executionProfile,
 		ctx.hasUI ? (title, options) => ctx.ui.select(title, options) : undefined,
 	);
+	let promptSchemaNotice = "";
+	let promptSchemaNoticeDigest: string | undefined;
 	const run = await runWorkflowSpec(workflow, ctx.cwd, {
 		task,
+		[WORKFLOW_PROMPT_SCHEMA_DIAGNOSTIC_SINK]: (notice, digest) => {
+			if (digest === promptSchemaNoticeDigest) return;
+			promptSchemaNoticeDigest = digest;
+			promptSchemaNotice = notice;
+		},
 		runtimeOverrides: request.runtimeOverrides,
 		runtimeDefaults: currentRuntimeDefaults(ctx, api),
 		availableModels: availableWorkflowModels(ctx),
@@ -851,7 +859,7 @@ async function startWorkflowRunFromRequest(
 	}
 	return {
 		run,
-		text: `Workflow ${verb}: ${run.name ?? "workflow"}\n${formatHumanRunLaunch(run)}${detachNote}\nOpen: /workflow ${run.runId}`,
+		text: `${promptSchemaNotice ? `${promptSchemaNotice}\n` : ""}Workflow ${verb}: ${run.name ?? "workflow"}\n${formatHumanRunLaunch(run)}${detachNote}\nOpen: /workflow ${run.runId}`,
 	};
 }
 

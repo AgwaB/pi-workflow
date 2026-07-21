@@ -29,10 +29,12 @@ import { setSubagentApiForTests } from "../../.tmp/unit/subagent-backend.js";
 import { compileWorkflow } from "../../.tmp/unit/compiler.js";
 import {
 	buildForeachGeneratedTasks,
+	canonicalForeachSourceLineage,
 	dependenciesReady,
 	markDagDependentsSkipped,
 	markFailFastCancellations,
 	removeForeachGeneratedTasksForPlaceholders,
+	resolveForeachSiblingSourceIds,
 	reconcileForeachGeneratedRunRecords,
 	synchronizeTerminalBarrierSourceSpecIds,
 } from "../../.tmp/unit/engine-run-graph.js";
@@ -283,6 +285,73 @@ test("foreach itemIdentityPath produces stable duplicate-safe child ids", () => 
 		{ correlationId: "c_dup" },
 	]);
 	assert.match(duplicate.error, /duplicate foreach generated task id/);
+
+	const sourceA = canonicalForeachSourceLineage("source-a");
+	const sourceB = canonicalForeachSourceLineage("source-b", "upstream-lineage");
+	const sibling = resolveForeachSiblingSourceIds(
+		["claim", "claim", "unique"],
+		[sourceA, sourceB, sourceA],
+		"verify",
+	);
+	assert.equal(sibling.error, undefined);
+	assert.equal(sibling.taskIds[2], "unique", "unique legacy ids remain byte-identical");
+	assert.match(sibling.taskIds[0], /^claim--[a-f0-9]{12}$/);
+	assert.match(sibling.taskIds[1], /^claim--[a-f0-9]{12}$/);
+	assert.notEqual(sibling.taskIds[0], sibling.taskIds[1]);
+
+	const uniqueWithLineage = buildForeachGeneratedTasks(
+		template,
+		undefined,
+		[{ correlationId: "unique" }],
+		{ lineages: [sourceA] },
+	);
+	assert.deepEqual(uniqueWithLineage.tasks[0].foreachGenerated, {
+		placeholderSpecId: "singleton.item",
+		itemIdentity: "unique",
+	});
+	const collisionWithLineage = buildForeachGeneratedTasks(
+		template,
+		undefined,
+		[{ correlationId: "claim" }, { correlationId: "claim" }],
+		{ lineages: [sourceA, sourceB] },
+	);
+	assert.equal(collisionWithLineage.error, undefined);
+	assert.deepEqual(
+		collisionWithLineage.tasks.map((task) => task.foreachGenerated),
+		collisionWithLineage.tasks.map((task, index) => ({
+			placeholderSpecId: "singleton.item",
+			itemIdentity: "claim",
+			sourceLineageDigest: [sourceA, sourceB][index].digest,
+			resolvedTaskId: task.taskId,
+		})),
+	);
+	assert.deepEqual(
+		resolveForeachSiblingSourceIds(
+			["claim", "claim"],
+			[sourceB, sourceA],
+			"verify",
+		).taskIds,
+		[sibling.taskIds[1], sibling.taskIds[0]],
+		"source order does not alter lineage resolution",
+	);
+	assert.match(
+		resolveForeachSiblingSourceIds(
+			["claim", "claim"],
+			[sourceA, sourceA],
+			"verify",
+		).error,
+		/same source lineage/,
+	);
+	assert.match(
+		resolveForeachSiblingSourceIds(
+			["unique"],
+			[sourceA],
+			"verify",
+			new Set(["verify.unique"]),
+		).error,
+		/collides with an existing compiled task/,
+	);
+
 	const reserved = buildForeachGeneratedTasks(template, undefined, [
 		{ correlationId: "item" },
 	]);
@@ -539,19 +608,24 @@ test("prepared foreach materialization recovers exact ids after each incomplete 
 		itemSourceKind: "control",
 		itemRef: "control:1",
 	};
+	const collisionIdentity = {
+		sourceLineageDigest: "0123456789abcdef01234567",
+		resolvedTaskId: "claim-a--0123456789ab",
+	};
 	const generatedTask = {
-		id: "fan.claim-a",
+		id: `fan.${collisionIdentity.resolvedTaskId}`,
 		dependsOn: ["source.main"],
 		foreachGenerated: {
 			placeholderSpecId: "fan.item",
 			itemIdentity: "claim-a",
+			...collisionIdentity,
 			...itemSource,
 		},
 		sourceGeneration: 4,
 	};
 	const generatedRunTask = {
 		taskId: "task-77",
-		specId: "fan.claim-a",
+		specId: generatedTask.id,
 		status: "pending",
 		statusDetail: "pending",
 		dependsOn: ["source.main"],
@@ -559,6 +633,7 @@ test("prepared foreach materialization recovers exact ids after each incomplete 
 		foreachGenerated: {
 			placeholderSpecId: "fan.item",
 			itemIdentity: "claim-a",
+			...collisionIdentity,
 			...itemSource,
 		},
 	};
@@ -631,19 +706,19 @@ test("prepared foreach materialization recovers exact ids after each incomplete 
 		);
 		assert.deepEqual(
 			compiled.tasks.map((task) => task.id),
-			["source.main", "fan.item", "fan.claim-a", "summary.main"],
+			["source.main", "fan.item", generatedTask.id, "summary.main"],
 		);
 		assert.deepEqual(
 			run.tasks.map((task) => [task.specId, task.taskId]),
 			[
 				["source.main", "task-source"],
 				["fan.item", "task-parent"],
-				["fan.claim-a", "task-77"],
+				[generatedTask.id, "task-77"],
 				["summary.main", "task-summary"],
 			],
 		);
 		assert.equal(run.tasks[1].status, "completed");
-		assert.deepEqual(run.tasks[3].dependsOn, ["fan.claim-a"]);
+		assert.deepEqual(run.tasks[3].dependsOn, [generatedTask.id]);
 		assert.equal("foreachMaterializationJournal" in run, false);
 	}
 
@@ -2566,6 +2641,70 @@ test("resume revalidates status after acquiring the lease before cleanup", async
 		assert.equal((await readRunRecord(cwd, run.runId)).status, "completed");
 	} finally {
 		setRunLeaseTestHooksForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("strict named diagnostics reject before any run, provenance, authority, or backend side effect", async () => {
+	const cwd = makeProject();
+	let backendInvocations = 0;
+	const previousStrict = process.env.PI_WORKFLOW_STRICT_PROMPT_SCHEMA;
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		writeWorkflow(cwd);
+		const workflowDir = join(cwd, "workflows", "wait-refresh");
+		writeFileSync(
+			join(workflowDir, "control.schema.json"),
+			JSON.stringify({
+				type: "object",
+				required: ["schema", "digest", "items"],
+				properties: {
+					schema: { type: "string" },
+					digest: { type: "string" },
+					items: {
+						type: "array",
+						items: {
+							type: "object",
+							required: ["claim"],
+							properties: { claim: { type: "string" } },
+						},
+					},
+				},
+			}),
+		);
+		const specPath = join(workflowDir, "spec.json");
+		const spec = JSON.parse(readFileSync(specPath, "utf8"));
+		spec.artifactGraph.stages[0].output = {
+			controlSchema: "./control.schema.json",
+		};
+		writeFileSync(specPath, JSON.stringify(spec));
+		setSubagentApiForTests({
+			async runSubagent() {
+				backendInvocations += 1;
+				throw new Error("backend must not be invoked");
+			},
+		});
+		const before = projectTreeSnapshot(cwd);
+		process.env.PI_WORKFLOW_STRICT_PROMPT_SCHEMA = "1";
+		await assert.rejects(
+			() =>
+				runWorkflow("wait-refresh", cwd, {
+					task: "Strict diagnostics side-effect check.",
+					runId: "strict-diagnostics-no-side-effects",
+				}),
+			/Strict prompt\/schema validation rejected/,
+		);
+		assert.equal(backendInvocations, 0);
+		assert.deepEqual(projectTreeSnapshot(cwd), before);
+		assert.equal(
+			existsSync(workflowRunDir(cwd, "strict-diagnostics-no-side-effects")),
+			false,
+		);
+	} finally {
+		if (previousStrict === undefined)
+			delete process.env.PI_WORKFLOW_STRICT_PROMPT_SCHEMA;
+		else process.env.PI_WORKFLOW_STRICT_PROMPT_SCHEMA = previousStrict;
+		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });
