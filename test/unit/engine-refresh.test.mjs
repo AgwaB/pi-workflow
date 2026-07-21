@@ -505,6 +505,88 @@ test("generation reset removes mapped foreach children and restores the placehol
 	assert.deepEqual(run.tasks[2].dependsOn, [placeholderSpecId]);
 });
 
+test("collision-disambiguated foreach identity drift fails closed during reconciliation and removal", () => {
+	const collisionIdentity = {
+		sourceLineageDigest: "0123456789abcdef01234567",
+		resolvedTaskId: "claim-a--0123456789ab",
+	};
+	const makeState = () => {
+		const placeholderSpecId = "fan.item";
+		const childSpecId = `fan.${collisionIdentity.resolvedTaskId}`;
+		const membership = {
+			placeholderSpecId,
+			itemIdentity: "claim-a",
+			...collisionIdentity,
+		};
+		return {
+			run: {
+				tasks: [
+					{ taskId: "task-parent", specId: placeholderSpecId },
+					{
+						taskId: "task-child",
+						specId: childSpecId,
+						sourceGeneration: 2,
+						foreachGenerated: { ...membership },
+					},
+				],
+			},
+			compiled: {
+				tasks: [
+					{ id: placeholderSpecId, foreach: {} },
+					{
+						id: childSpecId,
+						sourceGeneration: 2,
+						foreachGenerated: { ...membership },
+					},
+				],
+			},
+			placeholderSpecId,
+		};
+	};
+	const mutations = [
+		["sourceLineageDigest", undefined],
+		["sourceLineageDigest", "fedcba9876543210fedcba98"],
+		["resolvedTaskId", undefined],
+		["resolvedTaskId", "claim-a--fedcba987654"],
+	];
+
+	for (const [field, value] of mutations) {
+		const reconciliation = makeState();
+		if (value === undefined) {
+			delete reconciliation.run.tasks[1].foreachGenerated[field];
+		} else {
+			reconciliation.run.tasks[1].foreachGenerated[field] = value;
+		}
+		assert.throws(
+			() =>
+				reconcileForeachGeneratedRunRecords(
+					"/tmp",
+					reconciliation.run,
+					reconciliation.compiled,
+				),
+			/does not exactly match compiled state/,
+			`reconciliation must reject ${field}=${String(value)}`,
+		);
+
+		const removal = makeState();
+		if (value === undefined) {
+			delete removal.run.tasks[1].foreachGenerated[field];
+		} else {
+			removal.run.tasks[1].foreachGenerated[field] = value;
+		}
+		assert.throws(
+			() =>
+				removeForeachGeneratedTasksForPlaceholders(
+					removal.run,
+					removal.compiled,
+					new Set([removal.placeholderSpecId]),
+				),
+			/does not exactly match its compiled placeholder/,
+			`removal must reject ${field}=${String(value)}`,
+		);
+	}
+});
+
 test("foreach itemPayloadPath projects prompts, fails closed, and caps the final prompt", () => {
 	const template = {
 		id: "singleton.item",
