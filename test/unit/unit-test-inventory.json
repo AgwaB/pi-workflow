@@ -1,7 +1,7 @@
 {
 	"schema": "pi-workflow-unit-test-inventory-v1",
 	"source": "unit.test.mjs",
-	"count": 502,
+	"count": 508,
 	"tests": [
 		{
 			"name": "public schemaVersion 1 parser accepts artifact graph and rejects non-artifactGraph top-level shapes",
@@ -211,6 +211,12 @@
 			"name": "artifactGraph runtime support executes helper and writes artifacts",
 			"occurrence": 1,
 			"sha256": "649b20ebec7df29365932caf164a24ed604ed81246511f040a7901b4098a3a3e",
+			"domain": "artifact-web"
+		},
+		{
+			"name": "artifact graph sources expose generation-bound dispatch metadata and support fails closed when it is stale",
+			"occurrence": 1,
+			"sha256": "fd49c9644c0e6b4f146a6b26b6d47cc6aff7260bd80fff275552f4a330feb8ca",
 			"domain": "artifact-web"
 		},
 		{
@@ -757,6 +763,30 @@
 			"name": "schema and compiler accept partial sourcePolicy on foreach",
 			"occurrence": 1,
 			"sha256": "ee8ae41388954a5f70f5de64d3e2ac86d13fb7d4ea0184344cfaab7cabca788d",
+			"domain": "authoring-interface"
+		},
+		{
+			"name": "artifact graph opt-ins validate and preserve compiled metadata",
+			"occurrence": 1,
+			"sha256": "744515aafcc0be26e88fe071ef3aa81b565b65ee8c28f6d3ccf3fe98887644da",
+			"domain": "authoring-interface"
+		},
+		{
+			"name": "compiler rejects a static foreach prompt cap below its Unicode boundary",
+			"occurrence": 1,
+			"sha256": "b63141342eaf9da4e7637e062c394621a604b40ef8efb81a61ba53353eb889c4",
+			"domain": "authoring-interface"
+		},
+		{
+			"name": "compiler diagnoses foreach item projections only with a known item schema",
+			"occurrence": 1,
+			"sha256": "fa467e56088275742ebd88cdd7ced69e1aa0bb91e2fb509451e4aec8703cb4aa",
+			"domain": "authoring-interface"
+		},
+		{
+			"name": "artifact graph opt-ins reject malformed or misplaced authoring fields",
+			"occurrence": 1,
+			"sha256": "75b7a523c7a137301eca5917ddcdfd54e6bbffb9adf00634735cd4a5eb7e6d99",
 			"domain": "authoring-interface"
 		},
 		{
@@ -2608,6 +2638,12 @@
 			"domain": "engine-store"
 		},
 		{
+			"name": "run lease absolute age does not reclaim a fresh live-pid heartbeat",
+			"occurrence": 1,
+			"sha256": "2148c126c5913dbe3712e4734eacd899e336eec017069a5562962827a22d6cb5",
+			"domain": "engine-store"
+		},
+		{
 			"name": "run lease release does not unlink a replacement lock",
 			"occurrence": 1,
 			"sha256": "5bdfb621ef735bfb5e6f00739efc4d0fea1b1da041c309a45ad6e196c3dfa2c1",
@@ -2826,7 +2862,7 @@
 		{
 			"name": "workflow index debounces nonterminal updates but publishes terminal runs immediately",
 			"occurrence": 1,
-			"sha256": "46f651566afc6c6291987ec824ba34da9db288a53913e161e3b8a476e057452c",
+			"sha256": "ff0a8930e352e5f459ba6fae5d304cd5790c86cdd2677aadf7341d4cea3d6f13",
 			"domain": "engine-store"
 		},
 		{
@@ -2856,7 +2892,7 @@
 		{
 			"name": "stopRun interrupts non-terminal tasks and best-effort cleans up backend handles",
 			"occurrence": 1,
-			"sha256": "e99fbbb999c0312123b6c7cbe7e62f7d04a859c5ffbf101ee20714d63a073587",
+			"sha256": "084291de054b3a6e285e50a9fc3738f6a6a92dc50d93c613564a0f5051bf8c4c",
 			"domain": "engine-store"
 		},
 		{
@@ -2980,39 +3016,39 @@
 			"domain": "engine-store"
 		},
 		{
-			"name": "artifact graph opt-ins reject malformed or misplaced authoring fields",
+			"name": "launch-bootstrap provenance is deterministic, attempt-scoped, and bounded on mismatch",
 			"occurrence": 1,
-			"sha256": "75b7a523c7a137301eca5917ddcdfd54e6bbffb9adf00634735cd4a5eb7e6d99",
-			"domain": "authoring-interface"
+			"sha256": "892a3dbbd33eb51547fe4b324204b748433d896bfc705976c5c957343d49a2ba",
+			"domain": "engine-store"
 		},
 		{
-			"name": "artifact graph opt-ins validate and preserve compiled metadata",
+			"name": "launch-bootstrap provenance persists before launch and rejects same-attempt divergence",
 			"occurrence": 1,
-			"sha256": "744515aafcc0be26e88fe071ef3aa81b565b65ee8c28f6d3ccf3fe98887644da",
-			"domain": "authoring-interface"
+			"sha256": "718058548f947be875a389d05903f27fb19b0319c60d4fe680827b0dd0d75177",
+			"domain": "engine-store"
 		},
 		{
-			"name": "artifact graph sources expose generation-bound dispatch metadata and support fails closed when it is stale",
+			"name": "launch-bootstrap provenance reloads with the prepared artifact manifest before backend spawn",
 			"occurrence": 1,
-			"sha256": "fd49c9644c0e6b4f146a6b26b6d47cc6aff7260bd80fff275552f4a330feb8ca",
-			"domain": "artifact-web"
+			"sha256": "d2b4e8da14cf861292e117eab146bf8e423350c18e1f6f9d64aa30bf56bf47ca",
+			"domain": "engine-store"
 		},
 		{
-			"name": "compiler diagnoses foreach item projections only with a known item schema",
+			"name": "launch-bootstrap rejects wrong artifact identity and wrapper bindings before backend invocation",
 			"occurrence": 1,
-			"sha256": "fa467e56088275742ebd88cdd7ced69e1aa0bb91e2fb509451e4aec8703cb4aa",
-			"domain": "authoring-interface"
+			"sha256": "55e80a078b032f33cb4586412d6febad3bea0d43b521834d6cd32bad297c740a",
+			"domain": "engine-store"
 		},
 		{
-			"name": "compiler rejects a static foreach prompt cap below its Unicode boundary",
+			"name": "launch-bootstrap rejects artifact binding drift before runSubagent",
 			"occurrence": 1,
-			"sha256": "b63141342eaf9da4e7637e062c394621a604b40ef8efb81a61ba53353eb889c4",
-			"domain": "authoring-interface"
+			"sha256": "f63d355f36ecfe7b87b7f31730b3078599ce28078f5e4c2ba1d51d780faf2e7d",
+			"domain": "engine-store"
 		},
 		{
-			"name": "run lease absolute age does not reclaim a fresh live-pid heartbeat",
+			"name": "launch-bootstrap seals ambient extensions and rejects generated-wrapper drift before runSubagent",
 			"occurrence": 1,
-			"sha256": "682a43ecd49ec388a3cef0a255aa2fab4db7f2dbe5db7a4a0db7297072950b5c",
+			"sha256": "f9dab42172fc69aeca47919fa810fba17e53cc766da0fcd60ed735f318b54039",
 			"domain": "engine-store"
 		}
 	]

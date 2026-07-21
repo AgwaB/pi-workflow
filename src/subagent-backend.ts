@@ -57,17 +57,30 @@ import {
 	throwIfWorkflowStopRequested,
 } from "./workflow-stop.js";
 import {
+	retryWorkflowTaskSessionId,
+	workflowTaskSessionId,
+} from "./launch-session.js";
+import {
 	applyTaskResultArtifact,
 	isTaskTimedOut,
 	markTaskTimedOut,
 } from "./result.js";
-import type { BackendLaunchResult } from "./backend.js";
+import type {
+	BackendLaunchResult,
+	PreparedWorkflowTaskLaunch,
+} from "./backend.js";
 import {
 	readWorkflowArtifactReadLedger,
 	type WorkflowArtifactReadLedgerRecord,
 } from "./workflow-artifact-tool.js";
-import { writeWorkflowFetchCacheExtensionWrapper } from "./workflow-fetch-cache-extension.js";
-import { writeWorkflowWebSourceExtensionWrapper } from "./workflow-web-source-extension.js";
+import {
+	buildWorkflowFetchCacheExtensionWrapper,
+	writeWorkflowFetchCacheExtensionWrapper,
+} from "./workflow-fetch-cache-extension.js";
+import {
+	buildWorkflowWebSourceExtensionWrapper,
+	writeWorkflowWebSourceExtensionWrapper,
+} from "./workflow-web-source-extension.js";
 import { isWorkflowWebSourceTool } from "./workflow-web-source.js";
 import {
 	buildWorkflowOutputRetryInstructions,
@@ -84,7 +97,6 @@ import { writeWorkflowPartialOutputLedgerFromFile } from "./workflow-partial-out
 import { PI_WORKFLOW_ROLE_ENV } from "./process-role.js";
 
 const DEFAULT_SUBAGENT_RUNS_ROOT = ".pi/workflow-subagents";
-const MAX_SUBAGENT_SESSION_ID_LENGTH = 64;
 const EXTRA_SUBAGENT_EXTENSIONS_ENV = "PI_WORKFLOW_SUBAGENT_EXTRA_EXTENSIONS";
 const FETCH_CONTENT_CACHE_ENV = "PI_WORKFLOW_FETCH_CONTENT_CACHE";
 const LEGACY_FETCH_CACHE_ENV = "PI_WORKFLOW_FETCH_CACHE";
@@ -2279,6 +2291,7 @@ export async function launchSubagentTask(
 	compiledTask: CompiledTask,
 	leaseSignal?: AbortSignal,
 	workflowStopSignal?: AbortSignal,
+	preparedLaunch?: PreparedWorkflowTaskLaunch,
 ): Promise<BackendLaunchResult> {
 	if (task.status !== "pending") return { kind: "launched" };
 	if (task.backendHandle || task.pid) return { kind: "launched" };
@@ -2366,11 +2379,13 @@ export async function launchSubagentTask(
 	const resultFile = fromProjectPath(cwd, task.files.result);
 	const runsDir = subagentRunsDir(run, task);
 	const correlationId = `${run.runId}:${task.taskId}`;
-	const sessionId = subagentSessionId(run, task);
+	const sessionId = workflowTaskSessionId(run, task);
 
 	let launched: SubagentResultEnvelope;
-	const toolResultBudgetConfiguration =
-		dynamicTaskToolResultBudgetConfiguration(task);
+	const sealedLaunch =
+		preparedLaunch ??
+		(await prepareSubagentTaskLaunch(cwd, run, task, compiledTask));
+	const toolResultBudgetConfiguration = sealedLaunch.toolResultBudget;
 	let releaseLiveModelWorkerSlot: (() => void) | undefined;
 	try {
 		await throwIfLaunchStopped(cwd, run.runId, leaseSignal, workflowStopSignal);
@@ -2436,12 +2451,6 @@ export async function launchSubagentTask(
 
 		const api = await loadSubagentApi();
 		await throwIfLaunchStopped(cwd, run.runId, leaseSignal, workflowStopSignal);
-		const extensions = await workflowTaskExtensions(
-			cwd,
-			run,
-			task,
-			compiledTask,
-		);
 		await throwIfLaunchStopped(cwd, run.runId, leaseSignal, workflowStopSignal);
 		const subagentOptions: Record<string, unknown> = {
 			cwd: task.cwd,
@@ -2461,8 +2470,8 @@ export async function launchSubagentTask(
 			correlationId,
 			...(sessionId === undefined ? {} : { sessionId }),
 		};
-		subagentOptions.extensions = extensions;
-		if (captureToolCallsEnabled()) subagentOptions.captureToolCalls = true;
+		subagentOptions.extensions = sealedLaunch.extensions;
+		if (sealedLaunch.captureToolCalls) subagentOptions.captureToolCalls = true;
 		if (toolResultBudgetConfiguration?.maxTotalChars !== undefined) {
 			subagentOptions.toolResultBudget = {
 				maxTotalChars: toolResultBudgetConfiguration.maxTotalChars,
@@ -2484,6 +2493,7 @@ export async function launchSubagentTask(
 		launched = await runWithLaunchSlot(
 			async () => {
 				await beforeRunSubagentHookForTests?.();
+				await assertPreparedSubagentTaskLaunch(sealedLaunch);
 				await throwIfWorkflowStopRequested(cwd, run.runId);
 				throwIfAborted(leaseSignal);
 				throwIfAborted(workflowStopSignal);
@@ -3180,10 +3190,10 @@ function artifactGraphRetrySession(
 	if (task.outputRetry?.repairMode === "same_session") {
 		return {
 			repairMode: "new_session",
-			sessionId: retrySubagentSessionId(run, task, attempt),
+			sessionId: retryWorkflowTaskSessionId(run, task, attempt),
 		};
 	}
-	const expectedSessionId = subagentSessionId(run, task);
+	const expectedSessionId = workflowTaskSessionId(run, task);
 	const metadata = subagentResult?.metadata;
 	const metadataRecord =
 		metadata && typeof metadata === "object" && !Array.isArray(metadata)
@@ -3210,7 +3220,7 @@ function artifactGraphRetrySession(
 	}
 	return {
 		repairMode: "new_session",
-		sessionId: retrySubagentSessionId(run, task, attempt),
+		sessionId: retryWorkflowTaskSessionId(run, task, attempt),
 	};
 }
 
@@ -4612,39 +4622,60 @@ function captureToolCallsEnabled(): boolean {
 	return typeof value === "string" && /^(1|true|yes|on)$/i.test(value.trim());
 }
 
-async function workflowTaskExtensions(
+export async function prepareSubagentTaskLaunch(
 	cwd: string,
 	run: WorkflowRunRecord,
 	task: WorkflowTaskRunRecord,
 	compiledTask: CompiledTask,
-): Promise<string[]> {
+	requireArtifactBinding = false,
+): Promise<PreparedWorkflowTaskLaunch> {
 	const tools = compiledTask.runtime.tools;
 	let extensions = uniqueStrings([
 		...providerExtensionsForTools(tools, compiledTask.runtime.toolProviders),
 		...extraSubagentExtensionsFromEnv(),
 	]);
+	const generatedExtensions: PreparedWorkflowTaskLaunch["generatedExtensions"] =
+		[];
 	const taskDir = dirname(fromProjectPath(cwd, task.files.result));
+	const artifactBinding = await sealArtifactBinding(
+		task,
+		taskDir,
+		requireArtifactBinding,
+	);
 
 	if (shouldUseFetchContentCache(tools)) {
 		const wrapperPath = join(taskDir, "workflow-fetch-cache-extension.ts");
+		const config = {
+			runId: run.runId,
+			taskId: task.taskId,
+			cacheDir: resolve(
+				cwd,
+				".pi",
+				"workflows",
+				run.runId,
+				"source-cache",
+				"fetch-content",
+			),
+			maxInlineChars: fetchContentInlineCharsEnvValue(),
+		};
+		const expectedBytes = buildWorkflowFetchCacheExtensionWrapper({
+			importPath: WORKFLOW_FETCH_CACHE_EXTENSION_IMPORT,
+			webAccessExtensionPath: BUNDLED_PI_WEB_ACCESS_EXTENSION,
+			webAccessStoragePath: BUNDLED_PI_WEB_ACCESS_STORAGE,
+			config,
+		});
 		await writeWorkflowFetchCacheExtensionWrapper({
 			wrapperPath,
 			importPath: WORKFLOW_FETCH_CACHE_EXTENSION_IMPORT,
 			webAccessExtensionPath: BUNDLED_PI_WEB_ACCESS_EXTENSION,
 			webAccessStoragePath: BUNDLED_PI_WEB_ACCESS_STORAGE,
-			config: {
-				runId: run.runId,
-				taskId: task.taskId,
-				cacheDir: resolve(
-					cwd,
-					".pi",
-					"workflows",
-					run.runId,
-					"source-cache",
-					"fetch-content",
-				),
-				maxInlineChars: fetchContentInlineCharsEnvValue(),
-			},
+			config,
+		});
+		generatedExtensions.push({
+			kind: "fetch-cache",
+			path: wrapperPath,
+			expectedBytes,
+			config,
 		});
 		extensions = uniqueStrings([
 			...extensions.filter(
@@ -4660,34 +4691,40 @@ async function workflowTaskExtensions(
 			compiledTask.runtime.toolProviders,
 		);
 		const wrapperPath = join(taskDir, "workflow-web-source-extension.ts");
+		const config = {
+			schema: "workflow-web-source-launch-config-v1" as const,
+			runId: run.runId,
+			taskId: task.taskId,
+			cwd,
+			cacheDir: resolve(cwd, ".pi", "workflows", run.runId, "web-source-cache"),
+			provider: {
+				kind:
+					providerExtensionPath === BUNDLED_PI_WEB_ACCESS_EXTENSION
+						? ("pi-web-access" as const)
+						: ("extension" as const),
+				extensionPath: providerExtensionPath,
+			},
+			securityPolicy: {
+				allowPrivateHosts: false,
+				cacheRawProviderPayloads: false,
+			},
+		};
+		const expectedBytes = buildWorkflowWebSourceExtensionWrapper({
+			importPath: WORKFLOW_WEB_SOURCE_EXTENSION_IMPORT,
+			providerExtensionPath,
+			config,
+		});
 		await writeWorkflowWebSourceExtensionWrapper({
 			wrapperPath,
 			importPath: WORKFLOW_WEB_SOURCE_EXTENSION_IMPORT,
 			providerExtensionPath,
-			config: {
-				schema: "workflow-web-source-launch-config-v1",
-				runId: run.runId,
-				taskId: task.taskId,
-				cwd,
-				cacheDir: resolve(
-					cwd,
-					".pi",
-					"workflows",
-					run.runId,
-					"web-source-cache",
-				),
-				provider: {
-					kind:
-						providerExtensionPath === BUNDLED_PI_WEB_ACCESS_EXTENSION
-							? "pi-web-access"
-							: "extension",
-					extensionPath: providerExtensionPath,
-				},
-				securityPolicy: {
-					allowPrivateHosts: false,
-					cacheRawProviderPayloads: false,
-				},
-			},
+			config,
+		});
+		generatedExtensions.push({
+			kind: "web-source",
+			path: wrapperPath,
+			expectedBytes,
+			config,
 		});
 		const capturedProviderExtensions = new Set(
 			workflowWebSourceProviderExtensions(
@@ -4703,7 +4740,76 @@ async function workflowTaskExtensions(
 		]);
 	}
 
-	return extensions;
+	const toolResultBudget = dynamicTaskToolResultBudgetConfiguration(task);
+	return {
+		extensions,
+		generatedExtensions,
+		captureToolCalls: captureToolCallsEnabled(),
+		...(toolResultBudget === undefined ? {} : { toolResultBudget }),
+		...(artifactBinding === undefined ? {} : { artifactBinding }),
+	};
+}
+
+async function sealArtifactBinding(
+	task: WorkflowTaskRunRecord,
+	taskDir: string,
+	required: boolean,
+): Promise<PreparedWorkflowTaskLaunch["artifactBinding"]> {
+	if (
+		!task.artifactGraph?.enabled ||
+		task.artifactGraph.artifactAccess === "none"
+	)
+		return undefined;
+	const manifestPath = join(taskDir, "source-manifest.json");
+	const wrapperPath = join(taskDir, "workflow-artifact-extension.ts");
+	if (!required && !existsSync(manifestPath) && !existsSync(wrapperPath))
+		return undefined;
+	try {
+		const [expectedManifestBytes, expectedWrapperBytes] = await Promise.all([
+			readFile(manifestPath, "utf8"),
+			readFile(wrapperPath, "utf8"),
+		]);
+		return {
+			manifestPath,
+			expectedManifestBytes,
+			wrapperPath,
+			expectedWrapperBytes,
+		};
+	} catch {
+		throw new Error("launch-bootstrap artifact binding is unavailable");
+	}
+}
+
+async function assertPreparedSubagentTaskLaunch(
+	preparedLaunch: PreparedWorkflowTaskLaunch,
+): Promise<void> {
+	if (preparedLaunch.artifactBinding) {
+		let actualManifest: string;
+		let actualWrapper: string;
+		try {
+			[actualManifest, actualWrapper] = await Promise.all([
+				readFile(preparedLaunch.artifactBinding.manifestPath, "utf8"),
+				readFile(preparedLaunch.artifactBinding.wrapperPath, "utf8"),
+			]);
+		} catch {
+			throw new Error("launch-bootstrap artifact binding is unavailable");
+		}
+		if (
+			actualManifest !== preparedLaunch.artifactBinding.expectedManifestBytes ||
+			actualWrapper !== preparedLaunch.artifactBinding.expectedWrapperBytes
+		)
+			throw new Error("launch-bootstrap artifact binding drift detected");
+	}
+	for (const extension of preparedLaunch.generatedExtensions) {
+		let actual: string;
+		try {
+			actual = await readFile(extension.path, "utf8");
+		} catch {
+			throw new Error("launch-bootstrap generated extension is unavailable");
+		}
+		if (actual !== extension.expectedBytes)
+			throw new Error("launch-bootstrap generated extension drift detected");
+	}
 }
 
 function shouldUseFetchContentCache(
@@ -5012,7 +5118,7 @@ async function recoverSubagentHandle(
 				record.runId ?? entry.name,
 				attemptId,
 				runsDir,
-				subagentSessionId(run, task),
+				workflowTaskSessionId(run, task),
 			),
 			updatedAtMs:
 				timestampMs(record.updatedAt) ??
@@ -5094,55 +5200,6 @@ function subagentRunsDir(
 	task: WorkflowTaskRunRecord,
 ): string {
 	return `${DEFAULT_SUBAGENT_RUNS_ROOT}/${run.runId}/${task.taskId}`;
-}
-
-function subagentSessionId(
-	run: WorkflowRunRecord,
-	task: WorkflowTaskRunRecord,
-): string | undefined {
-	if (!task.artifactGraph?.enabled) return undefined;
-	const baseSessionId = baseSubagentSessionId(run, task);
-	if (task.outputRetry?.sessionId) return task.outputRetry.sessionId;
-	const launchAttempt = task.launchRetry?.attempts ?? 0;
-	if (launchAttempt > 0)
-		return boundedSubagentSessionId(
-			`${baseSessionId}.launch-retry-${launchAttempt}`,
-		);
-	const resumeAttempt = task.resumeEvents?.length ?? 0;
-	if (resumeAttempt > 0)
-		return boundedSubagentSessionId(`${baseSessionId}.resume-${resumeAttempt}`);
-	return baseSessionId;
-}
-
-function baseSubagentSessionId(
-	run: WorkflowRunRecord,
-	task: WorkflowTaskRunRecord,
-): string {
-	return boundedSubagentSessionId(`pi-workflow.${run.runId}.${task.taskId}`);
-}
-
-function retrySubagentSessionId(
-	run: WorkflowRunRecord,
-	task: WorkflowTaskRunRecord,
-	attempt: number,
-): string {
-	return boundedSubagentSessionId(
-		`${baseSubagentSessionId(run, task)}.retry-${attempt}`,
-	);
-}
-
-function boundedSubagentSessionId(value: string): string {
-	const sanitized = value.replace(/[^A-Za-z0-9._-]/g, "-");
-	if (sanitized.length <= MAX_SUBAGENT_SESSION_ID_LENGTH) return sanitized;
-	const digest = createHash("sha256")
-		.update(sanitized)
-		.digest("hex")
-		.slice(0, 16);
-	const suffix = sanitized.split(".").at(-1) || "session";
-	const prefix = `piwf.${digest}`;
-	const maxSuffixLength = MAX_SUBAGENT_SESSION_ID_LENGTH - prefix.length - 1;
-	const boundedSuffix = suffix.slice(-Math.max(1, maxSuffixLength));
-	return `${prefix}.${boundedSuffix}`;
 }
 
 function buildSystemPrompt(task: CompiledTask): string {

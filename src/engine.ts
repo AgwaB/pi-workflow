@@ -37,6 +37,10 @@ import {
 	writeStaticRunArtifacts,
 } from "./store.js";
 import { resolveWorkflowBackend } from "./backend.js";
+import {
+	createLaunchBootstrapProvenance,
+	recordLaunchBootstrapProvenance,
+} from "./launch-bootstrap-provenance.js";
 import { ensureManagedWorktree } from "./worktree.js";
 import { resolveWorkflowHelperRef } from "./workflow-helpers.js";
 import { buildAvailableToolView } from "./tool-metadata.js";
@@ -4127,18 +4131,37 @@ async function launchPendingTaskAt(
 		await throwIfWorkflowStopRequested(cwd, run.runId);
 		recordCreatedLoopWorktree(run, task, worktreeLaunchTask);
 		await writeRunRecord(cwd, run);
+		const backend = resolveWorkflowBackend(run);
 		const stop = createWorkflowStopSignal(cwd, run.runId);
 		let launch;
 		try {
 			await throwIfWorkflowStopRequested(cwd, run.runId);
 			await persistFinalPromptMetadata(cwd, run, task, worktreeLaunchTask);
-			launch = await resolveWorkflowBackend(run).launchTask(
+			const preparedLaunch = await backend.prepareTaskLaunch(
+				cwd,
+				run,
+				task,
+				worktreeLaunchTask,
+			);
+			const provenance = await createLaunchBootstrapProvenance(
+				cwd,
+				run,
+				task,
+				worktreeLaunchTask,
+				backend.id,
+				preparedLaunch,
+			);
+			recordLaunchBootstrapProvenance(task, provenance);
+			await writeRunRecord(cwd, run);
+			await throwIfWorkflowStopRequested(cwd, run.runId);
+			launch = await backend.launchTask(
 				cwd,
 				run,
 				task,
 				worktreeLaunchTask,
 				leaseSignal,
 				stop.signal,
+				preparedLaunch,
 			);
 		} finally {
 			stop.dispose();

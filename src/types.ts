@@ -802,6 +802,68 @@ export interface WorkflowTaskTimingAggregateRecord {
 	incomplete?: boolean;
 }
 
+export interface LaunchBootstrapProvenanceRecord {
+	schema: "pi-workflow-launch-bootstrap-provenance-v1";
+	identitySha256: string;
+	workflow: { type: string; specPathSha256: string };
+	runId: string;
+	task: { taskId: string; specId: string; generation?: number };
+	attempt: {
+		key: string;
+		launchRetry: number;
+		outputRetry: number;
+		resume: number;
+	};
+	sessionId?: string;
+	backend: { id: string; type: string; mode: string };
+	prompt: { sha256: string; bytes: number };
+	artifacts?: {
+		manifestSha256: string;
+		wrapperSha256: string;
+		configSha256: string;
+	};
+	effectiveLaunch: {
+		extensions: Array<{
+			pathSha256: string;
+			generated?: {
+				kind: "fetch-cache" | "web-source";
+				wrapperSha256: string;
+				configSha256: string;
+			};
+		}>;
+		captureToolCalls: boolean;
+		toolResultBudgetSha256?: string;
+	};
+	effectivePolicy: {
+		tools: string[];
+		toolProvidersSha256: string;
+		model?: string;
+		thinking?: string;
+		fast?: string;
+		approvalMode: string;
+		maxRuntimeMs?: number;
+		cwdSha256: string;
+		worktree: {
+			enabled: boolean;
+			pathSha256?: string;
+			branchSha256?: string;
+			baseCwdSha256?: string;
+		};
+	};
+	sourceDependencies: {
+		contextDependsOn: string[];
+		sourceProjection?: unknown;
+		requiredReads?: unknown;
+		requiredReadPolicy?: unknown;
+		artifactAccess?: string;
+	};
+}
+
+export interface LaunchBootstrapProvenanceHistory {
+	version: 1;
+	records: LaunchBootstrapProvenanceRecord[];
+}
+
 export interface WorkflowTaskTimingRecord {
 	source: "pi-workflow";
 	capturedAt: string;
@@ -905,6 +967,8 @@ export interface WorkflowTaskRunRecord {
 		maxChars?: number;
 		measuredAt: string;
 	};
+	/** Internal persisted launch identity; not a workflow authoring or package API. */
+	launchBootstrap?: LaunchBootstrapProvenanceHistory;
 	startedAt?: string;
 	completedAt?: string;
 	elapsedMs?: number;
