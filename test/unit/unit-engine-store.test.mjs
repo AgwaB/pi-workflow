@@ -250,6 +250,13 @@ import {
 	createLaunchBootstrapProvenance,
 	recordLaunchBootstrapProvenance,
 } from "../../.tmp/unit/launch-bootstrap-provenance.js";
+import {
+	canonicalWorkflowLaunchAuthorityBytes,
+	consumeWorkflowLaunchAuthority,
+	createWorkflowLaunchAuthority,
+	issueWorkflowLaunchAuthority,
+	registerWorkflowLaunchAuthority,
+} from "../../.tmp/unit/launch-authority.js";
 import { prepareSubagentTaskLaunch } from "../../.tmp/unit/subagent-backend.js";
 
 test("fail-fast flags off preserve failed-run scheduling without sibling cancellation", async () => {
@@ -1295,6 +1302,7 @@ test("subagent terminal observability captures usage and separates launch timing
 			join(cwd, "workflows", "unit.json"),
 		);
 		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await prepareDagTask(cwd, run, compiled, 0);
 		await writeRunRecord(cwd, run);
 		await launchSubagentTask(cwd, run, run.tasks[0], compiled.tasks[0]);
 
@@ -1635,6 +1643,7 @@ test("subagent terminal observability aggregates distinct retry attempts", async
 			join(cwd, "workflows", "unit.json"),
 		);
 		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await prepareDagTask(cwd, run, compiled, 0);
 		await writeRunRecord(cwd, run);
 		await launchSubagentTask(cwd, run, run.tasks[0], compiled.tasks[0]);
 
@@ -2789,6 +2798,35 @@ test("refresh adopts handle-less running subagent from deterministic runsDir", a
 			workflowSpec("unit-scout"),
 		);
 		const task = run.tasks[0];
+		const preparedTask = await prepareDagTask(cwd, run, compiled, 0);
+		const preparedLaunch = await prepareSubagentTaskLaunch(
+			cwd,
+			run,
+			task,
+			preparedTask,
+		);
+		const provenance = await createLaunchBootstrapProvenance(
+			cwd,
+			run,
+			task,
+			preparedTask,
+			"pi-subagent/headless",
+			preparedLaunch,
+		);
+		recordLaunchBootstrapProvenance(task, provenance);
+		const authority = createWorkflowLaunchAuthority(
+			run,
+			task,
+			"pi-subagent/headless",
+			provenance,
+		);
+		issueWorkflowLaunchAuthority(task, authority);
+		registerWorkflowLaunchAuthority(
+			run,
+			task,
+			authority,
+			"pi-subagent/headless",
+		);
 		task.status = "running";
 		task.statusDetail = "launching";
 		task.startedAt = new Date().toISOString();
@@ -2904,6 +2942,11 @@ test("refresh adopts handle-less running subagent from deterministic runsDir", a
 		);
 		assert.equal(refreshed.tasks[0].status, "completed");
 		assert.equal(refreshed.tasks[0].backendHandle, undefined);
+		assert.deepEqual(refreshed.tasks[0].launchAuthority.records[0].state, {
+			phase: "consumed",
+			backendRunId: subRunId,
+			backendAttemptId: subAttemptId,
+		});
 		const workflowResult = JSON.parse(
 			readFileSync(join(cwd, refreshed.tasks[0].files.result), "utf8"),
 		);
@@ -5560,8 +5603,15 @@ test("launch-bootstrap provenance reloads with the prepared artifact manifest be
 			});
 			const reloaded = await readRunRecord(cwd, started.runId);
 			const record = reloaded.tasks[0].launchBootstrap.records[0];
+			const authority = reloaded.tasks[0].launchAuthority.records[0];
 			assert.equal(reloaded.tasks[0].status, "running");
 			assert.equal(record.backend.id, "pi-subagent/headless");
+			assert.equal(authority.grant.launchBootstrapSha256, record.identitySha256);
+			assert.deepEqual(authority.state, {
+				phase: "consumed",
+				backendRunId: "bootstrap-run",
+				backendAttemptId: "bootstrap-attempt",
+			});
 			assert.ok(record.artifacts.manifestSha256);
 			assert.ok(record.artifacts.configSha256);
 			assert.equal(
@@ -5849,6 +5899,704 @@ test("launch-bootstrap seals ambient extensions and rejects generated-wrapper dr
 		if (previousExtra === undefined)
 			delete process.env.PI_WORKFLOW_SUBAGENT_EXTRA_EXTENSIONS;
 		else process.env.PI_WORKFLOW_SUBAGENT_EXTRA_EXTENSIONS = previousExtra;
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+	}
+});
+
+test("workflow launch authority is deterministic and enforces its lifecycle", async () => {
+	const cwd = makeProject();
+	try {
+		const fixture = makeSubagentLaunchFixture(cwd, "authority-lifecycle");
+		const prepared = await prepareSubagentTaskLaunch(
+			cwd,
+			fixture.run,
+			fixture.task,
+			fixture.compiledTask,
+		);
+		const provenance = await createLaunchBootstrapProvenance(
+			cwd,
+			fixture.run,
+			fixture.task,
+			fixture.compiledTask,
+			"pi-subagent/headless",
+			prepared,
+		);
+		recordLaunchBootstrapProvenance(fixture.task, provenance);
+		const first = createWorkflowLaunchAuthority(
+			fixture.run,
+			fixture.task,
+			"pi-subagent/headless",
+			provenance,
+		);
+		const repeat = createWorkflowLaunchAuthority(
+			fixture.run,
+			fixture.task,
+			"pi-subagent/headless",
+			provenance,
+		);
+		assert.deepEqual(
+			canonicalWorkflowLaunchAuthorityBytes(first),
+			canonicalWorkflowLaunchAuthorityBytes(repeat),
+		);
+		assert.equal(first.launchBootstrapSha256, provenance.identitySha256);
+		issueWorkflowLaunchAuthority(fixture.task, first);
+		issueWorkflowLaunchAuthority(fixture.task, repeat);
+		assert.equal(fixture.task.launchAuthority.records.length, 1);
+		assert.equal(fixture.task.launchAuthority.records[0].state.phase, "issued");
+		registerWorkflowLaunchAuthority(
+			fixture.run,
+			fixture.task,
+			first,
+			"pi-subagent/headless",
+		);
+		assert.equal(
+			fixture.task.launchAuthority.records[0].state.phase,
+			"registered",
+		);
+		consumeWorkflowLaunchAuthority(
+			fixture.task,
+			first,
+			"backend-run",
+			"backend-attempt",
+		);
+		consumeWorkflowLaunchAuthority(
+			fixture.task,
+			first,
+			"backend-run",
+			"backend-attempt",
+		);
+		assert.deepEqual(fixture.task.launchAuthority.records[0].state, {
+			phase: "consumed",
+			backendRunId: "backend-run",
+			backendAttemptId: "backend-attempt",
+		});
+		assert.throws(
+			() =>
+				registerWorkflowLaunchAuthority(
+					fixture.run,
+					fixture.task,
+					first,
+					"pi-subagent/headless",
+				),
+			/already consumed/,
+		);
+		assert.throws(
+			() =>
+				consumeWorkflowLaunchAuthority(
+					fixture.task,
+					first,
+					"different-run",
+					"backend-attempt",
+				),
+			/backend identity mismatch/,
+		);
+
+		const foreign = structuredClone(first);
+		foreign.runId = "foreign-run";
+		const { identitySha256: _foreignIdentity, ...foreignBody } = foreign;
+		foreign.identitySha256 = createHash("sha256")
+			.update(canonicalWorkflowLaunchAuthorityBytes(foreignBody))
+			.digest("hex");
+		const foreignTask = structuredClone(fixture.task);
+		delete foreignTask.launchAuthority;
+		assert.throws(
+			() => issueWorkflowLaunchAuthority(foreignTask, foreign),
+			/provenance mismatch/,
+		);
+	} finally {
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+	}
+});
+
+test("subagent launch self-bootstraps authority and refuses a consumed duplicate", async () => {
+	const cwd = makeProject();
+	let launches = 0;
+	try {
+		setSubagentApiForTests({
+			async runSubagent() {
+				launches += 1;
+				return {
+					runId: "authority-run",
+					attemptId: "authority-attempt",
+					status: "running",
+				};
+			},
+			async getSubagentStatus() {
+				return null;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+		const fixture = makeSubagentLaunchFixture(cwd, "authority-direct");
+		await launchSubagentTask(
+			cwd,
+			fixture.run,
+			fixture.task,
+			fixture.compiledTask,
+		);
+		const record = fixture.task.launchAuthority.records[0];
+		assert.equal(record.state.phase, "consumed");
+		assert.equal(record.state.backendRunId, "authority-run");
+		assert.equal(record.state.backendAttemptId, "authority-attempt");
+		assert.equal(
+			record.grant.launchBootstrapSha256,
+			fixture.task.launchBootstrap.records[0].identitySha256,
+		);
+		const reloaded = await readRunRecord(cwd, fixture.run.runId);
+		assert.deepEqual(reloaded.tasks[0].launchAuthority, fixture.task.launchAuthority);
+
+		fixture.task.status = "pending";
+		fixture.task.statusDetail = "pending";
+		fixture.task.backendHandle = undefined;
+		fixture.task.backendTaskId = "";
+		fixture.task.pid = undefined;
+		const duplicate = await launchSubagentTask(
+			cwd,
+			fixture.run,
+			fixture.task,
+			fixture.compiledTask,
+		);
+		assert.equal(duplicate.kind, "capacity");
+		assert.match(duplicate.message, /already consumed/);
+		assert.equal(launches, 1);
+	} finally {
+		setSubagentApiForTests(undefined);
+		setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+	}
+});
+
+test("concurrent same-attempt launch calls invoke runSubagent once", async () => {
+	const cwd = makeProject();
+	let launches = 0;
+	let releaseAcknowledgement;
+	const acknowledgement = new Promise((resolve) => {
+		releaseAcknowledgement = resolve;
+	});
+	try {
+		setSubagentApiForTests({
+			async runSubagent() {
+				launches += 1;
+				await acknowledgement;
+				return {
+					runId: "authority-concurrent-run",
+					attemptId: "authority-concurrent-attempt",
+					status: "running",
+				};
+			},
+			async getSubagentStatus() {
+				return null;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+		const fixture = makeSubagentLaunchFixture(cwd, "authority-concurrent");
+		const first = launchSubagentTask(
+			cwd,
+			fixture.run,
+			fixture.task,
+			fixture.compiledTask,
+		);
+		const second = launchSubagentTask(
+			cwd,
+			fixture.run,
+			fixture.task,
+			fixture.compiledTask,
+		);
+		await eventually(() => assert.equal(launches, 1));
+		releaseAcknowledgement();
+		const results = await Promise.all([first, second]);
+		assert.equal(launches, 1);
+		assert(results.some((result) => result.kind === "launched"));
+		assert.equal(
+			fixture.task.launchAuthority.records[0].state.phase,
+			"consumed",
+		);
+	} finally {
+		releaseAcknowledgement?.();
+		setSubagentApiForTests(undefined);
+		setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+	}
+});
+
+test("subagent launch rejects hook-mutated authority before runSubagent", async () => {
+	const cwd = makeProject();
+	let launches = 0;
+	try {
+		setSubagentApiForTests({
+			async runSubagent() {
+				launches += 1;
+				return {
+					runId: "unexpected",
+					attemptId: "unexpected",
+					status: "running",
+				};
+			},
+			async getSubagentStatus() {
+				return null;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+		const fixture = makeSubagentLaunchFixture(cwd, "authority-drift");
+		const prepared = await prepareSubagentTaskLaunch(
+			cwd,
+			fixture.run,
+			fixture.task,
+			fixture.compiledTask,
+		);
+		const provenance = await createLaunchBootstrapProvenance(
+			cwd,
+			fixture.run,
+			fixture.task,
+			fixture.compiledTask,
+			"pi-subagent/headless",
+			prepared,
+		);
+		recordLaunchBootstrapProvenance(fixture.task, provenance);
+		const authority = createWorkflowLaunchAuthority(
+			fixture.run,
+			fixture.task,
+			"pi-subagent/headless",
+			provenance,
+		);
+		issueWorkflowLaunchAuthority(fixture.task, authority);
+		const authorized = { ...prepared, authority };
+		setSubagentLaunchControlsForTests({
+			beforeRunSubagent() {
+				authorized.authority.identitySha256 = "0".repeat(64);
+			},
+		});
+		await assert.rejects(
+			launchSubagentTask(
+				cwd,
+				fixture.run,
+				fixture.task,
+				fixture.compiledTask,
+				undefined,
+				undefined,
+				authorized,
+			),
+			/authority (?:history|grant) is malformed/,
+		);
+		assert.equal(launches, 0);
+	} finally {
+		setSubagentApiForTests(undefined);
+		setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+	}
+});
+
+test("subagent launch rejects intact authority when the sealed launch drifts", async () => {
+	const cwd = makeProject();
+	let launches = 0;
+	try {
+		setSubagentApiForTests({
+			async runSubagent() {
+				launches += 1;
+				return {
+					runId: "unexpected",
+					attemptId: "unexpected",
+					status: "running",
+				};
+			},
+			async getSubagentStatus() {
+				return null;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+		const mutations = [
+			{
+				name: "extensions",
+				apply(launch) {
+					launch.extensions.push("/tmp/foreign-extension.mjs");
+				},
+			},
+			{
+				name: "capture",
+				apply(launch) {
+					launch.captureToolCalls = !launch.captureToolCalls;
+				},
+			},
+			{
+				name: "generated",
+				apply(launch) {
+					const path = join(cwd, "mutated-generated-extension.ts");
+					const expectedBytes = "export default {};";
+					writeFileSync(path, expectedBytes, "utf8");
+					launch.extensions.push(path);
+					launch.generatedExtensions.push({
+						kind: "fetch-cache",
+						path,
+						expectedBytes,
+						config: { mutated: true },
+					});
+				},
+			},
+			{
+				name: "artifact-binding",
+				apply(launch) {
+					const manifestPath = join(cwd, "mutated-manifest.json");
+					const wrapperPath = join(cwd, "mutated-wrapper.ts");
+					const expectedManifestBytes = "{}";
+					const expectedWrapperBytes = "export default {};";
+					writeFileSync(manifestPath, expectedManifestBytes, "utf8");
+					writeFileSync(wrapperPath, expectedWrapperBytes, "utf8");
+					launch.artifactBinding = {
+						manifestPath,
+						expectedManifestBytes,
+						wrapperPath,
+						expectedWrapperBytes,
+					};
+				},
+			},
+		];
+		for (const mutation of mutations) {
+			const fixture = makeSubagentLaunchFixture(
+				cwd,
+				`authority-sealed-${mutation.name}`,
+			);
+			const prepared = await prepareSubagentTaskLaunch(
+				cwd,
+				fixture.run,
+				fixture.task,
+				fixture.compiledTask,
+			);
+			const provenance = await createLaunchBootstrapProvenance(
+				cwd,
+				fixture.run,
+				fixture.task,
+				fixture.compiledTask,
+				"pi-subagent/headless",
+				prepared,
+			);
+			recordLaunchBootstrapProvenance(fixture.task, provenance);
+			const authority = createWorkflowLaunchAuthority(
+				fixture.run,
+				fixture.task,
+				"pi-subagent/headless",
+				provenance,
+			);
+			issueWorkflowLaunchAuthority(fixture.task, authority);
+			const authorized = { ...prepared, authority };
+			mutation.apply(authorized);
+			await assert.rejects(
+				launchSubagentTask(
+					cwd,
+					fixture.run,
+					fixture.task,
+					fixture.compiledTask,
+					undefined,
+					undefined,
+					authorized,
+				),
+				/sealed launch mismatch/,
+			);
+			assert.equal(authority.identitySha256.length, 64);
+		}
+		assert.equal(launches, 0);
+	} finally {
+		setSubagentApiForTests(undefined);
+		setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+	}
+});
+
+test("subagent launch detaches validated options from post-registration mutation", async () => {
+	const cwd = makeProject();
+	let launches = 0;
+	try {
+		const fixture = makeSubagentLaunchFixture(cwd, "authority-detached");
+		const prepared = await prepareSubagentTaskLaunch(
+			cwd,
+			fixture.run,
+			fixture.task,
+			fixture.compiledTask,
+		);
+		prepared.extensions.push("/tmp/sealed-original.mjs");
+		prepared.toolResultBudget = {
+			configured: true,
+			source: "default",
+			maxTotalChars: 123_456,
+		};
+		const provenance = await createLaunchBootstrapProvenance(
+			cwd,
+			fixture.run,
+			fixture.task,
+			fixture.compiledTask,
+			"pi-subagent/headless",
+			prepared,
+		);
+		recordLaunchBootstrapProvenance(fixture.task, provenance);
+		const authority = createWorkflowLaunchAuthority(
+			fixture.run,
+			fixture.task,
+			"pi-subagent/headless",
+			provenance,
+		);
+		issueWorkflowLaunchAuthority(fixture.task, authority);
+		const authorized = { ...prepared, authority };
+		setSubagentApiForTests({
+			async runSubagent(options) {
+				launches += 1;
+				assert.deepEqual(options.extensions, ["/tmp/sealed-original.mjs"]);
+				assert.deepEqual(options.tools, ["read"]);
+				assert.equal(options.captureToolCalls, undefined);
+				assert.deepEqual(options.toolResultBudget, {
+					maxTotalChars: 123_456,
+				});
+				return {
+					runId: "authority-detached-run",
+					attemptId: "authority-detached-attempt",
+					status: "running",
+				};
+			},
+			async getSubagentStatus() {
+				return null;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+		setSubagentLaunchControlsForTests({
+			afterLaunchAuthorityRegistered() {
+				authorized.extensions.push("/tmp/late-mutation.mjs");
+				authorized.captureToolCalls = true;
+				authorized.toolResultBudget.maxTotalChars = 1;
+				fixture.compiledTask.runtime.tools.push("grep");
+			},
+		});
+		const result = await launchSubagentTask(
+			cwd,
+			fixture.run,
+			fixture.task,
+			fixture.compiledTask,
+			undefined,
+			undefined,
+			authorized,
+		);
+		assert.equal(result.kind, "launched");
+		assert.equal(launches, 1);
+	} finally {
+		setSubagentApiForTests(undefined);
+		setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+	}
+});
+
+test("subagent launch rejects authority owned by a foreign current run", async () => {
+	const cwd = makeProject();
+	let launches = 0;
+	try {
+		setSubagentApiForTests({
+			async runSubagent() {
+				launches += 1;
+				return {
+					runId: "unexpected",
+					attemptId: "unexpected",
+					status: "running",
+				};
+			},
+			async getSubagentStatus() {
+				return null;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+		const fixture = makeSubagentLaunchFixture(cwd, "authority-foreign-run");
+		const prepared = await prepareSubagentTaskLaunch(
+			cwd,
+			fixture.run,
+			fixture.task,
+			fixture.compiledTask,
+		);
+		const provenance = await createLaunchBootstrapProvenance(
+			cwd,
+			fixture.run,
+			fixture.task,
+			fixture.compiledTask,
+			"pi-subagent/headless",
+			prepared,
+		);
+		recordLaunchBootstrapProvenance(fixture.task, provenance);
+		const authority = createWorkflowLaunchAuthority(
+			fixture.run,
+			fixture.task,
+			"pi-subagent/headless",
+			provenance,
+		);
+		issueWorkflowLaunchAuthority(fixture.task, authority);
+		const invokedRun = {
+			...fixture.run,
+			runId: "foreign-current-run",
+			tasks: [fixture.task],
+		};
+		await assert.rejects(
+			launchSubagentTask(
+				cwd,
+				invokedRun,
+				fixture.task,
+				fixture.compiledTask,
+				undefined,
+				undefined,
+				{ ...prepared, authority },
+			),
+			/authority owner mismatch/,
+		);
+		assert.equal(launches, 0);
+	} finally {
+		setSubagentApiForTests(undefined);
+		setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+	}
+});
+
+test("registered launch authority defers replay and fails closed when recovery is stale", async () => {
+	const cwd = makeProject();
+	let launches = 0;
+	try {
+		setSubagentApiForTests({
+			async runSubagent() {
+				launches += 1;
+				return {
+					runId: "unexpected",
+					attemptId: "unexpected",
+					status: "running",
+				};
+			},
+			async getSubagentStatus() {
+				return null;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+		const fixture = makeSubagentLaunchFixture(cwd, "authority-registered");
+		const prepared = await prepareSubagentTaskLaunch(
+			cwd,
+			fixture.run,
+			fixture.task,
+			fixture.compiledTask,
+		);
+		const provenance = await createLaunchBootstrapProvenance(
+			cwd,
+			fixture.run,
+			fixture.task,
+			fixture.compiledTask,
+			"pi-subagent/headless",
+			prepared,
+		);
+		recordLaunchBootstrapProvenance(fixture.task, provenance);
+		const authority = createWorkflowLaunchAuthority(
+			fixture.run,
+			fixture.task,
+			"pi-subagent/headless",
+			provenance,
+		);
+		issueWorkflowLaunchAuthority(fixture.task, authority);
+		registerWorkflowLaunchAuthority(
+			fixture.run,
+			fixture.task,
+			authority,
+			"pi-subagent/headless",
+		);
+		const replay = await launchSubagentTask(
+			cwd,
+			fixture.run,
+			fixture.task,
+			fixture.compiledTask,
+			undefined,
+			undefined,
+			{ ...prepared, authority },
+		);
+		assert.equal(replay.kind, "capacity");
+		assert.match(replay.message, /awaiting correlation recovery/);
+		assert.equal(launches, 0);
+		assert.equal(
+			fixture.task.launchAuthority.records[0].state.phase,
+			"registered",
+		);
+
+		fixture.task.startedAt = new Date(Date.now() - 120_000).toISOString();
+		const refreshed = await refreshRunFromSubagentArtifacts(cwd, fixture.run);
+		assert.equal(refreshed.tasks[0].status, "failed");
+		assert.equal(
+			refreshed.tasks[0].statusDetail,
+			"launch_authority_recovery_failed",
+		);
+		assert.match(refreshed.tasks[0].lastMessage, /refusing duplicate spawn/);
+		assert.equal(launches, 0);
+	} finally {
+		setSubagentApiForTests(undefined);
+		setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
 		rmSync(cwd, {
 			recursive: true,
 			force: true,

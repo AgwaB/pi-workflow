@@ -1,7 +1,7 @@
 {
 	"schema": "pi-workflow-unit-test-inventory-v1",
 	"source": "unit.test.mjs",
-	"count": 508,
+	"count": 516,
 	"tests": [
 		{
 			"name": "public schemaVersion 1 parser accepts artifact graph and rejects non-artifactGraph top-level shapes",
@@ -366,7 +366,7 @@
 		{
 			"name": "subagent launch retries rotate artifact-graph session ids",
 			"occurrence": 1,
-			"sha256": "f1362df17f1f7e18d0da7eab11a1be5b80a5672e2189fcdce9dd1619815c928d",
+			"sha256": "3c7eab14a731a9cf1c8586c60a78605277e6a136d3ba730a9b5caddea49f9b95",
 			"domain": "artifact-web"
 		},
 		{
@@ -498,7 +498,7 @@
 		{
 			"name": "recovered artifact graph subagent handle preserves same-session retry",
 			"occurrence": 1,
-			"sha256": "69bcc3613dab64227b8315f9d74eef2f85676e70e142cad006404d5db3395f4e",
+			"sha256": "fc840d0392c7fdc854c2b66fba0ceabe5a9f75f9d630f9e2f73b6c88a2a5950b",
 			"domain": "artifact-web"
 		},
 		{
@@ -2724,7 +2724,7 @@
 		{
 			"name": "subagent terminal observability captures usage and separates launch timing",
 			"occurrence": 1,
-			"sha256": "e9466ba2fce13b16d2ea1fe19202e49d16b50a94be9aa7b57f366a7fa909262e",
+			"sha256": "15527257bcaafaf7bef98c0f208a906da4eb31cdb7fb67ebcb712d950cb315d8",
 			"domain": "engine-store"
 		},
 		{
@@ -2736,7 +2736,7 @@
 		{
 			"name": "subagent terminal observability aggregates distinct retry attempts",
 			"occurrence": 1,
-			"sha256": "635c45399231bbd5914f96d59c8064ce1139cae49f79a826c1e837c78baa55ee",
+			"sha256": "6f309483e0f49e56302716f5df19baee30db308c516e3aa16328a642292273ad",
 			"domain": "engine-store"
 		},
 		{
@@ -2802,7 +2802,7 @@
 		{
 			"name": "refresh adopts handle-less running subagent from deterministic runsDir",
 			"occurrence": 1,
-			"sha256": "01043598d6a993f4a685bc22c874c836e30fdacfc9038d877389ee58aec9b644",
+			"sha256": "11c7e9d425196686fcabfd8b2097492c88823e212c367095a77e400ef19add22",
 			"domain": "engine-store"
 		},
 		{
@@ -3030,7 +3030,7 @@
 		{
 			"name": "launch-bootstrap provenance reloads with the prepared artifact manifest before backend spawn",
 			"occurrence": 1,
-			"sha256": "d2b4e8da14cf861292e117eab146bf8e423350c18e1f6f9d64aa30bf56bf47ca",
+			"sha256": "5af8a30442c0d85708fa32bfbf7a0320868102eebb9c1c1ae8bd4aa39f63e015",
 			"domain": "engine-store"
 		},
 		{
@@ -3049,6 +3049,54 @@
 			"name": "launch-bootstrap seals ambient extensions and rejects generated-wrapper drift before runSubagent",
 			"occurrence": 1,
 			"sha256": "f9dab42172fc69aeca47919fa810fba17e53cc766da0fcd60ed735f318b54039",
+			"domain": "engine-store"
+		},
+		{
+			"name": "workflow launch authority is deterministic and enforces its lifecycle",
+			"occurrence": 1,
+			"sha256": "3e99a33eed15b5d787e3b2422a45b2828d99d713f281e6de2c0dc72c8bea83e1",
+			"domain": "engine-store"
+		},
+		{
+			"name": "subagent launch self-bootstraps authority and refuses a consumed duplicate",
+			"occurrence": 1,
+			"sha256": "3bcbdc0a18bfc3579533a60bd2809501135d877cccd10e01dbafe674c9d35f35",
+			"domain": "engine-store"
+		},
+		{
+			"name": "concurrent same-attempt launch calls invoke runSubagent once",
+			"occurrence": 1,
+			"sha256": "03ec4acd9cea24559f7dfaeef61db3a4c4d6205c5b9f1960e3c8f47e517690c1",
+			"domain": "engine-store"
+		},
+		{
+			"name": "subagent launch rejects hook-mutated authority before runSubagent",
+			"occurrence": 1,
+			"sha256": "280ff78df166d50ddb5069cf7f709d92fe93ea30d73b884f730b2bad8e5d77b2",
+			"domain": "engine-store"
+		},
+		{
+			"name": "subagent launch rejects intact authority when the sealed launch drifts",
+			"occurrence": 1,
+			"sha256": "9fd5a0053d5d54084922bba314aa9688d209fd81584ca11b2aa77c4b929dfa0f",
+			"domain": "engine-store"
+		},
+		{
+			"name": "subagent launch detaches validated options from post-registration mutation",
+			"occurrence": 1,
+			"sha256": "4f5a0787efbdec7f312cde800e9ec7e0222b0be07d1bdcaa52138f8c55f882fd",
+			"domain": "engine-store"
+		},
+		{
+			"name": "subagent launch rejects authority owned by a foreign current run",
+			"occurrence": 1,
+			"sha256": "72037858374c750ad194225fada483bad2e2fce5c2e1a9b30a76042224b0a18a",
+			"domain": "engine-store"
+		},
+		{
+			"name": "registered launch authority defers replay and fails closed when recovery is stale",
+			"occurrence": 1,
+			"sha256": "4e895299bf4e89c87f4d4c6eee4e7747275adf6e6cc1289456a27141dcbc0c41",
 			"domain": "engine-store"
 		}
 	]

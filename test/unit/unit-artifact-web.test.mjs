@@ -5124,6 +5124,7 @@ test("subagent launch retries rotate artifact-graph session ids", async () => {
 			join(cwd, "workflows", "unit.json"),
 		);
 		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await prepareDagTask(cwd, run, compiled, 0);
 		const task = run.tasks[0];
 		task.launchRetry = { attempts: 1, maxAttempts: 5, reason: "model" };
 		const launches = [];
@@ -7750,7 +7751,13 @@ test("recovered artifact graph subagent handle preserves same-session retry", as
 			compiledPrompt: "Artifact prompt.",
 			artifactGraph,
 		};
-		await launchSubagentTask(cwd, refreshed, refreshed.tasks[0], compiledTask);
+		const preparedTask = await prepareDagTask(
+			cwd,
+			refreshed,
+			{ tasks: [compiledTask] },
+			0,
+		);
+		await launchSubagentTask(cwd, refreshed, refreshed.tasks[0], preparedTask);
 		assert.equal(relaunched.sessionId, expectedSessionId);
 	} finally {
 		if (previousSameSessionRepair === undefined)

@@ -34,6 +34,7 @@ import {
 	eventually,
 	makeProject,
 	makeSubagentLaunchFixture,
+	prepareDagTask,
 	runWorkflowSpec,
 	scheduleRun,
 	setSubagentApiForTests,
@@ -1228,11 +1229,20 @@ test("successful fail-fast interruption releases the live model worker slot imme
 			join(cwd, "workflows", "unit.json"),
 		);
 		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		const runningIndex = compiled.tasks.findIndex(
+			(task) => task.id === "running.main",
+		);
+		const preparedRunning = await prepareDagTask(
+			cwd,
+			run,
+			compiled,
+			runningIndex,
+		);
 		await launchSubagentTask(
 			cwd,
 			run,
 			taskBySpec(run, "running.main"),
-			compiled.tasks.find((task) => task.id === "running.main"),
+			preparedRunning,
 		);
 		await completeTask(cwd, taskBySpec(run, "failed.main"), {}, "failed");
 		await writeRunRecord(cwd, run);

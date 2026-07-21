@@ -1257,6 +1257,7 @@ async function refreshZeroOutputModelFailure(cwd, options) {
 		join(cwd, "workflows", "unit.json"),
 	);
 	await writeStaticRunArtifacts(cwd, run, compiled, spec);
+	await prepareDagTask(cwd, run, compiled, 0);
 	const task = run.tasks[0];
 	const runId = options.runId;
 	const attemptId = options.attemptId;
@@ -1370,6 +1371,7 @@ async function createPendingSingleTaskRun(cwd, options = {}) {
 		join(cwd, "workflows", `${options.specName ?? "unit"}.json`),
 	);
 	await writeStaticRunArtifacts(cwd, run, compiled, spec);
+	await prepareDagTask(cwd, run, compiled, 0);
 	return { compiled, run, task: run.tasks[0] };
 }
 

@@ -157,6 +157,57 @@ export function canonicalLaunchBootstrapBytes(value: unknown): Buffer {
 	return Buffer.from(canonicalJson(value), "utf8");
 }
 
+export function assertRecordedLaunchBootstrapProvenance(
+	task: WorkflowTaskRunRecord,
+	identitySha256: string,
+): LaunchBootstrapProvenanceRecord {
+	const history = task.launchBootstrap;
+	if (!isValidHistory(history))
+		throw new Error("launch-bootstrap provenance is unavailable");
+	const attempts = new Set<string>();
+	let owner: LaunchBootstrapProvenanceRecord | undefined;
+	let matched: LaunchBootstrapProvenanceRecord | undefined;
+	for (const candidate of history.records) {
+		if (
+			!isValidLaunchBootstrapRecord(candidate) ||
+			(owner !== undefined && !hasSameHistoryOwner(candidate, owner)) ||
+			attempts.has(candidate.attempt.key)
+		)
+			throw new Error("launch-bootstrap provenance is malformed");
+		owner ??= candidate;
+		attempts.add(candidate.attempt.key);
+		if (candidate.identitySha256 === identitySha256) matched = candidate;
+	}
+	if (!matched)
+		throw new Error("launch-bootstrap provenance identity is unavailable");
+	return matched;
+}
+
+export async function assertPreparedLaunchMatchesRecordedProvenance(
+	cwd: string,
+	run: WorkflowRunRecord,
+	task: WorkflowTaskRunRecord,
+	preparedTask: CompiledTask,
+	backendId: string,
+	preparedLaunch: PreparedWorkflowTaskLaunch,
+	identitySha256: string,
+): Promise<void> {
+	const recorded = assertRecordedLaunchBootstrapProvenance(
+		task,
+		identitySha256,
+	);
+	const current = await createLaunchBootstrapProvenance(
+		cwd,
+		run,
+		task,
+		preparedTask,
+		backendId,
+		preparedLaunch,
+	);
+	if (canonicalJson(recorded) !== canonicalJson(current))
+		throw new Error("workflow launch authority sealed launch mismatch");
+}
+
 function launchIdentity(
 	preparedLaunch: PreparedWorkflowTaskLaunch,
 ): LaunchBootstrapProvenanceRecord["effectiveLaunch"] {
@@ -171,7 +222,12 @@ function launchIdentity(
 			extension,
 		]),
 	);
-	if (generated.size !== preparedLaunch.generatedExtensions.length)
+	if (
+		generated.size !== preparedLaunch.generatedExtensions.length ||
+		preparedLaunch.generatedExtensions.some(
+			(extension) => !preparedLaunch.extensions.includes(extension.path),
+		)
+	)
 		throw new Error("launch-bootstrap prepared extensions are invalid");
 	return {
 		extensions: preparedLaunch.extensions.map((path) => {
@@ -198,6 +254,24 @@ function launchIdentity(
 					toolResultBudgetSha256: sha256Canonical(
 						preparedLaunch.toolResultBudget,
 					),
+				}),
+		...(preparedLaunch.artifactBinding === undefined
+			? {}
+			: {
+					artifactBinding: {
+						manifestPathSha256: sha256Text(
+							preparedLaunch.artifactBinding.manifestPath,
+						),
+						manifestBytesSha256: sha256Text(
+							preparedLaunch.artifactBinding.expectedManifestBytes,
+						),
+						wrapperPathSha256: sha256Text(
+							preparedLaunch.artifactBinding.wrapperPath,
+						),
+						wrapperBytesSha256: sha256Text(
+							preparedLaunch.artifactBinding.expectedWrapperBytes,
+						),
+					},
 				}),
 	};
 }
@@ -398,13 +472,32 @@ function isEffectiveLaunch(value: unknown): boolean {
 			"extensions",
 			"captureToolCalls",
 			"toolResultBudgetSha256",
+			"artifactBinding",
 		]) ||
 		!Array.isArray(value.extensions) ||
 		typeof value.captureToolCalls !== "boolean" ||
-		!optionalSha256(value.toolResultBudgetSha256)
+		!optionalSha256(value.toolResultBudgetSha256) ||
+		(value.artifactBinding !== undefined &&
+			!isArtifactBindingIdentity(value.artifactBinding))
 	)
 		return false;
 	return value.extensions.every((extension) => isExtensionIdentity(extension));
+}
+
+function isArtifactBindingIdentity(value: unknown): boolean {
+	return (
+		isRecord(value) &&
+		hasExactKeys(value, [
+			"manifestPathSha256",
+			"manifestBytesSha256",
+			"wrapperPathSha256",
+			"wrapperBytesSha256",
+		]) &&
+		isSha256(value.manifestPathSha256) &&
+		isSha256(value.manifestBytesSha256) &&
+		isSha256(value.wrapperPathSha256) &&
+		isSha256(value.wrapperBytesSha256)
+	);
 }
 
 function isExtensionIdentity(value: unknown): boolean {

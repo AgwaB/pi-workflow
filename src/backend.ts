@@ -1,6 +1,7 @@
 import type {
 	CompiledTask,
 	WorkflowRunRecord,
+	WorkflowLaunchAuthorityGrant,
 	WorkflowTaskRunRecord,
 	WorkflowToolResultBudgetConfigurationSource,
 } from "./types.js";
@@ -37,6 +38,7 @@ export interface PreparedWorkflowTaskLaunch {
 		wrapperPath: string;
 		expectedWrapperBytes: string;
 	};
+	authority?: WorkflowLaunchAuthorityGrant;
 }
 
 export interface WorkflowBackend {

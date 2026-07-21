@@ -833,6 +833,12 @@ export interface LaunchBootstrapProvenanceRecord {
 		}>;
 		captureToolCalls: boolean;
 		toolResultBudgetSha256?: string;
+		artifactBinding?: {
+			manifestPathSha256: string;
+			manifestBytesSha256: string;
+			wrapperPathSha256: string;
+			wrapperBytesSha256: string;
+		};
 	};
 	effectivePolicy: {
 		tools: string[];
@@ -862,6 +868,35 @@ export interface LaunchBootstrapProvenanceRecord {
 export interface LaunchBootstrapProvenanceHistory {
 	version: 1;
 	records: LaunchBootstrapProvenanceRecord[];
+}
+
+export interface WorkflowLaunchAuthorityGrant {
+	schema: "pi-workflow-launch-authority-v1";
+	identitySha256: string;
+	issuer: "pi-workflow-engine";
+	operation: "launch-task";
+	runId: string;
+	task: { taskId: string; specId: string; generation?: number };
+	attemptKey: string;
+	backendId: string;
+	launchBootstrapSha256: string;
+}
+
+export interface WorkflowLaunchAuthorityRecord {
+	grant: WorkflowLaunchAuthorityGrant;
+	state:
+		| { phase: "issued" }
+		| { phase: "registered" }
+		| {
+				phase: "consumed";
+				backendRunId: string;
+				backendAttemptId: string;
+			};
+}
+
+export interface WorkflowLaunchAuthorityHistory {
+	version: 1;
+	records: WorkflowLaunchAuthorityRecord[];
 }
 
 export interface WorkflowTaskTimingRecord {
@@ -969,6 +1004,8 @@ export interface WorkflowTaskRunRecord {
 	};
 	/** Internal persisted launch identity; not a workflow authoring or package API. */
 	launchBootstrap?: LaunchBootstrapProvenanceHistory;
+	/** Internal host-owned launch grant; not an external authority or public API. */
+	launchAuthority?: WorkflowLaunchAuthorityHistory;
 	startedAt?: string;
 	completedAt?: string;
 	elapsedMs?: number;

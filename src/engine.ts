@@ -41,6 +41,10 @@ import {
 	createLaunchBootstrapProvenance,
 	recordLaunchBootstrapProvenance,
 } from "./launch-bootstrap-provenance.js";
+import {
+	createWorkflowLaunchAuthority,
+	issueWorkflowLaunchAuthority,
+} from "./launch-authority.js";
 import { ensureManagedWorktree } from "./worktree.js";
 import { resolveWorkflowHelperRef } from "./workflow-helpers.js";
 import { buildAvailableToolView } from "./tool-metadata.js";
@@ -4152,6 +4156,14 @@ async function launchPendingTaskAt(
 				preparedLaunch,
 			);
 			recordLaunchBootstrapProvenance(task, provenance);
+			const authority = createWorkflowLaunchAuthority(
+				run,
+				task,
+				backend.id,
+				provenance,
+			);
+			issueWorkflowLaunchAuthority(task, authority);
+			const authorizedLaunch = { ...preparedLaunch, authority };
 			await writeRunRecord(cwd, run);
 			await throwIfWorkflowStopRequested(cwd, run.runId);
 			launch = await backend.launchTask(
@@ -4161,7 +4173,7 @@ async function launchPendingTaskAt(
 				worktreeLaunchTask,
 				leaseSignal,
 				stop.signal,
-				preparedLaunch,
+				authorizedLaunch,
 			);
 		} finally {
 			stop.dispose();

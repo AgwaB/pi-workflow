@@ -49,6 +49,7 @@ import {
 	fromProjectPath,
 	isTerminalTaskStatus,
 	nowIso,
+	setTaskTerminal,
 	toProjectPath,
 	writeRunRecord,
 } from "./store.js";
@@ -60,6 +61,22 @@ import {
 	retryWorkflowTaskSessionId,
 	workflowTaskSessionId,
 } from "./launch-session.js";
+import {
+	assertPreparedLaunchMatchesRecordedProvenance,
+	createLaunchBootstrapProvenance,
+	recordLaunchBootstrapProvenance,
+} from "./launch-bootstrap-provenance.js";
+import {
+	assertCurrentWorkflowLaunchAuthority,
+	consumeRegisteredWorkflowLaunchAuthority,
+	consumeWorkflowLaunchAuthority,
+	createWorkflowLaunchAuthority,
+	hasNonSpawnableWorkflowLaunchAuthority,
+	issueWorkflowLaunchAuthority,
+	registerWorkflowLaunchAuthority,
+	WorkflowLaunchAuthorityConsumedError,
+	WorkflowLaunchAuthorityRegisteredError,
+} from "./launch-authority.js";
 import {
 	applyTaskResultArtifact,
 	isTaskTimedOut,
@@ -98,6 +115,7 @@ import { PI_WORKFLOW_ROLE_ENV } from "./process-role.js";
 
 const DEFAULT_SUBAGENT_RUNS_ROOT = ".pi/workflow-subagents";
 const EXTRA_SUBAGENT_EXTENSIONS_ENV = "PI_WORKFLOW_SUBAGENT_EXTRA_EXTENSIONS";
+const SUBAGENT_HEADLESS_BACKEND_ID = "pi-subagent/headless";
 const FETCH_CONTENT_CACHE_ENV = "PI_WORKFLOW_FETCH_CONTENT_CACHE";
 const LEGACY_FETCH_CACHE_ENV = "PI_WORKFLOW_FETCH_CACHE";
 const FETCH_CONTENT_INLINE_CHARS_ENV = "PI_WORKFLOW_FETCH_CONTENT_INLINE_CHARS";
@@ -466,6 +484,9 @@ let launchSlotReleaseDelayMsForTests: number | undefined;
 let transientRetryJitterForTests: (() => number) | undefined;
 let launchSlotAcquiredHookForTests: (() => void) | undefined;
 let beforeRunSubagentHookForTests: (() => void | Promise<void>) | undefined;
+let afterLaunchAuthorityRegisteredHookForTests:
+	| (() => void | Promise<void>)
+	| undefined;
 let launchSlotReleaseGeneration = 0;
 
 interface SharedModelRateLimitBackoffState {
@@ -2204,6 +2225,7 @@ export function setSubagentLaunchControlsForTests(options?: {
 	retryJitterMs?: number | (() => number);
 	onLaunchSlotAcquired?: () => void;
 	beforeRunSubagent?: () => void | Promise<void>;
+	afterLaunchAuthorityRegistered?: () => void | Promise<void>;
 }): void {
 	launchSlotReleaseDelayMsForTests =
 		options?.releaseDelayMs === undefined
@@ -2217,6 +2239,8 @@ export function setSubagentLaunchControlsForTests(options?: {
 				: () => Math.max(0, Math.floor(options.retryJitterMs as number));
 	launchSlotAcquiredHookForTests = options?.onLaunchSlotAcquired;
 	beforeRunSubagentHookForTests = options?.beforeRunSubagent;
+	afterLaunchAuthorityRegisteredHookForTests =
+		options?.afterLaunchAuthorityRegistered;
 	launchSlotReleaseGeneration += 1;
 	activeLaunchSlots = 0;
 	activeLiveModelWorkerKeys.clear();
@@ -2382,9 +2406,33 @@ export async function launchSubagentTask(
 	const sessionId = workflowTaskSessionId(run, task);
 
 	let launched: SubagentResultEnvelope;
-	const sealedLaunch =
+	const basePreparedLaunch =
 		preparedLaunch ??
 		(await prepareSubagentTaskLaunch(cwd, run, task, compiledTask));
+	let sealedLaunch = basePreparedLaunch;
+	if (!basePreparedLaunch.authority) {
+		const provenance = await createLaunchBootstrapProvenance(
+			cwd,
+			run,
+			task,
+			compiledTask,
+			SUBAGENT_HEADLESS_BACKEND_ID,
+			basePreparedLaunch,
+		);
+		recordLaunchBootstrapProvenance(task, provenance);
+		const authority = createWorkflowLaunchAuthority(
+			run,
+			task,
+			SUBAGENT_HEADLESS_BACKEND_ID,
+			provenance,
+		);
+		issueWorkflowLaunchAuthority(task, authority);
+		sealedLaunch = { ...basePreparedLaunch, authority };
+		await writeRunRecord(cwd, run);
+	}
+	const launchAuthority = sealedLaunch.authority;
+	if (!launchAuthority)
+		throw new Error("workflow launch authority is unavailable");
 	const toolResultBudgetConfiguration = sealedLaunch.toolResultBudget;
 	let releaseLiveModelWorkerSlot: (() => void) | undefined;
 	try {
@@ -2459,7 +2507,6 @@ export async function launchSubagentTask(
 			systemPrompt: buildSystemPrompt(compiledTask),
 			model: compiledTask.runtime.model,
 			thinking: compiledTask.runtime.thinking,
-			tools: compiledTask.runtime.tools,
 			async: true,
 			onComplete: "detach",
 			asyncDependency: "needed-before-final",
@@ -2470,13 +2517,6 @@ export async function launchSubagentTask(
 			correlationId,
 			...(sessionId === undefined ? {} : { sessionId }),
 		};
-		subagentOptions.extensions = sealedLaunch.extensions;
-		if (sealedLaunch.captureToolCalls) subagentOptions.captureToolCalls = true;
-		if (toolResultBudgetConfiguration?.maxTotalChars !== undefined) {
-			subagentOptions.toolResultBudget = {
-				maxTotalChars: toolResultBudgetConfiguration.maxTotalChars,
-			};
-		}
 		const launchQueuedAt = nowIso();
 		let launchStartedAt: string | undefined;
 		recordTaskLaunchTiming(task, { launchQueuedAt });
@@ -2494,6 +2534,44 @@ export async function launchSubagentTask(
 			async () => {
 				await beforeRunSubagentHookForTests?.();
 				await assertPreparedSubagentTaskLaunch(sealedLaunch);
+				await throwIfWorkflowStopRequested(cwd, run.runId);
+				throwIfAborted(leaseSignal);
+				throwIfAborted(workflowStopSignal);
+				assertCurrentWorkflowLaunchAuthority(
+					run,
+					task,
+					launchAuthority,
+					SUBAGENT_HEADLESS_BACKEND_ID,
+				);
+				await assertPreparedLaunchMatchesRecordedProvenance(
+					cwd,
+					run,
+					task,
+					compiledTask,
+					SUBAGENT_HEADLESS_BACKEND_ID,
+					sealedLaunch,
+					launchAuthority.launchBootstrapSha256,
+				);
+				subagentOptions.tools =
+					compiledTask.runtime.tools === undefined
+						? undefined
+						: [...compiledTask.runtime.tools];
+				subagentOptions.extensions = [...sealedLaunch.extensions];
+				if (sealedLaunch.captureToolCalls)
+					subagentOptions.captureToolCalls = true;
+				if (toolResultBudgetConfiguration?.maxTotalChars !== undefined) {
+					subagentOptions.toolResultBudget = {
+						maxTotalChars: toolResultBudgetConfiguration.maxTotalChars,
+					};
+				}
+				registerWorkflowLaunchAuthority(
+					run,
+					task,
+					launchAuthority,
+					SUBAGENT_HEADLESS_BACKEND_ID,
+				);
+				await writeRunRecord(cwd, run);
+				await afterLaunchAuthorityRegisteredHookForTests?.();
 				await throwIfWorkflowStopRequested(cwd, run.runId);
 				throwIfAborted(leaseSignal);
 				throwIfAborted(workflowStopSignal);
@@ -2524,6 +2602,24 @@ export async function launchSubagentTask(
 			launchCompletedAt: nowIso(),
 		});
 	} catch (error) {
+		if (
+			error instanceof WorkflowLaunchAuthorityRegisteredError ||
+			error instanceof WorkflowLaunchAuthorityConsumedError
+		) {
+			releaseLiveModelWorkerSlot?.();
+			task.status = "running";
+			task.statusDetail = "launch_ack_pending";
+			task.lastMessage =
+				error instanceof WorkflowLaunchAuthorityConsumedError
+					? "launch authority is already consumed; awaiting handle recovery"
+					: "launch authority is already registered; awaiting correlation recovery";
+			await writeRunRecord(cwd, run).catch(() => undefined);
+			return {
+				kind: "capacity",
+				message: task.lastMessage,
+				retryAfterMs: STALE_LAUNCH_CLAIM_GRACE_MS,
+			};
+		}
 		if (workflowStopSignal?.aborted || isWorkflowStopRequestedError(error)) {
 			releaseLiveModelWorkerSlot?.();
 			clearTaskToolResultBudgetPendingConfiguration(task);
@@ -2559,6 +2655,12 @@ export async function launchSubagentTask(
 		throw error;
 	}
 
+	consumeWorkflowLaunchAuthority(
+		task,
+		launchAuthority,
+		launched.runId,
+		launched.attemptId,
+	);
 	const handle = makeSubagentHandle(
 		task,
 		launched.runId,
@@ -2639,6 +2741,18 @@ export async function refreshRunFromSubagentArtifacts(
 				changed = true;
 			}
 		}
+		if (
+			handle &&
+			consumeRegisteredWorkflowLaunchAuthority(
+				run,
+				task,
+				SUBAGENT_HEADLESS_BACKEND_ID,
+				handle.runId,
+				handle.attemptId,
+			)
+		) {
+			changed = true;
+		}
 		if (handle && task.toolResultBudget?.pendingConfiguration) {
 			bindTaskToolResultBudgetPendingConfiguration({
 				task,
@@ -2650,7 +2764,26 @@ export async function refreshRunFromSubagentArtifacts(
 		}
 		if (!handle) {
 			if (isStaleLaunchClaim(task)) {
-				resetStaleLaunchClaim(task);
+				if (
+					hasNonSpawnableWorkflowLaunchAuthority(
+						run,
+						task,
+						SUBAGENT_HEADLESS_BACKEND_ID,
+					)
+				) {
+					setTaskTerminal(
+						task,
+						"failed",
+						"launch_authority_recovery_failed",
+						{
+							exitCode: 1,
+							lastMessage:
+								"registered launch authority could not be correlated; refusing duplicate spawn",
+						},
+					);
+				} else {
+					resetStaleLaunchClaim(task);
+				}
 				releaseLiveModelWorkerSlotForTask(run, task);
 				changed = true;
 				continue;
@@ -2906,6 +3039,7 @@ function markSubagentTaskTimedOut(task: WorkflowTaskRunRecord): void {
 function isStaleLaunchClaim(task: WorkflowTaskRunRecord): boolean {
 	if (
 		(task.statusDetail !== "launching" &&
+			task.statusDetail !== "launch_ack_pending" &&
 			task.statusDetail !== "launch_ack_timeout" &&
 			task.statusDetail !== "launch_ack_aborted") ||
 		!task.startedAt
