@@ -43,6 +43,8 @@ export type {
 	CompiledWorkflow,
 	CompiledRole,
 	CompiledTask,
+	ExecutionProfileForeachBatch,
+	ExecutionProfileStageOverride,
 	FastMode,
 	WorkflowDefaults,
 	WorkflowRunProvenance,
@@ -165,11 +167,11 @@ routing-log.jsonl for direct). Use --no-route to skip the router and start
 the requested workflow directly. /workflow dynamic still requires an
 explicit --route to enable the router pass.
 
-With --profile NAME, /workflow run applies a named executionProfiles entry
-declared by the workflow spec and records it on the run. When omitted for a
-workflow with multiple profiles, interactive runs ask before launch; medium
-is the recommended first choice. Headless/print runs choose medium when it is
-declared. Explicit --profile bypasses the prompt. Routing asks only when the
-named workflow path is selected. Unknown names fail closed and list the
-declared profiles.
+With --profile NAME, /workflow run applies a custom-named executionProfiles
+entry declared by the workflow spec and records it on the run. When omitted,
+interactive runs offer the declared profiles plus the base spec. Headless/print
+runs use defaultExecutionProfile when declared, otherwise the base spec.
+Explicit --profile bypasses the prompt. Routing asks only when the named
+workflow path is selected. Unknown names fail closed and list the declared
+profiles.
 `;

@@ -109,7 +109,7 @@ const WORKFLOW_RUN_TOOL_PARAMETERS = {
 		profile: {
 			type: "string",
 			description:
-				"Optional named execution profile. Omit to ask interactively or use the workflow's medium profile in headless mode.",
+				"Optional custom-named execution profile. Omit to choose interactively or use the workflow's declared default in headless mode; without a default, the base spec runs.",
 		},
 	},
 	required: ["workflow", "task"],
@@ -767,16 +767,11 @@ type WorkflowProfileSelector = (
 	options: string[],
 ) => Promise<string | undefined>;
 
-const PROFILE_CHOICE_LABELS: Record<string, string> = {
-	medium: "Balanced (medium) — recommended; workflow pins as written",
-	low: "Fast (low) — faster/cheaper; complex reports may lose completeness",
-	high: "Thorough (high) — more reasoning; slower/costlier",
-};
-
 /**
  * Resolve an explicit or omitted execution profile for one named workflow.
- * Non-interactive callers default to `medium` when declared. Interactive
- * callers choose from the spec's declared profiles; cancellation stops launch.
+ * Headless callers use the declared default only. Interactive callers choose
+ * custom profile names deterministically and can select the base spec when no
+ * default is declared; cancellation stops launch.
  */
 export async function selectWorkflowExecutionProfile(
 	workflow: string,
@@ -788,25 +783,24 @@ export async function selectWorkflowExecutionProfile(
 	const loaded = await loadWorkflowSpec(workflow, cwd);
 	const profiles = loaded.spec.executionProfiles;
 	if (!profiles || Object.keys(profiles).length === 0) return undefined;
-	const names = Object.keys(profiles);
-	if (!select) return names.includes("medium") ? "medium" : undefined;
-	if (names.length === 1) return names[0];
-
-	const ordered = [
-		...(["medium", "low", "high"].filter((name) => names.includes(name))),
-		...names
-			.filter((name) => !["medium", "low", "high"].includes(name))
-			.sort(),
-	];
-	const labels = ordered.map(
-		(name) => PROFILE_CHOICE_LABELS[name] ?? `Profile: ${name}`,
+	const names = Object.keys(profiles).sort((left, right) =>
+		left.localeCompare(right),
 	);
+	const defaultProfile = loaded.spec.defaultExecutionProfile;
+	if (!select) return defaultProfile;
+
+	const ordered = defaultProfile
+		? [defaultProfile, ...names.filter((name) => name !== defaultProfile)]
+		: names;
+	const labels = ordered.map((name) => `Profile: ${name}`);
+	const options = [...labels, "Base (no profile)"];
 	const selected = await select(
 		`Choose execution profile for ${loaded.spec.name ?? workflow}`,
-		labels,
+		options,
 	);
 	if (selected === undefined)
 		throw new Error("Workflow run cancelled before profile selection.");
+	if (selected === "Base (no profile)") return undefined;
 	const selectedIndex = labels.indexOf(selected);
 	if (selectedIndex < 0)
 		throw new Error(`Unknown profile selection: ${selected}`);

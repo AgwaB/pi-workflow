@@ -24,9 +24,17 @@ const TOP_LEVEL_KEYS = new Set([
 	"defaults",
 	"roles",
 	"executionProfiles",
+	"defaultExecutionProfile",
 	"artifactGraph",
 ]);
-const EXECUTION_PROFILE_NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
+// Profile names are display/selection labels, not filesystem identifiers.
+const EXECUTION_PROFILE_NAME_PATTERN = /^(?=.*\S)[^\u0000-\u001f\u007f]+$/;
+const EXECUTION_PROFILE_OVERRIDE_KEYS = new Set([
+	"model",
+	"thinking",
+	"foreachBatch",
+]);
+const EXECUTION_PROFILE_FOREACH_BATCH_KEYS = new Set(["maxItems", "groupBy"]);
 const ARTIFACT_GRAPH_KEYS = new Set([
 	"stages",
 	"maxConcurrency",
@@ -312,32 +320,72 @@ function validateArtifactGraphTopLevel(
 	optionalString(spec.description, "$.description", issues);
 	validateDefaults(spec.defaults, "$.defaults", issues);
 	validateRoles(spec.roles, "$.roles", issues);
-	validateExecutionProfiles(
+	const declaredStages = collectDeclaredProfileStages(spec);
+	validateExecutionProfiles(spec.executionProfiles, declaredStages, issues);
+	validateDefaultExecutionProfile(
+		spec.defaultExecutionProfile,
 		spec.executionProfiles,
-		collectDeclaredStageIds(spec),
 		issues,
 	);
 }
 
-/** All stage ids in the graph, including nested dag container children. */
-function collectDeclaredStageIds(spec: Record<string, unknown>): Set<string> {
-	const ids = new Set<string>();
-	const visit = (stages: unknown): void => {
+type DeclaredProfileStages = {
+	byCanonicalId: ReadonlyMap<string, readonly Record<string, unknown>[]>;
+	nestedCanonicalIdsByRawId: ReadonlyMap<string, readonly string[]>;
+};
+
+/**
+ * Profile targets retain root ids and namespace dag children as `container.child`.
+ * Keeping every collision lets validation reject an ambiguous target rather than
+ * accidentally applying one raw child id to several nested stages.
+ */
+function collectDeclaredProfileStages(
+	spec: Record<string, unknown>,
+): DeclaredProfileStages {
+	const byCanonicalId = new Map<string, Record<string, unknown>[]>();
+	const nestedCanonicalIdsByRawId = new Map<string, string[]>();
+	const visit = (stages: unknown, namespace?: string): void => {
 		if (!Array.isArray(stages)) return;
 		for (const stage of stages) {
-			if (!isRecord(stage)) continue;
-			if (typeof stage.id === "string") ids.add(stage.id);
-			if (stage.type === "dag") visit(stage.stages);
+			if (!isRecord(stage) || typeof stage.id !== "string") continue;
+			const canonicalId = namespace ? `${namespace}.${stage.id}` : stage.id;
+			const targets = byCanonicalId.get(canonicalId) ?? [];
+			targets.push(stage);
+			byCanonicalId.set(canonicalId, targets);
+			if (namespace) {
+				const nestedTargets = nestedCanonicalIdsByRawId.get(stage.id) ?? [];
+				nestedTargets.push(canonicalId);
+				nestedCanonicalIdsByRawId.set(stage.id, nestedTargets);
+			}
+			if (stage.type === "dag") visit(stage.stages, canonicalId);
 		}
 	};
 	const graph = spec.artifactGraph;
 	if (isRecord(graph)) visit(graph.stages);
-	return ids;
+	return { byCanonicalId, nestedCanonicalIdsByRawId };
+}
+
+function validateDefaultExecutionProfile(
+	value: unknown,
+	profilesValue: unknown,
+	issues: ValidationIssue[],
+): void {
+	optionalString(value, "$.defaultExecutionProfile", issues);
+	if (
+		typeof value === "string" &&
+		value.trim() !== "" &&
+		(!isRecord(profilesValue) || !(value in profilesValue))
+	) {
+		issues.push({
+			path: "$.defaultExecutionProfile",
+			message: `must name a declared execution profile "${value}"`,
+		});
+	}
 }
 
 function validateExecutionProfiles(
 	value: unknown,
-	stageIds: ReadonlySet<string>,
+	declaredStages: DeclaredProfileStages,
 	issues: ValidationIssue[],
 ): void {
 	if (value === undefined) return;
@@ -350,25 +398,122 @@ function validateExecutionProfiles(
 			issues.push({
 				path: profilePath,
 				message:
-					"profile name must contain only letters, numbers, _ and -",
+					"profile name must be non-empty and contain no control characters",
 			});
 		}
 		const stageMap = recordAt(mapping, profilePath, issues);
 		if (!stageMap) continue;
-		for (const [stageId, thinking] of Object.entries(stageMap)) {
+		for (const [stageId, override] of Object.entries(stageMap)) {
 			const stagePath = `${profilePath}.${jsonKey(stageId)}`;
-			if (!stageIds.has(stageId)) {
+			const targets = declaredStages.byCanonicalId.get(stageId);
+			const nestedCanonicalIds =
+				declaredStages.nestedCanonicalIdsByRawId.get(stageId);
+			if (!targets) {
 				issues.push({
 					path: stagePath,
-					message: `unknown stage id "${stageId}"`,
+					message: nestedCanonicalIds?.length
+						? nestedCanonicalIds.length === 1
+							? `nested stage id "${stageId}" must use canonical id "${nestedCanonicalIds[0]}"`
+							: `ambiguous raw child stage id "${stageId}"; use a canonical id such as "${nestedCanonicalIds[0]}"`
+						: `unknown stage id "${stageId}"`,
 				});
-			}
-			if (!THINKING_LEVELS.includes(thinking as never)) {
+			} else if (targets.length !== 1) {
 				issues.push({
 					path: stagePath,
-					message: `must be one of: ${THINKING_LEVELS.join(", ")}`,
+					message: `ambiguous canonical stage id "${stageId}"`,
 				});
 			}
+			validateExecutionProfileStageOverride(
+				override,
+				stagePath,
+				targets?.length === 1 ? targets[0] : undefined,
+				issues,
+			);
+		}
+	}
+}
+
+function validateExecutionProfileStageOverride(
+	value: unknown,
+	path: string,
+	stage: Record<string, unknown> | undefined,
+	issues: ValidationIssue[],
+): void {
+	const override = recordAt(value, path, issues);
+	if (!override) return;
+	rejectUnknownKeys(override, EXECUTION_PROFILE_OVERRIDE_KEYS, path, issues);
+	optionalString(override.model, `${path}.model`, issues);
+	optionalEnum(override.thinking, THINKING_LEVELS, `${path}.thinking`, issues);
+	validateExecutionProfileForeachBatch(
+		override.foreachBatch,
+		`${path}.foreachBatch`,
+		stage,
+		issues,
+	);
+}
+
+function validateExecutionProfileForeachBatch(
+	value: unknown,
+	path: string,
+	stage: Record<string, unknown> | undefined,
+	issues: ValidationIssue[],
+): void {
+	if (value === undefined) return;
+	const batch = recordAt(value, path, issues);
+	if (!batch) return;
+	rejectUnknownKeys(batch, EXECUTION_PROFILE_FOREACH_BATCH_KEYS, path, issues);
+	if (batch.maxItems !== 2) {
+		issues.push({ path: `${path}.maxItems`, message: "must be exactly 2" });
+	}
+	validateExecutionProfileBatchGroupBy(
+		batch.groupBy,
+		`${path}.groupBy`,
+		issues,
+	);
+	if (stage?.type !== "foreach") {
+		issues.push({
+			path,
+			message: "is only valid when the target is a foreach stage",
+		});
+		return;
+	}
+	if (
+		!isRecord(stage.inputPolicy) ||
+		stage.inputPolicy.artifactAccess !== "none"
+	) {
+		issues.push({
+			path,
+			message:
+				'v1 requires the target foreach stage inputPolicy.artifactAccess to be explicitly "none"',
+		});
+	}
+}
+
+function validateExecutionProfileBatchGroupBy(
+	value: unknown,
+	path: string,
+	issues: ValidationIssue[],
+): void {
+	if (value === undefined) return;
+	const values = typeof value === "string" ? [value] : value;
+	if (!Array.isArray(values) || values.length === 0) {
+		issues.push({
+			path,
+			message:
+				"must be a simple item-relative JSONPath or a non-empty array of them",
+		});
+		return;
+	}
+	for (const [index, item] of values.entries()) {
+		if (
+			typeof item !== "string" ||
+			item.trim() === "" ||
+			!isSimpleJsonPath(item)
+		) {
+			issues.push({
+				path: Array.isArray(value) ? `${path}[${index}]` : path,
+				message: "must be a non-empty simple item-relative JSONPath",
+			});
 		}
 	}
 }

@@ -57,7 +57,10 @@ function writeRoutableWorkflow(cwd) {
 			name: "route-target",
 			input: { depth: "standard" },
 			defaults: { agent: "unit-scout", readOnly: true, tools: ["read"] },
-			executionProfiles: { medium: {}, low: { main: "low" } },
+			executionProfiles: {
+				medium: {},
+				low: { main: { thinking: "low" } },
+			},
 			artifactGraph: {
 				stages: [
 					{
@@ -191,9 +194,14 @@ function routedRequest(cwd, overrides = {}) {
 }
 
 function readRunDirSpec(cwd, runId) {
-	return JSON.parse(
-		readFileSync(join(cwd, ".pi", "workflows", runId, "spec.json"), "utf8"),
-	);
+	const specPath = join(cwd, ".pi", "workflows", runId, "spec.json");
+	try {
+		return JSON.parse(readFileSync(specPath, "utf8"));
+	} catch (error) {
+		throw new Error(`Could not read routed run spec: ${specPath}`, {
+			cause: error,
+		});
+	}
 }
 
 test("--route with high-confidence direct answers without starting a workflow run", async () => {
@@ -305,11 +313,12 @@ test("routed profile resolver runs only after routing selects the named workflow
 			}),
 		);
 		assert.equal(outcome.mode, "workflow");
+		assert.equal(calls.router, 1);
 		assert.equal(resolved, 1);
 		const run = await readRunRecord(cwd, outcome.run.runId);
 		assert.deepEqual(run.executionProfile, {
 			name: "low",
-			stageThinking: { main: "low" },
+			stageOverrides: { main: { thinking: "low" } },
 		});
 	} finally {
 		setSubagentApiForTests(undefined);
@@ -473,9 +482,8 @@ test("runs without --route never invoke the router subagent", async () => {
 			false,
 		);
 		assert.equal(
-			parseWorkflowRunArgs(
-				'run route-target "Keep literal --no-route inside"',
-			).route,
+			parseWorkflowRunArgs('run route-target "Keep literal --no-route inside"')
+				.route,
 			undefined,
 		);
 
@@ -543,7 +551,7 @@ test("/workflow run routes by default and --no-route skips the router", async ()
 				confirm: async () => true,
 				select: async (_title, options) => {
 					profilePrompts += 1;
-					return options.find((option) => option.startsWith("Balanced"));
+					return options.find((option) => option === "Profile: medium");
 				},
 			},
 		};

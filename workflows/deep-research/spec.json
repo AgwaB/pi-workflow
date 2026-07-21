@@ -20,17 +20,47 @@
   "input": {
     "depth": "standard"
   },
+  "defaultExecutionProfile": "medium",
   "executionProfiles": {
     "low": {
-      "research-questions": "low",
-      "normalize-claims": "medium",
-      "verify-claims": "low",
-      "final-audit": "high"
+      "research-questions": {
+        "thinking": "low"
+      },
+      "normalize-claims": {
+        "thinking": "medium"
+      },
+      "verify-claims": {
+        "thinking": "low",
+        "foreachBatch": {
+          "maxItems": 2,
+          "groupBy": [
+            "$.sourceRefs",
+            "$.sourceUrls"
+          ]
+        }
+      },
+      "final-audit": {
+        "thinking": "high"
+      }
     },
-    "medium": {},
+    "medium": {
+      "verify-claims": {
+        "foreachBatch": {
+          "maxItems": 2,
+          "groupBy": [
+            "$.sourceRefs",
+            "$.sourceUrls"
+          ]
+        }
+      }
+    },
     "high": {
-      "research-questions": "high",
-      "verify-claims": "xhigh"
+      "research-questions": {
+        "thinking": "high"
+      },
+      "verify-claims": {
+        "thinking": "xhigh"
+      }
     }
   },
   "artifactGraph": {

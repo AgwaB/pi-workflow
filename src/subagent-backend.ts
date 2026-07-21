@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import {
 	copyFile,
@@ -38,6 +38,7 @@ import type {
 	WorkflowTaskUsageRecord,
 	WorkflowTaskUsageValues,
 	WorkflowTaskRunRecord,
+	WorkflowForeachBatchRecord,
 	WorkflowToolResultBudgetConfigurationSource,
 } from "./types.js";
 import type { JsonSchema } from "./json-schema.js";
@@ -51,6 +52,8 @@ import {
 	nowIso,
 	setTaskTerminal,
 	toProjectPath,
+	workflowRunDir,
+	writeJsonAtomic,
 	writeRunRecord,
 } from "./store.js";
 import {
@@ -102,7 +105,10 @@ import { isWorkflowWebSourceTool } from "./workflow-web-source.js";
 import {
 	buildWorkflowOutputRetryInstructions,
 	parseWorkflowOutputForBundle,
+	validateWorkflowOutputForBundle,
+	writeValidatedWorkflowTaskArtifactBundle,
 	writeWorkflowTaskArtifactBundle,
+	type ValidParsedWorkflowOutput,
 	type WorkflowTaskFailedToolCallSummary,
 } from "./workflow-output-artifacts.js";
 import {
@@ -111,6 +117,17 @@ import {
 	workflowExperimentalFlagEnabled,
 } from "./experimental-speed-flags.js";
 import { writeWorkflowPartialOutputLedgerFromFile } from "./workflow-partial-output.js";
+import {
+	activeForeachBatchRecordForTask,
+	applyForeachBatchFallback,
+	assertForeachBatchRecord,
+	foreachBatchLeaderTask,
+	foreachBatchTasks,
+	parseForeachBatchEnvelope,
+	reconstructForeachBatchItemOutput,
+	setForeachBatchPhase,
+	sha256Text,
+} from "./foreach-batch-runtime.js";
 import { PI_WORKFLOW_ROLE_ENV } from "./process-role.js";
 
 const DEFAULT_SUBAGENT_RUNS_ROOT = ".pi/workflow-subagents";
@@ -2266,6 +2283,8 @@ export async function cleanupSubagentRun(
 	const errors: unknown[] = [];
 	for (const task of run.tasks) {
 		if (task.status !== "running") continue;
+		const batch = activeForeachBatchRecordForTask(run, task);
+		if (batch && task.foreachBatch?.role === "member") continue;
 		try {
 			await acknowledgeSubagentTaskInterrupted(run, task, "workflow cleanup");
 			task.statusDetail = "cancellation_acknowledged";
@@ -2715,13 +2734,21 @@ export async function refreshRunFromSubagentArtifacts(
 	cwd: string,
 	run: WorkflowRunRecord,
 ): Promise<WorkflowRunRecord> {
-	let changed = false;
+	let changed = await recoverForeachBatchRuntime(cwd, run);
 	let telemetryChanged = false;
 	const pollItems: RefreshPollItem[] = [];
 	reconcileLiveModelWorkerSlots(run);
 
 	for (const [order, task] of run.tasks.entries()) {
 		if (isTerminalTaskStatus(task.status) || task.status !== "running")
+			continue;
+		const activeBatch = activeForeachBatchRecordForTask(run, task);
+		if (activeBatch && task.foreachBatch?.role === "member") continue;
+		if (
+			activeBatch &&
+			activeBatch.phase !== "launching" &&
+			activeBatch.phase !== "running"
+		)
 			continue;
 		let handle = getSubagentHandle(task);
 		if (!handle) {
@@ -2771,6 +2798,14 @@ export async function refreshRunFromSubagentArtifacts(
 						SUBAGENT_HEADLESS_BACKEND_ID,
 					)
 				) {
+					if (activeBatch) {
+						await fallbackForeachBatchAfterTerminal(
+							cwd,
+							run,
+							activeBatch,
+							"batch launch authority could not be correlated",
+						);
+					} else {
 					setTaskTerminal(
 						task,
 						"failed",
@@ -2781,8 +2816,18 @@ export async function refreshRunFromSubagentArtifacts(
 								"registered launch authority could not be correlated; refusing duplicate spawn",
 						},
 					);
+					}
 				} else {
 					resetStaleLaunchClaim(task);
+					if (activeBatch) {
+						const [, member] = foreachBatchTasks(run, activeBatch);
+						setForeachBatchPhase(run, activeBatch, "prepared");
+						member.status = "pending";
+						member.statusDetail = "pending";
+						member.startedAt = undefined;
+						member.lastMessage =
+							"foreach batch leader launch claim expired; retrying exact prepared pair";
+					}
 				}
 				releaseLiveModelWorkerSlotForTask(run, task);
 				changed = true;
@@ -2791,6 +2836,13 @@ export async function refreshRunFromSubagentArtifacts(
 			if (isTaskTimedOut(task)) {
 				markSubagentTaskTimedOut(task);
 				releaseLiveModelWorkerSlotForTask(run, task);
+				if (activeBatch)
+					await fallbackForeachBatchAfterTerminal(
+						cwd,
+						run,
+						activeBatch,
+						"batch leader timed out before a backend handle was recovered",
+					);
 				changed = true;
 			}
 			continue;
@@ -2808,9 +2860,30 @@ export async function refreshRunFromSubagentArtifacts(
 		: [];
 	const refreshErrors: unknown[] = [];
 
-	for (const pollResult of pollResults) {
+	for (const [pollIndex, pollResult] of pollResults.entries()) {
 		if (pollResult.status === "rejected") {
 			refreshErrors.push(pollResult.reason);
+			const item = pollItems[pollIndex];
+			if (item && isTaskTimedOut(item.task)) {
+				try {
+					await interruptTimedOutSubagent(api!, item.task, item.handle);
+					markSubagentTaskTimedOut(item.task);
+					releaseLiveModelWorkerSlotForTask(run, item.task);
+					const batch = activeForeachBatchRecordForTask(run, item.task);
+					if (batch) {
+						await fallbackForeachBatchAfterTerminal(
+							cwd,
+							run,
+							batch,
+							"batch leader timed out after backend refresh failure",
+						);
+					}
+				} catch (error) {
+					markCancellationFailed(item.task, "timeout", error);
+					refreshErrors.push(error);
+				}
+				changed = true;
+			}
 			continue;
 		}
 		const { task, handle, snapshot, reconcileMs, statusPollMs } =
@@ -2827,6 +2900,14 @@ export async function refreshRunFromSubagentArtifacts(
 					await interruptTimedOutSubagent(api!, task, handle);
 					markSubagentTaskTimedOut(task);
 					releaseLiveModelWorkerSlotForTask(run, task);
+					const batch = activeForeachBatchRecordForTask(run, task);
+					if (batch)
+						await fallbackForeachBatchAfterTerminal(
+							cwd,
+							run,
+							batch,
+							"batch leader timed out while backend status was unavailable",
+						);
 				} catch (error) {
 					markCancellationFailed(task, "timeout", error);
 					refreshErrors.push(error);
@@ -2865,6 +2946,14 @@ export async function refreshRunFromSubagentArtifacts(
 					await interruptTimedOutSubagent(api!, task, handle);
 					markSubagentTaskTimedOut(task);
 					releaseLiveModelWorkerSlotForTask(run, task);
+					const batch = activeForeachBatchRecordForTask(run, task);
+					if (batch)
+						await fallbackForeachBatchAfterTerminal(
+							cwd,
+							run,
+							batch,
+							"batch leader timed out",
+						);
 				} catch (error) {
 					markCancellationFailed(task, "timeout", error);
 					refreshErrors.push(error);
@@ -3180,6 +3269,29 @@ async function materializeTerminalSubagentResult(
 		startedAt,
 		completedAt,
 	});
+	const activeForeachBatch = activeForeachBatchRecordForTask(run, task);
+	if (activeForeachBatch && task.foreachBatch?.role === "leader") {
+		activeForeachBatch.physicalExecution = {
+			leaderTaskId: task.taskId,
+			...(task.usage === undefined ? {} : { usage: task.usage }),
+			...(task.timing === undefined ? {} : { timing: task.timing }),
+		};
+		const changed = await materializeTerminalForeachBatchResult({
+			cwd,
+			run,
+			task,
+			record: activeForeachBatch,
+			rawOutput: outputText,
+			stderr: stderrText,
+			snapshot,
+			status: terminalForeachBatchStatus(statusInfo.status),
+			completedAt,
+			startedAt,
+			exitCode,
+		});
+		await recordTerminalParentSubagentChildEvent(run, task, snapshot);
+		return changed;
+	}
 	if (statusInfo.status === "completed") {
 		observeLiveModelWorkerCompletion(
 			modelRateLimitBackoffKey(task),
@@ -3313,6 +3425,387 @@ async function materializeTerminalSubagentResult(
 	}
 	await recordTerminalParentSubagentChildEvent(run, task, snapshot);
 	return changed;
+}
+
+type TerminalForeachBatchMaterializationInput = {
+	cwd: string;
+	run: WorkflowRunRecord;
+	task: WorkflowTaskRunRecord;
+	record: WorkflowForeachBatchRecord;
+	rawOutput: string;
+	stderr: string;
+	snapshot: SubagentRunStatusSnapshot;
+	status: "completed" | "failed" | "interrupted";
+	completedAt: string;
+	startedAt?: string;
+	exitCode: number;
+};
+
+function terminalForeachBatchStatus(
+	status: string,
+): "completed" | "failed" | "interrupted" {
+	if (status === "completed") return "completed";
+	return status === "interrupted" ? "interrupted" : "failed";
+}
+
+function foreachBatchArtifactDirectory(
+	cwd: string,
+	run: WorkflowRunRecord,
+	record: WorkflowForeachBatchRecord,
+): string {
+	// The digest prevents a corrupt persisted batch id from becoming a path.
+	return join(
+		workflowRunDir(cwd, run.runId),
+		"foreach-batches",
+		sha256Text(record.batchId),
+	);
+}
+
+async function writeForeachBatchTextAtomic(
+	file: string,
+	value: string,
+): Promise<void> {
+	await mkdir(dirname(file), { recursive: true });
+	const temporary = `${file}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
+	await writeFile(temporary, value, "utf8");
+	await rename(temporary, file);
+}
+
+async function persistTerminalForeachBatchEvidence(
+	input: TerminalForeachBatchMaterializationInput,
+): Promise<void> {
+	const directory = foreachBatchArtifactDirectory(
+		input.cwd,
+		input.run,
+		input.record,
+	);
+	const rawFile = join(directory, `raw-attempt-${input.record.attempt}.md`);
+	const receiptFile = join(
+		directory,
+		`receipt-attempt-${input.record.attempt}.json`,
+	);
+	await writeForeachBatchTextAtomic(rawFile, input.rawOutput);
+	await writeJsonAtomic(receiptFile, {
+		schema: "workflow-foreach-batch-receipt-v1",
+		batchId: input.record.batchId,
+		attempt: input.record.attempt,
+		phase: "terminal_received",
+		members: input.record.members.map((member) => ({
+			taskId: member.taskId,
+			specId: member.specId,
+			role: member.role,
+		})),
+		status: input.status,
+		completedAt: input.completedAt,
+		startedAt: input.startedAt,
+		exitCode: input.exitCode,
+		backend: {
+			runId: input.snapshot.runId,
+			attemptId: input.snapshot.attemptId,
+			backend: input.snapshot.backend,
+			failureKind: input.snapshot.failureKind,
+		},
+		rawSha256: sha256Text(input.rawOutput),
+	});
+	input.record.terminal = {
+		receivedAt: nowIso(),
+		rawPath: toProjectPath(input.cwd, rawFile),
+		receiptPath: toProjectPath(input.cwd, receiptFile),
+		rawSha256: sha256Text(input.rawOutput),
+		backendRunId: input.snapshot.runId,
+		backendAttemptId: input.snapshot.attemptId,
+		status: input.status,
+		completedAt: input.completedAt,
+		...(input.startedAt === undefined ? {} : { startedAt: input.startedAt }),
+		exitCode: input.exitCode,
+	};
+	setForeachBatchPhase(input.run, input.record, "terminal_received");
+	await writeRunRecord(input.cwd, input.run);
+}
+
+async function fallbackForeachBatchAfterTerminal(
+	cwd: string,
+	run: WorkflowRunRecord,
+	record: WorkflowForeachBatchRecord,
+	reason: string,
+): Promise<void> {
+	const directory = foreachBatchArtifactDirectory(cwd, run, record);
+	const diagnosticFile = join(
+		directory,
+		`fallback-attempt-${record.attempt}.json`,
+	);
+	await writeJsonAtomic(diagnosticFile, {
+		schema: "workflow-foreach-batch-fallback-v1",
+		batchId: record.batchId,
+		attempt: record.attempt,
+		reason,
+		terminal: record.terminal,
+	});
+	setForeachBatchPhase(run, record, "fallback_prepared");
+	record.fallback = {
+		preparedAt: nowIso(),
+		reason,
+		diagnosticsPath: toProjectPath(cwd, diagnosticFile),
+	};
+	await writeRunRecord(cwd, run);
+	applyForeachBatchFallback(run, record, reason);
+	await writeRunRecord(cwd, run);
+}
+
+async function foreachBatchMemberParseOptions(
+	cwd: string,
+	run: WorkflowRunRecord,
+	task: WorkflowTaskRunRecord,
+) {
+	const artifactOptions = task.artifactGraph?.output;
+	return {
+		analysisRequired: artifactOptions?.analysisRequired ?? true,
+		refsRequired: artifactOptions?.refsRequired ?? true,
+		refsMinItems: artifactOptions?.refsMinItems,
+		refsUrlValidation: artifactOptions?.refsUrlValidation,
+		refsAllowedLocators: await directDynamicSynthesisAllowedRefLocators(
+			cwd,
+			run,
+			task,
+		),
+		maxDigestChars: artifactOptions?.maxDigestChars,
+		controlJsonSchema: await readTaskControlJsonSchema(task),
+		outputProfile: task.dynamicGenerated?.outputProfile,
+	};
+}
+
+async function commitTerminalForeachBatch(
+	input: Omit<TerminalForeachBatchMaterializationInput, "snapshot" | "status">,
+): Promise<boolean> {
+	const {
+		cwd,
+		run,
+		record,
+		rawOutput,
+		stderr,
+		completedAt,
+		startedAt,
+		exitCode,
+	} = input;
+	const tasks = foreachBatchTasks(run, record);
+	setForeachBatchPhase(run, record, "committing");
+	record.commit ??= { startedAt: nowIso() };
+	await writeRunRecord(cwd, run);
+
+	const expectedTaskIds = record.members.map((member) => member.taskId);
+	const envelope = parseForeachBatchEnvelope(rawOutput, expectedTaskIds);
+	if (!envelope.valid) {
+		await fallbackForeachBatchAfterTerminal(
+			cwd,
+			run,
+			record,
+			`invalid foreach batch envelope: ${envelope.reason}`,
+		);
+		return true;
+	}
+	const itemByTaskId = new Map(envelope.items.map((item) => [item.id, item]));
+	let validated: Array<{
+		task: WorkflowTaskRunRecord;
+		rawOutput: string;
+		parsed: ValidParsedWorkflowOutput;
+		parseOptions: Awaited<ReturnType<typeof foreachBatchMemberParseOptions>>;
+	}>;
+	try {
+		validated = await Promise.all(
+			tasks.map(async (task) => {
+				const item = itemByTaskId.get(task.taskId);
+				if (!item)
+					throw new Error(
+						`batch item ${task.taskId} is missing after envelope validation`,
+					);
+				const itemRawOutput = reconstructForeachBatchItemOutput(item);
+				const parseOptions = await foreachBatchMemberParseOptions(
+					cwd,
+					run,
+					task,
+				);
+				const parsed = await validateWorkflowOutputForBundle(
+					itemRawOutput,
+					parseOptions,
+				);
+				if (!parsed.valid) {
+					throw new Error(
+						`batch item ${task.taskId} is invalid: ${parsed.issues
+							.map((issue) => issue.message)
+							.join("; ")}`,
+					);
+				}
+				return {
+					task,
+					rawOutput: itemRawOutput,
+					parsed: parsed as ValidParsedWorkflowOutput,
+					parseOptions,
+				};
+			}),
+		);
+	} catch (error) {
+		await fallbackForeachBatchAfterTerminal(
+			cwd,
+			run,
+			record,
+			`invalid foreach batch member output: ${error instanceof Error ? error.message : String(error)}`,
+		);
+		return true;
+	}
+
+	// All controls/schemas/refs are now valid in memory. No child bundle has
+	// been written before this point, so an invalid sibling cannot be accepted.
+	await Promise.all(
+		validated.map(async (candidate) => {
+			const taskDirectory = dirname(
+				fromProjectPath(cwd, candidate.task.files.result),
+			);
+			await mkdir(taskDirectory, { recursive: true });
+			const itemStderr =
+				candidate.task.foreachBatch?.role === "leader" ? stderr : "";
+			await Promise.all([
+				writeForeachBatchTextAtomic(
+					fromProjectPath(cwd, candidate.task.files.output),
+					candidate.rawOutput,
+				),
+				writeForeachBatchTextAtomic(
+					fromProjectPath(cwd, candidate.task.files.stderr),
+					itemStderr,
+				),
+			]);
+			await writeValidatedWorkflowTaskArtifactBundle(
+				{
+					taskDir: taskDirectory,
+					rawOutput: candidate.rawOutput,
+					startedAt,
+					completedAt,
+					exitCode,
+					stderr: itemStderr,
+					...candidate.parseOptions,
+				},
+				candidate.parsed,
+			);
+		}),
+	);
+
+	setForeachBatchPhase(run, record, "completed");
+	record.commit = {
+		startedAt: record.commit.startedAt,
+		completedAt: nowIso(),
+	};
+	for (const task of tasks) {
+		setTaskTerminal(task, "completed", "completed", {
+			completedAt,
+			exitCode,
+			lastMessage: "completed from foreach batch demux",
+		});
+		delete task.backendHandle;
+		delete task.backendFiles;
+		if (task.foreachBatch?.role === "member") task.backendTaskId = task.taskId;
+	}
+	await writeRunRecord(cwd, run);
+	return true;
+}
+
+async function materializeTerminalForeachBatchResult(
+	input: TerminalForeachBatchMaterializationInput,
+): Promise<boolean> {
+	await persistTerminalForeachBatchEvidence(input);
+	if (input.status !== "completed") {
+		await fallbackForeachBatchAfterTerminal(
+			input.cwd,
+			input.run,
+			input.record,
+			`batch backend terminal ${input.status}`,
+		);
+		return true;
+	}
+	return await commitTerminalForeachBatch(input);
+}
+
+/** Recover durable terminal/fallback boundaries without recomputing membership. */
+export async function recoverForeachBatchRuntime(
+	cwd: string,
+	run: WorkflowRunRecord,
+): Promise<boolean> {
+	let changed = false;
+	for (const record of run.foreachBatches ?? []) {
+		assertForeachBatchRecord(record);
+		foreachBatchTasks(run, record);
+		if (record.phase === "fallback_prepared") {
+			const reason =
+				record.fallback?.reason ?? "incomplete foreach batch fallback";
+			applyForeachBatchFallback(run, record, reason);
+			changed = true;
+			continue;
+		}
+		if (record.phase === "terminal_received" || record.phase === "committing") {
+			const terminal = record.terminal;
+			if (!terminal) {
+				throw new Error(
+					`foreach batch ${record.batchId} has no terminal receipt for ${record.phase}`,
+				);
+			}
+			if (terminal.status !== "completed") {
+				await fallbackForeachBatchAfterTerminal(
+					cwd,
+					run,
+					record,
+					record.fallback?.reason ??
+						`batch backend terminal ${terminal.status}`,
+				);
+				changed = true;
+				continue;
+			}
+			const rawOutput = await readFile(
+				fromProjectPath(cwd, terminal.rawPath),
+				"utf8",
+			);
+			if (sha256Text(rawOutput) !== terminal.rawSha256) {
+				throw new Error(
+					`foreach batch ${record.batchId} terminal raw evidence integrity failed`,
+				);
+			}
+			const leader = foreachBatchLeaderTask(run, record);
+			const stderr = await readFile(
+				fromProjectPath(cwd, leader.files.stderr),
+				"utf8",
+			).catch(() => "");
+			await commitTerminalForeachBatch({
+				cwd,
+				run,
+				task: leader,
+				record,
+				rawOutput,
+				stderr,
+				completedAt: terminal.completedAt ?? nowIso(),
+				startedAt: terminal.startedAt,
+				exitCode: terminal.exitCode ?? 0,
+			});
+			changed = true;
+			continue;
+		}
+		if (record.phase !== "launching") continue;
+		const [leader, member] = foreachBatchTasks(run, record);
+		if (leader.status === "pending" && !leader.backendHandle) {
+			setForeachBatchPhase(run, record, "prepared");
+			member.status = "pending";
+			member.statusDetail = "pending";
+			member.startedAt = undefined;
+			member.lastMessage =
+				"foreach batch launch was not claimed; retrying exact prepared pair";
+			changed = true;
+		}
+	}
+	if (changed) await writeRunRecord(cwd, run);
+	return changed;
+}
+
+export async function recoverForeachBatchRuntimeForTests(
+	cwd: string,
+	run: WorkflowRunRecord,
+): Promise<boolean> {
+	return await recoverForeachBatchRuntime(cwd, run);
 }
 
 function artifactGraphRetrySession(
@@ -5341,7 +5834,15 @@ function buildSystemPrompt(task: CompiledTask): string {
 	const workflowRefsMinItems = task.artifactGraph?.output.refsMinItems;
 	const workflowRefsUrlValidation =
 		task.artifactGraph?.output.refsUrlValidation;
-	const workflowOutputContract = task.artifactGraph?.enabled
+	const workflowOutputContract =
+		task.foreachBatchSynthetic?.schema === "workflow-foreach-batch-v1"
+			? [
+					"# Workflow Output Contract",
+					"This is a runtime-managed foreach batch. The exact outer control envelope is defined in the task prompt and overrides singleton control requirements.",
+					"Your final response must start exactly with <control> and end exactly with </refs>, with no prose outside the three required sections.",
+					"Do not add a singleton control.digest field or any other outer-envelope key not required by the batch prompt.",
+				]
+			: task.artifactGraph?.enabled
 		? [
 				"# Workflow Output Contract",
 				"For this workflow task, the output protocol in the task prompt overrides any direct-response format in the agent definition.",
