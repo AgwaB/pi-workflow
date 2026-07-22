@@ -2579,6 +2579,96 @@ test("deep-research final-audit packet compacts deterministic ledgers", async ()
 	assert.equal(result.packet.remainingGaps[0].id, "gap-remaining-001");
 });
 
+test("deep-research final-audit packet does not preserve contradicted fact-slot values as filled", async () => {
+	const { default: helper } = await import(
+		`../../workflows/deep-research/helpers/final-audit-packet.mjs?test=${Date.now()}`
+	);
+	const result = await helper({
+		sources: {
+			"plan.main": {
+				factSlots: [
+					{ id: "slot-price" },
+					{ id: "slot-capability" },
+					{ id: "slot-supported" },
+				],
+			},
+			"normalize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [
+						{ id: "claim-price", factSlotIds: ["slot-price"] },
+						{ id: "claim-capability", factSlotIds: ["slot-capability"] },
+						{ id: "claim-supported", factSlotIds: ["slot-supported"] },
+					],
+				},
+				factSlotCoverage: [
+					{
+						slotId: "slot-price",
+						status: "filled",
+						bestValue: "wrong neighboring-row price",
+					},
+					{
+						slotId: "slot-capability",
+						status: "filled",
+						bestValue: "family-level capability",
+					},
+					{
+						slotId: "slot-supported",
+						status: "filled",
+						bestValue: "directly verified value",
+					},
+				],
+			},
+			"audit-claims.main": {
+				claimDigests: [
+					{
+						id: "claim-price",
+						status: "conflicting",
+						factSlotIds: ["slot-price"],
+						correctionOrCounterclaim: "correct model-row price",
+					},
+					{
+						id: "claim-capability",
+						status: "partially_supported",
+						factSlotIds: ["slot-capability"],
+					},
+					{
+						id: "claim-supported",
+						status: "verified",
+						factSlotIds: ["slot-supported"],
+					},
+					{
+						id: "claim-supported-caveat",
+						status: "partially_supported",
+						factSlotIds: ["slot-supported"],
+					},
+				],
+				gateSummary: {},
+			},
+		},
+	});
+	const byId = new Map(
+		result.packet.factSlotCoverage.map((slot) => [slot.slotId, slot]),
+	);
+	assert.equal(byId.get("slot-price").status, "conflicting");
+	assert.equal(byId.get("slot-price").bestValue, "correct model-row price");
+	assert.match(byId.get("slot-price").gapReason, /claim-price/);
+	assert.equal(byId.get("slot-capability").status, "partial");
+	assert.match(byId.get("slot-capability").gapReason, /no audited verified claim/);
+	assert.equal(byId.get("slot-supported").status, "filled");
+	assert.equal(result.packet.factSlotStatusCounts.conflicting, 1);
+	assert.equal(result.packet.synthesisInput.factSlotStatusCounts.partial, 1);
+	assert.equal(result.packet.researchMetadataSeed.filledFactSlots, 1);
+	assert.equal(result.packet.researchMetadataSeed.partialFactSlots, 1);
+	assert.equal(result.packet.researchMetadataSeed.missingFactSlots, 1);
+	assert.equal(result.packet.researchMetadataSeed.conflictingFactSlots, 1);
+	assert.equal(
+		result.packet.researchMetadataSeed.filledFactSlots +
+			result.packet.researchMetadataSeed.partialFactSlots +
+			result.packet.researchMetadataSeed.missingFactSlots,
+		result.packet.researchMetadataSeed.plannedFactSlots,
+	);
+});
+
 test("deep-research P3 final-audit replay fixture preserves guardrail floors", async () => {
 	const fixturePath = join(
 		dirname(fileURLToPath(import.meta.url)),

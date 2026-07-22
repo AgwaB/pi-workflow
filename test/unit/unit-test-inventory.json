@@ -1,7 +1,7 @@
 {
 	"schema": "pi-workflow-unit-test-inventory-v1",
 	"source": "unit.test.mjs",
-	"count": 516,
+	"count": 517,
 	"tests": [
 		{
 			"name": "public schemaVersion 1 parser accepts artifact graph and rejects non-artifactGraph top-level shapes",
@@ -3098,6 +3098,12 @@
 			"occurrence": 1,
 			"sha256": "4e895299bf4e89c87f4d4c6eee4e7747275adf6e6cc1289456a27141dcbc0c41",
 			"domain": "engine-store"
+		},
+		{
+			"name": "deep-research final-audit packet does not preserve contradicted fact-slot values as filled",
+			"occurrence": 1,
+			"sha256": "df1de807cc6a63dc7f032f7d34bedf48812b73d89b8cad8f8c1e76ca439916e2",
+			"domain": "core-runtime"
 		}
 	]
 }

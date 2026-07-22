@@ -15,13 +15,13 @@ const domainFiles = [
 	"unit-engine-store.test.mjs",
 ];
 
-test("unit domain split preserves the exact 516-test inventory", () => {
+test("unit domain split preserves the exact 517-test inventory", () => {
 	assert.equal(existsSync(join(unitDir, "unit.test.mjs")), false);
 	const inventory = JSON.parse(
 		readFileSync(join(unitDir, "unit-test-inventory.json"), "utf8"),
 	);
 	assert.equal(inventory.schema, "pi-workflow-unit-test-inventory-v1");
-	assert.equal(inventory.count, 516);
+	assert.equal(inventory.count, 517);
 
 	const actual = [];
 	const occurrences = new Map();
