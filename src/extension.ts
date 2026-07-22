@@ -65,6 +65,12 @@ import {
 	type WorkflowRuntimeDefaults,
 } from "./workflow-runtime.js";
 import {
+	activeTopLevelWorkflowRuns,
+	clearActiveWorkflowUi,
+	renderActiveWorkflowUi,
+	withWorkflowLaunchForeground,
+} from "./workflow-active-ui.js";
+import {
 	beginParentUsageTracking,
 	recordParentSessionUsage,
 	resumeParentUsageTracking,
@@ -76,6 +82,11 @@ const UNFINISHED_RUN_NOTICE_DEDUPE_MS = 6 * 60 * 60 * 1000;
 const RUN_FEEDBACK_POLL_MS = 2_000;
 const WORKFLOW_FEEDBACK_LOCK_STALE_MS = 10 * 60 * 1000;
 const runFeedbackTimers = new Map<string, ReturnType<typeof setInterval>>();
+const activeWorkflowUiTimers = new Map<
+	string,
+	ReturnType<typeof setInterval>
+>();
+const workflowUiSessionControllers = new Map<string, AbortController>();
 
 export const WORKFLOW_LIST_TOOL = "workflow_list" as const;
 export const WORKFLOW_RUN_TOOL = "workflow_run" as const;
@@ -145,19 +156,42 @@ const WORKFLOW_DYNAMIC_TOOL_PARAMETERS = {
 export default function workflowExtension(pi: ExtensionAPI): void {
 	let workflowCompletionCache: Array<{ name: string }> = [];
 	pi.on("session_start", async (event, ctx) => {
+		invalidateWorkflowUiSession(ctx.cwd);
+		clearWorkflowFeedbackTimersForCwd(ctx.cwd);
+		clearActiveWorkflowUiTimerForCwd(ctx.cwd);
+		clearActiveWorkflowUi(ctx);
 		if (!isWorkflowSupervisorEnabled()) return;
+		const uiSessionSignal = startWorkflowUiSession(ctx.cwd);
 		workflowCompletionCache = await listWorkflows(ctx.cwd).catch(
 			() => workflowCompletionCache,
 		);
+		if (uiSessionSignal.aborted) return;
 		await resumeParentUsageTracking(ctx.cwd).catch(() => undefined);
+		if (uiSessionSignal.aborted) return;
 		await resumeSupervisors(ctx.cwd, {
 			dynamicUi: dynamicUiFromContext(ctx),
 		}).catch(() => undefined);
-		await notifyUnfinishedRuns(ctx.cwd, (message, type) =>
-			ctx.ui.notify(message, type),
-		).catch(() => undefined);
+		if (uiSessionSignal.aborted) return;
+		await restoreActiveWorkflowUi(ctx, pi, uiSessionSignal).catch(
+			() => undefined,
+		);
+		if (uiSessionSignal.aborted) return;
+		startActiveWorkflowUiPolling(ctx, pi, uiSessionSignal);
+		await notifyUnfinishedRuns(ctx.cwd, (message, type) => {
+			if (!uiSessionSignal.aborted) ctx.ui.notify(message, type);
+		}).catch(() => undefined);
+		if (uiSessionSignal.aborted) return;
 		if (event.reason !== "reload")
-			await deliverMissedWorkflowFeedback(ctx, pi).catch(() => undefined);
+			await deliverMissedWorkflowFeedback(ctx, pi, uiSessionSignal).catch(
+				() => undefined,
+			);
+	});
+
+	pi.on("session_shutdown", (_event, ctx) => {
+		invalidateWorkflowUiSession(ctx.cwd);
+		clearWorkflowFeedbackTimersForCwd(ctx.cwd);
+		clearActiveWorkflowUiTimerForCwd(ctx.cwd);
+		clearActiveWorkflowUi(ctx);
 	});
 
 	pi.on("message_end", async (event, ctx) => {
@@ -328,20 +362,27 @@ function watchWorkflowFeedback(
 	ctx: ExtensionContext,
 	api: ExtensionAPI,
 	runId: string,
+	signal = workflowUiSignalForCwd(ctx.cwd),
 ): void {
-	if (!canDeliverWorkflowFeedback(ctx)) return;
+	if (!canDeliverWorkflowFeedback(ctx) || signal.aborted) return;
 
 	const key = `${ctx.cwd}\0${runId}`;
 	if (runFeedbackTimers.has(key)) return;
-
+	let timer: ReturnType<typeof setInterval> | undefined;
 	const clear = () => {
 		const existing = runFeedbackTimers.get(key);
-		if (existing) clearInterval(existing);
+		if (!timer || existing !== timer) return;
+		clearInterval(timer);
 		runFeedbackTimers.delete(key);
 	};
 
-	const timer = setInterval(() => {
+	void refreshActiveWorkflowUi(ctx, signal).catch(() => undefined);
+	timer = setInterval(() => {
 		void (async () => {
+			if (signal.aborted) {
+				clear();
+				return;
+			}
 			let run;
 			try {
 				run = await refreshRun(ctx.cwd, runId);
@@ -351,14 +392,102 @@ function watchWorkflowFeedback(
 				// startup catch-up remains the backstop if this process exits.
 				return;
 			}
+			if (signal.aborted) {
+				clear();
+				return;
+			}
+			await refreshActiveWorkflowUi(ctx, signal).catch(() => undefined);
+			if (signal.aborted) {
+				clear();
+				return;
+			}
 			if (run.status === "running") return;
 
 			clear();
-			await deliverWorkflowFeedback(ctx, api, run);
+			await deliverWorkflowFeedback(ctx, api, run, { signal });
 		})().catch(() => clear());
 	}, RUN_FEEDBACK_POLL_MS);
 	timer.unref?.();
 	runFeedbackTimers.set(key, timer);
+}
+
+async function restoreActiveWorkflowUi(
+	ctx: ExtensionContext,
+	api: ExtensionAPI,
+	signal = workflowUiSignalForCwd(ctx.cwd),
+): Promise<void> {
+	if (!canDeliverWorkflowFeedback(ctx) || signal.aborted) return;
+	const index = await readFreshIndex(ctx.cwd);
+	if (signal.aborted) return;
+	renderActiveWorkflowUi(ctx, index);
+	for (const run of activeTopLevelWorkflowRuns(index)) {
+		if (signal.aborted) return;
+		watchWorkflowFeedback(ctx, api, run.runId, signal);
+	}
+}
+
+async function refreshActiveWorkflowUi(
+	ctx: ExtensionContext,
+	signal = workflowUiSignalForCwd(ctx.cwd),
+): Promise<void> {
+	if (!canDeliverWorkflowFeedback(ctx) || signal.aborted) return;
+	const index = await readFreshIndex(ctx.cwd);
+	if (signal.aborted) return;
+	renderActiveWorkflowUi(ctx, index);
+}
+
+function startWorkflowUiSession(cwd: string): AbortSignal {
+	const controller = new AbortController();
+	workflowUiSessionControllers.set(cwd, controller);
+	return controller.signal;
+}
+
+function workflowUiSignalForCwd(cwd: string): AbortSignal {
+	return (
+		workflowUiSessionControllers.get(cwd)?.signal ?? startWorkflowUiSession(cwd)
+	);
+}
+
+function invalidateWorkflowUiSession(cwd: string): void {
+	workflowUiSessionControllers.get(cwd)?.abort();
+	workflowUiSessionControllers.delete(cwd);
+}
+
+function clearWorkflowFeedbackTimersForCwd(cwd: string): void {
+	const prefix = `${cwd}\0`;
+	for (const [key, timer] of runFeedbackTimers) {
+		if (!key.startsWith(prefix)) continue;
+		clearInterval(timer);
+		runFeedbackTimers.delete(key);
+	}
+}
+
+function startActiveWorkflowUiPolling(
+	ctx: ExtensionContext,
+	api: ExtensionAPI,
+	signal = workflowUiSignalForCwd(ctx.cwd),
+): void {
+	if (!canDeliverWorkflowFeedback(ctx) || signal.aborted) return;
+	clearActiveWorkflowUiTimerForCwd(ctx.cwd);
+	const timer = setInterval(() => {
+		if (signal.aborted) {
+			clearActiveWorkflowUiTimerForCwd(ctx.cwd, timer);
+			return;
+		}
+		void restoreActiveWorkflowUi(ctx, api, signal).catch(() => undefined);
+	}, RUN_FEEDBACK_POLL_MS);
+	timer.unref?.();
+	activeWorkflowUiTimers.set(ctx.cwd, timer);
+}
+
+function clearActiveWorkflowUiTimerForCwd(
+	cwd: string,
+	expected?: ReturnType<typeof setInterval>,
+): void {
+	const timer = activeWorkflowUiTimers.get(cwd);
+	if (!timer || (expected && timer !== expected)) return;
+	clearInterval(timer);
+	activeWorkflowUiTimers.delete(cwd);
 }
 
 function canDeliverWorkflowFeedback(ctx: ExtensionContext): boolean {
@@ -370,9 +499,11 @@ function canDeliverWorkflowFeedback(ctx: ExtensionContext): boolean {
 export async function deliverMissedWorkflowFeedback(
 	ctx: ExtensionContext,
 	api: ExtensionAPI,
+	signal?: AbortSignal,
 ): Promise<void> {
-	if (!canDeliverWorkflowFeedback(ctx)) return;
+	if (!canDeliverWorkflowFeedback(ctx) || signal?.aborted) return;
 	const index = await readFreshIndex(ctx.cwd);
+	if (signal?.aborted) return;
 	const recent = (index?.runs ?? [])
 		.filter((run) => {
 			const updatedAtMs = Date.parse(run.updatedAt ?? "");
@@ -385,13 +516,16 @@ export async function deliverMissedWorkflowFeedback(
 		})
 		.slice(0, 5);
 	for (const summary of recent) {
+		if (signal?.aborted) return;
 		const run = await readRunRecord(ctx.cwd, summary.runId).catch(
 			() => undefined,
 		);
+		if (signal?.aborted) return;
 		if (run)
 			await deliverWorkflowFeedback(ctx, api, run, {
 				triggerTurn: false,
 				includeSummaryInstruction: false,
+				signal,
 			}).catch(() => undefined);
 	}
 }
@@ -400,10 +534,19 @@ async function deliverWorkflowFeedback(
 	ctx: ExtensionContext,
 	api: ExtensionAPI,
 	run: Awaited<ReturnType<typeof refreshRun>>,
-	options: { triggerTurn?: boolean; includeSummaryInstruction?: boolean } = {},
+	options: {
+		triggerTurn?: boolean;
+		includeSummaryInstruction?: boolean;
+		signal?: AbortSignal;
+	} = {},
 ): Promise<void> {
+	if (options.signal?.aborted) return;
 	const delivery = await claimWorkflowFeedbackDelivery(ctx.cwd, run);
 	if (!delivery) return;
+	if (options.signal?.aborted) {
+		await delivery.release();
+		return;
+	}
 	const summary = run.taskSummary;
 	const firstProblem = run.tasks.find((task) =>
 		["failed", "blocked", "interrupted"].includes(task.status),
@@ -417,6 +560,10 @@ async function deliverWorkflowFeedback(
 	const preview = await readWorkflowResultPreview(ctx.cwd, run).catch(
 		() => undefined,
 	);
+	if (options.signal?.aborted) {
+		await delivery.release();
+		return;
+	}
 	const triggerTurn = options.triggerTurn ?? true;
 	const includeSummaryInstruction =
 		options.includeSummaryInstruction ?? triggerTurn;
@@ -434,13 +581,17 @@ async function deliverWorkflowFeedback(
 		.join("\n");
 
 	try {
+		if (options.signal?.aborted) {
+			await delivery.release();
+			return;
+		}
 		await Promise.resolve(
 			api.sendMessage(
 				{ customType: "workflow-completion", content, display: true },
 				{ triggerTurn, deliverAs: "followUp" },
 			),
 		);
-		ctx.ui.notify(notice, level);
+		if (!options.signal?.aborted) ctx.ui.notify(notice, level);
 		await delivery.complete();
 	} catch (error) {
 		await delivery.release();
@@ -811,6 +962,7 @@ async function startWorkflowRunFromRequest(
 	request: WorkflowRunToolRequest,
 	ctx: ExtensionContext,
 	api: ExtensionAPI,
+	uiSessionSignal = workflowUiSignalForCwd(ctx.cwd),
 ): Promise<{ run: Awaited<ReturnType<typeof runWorkflowSpec>>; text: string }> {
 	const workflow = request.workflow.trim();
 	const task = request.task.trim();
@@ -841,8 +993,8 @@ async function startWorkflowRunFromRequest(
 		executionProfile,
 	});
 	const verb = workflowRunStartVerb(run.status);
-	if (run.status === "running") {
-		watchWorkflowFeedback(ctx, api, run.runId);
+	if (run.status === "running" && !uiSessionSignal.aborted) {
+		watchWorkflowFeedback(ctx, api, run.runId, uiSessionSignal);
 		beginParentUsageTracking(ctx.cwd, run.runId);
 	}
 
@@ -861,6 +1013,7 @@ async function startDynamicRunFromRequest(
 	request: WorkflowDynamicToolRequest,
 	ctx: ExtensionContext,
 	api: ExtensionAPI,
+	uiSessionSignal = workflowUiSignalForCwd(ctx.cwd),
 ): Promise<{ run: Awaited<ReturnType<typeof runDynamicTask>>; text: string }> {
 	const task = request.task.trim();
 	if (!task)
@@ -875,8 +1028,8 @@ async function startDynamicRunFromRequest(
 		dynamicUi: dynamicUiFromContext(ctx),
 	});
 	const verb = workflowRunStartVerb(run.status);
-	if (run.status === "running") {
-		watchWorkflowFeedback(ctx, api, run.runId);
+	if (run.status === "running" && !uiSessionSignal.aborted) {
+		watchWorkflowFeedback(ctx, api, run.runId, uiSessionSignal);
 		beginParentUsageTracking(ctx.cwd, run.runId);
 	}
 
@@ -947,6 +1100,7 @@ async function handleRoutedRunRequest(
 	},
 	ctx: ExtensionCommandContext,
 	api: ExtensionAPI,
+	uiSessionSignal = workflowUiSignalForCwd(ctx.cwd),
 ): Promise<void> {
 	const task = request.task.trim();
 	if (!task)
@@ -988,6 +1142,7 @@ async function handleRoutedRunRequest(
 	const routingLine = formatRoutingLine(outcome.routing);
 
 	if (outcome.mode === "direct") {
+		if (uiSessionSignal.aborted) return;
 		const rerun = request.requestedWorkflow
 			? `/workflow run ${request.requestedWorkflow} "<task>"`
 			: `/workflow dynamic "<task>"`;
@@ -1007,8 +1162,8 @@ async function handleRoutedRunRequest(
 
 	const run = outcome.run;
 	const verb = workflowRunStartVerb(run.status);
-	if (run.status === "running") {
-		watchWorkflowFeedback(ctx, api, run.runId);
+	if (run.status === "running" && !uiSessionSignal.aborted) {
+		watchWorkflowFeedback(ctx, api, run.runId, uiSessionSignal);
 		beginParentUsageTracking(ctx.cwd, run.runId);
 	}
 
@@ -1017,6 +1172,7 @@ async function handleRoutedRunRequest(
 		spawnDetachedSupervisor(ctx.cwd, run.runId);
 		detachNote = formatDetachedSupervisorNote(run.runId);
 	}
+	if (uiSessionSignal.aborted) return;
 
 	const headline =
 		outcome.mode === "dynamic"
@@ -1389,6 +1545,7 @@ async function handleWorkflowCommand(
 				parsed.model || parsed.thinking
 					? { model: parsed.model, thinking: parsed.thinking }
 					: undefined;
+			const uiSessionSignal = workflowUiSignalForCwd(ctx.cwd);
 			if (parsed.route ?? true) {
 				if (!parsed.detach && !parsed.forceNew) {
 					const guardNotice = await duplicateRunGuardNotice(
@@ -1396,22 +1553,30 @@ async function handleWorkflowCommand(
 						{ kind: "spec", specRef: specPath },
 						parsed.task,
 					);
+					if (uiSessionSignal.aborted) return;
 					if (guardNotice) {
 						emit(ctx, guardNotice, "warning");
 						return;
 					}
 				}
-				await handleRoutedRunRequest(
-					{
-						requestedWorkflow: specPath,
-						task: parsed.task,
-						detach: parsed.detach,
-						runtimeOverrides,
-						executionProfile: parsed.profile,
-						usage: '/workflow run <workflow-name-or-path> "<task>"',
-					},
+				await withWorkflowLaunchForeground(
 					ctx,
-					api,
+					specPath,
+					() =>
+						handleRoutedRunRequest(
+							{
+								requestedWorkflow: specPath,
+								task: parsed.task,
+								detach: parsed.detach,
+								runtimeOverrides,
+								executionProfile: parsed.profile,
+								usage: '/workflow run <workflow-name-or-path> "<task>"',
+							},
+							ctx,
+							api,
+							uiSessionSignal,
+						),
+					uiSessionSignal,
 				);
 				return;
 			}
@@ -1421,6 +1586,7 @@ async function handleWorkflowCommand(
 					{ kind: "spec", specRef: specPath },
 					parsed.task,
 				);
+				if (uiSessionSignal.aborted) return;
 				if (guardNotice) {
 					emit(ctx, guardNotice, "warning");
 					return;
@@ -1431,18 +1597,26 @@ async function handleWorkflowCommand(
 				workflow: specPath,
 				detach: parsed.detach,
 			});
-			const result = await startWorkflowRunFromRequest(
-				{
-					workflow: specPath,
-					task: parsed.task,
-					detach: parsed.detach,
-					runtimeOverrides,
-					executionProfile: parsed.profile,
-				},
+			const result = await withWorkflowLaunchForeground(
 				ctx,
-				api,
+				specPath,
+				() =>
+					startWorkflowRunFromRequest(
+						{
+							workflow: specPath,
+							task: parsed.task,
+							detach: parsed.detach,
+							runtimeOverrides,
+							executionProfile: parsed.profile,
+						},
+						ctx,
+						api,
+						uiSessionSignal,
+					),
+				uiSessionSignal,
 			);
-			emitRunStartResult(ctx, result.run.status, result.text);
+			if (!uiSessionSignal.aborted)
+				emitRunStartResult(ctx, result.run.status, result.text);
 			return;
 		}
 
@@ -1452,16 +1626,24 @@ async function handleWorkflowCommand(
 				parsed.model || parsed.thinking
 					? { model: parsed.model, thinking: parsed.thinking }
 					: undefined;
+			const uiSessionSignal = workflowUiSignalForCwd(ctx.cwd);
 			if (parsed.route) {
-				await handleRoutedRunRequest(
-					{
-						task: parsed.task,
-						detach: parsed.detach,
-						runtimeOverrides,
-						usage: '/workflow dynamic --route "<task>"',
-					},
+				await withWorkflowLaunchForeground(
 					ctx,
-					api,
+					"dynamic workflow",
+					() =>
+						handleRoutedRunRequest(
+							{
+								task: parsed.task,
+								detach: parsed.detach,
+								runtimeOverrides,
+								usage: '/workflow dynamic --route "<task>"',
+							},
+							ctx,
+							api,
+							uiSessionSignal,
+						),
+					uiSessionSignal,
 				);
 				return;
 			}
@@ -1471,6 +1653,7 @@ async function handleWorkflowCommand(
 					{ kind: "dynamic" },
 					parsed.task,
 				);
+				if (uiSessionSignal.aborted) return;
 				if (guardNotice) {
 					emit(ctx, guardNotice, "warning");
 					return;
@@ -1480,16 +1663,24 @@ async function handleWorkflowCommand(
 				kind: "dynamic",
 				detach: parsed.detach,
 			});
-			const result = await startDynamicRunFromRequest(
-				{
-					task: parsed.task,
-					detach: parsed.detach,
-					runtimeOverrides,
-				},
+			const result = await withWorkflowLaunchForeground(
 				ctx,
-				api,
+				"dynamic workflow",
+				() =>
+					startDynamicRunFromRequest(
+						{
+							task: parsed.task,
+							detach: parsed.detach,
+							runtimeOverrides,
+						},
+						ctx,
+						api,
+						uiSessionSignal,
+					),
+				uiSessionSignal,
 			);
-			emitRunStartResult(ctx, result.run.status, result.text);
+			if (!uiSessionSignal.aborted)
+				emitRunStartResult(ctx, result.run.status, result.text);
 			return;
 		}
 
@@ -1568,10 +1759,15 @@ async function handleWorkflowCommand(
 
 		if (action === "resume") {
 			const runId = requireArg(tokens, 1, "/workflow resume <run-id>");
+			const uiSessionSignal = workflowUiSignalForCwd(ctx.cwd);
 			const { run, resetTaskIds } = await resumeRun(ctx.cwd, runId, {
 				dynamicUi: dynamicUiFromContext(ctx),
 			});
-			if (run.status === "running") beginParentUsageTracking(ctx.cwd, runId);
+			if (run.status === "running" && !uiSessionSignal.aborted) {
+				watchWorkflowFeedback(ctx, api, runId, uiSessionSignal);
+				beginParentUsageTracking(ctx.cwd, runId);
+			}
+			if (uiSessionSignal.aborted) return;
 			emit(
 				ctx,
 				formatHumanRunResume(run, resetTaskIds.length),
