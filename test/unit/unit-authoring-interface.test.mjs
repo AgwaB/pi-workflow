@@ -2633,10 +2633,47 @@ test("bundled spec-review workflow compiles flat analysis and verification fanou
 	}
 });
 
-test("bundled deep-review workflow leaves reviewer fanout unconstrained by stage caps", async () => {
+test("bundled workflows compile warning-free and deep-review leaves reviewer fanout unconstrained", async () => {
 	const cwd = makeProject();
 	try {
 		writeAgent(cwd, "scout", "read, grep, find, ls");
+		writeAgent(
+			cwd,
+			"researcher",
+			"read, grep, find, ls, workflow_web_search, workflow_web_fetch_source, workflow_web_source_read",
+		);
+		for (const relativeSpecPath of bundledArtifactGraphSpecPaths()) {
+			const bundledSpecPath = join(process.cwd(), relativeSpecPath);
+			const bundledSpec = parsePublicWorkflow(
+				JSON.parse(readFileSync(bundledSpecPath, "utf8")),
+			);
+			const bundledCompiled = await compileWorkflow(bundledSpec, {
+				cwd,
+				specPath: bundledSpecPath,
+				task: "Audit the bundled workflow prompt contracts.",
+			});
+			assert.deepEqual(
+				bundledCompiled.warnings,
+				[],
+				`${relativeSpecPath} emitted prompt/schema warnings`,
+			);
+			for (const stage of bundledSpec.artifactGraph.stages) {
+				const prompt = stage.prompt ?? stage.each?.prompt;
+				const schemaRef = stage.output?.controlSchema;
+				if (!prompt || !schemaRef) continue;
+				const schema = JSON.parse(
+					readFileSync(join(dirname(bundledSpecPath), schemaRef), "utf8"),
+				);
+				for (const match of prompt.matchAll(/<control>(\{.*?\})<\/control>/g)) {
+					const example = JSON.parse(match[1]);
+					assert.deepEqual(
+						validateJsonSchema(example, schema),
+						{ valid: true, issues: [] },
+						`${relativeSpecPath} stage ${stage.id} has an invalid control example`,
+					);
+				}
+			}
+		}
 		const specPath = join(
 			process.cwd(),
 			"workflows",

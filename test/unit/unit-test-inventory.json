@@ -946,9 +946,9 @@
 			"domain": "authoring-interface"
 		},
 		{
-			"name": "bundled deep-review workflow leaves reviewer fanout unconstrained by stage caps",
+			"name": "bundled workflows compile warning-free and deep-review leaves reviewer fanout unconstrained",
 			"occurrence": 1,
-			"sha256": "fe89bb656fafeecf9aa204706d5c0e0f4ed20e2760049bbe5be1c305adb93f8f",
+			"sha256": "b150ab2a35dfa8361c399041de7cccfd444d4ac902e80cd7f59024c36ac34c1b",
 			"domain": "authoring-interface"
 		},
 		{
