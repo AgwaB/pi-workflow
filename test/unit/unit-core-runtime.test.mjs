@@ -2590,6 +2590,8 @@ test("deep-research final-audit packet does not preserve contradicted fact-slot 
 					{ id: "slot-price" },
 					{ id: "slot-capability" },
 					{ id: "slot-supported" },
+					{ id: "slot-missing-conflict" },
+					{ id: "slot-unresolved" },
 				],
 			},
 			"normalize-claims.main": {
@@ -2598,6 +2600,10 @@ test("deep-research final-audit packet does not preserve contradicted fact-slot 
 						{ id: "claim-price", factSlotIds: ["slot-price"] },
 						{ id: "claim-capability", factSlotIds: ["slot-capability"] },
 						{ id: "claim-supported", factSlotIds: ["slot-supported"] },
+						{
+							id: "claim-missing-conflict",
+							factSlotIds: ["slot-missing-conflict"],
+						},
 					],
 				},
 				factSlotCoverage: [
@@ -2615,6 +2621,14 @@ test("deep-research final-audit packet does not preserve contradicted fact-slot 
 						slotId: "slot-supported",
 						status: "filled",
 						bestValue: "directly verified value",
+					},
+					{
+						slotId: "slot-missing-conflict",
+						status: "missing",
+					},
+					{
+						slotId: "slot-unresolved",
+						status: "missing",
 					},
 				],
 			},
@@ -2641,6 +2655,12 @@ test("deep-research final-audit packet does not preserve contradicted fact-slot 
 						status: "partially_supported",
 						factSlotIds: ["slot-supported"],
 					},
+					{
+						id: "claim-missing-conflict",
+						status: "conflicting",
+						factSlotIds: ["slot-missing-conflict"],
+						correctionOrCounterclaim: "audited corrective value",
+					},
 				],
 				gateSummary: {},
 			},
@@ -2655,12 +2675,28 @@ test("deep-research final-audit packet does not preserve contradicted fact-slot 
 	assert.equal(byId.get("slot-capability").status, "partial");
 	assert.match(byId.get("slot-capability").gapReason, /no audited verified claim/);
 	assert.equal(byId.get("slot-supported").status, "filled");
-	assert.equal(result.packet.factSlotStatusCounts.conflicting, 1);
+	assert.equal(byId.get("slot-missing-conflict").status, "conflicting");
+	assert.equal(
+		byId.get("slot-missing-conflict").bestValue,
+		"audited corrective value",
+	);
+	assert.equal(byId.get("slot-unresolved").status, "missing");
+	assert.equal(result.packet.factSlotStatusCounts.conflicting, 2);
 	assert.equal(result.packet.synthesisInput.factSlotStatusCounts.partial, 1);
 	assert.equal(result.packet.researchMetadataSeed.filledFactSlots, 1);
 	assert.equal(result.packet.researchMetadataSeed.partialFactSlots, 1);
-	assert.equal(result.packet.researchMetadataSeed.missingFactSlots, 1);
-	assert.equal(result.packet.researchMetadataSeed.conflictingFactSlots, 1);
+	assert.equal(result.packet.researchMetadataSeed.missingOnlyFactSlots, 1);
+	assert.equal(result.packet.researchMetadataSeed.missingFactSlots, 3);
+	assert.equal(
+		result.packet.researchMetadataSeed.missingFactSlotsIncludesConflicting,
+		true,
+	);
+	assert.equal(result.packet.researchMetadataSeed.conflictingFactSlots, 2);
+	assert.equal(
+		result.packet.researchMetadataSeed.missingFactSlots,
+		result.packet.researchMetadataSeed.missingOnlyFactSlots +
+			result.packet.researchMetadataSeed.conflictingFactSlots,
+	);
 	assert.equal(
 		result.packet.researchMetadataSeed.filledFactSlots +
 			result.packet.researchMetadataSeed.partialFactSlots +

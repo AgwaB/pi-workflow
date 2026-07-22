@@ -115,6 +115,8 @@ function reconcileFactSlotCoverageWithAudit(factSlots, claimDigests) {
 			return {
 				...slot,
 				status: "conflicting",
+				// Preserve the audited correction for final-report consumers; status,
+				// rather than bestValue presence, remains the coverage authority.
 				bestValue:
 					corrections.join(" | ") ||
 					"Verifier evidence conflicts with the normalized value; see claim ledger.",
@@ -425,9 +427,15 @@ export default async function finalAuditPacket({ sources }) {
 				partialFactSlots: factSlotCoverage.filter(
 					(slot) => slot.status === "partial",
 				).length,
+				missingOnlyFactSlots: factSlotCoverage.filter(
+					(slot) => slot.status === "missing",
+				).length,
+				// Keep the legacy unresolved total backward-complete. The explicit
+				// fields make its overlap with conflictingFactSlots machine-readable.
 				missingFactSlots: factSlotCoverage.filter((slot) =>
 					["missing", "conflicting"].includes(slot.status),
 				).length,
+				missingFactSlotsIncludesConflicting: true,
 				conflictingFactSlots: factSlotCoverage.filter(
 					(slot) => slot.status === "conflicting",
 				).length,
