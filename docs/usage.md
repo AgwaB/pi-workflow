@@ -148,6 +148,8 @@ For reusable workflow authoring, `workflow-guide` includes validated scaffold bu
 | `/workflow stop <run-id>` | Interrupt a non-terminal run, best-effort interrupt active subagents, mark unfinished tasks interrupted, and stop the local supervisor watch. Use `/workflow resume <run-id>` if you want to restart unfinished work later. |
 | `/workflow resume <run-id>` | Resume a failed, interrupted, or resumable blocked run (including dynamic approval blocked in headless mode): completed tasks are preserved; failed/interrupted/skipped or resumable blocked tasks reset to pending and reschedule. Loop workflows are not supported yet. |
 
+Interactive `/workflow run` and `/workflow dynamic` slash commands display a foreground launch indicator while routing, validating, and completing the initial scheduling pass. After a durable run becomes active, the command returns and a compact `Active workflows` widget below the editor plus a footer status tracks top-level run progress. The widget is rebuilt from `.pi/workflows` after session reload, supports multiple active runs, and clears when none remain; open `/workflow` for the full board. Natural-language `workflow_run` and `workflow_dynamic` tool calls already use Pi's foreground tool row during initial launch, then use the same background widget.
+
 Not implemented: `/workflow continue` and `/workflow delegate`. Use `status`, `show`, `logs`, `wait`, `stop`, `resume`, and `pi-workflow inspect` for text/CLI inspection. The standalone CLI also offers `pi-workflow supervise <run-id>|--all` to drive scheduling from outside a Pi session (unfinished failed/interrupted or resumable blocked runs within the last 7 days are announced at session start with resume hints).
 
 ### Workflow board controls

@@ -70,6 +70,8 @@ For a one-off adaptive workflow that should plan, fan out, and synthesize withou
 /workflow dynamic "Research this repository and summarize the architecture tradeoffs."
 ```
 
+Interactive slash-command launches stay visibly in the foreground while routing, validating, and completing the initial scheduling pass. Once a durable run is active, the command returns and Pi shows an `Active workflows` widget below the editor plus a compact footer status. The widget tracks top-level run progress, survives session reload by rebuilding from `.pi/workflows`, and disappears when no workflow remains active. Open `/workflow` for the full board.
+
 ### Execution profiles
 
 A workflow may optionally declare custom-named `executionProfiles` and a

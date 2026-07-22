@@ -111,7 +111,12 @@ function writeCompletedSubagentArtifacts(cwd, runsDir, runId, attemptId) {
 
 function installFakeSubagentApi(
 	cwd,
-	{ routerText, directText = "Direct answer body." } = {},
+	{
+		routerText,
+		directText = "Direct answer body.",
+		keepTaskRunning = false,
+		routerGate,
+	} = {},
 ) {
 	const calls = { router: 0, direct: 0, launches: 0 };
 	const launches = new Map();
@@ -134,6 +139,7 @@ function installFakeSubagentApi(
 		async runSubagent(options) {
 			if (options.correlationId === ROUTER_CORRELATION_ID) {
 				calls.router += 1;
+				if (routerGate) await routerGate;
 				if (routerText instanceof Error) throw routerText;
 				return oneShotEnvelope("router", routerText, calls.router);
 			}
@@ -164,7 +170,7 @@ function installFakeSubagentApi(
 				runId,
 				attemptId: run.attemptId,
 				backend: "headless",
-				status: "completed",
+				status: keepTaskRunning ? "running" : "completed",
 				failureKind: null,
 				startedAt: new Date(Date.now() - 1000).toISOString(),
 				completedAt: new Date().toISOString(),
@@ -174,7 +180,12 @@ function installFakeSubagentApi(
 					{ type: "result", path: "result.json", artifactCwd: run.artifactDir },
 				],
 				metadata: { contextLengthExceeded: false },
-				attempts: [{ attemptId: run.attemptId, status: "completed" }],
+				attempts: [
+					{
+						attemptId: run.attemptId,
+						status: keepTaskRunning ? "running" : "completed",
+					},
+				],
 			};
 		},
 		async interruptSubagent() {
@@ -504,14 +515,107 @@ test("runs without --route never invoke the router subagent", async () => {
 	}
 });
 
+test("/workflow launch finishing after shutdown does not render into the closed session", async () => {
+	const { default: workflowExtension } = await import(
+		"../../.tmp/unit/extension.js"
+	);
+	const commands = new Map();
+	const handlers = new Map();
+	workflowExtension({
+		on(event, handler) {
+			handlers.set(event, handler);
+		},
+		registerCommand(name, definition) {
+			commands.set(name, definition);
+		},
+		registerTool() {},
+		sendMessage() {},
+		getThinkingLevel() {
+			return undefined;
+		},
+	});
+	const handler = commands.get("workflow")?.handler;
+	assert.ok(handler, "workflow command not registered");
+
+	const cwd = makeProject();
+	let releaseRouter;
+	const routerGate = new Promise((resolve) => (releaseRouter = resolve));
+	try {
+		writeAgent(cwd, "unit-scout");
+		writeRoutableWorkflow(cwd);
+		installFakeSubagentApi(cwd, {
+			routerText: JSON.stringify({
+				route: "workflow",
+				depth: "standard",
+				confidence: 0.9,
+				reason: "workflow warranted",
+			}),
+			keepTaskRunning: true,
+			routerGate,
+		});
+		const statuses = [];
+		const widgets = [];
+		const ctx = {
+			cwd,
+			hasUI: true,
+			ui: {
+				notify() {},
+				setStatus(key, value) {
+					statuses.push({ key, value });
+				},
+				setWidget(key, value, options) {
+					widgets.push({ key, value, options });
+				},
+				confirm: async () => true,
+				select: async (_title, options) =>
+					options.find((option) => option === "Profile: medium"),
+			},
+		};
+		const launch = handler(
+			'run route-target "Delayed routed launch."',
+			ctx,
+		);
+		for (let attempt = 0; attempt < 50; attempt += 1) {
+			if (
+				statuses.some(
+					(entry) =>
+						entry.key === "pi-workflow-launch" &&
+						typeof entry.value === "string",
+				)
+			)
+				break;
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		handlers.get("session_shutdown")?.({}, ctx);
+		const widgetCountAfterShutdown = widgets.length;
+		releaseRouter();
+		await launch;
+		await new Promise((resolve) => setTimeout(resolve, 25));
+		assert.equal(widgets.length, widgetCountAfterShutdown);
+		assert.equal(
+			widgets.some(
+				(entry) =>
+					entry.key === "pi-workflow-active" && Array.isArray(entry.value),
+			),
+			false,
+		);
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("/workflow run routes by default and --no-route skips the router", async () => {
 	const { default: workflowExtension } = await import(
 		"../../.tmp/unit/extension.js"
 	);
 	function captureHandler() {
 		const commands = new Map();
+		const handlers = new Map();
 		workflowExtension({
-			on() {},
+			on(event, handler) {
+				handlers.set(event, handler);
+			},
 			registerCommand(name, definition) {
 				commands.set(name, definition);
 			},
@@ -523,7 +627,7 @@ test("/workflow run routes by default and --no-route skips the router", async ()
 		});
 		const command = commands.get("workflow");
 		assert.ok(command, "workflow command not registered");
-		return command.handler;
+		return { handler: command.handler, handlers };
 	}
 
 	const cwd = makeProject();
@@ -537,9 +641,12 @@ test("/workflow run routes by default and --no-route skips the router", async ()
 				confidence: 0.9,
 				reason: "workflow warranted",
 			}),
+			keepTaskRunning: true,
 		});
-		const handler = captureHandler();
+		const { handler, handlers } = captureHandler();
 		const notices = [];
+		const statuses = [];
+		const widgets = [];
 		let profilePrompts = 0;
 		const ctx = {
 			cwd,
@@ -547,6 +654,12 @@ test("/workflow run routes by default and --no-route skips the router", async ()
 			ui: {
 				notify(message, level) {
 					notices.push({ message, level });
+				},
+				setStatus(key, value) {
+					statuses.push({ key, value });
+				},
+				setWidget(key, value, options) {
+					widgets.push({ key, value, options });
 				},
 				confirm: async () => true,
 				select: async (_title, options) => {
@@ -568,6 +681,69 @@ test("/workflow run routes by default and --no-route skips the router", async ()
 		assert.equal(calls.router, 1);
 		assert.equal(profilePrompts, 2);
 		assert.ok(calls.launches >= 2);
+		assert.equal(
+			statuses.some(
+				(entry) =>
+					entry.key === "pi-workflow-launch" &&
+					typeof entry.value === "string" &&
+					entry.value.includes("Starting route-target"),
+			),
+			true,
+		);
+		assert.deepEqual(
+			statuses.filter((entry) => entry.key === "pi-workflow-launch").at(-1),
+			{
+				key: "pi-workflow-launch",
+				value: undefined,
+			},
+		);
+		assert.equal(
+			widgets.some(
+				(entry) =>
+					entry.key === "pi-workflow-launch" &&
+					entry.options?.placement === "belowEditor",
+			),
+			true,
+		);
+		for (let attempt = 0; attempt < 50; attempt += 1) {
+			if (
+				widgets.some(
+					(entry) =>
+						entry.key === "pi-workflow-active" &&
+						Array.isArray(entry.value),
+				)
+			)
+				break;
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		assert.equal(
+			widgets.some(
+				(entry) =>
+					entry.key === "pi-workflow-active" &&
+					Array.isArray(entry.value) &&
+					entry.value[0] === "Active workflows",
+			),
+			true,
+		);
+		handlers.get("session_shutdown")?.({}, ctx);
+		await new Promise((resolve) => setTimeout(resolve, 25));
+		assert.equal(
+			widgets.filter((entry) => entry.key === "pi-workflow-active").at(-1)
+				?.value,
+			undefined,
+		);
+		await handlers.get("session_start")?.(
+			{ type: "session_start", reason: "reload" },
+			ctx,
+		);
+		assert.equal(
+			Array.isArray(
+				widgets.filter((entry) => entry.key === "pi-workflow-active").at(-1)
+					?.value,
+			),
+			true,
+		);
+		handlers.get("session_shutdown")?.({}, ctx);
 	} finally {
 		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
