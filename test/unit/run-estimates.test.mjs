@@ -489,7 +489,7 @@ test("duplicate /workflow run start is blocked with the existing run id; --force
 			},
 		};
 
-		// Duplicate start within 10 minutes → blocked, nothing launched.
+		// Routing runs first; the duplicate workflow launch itself is blocked.
 		await handler('run guard-target "Same task"', ctx);
 		assert.equal(notices.length, 1);
 		assert.equal(notices[0].level, "warning");
@@ -498,7 +498,7 @@ test("duplicate /workflow run start is blocked with the existing run id; --force
 			new RegExp(`Duplicate launch guard: run ${existingRunId} `),
 		);
 		assert.match(notices[0].message, /--force-new/);
-		assert.equal(calls.launches, 0);
+		assert.equal(calls.launches, 1);
 		assert.equal((await readIndex(cwd)).runs.length, 1);
 
 		// --force-new bypasses the guard and starts a new run. Assertions scan
@@ -515,7 +515,7 @@ test("duplicate /workflow run start is blocked with the existing run id; --force
 				notice.message.includes("Duplicate launch guard"),
 			),
 		);
-		assert.equal(calls.launches, 1);
+		assert.equal(calls.launches, 2);
 
 		// Different task text starts normally without --force-new.
 		notices.length = 0;
@@ -530,7 +530,7 @@ test("duplicate /workflow run start is blocked with the existing run id; --force
 				notice.message.includes("Duplicate launch guard"),
 			),
 		);
-		assert.equal(calls.launches, 2);
+		assert.equal(calls.launches, 3);
 	} finally {
 		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });

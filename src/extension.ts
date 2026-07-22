@@ -57,7 +57,9 @@ import {
 	WorkflowValidationError,
 } from "./types.js";
 import {
-	executeRoutedWorkflowRequest,
+	executeResolvedRoutedWorkflowRequest,
+	resolveRoutedDirectAnswer,
+	resolveWorkflowRouting,
 	WORKFLOW_ROUTING_LOG_RELATIVE_PATH,
 } from "./workflow-router.js";
 import {
@@ -65,10 +67,10 @@ import {
 	type WorkflowRuntimeDefaults,
 } from "./workflow-runtime.js";
 import {
-	activeTopLevelWorkflowRuns,
 	clearActiveWorkflowUi,
 	renderActiveWorkflowUi,
 	withWorkflowLaunchForeground,
+	WORKFLOW_LAUNCH_CANCELLED,
 } from "./workflow-active-ui.js";
 import {
 	beginParentUsageTracking,
@@ -420,7 +422,9 @@ async function restoreActiveWorkflowUi(
 	const index = await readFreshIndex(ctx.cwd);
 	if (signal.aborted) return;
 	renderActiveWorkflowUi(ctx, index);
-	for (const run of activeTopLevelWorkflowRuns(index)) {
+	for (const run of (index?.runs ?? []).filter(
+		(item) => !item.parentRunId && item.status === "running",
+	)) {
 		if (signal.aborted) return;
 		watchWorkflowFeedback(ctx, api, run.runId, signal);
 	}
@@ -762,6 +766,7 @@ interface WorkflowRunToolRequest {
 	detach: boolean;
 	runtimeOverrides?: WorkflowRuntimeDefaults;
 	executionProfile?: string;
+	executionProfileResolved?: boolean;
 }
 
 interface WorkflowDynamicToolRequest {
@@ -929,9 +934,10 @@ export async function selectWorkflowExecutionProfile(
 	cwd: string,
 	explicitProfile: string | undefined,
 	select?: WorkflowProfileSelector,
+	loadedWorkflow?: Awaited<ReturnType<typeof loadWorkflowSpec>>,
 ): Promise<string | undefined> {
 	if (explicitProfile) return explicitProfile;
-	const loaded = await loadWorkflowSpec(workflow, cwd);
+	const loaded = loadedWorkflow ?? (await loadWorkflowSpec(workflow, cwd));
 	const profiles = loaded.spec.executionProfiles;
 	if (!profiles || Object.keys(profiles).length === 0) return undefined;
 	const names = Object.keys(profiles).sort((left, right) =>
@@ -971,12 +977,16 @@ async function startWorkflowRunFromRequest(
 		throw new Error(
 			'This workflow needs a task. Usage: /workflow run <workflow-name-or-path> "<task>"',
 		);
-	const executionProfile = await selectWorkflowExecutionProfile(
-		workflow,
-		ctx.cwd,
-		request.executionProfile,
-		ctx.hasUI ? (title, options) => ctx.ui.select(title, options) : undefined,
-	);
+	const executionProfile = request.executionProfileResolved
+		? request.executionProfile
+		: await selectWorkflowExecutionProfile(
+				workflow,
+				ctx.cwd,
+				request.executionProfile,
+				ctx.hasUI
+					? (title, options) => ctx.ui.select(title, options)
+					: undefined,
+			);
 	let promptSchemaNotice = "";
 	let promptSchemaNoticeDigest: string | undefined;
 	const run = await runWorkflowSpec(workflow, ctx.cwd, {
@@ -1094,6 +1104,7 @@ async function handleRoutedRunRequest(
 		requestedWorkflow?: string;
 		task: string;
 		detach: boolean;
+		forceNew: boolean;
 		runtimeOverrides?: WorkflowRuntimeDefaults;
 		executionProfile?: string;
 		usage: string;
@@ -1117,7 +1128,8 @@ async function handleRoutedRunRequest(
 			detach: request.detach,
 		});
 	}
-	const outcome = await executeRoutedWorkflowRequest({
+	const requestedLabel = request.requestedWorkflow ?? "dynamic workflow";
+	const baseRequest = {
 		cwd: ctx.cwd,
 		task,
 		requestedWorkflow: request.requestedWorkflow,
@@ -1125,41 +1137,119 @@ async function handleRoutedRunRequest(
 		runtimeDefaults: currentRuntimeDefaults(ctx, api),
 		availableModels: availableWorkflowModels(ctx),
 		dynamicUi: dynamicUiFromContext(ctx),
-		executionProfile: request.executionProfile,
-		resolveExecutionProfile:
-			request.executionProfile || !request.requestedWorkflow
-				? undefined
-				: (workflow) =>
-						selectWorkflowExecutionProfile(
-							workflow,
-							ctx.cwd,
-							undefined,
-							ctx.hasUI
-								? (title, options) => ctx.ui.select(title, options)
-								: undefined,
-						),
-	});
-	const routingLine = formatRoutingLine(outcome.routing);
+	};
+	const routingResult = await withWorkflowLaunchForeground(
+		ctx,
+		`Routing ${requestedLabel}…`,
+		() => resolveWorkflowRouting(baseRequest),
+		uiSessionSignal,
+	);
+	if (routingResult === WORKFLOW_LAUNCH_CANCELLED) return;
+	let routing = routingResult;
 
-	if (outcome.mode === "direct") {
-		if (uiSessionSignal.aborted) return;
-		const rerun = request.requestedWorkflow
-			? `/workflow run ${request.requestedWorkflow} "<task>"`
-			: `/workflow dynamic "<task>"`;
-		emit(
+	if (routing.decided === "direct") {
+		const directResult = await withWorkflowLaunchForeground(
 			ctx,
-			[
-				"Router chose a direct answer instead of running the workflow.",
-				routingLine,
-				`Routing recorded in ${WORKFLOW_ROUTING_LOG_RELATIVE_PATH}. For the full workflow, rerun without --route: ${rerun}`,
-				"",
-				outcome.answer,
-			].join("\n"),
-			"info",
+			"Preparing direct answer…",
+			() => resolveRoutedDirectAnswer(baseRequest, routing),
+			uiSessionSignal,
 		);
+		if (directResult === WORKFLOW_LAUNCH_CANCELLED) return;
+		if (directResult.mode === "direct") {
+			if (uiSessionSignal.aborted) return;
+			const rerun = request.requestedWorkflow
+				? `/workflow run --no-route ${request.requestedWorkflow} "<task>"`
+				: `/workflow dynamic "<task>"`;
+			emit(
+				ctx,
+				[
+					"Router chose a direct answer instead of running the workflow.",
+					formatRoutingLine(directResult.routing),
+					`Routing recorded in ${WORKFLOW_ROUTING_LOG_RELATIVE_PATH}. To force the full workflow: ${rerun}`,
+					"",
+					directResult.answer,
+				].join("\n"),
+				"info",
+			);
+			return;
+		}
+		routing = directResult.routing;
+	}
+
+	const workflowRef =
+		routing.decided === "workflow" ? request.requestedWorkflow : undefined;
+	const launchLabel = workflowRef ?? "dynamic workflow";
+	const preflightResult = await withWorkflowLaunchForeground(
+		ctx,
+		`Validating ${launchLabel}…`,
+		async (launchSignal) => {
+			launchSignal.throwIfAborted();
+			const loadedWorkflow = workflowRef
+				? await loadWorkflowSpec(workflowRef, ctx.cwd)
+				: undefined;
+			launchSignal.throwIfAborted();
+			const guardNotice =
+				!request.detach && !request.forceNew
+					? await duplicateRunGuardNotice(
+							ctx.cwd,
+							workflowRef
+								? { kind: "spec", specRef: workflowRef }
+								: { kind: "dynamic" },
+							task,
+						)
+					: undefined;
+			launchSignal.throwIfAborted();
+			return { guardNotice, loadedWorkflow };
+		},
+		uiSessionSignal,
+	);
+	if (preflightResult === WORKFLOW_LAUNCH_CANCELLED) return;
+	if (preflightResult.guardNotice) {
+		emit(ctx, preflightResult.guardNotice, "warning");
 		return;
 	}
 
+	const executionProfile = workflowRef
+		? await selectWorkflowExecutionProfile(
+				workflowRef,
+				ctx.cwd,
+				request.executionProfile,
+				ctx.hasUI
+					? (title, options) => ctx.ui.select(title, options)
+					: undefined,
+				preflightResult.loadedWorkflow,
+			)
+		: undefined;
+	if (uiSessionSignal.aborted) return;
+
+	const outcomeResult = await withWorkflowLaunchForeground(
+		ctx,
+		`Starting ${launchLabel}…`,
+		async (launchSignal) => {
+			launchSignal.throwIfAborted();
+			const outcome = await executeResolvedRoutedWorkflowRequest(
+				{
+					...baseRequest,
+					executionProfile,
+					executionProfileResolved: Boolean(workflowRef),
+				},
+				routing,
+			);
+			if (
+				launchSignal.aborted &&
+				outcome.mode !== "direct" &&
+				outcome.run.status === "running"
+			) {
+				await stopRun(ctx.cwd, outcome.run.runId);
+			}
+			return outcome;
+		},
+		uiSessionSignal,
+	);
+	if (outcomeResult === WORKFLOW_LAUNCH_CANCELLED) return;
+	const outcome = outcomeResult;
+	if (outcome.mode === "direct") return;
+	const routingLine = formatRoutingLine(outcome.routing);
 	const run = outcome.run;
 	const verb = workflowRunStartVerb(run.status);
 	if (run.status === "running" && !uiSessionSignal.aborted) {
@@ -1547,51 +1637,57 @@ async function handleWorkflowCommand(
 					: undefined;
 			const uiSessionSignal = workflowUiSignalForCwd(ctx.cwd);
 			if (parsed.route ?? true) {
-				if (!parsed.detach && !parsed.forceNew) {
-					const guardNotice = await duplicateRunGuardNotice(
-						ctx.cwd,
-						{ kind: "spec", specRef: specPath },
-						parsed.task,
-					);
-					if (uiSessionSignal.aborted) return;
-					if (guardNotice) {
-						emit(ctx, guardNotice, "warning");
-						return;
-					}
-				}
-				await withWorkflowLaunchForeground(
+				await handleRoutedRunRequest(
+					{
+						requestedWorkflow: specPath,
+						task: parsed.task,
+						detach: parsed.detach,
+						forceNew: Boolean(parsed.forceNew),
+						runtimeOverrides,
+						executionProfile: parsed.profile,
+						usage: '/workflow run <workflow-name-or-path> "<task>"',
+					},
 					ctx,
-					specPath,
-					() =>
-						handleRoutedRunRequest(
-							{
-								requestedWorkflow: specPath,
-								task: parsed.task,
-								detach: parsed.detach,
-								runtimeOverrides,
-								executionProfile: parsed.profile,
-								usage: '/workflow run <workflow-name-or-path> "<task>"',
-							},
-							ctx,
-							api,
-							uiSessionSignal,
-						),
+					api,
 					uiSessionSignal,
 				);
 				return;
 			}
-			if (!parsed.detach && !parsed.forceNew) {
-				const guardNotice = await duplicateRunGuardNotice(
-					ctx.cwd,
-					{ kind: "spec", specRef: specPath },
-					parsed.task,
-				);
-				if (uiSessionSignal.aborted) return;
-				if (guardNotice) {
-					emit(ctx, guardNotice, "warning");
-					return;
-				}
+			const preflightResult = await withWorkflowLaunchForeground(
+				ctx,
+				`Validating ${specPath}…`,
+				async (launchSignal) => {
+					launchSignal.throwIfAborted();
+					const loadedWorkflow = await loadWorkflowSpec(specPath, ctx.cwd);
+					launchSignal.throwIfAborted();
+					const guardNotice =
+						!parsed.detach && !parsed.forceNew
+							? await duplicateRunGuardNotice(
+									ctx.cwd,
+									{ kind: "spec", specRef: specPath },
+									parsed.task,
+								)
+							: undefined;
+					launchSignal.throwIfAborted();
+					return { guardNotice, loadedWorkflow };
+				},
+				uiSessionSignal,
+			);
+			if (preflightResult === WORKFLOW_LAUNCH_CANCELLED) return;
+			if (preflightResult.guardNotice) {
+				emit(ctx, preflightResult.guardNotice, "warning");
+				return;
 			}
+			const executionProfile = await selectWorkflowExecutionProfile(
+				specPath,
+				ctx.cwd,
+				parsed.profile,
+				ctx.hasUI
+					? (title, options) => ctx.ui.select(title, options)
+					: undefined,
+				preflightResult.loadedWorkflow,
+			);
+			if (uiSessionSignal.aborted) return;
 			emitWorkflowLaunchNotice(ctx, {
 				kind: "workflow",
 				workflow: specPath,
@@ -1599,22 +1695,29 @@ async function handleWorkflowCommand(
 			});
 			const result = await withWorkflowLaunchForeground(
 				ctx,
-				specPath,
-				() =>
-					startWorkflowRunFromRequest(
+				`Starting ${specPath}…`,
+				async (launchSignal) => {
+					launchSignal.throwIfAborted();
+					const launch = await startWorkflowRunFromRequest(
 						{
 							workflow: specPath,
 							task: parsed.task,
 							detach: parsed.detach,
 							runtimeOverrides,
-							executionProfile: parsed.profile,
+							executionProfile,
+							executionProfileResolved: true,
 						},
 						ctx,
 						api,
 						uiSessionSignal,
-					),
+					);
+					if (launchSignal.aborted && launch.run.status === "running")
+						await stopRun(ctx.cwd, launch.run.runId);
+					return launch;
+				},
 				uiSessionSignal,
 			);
+			if (result === WORKFLOW_LAUNCH_CANCELLED) return;
 			if (!uiSessionSignal.aborted)
 				emitRunStartResult(ctx, result.run.status, result.text);
 			return;
@@ -1628,36 +1731,42 @@ async function handleWorkflowCommand(
 					: undefined;
 			const uiSessionSignal = workflowUiSignalForCwd(ctx.cwd);
 			if (parsed.route) {
-				await withWorkflowLaunchForeground(
+				await handleRoutedRunRequest(
+					{
+						task: parsed.task,
+						detach: parsed.detach,
+						forceNew: Boolean(parsed.forceNew),
+						runtimeOverrides,
+						usage: '/workflow dynamic --route "<task>"',
+					},
 					ctx,
-					"dynamic workflow",
-					() =>
-						handleRoutedRunRequest(
-							{
-								task: parsed.task,
-								detach: parsed.detach,
-								runtimeOverrides,
-								usage: '/workflow dynamic --route "<task>"',
-							},
-							ctx,
-							api,
-							uiSessionSignal,
-						),
+					api,
 					uiSessionSignal,
 				);
 				return;
 			}
-			if (!parsed.detach && !parsed.forceNew) {
-				const guardNotice = await duplicateRunGuardNotice(
-					ctx.cwd,
-					{ kind: "dynamic" },
-					parsed.task,
-				);
-				if (uiSessionSignal.aborted) return;
-				if (guardNotice) {
-					emit(ctx, guardNotice, "warning");
-					return;
-				}
+			const preflightResult = await withWorkflowLaunchForeground(
+				ctx,
+				"Validating dynamic workflow…",
+				async (launchSignal) => {
+					launchSignal.throwIfAborted();
+					const guardNotice =
+						!parsed.detach && !parsed.forceNew
+							? await duplicateRunGuardNotice(
+									ctx.cwd,
+									{ kind: "dynamic" },
+									parsed.task,
+								)
+							: undefined;
+					launchSignal.throwIfAborted();
+					return guardNotice;
+				},
+				uiSessionSignal,
+			);
+			if (preflightResult === WORKFLOW_LAUNCH_CANCELLED) return;
+			if (preflightResult) {
+				emit(ctx, preflightResult, "warning");
+				return;
 			}
 			emitWorkflowLaunchNotice(ctx, {
 				kind: "dynamic",
@@ -1665,9 +1774,10 @@ async function handleWorkflowCommand(
 			});
 			const result = await withWorkflowLaunchForeground(
 				ctx,
-				"dynamic workflow",
-				() =>
-					startDynamicRunFromRequest(
+				"Starting dynamic workflow…",
+				async (launchSignal) => {
+					launchSignal.throwIfAborted();
+					const launch = await startDynamicRunFromRequest(
 						{
 							task: parsed.task,
 							detach: parsed.detach,
@@ -1676,9 +1786,14 @@ async function handleWorkflowCommand(
 						ctx,
 						api,
 						uiSessionSignal,
-					),
+					);
+					if (launchSignal.aborted && launch.run.status === "running")
+						await stopRun(ctx.cwd, launch.run.runId);
+					return launch;
+				},
 				uiSessionSignal,
 			);
+			if (result === WORKFLOW_LAUNCH_CANCELLED) return;
 			if (!uiSessionSignal.aborted)
 				emitRunStartResult(ctx, result.run.status, result.text);
 			return;
@@ -1928,6 +2043,7 @@ function emitWorkflowLaunchNotice(
 		| { kind: "routed-workflow"; workflow: string | undefined; detach: boolean }
 		| { kind: "routed-dynamic"; workflow?: undefined; detach: boolean },
 ): void {
+	if (ctx.hasUI) return;
 	const label =
 		request.kind === "dynamic"
 			? "dynamic workflow"
@@ -1954,6 +2070,7 @@ function emitRunStartResult(
 	status: string,
 	text: string,
 ): void {
+	if (status === "running" && ctx.hasUI && ctx.mode === "tui") return;
 	emit(
 		ctx,
 		text,

@@ -11,6 +11,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 
+import { initTheme } from "@earendil-works/pi-coding-agent";
+
 import { runWorkflow } from "../../.tmp/unit/engine.js";
 import {
 	parseWorkflowDynamicArgs,
@@ -22,6 +24,8 @@ import {
 	executeRoutedWorkflowRequest,
 	parseWorkflowRouterOutput,
 } from "../../.tmp/unit/workflow-router.js";
+
+initTheme(undefined, false);
 
 const UNIT_TEST_HOME = mkdtempSync(join(tmpdir(), "workflow-router-home-"));
 process.env.HOME = UNIT_TEST_HOME;
@@ -331,6 +335,41 @@ test("routed profile resolver runs only after routing selects the named workflow
 			name: "low",
 			stageOverrides: { main: { thinking: "low" } },
 		});
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("resolved Base profile is not replaced by a routed default resolver", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout");
+		writeRoutableWorkflow(cwd);
+		const calls = installFakeSubagentApi(cwd, {
+			routerText: JSON.stringify({
+				route: "workflow",
+				depth: "standard",
+				confidence: 0.95,
+				reason: "workflow needed",
+			}),
+		});
+		let resolverCalls = 0;
+		const outcome = await executeRoutedWorkflowRequest(
+			routedRequest(cwd, {
+				executionProfile: undefined,
+				executionProfileResolved: true,
+				resolveExecutionProfile: async () => {
+					resolverCalls += 1;
+					return "low";
+				},
+			}),
+		);
+		assert.equal(outcome.mode, "workflow");
+		assert.equal(calls.router, 1);
+		assert.equal(resolverCalls, 0);
+		const run = await readRunRecord(cwd, outcome.run.runId);
+		assert.equal(run.executionProfile, undefined);
 	} finally {
 		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
@@ -647,11 +686,29 @@ test("/workflow run routes by default and --no-route skips the router", async ()
 		const notices = [];
 		const statuses = [];
 		const widgets = [];
+		const foregroundMessages = [];
 		let profilePrompts = 0;
 		const ctx = {
 			cwd,
 			hasUI: true,
+			mode: "tui",
 			ui: {
+				custom(factory) {
+					return new Promise((resolve) => {
+						let component;
+						const done = (value) => {
+							component?.dispose?.();
+							resolve(value);
+						};
+						component = factory(
+							{ requestRender() {} },
+							{ fg(_role, value) { return value; } },
+							undefined,
+							done,
+						);
+						foregroundMessages.push(component.render(100).join("\n"));
+					});
+				},
 				notify(message, level) {
 					notices.push({ message, level });
 				},
@@ -673,37 +730,64 @@ test("/workflow run routes by default and --no-route skips the router", async ()
 		await handler('run route-target "Routed by default task."', ctx);
 		assert.equal(calls.router, 1);
 
+		// An identical active workflow does not block a later direct route.
+		const directCalls = installFakeSubagentApi(cwd, {
+			routerText: JSON.stringify({
+				route: "direct",
+				depth: "quick",
+				confidence: 0.99,
+				reason: "direct answer is sufficient",
+			}),
+			directText: "DIRECT_DUPLICATE_GUARD_BYPASS",
+			keepTaskRunning: true,
+		});
+		await handler('run route-target "Routed by default task."', ctx);
+		assert.equal(directCalls.router, 1);
+		assert.equal(directCalls.direct, 1);
+		assert.equal(
+			notices.some(({ message }) =>
+				message.includes("DIRECT_DUPLICATE_GUARD_BYPASS"),
+			),
+			true,
+		);
+
 		// --no-route skips the router entirely.
 		await handler(
 			'run --no-route --force-new route-target "No route task."',
 			ctx,
 		);
-		assert.equal(calls.router, 1);
+		assert.equal(directCalls.router, 1);
 		assert.equal(profilePrompts, 2);
-		assert.ok(calls.launches >= 2);
+		assert.ok(calls.launches + directCalls.launches >= 2);
 		assert.equal(
-			statuses.some(
-				(entry) =>
-					entry.key === "pi-workflow-launch" &&
-					typeof entry.value === "string" &&
-					entry.value.includes("Starting route-target"),
+			foregroundMessages.some((message) =>
+				message.includes("Routing route-target"),
 			),
 			true,
 		);
-		assert.deepEqual(
-			statuses.filter((entry) => entry.key === "pi-workflow-launch").at(-1),
-			{
-				key: "pi-workflow-launch",
-				value: undefined,
-			},
-		);
 		assert.equal(
-			widgets.some(
-				(entry) =>
-					entry.key === "pi-workflow-launch" &&
-					entry.options?.placement === "belowEditor",
+			foregroundMessages.some((message) =>
+				message.includes("Validating route-target"),
 			),
 			true,
+		);
+		assert.equal(
+			foregroundMessages.some((message) =>
+				message.includes("Starting route-target"),
+			),
+			true,
+		);
+		assert.equal(
+			notices.some(({ message }) => message.includes("Workflow started")),
+			false,
+		);
+		assert.equal(
+			statuses.some((entry) => entry.key === "pi-workflow-launch"),
+			false,
+		);
+		assert.equal(
+			widgets.some((entry) => entry.key === "pi-workflow-launch"),
+			false,
 		);
 		for (let attempt = 0; attempt < 50; attempt += 1) {
 			if (

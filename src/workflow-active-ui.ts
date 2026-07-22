@@ -1,23 +1,35 @@
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+	BorderedLoader,
+	type ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 
 import type { WorkflowIndexRecord } from "./types.js";
 
 export const WORKFLOW_ACTIVE_STATUS_KEY = "pi-workflow-active";
 export const WORKFLOW_ACTIVE_WIDGET_KEY = "pi-workflow-active";
-export const WORKFLOW_LAUNCH_STATUS_KEY = "pi-workflow-launch";
-export const WORKFLOW_LAUNCH_WIDGET_KEY = "pi-workflow-launch";
+export const WORKFLOW_LAUNCH_CANCELLED: unique symbol = Symbol(
+	"workflow-launch-cancelled",
+);
 
 const ACTIVE_WORKFLOW_LIMIT = 5;
-const LAUNCH_FRAMES = ["◐", "◓", "◑", "◒"] as const;
 
 type WorkflowIndexRun = WorkflowIndexRecord["runs"][number];
-type WorkflowUiContext = Pick<ExtensionContext, "hasUI" | "ui">;
+type WorkflowUiContext = Pick<ExtensionContext, "hasUI" | "mode" | "ui">;
+type WorkflowLaunchOutcome<T> =
+	| { kind: "completed"; value: T }
+	| { kind: "cancelled" }
+	| { kind: "failed"; error: unknown };
 
 export function activeTopLevelWorkflowRuns(
 	index: WorkflowIndexRecord | undefined,
 ): WorkflowIndexRun[] {
 	return (index?.runs ?? [])
-		.filter((run) => !run.parentRunId && run.status === "running")
+		.filter(
+			(run) =>
+				!run.parentRunId &&
+				run.status === "running" &&
+				run.taskSummary.running > 0,
+		)
 		.sort((left, right) => {
 			const updatedDelta =
 				Date.parse(right.updatedAt ?? "") - Date.parse(left.updatedAt ?? "");
@@ -86,57 +98,48 @@ export function clearActiveWorkflowUi(ctx: WorkflowUiContext): void {
 export async function withWorkflowLaunchForeground<T>(
 	ctx: WorkflowUiContext,
 	label: string,
-	operation: () => Promise<T>,
+	operation: (signal: AbortSignal) => Promise<T>,
 	signal?: AbortSignal,
-): Promise<T> {
-	if (!ctx.hasUI || signal?.aborted) return operation();
-	let frameIndex = 0;
-	let timer: ReturnType<typeof setInterval> | undefined;
-	let cleared = false;
-	const clear = () => {
-		if (cleared) return;
-		cleared = true;
-		if (timer) clearInterval(timer);
-		safeUiCall(() =>
-			ctx.ui.setStatus(WORKFLOW_LAUNCH_STATUS_KEY, undefined),
-		);
-		safeUiCall(() =>
-			ctx.ui.setWidget(WORKFLOW_LAUNCH_WIDGET_KEY, undefined, {
-				placement: "belowEditor",
-			}),
-		);
-	};
-	const render = () => {
-		if (signal?.aborted) {
-			clear();
-			return;
-		}
-		const frame = LAUNCH_FRAMES[frameIndex % LAUNCH_FRAMES.length];
-		frameIndex += 1;
-		safeUiCall(() =>
-			ctx.ui.setStatus(
-				WORKFLOW_LAUNCH_STATUS_KEY,
-				`${frame} Starting ${label}`,
-			),
-		);
-		safeUiCall(() =>
-			ctx.ui.setWidget(
-				WORKFLOW_LAUNCH_WIDGET_KEY,
-				["Starting workflow", `${frame} ${label} — routing, validating, and launching`],
-				{ placement: "belowEditor" },
-			),
-		);
-	};
-	signal?.addEventListener("abort", clear, { once: true });
-	render();
-	timer = setInterval(render, 180);
-	timer.unref?.();
-	try {
-		return await operation();
-	} finally {
-		signal?.removeEventListener("abort", clear);
-		clear();
+): Promise<T | typeof WORKFLOW_LAUNCH_CANCELLED> {
+	if (signal?.aborted) return WORKFLOW_LAUNCH_CANCELLED;
+	if (!ctx.hasUI || ctx.mode !== "tui") {
+		return operation(signal ?? new AbortController().signal);
 	}
+
+	const outcome = await ctx.ui.custom<WorkflowLaunchOutcome<T>>(
+		(tui, theme, _keybindings, done) => {
+			const loader = new BorderedLoader(tui, theme, label);
+			const operationSignal = loader.signal;
+			let settled = false;
+			const finish = (value: WorkflowLaunchOutcome<T>) => {
+				if (settled) return;
+				settled = true;
+				signal?.removeEventListener("abort", cancel);
+				done(value);
+			};
+			const cancel = () => finish({ kind: "cancelled" });
+			loader.onAbort = cancel;
+			signal?.addEventListener("abort", cancel, { once: true });
+
+			Promise.resolve()
+				.then(() => operation(operationSignal))
+				.then(
+					(value) =>
+						finish(
+							operationSignal.aborted
+								? { kind: "cancelled" }
+								: { kind: "completed", value },
+						),
+					(error: unknown) => finish({ kind: "failed", error }),
+				);
+			return loader;
+		},
+	);
+
+	if (!outcome || outcome.kind === "cancelled")
+		return WORKFLOW_LAUNCH_CANCELLED;
+	if (outcome.kind === "failed") throw outcome.error;
+	return outcome.value;
 }
 
 function truncateLabel(value: string, maxCodePoints: number): string {
