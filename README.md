@@ -70,7 +70,7 @@ For a one-off adaptive workflow that should plan, fan out, and synthesize withou
 /workflow dynamic "Research this repository and summarize the architecture tradeoffs."
 ```
 
-Interactive slash-command launches stay visibly in the foreground while routing, validating, and completing the initial scheduling pass. Once a durable run is active, the command returns and Pi shows an `Active workflows` widget below the editor plus a compact footer status. The widget tracks top-level run progress, survives session reload by rebuilding from `.pi/workflows`, and disappears when no workflow remains active. Open `/workflow` for the full board.
+Interactive slash-command launches use Pi's cancellable foreground loader while routing, validating, and completing the initial scheduling pass. Once at least one backend task is actually running, the command returns and Pi shows an `Active workflows` widget below the editor plus a compact footer status. The widget excludes launch/preparation states and stale `running` records with no running task, tracks top-level run progress, survives session reload by rebuilding from `.pi/workflows`, and disappears when no workflow remains active. Open `/workflow` for the full board.
 
 ### Execution profiles
 

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { initTheme } from "@earendil-works/pi-coding-agent";
+
 import {
 	activeTopLevelWorkflowRuns,
 	formatActiveWorkflowLines,
@@ -8,9 +10,10 @@ import {
 	withWorkflowLaunchForeground,
 	WORKFLOW_ACTIVE_STATUS_KEY,
 	WORKFLOW_ACTIVE_WIDGET_KEY,
-	WORKFLOW_LAUNCH_STATUS_KEY,
-	WORKFLOW_LAUNCH_WIDGET_KEY,
+	WORKFLOW_LAUNCH_CANCELLED,
 } from "../../.tmp/unit/workflow-active-ui.js";
+
+initTheme(undefined, false);
 
 function summary(completed, total) {
 	return {
@@ -57,6 +60,10 @@ test("active workflow UI selects recent running top-level runs only", () => {
 				updatedAt: "2026-07-22T00:03:00.000Z",
 			}),
 			run({ runId: "workflow_done", status: "completed" }),
+			run({
+				runId: "workflow_stale",
+				taskSummary: { ...summary(3, 8), running: 0 },
+			}),
 			run({ runId: "workflow_child", parentRunId: "workflow_old" }),
 		]),
 	);
@@ -119,53 +126,87 @@ test("active workflow UI renders and clears footer and below-editor widget", () 
 	assert.equal(widgets.at(-1).value, undefined);
 });
 
-test("foreground workflow launch indicator clears after success and failure", async () => {
-	const statuses = [];
-	const widgets = [];
-	const ctx = {
-		hasUI: true,
-		ui: {
-			setStatus(key, value) {
-				statuses.push({ key, value });
-			},
-			setWidget(key, value, options) {
-				widgets.push({ key, value, options });
+function foregroundContext() {
+	const components = [];
+	return {
+		components,
+		ctx: {
+			hasUI: true,
+			mode: "tui",
+			ui: {
+				custom(factory) {
+					return new Promise((resolve) => {
+						let component;
+						const done = (value) => {
+							component?.dispose?.();
+							resolve(value);
+						};
+						component = factory(
+							{ requestRender() {} },
+							{ fg(_role, value) { return value; } },
+							undefined,
+							done,
+						);
+						components.push(component);
+					});
+				},
 			},
 		},
 	};
-	const value = await withWorkflowLaunchForeground(ctx, "deep-review", async () => {
-		assert.equal(statuses.at(-1).key, WORKFLOW_LAUNCH_STATUS_KEY);
-		assert.match(statuses.at(-1).value, /Starting deep-review/u);
-		assert.equal(widgets.at(-1).key, WORKFLOW_LAUNCH_WIDGET_KEY);
-		return 42;
-	});
+}
+
+test("foreground workflow launch uses a cancellable custom loader", async () => {
+	const { ctx, components } = foregroundContext();
+	const value = await withWorkflowLaunchForeground(
+		ctx,
+		"Starting deep-review…",
+		async (signal) => {
+			assert.equal(signal.aborted, false);
+			await Promise.resolve();
+			assert.match(components[0].render(80).join("\n"), /Starting deep-review/u);
+			return 42;
+		},
+	);
 	assert.equal(value, 42);
-	assert.equal(statuses.at(-1).value, undefined);
-	assert.equal(widgets.at(-1).value, undefined);
 
 	await assert.rejects(
-		withWorkflowLaunchForeground(ctx, "deep-review", async () => {
+		withWorkflowLaunchForeground(ctx, "Starting deep-review…", async () => {
 			throw new Error("launch failed");
 		}),
 		/launch failed/u,
 	);
-	assert.equal(statuses.at(-1).value, undefined);
-	assert.equal(widgets.at(-1).value, undefined);
 
 	const controller = new AbortController();
 	let finishLaunch;
+	let sessionOperationSignal;
 	const pending = withWorkflowLaunchForeground(
 		ctx,
-		"deep-review",
-		() => new Promise((resolve) => (finishLaunch = resolve)),
+		"Starting deep-review…",
+		(signal) => {
+			sessionOperationSignal = signal;
+			return new Promise((resolve) => (finishLaunch = resolve));
+		},
 		controller.signal,
 	);
+	await Promise.resolve();
 	controller.abort();
-	const statusCountAfterAbort = statuses.length;
-	assert.equal(statuses.at(-1).value, undefined);
-	assert.equal(widgets.at(-1).value, undefined);
-	await new Promise((resolve) => setTimeout(resolve, 220));
-	assert.equal(statuses.length, statusCountAfterAbort);
+	assert.equal(await pending, WORKFLOW_LAUNCH_CANCELLED);
+	assert.equal(sessionOperationSignal.aborted, false);
 	finishLaunch("started");
-	assert.equal(await pending, "started");
+
+	let finishEscapedLaunch;
+	let escapedOperationSignal;
+	const escaped = withWorkflowLaunchForeground(
+		ctx,
+		"Starting deep-review…",
+		(signal) => {
+			escapedOperationSignal = signal;
+			return new Promise((resolve) => (finishEscapedLaunch = resolve));
+		},
+	);
+	await Promise.resolve();
+	components.at(-1).handleInput("\u001b");
+	assert.equal(await escaped, WORKFLOW_LAUNCH_CANCELLED);
+	assert.equal(escapedOperationSignal.aborted, true);
+	finishEscapedLaunch("started");
 });

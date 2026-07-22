@@ -68,6 +68,8 @@ export interface RoutedWorkflowRequest {
 	dynamicUi?: DynamicWorkflowUi;
 	/** Named executionProfiles entry applied when the workflow path is chosen. */
 	executionProfile?: string;
+	/** True when an interactive caller deliberately selected a profile or Base. */
+	executionProfileResolved?: boolean;
 	/**
 	 * Resolve an omitted profile only after routing chooses the named workflow.
 	 * Interactive callers use this to avoid prompting for direct/dynamic routes.
@@ -232,24 +234,46 @@ export async function executeRoutedWorkflowRequest(
 	request: RoutedWorkflowRequest,
 ): Promise<RoutedWorkflowOutcome> {
 	const routing = await resolveWorkflowRouting(request);
+	return executeResolvedRoutedWorkflowRequest(request, routing);
+}
+
+export async function executeResolvedRoutedWorkflowRequest(
+	request: RoutedWorkflowRequest,
+	routing: WorkflowRunRouting,
+): Promise<RoutedWorkflowOutcome> {
 	if (routing.decided === "direct") {
-		try {
-			const answer = await runDirectRoutedAnswer(request);
-			await appendWorkflowRoutingLog(request.cwd, routing, request.task);
-			return { mode: "direct", routing, answer };
-		} catch (error) {
-			const fallbackDecision: WorkflowRouteDecision = request.requestedWorkflow
-				? "workflow"
-				: "dynamic";
-			return startDecidedRun(request, {
+		const direct = await resolveRoutedDirectAnswer(request, routing);
+		if (direct.mode === "direct") return direct;
+		return startDecidedRun(request, direct.routing);
+	}
+	return startDecidedRun(request, routing);
+}
+
+export async function resolveRoutedDirectAnswer(
+	request: RoutedWorkflowRequest,
+	routing: WorkflowRunRouting,
+): Promise<
+	| { mode: "direct"; routing: WorkflowRunRouting; answer: string }
+	| { mode: "escalated"; routing: WorkflowRunRouting }
+> {
+	try {
+		const answer = await runDirectRoutedAnswer(request);
+		await appendWorkflowRoutingLog(request.cwd, routing, request.task);
+		return { mode: "direct", routing, answer };
+	} catch (error) {
+		const fallbackDecision: WorkflowRouteDecision = request.requestedWorkflow
+			? "workflow"
+			: "dynamic";
+		return {
+			mode: "escalated",
+			routing: {
 				...routing,
 				decided: fallbackDecision,
 				depth: "standard",
 				reason: `${routing.reason} (direct answer failed: ${errorMessage(error)}; escalated to ${fallbackDecision} at standard depth)`,
-			});
-		}
+			},
+		};
 	}
-	return startDecidedRun(request, routing);
 }
 
 async function startDecidedRun(
@@ -274,9 +298,10 @@ async function startDecidedRun(
 		});
 		return { mode: "dynamic", routing: dynamicRouting, run };
 	}
-	const executionProfile =
-		request.executionProfile ??
-		(await request.resolveExecutionProfile?.(request.requestedWorkflow));
+	const executionProfile = request.executionProfileResolved
+		? request.executionProfile
+		: (request.executionProfile ??
+			(await request.resolveExecutionProfile?.(request.requestedWorkflow)));
 	const run = await runWorkflowSpec(request.requestedWorkflow, request.cwd, {
 		...commonOptions,
 		routing,
