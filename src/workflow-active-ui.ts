@@ -52,7 +52,7 @@ export function formatActiveWorkflowLines(
 			const elapsed = Number.isFinite(createdAtMs)
 				? ` · ${formatElapsed(nowMs - createdAtMs)}`
 				: "";
-			return `● ${truncateLabel(run.name ?? run.runId, 28)} ${run.taskSummary.completed}/${run.taskSummary.total} running${elapsed}`;
+			return `● ${truncateLabel(run.name ?? run.runId, 28)} ${visibleProgress(run)}/${run.taskSummary.total} running${elapsed}`;
 		}),
 	];
 	if (runs.length > visible.length)
@@ -73,7 +73,7 @@ export function renderActiveWorkflowUi(
 	}
 	const status =
 		runs.length === 1
-			? `● ${truncateLabel(runs[0].name ?? runs[0].runId, 18)} ${runs[0].taskSummary.completed}/${runs[0].taskSummary.total}`
+			? `● ${truncateLabel(runs[0].name ?? runs[0].runId, 18)} ${visibleProgress(runs[0])}/${runs[0].taskSummary.total}`
 			: `● workflows ${runs.length} active`;
 	safeUiCall(() => ctx.ui.setStatus(WORKFLOW_ACTIVE_STATUS_KEY, status));
 	safeUiCall(() =>
@@ -140,6 +140,10 @@ export async function withWorkflowLaunchForeground<T>(
 		return WORKFLOW_LAUNCH_CANCELLED;
 	if (outcome.kind === "failed") throw outcome.error;
 	return outcome.value;
+}
+
+function visibleProgress(run: WorkflowIndexRun): number {
+	return run.taskSummary.completed + run.taskSummary.running;
 }
 
 function truncateLabel(value: string, maxCodePoints: number): string {
