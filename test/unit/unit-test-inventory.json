@@ -1096,21 +1096,21 @@
 			"domain": "authoring-interface"
 		},
 		{
-			"name": "workflow TUI renders health in task list and detail",
+			"name": "workflow TUI keeps health inline without a Health section",
 			"occurrence": 1,
-			"sha256": "a1e4ebe85337a5c83994f8ea6f3e305de99ab689d81e40294485f879b72cf16f",
+			"sha256": "c958645eca012de1e50ea4984bffe569072f143f8ff92e59bce4b5d91ee9c537",
 			"domain": "authoring-interface"
 		},
 		{
-			"name": "workflow TUI renders selected run health without status-command detours",
+			"name": "workflow TUI omits run Health and Navigation sections",
 			"occurrence": 1,
-			"sha256": "f5737d6fa3752265c521098ed77b8d06c05b4a8fa833505d2767584b7e516ca7",
+			"sha256": "9875841d67c692d595d6da93c2fc1325204c4000865f6eb48c241bdd8c4b09c1",
 			"domain": "authoring-interface"
 		},
 		{
-			"name": "workflow TUI renders likely-stuck guidance and keeps narrow widths bounded",
+			"name": "workflow TUI renders likely-stuck inline status and keeps narrow widths bounded",
 			"occurrence": 1,
-			"sha256": "634a45c66e31e1a5fc78a12667f54f83a48bd920d21a98c74c69dcb0e5d98c75",
+			"sha256": "4543f4e90c5e857c4a27396c8613f952900947041b91bb6a5f8726e2eeb3cfe9",
 			"domain": "authoring-interface"
 		},
 		{
