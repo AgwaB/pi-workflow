@@ -14,6 +14,7 @@ import { after, test } from "node:test";
 import { buildForeachGeneratedTasks } from "../../.tmp/unit/engine-run-graph.js";
 import {
 	assertForeachBatchRecord,
+	buildForeachBatchPrompt,
 	parseForeachBatchEnvelope,
 } from "../../.tmp/unit/foreach-batch-runtime.js";
 import {
@@ -83,7 +84,12 @@ function batchOutput(items) {
 function writeWorkflow(
 	cwd,
 	name,
-	{ itemCount = 3, maxConcurrency = 2, groupBy } = {},
+	{
+		itemCount = 3,
+		maxConcurrency = 2,
+		groupBy,
+		stageMaxConcurrency,
+	} = {},
 ) {
 	const dir = join(cwd, "workflows", name);
 	mkdirSync(dir, { recursive: true });
@@ -116,6 +122,9 @@ function writeWorkflow(
 						id: "fan",
 						type: "foreach",
 						from: { source: "source", path: "$.items" },
+						...(stageMaxConcurrency === undefined
+							? {}
+							: { maxConcurrency: stageMaxConcurrency }),
 						inputPolicy: { artifactAccess: "none" },
 						each: { prompt: "Independently review ${item}." },
 						output: { analysis: { required: true }, refs: { required: true } },
@@ -166,13 +175,16 @@ function fakeApi({
 	cwd,
 	items,
 	batchItemFactory,
+	batchItemsTransform = (rows) => rows,
 	delayedBatch = false,
+	failBatchLaunchOnce = false,
 	throwBatchPoll = false,
 }) {
 	const runs = new Map();
 	const launches = [];
 	const interrupts = [];
 	let batchCompleted = !delayedBatch;
+	let batchLaunchFailed = false;
 	let batchStatusCalls = 0;
 	return {
 		launches,
@@ -201,9 +213,16 @@ function fakeApi({
 					});
 				} else if (prompt.includes("Workflow Foreach Batch Protocol v1")) {
 					kind = "batch";
+					if (failBatchLaunchOnce && !batchLaunchFailed) {
+						batchLaunchFailed = true;
+						launches.push({ runId, attemptId, kind: "batch-failed", prompt });
+						throw new Error("simulated batch launch failure");
+					}
 					const ids = idsFromBatchPrompt(prompt);
 					output = batchOutput(
-						ids.map((id, itemIndex) => batchItemFactory(id, itemIndex)),
+						batchItemsTransform(
+							ids.map((id, itemIndex) => batchItemFactory(id, itemIndex)),
+						),
 					);
 				} else if (prompt.includes("Finish after every fan item.")) {
 					kind = "downstream";
@@ -397,6 +416,34 @@ test("batch group keys persist from raw items and envelope ids are strict", () =
 			false,
 		);
 	}
+});
+
+test("batch prompt makes nested JSON decoding explicit and preserves decoded prepared prompts", () => {
+	const itemPrompts = [
+		'Copy payload {"value":"quoted \\"alpha\\" and slash \\\\ path"}.',
+		"Copy payload with a real newline:\nsecond line.",
+	];
+	const prompt = buildForeachBatchPrompt({
+		leader: {},
+		items: [
+			{ id: "task-1", prompt: itemPrompts[0] },
+			{ id: "task-2", prompt: itemPrompts[1] },
+		],
+	});
+	assert.match(prompt, /Parse it as JSON before processing either item/);
+	assert.match(prompt, /never from its displayed serialized representation/);
+	assert.match(prompt, /same threshold you would use if that item were the only task/);
+	const encoded = prompt.split("# Untrusted Prepared Item Tasks\n\n")[1];
+	let decoded;
+	try {
+		decoded = JSON.parse(encoded);
+	} catch (error) {
+		assert.fail(`batch prompt must end in valid JSON: ${String(error)}`);
+	}
+	assert.deepEqual(
+		decoded.items.map((item) => item.taskPrompt),
+		itemPrompts,
+	);
 });
 
 test("persisted batch phases and phase-dependent receipts fail closed", () => {
@@ -895,6 +942,223 @@ test("one invalid batched member falls back both items to singleton without outp
 				readFileSync(join(cwd, task.files.output), "utf8"),
 				/singleton/,
 			);
+		}
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("zero and one foreach items remain valid without creating batch ownership", async () => {
+	for (const itemCount of [0, 1]) {
+		const cwd = makeProject();
+		try {
+			writeAgent(cwd);
+			const name = `batch-cardinality-${itemCount}`;
+			const items = writeWorkflow(cwd, name, { itemCount });
+			const fake = fakeApi({
+				cwd,
+				items,
+				batchItemFactory() {
+					throw new Error("cardinality below two must not launch a batch");
+				},
+			});
+			setSubagentApiForTests(fake.api);
+			const started = await runWorkflow(name, cwd, {
+				task: `Run ${itemCount} foreach items.`,
+				executionProfile: "batched",
+			});
+			const completed = await waitForRun(cwd, started.runId, 20_000);
+			assert.equal(completed.status, "completed");
+			assert.equal(completed.foreachBatches?.length ?? 0, 0);
+			assert.deepEqual(
+				fake.launches.map((launch) => launch.kind),
+				itemCount === 0
+					? ["source", "downstream"]
+					: ["source", "singleton", "downstream"],
+			);
+		} finally {
+			setSubagentApiForTests(undefined);
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	}
+});
+
+test("logical concurrency below two degrades an eligible pair to ordered singletons", async () => {
+	for (const scenario of [
+		{ name: "global", maxConcurrency: 1 },
+		{ name: "stage", maxConcurrency: 2, stageMaxConcurrency: 1 },
+	]) {
+		const cwd = makeProject();
+		try {
+			writeAgent(cwd);
+			const name = `batch-one-${scenario.name}-slot`;
+			const items = writeWorkflow(cwd, name, {
+				itemCount: 2,
+				maxConcurrency: scenario.maxConcurrency,
+				stageMaxConcurrency: scenario.stageMaxConcurrency,
+			});
+			const fake = fakeApi({
+				cwd,
+				items,
+				batchItemFactory() {
+					throw new Error("a physical pair cannot consume only one logical slot");
+				},
+			});
+			setSubagentApiForTests(fake.api);
+			const started = await runWorkflow(name, cwd, {
+				task: "Respect one logical slot.",
+				executionProfile: "batched",
+			});
+			const completed = await waitForRun(cwd, started.runId, 20_000);
+			assert.equal(completed.status, "completed");
+			assert.equal(completed.foreachBatches?.length ?? 0, 0);
+			assert.deepEqual(
+				fake.launches.map((launch) => launch.kind),
+				["source", "singleton", "singleton", "downstream"],
+			);
+		} finally {
+			setSubagentApiForTests(undefined);
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	}
+});
+
+test("groupBy fallback paths preserve canonical type boundaries and unusable values stay singleton-only", () => {
+	const template = {
+		id: "fan",
+		stageId: "fan",
+		foreach: {
+			prompt: "Review ${item}",
+			injectRuntimeTask: false,
+			batch: { maxItems: 2, groupBy: ["$.primary", "$.fallback"] },
+		},
+	};
+	const generated = buildForeachGeneratedTasks(template, undefined, [
+		{ primary: "", fallback: { b: 2, a: 1 } },
+		{ fallback: { a: 1, b: 2 } },
+		{ primary: 1 },
+		{ primary: "1" },
+		{ primary: false },
+		{ primary: 0 },
+		{ primary: null, fallback: [] },
+		{ primary: null, fallback: ["x"] },
+	]);
+	assert.equal(generated.error, undefined);
+	const keys = generated.tasks.map(
+		(task) => task.foreachGenerated.batch.groupKey,
+	);
+	assert.deepEqual(keys, [
+		'{"a":1,"b":2}',
+		'{"a":1,"b":2}',
+		"1",
+		'"1"',
+		"false",
+		"0",
+		undefined,
+		'["x"]',
+	]);
+});
+
+test("multiple groups accept reversed batch rows and preserve exact per-item ownership", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd);
+		writeWorkflow(cwd, "batch-reversed-groups", {
+			itemCount: 6,
+			maxConcurrency: 6,
+			groupBy: "$.group",
+		});
+		const items = [
+			{ id: "a-1", group: "a" },
+			{ id: "a-2", group: "a" },
+			{ id: "a-tail", group: "a" },
+			{ id: "b-1", group: "b" },
+			{ id: "b-2", group: "b" },
+			{ id: "missing-group" },
+		];
+		const fake = fakeApi({
+			cwd,
+			items,
+			batchItemsTransform: (rows) => [...rows].reverse(),
+			batchItemFactory: (id) => ({
+				id,
+				control: { schema: "stage-control-v1", digest: `batch-${id}` },
+				analysis: `역순 Unicode analysis for ${id} — \"quoted\"`,
+				refs: [],
+			}),
+		});
+		setSubagentApiForTests(fake.api);
+		const started = await runWorkflow("batch-reversed-groups", cwd, {
+			task: "Accept exact ids regardless of row order.",
+			executionProfile: "batched",
+		});
+		const completed = await waitForRun(cwd, started.runId, 20_000);
+		assert.equal(completed.status, "completed");
+		assert.equal(
+			fake.launches.filter((launch) => launch.kind === "batch").length,
+			2,
+		);
+		assert.equal(
+			fake.launches.filter((launch) => launch.kind === "singleton").length,
+			2,
+		);
+		assert.equal(completed.foreachBatches?.length, 2);
+		for (const batch of completed.foreachBatches ?? []) {
+			assert.equal(batch.phase, "completed");
+			for (const member of batch.members) {
+				const task = completed.tasks.find(
+					(candidate) => candidate.taskId === member.taskId,
+				);
+				assert.ok(task);
+				assert.match(
+					readFileSync(join(cwd, task.files.output), "utf8"),
+					new RegExp(`batch-${member.taskId}`),
+				);
+			}
+		}
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("a physical batch launch failure durably falls back the exact pair to singleton", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd);
+		const items = writeWorkflow(cwd, "batch-launch-failure", { itemCount: 2 });
+		const fake = fakeApi({
+			cwd,
+			items,
+			failBatchLaunchOnce: true,
+			batchItemFactory: (id) => ({
+				id,
+				control: { schema: "stage-control-v1", digest: `batch-${id}` },
+				analysis: `analysis for ${id}`,
+				refs: [],
+			}),
+		});
+		setSubagentApiForTests(fake.api);
+		const started = await runWorkflow("batch-launch-failure", cwd, {
+			task: "Recover a failed physical pair launch.",
+			executionProfile: "batched",
+		});
+		const completed = await waitForRun(cwd, started.runId, 20_000);
+		assert.equal(completed.status, "completed");
+		assert.deepEqual(
+			fake.launches.map((launch) => launch.kind),
+			["source", "batch-failed", "singleton", "singleton", "downstream"],
+		);
+		const batch = completed.foreachBatches?.[0];
+		assert.equal(batch?.phase, "fallback_applied");
+		assert.match(batch?.fallback?.reason ?? "", /simulated batch launch failure/);
+		for (const task of completed.tasks.filter(
+			(candidate) => candidate.stageId === "fan",
+		)) {
+			assert.equal(task.status, "completed");
+			assert.equal(task.outputRetry, undefined);
+			assert.equal(task.foreachBatch?.batchingDisabled, true);
 		}
 	} finally {
 		setSubagentApiForTests(undefined);
