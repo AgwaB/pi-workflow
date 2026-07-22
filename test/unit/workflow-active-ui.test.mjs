@@ -73,7 +73,7 @@ test("active workflow UI selects recent running top-level runs only", () => {
 	);
 });
 
-test("active workflow UI formats bounded progress and elapsed time", () => {
+test("active workflow UI matches panel progress and formats bounded elapsed time", () => {
 	const runs = Array.from({ length: 7 }, (_, item) =>
 		run({
 			runId: `workflow_${item}`,
@@ -81,6 +81,11 @@ test("active workflow UI formats bounded progress and elapsed time", () => {
 				item === 0
 					? "긴-워크플로-이름-😀-abcdefghijklmnopqrstuvwxyz"
 					: `workflow-${item}`,
+			taskSummary: {
+				...summary(1, 11),
+				pending: 5,
+				running: 5,
+			},
 			updatedAt: `2026-07-22T00:0${item}:00.000Z`,
 		}),
 	);
@@ -90,7 +95,7 @@ test("active workflow UI formats bounded progress and elapsed time", () => {
 	);
 	assert.equal(lines[0], "Active workflows");
 	assert.match(lines[1], /^● 긴-워크플로-이름-😀-/u);
-	assert.match(lines[1], /3\/8 running · 2m$/u);
+	assert.match(lines[1], /6\/11 running · 2m$/u);
 	assert.equal(lines.length, 7);
 	assert.equal(lines.at(-1), "… and 2 more");
 });
@@ -112,7 +117,7 @@ test("active workflow UI renders and clears footer and below-editor widget", () 
 	renderActiveWorkflowUi(ctx, index([run()]));
 	assert.deepEqual(statuses.at(-1), {
 		key: WORKFLOW_ACTIVE_STATUS_KEY,
-		value: "● deep-review 3/8",
+		value: "● deep-review 4/8",
 	});
 	assert.equal(widgets.at(-1).key, WORKFLOW_ACTIVE_WIDGET_KEY);
 	assert.equal(widgets.at(-1).options.placement, "belowEditor");
