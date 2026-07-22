@@ -4251,7 +4251,7 @@ test("workflow TUI surfaces a Pi thinking clamp in task detail", () => {
 	assert.doesNotMatch(workflowViewText(unchangedView, 132), /Pi clamp:/);
 });
 
-test("workflow TUI renders health in task list and detail", () => {
+test("workflow TUI keeps health inline without a Health section", () => {
 	const heartbeat = new Date(Date.now() - 30_000).toISOString();
 	const startedAt = new Date(Date.now() - 10 * 60_000).toISOString();
 	const task = workflowViewTask({
@@ -4272,12 +4272,12 @@ test("workflow TUI renders health in task list and detail", () => {
 
 	view.mode = "task";
 	rendered = workflowViewText(view, 132);
-	assert.match(rendered, /Health/);
+	assert.doesNotMatch(rendered, /Health/);
 	assert.match(rendered, /long-tail active/);
-	assert.match(rendered, /suggested:\s+wait/);
+	assert.doesNotMatch(rendered, /suggested:\s+wait/);
 });
 
-test("workflow TUI renders selected run health without status-command detours", () => {
+test("workflow TUI omits run Health and Navigation sections", () => {
 	const heartbeat = new Date(Date.now() - 25_000).toISOString();
 	const task = workflowViewTask({
 		status: "running",
@@ -4295,16 +4295,18 @@ test("workflow TUI renders selected run health without status-command detours", 
 	view.flows = [slimSummary];
 	view.mode = "runs";
 
-	const rendered = workflowViewText(view, 132);
+	let rendered = workflowViewText(view, 132);
 	assert.match(rendered, /needs action:\s+0/);
-	assert.match(rendered, /Health/);
-	assert.match(rendered, /long-tail active/);
-	assert.match(rendered, /current:\s+final-audit\.main/);
-	assert.match(rendered, /suggested:\s+wait/);
+	assert.doesNotMatch(rendered, /Health|suggested:\s+wait/);
+
+	view.mode = "stages";
+	rendered = workflowViewText(view, 132);
+	assert.doesNotMatch(rendered, /Health|Navigation/);
+	assert.match(rendered, /Enter\/→ tasks/);
 	assert.doesNotMatch(rendered, /workflow status|\/workflow status/);
 });
 
-test("workflow TUI renders likely-stuck guidance and keeps narrow widths bounded", () => {
+test("workflow TUI renders likely-stuck inline status and keeps narrow widths bounded", () => {
 	const task = workflowViewTask({
 		status: "running",
 		displayName: "final-audit.main",
@@ -4320,8 +4322,7 @@ test("workflow TUI renders likely-stuck guidance and keeps narrow widths bounded
 
 	const rendered = workflowViewText(view, 132);
 	assert.match(rendered, /likely stuck/);
-	assert.match(rendered, /suggested:\s+resume/);
-	assert.match(rendered, /no fresh backend or activity signal/);
+	assert.doesNotMatch(rendered, /Health|suggested:\s+resume/);
 
 	for (const mode of ["runs", "stages", "tasks", "task"]) {
 		view.mode = mode;

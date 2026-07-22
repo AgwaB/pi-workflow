@@ -436,13 +436,7 @@ export class WorkflowView implements Component {
 	}
 
 	private renderStagesScreen(width: number, run: WorkflowRunRecord): string[] {
-		const sideLines = [
-			...this.runDetailSummaryLines(run),
-			"",
-			accent(this.theme, "Navigation"),
-			navHint(this.theme, "Enter/right: tasks"),
-			navHint(this.theme, "b/Esc/left: runs"),
-		];
+		const sideLines = this.runDetailSummaryLines(run);
 		return this.renderTwoPane(
 			width,
 			"Run Summary",
@@ -540,19 +534,6 @@ export class WorkflowView implements Component {
 			"",
 		];
 
-		const healthLines = this.taskHealthLines(taskHealth, width - 4);
-		if (healthLines.length > 0) {
-			lines.push(
-				...boxed(
-					this.theme,
-					"Health",
-					width,
-					healthLines,
-					healthColor(taskHealth),
-				),
-				"",
-			);
-		}
 
 		const validationLines = this.taskValidationStripLines(task, width - 4);
 		if (validationLines.length > 0) {
@@ -934,49 +915,6 @@ export class WorkflowView implements Component {
 		return lines.map((line) => fit(line, width));
 	}
 
-	private taskHealthLines(
-		health: WorkflowProgressHealth,
-		width: number,
-	): string[] {
-		if (health.state === "completed" || health.state === "pending") return [];
-		const lines = [
-			`${healthGlyph(this.theme, health)} ${healthLabel(this.theme, health)} ${muted(this.theme, health.summary)}`,
-			kvRow(this.theme, "suggested", health.suggestion, healthColor(health)),
-			kvRow(this.theme, "why", health.reason),
-		];
-		if (health.currentTask?.elapsedMs !== undefined)
-			lines.splice(
-				1,
-				0,
-				kvRow(
-					this.theme,
-					"elapsed",
-					formatDuration(health.currentTask.elapsedMs),
-				),
-			);
-		if (health.durationClass)
-			lines.push(
-				kvRow(this.theme, "duration", `${health.durationClass} expected`),
-			);
-		if (health.heartbeatAgeMs !== undefined)
-			lines.push(
-				kvRow(
-					this.theme,
-					"heartbeat",
-					`${formatDuration(health.heartbeatAgeMs)} ago`,
-				),
-			);
-		if (health.lastActivityAgeMs !== undefined)
-			lines.push(
-				kvRow(
-					this.theme,
-					"activity",
-					`${formatDuration(health.lastActivityAgeMs)} ago`,
-				),
-			);
-		return lines.map((line) => fit(line, width));
-	}
-
 	private taskValidationStripLines(
 		task: WorkflowTaskRunRecord,
 		width: number,
@@ -1234,7 +1172,6 @@ export class WorkflowView implements Component {
 		flow: WorkflowSummary,
 		detailRun?: WorkflowRunRecord,
 	): string[] {
-		const health = diagnoseWorkflowRunHealth(detailRun ?? flow);
 		const stallBadge = this.stallBadge(flow);
 		return [
 			`${statusGlyph(this.theme, flow.status)} ${strong(this.theme, flow.name ?? flow.type)} ${statusBadge(this.theme, flow.status, runStatusLabel(flow))}`,
@@ -1261,7 +1198,6 @@ export class WorkflowView implements Component {
 			]),
 			...(detailRun ? this.runUsageLines(detailRun) : []),
 			...(detailRun ? this.runToolResultBudgetLines(detailRun) : []),
-			...this.runHealthLines(health),
 		];
 	}
 
@@ -1320,39 +1256,7 @@ export class WorkflowView implements Component {
 		return stallBadgeText(this.theme, stall);
 	}
 
-	private runHealthLines(health: WorkflowProgressHealth): string[] {
-		if (health.state === "completed") return [];
-		const lines = [
-			"",
-			accent(this.theme, "Health"),
-			`${healthGlyph(this.theme, health)} ${healthLabel(this.theme, health)} ${muted(this.theme, health.summary)}`,
-		];
-		if (health.currentTask?.displayName)
-			lines.push(kvRow(this.theme, "current", health.currentTask.displayName));
-		if (health.lastActivityAgeMs !== undefined)
-			lines.push(
-				kvRow(
-					this.theme,
-					"activity",
-					`${formatDuration(health.lastActivityAgeMs)} ago`,
-				),
-			);
-		if (health.heartbeatAgeMs !== undefined)
-			lines.push(
-				kvRow(
-					this.theme,
-					"heartbeat",
-					`${formatDuration(health.heartbeatAgeMs)} ago`,
-				),
-			);
-		lines.push(
-			kvRow(this.theme, "suggested", health.suggestion, healthColor(health)),
-		);
-		return lines;
-	}
-
 	private runDetailSummaryLines(run: WorkflowRunRecord): string[] {
-		const health = diagnoseWorkflowRunHealth(run);
 		const stallBadge = this.stallBadge(run);
 		const lines = [
 			`${statusGlyph(this.theme, run.status)} ${strong(this.theme, run.name ?? run.type)} ${statusBadge(this.theme, run.status)}`,
@@ -1376,7 +1280,6 @@ export class WorkflowView implements Component {
 			kvRow(this.theme, "run", shortId(run.runId)),
 			...this.runUsageLines(run),
 			...this.runToolResultBudgetLines(run),
-			...this.runHealthLines(health),
 		];
 		if (run.fanout && run.fanout.length > 0) {
 			lines.push("", accent(this.theme, "Fanout"));
