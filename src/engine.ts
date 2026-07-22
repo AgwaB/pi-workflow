@@ -2641,6 +2641,17 @@ function preparedForeachBatchLaunchPlan(
 	return { leaderIndex, memberIndex, record };
 }
 
+function foreachBatchLogicalCapacityAtLeastTwo(
+	compiledTask: CompiledTask,
+	maxConcurrency: number,
+): boolean {
+	if (maxConcurrency < 2) return false;
+	if (compiledTask.stageMaxConcurrency === undefined) return true;
+	return (
+		Math.max(1, Math.min(MAX_CONCURRENCY, compiledTask.stageMaxConcurrency)) >= 2
+	);
+}
+
 function foreachBatchLogicalSlotsAvailable(
 	run: WorkflowRunRecord,
 	compiledTask: CompiledTask,
@@ -3108,21 +3119,29 @@ async function scheduleDagPass(
 					running,
 					maxConcurrency,
 				)
-			)
-				return false;
-			const batchOutcome = await launchForeachBatchAt(
-				cwd,
-				run,
-				compiledFlow,
-				batchPlan,
-				dispatchMapValidationSnapshot,
-				leaseSignal,
-			);
-			if (batchOutcome === "deferred") return false;
-			if (batchOutcome === "changed") return true;
-			if (batchOutcome === "launched") {
-				running += 2;
-				continue;
+			) {
+				if (
+					foreachBatchLogicalCapacityAtLeastTwo(
+						compiledTask,
+						maxConcurrency,
+					)
+				)
+					return false;
+			} else {
+				const batchOutcome = await launchForeachBatchAt(
+					cwd,
+					run,
+					compiledFlow,
+					batchPlan,
+					dispatchMapValidationSnapshot,
+					leaseSignal,
+				);
+				if (batchOutcome === "deferred") return false;
+				if (batchOutcome === "changed") return true;
+				if (batchOutcome === "launched") {
+					running += 2;
+					continue;
+				}
 			}
 		}
 
