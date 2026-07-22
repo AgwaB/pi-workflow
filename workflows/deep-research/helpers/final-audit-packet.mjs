@@ -92,6 +92,57 @@ function compactSlot(slot) {
 	};
 }
 
+function reconcileFactSlotCoverageWithAudit(factSlots, claimDigests) {
+	const claimsBySlot = new Map();
+	for (const claim of claimDigests) {
+		for (const slotId of compactStrings(claim.factSlotIds, 12)) {
+			const claims = claimsBySlot.get(slotId) ?? [];
+			claims.push(claim);
+			claimsBySlot.set(slotId, claims);
+		}
+	}
+	return factSlots.map((slot) => {
+		const claims = claimsBySlot.get(slot.slotId) ?? [];
+		if (claims.length === 0) return slot;
+		const statuses = new Set(claims.map((claim) => stringOf(claim.status)));
+		const claimIds = compactStrings(claims.map(idOf), 12);
+		if (statuses.has("conflicting")) {
+			const corrections = compactStrings(
+				claims.map((claim) => claim.correctionOrCounterclaim),
+				4,
+			);
+			const reason = `audited claim status is conflicting${claimIds.length ? ` (${claimIds.join(", ")})` : ""}`;
+			return {
+				...slot,
+				status: "conflicting",
+				bestValue:
+					corrections.join(" | ") ||
+					"Verifier evidence conflicts with the normalized value; see claim ledger.",
+				gapReason: slot.gapReason
+					? `${slot.gapReason}; ${reason}`
+					: reason,
+			};
+		}
+		if (
+			!statuses.has("verified") &&
+			slot.status === "filled" &&
+			["partially_supported", "unsupported", "verification_blocked"].some(
+				(status) => statuses.has(status),
+			)
+		) {
+			const reason = `no audited verified claim${claimIds.length ? ` (${claimIds.join(", ")})` : ""}`;
+			return {
+				...slot,
+				status: "partial",
+				gapReason: slot.gapReason
+					? `${slot.gapReason}; ${reason}`
+					: reason,
+			};
+		}
+		return slot;
+	});
+}
+
 function compactGap(gap) {
 	const item = asObject(gap);
 	return {
@@ -285,12 +336,13 @@ export default async function finalAuditPacket({ sources }) {
 	const claimInventory = asObject(normalized.claimInventory);
 	const verificationCandidates = asArray(claimInventory.verificationCandidates);
 	const preservedClaims = asArray(claimInventory.preservedClaims);
-	const claimDigests = asArray(audit.claimDigests);
+	const claimDigests = asArray(audit.claimDigests).map(compactClaimDigest);
 	const auditedIds = new Set(claimDigests.map(idOf).filter(Boolean));
 	const candidateIds = verificationCandidates.map(idOf).filter(Boolean);
 	const omittedCandidateIds = candidateIds.filter((id) => !auditedIds.has(id));
-	const factSlotCoverage = asArray(normalized.factSlotCoverage).map(
-		compactSlot,
+	const factSlotCoverage = reconcileFactSlotCoverageWithAudit(
+		asArray(normalized.factSlotCoverage).map(compactSlot),
+		claimDigests,
 	);
 	const coverageGaps = withGeneratedIds(
 		asArray(normalized.coverageGaps).map(compactGap),
@@ -373,8 +425,11 @@ export default async function finalAuditPacket({ sources }) {
 				partialFactSlots: factSlotCoverage.filter(
 					(slot) => slot.status === "partial",
 				).length,
-				missingFactSlots: factSlotCoverage.filter(
-					(slot) => slot.status === "missing",
+				missingFactSlots: factSlotCoverage.filter((slot) =>
+					["missing", "conflicting"].includes(slot.status),
+				).length,
+				conflictingFactSlots: factSlotCoverage.filter(
+					(slot) => slot.status === "conflicting",
 				).length,
 			},
 			verdictCounts: asObject(audit.verdictCounts),
@@ -384,7 +439,7 @@ export default async function finalAuditPacket({ sources }) {
 			coverageGaps,
 			remainingGaps,
 			sourceRefJoinFailures,
-			claimVerdictLedger: claimDigests.map(compactClaimDigest),
+			claimVerdictLedger: claimDigests,
 			verifierIntegrity: {
 				gateSummary,
 				invalidVerifierRows,
