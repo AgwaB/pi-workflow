@@ -1102,9 +1102,9 @@
 			"domain": "authoring-interface"
 		},
 		{
-			"name": "workflow TUI omits run Health and Navigation sections",
+			"name": "workflow TUI keeps run summaries compact without Health or Navigation sections",
 			"occurrence": 1,
-			"sha256": "9875841d67c692d595d6da93c2fc1325204c4000865f6eb48c241bdd8c4b09c1",
+			"sha256": "abb53e9155c75e73cc09b15daed375677d7feb149d537aab82ba109b2ae32d9a",
 			"domain": "authoring-interface"
 		},
 		{

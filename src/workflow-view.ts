@@ -383,13 +383,13 @@ export class WorkflowView implements Component {
 		const completed = taskSummary
 			? taskSummary.completed
 			: this.flows.filter((flow) => flow.status === "completed").length;
+		const context =
+			this.mode === "tasks"
+				? ""
+				: ` ${muted(this.theme, "·")} ${metaValue(this.theme, this.breadcrumbText())}`;
 		const lines = [
-			`${chip(this.theme, "mode", this.mode === "task" ? "detail" : this.mode, "accent")} ${chip(this.theme, "running", String(active), "accent")} ${chip(this.theme, "blocked", String(blocked), "warning")} ${chip(this.theme, "failed", String(failed), "error")} ${chip(this.theme, "done", String(completed), "success")}`,
+			`${chip(this.theme, "mode", this.mode === "task" ? "detail" : this.mode, "accent")} ${chip(this.theme, "running", String(active), "accent")} ${chip(this.theme, "blocked", String(blocked), "warning")} ${chip(this.theme, "failed", String(failed), "error")} ${chip(this.theme, "done", String(completed), "success")}${context}`,
 		];
-		if (this.mode !== "tasks")
-			lines.push(
-				`${metaLabel(this.theme, "workflow")} ${metaValue(this.theme, this.breadcrumbText())}`,
-			);
 		return [
 			...boxed(this.theme, "✦ Flow Board", width, lines, "borderAccent"),
 			"",
@@ -402,23 +402,14 @@ export class WorkflowView implements Component {
 			selected && this.detailRun?.runId === selected.runId
 				? this.detailRun
 				: undefined;
+		const activeRuns = this.flows.filter(
+			(flow) => flow.status === "running",
+		).length;
+		const actionRuns = this.flows.filter((flow) =>
+			["failed", "blocked", "interrupted"].includes(flow.status),
+		).length;
 		const sideLines = [
-			accent(this.theme, "All runs"),
-			kvRow(this.theme, "total", String(this.flows.length)),
-			kvRow(
-				this.theme,
-				"running",
-				String(this.flows.filter((flow) => flow.status === "running").length),
-			),
-			kvRow(
-				this.theme,
-				"needs action",
-				String(
-					this.flows.filter((flow) =>
-						["failed", "blocked", "interrupted"].includes(flow.status),
-					).length,
-				),
-			),
+			`${metaLabel(this.theme, "all")} ${metaValue(this.theme, String(this.flows.length))} ${muted(this.theme, "·")} ${metaLabel(this.theme, "active")} ${metaValue(this.theme, String(activeRuns))} ${muted(this.theme, "·")} ${metaLabel(this.theme, "action")} ${metaValue(this.theme, String(actionRuns))}`,
 			"",
 			accent(this.theme, "Selected"),
 			...(selected
@@ -427,7 +418,7 @@ export class WorkflowView implements Component {
 		];
 		return this.renderTwoPane(
 			width,
-			"Filters / Summary",
+			"Summary",
 			sideLines,
 			"Runs",
 			this.runLines(Math.max(1, this.mainPaneBodyWidth(width))),
@@ -1176,14 +1167,10 @@ export class WorkflowView implements Component {
 		return [
 			`${statusGlyph(this.theme, flow.status)} ${strong(this.theme, flow.name ?? flow.type)} ${statusBadge(this.theme, flow.status, runStatusLabel(flow))}`,
 			...(stallBadge ? [stallBadge] : []),
-			progressBar(this.theme, flow.taskSummary, 8),
+			`${progressBar(this.theme, flow.taskSummary, 8)} ${muted(this.theme, `· running ${flow.taskSummary.running}`)}`,
 			taskMetaLine(this.theme, [
 				["run", shortId(flow.runId)],
 				["started", timestampText(flow.createdAt)],
-			]),
-			taskMetaLine(this.theme, [
-				["tasks", `${flow.taskSummary.completed}/${flow.taskSummary.total}`],
-				["running", String(flow.taskSummary.running)],
 			]),
 			taskMetaLine(this.theme, [
 				["updated", timestampText(flow.updatedAt)],
@@ -1208,9 +1195,9 @@ export class WorkflowView implements Component {
 			this.parentUsage?.runId === run.runId ? this.parentUsage : undefined;
 		if (!tokens && !parent) return [];
 
-		const lines = ["", accent(this.theme, "Usage")];
+		const lines = [""];
 		if (tokens) {
-			lines.push(taskMetaLine(this.theme, [["tokens", tokens]]));
+			lines.push(`${accent(this.theme, "Usage")} ${metaValue(this.theme, tokens)}`);
 			const inputTokens = formatTokenCount(observed.inputTokens);
 			const outputTokens = formatTokenCount(observed.outputTokens);
 			const cacheRead = formatTokenCount(observed.cacheReadInputTokens);
@@ -1222,21 +1209,16 @@ export class WorkflowView implements Component {
 						["out", outputTokens ?? "n/a"],
 					]),
 				);
+			const usageDetails: Array<[string, string]> = [];
 			if (cacheRead || cacheWrite)
-				lines.push(
-					kvRow(
-						this.theme,
-						"cache r/w",
-						`${cacheRead ?? "n/a"} / ${cacheWrite ?? "n/a"}`,
-					),
-				);
+				usageDetails.push([
+					"cache",
+					`${cacheRead ?? "n/a"}/${cacheWrite ?? "n/a"}`,
+				]);
 			if (observed.omittedTaskIds.length > 0)
-				lines.push(
-					muted(
-						this.theme,
-						`${observed.omittedTaskIds.length} task(s) without usage`,
-					),
-				);
+				usageDetails.push(["gaps", String(observed.omittedTaskIds.length)]);
+			if (usageDetails.length > 0)
+				lines.push(taskMetaLine(this.theme, usageDetails));
 		}
 		if (parent) {
 			lines.push(
@@ -1261,11 +1243,7 @@ export class WorkflowView implements Component {
 		const lines = [
 			`${statusGlyph(this.theme, run.status)} ${strong(this.theme, run.name ?? run.type)} ${statusBadge(this.theme, run.status)}`,
 			...(stallBadge ? [stallBadge] : []),
-			progressBar(this.theme, run.taskSummary, 10),
-			taskMetaLine(this.theme, [
-				["tasks", `${run.taskSummary.completed}/${run.taskSummary.total}`],
-				["running", String(run.taskSummary.running)],
-			]),
+			`${progressBar(this.theme, run.taskSummary, 10)} ${muted(this.theme, `· running ${run.taskSummary.running}`)}`,
 			taskMetaLine(this.theme, [
 				["pending", String(run.taskSummary.pending)],
 				[
