@@ -470,7 +470,7 @@ function validateSectionLayout(
 	issues: WorkflowOutputIssue[],
 	requirements: SectionRequirements,
 ): void {
-	validateSectionCounts(sections, issues, requirements);
+	validateSectionCounts(raw, sections, issues, requirements);
 	validateCanonicalOrder(sections, issues, requirements);
 	validateNoOutsideText(raw, sections, issues);
 }
@@ -481,6 +481,7 @@ function parseSanitizedWorkflowOutput(
 ): ParsedWorkflowOutput | undefined {
 	const requirements = sectionRequirements(options);
 	const sections = collectSections(raw, requirements);
+	if (hasDuplicateSectionTags(raw, sections)) return undefined;
 	if (hasExactlyRequiredSections(sections, requirements)) {
 		const sanitized = sections
 			.map((section) => raw.slice(section.start, section.end).trim())
@@ -559,6 +560,7 @@ function hasExactlyRequiredSections(
 }
 
 function validateSectionCounts(
+	raw: string,
 	sections: readonly SectionMatch[],
 	issues: WorkflowOutputIssue[],
 	requirements: SectionRequirements,
@@ -568,7 +570,8 @@ function validateSectionCounts(
 		const required = sectionRequired(name, requirements);
 		const count = counts.get(name) ?? 0;
 		if (required && count === 0) issues.push(missingSectionIssue(name));
-		if (count > 1) issues.push(duplicateSectionIssue(name));
+		const tagCount = sectionOpenTagCount(raw, name, sections);
+		if (tagCount > 1) issues.push(duplicateSectionIssue(name, tagCount));
 	}
 }
 
@@ -2079,6 +2082,43 @@ function sectionCounts(
 	return counts;
 }
 
+function hasDuplicateSectionTags(
+	raw: string,
+	sections: readonly SectionMatch[],
+): boolean {
+	return CANONICAL_SECTION_ORDER.some(
+		(name) => sectionOpenTagCount(raw, name, sections) > 1,
+	);
+}
+
+function sectionOpenTagCount(
+	raw: string,
+	section: WorkflowOutputSectionName,
+	sections: readonly SectionMatch[],
+): number {
+	// Opening tags inside a matched section span are literal content (for
+	// example protocol text quoted in control JSON strings); only tags outside
+	// every matched span count toward the exactly-once layout rule.
+	const tag = `<${section}>`;
+	let count = 0;
+	let cursor = 0;
+	while (true) {
+		const index = raw.indexOf(tag, cursor);
+		if (index < 0) return count;
+		if (!insideMatchedSection(index, sections)) count += 1;
+		cursor = index + tag.length;
+	}
+}
+
+function insideMatchedSection(
+	index: number,
+	sections: readonly SectionMatch[],
+): boolean {
+	return sections.some(
+		(section) => index > section.start && index < section.end,
+	);
+}
+
 function sectionRequired(
 	name: WorkflowOutputSectionName,
 	requirements: SectionRequirements,
@@ -2108,11 +2148,12 @@ function missingSectionIssue(
 
 function duplicateSectionIssue(
 	section: WorkflowOutputSectionName,
+	count: number,
 ): WorkflowOutputIssue {
 	return {
 		code: "duplicate_section",
 		section,
-		message: `${section} section must appear exactly once`,
+		message: `${section} section must appear exactly once; found ${count}`,
 	};
 }
 
