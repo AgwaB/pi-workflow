@@ -184,7 +184,7 @@ function runRecord(
 	};
 }
 
-test("workflow board run usage shows cache tokens that explain total tokens", () => {
+test("workflow board compacts run usage while preserving token breakdown", () => {
 	const run = runRecord();
 	const view = new WorkflowView(
 		"/tmp/workflow-view",
@@ -208,10 +208,10 @@ test("workflow board run usage shows cache tokens that explain total tokens", ()
 
 	const rendered = view.render(120).join("\n");
 
-	assert.match(rendered, /tokens:\s+17\.5k/);
-	assert.match(rendered, /in:\s+6\.0k/);
-	assert.match(rendered, /out:\s+3\.3k/);
-	assert.match(rendered, /cache r\/w:\s+8\.2k \/ 0/);
+	assert.match(rendered, /Usage 17\.5k/);
+	assert.match(rendered, /in:\s+6\.0k · out:\s+3\.3k/);
+	assert.match(rendered, /cache:\s+8\.2k\/0/);
+	assert.doesNotMatch(rendered, /tokens:|cache r\/w|task\(s\) without usage/);
 });
 
 test("support task detail explains why provider token usage is unavailable", () => {

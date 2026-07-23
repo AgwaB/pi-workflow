@@ -4277,7 +4277,7 @@ test("workflow TUI keeps health inline without a Health section", () => {
 	assert.doesNotMatch(rendered, /suggested:\s+wait/);
 });
 
-test("workflow TUI omits run Health and Navigation sections", () => {
+test("workflow TUI keeps run summaries compact without Health or Navigation sections", () => {
 	const heartbeat = new Date(Date.now() - 25_000).toISOString();
 	const task = workflowViewTask({
 		status: "running",
@@ -4296,12 +4296,18 @@ test("workflow TUI omits run Health and Navigation sections", () => {
 	view.mode = "runs";
 
 	let rendered = workflowViewText(view, 132);
-	assert.match(rendered, /needs action:\s+0/);
-	assert.doesNotMatch(rendered, /Health|suggested:\s+wait/);
+	assert.match(rendered, /Summary/);
+	assert.match(rendered, /all 1 · active 1 · action 0/);
+	assert.match(rendered, /1\/\s*1 · running 1/);
+	assert.doesNotMatch(
+		rendered,
+		/Filters \/ Summary|needs action|Health|suggested:\s+wait/,
+	);
 
 	view.mode = "stages";
 	rendered = workflowViewText(view, 132);
-	assert.doesNotMatch(rendered, /Health|Navigation/);
+	assert.match(rendered, /1\/\s*1 · running 1/);
+	assert.doesNotMatch(rendered, /Health|Navigation|tasks:\s+1\/1/);
 	assert.match(rendered, /Enter\/→ tasks/);
 	assert.doesNotMatch(rendered, /workflow status|\/workflow status/);
 });
