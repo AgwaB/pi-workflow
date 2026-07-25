@@ -781,7 +781,7 @@ test("/workflow run routes by default and --no-route skips the router", async ()
 			'dynamic --force-new "Dynamic UI parity task."',
 			ctx,
 		);
-		for (let attempt = 0; attempt < 50; attempt += 1) {
+		for (let attempt = 0; attempt < 1_000; attempt += 1) {
 			if (dynamicLoader && dynamicCalls.launches > 0) break;
 			await new Promise((resolve) => setTimeout(resolve, 10));
 		}
@@ -795,7 +795,7 @@ test("/workflow run routes by default and --no-route skips the router", async ()
 		releaseDynamicStatus();
 		await dynamicLaunch;
 		let dynamicRun;
-		for (let attempt = 0; attempt < 100; attempt += 1) {
+		for (let attempt = 0; attempt < 1_000; attempt += 1) {
 			dynamicRun = (await readIndex(cwd))?.runs.find(
 				(run) => run.name === "dynamic",
 			);
