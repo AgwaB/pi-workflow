@@ -74,6 +74,9 @@ export async function runDynamicDecisionLoop(
 	let pendingReplan: DynamicPlannerPromptInput["replan"] | undefined;
 
 	for (let round = 0; round < maxRounds; round += 1) {
+		const finalSynthesisRound =
+			options.reserveFinalRoundForSynthesis === true &&
+			round === maxRounds - 1;
 		const replan = pendingReplan;
 		pendingReplan = undefined;
 		const coordination = buildPlannerCoordination(coordinationLedger, {
@@ -89,6 +92,7 @@ export async function runDynamicDecisionLoop(
 			generatedTaskIds: [...generatedTasks],
 			buildPlannerPrompt: options.buildPlannerPrompt,
 			replan,
+			finalSynthesisRound,
 		});
 		decisions.push(persisted);
 		if (!persisted.ok || !persisted.decision) {
@@ -107,6 +111,25 @@ export async function runDynamicDecisionLoop(
 		}
 
 		const decision = persisted.decision;
+		if (
+			finalSynthesisRound &&
+			decision.status !== "synthesize" &&
+			decision.status !== "blocked"
+		) {
+			blockers.push(
+				`reserved final synthesis round accepted unexpected status ${decision.status}`,
+			);
+			return result(
+				"blocked",
+				decisions,
+				generatedTasks,
+				stateIndexes,
+				blockers,
+				omissions,
+				caveats,
+				{ stallCount, replanCount },
+			);
+		}
 		if (decision.status === "stop" || decision.status === "blocked") {
 			for (const action of decision.nextActions) {
 				if (action.type === "stop") {
@@ -259,6 +282,7 @@ async function requestValidDecision(
 		generatedTaskIds: string[];
 		buildPlannerPrompt?: (input: DynamicPlannerPromptInput) => string;
 		replan?: DynamicPlannerPromptInput["replan"];
+		finalSynthesisRound?: boolean;
 	},
 ): Promise<LoopDecisionRecord> {
 	let lastPersisted: LoopDecisionRecord | undefined;
@@ -276,6 +300,7 @@ async function requestValidDecision(
 			latestStateIndex: input.latestStateIndex,
 			coordination: input.coordination,
 			generatedTaskIds: input.generatedTaskIds,
+			...(input.finalSynthesisRound ? { finalSynthesisRound: true } : {}),
 			...(input.replan ? { replan: input.replan } : {}),
 			...(lastPersisted && !lastPersisted.ok
 				? { repair: { errors: lastPersisted.errors, attempt } }
@@ -297,6 +322,9 @@ async function requestValidDecision(
 					expectedRound: input.round,
 					maxActions: input.config.maxActionsPerRound,
 					maxDecisionRounds: input.config.maxDecisionRounds,
+					...(input.finalSynthesisRound
+						? { allowedStatuses: ["synthesize", "blocked"] }
+						: {}),
 					allowedTools: input.config.allowedTools,
 					toolProviders: input.config.allowedToolProviders,
 					allowedOutputProfiles: input.config.allowedOutputProfiles,

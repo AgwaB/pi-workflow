@@ -3,7 +3,7 @@ import { join } from "node:path";
 
 import type { ArtifactGraphWorkflowSpec } from "./types.js";
 
-export const DIRECT_DYNAMIC_RUNTIME_VERSION = "direct-dynamic-runtime-v3";
+export const DIRECT_DYNAMIC_RUNTIME_VERSION = "direct-dynamic-runtime-v4";
 const DIRECT_DYNAMIC_RUNTIME_MAX_RUNTIME_MS = 7_200_000;
 const DIRECT_DYNAMIC_RUNTIME_TOOLS = [
 	"read",
@@ -116,7 +116,10 @@ export function directDynamicControllerSource(): string {
   if (typeof ctx?.dynamic?.runDecisionLoop !== 'function') {
     throw new Error('dynamic decision-loop helper is unavailable in controller context');
   }
-  return ctx.dynamic.runDecisionLoop({ buildPlannerPrompt: directDynamicPlannerPrompt });
+  return ctx.dynamic.runDecisionLoop({
+    buildPlannerPrompt: directDynamicPlannerPrompt,
+    reserveFinalRoundForSynthesis: true,
+  });
 }
 
 const PROMPT_METADATA_MAX_CHARS = 256;
@@ -156,7 +159,8 @@ export function directDynamicPlannerPrompt(input) {
     'You are the planner for a request-only direct dynamic research run.',
     'There is no user-selected workflow, no static intake stage, and no static final reducer. You must plan and execute the whole job dynamically, then produce the final answer through a synthesize action.',
     'Emit only machine-readable JSON in <control> using schema dynamic-decision-v1; the trusted runtime validates and executes accepted decisions.',
-    'Decide whether to add research work, verify findings, synthesize, stop, or block.',
+    input.finalSynthesisRound ? undefined : 'Decide whether to add research work, verify findings, synthesize, stop, or block.',
+    input.finalSynthesisRound ? 'This is the reserved final synthesis round. Emit status synthesize with one or more synthesize actions. Use blocked only for an irreducible approval, access, budget, or safety blocker. Do not emit continue, stop, add_work_item, or verify.' : undefined,
     \`Runtime task: \${input.task}\`,
     \`Round: \${input.round}\`,
     \`Generated tasks: \${generated}\`,

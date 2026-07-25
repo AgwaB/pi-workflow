@@ -24,6 +24,7 @@ import { loadAgentByName, parseAgentMarkdown } from "../../.tmp/unit/agents.js";
 import { compileWorkflow } from "../../.tmp/unit/compiler.js";
 import {
 	buildRunSourceContext,
+	dynamicControllerOutcomeFromOutput,
 	evaluateLoopUntilCondition,
 	formatRun,
 	formatStatus,
@@ -1044,6 +1045,7 @@ function makeValidatingDynamicDecisionLoopCtx({
 } = {}) {
 	const calls = {
 		agent: [],
+		validationContexts: [],
 		validationResults: [],
 		stateIndexRequests: [],
 		decisionLoopStatus: [],
@@ -1061,6 +1063,7 @@ function makeValidatingDynamicDecisionLoopCtx({
 		},
 		decision: {
 			async validateAndPersist(rawDecision, context) {
+				calls.validationContexts.push(context);
 				const validation = validateDynamicDecision(rawDecision, context);
 				calls.validationResults.push(validation);
 				return {
@@ -1870,6 +1873,7 @@ export {
 	dynamicLoopPersistedDecision,
 	dynamicLoopSignature,
 	dynamicLoopValidWorkDecision,
+	dynamicControllerOutcomeFromOutput,
 	dynamicOutputProfileValues,
 	dynamicStatePath,
 	enabledWorkflowExperimentalSpeedFlags,

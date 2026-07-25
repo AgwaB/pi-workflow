@@ -341,6 +341,87 @@ export function runProgressSnapshot(
 	};
 }
 
+export interface RunFileLease {
+	ownerId: string;
+	signal: AbortSignal;
+	assertOwner: () => Promise<void>;
+	release: () => Promise<void>;
+}
+
+export async function acquireRunFileLease(
+	cwd: string,
+	runId: string,
+	name: string,
+	waitMs = 0,
+	acquireSignal?: AbortSignal,
+): Promise<RunFileLease | undefined> {
+	assertSafeRunId(runId);
+	if (!/^[a-z0-9-]+$/.test(name))
+		throw new Error(`Unsafe run-file lease name: ${name}`);
+	const dir = workflowRunDir(cwd, runId);
+	await ensureDir(dir);
+	const lockFile = join(dir, `${name}.lock`);
+	const ownerId = `${process.pid}-${randomBytes(6).toString("hex")}`;
+	const deadline = Date.now() + Math.max(0, waitMs);
+	acquireSignal?.throwIfAborted();
+	while (!(await acquireLock(lockFile, ownerId))) {
+		acquireSignal?.throwIfAborted();
+		if (Date.now() >= deadline) return undefined;
+		await sleepWithSignal(
+			Math.min(INDEX_LOCK_RETRY_MS, deadline - Date.now()),
+			acquireSignal,
+		);
+	}
+	if (acquireSignal?.aborted) {
+		await releaseLock(lockFile, ownerId);
+		acquireSignal.throwIfAborted();
+	}
+
+	const abortController = new AbortController();
+	let released = false;
+	let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+	let heartbeatInFlight: Promise<void> | undefined;
+	const heartbeat = async (): Promise<void> => {
+		await assertLockOwner(lockFile, ownerId);
+		const now = new Date();
+		await utimes(lockFile, now, now);
+		await assertLockOwner(lockFile, ownerId);
+	};
+	const runHeartbeat = (): Promise<void> => {
+		const previous = heartbeatInFlight;
+		const next = (async () => {
+			if (previous) await previous;
+			await heartbeat();
+		})();
+		heartbeatInFlight = next;
+		void next.catch((error) => {
+			if (!abortController.signal.aborted) abortController.abort(error);
+		});
+		return next;
+	};
+	await runHeartbeat();
+	heartbeatTimer = setInterval(() => void runHeartbeat(), runLeaseHeartbeatIntervalMs());
+	heartbeatTimer.unref?.();
+
+	return {
+		ownerId,
+		signal: abortController.signal,
+		assertOwner: async () => {
+			abortController.signal.throwIfAborted();
+			await assertLockOwner(lockFile, ownerId);
+			abortController.signal.throwIfAborted();
+		},
+		release: async () => {
+			if (released) return;
+			released = true;
+			if (heartbeatTimer) clearInterval(heartbeatTimer);
+			heartbeatTimer = undefined;
+			await heartbeatInFlight?.catch(() => undefined);
+			await releaseLock(lockFile, ownerId);
+		},
+	};
+}
+
 export async function withRunLease<T>(
 	cwd: string,
 	runId: string,
@@ -1949,7 +2030,7 @@ export function deriveRunStatus(run: WorkflowRunRecord): WorkflowRunRecord {
  * excluded when at least one regular leaf exists, so a trailing sanitizer or
  * controller never masquerades as the run's final output.
  */
-function finalStageTasks(
+export function finalStageTasks(
 	tasks: WorkflowTaskRunRecord[],
 ): WorkflowTaskRunRecord[] {
 	const dependedOn = new Set<string>();
@@ -2199,6 +2280,22 @@ function taskBackendHandleString(
 
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function sleepWithSignal(ms: number, signal?: AbortSignal): Promise<void> {
+	if (!signal) return sleep(ms);
+	signal.throwIfAborted();
+	return new Promise((resolve, reject) => {
+		const timer = setTimeout(() => {
+			signal.removeEventListener("abort", onAbort);
+			resolve();
+		}, ms);
+		const onAbort = () => {
+			clearTimeout(timer);
+			reject(signal.reason);
+		};
+		signal.addEventListener("abort", onAbort, { once: true });
+	});
 }
 
 function compiledWorkflowHasDynamicController(

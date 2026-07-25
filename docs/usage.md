@@ -60,8 +60,9 @@ The extension also registers LLM-callable tools for normal chat requests:
 | Tool | Purpose |
 |---|---|
 | `workflow_list` | List discoverable workflows when the user asks what exists or asks Pi to choose without naming one. |
-| `workflow_run` | Start a run when the user explicitly asks to use/run/start a named workflow and provides a concrete task. |
-| `workflow_dynamic` | Start a spec-less direct dynamic run when the user explicitly asks for dynamic workflow execution and provides a concrete task. |
+| `workflow_run` | Start a run when the user explicitly asks to use/run/start a named workflow and provides a concrete task. Set `awaitTerminal: true` when the current turn needs the final result. |
+| `workflow_dynamic` | Start a spec-less direct dynamic run when the user explicitly asks for dynamic workflow execution and provides a concrete task. Set `awaitTerminal: true` when synthesis must return in the current turn. |
+| `workflow_wait` | Wait for an existing run to reach terminal state without model-driven file polling, then return semantic status and a bounded final-result preview. |
 
 Examples:
 
@@ -73,7 +74,7 @@ Use the deep-research workflow to research this repository's architecture tradeo
 Use the deep-review workflow to review the current diff for reliability and test coverage.
 ```
 
-Natural-language named-workflow invocation uses the same workflow resolution roots and task-required rule as `/workflow run`. If the workflow name or concrete task is missing, Pi should ask a clarifying question instead of launching a run. The deterministic manual equivalent is:
+Natural-language named-workflow invocation uses the same workflow resolution roots and task-required rule as `/workflow run`. If the workflow name or concrete task is missing, Pi should ask a clarifying question instead of launching a run. `workflow_run` and `workflow_dynamic` remain launch-only by default for compatibility. Use `awaitTerminal: true` plus an optional `timeoutMs`, or call `workflow_wait` with the returned run id. `detach: true` and `awaitTerminal: true` are mutually exclusive. Cancelling or timing out `workflow_wait` cancels only the wait, not scheduler-owned workflow progress. If a run becomes blocked rather than terminal, the tool returns `terminal: false`, `actionRequired: true`, blocked task ids, and inspect/resume guidance; it never labels an intermediate artifact as the final result. The deterministic manual equivalent is:
 
 ```text
 /workflow run deep-research "Research this repository's architecture tradeoffs."
@@ -148,7 +149,7 @@ For reusable workflow authoring, `workflow-guide` includes validated scaffold bu
 | `/workflow stop <run-id>` | Interrupt a non-terminal run, best-effort interrupt active subagents, mark unfinished tasks interrupted, and stop the local supervisor watch. Use `/workflow resume <run-id>` if you want to restart unfinished work later. |
 | `/workflow resume <run-id>` | Resume a failed, interrupted, or resumable blocked run (including dynamic approval blocked in headless mode): completed tasks are preserved; failed/interrupted/skipped or resumable blocked tasks reset to pending and reschedule. Loop workflows are not supported yet. |
 
-Interactive `/workflow run` and `/workflow dynamic` slash commands use Pi's cancellable foreground loader while routing, validating, and completing the initial scheduling pass. After at least one backend task is actually running, the command returns and a compact `Active workflows` widget below the editor plus a footer status tracks top-level run progress. Launch/preparation states and stale `running` records with no running task are excluded. The widget is rebuilt from `.pi/workflows` after session reload, supports multiple active runs, and clears when none remain; open `/workflow` for the full board. Natural-language `workflow_run` and `workflow_dynamic` tool calls already use Pi's foreground tool row during initial launch, then use the same background widget.
+Interactive `/workflow run` and `/workflow dynamic` slash commands use Pi's cancellable foreground loader while routing, validating, and completing the initial scheduling pass. After at least one backend task is actually running, the command returns and a compact `Active workflows` widget below the editor plus a footer status tracks top-level run progress. Launch/preparation states and stale `running` records with no running task are excluded. The widget is rebuilt from `.pi/workflows` after session reload, supports multiple active runs, and clears when none remain; open `/workflow` for the full board. Natural-language launch-only calls use the same background widget. Natural-language calls with `awaitTerminal: true`, and explicit `workflow_wait` calls, drive the existing scheduler until terminal or action-required blocked state and return only a bounded authoritative-output preview. They report retries, usage, degradation, and the artifact root. New direct-dynamic runtime v4 reserves its last configured decision round for canonical synthesize-or-block validation; a controller that still produces no synthesis output fails with `dynamic_incomplete`. Historical v3 exhausted runs remain readable as `exhausted_without_output`.
 
 Not implemented: `/workflow continue` and `/workflow delegate`. Use `status`, `show`, `logs`, `wait`, `stop`, `resume`, and `pi-workflow inspect` for text/CLI inspection. The standalone CLI also offers `pi-workflow supervise <run-id>|--all` to drive scheduling from outside a Pi session (unfinished failed/interrupted or resumable blocked runs within the last 7 days are announced at session start with resume hints).
 

@@ -209,8 +209,47 @@ test("package and bundled planner prompts safely render hostile digest-only and 
 	);
 });
 
-test("direct-dynamic runtime bundle version label is bumped to v3", () => {
-	assert.equal(DIRECT_DYNAMIC_RUNTIME_VERSION, "direct-dynamic-runtime-v3");
-	assert.match(DIRECT_DYNAMIC_RUNTIME_VERSION, /-v3$/);
-	assert.equal(DIRECT_DYNAMIC_RUNTIME_VERSION.includes("v2"), false);
+test("direct-dynamic reserved final round is synthesis-only in package and bundle prompts", async () => {
+	const input = {
+		...baseFixtureInput(undefined),
+		finalSynthesisRound: true,
+	};
+	const directDynamicPlannerPrompt = await loadBundledPlannerPrompt();
+	for (const prompt of [
+		directDynamicPlannerPrompt(input),
+		defaultPlannerPrompt(input),
+	]) {
+		assert.match(prompt, /reserved final synthesis round/);
+		assert.match(prompt, /Do not emit continue, stop, add_work_item, or verify/);
+	}
+	assert.doesNotMatch(
+		directDynamicPlannerPrompt(input),
+		/Decide whether to add research work/,
+	);
+});
+
+test("direct-dynamic v4 controller opts into final synthesis reservation", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "dynamic-controller-v4-"));
+	const controllerPath = join(dir, "controller.mjs");
+	writeFileSync(controllerPath, directDynamicControllerSource(), "utf8");
+	const imported = await import(pathToFileURL(controllerPath).href);
+	let captured;
+	const result = { control: { status: "synthesized" } };
+	const observed = await imported.default({
+		dynamic: {
+			async runDecisionLoop(options) {
+				captured = options;
+				return result;
+			},
+		},
+	});
+	assert.equal(observed, result);
+	assert.equal(captured.reserveFinalRoundForSynthesis, true);
+	assert.equal(typeof captured.buildPlannerPrompt, "function");
+});
+
+test("direct-dynamic runtime bundle version label is bumped to v4", () => {
+	assert.equal(DIRECT_DYNAMIC_RUNTIME_VERSION, "direct-dynamic-runtime-v4");
+	assert.match(DIRECT_DYNAMIC_RUNTIME_VERSION, /-v4$/);
+	assert.equal(DIRECT_DYNAMIC_RUNTIME_VERSION.includes("v3"), false);
 });

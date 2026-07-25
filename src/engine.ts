@@ -328,6 +328,11 @@ interface WorkflowScheduleOptions {
 	availableModels?: WorkflowModelInfo[];
 }
 
+interface WorkflowWaitOptions extends WorkflowScheduleOptions {
+	waitSignal?: AbortSignal;
+	onWaitProgress?: (run: WorkflowRunRecord) => void;
+}
+
 export const WORKFLOW_PROMPT_SCHEMA_DIAGNOSTIC_SINK: unique symbol = Symbol(
 	"workflowPromptSchemaDiagnosticSink",
 );
@@ -620,31 +625,95 @@ function applyDeclaredWorkflowInputOverrides<Spec>(
 	};
 }
 
+function workflowWaitAbortError(signal: AbortSignal): Error {
+	if (signal.reason instanceof Error) return signal.reason;
+	const error = new Error("Workflow wait cancelled");
+	error.name = "AbortError";
+	return error;
+}
+
+export function awaitWithinWorkflowWaitBoundary<T>(
+	operation: Promise<T>,
+	remainingMs: number,
+	signal: AbortSignal | undefined,
+	timeoutMessage: string,
+): Promise<T> {
+	if (signal?.aborted) return Promise.reject(workflowWaitAbortError(signal));
+	if (remainingMs <= 0) return Promise.reject(new Error(timeoutMessage));
+	return new Promise<T>((resolve, reject) => {
+		let settled = false;
+		const finish = (callback: () => void) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			signal?.removeEventListener("abort", onAbort);
+			callback();
+		};
+		const onAbort = () =>
+			finish(() => reject(workflowWaitAbortError(signal as AbortSignal)));
+		const timer = setTimeout(
+			() => finish(() => reject(new Error(timeoutMessage))),
+			remainingMs,
+		);
+		timer.unref?.();
+		signal?.addEventListener("abort", onAbort, { once: true });
+		operation.then(
+			(value) => finish(() => resolve(value)),
+			(error) => finish(() => reject(error)),
+		);
+	});
+}
+
 export async function waitForRun(
 	cwd: string,
 	runIdOrPrefix: string,
 	timeoutMs?: number,
-	options: WorkflowScheduleOptions = {},
+	options: WorkflowWaitOptions = {},
 ): Promise<WorkflowRunRecord> {
 	const timeout = clampTimeout(timeoutMs);
 	const deadline = Date.now() + timeout;
-	let run = await refreshRunOrRecordPollError(cwd, runIdOrPrefix);
+	const { waitSignal, onWaitProgress, ...scheduleOptions } = options;
+	let run = await awaitWithinWorkflowWaitBoundary(
+		refreshRunOrRecordPollError(cwd, runIdOrPrefix),
+		deadline - Date.now(),
+		waitSignal,
+		`Flow run ${runIdOrPrefix} still running after ${timeout}ms wait`,
+	);
+	onWaitProgress?.(run);
 
 	while (hasActiveSchedulerWork(run)) {
-		const beforeScheduleRemaining = deadline - Date.now();
-		if (beforeScheduleRemaining <= 0)
-			throw new Error(await stillRunningAfterWaitMessage(cwd, run, timeout));
-		const scheduled = await scheduleRun(cwd, run.runId, undefined, options);
+		const timeoutMessage = await stillRunningAfterWaitMessage(cwd, run, timeout);
+		const scheduled = await awaitWithinWorkflowWaitBoundary(
+			scheduleRun(cwd, run.runId, undefined, scheduleOptions),
+			deadline - Date.now(),
+			waitSignal,
+			timeoutMessage,
+		);
 		if (scheduled) run = scheduled;
+		onWaitProgress?.(run);
 		if (!hasActiveSchedulerWork(run)) return run;
-		run = await refreshRunOrRecordPollError(cwd, run.runId, run);
+		run = await awaitWithinWorkflowWaitBoundary(
+			refreshRunOrRecordPollError(cwd, run.runId, run),
+			deadline - Date.now(),
+			waitSignal,
+			timeoutMessage,
+		);
+		onWaitProgress?.(run);
 		if (!hasActiveSchedulerWork(run)) return run;
 		const remaining = deadline - Date.now();
-		if (remaining <= 0) {
-			throw new Error(await stillRunningAfterWaitMessage(cwd, run, timeout));
-		}
-		await sleep(schedulerPollDelayMs(run, remaining));
-		run = await refreshRunOrRecordPollError(cwd, run.runId, run);
+		await awaitWithinWorkflowWaitBoundary(
+			sleep(schedulerPollDelayMs(run, remaining)),
+			remaining,
+			waitSignal,
+			timeoutMessage,
+		);
+		run = await awaitWithinWorkflowWaitBoundary(
+			refreshRunOrRecordPollError(cwd, run.runId, run),
+			deadline - Date.now(),
+			waitSignal,
+			timeoutMessage,
+		);
+		onWaitProgress?.(run);
 	}
 
 	return run;
@@ -5131,7 +5200,11 @@ async function executeDynamicControllerTask(
 						unrunBranchBlockers,
 					)
 				: structuredOutput;
-		const outcome = dynamicControllerOutcomeFromOutput(outputForOutcome);
+		const outcome = dynamicControllerOutcomeFromOutput(outputForOutcome, {
+			requireOutput:
+				run.provenance?.mode === "direct-dynamic" &&
+				run.provenance.runtimeVersion === DIRECT_DYNAMIC_RUNTIME_VERSION,
+		});
 		await dynamicControllerTestHooks.beforeDynamicResultCommit?.({
 			cwd,
 			runId: run.runId,
@@ -6613,7 +6686,7 @@ async function runDynamicAgentRequest(input: {
 	);
 }
 
-interface DynamicControllerOutcome {
+export interface DynamicControllerOutcome {
 	taskStatus: "completed" | "blocked" | "failed";
 	statusDetail: string;
 	message: string;
@@ -6662,14 +6735,16 @@ function dynamicControllerOutputWithBranchBlockers(
 	};
 }
 
-function dynamicControllerOutcomeFromOutput(
+export function dynamicControllerOutcomeFromOutput(
 	structuredOutput: unknown,
+	options: { requireOutput?: boolean } = {},
 ): DynamicControllerOutcome {
 	const { control } = normalizeDynamicControllerOutput(structuredOutput);
 	const status =
 		typeof control.status === "string" ? control.status : undefined;
 	const blockers = dynamicControlStringArray(control.blockers);
 	const omissions = dynamicControlStringArray(control.omissions);
+	const outputTasks = dynamicControlStringArray(control.outputTasks);
 
 	if (status === "blocked" || (blockers.length > 0 && status !== "stopped")) {
 		return {
@@ -6681,6 +6756,18 @@ function dynamicControllerOutcomeFromOutput(
 			),
 			lifecycleStatus: "failed",
 			controllerStatus: "blocked",
+			blockers,
+			omissions,
+		};
+	}
+
+	if (options.requireOutput && outputTasks.length === 0) {
+		return {
+			taskStatus: "failed",
+			statusDetail: "dynamic_incomplete",
+			message: "direct dynamic controller produced no final synthesis output",
+			lifecycleStatus: "failed",
+			controllerStatus: "failed",
 			blockers,
 			omissions,
 		};
