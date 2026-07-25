@@ -78,6 +78,7 @@
   },
   "dependencies": {
     "@agwab/pi-subagent": "^0.4.8",
+    "brace-expansion": "^5.0.7",
     "pi-web-access": "^0.10.7",
     "typebox": "^1.1.39"
   },
