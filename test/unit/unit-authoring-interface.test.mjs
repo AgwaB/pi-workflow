@@ -245,7 +245,6 @@ import {
 	writeWorkflowWebSource,
 } from "./unit-test-support.mjs";
 
-
 test("shared status helpers derive canonical task summaries", () => {
 	assert.deepEqual(
 		summarizeTasks([
@@ -884,10 +883,19 @@ test("artifact graph opt-ins validate and preserve compiled metadata", async () 
 			Object.hasOwn(baselineSource.artifactGraph, "inputPolicy"),
 			false,
 		);
-		assert.equal(Object.hasOwn(baselineFanout.artifactGraph, "inputPolicy"), false);
+		assert.equal(
+			Object.hasOwn(baselineFanout.artifactGraph, "inputPolicy"),
+			false,
+		);
 		assert.equal(Object.hasOwn(baselineFanout, "sourceGeneration"), false);
-		assert.equal(Object.hasOwn(baselineFanout.foreach, "itemIdentityPath"), false);
-		assert.equal(Object.hasOwn(baselineFanout.foreach, "itemPayloadPath"), false);
+		assert.equal(
+			Object.hasOwn(baselineFanout.foreach, "itemIdentityPath"),
+			false,
+		);
+		assert.equal(
+			Object.hasOwn(baselineFanout.foreach, "itemPayloadPath"),
+			false,
+		);
 	} finally {
 		rmSync(cwd, {
 			recursive: true,
@@ -940,7 +948,8 @@ test("compiler rejects a static foreach prompt cap below its Unicode boundary", 
 			staticChars,
 		);
 		await assert.rejects(
-			() => compileWorkflow(specWithCap(staticChars - 1), { cwd, task: "Review" }),
+			() =>
+				compileWorkflow(specWithCap(staticChars - 1), { cwd, task: "Review" }),
 			/maxCompiledPromptChars: must be at least .*Unicode code points/,
 		);
 	} finally {
@@ -1012,7 +1021,9 @@ test("compiler diagnoses foreach item projections only with a known item schema"
 			{ cwd, task: "Review" },
 		);
 		assert.equal(
-			valid.warnings.some((warning) => /item(?:Identity|Payload)Path/.test(warning)),
+			valid.warnings.some((warning) =>
+				/item(?:Identity|Payload)Path/.test(warning),
+			),
 			false,
 		);
 
@@ -1046,7 +1057,8 @@ test("compiler diagnoses foreach item projections only with a known item schema"
 		assert.ok(
 			wrongPayloadType.warnings.some(
 				(warning) =>
-					/itemPayloadPath/.test(warning) && /must declare an object/.test(warning),
+					/itemPayloadPath/.test(warning) &&
+					/must declare an object/.test(warning),
 			),
 		);
 
@@ -1101,9 +1113,7 @@ test("artifact graph opt-ins reject malformed or misplaced authoring fields", ()
 							id: "container",
 							type: "dag",
 							inputPolicy: { terminalBarrier: "all-sources" },
-							stages: [
-								{ id: "child", type: "single", prompt: "Child." },
-							],
+							stages: [{ id: "child", type: "single", prompt: "Child." }],
 						},
 						{
 							id: "misplaced",
@@ -3519,6 +3529,7 @@ test("natural-language workflow tools list and start workflows", async () => {
 			cwd,
 			hasUI: false,
 			model: undefined,
+			sessionManager: { getSessionId: () => "session-tool-owner" },
 			ui: { notify() {} },
 		};
 		const listResult = await registeredTools[0].execute(
@@ -3643,6 +3654,7 @@ test("natural-language workflow tools list and start workflows", async () => {
 			cwd,
 			hasUI: false,
 			model: undefined,
+			sessionManager: { getSessionId: () => "session-tool-owner" },
 			ui: { notify() {} },
 		};
 		const listResult = await registeredTools[0].execute(
@@ -3704,6 +3716,20 @@ test("natural-language workflow tools list and start workflows", async () => {
 		assert.match(runResult.content[0].text, /Open: \/workflow workflow_/);
 		assert.equal(runResult.details.status, "running");
 		assert.match(launchedTask, /Investigate the repo/);
+		const audience = JSON.parse(
+			readFileSync(
+				join(
+					cwd,
+					".pi",
+					"workflows",
+					runResult.details.runId,
+					"feedback-audience.json",
+				),
+				"utf8",
+			),
+		);
+		assert.equal(audience.runId, runResult.details.runId);
+		assert.equal(audience.sessionId, "session-tool-owner");
 	} finally {
 		setSubagentApiForTests(undefined);
 		if (originalRole === undefined) delete process.env.PI_WORKFLOW_ROLE;
@@ -3716,6 +3742,27 @@ test("natural-language workflow tools list and start workflows", async () => {
 		});
 	}
 });
+
+function writeWorkflowFeedbackAudience(cwd, runId, sessionId) {
+	writeFileSync(
+		join(cwd, ".pi", "workflows", runId, "feedback-audience.json"),
+		JSON.stringify({
+			schema: "workflow-feedback-audience-v1",
+			runId,
+			sessionId,
+			boundAt: new Date().toISOString(),
+		}),
+	);
+}
+
+function workflowFeedbackContext(cwd, sessionId) {
+	return {
+		cwd,
+		hasUI: true,
+		sessionManager: { getSessionId: () => sessionId },
+		ui: { notify() {} },
+	};
+}
 
 test("deliverMissedWorkflowFeedback does not auto-trigger an agent turn on startup", async () => {
 	const cwd = makeProject();
@@ -3738,14 +3785,11 @@ test("deliverMissedWorkflowFeedback does not auto-trigger an agent turn on start
 		run.status = deriveRunStatus(run);
 		await writeRunRecord(cwd, run);
 		await updateIndex(cwd);
+		writeWorkflowFeedbackAudience(cwd, run.runId, "session-owner");
 
 		const sent = [];
 		await deliverMissedWorkflowFeedback(
-			{
-				cwd,
-				hasUI: true,
-				ui: { notify() {} },
-			},
+			workflowFeedbackContext(cwd, "session-owner"),
 			{
 				sendMessage(message, options) {
 					sent.push({ message, options });
@@ -3765,6 +3809,67 @@ test("deliverMissedWorkflowFeedback does not auto-trigger an agent turn on start
 			sent[0].message.content,
 			/Open the workflow for the full result/,
 		);
+	} finally {
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+	}
+});
+
+test("completion feedback is delivered only to the workflow owner session", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const workflowRoot = join(cwd, "workflows");
+		writeDefaultStageControlSchema(workflowRoot);
+		const spec = artifactGraphWorkflowSpec();
+		const specPath = join(workflowRoot, "unit.json");
+		writeFileSync(specPath, JSON.stringify(spec));
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Session-scoped completion target",
+		});
+		const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await completeTask(cwd, taskBySpec(run, "main.main"), {
+			executiveMarkdown: "# Executive\n\nDone.",
+		});
+		run.status = deriveRunStatus(run);
+		await writeRunRecord(cwd, run);
+		await updateIndex(cwd);
+		writeWorkflowFeedbackAudience(cwd, run.runId, "session-owner");
+
+		const wrongSessionMessages = [];
+		await deliverMissedWorkflowFeedback(
+			workflowFeedbackContext(cwd, "session-other"),
+			{
+				sendMessage(message, options) {
+					wrongSessionMessages.push({ message, options });
+				},
+			},
+		);
+		assert.equal(wrongSessionMessages.length, 0);
+		assert.equal(
+			existsSync(
+				join(cwd, ".pi", "workflows", run.runId, "feedback-delivery.json"),
+			),
+			false,
+		);
+
+		const ownerMessages = [];
+		await deliverMissedWorkflowFeedback(
+			workflowFeedbackContext(cwd, "session-owner"),
+			{
+				sendMessage(message, options) {
+					ownerMessages.push({ message, options });
+				},
+			},
+		);
+		assert.equal(ownerMessages.length, 1);
+		assert.equal(ownerMessages[0].message.customType, "workflow-completion");
 	} finally {
 		rmSync(cwd, {
 			recursive: true,
@@ -3798,6 +3903,7 @@ test("workflow extension skips missed completion feedback during session reload"
 		run.status = deriveRunStatus(run);
 		await writeRunRecord(cwd, run);
 		await updateIndex(cwd);
+		writeWorkflowFeedbackAudience(cwd, run.runId, "session-reload");
 
 		const handlers = new Map();
 		const sent = [];
@@ -3812,8 +3918,7 @@ test("workflow extension skips missed completion feedback during session reload"
 			},
 		});
 		const ctx = {
-			cwd,
-			hasUI: true,
+			...workflowFeedbackContext(cwd, "session-reload"),
 			ui: { notify() {}, confirm: async () => true },
 		};
 

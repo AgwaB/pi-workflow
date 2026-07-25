@@ -15,13 +15,13 @@ const domainFiles = [
 	"unit-engine-store.test.mjs",
 ];
 
-test("unit domain split preserves the exact 517-test inventory", () => {
+test("unit domain split preserves the exact 518-test inventory", () => {
 	assert.equal(existsSync(join(unitDir, "unit.test.mjs")), false);
 	const inventory = JSON.parse(
 		readFileSync(join(unitDir, "unit-test-inventory.json"), "utf8"),
 	);
 	assert.equal(inventory.schema, "pi-workflow-unit-test-inventory-v1");
-	assert.equal(inventory.count, 517);
+	assert.equal(inventory.count, 518);
 
 	const actual = [];
 	const occurrences = new Map();
@@ -47,7 +47,10 @@ test("unit domain split preserves the exact 517-test inventory", () => {
 				continue;
 			}
 			const nameArg = expression.arguments[0];
-			assert.ok(ts.isStringLiteralLike(nameArg), `${file} has a dynamic test name`);
+			assert.ok(
+				ts.isStringLiteralLike(nameArg),
+				`${file} has a dynamic test name`,
+			);
 			const name = nameArg.text;
 			const occurrence = (occurrences.get(name) ?? 0) + 1;
 			occurrences.set(name, occurrence);
@@ -61,14 +64,22 @@ test("unit domain split preserves the exact 517-test inventory", () => {
 			});
 			fileCount += 1;
 		}
-		assert.ok(fileCount > 0 && fileCount <= 150, `${file} has ${fileCount} tests`);
-		assert.ok(source.split("\n").length <= 12_000, `${file} is still monolithic`);
+		assert.ok(
+			fileCount > 0 && fileCount <= 150,
+			`${file} has ${fileCount} tests`,
+		);
+		assert.ok(
+			source.split("\n").length <= 12_000,
+			`${file} is still monolithic`,
+		);
 	}
 
 	const sortKey = (item) =>
 		`${item.name}\u0000${String(item.occurrence).padStart(4, "0")}\u0000${item.domain}`;
 	assert.deepEqual(
-		actual.toSorted((left, right) => sortKey(left).localeCompare(sortKey(right))),
+		actual.toSorted((left, right) =>
+			sortKey(left).localeCompare(sortKey(right)),
+		),
 		inventory.tests.toSorted((left, right) =>
 			sortKey(left).localeCompare(sortKey(right)),
 		),

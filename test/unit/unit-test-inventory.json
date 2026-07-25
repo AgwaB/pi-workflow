@@ -1,7 +1,7 @@
 {
 	"schema": "pi-workflow-unit-test-inventory-v1",
 	"source": "unit.test.mjs",
-	"count": 517,
+	"count": 518,
 	"tests": [
 		{
 			"name": "public schemaVersion 1 parser accepts artifact graph and rejects non-artifactGraph top-level shapes",
@@ -768,25 +768,25 @@
 		{
 			"name": "artifact graph opt-ins validate and preserve compiled metadata",
 			"occurrence": 1,
-			"sha256": "744515aafcc0be26e88fe071ef3aa81b565b65ee8c28f6d3ccf3fe98887644da",
+			"sha256": "402899d19c7d5efadf4eaa4fd93abc86164fcdf6de3626603f03c26da68b4e51",
 			"domain": "authoring-interface"
 		},
 		{
 			"name": "compiler rejects a static foreach prompt cap below its Unicode boundary",
 			"occurrence": 1,
-			"sha256": "b63141342eaf9da4e7637e062c394621a604b40ef8efb81a61ba53353eb889c4",
+			"sha256": "b1ae8ba41f28369b3ff5bdeb06e25c1259b8c5be765196ee3d2fd11af4764c08",
 			"domain": "authoring-interface"
 		},
 		{
 			"name": "compiler diagnoses foreach item projections only with a known item schema",
 			"occurrence": 1,
-			"sha256": "fa467e56088275742ebd88cdd7ced69e1aa0bb91e2fb509451e4aec8703cb4aa",
+			"sha256": "a179c061ae6d65af539c97f7dad0393a609263f38ab966e64f0aafbd90988605",
 			"domain": "authoring-interface"
 		},
 		{
 			"name": "artifact graph opt-ins reject malformed or misplaced authoring fields",
 			"occurrence": 1,
-			"sha256": "75b7a523c7a137301eca5917ddcdfd54e6bbffb9adf00634735cd4a5eb7e6d99",
+			"sha256": "390317f164c4692a329b18868f4cffb66e1ddb688dcfab8ce734401dad50fcfb",
 			"domain": "authoring-interface"
 		},
 		{
@@ -1026,25 +1026,31 @@
 		{
 			"name": "natural-language workflow tools list and start workflows",
 			"occurrence": 1,
-			"sha256": "5feb4301c9e2721582506640bfad29d0fcc1664dc5d86e880cb2024a0bdc3e5e",
+			"sha256": "370ca62ccec568cb578f42c0bfed2e5f85a0ae008448aded82d8a1ac6665989a",
 			"domain": "authoring-interface"
 		},
 		{
 			"name": "natural-language workflow tools list and start workflows",
 			"occurrence": 2,
-			"sha256": "5feb4301c9e2721582506640bfad29d0fcc1664dc5d86e880cb2024a0bdc3e5e",
+			"sha256": "dbf5bab55e4bcd827ed72564fb5bdaa1fb40dd0ddde150ec6561125d8c05cc19",
 			"domain": "authoring-interface"
 		},
 		{
 			"name": "deliverMissedWorkflowFeedback does not auto-trigger an agent turn on startup",
 			"occurrence": 1,
-			"sha256": "7ab17ddbd59a80297fb17e34aa26730ddbd99d4b110d15f6780ced590b533e16",
+			"sha256": "da7723cebacf8cb69a30e37d54d756256c740ca042614be5c4913f9eed444ce9",
+			"domain": "authoring-interface"
+		},
+		{
+			"name": "completion feedback is delivered only to the workflow owner session",
+			"occurrence": 1,
+			"sha256": "e830145f7075d8308eb91483068e4d9d8f31ff313ec4574a94830151d2ea7429",
 			"domain": "authoring-interface"
 		},
 		{
 			"name": "workflow extension skips missed completion feedback during session reload",
 			"occurrence": 1,
-			"sha256": "fdcc647484b87c1904ef7272281daffcabc3e0dd9a002fb49067e396fcaaf48f",
+			"sha256": "b4daacee806bbdc3e521e21a9550df4310a4e7be5176a855f479062fc84c0486",
 			"domain": "authoring-interface"
 		},
 		{
@@ -2586,7 +2592,7 @@
 		{
 			"name": "workflow_dynamic tool starts spec-less direct dynamic runs",
 			"occurrence": 1,
-			"sha256": "0677239beb76f7ab2afe67442e5a4aa27906433501dcf840d52454e24656a1eb",
+			"sha256": "a3cd09cc6d7084881b04f2736dffeb16812acabc05025601538b291a7c155625",
 			"domain": "dynamic-runtime"
 		},
 		{
