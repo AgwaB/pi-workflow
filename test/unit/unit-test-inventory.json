@@ -120,7 +120,7 @@
 		{
 			"name": "artifactGraph runtime foreach materializes items from a dag container output",
 			"occurrence": 1,
-			"sha256": "626bf30830483cfec410f939dd843d2cf73c64be33bae1bb6707614a4d997872",
+			"sha256": "7c91d27f73b2dd119e2deb82affb3cab3965a7c92c55bd85dd9960f181f61f85",
 			"domain": "artifact-web"
 		},
 		{

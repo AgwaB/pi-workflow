@@ -1668,6 +1668,7 @@ test("artifactGraph runtime foreach materializes items from a dag container outp
 			["verify.item_a", "verify.item_b"],
 		);
 	} finally {
+		await flushPendingIndexUpdatesForTests().catch(() => undefined);
 		rmSync(cwd, {
 			recursive: true,
 			force: true,
