@@ -120,6 +120,7 @@ function installFakeSubagentApi(
 		directText = "Direct answer body.",
 		keepTaskRunning = false,
 		routerGate,
+		statusGate,
 	} = {},
 ) {
 	const calls = { router: 0, direct: 0, launches: 0 };
@@ -170,6 +171,7 @@ function installFakeSubagentApi(
 		async getSubagentStatus({ runId }) {
 			const run = launches.get(runId);
 			assert.ok(run, `missing subagent run ${runId}`);
+			if (statusGate) await statusGate;
 			return {
 				runId,
 				attemptId: run.attemptId,
@@ -610,10 +612,7 @@ test("/workflow launch finishing after shutdown does not render into the closed 
 					options.find((option) => option === "Profile: medium"),
 			},
 		};
-		const launch = handler(
-			'run route-target "Delayed routed launch."',
-			ctx,
-		);
+		const launch = handler('run route-target "Delayed routed launch."', ctx);
 		for (let attempt = 0; attempt < 50; attempt += 1) {
 			if (
 				statuses.some(
@@ -687,11 +686,13 @@ test("/workflow run routes by default and --no-route skips the router", async ()
 		const statuses = [];
 		const widgets = [];
 		const foregroundMessages = [];
+		let dynamicLoader;
 		let profilePrompts = 0;
 		const ctx = {
 			cwd,
 			hasUI: true,
 			mode: "tui",
+			sessionManager: { getSessionId: () => "session-command-owner" },
 			ui: {
 				custom(factory) {
 					return new Promise((resolve) => {
@@ -702,11 +703,19 @@ test("/workflow run routes by default and --no-route skips the router", async ()
 						};
 						component = factory(
 							{ requestRender() {} },
-							{ fg(_role, value) { return value; } },
+							{
+								fg(_role, value) {
+									return value;
+								},
+							},
 							undefined,
 							done,
 						);
-						foregroundMessages.push(component.render(100).join("\n"));
+						const rendered = component.render(100).join("\n");
+						foregroundMessages.push(rendered);
+						if (rendered.includes("Working on dynamic workflow")) {
+							dynamicLoader = component;
+						}
 					});
 				},
 				notify(message, level) {
@@ -756,6 +765,44 @@ test("/workflow run routes by default and --no-route skips the router", async ()
 			'run --no-route --force-new route-target "No route task."',
 			ctx,
 		);
+
+		// Dynamic launch stays in the cancellable foreground after its initial
+		// planner subagent starts. Cancellation waits for an in-flight refresh
+		// before stopping the run, preventing that refresh from resurrecting it.
+		let releaseDynamicStatus;
+		const dynamicStatusGate = new Promise(
+			(resolve) => (releaseDynamicStatus = resolve),
+		);
+		const dynamicCalls = installFakeSubagentApi(cwd, {
+			keepTaskRunning: true,
+			statusGate: dynamicStatusGate,
+		});
+		const dynamicLaunch = handler(
+			'dynamic --force-new "Dynamic UI parity task."',
+			ctx,
+		);
+		for (let attempt = 0; attempt < 50; attempt += 1) {
+			if (dynamicLoader && dynamicCalls.launches > 0) break;
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		assert.ok(dynamicLoader, "dynamic foreground loader was not rendered");
+		assert.ok(
+			dynamicCalls.launches > 0,
+			"dynamic loader closed before the initial planner launched",
+		);
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		dynamicLoader.handleInput("\u001b");
+		releaseDynamicStatus();
+		await dynamicLaunch;
+		let dynamicRun;
+		for (let attempt = 0; attempt < 100; attempt += 1) {
+			dynamicRun = (await readIndex(cwd))?.runs.find(
+				(run) => run.name === "dynamic",
+			);
+			if (dynamicRun?.status === "interrupted") break;
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		assert.equal(dynamicRun?.status, "interrupted");
 		assert.equal(directCalls.router, 1);
 		assert.equal(profilePrompts, 2);
 		assert.ok(calls.launches + directCalls.launches >= 2);
@@ -778,6 +825,18 @@ test("/workflow run routes by default and --no-route skips the router", async ()
 			true,
 		);
 		assert.equal(
+			foregroundMessages.some((message) =>
+				message.includes("Validating dynamic workflow"),
+			),
+			true,
+		);
+		assert.equal(
+			foregroundMessages.some((message) =>
+				message.includes("Working on dynamic workflow"),
+			),
+			true,
+		);
+		assert.equal(
 			notices.some(({ message }) => message.includes("Workflow started")),
 			false,
 		);
@@ -793,8 +852,7 @@ test("/workflow run routes by default and --no-route skips the router", async ()
 			if (
 				widgets.some(
 					(entry) =>
-						entry.key === "pi-workflow-active" &&
-						Array.isArray(entry.value),
+						entry.key === "pi-workflow-active" && Array.isArray(entry.value),
 				)
 			)
 				break;

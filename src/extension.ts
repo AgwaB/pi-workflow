@@ -46,7 +46,10 @@ import {
 	fromProjectPath,
 	isMockRunProvenance,
 	readFreshIndex,
+	readJson,
 	readRunRecord,
+	workflowRunDir,
+	writeJsonAtomic,
 } from "./store.js";
 import { loadWorkflowSpec } from "./schema.js";
 import { listWorkflows, resolveWorkflowRef } from "./workflow-specs.js";
@@ -82,7 +85,10 @@ const UNFINISHED_RUN_NOTICE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const UNFINISHED_RUN_NOTICE_MAX_RUNS = 5;
 const UNFINISHED_RUN_NOTICE_DEDUPE_MS = 6 * 60 * 60 * 1000;
 const RUN_FEEDBACK_POLL_MS = 2_000;
+const DYNAMIC_INITIAL_PLAN_POLL_MS = 250;
+const DYNAMIC_INITIAL_PLAN_SPEC_ID = "dynamic.decide-r0";
 const WORKFLOW_FEEDBACK_LOCK_STALE_MS = 10 * 60 * 1000;
+const WORKFLOW_FEEDBACK_AUDIENCE_SCHEMA = "workflow-feedback-audience-v1";
 const runFeedbackTimers = new Map<string, ReturnType<typeof setInterval>>();
 const activeWorkflowUiTimers = new Map<
 	string,
@@ -310,13 +316,19 @@ export function registerWorkflowNaturalLanguageTools(
 		async execute(
 			_toolCallId: string,
 			params: unknown,
-			_signal: AbortSignal,
+			signal: AbortSignal,
 			_onUpdate: unknown,
 			ctx: ExtensionContext,
 		) {
 			assertWorkflowToolAllowedForRole();
 			const request = parseWorkflowDynamicToolParams(params);
-			const result = await startDynamicRunFromRequest(request, ctx, pi);
+			const result = await startDynamicRunFromRequest(
+				request,
+				ctx,
+				pi,
+				workflowUiSignalForCwd(ctx.cwd),
+				signal,
+			);
 			return {
 				content: [{ type: "text", text: result.text }],
 				details: {
@@ -426,6 +438,7 @@ async function restoreActiveWorkflowUi(
 		(item) => !item.parentRunId && item.status === "running",
 	)) {
 		if (signal.aborted) return;
+		if (!(await workflowFeedbackBelongsToSession(ctx, run.runId))) continue;
 		watchWorkflowFeedback(ctx, api, run.runId, signal);
 	}
 }
@@ -500,6 +513,131 @@ function canDeliverWorkflowFeedback(ctx: ExtensionContext): boolean {
 	return ctx.hasUI && !printMode;
 }
 
+function workflowFeedbackSessionId(ctx: ExtensionContext): string | undefined {
+	const sessionId = ctx.sessionManager?.getSessionId?.();
+	return typeof sessionId === "string" && sessionId.trim()
+		? sessionId
+		: undefined;
+}
+
+function workflowFeedbackAudiencePath(cwd: string, runId: string): string {
+	return join(workflowRunDir(cwd, runId), "feedback-audience.json");
+}
+
+async function bindWorkflowFeedbackAudience(
+	ctx: ExtensionContext,
+	runId: string,
+): Promise<boolean> {
+	const sessionId = workflowFeedbackSessionId(ctx);
+	if (!sessionId) return false;
+	try {
+		await writeJsonAtomic(workflowFeedbackAudiencePath(ctx.cwd, runId), {
+			schema: WORKFLOW_FEEDBACK_AUDIENCE_SCHEMA,
+			runId,
+			sessionId,
+			boundAt: new Date().toISOString(),
+		});
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+async function workflowFeedbackBelongsToSession(
+	ctx: ExtensionContext,
+	runId: string,
+): Promise<boolean> {
+	const sessionId = workflowFeedbackSessionId(ctx);
+	if (!sessionId) return false;
+	const audience = await readJson(
+		workflowFeedbackAudiencePath(ctx.cwd, runId),
+	).catch(() => undefined);
+	return (
+		audience !== undefined &&
+		typeof audience === "object" &&
+		audience !== null &&
+		(audience as Record<string, unknown>).schema ===
+			WORKFLOW_FEEDBACK_AUDIENCE_SCHEMA &&
+		(audience as Record<string, unknown>).runId === runId &&
+		(audience as Record<string, unknown>).sessionId === sessionId
+	);
+}
+
+async function startWorkflowFeedbackTracking(
+	ctx: ExtensionContext,
+	api: ExtensionAPI,
+	runId: string,
+	signal: AbortSignal,
+): Promise<void> {
+	void refreshActiveWorkflowUi(ctx, signal).catch(() => undefined);
+	if (!(await bindWorkflowFeedbackAudience(ctx, runId)) || signal.aborted)
+		return;
+	watchWorkflowFeedback(ctx, api, runId, signal);
+	beginParentUsageTracking(ctx.cwd, runId);
+}
+
+function dynamicInitialPlanInFlight(
+	run: Awaited<ReturnType<typeof refreshRun>>,
+): boolean {
+	return (
+		run.status === "running" &&
+		run.tasks.some(
+			(task) =>
+				task.specId === DYNAMIC_INITIAL_PLAN_SPEC_ID &&
+				(task.status === "pending" || task.status === "running"),
+		)
+	);
+}
+
+function waitForDynamicInitialPlan(
+	cwd: string,
+	initialRun: Awaited<ReturnType<typeof refreshRun>>,
+	signal: AbortSignal,
+): Promise<Awaited<ReturnType<typeof refreshRun>>> {
+	return new Promise((resolve) => {
+		let run = initialRun;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		let polling = false;
+		let settled = false;
+		const finish = () => {
+			if (settled || polling) return;
+			settled = true;
+			if (timer) clearTimeout(timer);
+			signal.removeEventListener("abort", finish);
+			resolve(run);
+		};
+		const schedule = () => {
+			if (signal.aborted || !dynamicInitialPlanInFlight(run)) {
+				finish();
+				return;
+			}
+			timer = setTimeout(poll, DYNAMIC_INITIAL_PLAN_POLL_MS);
+		};
+		const poll = () => {
+			timer = undefined;
+			if (signal.aborted) {
+				finish();
+				return;
+			}
+			polling = true;
+			void refreshRun(cwd, run.runId)
+				.then((nextRun) => {
+					run = nextRun;
+				})
+				.catch(() => {
+					// Keep the foreground handoff alive across transient run/lease
+					// reads. The next poll can still observe planner transition.
+				})
+				.finally(() => {
+					polling = false;
+					schedule();
+				});
+		};
+		signal.addEventListener("abort", finish, { once: true });
+		schedule();
+	});
+}
+
 export async function deliverMissedWorkflowFeedback(
 	ctx: ExtensionContext,
 	api: ExtensionAPI,
@@ -521,6 +659,7 @@ export async function deliverMissedWorkflowFeedback(
 		.slice(0, 5);
 	for (const summary of recent) {
 		if (signal?.aborted) return;
+		if (!(await workflowFeedbackBelongsToSession(ctx, summary.runId))) continue;
 		const run = await readRunRecord(ctx.cwd, summary.runId).catch(
 			() => undefined,
 		);
@@ -545,6 +684,7 @@ async function deliverWorkflowFeedback(
 	} = {},
 ): Promise<void> {
 	if (options.signal?.aborted) return;
+	if (!(await workflowFeedbackBelongsToSession(ctx, run.runId))) return;
 	const delivery = await claimWorkflowFeedbackDelivery(ctx.cwd, run);
 	if (!delivery) return;
 	if (options.signal?.aborted) {
@@ -1004,8 +1144,7 @@ async function startWorkflowRunFromRequest(
 	});
 	const verb = workflowRunStartVerb(run.status);
 	if (run.status === "running" && !uiSessionSignal.aborted) {
-		watchWorkflowFeedback(ctx, api, run.runId, uiSessionSignal);
-		beginParentUsageTracking(ctx.cwd, run.runId);
+		await startWorkflowFeedbackTracking(ctx, api, run.runId, uiSessionSignal);
 	}
 
 	let detachNote = "";
@@ -1024,23 +1163,34 @@ async function startDynamicRunFromRequest(
 	ctx: ExtensionContext,
 	api: ExtensionAPI,
 	uiSessionSignal = workflowUiSignalForCwd(ctx.cwd),
+	initialPlanSignal?: AbortSignal,
 ): Promise<{ run: Awaited<ReturnType<typeof runDynamicTask>>; text: string }> {
 	const task = request.task.trim();
 	if (!task)
 		throw new Error(
 			'This dynamic workflow needs a task. Usage: /workflow dynamic "<task>"',
 		);
-	const run = await runDynamicTask(ctx.cwd, {
+	let run = await runDynamicTask(ctx.cwd, {
 		task,
 		runtimeOverrides: request.runtimeOverrides,
 		runtimeDefaults: currentRuntimeDefaults(ctx, api),
 		availableModels: availableWorkflowModels(ctx),
 		dynamicUi: dynamicUiFromContext(ctx),
 	});
+	if (
+		ctx.mode === "tui" &&
+		initialPlanSignal &&
+		!initialPlanSignal.aborted &&
+		dynamicInitialPlanInFlight(run)
+	) {
+		run = await waitForDynamicInitialPlan(ctx.cwd, run, initialPlanSignal);
+	}
+	if (initialPlanSignal?.aborted && run.status === "running") {
+		run = (await stopRun(ctx.cwd, run.runId)).run;
+	}
 	const verb = workflowRunStartVerb(run.status);
 	if (run.status === "running" && !uiSessionSignal.aborted) {
-		watchWorkflowFeedback(ctx, api, run.runId, uiSessionSignal);
-		beginParentUsageTracking(ctx.cwd, run.runId);
+		await startWorkflowFeedbackTracking(ctx, api, run.runId, uiSessionSignal);
 	}
 
 	let detachNote = "";
@@ -1253,8 +1403,7 @@ async function handleRoutedRunRequest(
 	const run = outcome.run;
 	const verb = workflowRunStartVerb(run.status);
 	if (run.status === "running" && !uiSessionSignal.aborted) {
-		watchWorkflowFeedback(ctx, api, run.runId, uiSessionSignal);
-		beginParentUsageTracking(ctx.cwd, run.runId);
+		await startWorkflowFeedbackTracking(ctx, api, run.runId, uiSessionSignal);
 	}
 
 	let detachNote = "";
@@ -1774,7 +1923,7 @@ async function handleWorkflowCommand(
 			});
 			const result = await withWorkflowLaunchForeground(
 				ctx,
-				"Starting dynamic workflow…",
+				"Working on dynamic workflow…",
 				async (launchSignal) => {
 					launchSignal.throwIfAborted();
 					const launch = await startDynamicRunFromRequest(
@@ -1786,6 +1935,7 @@ async function handleWorkflowCommand(
 						ctx,
 						api,
 						uiSessionSignal,
+						launchSignal,
 					);
 					if (launchSignal.aborted && launch.run.status === "running")
 						await stopRun(ctx.cwd, launch.run.runId);
@@ -1879,8 +2029,7 @@ async function handleWorkflowCommand(
 				dynamicUi: dynamicUiFromContext(ctx),
 			});
 			if (run.status === "running" && !uiSessionSignal.aborted) {
-				watchWorkflowFeedback(ctx, api, runId, uiSessionSignal);
-				beginParentUsageTracking(ctx.cwd, runId);
+				await startWorkflowFeedbackTracking(ctx, api, runId, uiSessionSignal);
 			}
 			if (uiSessionSignal.aborted) return;
 			emit(

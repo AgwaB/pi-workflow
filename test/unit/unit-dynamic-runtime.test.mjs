@@ -245,7 +245,6 @@ import {
 	writeWorkflowWebSource,
 } from "./unit-test-support.mjs";
 
-
 test("dynamic controller engine guard reports stale missing runDecisionLoop wiring", async () => {
 	const specificMessage =
 		"incompatible or stale pi-workflow engine: dynamic controller context is missing runDecisionLoop (rebuild dist / reload workflow engine)";
@@ -8977,11 +8976,19 @@ test("workflow_dynamic tool starts spec-less direct dynamic runs", async () => {
 				return {};
 			},
 		});
+		const widgets = [];
 		const ctx = {
 			cwd,
-			hasUI: false,
+			hasUI: true,
 			model: undefined,
-			ui: { notify() {} },
+			sessionManager: { getSessionId: () => "session-dynamic-owner" },
+			ui: {
+				notify() {},
+				setStatus() {},
+				setWidget(key, value, options) {
+					widgets.push({ key, value, options });
+				},
+			},
 		};
 		await assert.rejects(
 			() =>
@@ -9005,6 +9012,41 @@ test("workflow_dynamic tool starts spec-less direct dynamic runs", async () => {
 		assert.match(result.content[0].text, /Run: workflow_/);
 		assert.equal(result.details.mode, "direct-dynamic");
 		assert.equal(result.details.provenance.userSelectedWorkflow, false);
+		const audience = JSON.parse(
+			readFileSync(
+				join(
+					cwd,
+					".pi",
+					"workflows",
+					result.details.runId,
+					"feedback-audience.json",
+				),
+				"utf8",
+			),
+		);
+		assert.equal(audience.runId, result.details.runId);
+		assert.equal(audience.sessionId, "session-dynamic-owner");
+		for (let attempt = 0; attempt < 50; attempt += 1) {
+			if (
+				widgets.some(
+					(entry) =>
+						entry.key === "pi-workflow-active" &&
+						Array.isArray(entry.value) &&
+						entry.value.some((line) => line.includes("dynamic")),
+				)
+			)
+				break;
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		assert.equal(
+			widgets.some(
+				(entry) =>
+					entry.key === "pi-workflow-active" &&
+					Array.isArray(entry.value) &&
+					entry.value.some((line) => line.includes("dynamic")),
+			),
+			true,
+		);
 		assert.equal(launched.length, 1);
 		assert.match(
 			String(launched[0].task),
