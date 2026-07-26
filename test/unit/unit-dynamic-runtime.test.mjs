@@ -78,6 +78,7 @@ import {
 	dynamicLoopPersistedDecision,
 	dynamicLoopSignature,
 	dynamicLoopValidWorkDecision,
+	dynamicControllerOutcomeFromOutput,
 	dynamicOutputProfileValues,
 	dynamicStatePath,
 	enabledWorkflowExperimentalSpeedFlags,
@@ -2405,6 +2406,171 @@ test("runDynamicDecisionLoop runs synthesis actions and returns synthesized", as
 	assert.equal(calls.stateIndexRequests.length, 0);
 });
 
+test("direct dynamic controller outcome fails closed when required synthesis output is absent", () => {
+	const exhausted = {
+		control: {
+			status: "exhausted",
+			outputTasks: [],
+			blockers: [],
+			omissions: [],
+		},
+	};
+	assert.equal(
+		dynamicControllerOutcomeFromOutput(exhausted).taskStatus,
+		"completed",
+		"reusable and historical controllers retain compatibility",
+	);
+	const incomplete = dynamicControllerOutcomeFromOutput(exhausted, {
+		requireOutput: true,
+	});
+	assert.equal(incomplete.taskStatus, "failed");
+	assert.equal(incomplete.statusDetail, "dynamic_incomplete");
+	assert.equal(incomplete.lifecycleStatus, "failed");
+
+	const emptySynthesis = dynamicControllerOutcomeFromOutput(
+		{
+			control: {
+				status: "synthesized",
+				outputTasks: [],
+				blockers: [],
+				omissions: [],
+			},
+		},
+		{ requireOutput: true },
+	);
+	assert.equal(emptySynthesis.statusDetail, "dynamic_incomplete");
+
+	const synthesized = dynamicControllerOutcomeFromOutput(
+		{
+			control: {
+				status: "synthesized",
+				outputTasks: ["dynamic.synthesis-final"],
+				blockers: [],
+				omissions: [],
+			},
+		},
+		{ requireOutput: true },
+	);
+	assert.equal(synthesized.taskStatus, "completed");
+	assert.equal(synthesized.statusDetail, "dynamic_completed");
+});
+
+test("runDynamicDecisionLoop reserves the opted-in final round for repaired synthesis", async () => {
+	const config = dynamicLoopConfig({
+		maxDecisionRounds: 2,
+		repair: { maxAttempts: 1 },
+	});
+	const work = {
+		schema: "dynamic-decision-v1",
+		decisionId: "decide-r0",
+		round: 0,
+		phase: "round",
+		status: "continue",
+		nextActions: [
+			{
+				type: "add_work_item",
+				actionId: "act-research-r0",
+				workItemId: "research-r0",
+				prompt: "Collect the required evidence.",
+				outputProfile: "generic_summary_v1",
+			},
+		],
+	};
+	const invalidFinalWork = {
+		...work,
+		decisionId: "decide-r1-work",
+		round: 1,
+		nextActions: [
+			{
+				...work.nextActions[0],
+				actionId: "act-forbidden-final-work",
+				workItemId: "forbidden-final-work",
+			},
+		],
+	};
+	const synthesis = {
+		schema: "dynamic-decision-v1",
+		decisionId: "decide-r1-synthesis",
+		round: 1,
+		phase: "final",
+		status: "synthesize",
+		nextActions: [
+			{
+				type: "synthesize",
+				actionId: "synth-final",
+				prompt: "Produce the final answer.",
+				outputProfile: "synthesis_v1",
+			},
+		],
+	};
+	const { ctx, calls } = makeValidatingDynamicDecisionLoopCtx({
+		config,
+		plannerControls: [work, invalidFinalWork, synthesis],
+		agentResults: {
+			"act-research-r0": { specId: "dynamic.research-r0" },
+			"synth-final": { specId: "dynamic.synthesis-final" },
+		},
+	});
+
+	const outcome = await runDynamicDecisionLoop(ctx, {
+		reserveFinalRoundForSynthesis: true,
+	});
+
+	assert.equal(outcome.control.status, "synthesized");
+	assert.deepEqual(outcome.control.outputTasks, ["dynamic.synthesis-final"]);
+	assert.equal(calls.validationContexts[0].allowedStatuses, undefined);
+	assert.deepEqual(calls.validationContexts[1].allowedStatuses, [
+		"synthesize",
+		"blocked",
+	]);
+	assert.deepEqual(calls.validationContexts[2].allowedStatuses, [
+		"synthesize",
+		"blocked",
+	]);
+	assert.match(plannerCalls(calls)[1].prompt, /reserved final synthesis round/);
+	assert.match(plannerCalls(calls)[2].prompt, /reserved final synthesis round/);
+	assert.match(plannerCalls(calls)[2].prompt, /previous decision was invalid/i);
+	assert.equal(
+		dispatchedCalls(calls).some(
+			(request) => request.id === "act-forbidden-final-work",
+		),
+		false,
+	);
+});
+
+test("runDynamicDecisionLoop permits an irreducible block in the reserved final round", async () => {
+	const blocked = {
+		schema: "dynamic-decision-v1",
+		decisionId: "decide-r0-blocked",
+		round: 0,
+		phase: "final",
+		status: "blocked",
+		nextActions: [
+			{
+				type: "stop",
+				actionId: "blocked-r0",
+				reason: "external approval is required",
+			},
+		],
+	};
+	const { ctx, calls } = makeValidatingDynamicDecisionLoopCtx({
+		config: dynamicLoopConfig({ maxDecisionRounds: 1 }),
+		plannerControls: [blocked],
+	});
+
+	const outcome = await runDynamicDecisionLoop(ctx, {
+		reserveFinalRoundForSynthesis: true,
+	});
+
+	assert.equal(outcome.control.status, "blocked");
+	assert.deepEqual(outcome.control.blockers, ["external approval is required"]);
+	assert.deepEqual(calls.validationContexts[0].allowedStatuses, [
+		"synthesize",
+		"blocked",
+	]);
+	assert.deepEqual(dispatchedCalls(calls), []);
+});
+
 test("runDynamicDecisionLoop returns exhausted when maxRounds is reached", async () => {
 	const { ctx, calls } = makeDynamicDecisionLoopCtx({
 		config: dynamicLoopConfig({ maxDecisionRounds: 2 }),
@@ -2433,6 +2599,10 @@ test("runDynamicDecisionLoop returns exhausted when maxRounds is reached", async
 		"round 1 accepted no executable work actions",
 	]);
 	assert.equal(calls.validationContexts.length, 2);
+	assert.equal(
+		calls.validationContexts.some((context) => "allowedStatuses" in context),
+		false,
+	);
 	assert.equal(calls.stateIndexRequests.length, 0);
 });
 
@@ -8884,7 +9054,7 @@ test("spec-less direct dynamic run records provenance and launches planner", asy
 		assert.equal(run.provenance.generatedSpec, false);
 		assert.match(
 			run.provenance.runtimeBundle,
-			/\.pi\/workflow-runtime\/direct-dynamic-runtime-v3\/spec\.json$/,
+			/\.pi\/workflow-runtime\/direct-dynamic-runtime-v4\/spec\.json$/,
 		);
 		assert.equal(run.tasks[0].kind, "dynamic");
 		assert.equal(launched.length, 1);

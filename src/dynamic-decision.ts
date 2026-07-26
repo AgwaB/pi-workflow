@@ -100,6 +100,7 @@ export interface DynamicDecisionValidationContext {
 	expectedRound?: number;
 	maxActions?: number;
 	maxDecisionRounds?: number;
+	allowedStatuses?: readonly DynamicDecisionStatus[];
 	allowedTools?: readonly string[];
 	toolProviders?: Record<string, CompiledToolProvider>;
 	allowUnknownTools?: boolean;
@@ -215,6 +216,15 @@ export function validateDynamicDecision(
 		["continue", "synthesize", "stop", "blocked"],
 		errors,
 	) as DynamicDecisionStatus | undefined;
+	if (
+		status &&
+		context.allowedStatuses &&
+		!context.allowedStatuses.includes(status)
+	) {
+		errors.push(
+			`status must be one of ${context.allowedStatuses.join(", ")} for this decision`,
+		);
+	}
 
 	if (
 		context.expectedRound !== undefined &&

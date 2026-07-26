@@ -1,7 +1,7 @@
 {
 	"schema": "pi-workflow-unit-test-inventory-v1",
 	"source": "unit.test.mjs",
-	"count": 518,
+	"count": 521,
 	"tests": [
 		{
 			"name": "public schemaVersion 1 parser accepts artifact graph and rejects non-artifactGraph top-level shapes",
@@ -1348,6 +1348,12 @@
 			"domain": "core-runtime"
 		},
 		{
+			"name": "deep-research final-audit packet does not preserve contradicted fact-slot values as filled",
+			"occurrence": 1,
+			"sha256": "b4e12bf3b4e178f4850f4e95c73acffcf1a8e87af5994f987d714c696485aed7",
+			"domain": "core-runtime"
+		},
+		{
 			"name": "deep-research P3 final-audit replay fixture preserves guardrail floors",
 			"occurrence": 1,
 			"sha256": "268a069065c0ba0a0d4a515432c36159f2ebd1877f79660c9629a4455292edf1",
@@ -2074,9 +2080,27 @@
 			"domain": "dynamic-runtime"
 		},
 		{
+			"name": "direct dynamic controller outcome fails closed when required synthesis output is absent",
+			"occurrence": 1,
+			"sha256": "e533f614661d90c7bab38bed0e22803150675fcd9d6dbe8d5b54d7cbd363f9fb",
+			"domain": "dynamic-runtime"
+		},
+		{
+			"name": "runDynamicDecisionLoop reserves the opted-in final round for repaired synthesis",
+			"occurrence": 1,
+			"sha256": "81b1cb7a082fa238d1516bd346b8220f70c528651c790e6b6e1b0c3a36bc2a7c",
+			"domain": "dynamic-runtime"
+		},
+		{
+			"name": "runDynamicDecisionLoop permits an irreducible block in the reserved final round",
+			"occurrence": 1,
+			"sha256": "37d5d1a28dcce9b3dec25432ce05868d2710dc1c1f3cbff10940fa64f0d48625",
+			"domain": "dynamic-runtime"
+		},
+		{
 			"name": "runDynamicDecisionLoop returns exhausted when maxRounds is reached",
 			"occurrence": 1,
-			"sha256": "0eab8b0eff381ed09f222e86a17c80bb7d81327585aea5b8cb037667a7746dca",
+			"sha256": "f4f1a9a4980b0c2758bb9e01c5842eee909380079dffb8cd49f3c4a2eca12f3a",
 			"domain": "dynamic-runtime"
 		},
 		{
@@ -2586,7 +2610,7 @@
 		{
 			"name": "spec-less direct dynamic run records provenance and launches planner",
 			"occurrence": 1,
-			"sha256": "d8a9780cac37bac2739c4732266c56ecbb9ce1d77ef004d38a06537dde051406",
+			"sha256": "eefac57e868fc106f38df744c5cebb47aabf99f237eceb18db62c9ac5897639d",
 			"domain": "dynamic-runtime"
 		},
 		{
@@ -3104,12 +3128,6 @@
 			"occurrence": 1,
 			"sha256": "4e895299bf4e89c87f4d4c6eee4e7747275adf6e6cc1289456a27141dcbc0c41",
 			"domain": "engine-store"
-		},
-		{
-			"name": "deep-research final-audit packet does not preserve contradicted fact-slot values as filled",
-			"occurrence": 1,
-			"sha256": "b4e12bf3b4e178f4850f4e95c73acffcf1a8e87af5994f987d714c696485aed7",
-			"domain": "core-runtime"
 		}
 	]
 }

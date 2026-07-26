@@ -64,7 +64,10 @@ test("WB-016 wait loop uses deadline selector while refresh remains single-write
 		readFile(new URL("../../src/engine.ts", import.meta.url), "utf8"),
 		readFile(new URL("../../src/subagent-backend.ts", import.meta.url), "utf8"),
 	]);
-	assert.match(engine, /await sleep\(schedulerPollDelayMs\(run, remaining\)\)/);
+	assert.match(
+		engine,
+		/await awaitWithinWorkflowWaitBoundary\(\s*sleep\(schedulerPollDelayMs\(run, remaining\)\)/,
+	);
 	const refreshBody = backend.slice(
 		backend.indexOf("export async function refreshRunFromSubagentArtifacts"),
 		backend.indexOf("async function pollSubagentForRefresh"),

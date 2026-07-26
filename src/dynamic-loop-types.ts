@@ -141,6 +141,8 @@ export interface DynamicLoopAgentResult {
 export interface RunDynamicDecisionLoopOptions {
 	maxRounds?: number;
 	buildPlannerPrompt?: (input: DynamicPlannerPromptInput) => string;
+	/** Reserve the final configured decision round for synthesize-or-block only. */
+	reserveFinalRoundForSynthesis?: boolean;
 }
 
 export interface DynamicPlannerPromptInput {
@@ -152,6 +154,8 @@ export interface DynamicPlannerPromptInput {
 	latestStateIndex?: DynamicStateIndexPersistResult;
 	coordination?: { summary: string; artifactPath?: string; digest?: string };
 	generatedTaskIds: string[];
+	/** True only for an explicitly reserved final synthesis decision round. */
+	finalSynthesisRound?: boolean;
 	repair?: { errors: string[]; attempt: number };
 	replan?: {
 		attempt: number;
