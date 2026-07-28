@@ -78,7 +78,11 @@ export function registerWorkflowArtifactTool(
 		],
 		parameters: workflowArtifactParameters as any,
 		async execute(_toolCallId: string, params: unknown) {
-			return await handleWorkflowArtifactToolCall(params, config);
+			try {
+				return await handleWorkflowArtifactToolCall(params, config);
+			} catch (error) {
+				return workflowArtifactFailureResult(error, config);
+			}
 		},
 	} as any);
 
@@ -88,6 +92,36 @@ export function registerWorkflowArtifactTool(
 	pi.on("before_agent_start", () => {
 		activateWorkflowArtifactTool(pi);
 	});
+}
+
+function workflowArtifactFailureResult(
+	error: unknown,
+	config: WorkflowArtifactToolConfig,
+) {
+	const message = error instanceof Error ? error.message : "unknown failure";
+	return {
+		content: [
+			{
+				type: "text" as const,
+				text: JSON.stringify(
+					{
+						status: "blocked",
+						code: "artifact_read_failed",
+						message,
+						next: "Call workflow_artifact with action=list, then retry with a listed source/artifact and a path that exists in that JSON artifact.",
+					},
+					null,
+					2,
+				),
+			},
+		],
+		details: {
+			action: "error",
+			runId: config.runId,
+			taskId: config.taskId,
+			code: "artifact_read_failed",
+		},
+	};
 }
 
 function activateWorkflowArtifactTool(pi: ExtensionAPI): void {

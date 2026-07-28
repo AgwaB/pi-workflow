@@ -418,7 +418,7 @@ export async function readWorkflowArtifact(
 	});
 	try {
 		if (options.path !== undefined) {
-			return readProjectedWorkflowArtifact({
+			return await readProjectedWorkflowArtifact({
 				source: resolved.source.source,
 				artifact: resolved.artifact,
 				file: opened.file,

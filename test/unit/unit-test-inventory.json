@@ -456,7 +456,7 @@
 		{
 			"name": "workflow_artifact extension registers and activates the tool",
 			"occurrence": 1,
-			"sha256": "eee76a5ff9e3d44fb1a9c563311c680a55256d21e16e97426cd7a5de404a80eb",
+			"sha256": "20b41f9c71b892a1ca73ca64927a593e1707e9db77a7472ec7feb560a259c417",
 			"domain": "artifact-web"
 		},
 		{
