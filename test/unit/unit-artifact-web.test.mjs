@@ -6437,6 +6437,7 @@ test("workflow_artifact extension registers and activates the tool", async () =>
 			join(producerDir, "analysis.md"),
 			"extension-visible analysis\n",
 		);
+		writeFileSync(join(producerDir, "control.json"), JSON.stringify({ claims: [] }));
 		const manifestPath = join(consumerDir, "source-manifest.json");
 		const ledgerPath = join(consumerDir, "read-ledger.jsonl");
 		writeFileSync(
@@ -6450,6 +6451,7 @@ test("workflow_artifact extension registers and activates the tool", async () =>
 						source: "plan",
 						artifacts: {
 							analysis: { path: join(producerDir, "analysis.md") },
+							control: { path: join(producerDir, "control.json") },
 						},
 					},
 				],
@@ -6499,6 +6501,20 @@ test("workflow_artifact extension registers and activates the tool", async () =>
 		assert.equal(ledger.length, 1);
 		assert.equal(ledger[0].source, "plan");
 		assert.equal(ledger[0].artifact, "analysis");
+
+		const blocked = await registeredTools[0].execute("tool-call-2", {
+			action: "read",
+			source: "plan",
+			artifact: "control",
+			path: "$.evidence",
+			maxItems: 5,
+		});
+		const blockedPayload = JSON.parse(blocked.content[0].text);
+		assert.equal(blockedPayload.status, "blocked");
+		assert.equal(blockedPayload.code, "artifact_read_failed");
+		assert.match(blockedPayload.message, /path did not resolve: \$\.evidence/);
+		assert.equal(blocked.details.action, "error");
+		assert.equal((await readWorkflowArtifactReadLedger(ledgerPath)).length, 1);
 	} finally {
 		rmSync(cwd, {
 			recursive: true,
