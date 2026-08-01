@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+	mkdir,
+	mkdtemp,
+	readFile,
+	rename,
+	rm,
+	writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -11,6 +18,7 @@ import {
 } from "../../.tmp/unit/store.js";
 import {
 	deliverWorkflowFeedback,
+	setWorkflowFeedbackBindWaitMsForTests,
 	setWorkflowFeedbackPollMsForTests,
 	watchWorkflowFeedbackForTests,
 	WORKFLOW_DYNAMIC_TOOL,
@@ -170,53 +178,95 @@ test("workflow wait boundary enforces timeout and cancellation without owning th
 	await assert.rejects(aborted, /wait cancellation sentinel/);
 });
 
-test("run-file lease cleans up failed initialization and supports release retry", async () => {
+test("run-file lease retries release internally and abandons persistent failures for immediate reclaim", async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "workflow-wait-lease-hooks-"));
-	let lease;
 	try {
-		let releaseAttempts = 0;
+		let initialReleaseAttempts = 0;
 		setRunLeaseTestHooksForTests({
 			onBeforeHeartbeat({ initial }) {
 				if (initial) throw new Error("initial heartbeat hook failed");
 			},
 			onBeforeReleaseLockRename() {
-				releaseAttempts += 1;
-				if (releaseAttempts === 1)
-					throw new Error("transient release hook failed");
+				initialReleaseAttempts += 1;
+				if (initialReleaseAttempts === 1)
+					throw new Error("transient initial release hook failed");
 			},
 		});
 		await assert.rejects(
 			acquireRunFileLease(cwd, "workflow_hook_initial", "presentation"),
 			/initial heartbeat hook failed/,
 		);
-		assert.equal(releaseAttempts, 2);
+		assert.equal(initialReleaseAttempts, 2);
+
 		setRunLeaseTestHooksForTests(undefined);
-		lease = await acquireRunFileLease(cwd, "workflow_hook_initial", "presentation");
-		assert.ok(lease);
-		let retryReleaseAttempts = 0;
+		const transient = await acquireRunFileLease(
+			cwd,
+			"workflow_hook_transient",
+			"presentation",
+		);
+		assert.ok(transient);
+		let transientAttempts = 0;
 		setRunLeaseTestHooksForTests({
-			heartbeatIntervalMs: 5,
 			onBeforeReleaseLockRename() {
-				retryReleaseAttempts += 1;
-				if (retryReleaseAttempts === 1)
-					throw new Error("release must be retryable");
+				transientAttempts += 1;
+				if (transientAttempts === 1)
+					throw new Error("transient release hook failed");
 			},
 		});
-		await assert.rejects(lease.release(), /release must be retryable/);
-		await lease.assertOwner();
-		assert.equal(
-			await acquireRunFileLease(cwd, "workflow_hook_initial", "presentation"),
-			undefined,
-		);
-		await lease.release();
-		lease = undefined;
+		await transient.release();
+		assert.equal(transientAttempts, 2);
+
 		setRunLeaseTestHooksForTests(undefined);
-		const next = await acquireRunFileLease(cwd, "workflow_hook_initial", "presentation");
-		assert.ok(next);
-		await next.release();
+		const persistent = await acquireRunFileLease(
+			cwd,
+			"workflow_hook_persistent",
+			"presentation",
+		);
+		assert.ok(persistent);
+		let persistentAttempts = 0;
+		setRunLeaseTestHooksForTests({
+			onBeforeReleaseLockRename() {
+				persistentAttempts += 1;
+				throw new Error("persistent release hook failed");
+			},
+		});
+		await assert.rejects(persistent.release(), /persistent release hook failed/);
+		assert.equal(persistentAttempts, 3);
+		setRunLeaseTestHooksForTests(undefined);
+		const reclaimed = await acquireRunFileLease(
+			cwd,
+			"workflow_hook_persistent",
+			"presentation",
+		);
+		assert.ok(reclaimed, "persistent release failure must be reclaimable now");
+		await reclaimed.release();
+
+		setRunLeaseTestHooksForTests({
+			onBeforeHeartbeat({ initial }) {
+				if (initial) throw new Error("persistent initial heartbeat failure");
+			},
+			onBeforeReleaseLockRename() {
+				throw new Error("persistent initial cleanup failure");
+			},
+		});
+		await assert.rejects(
+			acquireRunFileLease(
+				cwd,
+				"workflow_hook_persistent_initial",
+				"presentation",
+			),
+			/Failed to initialize and release run-file lease/,
+		);
+		setRunLeaseTestHooksForTests(undefined);
+		const reclaimedInitial = await acquireRunFileLease(
+			cwd,
+			"workflow_hook_persistent_initial",
+			"presentation",
+		);
+		assert.ok(reclaimedInitial);
+		await reclaimedInitial.release();
 	} finally {
 		setRunLeaseTestHooksForTests(undefined);
-		await lease?.release().catch(() => undefined);
 		await rm(cwd, { recursive: true, force: true });
 	}
 });
@@ -433,8 +483,9 @@ test("completion marker precedes best-effort UI notification", async () => {
 		const marker = JSON.parse(
 			await readFile(join(cwd, ".pi", "workflows", run.runId, "feedback-delivery.json"), "utf8"),
 		);
+		assert.equal(marker.schema, "workflow-feedback-delivery-v2");
 		assert.equal(marker.sessionId, "session-notify");
-		assert.equal(typeof marker.delivered.completed, "string");
+		assert.equal(Object.keys(marker.deliveredEpochs).length, 1);
 		const repeated = await deliverWorkflowFeedback(
 			feedbackContext(cwd, "session-notify"),
 			{ sendMessage: () => (sends += 1) },
@@ -443,6 +494,148 @@ test("completion marker precedes best-effort UI notification", async () => {
 		assert.deepEqual(repeated, { status: "already-delivered" });
 		assert.equal(sends, 1);
 	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("terminal delivery epochs allow same-status resume and migrate legacy markers", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "workflow-wait-epochs-"));
+	try {
+		const base = runRecord(cwd, { runId: "workflow_same_status_resume" });
+		const first = {
+			...base,
+			status: "failed",
+			taskSummary: {
+				...base.taskSummary,
+				completed: 0,
+				failed: 1,
+			},
+			tasks: [
+				{
+					...base.tasks[0],
+					status: "failed",
+					statusDetail: "first failure",
+					completedAt: "2026-07-25T00:00:01.000Z",
+				},
+			],
+		};
+		await writeRunFixture(cwd, first);
+		await writeFeedbackAudience(cwd, first.runId, "session-epochs");
+		let sends = 0;
+		assert.deepEqual(
+			await deliverWorkflowFeedback(
+				feedbackContext(cwd, "session-epochs"),
+				{ sendMessage: () => (sends += 1) },
+				first,
+			),
+			{ status: "delivered" },
+		);
+		const resumed = {
+			...first,
+			updatedAt: "2026-07-25T00:00:03.000Z",
+			tasks: [
+				{
+					...first.tasks[0],
+					statusDetail: "second failure",
+					completedAt: "2026-07-25T00:00:03.000Z",
+					resumeEvents: [
+						{
+							at: "2026-07-25T00:00:02.000Z",
+							fromStatus: "failed",
+							fromStatusDetail: "first failure",
+						},
+					],
+				},
+			],
+		};
+		assert.deepEqual(
+			await deliverWorkflowFeedback(
+				feedbackContext(cwd, "session-epochs"),
+				{ sendMessage: () => (sends += 1) },
+				resumed,
+			),
+			{ status: "delivered" },
+		);
+		assert.equal(sends, 2);
+		const resumedMarker = JSON.parse(
+			await readFile(
+				join(cwd, ".pi", "workflows", first.runId, "feedback-delivery.json"),
+				"utf8",
+			),
+		);
+		assert.equal(Object.keys(resumedMarker.deliveredEpochs).length, 2);
+
+		const legacy = runRecord(cwd, { runId: "workflow_legacy_delivery" });
+		await writeRunFixture(cwd, legacy);
+		await writeFeedbackAudience(cwd, legacy.runId, "session-legacy");
+		await writeFile(
+			join(cwd, ".pi", "workflows", legacy.runId, "feedback-delivery.json"),
+			`${JSON.stringify({
+				schema: "workflow-feedback-delivery-v1",
+				runId: legacy.runId,
+				sessionId: "session-legacy",
+				delivered: { completed: "2026-07-25T00:00:02.000Z" },
+			})}\n`,
+		);
+		const legacyOutcome = await deliverWorkflowFeedback(
+			feedbackContext(cwd, "session-legacy"),
+			{ sendMessage: () => (sends += 1) },
+			legacy,
+		);
+		assert.deepEqual(legacyOutcome, { status: "already-delivered" });
+		assert.equal(sends, 2);
+		const migrated = JSON.parse(
+			await readFile(
+				join(cwd, ".pi", "workflows", legacy.runId, "feedback-delivery.json"),
+				"utf8",
+			),
+		);
+		assert.equal(migrated.schema, "workflow-feedback-delivery-v2");
+		assert.equal(migrated.legacyDelivered.completed, "2026-07-25T00:00:02.000Z");
+		assert.equal(Object.keys(migrated.deliveredEpochs).length, 1);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("feedback marker commit is fenced when presentation lease is lost before rename", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "workflow-wait-marker-fence-"));
+	try {
+		const run = runRecord(cwd, { runId: "workflow_marker_fence" });
+		await writeRunFixture(cwd, run);
+		await writeFeedbackAudience(cwd, run.runId, "session-marker-fence");
+		const markerPath = join(
+			cwd,
+			".pi",
+			"workflows",
+			run.runId,
+			"feedback-delivery.json",
+		);
+		setRunLeaseTestHooksForTests({
+			async onBeforeAtomicRename({ file }) {
+				if (file !== markerPath) return;
+				await rename(
+					join(cwd, ".pi", "workflows", run.runId, "feedback-presentation.lock"),
+					join(cwd, ".pi", "workflows", run.runId, "feedback-presentation.lost"),
+				);
+			},
+		});
+		let sends = 0;
+		await assert.rejects(
+			deliverWorkflowFeedback(
+				feedbackContext(cwd, "session-marker-fence"),
+				{ sendMessage: () => (sends += 1) },
+				run,
+			),
+			/Lost supervisor lease/,
+		);
+		assert.equal(sends, 1);
+		await assert.rejects(
+			readFile(markerPath, "utf8"),
+			(error) => error?.code === "ENOENT",
+		);
+	} finally {
+		setRunLeaseTestHooksForTests(undefined);
 		await rm(cwd, { recursive: true, force: true });
 	}
 });
@@ -480,8 +673,84 @@ test("feedback watcher single-flights delivery and retries a failed send", async
 			const marker = JSON.parse(
 				await readFile(join(cwd, ".pi", "workflows", run.runId, "feedback-delivery.json"), "utf8"),
 			);
-			assert.equal(typeof marker.delivered.completed, "string");
+			assert.equal(Object.keys(marker.deliveredEpochs).length, 1);
 		});
+	} finally {
+		controller.abort();
+		setWorkflowFeedbackPollMsForTests(undefined);
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("feedback watcher stops after retry exhaustion and warns once", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "workflow-wait-watcher-exhausted-"));
+	const controller = new AbortController();
+	try {
+		const run = runRecord(cwd, { runId: "workflow_watcher_exhausted" });
+		await writeRunFixture(cwd, run);
+		await writeFeedbackAudience(cwd, run.runId, "session-watcher-exhausted");
+		setWorkflowFeedbackPollMsForTests(5);
+		let sends = 0;
+		const warnings = [];
+		watchWorkflowFeedbackForTests(
+			feedbackContext(cwd, "session-watcher-exhausted", {
+				ui: { notify: (message) => warnings.push(message) },
+			}),
+			{
+				sendMessage() {
+					sends += 1;
+					throw new Error("persistent send failure");
+				},
+			},
+			run.runId,
+			controller.signal,
+		);
+		await eventually(() => {
+			assert.equal(sends, 4);
+			assert.equal(warnings.length, 1);
+		});
+		assert.match(warnings[0], new RegExp(`/workflow wait ${run.runId}`));
+		await sleep(75);
+		assert.equal(sends, 4);
+		assert.equal(warnings.length, 1);
+	} finally {
+		controller.abort();
+		setWorkflowFeedbackPollMsForTests(undefined);
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("feedback watcher classifies invalid delivery markers as permanent", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "workflow-wait-watcher-permanent-"));
+	const controller = new AbortController();
+	try {
+		const run = runRecord(cwd, { runId: "workflow_watcher_permanent" });
+		await writeRunFixture(cwd, run);
+		await writeFeedbackAudience(cwd, run.runId, "session-watcher-permanent");
+		await writeFile(
+			join(cwd, ".pi", "workflows", run.runId, "feedback-delivery.json"),
+			`${JSON.stringify({
+				schema: "workflow-feedback-delivery-unknown",
+				runId: run.runId,
+				sessionId: "session-watcher-permanent",
+			})}\n`,
+		);
+		setWorkflowFeedbackPollMsForTests(5);
+		let sends = 0;
+		const warnings = [];
+		watchWorkflowFeedbackForTests(
+			feedbackContext(cwd, "session-watcher-permanent", {
+				ui: { notify: (message) => warnings.push(message) },
+			}),
+			{ sendMessage: () => (sends += 1) },
+			run.runId,
+			controller.signal,
+		);
+		await eventually(() => assert.equal(warnings.length, 1));
+		assert.equal(sends, 0);
+		assert.match(warnings[0], /unsupported delivery marker/);
+		await sleep(50);
+		assert.equal(warnings.length, 1);
 	} finally {
 		controller.abort();
 		setWorkflowFeedbackPollMsForTests(undefined);
@@ -548,7 +817,7 @@ test("workflow wait returns a terminal result without model polling", async () =
 				"utf8",
 			),
 		);
-		assert.equal(typeof delivery.delivered.completed, "string");
+		assert.equal(Object.keys(delivery.deliveredEpochs).length, 1);
 		await assert.rejects(
 			readFile(
 				join(
@@ -776,9 +1045,18 @@ test("cancelling workflow wait does not mutate the workflow", async () => {
 	}
 });
 
-test("awaitTerminal binds feedback audience for an immediately terminal support run", async () => {
+test("awaitTerminal retries feedback binding for an immediately terminal support run", async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "workflow-wait-immediate-terminal-"));
 	try {
+		let bindAttempts = 0;
+		setWorkflowFeedbackBindWaitMsForTests(200);
+		setRunLeaseTestHooksForTests({
+			onBeforeHeartbeat({ name, initial }) {
+				if (name !== "feedback-audience" || !initial) return;
+				bindAttempts += 1;
+				if (bindAttempts === 1) throw new Error("transient audience bind failure");
+			},
+		});
 		const workflowDir = join(cwd, "workflows", "immediate");
 		await mkdir(join(workflowDir, "helpers"), { recursive: true });
 		await writeFile(
@@ -823,7 +1101,72 @@ test("awaitTerminal binds feedback audience for an immediately terminal support 
 			),
 		);
 		assert.equal(audience.sessionId, "session-immediate");
+		assert.ok(bindAttempts >= 2);
 	} finally {
+		setRunLeaseTestHooksForTests(undefined);
+		setWorkflowFeedbackBindWaitMsForTests(undefined);
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("awaitTerminal bind failure reports run id and deterministic wait recovery", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "workflow-wait-bind-failure-"));
+	try {
+		const workflowDir = join(cwd, "workflows", "bind-failure");
+		await mkdir(join(workflowDir, "helpers"), { recursive: true });
+		await writeFile(
+			join(workflowDir, "helpers", "done.mjs"),
+			"export default async function done() { return { executiveMarkdown: '# Done' }; }\n",
+		);
+		await writeFile(
+			join(workflowDir, "spec.json"),
+			JSON.stringify(
+				artifactGraphWorkflowSpec({
+					name: "bind-failure",
+					artifactGraph: {
+						stages: [
+							{ id: "done", support: { uses: "./helpers/done.mjs" } },
+						],
+					},
+				}),
+			),
+		);
+		setWorkflowFeedbackBindWaitMsForTests(25);
+		setRunLeaseTestHooksForTests({
+			onBeforeHeartbeat({ name, initial }) {
+				if (name === "feedback-audience" && initial)
+					throw new Error("persistent audience bind failure");
+			},
+		});
+		const tools = [];
+		registerWorkflowNaturalLanguageTools(fakePi(tools), {
+			PI_WORKFLOW_ROLE: "supervisor",
+		});
+		const runTool = tools.find((tool) => tool.name === WORKFLOW_RUN_TOOL);
+		let bindError;
+		try {
+			await runTool.execute(
+				"call-bind-failure",
+				{
+					workflow: join(workflowDir, "spec.json"),
+					task: "Complete before binding",
+					awaitTerminal: true,
+					timeoutMs: 60_000,
+				},
+				new AbortController().signal,
+				undefined,
+				feedbackContext(cwd, "session-bind-failure", { hasUI: false }),
+			);
+		} catch (error) {
+			bindError = error;
+		}
+		assert.ok(bindError instanceof Error);
+		const runId = bindError.message.match(/workflow (workflow_[^ ]+) started/)?.[1];
+		assert.ok(runId, `missing run id in: ${bindError.message}`);
+		assert.match(bindError.message, new RegExp(`/workflow wait ${runId}$`));
+	} finally {
+		setRunLeaseTestHooksForTests(undefined);
+		setWorkflowFeedbackBindWaitMsForTests(undefined);
 		await rm(cwd, { recursive: true, force: true });
 	}
 });

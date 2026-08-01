@@ -4,6 +4,7 @@ import type {
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { closeSync, openSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
@@ -49,6 +50,7 @@ import {
 	readFreshIndex,
 	readJson,
 	readRunRecord,
+	type RunFileLease,
 	workflowRunDir,
 	writeJsonAtomic,
 } from "./store.js";
@@ -90,8 +92,14 @@ const RUN_FEEDBACK_POLL_MS = 2_000;
 const DYNAMIC_INITIAL_PLAN_POLL_MS = 250;
 const DYNAMIC_INITIAL_PLAN_SPEC_ID = "dynamic.decide-r0";
 const WORKFLOW_FEEDBACK_AUDIENCE_SCHEMA = "workflow-feedback-audience-v1";
-const WORKFLOW_FEEDBACK_DELIVERY_SCHEMA = "workflow-feedback-delivery-v1";
+const LEGACY_WORKFLOW_FEEDBACK_DELIVERY_SCHEMA =
+	"workflow-feedback-delivery-v1";
+const WORKFLOW_FEEDBACK_DELIVERY_SCHEMA = "workflow-feedback-delivery-v2";
+const WORKFLOW_FEEDBACK_MAX_DELIVERY_ATTEMPTS = 4;
+const WORKFLOW_FEEDBACK_BIND_WAIT_MS = 1_000;
+const WORKFLOW_FEEDBACK_BIND_RETRY_MS = 50;
 let workflowFeedbackPollMs = RUN_FEEDBACK_POLL_MS;
+let workflowFeedbackBindWaitMs = WORKFLOW_FEEDBACK_BIND_WAIT_MS;
 const runFeedbackTimers = new Map<string, ReturnType<typeof setInterval>>();
 const activeWorkflowUiTimers = new Map<
 	string,
@@ -488,6 +496,13 @@ export function setWorkflowFeedbackPollMsForTests(value?: number): void {
 		value === undefined ? RUN_FEEDBACK_POLL_MS : Math.max(1, Math.floor(value));
 }
 
+export function setWorkflowFeedbackBindWaitMsForTests(value?: number): void {
+	workflowFeedbackBindWaitMs =
+		value === undefined
+			? WORKFLOW_FEEDBACK_BIND_WAIT_MS
+			: Math.max(0, Math.floor(value));
+}
+
 async function workflowTerminalToolResult(
 	ctx: ExtensionContext,
 	api: ExtensionAPI,
@@ -537,6 +552,7 @@ async function workflowTerminalToolResult(
 		let deliveryAlreadyCompleted = await workflowFeedbackDeliveryRecorded(
 			ctx,
 			run,
+			presentationLease,
 		);
 		let preview =
 			terminal.terminal && !deliveryAlreadyCompleted
@@ -548,11 +564,16 @@ async function workflowTerminalToolResult(
 				: undefined;
 		waitSignal.throwIfAborted();
 		if (!deliveryAlreadyCompleted) {
-			delivery = await claimWorkflowFeedbackDelivery(ctx, run);
+			delivery = await claimWorkflowFeedbackDelivery(
+				ctx,
+				run,
+				presentationLease,
+			);
 			if (!delivery) {
 				deliveryAlreadyCompleted = await workflowFeedbackDeliveryRecorded(
 					ctx,
 					run,
+					presentationLease,
 				);
 				preview = undefined;
 				if (!deliveryAlreadyCompleted)
@@ -670,11 +691,26 @@ function watchWorkflowFeedback(
 	if (runFeedbackTimers.has(key)) return;
 	let timer: ReturnType<typeof setInterval> | undefined;
 	let pollInFlight = false;
+	let deliveryFailures = 0;
+	let nextDeliveryAttemptAt = 0;
+	let warned = false;
 	const clear = () => {
 		const existing = runFeedbackTimers.get(key);
 		if (!timer || existing !== timer) return;
 		clearInterval(timer);
 		runFeedbackTimers.delete(key);
+	};
+	const warnDeliveryStopped = (error: unknown): void => {
+		if (warned) return;
+		warned = true;
+		try {
+			ctx.ui.notify(
+				`Workflow ${runId} completion delivery stopped: ${errorMessage(error)}. Recover with /workflow wait ${runId}`,
+				"error",
+			);
+		} catch {
+			// Warning delivery is best effort and must never restart the watcher.
+		}
 	};
 	const poll = async (): Promise<void> => {
 		if (pollInFlight) return;
@@ -688,9 +724,7 @@ function watchWorkflowFeedback(
 			try {
 				run = await refreshRun(ctx.cwd, runId);
 			} catch {
-				// Keep polling across transient filesystem/lease/read failures. A
-				// later successful terminal read can still deliver in-session feedback;
-				// startup catch-up remains the backstop if this process exits.
+				// Run reads remain retryable; startup catch-up is the process-exit backstop.
 				return;
 			}
 			if (signal.aborted) {
@@ -702,12 +736,28 @@ function watchWorkflowFeedback(
 				clear();
 				return;
 			}
-			if (run.status === "running") return;
+			if (run.status === "running" || Date.now() < nextDeliveryAttemptAt)
+				return;
 
-			const outcome = await deliverWorkflowFeedback(ctx, api, run, { signal });
-			if (outcome.status !== "busy") clear();
-		} catch {
-			// Delivery failures are retryable while this session remains active.
+			try {
+				const outcome = await deliverWorkflowFeedback(ctx, api, run, {
+					signal,
+				});
+				if (outcome.status !== "busy") clear();
+			} catch (error) {
+				deliveryFailures += 1;
+				if (
+					isPermanentWorkflowFeedbackError(error) ||
+					deliveryFailures >= WORKFLOW_FEEDBACK_MAX_DELIVERY_ATTEMPTS
+				) {
+					warnDeliveryStopped(error);
+					clear();
+					return;
+				}
+				nextDeliveryAttemptAt =
+					Date.now() +
+					workflowFeedbackPollMs * 2 ** Math.max(0, deliveryFailures - 1);
+			}
 		} finally {
 			pollInFlight = false;
 		}
@@ -840,7 +890,7 @@ async function readWorkflowFeedbackAudience(
 ): Promise<WorkflowFeedbackAudience | undefined> {
 	const audience = await readJson<Record<string, unknown>>(
 		workflowFeedbackAudiencePath(cwd, runId),
-	).catch(() => undefined);
+	);
 	if (
 		audience?.schema !== WORKFLOW_FEEDBACK_AUDIENCE_SCHEMA ||
 		audience.runId !== runId ||
@@ -854,32 +904,80 @@ async function readWorkflowFeedbackAudience(
 async function bindWorkflowFeedbackAudience(
 	ctx: ExtensionContext,
 	runId: string,
+	waitMs = 0,
+	signal?: AbortSignal,
 ): Promise<boolean> {
 	const sessionId = workflowFeedbackSessionId(ctx);
 	if (!sessionId) return false;
-	const lease = await acquireRunFileLease(ctx.cwd, runId, "feedback-audience");
-	if (!lease) return false;
-	try {
-		const existing = await readWorkflowFeedbackAudience(ctx.cwd, runId);
-		if (existing) return existing.sessionId === sessionId;
-		const rawExisting = await readJson(
-			workflowFeedbackAudiencePath(ctx.cwd, runId),
-		).catch(() => undefined);
-		if (rawExisting !== undefined) return false;
-		await lease.assertOwner();
-		await writeJsonAtomic(workflowFeedbackAudiencePath(ctx.cwd, runId), {
-			schema: WORKFLOW_FEEDBACK_AUDIENCE_SCHEMA,
-			runId,
-			sessionId,
-			boundAt: new Date().toISOString(),
-		});
-		await lease.assertOwner();
-		return true;
-	} catch {
-		return false;
-	} finally {
-		await lease.release();
+	const deadline = Date.now() + Math.max(0, waitMs);
+	while (true) {
+		let lease: RunFileLease | undefined;
+		try {
+			lease = await acquireRunFileLease(
+				ctx.cwd,
+				runId,
+				"feedback-audience",
+				Math.max(0, deadline - Date.now()),
+				signal,
+			);
+			if (!lease) return false;
+			const existing = await readWorkflowFeedbackAudience(ctx.cwd, runId);
+			if (existing) {
+				const matches = existing.sessionId === sessionId;
+				await lease.release();
+				return matches;
+			}
+			const rawExisting = await readJson(
+				workflowFeedbackAudiencePath(ctx.cwd, runId),
+			);
+			if (rawExisting !== undefined) {
+				await lease.release();
+				return false;
+			}
+			await lease.assertOwner();
+			await writeJsonAtomic(
+				workflowFeedbackAudiencePath(ctx.cwd, runId),
+				{
+					schema: WORKFLOW_FEEDBACK_AUDIENCE_SCHEMA,
+					runId,
+					sessionId,
+					boundAt: new Date().toISOString(),
+				},
+				lease.signal,
+				lease.assertOwner,
+			);
+			await lease.assertOwner();
+			await lease.release();
+			return true;
+		} catch {
+			await lease?.release().catch(() => undefined);
+			signal?.throwIfAborted();
+			if (Date.now() >= deadline) return false;
+			await waitForWorkflowFeedbackRetry(
+				Math.min(WORKFLOW_FEEDBACK_BIND_RETRY_MS, deadline - Date.now()),
+				signal,
+			);
+		}
 	}
+}
+
+function waitForWorkflowFeedbackRetry(
+	ms: number,
+	signal?: AbortSignal,
+): Promise<void> {
+	if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));
+	signal.throwIfAborted();
+	return new Promise((resolve, reject) => {
+		const timer = setTimeout(() => {
+			signal.removeEventListener("abort", onAbort);
+			resolve();
+		}, ms);
+		const onAbort = () => {
+			clearTimeout(timer);
+			reject(signal.reason);
+		};
+		signal.addEventListener("abort", onAbort, { once: true });
+	});
 }
 
 async function workflowFeedbackBelongsToSession(
@@ -916,12 +1014,39 @@ async function startWorkflowParentTracking(
 	ctx: ExtensionContext,
 	runId: string,
 	signal: AbortSignal,
+	bindWaitMs = 0,
 ): Promise<boolean> {
 	void refreshActiveWorkflowUi(ctx, signal).catch(() => undefined);
-	if (!(await bindWorkflowFeedbackAudience(ctx, runId)) || signal.aborted)
+	if (
+		!(await bindWorkflowFeedbackAudience(ctx, runId, bindWaitMs, signal)) ||
+		signal.aborted
+	)
 		return false;
 	beginParentUsageTracking(ctx.cwd, runId);
 	return true;
+}
+
+async function requireAwaitTerminalParentTracking(
+	ctx: ExtensionContext,
+	runId: string,
+	signal: AbortSignal,
+): Promise<void> {
+	let tracked = false;
+	try {
+		tracked = await startWorkflowParentTracking(
+			ctx,
+			runId,
+			signal,
+			workflowFeedbackBindWaitMs,
+		);
+	} catch {
+		signal.throwIfAborted();
+	}
+	if (tracked) return;
+	signal.throwIfAborted();
+	throw new Error(
+		`workflow ${runId} started, but awaitTerminal could not bind completion delivery to this session. Recover deterministically with /workflow wait ${runId}`,
+	);
 }
 
 function dynamicInitialPlanInFlight(
@@ -1055,7 +1180,11 @@ export async function deliverWorkflowFeedback(
 	let delivery: Awaited<ReturnType<typeof claimWorkflowFeedbackDelivery>>;
 	try {
 		if (deliverySignal.aborted) return { status: "cancelled" };
-		delivery = await claimWorkflowFeedbackDelivery(ctx, run);
+		delivery = await claimWorkflowFeedbackDelivery(
+			ctx,
+			run,
+			presentationLease,
+		);
 		if (!delivery) return { status: "already-delivered" };
 		if (deliverySignal.aborted) {
 			await delivery.release();
@@ -1132,11 +1261,43 @@ export async function deliverWorkflowFeedback(
 	}
 }
 
+type WorkflowFeedbackRun = Awaited<ReturnType<typeof refreshRun>>;
+
 interface WorkflowFeedbackDeliveryRecord {
-	schema?: typeof WORKFLOW_FEEDBACK_DELIVERY_SCHEMA;
+	schema?: string;
 	runId?: string;
 	sessionId?: string;
+	/** v1 status-only entries. Retained under legacyDelivered after migration. */
 	delivered?: Record<string, string>;
+	legacyDelivered?: Record<string, string>;
+	deliveredEpochs?: Record<
+		string,
+		{ status: string; deliveredAt: string }
+	>;
+}
+
+class PermanentWorkflowFeedbackError extends Error {
+	readonly permanent = true;
+}
+
+function isPermanentWorkflowFeedbackError(error: unknown): boolean {
+	return (
+		error instanceof PermanentWorkflowFeedbackError ||
+		(error !== null &&
+			typeof error === "object" &&
+			(error as { permanent?: unknown }).permanent === true)
+	);
+}
+
+function errorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+function permanentWorkflowFeedbackError(
+	message: string,
+	cause?: unknown,
+): PermanentWorkflowFeedbackError {
+	return new PermanentWorkflowFeedbackError(message, { cause });
 }
 
 function assertWorkflowFeedbackDeliveryRecordAudience(
@@ -1146,19 +1307,117 @@ function assertWorkflowFeedbackDeliveryRecordAudience(
 ): void {
 	if (!state) return;
 	if (state.runId !== undefined && state.runId !== runId)
-		throw new Error(`workflow ${runId} has a mismatched delivery marker`);
+		throw permanentWorkflowFeedbackError(
+			`workflow ${runId} has a mismatched delivery marker`,
+		);
 	if (state.sessionId !== undefined && state.sessionId !== sessionId)
-		throw new Error(`workflow ${runId} delivery belongs to another session`);
+		throw permanentWorkflowFeedbackError(
+			`workflow ${runId} delivery belongs to another session`,
+		);
 	if (
 		state.schema !== undefined &&
+		state.schema !== LEGACY_WORKFLOW_FEEDBACK_DELIVERY_SCHEMA &&
 		state.schema !== WORKFLOW_FEEDBACK_DELIVERY_SCHEMA
 	)
-		throw new Error(`workflow ${runId} has an unsupported delivery marker`);
+		throw permanentWorkflowFeedbackError(
+			`workflow ${runId} has an unsupported delivery marker`,
+		);
+}
+
+function workflowFeedbackTerminalEpoch(run: WorkflowFeedbackRun): string {
+	const terminalState = {
+		status: run.status,
+		tasks: [...run.tasks]
+			.sort((left, right) => left.taskId.localeCompare(right.taskId))
+			.map((task) => ({
+				taskId: task.taskId,
+				specId: task.specId,
+				status: task.status,
+				statusDetail: task.statusDetail,
+				startedAt: task.startedAt,
+				completedAt: task.completedAt,
+				exitCode: task.exitCode,
+				resumeEvents: task.resumeEvents ?? [],
+			})),
+	};
+	return createHash("sha256")
+		.update(JSON.stringify(terminalState))
+		.digest("hex");
+}
+
+async function readWorkflowFeedbackDeliveryRecord(
+	file: string,
+	runId: string,
+): Promise<WorkflowFeedbackDeliveryRecord | undefined> {
+	try {
+		return await readJson<WorkflowFeedbackDeliveryRecord>(file);
+	} catch (error) {
+		if (error instanceof SyntaxError)
+			throw permanentWorkflowFeedbackError(
+				`workflow ${runId} has an invalid delivery marker`,
+				error,
+			);
+		throw error;
+	}
+}
+
+function currentWorkflowFeedbackDelivery(
+	state: WorkflowFeedbackDeliveryRecord | undefined,
+	epoch: string,
+): boolean {
+	return typeof state?.deliveredEpochs?.[epoch]?.deliveredAt === "string";
+}
+
+function legacyWorkflowFeedbackDeliveryTimestamp(
+	state: WorkflowFeedbackDeliveryRecord | undefined,
+	status: string,
+): string | undefined {
+	if (state?.schema === WORKFLOW_FEEDBACK_DELIVERY_SCHEMA) return undefined;
+	const timestamp = state?.delivered?.[status];
+	return typeof timestamp === "string" ? timestamp : undefined;
+}
+
+async function persistWorkflowFeedbackDelivery(
+	ctx: ExtensionContext,
+	run: WorkflowFeedbackRun,
+	presentationLease: RunFileLease,
+	file: string,
+	sessionId: string,
+	state: WorkflowFeedbackDeliveryRecord | undefined,
+	epoch: string,
+	deliveredAt: string,
+): Promise<void> {
+	await presentationLease.assertOwner();
+	await assertWorkflowFeedbackBelongsToSession(ctx, run.runId);
+	await writeJsonAtomic(
+		file,
+		{
+			schema: WORKFLOW_FEEDBACK_DELIVERY_SCHEMA,
+			runId: run.runId,
+			sessionId,
+			...(state?.delivered || state?.legacyDelivered
+				? {
+						legacyDelivered: {
+							...(state.legacyDelivered ?? {}),
+							...(state.delivered ?? {}),
+						},
+					}
+				: {}),
+			deliveredEpochs: {
+				...(state?.deliveredEpochs ?? {}),
+				[epoch]: { status: run.status, deliveredAt },
+			},
+		},
+		presentationLease.signal,
+		presentationLease.assertOwner,
+	);
+	await presentationLease.assertOwner();
 }
 
 async function workflowFeedbackDeliveryRecorded(
 	ctx: ExtensionContext,
-	run: { runId: string; status: string },
+	run: WorkflowFeedbackRun,
+	presentationLease: RunFileLease,
 ): Promise<boolean> {
 	const sessionId = await assertWorkflowFeedbackBelongsToSession(
 		ctx,
@@ -1171,22 +1430,37 @@ async function workflowFeedbackDeliveryRecorded(
 		run.runId,
 		"feedback-delivery.json",
 	);
-	const state = await readJson<WorkflowFeedbackDeliveryRecord>(file).catch(
-		() => undefined,
-	);
+	const epoch = workflowFeedbackTerminalEpoch(run);
+	const state = await readWorkflowFeedbackDeliveryRecord(file, run.runId);
 	assertWorkflowFeedbackDeliveryRecordAudience(state, run.runId, sessionId);
-	return typeof state?.delivered?.[run.status] === "string";
+	if (currentWorkflowFeedbackDelivery(state, epoch)) return true;
+	const legacyTimestamp = legacyWorkflowFeedbackDeliveryTimestamp(
+		state,
+		run.status,
+	);
+	if (!legacyTimestamp) return false;
+	await persistWorkflowFeedbackDelivery(
+		ctx,
+		run,
+		presentationLease,
+		file,
+		sessionId,
+		state,
+		epoch,
+		legacyTimestamp,
+	);
+	return true;
 }
 
 async function claimWorkflowFeedbackDelivery(
 	ctx: ExtensionContext,
-	run: { runId: string; status: string },
+	run: WorkflowFeedbackRun,
+	presentationLease: RunFileLease,
 ): Promise<
 	{ complete: () => Promise<void>; release: () => Promise<void> } | undefined
 > {
-	// Both callers hold the per-run feedback-presentation RunFileLease. That
-	// nonce-owned, heartbeat-renewed lease is the only delivery lock. Audience
-	// checks are repeated under that lease to close the pre-claim race.
+	// The nonce-owned presentation lease is the only delivery lock. Every marker
+	// migration/commit is fenced by its abort signal and owner assertion.
 	const sessionId = await assertWorkflowFeedbackBelongsToSession(
 		ctx,
 		run.runId,
@@ -1198,28 +1472,48 @@ async function claimWorkflowFeedbackDelivery(
 		run.runId,
 		"feedback-delivery.json",
 	);
-	const key = run.status;
-	const state = await readJson<WorkflowFeedbackDeliveryRecord>(file).catch(
-		() => undefined,
-	);
+	const epoch = workflowFeedbackTerminalEpoch(run);
+	const state = await readWorkflowFeedbackDeliveryRecord(file, run.runId);
 	assertWorkflowFeedbackDeliveryRecordAudience(state, run.runId, sessionId);
-	if (state?.delivered?.[key]) return undefined;
+	if (currentWorkflowFeedbackDelivery(state, epoch)) return undefined;
+	const legacyTimestamp = legacyWorkflowFeedbackDeliveryTimestamp(
+		state,
+		run.status,
+	);
+	if (legacyTimestamp) {
+		await persistWorkflowFeedbackDelivery(
+			ctx,
+			run,
+			presentationLease,
+			file,
+			sessionId,
+			state,
+			epoch,
+			legacyTimestamp,
+		);
+		return undefined;
+	}
 	return {
 		complete: async () => {
+			await presentationLease.assertOwner();
 			await assertWorkflowFeedbackBelongsToSession(ctx, run.runId);
-			const next = await readJson<WorkflowFeedbackDeliveryRecord>(file).catch(
-				() => undefined,
-			);
-			assertWorkflowFeedbackDeliveryRecordAudience(next, run.runId, sessionId);
-			await writeJsonAtomic(file, {
-				schema: WORKFLOW_FEEDBACK_DELIVERY_SCHEMA,
-				runId: run.runId,
+			const next = await readWorkflowFeedbackDeliveryRecord(file, run.runId);
+			assertWorkflowFeedbackDeliveryRecordAudience(
+				next,
+				run.runId,
 				sessionId,
-				delivered: {
-					...(next?.delivered ?? {}),
-					[key]: new Date().toISOString(),
-				},
-			});
+			);
+			if (currentWorkflowFeedbackDelivery(next, epoch)) return;
+			await persistWorkflowFeedbackDelivery(
+				ctx,
+				run,
+				presentationLease,
+				file,
+				sessionId,
+				next,
+				epoch,
+				new Date().toISOString(),
+			);
 		},
 		release: async () => undefined,
 	};
@@ -1633,7 +1927,7 @@ async function startWorkflowRunFromRequest(
 	});
 	const verb = workflowRunStartVerb(run.status);
 	if (request.awaitTerminal && !uiSessionSignal.aborted) {
-		await startWorkflowParentTracking(ctx, run.runId, uiSessionSignal);
+		await requireAwaitTerminalParentTracking(ctx, run.runId, uiSessionSignal);
 	} else if (
 		run.status === "running" &&
 		!request.awaitTerminal &&
@@ -1685,7 +1979,7 @@ async function startDynamicRunFromRequest(
 	}
 	const verb = workflowRunStartVerb(run.status);
 	if (request.awaitTerminal && !uiSessionSignal.aborted) {
-		await startWorkflowParentTracking(ctx, run.runId, uiSessionSignal);
+		await requireAwaitTerminalParentTracking(ctx, run.runId, uiSessionSignal);
 	} else if (
 		run.status === "running" &&
 		!request.awaitTerminal &&

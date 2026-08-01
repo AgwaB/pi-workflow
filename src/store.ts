@@ -52,7 +52,9 @@ const LEASE_ABSOLUTE_STALE_MS = 7 * 24 * 60 * 60 * 1000;
 const INDEX_LOCK_WAIT_MS = 5_000;
 const INDEX_LOCK_RETRY_MS = 50;
 const DEFAULT_INDEX_UPDATE_DEBOUNCE_MS = 500;
+const RUN_FILE_LEASE_RELEASE_RETRY_DELAYS_MS = [0, 10, 25] as const;
 let indexUpdateDebounceMs = DEFAULT_INDEX_UPDATE_DEBOUNCE_MS;
+const abandonedRunFileLeaseOwners = new Set<string>();
 const pendingIndexUpdates = new Map<
 	string,
 	{ cwd: string; runIds: Set<string>; timer: ReturnType<typeof setTimeout> }
@@ -85,6 +87,7 @@ type RunLeaseTestHooks = {
 		name: string;
 		initial: boolean;
 	}) => void | Promise<void>;
+	onBeforeAtomicRename?: (context: { file: string }) => void | Promise<void>;
 	onAfterAtomicRename?: (context: {
 		file: string;
 		abortLease: (error: unknown) => void;
@@ -222,6 +225,7 @@ export async function writeJsonAtomic(
 	file: string,
 	value: unknown,
 	abortSignal?: AbortSignal,
+	commitFence?: () => void | Promise<void>,
 ): Promise<void> {
 	const lease = runLeaseContext.getStore();
 	const activeAbortSignal = abortSignal ?? lease?.abortSignal;
@@ -239,6 +243,11 @@ export async function writeJsonAtomic(
 	await writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 	assertLeaseNotAborted(activeAbortSignal);
 	await assertLeaseContextOwnership(lease);
+	await commitFence?.();
+	await runLeaseTestHooks.onBeforeAtomicRename?.({ file });
+	await assertLeaseContextOwnership(lease);
+	await commitFence?.();
+	assertLeaseNotAborted(activeAbortSignal);
 	await rename(temp, file);
 	if (lease) {
 		await runLeaseTestHooks.onAfterAtomicRename?.({
@@ -374,7 +383,15 @@ export async function acquireRunFileLease(
 		);
 	}
 	if (acquireSignal?.aborted) {
-		await releaseLock(lockFile, ownerId);
+		try {
+			await releaseRunFileLockWithRetries(lockFile, ownerId);
+		} catch (releaseError) {
+			abandonedRunFileLeaseOwners.add(ownerId);
+			throw new AggregateError(
+				[abortSignalError(acquireSignal), releaseError],
+				`Failed to release cancelled run-file lease: ${lockFile}`,
+			);
+		}
 		acquireSignal.throwIfAborted();
 	}
 
@@ -421,21 +438,15 @@ export async function acquireRunFileLease(
 	try {
 		await runHeartbeat();
 	} catch (heartbeatError) {
-		let releaseError: unknown;
-		for (let attempt = 0; attempt < 2; attempt += 1) {
-			try {
-				await releaseLock(lockFile, ownerId);
-				releaseError = undefined;
-				break;
-			} catch (error) {
-				releaseError = error;
-			}
-		}
-		if (releaseError !== undefined)
+		try {
+			await releaseRunFileLockWithRetries(lockFile, ownerId);
+		} catch (releaseError) {
+			abandonedRunFileLeaseOwners.add(ownerId);
 			throw new AggregateError(
 				[heartbeatError, releaseError],
 				`Failed to initialize and release run-file lease: ${lockFile}`,
 			);
+		}
 		throw heartbeatError;
 	}
 	startHeartbeat();
@@ -457,11 +468,13 @@ export async function acquireRunFileLease(
 				await heartbeatInFlight?.catch(() => undefined);
 				heartbeatInFlight = undefined;
 				try {
-					await releaseLock(lockFile, ownerId);
-					released = true;
+					await releaseRunFileLockWithRetries(lockFile, ownerId);
 				} catch (error) {
-					startHeartbeat();
+					abandonedRunFileLeaseOwners.add(ownerId);
+					if (!abortController.signal.aborted) abortController.abort(error);
 					throw error;
+				} finally {
+					released = true;
 				}
 			})();
 			releaseInFlight = attempt;
@@ -665,6 +678,7 @@ async function reclaimStaleLock(lockFile: string): Promise<boolean> {
 	}
 
 	await unlink(reclaimFile).catch(() => undefined);
+	abandonedRunFileLeaseOwners.delete(claimed.ownerId);
 	return true;
 }
 
@@ -691,6 +705,7 @@ async function restoreReclaimFile(
 }
 
 function isReclaimableLockSnapshot(snapshot: LockSnapshot): boolean {
+	if (abandonedRunFileLeaseOwners.has(snapshot.ownerId)) return true;
 	const now = Date.now();
 	const leaseStale = now - snapshot.mtimeMs > LEASE_STALE_MS;
 	const absoluteStale =
@@ -766,6 +781,24 @@ async function acquireLockWithWait(
 			throw new Error(`Timed out waiting for lock: ${lockFile}`);
 		await sleep(INDEX_LOCK_RETRY_MS);
 	}
+}
+
+async function releaseRunFileLockWithRetries(
+	lockFile: string,
+	ownerId: string,
+): Promise<void> {
+	let lastError: unknown;
+	for (const delayMs of RUN_FILE_LEASE_RELEASE_RETRY_DELAYS_MS) {
+		if (delayMs > 0) await sleep(delayMs);
+		try {
+			await releaseLock(lockFile, ownerId);
+			abandonedRunFileLeaseOwners.delete(ownerId);
+			return;
+		} catch (error) {
+			lastError = error;
+		}
+	}
+	throw asLeaseError(lastError);
 }
 
 async function releaseLock(lockFile: string, ownerId: string): Promise<void> {
