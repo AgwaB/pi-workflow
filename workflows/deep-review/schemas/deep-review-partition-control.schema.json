@@ -112,7 +112,36 @@
         },
         "needsHuman": {
           "type": "array",
-          "items": { "type": "object" }
+          "items": {
+            "type": "object",
+            "required": ["findingId", "rootCauseId", "title", "severity"],
+            "properties": {
+              "findingId": { "type": "string", "minLength": 1 },
+              "rootCauseId": { "type": "string", "minLength": 1 },
+              "title": { "type": "string", "minLength": 1 },
+              "severity": { "type": "string", "minLength": 1 },
+              "locations": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["file"],
+                  "properties": {
+                    "file": { "type": "string", "minLength": 1 },
+                    "line": { "type": "number" },
+                    "lineEnd": { "type": "number" },
+                    "symbol": { "type": "string", "minLength": 1 }
+                  }
+                }
+              },
+              "evidenceQuotes": {
+                "type": "array",
+                "items": { "type": "string", "minLength": 1 }
+              },
+              "recommendedAction": { "type": "string" },
+              "note": { "type": "string" },
+              "counterEvidence": { "type": "array" }
+            }
+          }
         }
       }
     },

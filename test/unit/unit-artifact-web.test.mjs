@@ -2785,6 +2785,76 @@ test("artifactGraph runtime support marks helper errors as failed", async () => 
 		assert.equal(support?.status, "failed");
 		assert.equal(support?.statusDetail, "support_failed");
 		assert.match(support?.lastMessage ?? "", /helper boom/);
+
+		for (const declaredStatus of ["failed", "blocked"]) {
+			const semanticDir = join(
+				cwd,
+				"workflows",
+				`semantic-${declaredStatus}`,
+			);
+			mkdirSync(join(semanticDir, "helpers"), { recursive: true });
+			const semanticSpecPath = join(semanticDir, "spec.json");
+			writeFileSync(
+				join(semanticDir, "helpers", "semantic.mjs"),
+				`export default async function helper() { return { schema: "semantic-support-v1", digest: "semantic ${declaredStatus}", status: "${declaredStatus}", gates: { passed: false }, analysis: "preserved analysis", refs: [] }; }\n`,
+			);
+			const semanticSpec = workflowSpec("unit-scout", {
+				artifactGraph: {
+					stages: [
+						{
+							id: "semantic",
+							support: { uses: "./helpers/semantic.mjs" },
+						},
+					],
+				},
+			});
+			writeFileSync(semanticSpecPath, JSON.stringify(semanticSpec));
+			const semanticCompiled = await compileWorkflow(semanticSpec, {
+				cwd,
+				task: `Check semantic ${declaredStatus}`,
+				specPath: semanticSpecPath,
+			});
+			const { run: semanticRun } = await createWorkflowRunRecord(
+				cwd,
+				semanticCompiled,
+				semanticSpecPath,
+			);
+			await writeStaticRunArtifacts(
+				cwd,
+				semanticRun,
+				semanticCompiled,
+				semanticSpec,
+			);
+			await writeRunRecord(cwd, semanticRun);
+			await scheduleRun(cwd, semanticRun.runId);
+			const semanticUpdated = await readRunRecord(cwd, semanticRun.runId);
+			const semanticTask = taskBySpec(semanticUpdated, "semantic.main");
+			assert.equal(semanticTask.status, declaredStatus);
+			assert.equal(
+				semanticTask.statusDetail,
+				`support_declared_${declaredStatus}`,
+			);
+			const semanticResult = JSON.parse(
+				readFileSync(join(cwd, semanticTask.files.result), "utf8"),
+			);
+			assert.equal(semanticResult.status, "failed");
+			assert.equal(
+				JSON.parse(
+					readFileSync(
+						join(dirname(join(cwd, semanticTask.files.result)), "control.json"),
+						"utf8",
+					),
+				).status,
+				declaredStatus,
+			);
+			assert.equal(
+				readFileSync(
+					join(dirname(join(cwd, semanticTask.files.result)), "analysis.md"),
+					"utf8",
+				).trim(),
+				"preserved analysis",
+			);
+		}
 	} finally {
 		rmSync(cwd, {
 			recursive: true,

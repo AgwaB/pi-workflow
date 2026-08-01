@@ -315,16 +315,37 @@ function renderFindings(findings) {
 function renderNeedsHuman(partition) {
 	const ledger = partition?.partitions ?? partition?.reportContext;
 	const items = asArray(ledger?.needsHuman);
-	if (items.length === 0) return [];
+	if (items.length === 0) return { lines: [], representedIds: [] };
 	const out = ["## Needs human review", ""];
-	for (const raw of items) {
-		const finding = normalizeFinding(raw, 0, "NEEDS_HUMAN");
-		out.push(
-			`- **${finding.severity}** ${finding.findingId} — ${finding.title}`,
-		);
+	const representedIds = [];
+	for (const [index, raw] of items.entries()) {
+		const finding = normalizeFinding(raw, index, "NEEDS_HUMAN");
+		representedIds.push(finding.findingId);
+		out.push(...renderFindingCard(finding));
 	}
-	out.push("");
-	return out;
+	return { lines: out, representedIds };
+}
+
+function needsHumanCounts(partition) {
+	const partitionsPresent = Boolean(
+		partition?.partitions &&
+			typeof partition.partitions === "object" &&
+			Array.isArray(partition.partitions.needsHuman),
+	);
+	const ledger = partition?.partitions ?? partition?.reportContext;
+	const actual = asArray(ledger?.needsHuman).length;
+	const summary = partition?.partitionSummary;
+	const summaryCountPresent = Boolean(
+		summary &&
+			typeof summary === "object" &&
+			Object.hasOwn(summary, "needsHuman") &&
+			Number.isFinite(Number(summary.needsHuman)),
+	);
+	return {
+		actual,
+		expected: summaryCountPresent ? Number(summary.needsHuman) : actual,
+		metadataMissing: !partitionsPresent || !summaryCountPresent,
+	};
 }
 
 function renderSupportNotes(partition) {
@@ -411,10 +432,18 @@ function hasReportSynthesis(report) {
 
 function hasPartialFailures(partition) {
 	const summaryCount = Number(partition?.partitionSummary?.partialFailures);
+	const sourceStatus = partition?.sourceStatusSummary;
+	const nonCompleted = Number(sourceStatus?.nonCompleted);
+	const total = Number(sourceStatus?.total);
+	const completed = Number(sourceStatus?.completed);
 	return Boolean(
-		asArray(partition?.sourceStatusSummary?.partialFailures).length > 0 ||
+		asArray(sourceStatus?.partialFailures).length > 0 ||
 			asArray(partition?.reportContext?.partialFailures).length > 0 ||
-			(Number.isFinite(summaryCount) && summaryCount > 0),
+			(Number.isFinite(summaryCount) && summaryCount > 0) ||
+			(Number.isFinite(nonCompleted) && nonCompleted > 0) ||
+			(Number.isFinite(total) &&
+				Number.isFinite(completed) &&
+				completed < total),
 	);
 }
 
@@ -453,6 +482,8 @@ function renderMarkdown({
 	effectiveVerdict,
 	partition,
 	findingCountMismatch,
+	needsHumanCountMismatch,
+	needsHumanMetadataMissing,
 	supportNoteCountMismatch,
 	supportNoteMetadataMissing,
 	supportNoteEvidenceIncomplete,
@@ -465,6 +496,7 @@ function renderMarkdown({
 	);
 	const rendered = renderFindings(sortedFindings);
 	const representedIds = rendered.representedIds ?? [];
+	const renderedNeedsHuman = renderNeedsHuman(partition);
 	const lines = [
 		"# Deep review report",
 		"",
@@ -481,6 +513,22 @@ function renderMarkdown({
 			"## Renderer warning",
 			"",
 			`The narrative verdict \`${cleanText(report.verdict)}\` contradicted the deterministic ledger and was rendered conservatively as \`${effectiveVerdict}\`.`,
+			"",
+		);
+	}
+	if (needsHumanMetadataMissing) {
+		lines.push(
+			"## Renderer warning",
+			"",
+			"The partition ledger omitted required needs-human metadata. Inspect `partition-verdicts.control.json` before acting on this report.",
+			"",
+		);
+	}
+	if (needsHumanCountMismatch) {
+		lines.push(
+			"## Renderer warning",
+			"",
+			"The deterministic renderer found a mismatch between the declared and available needs-human counts. Inspect `partition-verdicts.control.json` before acting on this report.",
 			"",
 		);
 	}
@@ -518,7 +566,7 @@ function renderMarkdown({
 	}
 	lines.push(...(rendered.lines ?? rendered));
 	lines.push(...renderSupportNotes(partition));
-	lines.push(...renderNeedsHuman(partition));
+	lines.push(...renderedNeedsHuman.lines);
 	lines.push(...renderRisks({}, partition));
 	const nextAction = deterministicNextAction(effectiveVerdict);
 	if (nextAction) {
@@ -533,6 +581,7 @@ function renderMarkdown({
 	return {
 		markdown: lines.join("\n").trim(),
 		representedIds,
+		representedNeedsHumanIds: renderedNeedsHuman.representedIds,
 	};
 }
 
@@ -550,10 +599,14 @@ export default async function renderReviewReport({ sources, context = {} }) {
 			markdown: "",
 			findingSummary: { total: 0, bySeverity: {} },
 			renderedFindingIds: [],
+			renderedNeedsHumanIds: [],
 			sourceArtifacts: [],
 			gates: {
 				renderedAllFindings: false,
+				renderedAllNeedsHuman: false,
 				findingCountMismatch: true,
+				needsHumanCountMismatch: true,
+				needsHumanMetadataMissing: true,
 				reportSynthesisAvailable: false,
 				reportVerdictConsistent: false,
 				supportNoteCountMismatch: true,
@@ -567,6 +620,9 @@ export default async function renderReviewReport({ sources, context = {} }) {
 	const { all } = partitionFindings(partition);
 	const expected = expectedFindingCount(partition, all);
 	const findingCountMismatch = expected !== all.length;
+	const needsHuman = needsHumanCounts(partition);
+	const needsHumanCountMismatch = needsHuman.expected !== needsHuman.actual;
+	const needsHumanMetadataMissing = needsHuman.metadataMissing;
 	const supportNotes = supportNoteCounts(partition);
 	const supportNoteCountMismatch = supportNotes.expected !== supportNotes.actual;
 	const supportNoteMetadataMissing = supportNotes.metadataMissing;
@@ -581,18 +637,25 @@ export default async function renderReviewReport({ sources, context = {} }) {
 		effectiveVerdict,
 		partition,
 		findingCountMismatch,
+		needsHumanCountMismatch,
+		needsHumanMetadataMissing,
 		supportNoteCountMismatch,
 		supportNoteMetadataMissing,
 		supportNoteEvidenceIncomplete,
 	});
 	const bySeverity = severityCounts(all);
 	const renderedAllFindings = rendered.representedIds.length === all.length;
+	const renderedAllNeedsHuman =
+		rendered.representedNeedsHumanIds.length === needsHuman.actual;
 	const passed =
 		!findingCountMismatch &&
+		!needsHumanCountMismatch &&
+		!needsHumanMetadataMissing &&
 		!supportNoteCountMismatch &&
 		!supportNoteMetadataMissing &&
 		!supportNoteEvidenceIncomplete &&
 		renderedAllFindings &&
+		renderedAllNeedsHuman &&
 		reportAvailable &&
 		reportVerdictConsistent;
 
@@ -629,7 +692,9 @@ export default async function renderReviewReport({ sources, context = {} }) {
 		markdown: rendered.markdown,
 		findingSummary: { total: all.length, bySeverity },
 		renderedFindingIds: rendered.representedIds,
+		renderedNeedsHumanIds: rendered.representedNeedsHumanIds,
 		expectedFindingCount: expected,
+		needsHumanSummary: needsHuman,
 		supportNoteSummary: supportNotes,
 		sourceArtifacts: [
 			"partition-verdicts.control.json",
@@ -637,7 +702,10 @@ export default async function renderReviewReport({ sources, context = {} }) {
 		],
 		gates: {
 			renderedAllFindings,
+			renderedAllNeedsHuman,
 			findingCountMismatch,
+			needsHumanCountMismatch,
+			needsHumanMetadataMissing,
 			reportSynthesisAvailable: reportAvailable,
 			reportVerdictConsistent,
 			supportNoteCountMismatch,

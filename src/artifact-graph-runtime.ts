@@ -125,8 +125,26 @@ export async function executeSupportTask(
 
 		if (compiledTask.artifactGraph?.enabled) {
 			await throwIfWorkflowStopRequested(cwd, run.runId);
-			await writeArtifactGraphSupportResult(cwd, task, structuredOutput);
+			const declaredStatus = supportControlTerminalStatus(structuredOutput);
+			await writeArtifactGraphSupportResult(cwd, task, structuredOutput, {
+				lifecycleStatus: declaredStatus ? "failed" : "completed",
+				exitCode: declaredStatus ? 1 : 0,
+			});
+			if (declaredStatus) {
+				setTaskTerminal(
+					task,
+					declaredStatus,
+					`support_declared_${declaredStatus}`,
+					{
+						exitCode: 1,
+						lastMessage: `support declared ${declaredStatus}`,
+					},
+				);
+				await writeRunRecord(cwd, run);
+				return false;
+			}
 			setTaskTerminal(task, "completed", "support_completed", {
+				exitCode: 0,
 				lastMessage: "support completed",
 			});
 			await writeRunRecord(cwd, run);
@@ -819,10 +837,31 @@ export async function writeArtifactGraphDynamicResult(
 	}
 }
 
+function supportControlTerminalStatus(
+	structuredOutput: unknown,
+): "failed" | "blocked" | undefined {
+	const control = normalizeSupportControl(structuredOutput);
+	if (control.status === "failed" || control.status === "blocked")
+		return control.status;
+	const gates = control.gates;
+	if (
+		gates &&
+		typeof gates === "object" &&
+		!Array.isArray(gates) &&
+		(gates as Record<string, unknown>).passed === false
+	)
+		return "failed";
+	return undefined;
+}
+
 export async function writeArtifactGraphSupportResult(
 	cwd: string,
 	task: WorkflowTaskRunRecord,
 	structuredOutput: unknown,
+	options: {
+		lifecycleStatus?: "completed" | "failed";
+		exitCode?: number;
+	} = {},
 ): Promise<void> {
 	const control = normalizeSupportControl(structuredOutput);
 	const analysis = supportOutputAnalysis(structuredOutput, control);
@@ -847,6 +886,8 @@ export async function writeArtifactGraphSupportResult(
 		taskDir: dirname(fromProjectPath(cwd, task.files.result)),
 		rawOutput,
 		completedAt: new Date().toISOString(),
+		lifecycleStatus: options.lifecycleStatus,
+		exitCode: options.exitCode,
 		analysisRequired: task.artifactGraph?.output.analysisRequired ?? true,
 		refsRequired: task.artifactGraph?.output.refsRequired ?? true,
 		refsMinItems: task.artifactGraph?.output.refsMinItems,

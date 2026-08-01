@@ -228,7 +228,7 @@
 		{
 			"name": "artifactGraph runtime support marks helper errors as failed",
 			"occurrence": 1,
-			"sha256": "09eac5605ac396c37a7a72110eb6e98d27f535fa8f73d6667b79eeadf2c77f19",
+			"sha256": "26464ff2485648c763869d16f0d80c96fec519b4914ad80b0737d4830ff47c80",
 			"domain": "artifact-web"
 		},
 		{
@@ -1608,13 +1608,13 @@
 		{
 			"name": "deep-review render-review-report emits finding cards from partition ledger",
 			"occurrence": 1,
-			"sha256": "c1e0493d9a86342d8eab419ef41787cbf40955fbf99144629408356db30e4cdf",
+			"sha256": "08735fdb274873f7079b51ab0a9cd0e698212a5185de37982fc4bea141c960cc",
 			"domain": "core-runtime"
 		},
 		{
 			"name": "deep-review render-review-report surfaces count mismatches and missing partition",
 			"occurrence": 1,
-			"sha256": "0333210b92f85c2ac3e7d758ff2750a7a7fc750fd23410c9317d3b3085cb1736",
+			"sha256": "214f5ab2d4816f9a45e8079a2e15d7064081a0bfb1b4ac7f222084828c2c6778",
 			"domain": "core-runtime"
 		},
 		{

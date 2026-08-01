@@ -7096,8 +7096,13 @@ test("deep-review render-review-report emits finding cards from partition ledger
 						needsHuman: [
 							{
 								findingId: "finding-003",
+								rootCauseId: "root-003",
 								title: "Ambiguous domain behavior",
 								severity: "low",
+								locations: [{ file: "src/domain.ts", line: 42 }],
+								evidenceQuotes: ["  ambiguous();\r\n\r\nkeep exact  "],
+								recommendedAction: "Confirm the intended domain rule.",
+								note: "The available evidence does not resolve intent.",
 							},
 						],
 					},
@@ -7143,6 +7148,7 @@ test("deep-review render-review-report emits finding cards from partition ledger
 		assert.equal(result.gates.renderedAllFindings, true);
 		assert.equal(result.gates.reportSynthesisAvailable, true);
 		assert.deepEqual(result.renderedFindingIds, ["finding-001", "finding-002"]);
+		assert.deepEqual(result.renderedNeedsHumanIds, ["finding-003"]);
 		assert.equal(result.findingSummary.bySeverity.critical, 1);
 		assert.match(result.markdown, /# Deep review report/);
 		assert.match(result.markdown, /Verdict: \*\*NEEDS_WORK\*\*/);
@@ -7173,6 +7179,16 @@ test("deep-review render-review-report emits finding cards from partition ledger
 		assert.doesNotMatch(result.markdown, /overflow index/);
 		assert.match(result.markdown, /Verifier verdict: \*\*WEAKEN\*\*/);
 		assert.match(result.markdown, /Needs human review/);
+		assert.match(result.markdown, /finding-003 — Ambiguous domain behavior/);
+		assert.match(result.markdown, /src\/domain\.ts/);
+		assert.ok(
+			result.markdown.includes("  ambiguous();\r\n\r\nkeep exact  "),
+		);
+		assert.match(result.markdown, /Confirm the intended domain rule/);
+		assert.match(result.markdown, /available evidence does not resolve intent/);
+		assert.equal(result.gates.renderedAllNeedsHuman, true);
+		assert.equal(result.gates.needsHumanCountMismatch, false);
+		assert.equal(result.gates.needsHumanMetadataMissing, false);
 		assert.equal(
 			readFileSync(
 				join(
@@ -7294,6 +7310,7 @@ test("deep-review render-review-report surfaces count mismatches and missing par
 					keep: 1,
 					weaken: 0,
 					partialFailures: 0,
+					needsHuman: 0,
 					supportNotes: 0,
 				},
 				partitions: {
@@ -7343,6 +7360,7 @@ test("deep-review render-review-report surfaces count mismatches and missing par
 					keep: 0,
 					weaken: 0,
 					partialFailures: 1,
+					needsHuman: 0,
 					supportNotes: 0,
 				},
 				partitions: { keep: [], weaken: [], needsHuman: [] },
@@ -7364,10 +7382,48 @@ test("deep-review render-review-report surfaces count mismatches and missing par
 	assert.equal(partialVerdict.status, "passed");
 	assert.equal(partialVerdict.gates.reportVerdictConsistent, true);
 
+	const nonCompletedSource = await helper({
+		sources: {
+			"partition-verdicts.main": {
+				partitionSummary: {
+					keep: 0,
+					weaken: 0,
+					partialFailures: 0,
+					needsHuman: 0,
+					supportNotes: 0,
+				},
+				partitions: { keep: [], weaken: [], needsHuman: [] },
+				supportNotes: [],
+				sourceStatusSummary: {
+					total: 1,
+					completed: 0,
+					nonCompleted: 1,
+					partialFailures: [],
+				},
+			},
+			"report.main": {
+				summary: "Coverage is incomplete.",
+				verdict: "PARTIAL_REVIEW",
+				risks: [],
+				recommendedNextAction: "Rerun.",
+			},
+		},
+		options: {},
+		context: {},
+	});
+	assert.equal(nonCompletedSource.status, "passed");
+	assert.match(nonCompletedSource.markdown, /Verdict: \*\*PARTIAL_REVIEW\*\*/);
+	assert.match(nonCompletedSource.markdown, /Review coverage is partial/);
+
 	const missingSupportMetadata = await helper({
 		sources: {
 			"partition-verdicts.main": {
-				partitionSummary: { keep: 0, weaken: 0, partialFailures: 0 },
+				partitionSummary: {
+					keep: 0,
+					weaken: 0,
+					partialFailures: 0,
+					needsHuman: 0,
+				},
 				partitions: { keep: [], weaken: [], needsHuman: [] },
 			},
 			"report.main": {
@@ -7391,6 +7447,7 @@ test("deep-review render-review-report surfaces count mismatches and missing par
 					keep: 0,
 					weaken: 0,
 					partialFailures: 0,
+					needsHuman: 0,
 					supportNotes: 1,
 				},
 				partitions: { keep: [], weaken: [], needsHuman: [] },
@@ -7417,6 +7474,7 @@ test("deep-review render-review-report surfaces count mismatches and missing par
 					keep: 0,
 					weaken: 0,
 					partialFailures: 0,
+					needsHuman: 0,
 					supportNotes: 1,
 				},
 				partitions: { keep: [], weaken: [], needsHuman: [] },
