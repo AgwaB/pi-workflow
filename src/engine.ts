@@ -808,7 +808,7 @@ export async function stopRun(
 			`Workflow stop requested for ${current.runId}, but active work or descendant workflow stop could not be confirmed within ${STOP_RUN_LEASE_WAIT_MS}ms; stop intent remains durable and cancellation is still pending`,
 		);
 	}
-	return { run: latest, interruptedTaskIds: [] };
+	return { run: latest, interruptedTaskIds: workflowStoppedTaskIds(latest) };
 }
 
 type DescendantStopResult = {
@@ -996,7 +996,9 @@ async function finalizeStopRunWithLease(
 		const run = await readRunRecord(cwd, runId);
 		if (isTerminalWorkflowStatus(run.status)) {
 			await clearTerminalWorkflowStopIntentIfPresent(cwd, run);
-			return { run, interruptedTaskIds: [] };
+			// Another scheduler may have consumed the durable stop intent before
+			// this caller acquired the lease. Preserve the same summary either way.
+			return { run, interruptedTaskIds: workflowStoppedTaskIds(run) };
 		}
 		for (const task of run.tasks) {
 			if (task.status !== "running") continue;
@@ -1049,6 +1051,16 @@ async function finalizeStopIntentIfRequested(
 	await clearWorkflowStopIntent(cwd, run.runId);
 	unwatchRun(cwd, run.runId);
 	return true;
+}
+
+function workflowStoppedTaskIds(run: WorkflowRunRecord): string[] {
+	return run.tasks
+		.filter(
+			(task) =>
+				task.status === "interrupted" &&
+				task.statusDetail === "workflow_stopped",
+		)
+		.map((task) => task.taskId);
 }
 
 function markRunStopped(run: WorkflowRunRecord): string[] {

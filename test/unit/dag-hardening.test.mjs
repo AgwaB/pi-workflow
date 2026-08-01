@@ -346,6 +346,9 @@ test("stopRun writes durable intent and cooperatively cancels a blocked async su
 			taskBySpec(finalRun, "block.main").statusDetail,
 			"workflow_stopped",
 		);
+		assert.deepEqual(stopped.interruptedTaskIds, [
+			taskBySpec(finalRun, "block.main").taskId,
+		]);
 		assert.equal(stopped.run.runId, run.runId);
 	} finally {
 		cleanup(cwd);
