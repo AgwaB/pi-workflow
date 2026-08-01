@@ -37,11 +37,12 @@
     "expectedFindingCount": { "type": "number" },
     "needsHumanSummary": {
       "type": "object",
-      "required": ["actual", "expected", "metadataMissing"],
+      "required": ["actual", "expected", "metadataMissing", "incompleteEvidence"],
       "properties": {
         "actual": { "type": "number" },
         "expected": { "type": "number" },
-        "metadataMissing": { "type": "boolean" }
+        "metadataMissing": { "type": "boolean" },
+        "incompleteEvidence": { "type": "number" }
       },
       "additionalProperties": false
     },
@@ -68,6 +69,7 @@
         "findingCountMismatch",
         "needsHumanCountMismatch",
         "needsHumanMetadataMissing",
+        "needsHumanEvidenceIncomplete",
         "reportSynthesisAvailable",
         "reportVerdictConsistent",
         "supportNoteCountMismatch",
@@ -81,6 +83,7 @@
         "findingCountMismatch": { "type": "boolean" },
         "needsHumanCountMismatch": { "type": "boolean" },
         "needsHumanMetadataMissing": { "type": "boolean" },
+        "needsHumanEvidenceIncomplete": { "type": "boolean" },
         "reportSynthesisAvailable": { "type": "boolean" },
         "reportVerdictConsistent": { "type": "boolean" },
         "supportNoteCountMismatch": { "type": "boolean" },

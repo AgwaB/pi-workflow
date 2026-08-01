@@ -7189,6 +7189,7 @@ test("deep-review render-review-report emits finding cards from partition ledger
 		assert.equal(result.gates.renderedAllNeedsHuman, true);
 		assert.equal(result.gates.needsHumanCountMismatch, false);
 		assert.equal(result.gates.needsHumanMetadataMissing, false);
+		assert.equal(result.gates.needsHumanEvidenceIncomplete, false);
 		assert.equal(
 			readFileSync(
 				join(
@@ -7414,6 +7415,49 @@ test("deep-review render-review-report surfaces count mismatches and missing par
 	assert.equal(nonCompletedSource.status, "passed");
 	assert.match(nonCompletedSource.markdown, /Verdict: \*\*PARTIAL_REVIEW\*\*/);
 	assert.match(nonCompletedSource.markdown, /Review coverage is partial/);
+
+	const blankNeedsHumanEvidence = await helper({
+		sources: {
+			"partition-verdicts.main": {
+				partitionSummary: {
+					keep: 0,
+					weaken: 0,
+					partialFailures: 0,
+					needsHuman: 1,
+					supportNotes: 0,
+				},
+				partitions: {
+					keep: [],
+					weaken: [],
+					needsHuman: [
+						{
+							findingId: "finding-needs-human",
+							rootCauseId: "root-needs-human",
+							title: "Evidence is missing",
+							severity: "unknown",
+							locations: [],
+							evidenceQuotes: ["  \r\n  "],
+						},
+					],
+				},
+				supportNotes: [],
+			},
+			"report.main": {
+				summary: "Human review is required.",
+				verdict: "NEEDS_WORK",
+				risks: [],
+				recommendedNextAction: "Inspect manually.",
+			},
+		},
+		options: {},
+		context: {},
+	});
+	assert.equal(blankNeedsHumanEvidence.status, "failed");
+	assert.equal(
+		blankNeedsHumanEvidence.gates.needsHumanEvidenceIncomplete,
+		true,
+	);
+	assert.match(blankNeedsHumanEvidence.markdown, /needs-human finding lacked/);
 
 	const missingSupportMetadata = await helper({
 		sources: {

@@ -114,7 +114,14 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["findingId", "rootCauseId", "title", "severity"],
+            "required": [
+              "findingId",
+              "rootCauseId",
+              "title",
+              "severity",
+              "locations",
+              "evidenceQuotes"
+            ],
             "properties": {
               "findingId": { "type": "string", "minLength": 1 },
               "rootCauseId": { "type": "string", "minLength": 1 },

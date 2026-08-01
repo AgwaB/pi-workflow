@@ -848,8 +848,8 @@ function supportOnlyNeedsHumanItem(supportNotes) {
 			"Support-only findings need an underlying root-cause review before reporting",
 		verdict: "NEEDS_HUMAN",
 		severity: "unknown",
-		...(locations.length > 0 ? { locations } : {}),
-		...(evidenceQuotes.length > 0 ? { evidenceQuotes } : {}),
+		locations,
+		evidenceQuotes,
 		note: "All candidate findings were test/coverage, stale comment/docs, or dead-code symptoms. They were moved out of reportable findings because no independent behavioral root finding remained.",
 	};
 }

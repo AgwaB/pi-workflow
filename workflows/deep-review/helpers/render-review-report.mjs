@@ -345,6 +345,11 @@ function needsHumanCounts(partition) {
 		actual,
 		expected: summaryCountPresent ? Number(summary.needsHuman) : actual,
 		metadataMissing: !partitionsPresent || !summaryCountPresent,
+		incompleteEvidence: asArray(ledger?.needsHuman).filter(
+			(finding) =>
+				locationsOf(finding).length === 0 ||
+				evidenceQuotesOf(finding).length === 0,
+		).length,
 	};
 }
 
@@ -484,6 +489,7 @@ function renderMarkdown({
 	findingCountMismatch,
 	needsHumanCountMismatch,
 	needsHumanMetadataMissing,
+	needsHumanEvidenceIncomplete,
 	supportNoteCountMismatch,
 	supportNoteMetadataMissing,
 	supportNoteEvidenceIncomplete,
@@ -521,6 +527,14 @@ function renderMarkdown({
 			"## Renderer warning",
 			"",
 			"The partition ledger omitted required needs-human metadata. Inspect `partition-verdicts.control.json` before acting on this report.",
+			"",
+		);
+	}
+	if (needsHumanEvidenceIncomplete) {
+		lines.push(
+			"## Renderer warning",
+			"",
+			"At least one needs-human finding lacked a usable location or non-blank evidence quote. Inspect `partition-verdicts.control.json` before acting on this report.",
 			"",
 		);
 	}
@@ -607,6 +621,7 @@ export default async function renderReviewReport({ sources, context = {} }) {
 				findingCountMismatch: true,
 				needsHumanCountMismatch: true,
 				needsHumanMetadataMissing: true,
+				needsHumanEvidenceIncomplete: true,
 				reportSynthesisAvailable: false,
 				reportVerdictConsistent: false,
 				supportNoteCountMismatch: true,
@@ -623,6 +638,7 @@ export default async function renderReviewReport({ sources, context = {} }) {
 	const needsHuman = needsHumanCounts(partition);
 	const needsHumanCountMismatch = needsHuman.expected !== needsHuman.actual;
 	const needsHumanMetadataMissing = needsHuman.metadataMissing;
+	const needsHumanEvidenceIncomplete = needsHuman.incompleteEvidence > 0;
 	const supportNotes = supportNoteCounts(partition);
 	const supportNoteCountMismatch = supportNotes.expected !== supportNotes.actual;
 	const supportNoteMetadataMissing = supportNotes.metadataMissing;
@@ -639,6 +655,7 @@ export default async function renderReviewReport({ sources, context = {} }) {
 		findingCountMismatch,
 		needsHumanCountMismatch,
 		needsHumanMetadataMissing,
+		needsHumanEvidenceIncomplete,
 		supportNoteCountMismatch,
 		supportNoteMetadataMissing,
 		supportNoteEvidenceIncomplete,
@@ -651,6 +668,7 @@ export default async function renderReviewReport({ sources, context = {} }) {
 		!findingCountMismatch &&
 		!needsHumanCountMismatch &&
 		!needsHumanMetadataMissing &&
+		!needsHumanEvidenceIncomplete &&
 		!supportNoteCountMismatch &&
 		!supportNoteMetadataMissing &&
 		!supportNoteEvidenceIncomplete &&
@@ -706,6 +724,7 @@ export default async function renderReviewReport({ sources, context = {} }) {
 			findingCountMismatch,
 			needsHumanCountMismatch,
 			needsHumanMetadataMissing,
+			needsHumanEvidenceIncomplete,
 			reportSynthesisAvailable: reportAvailable,
 			reportVerdictConsistent,
 			supportNoteCountMismatch,

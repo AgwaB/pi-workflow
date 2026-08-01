@@ -1608,13 +1608,13 @@
 		{
 			"name": "deep-review render-review-report emits finding cards from partition ledger",
 			"occurrence": 1,
-			"sha256": "08735fdb274873f7079b51ab0a9cd0e698212a5185de37982fc4bea141c960cc",
+			"sha256": "ddb92673bc4f16d253782b7624a8223b4b26bdd933adb74185df89b425e79931",
 			"domain": "core-runtime"
 		},
 		{
 			"name": "deep-review render-review-report surfaces count mismatches and missing partition",
 			"occurrence": 1,
-			"sha256": "214f5ab2d4816f9a45e8079a2e15d7064081a0bfb1b4ac7f222084828c2c6778",
+			"sha256": "9a0980e7479257f3a8d4d2ee9cf15718c57e47557928c64b4daa6750ad6c6da5",
 			"domain": "core-runtime"
 		},
 		{
