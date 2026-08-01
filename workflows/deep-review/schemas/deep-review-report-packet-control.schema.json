@@ -1,0 +1,56 @@
+{
+  "type": "object",
+  "required": [
+    "schema",
+    "digest",
+    "maxChars",
+    "actualChars",
+    "partitionSummary",
+    "sourceStatusSummary",
+    "reportContext",
+    "normalizationNotes",
+    "overflowCounts"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "deep-review-report-packet-v1"
+    },
+    "digest": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64
+    },
+    "maxChars": {
+      "type": "number",
+      "const": 15000
+    },
+    "actualChars": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 15000
+    },
+    "partitionSummary": {
+      "type": "object"
+    },
+    "sourceStatusSummary": {
+      "type": "object"
+    },
+    "reportContext": {
+      "type": "object"
+    },
+    "normalizationNotes": {
+      "type": "array",
+      "maxItems": 4,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 200
+      }
+    },
+    "overflowCounts": {
+      "type": "object"
+    }
+  },
+  "additionalProperties": false
+}

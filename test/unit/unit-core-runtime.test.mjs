@@ -7112,6 +7112,46 @@ test("deep-review bounded report packet caps a >50KiB ledger while the renderer 
 	assert.ok(partition.reportPacket.overflowCounts.truncatedStrings > 0);
 	assert.ok(partition.reportPacket.overflowCounts.omittedStringChars > 0);
 
+	const isolatedPacket = await pipeline({
+		sources: { "partition-verdicts.main": partition },
+		options: {
+			mode: "report-packet",
+			partitionStage: "partition-verdicts",
+		},
+	});
+	assert.deepEqual(isolatedPacket, partition.reportPacket);
+	assert.ok(JSON.stringify(isolatedPacket).length <= 15000);
+	const packetSchema = JSON.parse(
+		readFileSync(
+			join(
+				helperDir,
+				"..",
+				"schemas",
+				"deep-review-report-packet-control.schema.json",
+			),
+			"utf8",
+		),
+	);
+	assert.deepEqual(validateJsonSchema(isolatedPacket, packetSchema), {
+		valid: true,
+		issues: [],
+	});
+	await assert.rejects(
+		pipeline({
+			sources: {
+				"partition-verdicts.main": {
+					...partition,
+					reportPacket: {
+						...partition.reportPacket,
+						actualChars: partition.reportPacket.actualChars + 1,
+					},
+				},
+			},
+			options: { mode: "report-packet" },
+		}),
+		/actualChars/u,
+	);
+
 	const rendered = await render({
 		sources: {
 			"partition-verdicts.main": partition,

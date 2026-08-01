@@ -186,7 +186,7 @@ The package includes four bundled workflows for common research and review jobs.
 | Workflow | Best for | What it does |
 |---|---|---|
 | `deep-research` | Deep, source-grounded research when breadth, verification, and cited recommendations matter. | Plans research questions by depth, fans out question-level research, normalizes and ranks claims, verifies selected claims against evidence, and renders an audited executive handoff. |
-| `deep-review` | Code or design review when one reviewer pass is not enough. | Triage selects review lenses, reviewers produce findings, a deterministic helper deduplicates them, a challenge pass tests the surviving findings, a deterministic helper partitions verdicts, and the final report keeps only evidence-backed issues. |
+| `deep-review` | Code or design review when one reviewer pass is not enough. | Triage selects review lenses, reviewers produce findings, a deterministic helper deduplicates them, a challenge pass tests the survivors, and deterministic helpers partition verdicts and isolate a bounded synthesis packet before the final renderer joins the synthesis to the full canonical evidence ledger. |
 | `spec-review` | Requirements-to-implementation traceability for an existing spec, API contract, or acceptance criteria. | Extracts testable requirements, maps implementation and tests, verifies candidate gaps, and reports which requirements are covered, missing, ambiguous, or need human judgment. |
 | `impact-review` | Side-effect and risk review for proposed or applied changes. | Maps change scope and affected surfaces, analyzes contract, state/data, validation, docs, security, and performance impact, then joins those lenses into likely regressions, missing checks, and next actions. |
 

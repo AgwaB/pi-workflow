@@ -2782,10 +2782,19 @@ test("deep-review artifact-graph support lifecycle retains adverse needs-human a
 						},
 					},
 					{
+						id: "report-packet",
+						from: "partition-verdicts",
+						support: {
+							uses: "./helpers/finding-pipeline.mjs",
+							options: { mode: "report-packet" },
+						},
+					},
+					{
 						id: "report",
 						type: "reduce",
-						from: "partition-verdicts",
+						from: "report-packet",
 						sourcePolicy: "partial",
+						tools: [],
 						prompt: "Synthesize.",
 					},
 					{
@@ -2833,8 +2842,10 @@ test("deep-review artifact-graph support lifecycle retains adverse needs-human a
 		await scheduleRun(cwd, run.runId, compiled);
 		const updated = await readRunRecord(cwd, run.runId);
 		const partitionTask = taskBySpec(updated, "partition-verdicts.main");
+		const reportPacketTask = taskBySpec(updated, "report-packet.main");
 		const finalTask = taskBySpec(updated, "final.main");
 		assert.equal(partitionTask.status, "completed");
+		assert.equal(reportPacketTask.status, "completed");
 		assert.equal(finalTask.status, "failed");
 		assert.equal(finalTask.statusDetail, "support_declared_failed");
 		const partitionDir = dirname(join(cwd, partitionTask.files.result));
@@ -2851,6 +2862,12 @@ test("deep-review artifact-graph support lifecycle retains adverse needs-human a
 			"adverseLifecycle()",
 		]);
 		assert.ok(partition.reportPacket.actualChars <= 15000);
+		const reportPacketDir = dirname(join(cwd, reportPacketTask.files.result));
+		const copiedReportPacket = JSON.parse(
+			readFileSync(join(reportPacketDir, "control.json"), "utf8"),
+		);
+		assert.deepEqual(copiedReportPacket, partition.reportPacket);
+		assert.ok(JSON.stringify(copiedReportPacket).length <= 15000);
 
 		const finalDir = dirname(join(cwd, finalTask.files.result));
 		const finalControl = JSON.parse(
@@ -2876,6 +2893,137 @@ test("deep-review artifact-graph support lifecycle retains adverse needs-human a
 			[],
 		);
 		assert.ok(readFileSync(join(finalDir, "raw.md"), "utf8").length > 0);
+	} finally {
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+	}
+});
+
+test("deep-review report manifest isolates the bounded packet from the full partition ledger", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "scout", "read, grep, find, ls");
+		const workflowDir = join(process.cwd(), "workflows", "deep-review");
+		const specPath = join(workflowDir, "spec.json");
+		const spec = JSON.parse(readFileSync(specPath, "utf8"));
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			specPath,
+			task: "Adversarially inspect report-stage artifact isolation.",
+		});
+		const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+
+		const pipeline = (
+			await import(
+				`${pathToFileURL(join(workflowDir, "helpers", "finding-pipeline.mjs")).href}?manifest=${Date.now()}`
+			)
+		).default;
+		const ledgerSecret = "FULL_PARTITION_LEDGER_MUST_NOT_REACH_REPORT";
+		const title = "Manifest isolation finding";
+		const partition = await pipeline({
+			sources: {
+				"dedup-findings.main": {
+					findings: [
+						{
+							findingId: "finding-manifest",
+							rootCauseId: "root-manifest",
+							title,
+							severity: "high",
+							file: "src/private-ledger.ts",
+							locations: [{ file: "src/private-ledger.ts", line: 4 }],
+							evidenceQuotes: [ledgerSecret],
+						},
+					],
+				},
+				"devil-advocate.item-001": {
+					finding: { title },
+					verdict: "KEEP",
+				},
+			},
+			options: { mode: "partition", dedupStage: "dedup-findings" },
+		});
+		const isolatedPacket = await pipeline({
+			sources: { "partition-verdicts.main": partition },
+			options: { mode: "report-packet" },
+		});
+		assert.deepEqual(isolatedPacket, partition.reportPacket);
+		assert.ok(JSON.stringify(isolatedPacket).length <= 15000);
+		assert.match(JSON.stringify(partition), new RegExp(ledgerSecret));
+		assert.doesNotMatch(JSON.stringify(isolatedPacket), new RegExp(ledgerSecret));
+
+		await completeTask(
+			cwd,
+			taskBySpec(run, "partition-verdicts.main"),
+			partition,
+		);
+		await completeTask(
+			cwd,
+			taskBySpec(run, "report-packet.main"),
+			isolatedPacket,
+		);
+		const reportTask = taskBySpec(run, "report.main");
+		const prepared = await prepareDagTask(
+			cwd,
+			run,
+			compiled,
+			run.tasks.indexOf(reportTask),
+		);
+		assert.deepEqual(prepared.runtime.tools, ["workflow_artifact"]);
+		assert.deepEqual(Object.keys(prepared.runtime.toolProviders ?? {}), [
+			"workflow_artifact",
+		]);
+
+		const reportDir = dirname(join(cwd, reportTask.files.result));
+		const manifestPath = join(reportDir, "source-manifest.json");
+		const ledgerPath = join(reportDir, "read-ledger.jsonl");
+		const manifest = await loadWorkflowSourceManifest(manifestPath, {
+			runDir: join(cwd, ".pi", "workflows", run.runId),
+		});
+		assert.deepEqual(
+			manifest.sources.map((source) => source.source),
+			["report-packet"],
+		);
+		assert.equal(
+			manifest.sources.some((source) => source.source === "partition-verdicts"),
+			false,
+		);
+
+		const toolConfig = {
+			runId: run.runId,
+			taskId: reportTask.taskId,
+			manifestPath,
+			ledgerPath,
+			runDir: join(cwd, ".pi", "workflows", run.runId),
+		};
+		const packetRead = await handleWorkflowArtifactToolCall(
+			{
+				action: "read",
+				source: "report-packet",
+				artifact: "control",
+				path: "$",
+				maxChars: 15000,
+			},
+			toolConfig,
+		);
+		assert.match(packetRead.content[0].text, new RegExp(isolatedPacket.digest));
+		assert.doesNotMatch(packetRead.content[0].text, new RegExp(ledgerSecret));
+		await assert.rejects(
+			handleWorkflowArtifactToolCall(
+				{
+					action: "read",
+					source: "partition-verdicts",
+					artifact: "control",
+					path: "$",
+				},
+				toolConfig,
+			),
+			/unknown workflow artifact source/u,
+		);
 	} finally {
 		rmSync(cwd, {
 			recursive: true,

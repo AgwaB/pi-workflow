@@ -2704,6 +2704,19 @@ test("bundled workflows compile warning-free and deep-review leaves reviewer fan
 			"spec.json",
 		);
 		const spec = JSON.parse(readFileSync(specPath, "utf8"));
+		assert.deepEqual(
+			spec.artifactGraph.stages.map((stage) => stage.id),
+			[
+				"triage",
+				"reviewers",
+				"dedup-findings",
+				"devil-advocate",
+				"partition-verdicts",
+				"report-packet",
+				"report",
+				"final",
+			],
+		);
 		const reviewersStage = spec.artifactGraph.stages.find(
 			(stage) => stage.id === "reviewers",
 		);
@@ -2718,25 +2731,35 @@ test("bundled workflows compile warning-free and deep-review leaves reviewer fan
 		const devilAdvocate = compiled.tasks.find(
 			(task) => task.key === "devil-advocate.item",
 		);
+		const reportPacket = compiled.tasks.find(
+			(task) => task.key === "report-packet.main",
+		);
 		const report = compiled.tasks.find((task) => task.key === "report.main");
+		const final = compiled.tasks.find((task) => task.key === "final.main");
 		assert.equal(reviewers?.stageMaxConcurrency, undefined);
 		assert.equal(devilAdvocate?.stageMaxConcurrency, undefined);
-		assert.deepEqual(report?.dependsOn, ["partition-verdicts.main"]);
+		assert.deepEqual(reportPacket?.dependsOn, ["partition-verdicts.main"]);
+		assert.deepEqual(report?.dependsOn, ["report-packet.main"]);
+		assert.deepEqual(final?.dependsOn, [
+			"report.main",
+			"partition-verdicts.main",
+		]);
+		assert.deepEqual(report?.runtime.tools, []);
 		assert.deepEqual(report?.artifactGraph.requiredReads, [
 			{
-				source: "partition-verdicts",
+				source: "report-packet",
 				artifact: "control",
-				path: "$.reportPacket",
-				maxChars: 16000,
+				path: "$",
+				maxChars: 15000,
 				count: 1,
 			},
 		]);
 		assert.deepEqual(report?.artifactGraph.requiredReadPolicy, [
 			{
-				source: "partition-verdicts",
+				source: "report-packet",
 				artifact: "control",
-				path: "$.reportPacket",
-				maxChars: 16000,
+				path: "$",
+				maxChars: 15000,
 				mustNotTruncate: true,
 			},
 		]);

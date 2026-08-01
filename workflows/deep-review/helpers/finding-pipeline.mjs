@@ -1,6 +1,6 @@
 // Deterministic post-processing for deep-review.
 //
-// Two modes (options.mode):
+// Four modes (options.mode):
 //   "dedup"     — sources: reviewer foreach outputs ({ lens, findings, ... }).
 //                 Flattens findings, normalizes shape, drops duplicates by
 //                 (file, normalized title) so the devil-advocate stage verifies
@@ -10,6 +10,9 @@
 //                 partitions findings into keep/weaken/drop/needsHuman in code,
 //                 and joins reviewer severity back onto KEEP findings so the
 //                 report stage cannot silently drop findings or drift severity.
+//   "report-packet" — sources: partition output. Copies only the mechanically
+//                 bounded report packet into an isolated support artifact so
+//                 model synthesis never receives the canonical full ledger.
 //   "batch-devil-advocate" — opt-in only. Plans deterministic batches of
 //                 deduped findings for a batched devil-advocate foreach. The
 //                 default deep-review workflow still uses one verifier per
@@ -1565,6 +1568,46 @@ function buildReportPacket({
 	return finalizeReportPacketCharCount(packet);
 }
 
+function isolateReportPacket(sources, options) {
+	const partitionStage = String(
+		options.partitionStage ?? "partition-verdicts",
+	).trim();
+	const partition = findSource(sources, partitionStage);
+	if (!partition || typeof partition !== "object") {
+		throw new Error(
+			`finding-pipeline: report-packet mode requires ${partitionStage} control source`,
+		);
+	}
+	const packet = partition.reportPacket;
+	if (!packet || typeof packet !== "object" || Array.isArray(packet)) {
+		throw new Error(
+			"finding-pipeline: partition source is missing reportPacket",
+		);
+	}
+	const serialized = JSON.stringify(packet);
+	if (packet.schema !== REPORT_PACKET_SCHEMA) {
+		throw new Error(
+			`finding-pipeline: report packet schema must be ${REPORT_PACKET_SCHEMA}`,
+		);
+	}
+	if (packet.maxChars !== REPORT_PACKET_MAX_CHARS) {
+		throw new Error(
+			`finding-pipeline: report packet maxChars must be ${REPORT_PACKET_MAX_CHARS}`,
+		);
+	}
+	if (serialized.length > REPORT_PACKET_MAX_CHARS) {
+		throw new Error(
+			`finding-pipeline: copied report packet exceeded ${REPORT_PACKET_MAX_CHARS} characters (${serialized.length})`,
+		);
+	}
+	if (packet.actualChars !== serialized.length) {
+		throw new Error(
+			`finding-pipeline: copied report packet actualChars ${String(packet.actualChars)} did not match ${serialized.length}`,
+		);
+	}
+	return packet;
+}
+
 function asBatchArray(value) {
 	if (Array.isArray(value?.batches)) return value.batches;
 	if (Array.isArray(value)) return value;
@@ -2405,7 +2448,8 @@ export default async function findingPipeline({
 	if (mode === "batch-devil-advocate")
 		return batchDevilAdvocateFindings(sources, options, context);
 	if (mode === "partition") return partitionVerdicts(sources, options, context);
+	if (mode === "report-packet") return isolateReportPacket(sources, options);
 	throw new Error(
-		`finding-pipeline: unknown mode "${mode}" (expected "dedup", "batch-devil-advocate", or "partition")`,
+		`finding-pipeline: unknown mode "${mode}" (expected "dedup", "batch-devil-advocate", "partition", or "report-packet")`,
 	);
 }

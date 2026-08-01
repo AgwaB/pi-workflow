@@ -1,7 +1,7 @@
 {
 	"schema": "pi-workflow-unit-test-inventory-v1",
 	"source": "unit.test.mjs",
-	"count": 524,
+	"count": 525,
 	"tests": [
 		{
 			"name": "public schemaVersion 1 parser accepts artifact graph and rejects non-artifactGraph top-level shapes",
@@ -228,7 +228,13 @@
 		{
 			"name": "deep-review artifact-graph support lifecycle retains adverse needs-human artifacts after report failure",
 			"occurrence": 1,
-			"sha256": "c5bc0cf69d208251a44d263220c31aaff1ccb4a48ffae8f9e1d9e42f36f1de88",
+			"sha256": "66bdac243fa46230de29ba0a167aca66cd1db1d6b964edb4278b004cf9febd34",
+			"domain": "artifact-web"
+		},
+		{
+			"name": "deep-review report manifest isolates the bounded packet from the full partition ledger",
+			"occurrence": 1,
+			"sha256": "9a5e62b03047be0293a4e016a53433c3146317571eb032eaf11ccfb818672aa3",
 			"domain": "artifact-web"
 		},
 		{
@@ -954,7 +960,7 @@
 		{
 			"name": "bundled workflows compile warning-free and deep-review leaves reviewer fanout unconstrained",
 			"occurrence": 1,
-			"sha256": "61ef42c2eb5e04e91e1c52ec887ceb86af9b494c237374fbebacd33937bade02",
+			"sha256": "e2495e073314e8d9e2fb38e897af754265463dce253f18e6e7095d53d08078dc",
 			"domain": "authoring-interface"
 		},
 		{
@@ -1614,7 +1620,7 @@
 		{
 			"name": "deep-review bounded report packet caps a >50KiB ledger while the renderer emits every finding",
 			"occurrence": 1,
-			"sha256": "4259834758d871801683ce54116d01ffdeffca903e39c223a0d566ad294f2d4c",
+			"sha256": "ba4ae1626731b6fc7bdf19d0939666e49acdeffe14490362e52560ccf00b8b61",
 			"domain": "core-runtime"
 		},
 		{
