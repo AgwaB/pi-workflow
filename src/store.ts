@@ -82,6 +82,7 @@ type RunLeaseTestHooks = {
 	onBeforeHeartbeat?: (context: {
 		cwd: string;
 		runId: string;
+		name: string;
 		initial: boolean;
 	}) => void | Promise<void>;
 	onAfterAtomicRename?: (context: {
@@ -379,9 +380,19 @@ export async function acquireRunFileLease(
 
 	const abortController = new AbortController();
 	let released = false;
+	let releaseInFlight: Promise<void> | undefined;
+	let heartbeatCount = 0;
 	let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
 	let heartbeatInFlight: Promise<void> | undefined;
 	const heartbeat = async (): Promise<void> => {
+		const initial = heartbeatCount === 0;
+		heartbeatCount += 1;
+		await runLeaseTestHooks.onBeforeHeartbeat?.({
+			cwd,
+			runId,
+			name,
+			initial,
+		});
 		await assertLockOwner(lockFile, ownerId);
 		const now = new Date();
 		await utimes(lockFile, now, now);
@@ -399,9 +410,35 @@ export async function acquireRunFileLease(
 		});
 		return next;
 	};
-	await runHeartbeat();
-	heartbeatTimer = setInterval(() => void runHeartbeat(), runLeaseHeartbeatIntervalMs());
-	heartbeatTimer.unref?.();
+	const startHeartbeat = (): void => {
+		if (released || heartbeatTimer) return;
+		heartbeatTimer = setInterval(
+			() => void runHeartbeat(),
+			runLeaseHeartbeatIntervalMs(),
+		);
+		heartbeatTimer.unref?.();
+	};
+	try {
+		await runHeartbeat();
+	} catch (heartbeatError) {
+		let releaseError: unknown;
+		for (let attempt = 0; attempt < 2; attempt += 1) {
+			try {
+				await releaseLock(lockFile, ownerId);
+				releaseError = undefined;
+				break;
+			} catch (error) {
+				releaseError = error;
+			}
+		}
+		if (releaseError !== undefined)
+			throw new AggregateError(
+				[heartbeatError, releaseError],
+				`Failed to initialize and release run-file lease: ${lockFile}`,
+			);
+		throw heartbeatError;
+	}
+	startHeartbeat();
 
 	return {
 		ownerId,
@@ -413,11 +450,26 @@ export async function acquireRunFileLease(
 		},
 		release: async () => {
 			if (released) return;
-			released = true;
-			if (heartbeatTimer) clearInterval(heartbeatTimer);
-			heartbeatTimer = undefined;
-			await heartbeatInFlight?.catch(() => undefined);
-			await releaseLock(lockFile, ownerId);
+			if (releaseInFlight) return releaseInFlight;
+			const attempt = (async () => {
+				if (heartbeatTimer) clearInterval(heartbeatTimer);
+				heartbeatTimer = undefined;
+				await heartbeatInFlight?.catch(() => undefined);
+				heartbeatInFlight = undefined;
+				try {
+					await releaseLock(lockFile, ownerId);
+					released = true;
+				} catch (error) {
+					startHeartbeat();
+					throw error;
+				}
+			})();
+			releaseInFlight = attempt;
+			try {
+				await attempt;
+			} finally {
+				if (releaseInFlight === attempt) releaseInFlight = undefined;
+			}
 		},
 	};
 }
@@ -460,7 +512,12 @@ export async function withRunLease<T>(
 		const heartbeat = async (): Promise<void> => {
 			const initial = heartbeatCount === 0;
 			heartbeatCount += 1;
-			await runLeaseTestHooks.onBeforeHeartbeat?.({ cwd, runId, initial });
+			await runLeaseTestHooks.onBeforeHeartbeat?.({
+				cwd,
+				runId,
+				name: "run",
+				initial,
+			});
 			assertLeaseNotAborted(abortController.signal);
 			await assertLockOwner(lockFile, ownerId);
 			const timestamp = nowIso();

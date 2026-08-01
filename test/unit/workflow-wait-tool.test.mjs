@@ -5,9 +5,14 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 
 import { awaitWithinWorkflowWaitBoundary } from "../../.tmp/unit/engine.js";
-import { acquireRunFileLease } from "../../.tmp/unit/store.js";
+import {
+	acquireRunFileLease,
+	setRunLeaseTestHooksForTests,
+} from "../../.tmp/unit/store.js";
 import {
 	deliverWorkflowFeedback,
+	setWorkflowFeedbackPollMsForTests,
+	watchWorkflowFeedbackForTests,
 	WORKFLOW_DYNAMIC_TOOL,
 	WORKFLOW_RUN_TOOL,
 	WORKFLOW_WAIT_TOOL,
@@ -15,9 +20,11 @@ import {
 	registerWorkflowWaitTool,
 } from "../../.tmp/unit/extension.js";
 import { summarizeWorkflowTerminal } from "../../.tmp/unit/workflow-terminal.js";
+import { artifactGraphWorkflowSpec } from "./unit-test-support.mjs";
 
 function fakePi(tools) {
 	return {
+		getThinkingLevel: () => "none",
 		registerTool(tool) {
 			tools.push(tool);
 		},
@@ -98,11 +105,56 @@ async function writeRunFixture(cwd, run, control = {}) {
 	await writeDynamicControl(cwd, run, control);
 }
 
+async function writeFeedbackAudience(cwd, runId, sessionId) {
+	await writeFile(
+		join(cwd, ".pi", "workflows", runId, "feedback-audience.json"),
+		`${JSON.stringify({
+			schema: "workflow-feedback-audience-v1",
+			runId,
+			sessionId,
+			boundAt: new Date().toISOString(),
+		})}\n`,
+	);
+}
+
+function feedbackContext(cwd, sessionId, overrides = {}) {
+	return {
+		cwd,
+		hasUI: true,
+		sessionManager: { getSessionId: () => sessionId },
+		ui: { confirm: async () => false, notify: () => undefined },
+		...overrides,
+	};
+}
+
+function sleep(ms) {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function eventually(action, timeoutMs = 1_000) {
+	const deadline = Date.now() + timeoutMs;
+	let lastError;
+	while (Date.now() <= deadline) {
+		try {
+			return await action();
+		} catch (error) {
+			lastError = error;
+			await sleep(10);
+		}
+	}
+	throw lastError;
+}
+
 test("workflow wait boundary enforces timeout and cancellation without owning the operation", async () => {
 	const never = new Promise(() => {});
 	const startedAt = Date.now();
 	await assert.rejects(
-		awaitWithinWorkflowWaitBoundary(never, 25, undefined, "wait timeout sentinel"),
+		awaitWithinWorkflowWaitBoundary(
+			never,
+			25,
+			undefined,
+			"wait timeout sentinel",
+		),
 		/wait timeout sentinel/,
 	);
 	assert.ok(Date.now() - startedAt < 250);
@@ -116,6 +168,88 @@ test("workflow wait boundary enforces timeout and cancellation without owning th
 	);
 	controller.abort(new Error("wait cancellation sentinel"));
 	await assert.rejects(aborted, /wait cancellation sentinel/);
+});
+
+test("run-file lease cleans up failed initialization and supports release retry", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "workflow-wait-lease-hooks-"));
+	let lease;
+	try {
+		let releaseAttempts = 0;
+		setRunLeaseTestHooksForTests({
+			onBeforeHeartbeat({ initial }) {
+				if (initial) throw new Error("initial heartbeat hook failed");
+			},
+			onBeforeReleaseLockRename() {
+				releaseAttempts += 1;
+				if (releaseAttempts === 1)
+					throw new Error("transient release hook failed");
+			},
+		});
+		await assert.rejects(
+			acquireRunFileLease(cwd, "workflow_hook_initial", "presentation"),
+			/initial heartbeat hook failed/,
+		);
+		assert.equal(releaseAttempts, 2);
+		setRunLeaseTestHooksForTests(undefined);
+		lease = await acquireRunFileLease(cwd, "workflow_hook_initial", "presentation");
+		assert.ok(lease);
+		let retryReleaseAttempts = 0;
+		setRunLeaseTestHooksForTests({
+			heartbeatIntervalMs: 5,
+			onBeforeReleaseLockRename() {
+				retryReleaseAttempts += 1;
+				if (retryReleaseAttempts === 1)
+					throw new Error("release must be retryable");
+			},
+		});
+		await assert.rejects(lease.release(), /release must be retryable/);
+		await lease.assertOwner();
+		assert.equal(
+			await acquireRunFileLease(cwd, "workflow_hook_initial", "presentation"),
+			undefined,
+		);
+		await lease.release();
+		lease = undefined;
+		setRunLeaseTestHooksForTests(undefined);
+		const next = await acquireRunFileLease(cwd, "workflow_hook_initial", "presentation");
+		assert.ok(next);
+		await next.release();
+	} finally {
+		setRunLeaseTestHooksForTests(undefined);
+		await lease?.release().catch(() => undefined);
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("workflow terminal wait spends one deadline across presentation and run waiting", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "workflow-wait-one-deadline-"));
+	try {
+		const run = runRecord(cwd, { runId: "workflow_one_deadline" });
+		await writeRunFixture(cwd, run);
+		await writeFeedbackAudience(cwd, run.runId, "session-deadline");
+		setRunLeaseTestHooksForTests({
+			async onBeforeHeartbeat({ name, initial }) {
+				if (name === "feedback-presentation" && initial) await sleep(1_100);
+			},
+		});
+		const tools = [];
+		registerWorkflowWaitTool(fakePi(tools), { PI_WORKFLOW_ROLE: "supervisor" });
+		const startedAt = Date.now();
+		await assert.rejects(
+			tools[0].execute(
+				"call-deadline",
+				{ runId: run.runId, timeoutMs: 1_000 },
+				new AbortController().signal,
+				undefined,
+				feedbackContext(cwd, "session-deadline", { hasUI: false }),
+			),
+			/still running after 1000ms wait/,
+		);
+		assert.ok(Date.now() - startedAt < 1_500);
+	} finally {
+		setRunLeaseTestHooksForTests(undefined);
+		await rm(cwd, { recursive: true, force: true });
+	}
 });
 
 test("durable wait ownership suppresses completion feedback in another delivery path", async () => {
@@ -157,6 +291,37 @@ test("durable wait ownership suppresses completion feedback in another delivery 
 				join(cwd, ".pi", "workflows", run.runId, "feedback-delivery.json"),
 				"utf8",
 			),
+			(error) => error?.code === "ENOENT",
+		);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("terminal presentation rejects a foreign session without changing the audience", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "workflow-wait-foreign-owner-"));
+	try {
+		const run = runRecord(cwd, { runId: "workflow_foreign_owner" });
+		await writeRunFixture(cwd, run);
+		await writeFeedbackAudience(cwd, run.runId, "session-owner");
+		const tools = [];
+		registerWorkflowWaitTool(fakePi(tools), { PI_WORKFLOW_ROLE: "supervisor" });
+		await assert.rejects(
+			tools[0].execute(
+				"call-foreign",
+				{ runId: run.runId, timeoutMs: 60_000 },
+				new AbortController().signal,
+				undefined,
+				feedbackContext(cwd, "session-other"),
+			),
+			/not owned by the current session/,
+		);
+		const audience = JSON.parse(
+			await readFile(join(cwd, ".pi", "workflows", run.runId, "feedback-audience.json"), "utf8"),
+		);
+		assert.equal(audience.sessionId, "session-owner");
+		await assert.rejects(
+			readFile(join(cwd, ".pi", "workflows", run.runId, "feedback-delivery.json"), "utf8"),
 			(error) => error?.code === "ENOENT",
 		);
 	} finally {
@@ -207,9 +372,119 @@ test("workflow wait does not re-present a completion won by the watcher", async 
 		assert.equal(result.details.deliveryAlreadyCompleted, true);
 		assert.equal(result.details.finalResultPreview, undefined);
 		assert.match(result.content[0].text, /completion already delivered/);
-		assert.doesNotMatch(result.content[0].text, /Watcher-owned terminal result/);
+		assert.doesNotMatch(
+			result.content[0].text,
+			/Watcher-owned terminal result/,
+		);
 		assert.equal(sends, 1);
 	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("delivery claims enforce audience identity and report structured outcomes", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "workflow-wait-claim-audience-"));
+	try {
+		const run = runRecord(cwd, { runId: "workflow_claim_audience" });
+		await writeRunFixture(cwd, run);
+		await writeFeedbackAudience(cwd, run.runId, "session-owner");
+		await writeFile(
+			join(cwd, ".pi", "workflows", run.runId, "feedback-delivery.json"),
+			`${JSON.stringify({ schema: "workflow-feedback-delivery-v1", runId: run.runId, sessionId: "session-other", delivered: {} })}\n`,
+		);
+		let sends = 0;
+		await assert.rejects(
+			deliverWorkflowFeedback(
+				feedbackContext(cwd, "session-owner"),
+				{ sendMessage: () => (sends += 1) },
+				run,
+			),
+			/delivery belongs to another session/,
+		);
+		assert.equal(sends, 0);
+		const foreign = await deliverWorkflowFeedback(
+			feedbackContext(cwd, "session-other"),
+			{ sendMessage: () => (sends += 1) },
+			run,
+		);
+		assert.deepEqual(foreign, { status: "not-owner" });
+		assert.equal(sends, 0);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("completion marker precedes best-effort UI notification", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "workflow-wait-notify-"));
+	try {
+		const run = runRecord(cwd, { runId: "workflow_notify_best_effort" });
+		await writeRunFixture(cwd, run);
+		await writeFeedbackAudience(cwd, run.runId, "session-notify");
+		let sends = 0;
+		const outcome = await deliverWorkflowFeedback(
+			feedbackContext(cwd, "session-notify", {
+				ui: { notify: () => { throw new Error("UI notification failed"); } },
+			}),
+			{ sendMessage: () => (sends += 1) },
+			run,
+		);
+		assert.deepEqual(outcome, { status: "delivered" });
+		assert.equal(sends, 1);
+		const marker = JSON.parse(
+			await readFile(join(cwd, ".pi", "workflows", run.runId, "feedback-delivery.json"), "utf8"),
+		);
+		assert.equal(marker.sessionId, "session-notify");
+		assert.equal(typeof marker.delivered.completed, "string");
+		const repeated = await deliverWorkflowFeedback(
+			feedbackContext(cwd, "session-notify"),
+			{ sendMessage: () => (sends += 1) },
+			run,
+		);
+		assert.deepEqual(repeated, { status: "already-delivered" });
+		assert.equal(sends, 1);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("feedback watcher single-flights delivery and retries a failed send", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "workflow-wait-watcher-retry-"));
+	const controller = new AbortController();
+	let rejectFirst;
+	try {
+		const run = runRecord(cwd, { runId: "workflow_watcher_retry" });
+		await writeRunFixture(cwd, run);
+		await writeFeedbackAudience(cwd, run.runId, "session-watcher-retry");
+		setWorkflowFeedbackPollMsForTests(5);
+		let sends = 0;
+		watchWorkflowFeedbackForTests(
+			feedbackContext(cwd, "session-watcher-retry"),
+			{
+				sendMessage() {
+					sends += 1;
+					if (sends === 1)
+						return new Promise((_, reject) => {
+							rejectFirst = reject;
+						});
+				},
+			},
+			run.runId,
+			controller.signal,
+		);
+		await eventually(() => assert.equal(sends, 1));
+		await sleep(30);
+		assert.equal(sends, 1, "poll ticks must not overlap an in-flight send");
+		rejectFirst(new Error("transient send failure"));
+		await eventually(() => assert.equal(sends, 2));
+		await eventually(async () => {
+			const marker = JSON.parse(
+				await readFile(join(cwd, ".pi", "workflows", run.runId, "feedback-delivery.json"), "utf8"),
+			);
+			assert.equal(typeof marker.delivered.completed, "string");
+		});
+	} finally {
+		controller.abort();
+		setWorkflowFeedbackPollMsForTests(undefined);
 		await rm(cwd, { recursive: true, force: true });
 	}
 });
@@ -221,7 +496,10 @@ test("workflow wait tool registers with bounded wait guidance", () => {
 	});
 	assert.equal(tools.length, 1);
 	assert.equal(tools[0].name, WORKFLOW_WAIT_TOOL);
-	assert.match(tools[0].promptGuidelines.join("\n"), /Do not repeatedly read run\.json/);
+	assert.match(
+		tools[0].promptGuidelines.join("\n"),
+		/Do not repeatedly read run\.json/,
+	);
 	assert.deepEqual(tools[0].parameters.required, ["runId"]);
 	assert.equal(tools[0].parameters.properties.timeoutMs.maximum, 14_400_000);
 });
@@ -313,6 +591,7 @@ test("workflow wait reports blocked action-required state without a final previe
 		await writeRunFixture(cwd, run, {
 			executiveMarkdown: "Intermediate text must not become a final result.",
 		});
+		await writeFeedbackAudience(cwd, run.runId, "session-blocked");
 		const tools = [];
 		registerWorkflowWaitTool(fakePi(tools), {
 			PI_WORKFLOW_ROLE: "supervisor",
@@ -322,7 +601,10 @@ test("workflow wait reports blocked action-required state without a final previe
 			{ runId: run.runId, timeoutMs: 60_000 },
 			new AbortController().signal,
 			undefined,
-			{ cwd, hasUI: false, ui: { confirm: async () => false } },
+			{
+				...feedbackContext(cwd, "session-blocked"),
+				hasUI: false,
+			},
 		);
 		assert.equal(result.details.terminal, false);
 		assert.equal(result.details.actionRequired, true);
@@ -376,6 +658,7 @@ test("workflow wait previews the declared dynamic output instead of the last com
 			{ tasks: [run.tasks[2]] },
 			{ executiveMarkdown: "Misleading later intermediate output." },
 		);
+		await writeFeedbackAudience(cwd, run.runId, "session-output");
 		const tools = [];
 		registerWorkflowWaitTool(fakePi(tools), {
 			PI_WORKFLOW_ROLE: "supervisor",
@@ -385,12 +668,16 @@ test("workflow wait previews the declared dynamic output instead of the last com
 			{ runId, timeoutMs: 60_000 },
 			new AbortController().signal,
 			undefined,
-			{ cwd, hasUI: false, ui: { confirm: async () => false } },
+			{
+				...feedbackContext(cwd, "session-output"),
+				hasUI: false,
+			},
 		);
-		assert.deepEqual(result.details.outputTaskIds, [
-			"dynamic.synthesis-final",
-		]);
-		assert.match(result.details.finalResultPreview, /Authoritative synthesized/);
+		assert.deepEqual(result.details.outputTaskIds, ["dynamic.synthesis-final"]);
+		assert.match(
+			result.details.finalResultPreview,
+			/Authoritative synthesized/,
+		);
 		assert.doesNotMatch(
 			result.details.finalResultPreview,
 			/Misleading later intermediate/,
@@ -432,6 +719,7 @@ test("workflow wait never falls back to an upstream artifact when the final task
 			{ tasks: [run.tasks[0]] },
 			{ executiveMarkdown: "Upstream output is not the final answer." },
 		);
+		await writeFeedbackAudience(cwd, run.runId, "session-failed-final");
 		const tools = [];
 		registerWorkflowWaitTool(fakePi(tools), {
 			PI_WORKFLOW_ROLE: "supervisor",
@@ -441,7 +729,10 @@ test("workflow wait never falls back to an upstream artifact when the final task
 			{ runId, timeoutMs: 60_000 },
 			new AbortController().signal,
 			undefined,
-			{ cwd, hasUI: false, ui: { confirm: async () => false } },
+			{
+				...feedbackContext(cwd, "session-failed-final"),
+				hasUI: false,
+			},
 		);
 		assert.equal(result.details.terminal, true);
 		assert.deepEqual(result.details.outputTaskIds, ["final"]);
@@ -480,6 +771,58 @@ test("cancelling workflow wait does not mutate the workflow", async () => {
 			),
 		);
 		assert.equal(persisted.status, "completed");
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("awaitTerminal binds feedback audience for an immediately terminal support run", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "workflow-wait-immediate-terminal-"));
+	try {
+		const workflowDir = join(cwd, "workflows", "immediate");
+		await mkdir(join(workflowDir, "helpers"), { recursive: true });
+		await writeFile(
+			join(workflowDir, "helpers", "done.mjs"),
+			"export default async function done() { return { executiveMarkdown: '# Immediate result\\n\\nDone.' }; }\n",
+		);
+		await writeFile(
+			join(workflowDir, "spec.json"),
+			JSON.stringify(
+				artifactGraphWorkflowSpec({
+					name: "immediate-terminal",
+					artifactGraph: {
+						stages: [
+							{ id: "done", support: { uses: "./helpers/done.mjs" } },
+						],
+					},
+				}),
+			),
+		);
+		const tools = [];
+		registerWorkflowNaturalLanguageTools(fakePi(tools), {
+			PI_WORKFLOW_ROLE: "supervisor",
+		});
+		const runTool = tools.find((tool) => tool.name === WORKFLOW_RUN_TOOL);
+		const result = await runTool.execute(
+			"call-immediate",
+			{
+				workflow: join(workflowDir, "spec.json"),
+				task: "Complete immediately",
+				awaitTerminal: true,
+				timeoutMs: 60_000,
+			},
+			new AbortController().signal,
+			undefined,
+			feedbackContext(cwd, "session-immediate", { hasUI: false }),
+		);
+		assert.equal(result.details.status, "completed");
+		const audience = JSON.parse(
+			await readFile(
+				join(cwd, ".pi", "workflows", result.details.runId, "feedback-audience.json"),
+				"utf8",
+			),
+		);
+		assert.equal(audience.sessionId, "session-immediate");
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
 	}
@@ -551,9 +894,14 @@ test("terminal summary distinguishes dynamic synthesis from exhausted no-output 
 			status: "synthesized",
 			outputTasks: ["dynamic.synthesize-r1"],
 		});
-		const synthesizedSummary = await summarizeWorkflowTerminal(cwd, synthesized);
+		const synthesizedSummary = await summarizeWorkflowTerminal(
+			cwd,
+			synthesized,
+		);
 		assert.equal(synthesizedSummary.semanticStatus, "synthesized");
-		assert.deepEqual(synthesizedSummary.outputTaskIds, ["dynamic.synthesize-r1"]);
+		assert.deepEqual(synthesizedSummary.outputTaskIds, [
+			"dynamic.synthesize-r1",
+		]);
 		assert.equal(synthesizedSummary.outputRetryAttempts, 1);
 		assert.equal(synthesizedSummary.launchRetryAttempts, 2);
 

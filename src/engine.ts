@@ -330,6 +330,7 @@ interface WorkflowScheduleOptions {
 
 interface WorkflowWaitOptions extends WorkflowScheduleOptions {
 	waitSignal?: AbortSignal;
+	waitDeadlineMs?: number;
 	onWaitProgress?: (run: WorkflowRunRecord) => void;
 }
 
@@ -671,13 +672,21 @@ export async function waitForRun(
 	options: WorkflowWaitOptions = {},
 ): Promise<WorkflowRunRecord> {
 	const timeout = clampTimeout(timeoutMs);
-	const deadline = Date.now() + timeout;
-	const { waitSignal, onWaitProgress, ...scheduleOptions } = options;
+	const timeoutDeadline = Date.now() + timeout;
+	const { waitSignal, waitDeadlineMs, onWaitProgress, ...scheduleOptions } =
+		options;
+	const deadline = Number.isFinite(waitDeadlineMs)
+		? Math.min(timeoutDeadline, waitDeadlineMs as number)
+		: timeoutDeadline;
+	const initialTimeoutMessage = `Flow run ${runIdOrPrefix} still running after ${timeout}ms wait`;
+	if (waitSignal?.aborted) throw workflowWaitAbortError(waitSignal);
+	const initialRemaining = deadline - Date.now();
+	if (initialRemaining <= 0) throw new Error(initialTimeoutMessage);
 	let run = await awaitWithinWorkflowWaitBoundary(
 		refreshRunOrRecordPollError(cwd, runIdOrPrefix),
-		deadline - Date.now(),
+		initialRemaining,
 		waitSignal,
-		`Flow run ${runIdOrPrefix} still running after ${timeout}ms wait`,
+		initialTimeoutMessage,
 	);
 	onWaitProgress?.(run);
 
