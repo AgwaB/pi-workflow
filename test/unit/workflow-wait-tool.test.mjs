@@ -310,6 +310,45 @@ test("run-file lease retries release internally and abandons persistent failures
 		);
 		assert.equal(child.stdout, "reclaimed");
 
+		const racing = await acquireRunFileLease(
+			cwd,
+			"workflow_hook_release_reclaim_race",
+			"presentation",
+		);
+		assert.ok(racing);
+		const releaseHookEntered = Promise.withResolvers();
+		const continueRelease = Promise.withResolvers();
+		const reclaimRenameCompleted = Promise.withResolvers();
+		const continueReclaim = Promise.withResolvers();
+		setRunLeaseTestHooksForTests({
+			async onBeforeReleaseLockRename({ lockFile }) {
+				if (!lockFile.includes("workflow_hook_release_reclaim_race")) return;
+				releaseHookEntered.resolve();
+				await continueRelease.promise;
+			},
+			async onAfterReclaimRename({ lockFile }) {
+				if (!lockFile.includes("workflow_hook_release_reclaim_race")) return;
+				reclaimRenameCompleted.resolve();
+				await continueReclaim.promise;
+			},
+		});
+		const racingRelease = racing.release();
+		await releaseHookEntered.promise;
+		const racingReclaim = acquireRunFileLease(
+			cwd,
+			"workflow_hook_release_reclaim_race",
+			"presentation",
+			500,
+		);
+		await reclaimRenameCompleted.promise;
+		continueRelease.resolve();
+		await racingRelease;
+		continueReclaim.resolve();
+		const reclaimedRace = await racingReclaim;
+		assert.ok(reclaimedRace);
+		setRunLeaseTestHooksForTests(undefined);
+		await reclaimedRace.release();
+
 		setRunLeaseTestHooksForTests({
 			onBeforeHeartbeat({ initial }) {
 				if (initial) throw new Error("persistent initial heartbeat failure");

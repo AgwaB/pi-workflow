@@ -690,7 +690,8 @@ async function acquireLock(
 async function reclaimStaleLock(lockFile: string): Promise<boolean> {
 	const snapshot = await readLockSnapshot(lockFile);
 	if (!snapshot) return true;
-	if (!(await isReclaimableLockSnapshot(lockFile, snapshot))) return false;
+	const initialDecision = await lockReclaimDecision(lockFile, snapshot);
+	if (!initialDecision.reclaimable) return false;
 
 	const reclaimFile = `${lockFile}.reclaim-${process.pid}-${randomBytes(3).toString("hex")}`;
 	try {
@@ -707,9 +708,16 @@ async function reclaimStaleLock(lockFile: string): Promise<boolean> {
 		await restoreReclaimFile(reclaimFile, lockFile);
 		return false;
 	}
-	if (!(await isReclaimableLockSnapshot(lockFile, claimed))) {
-		await restoreReclaimFile(reclaimFile, lockFile);
-		return false;
+	// A validated abandonment marker is a one-way declaration made only after
+	// heartbeats stop. Latch that decision across rename: the releaser may see
+	// the original path missing and clear the sidecar while this reclaim is in
+	// flight, but restoring the quiesced live-PID lock would orphan it.
+	if (!initialDecision.durablyAbandoned) {
+		const claimedDecision = await lockReclaimDecision(lockFile, claimed);
+		if (!claimedDecision.reclaimable) {
+			await restoreReclaimFile(reclaimFile, lockFile);
+			return false;
+		}
 	}
 
 	await unlink(reclaimFile).catch(() => undefined);
@@ -739,24 +747,30 @@ async function restoreReclaimFile(
 	await unlink(reclaimFile).catch(() => undefined);
 }
 
-async function isReclaimableLockSnapshot(
+interface LockReclaimDecision {
+	reclaimable: boolean;
+	durablyAbandoned: boolean;
+}
+
+async function lockReclaimDecision(
 	lockFile: string,
 	snapshot: LockSnapshot,
-): Promise<boolean> {
+): Promise<LockReclaimDecision> {
 	if (await isRunFileLeaseDurablyAbandoned(lockFile, snapshot.ownerId))
-		return true;
+		return { reclaimable: true, durablyAbandoned: true };
 	const now = Date.now();
 	const leaseStale = now - snapshot.mtimeMs > LEASE_STALE_MS;
 	const absoluteStale =
 		now - (snapshot.createdAtMs ?? snapshot.mtimeMs) > LEASE_ABSOLUTE_STALE_MS;
-	if (!leaseStale) return false;
+	if (!leaseStale)
+		return { reclaimable: false, durablyAbandoned: false };
 	if (
 		snapshot.pid !== undefined &&
 		isProcessAlive(snapshot.pid) &&
 		!absoluteStale
 	)
-		return false;
-	return true;
+		return { reclaimable: false, durablyAbandoned: false };
+	return { reclaimable: true, durablyAbandoned: false };
 }
 
 function runFileLeaseAbandonmentPath(
