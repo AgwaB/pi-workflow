@@ -1,7 +1,7 @@
 {
 	"schema": "pi-workflow-unit-test-inventory-v1",
 	"source": "unit.test.mjs",
-	"count": 521,
+	"count": 524,
 	"tests": [
 		{
 			"name": "public schemaVersion 1 parser accepts artifact graph and rejects non-artifactGraph top-level shapes",
@@ -223,6 +223,12 @@
 			"name": "artifactGraph runtime support omits failed control sources but passes status metadata",
 			"occurrence": 1,
 			"sha256": "c9a06ab2da4d7bb0e2e69d01bae81e27526cf728b6eb1286e4fc2bc8600c6ee3",
+			"domain": "artifact-web"
+		},
+		{
+			"name": "deep-review artifact-graph support lifecycle retains adverse needs-human artifacts after report failure",
+			"occurrence": 1,
+			"sha256": "c5bc0cf69d208251a44d263220c31aaff1ccb4a48ffae8f9e1d9e42f36f1de88",
 			"domain": "artifact-web"
 		},
 		{
@@ -738,25 +744,25 @@
 		{
 			"name": "bundled deep-research compacts audit packets before executive final",
 			"occurrence": 1,
-			"sha256": "750a488e7b029586733863ef381faa4ae6326e382f336992e05cc78ad587160e",
+			"sha256": "448963acd672aa551d791aff50bcc8b215f500115334024c248db7ccb7be474b",
 			"domain": "authoring-interface"
 		},
 		{
 			"name": "ambient runtime defaults do not override bundled stage thinking pins",
 			"occurrence": 1,
-			"sha256": "a9f285acb8bf3334c91f332d3aca25526739725a3f0aaae7ee78155fb9490d81",
+			"sha256": "0a06bec9ace88c32860586df65f94f04d739274d4c910ce14c0081e3a01e719f",
 			"domain": "authoring-interface"
 		},
 		{
 			"name": "explicit runtime thinking overrides bundled stage thinking pins",
 			"occurrence": 1,
-			"sha256": "67305405588815ab28563a3acba618e2dd2b92b0274842765b9a23fd7d2be550",
+			"sha256": "7bc6d8a4e7ec3e71e9869dafdeda83143cd15b9a3a1fc8a6a5b266a022c09baa",
 			"domain": "authoring-interface"
 		},
 		{
 			"name": "deep-research sanitizer clamps preserved claims to schema cap with diagnostics",
 			"occurrence": 1,
-			"sha256": "6f7e2f377ddbbb380126c8356835a243bfacb25ed23b60d277461a25c5a3372c",
+			"sha256": "4faec54c9081c58feb91dbf5ce1e925901ed6eb9b673cff58b4024338395b697",
 			"domain": "authoring-interface"
 		},
 		{
@@ -948,7 +954,7 @@
 		{
 			"name": "bundled workflows compile warning-free and deep-review leaves reviewer fanout unconstrained",
 			"occurrence": 1,
-			"sha256": "374f475a74a342846c0a3ce6cec175728f19900bd7c45b2e71a63ffa3822b624",
+			"sha256": "61ef42c2eb5e04e91e1c52ec887ceb86af9b494c237374fbebacd33937bade02",
 			"domain": "authoring-interface"
 		},
 		{
@@ -1080,13 +1086,13 @@
 		{
 			"name": "deep-research verification tier planner enforces sanitize schema caps",
 			"occurrence": 1,
-			"sha256": "5f508e7b28e755fe82df4a7d6221bfd3b21ee13a3fba80344d15283d61d4d2d0",
+			"sha256": "c4652e0026cbbdc78dfcba15410c9d5528a895c2c53d081088032e02beb21eff",
 			"domain": "authoring-interface"
 		},
 		{
 			"name": "deep-review report schema accepts only bounded narrative synthesis",
 			"occurrence": 1,
-			"sha256": "825377f010f0675eb8bad94f654f5ad3e1dd0045bc583351cb21b0a4db9b9c81",
+			"sha256": "931272f2c793c1f9e576790f1fb8a16a78e8ba0291435d46c435fe2709570831",
 			"domain": "authoring-interface"
 		},
 		{
@@ -1603,6 +1609,18 @@
 			"name": "deep-review batch partition demotes summary-only KEEP verdicts",
 			"occurrence": 1,
 			"sha256": "de4653815070d44d4e4e45def915528075424b5e6d6057bbba21b16c72d0f15a",
+			"domain": "core-runtime"
+		},
+		{
+			"name": "deep-review bounded report packet caps a >50KiB ledger while the renderer emits every finding",
+			"occurrence": 1,
+			"sha256": "4259834758d871801683ce54116d01ffdeffca903e39c223a0d566ad294f2d4c",
+			"domain": "core-runtime"
+		},
+		{
+			"name": "deep-review report synthesis stays conservative for partial sources",
+			"occurrence": 1,
+			"sha256": "038bc5258593c0a1ac4459757e640fa737141bb61b381ae0828279a90f803f0f",
 			"domain": "core-runtime"
 		},
 		{

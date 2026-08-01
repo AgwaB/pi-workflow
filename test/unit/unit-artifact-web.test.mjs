@@ -2733,6 +2733,159 @@ test("artifactGraph runtime support omits failed control sources but passes stat
 	}
 });
 
+test("deep-review artifact-graph support lifecycle retains adverse needs-human artifacts after report failure", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const workflowDir = join(cwd, "workflows", "deep-review-adverse");
+		const helperDir = join(workflowDir, "helpers");
+		mkdirSync(helperDir, { recursive: true });
+		for (const helperName of [
+			"finding-pipeline.mjs",
+			"render-review-report.mjs",
+		]) {
+			writeFileSync(
+				join(helperDir, helperName),
+				readFileSync(
+					join(
+						process.cwd(),
+						"workflows",
+						"deep-review",
+						"helpers",
+						helperName,
+					),
+					"utf8",
+				),
+			);
+		}
+		const specPath = join(workflowDir, "spec.json");
+		const spec = workflowSpec("unit-scout", {
+			artifactGraph: {
+				stages: [
+					{ id: "dedup-findings", type: "single", prompt: "Dedup." },
+					{
+						id: "devil-advocate",
+						type: "single",
+						after: [],
+						prompt: "Verify.",
+					},
+					{
+						id: "partition-verdicts",
+						from: ["dedup-findings", "devil-advocate"],
+						sourcePolicy: "partial",
+						support: {
+							uses: "./helpers/finding-pipeline.mjs",
+							options: {
+								mode: "partition",
+								dedupStage: "dedup-findings",
+							},
+						},
+					},
+					{
+						id: "report",
+						type: "reduce",
+						from: "partition-verdicts",
+						sourcePolicy: "partial",
+						prompt: "Synthesize.",
+					},
+					{
+						id: "final",
+						from: ["report", "partition-verdicts"],
+						sourcePolicy: "partial",
+						support: { uses: "./helpers/render-review-report.mjs" },
+					},
+				],
+			},
+		});
+		writeFileSync(specPath, JSON.stringify(spec));
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Retain adverse evidence through report failure",
+			specPath,
+		});
+		assert.deepEqual(compiled.warnings, []);
+		const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		const title = "Ambiguous adverse lifecycle behavior";
+		await completeTask(cwd, taskBySpec(run, "dedup-findings.main"), {
+			findings: [
+				{
+					findingId: "finding-adverse",
+					rootCauseId: "root-adverse",
+					title,
+					severity: "high",
+					file: "src/adverse.ts",
+					locations: [{ file: "src/adverse.ts", line: 17 }],
+					evidenceQuotes: ["adverseLifecycle()"],
+					recommendedAction: "Resolve the lifecycle contract.",
+				},
+			],
+		});
+		await completeTask(
+			cwd,
+			taskBySpec(run, "devil-advocate.main"),
+			{},
+			"failed",
+		);
+		await completeTask(cwd, taskBySpec(run, "report.main"), {}, "failed");
+		await writeRunRecord(cwd, run);
+
+		await scheduleRun(cwd, run.runId, compiled);
+		const updated = await readRunRecord(cwd, run.runId);
+		const partitionTask = taskBySpec(updated, "partition-verdicts.main");
+		const finalTask = taskBySpec(updated, "final.main");
+		assert.equal(partitionTask.status, "completed");
+		assert.equal(finalTask.status, "failed");
+		assert.equal(finalTask.statusDetail, "support_declared_failed");
+		const partitionDir = dirname(join(cwd, partitionTask.files.result));
+		const partition = JSON.parse(
+			readFileSync(join(partitionDir, "control.json"), "utf8"),
+		);
+		assert.equal(partition.partitionSummary.needsHuman, 1);
+		assert.equal(partition.partitionSummary.partialFailures, 1);
+		assert.equal(partition.partitions.needsHuman[0].findingId, "finding-adverse");
+		assert.deepEqual(partition.partitions.needsHuman[0].locations, [
+			{ file: "src/adverse.ts", line: 17 },
+		]);
+		assert.deepEqual(partition.partitions.needsHuman[0].evidenceQuotes, [
+			"adverseLifecycle()",
+		]);
+		assert.ok(partition.reportPacket.actualChars <= 15000);
+
+		const finalDir = dirname(join(cwd, finalTask.files.result));
+		const finalControl = JSON.parse(
+			readFileSync(join(finalDir, "control.json"), "utf8"),
+		);
+		const finalResult = JSON.parse(
+			readFileSync(join(finalDir, "result.json"), "utf8"),
+		);
+		assert.equal(finalControl.status, "failed");
+		assert.equal(finalControl.gates.renderedAllNeedsHuman, true);
+		assert.equal(finalControl.gates.reportSynthesisAvailable, false);
+		assert.deepEqual(finalControl.renderedNeedsHumanIds, ["finding-adverse"]);
+		assert.deepEqual(finalControl.sourceArtifacts, [
+			"partition-verdicts.control.json",
+		]);
+		assert.match(finalControl.markdown, /report_synthesis_failed/);
+		assert.match(finalControl.markdown, /Review coverage is partial/);
+		assert.match(finalControl.markdown, /Ambiguous adverse lifecycle behavior/);
+		assert.equal(finalResult.status, "failed");
+		assert.ok(readFileSync(join(finalDir, "analysis.md"), "utf8").length > 0);
+		assert.deepEqual(
+			JSON.parse(readFileSync(join(finalDir, "refs.json"), "utf8")),
+			[],
+		);
+		assert.ok(readFileSync(join(finalDir, "raw.md"), "utf8").length > 0);
+	} finally {
+		rmSync(cwd, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 10,
+		});
+	}
+});
+
 test("artifactGraph runtime support marks helper errors as failed", async () => {
 	const cwd = makeProject();
 	try {

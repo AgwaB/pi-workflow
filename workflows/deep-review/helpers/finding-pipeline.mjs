@@ -15,10 +15,30 @@
 //                 default deep-review workflow still uses one verifier per
 //                 finding.
 
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
 const VERDICTS = ["KEEP", "WEAKEN", "DROP", "NEEDS_HUMAN"];
+const REPORT_PACKET_SCHEMA = "deep-review-report-packet-v1";
+const REPORT_PACKET_MAX_CHARS = 15_000;
+const REPORT_PACKET_LIMITS = Object.freeze({
+	findingsPerPartition: 4,
+	findingIdChars: 64,
+	findingTitleChars: 220,
+	severityChars: 32,
+	recommendedActionChars: 220,
+	partialFailures: 4,
+	partialFailureSourceChars: 128,
+	partialFailureStatusChars: 32,
+	partialFailureDetailChars: 160,
+	supportNotes: 4,
+	supportNoteTitleChars: 160,
+	supportNoteReasonChars: 140,
+	supportingFindingChars: 96,
+	normalizationNotes: 4,
+	normalizationNoteChars: 200,
+});
 
 function asObjects(value) {
 	if (Array.isArray(value))
@@ -527,7 +547,11 @@ function quoteMatchLine(text, quote) {
 function cloneExistingContextPacket(packet) {
 	if (!packet || typeof packet !== "object" || Array.isArray(packet))
 		return null;
-	return JSON.parse(JSON.stringify(packet));
+	try {
+		return JSON.parse(JSON.stringify(packet));
+	} catch (error) {
+		throw error;
+	}
 }
 
 function buildFindingContextPacket(finding, id, options = {}, context = {}) {
@@ -1258,6 +1282,287 @@ function buildReportContext(partitions, supportNotes, partialFailures) {
 		})),
 		partialFailures,
 	};
+}
+
+function canonicalJsonValue(value) {
+	if (Array.isArray(value)) {
+		return value.map((item) =>
+			item === undefined ? null : canonicalJsonValue(item),
+		);
+	}
+	if (!value || typeof value !== "object") {
+		return typeof value === "number" && !Number.isFinite(value) ? null : value;
+	}
+	const canonical = {};
+	for (const key of Object.keys(value).sort()) {
+		if (value[key] !== undefined) canonical[key] = canonicalJsonValue(value[key]);
+	}
+	return canonical;
+}
+
+function evidenceLedgerDigest(value) {
+	return createHash("sha256")
+		.update(JSON.stringify(canonicalJsonValue(value)))
+		.digest("hex");
+}
+
+function exactReportCount(value, field) {
+	const count = Number(value ?? 0);
+	if (!Number.isSafeInteger(count) || count < 0) {
+		throw new Error(
+			`finding-pipeline: report packet ${field} must be a non-negative safe integer`,
+		);
+	}
+	return count;
+}
+
+function boundedReportText(value, maxChars, truncation, fallback) {
+	const text = String(value ?? "") || fallback;
+	const rawLimit = Math.min(text.length, maxChars);
+	if (
+		text.length <= maxChars &&
+		JSON.stringify(text).length - 2 <= maxChars
+	) {
+		return text;
+	}
+	let low = 0;
+	let high = rawLimit;
+	while (low < high) {
+		const middle = Math.ceil((low + high) / 2);
+		if (JSON.stringify(text.slice(0, middle)).length - 2 <= maxChars) {
+			low = middle;
+		} else {
+			high = middle - 1;
+		}
+	}
+	truncation.truncatedStrings += 1;
+	truncation.omittedStringChars += text.length - low;
+	return text.slice(0, low);
+}
+
+function boundedOptionalReportText(value, maxChars, truncation) {
+	const text = String(value ?? "");
+	if (!text.trim()) return undefined;
+	return boundedReportText(text, maxChars, truncation, "");
+}
+
+function compactFindingForReportPacket(item, truncation) {
+	const recommendedAction = boundedOptionalReportText(
+		item.recommendedAction,
+		REPORT_PACKET_LIMITS.recommendedActionChars,
+		truncation,
+	);
+	return {
+		findingId: boundedReportText(
+			item.findingId ?? item.id,
+			REPORT_PACKET_LIMITS.findingIdChars,
+			truncation,
+			"unknown-finding",
+		),
+		title: boundedReportText(
+			item.title,
+			REPORT_PACKET_LIMITS.findingTitleChars,
+			truncation,
+			"Untitled finding",
+		),
+		severity: boundedReportText(
+			item.severity,
+			REPORT_PACKET_LIMITS.severityChars,
+			truncation,
+			"unknown",
+		),
+		...(recommendedAction ? { recommendedAction } : {}),
+	};
+}
+
+function compactSupportNoteForReportPacket(note, truncation) {
+	const severity = boundedOptionalReportText(
+		note.severity,
+		REPORT_PACKET_LIMITS.severityChars,
+		truncation,
+	);
+	const reason = boundedOptionalReportText(
+		note.reason,
+		REPORT_PACKET_LIMITS.supportNoteReasonChars,
+		truncation,
+	);
+	const supportingFindingOf = boundedOptionalReportText(
+		note.supportingFindingOf,
+		REPORT_PACKET_LIMITS.supportingFindingChars,
+		truncation,
+	);
+	return {
+		title: boundedReportText(
+			note.title,
+			REPORT_PACKET_LIMITS.supportNoteTitleChars,
+			truncation,
+			"Untitled supporting observation",
+		),
+		...(severity ? { severity } : {}),
+		...(reason ? { reason } : {}),
+		...(supportingFindingOf ? { supportingFindingOf } : {}),
+	};
+}
+
+function compactPartialFailureForReportPacket(status, truncation) {
+	const source =
+		status.source ??
+		status.specId ??
+		status.taskId ??
+		status.displayName ??
+		"unknown-source";
+	const statusDetail = boundedOptionalReportText(
+		status.statusDetail ?? status.errorType ?? status.lastMessage,
+		REPORT_PACKET_LIMITS.partialFailureDetailChars,
+		truncation,
+	);
+	return {
+		source: boundedReportText(
+			source,
+			REPORT_PACKET_LIMITS.partialFailureSourceChars,
+			truncation,
+			"unknown-source",
+		),
+		status: boundedReportText(
+			status.status,
+			REPORT_PACKET_LIMITS.partialFailureStatusChars,
+			truncation,
+			"unknown",
+		),
+		...(statusDetail ? { statusDetail } : {}),
+	};
+}
+
+function finalizeReportPacketCharCount(packet) {
+	for (let iteration = 0; iteration < 8; iteration += 1) {
+		const measured = JSON.stringify(packet).length;
+		if (packet.actualChars === measured) break;
+		packet.actualChars = measured;
+	}
+	const actualChars = JSON.stringify(packet).length;
+	if (packet.actualChars !== actualChars) {
+		throw new Error(
+			"finding-pipeline: report packet character count did not stabilize",
+		);
+	}
+	if (actualChars > REPORT_PACKET_MAX_CHARS) {
+		throw new Error(
+			`finding-pipeline: report packet exceeded ${REPORT_PACKET_MAX_CHARS} characters (${actualChars})`,
+		);
+	}
+	return packet;
+}
+
+function buildReportPacket({
+	partitions,
+	supportNotes,
+	sourceStatusSummary: statusSummary,
+	partitionSummary,
+	normalizationNotes,
+}) {
+	const truncation = { truncatedStrings: 0, omittedStringChars: 0 };
+	const keep = partitions.keep
+		.slice(0, REPORT_PACKET_LIMITS.findingsPerPartition)
+		.map((item) => compactFindingForReportPacket(item, truncation));
+	const weaken = partitions.weaken
+		.slice(0, REPORT_PACKET_LIMITS.findingsPerPartition)
+		.map((item) => compactFindingForReportPacket(item, truncation));
+	const needsHuman = partitions.needsHuman
+		.slice(0, REPORT_PACKET_LIMITS.findingsPerPartition)
+		.map((item) => compactFindingForReportPacket(item, truncation));
+	const supportNoteSummaries = supportNotes
+		.slice(0, REPORT_PACKET_LIMITS.supportNotes)
+		.map((note) => compactSupportNoteForReportPacket(note, truncation));
+	const allPartialFailures = asObjects(statusSummary.partialFailures);
+	const partialFailures = allPartialFailures
+		.slice(0, REPORT_PACKET_LIMITS.partialFailures)
+		.map((status) => compactPartialFailureForReportPacket(status, truncation));
+	const boundedNormalizationNotes = normalizationNotes
+		.slice(0, REPORT_PACKET_LIMITS.normalizationNotes)
+		.map((note) =>
+			boundedReportText(
+				note,
+				REPORT_PACKET_LIMITS.normalizationNoteChars,
+				truncation,
+				"Unspecified normalization note",
+			),
+		);
+	const exactPartitionSummary = {
+		keep: partitions.keep.length,
+		weaken: partitions.weaken.length,
+		drop: partitions.drop.length,
+		needsHuman: partitions.needsHuman.length,
+		supportNotes: supportNotes.length,
+		mergedFindings: exactReportCount(
+			partitionSummary.mergedFindings,
+			"partitionSummary.mergedFindings",
+		),
+		verdictsReceived: exactReportCount(
+			partitionSummary.verdictsReceived,
+			"partitionSummary.verdictsReceived",
+		),
+		batchIntegrityIssues: exactReportCount(
+			partitionSummary.batchIntegrityIssues,
+			"partitionSummary.batchIntegrityIssues",
+		),
+		reviewerFindings: exactReportCount(
+			partitionSummary.reviewerFindings,
+			"partitionSummary.reviewerFindings",
+		),
+		missingVerdicts: exactReportCount(
+			partitionSummary.missingVerdicts,
+			"partitionSummary.missingVerdicts",
+		),
+		partialFailures: allPartialFailures.length,
+	};
+	const exactSourceStatusSummary = {
+		total: exactReportCount(statusSummary.total, "sourceStatusSummary.total"),
+		completed: exactReportCount(
+			statusSummary.completed,
+			"sourceStatusSummary.completed",
+		),
+		nonCompleted: exactReportCount(
+			statusSummary.nonCompleted,
+			"sourceStatusSummary.nonCompleted",
+		),
+		partialFailureCount: allPartialFailures.length,
+		partialFailures,
+	};
+	const digest = evidenceLedgerDigest({
+		partitions,
+		supportNotes,
+		sourceStatusSummary: statusSummary,
+		partitionSummary,
+		normalizationNotes,
+	});
+	const packet = {
+		schema: REPORT_PACKET_SCHEMA,
+		digest,
+		maxChars: REPORT_PACKET_MAX_CHARS,
+		actualChars: 0,
+		partitionSummary: exactPartitionSummary,
+		sourceStatusSummary: exactSourceStatusSummary,
+		reportContext: {
+			keep,
+			weaken,
+			needsHuman,
+			supportNoteSummaries,
+		},
+		normalizationNotes: boundedNormalizationNotes,
+		overflowCounts: {
+			keep: partitions.keep.length - keep.length,
+			weaken: partitions.weaken.length - weaken.length,
+			drop: partitions.drop.length,
+			needsHuman: partitions.needsHuman.length - needsHuman.length,
+			supportNotes: supportNotes.length - supportNoteSummaries.length,
+			partialFailures: allPartialFailures.length - partialFailures.length,
+			normalizationNotes:
+				normalizationNotes.length - boundedNormalizationNotes.length,
+			truncatedStrings: truncation.truncatedStrings,
+			omittedStringChars: truncation.omittedStringChars,
+		},
+	};
+	return finalizeReportPacketCharCount(packet);
 }
 
 function asBatchArray(value) {
@@ -2066,16 +2371,25 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 		supportNotes,
 		partialFailures,
 	);
+	const mergedSourceStatusSummary = mergeSourceStatusSummary(
+		directStatusSummary,
+		partialFailures,
+	);
+	const reportPacket = buildReportPacket({
+		partitions,
+		supportNotes,
+		sourceStatusSummary: mergedSourceStatusSummary,
+		partitionSummary,
+		normalizationNotes,
+	});
 
 	return {
 		partitions,
 		supportNotes,
 		reportContext,
-		digest: `partition: keep=${partitionSummary.keep}, weaken=${partitionSummary.weaken}, drop=${partitionSummary.drop}, needsHuman=${partitionSummary.needsHuman}, missingVerdicts=${missingVerdicts}, partialFailures=${partialFailures.length}, supportNotes=${supportNotes.length}`,
-		sourceStatusSummary: mergeSourceStatusSummary(
-			directStatusSummary,
-			partialFailures,
-		),
+		reportPacket,
+		digest: `partition: keep=${partitionSummary.keep}, weaken=${partitionSummary.weaken}, drop=${partitionSummary.drop}, needsHuman=${partitionSummary.needsHuman}, missingVerdicts=${missingVerdicts}, partialFailures=${partialFailures.length}, supportNotes=${supportNotes.length}, ledgerDigest=${reportPacket.digest}`,
+		sourceStatusSummary: mergedSourceStatusSummary,
 		partitionSummary,
 		normalizationNotes,
 	};

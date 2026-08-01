@@ -7032,6 +7032,193 @@ test("deep-review batch partition demotes summary-only KEEP verdicts", async () 
 	);
 });
 
+test("deep-review bounded report packet caps a >50KiB ledger while the renderer emits every finding", async () => {
+	const helperDir = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-review",
+		"helpers",
+	);
+	const pipeline = (
+		await import(
+			`${pathToFileURL(join(helperDir, "finding-pipeline.mjs")).href}?test=${Date.now()}`
+		)
+	).default;
+	const render = (
+		await import(
+			`${pathToFileURL(join(helperDir, "render-review-report.mjs")).href}?test=${Date.now()}`
+		)
+	).default;
+	const verdicts = ["KEEP", "WEAKEN", "NEEDS_HUMAN"];
+	const findings = [];
+	const sources = {};
+	for (let index = 0; index < 18; index += 1) {
+		const ordinal = String(index + 1).padStart(2, "0");
+		const title = `Ledger finding ${ordinal} ${'"\\n'.repeat(180)}`;
+		const finding = {
+			findingId: `finding-${ordinal}`,
+			rootCauseId: `root-${ordinal}`,
+			title,
+			severity: index % 2 === 0 ? "high" : "medium",
+			file: `src/ledger-${ordinal}.ts`,
+			locations: [{ file: `src/ledger-${ordinal}.ts`, line: index + 1 }],
+			evidenceQuotes: [`evidence-${ordinal}:${"x".repeat(3200)}`],
+			recommendedAction: `repair-${ordinal}:${'"\\n'.repeat(180)}`,
+		};
+		findings.push(finding);
+		sources[`devil-advocate.item-${ordinal}`] = {
+			finding: { title },
+			verdict: verdicts[Math.floor(index / 6)],
+		};
+	}
+	sources["dedup-findings.main"] = { findings };
+
+	const partition = await pipeline({
+		sources,
+		options: { mode: "partition", dedupStage: "dedup-findings" },
+	});
+	const canonicalLedger = {
+		partitions: partition.partitions,
+		supportNotes: partition.supportNotes,
+		sourceStatusSummary: partition.sourceStatusSummary,
+		partitionSummary: partition.partitionSummary,
+		normalizationNotes: partition.normalizationNotes,
+	};
+	assert.ok(JSON.stringify(canonicalLedger).length > 50 * 1024);
+	assert.equal(partition.reportPacket.maxChars, 15000);
+	assert.equal(
+		partition.reportPacket.actualChars,
+		JSON.stringify(partition.reportPacket).length,
+	);
+	assert.ok(partition.reportPacket.actualChars <= 15000);
+	assert.deepEqual(
+		{
+			keep: partition.reportPacket.reportContext.keep.length,
+			weaken: partition.reportPacket.reportContext.weaken.length,
+			needsHuman: partition.reportPacket.reportContext.needsHuman.length,
+		},
+		{ keep: 4, weaken: 4, needsHuman: 4 },
+	);
+	assert.deepEqual(
+		{
+			keep: partition.reportPacket.overflowCounts.keep,
+			weaken: partition.reportPacket.overflowCounts.weaken,
+			needsHuman: partition.reportPacket.overflowCounts.needsHuman,
+		},
+		{ keep: 2, weaken: 2, needsHuman: 2 },
+	);
+	assert.ok(partition.reportPacket.overflowCounts.truncatedStrings > 0);
+	assert.ok(partition.reportPacket.overflowCounts.omittedStringChars > 0);
+
+	const rendered = await render({
+		sources: {
+			"partition-verdicts.main": partition,
+			"report.main": {
+				summary: "Material findings remain.",
+				verdict: "NEEDS_WORK",
+				risks: [],
+				recommendedNextAction: "Address every ledger finding.",
+			},
+		},
+		context: {},
+	});
+	assert.equal(rendered.status, "passed");
+	assert.equal(rendered.gates.renderedAllFindings, true);
+	assert.equal(rendered.gates.renderedAllNeedsHuman, true);
+	assert.equal(rendered.renderedFindingIds.length, 12);
+	assert.equal(rendered.renderedNeedsHumanIds.length, 6);
+	for (const finding of findings) {
+		assert.match(rendered.markdown, new RegExp(finding.findingId));
+	}
+});
+
+test("deep-review report synthesis stays conservative for partial sources", async () => {
+	const helperDir = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-review",
+		"helpers",
+	);
+	const pipeline = (
+		await import(
+			`${pathToFileURL(join(helperDir, "finding-pipeline.mjs")).href}?partial=${Date.now()}`
+		)
+	).default;
+	const render = (
+		await import(
+			`${pathToFileURL(join(helperDir, "render-review-report.mjs")).href}?partial=${Date.now()}`
+		)
+	).default;
+	const title = "A completed verifier kept this finding";
+	const partition = await pipeline({
+		sources: {
+			"dedup-findings.main": {
+				findings: [
+					{
+						findingId: "finding-partial",
+						rootCauseId: "root-partial",
+						title,
+						severity: "high",
+						file: "src/partial.ts",
+						locations: [{ file: "src/partial.ts", line: 9 }],
+						evidenceQuotes: ["unsafePartial()"],
+					},
+				],
+			},
+			"devil-advocate.item-001": {
+				finding: { title },
+				verdict: "KEEP",
+			},
+		},
+		options: { mode: "partition", dedupStage: "dedup-findings" },
+		context: {
+			sourceStatuses: [
+				{
+					source: "devil-advocate.item-001",
+					specId: "devil-advocate.item-001",
+					status: "completed",
+				},
+				{
+					source: "devil-advocate.item-002",
+					specId: "devil-advocate.item-002",
+					status: "failed",
+					statusDetail: "model",
+				},
+			],
+		},
+	});
+	assert.equal(partition.partitionSummary.keep, 1);
+	assert.equal(partition.partitionSummary.partialFailures, 1);
+	assert.equal(partition.reportPacket.partitionSummary.partialFailures, 1);
+	assert.equal(partition.reportPacket.sourceStatusSummary.total, 2);
+	assert.equal(partition.reportPacket.sourceStatusSummary.completed, 1);
+	assert.equal(partition.reportPacket.sourceStatusSummary.nonCompleted, 1);
+	assert.equal(partition.reportPacket.sourceStatusSummary.partialFailureCount, 1);
+	assert.equal(partition.reportPacket.sourceStatusSummary.partialFailures.length, 1);
+
+	const rendered = await render({
+		sources: {
+			"partition-verdicts.main": partition,
+			"report.main": {
+				summary: "The completed verifier found work.",
+				verdict: "NEEDS_WORK",
+				risks: [],
+				recommendedNextAction: "Fix it.",
+			},
+		},
+		context: {},
+	});
+	assert.equal(rendered.status, "failed");
+	assert.equal(rendered.gates.reportVerdictConsistent, false);
+	assert.match(rendered.markdown, /Verdict: \*\*PARTIAL_REVIEW\*\*/);
+	assert.match(rendered.markdown, /Review coverage is partial/);
+	assert.match(rendered.markdown, /A completed verifier kept this finding/);
+});
+
 test("deep-review render-review-report emits finding cards from partition ledger", async () => {
 	const cwd = makeProject();
 	try {

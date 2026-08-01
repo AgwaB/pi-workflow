@@ -11,11 +11,12 @@
   "properties": {
     "schema": {
       "type": "string",
-      "minLength": 1
+      "const": "stage-control-v1"
     },
     "digest": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "maxLength": 1200
     },
     "summary": {
       "type": "string",

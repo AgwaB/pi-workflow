@@ -6,6 +6,7 @@
     "partitions",
     "supportNotes",
     "reportContext",
+    "reportPacket",
     "sourceStatusSummary",
     "partitionSummary",
     "normalizationNotes"
@@ -281,6 +282,200 @@
           }
         }
       }
+    },
+    "reportPacket": {
+      "type": "object",
+      "required": [
+        "schema",
+        "digest",
+        "maxChars",
+        "actualChars",
+        "partitionSummary",
+        "sourceStatusSummary",
+        "reportContext",
+        "normalizationNotes",
+        "overflowCounts"
+      ],
+      "properties": {
+        "schema": {
+          "type": "string",
+          "const": "deep-review-report-packet-v1"
+        },
+        "digest": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "maxChars": {
+          "type": "number",
+          "const": 15000
+        },
+        "actualChars": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 15000
+        },
+        "partitionSummary": {
+          "type": "object",
+          "required": [
+            "keep",
+            "weaken",
+            "drop",
+            "needsHuman",
+            "supportNotes",
+            "mergedFindings",
+            "verdictsReceived",
+            "batchIntegrityIssues",
+            "reviewerFindings",
+            "missingVerdicts",
+            "partialFailures"
+          ],
+          "properties": {
+            "keep": { "type": "number", "minimum": 0, "maximum": 9007199254740991 },
+            "weaken": { "type": "number", "minimum": 0, "maximum": 9007199254740991 },
+            "drop": { "type": "number", "minimum": 0, "maximum": 9007199254740991 },
+            "needsHuman": { "type": "number", "minimum": 0, "maximum": 9007199254740991 },
+            "supportNotes": { "type": "number", "minimum": 0, "maximum": 9007199254740991 },
+            "mergedFindings": { "type": "number", "minimum": 0, "maximum": 9007199254740991 },
+            "verdictsReceived": { "type": "number", "minimum": 0, "maximum": 9007199254740991 },
+            "batchIntegrityIssues": { "type": "number", "minimum": 0, "maximum": 9007199254740991 },
+            "reviewerFindings": { "type": "number", "minimum": 0, "maximum": 9007199254740991 },
+            "missingVerdicts": { "type": "number", "minimum": 0, "maximum": 9007199254740991 },
+            "partialFailures": { "type": "number", "minimum": 0, "maximum": 9007199254740991 }
+          },
+          "additionalProperties": false
+        },
+        "sourceStatusSummary": {
+          "type": "object",
+          "required": [
+            "total",
+            "completed",
+            "nonCompleted",
+            "partialFailureCount",
+            "partialFailures"
+          ],
+          "properties": {
+            "total": { "type": "number", "minimum": 0, "maximum": 9007199254740991 },
+            "completed": { "type": "number", "minimum": 0, "maximum": 9007199254740991 },
+            "nonCompleted": { "type": "number", "minimum": 0, "maximum": 9007199254740991 },
+            "partialFailureCount": { "type": "number", "minimum": 0, "maximum": 9007199254740991 },
+            "partialFailures": {
+              "type": "array",
+              "maxItems": 4,
+              "items": {
+                "type": "object",
+                "required": ["source", "status"],
+                "properties": {
+                  "source": { "type": "string", "minLength": 1, "maxLength": 128 },
+                  "status": { "type": "string", "minLength": 1, "maxLength": 32 },
+                  "statusDetail": { "type": "string", "minLength": 1, "maxLength": 160 }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "reportContext": {
+          "type": "object",
+          "required": ["keep", "weaken", "needsHuman", "supportNoteSummaries"],
+          "properties": {
+            "keep": {
+              "type": "array",
+              "maxItems": 4,
+              "items": {
+                "type": "object",
+                "required": ["findingId", "title", "severity"],
+                "properties": {
+                  "findingId": { "type": "string", "minLength": 1, "maxLength": 64 },
+                  "title": { "type": "string", "minLength": 1, "maxLength": 220 },
+                  "severity": { "type": "string", "minLength": 1, "maxLength": 32 },
+                  "recommendedAction": { "type": "string", "minLength": 1, "maxLength": 220 }
+                },
+                "additionalProperties": false
+              }
+            },
+            "weaken": {
+              "type": "array",
+              "maxItems": 4,
+              "items": {
+                "type": "object",
+                "required": ["findingId", "title", "severity"],
+                "properties": {
+                  "findingId": { "type": "string", "minLength": 1, "maxLength": 64 },
+                  "title": { "type": "string", "minLength": 1, "maxLength": 220 },
+                  "severity": { "type": "string", "minLength": 1, "maxLength": 32 },
+                  "recommendedAction": { "type": "string", "minLength": 1, "maxLength": 220 }
+                },
+                "additionalProperties": false
+              }
+            },
+            "needsHuman": {
+              "type": "array",
+              "maxItems": 4,
+              "items": {
+                "type": "object",
+                "required": ["findingId", "title", "severity"],
+                "properties": {
+                  "findingId": { "type": "string", "minLength": 1, "maxLength": 64 },
+                  "title": { "type": "string", "minLength": 1, "maxLength": 220 },
+                  "severity": { "type": "string", "minLength": 1, "maxLength": 32 },
+                  "recommendedAction": { "type": "string", "minLength": 1, "maxLength": 220 }
+                },
+                "additionalProperties": false
+              }
+            },
+            "supportNoteSummaries": {
+              "type": "array",
+              "maxItems": 4,
+              "items": {
+                "type": "object",
+                "required": ["title"],
+                "properties": {
+                  "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+                  "severity": { "type": "string", "minLength": 1, "maxLength": 32 },
+                  "reason": { "type": "string", "minLength": 1, "maxLength": 140 },
+                  "supportingFindingOf": { "type": "string", "minLength": 1, "maxLength": 96 }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "normalizationNotes": {
+          "type": "array",
+          "maxItems": 4,
+          "items": { "type": "string", "minLength": 1, "maxLength": 200 }
+        },
+        "overflowCounts": {
+          "type": "object",
+          "required": [
+            "keep",
+            "weaken",
+            "drop",
+            "needsHuman",
+            "supportNotes",
+            "partialFailures",
+            "normalizationNotes",
+            "truncatedStrings",
+            "omittedStringChars"
+          ],
+          "properties": {
+            "keep": { "type": "number", "minimum": 0, "maximum": 9007199254740991 },
+            "weaken": { "type": "number", "minimum": 0, "maximum": 9007199254740991 },
+            "drop": { "type": "number", "minimum": 0, "maximum": 9007199254740991 },
+            "needsHuman": { "type": "number", "minimum": 0, "maximum": 9007199254740991 },
+            "supportNotes": { "type": "number", "minimum": 0, "maximum": 9007199254740991 },
+            "partialFailures": { "type": "number", "minimum": 0, "maximum": 9007199254740991 },
+            "normalizationNotes": { "type": "number", "minimum": 0, "maximum": 9007199254740991 },
+            "truncatedStrings": { "type": "number", "minimum": 0, "maximum": 9007199254740991 },
+            "omittedStringChars": { "type": "number", "minimum": 0, "maximum": 9007199254740991 }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
     },
     "sourceStatusSummary": {
       "type": "object",
