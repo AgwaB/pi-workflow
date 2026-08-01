@@ -931,7 +931,10 @@ async function bindWorkflowFeedbackAudience(
 				Math.max(0, deadline - Date.now()),
 				signal,
 			);
-			if (!lease) return false;
+			if (!lease) {
+				const existing = await readWorkflowFeedbackAudience(ctx.cwd, runId);
+				return existing?.sessionId === sessionId;
+			}
 			const existing = await readWorkflowFeedbackAudience(ctx.cwd, runId);
 			if (existing) {
 				const matches = existing.sessionId === sessionId;
@@ -985,9 +988,11 @@ function waitForWorkflowFeedbackRetry(
 		}, ms);
 		const onAbort = () => {
 			clearTimeout(timer);
+			signal.removeEventListener("abort", onAbort);
 			reject(signal.reason);
 		};
 		signal.addEventListener("abort", onAbort, { once: true });
+		if (signal.aborted) onAbort();
 	});
 }
 
@@ -1662,7 +1667,7 @@ function legacyWorkflowFeedbackDeliveryTimestamp(
 	const resumedAtOrAfterDelivery = run.tasks.some((task) =>
 		(task.resumeEvents ?? []).some((event) => {
 			const resumeAtMs = Date.parse(event.at);
-			return Number.isFinite(resumeAtMs) && resumeAtMs >= deliveredAtMs;
+			return !Number.isFinite(resumeAtMs) || resumeAtMs >= deliveredAtMs;
 		}),
 	);
 	return resumedAtOrAfterDelivery ? undefined : timestamp;
@@ -1726,11 +1731,6 @@ async function workflowFeedbackDeliveryRecorded(
 		run.runId,
 	);
 	const epoch = workflowFeedbackTerminalEpoch(run);
-	const marker = await readWorkflowFeedbackDeliveryMarker(
-		join(ctx.cwd, ".pi", "workflows", run.runId, "feedback-delivery.json"),
-		run.runId,
-		sessionId,
-	);
 	const receiptFile = workflowFeedbackDeliveryReceiptPath(
 		ctx.cwd,
 		run.runId,
@@ -1745,6 +1745,13 @@ async function workflowFeedbackDeliveryRecorded(
 		)
 	)
 		return true;
+	// feedback-delivery.json is migration input only. Once the immutable
+	// epoch receipt exists, stale or malformed aggregate state is irrelevant.
+	const marker = await readWorkflowFeedbackDeliveryMarker(
+		join(ctx.cwd, ".pi", "workflows", run.runId, "feedback-delivery.json"),
+		run.runId,
+		sessionId,
+	);
 	const legacyTimestamp = legacyWorkflowFeedbackDeliveryTimestamp(
 		marker,
 		run,

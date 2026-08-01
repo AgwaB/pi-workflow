@@ -1203,7 +1203,7 @@ function rewriteCompiledBundlePaths(
 	compiled: CompiledWorkflow,
 	bundleDir: string,
 ): CompiledWorkflow {
-	const rewritten = structuredClone(compiled);
+	const rewritten = JSON.parse(JSON.stringify(compiled)) as CompiledWorkflow;
 	rewriteCompiledBundlePathsInValue(rewritten, bundleDir);
 	return rewritten;
 }
@@ -1421,14 +1421,7 @@ async function readJsonBundleFile(
 	ref: string,
 ): Promise<unknown | undefined> {
 	const text = await readBundleText(sourceRoot, ref);
-	if (text === undefined) return undefined;
-	try {
-		return JSON.parse(text);
-	} catch (error) {
-		throw new Error(`Invalid JSON workflow bundle reference: ${ref}`, {
-			cause: error,
-		});
-	}
+	return text === undefined ? undefined : JSON.parse(text);
 }
 
 async function readBundleText(
@@ -2561,7 +2554,9 @@ export function createTaskRunRecord(
 					)
 				: task.agentPath;
 	const taskArtifactGraph = task.artifactGraph
-		? structuredClone(task.artifactGraph)
+		? (JSON.parse(
+				JSON.stringify(task.artifactGraph),
+			) as typeof task.artifactGraph)
 		: undefined;
 	if (taskArtifactGraph) {
 		rewriteCompiledBundlePathsInValue(

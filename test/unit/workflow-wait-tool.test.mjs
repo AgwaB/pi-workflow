@@ -664,6 +664,67 @@ test("terminal delivery epochs allow same-status resume and migrate legacy marke
 		assert.equal(retainedLegacy.schema, "workflow-feedback-delivery-v1");
 		assert.equal(retainedLegacy.delivered.completed, "2026-07-25T00:00:02.000Z");
 		assert.equal((await feedbackReceipts(cwd, legacy.runId)).length, 1);
+		await writeFile(
+			join(cwd, ".pi", "workflows", legacy.runId, "feedback-delivery.json"),
+			"{ malformed legacy marker\n",
+		);
+		assert.deepEqual(
+			await deliverWorkflowFeedback(
+				feedbackContext(cwd, "session-legacy"),
+				{ sendMessage: () => (sends += 1) },
+				legacy,
+			),
+			{ status: "already-delivered" },
+		);
+		assert.equal(sends, 2);
+
+		const invalidResume = {
+			...legacy,
+			runId: "workflow_legacy_invalid_resume_time",
+			tasks: [
+				{
+					...legacy.tasks[0],
+					resumeEvents: [
+						{
+							at: "invalid-resume-time",
+							fromStatus: "completed",
+							fromStatusDetail: "completed",
+						},
+					],
+				},
+			],
+		};
+		await writeRunFixture(cwd, invalidResume);
+		await writeFeedbackAudience(
+			cwd,
+			invalidResume.runId,
+			"session-invalid-resume",
+		);
+		await writeFile(
+			join(
+				cwd,
+				".pi",
+				"workflows",
+				invalidResume.runId,
+				"feedback-delivery.json",
+			),
+			`${JSON.stringify({
+				schema: "workflow-feedback-delivery-v1",
+				runId: invalidResume.runId,
+				sessionId: "session-invalid-resume",
+				delivered: { completed: "2026-07-25T00:00:02.000Z" },
+			})}\n`,
+		);
+		let invalidResumeSends = 0;
+		assert.deepEqual(
+			await deliverWorkflowFeedback(
+				feedbackContext(cwd, "session-invalid-resume"),
+				{ sendMessage: () => (invalidResumeSends += 1) },
+				invalidResume,
+			),
+			{ status: "delivered" },
+		);
+		assert.equal(invalidResumeSends, 1);
 
 		const legacyResumed = {
 			...first,
