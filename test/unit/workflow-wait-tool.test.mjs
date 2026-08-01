@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
 	mkdir,
 	mkdtemp,
 	readFile,
+	readdir,
 	rename,
 	rm,
 	writeFile,
@@ -10,6 +13,9 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 import { awaitWithinWorkflowWaitBoundary } from "../../.tmp/unit/engine.js";
 import {
@@ -139,6 +145,56 @@ function sleep(ms) {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function terminalEpoch(run) {
+	return createHash("sha256")
+		.update(
+			JSON.stringify({
+				status: run.status,
+				tasks: [...run.tasks]
+					.sort((left, right) => left.taskId.localeCompare(right.taskId))
+					.map((task) => ({
+						taskId: task.taskId,
+						specId: task.specId,
+						status: task.status,
+						statusDetail: task.statusDetail,
+						startedAt: task.startedAt,
+						completedAt: task.completedAt,
+						exitCode: task.exitCode,
+						resumeEvents: task.resumeEvents ?? [],
+					})),
+			}),
+		)
+		.digest("hex");
+}
+
+function parseJsonFixture(text) {
+	try {
+		return JSON.parse(text);
+	} catch (error) {
+		throw new Error("invalid JSON test fixture", { cause: error });
+	}
+}
+
+async function feedbackReceipts(cwd, runId) {
+	const dir = join(
+		cwd,
+		".pi",
+		"workflows",
+		runId,
+		"feedback-delivery-receipts",
+	);
+	const files = await readdir(dir).catch((error) => {
+		if (error?.code === "ENOENT") return [];
+		throw error;
+	});
+	return Promise.all(
+		files.sort().map(async (file) => ({
+			file,
+			receipt: parseJsonFixture(await readFile(join(dir, file), "utf8")),
+		})),
+	);
+}
+
 async function eventually(action, timeoutMs = 1_000) {
 	const deadline = Date.now() + timeoutMs;
 	let lastError;
@@ -233,13 +289,26 @@ test("run-file lease retries release internally and abandons persistent failures
 		await assert.rejects(persistent.release(), /persistent release hook failed/);
 		assert.equal(persistentAttempts, 3);
 		setRunLeaseTestHooksForTests(undefined);
-		const reclaimed = await acquireRunFileLease(
-			cwd,
-			"workflow_hook_persistent",
-			"presentation",
+		const childScript = `
+			import { acquireRunFileLease } from ${JSON.stringify(
+				new URL("../../.tmp/unit/store.js", import.meta.url).href,
+			)};
+			const lease = await acquireRunFileLease(
+				process.env.RECLAIM_CWD,
+				"workflow_hook_persistent",
+				"presentation",
+				500,
+			);
+			if (!lease) throw new Error("child could not reclaim abandoned lease");
+			await lease.release();
+			process.stdout.write("reclaimed");
+		`;
+		const child = await execFileAsync(
+			process.execPath,
+			["--input-type=module", "-e", childScript],
+			{ env: { ...process.env, RECLAIM_CWD: cwd } },
 		);
-		assert.ok(reclaimed, "persistent release failure must be reclaimable now");
-		await reclaimed.release();
+		assert.equal(child.stdout, "reclaimed");
 
 		setRunLeaseTestHooksForTests({
 			onBeforeHeartbeat({ initial }) {
@@ -464,7 +533,7 @@ test("delivery claims enforce audience identity and report structured outcomes",
 	}
 });
 
-test("completion marker precedes best-effort UI notification", async () => {
+test("immutable completion receipt precedes best-effort UI notification", async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "workflow-wait-notify-"));
 	try {
 		const run = runRecord(cwd, { runId: "workflow_notify_best_effort" });
@@ -480,12 +549,20 @@ test("completion marker precedes best-effort UI notification", async () => {
 		);
 		assert.deepEqual(outcome, { status: "delivered" });
 		assert.equal(sends, 1);
-		const marker = JSON.parse(
-			await readFile(join(cwd, ".pi", "workflows", run.runId, "feedback-delivery.json"), "utf8"),
+		const receipts = await feedbackReceipts(cwd, run.runId);
+		assert.equal(receipts.length, 1);
+		assert.equal(
+			receipts[0].receipt.schema,
+			"workflow-feedback-delivery-receipt-v1",
 		);
-		assert.equal(marker.schema, "workflow-feedback-delivery-v2");
-		assert.equal(marker.sessionId, "session-notify");
-		assert.equal(Object.keys(marker.deliveredEpochs).length, 1);
+		assert.equal(receipts[0].receipt.sessionId, "session-notify");
+		await assert.rejects(
+			readFile(
+				join(cwd, ".pi", "workflows", run.runId, "feedback-delivery.json"),
+				"utf8",
+			),
+			(error) => error?.code === "ENOENT",
+		);
 		const repeated = await deliverWorkflowFeedback(
 			feedbackContext(cwd, "session-notify"),
 			{ sendMessage: () => (sends += 1) },
@@ -557,13 +634,7 @@ test("terminal delivery epochs allow same-status resume and migrate legacy marke
 			{ status: "delivered" },
 		);
 		assert.equal(sends, 2);
-		const resumedMarker = JSON.parse(
-			await readFile(
-				join(cwd, ".pi", "workflows", first.runId, "feedback-delivery.json"),
-				"utf8",
-			),
-		);
-		assert.equal(Object.keys(resumedMarker.deliveredEpochs).length, 2);
+		assert.equal((await feedbackReceipts(cwd, first.runId)).length, 2);
 
 		const legacy = runRecord(cwd, { runId: "workflow_legacy_delivery" });
 		await writeRunFixture(cwd, legacy);
@@ -584,55 +655,138 @@ test("terminal delivery epochs allow same-status resume and migrate legacy marke
 		);
 		assert.deepEqual(legacyOutcome, { status: "already-delivered" });
 		assert.equal(sends, 2);
-		const migrated = JSON.parse(
+		const retainedLegacy = JSON.parse(
 			await readFile(
 				join(cwd, ".pi", "workflows", legacy.runId, "feedback-delivery.json"),
 				"utf8",
 			),
 		);
-		assert.equal(migrated.schema, "workflow-feedback-delivery-v2");
-		assert.equal(migrated.legacyDelivered.completed, "2026-07-25T00:00:02.000Z");
-		assert.equal(Object.keys(migrated.deliveredEpochs).length, 1);
+		assert.equal(retainedLegacy.schema, "workflow-feedback-delivery-v1");
+		assert.equal(retainedLegacy.delivered.completed, "2026-07-25T00:00:02.000Z");
+		assert.equal((await feedbackReceipts(cwd, legacy.runId)).length, 1);
+
+		const legacyResumed = {
+			...first,
+			runId: "workflow_legacy_same_status_resume",
+			tasks: [
+				{
+					...first.tasks[0],
+					completedAt: "2026-07-25T00:00:03.000Z",
+					resumeEvents: [
+						{
+							at: "2026-07-25T00:00:02.000Z",
+							fromStatus: "failed",
+							fromStatusDetail: "first failure",
+						},
+					],
+				},
+			],
+		};
+		await writeRunFixture(cwd, legacyResumed);
+		await writeFeedbackAudience(cwd, legacyResumed.runId, "session-legacy-resume");
+		await writeFile(
+			join(cwd, ".pi", "workflows", legacyResumed.runId, "feedback-delivery.json"),
+			`${JSON.stringify({
+				schema: "workflow-feedback-delivery-v1",
+				runId: legacyResumed.runId,
+				sessionId: "session-legacy-resume",
+				delivered: { failed: "2026-07-25T00:00:01.000Z" },
+			})}\n`,
+		);
+		assert.deepEqual(
+			await deliverWorkflowFeedback(
+				feedbackContext(cwd, "session-legacy-resume"),
+				{ sendMessage: () => (sends += 1) },
+				legacyResumed,
+			),
+			{ status: "delivered" },
+		);
+		assert.equal(sends, 3);
+		assert.equal((await feedbackReceipts(cwd, legacyResumed.runId)).length, 1);
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
 	}
 });
 
-test("feedback marker commit is fenced when presentation lease is lost before rename", async () => {
-	const cwd = await mkdtemp(join(tmpdir(), "workflow-wait-marker-fence-"));
+test("exclusive epoch receipts preserve prior epochs across final-boundary lease loss", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "workflow-wait-receipt-fence-"));
 	try {
-		const run = runRecord(cwd, { runId: "workflow_marker_fence" });
-		await writeRunFixture(cwd, run);
-		await writeFeedbackAudience(cwd, run.runId, "session-marker-fence");
-		const markerPath = join(
+		const first = runRecord(cwd, { runId: "workflow_receipt_fence" });
+		await writeRunFixture(cwd, first);
+		await writeFeedbackAudience(cwd, first.runId, "session-receipt-fence");
+		await deliverWorkflowFeedback(
+			feedbackContext(cwd, "session-receipt-fence"),
+			{ sendMessage: () => undefined },
+			first,
+		);
+		const firstReceipts = await feedbackReceipts(cwd, first.runId);
+		assert.equal(firstReceipts.length, 1);
+		const preservedFirst = JSON.stringify(firstReceipts[0].receipt);
+		const resumed = {
+			...first,
+			updatedAt: "2026-07-25T00:00:03.000Z",
+			tasks: [
+				{
+					...first.tasks[0],
+					statusDetail: "completed after resume",
+					completedAt: "2026-07-25T00:00:03.000Z",
+					resumeEvents: [
+						{
+							at: "2026-07-25T00:00:02.000Z",
+							fromStatus: "completed",
+							fromStatusDetail: "completed",
+						},
+					],
+				},
+			],
+		};
+		const secondReceiptPath = join(
 			cwd,
 			".pi",
 			"workflows",
-			run.runId,
-			"feedback-delivery.json",
+			first.runId,
+			"feedback-delivery-receipts",
+			`${terminalEpoch(resumed)}.json`,
 		);
+		const sends = [];
+		let winnerOutcome;
 		setRunLeaseTestHooksForTests({
-			async onBeforeAtomicRename({ file }) {
-				if (file !== markerPath) return;
+			async onBeforeExclusiveLink({ file }) {
+				if (file !== secondReceiptPath) return;
 				await rename(
-					join(cwd, ".pi", "workflows", run.runId, "feedback-presentation.lock"),
-					join(cwd, ".pi", "workflows", run.runId, "feedback-presentation.lost"),
+					join(cwd, ".pi", "workflows", first.runId, "feedback-presentation.lock"),
+					join(cwd, ".pi", "workflows", first.runId, "feedback-presentation.lost"),
+				);
+				setRunLeaseTestHooksForTests(undefined);
+				winnerOutcome = await deliverWorkflowFeedback(
+					feedbackContext(cwd, "session-receipt-fence"),
+					{ sendMessage: () => sends.push("winner") },
+					resumed,
 				);
 			},
 		});
-		let sends = 0;
 		await assert.rejects(
 			deliverWorkflowFeedback(
-				feedbackContext(cwd, "session-marker-fence"),
-				{ sendMessage: () => (sends += 1) },
-				run,
+				feedbackContext(cwd, "session-receipt-fence"),
+				{ sendMessage: () => sends.push("stale") },
+				resumed,
 			),
 			/Lost supervisor lease/,
 		);
-		assert.equal(sends, 1);
-		await assert.rejects(
-			readFile(markerPath, "utf8"),
-			(error) => error?.code === "ENOENT",
+		assert.deepEqual(winnerOutcome, { status: "delivered" });
+		assert.deepEqual(sends, ["stale", "winner"]);
+		const receipts = await feedbackReceipts(cwd, first.runId);
+		assert.equal(receipts.length, 2);
+		assert.equal(
+			JSON.stringify(
+				receipts.find(({ file }) => file === firstReceipts[0].file).receipt,
+			),
+			preservedFirst,
+		);
+		assert.equal(
+			receipts.find(({ file }) => file === `${terminalEpoch(resumed)}.json`)
+				.receipt.status,
+			"completed",
 		);
 	} finally {
 		setRunLeaseTestHooksForTests(undefined);
@@ -670,10 +824,7 @@ test("feedback watcher single-flights delivery and retries a failed send", async
 		rejectFirst(new Error("transient send failure"));
 		await eventually(() => assert.equal(sends, 2));
 		await eventually(async () => {
-			const marker = JSON.parse(
-				await readFile(join(cwd, ".pi", "workflows", run.runId, "feedback-delivery.json"), "utf8"),
-			);
-			assert.equal(Object.keys(marker.deliveredEpochs).length, 1);
+			assert.equal((await feedbackReceipts(cwd, run.runId)).length, 1);
 		});
 	} finally {
 		controller.abort();
@@ -716,6 +867,162 @@ test("feedback watcher stops after retry exhaustion and warns once", async () =>
 	} finally {
 		controller.abort();
 		setWorkflowFeedbackPollMsForTests(undefined);
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("legacy, v1, and malformed v2 delivery markers are permanent", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "workflow-wait-malformed-markers-"));
+	try {
+		const cases = [
+			{
+				name: "legacy-map",
+				marker: (run) => ({ runId: run.runId, delivered: [] }),
+			},
+			{
+				name: "v1-audience",
+				marker: (run) => ({
+					schema: "workflow-feedback-delivery-v1",
+					runId: run.runId,
+					delivered: {},
+				}),
+			},
+			{
+				name: "v2-audience",
+				marker: () => ({
+					schema: "workflow-feedback-delivery-v2",
+					sessionId: "session-malformed",
+					deliveredEpochs: {},
+				}),
+			},
+			{
+				name: "v2-map",
+				marker: (run) => ({
+					schema: "workflow-feedback-delivery-v2",
+					runId: run.runId,
+					sessionId: "session-malformed",
+					deliveredEpochs: [],
+				}),
+			},
+			{
+				name: "v2-entry",
+				marker: (run) => ({
+					schema: "workflow-feedback-delivery-v2",
+					runId: run.runId,
+					sessionId: "session-malformed",
+					deliveredEpochs: { [terminalEpoch(run)]: "invalid" },
+				}),
+			},
+			{
+				name: "v2-status",
+				marker: (run) => ({
+					schema: "workflow-feedback-delivery-v2",
+					runId: run.runId,
+					sessionId: "session-malformed",
+					deliveredEpochs: {
+						[terminalEpoch(run)]: {
+							status: "failed",
+							deliveredAt: "2026-07-25T00:00:02.000Z",
+						},
+					},
+				}),
+			},
+			{
+				name: "v2-timestamp",
+				marker: (run) => ({
+					schema: "workflow-feedback-delivery-v2",
+					runId: run.runId,
+					sessionId: "session-malformed",
+					deliveredEpochs: {
+						[terminalEpoch(run)]: {
+							status: run.status,
+							deliveredAt: "not-a-timestamp",
+						},
+					},
+				}),
+			},
+		];
+		for (const entry of cases) {
+			const run = runRecord(cwd, {
+				runId: `workflow_malformed_${entry.name.replaceAll("-", "_")}`,
+			});
+			await writeRunFixture(cwd, run);
+			await writeFeedbackAudience(cwd, run.runId, "session-malformed");
+			await writeFile(
+				join(cwd, ".pi", "workflows", run.runId, "feedback-delivery.json"),
+				`${JSON.stringify(entry.marker(run))}\n`,
+			);
+			let sends = 0;
+			await assert.rejects(
+				deliverWorkflowFeedback(
+					feedbackContext(cwd, "session-malformed"),
+					{ sendMessage: () => (sends += 1) },
+					run,
+				),
+				/marker|epochs|entry|status|timestamp|session/,
+				entry.name,
+			);
+			assert.equal(sends, 0, entry.name);
+		}
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("malformed receipt shape, audience, status, and timestamp are permanent", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "workflow-wait-malformed-receipts-"));
+	try {
+		for (const variant of ["shape", "audience", "status", "timestamp"]) {
+			const run = runRecord(cwd, { runId: `workflow_receipt_${variant}` });
+			await writeRunFixture(cwd, run);
+			await writeFeedbackAudience(cwd, run.runId, "session-receipt-invalid");
+			const epoch = terminalEpoch(run);
+			const receiptFile = join(
+				cwd,
+				".pi",
+				"workflows",
+				run.runId,
+				"feedback-delivery-receipts",
+				`${epoch}.json`,
+			);
+			await mkdir(dirname(receiptFile), { recursive: true });
+			const valid = {
+				schema: "workflow-feedback-delivery-receipt-v1",
+				runId: run.runId,
+				sessionId: "session-receipt-invalid",
+				epoch,
+				status: run.status,
+				deliveredAt: "2026-07-25T00:00:02.000Z",
+				presentationOwnerId: "123-owner",
+			};
+			let receipt;
+			switch (variant) {
+				case "shape":
+					receipt = [];
+					break;
+				case "audience":
+					receipt = { ...valid, sessionId: "session-other" };
+					break;
+				case "status":
+					receipt = { ...valid, status: "failed" };
+					break;
+				default:
+					receipt = { ...valid, deliveredAt: "invalid" };
+			}
+			await writeFile(receiptFile, `${JSON.stringify(receipt)}\n`);
+			let sends = 0;
+			await assert.rejects(
+				deliverWorkflowFeedback(
+					feedbackContext(cwd, "session-receipt-invalid"),
+					{ sendMessage: () => (sends += 1) },
+					run,
+				),
+				/receipt/,
+				variant,
+			);
+			assert.equal(sends, 0, variant);
+		}
+	} finally {
 		await rm(cwd, { recursive: true, force: true });
 	}
 });
@@ -811,13 +1118,7 @@ test("workflow wait returns a terminal result without model polling", async () =
 		assert.match(result.content[0].text, /Workflow terminal/);
 		assert.equal(updates.length, 1);
 		assert.equal(updates[0].details.taskSummary.completed, 1);
-		const delivery = JSON.parse(
-			await readFile(
-				join(cwd, ".pi", "workflows", run.runId, "feedback-delivery.json"),
-				"utf8",
-			),
-		);
-		assert.equal(Object.keys(delivery.deliveredEpochs).length, 1);
+		assert.equal((await feedbackReceipts(cwd, run.runId)).length, 1);
 		await assert.rejects(
 			readFile(
 				join(
@@ -832,6 +1133,101 @@ test("workflow wait returns a terminal result without model polling", async () =
 			(error) => error?.code === "ENOENT",
 		);
 	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("successful workflow wait survives persistent final release failure", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "workflow-wait-release-success-"));
+	try {
+		const run = runRecord(cwd, { runId: "workflow_wait_release_success" });
+		await writeRunFixture(cwd, run, { executiveMarkdown: "Durable result." });
+		await writeFeedbackAudience(cwd, run.runId, "session-release-success");
+		let releaseAttempts = 0;
+		setRunLeaseTestHooksForTests({
+			onBeforeReleaseLockRename({ lockFile }) {
+				if (!lockFile.endsWith("feedback-presentation.lock")) return;
+				releaseAttempts += 1;
+				throw new Error("persistent final release failure");
+			},
+		});
+		const tools = [];
+		registerWorkflowWaitTool(fakePi(tools), {
+			PI_WORKFLOW_ROLE: "supervisor",
+		});
+		const result = await tools[0].execute(
+			"call-release-success",
+			{ runId: run.runId, timeoutMs: 60_000 },
+			new AbortController().signal,
+			undefined,
+			feedbackContext(cwd, "session-release-success", { hasUI: false }),
+		);
+		assert.equal(result.details.status, "completed");
+		assert.match(result.details.finalResultPreview, /Durable result/);
+		assert.equal(releaseAttempts, 3);
+		assert.equal((await feedbackReceipts(cwd, run.runId)).length, 1);
+		setRunLeaseTestHooksForTests(undefined);
+		const reclaimed = await acquireRunFileLease(
+			cwd,
+			run.runId,
+			"feedback-presentation",
+		);
+		assert.ok(reclaimed);
+		await reclaimed.release();
+	} finally {
+		setRunLeaseTestHooksForTests(undefined);
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("workflow wait timeout preserves its error and hands delivery back after release failure", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "workflow-wait-release-timeout-"));
+	try {
+		const base = runRecord(cwd, { runId: "workflow_wait_release_timeout" });
+		await writeRunFixture(cwd, base, { executiveMarkdown: "Watcher handoff result." });
+		await writeFeedbackAudience(cwd, base.runId, "session-release-timeout");
+		setWorkflowFeedbackPollMsForTests(5);
+		let releaseAttempts = 0;
+		let delayedInitialLease = false;
+		setRunLeaseTestHooksForTests({
+			async onBeforeHeartbeat({ name, initial }) {
+				if (
+					name === "feedback-presentation" &&
+					initial &&
+					!delayedInitialLease
+				) {
+					delayedInitialLease = true;
+					await sleep(1_100);
+				}
+			},
+			onBeforeReleaseLockRename({ lockFile }) {
+				if (!lockFile.endsWith("feedback-presentation.lock")) return;
+				releaseAttempts += 1;
+				throw new Error("persistent timeout release failure");
+			},
+		});
+		const tools = [];
+		const api = fakePi(tools);
+		let sends = 0;
+		api.sendMessage = () => (sends += 1);
+		registerWorkflowWaitTool(api, { PI_WORKFLOW_ROLE: "supervisor" });
+		await assert.rejects(
+			tools[0].execute(
+				"call-release-timeout",
+				{ runId: base.runId, timeoutMs: 1_000 },
+				new AbortController().signal,
+				undefined,
+				feedbackContext(cwd, "session-release-timeout"),
+			),
+			/still running after 1000ms wait/,
+		);
+		assert.ok(releaseAttempts >= 3);
+		setRunLeaseTestHooksForTests(undefined);
+		await eventually(() => assert.equal(sends, 1), 2_000);
+		assert.equal((await feedbackReceipts(cwd, base.runId)).length, 1);
+	} finally {
+		setRunLeaseTestHooksForTests(undefined);
+		setWorkflowFeedbackPollMsForTests(undefined);
 		await rm(cwd, { recursive: true, force: true });
 	}
 });

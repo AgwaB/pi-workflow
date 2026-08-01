@@ -53,6 +53,7 @@ import {
 	type RunFileLease,
 	workflowRunDir,
 	writeJsonAtomic,
+	writeJsonExclusive,
 } from "./store.js";
 import { loadWorkflowSpec } from "./schema.js";
 import { listWorkflows, resolveWorkflowRef } from "./workflow-specs.js";
@@ -95,6 +96,8 @@ const WORKFLOW_FEEDBACK_AUDIENCE_SCHEMA = "workflow-feedback-audience-v1";
 const LEGACY_WORKFLOW_FEEDBACK_DELIVERY_SCHEMA =
 	"workflow-feedback-delivery-v1";
 const WORKFLOW_FEEDBACK_DELIVERY_SCHEMA = "workflow-feedback-delivery-v2";
+const WORKFLOW_FEEDBACK_DELIVERY_RECEIPT_SCHEMA =
+	"workflow-feedback-delivery-receipt-v1";
 const WORKFLOW_FEEDBACK_MAX_DELIVERY_ATTEMPTS = 4;
 const WORKFLOW_FEEDBACK_BIND_WAIT_MS = 1_000;
 const WORKFLOW_FEEDBACK_BIND_RETRY_MS = 50;
@@ -634,19 +637,27 @@ async function workflowTerminalToolResult(
 		waitSignal.throwIfAborted();
 		await presentationLease.assertOwner();
 		await delivery?.complete();
-		await presentationLease.assertOwner();
-		waitSignal.throwIfAborted();
-		await presentationLease.release();
+		delivery = undefined;
+		// The result/receipt is already committed. Cleanup failure must not turn
+		// this successful tool call into a rejection; durable abandonment lets a
+		// watcher or another process reclaim the quiesced lease immediately.
+		await presentationLease.release().catch(() => undefined);
 		return result;
 	} catch (error) {
-		await delivery?.release();
-		await presentationLease.release();
-		watchWorkflowFeedback(
-			ctx,
-			api,
-			resolved.runId,
-			workflowUiSignalForCwd(ctx.cwd),
-		);
+		await delivery?.release().catch(() => undefined);
+		await presentationLease.release().catch(() => undefined);
+		// Always hand terminal delivery back to the watcher, even when release
+		// itself failed. The original wait/timeout error remains authoritative.
+		try {
+			watchWorkflowFeedback(
+				ctx,
+				api,
+				resolved.runId,
+				workflowUiSignalForCwd(ctx.cwd),
+			);
+		} catch {
+			// Watcher handoff is best effort and must not mask the wait error.
+		}
 		throw error;
 	}
 }
@@ -1249,7 +1260,7 @@ export async function deliverWorkflowFeedback(
 			try {
 				ctx.ui.notify(notice, level);
 			} catch {
-				// The durable marker is authoritative; UI notification is best effort.
+				// The immutable receipt is authoritative; UI notification is best effort.
 			}
 		}
 		return { status: "delivered" };
@@ -1263,18 +1274,46 @@ export async function deliverWorkflowFeedback(
 
 type WorkflowFeedbackRun = Awaited<ReturnType<typeof refreshRun>>;
 
-interface WorkflowFeedbackDeliveryRecord {
-	schema?: string;
-	runId?: string;
-	sessionId?: string;
-	/** v1 status-only entries. Retained under legacyDelivered after migration. */
-	delivered?: Record<string, string>;
-	legacyDelivered?: Record<string, string>;
-	deliveredEpochs?: Record<
-		string,
-		{ status: string; deliveredAt: string }
-	>;
+type WorkflowFeedbackDeliveryMarker =
+	| {
+			schema: "legacy";
+			runId?: string;
+			sessionId?: string;
+			delivered: Record<string, string>;
+	  }
+	| {
+			schema: typeof LEGACY_WORKFLOW_FEEDBACK_DELIVERY_SCHEMA;
+			runId: string;
+			sessionId: string;
+			delivered: Record<string, string>;
+	  }
+	| {
+			schema: typeof WORKFLOW_FEEDBACK_DELIVERY_SCHEMA;
+			runId: string;
+			sessionId: string;
+			legacyDelivered?: Record<string, string>;
+			deliveredEpochs: Record<
+				string,
+				{ status: string; deliveredAt: string }
+			>;
+	  };
+
+interface WorkflowFeedbackDeliveryReceipt {
+	schema: typeof WORKFLOW_FEEDBACK_DELIVERY_RECEIPT_SCHEMA;
+	runId: string;
+	sessionId: string;
+	epoch: string;
+	status: string;
+	deliveredAt: string;
+	presentationOwnerId: string;
 }
+
+const WORKFLOW_FEEDBACK_DELIVERY_STATUSES = new Set([
+	"blocked",
+	"completed",
+	"failed",
+	"interrupted",
+]);
 
 class PermanentWorkflowFeedbackError extends Error {
 	readonly permanent = true;
@@ -1300,28 +1339,181 @@ function permanentWorkflowFeedbackError(
 	return new PermanentWorkflowFeedbackError(message, { cause });
 }
 
-function assertWorkflowFeedbackDeliveryRecordAudience(
-	state: WorkflowFeedbackDeliveryRecord | undefined,
+function assertExactWorkflowFeedbackKeys(
+	value: Record<string, unknown>,
+	allowed: readonly string[],
+	runId: string,
+	kind: string,
+): void {
+	if (Object.keys(value).some((key) => !allowed.includes(key)))
+		throw permanentWorkflowFeedbackError(
+			`workflow ${runId} has a malformed ${kind}`,
+		);
+}
+
+function assertWorkflowFeedbackTimestamp(
+	value: unknown,
+	runId: string,
+	kind: string,
+): asserts value is string {
+	if (
+		typeof value !== "string" ||
+		!Number.isFinite(Date.parse(value)) ||
+		new Date(Date.parse(value)).toISOString() !== value
+	)
+		throw permanentWorkflowFeedbackError(
+			`workflow ${runId} has an invalid ${kind} timestamp`,
+		);
+}
+
+function parseWorkflowFeedbackStatusMap(
+	value: unknown,
+	runId: string,
+	kind: string,
+): Record<string, string> {
+	if (!isPlainRecord(value))
+		throw permanentWorkflowFeedbackError(
+			`workflow ${runId} has a malformed ${kind}`,
+		);
+	for (const [status, timestamp] of Object.entries(value)) {
+		if (!WORKFLOW_FEEDBACK_DELIVERY_STATUSES.has(status))
+			throw permanentWorkflowFeedbackError(
+				`workflow ${runId} has an invalid ${kind} status`,
+			);
+		assertWorkflowFeedbackTimestamp(timestamp, runId, kind);
+	}
+	return value as Record<string, string>;
+}
+
+function parseWorkflowFeedbackDeliveryMarker(
+	value: unknown,
 	runId: string,
 	sessionId: string,
-): void {
-	if (!state) return;
-	if (state.runId !== undefined && state.runId !== runId)
+): WorkflowFeedbackDeliveryMarker | undefined {
+	if (value === undefined) return undefined;
+	if (!isPlainRecord(value))
 		throw permanentWorkflowFeedbackError(
-			`workflow ${runId} has a mismatched delivery marker`,
+			`workflow ${runId} has an invalid delivery marker`,
 		);
-	if (state.sessionId !== undefined && state.sessionId !== sessionId)
-		throw permanentWorkflowFeedbackError(
-			`workflow ${runId} delivery belongs to another session`,
+	const schema = value.schema;
+	if (schema === undefined) {
+		assertExactWorkflowFeedbackKeys(
+			value,
+			["runId", "sessionId", "delivered"],
+			runId,
+			"legacy delivery marker",
 		);
-	if (
-		state.schema !== undefined &&
-		state.schema !== LEGACY_WORKFLOW_FEEDBACK_DELIVERY_SCHEMA &&
-		state.schema !== WORKFLOW_FEEDBACK_DELIVERY_SCHEMA
-	)
+		if (
+			(value.runId !== undefined && value.runId !== runId) ||
+			(value.sessionId !== undefined && value.sessionId !== sessionId)
+		)
+			throw permanentWorkflowFeedbackError(
+				`workflow ${runId} has a mismatched legacy delivery marker audience`,
+			);
+		return {
+			schema: "legacy",
+			...(typeof value.runId === "string" ? { runId: value.runId } : {}),
+			...(typeof value.sessionId === "string"
+				? { sessionId: value.sessionId }
+				: {}),
+			delivered: parseWorkflowFeedbackStatusMap(
+				value.delivered,
+				runId,
+				"legacy delivery marker",
+			),
+		};
+	}
+	if (schema === LEGACY_WORKFLOW_FEEDBACK_DELIVERY_SCHEMA) {
+		assertExactWorkflowFeedbackKeys(
+			value,
+			["schema", "runId", "sessionId", "delivered"],
+			runId,
+			"v1 delivery marker",
+		);
+		if (value.runId !== runId || value.sessionId !== sessionId)
+			throw permanentWorkflowFeedbackError(
+				value.sessionId !== sessionId
+					? `workflow ${runId} delivery belongs to another session`
+					: `workflow ${runId} has a mismatched delivery marker`,
+			);
+		return {
+			schema,
+			runId,
+			sessionId,
+			delivered: parseWorkflowFeedbackStatusMap(
+				value.delivered,
+				runId,
+				"v1 delivery marker",
+			),
+		};
+	}
+	if (schema !== WORKFLOW_FEEDBACK_DELIVERY_SCHEMA)
 		throw permanentWorkflowFeedbackError(
 			`workflow ${runId} has an unsupported delivery marker`,
 		);
+	assertExactWorkflowFeedbackKeys(
+		value,
+		["schema", "runId", "sessionId", "legacyDelivered", "deliveredEpochs"],
+		runId,
+		"v2 delivery marker",
+	);
+	if (value.runId !== runId || value.sessionId !== sessionId)
+		throw permanentWorkflowFeedbackError(
+			value.sessionId !== sessionId
+				? `workflow ${runId} delivery belongs to another session`
+				: `workflow ${runId} has a mismatched delivery marker`,
+		);
+	if (!isPlainRecord(value.deliveredEpochs))
+		throw permanentWorkflowFeedbackError(
+			`workflow ${runId} has malformed v2 delivery epochs`,
+		);
+	const deliveredEpochs: Record<
+		string,
+		{ status: string; deliveredAt: string }
+	> = {};
+	for (const [epoch, rawEntry] of Object.entries(value.deliveredEpochs)) {
+		if (!/^[a-f0-9]{64}$/.test(epoch) || !isPlainRecord(rawEntry))
+			throw permanentWorkflowFeedbackError(
+				`workflow ${runId} has a malformed v2 delivery entry`,
+			);
+		assertExactWorkflowFeedbackKeys(
+			rawEntry,
+			["status", "deliveredAt"],
+			runId,
+			"v2 delivery entry",
+		);
+		if (
+			typeof rawEntry.status !== "string" ||
+			!WORKFLOW_FEEDBACK_DELIVERY_STATUSES.has(rawEntry.status)
+		)
+			throw permanentWorkflowFeedbackError(
+				`workflow ${runId} has an invalid v2 delivery status`,
+			);
+		assertWorkflowFeedbackTimestamp(
+			rawEntry.deliveredAt,
+			runId,
+			"v2 delivery",
+		);
+		deliveredEpochs[epoch] = {
+			status: rawEntry.status,
+			deliveredAt: rawEntry.deliveredAt,
+		};
+	}
+	return {
+		schema,
+		runId,
+		sessionId,
+		...(value.legacyDelivered === undefined
+			? {}
+			: {
+					legacyDelivered: parseWorkflowFeedbackStatusMap(
+						value.legacyDelivered,
+						runId,
+						"v2 legacy delivery marker",
+					),
+				}),
+		deliveredEpochs,
+	};
 }
 
 function workflowFeedbackTerminalEpoch(run: WorkflowFeedbackRun): string {
@@ -1345,12 +1537,32 @@ function workflowFeedbackTerminalEpoch(run: WorkflowFeedbackRun): string {
 		.digest("hex");
 }
 
-async function readWorkflowFeedbackDeliveryRecord(
+function workflowFeedbackDeliveryReceiptPath(
+	cwd: string,
+	runId: string,
+	epoch: string,
+): string {
+	return join(
+		cwd,
+		".pi",
+		"workflows",
+		runId,
+		"feedback-delivery-receipts",
+		`${epoch}.json`,
+	);
+}
+
+async function readWorkflowFeedbackDeliveryMarker(
 	file: string,
 	runId: string,
-): Promise<WorkflowFeedbackDeliveryRecord | undefined> {
+	sessionId: string,
+): Promise<WorkflowFeedbackDeliveryMarker | undefined> {
 	try {
-		return await readJson<WorkflowFeedbackDeliveryRecord>(file);
+		return parseWorkflowFeedbackDeliveryMarker(
+			await readJson<unknown>(file),
+			runId,
+			sessionId,
+		);
 	} catch (error) {
 		if (error instanceof SyntaxError)
 			throw permanentWorkflowFeedbackError(
@@ -1361,57 +1573,147 @@ async function readWorkflowFeedbackDeliveryRecord(
 	}
 }
 
-function currentWorkflowFeedbackDelivery(
-	state: WorkflowFeedbackDeliveryRecord | undefined,
+function parseWorkflowFeedbackDeliveryReceipt(
+	value: unknown,
+	run: WorkflowFeedbackRun,
+	sessionId: string,
 	epoch: string,
-): boolean {
-	return typeof state?.deliveredEpochs?.[epoch]?.deliveredAt === "string";
+): WorkflowFeedbackDeliveryReceipt | undefined {
+	if (value === undefined) return undefined;
+	if (!isPlainRecord(value))
+		throw permanentWorkflowFeedbackError(
+			`workflow ${run.runId} has a malformed delivery receipt`,
+		);
+	assertExactWorkflowFeedbackKeys(
+		value,
+		[
+			"schema",
+			"runId",
+			"sessionId",
+			"epoch",
+			"status",
+			"deliveredAt",
+			"presentationOwnerId",
+		],
+		run.runId,
+		"delivery receipt",
+	);
+	if (
+		value.schema !== WORKFLOW_FEEDBACK_DELIVERY_RECEIPT_SCHEMA ||
+		value.runId !== run.runId ||
+		value.sessionId !== sessionId ||
+		value.epoch !== epoch ||
+		value.status !== run.status ||
+		typeof value.presentationOwnerId !== "string" ||
+		!/^[a-zA-Z0-9-]+$/.test(value.presentationOwnerId)
+	)
+		throw permanentWorkflowFeedbackError(
+			`workflow ${run.runId} has a mismatched delivery receipt`,
+		);
+	assertWorkflowFeedbackTimestamp(
+		value.deliveredAt,
+		run.runId,
+		"delivery receipt",
+	);
+	return value as unknown as WorkflowFeedbackDeliveryReceipt;
+}
+
+async function readWorkflowFeedbackDeliveryReceipt(
+	file: string,
+	run: WorkflowFeedbackRun,
+	sessionId: string,
+	epoch: string,
+): Promise<WorkflowFeedbackDeliveryReceipt | undefined> {
+	try {
+		return parseWorkflowFeedbackDeliveryReceipt(
+			await readJson<unknown>(file),
+			run,
+			sessionId,
+			epoch,
+		);
+	} catch (error) {
+		if (error instanceof SyntaxError)
+			throw permanentWorkflowFeedbackError(
+				`workflow ${run.runId} has an invalid delivery receipt`,
+				error,
+			);
+		throw error;
+	}
 }
 
 function legacyWorkflowFeedbackDeliveryTimestamp(
-	state: WorkflowFeedbackDeliveryRecord | undefined,
-	status: string,
+	state: WorkflowFeedbackDeliveryMarker | undefined,
+	run: WorkflowFeedbackRun,
+	epoch: string,
 ): string | undefined {
-	if (state?.schema === WORKFLOW_FEEDBACK_DELIVERY_SCHEMA) return undefined;
-	const timestamp = state?.delivered?.[status];
-	return typeof timestamp === "string" ? timestamp : undefined;
+	if (!state) return undefined;
+	if (state.schema === WORKFLOW_FEEDBACK_DELIVERY_SCHEMA) {
+		const entry = state.deliveredEpochs[epoch];
+		if (!entry) return undefined;
+		if (entry.status !== run.status)
+			throw permanentWorkflowFeedbackError(
+				`workflow ${run.runId} has a mismatched v2 delivery status`,
+			);
+		return entry.deliveredAt;
+	}
+	const timestamp = state.delivered[run.status];
+	if (!timestamp) return undefined;
+	const deliveredAtMs = Date.parse(timestamp);
+	const resumedAtOrAfterDelivery = run.tasks.some((task) =>
+		(task.resumeEvents ?? []).some((event) => {
+			const resumeAtMs = Date.parse(event.at);
+			return Number.isFinite(resumeAtMs) && resumeAtMs >= deliveredAtMs;
+		}),
+	);
+	return resumedAtOrAfterDelivery ? undefined : timestamp;
 }
 
-async function persistWorkflowFeedbackDelivery(
+async function persistWorkflowFeedbackDeliveryReceipt(
 	ctx: ExtensionContext,
 	run: WorkflowFeedbackRun,
 	presentationLease: RunFileLease,
 	file: string,
 	sessionId: string,
-	state: WorkflowFeedbackDeliveryRecord | undefined,
 	epoch: string,
 	deliveredAt: string,
 ): Promise<void> {
-	await presentationLease.assertOwner();
-	await assertWorkflowFeedbackBelongsToSession(ctx, run.runId);
-	await writeJsonAtomic(
-		file,
-		{
-			schema: WORKFLOW_FEEDBACK_DELIVERY_SCHEMA,
-			runId: run.runId,
+	const receipt: WorkflowFeedbackDeliveryReceipt = {
+		schema: WORKFLOW_FEEDBACK_DELIVERY_RECEIPT_SCHEMA,
+		runId: run.runId,
+		sessionId,
+		epoch,
+		status: run.status,
+		deliveredAt,
+		presentationOwnerId: presentationLease.ownerId,
+	};
+	try {
+		await presentationLease.assertOwner();
+		await assertWorkflowFeedbackBelongsToSession(ctx, run.runId);
+		const created = await writeJsonExclusive(
+			file,
+			receipt,
+			presentationLease.signal,
+			presentationLease.assertOwner,
+		);
+		if (created) return;
+	} catch (error) {
+		const committed = await readWorkflowFeedbackDeliveryReceipt(
+			file,
+			run,
 			sessionId,
-			...(state?.delivered || state?.legacyDelivered
-				? {
-						legacyDelivered: {
-							...(state.legacyDelivered ?? {}),
-							...(state.delivered ?? {}),
-						},
-					}
-				: {}),
-			deliveredEpochs: {
-				...(state?.deliveredEpochs ?? {}),
-				[epoch]: { status: run.status, deliveredAt },
-			},
-		},
-		presentationLease.signal,
-		presentationLease.assertOwner,
+			epoch,
+		);
+		if (committed) return;
+		throw error;
+	}
+	const committed = await readWorkflowFeedbackDeliveryReceipt(
+		file,
+		run,
+		sessionId,
+		epoch,
 	);
-	await presentationLease.assertOwner();
+	if (!committed)
+		throw new Error(`workflow ${run.runId} delivery receipt CAS failed`);
 }
 
 async function workflowFeedbackDeliveryRecorded(
@@ -1423,29 +1725,38 @@ async function workflowFeedbackDeliveryRecorded(
 		ctx,
 		run.runId,
 	);
-	const file = join(
-		ctx.cwd,
-		".pi",
-		"workflows",
-		run.runId,
-		"feedback-delivery.json",
-	);
 	const epoch = workflowFeedbackTerminalEpoch(run);
-	const state = await readWorkflowFeedbackDeliveryRecord(file, run.runId);
-	assertWorkflowFeedbackDeliveryRecordAudience(state, run.runId, sessionId);
-	if (currentWorkflowFeedbackDelivery(state, epoch)) return true;
+	const marker = await readWorkflowFeedbackDeliveryMarker(
+		join(ctx.cwd, ".pi", "workflows", run.runId, "feedback-delivery.json"),
+		run.runId,
+		sessionId,
+	);
+	const receiptFile = workflowFeedbackDeliveryReceiptPath(
+		ctx.cwd,
+		run.runId,
+		epoch,
+	);
+	if (
+		await readWorkflowFeedbackDeliveryReceipt(
+			receiptFile,
+			run,
+			sessionId,
+			epoch,
+		)
+	)
+		return true;
 	const legacyTimestamp = legacyWorkflowFeedbackDeliveryTimestamp(
-		state,
-		run.status,
+		marker,
+		run,
+		epoch,
 	);
 	if (!legacyTimestamp) return false;
-	await persistWorkflowFeedbackDelivery(
+	await persistWorkflowFeedbackDeliveryReceipt(
 		ctx,
 		run,
 		presentationLease,
-		file,
+		receiptFile,
 		sessionId,
-		state,
 		epoch,
 		legacyTimestamp,
 	);
@@ -1459,58 +1770,26 @@ async function claimWorkflowFeedbackDelivery(
 ): Promise<
 	{ complete: () => Promise<void>; release: () => Promise<void> } | undefined
 > {
-	// The nonce-owned presentation lease is the only delivery lock. Every marker
-	// migration/commit is fenced by its abort signal and owner assertion.
+	if (await workflowFeedbackDeliveryRecorded(ctx, run, presentationLease))
+		return undefined;
 	const sessionId = await assertWorkflowFeedbackBelongsToSession(
 		ctx,
 		run.runId,
 	);
-	const file = join(
-		ctx.cwd,
-		".pi",
-		"workflows",
-		run.runId,
-		"feedback-delivery.json",
-	);
 	const epoch = workflowFeedbackTerminalEpoch(run);
-	const state = await readWorkflowFeedbackDeliveryRecord(file, run.runId);
-	assertWorkflowFeedbackDeliveryRecordAudience(state, run.runId, sessionId);
-	if (currentWorkflowFeedbackDelivery(state, epoch)) return undefined;
-	const legacyTimestamp = legacyWorkflowFeedbackDeliveryTimestamp(
-		state,
-		run.status,
+	const receiptFile = workflowFeedbackDeliveryReceiptPath(
+		ctx.cwd,
+		run.runId,
+		epoch,
 	);
-	if (legacyTimestamp) {
-		await persistWorkflowFeedbackDelivery(
-			ctx,
-			run,
-			presentationLease,
-			file,
-			sessionId,
-			state,
-			epoch,
-			legacyTimestamp,
-		);
-		return undefined;
-	}
 	return {
 		complete: async () => {
-			await presentationLease.assertOwner();
-			await assertWorkflowFeedbackBelongsToSession(ctx, run.runId);
-			const next = await readWorkflowFeedbackDeliveryRecord(file, run.runId);
-			assertWorkflowFeedbackDeliveryRecordAudience(
-				next,
-				run.runId,
-				sessionId,
-			);
-			if (currentWorkflowFeedbackDelivery(next, epoch)) return;
-			await persistWorkflowFeedbackDelivery(
+			await persistWorkflowFeedbackDeliveryReceipt(
 				ctx,
 				run,
 				presentationLease,
-				file,
+				receiptFile,
 				sessionId,
-				next,
 				epoch,
 				new Date().toISOString(),
 			);

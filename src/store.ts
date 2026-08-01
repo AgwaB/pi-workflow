@@ -54,7 +54,6 @@ const INDEX_LOCK_RETRY_MS = 50;
 const DEFAULT_INDEX_UPDATE_DEBOUNCE_MS = 500;
 const RUN_FILE_LEASE_RELEASE_RETRY_DELAYS_MS = [0, 10, 25] as const;
 let indexUpdateDebounceMs = DEFAULT_INDEX_UPDATE_DEBOUNCE_MS;
-const abandonedRunFileLeaseOwners = new Set<string>();
 const pendingIndexUpdates = new Map<
 	string,
 	{ cwd: string; runIds: Set<string>; timer: ReturnType<typeof setTimeout> }
@@ -88,6 +87,7 @@ type RunLeaseTestHooks = {
 		initial: boolean;
 	}) => void | Promise<void>;
 	onBeforeAtomicRename?: (context: { file: string }) => void | Promise<void>;
+	onBeforeExclusiveLink?: (context: { file: string }) => void | Promise<void>;
 	onAfterAtomicRename?: (context: {
 		file: string;
 		abortLease: (error: unknown) => void;
@@ -258,6 +258,44 @@ export async function writeJsonAtomic(
 	assertLeaseNotAborted(activeAbortSignal);
 }
 
+export async function writeJsonExclusive(
+	file: string,
+	value: unknown,
+	abortSignal?: AbortSignal,
+	commitFence?: () => void | Promise<void>,
+): Promise<boolean> {
+	const lease = runLeaseContext.getStore();
+	const activeAbortSignal = abortSignal ?? lease?.abortSignal;
+	assertLeaseNotAborted(activeAbortSignal);
+	await assertLeaseContextOwnership(lease);
+	await ensureDir(dirname(file));
+	const temp = join(
+		dirname(file),
+		`.${Date.now().toString(36)}-${randomBytes(6).toString("hex")}.tmp`,
+	);
+	try {
+		await writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, {
+			encoding: "utf8",
+			flag: "wx",
+		});
+		assertLeaseNotAborted(activeAbortSignal);
+		await assertLeaseContextOwnership(lease);
+		await commitFence?.();
+		await runLeaseTestHooks.onBeforeExclusiveLink?.({ file });
+		try {
+			// link(2) is the commit: it atomically creates this epoch's immutable
+			// receipt and can never replace a receipt committed by another owner.
+			await link(temp, file);
+			return true;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+			throw error;
+		}
+	} finally {
+		await unlink(temp).catch(() => undefined);
+	}
+}
+
 export interface WorkflowStopIntentRecord {
 	schemaVersion: 1;
 	runId: string;
@@ -386,7 +424,6 @@ export async function acquireRunFileLease(
 		try {
 			await releaseRunFileLockWithRetries(lockFile, ownerId);
 		} catch (releaseError) {
-			abandonedRunFileLeaseOwners.add(ownerId);
 			throw new AggregateError(
 				[abortSignalError(acquireSignal), releaseError],
 				`Failed to release cancelled run-file lease: ${lockFile}`,
@@ -441,7 +478,6 @@ export async function acquireRunFileLease(
 		try {
 			await releaseRunFileLockWithRetries(lockFile, ownerId);
 		} catch (releaseError) {
-			abandonedRunFileLeaseOwners.add(ownerId);
 			throw new AggregateError(
 				[heartbeatError, releaseError],
 				`Failed to initialize and release run-file lease: ${lockFile}`,
@@ -470,7 +506,6 @@ export async function acquireRunFileLease(
 				try {
 					await releaseRunFileLockWithRetries(lockFile, ownerId);
 				} catch (error) {
-					abandonedRunFileLeaseOwners.add(ownerId);
 					if (!abortController.signal.aborted) abortController.abort(error);
 					throw error;
 				} finally {
@@ -655,7 +690,7 @@ async function acquireLock(
 async function reclaimStaleLock(lockFile: string): Promise<boolean> {
 	const snapshot = await readLockSnapshot(lockFile);
 	if (!snapshot) return true;
-	if (!isReclaimableLockSnapshot(snapshot)) return false;
+	if (!(await isReclaimableLockSnapshot(lockFile, snapshot))) return false;
 
 	const reclaimFile = `${lockFile}.reclaim-${process.pid}-${randomBytes(3).toString("hex")}`;
 	try {
@@ -672,13 +707,13 @@ async function reclaimStaleLock(lockFile: string): Promise<boolean> {
 		await restoreReclaimFile(reclaimFile, lockFile);
 		return false;
 	}
-	if (!isReclaimableLockSnapshot(claimed)) {
+	if (!(await isReclaimableLockSnapshot(lockFile, claimed))) {
 		await restoreReclaimFile(reclaimFile, lockFile);
 		return false;
 	}
 
 	await unlink(reclaimFile).catch(() => undefined);
-	abandonedRunFileLeaseOwners.delete(claimed.ownerId);
+	await clearRunFileLeaseAbandonment(lockFile, claimed.ownerId);
 	return true;
 }
 
@@ -704,8 +739,12 @@ async function restoreReclaimFile(
 	await unlink(reclaimFile).catch(() => undefined);
 }
 
-function isReclaimableLockSnapshot(snapshot: LockSnapshot): boolean {
-	if (abandonedRunFileLeaseOwners.has(snapshot.ownerId)) return true;
+async function isReclaimableLockSnapshot(
+	lockFile: string,
+	snapshot: LockSnapshot,
+): Promise<boolean> {
+	if (await isRunFileLeaseDurablyAbandoned(lockFile, snapshot.ownerId))
+		return true;
 	const now = Date.now();
 	const leaseStale = now - snapshot.mtimeMs > LEASE_STALE_MS;
 	const absoluteStale =
@@ -718,6 +757,51 @@ function isReclaimableLockSnapshot(snapshot: LockSnapshot): boolean {
 	)
 		return false;
 	return true;
+}
+
+function runFileLeaseAbandonmentPath(
+	lockFile: string,
+	ownerId: string,
+): string | undefined {
+	return /^[a-zA-Z0-9-]+$/.test(ownerId)
+		? `${lockFile}.abandoned-${ownerId}`
+		: undefined;
+}
+
+async function markRunFileLeaseAbandoned(
+	lockFile: string,
+	ownerId: string,
+): Promise<void> {
+	const file = runFileLeaseAbandonmentPath(lockFile, ownerId);
+	if (!file) throw new Error(`Unsafe run-file lease owner: ${ownerId}`);
+	try {
+		await writeFile(file, `${ownerId}\n`, { encoding: "utf8", flag: "wx" });
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+		if ((await readFile(file, "utf8")) !== `${ownerId}\n`) throw error;
+	}
+}
+
+async function isRunFileLeaseDurablyAbandoned(
+	lockFile: string,
+	ownerId: string,
+): Promise<boolean> {
+	const file = runFileLeaseAbandonmentPath(lockFile, ownerId);
+	if (!file) return false;
+	try {
+		return (await readFile(file, "utf8")) === `${ownerId}\n`;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+		throw error;
+	}
+}
+
+async function clearRunFileLeaseAbandonment(
+	lockFile: string,
+	ownerId: string,
+): Promise<void> {
+	const file = runFileLeaseAbandonmentPath(lockFile, ownerId);
+	if (file) await unlink(file).catch(() => undefined);
 }
 
 function sameLockOwnerSnapshot(
@@ -787,17 +871,31 @@ async function releaseRunFileLockWithRetries(
 	lockFile: string,
 	ownerId: string,
 ): Promise<void> {
+	// Heartbeats are stopped before this function is called. Publish the exact
+	// owner token before attempting the fallible rename so another process can
+	// reclaim immediately if every release attempt fails while this PID lives.
+	let abandonmentError: unknown;
+	try {
+		await markRunFileLeaseAbandoned(lockFile, ownerId);
+	} catch (error) {
+		abandonmentError = error;
+	}
 	let lastError: unknown;
 	for (const delayMs of RUN_FILE_LEASE_RELEASE_RETRY_DELAYS_MS) {
 		if (delayMs > 0) await sleep(delayMs);
 		try {
 			await releaseLock(lockFile, ownerId);
-			abandonedRunFileLeaseOwners.delete(ownerId);
+			await clearRunFileLeaseAbandonment(lockFile, ownerId);
 			return;
 		} catch (error) {
 			lastError = error;
 		}
 	}
+	if (abandonmentError)
+		throw new AggregateError(
+			[asLeaseError(lastError), abandonmentError],
+			`Failed to release and durably abandon run-file lease: ${lockFile}`,
+		);
 	throw asLeaseError(lastError);
 }
 
@@ -1105,7 +1203,7 @@ function rewriteCompiledBundlePaths(
 	compiled: CompiledWorkflow,
 	bundleDir: string,
 ): CompiledWorkflow {
-	const rewritten = JSON.parse(JSON.stringify(compiled)) as CompiledWorkflow;
+	const rewritten = structuredClone(compiled);
 	rewriteCompiledBundlePathsInValue(rewritten, bundleDir);
 	return rewritten;
 }
@@ -1323,7 +1421,14 @@ async function readJsonBundleFile(
 	ref: string,
 ): Promise<unknown | undefined> {
 	const text = await readBundleText(sourceRoot, ref);
-	return text === undefined ? undefined : JSON.parse(text);
+	if (text === undefined) return undefined;
+	try {
+		return JSON.parse(text);
+	} catch (error) {
+		throw new Error(`Invalid JSON workflow bundle reference: ${ref}`, {
+			cause: error,
+		});
+	}
 }
 
 async function readBundleText(
@@ -2456,9 +2561,7 @@ export function createTaskRunRecord(
 					)
 				: task.agentPath;
 	const taskArtifactGraph = task.artifactGraph
-		? (JSON.parse(
-				JSON.stringify(task.artifactGraph),
-			) as typeof task.artifactGraph)
+		? structuredClone(task.artifactGraph)
 		: undefined;
 	if (taskArtifactGraph) {
 		rewriteCompiledBundlePathsInValue(
