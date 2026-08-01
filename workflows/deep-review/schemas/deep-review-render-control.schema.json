@@ -30,16 +30,41 @@
       "items": { "type": "string" }
     },
     "expectedFindingCount": { "type": "number" },
+    "supportNoteSummary": {
+      "type": "object",
+      "required": ["actual", "expected", "metadataMissing", "incompleteEvidence"],
+      "properties": {
+        "actual": { "type": "number" },
+        "expected": { "type": "number" },
+        "metadataMissing": { "type": "boolean" },
+        "incompleteEvidence": { "type": "number" }
+      },
+      "additionalProperties": false
+    },
     "sourceArtifacts": {
       "type": "array",
       "items": { "type": "string" }
     },
     "gates": {
       "type": "object",
-      "required": ["renderedAllFindings", "findingCountMismatch", "passed"],
+      "required": [
+        "renderedAllFindings",
+        "findingCountMismatch",
+        "reportSynthesisAvailable",
+        "reportVerdictConsistent",
+        "supportNoteCountMismatch",
+        "supportNoteMetadataMissing",
+        "supportNoteEvidenceIncomplete",
+        "passed"
+      ],
       "properties": {
         "renderedAllFindings": { "type": "boolean" },
         "findingCountMismatch": { "type": "boolean" },
+        "reportSynthesisAvailable": { "type": "boolean" },
+        "reportVerdictConsistent": { "type": "boolean" },
+        "supportNoteCountMismatch": { "type": "boolean" },
+        "supportNoteMetadataMissing": { "type": "boolean" },
+        "supportNoteEvidenceIncomplete": { "type": "boolean" },
         "passed": { "type": "boolean" }
       },
       "additionalProperties": true

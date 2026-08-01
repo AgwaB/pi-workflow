@@ -2705,8 +2705,25 @@ test("bundled workflows compile warning-free and deep-review leaves reviewer fan
 		const devilAdvocate = compiled.tasks.find(
 			(task) => task.key === "devil-advocate.item",
 		);
+		const report = compiled.tasks.find((task) => task.key === "report.main");
 		assert.equal(reviewers?.stageMaxConcurrency, undefined);
 		assert.equal(devilAdvocate?.stageMaxConcurrency, undefined);
+		assert.deepEqual(report?.artifactGraph.requiredReads, [
+			{
+				source: "partition-verdicts",
+				artifact: "control",
+				path: "$",
+				count: 1,
+			},
+		]);
+		assert.deepEqual(report?.artifactGraph.requiredReadPolicy, [
+			{
+				source: "partition-verdicts",
+				artifact: "control",
+				path: "$",
+				mustNotTruncate: true,
+			},
+		]);
 		const triage = compiled.tasks.find((task) => task.key === "triage.main");
 		for (const task of [triage, reviewers, devilAdvocate]) {
 			assert.ok(task);
@@ -4240,7 +4257,7 @@ test("deep-research verification tier planner enforces sanitize schema caps", as
 	assert.deepEqual(fallback.tailCandidates, []);
 });
 
-test("deep-review report schema requires identity evidence for findings", () => {
+test("deep-review report schema accepts only bounded narrative synthesis", () => {
 	const schemaDir = join(
 		dirname(fileURLToPath(import.meta.url)),
 		"..",
@@ -4256,39 +4273,39 @@ test("deep-review report schema requires identity evidence for findings", () => 
 		),
 	);
 	const validControl = {
-		schema: "./schemas/deep-review-report-control.schema.json",
-		digest: "one finding",
-		summary: "summary",
-		verdict: "material_issue_found",
-		findings: [
-			{
-				findingId: "finding-001",
-				rootCauseId: "root-001",
-				title: "Pinned evidence survives",
-				severity: "medium",
-				locations: [{ file: "src/engine.ts", line: 10 }],
-				evidenceQuotes: ["if (changed) return bad;"],
-			},
-		],
-		risks: [],
-		needsHuman: [],
-		evidenceIndex: [],
-		recommendedNextAction: "Fix it.",
+		schema: "stage-control-v1",
+		digest: "concise synthesis",
+		summary: "One material issue remains.",
+		verdict: "NEEDS_WORK",
+		risks: ["One reviewer task was incomplete."],
+		recommendedNextAction: "Address the kept findings.",
 	};
 	const valid = validateJsonSchema(validControl, reportSchema);
 	assert.equal(valid.valid, true, JSON.stringify(valid.issues));
-	const invalid = validateJsonSchema(
-		{
-			...validControl,
-			findings: [{ ...validControl.findings[0], evidenceQuotes: [] }],
-		},
+
+	const duplicatedFindings = validateJsonSchema(
+		{ ...validControl, findings: [{ findingId: "finding-001" }] },
 		reportSchema,
 	);
-	assert.equal(invalid.valid, false);
+	assert.equal(duplicatedFindings.valid, false);
 	assert.ok(
-		invalid.issues.some(
-			(issue) => issue.path === "$.findings[0].evidenceQuotes",
-		),
+		duplicatedFindings.issues.some((issue) => issue.path === "$.findings"),
+	);
+
+	const tooManyRisks = validateJsonSchema(
+		{ ...validControl, risks: Array.from({ length: 13 }, () => "risk") },
+		reportSchema,
+	);
+	assert.equal(tooManyRisks.valid, false);
+	assert.ok(tooManyRisks.issues.some((issue) => issue.path === "$.risks"));
+
+	const invalidVerdict = validateJsonSchema(
+		{ ...validControl, verdict: "block_launch" },
+		reportSchema,
+	);
+	assert.equal(invalidVerdict.valid, false);
+	assert.ok(
+		invalidVerdict.issues.some((issue) => issue.path === "$.verdict"),
 	);
 });
 

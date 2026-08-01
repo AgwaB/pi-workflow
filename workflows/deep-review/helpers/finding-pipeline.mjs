@@ -150,11 +150,11 @@ function dedupeLocations(locations) {
 }
 
 function quoteStrings(value) {
-	if (typeof value === "string" && value.trim()) return [value.trim()];
+	if (typeof value === "string" && value.trim()) return [value];
 	if (Array.isArray(value)) return value.flatMap(quoteStrings);
 	if (value && typeof value === "object") {
 		if (typeof value.quote === "string" && value.quote.trim())
-			return [value.quote.trim()];
+			return [value.quote];
 		return Object.values(value).flatMap(quoteStrings);
 	}
 	return [];
@@ -166,6 +166,18 @@ function dedupeStrings(values) {
 	for (const value of values) {
 		const text = String(value ?? "").trim();
 		if (!text || seen.has(text)) continue;
+		seen.add(text);
+		out.push(text);
+	}
+	return out;
+}
+
+function dedupeEvidenceQuotes(values) {
+	const seen = new Set();
+	const out = [];
+	for (const value of values) {
+		const text = String(value ?? "");
+		if (!text.trim() || seen.has(text)) continue;
 		seen.add(text);
 		out.push(text);
 	}
@@ -262,7 +274,7 @@ function mergeSourceStatusSummary(directStatusSummary, partialFailures) {
 }
 
 function evidenceQuotesOf(finding) {
-	return dedupeStrings([
+	return dedupeEvidenceQuotes([
 		...quoteStrings(finding.evidenceQuotes),
 		...quoteStrings(finding.evidenceQuote),
 		...quoteStrings(finding.evidence),
@@ -1088,7 +1100,7 @@ function mergeFindingItems(primary, duplicate) {
 		...(Array.isArray(primary.locations) ? primary.locations : []),
 		...(Array.isArray(duplicate.locations) ? duplicate.locations : []),
 	]);
-	primary.evidenceQuotes = dedupeStrings([
+	primary.evidenceQuotes = dedupeEvidenceQuotes([
 		...(Array.isArray(primary.evidenceQuotes) ? primary.evidenceQuotes : []),
 		...(Array.isArray(duplicate.evidenceQuotes)
 			? duplicate.evidenceQuotes
@@ -1126,21 +1138,23 @@ function relatedRootFinding(a, b) {
 }
 
 function mergeCoveredCompoundFindings(items, bucketName, normalizationNotes) {
-	const remaining = [];
+	const removed = new Set();
 	let mergedCount = 0;
-	for (const item of items) {
+	const broadestFirst = [...items].sort(
+		(a, b) => rootSignalGroupsOf(b).size - rootSignalGroupsOf(a).size,
+	);
+	for (const item of broadestFirst) {
 		const signals = rootSignalGroupsOf(item);
-		if (signals.size <= 1) {
-			remaining.push(item);
-			continue;
-		}
+		if (signals.size <= 1) continue;
 		const coveringRoots = [];
 		let fullyCovered = true;
 		for (const signal of signals) {
 			const coveringRoot = items.find((candidate) => {
 				if (candidate === item) return false;
+				const candidateSignals = rootSignalGroupsOf(candidate);
 				return (
-					rootSignalGroupsOf(candidate).has(signal) &&
+					candidateSignals.size < signals.size &&
+					candidateSignals.has(signal) &&
 					relatedRootFinding(candidate, item)
 				);
 			});
@@ -1150,17 +1164,18 @@ function mergeCoveredCompoundFindings(items, bucketName, normalizationNotes) {
 			}
 			coveringRoots.push(coveringRoot);
 		}
-		if (!fullyCovered) {
-			remaining.push(item);
-			continue;
-		}
+		if (!fullyCovered) continue;
 		mergeFindingItems(coveringRoots[0], item);
+		removed.add(item);
 		mergedCount += 1;
 		normalizationNotes.push(
 			`compound root finding "${item.title}" covered by narrower ${bucketName} roots and merged as provenance`,
 		);
 	}
-	return { items: remaining, mergedCount };
+	return {
+		items: items.filter((item) => !removed.has(item)),
+		mergedCount,
+	};
 }
 
 function mergeEquivalentRootFindings(partitions, normalizationNotes) {
@@ -1215,18 +1230,9 @@ function compactFindingForReport(item) {
 		...(item.rootCauseId ? { rootCauseId: item.rootCauseId } : {}),
 		title: item.title,
 		severity: item.severity,
-		...(item.file ? { file: item.file } : {}),
-		locations: Array.isArray(item.locations) ? item.locations : [],
-		evidenceQuotes: Array.isArray(item.evidenceQuotes)
-			? item.evidenceQuotes
-			: [],
 		...(item.recommendedAction
 			? { recommendedAction: item.recommendedAction }
 			: {}),
-		...(Array.isArray(item.counterEvidence) && item.counterEvidence.length > 0
-			? { counterEvidence: item.counterEvidence }
-			: {}),
-		...(item.note ? { note: item.note } : {}),
 		...(Array.isArray(item.mergedFindings) && item.mergedFindings.length > 0
 			? {
 					mergedFindingIds: item.mergedFindings
@@ -1237,13 +1243,7 @@ function compactFindingForReport(item) {
 	};
 }
 
-function buildReportContext(
-	partitions,
-	supportNotes,
-	partitionSummary,
-	normalizationNotes,
-	partialFailures,
-) {
+function buildReportContext(partitions, supportNotes, partialFailures) {
 	return {
 		keep: partitions.keep.map(compactFindingForReport),
 		weaken: partitions.weaken.map(compactFindingForReport),
@@ -1251,19 +1251,12 @@ function buildReportContext(
 		supportNoteSummaries: supportNotes.map((note) => ({
 			title: note.title,
 			...(note.severity ? { severity: note.severity } : {}),
-			...(note.file ? { file: note.file } : {}),
 			...(note.reason ? { reason: note.reason } : {}),
 			...(note.supportingFindingOf
 				? { supportingFindingOf: note.supportingFindingOf }
 				: {}),
-			locations: Array.isArray(note.locations) ? note.locations : [],
-			evidenceQuotes: Array.isArray(note.evidenceQuotes)
-				? note.evidenceQuotes
-				: [],
 		})),
 		partialFailures,
-		partitionSummary,
-		normalizationNotes,
 	};
 }
 
@@ -1951,7 +1944,7 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 							? entry.finding
 							: {},
 					),
-			evidenceQuotes: dedupeStrings([
+			evidenceQuotes: dedupeEvidenceQuotes([
 				...(reviewerFinding?.evidenceQuotes ?? []),
 				...quoteStrings(entry.evidenceQuotes),
 				...quoteStrings(entry.evidenceQuote),
@@ -2071,8 +2064,6 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 	const reportContext = buildReportContext(
 		partitions,
 		supportNotes,
-		partitionSummary,
-		normalizationNotes,
 		partialFailures,
 	);
 

@@ -462,7 +462,7 @@
 		{
 			"name": "structured required read policy enforces projection ledger rows separately from string reads",
 			"occurrence": 1,
-			"sha256": "38e5f3b6506df1941c0a5eccb978b1227a316789fe9f39c0813b18da21fd0c4f",
+			"sha256": "4bd6b83cbdf4bef64798012d4cf965bb6f72d83e2555f372e88c23dd09d5fd49",
 			"domain": "artifact-web"
 		},
 		{
@@ -948,7 +948,7 @@
 		{
 			"name": "bundled workflows compile warning-free and deep-review leaves reviewer fanout unconstrained",
 			"occurrence": 1,
-			"sha256": "b150ab2a35dfa8361c399041de7cccfd444d4ac902e80cd7f59024c36ac34c1b",
+			"sha256": "374f475a74a342846c0a3ce6cec175728f19900bd7c45b2e71a63ffa3822b624",
 			"domain": "authoring-interface"
 		},
 		{
@@ -1084,9 +1084,9 @@
 			"domain": "authoring-interface"
 		},
 		{
-			"name": "deep-review report schema requires identity evidence for findings",
+			"name": "deep-review report schema accepts only bounded narrative synthesis",
 			"occurrence": 1,
-			"sha256": "9a7666a469fe7d304ae06ca2c0cc249c5d2d6fb79d33cf716efc747feac98ffd",
+			"sha256": "825377f010f0675eb8bad94f654f5ad3e1dd0045bc583351cb21b0a4db9b9c81",
 			"domain": "authoring-interface"
 		},
 		{
@@ -1566,13 +1566,13 @@
 		{
 			"name": "deep-review finding-pipeline dedups by file+title-token overlap and partitions verdicts with severity join",
 			"occurrence": 1,
-			"sha256": "8246877a23285a7289f8085e978b83b48c07532d9186fd1f91c2c13e9f1af8b4",
+			"sha256": "14ce35af714061964e382692a881fc85b0ccab00459a1e925629b18779e2ae88",
 			"domain": "core-runtime"
 		},
 		{
 			"name": "deep-review finding-pipeline preserves structured locations through dedup and partition",
 			"occurrence": 1,
-			"sha256": "424d28a323b42eecc53745a593748b29eb3373fdb6a6b0be1199afd7c34bb3a4",
+			"sha256": "bfd6493675e84d126d2bb1d3b0c07640852cdb8befb387e885554e0d6257a7a2",
 			"domain": "core-runtime"
 		},
 		{
@@ -1608,13 +1608,13 @@
 		{
 			"name": "deep-review render-review-report emits finding cards from partition ledger",
 			"occurrence": 1,
-			"sha256": "d505f1bd747d137e4190a6886bffc8d17e8f4d925323787772af9eb39f5b8d00",
+			"sha256": "c1e0493d9a86342d8eab419ef41787cbf40955fbf99144629408356db30e4cdf",
 			"domain": "core-runtime"
 		},
 		{
 			"name": "deep-review render-review-report surfaces count mismatches and missing partition",
 			"occurrence": 1,
-			"sha256": "64cfc41510d83f3efb722aab691d43e695e1dbdc39d1e328a5ed6f8294774fb9",
+			"sha256": "0333210b92f85c2ac3e7d758ff2750a7a7fc750fd23410c9317d3b3085cb1736",
 			"domain": "core-runtime"
 		},
 		{

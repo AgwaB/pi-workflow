@@ -8,6 +8,11 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 const SEVERITY_ORDER = ["critical", "high", "medium", "low", "info", "unknown"];
+const REPORT_VERDICTS = new Set([
+	"REVIEW_COMPLETE",
+	"NEEDS_WORK",
+	"PARTIAL_REVIEW",
+]);
 
 function findSource(sources, stageId) {
 	for (const [specId, source] of Object.entries(sources ?? {})) {
@@ -28,10 +33,7 @@ function cleanText(value) {
 }
 
 function evidenceText(value) {
-	return String(value ?? "")
-		.replace(/\r\n/g, "\n")
-		.replace(/\r/g, "\n")
-		.trim();
+	return String(value ?? "");
 }
 
 function escapeTableCell(value) {
@@ -116,7 +118,7 @@ function evidenceQuotesOf(finding) {
 	const out = [];
 	for (const quote of asArray(finding?.evidenceQuotes)) {
 		const text = evidenceText(quote);
-		if (!text || seen.has(text)) continue;
+		if (!text.trim() || seen.has(text)) continue;
 		seen.add(text);
 		out.push(text);
 	}
@@ -202,12 +204,12 @@ function normalizeFinding(finding, index, verdict) {
 }
 
 function partitionFindings(partition) {
-	const keep = asArray(partition?.reportContext?.keep).map((finding, index) =>
+	const ledger = partition?.partitions ?? partition?.reportContext;
+	const keep = asArray(ledger?.keep).map((finding, index) =>
 		normalizeFinding(finding, index, "KEEP"),
 	);
-	const weaken = asArray(partition?.reportContext?.weaken).map(
-		(finding, index) =>
-			normalizeFinding(finding, keep.length + index, "WEAKEN"),
+	const weaken = asArray(ledger?.weaken).map((finding, index) =>
+		normalizeFinding(finding, keep.length + index, "WEAKEN"),
 	);
 	return { keep, weaken, all: [...keep, ...weaken] };
 }
@@ -311,7 +313,8 @@ function renderFindings(findings) {
 }
 
 function renderNeedsHuman(partition) {
-	const items = asArray(partition?.reportContext?.needsHuman);
+	const ledger = partition?.partitions ?? partition?.reportContext;
+	const items = asArray(ledger?.needsHuman);
 	if (items.length === 0) return [];
 	const out = ["## Needs human review", ""];
 	for (const raw of items) {
@@ -322,6 +325,51 @@ function renderNeedsHuman(partition) {
 	}
 	out.push("");
 	return out;
+}
+
+function renderSupportNotes(partition) {
+	const notes = asArray(partition?.supportNotes);
+	if (notes.length === 0) return [];
+	const out = ["## Supporting observations", ""];
+	for (const note of notes) {
+		out.push(`### ${titleOf(note)}`, "", `Severity: **${severityOf(note)}**  `);
+		const reason = cleanText(note?.reason);
+		if (reason) out.push(`Reason: ${reason}  `);
+		const related = cleanText(note?.supportingFindingOf);
+		if (related) out.push(`Supports: ${related}  `);
+		out.push(
+			"",
+			...renderLocationsTable(locationsOf(note)),
+			...renderEvidenceQuotes(evidenceQuotesOf(note)),
+		);
+		const action = cleanText(note?.recommendedAction);
+		if (action) out.push("Recommended action:", "", action, "");
+	}
+	return out;
+}
+
+function supportNoteCounts(partition) {
+	const notesPresent = Array.isArray(partition?.supportNotes);
+	const notes = asArray(partition?.supportNotes);
+	const summary = partition?.partitionSummary;
+	const summaryCountPresent = Boolean(
+		summary &&
+			typeof summary === "object" &&
+			Object.hasOwn(summary, "supportNotes") &&
+			Number.isFinite(Number(summary.supportNotes)),
+	);
+	const declared = summaryCountPresent
+		? Number(summary.supportNotes)
+		: notes.length;
+	return {
+		actual: notes.length,
+		expected: declared,
+		metadataMissing: !notesPresent || !summaryCountPresent,
+		incompleteEvidence: notes.filter(
+			(note) =>
+				locationsOf(note).length === 0 || evidenceQuotesOf(note).length === 0,
+		).length,
+	};
 }
 
 function renderRisks(report, partition) {
@@ -352,25 +400,63 @@ function renderRisks(report, partition) {
 	return out;
 }
 
-function stringifySummary(report) {
-	const summary = report?.summary;
-	if (typeof summary === "string" && cleanText(summary))
-		return cleanText(summary);
-	if (summary && typeof summary === "object") {
-		return cleanText(
-			summary.summary ??
-				report?.digest ??
-				summary.verdict ??
-				JSON.stringify(summary),
-		);
-	}
-	if (typeof report?.digest === "string" && report.digest.trim()) {
-		return cleanText(report.digest);
-	}
-	return "Deep review completed.";
+function hasReportSynthesis(report) {
+	return Boolean(
+		report &&
+			typeof report === "object" &&
+			cleanText(report.summary) &&
+			REPORT_VERDICTS.has(cleanText(report.verdict)),
+	);
 }
 
-function renderMarkdown({ report, partition, findingCountMismatch }) {
+function hasPartialFailures(partition) {
+	const summaryCount = Number(partition?.partitionSummary?.partialFailures);
+	return Boolean(
+		asArray(partition?.sourceStatusSummary?.partialFailures).length > 0 ||
+			asArray(partition?.reportContext?.partialFailures).length > 0 ||
+			(Number.isFinite(summaryCount) && summaryCount > 0),
+	);
+}
+
+function requiredReportVerdict(partition, findings) {
+	if (hasPartialFailures(partition)) return "PARTIAL_REVIEW";
+	const ledger = partition?.partitions ?? partition?.reportContext;
+	if (findings.length > 0 || asArray(ledger?.needsHuman).length > 0)
+		return "NEEDS_WORK";
+	return "REVIEW_COMPLETE";
+}
+
+function deterministicSummary(partition, findings) {
+	const ledger = partition?.partitions ?? partition?.reportContext;
+	const needsHuman = asArray(ledger?.needsHuman).length;
+	if (hasPartialFailures(partition)) {
+		return `Review coverage is partial. The deterministic ledger contains ${findings.length} kept or weakened findings and ${needsHuman} needs-human items.`;
+	}
+	if (findings.length > 0 || needsHuman > 0) {
+		return `The deterministic ledger contains ${findings.length} kept or weakened findings and ${needsHuman} needs-human items.`;
+	}
+	return "The deterministic ledger contains no kept, weakened, or needs-human findings.";
+}
+
+function deterministicNextAction(verdict) {
+	if (verdict === "PARTIAL_REVIEW")
+		return "Complete failed or missing review work, then rerun the review before release.";
+	if (verdict === "NEEDS_WORK")
+		return "Address kept or weakened findings and resolve needs-human items before release.";
+	return "No reportable remediation remains in the deterministic review ledger.";
+}
+
+function renderMarkdown({
+	report,
+	reportAvailable,
+	reportVerdictConsistent,
+	effectiveVerdict,
+	partition,
+	findingCountMismatch,
+	supportNoteCountMismatch,
+	supportNoteMetadataMissing,
+	supportNoteEvidenceIncomplete,
+}) {
 	const { all } = partitionFindings(partition);
 	const sortedFindings = all.sort(
 		(a, b) =>
@@ -382,14 +468,46 @@ function renderMarkdown({ report, partition, findingCountMismatch }) {
 	const lines = [
 		"# Deep review report",
 		"",
-		`Verdict: **${cleanText(report?.verdict ?? "review_complete") || "review_complete"}**`,
+		`Verdict: **${reportAvailable ? effectiveVerdict : "report_synthesis_failed"}**`,
 		"",
 		"## Summary",
 		"",
-		stringifySummary(report),
+		deterministicSummary(partition, sortedFindings),
 		"",
 		...renderSeveritySummary(sortedFindings),
 	];
+	if (reportAvailable && !reportVerdictConsistent) {
+		lines.push(
+			"## Renderer warning",
+			"",
+			`The narrative verdict \`${cleanText(report.verdict)}\` contradicted the deterministic ledger and was rendered conservatively as \`${effectiveVerdict}\`.`,
+			"",
+		);
+	}
+	if (supportNoteMetadataMissing) {
+		lines.push(
+			"## Renderer warning",
+			"",
+			"The partition ledger omitted required support-note metadata. Inspect `partition-verdicts.control.json` before acting on this report.",
+			"",
+		);
+	}
+	if (supportNoteEvidenceIncomplete) {
+		lines.push(
+			"## Renderer warning",
+			"",
+			"At least one supporting observation lacked a usable location or non-blank evidence quote. Inspect `partition-verdicts.control.json` before acting on this report.",
+			"",
+		);
+	}
+	if (supportNoteCountMismatch) {
+		lines.push(
+			"## Renderer warning",
+			"",
+			"The deterministic renderer found a mismatch between the declared and available support-note counts. Inspect `partition-verdicts.control.json` before acting on this report.",
+			"",
+		);
+	}
 	if (findingCountMismatch) {
 		lines.push(
 			"## Renderer warning",
@@ -399,30 +517,29 @@ function renderMarkdown({ report, partition, findingCountMismatch }) {
 		);
 	}
 	lines.push(...(rendered.lines ?? rendered));
+	lines.push(...renderSupportNotes(partition));
 	lines.push(...renderNeedsHuman(partition));
-	lines.push(...renderRisks(report, partition));
-	const nextAction = cleanText(report?.recommendedNextAction ?? "");
+	lines.push(...renderRisks({}, partition));
+	const nextAction = deterministicNextAction(effectiveVerdict);
 	if (nextAction) {
 		lines.push("## Recommended next action", "", nextAction, "");
 	}
 	lines.push(
 		"## Evidence source",
 		"",
-		"Finding cards are rendered from deterministic `partition-verdicts.control.json`; summary/verdict/risk prose comes from `report.control.json` when available.",
+		"Finding cards, summary, risks, and next action are rendered deterministically from `partition-verdicts.control.json`; `report.control.json` supplies only a verdict that must agree with that ledger.",
 		"",
 	);
 	return {
-		markdown: lines
-			.join("\n")
-			.replace(/\n{3,}/g, "\n\n")
-			.trim(),
+		markdown: lines.join("\n").trim(),
 		representedIds,
 	};
 }
 
 export default async function renderReviewReport({ sources, context = {} }) {
 	const partition = findSource(sources, "partition-verdicts");
-	const report = findSource(sources, "report") ?? {};
+	const report = findSource(sources, "report");
+	const reportAvailable = hasReportSynthesis(report);
 	if (!partition || typeof partition !== "object") {
 		return {
 			schema: "deep-review-render-v1",
@@ -437,6 +554,11 @@ export default async function renderReviewReport({ sources, context = {} }) {
 			gates: {
 				renderedAllFindings: false,
 				findingCountMismatch: true,
+				reportSynthesisAvailable: false,
+				reportVerdictConsistent: false,
+				supportNoteCountMismatch: true,
+				supportNoteMetadataMissing: true,
+				supportNoteEvidenceIncomplete: true,
 				passed: false,
 			},
 		};
@@ -445,14 +567,34 @@ export default async function renderReviewReport({ sources, context = {} }) {
 	const { all } = partitionFindings(partition);
 	const expected = expectedFindingCount(partition, all);
 	const findingCountMismatch = expected !== all.length;
+	const supportNotes = supportNoteCounts(partition);
+	const supportNoteCountMismatch = supportNotes.expected !== supportNotes.actual;
+	const supportNoteMetadataMissing = supportNotes.metadataMissing;
+	const supportNoteEvidenceIncomplete = supportNotes.incompleteEvidence > 0;
+	const effectiveVerdict = requiredReportVerdict(partition, all);
+	const reportVerdictConsistent =
+		reportAvailable && cleanText(report.verdict) === effectiveVerdict;
 	const rendered = renderMarkdown({
-		report,
+		report: report ?? {},
+		reportAvailable,
+		reportVerdictConsistent,
+		effectiveVerdict,
 		partition,
 		findingCountMismatch,
+		supportNoteCountMismatch,
+		supportNoteMetadataMissing,
+		supportNoteEvidenceIncomplete,
 	});
 	const bySeverity = severityCounts(all);
 	const renderedAllFindings = rendered.representedIds.length === all.length;
-	const passed = !findingCountMismatch && renderedAllFindings;
+	const passed =
+		!findingCountMismatch &&
+		!supportNoteCountMismatch &&
+		!supportNoteMetadataMissing &&
+		!supportNoteEvidenceIncomplete &&
+		renderedAllFindings &&
+		reportAvailable &&
+		reportVerdictConsistent;
 
 	let sidecarPath;
 	try {
@@ -488,13 +630,19 @@ export default async function renderReviewReport({ sources, context = {} }) {
 		findingSummary: { total: all.length, bySeverity },
 		renderedFindingIds: rendered.representedIds,
 		expectedFindingCount: expected,
+		supportNoteSummary: supportNotes,
 		sourceArtifacts: [
 			"partition-verdicts.control.json",
-			...(report ? ["report.control.json"] : []),
+			...(reportAvailable ? ["report.control.json"] : []),
 		],
 		gates: {
 			renderedAllFindings,
 			findingCountMismatch,
+			reportSynthesisAvailable: reportAvailable,
+			reportVerdictConsistent,
+			supportNoteCountMismatch,
+			supportNoteMetadataMissing,
+			supportNoteEvidenceIncomplete,
 			passed,
 		},
 		...(sidecarPath ? { sidecarPath } : {}),

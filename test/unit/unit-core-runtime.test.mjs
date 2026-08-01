@@ -5348,6 +5348,8 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 		partition.reportContext.keep[0].findingId,
 		partition.partitions.keep[0].findingId,
 	);
+	assert.equal("locations" in partition.reportContext.keep[0], false);
+	assert.equal("evidenceQuotes" in partition.reportContext.keep[0], false);
 	// Severity joined from the reviewer finding, not the devil-advocate echo.
 	assert.equal(partition.partitions.keep[0].severity, "critical");
 	// Unrecognized verdict routes to needsHuman, not silence.
@@ -5432,8 +5434,12 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 		options: { mode: "partition", dedupStage: "dedup-findings" },
 	});
 	assert.deepEqual(
-		weakenCounterEvidence.reportContext.weaken[0].counterEvidence,
+		weakenCounterEvidence.partitions.weaken[0].counterEvidence,
 		["Only non-production config paths call this parser."],
+	);
+	assert.equal(
+		"counterEvidence" in weakenCounterEvidence.reportContext.weaken[0],
+		false,
 	);
 
 	const supportDemotion = await helper({
@@ -6078,6 +6084,7 @@ test("deep-review finding-pipeline preserves structured locations through dedup 
 	);
 	const helper = (await import(pathToFileURL(helperPath).href)).default;
 
+	const exactEvidence = "  return pattern.test(hostname);\r\n\r\n  // keep spacing  ";
 	const dedup = await helper({
 		sources: {
 			"reviewers.lens-a": {
@@ -6108,6 +6115,7 @@ test("deep-review finding-pipeline preserves structured locations through dedup 
 						evidenceQuotes: [
 							"return pattern.test(hostname)",
 							"diff drops the $ anchor",
+							exactEvidence,
 						],
 					},
 				],
@@ -6136,6 +6144,7 @@ test("deep-review finding-pipeline preserves structured locations through dedup 
 	assert.deepEqual(regex.evidenceQuotes, [
 		"return pattern.test(hostname)",
 		"diff drops the $ anchor",
+		exactEvidence,
 	]);
 
 	const partition = await helper({
@@ -6174,10 +6183,108 @@ test("deep-review finding-pipeline preserves structured locations through dedup 
 	assert.deepEqual(keepRegex.evidenceQuotes, [
 		"return pattern.test(hostname)",
 		"diff drops the $ anchor",
+		exactEvidence,
 	]);
 	assert.equal(
 		partition.partitions.keep.some((finding) => "reviewerFinding" in finding),
 		false,
+	);
+
+	const mergedPartition = await helper({
+		sources: {
+			"dedup-findings.main": {
+				findings: [
+					{
+						id: "merge-001",
+						findingId: "merge-001",
+						rootCauseId: "root-merge-001",
+						severity: "high",
+						title: "Parser shared root failure alpha",
+						file: "src/parser.ts",
+						locations: [
+							{ file: "src/parser.ts", line: 10, symbol: "parse" },
+						],
+						evidenceQuotes: ["common parser evidence"],
+					},
+					{
+						id: "merge-002",
+						findingId: "merge-002",
+						rootCauseId: "root-merge-002",
+						severity: "high",
+						title: "Parser shared root failure beta",
+						file: "src/parser.ts",
+						locations: [
+							{ file: "src/parser.ts", line: 10, symbol: "parse" },
+						],
+						evidenceQuotes: ["common parser evidence", exactEvidence],
+					},
+				],
+			},
+			"devil-advocate.item-merge-001": {
+				finding: { title: "Parser shared root failure alpha" },
+				verdict: "KEEP",
+			},
+			"devil-advocate.item-merge-002": {
+				finding: { title: "Parser shared root failure beta" },
+				verdict: "KEEP",
+			},
+		},
+		options: { mode: "partition", dedupStage: "dedup-findings" },
+	});
+	assert.equal(mergedPartition.partitionSummary.mergedFindings, 1);
+	assert.ok(
+		mergedPartition.partitions.keep[0].evidenceQuotes.includes(exactEvidence),
+	);
+	assert.equal(
+		mergedPartition.partitions.keep[0].evidenceQuotes.find(
+			(quote) => quote.includes("keep spacing"),
+		),
+		exactEvidence,
+	);
+
+	const mutuallyCompoundPartition = await helper({
+		sources: {
+			"dedup-findings.main": {
+				findings: [
+					{
+						id: "compound-001",
+						findingId: "compound-001",
+						rootCauseId: "root-compound-001",
+						severity: "high",
+						title: "startup failure async",
+						file: "src/compound.ts",
+						locations: [{ file: "src/compound.ts", line: 1 }],
+						evidenceQuotes: ["EXACT-A"],
+					},
+					{
+						id: "compound-002",
+						findingId: "compound-002",
+						rootCauseId: "root-compound-002",
+						severity: "high",
+						title: "cannot open durability",
+						file: "src/compound.ts",
+						locations: [{ file: "src/compound.ts", line: 1 }],
+						evidenceQuotes: ["EXACT-B"],
+					},
+				],
+			},
+			"devil-advocate.item-compound-001": {
+				finding: { title: "startup failure async" },
+				verdict: "KEEP",
+			},
+			"devil-advocate.item-compound-002": {
+				finding: { title: "cannot open durability" },
+				verdict: "KEEP",
+			},
+		},
+		options: { mode: "partition", dedupStage: "dedup-findings" },
+	});
+	assert.equal(mutuallyCompoundPartition.partitionSummary.keep, 2);
+	assert.deepEqual(
+		mutuallyCompoundPartition.partitions.keep.flatMap(
+			(finding) => finding.evidenceQuotes,
+		),
+		["EXACT-A", "EXACT-B"],
 	);
 
 	const schemaDir = join(
@@ -6213,6 +6320,42 @@ test("deep-review finding-pipeline preserves structured locations through dedup 
 		validPartition.valid,
 		true,
 		JSON.stringify(validPartition.issues),
+	);
+	const evidenceLessPartition = structuredClone({
+		schema: "stage-control-v1",
+		...partition,
+	});
+	evidenceLessPartition.partitions.keep[0].evidenceQuotes = [];
+	const invalidPartition = validateJsonSchema(
+		evidenceLessPartition,
+		partitionSchema,
+	);
+	assert.equal(invalidPartition.valid, false);
+	assert.ok(
+		invalidPartition.issues.some(
+			(issue) => issue.path === "$.partitions.keep[0].evidenceQuotes",
+		),
+	);
+	const incompleteSupportNotePartition = structuredClone({
+		schema: "stage-control-v1",
+		...partition,
+	});
+	incompleteSupportNotePartition.supportNotes = [
+		{
+			title: "Missing support evidence",
+			locations: [],
+			evidenceQuotes: [],
+		},
+	];
+	const invalidSupportNote = validateJsonSchema(
+		incompleteSupportNotePartition,
+		partitionSchema,
+	);
+	assert.equal(invalidSupportNote.valid, false);
+	assert.ok(
+		invalidSupportNote.issues.some((issue) =>
+			issue.path.startsWith("$.supportNotes[0]"),
+		),
 	);
 });
 
@@ -6907,8 +7050,14 @@ test("deep-review render-review-report emits finding cards from partition ledger
 		const result = await helper({
 			sources: {
 				"partition-verdicts.main": {
-					partitionSummary: { keep: 1, weaken: 1, drop: 0, needsHuman: 1 },
-					reportContext: {
+					partitionSummary: {
+						keep: 1,
+						weaken: 1,
+						drop: 0,
+						needsHuman: 1,
+						supportNotes: 1,
+					},
+					partitions: {
 						keep: [
 							{
 								findingId: "finding-001",
@@ -6924,6 +7073,7 @@ test("deep-review render-review-report emits finding cards from partition ledger
 									"const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret';",
 									"function verify() {\n  return jwt.verify(raw, JWT_SECRET);\n}",
 									"ENV JWT_SECRET=dev-secret",
+									"  line one\r\n\r\n\r\nline two  ",
 								],
 								recommendedAction:
 									"Require JWT_SECRET at startup and remove default credentials.",
@@ -6942,6 +7092,7 @@ test("deep-review render-review-report emits finding cards from partition ledger
 								],
 							},
 						],
+						drop: [],
 						needsHuman: [
 							{
 								findingId: "finding-003",
@@ -6949,12 +7100,36 @@ test("deep-review render-review-report emits finding cards from partition ledger
 								severity: "low",
 							},
 						],
+					},
+					supportNotes: [
+						{
+							title: "Missing regression coverage",
+							severity: "low",
+							reason: "test-gap support",
+							supportingFindingOf: "JWT accepts a default secret",
+							locations: [{ file: "tests/auth.test.ts", line: 12 }],
+							evidenceQuotes: ["test.todo('rejects default secret')"],
+							recommendedAction: "Add the missing regression test.",
+						},
+					],
+					// Report context intentionally omits full evidence payloads.
+					reportContext: {
+						keep: [
+							{
+								findingId: "finding-001",
+								rootCauseId: "root-001",
+								title: "JWT accepts a default secret",
+								severity: "critical",
+							},
+						],
+						weaken: [],
+						needsHuman: [],
 						partialFailures: [],
 					},
 				},
 				"report.main": {
 					summary: "Repository is not launch-ready.",
-					verdict: "block_launch",
+					verdict: "NEEDS_WORK",
 					risks: ["No partial review failures."],
 					recommendedNextAction: "Fix critical findings before launch.",
 				},
@@ -6966,10 +7141,11 @@ test("deep-review render-review-report emits finding cards from partition ledger
 		assert.equal(result.status, "passed");
 		assert.equal(result.gates.findingCountMismatch, false);
 		assert.equal(result.gates.renderedAllFindings, true);
+		assert.equal(result.gates.reportSynthesisAvailable, true);
 		assert.deepEqual(result.renderedFindingIds, ["finding-001", "finding-002"]);
 		assert.equal(result.findingSummary.bySeverity.critical, 1);
 		assert.match(result.markdown, /# Deep review report/);
-		assert.match(result.markdown, /Verdict: \*\*block_launch\*\*/);
+		assert.match(result.markdown, /Verdict: \*\*NEEDS_WORK\*\*/);
 		assert.match(result.markdown, /Critical findings/);
 		assert.match(
 			result.markdown,
@@ -6986,6 +7162,14 @@ test("deep-review render-review-report emits finding cards from partition ledger
 			/function verify\(\) \{\n {2}return jwt\.verify\(raw, JWT_SECRET\);\n\}/,
 		);
 		assert.match(result.markdown, /ENV JWT_SECRET=dev-secret/);
+		assert.ok(result.markdown.includes("  line one\r\n\r\n\r\nline two  "));
+		assert.equal(result.gates.supportNoteCountMismatch, false);
+		assert.equal(result.gates.supportNoteMetadataMissing, false);
+		assert.equal(result.gates.supportNoteEvidenceIncomplete, false);
+		assert.match(result.markdown, /Supporting observations/);
+		assert.match(result.markdown, /Missing regression coverage/);
+		assert.match(result.markdown, /tests\/auth\.test\.ts/);
+		assert.match(result.markdown, /test\.todo\('rejects default secret'\)/);
 		assert.doesNotMatch(result.markdown, /overflow index/);
 		assert.match(result.markdown, /Verifier verdict: \*\*WEAKEN\*\*/);
 		assert.match(result.markdown, /Needs human review/);
@@ -7032,6 +7216,234 @@ test("deep-review render-review-report surfaces count mismatches and missing par
 	assert.deepEqual(missing.blockers, [
 		"missing partition-verdicts control source",
 	]);
+
+	const reportFailure = await helper({
+		sources: {
+			"partition-verdicts.main": {
+				partitionSummary: { keep: 1, weaken: 0 },
+				partitions: {
+					keep: [
+						{
+							findingId: "finding-001",
+							title: "Evidence survives report failure",
+							severity: "high",
+							locations: [{ file: "src/a.ts", line: 1 }],
+							evidenceQuotes: ["unsafe()"],
+						},
+					],
+					weaken: [],
+					needsHuman: [],
+				},
+			},
+		},
+		options: {},
+		context: {},
+	});
+	assert.equal(reportFailure.status, "failed");
+	assert.equal(reportFailure.gates.renderedAllFindings, true);
+	assert.equal(reportFailure.gates.reportSynthesisAvailable, false);
+	assert.equal(reportFailure.gates.passed, false);
+	assert.deepEqual(reportFailure.sourceArtifacts, [
+		"partition-verdicts.control.json",
+	]);
+	assert.match(reportFailure.markdown, /report_synthesis_failed/);
+	assert.match(reportFailure.markdown, /Evidence survives report failure/);
+	assert.doesNotMatch(reportFailure.markdown, /Deep review completed/);
+
+	const contradictoryVerdict = await helper({
+		sources: {
+			"partition-verdicts.main": {
+				partitionSummary: { keep: 1, weaken: 0, partialFailures: 0 },
+				partitions: {
+					keep: [
+						{
+							findingId: "finding-001",
+							rootCauseId: "root-001",
+							title: "Material issue remains",
+							severity: "high",
+							locations: [{ file: "src/a.ts", line: 1 }],
+							evidenceQuotes: ["unsafe()"],
+						},
+					],
+					weaken: [],
+					needsHuman: [],
+				},
+			},
+			"report.main": {
+				summary: "No issue remains.",
+				verdict: "REVIEW_COMPLETE",
+				risks: [],
+				recommendedNextAction: "Ship.",
+			},
+		},
+		options: {},
+		context: {},
+	});
+	assert.equal(contradictoryVerdict.status, "failed");
+	assert.equal(contradictoryVerdict.gates.reportVerdictConsistent, false);
+	assert.equal(contradictoryVerdict.gates.passed, false);
+	assert.match(contradictoryVerdict.markdown, /Verdict: \*\*NEEDS_WORK\*\*/);
+	assert.match(contradictoryVerdict.markdown, /contradicted the deterministic ledger/);
+	assert.doesNotMatch(contradictoryVerdict.markdown, /No issue remains/);
+	assert.doesNotMatch(contradictoryVerdict.markdown, /Ship\./);
+
+	const matchingVerdictWithContradictoryNarrative = await helper({
+		sources: {
+			"partition-verdicts.main": {
+				partitionSummary: {
+					keep: 1,
+					weaken: 0,
+					partialFailures: 0,
+					supportNotes: 0,
+				},
+				partitions: {
+					keep: [
+						{
+							findingId: "finding-001",
+							rootCauseId: "root-001",
+							title: "Material issue remains",
+							severity: "high",
+							locations: [{ file: "src/a.ts", line: 1 }],
+							evidenceQuotes: ["unsafe()"],
+						},
+					],
+					weaken: [],
+					needsHuman: [],
+				},
+				supportNotes: [],
+			},
+			"report.main": {
+				summary: "No issues remain; release is safe.",
+				verdict: "NEEDS_WORK",
+				risks: ["There are no risks."],
+				recommendedNextAction: "Ship immediately.",
+			},
+		},
+		options: {},
+		context: {},
+	});
+	assert.equal(matchingVerdictWithContradictoryNarrative.status, "passed");
+	assert.doesNotMatch(
+		matchingVerdictWithContradictoryNarrative.markdown,
+		/No issues remain|There are no risks|Ship immediately/,
+	);
+	assert.match(
+		matchingVerdictWithContradictoryNarrative.markdown,
+		/The deterministic ledger contains 1 kept or weakened findings/,
+	);
+	assert.match(
+		matchingVerdictWithContradictoryNarrative.markdown,
+		/Address kept or weakened findings/,
+	);
+
+	const partialVerdict = await helper({
+		sources: {
+			"partition-verdicts.main": {
+				partitionSummary: {
+					keep: 0,
+					weaken: 0,
+					partialFailures: 1,
+					supportNotes: 0,
+				},
+				partitions: { keep: [], weaken: [], needsHuman: [] },
+				supportNotes: [],
+				reportContext: {
+					partialFailures: [{ status: "failed", source: "reviewers.item" }],
+				},
+			},
+			"report.main": {
+				summary: "Coverage is incomplete.",
+				verdict: "PARTIAL_REVIEW",
+				risks: ["One reviewer failed."],
+				recommendedNextAction: "Rerun the missing reviewer.",
+			},
+		},
+		options: {},
+		context: {},
+	});
+	assert.equal(partialVerdict.status, "passed");
+	assert.equal(partialVerdict.gates.reportVerdictConsistent, true);
+
+	const missingSupportMetadata = await helper({
+		sources: {
+			"partition-verdicts.main": {
+				partitionSummary: { keep: 0, weaken: 0, partialFailures: 0 },
+				partitions: { keep: [], weaken: [], needsHuman: [] },
+			},
+			"report.main": {
+				summary: "No reportable findings remain.",
+				verdict: "REVIEW_COMPLETE",
+				risks: [],
+				recommendedNextAction: "No action required.",
+			},
+		},
+		options: {},
+		context: {},
+	});
+	assert.equal(missingSupportMetadata.status, "failed");
+	assert.equal(missingSupportMetadata.gates.supportNoteMetadataMissing, true);
+	assert.match(missingSupportMetadata.markdown, /omitted required support-note metadata/);
+
+	const supportNoteMismatch = await helper({
+		sources: {
+			"partition-verdicts.main": {
+				partitionSummary: {
+					keep: 0,
+					weaken: 0,
+					partialFailures: 0,
+					supportNotes: 1,
+				},
+				partitions: { keep: [], weaken: [], needsHuman: [] },
+				supportNotes: [],
+			},
+			"report.main": {
+				summary: "No reportable findings remain.",
+				verdict: "REVIEW_COMPLETE",
+				risks: [],
+				recommendedNextAction: "No action required.",
+			},
+		},
+		options: {},
+		context: {},
+	});
+	assert.equal(supportNoteMismatch.status, "failed");
+	assert.equal(supportNoteMismatch.gates.supportNoteCountMismatch, true);
+	assert.match(supportNoteMismatch.markdown, /support-note counts/);
+
+	const blankSupportNoteEvidence = await helper({
+		sources: {
+			"partition-verdicts.main": {
+				partitionSummary: {
+					keep: 0,
+					weaken: 0,
+					partialFailures: 0,
+					supportNotes: 1,
+				},
+				partitions: { keep: [], weaken: [], needsHuman: [] },
+				supportNotes: [
+					{
+						title: "Blank support evidence",
+						locations: [{ file: "src/a.ts", line: 2 }],
+						evidenceQuotes: ["  \r\n  "],
+					},
+				],
+			},
+			"report.main": {
+				summary: "No reportable findings remain.",
+				verdict: "REVIEW_COMPLETE",
+				risks: [],
+				recommendedNextAction: "No action required.",
+			},
+		},
+		options: {},
+		context: {},
+	});
+	assert.equal(blankSupportNoteEvidence.status, "failed");
+	assert.equal(
+		blankSupportNoteEvidence.gates.supportNoteEvidenceIncomplete,
+		true,
+	);
+	assert.match(blankSupportNoteEvidence.markdown, /non-blank evidence quote/);
 
 	const mismatch = await helper({
 		sources: {

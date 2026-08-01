@@ -6564,6 +6564,12 @@ test("structured required read policy enforces projection ledger rows separately
 					path: "$.items",
 					maxChars: 200,
 				},
+				{
+					...base,
+					returnedBytes: 900,
+					truncated: true,
+					path: "$",
+				},
 			]
 				.map((row) => JSON.stringify(row))
 				.join("\n") + "\n",
@@ -6574,6 +6580,28 @@ test("structured required read policy enforces projection ledger rows separately
 		]);
 		assert.deepEqual(stringOnly.missing, []);
 		assert.deepEqual(stringOnly.projectionFailures, []);
+
+		const rootProjectionFailed = await checkRequiredArtifactReads(
+			taskDir,
+			[
+				{
+					source: "plan",
+					artifact: "control",
+					path: "$",
+					count: 1,
+				},
+			],
+			[
+				{
+					source: "plan",
+					artifact: "control",
+					path: "$",
+					mustNotTruncate: true,
+				},
+			],
+		);
+		assert.deepEqual(rootProjectionFailed.missing, []);
+		assert.match(rootProjectionFailed.projectionFailures[0], /path=\$/);
 
 		const maxCharsFailed = await checkRequiredArtifactReads(
 			taskDir,
