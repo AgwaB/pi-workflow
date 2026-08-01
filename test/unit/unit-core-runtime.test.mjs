@@ -1289,6 +1289,7 @@ test("adaptive live workers cap growth at configured live-worker limit", () => {
 test("successive foreach materialization keeps task ids unique", async () => {
 	const cwd = makeProject();
 	try {
+		captureSubagentPrompts();
 		writeAgent(cwd, "unit-scout", "read");
 		const spec = workflowSpec("unit-scout", {
 			artifactGraph: {
@@ -1345,6 +1346,7 @@ test("successive foreach materialization keeps task ids unique", async () => {
 			["verify.item-001", "verify.item-002"],
 		);
 	} finally {
+		setSubagentApiForTests(undefined);
 		rmSync(cwd, {
 			recursive: true,
 			force: true,

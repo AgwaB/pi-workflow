@@ -656,7 +656,9 @@ export function awaitWithinWorkflowWaitBoundary<T>(
 			() => finish(() => reject(new Error(timeoutMessage))),
 			remainingMs,
 		);
-		timer.unref?.();
+		// This timer is the only active handle when the wrapped operation is a
+		// pending Promise. Keep it referenced so Node 22 cannot exit before the
+		// awaited timeout boundary settles.
 		signal?.addEventListener("abort", onAbort, { once: true });
 		operation.then(
 			(value) => finish(() => resolve(value)),
