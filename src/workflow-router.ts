@@ -11,6 +11,7 @@ import type {
 	ThinkingLevel,
 	WorkflowRouteDecision,
 	WorkflowRouteDepth,
+	WorkflowRunLaunchCapture,
 	WorkflowRunRecord,
 	WorkflowRunRouting,
 } from "./types.js";
@@ -66,6 +67,8 @@ export interface RoutedWorkflowRequest {
 	runtimeDefaults?: WorkflowRuntimeDefaults;
 	availableModels?: WorkflowModelInfo[];
 	dynamicUi?: DynamicWorkflowUi;
+	/** Creation-surface provenance carried without logging raw command text. */
+	launch?: WorkflowRunLaunchCapture;
 	/** Named executionProfiles entry applied when the workflow path is chosen. */
 	executionProfile?: string;
 	/** True when an interactive caller deliberately selected a profile or Base. */
@@ -286,6 +289,7 @@ async function startDecidedRun(
 		runtimeDefaults: request.runtimeDefaults,
 		availableModels: request.availableModels,
 		dynamicUi: request.dynamicUi,
+		launch: request.launch,
 	};
 	if (routing.decided === "dynamic" || !request.requestedWorkflow) {
 		const dynamicRouting: WorkflowRunRouting =

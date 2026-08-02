@@ -1,7 +1,9 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { constants as fsConstants, type Stats } from "node:fs";
 import {
 	cp,
 	link,
+	lstat,
 	mkdir,
 	open,
 	readdir,
@@ -12,6 +14,7 @@ import {
 	unlink,
 	utimes,
 	writeFile,
+	type FileHandle,
 } from "node:fs/promises";
 import {
 	basename,
@@ -23,7 +26,7 @@ import {
 	resolve,
 	sep,
 } from "node:path";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 
 import { parseWorkflow } from "./schema.js";
 import {
@@ -33,6 +36,9 @@ import {
 	WORKFLOW_RUN_TYPE,
 	type WorkflowIndexRecord,
 	type WorkflowRunDegradation,
+	type WorkflowRunLaunchCapture,
+	type WorkflowRunLaunchCommandMetadata,
+	type WorkflowRunLaunchMetadata,
 	type WorkflowRunProvenance,
 	type WorkflowRunRecord,
 	type WorkflowRunStatus,
@@ -181,6 +187,613 @@ export function compiledWorkflowPath(cwd: string, runId: string): string {
 
 export function supervisorPath(cwd: string, runId: string): string {
 	return join(workflowRunDir(cwd, runId), "supervisor.json");
+}
+
+const WORKFLOW_LAUNCH_COMMAND_ARTIFACT = "launch-command.txt" as const;
+const NOFOLLOW_DIRECTORY_FLAGS =
+	fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW;
+
+type WorkflowLaunchArtifactTestHooks = {
+	onAfterReadOpen?: (context: {
+		artifactPath: string;
+	}) => void | Promise<void>;
+	onBeforeWriteRename?: (context: {
+		artifactPath: string;
+		tempPath: string;
+	}) => void | Promise<void>;
+	onAfterWriteRename?: (context: {
+		artifactPath: string;
+	}) => void | Promise<void>;
+};
+
+let workflowLaunchArtifactTestHooks: WorkflowLaunchArtifactTestHooks = {};
+
+export function setWorkflowLaunchArtifactTestHooksForTests(
+	hooks: WorkflowLaunchArtifactTestHooks = {},
+): void {
+	workflowLaunchArtifactTestHooks = hooks;
+}
+
+type PhysicalWorkflowLaunchRunDirectory = {
+	piPath: string;
+	rootPath: string;
+	runPath: string;
+	piStat: Stats;
+	rootStat: Stats;
+	runStat: Stats;
+	rootHandle: FileHandle;
+	runHandle: FileHandle;
+};
+
+function unsafeWorkflowLaunchArtifactPath(): Error {
+	return new Error("Unsafe workflow launch artifact path");
+}
+
+function sameFileIdentity(left: Stats, right: Stats): boolean {
+	return left.dev === right.dev && left.ino === right.ino;
+}
+
+async function ensurePhysicalDirectoryComponent(
+	path: string,
+	mode?: number,
+): Promise<Stats> {
+	try {
+		await mkdir(path, mode === undefined ? undefined : { mode });
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+	}
+	const entry = await lstat(path);
+	if (entry.isSymbolicLink() || !entry.isDirectory())
+		throw unsafeWorkflowLaunchArtifactPath();
+	return entry;
+}
+
+async function existingPhysicalDirectoryComponent(path: string): Promise<Stats> {
+	const entry = await lstat(path);
+	if (entry.isSymbolicLink() || !entry.isDirectory())
+		throw unsafeWorkflowLaunchArtifactPath();
+	return entry;
+}
+
+async function assertPhysicalWorkflowLaunchRunDirectory(
+	directory: PhysicalWorkflowLaunchRunDirectory,
+	requirePrivateMode = true,
+): Promise<void> {
+	const [piStat, rootStat, runStat, rootHandleStat, runHandleStat, rootReal, runReal] =
+		await Promise.all([
+			lstat(directory.piPath),
+			lstat(directory.rootPath),
+			lstat(directory.runPath),
+			directory.rootHandle.stat(),
+			directory.runHandle.stat(),
+			realpath(directory.rootPath),
+			realpath(directory.runPath),
+		]);
+	if (
+		piStat.isSymbolicLink() ||
+		rootStat.isSymbolicLink() ||
+		runStat.isSymbolicLink() ||
+		!piStat.isDirectory() ||
+		!rootStat.isDirectory() ||
+		!runStat.isDirectory() ||
+		!rootHandleStat.isDirectory() ||
+		!runHandleStat.isDirectory() ||
+		!sameFileIdentity(directory.piStat, piStat) ||
+		!sameFileIdentity(directory.rootStat, rootStat) ||
+		!sameFileIdentity(directory.runStat, runStat) ||
+		!sameFileIdentity(rootStat, rootHandleStat) ||
+		!sameFileIdentity(runStat, runHandleStat) ||
+		rootReal !== directory.rootPath ||
+		runReal !== directory.runPath ||
+		dirname(runReal) !== rootReal ||
+		(requirePrivateMode && (runHandleStat.mode & 0o777) !== 0o700)
+	) {
+		throw unsafeWorkflowLaunchArtifactPath();
+	}
+}
+
+async function openPhysicalWorkflowLaunchRunDirectory(
+	cwd: string,
+	runId: string,
+	create: boolean,
+): Promise<PhysicalWorkflowLaunchRunDirectory> {
+	assertSafeRunId(runId);
+	const physicalCwd = await realpath(resolve(cwd));
+	const piPath = join(physicalCwd, ".pi");
+	const rootPath = join(piPath, "workflows");
+	const runPath = join(rootPath, runId);
+	const directoryComponent = create
+		? ensurePhysicalDirectoryComponent
+		: existingPhysicalDirectoryComponent;
+	const piStat = await directoryComponent(piPath);
+	await directoryComponent(rootPath);
+	const initialRunStat = await directoryComponent(
+		runPath,
+		create ? 0o700 : undefined,
+	);
+	let rootHandle: FileHandle | undefined;
+	let runHandle: FileHandle | undefined;
+	try {
+		rootHandle = await open(rootPath, NOFOLLOW_DIRECTORY_FLAGS);
+		runHandle = await open(runPath, NOFOLLOW_DIRECTORY_FLAGS);
+		const directory: PhysicalWorkflowLaunchRunDirectory = {
+			piPath,
+			rootPath,
+			runPath,
+			piStat,
+			rootStat: await rootHandle.stat(),
+			runStat: initialRunStat,
+			rootHandle,
+			runHandle,
+		};
+		// Establish physical containment before mutating permissions. This prevents
+		// a swapped parent from being chmodded before its identity is verified.
+		await assertPhysicalWorkflowLaunchRunDirectory(directory, false);
+		if (create) {
+			await runHandle.chmod(0o700);
+			directory.runStat = await runHandle.stat();
+		}
+		await assertPhysicalWorkflowLaunchRunDirectory(directory);
+		return directory;
+	} catch (error) {
+		await runHandle?.close().catch(() => undefined);
+		await rootHandle?.close().catch(() => undefined);
+		throw error;
+	}
+}
+
+async function closePhysicalWorkflowLaunchRunDirectory(
+	directory: PhysicalWorkflowLaunchRunDirectory | undefined,
+): Promise<void> {
+	if (!directory) return;
+	await directory.runHandle.close().catch(() => undefined);
+	await directory.rootHandle.close().catch(() => undefined);
+}
+
+async function assertLaunchArtifactReplaceable(
+	artifactPath: string,
+): Promise<void> {
+	try {
+		const artifactStat = await lstat(artifactPath);
+		if (artifactStat.isSymbolicLink() || !artifactStat.isFile())
+			throw unsafeWorkflowLaunchArtifactPath();
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+	}
+}
+
+async function syncDirectoryHandle(directory: FileHandle): Promise<void> {
+	try {
+		await directory.sync();
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		if (code !== "EINVAL" && code !== "ENOTSUP" && code !== "EPERM")
+			throw error;
+	}
+}
+
+async function removeOwnedLaunchArtifact(
+	directory: PhysicalWorkflowLaunchRunDirectory,
+	path: string,
+	identity: Stats,
+): Promise<void> {
+	try {
+		await assertPhysicalWorkflowLaunchRunDirectory(directory);
+		const current = await lstat(path);
+		if (
+			current.isFile() &&
+			!current.isSymbolicLink() &&
+			sameFileIdentity(current, identity)
+		)
+			await unlink(path);
+	} catch {
+		// A failed containment check must never turn cleanup into an unrelated unlink.
+	}
+}
+
+export async function prepareWorkflowLaunchCommandArtifactPath(
+	cwd: string,
+	runId: string,
+): Promise<void> {
+	let directory: PhysicalWorkflowLaunchRunDirectory | undefined;
+	try {
+		directory = await openPhysicalWorkflowLaunchRunDirectory(cwd, runId, true);
+		await assertLaunchArtifactReplaceable(
+			join(directory.runPath, WORKFLOW_LAUNCH_COMMAND_ARTIFACT),
+		);
+	} finally {
+		await closePhysicalWorkflowLaunchRunDirectory(directory);
+	}
+}
+
+export async function writeWorkflowLaunchCommandArtifact(
+	cwd: string,
+	runId: string,
+	text: string,
+): Promise<Extract<WorkflowRunLaunchCommandMetadata, { state: "captured" }>> {
+	assertSafeRunId(runId);
+	if (typeof text !== "string")
+		throw new Error("Invalid workflow launch command capture");
+	const bytes = Buffer.from(text, "utf8");
+	let directory: PhysicalWorkflowLaunchRunDirectory | undefined;
+	let file: FileHandle | undefined;
+	let fileStat: Stats | undefined;
+	let tempPath = "";
+	let committed = false;
+	let verified = false;
+	try {
+		directory = await openPhysicalWorkflowLaunchRunDirectory(cwd, runId, true);
+		const artifactPath = join(
+			directory.runPath,
+			WORKFLOW_LAUNCH_COMMAND_ARTIFACT,
+		);
+		await assertLaunchArtifactReplaceable(artifactPath);
+		tempPath = `${artifactPath}.${randomBytes(12).toString("hex")}.tmp`;
+		file = await open(
+			tempPath,
+			fsConstants.O_WRONLY |
+				fsConstants.O_CREAT |
+				fsConstants.O_EXCL |
+				fsConstants.O_NOFOLLOW,
+			0o600,
+		);
+		await file.chmod(0o600);
+		await assertPhysicalWorkflowLaunchRunDirectory(directory);
+		await file.writeFile(bytes);
+		await file.sync();
+		fileStat = await file.stat();
+		if (
+			!fileStat.isFile() ||
+			fileStat.nlink !== 1 ||
+			(fileStat.mode & 0o777) !== 0o600 ||
+			fileStat.size !== bytes.byteLength
+		)
+			throw unsafeWorkflowLaunchArtifactPath();
+		await assertPhysicalWorkflowLaunchRunDirectory(directory);
+		await workflowLaunchArtifactTestHooks.onBeforeWriteRename?.({
+			artifactPath,
+			tempPath,
+		});
+		await assertPhysicalWorkflowLaunchRunDirectory(directory);
+		const preRenameStat = await file.stat();
+		if (
+			!sameFileIdentity(fileStat, preRenameStat) ||
+			!preRenameStat.isFile() ||
+			preRenameStat.nlink !== 1 ||
+			(preRenameStat.mode & 0o777) !== 0o600 ||
+			preRenameStat.size !== bytes.byteLength
+		)
+			throw unsafeWorkflowLaunchArtifactPath();
+		await assertLaunchArtifactReplaceable(artifactPath);
+		await rename(tempPath, artifactPath);
+		committed = true;
+		await workflowLaunchArtifactTestHooks.onAfterWriteRename?.({
+			artifactPath,
+		});
+		await assertPhysicalWorkflowLaunchRunDirectory(directory);
+		const committedHandleStat = await file.stat();
+		const committedStat = await lstat(artifactPath);
+		if (
+			committedStat.isSymbolicLink() ||
+			!committedStat.isFile() ||
+			!sameFileIdentity(fileStat, committedHandleStat) ||
+			!sameFileIdentity(fileStat, committedStat) ||
+			committedHandleStat.nlink !== 1 ||
+			committedStat.nlink !== 1 ||
+			(committedHandleStat.mode & 0o777) !== 0o600 ||
+			(committedStat.mode & 0o777) !== 0o600 ||
+			committedHandleStat.size !== bytes.byteLength ||
+			committedStat.size !== bytes.byteLength
+		)
+			throw unsafeWorkflowLaunchArtifactPath();
+		await syncDirectoryHandle(directory.runHandle);
+		await assertPhysicalWorkflowLaunchRunDirectory(directory);
+		const finalHandleStat = await file.stat();
+		const finalPathStat = await lstat(artifactPath);
+		if (
+			!sameFileIdentity(fileStat, finalHandleStat) ||
+			!sameFileIdentity(fileStat, finalPathStat) ||
+			finalHandleStat.nlink !== 1 ||
+			finalPathStat.nlink !== 1
+		)
+			throw unsafeWorkflowLaunchArtifactPath();
+		verified = true;
+		return {
+			state: "captured",
+			artifact: WORKFLOW_LAUNCH_COMMAND_ARTIFACT,
+			encoding: "utf-8",
+			bytes: bytes.byteLength,
+			sha256: createHash("sha256").update(bytes).digest("hex"),
+			fidelity: "pi-extension-command-v1",
+			sensitivity: "user-input",
+			disclosure: "explicit-only",
+		};
+	} finally {
+		if (!verified && file) {
+			await file.truncate(0).catch(() => undefined);
+			await file.sync().catch(() => undefined);
+		}
+		await file?.close().catch(() => undefined);
+		if (!verified && directory && fileStat) {
+			await removeOwnedLaunchArtifact(
+				directory,
+				committed
+					? join(directory.runPath, WORKFLOW_LAUNCH_COMMAND_ARTIFACT)
+					: tempPath,
+				fileStat,
+			);
+		}
+		await closePhysicalWorkflowLaunchRunDirectory(directory);
+	}
+}
+
+function workflowLaunchArtifactReadError(error: unknown): Error {
+	const code = (error as NodeJS.ErrnoException).code;
+	if (code === "ENOENT")
+		return new Error("launch command unavailable: artifact missing");
+	if (
+		code === "ELOOP" ||
+		(error instanceof Error &&
+			error.message === "Unsafe workflow launch artifact path")
+	)
+		return new Error("launch command unavailable: verification failed");
+	return new Error("launch command unavailable: artifact read failed");
+}
+
+export async function readWorkflowLaunchCommandArtifact(
+	cwd: string,
+	run: Pick<WorkflowRunRecord, "runId" | "launch">,
+): Promise<string> {
+	assertSafeRunId(run.runId);
+	if (!isWorkflowRunLaunchMetadata(run.launch))
+		throw new Error("launch command unavailable: metadata malformed");
+	if (run.launch.command.state !== "captured")
+		throw new Error("launch command unavailable: tool launch");
+	const command = run.launch.command;
+	let directory: PhysicalWorkflowLaunchRunDirectory | undefined;
+	let file: FileHandle | undefined;
+	try {
+		directory = await openPhysicalWorkflowLaunchRunDirectory(
+			cwd,
+			run.runId,
+			false,
+		);
+		const artifactPath = join(
+			directory.runPath,
+			WORKFLOW_LAUNCH_COMMAND_ARTIFACT,
+		);
+		file = await open(
+			artifactPath,
+			fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+		);
+		const openedStat = await file.stat();
+		if (
+			!openedStat.isFile() ||
+			openedStat.nlink !== 1 ||
+			(openedStat.mode & 0o777) !== 0o600 ||
+			openedStat.size !== command.bytes
+		)
+			throw unsafeWorkflowLaunchArtifactPath();
+		await workflowLaunchArtifactTestHooks.onAfterReadOpen?.({ artifactPath });
+		await assertPhysicalWorkflowLaunchRunDirectory(directory);
+		const bytes = await file.readFile();
+		const readStat = await file.stat();
+		await assertPhysicalWorkflowLaunchRunDirectory(directory);
+		const currentStat = await lstat(artifactPath);
+		if (
+			!sameFileIdentity(openedStat, readStat) ||
+			!sameFileIdentity(openedStat, currentStat) ||
+			currentStat.isSymbolicLink() ||
+			!currentStat.isFile() ||
+			readStat.nlink !== 1 ||
+			currentStat.nlink !== 1 ||
+			(readStat.mode & 0o777) !== 0o600 ||
+			readStat.size !== command.bytes
+		)
+			throw unsafeWorkflowLaunchArtifactPath();
+		const digest = createHash("sha256").update(bytes).digest("hex");
+		if (bytes.byteLength !== command.bytes || digest !== command.sha256)
+			throw unsafeWorkflowLaunchArtifactPath();
+		return bytes.toString("utf8");
+	} catch (error) {
+		if (
+			error instanceof Error &&
+			error.message.startsWith("launch command unavailable:")
+		)
+			throw error;
+		throw workflowLaunchArtifactReadError(error);
+	} finally {
+		await file?.close().catch(() => undefined);
+		await closePhysicalWorkflowLaunchRunDirectory(directory);
+	}
+}
+
+export function isWorkflowRunLaunchMetadata(
+	value: unknown,
+): value is WorkflowRunLaunchMetadata {
+	if (
+		!isPlainRecordWithKeys(value, [
+			"schema",
+			"source",
+			"requestKind",
+			"routingMode",
+			"profile",
+			"task",
+			"command",
+		])
+	)
+		return false;
+	if (value.schema !== "pi-workflow-run-launch-v1") return false;
+	if (!isWorkflowLaunchSource(value.source)) return false;
+	if (
+		value.requestKind !== "named-workflow" &&
+		value.requestKind !== "direct-dynamic"
+	)
+		return false;
+	if (
+		value.routingMode !== "default-on" &&
+		value.routingMode !== "explicit-on" &&
+		value.routingMode !== "off"
+	)
+		return false;
+	if (!isWorkflowLaunchProfile(value.profile)) return false;
+	if (!isWorkflowLaunchTask(value.task)) return false;
+	if (!isWorkflowLaunchMetadataCommand(value.command)) return false;
+	return isWorkflowLaunchSemanticCombination(value);
+}
+
+export function assertValidWorkflowRunLaunchCapture(
+	value: unknown,
+): asserts value is WorkflowRunLaunchCapture {
+	if (!isWorkflowRunLaunchCapture(value))
+		throw new Error("Invalid workflow launch metadata");
+}
+
+function isWorkflowRunLaunchCapture(
+	value: unknown,
+): value is WorkflowRunLaunchCapture {
+	if (
+		!isPlainRecordWithKeys(value, [
+			"schema",
+			"source",
+			"requestKind",
+			"routingMode",
+			"profile",
+			"task",
+			"command",
+		])
+	)
+		return false;
+	if (value.schema !== "pi-workflow-run-launch-v1") return false;
+	if (!isWorkflowLaunchSource(value.source)) return false;
+	if (
+		value.requestKind !== "named-workflow" &&
+		value.requestKind !== "direct-dynamic"
+	)
+		return false;
+	if (
+		value.routingMode !== "default-on" &&
+		value.routingMode !== "explicit-on" &&
+		value.routingMode !== "off"
+	)
+		return false;
+	if (!isWorkflowLaunchProfile(value.profile)) return false;
+	if (!isWorkflowLaunchTask(value.task)) return false;
+	if (
+		!isPlainRecordWithKeys(value.command, ["state", "text"]) &&
+		!isPlainRecordWithKeys(value.command, ["state", "reason"])
+	)
+		return false;
+	if (
+		value.command.state === "captured"
+			? typeof value.command.text !== "string"
+			: value.command.state !== "unavailable" ||
+				value.command.reason !== "not-a-command"
+	)
+		return false;
+	return isWorkflowLaunchSemanticCombination(value);
+}
+
+function isWorkflowLaunchSource(value: unknown): boolean {
+	if (isPlainRecordWithKeys(value, ["kind", "action"]))
+		return (
+			value.kind === "slash-command" &&
+			(value.action === "run" || value.action === "dynamic")
+		);
+	if (isPlainRecordWithKeys(value, ["kind", "name"]))
+		return (
+			value.kind === "tool" &&
+			(value.name === "workflow_run" || value.name === "workflow_dynamic")
+		);
+	return false;
+}
+
+function isWorkflowLaunchProfile(value: unknown): boolean {
+	if (isPlainRecordWithKeys(value, ["kind"]))
+		return value.kind === "base" || value.kind === "not-applicable";
+	return (
+		isPlainRecordWithKeys(value, ["kind", "name"]) &&
+		value.kind === "named" &&
+		typeof value.name === "string" &&
+		value.name.length > 0
+	);
+}
+
+function isWorkflowLaunchTask(value: unknown): boolean {
+	return (
+		isPlainRecordWithKeys(value, ["characters", "lines"]) &&
+		isNonNegativeSafeInteger(value.characters) &&
+		isNonNegativeSafeInteger(value.lines)
+	);
+}
+
+function isWorkflowLaunchMetadataCommand(value: unknown): boolean {
+	if (isPlainRecordWithKeys(value, ["state", "reason"]))
+		return value.state === "unavailable" && value.reason === "not-a-command";
+	return (
+		isPlainRecordWithKeys(value, [
+			"state",
+			"artifact",
+			"encoding",
+			"bytes",
+			"sha256",
+			"fidelity",
+			"sensitivity",
+			"disclosure",
+		]) &&
+		value.state === "captured" &&
+		value.artifact === WORKFLOW_LAUNCH_COMMAND_ARTIFACT &&
+		value.encoding === "utf-8" &&
+		isNonNegativeSafeInteger(value.bytes) &&
+		typeof value.sha256 === "string" &&
+		/^[0-9a-f]{64}$/.test(value.sha256) &&
+		value.fidelity === "pi-extension-command-v1" &&
+		value.sensitivity === "user-input" &&
+		value.disclosure === "explicit-only"
+	);
+}
+
+function isWorkflowLaunchSemanticCombination(
+	value: Record<string, unknown>,
+): boolean {
+	const source = value.source as Record<string, unknown>;
+	const command = value.command as Record<string, unknown>;
+	if (source.kind === "slash-command") {
+		if (command.state !== "captured") return false;
+		if (source.action === "run" && value.requestKind !== "named-workflow")
+			return false;
+		if (source.action === "dynamic" && value.requestKind !== "direct-dynamic")
+			return false;
+		if (source.action === "dynamic" && value.routingMode === "default-on")
+			return false;
+		return true;
+	}
+	if (command.state !== "unavailable" || value.routingMode !== "off")
+		return false;
+	if (source.name === "workflow_run")
+		return (
+			value.requestKind === "named-workflow" &&
+			(value.profile as Record<string, unknown>).kind !== "not-applicable"
+		);
+	return (
+		value.requestKind === "direct-dynamic" &&
+		(value.profile as Record<string, unknown>).kind === "not-applicable"
+	);
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+	return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+function isPlainRecordWithKeys(
+	value: unknown,
+	keys: readonly string[],
+): value is Record<string, unknown> {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const actual = Object.keys(value);
+	if (actual.length !== keys.length) return false;
+	const expected = new Set(keys);
+	return actual.every((key) => expected.has(key));
 }
 
 export function indexSupervisorErrorPath(cwd: string): string {
@@ -762,8 +1375,7 @@ async function lockReclaimDecision(
 	const leaseStale = now - snapshot.mtimeMs > LEASE_STALE_MS;
 	const absoluteStale =
 		now - (snapshot.createdAtMs ?? snapshot.mtimeMs) > LEASE_ABSOLUTE_STALE_MS;
-	if (!leaseStale)
-		return { reclaimable: false, durablyAbandoned: false };
+	if (!leaseStale) return { reclaimable: false, durablyAbandoned: false };
 	if (
 		snapshot.pid !== undefined &&
 		isProcessAlive(snapshot.pid) &&
@@ -1591,8 +2203,7 @@ function visitWorkflowBundleRefs(
 				if (!profile || typeof profile !== "object" || Array.isArray(profile))
 					continue;
 				const tools = (profile as Record<string, unknown>).tools;
-				if (Array.isArray(tools))
-					visitWorkflowBundleRefs(tools, collection);
+				if (Array.isArray(tools)) visitWorkflowBundleRefs(tools, collection);
 			}
 			if (Array.isArray(decisionLoop.allowedTools))
 				visitWorkflowBundleRefs(decisionLoop.allowedTools, collection);

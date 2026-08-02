@@ -18,7 +18,13 @@ import {
 	parseWorkflowDynamicArgs,
 	parseWorkflowRunArgs,
 } from "../../.tmp/unit/extension.js";
-import { readIndex, readRunRecord } from "../../.tmp/unit/store.js";
+import {
+	listRunRecords,
+	readIndex,
+	readRunRecord,
+	readWorkflowLaunchCommandArtifact,
+	workflowRunPath,
+} from "../../.tmp/unit/store.js";
 import { setSubagentApiForTests } from "../../.tmp/unit/subagent-backend.js";
 import {
 	executeRoutedWorkflowRequest,
@@ -760,10 +766,39 @@ test("/workflow run routes by default and --no-route skips the router", async ()
 			true,
 		);
 
-		// --no-route skips the router entirely.
-		await handler(
-			'run --no-route --force-new route-target "No route task."',
-			ctx,
+		// --no-route skips the router entirely and preserves the extension-boundary command.
+		const runIdsBeforeDirectSlash = new Set(
+			(await listRunRecords(cwd)).map((run) => run.runId),
+		);
+		const directSlashArgs =
+			'run --no-route --force-new route-target "No route task."';
+		await handler(directSlashArgs, ctx);
+		const directSlashRun = (await listRunRecords(cwd)).find(
+			(run) => !runIdsBeforeDirectSlash.has(run.runId),
+		);
+		assert.ok(directSlashRun);
+		assert.deepEqual(directSlashRun.launch, {
+			schema: "pi-workflow-run-launch-v1",
+			source: { kind: "slash-command", action: "run" },
+			requestKind: "named-workflow",
+			routingMode: "off",
+			profile: { kind: "named", name: "medium" },
+			task: { characters: 14, lines: 1 },
+			command: directSlashRun.launch.command,
+		});
+		assert.equal(
+			await readWorkflowLaunchCommandArtifact(cwd, directSlashRun),
+			`/workflow ${directSlashArgs}`,
+		);
+		assert.equal(
+			readFileSync(workflowRunPath(cwd, directSlashRun.runId), "utf8").includes(
+				directSlashArgs,
+			),
+			false,
+		);
+		assert.equal(
+			JSON.stringify(await readIndex(cwd)).includes(directSlashArgs),
+			false,
 		);
 
 		// Dynamic launch stays in the cancellable foreground after its initial
@@ -803,6 +838,20 @@ test("/workflow run routes by default and --no-route skips the router", async ()
 			await new Promise((resolve) => setTimeout(resolve, 10));
 		}
 		assert.equal(dynamicRun?.status, "interrupted");
+		const dynamicRecord = await readRunRecord(cwd, dynamicRun.runId);
+		assert.deepEqual(dynamicRecord.launch, {
+			schema: "pi-workflow-run-launch-v1",
+			source: { kind: "slash-command", action: "dynamic" },
+			requestKind: "direct-dynamic",
+			routingMode: "off",
+			profile: { kind: "not-applicable" },
+			task: { characters: 23, lines: 1 },
+			command: dynamicRecord.launch.command,
+		});
+		assert.equal(
+			await readWorkflowLaunchCommandArtifact(cwd, dynamicRecord),
+			'/workflow dynamic --force-new "Dynamic UI parity task."',
+		);
 		assert.equal(directCalls.router, 1);
 		assert.equal(profilePrompts, 2);
 		assert.ok(calls.launches + directCalls.launches >= 2);
@@ -866,6 +915,12 @@ test("/workflow run routes by default and --no-route skips the router", async ()
 					entry.value[0] === "Active workflows",
 			),
 			true,
+		);
+		assert.equal(
+			JSON.stringify(
+				widgets.filter((entry) => entry.key === "pi-workflow-active"),
+			).includes(`/workflow ${directSlashArgs}`),
+			false,
 		);
 		handlers.get("session_shutdown")?.({}, ctx);
 		await new Promise((resolve) => setTimeout(resolve, 25));

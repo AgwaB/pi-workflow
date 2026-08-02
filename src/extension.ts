@@ -60,6 +60,7 @@ import { listWorkflows, resolveWorkflowRef } from "./workflow-specs.js";
 import {
 	type CompiledWorkflow,
 	type ThinkingLevel,
+	type WorkflowRunLaunchCapture,
 	type WorkflowRunRouting,
 	WorkflowValidationError,
 } from "./types.js";
@@ -2173,11 +2174,62 @@ export async function selectWorkflowExecutionProfile(
 	return ordered[selectedIndex];
 }
 
+function workflowLaunchTaskCounts(task: string): {
+	characters: number;
+	lines: number;
+} {
+	const runtimeTask = task.trim();
+	return {
+		characters: Array.from(runtimeTask).length,
+		lines:
+			runtimeTask.length === 0 ? 0 : runtimeTask.split(/\r\n|\r|\n/).length,
+	};
+}
+
+function workflowSlashLaunchCapture(
+	action: "run" | "dynamic",
+	requestKind: "named-workflow" | "direct-dynamic",
+	routingMode: WorkflowRunLaunchCapture["routingMode"],
+	task: string,
+	args: string,
+): WorkflowRunLaunchCapture {
+	return {
+		schema: "pi-workflow-run-launch-v1",
+		source: { kind: "slash-command", action },
+		requestKind,
+		routingMode,
+		profile:
+			requestKind === "direct-dynamic"
+				? { kind: "not-applicable" }
+				: { kind: "base" },
+		task: workflowLaunchTaskCounts(task),
+		command: { state: "captured", text: `/workflow ${args}` },
+	};
+}
+
+function workflowToolLaunchCapture(
+	name: "workflow_run" | "workflow_dynamic",
+	requestKind: "named-workflow" | "direct-dynamic",
+	task: string,
+	profile: WorkflowRunLaunchCapture["profile"],
+): WorkflowRunLaunchCapture {
+	return {
+		schema: "pi-workflow-run-launch-v1",
+		source: { kind: "tool", name },
+		requestKind,
+		routingMode: "off",
+		profile,
+		task: workflowLaunchTaskCounts(task),
+		command: { state: "unavailable", reason: "not-a-command" },
+	};
+}
+
 async function startWorkflowRunFromRequest(
 	request: WorkflowRunToolRequest,
 	ctx: ExtensionContext,
 	api: ExtensionAPI,
 	uiSessionSignal = workflowUiSignalForCwd(ctx.cwd),
+	launch?: WorkflowRunLaunchCapture,
 ): Promise<{ run: Awaited<ReturnType<typeof runWorkflowSpec>>; text: string }> {
 	const workflow = request.workflow.trim();
 	const task = request.task.trim();
@@ -2200,6 +2252,16 @@ async function startWorkflowRunFromRequest(
 	let promptSchemaNoticeDigest: string | undefined;
 	const run = await runWorkflowSpec(workflow, ctx.cwd, {
 		task,
+		launch:
+			launch ??
+			workflowToolLaunchCapture(
+				"workflow_run",
+				"named-workflow",
+				task,
+				executionProfile
+					? { kind: "named", name: executionProfile }
+					: { kind: "base" },
+			),
 		[WORKFLOW_PROMPT_SCHEMA_DIAGNOSTIC_SINK]: (notice, digest) => {
 			if (digest === promptSchemaNoticeDigest) return;
 			promptSchemaNoticeDigest = digest;
@@ -2239,6 +2301,7 @@ async function startDynamicRunFromRequest(
 	api: ExtensionAPI,
 	uiSessionSignal = workflowUiSignalForCwd(ctx.cwd),
 	initialPlanSignal?: AbortSignal,
+	launch?: WorkflowRunLaunchCapture,
 ): Promise<{ run: Awaited<ReturnType<typeof runDynamicTask>>; text: string }> {
 	const task = request.task.trim();
 	if (!task)
@@ -2247,6 +2310,11 @@ async function startDynamicRunFromRequest(
 		);
 	let run = await runDynamicTask(ctx.cwd, {
 		task,
+		launch:
+			launch ??
+			workflowToolLaunchCapture("workflow_dynamic", "direct-dynamic", task, {
+				kind: "not-applicable",
+			}),
 		runtimeOverrides: request.runtimeOverrides,
 		runtimeDefaults: currentRuntimeDefaults(ctx, api),
 		availableModels: availableWorkflowModels(ctx),
@@ -2338,6 +2406,7 @@ async function handleRoutedRunRequest(
 		forceNew: boolean;
 		runtimeOverrides?: WorkflowRuntimeDefaults;
 		executionProfile?: string;
+		launch: WorkflowRunLaunchCapture;
 		usage: string;
 	},
 	ctx: ExtensionCommandContext,
@@ -2368,6 +2437,7 @@ async function handleRoutedRunRequest(
 		runtimeDefaults: currentRuntimeDefaults(ctx, api),
 		availableModels: availableWorkflowModels(ctx),
 		dynamicUi: dynamicUiFromContext(ctx),
+		launch: request.launch,
 	};
 	const routingResult = await withWorkflowLaunchForeground(
 		ctx,
@@ -2858,6 +2928,17 @@ async function handleWorkflowCommand(
 
 		if (action === "run") {
 			const parsed = parseWorkflowRunArgs(args);
+			const launchCapture = workflowSlashLaunchCapture(
+				"run",
+				"named-workflow",
+				parsed.route === false
+					? "off"
+					: parsed.route === true
+						? "explicit-on"
+						: "default-on",
+				parsed.task,
+				args,
+			);
 			const specPath =
 				parsed.specPath ||
 				requireArg(tokens, 1, '/workflow run <workflow-name-or-path> "<task>"');
@@ -2875,6 +2956,7 @@ async function handleWorkflowCommand(
 						forceNew: Boolean(parsed.forceNew),
 						runtimeOverrides,
 						executionProfile: parsed.profile,
+						launch: launchCapture,
 						usage: '/workflow run <workflow-name-or-path> "<task>"',
 					},
 					ctx,
@@ -2940,6 +3022,7 @@ async function handleWorkflowCommand(
 						ctx,
 						api,
 						uiSessionSignal,
+						launchCapture,
 					);
 					if (launchSignal.aborted && launch.run.status === "running")
 						await stopRun(ctx.cwd, launch.run.runId);
@@ -2955,6 +3038,13 @@ async function handleWorkflowCommand(
 
 		if (action === "dynamic") {
 			const parsed = parseWorkflowDynamicArgs(args);
+			const launchCapture = workflowSlashLaunchCapture(
+				"dynamic",
+				"direct-dynamic",
+				parsed.route ? "explicit-on" : "off",
+				parsed.task,
+				args,
+			);
 			const runtimeOverrides =
 				parsed.model || parsed.thinking
 					? { model: parsed.model, thinking: parsed.thinking }
@@ -2967,6 +3057,7 @@ async function handleWorkflowCommand(
 						detach: parsed.detach,
 						forceNew: Boolean(parsed.forceNew),
 						runtimeOverrides,
+						launch: launchCapture,
 						usage: '/workflow dynamic --route "<task>"',
 					},
 					ctx,
@@ -3017,6 +3108,7 @@ async function handleWorkflowCommand(
 						api,
 						uiSessionSignal,
 						launchSignal,
+						launchCapture,
 					);
 					if (launchSignal.aborted && launch.run.status === "running")
 						await stopRun(ctx.cwd, launch.run.runId);
