@@ -450,9 +450,8 @@ test("deep-research tiered verification variant is path-ref opt-in", async () =>
 	assert.doesNotMatch(verifyCore?.compiledPrompt ?? "", /results\[\]/);
 	assert.doesNotMatch(verifyTail?.compiledPrompt ?? "", /results\[\]/);
 	// The audit gate must see all verifier outputs from both tiers. The
-	// verification-tiers planning stage is intentionally not an audit source:
-	// the gate's fallback verifier-row collection would otherwise misread its
-	// candidate arrays as verdict rows.
+	// verification-tiers planning stage is intentionally not an audit source;
+	// only the explicit verifier stage-id families grant audit authority.
 	assert.deepEqual(auditClaims?.dependsOn, [
 		"plan.main",
 		"normalize-input-packet.main",
@@ -9150,6 +9149,131 @@ test("deep-research claim-evidence-gate preserves row-shaped results and clean b
 		{ reason: "duplicate_verifier_rows", count: 1 },
 	]);
 	assert.deepEqual(out.statusPartitions.verified, ["claim-row", "claim-batch"]);
+});
+
+test("deep-research claim-evidence-gate accepts current tiered verifier sources only", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"claim-evidence-gate.mjs",
+	);
+	const helper = (
+		await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)
+	).default;
+	const out = await helper({
+		sources: {
+			"normalize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [
+						{
+							id: "claim-core",
+							claim: "Core verifier row is audited.",
+							sourceRefs: ["wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+						},
+						{
+							id: "claim-tail",
+							claim: "Tail verifier row is audited.",
+							sourceRefs: ["wsrc_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+						},
+					],
+				},
+				factSlotCoverage: [],
+			},
+			"verification-tiers.main": {
+				coreCandidates: [{ id: "claim-core", status: "verified" }],
+				tailCandidates: [{ id: "claim-tail", status: "verified" }],
+			},
+			"verify-core-claims.item-001": {
+				id: "claim-core",
+				status: "verified",
+				evidence: [
+					{
+						sourceRef: "wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+						quote: "Core verifier row is audited.",
+					},
+				],
+			},
+			"verify-tail-claims.item-001": {
+				id: "claim-tail",
+				status: "verified",
+				evidence: [
+					{
+						sourceRef: "wsrc_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+						quote: "Tail verifier row is audited.",
+					},
+				],
+			},
+		},
+	});
+
+	assert.equal(out.gateSummary.verifierRowsTotal, 2);
+	assert.equal(out.gateSummary.validVerifierRows, 2);
+	assert.equal(out.gateSummary.missingVerifierResults, 0);
+	assert.deepEqual(out.statusPartitions.verified, ["claim-core", "claim-tail"]);
+});
+
+test("deep-research claim-evidence-gate rejects nested verifier aliases and unrelated sources", async () => {
+	const helperPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"deep-research",
+		"helpers",
+		"claim-evidence-gate.mjs",
+	);
+	const helper = (
+		await import(`${pathToFileURL(helperPath).href}?test=${Date.now()}`)
+	).default;
+	const legacyRow = {
+		id: "claim-legacy",
+		status: "verified",
+		evidence: [
+			{
+				sourceRef: "wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				quote: "A legacy alias must not grant verifier authority.",
+			},
+		],
+	};
+	const out = await helper({
+		sources: {
+			"normalize-claims.main": {
+				claimInventory: {
+					verificationCandidates: [
+						{
+							id: "claim-legacy",
+							claim: "A legacy alias must not grant verifier authority.",
+							sourceRefs: ["wsrc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+						},
+					],
+				},
+				factSlotCoverage: [],
+			},
+			"verify-claims.claims": { claims: [legacyRow] },
+			"verify-claims.claim-verdicts": { claimVerdicts: [legacyRow] },
+			"verify-claims.verdicts": { verdicts: [legacyRow] },
+			"verify-claims.items": { items: [legacyRow] },
+			"verify-claims.recursive": { nested: { rows: [legacyRow] } },
+			"verification-tiers.main": { candidates: [legacyRow] },
+			"custom-verifier.main": legacyRow,
+		},
+	});
+
+	assert.equal(out.gateSummary.verifierRowsTotal, 0);
+	assert.equal(out.gateSummary.validVerifierRows, 0);
+	assert.equal(out.gateSummary.missingVerifierResults, 1);
+	assert.deepEqual(out.statusPartitions.verified, []);
+	assert.equal(out.auditedClaims[0].status, "unverified");
+	assert.equal(out.auditedClaims[0].sourceId, undefined);
+	assert.ok(
+		out.remainingGaps.some(
+			(gap) => gap.evidenceState === "missing_verifier_result",
+		),
+	);
 });
 
 test("deep-research claim-evidence-gate blocks batch rows outside their source batch", async () => {

@@ -1,7 +1,7 @@
 {
 	"schema": "pi-workflow-unit-test-inventory-v1",
 	"source": "unit.test.mjs",
-	"count": 525,
+	"count": 527,
 	"tests": [
 		{
 			"name": "public schemaVersion 1 parser accepts artifact graph and rejects non-artifactGraph top-level shapes",
@@ -1182,7 +1182,7 @@
 		{
 			"name": "deep-research tiered verification variant is path-ref opt-in",
 			"occurrence": 1,
-			"sha256": "2434f3a034531a38456de405d9487635bdb1389cb55f64e515bed7ba9d9832fe",
+			"sha256": "724415489b0fccce9971568c8b7ed158414bbcd4d885dd026639f46c779ec061",
 			"domain": "core-runtime"
 		},
 		{
@@ -1741,6 +1741,18 @@
 			"name": "deep-research claim-evidence-gate preserves row-shaped results and clean batch joins",
 			"occurrence": 1,
 			"sha256": "63dedd036998dda695b417afb53478f86985809cf21eed2f7c0e5234e4ac85c2",
+			"domain": "core-runtime"
+		},
+		{
+			"name": "deep-research claim-evidence-gate accepts current tiered verifier sources only",
+			"occurrence": 1,
+			"sha256": "3c9c235a02029ca7ed3b93ea2b37b8da9d4938b157c96bd61ab22e63f1782954",
+			"domain": "core-runtime"
+		},
+		{
+			"name": "deep-research claim-evidence-gate rejects nested verifier aliases and unrelated sources",
+			"occurrence": 1,
+			"sha256": "91433d0dde764e7845007279613b250048e77ff1a685f5e637708ace0d093063",
 			"domain": "core-runtime"
 		},
 		{

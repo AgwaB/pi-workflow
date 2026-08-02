@@ -9,8 +9,9 @@ import {
 
 // Deterministic claim audit for deep-research.
 //
-// Sources: plan (optional), normalize-claims (optional), verify-claims foreach
-// outputs. For every verifier result this support helper:
+// Sources: plan (optional), normalize-claims (optional), and foreach outputs
+// from verify-claims, verify-core-claims, or verify-tail-claims. For every
+// verifier result this support helper:
 //   1. rejoins the original claim text and factSlotIds from
 //      normalize-claims.claimInventory.verificationCandidates by id (the
 //      verifier echo is not trusted for identity fields),
@@ -40,6 +41,22 @@ function asArray(value) {
 		if (Array.isArray(value.items)) return value.items;
 		return Object.values(value).flatMap(asArray);
 	}
+	return [];
+}
+
+function verifierRows(value) {
+	if (Array.isArray(value)) return value;
+	if (!value || typeof value !== "object") return [];
+	if (Array.isArray(value.auditedClaims)) return value.auditedClaims;
+	if (
+		"status" in value ||
+		"verdict" in value ||
+		"verdictDigest" in value ||
+		"claimId" in value ||
+		"id" in value
+	)
+		return [value];
+	if (Array.isArray(value.results)) return value.results;
 	return [];
 }
 
@@ -1169,32 +1186,20 @@ export default async function claimEvidenceGate({
 		),
 	);
 
-	const claims = Object.entries(sources ?? {})
-		.filter(
-			([specId]) =>
-				specId === "verify-claims" || specId.startsWith("verify-claims."),
+	const verifierStageIds = [
+		"verify-claims",
+		"verify-core-claims",
+		"verify-tail-claims",
+	];
+	const verifierClaims = Object.entries(sources ?? {})
+		.filter(([specId]) =>
+			verifierStageIds.some(
+				(stageId) => specId === stageId || specId.startsWith(`${stageId}.`),
+			),
 		)
 		.flatMap(([sourceId, source]) =>
-			asArray(source).map((claim, index) => ({ sourceId, claim, index })),
+			verifierRows(source).map((claim, index) => ({ sourceId, claim, index })),
 		);
-	// Legacy layout: when no verify-claims.* source ids exist (for example a
-	// single from: string dependency), fall back to every non-plan/non-normalize
-	// source. Exclude sanitizer sources because they are canonicalizer inputs, not
-	// verifier verdict rows.
-	const verifierClaims =
-		claims.length > 0
-			? claims
-			: Object.entries(sources ?? {})
-					.filter(
-						([specId]) =>
-							!specId.startsWith("plan") &&
-							!specId.startsWith("normalize-claims") &&
-							!specId.startsWith("normalize-input-packet") &&
-							!specId.startsWith("sanitize-claims"),
-					)
-					.flatMap(([sourceId, source]) =>
-						asArray(source).map((claim, index) => ({ sourceId, claim, index })),
-					);
 
 	const auditedClaims = [];
 	const remainingGaps = [];
