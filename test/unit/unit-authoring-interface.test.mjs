@@ -3647,6 +3647,55 @@ test("natural-language workflow tools list and start workflows", async () => {
 		assert.match(runResult.content[0].text, /Open: \/workflow workflow_/);
 		assert.equal(runResult.details.status, "running");
 		assert.match(launchedTask, /Investigate the repo/);
+		const toolRun = await readRunRecord(cwd, runResult.details.runId);
+		assert.deepEqual(toolRun.launch, {
+			schema: "pi-workflow-run-launch-v1",
+			source: { kind: "tool", name: "workflow_run" },
+			requestKind: "named-workflow",
+			routingMode: "off",
+			profile: { kind: "base" },
+			task: { characters: 20, lines: 1 },
+			command: { state: "unavailable", reason: "not-a-command" },
+		});
+		assert.equal(
+			existsSync(
+				join(cwd, ".pi", "workflows", toolRun.runId, "launch-command.txt"),
+			),
+			false,
+		);
+
+		const dynamicResult = await registeredTools[2].execute(
+			"tool-dynamic",
+			{ task: "Investigate dynamically" },
+			new AbortController().signal,
+			undefined,
+			ctx,
+		);
+		const dynamicToolRun = await readRunRecord(
+			cwd,
+			dynamicResult.details.runId,
+		);
+		assert.deepEqual(dynamicToolRun.launch, {
+			schema: "pi-workflow-run-launch-v1",
+			source: { kind: "tool", name: "workflow_dynamic" },
+			requestKind: "direct-dynamic",
+			routingMode: "off",
+			profile: { kind: "not-applicable" },
+			task: { characters: 23, lines: 1 },
+			command: { state: "unavailable", reason: "not-a-command" },
+		});
+		assert.equal(
+			existsSync(
+				join(
+					cwd,
+					".pi",
+					"workflows",
+					dynamicToolRun.runId,
+					"launch-command.txt",
+				),
+			),
+			false,
+		);
 	} finally {
 		setSubagentApiForTests(undefined);
 		if (originalRole === undefined) delete process.env.PI_WORKFLOW_ROLE;

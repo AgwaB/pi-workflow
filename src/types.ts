@@ -1258,6 +1258,52 @@ export interface WorkflowRunProvenance {
 	[key: string]: unknown;
 }
 
+export type WorkflowRunLaunchSource =
+	| { kind: "slash-command"; action: "run" | "dynamic" }
+	| { kind: "tool"; name: "workflow_run" | "workflow_dynamic" };
+
+export type WorkflowRunLaunchProfile =
+	| { kind: "named"; name: string }
+	| { kind: "base" }
+	| { kind: "not-applicable" };
+
+export type WorkflowRunLaunchCommandMetadata =
+	| {
+			state: "captured";
+			artifact: "launch-command.txt";
+			encoding: "utf-8";
+			bytes: number;
+			sha256: string;
+			fidelity: "pi-extension-command-v1";
+			sensitivity: "user-input";
+			disclosure: "explicit-only";
+	  }
+	| { state: "unavailable"; reason: "not-a-command" };
+
+/** Structured creation-launch provenance. Exact command text lives in a private sidecar. */
+export interface WorkflowRunLaunchMetadata {
+	schema: "pi-workflow-run-launch-v1";
+	source: WorkflowRunLaunchSource;
+	requestKind: "named-workflow" | "direct-dynamic";
+	routingMode: "default-on" | "explicit-on" | "off";
+	profile: WorkflowRunLaunchProfile;
+	task: { characters: number; lines: number };
+	command: WorkflowRunLaunchCommandMetadata;
+}
+
+/** Non-persisted launch input carried from a launch surface to the engine. */
+export interface WorkflowRunLaunchCapture {
+	schema: "pi-workflow-run-launch-v1";
+	source: WorkflowRunLaunchSource;
+	requestKind: "named-workflow" | "direct-dynamic";
+	routingMode: "default-on" | "explicit-on" | "off";
+	profile: WorkflowRunLaunchProfile;
+	task: { characters: number; lines: number };
+	command:
+		| { state: "captured"; text: string }
+		| { state: "unavailable"; reason: "not-a-command" };
+}
+
 /**
  * Deterministic claim-support accounting computed after a direct dynamic
  * run's synthesis completes. Fail-open: audit computation errors are recorded
@@ -1332,6 +1378,7 @@ export interface WorkflowRunRecord {
 	provenance?: WorkflowRunProvenance;
 	routing?: WorkflowRunRouting;
 	executionProfile?: WorkflowRunExecutionProfile;
+	launch?: WorkflowRunLaunchMetadata;
 	/** Durable transparent foreach batch journals, including terminal receipts. */
 	foreachBatches?: WorkflowForeachBatchRecord[];
 	/** Task-usage rollup persisted when the run reaches a terminal status. */

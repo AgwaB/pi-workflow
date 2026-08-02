@@ -1,14 +1,19 @@
 // @ts-nocheck
 import { open } from "node:fs/promises";
-import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import {
+	copyToClipboard,
+	type ExtensionCommandContext,
+} from "@earendil-works/pi-coding-agent";
 
 import {
 	workflowRunPath,
 	fromProjectPath,
+	isWorkflowRunLaunchMetadata,
 	listRunRecords,
 	readIndex,
 	readJson,
 	readRunRecord,
+	readWorkflowLaunchCommandArtifact,
 	supervisorPath,
 } from "./store.js";
 import { detectRunStall, type WorkflowRunStallInfo } from "./engine.js";
@@ -42,6 +47,7 @@ const MAX_LIST_ROWS = 18;
 const MAX_STAGE_TASK_ROWS = 18;
 const TASK_ARTIFACT_MAX_LINES = 1_000;
 const TASK_ARTIFACT_VIEW_LINES = 16;
+const LAUNCH_COMMAND_VIEW_LINES = 18;
 
 type TaskArtifactView = "output" | "prompt";
 
@@ -102,6 +108,14 @@ export class WorkflowView implements Component {
 	private loading = true;
 	private reloadActive = false;
 	private closed = false;
+	private launchCommandOpen = false;
+	private launchCommandText = "";
+	private launchCommandScrollLine = 0;
+	private launchLoadGeneration = 0;
+	private launchVerificationFailures = new Map<
+		string,
+		{ identity: string; reason: string }
+	>();
 	private timer?: ReturnType<typeof setInterval>;
 
 	constructor(
@@ -110,6 +124,9 @@ export class WorkflowView implements Component {
 		private readonly theme: Theme,
 		private readonly done: () => void,
 		private readonly initialRunId?: string,
+		private readonly copyLaunchCommand: (
+			text: string,
+		) => Promise<void> = copyToClipboard,
 	) {}
 
 	start(): void {
@@ -124,6 +141,7 @@ export class WorkflowView implements Component {
 	dispose(): void {
 		if (this.timer) clearInterval(this.timer);
 		this.timer = undefined;
+		this.clearLaunchCommand();
 	}
 
 	invalidate(): void {}
@@ -134,10 +152,23 @@ export class WorkflowView implements Component {
 			return;
 		}
 
+		if (this.launchCommandOpen) {
+			this.handleLaunchCommandInput(data);
+			return;
+		}
+
 		if (data === "r" || data === "R") {
 			this.message = "refreshing";
 			void this.reload(true);
 			this.tui.requestRender();
+			return;
+		}
+
+		if (
+			(data === "v" || data === "V") &&
+			(this.mode === "runs" || this.mode === "stages")
+		) {
+			void this.openLaunchCommand();
 			return;
 		}
 
@@ -156,10 +187,14 @@ export class WorkflowView implements Component {
 		// which makes the right edge of the workflow panel look broken.
 		const contentWidth = Math.max(1, viewportWidth - 2);
 		const selectedTask = this.selectedTaskRecord();
-		const lines =
-			this.mode === "task" && this.detailRun && selectedTask
-				? this.renderTaskDetail(contentWidth, this.detailRun, selectedTask)
-				: this.renderBoard(contentWidth);
+		let lines: string[];
+		if (this.launchCommandOpen) {
+			lines = this.renderLaunchCommand(contentWidth);
+		} else if (this.mode === "task" && this.detailRun && selectedTask) {
+			lines = this.renderTaskDetail(contentWidth, this.detailRun, selectedTask);
+		} else {
+			lines = this.renderBoard(contentWidth);
+		}
 		// Return full-width lines so Pi clears stale cells to the right, while the
 		// actual border/content remains inside contentWidth and never touches the
 		// terminal's final columns.
@@ -252,10 +287,14 @@ export class WorkflowView implements Component {
 		if (this.reloadActive) return;
 		this.reloadActive = true;
 		try {
+			const previousRunId = this.detailRun?.runId;
 			const flows = await loadFlowSummaries(this.cwd, this.initialRunId);
 			this.flows = flows;
 			this.supervisors = await loadRunSupervisors(this.cwd, flows);
 			this.selectedFlow = clampIndex(this.selectedFlow, flows.length);
+			const selectedRunId = flows[this.selectedFlow]?.runId;
+			if (previousRunId && previousRunId !== selectedRunId)
+				this.clearLaunchCommand();
 			const initialRunId = this.initialRunId;
 			if (initialRunId && this.loading) {
 				const initialIndex = flows.findIndex(
@@ -333,6 +372,172 @@ export class WorkflowView implements Component {
 			this.artifactScrollLine,
 			this.maxArtifactScrollLine(),
 		);
+	}
+
+	private handleLaunchCommandInput(data: string): void {
+		if (matchesKey(data, "escape") || data === "b" || data === "B") {
+			this.clearLaunchCommand();
+			this.message = "";
+			this.tui.requestRender();
+			return;
+		}
+		if (matchesKey(data, "up")) {
+			this.launchCommandScrollLine = Math.max(
+				0,
+				this.launchCommandScrollLine - 1,
+			);
+			this.tui.requestRender();
+			return;
+		}
+		if (matchesKey(data, "down")) {
+			this.launchCommandScrollLine += 1;
+			this.tui.requestRender();
+			return;
+		}
+		if (data === "c" || data === "C") void this.copyLoadedLaunchCommand();
+	}
+
+	private async openLaunchCommand(): Promise<void> {
+		const run = this.detailRun;
+		if (!run?.launch) {
+			this.message = "launch command unavailable: not captured";
+			this.tui.requestRender();
+			return;
+		}
+		if (!isWorkflowRunLaunchMetadata(run.launch)) {
+			this.message = "launch command unavailable: metadata malformed";
+			this.tui.requestRender();
+			return;
+		}
+		if (run.launch.command.state !== "captured") {
+			this.message = "launch command unavailable: tool launch";
+			this.tui.requestRender();
+			return;
+		}
+
+		const identity = this.launchCommandMetadataIdentity(run);
+		if (!identity) return;
+		const generation = ++this.launchLoadGeneration;
+		this.message = "loading launch command";
+		this.tui.requestRender();
+		try {
+			const text = await readWorkflowLaunchCommandArtifact(this.cwd, run);
+			if (
+				this.closed ||
+				generation !== this.launchLoadGeneration ||
+				this.detailRun?.runId !== run.runId ||
+				this.launchCommandMetadataIdentity(this.detailRun) !== identity
+			)
+				return;
+			this.launchVerificationFailures.delete(run.runId);
+			this.launchCommandText = text;
+			this.launchCommandScrollLine = 0;
+			this.launchCommandOpen = true;
+			this.message = "";
+		} catch (error) {
+			if (
+				generation !== this.launchLoadGeneration ||
+				!this.detailRun ||
+				this.launchCommandMetadataIdentity(this.detailRun) !== identity
+			)
+				return;
+			const message = launchCommandUnavailableMessage(error);
+			this.clearLaunchCommand();
+			this.recordLaunchVerificationFailure(run, message);
+			this.message = message;
+		} finally {
+			this.tui.requestRender();
+		}
+	}
+
+	private async copyLoadedLaunchCommand(): Promise<void> {
+		if (!this.launchCommandOpen) return;
+		const text = this.launchCommandText;
+		try {
+			await this.copyLaunchCommand(text);
+			if (!this.launchCommandOpen || this.launchCommandText !== text) return;
+			this.message = "Launch command copied";
+		} catch {
+			if (!this.launchCommandOpen || this.launchCommandText !== text) return;
+			this.message = "Launch command copy failed";
+		} finally {
+			this.tui.requestRender();
+		}
+	}
+
+	private clearLaunchCommand(): void {
+		this.launchLoadGeneration += 1;
+		this.launchCommandOpen = false;
+		this.launchCommandText = "";
+		this.launchCommandScrollLine = 0;
+	}
+
+	private launchCommandMetadataIdentity(
+		run: WorkflowRunRecord,
+	): string | undefined {
+		if (
+			!isWorkflowRunLaunchMetadata(run.launch) ||
+			run.launch.command.state !== "captured"
+		)
+			return undefined;
+		return JSON.stringify([run.runId, run.launch.command]);
+	}
+
+	private launchVerificationFailure(
+		run: WorkflowRunRecord,
+	): string | undefined {
+		const identity = this.launchCommandMetadataIdentity(run);
+		const failure = this.launchVerificationFailures.get(run.runId);
+		return identity && failure?.identity === identity
+			? failure.reason
+			: undefined;
+	}
+
+	private recordLaunchVerificationFailure(
+		run: WorkflowRunRecord,
+		message: string,
+	): void {
+		const identity = this.launchCommandMetadataIdentity(run);
+		if (!identity) return;
+		this.launchVerificationFailures.set(run.runId, {
+			identity,
+			reason: launchCommandUnavailableReason(message),
+		});
+	}
+
+	private renderLaunchCommand(width: number): string[] {
+		const bodyWidth = Math.max(1, width - 4);
+		const wrapped = wrapLaunchCommand(
+			escapeLaunchCommandForDisplay(this.launchCommandText),
+			bodyWidth,
+		);
+		const maxStart = Math.max(0, wrapped.length - LAUNCH_COMMAND_VIEW_LINES);
+		const start = Math.min(this.launchCommandScrollLine, maxStart);
+		this.launchCommandScrollLine = start;
+		const end = Math.min(wrapped.length, start + LAUNCH_COMMAND_VIEW_LINES);
+		const visible = wrapped.slice(start, end);
+		const lines = [
+			warning(this.theme, "Sensitive user input · control characters escaped"),
+			muted(
+				this.theme,
+				"Clipboard retention is controlled by the OS/terminal.",
+			),
+			"",
+			...visible.map((line) => previewText(this.theme, line)),
+			"",
+			scrollIndicator(
+				this.theme,
+				wrapped.length === 0
+					? "0 / 0"
+					: `${start + 1}-${end} / ${wrapped.length}`,
+			),
+		];
+		return [
+			...boxed(this.theme, "Launch Command", width, lines, "borderAccent"),
+			"",
+			this.footer("↑/↓ scroll · c copy exact command · b/Esc back · q close"),
+			...(this.message ? [messageText(this.theme, this.message)] : []),
+		];
 	}
 
 	private renderBoard(width: number): string[] {
@@ -524,7 +729,6 @@ export class WorkflowView implements Component {
 			),
 			"",
 		];
-
 
 		const validationLines = this.taskValidationStripLines(task, width - 4);
 		if (validationLines.length > 0) {
@@ -1060,6 +1264,7 @@ export class WorkflowView implements Component {
 
 	private moveRun(delta: number): void {
 		if (this.flows.length <= 0) return;
+		this.clearLaunchCommand();
 		this.selectedFlow = wrapIndex(this.selectedFlow + delta, this.flows.length);
 		this.selectedStage = 0;
 		this.selectedTask = 0;
@@ -1185,6 +1390,7 @@ export class WorkflowView implements Component {
 			]),
 			...(detailRun ? this.runUsageLines(detailRun) : []),
 			...(detailRun ? this.runToolResultBudgetLines(detailRun) : []),
+			...(detailRun ? this.launchSummaryLines(detailRun) : []),
 		];
 	}
 
@@ -1197,7 +1403,9 @@ export class WorkflowView implements Component {
 
 		const lines = [""];
 		if (tokens) {
-			lines.push(`${accent(this.theme, "Usage")} ${metaValue(this.theme, tokens)}`);
+			lines.push(
+				`${accent(this.theme, "Usage")} ${metaValue(this.theme, tokens)}`,
+			);
 			const inputTokens = formatTokenCount(observed.inputTokens);
 			const outputTokens = formatTokenCount(observed.outputTokens);
 			const cacheRead = formatTokenCount(observed.cacheReadInputTokens);
@@ -1238,6 +1446,52 @@ export class WorkflowView implements Component {
 		return stallBadgeText(this.theme, stall);
 	}
 
+	private launchSummaryLines(run: WorkflowRunRecord): string[] {
+		const launch = run.launch;
+		if (!launch || !isWorkflowRunLaunchMetadata(launch)) {
+			return [
+				"",
+				accent(this.theme, "Launch"),
+				kvRow(this.theme, "source", "unavailable"),
+				kvRow(
+					this.theme,
+					"command",
+					launch
+						? "unavailable (invalid metadata)"
+						: "unavailable (not captured)",
+				),
+			];
+		}
+
+		const source =
+			launch.source.kind === "slash-command"
+				? `slash · /workflow ${launch.source.action}`
+				: `tool · ${launch.source.name}`;
+		const route = launchRouteSummary(launch.routingMode, run.routing);
+		let profile = "n/a";
+		if (launch.profile.kind === "base") profile = "base";
+		if (launch.profile.kind === "named")
+			profile = escapeLaunchCommandForDisplay(launch.profile.name);
+		const chars = `${launch.task.characters} chars`;
+		const lines = `${launch.task.lines} ${launch.task.lines === 1 ? "line" : "lines"}`;
+		const verificationFailure = this.launchVerificationFailure(run);
+		const command =
+			launch.command.state === "captured"
+				? verificationFailure
+					? `unavailable (${verificationFailure})`
+					: "available · v view"
+				: "unavailable (tool launch)";
+		return [
+			"",
+			accent(this.theme, "Launch"),
+			kvRow(this.theme, "source", source),
+			kvRow(this.theme, "route", route),
+			kvRow(this.theme, "profile", profile),
+			kvRow(this.theme, "task", `${chars} · ${lines}`),
+			kvRow(this.theme, "command", command),
+		];
+	}
+
 	private runDetailSummaryLines(run: WorkflowRunRecord): string[] {
 		const stallBadge = this.stallBadge(run);
 		const lines = [
@@ -1258,6 +1512,7 @@ export class WorkflowView implements Component {
 			kvRow(this.theme, "run", shortId(run.runId)),
 			...this.runUsageLines(run),
 			...this.runToolResultBudgetLines(run),
+			...this.launchSummaryLines(run),
 		];
 		if (run.fanout && run.fanout.length > 0) {
 			lines.push("", accent(this.theme, "Fanout"));
@@ -1282,23 +1537,37 @@ export class WorkflowView implements Component {
 		return lines;
 	}
 
+	private selectedRunHasCapturedLaunch(): boolean {
+		const selected = this.flows[this.selectedFlow];
+		const run =
+			selected && this.detailRun?.runId === selected.runId
+				? this.detailRun
+				: undefined;
+		return (
+			isWorkflowRunLaunchMetadata(run?.launch) &&
+			run.launch.command.state === "captured" &&
+			!this.launchVerificationFailure(run)
+		);
+	}
+
 	private footerText(width: number): string {
+		const launchHint = this.selectedRunHasCapturedLaunch() ? " · v launch" : "";
 		if (width < 72) {
 			if (this.mode === "task")
 				return "←/→ artifact · ↑/↓ scroll · Esc back · r refresh · q close";
 			if (this.mode === "tasks")
 				return "Enter detail · ←/→ nav · ↑/↓ move · q close";
 			if (this.mode === "stages")
-				return "Enter tasks · ←/→ nav · ↑/↓ move · q close";
-			return "Enter stages · ↑/↓ move · q/Esc close";
+				return `Enter tasks · ←/→ nav · ↑/↓ move${launchHint} · q close`;
+			return `Enter stages · ↑/↓ move${launchHint} · q/Esc close`;
 		}
 		if (this.mode === "task")
 			return "←/→ switch Output/Prompt · ↑/↓ scroll artifact · b/Esc back · r refresh · q close";
 		if (this.mode === "tasks")
 			return "Enter/→ detail · b/Esc/← stages · ↑/↓ move · [/]/n/p sibling · r refresh · q close";
 		if (this.mode === "stages")
-			return "Enter/→ tasks · b/Esc/← runs · ↑/↓ move · [/]/n/p sibling · r refresh · q close";
-		return "Enter/→ stages · ↑/↓ move · [/]/n/p sibling · r refresh · q/Esc close";
+			return `Enter/→ tasks · b/Esc/← runs · ↑/↓ move · [/]/n/p sibling · r refresh${launchHint} · q close`;
+		return `Enter/→ stages · ↑/↓ move · [/]/n/p sibling · r refresh${launchHint} · q/Esc close`;
 	}
 
 	private footer(text: string): string {
@@ -1332,6 +1601,92 @@ export class WorkflowView implements Component {
 		// repaint so terminals do not leave stale workflow-board rows behind.
 		this.tui.requestRender(true);
 	}
+}
+
+function launchRouteSummary(
+	mode: "default-on" | "explicit-on" | "off",
+	routing: WorkflowRunRecord["routing"],
+): string {
+	if (mode === "off") return "off";
+	const intent = mode === "default-on" ? "default" : "explicit";
+	if (
+		!routing ||
+		(routing.decided !== "direct" &&
+			routing.decided !== "dynamic" &&
+			routing.decided !== "workflow") ||
+		(routing.depth !== "quick" &&
+			routing.depth !== "standard" &&
+			routing.depth !== "max") ||
+		typeof routing.confidence !== "number" ||
+		!Number.isFinite(routing.confidence) ||
+		routing.confidence < 0 ||
+		routing.confidence > 1
+	)
+		return `${intent} → unavailable`;
+	return `${intent} → ${routing.decided} · ${routing.depth} · ${Math.round(routing.confidence * 100)}%`;
+}
+
+function launchCommandUnavailableMessage(error: unknown): string {
+	const message = error instanceof Error ? error.message : "";
+	const allowed = [
+		"launch command unavailable: metadata malformed",
+		"launch command unavailable: tool launch",
+		"launch command unavailable: artifact missing",
+		"launch command unavailable: artifact read failed",
+		"launch command unavailable: verification failed",
+	];
+	return allowed.includes(message)
+		? message
+		: "launch command unavailable: verification failed";
+}
+
+function launchCommandUnavailableReason(message: string): string {
+	const prefix = "launch command unavailable: ";
+	return message.startsWith(prefix)
+		? message.slice(prefix.length)
+		: "verification failed";
+}
+
+function escapeLaunchCommandForDisplay(text: string): string {
+	let escaped = "";
+	for (const character of text) {
+		const codePoint = character.codePointAt(0) ?? 0;
+		if (character === "\\") escaped += "\\\\";
+		else if (character === '"') escaped += '\\"';
+		else if (character === "\n") escaped += "\\n";
+		else if (character === "\r") escaped += "\\r";
+		else if (character === "\t") escaped += "\\t";
+		else if (
+			codePoint <= 0x1f ||
+			(codePoint >= 0x7f && codePoint <= 0x9f) ||
+			codePoint === 0x061c ||
+			(codePoint >= 0x200e && codePoint <= 0x200f) ||
+			(codePoint >= 0x2028 && codePoint <= 0x202e) ||
+			(codePoint >= 0x2066 && codePoint <= 0x2069)
+		) {
+			escaped += `\\u${codePoint.toString(16).padStart(4, "0")}`;
+		} else escaped += character;
+	}
+	return escaped;
+}
+
+function wrapLaunchCommand(text: string, width: number): string[] {
+	if (!text) return [""];
+	const lines: string[] = [];
+	let line = "";
+	let lineWidth = 0;
+	for (const character of text) {
+		const characterWidth = visibleWidth(character);
+		if (line && lineWidth + characterWidth > width) {
+			lines.push(line);
+			line = "";
+			lineWidth = 0;
+		}
+		line += character;
+		lineWidth += characterWidth;
+	}
+	lines.push(line);
+	return lines;
 }
 
 async function loadFlowSummaries(

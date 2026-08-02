@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
+import {
+	workflowRunDir,
+	writeWorkflowLaunchCommandArtifact,
+} from "../../.tmp/unit/store.js";
 import { WorkflowView } from "../../.tmp/unit/workflow-view.js";
 
 const theme = {
@@ -10,6 +17,14 @@ const theme = {
 };
 
 const timestamp = "2026-07-07T00:00:00.000Z";
+
+async function waitFor(predicate, message = "condition did not settle") {
+	for (let attempt = 0; attempt < 200; attempt += 1) {
+		if (predicate()) return;
+		await new Promise((resolve) => setImmediate(resolve));
+	}
+	assert.fail(message);
+}
 
 function taskSummary(overrides = {}) {
 	return {
@@ -330,6 +345,307 @@ test("dynamic task detail keeps legacy telemetry unavailable and disabled distin
 		assert.doesNotMatch(rendered, /evicted:\s+0/);
 		if (telemetry === "disabled")
 			assert.match(rendered, /telemetry:\s+0\/1\s+·\s+counters:\s+0\/0/);
+	}
+});
+
+test("workflow board launch summary is structured and never previews command text", () => {
+	const run = runRecord();
+	run.launch = {
+		schema: "pi-workflow-run-launch-v1",
+		source: { kind: "slash-command", action: "run" },
+		requestKind: "named-workflow",
+		routingMode: "default-on",
+		profile: { kind: "named", name: "medium" },
+		task: { characters: 148, lines: 2 },
+		command: {
+			state: "captured",
+			artifact: "launch-command.txt",
+			encoding: "utf-8",
+			bytes: 99,
+			sha256: "a".repeat(64),
+			fidelity: "pi-extension-command-v1",
+			sensitivity: "user-input",
+			disclosure: "explicit-only",
+		},
+	};
+	run.routing = {
+		requested: "secret-workflow-path",
+		decided: "workflow",
+		depth: "standard",
+		confidence: 0.9,
+		reason: "secret routing reason",
+	};
+	const view = new WorkflowView(
+		"/tmp/workflow-view",
+		{ requestRender() {} },
+		theme,
+		() => {},
+	);
+	view.loading = false;
+	view.flows = [
+		{
+			runId: run.runId,
+			name: run.name,
+			type: run.type,
+			status: run.status,
+			createdAt: run.createdAt,
+			updatedAt: run.updatedAt,
+			taskSummary: run.taskSummary,
+		},
+	];
+	view.detailRun = run;
+
+	const rendered = view.render(120).join("\n");
+	assert.match(rendered, /Launch/);
+	assert.match(rendered, /source: slash · \/workflow/);
+	assert.match(rendered, /route: default → workflow/);
+	assert.match(rendered, /profile:\s+medium/);
+	assert.match(rendered, /148 chars · 2 lines/);
+	assert.match(rendered, /available · v view/);
+	assert.doesNotMatch(rendered, /secret-workflow-path|secret routing reason/);
+});
+
+test("launch summaries render quick, standard, and max routing depths", () => {
+	const run = runRecord();
+	run.launch = {
+		schema: "pi-workflow-run-launch-v1",
+		source: { kind: "slash-command", action: "run" },
+		requestKind: "named-workflow",
+		routingMode: "default-on",
+		profile: { kind: "base" },
+		task: { characters: 10, lines: 1 },
+		command: {
+			state: "captured",
+			artifact: "launch-command.txt",
+			encoding: "utf-8",
+			bytes: 10,
+			sha256: "0".repeat(64),
+			fidelity: "pi-extension-command-v1",
+			sensitivity: "user-input",
+			disclosure: "explicit-only",
+		},
+	};
+	const view = new WorkflowView(
+		"/tmp/workflow-view",
+		{ requestRender() {} },
+		theme,
+		() => {},
+	);
+	view.loading = false;
+	view.flows = [{ ...run, tasks: undefined }];
+	view.detailRun = run;
+
+	for (const depth of ["quick", "standard", "max"]) {
+		run.routing = {
+			requested: "usage-test",
+			decided: "workflow",
+			depth,
+			confidence: 0.82,
+			reason: "workflow route",
+		};
+		assert.match(
+			view.launchSummaryLines(run).join("\n"),
+			new RegExp(`default → workflow · ${depth} · 82%`),
+		);
+	}
+});
+
+test("launch command viewer verifies on demand, escapes controls, and copies exact text", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "piwf-view-launch-"));
+	const run = runRecord();
+	run.runId = "workflow_view_launch";
+	const exact =
+		'/workflow run review "line one\nline two\t\u001b]0;owned\u0007\u202e"';
+	const copied = [];
+	let copyShouldFail = false;
+	try {
+		const command = await writeWorkflowLaunchCommandArtifact(
+			cwd,
+			run.runId,
+			exact,
+		);
+		run.launch = {
+			schema: "pi-workflow-run-launch-v1",
+			source: { kind: "slash-command", action: "run" },
+			requestKind: "named-workflow",
+			routingMode: "off",
+			profile: { kind: "base" },
+			task: { characters: 24, lines: 2 },
+			command,
+		};
+		const view = new WorkflowView(
+			cwd,
+			{ requestRender() {} },
+			theme,
+			() => {},
+			undefined,
+			async (text) => {
+				if (copyShouldFail) throw new Error("clipboard failure");
+				copied.push(text);
+			},
+		);
+		view.loading = false;
+		view.flows = [
+			{
+				runId: run.runId,
+				name: run.name,
+				type: run.type,
+				status: run.status,
+				createdAt: run.createdAt,
+				updatedAt: run.updatedAt,
+				taskSummary: run.taskSummary,
+			},
+		];
+		view.detailRun = run;
+
+		assert.equal(view.render(100).join("\n").includes("line one"), false);
+		view.handleInput("c");
+		assert.deepEqual(copied, []);
+		view.handleInput("v");
+		await waitFor(
+			() => view.launchCommandOpen,
+			"launch command viewer did not open",
+		);
+		const rendered = view.render(100).join("\n");
+		assert.match(rendered, /Launch Command/);
+		assert.match(rendered, /Sensitive user input · control characters escaped/);
+		assert.match(rendered, /\\n/);
+		assert.match(rendered, /\\t/);
+		assert.match(rendered, /\\u001b/);
+		assert.match(rendered, /\\u202e/i);
+		assert.equal(rendered.includes("\u001b]0;owned"), false);
+
+		view.handleInput("c");
+		await waitFor(() => view.message === "Launch command copied");
+		assert.deepEqual(copied, [exact]);
+		assert.equal(view.message, "Launch command copied");
+		copyShouldFail = true;
+		view.handleInput("c");
+		await waitFor(() => view.message === "Launch command copy failed");
+		assert.equal(view.message, "Launch command copy failed");
+		assert.equal(view.launchCommandOpen, true);
+		assert.deepEqual(copied, [exact]);
+		view.handleInput("b");
+		assert.equal(view.launchCommandText, "");
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("legacy, tool, malformed, and tampered launch commands remain unavailable", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "piwf-view-unavailable-"));
+	const run = runRecord();
+	run.runId = "workflow_view_unavailable";
+	const copied = [];
+	try {
+		const view = new WorkflowView(
+			cwd,
+			{ requestRender() {} },
+			theme,
+			() => {},
+			undefined,
+			async (text) => copied.push(text),
+		);
+		view.loading = false;
+		view.flows = [{ ...run, tasks: undefined }];
+		view.detailRun = run;
+		assert.match(view.render(80).join("\n"), /unavailable \(not captured\)/);
+		view.handleInput("v");
+		assert.match(view.message, /not captured/);
+
+		run.launch = {
+			schema: "pi-workflow-run-launch-v1",
+			source: { kind: "tool", name: "workflow_dynamic" },
+			requestKind: "direct-dynamic",
+			routingMode: "off",
+			profile: { kind: "not-applicable" },
+			task: { characters: 12, lines: 1 },
+			command: { state: "unavailable", reason: "not-a-command" },
+		};
+		assert.match(view.render(80).join("\n"), /unavailable \(tool launch\)/);
+		view.handleInput("v");
+		assert.match(view.message, /tool launch/);
+
+		const command = await writeWorkflowLaunchCommandArtifact(
+			cwd,
+			run.runId,
+			"/workflow dynamic original",
+		);
+		run.launch = {
+			...run.launch,
+			source: { kind: "slash-command", action: "dynamic" },
+			command,
+		};
+		await writeFile(
+			join(workflowRunDir(cwd, run.runId), "launch-command.txt"),
+			"tampered",
+		);
+		view.handleInput("v");
+		await waitFor(() => /verification failed/.test(view.message));
+		assert.match(view.message, /verification failed/);
+		const failedRender = view.render(80).join("\n");
+		assert.match(failedRender, /unavailable \(verification failed\)/);
+		assert.doesNotMatch(failedRender, /available · v view/);
+		assert.doesNotMatch(failedRender, /v launch/);
+		assert.equal(copied.length, 0);
+
+		const repaired = await writeWorkflowLaunchCommandArtifact(
+			cwd,
+			run.runId,
+			"/workflow dynamic repaired",
+		);
+		run.launch.command = repaired;
+		const repairedRender = view.render(80).join("\n");
+		assert.match(repairedRender, /available · v view/);
+		assert.match(repairedRender, /v launch/);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("missing artifacts and widened run directories stay unavailable after verification", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "piwf-view-fail-closed-"));
+	try {
+		for (const scenario of ["missing", "wide-run-mode"]) {
+			const run = runRecord();
+			run.runId = `workflow_view_${scenario.replaceAll("-", "_")}`;
+			const command = await writeWorkflowLaunchCommandArtifact(
+				cwd,
+				run.runId,
+				`/workflow run ${scenario}`,
+			);
+			run.launch = {
+				schema: "pi-workflow-run-launch-v1",
+				source: { kind: "slash-command", action: "run" },
+				requestKind: "named-workflow",
+				routingMode: "off",
+				profile: { kind: "base" },
+				task: { characters: scenario.length, lines: 1 },
+				command,
+			};
+			if (scenario === "missing")
+				await rm(join(workflowRunDir(cwd, run.runId), "launch-command.txt"));
+			else await chmod(workflowRunDir(cwd, run.runId), 0o755);
+
+			const view = new WorkflowView(
+				cwd,
+				{ requestRender() {} },
+				theme,
+				() => {},
+			);
+			view.loading = false;
+			view.flows = [{ ...run, tasks: undefined }];
+			view.detailRun = run;
+			assert.match(view.render(80).join("\n"), /available · v view/);
+			view.handleInput("v");
+			await waitFor(() => view.message.startsWith("launch command unavailable:"));
+			const rendered = view.render(80).join("\n");
+			assert.match(rendered, /command:\s+unavailable \(/);
+			assert.doesNotMatch(rendered, /available · v view/);
+			assert.doesNotMatch(rendered, /v launch/);
+		}
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
 	}
 });
 

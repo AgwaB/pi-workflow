@@ -155,7 +155,7 @@ Not implemented: `/workflow continue` and `/workflow delegate`. Use `status`, `s
 
 ### Workflow board controls
 
-The `/workflow` board is read-only. It has four drill-down levels: runs, stages, tasks, and task detail.
+The `/workflow` board is read-only with respect to workflow state. It has four drill-down levels: runs, stages, tasks, and task detail, plus an explicit launch-command viewer.
 
 | Key | Action |
 |---|---|
@@ -164,8 +164,14 @@ The `/workflow` board is read-only. It has four drill-down levels: runs, stages,
 | `↑` / `↓` | Move within the current list or scroll the task artifact. |
 | `[` / `]` or `p` / `n` | Move to the previous/next sibling run, stage, or task where supported. |
 | `r` | Refresh run state from `.pi/workflows`. |
+| `v` in runs or stages | Verify and open the selected run's captured launch command. Raw command text is never shown in the narrow summary panes. |
+| `c` in the launch viewer | Copy the exact verified command. Copy is unavailable until the viewer has been opened explicitly. |
 | `←` / `→` in task detail | Switch between task output and prompt artifacts. |
 | `q` | Close the board. |
+
+New slash-command runs record typed creation-launch metadata in `run.json`, but the exact extension-visible command is kept only in the private `launch-command.txt` sidecar. The captured form is `/workflow`, one canonical separating space, then the exact argument string Pi supplied; Pi does not expose a collision suffix such as `/workflow:1` or the original prefix separator, so this is extension-boundary fidelity rather than editor-byte fidelity. Natural-language `workflow_run` and `workflow_dynamic` launches record structured tool provenance but intentionally have no synthesized command. Existing runs and API/nested runs without explicit launch metadata show **unavailable (not captured)**; pi-workflow does not reconstruct launch history from specs, prompts, routing records, or transcripts. Missing, malformed, permission-widened, or integrity-mismatched sidecars fail closed as unavailable.
+
+The launch viewer escapes terminal control and bidi characters for display, while `c` copies the exact unescaped verified text. Commands may contain sensitive user input. Clipboard retention is controlled by the OS or terminal and is outside pi-workflow's run retention. Sidecar checks reject symlinked components, hard-link substitution at commit checkpoints, widened permissions, and persistent path replacement. As with other same-user local state, they do not claim isolation from a hostile same-UID process that can continuously mutate directory ancestry between filesystem syscalls.
 
 ## Workflow resolution
 
@@ -619,7 +625,8 @@ Important files:
 
 | File | Purpose |
 |---|---|
-| `run.json` | Canonical run record: status, task summary, task records, fanout/loop/dynamic metadata, and run timestamps. |
+| `run.json` | Canonical run record: status, task summary, task records, fanout/loop/dynamic metadata, run timestamps, and optional structured creation-launch metadata. Exact commands are never stored here. |
+| `launch-command.txt` | Optional exact slash-command capture for a new slash launch. Stored as a private `0600` file in the run's `0700` directory and integrity-linked from `run.json`; absent for tool, legacy, ordinary API, and nested launches. |
 | `compiled.json` | Compiled workflow snapshot. |
 | `spec.json` | Workflow spec snapshot used by the run. |
 | `tasks/<task-id>/task.md` | Compiled task prompt. |

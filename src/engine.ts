@@ -14,6 +14,7 @@ import {
 import { loadWorkflowSpec } from "./schema.js";
 import {
 	assertRunLeaseOwnership,
+	assertValidWorkflowRunLaunchCapture,
 	assertWorkflowRunAvailable,
 	createRunRecord,
 	createTaskRunRecord,
@@ -31,6 +32,7 @@ import {
 	readRunRecord,
 	readWorkflowStopIntent,
 	requestWorkflowStop,
+	prepareWorkflowLaunchCommandArtifactPath,
 	resetTaskForResume,
 	setTaskTerminal,
 	clearWorkflowStopIntent,
@@ -42,6 +44,7 @@ import {
 	writeRunRecord,
 	writeCompiledRunArtifact,
 	writeStaticRunArtifacts,
+	writeWorkflowLaunchCommandArtifact,
 } from "./store.js";
 import { resolveWorkflowBackend } from "./backend.js";
 import {
@@ -201,6 +204,8 @@ import {
 	type ExecutionProfileStageOverride,
 	type WorkflowForeachBatchRecord,
 	WORKFLOW_RUN_TYPE,
+	type WorkflowRunLaunchCapture,
+	type WorkflowRunLaunchMetadata,
 	type WorkflowRunRecord,
 	type WorkflowRunExecutionProfile,
 	type WorkflowRunRouting,
@@ -310,6 +315,8 @@ export interface WorkflowRunOptions {
 	parentRunId?: string;
 	/** Router-pass audit record persisted on the run record (opt-in --route). */
 	routing?: WorkflowRunRouting;
+	/** Creation-surface provenance; exact command text is persisted only in a private sidecar. */
+	launch?: WorkflowRunLaunchCapture;
 	/**
 	 * Overrides for inputs the workflow spec declares (for example depth).
 	 * Keys the spec does not declare are ignored.
@@ -397,6 +404,7 @@ async function runLoadedWorkflowSpec(
 	diagnosticsPolicy: PromptSchemaDiagnosticsPolicy,
 	provenance?: WorkflowRunRecord["provenance"],
 ): Promise<WorkflowRunRecord> {
+	if (options.launch) assertValidWorkflowRunLaunchCapture(options.launch);
 	spec = applyDeclaredWorkflowInputOverrides(spec, options.inputOverrides);
 	const appliedProfile = applyWorkflowExecutionProfile(
 		spec,
@@ -428,8 +436,19 @@ async function runLoadedWorkflowSpec(
 		}
 	}
 
+	const launchCapture = options.launch
+		? normalizeWorkflowRunLaunchCapture(
+				options.launch,
+				options.task,
+				diagnosticsPolicy === "excluded-direct-dynamic",
+				appliedProfile.record?.name,
+			)
+		: undefined;
+	if (launchCapture) assertValidWorkflowRunLaunchCapture(launchCapture);
 	const runId = options.runId ?? makeRunId();
 	await assertWorkflowRunAvailable(cwd, runId);
+	if (launchCapture?.command.state === "captured")
+		await prepareWorkflowLaunchCommandArtifactPath(cwd, runId);
 	const { run } = await createRunRecord(cwd, compiled, specPath, {
 		runId,
 		parentRunId: options.parentRunId,
@@ -452,6 +471,13 @@ async function runLoadedWorkflowSpec(
 		}
 		await assertRunLeaseOwnership(cwd, run.runId, leaseSignal);
 		await initializeRunRecordDirectories(cwd, run);
+		await assertRunLeaseOwnership(cwd, run.runId, leaseSignal);
+		if (launchCapture)
+			run.launch = await persistWorkflowRunLaunch(
+				cwd,
+				run.runId,
+				launchCapture,
+			);
 		await assertRunLeaseOwnership(cwd, run.runId, leaseSignal);
 		await writeStaticRunArtifacts(cwd, run, compiled, spec);
 		await writeRunRecord(cwd, run, leaseSignal);
@@ -483,6 +509,52 @@ async function runLoadedWorkflowSpec(
 	if (shouldWatchRun(scheduled))
 		watchRun(cwd, scheduled.runId, scheduleOptions);
 	return scheduled;
+}
+
+function normalizeWorkflowRunLaunchCapture(
+	capture: WorkflowRunLaunchCapture,
+	task: string | undefined,
+	directDynamic: boolean,
+	profileName: string | undefined,
+): WorkflowRunLaunchCapture {
+	const runtimeTask = task?.trim() ?? "";
+	return {
+		...capture,
+		profile: directDynamic
+			? { kind: "not-applicable" }
+			: profileName
+				? { kind: "named", name: profileName }
+				: { kind: "base" },
+		task: {
+			characters: Array.from(runtimeTask).length,
+			lines:
+				runtimeTask.length === 0 ? 0 : runtimeTask.split(/\r\n|\r|\n/).length,
+		},
+	};
+}
+
+async function persistWorkflowRunLaunch(
+	cwd: string,
+	runId: string,
+	capture: WorkflowRunLaunchCapture,
+): Promise<WorkflowRunLaunchMetadata> {
+	const command =
+		capture.command.state === "captured"
+			? await writeWorkflowLaunchCommandArtifact(
+					cwd,
+					runId,
+					capture.command.text,
+				)
+			: capture.command;
+	return {
+		schema: capture.schema,
+		source: capture.source,
+		requestKind: capture.requestKind,
+		routingMode: capture.routingMode,
+		profile: capture.profile,
+		task: capture.task,
+		command,
+	};
 }
 
 /**
