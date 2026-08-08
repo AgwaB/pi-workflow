@@ -2541,7 +2541,18 @@ export async function scheduleRun(
 				`unsupported compiled workflow type: ${compiledFlow.type}`,
 			);
 		}
-		await scheduleDag(cwd, run, compiledFlow, options, leaseSignal);
+		const scheduleOptions =
+			options.hostCapabilities !== undefined
+				? options
+				: {
+						...options,
+						hostCapabilities: await resolveWorkflowHostCapabilities({
+							cwd,
+							workflow: run.specPath,
+							task: compiledFlow.task,
+						}),
+					};
+		await scheduleDag(cwd, run, compiledFlow, scheduleOptions, leaseSignal);
 		assertScheduleLeaseActive(leaseSignal);
 
 		run = await readRunRecord(cwd, run.runId);

@@ -100,7 +100,8 @@ export async function runDynamicHostOperation(input: {
 			idempotencyKey,
 		},
 	});
-	if (!events.some((event) => event.type === "host.started")) {
+	const isDanglingStart = events.some((event) => event.type === "host.started");
+	if (!isDanglingStart) {
 		await appendDynamicEvent(input.cwd, input.run.runId, {
 			controllerSpecId: input.controllerTask.specId,
 			type: "host.started",
@@ -114,7 +115,7 @@ export async function runDynamicHostOperation(input: {
 		});
 	}
 	const result = strictJson(
-		await (events.some((event) => event.type === "host.started")
+		await (isDanglingStart
 			? adapter.reconcile(request, context)
 			: adapter.invoke(request, context)),
 		"host operation result",

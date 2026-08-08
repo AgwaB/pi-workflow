@@ -157,16 +157,23 @@ test("completed host operation replays without invoking the adapter twice", asyn
 		const completed = await finishedRun(cwd, specPath, hostCapabilities);
 		assert.equal(invokes, 1);
 
-		const run = await readRunRecord(cwd, completed.runId);
-		const task = run.tasks.find((candidate) => candidate.stageId === "host");
-		task.status = "failed";
-		task.statusDetail = "test_replay";
-		task.completedAt = new Date().toISOString();
-		run.status = "failed";
-		await writeRunRecord(cwd, run);
-		const resumed = await resumeRun(cwd, run.runId, { hostCapabilities });
-		await waitForRun(cwd, resumed.run.runId, 10_000, { hostCapabilities });
-		assert.equal(invokes, 1);
+		const unregister = registerWorkflowHostCapabilityProvider(() =>
+			hostCapabilities,
+		);
+		try {
+			const run = await readRunRecord(cwd, completed.runId);
+			const task = run.tasks.find((candidate) => candidate.stageId === "host");
+			task.status = "failed";
+			task.statusDetail = "test_replay";
+			task.completedAt = new Date().toISOString();
+			run.status = "failed";
+			await writeRunRecord(cwd, run);
+			const resumed = await resumeRun(cwd, run.runId);
+			await waitForRun(cwd, resumed.run.runId, 10_000);
+			assert.equal(invokes, 1);
+		} finally {
+			unregister();
+		}
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
@@ -217,12 +224,22 @@ test("dangling started operation reconciles with the original idempotency key", 
 				},
 			},
 		};
-		const resumed = await resumeRun(cwd, run.runId, { hostCapabilities });
-		const finished = await waitForRun(cwd, resumed.run.runId, 10_000, { hostCapabilities });
-		assert.equal(finished.status, "completed", JSON.stringify(finished.tasks));
-		assert.equal(invokes, 0);
-		assert.equal(reconciliations.length, 1);
-		assert.equal(reconciliations[0].context.operation.idempotencyKey, idempotencyKey);
+		const unregister = registerWorkflowHostCapabilityProvider(() =>
+			hostCapabilities,
+		);
+		try {
+			const resumed = await resumeRun(cwd, run.runId);
+			const finished = await waitForRun(cwd, resumed.run.runId, 10_000);
+			assert.equal(finished.status, "completed", JSON.stringify(finished.tasks));
+			assert.equal(invokes, 0);
+			assert.equal(reconciliations.length, 1);
+			assert.equal(
+				reconciliations[0].context.operation.idempotencyKey,
+				idempotencyKey,
+			);
+		} finally {
+			unregister();
+		}
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
@@ -280,5 +297,25 @@ test("host capability providers receive frozen launch context and reject collisi
 	} finally {
 		unregister();
 		clearWorkflowHostCapabilityProvidersForTests();
+	}
+});
+
+test("host operation rejects non-JSON adapter results", async () => {
+	const cwd = project();
+	try {
+		const run = await finishedRun(cwd, writeHostWorkflow(cwd), {
+			"test.echo.v1": {
+				invoke() {
+					return { invalid: undefined };
+				},
+				reconcile() {
+					throw new Error("unexpected reconcile");
+				},
+			},
+		});
+		assert.equal(run.status, "failed");
+		assert.match(String(run.tasks[0].lastMessage), /only JSON values/iu);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
 	}
 });
