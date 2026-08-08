@@ -74,6 +74,11 @@ import {
 	hashDynamicRequest,
 	readDynamicEvents,
 } from "./dynamic-events.js";
+import { runDynamicHostOperation } from "./dynamic-host-operations.js";
+import {
+	resolveWorkflowHostCapabilities,
+	type WorkflowHostCapabilities,
+} from "./host-capabilities.js";
 import {
 	ensureDynamicControllerInitialized,
 	readOrRebuildDynamicState,
@@ -321,11 +326,14 @@ export interface WorkflowRunOptions {
 	 * recorded on the run record. Unknown names fail closed.
 	 */
 	executionProfile?: string;
+	/** Parent-process capability adapters available to declared dynamic host operations. */
+	hostCapabilities?: WorkflowHostCapabilities;
 }
 
 interface WorkflowScheduleOptions {
 	dynamicUi?: DynamicWorkflowUi;
 	availableModels?: WorkflowModelInfo[];
+	hostCapabilities?: WorkflowHostCapabilities;
 }
 
 interface WorkflowWaitOptions extends WorkflowScheduleOptions {
@@ -351,11 +359,18 @@ export async function runWorkflowSpec(
 	options: WorkflowRunDiagnosticOptions = {},
 ): Promise<WorkflowRunRecord> {
 	const loaded = await loadWorkflowSpec(specPath, cwd);
+	const hostCapabilities =
+		options.hostCapabilities ??
+		(await resolveWorkflowHostCapabilities({
+			cwd,
+			workflow: loaded.specPath,
+			task: options.task,
+		}));
 	return runLoadedWorkflowSpec(
 		cwd,
 		loaded.specPath,
 		loaded.spec,
-		options,
+		{ ...options, hostCapabilities },
 		"named-workflow",
 	);
 }
@@ -476,6 +491,7 @@ async function runLoadedWorkflowSpec(
 	const scheduleOptions = {
 		dynamicUi: options.dynamicUi,
 		availableModels: options.availableModels,
+		hostCapabilities: options.hostCapabilities,
 	};
 	const scheduled =
 		(await scheduleRun(cwd, initialized.runId, compiled, scheduleOptions)) ??
@@ -5194,6 +5210,7 @@ async function executeDynamicControllerTask(
 			dynamic: compiledTask.dynamic,
 			dynamicUi: options.dynamicUi,
 			availableModels: options.availableModels,
+			hostCapabilities: options.hostCapabilities,
 			stopSignal: stop.signal,
 		});
 		await throwIfWorkflowStopRequested(cwd, run.runId);
@@ -5384,6 +5401,7 @@ async function runDynamicControllerWorker(input: {
 	dynamic: CompiledDynamicWorkflowTask;
 	dynamicUi?: DynamicWorkflowUi;
 	availableModels?: WorkflowModelInfo[];
+	hostCapabilities?: WorkflowHostCapabilities;
 	stopSignal?: AbortSignal;
 }): Promise<unknown> {
 	const resolved = await resolveWorkflowHelperRef(
@@ -5433,6 +5451,7 @@ async function runDynamicControllerWorker(input: {
 	});
 	const helperCallCounts = new Map<string, number>();
 	const workflowCallCounts = new Map<string, number>();
+	const hostCallCounts = new Map<string, number>();
 	const agentOpIds = new Set<string>();
 	const replayedOpIds = new Set<string>();
 	let settled = false;
@@ -5480,6 +5499,7 @@ async function runDynamicControllerWorker(input: {
 				await handleDynamicWorkerMessage(input, message, {
 					helperCallCounts,
 					workflowCallCounts,
+					hostCallCounts,
 					agentOpIds,
 					replayedOpIds,
 					replayPrefix,
@@ -5592,12 +5612,14 @@ async function handleDynamicWorkerMessage(
 		helperSpecPath: string;
 		dynamic: CompiledDynamicWorkflowTask;
 		dynamicUi?: DynamicWorkflowUi;
+		hostCapabilities?: WorkflowHostCapabilities;
 		stopSignal?: AbortSignal;
 	},
 	message: any,
 	state: {
 		helperCallCounts: Map<string, number>;
 		workflowCallCounts: Map<string, number>;
+		hostCallCounts: Map<string, number>;
 		agentOpIds: Set<string>;
 		replayedOpIds: Set<string>;
 		replayPrefix: { opIds: string[]; cursor: number };
@@ -5794,6 +5816,27 @@ async function handleDynamicWorkerMessage(
 				isSettled: state.isSettled,
 				stopSignal: input.stopSignal,
 			});
+		} else if (message.op === "host") {
+			const alias = requiredDynamicString(
+				message.name,
+				"host operation name",
+				"ctx.host.invoke()",
+			);
+			const count = (state.hostCallCounts.get(alias) ?? 0) + 1;
+			state.hostCallCounts.set(alias, count);
+			const opId = `${input.controllerTask.specId}:host:${alias}:${String(count).padStart(3, "0")}`;
+			assertDynamicReplayPrefix(state.replayPrefix, opId);
+			state.replayedOpIds.add(opId);
+			value = await runDynamicHostOperation({
+				cwd: input.cwd,
+				run: input.run,
+				controllerTask: input.controllerTask,
+				dynamic: input.dynamic,
+				hostCapabilities: input.hostCapabilities,
+				alias,
+				callIndex: count,
+				request: message.input,
+			});
 		} else if (message.op === "workflow") {
 			const workflowId = requiredDynamicString(
 				message.name,
@@ -5928,6 +5971,8 @@ async function priorDynamicOperationOpIds(input: {
 						event.type === "result.read" ||
 						event.type === "helper.started" ||
 						event.type === "helper.completed" ||
+						event.type === "host.started" ||
+						event.type === "host.completed" ||
 						event.type === "workflow.started" ||
 						event.type === "workflow.completed"),
 			)
@@ -6320,6 +6365,7 @@ parentPort.on("message", (message) => {
   }
   const helperCallCounts = new Map();
   const workflowCallCounts = new Map();
+  const hostCallCounts = new Map();
   let decisionCallCount = 0;
   let fanoutPlanCallCount = 0;
   let stateIndexCallCount = 0;
@@ -6402,6 +6448,13 @@ parentPort.on("message", (message) => {
       const count = (workflowCallCounts.get(name) || 0) + 1;
       workflowCallCounts.set(name, count);
       return await call("workflow", { name, callIndex: count, input });
+    },
+    host: {
+      async invoke(name, input) {
+        const count = (hostCallCounts.get(name) || 0) + 1;
+        hostCallCounts.set(name, count);
+        return await call("host", { name, callIndex: count, input });
+      },
     },
     async agent(request) {
       return await call("agent", { request });

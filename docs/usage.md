@@ -381,7 +381,10 @@ Dynamic workflows keep JSON as the source of truth while allowing trusted bundle
     "uses": "./helpers/controller.mjs",
     "mode": "graph-splice",
     "permissions": { "approval": "auto" },
-    "budget": { "maxAgents": 1000, "maxConcurrency": 16 }
+    "budget": { "maxAgents": 1000, "maxConcurrency": 16 },
+    "hostOperations": {
+      "deliver": { "capability": "example.governed-delivery.v1" }
+    }
   }
 }
 ```
@@ -391,10 +394,11 @@ Controller/helper/nested workflow refs must be bundle-local `./...` paths. Neste
 Controller context rules:
 
 - Generated agents are real workflow tasks: `ctx.agent({ id, agent, prompt, tools })` inserts a deterministic `stageId.id` task into `compiled.json` and `run.json`, persists a request hash in `dynamic/events.jsonl`, and replays fail-closed if the same id later changes request shape.
-- On resume, controllers must re-issue previously recorded `ctx.agent`, `ctx.helper`, and `ctx.workflow` operations in the same order before issuing new operations; omitted or out-of-order replay fails closed with an explicit replay-invariant error.
+- On resume, controllers must re-issue previously recorded `ctx.agent`, `ctx.helper`, `ctx.workflow`, and `ctx.host.invoke` operations in the same order before issuing new operations; omitted or out-of-order replay fails closed with an explicit replay-invariant error.
 - Use `ctx.parallel([() => ctx.agent(...), ...])` for dynamic fan-out; the runtime records queued sibling generation ops before the controller suspends, and non-suspension operation failures make the controller fail closed. Generated dependency cycles are rejected.
 - `ctx.helper(name, input)` can call only helpers declared in `dynamic.helpers`; pure/retry-safe helpers may set `idempotent: true` so a crash after `helper.started` but before `helper.completed` can retry the helper instead of permanently failing closed.
 - `ctx.workflow(name, input)` can call only nested specs declared in `dynamic.workflows`.
+- `ctx.host.invoke(alias, request)` sends JSON to a parent-process adapter for an alias declared in `dynamic.hostOperations`. Hosts register explicit capability providers with `registerWorkflowHostCapabilityProvider`; missing capabilities fail closed. The engine persists `host.started` before invocation and `host.completed` after a JSON result. Resume replays completed results without another side effect and sends a dangling start only to the adapter's required `reconcile` method with the original idempotency key. Adapter functions never cross the worker boundary.
 
 Dynamic outputs should be compact typed artifacts. The controller returns normal workflow sections through `{ control, analysis, refs }`; generated child agents must return the same `<control>`, `<analysis>`, `<refs>` protocol as other artifact-graph tasks. When a controller result includes `outputTasks`/`outputTaskIds` (the built-in decision loop sets this from accepted `synthesize` actions), downstream `from: "<dynamic-stage>"` reducers also receive those exported task artifacts as stable sources such as `<dynamic-stage>.output`. Runtime state is stored under `.pi/workflows/<run-id>/dynamic/`:
 

@@ -19,6 +19,18 @@ export {
 } from "./engine.js";
 export type { ResumeRunSummary, StopRunSummary } from "./engine.js";
 export {
+	clearWorkflowHostCapabilityProvidersForTests,
+	registerWorkflowHostCapabilityProvider,
+	resolveWorkflowHostCapabilities,
+} from "./host-capabilities.js";
+export type {
+	WorkflowHostCapabilities,
+	WorkflowHostCapabilityLaunchContext,
+	WorkflowHostCapabilityProvider,
+	WorkflowHostOperationAdapter,
+	WorkflowHostOperationContext,
+} from "./host-capabilities.js";
+export {
 	estimateWorkflowDurationMs,
 	findDuplicateActiveRun,
 	formatApproxDuration,

@@ -146,6 +146,7 @@ const DYNAMIC_KEYS = new Set([
 	"permissions",
 	"helpers",
 	"workflows",
+	"hostOperations",
 	"decisionLoop",
 ]);
 const DYNAMIC_BUDGET_KEYS = new Set([
@@ -168,6 +169,7 @@ const DYNAMIC_HELPER_KEYS = new Set([
 	"idempotent",
 ]);
 const DYNAMIC_NESTED_WORKFLOW_KEYS = new Set(["uses"]);
+const DYNAMIC_HOST_OPERATION_KEYS = new Set(["capability"]);
 const DYNAMIC_DECISION_LOOP_KEYS = new Set([
 	"planner",
 	"workerDefaults",
@@ -1529,6 +1531,11 @@ function validateDynamicStage(
 		`${path}.dynamic.workflows`,
 		issues,
 	);
+	validateDynamicHostOperations(
+		dynamic.hostOperations,
+		`${path}.dynamic.hostOperations`,
+		issues,
+	);
 	validateDynamicDecisionLoop(
 		dynamic.decisionLoop,
 		`${path}.dynamic.decisionLoop`,
@@ -1682,6 +1689,53 @@ function validateDynamicWorkflows(
 					message: "must reference a workflow .json spec",
 				});
 			}
+		}
+	}
+}
+
+function validateDynamicHostOperations(
+	value: unknown,
+	path: string,
+	issues: ValidationIssue[],
+): void {
+	if (value === undefined) return;
+	const operations = recordAt(value, path, issues);
+	if (!operations) return;
+	for (const [key, operationValue] of Object.entries(operations)) {
+		if (!STAGE_ID_PATTERN.test(key)) {
+			issues.push({
+				path: `${path}.${jsonKey(key)}`,
+				message: "host operation alias must contain only letters, numbers, _ and -",
+			});
+		}
+		if (RESERVED_DYNAMIC_MAP_KEYS.has(key)) {
+			issues.push({
+				path: `${path}.${jsonKey(key)}`,
+				message: "host operation alias is reserved",
+			});
+		}
+		const operationPath = `${path}.${jsonKey(key)}`;
+		const operation = recordAt(operationValue, operationPath, issues);
+		if (!operation) continue;
+		rejectUnknownKeys(
+			operation,
+			DYNAMIC_HOST_OPERATION_KEYS,
+			operationPath,
+			issues,
+		);
+		const capability = requiredString(
+			operation.capability,
+			`${operationPath}.capability`,
+			issues,
+		);
+		if (
+			capability !== undefined &&
+			!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(capability)
+		) {
+			issues.push({
+				path: `${operationPath}.capability`,
+				message: "must be a path-free capability identifier of at most 128 characters",
+			});
 		}
 	}
 }

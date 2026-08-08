@@ -218,6 +218,7 @@ export async function ensureDynamicControllerInitialized(
 	const workflowRefs = Object.values(input.dynamic.workflows).map(
 		(workflow) => workflow.uses,
 	);
+	const hostOperations = input.dynamic.hostOperations;
 	const request = {
 		controllerSpecId: input.controllerSpecId,
 		controllerTaskId: input.controllerTaskId,
@@ -229,6 +230,7 @@ export async function ensureDynamicControllerInitialized(
 		decisionLoop: input.dynamic.decisionLoop,
 		helperRefs,
 		workflowRefs,
+		hostOperations,
 		contentFingerprint: input.contentFingerprint,
 	};
 	const requestHash = hashDynamicRequest(request);

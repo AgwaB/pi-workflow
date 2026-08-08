@@ -12,6 +12,8 @@ export type DynamicWorkflowEventType =
 	| "controller.phase"
 	| "helper.started"
 	| "helper.completed"
+	| "host.started"
+	| "host.completed"
 	| "workflow.started"
 	| "workflow.completed"
 	| "fanout.planned"
@@ -241,6 +243,8 @@ function isDynamicWorkflowEventType(
 		value === "controller.phase" ||
 		value === "helper.started" ||
 		value === "helper.completed" ||
+		value === "host.started" ||
+		value === "host.completed" ||
 		value === "workflow.started" ||
 		value === "workflow.completed" ||
 		value === "fanout.planned" ||

@@ -2146,6 +2146,15 @@ function buildDynamicTask(
 			usesPath: resolve(specDir, String(workflow.uses)),
 		};
 	}
+	const hostOperations: Record<string, any> = {};
+	for (const [operationId, operation] of Object.entries(
+		isPlainRecord(dynamic.hostOperations) ? dynamic.hostOperations : {},
+	)) {
+		if (!isPlainRecord(operation)) continue;
+		hostOperations[operationId] = {
+			capability: String(operation.capability),
+		};
+	}
 	const decisionLoop = compileDynamicDecisionLoop(
 		dynamic.decisionLoop,
 		runtimePriority,
@@ -2211,6 +2220,7 @@ function buildDynamicTask(
 			},
 			helpers,
 			workflows,
+			hostOperations,
 			...(decisionLoop ? { decisionLoop } : {}),
 			...(runtimePriority.runtimeOverrides
 				? { runtimeOverrides: runtimePriority.runtimeOverrides }

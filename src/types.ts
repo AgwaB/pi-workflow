@@ -185,6 +185,10 @@ export interface DynamicWorkflowNestedSpec {
 	uses: string;
 }
 
+export interface DynamicWorkflowHostOperationSpec {
+	capability: string;
+}
+
 export interface DynamicDecisionLoopExecutionProfileSpec {
 	agent?: string;
 	model?: string;
@@ -240,6 +244,7 @@ export interface DynamicWorkflowStageSpec {
 	permissions?: DynamicWorkflowPermissionsSpec;
 	helpers?: Record<string, DynamicWorkflowHelperSpec>;
 	workflows?: Record<string, DynamicWorkflowNestedSpec>;
+	hostOperations?: Record<string, DynamicWorkflowHostOperationSpec>;
 	decisionLoop?: DynamicDecisionLoopSpec;
 }
 
@@ -507,6 +512,10 @@ export interface CompiledDynamicNestedWorkflow {
 	usesPath?: string;
 }
 
+export interface CompiledDynamicHostOperation {
+	capability: string;
+}
+
 export interface CompiledDynamicDecisionLoopExecutionProfile {
 	agent?: string;
 	model?: string;
@@ -569,6 +578,7 @@ export interface CompiledDynamicWorkflowTask {
 	};
 	helpers: Record<string, CompiledDynamicWorkflowHelper>;
 	workflows: Record<string, CompiledDynamicNestedWorkflow>;
+	hostOperations: Record<string, CompiledDynamicHostOperation>;
 	decisionLoop?: CompiledDynamicDecisionLoop;
 	runtimeOverrides?: WorkflowRuntimeDefaults;
 	availableModels?: WorkflowModelInfo[];
