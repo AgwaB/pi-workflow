@@ -169,7 +169,12 @@ test("completed host operation replays without invoking the adapter twice", asyn
 			run.status = "failed";
 			await writeRunRecord(cwd, run);
 			const resumed = await resumeRun(cwd, run.runId);
-			await waitForRun(cwd, resumed.run.runId, 10_000);
+			const finished = await waitForRun(cwd, resumed.run.runId, 10_000);
+			assert.equal(
+				finished.status,
+				"completed",
+				JSON.stringify(finished.tasks),
+			);
 			assert.equal(invokes, 1);
 		} finally {
 			unregister();
