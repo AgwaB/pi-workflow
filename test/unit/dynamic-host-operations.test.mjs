@@ -26,9 +26,12 @@ function project() {
 	return mkdtempSync(join(tmpdir(), "pi-workflow-host-operation-"));
 }
 
-function writeHostWorkflow(cwd, controllerSource = null, hostOperations = {
-	echo: { capability: "test.echo.v1" },
-}) {
+function writeHostWorkflow(
+	cwd,
+	controllerSource = null,
+	hostOperations = { echo: { capability: "test.echo.v1" } },
+	approval = "auto",
+) {
 	const root = join(cwd, "workflows", "host-operation");
 	mkdirSync(join(root, "helpers"), { recursive: true });
 	writeFileSync(
@@ -54,7 +57,7 @@ function writeHostWorkflow(cwd, controllerSource = null, hostOperations = {
 				type: "dynamic",
 				dynamic: {
 					uses: "./helpers/controller.mjs",
-					permissions: { approval: "auto" },
+					permissions: { approval },
 					hostOperations,
 				},
 			}],
@@ -320,6 +323,65 @@ test("host operation rejects non-JSON adapter results", async () => {
 		});
 		assert.equal(run.status, "failed");
 		assert.match(String(run.tasks[0].lastMessage), /only JSON values/iu);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("manual approval displays and binds declared host capabilities", async () => {
+	const cwd = project();
+	const prompts = [];
+	try {
+		const specPath = writeHostWorkflow(
+			cwd,
+			null,
+			{
+				zeta: { capability: "test.zeta.v1" },
+				echo: { capability: "test.echo.v1" },
+			},
+			"ask",
+		);
+		const started = await runWorkflowSpec(specPath, cwd, {
+			task: "approve governed host operation",
+			dynamicUi: {
+				hasUI: true,
+				confirm: async (_title, message) => {
+					prompts.push(message);
+					return true;
+				},
+			},
+			hostCapabilities: {
+				"test.echo.v1": {
+					invoke() {
+						return { echoed: "hello" };
+					},
+					reconcile() {
+						throw new Error("unexpected reconcile");
+					},
+				},
+			},
+		});
+		const run = await waitForRun(cwd, started.runId, 10_000, {
+			hostCapabilities: {
+				"test.echo.v1": {
+					invoke: () => ({ echoed: "hello" }),
+					reconcile: () => ({ echoed: "hello" }),
+				},
+			},
+		});
+		assert.equal(run.status, "completed", JSON.stringify(run.tasks));
+		assert.equal(prompts.length, 1);
+		assert.match(
+			prompts[0],
+			/Declared host operations: echo -> test\.echo\.v1, zeta -> test\.zeta\.v1/u,
+		);
+		const approval = (await readDynamicEvents(cwd, run.runId)).find(
+			(event) => event.type === "approval.pending",
+		);
+		assert.deepEqual(approval.payload.approvalScope.hostOperations, {
+			echo: { capability: "test.echo.v1" },
+			zeta: { capability: "test.zeta.v1" },
+		});
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}

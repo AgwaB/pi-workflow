@@ -205,6 +205,14 @@ async function dynamicApprovalRequestPayload(input: {
 				{ uses: workflow.uses },
 			]),
 		),
+		hostOperations: Object.fromEntries(
+			Object.entries(input.dynamic.hostOperations ?? {})
+				.sort(([left], [right]) => left.localeCompare(right))
+				.map(([alias, operation]) => [
+					alias,
+					{ capability: operation.capability },
+				]),
+		),
 	};
 }
 
@@ -268,6 +276,9 @@ async function dynamicApprovalPromptMessage(
 	const workflows = Object.entries(input.dynamic.workflows).map(
 		([id, workflow]) => `${id} -> ${workflow.uses}`,
 	);
+	const hostOperations = Object.entries(input.dynamic.hostOperations ?? {})
+		.sort(([left], [right]) => left.localeCompare(right))
+		.map(([alias, operation]) => `${alias} -> ${operation.capability}`);
 	const taskFingerprint = dynamicApprovalTaskFingerprint(input.taskText);
 	const resolvedBundleSpec = await workflowBundleSpecPath(
 		input.cwd,
@@ -301,6 +312,9 @@ async function dynamicApprovalPromptMessage(
 		workflows.length > 0
 			? `Declared nested workflows: ${workflows.join(", ")}`
 			: "Declared nested workflows: none",
+		hostOperations.length > 0
+			? `Declared host operations: ${hostOperations.join(", ")}`
+			: "Declared host operations: none",
 		"Approve only if this workflow bundle and its helper code are trusted.",
 	].join("\n");
 }
