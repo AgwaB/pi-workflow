@@ -46,6 +46,7 @@ test("subagent launch durably consumes authority before releasing the general wo
 	const digested = [];
 	const externalLaunchGrantSha256 = "7".repeat(64);
 	try {
+		process.env.PI_WORKFLOW_REQUIRE_EXTERNAL_LAUNCH_GRANT = "1";
 		process.env.PI_WORKFLOW_EXTERNAL_LAUNCH_GRANT_SHA256 =
 			externalLaunchGrantSha256;
 		const fixture = makeSubagentLaunchFixture(cwd, "durable-launch-barrier");
@@ -173,6 +174,7 @@ test("subagent launch durably consumes authority before releasing the general wo
 		);
 	} finally {
 		delete process.env.PI_WORKFLOW_EXTERNAL_LAUNCH_GRANT_SHA256;
+		delete process.env.PI_WORKFLOW_REQUIRE_EXTERNAL_LAUNCH_GRANT;
 		setSubagentApiForTests(undefined);
 		setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
 		rmSync(cwd, { recursive: true, force: true });

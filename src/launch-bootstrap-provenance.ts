@@ -28,9 +28,16 @@ export const LAUNCH_BOOTSTRAP_PROVENANCE_SCHEMA =
 	"pi-workflow-launch-bootstrap-provenance-v1" as const;
 export const EXTERNAL_LAUNCH_GRANT_SHA256_ENV =
 	"PI_WORKFLOW_EXTERNAL_LAUNCH_GRANT_SHA256" as const;
+export const REQUIRE_EXTERNAL_LAUNCH_GRANT_ENV =
+	"PI_WORKFLOW_REQUIRE_EXTERNAL_LAUNCH_GRANT" as const;
 
 function externalLaunchGrantSha256(): string | undefined {
 	const value = process.env[EXTERNAL_LAUNCH_GRANT_SHA256_ENV];
+	if (
+		value === undefined &&
+		process.env[REQUIRE_EXTERNAL_LAUNCH_GRANT_ENV] === "1"
+	)
+		throw new Error("required external launch grant digest is absent");
 	if (value === undefined) return undefined;
 	if (!/^[a-f0-9]{64}$/u.test(value))
 		throw new Error("external launch grant digest must be lowercase SHA-256");
