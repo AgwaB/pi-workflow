@@ -21,6 +21,7 @@ const FOREACH_BATCH_PHASES = new Set<WorkflowForeachBatchRecord["phase"]>([
 	"fallback_applied",
 	"stopped",
 	"invalidated",
+	"non_reusable",
 ]);
 
 const ACTIVE_BATCH_PHASES = new Set<WorkflowForeachBatchRecord["phase"]>([
@@ -96,8 +97,24 @@ export function assertForeachBatchRecord(
 		(record.grouping.groupKey !== undefined &&
 			typeof record.grouping.groupKey !== "string") ||
 		!isSha256(record.executionSurfaceSha256) ||
+		((record.stateRootSha256 !== undefined ||
+			record.capabilitySubjectSha256 !== undefined) &&
+			(!isSha256(record.stateRootSha256) ||
+				!isSha256(record.capabilitySubjectSha256))) ||
 		!Number.isSafeInteger(record.attempt) ||
 		record.attempt < 1 ||
+		(record.dispatch !== undefined &&
+			(record.dispatch.schema !== "workflow-foreach-batch-dispatch-v1" ||
+				![
+					"reserved",
+					"terminal_received",
+					"reconciled",
+					"non_reusable",
+				].includes(record.dispatch.state) ||
+				typeof record.dispatch.attemptKey !== "string" ||
+				record.dispatch.attemptKey.length < 1 ||
+				!isSha256(record.dispatch.reservationSha256) ||
+				typeof record.dispatch.reservedAt !== "string")) ||
 		typeof record.preparedAt !== "string" ||
 		typeof record.batchPrompt !== "string" ||
 		!isSha256(record.batchPromptSha256)
@@ -216,7 +233,25 @@ export function applyForeachBatchFallback(
 ): [WorkflowTaskRunRecord, WorkflowTaskRunRecord] {
 	const tasks = foreachBatchTasks(run, record);
 	const now = new Date().toISOString();
+	if (record.dispatch?.state === "reserved") {
+		record.phase = "non_reusable";
+		record.dispatch.state = "non_reusable";
+		record.dispatch.reason =
+			"dispatch reservation has no terminal receipt; refusing singleton fallback";
+		for (const task of tasks) {
+			task.status = "failed";
+			task.statusDetail = "batch_dispatch_unresolved";
+			task.completedAt = now;
+			task.exitCode = 1;
+			task.lastMessage = record.dispatch.reason;
+		}
+		return tasks;
+	}
 	record.phase = "fallback_applied";
+	if (record.dispatch?.state === "terminal_received") {
+		record.dispatch.state = "reconciled";
+		record.dispatch.reconciledAt = now;
+	}
 	record.fallback = {
 		...(record.fallback ?? { preparedAt: now, reason }),
 		reason,

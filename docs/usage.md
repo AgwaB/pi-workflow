@@ -773,6 +773,27 @@ Scope order is agent frontmatter fallback < `defaults.tools` < stage `tools`: th
 - Subagent process launches are gated per Pi process to avoid boot storms: at most `max(2, floor(cpu cores / 2))` concurrent launches, overridable with the `PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES` environment variable. Queued tasks report a waiting message in their status. Deterministic boot failures (extension load or configuration errors) fail fast instead of consuming transient-failure retries.
 - External content, source files, and web pages used by workflow workers are untrusted data, not instructions.
 
+### Durable launch and batch controls
+
+Provider-capable launches use the general two-phase durable launch barrier from
+`@agwab/pi-subagent`. The worker writes a ready receipt and remains paused before
+Pi/provider initialization. The workflow then crash-durably commits the consumed
+launch authority and its release payload before releasing the worker, and records
+the worker acknowledgement in the task's attempt-scoped barrier history. Startup
+fails closed when an installed non-test backend lacks this API.
+
+Launch-bootstrap provenance also binds the canonical workflow state-root identity
+(device, inode, owner, mode, canonical path, and private persisted nonce) and the
+post-preparation effective tool-provider surface. Private state-root capabilities
+are in-memory, unforgeable handles; persisted digests are evidence, not authority.
+
+New transparent max-2 foreach batches persist a root-bound capability subject and
+an immutable inspected schedule. A dispatch reservation is included in the same
+durable commit that precedes barrier release. If recovery finds a reservation with
+no terminal receipt, the exact batch is marked `non_reusable` and its items fail
+closed instead of being silently relaunched. Legacy batch records remain readable
+but do not gain authority from missing hardened fields.
+
 ## Web tools
 
 New workflows should use `workflow_web_search`, `workflow_web_fetch_source`, and

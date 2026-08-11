@@ -193,6 +193,12 @@ import {
 	sha256Text,
 } from "./foreach-batch-runtime.js";
 import {
+	assertForeachBatchCapability,
+	foreachBatchCapabilitySubjectSha256,
+	issueForeachBatchCapability,
+} from "./foreach-batch-capability.js";
+import { workflowStateRootIdentity } from "./workflow-state-root.js";
+import {
 	EXECUTION_PROFILE_FOREACH_BATCH,
 	type ProfiledArtifactGraphStage,
 } from "./execution-profile.js";
@@ -2952,6 +2958,7 @@ async function launchForeachBatchAt(
 		)
 			throw new Error(`foreach batch ${batchId} already has a durable record`);
 		const preparedAt = new Date().toISOString();
+		const stateRootIdentity = await workflowStateRootIdentity(cwd);
 		record = {
 			version: 1,
 			batchId,
@@ -2966,6 +2973,7 @@ async function launchForeachBatchAt(
 			grouping: { ...grouping },
 			executionSurfaceSha256:
 				foreachBatchExecutionSurfaceSha256(preparedLeader),
+			stateRootSha256: stateRootIdentity.identitySha256,
 			members: [
 				{
 					taskId: leaderTask.taskId,
@@ -2988,6 +2996,8 @@ async function launchForeachBatchAt(
 			batchPrompt,
 			batchPromptSha256: sha256Text(batchPrompt),
 		};
+		record.capabilitySubjectSha256 =
+			foreachBatchCapabilitySubjectSha256(record);
 		run.foreachBatches ??= [];
 		run.foreachBatches.push(record);
 		leaderTask.foreachBatch = {
@@ -3008,6 +3018,11 @@ async function launchForeachBatchAt(
 			foreachBatchSynthetic: { schema: "workflow-foreach-batch-v1" },
 			compiledPrompt: batchPrompt,
 		};
+	}
+
+	if (record.stateRootSha256 || record.capabilitySubjectSha256) {
+		const capability = await issueForeachBatchCapability(cwd, record);
+		await assertForeachBatchCapability(cwd, record, capability);
 	}
 
 	try {

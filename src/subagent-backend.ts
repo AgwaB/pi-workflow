@@ -29,6 +29,7 @@ import type {
 	CompiledToolProvider,
 	RequiredWorkflowArtifactReadPolicy,
 	WorkflowRunRecord,
+	WorkflowDurableLaunchBarrierRecord,
 	WorkflowTaskTimingAttemptRecord,
 	WorkflowTaskTimingRecord,
 	WorkflowTaskToolResultBudgetAttemptRecord,
@@ -55,6 +56,7 @@ import {
 	workflowRunDir,
 	writeJsonAtomic,
 	writeRunRecord,
+	writeRunRecordDurable,
 } from "./store.js";
 import {
 	isWorkflowStopRequestedError,
@@ -128,6 +130,10 @@ import {
 	setForeachBatchPhase,
 	sha256Text,
 } from "./foreach-batch-runtime.js";
+import {
+	assertForeachBatchCapability,
+	issueForeachBatchCapability,
+} from "./foreach-batch-capability.js";
 import { PI_WORKFLOW_ROLE_ENV } from "./process-role.js";
 
 const DEFAULT_SUBAGENT_RUNS_ROOT = ".pi/workflow-subagents";
@@ -276,10 +282,62 @@ interface SubagentResultEnvelope {
 	cwd?: string;
 }
 
+interface DurableLaunchBarrierDescriptor {
+	schema: "pi-subagent-durable-launch-barrier-v1";
+	identitySha256: string;
+	directory: string;
+	readyPath: string;
+	releasePath: string;
+	ackPath: string;
+	challenge: string;
+	subjectSha256: string;
+	directoryIdentity: { device: number; inode: number; uid?: number };
+	timeoutMs: number;
+	pollIntervalMs: number;
+}
+
+interface DurableLaunchBarrierReady {
+	runId: string;
+	attemptId: string;
+	readySha256: string;
+	launchPayloadSha256: string;
+}
+
+interface DurableLaunchBarrierRelease {
+	runId: string;
+	attemptId: string;
+	readySha256: string;
+	releaseSha256: string;
+}
+
+interface DurableLaunchBarrierAck {
+	ackSha256: string;
+	releaseSha256: string;
+}
+
 interface SubagentApi {
 	runSubagent(
 		options: Record<string, unknown>,
 	): Promise<SubagentResultEnvelope>;
+	createDurableLaunchBarrier?(options: {
+		directory: string;
+		subjectSha256: string;
+		timeoutMs?: number;
+		pollIntervalMs?: number;
+	}): Promise<DurableLaunchBarrierDescriptor>;
+	durableLaunchBarrierDigest?(value: unknown): string;
+	waitForDurableLaunchBarrierReady?(
+		descriptor: DurableLaunchBarrierDescriptor,
+	): Promise<DurableLaunchBarrierReady>;
+	releaseDurableLaunchBarrier?(
+		descriptor: DurableLaunchBarrierDescriptor,
+		ready: DurableLaunchBarrierReady,
+		releasePayloadSha256: string,
+	): Promise<DurableLaunchBarrierRelease>;
+	waitForDurableLaunchBarrierAck?(
+		descriptor: DurableLaunchBarrierDescriptor,
+		release: DurableLaunchBarrierRelease,
+	): Promise<DurableLaunchBarrierAck>;
 	getSubagentStatus(
 		options: Record<string, unknown>,
 	): Promise<SubagentRunStatusSnapshot | null>;
@@ -327,6 +385,29 @@ async function loadSubagentApi(): Promise<SubagentApi> {
 		(mod) => mod as SubagentApi,
 	);
 	return cachedSubagentApi;
+}
+
+type DurableLaunchBarrierApi = Required<
+	Pick<
+		SubagentApi,
+		| "createDurableLaunchBarrier"
+		| "durableLaunchBarrierDigest"
+		| "waitForDurableLaunchBarrierReady"
+		| "releaseDurableLaunchBarrier"
+		| "waitForDurableLaunchBarrierAck"
+	>
+>;
+
+function hasDurableLaunchBarrierApi(
+	api: SubagentApi,
+): api is SubagentApi & DurableLaunchBarrierApi {
+	return (
+		typeof api.createDurableLaunchBarrier === "function" &&
+		typeof api.durableLaunchBarrierDigest === "function" &&
+		typeof api.waitForDurableLaunchBarrierReady === "function" &&
+		typeof api.releaseDurableLaunchBarrier === "function" &&
+		typeof api.waitForDurableLaunchBarrierAck === "function"
+	);
 }
 
 export interface OneShotSubagentEnvelope {
@@ -2454,6 +2535,14 @@ export async function launchSubagentTask(
 		throw new Error("workflow launch authority is unavailable");
 	const toolResultBudgetConfiguration = sealedLaunch.toolResultBudget;
 	let releaseLiveModelWorkerSlot: (() => void) | undefined;
+	let launchApi: SubagentApi | undefined;
+	let durableBarrierDescriptor: DurableLaunchBarrierDescriptor | undefined;
+	let durableBarrierRecord: WorkflowDurableLaunchBarrierRecord | undefined;
+	const hardenedBatchRecord = task.foreachBatch
+		? (run.foreachBatches ?? []).find(
+				(record) => record.batchId === task.foreachBatch?.batchId,
+			)
+		: undefined;
 	try {
 		await throwIfLaunchStopped(cwd, run.runId, leaseSignal, workflowStopSignal);
 		const launchAbortSignal = combineAbortSignals(
@@ -2517,7 +2606,66 @@ export async function launchSubagentTask(
 		await throwIfLaunchStopped(cwd, run.runId, leaseSignal, workflowStopSignal);
 
 		const api = await loadSubagentApi();
+		launchApi = api;
 		await throwIfLaunchStopped(cwd, run.runId, leaseSignal, workflowStopSignal);
+		const durableBarrierAvailable = hasDurableLaunchBarrierApi(api);
+		if (
+			!durableBarrierAvailable &&
+			injectedSubagentApi === undefined &&
+			hardenedBatchRecord &&
+			(hardenedBatchRecord.stateRootSha256 ||
+				hardenedBatchRecord.capabilitySubjectSha256)
+		)
+			throw new Error(
+				`foreach batch ${hardenedBatchRecord.batchId} requires the durable launch barrier API`,
+			);
+		if (!durableBarrierAvailable && injectedSubagentApi === undefined) {
+			throw new Error(
+				"installed @agwab/pi-subagent does not support the required durable launch barrier",
+			);
+		}
+		if (durableBarrierAvailable) {
+			const history = task.durableLaunchBarrier ?? { version: 1, records: [] };
+			durableBarrierRecord = history.records.find(
+				(record) => record.attemptKey === launchAuthority.attemptKey,
+			);
+			if (durableBarrierRecord === undefined) {
+				durableBarrierDescriptor = await api.createDurableLaunchBarrier({
+					directory: join(
+						workflowRunDir(cwd, run.runId),
+						"tasks",
+						task.taskId,
+						`.launch-barrier-${launchAuthority.identitySha256.slice(0, 16)}-${randomBytes(8).toString("hex")}`,
+					),
+					subjectSha256: launchAuthority.identitySha256,
+					timeoutMs: Math.min(
+						120_000,
+						Math.max(30_000, compiledTask.runtime.maxRuntimeMs ?? 30_000),
+					),
+				});
+				durableBarrierRecord = {
+					attemptKey: launchAuthority.attemptKey,
+					launchAuthoritySha256: launchAuthority.identitySha256,
+					descriptor: durableBarrierDescriptor,
+					phase: "created",
+				};
+				history.records.push(durableBarrierRecord);
+				task.durableLaunchBarrier = history;
+				await writeRunRecordDurable(cwd, run);
+			} else {
+				durableBarrierDescriptor = durableBarrierRecord.descriptor;
+				if (
+					durableBarrierRecord.launchAuthoritySha256 !==
+						launchAuthority.identitySha256 ||
+					durableBarrierDescriptor.subjectSha256 !==
+						launchAuthority.identitySha256
+				) {
+					throw new Error(
+						"durable launch barrier subject does not match launch authority",
+					);
+				}
+			}
+		}
 		await throwIfLaunchStopped(cwd, run.runId, leaseSignal, workflowStopSignal);
 		const subagentOptions: Record<string, unknown> = {
 			cwd: task.cwd,
@@ -2535,6 +2683,9 @@ export async function launchSubagentTask(
 			runsDir,
 			correlationId,
 			...(sessionId === undefined ? {} : { sessionId }),
+			...(durableBarrierDescriptor === undefined
+				? {}
+				: { durableLaunchBarrier: durableBarrierDescriptor }),
 		};
 		const launchQueuedAt = nowIso();
 		let launchStartedAt: string | undefined;
@@ -2674,12 +2825,112 @@ export async function launchSubagentTask(
 		throw error;
 	}
 
-	consumeWorkflowLaunchAuthority(
-		task,
-		launchAuthority,
-		launched.runId,
-		launched.attemptId,
-	);
+	if (durableBarrierDescriptor !== undefined) {
+		if (launchApi === undefined || !hasDurableLaunchBarrierApi(launchApi)) {
+			throw new Error("durable launch barrier API became unavailable");
+		}
+		const ready = await launchApi.waitForDurableLaunchBarrierReady(
+			durableBarrierDescriptor,
+		);
+		if (
+			ready.runId !== launched.runId ||
+			ready.attemptId !== launched.attemptId
+		) {
+			throw new Error(
+				"durable launch barrier backend identity does not match launch result",
+			);
+		}
+		if (durableBarrierRecord === undefined)
+			throw new Error("durable launch barrier record is unavailable");
+		durableBarrierRecord.phase = "ready";
+		durableBarrierRecord.readySha256 = ready.readySha256;
+		durableBarrierRecord.backendRunId = launched.runId;
+		durableBarrierRecord.backendAttemptId = launched.attemptId;
+		consumeWorkflowLaunchAuthority(
+			task,
+			launchAuthority,
+			launched.runId,
+			launched.attemptId,
+		);
+		const releasePayloadSha256 = launchApi.durableLaunchBarrierDigest({
+			schema: "pi-workflow-consumed-launch-release-v1",
+			runId: run.runId,
+			taskId: task.taskId,
+			attemptKey: launchAuthority.attemptKey,
+			launchAuthoritySha256: launchAuthority.identitySha256,
+			launchBootstrapSha256: launchAuthority.launchBootstrapSha256,
+			backendRunId: launched.runId,
+			backendAttemptId: launched.attemptId,
+			readySha256: ready.readySha256,
+			launchPayloadSha256: ready.launchPayloadSha256,
+			authorityPhase: "consumed",
+		});
+		durableBarrierRecord.phase = "consumed";
+		durableBarrierRecord.releasePayloadSha256 = releasePayloadSha256;
+		if (
+			hardenedBatchRecord &&
+			task.foreachBatch?.role === "leader" &&
+			(hardenedBatchRecord.stateRootSha256 ||
+				hardenedBatchRecord.capabilitySubjectSha256)
+		) {
+			const capability = await issueForeachBatchCapability(
+				cwd,
+				hardenedBatchRecord,
+			);
+			await assertForeachBatchCapability(
+				cwd,
+				hardenedBatchRecord,
+				capability,
+			);
+			const reservationSha256 = launchApi.durableLaunchBarrierDigest({
+				schema: "workflow-foreach-batch-dispatch-reservation-v1",
+				batchId: hardenedBatchRecord.batchId,
+				attemptKey: launchAuthority.attemptKey,
+				capabilitySubjectSha256:
+					hardenedBatchRecord.capabilitySubjectSha256,
+				stateRootSha256: hardenedBatchRecord.stateRootSha256,
+				releasePayloadSha256,
+			});
+			if (
+				hardenedBatchRecord.dispatch &&
+				(hardenedBatchRecord.dispatch.attemptKey !==
+					launchAuthority.attemptKey ||
+					hardenedBatchRecord.dispatch.reservationSha256 !==
+						reservationSha256)
+			)
+				throw new Error(
+					`foreach batch ${hardenedBatchRecord.batchId} dispatch reservation drift`,
+				);
+			hardenedBatchRecord.dispatch ??= {
+				schema: "workflow-foreach-batch-dispatch-v1",
+				state: "reserved",
+				attemptKey: launchAuthority.attemptKey,
+				reservationSha256,
+				reservedAt: nowIso(),
+			};
+		}
+		await writeRunRecordDurable(cwd, run);
+		const release = await launchApi.releaseDurableLaunchBarrier(
+			durableBarrierDescriptor,
+			ready,
+			releasePayloadSha256,
+		);
+		durableBarrierRecord.phase = "released";
+		durableBarrierRecord.releaseSha256 = release.releaseSha256;
+		const ack = await launchApi.waitForDurableLaunchBarrierAck(
+			durableBarrierDescriptor,
+			release,
+		);
+		durableBarrierRecord.phase = "acknowledged";
+		durableBarrierRecord.ackSha256 = ack.ackSha256;
+	} else {
+		consumeWorkflowLaunchAuthority(
+			task,
+			launchAuthority,
+			launched.runId,
+			launched.attemptId,
+		);
+	}
 	const handle = makeSubagentHandle(
 		task,
 		launched.runId,
@@ -3507,8 +3758,9 @@ async function persistTerminalForeachBatchEvidence(
 		},
 		rawSha256: sha256Text(input.rawOutput),
 	});
+	const receivedAt = nowIso();
 	input.record.terminal = {
-		receivedAt: nowIso(),
+		receivedAt,
 		rawPath: toProjectPath(input.cwd, rawFile),
 		receiptPath: toProjectPath(input.cwd, receiptFile),
 		rawSha256: sha256Text(input.rawOutput),
@@ -3519,6 +3771,10 @@ async function persistTerminalForeachBatchEvidence(
 		...(input.startedAt === undefined ? {} : { startedAt: input.startedAt }),
 		exitCode: input.exitCode,
 	};
+	if (input.record.dispatch) {
+		input.record.dispatch.state = "terminal_received";
+		input.record.dispatch.terminalReceivedAt = receivedAt;
+	}
 	setForeachBatchPhase(input.run, input.record, "terminal_received");
 	await writeRunRecord(input.cwd, input.run);
 }
@@ -3587,6 +3843,10 @@ async function commitTerminalForeachBatch(
 		startedAt,
 		exitCode,
 	} = input;
+	if (record.stateRootSha256 || record.capabilitySubjectSha256) {
+		const capability = await issueForeachBatchCapability(cwd, record);
+		await assertForeachBatchCapability(cwd, record, capability);
+	}
 	const tasks = foreachBatchTasks(run, record);
 	setForeachBatchPhase(run, record, "committing");
 	record.commit ??= { startedAt: nowIso() };
@@ -3689,6 +3949,10 @@ async function commitTerminalForeachBatch(
 	);
 
 	setForeachBatchPhase(run, record, "completed");
+	if (record.dispatch) {
+		record.dispatch.state = "reconciled";
+		record.dispatch.reconciledAt = nowIso();
+	}
 	record.commit = {
 		startedAt: record.commit.startedAt,
 		completedAt: nowIso(),
@@ -3731,6 +3995,10 @@ export async function recoverForeachBatchRuntime(
 	let changed = false;
 	for (const record of run.foreachBatches ?? []) {
 		assertForeachBatchRecord(record);
+		if (record.stateRootSha256 || record.capabilitySubjectSha256) {
+			const capability = await issueForeachBatchCapability(cwd, record);
+			await assertForeachBatchCapability(cwd, record, capability);
+		}
 		foreachBatchTasks(run, record);
 		if (record.phase === "fallback_prepared") {
 			const reason =
@@ -3788,12 +4056,26 @@ export async function recoverForeachBatchRuntime(
 		if (record.phase !== "launching") continue;
 		const [leader, member] = foreachBatchTasks(run, record);
 		if (leader.status === "pending" && !leader.backendHandle) {
-			setForeachBatchPhase(run, record, "prepared");
-			member.status = "pending";
-			member.statusDetail = "pending";
-			member.startedAt = undefined;
-			member.lastMessage =
-				"foreach batch launch was not claimed; retrying exact prepared pair";
+			if (record.dispatch?.state === "reserved") {
+				const reason =
+					"dispatch reservation has no durable terminal receipt; refusing reuse";
+				setForeachBatchPhase(run, record, "non_reusable");
+				record.dispatch.state = "non_reusable";
+				record.dispatch.reason = reason;
+				for (const task of [leader, member]) {
+					setTaskTerminal(task, "failed", "batch_dispatch_unresolved", {
+						exitCode: 1,
+						lastMessage: reason,
+					});
+				}
+			} else {
+				setForeachBatchPhase(run, record, "prepared");
+				member.status = "pending";
+				member.statusDetail = "pending";
+				member.startedAt = undefined;
+				member.lastMessage =
+					"foreach batch launch was not claimed; retrying exact prepared pair";
+			}
 			changed = true;
 		}
 	}

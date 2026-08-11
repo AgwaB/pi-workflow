@@ -10,6 +10,7 @@ import {
 	normalizeWorkflowSourceManifest,
 } from "./workflow-artifact-tool.js";
 import { fromProjectPath, workflowRunDir } from "./store.js";
+import { workflowStateRootIdentity } from "./workflow-state-root.js";
 import {
 	isWorkflowTaskSessionIdentity,
 	workflowTaskAttemptIdentity,
@@ -40,6 +41,7 @@ export async function createLaunchBootstrapProvenance(
 ): Promise<LaunchBootstrapProvenanceRecord> {
 	const sessionId = workflowTaskSessionId(run, task);
 	const artifactIdentities = await artifactIdentity(cwd, run, task);
+	const stateRootIdentity = await workflowStateRootIdentity(cwd);
 	const record: Omit<LaunchBootstrapProvenanceRecord, "identitySha256"> = {
 		schema: LAUNCH_BOOTSTRAP_PROVENANCE_SCHEMA,
 		workflow: {
@@ -87,6 +89,7 @@ export async function createLaunchBootstrapProvenance(
 				? {}
 				: { maxRuntimeMs: preparedTask.runtime.maxRuntimeMs }),
 			cwdSha256: sha256Text(task.cwd),
+			stateRootSha256: stateRootIdentity.identitySha256,
 			worktree: {
 				enabled: task.worktree.enabled,
 				...(task.worktree.path === null
@@ -530,6 +533,7 @@ function isEffectivePolicy(value: unknown): boolean {
 			"approvalMode",
 			"maxRuntimeMs",
 			"cwdSha256",
+			"stateRootSha256",
 			"worktree",
 		]) ||
 		!Array.isArray(value.tools) ||
@@ -541,7 +545,8 @@ function isEffectivePolicy(value: unknown): boolean {
 		!nonEmptyString(value.approvalMode) ||
 		(value.maxRuntimeMs !== undefined &&
 			!positiveInteger(value.maxRuntimeMs)) ||
-		!isSha256(value.cwdSha256)
+		!isSha256(value.cwdSha256) ||
+		!optionalSha256(value.stateRootSha256)
 	)
 		return false;
 	return isWorktree(value.worktree);

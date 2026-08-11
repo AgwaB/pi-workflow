@@ -884,6 +884,7 @@ export interface LaunchBootstrapProvenanceRecord {
 		approvalMode: string;
 		maxRuntimeMs?: number;
 		cwdSha256: string;
+		stateRootSha256?: string;
 		worktree: {
 			enabled: boolean;
 			pathSha256?: string;
@@ -932,6 +933,38 @@ export interface WorkflowLaunchAuthorityRecord {
 export interface WorkflowLaunchAuthorityHistory {
 	version: 1;
 	records: WorkflowLaunchAuthorityRecord[];
+}
+
+export interface WorkflowDurableLaunchBarrierDescriptor {
+	schema: "pi-subagent-durable-launch-barrier-v1";
+	identitySha256: string;
+	directory: string;
+	readyPath: string;
+	releasePath: string;
+	ackPath: string;
+	challenge: string;
+	subjectSha256: string;
+	directoryIdentity: { device: number; inode: number; uid?: number };
+	timeoutMs: number;
+	pollIntervalMs: number;
+}
+
+export interface WorkflowDurableLaunchBarrierRecord {
+	attemptKey: string;
+	launchAuthoritySha256: string;
+	descriptor: WorkflowDurableLaunchBarrierDescriptor;
+	phase: "created" | "ready" | "consumed" | "released" | "acknowledged";
+	readySha256?: string;
+	releaseSha256?: string;
+	ackSha256?: string;
+	backendRunId?: string;
+	backendAttemptId?: string;
+	releasePayloadSha256?: string;
+}
+
+export interface WorkflowDurableLaunchBarrierHistory {
+	version: 1;
+	records: WorkflowDurableLaunchBarrierRecord[];
 }
 
 export interface WorkflowTaskTimingRecord {
@@ -983,7 +1016,8 @@ export type WorkflowForeachBatchPhase =
 	| "fallback_prepared"
 	| "fallback_applied"
 	| "stopped"
-	| "invalidated";
+	| "invalidated"
+	| "non_reusable";
 
 /** Per-task ownership marker for an active or archived transparent foreach batch. */
 export interface WorkflowForeachBatchTaskState {
@@ -1017,6 +1051,18 @@ export interface WorkflowForeachBatchRecord {
 	sourceGeneration?: number;
 	grouping: WorkflowForeachBatchGrouping;
 	executionSurfaceSha256: string;
+	stateRootSha256?: string;
+	capabilitySubjectSha256?: string;
+	dispatch?: {
+		schema: "workflow-foreach-batch-dispatch-v1";
+		state: "reserved" | "terminal_received" | "reconciled" | "non_reusable";
+		attemptKey: string;
+		reservationSha256: string;
+		reservedAt: string;
+		terminalReceivedAt?: string;
+		reconciledAt?: string;
+		reason?: string;
+	};
 	members: [WorkflowForeachBatchMember, WorkflowForeachBatchMember];
 	attempt: number;
 	phase: WorkflowForeachBatchPhase;
@@ -1121,6 +1167,8 @@ export interface WorkflowTaskRunRecord {
 	launchBootstrap?: LaunchBootstrapProvenanceHistory;
 	/** Internal host-owned launch grant; not an external authority or public API. */
 	launchAuthority?: WorkflowLaunchAuthorityHistory;
+	/** General pi-subagent durable launch barrier receipts, retained by attempt. */
+	durableLaunchBarrier?: WorkflowDurableLaunchBarrierHistory;
 	startedAt?: string;
 	completedAt?: string;
 	elapsedMs?: number;
