@@ -43,7 +43,11 @@ test("workflow state-root capabilities are private, stable, and physically bound
 test("subagent launch durably consumes authority before releasing the general worker barrier", async () => {
 	const cwd = makeProject();
 	const events = [];
+	const digested = [];
+	const externalLaunchGrantSha256 = "7".repeat(64);
 	try {
+		process.env.PI_WORKFLOW_EXTERNAL_LAUNCH_GRANT_SHA256 =
+			externalLaunchGrantSha256;
 		const fixture = makeSubagentLaunchFixture(cwd, "durable-launch-barrier");
 		const descriptor = {
 			schema: "pi-subagent-durable-launch-barrier-v1",
@@ -64,6 +68,7 @@ test("subagent launch durably consumes authority before releasing the general wo
 				return { ...descriptor, subjectSha256: options.subjectSha256 };
 			},
 			durableLaunchBarrierDigest(value) {
+				digested.push(value);
 				return createHash("sha256")
 					.update(JSON.stringify(value))
 					.digest("hex");
@@ -155,7 +160,19 @@ test("subagent launch durably consumes authority before releasing the general wo
 			fixture.task.launchAuthority.records[0].state.phase,
 			"consumed",
 		);
+		assert.equal(
+			fixture.task.launchBootstrap.records[0].effectivePolicy
+				.externalLaunchGrantSha256,
+			externalLaunchGrantSha256,
+		);
+		assert.equal(
+			digested.find(
+				(value) => value.schema === "pi-workflow-consumed-launch-release-v1",
+			).externalLaunchGrantSha256,
+			externalLaunchGrantSha256,
+		);
 	} finally {
+		delete process.env.PI_WORKFLOW_EXTERNAL_LAUNCH_GRANT_SHA256;
 		setSubagentApiForTests(undefined);
 		setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
 		rmSync(cwd, { recursive: true, force: true });

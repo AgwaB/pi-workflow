@@ -26,6 +26,16 @@ import type {
 
 export const LAUNCH_BOOTSTRAP_PROVENANCE_SCHEMA =
 	"pi-workflow-launch-bootstrap-provenance-v1" as const;
+export const EXTERNAL_LAUNCH_GRANT_SHA256_ENV =
+	"PI_WORKFLOW_EXTERNAL_LAUNCH_GRANT_SHA256" as const;
+
+function externalLaunchGrantSha256(): string | undefined {
+	const value = process.env[EXTERNAL_LAUNCH_GRANT_SHA256_ENV];
+	if (value === undefined) return undefined;
+	if (!/^[a-f0-9]{64}$/u.test(value))
+		throw new Error("external launch grant digest must be lowercase SHA-256");
+	return value;
+}
 
 export async function createLaunchBootstrapProvenance(
 	cwd: string,
@@ -42,6 +52,7 @@ export async function createLaunchBootstrapProvenance(
 	const sessionId = workflowTaskSessionId(run, task);
 	const artifactIdentities = await artifactIdentity(cwd, run, task);
 	const stateRootIdentity = await workflowStateRootIdentity(cwd);
+	const externalGrantSha256 = externalLaunchGrantSha256();
 	const record: Omit<LaunchBootstrapProvenanceRecord, "identitySha256"> = {
 		schema: LAUNCH_BOOTSTRAP_PROVENANCE_SCHEMA,
 		workflow: {
@@ -75,6 +86,9 @@ export async function createLaunchBootstrapProvenance(
 			toolProvidersSha256: sha256Canonical(
 				preparedTask.runtime.toolProviders ?? {},
 			),
+			...(externalGrantSha256 === undefined
+				? {}
+				: { externalLaunchGrantSha256: externalGrantSha256 }),
 			...(preparedTask.runtime.model === undefined
 				? {}
 				: { model: preparedTask.runtime.model }),
@@ -527,6 +541,7 @@ function isEffectivePolicy(value: unknown): boolean {
 		!hasAllowedKeys(value, [
 			"tools",
 			"toolProvidersSha256",
+			"externalLaunchGrantSha256",
 			"model",
 			"thinking",
 			"fast",
@@ -539,6 +554,7 @@ function isEffectivePolicy(value: unknown): boolean {
 		!Array.isArray(value.tools) ||
 		!value.tools.every(nonEmptyString) ||
 		!isSha256(value.toolProvidersSha256) ||
+		!optionalSha256(value.externalLaunchGrantSha256) ||
 		!optionalString(value.model) ||
 		!optionalString(value.thinking) ||
 		!optionalString(value.fast) ||

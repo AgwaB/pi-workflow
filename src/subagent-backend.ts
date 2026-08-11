@@ -68,6 +68,7 @@ import {
 } from "./launch-session.js";
 import {
 	assertPreparedLaunchMatchesRecordedProvenance,
+	assertRecordedLaunchBootstrapProvenance,
 	createLaunchBootstrapProvenance,
 	recordLaunchBootstrapProvenance,
 } from "./launch-bootstrap-provenance.js";
@@ -2852,6 +2853,10 @@ export async function launchSubagentTask(
 			launched.runId,
 			launched.attemptId,
 		);
+		const launchBootstrap = assertRecordedLaunchBootstrapProvenance(
+			task,
+			launchAuthority.launchBootstrapSha256,
+		);
 		const releasePayloadSha256 = launchApi.durableLaunchBarrierDigest({
 			schema: "pi-workflow-consumed-launch-release-v1",
 			runId: run.runId,
@@ -2864,6 +2869,12 @@ export async function launchSubagentTask(
 			readySha256: ready.readySha256,
 			launchPayloadSha256: ready.launchPayloadSha256,
 			authorityPhase: "consumed",
+			...(launchBootstrap.effectivePolicy.externalLaunchGrantSha256 === undefined
+				? {}
+				: {
+						externalLaunchGrantSha256:
+							launchBootstrap.effectivePolicy.externalLaunchGrantSha256,
+					}),
 		});
 		durableBarrierRecord.phase = "consumed";
 		durableBarrierRecord.releasePayloadSha256 = releasePayloadSha256;

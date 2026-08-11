@@ -878,6 +878,7 @@ export interface LaunchBootstrapProvenanceRecord {
 	effectivePolicy: {
 		tools: string[];
 		toolProvidersSha256: string;
+		externalLaunchGrantSha256?: string;
 		model?: string;
 		thinking?: string;
 		fast?: string;
