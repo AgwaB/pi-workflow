@@ -179,6 +179,7 @@ function fakeApi({
 	delayedBatch = false,
 	failBatchLaunchOnce = false,
 	throwBatchPoll = false,
+	durableBarrier = false,
 }) {
 	const runs = new Map();
 	const launches = [];
@@ -186,6 +187,8 @@ function fakeApi({
 	let batchCompleted = !delayedBatch;
 	let batchLaunchFailed = false;
 	let batchStatusCalls = 0;
+	let barrierCount = 0;
+	const barriers = new Map();
 	return {
 		launches,
 		interrupts,
@@ -196,6 +199,144 @@ function fakeApi({
 			return batchStatusCalls;
 		},
 		api: {
+			...(durableBarrier
+				? {
+						async createDurableLaunchBarrierV2(options) {
+							barrierCount += 1;
+							const barrier = {
+								schema: "pi-subagent-durable-launch-barrier-v2",
+								identitySha256: createHash("sha256")
+									.update(`barrier-${barrierCount}`)
+									.digest("hex"),
+								directory: options.directory,
+								readyPath: join(options.directory, "ready-v2.json"),
+								decisionPath: join(options.directory, "decision-v2.json"),
+								ackPath: join(options.directory, "ack-v2.json"),
+								challenge: "1".repeat(64),
+								decisionNonce: "7".repeat(64),
+								subjectSha256: options.subjectSha256,
+								...(options.authorityBindingSha256 === undefined
+									? {}
+									: {
+											authorityBindingSha256:
+												options.authorityBindingSha256,
+										}),
+								directoryIdentity: { device: 1, inode: barrierCount },
+								timeoutMs: options.timeoutMs,
+								pollIntervalMs: 10,
+							};
+							barriers.set(barrier.identitySha256, { barrier });
+							return barrier;
+						},
+						durableLaunchBarrierDigest(value) {
+							return createHash("sha256")
+								.update(JSON.stringify(value))
+								.digest("hex");
+						},
+						async waitForDurableLaunchBarrierV2Ready(barrier) {
+							const launch = launches.at(-1);
+							assert.ok(launch, "barrier ready requires a launched worker");
+							const ready = {
+								schema: "pi-subagent-durable-launch-barrier-ready-v2",
+								barrierIdentitySha256: barrier.identitySha256,
+								challenge: barrier.challenge,
+								decisionNonce: barrier.decisionNonce,
+								subjectSha256: barrier.subjectSha256,
+								...(barrier.authorityBindingSha256 === undefined
+									? {}
+									: {
+											authorityBindingSha256:
+												barrier.authorityBindingSha256,
+										}),
+								runId: launch.runId,
+								attemptId: launch.attemptId,
+								workerPid: 101,
+								readySha256: "2".repeat(64),
+								launchPayloadSha256: "3".repeat(64),
+								executionPlanSha256: "6".repeat(64),
+							};
+							barriers.get(barrier.identitySha256).ready = ready;
+							return ready;
+						},
+						async resolveDurableLaunchBarrierV2Release(
+							barrier,
+							ready,
+							releasePayloadSha256,
+						) {
+							const state = barriers.get(barrier.identitySha256);
+							state.decision ??= {
+								schema: "pi-subagent-durable-launch-barrier-decision-v2",
+								kind: "released",
+								barrierIdentitySha256: barrier.identitySha256,
+								challenge: barrier.challenge,
+								decisionNonce: barrier.decisionNonce,
+								subjectSha256: barrier.subjectSha256,
+								...(barrier.authorityBindingSha256 === undefined
+									? {}
+									: {
+											authorityBindingSha256:
+												barrier.authorityBindingSha256,
+										}),
+								runId: ready.runId,
+								attemptId: ready.attemptId,
+								readySha256: ready.readySha256,
+								releasePayloadSha256,
+								decisionSha256: "4".repeat(64),
+							};
+							return {
+								outcome: state.decision.kind,
+								decision: state.decision,
+							};
+						},
+						async revokeDurableLaunchBarrierV2(barrier, options) {
+							const state = barriers.get(barrier.identitySha256);
+							state.decision ??= {
+								schema: "pi-subagent-durable-launch-barrier-decision-v2",
+								kind: "revoked",
+								barrierIdentitySha256: barrier.identitySha256,
+								challenge: barrier.challenge,
+								decisionNonce: barrier.decisionNonce,
+								subjectSha256: barrier.subjectSha256,
+								...(barrier.authorityBindingSha256 === undefined
+									? {}
+									: {
+											authorityBindingSha256:
+												barrier.authorityBindingSha256,
+										}),
+								cancellationId: options.cancellationId,
+								reasonSha256: options.reasonSha256,
+								decisionSha256: "8".repeat(64),
+							};
+							return {
+								outcome: state.decision.kind,
+								decision: state.decision,
+							};
+						},
+						async readDurableLaunchBarrierV2State(barrier) {
+							const state = barriers.get(barrier.identitySha256);
+							return {
+								...(state.ready ? { ready: state.ready } : {}),
+								...(state.decision ? { decision: state.decision } : {}),
+								...(state.ack ? { ack: state.ack } : {}),
+							};
+						},
+						async waitForDurableLaunchBarrierV2Ack(barrier, release) {
+							const state = barriers.get(barrier.identitySha256);
+							state.ack = {
+								schema: "pi-subagent-durable-launch-barrier-ack-v2",
+								barrierIdentitySha256: barrier.identitySha256,
+								challenge: barrier.challenge,
+								decisionNonce: barrier.decisionNonce,
+								runId: release.runId,
+								attemptId: release.attemptId,
+								readySha256: release.readySha256,
+								decisionSha256: release.decisionSha256,
+								ackSha256: "5".repeat(64),
+							};
+							return state.ack;
+						},
+					}
+				: {}),
 			async runSubagent(options) {
 				const index = launches.length + 1;
 				const prompt = String(options.task);
@@ -298,7 +439,17 @@ function fakeApi({
 			},
 			async interruptSubagent(options) {
 				interrupts.push(options);
-				return {};
+				return {
+					status: "already-terminal",
+					runId: options.runId,
+					interruptedAttempts: [],
+					unsupportedAttempts: [],
+					record: {
+						attempts: [
+							{ attemptId: options.attemptId, status: "cancelled" },
+						],
+					},
+				};
 			},
 		},
 	};
@@ -535,6 +686,7 @@ test("profile-only batching uses one physical launch, preserves per-item artifac
 		const fake = fakeApi({
 			cwd,
 			items,
+			durableBarrier: true,
 			delayedBatch: true,
 			batchItemFactory: (id) => ({
 				id,
@@ -565,6 +717,14 @@ test("profile-only batching uses one physical launch, preserves per-item artifac
 		const batch = active.foreachBatches?.[0];
 		assert.ok(batch, "batch ownership must be durable before launch");
 		assert.equal(batch.members.length, 2);
+		assert.match(batch.stateRootSha256, /^[a-f0-9]{64}$/u);
+		assert.match(batch.capabilitySubjectSha256, /^[a-f0-9]{64}$/u);
+		assert.equal(batch.dispatch?.state, "reserved");
+		assert.equal(
+			active.tasks.find((task) => task.foreachBatch?.role === "leader")
+				?.durableLaunchBarrier?.records.at(-1)?.phase,
+			"acknowledged",
+		);
 		assert.equal(
 			active.tasks.find((task) => task.foreachBatch?.role === "member")
 				?.backendHandle,
@@ -587,6 +747,7 @@ test("profile-only batching uses one physical launch, preserves per-item artifac
 			["source", "batch", "singleton", "downstream"],
 		);
 		const completedBatch = completed.foreachBatches?.[0];
+		assert.equal(completedBatch?.dispatch?.state, "reconciled");
 		assert.equal(
 			completedBatch?.physicalExecution?.leaderTaskId,
 			completedBatch?.members.find((member) => member.role === "leader")?.taskId,

@@ -878,12 +878,14 @@ export interface LaunchBootstrapProvenanceRecord {
 	effectivePolicy: {
 		tools: string[];
 		toolProvidersSha256: string;
+		externalLaunchGrantSha256?: string;
 		model?: string;
 		thinking?: string;
 		fast?: string;
 		approvalMode: string;
 		maxRuntimeMs?: number;
 		cwdSha256: string;
+		stateRootSha256?: string;
 		worktree: {
 			enabled: boolean;
 			pathSha256?: string;
@@ -932,6 +934,66 @@ export interface WorkflowLaunchAuthorityRecord {
 export interface WorkflowLaunchAuthorityHistory {
 	version: 1;
 	records: WorkflowLaunchAuthorityRecord[];
+}
+
+export interface WorkflowDurableLaunchBarrierDescriptor {
+	schema: "pi-subagent-durable-launch-barrier-v2";
+	identitySha256: string;
+	directory: string;
+	readyPath: string;
+	decisionPath: string;
+	ackPath: string;
+	challenge: string;
+	decisionNonce: string;
+	subjectSha256: string;
+	/** External one-run authority digest bound into the pi-subagent worker plan. */
+	authorityBindingSha256?: string;
+	directoryIdentity: { device: number; inode: number; uid?: number };
+	timeoutMs: number;
+	pollIntervalMs: number;
+}
+
+export interface WorkflowDurableLaunchBarrierCancellationRecord {
+	cancellationId: string;
+	requestedAt: string;
+	reasonSha256: string;
+	decision: "revoked" | "released";
+	interruptStatus?: "interrupt-requested" | "already-terminal";
+	terminalAttemptId?: string;
+	terminalStatus?: "cancelled" | "completed" | "failed";
+	terminalObservedAt?: string;
+}
+
+export interface WorkflowDurableLaunchBarrierRecord {
+	attemptKey: string;
+	launchAuthoritySha256: string;
+	/** External authority digest expected in descriptor, READY, and decision. */
+	authorityBindingSha256?: string;
+	descriptor: WorkflowDurableLaunchBarrierDescriptor;
+	phase:
+		| "created"
+		| "ready"
+		| "consumed"
+		| "released"
+		| "acknowledged"
+		| "revoked"
+		| "release_won_cancellation_pending"
+		| "cancellation_acknowledged";
+	readySha256?: string;
+	launchPayloadSha256?: string;
+	executionPlanSha256?: string;
+	decisionSha256?: string;
+	ackSha256?: string;
+	backendRunId?: string;
+	backendAttemptId?: string;
+	releasePayloadSha256?: string;
+	releaseWinner?: boolean;
+	cancellation?: WorkflowDurableLaunchBarrierCancellationRecord;
+}
+
+export interface WorkflowDurableLaunchBarrierHistory {
+	version: 2;
+	records: WorkflowDurableLaunchBarrierRecord[];
 }
 
 export interface WorkflowTaskTimingRecord {
@@ -983,7 +1045,8 @@ export type WorkflowForeachBatchPhase =
 	| "fallback_prepared"
 	| "fallback_applied"
 	| "stopped"
-	| "invalidated";
+	| "invalidated"
+	| "non_reusable";
 
 /** Per-task ownership marker for an active or archived transparent foreach batch. */
 export interface WorkflowForeachBatchTaskState {
@@ -1017,6 +1080,18 @@ export interface WorkflowForeachBatchRecord {
 	sourceGeneration?: number;
 	grouping: WorkflowForeachBatchGrouping;
 	executionSurfaceSha256: string;
+	stateRootSha256?: string;
+	capabilitySubjectSha256?: string;
+	dispatch?: {
+		schema: "workflow-foreach-batch-dispatch-v1";
+		state: "reserved" | "terminal_received" | "reconciled" | "non_reusable";
+		attemptKey: string;
+		reservationSha256: string;
+		reservedAt: string;
+		terminalReceivedAt?: string;
+		reconciledAt?: string;
+		reason?: string;
+	};
 	members: [WorkflowForeachBatchMember, WorkflowForeachBatchMember];
 	attempt: number;
 	phase: WorkflowForeachBatchPhase;
@@ -1121,6 +1196,8 @@ export interface WorkflowTaskRunRecord {
 	launchBootstrap?: LaunchBootstrapProvenanceHistory;
 	/** Internal host-owned launch grant; not an external authority or public API. */
 	launchAuthority?: WorkflowLaunchAuthorityHistory;
+	/** General pi-subagent durable launch barrier receipts, retained by attempt. */
+	durableLaunchBarrier?: WorkflowDurableLaunchBarrierHistory;
 	startedAt?: string;
 	completedAt?: string;
 	elapsedMs?: number;

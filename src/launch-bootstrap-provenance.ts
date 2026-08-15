@@ -10,6 +10,7 @@ import {
 	normalizeWorkflowSourceManifest,
 } from "./workflow-artifact-tool.js";
 import { fromProjectPath, workflowRunDir } from "./store.js";
+import { workflowStateRootIdentity } from "./workflow-state-root.js";
 import {
 	isWorkflowTaskSessionIdentity,
 	workflowTaskAttemptIdentity,
@@ -25,6 +26,23 @@ import type {
 
 export const LAUNCH_BOOTSTRAP_PROVENANCE_SCHEMA =
 	"pi-workflow-launch-bootstrap-provenance-v1" as const;
+export const EXTERNAL_LAUNCH_GRANT_SHA256_ENV =
+	"PI_WORKFLOW_EXTERNAL_LAUNCH_GRANT_SHA256" as const;
+export const REQUIRE_EXTERNAL_LAUNCH_GRANT_ENV =
+	"PI_WORKFLOW_REQUIRE_EXTERNAL_LAUNCH_GRANT" as const;
+
+function externalLaunchGrantSha256(): string | undefined {
+	const value = process.env[EXTERNAL_LAUNCH_GRANT_SHA256_ENV];
+	if (
+		value === undefined &&
+		process.env[REQUIRE_EXTERNAL_LAUNCH_GRANT_ENV] === "1"
+	)
+		throw new Error("required external launch grant digest is absent");
+	if (value === undefined) return undefined;
+	if (!/^[a-f0-9]{64}$/u.test(value))
+		throw new Error("external launch grant digest must be lowercase SHA-256");
+	return value;
+}
 
 export async function createLaunchBootstrapProvenance(
 	cwd: string,
@@ -40,6 +58,8 @@ export async function createLaunchBootstrapProvenance(
 ): Promise<LaunchBootstrapProvenanceRecord> {
 	const sessionId = workflowTaskSessionId(run, task);
 	const artifactIdentities = await artifactIdentity(cwd, run, task);
+	const stateRootIdentity = await workflowStateRootIdentity(cwd);
+	const externalGrantSha256 = externalLaunchGrantSha256();
 	const record: Omit<LaunchBootstrapProvenanceRecord, "identitySha256"> = {
 		schema: LAUNCH_BOOTSTRAP_PROVENANCE_SCHEMA,
 		workflow: {
@@ -73,6 +93,9 @@ export async function createLaunchBootstrapProvenance(
 			toolProvidersSha256: sha256Canonical(
 				preparedTask.runtime.toolProviders ?? {},
 			),
+			...(externalGrantSha256 === undefined
+				? {}
+				: { externalLaunchGrantSha256: externalGrantSha256 }),
 			...(preparedTask.runtime.model === undefined
 				? {}
 				: { model: preparedTask.runtime.model }),
@@ -87,6 +110,7 @@ export async function createLaunchBootstrapProvenance(
 				? {}
 				: { maxRuntimeMs: preparedTask.runtime.maxRuntimeMs }),
 			cwdSha256: sha256Text(task.cwd),
+			stateRootSha256: stateRootIdentity.identitySha256,
 			worktree: {
 				enabled: task.worktree.enabled,
 				...(task.worktree.path === null
@@ -524,24 +548,28 @@ function isEffectivePolicy(value: unknown): boolean {
 		!hasAllowedKeys(value, [
 			"tools",
 			"toolProvidersSha256",
+			"externalLaunchGrantSha256",
 			"model",
 			"thinking",
 			"fast",
 			"approvalMode",
 			"maxRuntimeMs",
 			"cwdSha256",
+			"stateRootSha256",
 			"worktree",
 		]) ||
 		!Array.isArray(value.tools) ||
 		!value.tools.every(nonEmptyString) ||
 		!isSha256(value.toolProvidersSha256) ||
+		!optionalSha256(value.externalLaunchGrantSha256) ||
 		!optionalString(value.model) ||
 		!optionalString(value.thinking) ||
 		!optionalString(value.fast) ||
 		!nonEmptyString(value.approvalMode) ||
 		(value.maxRuntimeMs !== undefined &&
 			!positiveInteger(value.maxRuntimeMs)) ||
-		!isSha256(value.cwdSha256)
+		!isSha256(value.cwdSha256) ||
+		!optionalSha256(value.stateRootSha256)
 	)
 		return false;
 	return isWorktree(value.worktree);

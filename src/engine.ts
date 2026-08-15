@@ -193,6 +193,12 @@ import {
 	sha256Text,
 } from "./foreach-batch-runtime.js";
 import {
+	assertForeachBatchCapability,
+	foreachBatchCapabilitySubjectSha256,
+	issueForeachBatchCapability,
+} from "./foreach-batch-capability.js";
+import { workflowStateRootIdentity } from "./workflow-state-root.js";
+import {
 	EXECUTION_PROFILE_FOREACH_BATCH,
 	type ProfiledArtifactGraphStage,
 } from "./execution-profile.js";
@@ -1138,9 +1144,12 @@ function workflowStoppedTaskIds(run: WorkflowRunRecord): string[] {
 function markRunStopped(run: WorkflowRunRecord): string[] {
 	const interruptedTaskIds: string[] = [];
 	for (const task of run.tasks) {
+		const durableBarrierRecord = task.durableLaunchBarrier?.records.at(-1);
 		if (
 			task.status === "running" &&
-			task.statusDetail === "cancellation_failed"
+			(task.statusDetail === "cancellation_failed" ||
+				(durableBarrierRecord !== undefined &&
+					durableBarrierRecord.phase !== "cancellation_acknowledged"))
 		)
 			continue;
 		if (
@@ -2952,6 +2961,7 @@ async function launchForeachBatchAt(
 		)
 			throw new Error(`foreach batch ${batchId} already has a durable record`);
 		const preparedAt = new Date().toISOString();
+		const stateRootIdentity = await workflowStateRootIdentity(cwd);
 		record = {
 			version: 1,
 			batchId,
@@ -2966,6 +2976,7 @@ async function launchForeachBatchAt(
 			grouping: { ...grouping },
 			executionSurfaceSha256:
 				foreachBatchExecutionSurfaceSha256(preparedLeader),
+			stateRootSha256: stateRootIdentity.identitySha256,
 			members: [
 				{
 					taskId: leaderTask.taskId,
@@ -2988,6 +2999,8 @@ async function launchForeachBatchAt(
 			batchPrompt,
 			batchPromptSha256: sha256Text(batchPrompt),
 		};
+		record.capabilitySubjectSha256 =
+			foreachBatchCapabilitySubjectSha256(record);
 		run.foreachBatches ??= [];
 		run.foreachBatches.push(record);
 		leaderTask.foreachBatch = {
@@ -3008,6 +3021,11 @@ async function launchForeachBatchAt(
 			foreachBatchSynthetic: { schema: "workflow-foreach-batch-v1" },
 			compiledPrompt: batchPrompt,
 		};
+	}
+
+	if (record.stateRootSha256 || record.capabilitySubjectSha256) {
+		const capability = await issueForeachBatchCapability(cwd, record);
+		await assertForeachBatchCapability(cwd, record, capability);
 	}
 
 	try {
@@ -3383,6 +3401,7 @@ async function applyFailFastCancellation(
 			const batch = activeForeachBatchRecordForTask(run, task);
 			try {
 				await acknowledgeSubagentTaskInterrupted(
+					cwd,
 					run,
 					task,
 					"workflow fail-fast cancellation",
@@ -5097,7 +5116,30 @@ async function launchPendingTaskAt(
 		return launch.kind === "launched";
 	} catch (error) {
 		if (leaseSignal?.aborted) throw error;
+		const durableBarrierRecord = task.durableLaunchBarrier?.records.at(-1);
+		if (
+			task.backendHandle &&
+			durableBarrierRecord &&
+			durableBarrierRecord.phase !== "cancellation_acknowledged" &&
+			task.statusDetail === "cancellation_failed"
+		) {
+			task.status = "running";
+			await writeRunRecord(cwd, run).catch(() => undefined);
+			throw error;
+		}
 		if (isWorkflowStopRequestedError(error)) {
+			if (
+				task.backendHandle &&
+				durableBarrierRecord &&
+				durableBarrierRecord.phase !== "cancellation_acknowledged"
+			) {
+				task.status = "running";
+				task.statusDetail = "cancellation_pending";
+				task.lastMessage =
+					"workflow stop is waiting for exact backend cancellation acknowledgement";
+				await writeRunRecord(cwd, run).catch(() => undefined);
+				return false;
+			}
 			setTaskTerminal(task, "interrupted", "workflow_stopped", {
 				exitCode: 130,
 				lastMessage: "Workflow stopped by user request",

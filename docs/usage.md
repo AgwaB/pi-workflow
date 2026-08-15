@@ -773,6 +773,39 @@ Scope order is agent frontmatter fallback < `defaults.tools` < stage `tools`: th
 - Subagent process launches are gated per Pi process to avoid boot storms: at most `max(2, floor(cpu cores / 2))` concurrent launches, overridable with the `PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES` environment variable. Queued tasks report a waiting message in their status. Deterministic boot failures (extension load or configuration errors) fail fast instead of consuming transient-failure retries.
 - External content, source files, and web pages used by workflow workers are untrusted data, not instructions.
 
+### Durable launch and batch controls
+
+Provider-capable launches require the bundled runtime's opt-in
+`durable-launch-barrier-v2` API; the workflow does not silently downgrade to the
+weaker v1 release protocol. The worker writes READY and remains paused before
+Pi/provider initialization. An external grant digest is bound through the
+descriptor, worker execution plan, READY receipt, and immutable gate decision.
+The workflow durably records the provisional backend handle and execution-plan
+digest, then commits consumed launch authority and the release payload before
+competing for one exclusive `released`-or-`revoked` decision. A revocation that
+wins this decision prevents worker execution. A release that wins remains visible
+as `release_won_cancellation_pending` during later cancellation.
+
+Workflow stop, lease loss, timeout, and fail-fast cleanup require both an explicit
+interrupt result for the exact backend attempt and an observed terminal status for
+that same attempt. `unsupported`, `not-found`, mismatched-attempt, and timeout
+results leave cancellation pending and retain the durable stop intent and backend
+handle. Crash recovery validates READY/decision/ACK receipts and never respawns the
+attempt; incomplete stale barriers are revoked and reaped fail-closed. Startup
+fails before spawn when v2 is unavailable or any bound receipt drifts.
+
+Launch-bootstrap provenance also binds the canonical workflow state-root identity
+(device, inode, owner, mode, canonical path, and private persisted nonce) and the
+post-preparation effective tool-provider surface. Private state-root capabilities
+are in-memory, unforgeable handles; persisted digests are evidence, not authority.
+
+New transparent max-2 foreach batches persist a root-bound capability subject and
+an immutable inspected schedule. A dispatch reservation is included in the same
+durable commit that precedes barrier release. If recovery finds a reservation with
+no terminal receipt, the exact batch is marked `non_reusable` and its items fail
+closed instead of being silently relaunched. Legacy batch records remain readable
+but do not gain authority from missing hardened fields.
+
 ## Web tools
 
 New workflows should use `workflow_web_search`, `workflow_web_fetch_source`, and

@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to publish, e.g. 0.7.3 or 0.8.0"
+        description: "Version to publish, e.g. 0.11.1 or 0.12.0"
         required: true
         type: string
 
@@ -21,8 +21,8 @@ jobs:
     permissions:
       contents: read
     outputs:
-      artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
       package-sha: ${{ steps.package.outputs.package-sha }}
+      release-tree: ${{ steps.package.outputs.release-tree }}
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -54,6 +54,7 @@ jobs:
           if [ "$current" != "$TARGET_VERSION" ]; then
             npm version "$TARGET_VERSION" --no-git-tag-version --ignore-scripts
           fi
+          test "$(node -p "require('./package.json').name")" = "@agwab/pi-workflow"
           test "$(node -p "require('./package.json').version")" = "$TARGET_VERSION"
           test "$(node -p "require('./package-lock.json').version")" = "$TARGET_VERSION"
           echo "version=$TARGET_VERSION" >> "$GITHUB_OUTPUT"
@@ -66,130 +67,66 @@ jobs:
           PI_WORKFLOW_ALLOW_PUBLISHED_VERSION: "1"
         run: npm run release:check
 
-      - name: Create exact validated release commit, tag, package, and metadata
+      - name: Create exact package and source-tree metadata
         id: package
         env:
           TARGET_VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
           git diff --exit-code -- . ':(exclude)package.json' ':(exclude)package-lock.json'
           test -z "$(git ls-files --others --exclude-standard)"
           git add package.json package-lock.json
-          if ! git diff --cached --quiet; then
-            git commit -m "chore(release): v$TARGET_VERSION"
-          fi
-          if git rev-parse -q --verify "refs/tags/v$TARGET_VERSION" >/dev/null; then
-            test "$(git rev-list -n 1 "refs/tags/v$TARGET_VERSION")" = "$(git rev-parse HEAD)"
-          else
-            git tag "v$TARGET_VERSION"
-          fi
-          test -z "$(git status --porcelain)"
+          release_tree="$(git write-tree)"
 
           pack_json_file="$(mktemp)"
           cleanup_pack_json() { rm -f "$pack_json_file"; }
           trap cleanup_pack_json EXIT
           npm pack --ignore-scripts --json > "$pack_json_file"
           package_file="$(node -e 'const fs=require("node:fs"); const [p]=JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(p.filename)' "$pack_json_file")"
-          package_sha="$(sha256sum "$package_file" | awk '{print $1}')"
+          expected_file="agwab-pi-workflow-$TARGET_VERSION.tgz"
+          test "$package_file" = "$expected_file"
+          test -f "$expected_file"
+          test "$(find . -maxdepth 1 -type f -name '*.tgz' -print | wc -l | tr -d ' ')" = "1"
+          package_sha="$(sha256sum "$expected_file" | awk '{print $1}')"
           echo "package-sha=$package_sha" >> "$GITHUB_OUTPUT"
-          git bundle create release.bundle HEAD "refs/tags/v$TARGET_VERSION"
+          echo "release-tree=$release_tree" >> "$GITHUB_OUTPUT"
 
-          export PACKAGE_FILE="$package_file"
+          export PACKAGE_FILE="$expected_file"
           export PACKAGE_SHA="$package_sha"
           export BASE_SHA="${{ github.sha }}"
-          export RELEASE_COMMIT="$(git rev-parse HEAD)"
-          export RELEASE_TREE="$(git rev-parse HEAD^{tree})"
+          export RELEASE_TREE="$release_tree"
           node <<'NODE'
           const fs = require('node:fs');
-          const pkg = require('./package.json');
           fs.writeFileSync('release-metadata.json', `${JSON.stringify({
-            schema: 'pi-workflow-release-metadata-v1',
-            name: pkg.name,
+            schema: 'pi-workflow-release-metadata-v2',
+            name: '@agwab/pi-workflow',
             version: process.env.TARGET_VERSION,
             baseSha: process.env.BASE_SHA,
-            releaseCommit: process.env.RELEASE_COMMIT,
             releaseTree: process.env.RELEASE_TREE,
             packageFile: process.env.PACKAGE_FILE,
             packageSha256: process.env.PACKAGE_SHA,
           }, null, 2)}\n`);
           NODE
-          test "$(node -p "require('./release-metadata.json').version")" = "$TARGET_VERSION"
 
       - name: Upload exact release artifact
-        id: upload
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-artifact
           path: |
-            release.bundle
             release-metadata.json
-            *.tgz
+            agwab-pi-workflow-${{ steps.version.outputs.version }}.tgz
           if-no-files-found: error
           retention-days: 7
 
-  publish:
+  source:
     needs: build
     runs-on: ubuntu-latest
-    environment: npm-publish
     permissions:
-      actions: read
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
-        with:
-          node-version: 24
-          registry-url: https://registry.npmjs.org
-          package-manager-cache: false
-
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          name: release-artifact
-          path: release-artifact
-
-      - name: Verify and publish exact tarball without lifecycle scripts
-        env:
-          BUILD_PACKAGE_SHA: ${{ needs.build.outputs.package-sha }}
-          TARGET_VERSION: ${{ needs.build.outputs.version }}
-        run: |
-          set -euo pipefail
-          metadata=release-artifact/release-metadata.json
-          test "$(node -p "require('./$metadata').version")" = "$TARGET_VERSION"
-          name="$(node -p "require('./$metadata').name")"
-          package_file="$(node -p "require('./$metadata').packageFile")"
-          package_path="$PWD/release-artifact/$package_file"
-          test -f "$package_path"
-          expected_sha="$(node -p "require('./$metadata').packageSha256")"
-          actual_sha="$(sha256sum "$package_path" | awk '{print $1}')"
-          test "$expected_sha" = "$BUILD_PACKAGE_SHA"
-          test "$actual_sha" = "$BUILD_PACKAGE_SHA"
-
-          integrity="$(npm view "$name@$TARGET_VERSION" dist.integrity 2>/dev/null || true)"
-          if [ -n "$integrity" ]; then
-            export PACKAGE_PATH="$package_path" EXPECTED_INTEGRITY="$integrity"
-            node --input-type=commonjs --eval '
-            const crypto = require("node:crypto");
-            const fs = require("node:fs");
-            const actual = `sha512-${crypto.createHash("sha512").update(fs.readFileSync(process.env.PACKAGE_PATH)).digest("base64")}`;
-            if (actual !== process.env.EXPECTED_INTEGRITY) {
-              throw new Error(`published package integrity mismatch: expected ${process.env.EXPECTED_INTEGRITY}, got ${actual}`);
-            }
-            '
-            echo "$name@$TARGET_VERSION already exists with identical integrity; skipping publish."
-          else
-            npm publish "$package_path" --access public --provenance --ignore-scripts
-          fi
-
-  release:
-    needs: [build, publish]
-    runs-on: ubuntu-latest
-    permissions:
-      actions: read
       contents: write
       id-token: none
+    outputs:
+      needs-push: ${{ steps.prepare.outputs.needs-push }}
+      release-commit: ${{ steps.prepare.outputs.release-commit }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -202,65 +139,185 @@ jobs:
           node-version: 24
           package-manager-cache: false
 
+      - name: Independently reconstruct the validated release tree
+        id: prepare
+        env:
+          EXPECTED_RELEASE_TREE: ${{ needs.build.outputs.release-tree }}
+          TARGET_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$TARGET_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "version must be an exact semver without a v prefix" >&2
+            exit 1
+          fi
+          test "$(node -p "require('./package.json').name")" = "@agwab/pi-workflow"
+          current="$(node -p "require('./package.json').version")"
+          if [ "$current" != "$TARGET_VERSION" ]; then
+            npm version "$TARGET_VERSION" --no-git-tag-version --ignore-scripts
+          fi
+          test "$(node -p "require('./package.json').version")" = "$TARGET_VERSION"
+          test "$(node -p "require('./package-lock.json').version")" = "$TARGET_VERSION"
+          git diff --exit-code -- . ':(exclude)package.json' ':(exclude)package-lock.json'
+          test -z "$(git ls-files --others --exclude-standard)"
+          git add package.json package-lock.json
+          release_tree="$(git write-tree)"
+          test "$release_tree" = "$EXPECTED_RELEASE_TREE"
+
+          base_commit="${{ github.sha }}"
+          remote_main="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
+          remote_tag="$(git ls-remote origin "refs/tags/v$TARGET_VERSION" | awk '{print $1}')"
+          needs_push=false
+
+          if [ "$remote_main" = "$base_commit" ] && [ -z "$remote_tag" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            if ! git diff --cached --quiet; then
+              git commit -m "chore(release): v$TARGET_VERSION"
+            fi
+            release_commit="$(git rev-parse HEAD)"
+            test "$(git rev-parse HEAD^{tree})" = "$EXPECTED_RELEASE_TREE"
+            if git rev-parse -q --verify "refs/tags/v$TARGET_VERSION" >/dev/null; then
+              test "$(git rev-list -n 1 "refs/tags/v$TARGET_VERSION")" = "$release_commit"
+            else
+              git tag "v$TARGET_VERSION"
+            fi
+            needs_push=true
+          elif [ "$remote_main" = "$base_commit" ] && [ "$remote_tag" = "$base_commit" ]; then
+            release_commit="$base_commit"
+            test "$(git rev-parse "$release_commit^{tree}")" = "$EXPECTED_RELEASE_TREE"
+          elif [ -n "$remote_tag" ] && [ "$remote_main" = "$remote_tag" ]; then
+            release_commit="$remote_main"
+            git fetch --no-tags origin "$release_commit"
+            test "$(git rev-parse "$release_commit^")" = "$base_commit"
+            test "$(git rev-parse "$release_commit^{tree}")" = "$EXPECTED_RELEASE_TREE"
+          else
+            echo "remote main/tag identity is incompatible with this release" >&2
+            exit 1
+          fi
+
+          echo "needs-push=$needs_push" >> "$GITHUB_OUTPUT"
+          echo "release-commit=$release_commit" >> "$GITHUB_OUTPUT"
+
+      - name: Atomically push the independently reconstructed commit and tag
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          NEEDS_PUSH: ${{ steps.prepare.outputs.needs-push }}
+          RELEASE_COMMIT: ${{ steps.prepare.outputs.release-commit }}
+          TARGET_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "$NEEDS_PUSH" = "true" ]; then
+            remote="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+            git push --atomic "$remote" \
+              "$RELEASE_COMMIT:refs/heads/main" \
+              "$RELEASE_COMMIT:refs/tags/v$TARGET_VERSION"
+          fi
+
+      - name: Verify remote release identity
+        env:
+          RELEASE_COMMIT: ${{ steps.prepare.outputs.release-commit }}
+          TARGET_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          remote_main="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
+          remote_tag="$(git ls-remote origin "refs/tags/v$TARGET_VERSION" | awk '{print $1}')"
+          test "$remote_main" = "$RELEASE_COMMIT"
+          test "$remote_tag" = "$RELEASE_COMMIT"
+
+  publish:
+    needs: [build, source]
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ needs.source.outputs.release-commit }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: release-artifact
           path: release-artifact
 
-      - name: Verify exact commit, package identity, and unchanged main
-        id: verify
+      - name: Verify source identity and publish the fixed-path tarball
         env:
           BUILD_PACKAGE_SHA: ${{ needs.build.outputs.package-sha }}
+          RELEASE_COMMIT: ${{ needs.source.outputs.release-commit }}
           TARGET_VERSION: ${{ needs.build.outputs.version }}
         run: |
           set -euo pipefail
-          metadata=release-artifact/release-metadata.json
-          test "$(node -p "require('./$metadata').baseSha")" = "${{ github.sha }}"
-          test "$(node -p "require('./$metadata').version")" = "$TARGET_VERSION"
-          release_commit="$(node -p "require('./$metadata').releaseCommit")"
-          release_tree="$(node -p "require('./$metadata').releaseTree")"
-          package_file="$(node -p "require('./$metadata').packageFile")"
-          package_sha="$(node -p "require('./$metadata').packageSha256")"
-          test "$package_sha" = "$BUILD_PACKAGE_SHA"
-          test "$(sha256sum "release-artifact/$package_file" | awk '{print $1}')" = "$BUILD_PACKAGE_SHA"
+          test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT"
+          test "$(node -p "require('./package.json').name")" = "@agwab/pi-workflow"
+          test "$(node -p "require('./package.json').version")" = "$TARGET_VERSION"
+          remote_main="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
+          remote_tag="$(git ls-remote origin "refs/tags/v$TARGET_VERSION" | awk '{print $1}')"
+          test "$remote_main" = "$RELEASE_COMMIT"
+          test "$remote_tag" = "$RELEASE_COMMIT"
 
-          git bundle verify release-artifact/release.bundle
-          git fetch release-artifact/release.bundle "refs/tags/v$TARGET_VERSION:refs/tags/release-candidate"
-          test "$(git rev-list -n 1 refs/tags/release-candidate)" = "$release_commit"
-          test "$(git rev-parse "$release_commit^{tree}")" = "$release_tree"
-          if [ "$release_commit" != "${{ github.sha }}" ]; then
-            test "$(git rev-parse "$release_commit^")" = "${{ github.sha }}"
+          expected_file="agwab-pi-workflow-$TARGET_VERSION.tgz"
+          package_path="$PWD/release-artifact/$expected_file"
+          test -f "$package_path"
+          test "$(find release-artifact -maxdepth 1 -type f -name '*.tgz' -print | wc -l | tr -d ' ')" = "1"
+          metadata=release-artifact/release-metadata.json
+          test "$(node -p "require('./$metadata').schema")" = "pi-workflow-release-metadata-v2"
+          test "$(node -p "require('./$metadata').name")" = "@agwab/pi-workflow"
+          test "$(node -p "require('./$metadata').version")" = "$TARGET_VERSION"
+          test "$(node -p "require('./$metadata').baseSha")" = "${{ github.sha }}"
+          test "$(node -p "require('./$metadata').releaseTree")" = "${{ needs.build.outputs.release-tree }}"
+          test "$(node -p "require('./$metadata').packageFile")" = "$expected_file"
+          expected_sha="$(node -p "require('./$metadata').packageSha256")"
+          actual_sha="$(sha256sum "$package_path" | awk '{print $1}')"
+          test "$expected_sha" = "$BUILD_PACKAGE_SHA"
+          test "$actual_sha" = "$BUILD_PACKAGE_SHA"
+
+          if tar -tzf "$package_path" | grep -Eq '(^/|(^|/)\.\.(/|$)|\\)'; then
+            echo "package contains an unsafe archive path" >&2
+            exit 1
+          fi
+          packed_name="$(tar -xOf "$package_path" package/package.json | node -p 'JSON.parse(require("node:fs").readFileSync(0, "utf8")).name')"
+          packed_version="$(tar -xOf "$package_path" package/package.json | node -p 'JSON.parse(require("node:fs").readFileSync(0, "utf8")).version')"
+          test "$packed_name" = "@agwab/pi-workflow"
+          test "$packed_version" = "$TARGET_VERSION"
+
+          integrity="$(npm view "@agwab/pi-workflow@$TARGET_VERSION" dist.integrity 2>/dev/null || true)"
+          if [ -n "$integrity" ]; then
+            export PACKAGE_PATH="$package_path" EXPECTED_INTEGRITY="$integrity"
+            node --input-type=commonjs --eval '
+            const crypto = require("node:crypto");
+            const fs = require("node:fs");
+            const actual = `sha512-${crypto.createHash("sha512").update(fs.readFileSync(process.env.PACKAGE_PATH)).digest("base64")}`;
+            if (actual !== process.env.EXPECTED_INTEGRITY) {
+              throw new Error(`published package integrity mismatch: expected ${process.env.EXPECTED_INTEGRITY}, got ${actual}`);
+            }
+            '
+            echo "@agwab/pi-workflow@$TARGET_VERSION already exists with identical integrity; skipping publish."
+          else
+            npm publish "$package_path" --access public --provenance --ignore-scripts
           fi
 
-          remote_main="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
-          test "$remote_main" = "${{ github.sha }}"
-
-          name="$(node -p "require('./$metadata').name")"
-          integrity="$(npm view "$name@$TARGET_VERSION" dist.integrity)"
-          export PACKAGE_PATH="release-artifact/$package_file" EXPECTED_INTEGRITY="$integrity"
-          node <<'NODE'
-          const crypto = require('node:crypto');
-          const fs = require('node:fs');
-          const actual = `sha512-${crypto.createHash('sha512').update(fs.readFileSync(process.env.PACKAGE_PATH)).digest('base64')}`;
-          if (actual !== process.env.EXPECTED_INTEGRITY) throw new Error('registry/package artifact integrity mismatch');
-          NODE
-          echo "release_commit=$release_commit" >> "$GITHUB_OUTPUT"
-
-      - name: Push the exact validated release commit and tag
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          TARGET_VERSION: ${{ needs.build.outputs.version }}
-          RELEASE_COMMIT: ${{ steps.verify.outputs.release_commit }}
-        run: |
-          set -euo pipefail
-          remote="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git push "$remote" "$RELEASE_COMMIT:refs/heads/main" "$RELEASE_COMMIT:refs/tags/v$TARGET_VERSION"
-
+  release:
+    needs: [build, source, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: none
+    steps:
       - name: Create GitHub release for the exact published commit
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_COMMIT: ${{ needs.source.outputs.release-commit }}
           TARGET_VERSION: ${{ needs.build.outputs.version }}
-          RELEASE_COMMIT: ${{ steps.verify.outputs.release_commit }}
         run: |
           set -euo pipefail
           if gh release view "v$TARGET_VERSION" >/dev/null 2>&1; then

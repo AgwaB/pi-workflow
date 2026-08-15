@@ -1176,7 +1176,7 @@
 		{
 			"name": "fail-fast flags on cancel pending siblings and interrupt running siblings distinctly",
 			"occurrence": 1,
-			"sha256": "ac16d9fea089c399244a33dd23d741ab63ee4e92c6c5cff8999019974726d9ed",
+			"sha256": "25d90f525448704f4ff889df1d415d9e5e36986a5a8f8903c120bc817192d6e9",
 			"domain": "core-runtime"
 		},
 		{
@@ -2886,7 +2886,7 @@
 		{
 			"name": "refresh interrupts timed-out running subagents and clears stale handles",
 			"occurrence": 1,
-			"sha256": "419c91b3af78554c4486ab458df9d4df450cb52f70f92601cebb6d6e4cf9e56e",
+			"sha256": "2f7746113cc916fd7fc4d09837236700191e2c02ed7bbcea6a29911e30c1fa9b",
 			"domain": "engine-store"
 		},
 		{
@@ -2958,7 +2958,7 @@
 		{
 			"name": "stopRun interrupts non-terminal tasks and best-effort cleans up backend handles",
 			"occurrence": 1,
-			"sha256": "084291de054b3a6e285e50a9fc3738f6a6a92dc50d93c613564a0f5051bf8c4c",
+			"sha256": "d7e117e8cc57c9753a8de35a6960d123f8d789bfdfe755e2ae902d72dd05bdc9",
 			"domain": "engine-store"
 		},
 		{
@@ -3018,13 +3018,13 @@
 		{
 			"name": "cleanupSubagentRun releases global live model worker cap keys",
 			"occurrence": 1,
-			"sha256": "737399985e52acc387d3d487934f3b5c729cfaa7a7b3e12db24ef76b64dd2c39",
+			"sha256": "8b8fbbbffcfab043939978f28d77bc5ed01d92110f706a3ca6c602aef4e3b779",
 			"domain": "engine-store"
 		},
 		{
 			"name": "fail-fast cleanup releases the global live model worker cap slot for other runs",
 			"occurrence": 1,
-			"sha256": "7a087fbb7fe9cf0329548895e93873c50be5378d7958973af285e49b48c1f549",
+			"sha256": "d477c1129724a5de1a15099aa1bb088133901c3b2c9b89cdae69dbff896919ac",
 			"domain": "engine-store"
 		},
 		{

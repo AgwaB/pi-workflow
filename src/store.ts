@@ -871,6 +871,31 @@ export async function writeJsonAtomic(
 	assertLeaseNotAborted(activeAbortSignal);
 }
 
+export async function syncFileAndDirectory(file: string): Promise<void> {
+	const fileHandle = await open(file, fsConstants.O_RDONLY);
+	try {
+		await fileHandle.sync();
+	} finally {
+		await fileHandle.close();
+	}
+	const directoryHandle = await open(dirname(file), fsConstants.O_RDONLY);
+	try {
+		await directoryHandle.sync();
+	} finally {
+		await directoryHandle.close();
+	}
+}
+
+export async function writeJsonAtomicDurable(
+	file: string,
+	value: unknown,
+	abortSignal?: AbortSignal,
+	commitFence?: () => void | Promise<void>,
+): Promise<void> {
+	await writeJsonAtomic(file, value, abortSignal, commitFence);
+	await syncFileAndDirectory(file);
+}
+
 export async function writeJsonExclusive(
 	file: string,
 	value: unknown,
@@ -1775,6 +1800,15 @@ function scheduleIndexUpdate(cwd: string, runId: string): void {
 	);
 	timer.unref?.();
 	pendingIndexUpdates.set(key, { cwd, runIds, timer });
+}
+
+export async function writeRunRecordDurable(
+	cwd: string,
+	run: WorkflowRunRecord,
+	abortSignal?: AbortSignal,
+): Promise<void> {
+	await writeRunRecord(cwd, run, abortSignal);
+	await syncFileAndDirectory(workflowRunPath(cwd, run.runId));
 }
 
 export async function flushPendingIndexUpdatesForTests(): Promise<number> {

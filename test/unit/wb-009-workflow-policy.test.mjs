@@ -129,13 +129,29 @@ test("WB-009 CI and release checkout never persist credentials", async () => {
 	}
 });
 
-test("WB-009 privileged jobs consume the exact artifact without install or build lifecycle", async () => {
+test("WB-009 privileged jobs separate source promotion, npm OIDC, and release authority", async () => {
 	const publishWorkflow = await workflow("publish.yml");
+	const sourceJob = publishWorkflow
+		.split("\n  source:\n")[1]
+		.split("\n  publish:\n")[0];
 	const publishJob = publishWorkflow
 		.split("\n  publish:\n")[1]
 		.split("\n  release:\n")[0];
 	const releaseJob = publishWorkflow.split("\n  release:\n")[1];
+
+	assert.match(sourceJob, /contents: write/);
+	assert.match(sourceJob, /id-token: none/);
+	assert.match(sourceJob, /git write-tree/);
+	assert.match(sourceJob, /git push --atomic/);
+	assert.match(sourceJob, /test "\$remote_main" = "\$RELEASE_COMMIT"/);
+	assert.match(sourceJob, /test "\$remote_tag" = "\$RELEASE_COMMIT"/);
+	assert.doesNotMatch(
+		sourceJob,
+		/npm (?:ci|install)|npm run|npm pack|npm publish|release-metadata/,
+	);
+
 	assert.match(publishJob, /environment: npm-publish/);
+	assert.match(publishJob, /contents: read/);
 	assert.match(publishJob, /id-token: write/);
 	assert.match(publishJob, /actions\/download-artifact@[0-9a-f]{40}/);
 	assert.match(
@@ -144,37 +160,33 @@ test("WB-009 privileged jobs consume the exact artifact without install or build
 	);
 	assert.match(publishJob, /test "\$expected_sha" = "\$BUILD_PACKAGE_SHA"/);
 	assert.match(publishJob, /test "\$actual_sha" = "\$BUILD_PACKAGE_SHA"/);
-	assert.doesNotMatch(publishJob, /npm (?:ci|install)|npm run|npm pack/);
+	assert.doesNotMatch(publishJob, /npm (?:ci|install)|npm run|npm pack|git push/);
+	assert.match(publishJob, /expected_file="agwab-pi-workflow-\$TARGET_VERSION\.tgz"/);
 	assert.match(
 		publishJob,
-		/package_path="\$PWD\/release-artifact\/\$package_file"/,
+		/package_path="\$PWD\/release-artifact\/\$expected_file"/,
 	);
 	assert.match(publishJob, /test -f "\$package_path"/);
+	assert.match(publishJob, /test "[^\n]+packageFile[^\n]+" = "\$expected_file"/);
+	assert.match(publishJob, /tar -tzf "\$package_path"/);
 	assert.match(publishJob, /npm publish "\$package_path"/);
 	assert.match(publishJob, /--ignore-scripts/);
 
+	assert.match(releaseJob, /needs: \[build, source, publish\]/);
 	assert.match(releaseJob, /contents: write/);
 	assert.match(releaseJob, /id-token: none/);
 	assert.doesNotMatch(
 		releaseJob,
-		/npm (?:ci|install)|npm run|npm pack|npm publish/,
+		/npm (?:ci|install)|npm run|npm pack|npm publish|git push/,
 	);
-	assert.match(releaseJob, /git bundle verify/);
-	assert.match(
-		releaseJob,
-		/BUILD_PACKAGE_SHA: \$\{\{ needs\.build\.outputs\.package-sha \}\}/,
-	);
-	assert.match(releaseJob, /test "\$package_sha" = "\$BUILD_PACKAGE_SHA"/);
-	assert.match(releaseJob, /sha256sum[^\n]+BUILD_PACKAGE_SHA/);
-	assert.match(releaseJob, /remote_main[^]*github\.sha/);
-	assert.match(releaseJob, /registry\/package artifact integrity mismatch/);
+	assert.match(releaseJob, /gh release create/);
 });
 
 test("WB-009 read-only build creates and hashes the only publishable tarball", async () => {
 	const publishWorkflow = await workflow("publish.yml");
 	const buildJob = publishWorkflow
 		.split("\n  build:\n")[1]
-		.split("\n  publish:\n")[0];
+		.split("\n  source:\n")[0];
 	assert.match(buildJob, /permissions:\n\s+contents: read/);
 	assert.doesNotMatch(buildJob, /id-token: write|contents: write/);
 	assert.match(buildJob, /npm ci --legacy-peer-deps --ignore-scripts/);
@@ -185,9 +197,15 @@ test("WB-009 read-only build creates and hashes the only publishable tarball", a
 	);
 	assert.match(
 		buildJob,
+		/release-tree: \$\{\{ steps\.package\.outputs\.release-tree \}\}/,
+	);
+	assert.match(
+		buildJob,
 		/id: package[^]*echo "package-sha=\$package_sha" >> "\$GITHUB_OUTPUT"/,
 	);
+	assert.match(buildJob, /release_tree="\$\(git write-tree\)"/);
+	assert.match(buildJob, /pi-workflow-release-metadata-v2/);
 	assert.match(buildJob, /packageSha256/);
-	assert.match(buildJob, /release\.bundle/);
+	assert.match(buildJob, /agwab-pi-workflow-\$\{\{ steps\.version\.outputs\.version \}\}\.tgz/);
 	assert.match(buildJob, /actions\/upload-artifact@[0-9a-f]{40}/);
 });

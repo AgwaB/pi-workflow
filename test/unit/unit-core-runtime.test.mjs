@@ -348,7 +348,17 @@ test("fail-fast flags on cancel pending siblings and interrupt running siblings 
 			},
 			async interruptSubagent(options) {
 				interrupts.push(options);
-				return {};
+				return {
+					status: "already-terminal",
+					runId: options.runId,
+					interruptedAttempts: [],
+					unsupportedAttempts: [],
+					record: {
+						attempts: [
+							{ attemptId: options.attemptId, status: "cancelled" },
+						],
+					},
+				};
 			},
 		});
 		const { run } = await createFailFastPolicyRun(cwd, {

@@ -673,7 +673,8 @@ function spawnDetachedSupervisor(
 	try {
 		const child = spawn(process.execPath, [cliPath, "supervise", runId], {
 			cwd,
-			detached: true,
+			detached:
+				process.env.PI_WORKFLOW_CONTAIN_DETACHED_SUPERVISOR !== "1",
 			stdio: ["ignore", fd, fd],
 		});
 		child.unref();

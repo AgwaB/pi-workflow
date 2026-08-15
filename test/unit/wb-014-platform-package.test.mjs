@@ -99,11 +99,15 @@ test("publish workflow passes npm an unambiguous tarball path", () => {
 	const publish = readRoot(".github/workflows/publish.yml");
 	assert.doesNotMatch(
 		publish,
-		/npm publish\s+"release-artifact\/\$package_file"/,
+		/npm publish\s+"release-artifact\/\$(?:package_file|expected_file)"/,
 	);
 	assert.match(
 		publish,
-		/package_path="\$PWD\/release-artifact\/\$package_file"/,
+		/expected_file="agwab-pi-workflow-\$TARGET_VERSION\.tgz"/,
+	);
+	assert.match(
+		publish,
+		/package_path="\$PWD\/release-artifact\/\$expected_file"/,
 	);
 	assert.match(publish, /test -f "\$package_path"/);
 	assert.match(
