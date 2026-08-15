@@ -320,8 +320,8 @@ jobs:
           TARGET_VERSION: ${{ needs.build.outputs.version }}
         run: |
           set -euo pipefail
-          if gh release view "v$TARGET_VERSION" >/dev/null 2>&1; then
-            test "$(gh release view "v$TARGET_VERSION" --json targetCommitish --jq .targetCommitish)" = "$RELEASE_COMMIT"
+          if gh release view "v$TARGET_VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            test "$(gh release view "v$TARGET_VERSION" --repo "$GITHUB_REPOSITORY" --json targetCommitish --jq .targetCommitish)" = "$RELEASE_COMMIT"
           else
-            gh release create "v$TARGET_VERSION" --target "$RELEASE_COMMIT" --title "v$TARGET_VERSION" --generate-notes
+            gh release create "v$TARGET_VERSION" --repo "$GITHUB_REPOSITORY" --target "$RELEASE_COMMIT" --title "v$TARGET_VERSION" --generate-notes
           fi

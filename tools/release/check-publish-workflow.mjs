@@ -86,6 +86,16 @@ const negativeFixtures = [
 			candidate.jobs.release.needs = ["build", "source"];
 		},
 	],
+	[
+		"GitHub release commands must be explicitly repository-scoped",
+		(candidate) => {
+			step(candidate.jobs.release, "Create GitHub release for the exact published commit").run =
+				step(candidate.jobs.release, "Create GitHub release for the exact published commit").run.replaceAll(
+					' --repo "$GITHUB_REPOSITORY"',
+					"",
+				);
+		},
+	],
 ];
 
 for (const [name, mutate] of negativeFixtures) {
@@ -187,6 +197,21 @@ function validateWorkflow(candidate) {
 		/npm publish "\$package_path" --access public --provenance --ignore-scripts/,
 	);
 	assert.doesNotMatch(publishRun, /package_file=|\$package_file|\.\.\//);
+
+	const releaseRun = step(
+		release,
+		"Create GitHub release for the exact published commit",
+	).run;
+	const releaseCommands = [
+		...releaseRun.matchAll(/\bgh release (?:view|create)\b[^\n]*/g),
+	].map((match) => match[0]);
+	assert.equal(releaseCommands.length, 3);
+	for (const command of releaseCommands)
+		assert.match(command, /--repo "\$GITHUB_REPOSITORY"/);
+	assert.match(
+		releaseRun,
+		/gh release create "v\$TARGET_VERSION" --repo "\$GITHUB_REPOSITORY" --target "\$RELEASE_COMMIT"/,
+	);
 
 	assert.doesNotMatch(jobText(build), /\bnpm publish\b|\bgit push\b/);
 	assert.doesNotMatch(jobText(source), /\bnpm publish\b/);
