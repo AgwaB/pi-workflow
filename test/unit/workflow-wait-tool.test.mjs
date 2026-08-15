@@ -926,6 +926,17 @@ test("feedback watcher single-flights delivery and retries a failed send", async
 		await eventually(async () => {
 			assert.equal((await feedbackReceipts(cwd, run.runId)).length, 1);
 		});
+		controller.abort();
+		const reclaimed = await eventually(async () => {
+			const lease = await acquireRunFileLease(
+				cwd,
+				run.runId,
+				"feedback-presentation",
+			);
+			assert.ok(lease);
+			return lease;
+		}, 2_000);
+		await reclaimed.release();
 	} finally {
 		controller.abort();
 		setWorkflowFeedbackPollMsForTests(undefined);
@@ -1325,6 +1336,16 @@ test("workflow wait timeout preserves its error and hands delivery back after re
 		setRunLeaseTestHooksForTests(undefined);
 		await eventually(() => assert.equal(sends, 1), 2_000);
 		assert.equal((await feedbackReceipts(cwd, base.runId)).length, 1);
+		const reclaimed = await eventually(async () => {
+			const lease = await acquireRunFileLease(
+				cwd,
+				base.runId,
+				"feedback-presentation",
+			);
+			assert.ok(lease);
+			return lease;
+		}, 2_000);
+		await reclaimed.release();
 	} finally {
 		setRunLeaseTestHooksForTests(undefined);
 		setWorkflowFeedbackPollMsForTests(undefined);

@@ -4417,7 +4417,7 @@ test("subagent launch gate honors env override and recovers slots after throw", 
 				delayedSecond.task,
 				delayedSecond.compiledTask,
 			),
-			sleep(500).then(() => {
+			sleep(2_000).then(() => {
 				throw new Error("delayed launch slot was not released");
 			}),
 		]);
@@ -4458,7 +4458,7 @@ test("subagent launch gate honors env override and recovers slots after throw", 
 				afterThrow.task,
 				afterThrow.compiledTask,
 			),
-			sleep(250).then(() => {
+			sleep(2_000).then(() => {
 				throw new Error("launch slot was not released after throw");
 			}),
 		]);

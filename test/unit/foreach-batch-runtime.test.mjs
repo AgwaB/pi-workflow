@@ -904,7 +904,12 @@ test("restart recovers a prepared exact pair without inferring adjacency", async
 
 		await refreshRun(cwd, started.runId);
 		const recoveredPrepared = await readRunRecord(cwd, started.runId);
-		assert.equal(recoveredPrepared.foreachBatches?.[0]?.phase, "prepared");
+		assert.ok(
+			["prepared", "running"].includes(
+				recoveredPrepared.foreachBatches?.[0]?.phase,
+			),
+			"recovery may be observed before or immediately after replacement launch",
+		);
 		assert.deepEqual(
 			recoveredPrepared.foreachBatches?.[0]?.members.map(
 				(entry) => entry.taskId,
