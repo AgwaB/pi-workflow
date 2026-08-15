@@ -200,8 +200,18 @@ function installFakeSubagentApi(
 				],
 			};
 		},
-		async interruptSubagent() {
-			return {};
+		async interruptSubagent(options) {
+			return {
+				status: "already-terminal",
+				runId: options.runId,
+				interruptedAttempts: [],
+				unsupportedAttempts: [],
+				record: {
+					attempts: [
+						{ attemptId: options.attemptId, status: "cancelled" },
+					],
+				},
+			};
 		},
 	});
 	return calls;

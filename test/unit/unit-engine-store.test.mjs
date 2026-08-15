@@ -3194,7 +3194,17 @@ test("refresh interrupts timed-out running subagents and clears stale handles", 
 			},
 			async interruptSubagent(options) {
 				interrupts.push(options);
-				return {};
+				return {
+					status: "already-terminal",
+					runId: options.runId,
+					interruptedAttempts: [],
+					unsupportedAttempts: [],
+					record: {
+						attempts: [
+							{ attemptId: options.attemptId, status: "cancelled" },
+						],
+					},
+				};
 			},
 		});
 		await writeRunRecord(cwd, run);
@@ -3899,7 +3909,17 @@ test("stopRun interrupts non-terminal tasks and best-effort cleans up backend ha
 			},
 			async interruptSubagent(options) {
 				interrupts.push(options);
-				return {};
+				return {
+					status: "already-terminal",
+					runId: options.runId,
+					interruptedAttempts: [],
+					unsupportedAttempts: [],
+					record: {
+						attempts: [
+							{ attemptId: options.attemptId, status: "cancelled" },
+						],
+					},
+				};
 			},
 		});
 		try {
@@ -4788,9 +4808,19 @@ test("cleanupSubagentRun releases global live model worker cap keys", async () =
 					status: "running",
 				};
 			},
-			async interruptSubagent() {
+			async interruptSubagent(options) {
 				interrupts += 1;
-				return {};
+				return {
+					status: "already-terminal",
+					runId: options.runId,
+					interruptedAttempts: [],
+					unsupportedAttempts: [],
+					record: {
+						attempts: [
+							{ attemptId: options.attemptId, status: "cancelled" },
+						],
+					},
+				};
 			},
 		});
 		const first = makeSubagentLaunchFixture(cwd, "cap_cleanup_first");
@@ -4858,7 +4888,17 @@ test("fail-fast cleanup releases the global live model worker cap slot for other
 			},
 			async interruptSubagent(options) {
 				interrupts.push(options);
-				return {};
+				return {
+					status: "already-terminal",
+					runId: options.runId,
+					interruptedAttempts: [],
+					unsupportedAttempts: [],
+					record: {
+						attempts: [
+							{ attemptId: options.attemptId, status: "cancelled" },
+						],
+					},
+				};
 			},
 		});
 

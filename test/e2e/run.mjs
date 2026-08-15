@@ -148,6 +148,8 @@ JSON
         npm init -y >/dev/null
         peer_flag="--leg""acy-peer-deps"
         npm install "$peer_flag" --ignore-scripts "./$tarball" >/dev/null
+        node --input-type=module -e 'import { createRequire } from "node:module"; import { pathToFileURL } from "node:url"; const require = createRequire(import.meta.resolve("@agwab/pi-workflow/package.json")); const pkg = require("@agwab/pi-subagent/package.json"); const api = await import(pathToFileURL(require.resolve("@agwab/pi-subagent/api")).href); if (!/^0\\.5\\.\\d+$/.test(pkg.version)) throw new Error("unexpected bundled pi-subagent version: " + pkg.version); for (const name of ["createDurableLaunchBarrierV2", "durableLaunchBarrierDigest", "waitForDurableLaunchBarrierV2Ready", "resolveDurableLaunchBarrierV2Release", "revokeDurableLaunchBarrierV2", "readDurableLaunchBarrierV2State", "waitForDurableLaunchBarrierV2Ack"]) if (typeof api[name] !== "function") throw new Error("missing bundled pi-subagent API: " + name);'
+        node ${JSON.stringify(join(root, "test", "e2e", "cases", "packed-durable-barrier-v2.mjs"))} "$tmp/node_modules/@agwab/pi-workflow" "$tmp"
         node node_modules/@agwab/pi-workflow/src/cli.mjs --help >/dev/null
         ./node_modules/.bin/pi-workflow --help >/dev/null
         PI_WORKFLOW_ROLE=supervisor ./node_modules/.bin/pi-workflow supervise --all --poll-ms 250 --max-runtime-ms 1000 >/dev/null

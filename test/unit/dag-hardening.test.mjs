@@ -1002,9 +1002,19 @@ test("stopping parent cascades to active nested dynamic child before parent fina
 			async reconcileSubagentRun() {
 				return {};
 			},
-			async interruptSubagent() {
+			async interruptSubagent(options) {
 				interrupts += 1;
-				return {};
+				return {
+					status: "already-terminal",
+					runId: options.runId,
+					interruptedAttempts: [],
+					unsupportedAttempts: [],
+					record: {
+						attempts: [
+							{ attemptId: options.attemptId, status: "cancelled" },
+						],
+					},
+				};
 			},
 		});
 		const workflowDir = join(cwd, "workflows", "bundle");
@@ -1209,9 +1219,19 @@ test("successful fail-fast interruption releases the live model worker slot imme
 			async reconcileSubagentRun() {
 				return {};
 			},
-			async interruptSubagent() {
+			async interruptSubagent(options) {
 				interrupts += 1;
-				return {};
+				return {
+					status: "already-terminal",
+					runId: options.runId,
+					interruptedAttempts: [],
+					unsupportedAttempts: [],
+					record: {
+						attempts: [
+							{ attemptId: options.attemptId, status: "cancelled" },
+						],
+					},
+				};
 			},
 		});
 		const spec = workflowSpec("unit-scout", {

@@ -61,6 +61,101 @@ test("WB-004 surfaces interrupt rejection and preserves recoverable worker state
 	assert.equal(task.backendHandle.runId, "child-run");
 });
 
+test("WB-004 rejects unsupported and mismatched exact-attempt interruption results", async (t) => {
+	t.after(() => setSubagentApiForTests(undefined));
+	const task = runningTask();
+	setSubagentApiForTests({
+		interruptSubagent: async () => ({
+			status: "unsupported",
+			runId: "child-run",
+			interruptedAttempts: [],
+			unsupportedAttempts: ["child-attempt"],
+			record: null,
+		}),
+	});
+	await assert.rejects(
+		interruptSubagentTask(task, "unsupported cancellation"),
+		/not acknowledged.*unsupported/,
+	);
+	assert.equal(task.status, "running");
+	assert.equal(task.backendHandle.attemptId, "child-attempt");
+
+	setSubagentApiForTests({
+		interruptSubagent: async () => ({
+			status: "interrupt-requested",
+			runId: "child-run",
+			interruptedAttempts: ["other-attempt"],
+			unsupportedAttempts: [],
+			record: null,
+		}),
+	});
+	await assert.rejects(
+		interruptSubagentTask(task, "mismatched cancellation"),
+		/acknowledged a different attempt/,
+	);
+
+	setSubagentApiForTests({
+		interruptSubagent: async () => ({
+			status: "already-terminal",
+			runId: "other-run",
+			interruptedAttempts: [],
+			unsupportedAttempts: [],
+			record: {
+				attempts: [
+					{ attemptId: "child-attempt", status: "cancelled" },
+				],
+			},
+		}),
+	});
+	await assert.rejects(
+		interruptSubagentTask(task, "wrong run cancellation"),
+		/result run other-run does not match child-run/,
+	);
+});
+
+test("WB-004 waits for the exact interrupted attempt to become terminal", async (t) => {
+	t.after(() => setSubagentApiForTests(undefined));
+	const task = runningTask();
+	let statusCalls = 0;
+	setSubagentApiForTests({
+		interruptSubagent: async () => ({
+			status: "interrupt-requested",
+			runId: "child-run",
+			interruptedAttempts: ["child-attempt"],
+			unsupportedAttempts: [],
+			record: {
+				attempts: [{ attemptId: "child-attempt", status: "running" }],
+			},
+		}),
+		getSubagentStatus: async () => {
+			statusCalls += 1;
+			return {
+				runId: "child-run",
+				attemptId: "child-attempt",
+				backend: "headless",
+				status: statusCalls < 2 ? "running" : "cancelled",
+				failureKind: statusCalls < 2 ? null : "user_cancelled",
+				startedAt: new Date().toISOString(),
+				completedAt: statusCalls < 2 ? null : new Date().toISOString(),
+				logs: [],
+				attempts: [
+					{
+						attemptId: "child-attempt",
+						status: statusCalls < 2 ? "running" : "cancelled",
+					},
+				],
+			};
+		},
+	});
+	const acknowledgement = await interruptSubagentTask(
+		task,
+		"delayed exact cancellation",
+	);
+	assert.equal(acknowledgement.attemptId, "child-attempt");
+	assert.equal(acknowledgement.status, "cancelled");
+	assert.equal(statusCalls, 2);
+});
+
 test("WB-004 cleanup records cancellation failure and later acknowledgement", async (t) => {
 	t.after(() => setSubagentApiForTests(undefined));
 	const task = runningTask();
@@ -76,7 +171,19 @@ test("WB-004 cleanup records cancellation failure and later acknowledgement", as
 	assert.match(task.lastMessage, /worker still alive/);
 	assert.equal(task.backendHandle.runId, "child-run");
 
-	setSubagentApiForTests({ interruptSubagent: async () => ({ acknowledged: true }) });
+	setSubagentApiForTests({
+		interruptSubagent: async () => ({
+			status: "already-terminal",
+			runId: "child-run",
+			interruptedAttempts: [],
+			unsupportedAttempts: [],
+			record: {
+				attempts: [
+					{ attemptId: "child-attempt", status: "cancelled" },
+				],
+			},
+		}),
+	});
 	await cleanupSubagentRun("/tmp/project", run);
 	assert.equal(task.status, "running");
 	assert.equal(task.statusDetail, "cancellation_acknowledged");

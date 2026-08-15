@@ -775,12 +775,24 @@ Scope order is agent frontmatter fallback < `defaults.tools` < stage `tools`: th
 
 ### Durable launch and batch controls
 
-Provider-capable launches use the general two-phase durable launch barrier from
-`@agwab/pi-subagent`. The worker writes a ready receipt and remains paused before
-Pi/provider initialization. The workflow then crash-durably commits the consumed
-launch authority and its release payload before releasing the worker, and records
-the worker acknowledgement in the task's attempt-scoped barrier history. Startup
-fails closed when an installed non-test backend lacks this API.
+Provider-capable launches require the bundled runtime's opt-in
+`durable-launch-barrier-v2` API; the workflow does not silently downgrade to the
+weaker v1 release protocol. The worker writes READY and remains paused before
+Pi/provider initialization. An external grant digest is bound through the
+descriptor, worker execution plan, READY receipt, and immutable gate decision.
+The workflow durably records the provisional backend handle and execution-plan
+digest, then commits consumed launch authority and the release payload before
+competing for one exclusive `released`-or-`revoked` decision. A revocation that
+wins this decision prevents worker execution. A release that wins remains visible
+as `release_won_cancellation_pending` during later cancellation.
+
+Workflow stop, lease loss, timeout, and fail-fast cleanup require both an explicit
+interrupt result for the exact backend attempt and an observed terminal status for
+that same attempt. `unsupported`, `not-found`, mismatched-attempt, and timeout
+results leave cancellation pending and retain the durable stop intent and backend
+handle. Crash recovery validates READY/decision/ACK receipts and never respawns the
+attempt; incomplete stale barriers are revoked and reaped fail-closed. Startup
+fails before spawn when v2 is unavailable or any bound receipt drifts.
 
 Launch-bootstrap provenance also binds the canonical workflow state-root identity
 (device, inode, owner, mode, canonical path, and private persisted nonce) and the

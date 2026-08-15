@@ -937,34 +937,62 @@ export interface WorkflowLaunchAuthorityHistory {
 }
 
 export interface WorkflowDurableLaunchBarrierDescriptor {
-	schema: "pi-subagent-durable-launch-barrier-v1";
+	schema: "pi-subagent-durable-launch-barrier-v2";
 	identitySha256: string;
 	directory: string;
 	readyPath: string;
-	releasePath: string;
+	decisionPath: string;
 	ackPath: string;
 	challenge: string;
+	decisionNonce: string;
 	subjectSha256: string;
+	/** External one-run authority digest bound into the pi-subagent worker plan. */
+	authorityBindingSha256?: string;
 	directoryIdentity: { device: number; inode: number; uid?: number };
 	timeoutMs: number;
 	pollIntervalMs: number;
 }
 
+export interface WorkflowDurableLaunchBarrierCancellationRecord {
+	cancellationId: string;
+	requestedAt: string;
+	reasonSha256: string;
+	decision: "revoked" | "released";
+	interruptStatus?: "interrupt-requested" | "already-terminal";
+	terminalAttemptId?: string;
+	terminalStatus?: "cancelled" | "completed" | "failed";
+	terminalObservedAt?: string;
+}
+
 export interface WorkflowDurableLaunchBarrierRecord {
 	attemptKey: string;
 	launchAuthoritySha256: string;
+	/** External authority digest expected in descriptor, READY, and decision. */
+	authorityBindingSha256?: string;
 	descriptor: WorkflowDurableLaunchBarrierDescriptor;
-	phase: "created" | "ready" | "consumed" | "released" | "acknowledged";
+	phase:
+		| "created"
+		| "ready"
+		| "consumed"
+		| "released"
+		| "acknowledged"
+		| "revoked"
+		| "release_won_cancellation_pending"
+		| "cancellation_acknowledged";
 	readySha256?: string;
-	releaseSha256?: string;
+	launchPayloadSha256?: string;
+	executionPlanSha256?: string;
+	decisionSha256?: string;
 	ackSha256?: string;
 	backendRunId?: string;
 	backendAttemptId?: string;
 	releasePayloadSha256?: string;
+	releaseWinner?: boolean;
+	cancellation?: WorkflowDurableLaunchBarrierCancellationRecord;
 }
 
 export interface WorkflowDurableLaunchBarrierHistory {
-	version: 1;
+	version: 2;
 	records: WorkflowDurableLaunchBarrierRecord[];
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "@agwab/pi-workflow",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "Workflow orchestration for Pi subagents.",
   "private": false,
   "type": "module",
@@ -44,8 +44,9 @@
     "build": "rm -rf dist && tsc -p tsconfig.json --outDir dist --noEmit false",
     "typecheck": "tsc --noEmit",
     "check:scripts": "node tools/release/check-scripts.mjs",
+    "check:release-workflow": "node tools/release/check-publish-workflow.mjs",
     "check:public-surface": "node tools/release/check-public-surface.mjs",
-    "validate": "npm run check:scripts && npm run check:public-surface && npm run typecheck && npm run test:unit",
+    "validate": "npm run check:scripts && npm run check:release-workflow && npm run check:public-surface && npm run typecheck && npm run test:unit",
     "test": "npm run test:unit",
     "test:build": "rm -rf .tmp/unit && tsc -p tsconfig.json --outDir .tmp/unit --noEmit false",
     "test:unit": "npm run build && npm run test:build && node --test test/unit/*.test.mjs",
@@ -71,13 +72,14 @@
     "@earendil-works/pi-ai": "^0.78.0",
     "@earendil-works/pi-coding-agent": "*",
     "@types/node": "^24.0.0",
-    "typescript": "^5.0.0"
+    "typescript": "^5.0.0",
+    "yaml": "^2.9.0"
   },
   "engines": {
     "node": ">=22.19.0"
   },
   "dependencies": {
-    "@agwab/pi-subagent": "^0.4.8",
+    "@agwab/pi-subagent": "^0.5.1",
     "pi-web-access": "^0.10.7",
     "typebox": "^1.1.39"
   },
