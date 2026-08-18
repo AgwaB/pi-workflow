@@ -1878,7 +1878,7 @@
 		{
 			"name": "dynamic request hashes use persisted JSON shape",
 			"occurrence": 1,
-			"sha256": "0a3b14362b0247fa4bd9f0cccc571012861fadf1a8ba4cf3334cbef0e8354d2e",
+			"sha256": "c0dd0bfa04819ecff022a1c769f789cfa9930b054b3998b2b00fd0e85529585b",
 			"domain": "dynamic-runtime"
 		},
 		{
