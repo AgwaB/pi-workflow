@@ -947,6 +947,49 @@ test("dynamic request hashes use persisted JSON shape", () => {
 		hashDynamicRequest({ value: { toJSON: () => "json-shape" } }),
 		hashDynamicRequest({ value: "json-shape" }),
 	);
+
+	const emptyHash = hashDynamicRequest({ input: {} });
+	for (const key of ["__proto__", "constructor", "prototype"]) {
+		const input = Object.fromEntries([[key, { target: "A" }]]);
+		assert.notEqual(
+			hashDynamicRequest({ input }),
+			emptyHash,
+			`${key} must remain part of the request hash`,
+		);
+	}
+	const protoA = Object.fromEntries([["__proto__", { target: "A" }]]);
+	const protoB = Object.fromEntries([["__proto__", { target: "B" }]]);
+	assert.notEqual(
+		hashDynamicRequest({ input: protoA }),
+		hashDynamicRequest({ input: protoB }),
+	);
+	assert.notEqual(
+		hashDynamicRequest({ input: { nested: protoA } }),
+		hashDynamicRequest({ input: { nested: {} } }),
+	);
+
+	const value = {
+		z: [3, { b: true, a: "line\n" }],
+		a: { value: null, count: 1 },
+	};
+	const reordered = {
+		a: { count: 1, value: null },
+		z: [3, { a: "line\n", b: true }],
+	};
+	assert.equal(hashDynamicRequest(value), hashDynamicRequest(reordered));
+	assert.equal(
+		hashDynamicRequest(value),
+		"cc00a2ca22a5340143a675c573fc06f84f0025ad339f5fea07b825ca00f4bef9",
+	);
+	assert.notEqual(hashDynamicRequest([1, 2]), hashDynamicRequest([2, 1]));
+	assert.equal(
+		hashDynamicRequest({ value: -0 }),
+		hashDynamicRequest({ value: 0 }),
+	);
+	assert.equal(
+		hashDynamicRequest({ z: "한글😀", a: "quote\"\\\n" }),
+		hashDynamicRequest({ a: "quote\"\\\n", z: "한글😀" }),
+	);
 });
 
 test("dynamic-decision-v1 accepts strict executable decisions and canonicalizes hashes", () => {

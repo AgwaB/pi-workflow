@@ -261,21 +261,19 @@ function normalizePayload(
 }
 
 function stableStringify(value: unknown): string {
-	return JSON.stringify(toStableJson(value));
+	if (Array.isArray(value))
+		return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+	if (!isRecord(value)) return JSON.stringify(value) ?? "null";
+	// Emit entries directly so special keys such as "__proto__" remain data.
+	return `{${Object.keys(value)
+		.sort()
+		.map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`)
+		.join(",")}}`;
 }
 
 function toJsonNormalizedValue(value: unknown): unknown {
 	const text = JSON.stringify(value);
 	return text === undefined ? null : JSON.parse(text);
-}
-
-function toStableJson(value: unknown): unknown {
-	if (Array.isArray(value)) return value.map((item) => toStableJson(item));
-	if (!isRecord(value)) return value;
-	const result: Record<string, unknown> = {};
-	for (const key of Object.keys(value).sort())
-		result[key] = toStableJson(value[key]);
-	return result;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
