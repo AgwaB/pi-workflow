@@ -8286,6 +8286,238 @@ test("non artifact graph subagent launches do not request child sessions", async
 	}
 });
 
+const STRICT_LAYOUT_CONTENT = {
+	control: JSON.stringify({ schema: "stage-control-v1", digest: "ready" }),
+	analysis: "Detailed reasoning.",
+	refs: "[]",
+};
+
+function strictLayoutSection(name, content = STRICT_LAYOUT_CONTENT[name]) {
+	return `<${name}>${content}</${name}>`;
+}
+
+function strictLayoutRequiredNames(options) {
+	return [
+		"control",
+		...(options.analysisRequired ? ["analysis"] : []),
+		...(options.refsRequired ? ["refs"] : []),
+	];
+}
+
+function assertStrictLayoutDuplicate(raw, options, section, label) {
+	for (const [parserName, parser] of [
+		["direct", parseWorkflowOutput],
+		["bundle", parseWorkflowOutputForBundle],
+	]) {
+		const parsed = parser(raw, options);
+		assert.equal(
+			parsed.valid,
+			false,
+			`${label} (${parserName}) unexpectedly passed`,
+		);
+		const duplicate = parsed.issues.find(
+			(issue) =>
+				issue.code === "duplicate_section" && issue.section === section,
+		);
+		assert.ok(
+			duplicate,
+			`${label} (${parserName}) lost duplicate evidence: ${JSON.stringify(parsed.issues)}`,
+		);
+		assert.match(duplicate.message, /exactly once; found [2-9]\d*/);
+	}
+}
+
+test("workflow output parsers reject duplicate sections at every canonical boundary", () => {
+	const requirementCases = [
+		{ analysisRequired: true, refsRequired: true },
+		{ analysisRequired: false, refsRequired: true },
+		{ analysisRequired: true, refsRequired: false },
+		{ analysisRequired: false, refsRequired: false },
+	];
+	const separators = ["", "\n\n", "\nintervening prose\n"];
+
+	for (const options of requirementCases) {
+		const names = strictLayoutRequiredNames(options);
+		const canonical = names.map((name) => strictLayoutSection(name));
+		for (const duplicateName of ["control", "analysis", "refs"]) {
+			for (let boundary = 0; boundary <= canonical.length; boundary += 1) {
+				for (const separator of separators) {
+					const before = canonical.slice(0, boundary).join("\n");
+					const after = canonical.slice(boundary).join("\n");
+					const duplicateCount = names.includes(duplicateName) ? 1 : 2;
+					const duplicates = Array.from(
+						{ length: duplicateCount },
+						() => strictLayoutSection(duplicateName),
+					).join(separator);
+					const raw = [before, duplicates, after]
+						.filter((part) => part.length > 0)
+						.join(separator);
+					assertStrictLayoutDuplicate(
+						raw,
+						options,
+						duplicateName,
+						`${duplicateName} duplicate at boundary ${boundary} with ${JSON.stringify(separator)}`,
+					);
+				}
+			}
+		}
+	}
+});
+
+test("workflow output parsers retain duplicate evidence across missing-tail damage", () => {
+	const control = strictLayoutSection("control");
+	const analysis = strictLayoutSection("analysis");
+	const refs = strictLayoutSection("refs");
+	const cases = [
+		{
+			name: "duplicate analysis with refs omitted",
+			section: "analysis",
+			raw: [control, analysis, strictLayoutSection("analysis", "Second analysis.")].join(
+				"\n",
+			),
+		},
+		{
+			name: "duplicate control with the analysis close omitted",
+			section: "control",
+			raw: [
+				control,
+				strictLayoutSection(
+					"control",
+					JSON.stringify({ schema: "stage-control-v1", digest: "second" }),
+				),
+				"<analysis>Unclosed analysis.",
+				refs,
+			].join("\n"),
+		},
+		{
+			name: "duplicate analysis after literal open-only marker text",
+			section: "analysis",
+			raw: [
+				control,
+				strictLayoutSection(
+					"analysis",
+					"First analysis mentions <analysis> as literal text.",
+				),
+				strictLayoutSection("analysis", "Second analysis."),
+				refs,
+			].join("\n"),
+		},
+		{
+			name: "duplicate refs with the final close omitted",
+			section: "refs",
+			raw: [control, analysis, refs, "<refs>[]"].join("\n"),
+		},
+	];
+
+	for (const fixture of cases) {
+		assertStrictLayoutDuplicate(
+			fixture.raw,
+			{ analysisRequired: true, refsRequired: true },
+			fixture.section,
+			fixture.name,
+		);
+	}
+
+	for (const options of [
+		{ analysisRequired: true, refsRequired: true },
+		{ analysisRequired: false, refsRequired: true },
+		{ analysisRequired: true, refsRequired: false },
+		{ analysisRequired: false, refsRequired: false },
+	]) {
+		const requiredNames = strictLayoutRequiredNames(options);
+		const canonical = requiredNames
+			.map((name) => strictLayoutSection(name))
+			.join("\n");
+		for (const duplicateName of ["control", "analysis", "refs"]) {
+			const first = requiredNames.includes(duplicateName)
+				? ""
+				: strictLayoutSection(duplicateName);
+			const raw = [
+				canonical,
+				first,
+				`<${duplicateName}>${STRICT_LAYOUT_CONTENT[duplicateName]}`,
+			]
+				.filter((part) => part.length > 0)
+				.join("\n");
+			assertStrictLayoutDuplicate(
+				raw,
+				options,
+				duplicateName,
+				`${duplicateName} duplicate with an unclosed final block`,
+			);
+		}
+	}
+});
+
+test("workflow output parsers preserve literal markers and safe tail repairs", () => {
+	const requirementCases = [
+		{ analysisRequired: true, refsRequired: true },
+		{ analysisRequired: false, refsRequired: true },
+		{ analysisRequired: true, refsRequired: false },
+		{ analysisRequired: false, refsRequired: false },
+	];
+	for (const options of requirementCases) {
+		const raw = strictLayoutRequiredNames(options)
+			.map((name) => strictLayoutSection(name))
+			.join("\n");
+		for (const parser of [parseWorkflowOutput, parseWorkflowOutputForBundle]) {
+			const parsed = parser(raw, options);
+			assert.equal(parsed.valid, true, JSON.stringify(parsed.issues));
+		}
+	}
+
+	const markerCases = [
+		"Literal <analysis> opening marker remains data.",
+		"Literal </analysis> closing marker remains data.",
+		"Literal <analysis>balanced</analysis> marker pair remains data.",
+	];
+	for (const analysisText of markerCases) {
+		const raw = [
+			strictLayoutSection(
+				"control",
+				JSON.stringify({
+					schema: "stage-control-v1",
+					digest: "quoted markers",
+					note: "<control></control><analysis></analysis><refs></refs>",
+				}),
+			),
+			strictLayoutSection("analysis", analysisText),
+			strictLayoutSection(
+				"refs",
+				JSON.stringify([
+					{ note: "<control></control><analysis></analysis><refs></refs>" },
+				]),
+			),
+		].join("\n");
+		for (const parser of [parseWorkflowOutput, parseWorkflowOutputForBundle]) {
+			const parsed = parser(raw);
+			assert.equal(parsed.valid, true, JSON.stringify(parsed.issues));
+		}
+	}
+
+	const safeRepairs = [
+		[strictLayoutSection("control"), "<analysis>Unclosed analysis."].join(
+			"\n",
+		),
+		[strictLayoutSection("control"), strictLayoutSection("analysis")].join(
+			"\n",
+		),
+		[
+			strictLayoutSection("control"),
+			"<analysis>Analysis missing its close.",
+			strictLayoutSection("refs"),
+		].join("\n"),
+	];
+	for (const raw of safeRepairs) {
+		const parsed = parseWorkflowOutputForBundle(raw);
+		assert.equal(parsed.valid, true, JSON.stringify(parsed.issues));
+		assert.equal(
+			parsed.issues.some((issue) => issue.code === "duplicate_section"),
+			false,
+		);
+	}
+});
+
 test("workflow output parser accepts canonical control analysis refs sections", () => {
 	const raw = [
 		"<control>",
