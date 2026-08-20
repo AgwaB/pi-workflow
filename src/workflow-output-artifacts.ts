@@ -200,6 +200,30 @@ interface SectionRequirements {
 	refsMinItems: number;
 }
 
+interface SectionObservation {
+	name: WorkflowOutputSectionName;
+	start: number;
+	contentStart: number;
+	contentEnd: number;
+	end?: number;
+}
+
+interface TextRange {
+	start: number;
+	end: number;
+}
+
+interface SectionLayoutScan {
+	sections: SectionMatch[];
+	observations: SectionObservation[];
+	duplicateNames: ReadonlySet<WorkflowOutputSectionName>;
+	duplicateCounts: ReadonlyMap<WorkflowOutputSectionName, number>;
+	outsideRanges: TextRange[];
+	complete: boolean;
+	repairEligible: boolean;
+	hasExtraProtocolBlocks: boolean;
+}
+
 export function parseWorkflowOutput(
 	raw: string,
 	options: ParseWorkflowOutputOptions = {},
@@ -208,22 +232,22 @@ export function parseWorkflowOutput(
 	const issues: WorkflowOutputIssue[] = [];
 	const repairs: WorkflowOutputRepair[] = [];
 	const requirements = sectionRequirements(options);
-	const sections = collectSections(protocolRaw, requirements);
-	validateSectionLayout(protocolRaw, sections, issues, requirements);
+	const layout = scanSectionLayout(protocolRaw, requirements);
+	validateSectionLayout(layout, issues, requirements);
 
 	const control = parseControlSection(
-		sectionText(sections, SECTION_CONTROL),
+		sectionText(layout.sections, SECTION_CONTROL),
 		issues,
 		repairs,
 		options,
 	);
 	const analysis = parseAnalysisSection(
-		sectionText(sections, SECTION_ANALYSIS),
+		sectionText(layout.sections, SECTION_ANALYSIS),
 		issues,
 		requirements,
 	);
 	const refs = parseRefsSection(
-		sectionText(sections, SECTION_REFS),
+		sectionText(layout.sections, SECTION_REFS),
 		issues,
 		requirements,
 	);
@@ -245,7 +269,7 @@ export function parseWorkflowOutputForBundle(
 ): ParsedWorkflowOutput {
 	const parsed = parseWorkflowOutput(raw, options);
 	if (parsed.valid) return parsed;
-	return parseSanitizedWorkflowOutput(raw, options) ?? parsed;
+	return parseSanitizedWorkflowOutput(parsed.raw, options) ?? parsed;
 }
 
 /** Validate a candidate bundle fully in memory without writing task artifacts. */
@@ -405,55 +429,113 @@ function normalizedRefsMinItems(value: number | undefined): number {
 	return Number.isInteger(value) && value > 0 ? value : 0;
 }
 
-function collectSections(
+function scanSectionLayout(
 	raw: string,
 	requirements: SectionRequirements,
-): SectionMatch[] {
-	const sections: SectionMatch[] = [];
+): SectionLayoutScan {
+	const observations = collectSectionObservations(raw, requirements);
+	const sections = observations.flatMap((observation): SectionMatch[] => {
+		if (observation.end === undefined) return [];
+		return [
+			{
+				name: observation.name,
+				content: raw
+					.slice(observation.contentStart, observation.contentEnd)
+					.trim(),
+				start: observation.start,
+				end: observation.end,
+			},
+		];
+	});
+	const expected = requiredSectionOrder(requirements);
+	const complete =
+		sections.length === expected.length &&
+		sections.every((section, index) => section.name === expected[index]);
+	const { duplicateNames, duplicateCounts, hasExtraProtocolBlocks } =
+		scanStructuralSectionOpenings(raw, observations, requirements);
+	return {
+		sections,
+		observations,
+		duplicateNames,
+		duplicateCounts,
+		outsideRanges: collectOutsideTextRanges(raw, sections),
+		complete,
+		repairEligible:
+			!complete && duplicateNames.size === 0 && !hasExtraProtocolBlocks,
+		hasExtraProtocolBlocks,
+	};
+}
+
+function collectSectionObservations(
+	raw: string,
+	requirements: SectionRequirements,
+): SectionObservation[] {
+	const observations: SectionObservation[] = [];
 	let cursor = 0;
 	const expected = requiredSectionOrder(requirements);
 	for (const [index, name] of expected.entries()) {
 		const openTag = `<${name}>`;
 		const closeTag = `</${name}>`;
+		const nextTag = expected[index + 1]
+			? `<${expected[index + 1]}>`
+			: undefined;
 		const openStart = raw.indexOf(openTag, cursor);
 		if (openStart < 0) continue;
 		const contentStart = openStart + openTag.length;
 		const closeStart = findSectionClose(raw, {
+			name,
 			contentStart,
 			closeTag,
-			nextTag: expected[index + 1] ? `<${expected[index + 1]}>` : undefined,
+			nextTag,
 		});
-		if (closeStart < 0) continue;
-		const end = closeStart + closeTag.length;
-		sections.push({
+		if (closeStart >= 0) {
+			const end = closeStart + closeTag.length;
+			observations.push({
+				name,
+				start: openStart,
+				contentStart,
+				contentEnd: closeStart,
+				end,
+			});
+			cursor = end;
+			continue;
+		}
+		const nextOpen = nextTag ? raw.indexOf(nextTag, contentStart) : -1;
+		const contentEnd = nextOpen >= 0 ? nextOpen : raw.length;
+		observations.push({
 			name,
-			content: raw.slice(contentStart, closeStart).trim(),
 			start: openStart,
-			end,
+			contentStart,
+			contentEnd,
 		});
-		cursor = end;
+		cursor = contentEnd;
 	}
-	return sections;
+	return observations;
 }
 
 function findSectionClose(
 	raw: string,
-	options: { contentStart: number; closeTag: string; nextTag?: string },
+	options: {
+		name: WorkflowOutputSectionName;
+		contentStart: number;
+		closeTag: string;
+		nextTag?: string;
+	},
 ): number {
 	let searchFrom = options.contentStart;
 	let fallback = -1;
 	while (true) {
 		const candidate = raw.indexOf(options.closeTag, searchFrom);
 		if (candidate < 0) break;
-		fallback = candidate;
-		const after = skipWhitespace(raw, candidate + options.closeTag.length);
 		if (
-			options.closeTag === "</control>" &&
+			options.name !== SECTION_ANALYSIS &&
 			isInsideJsonString(raw.slice(options.contentStart, candidate))
 		) {
 			searchFrom = candidate + options.closeTag.length;
 			continue;
 		}
+		fallback = candidate;
+		const after = skipWhitespace(raw, candidate + options.closeTag.length);
 		if (options.nextTag) {
 			if (raw.startsWith(options.nextTag, after)) return candidate;
 		} else if (raw.slice(after).trim() === "") {
@@ -487,15 +569,154 @@ function isInsideJsonString(text: string): boolean {
 	return inString;
 }
 
-function validateSectionLayout(
+function scanStructuralSectionOpenings(
+	raw: string,
+	observations: readonly SectionObservation[],
+	requirements: SectionRequirements,
+): {
+	duplicateNames: ReadonlySet<WorkflowOutputSectionName>;
+	duplicateCounts: ReadonlyMap<WorkflowOutputSectionName, number>;
+	hasExtraProtocolBlocks: boolean;
+} {
+	const openingCounts = new Map<WorkflowOutputSectionName, number>();
+	const duplicateNames = new Set<WorkflowOutputSectionName>();
+	for (const observation of observations) {
+		openingCounts.set(
+			observation.name,
+			(openingCounts.get(observation.name) ?? 0) + 1,
+		);
+		const content = raw.slice(
+			observation.contentStart,
+			observation.contentEnd,
+		);
+		if (observation.name === SECTION_ANALYSIS) {
+			if (hasAnalysisSectionRestart(content)) {
+				duplicateNames.add(observation.name);
+			}
+			continue;
+		}
+		const nestedOpenings = countTagOutsideJsonStrings(
+			content,
+			`<${observation.name}>`,
+		);
+		if (nestedOpenings > 0) {
+			openingCounts.set(
+				observation.name,
+				(openingCounts.get(observation.name) ?? 0) + nestedOpenings,
+			);
+		}
+	}
+
+	for (const range of collectOutsideRanges(raw.length, observations)) {
+		const text = raw.slice(range.start, range.end);
+		for (const name of CANONICAL_SECTION_ORDER) {
+			const count = countTag(text, `<${name}>`);
+			if (count === 0) continue;
+			openingCounts.set(name, (openingCounts.get(name) ?? 0) + count);
+		}
+	}
+
+	let hasExtraProtocolBlocks = duplicateNames.size > 0;
+	const duplicateCounts = new Map<WorkflowOutputSectionName, number>();
+	for (const name of CANONICAL_SECTION_ORDER) {
+		const count = openingCounts.get(name) ?? 0;
+		if (count > 1) duplicateNames.add(name);
+		if (duplicateNames.has(name)) duplicateCounts.set(name, Math.max(count, 2));
+		const allowed = sectionRequired(name, requirements) ? 1 : 0;
+		if (count > allowed) hasExtraProtocolBlocks = true;
+	}
+	return { duplicateNames, duplicateCounts, hasExtraProtocolBlocks };
+}
+
+function collectOutsideRanges(
+	rawLength: number,
+	observations: readonly SectionObservation[],
+): TextRange[] {
+	const ranges: TextRange[] = [];
+	let cursor = 0;
+	for (const observation of observations) {
+		if (cursor < observation.start) {
+			ranges.push({ start: cursor, end: observation.start });
+		}
+		cursor = Math.max(cursor, observation.end ?? observation.contentEnd);
+	}
+	if (cursor < rawLength) ranges.push({ start: cursor, end: rawLength });
+	return ranges;
+}
+
+function collectOutsideTextRanges(
 	raw: string,
 	sections: readonly SectionMatch[],
+): TextRange[] {
+	const ranges: TextRange[] = [];
+	let cursor = 0;
+	for (const section of sections) {
+		if (
+			cursor < section.start &&
+			raw.slice(cursor, section.start).trim().length > 0
+		) {
+			ranges.push({ start: cursor, end: section.start });
+		}
+		cursor = section.end;
+	}
+	if (raw.slice(cursor).trim().length > 0) {
+		ranges.push({ start: cursor, end: raw.length });
+	}
+	return ranges;
+}
+
+function countTag(text: string, tag: string): number {
+	let count = 0;
+	let cursor = 0;
+	while (true) {
+		const index = text.indexOf(tag, cursor);
+		if (index < 0) return count;
+		count += 1;
+		cursor = index + tag.length;
+	}
+}
+
+function countTagOutsideJsonStrings(text: string, tag: string): number {
+	let count = 0;
+	let inString = false;
+	let escaped = false;
+	for (let index = 0; index < text.length; index += 1) {
+		const char = text[index] ?? "";
+		if (escaped) {
+			escaped = false;
+			continue;
+		}
+		if (inString && char === "\\") {
+			escaped = true;
+			continue;
+		}
+		if (char === '"') {
+			inString = !inString;
+			continue;
+		}
+		if (!inString && text.startsWith(tag, index)) {
+			count += 1;
+			index += tag.length - 1;
+		}
+	}
+	return count;
+}
+
+function hasAnalysisSectionRestart(content: string): boolean {
+	const closeTag = `</${SECTION_ANALYSIS}>`;
+	const close = content.indexOf(closeTag);
+	if (close < 0) return false;
+	return content.indexOf(`<${SECTION_ANALYSIS}>`, close + closeTag.length) >= 0;
+}
+
+function validateSectionLayout(
+	layout: SectionLayoutScan,
 	issues: WorkflowOutputIssue[],
 	requirements: SectionRequirements,
 ): void {
-	validateSectionCounts(sections, issues, requirements);
-	validateCanonicalOrder(sections, issues, requirements);
-	validateNoOutsideText(raw, sections, issues);
+	validateSectionCounts(layout, issues, requirements);
+	validateCanonicalOrder(layout.sections, issues, requirements);
+	validateNoOutsideText(layout.outsideRanges, issues);
 }
 
 function parseSanitizedWorkflowOutput(
@@ -503,9 +724,12 @@ function parseSanitizedWorkflowOutput(
 	options: ParseWorkflowOutputOptions,
 ): ParsedWorkflowOutput | undefined {
 	const requirements = sectionRequirements(options);
-	const sections = collectSections(raw, requirements);
-	if (hasExactlyRequiredSections(sections, requirements)) {
-		const sanitized = sections
+	const layout = scanSectionLayout(raw, requirements);
+	if (layout.duplicateNames.size > 0 || layout.hasExtraProtocolBlocks) {
+		return undefined;
+	}
+	if (layout.complete) {
+		const sanitized = layout.sections
 			.map((section) => raw.slice(section.start, section.end).trim())
 			.join("\n");
 		if (sanitized !== raw.trim()) {
@@ -513,7 +737,7 @@ function parseSanitizedWorkflowOutput(
 			if (parsed.valid) return parsed;
 		}
 	}
-	const repaired = repairMissingTailSections(raw, requirements);
+	const repaired = repairMissingTailSections(raw, requirements, layout);
 	if (repaired !== undefined) {
 		const parsed = parseWorkflowOutput(repaired, options);
 		if (parsed.valid) return parsed;
@@ -524,74 +748,62 @@ function parseSanitizedWorkflowOutput(
 function repairMissingTailSections(
 	raw: string,
 	requirements: SectionRequirements,
+	layout: SectionLayoutScan,
 ): string | undefined {
-	const controlOpen = raw.indexOf("<control>");
-	if (controlOpen < 0) return undefined;
-	const controlContentStart = controlOpen + "<control>".length;
-	const controlClose = raw.indexOf("</control>", controlContentStart);
-	if (controlClose < 0) return undefined;
-	const controlContent = raw.slice(controlContentStart, controlClose).trim();
-	const afterControl = raw.slice(controlClose + "</control>".length);
-	let analysis = "";
-	let refs = "[]";
-	const analysisOpen = afterControl.indexOf("<analysis>");
+	if (!layout.repairEligible) return undefined;
+	const observations = new Map(
+		layout.observations.map((observation) => [observation.name, observation]),
+	);
+	const control = observations.get(SECTION_CONTROL);
+	if (!control || control.end === undefined) return undefined;
+	const contents = new Map<WorkflowOutputSectionName, string>();
+	contents.set(
+		SECTION_CONTROL,
+		raw.slice(control.contentStart, control.contentEnd).trim(),
+	);
 	if (requirements.analysisRequired) {
-		if (analysisOpen < 0) return undefined;
-		const analysisStart = analysisOpen + "<analysis>".length;
-		const analysisClose = afterControl.indexOf("</analysis>", analysisStart);
-		const refsOpenAfterAnalysis = afterControl.indexOf("<refs>", analysisStart);
-		const analysisEnd =
-			analysisClose >= 0
-				? analysisClose
-				: refsOpenAfterAnalysis >= 0
-					? refsOpenAfterAnalysis
-					: afterControl.length;
-		analysis = afterControl.slice(analysisStart, analysisEnd).trim();
-		if (analysis.length === 0) return undefined;
+		const analysis = observations.get(SECTION_ANALYSIS);
+		if (!analysis) return undefined;
+		const content = raw
+			.slice(analysis.contentStart, analysis.contentEnd)
+			.trim();
+		if (content.length === 0) return undefined;
+		contents.set(SECTION_ANALYSIS, content);
 	}
-	const refsSearchStart =
-		analysisOpen >= 0 ? analysisOpen + "<analysis>".length : 0;
-	const refsOpen = afterControl.indexOf("<refs>", refsSearchStart);
-	if (refsOpen >= 0) {
-		const refsStart = refsOpen + "<refs>".length;
-		const refsClose = afterControl.indexOf("</refs>", refsStart);
-		if (refsClose >= 0) refs = afterControl.slice(refsStart, refsClose).trim();
-	} else if (requirements.refsRequired) {
-		refs = "[]";
+	if (requirements.refsRequired) {
+		const refs = observations.get(SECTION_REFS);
+		contents.set(
+			SECTION_REFS,
+			refs?.end === undefined
+				? "[]"
+				: raw.slice(refs.contentStart, refs.contentEnd).trim(),
+		);
 	}
-	return [
-		"<control>",
-		controlContent,
-		"</control>",
-		"<analysis>",
-		analysis,
-		"</analysis>",
-		"<refs>",
-		refs,
-		"</refs>",
-	].join("\n");
-}
-
-function hasExactlyRequiredSections(
-	sections: readonly SectionMatch[],
-	requirements: SectionRequirements,
-): boolean {
-	const expected = requiredSectionOrder(requirements);
-	if (sections.length !== expected.length) return false;
-	return sections.every((section, index) => section.name === expected[index]);
+	return requiredSectionOrder(requirements)
+		.flatMap((name) => [
+			`<${name}>`,
+			contents.get(name) ?? "",
+			`</${name}>`,
+		])
+		.join("\n");
 }
 
 function validateSectionCounts(
-	sections: readonly SectionMatch[],
+	layout: SectionLayoutScan,
 	issues: WorkflowOutputIssue[],
 	requirements: SectionRequirements,
 ): void {
-	const counts = sectionCounts(sections);
 	for (const name of CANONICAL_SECTION_ORDER) {
 		const required = sectionRequired(name, requirements);
-		const count = counts.get(name) ?? 0;
+		const count = layout.sections.filter(
+			(section) => section.name === name,
+		).length;
 		if (required && count === 0) issues.push(missingSectionIssue(name));
-		if (count > 1) issues.push(duplicateSectionIssue(name));
+		if (layout.duplicateNames.has(name)) {
+			issues.push(
+				duplicateSectionIssue(name, layout.duplicateCounts.get(name) ?? 2),
+			);
+		}
 	}
 }
 
@@ -611,19 +823,10 @@ function validateCanonicalOrder(
 }
 
 function validateNoOutsideText(
-	raw: string,
-	sections: readonly SectionMatch[],
+	outsideRanges: readonly TextRange[],
 	issues: WorkflowOutputIssue[],
 ): void {
-	let cursor = 0;
-	for (const section of sections) {
-		if (raw.slice(cursor, section.start).trim().length > 0) {
-			issues.push(outsideTextIssue());
-			return;
-		}
-		cursor = section.end;
-	}
-	if (raw.slice(cursor).trim().length > 0) issues.push(outsideTextIssue());
+	if (outsideRanges.length > 0) issues.push(outsideTextIssue());
 }
 
 function parseControlSection(
@@ -2103,16 +2306,6 @@ function artifactIndex(files: Record<string, string>): Record<string, string> {
 	);
 }
 
-function sectionCounts(
-	sections: readonly SectionMatch[],
-): Map<WorkflowOutputSectionName, number> {
-	const counts = new Map<WorkflowOutputSectionName, number>();
-	for (const section of sections) {
-		counts.set(section.name, (counts.get(section.name) ?? 0) + 1);
-	}
-	return counts;
-}
-
 function sectionRequired(
 	name: WorkflowOutputSectionName,
 	requirements: SectionRequirements,
@@ -2142,11 +2335,12 @@ function missingSectionIssue(
 
 function duplicateSectionIssue(
 	section: WorkflowOutputSectionName,
+	count: number,
 ): WorkflowOutputIssue {
 	return {
 		code: "duplicate_section",
 		section,
-		message: `${section} section must appear exactly once`,
+		message: `${section} section must appear exactly once; found ${count}`,
 	};
 }
 
