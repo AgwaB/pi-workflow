@@ -105,15 +105,17 @@ When creating or changing a workflow:
     running.
 12. Report the exact validation result, every warning, and any remaining safety notes.
 
-## Dry-run verification
+## Runtime acceptance dry run
 
-`/workflow validate` checks form, not behavior. Before treating a new or materially changed workflow as trustworthy, do a first real run on a small/representative task and inspect the early stages — do not assume the graph behaves well just because it compiled.
+`/workflow validate` checks form, not behavior. Before treating a new or materially changed workflow as trustworthy, run a bounded representative task and prove the workflow's runtime invariants. Do not turn one observed workflow's values into universal constants; declare the expected counts, identities, and completion rules for the workflow being authored.
 
-- Run once on a bounded task, then inspect with `/workflow` (board) or `pi-workflow inspect <run-id> --results`.
-- Check the plan/first stage first: does the fan-out list have the right number of items, correct granularity, and no empty/degenerate entries? A `foreach` fanning out over the wrong count is the most common latent defect that validation cannot catch.
-- Check that each downstream stage actually received upstream data (control fields populated, `requiredReads` satisfied), not empty projections.
-- Confirm read-only stages did not attempt mutation and that partial-failure branches behave (kill one worker or use a task that yields an empty slice, if practical).
-- Tune prompts and schemas from what the run reveals, then re-validate. Treat the first run as part of authoring, not as done. State clearly whether a workflow has been dry-run or is validation-only.
+1. **Declare acceptance invariants before launch.** Record the expected fan-out count and stable item ids, permitted resolved agents/models/tools, required evidence shape, planned fan-in counts, tolerated failure policy, and final status/verdict rule. Static validation does not prove provider credentials, quota, model availability, or model output conformance; classify those separately from graph/helper defects.
+2. **Inspect materialization, not only the plan.** Use `/workflow` or `pi-workflow inspect <run-id> --results`, then inspect `run.json`, the plan `control.json`, and relevant `source-manifest.json` files. Reconcile planned items against materialized task `specId`/`displayName` values and against the stable identity echoed in each worker control. Treat manifest `source` names and in-memory source-map keys as routing aliases, not business identity; an alias may be a bare stage name and need not equal the foreach item id. Never derive assignment identity from alias shape, object enumeration order, title text, or array position. Prefer `each.itemIdentityPath` plus an explicit id in the item and worker output.
+3. **Reconcile every fan-in boundary.** Mechanically compare the applicable planned ids -> materialized task ids -> valid worker controls -> decision/verifier ids -> final/output ids, omitting only stages the graph does not contain. Missing, duplicate, extra, malformed, or completed-but-mismatched rows are integrity failures, not empty success. Preserve those failures in source-status accounting and choose a conservative partial/blocked result.
+4. **Inspect evidence and provenance.** For any positive or modified disposition, require structured repository or source evidence rather than free-form strings. Confirm every final row retains its producer/origin and verifier lineage through every transform actually present, for example dedup, partition, merge, packet, and render stages.
+5. **Exercise degradation and finality.** On a cheap fixture, make one worker absent/invalid or synthesize an empty slice when practical. Confirm `terminalBarrier`, `sourcePolicy`, missing-row handling, and final status agree. A missing or inconsistent narrative/report stage must not emit a machine verdict that claims complete success merely because the canonical ledger is otherwise clean.
+6. **Audit deterministic helpers and side effects.** For the helper behaviors actually present, run fixtures for source reordering, duplicate-like-but-distinct rows, true duplicates, nested merges, missing decisions, and untrusted render text. A read-only workflow's support helpers must also avoid undeclared filesystem, process, or network side effects; `readOnly` tool narrowing does not sandbox support code.
+7. Tune prompts, schemas, and helpers from the evidence, re-run focused regression tests, then re-run `/workflow validate`. Repeat the full provider-backed run only when the fix affects model prompts, stage topology, runtime materialization, or another invariant that focused deterministic tests cannot cover. State clearly whether the final state is validation-only, helper-tested after a prior dry run, or dry-run on the exact final revision.
 
 ## Scaffold usage
 
@@ -181,6 +183,32 @@ Validation passing means the spec is well-formed, not that it is good. These pat
     `"coverageGaps": {}`), and huge foreach fan-in reducers likely to hit
     length/control-bloat limits. Fix these before first real runs; do not
     treat them as cosmetic.
+13. **Identity and cardinality are control-plane contracts.** Give every
+    planned foreach/verification row a stable explicit id, echo it in worker
+    control, and reconcile the complete id sets at each fan-in. Runtime source
+    aliases, task order, and human titles are presentation/routing data, not
+    identity. Count equality alone is insufficient because one missing row and
+    one duplicate row can cancel numerically.
+14. **Deterministic transforms must be lossless and schema-checked.** Dedup
+    only with concrete same-entity evidence such as overlapping locations or
+    exact source evidence, not fuzzy title similarity alone. For a confirmed
+    merge, union evidence, locations, severity, origins, verifier records, and
+    nested lineage deterministically. Sort by canonical identity before
+    assigning generated ids, and validate every support output against the
+    exact downstream contract.
+15. **The canonical ledger outranks narrative synthesis.** Derive counts,
+    disposition coverage, and the machine verdict from deterministic ledger
+    state. Treat an absent/inconsistent report or uncovered source as partial
+    or blocked, even if all remaining findings are clean. Narrative stages may
+    summarize the ledger but must not erase rejected/excluded audit rows,
+    missing rows, provenance, or integrity failures.
+16. **Read-only and untrusted-output rules include support code.** A
+    read-only workflow's trusted helpers should be pure artifact transforms;
+    any filesystem/process/network side effect needs an explicit workflow
+    contract and safety review. Deterministic renderers must escape untrusted
+    Markdown/HTML text, choose code fences that cannot be closed by embedded
+    content, and mechanically prove that every authoritative disposition is
+    represented or auditable.
 
 ## Control schema and output gotchas
 
@@ -231,8 +259,12 @@ Before handing off or recommending a reusable workflow run, verify or report as 
 - No orphaned `schemas/*.json` or `helpers/*.mjs` files remain that the spec does not reference (common after adapting a scaffold).
 - Write-capable workflows document worktree policy, protected-path expectations, and validation/check stages.
 - Runtime task examples include scope, exclusions, final artifact, and success metric.
+- Runtime acceptance invariants declare expected item identities/counts, permitted resolved agents/models/tools, evidence requirements, degradation behavior, and final status/verdict rules.
+- Every fan-in reconciles its applicable planned, materialized, valid, decision/verification, and final/output id sets; aliases and enumeration order are never treated as business identity.
+- Deterministic helper fixtures cover reordering, missing/duplicate/extra rows, lossless merge/dedup, partial failure, report absence/inconsistency, and untrusted rendering where those behaviors exist.
+- Support-helper side effects match the workflow's read/write declaration, and final renderers preserve every authoritative disposition and provenance row.
 - The "Quality design patterns" were applied or their omission is justified (especially control/analysis split, evidence-forcing schemas, few-shot exact control examples, `partial` fan-in, and prompt-inject defense).
-- State whether the workflow has been dry-run (first real run inspected) or is validation-only.
+- State whether the final revision is validation-only, helper-tested after a prior dry run, or dry-run exactly as delivered.
 
 ## Promotion checklist
 
