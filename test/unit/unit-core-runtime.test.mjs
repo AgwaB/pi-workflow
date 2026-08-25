@@ -2959,13 +2959,52 @@ test("deep-research renderer emits evidence-backed report and sidecars", async (
 		assert.ok(result.sourceUrlCount <= 4);
 		assert.equal(result.auditArtifact, "audit.md");
 		assert.equal(result.auditSidecarPath, "audit.md");
+		assert.equal(result.sidecarPath, "final-report.md");
 		assert.equal(result.renderMode, "evidence-backed-report");
+		assert.match(result.completionSummaryMarkdown, /## Core conclusion/);
+		assert.match(result.completionSummaryMarkdown, /## Main recommendations/);
+		assert.match(result.completionSummaryMarkdown, /## Evidence level/);
+		assert.doesNotMatch(
+			result.completionSummaryMarkdown,
+			/final-report\.md|audit\.md|refs\.json|workflow_exec|task-final/,
+		);
 		assert.match(result.executiveMarkdown, /# Research report/);
+		assert.match(result.executiveMarkdown, /## Executive summary/);
+		assert.match(result.executiveMarkdown, /## Research scope and method/);
 		assert.match(result.executiveMarkdown, /Evidence strength/);
 		assert.match(result.executiveMarkdown, /Source index/);
 		assert.match(result.executiveMarkdown, /Audit summary/);
+		assert.match(result.executiveMarkdown, /## Related artifacts/);
+		assert.match(result.executiveMarkdown, /\[Evidence audit\]\(audit\.md\)/);
+		assert.match(
+			result.executiveMarkdown,
+			/\[Structured source references\]\(refs\.json\)/,
+		);
+		assert.ok(
+			result.executiveMarkdown.indexOf("## Executive summary") <
+				result.executiveMarkdown.indexOf("## Main findings"),
+		);
+		assert.ok(
+			result.executiveMarkdown.indexOf("## Main findings") <
+				result.executiveMarkdown.indexOf("## Evidence strength"),
+		);
 		assert.equal(result.claimSummary.verified, 1);
 		assert.equal(result.factSlotSummary.missingOrConflicting, 1);
+		assert.equal(
+			readFileSync(
+				join(
+					cwd,
+					".pi",
+					"workflows",
+					"workflow_exec",
+					"tasks",
+					"task-final",
+					"final-report.md",
+				),
+				"utf8",
+			),
+			`${result.executiveMarkdown}\n`,
+		);
 		assert.equal(
 			readFileSync(
 				join(
@@ -3287,7 +3326,7 @@ test("deep-research executive renderer preserves object gaps zeros and recommend
 				},
 			},
 			options: {
-				maxWords: 160,
+				maxWords: 500,
 				maxUrls: 2,
 				maxFindings: 0,
 				maxRecommendations: 2,
@@ -3313,7 +3352,7 @@ test("deep-research executive renderer preserves object gaps zeros and recommend
 			/Verify any claim before promoting it/,
 		);
 		assert.match(result.executiveMarkdown, /human domain review/);
-		assert.equal(result.sidecarPath, "executive.md");
+		assert.equal(result.sidecarPath, "final-report.md");
 		assert.doesNotMatch(
 			JSON.stringify(result),
 			/\/Users\/|\.pi\/workflows|web-source-cache/,

@@ -579,6 +579,9 @@ test("bundled deep-research compacts audit packets before executive final", asyn
 		},
 	]);
 	assert.equal(finalAudit.artifactGraph.sourceProjection, undefined);
+	assert.equal(finalAudit.injectTask, true);
+	assert.match(finalAudit.compiledPrompt, /# Task/);
+	assert.match(finalAudit.compiledPrompt, /same language as the runtime task/);
 	assert.match(finalAudit.compiledPrompt, /synthesis overlay/);
 	assert.match(finalAudit.compiledPrompt, /exactly one workflow_artifact read/);
 	assert.match(

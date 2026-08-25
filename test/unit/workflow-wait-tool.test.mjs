@@ -540,6 +540,45 @@ test("workflow wait does not re-present a completion won by the watcher", async 
 	}
 });
 
+test("successful completion feedback requests a result-only summary", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "workflow-result-only-feedback-"));
+	try {
+		const run = runRecord(cwd, { runId: "workflow_result_only" });
+		await writeRunFixture(cwd, run, {
+			completionSummaryMarkdown:
+				"## Core conclusion\n\nUse the verified result.\n\n## Evidence level\n\n- 4 verified claims.",
+			executiveMarkdown: "# Full report\n\nFULL_REPORT_ONLY_TEXT",
+			sidecarPath: "final-report.md",
+			auditSidecarPath: "audit.md",
+		});
+		await writeFeedbackAudience(cwd, run.runId, "session-result-only");
+		const sent = [];
+
+		const outcome = await deliverWorkflowFeedback(
+			feedbackContext(cwd, "session-result-only"),
+			{
+				sendMessage(message, options) {
+					sent.push({ message, options });
+				},
+			},
+			run,
+		);
+
+		assert.deepEqual(outcome, { status: "delivered" });
+		assert.equal(sent.length, 1);
+		assert.match(sent[0].message.content, /Use the verified result/);
+		assert.match(sent[0].message.content, /substantive workflow result/);
+		assert.match(sent[0].message.content, /Do not mention routine completion status/);
+		assert.doesNotMatch(sent[0].message.content, /FULL_REPORT_ONLY_TEXT/);
+		assert.doesNotMatch(sent[0].message.content, /Open: \/workflow/);
+		assert.doesNotMatch(sent[0].message.content, /completed, 0 failed/);
+		assert.doesNotMatch(sent[0].message.content, /link relevant artifacts/);
+		assert.doesNotMatch(sent[0].message.content, /final-report\.md|audit\.md/);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
 test("delivery claims enforce audience identity and report structured outcomes", async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "workflow-wait-claim-audience-"));
 	try {
@@ -1196,7 +1235,11 @@ test("workflow wait returns a terminal result without model polling", async () =
 	try {
 		const run = runRecord(cwd);
 		await writeRunFixture(cwd, run, {
-			executiveMarkdown: "Completed result from the workflow.",
+			completionSummaryMarkdown:
+				"## Core conclusion\n\nCompleted result from the workflow.",
+			executiveMarkdown: "# Full report\n\nFULL_REPORT_ONLY_TEXT",
+			sidecarPath: "final-report.md",
+			auditSidecarPath: "audit.md",
 		});
 		await writeFile(
 			join(cwd, ".pi", "workflows", run.runId, "feedback-audience.json"),
@@ -1226,7 +1269,15 @@ test("workflow wait returns a terminal result without model polling", async () =
 		assert.equal(result.details.status, "completed");
 		assert.equal(result.details.semanticStatus, "completed");
 		assert.match(result.details.finalResultPreview, /Completed result/);
-		assert.match(result.content[0].text, /Workflow terminal/);
+		assert.equal(
+			result.content[0].text,
+			"## Core conclusion\n\nCompleted result from the workflow.",
+		);
+		assert.doesNotMatch(result.content[0].text, /Workflow terminal|Run:/);
+		assert.doesNotMatch(
+			result.content[0].text,
+			/Artifacts:|final-report\.md|audit\.md|FULL_REPORT_ONLY_TEXT/,
+		);
 		assert.equal(updates.length, 1);
 		assert.equal(updates[0].details.taskSummary.completed, 1);
 		assert.equal((await feedbackReceipts(cwd, run.runId)).length, 1);

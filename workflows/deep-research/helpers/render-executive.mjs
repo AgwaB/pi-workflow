@@ -965,6 +965,99 @@ function selectCaveats(report) {
 	};
 }
 
+function renderCompletionSummary(report, claimSummary, slots, fallback) {
+	const recommendations = recommendationEntries(report);
+	const primaryEntries = (
+		recommendations.length > 0 ? recommendations : mainFindingEntries(report)
+	).slice(0, 8);
+	const categoryOrder = [
+		"Decision note",
+		"Gap",
+		"Caveat",
+		"Contested",
+		"Unsupported",
+		"Unverified lead",
+	];
+	const categoryRank = new Map(
+		categoryOrder.map((category, index) => [category, index]),
+	);
+	const limitations = caveatCategories(report)
+		.flatMap((category) =>
+			category.entries.map((entry) => ({ kind: category.kind, ...entry })),
+		)
+		.sort(
+			(left, right) =>
+				(categoryRank.get(left.kind) ?? categoryOrder.length) -
+				(categoryRank.get(right.kind) ?? categoryOrder.length),
+		)
+		.slice(0, 6);
+	const out = [
+		"## Core conclusion",
+		"",
+		summaryText(report, fallback),
+		"",
+	];
+	if (primaryEntries.length > 0) {
+		out.push("## Main recommendations", "");
+		for (const { item, text } of primaryEntries) {
+			const status = evidenceStatusOf(item) || "not specified";
+			out.push(`- ${text} — evidence: ${status}`);
+		}
+		out.push("");
+	}
+	out.push(
+		"## Evidence level",
+		"",
+		`- Claims: ${claimSummary.verified} verified, ${claimSummary.partially_supported} partially supported, ${claimSummary.unsupported} unsupported, ${claimSummary.conflicting} conflicting, ${claimSummary.verification_blocked} verification blocked.`,
+		`- Fact slots: ${slots.filled} filled, ${slots.partial} partial, ${slots.missingOrConflicting} missing/conflicting, ${slots.total} total.`,
+		"",
+	);
+	if (limitations.length > 0) {
+		out.push("## Remaining decisions and limits", "");
+		for (const { kind, text } of limitations) {
+			out.push(`- **${kind}:** ${text}`);
+		}
+		out.push("");
+	}
+	return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function renderResearchScopeAndMethod(report) {
+	const metadata = isRecord(report?.researchMetadata)
+		? report.researchMetadata
+		: {};
+	const scopeCoverage = asArray(report?.researchScopeCoverage);
+	const scopeCounts = new Map();
+	for (const row of scopeCoverage) {
+		const status = cleanText(row?.status ?? "unknown") || "unknown";
+		scopeCounts.set(status, (scopeCounts.get(status) ?? 0) + 1);
+	}
+	const rows = [];
+	if (cleanText(metadata.taskType))
+		rows.push(`- Task type: ${cleanText(metadata.taskType)}.`);
+	if (cleanText(metadata.depth))
+		rows.push(`- Research depth: ${cleanText(metadata.depth)}.`);
+	if (Number.isFinite(Number(metadata.researchQuestions)))
+		rows.push(`- Research questions: ${Number(metadata.researchQuestions)}.`);
+	if (Number.isFinite(Number(metadata.plannedFactSlots)))
+		rows.push(`- Planned fact slots: ${Number(metadata.plannedFactSlots)}.`);
+	if (cleanText(metadata.expectedFinalShape))
+		rows.push(
+			`- Expected output shape: ${cleanText(metadata.expectedFinalShape)}.`,
+		);
+	if (scopeCoverage.length > 0) {
+		rows.push(
+			`- Scope coverage: ${[...scopeCounts.entries()]
+				.map(([status, count]) => `${status} ${count}`)
+				.join(", ")}.`,
+		);
+	}
+	rows.push(
+		"- Method: plan research questions, collect source evidence, normalize claims, verify selected claims, apply deterministic audit gates, and synthesize the report.",
+	);
+	return ["## Research scope and method", "", ...rows, ""];
+}
+
 function renderCaveats(report) {
 	const selection = selectCaveats(report);
 	if (selection.total === 0) return [];
@@ -1013,7 +1106,17 @@ function renderAuditSummary(report, claimSummary, slots) {
 		...(coverage.researchQuestions != null
 			? [`- Research questions: ${coverage.researchQuestions}.`]
 			: []),
-		"- Audit artifact: `audit.md`.",
+		"",
+	];
+}
+
+function renderRelatedArtifacts() {
+	return [
+		"## Related artifacts",
+		"",
+		"- [Evidence audit](audit.md) — claim verdicts, fact-slot coverage, gaps, and renderer diagnostics.",
+		"- [Structured source references](refs.json) — machine-readable source pointers used by the final task.",
+		"- [Machine-readable report](control.json) — the structured final report and completion-summary contract.",
 		"",
 	];
 }
@@ -1087,21 +1190,33 @@ function renderResearchMarkdown(control, packetSource, options = {}) {
 		renderedSourceUrls: sourceIndex.length,
 	};
 	const warnings = [...renderWarnings(sectionCounts), ...composed.warnings];
+	const completionSummaryMarkdown = renderCompletionSummary(
+		report,
+		claimSummary,
+		slots,
+		control.digest,
+	);
+	const reportExecutiveSummary = completionSummaryMarkdown.replace(
+		/^## /gm,
+		"### ",
+	);
 
 	const sections = [
 		"# Research report",
 		"",
-		"## Bottom line",
+		"## Executive summary",
 		"",
-		summaryText(report, control.digest),
+		reportExecutiveSummary,
 		"",
-		...renderEvidenceStrength(report),
+		...renderResearchScopeAndMethod(report),
 		...renderMainFindings(report),
 		...renderRecommendations(report),
 		...renderActionPlan(report),
+		...renderEvidenceStrength(report),
 		...renderCaveats(report),
 		...renderSourceIndex(sourceIndex),
 		...renderAuditSummary(report, claimSummary, slots),
+		...renderRelatedArtifacts(),
 	];
 
 	const markdown = sections
@@ -1110,6 +1225,7 @@ function renderResearchMarkdown(control, packetSource, options = {}) {
 		.trim();
 	return {
 		markdown,
+		completionSummaryMarkdown,
 		sourceIndex,
 		allSourceIndex,
 		claimSummary,
@@ -1157,7 +1273,7 @@ function renderAuditMarkdown(control, packetSource, rendered) {
 	const out = [
 		"# Research audit",
 		"",
-		"This artifact preserves the detailed claim/gap/source ledger behind `executive.md`.",
+		"This artifact preserves the detailed claim/gap/source ledger behind `final-report.md`.",
 		"",
 		"## Claim verdict ledger",
 		"",
@@ -1252,6 +1368,7 @@ export default async function renderExecutive({
 				"Research report rendering failed: missing final-audit control source.",
 			status: "blocked",
 			blockers: ["missing final-audit control source"],
+			completionSummaryMarkdown: "",
 			executiveMarkdown: "",
 			reportMarkdown: "",
 			auditMarkdown: "",
@@ -1316,7 +1433,8 @@ export default async function renderExecutive({
 		!truncatedWithOpenGaps &&
 		!serializationArtifact;
 
-	let executiveSidecarPath;
+	let finalReportSidecarPath;
+	let legacyExecutiveSidecarPath;
 	let auditSidecarPath;
 	try {
 		if (context.cwd && context.runId && context.taskId) {
@@ -1329,9 +1447,11 @@ export default async function renderExecutive({
 				context.taskId,
 			);
 			await mkdir(taskDir, { recursive: true });
-			executiveSidecarPath = join(taskDir, "executive.md");
+			finalReportSidecarPath = join(taskDir, "final-report.md");
+			legacyExecutiveSidecarPath = join(taskDir, "executive.md");
 			auditSidecarPath = join(taskDir, "audit.md");
-			await writeFile(executiveSidecarPath, `${markdown}\n`, "utf8");
+			await writeFile(finalReportSidecarPath, `${markdown}\n`, "utf8");
+			await writeFile(legacyExecutiveSidecarPath, `${markdown}\n`, "utf8");
 			await writeFile(auditSidecarPath, `${auditMarkdown}\n`, "utf8");
 		}
 	} catch {
@@ -1343,6 +1463,7 @@ export default async function renderExecutive({
 		digest: truncateWords(stripLeadingHeading(markdown), 45),
 		status: passed ? "passed" : "failed",
 		renderMode: "evidence-backed-report",
+		completionSummaryMarkdown: rendered.completionSummaryMarkdown,
 		executiveMarkdown: markdown,
 		reportMarkdown: markdown,
 		auditMarkdown,
@@ -1368,7 +1489,7 @@ export default async function renderExecutive({
 			passed,
 		},
 		auditArtifact: auditSidecarPath ? "audit.md" : "final-audit.control.json",
-		...(executiveSidecarPath ? { sidecarPath: "executive.md" } : {}),
+		...(finalReportSidecarPath ? { sidecarPath: "final-report.md" } : {}),
 		...(auditSidecarPath ? { auditSidecarPath: "audit.md" } : {}),
 	};
 }

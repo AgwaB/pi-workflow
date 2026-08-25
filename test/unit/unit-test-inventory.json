@@ -750,7 +750,7 @@
 		{
 			"name": "bundled deep-research compacts audit packets before executive final",
 			"occurrence": 1,
-			"sha256": "448963acd672aa551d791aff50bcc8b215f500115334024c248db7ccb7be474b",
+			"sha256": "b594f2ac59ca23d336b4930bbb2f8c79da242dc99b0a96f94bc5a4bc46548cab",
 			"domain": "authoring-interface"
 		},
 		{
@@ -1374,7 +1374,7 @@
 		{
 			"name": "deep-research renderer emits evidence-backed report and sidecars",
 			"occurrence": 1,
-			"sha256": "eabbefb2a4caffdb1ea232f3b1128d977cf263c17632293c97de06ebce4f4bfd",
+			"sha256": "ca09bb38e034bc60fe6ec43e55ad303516a079fbdce079e41f78c69c3132588b",
 			"domain": "core-runtime"
 		},
 		{
@@ -1392,7 +1392,7 @@
 		{
 			"name": "deep-research executive renderer preserves object gaps zeros and recommendation labels",
 			"occurrence": 1,
-			"sha256": "3867b793b57311f4033f3e54919c244fed45131a57dbda55103a5391284b110f",
+			"sha256": "90bb6cac34416c00e2d62e2ac7615f5e1da916867be038dc5728969b9be6735a",
 			"domain": "core-runtime"
 		},
 		{
