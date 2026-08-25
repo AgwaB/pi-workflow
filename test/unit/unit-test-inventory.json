@@ -522,19 +522,19 @@
 		{
 			"name": "workflow output parsers reject duplicate sections at every canonical boundary",
 			"occurrence": 1,
-			"sha256": "4ea67dc2ed47a325da4f079b74c7157212ee63dfd330985eef523b7ad35389f2",
+			"sha256": "ab46c9a330341e5f06144d47b31473f01b746c8806f3875b577d9d31c7423596",
 			"domain": "artifact-web"
 		},
 		{
 			"name": "workflow output parsers retain duplicate evidence across missing-tail damage",
 			"occurrence": 1,
-			"sha256": "fdb36baba9e3535dde400eb895ad9f27ba8048b242f09aea930c0d537f3d5fe2",
+			"sha256": "5070b0568e3e14fa6ee7beec5fbbbfe93e1fb9bb5748bfa84764847c7927e2fc",
 			"domain": "artifact-web"
 		},
 		{
 			"name": "workflow output parsers preserve literal markers and safe tail repairs",
 			"occurrence": 1,
-			"sha256": "b6bb9371558d71c081acdda6b3546a50ea2b1f7d181cc155daf27b069d136eb4",
+			"sha256": "035aa1c4a2299ed34c0df882122c051cdb12d01f2e5ebf986b5ddd06a4ab54e3",
 			"domain": "artifact-web"
 		},
 		{

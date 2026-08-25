@@ -522,26 +522,31 @@ function findSectionClose(
 		nextTag?: string;
 	},
 ): number {
-	let searchFrom = options.contentStart;
 	let fallback = -1;
-	while (true) {
-		const candidate = raw.indexOf(options.closeTag, searchFrom);
-		if (candidate < 0) break;
-		if (
-			options.name !== SECTION_ANALYSIS &&
-			isInsideJsonString(raw.slice(options.contentStart, candidate))
-		) {
-			searchFrom = candidate + options.closeTag.length;
-			continue;
+	let inJsonString = false;
+	let escaped = false;
+	for (let index = options.contentStart; index < raw.length; index += 1) {
+		if (options.name !== SECTION_ANALYSIS) {
+			const char = raw[index] ?? "";
+			if (escaped) {
+				escaped = false;
+				continue;
+			}
+			if (inJsonString && char === "\\") {
+				escaped = true;
+				continue;
+			}
+			if (char === '"') {
+				inJsonString = !inJsonString;
+				continue;
+			}
+			if (inJsonString) continue;
 		}
-		fallback = candidate;
-		const after = skipWhitespace(raw, candidate + options.closeTag.length);
-		if (options.nextTag) {
-			if (raw.startsWith(options.nextTag, after)) return candidate;
-		} else if (raw.slice(after).trim() === "") {
-			return candidate;
-		}
-		searchFrom = candidate + options.closeTag.length;
+		if (!raw.startsWith(options.closeTag, index)) continue;
+		fallback = index;
+		const after = skipWhitespace(raw, index + options.closeTag.length);
+		if (options.nextTag && raw.startsWith(options.nextTag, after)) return index;
+		index += options.closeTag.length - 1;
 	}
 	return fallback;
 }
@@ -550,23 +555,6 @@ function skipWhitespace(raw: string, index: number): number {
 	let cursor = index;
 	while (cursor < raw.length && /\s/.test(raw[cursor] ?? "")) cursor += 1;
 	return cursor;
-}
-
-function isInsideJsonString(text: string): boolean {
-	let inString = false;
-	let escaped = false;
-	for (const char of text) {
-		if (escaped) {
-			escaped = false;
-			continue;
-		}
-		if (char === "\\") {
-			escaped = true;
-			continue;
-		}
-		if (char === '"') inString = !inString;
-	}
-	return inString;
 }
 
 function scanStructuralSectionOpenings(
@@ -579,44 +567,32 @@ function scanStructuralSectionOpenings(
 	hasExtraProtocolBlocks: boolean;
 } {
 	const openingCounts = new Map<WorkflowOutputSectionName, number>();
-	const duplicateNames = new Set<WorkflowOutputSectionName>();
+	const addOpenings = (
+		counts: ReadonlyMap<WorkflowOutputSectionName, number>,
+	): void => {
+		for (const [name, count] of counts) {
+			openingCounts.set(name, (openingCounts.get(name) ?? 0) + count);
+		}
+	};
 	for (const observation of observations) {
 		openingCounts.set(
 			observation.name,
 			(openingCounts.get(observation.name) ?? 0) + 1,
 		);
-		const content = raw.slice(
-			observation.contentStart,
-			observation.contentEnd,
-		);
-		if (observation.name === SECTION_ANALYSIS) {
-			if (hasAnalysisSectionRestart(content)) {
-				duplicateNames.add(observation.name);
-			}
-			continue;
-		}
-		const nestedOpenings = countTagOutsideJsonStrings(
-			content,
-			`<${observation.name}>`,
-		);
-		if (nestedOpenings > 0) {
-			openingCounts.set(
+		addOpenings(
+			countStructuralSectionOpenings(
+				raw.slice(observation.contentStart, observation.contentEnd),
 				observation.name,
-				(openingCounts.get(observation.name) ?? 0) + nestedOpenings,
-			);
-		}
+			),
+		);
 	}
 
 	for (const range of collectOutsideRanges(raw.length, observations)) {
-		const text = raw.slice(range.start, range.end);
-		for (const name of CANONICAL_SECTION_ORDER) {
-			const count = countTag(text, `<${name}>`);
-			if (count === 0) continue;
-			openingCounts.set(name, (openingCounts.get(name) ?? 0) + count);
-		}
+		addOpenings(countStructuralSectionOpenings(raw.slice(range.start, range.end)));
 	}
 
-	let hasExtraProtocolBlocks = duplicateNames.size > 0;
+	const duplicateNames = new Set<WorkflowOutputSectionName>();
+	let hasExtraProtocolBlocks = false;
 	const duplicateCounts = new Map<WorkflowOutputSectionName, number>();
 	for (const name of CANONICAL_SECTION_ORDER) {
 		const count = openingCounts.get(name) ?? 0;
@@ -665,48 +641,200 @@ function collectOutsideTextRanges(
 	return ranges;
 }
 
-function countTag(text: string, tag: string): number {
-	let count = 0;
-	let cursor = 0;
-	while (true) {
-		const index = text.indexOf(tag, cursor);
-		if (index < 0) return count;
-		count += 1;
-		cursor = index + tag.length;
+function countStructuralSectionOpenings(
+	text: string,
+	initialSection?: WorkflowOutputSectionName,
+): ReadonlyMap<WorkflowOutputSectionName, number> {
+	const counts = new Map<WorkflowOutputSectionName, number>();
+	const analysisMarkers = analyzeAnalysisMarkers(text);
+	const selectedAnalysisContent = initialSection === SECTION_ANALYSIS;
+	const completeJsonSectionOpenings = new Set([
+		...findCompleteJsonSectionOpenings(text, SECTION_CONTROL),
+		...findCompleteJsonSectionOpenings(text, SECTION_REFS),
+	]);
+	let activeSection = initialSection;
+	let analysisDepth = activeSection === SECTION_ANALYSIS ? 1 : 0;
+	let analysisClosedLiteral = false;
+	let inJsonString = false;
+	let escaped = false;
+	const recordOpening = (opening: WorkflowOutputSectionName): void => {
+		counts.set(opening, (counts.get(opening) ?? 0) + 1);
+		activeSection = opening;
+		analysisDepth = opening === SECTION_ANALYSIS ? 1 : 0;
+		analysisClosedLiteral = false;
+		inJsonString = false;
+		escaped = false;
+	};
+
+	for (let index = 0; index < text.length; index += 1) {
+		if (activeSection === SECTION_ANALYSIS) {
+			const opening = sectionOpeningAt(text, index);
+			if (
+				opening &&
+				opening !== SECTION_ANALYSIS &&
+				analysisClosedLiteral &&
+				completeJsonSectionOpenings.has(index)
+			) {
+				recordOpening(opening);
+				index += `<${opening}>`.length - 1;
+				continue;
+			}
+
+			const openTag = `<${SECTION_ANALYSIS}>`;
+			const closeTag = `</${SECTION_ANALYSIS}>`;
+			if (opening === SECTION_ANALYSIS) {
+				const balancedLiteral =
+					selectedAnalysisContent &&
+					analysisMarkers.balancedSuffixOpenings.has(index);
+				if (analysisClosedLiteral && !balancedLiteral) {
+					recordOpening(SECTION_ANALYSIS);
+				} else {
+					analysisDepth += 1;
+				}
+				index += openTag.length - 1;
+				continue;
+			}
+			if (text.startsWith(closeTag, index)) {
+				analysisDepth = Math.max(0, analysisDepth - 1);
+				analysisClosedLiteral = true;
+				if (analysisDepth === 0 && !selectedAnalysisContent) {
+					activeSection = undefined;
+				}
+				index += closeTag.length - 1;
+			}
+			continue;
+		}
+
+		if (activeSection !== undefined) {
+			const char = text[index] ?? "";
+			if (escaped) {
+				escaped = false;
+				continue;
+			}
+			if (inJsonString && char === "\\") {
+				escaped = true;
+				continue;
+			}
+			if (char === '"') {
+				inJsonString = !inJsonString;
+				continue;
+			}
+			if (inJsonString) continue;
+			const closeTag = `</${activeSection}>`;
+			if (text.startsWith(closeTag, index)) {
+				activeSection = undefined;
+				index += closeTag.length - 1;
+				continue;
+			}
+		}
+
+		const opening = sectionOpeningAt(text, index);
+		if (!opening) continue;
+		recordOpening(opening);
+		index += `<${opening}>`.length - 1;
 	}
+	return counts;
 }
 
-function countTagOutsideJsonStrings(text: string, tag: string): number {
-	let count = 0;
-	let inString = false;
+function sectionOpeningAt(
+	text: string,
+	index: number,
+): WorkflowOutputSectionName | undefined {
+	return CANONICAL_SECTION_ORDER.find((name) =>
+		text.startsWith(`<${name}>`, index),
+	);
+}
+
+function analyzeAnalysisMarkers(text: string): {
+	balancedSuffixOpenings: ReadonlySet<number>;
+} {
+	const openTag = `<${SECTION_ANALYSIS}>`;
+	const closeTag = `</${SECTION_ANALYSIS}>`;
+	const markers: Array<{ index: number; delta: 1 | -1 }> = [];
+	for (let index = 0; index < text.length; index += 1) {
+		if (text.startsWith(openTag, index)) {
+			markers.push({ index, delta: 1 });
+			index += openTag.length - 1;
+			continue;
+		}
+		if (text.startsWith(closeTag, index)) {
+			markers.push({ index, delta: -1 });
+			index += closeTag.length - 1;
+		}
+	}
+
+	const cumulative: number[] = [];
+	let balance = 0;
+	for (const marker of markers) {
+		balance += marker.delta;
+		cumulative.push(balance);
+	}
+	const suffixMinimum: number[] = Array.from({ length: markers.length });
+	let runningMinimum = Number.POSITIVE_INFINITY;
+	for (let index = markers.length - 1; index >= 0; index -= 1) {
+		runningMinimum = Math.min(runningMinimum, cumulative[index] ?? 0);
+		suffixMinimum[index] = runningMinimum;
+	}
+
+	const balancedSuffixOpenings = new Set<number>();
+	for (let index = markers.length - 1; index >= 0; index -= 1) {
+		const marker = markers[index];
+		if (!marker || marker.delta === -1) continue;
+		const balanceBefore = index === 0 ? 0 : (cumulative[index - 1] ?? 0);
+		if (
+			balance - balanceBefore === 0 &&
+			(suffixMinimum[index] ?? Number.NEGATIVE_INFINITY) >= balanceBefore
+		) {
+			balancedSuffixOpenings.add(marker.index);
+		}
+	}
+	return { balancedSuffixOpenings };
+}
+
+function findCompleteJsonSectionOpenings(
+	text: string,
+	name: typeof SECTION_CONTROL | typeof SECTION_REFS,
+): ReadonlySet<number> {
+	const complete = new Set<number>();
+	const pending: number[] = [];
+	const openTag = `<${name}>`;
+	const closeTag = `</${name}>`;
+	let inJsonString = false;
 	let escaped = false;
 	for (let index = 0; index < text.length; index += 1) {
+		if (pending.length === 0) {
+			if (!text.startsWith(openTag, index)) continue;
+			pending.push(index);
+			inJsonString = false;
+			escaped = false;
+			index += openTag.length - 1;
+			continue;
+		}
 		const char = text[index] ?? "";
 		if (escaped) {
 			escaped = false;
 			continue;
 		}
-		if (inString && char === "\\") {
+		if (inJsonString && char === "\\") {
 			escaped = true;
 			continue;
 		}
 		if (char === '"') {
-			inString = !inString;
+			inJsonString = !inJsonString;
 			continue;
 		}
-		if (!inString && text.startsWith(tag, index)) {
-			count += 1;
-			index += tag.length - 1;
+		if (inJsonString) continue;
+		if (text.startsWith(openTag, index)) {
+			pending.push(index);
+			index += openTag.length - 1;
+			continue;
 		}
+		if (!text.startsWith(closeTag, index)) continue;
+		const opening = pending.pop();
+		if (opening !== undefined) complete.add(opening);
+		index += closeTag.length - 1;
 	}
-	return count;
-}
-
-function hasAnalysisSectionRestart(content: string): boolean {
-	const closeTag = `</${SECTION_ANALYSIS}>`;
-	const close = content.indexOf(closeTag);
-	if (close < 0) return false;
-	return content.indexOf(`<${SECTION_ANALYSIS}>`, close + closeTag.length) >= 0;
+	return complete;
 }
 
 function validateSectionLayout(
