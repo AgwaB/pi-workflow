@@ -8304,7 +8304,13 @@ function strictLayoutRequiredNames(options) {
 	];
 }
 
-function assertStrictLayoutDuplicate(raw, options, section, label) {
+function assertStrictLayoutDuplicate(
+	raw,
+	options,
+	section,
+	label,
+	expectedCount,
+) {
 	for (const [parserName, parser] of [
 		["direct", parseWorkflowOutput],
 		["bundle", parseWorkflowOutputForBundle],
@@ -8324,6 +8330,13 @@ function assertStrictLayoutDuplicate(raw, options, section, label) {
 			`${label} (${parserName}) lost duplicate evidence: ${JSON.stringify(parsed.issues)}`,
 		);
 		assert.match(duplicate.message, /exactly once; found [2-9]\d*/);
+		if (expectedCount !== undefined) {
+			assert.equal(
+				duplicate.message,
+				`${section} section must appear exactly once; found ${expectedCount}`,
+				`${label} (${parserName}) reported the wrong duplicate count`,
+			);
+		}
 	}
 }
 
@@ -8361,6 +8374,98 @@ test("workflow output parsers reject duplicate sections at every canonical bound
 				}
 			}
 		}
+	}
+
+	for (const openMarkerCount of [1, 2, 3, 1_000]) {
+		const mixedRaw = [
+			strictLayoutSection("control"),
+			strictLayoutSection(
+				"analysis",
+				`First analysis mentions literal ${"<analysis>".repeat(openMarkerCount)} text.`,
+			),
+			strictLayoutSection(
+				"control",
+				JSON.stringify({ schema: "stage-control-v1", digest: "second" }),
+			),
+			strictLayoutSection(
+				"analysis",
+				"Second analysis mentions literal </analysis> text.",
+			),
+		].join("\n");
+		for (const section of ["control", "analysis"]) {
+			assertStrictLayoutDuplicate(
+				mixedRaw,
+				{ analysisRequired: true, refsRequired: true },
+				section,
+				`mixed duplicate evidence with ${openMarkerCount} open-only markers for ${section}`,
+				2,
+			);
+		}
+	}
+
+	for (const count of [3, 4]) {
+		for (const openMarkerCount of [1, 3]) {
+			const raw = [
+				strictLayoutSection("control"),
+				...Array.from({ length: count }, (_, index) =>
+					strictLayoutSection(
+						"analysis",
+						index === 0
+							? `Analysis 1 mentions ${"<analysis>".repeat(openMarkerCount)} literal markers.`
+							: `Analysis ${index + 1}.`,
+					),
+				),
+				strictLayoutSection("refs"),
+			].join("\n");
+			assertStrictLayoutDuplicate(
+				raw,
+				{ analysisRequired: true, refsRequired: true },
+				"analysis",
+				`${count} analysis sections after ${openMarkerCount} open-only markers`,
+				count,
+			);
+		}
+	}
+
+	const extraAnalysisCases = [
+		{
+			name: "required analysis with two extras after refs",
+			options: { analysisRequired: true, refsRequired: true },
+			expectedCount: 3,
+			raw: [
+				strictLayoutSection("control"),
+				strictLayoutSection("analysis"),
+				strictLayoutSection("refs"),
+				strictLayoutSection(
+					"analysis",
+					"First extra mentions literal <analysis> text.",
+				),
+				strictLayoutSection("analysis", "Second extra."),
+			].join("\n"),
+		},
+		{
+			name: "optional analysis with two extras after refs",
+			options: { analysisRequired: false, refsRequired: true },
+			expectedCount: 2,
+			raw: [
+				strictLayoutSection("control"),
+				strictLayoutSection("refs"),
+				strictLayoutSection(
+					"analysis",
+					"First extra mentions literal <analysis> text.",
+				),
+				strictLayoutSection("analysis", "Second extra."),
+			].join("\n"),
+		},
+	];
+	for (const fixture of extraAnalysisCases) {
+		assertStrictLayoutDuplicate(
+			fixture.raw,
+			fixture.options,
+			"analysis",
+			fixture.name,
+			fixture.expectedCount,
+		);
 	}
 });
 
@@ -8418,6 +8523,32 @@ test("workflow output parsers retain duplicate evidence across missing-tail dama
 		);
 	}
 
+	const mixedUnclosedTail = [
+		control,
+		strictLayoutSection(
+			"analysis",
+			`First analysis mentions ${"<analysis>".repeat(3)} literal markers.`,
+		),
+		strictLayoutSection(
+			"control",
+			JSON.stringify({ schema: "stage-control-v1", digest: "second" }),
+		),
+		strictLayoutSection(
+			"analysis",
+			"Second analysis mentions literal </analysis> text.",
+		),
+		"<refs>[]",
+	].join("\n");
+	for (const section of ["control", "analysis"]) {
+		assertStrictLayoutDuplicate(
+			mixedUnclosedTail,
+			{ analysisRequired: true, refsRequired: true },
+			section,
+			`mixed open-only literal duplicate with unclosed refs for ${section}`,
+			2,
+		);
+	}
+
 	for (const options of [
 		{ analysisRequired: true, refsRequired: true },
 		{ analysisRequired: false, refsRequired: true },
@@ -8470,6 +8601,9 @@ test("workflow output parsers preserve literal markers and safe tail repairs", (
 		"Literal <analysis> opening marker remains data.",
 		"Literal </analysis> closing marker remains data.",
 		"Literal <analysis>balanced</analysis> marker pair remains data.",
+		"Compare <analysis>A</analysis> and <analysis>B</analysis> examples.",
+		"Compare literal </analysis> with literal <control> in prose.",
+		`Repeated open-only markers remain data: ${"<analysis>".repeat(1_000)}`,
 	];
 	for (const analysisText of markerCases) {
 		const raw = [
@@ -8493,6 +8627,26 @@ test("workflow output parsers preserve literal markers and safe tail repairs", (
 			const parsed = parser(raw);
 			assert.equal(parsed.valid, true, JSON.stringify(parsed.issues));
 		}
+	}
+
+	const repeatedJsonMarkers = [
+		strictLayoutSection(
+			"control",
+			JSON.stringify({
+				schema: "stage-control-v1",
+				digest: "repeated quoted markers",
+				note: "</control>".repeat(1_000),
+			}),
+		),
+		strictLayoutSection("analysis", "Detailed reasoning."),
+		strictLayoutSection(
+			"refs",
+			JSON.stringify([{ note: "</refs>".repeat(1_000) }]),
+		),
+	].join("\n");
+	for (const parser of [parseWorkflowOutput, parseWorkflowOutputForBundle]) {
+		const parsed = parser(repeatedJsonMarkers);
+		assert.equal(parsed.valid, true, JSON.stringify(parsed.issues));
 	}
 
 	const safeRepairs = [
