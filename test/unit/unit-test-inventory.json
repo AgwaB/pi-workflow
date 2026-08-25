@@ -1,7 +1,7 @@
 {
 	"schema": "pi-workflow-unit-test-inventory-v1",
 	"source": "unit.test.mjs",
-	"count": 527,
+	"count": 530,
 	"tests": [
 		{
 			"name": "public schemaVersion 1 parser accepts artifact graph and rejects non-artifactGraph top-level shapes",
@@ -517,6 +517,24 @@
 			"name": "non artifact graph subagent launches do not request child sessions",
 			"occurrence": 1,
 			"sha256": "db9c3fe06285a2c82927757c61d3071403451b3016735dade9e51b0b7f27f14a",
+			"domain": "artifact-web"
+		},
+		{
+			"name": "workflow output parsers reject duplicate sections at every canonical boundary",
+			"occurrence": 1,
+			"sha256": "ab46c9a330341e5f06144d47b31473f01b746c8806f3875b577d9d31c7423596",
+			"domain": "artifact-web"
+		},
+		{
+			"name": "workflow output parsers retain duplicate evidence across missing-tail damage",
+			"occurrence": 1,
+			"sha256": "5070b0568e3e14fa6ee7beec5fbbbfe93e1fb9bb5748bfa84764847c7927e2fc",
+			"domain": "artifact-web"
+		},
+		{
+			"name": "workflow output parsers preserve literal markers and safe tail repairs",
+			"occurrence": 1,
+			"sha256": "035aa1c4a2299ed34c0df882122c051cdb12d01f2e5ebf986b5ddd06a4ab54e3",
 			"domain": "artifact-web"
 		},
 		{
