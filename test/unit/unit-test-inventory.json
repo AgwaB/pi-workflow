@@ -1584,7 +1584,7 @@
 		{
 			"name": "global live model worker cap defers in leased scheduler without hanging",
 			"occurrence": 1,
-			"sha256": "6f804a76b08f4aa2268ab483a03dcc97253cf4311da4078ee2b37c17bafafd6d",
+			"sha256": "83ad11d0eb6fa9d4e860c4f5bb5e7fa7c15ee71cd706c9aa8f2351d5096f1186",
 			"domain": "engine-store"
 		},
 		{
