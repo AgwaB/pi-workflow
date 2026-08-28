@@ -25,9 +25,9 @@ const runDigests = {
 	"build:Release validation in read-only privilege context": "2dcf0cae26e5fbb692c48fcf6d85a57e02342aeb1e23fdb76311b35245c7c01e",
 	"build:Create exact package and source-tree metadata": "62304bd3eccd8703a5af4380b5c5a556e6156acf16f40db4da61dec51ed301ca",
 	"source:Verify promoted release source identity": "b3f7b5a016768071b5bec9b71e0717c834ceb06ea8c5c186caf5222ad38d46b0",
-	"publish:Publish exact promoted tarball and record registry envelopes": "a72a66c0375ad982e072ca511c14d8b4b2e376727421fde4ee4b8c3a76ea9090",
+	"publish:Publish exact promoted tarball and record registry envelopes": "f1cb881a7cee7ed93d50fd09438c20d3fa542c110901d19eaa4fe22a4179d47e",
 	"verification:Cryptographically gate and verify exact npm provenance": "ff3b05b74bf1fe6daee60657a68ec4f40205370d8bc57cfb2cbb5aaeea86978f",
-	"release:Create GitHub release for the exact published commit": "08c06410736e237e6beedb4f15cf4d2ce23b330d5bf22577d119a2e1db337c34",
+	"release:Create GitHub release for the exact published commit": "1c548669986532b1366629fbc7c276231bcd12094bda315768938cd3e08ba175",
 };
 
 const workflow = parse(readFileSync(".github/workflows/publish.yml", "utf8"));
@@ -44,13 +44,29 @@ const negativeFixtures = [
 	["release is not guarded after GitHub release operation", (c) => { c.jobs.release.steps[0].run = c.jobs.release.steps[0].run.replace("\nfi\nverify_release_tag", "\nfi"); }],
 	["release tag identity check is missing", (c) => { c.jobs.release.steps[0].run = c.jobs.release.steps[0].run.replace('test "$dereferenced_tag" = "$RELEASE_COMMIT"', "true # tag identity check removed"); }],
 	["release tag is not dereferenced through GitHub API", (c) => { c.jobs.release.steps[0].run = c.jobs.release.steps[0].run.replace('gh api --method GET "repos/$GITHUB_REPOSITORY/git/tags/$tag_object_sha" --jq \'.object.sha\'', "true # tag dereference removed"); }],
-	["release tag protection policy is missing", (c) => { c.jobs.release.steps[0].run = c.jobs.release.steps[0].run.replace('gh api --method GET "repos/$GITHUB_REPOSITORY/tags/protection"', "printf '[]'"); }],
+	["release ruleset policy endpoint is missing", (c) => { c.jobs.release.steps[0].run = c.jobs.release.steps[0].run.replace('gh api --method GET --paginate --slurp "repos/$GITHUB_REPOSITORY/rulesets"', "printf '[]'"); }],
+	["release ruleset target filter is missing", (c) => { c.jobs.release.steps[0].run = c.jobs.release.steps[0].run.replace("entry.enforcement === 'active' && entry.target === 'tag'", "entry.enforcement === 'active' && true"); }],
+	["release ruleset enforcement filter is missing", (c) => { c.jobs.release.steps[0].run = c.jobs.release.steps[0].run.replace("entry.enforcement === 'active' && entry.target === 'tag'", "true && entry.target === 'tag'"); }],
+	["release ruleset include-pattern check is missing", (c) => { c.jobs.release.steps[0].run = c.jobs.release.steps[0].run.replace("const included = refName.include.some((pattern) => globRegex(pattern).test(tagRef));", "const included = true;"); }],
+	["release ruleset exclude-pattern check is missing", (c) => { c.jobs.release.steps[0].run = c.jobs.release.steps[0].run.replace("const excluded = refName.exclude.some((pattern) => globRegex(pattern).test(tagRef));", "const excluded = false;"); }],
+	["release deletion-rule check is missing", (c) => { c.jobs.release.steps[0].run = c.jobs.release.steps[0].run.replace("ruleTypes.has('deletion')", "true"); }],
+	["release non-fast-forward-rule check is missing", (c) => { c.jobs.release.steps[0].run = c.jobs.release.steps[0].run.replace("ruleTypes.has('non_fast_forward')", "true"); }],
+	["release ruleset matcher treats plus as a wildcard", (c) => { c.jobs.release.steps[0].run = c.jobs.release.steps[0].run.replace("else expression += escape(character);", "else if (character === '+') expression += '[^/]+'; else expression += escape(character);"); }],
 	["publish is granted contents write", (c) => { c.jobs.publish.permissions.contents = "write"; }],
 	["publish lacks contents read", (c) => { delete c.jobs.publish.permissions.contents; }],
 	["publish tag identity check is missing", (c) => { c.jobs.publish.steps[2].run = c.jobs.publish.steps[2].run.replace('test "$dereferenced_tag" = "$RELEASE_COMMIT"', "true # tag identity check removed"); }],
 	["publish annotated/lightweight tag handling drifts", (c) => { c.jobs.publish.steps[2].run = c.jobs.publish.steps[2].run.replace('commit) dereferenced_tag="$tag_object_sha" ;;', 'commit) dereferenced_tag="" ;;'); }],
 	["publish tag is not dereferenced through GitHub API", (c) => { c.jobs.publish.steps[2].run = c.jobs.publish.steps[2].run.replace('git/tags/$tag_object_sha', 'git/tag-object/$tag_object_sha'); }],
-	["publish tag protection policy is missing", (c) => { c.jobs.publish.steps[2].run = c.jobs.publish.steps[2].run.replace('gh api --method GET "repos/$GITHUB_REPOSITORY/tags/protection"', "printf '[]'"); }],
+	["publish ruleset policy endpoint is missing", (c) => { c.jobs.publish.steps[2].run = c.jobs.publish.steps[2].run.replace('gh api --method GET --paginate --slurp "repos/$GITHUB_REPOSITORY/rulesets"', "printf '[]'"); }],
+	["publish ruleset target filter is missing", (c) => { c.jobs.publish.steps[2].run = c.jobs.publish.steps[2].run.replace("entry.enforcement === 'active' && entry.target === 'tag'", "entry.enforcement === 'active' && true"); }],
+	["publish ruleset enforcement filter is missing", (c) => { c.jobs.publish.steps[2].run = c.jobs.publish.steps[2].run.replace("entry.enforcement === 'active' && entry.target === 'tag'", "true && entry.target === 'tag'"); }],
+	["publish ruleset detail target check is missing", (c) => { c.jobs.publish.steps[2].run = c.jobs.publish.steps[2].run.replace("ruleset.target !== 'tag'", "false"); }],
+	["publish ruleset detail enforcement check is missing", (c) => { c.jobs.publish.steps[2].run = c.jobs.publish.steps[2].run.replace("ruleset.enforcement !== 'active'", "false"); }],
+	["publish ruleset include-pattern check is missing", (c) => { c.jobs.publish.steps[2].run = c.jobs.publish.steps[2].run.replace("const included = refName.include.some((pattern) => globRegex(pattern).test(tagRef));", "const included = true;"); }],
+	["publish ruleset exclude-pattern check is missing", (c) => { c.jobs.publish.steps[2].run = c.jobs.publish.steps[2].run.replace("const excluded = refName.exclude.some((pattern) => globRegex(pattern).test(tagRef));", "const excluded = false;"); }],
+	["publish deletion-rule check is missing", (c) => { c.jobs.publish.steps[2].run = c.jobs.publish.steps[2].run.replace("ruleTypes.has('deletion')", "true"); }],
+	["publish non-fast-forward-rule check is missing", (c) => { c.jobs.publish.steps[2].run = c.jobs.publish.steps[2].run.replace("ruleTypes.has('non_fast_forward')", "true"); }],
+	["publish ruleset matcher treats plus as a wildcard", (c) => { c.jobs.publish.steps[2].run = c.jobs.publish.steps[2].run.replace("else expression += escape(character);", "else if (character === '+') expression += '[^/]+'; else expression += escape(character);"); }],
 	["verification checkout ref drifts", (c) => { c.jobs.verification.steps[0].with.ref = "main"; }],
 	["unrelated action ref", (c) => { c.jobs.verification.steps[1].uses = "actions/setup-node@v6"; }],
 	["wrong registry", (c) => { c.jobs.publish.steps[2].run = c.jobs.publish.steps[2].run.replaceAll("https://registry.npmjs.org", "https://evil.example"); }],
@@ -168,8 +184,33 @@ function validateWorkflow(candidate) {
 	assert.match(publishRun, /gh api --method GET "repos\/\$GITHUB_REPOSITORY\/git\/ref\/tags\/\$tag_name"/);
 	assert.match(publishRun, /gh api --method GET "repos\/\$GITHUB_REPOSITORY\/git\/tags\/\$tag_object_sha" --jq '\.object\.sha'/);
 	assert.match(publishRun, /test "\$dereferenced_tag" = "\$RELEASE_COMMIT"/);
-	assert.match(publishRun, /gh api --method GET "repos\/\$GITHUB_REPOSITORY\/tags\/protection"/);
-	assert.match(publishRun, /protected-tag pattern/);
+	const legacyTagProtectionPath = ["tags", "protection"].join("/");
+	for (const [jobName, gateRun] of [["publish", publishRun], ["release", releaseRun]]) {
+		assert.equal(gateRun.includes(legacyTagProtectionPath), false, `${jobName} must not use the removed legacy tag-protection endpoint`);
+		assert.match(gateRun, /tag_ref="refs\/tags\/v\$TARGET_VERSION"/);
+		assert.match(gateRun, /rulesets_json="\$\(gh api --method GET --paginate --slurp "repos\/\$GITHUB_REPOSITORY\/rulesets"\)"/);
+		assert.match(gateRun, /Number\.isSafeInteger\(entry\.id\)/, `${jobName} must validate numeric ruleset IDs`);
+		assert.match(gateRun, /typeof entry\.target !== 'string'/, `${jobName} must validate ruleset targets`);
+		assert.match(gateRun, /typeof entry\.enforcement !== 'string'/, `${jobName} must validate ruleset enforcement`);
+		assert.match(gateRun, /entry\.enforcement === 'active' && entry\.target === 'tag'/, `${jobName} must select active tag rulesets`);
+		assert.match(gateRun, /gh api --method GET "repos\/\$GITHUB_REPOSITORY\/rulesets\/\$ruleset_id"/);
+		assert.match(gateRun, /ruleset\.id !== expectedId/);
+		assert.match(gateRun, /ruleset\.enforcement !== 'active' \|\| ruleset\.target !== 'tag'/, `${jobName} must verify exact active tag details`);
+		assert.match(gateRun, /ruleset\.conditions\?\.ref_name/);
+		assert.match(gateRun, /Array\.isArray\(refName\.include\)/);
+		assert.match(gateRun, /Array\.isArray\(refName\.exclude\)/);
+		assert.match(gateRun, /refName\.include/);
+		assert.match(gateRun, /refName\.exclude/);
+		assert.match(gateRun, /const included = refName\.include\.some\(\(pattern\) => globRegex\(pattern\)\.test\(tagRef\)\)/, `${jobName} must evaluate included ref patterns`);
+		assert.match(gateRun, /const excluded = refName\.exclude\.some\(\(pattern\) => globRegex\(pattern\)\.test\(tagRef\)\)/, `${jobName} must evaluate excluded ref patterns`);
+		assert.match(gateRun, /ruleTypes\.has\('deletion'\)/, `${jobName} must require deletion protection`);
+		assert.match(gateRun, /ruleTypes\.has\('non_fast_forward'\)/, `${jobName} must require non-fast-forward protection`);
+		assert.match(gateRun, /included && !excluded && ruleTypes\.has\('deletion'\) && ruleTypes\.has\('non_fast_forward'\)/);
+		assert.match(gateRun, /else expression \+= escape\(character\);/, `${jobName} must treat unsupported pattern characters literally`);
+		assert.doesNotMatch(gateRun, /character === '\+'/, `${jobName} must not treat bare plus as a wildcard`);
+		assert.match(gateRun, /pages\.length === 0|pages\.some\(\(page\) => !Array\.isArray\(page\)/, `${jobName} must reject empty or malformed ruleset pages`);
+		assert.match(gateRun, /activeTags\.length === 0/);
+	}
 	assert.equal(normalizedFunction(publishRun, "verify_release_tag"), normalizedFunction(releaseRun, "verify_release_tag"), "OIDC and post-release tag gates must be exact duplicates");
 	assert.match(publishRun, /\n[ \t]*verify_release_tag\n[ \t]*npm publish "\$package_path"/, "publish must verify the protected tag immediately before npm publish");
 	assert.equal((publishRun.match(/^[ \t]*verify_release_tag$/gm) ?? []).length, 1, "publish tag must be checked exactly before npm publish");
@@ -184,8 +225,6 @@ function validateWorkflow(candidate) {
 	assert.match(releaseRun, /gh api --method GET "repos\/\$GITHUB_REPOSITORY\/git\/ref\/tags\/\$tag_name"/);
 	assert.match(releaseRun, /gh api --method GET "repos\/\$GITHUB_REPOSITORY\/git\/tags\/\$tag_object_sha" --jq '\.object\.sha'/);
 	assert.match(releaseRun, /test "\$dereferenced_tag" = "\$RELEASE_COMMIT"/);
-	assert.match(releaseRun, /gh api --method GET "repos\/\$GITHUB_REPOSITORY\/tags\/protection"/);
-	assert.match(releaseRun, /protected-tag pattern/);
 	assert.doesNotMatch(releaseRun, /git\s+ls-remote/);
 	assert.equal((releaseRun.match(/^verify_release_tag$/gm) ?? []).length, 2, "release tag must be checked exactly before and after the GitHub operation");
 	assert.ok(releaseRun.includes("\nverify_release_tag\nif gh release view"), "missing pre-operation release-tag guard");

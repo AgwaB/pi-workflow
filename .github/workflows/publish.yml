@@ -235,6 +235,7 @@ jobs:
           umask 077
           verify_release_tag() {
             tag_name="v$TARGET_VERSION"
+            tag_ref="refs/tags/v$TARGET_VERSION"
             ref_json="$(gh api --method GET "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag_name")"
             tag_object_type="$(printf '%s' "$ref_json" | jq -r '.object.type')"
             tag_object_sha="$(printf '%s' "$ref_json" | jq -r '.object.sha')"
@@ -249,16 +250,62 @@ jobs:
             test "$dereferenced_tag" != "null"
             test "$dereferenced_tag" = "$RELEASE_COMMIT"
 
-            protected_patterns="$(gh api --method GET "repos/$GITHUB_REPOSITORY/tags/protection")"
-            TAG_NAME="$tag_name" PROTECTED_PATTERNS="$protected_patterns" node --input-type=module <<'NODE'
-          const tagName = process.env.TAG_NAME;
-          const protections = JSON.parse(process.env.PROTECTED_PATTERNS);
-          const patterns = Array.isArray(protections) ? protections.map((entry) => entry?.pattern).filter((pattern) => typeof pattern === 'string' && pattern.length > 0) : [];
-          const escape = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-          const glob = (pattern) => pattern.split(/([*?])/).map((part) => part === '*' ? '.*' : part === '?' ? '.' : escape(part)).join('');
-          const matches = patterns.some((pattern) => new RegExp(`^${glob(pattern)}$`).test(tagName));
-          if (!matches) throw new Error(`release tag ${tagName} is not covered by a GitHub protected-tag pattern`);
+            rulesets_json="$(gh api --method GET --paginate --slurp "repos/$GITHUB_REPOSITORY/rulesets")"
+            active_ruleset_ids="$(RULESETS_JSON="$rulesets_json" node --input-type=module <<'NODE'
+          const raw = process.env.RULESETS_JSON;
+          let pages;
+          try { pages = JSON.parse(raw); } catch (error) { throw new Error(`rulesets response is not valid JSON: ${error.message}`); }
+          if (!Array.isArray(pages) || pages.length === 0 || pages.some((page) => !Array.isArray(page) || page.length === 0)) throw new Error('rulesets response must contain non-empty pages');
+          const summaries = pages.flat();
+          const ids = new Set();
+          for (const entry of summaries) {
+            if (!entry || typeof entry !== 'object' || Array.isArray(entry) || !Number.isSafeInteger(entry.id) || entry.id <= 0 || typeof entry.target !== 'string' || typeof entry.enforcement !== 'string') throw new Error('rulesets response contains a malformed summary');
+            if (ids.has(entry.id)) throw new Error(`rulesets response contains duplicate id ${entry.id}`);
+            ids.add(entry.id);
+          }
+          const activeTags = summaries.filter((entry) => entry.enforcement === 'active' && entry.target === 'tag');
+          if (activeTags.length === 0) throw new Error('no active tag ruleset was returned');
+          process.stdout.write(activeTags.map((entry) => String(entry.id)).join('\n'));
           NODE
+          )"
+            matched_ruleset=0
+            while IFS= read -r ruleset_id; do
+              test "$ruleset_id" != ""
+              ruleset_json="$(gh api --method GET "repos/$GITHUB_REPOSITORY/rulesets/$ruleset_id")"
+              ruleset_match="$(RULESET_ID="$ruleset_id" RULESET_JSON="$ruleset_json" TAG_REF="$tag_ref" node --input-type=module <<'NODE'
+          const raw = process.env.RULESET_JSON;
+          const expectedId = Number(process.env.RULESET_ID);
+          const tagRef = process.env.TAG_REF;
+          let ruleset;
+          try { ruleset = JSON.parse(raw); } catch (error) { throw new Error(`ruleset detail is not valid JSON: ${error.message}`); }
+          if (!ruleset || typeof ruleset !== 'object' || Array.isArray(ruleset) || !Number.isSafeInteger(expectedId) || expectedId <= 0 || ruleset.id !== expectedId || ruleset.enforcement !== 'active' || ruleset.target !== 'tag') throw new Error('ruleset detail is not an exact active tag ruleset');
+          const refName = ruleset.conditions?.ref_name;
+          if (!refName || typeof refName !== 'object' || Array.isArray(refName) || !Array.isArray(refName.include) || !Array.isArray(refName.exclude) || refName.include.length === 0 || refName.include.some((pattern) => typeof pattern !== 'string' || pattern.length === 0) || refName.exclude.some((pattern) => typeof pattern !== 'string' || pattern.length === 0)) throw new Error('ruleset ref_name conditions are malformed');
+          if (!Array.isArray(ruleset.rules) || ruleset.rules.length === 0 || ruleset.rules.some((rule) => !rule || typeof rule !== 'object' || Array.isArray(rule) || typeof rule.type !== 'string' || rule.type.length === 0)) throw new Error('ruleset rules are malformed');
+          const escape = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const globRegex = (pattern) => {
+            let expression = '^';
+            for (let index = 0; index < pattern.length; index++) {
+              const character = pattern[index];
+              if (character === '*') {
+                if (pattern[index + 1] === '*') index++;
+                expression += pattern[index - 1] === '*' ? '.*' : '[^/]*';
+              } else if (character === '?') expression += '[^/]';
+              else expression += escape(character);
+            }
+            return new RegExp(`${expression}$`);
+          };
+          const included = refName.include.some((pattern) => globRegex(pattern).test(tagRef));
+          const excluded = refName.exclude.some((pattern) => globRegex(pattern).test(tagRef));
+          const ruleTypes = new Set(ruleset.rules.map((rule) => rule.type));
+          process.stdout.write(included && !excluded && ruleTypes.has('deletion') && ruleTypes.has('non_fast_forward') ? 'true' : 'false');
+          NODE
+              )"
+              if [ "$ruleset_match" = "true" ]; then
+                matched_ruleset=1
+              fi
+            done <<< "$active_ruleset_ids"
+            test "$matched_ruleset" = "1"
           }
           printf '%s\n' 'registry=https://registry.npmjs.org/' 'tag=latest' > "$NPM_CONFIG_USERCONFIG"
           printf '%s\n' 'registry=https://registry.npmjs.org/' > "$NPM_CONFIG_GLOBALCONFIG"
@@ -415,6 +462,7 @@ jobs:
           set -euo pipefail
           verify_release_tag() {
             tag_name="v$TARGET_VERSION"
+            tag_ref="refs/tags/v$TARGET_VERSION"
             ref_json="$(gh api --method GET "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag_name")"
             tag_object_type="$(printf '%s' "$ref_json" | jq -r '.object.type')"
             tag_object_sha="$(printf '%s' "$ref_json" | jq -r '.object.sha')"
@@ -429,16 +477,62 @@ jobs:
             test "$dereferenced_tag" != "null"
             test "$dereferenced_tag" = "$RELEASE_COMMIT"
 
-            protected_patterns="$(gh api --method GET "repos/$GITHUB_REPOSITORY/tags/protection")"
-            TAG_NAME="$tag_name" PROTECTED_PATTERNS="$protected_patterns" node --input-type=module <<'NODE'
-          const tagName = process.env.TAG_NAME;
-          const protections = JSON.parse(process.env.PROTECTED_PATTERNS);
-          const patterns = Array.isArray(protections) ? protections.map((entry) => entry?.pattern).filter((pattern) => typeof pattern === 'string' && pattern.length > 0) : [];
-          const escape = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-          const glob = (pattern) => pattern.split(/([*?])/).map((part) => part === '*' ? '.*' : part === '?' ? '.' : escape(part)).join('');
-          const matches = patterns.some((pattern) => new RegExp(`^${glob(pattern)}$`).test(tagName));
-          if (!matches) throw new Error(`release tag ${tagName} is not covered by a GitHub protected-tag pattern`);
+            rulesets_json="$(gh api --method GET --paginate --slurp "repos/$GITHUB_REPOSITORY/rulesets")"
+            active_ruleset_ids="$(RULESETS_JSON="$rulesets_json" node --input-type=module <<'NODE'
+          const raw = process.env.RULESETS_JSON;
+          let pages;
+          try { pages = JSON.parse(raw); } catch (error) { throw new Error(`rulesets response is not valid JSON: ${error.message}`); }
+          if (!Array.isArray(pages) || pages.length === 0 || pages.some((page) => !Array.isArray(page) || page.length === 0)) throw new Error('rulesets response must contain non-empty pages');
+          const summaries = pages.flat();
+          const ids = new Set();
+          for (const entry of summaries) {
+            if (!entry || typeof entry !== 'object' || Array.isArray(entry) || !Number.isSafeInteger(entry.id) || entry.id <= 0 || typeof entry.target !== 'string' || typeof entry.enforcement !== 'string') throw new Error('rulesets response contains a malformed summary');
+            if (ids.has(entry.id)) throw new Error(`rulesets response contains duplicate id ${entry.id}`);
+            ids.add(entry.id);
+          }
+          const activeTags = summaries.filter((entry) => entry.enforcement === 'active' && entry.target === 'tag');
+          if (activeTags.length === 0) throw new Error('no active tag ruleset was returned');
+          process.stdout.write(activeTags.map((entry) => String(entry.id)).join('\n'));
           NODE
+          )"
+            matched_ruleset=0
+            while IFS= read -r ruleset_id; do
+              test "$ruleset_id" != ""
+              ruleset_json="$(gh api --method GET "repos/$GITHUB_REPOSITORY/rulesets/$ruleset_id")"
+              ruleset_match="$(RULESET_ID="$ruleset_id" RULESET_JSON="$ruleset_json" TAG_REF="$tag_ref" node --input-type=module <<'NODE'
+          const raw = process.env.RULESET_JSON;
+          const expectedId = Number(process.env.RULESET_ID);
+          const tagRef = process.env.TAG_REF;
+          let ruleset;
+          try { ruleset = JSON.parse(raw); } catch (error) { throw new Error(`ruleset detail is not valid JSON: ${error.message}`); }
+          if (!ruleset || typeof ruleset !== 'object' || Array.isArray(ruleset) || !Number.isSafeInteger(expectedId) || expectedId <= 0 || ruleset.id !== expectedId || ruleset.enforcement !== 'active' || ruleset.target !== 'tag') throw new Error('ruleset detail is not an exact active tag ruleset');
+          const refName = ruleset.conditions?.ref_name;
+          if (!refName || typeof refName !== 'object' || Array.isArray(refName) || !Array.isArray(refName.include) || !Array.isArray(refName.exclude) || refName.include.length === 0 || refName.include.some((pattern) => typeof pattern !== 'string' || pattern.length === 0) || refName.exclude.some((pattern) => typeof pattern !== 'string' || pattern.length === 0)) throw new Error('ruleset ref_name conditions are malformed');
+          if (!Array.isArray(ruleset.rules) || ruleset.rules.length === 0 || ruleset.rules.some((rule) => !rule || typeof rule !== 'object' || Array.isArray(rule) || typeof rule.type !== 'string' || rule.type.length === 0)) throw new Error('ruleset rules are malformed');
+          const escape = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const globRegex = (pattern) => {
+            let expression = '^';
+            for (let index = 0; index < pattern.length; index++) {
+              const character = pattern[index];
+              if (character === '*') {
+                if (pattern[index + 1] === '*') index++;
+                expression += pattern[index - 1] === '*' ? '.*' : '[^/]*';
+              } else if (character === '?') expression += '[^/]';
+              else expression += escape(character);
+            }
+            return new RegExp(`${expression}$`);
+          };
+          const included = refName.include.some((pattern) => globRegex(pattern).test(tagRef));
+          const excluded = refName.exclude.some((pattern) => globRegex(pattern).test(tagRef));
+          const ruleTypes = new Set(ruleset.rules.map((rule) => rule.type));
+          process.stdout.write(included && !excluded && ruleTypes.has('deletion') && ruleTypes.has('non_fast_forward') ? 'true' : 'false');
+          NODE
+              )"
+              if [ "$ruleset_match" = "true" ]; then
+                matched_ruleset=1
+              fi
+            done <<< "$active_ruleset_ids"
+            test "$matched_ruleset" = "1"
           }
 
           verify_release_tag
