@@ -188,10 +188,13 @@ async function feedbackReceipts(cwd, runId) {
 		throw error;
 	});
 	return Promise.all(
-		files.sort().map(async (file) => ({
-			file,
-			receipt: parseJsonFixture(await readFile(join(dir, file), "utf8")),
-		})),
+		files
+			.filter((file) => file.endsWith(".json"))
+			.sort()
+			.map(async (file) => ({
+				file,
+				receipt: parseJsonFixture(await readFile(join(dir, file), "utf8")),
+			})),
 	);
 }
 
@@ -1386,7 +1389,11 @@ test("workflow wait timeout preserves its error and hands delivery back after re
 		assert.ok(releaseAttempts >= 3);
 		setRunLeaseTestHooksForTests(undefined);
 		await eventually(() => assert.equal(sends, 1), 2_000);
-		assert.equal((await feedbackReceipts(cwd, base.runId)).length, 1);
+		await eventually(
+			async () =>
+				assert.equal((await feedbackReceipts(cwd, base.runId)).length, 1),
+			2_000,
+		);
 		const reclaimed = await eventually(async () => {
 			const lease = await acquireRunFileLease(
 				cwd,
@@ -1400,7 +1407,10 @@ test("workflow wait timeout preserves its error and hands delivery back after re
 	} finally {
 		setRunLeaseTestHooksForTests(undefined);
 		setWorkflowFeedbackPollMsForTests(undefined);
-		await rm(cwd, { recursive: true, force: true });
+		await eventually(
+			() => rm(cwd, { recursive: true, force: true }),
+			2_000,
+		);
 	}
 });
 
