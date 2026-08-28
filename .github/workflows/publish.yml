@@ -21,8 +21,6 @@ jobs:
     permissions:
       contents: read
     env:
-      NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/pi-workflow-npmrc
-      NPM_CONFIG_GLOBALCONFIG: ${{ runner.temp }}/pi-workflow-global-npmrc
       NPM_CONFIG_REGISTRY: https://registry.npmjs.org
       NPM_CONFIG_TAG: latest
     outputs:
@@ -40,12 +38,35 @@ jobs:
           node-version: 24
           package-manager-cache: false
 
-      - name: Show Node/npm versions
+      - name: Bootstrap private npm config
         run: |
           set -euo pipefail
           umask 077
+          test -n "${RUNNER_TEMP:-}"
+          test -d "$RUNNER_TEMP"
+          test -n "${GITHUB_WORKSPACE:-}"
+          case "$RUNNER_TEMP" in
+            "$GITHUB_WORKSPACE"|"$GITHUB_WORKSPACE"/*|"$PWD"|"$PWD"/*)
+              echo "RUNNER_TEMP must be outside checkout and package roots" >&2
+              exit 1
+              ;;
+          esac
+          export NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/pi-workflow-npmrc"
+          export NPM_CONFIG_GLOBALCONFIG="$RUNNER_TEMP/pi-workflow-global-npmrc"
+          export NPM_CONFIG_REGISTRY="https://registry.npmjs.org"
+          export NPM_CONFIG_TAG="latest"
           printf '%s\n' 'registry=https://registry.npmjs.org/' 'tag=latest' > "$NPM_CONFIG_USERCONFIG"
           printf '%s\n' 'registry=https://registry.npmjs.org/' > "$NPM_CONFIG_GLOBALCONFIG"
+          {
+            printf 'NPM_CONFIG_USERCONFIG=%s\n' "$NPM_CONFIG_USERCONFIG"
+            printf 'NPM_CONFIG_GLOBALCONFIG=%s\n' "$NPM_CONFIG_GLOBALCONFIG"
+            printf 'NPM_CONFIG_REGISTRY=%s\n' "$NPM_CONFIG_REGISTRY"
+            printf 'NPM_CONFIG_TAG=%s\n' "$NPM_CONFIG_TAG"
+          } >> "$GITHUB_ENV"
+
+      - name: Show Node/npm versions
+        run: |
+          set -euo pipefail
           test ! -e .npmrc
           node --version
           npm --version
@@ -208,8 +229,6 @@ jobs:
       contents: read
       id-token: write
     env:
-      NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/pi-workflow-npmrc
-      NPM_CONFIG_GLOBALCONFIG: ${{ runner.temp }}/pi-workflow-global-npmrc
       NPM_CONFIG_REGISTRY: https://registry.npmjs.org
       NPM_CONFIG_TAG: latest
     steps:
@@ -217,6 +236,32 @@ jobs:
         with:
           node-version: 24
           package-manager-cache: false
+
+      - name: Bootstrap private npm config
+        run: |
+          set -euo pipefail
+          umask 077
+          test -n "${RUNNER_TEMP:-}"
+          test -d "$RUNNER_TEMP"
+          test -n "${GITHUB_WORKSPACE:-}"
+          case "$RUNNER_TEMP" in
+            "$GITHUB_WORKSPACE"|"$GITHUB_WORKSPACE"/*|"$PWD"|"$PWD"/*)
+              echo "RUNNER_TEMP must be outside checkout and package roots" >&2
+              exit 1
+              ;;
+          esac
+          export NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/pi-workflow-npmrc"
+          export NPM_CONFIG_GLOBALCONFIG="$RUNNER_TEMP/pi-workflow-global-npmrc"
+          export NPM_CONFIG_REGISTRY="https://registry.npmjs.org"
+          export NPM_CONFIG_TAG="latest"
+          printf '%s\n' 'registry=https://registry.npmjs.org/' 'tag=latest' > "$NPM_CONFIG_USERCONFIG"
+          printf '%s\n' 'registry=https://registry.npmjs.org/' > "$NPM_CONFIG_GLOBALCONFIG"
+          {
+            printf 'NPM_CONFIG_USERCONFIG=%s\n' "$NPM_CONFIG_USERCONFIG"
+            printf 'NPM_CONFIG_GLOBALCONFIG=%s\n' "$NPM_CONFIG_GLOBALCONFIG"
+            printf 'NPM_CONFIG_REGISTRY=%s\n' "$NPM_CONFIG_REGISTRY"
+            printf 'NPM_CONFIG_TAG=%s\n' "$NPM_CONFIG_TAG"
+          } >> "$GITHUB_ENV"
 
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
@@ -307,8 +352,6 @@ jobs:
             done <<< "$active_ruleset_ids"
             test "$matched_ruleset" = "1"
           }
-          printf '%s\n' 'registry=https://registry.npmjs.org/' 'tag=latest' > "$NPM_CONFIG_USERCONFIG"
-          printf '%s\n' 'registry=https://registry.npmjs.org/' > "$NPM_CONFIG_GLOBALCONFIG"
           test ! -e .npmrc
           expected_file="agwab-pi-workflow-$TARGET_VERSION.tgz"
           package_path="$PWD/release-artifact/$expected_file"
@@ -365,8 +408,6 @@ jobs:
       EXPECTED_REPOSITORY: AgwaB/pi-workflow
       EXPECTED_WORKFLOW_REF: refs/heads/main
       EXPECTED_WORKFLOW_PATH: .github/workflows/publish.yml
-      NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/pi-workflow-npmrc
-      NPM_CONFIG_GLOBALCONFIG: ${{ runner.temp }}/pi-workflow-global-npmrc
       NPM_CONFIG_REGISTRY: https://registry.npmjs.org
       NPM_CONFIG_TAG: latest
     steps:
@@ -380,6 +421,32 @@ jobs:
         with:
           node-version: 24
           package-manager-cache: false
+
+      - name: Bootstrap private npm config
+        run: |
+          set -euo pipefail
+          umask 077
+          test -n "${RUNNER_TEMP:-}"
+          test -d "$RUNNER_TEMP"
+          test -n "${GITHUB_WORKSPACE:-}"
+          case "$RUNNER_TEMP" in
+            "$GITHUB_WORKSPACE"|"$GITHUB_WORKSPACE"/*|"$PWD"|"$PWD"/*)
+              echo "RUNNER_TEMP must be outside checkout and package roots" >&2
+              exit 1
+              ;;
+          esac
+          export NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/pi-workflow-npmrc"
+          export NPM_CONFIG_GLOBALCONFIG="$RUNNER_TEMP/pi-workflow-global-npmrc"
+          export NPM_CONFIG_REGISTRY="https://registry.npmjs.org"
+          export NPM_CONFIG_TAG="latest"
+          printf '%s\n' 'registry=https://registry.npmjs.org/' 'tag=latest' > "$NPM_CONFIG_USERCONFIG"
+          printf '%s\n' 'registry=https://registry.npmjs.org/' > "$NPM_CONFIG_GLOBALCONFIG"
+          {
+            printf 'NPM_CONFIG_USERCONFIG=%s\n' "$NPM_CONFIG_USERCONFIG"
+            printf 'NPM_CONFIG_GLOBALCONFIG=%s\n' "$NPM_CONFIG_GLOBALCONFIG"
+            printf 'NPM_CONFIG_REGISTRY=%s\n' "$NPM_CONFIG_REGISTRY"
+            printf 'NPM_CONFIG_TAG=%s\n' "$NPM_CONFIG_TAG"
+          } >> "$GITHUB_ENV"
 
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
@@ -400,8 +467,6 @@ jobs:
         run: |
           set -euo pipefail
           umask 077
-          printf '%s\n' 'registry=https://registry.npmjs.org/' 'tag=latest' > "$NPM_CONFIG_USERCONFIG"
-          printf '%s\n' 'registry=https://registry.npmjs.org/' > "$NPM_CONFIG_GLOBALCONFIG"
           test ! -e .npmrc
           expected_file="agwab-pi-workflow-$TARGET_VERSION.tgz"
           package_path="$PWD/release-artifact/$expected_file"
