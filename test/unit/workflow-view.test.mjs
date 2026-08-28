@@ -18,10 +18,15 @@ const theme = {
 
 const timestamp = "2026-07-07T00:00:00.000Z";
 
-async function waitFor(predicate, message = "condition did not settle") {
-	for (let attempt = 0; attempt < 200; attempt += 1) {
+async function waitFor(
+	predicate,
+	message = "condition did not settle",
+	timeoutMs = 5_000,
+) {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() <= deadline) {
 		if (predicate()) return;
-		await new Promise((resolve) => setImmediate(resolve));
+		await new Promise((resolve) => setTimeout(resolve, 10));
 	}
 	assert.fail(message);
 }
