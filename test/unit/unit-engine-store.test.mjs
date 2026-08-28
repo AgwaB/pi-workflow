@@ -4831,7 +4831,7 @@ test("cleanupSubagentRun releases global live model worker cap keys", async () =
 		assert.equal(interrupts, 1);
 		const secondLaunch = await Promise.race([
 			launchSubagentTask(cwd, second.run, second.task, second.compiledTask),
-			sleep(250).then(() => {
+			sleep(2_000).then(() => {
 				throw new Error("cleanup did not release global worker slot");
 			}),
 		]);

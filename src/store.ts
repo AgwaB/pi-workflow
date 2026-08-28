@@ -65,6 +65,11 @@ const pendingIndexUpdates = new Map<
 	string,
 	{ cwd: string; runIds: Set<string>; timer: ReturnType<typeof setTimeout> }
 >();
+// A debounce timer can have fired and removed its pending entry while the
+// asynchronous index update is still creating/releasing filesystem artifacts.
+// Keep those operations visible so test teardown can establish filesystem
+// quiescence before removing an isolated cwd.
+const inFlightIndexUpdates = new Set<Promise<unknown>>();
 const runLeaseContext = new AsyncLocalStorage<{
 	cwd: string;
 	runId: string;
@@ -1805,7 +1810,11 @@ function scheduleIndexUpdate(cwd: string, runId: string): void {
 
 	const runUpdate = (): void => {
 		pendingIndexUpdates.delete(key);
-		void updateIndex(cwd, [...runIds]).catch(() => undefined);
+		const update = updateIndex(cwd, [...runIds]).catch(() => undefined);
+		inFlightIndexUpdates.add(update);
+		void update.then(() => {
+			inFlightIndexUpdates.delete(update);
+		});
 	};
 
 	// Hot nonterminal updates share one per-cwd dirty set. Correctness-sensitive
@@ -1828,13 +1837,19 @@ export async function writeRunRecordDurable(
 }
 
 export async function flushPendingIndexUpdatesForTests(): Promise<number> {
-	const pending = [...pendingIndexUpdates.values()];
-	pendingIndexUpdates.clear();
-	for (const item of pending) clearTimeout(item.timer);
-	await Promise.all(
-		pending.map((item) => updateIndex(item.cwd, [...item.runIds])),
-	);
-	return pending.length;
+	let flushed = 0;
+	while (true) {
+		const pending = [...pendingIndexUpdates.values()];
+		pendingIndexUpdates.clear();
+		for (const item of pending) clearTimeout(item.timer);
+		const scheduled = pending.map((item) =>
+			updateIndex(item.cwd, [...item.runIds]),
+		);
+		const inFlight = [...inFlightIndexUpdates];
+		if (scheduled.length === 0 && inFlight.length === 0) return flushed;
+		await Promise.all([...scheduled, ...inFlight]);
+		flushed += pending.length;
+	}
 }
 
 export function setIndexUpdateDebounceMsForTests(value?: number): void {
