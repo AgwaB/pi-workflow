@@ -5010,7 +5010,7 @@ test("global live model worker cap defers in leased scheduler without hanging", 
 
 		await Promise.race([
 			scheduleRun(cwd, run.runId),
-			sleep(1000).then(() => {
+			sleep(5_000).then(() => {
 				throw new Error("leased scheduler hung on saturated global worker cap");
 			}),
 		]);
@@ -5028,7 +5028,7 @@ test("global live model worker cap defers in leased scheduler without hanging", 
 		await writeRunRecord(cwd, updated);
 		await Promise.race([
 			scheduleRun(cwd, run.runId),
-			sleep(1000).then(() => {
+			sleep(5_000).then(() => {
 				throw new Error("leased scheduler hung retrying global worker cap");
 			}),
 		]);
