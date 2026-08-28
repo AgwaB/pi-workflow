@@ -588,7 +588,7 @@
 		{
 			"name": "cleanupSubagentRun releases global live model worker cap keys",
 			"occurrence": 1,
-			"sha256": "8b8fbbbffcfab043939978f28d77bc5ed01d92110f706a3ca6c602aef4e3b779",
+			"sha256": "97af63a991a9df659a025f5e10ab509c791af0e2e9ad4e7e2da6c681a870ff90",
 			"domain": "engine-store"
 		},
 		{

@@ -32,7 +32,10 @@ import {
 	workflowRunDir,
 	writeRunRecord,
 } from "../../.tmp/unit/store.js";
-import { setSubagentApiForTests } from "../../.tmp/unit/subagent-backend.js";
+import {
+	setSubagentApiForTests,
+	setSubagentLaunchControlsForTests,
+} from "../../.tmp/unit/subagent-backend.js";
 import { setWorkflowOutputArtifactWriteHookForTests } from "../../.tmp/unit/workflow-output-artifacts.js";
 
 const UNIT_TEST_HOME = mkdtempSync(
@@ -40,6 +43,12 @@ const UNIT_TEST_HOME = mkdtempSync(
 );
 process.env.HOME = UNIT_TEST_HOME;
 process.env.USERPROFILE = UNIT_TEST_HOME;
+
+// Keep launch-slot timing local to this fixture. The recovery test deliberately
+// leaves a supervisor watcher alive while it rewrites a launch boundary; the
+// production default delay can otherwise let that watcher hold the lease until
+// the assertion runs under the full concurrent suite.
+setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
 
 after(() => {
 	rmSync(UNIT_TEST_HOME, { recursive: true, force: true });
