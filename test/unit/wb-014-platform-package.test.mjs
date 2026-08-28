@@ -53,6 +53,23 @@ test("CI validates the complete package surface on macOS and Linux with pinned a
 	assert.match(readRoot("README.md"), /macOS or Linux/);
 });
 
+test("package validation pack commands never run lifecycle builds", () => {
+	const packageJson = parseJson(readRoot("package.json"), "package.json");
+	assert.match(packageJson.scripts["pack:dry"], /npm pack .*--ignore-scripts/);
+
+	const releaseCheck = readRoot("tools/release/release-check.mjs");
+	assert.match(
+		releaseCheck,
+		/\["pack", "--dry-run", "--json", "--ignore-scripts", "--registry"/,
+	);
+
+	const packedLoader = readRoot("test/e2e/cases/packed-web-loader.mjs");
+	assert.match(
+		packedLoader,
+		/\["pack", "--pack-destination", packDir, "--silent", "--ignore-scripts"\]/,
+	);
+});
+
 test("release checker is shell-free and requires all official default, public variant, and scaffold bundle specs", () => {
 	const source = readRoot("tools/release/release-check.mjs");
 	assert.match(source, /shell: false/);
@@ -74,6 +91,32 @@ test("release checker is shell-free and requires all official default, public va
 	}
 	assert.match(source, /missing referenced workflow\/scaffold assets/i);
 	assert.match(source, /FORBIDDEN_CANDIDATE_PATTERN/);
+	for (const requiredPath of [
+		"src/code-search-compat-extension.ts",
+		"dist/code-search-compat-extension.js",
+		"node_modules/pi-web-access/package.json",
+		"node_modules/pi-web-access/index.ts",
+		"node_modules/pi-web-access/storage.ts",
+		"node_modules/pi-web-access/exa.ts",
+	]) {
+		assert.ok(source.includes(requiredPath), requiredPath);
+	}
+	assert.match(
+		source,
+		/lock\.packages\?\.\["node_modules\/pi-web-access"\]\?\.version/,
+	);
+	assert.match(source, /bundled pi-web-access must match package-lock\.json/);
+	assert.match(source, /assertPackedTypeScriptClosure/);
+	assert.match(source, /entryPaths: \["index\.ts", "storage\.ts"\]/);
+	assert.match(source, /registryFreeValidationOnly/);
+	assert.match(
+		source,
+		/const NPM_PACK_JSON_MAX_BUFFER = 8 \* 1024 \* 1024;/,
+	);
+	assert.match(
+		source,
+		/execFileSync\("npm", \["pack", "--dry-run", "--json", "--ignore-scripts", "--registry", NPM_REGISTRY, "--tag", NPM_DIST_TAG\], \{[\s\S]*?maxBuffer: NPM_PACK_JSON_MAX_BUFFER,[\s\S]*?\}\);/,
+	);
 });
 
 test("publish workflow parses npm pack JSON from a temporary file instead of argv", () => {
@@ -82,7 +125,7 @@ test("publish workflow parses npm pack JSON from a temporary file instead of arg
 	assert.match(publish, /trap cleanup_pack_json EXIT/);
 	assert.match(
 		publish,
-		/npm pack --ignore-scripts --json > "\$pack_json_file"/,
+		/npm pack --ignore-scripts --registry https:\/\/registry\.npmjs\.org --tag latest --json > "\$pack_json_file"/
 	);
 	assert.match(publish, /readFileSync\(process\.argv\[1\], "utf8"\)/);
 	assert.doesNotMatch(
@@ -112,7 +155,7 @@ test("publish workflow passes npm an unambiguous tarball path", () => {
 	assert.match(publish, /test -f "\$package_path"/);
 	assert.match(
 		publish,
-		/npm publish "\$package_path" --access public --provenance --ignore-scripts/,
+		/npm publish "\$package_path" --access public --provenance --ignore-scripts --registry https:\/\/registry\.npmjs\.org --tag latest/,
 	);
 });
 
@@ -124,6 +167,7 @@ test("release pack JSON parser handles the real dry-run manifest from a file pat
 			cwd: root,
 			encoding: "utf8",
 			timeout: 180_000,
+			maxBuffer: 8 * 1024 * 1024,
 		},
 	);
 	const tmp = mkdtempSync(join(tmpdir(), "pi-workflow-pack-json-"));
@@ -142,6 +186,10 @@ test("release pack JSON parser handles the real dry-run manifest from a file pat
 		);
 		assert.equal(actual, expected);
 		assert.ok(output.length > 0, "expected npm pack to emit JSON");
+		assert.ok(
+			Buffer.byteLength(output, "utf8") < 8 * 1024 * 1024,
+			"pack manifest must remain within the bounded release-check buffer",
+		);
 	} finally {
 		rmSync(tmp, { recursive: true, force: true });
 	}
@@ -218,6 +266,7 @@ test("npm dry-run package contains every local asset referenced by official, opt
 			cwd: root,
 			encoding: "utf8",
 			timeout: 180_000,
+			maxBuffer: 8 * 1024 * 1024,
 		},
 	);
 	const [summary] = parseJson(output, "npm pack dry-run output");
@@ -225,10 +274,25 @@ test("npm dry-run package contains every local asset referenced by official, opt
 	for (const required of [
 		"workflows/README.md",
 		"skills/workflow-guide/scaffolds/README.md",
+		"src/code-search-compat-extension.ts",
+		"dist/code-search-compat-extension.js",
+		"node_modules/pi-web-access/package.json",
+		"node_modules/pi-web-access/index.ts",
+		"node_modules/pi-web-access/storage.ts",
+		"node_modules/pi-web-access/exa.ts",
 		...bundleSpecs,
 	]) {
 		assert.ok(packed.has(required), `package missing ${required}`);
 	}
+	assert.equal(
+		parseJson(
+			readRoot("node_modules/pi-web-access/package.json"),
+			"bundled pi-web-access package.json",
+		).version,
+		parseJson(readRoot("package-lock.json"), "package-lock.json").packages[
+			"node_modules/pi-web-access"
+		].version,
+	);
 	for (const file of packed) {
 		assert.ok(
 			!file.startsWith("internal/"),

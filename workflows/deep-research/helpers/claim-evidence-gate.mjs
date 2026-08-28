@@ -839,17 +839,134 @@ function refsNoneMultiClaimBatchIssues({
 	return issues;
 }
 
-function verifierBatchId(sourceId) {
-	const prefix = "verify-claims.";
+function verifierBatchId(sourceId, stageId = "verify-claims") {
+	const prefix = `${stageId}.`;
 	if (typeof sourceId !== "string" || !sourceId.startsWith(prefix)) return null;
 	return sanitizeTaskId(sourceId.slice(prefix.length)) || null;
+}
+
+function verifierStageForSource(sourceId) {
+	for (const stageId of ["verify-claims", "verify-core-claims", "verify-tail-claims"]) {
+		if (sourceId === stageId || sourceId.startsWith(`${stageId}.`)) return stageId;
+	}
+	return null;
+}
+
+function exactVerifierOwner(status, sourceId, claimId, stageId) {
+	if (!status || typeof status !== "object" || !stageId) return null;
+	const source = typeof status.source === "string" ? status.source.trim() : "";
+	const specId = typeof status.specId === "string" ? status.specId.trim() : "";
+	const itemIdentity = typeof status.itemIdentity === "string" ? status.itemIdentity.trim() : "";
+	const placeholderSpecId = typeof status.placeholderSpecId === "string"
+		? status.placeholderSpecId.trim()
+		: "";
+	const expectedSpecId = `${stageId}.${claimId}`;
+	if (
+		source !== sourceId ||
+		status.stageId !== stageId ||
+		status.status !== "completed" ||
+		typeof status.taskId !== "string" || !status.taskId.trim() ||
+		specId !== expectedSpecId ||
+		itemIdentity !== claimId ||
+		placeholderSpecId !== `${stageId}.item`
+	) return null;
+	return {
+		source,
+		stageId,
+		specId,
+		taskId: status.taskId.trim(),
+		itemIdentity,
+		placeholderSpecId,
+		status: status.status,
+	};
+}
+
+function verifierOwnerForRow(sourceStatuses, sourceId, claimId) {
+	const stageId = verifierStageForSource(sourceId);
+	const owners = (Array.isArray(sourceStatuses) ? sourceStatuses : []).filter(
+		(status) => status && typeof status === "object" && status.source === sourceId,
+	);
+	return {
+		stageId,
+		owners,
+		exact: owners.length === 1
+			? exactVerifierOwner(owners[0], sourceId, claimId, stageId)
+			: null,
+	};
+}
+
+function exactVerifierBatchOwner(
+	status,
+	sourceId,
+	stageId,
+	batchId,
+	batchMembershipById,
+) {
+	if (!status || typeof status !== "object" || !stageId || !batchId) return null;
+	const source = typeof status.source === "string" ? status.source.trim() : "";
+	const specId = typeof status.specId === "string" ? status.specId.trim() : "";
+	const itemIdentity = typeof status.itemIdentity === "string" ? status.itemIdentity.trim() : "";
+	const placeholderSpecId = typeof status.placeholderSpecId === "string"
+		? status.placeholderSpecId.trim()
+		: "";
+	if (
+		source !== sourceId ||
+		status.stageId !== stageId ||
+		status.status !== "completed" ||
+		typeof status.taskId !== "string" || !status.taskId.trim() ||
+		specId !== `${stageId}.${batchId}` ||
+		!batchMembershipById.has(batchId) ||
+		itemIdentity !== batchId ||
+		placeholderSpecId !== `${stageId}.item`
+	) return null;
+	return {
+		source,
+		stageId,
+		specId,
+		taskId: status.taskId.trim(),
+		batchId,
+		itemIdentity,
+		placeholderSpecId,
+		status: status.status,
+	};
+}
+
+function verifierBatchOwnerForSource(
+	sourceStatuses,
+	sourceId,
+	batchMembershipById,
+	batchIdBySourceName,
+) {
+	const stageId = verifierStageForSource(sourceId);
+	const owners = (Array.isArray(sourceStatuses) ? sourceStatuses : []).filter(
+		(status) => status && typeof status === "object" && status.source === sourceId,
+	);
+	const batchId =
+		(stageId && verifierBatchId(sourceId, stageId)) ||
+		batchIdBySourceName?.get(sourceId) ||
+		null;
+	return {
+		stageId,
+		batchId,
+		owners,
+		exact: owners.length === 1
+			? exactVerifierBatchOwner(
+					owners[0],
+					sourceId,
+					stageId,
+					batchId,
+					batchMembershipById,
+				)
+			: null,
+	};
 }
 
 function buildBatchIdBySourceName(sourceStatuses) {
 	const bySource = new Map();
 	for (const status of Array.isArray(sourceStatuses) ? sourceStatuses : []) {
 		const source = typeof status?.source === "string" ? status.source : "";
-		const batchId = verifierBatchId(status?.specId);
+		const stageId = verifierStageForSource(source);
+		const batchId = stageId ? verifierBatchId(status?.specId, stageId) : null;
 		if (source && batchId) bySource.set(source, batchId);
 	}
 	return bySource;
@@ -863,8 +980,10 @@ function batchMembershipIssue({
 }) {
 	if (!(batchMembershipById instanceof Map) || batchMembershipById.size === 0)
 		return null;
+	const stageId = verifierStageForSource(sourceId);
 	const batchId =
-		verifierBatchId(sourceId) ?? batchIdBySourceName?.get(sourceId);
+		(stageId ? verifierBatchId(sourceId, stageId) : null) ??
+		batchIdBySourceName?.get(sourceId);
 	if (!batchId) {
 		return {
 			reason: "unknown_verification_batch_id",
@@ -1089,6 +1208,7 @@ function buildZeroCandidateFloorGap({
 function buildBatchAdoptionReadiness({ gateSummary, candidateCount }) {
 	const checks = [
 		["invalid_verifier_rows", gateSummary.invalidVerifierRows],
+		["verifier_owner_issues", gateSummary.verifierOwnerIssues],
 		["missing_verifier_results", gateSummary.missingVerifierResults],
 		["duplicate_verifier_rows", gateSummary.duplicateVerifierRows],
 		["duplicate_status_conflicts", gateSummary.duplicateStatusConflicts],
@@ -1120,10 +1240,15 @@ function buildBatchAdoptionReadiness({ gateSummary, candidateCount }) {
 const STATUS_BUCKETS = VERIFICATION_STATUS_BUCKETS;
 
 function findSource(sources, stageId) {
-	for (const [specId, source] of Object.entries(sources ?? {})) {
-		if (specId === stageId || specId.startsWith(`${stageId}.`)) return source;
+	const matches = Object.entries(sources ?? {}).filter(
+		([specId]) => specId === stageId || specId.startsWith(`${stageId}.`),
+	);
+	if (matches.length > 1) {
+		throw new Error(
+			`deep-research: ambiguous ${stageId} source (${matches.map(([specId]) => specId).join(", ")})`,
+		);
 	}
-	return null;
+	return matches[0]?.[1] ?? null;
 }
 
 export default async function claimEvidenceGate({
@@ -1206,6 +1331,8 @@ export default async function claimEvidenceGate({
 	const identityJoinNotes = [];
 	const sourceRefJoinFailures = [];
 	const invalidVerifierRows = [];
+	const verifierOwnerIssues = [];
+	const verifierOwnerLedger = [];
 	const duplicateVerifierRows = [];
 	const gateSummary = {
 		total: 0,
@@ -1226,6 +1353,7 @@ export default async function claimEvidenceGate({
 		refsNoneMultiClaimBatches: refsNoneBatchIssues.length,
 		sourceEvidenceCompatibilityFailures: 0,
 		sourceEvidenceCompatibilityMismatches: 0,
+		verifierOwnerIssues: 0,
 		additionalEvidenceSourceDowngrades: 0,
 		zeroCandidateFloorBlockers: 0,
 	};
@@ -1257,7 +1385,81 @@ export default async function claimEvidenceGate({
 	}
 	const verifierRowsById = new Map();
 	const legacyVerifierRows = [];
+	const batchOwnerBySource = new Map();
+	const batchOwnerIssueBySource = new Map();
+	const hasMaterializedStatuses = Object.hasOwn(context, "sourceStatuses");
+	// A batch carrier is a physical verifier task, not a claim identity. It must
+	// nevertheless have one exact completed materialized owner before any of its
+	// member rows can enter the audit ledger.
+	if (batchMembershipById.size > 0 && hasMaterializedStatuses) {
+		for (const [sourceId] of Object.entries(sources ?? {})) {
+			const stageId = verifierStageForSource(sourceId);
+			if (!stageId) continue;
+			const ownerCheck = verifierBatchOwnerForSource(
+				context.sourceStatuses,
+				sourceId,
+				batchMembershipById,
+				batchIdBySourceName,
+			);
+			if (ownerCheck.exact) {
+				batchOwnerBySource.set(sourceId, ownerCheck.exact);
+				verifierOwnerLedger.push(ownerCheck.exact);
+				continue;
+			}
+			// A bare carrier alias has no batch identity to bind. Leave that case
+			// to the normal batch-membership gate, which reports unknown batch
+			// identity rather than inventing an owner relationship.
+			if (!ownerCheck.batchId) continue;
+			const reason = ownerCheck.owners.length === 0
+				? "missing_materialized_verifier_batch_owner"
+				: ownerCheck.owners.length !== 1
+					? "verifier_batch_source_not_bound_to_exactly_one_materialized_owner"
+					: "verifier_batch_source_status_identity_mismatch";
+			const issue = {
+				sourceId,
+				batchId: ownerCheck.batchId,
+				ownerStageId: ownerCheck.stageId,
+				reason,
+				nextStep: "Repair the completed batch carrier status before accepting any member verifier row.",
+			};
+			batchOwnerIssueBySource.set(sourceId, issue);
+			verifierOwnerIssues.push(issue);
+			gateSummary.verifierOwnerIssues += 1;
+		}
+	}
+	// Batch envelopes have a separate membership/row gate. The exact singleton
+	// owner contract applies to the ordinary transparent foreach sources and
+	// must not reinterpret a physical batch carrier as one claim owner.
+	const strictOwnerMode = hasMaterializedStatuses && batchMembershipById.size === 0;
 	for (const { sourceId, claim, index } of verifierClaims) {
+		let owner;
+		if (batchMembershipById.size > 0) {
+			owner = batchOwnerBySource.get(sourceId);
+			const ownerIssue = batchOwnerIssueBySource.get(sourceId);
+			if (!owner && ownerIssue) {
+				// Preserve a more specific batch-membership failure when a row is
+				// also outside its carrier's declared batch. The carrier owner issue
+				// remains in verifierOwnerIssues, so neither defect is hidden.
+				const membershipIssue = batchMembershipIssue({
+					sourceId,
+					claimId: claimIdOf(claim).id,
+					batchMembershipById,
+					batchIdBySourceName,
+				});
+				if (!membershipIssue) {
+					const idCheck = claimIdOf(claim);
+					const issue = {
+						...(idCheck.id ? { claimId: idCheck.id } : {}),
+						sourceId,
+						...ownerIssue,
+					};
+					invalidVerifierRows.push({ ...issue, row: index });
+					remainingGaps.push(gapForVerifierIssue(issue));
+					gateSummary.invalidVerifierRows += 1;
+					continue;
+				}
+			}
+		}
 		const idCheck = claimIdOf(claim);
 		if (!idCheck.id) {
 			const issue = issueForVerifierRow({
@@ -1270,6 +1472,36 @@ export default async function claimEvidenceGate({
 			remainingGaps.push(gapForVerifierIssue(issue));
 			gateSummary.invalidVerifierRows += 1;
 			continue;
+		}
+		if (strictOwnerMode) {
+			const ownerCheck = verifierOwnerForRow(
+				context.sourceStatuses,
+				sourceId,
+				idCheck.id,
+			);
+			owner = ownerCheck.exact;
+			if (!owner) {
+				const reason = ownerCheck.owners.length === 0
+					? "missing_materialized_verifier_owner"
+					: ownerCheck.owners.length !== 1
+						? "verifier_source_not_bound_to_exactly_one_materialized_owner"
+						: "verifier_source_status_identity_mismatch";
+				const issue = issueForVerifierRow({
+					sourceId,
+					claim,
+					index,
+					claimId: idCheck.id,
+					reason,
+					ownerStageId: ownerCheck.stageId,
+				});
+				verifierOwnerIssues.push(issue);
+				invalidVerifierRows.push(issue);
+				remainingGaps.push(gapForVerifierIssue(issue));
+				gateSummary.invalidVerifierRows += 1;
+				gateSummary.verifierOwnerIssues += 1;
+				continue;
+			}
+			verifierOwnerLedger.push(owner);
 		}
 		if (candidateRecords.length > 0 && !candidatesById.has(idCheck.id)) {
 			const issue = issueForVerifierRow({
@@ -1306,7 +1538,12 @@ export default async function claimEvidenceGate({
 		const row = {
 			sourceId,
 			claimId: idCheck.id,
-			claim: { ...claim, [idCheck.field ?? "id"]: idCheck.id },
+			...(owner ? { owner: { ...owner } } : {}),
+			claim: {
+				...claim,
+				[idCheck.field ?? "id"]: idCheck.id,
+				...(owner ? { verifierOwner: { ...owner } } : {}),
+			},
 		};
 		gateSummary.validVerifierRows += 1;
 		if (candidateRecords.length > 0) {
@@ -1634,6 +1871,7 @@ export default async function claimEvidenceGate({
 		confidence: claim.confidence,
 		sourceRefs: claim.sourceRefs,
 		sourceUrls: claim.sourceUrls,
+		...(claim.verifierOwner ? { verifierOwner: { ...claim.verifierOwner } } : {}),
 		verdictDigest: claim.verdictDigest,
 		correctionOrCounterclaim: claim.correctionOrCounterclaim,
 	}));
@@ -1646,6 +1884,8 @@ export default async function claimEvidenceGate({
 		auditedClaims,
 		claimDigests,
 		gateSummary,
+		verifierOwnerLedger,
+		verifierOwnerIssues,
 		batchAdoptionReadiness,
 		remainingGaps,
 		sourceRefJoinFailures,

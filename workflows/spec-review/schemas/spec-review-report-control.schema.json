@@ -4,23 +4,88 @@
     "schema",
     "digest",
     "summary",
-    "findings"
+    "verdict",
+    "ownerLedger",
+    "ownerLedgerReconciliation",
+    "risks",
+    "recommendedNextAction"
   ],
   "properties": {
     "schema": {
       "type": "string",
-      "minLength": 1
+      "const": "spec-review-report-v1"
     },
     "digest": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "maxLength": 1200
     },
-    "summary": {},
-    "findings": {
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4000
+    },
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "CONFORMS",
+        "GAPS_FOUND",
+        "NEEDS_HUMAN",
+        "INCONCLUSIVE"
+      ]
+    },
+    "ownerLedger": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "required": ["source", "stageId", "specId", "taskId", "itemIdentity", "placeholderSpecId", "status"],
+        "properties": {
+          "source": { "type": "string", "minLength": 1 },
+          "stageId": { "type": "string", "minLength": 1 },
+          "specId": { "type": "string", "minLength": 1 },
+          "taskId": { "type": "string", "minLength": 1 },
+          "itemIdentity": { "type": "string", "minLength": 1 },
+          "placeholderSpecId": { "type": "string", "minLength": 1 },
+          "status": { "type": "string", "const": "completed" },
+          "batchId": { "type": "string" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "ownerLedgerReconciliation": {
+      "type": "object",
+      "required": ["ownerRowCount", "verifierRowCount", "ownerIds", "verifierIds", "duplicateOwnerIds", "duplicateVerifierIds", "missingOwnerRows", "orphanOwnerRows", "statusMismatches", "cardinalityPassed", "passed"],
+      "properties": {
+        "ownerRowCount": { "type": "integer", "minimum": 1 },
+        "verifierRowCount": { "type": "integer", "minimum": 1 },
+        "ownerIds": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "verifierIds": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "duplicateOwnerIds": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "duplicateVerifierIds": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "missingOwnerRows": { "type": "array", "items": { "type": "string" } },
+        "orphanOwnerRows": { "type": "array", "items": { "type": "string" } },
+        "statusMismatches": { "type": "array", "items": { "type": "string" } },
+        "cardinalityPassed": { "type": "boolean" },
+        "passed": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    "risks": {
       "type": "array",
       "items": {
-        "type": "object"
-      }
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1000
+      },
+      "maxItems": 12
+    },
+    "recommendedNextAction": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1600
     }
-  }
+  },
+  "additionalProperties": false
 }

@@ -1,21 +1,23 @@
 {
   "type": "object",
-  "required": [
-    "schema",
-    "digest",
-    "finding",
-    "verdict"
-  ],
+  "required": ["schema", "digest", "findingId", "finding", "verdict", "evidence", "counterEvidence", "recommendedAction"],
   "properties": {
-    "schema": {
-      "type": "string",
-      "minLength": 1
+    "schema": { "type": "string", "const": "stage-control-v1" },
+    "digest": { "type": "string", "minLength": 1, "maxLength": 1200 },
+    "findingId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "finding": { "type": "string", "minLength": 1, "maxLength": 400 },
+    "verdict": { "type": "string", "enum": ["KEEP", "WEAKEN", "DROP", "NEEDS_HUMAN"] },
+    "evidence": {
+      "type": "array",
+      "maxItems": 12,
+      "items": { "type": "string", "minLength": 1, "maxLength": 2000 }
     },
-    "digest": {
-      "type": "string",
-      "minLength": 1
+    "counterEvidence": {
+      "type": "array",
+      "maxItems": 12,
+      "items": { "type": "string", "minLength": 1, "maxLength": 2000 }
     },
-    "finding": {},
-    "verdict": {}
-  }
+    "recommendedAction": { "type": "string", "minLength": 1, "maxLength": 2000 }
+  },
+  "additionalProperties": false
 }

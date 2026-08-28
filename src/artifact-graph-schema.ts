@@ -1866,13 +1866,18 @@ function validateForeachStage(
 	validateWorkflowToolArray(each.tools, `${path}.each.tools`, issues);
 	optionalBoolean(each.readOnly, `${path}.each.readOnly`, issues);
 	optionalString(each.model, `${path}.each.model`, issues);
-	optionalString(each.thinking, `${path}.each.thinking`, issues);
+	optionalEnum(each.thinking, THINKING_LEVELS, `${path}.each.thinking`, issues);
 	optionalPositiveInteger(
 		each.maxRuntimeMs,
 		`${path}.each.maxRuntimeMs`,
 		issues,
 	);
-	optionalString(each.worktreePolicy, `${path}.each.worktreePolicy`, issues);
+	optionalEnum(
+		each.worktreePolicy,
+		WORKTREE_POLICIES,
+		`${path}.each.worktreePolicy`,
+		issues,
+	);
 	validateForeachItemPropertyPath(
 		each.itemIdentityPath,
 		`${path}.each.itemIdentityPath`,

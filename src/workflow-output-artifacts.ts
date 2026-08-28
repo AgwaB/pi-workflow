@@ -1,6 +1,18 @@
 import { randomBytes } from "node:crypto";
+import { lookup } from "node:dns/promises";
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+
+import { nonPublicIpReason } from "./workflow-network-policy.js";
+import { isSensitiveWorkflowQueryKey, redactSensitiveWorkflowText } from "./workflow-sensitive-query.js";
+
+// Unit tests replace fetch with an explicit in-memory transport. That seam is
+// enabled only inside Node's test context; production always uses the
+// request-based path below so DNS resolution is under our control.
+const defaultRefValidationFetch = globalThis.fetch;
+const runningUnderNodeTest = process.env.NODE_TEST_CONTEXT !== undefined;
 
 import {
 	validateStructuredContract,
@@ -31,6 +43,8 @@ const DEFAULT_REFS_URL_VALIDATION_TIMEOUT_MS = 8_000;
 const DEFAULT_REFS_URL_VALIDATION_MAX_URLS = 25;
 const REFS_URL_VALIDATION_CONCURRENCY = 4;
 const REFS_URL_VALIDATION_PER_HOST_CONCURRENCY = 1;
+const REFS_URL_VALIDATION_MAX_REDIRECTS = 5;
+const REFS_URL_VALIDATION_MAX_RESPONSE_BYTES = 64 * 1024;
 
 type WorkflowOutputSectionName = (typeof CANONICAL_SECTION_ORDER)[number];
 
@@ -200,6 +214,30 @@ interface SectionRequirements {
 	refsMinItems: number;
 }
 
+interface SectionObservation {
+	name: WorkflowOutputSectionName;
+	start: number;
+	contentStart: number;
+	contentEnd: number;
+	end?: number;
+}
+
+interface TextRange {
+	start: number;
+	end: number;
+}
+
+interface SectionLayoutScan {
+	sections: SectionMatch[];
+	observations: SectionObservation[];
+	duplicateNames: ReadonlySet<WorkflowOutputSectionName>;
+	duplicateCounts: ReadonlyMap<WorkflowOutputSectionName, number>;
+	outsideRanges: TextRange[];
+	complete: boolean;
+	repairEligible: boolean;
+	hasExtraProtocolBlocks: boolean;
+}
+
 export function parseWorkflowOutput(
 	raw: string,
 	options: ParseWorkflowOutputOptions = {},
@@ -208,22 +246,22 @@ export function parseWorkflowOutput(
 	const issues: WorkflowOutputIssue[] = [];
 	const repairs: WorkflowOutputRepair[] = [];
 	const requirements = sectionRequirements(options);
-	const sections = collectSections(protocolRaw, requirements);
-	validateSectionLayout(protocolRaw, sections, issues, requirements);
+	const layout = scanSectionLayout(protocolRaw, requirements);
+	validateSectionLayout(layout, issues, requirements);
 
 	const control = parseControlSection(
-		sectionText(sections, SECTION_CONTROL),
+		sectionText(layout.sections, SECTION_CONTROL),
 		issues,
 		repairs,
 		options,
 	);
 	const analysis = parseAnalysisSection(
-		sectionText(sections, SECTION_ANALYSIS),
+		sectionText(layout.sections, SECTION_ANALYSIS),
 		issues,
 		requirements,
 	);
 	const refs = parseRefsSection(
-		sectionText(sections, SECTION_REFS),
+		sectionText(layout.sections, SECTION_REFS),
 		issues,
 		requirements,
 	);
@@ -245,7 +283,7 @@ export function parseWorkflowOutputForBundle(
 ): ParsedWorkflowOutput {
 	const parsed = parseWorkflowOutput(raw, options);
 	if (parsed.valid) return parsed;
-	return parseSanitizedWorkflowOutput(raw, options) ?? parsed;
+	return parseSanitizedWorkflowOutput(parsed.raw, options) ?? parsed;
 }
 
 /** Validate a candidate bundle fully in memory without writing task artifacts. */
@@ -405,61 +443,124 @@ function normalizedRefsMinItems(value: number | undefined): number {
 	return Number.isInteger(value) && value > 0 ? value : 0;
 }
 
-function collectSections(
+function scanSectionLayout(
 	raw: string,
 	requirements: SectionRequirements,
-): SectionMatch[] {
-	const sections: SectionMatch[] = [];
+): SectionLayoutScan {
+	const observations = collectSectionObservations(raw, requirements);
+	const sections = observations.flatMap((observation): SectionMatch[] => {
+		if (observation.end === undefined) return [];
+		return [
+			{
+				name: observation.name,
+				content: raw
+					.slice(observation.contentStart, observation.contentEnd)
+					.trim(),
+				start: observation.start,
+				end: observation.end,
+			},
+		];
+	});
+	const expected = requiredSectionOrder(requirements);
+	const complete =
+		sections.length === expected.length &&
+		sections.every((section, index) => section.name === expected[index]);
+	const { duplicateNames, duplicateCounts, hasExtraProtocolBlocks } =
+		scanStructuralSectionOpenings(raw, observations, requirements);
+	return {
+		sections,
+		observations,
+		duplicateNames,
+		duplicateCounts,
+		outsideRanges: collectOutsideTextRanges(raw, sections),
+		complete,
+		repairEligible:
+			!complete && duplicateNames.size === 0 && !hasExtraProtocolBlocks,
+		hasExtraProtocolBlocks,
+	};
+}
+
+function collectSectionObservations(
+	raw: string,
+	requirements: SectionRequirements,
+): SectionObservation[] {
+	const observations: SectionObservation[] = [];
 	let cursor = 0;
 	const expected = requiredSectionOrder(requirements);
 	for (const [index, name] of expected.entries()) {
 		const openTag = `<${name}>`;
 		const closeTag = `</${name}>`;
+		const nextTag = expected[index + 1]
+			? `<${expected[index + 1]}>`
+			: undefined;
 		const openStart = raw.indexOf(openTag, cursor);
 		if (openStart < 0) continue;
 		const contentStart = openStart + openTag.length;
 		const closeStart = findSectionClose(raw, {
+			name,
 			contentStart,
 			closeTag,
-			nextTag: expected[index + 1] ? `<${expected[index + 1]}>` : undefined,
+			nextTag,
 		});
-		if (closeStart < 0) continue;
-		const end = closeStart + closeTag.length;
-		sections.push({
+		if (closeStart >= 0) {
+			const end = closeStart + closeTag.length;
+			observations.push({
+				name,
+				start: openStart,
+				contentStart,
+				contentEnd: closeStart,
+				end,
+			});
+			cursor = end;
+			continue;
+		}
+		const nextOpen = nextTag ? raw.indexOf(nextTag, contentStart) : -1;
+		const contentEnd = nextOpen >= 0 ? nextOpen : raw.length;
+		observations.push({
 			name,
-			content: raw.slice(contentStart, closeStart).trim(),
 			start: openStart,
-			end,
+			contentStart,
+			contentEnd,
 		});
-		cursor = end;
+		cursor = contentEnd;
 	}
-	return sections;
+	return observations;
 }
 
 function findSectionClose(
 	raw: string,
-	options: { contentStart: number; closeTag: string; nextTag?: string },
+	options: {
+		name: WorkflowOutputSectionName;
+		contentStart: number;
+		closeTag: string;
+		nextTag?: string;
+	},
 ): number {
-	let searchFrom = options.contentStart;
 	let fallback = -1;
-	while (true) {
-		const candidate = raw.indexOf(options.closeTag, searchFrom);
-		if (candidate < 0) break;
-		fallback = candidate;
-		const after = skipWhitespace(raw, candidate + options.closeTag.length);
-		if (
-			options.closeTag === "</control>" &&
-			isInsideJsonString(raw.slice(options.contentStart, candidate))
-		) {
-			searchFrom = candidate + options.closeTag.length;
-			continue;
+	let inJsonString = false;
+	let escaped = false;
+	for (let index = options.contentStart; index < raw.length; index += 1) {
+		if (options.name !== SECTION_ANALYSIS) {
+			const char = raw[index] ?? "";
+			if (escaped) {
+				escaped = false;
+				continue;
+			}
+			if (inJsonString && char === "\\") {
+				escaped = true;
+				continue;
+			}
+			if (char === '"') {
+				inJsonString = !inJsonString;
+				continue;
+			}
+			if (inJsonString) continue;
 		}
-		if (options.nextTag) {
-			if (raw.startsWith(options.nextTag, after)) return candidate;
-		} else if (raw.slice(after).trim() === "") {
-			return candidate;
-		}
-		searchFrom = candidate + options.closeTag.length;
+		if (!raw.startsWith(options.closeTag, index)) continue;
+		fallback = index;
+		const after = skipWhitespace(raw, index + options.closeTag.length);
+		if (options.nextTag && raw.startsWith(options.nextTag, after)) return index;
+		index += options.closeTag.length - 1;
 	}
 	return fallback;
 }
@@ -470,32 +571,294 @@ function skipWhitespace(raw: string, index: number): number {
 	return cursor;
 }
 
-function isInsideJsonString(text: string): boolean {
-	let inString = false;
+function scanStructuralSectionOpenings(
+	raw: string,
+	observations: readonly SectionObservation[],
+	requirements: SectionRequirements,
+): {
+	duplicateNames: ReadonlySet<WorkflowOutputSectionName>;
+	duplicateCounts: ReadonlyMap<WorkflowOutputSectionName, number>;
+	hasExtraProtocolBlocks: boolean;
+} {
+	const openingCounts = new Map<WorkflowOutputSectionName, number>();
+	const addOpenings = (
+		counts: ReadonlyMap<WorkflowOutputSectionName, number>,
+	): void => {
+		for (const [name, count] of counts) {
+			openingCounts.set(name, (openingCounts.get(name) ?? 0) + count);
+		}
+	};
+	for (const observation of observations) {
+		openingCounts.set(
+			observation.name,
+			(openingCounts.get(observation.name) ?? 0) + 1,
+		);
+		addOpenings(
+			countStructuralSectionOpenings(
+				raw.slice(observation.contentStart, observation.contentEnd),
+				observation.name,
+			),
+		);
+	}
+
+	for (const range of collectOutsideRanges(raw.length, observations)) {
+		addOpenings(countStructuralSectionOpenings(raw.slice(range.start, range.end)));
+	}
+
+	const duplicateNames = new Set<WorkflowOutputSectionName>();
+	let hasExtraProtocolBlocks = false;
+	const duplicateCounts = new Map<WorkflowOutputSectionName, number>();
+	for (const name of CANONICAL_SECTION_ORDER) {
+		const count = openingCounts.get(name) ?? 0;
+		if (count > 1) duplicateNames.add(name);
+		if (duplicateNames.has(name)) duplicateCounts.set(name, Math.max(count, 2));
+		const allowed = sectionRequired(name, requirements) ? 1 : 0;
+		if (count > allowed) hasExtraProtocolBlocks = true;
+	}
+	return { duplicateNames, duplicateCounts, hasExtraProtocolBlocks };
+}
+
+function collectOutsideRanges(
+	rawLength: number,
+	observations: readonly SectionObservation[],
+): TextRange[] {
+	const ranges: TextRange[] = [];
+	let cursor = 0;
+	for (const observation of observations) {
+		if (cursor < observation.start) {
+			ranges.push({ start: cursor, end: observation.start });
+		}
+		cursor = Math.max(cursor, observation.end ?? observation.contentEnd);
+	}
+	if (cursor < rawLength) ranges.push({ start: cursor, end: rawLength });
+	return ranges;
+}
+
+function collectOutsideTextRanges(
+	raw: string,
+	sections: readonly SectionMatch[],
+): TextRange[] {
+	const ranges: TextRange[] = [];
+	let cursor = 0;
+	for (const section of sections) {
+		if (
+			cursor < section.start &&
+			raw.slice(cursor, section.start).trim().length > 0
+		) {
+			ranges.push({ start: cursor, end: section.start });
+		}
+		cursor = section.end;
+	}
+	if (raw.slice(cursor).trim().length > 0) {
+		ranges.push({ start: cursor, end: raw.length });
+	}
+	return ranges;
+}
+
+function countStructuralSectionOpenings(
+	text: string,
+	initialSection?: WorkflowOutputSectionName,
+): ReadonlyMap<WorkflowOutputSectionName, number> {
+	const counts = new Map<WorkflowOutputSectionName, number>();
+	const analysisMarkers = analyzeAnalysisMarkers(text);
+	const selectedAnalysisContent = initialSection === SECTION_ANALYSIS;
+	const completeJsonSectionOpenings = new Set([
+		...findCompleteJsonSectionOpenings(text, SECTION_CONTROL),
+		...findCompleteJsonSectionOpenings(text, SECTION_REFS),
+	]);
+	let activeSection = initialSection;
+	let analysisDepth = activeSection === SECTION_ANALYSIS ? 1 : 0;
+	let analysisClosedLiteral = false;
+	let inJsonString = false;
 	let escaped = false;
-	for (const char of text) {
+	const recordOpening = (opening: WorkflowOutputSectionName): void => {
+		counts.set(opening, (counts.get(opening) ?? 0) + 1);
+		activeSection = opening;
+		analysisDepth = opening === SECTION_ANALYSIS ? 1 : 0;
+		analysisClosedLiteral = false;
+		inJsonString = false;
+		escaped = false;
+	};
+
+	for (let index = 0; index < text.length; index += 1) {
+		if (activeSection === SECTION_ANALYSIS) {
+			const opening = sectionOpeningAt(text, index);
+			if (
+				opening &&
+				opening !== SECTION_ANALYSIS &&
+				analysisClosedLiteral &&
+				completeJsonSectionOpenings.has(index)
+			) {
+				recordOpening(opening);
+				index += `<${opening}>`.length - 1;
+				continue;
+			}
+
+			const openTag = `<${SECTION_ANALYSIS}>`;
+			const closeTag = `</${SECTION_ANALYSIS}>`;
+			if (opening === SECTION_ANALYSIS) {
+				const balancedLiteral =
+					selectedAnalysisContent &&
+					analysisMarkers.balancedSuffixOpenings.has(index);
+				if (analysisClosedLiteral && !balancedLiteral) {
+					recordOpening(SECTION_ANALYSIS);
+				} else {
+					analysisDepth += 1;
+				}
+				index += openTag.length - 1;
+				continue;
+			}
+			if (text.startsWith(closeTag, index)) {
+				analysisDepth = Math.max(0, analysisDepth - 1);
+				analysisClosedLiteral = true;
+				if (analysisDepth === 0 && !selectedAnalysisContent) {
+					activeSection = undefined;
+				}
+				index += closeTag.length - 1;
+			}
+			continue;
+		}
+
+		if (activeSection !== undefined) {
+			const char = text[index] ?? "";
+			if (escaped) {
+				escaped = false;
+				continue;
+			}
+			if (inJsonString && char === "\\") {
+				escaped = true;
+				continue;
+			}
+			if (char === '"') {
+				inJsonString = !inJsonString;
+				continue;
+			}
+			if (inJsonString) continue;
+			const closeTag = `</${activeSection}>`;
+			if (text.startsWith(closeTag, index)) {
+				activeSection = undefined;
+				index += closeTag.length - 1;
+				continue;
+			}
+		}
+
+		const opening = sectionOpeningAt(text, index);
+		if (!opening) continue;
+		recordOpening(opening);
+		index += `<${opening}>`.length - 1;
+	}
+	return counts;
+}
+
+function sectionOpeningAt(
+	text: string,
+	index: number,
+): WorkflowOutputSectionName | undefined {
+	return CANONICAL_SECTION_ORDER.find((name) =>
+		text.startsWith(`<${name}>`, index),
+	);
+}
+
+function analyzeAnalysisMarkers(text: string): {
+	balancedSuffixOpenings: ReadonlySet<number>;
+} {
+	const openTag = `<${SECTION_ANALYSIS}>`;
+	const closeTag = `</${SECTION_ANALYSIS}>`;
+	const markers: Array<{ index: number; delta: 1 | -1 }> = [];
+	for (let index = 0; index < text.length; index += 1) {
+		if (text.startsWith(openTag, index)) {
+			markers.push({ index, delta: 1 });
+			index += openTag.length - 1;
+			continue;
+		}
+		if (text.startsWith(closeTag, index)) {
+			markers.push({ index, delta: -1 });
+			index += closeTag.length - 1;
+		}
+	}
+
+	const cumulative: number[] = [];
+	let balance = 0;
+	for (const marker of markers) {
+		balance += marker.delta;
+		cumulative.push(balance);
+	}
+	const suffixMinimum: number[] = Array.from({ length: markers.length });
+	let runningMinimum = Number.POSITIVE_INFINITY;
+	for (let index = markers.length - 1; index >= 0; index -= 1) {
+		runningMinimum = Math.min(runningMinimum, cumulative[index] ?? 0);
+		suffixMinimum[index] = runningMinimum;
+	}
+
+	const balancedSuffixOpenings = new Set<number>();
+	for (let index = markers.length - 1; index >= 0; index -= 1) {
+		const marker = markers[index];
+		if (!marker || marker.delta === -1) continue;
+		const balanceBefore = index === 0 ? 0 : (cumulative[index - 1] ?? 0);
+		if (
+			balance - balanceBefore === 0 &&
+			(suffixMinimum[index] ?? Number.NEGATIVE_INFINITY) >= balanceBefore
+		) {
+			balancedSuffixOpenings.add(marker.index);
+		}
+	}
+	return { balancedSuffixOpenings };
+}
+
+function findCompleteJsonSectionOpenings(
+	text: string,
+	name: typeof SECTION_CONTROL | typeof SECTION_REFS,
+): ReadonlySet<number> {
+	const complete = new Set<number>();
+	const pending: number[] = [];
+	const openTag = `<${name}>`;
+	const closeTag = `</${name}>`;
+	let inJsonString = false;
+	let escaped = false;
+	for (let index = 0; index < text.length; index += 1) {
+		if (pending.length === 0) {
+			if (!text.startsWith(openTag, index)) continue;
+			pending.push(index);
+			inJsonString = false;
+			escaped = false;
+			index += openTag.length - 1;
+			continue;
+		}
+		const char = text[index] ?? "";
 		if (escaped) {
 			escaped = false;
 			continue;
 		}
-		if (char === "\\") {
+		if (inJsonString && char === "\\") {
 			escaped = true;
 			continue;
 		}
-		if (char === '"') inString = !inString;
+		if (char === '"') {
+			inJsonString = !inJsonString;
+			continue;
+		}
+		if (inJsonString) continue;
+		if (text.startsWith(openTag, index)) {
+			pending.push(index);
+			index += openTag.length - 1;
+			continue;
+		}
+		if (!text.startsWith(closeTag, index)) continue;
+		const opening = pending.pop();
+		if (opening !== undefined) complete.add(opening);
+		index += closeTag.length - 1;
 	}
-	return inString;
+	return complete;
 }
 
 function validateSectionLayout(
-	raw: string,
-	sections: readonly SectionMatch[],
+	layout: SectionLayoutScan,
 	issues: WorkflowOutputIssue[],
 	requirements: SectionRequirements,
 ): void {
-	validateSectionCounts(sections, issues, requirements);
-	validateCanonicalOrder(sections, issues, requirements);
-	validateNoOutsideText(raw, sections, issues);
+	validateSectionCounts(layout, issues, requirements);
+	validateCanonicalOrder(layout.sections, issues, requirements);
+	validateNoOutsideText(layout.outsideRanges, issues);
 }
 
 function parseSanitizedWorkflowOutput(
@@ -503,9 +866,12 @@ function parseSanitizedWorkflowOutput(
 	options: ParseWorkflowOutputOptions,
 ): ParsedWorkflowOutput | undefined {
 	const requirements = sectionRequirements(options);
-	const sections = collectSections(raw, requirements);
-	if (hasExactlyRequiredSections(sections, requirements)) {
-		const sanitized = sections
+	const layout = scanSectionLayout(raw, requirements);
+	if (layout.duplicateNames.size > 0 || layout.hasExtraProtocolBlocks) {
+		return undefined;
+	}
+	if (layout.complete) {
+		const sanitized = layout.sections
 			.map((section) => raw.slice(section.start, section.end).trim())
 			.join("\n");
 		if (sanitized !== raw.trim()) {
@@ -513,7 +879,7 @@ function parseSanitizedWorkflowOutput(
 			if (parsed.valid) return parsed;
 		}
 	}
-	const repaired = repairMissingTailSections(raw, requirements);
+	const repaired = repairMissingTailSections(raw, requirements, layout);
 	if (repaired !== undefined) {
 		const parsed = parseWorkflowOutput(repaired, options);
 		if (parsed.valid) return parsed;
@@ -524,74 +890,62 @@ function parseSanitizedWorkflowOutput(
 function repairMissingTailSections(
 	raw: string,
 	requirements: SectionRequirements,
+	layout: SectionLayoutScan,
 ): string | undefined {
-	const controlOpen = raw.indexOf("<control>");
-	if (controlOpen < 0) return undefined;
-	const controlContentStart = controlOpen + "<control>".length;
-	const controlClose = raw.indexOf("</control>", controlContentStart);
-	if (controlClose < 0) return undefined;
-	const controlContent = raw.slice(controlContentStart, controlClose).trim();
-	const afterControl = raw.slice(controlClose + "</control>".length);
-	let analysis = "";
-	let refs = "[]";
-	const analysisOpen = afterControl.indexOf("<analysis>");
+	if (!layout.repairEligible) return undefined;
+	const observations = new Map(
+		layout.observations.map((observation) => [observation.name, observation]),
+	);
+	const control = observations.get(SECTION_CONTROL);
+	if (!control || control.end === undefined) return undefined;
+	const contents = new Map<WorkflowOutputSectionName, string>();
+	contents.set(
+		SECTION_CONTROL,
+		raw.slice(control.contentStart, control.contentEnd).trim(),
+	);
 	if (requirements.analysisRequired) {
-		if (analysisOpen < 0) return undefined;
-		const analysisStart = analysisOpen + "<analysis>".length;
-		const analysisClose = afterControl.indexOf("</analysis>", analysisStart);
-		const refsOpenAfterAnalysis = afterControl.indexOf("<refs>", analysisStart);
-		const analysisEnd =
-			analysisClose >= 0
-				? analysisClose
-				: refsOpenAfterAnalysis >= 0
-					? refsOpenAfterAnalysis
-					: afterControl.length;
-		analysis = afterControl.slice(analysisStart, analysisEnd).trim();
-		if (analysis.length === 0) return undefined;
+		const analysis = observations.get(SECTION_ANALYSIS);
+		if (!analysis) return undefined;
+		const content = raw
+			.slice(analysis.contentStart, analysis.contentEnd)
+			.trim();
+		if (content.length === 0) return undefined;
+		contents.set(SECTION_ANALYSIS, content);
 	}
-	const refsSearchStart =
-		analysisOpen >= 0 ? analysisOpen + "<analysis>".length : 0;
-	const refsOpen = afterControl.indexOf("<refs>", refsSearchStart);
-	if (refsOpen >= 0) {
-		const refsStart = refsOpen + "<refs>".length;
-		const refsClose = afterControl.indexOf("</refs>", refsStart);
-		if (refsClose >= 0) refs = afterControl.slice(refsStart, refsClose).trim();
-	} else if (requirements.refsRequired) {
-		refs = "[]";
+	if (requirements.refsRequired) {
+		const refs = observations.get(SECTION_REFS);
+		contents.set(
+			SECTION_REFS,
+			refs?.end === undefined
+				? "[]"
+				: raw.slice(refs.contentStart, refs.contentEnd).trim(),
+		);
 	}
-	return [
-		"<control>",
-		controlContent,
-		"</control>",
-		"<analysis>",
-		analysis,
-		"</analysis>",
-		"<refs>",
-		refs,
-		"</refs>",
-	].join("\n");
-}
-
-function hasExactlyRequiredSections(
-	sections: readonly SectionMatch[],
-	requirements: SectionRequirements,
-): boolean {
-	const expected = requiredSectionOrder(requirements);
-	if (sections.length !== expected.length) return false;
-	return sections.every((section, index) => section.name === expected[index]);
+	return requiredSectionOrder(requirements)
+		.flatMap((name) => [
+			`<${name}>`,
+			contents.get(name) ?? "",
+			`</${name}>`,
+		])
+		.join("\n");
 }
 
 function validateSectionCounts(
-	sections: readonly SectionMatch[],
+	layout: SectionLayoutScan,
 	issues: WorkflowOutputIssue[],
 	requirements: SectionRequirements,
 ): void {
-	const counts = sectionCounts(sections);
 	for (const name of CANONICAL_SECTION_ORDER) {
 		const required = sectionRequired(name, requirements);
-		const count = counts.get(name) ?? 0;
+		const count = layout.sections.filter(
+			(section) => section.name === name,
+		).length;
 		if (required && count === 0) issues.push(missingSectionIssue(name));
-		if (count > 1) issues.push(duplicateSectionIssue(name));
+		if (layout.duplicateNames.has(name)) {
+			issues.push(
+				duplicateSectionIssue(name, layout.duplicateCounts.get(name) ?? 2),
+			);
+		}
 	}
 }
 
@@ -611,19 +965,10 @@ function validateCanonicalOrder(
 }
 
 function validateNoOutsideText(
-	raw: string,
-	sections: readonly SectionMatch[],
+	outsideRanges: readonly TextRange[],
 	issues: WorkflowOutputIssue[],
 ): void {
-	let cursor = 0;
-	for (const section of sections) {
-		if (raw.slice(cursor, section.start).trim().length > 0) {
-			issues.push(outsideTextIssue());
-			return;
-		}
-		cursor = section.end;
-	}
-	if (raw.slice(cursor).trim().length > 0) issues.push(outsideTextIssue());
+	if (outsideRanges.length > 0) issues.push(outsideTextIssue());
 }
 
 function parseControlSection(
@@ -1731,7 +2076,7 @@ async function validateRefsUrlAvailability(
 			code: "unavailable_ref_locator",
 			section: SECTION_REFS,
 			path: `refs[${index}]`,
-			message: `ref URL is not reachable (${result.reason}): ${href}`,
+			message: `ref URL is not reachable (${result.reason}): ${redactSensitiveWorkflowText(href)}`,
 		});
 	}
 	return issues;
@@ -1833,38 +2178,193 @@ async function checkRefUrlAvailability(
 	href: string,
 	timeoutMs: number,
 ): Promise<RefUrlAvailabilityResult> {
-	const headers = { "user-agent": "pi-workflow-ref-validator/0.1" };
-	for (const attempt of [
-		{ method: "HEAD", headers },
-		{ method: "GET", headers: { ...headers, range: "bytes=0-2047" } },
-	]) {
+	if (obviouslyNonPublicRefUrl(href))
+		return { ok: false, reason: "private host blocked" };
+	if (runningUnderNodeTest && globalThis.fetch !== defaultRefValidationFetch)
+		return checkInjectedRefUrlAvailability(href, timeoutMs);
+	const headers = {
+		"user-agent": "pi-workflow-ref-validator/0.2",
+		"accept-encoding": "identity",
+	};
+	for (const method of ["HEAD", "GET"] as const) {
+		let current = href;
 		try {
-			const response = await fetch(href, {
-				...attempt,
-				redirect: "follow",
-				signal: AbortSignal.timeout(timeoutMs),
-			});
-			if (response.ok) {
-				if (attempt.method === "GET") {
-					try {
-						await response.arrayBuffer();
-					} catch {
-						// Availability was already established by the HTTP status.
-					}
+			for (let redirect = 0; redirect <= REFS_URL_VALIDATION_MAX_REDIRECTS; redirect += 1) {
+				const checked = await validatePublicRefUrl(current);
+				const response = await requestRefUrl(checked, method, headers, timeoutMs);
+				if (response.status >= 300 && response.status < 400) {
+					if (!response.location)
+						return { ok: false, reason: "redirect without location" };
+					if (redirect === REFS_URL_VALIDATION_MAX_REDIRECTS)
+						return { ok: false, reason: "too many redirects" };
+					current = new URL(response.location, checked).href;
+					continue;
 				}
-				return { ok: true };
+				if (response.tooLarge)
+					return { ok: false, reason: "response exceeds size cap" };
+				if (response.status >= 200 && response.status < 300)
+					return { ok: true };
+				if (method === "GET") return { ok: false, reason: `HTTP ${response.status}` };
+				break;
 			}
-			if (attempt.method === "GET")
-				return { ok: false, reason: `HTTP ${response.status}` };
 		} catch (error) {
-			if (attempt.method === "GET") {
-				const reason =
-					error instanceof Error ? error.message || error.name : String(error);
+			if (method === "GET") {
+				const reason = error instanceof Error ? error.message || error.name : String(error);
 				return { ok: false, reason };
 			}
 		}
 	}
 	return { ok: false, reason: "request failed" };
+}
+
+function obviouslyNonPublicRefUrl(href: string): boolean {
+	try {
+		const parsed = new URL(href);
+		const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+		return Boolean(nonPublicIpReason(hostname)) || parsed.username !== "" || parsed.password !== "" ||
+			[...parsed.searchParams.keys()].some(isSensitiveWorkflowQueryKey) ||
+			hostname === "localhost" || hostname.endsWith(".localhost") ||
+			hostname.endsWith(".local") || hostname.endsWith(".internal");
+	} catch {
+		return true;
+	}
+}
+
+async function checkInjectedRefUrlAvailability(
+	href: string,
+	timeoutMs: number,
+): Promise<RefUrlAvailabilityResult> {
+	const headers = { "user-agent": "pi-workflow-ref-validator/0.2" };
+	for (const method of ["HEAD", "GET"] as const) {
+		try {
+			const response = await globalThis.fetch(href, {
+				method,
+				headers: method === "GET" ? { ...headers, range: "bytes=0-2047" } : headers,
+				redirect: "follow",
+				signal: AbortSignal.timeout(timeoutMs),
+			});
+			if (response.ok) {
+				if (method === "GET") {
+					const body = await response.arrayBuffer();
+					if (body.byteLength > REFS_URL_VALIDATION_MAX_RESPONSE_BYTES)
+						return { ok: false, reason: "response exceeds size cap" };
+				}
+				return { ok: true };
+			}
+			if (method === "GET") return { ok: false, reason: `HTTP ${response.status}` };
+		} catch (error) {
+			if (method === "GET") {
+				const reason = error instanceof Error ? error.message || error.name : String(error);
+				return { ok: false, reason };
+			}
+		}
+	}
+	return { ok: false, reason: "request failed" };
+}
+
+type RefProbeResponse = {
+	status: number;
+	location?: string;
+	tooLarge: boolean;
+};
+
+async function validatePublicRefUrl(href: string): Promise<string> {
+	let parsed: URL;
+	try {
+		parsed = new URL(href);
+	} catch {
+		throw new Error("invalid URL");
+	}
+	if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
+		throw new Error("unsupported URL scheme");
+	if (parsed.username || parsed.password || [...parsed.searchParams.keys()].some(isSensitiveWorkflowQueryKey))
+		throw new Error("sensitive URL blocked");
+	const addresses = await lookup(parsed.hostname, { all: true, verbatim: true });
+	if (addresses.length === 0) throw new Error("DNS resolution failed");
+	for (const address of addresses) {
+		if (nonPublicIpReason(address.address)) throw new Error("private host blocked");
+	}
+	return parsed.href;
+}
+
+async function requestRefUrl(
+	href: string,
+	method: "HEAD" | "GET",
+	headers: Record<string, string>,
+	timeoutMs: number,
+): Promise<RefProbeResponse> {
+	const parsed = new URL(href);
+	const request = parsed.protocol === "https:" ? httpsRequest : httpRequest;
+	return await new Promise<RefProbeResponse>((resolveResult, reject) => {
+		let settled = false;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const finish = (result: RefProbeResponse): void => {
+			if (settled) return;
+			settled = true;
+			if (timer) clearTimeout(timer);
+			resolveResult(result);
+		};
+		const fail = (error: unknown): void => {
+			if (settled) return;
+			settled = true;
+			if (timer) clearTimeout(timer);
+			reject(error);
+		};
+		const req = request(
+			parsed,
+			{
+				method,
+				headers,
+				lookup(hostname, options, callback) {
+					lookup(hostname, { all: true, verbatim: true })
+						.then((addresses) => {
+							if (addresses.length === 0 || addresses.some((address) => nonPublicIpReason(address.address))) {
+								callback(new Error("private host blocked"), "", 4);
+								return;
+							}
+							const address = addresses[0]!;
+							if (options && typeof options === "object" && "all" in options && options.all === true)
+								callback(null, addresses);
+							else callback(null, address.address, address.family);
+						})
+						.catch((error: unknown) => callback(error as Error, "", 4));
+				},
+			},
+			(res) => {
+				const status = res.statusCode ?? 0;
+				const location = Array.isArray(res.headers.location)
+					? res.headers.location[0]
+					: res.headers.location;
+				const declaredLength = Number(res.headers["content-length"]);
+				if (status >= 200 && status < 300 && Number.isSafeInteger(declaredLength) &&
+					declaredLength > REFS_URL_VALIDATION_MAX_RESPONSE_BYTES) {
+					res.destroy();
+					finish({ status, tooLarge: true });
+					return;
+				}
+				if (method === "HEAD" || (status >= 300 && status < 400)) {
+					res.resume();
+					finish({ status, ...(location ? { location } : {}), tooLarge: false });
+					return;
+				}
+				let bytes = 0;
+				let tooLarge = false;
+				res.on("data", (chunk: Buffer | string) => {
+					bytes += Buffer.byteLength(chunk);
+					if (bytes > REFS_URL_VALIDATION_MAX_RESPONSE_BYTES) {
+						tooLarge = true;
+						res.destroy();
+					}
+				});
+				res.on("end", () => finish({ status, ...(location ? { location } : {}), tooLarge }));
+				res.on("close", () => { if (tooLarge) finish({ status, tooLarge }); });
+			},
+		);
+		req.setTimeout(Math.max(1, timeoutMs), () => req.destroy(new Error("request timeout")));
+		timer = setTimeout(() => req.destroy(new Error("request timeout")), Math.max(1, timeoutMs));
+		req.on("error", fail);
+		req.end();
+	});
 }
 
 function validateControlContract(
@@ -2103,16 +2603,6 @@ function artifactIndex(files: Record<string, string>): Record<string, string> {
 	);
 }
 
-function sectionCounts(
-	sections: readonly SectionMatch[],
-): Map<WorkflowOutputSectionName, number> {
-	const counts = new Map<WorkflowOutputSectionName, number>();
-	for (const section of sections) {
-		counts.set(section.name, (counts.get(section.name) ?? 0) + 1);
-	}
-	return counts;
-}
-
 function sectionRequired(
 	name: WorkflowOutputSectionName,
 	requirements: SectionRequirements,
@@ -2142,11 +2632,12 @@ function missingSectionIssue(
 
 function duplicateSectionIssue(
 	section: WorkflowOutputSectionName,
+	count: number,
 ): WorkflowOutputIssue {
 	return {
 		code: "duplicate_section",
 		section,
-		message: `${section} section must appear exactly once`,
+		message: `${section} section must appear exactly once; found ${count}`,
 	};
 }
 

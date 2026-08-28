@@ -2588,6 +2588,22 @@ test("deep-research final-audit packet compacts deterministic ledgers", async ()
 	);
 	assert.equal(result.packet.coverageGaps[0].id, "gap-coverage-001");
 	assert.equal(result.packet.remainingGaps[0].id, "gap-remaining-001");
+	const packetSchema = JSON.parse(
+		readFileSync(
+			join(
+				process.cwd(),
+				"workflows",
+				"deep-research",
+				"schemas",
+				"deep-research-final-audit-packet-control.schema.json",
+			),
+			"utf8",
+		),
+	);
+	assert.deepEqual(validateJsonSchema(result, packetSchema), {
+		valid: true,
+		issues: [],
+	});
 });
 
 test("deep-research final-audit packet does not preserve contradicted fact-slot values as filled", async () => {
@@ -2864,6 +2880,78 @@ test("deep-research P3 final-audit replay fixture preserves guardrail floors", a
 	}
 });
 
+function deepResearchPacketFixture(overrides = {}) {
+	return {
+		schema: "deep-research-final-audit-packet-v1",
+		digest: "Packet fixture digest",
+		packet: {
+			synthesisInput: {
+				researchMetadata: {},
+				verdictCounts: {},
+				factSlotStatusCounts: {},
+				integritySummary: {},
+				researchScopeCoverage: [],
+				factSlots: [],
+				claims: [],
+				preservedClaims: [],
+				gaps: [],
+			},
+			researchMetadataSeed: {},
+			verdictCounts: {},
+			statusPartitions: {},
+			factSlotCoverage: [],
+			factSlotStatusCounts: {},
+			coverageGaps: [],
+			remainingGaps: [],
+			sourceRefJoinFailures: [],
+			claimVerdictLedger: [],
+			verifierIntegrity: {},
+			normalizerDiagnostics: {},
+			preservedClaims: [],
+			researchScopeCoverage: [],
+			invariantChecks: {},
+			overflowLedger: {},
+			...overrides,
+		},
+	};
+}
+
+function deepResearchSynthesisFixture(overrides = {}) {
+	return {
+		schema: "deep-research-final-synthesis-v1",
+		digest: "Synthesis digest",
+		synthesis: {
+			bottomLine: "No unsupported conclusion is available.",
+			keyFindingIds: [],
+			recommendations: [],
+			actionPlan: [],
+			caveatNotes: [],
+			parentDecisionNotes: [],
+			...overrides,
+		},
+	};
+}
+
+function deepResearchLegacyFixture(finalReport, claims, digest) {
+	return {
+		schema: "deep-research-final-control-v1",
+		digest,
+		finalReport: {
+			researchMetadata: {},
+			coverageSummary: {},
+			factSlotCoverage: [],
+			mainFindings: [],
+			recommendations: [],
+			actionPlan: [],
+			parentDecisionNotes: [],
+			unverifiedButRelevant: [],
+			remainingGaps: [],
+			...finalReport,
+		},
+		claimVerdictIndex: { claims },
+	};
+}
+
 test("deep-research renderer emits evidence-backed report and sidecars", async () => {
 	const cwd = makeProject();
 	try {
@@ -2897,8 +2985,11 @@ test("deep-research renderer emits evidence-backed report and sidecars", async (
 					},
 				},
 				"final-audit.main": {
+					schema: "deep-research-final-control-v1",
 					digest: "Audited research digest",
 					finalReport: {
+						researchMetadata: {},
+						coverageSummary: {},
 						summary:
 							"Use the deterministic research report for the parent handoff and keep the full audit in final-audit.control.json.",
 						factSlotCoverage: [
@@ -2924,7 +3015,7 @@ test("deep-research renderer emits evidence-backed report and sidecars", async (
 						recommendations: [
 							{
 								recommendation:
-									"Read the rendered report first, then inspect final-audit.control.json for claim-level evidence.",
+									"Read **the report** [safely](https://example.test). ## forged recommendation; then inspect final-audit.control.json.",
 								evidenceStatus: "verified",
 								sourceUrls: ["https://example.test/audit"],
 							},
@@ -2936,6 +3027,8 @@ test("deep-research renderer emits evidence-backed report and sidecars", async (
 								sources: ["https://example.test/action"],
 							},
 						],
+						parentDecisionNotes: [],
+						unverifiedButRelevant: [],
 						remainingGaps: [
 							{ gap: "Run a larger holdout before making superiority claims." },
 						],
@@ -2967,6 +3060,11 @@ test("deep-research renderer emits evidence-backed report and sidecars", async (
 		assert.doesNotMatch(
 			result.completionSummaryMarkdown,
 			/final-report\.md|audit\.md|refs\.json|workflow_exec|task-final/,
+		);
+		assert.ok(
+			result.completionSummaryMarkdown.includes(
+				"Read \\*\\*the report\\*\\* \\[safely\\](https://example.test). \\#\\# forged recommendation; then inspect final-audit.\\[artifact omitted\\].",
+			),
 		);
 		assert.match(result.executiveMarkdown, /# Research report/);
 		assert.match(result.executiveMarkdown, /## Executive summary/);
@@ -3076,7 +3174,26 @@ test("deep-research renderer joins synthesis overlay against packet ledgers", as
 	const result = await helper({
 		sources: {
 			"final-audit-packet.main": {
+				schema: "deep-research-final-audit-packet-v1",
+				digest: "Packet fixture digest",
 				packet: {
+					synthesisInput: {
+						researchMetadata: {},
+						verdictCounts: {},
+						factSlotStatusCounts: {},
+						integritySummary: {},
+						researchScopeCoverage: [],
+						factSlots: [],
+						claims: [],
+						preservedClaims: [],
+						gaps: [],
+					},
+					statusPartitions: {},
+					factSlotStatusCounts: {},
+					sourceRefJoinFailures: [],
+					verifierIntegrity: {},
+					normalizerDiagnostics: {},
+					overflowLedger: {},
 					researchMetadataSeed: { depth: "standard", researchQuestions: 2 },
 					verdictCounts: {
 						verified: 1,
@@ -3174,12 +3291,14 @@ test("deep-research renderer joins synthesis overlay against packet ledgers", as
 							note: "Do not upgrade partial evidence.",
 							whyItMatters: "The renderer enforces audited statuses.",
 							evidenceStatus: "verified",
+							suggestedParentDecision: "Keep the partial claim caveated.",
 							supportingClaimIds: ["claim-002"],
 						},
 						{
 							note: "Blocked support must stay blocked.",
 							whyItMatters: "Blocked claims are not verified support.",
 							evidenceStatus: "verified",
+							suggestedParentDecision: "Do not promote blocked support.",
 							supportingClaimIds: ["claim-004"],
 						},
 					],
@@ -3238,31 +3357,26 @@ test("deep-research renderer does not promote unverified fallback findings", asy
 	).default;
 	const result = await helper({
 		sources: {
-			"final-audit-packet.main": {
-				packet: {
-					verdictCounts: {
-						verified: 0,
-						partiallySupported: 0,
-						unsupported: 0,
-						conflicting: 0,
-						verificationBlocked: 0,
+			"final-audit-packet.main": deepResearchPacketFixture({
+				verdictCounts: {
+					verified: 0,
+					partiallySupported: 0,
+					unsupported: 0,
+					conflicting: 0,
+					verificationBlocked: 0,
+				},
+				invariantChecks: { candidateCount: 1 },
+				claimVerdictLedger: [
+					{
+						id: "claim-unverified",
+						claim: "Unverified packet claim",
+						status: "unverified",
 					},
-					invariantChecks: { candidateCount: 1 },
-					claimVerdictLedger: [
-						{
-							id: "claim-unverified",
-							claim: "Unverified packet claim",
-							status: "unverified",
-						},
-					],
-				},
-			},
-			"final-audit.main": {
-				synthesis: {
-					bottomLine: "No verified findings.",
-					keyFindingIds: [],
-				},
-			},
+				],
+			}),
+			"final-audit.main": deepResearchSynthesisFixture({
+				bottomLine: "No verified findings.",
+			}),
 		},
 		context: {},
 	});
@@ -3293,8 +3407,15 @@ test("deep-research executive renderer preserves object gaps zeros and recommend
 		const result = await helper({
 			sources: {
 				"final-audit.main": {
+					schema: "deep-research-final-control-v1",
 					digest: "Zero-count audit digest",
 					finalReport: {
+						researchMetadata: {},
+						factSlotCoverage: [],
+						mainFindings: [],
+						actionPlan: [],
+						parentDecisionNotes: [],
+						unverifiedButRelevant: [],
 						summary: {
 							directAnswer:
 								"No claims were promoted after deterministic checks.",
@@ -3383,8 +3504,13 @@ test("deep-research renderer renders over-cap evidence without omission", async 
 	const result = await helper({
 		sources: {
 			"final-audit.main": {
+				schema: "deep-research-final-control-v1",
 				digest: "Audited research digest",
 				finalReport: {
+					researchMetadata: {},
+					recommendations: [],
+					actionPlan: [],
+					parentDecisionNotes: [],
 					summary:
 						"Renderer should render every structured item, even when legacy caps are low.",
 					coverageSummary: {
@@ -3506,9 +3632,18 @@ test("deep-research executive renderer fails gate when truncating open gaps", as
 	const result = await helper({
 		sources: {
 			"final-audit.main": {
+				schema: "deep-research-final-control-v1",
 				digest:
 					"This summary is intentionally verbose so the bounded renderer truncates before all caveats can be displayed safely to the parent consumer.",
 				finalReport: {
+					researchMetadata: {},
+					coverageSummary: {},
+					factSlotCoverage: [],
+					mainFindings: [],
+					recommendations: [],
+					actionPlan: [],
+					parentDecisionNotes: [],
+					unverifiedButRelevant: [],
 					summary:
 						"This summary is intentionally verbose so the bounded renderer truncates before all caveats can be displayed safely to the parent consumer.",
 					remainingGaps: [
@@ -3552,6 +3687,114 @@ test("deep-research executive renderer blocks without audit control", async () =
 	assert.equal(result.status, "blocked");
 	assert.equal(result.gates.passed, false);
 	assert.deepEqual(result.blockers, ["missing final-audit control source"]);
+
+	const unrelatedFallback = await helper({
+		sources: {
+			"final-audit-packet.main": { packet: { claimVerdictLedger: [] } },
+		},
+		options: {},
+		context: {},
+	});
+	assert.equal(unrelatedFallback.status, "blocked");
+	assert.deepEqual(unrelatedFallback.blockers, [
+		"missing final-audit control source",
+	]);
+
+	const malformed = await helper({
+		sources: { "final-audit.main": { digest: "digest-only" } },
+		options: {},
+		context: {},
+	});
+	assert.equal(malformed.status, "blocked");
+	assert.equal(malformed.completionSummaryMarkdown, "");
+	assert.deepEqual(malformed.blockers, [
+		"malformed final-audit control source",
+	]);
+
+	const missingPacket = await helper({
+		sources: {
+			"final-audit.main": deepResearchSynthesisFixture({
+				bottomLine: "Modern synthesis requires its ledger.",
+			}),
+		},
+		options: {},
+		context: {},
+	});
+	assert.equal(missingPacket.status, "blocked");
+	assert.equal(missingPacket.completionSummaryMarkdown, "");
+	assert.deepEqual(missingPacket.blockers, [
+		"missing final-audit-packet control source",
+	]);
+
+	const malformedPacket = await helper({
+		sources: {
+			"final-audit.main": deepResearchSynthesisFixture({
+				bottomLine: "Malformed packets cannot support synthesis.",
+			}),
+			"final-audit-packet.main": {
+				schema: "deep-research-final-audit-packet-v1",
+				packet: {},
+			},
+		},
+		options: {},
+		context: {},
+	});
+	assert.equal(malformedPacket.status, "blocked");
+	assert.equal(malformedPacket.completionSummaryMarkdown, "");
+	assert.deepEqual(malformedPacket.blockers, [
+		"malformed final-audit-packet control source",
+	]);
+
+	const modernExtraProperty = await helper({
+		sources: {
+			"final-audit.main": {
+				...deepResearchSynthesisFixture(),
+				unexpected: true,
+			},
+			"final-audit-packet.main": deepResearchPacketFixture(),
+		},
+		options: {},
+		context: {},
+	});
+	assert.equal(modernExtraProperty.status, "blocked");
+	assert.equal(modernExtraProperty.completionSummaryMarkdown, "");
+	assert.deepEqual(modernExtraProperty.blockers, [
+		"malformed final-audit control source",
+	]);
+
+	const numericLegacySchema = deepResearchLegacyFixture(
+		{},
+		[],
+		"Legacy digest",
+	);
+	numericLegacySchema.schema = 123;
+	const malformedLegacy = await helper({
+		sources: { "final-audit.main": numericLegacySchema },
+		options: {},
+		context: {},
+	});
+	assert.equal(malformedLegacy.status, "blocked");
+	assert.equal(malformedLegacy.completionSummaryMarkdown, "");
+	assert.deepEqual(malformedLegacy.blockers, [
+		"malformed final-audit control source",
+	]);
+
+	const packetExtraProperty = await helper({
+		sources: {
+			"final-audit.main": deepResearchSynthesisFixture(),
+			"final-audit-packet.main": {
+				...deepResearchPacketFixture(),
+				unexpected: true,
+			},
+		},
+		options: {},
+		context: {},
+	});
+	assert.equal(packetExtraProperty.status, "blocked");
+	assert.equal(packetExtraProperty.completionSummaryMarkdown, "");
+	assert.deepEqual(packetExtraProperty.blockers, [
+		"malformed final-audit-packet control source",
+	]);
 });
 
 test("refresh surfaces poll API errors after processing sibling tasks", async () => {
@@ -5280,7 +5523,46 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 		"helpers",
 		"finding-pipeline.mjs",
 	);
-	const helper = (await import(pathToFileURL(helperPath).href)).default;
+	const pipelineHelper = (await import(pathToFileURL(helperPath).href)).default;
+	// Older fixture rows in this long-running contract test predate the strict
+	// foreach identity contract. Adapt only those legacy fixtures here; the
+	// focused hardening cases below use explicit IDs and therefore exercise the
+	// production path without this adapter.
+	const helper = async (input) => {
+		const sources = Object.fromEntries(
+			Object.entries(input.sources ?? {}).map(([sourceId, source]) => {
+				if (!sourceId.startsWith("dedup-findings") || !Array.isArray(source?.findings))
+					return [sourceId, source];
+				const findings = source.findings.map((finding, index) => ({
+					...finding,
+					findingId: finding.findingId ?? `verdict-${String(index + 1).padStart(3, "0")}`,
+				}));
+				return [sourceId, { ...source, findings }];
+			}),
+		);
+		const legacyFixtureMode = !Object.values(input.sources ?? {}).some((source) =>
+			Array.isArray(source?.findings) && source.findings.some((finding) => finding.findingId),
+		);
+		const byTitle = new Map(
+			Object.values(sources).flatMap((source) =>
+			Array.isArray(source?.findings)
+				? source.findings.map((finding) => [String(finding.title), finding])
+				: [],
+			),
+		);
+		for (const [sourceId, source] of Object.entries(sources)) {
+			if (!sourceId.startsWith("devil-advocate") || !source || typeof source !== "object") continue;
+			const legacyTitle = typeof source.finding === "string" ? source.finding : source.finding?.title;
+			const finding = byTitle.get(String(legacyTitle));
+			if (!legacyFixtureMode || !finding || source.findingId) continue;
+			source.findingId = finding.findingId;
+			source.finding = finding.title;
+			if (!Array.isArray(source.evidence)) source.evidence = finding.evidenceQuotes?.slice(0, 1) ?? ["legacy verifier evidence"];
+			if (!Array.isArray(source.counterEvidence)) source.counterEvidence = [];
+			if (typeof source.recommendedAction !== "string") source.recommendedAction = "Review the finding.";
+		}
+		return pipelineHelper({ ...input, sources });
+	};
 
 	const dedup = await helper({
 		sources: {
@@ -5291,6 +5573,7 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 						title: "matchHostname drops trailing anchor",
 						file: "host/src/host/patterns.ts",
 						evidence: "patterns.ts:42",
+						evidenceQuotes: ["const matchHostname = /exact/;"],
 					},
 					{
 						severity: "major",
@@ -5306,6 +5589,7 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 						title: "matchHostname regex trailing anchor dropped",
 						file: "host/src/host/patterns.ts",
 						evidence: "patterns.ts:42 with longer supporting evidence",
+						evidenceQuotes: ["const matchHostname = /exact/;"],
 					},
 				],
 			},
@@ -5360,12 +5644,29 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 		sources: {
 			"dedup-findings.main": dedup,
 			"devil-advocate.item-001": {
-				finding: { title: "matchHostname trailing anchor regex dropped" },
-				verdict: "KEPT",
+				findingId: "finding-001",
+				finding: "matchHostname drops trailing anchor",
+				verdict: "KEEP",
+				evidence: ["const matchHostname = /exact/;"],
+				counterEvidence: [],
+				recommendedAction: {
+					validation: [
+						"schema",
+						{ expected: "pass", command: "npm test" },
+					],
+					change: {
+						target: "matchHostname",
+						steps: ["restore anchor", "add regression"],
+					},
+				},
 			},
 			"devil-advocate.item-002": {
-				finding: { title: "Port upper bound removed" },
+				findingId: "finding-002",
+				finding: "Port upper bound removed",
 				verdict: "totally bogus verdict",
+				evidence: ["server-ops.ts:10"],
+				counterEvidence: [],
+				recommendedAction: "Inspect the port bound.",
 			},
 		},
 		options: { mode: "partition", dedupStage: "dedup-findings" },
@@ -5402,8 +5703,26 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 	assert.equal("evidenceQuotes" in partition.reportContext.keep[0], false);
 	// Severity joined from the reviewer finding, not the devil-advocate echo.
 	assert.equal(partition.partitions.keep[0].severity, "critical");
+	const structuredRecommendedAction =
+		'{"change":{"steps":["restore anchor","add regression"],"target":"matchHostname"},"validation":["schema",{"command":"npm test","expected":"pass"}]}';
+	assert.equal(
+		partition.partitions.keep[0].recommendedAction,
+		structuredRecommendedAction,
+	);
+	assert.equal(
+		partition.reportContext.keep[0].recommendedAction,
+		structuredRecommendedAction,
+	);
+	assert.equal(
+		partition.reportPacket.reportContext.keep[0].recommendedAction,
+		structuredRecommendedAction,
+	);
+	assert.doesNotMatch(
+		JSON.stringify(partition),
+		/\[object Object\]/u,
+	);
 	// Unrecognized verdict routes to needsHuman, not silence.
-	assert.equal(partition.partitionSummary.needsHuman, 1);
+	assert.equal(partition.partitionSummary.needsHuman, 3);
 	assert.ok(
 		partition.normalizationNotes.some((n) =>
 			n.includes("unrecognized verdict"),
@@ -5426,9 +5745,11 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 				],
 			},
 			"devil-advocate.item-001": {
-				finding: "F-ID-001",
+				findingId: "F-ID-001",
+				finding: "Exact reviewer title for id echo",
 				verdict: "KEEP",
 				evidence: ["src/id.ts:7 doThing()"],
+				counterEvidence: [],
 				recommendedAction: "Keep the finding.",
 			},
 		},
@@ -5454,11 +5775,11 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 	assert.equal(sparseUnmatchedVerdict.partitionSummary.needsHuman, 1);
 	assert.equal(
 		sparseUnmatchedVerdict.partitions.needsHuman[0].findingId,
-		"verdict-001",
+		"verdict-integrity-001",
 	);
 	assert.ok(
 		sparseUnmatchedVerdict.normalizationNotes.some((note) =>
-			note.includes("lacked identity evidence"),
+			note.includes("integrity issue"),
 		),
 	);
 
@@ -5467,6 +5788,7 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 			"dedup-findings.main": {
 				findings: [
 					{
+						findingId: "config-001",
 						severity: "medium",
 						title: "Config parser accepts invalid booleans",
 						file: "src/config.ts",
@@ -5476,9 +5798,12 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 				],
 			},
 			"devil-advocate.item-001": {
-				finding: { title: "Config parser accepts invalid booleans" },
+				findingId: "config-001",
+				finding: "Config parser accepts invalid booleans",
 				verdict: "WEAKEN",
-				counterEvidence: "Only non-production config paths call this parser.",
+				evidence: [],
+				counterEvidence: ["Only non-production config paths call this parser."],
+				recommendedAction: "Constrain production callers.",
 			},
 		},
 		options: { mode: "partition", dedupStage: "dedup-findings" },
@@ -5515,13 +5840,17 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 						severity: "low",
 						title: "Dead match[4] fallback remains after capture group removal",
 						file: "workflows/deep-review/helpers/finding-pipeline.mjs",
+						locations: [{ file: "workflows/deep-review/helpers/finding-pipeline.mjs", line: 104 }],
 						evidence: "const start still reads match[4]",
+						evidenceQuotes: ["const start still reads match[4]"],
 					},
 					{
 						severity: "low",
 						title: "Stale comment still says colon references are supported",
 						file: "workflows/deep-review/helpers/finding-pipeline.mjs",
+						locations: [{ file: "workflows/deep-review/helpers/finding-pipeline.mjs", line: 104 }],
 						evidence: "comment mentions :N references",
+						evidenceQuotes: ["comment mentions :N references"],
 					},
 					{
 						severity: "low",
@@ -5556,17 +5885,22 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 	});
 	assert.deepEqual(
 		supportDemotion.partitions.keep.map((finding) => finding.title),
-		["Dropping colon parser loses file:line locations"],
+		[
+			"Dropping colon parser loses file:line locations",
+			"Dead match[4] fallback remains after capture group removal",
+			"Stale comment still says colon references are supported",
+		],
 	);
 	assert.deepEqual(supportDemotion.partitions.weaken, []);
-	assert.equal(supportDemotion.partitionSummary.supportNotes, 3);
-	assert.equal(supportDemotion.supportNotes.length, 3);
+	assert.equal(supportDemotion.partitionSummary.supportNotes, 0);
+	assert.equal(supportDemotion.supportNotes.length, 0);
+	assert.equal(supportDemotion.partitions.needsHuman.length, 1);
+	assert.deepEqual(
+		supportDemotion.partitions.needsHuman.map((finding) => finding.findingId),
+		["verdict-004"],
+	);
 	assert.ok(
-		supportDemotion.supportNotes.every(
-			(note) =>
-				note.supportingFindingOf ===
-				"Dropping colon parser loses file:line locations",
-		),
+		supportDemotion.partitions.needsHuman.every((finding) => finding.verdict === "NEEDS_HUMAN"),
 	);
 	assert.ok(
 		supportDemotion.normalizationNotes.some((note) =>
@@ -5680,8 +6014,8 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 		options: { mode: "partition", dedupStage: "dedup-findings" },
 	});
 	assert.equal(d4DuplicateRootCollapse.partitionSummary.keep, 1);
-	assert.equal(d4DuplicateRootCollapse.partitionSummary.weaken, 0);
-	assert.equal(d4DuplicateRootCollapse.partitionSummary.supportNotes, 1);
+	assert.equal(d4DuplicateRootCollapse.partitionSummary.weaken, 1);
+	assert.equal(d4DuplicateRootCollapse.partitionSummary.supportNotes, 0);
 	assert.equal(d4DuplicateRootCollapse.partitionSummary.mergedFindings, 2);
 	assert.deepEqual(
 		d4DuplicateRootCollapse.reportContext.keep[0].mergedFindingIds,
@@ -5741,15 +6075,15 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 	});
 	assert.deepEqual(supportOnlyDemotion.partitions.keep, []);
 	assert.deepEqual(supportOnlyDemotion.partitions.weaken, []);
-	assert.equal(supportOnlyDemotion.partitionSummary.supportNotes, 3);
-	assert.equal(supportOnlyDemotion.partitionSummary.needsHuman, 1);
-	assert.equal(
-		supportOnlyDemotion.partitions.needsHuman[0].findingId,
-		"needs-human-support-only",
+	assert.equal(supportOnlyDemotion.partitionSummary.supportNotes, 0);
+	assert.equal(supportOnlyDemotion.partitionSummary.needsHuman, 3);
+	assert.deepEqual(
+		supportOnlyDemotion.partitions.needsHuman.map((finding) => finding.findingId),
+		["verdict-002", "verdict-003", "verdict-001"],
 	);
 	assert.ok(
-		supportOnlyDemotion.normalizationNotes.some((note) =>
-			note.includes("support-only review produced 3 non-root finding"),
+		supportOnlyDemotion.normalizationNotes.every((note) =>
+			!note.includes("support-only review produced"),
 		),
 	);
 
@@ -5822,7 +6156,9 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 		["String-form scrapling_fetch becomes a blocked custom tool"],
 	);
 	assert.deepEqual(docsEvidenceRoot.partitions.weaken, []);
-	assert.equal(docsEvidenceRoot.partitionSummary.supportNotes, 1);
+	assert.equal(docsEvidenceRoot.partitionSummary.supportNotes, 0);
+	assert.equal(docsEvidenceRoot.partitionSummary.needsHuman, 1);
+	assert.equal(docsEvidenceRoot.partitions.needsHuman[0].findingId, "verdict-002");
 
 	const rootMerge = await helper({
 		sources: {
@@ -5897,6 +6233,106 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 		rootMerge.normalizationNotes.some((note) =>
 			note.includes("equivalent root finding"),
 		),
+	);
+
+	const sharedLineDistinctRoots = await helper({
+		sources: {
+			"dedup-findings.main": {
+				findings: [
+					{
+						severity: "high",
+						title: "Inline cap skips continuation ranges",
+						file: "src/fetch-wrapper.ts",
+						locations: [{ file: "src/fetch-wrapper.ts", line: 42 }],
+						evidenceQuotes: ["return capFetchContentInlineResult(result);"],
+					},
+					{
+						severity: "high",
+						title: "Authenticated responses persist session credentials",
+						file: "src/fetch-wrapper.ts",
+						locations: [{ file: "src/fetch-wrapper.ts", line: 42 }],
+						evidenceQuotes: ["return capFetchContentInlineResult(result);"],
+					},
+				],
+			},
+			"devil-advocate.item-001": {
+				finding: { title: "Inline cap skips continuation ranges" },
+				verdict: "KEEP",
+			},
+			"devil-advocate.item-002": {
+				finding: {
+					title: "Authenticated responses persist session credentials",
+				},
+				verdict: "WEAKEN",
+			},
+		},
+		options: { mode: "partition", dedupStage: "dedup-findings" },
+	});
+	assert.equal(sharedLineDistinctRoots.partitionSummary.keep, 1);
+	assert.equal(sharedLineDistinctRoots.partitionSummary.weaken, 1);
+	assert.equal(sharedLineDistinctRoots.partitionSummary.mergedFindings, 0);
+
+	const transitiveLineage = await helper({
+		sources: {
+			"dedup-findings.main": {
+				findings: [
+					{
+						findingId: "lineage-keep",
+						severity: "high",
+						title: "Parser timeout loses retry state",
+						file: "src/parser.ts",
+						locations: [{ file: "src/parser.ts", line: 10 }],
+						evidenceQuotes: ["retryState = undefined"],
+					},
+					{
+						findingId: "lineage-weaken-a",
+						severity: "medium",
+						title: "Parser timeout loses retry state on resume",
+						file: "src/parser.ts",
+						locations: [{ file: "src/parser.ts", line: 10 }],
+						evidenceQuotes: ["retryState = undefined"],
+					},
+					{
+						findingId: "lineage-weaken-b",
+						severity: "medium",
+						title: "Parser timeout loses retry state after resume",
+						file: "src/parser.ts",
+						locations: [{ file: "src/parser.ts", line: 10 }],
+						evidenceQuotes: ["retryState = undefined"],
+					},
+				],
+			},
+			"devil-advocate.lineage-keep": {
+				findingId: "lineage-keep",
+				finding: "Parser timeout loses retry state",
+				verdict: "KEEP",
+				evidence: ["retryState = undefined"], counterEvidence: [], recommendedAction: "Fix retry state.",
+			},
+			"devil-advocate.lineage-weaken-a": {
+				findingId: "lineage-weaken-a",
+				finding: "Parser timeout loses retry state on resume",
+				verdict: "WEAKEN",
+				evidence: [], counterEvidence: ["limited"], recommendedAction: "Limit scope.",
+			},
+			"devil-advocate.lineage-weaken-b": {
+				findingId: "lineage-weaken-b",
+				finding: "Parser timeout loses retry state after resume",
+				verdict: "WEAKEN",
+				evidence: [], counterEvidence: ["limited"], recommendedAction: "Limit scope.",
+			},
+		},
+		options: { mode: "partition", dedupStage: "dedup-findings" },
+	});
+	assert.equal(transitiveLineage.partitionSummary.mergedFindings, 2);
+	assert.deepEqual(
+		transitiveLineage.partitions.keep[0].mergedFindings.map(
+			(finding) => finding.findingId,
+		),
+		["lineage-weaken-a", "lineage-weaken-b"],
+	);
+	assert.deepEqual(
+		transitiveLineage.reportContext.keep[0].mergedFindingIds,
+		["lineage-weaken-a", "lineage-weaken-b"],
 	);
 
 	const lifecycleRootPreservation = await helper({
@@ -6116,6 +6552,240 @@ test("deep-review finding-pipeline dedups by file+title-token overlap and partit
 		2,
 	);
 
+	const sharedTestLifecycleRoots = await helper({
+		sources: {
+			"dedup-findings.main": {
+				findings: [
+					{
+						severity: "high",
+						title: "Snapshot generator abort can block shard alpha",
+						file: "src/alpha.ts",
+						locations: [
+							{ file: "src/alpha.ts", line: 10 },
+							{ file: "test/shared-generator.test.ts", line: 50 },
+						],
+						evidenceQuotes: ["await alphaAbort"],
+					},
+					{
+						severity: "high",
+						title: "Snapshot generator release can corrupt shard beta",
+						file: "src/beta.ts",
+						locations: [
+							{ file: "src/beta.ts", line: 20 },
+							{ file: "test/shared-generator.test.ts", line: 50 },
+						],
+						evidenceQuotes: ["releaseBeta()"],
+					},
+				],
+			},
+			"devil-advocate.lifecycle-a": {
+				finding: { title: "Snapshot generator abort can block shard alpha" },
+				verdict: "KEEP",
+			},
+			"devil-advocate.lifecycle-b": {
+				finding: {
+					title: "Snapshot generator release can corrupt shard beta",
+				},
+				verdict: "KEEP",
+			},
+		},
+		options: { mode: "partition", dedupStage: "dedup-findings" },
+	});
+	assert.equal(sharedTestLifecycleRoots.partitionSummary.keep, 2);
+	assert.equal(sharedTestLifecycleRoots.partitionSummary.mergedFindings, 0);
+
+	const sharedTestCompoundRoots = await helper({
+		sources: {
+			"dedup-findings.main": {
+				findings: [
+					{
+						severity: "high",
+						title: "Startup failure leaves writer unavailable",
+						file: "src/lifecycle.ts",
+						locations: [
+							{ file: "src/lifecycle.ts", line: 10 },
+							{ file: "test/shared-lifecycle.test.ts", line: 50 },
+						],
+						evidenceQuotes: ["startWriter()"],
+					},
+					{
+						severity: "high",
+						title: "Shutdown error leaks writer resources",
+						file: "src/lifecycle.ts",
+						locations: [
+							{ file: "src/lifecycle.ts", line: 30 },
+							{ file: "test/shared-lifecycle.test.ts", line: 50 },
+						],
+						evidenceQuotes: ["closeWriter()"],
+					},
+					{
+						severity: "high",
+						title: "Startup failure and shutdown error share lifecycle",
+						file: "src/lifecycle.ts",
+						locations: [
+							{ file: "src/lifecycle.ts", line: 100 },
+							{ file: "test/shared-lifecycle.test.ts", line: 50 },
+						],
+						evidenceQuotes: ["writer lifecycle"],
+					},
+				],
+			},
+			"devil-advocate.compound-a": {
+				finding: { title: "Startup failure leaves writer unavailable" },
+				verdict: "KEEP",
+			},
+			"devil-advocate.compound-b": {
+				finding: { title: "Shutdown error leaks writer resources" },
+				verdict: "KEEP",
+			},
+			"devil-advocate.compound-c": {
+				finding: {
+					title: "Startup failure and shutdown error share lifecycle",
+				},
+				verdict: "KEEP",
+			},
+		},
+		options: { mode: "partition", dedupStage: "dedup-findings" },
+	});
+	assert.equal(sharedTestCompoundRoots.partitionSummary.keep, 3);
+	assert.equal(sharedTestCompoundRoots.partitionSummary.mergedFindings, 0);
+
+	const locationSeparated = await helper({
+		sources: {
+			"reviewers.docker": {
+				findings: [
+					{ findingId: "docker-1", title: "Unsafe build command", file: "Dockerfile", locations: [{ file: "Dockerfile", line: 10 }], evidenceQuotes: ["RUN curl | sh"] },
+				], evidenceChecked: ["Dockerfile:10"], noIssueNotes: [],
+			},
+			"reviewers.script": {
+				findings: [
+					{ findingId: "script-1", title: "Unsafe build command", file: "scripts/build.sh", locations: [{ file: "scripts/build.sh", line: 10 }], evidenceQuotes: ["curl | sh"] },
+				], evidenceChecked: ["scripts/build.sh:10"], noIssueNotes: [],
+			},
+		}, options: { mode: "dedup" },
+	});
+	assert.equal(locationSeparated.findings.length, 2);
+
+	const unicodeSeparated = await helper({
+		sources: {
+			"reviewers.ko": {
+				findings: [
+					{ findingId: "ko-1", title: "권한 검증 누락", file: "src/auth.ts", locations: [{ file: "src/auth.ts", line: 10 }], evidenceQuotes: ["authorize(request)"] },
+					{ findingId: "ko-2", title: "권한 검증 누락됨", file: "src/auth.ts", locations: [{ file: "src/auth.ts", line: 40 }], evidenceQuotes: ["authorize(request)"] },
+				], evidenceChecked: ["src/auth.ts:10", "src/auth.ts:40"], noIssueNotes: [],
+			},
+		}, options: { mode: "dedup" },
+	});
+	assert.equal(unicodeSeparated.findings.length, 2);
+
+	const proseOnly = await helper({
+		sources: {
+			"reviewers.prose": {
+				findings: [
+					{ findingId: "prose-1", title: "First prose claim", file: "src/prose.ts", locations: [{ file: "src/prose.ts", line: 10 }], evidence: "Both reports describe the same behavior." },
+					{ findingId: "prose-2", title: "Second prose claim", file: "src/prose.ts", locations: [{ file: "src/prose.ts", line: 10 }], evidence: "Both reports describe the same behavior." },
+				], evidenceChecked: ["src/prose.ts:10"], noIssueNotes: [],
+			},
+		}, options: { mode: "dedup" },
+	});
+	assert.equal(proseOnly.findings.length, 2);
+	assert.deepEqual(proseOnly.findings[0].evidenceQuotes, []);
+
+	const exactQuote = await helper({
+		sources: {
+			"reviewers.quote": {
+				findings: [
+					{ findingId: "quote-1", title: "First title", file: "src/quote.ts", locations: [{ file: "src/quote.ts", line: 10 }], evidence: "Reviewer prose", evidenceQuotes: ["const exact = true;"] },
+					{ findingId: "quote-2", title: "Second title", file: "src/quote.ts", locations: [{ file: "src/quote.ts", line: 10 }], evidence: "Different prose", evidenceQuotes: ["  const exact = true;  "] },
+				], evidenceChecked: ["src/quote.ts:10"], noIssueNotes: [],
+			},
+		}, options: { mode: "dedup" },
+	});
+	assert.equal(exactQuote.dedupSummary.duplicateCount, 1);
+
+	const missingMaterializedLens = await helper({
+		sources: {
+			triage: { reviewLenses: [{ id: "runtime" }] },
+			"reviewers.runtime": {
+				lens: "runtime",
+				findings: [], evidenceChecked: ["src/runtime.ts"], noIssueNotes: ["No issues found."],
+			},
+		}, options: { mode: "dedup" },
+		context: { sourceStatuses: [{ source: "reviewers.runtime", specId: "reviewers.runtime", stageId: "reviewers", status: "completed" }] },
+	});
+	assert.ok(missingMaterializedLens.coverageIssues.some((issue) => issue.reason === "reviewer_materialized_identity_missing"));
+	assert.deepEqual(missingMaterializedLens.reviewerLedger.plannedLensIds, ["runtime"]);
+
+	const strictIds = {
+		"dedup-findings.main": {
+			findings: [
+				...[
+					["id-1", "One"], ["id-2", "Two"], ["id-3", "Three"], ["id-4", "Four"],
+				].map(([findingId, title], index) => ({ findingId, rootCauseId: `root-${index}`, title, severity: "high", file: "src/ids.ts", locations: [{ file: "src/ids.ts", line: index + 1 }], evidenceQuotes: [`evidence-${index}`] })),
+			],
+		},
+		"devil-advocate.one": { findingId: "id-1", finding: "One", verdict: "KEEP", evidence: ["checked one"], counterEvidence: [], recommendedAction: "Fix one" },
+		"devil-advocate.duplicate-a": { findingId: "id-2", finding: "Two", verdict: "KEEP", evidence: ["checked two"], counterEvidence: [], recommendedAction: "Fix two" },
+		"devil-advocate.duplicate-b": { findingId: "id-2", finding: "Two", verdict: "DROP", evidence: ["checked two"], counterEvidence: [], recommendedAction: "Fix two" },
+		"devil-advocate.unknown": { findingId: "id-999", finding: "Unknown", verdict: "KEEP", evidence: ["unknown"], counterEvidence: [], recommendedAction: "Inspect" },
+		"devil-advocate.legacy": { finding: "Four", verdict: "KEEP", evidence: ["legacy"], counterEvidence: [], recommendedAction: "Inspect" },
+	};
+	const strictPartition = await helper({ sources: strictIds, options: { mode: "partition", dedupStage: "dedup-findings" } });
+	assert.equal(strictPartition.partitions.keep.length, 1);
+	assert.equal(strictPartition.partitions.needsHuman.length, 6);
+	assert.equal(strictPartition.partitionSummary.verdictIntegrityIssues, 4);
+	assert.equal(strictPartition.partitionSummary.missingVerdicts, 2);
+
+	const emptyReviewer = await helper({
+		sources: { "reviewers.empty": { findings: [], evidenceChecked: [], noIssueNotes: [] } },
+		options: { mode: "dedup" },
+	});
+	assert.equal(emptyReviewer.coverageIssues.length, 1);
+	const emptyPartition = await helper({
+		sources: { "dedup-findings.main": emptyReviewer },
+		options: { mode: "partition", dedupStage: "dedup-findings" },
+	});
+	assert.equal(emptyPartition.partitionSummary.reviewerCoverageIssues, 1);
+	assert.equal(emptyPartition.partitions.needsHuman.length, 1);
+
+	const severityMerge = await helper({
+		sources: {
+			"dedup-findings.main": { findings: [
+				{ findingId: "sev-high", title: "Same root", severity: "high", file: "src/severity.ts", locations: [{ file: "src/severity.ts", line: 5 }], evidenceQuotes: ["same code"] },
+				{ findingId: "sev-critical", title: "Same root", severity: "critical", file: "src/severity.ts", locations: [{ file: "src/severity.ts", line: 5 }], evidenceQuotes: ["same code"] },
+			] },
+			"devil-advocate.high": { findingId: "sev-high", finding: "Same root", verdict: "KEEP", evidence: ["same code"], counterEvidence: [], recommendedAction: "Fix high" },
+			"devil-advocate.critical": { findingId: "sev-critical", finding: "Same root", verdict: "KEEP", evidence: ["same code"], counterEvidence: [], recommendedAction: "Fix critical" },
+		}, options: { mode: "partition", dedupStage: "dedup-findings" },
+	});
+	assert.equal(severityMerge.partitionSummary.mergedFindings, 1);
+	assert.equal(severityMerge.partitions.keep[0].severity, "critical");
+	assert.equal(severityMerge.partitions.keep[0].mergedFindings[0].originalSeverity, "critical");
+
+	const lineagePartition = await helper({
+		sources: {
+			"dedup-findings.main": { findings: [
+				{ findingId: "line-keep", title: "Shared root", severity: "high", file: "src/lineage.ts", locations: [{ file: "src/lineage.ts", line: 7 }], evidenceQuotes: ["lineage code"] },
+				{ findingId: "line-weaken", title: "Shared root", severity: "medium", file: "src/lineage.ts", locations: [{ file: "src/lineage.ts", line: 7 }], evidenceQuotes: ["lineage code"] },
+			] },
+			"devil-advocate.keep": { findingId: "line-keep", finding: "Shared root", verdict: "KEEP", evidence: ["lineage code"], counterEvidence: [], recommendedAction: "Fix root" },
+			"devil-advocate.weaken": { findingId: "line-weaken", finding: "Shared root", verdict: "WEAKEN", evidence: [], counterEvidence: ["Impact is limited"], recommendedAction: "Reassess scope" },
+		}, options: { mode: "partition", dedupStage: "dedup-findings" },
+	});
+	assert.equal(lineagePartition.partitionSummary.mergedFindings, 1);
+	assert.equal(lineagePartition.partitions.keep[0].mergedFindings[0].originalVerdict, "WEAKEN");
+	const render = (await import(`${pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "workflows", "deep-review", "helpers", "render-review-report.mjs")).href}?lineage=${Date.now()}`)).default;
+	const renderedLineage = await render({ sources: { "partition-verdicts.main": lineagePartition, "report.main": { summary: "Work remains", verdict: "NEEDS_WORK" } } });
+	assert.equal(renderedLineage.status, "failed");
+	assert.match(renderedLineage.markdown, /original verdict: \*\*WEAKEN\*\*/u);
+	assert.match(renderedLineage.markdown, /Reassess scope/u);
+	assert.deepEqual(renderedLineage.verifierCoverage.missingFindingIds, []);
+	assert.deepEqual(renderedLineage.verifierCoverage.orphanFindingIds, []);
+	assert.deepEqual(renderedLineage.verifierCoverage.duplicateFindingIds, []);
+	const badCounts = await render({ sources: { "partition-verdicts.main": { ...lineagePartition, partitionSummary: { ...lineagePartition.partitionSummary, mergedFindings: 0 } }, "report.main": { summary: "Work remains", verdict: "NEEDS_WORK" } } });
+	assert.equal(badCounts.status, "failed");
+	assert.equal(badCounts.gates.mergedFindingCountMismatch, true);
+
 	await assert.rejects(
 		helper({ sources: {}, options: { mode: "bogus" } }),
 		/unknown mode/,
@@ -6184,7 +6854,6 @@ test("deep-review finding-pipeline preserves structured locations through dedup 
 	]);
 	assert.deepEqual(boundary.evidenceQuotes, [
 		"if (!isPathInsideRoot(target, root)) throw",
-		"Gates resolveWritePath (line 46) and assertSafeWritePath (line 90).",
 	]);
 	const regex = dedup.findings.find((f) => f.title.includes("Regex anchor"));
 	// Explicit location preserved verbatim, including the symbol.
@@ -6201,12 +6870,20 @@ test("deep-review finding-pipeline preserves structured locations through dedup 
 		sources: {
 			"dedup-findings.main": dedup,
 			"devil-advocate.item-001": {
-				finding: { title: "Path boundary bypass in isPathInsideRoot" },
+				findingId: "finding-001",
+				finding: "Path boundary bypass in isPathInsideRoot",
 				verdict: "KEEP",
+				evidence: ["if (!isPathInsideRoot(target, root)) throw"],
+				counterEvidence: [],
+				recommendedAction: "Preserve the boundary check.",
 			},
 			"devil-advocate.item-002": {
-				finding: { title: "Regex anchor dropped in matchHostname" },
+				findingId: "finding-002",
+				finding: "Regex anchor dropped in matchHostname",
 				verdict: "KEEP",
+				evidence: ["return pattern.test(hostname)"],
+				counterEvidence: [],
+				recommendedAction: "Restore the anchor.",
 			},
 		},
 		options: { mode: "partition", dedupStage: "dedup-findings" },
@@ -6271,12 +6948,16 @@ test("deep-review finding-pipeline preserves structured locations through dedup 
 				],
 			},
 			"devil-advocate.item-merge-001": {
-				finding: { title: "Parser shared root failure alpha" },
+				findingId: "merge-001",
+				finding: "Parser shared root failure alpha",
 				verdict: "KEEP",
+				evidence: ["common parser evidence"], counterEvidence: [], recommendedAction: "Fix parser.",
 			},
 			"devil-advocate.item-merge-002": {
-				finding: { title: "Parser shared root failure beta" },
+				findingId: "merge-002",
+				finding: "Parser shared root failure beta",
 				verdict: "KEEP",
+				evidence: ["common parser evidence"], counterEvidence: [], recommendedAction: "Fix parser.",
 			},
 		},
 		options: { mode: "partition", dedupStage: "dedup-findings" },
@@ -6319,12 +7000,16 @@ test("deep-review finding-pipeline preserves structured locations through dedup 
 				],
 			},
 			"devil-advocate.item-compound-001": {
-				finding: { title: "startup failure async" },
+				findingId: "compound-001",
+				finding: "startup failure async",
 				verdict: "KEEP",
+				evidence: ["EXACT-A"], counterEvidence: [], recommendedAction: "Fix startup.",
 			},
 			"devil-advocate.item-compound-002": {
-				finding: { title: "cannot open durability" },
+				findingId: "compound-002",
+				finding: "cannot open durability",
 				verdict: "KEEP",
+				evidence: ["EXACT-B"], counterEvidence: [], recommendedAction: "Fix durability.",
 			},
 		},
 		options: { mode: "partition", dedupStage: "dedup-findings" },
@@ -6357,6 +7042,51 @@ test("deep-review finding-pipeline preserves structured locations through dedup 
 			"utf8",
 		),
 	);
+	const reviewerSchema = JSON.parse(
+		readFileSync(
+			join(schemaDir, "deep-review-reviewers-control.schema.json"),
+			"utf8",
+		),
+	);
+	const emptyAttestation = {
+		schema: "stage-control-v1",
+		digest: "empty-review",
+		lens: "runtime",
+		findings: [],
+		evidenceChecked: ["src/runtime.ts"],
+		noIssueNotes: ["Checked runtime paths; no issue found."],
+	};
+	assert.equal(
+		validateJsonSchema(emptyAttestation, reviewerSchema).valid,
+		true,
+	);
+	const emptyWithoutAttestation = {
+		...emptyAttestation,
+		noIssueNotes: [],
+	};
+	assert.equal(
+		validateJsonSchema(emptyWithoutAttestation, reviewerSchema).valid,
+		false,
+	);
+	const typedSupportFinding = structuredClone(emptyAttestation);
+	typedSupportFinding.findings = [{
+		classification: "support-only",
+		supportingFindingId: "root-001",
+		severity: "low",
+		title: "Test support for root",
+		file: "test/root.test.ts",
+		locations: [{ file: "test/root.test.ts", line: 4 }],
+		evidence: "coverage evidence",
+		evidenceQuotes: ["it('covers root')"],
+		rationale: "The test is supplementary evidence.",
+		recommendedAction: "Add or update the test.",
+		confidence: "high",
+	}];
+	typedSupportFinding.noIssueNotes = [];
+	assert.equal(validateJsonSchema(typedSupportFinding, reviewerSchema).valid, true);
+	const invalidSupportClassification = structuredClone(typedSupportFinding);
+	invalidSupportClassification.findings[0].classification = "maybe-support";
+	assert.equal(validateJsonSchema(invalidSupportClassification, reviewerSchema).valid, false);
 	const validDedup = validateJsonSchema(
 		{ schema: "stage-control-v1", ...dedup },
 		dedupSchema,
@@ -7119,8 +7849,12 @@ test("deep-review bounded report packet caps a >50KiB ledger while the renderer 
 		};
 		findings.push(finding);
 		sources[`devil-advocate.item-${ordinal}`] = {
-			finding: { title },
+			findingId: finding.findingId,
+			finding: title,
 			verdict: verdicts[Math.floor(index / 6)],
+			evidence: ["verified repository evidence"],
+			counterEvidence: [],
+			recommendedAction: "Repair the finding.",
 		};
 	}
 	sources["dedup-findings.main"] = { findings };
@@ -7214,7 +7948,7 @@ test("deep-review bounded report packet caps a >50KiB ledger while the renderer 
 		},
 		context: {},
 	});
-	assert.equal(rendered.status, "passed");
+	assert.equal(rendered.status, "failed");
 	assert.equal(rendered.gates.renderedAllFindings, true);
 	assert.equal(rendered.gates.renderedAllNeedsHuman, true);
 	assert.equal(rendered.renderedFindingIds.length, 12);
@@ -7260,8 +7994,12 @@ test("deep-review report synthesis stays conservative for partial sources", asyn
 				],
 			},
 			"devil-advocate.item-001": {
-				finding: { title },
+				findingId: "finding-partial",
+				finding: title,
 				verdict: "KEEP",
+				evidence: ["unsafePartial()"],
+				counterEvidence: [],
+				recommendedAction: "Fix the partial behavior.",
 			},
 		},
 		options: { mode: "partition", dedupStage: "dedup-findings" },
@@ -7281,7 +8019,7 @@ test("deep-review report synthesis stays conservative for partial sources", asyn
 			],
 		},
 	});
-	assert.equal(partition.partitionSummary.keep, 1);
+	assert.equal(partition.partitionSummary.keep, 0);
 	assert.equal(partition.partitionSummary.partialFailures, 1);
 	assert.equal(partition.reportPacket.partitionSummary.partialFailures, 1);
 	assert.equal(partition.reportPacket.sourceStatusSummary.total, 2);
@@ -7304,6 +8042,7 @@ test("deep-review report synthesis stays conservative for partial sources", asyn
 	});
 	assert.equal(rendered.status, "failed");
 	assert.equal(rendered.gates.reportVerdictConsistent, false);
+	assert.equal(rendered.completionSummaryMarkdown, "");
 	assert.match(rendered.markdown, /Verdict: \*\*PARTIAL_REVIEW\*\*/);
 	assert.match(rendered.markdown, /Review coverage is partial/);
 	assert.match(rendered.markdown, /A completed verifier kept this finding/);
@@ -7332,6 +8071,7 @@ test("deep-review render-review-report emits finding cards from partition ledger
 						weaken: 1,
 						drop: 0,
 						needsHuman: 1,
+						mergedFindings: 0,
 						supportNotes: 1,
 					},
 					partitions: {
@@ -7360,13 +8100,19 @@ test("deep-review render-review-report emits finding cards from partition ledger
 							{
 								findingId: "finding-002",
 								rootCauseId: "root-002",
-								title: "Test-only issue should be weakened",
+								title:
+									"Test-only issue should be weakened ## forged `heading` final-report.md workflow_exec task-final",
 								severity: "medium",
 								locations: [{ file: "tests/auth.test.ts", line: 1 }],
-								evidenceQuotes: ["expect(true).toBe(true);"],
-								counterEvidence: [
-									"This is a support gap, not the root defect.",
+								evidenceQuotes: [
+									"expect(true).toBe(true);",
+									"before\n```\n## forged evidence heading\n```\nafter",
 								],
+								counterEvidence: [
+									"This is **support** [context](https://example.test), not the root defect. ## forged counter",
+								],
+								recommendedAction:
+									"Run [unsafe](https://example.test) **now** ## forged action.",
 							},
 						],
 						drop: [],
@@ -7419,16 +8165,42 @@ test("deep-review render-review-report emits finding cards from partition ledger
 			context: { cwd, runId: "workflow_review", taskId: "task-final" },
 		});
 
+		const renderSchema = JSON.parse(
+			readFileSync(
+				join(
+					dirname(helperPath),
+					"..",
+					"schemas",
+					"deep-review-render-control.schema.json",
+				),
+				"utf8",
+			),
+		);
+		assert.deepEqual(validateJsonSchema(result, renderSchema), {
+			valid: true,
+			issues: [],
+		});
 		assert.equal(result.schema, "deep-review-render-v1");
-		assert.equal(result.status, "passed");
+		assert.equal(result.status, "failed");
 		assert.equal(result.gates.findingCountMismatch, false);
 		assert.equal(result.gates.renderedAllFindings, true);
+		assert.equal(result.gates.renderedAllSupportNotes, true);
 		assert.equal(result.gates.reportSynthesisAvailable, true);
 		assert.deepEqual(result.renderedFindingIds, ["finding-001", "finding-002"]);
 		assert.deepEqual(result.renderedNeedsHumanIds, ["finding-003"]);
 		assert.equal(result.findingSummary.bySeverity.critical, 1);
 		assert.match(result.markdown, /# Deep review report/);
+		assert.match(result.markdown, /^# Deep review report\n\n## Executive summary/);
 		assert.match(result.markdown, /Verdict: \*\*NEEDS_WORK\*\*/);
+		assert.match(result.markdown, /## Evidence and review coverage/);
+		assert.match(result.markdown, /## Limitations/);
+		assert.match(result.markdown, /## Related artifacts/);
+		assert.equal(
+			result.markdown.match(/^## .+$/gm)?.at(-1),
+			"## Related artifacts",
+		);
+		assert.equal(result.completionSummaryMarkdown, "");
+		assert.equal(result.gates.requiredLedgersPresent, false);
 		assert.match(result.markdown, /Critical findings/);
 		assert.match(
 			result.markdown,
@@ -7455,6 +8227,26 @@ test("deep-review render-review-report emits finding cards from partition ledger
 		assert.match(result.markdown, /test\.todo\('rejects default secret'\)/);
 		assert.doesNotMatch(result.markdown, /overflow index/);
 		assert.match(result.markdown, /Verifier verdict: \*\*WEAKEN\*\*/);
+		assert.ok(
+			result.markdown.includes(
+				"### finding-002 — Test-only issue should be weakened \\#\\# forged \\`heading\\` final-report.md workflow\\_exec task-final",
+			),
+		);
+		assert.match(
+			result.markdown,
+			/````text\nbefore\n```\n## forged evidence heading\n```\nafter\n````/,
+		);
+		assert.ok(
+			result.markdown.includes(
+				"Run \\[unsafe\\](https://example.test) \\*\\*now\\*\\* \\#\\# forged action.",
+			),
+		);
+		assert.ok(
+			result.markdown.includes(
+				"This is \\*\\*support\\*\\* \\[context\\](https://example.test), not the root defect. \\#\\# forged counter",
+			),
+		);
+		assert.equal(result.completionSummaryMarkdown, "");
 		assert.match(result.markdown, /Needs human review/);
 		assert.match(result.markdown, /finding-003 — Ambiguous domain behavior/);
 		assert.match(result.markdown, /src\/domain\.ts/);
@@ -7467,21 +8259,33 @@ test("deep-review render-review-report emits finding cards from partition ledger
 		assert.equal(result.gates.needsHumanCountMismatch, false);
 		assert.equal(result.gates.needsHumanMetadataMissing, false);
 		assert.equal(result.gates.needsHumanEvidenceIncomplete, false);
-		assert.equal(
-			readFileSync(
-				join(
-					cwd,
-					".pi",
-					"workflows",
-					"workflow_review",
-					"tasks",
-					"task-final",
-					"review.md",
-				),
-				"utf8",
+		const finalReport = readFileSync(
+			join(
+				cwd,
+				".pi",
+				"workflows",
+				"workflow_review",
+				"tasks",
+				"task-final",
+				"final-report.md",
 			),
-			`${result.markdown}\n`,
+			"utf8",
 		);
+		const legacyReview = readFileSync(
+			join(
+				cwd,
+				".pi",
+				"workflows",
+				"workflow_review",
+				"tasks",
+				"task-final",
+				"review.md",
+			),
+			"utf8",
+		);
+		assert.equal(result.sidecarPath, "final-report.md");
+		assert.equal(finalReport, `${result.markdown}\n`);
+		assert.equal(legacyReview, finalReport);
 	} finally {
 		rmSync(cwd, {
 			recursive: true,
@@ -7537,6 +8341,7 @@ test("deep-review render-review-report surfaces count mismatches and missing par
 	assert.equal(reportFailure.gates.renderedAllFindings, true);
 	assert.equal(reportFailure.gates.reportSynthesisAvailable, false);
 	assert.equal(reportFailure.gates.passed, false);
+	assert.equal(reportFailure.completionSummaryMarkdown, "");
 	assert.deepEqual(reportFailure.sourceArtifacts, [
 		"partition-verdicts.control.json",
 	]);
@@ -7576,6 +8381,7 @@ test("deep-review render-review-report surfaces count mismatches and missing par
 	assert.equal(contradictoryVerdict.status, "failed");
 	assert.equal(contradictoryVerdict.gates.reportVerdictConsistent, false);
 	assert.equal(contradictoryVerdict.gates.passed, false);
+	assert.equal(contradictoryVerdict.completionSummaryMarkdown, "");
 	assert.match(contradictoryVerdict.markdown, /Verdict: \*\*NEEDS_WORK\*\*/);
 	assert.match(contradictoryVerdict.markdown, /contradicted the deterministic ledger/);
 	assert.doesNotMatch(contradictoryVerdict.markdown, /No issue remains/);
@@ -7587,8 +8393,10 @@ test("deep-review render-review-report surfaces count mismatches and missing par
 				partitionSummary: {
 					keep: 1,
 					weaken: 0,
+					drop: 0,
 					partialFailures: 0,
 					needsHuman: 0,
+					mergedFindings: 0,
 					supportNotes: 0,
 				},
 				partitions: {
@@ -7617,7 +8425,7 @@ test("deep-review render-review-report surfaces count mismatches and missing par
 		options: {},
 		context: {},
 	});
-	assert.equal(matchingVerdictWithContradictoryNarrative.status, "passed");
+	assert.equal(matchingVerdictWithContradictoryNarrative.status, "failed");
 	assert.doesNotMatch(
 		matchingVerdictWithContradictoryNarrative.markdown,
 		/No issues remain|There are no risks|Ship immediately/,
@@ -7637,8 +8445,10 @@ test("deep-review render-review-report surfaces count mismatches and missing par
 				partitionSummary: {
 					keep: 0,
 					weaken: 0,
+					drop: 0,
 					partialFailures: 1,
 					needsHuman: 0,
+					mergedFindings: 0,
 					supportNotes: 0,
 				},
 				partitions: { keep: [], weaken: [], needsHuman: [] },
@@ -7657,7 +8467,7 @@ test("deep-review render-review-report surfaces count mismatches and missing par
 		options: {},
 		context: {},
 	});
-	assert.equal(partialVerdict.status, "passed");
+	assert.equal(partialVerdict.status, "failed");
 	assert.equal(partialVerdict.gates.reportVerdictConsistent, true);
 
 	const nonCompletedSource = await helper({
@@ -7666,8 +8476,10 @@ test("deep-review render-review-report surfaces count mismatches and missing par
 				partitionSummary: {
 					keep: 0,
 					weaken: 0,
+					drop: 0,
 					partialFailures: 0,
 					needsHuman: 0,
+					mergedFindings: 0,
 					supportNotes: 0,
 				},
 				partitions: { keep: [], weaken: [], needsHuman: [] },
@@ -7689,7 +8501,7 @@ test("deep-review render-review-report surfaces count mismatches and missing par
 		options: {},
 		context: {},
 	});
-	assert.equal(nonCompletedSource.status, "passed");
+	assert.equal(nonCompletedSource.status, "failed");
 	assert.match(nonCompletedSource.markdown, /Verdict: \*\*PARTIAL_REVIEW\*\*/);
 	assert.match(nonCompletedSource.markdown, /Review coverage is partial/);
 
@@ -9714,4 +10526,98 @@ test("workflow task selection follows task id after problem reordering changes",
 		rendered.indexOf("blocked task") < rendered.indexOf("failed task"),
 		"blocked task remains selected after failed task moves down",
 	);
+});
+
+test("deep-review strict ledgers reject omission and swapped verifier ownership", async () => {
+	const helperDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "workflows", "deep-review", "helpers");
+	const pipeline = (await import(`${pathToFileURL(join(helperDir, "finding-pipeline.mjs")).href}?strict=${Date.now()}`)).default;
+	const render = (await import(`${pathToFileURL(join(helperDir, "render-review-report.mjs")).href}?strict=${Date.now()}`)).default;
+	const finding = { findingId: "F-strict", title: "Strict ownership finding", severity: "high", file: "src/strict.ts", locations: [{ file: "src/strict.ts", line: 4 }], evidence: "observed", evidenceQuotes: ["const strict = true;"], rationale: "risk", recommendedAction: "Fix it", confidence: "high" };
+	const statuses = [
+		{ source: "triage", specId: "triage", taskId: "triage-task", stageId: "triage", status: "completed" },
+		{ source: "reviewers.runtime", specId: "reviewers.runtime", taskId: "reviewer-task", stageId: "reviewers", itemIdentity: "runtime", placeholderSpecId: "reviewers.item", status: "completed" },
+		{ source: "devil-advocate.F-strict", specId: "devil-advocate.F-strict", taskId: "verifier-task", stageId: "devil-advocate", itemIdentity: "F-strict", placeholderSpecId: "devil-advocate.item", status: "completed" },
+	];
+	const dedup = await pipeline({ sources: { triage: { reviewLenses: [{ id: "runtime" }] }, "reviewers.runtime": { lens: "runtime", findings: [finding], evidenceChecked: ["src/strict.ts:4"], noIssueNotes: [] } }, context: { sourceStatuses: statuses }, options: { mode: "dedup" } });
+	const partition = await pipeline({ sources: { "dedup-findings.main": dedup, "devil-advocate.F-strict": { findingId: "F-strict", finding: finding.title, verdict: "KEEP", evidence: ["const strict = true;"], counterEvidence: [], recommendedAction: "Fix it" } }, context: { sourceStatuses: statuses }, options: { mode: "partition", dedupStage: "dedup-findings" } });
+	assert.equal(partition.reviewerLedger.complete, true);
+	assert.equal(partition.verifierCoverage.complete, true);
+	assert.deepEqual(partition.verifierCoverage.rows[0].owner, { source: "devil-advocate.F-strict", specId: "devil-advocate.F-strict", taskId: "verifier-task", itemIdentity: "F-strict", placeholderSpecId: "devil-advocate.item" });
+	const good = await render({ sources: { "partition-verdicts.main": partition, report: { summary: "work", verdict: "NEEDS_WORK" } } });
+	assert.equal(good.status, "passed");
+	assert.deepEqual(good.emissionRows, good.expectedEmissionRows);
+	const reversed = await pipeline({ sources: { triage: { reviewLenses: [{ id: "runtime" }] }, "reviewers.runtime": { lens: "runtime", findings: [finding], evidenceChecked: ["src/strict.ts:4"], noIssueNotes: [] } }, context: { sourceStatuses: [...statuses].reverse() }, options: { mode: "dedup" } });
+	assert.equal(reversed.reviewerLedger.complete, true);
+	for (const field of ["reviewerLedger", "dedupSummary", "verifierCoverage"]) {
+		const omitted = { ...partition };
+		delete omitted[field];
+		const result = await render({ sources: { "partition-verdicts.main": omitted, report: { summary: "work", verdict: "NEEDS_WORK" } } });
+		assert.equal(result.status, "failed", field);
+	}
+	const swapped = structuredClone(partition);
+	swapped.verifierCoverage.rows[0].owner.itemIdentity = "other-finding";
+	assert.equal((await render({ sources: { "partition-verdicts.main": swapped, report: { summary: "work", verdict: "NEEDS_WORK" } } })).status, "failed");
+	for (const mutate of [(value) => value.pop(), (value) => value.push("extra")]) {
+		const emissionDrift = structuredClone(partition);
+		mutate(emissionDrift.dedupSummary.dispositionFindingIds);
+		assert.equal((await render({ sources: { "partition-verdicts.main": emissionDrift, report: { summary: "work", verdict: "NEEDS_WORK" } } })).status, "failed");
+	}
+});
+
+test("deep-review structured support rows conserve IDs and use safe Markdown fences", async () => {
+	const helperDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "workflows", "deep-review", "helpers");
+	const pipeline = (await import(`${pathToFileURL(join(helperDir, "finding-pipeline.mjs")).href}?support=${Date.now()}`)).default;
+	const render = (await import(`${pathToFileURL(join(helperDir, "render-review-report.mjs")).href}?support=${Date.now()}`)).default;
+	const root = { findingId: "root", title: "Runtime root defect", severity: "high", file: "src/root.ts", locations: [{ file: "src/root.ts", line: 3 }], evidenceQuotes: ["runtimeRoot()"] };
+	const support = { findingId: "support", rootCauseId: "root", classification: "support-only", supportingFindingId: "root", title: "Missing test coverage for runtime root defect", severity: "low", file: "test/root.test.ts", locations: [{ file: "test/root.test.ts", line: 8 }], evidenceQuotes: ["it('covers root')"], evidence: "coverage gap", recommendedAction: "Add the test." };
+	const statuses = [
+		{ source: "devil-advocate.root", specId: "devil-advocate.root", taskId: "root-task", stageId: "devil-advocate", itemIdentity: "root", placeholderSpecId: "devil-advocate.item", status: "completed" },
+		{ source: "devil-advocate.support", specId: "devil-advocate.support", taskId: "support-task", stageId: "devil-advocate", itemIdentity: "support", placeholderSpecId: "devil-advocate.item", status: "completed" },
+	];
+	const result = await pipeline({ sources: { "dedup-findings.main": { findings: [root, support] }, "devil-advocate.root": { findingId: "root", finding: root.title, verdict: "KEEP", evidence: ["runtimeRoot()"], counterEvidence: [], recommendedAction: "Fix root" }, "devil-advocate.support": { findingId: "support", finding: support.title, verdict: "KEEP", evidence: ["it('covers root')"], counterEvidence: [], recommendedAction: "Add the test." } }, context: { sourceStatuses: statuses }, options: { mode: "partition", dedupStage: "dedup-findings" } });
+	assert.equal(result.supportNotes.length, 1);
+	assert.equal(result.supportNotes[0].findingId, "support");
+	assert.equal(result.supportNotes[0].classification, "support-only");
+	assert.equal(result.supportNotes[0].supportingFindingId, "root");
+	assert.ok(result.dedupSummary.supportFindingIds.includes("support"));
+	const rendered = await render({ sources: { "partition-verdicts.main": result, report: { summary: "work", verdict: "NEEDS_WORK" } } });
+	assert.equal(rendered.emissionRows.filter((row) => row.kind === "support").length, 1);
+	const fenced = await render({ sources: { "partition-verdicts.main": { ...result, supportNotes: [{ ...result.supportNotes[0], evidenceQuotes: ["embedded ``` fence"] }] }, report: { summary: "work", verdict: "NEEDS_WORK" } } });
+	assert.match(fenced.markdown, /embedded ``` fence/);
+
+	const multipleRoots = await pipeline({
+		sources: {
+			"dedup-findings.main": { findings: [
+				{ findingId: "root-a", title: "First runtime root", severity: "high", file: "src/a.ts", locations: [{ file: "src/a.ts", line: 4 }], evidenceQuotes: ["firstRuntimeRoot()"] },
+				{ findingId: "root-b", title: "Second runtime root", severity: "high", file: "src/b.ts", locations: [{ file: "src/b.ts", line: 8 }], evidenceQuotes: ["secondRuntimeRoot()"] },
+				{ findingId: "support-b", classification: "support-only", supportingFindingId: "root-b", title: "Test coverage for second runtime root", severity: "low", file: "test/b.test.ts", locations: [{ file: "test/b.test.ts", line: 12 }], evidenceQuotes: ["it('covers second root')"] },
+			] },
+			"devil-advocate.root-a": { findingId: "root-a", finding: "First runtime root", verdict: "KEEP", evidence: ["firstRuntimeRoot()"], counterEvidence: [], recommendedAction: "Fix first root." },
+			"devil-advocate.root-b": { findingId: "root-b", finding: "Second runtime root", verdict: "KEEP", evidence: ["secondRuntimeRoot()"], counterEvidence: [], recommendedAction: "Fix second root." },
+			"devil-advocate.support-b": { findingId: "support-b", finding: "Test coverage for second runtime root", verdict: "KEEP", evidence: ["it('covers second root')"], counterEvidence: [], recommendedAction: "Add the test." },
+		},
+		options: { mode: "partition", dedupStage: "dedup-findings" },
+	});
+	assert.deepEqual(multipleRoots.partitions.keep.map((finding) => finding.findingId), ["root-a", "root-b"]);
+	assert.deepEqual(multipleRoots.supportNotes.map((note) => note.supportingFindingId), ["root-b"]);
+	assert.equal(multipleRoots.partitions.needsHuman.length, 0);
+
+	const unassociated = await pipeline({
+		sources: {
+			"dedup-findings.main": { findings: [
+				{ findingId: "root-unassociated", title: "Unassociated runtime root", severity: "high", file: "src/unassociated.ts", locations: [{ file: "src/unassociated.ts", line: 5 }], evidenceQuotes: ["unassociatedRuntime()"] },
+				{ findingId: "support-unassociated", classification: "support-only", title: "Unassociated test support", severity: "low", file: "test/unassociated.test.ts", locations: [{ file: "test/unassociated.test.ts", line: 9 }], evidenceQuotes: ["it('preserves this support')"] },
+			] },
+			"devil-advocate.root-unassociated": { findingId: "root-unassociated", finding: "Unassociated runtime root", verdict: "KEEP", evidence: ["unassociatedRuntime()"], counterEvidence: [], recommendedAction: "Fix the root." },
+			"devil-advocate.support-unassociated": { findingId: "support-unassociated", finding: "Unassociated test support", verdict: "KEEP", evidence: ["it('preserves this support')"], counterEvidence: [], recommendedAction: "Review support." },
+		},
+		options: { mode: "partition", dedupStage: "dedup-findings" },
+	});
+	assert.equal(unassociated.supportNotes.length, 0);
+	assert.equal(unassociated.partitions.needsHuman.length, 1);
+	assert.equal(unassociated.partitions.needsHuman[0].findingId, "support-unassociated");
+	assert.match(unassociated.partitions.needsHuman[0].evidenceQuotes[0], /preserves this support/);
+	const unassociatedRendered = await render({ sources: { "partition-verdicts.main": unassociated, report: { summary: "support requires review", verdict: "NEEDS_WORK" } } });
+	assert.match(unassociatedRendered.markdown, /support-unassociated/);
+	assert.match(unassociatedRendered.markdown, /preserves this support/);
 });

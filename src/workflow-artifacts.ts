@@ -308,9 +308,25 @@ export function buildSourceContextPacket(
 	);
 	const maxPacketChars = normalizeOptionalCharCap(options.maxPacketChars);
 	const packet: SourceContextPacket = { tasks: [], byStage: {} };
-	let packetChars = 0;
 
+	// Build the accounting metadata first.  It is part of the serialized packet
+	// and must not be treated as free space for task payloads.
 	for (const task of run.tasks ?? []) {
+		const stageId = task.stageId ?? "(none)";
+		const stage = (packet.byStage[stageId] ??= {
+			taskCount: 0,
+			statusCounts: {},
+		});
+		stage.taskCount += 1;
+		if (task.status)
+			stage.statusCounts[task.status] =
+				(stage.statusCounts[task.status] ?? 0) + 1;
+	}
+	if (maxPacketChars !== undefined && JSON.stringify(packet).length > maxPacketChars)
+		packet.byStage = {};
+
+	const sourceTasks = run.tasks ?? [];
+	for (const [taskIndex, task] of sourceTasks.entries()) {
 		const taskId = task.taskId;
 		const stageId = task.stageId ?? "(none)";
 		const structuredOutput = taskId
@@ -321,45 +337,56 @@ export function buildSourceContextPacket(
 			options.structuredOutputPathsByStage?.[stageId],
 		);
 		const rawOutput = taskId ? options.rawOutputsByTaskId?.[taskId] : undefined;
-		const status = task.status;
 		const stageStructuredChars =
 			maxStructuredCharsByStage[stageId] ?? maxStructuredChars;
-		const entry = fitSourceContextTaskToBudget(
-			{
-				taskId,
-				specId: task.specId,
-				stageId,
-				status,
-				structuredOutput: capStructuredOutput(
-					projection.value,
-					stageStructuredChars,
-				),
-				outputPreview:
-					structuredOutput === undefined && rawOutput !== undefined
-						? preview(rawOutput, maxPreviewChars)
-						: undefined,
-				projectionWarnings:
-					projection.missingPaths.length > 0
-						? projection.missingPaths.map((path) => ({
-								path,
-								reason: "missing",
-							}))
-						: undefined,
-			},
+		const entry: SourceContextTask = {
+			taskId,
+			specId: task.specId,
+			stageId,
+			status: task.status,
+			structuredOutput: capStructuredOutput(
+				projection.value,
+				stageStructuredChars,
+			),
+			outputPreview:
+				structuredOutput === undefined && rawOutput !== undefined
+					? preview(rawOutput, maxPreviewChars)
+					: undefined,
+			projectionWarnings:
+				projection.missingPaths.length > 0
+					? projection.missingPaths.map((path) => ({
+							path,
+							reason: "missing",
+						}))
+					: undefined,
+		};
+		const reservedTasks = sourceTasks.slice(taskIndex + 1).map((future) => ({
+			stageId: future.stageId ?? "(none)",
+			omittedOutput: { reason: "packet_budget_exhausted" as const },
+		}));
+		let fitted = fitSourceContextTaskToBudget(
+			packet,
+			entry,
 			maxPacketChars,
-			packetChars,
+			reservedTasks,
 		);
-
-		packet.tasks.push(entry);
-		packetChars += JSON.stringify(entry).length;
-
-		const stage = (packet.byStage[stageId] ??= {
-			taskCount: 0,
-			statusCounts: {},
-		});
-		stage.taskCount += 1;
-		if (status)
-			stage.statusCounts[status] = (stage.statusCounts[status] ?? 0) + 1;
+		if (!fitted && maxPacketChars !== undefined &&
+			Object.keys(packet.byStage).length > 0) {
+			// Under an extremely tight cap, retaining both the stage summary and
+			// useful task entries is impossible. Drop the optional summary and
+			// repack against the same serialized limit; its bytes were still
+			// accounted for while attempting the preferred representation.
+			packet.byStage = {};
+			fitted = fitSourceContextTaskToBudget(
+				packet,
+				entry,
+				maxPacketChars,
+				reservedTasks,
+			);
+		}
+		// If even the bounded metadata marker cannot fit, omit the task. The
+		// final serialized packet remains within the global limit.
+		if (fitted) packet.tasks.push(fitted);
 	}
 
 	return packet;
@@ -454,15 +481,72 @@ function normalizeOptionalCharCap(
 }
 
 function fitSourceContextTaskToBudget(
+	packet: SourceContextPacket,
 	entry: SourceContextTask,
 	maxPacketChars: number | undefined,
-	usedChars: number,
-): SourceContextTask {
-	if (
-		maxPacketChars === undefined ||
-		usedChars + JSON.stringify(entry).length <= maxPacketChars
-	)
+	reservedTasks: SourceContextTask[] = [],
+): SourceContextTask | undefined {
+	if (maxPacketChars === undefined ||
+		serializedPacketLength(packet, entry, reservedTasks) <= maxPacketChars)
 		return entry;
+
+	if (entry.structuredOutput !== undefined) {
+		const serialized = JSON.stringify(entry.structuredOutput);
+		const candidate = (length: number): SourceContextTask => ({
+			taskId: entry.taskId,
+			specId: entry.specId,
+			stageId: entry.stageId,
+			status: entry.status,
+			structuredOutput: {
+				truncated: true,
+				originalChars: serialized.length,
+				preview: preview(serialized, length),
+			},
+			projectionWarnings: entry.projectionWarnings,
+		});
+		const fitted = largestFittingSourceContextTask(
+			packet, maxPacketChars, candidate, serialized.length, reservedTasks,
+		);
+		if (fitted) return fitted;
+		if (reservedTasks.length > 0) {
+			const compactCandidate = (length: number): SourceContextTask => ({
+				stageId: entry.stageId,
+				structuredOutput: {
+					truncated: true,
+					preview: preview(serialized, length),
+				},
+			});
+			const compact = largestFittingSourceContextTask(
+				packet, maxPacketChars, compactCandidate, serialized.length, reservedTasks,
+			);
+			if (compact) return compact;
+		}
+	}
+
+	if (entry.outputPreview !== undefined) {
+		const candidate = (length: number): SourceContextTask => ({
+			taskId: entry.taskId,
+			specId: entry.specId,
+			stageId: entry.stageId,
+			status: entry.status,
+			outputPreview: preview(entry.outputPreview!, length),
+			projectionWarnings: entry.projectionWarnings,
+		});
+		const fitted = largestFittingSourceContextTask(
+			packet, maxPacketChars, candidate, entry.outputPreview.length, reservedTasks,
+		);
+		if (fitted) return fitted;
+		if (reservedTasks.length > 0) {
+			const compactCandidate = (length: number): SourceContextTask => ({
+				stageId: entry.stageId,
+				outputPreview: preview(entry.outputPreview!, length),
+			});
+			const compact = largestFittingSourceContextTask(
+				packet, maxPacketChars, compactCandidate, entry.outputPreview.length, reservedTasks,
+			);
+			if (compact) return compact;
+		}
+	}
 
 	const originalOutputChars = outputChars(entry);
 	const metadataOnly: SourceContextTask = {
@@ -473,41 +557,52 @@ function fitSourceContextTaskToBudget(
 		projectionWarnings: entry.projectionWarnings,
 		omittedOutput: {
 			reason: "packet_budget_exhausted",
-			originalChars: originalOutputChars,
+			...(originalOutputChars === undefined ? {} : { originalChars: originalOutputChars }),
 		},
 	};
-	const metadataChars = JSON.stringify(metadataOnly).length;
-	const remaining = maxPacketChars - usedChars - metadataChars;
-	if (remaining <= 24) return metadataOnly;
+	if (serializedPacketLength(packet, metadataOnly, reservedTasks) <= maxPacketChars)
+		return metadataOnly;
+	const compactMetadata: SourceContextTask = {
+		stageId: entry.stageId,
+		omittedOutput: { reason: "packet_budget_exhausted" },
+	};
+	return serializedPacketLength(packet, compactMetadata, reservedTasks) <= maxPacketChars
+		? compactMetadata
+		: undefined;
+}
 
-	if (entry.structuredOutput !== undefined) {
-		const serialized = JSON.stringify(entry.structuredOutput);
-		return {
-			taskId: entry.taskId,
-			specId: entry.specId,
-			stageId: entry.stageId,
-			status: entry.status,
-			structuredOutput: {
-				truncated: true,
-				originalChars: serialized.length,
-				preview: preview(serialized, remaining),
-			},
-			projectionWarnings: entry.projectionWarnings,
-		};
+function largestFittingSourceContextTask(
+	packet: SourceContextPacket,
+	maxPacketChars: number,
+	candidate: (length: number) => SourceContextTask,
+	maxLength: number,
+	reservedTasks: SourceContextTask[] = [],
+): SourceContextTask | undefined {
+	let low = 0;
+	let high = Math.max(0, maxLength);
+	let best: SourceContextTask | undefined;
+	while (low <= high) {
+		const middle = Math.floor((low + high) / 2);
+		const value = candidate(middle);
+		if (serializedPacketLength(packet, value, reservedTasks) <= maxPacketChars) {
+			best = value;
+			low = middle + 1;
+		} else {
+			high = middle - 1;
+		}
 	}
+	return best;
+}
 
-	if (entry.outputPreview !== undefined) {
-		return {
-			taskId: entry.taskId,
-			specId: entry.specId,
-			stageId: entry.stageId,
-			status: entry.status,
-			outputPreview: preview(entry.outputPreview, remaining),
-			projectionWarnings: entry.projectionWarnings,
-		};
-	}
-
-	return metadataOnly;
+function serializedPacketLength(
+	packet: SourceContextPacket,
+	candidate: SourceContextTask,
+	reservedTasks: SourceContextTask[] = [],
+): number {
+	return JSON.stringify({
+		...packet,
+		tasks: [...packet.tasks, candidate, ...reservedTasks],
+	}).length;
 }
 
 function outputChars(entry: SourceContextTask): number | undefined {

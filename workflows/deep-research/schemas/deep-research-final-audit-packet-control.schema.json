@@ -1,0 +1,93 @@
+{
+  "type": "object",
+  "required": ["schema", "digest", "packet"],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "deep-research-final-audit-packet-v1"
+    },
+    "digest": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1200
+    },
+    "packet": {
+      "type": "object",
+      "required": [
+        "synthesisInput",
+        "researchMetadataSeed",
+        "verdictCounts",
+        "statusPartitions",
+        "factSlotCoverage",
+        "factSlotStatusCounts",
+        "coverageGaps",
+        "remainingGaps",
+        "sourceRefJoinFailures",
+        "claimVerdictLedger",
+        "verifierIntegrity",
+        "normalizerDiagnostics",
+        "preservedClaims",
+        "researchScopeCoverage",
+        "invariantChecks",
+        "overflowLedger"
+      ],
+      "properties": {
+        "synthesisInput": {
+          "type": "object",
+          "required": [
+            "researchMetadata",
+            "verdictCounts",
+            "factSlotStatusCounts",
+            "integritySummary",
+            "researchScopeCoverage",
+            "factSlots",
+            "claims",
+            "preservedClaims",
+            "gaps"
+          ],
+          "properties": {
+            "researchMetadata": { "type": "object" },
+            "verdictCounts": { "type": "object" },
+            "factSlotStatusCounts": { "type": "object" },
+            "integritySummary": { "type": "object" },
+            "researchScopeCoverage": { "type": "array", "items": { "type": "object" } },
+            "factSlots": { "type": "array", "items": { "type": "object" } },
+            "claims": { "type": "array", "items": { "type": "object" } },
+            "preservedClaims": { "type": "array", "items": { "type": "object" } },
+            "gaps": { "type": "array", "items": { "type": "object" } }
+          },
+          "additionalProperties": true
+        },
+        "researchMetadataSeed": { "type": "object" },
+        "verdictCounts": { "type": "object" },
+        "statusPartitions": { "type": "object" },
+        "factSlotCoverage": { "type": "array", "items": { "type": "object" } },
+        "factSlotStatusCounts": { "type": "object" },
+        "coverageGaps": { "type": "array", "items": { "type": "object" } },
+        "remainingGaps": { "type": "array", "items": { "type": "object" } },
+        "sourceRefJoinFailures": { "type": "array", "items": { "type": "object" } },
+        "claimVerdictLedger": { "type": "array", "items": { "type": "object" } },
+        "verifierIntegrity": {
+          "type": "object",
+          "properties": {
+            "gateSummary": { "type": "object" },
+            "invalidVerifierRows": { "type": "array", "items": { "type": "object" } },
+            "duplicateVerifierRows": { "type": "array", "items": { "type": "object" } },
+            "verifierOwnerLedger": { "type": "array", "items": { "type": "object" } },
+            "verifierOwnerIssues": { "type": "array", "items": { "type": "object" } },
+            "invalidNormalizedCandidateCount": { "type": "integer", "minimum": 0 },
+            "invalidNormalizedCandidateRows": { "type": "array", "items": { "type": "object" } }
+          },
+          "additionalProperties": true
+        },
+        "normalizerDiagnostics": { "type": "object" },
+        "preservedClaims": { "type": "array", "items": { "type": "object" } },
+        "researchScopeCoverage": { "type": "array", "items": { "type": "object" } },
+        "invariantChecks": { "type": "object" },
+        "overflowLedger": { "type": "object" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": false
+}

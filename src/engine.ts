@@ -2852,6 +2852,93 @@ function foreachBatchId(
 	return `foreach-batch-${leader.taskId}-${member.taskId}-g${generation}`;
 }
 
+function sameForeachBatchRecordGrouping(
+	record: WorkflowForeachBatchRecord,
+	compiled: CompiledTask,
+): boolean {
+	const grouping = compiled.foreachGenerated?.batch;
+	return Boolean(
+		grouping &&
+		grouping.enabled === true &&
+		record.grouping.enabled === grouping.enabled &&
+		record.grouping.groupBy === grouping.groupBy &&
+		record.grouping.groupKey === grouping.groupKey,
+	);
+}
+
+function sameOptionalForeachMetadata(
+	record: WorkflowForeachBatchRecord,
+	leaderTask: WorkflowTaskRunRecord,
+	memberTask: WorkflowTaskRunRecord,
+	leaderCompiled: CompiledTask,
+	memberCompiled: CompiledTask,
+): boolean {
+	return (
+		record.placeholderSpecId === leaderCompiled.foreachGenerated?.placeholderSpecId &&
+		record.placeholderSpecId === memberCompiled.foreachGenerated?.placeholderSpecId &&
+		record.placeholderSpecId === leaderTask.foreachGenerated?.placeholderSpecId &&
+		record.placeholderSpecId === memberTask.foreachGenerated?.placeholderSpecId &&
+		record.stageId === leaderTask.stageId &&
+		record.stageId === memberTask.stageId &&
+		record.stageId === leaderCompiled.stageId &&
+		record.stageId === memberCompiled.stageId &&
+		record.generation === leaderTask.generation &&
+		record.generation === memberTask.generation &&
+		record.generation === leaderCompiled.generation &&
+		record.generation === memberCompiled.generation &&
+		record.sourceGeneration === leaderTask.sourceGeneration &&
+		record.sourceGeneration === memberTask.sourceGeneration &&
+		record.sourceGeneration === leaderCompiled.sourceGeneration &&
+		record.sourceGeneration === memberCompiled.sourceGeneration &&
+		sameForeachBatchRecordGrouping(record, leaderCompiled) &&
+		sameForeachBatchRecordGrouping(record, memberCompiled) &&
+		record.grouping.groupBy === leaderTask.foreachGenerated?.batch?.groupBy &&
+		record.grouping.groupKey === leaderTask.foreachGenerated?.batch?.groupKey &&
+		record.grouping.groupBy === memberTask.foreachGenerated?.batch?.groupBy &&
+		record.grouping.groupKey === memberTask.foreachGenerated?.batch?.groupKey
+	);
+}
+
+async function revalidatePreparedForeachBatch(
+	cwd: string,
+	run: WorkflowRunRecord,
+	compiledFlow: CompiledWorkflow,
+	record: WorkflowForeachBatchRecord,
+	leaderIndex: number,
+	memberIndex: number,
+	validationSnapshot: ArtifactGraphRuntimeValidationSnapshot,
+): Promise<CompiledTask> {
+	const leaderTask = run.tasks[leaderIndex];
+	const memberTask = run.tasks[memberIndex];
+	const leaderCompiled = compiledFlow.tasks[leaderIndex];
+	const memberCompiled = compiledFlow.tasks[memberIndex];
+	if (!leaderTask || !memberTask || !leaderCompiled || !memberCompiled)
+		throw new Error(`foreach batch ${record.batchId} prepared members are missing`);
+	if (
+		!sameOptionalForeachMetadata(
+			record,
+			leaderTask,
+			memberTask,
+			leaderCompiled,
+			memberCompiled,
+		)
+	)
+		throw new Error(`foreach batch ${record.batchId} prepared generation/grouping metadata drifted`);
+	const [preparedLeader, preparedMember] = await Promise.all([
+		prepareDagTask(cwd, run, compiledFlow, leaderIndex, validationSnapshot),
+		prepareDagTask(cwd, run, compiledFlow, memberIndex, validationSnapshot),
+	]);
+	const leaderSurface = foreachBatchExecutionSurfaceSha256(preparedLeader);
+	const memberSurface = foreachBatchExecutionSurfaceSha256(preparedMember);
+	if (
+		leaderSurface !== record.executionSurfaceSha256 ||
+		memberSurface !== record.executionSurfaceSha256 ||
+		leaderSurface !== memberSurface
+	)
+		throw new Error(`foreach batch ${record.batchId} prepared execution surface drifted`);
+	return preparedLeader;
+}
+
 function batchMemberForTask(
 	record: WorkflowForeachBatchRecord,
 	task: WorkflowTaskRunRecord,
@@ -2906,12 +2993,6 @@ async function launchForeachBatchAt(
 	if (record) {
 		const leaderMember = batchMemberForTask(record, leaderTask);
 		const memberMember = batchMemberForTask(record, memberTask);
-		leaderLaunchTask = {
-			...leaderCompiled,
-			cwd: leaderTask.cwd,
-			foreachBatchSynthetic: { schema: "workflow-foreach-batch-v1" },
-			compiledPrompt: record.batchPrompt,
-		};
 		if (
 			leaderMember.role !== "leader" ||
 			memberMember.role !== "member" ||
@@ -2920,6 +3001,35 @@ async function launchForeachBatchAt(
 			throw new Error(
 				`foreach batch ${record.batchId} durable launch integrity failed`,
 			);
+		}
+		try {
+			// A prepared record is a replay boundary. Rebuild both singleton
+			// preparation surfaces immediately before launch rather than trusting
+			// the currently loaded compiled task or adjacency. Any drift disables
+			// the batch before a physical backend launch can occur.
+			const preparedLeader = await revalidatePreparedForeachBatch(
+				cwd,
+				run,
+				compiledFlow,
+				record,
+				plan.leaderIndex,
+				plan.memberIndex,
+				validationSnapshot,
+			);
+			leaderLaunchTask = {
+				...preparedLeader,
+				cwd: leaderTask.cwd,
+				foreachBatchSynthetic: { schema: "workflow-foreach-batch-v1" },
+				compiledPrompt: record.batchPrompt,
+			};
+		} catch (error) {
+			await fallbackForeachBatch(
+				cwd,
+				run,
+				record,
+				`prepared batch drift: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return "changed";
 		}
 	} else {
 		let preparedLeader: CompiledTask;
@@ -2946,6 +3056,9 @@ async function launchForeachBatchAt(
 		}
 		const grouping = leaderCompiled.foreachGenerated?.batch;
 		if (!grouping) return "unavailable";
+		const leaderSurface = foreachBatchExecutionSurfaceSha256(preparedLeader);
+		const memberSurface = foreachBatchExecutionSurfaceSha256(preparedMember);
+		if (leaderSurface !== memberSurface) return "unavailable";
 		const batchPrompt = buildForeachBatchPrompt({
 			leader: preparedLeader,
 			items: [
@@ -2974,8 +3087,7 @@ async function launchForeachBatchAt(
 				? {}
 				: { sourceGeneration: leaderTask.sourceGeneration }),
 			grouping: { ...grouping },
-			executionSurfaceSha256:
-				foreachBatchExecutionSurfaceSha256(preparedLeader),
+			executionSurfaceSha256: leaderSurface,
 			stateRootSha256: stateRootIdentity.identitySha256,
 			members: [
 				{

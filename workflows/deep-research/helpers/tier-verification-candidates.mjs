@@ -67,22 +67,22 @@ function asArray(value) {
 	return [];
 }
 
+function canonicalSource(sources, stageId) {
+	const matches = Object.entries(sources ?? {}).filter(
+		([specId]) => specId === stageId || specId.startsWith(`${stageId}.`),
+	);
+	if (matches.length > 1) {
+		throw new Error(
+			`deep-research: ambiguous ${stageId} source (${matches.map(([specId]) => specId).join(", ")})`,
+		);
+	}
+	return matches[0]?.[1] ?? null;
+}
+
 function findCandidates(sources) {
-	for (const [specId, source] of Object.entries(sources ?? {})) {
-		if (specId === "sanitize-claims" || specId.startsWith("sanitize-claims.")) {
-			return asArray(source);
-		}
-	}
-	for (const [specId, source] of Object.entries(sources ?? {})) {
-		if (
-			specId === "normalize-claims" ||
-			specId.startsWith("normalize-claims.")
-		) {
-			const candidates = asArray(source);
-			if (candidates.length > 0) return candidates;
-		}
-	}
-	return [];
+	const sanitized = canonicalSource(sources, "sanitize-claims");
+	if (sanitized !== null) return asArray(sanitized);
+	return asArray(canonicalSource(sources, "normalize-claims"));
 }
 
 function allocateFallbackId(usedIds, index) {

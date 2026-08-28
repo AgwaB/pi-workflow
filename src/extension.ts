@@ -6,8 +6,16 @@ import type {
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { closeSync, openSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join, relative } from "node:path";
+import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import {
+	dirname,
+	isAbsolute as isAbsolutePath,
+	join,
+	relative,
+	resolve as resolvePath,
+	sep,
+	win32,
+} from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { discoverAgents } from "./agents.js";
@@ -604,7 +612,8 @@ async function workflowTerminalToolResult(
 				: "Final result preview: unavailable";
 		}
 		const resultOnlySummary =
-			!deliveryAlreadyCompleted && terminal.semanticStatus === "completed"
+			!deliveryAlreadyCompleted &&
+			isResultOnlyWorkflowSuccess(terminal.semanticStatus, preview)
 				? stringValue(preview)
 				: undefined;
 		const text =
@@ -1245,8 +1254,7 @@ export async function deliverWorkflowFeedback(
 			options.includeSummaryInstruction ?? triggerTurn;
 		const resultOnlySummary =
 			includeSummaryInstruction &&
-			terminal.semanticStatus === "completed" &&
-			Boolean(preview?.trim());
+			isResultOnlyWorkflowSuccess(terminal.semanticStatus, preview);
 		let content: string;
 		if (resultOnlySummary) {
 			content = [
@@ -1831,6 +1839,89 @@ async function claimWorkflowFeedbackDelivery(
 	};
 }
 
+const RESULT_ONLY_WORKFLOW_STATUSES = new Set([
+	"completed",
+	"synthesized",
+	"exhausted_with_output",
+]);
+
+function isResultOnlyWorkflowSuccess(
+	semanticStatus: string,
+	preview: string | undefined,
+): boolean {
+	return RESULT_ONLY_WORKFLOW_STATUSES.has(semanticStatus) &&
+		Boolean(preview?.trim());
+}
+
+function isDirectDynamicSynthesisTask(
+	run: Awaited<ReturnType<typeof refreshRun>>,
+	task: Awaited<ReturnType<typeof refreshRun>>["tasks"][number],
+): boolean {
+	return (
+		run.provenance?.mode === "direct-dynamic" &&
+		task.dynamicGenerated?.outputProfile === "synthesis_v1"
+	);
+}
+
+function safeRelativeTaskArtifactPath(
+	taskDir: string,
+	candidate: string,
+): string | undefined {
+	// Metadata is allowed to name a file below the task directory, but never a
+	// filesystem path. Reject backslashes too so a Windows path cannot become a
+	// surprising relative filename when inspected on POSIX.
+	if (
+		!candidate ||
+		candidate.includes("\0") ||
+		candidate.includes("\\") ||
+		candidate.split("/").some((part) => part === "..") ||
+		isAbsolutePath(candidate) ||
+		win32.isAbsolute(candidate)
+	)
+		return undefined;
+	const root = resolvePath(taskDir);
+	const resolved = resolvePath(root, candidate);
+	const escaped = relative(root, resolved);
+	if (
+		!escaped ||
+		escaped === ".." ||
+		escaped.startsWith(".." + sep) ||
+		isAbsolutePath(escaped)
+	)
+		return undefined;
+	return resolved;
+}
+
+function isRawProtocolArtifactPath(candidate: string): boolean {
+	const name = candidate.split("/").at(-1)?.toLowerCase();
+	return name === "raw.md" || name === "output.log";
+}
+
+async function readSafeRelativeTaskArtifact(
+	taskDir: string,
+	candidate: string,
+): Promise<string | undefined> {
+	const path = safeRelativeTaskArtifactPath(taskDir, candidate);
+	if (!path) return undefined;
+	try {
+		// Check the resolved target as well as the lexical path. This closes the
+		// symlink variant of a traversal supplied through provider metadata.
+		const root = await realpath(taskDir);
+		const target = await realpath(path);
+		const escaped = relative(root, target);
+		if (
+			escaped === ".." ||
+			escaped.startsWith(".." + sep) ||
+			isAbsolutePath(escaped)
+		)
+			return undefined;
+		const text = (await readFile(target, "utf8")).trim();
+		return text || undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 async function readWorkflowResultPreview(
 	cwd: string,
 	run: Awaited<ReturnType<typeof refreshRun>>,
@@ -1853,6 +1944,29 @@ async function readWorkflowResultPreview(
 	if (completionSummaryMarkdown) {
 		return truncateWorkflowPreview(completionSummaryMarkdown);
 	}
+
+	if (isDirectDynamicSynthesisTask(run, task)) {
+		// Direct dynamic workers have protocol output in raw.md/output.log. Only
+		// use validated summary fields and the parser-produced analysis artifact
+		// for their user-facing preview; never expose protocol wrappers.
+		const summary = stringValue(control?.summary);
+		if (summary) return truncateWorkflowPreview(summary);
+		const analysis = await readSafeRelativeTaskArtifact(taskDir, "analysis.md");
+		if (analysis) return truncateWorkflowPreview(analysis);
+		const executiveMarkdown = stringValue(control?.executiveMarkdown);
+		if (executiveMarkdown) return truncateWorkflowPreview(executiveMarkdown);
+		const sidecarPath = stringValue(control?.sidecarPath);
+		if (sidecarPath && !isRawProtocolArtifactPath(sidecarPath)) {
+			const sidecar = await readSafeRelativeTaskArtifact(taskDir, sidecarPath);
+			if (sidecar) return truncateWorkflowPreview(sidecar);
+		}
+		const finalReport = await readSafeRelativeTaskArtifact(
+			taskDir,
+			"final-report.md",
+		);
+		return finalReport ? truncateWorkflowPreview(finalReport) : undefined;
+	}
+
 	const executiveMarkdown = stringValue(control?.executiveMarkdown);
 	if (executiveMarkdown) return truncateWorkflowPreview(executiveMarkdown);
 	for (const fileName of [
@@ -1865,13 +1979,14 @@ async function readWorkflowResultPreview(
 	].filter(
 		(item): item is string => typeof item === "string" && item.length > 0,
 	)) {
-		try {
-			const text = (await readFile(join(taskDir, fileName), "utf8")).trim();
-			if (!text) continue;
-			return truncateWorkflowPreview(text);
-		} catch {
-			// Try the next artifact candidate.
-		}
+		const text = stringValue(
+			fileName === stringValue(control?.sidecarPath)
+				? await readSafeRelativeTaskArtifact(taskDir, fileName)
+				: await readFile(join(taskDir, fileName), "utf8").catch(
+					() => undefined,
+				),
+		);
+		if (text) return truncateWorkflowPreview(text);
 	}
 	return undefined;
 }

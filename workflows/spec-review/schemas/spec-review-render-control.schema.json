@@ -1,0 +1,74 @@
+{
+  "type": "object",
+  "required": [
+    "schema",
+    "digest",
+    "status",
+    "completionSummaryMarkdown",
+    "markdown",
+    "verdict",
+    "findingSummary",
+    "renderedFindingIds",
+    "renderedNeedsHumanIds",
+    "renderedDroppedFindingIds",
+    "sourceArtifacts",
+    "gates"
+  ],
+  "properties": {
+    "schema": { "type": "string", "const": "spec-review-render-v1" },
+    "digest": { "type": "string", "minLength": 1, "maxLength": 1200 },
+    "status": { "type": "string", "enum": ["passed", "failed", "blocked"] },
+    "completionSummaryMarkdown": { "type": "string", "maxLength": 6000 },
+    "markdown": { "type": "string" },
+    "verdict": {
+      "type": "string",
+      "enum": ["CONFORMS", "GAPS_FOUND", "NEEDS_HUMAN", "INCONCLUSIVE"]
+    },
+    "findingSummary": {
+      "type": "object",
+      "required": ["final", "needsHuman", "dropped"],
+      "properties": {
+        "final": { "type": "integer", "minimum": 0 },
+        "needsHuman": { "type": "integer", "minimum": 0 },
+        "dropped": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "renderedFindingIds": { "type": "array", "items": { "type": "string" } },
+    "renderedNeedsHumanIds": { "type": "array", "items": { "type": "string" } },
+    "renderedDroppedFindingIds": { "type": "array", "items": { "type": "string" } },
+    "sourceArtifacts": { "type": "array", "items": { "type": "string" } },
+    "gates": {
+      "type": "object",
+      "required": [
+        "partitionAvailable",
+        "reportSynthesisAvailable",
+        "ownerLedgerReconciliationPassed",
+        "sourceCoverageComplete",
+        "verifierCoverageComplete",
+        "reportVerdictConsistent",
+        "renderedAllCanonicalRows",
+        "duplicateCanonicalIds",
+        "actionableEvidenceComplete",
+        "passed"
+      ],
+      "properties": {
+        "partitionAvailable": { "type": "boolean" },
+        "reportSynthesisAvailable": { "type": "boolean" },
+        "ownerLedgerReconciliationPassed": { "type": "boolean" },
+        "sourceCoverageComplete": { "type": "boolean" },
+        "verifierCoverageComplete": { "type": "boolean" },
+        "reportVerdictConsistent": { "type": "boolean" },
+        "renderedAllCanonicalRows": { "type": "boolean" },
+        "duplicateCanonicalIds": { "type": "array", "items": { "type": "string" } },
+        "actionableEvidenceComplete": { "type": "boolean" },
+        "passed": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "blockers": { "type": "array", "items": { "type": "string" }, "maxItems": 32 },
+    "sidecarPath": { "type": "string", "const": "final-report.md" },
+    "ledgerSidecarPath": { "type": "string", "const": "source-ledger.json" }
+  },
+  "additionalProperties": false
+}

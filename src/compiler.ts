@@ -1318,6 +1318,42 @@ function runtimeSettings(value: unknown): WorkflowRuntimeDefaults | undefined {
 	return model || thinking ? { model, thinking } : undefined;
 }
 
+function formatRoleText(
+	selectedRoles: readonly { name: string; content: string }[],
+): string {
+	return selectedRoles.length
+		? `# Role Context\n\n${selectedRoles.map((role) => `## Role: ${role.name}\n${role.content}`).join("\n\n")}`
+		: "";
+}
+
+function roleSelection(value: unknown): string[] | undefined {
+	if (typeof value === "string") return [value];
+	if (Array.isArray(value))
+		return value.filter((name): name is string => typeof name === "string");
+	return undefined;
+}
+
+function selectRoles(
+	roles: readonly { name: string; content: string }[],
+	selection: unknown,
+	path: string,
+	issues: ValidationIssue[],
+): { selected: typeof roles; names: string[] } {
+	const names = roleSelection(selection);
+	if (names === undefined) return { selected: roles, names: roles.map((role) => role.name) };
+	const byName = new Map(roles.map((role) => [role.name, role]));
+	const selected: typeof roles[number][] = [];
+	for (const name of names) {
+		const role = byName.get(name);
+		if (!role) {
+			issues.push({ path, message: `unknown workflow role "${name}"` });
+			continue;
+		}
+		selected.push(role);
+	}
+	return { selected, names: selected.map((role) => role.name) };
+}
+
 async function compileArtifactGraphPlan(
 	spec: any,
 	options: CompileOptions & {
@@ -1362,9 +1398,7 @@ async function compileArtifactGraphPlan(
 			return compileRole(name, role, sourceAgent);
 		}),
 	);
-	const roleText = roles.length
-		? `# Role Context\n\n${roles.map((r) => `## Role: ${r.name}\n${r.content}`).join("\n\n")}`
-		: "";
+	const allRoleText = formatRoleText(roles);
 	const workflowInput = (spec as any).input;
 	const workflowInputText =
 		workflowInput &&
@@ -1376,6 +1410,7 @@ async function compileArtifactGraphPlan(
 	const runtimeOverrides = options.runtimeOverrides;
 	const runtimeDefaults = options.runtimeDefaults;
 	const specRuntimeDefaults = runtimeSettings(spec.defaults);
+	const workflowCwd = resolve(options.cwd, spec.defaults?.cwd ?? ".");
 	const tasks: any[] = [];
 	const stageRecords: any[] = [];
 	const issues: ValidationIssue[] = [];
@@ -1393,6 +1428,12 @@ async function compileArtifactGraphPlan(
 		overrides: Partial<CompiledTask> & Record<string, unknown> = {},
 	): Promise<any> => {
 		const key = `${stage.id}.${taskId}`;
+		const runtimeStageKind = runtimeStageKindFor(stage) ?? "single";
+		const each =
+			runtimeStageKind === "foreach" && isPlainRecord(stage.each)
+				? stage.each
+				: undefined;
+		const taskCwd = resolve(workflowCwd, stage.cwd ?? ".");
 		if (isSupportStage(stage)) {
 			return buildSupportTask(
 				stage,
@@ -1400,7 +1441,7 @@ async function compileArtifactGraphPlan(
 				key,
 				prompt,
 				dependencyKeys,
-				options.cwd,
+				taskCwd,
 				workflowInputText,
 				overrides,
 			);
@@ -1449,7 +1490,7 @@ async function compileArtifactGraphPlan(
 				key,
 				prompt,
 				dependencyKeys,
-				options.cwd,
+				taskCwd,
 				specDir,
 				workflowInputText,
 				options.task,
@@ -1483,7 +1524,7 @@ async function compileArtifactGraphPlan(
 			return dynamicTask;
 		}
 
-		const stageAgentName = stage.agent ?? agentName;
+		const stageAgentName = each?.agent ?? stage.agent ?? agentName;
 		const stageAgent =
 			stageAgentName === agentName
 				? await getDefaultAgent()
@@ -1491,22 +1532,29 @@ async function compileArtifactGraphPlan(
 						stageAgentName,
 						options.cwd,
 						agentCache,
-						`$.artifactGraph.stages.${stage.id}.agent`,
+						`$.artifactGraph.stages.${jsonKey(stage.id)}.${each?.agent !== undefined ? "each.agent" : "agent"}`,
 					);
 		if (!validatedAgentPaths.has(stageAgent.sourcePath)) {
 			validateAgentRuntime(
 				stageAgent,
 				issues,
-				`$.artifactGraph.stages.${jsonKey(stage.id)}.agent`,
+				`$.artifactGraph.stages.${jsonKey(stage.id)}.${each?.agent !== undefined ? "each.agent" : "agent"}`,
 			);
 			validatedAgentPaths.add(stageAgent.sourcePath);
 		}
-		validateToolSpecs(
-			stage.tools,
+		const selectedRoles = selectRoles(
+			roles,
+			each?.role !== undefined ? each.role : stage.role,
+			`$.artifactGraph.stages.${jsonKey(stage.id)}.${each?.role !== undefined ? "each.role" : "role"}`,
 			issues,
-			`$.artifactGraph.stages.${jsonKey(stage.id)}.tools`,
 		);
-		const runtimeStageKind = runtimeStageKindFor(stage) ?? "single";
+		const selectedRoleText = formatRoleText(selectedRoles.selected);
+		const authoredTools = each?.tools ?? stage.tools;
+		validateToolSpecs(
+			authoredTools,
+			issues,
+			`$.artifactGraph.stages.${jsonKey(stage.id)}.${each?.tools !== undefined ? "each.tools" : "tools"}`,
+		);
 		// By default only `single` stages receive the runtime task body; foreach
 		// and reduce stages operate on upstream item/Source Context instead. A
 		// stage may opt in with `injectRuntimeTask: true` when a cross-cutting user
@@ -1533,7 +1581,7 @@ async function compileArtifactGraphPlan(
 						taskText,
 						workflowInputText || undefined,
 						stageText,
-						roleText || undefined,
+						selectedRoleText || undefined,
 						instructionText,
 					]
 				: [
@@ -1541,18 +1589,18 @@ async function compileArtifactGraphPlan(
 						workflowInputText || undefined,
 						stageText,
 						instructionText,
-						roleText || undefined,
+						selectedRoleText || undefined,
 					]
 		)
 			.filter(Boolean)
 			.join("\n\n");
 		const toolSelection = resolveToolSelection(
-			[spec.defaults?.tools, stage.tools],
+			[spec.defaults?.tools, authoredTools],
 			stageAgent.tools,
 		);
 		const toolPath =
-			stage.tools !== undefined
-				? `$.artifactGraph.stages.${jsonKey(stage.id)}.tools`
+			authoredTools !== undefined
+				? `$.artifactGraph.stages.${jsonKey(stage.id)}.${each?.tools !== undefined ? "each.tools" : "tools"}`
 				: spec.defaults?.tools !== undefined
 					? "$.defaults.tools"
 					: `$.artifactGraph.stages.${jsonKey(stage.id)}.agent`;
@@ -1561,7 +1609,15 @@ async function compileArtifactGraphPlan(
 		const filteredToolSelection = filterToolSelection(toolSelection);
 		const requestedRuntime = selectWorkflowRuntime(
 			runtimeOverrides,
-			runtimeSettings(stage),
+			runtimeSettings(
+				each
+					? {
+							...stage,
+							model: each.model ?? stage.model,
+							thinking: each.thinking ?? stage.thinking,
+						}
+					: stage,
+			),
 			runtimeDefaults,
 			specRuntimeDefaults,
 		);
@@ -1586,17 +1642,20 @@ async function compileArtifactGraphPlan(
 				? { toolProviders: filteredToolSelection.toolProviders }
 				: {}),
 			maxRuntimeMs:
+				each?.maxRuntimeMs ??
 				stage.maxRuntimeMs ??
 				spec.defaults?.maxRuntimeMs ??
 				DEFAULT_MAX_RUNTIME_MS,
 		};
 		const readOnlyDeclared =
+			each?.readOnly ??
 			stage.readOnly ??
 			spec.defaults?.readOnly ??
 			spec.readOnly ??
 			stageAgent.readOnly ??
 			false;
 		const worktreePolicy =
+			each?.worktreePolicy ??
 			stage.worktreePolicy ??
 			spec.defaults?.worktreePolicy ??
 			spec.worktreePolicy ??
@@ -1648,11 +1707,12 @@ async function compileArtifactGraphPlan(
 			systemPromptMode: stageAgent.systemPromptMode,
 			inheritProjectContext: stageAgent.inheritProjectContext,
 			inheritSkills: stageAgent.inheritSkills,
-			roleNames: roles.map((r) => r.name),
+			roleNames: selectedRoles.names,
 			task: normalizedPrompt,
-			cwd: options.cwd,
+			cwd: taskCwd,
 			explicitCwd: stage.cwd !== undefined,
-			explicitWorktreePolicy: stage.worktreePolicy !== undefined,
+			explicitWorktreePolicy:
+				each?.worktreePolicy !== undefined || stage.worktreePolicy !== undefined,
 			runtime,
 			safety,
 			outputContract: stage.outputContract,
@@ -1685,7 +1745,7 @@ async function compileArtifactGraphPlan(
 							...(itemIdentityPath !== undefined ? { itemIdentityPath } : {}),
 							...(itemPayloadPath !== undefined ? { itemPayloadPath } : {}),
 							injectRuntimeTask: injectTask,
-							roleText,
+							roleText: selectedRoleText,
 						}
 					: undefined,
 			...overrides,
@@ -1844,6 +1904,13 @@ async function compileArtifactGraphPlan(
 				onExhausted: loopTemplates.onExhausted,
 				progressPath: stage.progressPath,
 			});
+			const loopRoleNames = roleSelection(stage.role);
+			const loopRoleText =
+				loopRoleNames === undefined
+					? allRoleText
+					: formatRoleText(
+							roles.filter((role) => loopRoleNames.includes(role.name)),
+						);
 			tasks.push(
 				await buildTask(
 					stage,
@@ -1871,7 +1938,7 @@ async function compileArtifactGraphPlan(
 							workflowInputText || undefined,
 							`# Workflow Stage\n\nstage=${stage.id}\ntype=loop`,
 							"# Instructions\n\nLoop controller placeholder. Child stages are materialized by the workflow engine at runtime.",
-							roleText || undefined,
+							loopRoleText || undefined,
 						]
 							.filter(Boolean)
 							.join("\n\n"),
@@ -2048,7 +2115,7 @@ function buildSupportTask(
 		roleNames: [],
 		task: normalizedPrompt,
 		cwd,
-		explicitCwd: false,
+		explicitCwd: stage.cwd !== undefined,
 		explicitWorktreePolicy: false,
 		runtime: { approvalMode: "non-interactive" },
 		safety: {
@@ -2164,7 +2231,7 @@ function buildDynamicTask(
 		roleNames: [],
 		task: normalizedPrompt,
 		cwd,
-		explicitCwd: false,
+		explicitCwd: stage.cwd !== undefined,
 		explicitWorktreePolicy: false,
 		runtime: {
 			approvalMode: "non-interactive",

@@ -9,7 +9,10 @@
     "reportPacket",
     "sourceStatusSummary",
     "partitionSummary",
-    "normalizationNotes"
+    "normalizationNotes",
+    "reviewerLedger",
+    "dedupSummary",
+    "verifierCoverage"
   ],
   "properties": {
     "schema": {
@@ -127,6 +130,9 @@
               "findingId": { "type": "string", "minLength": 1 },
               "rootCauseId": { "type": "string", "minLength": 1 },
               "title": { "type": "string", "minLength": 1 },
+              "classification": { "type": "string", "enum": ["behavioral", "support-only"] },
+              "supportClassification": { "type": "string", "enum": ["behavioral", "support-only"] },
+              "supportingFindingId": { "type": "string", "minLength": 1 },
               "severity": { "type": "string", "minLength": 1 },
               "locations": {
                 "type": "array",
@@ -157,12 +163,59 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["title", "locations", "evidenceQuotes"],
+        "required": ["findingId", "originalFindingId", "rootCauseId", "title", "locations", "evidenceQuotes", "source", "sourceLineage", "reviewerIdentity", "verifierOwner", "mergedLineage", "supportingFindingId"],
         "properties": {
           "title": { "type": "string", "minLength": 1 },
+          "classification": { "type": "string", "enum": ["behavioral", "support-only"] },
+          "supportClassification": { "type": "string", "enum": ["behavioral", "support-only"] },
           "severity": { "type": "string" },
           "reason": { "type": "string" },
           "supportingFindingOf": { "type": "string" },
+          "findingId": { "type": "string", "minLength": 1 },
+          "originalFindingId": { "type": "string", "minLength": 1 },
+          "rootCauseId": { "type": "string", "minLength": 1 },
+          "source": { "type": "string", "minLength": 1 },
+          "sourceLineage": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+          "reviewerIdentity": {
+            "type": "object",
+            "required": ["source", "specId", "taskId", "itemIdentity", "placeholderSpecId"],
+            "properties": {
+              "source": { "type": "string", "minLength": 1 },
+              "specId": { "type": "string", "minLength": 1 },
+              "taskId": { "type": "string", "minLength": 1 },
+              "itemIdentity": { "type": "string", "minLength": 1 },
+              "placeholderSpecId": { "type": "string", "minLength": 1 }
+            }
+          },
+          "verifierOwner": {
+            "type": "object",
+            "required": ["source", "specId", "taskId", "itemIdentity", "placeholderSpecId"],
+            "properties": {
+              "source": { "type": "string", "minLength": 1 },
+              "specId": { "type": "string", "minLength": 1 },
+              "taskId": { "type": "string", "minLength": 1 },
+              "itemIdentity": { "type": "string", "minLength": 1 },
+              "placeholderSpecId": { "type": "string", "minLength": 1 }
+            }
+          },
+          "mergedLineage": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["findingId", "originalFindingId", "rootCauseId"],
+              "properties": {
+                "findingId": { "type": "string", "minLength": 1 },
+                "originalFindingId": { "type": "string", "minLength": 1 },
+                "rootCauseId": { "type": "string", "minLength": 1 },
+                "source": { "type": "string" },
+                "sourceLineage": { "type": "array", "items": { "type": "string" } },
+                "reviewerIdentity": { "type": "object" },
+                "verifierOwner": { "type": "object" }
+              }
+            }
+          },
+          "mergedFindings": { "type": "array", "items": { "type": "object" } },
+          "supportingFindingId": { "type": "string", "minLength": 1 },
           "locations": {
             "type": "array",
             "minItems": 1,
@@ -191,6 +244,7 @@
       "required": [
         "keep",
         "weaken",
+        "drop",
         "needsHuman",
         "supportNoteSummaries",
         "partialFailures"
@@ -229,6 +283,21 @@
                 "type": "array",
                 "items": { "type": "string", "minLength": 1 }
               }
+            }
+          }
+        },
+        "drop": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["findingId", "rootCauseId", "title", "severity"],
+            "properties": {
+              "findingId": { "type": "string", "minLength": 1 },
+              "rootCauseId": { "type": "string", "minLength": 1 },
+              "title": { "type": "string", "minLength": 1 },
+              "severity": { "type": "string", "minLength": 1 },
+              "recommendedAction": { "type": "string" },
+              "mergedFindingIds": { "type": "array", "items": { "type": "string", "minLength": 1 } }
             }
           }
         },
@@ -326,6 +395,8 @@
             "mergedFindings",
             "verdictsReceived",
             "batchIntegrityIssues",
+            "verdictIntegrityIssues",
+            "reviewerCoverageIssues",
             "reviewerFindings",
             "missingVerdicts",
             "partialFailures"
@@ -339,6 +410,8 @@
             "mergedFindings": { "type": "number", "minimum": 0, "maximum": 9007199254740991 },
             "verdictsReceived": { "type": "number", "minimum": 0, "maximum": 9007199254740991 },
             "batchIntegrityIssues": { "type": "number", "minimum": 0, "maximum": 9007199254740991 },
+            "verdictIntegrityIssues": { "type": "number", "minimum": 0, "maximum": 9007199254740991 },
+            "reviewerCoverageIssues": { "type": "number", "minimum": 0, "maximum": 9007199254740991 },
             "reviewerFindings": { "type": "number", "minimum": 0, "maximum": 9007199254740991 },
             "missingVerdicts": { "type": "number", "minimum": 0, "maximum": 9007199254740991 },
             "partialFailures": { "type": "number", "minimum": 0, "maximum": 9007199254740991 }
@@ -378,7 +451,7 @@
         },
         "reportContext": {
           "type": "object",
-          "required": ["keep", "weaken", "needsHuman", "supportNoteSummaries"],
+          "required": ["keep", "weaken", "drop", "needsHuman", "supportNoteSummaries"],
           "properties": {
             "keep": {
               "type": "array",
@@ -396,6 +469,21 @@
               }
             },
             "weaken": {
+              "type": "array",
+              "maxItems": 4,
+              "items": {
+                "type": "object",
+                "required": ["findingId", "title", "severity"],
+                "properties": {
+                  "findingId": { "type": "string", "minLength": 1, "maxLength": 64 },
+                  "title": { "type": "string", "minLength": 1, "maxLength": 220 },
+                  "severity": { "type": "string", "minLength": 1, "maxLength": 32 },
+                  "recommendedAction": { "type": "string", "minLength": 1, "maxLength": 220 }
+                },
+                "additionalProperties": false
+              }
+            },
+            "drop": {
               "type": "array",
               "maxItems": 4,
               "items": {
@@ -497,6 +585,8 @@
         "supportNotes",
         "mergedFindings",
         "verdictsReceived",
+        "verdictIntegrityIssues",
+        "reviewerCoverageIssues",
         "reviewerFindings",
         "missingVerdicts",
         "partialFailures"
@@ -509,6 +599,8 @@
         "supportNotes": { "type": "number", "minimum": 0 },
         "mergedFindings": { "type": "number", "minimum": 0 },
         "verdictsReceived": { "type": "number", "minimum": 0 },
+        "verdictIntegrityIssues": { "type": "number", "minimum": 0 },
+        "reviewerCoverageIssues": { "type": "number", "minimum": 0 },
         "reviewerFindings": { "type": "number", "minimum": 0 },
         "missingVerdicts": { "type": "number", "minimum": 0 },
         "partialFailures": { "type": "number", "minimum": 0 }
@@ -517,6 +609,56 @@
     "normalizationNotes": {
       "type": "array",
       "items": { "type": "string" }
+    },
+    "reviewerLedger": {
+      "type": "object",
+      "required": ["complete", "plannedLensIds", "materializedReviewerIds", "attestedLensIds", "ownerMap", "rawFindingIds", "dedupFindingIds", "dispositionFindingIds", "supportFindingIds", "lineageFindingIds", "sourceStatuses"],
+      "properties": {
+        "complete": { "type": "boolean" },
+        "plannedLensIds": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "materializedReviewerIds": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "attestedLensIds": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "ownerMap": { "type": "array", "items": { "type": "object", "required": ["source", "specId", "taskId", "itemIdentity", "placeholderSpecId"], "properties": { "source": { "type": "string", "minLength": 1 }, "specId": { "type": "string", "minLength": 1 }, "taskId": { "type": "string", "minLength": 1 }, "itemIdentity": { "type": "string", "minLength": 1 }, "placeholderSpecId": { "type": "string", "minLength": 1 } } } },
+        "rawFindingIds": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "dedupFindingIds": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "dispositionFindingIds": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "supportFindingIds": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "lineageFindingIds": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "sourceStatuses": { "type": "array", "items": { "type": "object" } }
+      },
+      "additionalProperties": true
+    },
+    "dedupSummary": {
+      "type": "object",
+      "required": ["complete", "rawCount", "uniqueCount", "duplicateCount", "rawFindingIds", "dedupFindingIds", "dispositionFindingIds", "supportFindingIds", "lineageFindingIds", "duplicates"],
+      "properties": {
+        "complete": { "type": "boolean" },
+        "rawCount": { "type": "number", "minimum": 0 },
+        "uniqueCount": { "type": "number", "minimum": 0 },
+        "duplicateCount": { "type": "number", "minimum": 0 },
+        "rawFindingIds": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "dedupFindingIds": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "dispositionFindingIds": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "supportFindingIds": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "lineageFindingIds": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "duplicates": { "type": "array", "items": { "type": "object" } }
+      },
+      "additionalProperties": true
+    },
+    "verifierCoverage": {
+      "type": "object",
+      "required": ["complete", "verdictsReceived", "expectedFindingIds", "verdictFindingIds", "rows", "sourceStatuses", "digest", "ownerIssues"],
+      "properties": {
+        "complete": { "type": "boolean" },
+        "verdictsReceived": { "type": "number", "minimum": 0 },
+        "expectedFindingIds": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "verdictFindingIds": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "rows": { "type": "array", "items": { "type": "object", "required": ["sourceId", "findingId", "valid", "owner"], "properties": { "sourceId": { "type": "string", "minLength": 1 }, "findingId": { "type": "string" }, "valid": { "type": "boolean" }, "owner": { "type": "object", "required": ["source", "specId", "taskId", "itemIdentity", "placeholderSpecId"], "properties": { "source": { "type": "string" }, "specId": { "type": "string" }, "taskId": { "type": "string" }, "itemIdentity": { "type": "string" }, "placeholderSpecId": { "type": "string" } } } } } },
+        "sourceStatuses": { "type": "array", "items": { "type": "object" } },
+        "digest": { "type": "string", "minLength": 1 },
+        "ownerIssues": { "type": "array", "items": { "type": "object" } }
+      },
+      "additionalProperties": true
     }
   },
   "additionalProperties": true

@@ -140,16 +140,19 @@ export async function listWorkflows(
 	const nested = await Promise.all(
 		roots.map(async (root) => {
 			const files = await listSpecFiles(root.path);
-			return files.map((file) => {
+			return files.flatMap((file) => {
 				const aliases = aliasesFor(file, root.path);
-				return {
+				// Discovery is a user-facing registry. Do not advertise a ref that
+				// the name resolver would reject (explicit path refs remain valid).
+				if (aliases.length === 0) return [];
+				return [{
 					name: aliases[1] ?? aliases[0]!,
 					fileName: basename(file),
 					aliases,
 					specPath: file,
 					workflowRoot: workflowRootFor(file, root.path),
 					priority: root.priority,
-				};
+				}];
 			});
 		}),
 	);
@@ -303,8 +306,10 @@ function isBundleSpec(file: string, searchRoot: string): boolean {
 function aliasesFor(file: string, searchRoot: string): string[] {
 	const name = basename(file);
 	const extension = extname(name);
-	if (isBundleSpec(file, searchRoot)) return [basename(dirname(file))];
-	return [name, name.slice(0, -extension.length)];
+	const aliases = isBundleSpec(file, searchRoot)
+		? [basename(dirname(file))]
+		: [name, name.slice(0, -extension.length)];
+	return aliases.filter(isValidWorkflowName);
 }
 
 function workflowRootFor(file: string, searchRoot: string): string {
@@ -332,13 +337,17 @@ function isPathLike(ref: string): boolean {
 	);
 }
 
+function isValidWorkflowName(name: string): boolean {
+	return !name.startsWith(".") && /^[A-Za-z0-9_.-]+$/.test(name);
+}
+
 function validateWorkflowName(name: string): void {
 	if (name.startsWith(".")) {
 		throw new WorkflowValidationError([
 			{ path: name, message: "workflow names may not start with dot" },
 		]);
 	}
-	if (!/^[A-Za-z0-9_.-]+$/.test(name)) {
+	if (!isValidWorkflowName(name)) {
 		throw new WorkflowValidationError([
 			{
 				path: name,

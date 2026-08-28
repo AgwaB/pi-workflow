@@ -1,0 +1,113 @@
+{
+  "type": "object",
+  "required": [
+    "schema",
+    "digest",
+    "status",
+    "completionSummaryMarkdown",
+    "markdown",
+    "verdict",
+    "riskLevel",
+    "issueSummary",
+    "sourceArtifacts",
+    "gates"
+  ],
+  "properties": {
+    "schema": { "type": "string", "const": "impact-review-render-v1" },
+    "digest": { "type": "string", "minLength": 1, "maxLength": 1200 },
+    "status": { "type": "string", "enum": ["passed", "failed", "blocked"] },
+    "completionSummaryMarkdown": { "type": "string", "maxLength": 6000 },
+    "markdown": { "type": "string" },
+    "verdict": {
+      "type": "string",
+      "enum": ["READY", "NEEDS_WORK", "BLOCKED", "UNKNOWN"]
+    },
+    "riskLevel": {
+      "type": "string",
+      "enum": ["none", "low", "medium", "high", "unknown"]
+    },
+    "issueSummary": {
+      "type": "object",
+      "required": [
+        "blockingIssues",
+        "nonBlockingIssues",
+        "recommendedNextActions",
+        "validationToRun",
+        "needsHuman",
+        "confirmedSafeAreas",
+        "contractIssues",
+        "confirmedConsistencies",
+        "regressionRisks",
+        "riskReducers",
+        "requiredBeforeShip",
+        "niceToHave",
+        "readinessAssumptions"
+      ],
+      "properties": {
+        "blockingIssues": { "type": "integer", "minimum": 0 },
+        "nonBlockingIssues": { "type": "integer", "minimum": 0 },
+        "recommendedNextActions": { "type": "integer", "minimum": 0 },
+        "validationToRun": { "type": "integer", "minimum": 0 },
+        "needsHuman": { "type": "integer", "minimum": 0 },
+        "confirmedSafeAreas": { "type": "integer", "minimum": 0 },
+        "contractIssues": { "type": "integer", "minimum": 0 },
+        "confirmedConsistencies": { "type": "integer", "minimum": 0 },
+        "regressionRisks": { "type": "integer", "minimum": 0 },
+        "riskReducers": { "type": "integer", "minimum": 0 },
+        "requiredBeforeShip": { "type": "integer", "minimum": 0 },
+        "niceToHave": { "type": "integer", "minimum": 0 },
+        "readinessAssumptions": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "sourceArtifacts": { "type": "array", "items": { "type": "string" } },
+    "sourceCoverage": {
+      "type": "object",
+      "required": ["available", "expected", "assignments", "missing", "duplicate", "wrongStage", "orphan", "duplicateTaskIds", "statusCount", "expectedCount", "bijection"],
+      "properties": {
+        "available": { "type": "boolean" },
+        "expected": { "type": "array", "items": { "type": "object" } },
+        "assignments": { "type": "array", "items": { "type": "object" } },
+        "missing": { "type": "array", "items": { "type": "object" } },
+        "duplicate": { "type": "array", "items": { "type": "object" } },
+        "wrongStage": { "type": "array", "items": { "type": "object" } },
+        "orphan": { "type": "array", "items": { "type": "object" } },
+        "duplicateTaskIds": { "type": "array", "items": { "type": "string" } },
+        "statusCount": { "type": "integer", "minimum": 0 },
+        "expectedCount": { "type": "integer", "minimum": 0 },
+        "bijection": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "gates": {
+      "type": "object",
+      "required": [
+        "allLedgerSourcesAvailable",
+        "sourceCoverageComplete",
+        "verdictConsistent",
+        "riskFloorConsistent",
+        "synthesisRiskUnknown",
+        "regressionRiskUnknown",
+        "riskGatePassed",
+        "renderedAllStructuredItems",
+        "passed"
+      ],
+      "properties": {
+        "allLedgerSourcesAvailable": { "type": "boolean" },
+        "sourceCoverageComplete": { "type": "boolean" },
+        "verdictConsistent": { "type": "boolean" },
+        "riskFloorConsistent": { "type": "boolean" },
+        "synthesisRiskUnknown": { "type": "boolean" },
+        "regressionRiskUnknown": { "type": "boolean" },
+        "riskGatePassed": { "type": "boolean" },
+        "renderedAllStructuredItems": { "type": "boolean" },
+        "passed": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "blockers": { "type": "array", "items": { "type": "string" }, "maxItems": 32 },
+    "sidecarPath": { "type": "string", "const": "final-report.md" },
+    "ledgerSidecarPath": { "type": "string", "const": "source-ledger.json" }
+  },
+  "additionalProperties": false
+}

@@ -267,6 +267,12 @@ function buildArtifactGraphSupportSourceStatuses(
 			taskId: source.taskId,
 			specId: source.specId,
 			stageId: source.stageId,
+			...(source.foreachGenerated?.itemIdentity === undefined
+				? {}
+				: { itemIdentity: source.foreachGenerated.itemIdentity }),
+			...(source.foreachGenerated?.placeholderSpecId === undefined
+				? {}
+				: { placeholderSpecId: source.foreachGenerated.placeholderSpecId }),
 			...sourceStatusForTask(source),
 		});
 	}
@@ -275,6 +281,8 @@ function buildArtifactGraphSupportSourceStatuses(
 
 function sourceStatusForTask(task: WorkflowTaskRunRecord): {
 	status: string;
+	itemIdentity?: string;
+	placeholderSpecId?: string;
 	statusDetail?: string;
 	lastMessage?: string;
 	errorType?: string;
@@ -285,6 +293,8 @@ function sourceStatusForTask(task: WorkflowTaskRunRecord): {
 	const lastMessage = sanitizeSourceLastMessage(task.lastMessage);
 	return {
 		status: task.status,
+		...(task.foreachGenerated?.itemIdentity === undefined ? {} : { itemIdentity: task.foreachGenerated.itemIdentity }),
+		...(task.foreachGenerated?.placeholderSpecId === undefined ? {} : { placeholderSpecId: task.foreachGenerated.placeholderSpecId }),
 		...(task.statusDetail ? { statusDetail: task.statusDetail } : {}),
 		...(lastMessage ? { lastMessage } : {}),
 		...(task.status !== "completed"
@@ -1881,6 +1891,8 @@ export function sourceNameForTask(
 
 type ArtifactGraphManifestSourceWithRuntimeMetadata =
 	WorkflowSourceManifestSource & {
+		itemIdentity?: string;
+		placeholderSpecId?: string;
 		generation?: number;
 		sourceGeneration?: number;
 		dispatchMap?: ArtifactGraphDispatchMap;
@@ -1889,6 +1901,8 @@ type ArtifactGraphManifestSourceWithRuntimeMetadata =
 function artifactGraphManifestSourceRuntimeMetadata(
 	source: WorkflowSourceManifestSource,
 ): {
+	itemIdentity?: string;
+	placeholderSpecId?: string;
 	generation?: number;
 	sourceGeneration?: number;
 	dispatchMap?: ArtifactGraphDispatchMap;
@@ -1896,6 +1910,8 @@ function artifactGraphManifestSourceRuntimeMetadata(
 	const runtimeSource =
 		source as ArtifactGraphManifestSourceWithRuntimeMetadata;
 	return {
+		...(runtimeSource.itemIdentity === undefined ? {} : { itemIdentity: runtimeSource.itemIdentity }),
+		...(runtimeSource.placeholderSpecId === undefined ? {} : { placeholderSpecId: runtimeSource.placeholderSpecId }),
 		...(runtimeSource.generation === undefined
 			? {}
 			: { generation: runtimeSource.generation }),
@@ -1934,6 +1950,8 @@ export function formatArtifactGraphSourceContext(
 				taskId: source.taskId,
 				specId: source.specId,
 				stageId: source.stageId,
+				itemIdentity: source.itemIdentity,
+				placeholderSpecId: source.placeholderSpecId,
 				status: source.status,
 				statusDetail: source.statusDetail,
 				lastMessage: source.lastMessage,

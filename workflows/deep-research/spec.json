@@ -244,6 +244,9 @@
           "audit-claims"
         ],
         "sourcePolicy": "partial",
+        "output": {
+          "controlSchema": "./schemas/deep-research-final-audit-packet-control.schema.json"
+        },
         "support": {
           "uses": "./helpers/final-audit-packet.mjs"
         }

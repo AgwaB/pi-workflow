@@ -245,6 +245,7 @@ import {
 	writeWorkflowWebSource,
 } from "./unit-test-support.mjs";
 import { setForeachMaterializationPersistenceHookForTests } from "../../.tmp/unit/engine.js";
+import { prepareSubagentTaskLaunch } from "../../.tmp/unit/subagent-backend.js";
 
 
 
@@ -1851,7 +1852,7 @@ test("bundled impact-review artifact graph workflow compiles multi-join DAG", as
 		assert.equal(spec.name, "impact-review");
 		assert.equal(spec.artifactGraph.stages[0].id, "impact-analysis");
 		assert.equal(spec.artifactGraph.stages[0].type, "dag");
-		assert.equal(spec.artifactGraph.stages[0].outputFrom, "impact-synthesis");
+		assert.equal(spec.artifactGraph.stages[0].outputFrom, "final");
 
 		const compiled = await compileWorkflow(spec, {
 			cwd,
@@ -2157,7 +2158,8 @@ test("workflow source context packet applies stage caps and a global packet budg
 	assert.equal(packet.tasks[1].structuredOutput.truncated, true);
 	assert.equal(packet.tasks[1].structuredOutput.preview.length <= 13, true);
 	assert.equal(packet.tasks[2].omittedOutput.reason, "packet_budget_exhausted");
-	assert.deepEqual(packet.byStage.verify.statusCounts, { completed: 2 });
+	assert.equal(JSON.stringify(packet).length <= 320, true);
+	assert.equal(packet.byStage.verify, undefined);
 });
 
 test("workflow source context packet can project structured outputs by source stage", () => {
@@ -2544,8 +2546,10 @@ test("artifact graph sources expose generation-bound dispatch metadata and suppo
 		);
 		assert.deepEqual(
 			manifest.sources.map(
-				({ source, generation, sourceGeneration, dispatchMap }) => ({
+				({ source, itemIdentity, placeholderSpecId, generation, sourceGeneration, dispatchMap }) => ({
 					source,
+					itemIdentity,
+					placeholderSpecId,
 					generation,
 					sourceGeneration,
 					dispatchMap,
@@ -2554,12 +2558,16 @@ test("artifact graph sources expose generation-bound dispatch metadata and suppo
 			[
 				{
 					source: "fanout",
+					itemIdentity: undefined,
+					placeholderSpecId: undefined,
 					generation: 3,
 					sourceGeneration: undefined,
 					dispatchMap: current.fanout.dispatchMap,
 				},
 				{
 					source: "child",
+					itemIdentity: current.child.foreachGenerated.itemIdentity,
+					placeholderSpecId: current.fanout.specId,
 					generation: 3,
 					sourceGeneration: 7,
 					dispatchMap: undefined,
@@ -2578,16 +2586,20 @@ test("artifact graph sources expose generation-bound dispatch metadata and suppo
 		);
 		assert.deepEqual(
 			control.sourceStatuses.map(
-				({ source, generation, sourceGeneration, dispatchMap }) => ({
+				({ source, itemIdentity, placeholderSpecId, generation, sourceGeneration, dispatchMap }) => ({
 					source,
+					itemIdentity,
+					placeholderSpecId,
 					generation,
 					sourceGeneration,
 					dispatchMap,
 				}),
 			),
 			manifest.sources.map(
-				({ source, generation, sourceGeneration, dispatchMap }) => ({
+				({ source, itemIdentity, placeholderSpecId, generation, sourceGeneration, dispatchMap }) => ({
 					source,
+					itemIdentity,
+					placeholderSpecId,
 					generation,
 					sourceGeneration,
 					dispatchMap,
@@ -3664,7 +3676,7 @@ test("artifactGraph runtime partial dag join proceeds and exposes outputFrom dow
 	}
 });
 
-test("workflow fetch_content cache wrapper replays run-scoped hits with fresh response ids", async () => {
+test("workflow fetch_content extension provider passes through without cache replay", async () => {
 	const cwd = makeProject();
 	try {
 		const cacheDir = join(
@@ -3732,7 +3744,12 @@ test("workflow fetch_content cache wrapper replays run-scoped hits with fresh re
 		};
 		registerWorkflowFetchCacheExtension(
 			fakePi,
-			{ runId: "workflow_unit", taskId: "task-1", cacheDir },
+			{
+				runId: "workflow_unit",
+				taskId: "task-1",
+				cacheDir,
+				providerKind: "extension",
+			},
 			webAccessExtension,
 			storage,
 		);
@@ -3743,14 +3760,15 @@ test("workflow fetch_content cache wrapper replays run-scoped hits with fresh re
 			url: "https://example.test",
 		});
 
-		assert.equal(originCalls, 1);
-		assert.equal(first.details.cache.hit, false);
-		assert.equal(second.details.cache.hit, true);
-		assert.equal(second.details.responseId, "cached-1");
-		assert.match(second.content[0].text, /cached-1/);
-		assert.equal(stored.has("cached-1"), true);
-		assert.equal(appended.at(-1).data.id, "cached-1");
-		assert.equal(existsSync(join(cacheDir, "events.jsonl")), true);
+		assert.equal(originCalls, 2);
+		assert.equal(first.details.responseId, "origin-1");
+		assert.equal(second.details.responseId, "origin-2");
+		assert.equal(first.details.cache, undefined);
+		assert.equal(second.details.cache, undefined);
+		assert.match(second.content[0].text, /origin-2/);
+		assert.equal(stored.has("cached-1"), false);
+		assert.equal(appended.at(-1).data.id, "origin-2");
+		assert.equal(existsSync(join(cacheDir, "events.jsonl")), false);
 	} finally {
 		rmSync(cwd, {
 			recursive: true,
@@ -3869,7 +3887,7 @@ test("workflow fetch_content cache correlates concurrent stored data by response
 	}
 });
 
-test("workflow fetch_content cache wrapper caps inline text but preserves stored source data", async () => {
+test("workflow fetch_content extension provider preserves inline text and stored source data", async () => {
 	const cwd = makeProject();
 	try {
 		const cacheDir = join(
@@ -3936,6 +3954,7 @@ test("workflow fetch_content cache wrapper caps inline text but preserves stored
 				taskId: "task-1",
 				cacheDir,
 				maxInlineChars: 4,
+				providerKind: "extension",
 			},
 			webAccessExtension,
 			storage,
@@ -3949,19 +3968,16 @@ test("workflow fetch_content cache wrapper caps inline text but preserves stored
 			url: "https://example.test",
 		});
 
-		assert.match(
-			first.content[0].text,
-			/^abcd\n\n\[Workflow inline fetch content capped at 4 chars/,
-		);
-		assert.equal(first.details.workflowInlineContentCap.maxChars, 4);
-		assert.equal(first.details.cache.hit, false);
-		assert.match(
-			second.content[0].text,
-			/^abcd\n\n\[Workflow inline fetch content capped at 4 chars/,
-		);
-		assert.equal(second.details.cache.hit, true);
+		assert.equal(first.content[0].text, "abcdefghij");
+		assert.equal(second.content[0].text, "abcdefghij");
+		assert.equal(first.details.responseId, "origin-1");
+		assert.equal(second.details.responseId, "origin-1");
+		assert.equal(first.details.workflowInlineContentCap, undefined);
+		assert.equal(second.details.workflowInlineContentCap, undefined);
+		assert.equal(first.details.cache, undefined);
+		assert.equal(second.details.cache, undefined);
 		assert.equal(stored.get("origin-1").urls[0].content, "abcdefghij");
-		assert.equal(stored.get("cached-1").urls[0].content, "abcdefghij");
+		assert.equal(stored.has("cached-1"), false);
 	} finally {
 		rmSync(cwd, {
 			recursive: true,
@@ -4038,7 +4054,12 @@ test("subagent launch can opt out of fetch cache and keep built-in provider mapp
 			"scrapling_fetch",
 			"workflow_artifact",
 		]);
-		assert(captured.extensions.some(isBundledPiWebAccessExtension));
+		const fetchWrapper = captured.extensions.find((entry) =>
+			entry.endsWith("workflow-fetch-cache-extension.ts"),
+		);
+		assert(fetchWrapper);
+		assert.match(readFileSync(fetchWrapper, "utf8"), /pi-web-access[\\/]index\.ts/);
+		assert.equal(captured.extensions.some(isBundledPiWebAccessExtension), false);
 		assert(captured.extensions.includes("packages/pi-scrapling-access"));
 		assert(
 			captured.extensions.some((entry) =>
@@ -4299,7 +4320,7 @@ test("workflow web-source core anchors CJK normalized snippets and multi-match t
 	}
 });
 
-test("workflow web-source extension returns source cards and narrow reads without exposing cache paths", async () => {
+test("workflow web-source extension returns source cards and blocks sensitive URLs without exposing cache paths", async () => {
 	const cwd = makeProject();
 	try {
 		const cacheDir = join(
@@ -4311,6 +4332,7 @@ test("workflow web-source extension returns source cards and narrow reads withou
 		);
 		const registered = new Map();
 		const appended = [];
+		let providerCalls = 0;
 		const fakePi = {
 			registerTool(tool) {
 				registered.set(tool.name, tool);
@@ -4336,6 +4358,7 @@ test("workflow web-source extension returns source cards and narrow reads withou
 			pi.registerTool({
 				name: "fetch_content",
 				async execute(_id, params) {
+					providerCalls += 1;
 					pi.appendEntry("web-search-results", {
 						type: "fetch",
 						urls: [{ url: params.url, content: "RAW PROVIDER PAYLOAD" }],
@@ -4395,10 +4418,23 @@ test("workflow web-source extension returns source cards and narrow reads withou
 		assert.match(search.content[0].text, /workflow_web_fetch_source/);
 		assert.doesNotMatch(search.content[0].text, /secret/);
 
+		const blocked = await registered
+			.get("workflow_web_fetch_source")
+			.execute("call-blocked", {
+				url: "https://example.test/report?token=secret",
+			});
+		const blockedBody = JSON.parse(blocked.content[0].text);
+		assert.equal(blockedBody.status, "blocked");
+		assert.equal(blockedBody.code, "blocked_url");
+		assert.equal(blockedBody.reason, "sensitive_url_query");
+		assert.match(blocked.content[0].text, /token=REDACTED/);
+		assert.doesNotMatch(blocked.content[0].text, /sourceRef|secret/);
+		assert.equal(providerCalls, 0);
+
 		const fetched = await registered
 			.get("workflow_web_fetch_source")
 			.execute("call-fetch", {
-				url: "https://example.test/report?token=secret",
+				url: "https://example.test/report",
 			});
 		assert.match(fetched.content[0].text, /sourceRef/);
 		assert.doesNotMatch(fetched.content[0].text, /web-source-cache/);
@@ -4494,7 +4530,7 @@ test("workflow web-source extension returns source cards and narrow reads withou
 		const duplicate = await registered
 			.get("workflow_web_fetch_source")
 			.execute("call-fetch-2", {
-				url: "https://example.test/report?token=secret#quote",
+				url: "https://example.test/report#quote",
 			});
 		assert.equal(JSON.parse(duplicate.content[0].text).card.duplicate, true);
 		assert.equal(existsSync(join(cacheDir, "events.jsonl")), true);
@@ -4918,7 +4954,7 @@ test("workflow web-source search disables provider curation by default", async (
 	}
 });
 
-test("workflow web-source extension blocks untrusted custom fetch and reports budget exhaustion", async () => {
+test("workflow web-source extension blocks custom fetch to private hosts and reports budget exhaustion", async () => {
 	const cwd = makeProject();
 	try {
 		const cacheDir = join(
@@ -4971,8 +5007,11 @@ test("workflow web-source extension blocks untrusted custom fetch and reports bu
 		);
 		const blocked = await registered
 			.get("workflow_web_fetch_source")
-			.execute("call-untrusted", { url: "http://1.1.1.1/source" });
-		assert.match(blocked.content[0].text, /untrusted_provider_fetch/);
+			.execute("call-private", { url: "http://127.0.0.1/source" });
+		const blockedBody = JSON.parse(blocked.content[0].text);
+		assert.equal(blockedBody.status, "blocked");
+		assert.equal(blockedBody.code, "blocked_url");
+		assert.equal(blockedBody.reason, "private_host_blocked");
 		assert.equal(providerCalls, 0);
 
 		const trustedRegistered = new Map();
@@ -5026,73 +5065,34 @@ test("workflow web-source extension blocks untrusted custom fetch and reports bu
 	}
 });
 
-test("default normalized web fetch uses guarded direct fetch instead of captured fetch_content", async () => {
+test("normalized web fetch requires explicit public-host direct-safe preparation", async () => {
 	const cwd = makeProject();
-	const server = createServer((_req, res) => {
-		res.writeHead(200, { "content-type": "text/html" });
-		res.end(
-			"<html><head><title>Guarded &amp; Direct</title><style>.x{}</style></head><body><script>secret()</script><main>Local direct fetch body &amp; decoded quote for guarded default provider.</main></body></html>",
-		);
-	});
-	await new Promise((resolve) => server.listen(0, resolve));
+	let providerFetchCalls = 0;
 	try {
-		const address = server.address();
-		assert.equal(typeof address, "object");
-		const url = `http://localhost:${address.port}/source`;
-		const cacheDir = join(
-			cwd,
-			".pi",
-			"workflows",
-			"workflow_unit",
-			"web-source-cache",
-		);
-		const registered = new Map();
-		let providerFetchCalls = 0;
-		const fakePi = {
-			registerTool(tool) {
-				registered.set(tool.name, tool);
-			},
-		};
-		const providerExtension = (pi) => {
-			pi.registerTool({
-				name: "fetch_content",
-				async execute() {
-					providerFetchCalls += 1;
-					throw new Error("captured fetch_content should not be called");
+		assert.throws(
+			() => registerWorkflowWebSourceExtension(
+				{ registerTool() {} },
+				{
+					schema: "workflow-web-source-launch-config-v1",
+					runId: "workflow_unit",
+					taskId: "task-1",
+					cwd,
+					cacheDir: join(cwd, "web-source-cache"),
+					provider: { kind: "pi-web-access" },
+					securityPolicy: { allowPrivateHosts: true },
 				},
-			});
-		};
-		registerWorkflowWebSourceExtension(
-			fakePi,
-			{
-				schema: "workflow-web-source-launch-config-v1",
-				runId: "workflow_unit",
-				taskId: "task-1",
-				cwd,
-				cacheDir,
-				provider: { kind: "pi-web-access" },
-				securityPolicy: { allowPrivateHosts: true },
-			},
-			providerExtension,
+				(pi) => pi.registerTool({
+					name: "fetch_content",
+					async execute() {
+						providerFetchCalls += 1;
+						throw new Error("captured fetch_content should not be called");
+					},
+				}),
+			),
+			/public-host enforcement/,
 		);
-		const fetched = await registered
-			.get("workflow_web_fetch_source")
-			.execute("call-fetch", { url });
 		assert.equal(providerFetchCalls, 0);
-		assert.match(
-			fetched.content[0].text,
-			/Local direct fetch body & decoded quote/,
-		);
-		assert.doesNotMatch(fetched.content[0].text, /<main>|secret\(\)/);
-		const card = JSON.parse(fetched.content[0].text).card;
-		const stored = await readWorkflowWebSource(
-			{ runId: "workflow_unit", taskId: "task-1", cacheDir },
-			card.sourceRef,
-		);
-		assert.equal(stored.extractionLossy, true);
-		assert.match(stored.text, /Local direct fetch body & decoded quote/);
 	} finally {
-		await new Promise((resolve) => server.close(resolve));
 		rmSync(cwd, {
 			recursive: true,
 			force: true,
@@ -5102,11 +5102,15 @@ test("default normalized web fetch uses guarded direct fetch instead of captured
 	}
 });
 
-test("subagent launch captures custom normalized web provider extension instead of exposing it directly", async () => {
+test("subagent launch rejects custom normalized fetch ownership before dispatch", async () => {
 	const cwd = makeProject();
 	let captured;
 	try {
-		const providerPath = "/tmp/custom-workflow-web-provider.mjs";
+		const providerPath = join(cwd, "custom-workflow-web-provider.mjs");
+		writeFileSync(
+			providerPath,
+			"export default pi => pi.registerTool({ name: 'fetch_content', async execute() {} });\n",
+		);
 		writeAgent(cwd, "unit-researcher", "read, workflow_web_fetch_source");
 		setSubagentApiForTests({
 			async runSubagent(options) {
@@ -5157,17 +5161,12 @@ test("subagent launch captures custom normalized web provider extension instead 
 		);
 		await writeStaticRunArtifacts(cwd, run, compiled, spec);
 		await writeRunRecord(cwd, run);
-		await scheduleRun(cwd, run.runId);
 
-		assert.equal(captured.extensions.includes(providerPath), false);
-		const wrapperPath = captured.extensions.find((entry) =>
-			entry.endsWith("workflow-web-source-extension.ts"),
+		await assert.rejects(
+			() => prepareSubagentTaskLaunch(cwd, run, run.tasks[0], compiled.tasks[0]),
+			/unsupported normalized provider ownership/,
 		);
-		assert(wrapperPath);
-		assert.match(
-			readFileSync(wrapperPath, "utf8"),
-			/custom-workflow-web-provider/,
-		);
+		assert.equal(captured, undefined);
 	} finally {
 		setSubagentApiForTests(undefined);
 		rmSync(cwd, {
@@ -8286,6 +8285,392 @@ test("non artifact graph subagent launches do not request child sessions", async
 	}
 });
 
+const STRICT_LAYOUT_CONTENT = {
+	control: JSON.stringify({ schema: "stage-control-v1", digest: "ready" }),
+	analysis: "Detailed reasoning.",
+	refs: "[]",
+};
+
+function strictLayoutSection(name, content = STRICT_LAYOUT_CONTENT[name]) {
+	return `<${name}>${content}</${name}>`;
+}
+
+function strictLayoutRequiredNames(options) {
+	return [
+		"control",
+		...(options.analysisRequired ? ["analysis"] : []),
+		...(options.refsRequired ? ["refs"] : []),
+	];
+}
+
+function assertStrictLayoutDuplicate(
+	raw,
+	options,
+	section,
+	label,
+	expectedCount,
+) {
+	for (const [parserName, parser] of [
+		["direct", parseWorkflowOutput],
+		["bundle", parseWorkflowOutputForBundle],
+	]) {
+		const parsed = parser(raw, options);
+		assert.equal(
+			parsed.valid,
+			false,
+			`${label} (${parserName}) unexpectedly passed`,
+		);
+		const duplicate = parsed.issues.find(
+			(issue) =>
+				issue.code === "duplicate_section" && issue.section === section,
+		);
+		assert.ok(
+			duplicate,
+			`${label} (${parserName}) lost duplicate evidence: ${JSON.stringify(parsed.issues)}`,
+		);
+		assert.match(duplicate.message, /exactly once; found [2-9]\d*/);
+		if (expectedCount !== undefined) {
+			assert.equal(
+				duplicate.message,
+				`${section} section must appear exactly once; found ${expectedCount}`,
+				`${label} (${parserName}) reported the wrong duplicate count`,
+			);
+		}
+	}
+}
+
+test("workflow output parsers reject duplicate sections at every canonical boundary", () => {
+	const requirementCases = [
+		{ analysisRequired: true, refsRequired: true },
+		{ analysisRequired: false, refsRequired: true },
+		{ analysisRequired: true, refsRequired: false },
+		{ analysisRequired: false, refsRequired: false },
+	];
+	const separators = ["", "\n\n", "\nintervening prose\n"];
+
+	for (const options of requirementCases) {
+		const names = strictLayoutRequiredNames(options);
+		const canonical = names.map((name) => strictLayoutSection(name));
+		for (const duplicateName of ["control", "analysis", "refs"]) {
+			for (let boundary = 0; boundary <= canonical.length; boundary += 1) {
+				for (const separator of separators) {
+					const before = canonical.slice(0, boundary).join("\n");
+					const after = canonical.slice(boundary).join("\n");
+					const duplicateCount = names.includes(duplicateName) ? 1 : 2;
+					const duplicates = Array.from(
+						{ length: duplicateCount },
+						() => strictLayoutSection(duplicateName),
+					).join(separator);
+					const raw = [before, duplicates, after]
+						.filter((part) => part.length > 0)
+						.join(separator);
+					assertStrictLayoutDuplicate(
+						raw,
+						options,
+						duplicateName,
+						`${duplicateName} duplicate at boundary ${boundary} with ${JSON.stringify(separator)}`,
+					);
+				}
+			}
+		}
+	}
+
+	for (const openMarkerCount of [1, 2, 3, 1_000]) {
+		const mixedRaw = [
+			strictLayoutSection("control"),
+			strictLayoutSection(
+				"analysis",
+				`First analysis mentions literal ${"<analysis>".repeat(openMarkerCount)} text.`,
+			),
+			strictLayoutSection(
+				"control",
+				JSON.stringify({ schema: "stage-control-v1", digest: "second" }),
+			),
+			strictLayoutSection(
+				"analysis",
+				"Second analysis mentions literal </analysis> text.",
+			),
+		].join("\n");
+		for (const section of ["control", "analysis"]) {
+			assertStrictLayoutDuplicate(
+				mixedRaw,
+				{ analysisRequired: true, refsRequired: true },
+				section,
+				`mixed duplicate evidence with ${openMarkerCount} open-only markers for ${section}`,
+				2,
+			);
+		}
+	}
+
+	for (const count of [3, 4]) {
+		for (const openMarkerCount of [1, 3]) {
+			const raw = [
+				strictLayoutSection("control"),
+				...Array.from({ length: count }, (_, index) =>
+					strictLayoutSection(
+						"analysis",
+						index === 0
+							? `Analysis 1 mentions ${"<analysis>".repeat(openMarkerCount)} literal markers.`
+							: `Analysis ${index + 1}.`,
+					),
+				),
+				strictLayoutSection("refs"),
+			].join("\n");
+			assertStrictLayoutDuplicate(
+				raw,
+				{ analysisRequired: true, refsRequired: true },
+				"analysis",
+				`${count} analysis sections after ${openMarkerCount} open-only markers`,
+				count,
+			);
+		}
+	}
+
+	const extraAnalysisCases = [
+		{
+			name: "required analysis with two extras after refs",
+			options: { analysisRequired: true, refsRequired: true },
+			expectedCount: 3,
+			raw: [
+				strictLayoutSection("control"),
+				strictLayoutSection("analysis"),
+				strictLayoutSection("refs"),
+				strictLayoutSection(
+					"analysis",
+					"First extra mentions literal <analysis> text.",
+				),
+				strictLayoutSection("analysis", "Second extra."),
+			].join("\n"),
+		},
+		{
+			name: "optional analysis with two extras after refs",
+			options: { analysisRequired: false, refsRequired: true },
+			expectedCount: 2,
+			raw: [
+				strictLayoutSection("control"),
+				strictLayoutSection("refs"),
+				strictLayoutSection(
+					"analysis",
+					"First extra mentions literal <analysis> text.",
+				),
+				strictLayoutSection("analysis", "Second extra."),
+			].join("\n"),
+		},
+	];
+	for (const fixture of extraAnalysisCases) {
+		assertStrictLayoutDuplicate(
+			fixture.raw,
+			fixture.options,
+			"analysis",
+			fixture.name,
+			fixture.expectedCount,
+		);
+	}
+});
+
+test("workflow output parsers retain duplicate evidence across missing-tail damage", () => {
+	const control = strictLayoutSection("control");
+	const analysis = strictLayoutSection("analysis");
+	const refs = strictLayoutSection("refs");
+	const cases = [
+		{
+			name: "duplicate analysis with refs omitted",
+			section: "analysis",
+			raw: [control, analysis, strictLayoutSection("analysis", "Second analysis.")].join(
+				"\n",
+			),
+		},
+		{
+			name: "duplicate control with the analysis close omitted",
+			section: "control",
+			raw: [
+				control,
+				strictLayoutSection(
+					"control",
+					JSON.stringify({ schema: "stage-control-v1", digest: "second" }),
+				),
+				"<analysis>Unclosed analysis.",
+				refs,
+			].join("\n"),
+		},
+		{
+			name: "duplicate analysis after literal open-only marker text",
+			section: "analysis",
+			raw: [
+				control,
+				strictLayoutSection(
+					"analysis",
+					"First analysis mentions <analysis> as literal text.",
+				),
+				strictLayoutSection("analysis", "Second analysis."),
+				refs,
+			].join("\n"),
+		},
+		{
+			name: "duplicate refs with the final close omitted",
+			section: "refs",
+			raw: [control, analysis, refs, "<refs>[]"].join("\n"),
+		},
+	];
+
+	for (const fixture of cases) {
+		assertStrictLayoutDuplicate(
+			fixture.raw,
+			{ analysisRequired: true, refsRequired: true },
+			fixture.section,
+			fixture.name,
+		);
+	}
+
+	const mixedUnclosedTail = [
+		control,
+		strictLayoutSection(
+			"analysis",
+			`First analysis mentions ${"<analysis>".repeat(3)} literal markers.`,
+		),
+		strictLayoutSection(
+			"control",
+			JSON.stringify({ schema: "stage-control-v1", digest: "second" }),
+		),
+		strictLayoutSection(
+			"analysis",
+			"Second analysis mentions literal </analysis> text.",
+		),
+		"<refs>[]",
+	].join("\n");
+	for (const section of ["control", "analysis"]) {
+		assertStrictLayoutDuplicate(
+			mixedUnclosedTail,
+			{ analysisRequired: true, refsRequired: true },
+			section,
+			`mixed open-only literal duplicate with unclosed refs for ${section}`,
+			2,
+		);
+	}
+
+	for (const options of [
+		{ analysisRequired: true, refsRequired: true },
+		{ analysisRequired: false, refsRequired: true },
+		{ analysisRequired: true, refsRequired: false },
+		{ analysisRequired: false, refsRequired: false },
+	]) {
+		const requiredNames = strictLayoutRequiredNames(options);
+		const canonical = requiredNames
+			.map((name) => strictLayoutSection(name))
+			.join("\n");
+		for (const duplicateName of ["control", "analysis", "refs"]) {
+			const first = requiredNames.includes(duplicateName)
+				? ""
+				: strictLayoutSection(duplicateName);
+			const raw = [
+				canonical,
+				first,
+				`<${duplicateName}>${STRICT_LAYOUT_CONTENT[duplicateName]}`,
+			]
+				.filter((part) => part.length > 0)
+				.join("\n");
+			assertStrictLayoutDuplicate(
+				raw,
+				options,
+				duplicateName,
+				`${duplicateName} duplicate with an unclosed final block`,
+			);
+		}
+	}
+});
+
+test("workflow output parsers preserve literal markers and safe tail repairs", () => {
+	const requirementCases = [
+		{ analysisRequired: true, refsRequired: true },
+		{ analysisRequired: false, refsRequired: true },
+		{ analysisRequired: true, refsRequired: false },
+		{ analysisRequired: false, refsRequired: false },
+	];
+	for (const options of requirementCases) {
+		const raw = strictLayoutRequiredNames(options)
+			.map((name) => strictLayoutSection(name))
+			.join("\n");
+		for (const parser of [parseWorkflowOutput, parseWorkflowOutputForBundle]) {
+			const parsed = parser(raw, options);
+			assert.equal(parsed.valid, true, JSON.stringify(parsed.issues));
+		}
+	}
+
+	const markerCases = [
+		"Literal <analysis> opening marker remains data.",
+		"Literal </analysis> closing marker remains data.",
+		"Literal <analysis>balanced</analysis> marker pair remains data.",
+		"Compare <analysis>A</analysis> and <analysis>B</analysis> examples.",
+		"Compare literal </analysis> with literal <control> in prose.",
+		`Repeated open-only markers remain data: ${"<analysis>".repeat(1_000)}`,
+	];
+	for (const analysisText of markerCases) {
+		const raw = [
+			strictLayoutSection(
+				"control",
+				JSON.stringify({
+					schema: "stage-control-v1",
+					digest: "quoted markers",
+					note: "<control></control><analysis></analysis><refs></refs>",
+				}),
+			),
+			strictLayoutSection("analysis", analysisText),
+			strictLayoutSection(
+				"refs",
+				JSON.stringify([
+					{ note: "<control></control><analysis></analysis><refs></refs>" },
+				]),
+			),
+		].join("\n");
+		for (const parser of [parseWorkflowOutput, parseWorkflowOutputForBundle]) {
+			const parsed = parser(raw);
+			assert.equal(parsed.valid, true, JSON.stringify(parsed.issues));
+		}
+	}
+
+	const repeatedJsonMarkers = [
+		strictLayoutSection(
+			"control",
+			JSON.stringify({
+				schema: "stage-control-v1",
+				digest: "repeated quoted markers",
+				note: "</control>".repeat(1_000),
+			}),
+		),
+		strictLayoutSection("analysis", "Detailed reasoning."),
+		strictLayoutSection(
+			"refs",
+			JSON.stringify([{ note: "</refs>".repeat(1_000) }]),
+		),
+	].join("\n");
+	for (const parser of [parseWorkflowOutput, parseWorkflowOutputForBundle]) {
+		const parsed = parser(repeatedJsonMarkers);
+		assert.equal(parsed.valid, true, JSON.stringify(parsed.issues));
+	}
+
+	const safeRepairs = [
+		[strictLayoutSection("control"), "<analysis>Unclosed analysis."].join(
+			"\n",
+		),
+		[strictLayoutSection("control"), strictLayoutSection("analysis")].join(
+			"\n",
+		),
+		[
+			strictLayoutSection("control"),
+			"<analysis>Analysis missing its close.",
+			strictLayoutSection("refs"),
+		].join("\n"),
+	];
+	for (const raw of safeRepairs) {
+		const parsed = parseWorkflowOutputForBundle(raw);
+		assert.equal(parsed.valid, true, JSON.stringify(parsed.issues));
+		assert.equal(
+			parsed.issues.some((issue) => issue.code === "duplicate_section"),
+			false,
+		);
+	}
+});
+
 test("workflow output parser accepts canonical control analysis refs sections", () => {
 	const raw = [
 		"<control>",
@@ -9041,6 +9426,10 @@ test("workflow output parser normalizes reviewer location ranges before schema v
 		title: "Early local transactions can be skipped from persistence",
 		file: "core/txpool/locals/tx_tracker.go",
 		evidenceQuotes: ["func (tracker *TxTracker) Start() error { ... }"],
+		evidence: "The tracker path can skip local persistence.",
+		rationale: "Skipped persistence can lose local transaction state.",
+		recommendedAction: "Preserve local transaction persistence.",
+		confidence: "high",
 	};
 	const parseControl = (control) =>
 		parseWorkflowOutput(
@@ -9059,7 +9448,10 @@ test("workflow output parser normalizes reviewer location ranges before schema v
 		);
 
 	const stringLocations = parseControl({
-		schema: "./schemas/deep-review-reviewers-control.schema.json",
+		schema: "stage-control-v1",
+		lens: "runtime",
+		evidenceChecked: ["core/txpool/locals/tx_tracker.go"],
+		noIssueNotes: [],
 		digest: "task-7 attempt 1 shape",
 		findings: [
 			{
@@ -9082,7 +9474,10 @@ test("workflow output parser normalizes reviewer location ranges before schema v
 	]);
 
 	const stringLineRange = parseControl({
-		schema: "./schemas/deep-review-reviewers-control.schema.json",
+		schema: "stage-control-v1",
+		lens: "runtime",
+		evidenceChecked: ["core/txpool/locals/tx_tracker.go"],
+		noIssueNotes: [],
 		digest: "task-7 attempt 2 shape",
 		findings: [
 			{

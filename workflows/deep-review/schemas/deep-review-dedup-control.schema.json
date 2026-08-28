@@ -5,7 +5,8 @@
     "digest",
     "findings",
     "sourceStatusSummary",
-    "dedupSummary"
+    "dedupSummary",
+    "reviewerLedger"
   ],
   "properties": {
     "schema": {
@@ -38,6 +39,18 @@
             "minLength": 1
           },
           "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "classification": {
+            "type": "string",
+            "enum": ["behavioral", "support-only"]
+          },
+          "supportClassification": {
+            "type": "string",
+            "enum": ["behavioral", "support-only"]
+          },
+          "supportingFindingId": {
             "type": "string",
             "minLength": 1
           },
@@ -147,12 +160,33 @@
         }
       }
     },
+    "reviewerLedger": {
+      "type": "object",
+      "required": ["complete", "plannedLensIds", "materializedReviewerIds", "attestedLensIds", "ownerMap", "rawFindingIds", "dedupFindingIds", "sourceStatuses"],
+      "properties": {
+        "complete": { "type": "boolean" },
+        "plannedLensIds": { "type": "array" },
+        "materializedReviewerIds": { "type": "array" },
+        "attestedLensIds": { "type": "array" },
+        "ownerMap": { "type": "array" },
+        "rawFindingIds": { "type": "array" },
+        "dedupFindingIds": { "type": "array" },
+        "sourceStatuses": { "type": "array" }
+      },
+      "additionalProperties": true
+    },
     "dedupSummary": {
       "type": "object",
       "required": [
         "rawCount",
         "uniqueCount",
         "duplicateCount",
+        "rawFindingIds",
+        "dedupFindingIds",
+        "dispositionFindingIds",
+        "supportFindingIds",
+        "lineageFindingIds",
+        "complete",
         "duplicates"
       ],
       "properties": {

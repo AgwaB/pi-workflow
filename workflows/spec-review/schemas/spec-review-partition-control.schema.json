@@ -1,0 +1,185 @@
+{
+  "type": "object",
+  "required": [
+    "schema",
+    "digest",
+    "sourceStatusSummary",
+    "verifierCoverage",
+    "verdictCounts",
+    "requirementCoverage",
+    "finalFindings",
+    "droppedFindings",
+    "needsHuman",
+    "missingVerifications",
+    "invalidVerifierResults",
+    "orphanVerifierResults",
+    "noIssueNotes"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "spec-review-partition-v1"
+    },
+    "digest": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1200
+    },
+    "sourceStatusSummary": {
+      "type": "object",
+      "required": [
+        "metadataAvailable",
+        "total",
+        "completed",
+        "nonCompleted",
+        "partialFailures"
+      ],
+      "properties": {
+        "metadataAvailable": { "type": "boolean" },
+        "total": { "type": "integer", "minimum": 0 },
+        "completed": { "type": "integer", "minimum": 0 },
+        "nonCompleted": { "type": "integer", "minimum": 0 },
+        "partialFailures": {
+          "type": "array",
+          "items": { "type": "object" },
+          "maxItems": 64
+        },
+        "omittedPartialFailures": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "verifierCoverage": {
+      "type": "object",
+      "required": [
+        "complete",
+        "candidateCount",
+        "uniqueCandidateCount",
+        "verifierCount",
+        "uniqueVerifierCount",
+        "verifiedCandidateCount",
+        "missingIds",
+        "duplicateCandidateIds",
+        "duplicateVerifierIds",
+        "orphanVerifierIds"
+      ],
+      "properties": {
+        "complete": { "type": "boolean" },
+        "candidateCount": { "type": "integer", "minimum": 0 },
+        "uniqueCandidateCount": { "type": "integer", "minimum": 0 },
+        "verifierCount": { "type": "integer", "minimum": 0 },
+        "uniqueVerifierCount": { "type": "integer", "minimum": 0 },
+        "verifiedCandidateCount": { "type": "integer", "minimum": 0 },
+        "missingIds": { "type": "array", "items": { "type": "string" } },
+        "duplicateCandidateIds": { "type": "array", "items": { "type": "string" } },
+        "duplicateVerifierIds": { "type": "array", "items": { "type": "string" } },
+        "orphanVerifierIds": { "type": "array", "items": { "type": "string" } },
+        "ownerLedger": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["source", "stageId", "specId", "taskId", "itemIdentity", "placeholderSpecId", "status"],
+            "properties": {
+              "source": { "type": "string", "minLength": 1 },
+              "stageId": { "type": "string", "minLength": 1 },
+              "specId": { "type": "string", "minLength": 1 },
+              "taskId": { "type": "string", "minLength": 1 },
+              "batchId": { "type": "string" },
+              "itemIdentity": { "type": "string", "minLength": 1 },
+              "placeholderSpecId": { "type": "string", "minLength": 1 },
+              "status": { "type": "string", "const": "completed" }
+            },
+            "additionalProperties": false
+          },
+          "maxItems": 128
+        },
+        "batchOwnerLedger": {
+          "type": "array",
+          "items": { "type": "object" },
+          "maxItems": 128
+        },
+        "verifierRows": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["id", "owner"],
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "owner": {
+                "type": "object",
+                "required": ["source", "stageId", "specId", "taskId", "itemIdentity", "placeholderSpecId", "status"],
+                "properties": {
+                  "source": { "type": "string", "minLength": 1 },
+                  "stageId": { "type": "string", "minLength": 1 },
+                  "specId": { "type": "string", "minLength": 1 },
+                  "taskId": { "type": "string", "minLength": 1 },
+                  "itemIdentity": { "type": "string", "minLength": 1 },
+                  "placeholderSpecId": { "type": "string", "minLength": 1 },
+                  "status": { "type": "string", "const": "completed" },
+                  "batchId": { "type": "string" }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": true
+          },
+          "maxItems": 256
+        },
+        "ownerLedgerReconciliation": {
+          "type": "object",
+          "required": ["ownerRowCount", "verifierRowCount", "ownerIds", "verifierIds", "duplicateOwnerIds", "duplicateVerifierIds", "missingOwnerRows", "orphanOwnerRows", "statusMismatches", "cardinalityPassed", "passed"],
+          "properties": {
+            "ownerRowCount": { "type": "integer", "minimum": 1 },
+            "verifierRowCount": { "type": "integer", "minimum": 1 },
+            "ownerIds": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+            "verifierIds": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+            "duplicateOwnerIds": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+            "duplicateVerifierIds": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+            "missingOwnerRows": { "type": "array", "items": { "type": "string" } },
+            "orphanOwnerRows": { "type": "array", "items": { "type": "string" } },
+            "statusMismatches": { "type": "array", "items": { "type": "string" } },
+            "cardinalityPassed": { "type": "boolean" },
+            "passed": { "type": "boolean" }
+          },
+          "additionalProperties": false
+        },
+        "batch": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "verdictCounts": {
+      "type": "object",
+      "required": [
+        "keep",
+        "weaken",
+        "drop",
+        "needsHuman",
+        "missingVerification",
+        "invalidVerifier",
+        "orphanVerifier"
+      ],
+      "properties": {
+        "keep": { "type": "integer", "minimum": 0 },
+        "weaken": { "type": "integer", "minimum": 0 },
+        "drop": { "type": "integer", "minimum": 0 },
+        "needsHuman": { "type": "integer", "minimum": 0 },
+        "missingVerification": { "type": "integer", "minimum": 0 },
+        "invalidVerifier": { "type": "integer", "minimum": 0 },
+        "orphanVerifier": { "type": "integer", "minimum": 0 },
+        "batchIntegrity": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "requirementCoverage": { "type": "array", "items": { "type": "object" }, "maxItems": 80 },
+    "finalFindings": { "type": "array", "items": { "type": "object" }, "maxItems": 64 },
+    "droppedFindings": { "type": "array", "items": { "type": "object" }, "maxItems": 64 },
+    "needsHuman": { "type": "array", "items": { "type": "object" }, "maxItems": 256 },
+    "missingVerifications": { "type": "array", "items": { "type": "object" }, "maxItems": 64 },
+    "invalidVerifierResults": { "type": "array", "items": { "type": "object" }, "maxItems": 64 },
+    "orphanVerifierResults": { "type": "array", "items": { "type": "object" }, "maxItems": 64 },
+    "batchIntegrityIssues": { "type": "array", "items": { "type": "object" }, "maxItems": 128 },
+    "noIssueNotes": { "type": "array", "maxItems": 80 }
+  },
+  "additionalProperties": false
+}

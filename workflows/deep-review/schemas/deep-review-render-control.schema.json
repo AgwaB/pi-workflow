@@ -4,6 +4,7 @@
     "schema",
     "digest",
     "status",
+    "completionSummaryMarkdown",
     "markdown",
     "findingSummary",
     "renderedFindingIds",
@@ -16,6 +17,7 @@
     "digest": { "type": "string", "minLength": 1 },
     "status": { "type": "string", "enum": ["passed", "failed", "blocked"] },
     "blockers": { "type": "array", "items": { "type": "string" } },
+    "completionSummaryMarkdown": { "type": "string" },
     "markdown": { "type": "string" },
     "findingSummary": {
       "type": "object",
@@ -35,6 +37,8 @@
       "items": { "type": "string" }
     },
     "expectedFindingCount": { "type": "number" },
+    "expectedMergedFindingCount": { "type": "number" },
+    "mergedFindingCount": { "type": "number" },
     "needsHumanSummary": {
       "type": "object",
       "required": ["actual", "expected", "metadataMissing", "incompleteEvidence"],
@@ -66,6 +70,7 @@
       "required": [
         "renderedAllFindings",
         "renderedAllNeedsHuman",
+        "renderedAllSupportNotes",
         "findingCountMismatch",
         "needsHumanCountMismatch",
         "needsHumanMetadataMissing",
@@ -80,7 +85,14 @@
       "properties": {
         "renderedAllFindings": { "type": "boolean" },
         "renderedAllNeedsHuman": { "type": "boolean" },
+        "renderedAllSupportNotes": { "type": "boolean" },
         "findingCountMismatch": { "type": "boolean" },
+        "ledgerTopLevelCountMismatch": { "type": "boolean" },
+        "uniqueLedgerIds": { "type": "boolean" },
+        "duplicateLedgerIds": { "type": "array", "items": { "type": "string" } },
+        "mergedFindingCountMismatch": { "type": "boolean" },
+        "renderedAllLineage": { "type": "boolean" },
+        "renderedAllDropped": { "type": "boolean" },
         "needsHumanCountMismatch": { "type": "boolean" },
         "needsHumanMetadataMissing": { "type": "boolean" },
         "needsHumanEvidenceIncomplete": { "type": "boolean" },
@@ -93,7 +105,7 @@
       },
       "additionalProperties": true
     },
-    "sidecarPath": { "type": "string" }
+    "sidecarPath": { "type": "string", "const": "final-report.md" }
   },
   "additionalProperties": true
 }

@@ -85,10 +85,15 @@ function compactStrings(values, limit = 12) {
 }
 
 function findSource(sources, stageId) {
-	for (const [specId, source] of Object.entries(sources ?? {})) {
-		if (specId === stageId || specId.startsWith(`${stageId}.`)) return source;
+	const matches = Object.entries(sources ?? {}).filter(
+		([specId]) => specId === stageId || specId.startsWith(`${stageId}.`),
+	);
+	if (matches.length > 1) {
+		throw new Error(
+			`deep-research: ambiguous ${stageId} source (${matches.map(([specId]) => specId).join(", ")})`,
+		);
 	}
-	return null;
+	return matches[0]?.[1] ?? null;
 }
 
 function claimText(candidate) {
