@@ -26,6 +26,7 @@ import {
 	waitForRun,
 } from "../../.tmp/unit/engine.js";
 import {
+	compiledWorkflowPath,
 	readRunRecord,
 	withRunLease,
 	workflowRunDir,
@@ -925,6 +926,60 @@ test("restart recovers a prepared exact pair without inferring adjacency", async
 		fake.setBatchCompleted(true);
 		const completed = await waitForRun(cwd, started.runId, 20_000);
 		assert.equal(completed.status, "completed");
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("prepared batch execution-surface drift falls back before a physical batch launch", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd);
+		const items = writeWorkflow(cwd, "batch-surface-drift", { itemCount: 2 });
+		const fake = fakeApi({
+			cwd,
+			items,
+			delayedBatch: true,
+			batchItemFactory: (id) => ({
+				id,
+				control: { schema: "stage-control-v1", digest: `batch-${id}` },
+				analysis: `analysis for ${id}`,
+				refs: [],
+			}),
+		});
+		setSubagentApiForTests(fake.api);
+		const started = await runWorkflow("batch-surface-drift", cwd, {
+			task: "Reject prepared surface drift.",
+			executionProfile: "batched",
+		});
+		await refreshRun(cwd, started.runId);
+		await scheduleRun(cwd, started.runId);
+		const prepared = await readRunRecord(cwd, started.runId);
+		const record = prepared.foreachBatches?.[0];
+		assert.ok(record);
+		const leader = prepared.tasks.find((task) => task.foreachBatch?.role === "leader");
+		const member = prepared.tasks.find((task) => task.foreachBatch?.role === "member");
+		assert.ok(leader && member);
+		record.phase = "prepared";
+		for (const task of [leader, member]) {
+			task.status = "pending";
+			task.statusDetail = "pending";
+			task.backendHandle = undefined;
+			task.backendFiles = undefined;
+			task.launchBootstrap = undefined;
+			task.launchAuthority = undefined;
+			task.foreachBatch = { batchId: record.batchId, role: task.foreachBatch.role, phase: "prepared" };
+		}
+		await withRunLease(cwd, started.runId, async () => writeRunRecord(cwd, prepared));
+		const compiledPath = compiledWorkflowPath(cwd, started.runId);
+		const compiled = JSON.parse(readFileSync(compiledPath, "utf8"));
+		const leaderIndex = compiled.tasks.findIndex((task) => task.id === leader.specId);
+		compiled.tasks[leaderIndex].runtime = { ...compiled.tasks[leaderIndex].runtime, thinkingLevel: "high" };
+		writeFileSync(compiledPath, JSON.stringify(compiled));
+		await scheduleRun(cwd, started.runId);
+		assert.equal(fake.launches.filter((launch) => launch.kind === "batch").length, 1);
+		assert.equal(fake.launches.filter((launch) => launch.kind === "singleton").length, 2);
 	} finally {
 		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });

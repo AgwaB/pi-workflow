@@ -58,6 +58,17 @@
       "additionalProperties": true
     },
     "auditArtifact": { "type": "string" },
+    "packetReconciliation": {
+      "type": "object",
+      "required": ["strict", "passed", "blockers", "checks"],
+      "properties": {
+        "strict": { "type": "boolean" },
+        "passed": { "type": "boolean" },
+        "blockers": { "type": "array", "items": { "type": "string" } },
+        "checks": { "type": "object", "additionalProperties": true }
+      },
+      "additionalProperties": true
+    },
     "sidecarPath": { "type": "string" },
     "auditSidecarPath": { "type": "string" },
     "reportMarkdown": { "type": "string" },

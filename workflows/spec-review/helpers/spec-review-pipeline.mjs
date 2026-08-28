@@ -15,8 +15,11 @@
 //                        default spec-review workflow still verifies one
 //                        candidate per task.
 
+import { createHash } from "node:crypto";
+
 const VERDICTS = new Set(["KEEP", "WEAKEN", "DROP", "NEEDS_HUMAN"]);
 const SEVERITIES = new Set(["high", "medium", "low", "info"]);
+const MAX_PARTIAL_FAILURES = 64;
 
 const BATCH_PLAN_SCHEMA = "spec-review-verification-batches-v1";
 const BATCH_CONTROL_SCHEMA = "spec-review-verify-findings-batch-v1";
@@ -159,16 +162,22 @@ function partitionFindings(sources, options = {}, context = {}) {
 	);
 	const batchMode = batchMembership.byBatchId.size > 0;
 
-	// In batch mode the planner's cloned candidates are the authoritative join
-	// set (they carry deterministic fallback ids for id-less candidates); raw
-	// candidate ids that never reached a batch still get missing-verification
-	// coverage below.
+	// In batch mode the batch membership is the authoritative join set. In
+	// particular, an id-less raw candidate cannot be recovered by title or array
+	// position; the planner must have assigned its fallback id and carried it in
+	// candidateIds/candidates. This keeps coverage a unique ID set end-to-end.
 	const joinCandidates = batchMode
 		? new Map(batchMembership.candidatesById)
 		: candidatesById;
 	if (batchMode) {
-		for (const [id, candidate] of candidatesById.entries()) {
-			if (!joinCandidates.has(id)) joinCandidates.set(id, candidate);
+		for (const [id] of candidatesById.entries()) {
+			if (joinCandidates.has(id)) continue;
+			// A raw candidate outside the authoritative batch join set is not
+			// silently verified. It is recorded below as an integrity gap.
+			batchMembership.issues.push({
+				reason: "candidate_missing_from_authoritative_batch_join",
+				id,
+			});
 		}
 	}
 
@@ -176,6 +185,7 @@ function partitionFindings(sources, options = {}, context = {}) {
 		source: "candidate-findings",
 		...objectOrMessage(item),
 	}));
+	const sourceStatusSummary = summarizeSourceStatuses(context);
 
 	const verifierById = new Map();
 	const duplicateVerifierIds = [];
@@ -184,17 +194,56 @@ function partitionFindings(sources, options = {}, context = {}) {
 	const batchIntegrityIssues = [];
 	const issueCoveredIds = new Set();
 	let verifierCount = 0;
+	let batchOwnerLedgerRows = [];
+	const verifierRowLedger = [];
 
 	if (batchMode) {
+		const batchIdBySourceName = buildBatchIdBySourceName(
+			context?.sourceStatuses,
+			verifyStage,
+		);
 		const collected = collectBatchVerifierRows({
 			sources,
 			verifyStage,
 			batchMembership,
-			batchIdBySourceName: buildBatchIdBySourceName(
-				context?.sourceStatuses,
-				verifyStage,
-			),
+			batchIdBySourceName,
 		});
+		const ownerAudit = batchSourceStatusIssues(
+			sources,
+			verifyStage,
+			context?.sourceStatuses,
+			batchMembership,
+		);
+		batchOwnerLedgerRows = ownerAudit.ownerLedger;
+		collected.issues.unshift(...ownerAudit.issues);
+		for (const row of collected.rows) {
+			const owner = batchOwnerLedgerRows.find(
+				(candidate) => candidate.source === row.sourceId && candidate.batchId === row.batchId,
+			);
+			verifierRowLedger.push({
+				id: row.id,
+				verdict: row.entry.verdict,
+				severity: row.entry.severity,
+				...(owner ? { owner: { ...owner } } : {}),
+			});
+		}
+		// An owner defect invalidates every row carried by that source. Add the
+		// row id to the issue so the later fail-closed loop can quarantine the
+		// candidate rather than merely recording a generic source warning.
+		for (const issue of ownerAudit.issues) {
+			for (const row of collected.rows) {
+				if (row.sourceId !== issue.sourceId || !normalizeId(row.id)) continue;
+				collected.issues.push({
+					...issue,
+					id: normalizeId(row.id),
+					reason: "verifier_source_status_identity_mismatch",
+				});
+			}
+		}
+		// Membership defects are planning/join defects, not verifier rows. Keep
+		// them in the same fail-closed integrity path so a malformed or
+		// unplanned id-less candidate cannot certify a batch.
+		collected.issues.unshift(...batchMembership.issues);
 		verifierCount = collected.rowCount;
 
 		const rowsById = new Map();
@@ -253,11 +302,47 @@ function partitionFindings(sources, options = {}, context = {}) {
 	} else {
 		const verifierResults = findVerifierResults(sources, verifyStage);
 		verifierCount = verifierResults.length;
-		for (const result of verifierResults) {
+		const strictMaterializedStatusMode = true;
+		for (const { sourceId, value: result } of verifierResults) {
 			const id = normalizeId(result?.id);
 			if (!id) {
-				invalidVerifierResults.push({ reason: "missing_id", result });
+				const invalid = { reason: "missing_id", sourceId, result };
+				invalidVerifierResults.push(invalid);
+				needsHuman.push({
+					source: "verifier-integrity",
+					sourceId,
+					reason: "verifier result cannot be joined without an id",
+				});
 				continue;
+			}
+			// The source alias is only a routing hint. In a real artifact-graph
+			// run the result is admissible only after its exact materialized task
+			// status proves the stage/spec/placeholder/item/task binding.
+			if (strictMaterializedStatusMode) {
+				const expectedSpecId = `${verifyStage}.${id}`;
+				const owners = singletonVerifierStatuses(
+					context.sourceStatuses,
+					sourceId,
+					expectedSpecId,
+				);
+				if (
+					owners.length !== 1 ||
+					!singletonVerifierStatusIsExact(owners[0], verifyStage, id, sourceId)
+				) {
+					const reason = owners.length !== 1
+						? "verifier_alias_not_bound_to_exactly_one_materialized_status"
+						: "verifier_source_status_identity_mismatch";
+					invalidVerifierResults.push({ reason, sourceId, id, result });
+					needsHuman.push({ source: "verifier-integrity", sourceId, id, reason });
+					continue;
+				}
+				const owner = singletonOwnerFromStatus(owners[0]);
+				if (verifierById.has(id)) {
+					duplicateVerifierIds.push(id);
+					continue;
+				}
+				batchOwnerLedgerRows.push(owner);
+				verifierRowLedger.push({ id, verdict: result.verdict, severity: result.severity, owner });
 			}
 			if (verifierById.has(id)) {
 				duplicateVerifierIds.push(id);
@@ -285,16 +370,26 @@ function partitionFindings(sources, options = {}, context = {}) {
 			continue;
 		}
 
-		const verdict = normalizeVerdict(verifier.verdict);
-		const severity = normalizeSeverity(verifier.severity, candidate.severity);
-		if (!VERDICTS.has(String(verifier.verdict ?? "").toUpperCase())) {
+		const rawVerdict = String(verifier.verdict ?? "").trim().toUpperCase();
+		if (!VERDICTS.has(rawVerdict)) {
+			const invalid = {
+				reason: "invalid_verdict",
+				id,
+				verdict: verifier.verdict ?? null,
+				result: verifier,
+			};
+			invalidVerifierResults.push(invalid);
 			needsHuman.push({
 				source: "invalid-verdict",
 				id,
 				title: candidate.title ?? id,
 				reason: `invalid verifier verdict: ${String(verifier.verdict ?? "")}`,
+				invalidVerifierResult: invalid,
 			});
+			continue;
 		}
+		const verdict = normalizeVerdict(rawVerdict);
+		const severity = normalizeSeverity(verifier.severity, candidate.severity);
 
 		if (verdict === "KEEP" || verdict === "WEAKEN") {
 			finalFindings.push({
@@ -349,6 +444,11 @@ function partitionFindings(sources, options = {}, context = {}) {
 		}
 	}
 
+	const ownerLedger = batchOwnerLedgerRows;
+	const ownerLedgerReconciliation = reconcileOwnerLedger(
+		ownerLedger,
+		verifierRowLedger,
+	);
 	const verdictCounts = {
 		keep: finalFindings.filter((item) => item.verdict === "KEEP").length,
 		weaken: finalFindings.filter((item) => item.verdict === "WEAKEN").length,
@@ -360,11 +460,17 @@ function partitionFindings(sources, options = {}, context = {}) {
 		...(batchMode ? { batchIntegrity: batchIntegrityIssues.length } : {}),
 	};
 
-	return {
+	const partition = {
 		schema: "spec-review-partition-v1",
+		sourceStatusSummary,
 		verifierCoverage: {
-			candidateCount: candidateFindings.length,
-			uniqueCandidateCount: candidatesById.size,
+			// Batch membership, including deterministic fallback IDs, is the
+			// authoritative coverage universe. Do not report raw id-less or
+			// duplicate candidate rows as independently covered candidates.
+			// Empty owner/verifier ledgers are never complete.
+			complete: ownerLedgerReconciliation.passed,
+			candidateCount: batchMode ? joinCandidates.size : candidateFindings.length,
+			uniqueCandidateCount: joinCandidates.size,
 			verifierCount,
 			uniqueVerifierCount: verifierById.size,
 			verifiedCandidateCount: [...joinCandidates.keys()].filter((id) =>
@@ -384,6 +490,10 @@ function partitionFindings(sources, options = {}, context = {}) {
 						},
 					}
 				: {}),
+			ownerLedger,
+			batchOwnerLedger: ownerLedger,
+			verifierRows: verifierRowLedger,
+			ownerLedgerReconciliation,
 		},
 		verdictCounts,
 		requirementCoverage,
@@ -396,6 +506,10 @@ function partitionFindings(sources, options = {}, context = {}) {
 		...(batchMode ? { batchIntegrityIssues } : {}),
 		noIssueNotes,
 	};
+	return {
+		...partition,
+		digest: `sha256:${createHash("sha256").update(stableStringify(partition)).digest("hex")}`,
+	};
 }
 
 // --- batched verifier row collection ------------------------------------------
@@ -403,6 +517,8 @@ function partitionFindings(sources, options = {}, context = {}) {
 function buildBatchMembership(batchSource) {
 	const byBatchId = new Map();
 	const candidatesById = new Map();
+	const issues = [];
+	const candidateBatchIds = new Map();
 	const batches = Array.isArray(batchSource?.batches)
 		? batchSource.batches
 		: [];
@@ -415,9 +531,23 @@ function buildBatchMembership(batchSource) {
 		for (const candidate of candidates) {
 			if (!candidate || typeof candidate !== "object") continue;
 			const id = normalizeId(candidate.id);
-			if (!id) continue;
+			if (!id) {
+				issues.push({
+					reason: "batch_membership_candidate_missing_id",
+					batchId,
+				});
+				continue;
+			}
 			const title =
 				typeof candidate.title === "string" ? candidate.title.trim() : "";
+			if (members.has(id)) {
+				issues.push({
+					reason: "duplicate_batch_membership_candidate_id",
+					batchId,
+					id,
+				});
+				continue;
+			}
 			members.set(id, { id, title, titleKey: titleKeyOf(title) });
 			if (!candidatesById.has(id)) candidatesById.set(id, candidate);
 		}
@@ -426,12 +556,34 @@ function buildBatchMembership(batchSource) {
 			: [];
 		for (const rawId of candidateIds) {
 			const id = normalizeId(rawId);
-			if (!id || members.has(id)) continue;
+			if (!id) {
+				issues.push({ reason: "batch_membership_candidate_id_missing", batchId });
+				continue;
+			}
+			if (members.has(id)) continue;
 			members.set(id, { id, title: "", titleKey: "" });
+		}
+		for (const id of members.keys()) {
+			const batchesForId = candidateBatchIds.get(id) ?? [];
+			batchesForId.push(batchId);
+			candidateBatchIds.set(id, batchesForId);
 		}
 		byBatchId.set(batchId, members);
 	}
-	return { byBatchId, candidatesById };
+	for (const [id, batchIds] of candidateBatchIds) {
+		if (batchIds.length > 1) {
+			issues.push({
+				reason: "candidate_in_multiple_verification_batches",
+				id,
+				batchIds,
+			});
+		}
+		// `candidateIds` is the authoritative batch join set. A member that was
+		// declared only by id still gets a stub so it cannot disappear from
+		// coverage accounting or be replaced by title/array-position matching.
+		if (!candidatesById.has(id)) candidatesById.set(id, { id });
+	}
+	return { byBatchId, candidatesById, issues };
 }
 
 function buildBatchIdBySourceName(sourceStatuses, verifyStage) {
@@ -448,6 +600,85 @@ function buildBatchIdBySourceName(sourceStatuses, verifyStage) {
 	return bySource;
 }
 
+function batchOwnerFromStatus(status, sourceId, verifyStage, batchMembership) {
+	if (!status || typeof status !== "object") return null;
+	const specId = typeof status.specId === "string" ? status.specId.trim() : "";
+	const batchId = specId.startsWith(`${verifyStage}.`)
+		? specId.slice(verifyStage.length + 1).trim()
+		: "";
+	const source = typeof status.source === "string" ? status.source.trim() : "";
+	const itemIdentity = typeof status.itemIdentity === "string" ? status.itemIdentity.trim() : "";
+	const placeholderSpecId = typeof status.placeholderSpecId === "string" ? status.placeholderSpecId.trim() : "";
+	if (
+		source !== sourceId ||
+		status.stageId !== verifyStage ||
+		status.status !== "completed" ||
+		typeof status.taskId !== "string" || !status.taskId.trim() ||
+		!batchId || !batchMembership.byBatchId.has(batchId) ||
+		itemIdentity !== batchId ||
+		placeholderSpecId !== `${verifyStage}.item`
+	) return null;
+	return {
+		source,
+		stageId: verifyStage,
+		specId,
+		taskId: status.taskId.trim(),
+		batchId,
+		itemIdentity,
+		placeholderSpecId,
+		status: status.status,
+	};
+}
+
+function batchOwnerLedger(sources, verifyStage, sourceStatuses, batchMembership) {
+	const statuses = Array.isArray(sourceStatuses) ? sourceStatuses : [];
+	return Object.keys(sources ?? {})
+		.filter((sourceId) => sourceId === verifyStage || sourceId.startsWith(`${verifyStage}.`))
+		.map((sourceId) => {
+			const owners = statuses.filter((status) =>
+				status && typeof status === "object" && status.source === sourceId,
+			);
+			const owner = owners.length === 1
+				? batchOwnerFromStatus(owners[0], sourceId, verifyStage, batchMembership)
+				: null;
+			return owner ?? {
+				source: sourceId,
+				stageId: verifyStage,
+				specId: "",
+				taskId: "",
+				batchId: "",
+				itemIdentity: "",
+				placeholderSpecId: "",
+				status: owners[0]?.status ?? "missing",
+			};
+		});
+}
+
+function batchSourceStatusIssues(sources, verifyStage, sourceStatuses, batchMembership) {
+	const statuses = Array.isArray(sourceStatuses) ? sourceStatuses : [];
+	const issues = [];
+	const ownerLedger = batchOwnerLedger(sources, verifyStage, statuses, batchMembership);
+	for (const [index, owner] of ownerLedger.entries()) {
+		const owners = statuses.filter((status) =>
+			status && typeof status === "object" && status.source === owner.source,
+		);
+		if (owners.length !== 1 || !batchOwnerFromStatus(owners[0], owner.source, verifyStage, batchMembership)) {
+			issues.push({
+				reason: owners.length === 0
+					? "missing_materialized_verifier_status"
+					: owners.length !== 1
+						? "verifier_alias_not_bound_to_exactly_one_materialized_status"
+						: "verifier_source_status_identity_mismatch",
+				sourceId: owner.source,
+				batchId: owner.batchId,
+				ownerIndex: index,
+				expectedBatchIds: [...batchMembership.byBatchId.keys()],
+			});
+		}
+	}
+	return { issues, ownerLedger };
+}
+
 function collectBatchVerifierRows({
 	sources,
 	verifyStage,
@@ -457,7 +688,9 @@ function collectBatchVerifierRows({
 	const rows = [];
 	const issues = [];
 	let rowCount = 0;
-	for (const [sourceId, source] of Object.entries(sources ?? {})) {
+	for (const [sourceId, source] of Object.entries(sources ?? {}).sort(
+		([left], [right]) => left.localeCompare(right),
+	)) {
 		if (sourceId !== verifyStage && !sourceId.startsWith(`${verifyStage}.`))
 			continue;
 		const suffixBatchId = sourceId.startsWith(`${verifyStage}.`)
@@ -594,17 +827,148 @@ function titleKeyOf(value) {
 // --- shared helpers ------------------------------------------------------------
 
 function findStageSource(sources, stageId) {
-	for (const [specId, source] of Object.entries(sources ?? {})) {
-		if (specId === stageId || specId.startsWith(`${stageId}.`)) return source;
+	const matches = Object.entries(sources ?? {}).filter(
+		([specId]) => specId === stageId || specId.startsWith(`${stageId}.`),
+	);
+	if (matches.length > 1) {
+		throw new Error(
+			`spec-review: ambiguous ${stageId} source (${matches.map(([specId]) => specId).join(", ")})`,
+		);
 	}
-	return null;
+	return matches[0]?.[1] ?? null;
+}
+
+function singletonVerifierStatuses(statuses, sourceId, expectedSpecId) {
+	// Bind on the exact materialized spec id and canonical verifier stage.
+	// A source alias alone must never authorize an unrelated task.
+	const verifyStage = sourceId.split(".")[0] ||
+		expectedSpecId.slice(0, expectedSpecId.indexOf("."));
+	return (Array.isArray(statuses) ? statuses : []).filter(
+		(status) => status && typeof status === "object" &&
+			typeof status.specId === "string" &&
+			status.specId.toLowerCase() === expectedSpecId.toLowerCase() &&
+			(status.source === sourceId || status.source === verifyStage),
+	);
+}
+
+function singletonVerifierStatusIsExact(status, verifyStage, findingId, sourceId) {
+	const specItem = typeof status?.specId === "string" &&
+		status.specId.startsWith(`${verifyStage}.`)
+		? status.specId.slice(verifyStage.length + 1)
+		: "";
+	return Boolean(
+		status &&
+		status.status === "completed" &&
+		status.stageId === verifyStage &&
+		(status.source === sourceId || status.source === verifyStage) &&
+		specItem &&
+		specItem.toLowerCase() === findingId.toLowerCase() &&
+		status.itemIdentity === findingId &&
+		status.placeholderSpecId === `${verifyStage}.item` &&
+		typeof status.taskId === "string" &&
+		status.taskId.trim(),
+	);
+}
+
+function singletonOwnerFromStatus(status) {
+	return {
+		source: status.source,
+		stageId: status.stageId,
+		specId: status.specId,
+		taskId: status.taskId.trim(),
+		itemIdentity: status.itemIdentity,
+		placeholderSpecId: status.placeholderSpecId,
+		status: status.status,
+	};
+}
+
+function ownerKey(owner) {
+	return [
+		owner?.source,
+		owner?.stageId,
+		owner?.specId,
+		owner?.taskId,
+		owner?.itemIdentity,
+		owner?.placeholderSpecId,
+		owner?.batchId ?? "",
+		owner?.status,
+	].map((value) => String(value ?? "")).join("\\u001f");
+}
+
+function ownerComplete(owner) {
+	return Boolean(owner &&
+		[owner.source, owner.specId, owner.taskId, owner.itemIdentity, owner.placeholderSpecId]
+			.every((value) => typeof value === "string" && value.trim()) &&
+		owner.status === "completed");
+}
+
+function ownerIdentity(owner) {
+	return String(owner?.batchId ?? owner?.itemIdentity ?? "").trim();
+}
+
+function verifierIdentity(row) {
+	return String(row?.id ?? "").trim();
+}
+
+function ownerBindingIdentity(row) {
+	return String(row?.batchId ?? row?.id ?? "").trim();
+}
+
+function reconcileOwnerLedger(ownerLedger, verifierRows) {
+	const ownerKeys = new Set(ownerLedger.map(ownerKey));
+	const ownerIds = ownerLedger.map(ownerIdentity);
+	const verifierIds = verifierRows.map(verifierIdentity);
+	const duplicateOwnerIds = ownerIds.filter(
+		(id, index) => !id || ownerIds.indexOf(id) !== index,
+	);
+	const duplicateVerifierIds = verifierIds.filter(
+		(id, index) => !id || verifierIds.indexOf(id) !== index,
+	);
+	const missingOwnerRows = verifierRows
+		.filter((row) =>
+			!row.owner ||
+			!ownerKeys.has(ownerKey(row.owner)) ||
+			ownerIdentity(row.owner) !== ownerBindingIdentity(row),
+		)
+		.map((row) => row.id);
+	const orphanOwnerRows = ownerLedger
+		.filter((owner) => !verifierRows.some((row) => row.owner && ownerKey(row.owner) === ownerKey(owner)))
+		.map(ownerIdentity);
+	const statusMismatches = verifierRows
+		.filter((row) => !row.owner || row.owner.status !== "completed")
+		.map((row) => row.id);
+	const ownerRowsHaveCompleteIds = ownerLedger.every((owner) =>
+		ownerComplete(owner) && ownerIdentity(owner),
+	);
+	const verifierRowsHaveIds = verifierRows.every((row) => verifierIdentity(row));
+	// A batch carrier may own multiple verifier rows, but both ledgers must have
+	// positive cardinality and unique identities. Empty joins are never complete.
+	const cardinalityPassed = ownerLedger.length > 0 && verifierRows.length > 0 &&
+		ownerLedger.length <= verifierRows.length && ownerRowsHaveCompleteIds &&
+		verifierRowsHaveIds && duplicateOwnerIds.length === 0 &&
+		duplicateVerifierIds.length === 0;
+	return {
+		ownerRowCount: ownerLedger.length,
+		verifierRowCount: verifierRows.length,
+		ownerIds,
+		verifierIds,
+		duplicateOwnerIds: [...new Set(duplicateOwnerIds)],
+		duplicateVerifierIds: [...new Set(duplicateVerifierIds)],
+		missingOwnerRows,
+		orphanOwnerRows,
+		statusMismatches,
+		cardinalityPassed,
+		passed: cardinalityPassed && missingOwnerRows.length === 0 &&
+			orphanOwnerRows.length === 0 && statusMismatches.length === 0,
+	};
 }
 
 function findVerifierResults(sources, verifyStage) {
 	return Object.entries(sources ?? {})
 		.filter(([key]) => key === verifyStage || key.startsWith(`${verifyStage}.`))
-		.map(([, value]) => value)
-		.filter((value) => value && typeof value === "object");
+		.sort(([left], [right]) => left.localeCompare(right))
+		.map(([sourceId, value]) => ({ sourceId, value }))
+		.filter(({ value }) => value && typeof value === "object");
 }
 
 function normalizeId(value) {
@@ -648,6 +1012,91 @@ function findingSummary(candidate, extra) {
 		claim: candidate?.claim ?? "",
 		...extra,
 	};
+}
+
+function summarizeSourceStatuses(context) {
+	const metadataAvailable = Array.isArray(context?.sourceStatuses);
+	const normalized = metadataAvailable
+		? context.sourceStatuses.map((status) => {
+				if (!status || typeof status !== "object" || Array.isArray(status)) {
+					return {
+						status: "invalid_source_status_metadata",
+						errorType: "source_status_not_object",
+					};
+				}
+				const slim = slimSourceStatus(status);
+				if (!slim.source && !slim.specId && !slim.taskId) {
+					return {
+						...slim,
+						status: "invalid_source_status_metadata",
+						errorType: "source_status_missing_identity",
+					};
+				}
+				return slim;
+			})
+		: [];
+	const seen = new Set();
+	const statuses = normalized
+		.sort((left, right) => sourceStatusKey(left).localeCompare(sourceStatusKey(right)))
+		.map((status) => {
+			const key = `${status.specId ?? ""}|${status.taskId ?? ""}|${status.source ?? ""}`;
+			if (!key.replace(/\|/g, "") || !seen.has(key)) {
+				seen.add(key);
+				return status;
+			}
+			return {
+				...status,
+				status: "inconsistent_duplicate_source_status",
+				errorType: "duplicate_source_status_identity",
+			};
+		});
+	const failures = statuses.filter((status) => status.status !== "completed");
+	return {
+		metadataAvailable,
+		total: statuses.length,
+		completed: statuses.length - failures.length,
+		nonCompleted: failures.length,
+		partialFailures: failures.slice(0, MAX_PARTIAL_FAILURES),
+		...(failures.length > MAX_PARTIAL_FAILURES
+			? { omittedPartialFailures: failures.length - MAX_PARTIAL_FAILURES }
+			: {}),
+	};
+}
+
+function slimSourceStatus(status) {
+	const text = (value, max = 500) =>
+		typeof value === "string" && value.trim()
+			? value.replace(/\s+/g, " ").trim().slice(0, max)
+			: undefined;
+	return {
+		...(text(status.source, 200) ? { source: text(status.source, 200) } : {}),
+		...(text(status.specId, 200) ? { specId: text(status.specId, 200) } : {}),
+		...(text(status.taskId, 200) ? { taskId: text(status.taskId, 200) } : {}),
+		...(text(status.stageId, 200) ? { stageId: text(status.stageId, 200) } : {}),
+		status: text(status.status, 100) ?? "unknown",
+		...(text(status.statusDetail, 200)
+			? { statusDetail: text(status.statusDetail, 200) }
+			: {}),
+		...(text(status.errorType, 200)
+			? { errorType: text(status.errorType, 200) }
+			: {}),
+		...(text(status.lastMessage) ? { lastMessage: text(status.lastMessage) } : {}),
+	};
+}
+
+function sourceStatusKey(status) {
+	return `${status.specId ?? ""}|${status.taskId ?? ""}|${status.source ?? ""}|${status.status ?? ""}`;
+}
+
+function stableStringify(value) {
+	if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+	if (value && typeof value === "object") {
+		return `{${Object.keys(value)
+			.sort()
+			.map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`)
+			.join(",")}}`;
+	}
+	return JSON.stringify(value);
 }
 
 function summarizeCounterEvidence(verifier) {

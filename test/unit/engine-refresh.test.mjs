@@ -2952,6 +2952,27 @@ test("run record identity and public run ids fail closed without mutation", asyn
 	}
 });
 
+test("listRunRecords rejects duplicate taskIds before exposing a run", async () => {
+	const cwd = makeProject();
+	try {
+		const runId = "duplicate-list-run";
+		mkdirSync(workflowRunDir(cwd, runId), { recursive: true });
+		writeFileSync(
+			workflowRunPath(cwd, runId),
+			JSON.stringify({
+				runId,
+				tasks: [
+					{ taskId: "same-task", status: "pending" },
+					{ taskId: "same-task", status: "pending" },
+				],
+			}),
+		);
+		await assert.rejects(() => listRunRecords(cwd), /duplicate taskId/);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("prepared invalidation journals bind ownership and unaffected order across split recovery", () => {
 	const membership = {
 		placeholderSpecId: "fan.item",

@@ -1,5 +1,6 @@
 import type {
 	CompiledTask,
+	CompiledToolProvider,
 	WorkflowRunRecord,
 	WorkflowLaunchAuthorityGrant,
 	WorkflowTaskRunRecord,
@@ -20,6 +21,8 @@ export type BackendLaunchResult =
 
 export interface PreparedWorkflowTaskLaunch {
 	extensions: string[];
+	/** Provider metadata retained for launch auditing and wrapper preparation. */
+	toolProviders?: Record<string, CompiledToolProvider>;
 	generatedExtensions: Array<{
 		kind: "fetch-cache" | "web-source";
 		path: string;

@@ -1,6 +1,18 @@
 import { randomBytes } from "node:crypto";
+import { lookup } from "node:dns/promises";
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+
+import { nonPublicIpReason } from "./workflow-network-policy.js";
+import { isSensitiveWorkflowQueryKey, redactSensitiveWorkflowText } from "./workflow-sensitive-query.js";
+
+// Unit tests replace fetch with an explicit in-memory transport. That seam is
+// enabled only inside Node's test context; production always uses the
+// request-based path below so DNS resolution is under our control.
+const defaultRefValidationFetch = globalThis.fetch;
+const runningUnderNodeTest = process.env.NODE_TEST_CONTEXT !== undefined;
 
 import {
 	validateStructuredContract,
@@ -31,6 +43,8 @@ const DEFAULT_REFS_URL_VALIDATION_TIMEOUT_MS = 8_000;
 const DEFAULT_REFS_URL_VALIDATION_MAX_URLS = 25;
 const REFS_URL_VALIDATION_CONCURRENCY = 4;
 const REFS_URL_VALIDATION_PER_HOST_CONCURRENCY = 1;
+const REFS_URL_VALIDATION_MAX_REDIRECTS = 5;
+const REFS_URL_VALIDATION_MAX_RESPONSE_BYTES = 64 * 1024;
 
 type WorkflowOutputSectionName = (typeof CANONICAL_SECTION_ORDER)[number];
 
@@ -2062,7 +2076,7 @@ async function validateRefsUrlAvailability(
 			code: "unavailable_ref_locator",
 			section: SECTION_REFS,
 			path: `refs[${index}]`,
-			message: `ref URL is not reachable (${result.reason}): ${href}`,
+			message: `ref URL is not reachable (${result.reason}): ${redactSensitiveWorkflowText(href)}`,
 		});
 	}
 	return issues;
@@ -2164,38 +2178,193 @@ async function checkRefUrlAvailability(
 	href: string,
 	timeoutMs: number,
 ): Promise<RefUrlAvailabilityResult> {
-	const headers = { "user-agent": "pi-workflow-ref-validator/0.1" };
-	for (const attempt of [
-		{ method: "HEAD", headers },
-		{ method: "GET", headers: { ...headers, range: "bytes=0-2047" } },
-	]) {
+	if (obviouslyNonPublicRefUrl(href))
+		return { ok: false, reason: "private host blocked" };
+	if (runningUnderNodeTest && globalThis.fetch !== defaultRefValidationFetch)
+		return checkInjectedRefUrlAvailability(href, timeoutMs);
+	const headers = {
+		"user-agent": "pi-workflow-ref-validator/0.2",
+		"accept-encoding": "identity",
+	};
+	for (const method of ["HEAD", "GET"] as const) {
+		let current = href;
 		try {
-			const response = await fetch(href, {
-				...attempt,
-				redirect: "follow",
-				signal: AbortSignal.timeout(timeoutMs),
-			});
-			if (response.ok) {
-				if (attempt.method === "GET") {
-					try {
-						await response.arrayBuffer();
-					} catch {
-						// Availability was already established by the HTTP status.
-					}
+			for (let redirect = 0; redirect <= REFS_URL_VALIDATION_MAX_REDIRECTS; redirect += 1) {
+				const checked = await validatePublicRefUrl(current);
+				const response = await requestRefUrl(checked, method, headers, timeoutMs);
+				if (response.status >= 300 && response.status < 400) {
+					if (!response.location)
+						return { ok: false, reason: "redirect without location" };
+					if (redirect === REFS_URL_VALIDATION_MAX_REDIRECTS)
+						return { ok: false, reason: "too many redirects" };
+					current = new URL(response.location, checked).href;
+					continue;
 				}
-				return { ok: true };
+				if (response.tooLarge)
+					return { ok: false, reason: "response exceeds size cap" };
+				if (response.status >= 200 && response.status < 300)
+					return { ok: true };
+				if (method === "GET") return { ok: false, reason: `HTTP ${response.status}` };
+				break;
 			}
-			if (attempt.method === "GET")
-				return { ok: false, reason: `HTTP ${response.status}` };
 		} catch (error) {
-			if (attempt.method === "GET") {
-				const reason =
-					error instanceof Error ? error.message || error.name : String(error);
+			if (method === "GET") {
+				const reason = error instanceof Error ? error.message || error.name : String(error);
 				return { ok: false, reason };
 			}
 		}
 	}
 	return { ok: false, reason: "request failed" };
+}
+
+function obviouslyNonPublicRefUrl(href: string): boolean {
+	try {
+		const parsed = new URL(href);
+		const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+		return Boolean(nonPublicIpReason(hostname)) || parsed.username !== "" || parsed.password !== "" ||
+			[...parsed.searchParams.keys()].some(isSensitiveWorkflowQueryKey) ||
+			hostname === "localhost" || hostname.endsWith(".localhost") ||
+			hostname.endsWith(".local") || hostname.endsWith(".internal");
+	} catch {
+		return true;
+	}
+}
+
+async function checkInjectedRefUrlAvailability(
+	href: string,
+	timeoutMs: number,
+): Promise<RefUrlAvailabilityResult> {
+	const headers = { "user-agent": "pi-workflow-ref-validator/0.2" };
+	for (const method of ["HEAD", "GET"] as const) {
+		try {
+			const response = await globalThis.fetch(href, {
+				method,
+				headers: method === "GET" ? { ...headers, range: "bytes=0-2047" } : headers,
+				redirect: "follow",
+				signal: AbortSignal.timeout(timeoutMs),
+			});
+			if (response.ok) {
+				if (method === "GET") {
+					const body = await response.arrayBuffer();
+					if (body.byteLength > REFS_URL_VALIDATION_MAX_RESPONSE_BYTES)
+						return { ok: false, reason: "response exceeds size cap" };
+				}
+				return { ok: true };
+			}
+			if (method === "GET") return { ok: false, reason: `HTTP ${response.status}` };
+		} catch (error) {
+			if (method === "GET") {
+				const reason = error instanceof Error ? error.message || error.name : String(error);
+				return { ok: false, reason };
+			}
+		}
+	}
+	return { ok: false, reason: "request failed" };
+}
+
+type RefProbeResponse = {
+	status: number;
+	location?: string;
+	tooLarge: boolean;
+};
+
+async function validatePublicRefUrl(href: string): Promise<string> {
+	let parsed: URL;
+	try {
+		parsed = new URL(href);
+	} catch {
+		throw new Error("invalid URL");
+	}
+	if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
+		throw new Error("unsupported URL scheme");
+	if (parsed.username || parsed.password || [...parsed.searchParams.keys()].some(isSensitiveWorkflowQueryKey))
+		throw new Error("sensitive URL blocked");
+	const addresses = await lookup(parsed.hostname, { all: true, verbatim: true });
+	if (addresses.length === 0) throw new Error("DNS resolution failed");
+	for (const address of addresses) {
+		if (nonPublicIpReason(address.address)) throw new Error("private host blocked");
+	}
+	return parsed.href;
+}
+
+async function requestRefUrl(
+	href: string,
+	method: "HEAD" | "GET",
+	headers: Record<string, string>,
+	timeoutMs: number,
+): Promise<RefProbeResponse> {
+	const parsed = new URL(href);
+	const request = parsed.protocol === "https:" ? httpsRequest : httpRequest;
+	return await new Promise<RefProbeResponse>((resolveResult, reject) => {
+		let settled = false;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const finish = (result: RefProbeResponse): void => {
+			if (settled) return;
+			settled = true;
+			if (timer) clearTimeout(timer);
+			resolveResult(result);
+		};
+		const fail = (error: unknown): void => {
+			if (settled) return;
+			settled = true;
+			if (timer) clearTimeout(timer);
+			reject(error);
+		};
+		const req = request(
+			parsed,
+			{
+				method,
+				headers,
+				lookup(hostname, options, callback) {
+					lookup(hostname, { all: true, verbatim: true })
+						.then((addresses) => {
+							if (addresses.length === 0 || addresses.some((address) => nonPublicIpReason(address.address))) {
+								callback(new Error("private host blocked"), "", 4);
+								return;
+							}
+							const address = addresses[0]!;
+							if (options && typeof options === "object" && "all" in options && options.all === true)
+								callback(null, addresses);
+							else callback(null, address.address, address.family);
+						})
+						.catch((error: unknown) => callback(error as Error, "", 4));
+				},
+			},
+			(res) => {
+				const status = res.statusCode ?? 0;
+				const location = Array.isArray(res.headers.location)
+					? res.headers.location[0]
+					: res.headers.location;
+				const declaredLength = Number(res.headers["content-length"]);
+				if (status >= 200 && status < 300 && Number.isSafeInteger(declaredLength) &&
+					declaredLength > REFS_URL_VALIDATION_MAX_RESPONSE_BYTES) {
+					res.destroy();
+					finish({ status, tooLarge: true });
+					return;
+				}
+				if (method === "HEAD" || (status >= 300 && status < 400)) {
+					res.resume();
+					finish({ status, ...(location ? { location } : {}), tooLarge: false });
+					return;
+				}
+				let bytes = 0;
+				let tooLarge = false;
+				res.on("data", (chunk: Buffer | string) => {
+					bytes += Buffer.byteLength(chunk);
+					if (bytes > REFS_URL_VALIDATION_MAX_RESPONSE_BYTES) {
+						tooLarge = true;
+						res.destroy();
+					}
+				});
+				res.on("end", () => finish({ status, ...(location ? { location } : {}), tooLarge }));
+				res.on("close", () => { if (tooLarge) finish({ status, tooLarge }); });
+			},
+		);
+		req.setTimeout(Math.max(1, timeoutMs), () => req.destroy(new Error("request timeout")));
+		timer = setTimeout(() => req.destroy(new Error("request timeout")), Math.max(1, timeoutMs));
+		req.on("error", fail);
+		req.end();
+	});
 }
 
 function validateControlContract(

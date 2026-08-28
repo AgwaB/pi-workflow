@@ -260,9 +260,9 @@ export interface ArtifactGraphForeachSpec {
 	tools?: WorkflowToolSpec[];
 	readOnly?: boolean;
 	model?: string;
-	thinking?: string;
+	thinking?: ThinkingLevel;
 	maxRuntimeMs?: number;
-	worktreePolicy?: string;
+	worktreePolicy?: WorktreePolicy;
 	itemIdentityPath?: string;
 	itemPayloadPath?: string;
 }

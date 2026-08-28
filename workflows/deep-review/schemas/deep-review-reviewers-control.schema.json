@@ -1,81 +1,78 @@
 {
   "type": "object",
-  "required": [
-    "schema",
-    "digest",
-    "findings"
-  ],
+  "required": ["schema", "digest", "lens", "findings", "evidenceChecked", "noIssueNotes"],
   "properties": {
-    "schema": {
-      "type": "string",
-      "minLength": 1
-    },
-    "digest": {
-      "type": "string",
-      "minLength": 1
-    },
+    "schema": { "type": "string", "const": "stage-control-v1" },
+    "digest": { "type": "string", "minLength": 1, "maxLength": 1200 },
+    "lens": { "type": "string", "minLength": 1, "maxLength": 80 },
     "findings": {
       "type": "array",
+      "maxItems": 40,
       "items": {
         "type": "object",
-        "required": [
-          "severity",
-          "title",
-          "file",
-          "locations",
-          "evidenceQuotes"
-        ],
+        "required": ["severity", "title", "file", "locations", "evidence", "evidenceQuotes", "rationale", "recommendedAction", "confidence"],
         "properties": {
-          "severity": {
-            "type": "string",
-            "minLength": 1
-          },
-          "title": {
-            "type": "string",
-            "minLength": 1
-          },
-          "file": {
-            "type": "string",
-            "minLength": 1
-          },
+          "severity": { "type": "string", "enum": ["critical", "high", "medium", "low", "info", "unknown"] },
+          "title": { "type": "string", "minLength": 1, "maxLength": 400 },
+          "rootCauseId": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "classification": { "type": "string", "enum": ["behavioral", "support-only"] },
+          "supportClassification": { "type": "string", "enum": ["behavioral", "support-only"] },
+          "supportingFindingId": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "file": { "type": "string", "minLength": 1, "maxLength": 500 },
           "locations": {
             "type": "array",
             "minItems": 1,
+            "maxItems": 12,
             "items": {
               "type": "object",
-              "required": [
-                "file"
-              ],
+              "required": ["file"],
               "properties": {
-                "file": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "line": {
-                  "type": "number"
-                },
-                "lineEnd": {
-                  "type": "number"
-                },
-                "symbol": {
-                  "type": "string"
-                }
-              }
+                "file": { "type": "string", "minLength": 1, "maxLength": 500 },
+                "line": { "type": "number", "minimum": 1 },
+                "lineEnd": { "type": "number", "minimum": 1 },
+                "symbol": { "type": "string", "minLength": 1, "maxLength": 200 }
+              },
+              "additionalProperties": false
             }
           },
-          "evidenceQuote": {
-            "type": "string"
-          },
+          "evidence": { "type": "string", "minLength": 1, "maxLength": 3000 },
           "evidenceQuotes": {
             "type": "array",
             "minItems": 1,
-            "items": {
-              "type": "string",
-              "minLength": 1
-            }
-          }
-        }
+            "maxItems": 12,
+            "items": { "type": "string", "minLength": 1, "maxLength": 2000 }
+          },
+          "rationale": { "type": "string", "minLength": 1, "maxLength": 3000 },
+          "recommendedAction": { "type": "string", "minLength": 1, "maxLength": 2000 },
+          "confidence": { "type": "string", "enum": ["high", "medium", "low", "unknown"] }
+        },
+        "additionalProperties": false
+      }
+    },
+    "evidenceChecked": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 80,
+      "items": { "type": "string", "minLength": 1, "maxLength": 500 }
+    },
+    "noIssueNotes": {
+      "type": "array",
+      "maxItems": 12,
+      "items": { "type": "string", "minLength": 1, "maxLength": 1000 }
+    }
+  },
+  "anyOf": [
+    {
+      "properties": {
+        "findings": { "minItems": 1 }
+      }
+    },
+    {
+      "properties": {
+        "findings": { "maxItems": 0 },
+        "noIssueNotes": { "minItems": 1 }
       }
     }
-  }
+  ],
+  "additionalProperties": false
 }

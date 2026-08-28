@@ -54,6 +54,8 @@ export interface WorkflowSourceManifestSource {
 	taskId?: string;
 	specId?: string;
 	stageId?: string;
+	itemIdentity?: string;
+	placeholderSpecId?: string;
 	status?: string;
 	statusDetail?: string;
 	lastMessage?: string;

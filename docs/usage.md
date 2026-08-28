@@ -314,13 +314,19 @@ The normalized cache is stored under the workflow run directory:
 .pi/workflows/<run-id>/web-source-cache/
 ```
 
-Do not instruct agents to read that directory directly; source cards intentionally expose only opaque refs and short previews. The cache also writes an append-only index ledger plus same-URL fetch locks/negative-cache files so duplicate lookup and deterministic terminal failures can recover across parallel worker processes. Custom extension `fetch_content` providers are treated as trusted fetchers and are disabled under the default private-host policy; use the default safe fetch path or opt into trusted private-host behavior only for controlled providers. Legacy workflow tasks that still use `fetch_content` keep the older run-scoped file cache under `.pi/workflows/<run-id>/source-cache/fetch-content/`. Set `PI_WORKFLOW_FETCH_CONTENT_CACHE=0` to disable that legacy fetch cache for a run.
+Do not instruct agents to read that directory directly; source cards intentionally expose only opaque refs and short previews. The cache also writes an append-only index ledger plus serialized source-identity locking so duplicate lookup and deterministic terminal failures can recover across parallel worker processes. Custom normalized search providers are captured in declaration order; only selected passthrough tools are re-exported, so unselected provider tools do not leak. Local provider refs resolve against workflow cwd and must identify one existing extension file. Custom `fetch_content` ownership for normalized fetch is intentionally unsupported: preparation rejects it before provider dispatch because `allowPrivateHosts: false` cannot sandbox an arbitrary extension transport. The generated default pi-web-access fetch remains the only normalized fetch transport.
+
+The default normalized fetch path is instead the independent `pi-workflow-direct-safe-fetch` client. Its effective policy is `pi-workflow-strict-public-http-v1`, and that fetcher/policy provenance is retained on source cards, including duplicate and reloaded cards. It preserves pi-workflow's own public-host validation, redirect revalidation, DNS rebinding checks, and deadline. It intentionally does **not** inherit pi-web-access auth profiles, answer/fetch routing, hosted providers, proxy trust, domain policy, `ssrf.allowRanges`, or private-host enablement. Setting `securityPolicy.allowPrivateHosts: true` for this default direct path fails closed during initialization. Private targets are not implicitly enabled by provider metadata.
+
+Legacy workflow tasks that still use `fetch_content` keep the older run-scoped file cache under `.pi/workflows/<run-id>/source-cache/fetch-content/` only for the bundled `pi-web-access` provider. `readable` and `raw` modes use separate cache identities. Custom/extension providers remain functional pass-through calls, but caching is disabled because no stable fingerprinted cache contract exists; this prevents shared namespaces, unknown-argument collisions, and replay of provider-owned IDs. Answer mode, any call with an own `auth` property (regardless of its value), URL userinfo, fragments, and recognized credential/signature/session query parameters bypass workflow cache reads, writes, events, and directory creation. Authenticated response bodies never enter workflow-cache state. Because pi-web-access also disables its stored-content cache for authenticated fetches by default, a successful auth cache-off result may omit `responseId`; do not assume it is present. Set `PI_WORKFLOW_FETCH_CONTENT_CACHE=0` to disable the bundled legacy workflow cache for a run.
 
 To reduce worker context pressure for legacy `fetch_content` tasks, the bundled
 workflow fetch wrapper caps inline response text while preserving full stored
 source content. Override with `PI_WORKFLOW_FETCH_CONTENT_INLINE_CHARS=<n>` or
 disable the inline cap with `PI_WORKFLOW_FETCH_CONTENT_INLINE_CHARS=0` when you
 intentionally need the provider's full inline response.
+
+When a `responseId` is present, use paginated `get_search_content` calls rather than requesting an unbounded body. Select a URL with `url`/`urlIndex`, pass integer `offset` and `limit`, and continue at `details.nextOffset` while `details.truncated` is true. Workflow-mapped pages are normalized at UTF-16 surrogate boundaries; a `limit` of 1 over an astral character still advances and reports coherent `returnedChars`, `nextOffset`, and continuation values. For targeted passages, use `findText` (one string or a bounded string array) and optional `findMode` (`exact`, `case-insensitive`, or `fuzzy`). `findText` cannot be combined with `offset`/`limit`, and `findMode` requires `findText`. Workflow response-ID aliases are private run-cache files (`0700` directory/`0600` files), lazily rehydrated with a fresh provider-storage timestamp; tampered aliases fail closed and unmapped web IDs remain pass-through.
 
 ## Bundled workflows
 
@@ -643,7 +649,7 @@ Important files:
 
 Subagent worker artifacts are stored under `.pi/workflow-subagents/` by default and are referenced from the workflow run record.
 
-Workflow-specific deterministic renderers may add semantic sidecars in the final task directory. `deep-research` writes `final-report.md` as its user-facing report, keeps `executive.md` as a compatibility copy, writes the claim-level ledger to `audit.md`, and includes links to supporting artifacts only in the report's final **Related artifacts** section.
+All four bundled workflows use a common completion envelope while preserving workflow-specific verdicts and evidence models. A successful final renderer writes a compact `completionSummaryMarkdown` for result-only parent handoff and `final-report.md` as the stable user-facing sidecar; the first detailed section is **Executive summary**, evidence and limitations remain explicit, and supporting links appear only in the final **Related artifacts** section. `deep-research` keeps byte-identical `executive.md` plus its claim-level `audit.md`; `deep-review` keeps byte-identical `review.md`; `spec-review` and `impact-review` keep their canonical source controls in `source-ledger.json`. Missing, partial, contradictory, or incompletely rendered canonical ledgers fail or block the final support task instead of producing a clean completion.
 
 ## Token usage tracking
 
@@ -736,6 +742,10 @@ A workflow can declare reusable role context under top-level `roles`. Compiled r
 - `prompt`: literal role text, appended after any extracted agent sections.
 - `maxChars`: compiled role budget (default 12000). Longer content is truncated and flagged in `/workflow roles` output.
 
+A model stage may select one or more declared roles with `role` (a string or string array). When omitted, all declared roles are retained for compatibility. A `foreach` stage's `each.role` replaces the stage selection for its generated workers. `each.agent`, `each.tools`, `each.model`, `each.thinking`, `each.maxRuntimeMs`, `each.readOnly`, and `each.worktreePolicy` likewise override the stage values on the generated worker template; runtime command-line overrides still have highest precedence. Unknown role names fail during compilation.
+
+`defaults.cwd` and `stage.cwd` are resolved from the project invocation directory and emitted as absolute task working directories. Dynamic stages do not accept an explicit `cwd`.
+
 ### Tool allowlists
 
 Workflow `tools` are still the child-worker allowlist. Entries can be strings:
@@ -812,10 +822,42 @@ but do not gain authority from missing hardened fields.
 
 New workflows should use `workflow_web_search`, `workflow_web_fetch_source`, and
 `workflow_web_source_read` — tool semantics, batching forms, and the run-scoped
-cache are documented under "Run-scoped web-source cache" above. The bundled
-`pi-web-access` adapter remains the default compatibility provider for this
-release scope.
+cache are documented under "Run-scoped web-source cache" above. The normalized
+search result is an additive typed `ok | partial | empty | failed | cancelled`
+envelope with bounded candidates, counts, truncation, and provider attribution.
+Provider lists distinguish actual execution (`providers`) from requested selectors
+(`selectedProviders`); reserved selectors `auto` and `all` are never accepted as
+actual provider IDs, so attribution is unavailable without a concrete provider.
+Cancellation is authoritative even while waiting for the durable budget lock or
+ledger I/O: it returns zero candidates/usage and does not rewrite the ledger. Explicit source-read terms are limited to 16 per read, and a
+combined source-read batch is limited to 20 requests; over-limit calls fail as
+`invalid_params` rather than silently dropping evidence. Source cards retain the
+validated effective redirect URL and aliases, so a later fetch by either the
+requested or effective URL reuses the same source.
 
-- Legacy workflows that use `web_search`, `fetch_content`, `get_search_content`, or `code_search` still use the bundled `pi-web-access` dependency packaged with pi-workflow.
+The visible source budget is durable per `(runId, taskId)` in the private run
+cache. Each invocation uses a private counter and rebases its committed delta
+under the short budget lock, so concurrent calls cannot corrupt telemetry.
+Retries or resumed workers continue the same cumulative budget; a changed
+configured limit fails closed, while a different task ID is isolated. Aggregate
+`budget.truncated` is true only when visible text was clipped by `maxChars` or
+remaining budget, not merely when an operation is partial or failed. The
+visible-budget ledger's atomic rename is its commit point: cancellation before
+rename wins; cancellation after rename observes the committed result.
+
+The bundled `pi-web-access` adapter remains the default provider for legacy
+`web_search`, `fetch_content`, and `get_search_content` calls. A custom legacy
+provider is accepted only when one extension coherently owns every selected
+legacy web tool; it is imported inside the generated cache wrapper with
+`providerKind: "extension"`, while the bundled storage adapter remains in use.
+Split, multiple, or incompatible ownership fails before child dispatch. Required
+capabilities are validated by canonical tool name. If configuration renames or
+disables a required canonical tool, launch fails fast before the first model or
+provider-tool execution; pi-workflow does not guess compatibility from labels or
+schemas. pi-workflow's separate narrow compatibility extension preserves the
+legacy read-only `code_search({ query, maxTokens? })` surface through fixed Exa
+transport; a code-search-only task does not load or gain the other provider
+tools.
+
 - Object-form custom tool `extensions` are merged with built-in mappings and deduplicated for the subagent launch.
 - Web calls can still fail when network access, provider credentials, browser state, or quota are unavailable; research workflows should report those limits instead of guessing.

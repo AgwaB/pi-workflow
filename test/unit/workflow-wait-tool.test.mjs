@@ -1454,6 +1454,158 @@ test("workflow wait reports blocked action-required state without a final previe
 	}
 });
 
+test("result-only completion is limited to successful semantic statuses with output", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "workflow-result-only-statuses-"));
+	try {
+		for (const [status, preview] of [
+			["synthesized", "Synthesized result."],
+			["exhausted", "Exhausted result."],
+		]) {
+			const runId = `workflow_result_only_${status}`;
+			const run = runRecord(cwd, {
+				runId,
+				provenance: { mode: "direct-dynamic" },
+				tasks: [
+					taskRecord(runId, "controller", "dynamic.controller", {
+						kind: "dynamic",
+						statusDetail: "dynamic_completed",
+					}),
+					taskRecord(runId, "synthesis", "dynamic.synthesis", {
+						dynamicGenerated: { outputProfile: "synthesis_v1" },
+					}),
+				],
+			});
+			await writeRunFixture(cwd, run, {
+				schema: "dynamic-controller-result-v1",
+				status,
+				outputTasks: ["dynamic.synthesis"],
+			});
+			await writeDynamicControl(cwd, { tasks: [run.tasks[1]] }, {
+				summary: status === "synthesized" ? preview : "",
+			});
+			if (status === "exhausted") {
+				await writeFile(
+					join(cwd, dirname(run.tasks[1].files.output), "analysis.md"),
+					`${preview}\n`,
+				);
+			}
+			await writeFeedbackAudience(cwd, runId, `session-${status}`);
+			const sent = [];
+			const outcome = await deliverWorkflowFeedback(
+				feedbackContext(cwd, `session-${status}`),
+				{ sendMessage: (message) => sent.push(message) },
+				run,
+			);
+			assert.deepEqual(outcome, { status: "delivered" });
+			assert.equal(sent.length, 1);
+			assert.match(sent[0].content, /substantive workflow result/);
+		}
+
+		const blankId = "workflow_result_only_blank";
+		const blankRun = runRecord(cwd, {
+			runId: blankId,
+			provenance: { mode: "direct-dynamic" },
+			tasks: [
+				taskRecord(blankId, "controller", "dynamic.controller", {
+					kind: "dynamic",
+					statusDetail: "dynamic_completed",
+				}),
+				taskRecord(blankId, "synthesis", "dynamic.synthesis", {
+					dynamicGenerated: { outputProfile: "synthesis_v1" },
+				}),
+			],
+		});
+		await writeRunFixture(cwd, blankRun, {
+			schema: "dynamic-controller-result-v1",
+			status: "exhausted",
+			outputTasks: ["dynamic.synthesis"],
+		});
+		await writeDynamicControl(cwd, { tasks: [blankRun.tasks[1]] }, { summary: "   " });
+		await writeFeedbackAudience(cwd, blankId, "session-blank");
+		const blankSent = [];
+		await deliverWorkflowFeedback(
+			feedbackContext(cwd, "session-blank"),
+			{ sendMessage: (message) => blankSent.push(message) },
+			blankRun,
+		);
+		assert.equal(blankSent.length, 1);
+		assert.doesNotMatch(blankSent[0].content, /substantive workflow result/);
+		assert.match(blankSent[0].content, /Summarize the workflow outcome/);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("workflow preview ignores sidecar traversal paths", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "workflow-preview-traversal-"));
+	try {
+		const runId = "workflow_preview_traversal";
+		const run = runRecord(cwd, { runId });
+		const outsidePath = join(cwd, "outside-preview.md");
+		await writeFile(outsidePath, "MUST NOT BE PREVIEWED\n");
+		await writeRunFixture(cwd, run, {
+			sidecarPath: "../../../../../outside-preview.md",
+		});
+		await writeFeedbackAudience(cwd, runId, "session-traversal");
+		const sent = [];
+		await deliverWorkflowFeedback(
+			feedbackContext(cwd, "session-traversal"),
+			{ sendMessage: (message) => sent.push(message) },
+			run,
+		);
+		assert.equal(sent.length, 1);
+		assert.doesNotMatch(sent[0].content, /MUST NOT BE PREVIEWED/);
+		assert.doesNotMatch(sent[0].content, /outside-preview/);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("direct dynamic synthesis previews validated analysis, never protocol wrappers", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "workflow-preview-dynamic-"));
+	try {
+		const runId = "workflow_preview_dynamic";
+		const run = runRecord(cwd, {
+			runId,
+			provenance: { mode: "direct-dynamic" },
+			tasks: [
+				taskRecord(runId, "controller", "dynamic.controller", {
+					kind: "dynamic",
+					statusDetail: "dynamic_completed",
+				}),
+				taskRecord(runId, "synthesis", "dynamic.synthesis", {
+					dynamicGenerated: { outputProfile: "synthesis_v1" },
+				}),
+			],
+		});
+		await writeRunFixture(cwd, run, {
+			schema: "dynamic-controller-result-v1",
+			status: "synthesized",
+			outputTasks: ["dynamic.synthesis"],
+		});
+		const taskDir = join(cwd, dirname(run.tasks[1].files.output));
+		await writeDynamicControl(cwd, { tasks: [run.tasks[1]] }, {
+			summary: "",
+			sidecarPath: "raw.md",
+		});
+		await writeFile(join(taskDir, "analysis.md"), "Validated synthesis analysis.\n");
+		await writeFile(join(taskDir, "raw.md"), "<control>RAW PROTOCOL</control>\n");
+		await writeFile(join(taskDir, "output.log"), "<analysis>RAW WRAPPER</analysis>\n");
+		await writeFeedbackAudience(cwd, runId, "session-dynamic-preview");
+		const sent = [];
+		await deliverWorkflowFeedback(
+			feedbackContext(cwd, "session-dynamic-preview"),
+			{ sendMessage: (message) => sent.push(message) },
+			run,
+		);
+		assert.equal(sent.length, 1);
+		assert.match(sent[0].content, /Validated synthesis analysis/);
+		assert.doesNotMatch(sent[0].content, /RAW PROTOCOL|RAW WRAPPER/);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
 test("workflow wait previews the declared dynamic output instead of the last completed task", async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "workflow-wait-output-"));
 	try {

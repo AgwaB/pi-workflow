@@ -200,6 +200,10 @@ const BUNDLED_PI_WEB_ACCESS_STORAGE = bundledNodeModulePath(
 	"pi-web-access",
 	"storage.ts",
 );
+const CODE_SEARCH_COMPAT_EXTENSION = resolve(
+	MODULE_DIR,
+	`code-search-compat-extension${extname(MODULE_PATH)}`,
+);
 const WORKFLOW_FETCH_CACHE_EXTENSION_IMPORT = resolve(
 	MODULE_DIR,
 	`workflow-fetch-cache-extension${extname(MODULE_PATH)}`,
@@ -210,7 +214,7 @@ const WORKFLOW_WEB_SOURCE_EXTENSION_IMPORT = resolve(
 );
 const TOOL_PROVIDER_EXTENSIONS: Record<string, string[]> = {
 	web_search: [BUNDLED_PI_WEB_ACCESS_EXTENSION],
-	code_search: [BUNDLED_PI_WEB_ACCESS_EXTENSION],
+	code_search: [CODE_SEARCH_COMPAT_EXTENSION],
 	fetch_content: [BUNDLED_PI_WEB_ACCESS_EXTENSION],
 	get_search_content: [BUNDLED_PI_WEB_ACCESS_EXTENSION],
 };
@@ -513,8 +517,61 @@ export interface OneShotSubagentEnvelope {
 export async function runOneShotSubagentCall(
 	options: Record<string, unknown>,
 ): Promise<OneShotSubagentEnvelope> {
+	await assertSubagentExtensionsLoadable(options);
 	const api = await loadSubagentApi();
 	return (await api.runSubagent(options)) as OneShotSubagentEnvelope;
+}
+
+interface ExtensionPreflightLoader {
+	reload(options?: unknown): Promise<void>;
+	getExtensions(): {
+		errors: Array<{ path: string; error: string }>;
+	};
+}
+
+/**
+ * Load extension factories in an isolated Pi resource loader before a child
+ * backend can make its first model/provider call. Extension factories are
+ * intentionally run against the loader's buffered registration runtime.
+ */
+export async function assertSubagentExtensionsLoadable(
+	options: Record<string, unknown>,
+): Promise<void> {
+	const cwd =
+		typeof options.cwd === "string" && options.cwd
+			? resolve(options.cwd)
+			: process.cwd();
+	const extensions = Array.isArray(options.extensions)
+		? options.extensions.filter(
+				(value): value is string => typeof value === "string" && value.length > 0,
+			)
+		: undefined;
+	const piSdk = await import("@earendil-works/pi-coding-agent");
+	const resourceLoader = new piSdk.DefaultResourceLoader({
+		cwd,
+		agentDir: piSdk.getAgentDir(),
+		additionalExtensionPaths: extensions?.length ? extensions : undefined,
+		noExtensions: extensions !== undefined && extensions.length === 0,
+		noSkills: true,
+		noPromptTemplates: true,
+		noThemes: true,
+		noContextFiles: true,
+	}) as ExtensionPreflightLoader;
+	await resourceLoader.reload();
+	const errors = resourceLoader
+		.getExtensions()
+		.errors.map(({ path, error }) => ({ path, error }))
+		.sort(
+			(left, right) =>
+				left.path.localeCompare(right.path) || left.error.localeCompare(right.error),
+		);
+	if (errors.length === 0) return;
+	throw new Error(
+		[
+			"Subagent extension preflight failed before model execution:",
+			...errors.map(({ path, error }) => `- ${path}: ${error}`),
+		].join("\n"),
+	);
 }
 
 // @agwab/pi-subagent 0.4.x does not expose a supported per-run env option.
@@ -3121,6 +3178,8 @@ export async function launchSubagentTask(
 				subagentOptions.extensions = [...sealedLaunch.extensions];
 				if (sealedLaunch.captureToolCalls)
 					subagentOptions.captureToolCalls = true;
+				if (injectedSubagentApi === undefined)
+					await assertSubagentExtensionsLoadable(subagentOptions);
 				if (toolResultBudgetConfiguration?.maxTotalChars !== undefined) {
 					subagentOptions.toolResultBudget = {
 						maxTotalChars: toolResultBudgetConfiguration.maxTotalChars,
@@ -6328,8 +6387,27 @@ export async function prepareSubagentTaskLaunch(
 	requireArtifactBinding = false,
 ): Promise<PreparedWorkflowTaskLaunch> {
 	const tools = compiledTask.runtime.tools;
+	const legacyProviderTools = selectedLegacyProviderTools(tools);
+	const providerResolutionTools = new Set(legacyProviderTools);
+	if (shouldUseWorkflowWebSource(tools)) {
+		for (const tool of tools ?? []) {
+			if (isWorkflowWebSourceTool(tool) || !LEGACY_PROVIDER_TOOL_NAMES.has(tool))
+				providerResolutionTools.add(tool);
+		}
+		providerResolutionTools.add("web_search");
+	}
+	const toolProviders = await resolvePreparedToolProviders(
+		cwd,
+		compiledTask.runtime.toolProviders,
+		providerResolutionTools,
+	);
+	const legacyProvider = resolveLegacyProvider(
+		legacyProviderTools,
+		toolProviders,
+	);
+	assertSupportedNormalizedProviderOwnership(tools, toolProviders);
 	let extensions = uniqueStrings([
-		...providerExtensionsForTools(tools, compiledTask.runtime.toolProviders),
+		...providerExtensionsForTools(tools, toolProviders, legacyProvider),
 		...extraSubagentExtensionsFromEnv(),
 	]);
 	const generatedExtensions: PreparedWorkflowTaskLaunch["generatedExtensions"] =
@@ -6341,7 +6419,7 @@ export async function prepareSubagentTaskLaunch(
 		requireArtifactBinding,
 	);
 
-	if (shouldUseFetchContentCache(tools)) {
+	if (legacyProviderTools.length > 0) {
 		const wrapperPath = join(taskDir, "workflow-fetch-cache-extension.ts");
 		const config = {
 			runId: run.runId,
@@ -6355,17 +6433,24 @@ export async function prepareSubagentTaskLaunch(
 				"fetch-content",
 			),
 			maxInlineChars: fetchContentInlineCharsEnvValue(),
+			cacheEnabled: shouldUseFetchContentCache(tools) && legacyProvider.kind !== "extension",
+			providerKind: legacyProvider.kind,
+			requiredProviderTools: legacyProviderTools,
+			exposedProviderTools: legacyProviderTools,
+			passthroughProviderTools: selectedLegacyPassthroughTools(tools),
 		};
+		const providerExtensionPath =
+			legacyProvider.extensionPath ?? BUNDLED_PI_WEB_ACCESS_EXTENSION;
 		const expectedBytes = buildWorkflowFetchCacheExtensionWrapper({
 			importPath: WORKFLOW_FETCH_CACHE_EXTENSION_IMPORT,
-			webAccessExtensionPath: BUNDLED_PI_WEB_ACCESS_EXTENSION,
+			webAccessExtensionPath: providerExtensionPath,
 			webAccessStoragePath: BUNDLED_PI_WEB_ACCESS_STORAGE,
 			config,
 		});
 		await writeWorkflowFetchCacheExtensionWrapper({
 			wrapperPath,
 			importPath: WORKFLOW_FETCH_CACHE_EXTENSION_IMPORT,
-			webAccessExtensionPath: BUNDLED_PI_WEB_ACCESS_EXTENSION,
+			webAccessExtensionPath: providerExtensionPath,
 			webAccessStoragePath: BUNDLED_PI_WEB_ACCESS_STORAGE,
 			config,
 		});
@@ -6375,19 +6460,29 @@ export async function prepareSubagentTaskLaunch(
 			expectedBytes,
 			config,
 		});
+		const capturedLegacyExtensions = new Set([
+			BUNDLED_PI_WEB_ACCESS_EXTENSION,
+			...(legacyProvider.extensionPath ? [legacyProvider.extensionPath] : []),
+		]);
 		extensions = uniqueStrings([
 			...extensions.filter(
-				(extension) => resolve(extension) !== BUNDLED_PI_WEB_ACCESS_EXTENSION,
+				(extension) => !capturedLegacyExtensions.has(extension),
 			),
 			wrapperPath,
 		]);
 	}
 
 	if (shouldUseWorkflowWebSource(tools)) {
-		const providerExtensionPath = workflowWebSourceProviderExtension(
+		const providerExtensionPaths = workflowWebSourceProviderExtensions(
 			tools,
-			compiledTask.runtime.toolProviders,
+			toolProviders,
 		);
+		const providerExtensionPath =
+			providerExtensionPaths[0] ?? BUNDLED_PI_WEB_ACCESS_EXTENSION;
+		const effectiveProviderExtensionPaths =
+			providerExtensionPaths.length > 0
+				? providerExtensionPaths
+				: [providerExtensionPath];
 		const wrapperPath = join(taskDir, "workflow-web-source-extension.ts");
 		const config = {
 			schema: "workflow-web-source-launch-config-v1" as const,
@@ -6397,25 +6492,47 @@ export async function prepareSubagentTaskLaunch(
 			cacheDir: resolve(cwd, ".pi", "workflows", run.runId, "web-source-cache"),
 			provider: {
 				kind:
-					providerExtensionPath === BUNDLED_PI_WEB_ACCESS_EXTENSION
+					(providerExtensionPaths.length === 0 ||
+						providerExtensionPaths.every(
+							(path) => resolve(path) === BUNDLED_PI_WEB_ACCESS_EXTENSION,
+						))
 						? ("pi-web-access" as const)
 						: ("extension" as const),
 				extensionPath: providerExtensionPath,
+				extensionPaths: effectiveProviderExtensionPaths,
+				usesPiWebAccess: effectiveProviderExtensionPaths.includes(
+					BUNDLED_PI_WEB_ACCESS_EXTENSION,
+				),
 			},
+			providerToolOwnerPaths: normalizedProviderToolOwnerPaths(
+				tools,
+				toolProviders,
+				effectiveProviderExtensionPaths,
+			),
 			securityPolicy: {
 				allowPrivateHosts: false,
 				cacheRawProviderPayloads: false,
 			},
+			directFetchOnly: true,
+			exposedWorkflowTools: (tools ?? []).filter((tool) =>
+				isWorkflowWebSourceTool(tool),
+			),
+			passthroughProviderTools: selectedNormalizedPassthroughTools(tools, toolProviders),
+			requiredProviderTools: (tools ?? []).includes("workflow_web_search")
+				? ["web_search"]
+				: [],
 		};
 		const expectedBytes = buildWorkflowWebSourceExtensionWrapper({
 			importPath: WORKFLOW_WEB_SOURCE_EXTENSION_IMPORT,
 			providerExtensionPath,
+			providerExtensionPaths: effectiveProviderExtensionPaths,
 			config,
 		});
 		await writeWorkflowWebSourceExtensionWrapper({
 			wrapperPath,
 			importPath: WORKFLOW_WEB_SOURCE_EXTENSION_IMPORT,
 			providerExtensionPath,
+			providerExtensionPaths: effectiveProviderExtensionPaths,
 			config,
 		});
 		generatedExtensions.push({
@@ -6424,12 +6541,7 @@ export async function prepareSubagentTaskLaunch(
 			expectedBytes,
 			config,
 		});
-		const capturedProviderExtensions = new Set(
-			workflowWebSourceProviderExtensions(
-				tools,
-				compiledTask.runtime.toolProviders,
-			),
-		);
+		const capturedProviderExtensions = new Set(effectiveProviderExtensionPaths);
 		extensions = uniqueStrings([
 			...extensions.filter(
 				(extension) => !capturedProviderExtensions.has(extension),
@@ -6441,6 +6553,9 @@ export async function prepareSubagentTaskLaunch(
 	const toolResultBudget = dynamicTaskToolResultBudgetConfiguration(task);
 	return {
 		extensions,
+		...(toolProviders
+			? { toolProviders: clonePreparedToolProviders(toolProviders) }
+			: {}),
 		generatedExtensions,
 		captureToolCalls: captureToolCallsEnabled(),
 		...(toolResultBudget === undefined ? {} : { toolResultBudget }),
@@ -6510,6 +6625,79 @@ async function assertPreparedSubagentTaskLaunch(
 	}
 }
 
+function selectedLegacyProviderTools(
+	tools: readonly string[] | undefined,
+): string[] {
+	const selected = new Set(tools ?? []);
+	return ["web_search", "fetch_content", "get_search_content"].filter((tool) =>
+		selected.has(tool),
+	);
+}
+
+interface LegacyProviderResolution {
+	kind: "pi-web-access" | "extension";
+	extensionPath?: string;
+}
+
+function resolveLegacyProvider(
+	legacyTools: readonly string[],
+	toolProviders: Record<string, CompiledToolProvider> | undefined,
+): LegacyProviderResolution {
+	const explicit = legacyTools.map((tool) => ({
+		tool,
+		extensions: toolProviders?.[tool]?.extensions,
+	}));
+	const owned = explicit.filter((entry) => entry.extensions !== undefined);
+	if (owned.length === 0) return { kind: "pi-web-access" };
+	if (owned.length !== explicit.length) {
+		throw new Error(
+			"legacy provider ownership is split; configure one coherent provider extension for all selected legacy web tools",
+		);
+	}
+	const paths = new Set<string>();
+	for (const entry of owned) {
+		if (
+			!entry.extensions ||
+			entry.extensions.length !== 1 ||
+			typeof entry.extensions[0] !== "string" ||
+			entry.extensions[0].trim() === ""
+		) {
+			throw new Error(
+				"legacy provider ownership is incompatible; exactly one provider extension is required",
+			);
+		}
+		paths.add(entry.extensions[0]);
+	}
+	if (paths.size !== 1) {
+		throw new Error(
+			"legacy provider ownership is split; selected legacy web tools must share one provider extension",
+		);
+	}
+	const extensionPath = [...paths][0]!;
+	if (resolve(extensionPath) === BUNDLED_PI_WEB_ACCESS_EXTENSION)
+		return { kind: "pi-web-access" };
+	return { kind: "extension", extensionPath };
+}
+
+function clonePreparedToolProviders(
+	providers: Record<string, CompiledToolProvider>,
+): Record<string, CompiledToolProvider> {
+	return Object.fromEntries(
+		Object.entries(providers).map(([tool, provider]) => [
+			tool,
+			{
+				...provider,
+				...(provider.extensions !== undefined
+					? { extensions: [...provider.extensions] }
+					: {}),
+				...(provider.fallbackTools !== undefined
+					? { fallbackTools: [...provider.fallbackTools] }
+					: {}),
+			},
+		]),
+	);
+}
+
 function shouldUseFetchContentCache(
 	tools: readonly string[] | undefined,
 ): boolean {
@@ -6523,27 +6711,178 @@ function shouldUseWorkflowWebSource(
 	return (tools ?? []).some((tool) => isWorkflowWebSourceTool(tool));
 }
 
-function workflowWebSourceProviderExtension(
+const LEGACY_PROVIDER_TOOL_NAMES = new Set([
+	"web_search",
+	"fetch_content",
+	"get_search_content",
+]);
+
+function selectedLegacyPassthroughTools(
+	tools: readonly string[] | undefined,
+): string[] {
+	return (tools ?? []).filter(
+		(tool) =>
+			!LEGACY_PROVIDER_TOOL_NAMES.has(tool) &&
+			!isWorkflowWebSourceTool(tool),
+	);
+}
+
+function selectedNormalizedPassthroughTools(
+	tools: readonly string[] | undefined,
+	providers?: Record<string, CompiledToolProvider>,
+): string[] {
+	return (tools ?? []).filter(
+		(tool) =>
+			!LEGACY_PROVIDER_TOOL_NAMES.has(tool) &&
+			!isWorkflowWebSourceTool(tool) &&
+			providers !== undefined && Object.hasOwn(providers, tool),
+	);
+}
+
+function assertSupportedNormalizedProviderOwnership(
 	tools: readonly string[] | undefined,
 	toolProviders: Record<string, CompiledToolProvider> | undefined,
-): string {
-	return (
-		workflowWebSourceProviderExtensions(tools, toolProviders)[0] ??
-		BUNDLED_PI_WEB_ACCESS_EXTENSION
+): void {
+	if (!(tools ?? []).includes("workflow_web_fetch_source")) return;
+	// A custom search owner is valid. A custom fetch owner is not: the prepared
+	// normalized fetch tool is always the generated direct-safe transport.
+	for (const tool of ["workflow_web_fetch_source", "fetch_content"]) {
+		for (const extension of toolProviders?.[tool]?.extensions ?? []) {
+			if (resolve(extension) !== BUNDLED_PI_WEB_ACCESS_EXTENSION)
+				throw new Error(
+					"unsupported normalized provider ownership: custom fetch_content ownership for workflow_web_fetch_source is not supported; generated safe fetch uses pi-web-access",
+				);
+		}
+	}
+}
+
+async function resolvePreparedToolProviders(
+	cwd: string,
+	providers: Record<string, CompiledToolProvider> | undefined,
+	resolveTools: ReadonlySet<string>,
+): Promise<Record<string, CompiledToolProvider> | undefined> {
+	if (!providers) return undefined;
+	const resolved: Record<string, CompiledToolProvider> = {};
+	for (const [tool, provider] of Object.entries(providers)) {
+		const extensions =
+			provider.extensions && resolveTools.has(tool)
+				? await Promise.all(
+						provider.extensions.map((ref) =>
+							resolveProviderExtensionRef(ref, cwd, tool),
+						),
+					)
+				: provider.extensions
+					? [...provider.extensions]
+					: undefined;
+		resolved[tool] = {
+			...provider,
+			...(extensions ? { extensions } : {}),
+			...(provider.fallbackTools
+				? { fallbackTools: [...provider.fallbackTools] }
+				: {}),
+		};
+	}
+	return resolved;
+}
+
+async function resolveProviderExtensionRef(
+	ref: string,
+	cwd: string,
+	tool: string,
+): Promise<string> {
+	const trimmed = typeof ref === "string" ? ref.trim() : "";
+	if (!trimmed)
+		throw new Error(`provider extension ownership for ${tool} contains an empty reference`);
+	if (/^(?:npm:|git:|github:|https?:|ssh:)/i.test(trimmed)) {
+		throw new Error(
+			`provider extension reference ${JSON.stringify(ref)} for ${tool} is not a local extension file; package/remote extension sources are unsupported for sealed provider ownership`,
+		);
+	}
+	let local = trimmed;
+	if (/^file:\/\//i.test(local)) local = fileURLToPath(local);
+	else if (local === "~" || local.startsWith("~/"))
+		local = join(homedir(), local.slice(2));
+	const resolved = resolve(cwd, local);
+	try {
+		const info = await stat(resolved);
+		if (!info.isFile()) throw new Error("not a file");
+	} catch {
+		throw new Error(
+			`provider extension reference ${JSON.stringify(ref)} for ${tool} is missing or is not a single extension file (resolved ${resolved})`,
+		);
+	}
+	return resolved;
+}
+
+function normalizedProviderToolOwnerPaths(
+	tools: readonly string[] | undefined,
+	toolProviders: Record<string, CompiledToolProvider> | undefined,
+	providerPaths: readonly string[],
+): Record<string, string[]> {
+	const searchOwners = [
+		...(toolProviders?.workflow_web_search?.extensions ?? []),
+		...(toolProviders?.web_search?.extensions ?? []),
+	].filter(
+		(path, index, values): path is string =>
+			typeof path === "string" &&
+			path !== BUNDLED_PI_WEB_ACCESS_EXTENSION &&
+			values.indexOf(path) === index,
 	);
+	const webSearchOwners = searchOwners.length
+		? searchOwners
+		: providerPaths.includes(BUNDLED_PI_WEB_ACCESS_EXTENSION)
+			? [BUNDLED_PI_WEB_ACCESS_EXTENSION]
+			: [];
+	const owners: Record<string, string[]> = {};
+	if (webSearchOwners.length) owners.web_search = webSearchOwners;
+	for (const tool of selectedNormalizedPassthroughTools(tools, toolProviders)) {
+		const configured = toolProviders?.[tool]?.extensions ?? [];
+		const unique = [...new Set(configured.filter((path): path is string => typeof path === "string" && path.trim() !== ""))];
+		if (unique.length !== 1 || unique.length !== configured.length) {
+			throw new Error(`normalized provider ownership is missing or ambiguous for selected passthrough tool ${tool}`);
+		}
+		owners[tool] = unique;
+	}
+	if ((tools ?? []).includes("workflow_web_fetch_source")) {
+		owners.fetch_content = [BUNDLED_PI_WEB_ACCESS_EXTENSION];
+		owners.get_search_content = [BUNDLED_PI_WEB_ACCESS_EXTENSION];
+	}
+	return owners;
 }
 
 function workflowWebSourceProviderExtensions(
 	tools: readonly string[] | undefined,
 	toolProviders: Record<string, CompiledToolProvider> | undefined,
 ): string[] {
-	const providers = new Set<string>();
-	for (const tool of tools ?? []) {
-		if (!isWorkflowWebSourceTool(tool)) continue;
-		for (const provider of toolProviders?.[tool]?.extensions ?? [])
-			providers.add(provider);
+	const providers: string[] = [];
+	const add = (values: readonly string[] | undefined): void => {
+		for (const value of values ?? []) {
+			if (typeof value === "string" && value.trim() && !providers.includes(value))
+				providers.push(value);
+		}
+	};
+	const selected = tools ?? [];
+	for (const tool of selected) {
+		// workflow_web_fetch_source has no provider-owned transport. Do not load
+		// a custom fetch extension merely because it was attached to that tool;
+		// custom search and explicitly selected passthrough tools remain loaded.
+		if (
+			(tool === "workflow_web_search") ||
+			(!LEGACY_PROVIDER_TOOL_NAMES.has(tool) && !isWorkflowWebSourceTool(tool) && tool !== "code_search")
+		)
+			add(toolProviders?.[tool]?.extensions);
 	}
-	return [...providers];
+	// A shared provider may own code_search as well as a normalized search
+	// tool. Capture it in the generated wrapper so it can be re-exported once.
+	if (selected.includes("code_search")) add(toolProviders?.code_search?.extensions);
+	if (selected.includes("workflow_web_search"))
+		add(toolProviders?.web_search?.extensions);
+	// Normalized fetch is always backed by the generated public-host-checked
+	// pi-web-access transport. Custom fetch ownership is rejected above rather
+	// than being treated as equivalent merely because its URL input is public.
+	if (selected.includes("workflow_web_fetch_source"))
+		add([BUNDLED_PI_WEB_ACCESS_EXTENSION]);
+	return providers;
 }
 
 function fetchContentCacheEnvValue(): string | undefined {
@@ -6570,13 +6909,24 @@ function isExplicitlyDisabled(value: string | undefined): boolean {
 function providerExtensionsForTools(
 	tools: readonly string[] | undefined,
 	toolProviders: Record<string, CompiledToolProvider> | undefined,
+	legacyProvider: LegacyProviderResolution,
 ): string[] {
 	const providers = new Set<string>();
+	const legacyTools = new Set(["web_search", "fetch_content", "get_search_content"]);
 	for (const tool of tools ?? []) {
-		for (const provider of TOOL_PROVIDER_EXTENSIONS[tool] ?? [])
-			providers.add(provider);
-		for (const provider of toolProviders?.[tool]?.extensions ?? [])
-			providers.add(provider);
+		const customExtensions = toolProviders?.[tool]?.extensions;
+		const legacyOwnedByWrapper =
+			legacyTools.has(tool) && legacyProvider.kind === "extension";
+		if (
+			(!legacyOwnedByWrapper && tool !== "code_search") ||
+			(tool === "code_search" && customExtensions === undefined)
+		) {
+			for (const provider of TOOL_PROVIDER_EXTENSIONS[tool] ?? [])
+				providers.add(provider);
+		}
+		if (tool !== "workflow_web_fetch_source") {
+			for (const provider of customExtensions ?? []) providers.add(provider);
+		}
 	}
 	return [...providers];
 }

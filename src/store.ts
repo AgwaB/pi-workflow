@@ -50,6 +50,7 @@ import {
 	type TaskSummary,
 } from "./types.js";
 import { buildWorkflowRunMetrics } from "./workflow-metrics.js";
+import { assertUniqueRunTaskIds } from "./foreach-batch-runtime.js";
 
 const TERMINAL_INDEX_LIMIT = 50;
 export const LEASE_STALE_MS = 30_000;
@@ -1174,6 +1175,7 @@ export async function withRunLease<T>(
 	let heartbeatInFlight: Promise<void> | undefined;
 	const lock = await acquireLock(lockFile, ownerId);
 	if (!lock) return undefined;
+	let callerOutcomeSettled = false;
 	try {
 		const abortController = new AbortController();
 		const abortLease = (error: unknown): void => {
@@ -1264,10 +1266,24 @@ export async function withRunLease<T>(
 		assertLeaseNotAborted(abortController.signal);
 		await assertLockOwner(lockFile, ownerId);
 		assertLeaseNotAborted(abortController.signal);
+		callerOutcomeSettled = true;
 		return result;
+	} catch (error) {
+		// Cleanup must not replace the action's result or error. The release
+		// helper still publishes an abandonment marker before bounded retries, so
+		// a persistent cleanup failure leaves this live-PID lock reclaimable.
+		callerOutcomeSettled = true;
+		throw error;
 	} finally {
 		if (heartbeatTimer) clearInterval(heartbeatTimer);
-		await releaseLock(lockFile, ownerId);
+		heartbeatTimer = undefined;
+		await heartbeatInFlight?.catch(() => undefined);
+		heartbeatInFlight = undefined;
+		try {
+			await releaseRunFileLockWithRetries(lockFile, ownerId);
+		} catch (releaseError) {
+			if (!callerOutcomeSettled) throw releaseError;
+		}
 	}
 }
 
@@ -2611,6 +2627,10 @@ export async function readRunRecord(
 	const run = await readJson<WorkflowRunRecord>(file);
 	if (!run?.runId || !Array.isArray(run.tasks))
 		throw new Error(`Invalid workflow run record: ${file}`);
+	// Reject ambiguous task identity at the persistence boundary, before any
+	// scheduler recovery, foreach batch lookup, or terminal demux can build a
+	// taskId map that silently selects one duplicate.
+	assertUniqueRunTaskIds(run);
 	if (run.runId !== containingRunId) {
 		throw new Error(
 			`Workflow run record identity does not match containing directory: ${file}`,
@@ -2676,6 +2696,9 @@ export async function listRunRecords(
 						`Workflow run record identity does not match containing directory: ${file}`,
 					);
 				}
+				// Keep list and point reads equally strict. Callers commonly build
+				// taskId maps from listings during recovery and demux.
+				assertUniqueRunTaskIds(parsed);
 				return deriveRunStatus(parsed);
 			} catch (error) {
 				const code = (error as NodeJS.ErrnoException).code;
@@ -2721,6 +2744,7 @@ export async function updateIndex(
 	await ensureDir(workflowsRoot(cwd));
 	assertLeaseNotAborted(abortSignal);
 	await acquireLockWithWait(lockFile, ownerId);
+	let callerOutcomeSettled = false;
 
 	try {
 		assertLeaseNotAborted(abortSignal);
@@ -2733,9 +2757,19 @@ export async function updateIndex(
 		assertLeaseNotAborted(abortSignal);
 		await writeJsonAtomic(workflowIndexPath(cwd), index, abortSignal);
 		assertLeaseNotAborted(abortSignal);
+		callerOutcomeSettled = true;
 		return index;
+	} catch (error) {
+		// Preserve the index operation's outcome while ensuring a failed release
+		// has already made this live-PID lock durably reclaimable.
+		callerOutcomeSettled = true;
+		throw error;
 	} finally {
-		await releaseLock(lockFile, ownerId);
+		try {
+			await releaseRunFileLockWithRetries(lockFile, ownerId);
+		} catch (releaseError) {
+			if (!callerOutcomeSettled) throw releaseError;
+		}
 	}
 }
 

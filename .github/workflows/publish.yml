@@ -20,6 +20,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/pi-workflow-npmrc
+      NPM_CONFIG_GLOBALCONFIG: ${{ runner.temp }}/pi-workflow-global-npmrc
+      NPM_CONFIG_REGISTRY: https://registry.npmjs.org
+      NPM_CONFIG_TAG: latest
     outputs:
       package-sha: ${{ steps.package.outputs.package-sha }}
       release-tree: ${{ steps.package.outputs.release-tree }}
@@ -37,30 +42,47 @@ jobs:
 
       - name: Show Node/npm versions
         run: |
+          set -euo pipefail
+          umask 077
+          printf '%s\n' 'registry=https://registry.npmjs.org/' 'tag=latest' > "$NPM_CONFIG_USERCONFIG"
+          printf '%s\n' 'registry=https://registry.npmjs.org/' > "$NPM_CONFIG_GLOBALCONFIG"
+          test ! -e .npmrc
           node --version
           npm --version
 
-      - name: Prepare requested version without lifecycle scripts
+      - name: Validate already-versioned release source
         id: version
         env:
           TARGET_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          if ! [[ "$TARGET_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
+          if ! [[ "$TARGET_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
             echo "version must be an exact semver without a v prefix" >&2
             exit 1
           fi
-          current="$(node -p "require('./package.json').version")"
-          if [ "$current" != "$TARGET_VERSION" ]; then
-            npm version "$TARGET_VERSION" --no-git-tag-version --ignore-scripts
-          fi
+          test "$(git rev-parse HEAD)" = "${{ github.sha }}"
           test "$(node -p "require('./package.json').name")" = "@agwab/pi-workflow"
           test "$(node -p "require('./package.json').version")" = "$TARGET_VERSION"
           test "$(node -p "require('./package-lock.json').version")" = "$TARGET_VERSION"
+          tag_ref="refs/tags/v$TARGET_VERSION"
+          tag_refs="$(git ls-remote origin "$tag_ref" "$tag_ref^{}")"
+          dereferenced_tag="$(printf '%s\n' "$tag_refs" | awk -v ref="$tag_ref" '
+            BEGIN { peeled_ref = ref "^{}" }
+            NF == 0 { next }
+            NF != 2 { invalid = 1; next }
+            $2 == peeled_ref { peeled_sha = $1; peeled_count++; next }
+            $2 == ref { direct_sha = $1; direct_count++; next }
+            { invalid = 1 }
+            END {
+              if (invalid || direct_count != 1 || peeled_count > 1 || (peeled_count == 1 && !peeled_sha)) exit 1
+              if (peeled_count == 1) print peeled_sha
+              else print direct_sha
+            }')"
+          test "$dereferenced_tag" = "${{ github.sha }}"
           echo "version=$TARGET_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Install locked dependencies without lifecycle scripts
-        run: npm ci --legacy-peer-deps --ignore-scripts
+        run: npm ci --legacy-peer-deps --ignore-scripts --registry https://registry.npmjs.org
 
       - name: Release validation in read-only privilege context
         env:
@@ -73,15 +95,16 @@ jobs:
           TARGET_VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          git diff --exit-code -- . ':(exclude)package.json' ':(exclude)package-lock.json'
+          test ! -e .npmrc
+          git diff --exit-code
+          git diff --cached --exit-code
           test -z "$(git ls-files --others --exclude-standard)"
-          git add package.json package-lock.json
-          release_tree="$(git write-tree)"
+          release_tree="$(git rev-parse HEAD^{tree})"
 
           pack_json_file="$(mktemp)"
           cleanup_pack_json() { rm -f "$pack_json_file"; }
           trap cleanup_pack_json EXIT
-          npm pack --ignore-scripts --json > "$pack_json_file"
+          npm pack --ignore-scripts --registry https://registry.npmjs.org --tag latest --json > "$pack_json_file"
           package_file="$(node -e 'const fs=require("node:fs"); const [p]=JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(p.filename)' "$pack_json_file")"
           expected_file="agwab-pi-workflow-$TARGET_VERSION.tgz"
           test "$package_file" = "$expected_file"
@@ -93,20 +116,36 @@ jobs:
 
           export PACKAGE_FILE="$expected_file"
           export PACKAGE_SHA="$package_sha"
+          export PACKAGE_PATH="$PWD/$expected_file"
           export BASE_SHA="${{ github.sha }}"
           export RELEASE_TREE="$release_tree"
+          export SOURCE_REPOSITORY="$GITHUB_REPOSITORY"
           node <<'NODE'
           const fs = require('node:fs');
+          const crypto = require('node:crypto');
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          if (JSON.stringify(pkg.publishConfig) !== '{"access":"public"}') throw new Error('source publishConfig is not exact');
+          const packageIntegrity = `sha512-${crypto.createHash('sha512').update(fs.readFileSync(process.env.PACKAGE_PATH)).digest('base64')}`;
           fs.writeFileSync('release-metadata.json', `${JSON.stringify({
-            schema: 'pi-workflow-release-metadata-v2',
+            schema: 'pi-workflow-release-metadata-v3',
             name: '@agwab/pi-workflow',
             version: process.env.TARGET_VERSION,
-            baseSha: process.env.BASE_SHA,
+            sourceRepository: process.env.SOURCE_REPOSITORY,
+            sourceCommit: process.env.BASE_SHA,
+            releaseCommit: process.env.BASE_SHA,
             releaseTree: process.env.RELEASE_TREE,
             packageFile: process.env.PACKAGE_FILE,
             packageSha256: process.env.PACKAGE_SHA,
+            packageIntegrity,
           }, null, 2)}\n`);
           NODE
+
+          packed_config="$(tar -xOf "$expected_file" package/package.json | node --input-type=commonjs -e 'const fs=require("node:fs"); const p=JSON.parse(fs.readFileSync(0,"utf8")); process.stdout.write(JSON.stringify(p.publishConfig));')"
+          test "$packed_config" = '{"access":"public"}'
+          if tar -tzf "$expected_file" | grep -Eq '(^|/)\.npmrc$'; then
+            echo "package contains .npmrc" >&2
+            exit 1
+          fi
 
       - name: Upload exact release artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -122,11 +161,10 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
       id-token: none
     outputs:
-      needs-push: ${{ steps.prepare.outputs.needs-push }}
-      release-commit: ${{ steps.prepare.outputs.release-commit }}
+      release-commit: ${{ steps.verify.outputs.release-commit }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -134,95 +172,32 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
-        with:
-          node-version: 24
-          package-manager-cache: false
-
-      - name: Independently reconstruct the validated release tree
-        id: prepare
+      - name: Verify promoted release source identity
+        id: verify
         env:
           EXPECTED_RELEASE_TREE: ${{ needs.build.outputs.release-tree }}
           TARGET_VERSION: ${{ needs.build.outputs.version }}
         run: |
           set -euo pipefail
-          if ! [[ "$TARGET_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
-            echo "version must be an exact semver without a v prefix" >&2
-            exit 1
-          fi
-          test "$(node -p "require('./package.json').name")" = "@agwab/pi-workflow"
-          current="$(node -p "require('./package.json').version")"
-          if [ "$current" != "$TARGET_VERSION" ]; then
-            npm version "$TARGET_VERSION" --no-git-tag-version --ignore-scripts
-          fi
-          test "$(node -p "require('./package.json').version")" = "$TARGET_VERSION"
-          test "$(node -p "require('./package-lock.json').version")" = "$TARGET_VERSION"
-          git diff --exit-code -- . ':(exclude)package.json' ':(exclude)package-lock.json'
-          test -z "$(git ls-files --others --exclude-standard)"
-          git add package.json package-lock.json
-          release_tree="$(git write-tree)"
-          test "$release_tree" = "$EXPECTED_RELEASE_TREE"
-
-          base_commit="${{ github.sha }}"
-          remote_main="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
-          remote_tag="$(git ls-remote origin "refs/tags/v$TARGET_VERSION" | awk '{print $1}')"
-          needs_push=false
-
-          if [ "$remote_main" = "$base_commit" ] && [ -z "$remote_tag" ]; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            if ! git diff --cached --quiet; then
-              git commit -m "chore(release): v$TARGET_VERSION"
-            fi
-            release_commit="$(git rev-parse HEAD)"
-            test "$(git rev-parse HEAD^{tree})" = "$EXPECTED_RELEASE_TREE"
-            if git rev-parse -q --verify "refs/tags/v$TARGET_VERSION" >/dev/null; then
-              test "$(git rev-list -n 1 "refs/tags/v$TARGET_VERSION")" = "$release_commit"
-            else
-              git tag "v$TARGET_VERSION"
-            fi
-            needs_push=true
-          elif [ "$remote_main" = "$base_commit" ] && [ "$remote_tag" = "$base_commit" ]; then
-            release_commit="$base_commit"
-            test "$(git rev-parse "$release_commit^{tree}")" = "$EXPECTED_RELEASE_TREE"
-          elif [ -n "$remote_tag" ] && [ "$remote_main" = "$remote_tag" ]; then
-            release_commit="$remote_main"
-            git fetch --no-tags origin "$release_commit"
-            test "$(git rev-parse "$release_commit^")" = "$base_commit"
-            test "$(git rev-parse "$release_commit^{tree}")" = "$EXPECTED_RELEASE_TREE"
-          else
-            echo "remote main/tag identity is incompatible with this release" >&2
-            exit 1
-          fi
-
-          echo "needs-push=$needs_push" >> "$GITHUB_OUTPUT"
-          echo "release-commit=$release_commit" >> "$GITHUB_OUTPUT"
-
-      - name: Atomically push the independently reconstructed commit and tag
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          NEEDS_PUSH: ${{ steps.prepare.outputs.needs-push }}
-          RELEASE_COMMIT: ${{ steps.prepare.outputs.release-commit }}
-          TARGET_VERSION: ${{ needs.build.outputs.version }}
-        run: |
-          set -euo pipefail
-          if [ "$NEEDS_PUSH" = "true" ]; then
-            remote="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-            git push --atomic "$remote" \
-              "$RELEASE_COMMIT:refs/heads/main" \
-              "$RELEASE_COMMIT:refs/tags/v$TARGET_VERSION"
-          fi
-
-      - name: Verify remote release identity
-        env:
-          RELEASE_COMMIT: ${{ steps.prepare.outputs.release-commit }}
-          TARGET_VERSION: ${{ needs.build.outputs.version }}
-        run: |
-          set -euo pipefail
-          remote_main="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
-          remote_tag="$(git ls-remote origin "refs/tags/v$TARGET_VERSION" | awk '{print $1}')"
-          test "$remote_main" = "$RELEASE_COMMIT"
-          test "$remote_tag" = "$RELEASE_COMMIT"
+          test "$(git rev-parse HEAD)" = "${{ github.sha }}"
+          test "$(git rev-parse HEAD^{tree})" = "$EXPECTED_RELEASE_TREE"
+          test "$(git ls-remote origin refs/heads/main | awk '{print $1}')" = "${{ github.sha }}"
+          tag_ref="refs/tags/v$TARGET_VERSION"
+          tag_refs="$(git ls-remote origin "$tag_ref" "$tag_ref^{}")"
+          dereferenced_tag="$(printf '%s\n' "$tag_refs" | awk -v ref="$tag_ref" '
+            BEGIN { peeled_ref = ref "^{}" }
+            NF == 0 { next }
+            NF != 2 { invalid = 1; next }
+            $2 == peeled_ref { peeled_sha = $1; peeled_count++; next }
+            $2 == ref { direct_sha = $1; direct_count++; next }
+            { invalid = 1 }
+            END {
+              if (invalid || direct_count != 1 || peeled_count > 1 || (peeled_count == 1 && !peeled_sha)) exit 1
+              if (peeled_count == 1) print peeled_sha
+              else print direct_sha
+            }')"
+          test "$dereferenced_tag" = "${{ github.sha }}"
+          echo "release-commit=${{ github.sha }}" >> "$GITHUB_OUTPUT"
 
   publish:
     needs: [build, source]
@@ -232,6 +207,121 @@ jobs:
       actions: read
       contents: read
       id-token: write
+    env:
+      NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/pi-workflow-npmrc
+      NPM_CONFIG_GLOBALCONFIG: ${{ runner.temp }}/pi-workflow-global-npmrc
+      NPM_CONFIG_REGISTRY: https://registry.npmjs.org
+      NPM_CONFIG_TAG: latest
+    steps:
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: release-artifact
+          path: release-artifact
+
+      - name: Publish exact promoted tarball and record registry envelopes
+        env:
+          BUILD_PACKAGE_SHA: ${{ needs.build.outputs.package-sha }}
+          RELEASE_COMMIT: ${{ needs.source.outputs.release-commit }}
+          TARGET_VERSION: ${{ needs.build.outputs.version }}
+          NPM_PACKAGE: "@agwab/pi-workflow"
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          verify_release_tag() {
+            tag_name="v$TARGET_VERSION"
+            ref_json="$(gh api --method GET "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag_name")"
+            tag_object_type="$(printf '%s' "$ref_json" | jq -r '.object.type')"
+            tag_object_sha="$(printf '%s' "$ref_json" | jq -r '.object.sha')"
+            test "$tag_object_sha" != "null"
+            test "$tag_object_sha" != ""
+            case "$tag_object_type" in
+              commit) dereferenced_tag="$tag_object_sha" ;;
+              tag) dereferenced_tag="$(gh api --method GET "repos/$GITHUB_REPOSITORY/git/tags/$tag_object_sha" --jq '.object.sha')" ;;
+              *) echo "unsupported GitHub tag object type: $tag_object_type" >&2; exit 1 ;;
+            esac
+            test "$dereferenced_tag" != ""
+            test "$dereferenced_tag" != "null"
+            test "$dereferenced_tag" = "$RELEASE_COMMIT"
+
+            protected_patterns="$(gh api --method GET "repos/$GITHUB_REPOSITORY/tags/protection")"
+            TAG_NAME="$tag_name" PROTECTED_PATTERNS="$protected_patterns" node --input-type=module <<'NODE'
+          const tagName = process.env.TAG_NAME;
+          const protections = JSON.parse(process.env.PROTECTED_PATTERNS);
+          const patterns = Array.isArray(protections) ? protections.map((entry) => entry?.pattern).filter((pattern) => typeof pattern === 'string' && pattern.length > 0) : [];
+          const escape = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const glob = (pattern) => pattern.split(/([*?])/).map((part) => part === '*' ? '.*' : part === '?' ? '.' : escape(part)).join('');
+          const matches = patterns.some((pattern) => new RegExp(`^${glob(pattern)}$`).test(tagName));
+          if (!matches) throw new Error(`release tag ${tagName} is not covered by a GitHub protected-tag pattern`);
+          NODE
+          }
+          printf '%s\n' 'registry=https://registry.npmjs.org/' 'tag=latest' > "$NPM_CONFIG_USERCONFIG"
+          printf '%s\n' 'registry=https://registry.npmjs.org/' > "$NPM_CONFIG_GLOBALCONFIG"
+          test ! -e .npmrc
+          expected_file="agwab-pi-workflow-$TARGET_VERSION.tgz"
+          package_path="$PWD/release-artifact/$expected_file"
+          test -f "$package_path"
+          test "$(find release-artifact -maxdepth 1 -type f -name '*.tgz' -print | wc -l | tr -d ' ')" = "1"
+          actual_sha="$(sha256sum "$package_path" | awk '{print $1}')"
+          test "$actual_sha" = "$BUILD_PACKAGE_SHA"
+          metadata=release-artifact/release-metadata.json
+          test "$(node -p "require('./$metadata').schema")" = "pi-workflow-release-metadata-v3"
+          test "$(node -p "require('./$metadata').name")" = "$NPM_PACKAGE"
+          test "$(node -p "require('./$metadata').version")" = "$TARGET_VERSION"
+          test "$(node -p "require('./$metadata').packageFile")" = "$expected_file"
+          test "$(node -p "require('./$metadata').packageSha256")" = "$BUILD_PACKAGE_SHA"
+
+          publication_before=publication-before.json
+          publication_error="$(mktemp)"
+          cleanup_publication() { rm -f "$publication_error"; }
+          trap cleanup_publication EXIT
+          set +e
+          npm view "$NPM_PACKAGE@$TARGET_VERSION" name version dist --registry https://registry.npmjs.org --tag latest --json > "$publication_before" 2> "$publication_error"
+          view_status=$?
+          set -e
+          if [ "$view_status" -ne 0 ]; then
+            if ! grep -Eiq 'npm (ERR!|error) code E404' "$publication_error"; then
+              cat "$publication_error" >&2
+              exit "$view_status"
+            fi
+            printf '{"name":%s,"version":%s,"dist":null}\n' "$(node -p 'JSON.stringify(process.env.NPM_PACKAGE)')" "$(node -p 'JSON.stringify(process.env.TARGET_VERSION)')" > "$publication_before"
+            verify_release_tag
+            npm publish "$package_path" --access public --provenance --ignore-scripts --registry https://registry.npmjs.org --tag latest
+          fi
+          npm view "$NPM_PACKAGE@$TARGET_VERSION" name version dist --registry https://registry.npmjs.org --tag latest --json > publication-after.json
+          npm view "$NPM_PACKAGE" dist-tags --registry https://registry.npmjs.org --tag latest --json > dist-tags.json
+
+      - name: Upload registry evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: publication-evidence
+          path: |
+            publication-before.json
+            publication-after.json
+            dist-tags.json
+          if-no-files-found: error
+          retention-days: 7
+
+  verification:
+    needs: [build, source, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      id-token: none
+    env:
+      EXPECTED_REPOSITORY: AgwaB/pi-workflow
+      EXPECTED_WORKFLOW_REF: refs/heads/main
+      EXPECTED_WORKFLOW_PATH: .github/workflows/publish.yml
+      NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/pi-workflow-npmrc
+      NPM_CONFIG_GLOBALCONFIG: ${{ runner.temp }}/pi-workflow-global-npmrc
+      NPM_CONFIG_REGISTRY: https://registry.npmjs.org
+      NPM_CONFIG_TAG: latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -242,7 +332,6 @@ jobs:
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: 24
-          registry-url: https://registry.npmjs.org
           package-manager-cache: false
 
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
@@ -250,64 +339,68 @@ jobs:
           name: release-artifact
           path: release-artifact
 
-      - name: Verify source identity and publish the fixed-path tarball
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: publication-evidence
+          path: publication-evidence
+
+      - name: Cryptographically gate and verify exact npm provenance
         env:
           BUILD_PACKAGE_SHA: ${{ needs.build.outputs.package-sha }}
           RELEASE_COMMIT: ${{ needs.source.outputs.release-commit }}
           TARGET_VERSION: ${{ needs.build.outputs.version }}
+          NPM_PACKAGE: "@agwab/pi-workflow"
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT"
-          test "$(node -p "require('./package.json').name")" = "@agwab/pi-workflow"
-          test "$(node -p "require('./package.json').version")" = "$TARGET_VERSION"
-          remote_main="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
-          remote_tag="$(git ls-remote origin "refs/tags/v$TARGET_VERSION" | awk '{print $1}')"
-          test "$remote_main" = "$RELEASE_COMMIT"
-          test "$remote_tag" = "$RELEASE_COMMIT"
-
+          umask 077
+          printf '%s\n' 'registry=https://registry.npmjs.org/' 'tag=latest' > "$NPM_CONFIG_USERCONFIG"
+          printf '%s\n' 'registry=https://registry.npmjs.org/' > "$NPM_CONFIG_GLOBALCONFIG"
+          test ! -e .npmrc
           expected_file="agwab-pi-workflow-$TARGET_VERSION.tgz"
           package_path="$PWD/release-artifact/$expected_file"
           test -f "$package_path"
-          test "$(find release-artifact -maxdepth 1 -type f -name '*.tgz' -print | wc -l | tr -d ' ')" = "1"
-          metadata=release-artifact/release-metadata.json
-          test "$(node -p "require('./$metadata').schema")" = "pi-workflow-release-metadata-v2"
-          test "$(node -p "require('./$metadata').name")" = "@agwab/pi-workflow"
-          test "$(node -p "require('./$metadata').version")" = "$TARGET_VERSION"
-          test "$(node -p "require('./$metadata').baseSha")" = "${{ github.sha }}"
-          test "$(node -p "require('./$metadata').releaseTree")" = "${{ needs.build.outputs.release-tree }}"
-          test "$(node -p "require('./$metadata').packageFile")" = "$expected_file"
-          expected_sha="$(node -p "require('./$metadata').packageSha256")"
           actual_sha="$(sha256sum "$package_path" | awk '{print $1}')"
-          test "$expected_sha" = "$BUILD_PACKAGE_SHA"
           test "$actual_sha" = "$BUILD_PACKAGE_SHA"
+          metadata=release-artifact/release-metadata.json
+          test "$(node -p "require('./$metadata').schema")" = "pi-workflow-release-metadata-v3"
+          test "$(node -p "require('./$metadata').name")" = "$NPM_PACKAGE"
+          test "$(node -p "require('./$metadata').version")" = "$TARGET_VERSION"
+          test "$(node -p "require('./$metadata').sourceRepository")" = "$EXPECTED_REPOSITORY"
+          test "$(node -p "require('./$metadata').sourceCommit")" = "$RELEASE_COMMIT"
+          test "$(node -p "require('./$metadata').releaseCommit")" = "$RELEASE_COMMIT"
+          test "$(node -p "require('./$metadata').packageFile")" = "$expected_file"
 
-          if tar -tzf "$package_path" | grep -Eq '(^/|(^|/)\.\.(/|$)|\\)'; then
-            echo "package contains an unsafe archive path" >&2
-            exit 1
-          fi
-          packed_name="$(tar -xOf "$package_path" package/package.json | node -p 'JSON.parse(require("node:fs").readFileSync(0, "utf8")).name')"
-          packed_version="$(tar -xOf "$package_path" package/package.json | node -p 'JSON.parse(require("node:fs").readFileSync(0, "utf8")).version')"
-          test "$packed_name" = "@agwab/pi-workflow"
-          test "$packed_version" = "$TARGET_VERSION"
-
-          integrity="$(npm view "@agwab/pi-workflow@$TARGET_VERSION" dist.integrity 2>/dev/null || true)"
-          if [ -n "$integrity" ]; then
-            export PACKAGE_PATH="$package_path" EXPECTED_INTEGRITY="$integrity"
-            node --input-type=commonjs --eval '
-            const crypto = require("node:crypto");
-            const fs = require("node:fs");
-            const actual = `sha512-${crypto.createHash("sha512").update(fs.readFileSync(process.env.PACKAGE_PATH)).digest("base64")}`;
-            if (actual !== process.env.EXPECTED_INTEGRITY) {
-              throw new Error(`published package integrity mismatch: expected ${process.env.EXPECTED_INTEGRITY}, got ${actual}`);
-            }
-            '
-            echo "@agwab/pi-workflow@$TARGET_VERSION already exists with identical integrity; skipping publish."
-          else
-            npm publish "$package_path" --access public --provenance --ignore-scripts
-          fi
+          gate_dir="$(mktemp -d)"
+          audit_json="$PWD/npm-audit-signatures.json"
+          cleanup_gate() { rm -rf "$gate_dir" "$audit_json"; }
+          trap cleanup_gate EXIT
+          mkdir -p "$gate_dir/node_modules/@agwab"
+          tar -xzf "$package_path" -C "$gate_dir/node_modules/@agwab"
+          mv "$gate_dir/node_modules/@agwab/package" "$gate_dir/node_modules/@agwab/pi-workflow"
+          rm -rf "$gate_dir/node_modules/@agwab/pi-workflow/node_modules"
+          PACKAGE_INTEGRITY="$(node -e 'const fs=require("node:fs"),crypto=require("node:crypto"); process.stdout.write(`sha512-${crypto.createHash("sha512").update(fs.readFileSync(process.argv[1])).digest("base64")}`)' "$package_path")"
+          GATE_DIR="$gate_dir" PACKAGE_INTEGRITY="$PACKAGE_INTEGRITY" TARGET_VERSION="$TARGET_VERSION" node --input-type=module <<'NODE'
+          import { writeFileSync } from 'node:fs';
+          const dir = process.env.GATE_DIR;
+          const version = process.env.TARGET_VERSION;
+          const integrity = process.env.PACKAGE_INTEGRITY;
+          const lock = {
+            name: 'pi-workflow-provenance-gate', version: '1.0.0', lockfileVersion: 3, requires: true,
+            packages: {
+              '': { name: 'pi-workflow-provenance-gate', version: '1.0.0', dependencies: { '@agwab/pi-workflow': version } },
+              'node_modules/@agwab/pi-workflow': {
+                version, resolved: `https://registry.npmjs.org/@agwab/pi-workflow/-/pi-workflow-${version}.tgz`, integrity,
+              },
+            },
+          };
+          writeFileSync(`${dir}/package.json`, JSON.stringify({ name: lock.name, version: lock.version, dependencies: { '@agwab/pi-workflow': version } }));
+          writeFileSync(`${dir}/package-lock.json`, JSON.stringify(lock));
+          NODE
+          (cd "$gate_dir" && npm audit signatures --json --include-attestations --package-lock-only --registry https://registry.npmjs.org --ignore-scripts > "$audit_json")
+          EXPECTED_REPOSITORY="$EXPECTED_REPOSITORY" EXPECTED_WORKFLOW_REF="$EXPECTED_WORKFLOW_REF" EXPECTED_WORKFLOW_PATH="$EXPECTED_WORKFLOW_PATH" NPM_PACKAGE="$NPM_PACKAGE" TARGET_VERSION="$TARGET_VERSION" RELEASE_COMMIT="$RELEASE_COMMIT" node tools/release/verify-npm-publication.mjs "$package_path" publication-evidence/publication-before.json publication-evidence/publication-after.json publication-evidence/dist-tags.json "$audit_json"
 
   release:
-    needs: [build, source, publish]
+    needs: [build, source, publish, verification]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -320,8 +413,38 @@ jobs:
           TARGET_VERSION: ${{ needs.build.outputs.version }}
         run: |
           set -euo pipefail
+          verify_release_tag() {
+            tag_name="v$TARGET_VERSION"
+            ref_json="$(gh api --method GET "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag_name")"
+            tag_object_type="$(printf '%s' "$ref_json" | jq -r '.object.type')"
+            tag_object_sha="$(printf '%s' "$ref_json" | jq -r '.object.sha')"
+            test "$tag_object_sha" != "null"
+            test "$tag_object_sha" != ""
+            case "$tag_object_type" in
+              commit) dereferenced_tag="$tag_object_sha" ;;
+              tag) dereferenced_tag="$(gh api --method GET "repos/$GITHUB_REPOSITORY/git/tags/$tag_object_sha" --jq '.object.sha')" ;;
+              *) echo "unsupported GitHub tag object type: $tag_object_type" >&2; exit 1 ;;
+            esac
+            test "$dereferenced_tag" != ""
+            test "$dereferenced_tag" != "null"
+            test "$dereferenced_tag" = "$RELEASE_COMMIT"
+
+            protected_patterns="$(gh api --method GET "repos/$GITHUB_REPOSITORY/tags/protection")"
+            TAG_NAME="$tag_name" PROTECTED_PATTERNS="$protected_patterns" node --input-type=module <<'NODE'
+          const tagName = process.env.TAG_NAME;
+          const protections = JSON.parse(process.env.PROTECTED_PATTERNS);
+          const patterns = Array.isArray(protections) ? protections.map((entry) => entry?.pattern).filter((pattern) => typeof pattern === 'string' && pattern.length > 0) : [];
+          const escape = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const glob = (pattern) => pattern.split(/([*?])/).map((part) => part === '*' ? '.*' : part === '?' ? '.' : escape(part)).join('');
+          const matches = patterns.some((pattern) => new RegExp(`^${glob(pattern)}$`).test(tagName));
+          if (!matches) throw new Error(`release tag ${tagName} is not covered by a GitHub protected-tag pattern`);
+          NODE
+          }
+
+          verify_release_tag
           if gh release view "v$TARGET_VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             test "$(gh release view "v$TARGET_VERSION" --repo "$GITHUB_REPOSITORY" --json targetCommitish --jq .targetCommitish)" = "$RELEASE_COMMIT"
           else
             gh release create "v$TARGET_VERSION" --repo "$GITHUB_REPOSITORY" --target "$RELEASE_COMMIT" --title "v$TARGET_VERSION" --generate-notes
           fi
+          verify_release_tag

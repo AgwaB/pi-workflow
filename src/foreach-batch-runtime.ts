@@ -147,10 +147,26 @@ export function assertForeachBatchRecord(
 	}
 }
 
+export function assertUniqueRunTaskIds(
+	run: Pick<WorkflowRunRecord, "tasks">,
+): void {
+	const seen = new Set<string>();
+	for (const task of run.tasks) {
+		if (typeof task.taskId !== "string" || task.taskId === "")
+			throw new Error("workflow run contains an invalid taskId");
+		if (seen.has(task.taskId))
+			throw new Error(`workflow run contains duplicate taskId ${JSON.stringify(task.taskId)}`);
+		seen.add(task.taskId);
+	}
+}
+
 export function foreachBatchRecordForTask(
 	run: WorkflowRunRecord,
 	task: Pick<WorkflowTaskRunRecord, "foreachBatch">,
 ): WorkflowForeachBatchRecord | undefined {
+	// Validate the complete run before resolving a batch record. A taskId map
+	// must never silently choose one of two persisted owners.
+	assertUniqueRunTaskIds(run);
 	const batchId = task.foreachBatch?.batchId;
 	if (!batchId) return undefined;
 	const records = run.foreachBatches ?? [];
@@ -175,6 +191,7 @@ export function foreachBatchTasks(
 	run: WorkflowRunRecord,
 	record: WorkflowForeachBatchRecord,
 ): [WorkflowTaskRunRecord, WorkflowTaskRunRecord] {
+	assertUniqueRunTaskIds(run);
 	assertForeachBatchRecord(record);
 	const byTaskId = new Map(run.tasks.map((task) => [task.taskId, task]));
 	const resolved = record.members.map((member) => {

@@ -566,6 +566,16 @@ test("bundled deep-research compacts audit packets before executive final", asyn
 		finalAuditPacket.support.uses,
 		"./helpers/final-audit-packet.mjs",
 	);
+	assert.ok(
+		finalAuditPacket.artifactGraph.output.controlSchemaPath.endsWith(
+			join(
+				"workflows",
+				"deep-research",
+				"schemas",
+				"deep-research-final-audit-packet-control.schema.json",
+			),
+		),
+	);
 
 	assert.equal(finalAudit?.kind, "reduce");
 	assert.deepEqual(finalAudit.dependsOn, ["final-audit-packet.main"]);
@@ -2559,10 +2569,24 @@ test("spec-review partition helper joins verifier results and flags missing cove
 		context: {
 			cwd: process.cwd(),
 			specPath: "workflows/spec-review/spec.json",
+			sourceStatuses: [
+				{ source: "candidate-findings", specId: "candidate-findings.main", stageId: "candidate-findings", taskId: "task-candidates", status: "completed" },
+				{ source: "verify-findings.finding-001", specId: "verify-findings.finding-001", stageId: "verify-findings", taskId: "task-verify-1", itemIdentity: "FINDING-001", placeholderSpecId: "verify-findings.item", status: "completed" },
+				{ source: "verify-findings.finding-002", specId: "verify-findings.finding-002", stageId: "verify-findings", taskId: "task-verify-2", itemIdentity: "FINDING-002", placeholderSpecId: "verify-findings.item", status: "completed" },
+				{ source: "verify-findings.orphan", specId: "verify-findings.FINDING-999", stageId: "verify-findings", taskId: "task-verify-orphan", itemIdentity: "FINDING-999", placeholderSpecId: "verify-findings.item", status: "completed" },
+			],
 		},
 	});
 
 	assert.equal(result.schema, "spec-review-partition-v1");
+	assert.match(result.digest, /^sha256:[a-f0-9]{64}$/);
+	assert.deepEqual(result.sourceStatusSummary, {
+		metadataAvailable: true,
+		total: 4,
+		completed: 4,
+		nonCompleted: 0,
+		partialFailures: [],
+	});
 	assert.deepEqual(result.verifierCoverage.missingIds, ["FINDING-003"]);
 	assert.deepEqual(result.verifierCoverage.orphanVerifierIds, ["FINDING-999"]);
 	assert.deepEqual(
@@ -2644,11 +2668,30 @@ test("bundled spec-review workflow compiles flat analysis and verification fanou
 			uses: "./helpers/spec-review-pipeline.mjs",
 			options: { mode: "partition" },
 		});
+		assert.ok(
+			partition.artifactGraph.output.controlSchemaPath.endsWith(
+				join("workflows", "spec-review", "schemas", "spec-review-partition-control.schema.json"),
+			),
+		);
 		const reportStage = compiled.stages.find((stage) => stage.id === "report");
 		assert.equal(reportStage.sourcePolicy, "require-success");
 		const report = compiled.tasks.find((task) => task.key === "report.main");
 		assert.equal(report.kind, "reduce");
+		assert.equal(report.injectTask, true);
+		assert.match(report.compiledPrompt, /# Task/);
 		assert.deepEqual(report.dependsOn, ["partition-findings.main"]);
+		const final = compiled.tasks.find((task) => task.key === "final.main");
+		assert.equal(final.kind, "support");
+		assert.deepEqual(final.dependsOn, ["report.main", "partition-findings.main"]);
+		assert.deepEqual(final.artifactGraph.inputPolicy, {
+			terminalBarrier: "all-sources",
+		});
+		assert.equal(final.support.uses, "./helpers/render-spec-review-report.mjs");
+		assert.ok(
+			final.artifactGraph.output.controlSchemaPath.endsWith(
+				join("workflows", "spec-review", "schemas", "spec-review-render-control.schema.json"),
+			),
+		);
 	} finally {
 		rmSync(cwd, {
 			recursive: true,
@@ -2795,6 +2838,29 @@ test("bundled workflows compile warning-free and deep-review leaves reviewer fan
 			assert.equal(prepared.runtime.tools.includes("workflow_artifact"), false);
 			assert.doesNotMatch(prepared.compiledPrompt, /Workflow Artifact Inputs/);
 		}
+
+		const specReviewPath = join(
+			process.cwd(),
+			"workflows",
+			"spec-review",
+			"spec.json",
+		);
+		const specReviewCompiled = await compileWorkflow(
+			parsePublicWorkflow(JSON.parse(readFileSync(specReviewPath, "utf8"))),
+			{ cwd, specPath: specReviewPath, task: "Audit spec-review completion." },
+		);
+		const specReviewReport = specReviewCompiled.tasks.find(
+			(task) => task.key === "report.main",
+		);
+		const specReviewFinal = specReviewCompiled.tasks.find(
+			(task) => task.key === "final.main",
+		);
+		assert.equal(specReviewReport?.injectTask, true);
+		assert.equal(specReviewFinal?.kind, "support");
+		assert.deepEqual(specReviewFinal?.dependsOn, [
+			"report.main",
+			"partition-findings.main",
+		]);
 	} finally {
 		rmSync(cwd, {
 			recursive: true,
@@ -2859,9 +2925,11 @@ test("bundled spec-review workflow materializes verifier and partitions verified
 				"map-implementation.main",
 				"inspect-tests.main",
 				"candidate-findings.main",
+				"verify-findings.item",
 				"verify-findings.finding-001",
 				"partition-findings.main",
 				"report.main",
+				"final.main",
 			],
 		);
 		assert.deepEqual(taskBySpec(current, "partition-findings.main").dependsOn, [
@@ -4398,6 +4466,61 @@ test("deep-review report schema accepts only bounded narrative synthesis", () =>
 	assert.ok(
 		invalidVerdict.issues.some((issue) => issue.path === "$.verdict"),
 	);
+});
+
+test("spec-review report schema accepts only bounded narrative overlay", () => {
+	const schemaPath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"..",
+		"..",
+		"workflows",
+		"spec-review",
+		"schemas",
+		"spec-review-report-control.schema.json",
+	);
+	const reportSchema = parseFixtureJson(readFileSync(schemaPath, "utf8"));
+	const validControl = {
+		schema: "spec-review-report-v1",
+		digest: "concise synthesis",
+		summary: "One conformance gap remains.",
+		verdict: "GAPS_FOUND",
+		ownerLedger: [{
+			source: "verify-findings.F-001",
+			stageId: "verify-findings",
+			specId: "verify-findings.F-001",
+			taskId: "task-001",
+			itemIdentity: "F-001",
+			placeholderSpecId: "verify-findings.item",
+			status: "completed",
+		}],
+		ownerLedgerReconciliation: {
+			ownerRowCount: 1,
+			verifierRowCount: 1,
+			ownerIds: ["F-001"],
+			verifierIds: ["F-001"],
+			duplicateOwnerIds: [],
+			duplicateVerifierIds: [],
+			missingOwnerRows: [],
+			orphanOwnerRows: [],
+			statusMismatches: [],
+			cardinalityPassed: true,
+			passed: true,
+		},
+		risks: ["One requirement is ambiguous."],
+		recommendedNextAction: "Address the confirmed gap.",
+	};
+	assert.deepEqual(validateJsonSchema(validControl, reportSchema), {
+		valid: true,
+		issues: [],
+	});
+	for (const invalidControl of [
+		{ ...validControl, findings: [] },
+		{ ...validControl, requirementCoverage: [] },
+		{ ...validControl, risks: Array.from({ length: 13 }, () => "risk") },
+		{ ...validControl, verdict: "READY" },
+	]) {
+		assert.equal(validateJsonSchema(invalidControl, reportSchema).valid, false);
+	}
 });
 
 test("minimal JSON schema validator enforces control schema subset", () => {

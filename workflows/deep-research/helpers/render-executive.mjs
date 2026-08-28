@@ -11,11 +11,15 @@ import { join } from "node:path";
 import { canonicalVerificationStatus } from "./verification-ontology.mjs";
 
 function findSource(sources, stageId) {
-	const entries = Object.entries(sources ?? {});
-	const exact = entries.find(([specId]) => specId === stageId);
-	if (exact) return exact[1];
-	const dotted = entries.find(([specId]) => specId.startsWith(`${stageId}.`));
-	return dotted?.[1] ?? null;
+	const matches = Object.entries(sources ?? {}).filter(
+		([specId]) => specId === stageId || specId.startsWith(`${stageId}.`),
+	);
+	if (matches.length > 1) {
+		throw new Error(
+			`deep-research: ambiguous ${stageId} source (${matches.map(([specId]) => specId).join(", ")})`,
+		);
+	}
+	return matches[0]?.[1] ?? null;
 }
 
 function asArray(value) {
@@ -81,6 +85,20 @@ function cleanText(value) {
 		.replace(/\s+/g, " ")
 		.replace(/\s+([,.;:!?])/g, "$1")
 		.trim();
+}
+
+function completionText(value) {
+	return cleanText(value)
+		.replace(/(?:^|[\\/])\.pi[\\/]workflows(?:[\\/][^\s]*)?/gi, " [artifact omitted]")
+		.replace(/\b(?:final-report|executive|audit|review)\.md\b/gi, "[artifact omitted]")
+		.replace(/\b(?:refs|control)\.json\b/gi, "[artifact omitted]")
+		.replace(/\brelated[\s-]+artifacts\b/gi, "[section title omitted]")
+		.replace(/\bworkflow[_-][\w.-]+\b/gi, "[run omitted]")
+		.replace(/\btask[_-][\w.-]+\b/gi, "[task omitted]")
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
+		.replace(/([\\`*_[\]{}#+|])/g, "\\$1");
 }
 
 function escapeTableCell(value) {
@@ -451,6 +469,179 @@ function packetOf(packetSource) {
 	return isRecord(packetSource?.packet) ? packetSource.packet : {};
 }
 
+function hasOwn(record, key) {
+	return isRecord(record) && Object.prototype.hasOwnProperty.call(record, key);
+}
+
+function exactKeys(record, allowed) {
+	return (
+		isRecord(record) &&
+		Object.keys(record).every((key) => allowed.includes(key))
+	);
+}
+
+function boundedString(value, minLength, maxLength) {
+	return (
+		typeof value === "string" &&
+		value.length >= minLength &&
+		value.length <= maxLength
+	);
+}
+
+function boundedArray(value, maxItems, itemCheck) {
+	return (
+		Array.isArray(value) &&
+		value.length <= maxItems &&
+		value.every(itemCheck)
+	);
+}
+
+function boundedStringArray(value, maxItems) {
+	return boundedArray(value, maxItems, (item) => typeof item === "string");
+}
+
+function modernRecommendationValid(item) {
+	return Boolean(
+		isRecord(item) &&
+		boundedString(item.recommendation, 1, 1200) &&
+		boundedStringArray(item.supportingClaimIds, 8) &&
+		(!hasOwn(item, "evidenceStatus") || typeof item.evidenceStatus === "string") &&
+		(!hasOwn(item, "rationale") || boundedString(item.rationale, 0, 1200)),
+	);
+}
+
+function modernActionValid(item) {
+	return Boolean(
+		isRecord(item) &&
+		boundedString(item.action, 1, 1200) &&
+		boundedStringArray(item.supportingClaimIds, 8) &&
+		(!hasOwn(item, "evidenceStatus") || typeof item.evidenceStatus === "string"),
+	);
+}
+
+function modernCaveatValid(item) {
+	return Boolean(
+		isRecord(item) &&
+		boundedString(item.note, 1, 1200) &&
+		(!hasOwn(item, "relatedClaimIds") ||
+			boundedStringArray(item.relatedClaimIds, 8)) &&
+		(!hasOwn(item, "gapIds") || boundedStringArray(item.gapIds, 8)),
+	);
+}
+
+function modernDecisionValid(item) {
+	return Boolean(
+		isRecord(item) &&
+		boundedString(item.note, 1, 1200) &&
+		boundedString(item.whyItMatters, 1, 1200) &&
+		typeof item.evidenceStatus === "string" &&
+		boundedString(item.suggestedParentDecision, 0, 1200) &&
+		(!hasOwn(item, "supportingClaimIds") ||
+			boundedStringArray(item.supportingClaimIds, 8)),
+	);
+}
+
+function validModernFinalAudit(control) {
+	const synthesis = control?.synthesis;
+	const synthesisKeys = [
+		"bottomLine",
+		"keyFindingIds",
+		"recommendations",
+		"actionPlan",
+		"caveatNotes",
+		"parentDecisionNotes",
+		"notableUnsupportedClaimIds",
+		"contestedClaimIds",
+	];
+	return Boolean(
+		exactKeys(control, ["schema", "digest", "synthesis"]) &&
+		control.schema === "deep-research-final-synthesis-v1" &&
+		boundedString(control.digest, 1, 1200) &&
+		exactKeys(synthesis, synthesisKeys) &&
+		boundedString(synthesis.bottomLine, 1, 4000) &&
+		boundedStringArray(synthesis.keyFindingIds, 12) &&
+		boundedArray(synthesis.recommendations, 12, modernRecommendationValid) &&
+		boundedArray(synthesis.actionPlan, 12, modernActionValid) &&
+		boundedArray(synthesis.caveatNotes, 16, modernCaveatValid) &&
+		boundedArray(synthesis.parentDecisionNotes, 12, modernDecisionValid) &&
+		(!hasOwn(synthesis, "notableUnsupportedClaimIds") ||
+			boundedStringArray(synthesis.notableUnsupportedClaimIds, 12)) &&
+		(!hasOwn(synthesis, "contestedClaimIds") ||
+			boundedStringArray(synthesis.contestedClaimIds, 12)),
+	);
+}
+
+function validLegacyFinalAudit(control) {
+	const report = control?.finalReport;
+	return Boolean(
+		isRecord(control) &&
+		boundedString(control.schema, 1, Infinity) &&
+		boundedString(control.digest, 1, Infinity) &&
+		isRecord(report) &&
+		[
+			"researchMetadata",
+			"coverageSummary",
+			"recommendations",
+			"actionPlan",
+			"remainingGaps",
+		].every((field) => hasOwn(report, field)) &&
+		boundedArray(report.factSlotCoverage, 64, isRecord) &&
+		boundedArray(report.mainFindings, 12, isRecord) &&
+		boundedArray(report.parentDecisionNotes, 12, isRecord) &&
+		boundedArray(report.unverifiedButRelevant, 16, isRecord) &&
+		isRecord(control.claimVerdictIndex) &&
+		boundedArray(control.claimVerdictIndex.claims, 64, isRecord),
+	);
+}
+
+function validFinalAuditPacket(packetSource) {
+	const packet = packetSource?.packet;
+	const synthesisInput = packet?.synthesisInput;
+	return Boolean(
+		exactKeys(packetSource, ["schema", "digest", "packet"]) &&
+		packetSource.schema === "deep-research-final-audit-packet-v1" &&
+		boundedString(packetSource.digest, 1, 1200) &&
+		isRecord(packet) &&
+		[
+			"researchMetadataSeed",
+			"verdictCounts",
+			"statusPartitions",
+			"factSlotStatusCounts",
+			"verifierIntegrity",
+			"normalizerDiagnostics",
+			"invariantChecks",
+			"overflowLedger",
+		].every((field) => isRecord(packet[field])) &&
+		[
+			"factSlotCoverage",
+			"coverageGaps",
+			"remainingGaps",
+			"sourceRefJoinFailures",
+			"claimVerdictLedger",
+			"preservedClaims",
+			"researchScopeCoverage",
+		].every((field) =>
+			boundedArray(packet[field], Infinity, isRecord),
+		) &&
+		isRecord(synthesisInput) &&
+		[
+			"researchMetadata",
+			"verdictCounts",
+			"factSlotStatusCounts",
+			"integritySummary",
+		].every((field) => isRecord(synthesisInput[field])) &&
+		[
+			"researchScopeCoverage",
+			"factSlots",
+			"claims",
+			"preservedClaims",
+			"gaps",
+		].every((field) =>
+			boundedArray(synthesisInput[field], Infinity, isRecord),
+		),
+	);
+}
+
 function claimIdOf(row) {
 	return cleanText(row?.id ?? row?.claimId ?? "");
 }
@@ -478,6 +669,333 @@ function mapById(rows, idFn) {
 function numberedId(prefix, index) {
 	return `${prefix}-${String(index + 1).padStart(3, "0")}`;
 }
+
+function duplicateIds(rows, idFn) {
+	const counts = new Map();
+	for (const row of rows) {
+		const id = idFn(row);
+		if (id) counts.set(id, (counts.get(id) ?? 0) + 1);
+	}
+	return [...counts.entries()]
+		.filter(([, count]) => count > 1)
+		.map(([id]) => id);
+}
+
+function packetDuplicateIds(packet, control) {
+	const ledger = claimLedger(packet, control);
+	const gaps = packetGapRows(packet);
+	return {
+		claimIds: duplicateIds(ledger, claimIdOf),
+		gapIds: duplicateIds(gaps, gapIdOf),
+	};
+}
+
+function duplicateIdRenderResult(duplicates) {
+	const blockers = [];
+	if (duplicates.claimIds.length > 0)
+		blockers.push(`duplicate claim IDs: ${duplicates.claimIds.join(", ")}`);
+	if (duplicates.gapIds.length > 0)
+		blockers.push(`duplicate gap IDs: ${duplicates.gapIds.join(", ")}`);
+	return {
+		schema: "deep-research-executive-render-v1",
+		digest: `Research report rendering blocked: ${blockers.join("; ")}`,
+		status: "failed",
+		blockers,
+		completionSummaryMarkdown: "",
+		executiveMarkdown: "",
+		reportMarkdown: "",
+		auditMarkdown: "",
+		wordCount: 0,
+		sourceUrlCount: 0,
+		totalSourceUrlCount: 0,
+		sourceUrls: [],
+		sourceIndex: [],
+		claimSummary: { total: 0, verified: 0, partially_supported: 0, unsupported: 0, conflicting: 0, verification_blocked: 0 },
+		factSlotSummary: { total: 0, filled: 0, partial: 0, missingOrConflicting: 0 },
+		sectionCounts: {},
+		renderWarnings: [],
+		duplicateClaimIds: duplicates.claimIds,
+		duplicateGapIds: duplicates.gapIds,
+		gates: {
+			renderedAllStructuredItems: false,
+			duplicateClaimIds: duplicates.claimIds,
+			duplicateGapIds: duplicates.gapIds,
+			passed: false,
+		},
+		auditArtifact: "final-audit.control.json",
+	};
+}
+
+function sameIdMultiset(left, right) {
+	if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length)
+		return false;
+	const counts = new Map();
+	for (const id of left) counts.set(id, (counts.get(id) ?? 0) + 1);
+	for (const id of right) {
+		const count = counts.get(id) ?? 0;
+		if (count === 0) return false;
+		if (count === 1) counts.delete(id);
+		else counts.set(id, count - 1);
+	}
+	return counts.size === 0;
+}
+
+function packetStatusKey(status) {
+	const normalized = normalizeClaimStatus(status);
+	return normalized || "unverified";
+}
+
+function packetCountMap(rows) {
+	const counts = {
+		verified: 0,
+		partially_supported: 0,
+		unsupported: 0,
+		conflicting: 0,
+		verification_blocked: 0,
+		unverified: 0,
+	};
+	for (const row of rows) {
+		const status = packetStatusKey(row?.status ?? row?.verdict);
+		if (Object.hasOwn(counts, status)) counts[status] += 1;
+	}
+	return counts;
+}
+
+function packetStatusIds(packet) {
+	const partitions = packet?.statusPartitions;
+	if (!isRecord(partitions)) return null;
+	const result = {};
+	for (const [key, value] of Object.entries(partitions)) {
+		const status = packetStatusKey(key);
+		if (!Array.isArray(value)) return { invalid: true };
+		result[status] = [...(result[status] ?? []), ...value.filter((id) => typeof id === "string" && id.trim())];
+	}
+	return result;
+}
+
+function numberMatches(actual, expected) {
+	return Number.isSafeInteger(Number(actual)) && Number(actual) >= 0 && Number(actual) === Number(expected);
+}
+
+function ownerKey(owner) {
+	if (!isRecord(owner)) return "";
+	return [
+		owner.source,
+		owner.stageId,
+		owner.specId,
+		owner.taskId,
+		owner.itemIdentity,
+		owner.placeholderSpecId,
+		owner.batchId ?? "",
+		owner.status,
+	].map((value) => String(value ?? "")).join("\u001f");
+}
+
+function exactOwnerShape(owner) {
+	return isRecord(owner) &&
+		["source", "stageId", "specId", "taskId", "itemIdentity", "placeholderSpecId", "status"]
+			.every((field) => typeof owner[field] === "string" && owner[field].trim()) &&
+		owner.status === "completed" &&
+		(typeof owner.batchId === "undefined" || (typeof owner.batchId === "string" && owner.batchId.trim())) &&
+		owner.specId === `${owner.stageId}.${owner.batchId ?? owner.itemIdentity}` &&
+		owner.placeholderSpecId === `${owner.stageId}.item` &&
+		(owner.batchId === undefined || owner.itemIdentity === owner.batchId);
+}
+
+function reconcileVerifierOwners(packet, ledger) {
+	const owners = asArray(packet?.verifierIntegrity?.verifierOwnerLedger);
+	const blockers = [];
+	const ownerByKey = new Map();
+	for (const owner of owners) {
+		const key = ownerKey(owner);
+		if (!exactOwnerShape(owner)) blockers.push("verifier owner ledger contains an incomplete or non-completed owner");
+		if (!key) continue;
+		if (ownerByKey.has(key)) blockers.push("verifier owner ledger contains duplicate owners");
+		ownerByKey.set(key, owner);
+	}
+	const claimOwners = [];
+	for (const claim of ledger) {
+		if (!isRecord(claim?.verifierOwner)) {
+			blockers.push(`claim owner is missing: ${claimIdOf(claim) || "unknown"}`);
+			continue;
+		}
+		const key = ownerKey(claim.verifierOwner);
+		claimOwners.push(key);
+		if (!ownerByKey.has(key)) blockers.push(`claim owner is absent from owner ledger: ${claimIdOf(claim) || "unknown"}`);
+	}
+	for (const key of ownerByKey.keys()) {
+		if (!claimOwners.includes(key)) blockers.push("verifier owner ledger contains an orphan owner");
+	}
+	if (ledger.length > 0 && owners.length === 0) blockers.push("verifier owner ledger is missing");
+	return {
+		passed: blockers.length === 0,
+		blockers,
+		checks: { ownerRowCount: owners.length, claimOwnerRowCount: claimOwners.length },
+	};
+}
+
+// A packet emitted by final-audit-packet has all of these ledgers. Older
+// final-audit fixtures intentionally provide only a legacy report/claim index;
+// retain their rendering behavior while making the real packet contract strict.
+function packetHasCompleteContract(packet) {
+	return isRecord(packet) &&
+		Array.isArray(packet.claimVerdictLedger) &&
+		isRecord(packet.verdictCounts) &&
+		isRecord(packet.statusPartitions) &&
+		Array.isArray(packet.factSlotCoverage) &&
+		isRecord(packet.factSlotStatusCounts) &&
+		isRecord(packet.verifierIntegrity) &&
+		Array.isArray(packet.verifierIntegrity.verifierOwnerLedger) &&
+		Array.isArray(packet.verifierIntegrity.verifierOwnerIssues) &&
+		Array.isArray(packet.verifierIntegrity.invalidNormalizedCandidateRows) &&
+		isRecord(packet.invariantChecks) &&
+		Array.isArray(packet.invariantChecks.candidateIds) &&
+		Array.isArray(packet.invariantChecks.auditedClaimIds) &&
+		isRecord(packet.overflowLedger) &&
+		isRecord(packet.synthesisInput?.integritySummary);
+}
+
+function reconcileFinalPacket(packet, control) {
+	if (!packetHasCompleteContract(packet)) {
+		return { strict: false, passed: true, blockers: [], checks: {} };
+	}
+	const blockers = [];
+	const ledger = packet.claimVerdictLedger;
+	const ledgerIds = ledger.map(claimIdOf);
+	const ownerReconciliation = reconcileVerifierOwners(packet, ledger);
+	if (!ownerReconciliation.passed) blockers.push(...ownerReconciliation.blockers);
+	const ledgerIdSet = new Set(ledgerIds.filter(Boolean));
+	if (ledgerIds.some((id) => !id) || ledgerIdSet.size !== ledgerIds.length)
+		blockers.push("packet claim ledger has missing or duplicate IDs");
+	const counts = packetCountMap(ledger);
+	const packetCounts = packetVerdictCounts(packet, counts) ?? {};
+	for (const key of ["verified", "partially_supported", "unsupported", "conflicting", "verification_blocked"]) {
+		const packetKey = key === "partially_supported" ? "partiallySupported" : key === "verification_blocked" ? "verificationBlocked" : key;
+		if (!numberMatches(packetCounts[key], counts[key])) blockers.push(`packet count mismatch: ${key}`);
+	}
+	const invariant = packet.invariantChecks;
+	const auditedCount = Number(invariant.auditedClaimCount);
+	const candidateCount = Number(invariant.candidateCount);
+	const omitted = asArray(invariant.omittedCandidateIds).filter((id) => typeof id === "string" && id.trim());
+	if (!numberMatches(auditedCount, ledger.length)) blockers.push("audited claim count does not match claim ledger");
+	if (!Number.isSafeInteger(candidateCount) || candidateCount < ledger.length || candidateCount !== ledger.length + omitted.length)
+		blockers.push("candidate/audited/omitted counts do not reconcile");
+	if (Array.isArray(invariant.auditedClaimIds) && !sameIdMultiset(invariant.auditedClaimIds, ledgerIds)) blockers.push("audited claim IDs do not match claim ledger");
+	if (Array.isArray(invariant.candidateIds)) {
+		if (new Set(invariant.candidateIds).size !== invariant.candidateIds.length) blockers.push("candidate IDs are duplicated");
+		if (invariant.candidateIds.length !== candidateCount) blockers.push("candidate ID count does not match candidate count");
+		const candidateSet = new Set(invariant.candidateIds);
+		if (ledgerIds.some((id) => !candidateSet.has(id))) blockers.push("audited claim is absent from candidate ledger");
+	}
+	const statusTotal = Object.values(counts).reduce((total, count) => total + count, 0);
+	if (statusTotal !== ledger.length) blockers.push("claim status counts do not sum to the claim ledger");
+	const partitions = packetStatusIds(packet);
+	if (!partitions || partitions.invalid) blockers.push("packet status partitions are malformed");
+	else {
+		if (isRecord(invariant.statusPartitionIds)) {
+			const invariantPartitions = packetStatusIds({ statusPartitions: invariant.statusPartitionIds });
+			const partitionKeys = new Set(Object.keys(partitions));
+			const invariantKeys = new Set(Object.keys(invariantPartitions ?? {}));
+			const sameKeys = partitionKeys.size === invariantKeys.size && [...partitionKeys].every((key) => invariantKeys.has(key));
+			if (!invariantPartitions || invariantPartitions.invalid || !sameKeys || [...partitionKeys].some((key) => !sameIdMultiset(invariantPartitions[key], partitions[key]))) blockers.push("invariant status partitions do not match packet partitions");
+		}
+		const partitionIds = Object.values(partitions).flat();
+		if (!sameIdMultiset(partitionIds, ledgerIds)) blockers.push("status partitions do not cover the claim ledger");
+		for (const [status, ids] of Object.entries(partitions)) {
+			const expected = ledger.filter((claim) => packetStatusKey(claim?.status ?? claim?.verdict) === status).map(claimIdOf);
+			if (!sameIdMultiset(ids, expected)) blockers.push(`status partition mismatch: ${status}`);
+		}
+	}
+	const slots = packet.factSlotCoverage;
+	const slotIds = slots.map((slot) => cleanText(slot?.slotId ?? slot?.id));
+	if (slotIds.some((id) => !id) || new Set(slotIds).size !== slotIds.length) blockers.push("fact-slot ledger has missing or duplicate IDs");
+	const slotCounts = {};
+	for (const slot of slots) {
+		const status = cleanText(slot?.status ?? "unknown") || "unknown";
+		slotCounts[status] = (slotCounts[status] ?? 0) + 1;
+	}
+	for (const [status, count] of Object.entries(slotCounts)) {
+		if (Number(packet.factSlotStatusCounts[status] ?? 0) !== count) blockers.push(`fact-slot count mismatch: ${status}`);
+	}
+	for (const [status, count] of Object.entries(packet.factSlotStatusCounts)) {
+		if (Number(count) !== Number(slotCounts[status] ?? 0)) blockers.push(`fact-slot count has extra status: ${status}`);
+	}
+	const candidateSet = new Set(Array.isArray(invariant.candidateIds) ? invariant.candidateIds : []);
+	const slotById = new Map(slots.map((slot) => [cleanText(slot?.slotId ?? slot?.id), slot]));
+	for (const slot of slots) {
+		for (const candidateId of asArray(slot?.verificationCandidateIds)) {
+			if (candidateSet.size > 0 && !candidateSet.has(candidateId)) blockers.push(`fact-slot references unknown candidate: ${candidateId}`);
+		}
+	}
+	for (const claim of ledger) {
+		for (const slotId of asArray(claim?.factSlotIds)) {
+			const slot = slotById.get(cleanText(slotId));
+			if (!slot) blockers.push(`claim references unknown fact slot: ${slotId}`);
+			else if (Array.isArray(slot.verificationCandidateIds) && slot.verificationCandidateIds.length > 0 && !slot.verificationCandidateIds.includes(claimIdOf(claim))) blockers.push(`fact-slot candidate mapping omits audited claim: ${claimIdOf(claim)}`);
+		}
+	}
+	const integrity = packet.verifierIntegrity;
+	const invalidNormalizedRows = asArray(integrity.invalidNormalizedCandidateRows);
+	if (!numberMatches(integrity.invalidNormalizedCandidateCount, invalidNormalizedRows.length)) blockers.push("invalid normalized candidate count does not match rows");
+	if (!numberMatches(integrity.gateSummary?.invalidNormalizedCandidates, invalidNormalizedRows.length)) blockers.push("gate invalid normalized candidate count does not match rows");
+	if (invalidNormalizedRows.length > 0) blockers.push("invalid normalized candidate rows are present");
+	if (!numberMatches(invariant.verifierIntegrity?.invalidNormalizedCandidateCount, invalidNormalizedRows.length)) blockers.push("invariant invalid normalized candidate count does not match rows");
+	const overflow = packet.overflowLedger;
+	const overflowChecks = [
+		["preservedClaimCount", asArray(packet.preservedClaims).length],
+		["coverageGapCount", asArray(packet.coverageGaps).length],
+		["remainingGapCount", asArray(packet.remainingGaps).length],
+		["omittedVerificationCandidateCount", omitted.length],
+		["invalidVerifierRowCount", asArray(packet.verifierIntegrity.invalidVerifierRows).length],
+		["duplicateVerifierRowCount", asArray(packet.verifierIntegrity.duplicateVerifierRows).length],
+		["verifierOwnerIssueCount", asArray(packet.verifierIntegrity.verifierOwnerIssues).length],
+		["invalidNormalizedCandidateCount", invalidNormalizedRows.length],
+	];
+	for (const [field, expected] of overflowChecks) if (!numberMatches(overflow[field], expected)) blockers.push(`overflow mismatch: ${field}`);
+	const invIntegrity = isRecord(invariant.verifierIntegrity) ? invariant.verifierIntegrity : {};
+	for (const field of ["invalidVerifierRows", "duplicateVerifierRows", "verifierOwnerIssues", "missingVerifierResults", "zeroCandidateFloorBlockers"]) {
+		const expected = field === "invalidVerifierRows" ? asArray(integrity.invalidVerifierRows).length : field === "duplicateVerifierRows" ? asArray(integrity.duplicateVerifierRows).length : field === "verifierOwnerIssues" ? asArray(integrity.verifierOwnerIssues).length : Number(integrity.gateSummary?.[field] ?? 0);
+		if (!numberMatches(invIntegrity[field], expected)) blockers.push(`verifier integrity mismatch: ${field}`);
+	}
+	const synthesisClaims = asArray(packet.synthesisInput?.claims);
+	if (synthesisClaims.length > 0 && !sameIdMultiset(synthesisClaims.map(claimIdOf), ledgerIds)) blockers.push("synthesis claim ledger does not match packet claim ledger");
+	const synthesisCounts = packet.synthesisInput?.verdictCounts;
+	if (isRecord(synthesisCounts)) {
+		for (const [key, value] of Object.entries(packetCounts)) {
+			const synthesisKey = key === "partially_supported" ? "partiallySupported" : key === "verification_blocked" ? "verificationBlocked" : key;
+			if (synthesisCounts[synthesisKey] !== undefined && Number(synthesisCounts[synthesisKey]) !== Number(value)) blockers.push(`synthesis count mismatch: ${key}`);
+		}
+	}
+	const synthesisIntegrity = packet.synthesisInput?.integritySummary;
+	if (isRecord(synthesisIntegrity)) {
+		const packetJoinFailures = Number(integrity.gateSummary?.sourceRefJoinFailures ?? asArray(packet.sourceRefJoinFailures).length);
+		if (synthesisIntegrity.sourceRefJoinFailures !== undefined && Number(synthesisIntegrity.sourceRefJoinFailures) !== packetJoinFailures) blockers.push("synthesis integrity source-ref count mismatch");
+		if (synthesisIntegrity.invalidVerifierRows !== undefined && Number(synthesisIntegrity.invalidVerifierRows) !== asArray(integrity.invalidVerifierRows).length) blockers.push("synthesis integrity verifier-row count mismatch");
+		if (synthesisIntegrity.invalidNormalizedCandidateCount !== undefined && Number(synthesisIntegrity.invalidNormalizedCandidateCount) !== invalidNormalizedRows.length) blockers.push("synthesis integrity invalid normalized candidate count mismatch");
+		const synthesisInvalidRows = asArray(synthesisIntegrity.invalidNormalizedCandidateRows);
+		if (synthesisInvalidRows.length !== invalidNormalizedRows.length || JSON.stringify(synthesisInvalidRows) !== JSON.stringify(invalidNormalizedRows)) blockers.push("synthesis integrity invalid normalized candidate rows mismatch");
+	}
+	const finalClaims = asArray(control?.claimVerdictIndex?.claims);
+	for (const row of finalClaims) {
+		const id = claimIdOf(row);
+		const packetRow = ledger.find((claim) => claimIdOf(claim) === id);
+		if (!packetRow || packetStatusKey(row?.status ?? row?.verdict) !== packetStatusKey(packetRow?.status ?? packetRow?.verdict)) blockers.push(`final claim ledger mismatch: ${id || "missing id"}`);
+	}
+	return {
+		strict: true,
+		passed: blockers.length === 0,
+		blockers,
+		checks: {
+			candidateCount,
+			auditedCount,
+			omittedCount: omitted.length,
+			ledgerCount: ledger.length,
+			ownerReconciliation,
+			invalidNormalizedCandidateCount: invalidNormalizedRows.length,
+		},
+	};
+}
+
 
 function packetGapRows(packet) {
 	const remaining = asArray(packet?.remainingGaps).map((gap, index) => ({
@@ -994,14 +1512,16 @@ function renderCompletionSummary(report, claimSummary, slots, fallback) {
 	const out = [
 		"## Core conclusion",
 		"",
-		summaryText(report, fallback),
+		completionText(summaryText(report, fallback)),
 		"",
 	];
 	if (primaryEntries.length > 0) {
 		out.push("## Main recommendations", "");
 		for (const { item, text } of primaryEntries) {
 			const status = evidenceStatusOf(item) || "not specified";
-			out.push(`- ${text} — evidence: ${status}`);
+			out.push(
+				`- ${completionText(text)} — evidence: ${completionText(status)}`,
+			);
 		}
 		out.push("");
 	}
@@ -1015,7 +1535,7 @@ function renderCompletionSummary(report, claimSummary, slots, fallback) {
 	if (limitations.length > 0) {
 		out.push("## Remaining decisions and limits", "");
 		for (const { kind, text } of limitations) {
-			out.push(`- **${kind}:** ${text}`);
+			out.push(`- **${completionText(kind)}:** ${completionText(text)}`);
 		}
 		out.push("");
 	}
@@ -1352,22 +1872,60 @@ function renderAuditMarkdown(control, packetSource, rendered) {
 		.trim();
 }
 
+function blockedSourceResult(reason) {
+	return {
+		schema: "deep-research-executive-render-v1",
+		digest: `Research report rendering blocked: ${reason}`,
+		status: "blocked",
+		blockers: [reason],
+		completionSummaryMarkdown: "",
+		executiveMarkdown: "",
+		reportMarkdown: "",
+		auditMarkdown: "",
+		wordCount: 0,
+		sourceUrlCount: 0,
+		totalSourceUrlCount: 0,
+		sourceUrls: [],
+		sourceIndex: [],
+		claimSummary: { total: 0, verified: 0, partially_supported: 0, unsupported: 0, conflicting: 0, verification_blocked: 0 },
+		factSlotSummary: { total: 0, filled: 0, partial: 0, missingOrConflicting: 0 },
+		sectionCounts: {},
+		renderWarnings: [],
+		gates: { renderedAllStructuredItems: false, passed: false },
+		auditArtifact: "final-audit.control.json",
+	};
+}
+
 export default async function renderExecutive({
 	sources,
 	options = {},
 	context = {},
 }) {
-	const control =
-		findSource(sources, "final-audit") ??
-		sources?.[Object.keys(sources ?? {})[0]];
-	const auditPacket = findSource(sources, "final-audit-packet");
-	if (!control || typeof control !== "object") {
+	let control;
+	let auditPacket;
+	try {
+		control = findSource(sources, "final-audit");
+		auditPacket = findSource(sources, "final-audit-packet");
+	} catch (error) {
+		return blockedSourceResult(error instanceof Error ? error.message : String(error));
+	}
+	const modernControl = validModernFinalAudit(control);
+	const legacyControl = validLegacyFinalAudit(control);
+	let controlBlocker = "";
+	if (!control || typeof control !== "object")
+		controlBlocker = "missing final-audit control source";
+	else if (!modernControl && !legacyControl)
+		controlBlocker = "malformed final-audit control source";
+	else if (modernControl && !auditPacket)
+		controlBlocker = "missing final-audit-packet control source";
+	else if (modernControl && !validFinalAuditPacket(auditPacket))
+		controlBlocker = "malformed final-audit-packet control source";
+	if (controlBlocker) {
 		return {
 			schema: "deep-research-executive-render-v1",
-			digest:
-				"Research report rendering failed: missing final-audit control source.",
+			digest: `Research report rendering failed: ${controlBlocker}.`,
 			status: "blocked",
-			blockers: ["missing final-audit control source"],
+			blockers: [controlBlocker],
 			completionSummaryMarkdown: "",
 			executiveMarkdown: "",
 			reportMarkdown: "",
@@ -1401,6 +1959,12 @@ export default async function renderExecutive({
 		};
 	}
 
+	const packet = packetOf(auditPacket);
+	const duplicates = packetDuplicateIds(packet, control);
+	if (duplicates.claimIds.length > 0 || duplicates.gapIds.length > 0)
+		return duplicateIdRenderResult(duplicates);
+	const packetReconciliation = reconcileFinalPacket(packet, control);
+
 	const opts = {
 		maxWords: Number.isFinite(Number(options.maxWords))
 			? Math.max(0, Number(options.maxWords))
@@ -1431,7 +1995,8 @@ export default async function renderExecutive({
 	const passed =
 		renderedAllStructuredItems &&
 		!truncatedWithOpenGaps &&
-		!serializationArtifact;
+		!serializationArtifact &&
+		packetReconciliation.passed;
 
 	let finalReportSidecarPath;
 	let legacyExecutiveSidecarPath;
@@ -1463,7 +2028,9 @@ export default async function renderExecutive({
 		digest: truncateWords(stripLeadingHeading(markdown), 45),
 		status: passed ? "passed" : "failed",
 		renderMode: "evidence-backed-report",
-		completionSummaryMarkdown: rendered.completionSummaryMarkdown,
+		completionSummaryMarkdown: passed
+			? rendered.completionSummaryMarkdown
+			: "",
 		executiveMarkdown: markdown,
 		reportMarkdown: markdown,
 		auditMarkdown,
@@ -1479,6 +2046,7 @@ export default async function renderExecutive({
 		factSlotSummary: rendered.factSlotSummary,
 		sectionCounts: rendered.sectionCounts,
 		renderWarnings: rendered.renderWarnings,
+		packetReconciliation,
 		gates: {
 			renderedAllStructuredItems,
 			maxWords: Number.isFinite(opts.maxWords) ? opts.maxWords : null,
@@ -1486,6 +2054,8 @@ export default async function renderExecutive({
 			truncated,
 			truncatedWithOpenGaps,
 			serializationArtifact,
+			packetReconciliationPassed: packetReconciliation.passed,
+			packetReconciliationBlockers: packetReconciliation.blockers,
 			passed,
 		},
 		auditArtifact: auditSidecarPath ? "audit.md" : "final-audit.control.json",

@@ -1,26 +1,29 @@
 {
   "type": "object",
-  "required": [
-    "schema",
-    "digest",
-    "reviewLenses"
-  ],
+  "required": ["schema", "digest", "reviewLenses", "triageSummary", "riskLevel", "skippedLenses"],
   "properties": {
-    "schema": {
-      "type": "string",
-      "minLength": 1
-    },
-    "digest": {
-      "type": "string",
-      "minLength": 1
-    },
+    "schema": { "type": "string", "const": "stage-control-v1" },
+    "digest": { "type": "string", "minLength": 1, "maxLength": 1200 },
     "reviewLenses": {
       "type": "array",
-      "items": {
-        "type": "object"
-      },
       "minItems": 1,
-      "maxItems": 5
-    }
-  }
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "required": ["id", "focus", "whyNeeded", "evidenceToInspect", "severityBias"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1, "maxLength": 80 },
+          "focus": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "whyNeeded": { "type": "string", "minLength": 1, "maxLength": 1000 },
+          "evidenceToInspect": { "type": "array", "minItems": 1, "maxItems": 20, "items": { "type": "string", "minLength": 1, "maxLength": 500 } },
+          "severityBias": { "type": "string", "enum": ["critical", "high", "medium", "low", "info", "unknown"] }
+        },
+        "additionalProperties": false
+      }
+    },
+    "triageSummary": { "type": "string", "minLength": 1, "maxLength": 2000 },
+    "riskLevel": { "type": "string", "enum": ["critical", "high", "medium", "low", "unknown"] },
+    "skippedLenses": { "type": "array", "maxItems": 20, "items": { "type": "string", "minLength": 1, "maxLength": 200 } }
+  },
+  "additionalProperties": false
 }

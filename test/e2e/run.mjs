@@ -1,9 +1,16 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import {
+	accessSync,
+	chmodSync,
+	constants,
+	copyFileSync,
+	mkdirSync,
+	writeFileSync,
+} from "node:fs";
+import { delimiter, dirname, join, relative, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const resultRoot = join(root, ".tmp", "test-results", "e2e");
@@ -13,6 +20,51 @@ const resultDir = join(
 	`run-${stamp}-${randomUUID().slice(0, 8)}`,
 );
 mkdirSync(resultDir, { recursive: true });
+
+const processLog = join(resultDir, "process-tree.jsonl");
+const guardModule = join(root, "test", "e2e", "no-external-actions-guard.mjs");
+const commandShimSource = join(
+	root,
+	"test",
+	"e2e",
+	"no-external-actions-command-shim.mjs",
+);
+const commandShimDir = join(resultDir, "command-shims");
+const isolatedRoot = join(resultDir, "isolated-roots");
+const realNpm = findExecutable("npm", process.env.PATH);
+mkdirSync(commandShimDir, { recursive: true });
+for (const command of ["npm", "npx", "pnpm", "yarn", "bun", "curl", "wget", "pi"]) {
+	const shim = join(commandShimDir, command);
+	copyFileSync(commandShimSource, shim);
+	chmodSync(shim, 0o700);
+}
+const isolatedEnvironment = {
+	HOME: join(isolatedRoot, "home"),
+	PI_CODING_AGENT_DIR: join(isolatedRoot, "pi-agent"),
+	XDG_CONFIG_HOME: join(isolatedRoot, "xdg-config"),
+	XDG_CACHE_HOME: join(isolatedRoot, "xdg-cache"),
+	XDG_DATA_HOME: join(isolatedRoot, "xdg-data"),
+	XDG_STATE_HOME: join(isolatedRoot, "xdg-state"),
+};
+for (const path of Object.values(isolatedEnvironment)) {
+	mkdirSync(path, { recursive: true });
+}
+Object.assign(process.env, isolatedEnvironment, {
+	PATH: `${commandShimDir}${delimiter}${process.env.PATH ?? ""}`,
+	PI_WORKFLOW_E2E_NO_EXTERNAL_ACTIONS: "1",
+	PI_WORKFLOW_E2E_PROCESS_LOG: processLog,
+	PI_WORKFLOW_E2E_REAL_NPM: realNpm,
+	npm_config_offline: "true",
+	npm_config_audit: "false",
+	npm_config_fund: "false",
+	npm_config_update_notifier: "false",
+	npm_config_userconfig: join(isolatedRoot, "npmrc"),
+	NODE_OPTIONS: [
+		process.env.NODE_OPTIONS,
+		`--import=${pathToFileURL(guardModule).href}`,
+	].filter(Boolean).join(" "),
+});
+await import(pathToFileURL(guardModule).href);
 
 const rows = [];
 let failed = false;
@@ -86,26 +138,13 @@ function ensureCompiledArtifacts() {
 }
 
 function assertNoLegacyTerms() {
-	const forbidden = [
-		"rec" + "ipe",
-		"Rec" + "ipe",
-		"rec" + "ipes",
-		"Rec" + "ipes",
-		"/fl" + "ow",
-		"fl" + "ow-rec" + "ipes",
-		"workfl" + "ow-rec" + "ipes",
-		"\\.pi/fl" + "ows",
-	];
-	// Dated handoff records may mention banned terms as policy statements;
-	// they are internal historical notes, not public usage.
+	// The scanner uses distinct clean, forbidden-match, and read/setup-error
+	// statuses. Only its clean exit code is accepted by the E2E gate.
 	const result = run(
-		"grep-forbidden-terms",
-		"bash",
-		[
-			"-lc",
-			`grep -RInE '${forbidden.join("|")}' src test README.md docs workflows package.json 2>/dev/null`,
-		],
-		{ expectedExitCodes: [1] },
+		"forbidden-term-scan",
+		process.execPath,
+		[join(root, "test", "e2e", "forbidden-term-scanner.mjs")],
+		{ expectedExitCodes: [0] },
 	);
 	return result;
 }
@@ -121,6 +160,12 @@ function main() {
 		expectedExitCodes: [1],
 		stderrPattern: /unknown command/i,
 	});
+	run(
+		"packed-web-loader",
+		process.execPath,
+		[join(root, "test", "e2e", "cases", "packed-web-loader.mjs")],
+		{ timeoutMs: 300_000 },
+	);
 	run("cli-inspect-reliability", "bash", [
 		"-lc",
 		`set -euo pipefail
@@ -135,30 +180,6 @@ JSON
         grep -q 'completion: repaired' <<<"$output"
         grep -q 'retries: output=1, launch=0, resumes=1, contextLimitFailures=1' <<<"$output"`,
 	]);
-	run(
-		"consumer-install-cli",
-		"bash",
-		[
-			"-lc",
-			`set -euo pipefail
-        tmp="$(mktemp -d)"
-        trap 'rm -rf "$tmp"' EXIT
-        tarball="$(npm pack --pack-destination "$tmp" --silent | tail -1)"
-        cd "$tmp"
-        npm init -y >/dev/null
-        peer_flag="--leg""acy-peer-deps"
-        npm install "$peer_flag" --ignore-scripts "./$tarball" >/dev/null
-        node --input-type=module -e 'import { createRequire } from "node:module"; import { pathToFileURL } from "node:url"; const require = createRequire(import.meta.resolve("@agwab/pi-workflow/package.json")); const pkg = require("@agwab/pi-subagent/package.json"); const api = await import(pathToFileURL(require.resolve("@agwab/pi-subagent/api")).href); if (!/^0\\.5\\.\\d+$/.test(pkg.version)) throw new Error("unexpected bundled pi-subagent version: " + pkg.version); for (const name of ["createDurableLaunchBarrierV2", "durableLaunchBarrierDigest", "waitForDurableLaunchBarrierV2Ready", "resolveDurableLaunchBarrierV2Release", "revokeDurableLaunchBarrierV2", "readDurableLaunchBarrierV2State", "waitForDurableLaunchBarrierV2Ack"]) if (typeof api[name] !== "function") throw new Error("missing bundled pi-subagent API: " + name);'
-        node ${JSON.stringify(join(root, "test", "e2e", "cases", "packed-durable-barrier-v2.mjs"))} "$tmp/node_modules/@agwab/pi-workflow" "$tmp"
-        node node_modules/@agwab/pi-workflow/src/cli.mjs --help >/dev/null
-        ./node_modules/.bin/pi-workflow --help >/dev/null
-        PI_WORKFLOW_ROLE=supervisor ./node_modules/.bin/pi-workflow supervise --all --poll-ms 250 --max-runtime-ms 1000 >/dev/null
-        node --input-type=module -e "import { parseWorkflow, WORKFLOW_COMMAND } from '@agwab/pi-workflow'; if (typeof parseWorkflow !== 'function' || WORKFLOW_COMMAND !== 'workflow') throw new Error('bad public import')"
-        mkdir -p "$tmp/home"
-        HOME="$tmp/home" node ${JSON.stringify(join(root, "test", "e2e", "cases", "packed-workflows.mjs"))} "$tmp/node_modules/@agwab/pi-workflow" "$tmp"`,
-		],
-		{ timeoutMs: 300_000 },
-	);
 
 	nodeEval(
 		"workflow-registry",
@@ -205,10 +226,10 @@ JSON
     if (publicSpec.schemaVersion !== 1) throw new Error('bad artifact graph schema');
     if (!publicSpec.artifactGraph?.stages?.length) throw new Error('missing artifact graph stages');
     const bundled = [
-      ['spec-review', 'workflows/spec-review/spec.json', 'report'],
-      ['deep-review', 'workflows/deep-review/spec.json', 'report'],
+      ['spec-review', 'workflows/spec-review/spec.json', 'final'],
+      ['deep-review', 'workflows/deep-review/spec.json', 'final'],
       ['deep-research', 'workflows/deep-research/spec.json', 'final'],
-      ['impact-review', 'workflows/impact-review/spec.json', 'impact-analysis.impact-synthesis'],
+      ['impact-review', 'workflows/impact-review/spec.json', 'impact-analysis.final'],
     ];
     for (const [name, specPath, expectedStage] of bundled) {
       const spec = parseWorkflow(JSON.parse(await readFile(specPath, 'utf8')));
@@ -225,36 +246,28 @@ JSON
 	);
 
 	nodeEval(
-		"workflow-web-source-fake-provider",
+		"workflow-web-source-cache",
 		`
     import { mkdtempSync, rmSync, existsSync } from 'node:fs';
     import { tmpdir } from 'node:os';
     import { join } from 'node:path';
     import { registerWorkflowWebSourceExtension } from './.tmp/unit/workflow-web-source-extension.js';
+    import { createWorkflowWebSource, writeWorkflowWebSource } from './.tmp/unit/workflow-web-source.js';
     const cwd = mkdtempSync(join(tmpdir(), 'pi-workflow-web-source-e2e-'));
     try {
       const cacheDir = join(cwd, '.pi', 'workflows', 'workflow_e2e', 'web-source-cache');
+      const config = { runId: 'workflow_e2e', taskId: 'task-1', cacheDir };
+      const source = createWorkflowWebSource({ config, url: 'https://example.test/source', text: 'Exact source quote: alpha beta gamma.', provider: 'provider-free-e2e-fixture' });
+      await writeWorkflowWebSource(config, source);
       const registered = new Map();
-      const appended = [];
-      const pi = { registerTool(tool) { registered.set(tool.name, tool); }, appendEntry(type, data) { appended.push({ type, data }); } };
-      const provider = (providerPi) => providerPi.registerTool({
-        name: 'fetch_content',
-        async execute(_id, params) {
-          providerPi.appendEntry('web-search-results', { urls: [{ url: params.url, content: 'RAW PROVIDER PAYLOAD' }] });
-          return { content: [{ type: 'text', text: 'Exact source quote for ' + params.url + ': alpha beta gamma.' }], details: { successful: 1, finalUrl: params.url } };
-        }
-      });
-      registerWorkflowWebSourceExtension(pi, { schema: 'workflow-web-source-launch-config-v1', runId: 'workflow_e2e', taskId: 'task-1', cwd, cacheDir, provider: { kind: 'extension' }, securityPolicy: { allowPrivateHosts: true }, webSourcePolicy: { previewChars: 32, sourceReadMaxChars: 80, perTaskVisibleCharBudget: 320 } }, provider);
-      if (registered.has('fetch_content')) throw new Error('legacy fetch_content was exposed in normalized-only mode');
-      const fetched = await registered.get('workflow_web_fetch_source').execute('fetch', { url: 'https://example.test/source?token=secret' });
-      const body = fetched.content[0].text;
-      if (!body.includes('sourceRef')) throw new Error('missing sourceRef card');
-      if (body.includes('web-source-cache') || body.includes('secret') || body.includes('RAW PROVIDER PAYLOAD')) throw new Error('model-visible leak in source card');
-      if (appended.length !== 0) throw new Error('provider side effect was forwarded');
-      const sourceRef = JSON.parse(body).card.sourceRef;
-      const read = await registered.get('workflow_web_source_read').execute('read', { sourceRef, query: 'alpha beta gamma' });
+      registerWorkflowWebSourceExtension(
+        { registerTool(tool) { registered.set(tool.name, tool); } },
+        { schema: 'workflow-web-source-launch-config-v1', ...config, cwd, provider: { kind: 'none' }, exposedWorkflowTools: ['workflow_web_source_read'], webSourcePolicy: { sourceReadMaxChars: 80, perTaskVisibleCharBudget: 320 } },
+      );
+      if (registered.size !== 1 || !registered.has('workflow_web_source_read')) throw new Error('unexpected provider-free tool inventory');
+      const read = await registered.get('workflow_web_source_read').execute('read', { sourceRef: source.sourceRef, query: 'alpha beta gamma' });
       if (!read.content[0].text.includes('alpha beta gamma')) throw new Error('source-read quote missing');
-      const batch = await registered.get('workflow_web_source_read').execute('read-batch', { sourceRef, reads: [{ query: 'Exact source quote' }, { claim: 'alpha beta gamma source quote', terms: ['alpha beta', 'gamma'] }, { query: 'missing phrase' }] });
+      const batch = await registered.get('workflow_web_source_read').execute('read-batch', { sourceRef: source.sourceRef, reads: [{ query: 'Exact source quote' }, { claim: 'alpha beta gamma source quote', terms: ['alpha beta', 'gamma'] }, { query: 'missing phrase' }] });
       const batchBody = JSON.parse(batch.content[0].text);
       if (!Array.isArray(batchBody.results) || batchBody.results.length !== 3) throw new Error('batch source-read results missing');
       if (batchBody.results[0].status !== 'ok' || batchBody.results[1].status !== 'candidate' || batchBody.results[1].matchType !== 'terms' || batchBody.results[2].status !== 'not_found') throw new Error('batch source-read statuses wrong');
@@ -286,8 +299,37 @@ JSON
   `,
 	);
 
+	nodeEval(
+		"no-external-actions",
+		`
+    import { readFileSync } from 'node:fs';
+    const lines = readFileSync(${JSON.stringify(processLog)}, 'utf8').trim().split(/\\r?\\n/).filter(Boolean);
+    const events = lines.map((line) => JSON.parse(line));
+    if (!events.some((event) => event.type === 'process-start')) throw new Error('missing process-tree startup instrumentation');
+    if (!events.some((event) => event.type === 'child-process')) throw new Error('missing child-process instrumentation');
+    if (!events.some((event) => event.type === 'command-shim' && event.command === 'npm' && event.classification === 'allowed')) throw new Error('npm pack/run shim was not exercised');
+    const forbidden = events.filter((event) => ['blocked-command', 'network-attempt', 'provider-tool-execution'].includes(event.type));
+    if (forbidden.length > 0) throw new Error('forbidden E2E process activity: ' + JSON.stringify(forbidden));
+    console.log(JSON.stringify({ processEvents: events.length, forbiddenEvents: forbidden.length }));
+  `,
+	);
+
 	writeReport();
 	if (failed) process.exitCode = 1;
+}
+
+function findExecutable(name, pathValue) {
+	for (const directory of String(pathValue ?? "").split(delimiter)) {
+		if (!directory) continue;
+		const candidate = join(directory, name);
+		try {
+			accessSync(candidate, constants.X_OK);
+			return candidate;
+		} catch {
+			// Continue searching PATH.
+		}
+	}
+	throw new Error(`required executable not found on PATH: ${name}`);
 }
 
 function writeReport() {

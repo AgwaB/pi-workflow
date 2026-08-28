@@ -9,10 +9,15 @@
 const SCHEMA = "deep-research-final-audit-packet-v1";
 
 function findSource(sources, stageId) {
-	for (const [specId, source] of Object.entries(sources ?? {})) {
-		if (specId === stageId || specId.startsWith(`${stageId}.`)) return source;
+	const matches = Object.entries(sources ?? {}).filter(
+		([specId]) => specId === stageId || specId.startsWith(`${stageId}.`),
+	);
+	if (matches.length > 1) {
+		throw new Error(
+			`deep-research: ambiguous ${stageId} source (${matches.map(([specId]) => specId).join(", ")})`,
+		);
 	}
-	return null;
+	return matches[0]?.[1] ?? null;
 }
 
 function asArray(value) {
@@ -66,6 +71,7 @@ function compactClaimDigest(claim) {
 		factSlotIds: compactStrings(digest.factSlotIds, 12),
 		sourceRefs: compactStrings(digest.sourceRefs, 8),
 		sourceUrls: compactStrings(digest.sourceUrls, 8),
+		...(digest.verifierOwner ? { verifierOwner: compactOwner(digest.verifierOwner) } : {}),
 		support: stringOf(
 			digest.verdictDigest?.support ??
 				digest.verdictDigest?.summary ??
@@ -169,6 +175,30 @@ function compactVerifierIssue(issue) {
 		reason: stringOf(item.reason),
 		status: stringOf(item.status),
 		nextStep: stringOf(item.nextStep),
+	};
+}
+
+function compactInvalidNormalizedCandidate(row) {
+	const item = asObject(row);
+	return {
+		index: Number.isSafeInteger(Number(item.index)) ? Number(item.index) : undefined,
+		claimId: stringOf(item.claimId),
+		reason: stringOf(item.reason),
+		nextStep: stringOf(item.nextStep),
+	};
+}
+
+function compactOwner(owner) {
+	const item = asObject(owner);
+	return {
+		source: stringOf(item.source),
+		stageId: stringOf(item.stageId),
+		specId: stringOf(item.specId),
+		taskId: stringOf(item.taskId),
+		itemIdentity: stringOf(item.itemIdentity),
+		placeholderSpecId: stringOf(item.placeholderSpecId),
+		...(stringOf(item.batchId) ? { batchId: stringOf(item.batchId) } : {}),
+		status: stringOf(item.status),
 	};
 }
 
@@ -334,7 +364,30 @@ export default async function finalAuditPacket({ sources }) {
 			? sanitizedCandidates
 			: normalizeClaims;
 	const sanitizerDiagnostics = asObject(normalized.sanitizerDiagnostics);
-	const audit = asObject(findSource(sources, "audit-claims"));
+	const auditSource = findSource(sources, "audit-claims");
+	if (!auditSource || typeof auditSource !== "object" || Array.isArray(auditSource)) {
+		throw new Error(
+			"deep-research final-audit-packet: missing audit-claims control source; refusing to emit an empty packet",
+		);
+	}
+	const audit = auditSource;
+	// These fields establish that the audit stage actually ran and produced an
+	// auditable ledger. Do not turn an absent/incomplete audit into a valid empty packet.
+	const incompleteAuditFields = [
+		["claimDigests", Array.isArray(audit.claimDigests)],
+		["gateSummary", audit.gateSummary && typeof audit.gateSummary === "object" && !Array.isArray(audit.gateSummary)],
+	].filter(([, present]) => !present).map(([field]) => field);
+	const hasAuditLedger =
+		Object.keys(audit.gateSummary ?? {}).length > 0 ||
+		(audit.verdictCounts && typeof audit.verdictCounts === "object" && !Array.isArray(audit.verdictCounts) && Object.keys(audit.verdictCounts).length > 0) ||
+		(audit.statusPartitions && typeof audit.statusPartitions === "object" && !Array.isArray(audit.statusPartitions) && Object.keys(audit.statusPartitions).length > 0);
+	if (incompleteAuditFields.length === 0 && audit.claimDigests.length === 0 && !hasAuditLedger)
+		incompleteAuditFields.push("audit ledgers");
+	if (incompleteAuditFields.length > 0) {
+		throw new Error(
+			`deep-research final-audit-packet: incomplete audit-claims control (${incompleteAuditFields.join(", ")}); refusing to emit a valid empty packet`,
+		);
+	}
 	const claimInventory = asObject(normalized.claimInventory);
 	const verificationCandidates = asArray(claimInventory.verificationCandidates);
 	const preservedClaims = asArray(claimInventory.preservedClaims);
@@ -364,6 +417,11 @@ export default async function finalAuditPacket({ sources }) {
 	const duplicateVerifierRows = asArray(audit.duplicateVerifierRows).map(
 		compactDuplicateVerifierRow,
 	);
+	const invalidNormalizedCandidateRows = asArray(
+		audit.invalidNormalizedCandidates,
+	).map(compactInvalidNormalizedCandidate);
+	const verifierOwnerLedger = asArray(audit.verifierOwnerLedger).map(compactOwner);
+	const verifierOwnerIssues = asArray(audit.verifierOwnerIssues).map(compactVerifierIssue);
 	const gateSummary = asObject(audit.gateSummary);
 	const batchAdoptionReadiness = compactBatchAdoptionReadiness(
 		audit.batchAdoptionReadiness,
@@ -391,6 +449,9 @@ export default async function finalAuditPacket({ sources }) {
 		sourceRefJoinFailures: sourceRefJoinFailures.length,
 		invalidVerifierRows: invalidVerifierRows.length,
 		duplicateVerifierRows: duplicateVerifierRows.length,
+		verifierOwnerIssues: verifierOwnerIssues.length,
+		invalidNormalizedCandidateCount: invalidNormalizedCandidateRows.length,
+		invalidNormalizedCandidateRows,
 		missingVerifierResults: Number(gateSummary.missingVerifierResults ?? 0),
 		zeroCandidateFloorBlockers,
 		batchAdoptionStatus: stringOf(batchAdoptionReadiness.status),
@@ -412,6 +473,7 @@ export default async function finalAuditPacket({ sources }) {
 
 	return {
 		schema: SCHEMA,
+		digest: `Prepared final-audit packet with ${claimDigests.length} audited claim(s), ${factSlotCoverage.length} fact slot(s), and ${remainingGaps.length + coverageGaps.length + sourceRefJoinFailures.length} gap row(s).`,
 		packet: {
 			synthesisInput,
 			researchMetadataSeed: {
@@ -452,6 +514,10 @@ export default async function finalAuditPacket({ sources }) {
 				gateSummary,
 				invalidVerifierRows,
 				duplicateVerifierRows,
+				invalidNormalizedCandidateCount: invalidNormalizedCandidateRows.length,
+				invalidNormalizedCandidateRows,
+				verifierOwnerLedger,
+				verifierOwnerIssues,
 				...(stringOf(batchAdoptionReadiness.status)
 					? { batchAdoptionReadiness }
 					: {}),
@@ -472,12 +538,17 @@ export default async function finalAuditPacket({ sources }) {
 			invariantChecks: {
 				candidateCount: verificationCandidates.length,
 				auditedClaimCount: claimDigests.length,
+				candidateIds,
+				auditedClaimIds: claimDigests.map(idOf),
+				statusPartitionIds: asObject(audit.statusPartitions),
 				omittedCandidateIds,
 				droppedSlotIds: asArray(audit.slotCoverageCheck?.droppedSlotIds),
 				sourceRefCoverage,
 				verifierIntegrity: {
 					invalidVerifierRows: invalidVerifierRows.length,
 					duplicateVerifierRows: duplicateVerifierRows.length,
+					invalidNormalizedCandidateCount: invalidNormalizedCandidateRows.length,
+					verifierOwnerIssues: verifierOwnerIssues.length,
 					missingVerifierResults: Number(
 						gateSummary.missingVerifierResults ?? 0,
 					),
@@ -492,6 +563,8 @@ export default async function finalAuditPacket({ sources }) {
 				omittedVerificationCandidateCount: omittedCandidateIds.length,
 				invalidVerifierRowCount: invalidVerifierRows.length,
 				duplicateVerifierRowCount: duplicateVerifierRows.length,
+				invalidNormalizedCandidateCount: invalidNormalizedCandidateRows.length,
+				verifierOwnerIssueCount: verifierOwnerIssues.length,
 			},
 		},
 	};
