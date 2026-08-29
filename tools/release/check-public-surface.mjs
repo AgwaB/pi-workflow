@@ -14,7 +14,7 @@ const tracked = execFileSync("git", ["-C", root, "ls-files", "-z"], {
 
 const violations = [];
 const forbiddenExact = new Set(["AGENTS.md", "CHANGELOG.md"]);
-const forbiddenPrefixes = ["docs/maintenance/", "internal/"];
+const forbiddenPrefixes = ["docs/maintenance/", "docs/releases/", "internal/"];
 
 for (const path of tracked) {
 	if (forbiddenExact.has(path)) {
@@ -56,7 +56,9 @@ for (const path of packageJson.files ?? []) {
 		path === "tools" ||
 		path.startsWith("tools/") ||
 		path === "docs/maintenance" ||
-		path.startsWith("docs/maintenance/")
+		path.startsWith("docs/maintenance/") ||
+		path === "docs/releases" ||
+		path.startsWith("docs/releases/")
 	) {
 		violations.push(`package.json files exposes non-product surface: ${path}`);
 	}
