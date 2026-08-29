@@ -97,16 +97,225 @@ test("WB-009 privileged npm OIDC job is repository-free and verification is subs
 	assert.doesNotMatch(publish, /actions\/checkout|tools\/release|npm audit|npm run|npm (?:ci|install)/);
 	assert.match(publish, /npm publish "\$package_path" --access public --provenance --ignore-scripts --registry https:\/\/registry\.npmjs\.org --tag latest/);
 	assert.match(publish, /npm view "\$NPM_PACKAGE@\$TARGET_VERSION" name version dist --registry https:\/\/registry\.npmjs\.org --tag latest --json/);
+	assert.match(publish, /registry_error_is_permanent\(\)/);
+	assert.match(publish, /registry_error_is_retryable\(\)/);
+	assert.match(publish, /observe_registry_until_visible\(\)/);
+	assert.match(publish, /max_attempts=30/);
+	assert.match(publish, /latest dist-tag has not converged/);
+	assert.match(publish, /observe_registry_until_visible publication-after\.json dist-tags\.json/);
 	assert.match(publish, /publication-before\.json/);
 	assert.match(publish, /publication-after\.json/);
 	assert.match(verification, /actions\/checkout@[0-9a-f]{40}/);
 	assert.match(verification, /id-token: none/);
 	assert.match(verification, /npm audit signatures --json --include-attestations --package-lock-only --registry https:\/\/registry\.npmjs\.org --ignore-scripts/);
+	assert.match(verification, /audit_max_attempts=30/);
+	assert.match(verification, /value\.invalid\.length>0/);
+	assert.match(verification, /value\.missing\.length>0 \|\| value\.verified\.length===0/);
+	assert.match(verification, /audit_error_is_permanent\(\)/);
+	assert.match(verification, /audit_error_is_retryable\(\)/);
+	assert.match(verification, /if \[ "\$audit_retryable" -ne 1 \]/);
+	assert.match(verification, /npm provenance was not visible after \$audit_max_attempts attempts/);
 	assert.match(verification, /node tools\/release\/verify-npm-publication\.mjs/);
 	assert.match(verification, /EXPECTED_REPOSITORY: AgwaB\/pi-workflow/);
 	assert.match(verification, /needs: \[build, source, publish\]/);
 	assert.match(release, /needs: \[build, source, publish, verification\]/);
 	assert.match(release, /id-token: none/);
+});
+
+test("WB-009 registry visibility helper retries transient absence and stale latest but stays bounded", async () => {
+	const publishScript = runScripts().find(({ path, script }) => path.startsWith("jobs.publish.") && path.endsWith(".run") && script.includes("# registry visibility retry start"));
+	assert.ok(publishScript);
+	const start = publishScript.script.indexOf("# registry visibility retry start");
+	const endMarker = "# registry visibility retry end";
+	const end = publishScript.script.indexOf(endMarker, start);
+	assert.ok(start >= 0 && end > start);
+	const helper = publishScript.script.slice(start, end + endMarker.length);
+	assert.doesNotMatch(helper, /\bnpm publish\b/);
+
+	const cwd = await mkdtemp(join(tmpdir(), "pi-wb009-registry-"));
+	try {
+		const fakeNpm = join(cwd, "npm");
+		const fakeSleep = join(cwd, "sleep");
+		const stateFile = join(cwd, "state");
+		const sleepFile = join(cwd, "sleeps");
+		const errorFile = join(cwd, "registry-error");
+		const metadataFile = join(cwd, "metadata.json");
+		const tagsFile = join(cwd, "tags.json");
+		await writeFile(fakeNpm, `#!/usr/bin/env bash
+set -euo pipefail
+count=0
+if [ -f "$STATE_FILE" ]; then count="$(cat "$STATE_FILE")"; fi
+count=$((count + 1))
+printf '%s' "$count" > "$STATE_FILE"
+test "$1" = view
+if [ "$FAKE_MODE" = auth ]; then echo 'npm error code E401' >&2; exit 1; fi
+if [ "$FAKE_MODE" = mixed ]; then printf '%s\n' 'npm error code E401' 'npm error code E500' >&2; exit 1; fi
+if [ "$FAKE_MODE" = missing ]; then echo 'npm error code E404' >&2; exit 1; fi
+if [ "$FAKE_MODE" = rate ] && [ "$count" -eq 1 ]; then echo 'npm error code E429' >&2; exit 1; fi
+if [ "$FAKE_MODE" = server ] && [ "$count" -eq 1 ]; then echo 'npm error code E599' >&2; exit 1; fi
+if [ "$FAKE_MODE" = network ] && [ "$count" -eq 1 ]; then echo 'npm error code ECONNREFUSED' >&2; exit 1; fi
+if [[ " $* " == *" name version dist "* ]]; then
+  if [ "$FAKE_MODE" = eventual ] && [ "$count" -eq 1 ]; then echo 'npm error code E404' >&2; exit 1; fi
+  printf '{"name":"%s","version":"%s","dist":{"integrity":"fixture"}}\\n' "$NPM_PACKAGE" "$TARGET_VERSION"
+  exit 0
+fi
+if [[ " $* " == *" dist-tags "* ]]; then
+  if [ "$FAKE_MODE" = eventual ] && [ "$count" -eq 3 ]; then printf '{"latest":"0.0.0"}\\n'; else printf '{"latest":"%s"}\\n' "$TARGET_VERSION"; fi
+  exit 0
+fi
+echo "unexpected npm command: $*" >&2
+exit 2
+`);
+		await writeFile(fakeSleep, "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' \"$1\" >> \"$SLEEP_FILE\"\n");
+		await chmod(fakeNpm, 0o755);
+		await chmod(fakeSleep, 0o755);
+		const baseEnv = {
+			...process.env,
+			PATH: `${cwd}:${process.env.PATH}`,
+			STATE_FILE: stateFile,
+			SLEEP_FILE: sleepFile,
+			ERROR_FILE: errorFile,
+			METADATA_FILE: metadataFile,
+			TAGS_FILE: tagsFile,
+			NPM_PACKAGE: "@agwab/pi-workflow",
+			TARGET_VERSION: "1.2.3",
+		};
+		const invoke = (body, mode) => spawnSync("bash", ["-c", `set -euo pipefail\n${body}\npublication_error="$ERROR_FILE"\nobserve_registry_until_visible "$METADATA_FILE" "$TAGS_FILE"\n`], {
+			cwd, encoding: "utf8", env: { ...baseEnv, FAKE_MODE: mode },
+		});
+
+		const recovered = invoke(helper, "eventual");
+		assert.equal(recovered.status, 0, recovered.stderr);
+		assert.equal(await readFile(stateFile, "utf8"), "5");
+		assert.deepEqual(JSON.parse(await readFile(metadataFile, "utf8")), { name: "@agwab/pi-workflow", version: "1.2.3", dist: { integrity: "fixture" } });
+		assert.deepEqual(JSON.parse(await readFile(tagsFile, "utf8")), { latest: "1.2.3" });
+		assert.deepEqual((await readFile(sleepFile, "utf8")).trim().split("\n"), ["2", "4"]);
+
+		for (const mode of ["rate", "server", "network"]) {
+			await writeFile(stateFile, "0");
+			const transient = invoke(helper, mode);
+			assert.equal(transient.status, 0, `${mode}: ${transient.stderr}`);
+			assert.equal(await readFile(stateFile, "utf8"), "3");
+		}
+
+		for (const mode of ["auth", "mixed"]) {
+			await writeFile(stateFile, "0");
+			const forbidden = invoke(helper, mode);
+			assert.notEqual(forbidden.status, 0);
+			assert.equal(await readFile(stateFile, "utf8"), "1");
+			assert.match(forbidden.stderr, /E401/);
+		}
+
+		await writeFile(stateFile, "0");
+		const bounded = invoke(helper.replace("max_attempts=30", "max_attempts=3"), "missing");
+		assert.notEqual(bounded.status, 0);
+		assert.equal(await readFile(stateFile, "utf8"), "3");
+		assert.match(bounded.stderr, /after 3 attempts/);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("WB-009 provenance visibility retry accepts delayed evidence, rejects invalid evidence, and stays bounded", async () => {
+	const verificationScript = runScripts().find(({ path, script }) => path.startsWith("jobs.verification.") && path.endsWith(".run") && script.includes("# provenance visibility retry start"));
+	assert.ok(verificationScript);
+	const start = verificationScript.script.indexOf("# provenance visibility retry start");
+	const endMarker = "# provenance visibility retry end";
+	const end = verificationScript.script.indexOf(endMarker, start);
+	assert.ok(start >= 0 && end > start);
+	const retry = verificationScript.script.slice(start, end + endMarker.length);
+	assert.doesNotMatch(retry, /\bnpm publish\b/);
+
+	const cwd = await mkdtemp(join(tmpdir(), "pi-wb009-provenance-"));
+	try {
+		const fakeNpm = join(cwd, "npm");
+		const fakeSleep = join(cwd, "sleep");
+		const stateFile = join(cwd, "state");
+		const sleepFile = join(cwd, "sleeps");
+		const auditFile = join(cwd, "audit.json");
+		const auditTmp = join(cwd, "audit.tmp");
+		const auditError = join(cwd, "audit.error");
+		await writeFile(fakeNpm, `#!/usr/bin/env bash
+set -euo pipefail
+count=0
+if [ -f "$STATE_FILE" ]; then count="$(cat "$STATE_FILE")"; fi
+count=$((count + 1))
+printf '%s' "$count" > "$STATE_FILE"
+test "$1" = audit
+test "$2" = signatures
+case "$FAKE_MODE" in
+  eventual)
+    if [ "$count" -eq 1 ]; then printf '{"invalid":[],"missing":[],"verified":[]}\\n'; else printf '{"invalid":[],"missing":[],"verified":[{}]}\\n'; fi
+    ;;
+  transient)
+    if [ "$count" -eq 1 ]; then echo 'npm error code ECONNREFUSED' >&2; exit 1; else printf '{"invalid":[],"missing":[],"verified":[{}]}\\n'; fi
+    ;;
+  rate)
+    if [ "$count" -eq 1 ]; then echo 'npm error code E429' >&2; exit 1; else printf '{"invalid":[],"missing":[],"verified":[{}]}\\n'; fi
+    ;;
+  server)
+    if [ "$count" -eq 1 ]; then printf '{"error":{"code":"E599"}}\\n'; exit 1; else printf '{"invalid":[],"missing":[],"verified":[{}]}\\n'; fi
+    ;;
+  invalid) printf '{"invalid":[{}],"missing":[],"verified":[]}\\n' ;;
+  auth) echo 'npm error code E403' >&2; exit 1 ;;
+  integrity) echo 'npm error code EINTEGRITY' >&2; exit 1 ;;
+  mixed) printf '{"invalid":[],"missing":[],"verified":[]}\\n'; printf '%s\\n' 'npm error code E401' 'npm error code E500' >&2; exit 1 ;;
+  missing) printf '{"invalid":[],"missing":[{}],"verified":[]}\\n' ;;
+  *) exit 2 ;;
+esac
+`);
+		await writeFile(fakeSleep, "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' \"$1\" >> \"$SLEEP_FILE\"\n");
+		await chmod(fakeNpm, 0o755);
+		await chmod(fakeSleep, 0o755);
+		const baseEnv = {
+			...process.env,
+			PATH: `${cwd}:${process.env.PATH}`,
+			STATE_FILE: stateFile,
+			SLEEP_FILE: sleepFile,
+			GATE_DIR: cwd,
+			AUDIT_JSON: auditFile,
+			AUDIT_TMP: auditTmp,
+			AUDIT_ERROR: auditError,
+		};
+		const invoke = (body, mode) => spawnSync("bash", ["-c", `set -euo pipefail\ngate_dir="$GATE_DIR"\naudit_json="$AUDIT_JSON"\naudit_tmp="$AUDIT_TMP"\naudit_error="$AUDIT_ERROR"\n${body}\n`], {
+			cwd, encoding: "utf8", env: { ...baseEnv, FAKE_MODE: mode },
+		});
+
+		const recovered = invoke(retry, "eventual");
+		assert.equal(recovered.status, 0, recovered.stderr);
+		assert.equal(await readFile(stateFile, "utf8"), "2");
+		assert.deepEqual(JSON.parse(await readFile(auditFile, "utf8")), { invalid: [], missing: [], verified: [{}] });
+		assert.deepEqual((await readFile(sleepFile, "utf8")).trim().split("\n"), ["2"]);
+
+		for (const mode of ["transient", "rate", "server"]) {
+			await writeFile(stateFile, "0");
+			const transient = invoke(retry, mode);
+			assert.equal(transient.status, 0, `${mode}: ${transient.stderr}`);
+			assert.equal(await readFile(stateFile, "utf8"), "2");
+		}
+
+		await writeFile(stateFile, "0");
+		const invalid = invoke(retry, "invalid");
+		assert.notEqual(invalid.status, 0);
+		assert.equal(await readFile(stateFile, "utf8"), "1");
+		assert.match(invalid.stderr, /invalid evidence/);
+
+		for (const mode of ["auth", "integrity", "mixed"]) {
+			await writeFile(stateFile, "0");
+			const permanent = invoke(retry, mode);
+			assert.notEqual(permanent.status, 0);
+			assert.equal(await readFile(stateFile, "utf8"), "1");
+			assert.match(permanent.stderr, /permanent error/);
+		}
+
+		await writeFile(stateFile, "0");
+		const bounded = invoke(retry.replace("audit_max_attempts=30", "audit_max_attempts=3"), "missing");
+		assert.notEqual(bounded.status, 0);
+		assert.equal(await readFile(stateFile, "utf8"), "3");
+		assert.match(bounded.stderr, /not visible after 3 attempts/);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
 });
 
 test("WB-009 exact graph checker rejects privilege and producer drift", () => {
@@ -115,6 +324,8 @@ test("WB-009 exact graph checker rejects privilege and producer drift", () => {
 	const report = JSON.parse(result.stdout);
 	assert.equal(report.privilegeSeparated, true);
 	assert.equal(report.cryptographicGate, "npm-audit-signatures");
+	assert.equal(report.registryVisibilityRetry, true);
+	assert.equal(report.provenanceVisibilityRetry, true);
 	assert.ok(report.negativeFixtures >= 10);
 });
 

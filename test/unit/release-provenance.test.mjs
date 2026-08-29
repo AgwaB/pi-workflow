@@ -57,7 +57,7 @@ function audit(digest, overrides = {}) {
 	return { invalid: [], missing: [], verified: [Object.assign(record, overrides)] };
 }
 
-async function runFixture(mutate, after = "valid", { fetchImpl } = {}) {
+async function runFixture(mutate, after = "valid", { fetchImpl, verifierOptions = {} } = {}) {
 	const cwd = await mkdtemp(join(tmpdir(), "pi-release-provenance-"));
 	try {
 		const bytes = Buffer.from("offline release artifact fixture\n");
@@ -78,7 +78,7 @@ async function runFixture(mutate, after = "valid", { fetchImpl } = {}) {
 		};
 		const env = { NPM_PACKAGE: name, TARGET_VERSION: version, EXPECTED_REPOSITORY: "AgwaB/pi-workflow", EXPECTED_WORKFLOW_REF: "refs/heads/main", EXPECTED_WORKFLOW_PATH: ".github/workflows/publish.yml", RELEASE_COMMIT: commit };
 		if (fetchImpl) {
-			const output = await verifyNpmPublication({ ...paths, env, fetchImpl });
+			const output = await verifyNpmPublication({ ...paths, env, fetchImpl, ...verifierOptions });
 			return { status: 0, output };
 		}
 		return spawnSync(process.execPath, [verifier, paths.packagePath, paths.beforePath, paths.afterPath, paths.tagsPath, paths.auditPath], {
@@ -104,10 +104,78 @@ test("valid provenance verification has a deterministic fetch seam and reports s
 	assert.equal(calls.length, 1);
 	assert.match(calls[0].url, /registry\.npmjs\.org/);
 	assert.equal(calls[0].options.redirect, "error");
+	let tamperedCalls = 0;
 	await assert.rejects(
-		runFixture(() => {}, "valid", { fetchImpl: async () => ({ ok: true, arrayBuffer: async () => Buffer.from("tampered\\n") }) }),
+		runFixture(() => {}, "valid", {
+			fetchImpl: async () => {
+				tamperedCalls += 1;
+				return { ok: true, status: 200, arrayBuffer: async () => tamperedCalls === 1 ? Buffer.from("tampered\\n") : artifactBytes };
+			},
+			verifierOptions: { tarballFetchAttempts: 2, tarballFetchDelayMs: 0, sleepImpl: async () => {} },
+		}),
 		/registry tarball bytes fail integrity verification/,
 	);
+	assert.equal(tamperedCalls, 1);
+});
+
+test("transient registry tarball responses retry within a bound and permanent responses fail immediately", async () => {
+	const artifactBytes = Buffer.from("offline release artifact fixture\n");
+	const waits = [];
+	let calls = 0;
+	const result = await runFixture(() => {}, "valid", {
+		fetchImpl: async () => {
+			calls += 1;
+			if (calls === 1) return { ok: true, status: 200, arrayBuffer: async () => { throw new TypeError("temporary body transport failure"); } };
+			if (calls === 2) return { ok: false, status: 429 };
+			if (calls === 3) return { ok: false, status: 599 };
+			return { ok: true, status: 200, arrayBuffer: async () => artifactBytes };
+		},
+		verifierOptions: {
+			tarballFetchAttempts: 4,
+			tarballFetchDelayMs: 7,
+			sleepImpl: async (delayMs) => { waits.push(delayMs); },
+		},
+	});
+	assert.equal(result.status, 0);
+	assert.equal(calls, 4);
+	assert.deepEqual(waits, [7, 7, 7]);
+
+	let forbiddenCalls = 0;
+	await assert.rejects(
+		runFixture(() => {}, "valid", {
+			fetchImpl: async () => { forbiddenCalls += 1; return { ok: false, status: 403 }; },
+			verifierOptions: { tarballFetchAttempts: 3, tarballFetchDelayMs: 0, sleepImpl: async () => {} },
+		}),
+		/HTTP 403/,
+	);
+	assert.equal(forbiddenCalls, 1);
+
+	let exhaustedCalls = 0;
+	await assert.rejects(
+		runFixture(() => {}, "valid", {
+			fetchImpl: async () => { exhaustedCalls += 1; return { ok: false, status: 404 }; },
+			verifierOptions: { tarballFetchAttempts: 2, tarballFetchDelayMs: 0, sleepImpl: async () => {} },
+		}),
+		/HTTP 404/,
+	);
+	assert.equal(exhaustedCalls, 2);
+
+	let timeoutCalls = 0;
+	await assert.rejects(
+		runFixture(() => {}, "valid", {
+			fetchImpl: async (_url, { signal }) => {
+				timeoutCalls += 1;
+				return {
+					ok: true,
+					status: 200,
+					arrayBuffer: async () => new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true })),
+				};
+			},
+			verifierOptions: { tarballFetchAttempts: 2, tarballFetchDelayMs: 0, tarballFetchTimeoutMs: 1, sleepImpl: async () => {} },
+		}),
+		/body read failed/,
+	);
+	assert.equal(timeoutCalls, 2);
 });
 
 test("producer envelopes are closed and single-field npm view drift is rejected", async () => {
