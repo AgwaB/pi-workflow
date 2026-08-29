@@ -352,6 +352,78 @@ jobs:
             done <<< "$active_ruleset_ids"
             test "$matched_ruleset" = "1"
           }
+          # registry visibility retry start
+          registry_error_is_permanent() {
+            grep -Eiq 'npm (ERR!|error) code (E401|E403|EINTEGRITY)|npm (ERR!|error) (401|403)([^0-9]|$)' "$1"
+          }
+          registry_error_is_retryable() {
+            grep -Eiq 'npm (ERR!|error) code (E404|E408|E425|E429|E5[0-9][0-9]|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|ENOTFOUND|EPIPE)|npm (ERR!|error) (404|408|425|429|5[0-9][0-9])([^0-9]|$)' "$1"
+          }
+          observe_registry_until_visible() {
+            metadata_output="$1"
+            tags_output="$2"
+            metadata_tmp="${metadata_output}.tmp"
+            tags_tmp="${tags_output}.tmp"
+            max_attempts=30
+            attempt=1
+            last_reason="registry state is not visible"
+            while [ "$attempt" -le "$max_attempts" ]; do
+              rm -f "$metadata_tmp" "$tags_tmp"
+              : > "$publication_error"
+              set +e
+              npm view "$NPM_PACKAGE@$TARGET_VERSION" name version dist --registry https://registry.npmjs.org --tag latest --json > "$metadata_tmp" 2> "$publication_error"
+              metadata_status=$?
+              set -e
+              if [ "$metadata_status" -ne 0 ]; then
+                if registry_error_is_permanent "$publication_error" || ! registry_error_is_retryable "$publication_error"; then
+                  cat "$publication_error" >&2
+                  return "$metadata_status"
+                fi
+                last_reason="package metadata is not visible"
+              else
+                if ! node -e 'const fs=require("node:fs"); const value=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); const keys=Object.keys(value).sort(); if (JSON.stringify(keys)!=="[\"dist\",\"name\",\"version\"]" || value.name!==process.argv[2] || value.version!==process.argv[3] || !value.dist || typeof value.dist!=="object" || Array.isArray(value.dist)) throw new Error("registry package metadata identity is malformed");' "$metadata_tmp" "$NPM_PACKAGE" "$TARGET_VERSION"; then
+                  echo "registry returned a conflicting package identity" >&2
+                  return 1
+                fi
+                : > "$publication_error"
+                set +e
+                npm view "$NPM_PACKAGE" dist-tags --registry https://registry.npmjs.org --tag latest --json > "$tags_tmp" 2> "$publication_error"
+                tags_status=$?
+                set -e
+                if [ "$tags_status" -ne 0 ]; then
+                  if registry_error_is_permanent "$publication_error" || ! registry_error_is_retryable "$publication_error"; then
+                    cat "$publication_error" >&2
+                    return "$tags_status"
+                  fi
+                  last_reason="dist-tags are not visible"
+                else
+                  set +e
+                  node -e 'const fs=require("node:fs"); const value=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); const keys=Object.keys(value); if (keys.length!==1 || keys[0]!=="latest" || typeof value.latest!=="string") throw new Error("registry dist-tags identity is malformed"); process.exit(value.latest===process.argv[2] ? 0 : 75);' "$tags_tmp" "$TARGET_VERSION"
+                  tags_state=$?
+                  set -e
+                  case "$tags_state" in
+                    0)
+                      mv "$metadata_tmp" "$metadata_output"
+                      mv "$tags_tmp" "$tags_output"
+                      return 0
+                      ;;
+                    75) last_reason="latest dist-tag has not converged" ;;
+                    *) echo "registry returned malformed dist-tags" >&2; return "$tags_state" ;;
+                  esac
+                fi
+              fi
+              if [ "$attempt" -eq "$max_attempts" ]; then
+                test ! -s "$publication_error" || cat "$publication_error" >&2
+                echo "$last_reason after $max_attempts attempts" >&2
+                return 1
+              fi
+              delay_seconds=$((attempt < 6 ? attempt * 2 : 10))
+              echo "$last_reason (attempt $attempt/$max_attempts); retrying in ${delay_seconds}s" >&2
+              sleep "$delay_seconds"
+              attempt=$((attempt + 1))
+            done
+          }
+          # registry visibility retry end
           test ! -e .npmrc
           expected_file="agwab-pi-workflow-$TARGET_VERSION.tgz"
           package_path="$PWD/release-artifact/$expected_file"
@@ -368,7 +440,7 @@ jobs:
 
           publication_before=publication-before.json
           publication_error="$(mktemp)"
-          cleanup_publication() { rm -f "$publication_error"; }
+          cleanup_publication() { rm -f "$publication_error" publication-after.json.tmp dist-tags.json.tmp; }
           trap cleanup_publication EXIT
           set +e
           npm view "$NPM_PACKAGE@$TARGET_VERSION" name version dist --registry https://registry.npmjs.org --tag latest --json > "$publication_before" 2> "$publication_error"
@@ -383,8 +455,7 @@ jobs:
             verify_release_tag
             npm publish "$package_path" --access public --provenance --ignore-scripts --registry https://registry.npmjs.org --tag latest
           fi
-          npm view "$NPM_PACKAGE@$TARGET_VERSION" name version dist --registry https://registry.npmjs.org --tag latest --json > publication-after.json
-          npm view "$NPM_PACKAGE" dist-tags --registry https://registry.npmjs.org --tag latest --json > dist-tags.json
+          observe_registry_until_visible publication-after.json dist-tags.json
 
       - name: Upload registry evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -484,7 +555,9 @@ jobs:
 
           gate_dir="$(mktemp -d)"
           audit_json="$PWD/npm-audit-signatures.json"
-          cleanup_gate() { rm -rf "$gate_dir" "$audit_json"; }
+          audit_tmp="$(mktemp)"
+          audit_error="$(mktemp)"
+          cleanup_gate() { rm -rf "$gate_dir" "$audit_json" "$audit_tmp" "$audit_error"; }
           trap cleanup_gate EXIT
           mkdir -p "$gate_dir/node_modules/@agwab"
           tar -xzf "$package_path" -C "$gate_dir/node_modules/@agwab"
@@ -508,7 +581,70 @@ jobs:
           writeFileSync(`${dir}/package.json`, JSON.stringify({ name: lock.name, version: lock.version, dependencies: { '@agwab/pi-workflow': version } }));
           writeFileSync(`${dir}/package-lock.json`, JSON.stringify(lock));
           NODE
-          (cd "$gate_dir" && npm audit signatures --json --include-attestations --package-lock-only --registry https://registry.npmjs.org --ignore-scripts > "$audit_json")
+          # provenance visibility retry start
+          audit_error_is_permanent() {
+            grep -Eiq 'npm (ERR!|error) code (E401|E403|EINTEGRITY)|npm (ERR!|error) (401|403)([^0-9]|$)|"(code|errno)"[[:space:]]*:[[:space:]]*"(E401|E403|EINTEGRITY)"|"(status|statusCode)"[[:space:]]*:[[:space:]]*(401|403)([^0-9]|$)' "$audit_tmp" "$audit_error"
+          }
+          audit_error_is_retryable() {
+            grep -Eiq 'npm (ERR!|error) code (E404|E408|E425|E429|E5[0-9][0-9]|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|ENOTFOUND|EPIPE)|npm (ERR!|error) (404|408|425|429|5[0-9][0-9])([^0-9]|$)|"(code|errno)"[[:space:]]*:[[:space:]]*"(E404|E408|E425|E429|E5[0-9][0-9]|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|ENOTFOUND|EPIPE)"|"(status|statusCode)"[[:space:]]*:[[:space:]]*(404|408|425|429|5[0-9][0-9])([^0-9]|$)' "$audit_tmp" "$audit_error"
+          }
+          audit_max_attempts=30
+          audit_attempt=1
+          while [ "$audit_attempt" -le "$audit_max_attempts" ]; do
+            : > "$audit_tmp"
+            : > "$audit_error"
+            set +e
+            (cd "$gate_dir" && npm audit signatures --json --include-attestations --package-lock-only --registry https://registry.npmjs.org --ignore-scripts > "$audit_tmp" 2> "$audit_error")
+            audit_status=$?
+            set -e
+            audit_state="$(node -e 'const fs=require("node:fs"); try { const value=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); if (!value || typeof value!=="object" || Array.isArray(value) || !Array.isArray(value.invalid) || !Array.isArray(value.missing) || !Array.isArray(value.verified)) process.stdout.write("malformed"); else if (value.invalid.length>0) process.stdout.write("invalid"); else if (value.missing.length>0 || value.verified.length===0) process.stdout.write("pending"); else process.stdout.write("ready"); } catch { process.stdout.write("malformed"); }' "$audit_tmp")"
+            if [ "$audit_status" -eq 0 ] && [ "$audit_state" = "ready" ]; then
+              mv "$audit_tmp" "$audit_json"
+              break
+            fi
+            if [ "$audit_state" = "invalid" ]; then
+              cat "$audit_tmp" >&2
+              cat "$audit_error" >&2
+              echo "npm provenance verification returned invalid evidence" >&2
+              test "$audit_status" -ne 0 || audit_status=1
+              exit "$audit_status"
+            fi
+            if audit_error_is_permanent; then
+              cat "$audit_tmp" >&2
+              cat "$audit_error" >&2
+              echo "npm provenance verification returned a permanent error" >&2
+              test "$audit_status" -ne 0 || audit_status=1
+              exit "$audit_status"
+            fi
+            if [ "$audit_status" -eq 0 ] && [ "$audit_state" = "malformed" ]; then
+              cat "$audit_tmp" >&2
+              echo "npm provenance verification returned malformed success evidence" >&2
+              exit 1
+            fi
+            audit_retryable=0
+            if [ "$audit_state" = "pending" ] || audit_error_is_retryable; then
+              audit_retryable=1
+            fi
+            if [ "$audit_retryable" -ne 1 ]; then
+              cat "$audit_tmp" >&2
+              cat "$audit_error" >&2
+              echo "npm provenance verification returned a non-retryable result" >&2
+              test "$audit_status" -ne 0 || audit_status=1
+              exit "$audit_status"
+            fi
+            if [ "$audit_attempt" -eq "$audit_max_attempts" ]; then
+              cat "$audit_tmp" >&2
+              cat "$audit_error" >&2
+              echo "npm provenance was not visible after $audit_max_attempts attempts" >&2
+              test "$audit_status" -ne 0 || audit_status=1
+              exit "$audit_status"
+            fi
+            audit_delay_seconds=$((audit_attempt < 6 ? audit_attempt * 2 : 10))
+            echo "npm provenance is not yet visible (attempt $audit_attempt/$audit_max_attempts, state $audit_state); retrying in ${audit_delay_seconds}s" >&2
+            sleep "$audit_delay_seconds"
+            audit_attempt=$((audit_attempt + 1))
+          done
+          # provenance visibility retry end
           EXPECTED_REPOSITORY="$EXPECTED_REPOSITORY" EXPECTED_WORKFLOW_REF="$EXPECTED_WORKFLOW_REF" EXPECTED_WORKFLOW_PATH="$EXPECTED_WORKFLOW_PATH" NPM_PACKAGE="$NPM_PACKAGE" TARGET_VERSION="$TARGET_VERSION" RELEASE_COMMIT="$RELEASE_COMMIT" node tools/release/verify-npm-publication.mjs "$package_path" publication-evidence/publication-before.json publication-evidence/publication-after.json publication-evidence/dist-tags.json "$audit_json"
 
   release:

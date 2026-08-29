@@ -26,8 +26,8 @@ const runDigests = {
 	"build:Release validation in read-only privilege context": "2dcf0cae26e5fbb692c48fcf6d85a57e02342aeb1e23fdb76311b35245c7c01e",
 	"build:Create exact package and source-tree metadata": "62304bd3eccd8703a5af4380b5c5a556e6156acf16f40db4da61dec51ed301ca",
 	"source:Verify promoted release source identity": "b3f7b5a016768071b5bec9b71e0717c834ceb06ea8c5c186caf5222ad38d46b0",
-	"publish:Publish exact promoted tarball and record registry envelopes": "cc2ccfacf68ed453bd56eecf37aa7c094d885de6c6cf489850bee9919635c8b8",
-	"verification:Cryptographically gate and verify exact npm provenance": "66642261fb2213892b3365ebd99f0dc858f0d962cfb8c8e4a2f96b830a5dafb3",
+	"publish:Publish exact promoted tarball and record registry envelopes": "be9aec1a38d7566e6a88068a19a40ae92d643c5ce9662f5d3ecc3364849c4874",
+	"verification:Cryptographically gate and verify exact npm provenance": "ebb058402cac8e5ab8dd5d53ec38ab63cb88f7362ee4a78707f7b0be563df346",
 	"release:Create GitHub release for the exact published commit": "1c548669986532b1366629fbc7c276231bcd12094bda315768938cd3e08ba175",
 };
 
@@ -73,6 +73,17 @@ const negativeFixtures = [
 	["wrong registry", (c) => { c.jobs.publish.steps[3].run = c.jobs.publish.steps[3].run.replaceAll("https://registry.npmjs.org", "https://evil.example"); }],
 	["wrong npm tag", (c) => { c.jobs.publish.steps[3].run = c.jobs.publish.steps[3].run.replaceAll("--tag latest", "--tag next"); }],
 	["single-field npm view drift", (c) => { c.jobs.publish.steps[3].run = c.jobs.publish.steps[3].run.replace("name version dist", "dist"); }],
+	["missing registry visibility reconciliation", (c) => { c.jobs.publish.steps[3].run = c.jobs.publish.steps[3].run.replace("observe_registry_until_visible publication-after.json dist-tags.json", "true # registry visibility reconciliation removed"); }],
+	["unbounded registry visibility reconciliation", (c) => { c.jobs.publish.steps[3].run = c.jobs.publish.steps[3].run.replace("max_attempts=30", "max_attempts=0"); }],
+	["registry visibility retry accepts auth failures", (c) => { c.jobs.publish.steps[3].run = c.jobs.publish.steps[3].run.replace("E404|E408", "E401|E408"); }],
+	["registry permanent-error precedence is missing", (c) => { c.jobs.publish.steps[3].run = c.jobs.publish.steps[3].run.replace('registry_error_is_permanent "$publication_error" || ', ""); }],
+	["missing provenance visibility retry", (c) => { c.jobs.verification.steps[5].run = c.jobs.verification.steps[5].run.replace("audit_max_attempts=30", "audit_max_attempts=1"); }],
+	["provenance retry accepts empty verified evidence", (c) => { c.jobs.verification.steps[5].run = c.jobs.verification.steps[5].run.replace("value.verified.length===0", "false"); }],
+	["provenance retry accepts invalid evidence", (c) => { c.jobs.verification.steps[5].run = c.jobs.verification.steps[5].run.replace('if [ "$audit_state" = "invalid" ]', "if false"); }],
+	["provenance retry accepts integrity errors", (c) => { c.jobs.verification.steps[5].run = c.jobs.verification.steps[5].run.replace("E404|E408", "EINTEGRITY|E408"); }],
+	["provenance permanent-error precedence is missing", (c) => { c.jobs.verification.steps[5].run = c.jobs.verification.steps[5].run.replace("if audit_error_is_permanent; then", "if false; then"); }],
+	["provenance retry loses its allowlist gate", (c) => { c.jobs.verification.steps[5].run = c.jobs.verification.steps[5].run.replace('if [ "$audit_retryable" -ne 1 ]', "if false"); }],
+	["provenance retry can exit zero on failure", (c) => { c.jobs.verification.steps[5].run = c.jobs.verification.steps[5].run.replaceAll('test "$audit_status" -ne 0 || audit_status=1', "true # nonzero fallback removed"); }],
 	["missing cryptographic gate", (c) => { c.jobs.verification.steps[5].run = c.jobs.verification.steps[5].run.replace("npm audit signatures", "npm audit"); }],
 	["missing exact verifier", (c) => { c.jobs.verification.steps[5].run = c.jobs.verification.steps[5].run.replace("tools/release/verify-npm-publication.mjs", "true"); }],
 	["missing provenance publish flag", (c) => { c.jobs.publish.steps[3].run = c.jobs.publish.steps[3].run.replace("--provenance", ""); }],
@@ -103,6 +114,8 @@ console.log(JSON.stringify({
 	publishAfterRemoteIdentity: true,
 	privilegeSeparated: true,
 	cryptographicGate: "npm-audit-signatures",
+	registryVisibilityRetry: true,
+	provenanceVisibilityRetry: true,
 }, null, 2));
 
 function validateWorkflow(candidate) {
@@ -201,6 +214,22 @@ function validateWorkflow(candidate) {
 	}
 	assert.match(publishRun, /publication-before\.json/);
 	assert.match(publishRun, /publication-after\.json/);
+	const registryPermanent = normalizedFunction(publishRun, "registry_error_is_permanent");
+	const registryRetry = normalizedFunction(publishRun, "registry_error_is_retryable");
+	const registryObservation = normalizedFunction(publishRun, "observe_registry_until_visible");
+	assert.match(registryPermanent, /E401\|E403\|EINTEGRITY/);
+	assert.match(registryRetry, /E404\|E408\|E425\|E429\|E5\[0-9\]\[0-9\]/);
+	assert.match(registryRetry, /ECONNRESET\|ECONNREFUSED\|ETIMEDOUT\|EAI_AGAIN\|ENETUNREACH\|EHOSTUNREACH\|ENOTFOUND\|EPIPE/);
+	assert.doesNotMatch(registryRetry, /E401|E403|EINTEGRITY/, "authorization and integrity failures must never be retried");
+	assert.match(registryObservation, /max_attempts=30/);
+	assert.match(registryObservation, /while \[ "\$attempt" -le "\$max_attempts" \]/);
+	assert.equal((registryObservation.match(/registry_error_is_permanent "\$publication_error" \|\| ! registry_error_is_retryable "\$publication_error"/g) ?? []).length, 2);
+	assert.match(registryObservation, /latest dist-tag has not converged/);
+	assert.match(registryObservation, /return "\$metadata_status"/);
+	assert.match(registryObservation, /sleep "\$delay_seconds"/);
+	assert.match(registryObservation, /mv "\$metadata_tmp" "\$metadata_output"/);
+	assert.match(publishRun, /^observe_registry_until_visible publication-after\.json dist-tags\.json$/m);
+	assert.equal((publishRun.match(/^observe_registry_until_visible publication-after\.json dist-tags\.json$/gm) ?? []).length, 1);
 	assert.equal(publishStep.env.RELEASE_COMMIT, "${{ needs.source.outputs.release-commit }}");
 	assert.equal(publishStep.env.GH_TOKEN, "${{ github.token }}");
 	assert.match(publishRun, /gh api --method GET "repos\/\$GITHUB_REPOSITORY\/git\/ref\/tags\/\$tag_name"/);
@@ -238,6 +267,25 @@ function validateWorkflow(candidate) {
 	assert.equal((publishRun.match(/^[ \t]*verify_release_tag$/gm) ?? []).length, 1, "publish tag must be checked exactly before npm publish");
 	assert.doesNotMatch(publishRun, /verify-npm-publication|npm audit signatures|git\s+(?:push|commit|tag)|npm (?:ci|install|run)/);
 	assert.match(verifyRun, /npm audit signatures --json --include-attestations --package-lock-only --registry https:\/\/registry\.npmjs\.org --ignore-scripts/);
+	assert.match(verifyRun, /audit_max_attempts=30/);
+	assert.match(verifyRun, /while \[ "\$audit_attempt" -le "\$audit_max_attempts" \]/);
+	assert.match(verifyRun, /value\.invalid\.length>0/);
+	assert.match(verifyRun, /value\.missing\.length>0 \|\| value\.verified\.length===0/);
+	const auditPermanent = normalizedFunction(verifyRun, "audit_error_is_permanent");
+	const auditRetry = normalizedFunction(verifyRun, "audit_error_is_retryable");
+	assert.match(auditPermanent, /E401\|E403\|EINTEGRITY/);
+	assert.match(auditRetry, /E404\|E408\|E425\|E429\|E5\[0-9\]\[0-9\]/);
+	assert.match(auditRetry, /ECONNRESET\|ECONNREFUSED\|ETIMEDOUT\|EAI_AGAIN\|ENETUNREACH\|EHOSTUNREACH\|ENOTFOUND\|EPIPE/);
+	assert.doesNotMatch(auditRetry, /E401|E403|EINTEGRITY/, "permanent provenance failures must not be retried");
+	assert.match(verifyRun, /"\$audit_state" = "invalid"/);
+	const auditPermanentOffset = verifyRun.indexOf("if audit_error_is_permanent; then");
+	const auditRetryOffset = verifyRun.indexOf('if [ "$audit_state" = "pending" ] || audit_error_is_retryable; then');
+	assert.ok(auditPermanentOffset >= 0 && auditPermanentOffset < auditRetryOffset, "permanent provenance errors must take precedence over retryable signals");
+	assert.match(verifyRun, /"\$audit_state" = "pending" \] \|\| audit_error_is_retryable/);
+	assert.match(verifyRun, /if \[ "\$audit_retryable" -ne 1 \]/);
+	assert.match(verifyRun, /npm provenance was not visible after \$audit_max_attempts attempts/);
+	assert.equal((verifyRun.match(/test "\$audit_status" -ne 0 \|\| audit_status=1/g) ?? []).length, 4);
+	assert.match(verifyRun, /sleep "\$audit_delay_seconds"/);
 	assert.match(verifyRun, /tools\/release\/verify-npm-publication\.mjs/);
 	assert.match(verifyRun, /EXPECTED_REPOSITORY/);
 	assert.doesNotMatch(publishRun, /checkout|tools\/release|npm audit|npm run|npm (?:ci|install)/i);

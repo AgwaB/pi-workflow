@@ -12,6 +12,10 @@ export async function verifyNpmPublication({
 	auditPath,
 	env = process.env,
 	fetchImpl = globalThis.fetch,
+	tarballFetchAttempts = 12,
+	tarballFetchDelayMs = 5_000,
+	tarballFetchTimeoutMs = 30_000,
+	sleepImpl = sleep,
 } = {}) {
 	if (!packagePath || !beforePath || !afterPath || !tagsPath || !auditPath) {
 		throw new Error(
@@ -70,13 +74,32 @@ export async function verifyNpmPublication({
 		expectedWorkflowPath,
 	);
 
-	const tarballUrl = new URL(publication.dist.tarball);
+	let tarballUrl;
+	try {
+		tarballUrl = new URL(publication.dist.tarball);
+	} catch (error) {
+		throw new Error("published tarball URL is invalid", { cause: error });
+	}
 	assert.equal(tarballUrl.protocol, "https:", "published tarball is not HTTPS");
 	assert.equal(tarballUrl.origin, registry, "published tarball is not from the approved registry");
 	if (typeof fetchImpl !== "function") throw new Error("publication tarball fetch implementation is unavailable");
-	const response = await fetchImpl(tarballUrl, { redirect: "error" });
-	if (!response.ok) throw new Error(`published tarball fetch failed: HTTP ${response.status}`);
-	const remoteBytes = Buffer.from(await response.arrayBuffer());
+	if (!Number.isSafeInteger(tarballFetchAttempts) || tarballFetchAttempts < 1 || tarballFetchAttempts > 30) {
+		throw new Error("publication tarball fetch attempts must be an integer from 1 through 30");
+	}
+	if (!Number.isSafeInteger(tarballFetchDelayMs) || tarballFetchDelayMs < 0 || tarballFetchDelayMs > 60_000) {
+		throw new Error("publication tarball fetch delay must be an integer from 0 through 60000 milliseconds");
+	}
+	if (!Number.isSafeInteger(tarballFetchTimeoutMs) || tarballFetchTimeoutMs < 1 || tarballFetchTimeoutMs > 120_000) {
+		throw new Error("publication tarball fetch timeout must be an integer from 1 through 120000 milliseconds");
+	}
+	if (typeof sleepImpl !== "function") throw new Error("publication tarball retry sleeper is unavailable");
+	const remoteBytes = await fetchPublishedTarballBytes(tarballUrl, {
+		fetchImpl,
+		attempts: tarballFetchAttempts,
+		delayMs: tarballFetchDelayMs,
+		timeoutMs: tarballFetchTimeoutMs,
+		sleepImpl,
+	});
 	assert.equal(
 		`sha512-${createHash("sha512").update(remoteBytes).digest("base64")}`,
 		packageIntegrity,
@@ -105,8 +128,77 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
 		});
 }
 
+const RETRYABLE_FETCH_ERROR_CODES = new Set([
+	"ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EAI_AGAIN", "ENETUNREACH", "EHOSTUNREACH", "ENOTFOUND", "EPIPE",
+	"UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT", "UND_ERR_SOCKET",
+]);
+
+class RetryableRegistryError extends Error {}
+
+async function fetchPublishedTarballBytes(url, { fetchImpl, attempts, delayMs, timeoutMs, sleepImpl }) {
+	for (let attempt = 1; attempt <= attempts; attempt += 1) {
+		try {
+			return await fetchPublishedTarballAttempt(url, { fetchImpl, timeoutMs });
+		} catch (error) {
+			if (!(error instanceof RetryableRegistryError) || attempt === attempts) throw error;
+			await sleepImpl(delayMs);
+		}
+	}
+	throw new Error("published tarball fetch exhausted without a response");
+}
+
+async function fetchPublishedTarballAttempt(url, { fetchImpl, timeoutMs }) {
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(new Error("published tarball fetch attempt timed out")), timeoutMs);
+	try {
+		let response;
+		try {
+			response = await fetchImpl(url, { redirect: "error", signal: controller.signal });
+		} catch (error) {
+			if (controller.signal.aborted || isRetryableFetchError(error)) {
+				throw new RetryableRegistryError("published tarball transport failed", { cause: error });
+			}
+			throw error;
+		}
+		if (!response || typeof response.ok !== "boolean") {
+			throw new Error("published tarball fetch returned a malformed response");
+		}
+		if (!response.ok) {
+			const failure = new Error(`published tarball fetch failed: HTTP ${response.status}`);
+			if (isRetryableRegistryStatus(response.status)) throw new RetryableRegistryError(failure.message, { cause: failure });
+			throw failure;
+		}
+		try {
+			return Buffer.from(await response.arrayBuffer());
+		} catch (error) {
+			if (controller.signal.aborted || isRetryableFetchError(error)) {
+				throw new RetryableRegistryError("published tarball body read failed", { cause: error });
+			}
+			throw error;
+		}
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+function isRetryableRegistryStatus(status) {
+	return [404, 408, 425, 429].includes(status) || (Number.isInteger(status) && status >= 500 && status <= 599);
+}
+
+function isRetryableFetchError(error) {
+	return error instanceof TypeError || RETRYABLE_FETCH_ERROR_CODES.has(error?.code) || RETRYABLE_FETCH_ERROR_CODES.has(error?.cause?.code);
+}
+
+function sleep(delayMs) {
+	return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
 function readJson(path) {
-	return JSON.parse(readFileSync(path, "utf8"));
+	try {
+		return JSON.parse(readFileSync(path, "utf8"));
+	} catch (error) {
+		throw new Error(`release evidence is not valid JSON: ${path}`, { cause: error });
+	}
 }
 
 function assertPublicationEnvelope(value, label, allowUnpublished, expectedName, expectedVersion, registry) {
@@ -226,7 +318,12 @@ function assertSubject(payload, subjectPurl, subjectDigestHex) {
 
 function decodePayload(encoded) {
 	assert.equal(typeof encoded, "string");
-	const payload = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
+	let payload;
+	try {
+		payload = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
+	} catch (error) {
+		throw new Error("DSSE payload is not valid JSON", { cause: error });
+	}
 	assert.ok(payload && typeof payload === "object" && !Array.isArray(payload), "DSSE payload is not an object");
 	return payload;
 }
