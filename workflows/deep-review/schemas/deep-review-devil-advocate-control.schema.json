@@ -9,8 +9,20 @@
     "verdict": { "type": "string", "enum": ["KEEP", "WEAKEN", "DROP", "NEEDS_HUMAN"] },
     "evidence": {
       "type": "array",
+      "minItems": 1,
       "maxItems": 12,
-      "items": { "type": "string", "minLength": 1, "maxLength": 2000 }
+      "items": {
+        "type": "object",
+        "required": ["file", "line", "quote"],
+        "properties": {
+          "file": { "type": "string", "minLength": 1, "maxLength": 500 },
+          "line": { "type": "integer", "minimum": 1 },
+          "lineEnd": { "type": "integer", "minimum": 1 },
+          "symbol": { "type": "string", "minLength": 1, "maxLength": 300 },
+          "quote": { "type": "string", "minLength": 8, "maxLength": 1200 }
+        },
+        "additionalProperties": false
+      }
     },
     "counterEvidence": {
       "type": "array",

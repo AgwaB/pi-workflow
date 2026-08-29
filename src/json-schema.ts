@@ -182,7 +182,14 @@ function validateConst(
 ): void {
 	if (!Object.hasOwn(schema, "const")) return;
 	if (!jsonEqual(value, schema.const)) {
-		issues.push({ path, message: "value must equal schema const" });
+		const expected = formatSchemaExpectation(schema.const);
+		issues.push({
+			path,
+			message:
+				expected === undefined
+					? "value must equal schema const"
+					: `value must equal schema const ${expected}`,
+		});
 	}
 }
 
@@ -194,7 +201,25 @@ function validateEnum(
 ): void {
 	if (!Array.isArray(schema.enum)) return;
 	if (!schema.enum.some((candidate) => jsonEqual(value, candidate))) {
-		issues.push({ path, message: "value must match one of schema enum" });
+		const expected = formatSchemaExpectation(schema.enum);
+		issues.push({
+			path,
+			message:
+				expected === undefined
+					? "value must match one of schema enum"
+					: `value must match one of schema enum ${expected}`,
+		});
+	}
+}
+
+function formatSchemaExpectation(value: unknown): string | undefined {
+	try {
+		const serialized = JSON.stringify(value);
+		return serialized !== undefined && serialized.length <= 240
+			? serialized
+			: undefined;
+	} catch {
+		return undefined;
 	}
 }
 

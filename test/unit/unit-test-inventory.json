@@ -582,7 +582,7 @@
 		{
 			"name": "bundled workflows compile warning-free and deep-review leaves reviewer fanout unconstrained",
 			"occurrence": 1,
-			"sha256": "41ffc50fd26ed6fdae4ac7e0dbe950591ea5911e471aedfec3aadf9bfd2323b2",
+			"sha256": "96187f54219b78d385985fc322ee3808a75d736442a552491cc9afd9457f7dca",
 			"domain": "authoring-interface"
 		},
 		{
@@ -678,7 +678,7 @@
 		{
 			"name": "compiler lowers dynamic stages to controller placeholders",
 			"occurrence": 1,
-			"sha256": "a0b7631f31883f29ec79f5287fb1feea309ba09c7c201a0401b228959b93315e",
+			"sha256": "ef5709361708e34b501377527fd8db6c3350cbdf0d274135efe3a06d9e70b1aa",
 			"domain": "dynamic-runtime"
 		},
 		{
@@ -1104,7 +1104,7 @@
 		{
 			"name": "deep-review artifact-graph support lifecycle retains adverse needs-human artifacts after report failure",
 			"occurrence": 1,
-			"sha256": "66bdac243fa46230de29ba0a167aca66cd1db1d6b964edb4278b004cf9febd34",
+			"sha256": "b8146daa0a16b992a0653954605bcd6193ba2cd06cdf7b94ae030ee3e93550ea",
 			"domain": "artifact-web"
 		},
 		{
@@ -1158,19 +1158,19 @@
 		{
 			"name": "deep-review finding-pipeline preserves structured locations through dedup and partition",
 			"occurrence": 1,
-			"sha256": "5e210c8a602a2d79a86beada6c792626ffdf04ea37eebe2852b96a011247b607",
+			"sha256": "883ba0ead17cfe056c07236870fe3d2c8e94307f1ee24ea45bd58f852bd793de",
 			"domain": "core-runtime"
 		},
 		{
 			"name": "deep-review render-review-report emits finding cards from partition ledger",
 			"occurrence": 1,
-			"sha256": "61c4a29e2daf0ac2d3815b8f57546af5a00f55868c5ba66909a6d70182fec836",
+			"sha256": "b9a8b99d1003b157ec9c4aff9bf92ea6c7192597b96cd72f6d67bc2a7844a7cf",
 			"domain": "core-runtime"
 		},
 		{
 			"name": "deep-review render-review-report surfaces count mismatches and missing partition",
 			"occurrence": 1,
-			"sha256": "7759a073c79dc1b486ed0c86d97c780123e7e74f0a8a8479f9046855fe1d47fa",
+			"sha256": "ad01f94484240671b5445fa18c0ed4222cf2e128ce43cc8f471ea3fb68b0fcc0",
 			"domain": "core-runtime"
 		},
 		{
@@ -2790,7 +2790,7 @@
 		{
 			"name": "workflow output parser normalizes reviewer location ranges before schema validation",
 			"occurrence": 1,
-			"sha256": "c013a4749ba58ef107318db8a05c6c63e650cebfd1e7c0ca294865cedad2c7c1",
+			"sha256": "422f6c1035f43dc06856c0dd6eb2b3c70e61dc635768bee5f821eba61e91c635",
 			"domain": "artifact-web"
 		},
 		{

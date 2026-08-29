@@ -2783,6 +2783,22 @@ test("bundled workflows compile warning-free and deep-review leaves reviewer fan
 		const report = compiled.tasks.find((task) => task.key === "report.main");
 		const final = compiled.tasks.find((task) => task.key === "final.main");
 		assert.equal(reviewers?.stageMaxConcurrency, undefined);
+		assert.match(
+			reviewers?.compiledPrompt ?? "",
+			/Validate the control object against the workflow-local control schema file: \.\/schemas\/deep-review-reviewers-control\.schema\.json/,
+		);
+		assert.match(
+			reviewers?.compiledPrompt ?? "",
+			/Never emit the file path or file name as the value of `control\.schema`\./,
+		);
+		assert.match(
+			reviewers?.compiledPrompt ?? "",
+			/If none is specified, use `stage-control-v1`; do not derive a value from the schema file name\./,
+		);
+		assert.doesNotMatch(
+			reviewers?.compiledPrompt ?? "",
+			/Use workflow-local control schema reference/,
+		);
 		assert.equal(devilAdvocate?.stageMaxConcurrency, undefined);
 		assert.deepEqual(reportPacket?.dependsOn, ["partition-verdicts.main"]);
 		assert.deepEqual(report?.dependsOn, ["report-packet.main"]);

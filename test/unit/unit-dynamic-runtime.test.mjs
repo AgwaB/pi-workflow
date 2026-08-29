@@ -496,7 +496,15 @@ test("compiler lowers dynamic stages to controller placeholders", async () => {
 		);
 		assert.match(
 			controller.compiledPrompt,
-			/Use workflow-local control schema reference: \.\/schemas\/controller-output\.schema\.json/,
+			/Validate the control object against the workflow-local control schema file: \.\/schemas\/controller-output\.schema\.json/,
+		);
+		assert.match(
+			controller.compiledPrompt,
+			/Never emit the file path or file name as the value of `control\.schema`\./,
+		);
+		assert.match(
+			controller.compiledPrompt,
+			/If none is specified, use `dynamic-controller-result-v1`; do not derive a value from the schema file name\./,
 		);
 		assert.equal(
 			controller.dynamic.helpers.normalize.uses,

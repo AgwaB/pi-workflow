@@ -1414,13 +1414,17 @@ function foreachInvalidationOwnership(
 			if (compiledTask?.foreach) {
 				recordOwnership(specId, compiledTask, runTask, sourceSpecId);
 			}
-			recordOwnership(
-				compiledTask?.foreachGenerated?.placeholderSpecId ??
-					runTask?.foreachGenerated?.placeholderSpecId,
-				compiledTask,
-				runTask,
-				sourceSpecId,
-			);
+			// A directly resumed generated child keeps its frozen item membership.
+			// Only downstream foreach groups need transactional rematerialization.
+			if (specId !== sourceSpecId) {
+				recordOwnership(
+					compiledTask?.foreachGenerated?.placeholderSpecId ??
+						runTask?.foreachGenerated?.placeholderSpecId,
+					compiledTask,
+					runTask,
+					sourceSpecId,
+				);
+			}
 		}
 		const sourceTaskId = runBySpecId.get(sourceSpecId)?.taskId;
 		if (!sourceTaskId) continue;
@@ -1706,10 +1710,36 @@ function dependencyResumeInvalidationPlan(
 			pending.push(dependentSpecId);
 		}
 	}
+	const foreachAffectedSpecIds = new Set(invalidatedSpecIds);
+	const preservedSourceGroupSpecIds = new Set<string>();
+	const preservedSourcePlaceholderSpecIds = new Set<string>();
+	for (const sourceSpecId of sourceSpecIds) {
+		const compiledSource = compiledBySpecId.get(sourceSpecId);
+		const runSource = runTaskBySpecId.get(sourceSpecId);
+		const generatedPlaceholder =
+			compiledSource?.foreachGenerated?.placeholderSpecId ??
+			runSource?.foreachGenerated?.placeholderSpecId;
+		if (!generatedPlaceholder) {
+			foreachAffectedSpecIds.add(sourceSpecId);
+			continue;
+		}
+		preservedSourceGroupSpecIds.add(sourceSpecId);
+		preservedSourceGroupSpecIds.add(generatedPlaceholder);
+		preservedSourcePlaceholderSpecIds.add(generatedPlaceholder);
+	}
+	if (preservedSourcePlaceholderSpecIds.size > 0) {
+		// Validate frozen membership before preserving the originating group.
+		foreachInvalidationGroups(
+			run,
+			compiledFlow,
+			preservedSourceGroupSpecIds,
+			preservedSourcePlaceholderSpecIds,
+		);
+	}
 	const foreachGroups = foreachInvalidationGroups(
 		run,
 		compiledFlow,
-		new Set([...sourceSpecIds, ...invalidatedSpecIds]),
+		foreachAffectedSpecIds,
 		foreachOwnership.placeholderSpecIds,
 	);
 	for (const group of foreachGroups) {

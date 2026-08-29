@@ -232,15 +232,29 @@ function appendWorkflowOutputInstructions(
 		"<refs>[]</refs>",
 		"The <control> section must be valid JSON object data for the workflow control plane.",
 		"The control object must include a non-empty string `schema` and a concise non-empty string `digest`.",
-		controlSchema
-			? `Use workflow-local control schema reference: ${controlSchema}`
-			: "Use schema `stage-control-v1` unless the workflow asks for a more specific control schema.",
+		...controlSchemaOutputInstructions(controlSchema, "stage-control-v1"),
 		"Put detailed prose, reasoning, and evidence discussion in <analysis> only.",
 		"Put structured evidence pointers in <refs> as a JSON array; use [] if none.",
 		...partialOutputInstructions(stage.output?.partial?.paths),
 	]
 		.filter(Boolean)
 		.join("\n\n");
+}
+
+function controlSchemaOutputInstructions(
+	controlSchema: string | undefined,
+	defaultSchema: string,
+): string[] {
+	if (!controlSchema) {
+		return [
+			`Use schema \`${defaultSchema}\` unless the workflow asks for a more specific control schema.`,
+		];
+	}
+	return [
+		`Validate the control object against the workflow-local control schema file: ${controlSchema}`,
+		"That file path identifies the validation contract only. Never emit the file path or file name as the value of `control.schema`.",
+		`Use the exact \`control.schema\` value required by the stage prompt or example. If none is specified, use \`${defaultSchema}\`; do not derive a value from the schema file name.`,
+	];
 }
 
 function partialOutputInstructions(
@@ -2172,9 +2186,10 @@ function buildDynamicTask(
 			"# Workflow Output Protocol",
 			"Dynamic controller return values are normalized into workflow artifact sections: <control>{...}</control>, <analysis>...</analysis>, and <refs>[]</refs>.",
 			"The control object must include a non-empty `schema` string and concise `digest`/`summary`.",
-			controlSchema
-				? `Use workflow-local control schema reference: ${controlSchema}`
-				: "Use schema `dynamic-controller-result-v1` unless the workflow asks for a more specific control schema.",
+			...controlSchemaOutputInstructions(
+				controlSchema,
+				"dynamic-controller-result-v1",
+			),
 		].join("\n\n"),
 		normalizedPrompt ? `# Instructions\n\n${normalizedPrompt}` : undefined,
 	]

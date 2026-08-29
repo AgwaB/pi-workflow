@@ -247,7 +247,11 @@ Start with the run summary, then inspect only the failing task before resuming:
 For a terminal-friendly evidence view, run
 `pi-workflow inspect <run-id> --failures --results`. After fixing the reported
 access, configuration, output, or code problem, use
-`/workflow resume <run-id>`; completed task artifacts are preserved.
+`/workflow resume <run-id>`; completed task artifacts are preserved. A run executes
+its copied `bundle/` snapshot, so installing a newer pi-workflow version does not
+replace that run's schemas or support helpers. If the failure was fixed in newer
+workflow bundle code, start a fresh run rather than editing historical run or
+bundle artifacts.
 
 ### Speed and quality guardrails
 
@@ -335,7 +339,7 @@ When a `responseId` is present, use paginated `get_search_content` calls rather 
 | Workflow | Required agents | Mode | Use when |
 |---|---|---|---|
 | `deep-research` | `researcher` | plan + foreach questions + normalize-input packet support + normalize + foreach verifier + audit support + final-audit packet support + compact final synthesis reduce + deterministic ledger-backed executive render | Use when you need a grounded answer or summary based on source material. |
-| `deep-review` | `scout` | triage + foreach review lenses + dedup support + foreach devil's advocate + verdict-partition support + bounded report-packet support + no-repository-tool synthesis + deterministic full-ledger render | Use when you want code or design reviewed carefully from multiple angles. |
+| `deep-review` | `scout` | triage + foreach review lenses with typed required-source coverage + dedup support + foreach devil's advocate + verdict-partition support + bounded report-packet support + no-repository-tool synthesis + deterministic full-ledger render | Use when you want code or design reviewed carefully from multiple angles. Unreadable or metadata-only required sources force a partial verdict and appear in the final report. |
 | `spec-review` | `scout` | extract spec + map implementation + inspect tests -> reduce candidates -> foreach verifier -> reduce report | Use when you want to check whether requirements, an API spec, or a contract are reflected in the implementation and tests. |
 | `impact-review` | `scout` | scope/implementation/validation maps -> impact lenses -> consistency/regression/ship-readiness joins -> final synthesis | Use before merging or releasing a change to check affected areas, risks, missing tests, and missing docs. |
 

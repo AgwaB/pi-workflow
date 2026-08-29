@@ -1209,6 +1209,42 @@ function hasPartialFailures(partition) {
 	);
 }
 
+function sourceCoverageGaps(partition) {
+	const rows = [
+		...asArray(partition?.sourceStatusSummary?.partialFailures),
+		...asArray(partition?.reportContext?.partialFailures),
+	].filter(
+		(row) =>
+			row?.status === "source_coverage_incomplete" ||
+			row?.errorType === "source_coverage",
+	);
+	const seen = new Set();
+	return rows.filter((row) => {
+		const key = `${row.source ?? row.specId ?? ""}|${row.sourcePath ?? ""}|${row.coverageStatus ?? ""}`;
+		if (seen.has(key)) return false;
+		seen.add(key);
+		return true;
+	});
+}
+
+function renderSourceCoverageGaps(partition) {
+	const gaps = sourceCoverageGaps(partition);
+	if (gaps.length === 0) return [];
+	const lines = [
+		"## Required source coverage gaps",
+		"",
+		"| Reviewer source | Required source | Status | Extraction artifact | Detail |",
+		"|---|---|---|---|---|",
+	];
+	for (const gap of gaps) {
+		lines.push(
+			`| ${escapeTableCell(gap.displayName ?? gap.specId ?? gap.source ?? "unknown")} | ${escapeTableCell(gap.sourcePath ?? "unknown")} | ${escapeTableCell(gap.coverageStatus ?? gap.status ?? "unknown")} | ${escapeTableCell(gap.extractionArtifact ?? "—")} | ${escapeTableCell(gap.statusDetail ?? "Required source content was not read.")} |`,
+		);
+	}
+	lines.push("");
+	return lines;
+}
+
 function requiredReportVerdict(partition, findings) {
 	if (hasPartialFailures(partition)) return "PARTIAL_REVIEW";
 	const requiredLedgers = [partition?.reviewerLedger, partition?.dedupSummary, partition?.verifierCoverage];
@@ -1261,6 +1297,7 @@ function deterministicNextAction(verdict) {
 function completionLimitations({
 	reportAvailable,
 	reportVerdictConsistent,
+	rendererIntegrityFailed,
 	partition,
 	findingCountMismatch,
 	needsHumanCountMismatch,
@@ -1271,8 +1308,10 @@ function completionLimitations({
 	supportNoteEvidenceIncomplete,
 }) {
 	const limitations = [];
+	if (rendererIntegrityFailed)
+		limitations.push("Renderer integrity checks failed, so counts, provenance, or canonical ledgers must be repaired before relying on the conclusion.");
 	if (hasPartialFailures(partition))
-		limitations.push("Review coverage is partial because one or more sources did not complete.");
+		limitations.push("Review coverage is partial because a task did not complete or required source content was unavailable.");
 	if (!reportAvailable)
 		limitations.push("Executive synthesis was unavailable, so no complete review conclusion can be claimed.");
 	else if (!reportVerdictConsistent)
@@ -1315,7 +1354,7 @@ function renderCompletionSummary({
 	const out = [
 		"## Core conclusion",
 		"",
-		`Verdict: **${cleanText(reportAvailable ? effectiveVerdict : "report_synthesis_failed")}**. ${completionText(deterministicSummary(partition, findings))}`,
+		`Verdict: **${cleanText(effectiveVerdict)}**. ${completionText(deterministicSummary(partition, findings))}`,
 		"",
 		"## Key findings",
 		"",
@@ -1392,6 +1431,7 @@ function renderMarkdown({
 	report,
 	reportAvailable,
 	reportVerdictConsistent,
+	rendererIntegrityFailed = false,
 	effectiveVerdict,
 	partition,
 	findingCountMismatch,
@@ -1416,6 +1456,7 @@ function renderMarkdown({
 	const limitations = completionLimitations({
 		reportAvailable,
 		reportVerdictConsistent,
+		rendererIntegrityFailed,
 		partition,
 		findingCountMismatch,
 		needsHumanCountMismatch,
@@ -1442,7 +1483,14 @@ function renderMarkdown({
 		"",
 		...renderSeveritySummary(sortedFindings),
 	];
-	if (reportAvailable && !reportVerdictConsistent) {
+	if (!reportAvailable) {
+		lines.push(
+			"## Renderer warning",
+			"",
+			"Narrative synthesis was unavailable; the deterministic renderer downgraded the user-facing verdict to `PARTIAL_REVIEW`.",
+			"",
+		);
+	} else if (!reportVerdictConsistent) {
 		lines.push(
 			"## Renderer warning",
 			"",
@@ -1515,6 +1563,7 @@ function renderMarkdown({
 		lines.push("## Recommended next action", "", nextAction, "");
 	}
 	lines.push(...renderEvidenceCoverage(partition, sortedFindings));
+	lines.push(...renderSourceCoverageGaps(partition));
 	lines.push(...renderLimitations(limitations));
 	lines.push(...renderRelatedArtifacts());
 	return {
@@ -1533,6 +1582,7 @@ function blockedRenderResult(reason) {
 		schema: "deep-review-render-v1",
 		digest: `Deep review rendering blocked: ${reason}`,
 		status: "blocked",
+		verdict: "PARTIAL_REVIEW",
 		blockers: [reason],
 		markdown: "",
 		completionSummaryMarkdown: "",
@@ -1575,6 +1625,7 @@ export default async function renderReviewReport({ sources, context = {} }) {
 			digest:
 				"Deep review rendering failed: missing partition-verdicts control source.",
 			status: "blocked",
+			verdict: "PARTIAL_REVIEW",
 			blockers: ["missing partition-verdicts control source"],
 			markdown: "",
 			completionSummaryMarkdown: "",
@@ -1661,23 +1712,27 @@ export default async function renderReviewReport({ sources, context = {} }) {
 	const supportNoteCountMismatch = supportNotes.expected !== supportNotes.actual;
 	const supportNoteMetadataMissing = supportNotes.metadataMissing;
 	const supportNoteEvidenceIncomplete = supportNotes.incompleteEvidence > 0;
-	const effectiveVerdict = requiredReportVerdict(partition, all);
+	let effectiveVerdict = requiredReportVerdict(partition, all);
 	const reportVerdictConsistent =
 		reportAvailable && cleanText(report.verdict) === effectiveVerdict;
-	const rendered = renderMarkdown({
-		report: report ?? {},
-		reportAvailable,
-		reportVerdictConsistent,
-		effectiveVerdict,
-		partition,
-		findingCountMismatch,
-		needsHumanCountMismatch,
-		needsHumanMetadataMissing,
-		needsHumanEvidenceIncomplete,
-		supportNoteCountMismatch,
-		supportNoteMetadataMissing,
-		supportNoteEvidenceIncomplete,
-	});
+	let rendererIntegrityFailed = false;
+	const renderCurrentVerdict = () =>
+		renderMarkdown({
+			report: report ?? {},
+			reportAvailable,
+			reportVerdictConsistent,
+			rendererIntegrityFailed,
+			effectiveVerdict,
+			partition,
+			findingCountMismatch,
+			needsHumanCountMismatch,
+			needsHumanMetadataMissing,
+			needsHumanEvidenceIncomplete,
+			supportNoteCountMismatch,
+			supportNoteMetadataMissing,
+			supportNoteEvidenceIncomplete,
+		});
+	let rendered = renderCurrentVerdict();
 	const bySeverity = severityCounts(all);
 	const renderedAllFindings = rendered.representedIds.length === all.length;
 	const renderedAllNeedsHuman =
@@ -1714,7 +1769,7 @@ export default async function renderReviewReport({ sources, context = {} }) {
 		idAudit.topLevelIds.length +
 		idAudit.supportIds.length +
 		idAudit.lineageIds.length;
-	const passed =
+	const renderIntegrityPassed =
 		!findingCountMismatch &&
 		!idAudit.topLevelCountMismatch &&
 		!idAudit.mergedCountMismatch &&
@@ -1748,6 +1803,15 @@ export default async function renderReviewReport({ sources, context = {} }) {
 		renderedAllSupportNotes &&
 		reportAvailable &&
 		reportVerdictConsistent;
+	if (!renderIntegrityPassed) {
+		rendererIntegrityFailed = true;
+		if (effectiveVerdict !== "PARTIAL_REVIEW") {
+			effectiveVerdict = "PARTIAL_REVIEW";
+		}
+		rendered = renderCurrentVerdict();
+	}
+	const passed =
+		renderIntegrityPassed && effectiveVerdict !== "PARTIAL_REVIEW";
 
 	let sidecarPath;
 	try {
@@ -1781,6 +1845,7 @@ export default async function renderReviewReport({ sources, context = {} }) {
 				.join(", ") || "none"
 		}.`,
 		status: passed ? "passed" : "failed",
+		verdict: effectiveVerdict,
 		completionSummaryMarkdown: passed ? rendered.completionSummaryMarkdown : "",
 		markdown: rendered.markdown,
 		findingSummary: { total: all.length, bySeverity },

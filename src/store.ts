@@ -1411,6 +1411,21 @@ interface LockReclaimDecision {
 	durablyAbandoned: boolean;
 }
 
+async function staleSupervisorLockOwnerWasNeverPublished(
+	lockFile: string,
+	ownerId: string,
+): Promise<boolean> {
+	if (basename(lockFile) !== "supervisor.lock") return false;
+	const supervisor = await readJson<WorkflowSupervisorRecord>(
+		join(dirname(lockFile), "supervisor.json"),
+	);
+	return (
+		typeof supervisor?.ownerId === "string" &&
+		supervisor.ownerId.length > 0 &&
+		supervisor.ownerId !== ownerId
+	);
+}
+
 async function lockReclaimDecision(
 	lockFile: string,
 	snapshot: LockSnapshot,
@@ -1422,10 +1437,18 @@ async function lockReclaimDecision(
 	const absoluteStale =
 		now - (snapshot.createdAtMs ?? snapshot.mtimeMs) > LEASE_ABSOLUTE_STALE_MS;
 	if (!leaseStale) return { reclaimable: false, durablyAbandoned: false };
+	// The action starts only after its first heartbeat publishes this owner in
+	// supervisor.json. A different published owner therefore proves that this
+	// stale generation was stranded before user work began, even if the Pi PID
+	// remains alive for unrelated session work.
 	if (
 		snapshot.pid !== undefined &&
 		isProcessAlive(snapshot.pid) &&
-		!absoluteStale
+		!absoluteStale &&
+		!(await staleSupervisorLockOwnerWasNeverPublished(
+			lockFile,
+			snapshot.ownerId,
+		))
 	)
 		return { reclaimable: false, durablyAbandoned: false };
 	return { reclaimable: true, durablyAbandoned: false };

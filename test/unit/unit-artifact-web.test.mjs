@@ -2895,7 +2895,8 @@ test("deep-review artifact-graph support lifecycle retains adverse needs-human a
 		assert.deepEqual(finalControl.sourceArtifacts, [
 			"partition-verdicts.control.json",
 		]);
-		assert.match(finalControl.markdown, /report_synthesis_failed/);
+		assert.match(finalControl.markdown, /Verdict: \*\*PARTIAL_REVIEW\*\*/);
+		assert.match(finalControl.markdown, /Narrative synthesis was unavailable/);
 		assert.match(finalControl.markdown, /Review coverage is partial/);
 		assert.match(finalControl.markdown, /Ambiguous adverse lifecycle behavior/);
 		assert.equal(finalResult.status, "failed");
@@ -9451,6 +9452,13 @@ test("workflow output parser normalizes reviewer location ranges before schema v
 		schema: "stage-control-v1",
 		lens: "runtime",
 		evidenceChecked: ["core/txpool/locals/tx_tracker.go"],
+		sourceCoverage: [{
+			path: "core/txpool/locals/tx_tracker.go",
+			status: "read",
+			evidence: "func (tracker *TxTracker) Start() error { ... }",
+			artifact: "",
+			reason: "",
+		}],
 		noIssueNotes: [],
 		digest: "task-7 attempt 1 shape",
 		findings: [
@@ -9477,6 +9485,13 @@ test("workflow output parser normalizes reviewer location ranges before schema v
 		schema: "stage-control-v1",
 		lens: "runtime",
 		evidenceChecked: ["core/txpool/locals/tx_tracker.go"],
+		sourceCoverage: [{
+			path: "core/txpool/locals/tx_tracker.go",
+			status: "read",
+			evidence: "func (tracker *TxTracker) Start() error { ... }",
+			artifact: "",
+			reason: "",
+		}],
 		noIssueNotes: [],
 		digest: "task-7 attempt 2 shape",
 		findings: [
