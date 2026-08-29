@@ -7054,6 +7054,13 @@ test("deep-review finding-pipeline preserves structured locations through dedup 
 		lens: "runtime",
 		findings: [],
 		evidenceChecked: ["src/runtime.ts"],
+		sourceCoverage: [{
+			path: "src/runtime.ts",
+			status: "read",
+			evidence: "runtime path checked",
+			artifact: "",
+			reason: "",
+		}],
 		noIssueNotes: ["Checked runtime paths; no issue found."],
 	};
 	assert.equal(
@@ -8191,7 +8198,8 @@ test("deep-review render-review-report emits finding cards from partition ledger
 		assert.equal(result.findingSummary.bySeverity.critical, 1);
 		assert.match(result.markdown, /# Deep review report/);
 		assert.match(result.markdown, /^# Deep review report\n\n## Executive summary/);
-		assert.match(result.markdown, /Verdict: \*\*NEEDS_WORK\*\*/);
+		assert.match(result.markdown, /Verdict: \*\*PARTIAL_REVIEW\*\*/);
+		assert.match(result.markdown, /Renderer integrity checks failed/);
 		assert.match(result.markdown, /## Evidence and review coverage/);
 		assert.match(result.markdown, /## Limitations/);
 		assert.match(result.markdown, /## Related artifacts/);
@@ -8345,7 +8353,8 @@ test("deep-review render-review-report surfaces count mismatches and missing par
 	assert.deepEqual(reportFailure.sourceArtifacts, [
 		"partition-verdicts.control.json",
 	]);
-	assert.match(reportFailure.markdown, /report_synthesis_failed/);
+	assert.match(reportFailure.markdown, /Verdict: \*\*PARTIAL_REVIEW\*\*/);
+	assert.match(reportFailure.markdown, /Narrative synthesis was unavailable/);
 	assert.match(reportFailure.markdown, /Evidence survives report failure/);
 	assert.doesNotMatch(reportFailure.markdown, /Deep review completed/);
 
@@ -8382,7 +8391,7 @@ test("deep-review render-review-report surfaces count mismatches and missing par
 	assert.equal(contradictoryVerdict.gates.reportVerdictConsistent, false);
 	assert.equal(contradictoryVerdict.gates.passed, false);
 	assert.equal(contradictoryVerdict.completionSummaryMarkdown, "");
-	assert.match(contradictoryVerdict.markdown, /Verdict: \*\*NEEDS_WORK\*\*/);
+	assert.match(contradictoryVerdict.markdown, /Verdict: \*\*PARTIAL_REVIEW\*\*/);
 	assert.match(contradictoryVerdict.markdown, /contradicted the deterministic ledger/);
 	assert.doesNotMatch(contradictoryVerdict.markdown, /No issue remains/);
 	assert.doesNotMatch(contradictoryVerdict.markdown, /Ship\./);
@@ -8426,6 +8435,10 @@ test("deep-review render-review-report surfaces count mismatches and missing par
 		context: {},
 	});
 	assert.equal(matchingVerdictWithContradictoryNarrative.status, "failed");
+	assert.match(
+		matchingVerdictWithContradictoryNarrative.markdown,
+		/Verdict: \*\*PARTIAL_REVIEW\*\*/,
+	);
 	assert.doesNotMatch(
 		matchingVerdictWithContradictoryNarrative.markdown,
 		/No issues remain|There are no risks|Ship immediately/,
@@ -8436,7 +8449,7 @@ test("deep-review render-review-report surfaces count mismatches and missing par
 	);
 	assert.match(
 		matchingVerdictWithContradictoryNarrative.markdown,
-		/Address kept or weakened findings/,
+		/Complete failed or missing review work/,
 	);
 
 	const partialVerdict = await helper({

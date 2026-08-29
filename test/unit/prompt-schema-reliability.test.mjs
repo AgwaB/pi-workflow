@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
+import { validateJsonSchema } from "../../.tmp/unit/json-schema.js";
 import {
 	assertPromptSchemaDiagnosticsAllowRun,
 	buildPromptSchemaDiagnosticNotice,
@@ -10,6 +11,7 @@ import {
 	promptSchemaDiagnosticsApply,
 	workflowPromptSchemaDiagnostics,
 } from "../../.tmp/unit/prompt-schema-diagnostics.js";
+import { buildWorkflowOutputRetryInstructions } from "../../.tmp/unit/workflow-output-artifacts.js";
 
 const actionable =
 	'stage "plan" requires $.items[].claim but the prompt does not show the exact JSON key "claim". Add a small <control> JSON skeleton or few-shot example using that key to avoid model drift to aliases such as name/claim/title.';
@@ -110,4 +112,48 @@ test("one run-start notice retains warning order without validate formatting", (
 			text: notice,
 		},
 	);
+});
+
+test("schema retry diagnostics include bounded expected const values", () => {
+	const validation = validateJsonSchema(
+		{ schema: "./schemas/reviewer-control.schema.json" },
+		{
+			type: "object",
+			properties: {
+				schema: { type: "string", const: "stage-control-v1" },
+			},
+		},
+	);
+	assert.deepEqual(validation.issues, [
+		{
+			path: "$.schema",
+			message: 'value must equal schema const "stage-control-v1"',
+		},
+	]);
+
+	const retry = buildWorkflowOutputRetryInstructions([
+		{
+			code: "contract_failed",
+			section: "control",
+			path: "$.schema",
+			message: `control JSON schema failed: ${validation.issues[0].message}`,
+		},
+	]);
+	assert.match(
+		retry,
+		/\$\.schema: control JSON schema failed: value must equal schema const "stage-control-v1"/u,
+	);
+
+	const enumValidation = validateJsonSchema("unexpected", {
+		enum: ["KEEP", "WEAKEN", "DROP"],
+	});
+	assert.equal(
+		enumValidation.issues[0].message,
+		'value must match one of schema enum ["KEEP","WEAKEN","DROP"]',
+	);
+
+	const oversized = validateJsonSchema("actual", {
+		const: "x".repeat(241),
+	});
+	assert.equal(oversized.issues[0].message, "value must equal schema const");
 });

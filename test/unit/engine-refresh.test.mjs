@@ -996,6 +996,125 @@ test("default task records omit generation while opted-in records retain it", ()
 	assert.equal(optedInRecord.generation, 0);
 });
 
+test("dependency invalidation preserves resumed foreach siblings and replays the downstream closure", () => {
+	const membership = (identity, taskId) => ({
+		placeholderSpecId: "reviewers.item",
+		itemIdentity: identity,
+		itemHash: `hash-${identity}`,
+		itemSourceTaskId: "task-plan",
+		itemSourceSpecId: "plan.main",
+		itemSourceKind: "control",
+		itemRef: `control:${identity}`,
+		taskId,
+		specId: `reviewers.${identity}`,
+	});
+	const entries = [
+		membership("security", "task-reviewer"),
+		membership("runtime", "task-sibling"),
+	];
+	const dispatchMap = {
+		version: 1,
+		generation: 0,
+		sourceTaskId: "task-plan",
+		entries,
+		digest: hashDynamicRequest({
+			version: 1,
+			generation: 0,
+			sourceTaskId: "task-plan",
+			entries,
+		}),
+	};
+	const run = {
+		runId: "run-reviewer-resume",
+		tasks: [
+			{ taskId: "task-plan", specId: "plan.main", status: "completed" },
+			{
+				taskId: "task-parent",
+				specId: "reviewers.item",
+				status: "completed",
+				dependsOn: ["plan.main"],
+				dispatchMap,
+			},
+			{
+				taskId: "task-reviewer",
+				specId: "reviewers.security",
+				status: "failed",
+				dependsOn: ["plan.main"],
+				sourceGeneration: 0,
+				foreachGenerated: entries[0],
+			},
+			{
+				taskId: "task-sibling",
+				specId: "reviewers.runtime",
+				status: "completed",
+				dependsOn: ["plan.main"],
+				sourceGeneration: 0,
+				foreachGenerated: entries[1],
+			},
+			{
+				taskId: "task-dedup",
+				specId: "dedup.main",
+				status: "completed",
+				dependsOn: ["reviewers.security", "reviewers.runtime"],
+				artifactGraph: {
+					inputPolicy: { invalidateOnDependencyResume: true },
+				},
+			},
+			{
+				taskId: "task-final",
+				specId: "final.main",
+				status: "completed",
+				dependsOn: ["dedup.main"],
+			},
+		],
+	};
+	const compiled = {
+		tasks: [
+			{ id: "plan.main" },
+			{
+				id: "reviewers.item",
+				dependsOn: ["plan.main"],
+				foreach: { itemIdentityPath: "$.id" },
+			},
+			{
+				id: "reviewers.security",
+				dependsOn: ["plan.main"],
+				sourceGeneration: 0,
+				foreachGenerated: entries[0],
+			},
+			{
+				id: "reviewers.runtime",
+				dependsOn: ["plan.main"],
+				sourceGeneration: 0,
+				foreachGenerated: entries[1],
+			},
+			{
+				id: "dedup.main",
+				dependsOn: ["reviewers.security", "reviewers.runtime"],
+				artifactGraph: {
+					inputPolicy: { invalidateOnDependencyResume: true },
+				},
+			},
+			{ id: "final.main", dependsOn: ["dedup.main"] },
+		],
+	};
+
+	const plan = dependencyResumeInvalidationPlanForTests(run, compiled);
+	assert.deepEqual(plan?.sourceTaskIds, ["task-reviewer"]);
+	assert.deepEqual(plan?.invalidatedTaskIds, ["task-dedup", "task-final"]);
+	assert.deepEqual(plan?.foreachGroups, []);
+	assert.equal(plan?.invalidatedTaskIds.includes("task-parent"), false);
+	assert.equal(plan?.invalidatedTaskIds.includes("task-sibling"), false);
+	assert.throws(
+		() =>
+			dependencyResumeInvalidationPlanForTests(
+				{ ...run, tasks: run.tasks.filter((task) => task.taskId !== "task-parent") },
+				compiled,
+			),
+		/foreach group reviewers\.item without transactional rematerialization/,
+	);
+});
+
 test("dependency invalidation atomically quarantines old task evidence and fails closed at dynamic ownership", async () => {
 	const cwd = makeProject();
 	try {
@@ -2911,6 +3030,67 @@ test("run leases release first-heartbeat failures and abort an owner after stale
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });
+
+test("stale live-pid run lease reclaims only a generation that never published its supervisor heartbeat", async () => {
+	const cwd = makeProject();
+	try {
+		const staleAt = new Date(Date.now() - 60_000);
+		const runId = "stale-unpublished-live-generation";
+		const runDir = workflowRunDir(cwd, runId);
+		const lockFile = join(runDir, "supervisor.lock");
+		mkdirSync(runDir, { recursive: true });
+		writeFileSync(
+			lockFile,
+			`stranded-live-owner\n${process.pid}\n${staleAt.toISOString()}\n`,
+		);
+		utimesSync(lockFile, staleAt, staleAt);
+		writeFileSync(
+			join(runDir, "supervisor.json"),
+			JSON.stringify({
+				schemaVersion: 1,
+				ownerId: "previous-owner",
+				pid: process.pid,
+				updatedAt: staleAt.toISOString(),
+				lockFile: ".pi/workflows/stale-unpublished-live-generation/supervisor.lock",
+			}),
+		);
+
+		assert.equal(
+			await withRunLease(cwd, runId, async () => "recovered"),
+			"recovered",
+		);
+		assert.equal(existsSync(lockFile), false);
+
+		const protectedRunId = "stale-published-live-generation";
+		const protectedDir = workflowRunDir(cwd, protectedRunId);
+		const protectedLock = join(protectedDir, "supervisor.lock");
+		mkdirSync(protectedDir, { recursive: true });
+		writeFileSync(
+			protectedLock,
+			`published-live-owner\n${process.pid}\n${staleAt.toISOString()}\n`,
+		);
+		utimesSync(protectedLock, staleAt, staleAt);
+		writeFileSync(
+			join(protectedDir, "supervisor.json"),
+			JSON.stringify({
+				schemaVersion: 1,
+				ownerId: "published-live-owner",
+				pid: process.pid,
+				updatedAt: staleAt.toISOString(),
+				lockFile: ".pi/workflows/stale-published-live-generation/supervisor.lock",
+			}),
+		);
+
+		assert.equal(
+			await withRunLease(cwd, protectedRunId, async () => "must-not-acquire"),
+			undefined,
+		);
+		assert.match(readFileSync(protectedLock, "utf8"), /^published-live-owner\n/);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("run record identity and public run ids fail closed without mutation", async () => {
 	const cwd = makeProject();
 	try {

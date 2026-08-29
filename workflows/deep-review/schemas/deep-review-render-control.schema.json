@@ -4,6 +4,7 @@
     "schema",
     "digest",
     "status",
+    "verdict",
     "completionSummaryMarkdown",
     "markdown",
     "findingSummary",
@@ -16,7 +17,8 @@
     "schema": { "type": "string", "const": "deep-review-render-v1" },
     "digest": { "type": "string", "minLength": 1 },
     "status": { "type": "string", "enum": ["passed", "failed", "blocked"] },
-    "blockers": { "type": "array", "items": { "type": "string" } },
+    "verdict": { "type": "string", "enum": ["REVIEW_COMPLETE", "NEEDS_WORK", "PARTIAL_REVIEW"] },
+    "blockers": { "type": "array", "items": { "type": "string", "minLength": 1 } },
     "completionSummaryMarkdown": { "type": "string" },
     "markdown": { "type": "string" },
     "findingSummary": {
@@ -107,5 +109,53 @@
     },
     "sidecarPath": { "type": "string", "const": "final-report.md" }
   },
+  "oneOf": [
+    {
+      "type": "object",
+      "required": ["status", "verdict", "gates"],
+      "properties": {
+        "status": { "type": "string", "const": "passed" },
+        "verdict": { "type": "string", "enum": ["REVIEW_COMPLETE", "NEEDS_WORK"] },
+        "gates": {
+          "type": "object",
+          "required": ["passed"],
+          "properties": { "passed": { "type": "boolean", "const": true } }
+        },
+        "blockers": false
+      }
+    },
+    {
+      "type": "object",
+      "required": ["status", "verdict", "gates"],
+      "properties": {
+        "status": { "type": "string", "const": "failed" },
+        "verdict": { "type": "string", "const": "PARTIAL_REVIEW" },
+        "gates": {
+          "type": "object",
+          "required": ["passed"],
+          "properties": { "passed": { "type": "boolean", "const": false } }
+        },
+        "blockers": false
+      }
+    },
+    {
+      "type": "object",
+      "required": ["status", "verdict", "gates", "blockers"],
+      "properties": {
+        "status": { "type": "string", "const": "blocked" },
+        "verdict": { "type": "string", "const": "PARTIAL_REVIEW" },
+        "gates": {
+          "type": "object",
+          "required": ["passed"],
+          "properties": { "passed": { "type": "boolean", "const": false } }
+        },
+        "blockers": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  ],
   "additionalProperties": true
 }

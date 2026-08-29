@@ -1,6 +1,6 @@
 {
   "type": "object",
-  "required": ["schema", "digest", "lens", "findings", "evidenceChecked", "noIssueNotes"],
+  "required": ["schema", "digest", "lens", "findings", "evidenceChecked", "sourceCoverage", "noIssueNotes"],
   "properties": {
     "schema": { "type": "string", "const": "stage-control-v1" },
     "digest": { "type": "string", "minLength": 1, "maxLength": 1200 },
@@ -54,6 +54,63 @@
       "minItems": 1,
       "maxItems": 80,
       "items": { "type": "string", "minLength": 1, "maxLength": 500 }
+    },
+    "sourceCoverage": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 20,
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": ["path", "status", "evidence", "artifact", "reason"],
+            "properties": {
+              "path": { "type": "string", "minLength": 1, "maxLength": 500 },
+              "status": { "type": "string", "const": "read" },
+              "evidence": { "type": "string", "minLength": 1, "maxLength": 1200 },
+              "artifact": { "type": "string", "const": "" },
+              "reason": { "type": "string", "maxLength": 800 }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": ["path", "status", "evidence", "artifact", "reason"],
+            "properties": {
+              "path": { "type": "string", "minLength": 1, "maxLength": 500 },
+              "status": { "type": "string", "const": "ocr-extracted" },
+              "evidence": { "type": "string", "minLength": 1, "maxLength": 1200 },
+              "artifact": { "type": "string", "minLength": 1, "maxLength": 500 },
+              "reason": { "type": "string", "maxLength": 800 }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": ["path", "status", "evidence", "artifact", "reason"],
+            "properties": {
+              "path": { "type": "string", "minLength": 1, "maxLength": 500 },
+              "status": { "type": "string", "const": "metadata-only" },
+              "evidence": { "type": "string", "const": "" },
+              "artifact": { "type": "string", "const": "" },
+              "reason": { "type": "string", "minLength": 1, "maxLength": 800 }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": ["path", "status", "evidence", "artifact", "reason"],
+            "properties": {
+              "path": { "type": "string", "minLength": 1, "maxLength": 500 },
+              "status": { "type": "string", "const": "unreadable" },
+              "evidence": { "type": "string", "const": "" },
+              "artifact": { "type": "string", "const": "" },
+              "reason": { "type": "string", "minLength": 1, "maxLength": 800 }
+            },
+            "additionalProperties": false
+          }
+        ]
+      }
     },
     "noIssueNotes": {
       "type": "array",

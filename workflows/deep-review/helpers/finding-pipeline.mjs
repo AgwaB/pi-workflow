@@ -225,6 +225,90 @@ function dedupeEvidenceQuotes(values) {
 	return out;
 }
 
+function verifierEvidenceRowsOf(value) {
+	const input = Array.isArray(value) ? value : [];
+	const rows = [];
+	const issues = [];
+	if (!Array.isArray(value)) issues.push("verifier evidence was not an array");
+	for (const [index, raw] of input.entries()) {
+		if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+			issues.push(`verifier evidence row ${index} was not an object`);
+			continue;
+		}
+		const allowedKeys = new Set(["file", "line", "lineEnd", "symbol", "quote"]);
+		if (Object.keys(raw).some((key) => !allowedKeys.has(key))) {
+			issues.push(`verifier evidence row ${index} had unexpected fields`);
+			continue;
+		}
+		if (
+			typeof raw.file !== "string" ||
+			typeof raw.line !== "number" ||
+			typeof raw.quote !== "string" ||
+			(raw.lineEnd !== undefined && typeof raw.lineEnd !== "number") ||
+			(raw.symbol !== undefined && typeof raw.symbol !== "string")
+		) {
+			issues.push(`verifier evidence row ${index} had invalid primitive types`);
+			continue;
+		}
+		const file = raw.file.trim();
+		const quote = raw.quote.trim();
+		const line = raw.line;
+		const lineEnd = raw.lineEnd;
+		const symbol = raw.symbol?.trim() ?? "";
+		if (!file || quote.length < 8 || !Number.isInteger(line) || line < 1) {
+			issues.push(`verifier evidence row ${index} had invalid file, line, or quote`);
+			continue;
+		}
+		if (
+			lineEnd !== undefined &&
+			(!Number.isInteger(lineEnd) || lineEnd < line)
+		) {
+			issues.push(`verifier evidence row ${index} had an invalid lineEnd`);
+			continue;
+		}
+		rows.push({
+			file,
+			line,
+			...(lineEnd === undefined ? {} : { lineEnd }),
+			...(symbol ? { symbol } : {}),
+			quote,
+		});
+	}
+	return { rows, issues };
+}
+
+function verifierEvidenceGroundingIssues(rows, context = {}) {
+	if (rows.length === 0) return ["verifier supplied no structured evidence rows"];
+	const issues = [];
+	const repoRoot = repoRootFromContext(context);
+	for (const row of rows) {
+		const source = readRepoText(
+			row.file,
+			repoRoot,
+			MAX_SOURCE_COVERAGE_FILE_BYTES,
+		);
+		if (!source.exists || source.tooLarge) {
+			issues.push(`${row.file}:${row.line} could not be read safely`);
+			continue;
+		}
+		const lines = source.text.split(/\r?\n/u);
+		const lineEnd = row.lineEnd ?? row.line;
+		if (row.line > lines.length || lineEnd > lines.length) {
+			issues.push(`${row.file}:${row.line}-${lineEnd} is outside the file`);
+			continue;
+		}
+		const scopedText = lines.slice(row.line - 1, lineEnd).join("\n");
+		if (
+			!scopedText
+				.replace(/\r\n/gu, "\n")
+				.includes(row.quote.replace(/\r\n/gu, "\n"))
+		) {
+			issues.push(`${row.file}:${row.line}-${lineEnd} did not contain the exact verifier quote`);
+		}
+	}
+	return issues;
+}
+
 function sourceStatusesOf(context) {
 	return asObjects(context?.sourceStatuses);
 }
@@ -236,6 +320,13 @@ function slimSourceStatus(status) {
 		...(status.taskId ? { taskId: String(status.taskId) } : {}),
 		...(status.specId ? { specId: String(status.specId) } : {}),
 		...(status.stageId ? { stageId: String(status.stageId) } : {}),
+		...(status.sourcePath ? { sourcePath: String(status.sourcePath) } : {}),
+		...(status.coverageStatus
+			? { coverageStatus: String(status.coverageStatus) }
+			: {}),
+		...(status.extractionArtifact
+			? { extractionArtifact: String(status.extractionArtifact) }
+			: {}),
 		...(status.itemIdentity !== undefined
 			? { itemIdentity: String(status.itemIdentity) }
 			: {}),
@@ -316,6 +407,31 @@ function mergeSourceStatusSummary(directStatusSummary, partialFailures) {
 			Number(directStatusSummary?.total ?? 0) + transitiveOnlyFailures.length,
 		completed: Number(directStatusSummary?.completed ?? 0),
 		nonCompleted: asObjects(partialFailures).length,
+		partialFailures,
+	};
+}
+
+function applySourceCoverageFailures(summary, failures) {
+	const coverageFailures = asObjects(failures).map(slimSourceStatus);
+	if (coverageFailures.length === 0) return summary;
+	const failedSources = new Set(
+		coverageFailures.map((failure) => failure.source).filter(Boolean),
+	);
+	const partialFailures = mergePartialFailures(
+		summary?.partialFailures,
+		coverageFailures,
+	);
+	const completed = Math.max(
+		0,
+		Number(summary?.completed ?? 0) - failedSources.size,
+	);
+	return {
+		total: Math.max(
+			Number(summary?.total ?? 0),
+			completed + partialFailures.length,
+		),
+		completed,
+		nonCompleted: partialFailures.length,
 		partialFailures,
 	};
 }
@@ -562,6 +678,13 @@ function mergeDedupFinding(primary, duplicate) {
 	]);
 	primary.rationale = dedupeStrings([primary.rationale, duplicate.rationale]).join(" ");
 	primary.recommendedAction = primary.recommendedAction || duplicate.recommendedAction;
+	primary.sourceCoverageComplete = Boolean(
+		primary.sourceCoverageComplete && duplicate.sourceCoverageComplete,
+	);
+	primary.sourceCoverageIssuePaths = dedupeStrings([
+		...(primary.sourceCoverageIssuePaths ?? []),
+		...(duplicate.sourceCoverageIssuePaths ?? []),
+	]);
 	if (duplicate.reviewerIdentity) primary.reviewerIdentities = dedupeOwners([
 		...(primary.reviewerIdentities ?? (primary.reviewerIdentity ? [primary.reviewerIdentity] : [])),
 		duplicate.reviewerIdentity,
@@ -590,6 +713,298 @@ function nonBlankStringArray(value) {
 	return Array.isArray(value)
 		? value.filter((entry) => typeof entry === "string" && entry.trim())
 		: [];
+}
+
+const USABLE_SOURCE_COVERAGE = new Set(["read", "ocr-extracted"]);
+const OCR_BINDING_SCHEMA = "deep-review-ocr-binding-v1";
+const TRUSTED_OCR_ARTIFACT_ROOT = ".pi/ocr-artifacts/";
+const MAX_SOURCE_COVERAGE_FILE_BYTES = 20_000_000;
+const MAX_OCR_BINDING_FILE_BYTES = 20_000;
+
+function coveragePathLabel(value) {
+	const raw = String(value ?? "");
+	if (!raw) return "(missing path)";
+	return raw.trim() ? raw : JSON.stringify(raw);
+}
+
+function parseSourceCoveragePointer(value) {
+	const raw = String(value ?? "");
+	if (!raw || raw !== raw.trim()) return null;
+	const match = /^(.*):(\d+)(?:-(\d+))?$/u.exec(raw);
+	if (!match) return { file: raw };
+	const file = match[1];
+	const line = Number(match[2]);
+	const lineEnd = Number(match[3] ?? match[2]);
+	if (
+		!file ||
+		file !== file.trim() ||
+		!Number.isInteger(line) ||
+		!Number.isInteger(lineEnd) ||
+		line < 1 ||
+		lineEnd < line
+	) {
+		return null;
+	}
+	return { file, line, lineEnd };
+}
+
+function trustedOcrArtifactPathIssue(artifactPath, repoRoot) {
+	const relative = safeRepoRelativePath(artifactPath, repoRoot);
+	if (!relative || !relative.startsWith(TRUSTED_OCR_ARTIFACT_ROOT)) {
+		return "OCR artifact is outside the trusted control-plane root";
+	}
+	try {
+		const rootSegments = TRUSTED_OCR_ARTIFACT_ROOT.split("/").filter(Boolean);
+		let current = path.resolve(repoRoot);
+		for (const segment of rootSegments) {
+			current = path.join(current, segment);
+			const stat = fs.lstatSync(current);
+			if (stat.isSymbolicLink() || !stat.isDirectory()) {
+				return "trusted OCR root contains a symlink or non-directory component";
+			}
+		}
+		const trustedRoot = current;
+		const realTrustedRoot = fs.realpathSync(trustedRoot);
+		const absolute = path.resolve(repoRoot, relative);
+		const realArtifact = fs.realpathSync(absolute);
+		if (!pathIsInsideRoot(realTrustedRoot, realArtifact)) {
+			return "OCR artifact resolves outside the trusted control-plane root";
+		}
+		const nested = path.relative(trustedRoot, absolute).split(path.sep);
+		current = trustedRoot;
+		for (const segment of nested.slice(0, -1)) {
+			current = path.join(current, segment);
+			const stat = fs.lstatSync(current);
+			if (stat.isSymbolicLink() || !stat.isDirectory()) {
+				return "OCR artifact path contains a symlinked directory";
+			}
+		}
+		return "";
+	} catch {
+		return "trusted OCR artifact path is unavailable";
+	}
+}
+
+function trustedOcrFileIssue(file) {
+	if (file.nlink !== 1) return "trusted OCR file must have exactly one link";
+	if ((file.mode & 0o022) !== 0) {
+		return "trusted OCR file must not be group- or world-writable";
+	}
+	if (typeof process.getuid === "function" && file.uid !== process.getuid()) {
+		return "trusted OCR file must be owned by the current user";
+	}
+	return "";
+}
+
+function ocrBindingIssue(row, path, source, artifact, repoRoot) {
+	const bindingPath = `${row.artifact}.binding.json`;
+	const bindingFile = readRepoText(
+		bindingPath,
+		repoRoot,
+		MAX_OCR_BINDING_FILE_BYTES,
+	);
+	if (!bindingFile.exists || bindingFile.tooLarge) {
+		return "OCR source binding is unavailable";
+	}
+	const bindingTrustIssue = trustedOcrFileIssue(bindingFile);
+	if (bindingTrustIssue) return bindingTrustIssue;
+	let binding;
+	try {
+		binding = JSON.parse(bindingFile.text);
+	} catch {
+		return "OCR source binding is not valid JSON";
+	}
+	if (!binding || typeof binding !== "object" || Array.isArray(binding)) {
+		return "OCR source binding has invalid shape";
+	}
+	const expected = {
+		schema: OCR_BINDING_SCHEMA,
+		sourcePath: path,
+		sourceSha256: source.sha256,
+		artifactPath: row.artifact,
+		artifactSha256: artifact.sha256,
+	};
+	const expectedKeys = Object.keys(expected).sort();
+	const actualKeys = Object.keys(binding).sort();
+	if (
+		expectedKeys.length !== actualKeys.length ||
+		expectedKeys.some((key, index) => key !== actualKeys[index])
+	) {
+		return "OCR source binding has invalid fields";
+	}
+	for (const [key, value] of Object.entries(expected)) {
+		if (binding[key] !== value) return `OCR source binding mismatched ${key}`;
+	}
+	return "";
+}
+
+function exactSourceQuoteIssue(row, path, context) {
+	if (!row.evidence) return "content quote missing";
+	const pointer = parseSourceCoveragePointer(path);
+	if (!pointer) return "required source pointer is invalid";
+	const repoRoot = repoRootFromContext(context);
+	const source = readRepoText(
+		pointer.file,
+		repoRoot,
+		MAX_SOURCE_COVERAGE_FILE_BYTES,
+	);
+	if (!source.exists) return "required source file is unavailable";
+	if (row.status === "ocr-extracted") {
+		if (source.tooLarge) return "required OCR source is too large to bind";
+		if (!row.artifact) return "OCR artifact missing";
+		if (row.artifact !== row.artifact.trim()) return "OCR artifact path is invalid";
+		const artifactPathIssue = trustedOcrArtifactPathIssue(
+			row.artifact,
+			repoRoot,
+		);
+		if (artifactPathIssue) return artifactPathIssue;
+		const artifact = readRepoText(
+			row.artifact,
+			repoRoot,
+			MAX_SOURCE_COVERAGE_FILE_BYTES,
+		);
+		if (!artifact.exists || artifact.tooLarge) {
+			return "OCR artifact is unavailable";
+		}
+		const artifactTrustIssue = trustedOcrFileIssue(artifact);
+		if (artifactTrustIssue) return artifactTrustIssue;
+		const bindingIssue = ocrBindingIssue(
+			row,
+			path,
+			source,
+			artifact,
+			repoRoot,
+		);
+		if (bindingIssue) return bindingIssue;
+		return artifact.text.replace(/\r\n/gu, "\n").includes(row.evidence.replace(/\r\n/gu, "\n"))
+			? ""
+			: "OCR quote was not found in artifact";
+	}
+	if (source.tooLarge) return "required source is too large to verify";
+	let scopedText = source.text;
+	if (pointer.line !== undefined) {
+		const lines = source.text.split(/\r?\n/u);
+		if (pointer.line > lines.length) return "required source range is unavailable";
+		const end = Math.min(pointer.lineEnd, lines.length);
+		scopedText = lines.slice(pointer.line - 1, end).join("\n");
+	}
+	return scopedText.replace(/\r\n/gu, "\n").includes(row.evidence.replace(/\r\n/gu, "\n"))
+		? ""
+		: "content quote was not found in required source range";
+}
+
+function assessSourceCoverage(requiredValue, coverageValue, context = {}) {
+	const issues = [];
+	const requiredPaths = [];
+	const seenRequired = new Set();
+	for (const value of Array.isArray(requiredValue) ? requiredValue : []) {
+		const path = typeof value === "string" ? value : String(value ?? "");
+		if (!path || path !== path.trim()) {
+			issues.push({
+				path: coveragePathLabel(path),
+				status: "invalid",
+				reason: "planned coverage path is blank or whitespace-padded",
+			});
+			continue;
+		}
+		if (seenRequired.has(path)) {
+			issues.push({
+				path,
+				status: "duplicate",
+				reason: "planned coverage path is duplicated",
+			});
+			continue;
+		}
+		seenRequired.add(path);
+		requiredPaths.push(path);
+	}
+	if (requiredPaths.length === 0 && issues.length === 0) {
+		return { issues: [], rows: [] };
+	}
+	const rows = asObjects(coverageValue).map((row) => ({
+		path: typeof row.path === "string" ? row.path : String(row.path ?? ""),
+		status: String(row.status ?? "").trim(),
+		evidence: String(row.evidence ?? "").trim(),
+		artifact:
+			typeof row.artifact === "string"
+				? row.artifact
+				: String(row.artifact ?? ""),
+		reason: String(row.reason ?? "").trim(),
+	}));
+	const requiredSet = new Set(requiredPaths);
+	for (const path of requiredPaths) {
+		const matches = rows.filter((row) => row.path === path);
+		if (matches.length === 0) {
+			issues.push({ path, status: "missing", reason: "coverage row missing" });
+			continue;
+		}
+		if (matches.length > 1) {
+			issues.push({ path, status: "duplicate", reason: "coverage row duplicated" });
+			continue;
+		}
+		const row = matches[0];
+		if (!USABLE_SOURCE_COVERAGE.has(row.status)) {
+			issues.push({
+				path,
+				status: row.status || "invalid",
+				reason: row.reason || "required source content was not read",
+			});
+			continue;
+		}
+		const evidenceIssue = exactSourceQuoteIssue(row, path, context);
+		if (evidenceIssue) {
+			issues.push({ path, status: row.status, reason: evidenceIssue });
+		}
+	}
+	for (const row of rows) {
+		if (!row.path || !requiredSet.has(row.path)) {
+			issues.push({
+				path: coveragePathLabel(row.path),
+				status: row.status || "invalid",
+				reason: "unexpected coverage row",
+			});
+		}
+	}
+	return { issues, rows };
+}
+
+function sourceCoverageFailure(sourceId, reviewerId, assessment) {
+	const issuePaths = dedupeStrings(
+		assessment.issues.map((issue) => coveragePathLabel(issue.path)),
+	);
+	const statuses = dedupeStrings(
+		assessment.issues.map((issue) => issue.status).filter(Boolean),
+	);
+	const rawIssuePathSet = new Set(
+		assessment.issues.map((issue) => String(issue.path ?? "")),
+	);
+	const extractionArtifacts = dedupeStrings(
+		assessment.rows
+			.filter((row) => rawIssuePathSet.has(row.path))
+			.map((row) => row.artifact)
+			.filter(Boolean),
+	);
+	const details = assessment.issues
+		.map(
+			(issue) =>
+				`${coveragePathLabel(issue.path)}: ${issue.status} (${issue.reason})`,
+		)
+		.join("; ")
+		.slice(0, 500);
+	return {
+		source: sourceId,
+		displayName: sourceId,
+		specId: sourceId,
+		stageId: String(sourceId).split(".")[0],
+		status: "source_coverage_incomplete",
+		statusDetail: `${reviewerId || "unknown reviewer"}: ${details}`.slice(0, 500),
+		errorType: "source_coverage",
+		sourcePath: (issuePaths.join(", ") || "(unknown source)").slice(0, 500),
+		coverageStatus: (statuses.join(", ") || "invalid").slice(0, 120),
+		...(extractionArtifacts.length > 0
+			? { extractionArtifact: extractionArtifacts.join(", ").slice(0, 500) }
+			: {}),
+	};
 }
 
 function idArray(value) {
@@ -747,6 +1162,10 @@ function reviewerCoverageLedger(sources, context, coverageIssues) {
 	const contextPlan = idArray(context?.plannedLensIds);
 	for (const id of contextPlan) if (!plannedLensIds.includes(id)) plannedLensIds.push(id);
 
+	const triageLenses = asObjects(triageSource?.[1]?.reviewLenses);
+	const lensById = new Map(
+		triageLenses.map((lens) => [String(lens.id ?? "").trim(), lens]),
+	);
 	const reviewerEntries = Object.entries(sources ?? {}).filter(
 		([sourceId, source]) => !isTriageSource(sourceId, source),
 	);
@@ -755,6 +1174,7 @@ function reviewerCoverageLedger(sources, context, coverageIssues) {
 	const materializedReviewerSourceIds = [];
 	const validAttestationSourceIds = [];
 	const ownerMap = [];
+	const sourceCoverageFailures = [];
 	let ownerBindingValid = true;
 	for (const [sourceId, source] of reviewerEntries) {
 		const owners = reviewerStatusesForAlias(rawStatuses, sourceId);
@@ -777,8 +1197,18 @@ function reviewerCoverageLedger(sources, context, coverageIssues) {
 		if (evidenceChecked.length === 0) reasons.push("reviewer_control_missing_evidenceChecked_attestation");
 		if (findings.length === 0 && noIssueNotes.length === 0)
 			reasons.push("empty_reviewer_output_missing_noIssueNotes_attestation");
-		if (typeof source?.lens !== "string" || !source.lens.trim())
-			reasons.push("reviewer_control_missing_materialized_lens");
+		const lensId = String(source?.lens ?? "").trim();
+		if (!lensId) reasons.push("reviewer_control_missing_materialized_lens");
+		const sourceCoverage = assessSourceCoverage(
+			lensById.get(lensId)?.evidenceToInspect,
+			source?.sourceCoverage,
+			context,
+		);
+		if (sourceCoverage.issues.length > 0) {
+			sourceCoverageFailures.push(
+				sourceCoverageFailure(sourceId, lensId, sourceCoverage),
+			);
+		}
 		if (owner) {
 			materializedReviewerIds.push(owner.itemIdentity);
 			materializedReviewerSourceIds.push(sourceId);
@@ -830,6 +1260,7 @@ function reviewerCoverageLedger(sources, context, coverageIssues) {
 		duplicateMaterializedReviewerIds: [...new Set(duplicateMaterializedReviewerIds)],
 		setEquality: ownerBindingValid && sameSet(plannedLensIds, materializedReviewerIds) && sameSet(plannedLensIds, attestedLensIds),
 		sourceStatuses: statuses,
+		sourceCoverageFailures,
 	};
 }
 
@@ -858,6 +1289,19 @@ function dedupFindings(sources, context = {}) {
 		}
 	}
 	const reviewerCoverage = reviewerCoverageLedger(sources, context, coverageIssues);
+	const sourceCoverageFailuresBySource = new Map();
+	for (const failure of reviewerCoverage.sourceCoverageFailures) {
+		const failures = sourceCoverageFailuresBySource.get(failure.source) ?? [];
+		failures.push(failure);
+		sourceCoverageFailuresBySource.set(failure.source, failures);
+	}
+	for (const finding of normalized) {
+		const failures = sourceCoverageFailuresBySource.get(finding.source) ?? [];
+		finding.sourceCoverageComplete = failures.length === 0;
+		finding.sourceCoverageIssuePaths = dedupeStrings(
+			failures.map((failure) => failure.sourcePath),
+		);
+	}
 	// Allocate occurrence-safe IDs before any deduplication. This makes raw IDs a
 	// lossless multiset rather than allowing duplicate reviewer echoes to cancel.
 	const occurrenceSafe = ensureUniqueFindingIds(normalized);
@@ -900,7 +1344,10 @@ function dedupFindings(sources, context = {}) {
 		coverageIssues.length,
 		...reviewerCoverageIssuesBySource.values(),
 	);
-	const statusSummary = sourceStatusSummary(sourceStatusesOf(context));
+	const statusSummary = applySourceCoverageFailures(
+		sourceStatusSummary(sourceStatusesOf(context)),
+		reviewerCoverage.sourceCoverageFailures,
+	);
 	const kept = [];
 	const duplicates = [];
 	for (const finding of normalized) {
@@ -1021,26 +1468,103 @@ function safeRepoRelativePath(file, repoRoot = process.cwd()) {
 	return path.relative(root, absolute).split(path.sep).join("/");
 }
 
-function readRepoText(file, repoRoot = process.cwd()) {
+function readRepoText(file, repoRoot = process.cwd(), maxBytes = Infinity) {
 	const relative = safeRepoRelativePath(file, repoRoot);
 	if (!relative) return { relative: null, exists: false, text: "" };
 	const root = path.resolve(repoRoot);
 	const absolute = path.resolve(root, relative);
+	let descriptor;
 	try {
 		const realRoot = fs.realpathSync(root);
-		const realAbsolute = fs.realpathSync(absolute);
-		if (!pathIsInsideRoot(realRoot, realAbsolute)) {
+		const initialRealAbsolute = fs.realpathSync(absolute);
+		if (!pathIsInsideRoot(realRoot, initialRealAbsolute)) {
 			return { relative, exists: false, text: "" };
 		}
-		const stat = fs.statSync(realAbsolute);
-		if (!stat.isFile()) return { relative, exists: false, text: "" };
+		descriptor = fs.openSync(
+			absolute,
+			fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0),
+		);
+		const openedStat = fs.fstatSync(descriptor);
+		const currentRealAbsolute = fs.realpathSync(absolute);
+		if (!pathIsInsideRoot(realRoot, currentRealAbsolute)) {
+			return { relative, exists: false, text: "" };
+		}
+		const currentStat = fs.statSync(currentRealAbsolute);
+		if (
+			!openedStat.isFile() ||
+			openedStat.dev !== currentStat.dev ||
+			openedStat.ino !== currentStat.ino
+		) {
+			return { relative, exists: false, text: "" };
+		}
+		const finiteLimit = Number.isFinite(maxBytes)
+			? Math.max(0, Math.floor(maxBytes))
+			: Infinity;
+		if (openedStat.size > finiteLimit) {
+			return { relative, exists: true, text: "", tooLarge: true };
+		}
+		const chunks = [];
+		let totalBytes = 0;
+		while (true) {
+			const remaining = Number.isFinite(finiteLimit)
+				? finiteLimit - totalBytes + 1
+				: 64 * 1024;
+			if (remaining <= 0) {
+				return { relative, exists: true, text: "", tooLarge: true };
+			}
+			const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, remaining));
+			const bytesRead = fs.readSync(
+				descriptor,
+				buffer,
+				0,
+				buffer.length,
+				null,
+			);
+			if (bytesRead === 0) break;
+			totalBytes += bytesRead;
+			if (totalBytes > finiteLimit) {
+				return { relative, exists: true, text: "", tooLarge: true };
+			}
+			chunks.push(buffer.subarray(0, bytesRead));
+		}
+		const finalStat = fs.fstatSync(descriptor);
+		const finalRealAbsolute = fs.realpathSync(absolute);
+		if (!pathIsInsideRoot(realRoot, finalRealAbsolute)) {
+			return { relative, exists: false, text: "" };
+		}
+		const finalPathStat = fs.statSync(finalRealAbsolute);
+		if (
+			finalStat.dev !== openedStat.dev ||
+			finalStat.ino !== openedStat.ino ||
+			finalPathStat.dev !== openedStat.dev ||
+			finalPathStat.ino !== openedStat.ino ||
+			finalStat.size !== openedStat.size ||
+			finalStat.size !== totalBytes ||
+			finalStat.mtimeMs !== openedStat.mtimeMs ||
+			finalStat.ctimeMs !== openedStat.ctimeMs
+		) {
+			return { relative, exists: false, text: "" };
+		}
+		const bytes = Buffer.concat(chunks, totalBytes);
 		return {
 			relative,
 			exists: true,
-			text: fs.readFileSync(realAbsolute, "utf8"),
+			text: bytes.toString("utf8"),
+			sha256: createHash("sha256").update(bytes).digest("hex"),
+			mode: finalStat.mode,
+			uid: finalStat.uid,
+			nlink: finalStat.nlink,
 		};
 	} catch {
 		return { relative, exists: false, text: "" };
+	} finally {
+		if (descriptor !== undefined) {
+			try {
+				fs.closeSync(descriptor);
+			} catch {
+				// The read result already failed closed if descriptor state drifted.
+			}
+		}
 	}
 }
 
@@ -2824,7 +3348,13 @@ function singletonVerdictMalformedReason(entry) {
 		return "malformed_devil_advocate_schema";
 	if (!Array.isArray(entry.evidence))
 		return "malformed_devil_advocate_evidence_array";
-	if (entry.evidence.some((value) => typeof value !== "string" || !value.trim()))
+	const legacyStringEvidence = entry.evidence.every(
+		(value) => typeof value === "string" && value.trim(),
+	);
+	const structuredEvidence = entry.evidence.every(
+		(value) => value && typeof value === "object" && !Array.isArray(value),
+	);
+	if (!legacyStringEvidence && !structuredEvidence)
 		return "malformed_devil_advocate_evidence_item";
 	if (!Array.isArray(entry.counterEvidence))
 		return "malformed_devil_advocate_counterEvidence_array";
@@ -2937,7 +3467,7 @@ function invalidDedupSummary() {
 function partitionVerdicts(sources, options = {}, context = {}) {
 	const dedupStageId = String(options.dedupStage ?? "dedup-findings");
 	const directStatusSummary = sourceStatusSummary(sourceStatusesOf(context));
-	const partialFailures = mergePartialFailures(
+	let partialFailures = mergePartialFailures(
 		directStatusSummary.partialFailures,
 		...Object.values(sources ?? {}).map(partialFailuresFromSource),
 	);
@@ -3173,6 +3703,28 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 				`verdict "${String(entry.verdict)}" normalized to ${verdict} for "${title}"`,
 			);
 		}
+		const structuredVerifierEvidence =
+			Array.isArray(entry.evidence) &&
+			entry.evidence.length > 0 &&
+			entry.evidence.every(
+				(value) => value && typeof value === "object" && !Array.isArray(value),
+			);
+		const verifierEvidenceResult = structuredVerifierEvidence
+			? verifierEvidenceRowsOf(entry.evidence)
+			: { rows: [], issues: [] };
+		const verifierEvidenceRows = verifierEvidenceResult.rows;
+		const verifierEvidenceQuotes = structuredVerifierEvidence
+			? verifierEvidenceRows.map((row) => row.quote)
+			: dedupeStrings(quoteStrings(entry.evidence));
+		const recommendedAction = contractText(entry.recommendedAction);
+		if (typeof entry.recommendedAction !== "string" && recommendedAction) {
+			const valueType = Array.isArray(entry.recommendedAction)
+				? "array"
+				: typeof entry.recommendedAction;
+			normalizationNotes.push(
+				`legacy recommendedAction for ${JSON.stringify(String(title))} normalized from ${valueType} to canonical JSON text`,
+			);
+		}
 		const item = {
 			findingId:
 				reviewerFinding?.findingId ?? reviewerFinding?.id ?? fallbackId,
@@ -3237,17 +3789,73 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 				...(reviewerFinding?.evidenceQuotes ?? []),
 				...quoteStrings(entry.evidenceQuotes),
 				...quoteStrings(entry.evidenceQuote),
+				...verifierEvidenceRows.map((row) => row.quote),
 			]),
-			evidence: entry.evidence ?? reviewerFinding?.evidence ?? [],
+			evidence: structuredVerifierEvidence
+				? verifierEvidenceRows
+				: (entry.evidence ?? reviewerFinding?.evidence ?? []),
 			rationale: reviewerFinding?.rationale ?? "",
-			verifierEvidence: quoteStrings(entry.evidence),
+			verifierEvidence: verifierEvidenceQuotes,
 			counterEvidence: dedupeStrings(quoteStrings(entry.counterEvidence)),
-			recommendedAction: contractText(entry.recommendedAction),
+			recommendedAction,
+			sourceCoverageComplete:
+				reviewerFinding?.sourceCoverageComplete !== false,
+			sourceCoverageIssuePaths: dedupeStrings(
+				reviewerFinding?.sourceCoverageIssuePaths ?? [],
+			),
 			...(row.owner ? { verifierOwner: { ...row.owner } } : {}),
 			...(row.batched
 				? { evidenceSourceType: batchEvidenceSourceType(entry) }
 				: {}),
 		};
+		if (
+			item.sourceCoverageComplete === false ||
+			item.sourceCoverageIssuePaths.length > 0
+		) {
+			const issuePaths = item.sourceCoverageIssuePaths;
+			const note = `originating reviewer did not complete required source coverage${
+				issuePaths.length > 0 ? `: ${issuePaths.join(", ")}` : ""
+			}`;
+			partitions.needsHuman.push({
+				...item,
+				verdict: "NEEDS_HUMAN",
+				note,
+			});
+			normalizationNotes.push(
+				`verdict for "${title}" came from incomplete source coverage; routed to NEEDS_HUMAN instead of ${verdict}`,
+			);
+			continue;
+		}
+		const verifierEvidenceIssues =
+			!row.batched && structuredVerifierEvidence
+				? [
+						...verifierEvidenceResult.issues,
+						...verifierEvidenceGroundingIssues(
+							verifierEvidenceRows,
+							context,
+						),
+					]
+				: [];
+		if (verifierEvidenceIssues.length > 0) {
+			const failure = {
+				source: row.sourceId ?? "unknown-verifier",
+				specId: row.sourceId ?? "unknown-verifier",
+				stageId: "devil-advocate",
+				status: "verifier_evidence_unverified",
+				statusDetail: `verifier evidence was not grounded: ${verifierEvidenceIssues[0]}`,
+				errorType: "verifier_evidence",
+			};
+			partialFailures = mergePartialFailures(partialFailures, [failure]);
+			partitions.needsHuman.push({
+				...item,
+				verdict: "NEEDS_HUMAN",
+				note: failure.statusDetail,
+			});
+			normalizationNotes.push(
+				`verdict for "${title}" had ungrounded verifier evidence; routed to NEEDS_HUMAN instead of ${verdict}`,
+			);
+			continue;
+		}
 		const batchDemotionReason = row.batched
 			? conservativeBatchVerdictDemotionReason(
 					entry,
@@ -3278,15 +3886,14 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 				item.locations.length === 0 ||
 				!Array.isArray(item.evidenceQuotes) ||
 				item.evidenceQuotes.length === 0);
-		const verifierEvidence = dedupeStrings(quoteStrings(entry.evidence));
 		const lacksVerifierEvidence =
 			!isSupportItem &&
-			((verdict === "KEEP" && verifierEvidence.length === 0) ||
+			((verdict === "KEEP" && verifierEvidenceQuotes.length === 0) ||
 				(verdict === "WEAKEN" &&
-					verifierEvidence.length === 0 &&
+					verifierEvidenceQuotes.length === 0 &&
 					dedupeStrings(quoteStrings(entry.counterEvidence)).length === 0) ||
 				(verdict === "DROP" &&
-					verifierEvidence.length === 0 &&
+					verifierEvidenceQuotes.length === 0 &&
 					dedupeStrings(quoteStrings(entry.counterEvidence)).length === 0));
 		if (lacksIdentityEvidence || lacksVerifierEvidence) {
 			partitions.needsHuman.push({
