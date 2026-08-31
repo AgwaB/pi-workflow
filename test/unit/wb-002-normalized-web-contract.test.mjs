@@ -1343,28 +1343,28 @@ test("WB-002 fetch lock roots and owners use private modes while held", async (t
 	}
 });
 
-test("WB-002 documentation states the normalized and legacy web compatibility contracts", () => {
+test("WB-002 detailed web compatibility contracts live in usage, not README", () => {
 	const root = resolve(import.meta.dirname, "../..");
 	const readme = readFileSync(join(root, "README.md"), "utf8");
 	const usage = readFileSync(join(root, "docs/usage.md"), "utf8");
-	for (const text of [readme, usage]) {
-		assert.match(text, /canonical/i);
-		assert.match(text, /fail(?:s|ure)? fast|fail-fast/i);
-		assert.match(text, /readable/);
-		assert.match(text, /raw/);
-		assert.match(text, /answer/);
-		assert.match(text, /auth/);
-		assert.match(text, /responseId/);
-		assert.match(text, /get_search_content/);
-		assert.match(text, /offset/);
-		assert.match(text, /limit/);
-		assert.match(text, /nextOffset/);
-		assert.match(text, /truncated/);
-		assert.match(text, /findText/);
-		assert.match(text, /findMode/);
-		assert.match(text, /pi-workflow-direct-safe-fetch/);
-		assert.match(text, /pi-workflow-strict-public-http-v1/);
-		assert.match(text, /allowRanges/);
-		assert.match(text, /proxy/);
-	}
+	assert.match(usage, /canonical/i);
+	assert.match(usage, /fail(?:s|ed)? fast|fail-fast|failure fast/i);
+	assert.match(usage, /readable/);
+	assert.match(usage, /raw/);
+	assert.match(usage, /answer/);
+	assert.match(usage, /auth/);
+	assert.match(usage, /responseId/);
+	assert.match(usage, /get_search_content/);
+	assert.match(usage, /offset/);
+	assert.match(usage, /limit/);
+	assert.match(usage, /nextOffset/);
+	assert.match(usage, /truncated/);
+	assert.match(usage, /findText/);
+	assert.match(usage, /findMode/);
+	assert.match(usage, /pi-workflow-direct-safe-fetch/);
+	assert.match(usage, /pi-workflow-strict-public-http-v1/);
+	assert.match(usage, /allowRanges/);
+	assert.match(usage, /proxy/);
+	assert.match(readme, /\[`docs\/usage\.md`\]\(\.\/docs\/usage\.md\)/);
+	assert.doesNotMatch(readme, /providerKind: "extension"|nextOffset|pi-workflow-direct-safe-fetch/);
 });
