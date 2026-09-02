@@ -129,7 +129,7 @@ export function formatWorkflowPruneSummary(summary: WorkflowPruneSummary): strin
 			);
 		}
 	}
-	lines.push(`Total bytes: ${summary.totalBytes}`);
+	lines.push(`Total bytes: ${summary.totalBytes} (logical file bytes; hard links counted once, so du may report more)`);
 	if (!summary.dryRun) lines.push(`Deleted bytes: ${summary.deletedBytes}`);
 	if (summary.error) lines.push(`Error: ${summary.error}`);
 	return lines.join("\n");
