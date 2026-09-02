@@ -151,6 +151,7 @@ Usage:
   /workflow wait <run-id> [timeout-ms]
   /workflow resume <run-id>
   /workflow stop <run-id>
+  /workflow prune [--keep N] [--older-than DAYS] [--yes] [--json]
 
 /workflow opens the read-only workflow board TUI.
 /workflow <run-id> opens the board focused on that run.

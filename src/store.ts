@@ -52,7 +52,7 @@ import {
 import { buildWorkflowRunMetrics } from "./workflow-metrics.js";
 import { assertUniqueRunTaskIds } from "./foreach-batch-runtime.js";
 
-const TERMINAL_INDEX_LIMIT = 50;
+export const TERMINAL_INDEX_LIMIT = 50;
 export const LEASE_STALE_MS = 30_000;
 export const FAIL_FAST_CANCELLED_STATUS_DETAIL = "fail_fast_cancelled";
 const LEASE_ABSOLUTE_STALE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -157,7 +157,7 @@ export function assertSafeRunId(runId: string): void {
 	}
 }
 
-function isSafeRunId(runId: unknown): runId is string {
+export function isSafeRunId(runId: unknown): runId is string {
 	try {
 		assertSafeRunId(runId as string);
 		return true;
@@ -3379,6 +3379,38 @@ export async function createWorkflowRunRecord(
 	const result = await createRunRecord(cwd, compiled, specPath);
 	result.run.type = WORKFLOW_RUN_TYPE as any;
 	return result;
+}
+
+export async function isWorkflowRunLeaseLive(
+	cwd: string,
+	runId: string,
+): Promise<boolean> {
+	const dir = workflowRunDir(cwd, runId);
+	const lockFile = join(dir, "supervisor.lock");
+	try {
+		const lock = await readLockSnapshot(lockFile);
+		if (lock) return !(await lockReclaimDecision(lockFile, lock)).reclaimable;
+		for (const file of [join(dir, "supervisor.json"), supervisorLeasePath(cwd, runId)]) {
+			try {
+				const record = JSON.parse(await readFile(file, "utf8")) as {
+					pid?: unknown;
+					updatedAt?: unknown;
+					heartbeatAt?: unknown;
+				};
+				const heartbeatAt = record.heartbeatAt ?? record.updatedAt;
+				const pid = typeof record.pid === "number" ? record.pid : undefined;
+				const timestamp = typeof heartbeatAt === "string" ? Date.parse(heartbeatAt) : NaN;
+				if (!Number.isFinite(timestamp)) return true;
+				if (Date.now() - timestamp <= LEASE_STALE_MS && pid !== undefined && isProcessAlive(pid)) return true;
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+				return true;
+			}
+		}
+		return false;
+	} catch {
+		return true;
+	}
 }
 
 export function supervisorLeasePath(cwd: string, runId: string): string {
