@@ -188,7 +188,7 @@ Name refs use the first priority root that contains a match:
 
 1. `<cwd>/workflows/` — repo-tracked, project-shared workflows
 2. `<cwd>/.pi/workflows/` — project-private workflows
-3. `~/.pi/agent/workflows/` — user/global workflows
+3. `~/.pi/agent/workflows/` — user/global workflows (under `$PI_CODING_AGENT_DIR/workflows/` when Pi's config-directory override is set; user agents under the same root's `agents/` follow it too)
 4. bundled package `workflows/`
 
 A higher-priority name shadows matches in lower-priority roots. Resolution fails closed as ambiguous only when more than one matching spec exists at the winning priority (for example both flat and bundle forms for the same name in one root); a lower-priority duplicate does not make the name ambiguous.

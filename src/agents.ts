@@ -1,5 +1,4 @@
 import { lstat, readdir, readFile, realpath } from "node:fs/promises";
-import { homedir } from "node:os";
 import {
 	basename,
 	dirname,
@@ -11,6 +10,7 @@ import {
 } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { piAgentDir } from "./pi-agent-dir.js";
 import {
 	APPROVAL_MODES,
 	type AgentDefinition,
@@ -136,7 +136,7 @@ export function parseAgentMarkdown(
 function agentRoots(cwd: string): Array<{ path: string; scope: AgentScope }> {
 	return [
 		{ path: resolve(cwd, ".pi", "agents"), scope: "project" },
-		{ path: join(homedir(), ".pi", "agent", "agents"), scope: "user" },
+		{ path: join(piAgentDir(), "agents"), scope: "user" },
 		...bundledAgentRoots().map((path) => ({ path, scope: "bundled" as const })),
 	];
 }
