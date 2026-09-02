@@ -85,7 +85,6 @@ export async function refreshRunOrRecordPollError(
  * wall time without deriving expectations from prior runs.
  */
 export async function stillRunningAfterWaitMessage(
-	cwd: string,
 	run: WorkflowRunRecord,
 	timeoutMs: number,
 ): Promise<string> {

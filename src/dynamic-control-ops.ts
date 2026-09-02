@@ -39,7 +39,6 @@ import type {
 	WorkflowTaskRunRecord,
 } from "./types.js";
 import type { WorkflowSourceManifestSource } from "./workflow-artifact-tool.js";
-import { readSimpleJsonPath } from "./workflow-runtime.js";
 
 export async function runDynamicDecisionPersistCall(input: {
 	cwd: string;
@@ -911,24 +910,6 @@ function requiredDynamicNonNegativeInteger(
 	return value;
 }
 
-function requiredDynamicPositiveInteger(
-	value: unknown,
-	field: string,
-	api: string,
-): number {
-	if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
-		throw new Error(`${api} ${field} must be a positive integer`);
-	}
-	return value;
-}
-
 function optionalDynamicStringField(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
-function optionalDynamicOutputProfile(
-	value: unknown,
-): DynamicOutputProfile | undefined {
-	if (value === undefined) return undefined;
-	return requiredDynamicOutputProfile(value, "outputProfile", "ctx.agent()");
 }

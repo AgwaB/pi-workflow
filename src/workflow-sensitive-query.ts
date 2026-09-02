@@ -87,7 +87,7 @@ export function redactSensitiveWorkflowText(value: string): string {
 	// ordinary anchors are returned unchanged by the fragment helper.
 	const withFragments = withUrls.replace(
 		/(^|[\s("'=:)])#([^\s)\]}>"]+)/gu,
-		(whole, prefix, fragment) => `${prefix}${redactSensitiveWorkflowFragment(`#${fragment}`)}`,
+		(_whole, prefix, fragment) => `${prefix}${redactSensitiveWorkflowFragment(`#${fragment}`)}`,
 	);
 	const assignment = /(["']?)([^\s"'=:,;{}]+)\1\s*([=:])\s*(["']?)([^\s"'&,;}]+)\4/gu;
 	const redactedAssignments = withFragments.replace(assignment, (whole, quote, key, delimiter, valueQuote) => {
