@@ -8,6 +8,7 @@ function usage() {
 
 Usage:
   pi-workflow inspect <run-id-or-prefix> [--failures] [--results] [--json]
+  pi-workflow prune [--keep N] [--older-than DAYS] [--yes] [--json]
   pi-workflow supervise <run-id-or-prefix> [--poll-ms N] [--max-runtime-ms N]
   pi-workflow supervise --all [--poll-ms N] [--max-runtime-ms N]
 
@@ -27,6 +28,10 @@ if (!command || command === "help" || command === "--help" || command === "-h") 
 
 if (command === "supervise") {
   process.exit(await supervise(args.slice(1)));
+}
+
+if (command === "prune") {
+  process.exit(await prune(args.slice(1)));
 }
 
 if (command !== "inspect") {
@@ -83,6 +88,38 @@ for (const task of selected) {
 }
 
 process.stdout.write(`${lines.join("\n")}\n`);
+
+async function prune(argv) {
+  let keep;
+  let olderThanDays;
+  let yes = false;
+  let json = false;
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === "--yes") yes = true;
+    else if (arg === "--json") json = true;
+    else if (arg === "--keep") keep = Number(argv[++index]);
+    else if (arg === "--older-than") olderThanDays = Number(argv[++index]);
+    else {
+      process.stderr.write(`Unknown prune argument "${arg}".\n${usage()}`);
+      return 1;
+    }
+  }
+  if (keep !== undefined && (!Number.isInteger(keep) || keep < 0)) {
+    process.stderr.write("--keep requires a non-negative integer.\n");
+    return 1;
+  }
+  if (olderThanDays !== undefined && (!Number.isFinite(olderThanDays) || olderThanDays < 0)) {
+    process.stderr.write("--older-than requires a non-negative number of days.\n");
+    return 1;
+  }
+  const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+  const buildDir = await resolveEngineDist(packageRoot);
+  const retention = await import(pathToFileURL(join(buildDir, "run-retention.js")).href);
+  const summary = await retention.pruneWorkflowRuns(process.cwd(), { keep, olderThanDays, yes });
+  process.stdout.write(`${json ? JSON.stringify(summary, null, 2) : retention.formatWorkflowPruneSummary(summary)}\n`);
+  return summary.error ? 1 : 0;
+}
 
 async function supervise(argv) {
   let runRef;

@@ -47,6 +47,7 @@ Terminal CLI:
 
 ```bash
 pi-workflow inspect <run-id-or-prefix> [--failures] [--results] [--json]
+pi-workflow prune [--keep N] [--older-than DAYS] [--yes] [--json]
 pi-workflow supervise <run-id-or-prefix> [--poll-ms N] [--max-runtime-ms N]
 pi-workflow supervise --all [--poll-ms N] [--max-runtime-ms N]
 ```
@@ -147,6 +148,7 @@ For reusable workflow authoring, `workflow-guide` includes validated scaffold bu
 | `/workflow logs <run-id> [task-id-or-spec-id] [lines]` | Print captured logs for a workflow task. Defaults to `task-1`; a stage/spec id resolves when it identifies a task unambiguously. |
 | `/workflow wait <run-id> [timeout-ms]` | Poll until the run finishes or the optional timeout elapses. |
 | `/workflow stop <run-id>` | Interrupt a non-terminal run, best-effort interrupt active subagents, mark unfinished tasks interrupted, and stop the local supervisor watch. Use `/workflow resume <run-id>` if you want to restart unfinished work later. |
+| `/workflow prune [--keep N] [--older-than DAYS] [--yes]` | Preview or delete terminal runs beyond the retention filters. Deletion requires `--yes`. |
 | `/workflow resume <run-id>` | Resume a failed, interrupted, or resumable blocked run (including dynamic approval blocked in headless mode): completed tasks are preserved; failed/interrupted/skipped or resumable blocked tasks reset to pending and reschedule. Loop workflows are not supported yet. |
 
 Interactive `/workflow run` and `/workflow dynamic` slash commands use Pi's cancellable foreground loader while routing, validating, and completing the initial scheduling pass. After at least one backend task is actually running, the command returns and a compact `Active workflows` widget below the editor plus a footer status tracks top-level run progress. Launch/preparation states and stale `running` records with no running task are excluded. The widget is rebuilt from `.pi/workflows` after session reload, supports multiple active runs, and clears when none remain; open `/workflow` for the full board. Natural-language launch-only calls use the same background widget. Natural-language calls with `awaitTerminal: true`, and explicit `workflow_wait` calls, drive the existing scheduler until terminal or action-required blocked state and return only a bounded authoritative-output preview. They report retries, usage, degradation, and the artifact root. For an ordinary output-bearing `completed` run, active-session completion feedback asks the parent to present only the substantive result in the user's language: direct conclusion, key findings or recommendations, evidence level, and important limitations or open decisions. It does not ask the parent to repeat routine success metadata or list artifact paths. Clean `workflow_run`/`workflow_wait` terminal tool text follows the same result-only rule while keeping run ids, lifecycle state, retries, and artifact roots in structured tool details for programmatic consumers. A final control field named `completionSummaryMarkdown`, when present, is preferred over the full report for these handoffs. Degraded, failed, blocked, interrupted, duplicate-delivery, and output-missing outcomes still surface lifecycle state and the next useful action. `engineStatus` is the persisted lifecycle state; `semanticStatus` interprets the result. Output-bearing successes include `completed`, `completed_degraded`, `synthesized`, and `exhausted_with_output`; `completed_without_semantic_result` and `exhausted_without_output` explicitly report that no authoritative result exists. Blocked variants return `actionRequired: true`, while `failed`, `interrupted`, and `dynamic_incomplete` are unsuccessful terminal outcomes. New direct-dynamic runtime v4 reserves its last configured decision round for canonical synthesize-or-block validation; a controller that still produces no synthesis output fails with `dynamic_incomplete`. Historical v3 exhausted runs remain readable as `exhausted_without_output`.
@@ -685,6 +687,10 @@ Important files:
 | `tasks/<task-id>/result.json` | Structured task result envelope and artifact pointers. |
 
 Subagent worker artifacts are stored under `.pi/workflow-subagents/` by default and are referenced from the workflow run record.
+
+### Retention
+
+Nothing is deleted automatically. Run `pi-workflow prune` or `/workflow prune` to preview terminal runs beyond the retention window; add `--yes` to delete them. When identical, `tasks/<task-id>/output.log` and `raw.md` are hard links to the same file contents.
 
 All four bundled workflows use a common completion envelope while preserving workflow-specific verdicts and evidence models. A successful final renderer writes a compact `completionSummaryMarkdown` for result-only parent handoff and `final-report.md` as the stable user-facing sidecar; the first detailed section is **Executive summary**, evidence and limitations remain explicit, and supporting links appear only in the final **Related artifacts** section. `deep-research` keeps byte-identical `executive.md` plus its claim-level `audit.md`; `deep-review` keeps byte-identical `review.md`; `spec-review` and `impact-review` keep their canonical source controls in `source-ledger.json`. Missing, partial, contradictory, or incompletely rendered canonical ledgers fail or block the final support task instead of producing a clean completion.
 

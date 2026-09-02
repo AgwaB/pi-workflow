@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
-import { mkdir, rename, writeFile } from "node:fs/promises";
+import { link, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
 import { nonPublicIpReason } from "./workflow-network-policy.js";
@@ -2427,6 +2427,16 @@ function parsedOutputValid(
 	return true;
 }
 
+export type TaskArtifactLinkTestHook = (source: string, target: string) => void | Promise<void>;
+
+let taskArtifactLinkForTests: TaskArtifactLinkTestHook | undefined;
+
+export function setTaskArtifactLinkForTests(
+	hook: TaskArtifactLinkTestHook | undefined,
+): void {
+	taskArtifactLinkForTests = hook;
+}
+
 type WorkflowOutputArtifactWriteHook = (event: {
 	phase: "before" | "after";
 	file: string;
@@ -2506,11 +2516,34 @@ async function writeSidecars(
 		writeJsonAtomic(files.control!, parsed.control),
 		writeTextAtomic(files.analysis!, ensureTrailingNewline(parsed.analysis)),
 		writeJsonAtomic(files.refs!, parsed.refs),
-		writeTextAtomic(files.raw!, options.rawOutput),
+		writeRawArtifact(files.raw!, options.rawOutput),
 		writeOptionalText(files.prompt, options.prompt),
 		writeOptionalText(files["system-prompt"], options.systemPrompt),
 		writeOptionalText(files.stderr, options.stderr),
 	]);
+}
+
+async function writeRawArtifact(file: string, value: string): Promise<void> {
+	const outputFile = join(dirname(file), "output.log");
+	const expected = Buffer.from(value, "utf8");
+	try {
+		const output = await stat(outputFile);
+		if (output.isFile() && output.size === expected.byteLength) {
+			const actual = await readFile(outputFile);
+			if (Buffer.compare(actual, expected) === 0) {
+				await taskArtifactLinkForTests?.(outputFile, file);
+				await unlink(file).catch((error: unknown) => {
+					if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+				});
+				await link(outputFile, file);
+				await emitWorkflowOutputArtifactWriteHook({ phase: "after", file });
+				return;
+			}
+		}
+	} catch {
+		// A failed comparison or hard-link attempt falls back to the normal atomic write.
+	}
+	await writeTextAtomic(file, value);
 }
 
 async function writeOptionalText(

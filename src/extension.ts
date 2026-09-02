@@ -42,6 +42,10 @@ import {
 import { WORKFLOW_COMMAND, WORKFLOW_HELP } from "./index.js";
 import { showWorkflowView } from "./workflow-view.js";
 import {
+	formatWorkflowPruneSummary,
+	pruneWorkflowRuns,
+} from "./run-retention.js";
+import {
 	assertWorkflowActionAllowedForRole,
 	assertWorkflowToolAllowedForRole,
 	isWorkflowSupervisorEnabled,
@@ -2820,6 +2824,7 @@ export const WORKFLOW_KNOWN_ACTIONS: ReadonlySet<string> = new Set([
 	"wait",
 	"resume",
 	"stop",
+	"prune",
 	"--help",
 	"-h",
 ]);
@@ -3361,6 +3366,19 @@ async function handleWorkflowCommand(
 			return;
 		}
 
+		if (action === "prune") {
+			const options = parseWorkflowPruneArgs(tokens.slice(1));
+			const summary = await pruneWorkflowRuns(ctx.cwd, options);
+			emit(
+				ctx,
+				options.json
+					? JSON.stringify(summary, null, 2)
+					: formatWorkflowPruneSummary(summary),
+				"info",
+			);
+			return;
+		}
+
 		throw new Error(
 			`Unknown /workflow action "${action}". Try /workflow help.`,
 		);
@@ -3519,6 +3537,28 @@ function emitWorkflowLaunchNotice(
 		? "Routing request and preparing run…"
 		: "Preparing run and scheduling first task…";
 	emit(ctx, `Starting ${label}\n${preparation}`, "info");
+}
+
+function parseWorkflowPruneArgs(args: string[]): {
+	keep?: number;
+	olderThanDays?: number;
+	yes?: boolean;
+	json?: boolean;
+} {
+	const options: ReturnType<typeof parseWorkflowPruneArgs> = {};
+	for (let index = 0; index < args.length; index += 1) {
+		const arg = args[index];
+		if (arg === "--yes") options.yes = true;
+		else if (arg === "--json") options.json = true;
+		else if (arg === "--keep") options.keep = Number(args[++index]);
+		else if (arg === "--older-than") options.olderThanDays = Number(args[++index]);
+		else throw new Error(`Unknown prune argument "${arg}"`);
+	}
+	if (options.keep !== undefined && (!Number.isInteger(options.keep) || options.keep < 0))
+		throw new Error("--keep requires a non-negative integer");
+	if (options.olderThanDays !== undefined && (!Number.isFinite(options.olderThanDays) || options.olderThanDays < 0))
+		throw new Error("--older-than requires a non-negative number of days");
+	return options;
 }
 
 function formatError(error: unknown): string {

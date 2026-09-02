@@ -2,12 +2,14 @@ import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import {
 	copyFile,
+	link,
 	mkdir,
 	readFile,
 	readdir,
 	rename,
 	rm,
 	stat,
+	unlink,
 	writeFile,
 } from "node:fs/promises";
 import {
@@ -7042,6 +7044,30 @@ function stringValue(value: unknown): string | undefined {
 	return typeof value === "string" ? value : undefined;
 }
 
+export type TaskArtifactLinkTestHook = (source: string, target: string) => void | Promise<void>;
+
+let taskArtifactLinkForTests: TaskArtifactLinkTestHook | undefined;
+
+export function setTaskArtifactLinkForTests(
+	hook: TaskArtifactLinkTestHook | undefined,
+): void {
+	taskArtifactLinkForTests = hook;
+}
+
+async function linkTaskArtifact(source: string, target: string): Promise<void> {
+	await taskArtifactLinkForTests?.(source, target);
+	await unlinkExistingTaskArtifact(target);
+	await link(source, target);
+}
+
+async function unlinkExistingTaskArtifact(target: string): Promise<void> {
+	try {
+		await unlink(target);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") return;
+	}
+}
+
 async function copyLogOrEmpty(
 	snapshot: SubagentRunStatusSnapshot,
 	ref: SubagentRunLogRef | undefined,
@@ -7061,10 +7087,14 @@ async function copyLogOrEmpty(
 		return 0;
 	}
 	let copied = true;
-	await copyFile(source, target).catch(async () => {
-		copied = false;
-		await writeFile(target, "", "utf8");
-	});
+	try {
+		await linkTaskArtifact(source, target);
+	} catch {
+		await copyFile(source, target).catch(async () => {
+			copied = false;
+			await writeFile(target, "", "utf8");
+		});
+	}
 	if (!copied) return 0;
 	return stat(target)
 		.then((value) => value.size)
