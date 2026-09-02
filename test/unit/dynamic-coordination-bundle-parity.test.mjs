@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -31,12 +31,16 @@ function extractCoordinationBlock(prompt) {
 
 async function loadBundledPlannerPrompt() {
 	const dir = mkdtempSync(join(tmpdir(), "dynamic-coordination-bundle-"));
-	const controllerPath = join(dir, "controller.mjs");
-	writeFileSync(controllerPath, directDynamicControllerSource(), "utf8");
-	const imported = await import(pathToFileURL(controllerPath).href);
-	assert.equal(typeof imported.default, "function");
-	assert.equal(typeof imported.directDynamicPlannerPrompt, "function");
-	return imported.directDynamicPlannerPrompt;
+	try {
+		const controllerPath = join(dir, "controller.mjs");
+		writeFileSync(controllerPath, directDynamicControllerSource(), "utf8");
+		const imported = await import(pathToFileURL(controllerPath).href);
+		assert.equal(typeof imported.default, "function");
+		assert.equal(typeof imported.directDynamicPlannerPrompt, "function");
+		return imported.directDynamicPlannerPrompt;
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
 }
 
 function baseFixtureInput(coordination) {
@@ -230,22 +234,26 @@ test("direct-dynamic reserved final round is synthesis-only in package and bundl
 
 test("direct-dynamic v4 controller opts into final synthesis reservation", async () => {
 	const dir = mkdtempSync(join(tmpdir(), "dynamic-controller-v4-"));
-	const controllerPath = join(dir, "controller.mjs");
-	writeFileSync(controllerPath, directDynamicControllerSource(), "utf8");
-	const imported = await import(pathToFileURL(controllerPath).href);
-	let captured;
-	const result = { control: { status: "synthesized" } };
-	const observed = await imported.default({
-		dynamic: {
-			async runDecisionLoop(options) {
-				captured = options;
-				return result;
+	try {
+		const controllerPath = join(dir, "controller.mjs");
+		writeFileSync(controllerPath, directDynamicControllerSource(), "utf8");
+		const imported = await import(pathToFileURL(controllerPath).href);
+		let captured;
+		const result = { control: { status: "synthesized" } };
+		const observed = await imported.default({
+			dynamic: {
+				async runDecisionLoop(options) {
+					captured = options;
+					return result;
+				},
 			},
-		},
-	});
-	assert.equal(observed, result);
-	assert.equal(captured.reserveFinalRoundForSynthesis, true);
-	assert.equal(typeof captured.buildPlannerPrompt, "function");
+		});
+		assert.equal(observed, result);
+		assert.equal(captured.reserveFinalRoundForSynthesis, true);
+		assert.equal(typeof captured.buildPlannerPrompt, "function");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
 });
 
 test("direct-dynamic runtime bundle version label is bumped to v4", () => {
