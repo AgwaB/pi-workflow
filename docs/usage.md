@@ -540,6 +540,8 @@ Use workflow-local JSON Schema files when the control plane needs stronger valid
 
 The built-in validator supports the subset used by bundled workflows: `type`, `required`, `properties`, `items`, `enum`, `const`, length/item/number bounds, `additionalProperties`, and simple `allOf`/`anyOf`/`oneOf`. Unsupported keywords such as `$ref`, `$defs`, `definitions`, and `pattern` are rejected when the workflow is loaded.
 
+When a control schema constrains `control.schema` with `const` or `enum`, that value is the semantic output protocol identifier; it is independent of the schema file's basename. Model prompts and examples must emit the exact constrained value rather than deriving one from `output.controlSchema` (for example, `stage-control-v1`, not `questions-control.schema`).
+
 ### Opt-in partial output for streaming foreach
 
 A producer stage can declare stable array paths that may be published before terminal completion:
