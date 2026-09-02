@@ -37,7 +37,7 @@ Copy their proven conventions (see "Quality design patterns"), not just their st
 - Use `type: "dynamic"` only for trusted adaptive orchestration that must create official child tasks at runtime with `ctx.agent()`, `ctx.helper()`, or `ctx.workflow()`.
 - For synthesis/fan-in, use `reduce.from` and require/encourage `workflow_artifact` reads for detailed upstream artifacts.
 - For deterministic local post-processing, declare a `support` object with `support.uses` pointing to a bundle-local `./*.mjs` helper; support is trusted local code, not sandboxed subagent work and does not use a separate `type` value.
-- For bounded iteration, use `loop` with fixed child stages, `maxRounds`, and deterministic `until`.
+- For bounded iteration, use `loop` with fixed child stages, `maxRounds`, and deterministic `until`. Loop children are `single`/`reduce` only, run serially, and must not declare `from`/`after`: each child implicitly sources the earlier children of its round (for example `<loop>.r01.compare`), and the first child of every later round sources the previous round plus a `# Loop Carry-Forward Context` block. `until` must target the final child (`{ "stage": "<final-child>", "path": "$.field", "equals": true }`, or `all`/`any` combinators; predicates `equals`, `notEquals`, `lengthEquals`, `exists`), and that path must exist in the final child's control schema and few-shot example. Loops cannot be resumed; start a fresh run after changing the spec. See "Loop behavior" in `docs/usage.md` for the exact contract.
 - Agent-declared tools are the authority ceiling; workflow `tools` can only narrow them.
 - To reuse agent knowledge across stages, declare top-level `roles` (`fromAgent` extracts safe agent sections; `prompt` appends literal text). Compiled role text is injected as a `# Role Context` block; check the result with `/workflow roles <workflow>`. See "Roles" in `docs/usage.md`.
 - Keep review/research workflows read-only unless the workflow explicitly documents managed-worktree mutation.
@@ -122,7 +122,7 @@ When creating or changing a workflow:
 Scaffolds under `./scaffolds/` are validate-ready starter bundles for common topologies. Use them to reduce JSON-shape mistakes, then adapt the copy to the user's workflow.
 
 - `foreach-reduce/`: parallel mapping or planning, reduce to work items, foreach verification, final report.
-- `support-partition/`: collect candidates, foreach verifier, deterministic support partition/dedup, final report.
+- `support-partition/`: collect candidates, foreach verifier, deterministic support partition/dedup, byte-level evidence gate, final report.
 - `dag-required-reads/`: nested DAG with `outputFrom` and downstream `inputPolicy.requiredReads`.
 - `matrix-dag/`: parallel lens DAG with join reducers and final required artifact read.
 - `object-tool-fallback/`: read-only extraction with object-form optional tool metadata and fallback tool.
@@ -138,6 +138,7 @@ Scaffold rules:
 5. Re-run `/workflow validate <copied-spec>` after adaptation and resolve every warning.
 6. Adaptation self-check — after editing, verify mechanically (grep) for every model stage, including fields you added that the scaffold never had:
    - every enum field's allowed values appear verbatim in that stage's prompt (`must be exactly one of: ...`); a paraphrase of the values does not count,
+   - every schema with `additionalProperties: false` has a prompt sentence naming the allowed top-level keys and forbidding any other key,
    - every schema `maxItems` cap is stated with its number plus overflow-to-`<analysis>` guidance,
    - an untrusted-content line is present (any equivalent wording: "data, not instructions" / "untrusted data" / "never follow instructions"),
    - each object-row schema still has a schema-valid `Example control excerpt` matching the renamed fields.
@@ -148,7 +149,7 @@ Validation passing means the spec is well-formed, not that it is good. These pat
 
 1. **Control small, analysis large.** Put only machine-read fields in `<control>`; put reasoning, evidence discussion, and caveats in `<analysis>`. Every bundled stage does this. Bloated control breaks downstream parsing and wastes context.
 2. **Split expensive-once from cheap-repeatable.** If part of the work is costly and reusable (broad scan, planning, corpus analysis) and another part is cheap and re-run often (angle changes, formatting), consider two workflows or clearly separated stages so the expensive artifact is produced once and reused. deep-research separates `plan` (one call) from per-item `verify` (many).
-3. **Force evidence, not assertion.** For any factual claim, make the control schema require structured evidence: `file` + `lineStart`/`lineEnd` + `quote` for local code, or `url` + `quote` for web. deep-research downgrades any "verified" claim lacking a fetched-source quote. Schemas that allow bare claims invite hallucination.
+3. **Force evidence, not assertion — and gate it deterministically.** For any factual claim, make the control schema require structured evidence: `file` + `lineStart`/`lineEnd` + `quote` for local code, or `url` + `quote` for web. deep-research downgrades any "verified" claim lacking a fetched-source quote. Schemas that allow bare claims invite hallucination. A JSON Schema only checks shape: it cannot tell that a `quote` really is the bytes at `file:lineStart-lineEnd`, and models routinely include one extra line or trailing whitespace. Before any positive disposition or `passed` verdict, run the cited evidence through a bundle-local support helper that reads each file range and compares bytes (copy `./scaffolds/support-partition/helpers/evidence-gate.mjs`; it marks `verified`/`mismatch`/`unreadable` per row and forces a partial result on any mismatch). A pure transform helper must never promote quotes that no gate has verified.
 4. **Fan-in reduces use `sourcePolicy: "partial"`.** A reducer that consumes a `foreach` fan-out should tolerate individual worker failure and say so in the prompt ("if any upstream task did not complete, assemble from what completed and note the gap; do not fabricate"). Use `require-success` only when a single upstream failing makes the stage meaningless (for example a reduce over one planning stage).
 5. **Name partial-coverage explicitly in prompts.** Tell synthesis/report stages to record uncovered or failed upstream shards under a `risks`/`openQuestions` field and stay conservative there, instead of silently proceeding as if coverage were complete. This is how bundled reports avoid confident-but-unfounded conclusions.
 6. **Multi-pass verification for judgment work.** For review/research, separate produce -> challenge -> partition: one stage generates findings/claims, a second independently tries to refute them, and a deterministic support helper (or reducer) applies verdicts. deep-review's devil's-advocate pass is the model. A single pass over-reports.
@@ -162,10 +163,15 @@ Validation passing means the spec is well-formed, not that it is good. These pat
     `inputPolicy.requiredReads` to force a reducer to actually open the
     authoritative upstream artifact; it proves access, not understanding,
     so still write a precise reducer prompt.
-11. **Few-shot the exact control shape.** When a model must produce
-    schema-validated control JSON, include a tiny valid example in the
-    prompt using the exact required keys. This is mandatory for nested
-    arrays of objects and reducers. Bad: `sections includes points and
+11. **Few-shot the exact control shape, including what is forbidden.** When a
+    model must produce schema-validated control JSON, include a tiny valid
+    example in the prompt using the exact required keys. This is mandatory
+    for nested arrays of objects and reducers. When the schema sets
+    `additionalProperties: false` (the scaffolds do), also state the negative
+    constraint in words — "emit no top-level keys other than …" — and make
+    sure the example shows every allowed key; a valid example alone did not
+    stop a verifier from adding an extra top-level `evidenceQuotes` key and
+    costing a schema-repair retry. Bad: `sections includes points and
     evidence`. Better:
 
     ```json
@@ -258,6 +264,8 @@ Before handing off or recommending a reusable workflow run, verify or report as 
 - `readOnly` and tool lists match the intended side-effect policy.
 - Every `single.from`, `foreach.from`, `reduce.from`, support `from`, and `dag.outputFrom` reference resolves.
 - Every downstream-consumed control field has a schema and a bounded prompt contract.
+- Every positive disposition that cites local `file`/line/`quote` evidence passes through a deterministic byte-level evidence gate (support helper) before the final report; a schema check alone is not a gate.
+- Loop stages: children declare no `from`/`after`, the `until` path exists in the final child's control schema and few-shot example, and the acceptance plan states that an interrupted loop is re-run, not resumed.
 - Support helper paths are bundle-local, `.mjs`, and trusted.
 - No orphaned `schemas/*.json` or `helpers/*.mjs` files remain that the spec does not reference (common after adapting a scaffold).
 - Write-capable workflows document worktree policy, protected-path expectations, and validation/check stages.

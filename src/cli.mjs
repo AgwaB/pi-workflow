@@ -50,9 +50,16 @@ if (options.has("--json")) {
 }
 
 const tasks = Array.isArray(run.tasks) ? run.tasks : [];
-const selected = options.has("--failures")
-  ? tasks.filter((task) => ["failed", "blocked", "interrupted"].includes(task.status))
-  : tasks;
+const failures = tasks.filter((task) =>
+  ["failed", "blocked", "interrupted"].includes(task.status),
+);
+// `--failures` narrows the listing to failure detail. Combined with
+// `--results` on a run that has no failures it would otherwise print nothing
+// useful, so the flags stay additive: fall back to every task's result and
+// say so explicitly.
+const failuresOnly = options.has("--failures");
+const showAllResults = failuresOnly && options.has("--results") && failures.length === 0;
+const selected = failuresOnly && !showAllResults ? failures : tasks;
 const reliability = summarizeReliability(tasks);
 
 const lines = [
@@ -64,6 +71,7 @@ const lines = [
   `completion: ${reliability.health}`,
   `retries: output=${reliability.outputRetries}, launch=${reliability.launchRetries}, resumes=${reliability.resumeEvents}, contextLimitFailures=${reliability.contextLimitFailures}`,
 ];
+if (showAllResults) lines.push("failures: none (showing every task result)");
 
 for (const task of selected) {
   lines.push(`- ${task.taskId}: ${task.status}/${task.statusDetail}${task.lastMessage ? ` — ${task.lastMessage}` : ""}`);

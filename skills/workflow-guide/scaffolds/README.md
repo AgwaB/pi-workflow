@@ -9,7 +9,7 @@ These scaffolds are skill resources, not bundled starter workflows. Do not run t
 | Scaffold | Use when | Key features |
 |---|---|---|
 | `foreach-reduce/` | Extract a list of work items, verify each item, then synthesize a report. | parallel roots, `reduce.from`, `foreach.from`, final `reduce`, control schemas |
-| `support-partition/` | Candidate findings need deterministic partitioning/dedup after verifier verdicts. | `foreach`, bundle-local `support.uses`, helper output, `inputPolicy.requiredReads` |
+| `support-partition/` | Candidate findings need deterministic partitioning/dedup after verifier verdicts, then a byte-level check that every cited quote really exists at its file range. | `foreach`, bundle-local `support.uses`, helper output, `helpers/evidence-gate.mjs` (demotes unverifiable rows to needsHuman and marks integrity partial), `inputPolicy.requiredReads` |
 | `dag-required-reads/` | A nested analysis DAG must expose one child output and force downstream artifact reads. | `type: "dag"`, `outputFrom`, `inputPolicy.requiredReads` |
 | `matrix-dag/` | Multiple review lenses should run in parallel and then join through reducers. | nested DAG, parallel roots, join reducers, `outputFrom`, final required read |
 | `object-tool-fallback/` | A read-only workflow needs an optional custom/web extraction fallback. | object-form tool metadata, fallback tool, artifact-read gates |

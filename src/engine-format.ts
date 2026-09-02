@@ -303,6 +303,30 @@ export function formatHumanRunLaunch(
 	].join("\n");
 }
 
+/**
+ * One line per loop stage so status/show expose round count and the loop
+ * outcome, which otherwise only appear in run.json `loopStates` or per-round
+ * task ids such as `<loop>.r02.<child>`.
+ */
+export function formatLoopSummaryLines(run: WorkflowRunRecord): string[] {
+	const states = run.loopStates ?? [];
+	if (states.length === 0) return [];
+	return states.map((state) => {
+		const rounds = `${state.round} round${state.round === 1 ? "" : "s"}`;
+		const outcome =
+			state.status === "completed"
+				? "stopped: until condition met"
+				: state.status === "exhausted"
+					? "exhausted: maxRounds reached before the until condition was met"
+					: state.status === "stopped_no_progress"
+						? "stopped: no progress between rounds"
+						: state.awaitingOnExhausted
+							? "awaiting onExhausted stage"
+							: "in progress";
+		return `Loop ${state.loopId}: ${rounds} · ${outcome}`;
+	});
+}
+
 function formatHumanRunCard(
 	run: WorkflowRunRecord,
 	options: {
@@ -323,6 +347,7 @@ function formatHumanRunCard(
 		lines.push(`Updated: ${friendlyTimestamp(run.updatedAt)}`);
 	}
 	lines.push("", `Progress: ${formatHumanProgress(run)}`);
+	lines.push(...formatLoopSummaryLines(run));
 	const usage = options.includeUsage ? formatHumanUsageLine(run) : undefined;
 	if (usage) lines.push(usage);
 	lines.push(...formatWarnings(run, options));

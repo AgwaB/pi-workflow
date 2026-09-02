@@ -3447,7 +3447,7 @@ function formatRoles(compiled: CompiledWorkflow): string {
 	return compiled.roles
 		.map((role) => {
 			const lines = [
-				`# Role: ${role.name}`,
+				`Role: ${role.name}`,
 				role.fromAgent ? `fromAgent: ${role.fromAgent}` : undefined,
 				role.sourcePath ? `sourcePath: ${role.sourcePath}` : undefined,
 				`includedSections: ${role.includedSections.join(", ")}`,
@@ -3456,6 +3456,11 @@ function formatRoles(compiled: CompiledWorkflow): string {
 					? `truncated: true (maxChars=${role.maxChars})`
 					: `truncated: false (maxChars=${role.maxChars})`,
 				"",
+				// Show the block exactly as the compiler injects it into each task
+				// prompt that selects this role, so authors can verify by eye.
+				"# Role Context",
+				"",
+				`## Role: ${role.name}`,
 				role.content || "(empty role content)",
 			].filter((line): line is string => line !== undefined);
 

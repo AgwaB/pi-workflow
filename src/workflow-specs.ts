@@ -95,9 +95,22 @@ export async function resolveWorkflowRef(
 		return { inputRef: ref, specPath: pathCandidate };
 	}
 
+	// A bundle directory (`<name>/spec.json` alongside schemas/helpers) is the
+	// documented storage form, so accept the directory itself as a path ref.
+	const bundleCandidate = join(pathCandidate, "spec.json");
+	if (
+		(isPathLike(trimmed) || (await isDirectory(pathCandidate))) &&
+		(await isFile(bundleCandidate))
+	) {
+		return { inputRef: ref, specPath: bundleCandidate };
+	}
+
 	if (isPathLike(trimmed)) {
 		throw new WorkflowValidationError([
-			{ path: trimmed, message: "workflow spec file not found" },
+			{
+				path: trimmed,
+				message: "workflow spec file not found (expected a .json spec or a bundle directory containing spec.json)",
+			},
 		]);
 	}
 
@@ -319,6 +332,15 @@ function workflowRootFor(file: string, searchRoot: string): string {
 async function isFile(path: string): Promise<boolean> {
 	try {
 		return (await stat(path)).isFile();
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+		throw error;
+	}
+}
+
+async function isDirectory(path: string): Promise<boolean> {
+	try {
+		return (await stat(path)).isDirectory();
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
 		throw error;
