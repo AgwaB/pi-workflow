@@ -9,7 +9,12 @@ import {
 	writeValidatedWorkflowTaskArtifactBundle,
 } from "../../.tmp/unit/workflow-output-artifacts.js";
 import { pruneWorkflowRuns } from "../../.tmp/unit/run-retention.js";
-import { updateIndex, withRunLease } from "../../.tmp/unit/store.js";
+import {
+	setStaticArtifactLinkForTests,
+	updateIndex,
+	withRunLease,
+	writeStaticRunArtifacts,
+} from "../../.tmp/unit/store.js";
 
 const parsed = {
 	protocol: "workflow-output-sections-v1",
@@ -20,6 +25,32 @@ const parsed = {
 	refs: [],
 	issues: [],
 };
+
+async function withStaticArtifacts(
+	fn,
+	bundleSpec = `${JSON.stringify({ name: "fixture", stages: [{ id: "main" }] }, null, 2)}\n`,
+	hook,
+) {
+	const root = await mkdtemp(join(tmpdir(), "pi-workflow-static-artifacts-"));
+	const sourceDir = join(root, "workflow");
+	const runId = "workflow_static_artifact_link";
+	const originalSpec = { name: "fixture", stages: [{ id: "main" }] };
+	await mkdir(sourceDir, { recursive: true });
+	await writeFile(join(sourceDir, "spec.json"), bundleSpec);
+	try {
+		setStaticArtifactLinkForTests(hook);
+		await writeStaticRunArtifacts(
+			root,
+			{ runId, specPath: join(sourceDir, "spec.json"), tasks: [] },
+			{},
+			originalSpec,
+		);
+		await fn(join(root, ".pi", "workflows", runId), originalSpec);
+	} finally {
+		setStaticArtifactLinkForTests(undefined);
+		await rm(root, { recursive: true, force: true });
+	}
+}
 
 async function withTaskDir(fn) {
 	const root = await mkdtemp(join(tmpdir(), "pi-workflow-artifacts-"));
