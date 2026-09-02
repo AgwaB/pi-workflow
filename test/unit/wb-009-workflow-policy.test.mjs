@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
+
+import { parse as parseYaml } from "yaml";
 
 const root = new URL("../..", import.meta.url);
 const workflowPath = new URL(".github/workflows/publish.yml", root);
@@ -11,31 +14,33 @@ const checkerPath = new URL("tools/release/check-publish-workflow.mjs", root);
 const dispatcherPath = new URL("tools/release/dispatch-release.mjs", root);
 const workflow = () => readFile(workflowPath, "utf8");
 
-function rubyYaml() {
-	return spawnSync("ruby", ["-ryaml", "-e", "YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)", workflowPath.pathname], { encoding: "utf8" });
+// Parse with the same `yaml` dev dependency that tools/release/check-publish-workflow.mjs
+// uses, so the test needs no system Ruby. `parse` throws on malformed YAML and
+// on duplicate keys; anchors and aliases resolve by default.
+function parsedWorkflow() {
+	return parseYaml(readFileSync(workflowPath, "utf8"));
 }
 function runScripts() {
-	const result = spawnSync("ruby", ["-ryaml", "-rjson", "-e", `
-document = YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)
-runs = []
-walk = lambda do |value, path|
-  case value
-  when Hash
-    value.each { |key, child| child_path = path + [key.to_s]; runs << { path: child_path.join("."), script: child } if key.to_s == "run" && child.is_a?(String); walk.call(child, child_path) }
-  when Array
-    value.each_with_index { |child, index| walk.call(child, path + [index.to_s]) }
-  end
-end
-walk.call(document, [])
-STDOUT.write(JSON.generate(runs))
-`, workflowPath.pathname], { encoding: "utf8" });
-	assert.equal(result.status, 0, result.stderr);
-	return JSON.parse(result.stdout);
+	const runs = [];
+	const walk = (value, path) => {
+		if (Array.isArray(value)) {
+			value.forEach((child, index) => walk(child, [...path, String(index)]));
+			return;
+		}
+		if (!value || typeof value !== "object") return;
+		for (const [key, child] of Object.entries(value)) {
+			const childPath = [...path, key];
+			if (key === "run" && typeof child === "string") runs.push({ path: childPath.join("."), script: child });
+			walk(child, childPath);
+		}
+	};
+	walk(parsedWorkflow(), []);
+	return runs;
 }
 function shellForSyntax(script) { return script.replace(/\$\{\{[^\n]*?\}\}/g, "__GITHUB_ACTIONS_EXPRESSION__"); }
 
  test("WB-009 YAML, pinned actions, and shell syntax are valid", async () => {
-	assert.equal(rubyYaml().status, 0, rubyYaml().stderr);
+	assert.doesNotThrow(() => parsedWorkflow());
 	const text = await workflow();
 	const uses = [...text.matchAll(/^\s*- uses:\s*([^\s#]+)(?:\s+#.*)?$/gm)].map((m) => m[1]);
 	assert.ok(uses.length > 0);
