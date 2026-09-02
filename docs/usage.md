@@ -137,8 +137,8 @@ For reusable workflow authoring, `workflow-guide` includes validated scaffold bu
 | `/workflow` or `/workflow <run-id>` | Open the read-only workflow board TUI. With a run id or prefix, focus that run. Falls back to text `status` output in `--print` mode or when no TUI is available. |
 | `/workflow help` | Show help. |
 | `/workflow list` | List workflow specs discoverable from the current project and installed package. |
-| `/workflow validate <workflow-name-or-path>` | Load and compile a workflow without starting a run. Reports blocked permission previews and warnings. Non-interactive form for scripts and agents: `pi -p --no-session "/workflow validate <workflow-name-or-path>"` from the project directory. |
-| `/workflow roles <workflow-name-or-path>` | Show the compiled role context included for each workflow role. |
+| `/workflow validate <workflow-name-or-path>` | Load and compile a workflow without starting a run. Reports blocked permission previews and warnings. A path may be a `.json` spec or a bundle directory containing `spec.json`. Non-interactive form for scripts and agents: `pi -p --no-session "/workflow validate <workflow-name-or-path>"` from the project directory. |
+| `/workflow roles <workflow-name-or-path>` | Show each compiled role: source agent, included/excluded sections, truncation, and the exact `# Role Context` block injected into task prompts that select it. |
 | `/workflow agents` | List discoverable Pi agents, model/thinking defaults, tool ceilings, and source paths. |
 | `/workflow run [--no-route] [--model MODEL] [--thinking LEVEL] [--profile NAME] <workflow-name-or-path> "<task>" [--detach] [--force-new]` | Start a named workflow run with the supplied runtime task. Routing is on by default: a low-cost direct-vs-dynamic-vs-requested-workflow router pass runs first and records its decision; `--no-route` skips it and starts the requested workflow directly (`--route` remains accepted as an explicit opt-in). `--profile NAME` applies a named `executionProfiles` entry declared by the spec (per-stage model, thinking, or batch overrides, recorded on the run record as `executionProfile`; unknown names fail closed). When `--profile` is omitted, an interactive run prompts when profiles exist; a declared `defaultExecutionProfile` is first, otherwise `Base (no profile)` is available. Headless/print/JSON launches, and `workflow_run` calls without an interactive selector, use the declared `defaultExecutionProfile`, or the base workflow when none is declared; they do not infer a profile from a name such as `medium`. Explicit `--profile` bypasses selection. Profile names are spec-defined labels, so `low`, `medium`, and `high` are conventions, not reserved names. Routing asks only after it selects the named workflow, never for direct/dynamic routes. `--detach` spawns a standalone supervisor process after the initial scheduling pass so the run keeps progressing after this Pi session exits (log: `.pi/workflows/<run-id>/supervise.log`). Dynamic controllers and `approval: "ask"` prompts in that first pass can still run inline; later detached/headless approval blocks require an interactive `/workflow resume <run-id>`. An identical active launch within 10 minutes is skipped unless `--force-new` is present. |
 | `/workflow dynamic [--route] [--model MODEL] [--thinking LEVEL] "<task>" [--detach] [--force-new]` | Start a spec-less direct dynamic run. The runtime uses a built-in trusted controller to plan/fan out/synthesize dynamically; no workflow name, user-selected spec, or generated spec is required. Unlike `/workflow run`, the router pass stays opt-in via `--route`; model, thinking, detach, duplicate-guard, and force-new controls match `/workflow run`. |
@@ -245,7 +245,9 @@ Start with the run summary, then inspect only the failing task before resuming:
 ```
 
 For a terminal-friendly evidence view, run
-`pi-workflow inspect <run-id> --failures --results`. After fixing the reported
+`pi-workflow inspect <run-id> --results` (every task's result envelope) or
+`pi-workflow inspect <run-id> --failures --results` (failure detail; on a run
+with no failures it falls back to every task's result and says so). After fixing the reported
 access, configuration, output, or code problem, use
 `/workflow resume <run-id>`; completed task artifacts are preserved. A run executes
 its copied `bundle/` snapshot, so installing a newer pi-workflow version does not
@@ -616,12 +618,41 @@ fix-loop.r02.check
 
 Loop child stages run strictly in listed order. Nested `loop`, `foreach`, `dag`, and support children are rejected in v1. There is no `parallel` stage type; model parallel branches as multiple roots or with `after: []`.
 
+Minimal shape (the `until` condition must reference the final child stage):
+
+```json
+{
+  "id": "doc-sync",
+  "type": "loop",
+  "maxRounds": 2,
+  "until": { "stage": "draft", "path": "$.consistent", "equals": true },
+  "stages": [
+    { "id": "compare", "type": "single", "prompt": "...", "output": { "controlSchema": "./schemas/compare-control.schema.json" } },
+    { "id": "draft", "type": "single", "prompt": "...", "output": { "controlSchema": "./schemas/draft-control.schema.json" } }
+  ]
+}
+```
+
+Data flow inside a loop is implicit, not authored:
+
+- Loop children must not declare `from` or `after`; validation rejects them. Each child depends on the previous child of the same round, so its runtime sources are that round's earlier children (for example `doc-sync.r01.compare` for `draft` in round 1), readable through `workflow_artifact` like any other source.
+- The first child of round N (N > 1) depends on every task of round N-1, runs with `sourcePolicy: "partial"`, and receives a `# Loop Carry-Forward Context` block: the previous round number, the designated check stage, the progress metric, the check stage's latest structured output (compact JSON, bounded to about 4,000 characters), and a rolling summary. Later children in a round do not receive that block.
+- Round 1's first child inherits the loop stage's own dependencies.
+
+`until` grammar:
+
+- Leaf: `{ "stage": "<final-child-id>", "path": "$.field", ... }` plus one predicate: `equals` / `notEquals` (string, number, boolean, or null, compared with `Object.is`), `lengthEquals` (integer, array or string length), or `exists` (boolean). If several predicates are present only the first in the order `exists`, `equals`, `notEquals`, `lengthEquals` is evaluated; a leaf with no predicate, no `path`, or an unreadable value never matches. `source` is accepted as an alias for `stage`; the referenced child must be the final child stage, and `path` uses the same `$`-prefixed simple dot/bracket syntax as `foreach.from`, read from that child's `control.json`.
+- Combinators: `{ "all": [ ...conditions ] }` and `{ "any": [ ...conditions ] }` nest leaves or further combinators.
+- Put the `until` path in the final child's control schema and show it in that stage's few-shot example; a missing path evaluates as not satisfied and the loop runs to `maxRounds`.
+
 A loop stops when:
 
-- `until` evaluates true,
-- `maxRounds` is exhausted,
-- no-progress detection fires,
+- `until` evaluates true (`loopStates[].status: "completed"`),
+- `maxRounds` is exhausted (`"exhausted"`),
+- no-progress detection fires (`"stopped_no_progress"`): from round 2 on, the metric at `progressPath` (default `$.blockingFailures`; array/string length or a finite number) read from the designated check stage's control is compared with the previous round and the loop stops when it did not decrease,
 - or a blocking failure prevents scheduling.
+
+An optional `onExhausted` stage runs once when the loop ends by exhaustion or no progress. Round count and outcome appear in `/workflow status`, `/workflow show`, and `run.json` `loopStates`. `/workflow resume` does not support loop workflows yet, so fix the spec and start a fresh run instead of resuming an interrupted loop.
 
 There is no auto-merge. Managed worktree output is recorded for human review.
 
