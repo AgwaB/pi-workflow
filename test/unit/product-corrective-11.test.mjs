@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 
 import {
   registerWorkflowFetchCacheExtension,
@@ -24,7 +24,18 @@ import {
 } from "../../.tmp/unit/workflow-web-source.js";
 import { redactSensitiveWorkflowText } from "../../.tmp/unit/workflow-sensitive-query.js";
 
-const project = () => mkdtempSync(join(tmpdir(), "workflow-product-corrective-11-"));
+const TEST_ROOT = mkdtempSync(join(tmpdir(), "pi-workflow-tests-"));
+function cleanupTestRoot() {
+  if (process.exitCode !== undefined && process.exitCode !== 0) {
+    console.error(`product corrective test artifacts retained at ${TEST_ROOT}`);
+    return;
+  }
+  rmSync(TEST_ROOT, { recursive: true, force: true });
+}
+after(cleanupTestRoot);
+process.on("exit", cleanupTestRoot);
+
+const project = () => mkdtempSync(join(TEST_ROOT, "workflow-product-corrective-11-"));
 const cleanup = (cwd) => rmSync(cwd, { recursive: true, force: true });
 const body = (result) => JSON.parse(result.content[0].text);
 
