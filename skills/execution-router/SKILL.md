@@ -47,7 +47,7 @@ If the scope, final artifact, or success metric is unclear and would change the 
 
 Before scoring, collect cheap objective signals when tools/context make them available. Use these as anchors, not hard gates:
 
-- **Available routes**: discover existing workflows when the user asks to choose a route or when a workflow may fit.
+- **Available routes**: discover existing workflows with the `workflow_list` tool (or `/workflow list`) when the user asks to choose a route or when a workflow may fit; it reports bundled, project, and user/global specs with their agent and read-only posture.
 - **Change breadth**: changed file count, changed domain count, diff size, and whether files share ownership/state.
 - **Context pressure**: number of source families, amount of generated/runtime material to exclude, and whether one agent can keep the relevant facts coherent.
 - **Validation readiness**: known test/check commands, workflow validation status, required agents, and whether evidence can be produced without mutating state.
@@ -113,7 +113,7 @@ ask clarification
 Before recommending an existing workflow run, check or explicitly plan to check:
 
 - The workflow exists and is unambiguous.
-- `/workflow validate <name-or-path>` should be run before launch; if validation has not run yet, the concrete action is `validate/run workflow:<name>`.
+- `/workflow validate <name-or-path>` should be run before launch; if validation has not run yet, the concrete action is `validate/run workflow:<name>`. From an agent/tool context run it as `pi -p --no-session "/workflow validate <name-or-path>"` in the project directory.
 - Required agents are available or the missing agent is called out as a blocker.
 - The workflow read/write policy matches allowed side effects.
 - Tool ceilings are sufficient and do not exceed the agent authority ceiling.

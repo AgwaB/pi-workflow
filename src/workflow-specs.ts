@@ -1,5 +1,4 @@
 import { readFile, readdir, stat } from "node:fs/promises";
-import { homedir } from "node:os";
 import {
 	basename,
 	dirname,
@@ -12,6 +11,7 @@ import {
 import { fileURLToPath } from "node:url";
 
 import { isArtifactGraphWorkflowSpecShape } from "./artifact-graph-schema.js";
+import { piAgentDir } from "./pi-agent-dir.js";
 import { WorkflowValidationError } from "./types.js";
 
 const SPEC_EXTENSIONS = new Set([".json"]);
@@ -188,7 +188,7 @@ function workflowRoots(cwd: string): WorkflowRoot[] {
 	return uniqueWorkflowRoots([
 		{ path: resolve(cwd, "workflows"), priority: 0 },
 		{ path: resolve(cwd, ".pi", "workflows"), priority: 1 },
-		{ path: join(homedir(), ".pi", "agent", "workflows"), priority: 2 },
+		{ path: join(piAgentDir(), "workflows"), priority: 2 },
 		{ path: PACKAGE_WORKFLOW_ROOT, priority: 3 },
 	]);
 }

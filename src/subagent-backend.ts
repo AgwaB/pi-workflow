@@ -43,6 +43,7 @@ import type {
 	WorkflowToolResultBudgetConfigurationSource,
 } from "./types.js";
 import type { JsonSchema } from "./json-schema.js";
+import { piAgentDir } from "./pi-agent-dir.js";
 import {
 	normalizedToolResultBudgetValues,
 	summarizeToolResultBudgetAttempts,
@@ -775,7 +776,7 @@ export function sharedRateLimitPersistenceTelemetryForTests(): SharedRateLimitPe
 }
 
 function sharedModelRateLimitBackoffFile(): string {
-	return join(homedir(), ".pi", "agent", "model-rate-limit-backoff.json");
+	return join(piAgentDir(), "model-rate-limit-backoff.json");
 }
 
 function validPersistedSharedBackoff(
@@ -6006,7 +6007,7 @@ function retryAfterMsFromRateLimitText(
 
 function workflowAuthFile(): string {
 	const override = process.env[WORKFLOW_AUTH_FILE_ENV]?.trim();
-	return override ? override : join(homedir(), ".pi", "agent", "auth.json");
+	return override ? override : join(piAgentDir(), "auth.json");
 }
 
 function providerAuthType(

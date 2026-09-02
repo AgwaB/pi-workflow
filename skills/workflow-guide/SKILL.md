@@ -47,7 +47,7 @@ Copy their proven conventions (see "Quality design patterns"), not just their st
 - Name priority is project-shared `workflows/`, project-private `.pi/workflows/`, user/global, then the installed package bundle; higher roots shadow lower ones and ambiguity is fail-closed only within the winning priority.
 - If the user asks to create a workflow but does not specify storage scope, ask them to choose project-private, project-shared/tracked, or user/global before writing. Treat changes to pi-workflow's official package `workflows/` as a separate promotion step requiring an explicit package-distribution request.
 - For natural-language execution of existing workflows, prefer `workflow_list` and `workflow_run` when those tools are available; use `/workflow ...` commands as the deterministic manual fallback.
-- Always run `/workflow validate <workflow-or-file>` before handing off or running a reusable workflow.
+- Always run `/workflow validate <workflow-or-file>` before handing off or running a reusable workflow. There is no validate tool, so from an agent/tool context run it non-interactively from the project directory: `pi -p --no-session "/workflow validate <workflow-or-file>"`; it prints the same summary and `Warnings:` list as the interactive command and exits non-zero on an invalid spec.
 
 ## Authoring intake
 
@@ -90,7 +90,7 @@ When creating or changing a workflow:
    descriptions. For required nested arrays/objects, the prompt must show
    the container type literally, for example:
    `"points": []`, `"evidence": []`, `"coverageGaps": {}`.
-10. Validate with `/workflow validate <workflow-or-file>`.
+10. Validate with `/workflow validate <workflow-or-file>` (from an agent/tool context: `pi -p --no-session "/workflow validate <workflow-or-file>"` in the project directory).
 11. Do not ignore validation warnings. Treat a `foreach` path warning
     (the path's top-level key is not a property of the source stage's
     control schema) as a likely typo that would fan out over nothing at
