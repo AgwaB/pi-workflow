@@ -1055,12 +1055,24 @@ async function collectWorkflowQualityWarnings(
 
 		for (const field of complexControlShapeFields(schema, prompt)) {
 			if (!promptShowsJsonKeyShape(prompt, field.key, field.expectedShape)) {
-				const example = field.expectedShape === "object" ? "{}" : "[]";
+				// The check only needs the literal opener after the key; when the
+				// schema forbids an empty container, say so instead of suggesting a
+				// skeleton that the schema itself would reject.
+				const example = field.nonEmpty
+					? field.expectedShape === "object"
+						? "{ ... }"
+						: "[ ... ]"
+					: field.expectedShape === "object"
+						? "{}"
+						: "[]";
+				const nonEmptyNote = field.nonEmpty
+					? ` (the schema requires a non-empty ${field.expectedShape}, so show at least one example item)`
+					: "";
 				const source = field.required
 					? `requires ${field.path}`
 					: `defines ${field.path}`;
 				warnings.push(
-					`stage "${stage.id}" ${source} as a JSON ${field.expectedShape}, but the prompt does not show an exact "${field.key}": ${example} control shape. Add a small schema-valid <control> JSON skeleton so model output does not drift to the wrong type or alias nested fields.`,
+					`stage "${stage.id}" ${source} as a JSON ${field.expectedShape}, but the prompt does not show an exact "${field.key}": ${example} control shape${nonEmptyNote}. Add a small schema-valid <control> JSON skeleton so model output does not drift to the wrong type or alias nested fields.`,
 				);
 			}
 		}
@@ -1148,6 +1160,8 @@ type ComplexControlShapeField = {
 	key: string;
 	expectedShape: "array" | "object";
 	required: boolean;
+	/** True when the schema forbids an empty container (minItems/minProperties > 0). */
+	nonEmpty: boolean;
 };
 
 function complexControlShapeFields(
@@ -1179,6 +1193,10 @@ function complexControlShapeFields(
 				key,
 				expectedShape,
 				required: isRequired,
+				nonEmpty:
+					expectedShape === "array"
+						? Number(child?.minItems) > 0
+						: Number(child?.minProperties) > 0,
 			});
 		}
 		if (isRequired) {
