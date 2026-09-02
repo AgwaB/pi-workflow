@@ -39,7 +39,7 @@ function runInspect(cwd, args) {
 	});
 }
 
-test("F7: a bundle directory containing spec.json resolves as a workflow path", async () => {
+test("a bundle directory containing spec.json resolves as a workflow path", async () => {
 	const cwd = await scratch("bundle-dir");
 	try {
 		const spec = join(cwd, ".pi", "workflows", "bundle-form", "spec.json");
@@ -57,7 +57,7 @@ test("F7: a bundle directory containing spec.json resolves as a workflow path", 
 	}
 });
 
-test("F2: inspect --failures --results falls back to every task result on a clean run", async () => {
+test("inspect --failures --results falls back to every task result on a clean run", async () => {
 	const cwd = await scratch("inspect-flags");
 	try {
 		const runDir = join(cwd, ".pi", "workflows", "workflow_gate");
@@ -93,7 +93,7 @@ test("F2: inspect --failures --results falls back to every task result on a clea
 	}
 });
 
-test("F2: inspect --failures --results keeps failure-only listing when a task failed", async () => {
+test("inspect --failures --results keeps failure-only listing when a task failed", async () => {
 	const cwd = await scratch("inspect-failures");
 	try {
 		const runDir = join(cwd, ".pi", "workflows", "workflow_fail");
@@ -128,7 +128,7 @@ test("F2: inspect --failures --results keeps failure-only listing when a task fa
 	}
 });
 
-test("F6: nested-shape warning names a non-empty skeleton when the schema forbids an empty array", async () => {
+test("nested-shape warning names a non-empty skeleton when the schema forbids an empty array", async () => {
 	const cwd = await scratch("shape-warning");
 	try {
 		const schemaDir = join(cwd, "schemas");
@@ -186,7 +186,7 @@ test("F6: nested-shape warning names a non-empty skeleton when the schema forbid
 	}
 });
 
-test("F8: status and details show loop rounds and outcome", () => {
+test("status and details show loop rounds and outcome", () => {
 	const run = {
 		schemaVersion: 1,
 		runId: "workflow_loop",
@@ -217,7 +217,7 @@ test("F8: status and details show loop rounds and outcome", () => {
 	assert.deepEqual(formatLoopSummaryLines({ ...run, loopStates: undefined }), []);
 });
 
-test("F1: scaffold evidence gate verifies quotes against cited file ranges and demotes mismatches", async () => {
+test("scaffold evidence gate verifies quotes against cited file ranges and demotes mismatches", async () => {
 	const cwd = await scratch("evidence-gate");
 	try {
 		await mkdir(join(cwd, "src"), { recursive: true });
