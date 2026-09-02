@@ -106,3 +106,29 @@ test("WB-005 duplicate guard sees active run.json even when index is absent", as
 	);
 	assert.equal(match.runId, run.runId);
 });
+
+test("resumeSupervisors does not create workflow state in a project without runs", async () => {
+	const { resumeSupervisors } = await import("../../.tmp/unit/engine.js");
+	const { existsSync } = await import("node:fs");
+	const { rm } = await import("node:fs/promises");
+	const cwd = await mkdtemp(join(tmpdir(), "piwf-resume-empty-"));
+	try {
+	await resumeSupervisors(cwd);
+	assert.equal(existsSync(join(cwd, ".pi", "workflows")), false, "no .pi/workflows directory is created");
+	assert.equal(await readIndex(cwd), undefined);
+
+	// Once a run exists the index is written as before.
+	const runId = "resume-seeded";
+	await mkdir(workflowRunDir(cwd, runId), { recursive: true });
+	const seeded = runRecord(cwd, runId);
+	setTaskTerminal(seeded.tasks[0], "completed", "completed");
+	seeded.status = "completed";
+	await withRunLease(cwd, runId, async () => writeRunRecord(cwd, seeded));
+	await resumeSupervisors(cwd);
+	const index = await readIndex(cwd);
+	assert.ok(index, "index is created once a run exists");
+	assert.deepEqual(index.runs.map((run) => run.runId), [runId]);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
