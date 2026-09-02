@@ -3400,8 +3400,8 @@ export async function isWorkflowRunLeaseLive(
 				const heartbeatAt = record.heartbeatAt ?? record.updatedAt;
 				const pid = typeof record.pid === "number" ? record.pid : undefined;
 				const timestamp = typeof heartbeatAt === "string" ? Date.parse(heartbeatAt) : NaN;
-				if (!Number.isFinite(timestamp)) return true;
-				if (Date.now() - timestamp <= LEASE_STALE_MS && pid !== undefined && isProcessAlive(pid)) return true;
+				if (!Number.isFinite(timestamp) || pid === undefined) return true;
+				if (Date.now() - timestamp <= LEASE_STALE_MS && isProcessAlive(pid)) return true;
 			} catch (error) {
 				if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
 				return true;
