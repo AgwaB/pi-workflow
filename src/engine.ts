@@ -771,7 +771,7 @@ export async function waitForRun(
 	onWaitProgress?.(run);
 
 	while (hasActiveSchedulerWork(run)) {
-		const timeoutMessage = await stillRunningAfterWaitMessage(cwd, run, timeout);
+		const timeoutMessage = await stillRunningAfterWaitMessage(run, timeout);
 		const scheduled = await awaitWithinWorkflowWaitBoundary(
 			scheduleRun(cwd, run.runId, undefined, scheduleOptions),
 			deadline - Date.now(),

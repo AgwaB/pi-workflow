@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, open, readFile, readdir, rename, rm, rmdir, unlink } from "node:fs/promises";
+import { lstat, open, readFile, readdir, rename, rm, unlink } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import {
@@ -614,14 +614,13 @@ export async function readWorkflowWebSource(
 			await readFile(sourceObjectPath(config, sourceRef), "utf8"),
 		) as unknown;
 		if (!isRecord(parsed)) return undefined;
-		return reconstructPersistedWorkflowWebSource(config, parsed, sourceRef);
+		return reconstructPersistedWorkflowWebSource(parsed, sourceRef);
 	} catch {
 		return undefined;
 	}
 }
 
 function reconstructPersistedWorkflowWebSource(
-	config: WorkflowWebSourceCacheConfig,
 	value: Record<string, unknown>,
 	sourceRef: string,
 ): WorkflowWebSource | undefined {

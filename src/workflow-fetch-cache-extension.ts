@@ -1,15 +1,12 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
-import { constants } from "node:fs";
-import { lstat, mkdir, open, readFile, rename, rm, rmdir, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { assertPiWebAccessEffectiveConfig } from "./pi-web-access-config.js";
 import {
 	appendPrivateFile,
-	ensurePrivateDirectory,
-	writePrivateFileAtomic,
 	writePrivateFileNoReplace,
 	publishPrivateGenerationDirectory,
 } from "./secure-atomic-write.js";
@@ -349,7 +346,6 @@ function withFetchCacheExecution(
 				} finally {
 					capture.active = false;
 				}
-				let objectPublished = false;
 				try {
 					throwIfFetchCacheAborted(signal);
 					if (fetchResultWasCancelled(result))
@@ -387,7 +383,6 @@ function withFetchCacheExecution(
 					}, signal);
 					// If no-replace lost a race, `published` is the validated durable
 					// winner. Never continue with this invocation's losing response.
-					objectPublished = true;
 					try {
 						await workflowFetchCachePublicationHook?.("after-object-publication", cacheKey.key);
 					} catch (error) {
@@ -1068,121 +1063,6 @@ function findStoredContent(text: string, queries: string[], mode: "exact" | "cas
 	return { text: sections.join("\n\n"), details: { matchCount: matches.length, returnedMatches, queryResults } };
 }
 
-interface MappedPaging {
-	params: Record<string, unknown>;
-	offset: number;
-	limit: number;
-	endOffset: number;
-	urlIndex: number;
-}
-
-function normalizeMappedPagingParams(
-	params: Record<string, unknown>,
-	storedData: Record<string, unknown>,
-): MappedPaging | undefined {
-	if (!Number.isInteger(params.offset) || !Number.isInteger(params.limit))
-		return undefined;
-	const offset = params.offset as number;
-	const limit = params.limit as number;
-	if (offset < 0 || limit <= 0 || !Array.isArray(storedData.urls))
-		return undefined;
-	const urlIndex = Number.isInteger(params.urlIndex)
-		? (params.urlIndex as number)
-		: typeof params.url === "string"
-			? storedData.urls.findIndex(
-					(item) => isRecord(item) && item.url === params.url,
-				)
-			: -1;
-	const url = storedData.urls[urlIndex];
-	if (!isRecord(url) || typeof url.content !== "string") return undefined;
-	const content = url.content;
-	if (offset > content.length) return undefined;
-	let start = offset;
-	if (
-		start > 0 &&
-		start < content.length &&
-		isLowSurrogate(content.charCodeAt(start)) &&
-		isHighSurrogate(content.charCodeAt(start - 1))
-	)
-		start += 1;
-	let end = Math.min(start + limit, content.length);
-	if (
-		end > start &&
-		end < content.length &&
-		isLowSurrogate(content.charCodeAt(end)) &&
-		isHighSurrogate(content.charCodeAt(end - 1))
-	) {
-		// A one-code-unit page over an astral character must include both code
-		// units; otherwise nextOffset would equal offset forever.
-		end =
-			limit === 1 &&
-			isHighSurrogate(content.charCodeAt(start))
-				? Math.min(end + 1, content.length)
-				: end - 1;
-	}
-	return {
-		params: { ...params, offset: start, limit: Math.max(1, end - start) },
-		offset: start,
-		limit,
-		endOffset: end,
-		urlIndex,
-	};
-}
-
-function normalizeMappedPagingResult(
-	result: ToolResult,
-	paging: MappedPaging,
-	responseId: string,
-): ToolResult {
-	const details = result.details;
-	if (!isRecord(details) || typeof details.returnedChars !== "number")
-		return result;
-	const returnedChars = paging.endOffset - paging.offset;
-	const contentLength =
-		typeof details.contentLength === "number"
-			? details.contentLength
-			: paging.endOffset;
-	const hasMore = paging.endOffset < contentLength;
-	const nextOffset = hasMore ? paging.endOffset : null;
-	const content = Array.isArray(result.content)
-		? result.content.map((entry) =>
-				entry.type === "text" && typeof entry.text === "string"
-					? { ...entry, text: rewritePagingContinuation(entry.text, paging, responseId, contentLength, hasMore) }
-					: entry,
-			)
-		: result.content;
-	return {
-		...result,
-		...(content === undefined ? {} : { content }),
-		details: {
-			...details,
-			offset: paging.offset,
-			limit: paging.limit,
-			returnedChars,
-			nextOffset,
-			truncated: hasMore,
-		},
-	};
-}
-
-function rewritePagingContinuation(
-	text: string,
-	paging: MappedPaging,
-	responseId: string,
-	contentLength: number,
-	hasMore: boolean,
-): string {
-	const suffix = text.match(
-		/\n\n---\nShowing chars \d+-\d+ of \d+\.(?: Use ([A-Za-z][A-Za-z0-9_-]{0,63})\(\{ responseId: "[^\"]+", urlIndex: \d+, offset: \d+, limit: \d+ \}\) for the next slice\.)?$/,
-	);
-	if (!suffix) return text;
-	const toolName = suffix[1] ?? "get_search_content";
-	const continuation = `\n\n---\nShowing chars ${paging.offset}-${paging.endOffset} of ${contentLength}.`;
-	return text.slice(0, text.length - suffix[0].length) +
-		(hasMore
-			? `${continuation} Use ${toolName}({ responseId: "${responseId}", urlIndex: ${paging.urlIndex}, offset: ${paging.endOffset}, limit: ${paging.limit} }) for the next slice.`
-			: continuation);
-}
 
 function materializeCacheHit(
 	pi: PiLike,

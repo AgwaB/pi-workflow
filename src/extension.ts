@@ -2801,7 +2801,12 @@ function isThinkingLevel(value: string | undefined): value is ThinkingLevel {
 	);
 }
 
-const WORKFLOW_KNOWN_ACTIONS = new Set([
+/**
+ * Every `/workflow <action>` the slash command handles. A lone token outside
+ * this set that looks like a run id opens the board instead of dispatching.
+ * Keep in sync with WORKFLOW_HELP; a unit test enforces the pairing.
+ */
+export const WORKFLOW_KNOWN_ACTIONS: ReadonlySet<string> = new Set([
 	"help",
 	"list",
 	"validate",
@@ -2814,6 +2819,7 @@ const WORKFLOW_KNOWN_ACTIONS = new Set([
 	"logs",
 	"wait",
 	"resume",
+	"stop",
 	"--help",
 	"-h",
 ]);

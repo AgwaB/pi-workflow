@@ -95,6 +95,34 @@ function record(label, command, result, options) {
 	if (!pass) failed = true;
 }
 
+function skip(label, command, reason) {
+	const out = join(resultDir, `${label}.out`);
+	const err = join(resultDir, `${label}.err`);
+	writeFileSync(out, "");
+	writeFileSync(err, `${reason}\n`);
+	rows.push({
+		label,
+		command: command.join(" "),
+		status: null,
+		signal: null,
+		error: "",
+		durationMs: 0,
+		expected: "skipped",
+		stdout: relative(root, out),
+		stderr: relative(root, err),
+		excerpt: reason,
+		result: "SKIP",
+	});
+}
+
+function insideGitWorktree() {
+	const result = spawnSync("git", ["rev-parse", "--is-inside-work-tree"], {
+		cwd: root,
+		encoding: "utf8",
+	});
+	return result.status === 0 && result.stdout.trim() === "true";
+}
+
 function run(label, command, args = [], options = {}) {
 	const out = join(resultDir, `${label}.out`);
 	const err = join(resultDir, `${label}.err`);
@@ -153,7 +181,16 @@ function main() {
 	console.log(`Writing E2E evidence to ${relative(root, resultDir)}`);
 
 	ensureCompiledArtifacts();
-	run("diff-check", "git", ["diff", "--check"]);
+	// `git diff --check` only has meaning inside a Git worktree. A git-archive
+	// export or packed consumer has no repository, so record an explicit skip
+	// instead of failing the whole smoke on exit 129.
+	if (insideGitWorktree()) run("diff-check", "git", ["diff", "--check"]);
+	else
+		skip(
+			"diff-check",
+			["git", "diff", "--check"],
+			"skipped: source root is not inside a Git worktree",
+		);
 	assertNoLegacyTerms();
 	run("cli-help", process.execPath, ["src/cli.mjs", "--help"]);
 	run("cli-unknown-command", process.execPath, ["src/cli.mjs", "nope"], {
