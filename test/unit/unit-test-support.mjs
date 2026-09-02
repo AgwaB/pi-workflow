@@ -17,7 +17,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { loadAgentByName, parseAgentMarkdown } from "../../.tmp/unit/agents.js";
@@ -236,14 +236,26 @@ function rmSync(path, options) {
 	return nodeRmSync(path, retryOptions);
 }
 
-const UNIT_TEST_HOME = mkdtempSync(join(tmpdir(), "workflow-unit-home-"));
+const UNIT_TEST_ROOT = mkdtempSync(join(tmpdir(), "pi-workflow-tests-"));
+const UNIT_TEST_HOME = mkdtempSync(join(UNIT_TEST_ROOT, "workflow-unit-home-"));
 process.env.HOME = UNIT_TEST_HOME;
 process.env.USERPROFILE = UNIT_TEST_HOME;
+
+function cleanupUnitTestRoot() {
+	if (process.exitCode !== undefined && process.exitCode !== 0) {
+		console.error(`workflow unit test artifacts retained at ${UNIT_TEST_ROOT}`);
+		return;
+	}
+	rmSync(UNIT_TEST_ROOT, { recursive: true, force: true });
+}
+
+after(cleanupUnitTestRoot);
+process.on("exit", cleanupUnitTestRoot);
 
 setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
 
 function makeProject() {
-	return mkdtempSync(join(tmpdir(), "workflow-unit-"));
+	return mkdtempSync(join(UNIT_TEST_ROOT, "workflow-unit-"));
 }
 
 function supervisorLockPath(cwd, runId) {

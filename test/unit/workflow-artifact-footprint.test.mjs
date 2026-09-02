@@ -54,10 +54,16 @@ async function withStaticArtifacts(
 
 async function withTaskDir(fn) {
 	const root = await mkdtemp(join(tmpdir(), "pi-workflow-artifacts-"));
+	let failed = false;
 	try {
 		await fn(root);
+	} catch (error) {
+		failed = true;
+		throw error;
 	} finally {
 		setTaskArtifactLinkForTests(undefined);
+		if (!failed) await rm(root, { recursive: true, force: true });
+		else console.error(`workflow artifact test artifacts retained at ${root}`);
 	}
 }
 
