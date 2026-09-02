@@ -21,16 +21,24 @@ import { loadWorkflowSpec } from "../../.tmp/unit/schema.js";
 import { compiledWorkflowPath, readRunRecord } from "../../.tmp/unit/store.js";
 import { setSubagentApiForTests } from "../../.tmp/unit/subagent-backend.js";
 
-const UNIT_TEST_HOME = mkdtempSync(join(tmpdir(), "execution-profiles-home-"));
+const UNIT_TEST_ROOT = mkdtempSync(join(tmpdir(), "pi-workflow-tests-"));
+const UNIT_TEST_HOME = mkdtempSync(join(UNIT_TEST_ROOT, "execution-profiles-home-"));
 process.env.HOME = UNIT_TEST_HOME;
 process.env.USERPROFILE = UNIT_TEST_HOME;
 
-after(() => {
-	rmSync(UNIT_TEST_HOME, { recursive: true, force: true });
-});
+function cleanupUnitTestRoot() {
+	if (process.exitCode !== undefined && process.exitCode !== 0) {
+		console.error(`execution profile test artifacts retained at ${UNIT_TEST_ROOT}`);
+		return;
+	}
+	rmSync(UNIT_TEST_ROOT, { recursive: true, force: true });
+}
+
+after(cleanupUnitTestRoot);
+process.on("exit", cleanupUnitTestRoot);
 
 function makeProject() {
-	return mkdtempSync(join(tmpdir(), "execution-profiles-"));
+	return mkdtempSync(join(UNIT_TEST_ROOT, "execution-profiles-"));
 }
 
 function writeAgent(cwd, name) {

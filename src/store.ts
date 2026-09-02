@@ -1894,6 +1894,16 @@ export async function writeCompiledRunArtifact(
 	);
 }
 
+export type StaticArtifactLinkTestHook = (source: string, target: string) => void | Promise<void>;
+
+let staticArtifactLinkForTests: StaticArtifactLinkTestHook | undefined;
+
+export function setStaticArtifactLinkForTests(
+	hook: StaticArtifactLinkTestHook | undefined,
+): void {
+	staticArtifactLinkForTests = hook;
+}
+
 export async function writeStaticRunArtifacts(
 	cwd: string,
 	run: WorkflowRunRecord,
@@ -1901,16 +1911,36 @@ export async function writeStaticRunArtifacts(
 	originalSpec: unknown,
 ): Promise<void> {
 	const runDir = workflowRunDir(cwd, run.runId);
-	await writeJsonAtomic(join(runDir, "spec.json"), originalSpec);
+	const runSpec = join(runDir, "spec.json");
+	const bundleDir = join(runDir, "bundle");
+	await writeJsonAtomic(runSpec, originalSpec);
 	await writeCompiledRunArtifact(cwd, run.runId, compiled);
-	await copyWorkflowBundleArtifacts(
-		cwd,
-		run.specPath,
-		join(runDir, "bundle"),
-		originalSpec,
-	);
-	rewriteCompiledBundlePathsInValue(run, join(runDir, "bundle"));
-	rewriteCompiledBundlePathsInValue(compiled, join(runDir, "bundle"));
+	await copyWorkflowBundleArtifacts(cwd, run.specPath, bundleDir, originalSpec);
+	await linkIdenticalStaticArtifact(join(bundleDir, "spec.json"), runSpec, originalSpec);
+	rewriteCompiledBundlePathsInValue(run, bundleDir);
+	rewriteCompiledBundlePathsInValue(compiled, bundleDir);
+}
+
+async function linkIdenticalStaticArtifact(
+	source: string,
+	target: string,
+	fallback: unknown,
+): Promise<void> {
+	try {
+		const [sourceStat, targetStat] = await Promise.all([stat(source), stat(target)]);
+		if (!sourceStat.isFile() || !targetStat.isFile() || sourceStat.size !== targetStat.size)
+			return;
+		const [sourceBytes, targetBytes] = await Promise.all([
+			readFile(source),
+			readFile(target),
+		]);
+		if (Buffer.compare(sourceBytes, targetBytes) !== 0) return;
+		await staticArtifactLinkForTests?.(source, target);
+		await unlink(target);
+		await link(source, target);
+	} catch {
+		await writeJsonAtomic(target, fallback).catch(() => undefined);
+	}
 }
 
 function rewriteCompiledBundlePaths(

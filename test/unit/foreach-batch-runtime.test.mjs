@@ -38,8 +38,9 @@ import {
 } from "../../.tmp/unit/subagent-backend.js";
 import { setWorkflowOutputArtifactWriteHookForTests } from "../../.tmp/unit/workflow-output-artifacts.js";
 
+const UNIT_TEST_ROOT = mkdtempSync(join(tmpdir(), "pi-workflow-tests-"));
 const UNIT_TEST_HOME = mkdtempSync(
-	join(tmpdir(), "foreach-batch-runtime-home-"),
+	join(UNIT_TEST_ROOT, "foreach-batch-runtime-home-"),
 );
 process.env.HOME = UNIT_TEST_HOME;
 process.env.USERPROFILE = UNIT_TEST_HOME;
@@ -50,12 +51,19 @@ process.env.USERPROFILE = UNIT_TEST_HOME;
 // the assertion runs under the full concurrent suite.
 setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
 
-after(() => {
-	rmSync(UNIT_TEST_HOME, { recursive: true, force: true });
-});
+function cleanupUnitTestRoot() {
+	if (process.exitCode !== undefined && process.exitCode !== 0) {
+		console.error(`foreach batch test artifacts retained at ${UNIT_TEST_ROOT}`);
+		return;
+	}
+	rmSync(UNIT_TEST_ROOT, { recursive: true, force: true });
+}
+
+after(cleanupUnitTestRoot);
+process.on("exit", cleanupUnitTestRoot);
 
 function makeProject() {
-	return mkdtempSync(join(tmpdir(), "foreach-batch-runtime-"));
+	return mkdtempSync(join(UNIT_TEST_ROOT, "foreach-batch-runtime-"));
 }
 
 function writeAgent(cwd) {
