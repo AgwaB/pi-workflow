@@ -18,12 +18,12 @@ const registry = "https://registry.npmjs.org";
 function envelope(dist) {
 	return { name, version, dist };
 }
-function dist(integrity) {
+function dist(integrity, signatures = [{ keyid: "fixture-key", sig: "fixture-signature" }]) {
 	return {
 		integrity, shasum: "fixture-sha", tarball: `${registry}/@agwab/pi-workflow/-/pi-workflow-${version}.tgz`,
 		fileCount: 1, unpackedSize: 1,
 		attestations: { url: `${registry}/-/npm/v1/attestations/@agwab%2fpi-workflow@${version}`, provenance: { predicateType: "https://slsa.dev/provenance/v1" } },
-		signatures: [{ keyid: "fixture-key", sig: "fixture-signature" }],
+		signatures,
 	};
 }
 function statement(payload, predicateType) {
@@ -57,14 +57,14 @@ function audit(digest, overrides = {}) {
 	return { invalid: [], missing: [], verified: [Object.assign(record, overrides)] };
 }
 
-async function runFixture(mutate, after = "valid", { fetchImpl, verifierOptions = {} } = {}) {
+async function runFixture(mutate, after = "valid", { fetchImpl, verifierOptions = {}, registrySignatures } = {}) {
 	const cwd = await mkdtemp(join(tmpdir(), "pi-release-provenance-"));
 	try {
 		const bytes = Buffer.from("offline release artifact fixture\n");
 		const integrity = `sha512-${createHash("sha512").update(bytes).digest("base64")}`;
 		await writeFile(join(cwd, "package.tgz"), bytes);
 		await writeFile(join(cwd, "before.json"), JSON.stringify(envelope(null)));
-		await writeFile(join(cwd, "after.json"), JSON.stringify(after === "single-field" ? { dist: dist(integrity) } : envelope(dist(integrity))));
+		await writeFile(join(cwd, "after.json"), JSON.stringify(after === "single-field" ? { dist: dist(integrity, registrySignatures) } : envelope(dist(integrity, registrySignatures))));
 		await writeFile(join(cwd, "tags.json"), JSON.stringify({ latest: version }));
 		const evidence = audit(createHash("sha512").update(bytes).digest("hex"));
 		mutate(evidence);
@@ -182,6 +182,23 @@ test("producer envelopes are closed and single-field npm view drift is rejected"
 	const result = await runFixture(() => {}, "single-field");
 	assert.notEqual(result.status, 0);
 	assert.match(result.stderr, /post-publication keys/);
+});
+
+test("registry key rotation may return multiple signatures but never zero", async () => {
+	const artifactBytes = Buffer.from("offline release artifact fixture\n");
+	const fetchImpl = async () => ({ ok: true, arrayBuffer: async () => artifactBytes });
+	const rotated = await runFixture(() => {}, "valid", {
+		fetchImpl,
+		registrySignatures: [
+			{ keyid: "fixture-key", sig: "fixture-signature-a" },
+			{ keyid: "fixture-key", sig: "fixture-signature-b" },
+		],
+	});
+	assert.equal(rotated.status, 0);
+	await assert.rejects(
+		runFixture(() => {}, "valid", { fetchImpl, registrySignatures: [] }),
+		/must contain at least one registry signature/,
+	);
 });
 
 test("unrelated signature records are not accepted as provenance", async () => {
