@@ -27,6 +27,7 @@ import {
 	isTerminalWorkflowStatus,
 	isTerminalTaskStatus,
 	listRunRecords,
+	readIndex,
 	makeRunId,
 	readJson,
 	readRunRecord,
@@ -2502,6 +2503,9 @@ export async function resumeSupervisors(
 				watchRun(cwd, run.runId, options);
 			}
 		}
+		// A project that has never run a workflow gets no `.pi/workflows/`
+		// state from merely starting Pi; the index is created with the first run.
+		if (runs.length === 0 && (await readIndex(cwd)) === undefined) return;
 		await updateIndex(cwd).catch((error) =>
 			recordSupervisorError(cwd, "index", error),
 		);

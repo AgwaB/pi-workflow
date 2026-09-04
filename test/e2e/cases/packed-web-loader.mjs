@@ -313,7 +313,7 @@ try {
 		const subagentPackage = consumerRequire(
 			join(packageRoot, "node_modules", "@agwab", "pi-subagent", "package.json"),
 		);
-		assert.match(subagentPackage.version, /^0\.5\.\d+$/);
+		assert.match(subagentPackage.version, /^0\.6\.\d+$/);
 		const subagentRequire = createRequire(
 			join(packageRoot, "node_modules", "@agwab", "pi-subagent", "package.json"),
 		);
@@ -328,6 +328,7 @@ try {
 			"revokeDurableLaunchBarrierV2",
 			"readDurableLaunchBarrierV2State",
 			"waitForDurableLaunchBarrierV2Ack",
+			"pruneSubagentRuns",
 		]) {
 			assert.equal(typeof subagentApi[name], "function", `missing bundled API ${name}`);
 		}
