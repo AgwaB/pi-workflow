@@ -146,7 +146,7 @@ test("workflow state-root capabilities are private, stable, and physically bound
 	}
 });
 
-test("the packed workflow contract is locked to pi-subagent 0.5.1 durable APIs", async () => {
+test("the packed workflow contract is locked to pi-subagent 0.6.0 durable APIs", async () => {
 	const packageJson = parseJson(
 		readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
 		"package.json",
@@ -155,10 +155,14 @@ test("the packed workflow contract is locked to pi-subagent 0.5.1 durable APIs",
 		readFileSync(new URL("../../package-lock.json", import.meta.url), "utf8"),
 		"package-lock.json",
 	);
-	assert.equal(packageJson.dependencies["@agwab/pi-subagent"], "^0.5.1");
+	assert.equal(packageJson.dependencies["@agwab/pi-subagent"], "^0.6.0");
 	assert.ok(packageJson.bundleDependencies.includes("@agwab/pi-subagent"));
 	const locked = packageLock.packages["node_modules/@agwab/pi-subagent"];
-	assert.equal(locked.version, "0.5.1");
+	assert.equal(locked.version, "0.6.0");
+	assert.equal(
+		locked.integrity,
+		"sha512-HI1ea10jo9BIr1Fs0uwKRfmIzoVek6Irw2lDB0D3Qj7rKmizn61BXzlP7vjPuE0mEojCzBJTCkpOmD9K3y4vCw==",
+	);
 	assert.equal(locked.inBundle, true);
 	const api = await import("@agwab/pi-subagent/api");
 	for (const name of [
@@ -169,6 +173,7 @@ test("the packed workflow contract is locked to pi-subagent 0.5.1 durable APIs",
 		"revokeDurableLaunchBarrierV2",
 		"readDurableLaunchBarrierV2State",
 		"waitForDurableLaunchBarrierV2Ack",
+		"pruneSubagentRuns",
 	])
 		assert.equal(typeof api[name], "function", `missing ${name}`);
 });
