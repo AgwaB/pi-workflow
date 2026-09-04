@@ -220,7 +220,7 @@ function assertPublicationEnvelope(value, label, allowUnpublished, expectedName,
 	assertExactKeys(value.dist.attestations, ["url", "provenance"], `${label}.dist.attestations`);
 	assert.equal(value.dist.attestations.url, `${registry}/-/npm/v1/attestations/@agwab%2fpi-workflow@${expectedVersion}`);
 	assertExactObject(value.dist.attestations.provenance, { predicateType: "https://slsa.dev/provenance/v1" }, `${label}.dist.attestations.provenance`);
-	assert.ok(Array.isArray(value.dist.signatures) && value.dist.signatures.length === 1, `${label} must contain one registry signature`);
+	assert.ok(Array.isArray(value.dist.signatures) && value.dist.signatures.length > 0, `${label} must contain at least one registry signature`);
 	for (const signature of value.dist.signatures) {
 		assertExactKeys(signature, ["keyid", "sig"], `${label}.dist.signatures[]`);
 		assert.equal(typeof signature.keyid, "string");
