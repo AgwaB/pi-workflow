@@ -5213,6 +5213,9 @@ async function materializeTerminalArtifactGraphResultInner(
 			...retrySession,
 		});
 	}
+	// Retain a host-owned anchor independently of the result sidecar. Removing or
+	// replacing that sidecar cannot downgrade new linked raw to legacy evidence.
+	task.rawArtifactIntegrity = written.result.rawIntegrity;
 	const completedAfterTimeout = resultCompletedAfterTimeout(
 		task,
 		written.result.completedAt,

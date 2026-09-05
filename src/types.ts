@@ -1214,6 +1214,8 @@ export interface WorkflowTaskRunRecord {
 		result: string;
 	};
 	backendFiles?: Record<string, string>;
+	/** Host-owned raw byte integrity for the current materialized generation. */
+	rawArtifactIntegrity?: { version: 1; sha256: string; bytes: number; owner: string };
 	lastMessage?: string;
 	outputRetry?: {
 		attempts: number;

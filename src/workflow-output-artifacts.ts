@@ -3,7 +3,8 @@ import { lookup } from "node:dns/promises";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { constants as fsConstants } from "node:fs";
-import { copyFile, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { link, lstat, mkdir, open, rename, unlink, writeFile } from "node:fs/promises";
+import { assertSafeRawTaskDirectory, checkRawLinks, establishRawOwner, hashRawDescriptor, rawDigest, recheckRawOwner, sameInode, sameRawVersion, type RawIntegrity } from "./workflow-raw-contract.js";
 import { dirname, join, resolve } from "node:path";
 
 import { nonPublicIpReason } from "./workflow-network-policy.js";
@@ -165,6 +166,8 @@ export interface WorkflowTaskResultEnvelope {
 	status: "completed" | "failed";
 	artifacts: Record<string, string>;
 	controlDigest?: string;
+	/** Host-written corruption detection; not cryptographic provenance. */
+	rawIntegrity?: RawIntegrity;
 	startedAt?: string;
 	completedAt: string;
 	exitCode: number;
@@ -2522,9 +2525,11 @@ async function writeValidWorkflowOutputBundle(
 	parsed: ValidParsedWorkflowOutput,
 	options: WorkflowTaskArtifactBundleOptions,
 ): Promise<Extract<WorkflowArtifactBundleWriteResult, { valid: true }>> {
+	await assertSafeRawTaskDirectory(taskDir);
 	const files = artifactFileMap(taskDir, options);
-	await writeSidecars(files, parsed, options);
+	const rawIntegrity = await writeSidecars(files, parsed, options);
 	const result = validResultEnvelope(files, parsed, options);
+	if (rawIntegrity) result.rawIntegrity = rawIntegrity;
 	await writeJsonAtomic(files.result!, result);
 	return { valid: true, parsed, result, files };
 }
@@ -2551,8 +2556,8 @@ async function writeSidecars(
 	files: Record<string, string>,
 	parsed: ValidParsedWorkflowOutput,
 	options: WorkflowTaskArtifactBundleOptions,
-): Promise<void> {
-	await Promise.all([
+): Promise<RawIntegrity | undefined> {
+	const [, , , rawIntegrity] = await Promise.all([
 		writeJsonAtomic(files.control!, parsed.control),
 		writeTextAtomic(files.analysis!, ensureTrailingNewline(parsed.analysis)),
 		writeJsonAtomic(files.refs!, parsed.refs),
@@ -2561,36 +2566,52 @@ async function writeSidecars(
 		writeOptionalText(files["system-prompt"], options.systemPrompt),
 		writeOptionalText(files.stderr, options.stderr),
 	]);
+	return rawIntegrity;
 }
 
-async function writeRawArtifact(file: string, value: string): Promise<void> {
-	const outputFile = join(dirname(file), "output.log");
+async function writeRawArtifact(file: string, value: string): Promise<RawIntegrity | undefined> {
+	await assertSafeRawTaskDirectory(dirname(file));
 	const expected = Buffer.from(value, "utf8");
-	try {
-		const output = await stat(outputFile);
-		if (output.isFile() && output.size === expected.byteLength) {
-			const actual = await readFile(outputFile);
-			if (Buffer.compare(actual, expected) === 0) {
-				await taskArtifactLinkForTests?.(outputFile, file);
-				// Keep raw independently readable and immutable even when output.log
-				// shares an attempt inode. CoW retains storage savings where available.
-				const temp = join(dirname(file), `.raw-${randomBytes(12).toString("hex")}.tmp`);
+	const owner = await establishRawOwner(dirname(file)).catch(() => undefined);
+	const integrity: RawIntegrity | undefined = owner ? { version: 1, owner: owner.identity, bytes: expected.length, sha256: rawDigest(expected) } : undefined;
+	if (owner) {
+		const temp = join(dirname(file), `.raw-${randomBytes(12).toString("hex")}.tmp`);
+		try {
+			const before = await lstat(owner.output);
+			if (!before.isFile() || before.size !== expected.length) throw new Error("raw source mismatch");
+			await checkRawLinks(owner, before, false);
+			const source = await open(owner.output, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+			try {
+				// Content is verified on the linked descriptor below, not in a
+				// redundant compare-before-link pass vulnerable to source mutation.
+				if (!sameRawVersion(before, await source.stat())) throw new Error("raw source changed");
+				await taskArtifactLinkForTests?.(owner.output, file);
+				await emitWorkflowOutputArtifactWriteHook({ phase: "before", file });
+				await link(owner.output, temp);
+				const linked = await open(temp, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
 				try {
-					await emitWorkflowOutputArtifactWriteHook({ phase: "before", file });
-					await copyFile(outputFile, temp, fsConstants.COPYFILE_FICLONE | fsConstants.COPYFILE_EXCL);
-					if (!expected.equals(await readFile(temp))) throw new Error("raw snapshot source changed");
+					const info = await linked.stat();
+					if (!sameInode(before, info) || !expected.equals(await linked.readFile()) || !sameRawVersion(info, await linked.stat()) || !sameRawVersion(info, await lstat(owner.output))) throw new Error("raw linked source changed");
+					await recheckRawOwner(owner);
 					await rename(temp, file);
 					await emitWorkflowOutputArtifactWriteHook({ phase: "after", file });
-					return;
-				} finally {
-					await unlink(temp).catch(() => {});
-				}
-			}
-		}
-	} catch {
-		// A failed comparison or clone attempt falls back to the authoritative bytes.
+					const after = await linked.stat();
+					await checkRawLinks(owner, after);
+					// rename may change ctime itself. Verify authoritative bytes after
+					// publication as well as inode/link/size and write timestamps.
+					if (!sameInode(info, after) || info.size !== after.size || info.nlink !== after.nlink || info.mtimeMs !== after.mtimeMs || await hashRawDescriptor(linked, expected.length) !== integrity!.sha256 || !sameRawVersion(after, await linked.stat())) throw new Error("raw publication changed");
+				} finally { await linked.close(); }
+			} finally { await source.close(); }
+			await recheckRawOwner(owner);
+			return integrity;
+		} catch {
+			// Source/link failures may use authoritative bytes, but owner/root
+			// substitution must abort rather than write through a replacement path.
+			await recheckRawOwner(owner);
+		} finally { await unlink(temp).catch(() => {}); }
 	}
 	await writeTextAtomic(file, value);
+	return integrity;
 }
 
 async function writeOptionalText(

@@ -10,6 +10,7 @@ import {
 	type FileHandle,
 } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { assertNoRawIntegrityAnchor, checkRawLinks, establishRawOwner, hashRawDescriptor, readRawIntegrity, recheckRawOwner, sameRawVersion, type RawOwner, type RawIntegrity } from "./workflow-raw-contract.js";
 
 import {
 	EXPERIMENTAL_TOOL_DEDUP_ENV,
@@ -50,6 +51,8 @@ export interface WorkflowArtifactRef {
 
 export interface WorkflowSourceManifestSource {
 	source: string;
+	generation?: number;
+	sourceGeneration?: number;
 	displayName?: string;
 	taskId?: string;
 	specId?: string;
@@ -171,6 +174,11 @@ const DEFAULT_MAX_BYTES = 50 * 1024;
 const DEFAULT_MAX_LINES = 2000;
 const SOURCE_NAME_PATTERN = /^[A-Za-z0-9_.:-]+$/;
 let artifactValidatedHookForTests: (() => void | Promise<void>) | undefined;
+let artifactReadHookForTests: (() => void | Promise<void>) | undefined;
+
+export function setArtifactReadHookForTests(hook: (() => void | Promise<void>) | undefined): void {
+	artifactReadHookForTests = hook;
+}
 
 export function setArtifactValidatedHookForTests(
 	hook: (() => void | Promise<void>) | undefined,
@@ -273,6 +281,8 @@ export function normalizeWorkflowSourceManifest(
 
 		return {
 			source,
+			generation: optionalNonNegativeInteger(sourceValue.generation, `sources[${index}].generation`),
+			sourceGeneration: optionalNonNegativeInteger(sourceValue.sourceGeneration, `sources[${index}].sourceGeneration`),
 			displayName: optionalString(
 				sourceValue.displayName,
 				`sources[${index}].displayName`,
@@ -417,6 +427,7 @@ export async function readWorkflowArtifact(
 		artifactPath,
 		runDir: options.runDir,
 		label: `${sourceName}.${artifact}`,
+		rawSource: artifact === "raw" ? { runId: manifest.runId, taskId: resolved.source.taskId, source: sourceName, generation: resolved.source.generation, sourceGeneration: resolved.source.sourceGeneration } : undefined,
 	});
 	try {
 		if (options.path !== undefined) {
@@ -455,7 +466,8 @@ export async function readWorkflowArtifact(
 			mediaType: resolved.ref.mediaType,
 		};
 	} finally {
-		await opened.file.close();
+		try { await opened.validateAfterRead(); }
+		finally { await opened.file.close(); }
 	}
 }
 
@@ -463,7 +475,8 @@ async function openValidatedArtifactFile(options: {
 	artifactPath: string;
 	runDir?: string;
 	label: string;
-}): Promise<{ file: FileHandle; fileStat: Stats }> {
+	rawSource?: { runId: string; taskId?: string; source: string; generation?: number; sourceGeneration?: number };
+}): Promise<{ file: FileHandle; fileStat: Stats; validateAfterRead: () => Promise<void> }> {
 	const linkStat = await lstat(options.artifactPath);
 	if (linkStat.isSymbolicLink()) {
 		throw new Error(`workflow artifact must not be a symlink: ${options.label}`);
@@ -474,8 +487,17 @@ async function openValidatedArtifactFile(options: {
 			`workflow artifact is not a regular file: ${options.label}`,
 		);
 	}
+	let owner: RawOwner | undefined;
+	let integrity: RawIntegrity | undefined;
+	if (options.rawSource && options.runDir) {
+		owner = await establishRawOwner(dirname(options.artifactPath), { ...options.rawSource, runDir: options.runDir }).catch(() => undefined);
+		if (owner && await realpath(options.artifactPath) !== owner.raw) throw new Error("raw artifact path is not the owned raw path");
+		if (owner) integrity = await readRawIntegrity(owner, validatedStat.nlink === 1);
+		else await assertNoRawIntegrityAnchor(dirname(options.artifactPath));
+	}
 	if (validatedStat.nlink > 1) {
-		throw new Error(`workflow artifact must not be hard-linked: ${options.label}`);
+		if (!owner) throw new Error(`workflow artifact must not be hard-linked: ${options.label}`);
+		await checkRawLinks(owner, validatedStat);
 	}
 	if (options.runDir) {
 		const [realRunDir, realArtifactPath] = await Promise.all([
@@ -496,18 +518,28 @@ async function openValidatedArtifactFile(options: {
 	try {
 		const fileStat = await file.stat();
 		if (fileStat.nlink > 1) {
-			throw new Error(`workflow artifact must not be hard-linked: ${options.label}`);
+			if (!owner) throw new Error(`workflow artifact must not be hard-linked: ${options.label}`);
+			await checkRawLinks(owner, fileStat);
 		}
 		if (
 			!fileStat.isFile() ||
-			fileStat.dev !== validatedStat.dev ||
-			fileStat.ino !== validatedStat.ino
+			!sameRawVersion(fileStat, validatedStat)
 		) {
 			throw new Error(
 				`workflow artifact changed during validation: ${options.label}`,
 			);
 		}
-		return { file, fileStat };
+		if (owner) await recheckRawOwner(owner);
+		return { file, fileStat, validateAfterRead: async () => {
+			await artifactReadHookForTests?.();
+			if (integrity && (integrity.bytes !== fileStat.size || await hashRawDescriptor(file, fileStat.size) !== integrity.sha256)) throw new Error("raw artifact integrity mismatch");
+			if (owner) {
+				await recheckRawOwner(owner);
+				if (JSON.stringify(await readRawIntegrity(owner, fileStat.nlink === 1)) !== JSON.stringify(integrity)) throw new Error("raw artifact integrity record changed");
+				if (fileStat.nlink > 1) await checkRawLinks(owner, await file.stat());
+			}
+			if (!sameRawVersion(fileStat, await file.stat()) || !sameRawVersion(fileStat, await lstat(options.artifactPath))) throw new Error("workflow artifact changed during read");
+		} };
 	} catch (error) {
 		await file.close();
 		throw error;
@@ -825,7 +857,7 @@ export async function handleWorkflowArtifactToolCall(
 	if (!input.artifact)
 		throw new Error("workflow_artifact read requires artifact");
 	const dedupKey = workflowArtifactReadDedupKey(config, accessMode, input);
-	const cachedRead = workflowExperimentalFlagEnabled(
+	const cachedRead = input.artifact !== "raw" && workflowExperimentalFlagEnabled(
 		EXPERIMENTAL_TOOL_DEDUP_ENV,
 	)
 		? workflowArtifactReadDedupCache.get(dedupKey)
@@ -883,7 +915,7 @@ export async function handleWorkflowArtifactToolCall(
 		{ accessMode },
 	);
 	const completedCacheKey =
-		resolvedArtifact.source.status === "completed"
+		input.artifact !== "raw" && resolvedArtifact.source.status === "completed"
 			? completedArtifactReadCacheKey(
 					config,
 					accessMode,
