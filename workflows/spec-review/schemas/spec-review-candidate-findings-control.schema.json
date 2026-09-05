@@ -25,7 +25,19 @@
     "requirementCoverage": {
       "type": "array",
       "items": {
-        "type": "object"
+        "type": "object",
+        "properties": {
+          "evidence": { "type": "array", "maxItems": 64, "items": { "anyOf": [
+            { "type": "string" },
+            { "type": "object", "required": ["file", "lineStart", "lineEnd", "quote"], "properties": {
+              "file": { "type": "string", "minLength": 1 },
+              "lineStart": { "type": "integer", "minimum": 1 },
+              "lineEnd": { "type": "integer", "minimum": 1 },
+              "quote": { "type": "string", "minLength": 1 },
+              "relevance": { "type": "string" }
+            }, "additionalProperties": false }
+          ] } }
+        }
       },
       "maxItems": 40
     }

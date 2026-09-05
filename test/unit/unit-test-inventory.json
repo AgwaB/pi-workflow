@@ -576,7 +576,7 @@
 		{
 			"name": "bundled spec-review workflow materializes verifier and partitions verified findings",
 			"occurrence": 1,
-			"sha256": "4171435a6459a49f06d399e9863e6bf5a4a5f8b4e6949ce331a83322a5b5a542",
+			"sha256": "4a4f110ea49f4e7a56af1a57971fe32e88a296479ce139f21baa341efcccc1b9",
 			"domain": "authoring-interface"
 		},
 		{
@@ -2346,7 +2346,7 @@
 		{
 			"name": "spec-review partition helper joins verifier results and flags missing coverage",
 			"occurrence": 1,
-			"sha256": "40906e890a47e5fd6c89e45b5cc57d7ff7622d9a967487ced8015d1021c57a85",
+			"sha256": "05fc6d76643e99f5d636d92cafd6d346a4f4eec5197f57b8bb1327262c7b91a4",
 			"domain": "authoring-interface"
 		},
 		{

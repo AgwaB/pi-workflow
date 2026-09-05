@@ -25,6 +25,59 @@
       "minLength": 1,
       "maxLength": 1200
     },
+    "evidenceGate": {
+      "type": "object",
+      "required": ["protocol", "complete", "findings", "coverage"],
+      "properties": {
+        "protocol": { "const": "spec-local-evidence-v1", "type": "string" },
+        "complete": { "type": "boolean" },
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object", "required": ["id", "verdict", "complete", "rows"],
+            "properties": {
+              "id": { "type": "string" },
+              "verdict": { "type": "string", "enum": ["KEEP", "WEAKEN", "DROP", "NEEDS_HUMAN"] },
+              "complete": { "type": "boolean" },
+              "rows": {
+                "type": "array",
+                "items": {
+                  "type": "object", "required": ["field", "index", "citation", "status"],
+                  "properties": {
+                    "field": { "type": "string", "enum": ["evidence", "counterEvidence"] },
+                    "index": { "type": "integer", "minimum": 0 },
+                    "status": { "type": "string", "enum": ["verified", "mismatch", "unreadable", "unverified"] },
+                    "reason": { "type": "string" },
+                    "sha256": { "type": "string", "minLength": 64, "maxLength": 64 },
+                    "citation": { "anyOf": [
+                      { "type": "string" },
+                      { "type": "object", "required": ["file", "lineStart", "lineEnd", "quote"], "properties": {
+                        "file": { "type": "string", "minLength": 1 },
+                        "lineStart": { "type": "integer", "minimum": 1 },
+                        "lineEnd": { "type": "integer", "minimum": 1 },
+                        "quote": { "type": "string", "minLength": 1 },
+                        "relevance": { "type": "string" }
+                      }, "additionalProperties": false }
+                    ] }
+                  }, "additionalProperties": false
+                }
+              }
+            }, "additionalProperties": false
+          }
+        },
+        "coverage": { "type": "array", "items": {
+          "type": "object", "required": ["index", "id", "verdict", "complete", "rows", "positive"],
+          "properties": {
+            "index": { "type": "integer", "minimum": 0 },
+            "id": { "type": "string" },
+            "verdict": { "type": "string", "const": "KEEP" },
+            "complete": { "type": "boolean" },
+            "positive": { "type": "boolean" },
+            "rows": { "type": "array", "items": { "type": "object" } }
+          }, "additionalProperties": false
+        } }
+      }, "additionalProperties": false
+    },
     "sourceStatusSummary": {
       "type": "object",
       "required": [
@@ -171,9 +224,33 @@
       },
       "additionalProperties": false
     },
-    "requirementCoverage": { "type": "array", "items": { "type": "object" }, "maxItems": 80 },
-    "finalFindings": { "type": "array", "items": { "type": "object" }, "maxItems": 64 },
-    "droppedFindings": { "type": "array", "items": { "type": "object" }, "maxItems": 64 },
+    "requirementCoverage": { "type": "array", "items": { "type": "object", "properties": {
+      "evidence": { "type": "array", "items": { "anyOf": [
+        { "type": "string" },
+        { "type": "object", "required": ["file", "lineStart", "lineEnd", "quote"], "properties": {
+          "file": { "type": "string", "minLength": 1 }, "lineStart": { "type": "integer", "minimum": 1 },
+          "lineEnd": { "type": "integer", "minimum": 1 }, "quote": { "type": "string", "minLength": 1 }, "relevance": { "type": "string" }
+        }, "additionalProperties": false }
+      ] } }
+    } }, "maxItems": 80 },
+    "finalFindings": { "type": "array", "items": { "type": "object", "properties": {
+      "evidence": { "type": "array", "items": { "anyOf": [
+        { "type": "string" },
+        { "type": "object", "required": ["file", "lineStart", "lineEnd", "quote"], "properties": {
+          "file": { "type": "string", "minLength": 1 }, "lineStart": { "type": "integer", "minimum": 1 },
+          "lineEnd": { "type": "integer", "minimum": 1 }, "quote": { "type": "string", "minLength": 1 }, "relevance": { "type": "string" }
+        }, "additionalProperties": false }
+      ] } }
+    } }, "maxItems": 64 },
+    "droppedFindings": { "type": "array", "items": { "type": "object", "properties": {
+      "counterEvidence": { "type": "array", "items": { "anyOf": [
+        { "type": "string" },
+        { "type": "object", "required": ["file", "lineStart", "lineEnd", "quote"], "properties": {
+          "file": { "type": "string", "minLength": 1 }, "lineStart": { "type": "integer", "minimum": 1 },
+          "lineEnd": { "type": "integer", "minimum": 1 }, "quote": { "type": "string", "minLength": 1 }, "relevance": { "type": "string" }
+        }, "additionalProperties": false }
+      ] } }
+    } }, "maxItems": 64 },
     "needsHuman": { "type": "array", "items": { "type": "object" }, "maxItems": 256 },
     "missingVerifications": { "type": "array", "items": { "type": "object" }, "maxItems": 64 },
     "invalidVerifierResults": { "type": "array", "items": { "type": "object" }, "maxItems": 64 },

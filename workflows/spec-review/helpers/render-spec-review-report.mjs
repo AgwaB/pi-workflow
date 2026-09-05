@@ -6,6 +6,7 @@
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { partitionEvidenceComplete } from "./spec-evidence-gate.mjs";
 
 const REPORT_VERDICTS = new Set([
 	"CONFORMS",
@@ -105,23 +106,6 @@ function rowIdentity(row, prefix, index) {
 
 function rowTitle(row, fallback) {
 	return cleanText(row?.title ?? row?.finding ?? row?.claim ?? row?.question ?? fallback);
-}
-
-function evidenceUsableItem(item) {
-	// Legacy file:line citations remain supported. This is locator/quote
-	// presence, not a byte-grounding or semantic proof. Bare assertions and
-	// claim/relevance prose must not masquerade as source evidence.
-	if (typeof item === "string") {
-		return !/https?:\/\//i.test(item) && /(?:^|[\s`(])(?:\.?\.?\/)?[\w./-]+\.[\w-]+(?::[1-9]\d*(?:-[1-9]\d*)?|#L[1-9]\d*(?:-L?[1-9]\d*)?)(?=$|[\s`:),])/u.test(item);
-	}
-	if (!isRecord(item)) return false;
-	const locator = cleanText(item.file ?? item.path ?? item.source ?? "");
-	const quote = cleanText(item.quote ?? item.evidence ?? "");
-	return Boolean(locator && !/^[a-z][a-z0-9+.-]*:\/\//i.test(locator) && quote);
-}
-
-function findingHasUsableEvidence(finding) {
-	return asArray(finding?.evidence).some(evidenceUsableItem);
 }
 
 function reportAvailable(report) {
@@ -332,6 +316,7 @@ function verifierCoverageComplete(partition) {
 		return false;
 	const candidateNeedsHumanSources = new Set([
 		"candidate-findings",
+		"evidence-gate",
 		"verifier",
 		"invalid-verdict",
 		"missing-verification",
@@ -495,7 +480,7 @@ function renderRequirementCoverage(rows) {
 }
 
 function renderNoIssueNotes(rows) {
-	const out = ["## Confirmed and no-issue observations", ""];
+	const out = ["## Preliminary no-issue observations (unverified)", "", "These model-authored notes are not independent conformance evidence.", ""];
 	if (rows.length === 0) return [...out, "No no-issue observations were recorded.", ""];
 	for (const row of rows) {
 		const text = typeof row === "string" ? row : stableStringify(row);
@@ -542,7 +527,7 @@ function limitationRows({ sourceCoverageComplete, coverageComplete, duplicates, 
 	if (duplicates.length > 0)
 		rows.push(`Canonical disposition IDs are duplicated: ${duplicates.join(", ")}.`);
 	if (!evidenceComplete)
-		rows.push("At least one actionable finding lacks usable locator-plus-evidence support.");
+		rows.push("Local byte evidence is incomplete, changed, or unverified for a disposition or positive requirement-coverage claim; legacy locators cannot establish support or justify removal.");
 	if (!reportPresent)
 		rows.push("The narrative report synthesis is absent or malformed.");
 	else if (!verdictConsistent)
@@ -626,6 +611,10 @@ function renderMarkdown({ verdict, report, partition, completionSummaryMarkdown,
 		),
 		...renderNoIssueNotes(asArray(partition.noIssueNotes)),
 		...renderVerifierIntegrity(partition),
+		"## Byte evidence audit",
+		"",
+		...fenced(partition.evidenceGate ?? { complete: false, reason: "legacy partition has no byte gate" }, "json"),
+		"",
 		"## Recommended next action",
 		"",
 		safeInline(report?.recommendedNextAction ?? "Resolve renderer blockers, then rerun the spec review."),
@@ -708,12 +697,13 @@ export default async function renderSpecReviewReport({ sources, context = {} }) 
 		partitionSourceCoverageComplete(partition) && finalSourceCoverageComplete(context);
 	const ownerLedgerReconciliationPassed = verifierOwnerLedgerComplete(partition);
 	const coverageComplete = verifierCoverageComplete(partition);
-	const evidenceComplete = finalFindings.every(findingHasUsableEvidence);
-	const verdict = requiredVerdict(
+	const evidenceComplete = await partitionEvidenceComplete(partition, context);
+	const ledgerVerdict = requiredVerdict(
 		partition,
 		sourceCoverageComplete,
 		coverageComplete,
 	);
+	const verdict = !evidenceComplete && ledgerVerdict === "CONFORMS" ? "INCONCLUSIVE" : ledgerVerdict;
 	const verdictConsistent = reportPresent && cleanText(report.verdict) === verdict;
 	const limitations = limitationRows({
 		sourceCoverageComplete,

@@ -99,11 +99,11 @@ for (const mode of ['exact', 'mismatch', 'wrong-range', 'missing-file', 'symlink
 
 for (const [label, evidence, usable] of [
   ['bare assertion', ['Trust me; no repository locator.'], false],
-  ['legacy located evidence', ['source.ts:1: export const enabled = false;'], true],
-  ['structured quote', [{ file: 'source.ts', line: 1, quote: 'export const enabled = false;' }], true],
-  ['claim is not quote', [{ file: 'source.ts', claim: 'Trust me' }], false],
+  ['legacy located evidence is display-only', ['source.ts:1: export const enabled = false;'], false],
+  ['structured quote', [{ file: 'source.ts', lineStart: 1, lineEnd: 1, quote: 'export const enabled = false;' }], true],
+  ['claim is not quote', ['source.ts:1: Trust me'], false],
 ]) {
-  test(`spec-review actionable evidence requires a locator: ${label}`, async (t) => {
+  test(`spec-review actionable evidence requires verified bytes: ${label}`, async (t) => {
     const cwd = await fixture(t);
     const id = 'finding-001';
     const v = { schema: 'test', digest: 'test', id, verdict: 'KEEP', severity: 'medium', evidence, finalClaim: 'A gap exists', recommendedAction: 'Fix it' };
@@ -112,7 +112,7 @@ for (const [label, evidence, usable] of [
     assert.equal(validateJsonSchema(plan, await schema('workflows/spec-review/schemas/spec-review-candidate-findings-control.schema.json')).valid, true);
     const p = await specPartition({ sources: { 'candidate-findings': plan, 'verify-findings': v }, options: { mode: 'partition' }, context: { cwd, sourceStatuses: [{ source: 'candidate-findings', stageId: 'candidate-findings', specId: 'candidate-findings.main', taskId: 'task-plan', status: 'completed' }, owner('verify-findings', id)] } });
     const report = { schema: 'spec-review-report-v1', digest: 'test', summary: 'A gap exists.', verdict: 'GAPS_FOUND', risks: [], recommendedNextAction: 'Fix it.', ownerLedger: p.verifierCoverage.ownerLedger, ownerLedgerReconciliation: p.verifierCoverage.ownerLedgerReconciliation };
-    const result = await specRender({ sources: { 'partition-findings': p, report }, context: { sourceStatuses: ['partition-findings', 'report'].map((source) => ({ source, stageId: source, specId: `${source}.main`, taskId: `task-${source}`, status: 'completed' })) } });
+    const result = await specRender({ sources: { 'partition-findings': p, report }, context: { cwd, sourceStatuses: ['partition-findings', 'report'].map((source) => ({ source, stageId: source, specId: `${source}.main`, taskId: `task-${source}`, status: 'completed' })) } });
     assert.equal(validateJsonSchema(p, await schema('workflows/spec-review/schemas/spec-review-partition-control.schema.json')).valid, true);
     assert.equal(validateJsonSchema(report, await schema('workflows/spec-review/schemas/spec-review-report-control.schema.json')).valid, true);
     assert.equal(validateJsonSchema(result, await schema('workflows/spec-review/schemas/spec-review-render-control.schema.json')).valid, true);

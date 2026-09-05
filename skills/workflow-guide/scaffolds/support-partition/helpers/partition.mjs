@@ -9,7 +9,7 @@ function asArray(value) {
 }
 
 function strings(value) {
-  if (typeof value === "string" && value.trim()) return [value.trim()];
+  if (typeof value === "string" && value.trim()) return [value];
   if (Array.isArray(value)) return value.flatMap(strings);
   if (value && typeof value === "object") return Object.values(value).flatMap(strings);
   return [];
@@ -19,8 +19,8 @@ function dedupeStrings(values) {
   const seen = new Set();
   const out = [];
   for (const value of values) {
-    const text = String(value ?? "").trim();
-    if (!text || seen.has(text)) continue;
+    const text = String(value ?? "");
+    if (!text.trim() || seen.has(text)) continue;
     seen.add(text);
     out.push(text);
   }

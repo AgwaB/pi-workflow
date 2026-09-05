@@ -16,6 +16,8 @@
 //                        candidate per task.
 
 import { createHash } from "node:crypto";
+import { EVIDENCE_PROTOCOL, gateDisposition, gateRequirementCoverage, isLocalCitation } from "./spec-evidence-gate.mjs";
+import { readLocalText } from "./local-evidence-reader.mjs";
 
 const VERDICTS = new Set(["KEEP", "WEAKEN", "DROP", "NEEDS_HUMAN"]);
 const SEVERITIES = new Set(["high", "medium", "low", "info"]);
@@ -127,7 +129,7 @@ function normalizeMaxBatchSize(value) {
 
 // --- partition ---------------------------------------------------------------
 
-function partitionFindings(sources, options = {}, context = {}) {
+async function partitionFindings(sources, options = {}, context = {}) {
 	const candidateStage = String(
 		options?.candidateStage ?? "candidate-findings",
 	);
@@ -186,6 +188,26 @@ function partitionFindings(sources, options = {}, context = {}) {
 		...objectOrMessage(item),
 	}));
 	const sourceStatusSummary = summarizeSourceStatuses(context);
+	const candidateStatuses = (Array.isArray(context.sourceStatuses) ? context.sourceStatuses : []).filter(row =>
+		row?.stageId === candidateStage && (row.source === candidateStage || row.source?.startsWith(`${candidateStage}.`)) &&
+		row.specId === `${candidateStage}.main` && typeof row.taskId === "string" && row.taskId.trim());
+	if (candidateStatuses.length !== 1 || candidateStatuses[0].status !== "completed") {
+		sourceStatusSummary.total += 1;
+		sourceStatusSummary.nonCompleted += 1;
+		sourceStatusSummary.partialFailures = [...sourceStatusSummary.partialFailures, {
+			source: candidateStage, status: "missing_or_inconsistent_candidate_source_status",
+		}].slice(0, MAX_PARTIAL_FAILURES);
+	}
+
+	// In a scheduler run, the candidate reducer's runtime-written manifest is
+	// the authority for its three required mapping sources. A model cannot
+	// hide a failed mapping stage by emitting a clean candidate control.
+	if (context.runId && candidateStatuses.length === 1) {
+		const failures = await candidateUpstreamFailures(context, candidateStatuses[0]);
+		sourceStatusSummary.total += failures.length;
+		sourceStatusSummary.nonCompleted += failures.length;
+		sourceStatusSummary.partialFailures = [...sourceStatusSummary.partialFailures, ...failures].slice(0, MAX_PARTIAL_FAILURES);
+	}
 
 	const verifierById = new Map();
 	const duplicateVerifierIds = [];
@@ -352,6 +374,8 @@ function partitionFindings(sources, options = {}, context = {}) {
 		}
 	}
 
+	const evidenceFindings = [];
+	const evidenceCoverage = await gateRequirementCoverage(requirementCoverage, context);
 	const finalFindings = [];
 	const droppedFindings = [];
 	const missingVerifications = [];
@@ -390,6 +414,19 @@ function partitionFindings(sources, options = {}, context = {}) {
 		}
 		const verdict = normalizeVerdict(rawVerdict);
 		const severity = normalizeSeverity(verifier.severity, candidate.severity);
+		const evidence = Array.isArray(verifier.evidence) ? verifier.evidence : [];
+		const counterEvidence = Array.isArray(verifier.counterEvidence) ? verifier.counterEvidence : [];
+		const evidenceGate = await gateDisposition(id, verdict, evidence, counterEvidence, context);
+		evidenceFindings.push(evidenceGate);
+		if (verdict !== "NEEDS_HUMAN" && !evidenceGate.complete) {
+			needsHuman.push({
+				source: "evidence-gate", id, title: candidate.title ?? id,
+				verdict: "NEEDS_HUMAN", originalVerdict: verdict, evidence, counterEvidence,
+				reason: `Unverified ${verdict}: exact local byte evidence required${verdict === "DROP" ? " in counterEvidence before removal" : ""}`,
+				originalCandidate: candidate, evidenceGate,
+			});
+			continue;
+		}
 
 		if (verdict === "KEEP" || verdict === "WEAKEN") {
 			finalFindings.push({
@@ -412,6 +449,7 @@ function partitionFindings(sources, options = {}, context = {}) {
 				id,
 				title: candidate.title ?? id,
 				reason: summarizeCounterEvidence(verifier),
+				verdict, evidence, counterEvidence,
 				originalCandidate: candidate,
 			});
 		} else {
@@ -462,6 +500,14 @@ function partitionFindings(sources, options = {}, context = {}) {
 
 	const partition = {
 		schema: "spec-review-partition-v1",
+		evidenceGate: {
+			protocol: EVIDENCE_PROTOCOL,
+			complete: evidenceFindings.length === joinCandidates.size && evidenceFindings.length > 0 &&
+				evidenceFindings.every(row => row.complete) && evidenceCoverage.every(row => row.complete) &&
+				needsHuman.length === 0 && sourceStatusSummary.metadataAvailable && sourceStatusSummary.total > 0 && sourceStatusSummary.nonCompleted === 0,
+			findings: evidenceFindings,
+			coverage: evidenceCoverage,
+		},
 		sourceStatusSummary,
 		verifierCoverage: {
 			// Batch membership, including deterministic fallback IDs, is the
@@ -803,11 +849,11 @@ function malformedBatchRowReason(row) {
 		return "malformed_batch_row_invalid_severity";
 	if (!Array.isArray(row.evidence))
 		return "malformed_batch_row_missing_evidence_array";
-	if (row.evidence.some((item) => typeof item !== "string"))
+	if (row.evidence.some((item) => typeof item !== "string" && !isLocalCitation(item)))
 		return "malformed_batch_row_invalid_evidence_item";
 	if (!Array.isArray(row.counterEvidence))
 		return "malformed_batch_row_missing_counterEvidence_array";
-	if (row.counterEvidence.some((item) => typeof item !== "string"))
+	if (row.counterEvidence.some((item) => typeof item !== "string" && !isLocalCitation(item)))
 		return "malformed_batch_row_invalid_counterEvidence_item";
 	if (typeof row.finalClaim !== "string")
 		return "malformed_batch_row_missing_finalClaim";
@@ -1061,6 +1107,30 @@ function summarizeSourceStatuses(context) {
 			? { omittedPartialFailures: failures.length - MAX_PARTIAL_FAILURES }
 			: {}),
 	};
+}
+
+async function candidateUpstreamFailures(context, owner) {
+	const required = ["extract-spec", "map-implementation", "inspect-tests"];
+	try {
+		if (![context.runId, owner.taskId].every(id => typeof id === "string" && /^[a-zA-Z0-9_-]+$/.test(id))) throw new Error("unsafe runtime source identity");
+		const text = await readLocalText(context.cwd, `.pi/workflows/${context.runId}/tasks/${owner.taskId}/source-manifest.json`, context.signal);
+		const manifest = JSON.parse(text);
+		if (manifest.schema !== "workflow-source-manifest-v1" || manifest.runId !== context.runId || manifest.taskId !== owner.taskId || !Array.isArray(manifest.sources)) throw new Error("invalid candidate source manifest");
+		const failures = [];
+		for (const stage of required) {
+			const rows = manifest.sources.filter(row => row.stageId === stage && row.source === stage && row.specId === `${stage}.main`);
+			if (rows.length !== 1 || rows[0].status !== "completed" || !rows[0].artifacts?.control?.path || !/^[a-zA-Z0-9_-]+$/.test(rows[0].taskId ?? "")) {
+				failures.push({ source: stage, status: "missing_or_incomplete_upstream_source" });
+				continue;
+			}
+			// Read the actual bounded control file, not merely a metadata locator.
+			JSON.parse(await readLocalText(context.cwd, `.pi/workflows/${context.runId}/tasks/${rows[0].taskId}/control.json`, context.signal));
+		}
+		return failures;
+	} catch (error) {
+		context.signal?.throwIfAborted();
+		return [{ source: "candidate-findings", status: "unverifiable_upstream_sources", lastMessage: error.code ?? error.message }];
+	}
 }
 
 function slimSourceStatus(status) {
