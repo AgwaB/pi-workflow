@@ -16,6 +16,8 @@ supervise drives workflow scheduling from a standalone process until the
 target run(s) reach a terminal status, so runs keep progressing after the
 Pi session that started them exits. The run lease arbitrates with any
 in-session supervisor. Exit codes: 0 completed, 1 failed/interrupted, 2 blocked.
+For --all, only runs observed running are included; failure takes precedence
+over blocked. Empty batches succeed; historical terminal runs are ignored.
 `;
 }
 
@@ -46,6 +48,10 @@ if (!ref) {
 }
 
 const options = new Set(args.slice(2));
+if (ref.startsWith("-") || [...options].some(option => !["--failures", "--results", "--json"].includes(option))) {
+  process.stderr.write(`Unknown inspect argument or option.\n${usage()}`);
+  process.exit(1);
+}
 const cwd = process.cwd();
 const run = await readRun(cwd, ref);
 
@@ -98,14 +104,21 @@ async function prune(argv) {
     const arg = argv[index];
     if (arg === "--yes") yes = true;
     else if (arg === "--json") json = true;
-    else if (arg === "--keep") keep = Number(argv[++index]);
-    else if (arg === "--older-than") olderThanDays = Number(argv[++index]);
+    else if (arg === "--keep" || arg === "--older-than") {
+      const raw = argv[++index];
+      if (!raw?.trim() || raw.startsWith("--")) {
+        process.stderr.write(`${arg} requires a numeric value.\n`);
+        return 1;
+      }
+      if (arg === "--keep") keep = Number(raw);
+      else olderThanDays = Number(raw);
+    }
     else {
       process.stderr.write(`Unknown prune argument "${arg}".\n${usage()}`);
       return 1;
     }
   }
-  if (keep !== undefined && (!Number.isInteger(keep) || keep < 0)) {
+  if (keep !== undefined && (!Number.isSafeInteger(keep) || keep < 0)) {
     process.stderr.write("--keep requires a non-negative integer.\n");
     return 1;
   }
@@ -129,13 +142,26 @@ async function supervise(argv) {
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--all") allMode = true;
-    else if (arg === "--poll-ms") pollMs = Math.max(250, Number(argv[++index]) || pollMs);
-    else if (arg === "--max-runtime-ms") maxRuntimeMs = Math.max(1_000, Number(argv[++index]) || maxRuntimeMs);
+    else if (arg === "--poll-ms" || arg === "--max-runtime-ms") {
+      const raw = argv[++index];
+      const value = Number(raw);
+      const minimum = arg === "--poll-ms" ? 250 : 1_000;
+      if (!raw || !/^\d+$/.test(raw) || !Number.isSafeInteger(value) || value < minimum || value > 2_147_483_647) {
+        process.stderr.write(`${arg} requires an integer from ${minimum} to 2147483647.\n`);
+        return 1;
+      }
+      if (arg === "--poll-ms") pollMs = value;
+      else maxRuntimeMs = value;
+    }
     else if (!arg.startsWith("--") && !runRef) runRef = arg;
     else {
       process.stderr.write(`Unknown supervise argument "${arg}".\n${usage()}`);
       return 1;
     }
+  }
+  if (runRef && allMode) {
+    process.stderr.write("Run id and --all are mutually exclusive.\n");
+    return 1;
   }
   if (!runRef && !allMode) {
     process.stderr.write(`Missing run id (or --all).\n${usage()}`);
@@ -152,6 +178,7 @@ async function supervise(argv) {
   const cwd = process.cwd();
   const runId = runRef ? (await store.readRunRecord(cwd, runRef)).runId : undefined;
   const lastPrinted = new Map();
+  const supervised = new Set();
   const deadline = Date.now() + maxRuntimeMs;
   log(`supervising ${runId ?? "all running runs"} in ${cwd} (poll ${pollMs}ms)`);
 
@@ -162,6 +189,7 @@ async function supervise(argv) {
 
     for (const run of runs) {
       if (run.status !== "running") continue;
+      supervised.add(run.runId);
       await engine.scheduleRun(cwd, run.runId).catch((error) => log(`schedule error ${run.runId}: ${error?.message ?? error}`));
     }
 
@@ -183,7 +211,10 @@ async function supervise(argv) {
       }
     } else if (!refreshed.some((run) => run.status === "running")) {
       log("done: no running runs remain");
-      return 0;
+      const outcomes = refreshed.filter(run => supervised.has(run.runId));
+      // Failure/interruption takes precedence over blocked, then completed.
+      if (outcomes.length !== supervised.size || outcomes.some(run => !["completed", "blocked"].includes(run.status))) return 1;
+      return outcomes.some(run => run.status === "blocked") ? 2 : 0;
     }
 
     if (Date.now() >= deadline) {
