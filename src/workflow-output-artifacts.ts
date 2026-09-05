@@ -2562,7 +2562,8 @@ async function writeSidecars(
 	options: WorkflowTaskArtifactBundleOptions,
 	owner?: RawOwner,
 ): Promise<RawIntegrity | undefined> {
-	const [, , , rawIntegrity] = await Promise.all([
+	// A failed sibling must not leave other writes running after publication settles.
+	const writes = await Promise.allSettled([
 		writeJsonAtomic(files.control!, parsed.control),
 		writeTextAtomic(files.analysis!, ensureTrailingNewline(parsed.analysis)),
 		writeJsonAtomic(files.refs!, parsed.refs),
@@ -2571,7 +2572,11 @@ async function writeSidecars(
 		writeOptionalText(files["system-prompt"], options.systemPrompt),
 		writeOptionalText(files.stderr, options.stderr),
 	]);
-	return rawIntegrity;
+	for (const result of writes) {
+		if (result.status === "rejected") throw result.reason;
+	}
+	const raw = writes[3];
+	return raw.status === "fulfilled" ? raw.value : undefined;
 }
 
 async function writeRawArtifact(file: string, value: string, owner?: RawOwner): Promise<RawIntegrity | undefined> {
