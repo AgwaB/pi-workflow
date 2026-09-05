@@ -12,6 +12,7 @@ import {
 	type DynamicWorkflowUi,
 } from "./dynamic-controller-policy.js";
 import { hashDynamicRequest, readDynamicEvents } from "./dynamic-events.js";
+import { remainingDynamicNestedWorkflowDepth } from "./dynamic-nested-depth.js";
 import {
 	readOrRebuildDynamicState,
 	recordDynamicEventAndUpdateState,
@@ -188,6 +189,14 @@ export async function runDynamicNestedWorkflowCall(input: {
 		() => undefined,
 	);
 	if (!nestedRun) {
+		// A durable start reservation may survive a restart without a child run.
+		// Revalidate ancestry before executing it, not just before reserving it.
+		await assertDynamicNestedWorkflowBudgetAvailable({
+			cwd: input.cwd,
+			runId: input.run.runId,
+			controllerSpecId: input.controllerTask.specId,
+			dynamic: input.dynamic,
+		});
 		if (input.isSettled?.()) return undefined;
 		await throwIfWorkflowStopRequested(input.cwd, input.run.runId);
 		nestedRun = await input.runWorkflowSpec(nestedSpecPath, input.cwd, {
@@ -265,6 +274,9 @@ export async function runDynamicNestedWorkflowCall(input: {
 	if (nestedRun.status === "running") {
 		return await buildNestedWorkflowResult(input.cwd, nestedRun);
 	}
+	// Cascading stop can settle the child before the parent's polling signal
+	// fires. Preserve cancellation instead of racing into an ordinary failure.
+	await throwIfWorkflowStopRequested(input.cwd, input.run.runId);
 	throw new Error(
 		`dynamic nested workflow ${workflowId} ended with ${nestedRun.status}`,
 	);
@@ -304,14 +316,12 @@ async function assertDynamicNestedWorkflowBudgetAvailable(input: {
 	controllerSpecId: string;
 	dynamic: CompiledDynamicWorkflowTask;
 }): Promise<void> {
-	const state = await readOrRebuildDynamicState(input.cwd, input.runId);
-	const counters = state.controllers[input.controllerSpecId]?.counters;
-	if (
-		(counters?.nestedWorkflowDepth ?? 0) >=
-		input.dynamic.budget.maxNestedWorkflowDepth
-	) {
+	const remaining = await remainingDynamicNestedWorkflowDepth(
+		input.cwd, input.runId, input.dynamic.budget.maxNestedWorkflowDepth,
+	);
+	if (remaining <= 0) {
 		throw new DynamicControllerBudgetBlocked(
-			`dynamic nested workflow budget exhausted: maxNestedWorkflowDepth=${input.dynamic.budget.maxNestedWorkflowDepth}`,
+			`dynamic nested workflow budget exhausted: maxNestedWorkflowDepth=${input.dynamic.budget.maxNestedWorkflowDepth} (ancestor-relative remaining depth=${remaining}; incomplete ancestry grants no depth)`,
 		);
 	}
 }

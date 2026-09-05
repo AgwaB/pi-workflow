@@ -10,6 +10,7 @@ import {
 	type DynamicWorkflowEvent,
 } from "./dynamic-events.js";
 import { nowIso, readRunRecord, writeJsonAtomic } from "./store.js";
+import { observedDynamicNestedWorkflowDepth } from "./dynamic-nested-depth.js";
 import type { CompiledDynamicWorkflowTask } from "./types.js";
 
 export const DYNAMIC_STATE_SCHEMA = "pi-workflow-dynamic-state-v1";
@@ -31,6 +32,7 @@ export interface DynamicBudgetCounters {
 	runningAgents: number;
 	graphMutations: number;
 	helperRuns: number;
+	/** Historical maximum descendant depth; not a consumable sibling count. */
 	nestedWorkflowDepth: number;
 	runtimeMs: number;
 }
@@ -427,7 +429,9 @@ function applyDynamicEvent(
 		const runId = optionalString(event.payload.runId);
 		if (runId && !controller.nestedWorkflowRunIds.includes(runId)) {
 			controller.nestedWorkflowRunIds.push(runId);
-			controller.counters.nestedWorkflowDepth += 1;
+			controller.counters.nestedWorkflowDepth = Math.max(
+				controller.counters.nestedWorkflowDepth, 1,
+			);
 		}
 		if (
 			runId &&
@@ -548,6 +552,10 @@ async function applyDynamicTaskLifecycle(
 	const run = await readRunRecord(cwd, runId).catch(() => undefined);
 	if (!run) return;
 	for (const controller of Object.values(state.controllers)) {
+		// Also replaces legacy cache values that counted completed siblings.
+		controller.counters.nestedWorkflowDepth = await observedDynamicNestedWorkflowDepth(
+			cwd, runId, controller.nestedWorkflowRunIds,
+		);
 		for (const branch of controller.branches) {
 			if (!branch.specId) continue;
 			const task = run.tasks.find(
@@ -660,6 +668,7 @@ function mergeCounters(counters: DynamicBudgetCounters, value: unknown): void {
 	for (const key of Object.keys(counters) as Array<
 		keyof DynamicBudgetCounters
 	>) {
+		if (key === "nestedWorkflowDepth") continue;
 		const amount = value[key];
 		if (typeof amount === "number" && Number.isFinite(amount)) {
 			counters[key] += amount;

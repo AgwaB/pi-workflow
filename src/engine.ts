@@ -86,6 +86,7 @@ import {
 	recordDynamicEventAndUpdateState,
 	type DynamicControllerStatus,
 } from "./dynamic-state.js";
+import { remainingDynamicNestedWorkflowDepth } from "./dynamic-nested-depth.js";
 import {
 	DynamicControllerBudgetBlocked,
 	DynamicControllerNestedApprovalBlocked,
@@ -6358,6 +6359,9 @@ async function currentDynamicBudgetRemaining(input: {
 			input.controllerTask.specId,
 			state.controllers[input.controllerTask.specId]?.generatedTaskIds ?? [],
 		),
+		await remainingDynamicNestedWorkflowDepth(
+			input.cwd, input.run.runId, input.dynamic.budget.maxNestedWorkflowDepth,
+		),
 	);
 }
 
@@ -6425,11 +6429,11 @@ function dynamicBudgetRemaining(
 				runningAgents?: number;
 				graphMutations?: number;
 				helperRuns?: number;
-				nestedWorkflowDepth?: number;
 				runtimeMs?: number;
 		  }
 		| undefined,
-	runningAgents = counters?.runningAgents ?? 0,
+	runningAgents: number,
+	nestedDepthRemaining: number,
 ): Record<string, number> {
 	return {
 		maxAgents: Math.max(0, dynamic.budget.maxAgents - (counters?.agents ?? 0)),
@@ -6438,11 +6442,7 @@ function dynamicBudgetRemaining(
 			0,
 			remainingDynamicRuntimeMs(dynamic, counters?.runtimeMs ?? 0),
 		),
-		maxNestedWorkflowDepth: Math.max(
-			0,
-			dynamic.budget.maxNestedWorkflowDepth -
-				(counters?.nestedWorkflowDepth ?? 0),
-		),
+		maxNestedWorkflowDepth: nestedDepthRemaining,
 		maxGraphMutations: Math.max(
 			0,
 			dynamic.budget.maxGraphMutations - (counters?.graphMutations ?? 0),
