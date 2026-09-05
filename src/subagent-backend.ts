@@ -4793,6 +4793,7 @@ async function commitTerminalForeachBatch(
 				{
 					taskDir: taskDirectory,
 					rawOutput: candidate.rawOutput,
+					rawIntegrityHost: candidate.task,
 					startedAt,
 					completedAt,
 					exitCode,
@@ -5183,6 +5184,7 @@ async function materializeTerminalArtifactGraphResultInner(
 		writeWorkflowTaskArtifactBundle({
 			taskDir: dirname(options.resultFile),
 			rawOutput,
+			rawIntegrityHost: task,
 			startedAt: options.startedAt,
 			completedAt: options.completedAt,
 			exitCode: options.exitCode,

@@ -4,11 +4,12 @@ import {
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
+	statSync,
 	rmSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { join, relative, dirname } from "node:path";
 import { after, test } from "node:test";
 
 import { buildForeachGeneratedTasks } from "../../.tmp/unit/engine-run-graph.js";
@@ -36,6 +37,8 @@ import {
 	setSubagentApiForTests,
 	setSubagentLaunchControlsForTests,
 } from "../../.tmp/unit/subagent-backend.js";
+import { readWorkflowArtifact, handleWorkflowArtifactToolCall } from "../../.tmp/unit/workflow-artifact-tool.js";
+import { checkRequiredArtifactReads } from "../../.tmp/unit/subagent-backend.js";
 import { setWorkflowOutputArtifactWriteHookForTests } from "../../.tmp/unit/workflow-output-artifacts.js";
 
 const UNIT_TEST_ROOT = mkdtempSync(join(tmpdir(), "pi-workflow-tests-"));
@@ -164,7 +167,7 @@ function writeWorkflow(
 	}));
 }
 
-function writeSubagentArtifacts(cwd, runsDir, runId, attemptId, output) {
+function writeSubagentArtifacts(cwd, runsDir, runId, attemptId, output, correlationId) {
 	const dir = join(cwd, runsDir, runId, "attempts", attemptId);
 	mkdirSync(dir, { recursive: true });
 	writeFileSync(join(dir, "output.log"), output);
@@ -172,12 +175,18 @@ function writeSubagentArtifacts(cwd, runsDir, runId, attemptId, output) {
 	writeFileSync(
 		join(dir, "result.json"),
 		JSON.stringify({
+			runId,
+			attemptId,
 			status: "completed",
 			startedAt: new Date(Date.now() - 100).toISOString(),
 			completedAt: new Date().toISOString(),
 			exitCode: 0,
 		}),
 	);
+	writeFileSync(join(cwd, runsDir, runId, "run.json"), JSON.stringify({
+		runId, correlationId, latestAttemptId: attemptId, activeAttemptId: null,
+		status: "completed", attempts: [{ attemptId, status: "completed" }],
+	}));
 	return dir;
 }
 
@@ -399,6 +408,7 @@ function fakeApi({
 					runId,
 					attemptId,
 					output,
+					options.correlationId,
 				);
 				launches.push({ runId, attemptId, kind, prompt, artifactDir });
 				runs.set(runId, { runId, attemptId, kind, artifactDir });
@@ -774,6 +784,34 @@ test("profile-only batching uses one physical launch, preserves per-item artifac
 			completedBatch?.physicalExecution?.timing,
 			"physical batch timing must be attributed once at batch level",
 		);
+		// Exercise every logical item (especially the handle-less follower), not
+		// just the physical leader or filesystem bytes. Normal host commits must
+		// have persisted each anchor; tests never synthesize an integrity record.
+		const persisted = await readRunRecord(cwd, started.runId);
+		const runDir = workflowRunDir(cwd, started.runId);
+		const consumer = join(runDir, "tasks", "raw-reader");
+		mkdirSync(consumer, { recursive: true });
+		for (const task of persisted.tasks) {
+			const path = join(dirname(join(cwd, task.files.result)), "raw.md");
+			const raw = readFileSync(path, "utf8");
+			assert.ok(task.rawArtifactIntegrity, `host anchor for ${task.taskId}`);
+			assert.equal(statSync(path).nlink, task.foreachBatch ? 2 : 3);
+			const manifest = { schema: "workflow-source-manifest-v1", runId: started.runId, taskId: "raw-reader", sources: [{ source: task.specId, taskId: task.taskId, generation: task.generation, sourceGeneration: task.sourceGeneration, artifacts: { raw: { path } } }] };
+			const full = await readWorkflowArtifact(manifest, task.specId, "raw", { runDir, maxBytes: 65536 });
+			assert.equal(full.content, raw);
+			assert.equal(full.returnedBytes, Buffer.byteLength(raw));
+			assert.equal(full.truncated, false);
+			assert.equal(full.rawAssurance.kind, "host_digest_verified");
+			const config = { runId: started.runId, taskId: "raw-reader", runDir, manifestPath: join(consumer, "source-manifest.json"), ledgerPath: join(consumer, `${task.taskId}-ledger.jsonl`) };
+			writeFileSync(config.manifestPath, JSON.stringify(manifest));
+			// requiredReads reads read-ledger.jsonl, reset it per logical source.
+			config.ledgerPath = join(consumer, "read-ledger.jsonl");
+			writeFileSync(config.ledgerPath, "");
+			await handleWorkflowArtifactToolCall({ action: "read", source: task.specId, artifact: "raw" }, { ...config, maxBytes: 19 });
+			assert.deepEqual((await checkRequiredArtifactReads(consumer, [`${task.specId}.raw`])).missing, [`${task.specId}.raw`]);
+			await handleWorkflowArtifactToolCall({ action: "read", source: task.specId, artifact: "raw" }, config);
+			assert.deepEqual((await checkRequiredArtifactReads(consumer, [`${task.specId}.raw`])).missing, []);
+		}
 		const fanTasks = completed.tasks.filter((task) => task.stageId === "fan");
 		assert.equal(fanTasks.length, 3);
 		for (const task of fanTasks) {

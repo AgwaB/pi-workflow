@@ -829,6 +829,7 @@ export async function writeArtifactGraphDynamicResult(
 	const written = await writeWorkflowTaskArtifactBundle({
 		taskDir: dirname(fromProjectPath(cwd, task.files.result)),
 		rawOutput,
+		rawIntegrityHost: task,
 		completedAt: new Date().toISOString(),
 		lifecycleStatus,
 		analysisRequired: task.artifactGraph?.output.analysisRequired ?? true,
@@ -895,6 +896,7 @@ export async function writeArtifactGraphSupportResult(
 	const written = await writeWorkflowTaskArtifactBundle({
 		taskDir: dirname(fromProjectPath(cwd, task.files.result)),
 		rawOutput,
+		rawIntegrityHost: task,
 		completedAt: new Date().toISOString(),
 		lifecycleStatus: options.lifecycleStatus,
 		exitCode: options.exitCode,

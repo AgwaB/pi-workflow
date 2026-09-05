@@ -4,7 +4,7 @@ import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { constants as fsConstants } from "node:fs";
 import { link, lstat, mkdir, open, rename, unlink, writeFile } from "node:fs/promises";
-import { assertSafeRawTaskDirectory, checkRawLinks, establishRawOwner, hashRawDescriptor, rawDigest, recheckRawOwner, sameInode, sameRawVersion, type RawIntegrity } from "./workflow-raw-contract.js";
+import { assertSafeRawTaskDirectory, checkRawLinks, establishRawOwner, matchesRawDescriptor, rawDigest, rawFileVersion, recheckRawOwner, sameInode, sameRawVersion, type RawIntegrity, type RawOwner } from "./workflow-raw-contract.js";
 import { dirname, join, resolve } from "node:path";
 
 import { nonPublicIpReason } from "./workflow-network-policy.js";
@@ -142,6 +142,8 @@ export interface WorkflowTaskArtifactBundleOptions
 	extends ParseWorkflowOutputOptions {
 	taskDir: string;
 	rawOutput: string;
+	/** Host task updated by its normal run-record commit. Without this, raw is independent. */
+	rawIntegrityHost?: { rawArtifactIntegrity?: RawIntegrity };
 	attempt?: number;
 	startedAt?: string;
 	completedAt?: string;
@@ -2525,12 +2527,14 @@ async function writeValidWorkflowOutputBundle(
 	parsed: ValidParsedWorkflowOutput,
 	options: WorkflowTaskArtifactBundleOptions,
 ): Promise<Extract<WorkflowArtifactBundleWriteResult, { valid: true }>> {
-	await assertSafeRawTaskDirectory(taskDir);
+	const owner = options.rawIntegrityHost ? await establishRawOwner(taskDir).catch(() => undefined) : undefined;
+	if (!owner) await assertSafeRawTaskDirectory(taskDir);
 	const files = artifactFileMap(taskDir, options);
-	const rawIntegrity = await writeSidecars(files, parsed, options);
+	const rawIntegrity = await writeSidecars(files, parsed, options, owner);
 	const result = validResultEnvelope(files, parsed, options);
 	if (rawIntegrity) result.rawIntegrity = rawIntegrity;
 	await writeJsonAtomic(files.result!, result);
+	if (options.rawIntegrityHost) options.rawIntegrityHost.rawArtifactIntegrity = rawIntegrity;
 	return { valid: true, parsed, result, files };
 }
 
@@ -2556,12 +2560,13 @@ async function writeSidecars(
 	files: Record<string, string>,
 	parsed: ValidParsedWorkflowOutput,
 	options: WorkflowTaskArtifactBundleOptions,
+	owner?: RawOwner,
 ): Promise<RawIntegrity | undefined> {
 	const [, , , rawIntegrity] = await Promise.all([
 		writeJsonAtomic(files.control!, parsed.control),
 		writeTextAtomic(files.analysis!, ensureTrailingNewline(parsed.analysis)),
 		writeJsonAtomic(files.refs!, parsed.refs),
-		writeRawArtifact(files.raw!, options.rawOutput),
+		writeRawArtifact(files.raw!, options.rawOutput, owner),
 		writeOptionalText(files.prompt, options.prompt),
 		writeOptionalText(files["system-prompt"], options.systemPrompt),
 		writeOptionalText(files.stderr, options.stderr),
@@ -2569,11 +2574,9 @@ async function writeSidecars(
 	return rawIntegrity;
 }
 
-async function writeRawArtifact(file: string, value: string): Promise<RawIntegrity | undefined> {
-	await assertSafeRawTaskDirectory(dirname(file));
+async function writeRawArtifact(file: string, value: string, owner?: RawOwner): Promise<RawIntegrity | undefined> {
 	const expected = Buffer.from(value, "utf8");
-	const owner = await establishRawOwner(dirname(file)).catch(() => undefined);
-	const integrity: RawIntegrity | undefined = owner ? { version: 1, owner: owner.identity, bytes: expected.length, sha256: rawDigest(expected) } : undefined;
+	const integrity: RawIntegrity | undefined = owner ? { version: 1, owner: owner.identity, bytes: expected.length, sha256: rawDigest(expected), ...(owner.terminal && owner.attempt ? { terminal: owner.terminal, terminalVersion: rawFileVersion(owner.metadata.get(join(dirname(owner.attempt), "result.json"))!) } : {}) } : undefined;
 	if (owner) {
 		const temp = join(dirname(file), `.raw-${randomBytes(12).toString("hex")}.tmp`);
 		try {
@@ -2591,7 +2594,7 @@ async function writeRawArtifact(file: string, value: string): Promise<RawIntegri
 				const linked = await open(temp, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
 				try {
 					const info = await linked.stat();
-					if (!sameInode(before, info) || !expected.equals(await linked.readFile()) || !sameRawVersion(info, await linked.stat()) || !sameRawVersion(info, await lstat(owner.output))) throw new Error("raw linked source changed");
+					if (!sameInode(before, info) || before.size !== info.size || before.mtimeMs !== info.mtimeMs || !sameRawVersion(info, await linked.stat()) || !sameRawVersion(info, await lstat(owner.output))) throw new Error("raw linked source changed");
 					await recheckRawOwner(owner);
 					await rename(temp, file);
 					await emitWorkflowOutputArtifactWriteHook({ phase: "after", file });
@@ -2599,7 +2602,7 @@ async function writeRawArtifact(file: string, value: string): Promise<RawIntegri
 					await checkRawLinks(owner, after);
 					// rename may change ctime itself. Verify authoritative bytes after
 					// publication as well as inode/link/size and write timestamps.
-					if (!sameInode(info, after) || info.size !== after.size || info.nlink !== after.nlink || info.mtimeMs !== after.mtimeMs || await hashRawDescriptor(linked, expected.length) !== integrity!.sha256 || !sameRawVersion(after, await linked.stat())) throw new Error("raw publication changed");
+					if (!sameInode(info, after) || info.size !== after.size || info.nlink !== after.nlink || info.mtimeMs !== after.mtimeMs || !await matchesRawDescriptor(linked, expected) || !sameRawVersion(after, await linked.stat())) throw new Error("raw publication changed");
 				} finally { await linked.close(); }
 			} finally { await source.close(); }
 			await recheckRawOwner(owner);
@@ -2611,6 +2614,7 @@ async function writeRawArtifact(file: string, value: string): Promise<RawIntegri
 		} finally { await unlink(temp).catch(() => {}); }
 	}
 	await writeTextAtomic(file, value);
+	if (owner) await recheckRawOwner(owner);
 	return integrity;
 }
 
