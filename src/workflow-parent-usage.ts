@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
+import { lstat } from "node:fs/promises";
 import { join } from "node:path";
 
 import { normalizedUsageValues } from "./subagent-backend.js";
-import { acquireRunFileLease, nowIso, readIndex, readJson, workflowRunDir, writeJsonAtomicDurable } from "./store.js";
+import { acquireRunFileLease, acquireWorkflowTopologyLease, nowIso, readIndex, readJson, workflowRunDir, writeJsonAtomicDurable } from "./store.js";
 import type { WorkflowTaskUsageValues } from "./types.js";
 
 /** Parent assistant usage is a sidecar: the scheduler owns run.json. */
@@ -40,16 +41,53 @@ interface TrackedRun {
 	pendingWrite: Promise<void>;
 	/** Keep operations until acknowledged; never retain raw assistant messages. */
 	operations: Array<() => Promise<void>>;
+	directoryIdentity?: { dev: number; ino: number };
+	removed?: boolean;
 	lastWriteFailure?: WorkflowParentUsageRecord["lastWriteFailure"];
 }
 const trackedRuns = new Map<string, TrackedRun>();
 const trackedRunKey = (cwd: string, runId: string, sessionId: string): string => `${cwd}\0${runId}\0${sessionId}`;
 const parentUsageFile = (cwd: string, runId: string): string => join(workflowRunDir(cwd, runId), PARENT_USAGE_FILE);
 
+async function stillTrackedGeneration(entry: TrackedRun): Promise<boolean> {
+	if (entry.removed) return false;
+	const index = await readIndex(entry.cwd);
+	const info = await lstat(workflowRunDir(entry.cwd, entry.runId)).catch((error: NodeJS.ErrnoException) => {
+		if (error.code === "ENOENT") return undefined;
+		throw error;
+	});
+	if (!index?.runs.some(run => run.runId === entry.runId) ||
+		(entry.directoryIdentity && (!info || info.dev !== entry.directoryIdentity.dev || info.ino !== entry.directoryIdentity.ino))) {
+		entry.removed = true;
+		trackedRuns.delete(trackedRunKey(entry.cwd, entry.runId, entry.sessionId));
+		return false;
+	}
+	if (info && (!info.isDirectory() || info.isSymbolicLink()))
+		throw new Error("Parent usage run storage is not a real directory");
+	return true;
+}
+
 async function mutate(entry: TrackedRun, update: (record: WorkflowParentUsageRecord) => void): Promise<void> {
-	const lease = await acquireRunFileLease(entry.cwd, entry.runId, "parent-usage", 5_000);
-	if (!lease) throw new Error(`Parent usage sidecar busy: ${entry.runId}`);
+	// The read-only check also avoids recreating an entirely removed workflows root.
+	if (!await stillTrackedGeneration(entry)) return;
+	const topology = await acquireWorkflowTopologyLease(entry.cwd, 5_000);
+	if (!topology) throw new Error(`Parent usage topology busy: ${entry.runId}`);
+	let lease: Awaited<ReturnType<typeof acquireRunFileLease>>;
 	try {
+		// Prune may have detached this generation while the topology lease waited.
+		if (!await stillTrackedGeneration(entry)) return;
+		lease = await acquireRunFileLease(entry.cwd, entry.runId, "parent-usage", 5_000, topology.signal);
+		if (!lease) throw new Error(`Parent usage sidecar busy: ${entry.runId}`);
+		const info = await lstat(workflowRunDir(entry.cwd, entry.runId));
+		if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("Unsafe parent usage run directory");
+		entry.directoryIdentity ??= { dev: info.dev, ino: info.ino };
+		const assertOwner = async (): Promise<void> => {
+			await topology.assertOwner();
+			await lease!.assertOwner();
+			const current = await lstat(workflowRunDir(entry.cwd, entry.runId));
+			if (!current.isDirectory() || current.dev !== entry.directoryIdentity!.dev || current.ino !== entry.directoryIdentity!.ino)
+				throw new Error("Parent usage run generation changed");
+		};
 		const existing = await readJson<WorkflowParentUsageRecord>(parentUsageFile(entry.cwd, entry.runId));
 		// Also check durable feedback ownership when it exists. Legacy sidecars
 		// remain readable but frozen, even if a caller explicitly begins tracking.
@@ -64,14 +102,21 @@ async function mutate(entry: TrackedRun, update: (record: WorkflowParentUsageRec
 		};
 		update(record);
 		if (entry.lastWriteFailure) record.lastWriteFailure = entry.lastWriteFailure;
-		await writeJsonAtomicDurable(parentUsageFile(entry.cwd, entry.runId), record, lease.signal, lease.assertOwner);
-	} finally { await lease.release(); }
+		await writeJsonAtomicDurable(parentUsageFile(entry.cwd, entry.runId), record, lease.signal, assertOwner);
+	} finally {
+		try { await lease?.release(); }
+		finally { await topology.release(); }
+	}
 }
 
 /** Retry a failed head before later operations. A rejected caller does not poison the queue. */
 function drain(entry: TrackedRun): Promise<void> {
 	entry.pendingWrite = entry.pendingWrite.catch(() => undefined).then(async () => {
 		while (entry.operations.length > 0) {
+			if (entry.removed) {
+				entry.operations.length = 0;
+				return;
+			}
 			try {
 				await entry.operations[0]!();
 				entry.operations.shift();
