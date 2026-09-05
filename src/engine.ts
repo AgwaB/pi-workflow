@@ -160,6 +160,7 @@ import {
 	finalCompiledPromptMeasurement,
 	executeSupportTask,
 	normalizeDynamicControllerOutput,
+	dynamicOutputTaskSpecIds,
 	prepareArtifactGraphRetryTask,
 	prepareDagTask,
 	readArtifactGraphControl,
@@ -5453,6 +5454,7 @@ async function executeDynamicControllerTask(
 	const stop = createWorkflowStopSignal(cwd, run.runId);
 	try {
 		const structuredOutput = await runDynamicControllerWorker({
+			attemptStartedAt: activeRuntimeStartedAt,
 			cwd,
 			run,
 			compiledFlow,
@@ -5486,6 +5488,12 @@ async function executeDynamicControllerTask(
 			task.specId,
 		);
 		await throwIfWorkflowStopRequested(cwd, run.runId);
+		for (const specId of dynamicOutputTaskSpecIds(normalizeDynamicControllerOutput(structuredOutput).control)) {
+			const exported = run.tasks.find(candidate => candidate.specId === specId);
+			if (!exported || exported.status !== "completed" || !exported.artifactGraph?.enabled) {
+				unrunBranchBlockers.push(`dynamic exported output is not a completed artifact task: ${specId}`);
+			}
+		}
 		const outputForOutcome =
 			unrunBranchBlockers.length > 0
 				? dynamicControllerOutputWithBranchBlockers(
@@ -5643,6 +5651,7 @@ function dynamicDecisionLoopModuleUrl(): string {
 }
 
 async function runDynamicControllerWorker(input: {
+	attemptStartedAt: number;
 	cwd: string;
 	run: WorkflowRunRecord;
 	compiledFlow: CompiledWorkflow;
@@ -5707,13 +5716,16 @@ async function runDynamicControllerWorker(input: {
 	const replayedOpIds = new Set<string>();
 	let settled = false;
 	let currentGeneratedTaskIds = generatedTaskIds;
-	const timeoutMs = remainingDynamicRuntimeMs(
+	const deadline = input.attemptStartedAt + remainingDynamicRuntimeMs(
 		input.dynamic,
 		state.controllers[input.controllerTask.specId]?.counters.runtimeMs ?? 0,
 	);
-
+	const timeoutMs = Math.max(0, deadline - Date.now());
+	const attemptAbort = new AbortController();
+	const attemptInput = { ...input, stopSignal: attemptAbort.signal };
 	return await new Promise<unknown>((resolvePromise, rejectPromise) => {
 		let opQueue = Promise.resolve();
+		let handlerFailure: { error: unknown } | undefined;
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		const finish = (callback: () => void): void => {
 			if (settled) return;
@@ -5721,8 +5733,14 @@ async function runDynamicControllerWorker(input: {
 			if (timer) clearTimeout(timer);
 			input.stopSignal?.removeEventListener("abort", abortStop);
 			worker.removeAllListeners();
-			void worker.terminate().catch(() => undefined);
-			callback();
+			attemptAbort.abort(input.stopSignal?.reason ?? new DynamicControllerBudgetBlocked(
+				"dynamic controller attempt settled; owned helper cancelled",
+			));
+			// Join the handler's terminal helper event and both worker terminations.
+			void Promise.all([worker.terminate(), opQueue]).then(
+				() => handlerFailure ? rejectPromise(handlerFailure.error) : callback(),
+				rejectPromise,
+			);
 		};
 		const abortStop = (): void => {
 			finish(() => rejectPromise(input.stopSignal?.reason));
@@ -5747,7 +5765,8 @@ async function runDynamicControllerWorker(input: {
 		worker.on("message", (message) => {
 			const runHandler = async (): Promise<void> => {
 				if (settled) return;
-				await handleDynamicWorkerMessage(input, message, {
+				await handleDynamicWorkerMessage(attemptInput, message, {
+					deadline,
 					helperCallCounts,
 					workflowCallCounts,
 					agentOpIds,
@@ -5773,7 +5792,8 @@ async function runDynamicControllerWorker(input: {
 				});
 			};
 			opQueue = opQueue.then(runHandler, runHandler).catch((error) => {
-				finish(() => rejectPromise(error));
+				handlerFailure = { error };
+				if (!settled) finish(() => rejectPromise(error));
 			});
 		});
 		worker.on("error", (error) => finish(() => rejectPromise(error)));
@@ -5866,6 +5886,7 @@ async function handleDynamicWorkerMessage(
 	},
 	message: any,
 	state: {
+		deadline: number;
 		helperCallCounts: Map<string, number>;
 		workflowCallCounts: Map<string, number>;
 		agentOpIds: Set<string>;
@@ -6061,6 +6082,7 @@ async function handleDynamicWorkerMessage(
 				helperId,
 				callIndex: count,
 				helperInput: message.input,
+				deadline: state.deadline,
 				isSettled: state.isSettled,
 				stopSignal: input.stopSignal,
 			});
@@ -6099,7 +6121,10 @@ async function handleDynamicWorkerMessage(
 			budgetRemaining: await currentDynamicBudgetRemaining(input),
 		});
 	} catch (error) {
-		if (state.isSettled()) return;
+		if (state.isSettled()) {
+			if (error === input.stopSignal?.reason || error instanceof DynamicControllerBudgetBlocked) return;
+			throw error;
+		}
 		if (isWorkflowStopRequestedError(error) || input.stopSignal?.aborted) {
 			state.finish(() => state.reject(error));
 			return;
@@ -6468,8 +6493,7 @@ async function runDynamicHelperWorker(input: {
 			if (timer) clearTimeout(timer);
 			input.stopSignal?.removeEventListener("abort", abortStop);
 			worker.removeAllListeners();
-			void worker.terminate().catch(() => undefined);
-			callback();
+			void worker.terminate().then(callback, rejectPromise);
 		};
 		const abortStop = (): void => {
 			finish(() => rejectPromise(input.stopSignal?.reason));
@@ -6615,7 +6639,7 @@ parentPort.on("message", (message) => {
     graph: {
       generatedTaskIds: () => [...generatedTaskIds],
       generatedBranchTaskIds: () => [...(workerData.generatedBranchTaskIds || [])],
-      generatedTaskSpecId: (taskId) => workerData.controllerStageId + "." + taskId,
+      generatedTaskSpecId: (taskId) => workerData.controllerStageId + "." + String(taskId).trim().toLowerCase().replace(/[^a-z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64),
     },
     budget: { remaining: () => ({ ...budgetRemaining }), check: budgetCheck },
     tools: { available: () => toJson(workerData.availableTools || []) },
@@ -7037,7 +7061,7 @@ export function dynamicControllerOutcomeFromOutput(
 		typeof control.status === "string" ? control.status : undefined;
 	const blockers = dynamicControlStringArray(control.blockers);
 	const omissions = dynamicControlStringArray(control.omissions);
-	const outputTasks = dynamicControlStringArray(control.outputTasks);
+	const outputTasks = dynamicOutputTaskSpecIds(control);
 
 	if (status === "blocked" || (blockers.length > 0 && status !== "stopped")) {
 		return {

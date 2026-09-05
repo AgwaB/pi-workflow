@@ -371,6 +371,7 @@ export async function runDynamicHelperCall(input: {
 	helperId: string;
 	callIndex: number;
 	helperInput: unknown;
+	deadline?: number;
 	isSettled?: () => boolean;
 	stopSignal?: AbortSignal;
 }): Promise<unknown> {
@@ -456,52 +457,67 @@ export async function runDynamicHelperCall(input: {
 			},
 		});
 	}
-	const result = await input.runDynamicHelperWorker({
-		ref: helperSpec.uses,
-		specPath: input.helperSpecPath,
-		cwd: input.cwd,
-		runId: input.run.runId,
-		stopSignal: input.stopSignal,
-		callInput: {
-			sources: normalizedInput.sources,
-			options: normalizedInput.options,
-			context: {
-				specPath: input.helperSpecPath,
-				originalSpecPath: input.run.specPath,
-				stageId: input.controllerTask.stageId,
-				taskId: input.controllerTask.taskId,
-				runId: input.run.runId,
-				cwd: input.cwd,
+	try {
+		const result = await input.runDynamicHelperWorker({
+			ref: helperSpec.uses,
+			specPath: input.helperSpecPath,
+			cwd: input.cwd,
+			runId: input.run.runId,
+			stopSignal: input.stopSignal,
+			callInput: {
+				sources: normalizedInput.sources,
+				options: normalizedInput.options,
+				context: {
+					specPath: input.helperSpecPath,
+					originalSpecPath: input.run.specPath,
+					stageId: input.controllerTask.stageId,
+					taskId: input.controllerTask.taskId,
+					runId: input.run.runId,
+					cwd: input.cwd,
+				},
 			},
-		},
-		timeoutMs: remainingDynamicRuntimeMs(
-			input.dynamic,
-			(await readOrRebuildDynamicState(input.cwd, input.run.runId)).controllers[
-				input.controllerTask.specId
-			]?.counters.runtimeMs ?? 0,
-		),
-	});
-	if (input.isSettled?.()) return undefined;
-	const serializedResult = toDynamicJsonValue(result);
-	await validateDynamicHelperSchema(
-		input.helperSpecPath,
-		helperSpec.outputSchema,
-		serializedResult,
-		`dynamic helper ${helperId} output`,
-	);
-	if (input.isSettled?.()) return undefined;
-	await recordDynamicEventAndUpdateState(input.cwd, input.run.runId, {
-		controllerSpecId: input.controllerTask.specId,
-		type: "helper.completed",
-		opId,
-		requestHash,
-		payload: {
-			helperId,
-			uses: helperSpec.uses,
-			result: serializedResult,
-		},
-	});
-	return serializedResult;
+			timeoutMs: Math.min(
+				input.deadline === undefined ? Infinity : Math.max(0, input.deadline - Date.now()),
+				remainingDynamicRuntimeMs(
+					input.dynamic,
+					(await readOrRebuildDynamicState(input.cwd, input.run.runId)).controllers[
+						input.controllerTask.specId
+					]?.counters.runtimeMs ?? 0,
+				),
+			),
+		});
+		if (input.stopSignal?.aborted) throw input.stopSignal.reason;
+		const serializedResult = toDynamicJsonValue(result);
+		await validateDynamicHelperSchema(
+			input.helperSpecPath,
+			helperSpec.outputSchema,
+			serializedResult,
+			`dynamic helper ${helperId} output`,
+		);
+		if (input.stopSignal?.aborted) throw input.stopSignal.reason;
+		await recordDynamicEventAndUpdateState(input.cwd, input.run.runId, {
+			controllerSpecId: input.controllerTask.specId,
+			type: "helper.completed",
+			opId,
+			requestHash,
+			payload: {
+				helperId,
+				uses: helperSpec.uses,
+				result: serializedResult,
+			},
+		});
+		return serializedResult;
+	} catch (error) {
+		await recordDynamicEventAndUpdateState(input.cwd, input.run.runId, {
+			controllerSpecId: input.controllerTask.specId,
+			type: input.stopSignal?.aborted || error instanceof DynamicControllerBudgetBlocked
+				? "helper.cancelled" : "helper.failed",
+			opId,
+			requestHash,
+			payload: { helperId, uses: helperSpec.uses, message: error instanceof Error ? error.message : String(error) },
+		});
+		throw error;
+	}
 }
 
 async function validateDynamicHelperSchema(

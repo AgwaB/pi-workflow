@@ -73,6 +73,8 @@ export async function runDynamicDecisionPersistCall(input: {
 		rawDecision: input.rawDecision,
 		validation,
 		stateIndexDigest,
+		attemptId: hashDynamicRequest({ opId: input.opId, requestHash }),
+		expectedRound: typeof context.expectedRound === "number" ? context.expectedRound : undefined,
 	});
 	if (!alreadyRecorded)
 		await recordDynamicEventAndUpdateState(input.cwd, input.run.runId, {
@@ -475,6 +477,14 @@ export function normalizeDynamicFanoutPlanRequest(
 			agentRequest: { ...agentRequest, branchId },
 		};
 	});
+	const requestIds = new Set<string>();
+	const branchIds = new Set<string>();
+	for (const branch of branches) {
+		if (requestIds.has(branch.requestId) || branchIds.has(branch.branchId))
+			throw new Error(`ctx.fanout.plan() duplicate generated request or branch id: ${branch.requestId}`);
+		requestIds.add(branch.requestId);
+		branchIds.add(branch.branchId);
+	}
 	return { round, decisionHash, branches };
 }
 

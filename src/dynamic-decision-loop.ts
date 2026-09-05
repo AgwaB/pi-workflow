@@ -62,6 +62,7 @@ export async function runDynamicDecisionLoop(
 	const generatedTasks = new Set<string>(
 		dynamicLoopInitialGeneratedTaskIds(ctx),
 	);
+	const indexedTasks = new Map<string, { taskId: string; outputProfile: string }>();
 	const blockers: string[] = [];
 	const omissions: string[] = [];
 	const caveats: string[] = [];
@@ -189,12 +190,15 @@ export async function runDynamicDecisionLoop(
 		if (completed.length === 0) {
 			omissions.push(`round ${round} accepted no executable work actions`);
 		} else {
+			// Rebuild from original extracts across rounds: verifications need the
+			// candidate and its provenance, not just the historical issue ledger.
+			for (const item of completed) {
+				const taskId = item.specId ?? item.taskId;
+				indexedTasks.set(taskId, { taskId, outputProfile: item.outputProfile });
+			}
 			latestStateIndex = await ctx.stateIndex.extractAndPersist({
 				round,
-				tasks: completed.map((item) => ({
-					taskId: item.specId ?? item.taskId,
-					outputProfile: item.outputProfile,
-				})),
+				tasks: [...indexedTasks.values()],
 				maxFindings: config.stateIndex.maxFindings,
 			});
 			stateIndexes.push({ round, digest: latestStateIndex.digest });
