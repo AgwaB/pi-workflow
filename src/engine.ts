@@ -4305,6 +4305,16 @@ async function materializeForeachTask(
 	const sourceTasks = run.tasks.filter((task) =>
 		sourceStageIds.includes(task.stageId ?? ""),
 	);
+	const missingSourceStageIds = sourceStageIds.filter(
+		(stageId) => !sourceTasks.some((task) => task.stageId === stageId),
+	);
+	if (sourceStageIds.length === 0 || missingSourceStageIds.length > 0) {
+		setTaskTerminal(templateRunTask, "blocked", "foreach_expansion_blocked", {
+			lastMessage: `foreach source is missing from the authoritative run task record: ${missingSourceStageIds.join(", ") || "no source stage declared"}`,
+		});
+		await writeRunRecord(cwd, run);
+		return true;
+	}
 	const streaming = foreachStreamingEnabled(template);
 	const dispatchContext = foreachDispatchMapContext(template, sourceTasks);
 	if (dispatchContext && "error" in dispatchContext) {
