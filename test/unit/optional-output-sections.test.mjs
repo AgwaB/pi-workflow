@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -32,11 +32,14 @@ for (const analysisRequired of [true, false]) for (const refsRequired of [true, 
  test(`support serializer accepts optional settings ${JSON.stringify(options)}`, async (t) => {
   const root = await mkdtemp(join(tmpdir(), "workflow-optional-support-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const task = { files: { output: join(root, "output.log"), stderr: join(root, "stderr.log"), result: join(root, "result.json") }, artifactGraph: { output: options } };
+  const runDir=join(root,'.pi','workflows','optional-support'),taskDir=join(runDir,'tasks','producer');
+  await mkdir(taskDir,{recursive:true});
+  const task = {taskId:'producer',specId:'producer',cwd:root,status:'running',files: { output: join(taskDir, "output.log"), stderr: join(taskDir, "stderr.log"), result: join(taskDir, "result.json") }, artifactGraph: { output: options } };
+  await writeFile(join(runDir,'run.json'),JSON.stringify({runId:'optional-support',createdAt:new Date().toISOString(),tasks:[task]}));
   await writeArtifactGraphSupportResult(root, task, { control: { schema: "stage-control-v1", digest: "done" }, analysis: "Kept evidence", refs: [] });
   const result = JSON.parse(await readFile(task.files.result, "utf8"));
   assert.equal(result.outputValidation.valid, true);
-  assert.equal((await readFile(join(root, "analysis.md"), "utf8")).trim(), "Kept evidence");
+  assert.equal((await readFile(join(taskDir, "analysis.md"), "utf8")).trim(), "Kept evidence");
  });
 }
 

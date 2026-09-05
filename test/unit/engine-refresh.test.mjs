@@ -25,7 +25,9 @@ import {
 	scheduleRun,
 	waitForRun,
 } from "../../.tmp/unit/engine.js";
-import { setSubagentApiForTests } from "../../.tmp/unit/subagent-backend.js";
+import { withMaterializedRawHost } from './raw-host-fixture.mjs';
+const setSubagentApiForTests = withMaterializedRawHost(setRawApi);
+import { setSubagentApiForTests as setRawApi } from "../../.tmp/unit/subagent-backend.js";
 import { compileWorkflow } from "../../.tmp/unit/compiler.js";
 import {
 	buildForeachGeneratedTasks,

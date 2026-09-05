@@ -10,7 +10,7 @@ import {
 	type FileHandle,
 } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
-import { assertNoRawIntegrityAnchor, checkRawLinks, establishRawOwner, hashRawDescriptor, rawDigest, readRawIntegrity, recheckRawOwner, sameRawVersion, type RawOwner, type RawIntegrity } from "./workflow-raw-contract.js";
+import { assertNoRawIntegrityAnchor, checkRawLinks, establishRawOwner, hashRawDescriptor, rawDigest, readRawIntegrity, recheckRawOwner, sameRawVersion, type RawOwner, type RawIntegrity, type RawSourceTuple } from "./workflow-raw-contract.js";
 
 import {
 	EXPERIMENTAL_TOOL_DEDUP_ENV,
@@ -409,6 +409,11 @@ export function resolveWorkflowArtifact(
 	return { source, artifact, ref };
 }
 
+function rawSourceTuple(source: WorkflowSourceManifestSource): RawSourceTuple {
+	const { source: name, taskId, specId, stageId, generation, sourceGeneration } = source;
+	return { source: name, taskId, specId, stageId, generation, sourceGeneration };
+}
+
 export async function readWorkflowArtifact(
 	manifest: WorkflowSourceManifest,
 	sourceName: string,
@@ -434,7 +439,7 @@ export async function readWorkflowArtifact(
 		artifactPath,
 		runDir: options.runDir,
 		label: `${sourceName}.${artifact}`,
-		rawSource: artifact === "raw" ? { runId: manifest.runId, taskId: resolved.source.taskId, source: sourceName, generation: resolved.source.generation, sourceGeneration: resolved.source.sourceGeneration } : undefined,
+		rawSource: artifact === "raw" ? { runId: manifest.runId, ...rawSourceTuple(resolved.source), sources: manifest.sources.map(rawSourceTuple) } : undefined,
 	});
 	let fullRawBytes: Buffer | undefined;
 	try {
@@ -485,7 +490,7 @@ async function openValidatedArtifactFile(options: {
 	artifactPath: string;
 	runDir?: string;
 	label: string;
-	rawSource?: { runId: string; taskId?: string; source: string; generation?: number; sourceGeneration?: number };
+	rawSource?: RawSourceTuple & { runId: string; sources: RawSourceTuple[] };
 }): Promise<{ file: FileHandle; fileStat: Stats; rawAssurance?: RawAssurance; validateAfterRead: (fullBytes?: Buffer) => Promise<void> }> {
 	const linkStat = await lstat(options.artifactPath);
 	if (linkStat.isSymbolicLink()) {

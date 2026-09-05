@@ -5,7 +5,8 @@ import { basename, dirname, join, relative, resolve } from "node:path";
 import { hasNonSpawnableWorkflowLaunchAuthority } from "./launch-authority.js";
 import { workflowTaskAttemptIdentity, workflowTaskSessionId } from "./launch-session.js";
 import { foreachBatchTasks } from "./foreach-batch-runtime.js";
-import type { WorkflowRunRecord } from "./types.js";
+import type { WorkflowRunRecord, WorkflowTaskRunRecord } from "./types.js";
+import { sourceNameForTask, dynamicOutputSourceName, dynamicOutputTaskSpecIds } from "./workflow-source-alias.js";
 
 // Host run records are the authority boundary. These hashes detect corruption;
 // they are NOT signatures, nor proof of historical byte authorship.
@@ -37,7 +38,63 @@ export interface RawOwner {
 	resultValidated?: boolean;
 	terminal?: Record<string, unknown>;
 }
-interface RawSelection { runDir: string; runId: string; taskId?: string; source: string; generation?: number; sourceGeneration?: number }
+export interface RawSourceTuple {
+	source: string;
+	taskId?: string;
+	specId?: string;
+	stageId?: string;
+	generation?: number;
+	sourceGeneration?: number;
+}
+export interface RawSelection extends RawSourceTuple { runDir: string; runId: string; sources: RawSourceTuple[] }
+
+function matchesSourceTuple(source: RawSourceTuple, task: WorkflowTaskRunRecord): boolean {
+	return source.taskId === task.taskId && source.specId === task.specId && source.stageId === task.stageId && source.generation === task.generation && source.sourceGeneration === task.sourceGeneration;
+}
+
+async function assertRawSourceAlias(run: WorkflowRunRecord, task: WorkflowTaskRunRecord, expected: RawSelection, project: string, directories: Map<string, Stats>, snapshots: Map<string, Stats>): Promise<void> {
+	if (!matchesSourceTuple(expected, task)) fail();
+	const selected = expected.sources.filter(source => source.source === expected.source);
+	if (selected.length !== 1 || !matchesSourceTuple(selected[0]!, task) || new Set(expected.sources.map(source => source.source)).size !== expected.sources.length) fail();
+	// A fully bound tuple disambiguates the runtime's first foreach stage alias.
+	// The spec ID is also the runtime's canonical collision fallback.
+	if (expected.source === sourceNameForTask(task, new Set()) || expected.source === task.specId) return;
+
+	// Export aliases are not identities. Replay the runtime naming/resolution
+	// against exact controller tuples and their canonical control records, never
+	// infer an alias from a raw path or an ambiguous global name search.
+	const usedNames = new Set<string>();
+	const exports = new Map<string, WorkflowTaskRunRecord>();
+	for (const source of expected.sources) {
+		const candidates = run.tasks.filter(candidate => matchesSourceTuple(source, candidate));
+		if (candidates.length !== 1) fail();
+		const current = candidates[0]!;
+		const exported = exports.get(source.source);
+		if (exported) {
+			if (exported !== current) fail();
+			if (source.source === expected.source) return;
+			continue;
+		}
+		if (source.source !== sourceNameForTask(current, usedNames)) fail();
+		if (current.kind !== "dynamic" || current.status !== "completed") continue;
+		if (!safeId(current.taskId)) fail();
+		const controllerDir = join(project, ".pi", "workflows", run.runId, "tasks", current.taskId);
+		const lexicalRunDir = resolve(expected.runDir);
+		const lexicalProject = dirname(dirname(dirname(lexicalRunDir)));
+		if (resolve(lexicalProject, current.files.result) !== join(lexicalRunDir, "tasks", current.taskId, "result.json")) fail();
+		await directoryChain(project, controllerDir, directories);
+		const control = await metadata(join(controllerDir, "control.json"), snapshots);
+		let index = 0;
+		for (const specId of dynamicOutputTaskSpecIds(control)) {
+			const outputs = run.tasks.filter(candidate => candidate.specId === specId);
+			if (outputs.length === 0) continue;
+			if (outputs.length !== 1) fail();
+			const alias = dynamicOutputSourceName(current, index++, usedNames);
+			exports.set(alias, outputs[0]!);
+		}
+	}
+	fail();
+}
 const safeId = (value: unknown): value is string =>
 	typeof value === "string" && /^[A-Za-z0-9_.-]+$/.test(value) && value !== "." && value !== "..";
 function fail(): never { throw new Error("raw artifact ownership/link contract could not be established"); }
@@ -86,9 +143,15 @@ export async function assertSafeRawTaskDirectory(taskDirectory: string): Promise
 	await directoryChain(project, join(project, ".pi", "workflows", basename(runDir), "tasks", basename(taskDir)), new Map());
 }
 
+let rawOwnerEstablishmentHookForTests: ((taskDir: string) => void | Promise<void>) | undefined;
+export function setRawOwnerEstablishmentHookForTests(hook: typeof rawOwnerEstablishmentHookForTests): void {
+	rawOwnerEstablishmentHookForTests = hook;
+}
+
 /** Only the canonical host-selected run tree can confer a raw link allowance. */
 export async function establishRawOwner(taskDirectory: string, expected?: RawSelection): Promise<RawOwner> {
 	const taskDir = resolve(taskDirectory);
+	await rawOwnerEstablishmentHookForTests?.(taskDir);
 	const taskId = basename(taskDir);
 	const runDir = dirname(dirname(taskDir));
 	const runId = basename(runDir);
@@ -108,10 +171,7 @@ export async function establishRawOwner(taskDirectory: string, expected?: RawSel
 	if (matches.length !== 1) fail();
 	const task = matches[0]!;
 	if (expected) {
-		// The manifest may select a host record, not rename a foreign producer.
-		// Ambiguous stage aliases (e.g. multiple foreach children) fail closed.
-		const named = run.tasks.filter(candidate => expected.source === candidate.specId || expected.source === candidate.taskId || (!candidate.dynamicGenerated && expected.source === candidate.stageId));
-		if (named.length !== 1 || named[0]!.taskId !== taskId || expected.generation !== task.generation || expected.sourceGeneration !== task.sourceGeneration) fail();
+		await assertRawSourceAlias(run, task, expected, project, directories, snapshots);
 	}
 	if (!task.files || resolve(lexicalProject, task.files.output) !== join(taskDir, "output.log") || resolve(lexicalProject, task.files.result) !== join(taskDir, "result.json")) fail();
 	if (!["running", "completed", "failed"].includes(task.status)) fail();

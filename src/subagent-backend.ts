@@ -3894,6 +3894,10 @@ export async function refreshRunFromSubagentArtifacts(
 				handle.attemptId,
 			)
 		) {
+			// Recovery has just established a consumed host owner. Make that
+			// authority durable before a terminal snapshot can publish raw; the
+			// writer must not fall back through the old registered-only record.
+			await writeRunRecord(cwd, run);
 			changed = true;
 		}
 		if (handle && task.toolResultBudget?.pendingConfiguration) {

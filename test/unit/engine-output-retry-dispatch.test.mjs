@@ -7,8 +7,11 @@ import { after, test } from "node:test";
 import { refreshRun, runWorkflow, waitForRun } from "../../.tmp/unit/engine.js";
 import {
 	ARTIFACT_OUTPUT_RETRIES_ENV,
-	setSubagentApiForTests,
+	setSubagentApiForTests as setRawApi,
 } from "../../.tmp/unit/subagent-backend.js";
+
+import { withMaterializedRawHost } from './raw-host-fixture.mjs';
+const setSubagentApiForTests = withMaterializedRawHost(setRawApi);
 
 const UNIT_TEST_HOME = mkdtempSync(join(tmpdir(), "workflow-retry-dispatch-home-"));
 process.env.HOME = UNIT_TEST_HOME;

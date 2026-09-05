@@ -15,7 +15,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { after, test } from "node:test";
 
 import { runWorkflowSpec, waitForRun } from "../../.tmp/unit/engine.js";
-import { setSubagentApiForTests } from "../../.tmp/unit/subagent-backend.js";
+import { withMaterializedRawHost } from './raw-host-fixture.mjs';
+const setSubagentApiForTests = withMaterializedRawHost(setRawApi);
+import { setSubagentApiForTests as setRawApi } from "../../.tmp/unit/subagent-backend.js";
 import { workflowRunDir } from "../../.tmp/unit/store.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));

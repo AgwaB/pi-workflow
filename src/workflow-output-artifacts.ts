@@ -2527,7 +2527,9 @@ async function writeValidWorkflowOutputBundle(
 	parsed: ValidParsedWorkflowOutput,
 	options: WorkflowTaskArtifactBundleOptions,
 ): Promise<Extract<WorkflowArtifactBundleWriteResult, { valid: true }>> {
-	const owner = options.rawIntegrityHost ? await establishRawOwner(taskDir).catch(() => undefined) : undefined;
+	// Explicit host publication must never downgrade an establishment failure to
+	// the intentionally unowned low-level writer path (or clear an old anchor).
+	const owner = options.rawIntegrityHost ? await establishRawOwner(taskDir) : undefined;
 	if (!owner) await assertSafeRawTaskDirectory(taskDir);
 	const files = artifactFileMap(taskDir, options);
 	const rawIntegrity = await writeSidecars(files, parsed, options, owner);

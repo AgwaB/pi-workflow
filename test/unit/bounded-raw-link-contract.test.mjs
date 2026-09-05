@@ -34,7 +34,7 @@ async function fixture(t, legacy = false) {
   const bundle=await writeWorkflowTaskArtifactBundle({taskDir,rawOutput:raw});
   Object.assign(run,JSON.parse(await readFile(join(runDir,'run.json'),'utf8')));
  }
- const manifest={schema:'workflow-source-manifest-v1',runId,taskId:'task-2',sources:[{source:'producer',taskId,status:'completed',artifacts:{raw:{path:artifact}}}]};
+ const manifest={schema:'workflow-source-manifest-v1',runId,taskId:'task-2',sources:[{source:'producer',taskId,specId:'producer',status:'completed',artifacts:{raw:{path:artifact}}}]};
  const config={runId,taskId:'task-2',runDir,manifestPath:join(consumer,'source-manifest.json'),ledgerPath:join(consumer,'read-ledger.jsonl')};
  await writeFile(config.manifestPath,JSON.stringify(manifest));
  const read=(opts={})=>readWorkflowArtifact(manifest,'producer','raw',{runDir,...opts});
@@ -140,12 +140,53 @@ test('actual support execution publishes a host anchor with the normal run updat
  const run=await store.readRunRecord(root,started.runId),task=run.tasks[0],runDir=store.workflowRunDir(root,run.runId);
  const artifact=join(dirname(join(root,task.files.result)),'raw.md');
  assert.ok(task.rawArtifactIntegrity);assert.equal((await stat(artifact)).nlink,2);
- const manifest={schema:'workflow-source-manifest-v1',runId:run.runId,taskId:'consumer',sources:[{source:task.specId,taskId:task.taskId,artifacts:{raw:{path:artifact}}}]};
+ const manifest={schema:'workflow-source-manifest-v1',runId:run.runId,taskId:'consumer',sources:[{source:task.specId,taskId:task.taskId,specId:task.specId,stageId:task.stageId,generation:task.generation,sourceGeneration:task.sourceGeneration,artifacts:{raw:{path:artifact}}}]};
  const full=await readWorkflowArtifact(manifest,task.specId,'raw',{runDir});
  assert.equal(full.content,await readFile(artifact,'utf8'));assert.equal(full.rawAssurance.kind,'host_digest_verified');
  const path=join(root,task.files.result),result=JSON.parse(await readFile(path,'utf8'));
  delete result.rawIntegrity;await writeFile(path,JSON.stringify(result));
  await assert.rejects(()=>readWorkflowArtifact(manifest,task.specId,'raw',{runDir}));
+});
+test('explicit support publication rejects pre-establishment host drift from the joined prepared hook',async t=>{
+ const root=await mkdtemp(join(tmpdir(),'support-owner-drift-'));
+ const engine=await import('../../.tmp/unit/engine.js');
+ const store=await import('../../.tmp/unit/store.js');
+ const runtime=await import('../../.tmp/unit/artifact-graph-runtime.js');
+ const {readdir}=await import('node:fs/promises');
+ let calls=0;
+ t.after(async()=>{runtime.setSupportHelperPreparedHookForTests(undefined);await store.flushPendingIndexUpdatesForTests();await rm(root,{recursive:true,force:true,maxRetries:5});});
+ await mkdir(join(root,'workflows','raw-support'),{recursive:true});
+ await writeFile(join(root,'workflows','raw-support','helper.mjs'),`export default function(){return {schema:'stage-control-v1',digest:'done',analysis:'Fresh host bytes'};}`);
+ await writeFile(join(root,'workflows','raw-support','spec.json'),JSON.stringify({schemaVersion:1,name:'raw-support',artifactGraph:{stages:[{id:'producer',support:{uses:'./helper.mjs'}}]}}));
+ runtime.setSupportHelperPreparedHookForTests(async()=>{
+  calls++;
+  const ids=(await readdir(join(root,'.pi','workflows'))).filter(id=>id.startsWith('workflow_'));
+  assert.equal(ids.length,1);
+  const path=join(root,'.pi','workflows',ids[0],'run.json');
+  const run=JSON.parse(await readFile(path,'utf8'));
+  assert.equal(run.tasks[0].status,'running');run.tasks[0].status='blocked';
+  await writeFile(path,JSON.stringify(run));
+ });
+ const started=await engine.runWorkflow('raw-support',root,{task:'Local helper only'});
+ const terminal=await engine.waitForRun(root,started.runId,20000);
+ assert.equal(calls,1);
+ assert.notEqual(terminal.status,'completed');
+ const run=await store.readRunRecord(root,started.runId),task=run.tasks[0];
+ assert.notEqual(task.status,'completed');
+ const result=JSON.parse(await readFile(join(root,task.files.result),'utf8').catch(()=> '{}'));
+ assert.notEqual(result.outputValidation?.valid,true);
+ await assert.rejects(()=>stat(join(dirname(join(root,task.files.result)),'raw.md')),{code:'ENOENT'});
+});
+test('explicit host establishment failure preserves the previous real anchor and canonical result',async t=>{
+ const f=await fixture(t),host=f.run.tasks[0];
+ const previous=structuredClone(host.rawArtifactIntegrity);
+ const result=await readFile(join(f.taskDir,'result.json'),'utf8');
+ const disk=structuredClone(f.run);disk.tasks[0].status='blocked';
+ await writeFile(join(f.runDir,'run.json'),JSON.stringify(disk));
+ await assert.rejects(()=>writeBundle({taskDir:f.taskDir,rawOutput:raw,rawIntegrityHost:host}),/ownership/);
+ assert.deepEqual(host.rawArtifactIntegrity,previous);
+ assert.equal(await readFile(join(f.taskDir,'result.json'),'utf8'),result);
+ assert.equal(await readFile(f.artifact,'utf8'),raw);
 });
 test('low-level writer in an owned directory stays independent without a host publication context',async t=>{
  const f=await fixture(t,true); await unlink(f.artifact);

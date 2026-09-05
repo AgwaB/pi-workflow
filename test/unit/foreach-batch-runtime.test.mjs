@@ -37,8 +37,10 @@ import {
 	setSubagentApiForTests,
 	setSubagentLaunchControlsForTests,
 } from "../../.tmp/unit/subagent-backend.js";
-import { readWorkflowArtifact, handleWorkflowArtifactToolCall } from "../../.tmp/unit/workflow-artifact-tool.js";
+import { readWorkflowArtifact, handleWorkflowArtifactToolCall, setArtifactReadHookForTests } from "../../.tmp/unit/workflow-artifact-tool.js";
 import { checkRequiredArtifactReads } from "../../.tmp/unit/subagent-backend.js";
+import * as rawContract from "../../.tmp/unit/workflow-raw-contract.js";
+const { setRawOwnerEstablishmentHookForTests } = rawContract;
 import { setWorkflowOutputArtifactWriteHookForTests } from "../../.tmp/unit/workflow-output-artifacts.js";
 
 const UNIT_TEST_ROOT = mkdtempSync(join(tmpdir(), "pi-workflow-tests-"));
@@ -711,6 +713,11 @@ test("profile-only batching uses one physical launch, preserves per-item artifac
 	try {
 		writeAgent(cwd);
 		const items = writeWorkflow(cwd, "batch-valid");
+		items.forEach((item, index) => { item.id = ["A", "B", "C"][index]; });
+		const specPath = join(cwd, "workflows", "batch-valid", "spec.json");
+		const spec = JSON.parse(readFileSync(specPath, "utf8"));
+		spec.artifactGraph.stages[2].from = "fan";
+		writeFileSync(specPath, JSON.stringify(spec));
 		const fake = fakeApi({
 			cwd,
 			items,
@@ -789,29 +796,45 @@ test("profile-only batching uses one physical launch, preserves per-item artifac
 		// have persisted each anchor; tests never synthesize an integrity record.
 		const persisted = await readRunRecord(cwd, started.runId);
 		const runDir = workflowRunDir(cwd, started.runId);
-		const consumer = join(runDir, "tasks", "raw-reader");
-		mkdirSync(consumer, { recursive: true });
-		for (const task of persisted.tasks) {
+		const downstream = persisted.tasks.find(task => task.stageId === "downstream");
+		const consumer = dirname(join(cwd, downstream.files.result));
+		const manifestPath = join(consumer, "source-manifest.json");
+		const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+		assert.deepEqual(manifest.sources.map(source => source.source), ["fan", "fan.b", "fan.c"]);
+		for (const source of manifest.sources) {
+			const task = persisted.tasks.find(task => task.taskId === source.taskId);
 			const path = join(dirname(join(cwd, task.files.result)), "raw.md");
 			const raw = readFileSync(path, "utf8");
 			assert.ok(task.rawArtifactIntegrity, `host anchor for ${task.taskId}`);
 			assert.equal(statSync(path).nlink, task.foreachBatch ? 2 : 3);
-			const manifest = { schema: "workflow-source-manifest-v1", runId: started.runId, taskId: "raw-reader", sources: [{ source: task.specId, taskId: task.taskId, generation: task.generation, sourceGeneration: task.sourceGeneration, artifacts: { raw: { path } } }] };
-			const full = await readWorkflowArtifact(manifest, task.specId, "raw", { runDir, maxBytes: 65536 });
+			assert.equal(source.artifacts.raw.path, path);
+			const full = await readWorkflowArtifact(manifest, source.source, "raw", { runDir, maxBytes: 65536 });
 			assert.equal(full.content, raw);
 			assert.equal(full.returnedBytes, Buffer.byteLength(raw));
 			assert.equal(full.truncated, false);
 			assert.equal(full.rawAssurance.kind, "host_digest_verified");
-			const config = { runId: started.runId, taskId: "raw-reader", runDir, manifestPath: join(consumer, "source-manifest.json"), ledgerPath: join(consumer, `${task.taskId}-ledger.jsonl`) };
-			writeFileSync(config.manifestPath, JSON.stringify(manifest));
+			const config = { runId: started.runId, taskId: downstream.taskId, runDir, manifestPath, ledgerPath: join(consumer, `${task.taskId}-ledger.jsonl`) };
 			// requiredReads reads read-ledger.jsonl, reset it per logical source.
 			config.ledgerPath = join(consumer, "read-ledger.jsonl");
 			writeFileSync(config.ledgerPath, "");
-			await handleWorkflowArtifactToolCall({ action: "read", source: task.specId, artifact: "raw" }, { ...config, maxBytes: 19 });
-			assert.deepEqual((await checkRequiredArtifactReads(consumer, [`${task.specId}.raw`])).missing, [`${task.specId}.raw`]);
-			await handleWorkflowArtifactToolCall({ action: "read", source: task.specId, artifact: "raw" }, config);
-			assert.deepEqual((await checkRequiredArtifactReads(consumer, [`${task.specId}.raw`])).missing, []);
+			const prefix = await readWorkflowArtifact(manifest, source.source, "raw", { runDir, maxBytes: 19 });
+			assert.equal(prefix.content, raw.slice(0, 19));
+			assert.equal(prefix.returnedBytes, 19);
+			assert.equal(prefix.rawAssurance.kind, "host_digest_verified");
+			await handleWorkflowArtifactToolCall({ action: "read", source: source.source, artifact: "raw" }, { ...config, maxBytes: 19 });
+			assert.deepEqual((await checkRequiredArtifactReads(consumer, [`${source.source}.raw`])).missing, [`${source.source}.raw`]);
+			const tool = await handleWorkflowArtifactToolCall({ action: "read", source: source.source, artifact: "raw" }, config);
+			assert.equal(tool.details.rawAssurance.kind, "host_digest_verified");
+			assert.deepEqual((await checkRequiredArtifactReads(consumer, [`${source.source}.raw`])).missing, []);
 		}
+		for (const field of ['taskId','specId','stageId','generation','sourceGeneration','source']) {
+			const forged=structuredClone(manifest),source=forged.sources[0];
+			source[field]=field.includes('Generation')||field==='generation'?999:'foreign';
+			await assert.rejects(()=>readWorkflowArtifact(forged,source.source,'raw',{runDir}));
+		}
+		const ambiguous=structuredClone(manifest);
+		delete ambiguous.sources[0].taskId;delete ambiguous.sources[0].specId;
+		await assert.rejects(()=>readWorkflowArtifact(ambiguous,'fan','raw',{runDir}));
 		const fanTasks = completed.tasks.filter((task) => task.stageId === "fan");
 		assert.equal(fanTasks.length, 3);
 		for (const task of fanTasks) {
@@ -834,6 +857,136 @@ test("profile-only batching uses one physical launch, preserves per-item artifac
 		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
 	}
+});
+
+test("scheduler persisted dynamic export manifest reads exact full/truncated raw and rejects forged tuples/aliases", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd);
+		const dir = join(cwd, "workflows", "raw-dynamic-export");
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, "controller.mjs"), `export default async function(ctx) {
+		 const output = await ctx.agent({id:'synthesis',agent:'unit-scout',tools:['read'],prompt:'Synthesize local output.'});
+		 return {control:{schema:'dynamic-controller-result-v1',digest:'done',outputTasks:[output.specId]},analysis:'Controller evidence é 🎯',refs:[]};
+		}`);
+		writeFileSync(join(dir, "spec.json"), JSON.stringify({schemaVersion:1,name:'raw-dynamic-export',defaults:{agent:'unit-scout',readOnly:true,tools:['read']},artifactGraph:{stages:[
+		 {id:'adaptive',type:'dynamic',dynamic:{uses:'./controller.mjs'}},
+		 {id:'consumer',type:'single',from:'adaptive',prompt:'Finish after every fan item.'}
+		]}}));
+		const fake = fakeApi({cwd,items:[],durableBarrier:true});
+		setSubagentApiForTests(fake.api);
+		const started = await runWorkflow('raw-dynamic-export',cwd,{task:'Local dynamic export'});
+		const terminal = await waitForRun(cwd,started.runId,20000);
+		assert.equal(terminal.status,'completed');
+		const run = await readRunRecord(cwd,started.runId), runDir = workflowRunDir(cwd,run.runId);
+		const consumerTask = run.tasks.find(task=>task.stageId==='consumer');
+		const consumer = dirname(join(cwd,consumerTask.files.result)), manifestPath=join(consumer,'source-manifest.json');
+		const manifest=JSON.parse(readFileSync(manifestPath,'utf8'));
+		assert.deepEqual(manifest.sources.map(source=>source.source),['adaptive','adaptive.output']);
+		const config={runId:run.runId,taskId:consumerTask.taskId,runDir,manifestPath,ledgerPath:join(consumer,'read-ledger.jsonl')};
+		for(const source of manifest.sources){
+		 const task=run.tasks.find(task=>task.taskId===source.taskId),raw=readFileSync(source.artifacts.raw.path,'utf8');
+		 assert.ok(task.rawArtifactIntegrity);
+		 assert.deepEqual(JSON.parse(readFileSync(join(cwd,task.files.result),'utf8')).rawIntegrity,task.rawArtifactIntegrity);
+		 for(const maxBytes of [17,65536]){
+		  const read=await readWorkflowArtifact(manifest,source.source,'raw',{runDir,maxBytes});
+		  assert.equal(read.content,maxBytes===17?raw.slice(0,17):raw);
+		  assert.equal(read.bytes,Buffer.byteLength(raw));assert.equal(read.returnedBytes,maxBytes===17?17:Buffer.byteLength(raw));
+		  assert.equal(read.truncated,maxBytes===17);assert.equal(read.rawAssurance.kind,'host_digest_verified');
+		 }
+		 writeFileSync(config.ledgerPath,'');
+		 const prefix=await handleWorkflowArtifactToolCall({action:'read',source:source.source,artifact:'raw'},{...config,maxBytes:17});
+		 assert.equal(prefix.details.rawAssurance.kind,'host_digest_verified');
+		 assert.deepEqual((await checkRequiredArtifactReads(consumer,[`${source.source}.raw`])).missing,[`${source.source}.raw`]);
+		 const full=await handleWorkflowArtifactToolCall({action:'read',source:source.source,artifact:'raw'},config);
+		 assert.equal(full.details.rawAssurance.kind,'host_digest_verified');
+		 assert.deepEqual((await checkRequiredArtifactReads(consumer,[`${source.source}.raw`])).missing,[]);
+		}
+		for(const kind of ['taskId','specId','stageId','generation','sourceGeneration','missing-task','missing-spec','missing-stage','fabricated-alias','foreign-export','duplicate-alias','foreign-run','controller-generation']){
+		 const forged=structuredClone(manifest),source=forged.sources[1];
+		 if(['taskId','specId','stageId'].includes(kind)) source[kind]='foreign';
+		 if(['generation','sourceGeneration'].includes(kind)) source[kind]=999;
+		 if(kind.startsWith('missing-')) delete source[{'missing-task':'taskId','missing-spec':'specId','missing-stage':'stageId'}[kind]];
+		 if(kind==='fabricated-alias') source.source='arbitrary.output';
+		 if(kind==='foreign-export') {const other=forged.sources[0];Object.assign(source,{taskId:other.taskId,specId:other.specId,stageId:other.stageId,generation:other.generation,sourceGeneration:other.sourceGeneration,artifacts:other.artifacts});}
+		 if(kind==='duplicate-alias') forged.sources.push(structuredClone(source));
+		 if(kind==='foreign-run') forged.runId='foreign';
+		 if(kind==='controller-generation') forged.sources[0].generation=999;
+		 await assert.rejects(()=>readWorkflowArtifact(forged,source.source,'raw',{runDir}),kind);
+		}
+		const controller=run.tasks.find(task=>task.kind==='dynamic');
+		const controlPath=join(dirname(join(cwd,controller.files.result)),'control.json');
+		const controlText=readFileSync(controlPath,'utf8');
+		writeFileSync(config.ledgerPath,'');
+		setArtifactReadHookForTests(async()=>{
+		 setArtifactReadHookForTests(undefined);
+		 const control=JSON.parse(controlText);control.outputTasks=[controller.specId];
+		 writeFileSync(controlPath,JSON.stringify(control));
+		});
+		await assert.rejects(()=>handleWorkflowArtifactToolCall({action:'read',source:'adaptive.output',artifact:'raw'},config));
+		assert.equal(readFileSync(config.ledgerPath,'utf8'),'','changed export resolution cannot publish a ledger row');
+		assert.deepEqual((await checkRequiredArtifactReads(consumer,['adaptive.output.raw'])).missing,['adaptive.output.raw']);
+		writeFileSync(controlPath,controlText);
+	} finally {setArtifactReadHookForTests(undefined);setSubagentApiForTests(undefined);rmSync(cwd,{recursive:true,force:true});}
+});
+
+for (const kind of ['backend','salvage','batch','dynamic']) for (const drift of (kind==='dynamic'?['run','task']:['run','task','mirror','attempt'])) test(`explicit ${kind} host rejects joined pre-establishment ${drift} drift`, async () => {
+ const cwd=makeProject();let hits=0;let rejectedTaskDir;
+ try {
+  writeAgent(cwd);
+  let items=[];
+  if(kind==='batch')items=writeWorkflow(cwd,'owner-drift');
+  else {
+   const dir=join(cwd,'workflows','owner-drift');mkdirSync(dir,{recursive:true});
+   writeFileSync(join(dir,'controller.mjs'),`export default function(){return {control:{schema:'dynamic-controller-result-v1',digest:'done'},analysis:'Fresh dynamic body',refs:[]}}`);
+   writeFileSync(join(dir,'spec.json'),JSON.stringify({schemaVersion:1,name:'owner-drift',defaults:{agent:'unit-scout',readOnly:true,tools:['read']},artifactGraph:{stages:[kind==='dynamic'?{id:'producer',type:'dynamic',dynamic:{uses:'./controller.mjs'}}:{id:'producer',type:'single',prompt:'Local valid body.'}]}}));
+  }
+  const fake=fakeApi({cwd,items,durableBarrier:true,batchItemFactory:id=>({id,control:{schema:'stage-control-v1',digest:id},analysis:'batch evidence',refs:[]})});
+  if(kind==='salvage'){
+   const get=fake.api.getSubagentStatus;
+   fake.api.getSubagentStatus=async options=>{
+    const status=await get(options),attemptDir=status.logs[0].artifactCwd,mirrorPath=join(dirname(dirname(attemptDir)),'run.json');
+    const terminalPath=join(attemptDir,'result.json'),terminal=JSON.parse(readFileSync(terminalPath,'utf8')),mirror=JSON.parse(readFileSync(mirrorPath,'utf8'));
+    terminal.status='failed';mirror.status='failed';mirror.attempts[0].status='failed';
+    writeFileSync(terminalPath,JSON.stringify(terminal));writeFileSync(mirrorPath,JSON.stringify(mirror));
+    return {...status,status:'failed',failureKind:'model',metadata:{stopReason:'end',contextLengthExceeded:false}};
+   };
+  }
+  setSubagentApiForTests(fake.api);
+  setRawOwnerEstablishmentHookForTests(async taskDir=>{
+   const runPath=join(dirname(dirname(taskDir)),'run.json'),run=JSON.parse(readFileSync(runPath,'utf8'));
+   const task=run.tasks.find(task=>dirname(join(cwd,task.files.result))===taskDir);
+   if(kind==='batch'&&!task.foreachBatch)return;
+   hits++;rejectedTaskDir=taskDir;
+   // All batch members see the same invalid authority, rather than allowing
+   // a healthy sibling to publish after the failed operation has returned.
+   if(drift==='run')run.runId='foreign';
+   if(drift==='task')for(const member of run.tasks.filter(candidate=>kind==='batch'?candidate.foreachBatch:true))member.status='blocked';
+   if(drift==='run'||drift==='task')writeFileSync(runPath,JSON.stringify(run));
+   else {
+    const leader=task.foreachBatch?run.tasks.find(candidate=>candidate.foreachBatch?.role==='leader'):task;
+    const state=leader.launchAuthority.records.at(-1).state;
+    const mirrorDir=join(cwd,'.pi','workflow-subagents',run.runId,leader.taskId,state.backendRunId);
+    const path=drift==='mirror'?join(mirrorDir,'run.json'):join(mirrorDir,'attempts',state.backendAttemptId,'result.json');
+    const record=JSON.parse(readFileSync(path,'utf8'));
+    if(drift==='mirror')record.correlationId='foreign:task';else record.attemptId='foreign';
+    writeFileSync(path,JSON.stringify(record));
+   }
+  });
+  let started,error;
+  try {
+   started=await runWorkflow('owner-drift',cwd,{task:'Joined local publication drift',...(kind==='batch'?{executionProfile:'batched'}:{})});
+   // Drive only to the rejected publication boundary; do not launch recovery
+   // attempts after this deliberately corrupted host state.
+   for(let i=0;i<5&&!hits;i++){await refreshRun(cwd,started.runId);if(!hits)await scheduleRun(cwd,started.runId);}
+  } catch(caught){error=caught;}
+  assert.ok(hits>0,'the actual publisher must reach the establishment fence');
+  assert.ok(error||kind==='dynamic','backend publication must propagate the ownership rejection');
+  const result=JSON.parse((()=>{try{return readFileSync(join(rejectedTaskDir,'result.json'),'utf8');}catch{return '{}';}})());
+  assert.notEqual(result.outputValidation?.valid,true);
+  assert.throws(()=>statSync(join(rejectedTaskDir,'raw.md')),{code:'ENOENT'});
+  if(started){const persisted=await readRunRecord(cwd,started.runId).catch(()=>undefined);if(persisted)assert.notEqual(persisted.tasks.find(task=>dirname(join(cwd,task.files.result))===rejectedTaskDir)?.status,'completed');}
+ } finally {setRawOwnerEstablishmentHookForTests(undefined);setSubagentApiForTests(undefined);rmSync(cwd,{recursive:true,force:true});}
 });
 
 test("stop and resume clear an active group as a unit and resume as singletons", async () => {

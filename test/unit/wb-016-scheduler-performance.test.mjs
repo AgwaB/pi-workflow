@@ -72,7 +72,10 @@ test("WB-016 wait loop uses deadline selector while refresh remains single-write
 		backend.indexOf("export async function refreshRunFromSubagentArtifacts"),
 		backend.indexOf("async function pollSubagentForRefresh"),
 	);
-	assert.equal((refreshBody.match(/writeRunRecord\(/g) ?? []).length, 1);
+	// Ordinary refresh remains coalesced. A newly consumed recovery owner is
+	// the one required exception: raw publication cannot precede durable authority.
+	assert.equal((refreshBody.match(/writeRunRecord\(/g) ?? []).length, 2);
+	assert.match(refreshBody, /consumeRegisteredWorkflowLaunchAuthority\([\s\S]*?await writeRunRecord\(cwd, run\);/);
 	assert.match(
 		refreshBody,
 		/if \(changed \|\| telemetryChanged\) await writeRunRecord\(cwd, run\)/,
