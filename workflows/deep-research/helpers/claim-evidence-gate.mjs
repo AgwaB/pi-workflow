@@ -746,7 +746,13 @@ function issueForVerifierRow({
 					? "Verifier batch output included a claim id outside the source batch; rerun or repair the batch before counting any row."
 					: reason === "unknown_verification_batch_id"
 						? "Verifier batch output came from an unknown batch id; rerun or repair the batch before counting any row."
-						: "Verifier output is missing a usable string id/claimId; rerun or repair the verifier row before counting it.",
+						: [
+									"missing_materialized_verifier_owner",
+									"verifier_source_not_bound_to_exactly_one_materialized_owner",
+									"verifier_source_status_identity_mismatch",
+								].includes(reason)
+							? "Inspect runtime verifier source-owner metadata and foreach materialization, including itemIdentity, against the verifier claim id; quarantine the row until exactly one matching completed owner is established."
+							: "Verifier output is missing a usable string id/claimId; rerun or repair the verifier row before counting it.",
 	};
 }
 
