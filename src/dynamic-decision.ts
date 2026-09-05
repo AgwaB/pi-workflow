@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 import { dynamicRunDir } from "./dynamic-events.js";
 import { DYNAMIC_OUTPUT_PROFILES } from "./dynamic-profiles.js";
+import { sanitizeTaskId } from "./engine-run-graph.js";
 import { ensureDir, writeJsonAtomic } from "./store.js";
 import {
 	effectiveToolClassification,
@@ -127,6 +128,8 @@ export interface DynamicDecisionArtifactWriteInput {
 	rawDecision: unknown;
 	validation: DynamicDecisionValidationResult;
 	stateIndexDigest?: string;
+	attemptId?: string;
+	expectedRound?: number;
 }
 
 export interface DynamicDecisionArtifactWriteResult {
@@ -266,6 +269,28 @@ export function validateDynamicDecision(
 	);
 	validateStatusActionInvariant(status, nextActions, errors);
 	validateDependencies(nextActions, context, errors);
+	const executableIds = new Map<string, string>();
+	for (const action of nextActions) {
+		if (action.type === "stop") continue;
+		const rawId =
+			action.type === "add_work_item" ? action.workItemId : action.actionId;
+		const id = sanitizeTaskId(rawId);
+		if (!id || id === "controller" || /^decide-r\d+(?:-repair-\d+)?$/.test(id))
+			errors.push(
+				`action ${action.actionId} has reserved or empty generated task id ${id}`,
+			);
+		if (executableIds.has(id))
+			errors.push(
+				`generated task id ${rawId} collides with ${executableIds.get(id)}`,
+			);
+		executableIds.set(id, rawId);
+		if ((context.knownGeneratedTaskIds ?? []).some(
+			(taskId) => taskId === id || taskId.endsWith(`.${id}`),
+		))
+			errors.push(
+				`action ${action.actionId} ${action.type === "add_work_item" ? "workItemId" : "actionId"} already exists as a generated task`,
+			);
+	}
 
 	if (
 		errors.length > 0 ||
@@ -323,8 +348,16 @@ export function dynamicLoopSignature(
 export async function writeDynamicDecisionArtifacts(
 	input: DynamicDecisionArtifactWriteInput,
 ): Promise<DynamicDecisionArtifactWriteResult> {
-	const round = input.validation.decision?.round ?? 0;
-	const decisionId = input.validation.decision?.decisionId ?? "invalid";
+	const round = input.validation.decision?.round ?? input.expectedRound ?? 0;
+	// Invalid attempts have no decision identity. Bind both files to the entire
+	// request (including validation context), never to a shared "invalid" slot.
+	const decisionId = input.validation.decision?.decisionId ?? `invalid-${
+		input.attemptId ?? hashDynamicDecision({
+			raw: input.rawDecision,
+			validation: input.validation,
+			stateIndexDigest: input.stateIndexDigest,
+		})
+	}`;
 	const directory = join(
 		dynamicRunDir(input.cwd, input.runId),
 		"decisions",
@@ -727,25 +760,14 @@ function validateDependencies(
 	const known = new Set(context.knownGeneratedTaskIds ?? []);
 	for (const action of actions) {
 		if (action.type !== "add_work_item") continue;
-		if (
-			known.has(action.workItemId) ||
-			[...known].some(
-				(taskId) => taskId.split(".").at(-1) === action.workItemId,
-			)
-		) {
-			errors.push(
-				`action ${action.actionId} workItemId already exists as a generated task`,
-			);
-		}
-		const dependsOn = action.dependsOn ?? [];
-		for (const dependency of dependsOn) {
-			if (known.size > 0 && !known.has(dependency))
-				errors.push(
-					`action ${action.actionId} depends on unknown task ${dependency}`,
-				);
-			if (dependency === action.workItemId)
+		for (const dependency of action.dependsOn ?? []) {
+			if (!known.has(dependency))
+				errors.push(`action ${action.actionId} depends on unknown task ${dependency}`);
+			if (sanitizeTaskId(dependency) === sanitizeTaskId(action.workItemId))
 				errors.push(`action ${action.actionId} depends on itself`);
 		}
+		// Only preceding work items are resolvable by the sequential dispatcher.
+		known.add(action.workItemId);
 	}
 }
 

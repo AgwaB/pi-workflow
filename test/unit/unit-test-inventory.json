@@ -576,7 +576,7 @@
 		{
 			"name": "bundled spec-review workflow materializes verifier and partitions verified findings",
 			"occurrence": 1,
-			"sha256": "4171435a6459a49f06d399e9863e6bf5a4a5f8b4e6949ce331a83322a5b5a542",
+			"sha256": "4a4f110ea49f4e7a56af1a57971fe32e88a296479ce139f21baa341efcccc1b9",
 			"domain": "authoring-interface"
 		},
 		{
@@ -870,7 +870,7 @@
 		{
 			"name": "deep-research claim-evidence-gate enforces structured evidence, rejoins identity, and partitions statuses",
 			"occurrence": 1,
-			"sha256": "e3c0c5977048fe0b9f1319bd2eb530efbd32bb6fdb8416e1e58017dd403a3932",
+			"sha256": "0bb31c79c45d5f525eab1f2ef77b26da6bc5746e54e0133f58dbc99f2af87286",
 			"domain": "core-runtime"
 		},
 		{
@@ -918,7 +918,7 @@
 		{
 			"name": "deep-research claim-evidence-gate suppresses sourceRef join failures for local evidence",
 			"occurrence": 1,
-			"sha256": "3d1f6c0528c72b089a51341b14cbabe776202a64fce97986210ec3bc88efc82c",
+			"sha256": "7ba3ea6e0e3b2f2603bcfa09cc6b1ebc1d351c6b2f980e4907976ee4333bd7da",
 			"domain": "artifact-web"
 		},
 		{
@@ -2346,7 +2346,7 @@
 		{
 			"name": "spec-review partition helper joins verifier results and flags missing coverage",
 			"occurrence": 1,
-			"sha256": "40906e890a47e5fd6c89e45b5cc57d7ff7622d9a967487ced8015d1021c57a85",
+			"sha256": "05fc6d76643e99f5d636d92cafd6d346a4f4eec5197f57b8bb1327262c7b91a4",
 			"domain": "authoring-interface"
 		},
 		{
@@ -2424,7 +2424,7 @@
 		{
 			"name": "structured required read policy enforces projection ledger rows separately from string reads",
 			"occurrence": 1,
-			"sha256": "4bd6b83cbdf4bef64798012d4cf965bb6f72d83e2555f372e88c23dd09d5fd49",
+			"sha256": "7d88ee06b89a264f9de200cb3a994226654695bb93cc97649a473bd4173ab74b",
 			"domain": "artifact-web"
 		},
 		{
@@ -2760,7 +2760,7 @@
 		{
 			"name": "workflow index preserves run linkage without embedding task rows",
 			"occurrence": 1,
-			"sha256": "da1baddc5dc2c69c9fb83d84476b3a1fe7b46e5b454df6324b5dd1a7caf2c90e",
+			"sha256": "8f2fb846232abd09cf62a7ec6cd9bc00d68cdbff3b5006fd3b880c5c2a6f80f4",
 			"domain": "engine-store"
 		},
 		{

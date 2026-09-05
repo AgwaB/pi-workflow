@@ -2426,8 +2426,8 @@ function safeFetchOnce(
 					contentType &&
 					!isWorkflowWebTextContentType(contentType)
 				) {
-					res.resume();
 					settle({ ok: false, reason: "unsupported_content_type", url });
+					req.destroy();
 					return;
 				}
 				res.on("data", (chunk: string) => {
@@ -2456,8 +2456,17 @@ function safeFetchOnce(
 						text,
 					});
 				});
+				res.on("error", (error: Error) => {
+					if (!truncated) settle({ ok: false, reason: error.message || "response_aborted", url });
+				});
+				res.on("aborted", () => {
+					if (!truncated) settle({ ok: false, reason: "response_aborted", url });
+				});
 				res.on("close", () => {
-					if (!truncated) return;
+					if (!truncated) {
+						settle({ ok: false, reason: "response_aborted", url });
+						return;
+					}
 					settle({
 						ok: true,
 						status,
@@ -2472,6 +2481,8 @@ function safeFetchOnce(
 			req.destroy(new Error("fetch_timeout"));
 		});
 		deadlineTimer = runtime.setDeadlineTimer(() => {
+			// A previously closed socket may not emit another error on destroy.
+			settle({ ok: false, reason: "fetch_deadline_exceeded", url });
 			req.destroy(new Error("fetch_deadline_exceeded"));
 		}, remainingMs);
 		req.on("error", (error: Error) => {
@@ -2480,6 +2491,7 @@ function safeFetchOnce(
 		});
 		if (signal) {
 			abortListener = () => {
+				settle({ ok: false, reason: "aborted", url });
 				req.destroy(new Error("aborted"));
 			};
 			if (signal.aborted) abortListener();

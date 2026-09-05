@@ -1035,7 +1035,12 @@ export async function awaitSubagentOperation<T>(
 			options.signal.addEventListener("abort", abortListener, { once: true });
 		}
 		Promise.resolve()
-			.then(operation)
+			.then(() => {
+				// Cancellation can win after this waiter is created but before its
+				// operation microtask starts. Never dispatch work after that outcome.
+				throwIfAborted(options.signal);
+				return operation();
+			})
 			.then(
 				(value) => finish(() => resolveOperation(value)),
 				(error: unknown) => finish(() => rejectOperation(error)),
@@ -3889,6 +3894,10 @@ export async function refreshRunFromSubagentArtifacts(
 				handle.attemptId,
 			)
 		) {
+			// Recovery has just established a consumed host owner. Make that
+			// authority durable before a terminal snapshot can publish raw; the
+			// writer must not fall back through the old registered-only record.
+			await writeRunRecord(cwd, run);
 			changed = true;
 		}
 		if (handle && task.toolResultBudget?.pendingConfiguration) {
@@ -4788,6 +4797,7 @@ async function commitTerminalForeachBatch(
 				{
 					taskDir: taskDirectory,
 					rawOutput: candidate.rawOutput,
+					rawIntegrityHost: candidate.task,
 					startedAt,
 					completedAt,
 					exitCode,
@@ -5090,6 +5100,7 @@ async function materializeTerminalArtifactGraphResultInner(
 		refsMinItems: artifactOptions?.refsMinItems,
 		refsUrlValidation: artifactOptions?.refsUrlValidation,
 		refsAllowedLocators,
+		partialPaths: artifactOptions?.partial?.paths ?? [],
 		maxDigestChars: artifactOptions?.maxDigestChars,
 		controlJsonSchema,
 		outputProfile: task.dynamicGenerated?.outputProfile,
@@ -5115,7 +5126,7 @@ async function materializeTerminalArtifactGraphResultInner(
 		return retryOrFailArtifactGraphTask(task, {
 			reason: "workflow_output_invalid",
 			attempt,
-			message: buildWorkflowOutputRetryInstructions(parsed.issues),
+			message: buildWorkflowOutputRetryInstructions(parsed.issues, parseOptions),
 			...retrySession,
 		});
 	}
@@ -5177,6 +5188,7 @@ async function materializeTerminalArtifactGraphResultInner(
 		writeWorkflowTaskArtifactBundle({
 			taskDir: dirname(options.resultFile),
 			rawOutput,
+			rawIntegrityHost: task,
 			startedAt: options.startedAt,
 			completedAt: options.completedAt,
 			exitCode: options.exitCode,
@@ -5203,10 +5215,13 @@ async function materializeTerminalArtifactGraphResultInner(
 		return retryOrFailArtifactGraphTask(task, {
 			reason: "workflow_output_invalid",
 			attempt,
-			message: buildWorkflowOutputRetryInstructions(written.parsed.issues),
+			message: buildWorkflowOutputRetryInstructions(written.parsed.issues, parseOptions),
 			...retrySession,
 		});
 	}
+	// Retain a host-owned anchor independently of the result sidecar. Removing or
+	// replacing that sidecar cannot downgrade new linked raw to legacy evidence.
+	task.rawArtifactIntegrity = written.result.rawIntegrity;
 	const completedAfterTimeout = resultCompletedAfterTimeout(
 		task,
 		written.result.completedAt,
@@ -5506,6 +5521,7 @@ function requiredArtifactReadSatisfied(
 	if (!normalized) return false;
 	const matches = ledger.filter(
 		(entry) =>
+			!entry.truncated &&
 			entry.source === normalized.source &&
 			entry.artifact === normalized.artifact &&
 			requiredArtifactReadPathSatisfied(normalized, entry.path) &&

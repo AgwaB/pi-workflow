@@ -142,7 +142,7 @@ function report(verdict = "GAPS_FOUND") {
 	};
 }
 
-test("spec-review renderer preserves every canonical disposition and writes a safe completion envelope", async () => {
+test("spec-review renderer preserves every legacy disposition but withholds ungrounded completion", async () => {
 	const cwd = mkdtempSync(join(tmpdir(), "spec-review-render-"));
 	try {
 		const partition = cleanPartition();
@@ -162,15 +162,16 @@ test("spec-review renderer preserves every canonical disposition and writes a sa
 			context: { ...context, taskId: undefined },
 		});
 
-		assert.equal(first.status, "passed");
-		assert.equal(first.verdict, "GAPS_FOUND");
-		assert.equal(first.gates.passed, true);
+		assert.equal(first.status, "failed");
+		assert.equal(first.verdict, "INCONCLUSIVE"); // Legacy ledger has no attested requirement scope.
+		assert.equal(first.gates.passed, false);
+		assert.equal(first.gates.actionableEvidenceComplete, false);
 		assert.deepEqual(first.renderedFindingIds, ["FINDING-KEEP"]);
 		assert.deepEqual(first.renderedNeedsHumanIds, ["FINDING-HUMAN"]);
 		assert.deepEqual(first.renderedDroppedFindingIds, ["FINDING-DROP"]);
 		assert.equal(first.sidecarPath, "final-report.md");
 		assert.equal(first.ledgerSidecarPath, "source-ledger.json");
-		assert.ok(first.completionSummaryMarkdown.trim());
+		assert.equal(first.completionSummaryMarkdown, "");
 		assert.ok(Array.from(first.completionSummaryMarkdown).length <= 6000);
 		assert.doesNotMatch(
 			first.completionSummaryMarkdown,
@@ -754,7 +755,7 @@ test("spec-review renderer fails closed on verdict, source, evidence, and verifi
 			},
 			context,
 		});
-		assert.equal(integrityResult.verdict, "NEEDS_HUMAN");
+		assert.equal(integrityResult.verdict, "INCONCLUSIVE"); // Missing requirement proof takes precedence.
 		assert.equal(integrityResult.status, "failed");
 		assert.equal(integrityResult.gates.verifierCoverageComplete, false);
 		assert.deepEqual(integrityResult.renderedNeedsHumanIds, [

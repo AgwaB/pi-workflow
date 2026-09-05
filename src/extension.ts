@@ -94,6 +94,7 @@ import {
 } from "./workflow-active-ui.js";
 import {
 	beginParentUsageTracking,
+	flushParentUsageTracking,
 	recordParentSessionUsage,
 	resumeParentUsageTracking,
 } from "./workflow-parent-usage.js";
@@ -131,7 +132,11 @@ export const WORKFLOW_WAIT_TOOL = "workflow_wait" as const;
 const WORKFLOW_LIST_TOOL_PARAMETERS = {
 	type: "object",
 	additionalProperties: false,
-	properties: {},
+	properties: {
+		query: { type: "string", description: "Optional name or alias substring filter." },
+		offset: { type: "integer", minimum: 0, description: "Zero-based continuation offset (default 0)." },
+		limit: { type: "integer", minimum: 1, maximum: 20, description: "Page size (default/max 20)." },
+	},
 } as const;
 
 const WORKFLOW_RUN_TOOL_PARAMETERS = {
@@ -245,7 +250,7 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 			() => workflowCompletionCache,
 		);
 		if (uiSessionSignal.aborted) return;
-		await resumeParentUsageTracking(ctx.cwd).catch(() => undefined);
+		await resumeParentUsageTracking(ctx.cwd, workflowFeedbackSessionId(ctx) ?? "").catch(() => notifyParentUsageDeferred(ctx));
 		if (uiSessionSignal.aborted) return;
 		await resumeSupervisors(ctx.cwd, {
 			dynamicUi: dynamicUiFromContext(ctx),
@@ -266,17 +271,18 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 			);
 	});
 
-	pi.on("session_shutdown", (_event, ctx) => {
+	pi.on("session_shutdown", async (_event, ctx) => {
 		invalidateWorkflowUiSession(ctx.cwd);
 		clearWorkflowFeedbackTimersForCwd(ctx.cwd);
 		clearActiveWorkflowUiTimerForCwd(ctx.cwd);
 		clearActiveWorkflowUi(ctx);
+		await flushParentUsageTracking(ctx.cwd, workflowFeedbackSessionId(ctx) ?? "", true).catch(() => notifyParentUsageDeferred(ctx));
 	});
 
 	pi.on("message_end", async (event, ctx) => {
 		if (!isWorkflowSupervisorEnabled()) return;
-		await recordParentSessionUsage(ctx.cwd, event.message).catch(
-			() => undefined,
+		await recordParentSessionUsage(ctx.cwd, event.message, workflowFeedbackSessionId(ctx) ?? "").catch(
+			() => notifyParentUsageDeferred(ctx),
 		);
 	});
 
@@ -296,6 +302,12 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 	});
 }
 
+function notifyParentUsageDeferred(ctx: ExtensionContext): void {
+	const message = "Parent usage accounting deferred after a write failure; pending totals will retry on the next message or flush. A sanitized diagnostic is saved with recovery.";
+	if (ctx.hasUI) ctx.ui.notify(message, "warning");
+	else process.stderr.write(`${message}\n`);
+}
+
 export function registerWorkflowNaturalLanguageTools(
 	pi: ExtensionAPI,
 	env: NodeJS.ProcessEnv = process.env,
@@ -306,7 +318,7 @@ export function registerWorkflowNaturalLanguageTools(
 		name: WORKFLOW_LIST_TOOL,
 		label: "List Workflows",
 		description:
-			"List pi-workflow specs discoverable from the current project and installed package.",
+			"List pi-workflow specs discoverable from the current project and installed package. Paginated (max 20), metadata clipped, output bounded to 50KB/2000 lines; use offset/query for more.",
 		promptSnippet:
 			"List available pi-workflow workflow names, descriptions, and spec paths.",
 		promptGuidelines: [
@@ -322,14 +334,11 @@ export function registerWorkflowNaturalLanguageTools(
 			ctx: ExtensionContext,
 		) {
 			assertWorkflowToolAllowedForRole();
-			parseWorkflowListToolParams(params);
-			const workflows = await listWorkflowSummaries(ctx.cwd);
-			return {
-				content: [
-					{ type: "text", text: formatWorkflowListToolResult(workflows) },
-				],
-				details: { workflows },
-			};
+			const request = parseWorkflowListToolParams(params);
+			const catalog = (await listWorkflows(ctx.cwd)).filter(workflow => !request.query ||
+				[workflow.name, ...workflow.aliases].some(name => name.toLowerCase().includes(request.query!)));
+			const workflows = await listWorkflowSummaries(ctx.cwd, catalog.slice(request.offset, request.offset + request.limit));
+			return boundedWorkflowListPage(workflows, catalog.length, request.offset, request.query);
 		},
 	} as any);
 
@@ -1062,7 +1071,8 @@ async function startWorkflowParentTracking(
 		signal.aborted
 	)
 		return false;
-	beginParentUsageTracking(ctx.cwd, runId);
+	beginParentUsageTracking(ctx.cwd, runId, workflowFeedbackSessionId(ctx) ?? "");
+	await flushParentUsageTracking(ctx.cwd, workflowFeedbackSessionId(ctx) ?? "");
 	return true;
 }
 
@@ -1168,8 +1178,8 @@ export async function deliverMissedWorkflowFeedback(
 				Date.now() - updatedAtMs <= UNFINISHED_RUN_NOTICE_MAX_AGE_MS &&
 				["completed", "failed", "blocked", "interrupted"].includes(run.status)
 			);
-		})
-		.slice(0, 5);
+		});
+	let delivered = 0;
 	for (const summary of recent) {
 		if (signal?.aborted) return;
 		if (!(await workflowFeedbackBelongsToSession(ctx, summary.runId))) continue;
@@ -1177,12 +1187,14 @@ export async function deliverMissedWorkflowFeedback(
 			() => undefined,
 		);
 		if (signal?.aborted) return;
-		if (run)
-			await deliverWorkflowFeedback(ctx, api, run, {
+		if (run) {
+			const outcome = await deliverWorkflowFeedback(ctx, api, run, {
 				triggerTurn: false,
 				includeSummaryInstruction: false,
 				signal,
 			}).catch(() => undefined);
+			if (outcome?.status === "delivered" && ++delivered >= 5) break;
+		}
 	}
 }
 
@@ -2050,15 +2062,17 @@ interface WorkflowWaitToolRequest {
 	timeoutMs?: number;
 }
 
-function parseWorkflowListToolParams(params: unknown): void {
-	if (params === undefined || params === null) return;
-	if (!isPlainRecord(params))
-		throw new Error("workflow_list input must be an object");
-	const keys = Object.keys(params);
-	if (keys.length > 0)
-		throw new Error(
-			`workflow_list does not accept arguments: ${keys.join(", ")}`,
-		);
+function parseWorkflowListToolParams(params: unknown): { offset: number; limit: number; query?: string } {
+	if (params === undefined || params === null) return { offset: 0, limit: 20 };
+	if (!isPlainRecord(params)) throw new Error("workflow_list input must be an object");
+	const keys = Object.keys(params).filter(key => !["offset", "limit", "query"].includes(key));
+	if (keys.length) throw new Error(`workflow_list does not accept arguments: ${keys.join(", ")}`);
+	const offset = params.offset === undefined ? 0 : params.offset;
+	const limit = params.limit === undefined ? 20 : params.limit;
+	if (typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0) throw new Error("workflow_list offset must be a non-negative integer");
+	if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > 20) throw new Error("workflow_list limit must be an integer from 1 to 20");
+	if (params.query !== undefined && typeof params.query !== "string") throw new Error("workflow_list query must be a string");
+	return { offset, limit, query: (params.query as string | undefined)?.trim().toLowerCase() };
 }
 
 function parseWorkflowRunToolParams(params: unknown): WorkflowRunToolRequest {
@@ -2208,10 +2222,12 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 
 async function listWorkflowSummaries(
 	cwd: string,
+	workflows: Awaited<ReturnType<typeof listWorkflows>>,
 ): Promise<WorkflowListSummary[]> {
-	const workflows = await listWorkflows(cwd);
-	return await Promise.all(
-		workflows.map(async (workflow) => {
+	const summaries: WorkflowListSummary[] = [];
+	// Keep metadata IO bounded independently from catalog discovery.
+	for (let offset = 0; offset < workflows.length; offset += 4) {
+		summaries.push(...await Promise.all(workflows.slice(offset, offset + 4).map(async (workflow) => {
 			let description: string | undefined;
 			let agent: string | undefined;
 			let readOnly: boolean | undefined;
@@ -2228,12 +2244,50 @@ async function listWorkflowSummaries(
 				name: workflow.name,
 				aliases: workflow.aliases,
 				specPath: toDisplayPath(workflow.specPath, cwd),
-				...(description ? { description } : {}),
-				...(agent ? { agent } : {}),
+				...(description ? { description: clipWorkflowMetadata(description, 512) } : {}),
+				...(agent ? { agent: clipWorkflowMetadata(agent, 128) } : {}),
 				...(readOnly !== undefined ? { readOnly } : {}),
 			};
-		}),
-	);
+		})));
+	}
+	return summaries;
+}
+
+function boundedWorkflowListPage(rows: WorkflowListSummary[], total: number, offset: number, query?: string) {
+	const makePage = (workflows: WorkflowListSummary[]) => {
+		const nextOffset = offset + workflows.length < total ? offset + workflows.length : undefined;
+		const omitted = Math.max(0, total - offset - workflows.length);
+		const notice = nextOffset !== undefined
+			? `\n[${omitted} workflows omitted. Continue with workflow_list offset=${nextOffset}${query ? " and the same query" : ""}, or narrow query.]` : "";
+		return {
+			content: [{ type: "text", text: formatWorkflowListToolResult(workflows) + notice }],
+			details: { workflows, total, nextOffset, omitted },
+		};
+	};
+	const fits = (page: ReturnType<typeof makePage>): boolean =>
+		[JSON.stringify(page.content, null, 2), JSON.stringify(page.details, null, 2), page.content[0]!.text]
+			.every(text => Buffer.byteLength(text) <= 50 * 1024 && text.split("\n").length <= 2_000);
+	const included: WorkflowListSummary[] = [];
+	for (let row of rows) {
+		if (!fits(makePage([...included, row]))) {
+			if (included.length > 0) break;
+			// Even pathological names/alias metadata must not cause a zero-progress
+			// continuation. Preserve the complete path; optional metadata can go.
+			row = { name: clipWorkflowMetadata(row.name, 256), aliases: [], specPath: row.specPath };
+			if (!fits(makePage([row]))) throw new Error("workflow_list spec path exceeds the response budget; narrow the catalog at its source");
+		}
+		included.push(row);
+	}
+	return makePage(included);
+}
+
+function clipWorkflowMetadata(value: string, maxBytes: number): string {
+	const text = value.replace(/\s+/g, " ");
+	if (Buffer.byteLength(text) <= maxBytes) return text;
+	const data = Buffer.from(text);
+	let end = maxBytes - 16;
+	while ((data[end]! & 0xc0) === 0x80) end--;
+	return data.subarray(0, end).toString("utf8") + " [truncated]";
 }
 
 function formatWorkflowListToolResult(
@@ -2242,10 +2296,11 @@ function formatWorkflowListToolResult(
 	if (workflows.length === 0) return "No workflows found.";
 	return [
 		"Available workflows:",
+		"Metadata previews may be truncated; read the spec (full path in details), or /workflow show <name>. Use workflow_list query/offset for more workflows.",
 		...workflows.map((workflow) => {
-			const aliases = workflow.aliases
+			const aliases = clipWorkflowMetadata(workflow.aliases
 				.filter((alias) => alias !== workflow.name)
-				.join(", ");
+				.join(", "), 256);
 			const metadata = [
 				workflow.agent ? `agent=${workflow.agent}` : undefined,
 				workflow.readOnly !== undefined
@@ -2255,8 +2310,8 @@ function formatWorkflowListToolResult(
 				.filter((item): item is string => item !== undefined)
 				.join(", ");
 			return [
-				`- ${workflow.name}${aliases ? ` (aliases: ${aliases})` : ""}: ${workflow.description ?? "No description."}`,
-				`  spec: ${workflow.specPath}${metadata ? `; ${metadata}` : ""}`,
+				`- ${clipWorkflowMetadata(workflow.name, 256)}${aliases ? ` (aliases: ${aliases})` : ""}: ${workflow.description ?? "No description."}`,
+				`  spec: ${clipWorkflowMetadata(workflow.specPath, 1024)}${metadata ? `; ${metadata}` : ""}`,
 			].join("\n");
 		}),
 	].join("\n");
@@ -2735,7 +2790,7 @@ async function openWorkflowBoard(
 ): Promise<void> {
 	const printMode =
 		process.argv.includes("--print") || process.argv.includes("-p");
-	if (!ctx.hasUI || printMode) {
+	if (ctx.mode !== "tui" || !ctx.hasUI || printMode) {
 		emit(
 			ctx,
 			runId
@@ -3305,7 +3360,7 @@ async function handleWorkflowCommand(
 					ctx.cwd,
 					runId,
 					taskId,
-					lineText ? Number(lineText) : undefined,
+					lineText ? parseWorkflowInteger(lineText, "logs lines") : undefined,
 				),
 				"info",
 			);
@@ -3321,7 +3376,7 @@ async function handleWorkflowCommand(
 			const run = await waitForRun(
 				ctx.cwd,
 				runId,
-				tokens[2] ? Number(tokens[2]) : undefined,
+				tokens[2] ? parseWorkflowInteger(tokens[2], "wait timeout-ms") : undefined,
 				{ dynamicUi: dynamicUiFromContext(ctx) },
 			);
 			emit(
@@ -3367,7 +3422,7 @@ async function handleWorkflowCommand(
 		}
 
 		if (action === "prune") {
-			const options = parseWorkflowPruneArgs(tokens.slice(1));
+			const options = parseWorkflowPruneArgs(tokenizeWorkflowRunArgs(args).slice(1).map(token => token.text));
 			const summary = await pruneWorkflowRuns(ctx.cwd, options);
 			emit(
 				ctx,
@@ -3539,7 +3594,7 @@ function emitWorkflowLaunchNotice(
 	emit(ctx, `Starting ${label}\n${preparation}`, "info");
 }
 
-function parseWorkflowPruneArgs(args: string[]): {
+export function parseWorkflowPruneArgs(args: string[]): {
 	keep?: number;
 	olderThanDays?: number;
 	yes?: boolean;
@@ -3550,11 +3605,16 @@ function parseWorkflowPruneArgs(args: string[]): {
 		const arg = args[index];
 		if (arg === "--yes") options.yes = true;
 		else if (arg === "--json") options.json = true;
-		else if (arg === "--keep") options.keep = Number(args[++index]);
-		else if (arg === "--older-than") options.olderThanDays = Number(args[++index]);
+		else if (arg === "--keep" || arg === "--older-than") {
+			const key = arg === "--keep" ? "keep" : "olderThanDays";
+			if (options[key] !== undefined) throw new Error(`Duplicate prune option ${arg}`);
+			const raw = args[++index];
+			if (!raw?.trim() || raw.startsWith("--")) throw new Error(`${arg} requires a numeric value`);
+			options[key] = Number(raw);
+		}
 		else throw new Error(`Unknown prune argument "${arg}"`);
 	}
-	if (options.keep !== undefined && (!Number.isInteger(options.keep) || options.keep < 0))
+	if (options.keep !== undefined && (!Number.isSafeInteger(options.keep) || options.keep < 0))
 		throw new Error("--keep requires a non-negative integer");
 	if (options.olderThanDays !== undefined && (!Number.isFinite(options.olderThanDays) || options.olderThanDays < 0))
 		throw new Error("--older-than requires a non-negative number of days");
@@ -3632,6 +3692,7 @@ export function parseWorkflowRunArgs(args: string): {
 		taskTokenEnd = nextEnd;
 	}
 
+	assertNoUnconsumedOptions(tokens.slice(cursor, taskTokenEnd));
 	let taskStart = specToken.end;
 	while (taskStart < body.length && /\s/.test(body[taskStart] ?? ""))
 		taskStart += 1;
@@ -3674,6 +3735,8 @@ export function parseWorkflowDynamicArgs(args: string): {
 		taskTokenEnd = nextEnd;
 	}
 
+	if (parsed.profile !== undefined) throw new Error("Workflow dynamic does not support --profile");
+	assertNoUnconsumedOptions(tokens.slice(cursor, taskTokenEnd));
 	const taskStartToken = tokens[cursor];
 	if (!taskStartToken || taskTokenEnd <= cursor) return { task: "", ...parsed };
 	const taskEnd =
@@ -3701,19 +3764,11 @@ interface WorkflowRunArgToken {
 }
 
 function stripWorkflowRunCommand(input: string): string {
-	return input === "run"
-		? ""
-		: input.startsWith("run ")
-			? input.slice(4).trimStart()
-			: input;
+	return input.replace(/^run(?:\s+|$)/, "");
 }
 
 function stripWorkflowDynamicCommand(input: string): string {
-	return input === "dynamic"
-		? ""
-		: input.startsWith("dynamic ")
-			? input.slice("dynamic".length + 1).trimStart()
-			: input;
+	return input.replace(/^dynamic(?:\s+|$)/, "");
 }
 
 function tokenizeWorkflowRunArgs(input: string): WorkflowRunArgToken[] {
@@ -3730,6 +3785,7 @@ function tokenizeWorkflowRunArgs(input: string): WorkflowRunArgToken[] {
 			index += 1;
 			let text = "";
 			let escaped = false;
+			let closed = false;
 			while (index < input.length) {
 				const char = input[index] ?? "";
 				index += 1;
@@ -3742,9 +3798,10 @@ function tokenizeWorkflowRunArgs(input: string): WorkflowRunArgToken[] {
 					escaped = true;
 					continue;
 				}
-				if (char === quote) break;
+				if (char === quote) { closed = true; break; }
 				text += char;
 			}
+			if (!closed) throw new Error("Unterminated quoted workflow argument");
 			tokens.push({ text, start, end: index, quoted: true });
 			continue;
 		}
@@ -3761,6 +3818,9 @@ function tokenizeWorkflowRunArgs(input: string): WorkflowRunArgToken[] {
 	return tokens;
 }
 
+const RUN_SCALAR_OPTIONS = ["--model", "--profile", "--thinking", "--reasoning"];
+
+/** Shared by both ends of run/dynamic input: duplicates never depend on scan order. */
 function consumeLeadingRunOptionTokens(
 	tokens: readonly WorkflowRunArgToken[],
 	index: number,
@@ -3768,61 +3828,25 @@ function consumeLeadingRunOptionTokens(
 ): number {
 	const token = tokens[index];
 	if (!token || token.quoted) return 0;
-
-	if (token.text === "--detach") {
-		parsed.detach = true;
+	if (token.text === "--detach") { parsed.detach = true; return 1; }
+	if (token.text === "--force-new") { parsed.forceNew = true; return 1; }
+	if (token.text === "--route" || token.text === "--no-route") {
+		const route = token.text === "--route";
+		if (parsed.route !== undefined && parsed.route !== route)
+			throw new Error("Conflicting workflow options --route and --no-route");
+		parsed.route = route;
 		return 1;
 	}
-
-	if (token.text === "--route") {
-		parsed.route = true;
-		return 1;
+	for (const option of RUN_SCALAR_OPTIONS) {
+		const inline = optionValueFromEquals(token.text, option);
+		if (inline === undefined && token.text !== option) continue;
+		const value = inline ?? requiredOptionValue(tokens[index + 1], option);
+		const key = option === "--model" ? "model" : option === "--profile" ? "profile" : "thinking";
+		if (parsed[key] !== undefined) throw new Error(`Duplicate workflow option ${option}`);
+		if (key === "thinking") parsed.thinking = parseThinkingLevel(value);
+		else parsed[key] = value;
+		return inline === undefined ? 2 : 1;
 	}
-
-	if (token.text === "--no-route") {
-		parsed.route = false;
-		return 1;
-	}
-
-	if (token.text === "--force-new") {
-		parsed.forceNew = true;
-		return 1;
-	}
-
-	const model = optionValueFromEquals(token.text, "--model");
-	if (model !== undefined) {
-		parsed.model = model;
-		return 1;
-	}
-	if (token.text === "--model") {
-		parsed.model = requiredOptionValue(tokens[index + 1], "--model");
-		return 2;
-	}
-
-	const profile = optionValueFromEquals(token.text, "--profile");
-	if (profile !== undefined) {
-		parsed.profile = profile;
-		return 1;
-	}
-	if (token.text === "--profile") {
-		parsed.profile = requiredOptionValue(tokens[index + 1], "--profile");
-		return 2;
-	}
-
-	const thinking =
-		optionValueFromEquals(token.text, "--thinking") ??
-		optionValueFromEquals(token.text, "--reasoning");
-	if (thinking !== undefined) {
-		parsed.thinking = parseThinkingLevel(thinking);
-		return 1;
-	}
-	if (token.text === "--thinking" || token.text === "--reasoning") {
-		parsed.thinking = parseThinkingLevel(
-			requiredOptionValue(tokens[index + 1], token.text),
-		);
-		return 2;
-	}
-
 	return 0;
 }
 
@@ -3833,85 +3857,41 @@ function consumeTrailingRunOptionTokens(
 ): number {
 	const last = tokens[end - 1];
 	if (!last) return end;
-
-	if (!last.quoted && last.text === "--detach") {
-		parsed.detach = true;
-		return end - 1;
-	}
-
-	if (!last.quoted && last.text === "--route") {
-		parsed.route = true;
-		return end - 1;
-	}
-
-	if (!last.quoted && last.text === "--no-route") {
-		parsed.route = false;
-		return end - 1;
-	}
-
-	if (!last.quoted && last.text === "--force-new") {
-		parsed.forceNew = true;
-		return end - 1;
-	}
-
-	const model = !last.quoted
-		? optionValueFromEquals(last.text, "--model")
-		: undefined;
-	if (model !== undefined) {
-		parsed.model = model;
-		return end - 1;
-	}
-
-	const thinking = !last.quoted
-		? (optionValueFromEquals(last.text, "--thinking") ??
-			optionValueFromEquals(last.text, "--reasoning"))
-		: undefined;
-	if (thinking !== undefined) {
-		parsed.thinking = parseThinkingLevel(thinking);
-		return end - 1;
-	}
-
-	const profile = !last.quoted
-		? optionValueFromEquals(last.text, "--profile")
-		: undefined;
-	if (profile !== undefined) {
-		parsed.profile = profile;
-		return end - 1;
-	}
-
+	if (!last.quoted && RUN_SCALAR_OPTIONS.includes(last.text))
+		throw new Error(`Workflow run option ${last.text} requires a value`);
 	const option = tokens[end - 2];
-	if (!option || option.quoted) return end;
-	if (option.text === "--model") {
-		parsed.model = last.text;
+	if (option && !option.quoted && RUN_SCALAR_OPTIONS.includes(option.text)) {
+		consumeLeadingRunOptionTokens(tokens.slice(0, end), end - 2, parsed);
 		return end - 2;
 	}
-	if (option.text === "--thinking" || option.text === "--reasoning") {
-		parsed.thinking = parseThinkingLevel(last.text);
-		return end - 2;
-	}
-	if (option.text === "--profile") {
-		parsed.profile = last.text;
-		return end - 2;
-	}
-
-	return end;
+	const consumed = consumeLeadingRunOptionTokens(tokens.slice(0, end), end - 1, parsed);
+	return end - consumed;
 }
 
 function optionValueFromEquals(
 	text: string,
 	option: string,
 ): string | undefined {
-	return text.startsWith(`${option}=`)
-		? text.slice(option.length + 1)
-		: undefined;
+	if (!text.startsWith(`${option}=`)) return undefined;
+	const value = text.slice(option.length + 1);
+	if (!value.trim()) throw new Error(`Workflow run option ${option} requires a value`);
+	return value;
 }
 
 function requiredOptionValue(
 	token: WorkflowRunArgToken | undefined,
 	option: string,
 ): string {
-	if (!token) throw new Error(`Workflow run option ${option} requires a value`);
+	if (!token || !token.text.trim() || (!token.quoted && token.text.startsWith("--")))
+		throw new Error(`Workflow run option ${option} requires a value`);
 	return token.text;
+}
+
+function assertNoUnconsumedOptions(tokens: readonly WorkflowRunArgToken[]): void {
+	for (const token of tokens) {
+		if (!token.quoted && token.text.startsWith("--"))
+			throw new Error(`Unknown or misplaced workflow option ${token.text}; quote literal task text containing options`);
+	}
 }
 
 function trimEndBefore(input: string, index: number): number {
@@ -4009,6 +3989,13 @@ export function workflowArgumentCompletions(
 		return matches.length > 0 ? matches : undefined;
 	}
 	return undefined;
+}
+
+function parseWorkflowInteger(text: string, option: string): number {
+	const value = Number(text);
+	if (!/^\d+$/.test(text) || !Number.isSafeInteger(value) || value < 1 || value > 2_147_483_647)
+		throw new Error(`Workflow ${option} requires an integer from 1 to 2147483647`);
+	return value;
 }
 
 function splitArgs(args: string): string[] {

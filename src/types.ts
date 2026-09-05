@@ -271,6 +271,7 @@ export interface ArtifactGraphStageSpec {
 	id: string;
 	type?: ArtifactGraphStageType;
 	prompt?: string;
+	injectRuntimeTask?: boolean;
 	agent?: string;
 	role?: string | string[];
 	cwd?: string;
@@ -1213,6 +1214,8 @@ export interface WorkflowTaskRunRecord {
 		result: string;
 	};
 	backendFiles?: Record<string, string>;
+	/** Host-owned raw byte integrity for the current materialized generation. */
+	rawArtifactIntegrity?: import("./workflow-raw-contract.js").RawIntegrity;
 	lastMessage?: string;
 	outputRetry?: {
 		attempts: number;

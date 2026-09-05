@@ -283,6 +283,8 @@ test("scaffold evidence gate verifies quotes against cited file ranges and demot
 					value: {
 						...sources["partition-verdicts"].value,
 						partitions: { keep: [finding("OK-001", { evidenceQuotes: ["evict();"] })], weaken: [], drop: [], needsHuman: [] },
+						partitionSummary: { keep: 1, weaken: 0, drop: 0, needsHuman: 0, verdictsReceived: 1, candidates: 1, integrity: "complete" },
+						identityIntegrity: { plannedIds: ["OK-001"], verifiedIds: ["OK-001"], issues: [], complete: true },
 					},
 				},
 			},

@@ -10,6 +10,7 @@ import {
 	type FileHandle,
 } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { assertNoRawIntegrityAnchor, checkRawLinks, establishRawOwner, hashRawDescriptor, rawDigest, readRawIntegrity, recheckRawOwner, sameRawVersion, type RawOwner, type RawIntegrity, type RawSourceTuple } from "./workflow-raw-contract.js";
 
 import {
 	EXPERIMENTAL_TOOL_DEDUP_ENV,
@@ -50,6 +51,8 @@ export interface WorkflowArtifactRef {
 
 export interface WorkflowSourceManifestSource {
 	source: string;
+	generation?: number;
+	sourceGeneration?: number;
 	displayName?: string;
 	taskId?: string;
 	specId?: string;
@@ -79,7 +82,13 @@ export interface WorkflowSourceManifest {
 	};
 }
 
+export interface RawAssurance {
+	kind: "host_digest_verified" | "legacy_scoped_unattested" | "independent_unattested";
+	originalBytes: "host_digest_verified" | "unattested";
+}
+
 export interface WorkflowArtifactReadLedgerRecord {
+	rawAssurance?: RawAssurance;
 	schema: typeof WORKFLOW_ARTIFACT_READ_SCHEMA;
 	runId: string;
 	taskId: string;
@@ -137,6 +146,7 @@ export interface WorkflowArtifactProjectionMetadata {
 }
 
 export interface WorkflowArtifactReadResult {
+	rawAssurance?: RawAssurance;
 	source: string;
 	artifact: WorkflowArtifactKind;
 	content: string;
@@ -171,6 +181,11 @@ const DEFAULT_MAX_BYTES = 50 * 1024;
 const DEFAULT_MAX_LINES = 2000;
 const SOURCE_NAME_PATTERN = /^[A-Za-z0-9_.:-]+$/;
 let artifactValidatedHookForTests: (() => void | Promise<void>) | undefined;
+let artifactReadHookForTests: (() => void | Promise<void>) | undefined;
+
+export function setArtifactReadHookForTests(hook: (() => void | Promise<void>) | undefined): void {
+	artifactReadHookForTests = hook;
+}
 
 export function setArtifactValidatedHookForTests(
 	hook: (() => void | Promise<void>) | undefined,
@@ -273,6 +288,8 @@ export function normalizeWorkflowSourceManifest(
 
 		return {
 			source,
+			generation: optionalNonNegativeInteger(sourceValue.generation, `sources[${index}].generation`),
+			sourceGeneration: optionalNonNegativeInteger(sourceValue.sourceGeneration, `sources[${index}].sourceGeneration`),
 			displayName: optionalString(
 				sourceValue.displayName,
 				`sources[${index}].displayName`,
@@ -392,6 +409,11 @@ export function resolveWorkflowArtifact(
 	return { source, artifact, ref };
 }
 
+function rawSourceTuple(source: WorkflowSourceManifestSource): RawSourceTuple {
+	const { source: name, taskId, specId, stageId, generation, sourceGeneration } = source;
+	return { source: name, taskId, specId, stageId, generation, sourceGeneration };
+}
+
 export async function readWorkflowArtifact(
 	manifest: WorkflowSourceManifest,
 	sourceName: string,
@@ -417,10 +439,12 @@ export async function readWorkflowArtifact(
 		artifactPath,
 		runDir: options.runDir,
 		label: `${sourceName}.${artifact}`,
+		rawSource: artifact === "raw" ? { runId: manifest.runId, ...rawSourceTuple(resolved.source), sources: manifest.sources.map(rawSourceTuple) } : undefined,
 	});
+	let fullRawBytes: Buffer | undefined;
 	try {
 		if (options.path !== undefined) {
-			return await readProjectedWorkflowArtifact({
+			return { ...await readProjectedWorkflowArtifact({
 				source: resolved.source.source,
 				artifact: resolved.artifact,
 				file: opened.file,
@@ -429,7 +453,7 @@ export async function readWorkflowArtifact(
 				path: options.path,
 				maxItems: options.maxItems,
 				maxChars: options.maxChars,
-			});
+			}), ...(opened.rawAssurance ? { rawAssurance: opened.rawAssurance } : {}) };
 		}
 		if (options.maxItems !== undefined || options.maxChars !== undefined) {
 			throw new Error("workflow_artifact maxItems/maxChars require path");
@@ -437,7 +461,8 @@ export async function readWorkflowArtifact(
 		const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
 		const maxLines = options.maxLines ?? DEFAULT_MAX_LINES;
 		const sizeTruncated = opened.fileStat.size > maxBytes;
-		const text = sizeTruncated
+		if (artifact === "raw" && !sizeTruncated) fullRawBytes = await opened.file.readFile();
+		const text = fullRawBytes ? fullRawBytes.toString("utf8") : sizeTruncated
 			? await readUtf8Prefix(opened.file, maxBytes)
 			: await opened.file.readFile({ encoding: "utf8" });
 		const bytes = opened.fileStat.size;
@@ -453,9 +478,11 @@ export async function readWorkflowArtifact(
 			returnedBytes: Buffer.byteLength(truncated.content, "utf8"),
 			truncated: truncated.truncated || sizeTruncated,
 			mediaType: resolved.ref.mediaType,
+			...(opened.rawAssurance ? { rawAssurance: opened.rawAssurance } : {}),
 		};
 	} finally {
-		await opened.file.close();
+		try { await opened.validateAfterRead(fullRawBytes); }
+		finally { await opened.file.close(); }
 	}
 }
 
@@ -463,7 +490,8 @@ async function openValidatedArtifactFile(options: {
 	artifactPath: string;
 	runDir?: string;
 	label: string;
-}): Promise<{ file: FileHandle; fileStat: Stats }> {
+	rawSource?: RawSourceTuple & { runId: string; sources: RawSourceTuple[] };
+}): Promise<{ file: FileHandle; fileStat: Stats; rawAssurance?: RawAssurance; validateAfterRead: (fullBytes?: Buffer) => Promise<void> }> {
 	const linkStat = await lstat(options.artifactPath);
 	if (linkStat.isSymbolicLink()) {
 		throw new Error(`workflow artifact must not be a symlink: ${options.label}`);
@@ -474,8 +502,17 @@ async function openValidatedArtifactFile(options: {
 			`workflow artifact is not a regular file: ${options.label}`,
 		);
 	}
+	let owner: RawOwner | undefined;
+	let integrity: RawIntegrity | undefined;
+	if (options.rawSource) {
+		owner = options.runDir ? await establishRawOwner(dirname(options.artifactPath), { ...options.rawSource, runDir: options.runDir }).catch(() => undefined) : undefined;
+		if (owner && await realpath(options.artifactPath) !== owner.raw) throw new Error("raw artifact path is not the owned raw path");
+		if (owner) integrity = await readRawIntegrity(owner);
+		else await assertNoRawIntegrityAnchor(dirname(options.artifactPath));
+	}
 	if (validatedStat.nlink > 1) {
-		throw new Error(`workflow artifact must not be hard-linked: ${options.label}`);
+		if (!owner) throw new Error(`workflow artifact must not be hard-linked: ${options.label}`);
+		await checkRawLinks(owner, validatedStat);
 	}
 	if (options.runDir) {
 		const [realRunDir, realArtifactPath] = await Promise.all([
@@ -495,16 +532,33 @@ async function openValidatedArtifactFile(options: {
 	);
 	try {
 		const fileStat = await file.stat();
+		if (fileStat.nlink > 1) {
+			if (!owner) throw new Error(`workflow artifact must not be hard-linked: ${options.label}`);
+			await checkRawLinks(owner, fileStat);
+		}
 		if (
 			!fileStat.isFile() ||
-			fileStat.dev !== validatedStat.dev ||
-			fileStat.ino !== validatedStat.ino
+			!sameRawVersion(fileStat, validatedStat)
 		) {
 			throw new Error(
 				`workflow artifact changed during validation: ${options.label}`,
 			);
 		}
-		return { file, fileStat };
+		if (owner) await recheckRawOwner(owner);
+		const rawAssurance: RawAssurance | undefined = options.rawSource ? {
+			kind: integrity ? "host_digest_verified" : owner ? "legacy_scoped_unattested" : "independent_unattested",
+			originalBytes: integrity ? "host_digest_verified" : "unattested",
+		} : undefined;
+		return { file, fileStat, rawAssurance, validateAfterRead: async (fullBytes) => {
+			await artifactReadHookForTests?.();
+			if (integrity && (integrity.bytes !== fileStat.size || (fullBytes ? rawDigest(fullBytes) : await hashRawDescriptor(file, fileStat.size)) !== integrity.sha256)) throw new Error("raw artifact integrity mismatch");
+			if (owner) {
+				await recheckRawOwner(owner);
+				if (JSON.stringify(await readRawIntegrity(owner)) !== JSON.stringify(integrity)) throw new Error("raw artifact integrity record changed");
+				if (fileStat.nlink > 1) await checkRawLinks(owner, await file.stat());
+			}
+			if (!sameRawVersion(fileStat, await file.stat()) || !sameRawVersion(fileStat, await lstat(options.artifactPath))) throw new Error("workflow artifact changed during read");
+		} };
 	} catch (error) {
 		await file.close();
 		throw error;
@@ -822,7 +876,7 @@ export async function handleWorkflowArtifactToolCall(
 	if (!input.artifact)
 		throw new Error("workflow_artifact read requires artifact");
 	const dedupKey = workflowArtifactReadDedupKey(config, accessMode, input);
-	const cachedRead = workflowExperimentalFlagEnabled(
+	const cachedRead = input.artifact !== "raw" && workflowExperimentalFlagEnabled(
 		EXPERIMENTAL_TOOL_DEDUP_ENV,
 	)
 		? workflowArtifactReadDedupCache.get(dedupKey)
@@ -880,7 +934,7 @@ export async function handleWorkflowArtifactToolCall(
 		{ accessMode },
 	);
 	const completedCacheKey =
-		resolvedArtifact.source.status === "completed"
+		input.artifact !== "raw" && resolvedArtifact.source.status === "completed"
 			? completedArtifactReadCacheKey(
 					config,
 					accessMode,
@@ -920,6 +974,7 @@ export async function handleWorkflowArtifactToolCall(
 		bytes: read.bytes,
 		returnedBytes: read.returnedBytes,
 		truncated: read.truncated,
+		...(read.rawAssurance ? { rawAssurance: read.rawAssurance } : {}),
 		...(read.projection?.path === undefined
 			? {}
 			: { path: read.projection.path }),
@@ -943,7 +998,7 @@ export async function handleWorkflowArtifactToolCall(
 		content: [
 			{
 				type: "text",
-				text: `# workflow_artifact: ${read.source}.${read.artifact}${projectionLabel}\n\n${read.content}${truncation}`,
+				text: `# workflow_artifact: ${read.source}.${read.artifact}${projectionLabel}\n\n${read.content}${truncation}${read.rawAssurance ? `\n\n[raw assurance: ${read.rawAssurance.kind}; original bytes: ${read.rawAssurance.originalBytes}]` : ""}`,
 			},
 		],
 		details: {
@@ -957,6 +1012,7 @@ export async function handleWorkflowArtifactToolCall(
 			truncated: read.truncated,
 			mediaType: read.mediaType,
 			projection: read.projection,
+			...(read.rawAssurance ? { rawAssurance: read.rawAssurance } : {}),
 		},
 	};
 }
@@ -1014,7 +1070,15 @@ function normalizeReadLedgerRecord(
 		...(path === undefined ? {} : { path }),
 		...(maxItems === undefined ? {} : { maxItems }),
 		...(maxChars === undefined ? {} : { maxChars }),
+		...(value.rawAssurance === undefined ? {} : { rawAssurance: normalizeRawAssurance(value.rawAssurance) }),
 	};
+}
+
+function normalizeRawAssurance(value: unknown): RawAssurance {
+	if (!isRecord(value) || (value.kind !== "host_digest_verified" && value.kind !== "legacy_scoped_unattested" && value.kind !== "independent_unattested") || value.originalBytes !== (value.kind === "host_digest_verified" ? "host_digest_verified" : "unattested")) {
+		throw new Error("invalid raw assurance metadata");
+	}
+	return { kind: value.kind, originalBytes: value.kind === "host_digest_verified" ? "host_digest_verified" : "unattested" };
 }
 
 function normalizeToolInput(value: unknown):

@@ -855,26 +855,38 @@ export async function writeJsonAtomic(
 	await assertLeaseContextOwnership(lease);
 	const temp = join(
 		dirname(file),
-		`.${Date.now().toString(36)}-${randomBytes(3).toString("hex")}.tmp`,
+		`.${Date.now().toString(36)}-${randomBytes(12).toString("hex")}.tmp`,
 	);
-	assertLeaseNotAborted(activeAbortSignal);
-	await assertLeaseContextOwnership(lease);
-	await writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-	assertLeaseNotAborted(activeAbortSignal);
-	await assertLeaseContextOwnership(lease);
-	await commitFence?.();
-	await runLeaseTestHooks.onBeforeAtomicRename?.({ file });
-	await assertLeaseContextOwnership(lease);
-	await commitFence?.();
-	assertLeaseNotAborted(activeAbortSignal);
-	await rename(temp, file);
-	if (lease) {
-		await runLeaseTestHooks.onAfterAtomicRename?.({
-			file,
-			abortLease: lease.abortLease,
-		});
+	let temporaryCreated = false;
+	try {
+		assertLeaseNotAborted(activeAbortSignal);
+		await assertLeaseContextOwnership(lease);
+		const handle = await open(temp, "wx", 0o600);
+		temporaryCreated = true;
+		try {
+			await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, "utf8");
+		} finally {
+			await handle.close();
+		}
+		assertLeaseNotAborted(activeAbortSignal);
+		await assertLeaseContextOwnership(lease);
+		await commitFence?.();
+		await runLeaseTestHooks.onBeforeAtomicRename?.({ file });
+		await assertLeaseContextOwnership(lease);
+		await commitFence?.();
+		assertLeaseNotAborted(activeAbortSignal);
+		await rename(temp, file);
+		temporaryCreated = false;
+		if (lease) {
+			await runLeaseTestHooks.onAfterAtomicRename?.({
+				file,
+				abortLease: lease.abortLease,
+			});
+		}
+		assertLeaseNotAborted(activeAbortSignal);
+	} finally {
+		if (temporaryCreated) await unlink(temp).catch(() => undefined);
 	}
-	assertLeaseNotAborted(activeAbortSignal);
 }
 
 export async function syncFileAndDirectory(file: string): Promise<void> {
@@ -926,6 +938,9 @@ export async function writeJsonExclusive(
 		await assertLeaseContextOwnership(lease);
 		await commitFence?.();
 		await runLeaseTestHooks.onBeforeExclusiveLink?.({ file });
+		await assertLeaseContextOwnership(lease);
+		await commitFence?.();
+		assertLeaseNotAborted(activeAbortSignal);
 		try {
 			// link(2) is the commit: it atomically creates this epoch's immutable
 			// receipt and can never replace a receipt committed by another owner.
@@ -1050,7 +1065,27 @@ export async function acquireRunFileLease(
 	assertSafeRunId(runId);
 	if (!/^[a-z0-9-]+$/.test(name))
 		throw new Error(`Unsafe run-file lease name: ${name}`);
-	const dir = workflowRunDir(cwd, runId);
+	return acquireFileLeaseInDirectory(cwd, runId, name, workflowRunDir(cwd, runId), waitMs, acquireSignal);
+}
+
+/** Serialize retention topology plans with first run-record publication.
+ * Bounded acquisition; never used by read-only prune previews. */
+export async function acquireWorkflowTopologyLease(
+	cwd: string, waitMs = INDEX_LOCK_WAIT_MS, acquireSignal?: AbortSignal,
+): Promise<RunFileLease | undefined> {
+	const root = workflowsRoot(cwd);
+	await ensureDir(root);
+	for (const path of [resolve(root, ".."), root]) {
+		const info = await lstat(path);
+		if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("unsafe workflow topology root");
+	}
+	return acquireFileLeaseInDirectory(cwd, "topology", "retention", root, waitMs, acquireSignal);
+}
+
+async function acquireFileLeaseInDirectory(
+	cwd: string, runId: string, name: string, dir: string,
+	waitMs: number, acquireSignal?: AbortSignal,
+): Promise<RunFileLease | undefined> {
 	await ensureDir(dir);
 	const lockFile = join(dir, `${name}.lock`);
 	const ownerId = `${process.pid}-${randomBytes(6).toString("hex")}`;
@@ -1234,7 +1269,7 @@ export async function withRunLease<T>(
 				lockFile: toProjectPath(cwd, lockFile),
 				...(lastTaskTransitionAt ? { lastTaskTransitionAt } : {}),
 				...(taskStatusCounts ? { taskStatusCounts } : {}),
-			});
+			}, abortController.signal, () => assertLockOwner(lockFile, ownerId));
 		};
 		const runHeartbeat = (): Promise<void> => {
 			const previous = heartbeatInFlight;
@@ -1275,7 +1310,7 @@ export async function withRunLease<T>(
 		return result;
 	} catch (error) {
 		// Cleanup must not replace the action's result or error. The release
-		// helper still publishes an abandonment marker before bounded retries, so
+		// helper publishes an abandonment marker after bounded retries fail, so
 		// a persistent cleanup failure leaves this live-PID lock reclaimable.
 		callerOutcomeSettled = true;
 		throw error;
@@ -1368,9 +1403,8 @@ async function reclaimStaleLock(lockFile: string): Promise<boolean> {
 		return false;
 	}
 	// A validated abandonment marker is a one-way declaration made only after
-	// heartbeats stop. Latch that decision across rename: the releaser may see
-	// the original path missing and clear the sidecar while this reclaim is in
-	// flight, but restoring the quiesced live-PID lock would orphan it.
+	// heartbeats and release attempts stop. Latch that decision across rename;
+	// restoring a quiesced live-PID lock would orphan it.
 	if (!initialDecision.durablyAbandoned) {
 		const claimedDecision = await lockReclaimDecision(lockFile, claimed);
 		if (!claimedDecision.reclaimable) {
@@ -1566,15 +1600,10 @@ async function releaseRunFileLockWithRetries(
 	lockFile: string,
 	ownerId: string,
 ): Promise<void> {
-	// Heartbeats are stopped before this function is called. Publish the exact
-	// owner token before attempting the fallible rename so another process can
-	// reclaim immediately if every release attempt fails while this PID lives.
-	let abandonmentError: unknown;
-	try {
-		await markRunFileLeaseAbandoned(lockFile, ownerId);
-	} catch (error) {
-		abandonmentError = error;
-	}
+	// Heartbeats are stopped and joined before this function is called; handle
+	// releases are single-flight. Keep ownership private throughout the bounded
+	// rename attempts. Advertising abandonment first would let a reclaimer
+	// replace our snapshot before releaseLock renames the well-known path.
 	let lastError: unknown;
 	for (const delayMs of RUN_FILE_LEASE_RELEASE_RETRY_DELAYS_MS) {
 		if (delayMs > 0) await sleep(delayMs);
@@ -1586,11 +1615,18 @@ async function releaseRunFileLockWithRetries(
 			lastError = error;
 		}
 	}
-	if (abandonmentError)
+	// One-way handoff: after publishing this owner token, only reclaimers may
+	// detach the lock. Never retry releaseLock or clear the marker from here,
+	// even if marker publication fails ambiguously. This keeps failed cleanup
+	// recoverable while this PID lives without racing the replacement owner.
+	try {
+		await markRunFileLeaseAbandoned(lockFile, ownerId);
+	} catch (abandonmentError) {
 		throw new AggregateError(
 			[asLeaseError(lastError), abandonmentError],
 			`Failed to release and durably abandon run-file lease: ${lockFile}`,
 		);
+	}
 	throw asLeaseError(lastError);
 }
 
@@ -1796,7 +1832,31 @@ export async function writeRunRecord(
 	const derived = deriveRunStatus(run);
 	Object.assign(run, derived);
 	if (isTerminalWorkflowStatus(run.status)) run.usage = runUsageRollup(run);
-	await writeJsonAtomic(runFile, run, abortSignal);
+	if (firstWrite) {
+		const topology = await acquireWorkflowTopologyLease(cwd, INDEX_LOCK_WAIT_MS, abortSignal);
+		if (!topology) throw new Error("workflow topology lease unavailable");
+		try {
+			// Another first writer may have published while this one waited.
+			const published = await readJson<WorkflowRunRecord>(runFile);
+			if (published && (published.parentRunId !== run.parentRunId || published.rootRunId !== run.rootRunId))
+				throw new Error("workflow ancestry is immutable after publication");
+			if (run.parentRunId) {
+				const parent = await readRunRecord(cwd, run.parentRunId);
+				if (parent.runId !== run.parentRunId) throw new Error("workflow parent identity mismatch");
+			}
+			await topology.assertOwner();
+			await assertActiveRunLease(cwd, run.runId, abortSignal);
+			await writeJsonAtomic(runFile, run, abortSignal, topology.assertOwner);
+		} finally {
+			await topology.release();
+		}
+	} else {
+		// A published reference cannot move outside the topology protocol.
+		const previous = await readRunRecord(cwd, run.runId);
+		if (previous.parentRunId !== run.parentRunId || previous.rootRunId !== run.rootRunId)
+			throw new Error("workflow ancestry is immutable after publication");
+		await writeJsonAtomic(runFile, run, abortSignal);
+	}
 	assertLeaseNotAborted(abortSignal);
 	if (isTerminalWorkflowStatus(run.status))
 		runProgressByRun.delete(runProgressKey(cwd, run.runId));

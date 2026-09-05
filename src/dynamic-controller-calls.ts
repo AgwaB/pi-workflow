@@ -12,6 +12,7 @@ import {
 	type DynamicWorkflowUi,
 } from "./dynamic-controller-policy.js";
 import { hashDynamicRequest, readDynamicEvents } from "./dynamic-events.js";
+import { remainingDynamicNestedWorkflowDepth } from "./dynamic-nested-depth.js";
 import {
 	readOrRebuildDynamicState,
 	recordDynamicEventAndUpdateState,
@@ -188,6 +189,14 @@ export async function runDynamicNestedWorkflowCall(input: {
 		() => undefined,
 	);
 	if (!nestedRun) {
+		// A durable start reservation may survive a restart without a child run.
+		// Revalidate ancestry before executing it, not just before reserving it.
+		await assertDynamicNestedWorkflowBudgetAvailable({
+			cwd: input.cwd,
+			runId: input.run.runId,
+			controllerSpecId: input.controllerTask.specId,
+			dynamic: input.dynamic,
+		});
 		if (input.isSettled?.()) return undefined;
 		await throwIfWorkflowStopRequested(input.cwd, input.run.runId);
 		nestedRun = await input.runWorkflowSpec(nestedSpecPath, input.cwd, {
@@ -265,6 +274,9 @@ export async function runDynamicNestedWorkflowCall(input: {
 	if (nestedRun.status === "running") {
 		return await buildNestedWorkflowResult(input.cwd, nestedRun);
 	}
+	// Cascading stop can settle the child before the parent's polling signal
+	// fires. Preserve cancellation instead of racing into an ordinary failure.
+	await throwIfWorkflowStopRequested(input.cwd, input.run.runId);
 	throw new Error(
 		`dynamic nested workflow ${workflowId} ended with ${nestedRun.status}`,
 	);
@@ -304,14 +316,12 @@ async function assertDynamicNestedWorkflowBudgetAvailable(input: {
 	controllerSpecId: string;
 	dynamic: CompiledDynamicWorkflowTask;
 }): Promise<void> {
-	const state = await readOrRebuildDynamicState(input.cwd, input.runId);
-	const counters = state.controllers[input.controllerSpecId]?.counters;
-	if (
-		(counters?.nestedWorkflowDepth ?? 0) >=
-		input.dynamic.budget.maxNestedWorkflowDepth
-	) {
+	const remaining = await remainingDynamicNestedWorkflowDepth(
+		input.cwd, input.runId, input.dynamic.budget.maxNestedWorkflowDepth,
+	);
+	if (remaining <= 0) {
 		throw new DynamicControllerBudgetBlocked(
-			`dynamic nested workflow budget exhausted: maxNestedWorkflowDepth=${input.dynamic.budget.maxNestedWorkflowDepth}`,
+			`dynamic nested workflow budget exhausted: maxNestedWorkflowDepth=${input.dynamic.budget.maxNestedWorkflowDepth} (ancestor-relative remaining depth=${remaining}; incomplete ancestry grants no depth)`,
 		);
 	}
 }
@@ -371,6 +381,7 @@ export async function runDynamicHelperCall(input: {
 	helperId: string;
 	callIndex: number;
 	helperInput: unknown;
+	deadline?: number;
 	isSettled?: () => boolean;
 	stopSignal?: AbortSignal;
 }): Promise<unknown> {
@@ -456,52 +467,67 @@ export async function runDynamicHelperCall(input: {
 			},
 		});
 	}
-	const result = await input.runDynamicHelperWorker({
-		ref: helperSpec.uses,
-		specPath: input.helperSpecPath,
-		cwd: input.cwd,
-		runId: input.run.runId,
-		stopSignal: input.stopSignal,
-		callInput: {
-			sources: normalizedInput.sources,
-			options: normalizedInput.options,
-			context: {
-				specPath: input.helperSpecPath,
-				originalSpecPath: input.run.specPath,
-				stageId: input.controllerTask.stageId,
-				taskId: input.controllerTask.taskId,
-				runId: input.run.runId,
-				cwd: input.cwd,
+	try {
+		const result = await input.runDynamicHelperWorker({
+			ref: helperSpec.uses,
+			specPath: input.helperSpecPath,
+			cwd: input.cwd,
+			runId: input.run.runId,
+			stopSignal: input.stopSignal,
+			callInput: {
+				sources: normalizedInput.sources,
+				options: normalizedInput.options,
+				context: {
+					specPath: input.helperSpecPath,
+					originalSpecPath: input.run.specPath,
+					stageId: input.controllerTask.stageId,
+					taskId: input.controllerTask.taskId,
+					runId: input.run.runId,
+					cwd: input.cwd,
+				},
 			},
-		},
-		timeoutMs: remainingDynamicRuntimeMs(
-			input.dynamic,
-			(await readOrRebuildDynamicState(input.cwd, input.run.runId)).controllers[
-				input.controllerTask.specId
-			]?.counters.runtimeMs ?? 0,
-		),
-	});
-	if (input.isSettled?.()) return undefined;
-	const serializedResult = toDynamicJsonValue(result);
-	await validateDynamicHelperSchema(
-		input.helperSpecPath,
-		helperSpec.outputSchema,
-		serializedResult,
-		`dynamic helper ${helperId} output`,
-	);
-	if (input.isSettled?.()) return undefined;
-	await recordDynamicEventAndUpdateState(input.cwd, input.run.runId, {
-		controllerSpecId: input.controllerTask.specId,
-		type: "helper.completed",
-		opId,
-		requestHash,
-		payload: {
-			helperId,
-			uses: helperSpec.uses,
-			result: serializedResult,
-		},
-	});
-	return serializedResult;
+			timeoutMs: Math.min(
+				input.deadline === undefined ? Infinity : Math.max(0, input.deadline - Date.now()),
+				remainingDynamicRuntimeMs(
+					input.dynamic,
+					(await readOrRebuildDynamicState(input.cwd, input.run.runId)).controllers[
+						input.controllerTask.specId
+					]?.counters.runtimeMs ?? 0,
+				),
+			),
+		});
+		if (input.stopSignal?.aborted) throw input.stopSignal.reason;
+		const serializedResult = toDynamicJsonValue(result);
+		await validateDynamicHelperSchema(
+			input.helperSpecPath,
+			helperSpec.outputSchema,
+			serializedResult,
+			`dynamic helper ${helperId} output`,
+		);
+		if (input.stopSignal?.aborted) throw input.stopSignal.reason;
+		await recordDynamicEventAndUpdateState(input.cwd, input.run.runId, {
+			controllerSpecId: input.controllerTask.specId,
+			type: "helper.completed",
+			opId,
+			requestHash,
+			payload: {
+				helperId,
+				uses: helperSpec.uses,
+				result: serializedResult,
+			},
+		});
+		return serializedResult;
+	} catch (error) {
+		await recordDynamicEventAndUpdateState(input.cwd, input.run.runId, {
+			controllerSpecId: input.controllerTask.specId,
+			type: input.stopSignal?.aborted || error instanceof DynamicControllerBudgetBlocked
+				? "helper.cancelled" : "helper.failed",
+			opId,
+			requestHash,
+			payload: { helperId, uses: helperSpec.uses, message: error instanceof Error ? error.message : String(error) },
+		});
+		throw error;
+	}
 }
 
 async function validateDynamicHelperSchema(

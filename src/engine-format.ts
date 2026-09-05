@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFileLinesBounded } from "./workflow-preview.js";
 
 import { formatDynamicAuditSummary } from "./dynamic-audit.js";
 import { buildDynamicToolResultBudgetMetrics } from "./dynamic-tool-result-budget-metrics.js";
@@ -9,7 +9,6 @@ import {
 	refreshRun,
 } from "./engine-wait.js";
 import {
-	fromProjectPath,
 	isMockRunProvenance,
 	LEASE_STALE_MS,
 	listRunRecords,
@@ -196,20 +195,11 @@ export async function formatLogs(
 	);
 	if (!task) throw new Error(`Task not found in ${run.runId}: ${taskId}`);
 
-	const outputFile = fromProjectPath(cwd, task.files.output);
 	const count = Math.max(
 		1,
 		Math.min(LOG_LINES_MAX, Math.floor(lineCount || LOG_LINES_DEFAULT)),
 	);
-	let text: string;
-	try {
-		text = await readFile(outputFile, "utf8");
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") text = "";
-		else throw error;
-	}
-
-	const tail = text.split(/\r?\n/).slice(-count).join("\n").trim();
+	const tail = (await readFileLinesBounded(cwd, task.files.output, count)).join("\n").trim();
 	return prependRefreshWarning(
 		[
 			`Logs: ${task.displayName || task.specId}`,

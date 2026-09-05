@@ -57,8 +57,6 @@ interface PartialSectionMatch {
 	index: number;
 }
 
-const PARTIAL_CONTROL_OPEN = "partial-control";
-
 export function partialOutputLedgerPath(taskDir: string): string {
 	return join(taskDir, WORKFLOW_PARTIAL_OUTPUT_LEDGER_FILE);
 }
@@ -99,9 +97,21 @@ export async function writeWorkflowPartialOutputLedgerFromFile(options: {
 	});
 }
 
-export function stripWorkflowPartialOutputSections(raw: string): string {
-	if (!raw.includes(PARTIAL_CONTROL_OPEN)) return raw;
-	return raw.replace(partialControlSectionRegExp(), "");
+export function stripWorkflowPartialOutputSections(
+	raw: string,
+	options: ParseWorkflowPartialOutputOptions = {},
+): string {
+	const sections = collectPartialControlSections(raw);
+	if (sections.length === 0) return raw;
+	// Never erase malformed, undeclared, or revised publications as harmless prose.
+	if (parseWorkflowPartialOutput(raw, options).issues.length > 0) return raw;
+	let stripped = "";
+	let cursor = 0;
+	for (const section of sections) {
+		stripped += raw.slice(cursor, section.start);
+		cursor = section.end;
+	}
+	return stripped + raw.slice(cursor);
 }
 
 export function parseWorkflowPartialOutput(
@@ -180,23 +190,77 @@ export function hasFatalPartialOutputIssue(
 }
 
 function collectPartialControlSections(raw: string): PartialSectionMatch[] {
-	if (!raw.includes(PARTIAL_CONTROL_OPEN)) return [];
+	if (!/partial-control/i.test(raw)) return [];
 	const matches: PartialSectionMatch[] = [];
-	const re = partialControlSectionRegExp();
-	let match: RegExpExecArray | null;
-	while ((match = re.exec(raw)) !== null) {
+	const opening = /[ \t]*<partial-control[ \t]*>/giy;
+	const closing = "</partial-control>";
+	let cursor = 0;
+	let fence: { marker: string; length: number } | undefined;
+	// Publications precede final sections and occupy standalone blocks. Progress
+	// prose may separate them; inline/fenced examples and final content are data.
+	while (cursor < raw.length) {
+		const newline = raw.indexOf("\n", cursor);
+		const lineEnd = newline < 0 ? raw.length : newline;
+		const line = raw.slice(cursor, lineEnd).replace(/\r$/, "");
+		const fenceMarker = line.match(/^[ \t]*(`{3,}|~{3,})(.*)$/);
+		if (fence) {
+			if (fenceMarker?.[1]?.[0] === fence.marker &&
+				fenceMarker[1].length >= fence.length && !fenceMarker[2]?.trim()) {
+				fence = undefined;
+			}
+			cursor = lineEnd + 1;
+			continue;
+		}
+		if (fenceMarker?.[1]) {
+			fence = { marker: fenceMarker[1][0]!, length: fenceMarker[1].length };
+			cursor = lineEnd + 1;
+			continue;
+		}
+		opening.lastIndex = cursor;
+		const match = opening.exec(raw);
+		if (!match) {
+			if (/<(?:control|analysis|refs)>/i.test(line)) break;
+			cursor = lineEnd + 1;
+			continue;
+		}
+		const contentStart = opening.lastIndex;
+		let inString = false;
+		let escaped = false;
+		let closeStart = -1;
+		for (let index = contentStart; index < raw.length; index += 1) {
+			const char = raw[index];
+			if (escaped) {
+				escaped = false;
+				continue;
+			}
+			if (inString && char === "\\") {
+				escaped = true;
+				continue;
+			}
+			if (char === '"') {
+				inString = !inString;
+				continue;
+			}
+			if (
+				!inString && raw[index] === "<" &&
+				raw.slice(index, index + closing.length).toLowerCase() === closing
+			) {
+				closeStart = index;
+				break;
+			}
+		}
+		if (closeStart < 0) break; // An incomplete streaming publication is not ready.
+		const end = closeStart + closing.length;
+		if (!/^[ \t]*(?:\r?\n|$)/.test(raw.slice(end))) break;
 		matches.push({
-			content: match[1] ?? "",
-			start: match.index,
-			end: re.lastIndex,
+			content: raw.slice(contentStart, closeStart),
+			start: cursor,
+			end,
 			index: matches.length,
 		});
+		cursor = end;
 	}
 	return matches;
-}
-
-function partialControlSectionRegExp(): RegExp {
-	return /[ \t]*<partial-control\s*>([\s\S]*?)<\/partial-control>[ \t]*(?:\r?\n)?/gi;
 }
 
 function parsePartialSectionJson(

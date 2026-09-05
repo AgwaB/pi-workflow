@@ -10,6 +10,7 @@ import {
 	type DynamicWorkflowEvent,
 } from "./dynamic-events.js";
 import { nowIso, readRunRecord, writeJsonAtomic } from "./store.js";
+import { observedDynamicNestedWorkflowDepth } from "./dynamic-nested-depth.js";
 import type { CompiledDynamicWorkflowTask } from "./types.js";
 
 export const DYNAMIC_STATE_SCHEMA = "pi-workflow-dynamic-state-v1";
@@ -31,6 +32,9 @@ export interface DynamicBudgetCounters {
 	runningAgents: number;
 	graphMutations: number;
 	helperRuns: number;
+	/** Local launch depth (0/1) on hot projections; full historical descendant
+	 * depth only with readOrRebuildDynamicState({ observeDescendants: true }).
+	 * Display-only in either form, never a consumable or execution authority. */
 	nestedWorkflowDepth: number;
 	runtimeMs: number;
 }
@@ -128,6 +132,7 @@ export async function readDynamicState(
 export async function readOrRebuildDynamicState(
 	cwd: string,
 	runId: string,
+	options: { observeDescendants?: boolean } = {},
 ): Promise<DynamicWorkflowState> {
 	try {
 		const state = await readDynamicState(cwd, runId);
@@ -143,13 +148,29 @@ export async function readOrRebuildDynamicState(
 			);
 			if (projectedSeq === latestEventSeq) {
 				await applyDynamicTaskLifecycle(cwd, runId, state);
+				if (options.observeDescendants) await observeDescendantDepthForDisplay(cwd, runId, state);
 				return state;
 			}
 		}
 	} catch {
 		// Corrupt or stale state is a projection cache; rebuild from the append-only log.
 	}
-	return rebuildDynamicState(cwd, runId);
+	const state = await rebuildDynamicState(cwd, runId);
+	if (options.observeDescendants) await observeDescendantDepthForDisplay(cwd, runId, state);
+	return state;
+}
+
+// Explicit, potentially expensive display boundary. Never called at controller
+// activation or persisted back into the hot projection. The local ledger already
+// supplies migration from legacy cumulative sibling counts without descendant IO.
+async function observeDescendantDepthForDisplay(
+	cwd: string, runId: string, state: DynamicWorkflowState,
+): Promise<void> {
+	for (const controller of Object.values(state.controllers)) {
+		controller.counters.nestedWorkflowDepth = await observedDynamicNestedWorkflowDepth(
+			cwd, runId, controller.nestedWorkflowRunIds,
+		);
+	}
 }
 
 export async function rebuildDynamicState(
@@ -427,7 +448,9 @@ function applyDynamicEvent(
 		const runId = optionalString(event.payload.runId);
 		if (runId && !controller.nestedWorkflowRunIds.includes(runId)) {
 			controller.nestedWorkflowRunIds.push(runId);
-			controller.counters.nestedWorkflowDepth += 1;
+			controller.counters.nestedWorkflowDepth = Math.max(
+				controller.counters.nestedWorkflowDepth, 1,
+			);
 		}
 		if (
 			runId &&
@@ -548,6 +571,9 @@ async function applyDynamicTaskLifecycle(
 	const run = await readRunRecord(cwd, runId).catch(() => undefined);
 	if (!run) return;
 	for (const controller of Object.values(state.controllers)) {
+		// Legacy caches counted siblings. Local reservations suffice for hot state;
+		// full historical observation belongs only at the explicit display boundary.
+		controller.counters.nestedWorkflowDepth = controller.nestedWorkflowRunIds.length > 0 ? 1 : 0;
 		for (const branch of controller.branches) {
 			if (!branch.specId) continue;
 			const task = run.tasks.find(
@@ -660,6 +686,7 @@ function mergeCounters(counters: DynamicBudgetCounters, value: unknown): void {
 	for (const key of Object.keys(counters) as Array<
 		keyof DynamicBudgetCounters
 	>) {
+		if (key === "nestedWorkflowDepth") continue;
 		const amount = value[key];
 		if (typeof amount === "number" && Number.isFinite(amount)) {
 			counters[key] += amount;

@@ -51,7 +51,7 @@ export function buildFanoutBranchPlanRequests(
 		if (action.type === "add_work_item") {
 			workItemToSpecId.set(
 				action.workItemId,
-				ctx.graph.generatedTaskSpecId?.(action.workItemId) ?? action.workItemId,
+				ctx.graph.generatedTaskSpecId?.(sanitizeTaskId(action.workItemId)) ?? sanitizeTaskId(action.workItemId),
 			);
 		}
 	}

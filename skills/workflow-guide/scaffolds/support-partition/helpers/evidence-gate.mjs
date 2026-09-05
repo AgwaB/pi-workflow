@@ -11,11 +11,10 @@
 //
 // Read-only: it only reads files under the workflow cwd; it never writes.
 
-import { readFile } from "node:fs/promises";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { resolve } from "node:path";
+import { readLocalText, localRange } from "./local-evidence-reader.mjs";
 
 const DEFAULT_BUCKETS = ["keep", "weaken"];
-const MAX_FILE_BYTES = 4 * 1024 * 1024;
 
 function asObject(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
@@ -28,7 +27,6 @@ function asArray(value) {
 function quotes(value) {
   return asArray(value)
     .map((item) => (typeof item === "string" ? item : typeof item?.quote === "string" ? item.quote : ""))
-    .map((text) => text.replace(/\r\n/g, "\n"))
     .filter((text) => text.trim() !== "");
 }
 
@@ -38,46 +36,25 @@ function locations(value) {
     .filter((item) => item && typeof item.file === "string" && item.file.trim() !== "");
 }
 
-function insideRoot(root, file) {
-  const target = resolve(root, file);
-  const rel = relative(root, target);
-  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel) && !rel.split(sep).includes("..")
-    ? target
-    : undefined;
-}
-
-async function readRange(cache, root, location) {
-  const target = insideRoot(root, location.file);
-  if (!target) return { status: "unreadable", reason: "path escapes workflow cwd" };
-  let text = cache.get(target);
-  if (text === undefined) {
-    try {
-      const raw = await readFile(target);
-      if (raw.byteLength > MAX_FILE_BYTES) return { status: "unreadable", reason: "file too large" };
-      text = raw.toString("utf8").replace(/\r\n/g, "\n");
-      cache.set(target, text);
-    } catch (error) {
-      return { status: "unreadable", reason: error?.code ?? "read failed" };
-    }
+async function readRange(root, location, signal) {
+  try {
+    const text = await readLocalText(root, location.file, signal);
+    const start = location.line ?? 1;
+    const end = location.lineEnd ?? (location.line === undefined ? text.split("\n").length : start);
+    return { status: "ok", text: localRange(text, start, end) };
+  } catch (error) {
+    signal?.throwIfAborted();
+    return { status: "unreadable", reason: error?.code ?? error.message };
   }
-  const lines = text.split("\n");
-  const start = Number.isInteger(location.line) && location.line > 0 ? location.line : 1;
-  const end = Number.isInteger(location.lineEnd) && location.lineEnd >= start ? location.lineEnd : Number.isInteger(location.line) ? start : lines.length;
-  if (start > lines.length) return { status: "unreadable", reason: `line ${start} beyond end of file (${lines.length} lines)` };
-  return { status: "ok", text: lines.slice(start - 1, Math.min(end, lines.length)).join("\n") };
 }
 
-function normalizeForFallback(text) {
-  return text.split("\n").map((line) => line.trimEnd()).join("\n").trim();
-}
-
-async function gateFinding(finding, root, cache, options) {
+async function gateFinding(finding, root, signal) {
   const cited = locations(finding.locations);
   const quoteList = quotes(finding.evidenceQuotes);
   const rows = [];
   const ranges = [];
   for (const location of cited) {
-    const range = await readRange(cache, root, location);
+    const range = await readRange(root, location, signal);
     ranges.push({ location, range });
   }
   for (const quote of quoteList) {
@@ -94,12 +71,6 @@ async function gateFinding(finding, root, cache, options) {
         matchedIn = location;
         break;
       }
-      if (options.allowTrailingWhitespaceDrift && normalizeForFallback(range.text).includes(normalizeForFallback(quote))) {
-        status = "verified";
-        matchedIn = location;
-        reason = "matched after trailing-whitespace normalization";
-        break;
-      }
     }
     if (status === "mismatch" && ranges.length > 0 && ranges.every((entry) => entry.range.status !== "ok")) status = "unreadable";
     if (ranges.length === 0) {
@@ -107,6 +78,11 @@ async function gateFinding(finding, root, cache, options) {
       reason = "finding cites no locations";
     }
     rows.push({ quote, status, ...(matchedIn ? { file: matchedIn.file, line: matchedIn.line ?? null, lineEnd: matchedIn.lineEnd ?? null } : {}), ...(reason ? { reason } : {}) });
+  }
+  for (const { location, range } of ranges) {
+    if (range.status !== "ok" && !rows.some(row => row.status === "unreadable" && row.reason?.includes(`${location.file}:`))) {
+      rows.push({ quote: "", file: location.file, status: "unreadable", reason: range.reason });
+    }
   }
   if (quoteList.length === 0) rows.push({ quote: "", status: "unreadable", reason: "finding has no evidenceQuotes" });
   return rows;
@@ -116,8 +92,8 @@ export default async function helper({ sources, options = {}, context = {} }) {
   const partitionStage = String(options.partitionStage ?? "partition-verdicts");
   const gatedBuckets = asArray(options.buckets).length > 0 ? asArray(options.buckets).map(String) : DEFAULT_BUCKETS;
   const root = resolve(String(options.root ?? context.cwd ?? process.cwd()));
-  const upstream = asObject(sources?.[partitionStage]) ?? asObject(Object.values(asObject(sources) ?? {}).find((entry) => asObject(entry)?.value?.partitions));
-  const value = asObject(upstream?.value);
+  const matches = Object.entries(asObject(sources) ?? {}).filter(([source]) => source === partitionStage || source.startsWith(`${partitionStage}.`));
+  const value = matches.length === 1 ? asObject(asObject(matches[0][1])?.value) : undefined;
   if (!value) {
     return {
       schema: "helper-output-v1",
@@ -134,7 +110,6 @@ export default async function helper({ sources, options = {}, context = {} }) {
 
   const partitions = { keep: [], weaken: [], drop: [], needsHuman: [] };
   for (const bucket of Object.keys(partitions)) partitions[bucket] = asArray(value.partitions?.[bucket]).map((item) => ({ ...item }));
-  const cache = new Map();
   const gateRows = [];
   const demoted = [];
   let verified = 0;
@@ -146,7 +121,7 @@ export default async function helper({ sources, options = {}, context = {} }) {
     const kept = [];
     for (const finding of partitions[bucket]) {
       if (context.signal?.aborted) throw new Error("evidence gate aborted");
-      const rows = await gateFinding(finding, root, cache, options);
+      const rows = await gateFinding(finding, root, context.signal);
       const findingId = String(finding.findingId ?? finding.id ?? "");
       for (const row of rows) {
         gateRows.push({ findingId, bucket, ...row });
@@ -180,7 +155,15 @@ export default async function helper({ sources, options = {}, context = {} }) {
     verdictsReceived: Number(summary.verdictsReceived ?? 0),
     candidates: Number(summary.candidates ?? 0),
   };
-  const integrity = mismatch === 0 && unreadable === 0 ? (value.partitionSummary?.integrity ?? "complete") : "partial";
+  const identity = asObject(value.identityIntegrity);
+  const plannedIds = asArray(identity?.plannedIds);
+  const verifiedIds = asArray(identity?.verifiedIds);
+  const outputIds = Object.values(partitions).flat().map((row) => row.findingId);
+  const sameIds = (ids) => ids.length === plannedIds.length && new Set(ids).size === ids.length && ids.every((id) => typeof id === "string" && plannedIds.includes(id));
+  const identityComplete = identity?.complete === true && Array.isArray(identity.issues) && identity.issues.length === 0 &&
+    new Set(plannedIds).size === plannedIds.length && sameIds(verifiedIds) && sameIds(outputIds) &&
+    summary.candidates === plannedIds.length && summary.verdictsReceived === verifiedIds.length && summary.integrity === "complete";
+  const integrity = mismatch === 0 && unreadable === 0 && identityComplete ? "complete" : "partial";
   const normalizationNotes = [
     ...asArray(value.normalizationNotes).map(String),
     `evidence gate: ${verified} verified, ${mismatch} mismatch, ${unreadable} unreadable${demoted.length ? `; demoted ${demoted.join(", ")}` : ""}`,

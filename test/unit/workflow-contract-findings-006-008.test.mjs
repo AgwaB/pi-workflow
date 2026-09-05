@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 const load = (relative) => import(new URL(`../${relative}`, import.meta.url));
 const specReview = (await import(new URL("../../workflows/spec-review/helpers/spec-review-pipeline.mjs", import.meta.url))).default;
 const impactRender = (await import(new URL("../../workflows/impact-review/helpers/render-impact-report.mjs", import.meta.url))).default;
@@ -29,7 +32,10 @@ const statuses = [
   { source: "devil-advocate.F-001", specId: "devil-advocate.F-001", taskId: "verifier-task", stageId: "devil-advocate", itemIdentity: "F-001", placeholderSpecId: "devil-advocate.item", status: "completed" }
 ];
 
-test("spec-review batch fallback IDs preserve end-to-end candidate coverage", async () => {
+test("spec-review batch fallback IDs preserve end-to-end candidate coverage", async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), "spec-batch-bytes-"));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  await writeFile(join(cwd, "source.ts"), "The gap is present.\n");
   const plan = await specReview({
     sources: { "candidate-findings": { candidateFindings: [{ title: "Fallback candidate", severity: "high" }] } },
     options: { mode: "batch-candidates", maxBatchSize: 2 }
@@ -43,10 +49,10 @@ test("spec-review batch fallback IDs preserve end-to-end candidate coverage", as
       "verification-batches": plan,
       "verify-findings": {
         schema: "spec-review-verify-findings-batch-v1",
-        results: [{ id: "candidate-001", title: "Fallback candidate", verdict: "KEEP", severity: "high", evidence: [], counterEvidence: [], finalClaim: "The gap is present.", recommendedAction: "Fix it." }]
+        results: [{ id: "candidate-001", title: "Fallback candidate", verdict: "KEEP", severity: "high", evidence: [{ file: "source.ts", lineStart: 1, lineEnd: 1, quote: "The gap is present." }], counterEvidence: [], finalClaim: "The gap is present.", recommendedAction: "Fix it." }]
       }
     },
-    context: { sourceStatuses: [{ source: "verify-findings", specId: "verify-findings.vbatch-001", taskId: "batch-task-001", stageId: "verify-findings", itemIdentity: "vbatch-001", placeholderSpecId: "verify-findings.item", status: "completed" }] },
+    context: { cwd, sourceStatuses: [{ source: "verify-findings", specId: "verify-findings.vbatch-001", taskId: "batch-task-001", stageId: "verify-findings", itemIdentity: "vbatch-001", placeholderSpecId: "verify-findings.item", status: "completed" }] },
     options: { mode: "partition" }
   });
   assert.equal(result.verifierCoverage.candidateCount, 1);

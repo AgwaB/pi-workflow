@@ -2,7 +2,9 @@ import { randomBytes } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
-import { link, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { link, lstat, mkdir, open, rename, unlink, writeFile } from "node:fs/promises";
+import { assertSafeRawTaskDirectory, checkRawLinks, establishRawOwner, matchesRawDescriptor, rawDigest, rawFileVersion, recheckRawOwner, sameInode, sameRawVersion, type RawIntegrity, type RawOwner } from "./workflow-raw-contract.js";
 import { dirname, join, resolve } from "node:path";
 
 import { nonPublicIpReason } from "./workflow-network-policy.js";
@@ -102,6 +104,8 @@ export interface ParsedWorkflowOutput {
 }
 
 export interface ParseWorkflowOutputOptions {
+	/** Declared streaming paths; [] disallows publications. Undefined supports standalone parser use. */
+	partialPaths?: readonly string[];
 	analysisRequired?: boolean;
 	refsRequired?: boolean;
 	refsMinItems?: number;
@@ -138,6 +142,8 @@ export interface WorkflowTaskArtifactBundleOptions
 	extends ParseWorkflowOutputOptions {
 	taskDir: string;
 	rawOutput: string;
+	/** Host task updated by its normal run-record commit. Without this, raw is independent. */
+	rawIntegrityHost?: { rawArtifactIntegrity?: RawIntegrity };
 	attempt?: number;
 	startedAt?: string;
 	completedAt?: string;
@@ -162,6 +168,8 @@ export interface WorkflowTaskResultEnvelope {
 	status: "completed" | "failed";
 	artifacts: Record<string, string>;
 	controlDigest?: string;
+	/** Host-written corruption detection; not cryptographic provenance. */
+	rawIntegrity?: RawIntegrity;
 	startedAt?: string;
 	completedAt: string;
 	exitCode: number;
@@ -242,7 +250,9 @@ export function parseWorkflowOutput(
 	raw: string,
 	options: ParseWorkflowOutputOptions = {},
 ): ParsedWorkflowOutput {
-	const protocolRaw = stripWorkflowPartialOutputSections(raw);
+	const protocolRaw = stripWorkflowPartialOutputSections(raw, {
+		allowedPaths: options.partialPaths,
+	});
 	const issues: WorkflowOutputIssue[] = [];
 	const repairs: WorkflowOutputRepair[] = [];
 	const requirements = sectionRequirements(options);
@@ -353,17 +363,21 @@ export async function writeValidatedWorkflowTaskArtifactBundle(
 
 export function buildWorkflowOutputRetryInstructions(
 	issues: readonly WorkflowOutputIssue[],
+	options: ParseWorkflowOutputOptions = {},
 ): string {
+	const requirements = sectionRequirements(options);
 	const issueLines = issues.map((issue) => {
 		const where = issue.path ?? issue.section;
 		return `- ${where ? `${where}: ` : ""}${issue.message}`;
 	});
 	return [
 		"Validation error: workflow output protocol was invalid.",
-		"Return exactly these sections, in this order, with no prose outside the tags:",
+		requirements.analysisRequired && requirements.refsRequired
+			? "Return exactly these sections, in this order, with no prose outside the tags:"
+			: "Return these sections in this order, at most once each, with no prose outside the tags. Optional sections may be omitted:",
 		"<control>{...}</control>",
-		"<analysis>...</analysis>",
-		"<refs>[...]</refs>",
+		requirements.analysisRequired ? "<analysis>...</analysis>" : "<analysis>...</analysis> (optional)",
+		requirements.refsRequired ? "<refs>[...]</refs>" : "<refs>[...]</refs> (optional)",
 		...retryRepairGuidance(issues),
 		"Issues:",
 		...issueLines,
@@ -447,7 +461,7 @@ function scanSectionLayout(
 	raw: string,
 	requirements: SectionRequirements,
 ): SectionLayoutScan {
-	const observations = collectSectionObservations(raw, requirements);
+	const observations = collectSectionObservations(raw);
 	const sections = observations.flatMap((observation): SectionMatch[] => {
 		if (observation.end === undefined) return [];
 		return [
@@ -461,12 +475,14 @@ function scanSectionLayout(
 			},
 		];
 	});
-	const expected = requiredSectionOrder(requirements);
+	const expected = CANONICAL_SECTION_ORDER.filter((name) =>
+		sectionRequired(name, requirements) || sections.some((section) => section.name === name),
+	);
 	const complete =
 		sections.length === expected.length &&
 		sections.every((section, index) => section.name === expected[index]);
 	const { duplicateNames, duplicateCounts, hasExtraProtocolBlocks } =
-		scanStructuralSectionOpenings(raw, observations, requirements);
+		scanStructuralSectionOpenings(raw, observations);
 	return {
 		sections,
 		observations,
@@ -482,11 +498,10 @@ function scanSectionLayout(
 
 function collectSectionObservations(
 	raw: string,
-	requirements: SectionRequirements,
 ): SectionObservation[] {
 	const observations: SectionObservation[] = [];
 	let cursor = 0;
-	const expected = requiredSectionOrder(requirements);
+	const expected = CANONICAL_SECTION_ORDER;
 	for (const [index, name] of expected.entries()) {
 		const openTag = `<${name}>`;
 		const closeTag = `</${name}>`;
@@ -495,6 +510,12 @@ function collectSectionObservations(
 			: undefined;
 		const openStart = raw.indexOf(openTag, cursor);
 		if (openStart < 0) continue;
+		// An absent optional section must not be discovered inside a later
+		// section's JSON strings (for example a literal <analysis> in refs).
+		if (expected.slice(index + 1).some((later) => {
+			const laterStart = raw.indexOf(`<${later}>`, cursor);
+			return laterStart >= 0 && laterStart < openStart;
+		})) continue;
 		const contentStart = openStart + openTag.length;
 		const closeStart = findSectionClose(raw, {
 			name,
@@ -574,7 +595,6 @@ function skipWhitespace(raw: string, index: number): number {
 function scanStructuralSectionOpenings(
 	raw: string,
 	observations: readonly SectionObservation[],
-	requirements: SectionRequirements,
 ): {
 	duplicateNames: ReadonlySet<WorkflowOutputSectionName>;
 	duplicateCounts: ReadonlyMap<WorkflowOutputSectionName, number>;
@@ -612,8 +632,9 @@ function scanStructuralSectionOpenings(
 		const count = openingCounts.get(name) ?? 0;
 		if (count > 1) duplicateNames.add(name);
 		if (duplicateNames.has(name)) duplicateCounts.set(name, Math.max(count, 2));
-		const allowed = sectionRequired(name, requirements) ? 1 : 0;
-		if (count > allowed) hasExtraProtocolBlocks = true;
+		if (count > observations.filter((observation) => observation.name === name).length) {
+			hasExtraProtocolBlocks = true;
+		}
 	}
 	return { duplicateNames, duplicateCounts, hasExtraProtocolBlocks };
 }
@@ -857,7 +878,7 @@ function validateSectionLayout(
 	requirements: SectionRequirements,
 ): void {
 	validateSectionCounts(layout, issues, requirements);
-	validateCanonicalOrder(layout.sections, issues, requirements);
+	validateCanonicalOrder(layout.sections, issues);
 	validateNoOutsideText(layout.outsideRanges, issues);
 }
 
@@ -867,6 +888,10 @@ function parseSanitizedWorkflowOutput(
 ): ParsedWorkflowOutput | undefined {
 	const requirements = sectionRequirements(options);
 	const layout = scanSectionLayout(raw, requirements);
+	// A rejected/incomplete publication must not be discarded as outside prose.
+	if (layout.outsideRanges.some((range) =>
+		/(?:^|\n)[ \t]*<partial-control\b/i.test(raw.slice(range.start, range.end)),
+	)) return undefined;
 	if (layout.duplicateNames.size > 0 || layout.hasExtraProtocolBlocks) {
 		return undefined;
 	}
@@ -903,7 +928,7 @@ function repairMissingTailSections(
 		SECTION_CONTROL,
 		raw.slice(control.contentStart, control.contentEnd).trim(),
 	);
-	if (requirements.analysisRequired) {
+	if (requirements.analysisRequired || observations.has(SECTION_ANALYSIS)) {
 		const analysis = observations.get(SECTION_ANALYSIS);
 		if (!analysis) return undefined;
 		const content = raw
@@ -912,8 +937,10 @@ function repairMissingTailSections(
 		if (content.length === 0) return undefined;
 		contents.set(SECTION_ANALYSIS, content);
 	}
-	if (requirements.refsRequired) {
+	if (requirements.refsRequired || observations.has(SECTION_REFS)) {
 		const refs = observations.get(SECTION_REFS);
+		// Optional supplied JSON must validate, not disappear during tail repair.
+		if (!requirements.refsRequired && refs?.end === undefined) return undefined;
 		contents.set(
 			SECTION_REFS,
 			refs?.end === undefined
@@ -921,7 +948,7 @@ function repairMissingTailSections(
 				: raw.slice(refs.contentStart, refs.contentEnd).trim(),
 		);
 	}
-	return requiredSectionOrder(requirements)
+	return CANONICAL_SECTION_ORDER.filter((name) => contents.has(name))
 		.flatMap((name) => [
 			`<${name}>`,
 			contents.get(name) ?? "",
@@ -952,11 +979,10 @@ function validateSectionCounts(
 function validateCanonicalOrder(
 	sections: readonly SectionMatch[],
 	issues: WorkflowOutputIssue[],
-	requirements: SectionRequirements,
 ): void {
 	if (sections.length === 0) return;
 	const actual = sections.map((section) => section.name);
-	const expected = requiredSectionOrder(requirements);
+	const expected = CANONICAL_SECTION_ORDER.filter((name) => actual.includes(name));
 	if (sameArray(actual, expected)) return;
 	issues.push({
 		code: "unexpected_text",
@@ -1794,7 +1820,7 @@ function parseAnalysisSection(
 	issues: WorkflowOutputIssue[],
 	requirements: SectionRequirements,
 ): string | undefined {
-	if (text === undefined) return undefined;
+	if (text === undefined) return requirements.analysisRequired ? undefined : "";
 	if (requirements.analysisRequired && text.trim().length === 0) {
 		issues.push({
 			code: "empty_section",
@@ -2190,7 +2216,7 @@ async function checkRefUrlAvailability(
 		let current = href;
 		try {
 			for (let redirect = 0; redirect <= REFS_URL_VALIDATION_MAX_REDIRECTS; redirect += 1) {
-				const checked = await validatePublicRefUrl(current);
+				const checked = await validatePublicRefUrl(current, timeoutMs);
 				const response = await requestRefUrl(checked, method, headers, timeoutMs);
 				if (response.status >= 300 && response.status < 400) {
 					if (!response.location)
@@ -2268,7 +2294,7 @@ type RefProbeResponse = {
 	tooLarge: boolean;
 };
 
-async function validatePublicRefUrl(href: string): Promise<string> {
+async function validatePublicRefUrl(href: string, timeoutMs: number): Promise<string> {
 	let parsed: URL;
 	try {
 		parsed = new URL(href);
@@ -2279,7 +2305,17 @@ async function validatePublicRefUrl(href: string): Promise<string> {
 		throw new Error("unsupported URL scheme");
 	if (parsed.username || parsed.password || [...parsed.searchParams.keys()].some(isSensitiveWorkflowQueryKey))
 		throw new Error("sensitive URL blocked");
-	const addresses = await lookup(parsed.hostname, { all: true, verbatim: true });
+	// Separate per-preflight bound, just like the per-request transport bound.
+	// HEAD, GET and each redirect may each consume both; not a batch deadline.
+	// OS DNS may be uncancellable, but a late result never resumes this probe.
+	const pending = lookup(parsed.hostname, { all: true, verbatim: true });
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const addresses = await Promise.race([
+		pending,
+		new Promise<Awaited<typeof pending>>((_, reject) => {
+			timer = setTimeout(() => reject(new Error("DNS resolution timeout")), Math.max(1, timeoutMs));
+		}),
+	]).finally(() => { if (timer) clearTimeout(timer); });
 	if (addresses.length === 0) throw new Error("DNS resolution failed");
 	for (const address of addresses) {
 		if (nonPublicIpReason(address.address)) throw new Error("private host blocked");
@@ -2343,8 +2379,8 @@ async function requestRefUrl(
 					return;
 				}
 				if (method === "HEAD" || (status >= 300 && status < 400)) {
-					res.resume();
 					finish({ status, ...(location ? { location } : {}), tooLarge: false });
+					res.destroy();
 					return;
 				}
 				let bytes = 0;
@@ -2357,11 +2393,20 @@ async function requestRefUrl(
 					}
 				});
 				res.on("end", () => finish({ status, ...(location ? { location } : {}), tooLarge }));
-				res.on("close", () => { if (tooLarge) finish({ status, tooLarge }); });
+				res.on("error", (error: Error) => { if (!tooLarge) fail(error); });
+				res.on("aborted", () => { if (!tooLarge) fail(new Error("response aborted")); });
+				res.on("close", () => {
+					if (tooLarge) finish({ status, tooLarge });
+					else fail(new Error("response aborted"));
+				});
 			},
 		);
 		req.setTimeout(Math.max(1, timeoutMs), () => req.destroy(new Error("request timeout")));
-		timer = setTimeout(() => req.destroy(new Error("request timeout")), Math.max(1, timeoutMs));
+		timer = setTimeout(() => {
+			const error = new Error("request timeout");
+			fail(error);
+			req.destroy(error);
+		}, Math.max(1, timeoutMs));
 		req.on("error", fail);
 		req.end();
 	});
@@ -2482,10 +2527,16 @@ async function writeValidWorkflowOutputBundle(
 	parsed: ValidParsedWorkflowOutput,
 	options: WorkflowTaskArtifactBundleOptions,
 ): Promise<Extract<WorkflowArtifactBundleWriteResult, { valid: true }>> {
+	// Explicit host publication must never downgrade an establishment failure to
+	// the intentionally unowned low-level writer path (or clear an old anchor).
+	const owner = options.rawIntegrityHost ? await establishRawOwner(taskDir) : undefined;
+	if (!owner) await assertSafeRawTaskDirectory(taskDir);
 	const files = artifactFileMap(taskDir, options);
-	await writeSidecars(files, parsed, options);
+	const rawIntegrity = await writeSidecars(files, parsed, options, owner);
 	const result = validResultEnvelope(files, parsed, options);
+	if (rawIntegrity) result.rawIntegrity = rawIntegrity;
 	await writeJsonAtomic(files.result!, result);
+	if (options.rawIntegrityHost) options.rawIntegrityHost.rawArtifactIntegrity = rawIntegrity;
 	return { valid: true, parsed, result, files };
 }
 
@@ -2511,39 +2562,67 @@ async function writeSidecars(
 	files: Record<string, string>,
 	parsed: ValidParsedWorkflowOutput,
 	options: WorkflowTaskArtifactBundleOptions,
-): Promise<void> {
-	await Promise.all([
+	owner?: RawOwner,
+): Promise<RawIntegrity | undefined> {
+	// A failed sibling must not leave other writes running after publication settles.
+	const writes = await Promise.allSettled([
 		writeJsonAtomic(files.control!, parsed.control),
 		writeTextAtomic(files.analysis!, ensureTrailingNewline(parsed.analysis)),
 		writeJsonAtomic(files.refs!, parsed.refs),
-		writeRawArtifact(files.raw!, options.rawOutput),
+		writeRawArtifact(files.raw!, options.rawOutput, owner),
 		writeOptionalText(files.prompt, options.prompt),
 		writeOptionalText(files["system-prompt"], options.systemPrompt),
 		writeOptionalText(files.stderr, options.stderr),
 	]);
+	for (const result of writes) {
+		if (result.status === "rejected") throw result.reason;
+	}
+	const raw = writes[3];
+	return raw.status === "fulfilled" ? raw.value : undefined;
 }
 
-async function writeRawArtifact(file: string, value: string): Promise<void> {
-	const outputFile = join(dirname(file), "output.log");
+async function writeRawArtifact(file: string, value: string, owner?: RawOwner): Promise<RawIntegrity | undefined> {
 	const expected = Buffer.from(value, "utf8");
-	try {
-		const output = await stat(outputFile);
-		if (output.isFile() && output.size === expected.byteLength) {
-			const actual = await readFile(outputFile);
-			if (Buffer.compare(actual, expected) === 0) {
-				await taskArtifactLinkForTests?.(outputFile, file);
-				await unlink(file).catch((error: unknown) => {
-					if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-				});
-				await link(outputFile, file);
-				await emitWorkflowOutputArtifactWriteHook({ phase: "after", file });
-				return;
-			}
-		}
-	} catch {
-		// A failed comparison or hard-link attempt falls back to the normal atomic write.
+	const integrity: RawIntegrity | undefined = owner ? { version: 1, owner: owner.identity, bytes: expected.length, sha256: rawDigest(expected), ...(owner.terminal && owner.attempt ? { terminal: owner.terminal, terminalVersion: rawFileVersion(owner.metadata.get(join(dirname(owner.attempt), "result.json"))!) } : {}) } : undefined;
+	if (owner) {
+		const temp = join(dirname(file), `.raw-${randomBytes(12).toString("hex")}.tmp`);
+		try {
+			const before = await lstat(owner.output);
+			if (!before.isFile() || before.size !== expected.length) throw new Error("raw source mismatch");
+			await checkRawLinks(owner, before, false);
+			const source = await open(owner.output, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+			try {
+				// Content is verified on the linked descriptor below, not in a
+				// redundant compare-before-link pass vulnerable to source mutation.
+				if (!sameRawVersion(before, await source.stat())) throw new Error("raw source changed");
+				await taskArtifactLinkForTests?.(owner.output, file);
+				await emitWorkflowOutputArtifactWriteHook({ phase: "before", file });
+				await link(owner.output, temp);
+				const linked = await open(temp, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+				try {
+					const info = await linked.stat();
+					if (!sameInode(before, info) || before.size !== info.size || before.mtimeMs !== info.mtimeMs || !sameRawVersion(info, await linked.stat()) || !sameRawVersion(info, await lstat(owner.output))) throw new Error("raw linked source changed");
+					await recheckRawOwner(owner);
+					await rename(temp, file);
+					await emitWorkflowOutputArtifactWriteHook({ phase: "after", file });
+					const after = await linked.stat();
+					await checkRawLinks(owner, after);
+					// rename may change ctime itself. Verify authoritative bytes after
+					// publication as well as inode/link/size and write timestamps.
+					if (!sameInode(info, after) || info.size !== after.size || info.nlink !== after.nlink || info.mtimeMs !== after.mtimeMs || !await matchesRawDescriptor(linked, expected) || !sameRawVersion(after, await linked.stat())) throw new Error("raw publication changed");
+				} finally { await linked.close(); }
+			} finally { await source.close(); }
+			await recheckRawOwner(owner);
+			return integrity;
+		} catch {
+			// Source/link failures may use authoritative bytes, but owner/root
+			// substitution must abort rather than write through a replacement path.
+			await recheckRawOwner(owner);
+		} finally { await unlink(temp).catch(() => {}); }
 	}
 	await writeTextAtomic(file, value);
+	if (owner) await recheckRawOwner(owner);
+	return integrity;
 }
 
 async function writeOptionalText(
@@ -2643,14 +2722,6 @@ function sectionRequired(
 	if (name === SECTION_ANALYSIS) return requirements.analysisRequired;
 	if (name === SECTION_REFS) return requirements.refsRequired;
 	return true;
-}
-
-function requiredSectionOrder(
-	requirements: SectionRequirements,
-): WorkflowOutputSectionName[] {
-	return CANONICAL_SECTION_ORDER.filter((name) =>
-		sectionRequired(name, requirements),
-	);
 }
 
 function missingSectionIssue(

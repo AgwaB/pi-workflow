@@ -2504,7 +2504,11 @@ test("tool metadata cannot downgrade known mutating tools", async () => {
 	}
 });
 
-test("spec-review partition helper joins verifier results and flags missing coverage", async () => {
+test("spec-review partition helper joins verifier results and flags missing coverage", async (t) => {
+	const cwd = makeProject();
+	t.after(() => rmSync(cwd, { recursive: true, force: true }));
+	mkdirSync(join(cwd, "src"), { recursive: true });
+	writeFileSync(join(cwd, "src/a.ts"), "a\n");
 	const helper = (
 		await import(
 			pathToFileURL(
@@ -2551,13 +2555,14 @@ test("spec-review partition helper joins verifier results and flags missing cove
 				id: "FINDING-001",
 				verdict: "KEEP",
 				severity: "high",
-				evidence: [{ file: "src/a.ts", quote: "a", relevance: "r" }],
+				evidence: [{ file: "src/a.ts", lineStart: 1, lineEnd: 1, quote: "a", relevance: "r" }],
 				finalClaim: "Kept final claim",
 				recommendedAction: "Fix it",
 			},
 			"verify-findings.finding-002": {
 				id: "FINDING-002",
 				verdict: "DROP",
+				counterEvidence: [{ file: "src/a.ts", lineStart: 1, lineEnd: 1, quote: "a" }],
 				finalClaim: "Not supported",
 			},
 			"verify-findings.orphan": {
@@ -2567,7 +2572,7 @@ test("spec-review partition helper joins verifier results and flags missing cove
 		},
 		options: { mode: "partition" },
 		context: {
-			cwd: process.cwd(),
+			cwd,
 			specPath: "workflows/spec-review/spec.json",
 			sourceStatuses: [
 				{ source: "candidate-findings", specId: "candidate-findings.main", stageId: "candidate-findings", taskId: "task-candidates", status: "completed" },
@@ -2890,6 +2895,8 @@ test("bundled workflows compile warning-free and deep-review leaves reviewer fan
 test("bundled spec-review workflow materializes verifier and partitions verified findings", async () => {
 	const cwd = makeProject();
 	try {
+		mkdirSync(join(cwd, "src"), { recursive: true });
+		writeFileSync(join(cwd, "src/example.ts"), "missing\n");
 		writeAgent(cwd, "scout", "read, grep, find, ls");
 		captureSubagentPrompts([]);
 		const specPath = join(
@@ -2961,7 +2968,7 @@ test("bundled spec-review workflow materializes verifier and partitions verified
 				verdict: "KEEP",
 				severity: "medium",
 				evidence: [
-					{ file: "src/example.ts", quote: "missing", relevance: "gap" },
+					{ file: "src/example.ts", lineStart: 1, lineEnd: 1, quote: "missing", relevance: "gap" },
 				],
 				counterEvidence: [],
 				finalClaim: "Implementation misses behavior",

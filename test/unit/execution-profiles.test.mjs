@@ -19,7 +19,9 @@ import {
 import { parseArtifactGraphWorkflowSpec } from "../../.tmp/unit/artifact-graph-schema.js";
 import { loadWorkflowSpec } from "../../.tmp/unit/schema.js";
 import { compiledWorkflowPath, readRunRecord } from "../../.tmp/unit/store.js";
-import { setSubagentApiForTests } from "../../.tmp/unit/subagent-backend.js";
+import { withMaterializedRawHost } from './raw-host-fixture.mjs';
+const setSubagentApiForTests = withMaterializedRawHost(setRawApi);
+import { setSubagentApiForTests as setRawApi } from "../../.tmp/unit/subagent-backend.js";
 
 const UNIT_TEST_ROOT = mkdtempSync(join(tmpdir(), "pi-workflow-tests-"));
 const UNIT_TEST_HOME = mkdtempSync(join(UNIT_TEST_ROOT, "execution-profiles-home-"));

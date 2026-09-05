@@ -66,16 +66,29 @@ export function validateJsonSchemaSubset(
 	return { valid: issues.length === 0, issues };
 }
 
+function ownSchemaKeywords(schema: Record<string, unknown>): Record<string, unknown> {
+	const own: Record<string, unknown> = Object.create(null);
+	for (const key of Object.getOwnPropertyNames(schema)) own[key] = schema[key];
+	return own;
+}
+
 function validateSchemaSubset(
-	schema: unknown,
+	input: unknown,
 	path: string,
 	issues: JsonSchemaIssue[],
 ): void {
-	if (typeof schema === "boolean") return;
-	if (!isRecord(schema)) {
+	if (typeof input === "boolean") return;
+	if (!isRecord(input)) {
 		issues.push({ path, message: "schema must be a boolean or object" });
 		return;
 	}
+	const prototype = Object.getPrototypeOf(input);
+	if (prototype !== Object.prototype && prototype !== null) {
+		issues.push({ path, message: "schema must be a plain or null-prototype object" });
+		return;
+	}
+	// Only own keywords participate, even when Object.prototype is polluted.
+	const schema = ownSchemaKeywords(input);
 	for (const key of Object.keys(schema)) {
 		if (key === "pattern") {
 			issues.push({
@@ -100,7 +113,8 @@ function validateSchemaSubset(
 			});
 		}
 	}
-	if (schema.properties !== undefined) {
+	validateSchemaKeywordValues(schema, path, issues);
+	if (Object.hasOwn(schema, "properties")) {
 		if (!isRecord(schema.properties)) {
 			issues.push({ path: `${path}.properties`, message: "must be an object" });
 		} else {
@@ -110,7 +124,7 @@ function validateSchemaSubset(
 		}
 	}
 	if (
-		schema.additionalProperties !== undefined &&
+		Object.hasOwn(schema, "additionalProperties") &&
 		typeof schema.additionalProperties !== "boolean"
 	) {
 		validateSchemaSubset(
@@ -120,17 +134,23 @@ function validateSchemaSubset(
 		);
 	}
 	if (Array.isArray(schema.items)) {
+		if (schema.items.length === 0) {
+			issues.push({
+				path: `${path}.items`,
+				message: "tuple schemas must not be empty",
+			});
+		}
 		for (const [index, child] of schema.items.entries()) {
 			validateSchemaSubset(child, `${path}.items[${index}]`, issues);
 		}
-	} else if (schema.items !== undefined) {
+	} else if (Object.hasOwn(schema, "items")) {
 		validateSchemaSubset(schema.items, `${path}.items`, issues);
 	}
 	for (const key of ["allOf", "anyOf", "oneOf"] as const) {
 		const children = schema[key];
-		if (children === undefined) continue;
-		if (!Array.isArray(children)) {
-			issues.push({ path: `${path}.${key}`, message: "must be an array" });
+		if (!Object.hasOwn(schema, key)) continue;
+		if (!Array.isArray(children) || children.length === 0) {
+			issues.push({ path: `${path}.${key}`, message: "must be a non-empty array" });
 			continue;
 		}
 		for (const [index, child] of children.entries()) {
@@ -139,10 +159,98 @@ function validateSchemaSubset(
 	}
 }
 
+const JSON_SCHEMA_TYPES = new Set([
+	"array", "boolean", "integer", "null", "number", "object", "string",
+]);
+
+function validateSchemaKeywordValues(
+	schema: Record<string, unknown>,
+	path: string,
+	issues: JsonSchemaIssue[],
+): void {
+	const issue = (key: string, message: string): void => {
+		issues.push({ path: `${path}.${key}`, message });
+	};
+	for (const key of ["$schema", "$id", "title", "description"]) {
+		if (Object.hasOwn(schema, key) && typeof schema[key] !== "string")
+			issue(key, "must be a string");
+	}
+	if (Object.hasOwn(schema, "type")) {
+		const types = Array.isArray(schema.type) ? schema.type : [schema.type];
+		if (
+			types.length === 0 ||
+			types.some(type => typeof type !== "string" || !JSON_SCHEMA_TYPES.has(type)) ||
+			new Set(types).size !== types.length
+		) {
+			issue("type", "must be a supported type name or a non-empty array of unique type names");
+		}
+	}
+	if (Object.hasOwn(schema, "required")) {
+		const required = schema.required;
+		if (
+			!Array.isArray(required) ||
+			required.some(key => typeof key !== "string") ||
+			new Set(required).size !== required.length
+		) {
+			issue("required", "must be an array of unique property name strings");
+		}
+	}
+	if (Object.hasOwn(schema, "const") && !isJsonValue(schema.const))
+		issue("const", "must be a JSON value");
+	if (Object.hasOwn(schema, "enum")) {
+		const values = schema.enum;
+		if (
+			!Array.isArray(values) || values.length === 0 ||
+			values.some(value => !isJsonValue(value))
+		) {
+			issue("enum", "must be a non-empty array of JSON values");
+		} else if (new Set(values.map(jsonFingerprint)).size !== values.length) {
+			issue("enum", "must contain unique JSON values");
+		}
+	}
+	for (const key of ["minItems", "maxItems", "minLength", "maxLength"]) {
+		if (Object.hasOwn(schema, key) && (
+			typeof schema[key] !== "number" ||
+			!Number.isInteger(schema[key]) || schema[key] < 0
+		)) issue(key, "must be a non-negative integer");
+	}
+	for (const key of ["minimum", "maximum"]) {
+		if (Object.hasOwn(schema, key) && (
+			typeof schema[key] !== "number" || !Number.isFinite(schema[key])
+		)) issue(key, "must be a finite number");
+	}
+}
+
+/** Collision-free canonical JSON: sorted object keys, ordered arrays, strict primitives. */
+function jsonFingerprint(value: unknown): string {
+	if (Array.isArray(value)) return `[${value.map(jsonFingerprint).join(",")}]`;
+	if (isRecord(value)) return `{${Object.keys(value).sort().map(key =>
+		`${JSON.stringify(key)}:${jsonFingerprint(value[key])}`,
+	).join(",")}}`;
+	return JSON.stringify(value)!;
+}
+
+function isJsonValue(value: unknown, ancestors = new Set<object>()): boolean {
+	if (value === null || typeof value === "string" || typeof value === "boolean")
+		return true;
+	if (typeof value === "number") return Number.isFinite(value);
+	if (typeof value !== "object" || ancestors.has(value)) return false;
+	const prototype = Object.getPrototypeOf(value);
+	if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null)
+		return false;
+	ancestors.add(value);
+	const children = Array.isArray(value) ? Array.from(value) : Object.values(value);
+	const valid = children.every(child => isJsonValue(child, ancestors));
+	ancestors.delete(value);
+	return valid;
+}
+
 export function validateJsonSchema(
 	value: unknown,
 	schema: JsonSchema,
 ): JsonSchemaValidationResult {
+	const subset = validateJsonSchemaSubset(schema);
+	if (!subset.valid) return subset;
 	const issues: JsonSchemaIssue[] = [];
 	validateAgainstSchema(value, schema, "$", issues);
 	return { valid: issues.length === 0, issues };
@@ -164,6 +272,9 @@ function validateAgainstSchema(
 		return;
 	}
 
+	// Normalize each schema node, not instance/const data. This preserves own
+	// __proto__ property schemas without invoking the legacy prototype setter.
+	schema = ownSchemaKeywords(schema) as JsonSchemaObject;
 	validateConst(value, schema, path, issues);
 	validateEnum(value, schema, path, issues);
 	validateType(value, schema, path, issues);
@@ -250,13 +361,16 @@ function validateStringConstraints(
 	issues: JsonSchemaIssue[],
 ): void {
 	if (typeof value !== "string") return;
-	if (typeof schema.minLength === "number" && value.length < schema.minLength) {
+	const length = schema.minLength !== undefined || schema.maxLength !== undefined
+		? Array.from(value).length
+		: 0;
+	if (typeof schema.minLength === "number" && length < schema.minLength) {
 		issues.push({
 			path,
 			message: `string length must be >= ${schema.minLength}`,
 		});
 	}
-	if (typeof schema.maxLength === "number" && value.length > schema.maxLength) {
+	if (typeof schema.maxLength === "number" && length > schema.maxLength) {
 		issues.push({
 			path,
 			message: `string length must be <= ${schema.maxLength}`,
@@ -380,14 +494,18 @@ function validateCombinators(
 	path: string,
 	issues: JsonSchemaIssue[],
 ): void {
+	// The public entrypoint has already checked the entire schema subset.
+	const matchesChild = (child: JsonSchema): boolean => {
+		const childIssues: JsonSchemaIssue[] = [];
+		validateAgainstSchema(value, child, path, childIssues);
+		return childIssues.length === 0;
+	};
 	if (Array.isArray(schema.allOf)) {
 		for (const child of schema.allOf)
 			validateAgainstSchema(value, child, path, issues);
 	}
 	if (Array.isArray(schema.anyOf)) {
-		const matched = schema.anyOf.some(
-			(child) => validateJsonSchema(value, child).valid,
-		);
+		const matched = schema.anyOf.some(matchesChild);
 		if (!matched)
 			issues.push({
 				path,
@@ -395,9 +513,7 @@ function validateCombinators(
 			});
 	}
 	if (Array.isArray(schema.oneOf)) {
-		const matches = schema.oneOf.filter(
-			(child) => validateJsonSchema(value, child).valid,
-		).length;
+		const matches = schema.oneOf.filter(matchesChild).length;
 		if (matches !== 1)
 			issues.push({
 				path,
@@ -423,7 +539,7 @@ function valueMatchesType(value: unknown, type: string): boolean {
 		case "string":
 			return typeof value === "string";
 		default:
-			return true;
+			return false;
 	}
 }
 
@@ -432,5 +548,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function jsonEqual(left: unknown, right: unknown): boolean {
-	return JSON.stringify(left) === JSON.stringify(right);
+	if (left === right) return true;
+	if (Array.isArray(left) || Array.isArray(right)) {
+		return Array.isArray(left) && Array.isArray(right) &&
+			left.length === right.length &&
+			left.every((value, index) => jsonEqual(value, right[index]));
+	}
+	if (!isRecord(left) || !isRecord(right)) return false;
+	const keys = Object.keys(left);
+	return keys.length === Object.keys(right).length &&
+		keys.every(key => Object.hasOwn(right, key) && jsonEqual(left[key], right[key]));
 }

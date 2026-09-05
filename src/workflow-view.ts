@@ -1,5 +1,6 @@
-// @ts-nocheck
-import { open } from "node:fs/promises";
+import { stat } from "node:fs/promises";
+import { readFileLinesBounded } from "./workflow-preview.js";
+export { readFileLinesBounded } from "./workflow-preview.js";
 import {
 	copyToClipboard,
 	type ExtensionCommandContext,
@@ -103,10 +104,14 @@ export class WorkflowView implements Component {
 	private outputLines: string[] = [];
 	private promptLines: string[] = [];
 	private loadedTaskKey = "";
+	private previewGeneration = 0;
+	private selectionGeneration = 0;
+	private previewCache = new Map<string, { identity: string; lines: string[] }>();
 	private message = "";
 	private error = "";
 	private loading = true;
 	private reloadActive = false;
+	private reloadQueued = false;
 	private closed = false;
 	private launchCommandOpen = false;
 	private launchCommandText = "";
@@ -139,6 +144,10 @@ export class WorkflowView implements Component {
 	}
 
 	dispose(): void {
+		this.closed = true;
+		this.previewGeneration++;
+		this.selectionGeneration++;
+		this.previewCache.clear();
 		if (this.timer) clearInterval(this.timer);
 		this.timer = undefined;
 		this.clearLaunchCommand();
@@ -284,14 +293,23 @@ export class WorkflowView implements Component {
 	}
 
 	private async reload(forceDetail: boolean): Promise<void> {
-		if (this.reloadActive) return;
+		if (this.closed) return;
+		if (this.reloadActive) {
+			this.reloadQueued ||= forceDetail;
+			return;
+		}
 		this.reloadActive = true;
 		try {
-			const previousRunId = this.detailRun?.runId;
+			const generation = this.selectionGeneration;
+			const previousRunId = this.flows[this.selectedFlow]?.runId ?? this.detailRun?.runId;
 			const flows = await loadFlowSummaries(this.cwd, this.initialRunId);
+			const supervisors = await loadRunSupervisors(this.cwd, flows);
+			if (this.closed || generation !== this.selectionGeneration) return;
+			this.error = "";
 			this.flows = flows;
-			this.supervisors = await loadRunSupervisors(this.cwd, flows);
-			this.selectedFlow = clampIndex(this.selectedFlow, flows.length);
+			this.supervisors = supervisors;
+			const previousIndex = flows.findIndex(flow => flow.runId === previousRunId);
+			this.selectedFlow = previousIndex >= 0 ? previousIndex : clampIndex(this.selectedFlow, flows.length);
 			const selectedRunId = flows[this.selectedFlow]?.runId;
 			if (previousRunId && previousRunId !== selectedRunId)
 				this.clearLaunchCommand();
@@ -317,28 +335,48 @@ export class WorkflowView implements Component {
 			) {
 				const selected = flows[this.selectedFlow];
 				if (selected) {
-					this.detailRun = await readRunRecord(this.cwd, selected.runId);
-					this.parentUsage = await readParentUsage(
-						this.cwd,
-						selected.runId,
-					).catch(() => undefined);
+					const detailRun = await readRunRecord(this.cwd, selected.runId);
+					const parentUsage = await readParentUsage(this.cwd, selected.runId).catch(() => undefined);
+					if (this.closed || generation !== this.selectionGeneration) return;
+					this.detailRun = detailRun;
+					this.parentUsage = parentUsage;
 					this.clampStageAndTask();
 					await this.updateTaskPreviews();
 				}
 			}
 
-			this.error = "";
 			if (this.message === "refreshing") this.message = "refreshed";
 		} catch (error) {
 			this.error = error instanceof Error ? error.message : String(error);
 		} finally {
 			this.loading = false;
 			this.reloadActive = false;
-			this.tui.requestRender();
+			if (!this.closed) this.tui.requestRender();
+			if (this.reloadQueued && !this.closed) {
+				this.reloadQueued = false;
+				void this.reload(true);
+			}
 		}
 	}
 
+	private async cachedPreview(path: string | undefined): Promise<string[]> {
+		if (!path) return [];
+		const info = await stat(fromProjectPath(this.cwd, path)).catch(() => undefined);
+		const identity = info ? `${info.dev}:${info.ino}:${info.size}:${info.mtimeMs}:${info.ctimeMs}` : "missing";
+		const cached = this.previewCache.get(path);
+		if (info && cached?.identity === identity) return cached.lines;
+		const lines = await readFileLinesBounded(this.cwd, path, TASK_ARTIFACT_MAX_LINES);
+		if (!this.closed && info) {
+			if (this.previewCache.size >= 2) this.previewCache.delete(this.previewCache.keys().next().value!);
+			this.previewCache.set(path, { identity, lines });
+		}
+		return lines;
+	}
+
 	private async updateTaskPreviews(): Promise<void> {
+		const generation = ++this.previewGeneration;
+		if (this.closed || this.mode !== "task") return;
+		const runId = this.detailRun?.runId;
 		const task = this.selectedTaskRecord();
 		if (!task) {
 			this.outputLines = [];
@@ -348,30 +386,36 @@ export class WorkflowView implements Component {
 			return;
 		}
 
-		const taskKey = `${task.taskId}:${task.files.output}:${task.files.taskPrompt}`;
+		const taskKey = `${runId}:${task.taskId}:${task.files.output}:${task.files.taskPrompt}`;
 		if (taskKey !== this.loadedTaskKey) {
 			this.loadedTaskKey = taskKey;
+			this.outputLines = [];
+			this.promptLines = [];
 			this.resetArtifactScroll();
 		}
 
-		const [outputLines, promptLines] = await Promise.all([
-			readFileLinesBounded(
-				this.cwd,
-				task.files.output,
-				TASK_ARTIFACT_MAX_LINES,
-			),
-			readFileLinesBounded(
-				this.cwd,
-				task.files.taskPrompt,
-				TASK_ARTIFACT_MAX_LINES,
-			),
-		]);
+		const previews = await Promise.all([
+			this.cachedPreview(task.files.output),
+			this.cachedPreview(task.files.taskPrompt),
+		]).catch(error => {
+			if (!this.closed && generation === this.previewGeneration) {
+				this.error = error instanceof Error ? error.message : String(error);
+				this.tui.requestRender();
+			}
+			return undefined;
+		});
+		if (!previews) return;
+		const [outputLines, promptLines] = previews;
+		if (this.closed || generation !== this.previewGeneration || this.mode !== "task" ||
+			this.detailRun?.runId !== runId || this.selectedTaskRecord()?.taskId !== task.taskId) return;
+		this.error = "";
 		this.outputLines = outputLines;
 		this.promptLines = promptLines;
 		this.artifactScrollLine = Math.min(
 			this.artifactScrollLine,
 			this.maxArtifactScrollLine(),
 		);
+		this.tui.requestRender();
 	}
 
 	private handleLaunchCommandInput(data: string): void {
@@ -738,8 +782,7 @@ export class WorkflowView implements Component {
 					"Validation",
 					width,
 					validationLines,
-					task.outputValidation?.status === "invalid" ||
-						task.outputValidation?.valid === false
+					taskValidationSummary(task)?.status === "invalid"
 						? "error"
 						: "warning",
 				),
@@ -821,7 +864,10 @@ export class WorkflowView implements Component {
 			const left = `${prefix}${marker} ${selected ? strong(this.theme, name) : name}`;
 			const detailRun =
 				this.detailRun?.runId === flow.runId ? this.detailRun : undefined;
-			const health = diagnoseWorkflowRunHealth(detailRun ?? flow);
+			const health = diagnoseWorkflowRunHealth(detailRun ?? {
+				...flow,
+				tasks: undefined, // The index omits runtime fields needed for task-level health.
+			});
 			const healthText =
 				health.state === "completed"
 					? ""
@@ -1122,7 +1168,7 @@ export class WorkflowView implements Component {
 	}
 
 	private taskArtifactViewerLines(
-		task: WorkflowTaskRunRecord,
+		_task: WorkflowTaskRunRecord,
 		width: number,
 	): string[] {
 		const selectedLabel =
@@ -1162,12 +1208,6 @@ export class WorkflowView implements Component {
 		return this.taskArtifactView === "output"
 			? this.outputLines
 			: this.promptLines;
-	}
-
-	private currentArtifactPath(task: WorkflowTaskRunRecord): string {
-		return this.taskArtifactView === "output"
-			? task.files.output
-			: task.files.taskPrompt;
 	}
 
 	private switchTaskArtifact(delta: number): void {
@@ -1264,6 +1304,11 @@ export class WorkflowView implements Component {
 
 	private moveRun(delta: number): void {
 		if (this.flows.length <= 0) return;
+		this.selectionGeneration++;
+		this.previewGeneration++;
+		this.detailRun = undefined;
+		this.outputLines = [];
+		this.promptLines = [];
 		this.clearLaunchCommand();
 		this.selectedFlow = wrapIndex(this.selectedFlow + delta, this.flows.length);
 		this.selectedStage = 0;
@@ -1516,7 +1561,10 @@ export class WorkflowView implements Component {
 		];
 		if (run.fanout && run.fanout.length > 0) {
 			lines.push("", accent(this.theme, "Fanout"));
-			for (const item of run.fanout.slice(0, 3)) {
+			for (const candidate of run.fanout.slice(0, 3)) {
+				if (!candidate || typeof candidate !== "object") continue;
+				const item = candidate as Record<string, unknown>;
+				if (typeof item.stageId !== "string") continue;
 				lines.push(
 					taskMetaLine(this.theme, [
 						[item.stageId, `expanded=${item.expandedCount}`],
@@ -1525,15 +1573,6 @@ export class WorkflowView implements Component {
 				);
 			}
 		}
-		return lines;
-	}
-
-	private stageContextLines(run: WorkflowRunRecord): string[] {
-		const stageId = this.currentStageId(run);
-		const lines = [kvRow(this.theme, "run", shortId(run.runId))];
-		if (stageId) lines.push(kvRow(this.theme, "stage", stageId));
-		if (run.fanout?.some((item) => item.stageId === stageId))
-			lines.push(warning(this.theme, "fanout stage"));
 		return lines;
 	}
 
@@ -1762,46 +1801,6 @@ function runToSummary(cwd: string, run: WorkflowRunRecord): WorkflowSummary {
 	};
 }
 
-export async function readFileLinesBounded(
-	cwd: string,
-	projectPath: string | undefined,
-	maxLines: number,
-	options: { chunkBytes?: number; onRead?: (bytes: number) => void } = {},
-): Promise<string[]> {
-	if (!projectPath || maxLines <= 0) return [];
-	const file = await open(fromProjectPath(cwd, projectPath), "r").catch(
-		(error) => {
-			if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-			throw error;
-		},
-	);
-	if (!file) return [];
-	try {
-		const { size } = await file.stat();
-		if (size === 0) return [];
-		const chunkBytes = Math.max(1, options.chunkBytes ?? 64 * 1024);
-		const chunks: Buffer[] = [];
-		let position = size;
-		let newlineCount = 0;
-		while (position > 0 && newlineCount <= maxLines) {
-			const length = Math.min(chunkBytes, position);
-			position -= length;
-			const buffer = Buffer.allocUnsafe(length);
-			const result = await file.read(buffer, 0, length, position);
-			const chunk = buffer.subarray(0, result.bytesRead);
-			chunks.unshift(chunk);
-			options.onRead?.(result.bytesRead);
-			for (const byte of chunk) if (byte === 0x0a) newlineCount += 1;
-		}
-		const text = Buffer.concat(chunks).toString("utf8");
-		const lines = text.split(/\r?\n/);
-		if (lines[lines.length - 1] === "") lines.pop();
-		return lines.slice(-maxLines);
-	} finally {
-		await file.close();
-	}
-}
-
 function stageSummaries(
 	run: WorkflowRunRecord,
 ): Array<{ id: string; summary: TaskSummary }> {
@@ -1851,6 +1850,7 @@ function statusForSummary(
 	if (summary.total > 0 && summary.completed === summary.total)
 		return "completed";
 	if (summary.interrupted > 0) return "interrupted";
+	if (summary.skipped > 0) return "skipped";
 	return "interrupted";
 }
 
@@ -2166,10 +2166,12 @@ function taskProblemPriority(status: TaskRunStatus): number {
 function taskValidationSummary(
 	task: WorkflowTaskRunRecord,
 ): { status: string; message: string } | undefined {
-	const validation = task.outputValidation;
-	if (!validation) return undefined;
+	// Historical sidecars may carry this UI-only field; current run records do not.
+	const candidate = (task as WorkflowTaskRunRecord & { outputValidation?: unknown }).outputValidation;
+	if (!candidate || typeof candidate !== "object") return undefined;
+	const validation = candidate as Record<string, unknown>;
 	const status =
-		validation.status ??
+		(typeof validation.status === "string" ? validation.status : undefined) ??
 		(validation.valid === true
 			? "valid"
 			: validation.valid === false
@@ -2182,7 +2184,7 @@ function taskValidationSummary(
 		typeof issue === "string"
 			? issue
 			: (issue?.message ?? issue?.path ?? issue?.code ?? "");
-	const message = validation.message ?? validation.reason ?? issueMessage;
+	const message = String(validation.message ?? validation.reason ?? issueMessage);
 	if (status === "valid" && !message) return undefined;
 	return { status, message };
 }
@@ -2713,12 +2715,6 @@ function taskMetaLine(theme: Theme, pairs: Array<[string, string]>): string {
 		.join(` ${muted(theme, "·")} `);
 }
 
-function pathText(theme: Theme, projectPath: string): string {
-	const lastSlash = projectPath.lastIndexOf("/");
-	if (lastSlash < 0) return fg(theme, "mdLinkUrl", projectPath);
-	return `${dim(theme, projectPath.slice(0, lastSlash + 1))}${metaValue(theme, projectPath.slice(lastSlash + 1))}`;
-}
-
 function navHint(theme: Theme, text: string): string {
 	return text
 		.split(" · ")
@@ -2807,14 +2803,6 @@ function chip(
 	return fg(theme, color, strong(theme, `●${content}`));
 }
 
-function rule(theme: Theme, width: number): string {
-	return fg(
-		theme,
-		"borderMuted",
-		"─".repeat(Math.max(1, Math.min(width, 160))),
-	);
-}
-
 function selectedLine(
 	theme: Theme,
 	line: string,
@@ -2842,10 +2830,6 @@ function accent(theme: Theme, text: string): string {
 
 function muted(theme: Theme, text: string): string {
 	return fg(theme, "muted", text);
-}
-
-function dim(theme: Theme, text: string): string {
-	return fg(theme, "dim", text);
 }
 
 function success(theme: Theme, text: string): string {

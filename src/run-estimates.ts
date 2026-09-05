@@ -33,8 +33,9 @@ export interface DuplicateActiveRunMatch {
 /**
  * Estimate wall time for a workflow from the most recent completed top-level
  * runs with the same name in the workflow index. Index rows do not expose
- * provenance, so run.json is read only for the sampled candidates (bounded to
- * MAX_DURATION_SAMPLES) to exclude mock runs; unreadable records are kept.
+ * provenance, so candidates are read newest-first until MAX_DURATION_SAMPLES
+ * usable durations are found or candidates are exhausted. Mock runs are excluded;
+ * unreadable records are kept. The usable-sample cap does not bound file reads.
  * Returns undefined when fewer than MIN_DURATION_SAMPLES samples exist.
  */
 export async function estimateWorkflowDurationMs(

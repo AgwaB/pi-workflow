@@ -13,8 +13,11 @@ import {
 	launchSubagentTask,
 	makeProject,
 	refreshRunFromSubagentArtifacts,
-	setSubagentApiForTests,
+	setSubagentApiForTests as setRawApi,
 } from "./unit-test-support.mjs";
+
+import { withMaterializedRawHost } from './raw-host-fixture.mjs';
+const setSubagentApiForTests = withMaterializedRawHost(setRawApi);
 
 function dynamicMetadata(task, overrides = {}) {
 	task.dynamicGenerated = {
@@ -634,6 +637,7 @@ test("launch-abort correlation recovery binds the pre-ack effective configuratio
 		const refreshed = await refreshRunFromSubagentArtifacts(cwd, fixture.run);
 		const attempt = refreshed.tasks[0].toolResultBudget.attempts[0];
 		assert.equal(refreshed.tasks[0].status, "completed");
+		assert.ok(refreshed.tasks[0].rawArtifactIntegrity, 'recovered publication must retain host integrity');
 		assert.equal(attempt.backendRunId, recoveredRunId);
 		assert.equal(attempt.backendAttemptId, recoveredAttemptId);
 		assert.equal(attempt.configurationSource, "default");
