@@ -1035,7 +1035,12 @@ export async function awaitSubagentOperation<T>(
 			options.signal.addEventListener("abort", abortListener, { once: true });
 		}
 		Promise.resolve()
-			.then(operation)
+			.then(() => {
+				// Cancellation can win after this waiter is created but before its
+				// operation microtask starts. Never dispatch work after that outcome.
+				throwIfAborted(options.signal);
+				return operation();
+			})
 			.then(
 				(value) => finish(() => resolveOperation(value)),
 				(error: unknown) => finish(() => rejectOperation(error)),

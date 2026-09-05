@@ -855,26 +855,38 @@ export async function writeJsonAtomic(
 	await assertLeaseContextOwnership(lease);
 	const temp = join(
 		dirname(file),
-		`.${Date.now().toString(36)}-${randomBytes(3).toString("hex")}.tmp`,
+		`.${Date.now().toString(36)}-${randomBytes(12).toString("hex")}.tmp`,
 	);
-	assertLeaseNotAborted(activeAbortSignal);
-	await assertLeaseContextOwnership(lease);
-	await writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-	assertLeaseNotAborted(activeAbortSignal);
-	await assertLeaseContextOwnership(lease);
-	await commitFence?.();
-	await runLeaseTestHooks.onBeforeAtomicRename?.({ file });
-	await assertLeaseContextOwnership(lease);
-	await commitFence?.();
-	assertLeaseNotAborted(activeAbortSignal);
-	await rename(temp, file);
-	if (lease) {
-		await runLeaseTestHooks.onAfterAtomicRename?.({
-			file,
-			abortLease: lease.abortLease,
-		});
+	let temporaryCreated = false;
+	try {
+		assertLeaseNotAborted(activeAbortSignal);
+		await assertLeaseContextOwnership(lease);
+		const handle = await open(temp, "wx", 0o600);
+		temporaryCreated = true;
+		try {
+			await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, "utf8");
+		} finally {
+			await handle.close();
+		}
+		assertLeaseNotAborted(activeAbortSignal);
+		await assertLeaseContextOwnership(lease);
+		await commitFence?.();
+		await runLeaseTestHooks.onBeforeAtomicRename?.({ file });
+		await assertLeaseContextOwnership(lease);
+		await commitFence?.();
+		assertLeaseNotAborted(activeAbortSignal);
+		await rename(temp, file);
+		temporaryCreated = false;
+		if (lease) {
+			await runLeaseTestHooks.onAfterAtomicRename?.({
+				file,
+				abortLease: lease.abortLease,
+			});
+		}
+		assertLeaseNotAborted(activeAbortSignal);
+	} finally {
+		if (temporaryCreated) await unlink(temp).catch(() => undefined);
 	}
-	assertLeaseNotAborted(activeAbortSignal);
 }
 
 export async function syncFileAndDirectory(file: string): Promise<void> {
@@ -926,6 +938,9 @@ export async function writeJsonExclusive(
 		await assertLeaseContextOwnership(lease);
 		await commitFence?.();
 		await runLeaseTestHooks.onBeforeExclusiveLink?.({ file });
+		await assertLeaseContextOwnership(lease);
+		await commitFence?.();
+		assertLeaseNotAborted(activeAbortSignal);
 		try {
 			// link(2) is the commit: it atomically creates this epoch's immutable
 			// receipt and can never replace a receipt committed by another owner.
@@ -1234,7 +1249,7 @@ export async function withRunLease<T>(
 				lockFile: toProjectPath(cwd, lockFile),
 				...(lastTaskTransitionAt ? { lastTaskTransitionAt } : {}),
 				...(taskStatusCounts ? { taskStatusCounts } : {}),
-			});
+			}, abortController.signal, () => assertLockOwner(lockFile, ownerId));
 		};
 		const runHeartbeat = (): Promise<void> => {
 			const previous = heartbeatInFlight;

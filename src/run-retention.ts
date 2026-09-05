@@ -1,7 +1,8 @@
-import { lstat, readFile, readdir, realpath, rm } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, readdir, realpath, rename, rm } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 
 import {
+	acquireRunFileLease,
 	deriveRunStatus,
 	isSafeRunId,
 	isTerminalWorkflowStatus,
@@ -46,12 +47,23 @@ interface Candidate {
 	runDir: string;
 	mirrorDir: string;
 	bytes: number;
+	identity: { dev: number; ino: number };
+}
+
+let beforeDeleteForTests: (() => void | Promise<void>) | undefined;
+let afterQuarantineForTests: (() => void | Promise<void>) | undefined;
+export function setWorkflowPruneAfterQuarantineForTests(hook?: () => void | Promise<void>): void {
+	afterQuarantineForTests = hook;
+}
+export function setWorkflowPruneBeforeDeleteForTests(hook?: () => void | Promise<void>): void {
+	beforeDeleteForTests = hook;
 }
 
 export async function pruneWorkflowRuns(
 	cwd: string,
 	options: WorkflowPruneOptions = {},
 ): Promise<WorkflowPruneSummary> {
+	cwd = await realpath(resolve(cwd));
 	const keep = normalizeNonNegativeInteger(options.keep, TERMINAL_INDEX_LIMIT);
 	const olderThanDays = options.olderThanDays;
 	if (olderThanDays !== undefined && (!Number.isFinite(olderThanDays) || olderThanDays < 0))
@@ -88,7 +100,9 @@ export async function pruneWorkflowRuns(
 			summaryRuns.push(entry);
 			continue;
 		}
+		await beforeDeleteForTests?.();
 		const deletion = await deleteCandidate(cwd, candidate);
+		entry.protected = deletion.protected ?? false;
 		entry.deleted = deletion.deleted;
 		entry.error = deletion.error;
 		if (deletion.deleted) deletedRunIds.push(candidate.run.runId);
@@ -137,7 +151,7 @@ export function formatWorkflowPruneSummary(summary: WorkflowPruneSummary): strin
 
 async function findTerminalCandidates(cwd: string): Promise<Candidate[]> {
 	const root = workflowsRoot(cwd);
-	const rootReal = await realpath(root).catch(() => undefined);
+	const rootReal = await physicalRetentionRoot(root).catch(() => undefined);
 	if (!rootReal) return [];
 	const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
 	const candidates: Candidate[] = [];
@@ -146,11 +160,11 @@ async function findTerminalCandidates(cwd: string): Promise<Candidate[]> {
 		const runDir = join(root, entry.name);
 		if (!(await isContainedDirectory(rootReal, runDir))) continue;
 		try {
-			const run = deriveRunStatus(JSON.parse(await readFile(join(runDir, "run.json"), "utf8")) as WorkflowRunRecord);
+			const run = await readTerminalCandidate(runDir);
 			if (run.runId !== entry.name || !isTerminalWorkflowStatus(run.status) || !Number.isFinite(Date.parse(run.updatedAt))) continue;
 			const mirrorDir = join(cwd, ".pi", "workflow-subagents", entry.name);
 			const bytes = (await directoryBytes(runDir)) + (await containedDirectoryBytes(cwd, mirrorDir));
-			candidates.push({ run, runDir, mirrorDir, bytes });
+			candidates.push({ run, runDir, mirrorDir, bytes, identity: await lstat(runDir) });
 		} catch {
 			// Invalid, incomplete, or unreadable run records are protected by omission.
 		}
@@ -161,31 +175,68 @@ async function findTerminalCandidates(cwd: string): Promise<Candidate[]> {
 async function deleteCandidate(
 	cwd: string,
 	candidate: Candidate,
-): Promise<{ deleted: boolean; error?: string }> {
-	const errors: string[] = [];
-	let primaryDeleted = false;
+): Promise<{ deleted: boolean; protected?: boolean; error?: string }> {
 	const root = workflowsRoot(cwd);
+	let lease: Awaited<ReturnType<typeof acquireRunFileLease>>;
+	let primaryDeleted = false;
 	try {
-		await removeContainedDirectory(root, candidate.runDir);
-		primaryDeleted = true;
-	} catch (error) {
-		errors.push(`workflow directory: ${errorMessage(error)}`);
-	}
-	try {
+		await physicalRetentionRoot(root);
+		const identity = await lstat(candidate.runDir);
+		if (!identity.isDirectory() || identity.isSymbolicLink() ||
+			identity.dev !== candidate.identity.dev || identity.ino !== candidate.identity.ino)
+			throw new Error("run directory changed since selection");
+		if (await isWorkflowRunLeaseLive(cwd, candidate.run.runId))
+			return { deleted: false, protected: true, error: "live or indeterminate supervisor lease" };
+		// Share the scheduler/resume lock, not a separate prune-only lock. The
+		// earlier read-only probe is advisory; ownership closes the normal race.
+		lease = await acquireRunFileLease(cwd, candidate.run.runId, "supervisor");
+		if (!lease) return { deleted: false, protected: true, error: "supervisor lease acquired concurrently" };
+		const current = await readTerminalCandidate(candidate.runDir);
+		if (current.runId !== candidate.run.runId || current.updatedAt !== candidate.run.updatedAt ||
+			!isTerminalWorkflowStatus(current.status))
+			return { deleted: false, protected: true, error: "run changed since selection" };
+		// Remove the old mirror while the original run still occupies its name;
+		// a later run reusing that name must never lose its new mirror.
+		await lease.assertOwner();
 		await removeContainedDirectory(join(cwd, ".pi", "workflow-subagents"), candidate.mirrorDir);
+		await lease.assertOwner();
+		await removeContainedDirectory(root, candidate.runDir, candidate.identity);
+		primaryDeleted = true;
+		return { deleted: true };
 	} catch (error) {
-		errors.push(`subagent mirror: ${errorMessage(error)}`);
+		return { deleted: primaryDeleted, error: errorMessage(error) };
+	} finally {
+		await lease?.release();
 	}
-	return {
-		deleted: primaryDeleted,
-		...(errors.length === 0 ? {} : { error: errors.join("; ") }),
-	};
 }
 
-async function removeContainedDirectory(root: string, directory: string): Promise<void> {
+async function readTerminalCandidate(runDir: string): Promise<WorkflowRunRecord> {
+	const file = join(runDir, "run.json");
+	const info = await lstat(file);
+	if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) throw new Error("unsafe run record");
+	const run = JSON.parse(await readFile(file, "utf8")) as WorkflowRunRecord;
+	const statuses = new Set(["pending", "running", "blocked", "completed", "failed", "skipped", "interrupted"]);
+	if (!Array.isArray(run.tasks) || !run.tasks.every(task => task && statuses.has(task.status)))
+		throw new Error("invalid task statuses");
+	return deriveRunStatus(run);
+}
+
+async function physicalRetentionRoot(root: string): Promise<string> {
+	// cwd has been canonicalized, but application-owned ancestors must never
+	// be canonicalized through a symlink into an unrelated retention tree.
+	for (const path of [resolve(root, ".."), root]) {
+		const info = await lstat(path);
+		if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("unsafe retention root");
+	}
+	const physical = await realpath(root);
+	if (physical !== resolve(root)) throw new Error("retention root changed");
+	return physical;
+}
+
+async function removeContainedDirectory(root: string, directory: string, identity?: { dev: number; ino: number }): Promise<void> {
 	let rootReal: string;
 	try {
-		rootReal = await realpath(root);
+		rootReal = await physicalRetentionRoot(root);
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
 		throw error;
@@ -198,15 +249,33 @@ async function removeContainedDirectory(root: string, directory: string): Promis
 		throw error;
 	}
 	if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("path is not a real directory");
+	if (identity && (info.dev !== identity.dev || info.ino !== identity.ino)) throw new Error("run directory changed since selection");
 	const directoryReal = await realpath(directory);
 	if (!isInside(rootReal, directoryReal)) throw new Error("path is outside retention root");
-	await rm(directory, { recursive: true, force: true });
+	// Detach the selected generation before recursive removal can unlink its
+	// supervisor.lock. An unlocked/recreated original name is not our target.
+	// The container has no run.json, so index readers ignore it during removal.
+	const container = await mkdtemp(join(rootReal, ".prune-"));
+	const detached = join(container, "run");
+	let moved = false;
+	try {
+		await physicalRetentionRoot(root);
+		const current = await lstat(directory);
+		if (current.dev !== info.dev || current.ino !== info.ino) throw new Error("directory changed before quarantine");
+		await rename(directory, detached);
+		moved = true;
+		if (identity) await afterQuarantineForTests?.();
+		await rm(container, { recursive: true, force: true });
+	} catch (error) {
+		if (!moved) await rm(container, { recursive: true, force: true }).catch(() => undefined);
+		throw new Error(`${errorMessage(error)}${moved ? `; detached evidence retained at ${detached}` : ""}`);
+	}
 }
 
 async function containedDirectoryBytes(cwd: string, directory: string): Promise<number> {
 	const root = join(cwd, ".pi", "workflow-subagents");
 	try {
-		if (!(await isContainedDirectory(await realpath(root), directory))) return 0;
+		if (!(await isContainedDirectory(await physicalRetentionRoot(root), directory))) return 0;
 		return await directoryBytes(directory);
 	} catch {
 		return 0;
