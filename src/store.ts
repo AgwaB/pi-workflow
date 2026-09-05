@@ -1310,7 +1310,7 @@ export async function withRunLease<T>(
 		return result;
 	} catch (error) {
 		// Cleanup must not replace the action's result or error. The release
-		// helper still publishes an abandonment marker before bounded retries, so
+		// helper publishes an abandonment marker after bounded retries fail, so
 		// a persistent cleanup failure leaves this live-PID lock reclaimable.
 		callerOutcomeSettled = true;
 		throw error;
@@ -1403,9 +1403,8 @@ async function reclaimStaleLock(lockFile: string): Promise<boolean> {
 		return false;
 	}
 	// A validated abandonment marker is a one-way declaration made only after
-	// heartbeats stop. Latch that decision across rename: the releaser may see
-	// the original path missing and clear the sidecar while this reclaim is in
-	// flight, but restoring the quiesced live-PID lock would orphan it.
+	// heartbeats and release attempts stop. Latch that decision across rename;
+	// restoring a quiesced live-PID lock would orphan it.
 	if (!initialDecision.durablyAbandoned) {
 		const claimedDecision = await lockReclaimDecision(lockFile, claimed);
 		if (!claimedDecision.reclaimable) {
@@ -1601,15 +1600,10 @@ async function releaseRunFileLockWithRetries(
 	lockFile: string,
 	ownerId: string,
 ): Promise<void> {
-	// Heartbeats are stopped before this function is called. Publish the exact
-	// owner token before attempting the fallible rename so another process can
-	// reclaim immediately if every release attempt fails while this PID lives.
-	let abandonmentError: unknown;
-	try {
-		await markRunFileLeaseAbandoned(lockFile, ownerId);
-	} catch (error) {
-		abandonmentError = error;
-	}
+	// Heartbeats are stopped and joined before this function is called; handle
+	// releases are single-flight. Keep ownership private throughout the bounded
+	// rename attempts. Advertising abandonment first would let a reclaimer
+	// replace our snapshot before releaseLock renames the well-known path.
 	let lastError: unknown;
 	for (const delayMs of RUN_FILE_LEASE_RELEASE_RETRY_DELAYS_MS) {
 		if (delayMs > 0) await sleep(delayMs);
@@ -1621,11 +1615,18 @@ async function releaseRunFileLockWithRetries(
 			lastError = error;
 		}
 	}
-	if (abandonmentError)
+	// One-way handoff: after publishing this owner token, only reclaimers may
+	// detach the lock. Never retry releaseLock or clear the marker from here,
+	// even if marker publication fails ambiguously. This keeps failed cleanup
+	// recoverable while this PID lives without racing the replacement owner.
+	try {
+		await markRunFileLeaseAbandoned(lockFile, ownerId);
+	} catch (abandonmentError) {
 		throw new AggregateError(
 			[asLeaseError(lastError), abandonmentError],
 			`Failed to release and durably abandon run-file lease: ${lockFile}`,
 		);
+	}
 	throw asLeaseError(lastError);
 }
 
