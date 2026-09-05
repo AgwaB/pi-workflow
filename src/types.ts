@@ -271,6 +271,7 @@ export interface ArtifactGraphStageSpec {
 	id: string;
 	type?: ArtifactGraphStageType;
 	prompt?: string;
+	injectRuntimeTask?: boolean;
 	agent?: string;
 	role?: string | string[];
 	cwd?: string;

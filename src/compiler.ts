@@ -1792,6 +1792,7 @@ async function compileArtifactGraphPlan(
 		containerContextDependsOn: string[] | undefined,
 	): Promise<string[]> => {
 		const scopedStageTaskKeys = new Map<string, string[]>();
+		// Foreach refs are already namespaced when this output-source map is read.
 		const scopedSourceStageIds = new Map<string, string>();
 
 		for (const childStage of containerStage.stages ?? []) {
@@ -1838,7 +1839,7 @@ async function compileArtifactGraphPlan(
 				scopedStageTaskKeys.set(childStage.id, currentChildTaskKeys);
 				const outputStageId = resolveDagOutputStageId(namespacedChildStage);
 				if (outputStageId)
-					scopedSourceStageIds.set(childStage.id, outputStageId);
+					scopedSourceStageIds.set(namespacedChildStage.id, outputStageId);
 				continue;
 			}
 
@@ -1876,7 +1877,7 @@ async function compileArtifactGraphPlan(
 			}
 
 			scopedStageTaskKeys.set(childStage.id, currentChildTaskKeys);
-			scopedSourceStageIds.set(childStage.id, namespacedChildStage.id);
+			scopedSourceStageIds.set(namespacedChildStage.id, namespacedChildStage.id);
 		}
 
 		const outputChildId = resolveDagOutputChildId(containerStage);

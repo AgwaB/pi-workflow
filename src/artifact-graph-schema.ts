@@ -1943,8 +1943,8 @@ function validateLoopStage(
 	}
 	validateOptionalJsonPath(stage.progressPath, `${path}.progressPath`, issues);
 	const until = recordAt(stage.until, `${path}.until`, issues);
-	if (until) validateLoopUntil(until, `${path}.until`, issues);
 	if (!Array.isArray(stage.stages)) {
+		if (until) validateLoopUntil(until, `${path}.until`, issues, []);
 		issues.push({
 			path: `${path}.stages`,
 			message: "loop stages must declare child stages",
@@ -1965,26 +1965,7 @@ function validateLoopStage(
 		.filter((id): id is string => typeof id === "string");
 	const finalChildId = childIds.at(-1);
 	if (until) {
-		const untilSource =
-			typeof until.source === "string"
-				? until.source
-				: typeof until.stage === "string"
-					? until.stage
-					: undefined;
-		const untilSourcePath = until.source !== undefined ? "source" : "stage";
-		if (untilSource) {
-			if (!childIds.includes(untilSource)) {
-				issues.push({
-					path: `${path}.until.${untilSourcePath}`,
-					message: `references unknown loop child stage "${untilSource}"`,
-				});
-			} else if (finalChildId && untilSource !== finalChildId) {
-				issues.push({
-					path: `${path}.until.${untilSourcePath}`,
-					message: "must reference the final loop child stage",
-				});
-			}
-		}
+		validateLoopUntil(until, `${path}.until`, issues, childIds, finalChildId);
 	}
 	if (stage.onExhausted !== undefined) {
 		validateStage(
@@ -2001,10 +1982,45 @@ function validateLoopUntil(
 	until: Record<string, unknown>,
 	path: string,
 	issues: ValidationIssue[],
+	childIds: readonly string[],
+	finalChildId?: string,
 ): void {
 	rejectUnknownKeys(until, UNTIL_KEYS, path, issues);
 	optionalString(until.source, `${path}.source`, issues);
 	optionalString(until.stage, `${path}.stage`, issues);
+	if (
+		until.source !== undefined && until.stage !== undefined &&
+		until.source !== until.stage
+	) {
+		issues.push({
+			path,
+			message: "source and stage aliases must refer to the same loop child stage",
+		});
+	}
+	for (const key of ["source", "stage"] as const) {
+		const source = until[key];
+		if (typeof source !== "string") continue;
+		if (!childIds.includes(source)) {
+			issues.push({
+				path: `${path}.${key}`,
+				message: `references unknown loop child stage "${source}"`,
+			});
+		} else if (finalChildId && source !== finalChildId) {
+			issues.push({
+				path: `${path}.${key}`,
+				message: "must reference the final loop child stage",
+			});
+		}
+	}
+	if (
+		!Array.isArray(until.all) && !Array.isArray(until.any) &&
+		until.source === undefined && until.stage === undefined
+	) {
+		issues.push({
+			path,
+			message: "leaf must reference the final loop child with stage or source",
+		});
+	}
 	validateOptionalJsonPath(until.path, `${path}.path`, issues);
 	optionalBoolean(until.exists, `${path}.exists`, issues);
 	if (
@@ -2025,7 +2041,9 @@ function validateLoopUntil(
 		for (const [index, child] of until[key].entries()) {
 			const childUntil = recordAt(child, `${path}.${key}[${index}]`, issues);
 			if (childUntil)
-				validateLoopUntil(childUntil, `${path}.${key}[${index}]`, issues);
+				validateLoopUntil(
+					childUntil, `${path}.${key}[${index}]`, issues, childIds, finalChildId,
+				);
 		}
 	}
 }

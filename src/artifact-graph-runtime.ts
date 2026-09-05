@@ -1780,6 +1780,7 @@ export function projectArtifactGraphControl(
 		return { missingPaths: [], truncated: false };
 	}
 	const projected = createProjectionContainer();
+	const includeRoot = projection.include.includes("$");
 	const missingPaths: string[] = [];
 	for (const path of projection.include) {
 		const resolved = readSimpleJsonPath(control, path);
@@ -1787,9 +1788,17 @@ export function projectArtifactGraphControl(
 			missingPaths.push(path);
 			continue;
 		}
-		setProjectedJsonPath(projected, path, resolved);
+		if (!includeRoot) {
+			setProjectedJsonPath(projected, path, resolved);
+		}
 	}
-	const value = Object.keys(projected).length > 0 ? projected : undefined;
+	// Root selection subsumes narrower selections, including empty/scalar roots.
+	// Do not merge into control itself: projections must never mutate source data.
+	const value = includeRoot
+		? control
+		: Object.keys(projected).length > 0
+			? projected
+			: undefined;
 	return capArtifactGraphProjection(value, missingPaths, projection.maxChars);
 }
 
