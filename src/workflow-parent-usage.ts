@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 
 import { normalizedUsageValues } from "./subagent-backend.js";
-import { acquireRunFileLease, nowIso, readIndex, readJson, workflowRunDir, writeJsonAtomic } from "./store.js";
+import { acquireRunFileLease, nowIso, readIndex, readJson, workflowRunDir, writeJsonAtomicDurable } from "./store.js";
 import type { WorkflowTaskUsageValues } from "./types.js";
 
 /** Parent assistant usage is a sidecar: the scheduler owns run.json. */
@@ -21,6 +21,8 @@ export interface WorkflowParentUsageRecord extends WorkflowTaskUsageValues {
 	updatedAt: string;
 	completedAt?: string;
 	assistantMessages: number;
+	/** Sanitized retry diagnostic, persisted with the next successful mutation. */
+	lastWriteFailure?: { code: "parent_usage_write_failed"; at: string };
 }
 
 const ACCUMULATED_USAGE_KEYS = [
@@ -36,6 +38,9 @@ interface TrackedRun {
 	runId: string;
 	sessionId: string;
 	pendingWrite: Promise<void>;
+	/** Keep operations until acknowledged; never retain raw assistant messages. */
+	operations: Array<() => Promise<void>>;
+	lastWriteFailure?: WorkflowParentUsageRecord["lastWriteFailure"];
 }
 const trackedRuns = new Map<string, TrackedRun>();
 const trackedRunKey = (cwd: string, runId: string, sessionId: string): string => `${cwd}\0${runId}\0${sessionId}`;
@@ -58,9 +63,27 @@ async function mutate(entry: TrackedRun, update: (record: WorkflowParentUsageRec
 			sessionId: entry.sessionId, startedAt: nowIso(), updatedAt: nowIso(), assistantMessages: 0,
 		};
 		update(record);
-		await lease.assertOwner();
-		await writeJsonAtomic(parentUsageFile(entry.cwd, entry.runId), record);
+		if (entry.lastWriteFailure) record.lastWriteFailure = entry.lastWriteFailure;
+		await writeJsonAtomicDurable(parentUsageFile(entry.cwd, entry.runId), record, lease.signal, lease.assertOwner);
 	} finally { await lease.release(); }
+}
+
+/** Retry a failed head before later operations. A rejected caller does not poison the queue. */
+function drain(entry: TrackedRun): Promise<void> {
+	entry.pendingWrite = entry.pendingWrite.catch(() => undefined).then(async () => {
+		while (entry.operations.length > 0) {
+			try {
+				await entry.operations[0]!();
+				entry.operations.shift();
+			} catch (error) {
+				entry.lastWriteFailure = { code: "parent_usage_write_failed", at: nowIso() };
+				throw error;
+			}
+		}
+	});
+	// Begin is synchronous and some legacy callers don't await flush.
+	void entry.pendingWrite.catch(() => undefined);
+	return entry.pendingWrite;
 }
 
 /** Begin is still synchronous; queued initialization persists even before a turn. */
@@ -68,11 +91,10 @@ export function beginParentUsageTracking(cwd: string, runId: string, sessionId =
 	if (!sessionId.trim()) return;
 	const key = trackedRunKey(cwd, runId, sessionId);
 	if (trackedRuns.has(key)) return;
-	const entry: TrackedRun = { cwd, runId, sessionId, pendingWrite: Promise.resolve() };
+	const entry: TrackedRun = { cwd, runId, sessionId, pendingWrite: Promise.resolve(), operations: [] };
 	trackedRuns.set(key, entry);
-	entry.pendingWrite = mutate(entry, (record) => { delete record.completedAt; });
-	// Prevent unhandled rejections for legacy callers that do not await a flush.
-	void entry.pendingWrite.catch(() => undefined);
+	entry.operations.push(() => mutate(entry, (record) => { delete record.completedAt; }));
+	void drain(entry);
 }
 
 /** Resume only this known owner; preserve historical totals on a resumed run. */
@@ -101,35 +123,43 @@ export async function recordParentSessionUsage(cwd: string, message: unknown, se
 	// Pi messages carry timestamps. Explicit session-entry IDs are preferred;
 	// timestamp + content hashing also deduplicates same-session process replay.
 	const receipt = messageId ?? (typeof msg.timestamp === "number"
-		? createHash("sha256").update(JSON.stringify(message)).digest("hex") : undefined);
+		? createHash("sha256").update(JSON.stringify(message)).digest("hex") : randomUUID());
 	const tracked = [...trackedRuns.values()].filter(e => e.cwd === cwd && e.sessionId === sessionId);
 	await Promise.all(tracked.map(entry => {
-		entry.pendingWrite = entry.pendingWrite.then(async () => {
-			const index = await readIndex(cwd);
-			const terminal = TERMINAL_INDEX_STATUSES.has(index?.runs.find(r => r.runId === entry.runId)?.status ?? "");
+		let terminal: boolean | undefined;
+		entry.operations.push(async () => {
+			// Preserve the original intent across retries if the run finishes while
+			// its sidecar is busy; don't turn an earlier turn into the wrap-up.
+			if (terminal === undefined) {
+				const index = await readIndex(cwd);
+				terminal = TERMINAL_INDEX_STATUSES.has(index?.runs.find(r => r.runId === entry.runId)?.status ?? "");
+			}
 			await mutate(entry, record => {
 				if (record.completedAt && terminal) return;
-				if (!receipt || !record.messageIds?.includes(receipt)) {
+				if (!record.messageIds?.includes(receipt)) {
 					for (const key of ACCUMULATED_USAGE_KEYS) {
 						const value = values[key];
 						if (typeof value === "number") record[key] = (record[key] ?? 0) + value;
 					}
 					record.assistantMessages += 1;
 					record.updatedAt = nowIso();
-					if (receipt) (record.messageIds ??= []).push(receipt);
+					(record.messageIds ??= []).push(receipt);
 				}
 				if (terminal) record.completedAt = nowIso();
 			});
 			if (terminal) trackedRuns.delete(trackedRunKey(cwd, entry.runId, sessionId));
 		});
-		return entry.pendingWrite;
+		return drain(entry);
 	}));
 }
 
 export async function flushParentUsageTracking(cwd: string, sessionId = localOwner, detach = false): Promise<void> {
 	const entries = [...trackedRuns.entries()].filter(([, e]) => e.cwd === cwd && e.sessionId === sessionId);
-	if (detach) for (const [key] of entries) trackedRuns.delete(key);
-	await Promise.all(entries.map(([, e]) => e.pendingWrite));
+	await Promise.all(entries.map(async ([key, entry]) => {
+		await drain(entry);
+		// A failed detach must retain uncommitted deltas for the next flush/resume.
+		if (detach && entry.operations.length === 0) trackedRuns.delete(key);
+	}));
 }
 
 export function resetParentUsageTrackingForTests(): void { trackedRuns.clear(); }

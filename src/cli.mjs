@@ -96,40 +96,19 @@ for (const task of selected) {
 process.stdout.write(`${lines.join("\n")}\n`);
 
 async function prune(argv) {
-  let keep;
-  let olderThanDays;
-  let yes = false;
-  let json = false;
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-    if (arg === "--yes") yes = true;
-    else if (arg === "--json") json = true;
-    else if (arg === "--keep" || arg === "--older-than") {
-      const raw = argv[++index];
-      if (!raw?.trim() || raw.startsWith("--")) {
-        process.stderr.write(`${arg} requires a numeric value.\n`);
-        return 1;
-      }
-      if (arg === "--keep") keep = Number(raw);
-      else olderThanDays = Number(raw);
-    }
-    else {
-      process.stderr.write(`Unknown prune argument "${arg}".\n${usage()}`);
-      return 1;
-    }
-  }
-  if (keep !== undefined && (!Number.isSafeInteger(keep) || keep < 0)) {
-    process.stderr.write("--keep requires a non-negative integer.\n");
-    return 1;
-  }
-  if (olderThanDays !== undefined && (!Number.isFinite(olderThanDays) || olderThanDays < 0)) {
-    process.stderr.write("--older-than requires a non-negative number of days.\n");
-    return 1;
-  }
   const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
   const buildDir = await resolveEngineDist(packageRoot);
+  // Use the same boundary parser as /workflow prune, before any retention IO.
+  const { parseWorkflowPruneArgs } = await import(pathToFileURL(join(buildDir, "extension.js")).href);
+  let options;
+  try { options = parseWorkflowPruneArgs(argv); }
+  catch (error) {
+    process.stderr.write(`${error.message}\n`);
+    return 1;
+  }
+  const { json, ...retentionOptions } = options;
   const retention = await import(pathToFileURL(join(buildDir, "run-retention.js")).href);
-  const summary = await retention.pruneWorkflowRuns(process.cwd(), { keep, olderThanDays, yes });
+  const summary = await retention.pruneWorkflowRuns(process.cwd(), retentionOptions);
   process.stdout.write(`${json ? JSON.stringify(summary, null, 2) : retention.formatWorkflowPruneSummary(summary)}\n`);
   return summary.error ? 1 : 0;
 }
@@ -139,10 +118,16 @@ async function supervise(argv) {
   let allMode = false;
   let pollMs = 2_000;
   let maxRuntimeMs = 14_400_000;
+  const seen = new Set();
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--all") allMode = true;
     else if (arg === "--poll-ms" || arg === "--max-runtime-ms") {
+      if (seen.has(arg)) {
+        process.stderr.write(`Duplicate supervise option ${arg}.\n`);
+        return 1;
+      }
+      seen.add(arg);
       const raw = argv[++index];
       const value = Number(raw);
       const minimum = arg === "--poll-ms" ? 250 : 1_000;

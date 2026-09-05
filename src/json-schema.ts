@@ -66,16 +66,29 @@ export function validateJsonSchemaSubset(
 	return { valid: issues.length === 0, issues };
 }
 
+function ownSchemaKeywords(schema: Record<string, unknown>): Record<string, unknown> {
+	const own: Record<string, unknown> = Object.create(null);
+	for (const key of Object.getOwnPropertyNames(schema)) own[key] = schema[key];
+	return own;
+}
+
 function validateSchemaSubset(
-	schema: unknown,
+	input: unknown,
 	path: string,
 	issues: JsonSchemaIssue[],
 ): void {
-	if (typeof schema === "boolean") return;
-	if (!isRecord(schema)) {
+	if (typeof input === "boolean") return;
+	if (!isRecord(input)) {
 		issues.push({ path, message: "schema must be a boolean or object" });
 		return;
 	}
+	const prototype = Object.getPrototypeOf(input);
+	if (prototype !== Object.prototype && prototype !== null) {
+		issues.push({ path, message: "schema must be a plain or null-prototype object" });
+		return;
+	}
+	// Only own keywords participate, even when Object.prototype is polluted.
+	const schema = ownSchemaKeywords(input);
 	for (const key of Object.keys(schema)) {
 		if (key === "pattern") {
 			issues.push({
@@ -191,9 +204,7 @@ function validateSchemaKeywordValues(
 			values.some(value => !isJsonValue(value))
 		) {
 			issue("enum", "must be a non-empty array of JSON values");
-		} else if (values.some((value, index) =>
-			values.some((previous, previousIndex) => previousIndex < index && jsonEqual(previous, value)),
-		)) {
+		} else if (new Set(values.map(jsonFingerprint)).size !== values.length) {
 			issue("enum", "must contain unique JSON values");
 		}
 	}
@@ -208,6 +219,15 @@ function validateSchemaKeywordValues(
 			typeof schema[key] !== "number" || !Number.isFinite(schema[key])
 		)) issue(key, "must be a finite number");
 	}
+}
+
+/** Collision-free canonical JSON: sorted object keys, ordered arrays, strict primitives. */
+function jsonFingerprint(value: unknown): string {
+	if (Array.isArray(value)) return `[${value.map(jsonFingerprint).join(",")}]`;
+	if (isRecord(value)) return `{${Object.keys(value).sort().map(key =>
+		`${JSON.stringify(key)}:${jsonFingerprint(value[key])}`,
+	).join(",")}}`;
+	return JSON.stringify(value)!;
 }
 
 function isJsonValue(value: unknown, ancestors = new Set<object>()): boolean {
@@ -252,6 +272,9 @@ function validateAgainstSchema(
 		return;
 	}
 
+	// Normalize each schema node, not instance/const data. This preserves own
+	// __proto__ property schemas without invoking the legacy prototype setter.
+	schema = ownSchemaKeywords(schema) as JsonSchemaObject;
 	validateConst(value, schema, path, issues);
 	validateEnum(value, schema, path, issues);
 	validateType(value, schema, path, issues);

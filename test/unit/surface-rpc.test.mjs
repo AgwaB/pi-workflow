@@ -28,6 +28,21 @@ test('actual Pi RPC /workflow emits fallback and malformed launch commands stop 
  for(const [id,message] of [['missing','/workflow run deep-research "task" --model'],['dynamic','/workflow dynamic --profile high "task"']]){
   send({id,type:'prompt',message});await wait(e=>e.method==='notify'&&e.notifyType==='error'&&(id==='missing'?/requires a value/.test(e.message):/does not support --profile/.test(e.message)));
  }
+ for(const [id,message,expected] of [
+  ['model-prefix','/workflow run --model A --model B deep-research "task"',/Duplicate/],
+  ['model-suffix','/workflow run deep-research "task" --model A --model B',/Duplicate/],
+  ['model-mixed','/workflow run --model A deep-research "task" --model B',/Duplicate/],
+  ['route-prefix','/workflow run --route --no-route deep-research "task"',/Conflicting/],
+  ['route-suffix','/workflow run deep-research "task" --route --no-route',/Conflicting/],
+  ['profile','/workflow run deep-research "task" --profile low --profile high',/Duplicate/],
+  ['reasoning','/workflow dynamic --thinking low "task" --reasoning high',/Duplicate/],
+  ['unsafe-keep','/workflow prune --keep 9007199254740992',/non-negative integer/],
+  ['duplicate-keep','/workflow prune --keep 1 --keep 2',/Duplicate/],
+ ]) {
+  const start=events.length;
+  send({id,type:'prompt',message});
+  await wait(e=>events.indexOf(e)>=start&&e.method==='notify'&&e.notifyType==='error'&&expected.test(e.message));
+ }
  assert.equal(events.some(e=>e.type==='agent_start'),false,'custom commands must not invoke an agent');assert.doesNotMatch(stderr,/MODEL_CALL_FORBIDDEN/);
  send({id:'quit',type:'prompt',message:'/surface-exit'});await exited;
  assert.equal(p.exitCode,0,stderr);

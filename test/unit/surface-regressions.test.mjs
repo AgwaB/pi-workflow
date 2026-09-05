@@ -191,4 +191,3 @@ test('hidden artifact views do no IO; unchanged visible previews reuse file iden
  view.mode='task';await view.updateTaskPreviews();assert.equal(reads,2);await view.updateTaskPreviews();assert.equal(reads,2);
  await writeFile(join(cwd,'output'),'changed');await view.updateTaskPreviews();assert.equal(reads,3);assert.deepEqual(view.outputLines,['changed']);
 });
-
