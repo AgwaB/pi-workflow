@@ -5090,6 +5090,7 @@ async function materializeTerminalArtifactGraphResultInner(
 		refsMinItems: artifactOptions?.refsMinItems,
 		refsUrlValidation: artifactOptions?.refsUrlValidation,
 		refsAllowedLocators,
+		partialPaths: artifactOptions?.partial?.paths ?? [],
 		maxDigestChars: artifactOptions?.maxDigestChars,
 		controlJsonSchema,
 		outputProfile: task.dynamicGenerated?.outputProfile,
@@ -5115,7 +5116,7 @@ async function materializeTerminalArtifactGraphResultInner(
 		return retryOrFailArtifactGraphTask(task, {
 			reason: "workflow_output_invalid",
 			attempt,
-			message: buildWorkflowOutputRetryInstructions(parsed.issues),
+			message: buildWorkflowOutputRetryInstructions(parsed.issues, parseOptions),
 			...retrySession,
 		});
 	}
@@ -5203,7 +5204,7 @@ async function materializeTerminalArtifactGraphResultInner(
 		return retryOrFailArtifactGraphTask(task, {
 			reason: "workflow_output_invalid",
 			attempt,
-			message: buildWorkflowOutputRetryInstructions(written.parsed.issues),
+			message: buildWorkflowOutputRetryInstructions(written.parsed.issues, parseOptions),
 			...retrySession,
 		});
 	}
@@ -5506,6 +5507,7 @@ function requiredArtifactReadSatisfied(
 	if (!normalized) return false;
 	const matches = ledger.filter(
 		(entry) =>
+			!entry.truncated &&
 			entry.source === normalized.source &&
 			entry.artifact === normalized.artifact &&
 			requiredArtifactReadPathSatisfied(normalized, entry.path) &&

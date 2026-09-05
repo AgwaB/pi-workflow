@@ -495,6 +495,9 @@ async function openValidatedArtifactFile(options: {
 	);
 	try {
 		const fileStat = await file.stat();
+		if (fileStat.nlink > 1) {
+			throw new Error(`workflow artifact must not be hard-linked: ${options.label}`);
+		}
 		if (
 			!fileStat.isFile() ||
 			fileStat.dev !== validatedStat.dev ||

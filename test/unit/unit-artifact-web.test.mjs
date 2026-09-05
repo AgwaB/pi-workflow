@@ -6972,7 +6972,7 @@ test("structured required read policy enforces projection ledger rows separately
 				},
 			],
 		);
-		assert.deepEqual(rootProjectionFailed.missing, []);
+		assert.deepEqual(rootProjectionFailed.missing, ["plan.control path=$ count=1"]);
 		assert.match(rootProjectionFailed.projectionFailures[0], /path=\$/);
 
 		const maxCharsFailed = await checkRequiredArtifactReads(

@@ -223,13 +223,17 @@ function appendWorkflowOutputInstructions(
 	stage: ArtifactGraphStageSpec,
 ): string {
 	const controlSchema = stage.output?.controlSchema;
+	const analysisRequired = stage.output?.analysis?.required ?? true;
+	const refsRequired = (stage.output?.refs?.required ?? true) || (stage.output?.refs?.minItems ?? 0) > 0;
 	return [
 		prompt,
 		"# Workflow Output Protocol",
-		"Return your final answer exactly as these three sections, in this order, with no prose outside the tags:",
+		analysisRequired && refsRequired
+			? "Return your final answer exactly as these three sections, in this order, with no prose outside the tags:"
+			: "Return your final answer using these sections in this order, at most once each, with no prose outside the tags. Optional sections may be omitted:",
 		"<control>{...}</control>",
-		"<analysis>...</analysis>",
-		"<refs>[]</refs>",
+		analysisRequired ? "<analysis>...</analysis>" : "<analysis>...</analysis> (optional)",
+		refsRequired ? "<refs>[]</refs>" : "<refs>[]</refs> (optional)",
 		"The <control> section must be valid JSON object data for the workflow control plane.",
 		"The control object must include a non-empty string `schema` and a concise non-empty string `digest`.",
 		...controlSchemaOutputInstructions(controlSchema, "stage-control-v1"),
@@ -267,7 +271,8 @@ function partialOutputInstructions(
 		'<partial-control>{"schema":"workflow-partial-output-v1","path":"$.items","items":[{"id":"stable-id","...":"..."}]}</partial-control>',
 		"Use the actual declared path, not the example path, and include only items that are final/stable enough to appear unchanged in your final <control> at that path.",
 		"Every partial item must be the exact JSON object that will appear in the final array and must include a stable non-empty string `id`; never revise or withdraw a published partial item.",
-		"If an item might change, do not publish it partially; wait for the final workflow output. The final answer must still include the normal <control>, <analysis>, and <refs> sections exactly once.",
+		"Emit each partial-control publication as a standalone block before any final output sections, not inside prose or code fences.",
+		"If an item might change, do not publish it partially; wait for the final workflow output. The final answer must still follow the required/optional section rules above, with no duplicate sections.",
 	];
 }
 

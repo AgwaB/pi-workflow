@@ -67,7 +67,7 @@ async function withTaskDir(fn) {
 	}
 }
 
-test("identical output.log and raw.md share one inode", async () => {
+test("identical output.log and raw.md use independent snapshot inodes", async () => {
 	await withTaskDir(async (root) => {
 		const raw = "same output\n";
 		await writeFile(join(root, "output.log"), raw);
@@ -76,7 +76,8 @@ test("identical output.log and raw.md share one inode", async () => {
 			rawOutput: raw,
 		}, parsed);
 		assert.equal(result.files.raw, join(root, "raw.md"));
-		assert.equal((await stat(join(root, "output.log"))).ino, (await stat(join(root, "raw.md"))).ino);
+		assert.notEqual((await stat(join(root, "output.log"))).ino, (await stat(join(root, "raw.md"))).ino);
+		assert.equal(await readFile(join(root, "raw.md"), "utf8"), raw);
 	});
 });
 

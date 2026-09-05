@@ -2424,7 +2424,7 @@
 		{
 			"name": "structured required read policy enforces projection ledger rows separately from string reads",
 			"occurrence": 1,
-			"sha256": "4bd6b83cbdf4bef64798012d4cf965bb6f72d83e2555f372e88c23dd09d5fd49",
+			"sha256": "7d88ee06b89a264f9de200cb3a994226654695bb93cc97649a473bd4173ab74b",
 			"domain": "artifact-web"
 		},
 		{

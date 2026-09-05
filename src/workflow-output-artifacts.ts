@@ -2,7 +2,8 @@ import { randomBytes } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
-import { link, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { copyFile, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
 import { nonPublicIpReason } from "./workflow-network-policy.js";
@@ -102,6 +103,8 @@ export interface ParsedWorkflowOutput {
 }
 
 export interface ParseWorkflowOutputOptions {
+	/** Declared streaming paths; [] disallows publications. Undefined supports standalone parser use. */
+	partialPaths?: readonly string[];
 	analysisRequired?: boolean;
 	refsRequired?: boolean;
 	refsMinItems?: number;
@@ -242,7 +245,9 @@ export function parseWorkflowOutput(
 	raw: string,
 	options: ParseWorkflowOutputOptions = {},
 ): ParsedWorkflowOutput {
-	const protocolRaw = stripWorkflowPartialOutputSections(raw);
+	const protocolRaw = stripWorkflowPartialOutputSections(raw, {
+		allowedPaths: options.partialPaths,
+	});
 	const issues: WorkflowOutputIssue[] = [];
 	const repairs: WorkflowOutputRepair[] = [];
 	const requirements = sectionRequirements(options);
@@ -353,17 +358,21 @@ export async function writeValidatedWorkflowTaskArtifactBundle(
 
 export function buildWorkflowOutputRetryInstructions(
 	issues: readonly WorkflowOutputIssue[],
+	options: ParseWorkflowOutputOptions = {},
 ): string {
+	const requirements = sectionRequirements(options);
 	const issueLines = issues.map((issue) => {
 		const where = issue.path ?? issue.section;
 		return `- ${where ? `${where}: ` : ""}${issue.message}`;
 	});
 	return [
 		"Validation error: workflow output protocol was invalid.",
-		"Return exactly these sections, in this order, with no prose outside the tags:",
+		requirements.analysisRequired && requirements.refsRequired
+			? "Return exactly these sections, in this order, with no prose outside the tags:"
+			: "Return these sections in this order, at most once each, with no prose outside the tags. Optional sections may be omitted:",
 		"<control>{...}</control>",
-		"<analysis>...</analysis>",
-		"<refs>[...]</refs>",
+		requirements.analysisRequired ? "<analysis>...</analysis>" : "<analysis>...</analysis> (optional)",
+		requirements.refsRequired ? "<refs>[...]</refs>" : "<refs>[...]</refs> (optional)",
 		...retryRepairGuidance(issues),
 		"Issues:",
 		...issueLines,
@@ -447,7 +456,7 @@ function scanSectionLayout(
 	raw: string,
 	requirements: SectionRequirements,
 ): SectionLayoutScan {
-	const observations = collectSectionObservations(raw, requirements);
+	const observations = collectSectionObservations(raw);
 	const sections = observations.flatMap((observation): SectionMatch[] => {
 		if (observation.end === undefined) return [];
 		return [
@@ -461,12 +470,14 @@ function scanSectionLayout(
 			},
 		];
 	});
-	const expected = requiredSectionOrder(requirements);
+	const expected = CANONICAL_SECTION_ORDER.filter((name) =>
+		sectionRequired(name, requirements) || sections.some((section) => section.name === name),
+	);
 	const complete =
 		sections.length === expected.length &&
 		sections.every((section, index) => section.name === expected[index]);
 	const { duplicateNames, duplicateCounts, hasExtraProtocolBlocks } =
-		scanStructuralSectionOpenings(raw, observations, requirements);
+		scanStructuralSectionOpenings(raw, observations);
 	return {
 		sections,
 		observations,
@@ -482,11 +493,10 @@ function scanSectionLayout(
 
 function collectSectionObservations(
 	raw: string,
-	requirements: SectionRequirements,
 ): SectionObservation[] {
 	const observations: SectionObservation[] = [];
 	let cursor = 0;
-	const expected = requiredSectionOrder(requirements);
+	const expected = CANONICAL_SECTION_ORDER;
 	for (const [index, name] of expected.entries()) {
 		const openTag = `<${name}>`;
 		const closeTag = `</${name}>`;
@@ -495,6 +505,12 @@ function collectSectionObservations(
 			: undefined;
 		const openStart = raw.indexOf(openTag, cursor);
 		if (openStart < 0) continue;
+		// An absent optional section must not be discovered inside a later
+		// section's JSON strings (for example a literal <analysis> in refs).
+		if (expected.slice(index + 1).some((later) => {
+			const laterStart = raw.indexOf(`<${later}>`, cursor);
+			return laterStart >= 0 && laterStart < openStart;
+		})) continue;
 		const contentStart = openStart + openTag.length;
 		const closeStart = findSectionClose(raw, {
 			name,
@@ -574,7 +590,6 @@ function skipWhitespace(raw: string, index: number): number {
 function scanStructuralSectionOpenings(
 	raw: string,
 	observations: readonly SectionObservation[],
-	requirements: SectionRequirements,
 ): {
 	duplicateNames: ReadonlySet<WorkflowOutputSectionName>;
 	duplicateCounts: ReadonlyMap<WorkflowOutputSectionName, number>;
@@ -612,8 +627,9 @@ function scanStructuralSectionOpenings(
 		const count = openingCounts.get(name) ?? 0;
 		if (count > 1) duplicateNames.add(name);
 		if (duplicateNames.has(name)) duplicateCounts.set(name, Math.max(count, 2));
-		const allowed = sectionRequired(name, requirements) ? 1 : 0;
-		if (count > allowed) hasExtraProtocolBlocks = true;
+		if (count > observations.filter((observation) => observation.name === name).length) {
+			hasExtraProtocolBlocks = true;
+		}
 	}
 	return { duplicateNames, duplicateCounts, hasExtraProtocolBlocks };
 }
@@ -857,7 +873,7 @@ function validateSectionLayout(
 	requirements: SectionRequirements,
 ): void {
 	validateSectionCounts(layout, issues, requirements);
-	validateCanonicalOrder(layout.sections, issues, requirements);
+	validateCanonicalOrder(layout.sections, issues);
 	validateNoOutsideText(layout.outsideRanges, issues);
 }
 
@@ -867,6 +883,10 @@ function parseSanitizedWorkflowOutput(
 ): ParsedWorkflowOutput | undefined {
 	const requirements = sectionRequirements(options);
 	const layout = scanSectionLayout(raw, requirements);
+	// A rejected/incomplete publication must not be discarded as outside prose.
+	if (layout.outsideRanges.some((range) =>
+		/(?:^|\n)[ \t]*<partial-control\b/i.test(raw.slice(range.start, range.end)),
+	)) return undefined;
 	if (layout.duplicateNames.size > 0 || layout.hasExtraProtocolBlocks) {
 		return undefined;
 	}
@@ -903,7 +923,7 @@ function repairMissingTailSections(
 		SECTION_CONTROL,
 		raw.slice(control.contentStart, control.contentEnd).trim(),
 	);
-	if (requirements.analysisRequired) {
+	if (requirements.analysisRequired || observations.has(SECTION_ANALYSIS)) {
 		const analysis = observations.get(SECTION_ANALYSIS);
 		if (!analysis) return undefined;
 		const content = raw
@@ -912,8 +932,10 @@ function repairMissingTailSections(
 		if (content.length === 0) return undefined;
 		contents.set(SECTION_ANALYSIS, content);
 	}
-	if (requirements.refsRequired) {
+	if (requirements.refsRequired || observations.has(SECTION_REFS)) {
 		const refs = observations.get(SECTION_REFS);
+		// Optional supplied JSON must validate, not disappear during tail repair.
+		if (!requirements.refsRequired && refs?.end === undefined) return undefined;
 		contents.set(
 			SECTION_REFS,
 			refs?.end === undefined
@@ -921,7 +943,7 @@ function repairMissingTailSections(
 				: raw.slice(refs.contentStart, refs.contentEnd).trim(),
 		);
 	}
-	return requiredSectionOrder(requirements)
+	return CANONICAL_SECTION_ORDER.filter((name) => contents.has(name))
 		.flatMap((name) => [
 			`<${name}>`,
 			contents.get(name) ?? "",
@@ -952,11 +974,10 @@ function validateSectionCounts(
 function validateCanonicalOrder(
 	sections: readonly SectionMatch[],
 	issues: WorkflowOutputIssue[],
-	requirements: SectionRequirements,
 ): void {
 	if (sections.length === 0) return;
 	const actual = sections.map((section) => section.name);
-	const expected = requiredSectionOrder(requirements);
+	const expected = CANONICAL_SECTION_ORDER.filter((name) => actual.includes(name));
 	if (sameArray(actual, expected)) return;
 	issues.push({
 		code: "unexpected_text",
@@ -1794,7 +1815,7 @@ function parseAnalysisSection(
 	issues: WorkflowOutputIssue[],
 	requirements: SectionRequirements,
 ): string | undefined {
-	if (text === undefined) return undefined;
+	if (text === undefined) return requirements.analysisRequired ? undefined : "";
 	if (requirements.analysisRequired && text.trim().length === 0) {
 		issues.push({
 			code: "empty_section",
@@ -2532,16 +2553,23 @@ async function writeRawArtifact(file: string, value: string): Promise<void> {
 			const actual = await readFile(outputFile);
 			if (Buffer.compare(actual, expected) === 0) {
 				await taskArtifactLinkForTests?.(outputFile, file);
-				await unlink(file).catch((error: unknown) => {
-					if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-				});
-				await link(outputFile, file);
-				await emitWorkflowOutputArtifactWriteHook({ phase: "after", file });
-				return;
+				// Keep raw independently readable and immutable even when output.log
+				// shares an attempt inode. CoW retains storage savings where available.
+				const temp = join(dirname(file), `.raw-${randomBytes(12).toString("hex")}.tmp`);
+				try {
+					await emitWorkflowOutputArtifactWriteHook({ phase: "before", file });
+					await copyFile(outputFile, temp, fsConstants.COPYFILE_FICLONE | fsConstants.COPYFILE_EXCL);
+					if (!expected.equals(await readFile(temp))) throw new Error("raw snapshot source changed");
+					await rename(temp, file);
+					await emitWorkflowOutputArtifactWriteHook({ phase: "after", file });
+					return;
+				} finally {
+					await unlink(temp).catch(() => {});
+				}
 			}
 		}
 	} catch {
-		// A failed comparison or hard-link attempt falls back to the normal atomic write.
+		// A failed comparison or clone attempt falls back to the authoritative bytes.
 	}
 	await writeTextAtomic(file, value);
 }
@@ -2643,14 +2671,6 @@ function sectionRequired(
 	if (name === SECTION_ANALYSIS) return requirements.analysisRequired;
 	if (name === SECTION_REFS) return requirements.refsRequired;
 	return true;
-}
-
-function requiredSectionOrder(
-	requirements: SectionRequirements,
-): WorkflowOutputSectionName[] {
-	return CANONICAL_SECTION_ORDER.filter((name) =>
-		sectionRequired(name, requirements),
-	);
 }
 
 function missingSectionIssue(
