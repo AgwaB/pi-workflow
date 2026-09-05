@@ -423,7 +423,7 @@ Every subagent stage writes artifact bundles:
 - `control.json` — strict machine-readable control-plane JSON. Deterministic workflow decisions read this file only.
 - `analysis.md` — prose reasoning/evidence for humans and downstream readers.
 - `refs.json` — structured evidence pointers.
-- `raw.md` — original final answer.
+- `raw.md` — captured final-answer artifact; see Retention for raw-read assurance.
 
 | Node | Layer | Data behavior |
 |---|---|---|
@@ -741,7 +741,7 @@ Important files:
 | `tasks/<task-id>/control.json` | Machine-readable control artifact for artifact-graph tasks. |
 | `tasks/<task-id>/analysis.md` | Human-readable reasoning/evidence artifact. |
 | `tasks/<task-id>/refs.json` | Structured evidence pointers. |
-| `tasks/<task-id>/raw.md` | Original final answer before section extraction. |
+| `tasks/<task-id>/raw.md` | Captured final answer before section extraction; legacy scoped reads do not attest original bytes. |
 | `tasks/<task-id>/read-ledger.jsonl` | `workflow_artifact` read proof used by `requiredReads`. |
 | `tasks/<task-id>/source-manifest.json` | Upstream artifact manifest visible to the task. |
 | `tasks/<task-id>/output.log` | Captured worker output from the subagent attempt; may share its inode. |
@@ -752,7 +752,9 @@ Subagent worker artifacts are stored under `.pi/workflow-subagents/` by default 
 
 ### Retention
 
-Nothing is deleted automatically. Run `pi-workflow prune` or `/workflow prune` to preview terminal runs beyond the retention window; add `--yes` to delete them. Task `output.log` may share a hard link with its attempt log. The bundle writer stores `raw.md` as an independent snapshot so later log changes do not change the final-answer bytes. It requests copy-on-write cloning where supported and otherwise copies the bytes; physical storage savings are filesystem-dependent. Do not assume an older run has the same storage layout or rewrite its artifacts by hand. Artifact reads retain their link/path safety checks.
+Nothing is deleted automatically. Run `pi-workflow prune` or `/workflow prune` to preview terminal runs beyond the retention window; add `--yes` to delete them. Task `output.log` and `raw.md` may share storage only within the runtime's bounded run/task/attempt link contract. Raw reads validate exact ownership and source identity, canonical containment, and complete inode-link accounting; arbitrary, external, unaccounted links and observed substitutions fail closed. New host-owned publication requires a trusted host-recorded digest: a result-sidecar digest alone is not authority, and failed owner establishment cannot silently produce fresh legacy data. Link failures after valid ownership can use independent authoritative bytes while retaining their host binding.
+
+Raw read results and read-ledger rows include `rawAssurance`. `host_digest_verified` means the complete bytes match the trusted host binding, even when the returned view is truncated. Known legacy layouts expose their current scoped contents as `legacy_scoped_unattested`, with `originalBytes: "unattested"`; this does not attest historical final-answer bytes. Low-level writers without host publication context use independent storage and report `independent_unattested`, not host verification. These checks do not migrate old data, expand the allowed filesystem scope, prove semantic correctness, or authenticate an arbitrarily falsified host record. Do not infer assurance or physical savings from a filename, and do not rewrite historical artifacts by hand.
 
 Retention keeps the newest 50 terminal runs by default; `--keep` changes that count, and `--older-than` additionally restricts deletion to older terminal records. Preview is read-only: it acquires no topology/supervisor leases and performs no quarantine, deletion, or index write. Destructive pruning coordinates with first run publication through a workflow-root topology lease and checks candidate supervisor leases and generation identity again before detachment. Live or indeterminate supervisor leases protect a run. Every retained child protects its ancestors, regardless of child status; selected children purge before parents, and failed child purges or retained primary quarantines continue to protect ancestry. Unknown, unreadable, ambiguous, or cyclic references are protected rather than guessed. Preview conservatively reports retained-child protection instead of simulating successful child deletion.
 
