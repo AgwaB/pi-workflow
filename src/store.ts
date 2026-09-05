@@ -1065,7 +1065,27 @@ export async function acquireRunFileLease(
 	assertSafeRunId(runId);
 	if (!/^[a-z0-9-]+$/.test(name))
 		throw new Error(`Unsafe run-file lease name: ${name}`);
-	const dir = workflowRunDir(cwd, runId);
+	return acquireFileLeaseInDirectory(cwd, runId, name, workflowRunDir(cwd, runId), waitMs, acquireSignal);
+}
+
+/** Serialize retention topology plans with first run-record publication.
+ * Bounded acquisition; never used by read-only prune previews. */
+export async function acquireWorkflowTopologyLease(
+	cwd: string, waitMs = INDEX_LOCK_WAIT_MS, acquireSignal?: AbortSignal,
+): Promise<RunFileLease | undefined> {
+	const root = workflowsRoot(cwd);
+	await ensureDir(root);
+	for (const path of [resolve(root, ".."), root]) {
+		const info = await lstat(path);
+		if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("unsafe workflow topology root");
+	}
+	return acquireFileLeaseInDirectory(cwd, "topology", "retention", root, waitMs, acquireSignal);
+}
+
+async function acquireFileLeaseInDirectory(
+	cwd: string, runId: string, name: string, dir: string,
+	waitMs: number, acquireSignal?: AbortSignal,
+): Promise<RunFileLease | undefined> {
 	await ensureDir(dir);
 	const lockFile = join(dir, `${name}.lock`);
 	const ownerId = `${process.pid}-${randomBytes(6).toString("hex")}`;
@@ -1811,7 +1831,31 @@ export async function writeRunRecord(
 	const derived = deriveRunStatus(run);
 	Object.assign(run, derived);
 	if (isTerminalWorkflowStatus(run.status)) run.usage = runUsageRollup(run);
-	await writeJsonAtomic(runFile, run, abortSignal);
+	if (firstWrite) {
+		const topology = await acquireWorkflowTopologyLease(cwd, INDEX_LOCK_WAIT_MS, abortSignal);
+		if (!topology) throw new Error("workflow topology lease unavailable");
+		try {
+			// Another first writer may have published while this one waited.
+			const published = await readJson<WorkflowRunRecord>(runFile);
+			if (published && (published.parentRunId !== run.parentRunId || published.rootRunId !== run.rootRunId))
+				throw new Error("workflow ancestry is immutable after publication");
+			if (run.parentRunId) {
+				const parent = await readRunRecord(cwd, run.parentRunId);
+				if (parent.runId !== run.parentRunId) throw new Error("workflow parent identity mismatch");
+			}
+			await topology.assertOwner();
+			await assertActiveRunLease(cwd, run.runId, abortSignal);
+			await writeJsonAtomic(runFile, run, abortSignal, topology.assertOwner);
+		} finally {
+			await topology.release();
+		}
+	} else {
+		// A published reference cannot move outside the topology protocol.
+		const previous = await readRunRecord(cwd, run.runId);
+		if (previous.parentRunId !== run.parentRunId || previous.rootRunId !== run.rootRunId)
+			throw new Error("workflow ancestry is immutable after publication");
+		await writeJsonAtomic(runFile, run, abortSignal);
+	}
 	assertLeaseNotAborted(abortSignal);
 	if (isTerminalWorkflowStatus(run.status))
 		runProgressByRun.delete(runProgressKey(cwd, run.runId));

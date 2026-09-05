@@ -25,12 +25,13 @@ async function fixture(files, options = {}) {
     const { run } = await h.createWorkflowRunRecord(cwd, compiled, specPath, options);
     await h.writeStaticRunArtifacts(cwd, run, compiled, files['spec.json']);
     await h.writeRunRecord(cwd, run);
-    return { cwd, run, async close() { h.setSubagentApiForTests(undefined); await rm(cwd, { recursive: true, force: true }); } };
+    return { cwd, run, async close() { h.setSubagentApiForTests(undefined); await h.flushPendingIndexUpdatesForTests(); await rm(cwd, { recursive: true, force: true }); } };
 }
 async function controller(cwd, runId) { return h.taskBySpec(await h.readRunRecord(cwd, runId), 'adaptive.controller'); }
 async function control(cwd, runId) { const task = await controller(cwd, runId); return JSON.parse(await readFile(join(dirname(join(cwd, task.files.result)), 'control.json'), 'utf8')); }
 async function children(cwd, runId) { return [...new Set((await h.readDynamicEvents(cwd, runId)).filter(e => e.type === 'workflow.started').map(e => e.payload.runId))]; }
-async function depth(cwd, runId) { return (await readOrRebuildDynamicState(cwd, runId)).controllers['adaptive.controller'].counters.nestedWorkflowDepth; }
+// Historical depth is explicitly observed for display, never on controller hot paths.
+async function depth(cwd, runId) { return (await readOrRebuildDynamicState(cwd, runId, { observeDescendants: true })).controllers['adaptive.controller'].counters.nestedWorkflowDepth; }
 // All controller runs use the real local scheduler, bundle snapshots and worker threads.
 test('depth one permits sequential siblings without consuming remaining headroom or check', async () => {
     const f = await fixture({ 'spec.json': spec(1, childRef), 'controller.mjs': `export default async ctx=>{const before=ctx.budget.remaining();await ctx.workflow('child','one');const after=ctx.budget.remaining();const check=ctx.budget.check();await ctx.workflow('child','two');return {control:{digest:'siblings',before,after,check,final:ctx.budget.remaining()}}}`, 'child/spec.json': spec(8), 'child/controller.mjs': leaf });

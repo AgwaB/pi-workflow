@@ -25,12 +25,21 @@ export async function remainingDynamicNestedWorkflowDepth(
 				return Math.max(0, remaining);
 			}
 			const events = await readDynamicEvents(cwd, run.parentRunId);
+			// Match the canonical projector's ownership and file-order contract.
+			if (events.some((event, index) => event.runId !== run.parentRunId || event.seq !== index + 1)) return 0;
 			const starts = events.filter(
 				(event) =>
 					event.type === "workflow.started" && event.payload.runId === runId,
 			);
-			const owners = new Set(starts.map((event) => event.controllerSpecId));
-			if (owners.size !== 1) return 0;
+			if (starts.length === 0) return 0;
+			const registration = (event: typeof starts[number]) => [
+				event.controllerSpecId, event.opId, event.requestHash,
+				event.payload.workflowId, event.payload.uses,
+			];
+			const tuple = registration(starts[0]);
+			if (tuple.some((value) => typeof value !== "string" || value.length === 0) ||
+				starts.some((event) => registration(event).some((value, index) => value !== tuple[index]))) return 0;
+			// starting/running/completed snapshots are valid only for one launch.
 			const owner = starts[0].controllerSpecId;
 			const initializations = events.filter(
 				(event) =>

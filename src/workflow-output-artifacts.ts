@@ -2211,7 +2211,7 @@ async function checkRefUrlAvailability(
 		let current = href;
 		try {
 			for (let redirect = 0; redirect <= REFS_URL_VALIDATION_MAX_REDIRECTS; redirect += 1) {
-				const checked = await validatePublicRefUrl(current);
+				const checked = await validatePublicRefUrl(current, timeoutMs);
 				const response = await requestRefUrl(checked, method, headers, timeoutMs);
 				if (response.status >= 300 && response.status < 400) {
 					if (!response.location)
@@ -2289,7 +2289,7 @@ type RefProbeResponse = {
 	tooLarge: boolean;
 };
 
-async function validatePublicRefUrl(href: string): Promise<string> {
+async function validatePublicRefUrl(href: string, timeoutMs: number): Promise<string> {
 	let parsed: URL;
 	try {
 		parsed = new URL(href);
@@ -2300,7 +2300,17 @@ async function validatePublicRefUrl(href: string): Promise<string> {
 		throw new Error("unsupported URL scheme");
 	if (parsed.username || parsed.password || [...parsed.searchParams.keys()].some(isSensitiveWorkflowQueryKey))
 		throw new Error("sensitive URL blocked");
-	const addresses = await lookup(parsed.hostname, { all: true, verbatim: true });
+	// Separate per-preflight bound, just like the per-request transport bound.
+	// HEAD, GET and each redirect may each consume both; not a batch deadline.
+	// OS DNS may be uncancellable, but a late result never resumes this probe.
+	const pending = lookup(parsed.hostname, { all: true, verbatim: true });
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const addresses = await Promise.race([
+		pending,
+		new Promise<Awaited<typeof pending>>((_, reject) => {
+			timer = setTimeout(() => reject(new Error("DNS resolution timeout")), Math.max(1, timeoutMs));
+		}),
+	]).finally(() => { if (timer) clearTimeout(timer); });
 	if (addresses.length === 0) throw new Error("DNS resolution failed");
 	for (const address of addresses) {
 		if (nonPublicIpReason(address.address)) throw new Error("private host blocked");

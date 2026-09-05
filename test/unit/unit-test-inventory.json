@@ -2760,7 +2760,7 @@
 		{
 			"name": "workflow index preserves run linkage without embedding task rows",
 			"occurrence": 1,
-			"sha256": "da1baddc5dc2c69c9fb83d84476b3a1fe7b46e5b454df6324b5dd1a7caf2c90e",
+			"sha256": "8f2fb846232abd09cf62a7ec6cd9bc00d68cdbff3b5006fd3b880c5c2a6f80f4",
 			"domain": "engine-store"
 		},
 		{

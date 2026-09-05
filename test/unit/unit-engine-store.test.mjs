@@ -3319,6 +3319,11 @@ test("workflow index preserves run linkage without embedding task rows", async (
 			cwd,
 			task: "Index metadata",
 		});
+		// Publish real ancestry: first child publication now rejects an orphan.
+		const { run: rootRun } = await createRunRecord(cwd, compiled, join(cwd, "root.json"), { runId: "workflow_root" });
+		await writeRunRecord(cwd, rootRun);
+		const { run: parentRun } = await createRunRecord(cwd, compiled, join(cwd, "parent.json"), { runId: "workflow_parent", parentRunId: "workflow_root", rootRunId: "workflow_root" });
+		await writeRunRecord(cwd, parentRun);
 		const { run } = await createRunRecord(
 			cwd,
 			compiled,
