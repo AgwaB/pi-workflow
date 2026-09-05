@@ -120,7 +120,14 @@ export async function establishRawOwner(taskDirectory: string, expected?: RawSel
 		if (mirror.activeAttemptId != null || typeof mirror.status !== "string" || !["completed", "failed"].includes(mirror.status) || !isRecord(mirrorAttempt) || typeof mirrorAttempt.status !== "string" || !["completed", "failed"].includes(mirrorAttempt.status)) fail();
 		if (terminal.runId !== state.backendRunId || terminal.attemptId !== state.backendAttemptId || typeof terminal.status !== "string" || !["completed", "failed"].includes(terminal.status)) fail();
 		attempt = join(attemptDir, "output.log");
-		backend = { grant: record.grant, state, mirror: { runId: mirror.runId, correlationId: mirror.correlationId, latestAttemptId: mirror.latestAttemptId }, terminal };
+		// Notification/telemetry fields may change after terminal materialization.
+		// Bind the terminal execution identity, not unrelated mutable decorations.
+		backend = {
+			grant: record.grant,
+			state,
+			mirror: { runId: mirror.runId, correlationId: mirror.correlationId, latestAttemptId: mirror.latestAttemptId },
+			terminal: { runId: terminal.runId, attemptId: terminal.attemptId, status: terminal.status, startedAt: terminal.startedAt, completedAt: terminal.completedAt, exitCode: terminal.exitCode },
+		};
 	} else if (task.backendTaskId && task.backendTaskId !== taskId) {
 		// Old records missing launch identity cannot authorize a mirrored inode.
 		fail();
