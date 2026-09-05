@@ -116,8 +116,14 @@ for (const [label, evidence, usable] of [
     assert.equal(validateJsonSchema(p, await schema('workflows/spec-review/schemas/spec-review-partition-control.schema.json')).valid, true);
     assert.equal(validateJsonSchema(report, await schema('workflows/spec-review/schemas/spec-review-report-control.schema.json')).valid, true);
     assert.equal(validateJsonSchema(result, await schema('workflows/spec-review/schemas/spec-review-render-control.schema.json')).valid, true);
-    assert.equal(result.gates.actionableEvidenceComplete, usable);
-    assert.equal(result.status === 'passed', usable);
+    assert.equal(p.evidenceGate.findings[0].complete, usable);
+    assert.equal(p.finalFindings.length, usable ? 1 : 0);
+    // This unit control deliberately has no attested scope/coverage. Grounded
+    // finding bytes alone cannot certify the review; materialized positives
+    // in spec-requirement-coverage.test.mjs exercise successful completion.
+    assert.equal(result.gates.actionableEvidenceComplete, false);
+    assert.equal(result.status, 'failed');
+    assert.equal(result.verdict, 'INCONCLUSIVE');
   });
 }
 

@@ -6,7 +6,7 @@
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { partitionEvidenceComplete } from "./spec-evidence-gate.mjs";
+import { partitionEvidenceComplete, partitionRequirementReconciliation } from "./spec-evidence-gate.mjs";
 
 const REPORT_VERDICTS = new Set([
 	"CONFORMS",
@@ -393,8 +393,9 @@ function requiredVerdict(
 	partition,
 	sourceCoverageComplete,
 	verifierCoverageIsComplete,
+	requirementReconciliation,
 ) {
-	if (!sourceCoverageComplete) return "INCONCLUSIVE";
+	if (!sourceCoverageComplete || !requirementReconciliation.complete) return "INCONCLUSIVE";
 	const coverage = partition?.verifierCoverage ?? {};
 	const integrityRows =
 		asArray(partition?.missingVerifications).length +
@@ -410,7 +411,7 @@ function requiredVerdict(
 			: "INCONCLUSIVE";
 	if (asArray(partition?.finalFindings).length > 0) return "GAPS_FOUND";
 	if (integrityRows > 0 || unresolvedRows > 0) return "NEEDS_HUMAN";
-	return "CONFORMS";
+	return requirementReconciliation.allCovered ? "CONFORMS" : "INCONCLUSIVE";
 }
 
 function renderEvidence(evidence) {
@@ -527,7 +528,7 @@ function limitationRows({ sourceCoverageComplete, coverageComplete, duplicates, 
 	if (duplicates.length > 0)
 		rows.push(`Canonical disposition IDs are duplicated: ${duplicates.join(", ")}.`);
 	if (!evidenceComplete)
-		rows.push("Local byte evidence is incomplete, changed, or unverified for a disposition or positive requirement-coverage claim; legacy locators cannot establish support or justify removal.");
+		rows.push("Local byte evidence or exact extracted-requirement reconciliation is incomplete, changed, or unverified; legacy locators cannot establish support or justify removal.");
 	if (!reportPresent)
 		rows.push("The narrative report synthesis is absent or malformed.");
 	else if (!verdictConsistent)
@@ -698,10 +699,12 @@ export default async function renderSpecReviewReport({ sources, context = {} }) 
 	const ownerLedgerReconciliationPassed = verifierOwnerLedgerComplete(partition);
 	const coverageComplete = verifierCoverageComplete(partition);
 	const evidenceComplete = await partitionEvidenceComplete(partition, context);
+	const requirementReconciliation = await partitionRequirementReconciliation(partition, context);
 	const ledgerVerdict = requiredVerdict(
 		partition,
 		sourceCoverageComplete,
 		coverageComplete,
+		requirementReconciliation,
 	);
 	const verdict = !evidenceComplete && ledgerVerdict === "CONFORMS" ? "INCONCLUSIVE" : ledgerVerdict;
 	const verdictConsistent = reportPresent && cleanText(report.verdict) === verdict;

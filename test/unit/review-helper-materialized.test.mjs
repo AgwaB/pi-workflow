@@ -61,7 +61,7 @@ for (const mode of ["grounded", "drop-grounded", "legacy", "drop-unverified", "m
     if (mode === "mapping-missing") await h.completeTask(cwd, h.taskBySpec(current, "inspect-tests.main"), {}, "failed");
     else await complete(h.taskBySpec(current, "inspect-tests.main"), { testMap: [] });
     current = await step();
-    await complete(h.taskBySpec(current, "candidate-findings.main"), { candidateFindings: [candidate], requirementCoverage: [{ requirementId: "REQ-1", status: "gap" }], needsHuman: [], noIssueNotes: [] });
+    await complete(h.taskBySpec(current, "candidate-findings.main"), { candidateFindings: [candidate], requirementCoverage: [{ requirementId: "REQ-1", status: mode === "drop-grounded" ? "covered" : "gap", ...(mode === "drop-grounded" ? { evidence: [citation] } : {}) }], needsHuman: [], noIssueNotes: [] });
     current = await step();
     const verifier = current.tasks.find(task => task.foreachGenerated?.placeholderSpecId === "verify-findings.item");
     assert.equal(verifier.foreachGenerated.itemIdentity, candidate.id);

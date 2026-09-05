@@ -26,7 +26,10 @@
       "type": "array",
       "items": {
         "type": "object",
+        "required": ["requirementId", "status"],
         "properties": {
+          "requirementId": { "type": "string", "minLength": 1 },
+          "status": { "type": "string", "enum": ["covered", "gap", "partial", "unclear", "needsHuman"] },
           "evidence": { "type": "array", "maxItems": 64, "items": { "anyOf": [
             { "type": "string" },
             { "type": "object", "required": ["file", "lineStart", "lineEnd", "quote"], "properties": {

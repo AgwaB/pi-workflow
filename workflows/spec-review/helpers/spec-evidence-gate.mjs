@@ -2,6 +2,7 @@
 // display-only, including file:line, URLs and opaque source refs. No network.
 import { createHash } from "node:crypto";
 import { readLocalText, localRange } from "./local-evidence-reader.mjs";
+import { rendererRequirementSource } from "./spec-requirement-source.mjs";
 
 export const EVIDENCE_PROTOCOL = "spec-local-evidence-v1";
 function canonical(value) {
@@ -53,16 +54,75 @@ export async function gateDisposition(id, verdict, evidence, counterEvidence, co
   return { id, verdict, complete, rows };
 }
 
-export async function gateRequirementCoverage(coverage, context = {}) {
+export const COVERAGE_STATUSES = ["covered", "gap", "partial", "unclear", "needsHuman"];
+export const exactRequirementId = value => typeof value === "string" && value.length > 0 && value === value.trim() && !/[\s\u0000-\u001f\u007f-\u009f]/u.test(value);
+
+export async function gateRequirementCoverage(coverage, context = {}, finalFindings = []) {
   const rows = [];
   for (const [index, row] of (Array.isArray(coverage) ? coverage : []).entries()) {
-    // Gap/uncertainty is not a positive conformance claim. Unknown status is
-    // conservative, not an escape hatch for an unrecognized positive label.
-    const positive = !["gap", "unclear", "needsHuman", "needs_human", "NEEDS_HUMAN"].includes(row?.status);
-    const result = await gateDisposition(String(row?.requirementId ?? row?.id ?? index), "KEEP", row?.evidence, [], context);
-    rows.push({ index, ...result, complete: positive ? result.complete : true, positive });
+    const id = exactRequirementId(row?.requirementId) ? row.requirementId : "";
+    const positive = row?.status === "covered";
+    const result = await gateDisposition(id, "KEEP", row?.evidence, [], context);
+    const accountedBy = ["gap", "partial"].includes(row?.status)
+      ? finalFindings.filter(finding => ["KEEP", "WEAKEN"].includes(finding.verdict) && finding.requirementIds?.includes(id)).map(finding => finding.id).sort()
+      : [];
+    // Partial is a known remaining gap, never positive coverage. Unclear and
+    // needsHuman remain unresolved even with a retained finding. DROP cannot
+    // resolve a gap. Bad extra typed citations poison every status.
+    const bytesValid = result.rows.filter(item => typeof item.citation !== "string").every(item => item.status === "verified");
+    const complete = Boolean(id && COVERAGE_STATUSES.includes(row?.status) && bytesValid &&
+      (positive ? result.complete : accountedBy.length > 0));
+    rows.push({ index, ...result, status: typeof row?.status === "string" ? row.status : "", complete, positive, accountedBy });
   }
   return rows;
+}
+
+// Persist both the exact universe and its actual runtime/control-byte binding.
+// A set alone is insufficient: stale controls with unchanged IDs also fail.
+export function reconcileRequirementCoverage(coverage, checked, finalFindings, source) {
+  const issues = [];
+  const requirements = Array.isArray(source?.requirements) ? source.requirements : [];
+  const requirementIds = [];
+  if (!source?.complete || !source?.proof) issues.push("missing_requirement_source_proof");
+  if (!requirements.length || requirements.length > 40) issues.push("absent_or_invalid_requirement_scope");
+  for (const row of requirements) {
+    if (!exactRequirementId(row?.id)) issues.push("invalid_extracted_requirement_id");
+    else if (requirementIds.includes(row.id)) issues.push(`duplicate_extracted_requirement_id:${row.id}`);
+    else requirementIds.push(row.id);
+  }
+  requirementIds.sort();
+  if (!Array.isArray(coverage) || coverage.length > 40) issues.push("missing_or_invalid_coverage_array");
+  const coverageIds = [];
+  for (const row of Array.isArray(coverage) ? coverage : []) {
+    if (!exactRequirementId(row?.requirementId)) issues.push("invalid_coverage_requirement_id");
+    else {
+      if (coverageIds.includes(row.requirementId)) issues.push(`duplicate_coverage_requirement_id:${row.requirementId}`);
+      if (!requirementIds.includes(row.requirementId)) issues.push(`unknown_coverage_requirement_id:${row.requirementId}`);
+      coverageIds.push(row.requirementId);
+    }
+    if (!COVERAGE_STATUSES.includes(row?.status)) issues.push("invalid_coverage_status");
+  }
+  const missingIds = requirementIds.filter(id => !coverageIds.includes(id));
+  if (missingIds.length) issues.push("missing_requirement_coverage");
+  if (canonical(coverage) !== canonical(source?.candidate?.requirementCoverage)) issues.push("coverage_differs_from_candidate_control");
+  // Accounted gaps must use the candidate's exact explicit linkage, not a
+  // post-hoc forged finding link, alias, title or inferred positional ID.
+  for (const finding of finalFindings) {
+    const candidates = (Array.isArray(source?.candidate?.candidateFindings) ? source.candidate.candidateFindings : []).filter(row => row?.id === finding.id);
+    const ids = finding.requirementIds;
+    if (candidates.length !== 1 || !Array.isArray(ids) || !ids.length || new Set(ids).size !== ids.length ||
+      ids.some(id => !exactRequirementId(id) || !requirementIds.includes(id)) || canonical(ids) !== canonical(candidates[0]?.requirementIds)) issues.push(`invalid_finding_requirement_link:${finding.id}`);
+  }
+  const unresolvedIds = checked.filter(row => !row.complete).map(row => row.id);
+  const complete = issues.length === 0 && checked.length === requirements.length && unresolvedIds.length === 0;
+  return { protocol: "spec-requirement-reconciliation-v1", proof: source?.proof ?? null, requirementIds, coverageIds, missingIds, unresolvedIds, issues, complete, allCovered: complete && checked.every(row => row.positive) };
+}
+
+export async function partitionRequirementReconciliation(partition, context = {}) {
+  const source = await rendererRequirementSource(context);
+  const checked = await gateRequirementCoverage(partition?.requirementCoverage, context, partition?.finalFindings ?? []);
+  const actual = reconcileRequirementCoverage(partition?.requirementCoverage, checked, partition?.finalFindings ?? [], source);
+  return { ...actual, complete: actual.complete && canonical(actual) === canonical(partition?.evidenceGate?.requirementReconciliation) };
 }
 
 // The renderer reconciles canonical rows and recomputes actual bytes. It does
@@ -79,6 +139,7 @@ export async function partitionEvidenceComplete(partition, context = {}) {
     const checked = await gateDisposition(finding.id, verdict, finding.evidence, finding.counterEvidence, context);
     if (!checked.complete || canonical(saved) !== canonical(checked)) return false;
   }
-  const coverage = await gateRequirementCoverage(partition.requirementCoverage, context);
-  return coverage.every(row => row.complete) && canonical(gate.coverage) === canonical(coverage);
+  const coverage = await gateRequirementCoverage(partition.requirementCoverage, context, partition.finalFindings ?? []);
+  const reconciliation = await partitionRequirementReconciliation(partition, context);
+  return reconciliation.complete && coverage.every(row => row.complete) && canonical(gate.coverage) === canonical(coverage);
 }

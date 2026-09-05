@@ -22,8 +22,22 @@ const statuses = [{ source: "candidate-findings", stageId: "candidate-findings",
 export const verifierControl = (evidence, verdict = "KEEP", counterEvidence = []) => ({ schema: "stage-control-v1", digest: "verify", id: candidate.id, verdict, severity: "medium", evidence, counterEvidence, finalClaim: "A gap exists", recommendedAction: "Inspect" });
 export const reportControl = (p) => ({ schema: "spec-review-report-v1", digest: "report", summary: "Fixture review", verdict: p.finalFindings.length ? "GAPS_FOUND" : p.needsHuman.length ? "NEEDS_HUMAN" : "CONFORMS", risks: [], recommendedNextAction: "Inspect", ownerLedger: p.verifierCoverage.ownerLedger, ownerLedgerReconciliation: p.verifierCoverage.ownerLedgerReconciliation });
 export async function roundtrip(cwd, evidence, verdict = "KEEP", counterEvidence = [], analysis = candidates) {
-  const p = await partition({ sources: { "candidate-findings": analysis, "verify-findings": verifierControl(evidence, verdict, counterEvidence) }, context: { cwd, sourceStatuses: statuses } });
-  const result = await render({ sources: { "partition-findings": p, report: reportControl(p) }, context: { cwd, sourceStatuses: ["partition-findings", "report"].map(source => ({ source, stageId: source, specId: `${source}.main`, taskId: `task-${source}`, status: "completed" })) } });
+  // Explicit unit fixture for the runtime-owned source chain. End-to-end
+  // ownership is separately exercised by the real materialized scheduler tests.
+  const runId = "unit-byte-gate";
+  const save = async (taskId, file, value) => {
+    const dir = join(cwd, ".pi/workflows", runId, "tasks", taskId);
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, file), JSON.stringify(value));
+  };
+  const source = stage => ({ source: stage, stageId: stage, specId: `${stage}.main`, taskId: `task-${stage}`, status: "completed", artifacts: { control: { path: "control.json" } } });
+  const upstream = ["extract-spec", "map-implementation", "inspect-tests"].map(source);
+  for (const row of upstream) await save(row.taskId, "control.json", row.stageId === "extract-spec" ? { requirements: [{ id: "REQ-1" }] } : {});
+  await save("task-candidate", "control.json", analysis);
+  await save("task-candidate", "source-manifest.json", { schema: "workflow-source-manifest-v1", runId, taskId: "task-candidate", sources: upstream });
+  await save("task-partition-findings", "source-manifest.json", { schema: "workflow-source-manifest-v1", runId, taskId: "task-partition-findings", sources: [{ ...source("candidate-findings"), taskId: "task-candidate" }] });
+  const p = await partition({ sources: { "candidate-findings": analysis, "verify-findings": verifierControl(evidence, verdict, counterEvidence) }, context: { cwd, runId, sourceStatuses: statuses } });
+  const result = await render({ sources: { "partition-findings": p, report: reportControl(p) }, context: { cwd, runId, sourceStatuses: ["partition-findings", "report"].map(source => ({ source, stageId: source, specId: `${source}.main`, taskId: `task-${source}`, status: "completed" })) } });
   return { p, result };
 }
 async function fixture(fn) {
@@ -77,7 +91,8 @@ for (const evidence of [["definitely-not-present.ts:999: Trust me"], ["https://e
 }
 for (const verdict of ["KEEP", "WEAKEN", "DROP"]) {
   test(`spec-review grounded ${verdict} roundtrip passes`, () => fixture(async cwd => {
-    const { p, result } = await roundtrip(cwd, verdict === "DROP" ? [] : [citation], verdict, verdict === "DROP" ? [citation] : []);
+    const analysis = verdict === "DROP" ? { ...candidates, requirementCoverage: [{ requirementId: "REQ-1", status: "covered", evidence: [citation] }] } : candidates;
+    const { p, result } = await roundtrip(cwd, verdict === "DROP" ? [] : [citation], verdict, verdict === "DROP" ? [citation] : [], analysis);
     assert.equal(result.status, "passed");
     assert.equal(p.evidenceGate.complete, true);
     assert.equal(p.evidenceGate.findings[0].rows[0].status, "verified");
@@ -148,7 +163,8 @@ test("positive requirement coverage needs bytes; gap is not a coverage proof", (
 }));
 test("renderer rechecks source bytes and refuses absent/fabricated gate metadata", () => fixture(async cwd => {
   const { p } = await roundtrip(cwd, [citation]);
-  const invoke = () => render({ sources: { "partition-findings": p, report: reportControl(p) }, context: { cwd, sourceStatuses: ["partition-findings", "report"].map(source => ({ source, stageId: source, specId: `${source}.main`, taskId: source, status: "completed" })) } });
+  const invoke = () => render({ sources: { "partition-findings": p, report: reportControl(p) }, context: { cwd, runId: "unit-byte-gate", sourceStatuses: ["partition-findings", "report"].map(source => ({ source, stageId: source, specId: `${source}.main`, taskId: `task-${source}`, status: "completed" })) } });
+  assert.equal((await invoke()).gates.actionableEvidenceComplete, true);
   await writeFile(join(cwd, "source.ts"), "changed after partition\n");
   assert.equal((await invoke()).gates.actionableEvidenceComplete, false);
   p.evidenceGate.findings[0].rows[0].status = "verified";

@@ -163,7 +163,7 @@ test("spec-review renderer preserves every legacy disposition but withholds ungr
 		});
 
 		assert.equal(first.status, "failed");
-		assert.equal(first.verdict, "GAPS_FOUND");
+		assert.equal(first.verdict, "INCONCLUSIVE"); // Legacy ledger has no attested requirement scope.
 		assert.equal(first.gates.passed, false);
 		assert.equal(first.gates.actionableEvidenceComplete, false);
 		assert.deepEqual(first.renderedFindingIds, ["FINDING-KEEP"]);
@@ -755,7 +755,7 @@ test("spec-review renderer fails closed on verdict, source, evidence, and verifi
 			},
 			context,
 		});
-		assert.equal(integrityResult.verdict, "NEEDS_HUMAN");
+		assert.equal(integrityResult.verdict, "INCONCLUSIVE"); // Missing requirement proof takes precedence.
 		assert.equal(integrityResult.status, "failed");
 		assert.equal(integrityResult.gates.verifierCoverageComplete, false);
 		assert.deepEqual(integrityResult.renderedNeedsHumanIds, [
