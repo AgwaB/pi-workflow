@@ -639,13 +639,15 @@ function missingLaunchTimingMetricsByTask(
 }
 
 function stageMetrics(tasks: WorkflowTaskMetrics[]): WorkflowStageMetrics[] {
-	const stageIds: Array<string | null> = [];
+	const tasksByStage = new Map<string | null, WorkflowTaskMetrics[]>();
 	for (const task of tasks) {
-		if (!stageIds.includes(task.stageId)) stageIds.push(task.stageId);
+		const stageTasks = tasksByStage.get(task.stageId);
+		if (stageTasks) stageTasks.push(task);
+		else tasksByStage.set(task.stageId, [task]);
 	}
-	return stageIds.map((stageId) => ({
+	return Array.from(tasksByStage, ([stageId, stageTasks]) => ({
 		stageId,
-		...rollupTasks(tasks.filter((task) => task.stageId === stageId)),
+		...rollupTasks(stageTasks),
 	}));
 }
 
