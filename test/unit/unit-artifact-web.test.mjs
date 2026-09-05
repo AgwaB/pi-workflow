@@ -6118,7 +6118,11 @@ test("deep-research claim-evidence-gate backfills npm docs sourceRefs across CLI
 	assert.equal(out.gateSummary.sourceRefJoinFailures, 0);
 });
 
-test("deep-research claim-evidence-gate suppresses sourceRef join failures for local evidence", async () => {
+test("deep-research claim-evidence-gate suppresses sourceRef join failures for local evidence", async (t) => {
+	const cwd = makeProject();
+	t.after(() => rmSync(cwd, { recursive: true, force: true }));
+	mkdirSync(join(cwd, "src"), { recursive: true });
+	writeFileSync(join(cwd, "src", "engine.ts"), `${"\n".repeat(9)}Local repository evidence supports the implementation detail.\n`);
 	const helperPath = join(
 		dirname(fileURLToPath(import.meta.url)),
 		"..",
@@ -6162,6 +6166,7 @@ test("deep-research claim-evidence-gate suppresses sourceRef join failures for l
 			},
 		},
 		options: { requireFetchedEvidenceForVerified: true },
+		context: { cwd },
 	});
 
 	assert.deepEqual(out.statusPartitions.verified, ["claim-001"]);

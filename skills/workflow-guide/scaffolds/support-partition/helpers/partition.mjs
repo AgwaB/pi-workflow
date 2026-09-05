@@ -45,7 +45,7 @@ function collectVerifications(sources, verificationStage) {
   const verifications = [];
   for (const { key, value } of sourceValues(sources)) {
     if (key === verificationStage || key.startsWith(`${verificationStage}.`)) {
-      if (value.verdict || value.finding || value.candidateId) verifications.push(value);
+      verifications.push({ source: key, verification: value });
     }
   }
   return verifications;
@@ -71,7 +71,7 @@ function normalizeVerdict(value, notes, label) {
 }
 
 function findingId(finding, fallback) {
-  return String(finding?.findingId ?? finding?.id ?? fallback);
+  return String(finding?.id ?? finding?.findingId ?? fallback);
 }
 
 function compactFinding(finding, verification, verdict, index) {
@@ -92,15 +92,15 @@ function compactFinding(finding, verification, verdict, index) {
   };
 }
 
-function candidateKey(candidate) {
-  return String(candidate?.id ?? candidate?.findingId ?? candidate?.title ?? "").toLowerCase();
+function exactId(value) {
+  return typeof value === "string" && value.length > 0 && value.trim() === value ? value : undefined;
 }
 
-function buildCandidateMap(candidates) {
+function groupById(rows, getId) {
   const map = new Map();
-  for (const candidate of candidates) {
-    const key = candidateKey(candidate);
-    if (key && !map.has(key)) map.set(key, candidate);
+  for (const row of rows) {
+    const id = getId(row);
+    if (id) map.set(id, [...(map.get(id) ?? []), row]);
   }
   return map;
 }
@@ -110,36 +110,60 @@ export default async function helper({ sources, options = {}, context = {} }) {
   const verificationStage = String(options.verificationStage ?? "verify-candidates");
   const candidates = collectCandidates(sources, candidateStage);
   const verifications = collectVerifications(sources, verificationStage);
-  const candidateByKey = buildCandidateMap(candidates);
-  const seen = new Set();
+  const candidateById = groupById(candidates, (row) => exactId(row.id));
+  const verifierById = groupById(verifications, (row) => exactId(row.verification.candidateId));
   const normalizationNotes = [];
+  const issues = [];
+  const verifiedIds = [];
   const partitions = { keep: [], weaken: [], drop: [], needsHuman: [] };
-
-  verifications.forEach((verification, index) => {
-    const candidateId = String(verification.candidateId ?? "");
-    const echoedFinding = asObject(verification.finding) ?? {};
-    const candidate = candidateByKey.get(candidateId.toLowerCase()) ?? candidateByKey.get(candidateKey(echoedFinding));
-    const finding = Object.keys(echoedFinding).length > 0 ? echoedFinding : candidate;
-    const label = candidateId || finding?.title || `verification ${index + 1}`;
-    const verdict = normalizeVerdict(verification.verdict, normalizationNotes, label);
-    const item = compactFinding(finding, verification, verdict, index);
-    const key = item.findingId.toLowerCase();
-    if (key) seen.add(key);
+  const candidateSources = sourceValues(sources).filter(({ key }) => key === candidateStage || key.startsWith(`${candidateStage}.`));
+  if (candidateSources.length !== 1 || !Array.isArray(candidateSources[0]?.value.candidates) || candidateSources[0].value.candidates.length !== candidates.length) {
+    issues.push({ reason: "missing or ambiguous candidate source" });
+  }
+  const statuses = Array.isArray(context.sourceStatuses) ? context.sourceStatuses : [];
+  const owners = statuses.filter((row) => row.stageId === verificationStage && row.specId !== `${verificationStage}.item`);
+  // Source names route controls to status records; only explicit itemIdentity
+  // binds an assignment. Never derive identity from aliases, titles or order.
+  for (const row of verifications) {
+    const id = exactId(row.verification.candidateId);
+    const matches = owners.filter((owner) => owner.source === row.source);
+    const owner = matches[0];
+    row.valid = Boolean(id && candidateById.get(id)?.length === 1 &&
+      verifierById.get(id)?.length === 1 && exactId(row.verification.finding?.id) === id &&
+      (row.verification.finding?.findingId === undefined || row.verification.finding.findingId === id) &&
+      matches.length === 1 && owner.itemIdentity === id && owner.status === "completed" &&
+      exactId(owner.taskId) && exactId(owner.specId) && owner.specId.startsWith(`${verificationStage}.`) &&
+      owner.placeholderSpecId === `${verificationStage}.item` &&
+      owners.filter((other) => other.itemIdentity === id || other.taskId === owner.taskId || other.specId === owner.specId).length === 1);
+    if (!row.valid) issues.push({ source: row.source, candidateId: id ?? null, echoedId: row.verification.finding?.id ?? null, reason: "invalid, duplicate, unknown or mismatched verifier assignment" });
+  }
+  for (const owner of owners) {
+    if (!verifications.some((row) => row.source === owner.source && row.valid)) {
+      issues.push({ source: owner.source, candidateId: owner.itemIdentity ?? null, reason: "materialized assignment has no valid verifier control" });
+    }
+  }
+  candidates.forEach((candidate, index) => {
+    const id = exactId(candidate.id);
+    const row = id && verifierById.get(id)?.find((entry) => entry.valid);
+    if (!row || candidateSources.length !== 1) {
+      partitions.needsHuman.push({
+        ...compactFinding(candidate, {}, "NEEDS_HUMAN", index),
+        note: "no unique identity-matched verifier verdict received for this candidate"
+      });
+      issues.push({ candidateId: id ?? null, reason: "candidate has no unique valid verifier assignment" });
+      return;
+    }
+    const { verification } = row;
+    const verdict = normalizeVerdict(verification.verdict, normalizationNotes, id);
+    const item = { ...compactFinding(verification.finding, verification, verdict, index), findingId: id };
+    verifiedIds.push(id);
     if (verdict === "KEEP") partitions.keep.push(item);
     else if (verdict === "WEAKEN") partitions.weaken.push(item);
     else if (verdict === "DROP") partitions.drop.push(item);
     else partitions.needsHuman.push(item);
   });
-
-  candidates.forEach((candidate, index) => {
-    const key = findingId(candidate, `candidate-${index + 1}`).toLowerCase();
-    if (seen.has(key)) return;
-    partitions.needsHuman.push({
-      ...compactFinding(candidate, { recommendedAction: "Human review required because no verifier verdict was produced." }, "NEEDS_HUMAN", index),
-      note: "no verifier verdict received for this candidate"
-    });
-    normalizationNotes.push(`candidate ${key} had no verifier verdict; routed to NEEDS_HUMAN`);
-  });
+  const identityIntegrity = { plannedIds: candidates.map((row) => exactId(row.id) ?? null), verifiedIds, issues, complete: issues.length === 0 };
+  normalizationNotes.push(...issues.map((issue) => `identity integrity: ${issue.reason} (${issue.candidateId ?? issue.source ?? "source"})`));
 
   const partitionSummary = {
     keep: partitions.keep.length,
@@ -147,7 +171,8 @@ export default async function helper({ sources, options = {}, context = {} }) {
     drop: partitions.drop.length,
     needsHuman: partitions.needsHuman.length,
     verdictsReceived: verifications.length,
-    candidates: candidates.length
+    candidates: candidates.length,
+    integrity: identityIntegrity.complete ? "complete" : "partial"
   };
   const reportContext = {
     keep: partitions.keep,
@@ -163,6 +188,7 @@ export default async function helper({ sources, options = {}, context = {} }) {
       reportContext,
       partitionSummary,
       normalizationNotes,
+      identityIntegrity,
       helperContext: {
         specPath: context?.specPath ? String(context.specPath) : "",
         candidateStage,

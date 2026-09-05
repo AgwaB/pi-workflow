@@ -870,7 +870,7 @@
 		{
 			"name": "deep-research claim-evidence-gate enforces structured evidence, rejoins identity, and partitions statuses",
 			"occurrence": 1,
-			"sha256": "e3c0c5977048fe0b9f1319bd2eb530efbd32bb6fdb8416e1e58017dd403a3932",
+			"sha256": "0bb31c79c45d5f525eab1f2ef77b26da6bc5746e54e0133f58dbc99f2af87286",
 			"domain": "core-runtime"
 		},
 		{
@@ -918,7 +918,7 @@
 		{
 			"name": "deep-research claim-evidence-gate suppresses sourceRef join failures for local evidence",
 			"occurrence": 1,
-			"sha256": "3d1f6c0528c72b089a51341b14cbabe776202a64fce97986210ec3bc88efc82c",
+			"sha256": "7ba3ea6e0e3b2f2603bcfa09cc6b1ebc1d351c6b2f980e4907976ee4333bd7da",
 			"domain": "artifact-web"
 		},
 		{

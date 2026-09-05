@@ -8676,7 +8676,11 @@ test("deep-review render-review-report surfaces count mismatches and missing par
 	assert.match(mismatch.markdown, /Renderer warning/);
 });
 
-test("deep-research claim-evidence-gate enforces structured evidence, rejoins identity, and partitions statuses", async () => {
+test("deep-research claim-evidence-gate enforces structured evidence, rejoins identity, and partitions statuses", async (t) => {
+	const cwd = makeProject();
+	t.after(() => rmSync(cwd, { recursive: true, force: true }));
+	mkdirSync(join(cwd, "docs"), { recursive: true });
+	writeFileSync(join(cwd, "docs", "usage.md"), `${"\n".repeat(11)}local file evidence\n${"\n".repeat(4)}`);
 	const helperPath = join(
 		dirname(fileURLToPath(import.meta.url)),
 		"..",
@@ -8768,6 +8772,7 @@ test("deep-research claim-evidence-gate enforces structured evidence, rejoins id
 			requireFetchedEvidenceForVerified: true,
 			downgradeExactQuantitativeWithoutSource: true,
 		},
+		context: { cwd },
 	});
 	assert.deepEqual(out.statusPartitions.verified, ["claim-001", "claim-003"]);
 	assert.deepEqual(out.statusPartitions.partiallySupported, ["claim-002"]);

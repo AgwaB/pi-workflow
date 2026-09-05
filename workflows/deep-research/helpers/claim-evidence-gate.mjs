@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import localQuoteGate from "./local-quote-gate.mjs";
 
 import {
 	VERIFICATION_STATUS,
@@ -1555,7 +1556,7 @@ export default async function claimEvidenceGate({
 		}
 	}
 
-	function auditClaim({
+	async function auditClaim({
 		sourceId,
 		claim,
 		candidate,
@@ -1729,6 +1730,17 @@ export default async function claimEvidenceGate({
 			}
 		}
 
+		if (verdictOf(next) === VERIFICATION_STATUS.VERIFIED) {
+			const localRows = await localQuoteGate(next.evidence, context, looksLikeLocalSourceRef);
+			if (localRows.length > 0) next.localQuoteGate = localRows;
+			const failed = localRows.filter((row) => row.status !== "verified");
+			if (failed.length > 0) {
+				next = withVerdict(next, VERIFICATION_STATUS.PARTIALLY_SUPPORTED,
+					"local evidence quote did not match the cited file/range or could not be read",
+					{ reasonCode: failed.some((row) => row.status === "unreadable") ? "local_quote_unreadable" : "local_quote_mismatch" });
+			}
+		}
+
 		if (verdictOf(next) !== verdict) {
 			gateSummary.downgraded += 1;
 			remainingGaps.push({
@@ -1762,7 +1774,7 @@ export default async function claimEvidenceGate({
 					nextStep:
 						"Run or repair the verifier for this normalized candidate before treating the claim as supported.",
 				});
-				auditClaim({
+				await auditClaim({
 					sourceId: null,
 					claim: candidate,
 					candidate,
@@ -1796,7 +1808,7 @@ export default async function claimEvidenceGate({
 					});
 				}
 			}
-			auditClaim({
+			await auditClaim({
 				sourceId: merged.sourceId,
 				claim: merged.claim,
 				candidate,
@@ -1805,7 +1817,7 @@ export default async function claimEvidenceGate({
 		}
 	} else {
 		for (const row of legacyVerifierRows) {
-			auditClaim({
+			await auditClaim({
 				sourceId: row.sourceId,
 				claim: row.claim,
 				candidate: null,

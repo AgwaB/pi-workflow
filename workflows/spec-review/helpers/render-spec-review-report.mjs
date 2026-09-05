@@ -108,11 +108,16 @@ function rowTitle(row, fallback) {
 }
 
 function evidenceUsableItem(item) {
-	if (typeof item === "string") return Boolean(item.trim());
+	// Legacy file:line citations remain supported. This is locator/quote
+	// presence, not a byte-grounding or semantic proof. Bare assertions and
+	// claim/relevance prose must not masquerade as source evidence.
+	if (typeof item === "string") {
+		return !/https?:\/\//i.test(item) && /(?:^|[\s`(])(?:\.?\.?\/)?[\w./-]+\.[\w-]+(?::[1-9]\d*(?:-[1-9]\d*)?|#L[1-9]\d*(?:-L?[1-9]\d*)?)(?=$|[\s`:),])/u.test(item);
+	}
 	if (!isRecord(item)) return false;
-	const locator = cleanText(item.file ?? item.path ?? item.url ?? item.source ?? "");
-	const quote = cleanText(item.quote ?? item.evidence ?? item.claim ?? item.relevance ?? "");
-	return Boolean(locator && quote);
+	const locator = cleanText(item.file ?? item.path ?? item.source ?? "");
+	const quote = cleanText(item.quote ?? item.evidence ?? "");
+	return Boolean(locator && !/^[a-z][a-z0-9+.-]*:\/\//i.test(locator) && quote);
 }
 
 function findingHasUsableEvidence(finding) {

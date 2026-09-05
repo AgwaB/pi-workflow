@@ -116,8 +116,8 @@ export default async function helper({ sources, options = {}, context = {} }) {
   const partitionStage = String(options.partitionStage ?? "partition-verdicts");
   const gatedBuckets = asArray(options.buckets).length > 0 ? asArray(options.buckets).map(String) : DEFAULT_BUCKETS;
   const root = resolve(String(options.root ?? context.cwd ?? process.cwd()));
-  const upstream = asObject(sources?.[partitionStage]) ?? asObject(Object.values(asObject(sources) ?? {}).find((entry) => asObject(entry)?.value?.partitions));
-  const value = asObject(upstream?.value);
+  const matches = Object.entries(asObject(sources) ?? {}).filter(([source]) => source === partitionStage || source.startsWith(`${partitionStage}.`));
+  const value = matches.length === 1 ? asObject(asObject(matches[0][1])?.value) : undefined;
   if (!value) {
     return {
       schema: "helper-output-v1",
@@ -180,7 +180,15 @@ export default async function helper({ sources, options = {}, context = {} }) {
     verdictsReceived: Number(summary.verdictsReceived ?? 0),
     candidates: Number(summary.candidates ?? 0),
   };
-  const integrity = mismatch === 0 && unreadable === 0 ? (value.partitionSummary?.integrity ?? "complete") : "partial";
+  const identity = asObject(value.identityIntegrity);
+  const plannedIds = asArray(identity?.plannedIds);
+  const verifiedIds = asArray(identity?.verifiedIds);
+  const outputIds = Object.values(partitions).flat().map((row) => row.findingId);
+  const sameIds = (ids) => ids.length === plannedIds.length && new Set(ids).size === ids.length && ids.every((id) => typeof id === "string" && plannedIds.includes(id));
+  const identityComplete = identity?.complete === true && Array.isArray(identity.issues) && identity.issues.length === 0 &&
+    new Set(plannedIds).size === plannedIds.length && sameIds(verifiedIds) && sameIds(outputIds) &&
+    summary.candidates === plannedIds.length && summary.verdictsReceived === verifiedIds.length && summary.integrity === "complete";
+  const integrity = mismatch === 0 && unreadable === 0 && identityComplete ? "complete" : "partial";
   const normalizationNotes = [
     ...asArray(value.normalizationNotes).map(String),
     `evidence gate: ${verified} verified, ${mismatch} mismatch, ${unreadable} unreadable${demoted.length ? `; demoted ${demoted.join(", ")}` : ""}`,
