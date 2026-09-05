@@ -249,7 +249,11 @@ function cleanupUnitTestRoot() {
 	rmSync(UNIT_TEST_ROOT, { recursive: true, force: true });
 }
 
-after(cleanupUnitTestRoot);
+after(async () => {
+	// Test bodies can finish before advisory index timers/writes have drained.
+	await flushPendingIndexUpdatesForTests();
+	cleanupUnitTestRoot();
+});
 process.on("exit", cleanupUnitTestRoot);
 
 setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
