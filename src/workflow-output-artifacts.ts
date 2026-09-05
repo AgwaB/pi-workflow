@@ -2364,8 +2364,8 @@ async function requestRefUrl(
 					return;
 				}
 				if (method === "HEAD" || (status >= 300 && status < 400)) {
-					res.resume();
 					finish({ status, ...(location ? { location } : {}), tooLarge: false });
+					res.destroy();
 					return;
 				}
 				let bytes = 0;
@@ -2378,11 +2378,20 @@ async function requestRefUrl(
 					}
 				});
 				res.on("end", () => finish({ status, ...(location ? { location } : {}), tooLarge }));
-				res.on("close", () => { if (tooLarge) finish({ status, tooLarge }); });
+				res.on("error", (error: Error) => { if (!tooLarge) fail(error); });
+				res.on("aborted", () => { if (!tooLarge) fail(new Error("response aborted")); });
+				res.on("close", () => {
+					if (tooLarge) finish({ status, tooLarge });
+					else fail(new Error("response aborted"));
+				});
 			},
 		);
 		req.setTimeout(Math.max(1, timeoutMs), () => req.destroy(new Error("request timeout")));
-		timer = setTimeout(() => req.destroy(new Error("request timeout")), Math.max(1, timeoutMs));
+		timer = setTimeout(() => {
+			const error = new Error("request timeout");
+			fail(error);
+			req.destroy(error);
+		}, Math.max(1, timeoutMs));
 		req.on("error", fail);
 		req.end();
 	});
