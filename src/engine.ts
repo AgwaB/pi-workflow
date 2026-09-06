@@ -3648,9 +3648,19 @@ async function suspendedDynamicControllerStillWaiting(
 	}
 	for (const nestedRunId of controllerState?.waitingNestedWorkflowRunIds ??
 		[]) {
-		const nestedRun = await readRunRecord(cwd, nestedRunId).catch(
+		let nestedRun = await readRunRecord(cwd, nestedRunId).catch(
 			() => undefined,
 		);
+		// Reconcile a nested backend before deciding that a suspended controller
+		// is still waiting; the child backend may complete without updating this
+		// parent run record.
+		if (nestedRun && !isTerminalWorkflowStatus(nestedRun.status)) {
+			try {
+				nestedRun = await refreshRun(cwd, nestedRunId);
+			} catch (error) {
+				if (!isRefreshPollAggregateError(error)) throw error;
+			}
+		}
 		if (nestedRun && isResumableDynamicApprovalBlockedRun(nestedRun)) {
 			return false;
 		}

@@ -1,6 +1,6 @@
 {
   "name": "@agwab/pi-workflow",
-  "version": "0.13.6",
+  "version": "0.13.7",
   "description": "Workflow orchestration for Pi subagents.",
   "private": false,
   "type": "module",
@@ -80,7 +80,7 @@
     "node": ">=22.19.0"
   },
   "dependencies": {
-    "@agwab/pi-subagent": "^0.6.1",
+    "@agwab/pi-subagent": "^0.6.2",
     "pi-web-access": "^0.24.2",
     "typebox": "^1.3.18"
   },
