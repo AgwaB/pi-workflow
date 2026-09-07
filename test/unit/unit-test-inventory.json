@@ -84,7 +84,7 @@
 		{
 			"name": "artifact graph output retry falls back to new session after same-session repair fails",
 			"occurrence": 1,
-			"sha256": "4a5a606135a51f82e14a2d1eca0f6d3aa3dc60f11be921e56ba18320c4d91009",
+			"sha256": "02f2ecb6ba7eae7016a99f7e8ce3ce3310f9a0cf1e67aeb53dbc59f58936222c",
 			"domain": "artifact-web"
 		},
 		{
