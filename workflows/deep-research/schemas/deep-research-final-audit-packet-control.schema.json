@@ -35,28 +35,135 @@
         "synthesisInput": {
           "type": "object",
           "required": [
-            "researchMetadata",
-            "verdictCounts",
-            "factSlotStatusCounts",
-            "integritySummary",
-            "researchScopeCoverage",
-            "factSlots",
-            "claims",
-            "preservedClaims",
-            "gaps"
+            "header",
+            "pages"
           ],
           "properties": {
-            "researchMetadata": { "type": "object" },
-            "verdictCounts": { "type": "object" },
-            "factSlotStatusCounts": { "type": "object" },
-            "integritySummary": { "type": "object" },
-            "researchScopeCoverage": { "type": "array", "items": { "type": "object" } },
-            "factSlots": { "type": "array", "items": { "type": "object" } },
-            "claims": { "type": "array", "items": { "type": "object" } },
-            "preservedClaims": { "type": "array", "items": { "type": "object" } },
-            "gaps": { "type": "array", "items": { "type": "object" } }
+            "header": {
+              "type": "object",
+              "required": [
+                "schema",
+                "pageCount",
+                "maxChars",
+                "fields",
+                "pageEntryCounts"
+              ],
+              "properties": {
+                "schema": {
+                  "const": "deep-research-synthesis-pages-v1"
+                },
+                "pageCount": {
+                  "const": 8
+                },
+                "maxChars": {
+                  "const": 24000
+                },
+                "fields": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "field",
+                      "kind",
+                      "count"
+                    ],
+                    "properties": {
+                      "field": {
+                        "type": "string"
+                      },
+                      "kind": {
+                        "enum": [
+                          "array",
+                          "value"
+                        ]
+                      },
+                      "count": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "pageEntryCounts": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "minItems": 8,
+                  "maxItems": 8
+                },
+                "budgetBlock": {
+                  "type": "object",
+                  "required": [
+                    "status",
+                    "reason",
+                    "canonicalLedgerPreserved"
+                  ],
+                  "properties": {
+                    "status": {
+                      "const": "blocked"
+                    },
+                    "reason": {
+                      "enum": [
+                        "oversized_row",
+                        "page_bank_exhausted",
+                        "oversized_header"
+                      ]
+                    },
+                    "canonicalLedgerPreserved": {
+                      "const": true
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "additionalProperties": false
+            },
+            "pages": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "index",
+                  "entries"
+                ],
+                "properties": {
+                  "index": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 7
+                  },
+                  "entries": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "field",
+                        "value"
+                      ],
+                      "properties": {
+                        "field": {
+                          "type": "string"
+                        },
+                        "index": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "value": {}
+                      },
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "additionalProperties": false
+              },
+              "minItems": 8,
+              "maxItems": 8
+            }
           },
-          "additionalProperties": true
+          "additionalProperties": false
         },
         "researchMetadataSeed": { "type": "object" },
         "verdictCounts": { "type": "object" },

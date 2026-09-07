@@ -1,3 +1,4 @@
+import { reconstructSynthesisPages } from "../../workflows/deep-research/helpers/synthesis-pages.mjs";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -144,13 +145,12 @@ async function actualSynthesisRead(t, packet) {
     }],
   };
   await writeFile(join(consumer, "source-manifest.json"), JSON.stringify(manifest));
-  const projection = await readWorkflowArtifact(
-    manifest,
-    "final-audit-packet",
-    "control",
-    { runDir: cwd, path: "$.packet.synthesisInput", maxChars: 24000 },
-  );
-  return { encoded: JSON.stringify(packet.packet.synthesisInput), projection };
+  const values = [packet.packet.synthesisInput.header, ...packet.packet.synthesisInput.pages];
+  const paths = ["$.packet.synthesisInput.header", ...Array.from({ length: 8 }, (_, i) => `$.packet.synthesisInput.pages[${i}]`)];
+  return Promise.all(paths.map(async (path, i) => ({
+    encoded: JSON.stringify(values[i]),
+    projection: await readWorkflowArtifact(manifest, "final-audit-packet", "control", { runDir: cwd, path, maxChars: 24000 }),
+  })));
 }
 
 test("deep-research production research schema and packet preserve local evidence and question failures", async (t) => {
@@ -473,9 +473,9 @@ test("deep-research hostile synthesis identities produce an explicit budget bloc
       "audit-claims.main": audit,
     },
   });
-  assert([...JSON.stringify(packet.packet.synthesisInput)].length <= 24000);
+  assert(packet.packet.synthesisInput.pages.every((page) => JSON.stringify(page).length <= 24000));
   assert.equal(
-    packet.packet.synthesisInput.inputBudget.budgetBlock.status,
+    packet.packet.synthesisInput.header.budgetBlock.status,
     "blocked",
   );
   const rendered = await render({
@@ -689,10 +689,9 @@ test("deep-research final packet bounds the required synthesis read and rejects 
     "audit-claims.main": audit,
   };
   const packet = await finalPacket({ sources });
-  const encoded = JSON.stringify(packet.packet.synthesisInput);
-  assert([...encoded].length <= 24000);
-  assert.equal(packet.packet.synthesisInput.claims.length, 48);
-  assert.equal(packet.packet.synthesisInput.inputBudget.claimRowsPreserved, 48);
+  assert(packet.packet.synthesisInput.pages.every((page) => JSON.stringify(page).length <= 24000));
+  assert.equal(reconstructSynthesisPages(packet.packet.synthesisInput).claimVerdictLedger.length, 48);
+  assert.equal(packet.packet.synthesisInput.header.budgetBlock, undefined);
 
   const cleanSynthesis = {
     schema: "deep-research-final-synthesis-v1",
@@ -828,19 +827,16 @@ test("deep-research contradictory local and remote evidence is conservatively do
 test("deep-research actual synthesis reads use UTF-16 budget telemetry and preserve raw ledgers", async (t) => {
   for (const questionId of ["rq-plain", "rq-mixed-😀-\\\\-\\\"", `rq-${"😀".repeat(12000)}`]) {
     const packet = await finalPacket({ sources: packetSources(questionId) });
-    const { encoded, projection } = await actualSynthesisRead(t, packet);
-    assert.equal(packet.packet.synthesisInput.inputBudget.utf16Chars, encoded.length);
-    assert.equal(
-      packet.packet.synthesisInput.inputBudget.codePointTelemetry.codePoints,
-      [...encoded].length,
-    );
-    assert(encoded.length < 24000);
-    assert.equal(projection.projection.charsTruncated, false);
+    for (const { encoded, projection } of await actualSynthesisRead(t, packet)) {
+      assert(encoded.length <= 24000);
+      assert.equal(projection.projection.charsTruncated, false);
+      assert.equal(projection.projection.originalChars, encoded.length);
+    }
     if (questionId.includes("😀".repeat(100))) {
-      assert.equal(packet.packet.synthesisInput.inputBudget.budgetBlock.status, "blocked");
+      assert.equal(packet.packet.synthesisInput.header.budgetBlock.status, "blocked");
       assert.equal(packet.packet.claimVerdictLedger.length, 1);
     } else {
-      assert.equal(packet.packet.synthesisInput.inputBudget.budgetBlock, undefined);
+      assert.equal(packet.packet.synthesisInput.header.budgetBlock, undefined);
     }
   }
 });
@@ -879,7 +875,7 @@ test("deep-research demotion identities survive sanitizer, audit packet, and ren
   });
   assert.deepEqual(packet.packet.coverageGaps[0].sourceRefs, refs);
   assert.deepEqual(packet.packet.coverageGaps[0].sourceUrls, urls);
-  const synthesisGap = packet.packet.synthesisInput.gaps.find(
+  const synthesisGap = reconstructSynthesisPages(packet.packet.synthesisInput).coverageGaps.find(
     (gap) => gap.claimId === "demoted-1",
   );
   assert.deepEqual(synthesisGap.sourceRefs, refs);

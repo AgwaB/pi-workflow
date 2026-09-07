@@ -1,3 +1,5 @@
+import { buildSynthesisPages } from "./synthesis-pages.mjs";
+
 // Deterministic compact input packet for deep-research final-audit.
 //
 // This helper performs mechanical joins only: it copies plan metadata,
@@ -51,14 +53,6 @@ function compactStrings(values, limit = 5) {
 		if (out.length >= limit) break;
 	}
 	return out;
-}
-
-function truncateText(value, limit = 240) {
-	const text = stringOf(value);
-	if (!text) return undefined;
-	const normalized = text.replace(/\s+/g, " ").trim();
-	if (normalized.length <= limit) return normalized;
-	return `${normalized.slice(0, Math.max(0, limit - 1)).trimEnd()}…`;
 }
 
 const EVIDENCE_FIELDS = [
@@ -365,278 +359,6 @@ function withGeneratedIds(items, prefix) {
 	}));
 }
 
-function synthesisClaimDigest(claim) {
-	const item = compactClaimDigest(claim);
-	return {
-		id: item.id,
-		claim: truncateText(item.claim, 260),
-		status: item.status,
-		confidence: item.confidence,
-		factSlotIds: compactStrings(item.factSlotIds, 8),
-		support: truncateText(item.support, 240),
-		caveat: truncateText(item.caveat, 180),
-		correctionOrCounterclaim: truncateText(item.correctionOrCounterclaim, 180),
-		...(item.evidence ? { evidence: item.evidence } : {}),
-		...(item.localQuoteGate ? { localQuoteGate: item.localQuoteGate } : {}),
-		hasSourceUrls: compactStrings(item.sourceUrls, 1).length > 0,
-		hasSourceRefs: compactStrings(item.sourceRefs, 1).length > 0,
-	};
-}
-
-function synthesisFactSlot(slot) {
-	const item = asObject(slot);
-	return {
-		slotId: stringOf(item.slotId),
-		label: truncateText(item.label, 120),
-		status: stringOf(item.status),
-		gapReason: truncateText(item.gapReason, 120),
-		parentImpact: truncateText(item.parentImpact, 120),
-	};
-}
-
-function synthesisGap(gap) {
-	const item = asObject(gap);
-	return {
-		id: stringOf(item.id),
-		kind: stringOf(item.kind),
-		claimId: stringOf(item.claimId),
-		slotId: stringOf(item.slotId),
-		evidenceState: stringOf(item.evidenceState),
-		reason: truncateText(item.reason, 220),
-		nextStep: truncateText(item.nextStep, 180),
-		sourceRefs: compactStrings(item.sourceRefs, Infinity),
-		sourceUrls: compactStrings(item.sourceUrls, Infinity),
-		scopeItem: truncateText(item.scopeItem, 160),
-		whyItMatters: truncateText(item.whyItMatters, 180),
-	};
-}
-
-function synthesisScopeCoverage(row) {
-	const item = asObject(row);
-	return {
-		scopeItem: truncateText(item.scopeItem ?? item.item ?? item.topic, 160),
-		status: stringOf(item.status ?? item.coverageStatus),
-		evidenceState: stringOf(item.evidenceState),
-		summary: truncateText(item.summary ?? item.reason, 220),
-		whyItMatters: truncateText(item.whyItMatters, 180),
-	};
-}
-
-function synthesisQuestionCoverage(row) {
-	const item = asObject(row);
-	return {
-		// Question/source identities are never truncated in the projection. If
-		// hostile valid identities make the projection too large, the typed budget
-		// block below is emitted rather than presenting a partial identity as exact.
-		questionId: stringOf(item.questionId),
-		status: stringOf(item.status),
-		failureStatus: stringOf(item.failureStatus),
-		sourceIds: compactStrings(item.sourceIds, 4),
-	};
-}
-
-function synthesisQuestionIntegrity(coverage) {
-	const item = asObject(coverage);
-	const issueIds = (value) => compactStrings(value, 64);
-	return {
-		passed: item.passed === true,
-		plannedCount: asArray(item.plannedIds).length,
-		completedCount: asArray(item.completedIds).length,
-		missingIds: issueIds(item.missingIds),
-		duplicateIds: issueIds(item.duplicateIds),
-		extraIds: issueIds(item.extraIds),
-		failedIds: issueIds(item.failedIds),
-		invalidPlannedQuestionCount: Number(item.invalidPlannedQuestionCount ?? 0),
-		plannedDuplicateIds: issueIds(item.plannedDuplicateIds),
-		invalidOutputSourceIds: issueIds(item.invalidOutputSourceIds),
-	};
-}
-
-const SYNTHESIS_READ_MAX_CHARS = 24000;
-
-function codePointLength(value) {
-	return [...String(value ?? "")].length;
-}
-
-function truncateCodePoints(value, limit) {
-	const text = stringOf(value);
-	if (!text) return undefined;
-	const points = [...text];
-	return points.length <= limit
-		? text
-		: `${points.slice(0, Math.max(0, limit - 1)).join("")}…`;
-}
-
-function compactSynthesisForBudget(
-	input,
-	maxChars = SYNTHESIS_READ_MAX_CHARS,
-) {
-	const compact = structuredClone(input);
-	const projectionLosses = [];
-	const textFields = [
-		["claims", ["claim", "support", "caveat", "correctionOrCounterclaim"], 120],
-		["factSlots", ["label", "gapReason", "parentImpact"], 80],
-		["preservedClaims", ["claim", "whyItMatters"], 100],
-		["gaps", ["reason", "nextStep", "scopeItem", "whyItMatters"], 100],
-		["researchScopeCoverage", ["scopeItem", "summary", "whyItMatters"], 90],
-	];
-	for (const [collection, fields, limit] of textFields) {
-		for (const row of compact[collection] ?? []) {
-			for (const field of fields)
-				row[field] = truncateCodePoints(row[field], limit);
-		}
-	}
-	const serializedLength = (value) => JSON.stringify(value).length;
-	const budgetFor = (blocked = false) => ({
-		maxChars,
-		claimRowsPreserved: asArray(compact.claims).length,
-		gapRowsPreserved: asArray(compact.gaps).length,
-		textCompacted: serializedLength(compact) < serializedLength(input),
-		codePointTelemetry: {
-			maxCodePoints: 22000,
-			codePoints: 0,
-		},
-		utf16Chars: 0,
-		...(projectionLosses.length > 0 ? { projectionLosses } : {}),
-		...(blocked
-			? {
-					budgetBlock: {
-						status: "blocked",
-						reason:
-							"synthesis input cannot preserve its required projection within the serialized read budget",
-						action:
-							"Do not synthesize from this projection; use the canonical packet ledger and increase the supported projection budget only through an owner-approved contract change.",
-						canonicalLedgerPreserved: true,
-					},
-				}
-			: {}),
-	});
-	const withBudget = (blocked = false) => {
-		const result = { ...compact, inputBudget: budgetFor(blocked) };
-		// The consumer uses String.length, so publish telemetry measured from the
-		// exact JSON serialization, including this metadata. Iterate because the
-		// telemetry digits are part of that serialization too.
-		for (let attempt = 0; attempt < 12; attempt += 1) {
-			const encoded = JSON.stringify(result);
-			const nextChars = encoded.length;
-			const nextCodePoints = codePointLength(encoded);
-			const stable =
-				result.inputBudget.utf16Chars === nextChars &&
-				result.inputBudget.codePointTelemetry.codePoints === nextCodePoints;
-			result.inputBudget.utf16Chars = nextChars;
-			result.inputBudget.codePointTelemetry.codePoints = nextCodePoints;
-			if (stable) break;
-		}
-		return result;
-	};
-	const measure = () => serializedLength(withBudget(false));
-	if (measure() > maxChars) {
-		for (const row of compact.claims ?? []) {
-			row.claim = truncateCodePoints(row.claim, 48);
-			row.support = truncateCodePoints(row.support, 48);
-			row.caveat = truncateCodePoints(row.caveat, 48);
-			row.correctionOrCounterclaim = truncateCodePoints(
-				row.correctionOrCounterclaim,
-				48,
-			);
-		}
-		for (const row of compact.gaps ?? []) {
-			row.reason = truncateCodePoints(row.reason, 48);
-			row.nextStep = truncateCodePoints(row.nextStep, 48);
-		}
-	}
-	// Claims and fact-slot rows are the supported synthesis ledgers. Optional
-	// narrative rows may be omitted only with an auditable projection loss.
-	if (measure() > maxChars) {
-		for (const field of ["researchScopeCoverage", "preservedClaims", "gaps"]) {
-			const count = asArray(compact[field]).length;
-			if (count === 0) continue;
-			projectionLosses.push({
-				path: `$.${field}`,
-				omittedCount: count,
-				reason: "optional narrative projection omitted to preserve core ledgers",
-			});
-			compact[field] = [];
-			if (measure() <= maxChars) break;
-		}
-	}
-	// If even the core projection cannot fit (for example, hostile identity
-	// strings), fail closed with a typed budget block. Never truncate an
-	// authoritative claim id or silently lower the supported claim count.
-	if (measure() > maxChars) {
-		for (const field of ["claims", "factSlots", "researchQuestionCoverage"]) {
-			const count = asArray(compact[field]).length;
-			if (count === 0) continue;
-			projectionLosses.push({
-				path: `$.${field}`,
-				omittedCount: count,
-				reason:
-					"core projection omitted because authoritative identities cannot fit; canonical packet remains authoritative",
-			});
-			compact[field] = [];
-		}
-		return withBudget(true);
-	}
-	return withBudget(false);
-}
-
-function buildSynthesisInput({
-	plan,
-	factSlotCoverage,
-	claimDigests,
-	preservedClaims,
-	coverageGaps,
-	remainingGaps,
-	sourceRefJoinFailures,
-	researchScopeCoverage,
-	integritySummary,
-	audit,
-	researchQuestionCoverage,
-}) {
-	return {
-		researchMetadata: {
-			depth: stringOf(plan.depth),
-			taskType: stringOf(plan.taskType),
-			expectedFinalShape: stringOf(plan.expectedFinalShape),
-			researchQuestions: asArray(plan.researchQuestions).length,
-			plannedFactSlots: asArray(plan.factSlots).length,
-		},
-		researchQuestionCoverage: asArray(researchQuestionCoverage?.rows).map(
-			synthesisQuestionCoverage,
-		),
-		verdictCounts: asObject(audit.verdictCounts),
-		factSlotStatusCounts: countByStatus(factSlotCoverage),
-		integritySummary: {
-			...integritySummary,
-			...(researchQuestionCoverage
-				? {
-						researchQuestionIntegrity: synthesisQuestionIntegrity(
-							researchQuestionCoverage,
-						),
-					}
-				: {}),
-		},
-		researchScopeCoverage: asArray(researchScopeCoverage)
-			.slice(0, 24)
-			.map(synthesisScopeCoverage),
-		factSlots: factSlotCoverage.map(synthesisFactSlot),
-		claims: claimDigests.map(synthesisClaimDigest),
-		preservedClaims: preservedClaims.slice(0, 12).map((claim) => ({
-			id: idOf(claim),
-			claim: truncateText(claim.claim, 240),
-			factSlotIds: compactStrings(claim.factSlotIds, 8),
-			whyItMatters: truncateText(claim.whyItMatters ?? claim.reason, 180),
-		})),
-		gaps: [
-			...remainingGaps.map((gap) => synthesisGap({ ...gap, kind: "remaining" })),
-			...coverageGaps.map((gap) => synthesisGap({ ...gap, kind: "coverage" })),
-			...sourceRefJoinFailures.map((gap) =>
-				synthesisGap({ ...gap, kind: "sourceRefJoinFailure" }),
-			),
-		],
-	};
-}
-
 export default async function finalAuditPacket({ sources }) {
 	const plan = asObject(findSource(sources, "plan"));
 	const normalizeClaims = asObject(findSource(sources, "normalize-claims"));
@@ -776,45 +498,11 @@ export default async function finalAuditPacket({ sources }) {
 		).length,
 		sourceRefJoinFailures: sourceRefJoinFailures.length,
 	};
-	const integritySummary = {
-		...(researchQuestionCoverage
-			? { researchQuestionIntegrity: researchQuestionCoverage }
-			: {}),
-		omittedVerificationCandidateCount: omittedCandidateIds.length,
-		sourceRefJoinFailures: sourceRefJoinFailures.length,
-		invalidVerifierRows: invalidVerifierRows.length,
-		duplicateVerifierRows: duplicateVerifierRows.length,
-		verifierOwnerIssues: verifierOwnerIssues.length,
-		invalidNormalizedCandidateCount: invalidNormalizedCandidateRows.length,
-		invalidNormalizedCandidateRows,
-		missingVerifierResults: Number(gateSummary.missingVerifierResults ?? 0),
-		zeroCandidateFloorBlockers,
-		batchAdoptionStatus: stringOf(batchAdoptionReadiness.status),
-		batchAdoptionBlockers: asArray(batchAdoptionReadiness.blockers),
-		sourceRefCoverage,
-	};
-	const synthesisInput = compactSynthesisForBudget(
-		buildSynthesisInput({
-			plan,
-			factSlotCoverage,
-			claimDigests,
-			preservedClaims,
-			coverageGaps,
-			remainingGaps,
-			sourceRefJoinFailures,
-			researchScopeCoverage: normalized.researchScopeCoverage,
-			integritySummary,
-			audit,
-			researchQuestionCoverage,
-		}),
-		SYNTHESIS_READ_MAX_CHARS,
-	);
 
-	return {
+	const result = {
 		schema: SCHEMA,
 		digest: `Prepared final-audit packet with ${claimDigests.length} audited claim(s), ${factSlotCoverage.length} fact slot(s), and ${remainingGaps.length + coverageGaps.length + sourceRefJoinFailures.length} gap row(s).`,
 		packet: {
-			synthesisInput,
 			researchMetadataSeed: {
 				depth: stringOf(plan.depth),
 				taskType: stringOf(plan.taskType),
@@ -910,4 +598,6 @@ export default async function finalAuditPacket({ sources }) {
 			},
 		},
 	};
+	result.packet.synthesisInput = buildSynthesisPages(result.packet);
+	return result;
 }

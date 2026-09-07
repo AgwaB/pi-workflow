@@ -1,3 +1,4 @@
+import { reconstructSynthesisPages } from "../../workflows/deep-research/helpers/synthesis-pages.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -100,7 +101,7 @@ test("deep-research repo-local zero candidates produce an explicit verification-
 	const packet = await finalAuditPacket({
 		sources: { ...sources, "audit-claims.main": audit },
 	});
-	const packetZeroGap = packet.packet.synthesisInput.gaps.find(
+	const packetZeroGap = reconstructSynthesisPages(packet.packet.synthesisInput).remainingGaps.find(
 		(gap) => gap.evidenceState === "no_verification_candidates",
 	);
 
@@ -110,15 +111,15 @@ test("deep-research repo-local zero candidates produce an explicit verification-
 		1,
 	);
 	assert.equal(
-		packet.packet.synthesisInput.integritySummary.zeroCandidateFloorBlockers,
+		reconstructSynthesisPages(packet.packet.synthesisInput).verifierIntegrity.gateSummary.zeroCandidateFloorBlockers,
 		1,
 	);
 	assert.equal(
-		packet.packet.synthesisInput.integritySummary.batchAdoptionStatus,
+		reconstructSynthesisPages(packet.packet.synthesisInput).verifierIntegrity.batchAdoptionReadiness.status,
 		"blocked",
 	);
 	assert(packetZeroGap, "expected final audit synthesis packet to expose gap");
-	assert.equal(packetZeroGap.kind, "remaining");
+	assert.deepEqual(packetZeroGap, JSON.parse(JSON.stringify(packet.packet.remainingGaps.find((gap) => gap.id === packetZeroGap.id))));
 	assert.deepEqual(
 		packet.packet.remainingGaps.find(
 			(gap) => gap.evidenceState === "no_verification_candidates",
