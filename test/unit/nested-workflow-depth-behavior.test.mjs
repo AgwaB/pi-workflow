@@ -4,6 +4,7 @@ import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
+import { setDynamicControllerHooksForTests } from '../../.tmp/unit/engine.js';
 import * as h from './unit-test-support.mjs';
 import { dynamicStatePath, rebuildDynamicState, readOrRebuildDynamicState } from '../../.tmp/unit/dynamic-state.js';
 import { dynamicEventsPath } from '../../.tmp/unit/dynamic-events.js';
@@ -182,17 +183,71 @@ test('cancellation stops local nested controllers without authorizing another si
         await f.close();
     }
 });
-test('runtime deadline still bounds a controller after successful sibling workflows', async () => {
-    const f = await fixture({ 'spec.json': spec(1, childRef, { maxRuntimeMs: 600 }), 'controller.mjs': `export default async ctx=>{await ctx.workflow('child','one');await ctx.workflow('child','two');await new Promise(r=>setTimeout(r,1200));return {control:{digest:'must not complete'}}}`, 'child/spec.json': spec(8), 'child/controller.mjs': leaf });
+test('runtime deadline still bounds a controller after successful sibling workflows', async (t) => {
+    const f = await fixture({ 'spec.json': spec(1, childRef, { maxRuntimeMs: 600 }), 'controller.mjs': `import {writeFile} from 'node:fs/promises';export default async ctx=>{await ctx.workflow('child','one');await ctx.workflow('child','two');await writeFile('RESTART_MARKER','both');await new Promise(()=>{});}`, 'child/spec.json': spec(8), 'child/controller.mjs': leaf });
+    const realSetImmediate = globalThis.setImmediate;
+    const realSetTimeout = globalThis.setTimeout;
+    const realClearTimeout = globalThis.clearTimeout;
+    let running;
+    let childLaunches = 0;
+    let timer;
+    let timedOut = false;
     try {
-        await h.scheduleRun(f.cwd, f.run.runId);
-        assert.equal((await children(f.cwd, f.run.runId)).length, 2);
+        h.setIndexUpdateDebounceMsForTests(0);
+        t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.now() });
+        setDynamicControllerHooksForTests({ beforeControllerWorkerLaunch: ({ runId }) => {
+            if (runId !== f.run.runId && ++childLaunches === 2) t.mock.timers.tick(100);
+        } });
+        running = h.scheduleRun(f.cwd, f.run.runId);
+        const watchdog = new Promise((_, reject) => {
+            timer = realSetTimeout(() => { timedOut = true; reject(new Error('deadline fixture did not settle within 5000ms')); }, 5000);
+        });
+        // Attach the rejection handler immediately, including during filesystem reads.
+        void watchdog.catch(() => {});
+        while (true) {
+            try { await access(join(f.cwd, 'RESTART_MARKER')); break; }
+            catch (error) { if (error.code !== 'ENOENT') throw error; }
+            if (timedOut) await watchdog;
+            t.mock.timers.tick(0);
+            await new Promise(resolve => realSetImmediate(resolve));
+        }
+        assert.equal(childLaunches, 2);
+        const childIds = await children(f.cwd, f.run.runId);
+        assert.equal(childIds.length, 2);
+        for (const id of childIds) assert.equal((await controller(f.cwd, id)).status, 'completed');
+        // 100ms elapsed between siblings: resetting the parent budget now would
+        // incorrectly move its original deadline to 700ms.
+        t.mock.timers.tick(499);
+        assert.equal((await controller(f.cwd, f.run.runId)).status, 'running');
+        t.mock.timers.tick(1);
+        await Promise.race([running, watchdog]);
         const task = await controller(f.cwd, f.run.runId);
         assert.equal(task.statusDetail, 'dynamic_budget_blocked');
         assert.match(task.lastMessage, /maxRuntimeMs=600/);
         assert.equal(await depth(f.cwd, f.run.runId), 1);
     }
     finally {
+        if (timer) realClearTimeout(timer);
+        setDynamicControllerHooksForTests();
+        t.mock.timers.reset();
+        h.setIndexUpdateDebounceMsForTests(undefined);
+        if (running) { await h.stopRun(f.cwd, f.run.runId); await running; }
+        await f.close();
+    }
+});
+
+test('real-clock runtime deadline aborts a pending controller without requiring child progress', { timeout: 10000 }, async () => {
+    const f = await fixture({ 'spec.json': spec(1, {}, { maxRuntimeMs: 600 }), 'controller.mjs': `export default async()=>{await new Promise(()=>{});}` });
+    let running;
+    try {
+        running = h.scheduleRun(f.cwd, f.run.runId);
+        await running;
+        const task = await controller(f.cwd, f.run.runId);
+        assert.equal(task.statusDetail, 'dynamic_budget_blocked');
+        assert.match(task.lastMessage, /maxRuntimeMs=600/);
+    }
+    finally {
+        if (running) { await h.stopRun(f.cwd, f.run.runId); await running; }
         await f.close();
     }
 });

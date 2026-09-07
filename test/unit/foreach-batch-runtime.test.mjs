@@ -1,3 +1,4 @@
+import { drainWorkflowFixture, withWorkflowFixtureLease } from "./workflow-fixture-lifecycle.mjs";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
@@ -723,6 +724,7 @@ test("groupBy separates adjacent keys and a missing key is singleton-only", asyn
 
 test("profile-only batching uses one physical launch, preserves per-item artifacts, downstream, and logical slots", async () => {
 	const cwd = makeProject();
+	let started;
 	try {
 		writeAgent(cwd);
 		const items = writeWorkflow(cwd, "batch-valid");
@@ -746,7 +748,7 @@ test("profile-only batching uses one physical launch, preserves per-item artifac
 			}),
 		});
 		setSubagentApiForTests(fake.api);
-		const started = await runWorkflow("batch-valid", cwd, {
+		started = await runWorkflow("batch-valid", cwd, {
 			task: "Run batched items.",
 			executionProfile: "batched",
 		});
@@ -913,8 +915,15 @@ test("profile-only batching uses one physical launch, preserves per-item artifac
 			"completed",
 		);
 	} finally {
-		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		let drained = false;
+		try {
+			if (started) await drainWorkflowFixture(cwd, started.runId);
+			drained = true;
+		} finally {
+			setSubagentApiForTests(undefined);
+			// A failed drain must retain the fixture rather than delete under a writer.
+			if (drained) rmSync(cwd, { recursive: true, force: true });
+		}
 	}
 });
 
@@ -1723,6 +1732,7 @@ test("one invalid batched member falls back both items to singleton without outp
 
 test("legacy completed member keeps its authority while pending leader migrates to a fresh singleton key", async () => {
 	const cwd = makeProject();
+	let started;
 	try {
 		writeAgent(cwd);
 		const items = writeWorkflow(cwd, "legacy-fallback-authority", {
@@ -1741,7 +1751,7 @@ test("legacy completed member keeps its authority while pending leader migrates 
 			}),
 		});
 		setSubagentApiForTests(fake.api);
-		const started = await runWorkflow("legacy-fallback-authority", cwd, {
+		started = await runWorkflow("legacy-fallback-authority", cwd, {
 			task: "Create a legacy fallback authority fixture.",
 			executionProfile: "batched",
 		});
@@ -1771,20 +1781,19 @@ test("legacy completed member keeps its authority while pending leader migrates 
 		leader.completedAt = new Date().toISOString();
 		member.status = "pending";
 		member.statusDetail = "pending";
-		await withRunLease(cwd, started.runId, async () =>
-			writeRunRecord(cwd, fixture),
-		);
-		const compiled = JSON.parse(
-			readFileSync(compiledWorkflowPath(cwd, started.runId), "utf8"),
-		);
-		await launchSubagentTask(
-			cwd,
-			fixture,
-			member,
-			compiled.tasks[fixture.tasks.indexOf(member)],
-		);
-		await refreshRun(cwd, started.runId);
-		fixture = await readRunRecord(cwd, started.runId);
+		await withWorkflowFixtureLease(cwd, started.runId, async () => {
+			await writeRunRecord(cwd, fixture);
+			const compiled = JSON.parse(
+				readFileSync(compiledWorkflowPath(cwd, started.runId), "utf8"),
+			);
+			await launchSubagentTask(
+				cwd,
+				fixture,
+				member,
+				compiled.tasks[fixture.tasks.indexOf(member)],
+			);
+		});
+		fixture = await waitForRun(cwd, started.runId, 20_000);
 		const completedMember = fixture.tasks.find(
 			(task) => task.taskId === member.taskId,
 		);
@@ -1850,154 +1859,149 @@ test("legacy completed member keeps its authority while pending leader migrates 
 			).content,
 			memberRawBefore.toString(),
 		);
-		for (const historicalStatus of [
-			"failed",
-			"interrupted",
-			"blocked",
-			"skipped",
-		]) {
-			const historicalMember = fixture.tasks.find(
-				(task) => task.taskId === member.taskId,
+		const memberLaunchesBeforeRecovery = await withWorkflowFixtureLease(cwd, started.runId, async () => {
+			for (const historicalStatus of [
+				"failed",
+				"interrupted",
+				"blocked",
+				"skipped",
+			]) {
+				const historicalMember = fixture.tasks.find(
+					(task) => task.taskId === member.taskId,
+				);
+				const pendingPeer = fixture.tasks.find(
+					(task) => task.taskId === leader.taskId,
+				);
+				assert.ok(historicalMember && pendingPeer);
+				historicalMember.status = historicalStatus;
+				historicalMember.statusDetail = historicalStatus;
+				historicalMember.completedAt = undefined;
+				pendingPeer.status = "pending";
+				pendingPeer.statusDetail = "pending";
+				await writeRunRecord(cwd, fixture);
+				const changed = await recoverForeachBatchRuntimeForTests(cwd, fixture);
+				const retained = await readRunRecord(cwd, started.runId);
+				assert.equal(retained.tasks.find((task) => task.taskId === member.taskId)?.foreachBatch
+					?.physicalAttempt, undefined);
+				assert.equal(
+					retained.tasks.find((task) => task.taskId === leader.taskId)?.foreachBatch
+						?.physicalAttempt,
+					2,
+				);
+				assert.ok(
+					retained.tasks.find((task) => task.taskId === member.taskId)?.launchAuthority
+						?.records.some((entry) => !entry.grant.attemptKey.includes("physical:")),
+				);
+				assert.ok(
+					retained.tasks.find((task) => task.taskId === member.taskId)
+						?.durableLaunchBarrier?.records.some(
+							(entry) => !entry.attemptKey.includes("physical:"),
+						),
+				);
+				assert.equal(changed, historicalStatus === "failed");
+
+				assert.equal(await recoverForeachBatchRuntimeForTests(cwd, retained), false);
+				fixture = retained;
+			}
+			const memberBarrier = completedMember.durableLaunchBarrier?.records.find(
+				(entry) => !entry.attemptKey.includes("physical:"),
 			);
-			const pendingPeer = fixture.tasks.find(
+			assert.equal(memberBarrier?.phase, "acknowledged");
+			const memberLaunchesBeforeRecovery = fake.launches.filter(
+				(launch) =>
+					launch.kind === "singleton" && launch.prompt.includes("item=item-2"),
+			).length;
+			const legacyMemberKeys = completedMember.launchAuthority.records.map(
+				(entry) => entry.grant.attemptKey,
+			);
+
+			const resumed = fixture.tasks.find((task) => task.taskId === leader.taskId);
+			assert.ok(resumed);
+			resumed.status = "pending";
+			resumed.statusDetail = "pending";
+			resumed.startedAt = undefined;
+			resumed.completedAt = undefined;
+			resumed.backendHandle = undefined;
+			resumed.backendFiles = undefined;
+			delete resumed.foreachBatch.physicalAttempt;
+			await writeRunRecord(cwd, fixture);
+			assert.equal(await recoverForeachBatchRuntimeForTests(cwd, fixture), true);
+			assert.equal(await recoverForeachBatchRuntimeForTests(cwd, fixture), false);
+			const recovered = await readRunRecord(cwd, started.runId);
+			const recoveredLeader = recovered.tasks.find(
 				(task) => task.taskId === leader.taskId,
 			);
-			assert.ok(historicalMember && pendingPeer);
-			historicalMember.status = historicalStatus;
-			historicalMember.statusDetail = historicalStatus;
-			historicalMember.completedAt = undefined;
-			pendingPeer.status = "pending";
-			pendingPeer.statusDetail = "pending";
-			await withRunLease(cwd, started.runId, async () =>
-				writeRunRecord(cwd, fixture),
+			const recoveredMember = recovered.tasks.find(
+				(task) => task.taskId === member.taskId,
 			);
-			const changed = await recoverForeachBatchRuntimeForTests(cwd, fixture);
-			const retained = await readRunRecord(cwd, started.runId);
-			assert.equal(retained.tasks.find((task) => task.taskId === member.taskId)?.foreachBatch
-				?.physicalAttempt, undefined);
+			assert.equal(recoveredLeader?.foreachBatch?.physicalAttempt, 2);
+			assert.equal(recoveredMember?.foreachBatch?.physicalAttempt, undefined);
+			assert.deepEqual(
+				foreachBatchTasks(recovered, recovered.foreachBatches[0]).map(
+					(task) => task.taskId,
+				),
+				[leader.taskId, member.taskId],
+			);
 			assert.equal(
-				retained.tasks.find((task) => task.taskId === leader.taskId)?.foreachBatch
-					?.physicalAttempt,
-				2,
+				hasNonSpawnableWorkflowLaunchAuthority(
+					recovered,
+					recoveredMember,
+					"pi-subagent/headless",
+				),
+				true,
 			);
+			assert.deepEqual(
+				readFileSync(join(memberTaskDir, "raw.md")),
+				memberRawBefore,
+			);
+			assert.deepEqual(
+				readFileSync(join(memberTaskDir, "output.log")),
+				memberOutputBefore,
+			);
+			assert.deepEqual(
+				readFileSync(join(memberTaskDir, "result.json")),
+				memberResultBefore,
+			);
+			assert.equal(
+				JSON.stringify({
+					launchBootstrap: recoveredMember.launchBootstrap,
+					launchAuthority: recoveredMember.launchAuthority,
+					durableLaunchBarrier: recoveredMember.durableLaunchBarrier,
+				}),
+				memberHistoryBefore,
+			);
+
+			// An explicit retry is the only way to rekey historical work. It gets a
+			// fresh physical identity while retaining, but never reusing, its legacy grant.
+			recoveredMember.status = "pending";
+			recoveredMember.statusDetail = "pending";
+			recoveredMember.startedAt = undefined;
+			recoveredMember.completedAt = undefined;
+			await writeRunRecord(cwd, recovered);
+			assert.equal(await recoverForeachBatchRuntimeForTests(cwd, recovered), true);
+			assert.equal(await recoverForeachBatchRuntimeForTests(cwd, recovered), false);
+			const retried = await readRunRecord(cwd, started.runId);
+			const retriedMember = retried.tasks.find(
+				(task) => task.taskId === member.taskId,
+			);
+			assert.equal(retriedMember?.foreachBatch?.physicalAttempt, 2);
 			assert.ok(
-				retained.tasks.find((task) => task.taskId === member.taskId)?.launchAuthority
-					?.records.some((entry) => !entry.grant.attemptKey.includes("physical:")),
+				legacyMemberKeys.every(
+					(key) =>
+						retriedMember.launchAuthority.records.some(
+							(entry) => entry.grant.attemptKey === key,
+						),
+				),
 			);
-			assert.ok(
-				retained.tasks.find((task) => task.taskId === member.taskId)
-					?.durableLaunchBarrier?.records.some(
-						(entry) => !entry.attemptKey.includes("physical:"),
-					),
+			assert.equal(
+				retriedMember.launchAuthority.records.some(
+					(entry) => entry.grant.attemptKey.includes("physical:2"),
+				),
+				false,
 			);
-			assert.equal(changed, historicalStatus === "failed");
-
-			assert.equal(await recoverForeachBatchRuntimeForTests(cwd, retained), false);
-			fixture = retained;
-		}
-		const memberBarrier = completedMember.durableLaunchBarrier?.records.find(
-			(entry) => !entry.attemptKey.includes("physical:"),
-		);
-		assert.equal(memberBarrier?.phase, "acknowledged");
-		const memberLaunchesBeforeRecovery = fake.launches.filter(
-			(launch) =>
-				launch.kind === "singleton" && launch.prompt.includes("item=item-2"),
-		).length;
-		const legacyMemberKeys = completedMember.launchAuthority.records.map(
-			(entry) => entry.grant.attemptKey,
-		);
-
-		const resumed = fixture.tasks.find((task) => task.taskId === leader.taskId);
-		assert.ok(resumed);
-		resumed.status = "pending";
-		resumed.statusDetail = "pending";
-		resumed.startedAt = undefined;
-		resumed.completedAt = undefined;
-		resumed.backendHandle = undefined;
-		resumed.backendFiles = undefined;
-		delete resumed.foreachBatch.physicalAttempt;
-		await withRunLease(cwd, started.runId, async () =>
-			writeRunRecord(cwd, fixture),
-		);
-		assert.equal(await recoverForeachBatchRuntimeForTests(cwd, fixture), true);
-		assert.equal(await recoverForeachBatchRuntimeForTests(cwd, fixture), false);
-		const recovered = await readRunRecord(cwd, started.runId);
-		const recoveredLeader = recovered.tasks.find(
-			(task) => task.taskId === leader.taskId,
-		);
-		const recoveredMember = recovered.tasks.find(
-			(task) => task.taskId === member.taskId,
-		);
-		assert.equal(recoveredLeader?.foreachBatch?.physicalAttempt, 2);
-		assert.equal(recoveredMember?.foreachBatch?.physicalAttempt, undefined);
-		assert.deepEqual(
-			foreachBatchTasks(recovered, recovered.foreachBatches[0]).map(
-				(task) => task.taskId,
-			),
-			[leader.taskId, member.taskId],
-		);
-		assert.equal(
-			hasNonSpawnableWorkflowLaunchAuthority(
-				recovered,
-				recoveredMember,
-				"pi-subagent/headless",
-			),
-			true,
-		);
-		assert.deepEqual(
-			readFileSync(join(memberTaskDir, "raw.md")),
-			memberRawBefore,
-		);
-		assert.deepEqual(
-			readFileSync(join(memberTaskDir, "output.log")),
-			memberOutputBefore,
-		);
-		assert.deepEqual(
-			readFileSync(join(memberTaskDir, "result.json")),
-			memberResultBefore,
-		);
-		assert.equal(
-			JSON.stringify({
-				launchBootstrap: recoveredMember.launchBootstrap,
-				launchAuthority: recoveredMember.launchAuthority,
-				durableLaunchBarrier: recoveredMember.durableLaunchBarrier,
-			}),
-			memberHistoryBefore,
-		);
-
-		// An explicit retry is the only way to rekey historical work. It gets a
-		// fresh physical identity while retaining, but never reusing, its legacy grant.
-		recoveredMember.status = "pending";
-		recoveredMember.statusDetail = "pending";
-		recoveredMember.startedAt = undefined;
-		recoveredMember.completedAt = undefined;
-		await withRunLease(cwd, started.runId, async () =>
-			writeRunRecord(cwd, recovered),
-		);
-		assert.equal(await recoverForeachBatchRuntimeForTests(cwd, recovered), true);
-		assert.equal(await recoverForeachBatchRuntimeForTests(cwd, recovered), false);
-		const retried = await readRunRecord(cwd, started.runId);
-		const retriedMember = retried.tasks.find(
-			(task) => task.taskId === member.taskId,
-		);
-		assert.equal(retriedMember?.foreachBatch?.physicalAttempt, 2);
-		assert.ok(
-			legacyMemberKeys.every(
-				(key) =>
-					retriedMember.launchAuthority.records.some(
-						(entry) => entry.grant.attemptKey === key,
-					),
-			),
-		);
-		assert.equal(
-			retriedMember.launchAuthority.records.some(
-				(entry) => entry.grant.attemptKey.includes("physical:2"),
-			),
-			false,
-		);
-		await scheduleRun(cwd, started.runId);
-		await refreshRun(cwd, started.runId);
-		const completed = await readRunRecord(cwd, started.runId);
+			return memberLaunchesBeforeRecovery;
+		});
+		const completed = await waitForRun(cwd, started.runId, 20_000);
 		const finalLeader = completed.tasks.find(
 			(task) => task.taskId === leader.taskId,
 		);
@@ -2029,8 +2033,14 @@ test("legacy completed member keeps its authority while pending leader migrates 
 			"the explicit retry launches the member once under a new physical key",
 		);
 	} finally {
-		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
+		let drained = false;
+		try {
+			if (started) await drainWorkflowFixture(cwd, started.runId);
+			drained = true;
+		} finally {
+			setSubagentApiForTests(undefined);
+			if (drained) rmSync(cwd, { recursive: true, force: true });
+		}
 	}
 });
 
