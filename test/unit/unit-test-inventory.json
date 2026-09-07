@@ -2508,7 +2508,7 @@
 		{
 			"name": "subagent launch slot abort after acquisition releases slot before action",
 			"occurrence": 1,
-			"sha256": "f0b3e1db3282c32d17c5cc88da79e91869108e52ec94adfd78b0637b9b0cca9d",
+			"sha256": "f9a914f147826f8448302b15d683c327e1674e7eed6039f01d14cc27d217670b",
 			"domain": "engine-store"
 		},
 		{
