@@ -2615,6 +2615,14 @@ function recordTerminalTaskObservability(options: {
 	recordTaskTerminalTiming({ ...options, capturedAt });
 }
 
+/** Read-only snapshot: no slot reset, waiter wake-up, or mutable queue handles. */
+export function subagentLaunchSlotStateForTests(): {
+	active: number;
+	queued: number;
+} {
+	return { active: activeLaunchSlots, queued: launchWaitQueue.length };
+}
+
 export function setSubagentLaunchControlsForTests(options?: {
 	releaseDelayMs?: number;
 	retryJitterMs?: number | (() => number);

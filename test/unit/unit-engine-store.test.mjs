@@ -2,6 +2,7 @@
 import { withMaterializedRawHost } from './raw-host-fixture.mjs';
 const setSubagentApiForTests = withMaterializedRawHost(setRawApi);
 import { createHash } from "node:crypto";
+import { subagentLaunchSlotStateForTests } from "../../.tmp/unit/subagent-backend.js";
 import {
 	CACHE_SHAPE_METRICS_ENV,
 	DYNAMIC_WEB_SEARCH_BUDGET,
@@ -4605,33 +4606,47 @@ test("subagent launch slot abort after acquisition releases slot before action",
 	process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES = "1";
 	delete process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS;
 	const controller = new AbortController();
+	const cleanup = new AbortController();
+	const firstReady = Promise.withResolvers();
+	const releaseFirst = Promise.withResolvers();
+	const thirdReady = Promise.withResolvers();
+	const releaseThird = Promise.withResolvers();
+	const pending = [];
+	const track = (promise) => {
+		pending.push(promise);
+		// Attach immediately; assertions below still observe the original rejection.
+		void promise.catch(() => undefined);
+		return promise;
+	};
 	let slotAcquisitions = 0;
-	let resolveSecondAcquired;
-	const secondAcquired = new Promise((resolve) => {
-		resolveSecondAcquired = resolve;
-	});
+	const actionAcquisitions = [];
 	setSubagentLaunchControlsForTests({
 		releaseDelayMs: 0,
 		retryJitterMs: 0,
 		onLaunchSlotAcquired: () => {
 			slotAcquisitions += 1;
 			if (slotAcquisitions === 2) {
-				resolveSecondAcquired();
 				controller.abort(new Error("lease lost after acquire"));
+			}
+		},
+		beforeRunSubagent: async () => {
+			actionAcquisitions.push(slotAcquisitions);
+			if (slotAcquisitions === 3) {
+				thirdReady.resolve();
+				await releaseThird.promise;
 			}
 		},
 	});
 	try {
+		assert.deepEqual(subagentLaunchSlotStateForTests(), { active: 0, queued: 0 });
 		writeAgent(cwd, "unit-scout", "read");
 		let launches = 0;
-		let releaseFirst;
 		setSubagentApiForTests({
 			async runSubagent() {
 				launches += 1;
 				if (launches === 1) {
-					await new Promise((resolve) => {
-						releaseFirst = resolve;
-					});
+					firstReady.resolve();
+					await releaseFirst.promise;
 				}
 				return {
 					runId: `run_abort_acquired_${launches}`,
@@ -4642,44 +4657,61 @@ test("subagent launch slot abort after acquisition releases slot before action",
 		});
 		const first = makeSubagentLaunchFixture(cwd, "abort_acquired_first");
 		const second = makeSubagentLaunchFixture(cwd, "abort_acquired_second");
-		const firstLaunch = launchSubagentTask(
+		const firstLaunch = track(launchSubagentTask(
 			cwd,
 			first.run,
 			first.task,
 			first.compiledTask,
-		);
-		await eventually(() => assert.equal(typeof releaseFirst, "function"));
-		const secondLaunch = launchSubagentTask(
+			undefined,
+			cleanup.signal,
+		));
+		await Promise.race([firstReady.promise, firstLaunch]);
+		assert.deepEqual(subagentLaunchSlotStateForTests(), { active: 1, queued: 0 });
+		const secondLaunch = track(launchSubagentTask(
 			cwd,
 			second.run,
 			second.task,
 			second.compiledTask,
 			controller.signal,
-		);
+			cleanup.signal,
+		));
 		await eventually(() =>
-			assert.match(second.task.lastMessage, /launch slot/),
+			assert.deepEqual(subagentLaunchSlotStateForTests(), { active: 1, queued: 1 }),
 		);
-		releaseFirst();
-		await Promise.race([
-			secondAcquired,
-			sleep(250).then(() => {
-				throw new Error("second launch slot was not acquired before abort");
-			}),
-		]);
-		await assert.rejects(secondLaunch, /lease lost after acquire/);
+		assert.match(second.task.lastMessage, /launch slot/);
+		releaseFirst.resolve();
 		await firstLaunch;
 		assert.equal(slotAcquisitions, 2);
+		await assert.rejects(secondLaunch, /lease lost after acquire/);
 		assert.equal(launches, 1);
+		assert.deepEqual(actionAcquisitions, [1]);
+		// Inspect release itself, not preparation or post-launch filesystem latency.
+		assert.deepEqual(subagentLaunchSlotStateForTests(), { active: 0, queued: 0 });
 
 		const third = makeSubagentLaunchFixture(cwd, "abort_acquired_third");
-		await Promise.race([
-			launchSubagentTask(cwd, third.run, third.task, third.compiledTask),
-			sleep(250).then(() => {
-				throw new Error("launch slot leaked after acquired abort");
-			}),
-		]);
+		const thirdLaunch = track(launchSubagentTask(
+			cwd,
+			third.run,
+			third.task,
+			third.compiledTask,
+			undefined,
+			cleanup.signal,
+		));
+		await Promise.race([thirdReady.promise, thirdLaunch]);
+		assert.equal(slotAcquisitions, 3);
+		assert.deepEqual(actionAcquisitions, [1, 3]);
+		assert.deepEqual(subagentLaunchSlotStateForTests(), { active: 1, queued: 0 });
+		assert.equal(launches, 1);
+		releaseThird.resolve();
+		assert.deepEqual(await thirdLaunch, { kind: "launched" });
 		assert.equal(launches, 2);
+		assert.deepEqual(subagentLaunchSlotStateForTests(), { active: 0, queued: 0 });
 	} finally {
+		releaseFirst.resolve();
+		releaseThird.resolve();
+		cleanup.abort(new Error("test cleanup"));
+		controller.abort(new Error("test cleanup"));
+		await Promise.allSettled(pending);
 		setSubagentApiForTests(undefined);
 		setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
 		if (originalLaunchLimit === undefined)
