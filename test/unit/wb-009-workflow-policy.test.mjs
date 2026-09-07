@@ -105,11 +105,16 @@ test("WB-009 privileged npm OIDC job is repository-free and verification is subs
 	assert.match(publish, /registry_error_is_permanent\(\)/);
 	assert.match(publish, /registry_error_is_retryable\(\)/);
 	assert.match(publish, /observe_registry_until_visible\(\)/);
-	assert.match(publish, /max_attempts=30/);
+	assert.match(publish, /max_attempts=40/);
 	assert.match(publish, /latest dist-tag has not converged/);
 	assert.match(publish, /observe_registry_until_visible publication-after\.json dist-tags\.json/);
 	assert.match(publish, /publication-before\.json/);
+	assert.match(publish, /publication-state\.json/);
+	assert.match(publish, /publish command succeeded; awaiting registry visibility/);
+	assert.match(publish, /is already visible; publish command was not invoked/);
 	assert.match(publish, /publication-after\.json/);
+	const publicationUpload = parsedWorkflow().jobs.publish.steps.find((step) => step.name === "Upload registry evidence");
+	assert.equal(publicationUpload.if, "always()");
 	assert.match(verification, /actions\/checkout@[0-9a-f]{40}/);
 	assert.match(verification, /id-token: none/);
 	assert.match(verification, /npm audit signatures --json --include-attestations --package-lock-only --registry https:\/\/registry\.npmjs\.org --ignore-scripts/);
@@ -136,6 +141,14 @@ test("WB-009 registry visibility helper retries transient absence and stale late
 	assert.ok(start >= 0 && end > start);
 	const helper = publishScript.script.slice(start, end + endMarker.length);
 	assert.doesNotMatch(helper, /\bnpm publish\b/);
+	const stateStart = publishScript.script.indexOf("write_publication_state() {");
+	const stateEnd = publishScript.script.indexOf("\nset +e\nnpm view", stateStart);
+	assert.ok(stateStart >= 0 && stateEnd > stateStart);
+	const stateHelper = publishScript.script.slice(stateStart, stateEnd);
+	const preflightStart = publishScript.script.indexOf("preflight_is_exact_absence() {");
+	const preflightEnd = publishScript.script.indexOf("\nobserve_registry_until_visible() {", preflightStart);
+	assert.ok(preflightStart >= 0 && preflightEnd > preflightStart);
+	const preflightHelper = publishScript.script.slice(preflightStart, preflightEnd);
 
 	const cwd = await mkdtemp(join(tmpdir(), "pi-wb009-registry-"));
 	try {
@@ -146,6 +159,9 @@ test("WB-009 registry visibility helper retries transient absence and stale late
 		const errorFile = join(cwd, "registry-error");
 		const metadataFile = join(cwd, "metadata.json");
 		const tagsFile = join(cwd, "tags.json");
+		const publicationStateFile = join(cwd, "publication-state.json");
+		const preflightPayloadFile = join(cwd, "preflight-payload.json");
+		const preflightErrorFile = join(cwd, "preflight-error.log");
 		await writeFile(fakeNpm, `#!/usr/bin/env bash
 set -euo pipefail
 count=0
@@ -184,7 +200,51 @@ exit 2
 			TAGS_FILE: tagsFile,
 			NPM_PACKAGE: "@agwab/pi-workflow",
 			TARGET_VERSION: "1.2.3",
+			RELEASE_COMMIT: "0123456789abcdef0123456789abcdef01234567",
+			PUBLICATION_STATE_FILE: publicationStateFile,
+			PREFLIGHT_PAYLOAD_FILE: preflightPayloadFile,
+			PREFLIGHT_ERROR_FILE: preflightErrorFile,
 		};
+		const invokeMetadataValidation = () => spawnSync("bash", ["-c", `set -euo pipefail\n${helper}\nvalidate_publication_metadata "$METADATA_FILE"\n`], { cwd, encoding: "utf8", env: baseEnv });
+		await writeFile(metadataFile, '{"name":"@agwab/pi-workflow","version":"1.2.3","dist":{"integrity":"fixture"}}\n');
+		assert.equal(invokeMetadataValidation().status, 0);
+		await writeFile(metadataFile, '{"name":"@agwab/other","version":"1.2.3","dist":{"integrity":"fixture"}}\n');
+		assert.notEqual(invokeMetadataValidation().status, 0);
+		await writeFile(metadataFile, '{"name":"@agwab/pi-workflow","version":"1.2.3","dist":null}\n');
+		assert.notEqual(invokeMetadataValidation().status, 0);
+
+		const invokePreflight = () => spawnSync("bash", ["-c", `set -euo pipefail\n${preflightHelper}\npreflight_is_exact_absence "$PREFLIGHT_PAYLOAD_FILE" "$PREFLIGHT_ERROR_FILE"\n`], { cwd, encoding: "utf8", env: baseEnv });
+		await writeFile(preflightPayloadFile, '{"error":{"code":"E404","summary":"missing","detail":"missing"}}\n');
+		await writeFile(preflightErrorFile, 'npm error code E404\nnpm error 404 No match found\n');
+		assert.equal(invokePreflight().status, 0);
+		await writeFile(preflightErrorFile, 'npm error code E404\nnpm error code E401\n');
+		assert.notEqual(invokePreflight().status, 0);
+		await writeFile(preflightErrorFile, 'npm error code E404\nnpm error code E500\n');
+		assert.notEqual(invokePreflight().status, 0);
+		await writeFile(preflightPayloadFile, '{"error":{"code":"E500","summary":"server","detail":"server"}}\n');
+		await writeFile(preflightErrorFile, 'npm error code E500\n');
+		assert.notEqual(invokePreflight().status, 0);
+
+		const invokeState = (args) => spawnSync("bash", ["-c", `set -euo pipefail\npublication_state="$PUBLICATION_STATE_FILE"\n${stateHelper}\nwrite_publication_state ${args}\n`], { cwd, encoding: "utf8", env: baseEnv });
+		for (const [args, expected] of [
+			["true not-required", { versionAlreadyVisible: true, publishCommandStatus: "not-required" }],
+			["false pending", { versionAlreadyVisible: false, publishCommandStatus: "pending" }],
+			["false succeeded", { versionAlreadyVisible: false, publishCommandStatus: "succeeded" }],
+		]) {
+			const stateResult = invokeState(args);
+			assert.equal(stateResult.status, 0, stateResult.stderr);
+			assert.deepEqual(JSON.parse(await readFile(publicationStateFile, "utf8")), {
+				schema: "pi-workflow-publication-state-v1",
+				name: "@agwab/pi-workflow",
+				version: "1.2.3",
+				releaseCommit: "0123456789abcdef0123456789abcdef01234567",
+				...expected,
+			});
+		}
+		assert.notEqual(invokeState("true pending").status, 0);
+		assert.notEqual(invokeState("false not-required").status, 0);
+		assert.notEqual(invokeState("false unknown").status, 0);
+
 		const invoke = (body, mode) => spawnSync("bash", ["-c", `set -euo pipefail\n${body}\npublication_error="$ERROR_FILE"\nobserve_registry_until_visible "$METADATA_FILE" "$TAGS_FILE"\n`], {
 			cwd, encoding: "utf8", env: { ...baseEnv, FAKE_MODE: mode },
 		});
@@ -212,7 +272,18 @@ exit 2
 		}
 
 		await writeFile(stateFile, "0");
-		const bounded = invoke(helper.replace("max_attempts=30", "max_attempts=3"), "missing");
+		await rm(sleepFile, { force: true });
+		const fullBudget = invoke(helper, "missing");
+		assert.notEqual(fullBudget.status, 0);
+		assert.equal(await readFile(stateFile, "utf8"), "40");
+		const fullSleeps = (await readFile(sleepFile, "utf8")).trim().split("\n").map(Number);
+		assert.equal(fullSleeps.length, 39);
+		assert.equal(fullSleeps.reduce((sum, seconds) => sum + seconds, 0), 370);
+		assert.ok(fullSleeps.reduce((sum, seconds) => sum + seconds, 0) >= 360);
+		assert.match(fullBudget.stderr, /after 40 attempts/);
+
+		await writeFile(stateFile, "0");
+		const bounded = invoke(helper.replace("max_attempts=40", "max_attempts=3"), "missing");
 		assert.notEqual(bounded.status, 0);
 		assert.equal(await readFile(stateFile, "utf8"), "3");
 		assert.match(bounded.stderr, /after 3 attempts/);

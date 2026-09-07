@@ -26,7 +26,7 @@ const runDigests = {
 	"build:Release validation in read-only privilege context": "2dcf0cae26e5fbb692c48fcf6d85a57e02342aeb1e23fdb76311b35245c7c01e",
 	"build:Create exact package and source-tree metadata": "62304bd3eccd8703a5af4380b5c5a556e6156acf16f40db4da61dec51ed301ca",
 	"source:Verify promoted release source identity": "b3f7b5a016768071b5bec9b71e0717c834ceb06ea8c5c186caf5222ad38d46b0",
-	"publish:Publish exact promoted tarball and record registry envelopes": "be9aec1a38d7566e6a88068a19a40ae92d643c5ce9662f5d3ecc3364849c4874",
+	"publish:Publish exact promoted tarball and record registry envelopes": "9941ccbc2a373c45ec97dee3b377bae82847f31b041185a922139d18fcc4b670",
 	"verification:Cryptographically gate and verify exact npm provenance": "ebb058402cac8e5ab8dd5d53ec38ab63cb88f7362ee4a78707f7b0be563df346",
 	"release:Create GitHub release for the exact published commit": "1c548669986532b1366629fbc7c276231bcd12094bda315768938cd3e08ba175",
 };
@@ -74,7 +74,14 @@ const negativeFixtures = [
 	["wrong npm tag", (c) => { c.jobs.publish.steps[3].run = c.jobs.publish.steps[3].run.replaceAll("--tag latest", "--tag next"); }],
 	["single-field npm view drift", (c) => { c.jobs.publish.steps[3].run = c.jobs.publish.steps[3].run.replace("name version dist", "dist"); }],
 	["missing registry visibility reconciliation", (c) => { c.jobs.publish.steps[3].run = c.jobs.publish.steps[3].run.replace("observe_registry_until_visible publication-after.json dist-tags.json", "true # registry visibility reconciliation removed"); }],
-	["unbounded registry visibility reconciliation", (c) => { c.jobs.publish.steps[3].run = c.jobs.publish.steps[3].run.replace("max_attempts=30", "max_attempts=0"); }],
+	["unbounded registry visibility reconciliation", (c) => { c.jobs.publish.steps[3].run = c.jobs.publish.steps[3].run.replace("max_attempts=40", "max_attempts=0"); }],
+	["registry visibility budget is below the observed publication window", (c) => { c.jobs.publish.steps[3].run = c.jobs.publish.steps[3].run.replace("max_attempts=40", "max_attempts=30"); }],
+	["publication state evidence is omitted", (c) => { c.jobs.publish.steps[4].with.path = c.jobs.publish.steps[4].with.path.replace("publication-state.json\n", ""); }],
+	["failed publication evidence is not preserved", (c) => { delete c.jobs.publish.steps[4].if; }],
+	["accepted publication state is not recorded", (c) => { c.jobs.publish.steps[3].run = c.jobs.publish.steps[3].run.replace("write_publication_state false succeeded", "true # accepted publication state omitted"); }],
+	["preflight permanent-error precedence is missing", (c) => { c.jobs.publish.steps[3].run = c.jobs.publish.steps[3].run.replace('registry_error_is_permanent "$publication_before" "$publication_error" || ', ""); }],
+	["preflight exact-absence gate is missing", (c) => { c.jobs.publish.steps[3].run = c.jobs.publish.steps[3].run.replace('! preflight_is_exact_absence "$publication_before" "$publication_error"', "false"); }],
+	["visible preflight metadata identity is not validated", (c) => { c.jobs.publish.steps[3].run = c.jobs.publish.steps[3].run.replace('if ! validate_publication_metadata "$publication_before"; then', "if false; then"); }],
 	["registry visibility retry accepts auth failures", (c) => { c.jobs.publish.steps[3].run = c.jobs.publish.steps[3].run.replace("E404|E408", "E401|E408"); }],
 	["registry permanent-error precedence is missing", (c) => { c.jobs.publish.steps[3].run = c.jobs.publish.steps[3].run.replace('registry_error_is_permanent "$publication_error" || ', ""); }],
 	["missing provenance visibility retry", (c) => { c.jobs.verification.steps[5].run = c.jobs.verification.steps[5].run.replace("audit_max_attempts=30", "audit_max_attempts=1"); }],
@@ -218,16 +225,47 @@ function validateWorkflow(candidate) {
 	const registryRetry = normalizedFunction(publishRun, "registry_error_is_retryable");
 	const registryObservation = normalizedFunction(publishRun, "observe_registry_until_visible");
 	assert.match(registryPermanent, /E401\|E403\|EINTEGRITY/);
+	assert.match(registryPermanent, /"\$@"/);
 	assert.match(registryRetry, /E404\|E408\|E425\|E429\|E5\[0-9\]\[0-9\]/);
+	assert.match(registryRetry, /"\$@"/);
 	assert.match(registryRetry, /ECONNRESET\|ECONNREFUSED\|ETIMEDOUT\|EAI_AGAIN\|ENETUNREACH\|EHOSTUNREACH\|ENOTFOUND\|EPIPE/);
 	assert.doesNotMatch(registryRetry, /E401|E403|EINTEGRITY/, "authorization and integrity failures must never be retried");
-	assert.match(registryObservation, /max_attempts=30/);
+	const registryAttemptsMatch = registryObservation.match(/max_attempts=([0-9]+)/);
+	assert.ok(registryAttemptsMatch);
+	const registryAttempts = Number(registryAttemptsMatch[1]);
+	const registrySleepBudget = Array.from({ length: registryAttempts - 1 }, (_, index) => index + 1)
+		.reduce((seconds, attempt) => seconds + (attempt < 6 ? attempt * 2 : 10), 0);
+	assert.equal(registryAttempts, 40);
+	assert.equal(registrySleepBudget, 370);
+	assert.ok(registrySleepBudget >= 360 && registrySleepBudget <= 600, "registry visibility wait must be bounded beyond the observed 310-second publication window");
 	assert.match(registryObservation, /while \[ "\$attempt" -le "\$max_attempts" \]/);
 	assert.equal((registryObservation.match(/registry_error_is_permanent "\$publication_error" \|\| ! registry_error_is_retryable "\$publication_error"/g) ?? []).length, 2);
 	assert.match(registryObservation, /latest dist-tag has not converged/);
 	assert.match(registryObservation, /return "\$metadata_status"/);
+	assert.match(registryObservation, /delay_seconds=\$\(\(attempt < 6 \? attempt \* 2 : 10\)\)/);
 	assert.match(registryObservation, /sleep "\$delay_seconds"/);
 	assert.match(registryObservation, /mv "\$metadata_tmp" "\$metadata_output"/);
+	const publicationStateStart = publishRun.indexOf("write_publication_state() {");
+	const publicationStateEnd = publishRun.indexOf("\nset +e\nnpm view", publicationStateStart);
+	assert.ok(publicationStateStart >= 0 && publicationStateEnd > publicationStateStart, "publication state helper boundaries");
+	const publicationState = publishRun.slice(publicationStateStart, publicationStateEnd);
+	assert.match(publicationState, /pi-workflow-publication-state-v1/);
+	assert.match(publicationState, /versionAlreadyVisible/);
+	assert.match(publicationState, /publishCommandStatus/);
+	assert.match(publicationState, /not-required/);
+	assert.match(publicationState, /pending/);
+	assert.match(publicationState, /succeeded/);
+	assert.match(publicationState, /publication path and command status conflict/);
+	assert.equal((publishRun.match(/^[ \t]*write_publication_state (?:false pending|false succeeded|true not-required)$/gm) ?? []).length, 3);
+	assert.match(publishRun, /preflight_is_exact_absence\(\)/);
+	assert.match(publishRun, /payload\.error\.code !== 'E404'/);
+	assert.match(publishRun, /codes\.some\(\(code\) => code !== 'E404'\)/);
+	assert.match(publishRun, /statuses\.some\(\(status\) => status !== '404'\)/);
+	assert.match(publishRun, /if registry_error_is_permanent "\$publication_before" "\$publication_error" \|\| ! preflight_is_exact_absence "\$publication_before" "\$publication_error"; then/);
+	assert.match(publishRun, /if ! validate_publication_metadata "\$publication_before"; then/);
+	const publicationUpload = step(publish, "Upload registry evidence");
+	assert.equal(publicationUpload.if, "always()");
+	assert.match(publicationUpload.with.path, /^publication-before\.json\npublication-state\.json\npublication-after\.json\ndist-tags\.json\n$/);
 	assert.match(publishRun, /^observe_registry_until_visible publication-after\.json dist-tags\.json$/m);
 	assert.equal((publishRun.match(/^observe_registry_until_visible publication-after\.json dist-tags\.json$/gm) ?? []).length, 1);
 	assert.equal(publishStep.env.RELEASE_COMMIT, "${{ needs.source.outputs.release-commit }}");
@@ -263,7 +301,8 @@ function validateWorkflow(candidate) {
 		assert.match(gateRun, /activeTags\.length === 0/);
 	}
 	assert.equal(normalizedFunction(publishRun, "verify_release_tag"), normalizedFunction(releaseRun, "verify_release_tag"), "OIDC and post-release tag gates must be exact duplicates");
-	assert.match(publishRun, /\n[ \t]*verify_release_tag\n[ \t]*npm publish "\$package_path"/, "publish must verify the protected tag immediately before npm publish");
+	assert.match(publishRun, /\n[ \t]*verify_release_tag\n[ \t]*write_publication_state false pending\n[ \t]*npm publish "\$package_path"/, "publish must verify the protected tag and record pending state immediately before npm publish");
+	assert.match(publishRun, /npm publish "\$package_path"[^\n]*\n[ \t]*write_publication_state false succeeded/, "publish success must be durably recorded before visibility polling");
 	assert.equal((publishRun.match(/^[ \t]*verify_release_tag$/gm) ?? []).length, 1, "publish tag must be checked exactly before npm publish");
 	assert.doesNotMatch(publishRun, /verify-npm-publication|npm audit signatures|git\s+(?:push|commit|tag)|npm (?:ci|install|run)/);
 	assert.match(verifyRun, /npm audit signatures --json --include-attestations --package-lock-only --registry https:\/\/registry\.npmjs\.org --ignore-scripts/);
@@ -312,7 +351,7 @@ function validateSteps(jobName, steps) {
 			["run", "Create exact package and source-tree metadata"], ["action", ACTIONS.upload, { name: "release-artifact", path: "release-metadata.json\nagwab-pi-workflow-${{ steps.version.outputs.version }}.tgz\n", "if-no-files-found": "error", "retention-days": 7 }, "Upload exact release artifact"],
 		],
 		source: [["action", ACTIONS.checkout, { ref: "${{ github.sha }}", "fetch-depth": 0, "persist-credentials": false }], ["run", "Verify promoted release source identity"]],
-		publish: [["action", ACTIONS.setupNode, { "node-version": 24, "package-manager-cache": false }], ["run", "Bootstrap private npm config"], ["action", ACTIONS.download, { name: "release-artifact", path: "release-artifact" }], ["run", "Publish exact promoted tarball and record registry envelopes"], ["action", ACTIONS.upload, { name: "publication-evidence", path: "publication-before.json\npublication-after.json\ndist-tags.json\n", "if-no-files-found": "error", "retention-days": 7 }, "Upload registry evidence"]],
+		publish: [["action", ACTIONS.setupNode, { "node-version": 24, "package-manager-cache": false }], ["run", "Bootstrap private npm config"], ["action", ACTIONS.download, { name: "release-artifact", path: "release-artifact" }], ["run", "Publish exact promoted tarball and record registry envelopes"], ["action", ACTIONS.upload, { name: "publication-evidence", path: "publication-before.json\npublication-state.json\npublication-after.json\ndist-tags.json\n", "if-no-files-found": "error", "retention-days": 7 }, "Upload registry evidence", "always()"]],
 		verification: [["action", ACTIONS.checkout, { ref: "${{ needs.source.outputs.release-commit }}", "fetch-depth": 1, "persist-credentials": false }], ["action", ACTIONS.setupNode, { "node-version": 24, "package-manager-cache": false }], ["run", "Bootstrap private npm config"], ["action", ACTIONS.download, { name: "release-artifact", path: "release-artifact" }], ["action", ACTIONS.download, { name: "publication-evidence", path: "publication-evidence" }], ["run", "Cryptographically gate and verify exact npm provenance"]],
 		release: [["run", "Create GitHub release for the exact published commit"]],
 	};
@@ -321,8 +360,11 @@ function validateSteps(jobName, steps) {
 	for (const [index, spec] of catalogs[jobName].entries()) {
 		const actual = steps[index];
 		if (spec[0] === "action") {
-			assertExactKeys(actual, spec[3] ? ["name", "uses", "with"] : ["uses", "with"], `${jobName} step ${index}`);
+			let expectedKeys = ["uses", "with"];
+			if (spec[3]) expectedKeys = spec[4] ? ["name", "if", "uses", "with"] : ["name", "uses", "with"];
+			assertExactKeys(actual, expectedKeys, `${jobName} step ${index}`);
 			if (spec[3]) assert.equal(actual.name, spec[3]);
+			if (spec[4]) assert.equal(actual.if, spec[4]);
 			assert.equal(actual.uses, spec[1]);
 			assertExactObject(actual.with, spec[2], `${jobName} step ${index}.with`);
 		} else {

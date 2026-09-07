@@ -354,17 +354,31 @@ jobs:
           }
           # registry visibility retry start
           registry_error_is_permanent() {
-            grep -Eiq 'npm (ERR!|error) code (E401|E403|EINTEGRITY)|npm (ERR!|error) (401|403)([^0-9]|$)' "$1"
+            grep -Eiq 'npm (ERR!|error) code (E401|E403|EINTEGRITY)|npm (ERR!|error) (401|403)([^0-9]|$)' "$@"
           }
           registry_error_is_retryable() {
-            grep -Eiq 'npm (ERR!|error) code (E404|E408|E425|E429|E5[0-9][0-9]|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|ENOTFOUND|EPIPE)|npm (ERR!|error) (404|408|425|429|5[0-9][0-9])([^0-9]|$)' "$1"
+            grep -Eiq 'npm (ERR!|error) code (E404|E408|E425|E429|E5[0-9][0-9]|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|ENOTFOUND|EPIPE)|npm (ERR!|error) (404|408|425|429|5[0-9][0-9])([^0-9]|$)' "$@"
+          }
+          validate_publication_metadata() {
+            node -e 'const fs=require("node:fs"); const value=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); const keys=Object.keys(value).sort(); if (JSON.stringify(keys)!=="[\"dist\",\"name\",\"version\"]" || value.name!==process.argv[2] || value.version!==process.argv[3] || !value.dist || typeof value.dist!=="object" || Array.isArray(value.dist)) throw new Error("registry package metadata identity is malformed");' "$1" "$NPM_PACKAGE" "$TARGET_VERSION"
+          }
+          preflight_is_exact_absence() {
+            node --input-type=module - "$1" "$2" <<'NODE'
+          import { readFileSync } from 'node:fs';
+          const payload = JSON.parse(readFileSync(process.argv[2], 'utf8'));
+          if (JSON.stringify(Object.keys(payload).sort()) !== '["error"]' || !payload.error || typeof payload.error !== 'object' || Array.isArray(payload.error) || payload.error.code !== 'E404' || typeof payload.error.summary !== 'string' || typeof payload.error.detail !== 'string') throw new Error('preflight response is not an exact E404 envelope');
+          const diagnostic = readFileSync(process.argv[3], 'utf8');
+          const codes = [...diagnostic.matchAll(/npm (?:ERR!|error) code ([A-Z0-9]+)/gi)].map((match) => match[1].toUpperCase());
+          const statuses = [...diagnostic.matchAll(/^npm (?:ERR!|error) (401|403|404|408|425|429|5[0-9][0-9])(?:[^0-9]|$)/gim)].map((match) => match[1]);
+          if (codes.length === 0 || codes.some((code) => code !== 'E404') || statuses.some((status) => status !== '404')) throw new Error('preflight diagnostics are not exclusively E404');
+          NODE
           }
           observe_registry_until_visible() {
             metadata_output="$1"
             tags_output="$2"
             metadata_tmp="${metadata_output}.tmp"
             tags_tmp="${tags_output}.tmp"
-            max_attempts=30
+            max_attempts=40
             attempt=1
             last_reason="registry state is not visible"
             while [ "$attempt" -le "$max_attempts" ]; do
@@ -381,7 +395,7 @@ jobs:
                 fi
                 last_reason="package metadata is not visible"
               else
-                if ! node -e 'const fs=require("node:fs"); const value=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); const keys=Object.keys(value).sort(); if (JSON.stringify(keys)!=="[\"dist\",\"name\",\"version\"]" || value.name!==process.argv[2] || value.version!==process.argv[3] || !value.dist || typeof value.dist!=="object" || Array.isArray(value.dist)) throw new Error("registry package metadata identity is malformed");' "$metadata_tmp" "$NPM_PACKAGE" "$TARGET_VERSION"; then
+                if ! validate_publication_metadata "$metadata_tmp"; then
                   echo "registry returned a conflicting package identity" >&2
                   return 1
                 fi
@@ -439,30 +453,63 @@ jobs:
           test "$(node -p "require('./$metadata').packageSha256")" = "$BUILD_PACKAGE_SHA"
 
           publication_before=publication-before.json
+          publication_state=publication-state.json
           publication_error="$(mktemp)"
           cleanup_publication() { rm -f "$publication_error" publication-after.json.tmp dist-tags.json.tmp; }
           trap cleanup_publication EXIT
+          write_publication_state() {
+            VERSION_ALREADY_VISIBLE="$1" PUBLISH_COMMAND_STATUS="$2" PUBLICATION_STATE="$publication_state" node --input-type=module <<'NODE'
+          import { writeFileSync } from 'node:fs';
+          const versionAlreadyVisible = process.env.VERSION_ALREADY_VISIBLE;
+          if (versionAlreadyVisible !== 'true' && versionAlreadyVisible !== 'false') throw new Error('VERSION_ALREADY_VISIBLE must be true or false');
+          const publishCommandStatus = process.env.PUBLISH_COMMAND_STATUS;
+          if (!['not-required', 'pending', 'succeeded'].includes(publishCommandStatus)) throw new Error('PUBLISH_COMMAND_STATUS is invalid');
+          if ((versionAlreadyVisible === 'true') !== (publishCommandStatus === 'not-required')) throw new Error('publication path and command status conflict');
+          const state = {
+            schema: 'pi-workflow-publication-state-v1',
+            name: process.env.NPM_PACKAGE,
+            version: process.env.TARGET_VERSION,
+            releaseCommit: process.env.RELEASE_COMMIT,
+            versionAlreadyVisible: versionAlreadyVisible === 'true',
+            publishCommandStatus,
+          };
+          writeFileSync(process.env.PUBLICATION_STATE, `${JSON.stringify(state, null, 2)}\n`);
+          NODE
+          }
           set +e
           npm view "$NPM_PACKAGE@$TARGET_VERSION" name version dist --registry https://registry.npmjs.org --tag latest --json > "$publication_before" 2> "$publication_error"
           view_status=$?
           set -e
           if [ "$view_status" -ne 0 ]; then
-            if ! grep -Eiq 'npm (ERR!|error) code E404' "$publication_error"; then
-              cat "$publication_error" >&2
+            if registry_error_is_permanent "$publication_before" "$publication_error" || ! preflight_is_exact_absence "$publication_before" "$publication_error"; then
+              test ! -s "$publication_before" || cat "$publication_before" >&2
+              test ! -s "$publication_error" || cat "$publication_error" >&2
               exit "$view_status"
             fi
             printf '{"name":%s,"version":%s,"dist":null}\n' "$(node -p 'JSON.stringify(process.env.NPM_PACKAGE)')" "$(node -p 'JSON.stringify(process.env.TARGET_VERSION)')" > "$publication_before"
             verify_release_tag
+            write_publication_state false pending
             npm publish "$package_path" --access public --provenance --ignore-scripts --registry https://registry.npmjs.org --tag latest
+            write_publication_state false succeeded
+            echo "$NPM_PACKAGE@$TARGET_VERSION publish command succeeded; awaiting registry visibility"
+          else
+            if ! validate_publication_metadata "$publication_before"; then
+              echo "registry returned a conflicting preflight package identity" >&2
+              exit 1
+            fi
+            write_publication_state true not-required
+            echo "$NPM_PACKAGE@$TARGET_VERSION is already visible; publish command was not invoked"
           fi
           observe_registry_until_visible publication-after.json dist-tags.json
 
       - name: Upload registry evidence
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: publication-evidence
           path: |
             publication-before.json
+            publication-state.json
             publication-after.json
             dist-tags.json
           if-no-files-found: error
