@@ -3035,9 +3035,9 @@ export function deriveRunStatus(run: WorkflowRunRecord): WorkflowRunRecord {
 
 /**
  * Final-stage tasks are structural graph leaves: tasks whose specId no other
- * task depends on. Helper leaves (support/dynamic controller tasks) are
- * excluded when at least one regular leaf exists, so a trailing sanitizer or
- * controller never masquerades as the run's final output.
+ * task depends on. Materializing a foreach replaces downstream dependencies
+ * with its generated children, leaving the foreach task itself as an orphaned
+ * leaf. Those tasks are scheduling placeholders, not model outputs.
  */
 export function finalStageTasks(
 	tasks: WorkflowTaskRunRecord[],
@@ -3046,7 +3046,34 @@ export function finalStageTasks(
 	for (const task of tasks) {
 		for (const dependency of task.dependsOn ?? []) dependedOn.add(dependency);
 	}
-	const leaves = tasks.filter((task) => !dependedOn.has(task.specId));
+	const foreachPlaceholderStatusDetails = new Set([
+		"foreach_empty",
+		"foreach_materialized",
+		"foreach_streaming_complete",
+	]);
+	const generatedForeachPlaceholderSpecIds = new Set(
+		tasks.flatMap((task) =>
+			task.foreachGenerated?.placeholderSpecId === undefined
+				? []
+				: [task.foreachGenerated.placeholderSpecId],
+		),
+	);
+	const foreachPlaceholderSpecIds = new Set(
+		tasks
+			.filter(
+				(task) =>
+					task.kind === "foreach" &&
+					(foreachPlaceholderStatusDetails.has(task.statusDetail ?? "") ||
+						task.dispatchMap !== undefined ||
+						generatedForeachPlaceholderSpecIds.has(task.specId)),
+			)
+			.map((task) => task.specId),
+	);
+	const leaves = tasks.filter(
+		(task) =>
+			!dependedOn.has(task.specId) &&
+			!foreachPlaceholderSpecIds.has(task.specId),
+	);
 	const regularLeaves = leaves.filter(
 		(task) => task.kind !== "support" && task.kind !== "dynamic",
 	);

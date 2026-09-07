@@ -62,11 +62,31 @@
         "verdictCounts": { "type": "object" },
         "statusPartitions": { "type": "object" },
         "factSlotCoverage": { "type": "array", "items": { "type": "object" } },
+        "factSlotReconciliation": {
+          "type": "object",
+          "description": "Reverse candidate bindings may be appended only from valid canonical claim factSlotIds; unknown or contradictory hints remain visible for deterministic rejection.",
+          "properties": {
+            "source": { "type": "string" },
+            "addedReverseBindings": { "type": "array", "items": { "type": "object" } },
+            "preservedReverseBindings": { "type": "array", "items": { "type": "object" } },
+            "invalidCanonicalMemberships": { "type": "array", "items": { "type": "object" } }
+          }
+        },
         "factSlotStatusCounts": { "type": "object" },
         "coverageGaps": { "type": "array", "items": { "type": "object" } },
         "remainingGaps": { "type": "array", "items": { "type": "object" } },
         "sourceRefJoinFailures": { "type": "array", "items": { "type": "object" } },
-        "claimVerdictLedger": { "type": "array", "items": { "type": "object" } },
+        "claimVerdictLedger": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "description": "The canonical ledger preserves bounded verifier evidence, including local file/range/quote locations; local evidence does not require an HTTP URL.",
+            "properties": {
+              "evidence": { "type": "array", "items": { "type": "object" }, "maxItems": 5 },
+              "localQuoteGate": { "type": "array", "items": { "type": "object" } }
+            }
+          }
+        },
         "verifierIntegrity": {
           "type": "object",
           "properties": {

@@ -6149,6 +6149,7 @@ test("deep-research claim-evidence-gate suppresses sourceRef join failures for l
 								"Local repository evidence supports the implementation detail.",
 							factSlotIds: ["slot-001"],
 							sourceUrls: ["https://example.test/missing-card"],
+							file: "src/engine.ts",
 						},
 					],
 				},
@@ -6159,7 +6160,6 @@ test("deep-research claim-evidence-gate suppresses sourceRef join failures for l
 				status: "verified",
 				evidence: [
 					{
-						url: "https://example.test/missing-card",
 						path: "src/engine.ts#L10",
 						quote:
 							"Local repository evidence supports the implementation detail.",
@@ -9545,6 +9545,8 @@ test("workflow output parser repairs known workflow control schema slips before 
 				status: "completed",
 				impacts: [],
 				assumptions: [],
+				impactLedgerStatus: "complete",
+				impactLedger: [],
 			}),
 			"</control>",
 			"<analysis>",
@@ -9583,6 +9585,7 @@ test("workflow output parser repairs known workflow control schema slips before 
 				schema:
 					"./schemas/deep-research-research-questions-control.schema.json",
 				digest: "missing sources and scalar query count",
+				questionId: "rq-001",
 				question: { id: "rq-001", question: "What should be researched?" },
 				extractedFacts: [],
 				claims: [],
@@ -10759,6 +10762,8 @@ test("workflow output repair wraps bare string object rows only when valid by co
 						{ area: "cli", detail: "flag rename", severity: "low" },
 					],
 					assumptions: ["No consumers rely on the removed enum value"],
+					impactLedgerStatus: "complete",
+					impactLedger: [],
 				}),
 				"</control>",
 				"<analysis>",

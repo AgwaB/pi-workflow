@@ -3155,11 +3155,13 @@ async function launchForeachBatchAt(
 			batchId,
 			role: "leader",
 			phase: "prepared",
+			physicalAttempt: 1,
 		};
 		memberTask.foreachBatch = {
 			batchId,
 			role: "member",
 			phase: "prepared",
+			physicalAttempt: 1,
 		};
 		await persistFinalPromptMetadata(cwd, run, leaderTask, preparedLeader);
 		await persistFinalPromptMetadata(cwd, run, memberTask, preparedMember);

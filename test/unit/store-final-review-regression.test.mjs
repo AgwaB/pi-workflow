@@ -21,6 +21,7 @@ import {
 	writeRunRecord,
 	writeStaticRunArtifacts,
 } from "./unit-test-support.mjs";
+import { finalStageTasks } from "../../.tmp/unit/store.js";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -130,6 +131,110 @@ test("frozen bundles collect decision-loop providers and TypeScript import closu
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
+});
+
+test("final stage selection excludes only proven foreach scheduling placeholders", () => {
+	const task = (specId, options = {}) => ({
+		taskId: `task-${specId}`,
+		specId,
+		kind: "single",
+		status: "completed",
+		statusDetail: "completed",
+		...options,
+	});
+	const placeholder = (specId, statusDetail, options = {}) =>
+		task(specId, {
+			kind: "foreach",
+			statusDetail,
+			...options,
+		});
+	const generated = (specId, placeholderSpecId, options = {}) =>
+		task(specId, {
+			kind: "foreach",
+			foreachGenerated: { placeholderSpecId },
+			...options,
+		});
+
+	// This is the captured deep-review shape: materialized foreach parents are
+	// orphaned by dependency replacement, while final.main is authoritative.
+	const actualShape = [
+		task("triage.main"),
+		placeholder("reviewers.item", "foreach_materialized", {
+			dependsOn: ["triage.main"],
+			dispatchMap: {},
+		}),
+		generated("reviewers.security", "reviewers.item", {
+			dependsOn: ["triage.main"],
+		}),
+		task("dedup-findings.main", {
+			kind: "support",
+			dependsOn: ["reviewers.security"],
+		}),
+		task("report.main", { kind: "reduce", dependsOn: ["dedup-findings.main"] }),
+		task("final.main", {
+			kind: "support",
+			dependsOn: ["report.main"],
+		}),
+	];
+	assert.deepEqual(
+		finalStageTasks(actualShape).map((candidate) => candidate.specId),
+		["final.main"],
+	);
+
+	assert.deepEqual(
+		finalStageTasks([
+			placeholder("empty.item", "foreach_empty"),
+		]).map((candidate) => candidate.specId),
+		[],
+	);
+	assert.deepEqual(
+		finalStageTasks([
+			placeholder("stream.item", "foreach_streaming_complete"),
+			generated("stream.one", "stream.item"),
+		]).map((candidate) => candidate.specId),
+		["stream.one"],
+	);
+	assert.deepEqual(
+		finalStageTasks([
+			placeholder("materialized.item", "completed", {
+				dispatchMap: {},
+			}),
+			task("authoritative.support", { kind: "support" }),
+		]).map((candidate) => candidate.specId),
+		["authoritative.support"],
+	);
+	assert.deepEqual(
+		finalStageTasks([
+			placeholder("child-evidence.item", "completed"),
+			generated("child-evidence.one", "child-evidence.item"),
+		]).map((candidate) => candidate.specId),
+		["child-evidence.one"],
+	);
+
+	// A real model foreach leaf and a legacy foreach record without scheduler
+	// evidence remain governed by the existing regular-leaf behavior.
+	const realModelLeaf = task("model.foreach", { kind: "foreach" });
+	const legacyForeach = task("legacy.foreach", {
+		kind: "foreach",
+		statusDetail: "completed",
+	});
+	assert.deepEqual(
+		finalStageTasks([realModelLeaf, task("trailing.support", { kind: "support" })]).map(
+			(candidate) => candidate.specId,
+		),
+		["model.foreach"],
+	);
+	assert.deepEqual(
+		finalStageTasks([legacyForeach]).map((candidate) => candidate.specId),
+		["legacy.foreach"],
+	);
+	assert.deepEqual(
+		finalStageTasks([
+			task("partial.model", { status: "failed" }),
+			task("interrupted.support", { kind: "support", status: "interrupted" }),
+		]).map((candidate) => candidate.specId),
+		["partial.model"],
+	);
 });
 
 test("debounced index writes outlive the run lease that scheduled them", async () => {

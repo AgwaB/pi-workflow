@@ -32,7 +32,31 @@ export async function roundtrip(cwd, evidence, verdict = "KEEP", counterEvidence
   };
   const source = stage => ({ source: stage, stageId: stage, specId: `${stage}.main`, taskId: `task-${stage}`, status: "completed", artifacts: { control: { path: "control.json" } } });
   const upstream = ["extract-spec", "map-implementation", "inspect-tests"].map(source);
-  for (const row of upstream) await save(row.taskId, "control.json", row.stageId === "extract-spec" ? { requirements: [{ id: "REQ-1" }] } : {});
+  for (const row of upstream)
+    await save(
+      row.taskId,
+      "control.json",
+      row.stageId === "extract-spec"
+        ? {
+            specSources: ["SPEC.md"],
+            requirements: [
+              {
+                id: "REQ-1",
+                requirement: "The implementation must preserve the local behavior.",
+                specEvidence: {
+                  file: "SPEC.md",
+                  lineStart: 1,
+                  lineEnd: 1,
+                  quote: "The implementation must preserve the local behavior.",
+                },
+                priority: "high",
+                implementationSignals: ["source.ts:1"],
+                testSignals: ["test.ts:1"],
+              },
+            ],
+          }
+        : {},
+    );
   await save("task-candidate", "control.json", analysis);
   await save("task-candidate", "source-manifest.json", { schema: "workflow-source-manifest-v1", runId, taskId: "task-candidate", sources: upstream });
   await save("task-partition-findings", "source-manifest.json", { schema: "workflow-source-manifest-v1", runId, taskId: "task-partition-findings", sources: [{ ...source("candidate-findings"), taskId: "task-candidate" }] });
@@ -42,7 +66,11 @@ export async function roundtrip(cwd, evidence, verdict = "KEEP", counterEvidence
 }
 async function fixture(fn) {
   const cwd = await mkdtemp(join(tmpdir(), "review-byte-gate-"));
-  try { await writeFile(join(cwd, "source.ts"), `${citation.quote}\n`); await fn(cwd); }
+  try {
+    await writeFile(join(cwd, "source.ts"), `${citation.quote}\n`);
+    await writeFile(join(cwd, "SPEC.md"), "The implementation must preserve the local behavior.\n");
+    await fn(cwd);
+  }
   finally { await rm(cwd, { recursive: true, force: true }); }
 }
 async function scaffold(cwd, file = "source.ts", quote = citation.quote) {

@@ -1,6 +1,10 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import localQuoteGate from "./local-quote-gate.mjs";
+import localQuoteGate, {
+	isConservativeLocalLocator,
+	isLocalLocator,
+	localEvidenceRefs,
+} from "./local-quote-gate.mjs";
 
 import {
 	VERIFICATION_STATUS,
@@ -78,31 +82,20 @@ function collectUrls(value, urls = new Set()) {
 }
 
 function looksLikeLocalSourceRef(value) {
-	const text = String(value ?? "")
-		.trim()
-		.replace(/^(?:file|repo):/i, "")
-		.replace(/#L\d+(?:-L?\d+)?$/i, "");
-	return /^(?:\.?[\w.-]+\/)?[\w./-]+\.(?:md|json|ya?ml|ts|tsx|js|mjs|cjs|py|go|rs|zig|txt|sol|java|kt|swift|rb|php|c|cc|cpp|h|hpp)$/i.test(
-		text,
-	);
+	return isConservativeLocalLocator(value);
 }
 
 function collectEvidenceRefs(claim) {
 	const refs = new Set([...collectUrls(claim)]);
 	for (const row of Array.isArray(claim?.evidence) ? claim.evidence : []) {
 		if (!row || typeof row !== "object") continue;
-		for (const value of [
-			row.url,
-			row.source,
-			row.file,
-			row.path,
-			row.sourceRef,
-		]) {
+		const localRefs = new Set(localEvidenceRefs(row));
+		for (const value of Object.values(row)) {
 			if (typeof value !== "string") continue;
 			if (
 				/^https?:\/\//i.test(value) ||
 				isWorkflowSourceRef(value) ||
-				looksLikeLocalSourceRef(value)
+				localRefs.has(value.trim())
 			)
 				refs.add(value.trim());
 		}
@@ -113,32 +106,18 @@ function collectEvidenceRefs(claim) {
 function addLocalEvidenceRef(refs, value) {
 	if (typeof value !== "string") return;
 	const text = value.trim();
-	if (!text || /^https?:\/\//i.test(text) || isWorkflowSourceRef(text)) return;
-	if (looksLikeLocalSourceRef(text)) refs.add(text);
+	if (!text || /^(?:https?|wsrc):/i.test(text)) return;
+	if (looksLikeLocalSourceRef(text) || isExplicitLocalUrl(text)) refs.add(text);
 }
 
 function collectLocalEvidenceRefs(claim) {
 	const refs = new Set();
 	if (!claim || typeof claim !== "object") return refs;
-	for (const key of ["file", "path", "repoPath", "localPath", "sourceRef"]) {
-		addLocalEvidenceRef(refs, claim[key]);
-	}
-	for (const value of Array.isArray(claim.sourceRefs) ? claim.sourceRefs : []) {
+	for (const ref of localEvidenceRefs(claim)) addLocalEvidenceRef(refs, ref);
+	for (const value of Array.isArray(claim.sourceRefs) ? claim.sourceRefs : [])
 		addLocalEvidenceRef(refs, value);
-	}
-	for (const row of Array.isArray(claim.evidence) ? claim.evidence : []) {
-		if (!row || typeof row !== "object") continue;
-		for (const key of [
-			"file",
-			"path",
-			"repoPath",
-			"localPath",
-			"source",
-			"sourceRef",
-		]) {
-			addLocalEvidenceRef(refs, row[key]);
-		}
-	}
+	for (const row of Array.isArray(claim.evidence) ? claim.evidence : [])
+		for (const ref of localEvidenceRefs(row)) addLocalEvidenceRef(refs, ref);
 	return refs;
 }
 
@@ -203,12 +182,16 @@ function canonicalUrlKeys(value) {
 function addNpmDocsVersionAgnosticKey(keys, url) {
 	if (url.hostname !== "docs.npmjs.com") return;
 	if (!/^\/cli\/(?:v\d+\/)?using-npm\//u.test(url.pathname)) return;
-	const versionless = new URL(url.toString());
-	versionless.pathname = versionless.pathname.replace(
-		/^\/cli\/v\d+\//u,
-		"/cli/",
-	);
-	keys.add(stripCitationUrlPunctuation(versionless.toString()));
+	try {
+		const versionless = new URL(url.toString());
+		versionless.pathname = versionless.pathname.replace(
+			/^\/cli\/v\d+\//u,
+			"/cli/",
+		);
+		keys.add(stripCitationUrlPunctuation(versionless.toString()));
+	} catch {
+		// The caller already retains the original canonical URL key.
+	}
 }
 
 function addUrlSourceRef(urlToSourceRef, url, sourceRef) {
@@ -245,7 +228,23 @@ async function buildUrlSourceRefLookup(normalizeInputPacket, context) {
 	const sourceCards = asArray(normalizeInputPacket?.packet?.research?.sources);
 	for (const source of sourceCards) {
 		if (!source || typeof source !== "object") continue;
-		addUrlSourceRef(urlToSourceRef, source.url, source.sourceRef);
+		const refs = compactStrings(
+			[
+				source.sourceRef,
+				...(Array.isArray(source.sourceRefs) ? source.sourceRefs : []),
+			],
+			Infinity,
+		);
+		const urls = compactStrings(
+			[
+				source.url,
+				source.sourceUrl,
+				...(Array.isArray(source.sourceUrls) ? source.sourceUrls : []),
+			],
+			Infinity,
+		);
+		for (const [index, url] of urls.entries())
+			addUrlSourceRef(urlToSourceRef, url, refs[index] ?? refs[0]);
 	}
 	await addWebSourceCacheSourceRefs(urlToSourceRef, context);
 	return urlToSourceRef;
@@ -280,8 +279,7 @@ function normalizeLocalSourceRef(value) {
 
 function addSourceIdentity(identities, value, urlToSourceRef) {
 	if (Array.isArray(value)) {
-		for (const item of value)
-			addSourceIdentity(identities, item, urlToSourceRef);
+		for (const item of value) addSourceIdentity(identities, item, urlToSourceRef);
 		return;
 	}
 	if (typeof value !== "string") return;
@@ -297,7 +295,7 @@ function addSourceIdentity(identities, value, urlToSourceRef) {
 		identities.workflowRefs.add(text);
 		return;
 	}
-	if (looksLikeLocalSourceRef(text)) {
+	if (looksLikeLocalSourceRef(text) || isExplicitLocalUrl(text)) {
 		const local = normalizeLocalSourceRef(text);
 		if (local) identities.localRefs.add(local);
 	}
@@ -310,6 +308,9 @@ function collectSourceIdentitiesFromObject(value, identities, urlToSourceRef) {
 		return identities;
 	}
 	if (!value || typeof value !== "object") return identities;
+	const hasTypedLocalLocator = ["file", "path", "repoPath", "localPath"].some(
+		(key) => isConservativeLocalLocator(value[key]),
+	);
 	for (const key of [
 		"sourceRef",
 		"sourceRefs",
@@ -323,6 +324,9 @@ function collectSourceIdentitiesFromObject(value, identities, urlToSourceRef) {
 		"repoPath",
 		"localPath",
 	]) {
+		// `source` is a human label when a typed local locator is present. Do
+		// not turn that label into a second filesystem identity.
+		if (key === "source" && hasTypedLocalLocator) continue;
 		addSourceIdentity(identities, value[key], urlToSourceRef);
 	}
 	for (const key of ["sourceRead", "sourceCard", "sourceEvidence"])
@@ -351,6 +355,9 @@ function candidateSourceIdentities(candidate, urlToSourceRef) {
 		identities,
 		urlToSourceRef,
 	);
+	const hasTypedLocalLocator = ["file", "path", "repoPath", "localPath"].some(
+		(key) => isConservativeLocalLocator(candidate[key]),
+	);
 	for (const key of [
 		"sourceRef",
 		"sourceRefs",
@@ -363,8 +370,10 @@ function candidateSourceIdentities(candidate, urlToSourceRef) {
 		"repo",
 		"repoPath",
 		"localPath",
-	])
+	]) {
+		if (key === "source" && hasTypedLocalLocator) continue;
 		addSourceIdentity(identities, candidate[key], urlToSourceRef);
+	}
 	return identities;
 }
 
@@ -372,6 +381,87 @@ function evidenceRowSourceIdentities(row, urlToSourceRef) {
 	const identities = emptySourceIdentities();
 	collectSourceIdentitiesFromObject(row, identities, urlToSourceRef);
 	return identities;
+}
+
+function explicitWorkflowRefs(value, refs = new Set(), seen = new Set()) {
+	if (typeof value === "string") {
+		if (isWorkflowSourceRef(value)) refs.add(value.trim());
+		return refs;
+	}
+	if (!value || typeof value !== "object" || seen.has(value)) return refs;
+	seen.add(value);
+	if (Array.isArray(value)) {
+		for (const item of value) explicitWorkflowRefs(item, refs, seen);
+		return refs;
+	}
+	for (const [key, item] of Object.entries(value)) {
+		if (["sourceRef", "sourceRefs", "source", "ref", "refs"].includes(key))
+			explicitWorkflowRefs(item, refs, seen);
+	}
+	return refs;
+}
+
+function explicitHttpUrls(value, urls = [], seen = new Set()) {
+	if (typeof value === "string") {
+		if (/^https?:\/\//i.test(value.trim())) urls.push(value.trim());
+		return urls;
+	}
+	if (!value || typeof value !== "object" || seen.has(value)) return urls;
+	seen.add(value);
+	if (Array.isArray(value)) {
+		for (const item of value) explicitHttpUrls(item, urls, seen);
+		return urls;
+	}
+	for (const [key, item] of Object.entries(value)) {
+		if (
+			["url", "urls", "source", "sourceUrl", "sourceUrls", "href"].includes(key)
+		)
+			explicitHttpUrls(item, urls, seen);
+	}
+	return urls;
+}
+
+function sourceIdentityConsistency(value, urlToSourceRef, { allowMixedSources = false } = {}) {
+	const refs = explicitWorkflowRefs(value);
+	const urls = explicitHttpUrls(value);
+	const identities = evidenceRowSourceIdentities(value, urlToSourceRef);
+	const mappedRefs = new Set(sourceRefsForUrls(urls, urlToSourceRef));
+	if (!allowMixedSources && identities.localRefs.size > 0 && urls.length > 0) {
+		return {
+			reasonCode: "local_file_and_remote_url_conflict",
+			localRefs: [...identities.localRefs].sort(),
+			remoteUrls: [...new Set(urls.flatMap(canonicalUrlKeys))].sort(),
+			reason:
+				"evidence row declared both a local file identity and a remote URL without a known coherent mapping",
+		};
+	}
+	const knownUrlsByRef = new Map();
+	for (const [urlKey, sourceRef] of urlToSourceRef.entries()) {
+		const keys = knownUrlsByRef.get(sourceRef) ?? new Set();
+		keys.add(urlKey);
+		knownUrlsByRef.set(sourceRef, keys);
+	}
+	if (refs.size > 0 && urls.length > 0) {
+		const urlKeys = new Set(urls.flatMap(canonicalUrlKeys));
+		const agrees = [...refs].some((ref) => {
+			const knownUrls = knownUrlsByRef.get(ref);
+			return (
+				(mappedRefs.size > 0 && mappedRefs.has(ref)) ||
+				(knownUrls && [...urlKeys].some((key) => knownUrls.has(key)))
+			);
+		});
+		if (!agrees)
+			return {
+				explicitWorkflowRefs: [...refs],
+				mappedWorkflowRefs: [...mappedRefs],
+				knownUrls: [
+					...new Set(
+						[...refs].flatMap((ref) => [...(knownUrlsByRef.get(ref) ?? [])]),
+					),
+				],
+			};
+	}
+	return null;
 }
 
 function hasSourceIdentities(identities) {
@@ -449,9 +539,7 @@ function sourceCompatibilityTokens(value) {
 		.toLowerCase()
 		.match(/[a-z0-9][a-z0-9-]{2,}/gu);
 	return new Set(
-		(tokens ?? []).filter(
-			(token) => !SOURCE_COMPATIBILITY_STOPWORDS.has(token),
-		),
+		(tokens ?? []).filter((token) => !SOURCE_COMPATIBILITY_STOPWORDS.has(token)),
 	);
 }
 
@@ -489,6 +577,24 @@ function evaluateSourceCompatibility({
 	refsNoneMultiClaimBlocked = false,
 	allowAdditionalEvidenceSources = false,
 }) {
+	// A candidate aggregates independent sources; an individual citation does not.
+	const candidateIdentityMismatch = sourceIdentityConsistency(
+		candidate,
+		urlToSourceRef,
+		{ allowMixedSources: true },
+	);
+	if (candidateIdentityMismatch) {
+		return {
+			decision: "downgrade",
+			reasonCode:
+				candidateIdentityMismatch.reasonCode ??
+				"evidence_source_identity_mismatch",
+			reason:
+				candidateIdentityMismatch.reason ??
+				"candidate sourceRef and source URL resolve to different known workflow sources",
+			identityMismatch: candidateIdentityMismatch,
+		};
+	}
 	const candidateIdentities = candidateSourceIdentities(
 		candidate,
 		urlToSourceRef,
@@ -512,6 +618,19 @@ function evaluateSourceCompatibility({
 	const unmatchedRows = [];
 	const sameHostRows = [];
 	for (const [index, row] of strongRows.entries()) {
+		const rowIdentityMismatch = sourceIdentityConsistency(row, urlToSourceRef);
+		if (rowIdentityMismatch) {
+			return {
+				decision: "downgrade",
+				reasonCode:
+					rowIdentityMismatch.reasonCode ??
+					"evidence_source_identity_mismatch",
+				reason:
+					rowIdentityMismatch.reason ??
+					"evidence row sourceRef and source URL resolve to different known workflow sources",
+				identityMismatch: rowIdentityMismatch,
+			};
+		}
 		const rowIdentities = evidenceRowSourceIdentities(row, urlToSourceRef);
 		const rowSummary = summarizeSourceIdentities(rowIdentities);
 		if (hasIdentityIntersection(rowIdentities, candidateIdentities)) {
@@ -583,21 +702,31 @@ function hasFetchedEvidence(claim) {
 
 function hasStrongEvidenceRow(row) {
 	if (!row || typeof row !== "object") return false;
-	const refs = [row.url, row.source, row.file, row.path, row.sourceRef].filter(
-		(value) => typeof value === "string",
-	);
+	const refs = [
+		row.url,
+		row.sourceUrl,
+		row.source,
+		row.file,
+		row.path,
+		row.repoPath,
+		row.localPath,
+		row.sourceRef,
+	].filter((value) => typeof value === "string");
 	const hasExternalRef = refs.some(
 		(value) => /^https?:\/\//i.test(value) || isWorkflowSourceRef(value),
 	);
-	const hasLocalRef = refs.some((value) => looksLikeLocalSourceRef(value));
+	const hasLocalRef = localEvidenceRefs(row).length > 0;
 	const hasLocatedLocalRef =
-		hasLocalRef &&
-		(refs.some(hasLineFragment) || hasLocalEvidenceLocation(row));
+		hasLocalRef && (refs.some(hasLineFragment) || hasLocalEvidenceLocation(row));
 	const sourceRef = hasExternalRef || hasLocatedLocalRef;
 	const quote = typeof row.quote === "string" && row.quote.trim().length > 0;
 	if (!sourceRef || !quote) return false;
 	if (isCandidateEvidenceRow(row)) return false;
 	return true;
+}
+
+function isExplicitLocalUrl(value) {
+	return isConservativeLocalLocator(value);
 }
 
 function hasLineFragment(value) {
@@ -688,7 +817,7 @@ function claimIdOf(claim) {
 	return invalid ?? { id: null, reason: "missing_claim_id" };
 }
 
-function compactStrings(values) {
+function compactStrings(values = []) {
 	const out = [];
 	const seen = new Set();
 	for (const value of values) {
@@ -777,8 +906,7 @@ function batchClaimIds(batch) {
 		: Array.isArray(batch?.claims)
 			? batch.claims.map(
 					(claim, index) =>
-						claimIdOf(claim).id ??
-						`candidate-${String(index + 1).padStart(3, "0")}`,
+						claimIdOf(claim).id ?? `candidate-${String(index + 1).padStart(3, "0")}`,
 				)
 			: [];
 }
@@ -824,8 +952,7 @@ function refsNoneMultiClaimBatchIssues({
 	const issues = [];
 	for (const batch of asBatchArray(verificationBatches)) {
 		const batchId = typeof batch?.id === "string" ? batch.id.trim() : "";
-		const sourceKey =
-			typeof batch?.sourceKey === "string" ? batch.sourceKey : "";
+		const sourceKey = typeof batch?.sourceKey === "string" ? batch.sourceKey : "";
 		const claimIds = normalizedBatchClaimIds(batch);
 		if (!batchId || sourceKey !== "refs:none" || claimIds.length <= 1) continue;
 		const claimIdsWithoutExplicitSources = claimIds.filter((claimId) => {
@@ -853,8 +980,13 @@ function verifierBatchId(sourceId, stageId = "verify-claims") {
 }
 
 function verifierStageForSource(sourceId) {
-	for (const stageId of ["verify-claims", "verify-core-claims", "verify-tail-claims"]) {
-		if (sourceId === stageId || sourceId.startsWith(`${stageId}.`)) return stageId;
+	for (const stageId of [
+		"verify-claims",
+		"verify-core-claims",
+		"verify-tail-claims",
+	]) {
+		if (sourceId === stageId || sourceId.startsWith(`${stageId}.`))
+			return stageId;
 	}
 	return null;
 }
@@ -863,20 +995,24 @@ function exactVerifierOwner(status, sourceId, claimId, stageId) {
 	if (!status || typeof status !== "object" || !stageId) return null;
 	const source = typeof status.source === "string" ? status.source.trim() : "";
 	const specId = typeof status.specId === "string" ? status.specId.trim() : "";
-	const itemIdentity = typeof status.itemIdentity === "string" ? status.itemIdentity.trim() : "";
-	const placeholderSpecId = typeof status.placeholderSpecId === "string"
-		? status.placeholderSpecId.trim()
-		: "";
+	const itemIdentity =
+		typeof status.itemIdentity === "string" ? status.itemIdentity.trim() : "";
+	const placeholderSpecId =
+		typeof status.placeholderSpecId === "string"
+			? status.placeholderSpecId.trim()
+			: "";
 	const expectedSpecId = `${stageId}.${claimId}`;
 	if (
 		source !== sourceId ||
 		status.stageId !== stageId ||
 		status.status !== "completed" ||
-		typeof status.taskId !== "string" || !status.taskId.trim() ||
+		typeof status.taskId !== "string" ||
+		!status.taskId.trim() ||
 		specId !== expectedSpecId ||
 		itemIdentity !== claimId ||
 		placeholderSpecId !== `${stageId}.item`
-	) return null;
+	)
+		return null;
 	return {
 		source,
 		stageId,
@@ -891,14 +1027,16 @@ function exactVerifierOwner(status, sourceId, claimId, stageId) {
 function verifierOwnerForRow(sourceStatuses, sourceId, claimId) {
 	const stageId = verifierStageForSource(sourceId);
 	const owners = (Array.isArray(sourceStatuses) ? sourceStatuses : []).filter(
-		(status) => status && typeof status === "object" && status.source === sourceId,
+		(status) =>
+			status && typeof status === "object" && status.source === sourceId,
 	);
 	return {
 		stageId,
 		owners,
-		exact: owners.length === 1
-			? exactVerifierOwner(owners[0], sourceId, claimId, stageId)
-			: null,
+		exact:
+			owners.length === 1
+				? exactVerifierOwner(owners[0], sourceId, claimId, stageId)
+				: null,
 	};
 }
 
@@ -912,20 +1050,24 @@ function exactVerifierBatchOwner(
 	if (!status || typeof status !== "object" || !stageId || !batchId) return null;
 	const source = typeof status.source === "string" ? status.source.trim() : "";
 	const specId = typeof status.specId === "string" ? status.specId.trim() : "";
-	const itemIdentity = typeof status.itemIdentity === "string" ? status.itemIdentity.trim() : "";
-	const placeholderSpecId = typeof status.placeholderSpecId === "string"
-		? status.placeholderSpecId.trim()
-		: "";
+	const itemIdentity =
+		typeof status.itemIdentity === "string" ? status.itemIdentity.trim() : "";
+	const placeholderSpecId =
+		typeof status.placeholderSpecId === "string"
+			? status.placeholderSpecId.trim()
+			: "";
 	if (
 		source !== sourceId ||
 		status.stageId !== stageId ||
 		status.status !== "completed" ||
-		typeof status.taskId !== "string" || !status.taskId.trim() ||
+		typeof status.taskId !== "string" ||
+		!status.taskId.trim() ||
 		specId !== `${stageId}.${batchId}` ||
 		!batchMembershipById.has(batchId) ||
 		itemIdentity !== batchId ||
 		placeholderSpecId !== `${stageId}.item`
-	) return null;
+	)
+		return null;
 	return {
 		source,
 		stageId,
@@ -946,7 +1088,8 @@ function verifierBatchOwnerForSource(
 ) {
 	const stageId = verifierStageForSource(sourceId);
 	const owners = (Array.isArray(sourceStatuses) ? sourceStatuses : []).filter(
-		(status) => status && typeof status === "object" && status.source === sourceId,
+		(status) =>
+			status && typeof status === "object" && status.source === sourceId,
 	);
 	const batchId =
 		(stageId && verifierBatchId(sourceId, stageId)) ||
@@ -956,15 +1099,16 @@ function verifierBatchOwnerForSource(
 		stageId,
 		batchId,
 		owners,
-		exact: owners.length === 1
-			? exactVerifierBatchOwner(
-					owners[0],
-					sourceId,
-					stageId,
-					batchId,
-					batchMembershipById,
-				)
-			: null,
+		exact:
+			owners.length === 1
+				? exactVerifierBatchOwner(
+						owners[0],
+						sourceId,
+						stageId,
+						batchId,
+						batchMembershipById,
+					)
+				: null,
 	};
 }
 
@@ -1068,6 +1212,14 @@ function mergeVerifierRows(rows) {
 			sourceIds,
 			statusInputs,
 			selectedStatus,
+			sourceRefs: compactStrings(
+				rows.flatMap((row) => row.claim?.sourceRefs ?? []),
+				Infinity,
+			),
+			sourceUrls: compactStrings(
+				rows.flatMap((row) => row.claim?.sourceUrls ?? []),
+				Infinity,
+			),
 			action: "merged_evidence_and_selected_conservative_status",
 		},
 	};
@@ -1313,9 +1465,7 @@ export default async function claimEvidenceGate({
 		urlToSourceRef,
 	});
 	const refsNoneMultiClaimBlockedClaimIds = new Set(
-		refsNoneBatchIssues.flatMap(
-			(issue) => issue.claimIdsWithoutExplicitSources,
-		),
+		refsNoneBatchIssues.flatMap((issue) => issue.claimIdsWithoutExplicitSources),
 	);
 
 	const verifierStageIds = [
@@ -1417,17 +1567,19 @@ export default async function claimEvidenceGate({
 			// to the normal batch-membership gate, which reports unknown batch
 			// identity rather than inventing an owner relationship.
 			if (!ownerCheck.batchId) continue;
-			const reason = ownerCheck.owners.length === 0
-				? "missing_materialized_verifier_batch_owner"
-				: ownerCheck.owners.length !== 1
-					? "verifier_batch_source_not_bound_to_exactly_one_materialized_owner"
-					: "verifier_batch_source_status_identity_mismatch";
+			const reason =
+				ownerCheck.owners.length === 0
+					? "missing_materialized_verifier_batch_owner"
+					: ownerCheck.owners.length === 1
+						? "verifier_batch_source_status_identity_mismatch"
+						: "verifier_batch_source_not_bound_to_exactly_one_materialized_owner";
 			const issue = {
 				sourceId,
 				batchId: ownerCheck.batchId,
 				ownerStageId: ownerCheck.stageId,
 				reason,
-				nextStep: "Repair the completed batch carrier status before accepting any member verifier row.",
+				nextStep:
+					"Repair the completed batch carrier status before accepting any member verifier row.",
 			};
 			batchOwnerIssueBySource.set(sourceId, issue);
 			verifierOwnerIssues.push(issue);
@@ -1437,7 +1589,8 @@ export default async function claimEvidenceGate({
 	// Batch envelopes have a separate membership/row gate. The exact singleton
 	// owner contract applies to the ordinary transparent foreach sources and
 	// must not reinterpret a physical batch carrier as one claim owner.
-	const strictOwnerMode = hasMaterializedStatuses && batchMembershipById.size === 0;
+	const strictOwnerMode =
+		hasMaterializedStatuses && batchMembershipById.size === 0;
 	for (const { sourceId, claim, index } of verifierClaims) {
 		let owner;
 		if (batchMembershipById.size > 0) {
@@ -1488,11 +1641,12 @@ export default async function claimEvidenceGate({
 			);
 			owner = ownerCheck.exact;
 			if (!owner) {
-				const reason = ownerCheck.owners.length === 0
-					? "missing_materialized_verifier_owner"
-					: ownerCheck.owners.length !== 1
-						? "verifier_source_not_bound_to_exactly_one_materialized_owner"
-						: "verifier_source_status_identity_mismatch";
+				const reason =
+					ownerCheck.owners.length === 0
+						? "missing_materialized_verifier_owner"
+						: ownerCheck.owners.length === 1
+							? "verifier_source_status_identity_mismatch"
+							: "verifier_source_not_bound_to_exactly_one_materialized_owner";
 				const issue = issueForVerifierRow({
 					sourceId,
 					claim,
@@ -1617,6 +1771,13 @@ export default async function claimEvidenceGate({
 				workflowSourceRefs.add(sourceRef);
 			if (workflowSourceRefs.size > beforeSourceRefCount)
 				gateSummary.sourceRefsRejoined += 1;
+			const candidateSourceRefs = compactStrings(candidate.sourceRefs ?? [], Infinity);
+			const claimSourceRefs = compactStrings(next.sourceRefs ?? [], Infinity);
+			if (candidateSourceRefs.length > 0 || claimSourceRefs.length > 0)
+				next.sourceRefs = compactStrings(
+					[...claimSourceRefs, ...candidateSourceRefs],
+					Infinity,
+				);
 		}
 		const beforeUrlBackfillSourceRefCount = workflowSourceRefs.size;
 		for (const sourceRef of sourceRefsForUrls(
@@ -1632,7 +1793,11 @@ export default async function claimEvidenceGate({
 			gateSummary.sourceRefsBackfilledFromUrls +=
 				workflowSourceRefs.size - beforeUrlBackfillSourceRefCount;
 		}
-		if (workflowSourceRefs.size > 0) next.sourceRefs = [...workflowSourceRefs];
+		if (workflowSourceRefs.size > 0)
+			next.sourceRefs = compactStrings(
+				[...(next.sourceRefs ?? []), ...workflowSourceRefs],
+				Infinity,
+			);
 		const httpSourceUrls = [
 			...new Set([
 				...sourceUrlArray(candidate?.sourceUrls).filter((ref) =>
@@ -1706,11 +1871,16 @@ export default async function claimEvidenceGate({
 			});
 			if (compatibility.decision === "downgrade") {
 				gateSummary.sourceEvidenceCompatibilityFailures += 1;
-				if (compatibility.reasonCode === "evidence_source_mismatch")
+				if (
+					[
+						"evidence_source_mismatch",
+						"evidence_source_identity_mismatch",
+						"local_file_and_remote_url_conflict",
+					].includes(compatibility.reasonCode)
+				)
 					gateSummary.sourceEvidenceCompatibilityMismatches += 1;
 				if (
-					compatibility.reasonCode ===
-					"additional_evidence_source_requires_review"
+					compatibility.reasonCode === "additional_evidence_source_requires_review"
 				)
 					gateSummary.additionalEvidenceSourceDowngrades += 1;
 				next = withVerdict(
@@ -1737,29 +1907,40 @@ export default async function claimEvidenceGate({
 		}
 
 		if (verdictOf(next) === VERIFICATION_STATUS.VERIFIED) {
-			const localRows = await localQuoteGate(next.evidence, context, looksLikeLocalSourceRef);
+			const localRows = await localQuoteGate(
+				next.evidence,
+				context,
+				isLocalLocator,
+			);
 			if (localRows.length > 0) next.localQuoteGate = localRows;
 			const failed = localRows.filter((row) => row.status !== "verified");
 			if (failed.length > 0) {
-				next = withVerdict(next, VERIFICATION_STATUS.PARTIALLY_SUPPORTED,
+				next = withVerdict(
+					next,
+					VERIFICATION_STATUS.PARTIALLY_SUPPORTED,
 					"local evidence quote did not match the cited file/range or could not be read",
-					{ reasonCode: failed.some((row) => row.status === "unreadable") ? "local_quote_unreadable" : "local_quote_mismatch" });
+					{
+						reasonCode: failed.some((row) => row.status === "unreadable")
+							? "local_quote_unreadable"
+							: "local_quote_mismatch",
+					},
+				);
 			}
 		}
 
-		if (verdictOf(next) !== verdict) {
+		if (verdictOf(next) === verdict) {
+			gateSummary.unchanged += 1;
+		} else {
 			gateSummary.downgraded += 1;
 			remainingGaps.push({
 				claimId: next.id ?? next.claimId,
-				evidenceState:
-					next.evidenceGate?.reasonCode ?? "insufficient_for_verified",
+				evidenceState: next.evidenceGate?.reasonCode ?? "insufficient_for_verified",
 				reason: next.evidenceGate?.reason,
 				sourceUrls: evidenceRefs,
+				sourceRefs: compactStrings(next.sourceRefs ?? [], Infinity),
 				nextStep:
 					"Fetch or inspect primary source evidence for the exact claim before using it as verified.",
 			});
-		} else {
-			gateSummary.unchanged += 1;
 		}
 		auditedClaims.push(next);
 	}
@@ -1774,6 +1955,7 @@ export default async function claimEvidenceGate({
 					evidenceState: "missing_verifier_result",
 					reason: "normalized verification candidate had no verifier result",
 					sourceUrls: sourceUrlArray(candidate.sourceUrls),
+					sourceRefs: compactStrings(candidate.sourceRefs, Infinity),
 					relatedFactSlotIds: Array.isArray(candidate.factSlotIds)
 						? [...candidate.factSlotIds]
 						: [],
@@ -1806,6 +1988,8 @@ export default async function claimEvidenceGate({
 					gateSummary.duplicateStatusConflicts += 1;
 					remainingGaps.push({
 						claimId: candidate.id,
+						sourceRefs: compactStrings(candidate.sourceRefs, Infinity),
+						sourceUrls: sourceUrlArray(candidate.sourceUrls),
 						evidenceState: "duplicate_verifier_rows_conflicting",
 						reason:
 							"multiple verifier rows for the same normalized candidate disagreed; the gate selected a conservative status",
@@ -1846,10 +2030,7 @@ export default async function claimEvidenceGate({
 		statusPartitions[bucket].push(claim.id ?? claim.claimId ?? null);
 	}
 	const verdictCounts = Object.fromEntries(
-		Object.entries(statusPartitions).map(([bucket, ids]) => [
-			bucket,
-			ids.length,
-		]),
+		Object.entries(statusPartitions).map(([bucket, ids]) => [bucket, ids.length]),
 	);
 
 	// Slot coverage cross-check: planned slots that the normalizer dropped.

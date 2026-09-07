@@ -19,6 +19,7 @@ async function withRun(bundlePath, name, fn) {
   try {
     h.writeAgent(cwd, "scout", "read, grep, find, ls");
     await writeFile(join(cwd, "source.ts"), `${quote}\n`);
+    await writeFile(join(cwd, "SPEC.md"), "The implementation must preserve enabled behavior.\n");
     const bundle = join(cwd, "workflows", "fixture");
     await mkdir(dirname(bundle), { recursive: true });
     await cp(resolve(bundlePath), bundle, { recursive: true });
@@ -56,11 +57,32 @@ async function withRun(bundlePath, name, fn) {
 for (const mode of ["grounded", "drop-grounded", "legacy", "drop-unverified", "missing-file", "report-absent", "mapping-missing"]) {
   test(`actual spec-review scheduler/partition/renderer: ${mode}`, () => withRun("workflows/spec-review", `spec-${mode}`, async ({ cwd, step, complete, launches }) => {
     let current = await step();
-    await complete(h.taskBySpec(current, "extract-spec.main"), { requirements: [{ id: "REQ-1", requirement: "Enabled", specEvidence: "source.ts:1" }] });
+    await complete(h.taskBySpec(current, "extract-spec.main"), {
+      specSources: ["SPEC.md"],
+      requirements: [{
+        id: "REQ-1",
+        requirement: "The implementation must preserve enabled behavior.",
+        specEvidence: {
+          file: "SPEC.md",
+          lineStart: 1,
+          lineEnd: 1,
+          quote: "The implementation must preserve enabled behavior.",
+        },
+        priority: "high",
+        implementationSignals: ["source.ts:1"],
+        testSignals: ["source.ts:1"],
+      }],
+    });
     await complete(h.taskBySpec(current, "map-implementation.main"), { implementationMap: [{ file: "source.ts", evidence: quote }] });
     if (mode === "mapping-missing") await h.completeTask(cwd, h.taskBySpec(current, "inspect-tests.main"), {}, "failed");
     else await complete(h.taskBySpec(current, "inspect-tests.main"), { testMap: [] });
     current = await step();
+    if (mode === "mapping-missing") {
+      const candidateTask = h.taskBySpec(current, "candidate-findings.main");
+      assert.equal(candidateTask.status, "failed", JSON.stringify(candidateTask));
+      assert.match(JSON.stringify(candidateTask), /inspect-tests|source|read/i);
+      return;
+    }
     await complete(h.taskBySpec(current, "candidate-findings.main"), { candidateFindings: [candidate], requirementCoverage: [{ requirementId: "REQ-1", status: mode === "drop-grounded" ? "covered" : "gap", ...(mode === "drop-grounded" ? { evidence: [citation] } : {}) }], needsHuman: [], noIssueNotes: [] });
     current = await step();
     const verifier = current.tasks.find(task => task.foreachGenerated?.placeholderSpecId === "verify-findings.item");

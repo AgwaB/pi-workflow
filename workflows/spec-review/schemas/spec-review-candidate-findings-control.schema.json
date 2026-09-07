@@ -18,10 +18,53 @@
     "candidateFindings": {
       "type": "array",
       "items": {
-        "type": "object"
+        "type": "object",
+        "required": ["id", "requirementIds", "severity", "title", "claim", "specEvidence", "implementationEvidence", "testEvidence", "uncertainty"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "requirementIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "maxItems": 40 },
+          "severity": { "type": "string", "enum": ["high", "medium", "low", "info"] },
+          "title": { "type": "string", "minLength": 1 },
+          "claim": { "type": "string", "minLength": 1 },
+          "specEvidence": { "type": "array", "items": { "type": "string" }, "maxItems": 64 },
+          "implementationEvidence": { "type": "array", "items": { "type": "string" }, "maxItems": 64 },
+          "testEvidence": { "type": "array", "items": { "type": "string" }, "maxItems": 64 },
+          "uncertainty": { "type": "string", "minLength": 1 }
+        }
       },
       "maxItems": 30
     },
+    "needsHuman": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "required": ["reason"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1, "maxLength": 96 },
+          "requirementIds": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 96 }, "maxItems": 40 },
+          "reason": { "type": "string", "minLength": 1, "maxLength": 1000 },
+          "uncertainty": { "type": "string", "maxLength": 1000 },
+          "recommendedAction": { "type": "string", "maxLength": 1000 }
+        },
+        "additionalProperties": true
+      }
+    },
+    "scopeLimitations": {
+      "type": "array",
+      "maxItems": 40,
+      "items": {
+        "type": "object",
+        "required": ["kind", "text"],
+        "properties": {
+          "kind": { "type": "string", "const": "NONBLOCKING" },
+          "text": { "type": "string", "minLength": 1, "maxLength": 240 },
+          "blocking": { "type": "boolean", "const": false }
+        },
+        "additionalProperties": false
+      }
+    },
+    "testExecutionAttested": { "type": "boolean", "const": false },
     "requirementCoverage": {
       "type": "array",
       "items": {

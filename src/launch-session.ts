@@ -34,6 +34,9 @@ export function workflowTaskAttemptIdentity(
 		`launch-retry:${task.launchRetry?.attempts ?? 0}`,
 		`output-retry:${task.outputRetry?.attempts ?? 0}`,
 		`resume:${task.resumeEvents?.length ?? 0}`,
+		...(task.foreachBatch?.physicalAttempt === undefined
+			? []
+			: [`physical:${task.foreachBatch.physicalAttempt}`]),
 		`session:${sessionId ?? "none"}`,
 	].join(";");
 }

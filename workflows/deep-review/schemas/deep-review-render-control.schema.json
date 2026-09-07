@@ -43,12 +43,14 @@
     "mergedFindingCount": { "type": "number" },
     "needsHumanSummary": {
       "type": "object",
-      "required": ["actual", "expected", "metadataMissing", "incompleteEvidence"],
+      "required": ["actual", "expected", "metadataMissing", "incompleteEvidence", "verifierEvidenceIncomplete", "verifierEvidenceUnavailable"],
       "properties": {
         "actual": { "type": "number" },
         "expected": { "type": "number" },
         "metadataMissing": { "type": "boolean" },
-        "incompleteEvidence": { "type": "number" }
+        "incompleteEvidence": { "type": "number" },
+        "verifierEvidenceIncomplete": { "type": "number" },
+        "verifierEvidenceUnavailable": { "type": "number" }
       },
       "additionalProperties": false
     },
