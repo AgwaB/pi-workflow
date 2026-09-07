@@ -2460,7 +2460,7 @@
 		{
 			"name": "subagent launch gate honors env override and recovers slots after throw",
 			"occurrence": 1,
-			"sha256": "28c1a4df51dbb0fba0e54f9495078a25a8f2bd6da9616aeb3b8792444dfd5008",
+			"sha256": "c693ac3d1052c5d97011575b7c2311b2e5316e6b88202a9f5e050af28c126a3b",
 			"domain": "engine-store"
 		},
 		{
