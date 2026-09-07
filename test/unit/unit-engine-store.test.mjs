@@ -4270,6 +4270,34 @@ test("subagent launch gate honors env override and recovers slots after throw", 
 		process.env.PI_WORKFLOW_LAUNCH_SLOT_RELEASE_DELAY_MS;
 	process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES = "2";
 	setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
+	const cleanupController = new AbortController();
+	const releaseRunSubagent = [];
+	const trackedLaunches = new Set();
+	const makeRunSubagentEntrySignal = () => {
+		let resolve;
+		const promise = new Promise((done) => {
+			resolve = done;
+		});
+		return { promise, resolve };
+	};
+	let runSubagentEntrySignal = makeRunSubagentEntrySignal();
+	const notifyRunSubagentEntry = () => {
+		const signal = runSubagentEntrySignal;
+		runSubagentEntrySignal = makeRunSubagentEntrySignal();
+		signal.resolve();
+	};
+	const waitForRunSubagentEntries = async (count) => {
+		while (releaseRunSubagent.length < count)
+			await runSubagentEntrySignal.promise;
+	};
+	const trackLaunch = (launch) => {
+		trackedLaunches.add(launch);
+		void launch.then(
+			() => trackedLaunches.delete(launch),
+			() => trackedLaunches.delete(launch),
+		);
+		return launch;
+	};
 	try {
 		writeAgent(cwd, "unit-scout", "read");
 		const now = new Date().toISOString();
@@ -4343,16 +4371,28 @@ test("subagent launch gate honors env override and recovers slots after throw", 
 			};
 			return { run, task, compiledTask };
 		};
+		const launchFixture = (fixture) =>
+			trackLaunch(
+				launchSubagentTask(
+					cwd,
+					fixture.run,
+					fixture.task,
+					fixture.compiledTask,
+					cleanupController.signal,
+				),
+			);
 
 		let active = 0;
 		let maxActive = 0;
 		let sequence = 0;
-		const releaseRunSubagent = [];
 		setSubagentApiForTests({
 			async runSubagent() {
 				active += 1;
 				maxActive = Math.max(maxActive, active);
-				await new Promise((resolve) => releaseRunSubagent.push(resolve));
+				await new Promise((resolve) => {
+					releaseRunSubagent.push(resolve);
+					notifyRunSubagentEntry();
+				});
 				active -= 1;
 				sequence += 1;
 				return {
@@ -4364,10 +4404,10 @@ test("subagent launch gate honors env override and recovers slots after throw", 
 		});
 
 		const fixtures = [makeFixture("a"), makeFixture("b"), makeFixture("c")];
-		const launches = fixtures.map((fixture) =>
-			launchSubagentTask(cwd, fixture.run, fixture.task, fixture.compiledTask),
-		);
-		await eventually(() => assert.equal(releaseRunSubagent.length, 2));
+		for (const fixture of fixtures) await writeRunRecord(cwd, fixture.run);
+		await flushPendingIndexUpdatesForTests();
+		const launches = fixtures.map(launchFixture);
+		await waitForRunSubagentEntries(2);
 		assert.equal(maxActive, 2);
 		let queuedFixture;
 		await eventually(() => {
@@ -4381,7 +4421,7 @@ test("subagent launch gate honors env override and recovers slots after throw", 
 		assert.ok(queuedFixture.task.timing.launchQueuedAt);
 		assert.equal(queuedFixture.task.timing.launchCompletedAt, undefined);
 		releaseRunSubagent.shift()();
-		await eventually(() => assert.equal(releaseRunSubagent.length, 2));
+		await waitForRunSubagentEntries(2);
 		assert.equal(maxActive, 2);
 		assert.ok(queuedFixture.task.timing.launchStartedAt);
 		assert.equal(typeof queuedFixture.task.timing.launchWaitMs, "number");
@@ -4410,20 +4450,10 @@ test("subagent launch gate honors env override and recovers slots after throw", 
 		});
 		const delayedFirst = makeFixture("delayed_first");
 		const delayedSecond = makeFixture("delayed_second");
-		await launchSubagentTask(
-			cwd,
-			delayedFirst.run,
-			delayedFirst.task,
-			delayedFirst.compiledTask,
-		);
+		await launchFixture(delayedFirst);
 		assert.equal(delayedLaunches, 1);
 		await Promise.race([
-			launchSubagentTask(
-				cwd,
-				delayedSecond.run,
-				delayedSecond.task,
-				delayedSecond.compiledTask,
-			),
+			launchFixture(delayedSecond),
 			sleep(2_000).then(() => {
 				throw new Error("delayed launch slot was not released");
 			}),
@@ -4437,16 +4467,7 @@ test("subagent launch gate honors env override and recovers slots after throw", 
 			},
 		});
 		const failing = makeFixture("fail");
-		await assert.rejects(
-			() =>
-				launchSubagentTask(
-					cwd,
-					failing.run,
-					failing.task,
-					failing.compiledTask,
-				),
-			/boom/,
-		);
+		await assert.rejects(() => launchFixture(failing), /boom/);
 
 		setSubagentApiForTests({
 			async runSubagent() {
@@ -4459,27 +4480,32 @@ test("subagent launch gate honors env override and recovers slots after throw", 
 		});
 		const afterThrow = makeFixture("after_throw");
 		await Promise.race([
-			launchSubagentTask(
-				cwd,
-				afterThrow.run,
-				afterThrow.task,
-				afterThrow.compiledTask,
-			),
+			launchFixture(afterThrow),
 			sleep(2_000).then(() => {
 				throw new Error("launch slot was not released after throw");
 			}),
 		]);
 	} finally {
-		setSubagentApiForTests(undefined);
-		setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
-		if (originalLimit === undefined)
-			delete process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES;
-		else process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES = originalLimit;
-		if (originalReleaseDelay === undefined)
-			delete process.env.PI_WORKFLOW_LAUNCH_SLOT_RELEASE_DELAY_MS;
-		else
-			process.env.PI_WORKFLOW_LAUNCH_SLOT_RELEASE_DELAY_MS =
-				originalReleaseDelay;
+		cleanupController.abort(new Error("subagent launch gate test cleanup"));
+		while (releaseRunSubagent.length > 0) releaseRunSubagent.shift()();
+		try {
+			await Promise.allSettled([...trackedLaunches]);
+			await flushPendingIndexUpdatesForTests();
+		} finally {
+			setSubagentApiForTests(undefined);
+			setSubagentLaunchControlsForTests({
+				releaseDelayMs: 0,
+				retryJitterMs: 0,
+			});
+			if (originalLimit === undefined)
+				delete process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES;
+			else process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES = originalLimit;
+			if (originalReleaseDelay === undefined)
+				delete process.env.PI_WORKFLOW_LAUNCH_SLOT_RELEASE_DELAY_MS;
+			else
+				process.env.PI_WORKFLOW_LAUNCH_SLOT_RELEASE_DELAY_MS =
+					originalReleaseDelay;
+		}
 		rmSync(cwd, {
 			recursive: true,
 			force: true,
