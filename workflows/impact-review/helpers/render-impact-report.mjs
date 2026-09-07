@@ -14,6 +14,20 @@ const STAGES = [
 	"regression-risk",
 	"ship-readiness",
 ];
+const LEDGER_STAGES = [
+	"change-scope",
+	"implementation-map",
+	"validation-map",
+	"api-contract-impact",
+	"state-data-impact",
+	"validation-impact",
+	"docs-release-impact",
+	"security-performance-impact",
+	"contract-consistency",
+	"regression-risk",
+	"ship-readiness",
+	"impact-synthesis",
+];
 const VERDICTS = new Set(["READY", "NEEDS_WORK", "BLOCKED", "UNKNOWN"]);
 const RISKS = ["none", "low", "medium", "high"];
 const RISK_LEVELS = new Set([...RISKS, "unknown"]);
@@ -30,7 +44,10 @@ function isRecord(value) {
 
 function cleanText(value) {
 	return String(value ?? "")
-		.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g, " ")
+		.replace(
+			/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g,
+			" ",
+		)
 		.replace(/\s+/g, " ")
 		.replace(/\s+([,.;:!?])/g, "$1")
 		.trim();
@@ -56,45 +73,36 @@ function stableStringify(value) {
 	return JSON.stringify(value);
 }
 
-function stageMatches(value, stageId) {
-	const text = cleanText(value);
-	return (
-		text === stageId ||
-		text.startsWith(`${stageId}.`) ||
-		text.endsWith(`.${stageId}`) ||
-		text.includes(`.${stageId}.`)
-	);
+function canonicalSourceKey(stageId) {
+	return `impact-analysis.${stageId}`;
 }
 
 function findSource(sources, stageId) {
-	const matches = Object.entries(sources ?? {})
-		.filter(([alias]) => stageMatches(alias, stageId))
-		.sort(([a], [b]) => a.localeCompare(b));
-	if (matches.length > 1) {
-		throw new Error(
-			`impact-review renderer: ambiguous ${stageId} source (${matches.map(([alias]) => alias).join(", ")})`,
-		);
-	}
-	return matches[0]?.[1] ?? null;
+	const key = canonicalSourceKey(stageId);
+	return isRecord(sources) && isRecord(sources[key]) ? sources[key] : null;
 }
 
-function canonicalImpactStage(value) {
-	let text = cleanText(value);
-	if (text.startsWith("impact-analysis.")) text = text.slice("impact-analysis.".length);
-	if (text.endsWith(".main")) text = text.slice(0, -".main".length);
-	return text;
+function statusStageMatches(status, stageId) {
+	const source = canonicalSourceKey(stageId);
+	const stage = cleanText(status?.stageId);
+	const specId = cleanText(status?.specId);
+	return (
+		(stage === stageId || stage === source) &&
+		(specId === source || specId === `${source}.main`)
+	);
 }
 
-function sourceStatusMatches(status, stageId) {
-	const source = canonicalImpactStage(status?.source);
-	const spec = canonicalImpactStage(status?.specId);
-	const stage = canonicalImpactStage(status?.stageId);
-	return source === stageId && spec === stageId && stage === stageId;
-}
-
+// The runtime manifest, rather than model-produced origin/sourceIds, owns the
+// source identity.  Only the shipped 12-source bundle is accepted here; old
+// four-source captures must not silently enter the fresh protocol.
 function impactSourceCoverage(context) {
-	const statuses = Array.isArray(context?.sourceStatuses) ? context.sourceStatuses : [];
-	const expected = STAGES.map((stageId) => ({ stageId }));
+	const statuses = Array.isArray(context?.sourceStatuses)
+		? context.sourceStatuses
+		: [];
+	const expected = LEDGER_STAGES.map((stageId) => ({
+		stageId,
+		source: canonicalSourceKey(stageId),
+	}));
 	const missing = [];
 	const duplicate = [];
 	const wrongStage = [];
@@ -112,15 +120,9 @@ function impactSourceCoverage(context) {
 		.filter(([, indexes]) => indexes.length > 1)
 		.map(([taskId]) => taskId);
 	for (const target of expected) {
-		// Source and spec are mutually agreeing lifecycle identities. The stage
-		// field is checked separately so a copied alias cannot hide a wrong task.
 		const matches = statuses
 			.map((status, index) => ({ status, index }))
-			.filter(({ status }) =>
-				isRecord(status) &&
-				canonicalImpactStage(status.source) === target.stageId &&
-				canonicalImpactStage(status.specId) === target.stageId,
-			);
+			.filter(({ status }) => cleanText(status?.source) === target.source);
 		if (matches.length === 0) {
 			missing.push(target);
 			continue;
@@ -132,15 +134,17 @@ function impactSourceCoverage(context) {
 		const [{ status, index }] = matches;
 		assignedIndexes.add(index);
 		assignments.push({
-			sourceId: cleanText(status.source),
+			sourceId: target.source,
 			stageId: target.stageId,
 			statusSpecId: cleanText(status.specId),
 			statusSource: cleanText(status.source),
 			taskId: cleanText(status.taskId),
 		});
-		if (canonicalImpactStage(status.stageId) !== target.stageId ||
+		if (
+			!statusStageMatches(status, target.stageId) ||
 			cleanText(status.status) !== "completed" ||
-			!cleanText(status.taskId)) {
+			!cleanText(status.taskId)
+		)
 			wrongStage.push({
 				stageId: target.stageId,
 				statusSource: cleanText(status.source),
@@ -148,12 +152,15 @@ function impactSourceCoverage(context) {
 				claimedStageId: cleanText(status.stageId),
 				status: cleanText(status.status),
 			});
-		}
 	}
 	statuses.forEach((status, index) => {
-		if (!assignedIndexes.has(index)) {
-			orphan.push({ index, source: cleanText(status?.source), specId: cleanText(status?.specId), stageId: cleanText(status?.stageId) });
-		}
+		if (!assignedIndexes.has(index))
+			orphan.push({
+				index,
+				source: cleanText(status?.source),
+				specId: cleanText(status?.specId),
+				stageId: cleanText(status?.stageId),
+			});
 	});
 	return {
 		available: Array.isArray(context?.sourceStatuses),
@@ -166,67 +173,283 @@ function impactSourceCoverage(context) {
 		duplicateTaskIds,
 		statusCount: statuses.length,
 		expectedCount: expected.length,
-		bijection: Array.isArray(context?.sourceStatuses) &&
-			missing.length === 0 && duplicate.length === 0 && wrongStage.length === 0 &&
-			orphan.length === 0 && duplicateTaskIds.length === 0 &&
-			assignments.length === expected.length && statuses.length === expected.length,
+		bijection:
+			Array.isArray(context?.sourceStatuses) &&
+			missing.length === 0 &&
+			duplicate.length === 0 &&
+			wrongStage.length === 0 &&
+			orphan.length === 0 &&
+			duplicateTaskIds.length === 0 &&
+			assignments.length === expected.length &&
+			statuses.length === expected.length,
 	};
 }
 
-function sourceCoverageComplete(context) {
-	return impactSourceCoverage(context).bijection;
+// These are the producer-owned observations.  The final helper reads them
+// directly; no model is asked to recopy a second identity-bearing ledger.
+const ORIGINAL_FIELDS = {
+	"change-scope": [
+		["changeInputs", "scope"],
+		["affectedFiles", "scope"],
+		["affectedComponents", "scope"],
+		["publicSurfaces", "scope"],
+		["assumptions", "assumption"],
+		["outOfScope", "scope"],
+	],
+	"implementation-map": [
+		["components", "scope"],
+		["entryPoints", "scope"],
+		["dataFlows", "scope"],
+		["unknowns", "gap"],
+	],
+	"validation-map": [
+		["tests", "scope"],
+		["docs", "scope"],
+		["releaseArtifacts", "scope"],
+		["validationCommandsMentioned", "action"],
+		["knownGaps", "gap"],
+	],
+	"validation-impact": [
+		["coveredAreas", "scope"],
+		["missingValidation", "gap"],
+		["recommendedCommands", "action"],
+		["assumptions", "assumption"],
+	],
+	"api-contract-impact": [["impacts", "issue"], ["assumptions", "assumption"]],
+	"state-data-impact": [["impacts", "issue"], ["assumptions", "assumption"]],
+	"docs-release-impact": [["impacts", "issue"], ["assumptions", "assumption"]],
+	"security-performance-impact": [
+		["impacts", "risk"],
+		["assumptions", "assumption"],
+	],
+	"contract-consistency": [
+		["issues", "issue"],
+		["confirmedConsistencies", "assumption"],
+	],
+	"regression-risk": [["risks", "risk"], ["riskReducers", "action"]],
+	"ship-readiness": [
+		["requiredBeforeShip", "action"],
+		["niceToHave", "action"],
+		["assumptions", "assumption"],
+	],
+	"impact-synthesis": [
+		["blockingIssues", "blocker"],
+		["nonBlockingIssues", "issue"],
+		["confirmedSafeAreas", "assumption"],
+		["recommendedNextActions", "action"],
+		["validationToRun", "action"],
+		["needsHuman", "gap"],
+	],
+};
+
+function optionalString(value) {
+	return typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
+}
+
+function contentHash(value) {
+	return `sha256:${createHash("sha256").update(stableStringify(value)).digest("hex")}`;
+}
+
+function originalRowId(stageId, field, item, occurrence) {
+	const producerId = optionalString(item?.id);
+	const base = producerId
+		? `${canonicalSourceKey(stageId)}:${field}:${producerId}`
+		: `${canonicalSourceKey(stageId)}:${field}:payload-${contentHash(item).slice(7)}`;
+	return occurrence > 1 ? `${base}#${occurrence}` : base;
+}
+
+function originalRow(stageId, field, kind, item, index, occurrence, taskId) {
+	const record = isRecord(item) ? item : { text: String(item ?? "") };
+	const declaredSeverity = cleanText(record.severity ?? record.riskLevel).toLowerCase();
+	// An omitted optional severity is not an assertion that risk is unknown.
+	// Preserve explicit uncertainty and conservatively handle unknown labels.
+	const severity = declaredSeverity === "critical"
+		? "high"
+		: RISK_LEVELS.has(declaredSeverity)
+			? declaredSeverity
+			: declaredSeverity || record.scope === "unknown"
+				? "unknown"
+				: "none";
+	const source = canonicalSourceKey(stageId);
+	return {
+		id: originalRowId(stageId, field, record, occurrence),
+		text: optionalString(record.text) || stableStringify(record),
+		kind: [
+			"issue",
+			"risk",
+			"scope",
+			"assumption",
+			"gap",
+			"blocker",
+			"action",
+		].includes(record.kind)
+			? record.kind
+			: kind,
+		severity,
+		scope: ["known", "unknown"].includes(record.scope) ? record.scope : "known",
+		resolution: ["unresolved", "resolved", "accepted", "not-applicable"].includes(
+			record.resolution,
+		)
+			? record.resolution
+			: "unresolved",
+		resolutionNote:
+			optionalString(record.resolutionNote) ||
+			`No resolution was established for original ${field} row.`,
+		// These are host-derived identities.  Producer sourceIds/origin fields
+		// remain part of the original control but cannot replace this provenance.
+		origin: stageId,
+		sourceIds: [source],
+		provenance: {
+			source,
+			stage: stageId,
+			...(taskId ? { taskId } : {}),
+			field,
+			index,
+		},
+		contentHash: contentHash(item),
+		...(typeof record.owner === "string" && record.owner.trim()
+			? { owner: record.owner }
+			: {}),
+		...(Array.isArray(record.resolutionEvidence) &&
+		record.resolutionEvidence.every(
+			(item) =>
+				isRecord(item) &&
+				typeof item.type === "string" &&
+				item.type.trim() &&
+				typeof item.ref === "string" &&
+				item.ref.trim(),
+		)
+			? { resolutionEvidence: record.resolutionEvidence }
+			: {}),
+	};
+}
+
+function originalRowsForStage(stageId, value, taskId) {
+	const rows = [];
+	for (const [field, kind] of ORIGINAL_FIELDS[stageId] ?? []) {
+		const occurrences = new Map();
+		for (const [index, item] of asArray(value?.[field]).entries()) {
+			const key = optionalString(item?.id)
+				? `id:${optionalString(item.id)}`
+				: `payload:${contentHash(item)}`;
+			const occurrence = (occurrences.get(key) ?? 0) + 1;
+			occurrences.set(key, occurrence);
+			rows.push({
+				field,
+				index,
+				source: item,
+				row: originalRow(stageId, field, kind, item, index, occurrence, taskId),
+			});
+		}
+	}
+	return rows;
+}
+
+function sourceControlFailures(stageId, value) {
+	if (!isRecord(value)) return [`${stageId}:missing-control`];
+	return (ORIGINAL_FIELDS[stageId] ?? [])
+		.filter(([field]) => !Array.isArray(value[field]))
+		.map(([field]) => `${stageId}:missing-original-field:${field}`);
+}
+
+function resolutionClaimNeedsVerification(row) {
+	return Boolean(row && (["resolved", "accepted"].includes(row.resolution) || (row.resolution === "not-applicable" && row.severity !== "none")));
+}
+
+function reconcileImpactLedger(sources, context = {}) {
+	const assignments = new Map(
+		impactSourceCoverage(context).assignments.map((item) => [item.stageId, item]),
+	);
+	const canonicalRows = {};
+	const allRows = [];
+	const stageFailures = [];
+	const unverifiedResolutions = new Set();
+	const ids = new Set();
+	const expectedSources = new Set(LEDGER_STAGES.map(canonicalSourceKey));
+	for (const sourceKey of Object.keys(sources ?? {}))
+		if (!expectedSources.has(sourceKey))
+			stageFailures.push(`runtime-sources:unexpected-source-key:${sourceKey}`);
+	for (const stageId of LEDGER_STAGES) {
+		const value = findSource(sources, stageId);
+		const taskId = assignments.get(stageId)?.taskId;
+		stageFailures.push(...sourceControlFailures(stageId, value));
+		const rows = originalRowsForStage(stageId, value, taskId).map(({ row }) => row);
+		for (const row of rows) {
+			if (ids.has(row.id)) stageFailures.push(`${stageId}:${row.id}:identity-collision`);
+			ids.add(row.id);
+			if (resolutionClaimNeedsVerification(row)) unverifiedResolutions.add(row.id);
+		}
+		canonicalRows[stageId] = rows;
+		allRows.push(...rows);
+	}
+	const sourceCoverage = impactSourceCoverage(context);
+	if (!sourceCoverage.bijection)
+		stageFailures.push("runtime-source-statuses:incomplete-12-source-bijection");
+	const complete = stageFailures.length === 0 && unverifiedResolutions.size === 0;
+	return {
+		mode: "ledger",
+		status: complete ? "complete" : "invalid",
+		impactLedger: allRows,
+		missingIds: [],
+		duplicateIds: [...new Set(stageFailures.filter((item) => item.includes("identity-collision")).map((item) => item.split(":")[1]))].sort(),
+		fabricatedSourceIds: [],
+		stageFailures: [...new Set(stageFailures)].sort(),
+		unverifiedResolutions: [...unverifiedResolutions].sort(),
+		canonicalRows,
+		complete,
+	};
 }
 
 function synthesisValid(value) {
 	return Boolean(
 		isRecord(value) &&
-		cleanText(value.schema) &&
-		cleanText(value.digest) &&
-		cleanText(value.summary) &&
-		VERDICTS.has(cleanText(value.verdict)) &&
-		RISK_LEVELS.has(cleanText(value.riskLevel)) &&
-		[
-			"blockingIssues",
-			"nonBlockingIssues",
-			"confirmedSafeAreas",
-			"recommendedNextActions",
-			"validationToRun",
-			"needsHuman",
-		].every((key) => Array.isArray(value[key])),
+			cleanText(value.schema) &&
+			cleanText(value.digest) &&
+			cleanText(value.summary) &&
+			VERDICTS.has(cleanText(value.verdict)) &&
+			RISK_LEVELS.has(cleanText(value.riskLevel)) &&
+			[
+				"blockingIssues",
+				"nonBlockingIssues",
+				"confirmedSafeAreas",
+				"recommendedNextActions",
+				"validationToRun",
+				"needsHuman",
+			].every((key) => Array.isArray(value[key])),
 	);
 }
 
 function contractValid(value) {
 	return Boolean(
 		isRecord(value) &&
-		cleanText(value.schema) &&
-		cleanText(value.digest) &&
-		CONTRACT_STATES.has(cleanText(value.status)) &&
-		Array.isArray(value.issues) &&
-		Array.isArray(value.confirmedConsistencies),
+			cleanText(value.schema) &&
+			cleanText(value.digest) &&
+			CONTRACT_STATES.has(cleanText(value.status)) &&
+			Array.isArray(value.issues) &&
+			Array.isArray(value.confirmedConsistencies),
 	);
 }
 
 function regressionValid(value) {
 	return Boolean(
 		isRecord(value) &&
-		cleanText(value.schema) &&
-		cleanText(value.digest) &&
-		RISK_LEVELS.has(cleanText(value.riskLevel)) &&
-		Array.isArray(value.risks) &&
-		Array.isArray(value.riskReducers),
+			cleanText(value.schema) &&
+			cleanText(value.digest) &&
+			RISK_LEVELS.has(cleanText(value.riskLevel)) &&
+			Array.isArray(value.risks) &&
+			Array.isArray(value.riskReducers),
 	);
 }
 
 function shipValid(value) {
 	return Boolean(
 		isRecord(value) &&
-		cleanText(value.schema) &&
-		cleanText(value.digest) &&
-		SHIP_STATES.has(cleanText(value.status)) &&
-		Array.isArray(value.requiredBeforeShip) &&
-		Array.isArray(value.niceToHave) &&
-		Array.isArray(value.assumptions),
+			cleanText(value.schema) &&
+			cleanText(value.digest) &&
+			SHIP_STATES.has(cleanText(value.status)) &&
+			Array.isArray(value.requiredBeforeShip) &&
+			Array.isArray(value.niceToHave) &&
+			Array.isArray(value.assumptions),
 	);
 }
 
@@ -244,8 +467,6 @@ function requiredVerdict({ synthesis, contract, regression, ship }) {
 		ship.status === "needs-work" ||
 		contract.status === "warn" ||
 		contract.status === "fail" ||
-		regression.riskLevel === "medium" ||
-		regression.riskLevel === "high" ||
 		asArray(ship.requiredBeforeShip).length > 0 ||
 		asArray(synthesis.nonBlockingIssues).length > 0
 	)
@@ -253,20 +474,68 @@ function requiredVerdict({ synthesis, contract, regression, ship }) {
 	return "READY";
 }
 
-function riskFloorConsistent(synthesisRisk, regressionRisk) {
-	if (!RISK_LEVELS.has(synthesisRisk) || !RISK_LEVELS.has(regressionRisk))
+function riskFloorConsistent(
+	synthesisRisk,
+	regressionRisk,
+	canonicalRisk = "none",
+) {
+	if (
+		!RISK_LEVELS.has(synthesisRisk) ||
+		!RISK_LEVELS.has(regressionRisk) ||
+		!RISK_LEVELS.has(canonicalRisk)
+	)
 		return false;
+	if (canonicalRisk === "unknown")
+		return synthesisRisk === "unknown" && regressionRisk === "unknown";
 	if (regressionRisk === "unknown") return synthesisRisk === "unknown";
 	if (synthesisRisk === "unknown") return true;
-	return RISKS.indexOf(synthesisRisk) >= RISKS.indexOf(regressionRisk);
+	return (
+		RISKS.indexOf(synthesisRisk) >= RISKS.indexOf(regressionRisk) &&
+		RISKS.indexOf(synthesisRisk) >= RISKS.indexOf(canonicalRisk) &&
+		RISKS.indexOf(regressionRisk) >= RISKS.indexOf(canonicalRisk)
+	);
 }
 
-function effectiveRiskLevel(synthesisRisk, regressionRisk) {
-	if (synthesisRisk === "unknown" || regressionRisk === "unknown") return "unknown";
-	const synthesisIndex = RISKS.indexOf(synthesisRisk);
-	const regressionIndex = RISKS.indexOf(regressionRisk);
-	if (synthesisIndex < 0 && regressionIndex < 0) return "unknown";
-	return RISKS[Math.max(synthesisIndex, regressionIndex)] ?? "unknown";
+function effectiveRiskLevel(
+	synthesisRisk,
+	regressionRisk,
+	canonicalRisk = "none",
+) {
+	if (
+		synthesisRisk === "unknown" ||
+		regressionRisk === "unknown" ||
+		canonicalRisk === "unknown"
+	)
+		return "unknown";
+	const indexes = [synthesisRisk, regressionRisk, canonicalRisk].map((risk) =>
+		RISKS.indexOf(risk),
+	);
+	if (indexes.every((index) => index < 0)) return "unknown";
+	return RISKS[Math.max(...indexes)] ?? "unknown";
+}
+
+function informationalUnknown(row) {
+	if (row?.severity !== "unknown") return false;
+	const text = cleanText(row.text).toLowerCase();
+	return /out[- ]of[- ]scope|read[- ]only|unknown caller|caller(?:s)? unavailable|informational note/.test(text) &&
+		!/(required|missing|block|must|unavailable baseline|cannot|critical)/.test(text);
+}
+
+function summarizeCanonicalRisk(rows, unverifiedResolutions = []) {
+	const unverified = new Set(unverifiedResolutions);
+	const observationIds = new Set();
+	let knownFloor = "none";
+	for (const row of rows) {
+		// Unbound resolution claims cannot remove either a known risk or an
+		// unquantified observation. Unknown is not an ordinal above "high".
+		if (row.resolution !== "unresolved" && !unverified.has(row.id)) continue;
+		if (row.severity === "unknown") {
+			if (!informationalUnknown(row)) observationIds.add(row.id ?? `${row.stageId}.status`);
+			continue;
+		}
+		if (RISKS.indexOf(row.severity) > RISKS.indexOf(knownFloor)) knownFloor = row.severity;
+	}
+	return { present: observationIds.size > 0, knownFloor, observationIds: [...observationIds].sort() };
 }
 
 function rowText(row) {
@@ -284,19 +553,84 @@ function renderRows(heading, rows, emptyText) {
 
 function rowCollections({ synthesis, contract, regression, ship }) {
 	return [
-		["blockingIssues", "Blocking issues", synthesis.blockingIssues, "No blocking issue was recorded."],
-		["nonBlockingIssues", "Non-blocking issues", synthesis.nonBlockingIssues, "No non-blocking issue was recorded."],
-		["recommendedNextActions", "Recommended next actions", synthesis.recommendedNextActions, "No recommended action was recorded."],
-		["validationToRun", "Validation to run", synthesis.validationToRun, "No validation command was recorded."],
-		["needsHuman", "Needs human review", synthesis.needsHuman, "No needs-human row was recorded."],
-		["confirmedSafeAreas", "Confirmed safe areas", synthesis.confirmedSafeAreas, "No confirmed-safe row was recorded."],
-		["contractIssues", "Contract issues", contract.issues, "No contract inconsistency was recorded."],
-		["confirmedConsistencies", "Confirmed consistencies", contract.confirmedConsistencies, "No confirmed consistency was recorded."],
-		["regressionRisks", "Regression risks", regression.risks, "No regression-risk row was recorded."],
-		["riskReducers", "Risk reducers", regression.riskReducers, "No risk-reducer row was recorded."],
-		["requiredBeforeShip", "Required before ship", ship.requiredBeforeShip, "No required-before-ship row was recorded."],
-		["niceToHave", "Nice to have", ship.niceToHave, "No nice-to-have row was recorded."],
-		["readinessAssumptions", "Readiness assumptions", ship.assumptions, "No readiness assumption was recorded."],
+		[
+			"blockingIssues",
+			"Blocking issues",
+			synthesis.blockingIssues,
+			"No blocking issue was recorded.",
+		],
+		[
+			"nonBlockingIssues",
+			"Non-blocking issues",
+			synthesis.nonBlockingIssues,
+			"No non-blocking issue was recorded.",
+		],
+		[
+			"recommendedNextActions",
+			"Recommended next actions",
+			synthesis.recommendedNextActions,
+			"No recommended action was recorded.",
+		],
+		[
+			"validationToRun",
+			"Validation to run",
+			synthesis.validationToRun,
+			"No validation command was recorded.",
+		],
+		[
+			"needsHuman",
+			"Needs human review",
+			synthesis.needsHuman,
+			"No needs-human row was recorded.",
+		],
+		[
+			"confirmedSafeAreas",
+			"Confirmed safe areas",
+			synthesis.confirmedSafeAreas,
+			"No confirmed-safe row was recorded.",
+		],
+		[
+			"contractIssues",
+			"Contract issues",
+			contract.issues,
+			"No contract inconsistency was recorded.",
+		],
+		[
+			"confirmedConsistencies",
+			"Confirmed consistencies",
+			contract.confirmedConsistencies,
+			"No confirmed consistency was recorded.",
+		],
+		[
+			"regressionRisks",
+			"Regression risks",
+			regression.risks,
+			"No regression-risk row was recorded.",
+		],
+		[
+			"riskReducers",
+			"Risk reducers",
+			regression.riskReducers,
+			"No risk-reducer row was recorded.",
+		],
+		[
+			"requiredBeforeShip",
+			"Required before ship",
+			ship.requiredBeforeShip,
+			"No required-before-ship row was recorded.",
+		],
+		[
+			"niceToHave",
+			"Nice to have",
+			ship.niceToHave,
+			"No nice-to-have row was recorded.",
+		],
+		[
+			"readinessAssumptions",
+			"Readiness assumptions",
+			ship.assumptions,
+			"No readiness assumption was recorded.",
+		],
 	];
 }
 
@@ -309,7 +643,10 @@ function issueSummary(collections) {
 function completionText(value, maxChars = 300) {
 	const sanitized = safeInline(value)
 		.replace(/\.pi\b(?:[\\/][^\s]*)?/gi, "[artifact omitted]")
-		.replace(/\b(?:final-report|audit|review|executive)\.md\b/gi, "[artifact omitted]")
+		.replace(
+			/\b(?:final-report|audit|review|executive)\.md\b/gi,
+			"[artifact omitted]",
+		)
 		.replace(/\b(?:refs|control)\.json\b/gi, "[artifact omitted]")
 		.replace(/\brelated[\s-]+artifacts\b/gi, "[section title omitted]")
 		.replace(/\bworkflow[_-][\w.-]+\b/gi, "[run omitted]")
@@ -320,18 +657,37 @@ function completionText(value, maxChars = 300) {
 		: `${chars.slice(0, Math.max(1, maxChars - 1)).join("")}…`;
 }
 
-function actionSummaryRows(synthesis) {
-	return [
+function actionSummaryRows(synthesis, ship) {
+	const rows = [
+		...asArray(ship.requiredBeforeShip),
 		...asArray(synthesis.blockingIssues),
 		...asArray(synthesis.nonBlockingIssues),
 		...asArray(synthesis.recommendedNextActions),
 		...asArray(synthesis.validationToRun),
 		...asArray(synthesis.needsHuman),
-	].slice(0, 5);
+	];
+	const seen = new Set();
+	return rows
+		.filter((row) => {
+			const key =
+				isRecord(row) && cleanText(row.id)
+					? `id:${cleanText(row.id)}`
+					: `row:${stableStringify(row)}`;
+			if (seen.has(key)) return false;
+			seen.add(key);
+			return true;
+		});
 }
 
-function renderCompletionSummary({ verdict, riskLevel, synthesis, ship, summary, limitations }) {
-	const actions = actionSummaryRows(synthesis);
+function renderCompletionSummary({
+	verdict,
+	riskLevel,
+	synthesis,
+	ship,
+	summary,
+	limitations,
+}) {
+	const actions = actionSummaryRows(synthesis, ship);
 	const out = [
 		"## Core conclusion",
 		"",
@@ -340,8 +696,16 @@ function renderCompletionSummary({ verdict, riskLevel, synthesis, ship, summary,
 		"## Key actions",
 		"",
 	];
-	if (actions.length === 0) out.push("- No blocking issue, follow-up action, or validation command was recorded.");
-	else actions.forEach((row) => out.push(`- ${completionText(typeof row === "string" ? row : stableStringify(row), 420)}`));
+	if (actions.length === 0)
+		out.push(
+			"- No blocking issue, follow-up action, or validation command was recorded.",
+		);
+	else
+		actions.forEach((row) =>
+			out.push(
+				`- ${completionText(typeof row === "string" ? row : stableStringify(row), 420)}`,
+			),
+		);
 	out.push(
 		"",
 		"## Evidence level",
@@ -357,21 +721,44 @@ function renderCompletionSummary({ verdict, riskLevel, synthesis, ship, summary,
 		...asArray(synthesis.needsHuman),
 		...asArray(ship.assumptions),
 	];
-	if (importantLimitations.length === 0) out.push("- No source-coverage, open-decision, readiness-assumption, or renderer-integrity limitation was recorded.");
-	else importantLimitations.slice(0, 8).forEach((row) => out.push(`- ${completionText(typeof row === "string" ? row : stableStringify(row), 300)}`));
-	return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+	if (importantLimitations.length === 0)
+		out.push(
+			"- No source-coverage, open-decision, readiness-assumption, or renderer-integrity limitation was recorded.",
+		);
+	else
+		importantLimitations
+			.slice(0, 8)
+			.forEach((row) =>
+				out.push(
+					`- ${completionText(typeof row === "string" ? row : stableStringify(row), 300)}`,
+				),
+			);
+	return out
+		.join("\n")
+		.replace(/\n{3,}/g, "\n\n")
+		.trim();
 }
 
-function renderMarkdown({ verdict, riskLevel, synthesis, contract, regression, ship, collections, completionSummaryMarkdown, limitations }) {
+function renderMarkdown({
+	verdict,
+	riskLevel,
+	synthesis,
+	contract,
+	regression,
+	ship,
+	collections,
+	completionSummaryMarkdown,
+	limitations,
+}) {
 	const executive = completionSummaryMarkdown
 		? completionSummaryMarkdown.replace(/^## /gm, "### ")
 		: [
-			"### Core conclusion",
-			"",
-			`Renderer status is not passed. The conservative verdict is **${verdict}** with **${riskLevel}** risk.`,
-			"",
-			`Narrative synthesis: ${safeInline(synthesis.summary ?? "unavailable")}`,
-		].join("\n");
+				"### Core conclusion",
+				"",
+				`Renderer status is not passed. The conservative verdict is **${verdict}** with **${riskLevel}** risk.`,
+				"",
+				`Narrative synthesis: ${safeInline(synthesis.summary ?? "unavailable")}`,
+			].join("\n");
 	const rendered = Object.fromEntries(
 		collections.map(([key, heading, rows, emptyText]) => [
 			key,
@@ -421,7 +808,9 @@ function renderMarkdown({ verdict, riskLevel, synthesis, contract, regression, s
 		"- The three joined controls are authoritative for contract state, regression risk, and ship readiness; synthesis cannot lower their verdict or risk floor.",
 		...(limitations.length > 0
 			? limitations.map((row) => `- ${safeInline(row)}`)
-			: ["- No source-coverage, contradiction, risk-floor, or rendering limitation was recorded."]),
+			: [
+					"- No source-coverage, contradiction, risk-floor, or rendering limitation was recorded.",
+				]),
 		"",
 		"## Related artifacts",
 		"",
@@ -430,7 +819,10 @@ function renderMarkdown({ verdict, riskLevel, synthesis, contract, regression, s
 		"- [Canonical impact source ledger](source-ledger.json)",
 	];
 	return {
-		markdown: lines.join("\n").replace(/\n{3,}/g, "\n\n").trim(),
+		markdown: lines
+			.join("\n")
+			.replace(/\n{3,}/g, "\n\n")
+			.trim(),
 		renderedCounts: Object.fromEntries(
 			Object.entries(rendered).map(([key, value]) => [key, value.rendered]),
 		),
@@ -463,6 +855,15 @@ function blockedImpactResult(reason) {
 		},
 		sourceArtifacts: [],
 		blockers: [reason],
+		impactLedger: [],
+		ledgerCoverage: {
+			mode: "ledger",
+			status: "invalid",
+			missingIds: [],
+			duplicateIds: [],
+			fabricatedSourceIds: [],
+			stageFailures: [reason],
+		},
 		sourceCoverage: impactSourceCoverage({ sourceStatuses: [] }),
 		gates: {
 			allLedgerSourcesAvailable: false,
@@ -473,6 +874,9 @@ function blockedImpactResult(reason) {
 			regressionRiskUnknown: true,
 			riskGatePassed: false,
 			renderedAllStructuredItems: false,
+			ledgerComplete: false,
+			sidecarPublished: false,
+			byteAssuranceLimited: true,
 			passed: false,
 		},
 	};
@@ -489,7 +893,9 @@ export default async function renderImpactReport({ sources, context = {} }) {
 		regression = findSource(sources, "regression-risk") ?? {};
 		ship = findSource(sources, "ship-readiness") ?? {};
 	} catch (error) {
-		return blockedImpactResult(error instanceof Error ? error.message : String(error));
+		return blockedImpactResult(
+			error instanceof Error ? error.message : String(error),
+		);
 	}
 	const validity = {
 		"impact-synthesis": synthesisValid(synthesis),
@@ -497,55 +903,150 @@ export default async function renderImpactReport({ sources, context = {} }) {
 		"regression-risk": regressionValid(regression),
 		"ship-readiness": shipValid(ship),
 	};
-	const allLedgerSourcesAvailable = Object.values(validity).every(Boolean);
-	const sourceCoverage = impactSourceCoverage(context);
+	let ledgerCoverage;
+	try {
+		ledgerCoverage = reconcileImpactLedger(sources, context);
+	} catch (error) {
+		return blockedImpactResult(
+			error instanceof Error ? error.message : String(error),
+		);
+	}
+	const ledgerMode = ledgerCoverage.mode === "ledger";
+	const sourceCoverage = impactSourceCoverage(context, ledgerMode);
 	const coverageComplete = sourceCoverage.bijection;
+	const canonicalSourcesAvailable = Object.values(validity).every(Boolean);
+	const ledgerStatusComplete =
+		!ledgerMode ||
+		(ledgerCoverage.complete &&
+			ledgerCoverage.status === "complete" &&
+			ledgerCoverage.unverifiedResolutions.length === 0);
+	const allLedgerSourcesAvailable =
+		canonicalSourcesAvailable && ledgerStatusComplete;
 	const safeSynthesis = isRecord(synthesis) ? synthesis : {};
 	const safeContract = isRecord(contract) ? contract : {};
 	const safeRegression = isRecord(regression) ? regression : {};
 	const safeShip = isRecord(ship) ? ship : {};
-	const proposedVerdict = allLedgerSourcesAvailable && coverageComplete
-		? requiredVerdict({ synthesis: safeSynthesis, contract: safeContract, regression: safeRegression, ship: safeShip })
+	const unverifiedResolutionNeedsHuman = ledgerCoverage.unverifiedResolutions.map(
+		(id) => ({
+			id: `UNVERIFIED-RESOLUTION-${id}`,
+			text: `Resolution claim for ${id} is model-assessed only; verify owner authority and evidence before relying on it.`,
+			kind: "gap",
+			severity: "unknown",
+			scope: "known",
+			resolution: "unresolved",
+			resolutionNote: "No externally bound approval or evidence was supplied.",
+			origin: "impact-renderer",
+			sourceIds: [id],
+		}),
+	);
+	const effectiveSynthesis =
+		unverifiedResolutionNeedsHuman.length === 0
+			? safeSynthesis
+			: {
+					...safeSynthesis,
+					needsHuman: [
+						...asArray(safeSynthesis.needsHuman),
+						...unverifiedResolutionNeedsHuman,
+					],
+				};
+	const sourceVerdict = canonicalSourcesAvailable && coverageComplete
+		? requiredVerdict({ synthesis: effectiveSynthesis, contract: safeContract, regression: safeRegression, ship: safeShip })
+		: "UNKNOWN";
+	const proposedVerdict = allLedgerSourcesAvailable || sourceVerdict === "BLOCKED"
+		? sourceVerdict
 		: "UNKNOWN";
 	const synthesisRisk = cleanText(safeSynthesis.riskLevel);
 	const regressionRisk = cleanText(safeRegression.riskLevel);
-	const riskLevel = effectiveRiskLevel(synthesisRisk, regressionRisk);
-	const synthesisRiskUnknown = !RISK_LEVELS.has(synthesisRisk) || synthesisRisk === "unknown";
-	const regressionRiskUnknown = !RISK_LEVELS.has(regressionRisk) || regressionRisk === "unknown";
-	// Unknown risk is an explicit uncertainty state, never a successful
-	// readiness gate, even when all joined controls agree on UNKNOWN.
-	const riskGatePassed = !synthesisRiskUnknown && !regressionRiskUnknown;
-	const verdict = riskGatePassed ? proposedVerdict : "UNKNOWN";
+	// Lens-level risk assessments are also original source judgments, even
+	// when their individual observations omit an optional severity field.
+	const sourceRiskRows = ["api-contract-impact", "state-data-impact", "docs-release-impact", "security-performance-impact"]
+		.map((stageId) => ({ stageId, severity: cleanText(findSource(sources, stageId)?.status) }))
+		.filter((row) => RISK_LEVELS.has(row.severity))
+		.map((row) => ({ ...row, resolution: "unresolved", text: `${row.stageId} aggregate risk` }));
+	const riskUncertainty = ledgerMode
+		? summarizeCanonicalRisk([...ledgerCoverage.impactLedger, ...sourceRiskRows], ledgerCoverage.unverifiedResolutions)
+		: { present: false, knownFloor: "none", observationIds: [] };
+	const canonicalRisk = riskUncertainty.knownFloor;
+	const riskLevel = riskUncertainty.present && proposedVerdict === "READY"
+		? "unknown"
+		: effectiveRiskLevel(synthesisRisk, regressionRisk, canonicalRisk);
+	const synthesisRiskUnknown =
+		!RISK_LEVELS.has(synthesisRisk) || synthesisRisk === "unknown";
+	const regressionRiskUnknown =
+		!RISK_LEVELS.has(regressionRisk) || regressionRisk === "unknown";
+	// Unquantified observations cannot establish READY. They also cannot erase
+	// a coherent known BLOCKED/NEEDS_WORK assessment with a stated risk floor.
+	const uncertaintyBlocksConclusion = riskUncertainty.present && !["BLOCKED", "NEEDS_WORK"].includes(proposedVerdict);
+	const riskGatePassed = !synthesisRiskUnknown && !regressionRiskUnknown && !uncertaintyBlocksConclusion;
+	const riskConsistent =
+		allLedgerSourcesAvailable &&
+		riskFloorConsistent(synthesisRisk, regressionRisk, canonicalRisk);
+	// A known blocker remains authoritative even when another risk dimension is
+	// unknown; an understated risk cannot support a READY label.
+	const verdict =
+		proposedVerdict === "BLOCKED"
+			? "BLOCKED"
+			: riskGatePassed && (proposedVerdict !== "READY" || riskConsistent)
+				? proposedVerdict
+				: "UNKNOWN";
 	const verdictConsistent =
 		allLedgerSourcesAvailable &&
 		coverageComplete &&
 		cleanText(safeSynthesis.verdict) === verdict;
-	const riskConsistent =
-		allLedgerSourcesAvailable && riskFloorConsistent(synthesisRisk, regressionRisk);
 	const collections = rowCollections({
-		synthesis: safeSynthesis,
+		synthesis: effectiveSynthesis,
 		contract: safeContract,
 		regression: safeRegression,
 		ship: safeShip,
 	});
 	const summary = issueSummary(collections);
 	const limitations = [];
-	if (!allLedgerSourcesAvailable) {
+	if (!canonicalSourcesAvailable) {
 		const unavailable = STAGES.filter((stageId) => !validity[stageId]);
-		limitations.push(`Missing or malformed canonical source control(s): ${unavailable.join(", ")}.`);
+		limitations.push(
+			`Missing or malformed canonical source control(s): ${unavailable.join(", ") || "unknown"}.`,
+		);
 	}
+	if (!ledgerStatusComplete && canonicalSourcesAvailable)
+		limitations.push("Canonical source controls or runtime source provenance are incomplete.");
+	if (ledgerMode && !ledgerCoverage.complete) {
+		limitations.push(
+			`Impact ledger reconciliation failed: missing=${ledgerCoverage.missingIds.length}, duplicate=${ledgerCoverage.duplicateIds.length}, fabricated=${ledgerCoverage.fabricatedSourceIds.length}.`,
+		);
+	}
+	if (ledgerMode && ledgerCoverage.status !== "complete")
+		limitations.push(
+			`Impact ledger status is ${ledgerCoverage.status}; only complete ledger status can pass.`,
+		);
+	if (ledgerMode && ledgerCoverage.unverifiedResolutions.length > 0)
+		limitations.push(
+			`Resolution claims are model-assessed and lack externally bound approval/evidence authority: ${ledgerCoverage.unverifiedResolutions.join(", ")}.`,
+		);
+	if (ledgerMode && canonicalRisk !== "none")
+		limitations.push(`Known canonical impact risk floor is ${canonicalRisk}.`);
+	if (riskUncertainty.present)
+		limitations.push(`${riskUncertainty.observationIds.length} original risk observations remain unquantified; they are retained separately from the known risk floor and cannot establish READY.`);
+	limitations.push(
+		"Impact review does not attest historical source-file bytes; content hashes cover host-supplied control values only, and citations are unverified unless an authoritative byte snapshot is supplied.",
+	);
 	if (!coverageComplete)
-		limitations.push("Canonical source lifecycle metadata is missing, duplicated, non-terminal, or incomplete.");
+		limitations.push(
+			"Canonical source lifecycle metadata is missing, duplicated, non-terminal, or incomplete.",
+		);
 	if (allLedgerSourcesAvailable && !verdictConsistent)
-		limitations.push(`Synthesis verdict ${cleanText(safeSynthesis.verdict) || "unavailable"} contradicts required verdict ${verdict}.`);
+		limitations.push(
+			`Synthesis verdict ${cleanText(safeSynthesis.verdict) || "unavailable"} contradicts required verdict ${verdict}.`,
+		);
 	if (allLedgerSourcesAvailable && !riskConsistent)
-		limitations.push(`Synthesis risk ${synthesisRisk || "unavailable"} understates or obscures canonical regression risk ${regressionRisk || "unavailable"}.`);
+		limitations.push(
+			`Synthesis risk ${synthesisRisk || "unavailable"} understates or obscures the known source risk floor ${canonicalRisk} (regression risk ${regressionRisk || "unavailable"}).`,
+		);
 	if (!riskGatePassed)
 		limitations.push("Unknown impact risk prevents a successful readiness gate.");
 	const provisional = renderMarkdown({
 		verdict,
 		riskLevel,
-		synthesis: safeSynthesis,
+		synthesis: effectiveSynthesis,
 		contract: safeContract,
 		regression: safeRegression,
 		ship: safeShip,
@@ -557,7 +1058,9 @@ export default async function renderImpactReport({ sources, context = {} }) {
 		(key) => summary[key] === provisional.renderedCounts[key],
 	);
 	if (!renderedAllStructuredItems)
-		limitations.push("At least one structured issue, action, validation, needs-human, or readiness row was not rendered.");
+		limitations.push(
+			"At least one structured issue, action, validation, needs-human, or readiness row was not rendered.",
+		);
 	const passed =
 		allLedgerSourcesAvailable &&
 		coverageComplete &&
@@ -565,18 +1068,26 @@ export default async function renderImpactReport({ sources, context = {} }) {
 		riskConsistent &&
 		riskGatePassed &&
 		renderedAllStructuredItems;
-	const status = !allLedgerSourcesAvailable || !coverageComplete
-		? "blocked"
-		: passed
-			? "passed"
-			: "failed";
-	const completionSummaryMarkdown = passed
-		? renderCompletionSummary({ verdict, riskLevel, synthesis: safeSynthesis, ship: safeShip, summary, limitations })
+	let status =
+		!allLedgerSourcesAvailable || !coverageComplete
+			? "blocked"
+			: passed
+				? "passed"
+				: "failed";
+	let completionSummaryMarkdown = passed
+		? renderCompletionSummary({
+				verdict,
+				riskLevel,
+				synthesis: effectiveSynthesis,
+				ship: safeShip,
+				summary,
+				limitations,
+			})
 		: "";
-	const rendered = renderMarkdown({
+	let rendered = renderMarkdown({
 		verdict,
 		riskLevel,
-		synthesis: safeSynthesis,
+		synthesis: effectiveSynthesis,
 		contract: safeContract,
 		regression: safeRegression,
 		ship: safeShip,
@@ -593,53 +1104,113 @@ export default async function renderImpactReport({ sources, context = {} }) {
 		regressionRiskUnknown,
 		riskGatePassed,
 		renderedAllStructuredItems,
+		ledgerComplete: !ledgerMode || ledgerStatusComplete,
+		sidecarPublished: true,
+		byteAssuranceLimited: true,
 		passed,
-	};
-	const controlForDigest = {
-		status,
-		verdict,
-		riskLevel,
-		issueSummary: summary,
-		gates,
-		markdown: rendered.markdown,
 	};
 	let sidecarPath;
 	let ledgerSidecarPath;
+	let sidecarError;
+	const sidecarRequired = Boolean(
+		context.cwd && context.runId && context.taskId,
+	);
 	try {
-		if (context.cwd && context.runId && context.taskId) {
-			const taskDir = join(context.cwd, ".pi", "workflows", context.runId, "tasks", context.taskId);
+		if (sidecarRequired) {
+			const taskDir = join(
+				context.cwd,
+				".pi",
+				"workflows",
+				context.runId,
+				"tasks",
+				context.taskId,
+			);
 			await mkdir(taskDir, { recursive: true });
-			await writeFile(join(taskDir, "final-report.md"), `${rendered.markdown}\n`, "utf8");
+			await writeFile(
+				join(taskDir, "final-report.md"),
+				`${rendered.markdown}\n`,
+				"utf8",
+			);
 			await writeFile(
 				join(taskDir, "source-ledger.json"),
-				`${stableStringify({
-					schema: "impact-review-source-ledger-v1",
-					impactSynthesis: safeSynthesis,
-					contractConsistency: safeContract,
-					regressionRisk: safeRegression,
-					shipReadiness: safeShip,
-				})}\n`,
+					`${stableStringify({
+						schema: "impact-review-source-ledger-v1",
+						sourceControls: Object.fromEntries(
+							LEDGER_STAGES.map((stageId) => [
+								stageId,
+								findSource(sources, stageId),
+							]),
+						),
+						impactSynthesis: safeSynthesis,
+						contractConsistency: safeContract,
+						regressionRisk: safeRegression,
+						shipReadiness: safeShip,
+						impactLedger: ledgerCoverage.impactLedger,
+						ledgerCoverage,
+						})}\n`,
 				"utf8",
 			);
 			sidecarPath = "final-report.md";
 			ledgerSidecarPath = "source-ledger.json";
 		}
 	} catch {
-		// Sidecars are non-authoritative; the control remains deterministic.
+		sidecarError =
+			"Sidecar publication failed; final report and source ledger were not written.";
+		limitations.push(sidecarError);
 	}
+	if (sidecarRequired && !sidecarPath) {
+		status = "failed";
+		completionSummaryMarkdown = "";
+		rendered = renderMarkdown({
+			verdict,
+			riskLevel,
+			synthesis: effectiveSynthesis,
+			contract: safeContract,
+			regression: safeRegression,
+			ship: safeShip,
+			collections,
+			completionSummaryMarkdown,
+			limitations,
+		});
+	}
+	gates.sidecarPublished = !sidecarRequired || Boolean(sidecarPath);
+	gates.passed = gates.passed && gates.sidecarPublished;
+	const controlForDigestFinal = {
+		status,
+		verdict,
+		riskLevel,
+		riskUncertainty,
+		issueSummary: summary,
+		gates,
+		ledgerCoverage,
+		markdown: rendered.markdown,
+	};
 	return {
 		schema: "impact-review-render-v1",
-		digest: `sha256:${createHash("sha256").update(stableStringify(controlForDigest)).digest("hex")}`,
+		digest: `sha256:${createHash("sha256").update(stableStringify(controlForDigestFinal)).digest("hex")}`,
 		status,
 		...(limitations.length > 0 ? { blockers: limitations.slice(0, 32) } : {}),
 		completionSummaryMarkdown,
 		markdown: rendered.markdown,
 		verdict,
 		riskLevel,
+		riskUncertainty,
 		issueSummary: summary,
 		sourceCoverage,
-		sourceArtifacts: STAGES.filter((stageId) => validity[stageId]).map((stageId) => `${stageId}.control.json`),
+		sourceArtifacts: STAGES.filter((stageId) => validity[stageId]).map(
+			(stageId) => `${stageId}.control.json`,
+		),
+		impactLedger: ledgerCoverage.impactLedger,
+		ledgerCoverage: {
+			mode: ledgerCoverage.mode,
+			status: ledgerCoverage.status,
+			missingIds: ledgerCoverage.missingIds,
+			duplicateIds: ledgerCoverage.duplicateIds,
+			fabricatedSourceIds: ledgerCoverage.fabricatedSourceIds,
+			stageFailures: ledgerCoverage.stageFailures,
+		},
 		gates,
+		...(sidecarError ? { sidecarError } : {}),
 		...(sidecarPath ? { sidecarPath } : {}),
 		...(ledgerSidecarPath ? { ledgerSidecarPath } : {}),
 	};

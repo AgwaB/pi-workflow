@@ -558,7 +558,7 @@
 		{
 			"name": "bundled deep-research compacts audit packets before executive final",
 			"occurrence": 1,
-			"sha256": "6a3965544a57bb47436d31e8edc1389a4c8fb87ce764b03742595599f516189a",
+			"sha256": "99ee72717c707ded2dd201709325f3bd11f8a2d544e21e07e5023a2cad836fd8",
 			"domain": "authoring-interface"
 		},
 		{
@@ -576,7 +576,7 @@
 		{
 			"name": "bundled spec-review workflow materializes verifier and partitions verified findings",
 			"occurrence": 1,
-			"sha256": "4a4f110ea49f4e7a56af1a57971fe32e88a296479ce139f21baa341efcccc1b9",
+			"sha256": "171300031aed64e66afc1e2cd143b4bdce0d4dde0d2c68372d5ab16473f0c7e0",
 			"domain": "authoring-interface"
 		},
 		{
@@ -870,7 +870,7 @@
 		{
 			"name": "deep-research claim-evidence-gate enforces structured evidence, rejoins identity, and partitions statuses",
 			"occurrence": 1,
-			"sha256": "0bb31c79c45d5f525eab1f2ef77b26da6bc5746e54e0133f58dbc99f2af87286",
+			"sha256": "870aaf5358412d3772f7a5acc13b001ee4248f64681092d68326346899f35096",
 			"domain": "core-runtime"
 		},
 		{
@@ -918,7 +918,7 @@
 		{
 			"name": "deep-research claim-evidence-gate suppresses sourceRef join failures for local evidence",
 			"occurrence": 1,
-			"sha256": "7ba3ea6e0e3b2f2603bcfa09cc6b1ebc1d351c6b2f980e4907976ee4333bd7da",
+			"sha256": "b875cf0f33ed3e7930230845b57457bd754bee1cefb79e9e20154bf65cd9dbeb",
 			"domain": "artifact-web"
 		},
 		{
@@ -990,13 +990,13 @@
 		{
 			"name": "deep-research renderer emits evidence-backed report and sidecars",
 			"occurrence": 1,
-			"sha256": "259c645bc812fcc5f55607a9b3a667080274dee9c24c54a2bacd92f0e3de4f8d",
+			"sha256": "5da7a34cc8defb3139c024bf835301245c8bbca09531eac7775d0d0c3be15d4e",
 			"domain": "core-runtime"
 		},
 		{
 			"name": "deep-research renderer joins synthesis overlay against packet ledgers",
 			"occurrence": 1,
-			"sha256": "1aae296eea4e623fa3b284775b4374258fdcb2a632f71af6ad17edf45255f44a",
+			"sha256": "60aca372eae7bbce6246bdc555b901b350572c21e3387b87c13cc5103705faf8",
 			"domain": "core-runtime"
 		},
 		{
@@ -1146,7 +1146,7 @@
 		{
 			"name": "deep-review finding-pipeline dedups by file+title-token overlap and partitions verdicts with severity join",
 			"occurrence": 1,
-			"sha256": "8486e75cb64980deadcec0a2632e2016878c334416bdb8959b761268c061b850",
+			"sha256": "b6a0298d7ed6ef5bc97b84a4688453780f953d289fad41c24cd8967940b569c2",
 			"domain": "core-runtime"
 		},
 		{
@@ -1158,19 +1158,19 @@
 		{
 			"name": "deep-review finding-pipeline preserves structured locations through dedup and partition",
 			"occurrence": 1,
-			"sha256": "883ba0ead17cfe056c07236870fe3d2c8e94307f1ee24ea45bd58f852bd793de",
+			"sha256": "0de9b110431084d926ad81cf7379f599320e924ef5a3925abc74531972ff6e24",
 			"domain": "core-runtime"
 		},
 		{
 			"name": "deep-review render-review-report emits finding cards from partition ledger",
 			"occurrence": 1,
-			"sha256": "b9a8b99d1003b157ec9c4aff9bf92ea6c7192597b96cd72f6d67bc2a7844a7cf",
+			"sha256": "f88fff428ccaec4b54faf19e1ec13c2aa0702a37ec7a42ecc6619eda05c5e353",
 			"domain": "core-runtime"
 		},
 		{
 			"name": "deep-review render-review-report surfaces count mismatches and missing partition",
 			"occurrence": 1,
-			"sha256": "ad01f94484240671b5445fa18c0ed4222cf2e128ce43cc8f471ea3fb68b0fcc0",
+			"sha256": "6bd40d77a6b086f99ad2c5440b266fe41dd3edc0afcd404ba31d53e0d8d8975c",
 			"domain": "core-runtime"
 		},
 		{
@@ -2346,7 +2346,7 @@
 		{
 			"name": "spec-review partition helper joins verifier results and flags missing coverage",
 			"occurrence": 1,
-			"sha256": "05fc6d76643e99f5d636d92cafd6d346a4f4eec5197f57b8bb1327262c7b91a4",
+			"sha256": "a4cab1b3a4678d10bc1a17f1b2276ca12a351092ddce515d36fe02378c3ce3e1",
 			"domain": "authoring-interface"
 		},
 		{
@@ -2826,7 +2826,7 @@
 		{
 			"name": "workflow output parser repairs known workflow control schema slips before validation",
 			"occurrence": 1,
-			"sha256": "f97bd02449d5f496645c89c9ecc4517de1580191cf5b5d2afc296271ebb387cb",
+			"sha256": "2403a3dd5560272518839e708c6909b347915965a67a009fd1e0589dca5c81c0",
 			"domain": "artifact-web"
 		},
 		{
@@ -2880,7 +2880,7 @@
 		{
 			"name": "workflow output repair wraps bare string object rows only when valid by construction",
 			"occurrence": 1,
-			"sha256": "52679c2e11a0d9aa8a36f7067d1b9bb54c3cec12e7210ad50c9beaae8f7ab14a",
+			"sha256": "f23d4608b56f927d4d18a39f1a0a425807d40a0de80da550937a03cada2ac941",
 			"domain": "artifact-web"
 		},
 		{

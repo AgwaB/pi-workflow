@@ -195,10 +195,12 @@ Validation passing means the spec is well-formed, not that it is good. These pat
     aliases, task order, and human titles are presentation/routing data, not
     identity. Count equality alone is insufficient because one missing row and
     one duplicate row can cancel numerically.
-14. **Deterministic transforms must be lossless and schema-checked.** Dedup
-    only with concrete same-entity evidence such as overlapping locations or
-    exact source evidence, not fuzzy title similarity alone. For a confirmed
-    merge, union evidence, locations, severity, origins, verifier records, and
+14. **Deterministic transforms must be lossless and schema-checked.** Shared
+    locations, identical quotes, similar titles, and producer-local root ids
+    alone do not establish the same defect. Preserve independent verifier
+    obligations when causal claims or declared roots differ; merge only when
+    causal identity and producer/source ownership are compatible. For a
+    confirmed merge, union evidence, locations, severity, origins, verifier records, and
     nested lineage deterministically. Sort by canonical identity before
     assigning generated ids, and validate every support output against the
     exact downstream contract.

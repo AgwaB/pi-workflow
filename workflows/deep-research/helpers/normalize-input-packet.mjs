@@ -23,8 +23,7 @@ function researchSources(sources) {
 	return Object.entries(sources ?? {})
 		.filter(
 			([specId]) =>
-				specId === "research-questions" ||
-				specId.startsWith("research-questions."),
+				specId === "research-questions" || specId.startsWith("research-questions."),
 		)
 		.map(([sourceId, source]) => ({ sourceId, source: asObject(source) }));
 }
@@ -88,19 +87,28 @@ function compactExtractedFact(fact, sourceId, index) {
 	return {
 		id: `${sourceId}.fact-${String(index + 1).padStart(3, "0")}`,
 		sourceId,
+		questionId: stringOf(item.questionId),
+		sourceType: stringOf(item.sourceType),
+		file: stringOf(item.file),
+		lineStart: item.lineStart,
+		lineEnd: item.lineEnd,
+		symbol: stringOf(item.symbol ?? item.function),
+		supports: compactStrings(item.supports, 8),
 		slotId: stringOf(item.slotId),
 		slotLabel: stringOf(item.slotLabel),
 		entity: stringOf(item.entity),
 		value: item.value,
 		factType: stringOf(item.factType),
-		sourceUrls: compactStrings(item.sourceUrls, 6),
-		sourceRefs: compactStrings(item.sourceRefs, 6),
+		sourceUrls: compactStrings(item.sourceUrls, Infinity),
+		sourceRefs: compactStrings(item.sourceRefs, Infinity),
 		sourceTitleOrPublisher: stringOf(item.sourceTitleOrPublisher),
 		dateOrYear: stringOf(item.dateOrYear),
 		sourceQuality: stringOf(item.sourceQuality),
 		confidence: stringOf(item.confidence),
 		quote: stringOf(item.quote)?.slice(0, 500),
 		notes: stringOf(item.notes)?.slice(0, 300),
+		whyUnverified: stringOf(item.whyUnverified)?.slice(0, 300),
+		nextStep: stringOf(item.nextStep)?.slice(0, 300),
 	};
 }
 
@@ -114,9 +122,17 @@ function compactClaim(claim, sourceId, index) {
 					originLocator: `${sourceId}.claim-${String(index + 1).padStart(3, "0")}`,
 				}),
 		sourceId,
+		questionId: stringOf(item.questionId),
+		sourceType: stringOf(item.sourceType),
+		file: stringOf(item.file),
+		lineStart: item.lineStart,
+		lineEnd: item.lineEnd,
+		symbol: stringOf(item.symbol ?? item.function),
+		supports: compactStrings(item.supports, 8),
+		quote: stringOf(item.quote)?.slice(0, 500),
 		claim: stringOf(item.claim)?.slice(0, 600),
-		sourceUrls: compactStrings(item.sourceUrls, 6),
-		sourceRefs: compactStrings(item.sourceRefs, 6),
+		sourceUrls: compactStrings(item.sourceUrls, Infinity),
+		sourceRefs: compactStrings(item.sourceRefs, Infinity),
 		sourceTitleOrPublisher: stringOf(item.sourceTitleOrPublisher),
 		dateOrYear: stringOf(item.dateOrYear),
 		sourceQuality: stringOf(item.sourceQuality),
@@ -135,8 +151,25 @@ function compactSource(source, sourceId, index) {
 					originLocator: `${sourceId}.source-${String(index + 1).padStart(3, "0")}`,
 				}),
 		sourceId,
-		url: stringOf(item.url),
+		questionId: stringOf(item.questionId),
+		sourceType: stringOf(item.sourceType),
+		file: stringOf(item.file),
+		lineStart: item.lineStart,
+		lineEnd: item.lineEnd,
+		symbol: stringOf(item.symbol ?? item.function),
+		supports: compactStrings(item.supports, 8),
+		quote: stringOf(item.quote)?.slice(0, 500),
+		url: stringOf(item.url ?? item.sourceUrl),
+		sourceUrl: stringOf(item.sourceUrl),
+		sourceUrls: compactStrings(
+			[item.sourceUrls, item.sourceUrl, item.url].flat(),
+			Infinity,
+		),
 		sourceRef: stringOf(item.sourceRef),
+		sourceRefs: compactStrings(
+			[item.sourceRefs, item.sourceRef].flat(),
+			Infinity,
+		),
 		title: stringOf(item.title ?? item.sourceTitleOrPublisher),
 		publisher: stringOf(item.publisher),
 		sourceQuality: stringOf(item.sourceQuality),
@@ -155,10 +188,12 @@ function compactGap(gap, sourceId, index) {
 				}),
 		sourceId,
 		lead: stringOf(item.lead ?? item.claim ?? item.note)?.slice(0, 500),
-		sourceUrls: compactStrings(item.sourceUrls, 6),
-		sourceRefs: compactStrings(item.sourceRefs, 6),
+		sourceUrls: compactStrings(item.sourceUrls, Infinity),
+		sourceRefs: compactStrings(item.sourceRefs, Infinity),
 		factSlotIds: compactStrings(item.factSlotIds, 8),
 		reason: stringOf(item.reason ?? item.gapReason),
+		whyUnverified: stringOf(item.whyUnverified)?.slice(0, 300),
+		nextStep: stringOf(item.nextStep)?.slice(0, 300),
 	};
 }
 
@@ -183,13 +218,117 @@ function sourceStatusesOf(context) {
 	return asArray(context?.sourceStatuses).map(asObject);
 }
 
+function questionIdFromSource(source, sourceId) {
+	const explicit =
+		stringOf(source?.questionId) || stringOf(source?.question?.id);
+	if (explicit) return explicit;
+	const match = String(sourceId ?? "").match(/^research-questions\.(.+)$/u);
+	return match?.[1] || null;
+}
+
+function buildResearchQuestionCoverage(planQuestions, research, statuses) {
+	const plannedIds = planQuestions
+		.map((question) => stringOf(question?.id))
+		.filter(Boolean);
+	const invalidPlannedQuestionCount = planQuestions.length - plannedIds.length;
+	const plannedDuplicateIds = Object.entries(
+		countBy(
+			plannedIds.map((questionId) => ({ questionId })),
+			(row) => row.questionId,
+		),
+	)
+		.filter(([, count]) => count > 1)
+		.map(([questionId]) => questionId);
+	const observed = research.map(({ sourceId, source }) => ({
+		questionId: questionIdFromSource(source, sourceId),
+		sourceId,
+		outputQuestionId: stringOf(source?.questionId),
+	}));
+	const invalidOutputSourceIds = observed
+		.filter((row) => plannedIds.length > 0 && !row.outputQuestionId)
+		.map((row) => row.sourceId);
+	const failed = statuses
+		.filter(
+			(status) =>
+				isResearchQuestionStatus(status) && status.status !== "completed",
+		)
+		.map((status) => ({
+			questionId:
+				stringOf(status.itemIdentity) || questionIdFromSource({}, status.source),
+			sourceId: stringOf(status.source),
+			status: String(status.status ?? "unknown"),
+		}));
+	const counts = countBy(
+		observed.filter((row) => row.questionId),
+		(row) => row.questionId,
+	);
+	const duplicateIds = Object.entries(counts)
+		.filter(([, count]) => count > 1)
+		.map(([id]) => id);
+	const completedIds = [
+		...new Set(
+			observed.filter((row) => row.questionId).map((row) => row.questionId),
+		),
+	];
+	const missingIds = plannedIds.filter((id) => !completedIds.includes(id));
+	const extraIds = completedIds.filter((id) => !plannedIds.includes(id));
+	const failedIds = [
+		...new Set(failed.map((row) => row.questionId).filter(Boolean)),
+	];
+	const rows = plannedIds.map((questionId) => {
+		const matches = observed.filter((row) => row.questionId === questionId);
+		const failedMatch = failed.find((row) => row.questionId === questionId);
+		return {
+			questionId,
+			status: failedMatch
+				? "failed"
+				: matches.length > 1
+					? "duplicate"
+					: matches.length === 0
+						? "missing"
+						: "completed",
+			sourceIds: matches.map((row) => row.sourceId),
+			...(failedMatch ? { failureStatus: failedMatch.status } : {}),
+		};
+	});
+	for (const questionId of extraIds)
+		rows.push({
+			questionId,
+			status: "extra",
+			sourceIds: observed
+				.filter((row) => row.questionId === questionId)
+				.map((row) => row.sourceId),
+		});
+	return {
+		plannedIds,
+		completedIds,
+		missingIds,
+		duplicateIds,
+		extraIds,
+		failedIds,
+		invalidPlannedQuestionCount,
+		plannedDuplicateIds,
+		invalidOutputSourceIds,
+		rows,
+		passed:
+			invalidPlannedQuestionCount === 0 &&
+			plannedDuplicateIds.length === 0 &&
+			invalidOutputSourceIds.length === 0 &&
+			plannedIds.length === completedIds.length &&
+			missingIds.length === 0 &&
+			duplicateIds.length === 0 &&
+			extraIds.length === 0 &&
+			failedIds.length === 0 &&
+			observed.every((row) => row.questionId),
+	};
+}
+
 function isResearchQuestionStatus(status) {
 	return [status.source, status.specId, status.displayName, status.stageId]
 		.map((value) => String(value ?? ""))
 		.some(
 			(value) =>
-				value === "research-questions" ||
-				value.startsWith("research-questions."),
+				value === "research-questions" || value.startsWith("research-questions."),
 		);
 }
 
@@ -236,14 +375,12 @@ function overflowBySlot({ extractedFacts, claims, evidenceGaps }) {
 	return {
 		factsBySlot: countBy(extractedFacts, (fact) => fact.slotId),
 		claimsBySlot: countBy(
-			claims.flatMap((claim) =>
-				claim.factSlotIds.map((slotId) => ({ slotId })),
-			),
+			claims.flatMap((claim) => claim.factSlotIds.map((slotId) => ({ slotId }))),
 			(item) => item.slotId,
 		),
 		evidenceGapsBySlot: countBy(
 			evidenceGaps.flatMap((gap) =>
-				gap.factSlotIds.map((slotId) => ({ slotId })),
+				asArray(gap.factSlotIds).map((slotId) => ({ slotId })),
 			),
 			(item) => item.slotId,
 		),
@@ -465,9 +602,7 @@ function buildPrecisionGuard({ claims, planSlots }) {
 			flaggedClaims: guardedClaims.filter((claim) => claim.issues.length > 0)
 				.length,
 			issueCounts: countBy(
-				guardedClaims.flatMap((claim) =>
-					claim.issues.map((issue) => ({ issue })),
-				),
+				guardedClaims.flatMap((claim) => claim.issues.map((issue) => ({ issue }))),
 				(item) => item.issue,
 			),
 		},
@@ -566,6 +701,22 @@ export default async function normalizeInputPacket({ sources, context } = {}) {
 	);
 
 	const planSlots = asArray(plan.factSlots).map(compactPlanSlot);
+	const researchQuestionCoverage = buildResearchQuestionCoverage(
+		asArray(plan.researchQuestions),
+		research,
+		sourceStatusesOf(context),
+	);
+	for (const row of researchQuestionCoverage.rows) {
+		if (row.status === "completed") continue;
+		evidenceGaps.push({
+			id: `research-question-${row.questionId}-${row.status}`,
+			questionId: row.questionId,
+			lead: `Research question ${row.questionId} has status ${row.status}.`,
+			reason: `research_question_${row.status}`,
+			nextStep:
+				"Repair or rerun the missing, duplicate, extra, or failed research-question owner before claiming complete coverage.",
+		});
+	}
 	const precisionGuard = buildPrecisionGuard({ claims, planSlots });
 	const slotPreservation = buildSlotPreservation({ planSlots, extractedFacts });
 
@@ -591,6 +742,7 @@ export default async function normalizeInputPacket({ sources, context } = {}) {
 				evidenceGaps,
 				questionBudgetLedger,
 			},
+			researchQuestionCoverage,
 			slotPreservation,
 			precisionGuard,
 			ledgers: {
@@ -602,9 +754,7 @@ export default async function normalizeInputPacket({ sources, context } = {}) {
 				}),
 				slotFactCounts: countBy(extractedFacts, (fact) => fact.slotId),
 				claimSlotCounts: countBy(
-					claims.flatMap((claim) =>
-						claim.factSlotIds.map((slotId) => ({ slotId })),
-					),
+					claims.flatMap((claim) => claim.factSlotIds.map((slotId) => ({ slotId }))),
 					(item) => item.slotId,
 				),
 				sourceRefCoverage: {
@@ -612,7 +762,10 @@ export default async function normalizeInputPacket({ sources, context } = {}) {
 					claimsWithSourceRefs: sourceRefCoverage(claims),
 					sourcesWithSourceRefs: sourceCards.filter(
 						(source) =>
-							typeof source.sourceRef === "string" && source.sourceRef,
+							compactStrings(
+								[source.sourceRefs, source.sourceRef].flat(),
+								1,
+							).length > 0,
 					).length,
 				},
 			},

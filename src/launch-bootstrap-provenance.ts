@@ -77,6 +77,9 @@ export async function createLaunchBootstrapProvenance(
 			launchRetry: task.launchRetry?.attempts ?? 0,
 			outputRetry: task.outputRetry?.attempts ?? 0,
 			resume: task.resumeEvents?.length ?? 0,
+			...(task.foreachBatch?.physicalAttempt === undefined
+				? {}
+				: { physicalAttempt: task.foreachBatch.physicalAttempt }),
 		},
 		...(sessionId === undefined ? {} : { sessionId }),
 		backend: { id: backendId, type: run.backend.type, mode: run.backend.mode },
@@ -364,15 +367,19 @@ function isValidLaunchBootstrapRecord(
 		launchRetry: number;
 		outputRetry: number;
 		resume: number;
+		physicalAttempt?: number;
 	};
+	const expectedAttemptKey = [
+		`launch-retry:${attempt.launchRetry}`,
+		`output-retry:${attempt.outputRetry}`,
+		`resume:${attempt.resume}`,
+		...(attempt.physicalAttempt === undefined
+			? []
+			: [`physical:${attempt.physicalAttempt}`]),
+		`session:${value.sessionId ?? "none"}`,
+	].join(";");
 	if (
-		attempt.key !==
-		[
-			`launch-retry:${attempt.launchRetry}`,
-			`output-retry:${attempt.outputRetry}`,
-			`resume:${attempt.resume}`,
-			`session:${value.sessionId ?? "none"}`,
-		].join(";") ||
+		attempt.key !== expectedAttemptKey ||
 		(value.sessionId !== undefined &&
 			!isWorkflowTaskSessionIdentity({
 				runId: value.runId as string,
@@ -452,11 +459,16 @@ function isTask(value: unknown): boolean {
 function isAttempt(value: unknown): boolean {
 	return (
 		isRecord(value) &&
-		hasExactKeys(value, ["key", "launchRetry", "outputRetry", "resume"]) &&
+		hasAllowedKeys(value, ["key", "launchRetry", "outputRetry", "resume", "physicalAttempt"]) &&
+		hasRequiredKeys(value, ["key", "launchRetry", "outputRetry", "resume"]) &&
 		nonEmptyString(value.key) &&
 		nonNegativeInteger(value.launchRetry) &&
 		nonNegativeInteger(value.outputRetry) &&
-		nonNegativeInteger(value.resume)
+		nonNegativeInteger(value.resume) &&
+		(value.physicalAttempt === undefined ||
+			(typeof value.physicalAttempt === "number" &&
+				Number.isSafeInteger(value.physicalAttempt) &&
+				value.physicalAttempt >= 1))
 	);
 }
 

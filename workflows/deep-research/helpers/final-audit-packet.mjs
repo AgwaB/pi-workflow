@@ -61,17 +61,59 @@ function truncateText(value, limit = 240) {
 	return `${normalized.slice(0, Math.max(0, limit - 1)).trimEnd()}…`;
 }
 
+const EVIDENCE_FIELDS = [
+	"source",
+	"url",
+	"sourceRef",
+	"file",
+	"repo",
+	"line",
+	"lineStart",
+	"lineEnd",
+	"lines",
+	"excerptLocation",
+	"dateOrYear",
+	"quote",
+	"relevance",
+	"matchType",
+	"matchedTerms",
+	"missingTerms",
+	"coverageRatio",
+	"candidateOnly",
+];
+
+function compactEvidenceRow(row) {
+	const item = asObject(row);
+	const result = {};
+	for (const field of EVIDENCE_FIELDS) {
+		const value = item[field];
+		if (typeof value === "string" && value.trim()) result[field] = value;
+		else if (typeof value === "number" && Number.isFinite(value))
+			result[field] = value;
+		else if (typeof value === "boolean") result[field] = value;
+		else if (Array.isArray(value)) result[field] = compactStrings(value, 12);
+	}
+	return result;
+}
+
+function compactEvidenceRows(rows) {
+	return asArray(rows).slice(0, 5).map(compactEvidenceRow);
+}
+
 function compactClaimDigest(claim) {
 	const digest = asObject(claim);
+	const evidence = compactEvidenceRows(digest.evidence);
 	return {
 		id: idOf(digest),
 		claim: stringOf(digest.claim),
 		status: stringOf(digest.status ?? digest.verdict),
 		confidence: stringOf(digest.confidence),
 		factSlotIds: compactStrings(digest.factSlotIds, 12),
-		sourceRefs: compactStrings(digest.sourceRefs, 8),
-		sourceUrls: compactStrings(digest.sourceUrls, 8),
-		...(digest.verifierOwner ? { verifierOwner: compactOwner(digest.verifierOwner) } : {}),
+		sourceRefs: compactStrings(digest.sourceRefs, Infinity),
+		sourceUrls: compactStrings(digest.sourceUrls, Infinity),
+		...(digest.verifierOwner
+			? { verifierOwner: compactOwner(digest.verifierOwner) }
+			: {}),
 		support: stringOf(
 			digest.verdictDigest?.support ??
 				digest.verdictDigest?.summary ??
@@ -79,6 +121,10 @@ function compactClaimDigest(claim) {
 		),
 		caveat: stringOf(digest.verdictDigest?.caveat ?? digest.caveat),
 		correctionOrCounterclaim: stringOf(digest.correctionOrCounterclaim),
+		...(evidence.length > 0 ? { evidence } : {}),
+		...(Array.isArray(digest.localQuoteGate)
+			? { localQuoteGate: digest.localQuoteGate }
+			: {}),
 		...(digest.evidenceGate ? { evidenceGate: digest.evidenceGate } : {}),
 	};
 }
@@ -90,16 +136,60 @@ function compactSlot(slot) {
 		label: stringOf(item.label),
 		status: stringOf(item.status),
 		bestValue: item.bestValue,
-		sourceUrls: compactStrings(item.sourceUrls, 6),
+		sourceUrls: compactStrings(item.sourceUrls, Infinity),
+		sourceRefs: compactStrings(item.sourceRefs, Infinity),
 		sourceQuality: stringOf(item.sourceQuality),
-		verificationCandidateIds: compactStrings(item.verificationCandidateIds, 8),
+		verificationCandidateIds: compactStrings(item.verificationCandidateIds, 64),
 		gapReason: stringOf(item.gapReason),
 		parentImpact: stringOf(item.parentImpact),
 	};
 }
 
-function reconcileFactSlotCoverageWithAudit(factSlots, claimDigests) {
+function reconcileFactSlotCoverageWithAudit(
+	factSlots,
+	claimDigests,
+	candidateIds = [],
+) {
 	const claimsBySlot = new Map();
+	const slotById = new Map(factSlots.map((slot) => [slot.slotId, slot]));
+	const candidateSet = new Set(candidateIds);
+	const addedReverseBindings = [];
+	const invalidCanonicalMemberships = [];
+	const canonicalBindings = new Set();
+	for (const claim of claimDigests) {
+		const claimId = idOf(claim);
+		if (!claimId || (candidateSet.size > 0 && !candidateSet.has(claimId)))
+			continue;
+		for (const slotId of compactStrings(claim.factSlotIds, 12)) {
+			const slot = slotById.get(slotId);
+			if (!slot) {
+				invalidCanonicalMemberships.push({ claimId, slotId });
+				continue;
+			}
+			canonicalBindings.add(`${slotId}\u0000${claimId}`);
+			const current = Array.isArray(slot.verificationCandidateIds)
+				? slot.verificationCandidateIds
+				: [];
+			if (!current.includes(claimId)) {
+				slot.verificationCandidateIds = [...current, claimId];
+				addedReverseBindings.push({ claimId, slotId });
+			}
+		}
+	}
+	const preservedReverseBindings = [];
+	for (const slot of factSlots) {
+		for (const candidateId of Array.isArray(slot.verificationCandidateIds)
+			? slot.verificationCandidateIds
+			: []) {
+			if (!canonicalBindings.has(`${slot.slotId}\u0000${candidateId}`))
+				preservedReverseBindings.push({
+					slotId: slot.slotId,
+					candidateId,
+					reason: "reverse hint is absent from canonical claim factSlotIds",
+				});
+		}
+	}
+
 	for (const claim of claimDigests) {
 		for (const slotId of compactStrings(claim.factSlotIds, 12)) {
 			const claims = claimsBySlot.get(slotId) ?? [];
@@ -107,9 +197,18 @@ function reconcileFactSlotCoverageWithAudit(factSlots, claimDigests) {
 			claimsBySlot.set(slotId, claims);
 		}
 	}
-	return factSlots.map((slot) => {
+	const reconciledFactSlots = factSlots.map((slot) => {
 		const claims = claimsBySlot.get(slot.slotId) ?? [];
-		if (claims.length === 0) return slot;
+		if (claims.length === 0) {
+			return slot.status === "filled"
+				? {
+						...slot,
+						status: "partial",
+						gapReason:
+							slot.gapReason || "no audited claim was available for this filled slot",
+					}
+				: slot;
+		}
 		const statuses = new Set(claims.map((claim) => stringOf(claim.status)));
 		const claimIds = compactStrings(claims.map(idOf), 12);
 		if (statuses.has("conflicting")) {
@@ -126,9 +225,7 @@ function reconcileFactSlotCoverageWithAudit(factSlots, claimDigests) {
 				bestValue:
 					corrections.join(" | ") ||
 					"Verifier evidence conflicts with the normalized value; see claim ledger.",
-				gapReason: slot.gapReason
-					? `${slot.gapReason}; ${reason}`
-					: reason,
+				gapReason: slot.gapReason ? `${slot.gapReason}; ${reason}` : reason,
 			};
 		}
 		if (
@@ -142,13 +239,20 @@ function reconcileFactSlotCoverageWithAudit(factSlots, claimDigests) {
 			return {
 				...slot,
 				status: "partial",
-				gapReason: slot.gapReason
-					? `${slot.gapReason}; ${reason}`
-					: reason,
+				gapReason: slot.gapReason ? `${slot.gapReason}; ${reason}` : reason,
 			};
 		}
 		return slot;
 	});
+	return {
+		factSlots: reconciledFactSlots,
+		reconciliation: {
+			source: "canonical normalized claim factSlotIds",
+			addedReverseBindings,
+			preservedReverseBindings,
+			invalidCanonicalMemberships,
+		},
+	};
 }
 
 function compactGap(gap) {
@@ -160,7 +264,8 @@ function compactGap(gap) {
 		evidenceState: stringOf(item.evidenceState),
 		reason: stringOf(item.reason ?? item.gapReason),
 		nextStep: stringOf(item.nextStep),
-		sourceUrls: compactStrings(item.sourceUrls, 6),
+		sourceUrls: compactStrings(item.sourceUrls, Infinity),
+		sourceRefs: compactStrings(item.sourceRefs, Infinity),
 		relatedFactSlotIds: compactStrings(item.relatedFactSlotIds, 8),
 		scopeItem: stringOf(item.scopeItem),
 		whyItMatters: stringOf(item.whyItMatters),
@@ -181,7 +286,9 @@ function compactVerifierIssue(issue) {
 function compactInvalidNormalizedCandidate(row) {
 	const item = asObject(row);
 	return {
-		index: Number.isSafeInteger(Number(item.index)) ? Number(item.index) : undefined,
+		index: Number.isSafeInteger(Number(item.index))
+			? Number(item.index)
+			: undefined,
 		claimId: stringOf(item.claimId),
 		reason: stringOf(item.reason),
 		nextStep: stringOf(item.nextStep),
@@ -213,6 +320,8 @@ function compactDuplicateVerifierRow(row) {
 		statusInputs: compactStrings(item.statusInputs, 8),
 		selectedStatus: stringOf(item.selectedStatus),
 		statusConflict: item.statusConflict === true,
+		sourceRefs: compactStrings(item.sourceRefs, Infinity),
+		sourceUrls: compactStrings(item.sourceUrls, Infinity),
 		action: stringOf(item.action),
 	};
 }
@@ -267,6 +376,8 @@ function synthesisClaimDigest(claim) {
 		support: truncateText(item.support, 240),
 		caveat: truncateText(item.caveat, 180),
 		correctionOrCounterclaim: truncateText(item.correctionOrCounterclaim, 180),
+		...(item.evidence ? { evidence: item.evidence } : {}),
+		...(item.localQuoteGate ? { localQuoteGate: item.localQuoteGate } : {}),
 		hasSourceUrls: compactStrings(item.sourceUrls, 1).length > 0,
 		hasSourceRefs: compactStrings(item.sourceRefs, 1).length > 0,
 	};
@@ -293,6 +404,8 @@ function synthesisGap(gap) {
 		evidenceState: stringOf(item.evidenceState),
 		reason: truncateText(item.reason, 220),
 		nextStep: truncateText(item.nextStep, 180),
+		sourceRefs: compactStrings(item.sourceRefs, Infinity),
+		sourceUrls: compactStrings(item.sourceUrls, Infinity),
 		scopeItem: truncateText(item.scopeItem, 160),
 		whyItMatters: truncateText(item.whyItMatters, 180),
 	};
@@ -309,6 +422,164 @@ function synthesisScopeCoverage(row) {
 	};
 }
 
+function synthesisQuestionCoverage(row) {
+	const item = asObject(row);
+	return {
+		// Question/source identities are never truncated in the projection. If
+		// hostile valid identities make the projection too large, the typed budget
+		// block below is emitted rather than presenting a partial identity as exact.
+		questionId: stringOf(item.questionId),
+		status: stringOf(item.status),
+		failureStatus: stringOf(item.failureStatus),
+		sourceIds: compactStrings(item.sourceIds, 4),
+	};
+}
+
+function synthesisQuestionIntegrity(coverage) {
+	const item = asObject(coverage);
+	const issueIds = (value) => compactStrings(value, 64);
+	return {
+		passed: item.passed === true,
+		plannedCount: asArray(item.plannedIds).length,
+		completedCount: asArray(item.completedIds).length,
+		missingIds: issueIds(item.missingIds),
+		duplicateIds: issueIds(item.duplicateIds),
+		extraIds: issueIds(item.extraIds),
+		failedIds: issueIds(item.failedIds),
+		invalidPlannedQuestionCount: Number(item.invalidPlannedQuestionCount ?? 0),
+		plannedDuplicateIds: issueIds(item.plannedDuplicateIds),
+		invalidOutputSourceIds: issueIds(item.invalidOutputSourceIds),
+	};
+}
+
+const SYNTHESIS_READ_MAX_CHARS = 24000;
+
+function codePointLength(value) {
+	return [...String(value ?? "")].length;
+}
+
+function truncateCodePoints(value, limit) {
+	const text = stringOf(value);
+	if (!text) return undefined;
+	const points = [...text];
+	return points.length <= limit
+		? text
+		: `${points.slice(0, Math.max(0, limit - 1)).join("")}…`;
+}
+
+function compactSynthesisForBudget(
+	input,
+	maxChars = SYNTHESIS_READ_MAX_CHARS,
+) {
+	const compact = structuredClone(input);
+	const projectionLosses = [];
+	const textFields = [
+		["claims", ["claim", "support", "caveat", "correctionOrCounterclaim"], 120],
+		["factSlots", ["label", "gapReason", "parentImpact"], 80],
+		["preservedClaims", ["claim", "whyItMatters"], 100],
+		["gaps", ["reason", "nextStep", "scopeItem", "whyItMatters"], 100],
+		["researchScopeCoverage", ["scopeItem", "summary", "whyItMatters"], 90],
+	];
+	for (const [collection, fields, limit] of textFields) {
+		for (const row of compact[collection] ?? []) {
+			for (const field of fields)
+				row[field] = truncateCodePoints(row[field], limit);
+		}
+	}
+	const serializedLength = (value) => JSON.stringify(value).length;
+	const budgetFor = (blocked = false) => ({
+		maxChars,
+		claimRowsPreserved: asArray(compact.claims).length,
+		gapRowsPreserved: asArray(compact.gaps).length,
+		textCompacted: serializedLength(compact) < serializedLength(input),
+		codePointTelemetry: {
+			maxCodePoints: 22000,
+			codePoints: 0,
+		},
+		utf16Chars: 0,
+		...(projectionLosses.length > 0 ? { projectionLosses } : {}),
+		...(blocked
+			? {
+					budgetBlock: {
+						status: "blocked",
+						reason:
+							"synthesis input cannot preserve its required projection within the serialized read budget",
+						action:
+							"Do not synthesize from this projection; use the canonical packet ledger and increase the supported projection budget only through an owner-approved contract change.",
+						canonicalLedgerPreserved: true,
+					},
+				}
+			: {}),
+	});
+	const withBudget = (blocked = false) => {
+		const result = { ...compact, inputBudget: budgetFor(blocked) };
+		// The consumer uses String.length, so publish telemetry measured from the
+		// exact JSON serialization, including this metadata. Iterate because the
+		// telemetry digits are part of that serialization too.
+		for (let attempt = 0; attempt < 12; attempt += 1) {
+			const encoded = JSON.stringify(result);
+			const nextChars = encoded.length;
+			const nextCodePoints = codePointLength(encoded);
+			const stable =
+				result.inputBudget.utf16Chars === nextChars &&
+				result.inputBudget.codePointTelemetry.codePoints === nextCodePoints;
+			result.inputBudget.utf16Chars = nextChars;
+			result.inputBudget.codePointTelemetry.codePoints = nextCodePoints;
+			if (stable) break;
+		}
+		return result;
+	};
+	const measure = () => serializedLength(withBudget(false));
+	if (measure() > maxChars) {
+		for (const row of compact.claims ?? []) {
+			row.claim = truncateCodePoints(row.claim, 48);
+			row.support = truncateCodePoints(row.support, 48);
+			row.caveat = truncateCodePoints(row.caveat, 48);
+			row.correctionOrCounterclaim = truncateCodePoints(
+				row.correctionOrCounterclaim,
+				48,
+			);
+		}
+		for (const row of compact.gaps ?? []) {
+			row.reason = truncateCodePoints(row.reason, 48);
+			row.nextStep = truncateCodePoints(row.nextStep, 48);
+		}
+	}
+	// Claims and fact-slot rows are the supported synthesis ledgers. Optional
+	// narrative rows may be omitted only with an auditable projection loss.
+	if (measure() > maxChars) {
+		for (const field of ["researchScopeCoverage", "preservedClaims", "gaps"]) {
+			const count = asArray(compact[field]).length;
+			if (count === 0) continue;
+			projectionLosses.push({
+				path: `$.${field}`,
+				omittedCount: count,
+				reason: "optional narrative projection omitted to preserve core ledgers",
+			});
+			compact[field] = [];
+			if (measure() <= maxChars) break;
+		}
+	}
+	// If even the core projection cannot fit (for example, hostile identity
+	// strings), fail closed with a typed budget block. Never truncate an
+	// authoritative claim id or silently lower the supported claim count.
+	if (measure() > maxChars) {
+		for (const field of ["claims", "factSlots", "researchQuestionCoverage"]) {
+			const count = asArray(compact[field]).length;
+			if (count === 0) continue;
+			projectionLosses.push({
+				path: `$.${field}`,
+				omittedCount: count,
+				reason:
+					"core projection omitted because authoritative identities cannot fit; canonical packet remains authoritative",
+			});
+			compact[field] = [];
+		}
+		return withBudget(true);
+	}
+	return withBudget(false);
+}
+
 function buildSynthesisInput({
 	plan,
 	factSlotCoverage,
@@ -320,6 +591,7 @@ function buildSynthesisInput({
 	researchScopeCoverage,
 	integritySummary,
 	audit,
+	researchQuestionCoverage,
 }) {
 	return {
 		researchMetadata: {
@@ -329,9 +601,21 @@ function buildSynthesisInput({
 			researchQuestions: asArray(plan.researchQuestions).length,
 			plannedFactSlots: asArray(plan.factSlots).length,
 		},
+		researchQuestionCoverage: asArray(researchQuestionCoverage?.rows).map(
+			synthesisQuestionCoverage,
+		),
 		verdictCounts: asObject(audit.verdictCounts),
 		factSlotStatusCounts: countByStatus(factSlotCoverage),
-		integritySummary,
+		integritySummary: {
+			...integritySummary,
+			...(researchQuestionCoverage
+				? {
+						researchQuestionIntegrity: synthesisQuestionIntegrity(
+							researchQuestionCoverage,
+						),
+					}
+				: {}),
+		},
 		researchScopeCoverage: asArray(researchScopeCoverage)
 			.slice(0, 24)
 			.map(synthesisScopeCoverage),
@@ -344,9 +628,7 @@ function buildSynthesisInput({
 			whyItMatters: truncateText(claim.whyItMatters ?? claim.reason, 180),
 		})),
 		gaps: [
-			...remainingGaps.map((gap) =>
-				synthesisGap({ ...gap, kind: "remaining" }),
-			),
+			...remainingGaps.map((gap) => synthesisGap({ ...gap, kind: "remaining" })),
 			...coverageGaps.map((gap) => synthesisGap({ ...gap, kind: "coverage" })),
 			...sourceRefJoinFailures.map((gap) =>
 				synthesisGap({ ...gap, kind: "sourceRefJoinFailure" }),
@@ -365,23 +647,53 @@ export default async function finalAuditPacket({ sources }) {
 			: normalizeClaims;
 	const sanitizerDiagnostics = asObject(normalized.sanitizerDiagnostics);
 	const auditSource = findSource(sources, "audit-claims");
-	if (!auditSource || typeof auditSource !== "object" || Array.isArray(auditSource)) {
+	if (
+		!auditSource ||
+		typeof auditSource !== "object" ||
+		Array.isArray(auditSource)
+	) {
 		throw new Error(
 			"deep-research final-audit-packet: missing audit-claims control source; refusing to emit an empty packet",
 		);
 	}
 	const audit = auditSource;
+	const inputPacket = asObject(findSource(sources, "normalize-input-packet"));
+	const questionCoverageInput = inputPacket.packet?.researchQuestionCoverage;
+	const researchQuestionCoverage =
+		questionCoverageInput &&
+		typeof questionCoverageInput === "object" &&
+		!Array.isArray(questionCoverageInput) &&
+		typeof questionCoverageInput.passed === "boolean"
+			? questionCoverageInput
+			: null;
 	// These fields establish that the audit stage actually ran and produced an
 	// auditable ledger. Do not turn an absent/incomplete audit into a valid empty packet.
 	const incompleteAuditFields = [
 		["claimDigests", Array.isArray(audit.claimDigests)],
-		["gateSummary", audit.gateSummary && typeof audit.gateSummary === "object" && !Array.isArray(audit.gateSummary)],
-	].filter(([, present]) => !present).map(([field]) => field);
+		[
+			"gateSummary",
+			audit.gateSummary &&
+				typeof audit.gateSummary === "object" &&
+				!Array.isArray(audit.gateSummary),
+		],
+	]
+		.filter(([, present]) => !present)
+		.map(([field]) => field);
 	const hasAuditLedger =
 		Object.keys(audit.gateSummary ?? {}).length > 0 ||
-		(audit.verdictCounts && typeof audit.verdictCounts === "object" && !Array.isArray(audit.verdictCounts) && Object.keys(audit.verdictCounts).length > 0) ||
-		(audit.statusPartitions && typeof audit.statusPartitions === "object" && !Array.isArray(audit.statusPartitions) && Object.keys(audit.statusPartitions).length > 0);
-	if (incompleteAuditFields.length === 0 && audit.claimDigests.length === 0 && !hasAuditLedger)
+		(audit.verdictCounts &&
+			typeof audit.verdictCounts === "object" &&
+			!Array.isArray(audit.verdictCounts) &&
+			Object.keys(audit.verdictCounts).length > 0) ||
+		(audit.statusPartitions &&
+			typeof audit.statusPartitions === "object" &&
+			!Array.isArray(audit.statusPartitions) &&
+			Object.keys(audit.statusPartitions).length > 0);
+	if (
+		incompleteAuditFields.length === 0 &&
+		audit.claimDigests.length === 0 &&
+		!hasAuditLedger
+	)
 		incompleteAuditFields.push("audit ledgers");
 	if (incompleteAuditFields.length > 0) {
 		throw new Error(
@@ -391,14 +703,30 @@ export default async function finalAuditPacket({ sources }) {
 	const claimInventory = asObject(normalized.claimInventory);
 	const verificationCandidates = asArray(claimInventory.verificationCandidates);
 	const preservedClaims = asArray(claimInventory.preservedClaims);
-	const claimDigests = asArray(audit.claimDigests).map(compactClaimDigest);
+	const auditedClaimsById = new Map(
+		asArray(audit.auditedClaims)
+			.map((claim) => [idOf(claim), claim])
+			.filter(([id]) => id),
+	);
+	const claimDigests = asArray(audit.claimDigests).map((digest) => {
+		const audited = auditedClaimsById.get(idOf(digest));
+		return compactClaimDigest({
+			...digest,
+			...(audited?.evidence ? { evidence: audited.evidence } : {}),
+			...(Array.isArray(audited?.localQuoteGate)
+				? { localQuoteGate: audited.localQuoteGate }
+				: {}),
+		});
+	});
 	const auditedIds = new Set(claimDigests.map(idOf).filter(Boolean));
 	const candidateIds = verificationCandidates.map(idOf).filter(Boolean);
 	const omittedCandidateIds = candidateIds.filter((id) => !auditedIds.has(id));
-	const factSlotCoverage = reconcileFactSlotCoverageWithAudit(
+	const factSlotReconciliation = reconcileFactSlotCoverageWithAudit(
 		asArray(normalized.factSlotCoverage).map(compactSlot),
 		claimDigests,
+		candidateIds,
 	);
+	const factSlotCoverage = factSlotReconciliation.factSlots;
 	const coverageGaps = withGeneratedIds(
 		asArray(normalized.coverageGaps).map(compactGap),
 		"gap-coverage",
@@ -420,8 +748,12 @@ export default async function finalAuditPacket({ sources }) {
 	const invalidNormalizedCandidateRows = asArray(
 		audit.invalidNormalizedCandidates,
 	).map(compactInvalidNormalizedCandidate);
-	const verifierOwnerLedger = asArray(audit.verifierOwnerLedger).map(compactOwner);
-	const verifierOwnerIssues = asArray(audit.verifierOwnerIssues).map(compactVerifierIssue);
+	const verifierOwnerLedger = asArray(audit.verifierOwnerLedger).map(
+		compactOwner,
+	);
+	const verifierOwnerIssues = asArray(audit.verifierOwnerIssues).map(
+		compactVerifierIssue,
+	);
 	const gateSummary = asObject(audit.gateSummary);
 	const batchAdoptionReadiness = compactBatchAdoptionReadiness(
 		audit.batchAdoptionReadiness,
@@ -445,6 +777,9 @@ export default async function finalAuditPacket({ sources }) {
 		sourceRefJoinFailures: sourceRefJoinFailures.length,
 	};
 	const integritySummary = {
+		...(researchQuestionCoverage
+			? { researchQuestionIntegrity: researchQuestionCoverage }
+			: {}),
 		omittedVerificationCandidateCount: omittedCandidateIds.length,
 		sourceRefJoinFailures: sourceRefJoinFailures.length,
 		invalidVerifierRows: invalidVerifierRows.length,
@@ -458,18 +793,22 @@ export default async function finalAuditPacket({ sources }) {
 		batchAdoptionBlockers: asArray(batchAdoptionReadiness.blockers),
 		sourceRefCoverage,
 	};
-	const synthesisInput = buildSynthesisInput({
-		plan,
-		factSlotCoverage,
-		claimDigests,
-		preservedClaims,
-		coverageGaps,
-		remainingGaps,
-		sourceRefJoinFailures,
-		researchScopeCoverage: normalized.researchScopeCoverage,
-		integritySummary,
-		audit,
-	});
+	const synthesisInput = compactSynthesisForBudget(
+		buildSynthesisInput({
+			plan,
+			factSlotCoverage,
+			claimDigests,
+			preservedClaims,
+			coverageGaps,
+			remainingGaps,
+			sourceRefJoinFailures,
+			researchScopeCoverage: normalized.researchScopeCoverage,
+			integritySummary,
+			audit,
+			researchQuestionCoverage,
+		}),
+		SYNTHESIS_READ_MAX_CHARS,
+	);
 
 	return {
 		schema: SCHEMA,
@@ -483,9 +822,8 @@ export default async function finalAuditPacket({ sources }) {
 				researchQuestions: asArray(plan.researchQuestions).length,
 				sourcePolicy: asObject(plan.sourcePolicy),
 				plannedFactSlots: asArray(plan.factSlots).length,
-				filledFactSlots: factSlotCoverage.filter(
-					(slot) => slot.status === "filled",
-				).length,
+				filledFactSlots: factSlotCoverage.filter((slot) => slot.status === "filled")
+					.length,
 				partialFactSlots: factSlotCoverage.filter(
 					(slot) => slot.status === "partial",
 				).length,
@@ -512,6 +850,7 @@ export default async function finalAuditPacket({ sources }) {
 			claimVerdictLedger: claimDigests,
 			verifierIntegrity: {
 				gateSummary,
+				researchQuestionIntegrity: researchQuestionCoverage,
 				invalidVerifierRows,
 				duplicateVerifierRows,
 				invalidNormalizedCandidateCount: invalidNormalizedCandidateRows.length,
@@ -530,28 +869,31 @@ export default async function finalAuditPacket({ sources }) {
 				id: idOf(claim),
 				claim: stringOf(claim.claim),
 				factSlotIds: compactStrings(claim.factSlotIds, 8),
-				sourceRefs: compactStrings(claim.sourceRefs, 6),
-				sourceUrls: compactStrings(claim.sourceUrls, 6),
+				sourceRefs: compactStrings(claim.sourceRefs, Infinity),
+				sourceUrls: compactStrings(claim.sourceUrls, Infinity),
 				whyItMatters: stringOf(claim.whyItMatters ?? claim.reason),
 			})),
 			researchScopeCoverage: asArray(normalized.researchScopeCoverage),
+			researchQuestionCoverage: asArray(researchQuestionCoverage?.rows),
+			factSlotReconciliation: factSlotReconciliation.reconciliation,
 			invariantChecks: {
 				candidateCount: verificationCandidates.length,
+				factSlotReconciliation: factSlotReconciliation.reconciliation,
 				auditedClaimCount: claimDigests.length,
 				candidateIds,
 				auditedClaimIds: claimDigests.map(idOf),
 				statusPartitionIds: asObject(audit.statusPartitions),
 				omittedCandidateIds,
 				droppedSlotIds: asArray(audit.slotCoverageCheck?.droppedSlotIds),
+				researchQuestionIntegrity: researchQuestionCoverage,
 				sourceRefCoverage,
 				verifierIntegrity: {
 					invalidVerifierRows: invalidVerifierRows.length,
+					researchQuestionIntegrity: researchQuestionCoverage,
 					duplicateVerifierRows: duplicateVerifierRows.length,
 					invalidNormalizedCandidateCount: invalidNormalizedCandidateRows.length,
 					verifierOwnerIssues: verifierOwnerIssues.length,
-					missingVerifierResults: Number(
-						gateSummary.missingVerifierResults ?? 0,
-					),
+					missingVerifierResults: Number(gateSummary.missingVerifierResults ?? 0),
 					zeroCandidateFloorBlockers,
 					batchAdoptionStatus: stringOf(batchAdoptionReadiness.status),
 				},

@@ -6,6 +6,7 @@ import test from "node:test";
 
 import renderSpecReviewReport from "../../workflows/spec-review/helpers/render-spec-review-report.mjs";
 import renderImpactReport from "../../workflows/impact-review/helpers/render-impact-report.mjs";
+import { blankImpactSources, impactSourceStatuses } from "./impact-review-fixtures.mjs";
 
 function completeContext(cwd) {
 	return {
@@ -131,7 +132,7 @@ function cleanPartition() {
 	};
 }
 
-function report(verdict = "GAPS_FOUND") {
+function report(verdict = "GAPS_FOUND", partition = null) {
 	return {
 		schema: "spec-review-report-v1",
 		digest: "overlay",
@@ -139,6 +140,10 @@ function report(verdict = "GAPS_FOUND") {
 		verdict,
 		risks: ["Human intent remains unresolved."],
 		recommendedNextAction: "Implement the gap and resolve product intent.",
+		...(partition ? {
+			ownerLedger: partition.verifierCoverage.ownerLedger,
+			ownerLedgerReconciliation: partition.verifierCoverage.ownerLedgerReconciliation,
+		} : {}),
 	};
 }
 
@@ -149,7 +154,7 @@ test("spec-review renderer preserves every legacy disposition but withholds ungr
 		const context = completeContext(cwd);
 		const first = await renderSpecReviewReport({
 			sources: {
-				"report.main": report(),
+				"report.main": report("GAPS_FOUND", partition),
 				"partition-findings.main": partition,
 			},
 			context,
@@ -157,7 +162,7 @@ test("spec-review renderer preserves every legacy disposition but withholds ungr
 		const reordered = await renderSpecReviewReport({
 			sources: {
 				"partition-findings.alias": partition,
-				"report.alias": report(),
+				"report.alias": report("GAPS_FOUND", partition),
 			},
 			context: { ...context, taskId: undefined },
 		});
@@ -227,15 +232,15 @@ test("spec-review renderer preserves every legacy disposition but withholds ungr
 	}
 });
 
-test("spec-review renderer rejects a forged empty owner/verifier reconciliation", async () => {
+function forgedEmptyPartition(candidateCount) {
 	const partition = cleanPartition();
 	partition.finalFindings = [];
 	partition.droppedFindings = [];
 	partition.needsHuman = [];
 	partition.verifierCoverage = {
 		complete: true,
-		candidateCount: 0,
-		uniqueCandidateCount: 0,
+		candidateCount,
+		uniqueCandidateCount: candidateCount,
 		verifierCount: 0,
 		uniqueVerifierCount: 0,
 		verifiedCandidateCount: 0,
@@ -268,18 +273,34 @@ test("spec-review renderer rejects a forged empty owner/verifier reconciliation"
 		invalidVerifier: 0,
 		orphanVerifier: 0,
 	};
+	return partition;
+}
+
+async function assertForgedEmptyPartitionRejected(candidateCount) {
 	const result = await renderSpecReviewReport({
 		sources: {
-			"partition-findings.main": partition,
+			"partition-findings.main": forgedEmptyPartition(candidateCount),
 			"report.main": report("INCONCLUSIVE"),
 		},
 		context: completeContext(undefined),
 	});
 	assert.equal(result.status, "failed");
 	assert.equal(result.verdict, "INCONCLUSIVE");
-	assert.equal(result.gates.ownerLedgerReconciliationPassed, false);
+	// Empty ownership is internally cardinality-valid, but without an
+	// independently materialized candidate-universe proof it cannot complete.
+	assert.equal(result.gates.ownerLedgerReconciliationPassed, candidateCount === 0);
 	assert.equal(result.gates.verifierCoverageComplete, false);
 	assert.equal(result.completionSummaryMarkdown, "");
+}
+
+test("spec-review renderer rejects a forged empty owner/verifier reconciliation", async () => {
+	// Preserve the original zero-source attack: a persisted zero ledger is not
+	// proof that the runtime candidate universe was genuinely empty.
+	await assertForgedEmptyPartitionRejected(0);
+});
+
+test("spec-review renderer rejects a forged empty reconciliation for a non-empty universe", async () => {
+	await assertForgedEmptyPartitionRejected(1);
 });
 
 test("spec-review renderer rejects contradictory, duplicate, and orphan final lifecycle statuses", async () => {
@@ -330,23 +351,13 @@ function impactContext(cwd) {
 		cwd,
 		runId: "workflow_impact_report_contract",
 		taskId: "task-impact-final",
-		sourceStatuses: [
-			"impact-synthesis",
-			"contract-consistency",
-			"regression-risk",
-			"ship-readiness",
-		].map((stageId) => ({
-			source: `impact-analysis.${stageId}`,
-			specId: `impact-analysis.${stageId}.main`,
-			stageId: `impact-analysis.${stageId}`,
-			taskId: `task-${stageId}`,
-			status: "completed",
-		})),
+		sourceStatuses: impactSourceStatuses(),
 	};
 }
 
 function impactSources() {
 	return {
+		...blankImpactSources(),
 		"impact-analysis.impact-synthesis": {
 			schema: "impact-synthesis-v1",
 			digest: "synthesis-digest",
@@ -397,10 +408,7 @@ test("impact-review renderer reconciles joins, preserves rows, and writes a safe
 		const first = await renderImpactReport({ sources, context });
 		const reordered = await renderImpactReport({
 			sources: {
-				"ship-readiness.alias": sources["impact-analysis.ship-readiness"],
-				"regression-risk.alias": sources["impact-analysis.regression-risk"],
-				"contract-consistency.alias": sources["impact-analysis.contract-consistency"],
-				"impact-synthesis.alias": sources["impact-analysis.impact-synthesis"],
+				...Object.fromEntries(Object.entries(sources).reverse()),
 			},
 			context: { ...context, taskId: undefined },
 		});

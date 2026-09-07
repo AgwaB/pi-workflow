@@ -108,7 +108,7 @@ for (const [label, evidence, usable] of [
     const id = 'finding-001';
     const v = { schema: 'test', digest: 'test', id, verdict: 'KEEP', severity: 'medium', evidence, finalClaim: 'A gap exists', recommendedAction: 'Fix it' };
     assert.equal(validateJsonSchema(v, await schema('workflows/spec-review/schemas/spec-review-verify-findings-control.schema.json')).valid, true);
-    const plan = { schema: 'test', digest: 'test', candidateFindings: [{ id, title: 'Gap', claim: 'A gap exists', severity: 'medium', requirementIds: ['REQ-1'] }], requirementCoverage: [], needsHuman: [], noIssueNotes: [] };
+    const plan = { schema: 'test', digest: 'test', candidateFindings: [{ id, title: 'Gap', claim: 'A gap exists', severity: 'medium', requirementIds: ['REQ-1'], specEvidence: ['spec.md:1'], implementationEvidence: ['source.ts:1'], testEvidence: ['test.ts:1'], uncertainty: 'Verify exact scope.' }], requirementCoverage: [], needsHuman: [], noIssueNotes: [] };
     assert.equal(validateJsonSchema(plan, await schema('workflows/spec-review/schemas/spec-review-candidate-findings-control.schema.json')).valid, true);
     const p = await specPartition({ sources: { 'candidate-findings': plan, 'verify-findings': v }, options: { mode: 'partition' }, context: { cwd, sourceStatuses: [{ source: 'candidate-findings', stageId: 'candidate-findings', specId: 'candidate-findings.main', taskId: 'task-plan', status: 'completed' }, owner('verify-findings', id)] } });
     const report = { schema: 'spec-review-report-v1', digest: 'test', summary: 'A gap exists.', verdict: 'GAPS_FOUND', risks: [], recommendedNextAction: 'Fix it.', ownerLedger: p.verifierCoverage.ownerLedger, ownerLedgerReconciliation: p.verifierCoverage.ownerLedgerReconciliation };

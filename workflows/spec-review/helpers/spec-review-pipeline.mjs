@@ -16,7 +16,13 @@
 //                        candidate per task.
 
 import { createHash } from "node:crypto";
-import { EVIDENCE_PROTOCOL, gateDisposition, gateRequirementCoverage, reconcileRequirementCoverage, isLocalCitation } from "./spec-evidence-gate.mjs";
+import {
+	EVIDENCE_PROTOCOL,
+	gateDisposition,
+	gateRequirementCoverage,
+	reconcileRequirementCoverage,
+	isLocalCitation,
+} from "./spec-evidence-gate.mjs";
 import { candidateUpstreamFailures } from "./spec-requirement-source.mjs";
 
 const VERDICTS = new Set(["KEEP", "WEAKEN", "DROP", "NEEDS_HUMAN"]);
@@ -51,17 +57,13 @@ export default async function specReviewPipeline({
 // --- batch planning (opt-in) -------------------------------------------------
 
 function batchCandidateFindings(sources, options = {}) {
-	const candidateStage = String(
-		options?.candidateStage ?? "candidate-findings",
-	);
+	const candidateStage = String(options?.candidateStage ?? "candidate-findings");
 	const maxBatchSize = normalizeMaxBatchSize(options?.maxBatchSize);
 	const analysis = findStageSource(sources, candidateStage) ?? {};
 	const rawCandidates = Array.isArray(analysis?.candidateFindings)
 		? analysis.candidateFindings.filter(
 				(candidate) =>
-					candidate &&
-					typeof candidate === "object" &&
-					!Array.isArray(candidate),
+					candidate && typeof candidate === "object" && !Array.isArray(candidate),
 			)
 		: [];
 
@@ -130,9 +132,7 @@ function normalizeMaxBatchSize(value) {
 // --- partition ---------------------------------------------------------------
 
 async function partitionFindings(sources, options = {}, context = {}) {
-	const candidateStage = String(
-		options?.candidateStage ?? "candidate-findings",
-	);
+	const candidateStage = String(options?.candidateStage ?? "candidate-findings");
 	const verifyStage = String(options?.verifyStage ?? "verify-findings");
 	const batchStage = String(options?.batchStage ?? "verification-batches");
 
@@ -149,6 +149,7 @@ async function partitionFindings(sources, options = {}, context = {}) {
 	const noIssueNotes = Array.isArray(analysis?.noIssueNotes)
 		? analysis.noIssueNotes
 		: [];
+	const scopeLimitations = normalizeScopeLimitations(analysis?.scopeLimitations);
 
 	const candidatesById = new Map();
 	const duplicateCandidateIds = [];
@@ -183,33 +184,55 @@ async function partitionFindings(sources, options = {}, context = {}) {
 		}
 	}
 
-	const needsHuman = candidateNeedsHuman.map((item) => ({
-		source: "candidate-findings",
-		...objectOrMessage(item),
-	}));
+	const needsHuman = candidateNeedsHuman.map((item) =>
+		normalizeNeedsHumanEntry(item, "candidate-source"),
+	);
 	const sourceStatusSummary = summarizeSourceStatuses(context);
-	const candidateStatuses = (Array.isArray(context.sourceStatuses) ? context.sourceStatuses : []).filter(row =>
-		row?.stageId === candidateStage && (row.source === candidateStage || row.source?.startsWith(`${candidateStage}.`)) &&
-		row.specId === `${candidateStage}.main` && typeof row.taskId === "string" && row.taskId.trim());
-	if (candidateStatuses.length !== 1 || candidateStatuses[0].status !== "completed") {
+	const candidateStatuses = (
+		Array.isArray(context.sourceStatuses) ? context.sourceStatuses : []
+	).filter(
+		(row) =>
+			row?.stageId === candidateStage &&
+			(row.source === candidateStage ||
+				row.source?.startsWith(`${candidateStage}.`)) &&
+			row.specId === `${candidateStage}.main` &&
+			typeof row.taskId === "string" &&
+			row.taskId.trim(),
+	);
+	if (
+		candidateStatuses.length !== 1 ||
+		candidateStatuses[0].status !== "completed"
+	) {
 		sourceStatusSummary.total += 1;
 		sourceStatusSummary.nonCompleted += 1;
-		sourceStatusSummary.partialFailures = [...sourceStatusSummary.partialFailures, {
-			source: candidateStage, status: "missing_or_inconsistent_candidate_source_status",
-		}].slice(0, MAX_PARTIAL_FAILURES);
+		sourceStatusSummary.partialFailures = [
+			...sourceStatusSummary.partialFailures,
+			{
+				source: candidateStage,
+				status: "missing_or_inconsistent_candidate_source_status",
+			},
+		].slice(0, MAX_PARTIAL_FAILURES);
 	}
 
 	// In a scheduler run, the candidate reducer's runtime-written manifest is
 	// the authority for its three required mapping sources. A model cannot
 	// hide a failed mapping stage by emitting a clean candidate control.
 	let requirementSource = null;
+	let runtimeCandidateUniverse = null;
 	if (context.runId && candidateStatuses.length === 1) {
-		const upstream = await candidateUpstreamFailures(context, candidateStatuses[0]);
+		const upstream = await candidateUpstreamFailures(
+			context,
+			candidateStatuses[0],
+		);
 		requirementSource = upstream.requirementSource;
+		runtimeCandidateUniverse = upstream.runtimeCandidateUniverse;
 		const failures = upstream.failures;
 		sourceStatusSummary.total += failures.length;
 		sourceStatusSummary.nonCompleted += failures.length;
-		sourceStatusSummary.partialFailures = [...sourceStatusSummary.partialFailures, ...failures].slice(0, MAX_PARTIAL_FAILURES);
+		sourceStatusSummary.partialFailures = [
+			...sourceStatusSummary.partialFailures,
+			...failures,
+		].slice(0, MAX_PARTIAL_FAILURES);
 	}
 
 	const verifierById = new Map();
@@ -243,7 +266,8 @@ async function partitionFindings(sources, options = {}, context = {}) {
 		collected.issues.unshift(...ownerAudit.issues);
 		for (const row of collected.rows) {
 			const owner = batchOwnerLedgerRows.find(
-				(candidate) => candidate.source === row.sourceId && candidate.batchId === row.batchId,
+				(candidate) =>
+					candidate.source === row.sourceId && candidate.batchId === row.batchId,
 			);
 			verifierRowLedger.push({
 				id: row.id,
@@ -300,27 +324,32 @@ async function partitionFindings(sources, options = {}, context = {}) {
 				// rows: the candidate is routed to NEEDS_HUMAN, never joined.
 				issueCoveredIds.add(id);
 				verifierById.delete(id);
-				needsHuman.push({
-					source: "batch-integrity",
-					...findingSummary(joinCandidates.get(id), {
+				needsHuman.push(
+					needsHumanRecord(joinCandidates.get(id), null, {
+						source: "batch-integrity",
 						id,
 						status: "batch_integrity_issue",
 						reason: `verifier batch integrity issue: ${issue.reason}`,
+						batchIntegrityIssue: issue,
 					}),
-					batchIntegrityIssue: issue,
-				});
+				);
 			} else if (id) {
 				orphanVerifierResults.push({ id, verdict: issue.verdict ?? null });
 				needsHuman.push({
 					source: "orphan-verifier",
 					id,
+					verifierResult: issue,
 					reason: `verifier batch row did not match any candidate finding id (${issue.reason})`,
+					recommendedAction:
+						"Reconcile the verifier row with a planned candidate identity.",
 				});
 			} else {
 				needsHuman.push({
 					source: "batch-integrity",
 					reason: `verifier batch integrity issue: ${issue.reason}`,
 					batchIntegrityIssue: issue,
+					recommendedAction:
+						"Reconcile the verifier batch before relying on the review.",
 				});
 			}
 		}
@@ -336,7 +365,10 @@ async function partitionFindings(sources, options = {}, context = {}) {
 				needsHuman.push({
 					source: "verifier-integrity",
 					sourceId,
+					verifierResult: result,
 					reason: "verifier result cannot be joined without an id",
+					recommendedAction:
+						"Provide the exact candidate id and rerun verification.",
 				});
 				continue;
 			}
@@ -344,7 +376,7 @@ async function partitionFindings(sources, options = {}, context = {}) {
 			// run the result is admissible only after its exact materialized task
 			// status proves the stage/spec/placeholder/item/task binding.
 			if (strictMaterializedStatusMode) {
-				const expectedSpecId = `${verifyStage}.${id}`;
+				const expectedSpecId = runtimeSpecId(verifyStage, id);
 				const owners = singletonVerifierStatuses(
 					context.sourceStatuses,
 					sourceId,
@@ -354,11 +386,19 @@ async function partitionFindings(sources, options = {}, context = {}) {
 					owners.length !== 1 ||
 					!singletonVerifierStatusIsExact(owners[0], verifyStage, id, sourceId)
 				) {
-					const reason = owners.length !== 1
-						? "verifier_alias_not_bound_to_exactly_one_materialized_status"
-						: "verifier_source_status_identity_mismatch";
+					const reason =
+						owners.length === 1
+							? "verifier_source_status_identity_mismatch"
+							: "verifier_alias_not_bound_to_exactly_one_materialized_status";
 					invalidVerifierResults.push({ reason, sourceId, id, result });
-					needsHuman.push({ source: "verifier-integrity", sourceId, id, reason });
+					needsHuman.push(
+						needsHumanRecord(joinCandidates.get(id), result, {
+							source: "verifier-integrity",
+							sourceId,
+							id,
+							reason,
+						}),
+					);
 					continue;
 				}
 				const owner = singletonOwnerFromStatus(owners[0]);
@@ -367,7 +407,12 @@ async function partitionFindings(sources, options = {}, context = {}) {
 					continue;
 				}
 				batchOwnerLedgerRows.push(owner);
-				verifierRowLedger.push({ id, verdict: result.verdict, severity: result.severity, owner });
+				verifierRowLedger.push({
+					id,
+					verdict: result.verdict,
+					severity: result.severity,
+					owner,
+				});
 			}
 			if (verifierById.has(id)) {
 				duplicateVerifierIds.push(id);
@@ -392,11 +437,20 @@ async function partitionFindings(sources, options = {}, context = {}) {
 				reason: "candidate finding did not receive a verifier result",
 			});
 			missingVerifications.push(missing);
-			needsHuman.push({ source: "missing-verification", ...missing });
+			needsHuman.push(
+				needsHumanRecord(candidate, null, {
+					source: "missing-verification",
+					...missing,
+					recommendedAction:
+						"Obtain a verifier result for this candidate and rerun the review.",
+				}),
+			);
 			continue;
 		}
 
-		const rawVerdict = String(verifier.verdict ?? "").trim().toUpperCase();
+		const rawVerdict = String(verifier.verdict ?? "")
+			.trim()
+			.toUpperCase();
 		if (!VERDICTS.has(rawVerdict)) {
 			const invalid = {
 				reason: "invalid_verdict",
@@ -405,28 +459,45 @@ async function partitionFindings(sources, options = {}, context = {}) {
 				result: verifier,
 			};
 			invalidVerifierResults.push(invalid);
-			needsHuman.push({
-				source: "invalid-verdict",
-				id,
-				title: candidate.title ?? id,
-				reason: `invalid verifier verdict: ${String(verifier.verdict ?? "")}`,
-				invalidVerifierResult: invalid,
-			});
+			needsHuman.push(
+				needsHumanRecord(candidate, verifier, {
+					source: "invalid-verdict",
+					id,
+					title: candidate.title ?? id,
+					reason: `invalid verifier verdict: ${String(verifier.verdict ?? "")}`,
+					invalidVerifierResult: invalid,
+				}),
+			);
 			continue;
 		}
 		const verdict = normalizeVerdict(rawVerdict);
 		const severity = normalizeSeverity(verifier.severity, candidate.severity);
 		const evidence = Array.isArray(verifier.evidence) ? verifier.evidence : [];
-		const counterEvidence = Array.isArray(verifier.counterEvidence) ? verifier.counterEvidence : [];
-		const evidenceGate = await gateDisposition(id, verdict, evidence, counterEvidence, context);
+		const counterEvidence = Array.isArray(verifier.counterEvidence)
+			? verifier.counterEvidence
+			: [];
+		const evidenceGate = await gateDisposition(
+			id,
+			verdict,
+			evidence,
+			counterEvidence,
+			context,
+		);
 		evidenceFindings.push(evidenceGate);
 		if (verdict !== "NEEDS_HUMAN" && !evidenceGate.complete) {
-			needsHuman.push({
-				source: "evidence-gate", id, title: candidate.title ?? id,
-				verdict: "NEEDS_HUMAN", originalVerdict: verdict, evidence, counterEvidence,
-				reason: `Unverified ${verdict}: exact local byte evidence required${verdict === "DROP" ? " in counterEvidence before removal" : ""}`,
-				originalCandidate: candidate, evidenceGate,
-			});
+			needsHuman.push(
+				needsHumanRecord(candidate, verifier, {
+					source: "evidence-gate",
+					id,
+					title: candidate.title ?? id,
+					verdict: "NEEDS_HUMAN",
+					originalVerdict: verdict,
+					evidence,
+					counterEvidence,
+					reason: `Unverified ${verdict}: exact local byte evidence required${verdict === "DROP" ? " in counterEvidence before removal" : ""}`,
+					evidenceGate,
+				}),
+			);
 			continue;
 		}
 
@@ -451,23 +522,23 @@ async function partitionFindings(sources, options = {}, context = {}) {
 				id,
 				title: candidate.title ?? id,
 				reason: summarizeCounterEvidence(verifier),
-				verdict, evidence, counterEvidence,
+				verdict,
+				evidence,
+				counterEvidence,
 				originalCandidate: candidate,
 			});
 		} else {
-			needsHuman.push({
-				source: "verifier",
-				id,
-				title: candidate.title ?? id,
-				reason:
-					verifier.finalClaim ??
-					verifier.recommendedAction ??
-					"verifier requested human review",
-				evidence: Array.isArray(verifier.evidence) ? verifier.evidence : [],
-				counterEvidence: Array.isArray(verifier.counterEvidence)
-					? verifier.counterEvidence
-					: [],
-			});
+			needsHuman.push(
+				needsHumanRecord(candidate, verifier, {
+					source: "verifier",
+					id,
+					title: candidate.title ?? id,
+					reason:
+						verifier.finalClaim ??
+						verifier.recommendedAction ??
+						"verifier requested human review",
+				}),
+			);
 		}
 	}
 
@@ -484,12 +555,52 @@ async function partitionFindings(sources, options = {}, context = {}) {
 		}
 	}
 
-	const evidenceCoverage = await gateRequirementCoverage(requirementCoverage, context, finalFindings);
-	const requirementReconciliation = reconcileRequirementCoverage(analysis.requirementCoverage, evidenceCoverage, finalFindings, requirementSource);
+	needsHuman.splice(
+		0,
+		needsHuman.length,
+		...needsHuman.map((row) => normalizeNeedsHumanEntry(row, row?.source ?? "scope")),
+	);
+	const sourceCandidateIds = [...joinCandidates.keys()].sort();
+	const runtimeCandidateIds = Array.isArray(runtimeCandidateUniverse?.ids)
+		? [...runtimeCandidateUniverse.ids].sort()
+		: [];
+	const candidateUniverseIssues = [];
+	if (!runtimeCandidateUniverse) candidateUniverseIssues.push("missing_runtime_candidate_universe_proof");
+	else {
+		if (runtimeCandidateUniverse.count !== candidateFindings.length)
+			candidateUniverseIssues.push("candidate_count_differs_from_runtime_control");
+		if (runtimeCandidateUniverse.uniqueCount !== joinCandidates.size)
+			candidateUniverseIssues.push("candidate_unique_count_differs_from_runtime_control");
+		if (runtimeCandidateUniverse.duplicateIds?.length || runtimeCandidateUniverse.invalidRowCount)
+			candidateUniverseIssues.push("runtime_candidate_control_has_invalid_or_duplicate_ids");
+		if (stableStringify(sourceCandidateIds) !== stableStringify(runtimeCandidateIds))
+			candidateUniverseIssues.push("candidate_id_set_differs_from_runtime_control");
+	}
+	if (candidateUniverseIssues.length > 0) {
+		needsHuman.push(normalizeNeedsHumanEntry({
+			source: "candidate-universe-integrity",
+			reason: `Runtime candidate universe reconciliation failed: ${candidateUniverseIssues.join(", ")}`,
+			uncertainty: "The persisted candidate ledger is not proven to represent the runtime candidate control.",
+			recommendedAction: "Reconcile the candidate control and partition ledger, then rerun the review.",
+			candidateUniverseIssues,
+		}, "candidate-universe-integrity"));
+	}
+	const evidenceCoverage = await gateRequirementCoverage(
+		requirementCoverage,
+		context,
+		finalFindings,
+	);
+	const requirementReconciliation = reconcileRequirementCoverage(
+		analysis.requirementCoverage,
+		evidenceCoverage,
+		finalFindings,
+		requirementSource,
+	);
 	const ownerLedger = batchOwnerLedgerRows;
 	const ownerLedgerReconciliation = reconcileOwnerLedger(
 		ownerLedger,
 		verifierRowLedger,
+		runtimeCandidateUniverse?.uniqueCount ?? joinCandidates.size,
 	);
 	const verdictCounts = {
 		keep: finalFindings.filter((item) => item.verdict === "KEEP").length,
@@ -506,22 +617,36 @@ async function partitionFindings(sources, options = {}, context = {}) {
 		schema: "spec-review-partition-v1",
 		evidenceGate: {
 			protocol: EVIDENCE_PROTOCOL,
-			complete: evidenceFindings.length === joinCandidates.size && evidenceFindings.length > 0 &&
-				evidenceFindings.every(row => row.complete) && requirementReconciliation.complete &&
-				needsHuman.length === 0 && sourceStatusSummary.metadataAvailable && sourceStatusSummary.total > 0 && sourceStatusSummary.nonCompleted === 0,
+			complete:
+				evidenceFindings.length === joinCandidates.size &&
+				evidenceFindings.every((row) => row.complete) &&
+				requirementReconciliation.complete &&
+				needsHuman.length === 0 &&
+				sourceStatusSummary.metadataAvailable &&
+				sourceStatusSummary.total > 0 &&
+				sourceStatusSummary.nonCompleted === 0,
 			findings: evidenceFindings,
 			coverage: evidenceCoverage,
 			requirementReconciliation,
 		},
 		sourceStatusSummary,
 		verifierCoverage: {
+			candidateUniverse: runtimeCandidateUniverse ?? {
+				schema: "spec-review-runtime-candidate-universe-v1",
+				count: 0,
+				uniqueCount: 0,
+				ids: [],
+				duplicateIds: [],
+				invalidRowCount: 0,
+				proof: null,
+			},
 			// Batch membership, including deterministic fallback IDs, is the
 			// authoritative coverage universe. Do not report raw id-less or
 			// duplicate candidate rows as independently covered candidates.
 			// Empty owner/verifier ledgers are never complete.
 			complete: ownerLedgerReconciliation.passed,
-			candidateCount: batchMode ? joinCandidates.size : candidateFindings.length,
-			uniqueCandidateCount: joinCandidates.size,
+			candidateCount: runtimeCandidateUniverse?.count ?? candidateFindings.length,
+			uniqueCandidateCount: runtimeCandidateUniverse?.uniqueCount ?? joinCandidates.size,
 			verifierCount,
 			uniqueVerifierCount: verifierById.size,
 			verifiedCandidateCount: [...joinCandidates.keys()].filter((id) =>
@@ -545,6 +670,12 @@ async function partitionFindings(sources, options = {}, context = {}) {
 			batchOwnerLedger: ownerLedger,
 			verifierRows: verifierRowLedger,
 			ownerLedgerReconciliation,
+			candidateUniverseReconciliation: {
+				issues: candidateUniverseIssues,
+				passed: candidateUniverseIssues.length === 0,
+				runtimeIds: runtimeCandidateIds,
+				sourceIds: sourceCandidateIds,
+			},
 		},
 		verdictCounts,
 		requirementCoverage,
@@ -556,6 +687,18 @@ async function partitionFindings(sources, options = {}, context = {}) {
 		orphanVerifierResults,
 		...(batchMode ? { batchIntegrityIssues } : {}),
 		noIssueNotes,
+		scopeLimitations,
+		// This workflow's inspect-tests stage is explicitly read-only and does
+		// not execute tests. Keep the attestation truthful even when a model
+		// omits the optional field from its candidate control.
+		testExecutionAttested: false,
+		readProjection: {
+			candidateIds: runtimeCandidateIds,
+			requirementIds: requirementReconciliation.requirementIds,
+			finalIds: finalFindings.map((row) => row.id),
+			droppedIds: droppedFindings.map((row) => row.id),
+			needsHumanIds: needsHuman.map((row) => row.id).filter(Boolean),
+		},
 	};
 	return {
 		...partition,
@@ -570,9 +713,7 @@ function buildBatchMembership(batchSource) {
 	const candidatesById = new Map();
 	const issues = [];
 	const candidateBatchIds = new Map();
-	const batches = Array.isArray(batchSource?.batches)
-		? batchSource.batches
-		: [];
+	const batches = Array.isArray(batchSource?.batches) ? batchSource.batches : [];
 	for (const batch of batches) {
 		if (!batch || typeof batch !== "object") continue;
 		const batchId = normalizeId(batch.id);
@@ -658,17 +799,24 @@ function batchOwnerFromStatus(status, sourceId, verifyStage, batchMembership) {
 		? specId.slice(verifyStage.length + 1).trim()
 		: "";
 	const source = typeof status.source === "string" ? status.source.trim() : "";
-	const itemIdentity = typeof status.itemIdentity === "string" ? status.itemIdentity.trim() : "";
-	const placeholderSpecId = typeof status.placeholderSpecId === "string" ? status.placeholderSpecId.trim() : "";
+	const itemIdentity =
+		typeof status.itemIdentity === "string" ? status.itemIdentity.trim() : "";
+	const placeholderSpecId =
+		typeof status.placeholderSpecId === "string"
+			? status.placeholderSpecId.trim()
+			: "";
 	if (
 		source !== sourceId ||
 		status.stageId !== verifyStage ||
 		status.status !== "completed" ||
-		typeof status.taskId !== "string" || !status.taskId.trim() ||
-		!batchId || !batchMembership.byBatchId.has(batchId) ||
+		typeof status.taskId !== "string" ||
+		!status.taskId.trim() ||
+		!batchId ||
+		!batchMembership.byBatchId.has(batchId) ||
 		itemIdentity !== batchId ||
 		placeholderSpecId !== `${verifyStage}.item`
-	) return null;
+	)
+		return null;
 	return {
 		source,
 		stageId: verifyStage,
@@ -681,45 +829,72 @@ function batchOwnerFromStatus(status, sourceId, verifyStage, batchMembership) {
 	};
 }
 
-function batchOwnerLedger(sources, verifyStage, sourceStatuses, batchMembership) {
+function batchOwnerLedger(
+	sources,
+	verifyStage,
+	sourceStatuses,
+	batchMembership,
+) {
 	const statuses = Array.isArray(sourceStatuses) ? sourceStatuses : [];
 	return Object.keys(sources ?? {})
-		.filter((sourceId) => sourceId === verifyStage || sourceId.startsWith(`${verifyStage}.`))
+		.filter(
+			(sourceId) =>
+				sourceId === verifyStage || sourceId.startsWith(`${verifyStage}.`),
+		)
 		.map((sourceId) => {
-			const owners = statuses.filter((status) =>
-				status && typeof status === "object" && status.source === sourceId,
+			const owners = statuses.filter(
+				(status) =>
+					status && typeof status === "object" && status.source === sourceId,
 			);
-			const owner = owners.length === 1
-				? batchOwnerFromStatus(owners[0], sourceId, verifyStage, batchMembership)
-				: null;
-			return owner ?? {
-				source: sourceId,
-				stageId: verifyStage,
-				specId: "",
-				taskId: "",
-				batchId: "",
-				itemIdentity: "",
-				placeholderSpecId: "",
-				status: owners[0]?.status ?? "missing",
-			};
+			const owner =
+				owners.length === 1
+					? batchOwnerFromStatus(owners[0], sourceId, verifyStage, batchMembership)
+					: null;
+			return (
+				owner ?? {
+					source: sourceId,
+					stageId: verifyStage,
+					specId: "",
+					taskId: "",
+					batchId: "",
+					itemIdentity: "",
+					placeholderSpecId: "",
+					status: owners[0]?.status ?? "missing",
+				}
+			);
 		});
 }
 
-function batchSourceStatusIssues(sources, verifyStage, sourceStatuses, batchMembership) {
+function batchSourceStatusIssues(
+	sources,
+	verifyStage,
+	sourceStatuses,
+	batchMembership,
+) {
 	const statuses = Array.isArray(sourceStatuses) ? sourceStatuses : [];
 	const issues = [];
-	const ownerLedger = batchOwnerLedger(sources, verifyStage, statuses, batchMembership);
+	const ownerLedger = batchOwnerLedger(
+		sources,
+		verifyStage,
+		statuses,
+		batchMembership,
+	);
 	for (const [index, owner] of ownerLedger.entries()) {
-		const owners = statuses.filter((status) =>
-			status && typeof status === "object" && status.source === owner.source,
+		const owners = statuses.filter(
+			(status) =>
+				status && typeof status === "object" && status.source === owner.source,
 		);
-		if (owners.length !== 1 || !batchOwnerFromStatus(owners[0], owner.source, verifyStage, batchMembership)) {
+		if (
+			owners.length !== 1 ||
+			!batchOwnerFromStatus(owners[0], owner.source, verifyStage, batchMembership)
+		) {
 			issues.push({
-				reason: owners.length === 0
-					? "missing_materialized_verifier_status"
-					: owners.length !== 1
-						? "verifier_alias_not_bound_to_exactly_one_materialized_status"
-						: "verifier_source_status_identity_mismatch",
+				reason:
+					owners.length === 0
+						? "missing_materialized_verifier_status"
+						: owners.length === 1
+							? "verifier_source_status_identity_mismatch"
+							: "verifier_alias_not_bound_to_exactly_one_materialized_status",
 				sourceId: owner.source,
 				batchId: owner.batchId,
 				ownerIndex: index,
@@ -774,15 +949,12 @@ function collectBatchVerifierRows({
 			});
 			continue;
 		}
-		const members = batchId
-			? batchMembership.byBatchId.get(batchId)
-			: undefined;
+		const members = batchId ? batchMembership.byBatchId.get(batchId) : undefined;
 		for (const [index, row] of source.results.entries()) {
 			rowCount += 1;
 			const base = { sourceId, batchId, index };
 			const id = normalizeId(row?.id);
-			const verdict =
-				typeof row?.verdict === "string" ? row.verdict : undefined;
+			const verdict = typeof row?.verdict === "string" ? row.verdict : undefined;
 			const malformed = malformedBatchRowReason(row);
 			if (malformed) {
 				issues.push({
@@ -854,11 +1026,19 @@ function malformedBatchRowReason(row) {
 		return "malformed_batch_row_invalid_severity";
 	if (!Array.isArray(row.evidence))
 		return "malformed_batch_row_missing_evidence_array";
-	if (row.evidence.some((item) => typeof item !== "string" && !isLocalCitation(item)))
+	if (
+		row.evidence.some(
+			(item) => typeof item !== "string" && !isLocalCitation(item),
+		)
+	)
 		return "malformed_batch_row_invalid_evidence_item";
 	if (!Array.isArray(row.counterEvidence))
 		return "malformed_batch_row_missing_counterEvidence_array";
-	if (row.counterEvidence.some((item) => typeof item !== "string" && !isLocalCitation(item)))
+	if (
+		row.counterEvidence.some(
+			(item) => typeof item !== "string" && !isLocalCitation(item),
+		)
+	)
 		return "malformed_batch_row_invalid_counterEvidence_item";
 	if (typeof row.finalClaim !== "string")
 		return "malformed_batch_row_missing_finalClaim";
@@ -892,32 +1072,41 @@ function findStageSource(sources, stageId) {
 function singletonVerifierStatuses(statuses, sourceId, expectedSpecId) {
 	// Bind on the exact materialized spec id and canonical verifier stage.
 	// A source alias alone must never authorize an unrelated task.
-	const verifyStage = sourceId.split(".")[0] ||
+	const verifyStage =
+		sourceId.split(".")[0] ||
 		expectedSpecId.slice(0, expectedSpecId.indexOf("."));
 	return (Array.isArray(statuses) ? statuses : []).filter(
-		(status) => status && typeof status === "object" &&
+		(status) =>
+			status &&
+			typeof status === "object" &&
 			typeof status.specId === "string" &&
-			status.specId.toLowerCase() === expectedSpecId.toLowerCase() &&
+			status.specId === expectedSpecId &&
 			(status.source === sourceId || status.source === verifyStage),
 	);
 }
 
-function singletonVerifierStatusIsExact(status, verifyStage, findingId, sourceId) {
-	const specItem = typeof status?.specId === "string" &&
+function singletonVerifierStatusIsExact(
+	status,
+	verifyStage,
+	findingId,
+	sourceId,
+) {
+	const specItem =
+		typeof status?.specId === "string" &&
 		status.specId.startsWith(`${verifyStage}.`)
-		? status.specId.slice(verifyStage.length + 1)
-		: "";
+			? status.specId.slice(verifyStage.length + 1)
+			: "";
 	return Boolean(
 		status &&
-		status.status === "completed" &&
-		status.stageId === verifyStage &&
-		(status.source === sourceId || status.source === verifyStage) &&
-		specItem &&
-		specItem.toLowerCase() === findingId.toLowerCase() &&
-		status.itemIdentity === findingId &&
-		status.placeholderSpecId === `${verifyStage}.item` &&
-		typeof status.taskId === "string" &&
-		status.taskId.trim(),
+			status.status === "completed" &&
+			status.stageId === verifyStage &&
+			(status.source === sourceId || status.source === verifyStage) &&
+			specItem &&
+			specItem === runtimeLocatorIdentity(findingId) &&
+			status.itemIdentity === findingId &&
+			status.placeholderSpecId === `${verifyStage}.item` &&
+			typeof status.taskId === "string" &&
+			status.taskId.trim(),
 	);
 }
 
@@ -943,14 +1132,23 @@ function ownerKey(owner) {
 		owner?.placeholderSpecId,
 		owner?.batchId ?? "",
 		owner?.status,
-	].map((value) => String(value ?? "")).join("\\u001f");
+	]
+		.map((value) => String(value ?? ""))
+		.join("\\u001f");
 }
 
 function ownerComplete(owner) {
-	return Boolean(owner &&
-		[owner.source, owner.specId, owner.taskId, owner.itemIdentity, owner.placeholderSpecId]
-			.every((value) => typeof value === "string" && value.trim()) &&
-		owner.status === "completed");
+	return Boolean(
+		owner &&
+			[
+				owner.source,
+				owner.specId,
+				owner.taskId,
+				owner.itemIdentity,
+				owner.placeholderSpecId,
+			].every((value) => typeof value === "string" && value.trim()) &&
+			owner.status === "completed",
+	);
 }
 
 function ownerIdentity(owner) {
@@ -965,7 +1163,11 @@ function ownerBindingIdentity(row) {
 	return String(row?.batchId ?? row?.id ?? "").trim();
 }
 
-function reconcileOwnerLedger(ownerLedger, verifierRows) {
+function reconcileOwnerLedger(
+	ownerLedger,
+	verifierRows,
+	expectedCandidateCount,
+) {
 	const ownerKeys = new Set(ownerLedger.map(ownerKey));
 	const ownerIds = ownerLedger.map(ownerIdentity);
 	const verifierIds = verifierRows.map(verifierIdentity);
@@ -976,28 +1178,44 @@ function reconcileOwnerLedger(ownerLedger, verifierRows) {
 		(id, index) => !id || verifierIds.indexOf(id) !== index,
 	);
 	const missingOwnerRows = verifierRows
-		.filter((row) =>
-			!row.owner ||
-			!ownerKeys.has(ownerKey(row.owner)) ||
-			ownerIdentity(row.owner) !== ownerBindingIdentity(row),
+		.filter(
+			(row) =>
+				!row.owner ||
+				!ownerKeys.has(ownerKey(row.owner)) ||
+				ownerIdentity(row.owner) !== ownerBindingIdentity(row),
 		)
 		.map((row) => row.id);
 	const orphanOwnerRows = ownerLedger
-		.filter((owner) => !verifierRows.some((row) => row.owner && ownerKey(row.owner) === ownerKey(owner)))
+		.filter(
+			(owner) =>
+				!verifierRows.some(
+					(row) => row.owner && ownerKey(row.owner) === ownerKey(owner),
+				),
+		)
 		.map(ownerIdentity);
 	const statusMismatches = verifierRows
 		.filter((row) => !row.owner || row.owner.status !== "completed")
 		.map((row) => row.id);
-	const ownerRowsHaveCompleteIds = ownerLedger.every((owner) =>
-		ownerComplete(owner) && ownerIdentity(owner),
+	const ownerRowsHaveCompleteIds = ownerLedger.every(
+		(owner) => ownerComplete(owner) && ownerIdentity(owner),
 	);
 	const verifierRowsHaveIds = verifierRows.every((row) => verifierIdentity(row));
-	// A batch carrier may own multiple verifier rows, but both ledgers must have
-	// positive cardinality and unique identities. Empty joins are never complete.
-	const cardinalityPassed = ownerLedger.length > 0 && verifierRows.length > 0 &&
-		ownerLedger.length <= verifierRows.length && ownerRowsHaveCompleteIds &&
-		verifierRowsHaveIds && duplicateOwnerIds.length === 0 &&
-		duplicateVerifierIds.length === 0;
+	// A batch carrier may own multiple verifier rows. An empty join is complete
+	// only when the attested candidate universe is genuinely empty; missing
+	// verifier work for a non-empty universe remains incomplete.
+	const emptyJoin =
+		expectedCandidateCount === 0 &&
+		ownerLedger.length === 0 &&
+		verifierRows.length === 0;
+	const cardinalityPassed =
+		emptyJoin ||
+		(ownerLedger.length > 0 &&
+			verifierRows.length > 0 &&
+			ownerLedger.length <= verifierRows.length &&
+			ownerRowsHaveCompleteIds &&
+			verifierRowsHaveIds &&
+			duplicateOwnerIds.length === 0 &&
+			duplicateVerifierIds.length === 0);
 	return {
 		ownerRowCount: ownerLedger.length,
 		verifierRowCount: verifierRows.length,
@@ -1009,8 +1227,11 @@ function reconcileOwnerLedger(ownerLedger, verifierRows) {
 		orphanOwnerRows,
 		statusMismatches,
 		cardinalityPassed,
-		passed: cardinalityPassed && missingOwnerRows.length === 0 &&
-			orphanOwnerRows.length === 0 && statusMismatches.length === 0,
+		passed:
+			cardinalityPassed &&
+			missingOwnerRows.length === 0 &&
+			orphanOwnerRows.length === 0 &&
+			statusMismatches.length === 0,
 	};
 }
 
@@ -1020,6 +1241,16 @@ function findVerifierResults(sources, verifyStage) {
 		.sort(([left], [right]) => left.localeCompare(right))
 		.map(([sourceId, value]) => ({ sourceId, value }))
 		.filter(({ value }) => value && typeof value === "object");
+}
+
+function runtimeLocatorIdentity(value) {
+	return String(value ?? "")
+		.trim()
+		.toLowerCase();
+}
+
+function runtimeSpecId(stageId, businessIdentity) {
+	return `${stageId}.${runtimeLocatorIdentity(businessIdentity)}`;
 }
 
 function normalizeId(value) {
@@ -1049,10 +1280,96 @@ function arrayOfStrings(value) {
 		: [];
 }
 
-function objectOrMessage(value) {
-	return value && typeof value === "object" && !Array.isArray(value)
+function normalizeScopeLimitations(value) {
+	if (!Array.isArray(value)) return [];
+	return value
+		.filter(
+			(row) =>
+				row &&
+				typeof row === "object" &&
+				!Array.isArray(row) &&
+				row.kind === "NONBLOCKING" &&
+				typeof row.text === "string" &&
+				row.text.trim(),
+		)
+		.slice(0, 40)
+		.map((row) => ({
+			kind: "NONBLOCKING",
+			text: row.text.trim().slice(0, 240),
+			blocking: false,
+		}));
+}
+
+function normalizeNeedsHumanEntry(value, fallbackSource = "scope") {
+	const row = value && typeof value === "object" && !Array.isArray(value)
 		? value
-		: { message: String(value ?? "") };
+		: { reason: String(value ?? "") };
+	const candidate = row.originalCandidate && typeof row.originalCandidate === "object"
+		? row.originalCandidate
+		: null;
+	const candidateId = normalizeId(candidate?.id);
+	const source = normalizeId(row.source) ?? fallbackSource;
+	const candidateSources = new Set([
+		"evidence-gate",
+		"verifier",
+		"invalid-verdict",
+		"missing-verification",
+		"batch-integrity",
+		"verifier-integrity",
+	]);
+	const originKind = candidate ? "candidate" :
+		(source === "orphan-verifier" ? "orphan-verifier" :
+		 source === "batch-integrity" ? "batch-integrity" :
+		 source === "candidate-universe-integrity" ? "runtime-candidate-control" :
+		 source === "candidate-source" ? "candidate-source" : "scope");
+	const requirementIds = arrayOfStrings(candidate?.requirementIds ?? row.requirementIds);
+	const verifier = row.verifierResult && typeof row.verifierResult === "object"
+		? row.verifierResult
+		: null;
+	const finalClaim = typeof row.finalClaim === "string" && row.finalClaim.trim()
+		? row.finalClaim.trim()
+		: typeof verifier?.finalClaim === "string" && verifier.finalClaim.trim()
+			? verifier.finalClaim.trim()
+			: "No final verifier claim was supplied; the item remains unresolved.";
+	const recommendedAction = typeof row.recommendedAction === "string" && row.recommendedAction.trim()
+		? row.recommendedAction.trim()
+		: typeof verifier?.recommendedAction === "string" && verifier.recommendedAction.trim()
+			? verifier.recommendedAction.trim()
+			: "Reconcile the unresolved evidence and rerun the review.";
+	const reason = typeof row.reason === "string" && row.reason.trim()
+		? row.reason.trim()
+		: "The review could not establish a complete, source-backed disposition.";
+	const uncertainty = typeof row.uncertainty === "string" && row.uncertainty.trim()
+		? row.uncertainty.trim()
+		: "The origin, evidence, or verifier result is incomplete; no conformance claim is made.";
+	const origin = {
+		kind: originKind,
+		...(candidateId ? { candidateId } : {}),
+		...(typeof row.sourceId === "string" && row.sourceId.trim()
+			? { sourceId: row.sourceId.trim() }
+			: {}),
+	};
+	return {
+		source,
+		...(normalizeId(row.id) ? { id: normalizeId(row.id) } : {}),
+		...(typeof row.title === "string" && row.title.trim() ? { title: row.title.trim() } : {}),
+		requirementIds,
+		origin,
+		reason,
+		uncertainty,
+		finalClaim,
+		recommendedAction,
+		evidenceStatus: candidateSources.has(source) ? "unverified_or_incomplete" : "unavailable",
+		...(candidate ? { originalCandidate: candidate } : {}),
+		...(verifier ? { verifierResult: verifier } : {}),
+		...(row.details ? { details: row.details } : {}),
+		...(row.evidenceGate ? { evidenceGate: row.evidenceGate } : {}),
+		...(row.batchIntegrityIssue ? { batchIntegrityIssue: row.batchIntegrityIssue } : {}),
+		...(row.invalidVerifierResult ? { invalidVerifierResult: row.invalidVerifierResult } : {}),
+		...(row.candidateUniverseIssues ? { candidateUniverseIssues: row.candidateUniverseIssues } : {}),
+		...(row.verdict ? { verdict: row.verdict } : {}),
+		...(row.originalVerdict ? { originalVerdict: row.originalVerdict } : {}),
+	};
 }
 
 function findingSummary(candidate, extra) {
@@ -1062,6 +1379,22 @@ function findingSummary(candidate, extra) {
 		requirementIds: arrayOfStrings(candidate?.requirementIds),
 		claim: candidate?.claim ?? "",
 		...extra,
+	};
+}
+
+function needsHumanRecord(candidate, verifier, extra = {}) {
+	return {
+		...findingSummary(candidate, extra),
+		requirementIds: arrayOfStrings(candidate?.requirementIds),
+		uncertainty: candidate?.uncertainty ?? "",
+		originalCandidate: candidate,
+		...(verifier
+			? {
+					verifierResult: verifier,
+					finalClaim: verifier.finalClaim ?? "",
+					recommendedAction: verifier.recommendedAction ?? "",
+				}
+			: {}),
 	};
 }
 
@@ -1088,7 +1421,9 @@ function summarizeSourceStatuses(context) {
 		: [];
 	const seen = new Set();
 	const statuses = normalized
-		.sort((left, right) => sourceStatusKey(left).localeCompare(sourceStatusKey(right)))
+		.sort((left, right) =>
+			sourceStatusKey(left).localeCompare(sourceStatusKey(right)),
+		)
 		.map((status) => {
 			const key = `${status.specId ?? ""}|${status.taskId ?? ""}|${status.source ?? ""}`;
 			if (!key.replace(/\|/g, "") || !seen.has(key)) {
@@ -1131,7 +1466,9 @@ function slimSourceStatus(status) {
 		...(text(status.errorType, 200)
 			? { errorType: text(status.errorType, 200) }
 			: {}),
-		...(text(status.lastMessage) ? { lastMessage: text(status.lastMessage) } : {}),
+		...(text(status.lastMessage)
+			? { lastMessage: text(status.lastMessage) }
+			: {}),
 	};
 }
 

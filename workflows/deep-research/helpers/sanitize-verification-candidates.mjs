@@ -149,11 +149,11 @@ function schemaCapGap(drop) {
 }
 
 function sourceRefs(candidate) {
-	return compactStrings(candidate?.sourceRefs, 16);
+	return compactStrings(candidate?.sourceRefs, Infinity);
 }
 
 function sourceUrls(candidate) {
-	return compactStrings(candidate?.sourceUrls, 16);
+	return compactStrings(candidate?.sourceUrls, Infinity);
 }
 
 function localEvidenceRefs(candidate) {
@@ -356,13 +356,11 @@ async function buildUrlSourceRefLookup(normalizeInputPacket, context) {
 	const lookup = new Map();
 	const sources = asArray(normalizeInputPacket?.packet?.research?.sources);
 	for (const source of sources) {
-		const ref = sourceRefs(source)[0] || stringOf(source?.sourceRef);
-		if (!ref) continue;
-		for (const url of sourceUrls(source).length > 0
-			? sourceUrls(source)
-			: [source?.url]) {
-			addUrlSourceRef(lookup, url, ref);
-		}
+		const refs = sourceRefs(source);
+		const urls =
+			sourceUrls(source).length > 0 ? sourceUrls(source) : [stringOf(source?.url)];
+		for (const [index, url] of urls.entries())
+			addUrlSourceRef(lookup, url, refs[index] ?? refs[0]);
 	}
 	await addWebSourceCacheSourceRefs(lookup, context);
 	return lookup;
@@ -378,7 +376,7 @@ function backfillSourceRefs(candidate, hints, urlToSourceRef) {
 		const ref = urlToSourceRef.get(canonicalUrl(url));
 		if (ref && !refs.includes(ref)) refs.push(ref);
 	}
-	return refs.slice(0, 16);
+	return refs;
 }
 
 function evidenceHintsForCandidate(candidate, hintRows) {
@@ -388,14 +386,8 @@ function evidenceHintsForCandidate(candidate, hintRows) {
 	const candidateTokens = tokenSet(claimText(candidate));
 	const scored = [];
 	for (const row of hintRows) {
-		const refHits = setIntersectionCount(
-			new Set(row.sourceRefs),
-			candidateRefs,
-		);
-		const urlHits = setIntersectionCount(
-			new Set(row.sourceUrls),
-			candidateUrls,
-		);
+		const refHits = setIntersectionCount(new Set(row.sourceRefs), candidateRefs);
+		const urlHits = setIntersectionCount(new Set(row.sourceUrls), candidateUrls);
 		const slotHits = setIntersectionCount(
 			new Set(row.factSlotIds),
 			candidateSlots,
@@ -463,9 +455,15 @@ function includesLiteralPhrase(text, phrase) {
 	return needle.length > 0 && haystack.includes(needle);
 }
 
-function hasOverclaimedSourceInference(claim, options) {
+function hasOverclaimedSourceInference(claim, hints, options) {
 	return optionStrings(options, "overclaimedSourceInferencePhrases").some(
-		(phrase) => includesLiteralPhrase(claim, phrase),
+		(phrase) =>
+			includesLiteralPhrase(claim, phrase) &&
+			!hints.some(
+				(hint) =>
+					includesLiteralPhrase(hintEvidenceText(hint), phrase) &&
+					hintSupportsCandidate({ claim }, hint),
+			),
 	);
 }
 
@@ -522,7 +520,7 @@ function classifyCandidate(candidate, seenIds, hints = [], options = {}) {
 		) {
 			reasons.push("source_hint_claim_mismatch");
 		}
-		if (hasOverclaimedSourceInference(claim, options)) {
+		if (hasOverclaimedSourceInference(claim, hints, options)) {
 			reasons.push("overclaimed_source_inference");
 		}
 		if (hasUnsupportedNormativePrerequisite(claim, hints)) {
@@ -604,7 +602,8 @@ function demotionGap(candidate, reasons) {
 		reason: `sanitized from verifier candidates: ${reasons.join(", ")}`,
 		nextStep:
 			"Replace with a narrow source-stated factual atom, or keep as an explicit final-report gap/recommendation caveat.",
-		sourceUrls: sourceUrls(candidate).slice(0, 6),
+		sourceRefs: sourceRefs(candidate),
+		sourceUrls: sourceUrls(candidate),
 		claim: claim || undefined,
 	};
 }
@@ -694,7 +693,9 @@ function rewrittenCandidate(candidate, reasons, hints, urlToSourceRef) {
 		originalClaim: claimText(candidate),
 		claim: replacement,
 		sourceRefs: refs,
-		sourceUrls: hint.url ? [hint.url] : sourceUrls(candidate),
+		sourceUrls: hint.url
+			? compactStrings([hint.url, ...sourceUrls(candidate)], Infinity)
+			: sourceUrls(candidate),
 		sanitizerRewriteReasons: rewriteReasons,
 		reasonToVerify: `Deterministically rewritten to a source-backed atom from ${hint.sourceTitleOrPublisher ?? hint.url ?? hint.sourceRef ?? "source evidence"}.`,
 	};
@@ -716,9 +717,7 @@ function withoutSanitizerGapReason(value) {
 	return stringOf(value)
 		.split(";")
 		.map((part) => part.trim())
-		.filter(
-			(part) => part && !part.startsWith("sanitized verifier candidates:"),
-		)
+		.filter((part) => part && !part.startsWith("sanitized verifier candidates:"))
 		.join("; ");
 }
 
@@ -727,8 +726,7 @@ function adjustFactSlotCoverage(rows, demotedBySlot, keptIds) {
 		const slot = { ...asObject(row) };
 		const originalIds = compactStrings(slot.verificationCandidateIds, 24);
 		const filteredIds = originalIds.filter((id) => keptIds.has(id));
-		const demotedIds =
-			demotedBySlot.get(stringOf(slot.slotId ?? slot.id)) ?? [];
+		const demotedIds = demotedBySlot.get(stringOf(slot.slotId ?? slot.id)) ?? [];
 		if (originalIds.length > 0 || demotedIds.length > 0) {
 			slot.verificationCandidateIds = filteredIds;
 		}
@@ -778,12 +776,7 @@ export default async function sanitizeVerificationCandidates({
 			keptCandidates.push(sanitizedCandidate(candidate, hints, urlToSourceRef));
 			continue;
 		}
-		const rewrite = rewrittenCandidate(
-			candidate,
-			reasons,
-			hints,
-			urlToSourceRef,
-		);
+		const rewrite = rewrittenCandidate(candidate, reasons, hints, urlToSourceRef);
 		if (rewrite) {
 			for (const reason of rewrite.sanitizerRewriteReasons) {
 				rewriteReasonCounts[reason] = (rewriteReasonCounts[reason] ?? 0) + 1;
@@ -859,16 +852,15 @@ export default async function sanitizeVerificationCandidates({
 			const claim = claimText(preserved);
 			if (!claim) continue;
 			const id =
-				candidateId(preserved) ||
-				`promoted-${String(index + 1).padStart(3, "0")}`;
+				candidateId(preserved) || `promoted-${String(index + 1).padStart(3, "0")}`;
 			if (takenIds.has(id)) continue;
 			const hints = evidenceHintsForCandidate(preserved, evidenceHintRows);
 			const refs = backfillSourceRefs(preserved, hints, urlToSourceRef);
 			if (refs.length === 0) continue;
 			if (!hints.some((hint) => stringOf(hint.quote))) continue;
 			if (
-				classifyCandidate({ ...preserved, id }, new Set(), hints, options)
-					.length > 0
+				classifyCandidate({ ...preserved, id }, new Set(), hints, options).length >
+				0
 			) {
 				continue;
 			}
@@ -897,8 +889,7 @@ export default async function sanitizeVerificationCandidates({
 						...entry.preserved,
 						id: entry.id,
 						sourceRefs: entry.refs,
-						verificationNeed:
-							stringOf(entry.preserved?.verificationNeed) || "useful",
+						verificationNeed: stringOf(entry.preserved?.verificationNeed) || "useful",
 						reasonToVerify:
 							stringOf(entry.preserved?.reasonToVerify) ||
 							stringOf(entry.preserved?.whyItMatters) ||

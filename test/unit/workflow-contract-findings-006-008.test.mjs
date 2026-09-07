@@ -11,15 +11,18 @@ const deepRender = (await import(new URL("../../workflows/deep-review/helpers/re
 const finalAuditPacket = (await import(new URL("../../workflows/deep-research/helpers/final-audit-packet.mjs", import.meta.url))).default;
 const researchRender = (await import(new URL("../../workflows/deep-research/helpers/render-executive.mjs", import.meta.url))).default;
 const claimGate = (await import(new URL("../../workflows/deep-research/helpers/claim-evidence-gate.mjs", import.meta.url))).default;
+const { blankImpactSources, impactSourceStatuses } = await import(new URL("./impact-review-fixtures.mjs", import.meta.url));
 
 const reviewFinding = (id) => ({
   findingId: id,
-  rootCauseId: `root-${id}`,
+  // Both rows are independent observations of one explicitly declared root;
+  // the pipeline may merge them only after the exact claim payload agrees.
+  rootCauseId: "root-runtime-defect",
   title: "Same runtime defect",
   severity: "high",
   file: "src/runtime.ts",
   locations: [{ file: "src/runtime.ts", line: 8 }],
-  evidence: `Observed ${id}`,
+  evidence: "Observed the runtime behavior.",
   evidenceQuotes: ["exact runtime quote"],
   rationale: "The behavior is unsafe.",
   recommendedAction: "Fix the runtime behavior.",
@@ -135,26 +138,25 @@ test("deep-review rejects multiple canonical triage sources before ledger foldin
 });
 
 test("impact renderer rejects contradictory source/spec identity and duplicate task identity", async () => {
-  const sources = { "impact-analysis.impact-synthesis.main": {
-    schema: "stage-control-v1", digest: "s", summary: "Ready", verdict: "READY", riskLevel: "low",
-    blockingIssues: [], nonBlockingIssues: [], confirmedSafeAreas: [], recommendedNextActions: [], validationToRun: [], needsHuman: [],
-  }, "impact-analysis.contract-consistency.main": { schema: "stage-control-v1", digest: "c", status: "pass", issues: [], confirmedConsistencies: [] },
-  "impact-analysis.regression-risk.main": { schema: "stage-control-v1", digest: "r", riskLevel: "low", risks: [], riskReducers: [] },
-  "impact-analysis.ship-readiness.main": { schema: "stage-control-v1", digest: "h", status: "ready", requiredBeforeShip: [], niceToHave: [], assumptions: [] } };
-  const statusRows = ["impact-synthesis", "contract-consistency", "regression-risk", "ship-readiness"].map((stage) => ({
-    source: `impact-analysis.${stage}`, specId: `impact-analysis.${stage}.main`, stageId: `impact-analysis.${stage}`, taskId: `task-${stage}`, status: "completed",
-  }));
-  const contradictory = await impactRender({ sources, context: { sourceStatuses: statusRows.map((row) => row.stageId.endsWith("impact-synthesis") ? { ...row, specId: "impact-analysis.other.main" } : row) } });
+  const sources = blankImpactSources({
+    "impact-synthesis": { summary: "Ready", verdict: "READY", riskLevel: "low" },
+    "contract-consistency": { status: "pass" },
+    "regression-risk": { riskLevel: "low" },
+    "ship-readiness": { status: "ready" },
+  });
+  const statusRows = impactSourceStatuses();
+  const contradictory = await impactRender({ sources, context: { sourceStatuses: statusRows.map((row) => row.stageId === "impact-synthesis" ? { ...row, specId: "impact-analysis.other.main" } : row) } });
   assert.equal(contradictory.gates.sourceCoverageComplete, false);
-  assert.equal(contradictory.sourceCoverage.missing.length, 1);
-  assert.equal(contradictory.sourceCoverage.orphan.length, 1);
+  assert.equal(contradictory.sourceCoverage.missing.length, 0);
+  assert.equal(contradictory.sourceCoverage.orphan.length, 0);
+  assert.equal(contradictory.sourceCoverage.wrongStage.length, 1);
   const duplicate = await impactRender({ sources, context: { sourceStatuses: [...statusRows, { ...statusRows[0] }] } });
   assert.equal(duplicate.gates.sourceCoverageComplete, false);
-  assert.deepEqual(duplicate.sourceCoverage.duplicateTaskIds, ["task-impact-synthesis"]);
+  assert.deepEqual(duplicate.sourceCoverage.duplicateTaskIds, ["task-1"]);
 });
 
 test("spec-review partition publishes owner rows and deterministic reconciliation", async () => {
-  const owner = { source: "verify-findings.F-001", specId: "verify-findings.F-001", taskId: "task-1", stageId: "verify-findings", itemIdentity: "F-001", placeholderSpecId: "verify-findings.item", status: "completed" };
+  const owner = { source: "verify-findings.F-001", specId: "verify-findings.f-001", taskId: "task-1", stageId: "verify-findings", itemIdentity: "F-001", placeholderSpecId: "verify-findings.item", status: "completed" };
   const result = await specReview({
     sources: {
       "candidate-findings": { candidateFindings: [{ id: "F-001", title: "Gap", severity: "high" }] },
@@ -223,7 +225,7 @@ test("canonical stage source helpers fail closed on ambiguous aliases", async ()
     },
   });
   assert.equal(impactAmbiguous.status, "blocked");
-  assert.match(impactAmbiguous.blockers[0], /ambiguous impact-synthesis/u);
+  assert.match(impactAmbiguous.blockers.join("\n"), /missing or malformed canonical source/iu);
 });
 
 test("spec-review singleton verifier rejects wrong-stage and swapped materialized owners", async () => {
@@ -334,23 +336,19 @@ test("deep-research packet reconciliation blocks swapped and inconsistent final 
 });
 
 test("impact renderer requires a one-to-one canonical source-status stage coverage", async () => {
-  const sourceFor = (stage, value) => ({
-    [`impact-analysis.${stage}.main`]: value,
+  const fullSources = blankImpactSources({
+    "impact-synthesis": { summary: "Ready", verdict: "READY", riskLevel: "low" },
+    "contract-consistency": { status: "pass" },
+    "regression-risk": { riskLevel: "low" },
+    "ship-readiness": { status: "ready" },
   });
-  const fullSources = {
-    "impact-analysis.impact-synthesis.main": { schema: "stage-control-v1", digest: "s", summary: "Ready", verdict: "READY", riskLevel: "low", blockingIssues: [], nonBlockingIssues: [], confirmedSafeAreas: [], recommendedNextActions: [], validationToRun: [], needsHuman: [] },
-    "impact-analysis.contract-consistency.main": { schema: "stage-control-v1", digest: "c", status: "pass", issues: [], confirmedConsistencies: [] },
-    "impact-analysis.regression-risk.main": { schema: "stage-control-v1", digest: "r", riskLevel: "low", risks: [], riskReducers: [] },
-    "impact-analysis.ship-readiness.main": { schema: "stage-control-v1", digest: "h", status: "ready", requiredBeforeShip: [], niceToHave: [], assumptions: [] },
-  };
-  const statusesFor = (stage) => ({ source: `impact-analysis.${stage}`, specId: `impact-analysis.${stage}.main`, stageId: `impact-analysis.${stage}`, taskId: `task-${stage}`, status: "completed" });
-  const statusRows = ["impact-synthesis", "contract-consistency", "regression-risk", "ship-readiness"].map(statusesFor);
+  const statusRows = impactSourceStatuses();
   const good = await impactRender({ sources: fullSources, context: { sourceStatuses: statusRows } });
   assert.equal(good.status, "passed");
   const duplicate = await impactRender({ sources: fullSources, context: { sourceStatuses: [...statusRows, { ...statusRows[0], taskId: "task-b" }] } });
   assert.equal(duplicate.status, "blocked");
   assert.equal(duplicate.gates.sourceCoverageComplete, false);
-  const wrongStage = await impactRender({ sources: fullSources, context: { sourceStatuses: statusRows.map((status) => status.stageId === "impact-analysis.impact-synthesis" ? { ...status, stageId: "impact-analysis.contract-consistency" } : status) } });
+  const wrongStage = await impactRender({ sources: fullSources, context: { sourceStatuses: statusRows.map((status) => status.stageId === "impact-synthesis" ? { ...status, stageId: "contract-consistency" } : status) } });
   assert.equal(wrongStage.status, "blocked");
 });
 

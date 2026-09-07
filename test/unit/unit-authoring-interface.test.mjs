@@ -558,6 +558,7 @@ test("bundled deep-research compacts audit packets before executive final", asyn
 	assert.equal(finalAuditPacket?.kind, "support");
 	assert.deepEqual(finalAuditPacket.dependsOn, [
 		"plan.main",
+		"normalize-input-packet.main",
 		"normalize-claims.main",
 		"sanitize-claims.main",
 		"audit-claims.main",
@@ -2525,7 +2526,11 @@ test("spec-review partition helper joins verifier results and flags missing cove
 	const result = await helper({
 		sources: {
 			"candidate-findings.main": {
-				requirementCoverage: [{ requirementId: "REQ-001", status: "partial" }],
+				requirementCoverage: [{
+					requirementId: "REQ-001",
+					status: "partial",
+					evidence: [{ file: "src/example.ts", lineStart: 1, lineEnd: 1, quote: "missing" }],
+				}],
 				candidateFindings: [
 					{
 						id: "FINDING-001",
@@ -2578,7 +2583,7 @@ test("spec-review partition helper joins verifier results and flags missing cove
 				{ source: "candidate-findings", specId: "candidate-findings.main", stageId: "candidate-findings", taskId: "task-candidates", status: "completed" },
 				{ source: "verify-findings.finding-001", specId: "verify-findings.finding-001", stageId: "verify-findings", taskId: "task-verify-1", itemIdentity: "FINDING-001", placeholderSpecId: "verify-findings.item", status: "completed" },
 				{ source: "verify-findings.finding-002", specId: "verify-findings.finding-002", stageId: "verify-findings", taskId: "task-verify-2", itemIdentity: "FINDING-002", placeholderSpecId: "verify-findings.item", status: "completed" },
-				{ source: "verify-findings.orphan", specId: "verify-findings.FINDING-999", stageId: "verify-findings", taskId: "task-verify-orphan", itemIdentity: "FINDING-999", placeholderSpecId: "verify-findings.item", status: "completed" },
+				{ source: "verify-findings.orphan", specId: "verify-findings.finding-999", stageId: "verify-findings", taskId: "task-verify-orphan", itemIdentity: "FINDING-999", placeholderSpecId: "verify-findings.item", status: "completed" },
 			],
 		},
 	});
@@ -2897,6 +2902,7 @@ test("bundled spec-review workflow materializes verifier and partitions verified
 	try {
 		mkdirSync(join(cwd, "src"), { recursive: true });
 		writeFileSync(join(cwd, "src/example.ts"), "missing\n");
+		writeFileSync(join(cwd, "SPEC.md"), "The implementation must match the required behavior.\n");
 		writeAgent(cwd, "scout", "read, grep, find, ls");
 		captureSubagentPrompts([]);
 		const specPath = join(
@@ -2913,9 +2919,23 @@ test("bundled spec-review workflow materializes verifier and partitions verified
 		});
 		const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
 		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await writeRunRecord(cwd, run);
 
 		await completeTask(cwd, taskBySpec(run, "extract-spec.main"), {
-			requirements: [{ id: "REQ-001", requirement: "Must match" }],
+			specSources: ["SPEC.md"],
+			requirements: [{
+				id: "REQ-001",
+				requirement: "The implementation must match the required behavior.",
+				specEvidence: {
+					file: "SPEC.md",
+					lineStart: 1,
+					lineEnd: 1,
+					quote: "The implementation must match the required behavior.",
+				},
+				priority: "medium",
+				implementationSignals: [],
+				testSignals: [],
+			}],
 		});
 		await completeTask(cwd, taskBySpec(run, "map-implementation.main"), {
 			implementationMap: [],
@@ -2932,6 +2952,10 @@ test("bundled spec-review workflow materializes verifier and partitions verified
 					severity: "medium",
 					title: "Missing behavior",
 					claim: "Implementation misses behavior",
+					specEvidence: ["The implementation must match the required behavior."],
+					implementationEvidence: [],
+					testEvidence: [],
+					uncertainty: "Verify implementation behavior.",
 				},
 			],
 			needsHuman: [],
@@ -2959,6 +2983,23 @@ test("bundled spec-review workflow materializes verifier and partitions verified
 			"candidate-findings.main",
 			"verify-findings.finding-001",
 		]);
+		const candidateTask = taskBySpec(current, "candidate-findings.main");
+		const upstreamManifestSources = ["extract-spec", "map-implementation", "inspect-tests"].map((stageId) => {
+			const sourceTask = taskBySpec(current, `${stageId}.main`);
+			const sourceDir = dirname(join(cwd, sourceTask.files.result));
+			return {
+				source: stageId,
+				taskId: sourceTask.taskId,
+				specId: sourceTask.specId,
+				stageId: sourceTask.stageId,
+				status: sourceTask.status,
+				artifacts: { control: { path: join(sourceDir, "control.json") } },
+			};
+		});
+		writeFileSync(
+			join(dirname(join(cwd, candidateTask.files.result)), "source-manifest.json"),
+			JSON.stringify({ schema: "workflow-source-manifest-v1", runId: current.runId, taskId: candidateTask.taskId, sources: upstreamManifestSources }),
+		);
 
 		await completeTask(
 			cwd,
@@ -2991,6 +3032,22 @@ test("bundled spec-review workflow materializes verifier and partitions verified
 		assert.deepEqual(
 			partitionResult.finalFindings.map((finding) => finding.id),
 			["FINDING-001"],
+		);
+		writeFileSync(
+			join(dirname(join(cwd, partitionTask.files.result)), "source-manifest.json"),
+			JSON.stringify({
+				schema: "workflow-source-manifest-v1",
+				runId: current.runId,
+				taskId: partitionTask.taskId,
+				sources: [{
+					source: "candidate-findings",
+					taskId: taskBySpec(current, "candidate-findings.main").taskId,
+					specId: "candidate-findings.main",
+					stageId: "candidate-findings",
+					status: "completed",
+					artifacts: { control: { path: join(dirname(join(cwd, candidateTask.files.result)), "control.json") } },
+				}],
+			}),
 		);
 		assert.deepEqual(partitionResult.verdictCounts, {
 			keep: 1,

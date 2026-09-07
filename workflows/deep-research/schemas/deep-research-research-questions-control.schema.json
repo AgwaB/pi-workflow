@@ -3,6 +3,7 @@
   "required": [
     "schema",
     "digest",
+    "questionId",
     "question",
     "extractedFacts",
     "claims",
@@ -17,25 +18,64 @@
       "type": "string",
       "minLength": 1
     },
+    "questionId": {
+      "type": "string",
+      "minLength": 1
+    },
     "question": {},
     "extractedFacts": {
       "type": "array",
       "items": {
-        "type": "object"
+        "type": "object",
+        "description": "A local_repo fact may be fully typed with file, lineStart/lineEnd (or symbol), and quote; sourceUrls is optional for such local evidence.",
+        "properties": {
+          "sourceType": { "type": "string" },
+          "file": { "type": "string" },
+          "lineStart": { "type": "integer", "minimum": 1 },
+          "lineEnd": { "type": "integer", "minimum": 1 },
+          "sourceUrls": { "type": "array", "items": { "type": "string" } },
+          "sourceRefs": { "type": "array", "items": { "type": "string" } },
+          "quote": { "type": "string" },
+          "factType": { "type": "string" },
+          "value": {},
+          "dateOrYear": { "type": "string" }
+        }
       },
       "maxItems": 32
     },
     "claims": {
       "type": "array",
       "items": {
-        "type": "object"
+        "type": "object",
+        "description": "Claims may use typed local sourceRefs/file/range/quote evidence without an HTTP sourceUrl.",
+        "properties": {
+          "sourceType": { "type": "string" },
+          "file": { "type": "string" },
+          "lineStart": { "type": "integer", "minimum": 1 },
+          "lineEnd": { "type": "integer", "minimum": 1 },
+          "sourceUrls": { "type": "array", "items": { "type": "string" } },
+          "sourceRefs": { "type": "array", "items": { "type": "string" } },
+          "quote": { "type": "string" }
+        }
       },
       "maxItems": 24
     },
     "sources": {
       "type": "array",
+      "description": "Sources can be HTTP sources or typed local_repo rows; local rows do not require sourceUrl.",
       "items": {
-        "type": "object"
+        "type": "object",
+        "properties": {
+          "sourceType": { "type": "string" },
+          "file": { "type": "string" },
+          "lineStart": { "type": "integer", "minimum": 1 },
+          "lineEnd": { "type": "integer", "minimum": 1 },
+          "sourceUrl": { "type": "string" },
+          "sourceUrls": { "type": "array", "items": { "type": "string" } },
+          "sourceRef": { "type": "string" },
+          "sourceRefs": { "type": "array", "items": { "type": "string" } },
+          "quote": { "type": "string" }
+        }
       },
       "maxItems": 24
     },

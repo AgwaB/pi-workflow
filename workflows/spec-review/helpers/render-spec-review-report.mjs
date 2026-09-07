@@ -6,7 +6,8 @@
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { partitionEvidenceComplete, partitionRequirementReconciliation } from "./spec-evidence-gate.mjs";
+import { auditPartitionEvidence } from "./spec-evidence-gate.mjs";
+import { rendererCandidateUniverse } from "./spec-requirement-source.mjs";
 
 const REPORT_VERDICTS = new Set([
 	"CONFORMS",
@@ -62,8 +63,14 @@ function tableCell(value) {
 
 function completionText(value, maxChars = 220) {
 	const sanitized = safeInline(value)
-		.replace(/(?:^|[\\/])\.pi[\\/]workflows(?:[\\/][^\s]*)?/gi, "[artifact omitted]")
-		.replace(/\b(?:final-report|audit|review|executive)\.md\b/gi, "[artifact omitted]")
+		.replace(
+			/(?:^|[\\/])\.pi[\\/]workflows(?:[\\/][^\s]*)?/gi,
+			"[artifact omitted]",
+		)
+		.replace(
+			/\b(?:final-report|audit|review|executive)\.md\b/gi,
+			"[artifact omitted]",
+		)
 		.replace(/\b(?:refs|control)\.json\b/gi, "[artifact omitted]")
 		.replace(/\brelated[\s-]+artifacts\b/gi, "[section title omitted]")
 		.replace(/\bworkflow[_-][\w.-]+\b/gi, "[run omitted]")
@@ -92,11 +99,7 @@ function fenced(value, info = "text") {
 		...[...String(text).matchAll(/`+/g)].map((match) => match[0].length),
 	);
 	const fence = "`".repeat(Math.max(3, longestRun + 1));
-	return [
-		`${fence}${info}`,
-		String(text),
-		fence,
-	];
+	return [`${fence}${info}`, String(text), fence];
 }
 
 function rowIdentity(row, prefix, index) {
@@ -105,16 +108,20 @@ function rowIdentity(row, prefix, index) {
 }
 
 function rowTitle(row, fallback) {
-	return cleanText(row?.title ?? row?.finding ?? row?.claim ?? row?.question ?? fallback);
+	return cleanText(
+		row?.title ?? row?.finding ?? row?.claim ?? row?.question ?? fallback,
+	);
 }
 
 function reportAvailable(report) {
 	return Boolean(
 		isRecord(report) &&
-		cleanText(report.summary) &&
-		REPORT_VERDICTS.has(cleanText(report.verdict)) &&
-		Array.isArray(report.risks) &&
-		cleanText(report.recommendedNextAction),
+			cleanText(report.summary) &&
+			REPORT_VERDICTS.has(cleanText(report.verdict)) &&
+			Array.isArray(report.ownerLedger) &&
+			isRecord(report.ownerLedgerReconciliation) &&
+			Array.isArray(report.risks) &&
+			cleanText(report.recommendedNextAction),
 	);
 }
 
@@ -151,16 +158,18 @@ function finalSourceCoverageComplete(context) {
 		owners.push(status);
 		taskOwners.set(taskId, owners);
 	}
-	if ([...taskOwners.values()].some((owners) => owners.length !== 1)) return false;
+	if ([...taskOwners.values()].some((owners) => owners.length !== 1))
+		return false;
 
 	const assigned = new Set();
 	for (const stageId of FINAL_SOURCE_STAGES) {
 		const matches = statuses
 			.map((status, index) => ({ status, index }))
-			.filter(({ status }) =>
-				canonicalFinalSourceStage(status.stageId, stageId) === stageId &&
-				canonicalFinalSourceStage(status.source, stageId) === stageId &&
-				canonicalFinalSourceStage(status.specId, stageId) === stageId,
+			.filter(
+				({ status }) =>
+					canonicalFinalSourceStage(status.stageId, stageId) === stageId &&
+					canonicalFinalSourceStage(status.source, stageId) === stageId &&
+					canonicalFinalSourceStage(status.specId, stageId) === stageId,
 			);
 		if (matches.length !== 1) return false;
 		const [{ status, index }] = matches;
@@ -195,47 +204,93 @@ function ownerKey(owner) {
 		owner?.placeholderSpecId,
 		owner?.batchId ?? "",
 		owner?.status,
-	].map((value) => String(value ?? "")).join("\u001f");
+	]
+		.map((value) => String(value ?? ""))
+		.join("\u001f");
 }
 
 function exactOwnerShape(owner) {
-	return isRecord(owner) &&
-		["source", "stageId", "specId", "taskId", "itemIdentity", "placeholderSpecId", "status"]
-			.every((field) => typeof owner[field] === "string" && owner[field].trim()) &&
+	return (
+		isRecord(owner) &&
+		[
+			"source",
+			"stageId",
+			"specId",
+			"taskId",
+			"itemIdentity",
+			"placeholderSpecId",
+			"status",
+		].every((field) => typeof owner[field] === "string" && owner[field].trim()) &&
 		owner.status === "completed" &&
-		(typeof owner.batchId === "undefined" || (typeof owner.batchId === "string" && owner.batchId.trim())) &&
-		owner.specId === `${owner.stageId}.${owner.batchId ?? owner.itemIdentity}` &&
+		(typeof owner.batchId === "undefined" ||
+			(typeof owner.batchId === "string" && owner.batchId.trim())) &&
+		owner.specId ===
+			`${owner.stageId}.${String(owner.batchId ?? owner.itemIdentity).toLowerCase()}` &&
 		owner.placeholderSpecId === `${owner.stageId}.item` &&
-		(owner.batchId === undefined || owner.itemIdentity === owner.batchId);
+		(owner.batchId === undefined || owner.itemIdentity === owner.batchId)
+	);
 }
 
 function verifierOwnerLedgerComplete(partition) {
 	const coverage = partition?.verifierCoverage;
-	if (!isRecord(coverage) || !Array.isArray(coverage.ownerLedger) || !Array.isArray(coverage.verifierRows) || !isRecord(coverage.ownerLedgerReconciliation)) return false;
+	if (
+		!isRecord(coverage) ||
+		!Array.isArray(coverage.ownerLedger) ||
+		!Array.isArray(coverage.verifierRows) ||
+		!isRecord(coverage.ownerLedgerReconciliation)
+	)
+		return false;
 	const owners = coverage.ownerLedger;
 	const rows = coverage.verifierRows;
 	const reconciliation = coverage.ownerLedgerReconciliation;
-	// An empty join is never a successful final render, including a forged 0/0
-	// reconciliation. A batch carrier may own several verifier rows, but it
-	// cannot make either side of the join vacuously complete.
+	// A zero-candidate review has a valid empty ownership join only when every
+	// cardinality field is genuinely zero. A non-empty candidate universe still
+	// requires positive owner/verifier reconciliation.
+	const emptyJoin =
+		owners.length === 0 &&
+		rows.length === 0 &&
+		coverage.candidateCount === 0 &&
+		coverage.uniqueCandidateCount === 0 &&
+		coverage.verifierCount === 0 &&
+		coverage.uniqueVerifierCount === 0 &&
+		reconciliation.ownerRowCount === 0 &&
+		reconciliation.verifierRowCount === 0 &&
+		Array.isArray(reconciliation.ownerIds) &&
+		reconciliation.ownerIds.length === 0 &&
+		Array.isArray(reconciliation.verifierIds) &&
+		reconciliation.verifierIds.length === 0;
+	if (emptyJoin)
+		return (
+			reconciliation.cardinalityPassed === true &&
+			reconciliation.passed === true &&
+			asArray(reconciliation.duplicateOwnerIds).length === 0 &&
+			asArray(reconciliation.duplicateVerifierIds).length === 0 &&
+			asArray(reconciliation.missingOwnerRows).length === 0 &&
+			asArray(reconciliation.orphanOwnerRows).length === 0 &&
+			asArray(reconciliation.statusMismatches).length === 0
+		);
 	if (owners.length < 1 || rows.length < 1) return false;
 	if (
 		reconciliation.ownerRowCount !== owners.length ||
 		reconciliation.verifierRowCount !== rows.length ||
 		reconciliation.cardinalityPassed !== true ||
 		reconciliation.passed !== true
-	) return false;
+	)
+		return false;
 	if (
 		!Array.isArray(reconciliation.ownerIds) ||
 		!Array.isArray(reconciliation.verifierIds) ||
 		reconciliation.ownerIds.some((id) => typeof id !== "string" || !id.trim()) ||
-		reconciliation.verifierIds.some((id) => typeof id !== "string" || !id.trim()) ||
+		reconciliation.verifierIds.some(
+			(id) => typeof id !== "string" || !id.trim(),
+		) ||
 		asArray(reconciliation.duplicateOwnerIds).length > 0 ||
 		asArray(reconciliation.duplicateVerifierIds).length > 0 ||
 		asArray(reconciliation.missingOwnerRows).length > 0 ||
 		asArray(reconciliation.orphanOwnerRows).length > 0 ||
 		asArray(reconciliation.statusMismatches).length > 0
-	) return false;
+	)
+		return false;
 	const ownerKeys = new Set();
 	const ownerIds = [];
 	for (const owner of owners) {
@@ -249,11 +304,18 @@ function verifierOwnerLedgerComplete(partition) {
 	const verifierIds = [];
 	for (const row of rows) {
 		const id = cleanText(row?.id);
-		if (!id || verifierIds.includes(id) || !exactOwnerShape(row?.owner) || !ownerKeys.has(ownerKey(row.owner))) return false;
+		if (
+			!id ||
+			verifierIds.includes(id) ||
+			!exactOwnerShape(row?.owner) ||
+			!ownerKeys.has(ownerKey(row.owner))
+		)
+			return false;
 		verifierIds.push(id);
 		// Singleton ownership is one-to-one. A batch carrier is the only
 		// permitted many-to-one owner relationship.
-		if (!row.owner.batchId && cleanText(row.owner.itemIdentity) !== id) return false;
+		if (!row.owner.batchId && cleanText(row.owner.itemIdentity) !== id)
+			return false;
 	}
 	return (
 		setEquals(new Set(reconciliation.ownerIds), new Set(ownerIds)) &&
@@ -263,11 +325,42 @@ function verifierOwnerLedgerComplete(partition) {
 	);
 }
 
-function verifierCoverageComplete(partition) {
+function candidateUniverseMatches(partition, runtimeUniverse) {
+	const declared = partition?.verifierCoverage?.candidateUniverse;
+	if (!isRecord(declared) || !isRecord(runtimeUniverse)) return false;
+	if (
+		declared.count !== runtimeUniverse.count ||
+		declared.uniqueCount !== runtimeUniverse.uniqueCount ||
+		stableStringify(declared.ids) !== stableStringify(runtimeUniverse.ids) ||
+		stableStringify(declared.duplicateIds) !== stableStringify(runtimeUniverse.duplicateIds) ||
+		declared.invalidRowCount !== runtimeUniverse.invalidRowCount ||
+		stableStringify(declared.proof) !== stableStringify(runtimeUniverse.proof)
+	)
+		return false;
+	const reconciliation = partition.candidateUniverseReconciliation ?? partition.verifierCoverage.candidateUniverseReconciliation;
+	return isRecord(reconciliation) && reconciliation.passed === true &&
+		stableStringify(reconciliation.runtimeIds) === stableStringify(runtimeUniverse.ids);
+}
+
+function needsHumanRowComplete(row) {
+	return isRecord(row) &&
+		typeof row.source === "string" && row.source.trim() &&
+		Array.isArray(row.requirementIds) &&
+		isRecord(row.origin) && typeof row.origin.kind === "string" && row.origin.kind.trim() &&
+		typeof row.reason === "string" && row.reason.trim() &&
+		typeof row.uncertainty === "string" && row.uncertainty.trim() &&
+		typeof row.finalClaim === "string" && row.finalClaim.trim() &&
+		typeof row.recommendedAction === "string" && row.recommendedAction.trim();
+}
+
+function verifierCoverageComplete(partition, runtimeUniverse) {
 	const coverage = partition?.verifierCoverage;
 	const counts = partition?.verdictCounts;
+	if (!candidateUniverseMatches(partition, runtimeUniverse)) return false;
+	if (asArray(partition?.needsHuman).some((row) => !needsHumanRowComplete(row))) return false;
 	if (!verifierOwnerLedgerComplete(partition)) return false;
-	if (!isRecord(coverage) || !isRecord(counts) || coverage.complete !== true) return false;
+	if (!isRecord(coverage) || !isRecord(counts) || coverage.complete !== true)
+		return false;
 	const candidateCount = coverage.candidateCount;
 	const uniqueCandidateCount = coverage.uniqueCandidateCount;
 	const verifierCount = coverage.verifierCount;
@@ -287,7 +380,9 @@ function verifierCoverageComplete(partition) {
 	const missingRows = asArray(partition.missingVerifications)
 		.map((row) => cleanText(row?.id))
 		.filter(Boolean);
-	const orphanIds = asArray(coverage.orphanVerifierIds).map(cleanText).filter(Boolean);
+	const orphanIds = asArray(coverage.orphanVerifierIds)
+		.map(cleanText)
+		.filter(Boolean);
 	const orphanRows = asArray(partition.orphanVerifierResults)
 		.map((row) => cleanText(row?.id))
 		.filter(Boolean);
@@ -321,6 +416,7 @@ function verifierCoverageComplete(partition) {
 		"invalid-verdict",
 		"missing-verification",
 		"batch-integrity",
+		"verifier-integrity",
 	]);
 	const candidateNeedsHumanRows = asArray(partition.needsHuman).filter((row) =>
 		candidateNeedsHumanSources.has(cleanText(row?.source)),
@@ -347,8 +443,10 @@ function verifierCoverageComplete(partition) {
 		new Set(verifierIds).size !== verifierIds.length ||
 		candidateIds.length !== uniqueCandidateCount ||
 		verifierIds.length !== uniqueVerifierCount ||
-		!setEquals(new Set(candidateIds), new Set(verifierIds))
-	) return false;
+		!setEquals(new Set(candidateIds), new Set(verifierIds)) ||
+		!setEquals(new Set(candidateIds), new Set(runtimeUniverse.ids))
+	)
+		return false;
 	return (
 		candidateCount === uniqueCandidateCount &&
 		verifierCount === verifierRows.length &&
@@ -395,7 +493,8 @@ function requiredVerdict(
 	verifierCoverageIsComplete,
 	requirementReconciliation,
 ) {
-	if (!sourceCoverageComplete || !requirementReconciliation.complete) return "INCONCLUSIVE";
+	if (!sourceCoverageComplete || !requirementReconciliation.complete)
+		return "INCONCLUSIVE";
 	const coverage = partition?.verifierCoverage ?? {};
 	const integrityRows =
 		asArray(partition?.missingVerifications).length +
@@ -418,14 +517,18 @@ function renderEvidence(evidence) {
 	const rows = asArray(evidence);
 	if (rows.length === 0) return ["Evidence: _not provided_", ""];
 	const out = ["Evidence:", ""];
-	for (const row of rows) out.push(...fenced(row, isRecord(row) ? "json" : "text"), "");
+	for (const row of rows)
+		out.push(...fenced(row, isRecord(row) ? "json" : "text"), "");
 	return out;
 }
 
 function renderFinalFindings(rows) {
 	const out = ["## Actionable conformance gaps", ""];
 	if (rows.length === 0) {
-		out.push("No actionable KEEP or WEAKEN finding is present in the canonical ledger.", "");
+		out.push(
+			"No actionable KEEP or WEAKEN finding is present in the canonical ledger.",
+			"",
+		);
 		return out;
 	}
 	rows.forEach((row, index) => {
@@ -455,21 +558,41 @@ function renderDispositionRows(heading, rows, prefix, emptyText) {
 			"",
 			`- Source/disposition: ${safeInline(row?.source ?? row?.verdict ?? prefix)}`,
 			`- Reason: ${safeInline(row?.reason ?? row?.claim ?? row?.message ?? "not specified")}`,
+			...(Array.isArray(row?.requirementIds) && row.requirementIds.length > 0
+				? [`- Requirements: ${row.requirementIds.map(safeInline).join(", ")}`]
+				: []),
+			...(row?.uncertainty
+				? [`- Uncertainty: ${safeInline(row.uncertainty)}`]
+				: []),
+			...(row?.recommendedAction
+				? [`- Recommended action: ${safeInline(row.recommendedAction)}`]
+				: []),
 			"",
 		);
-		if (asArray(row?.evidence).length > 0) out.push(...renderEvidence(row.evidence));
+		if (asArray(row?.evidence).length > 0)
+			out.push(...renderEvidence(row.evidence));
 		if (asArray(row?.counterEvidence).length > 0) {
 			out.push("Counter-evidence:", "");
 			for (const evidence of row.counterEvidence)
 				out.push(...fenced(evidence, isRecord(evidence) ? "json" : "text"), "");
 		}
+		if (row?.verifierResult)
+			out.push("Verifier record:", "", ...fenced(row.verifierResult, "json"), "");
+		if (row?.originalCandidate)
+			out.push(
+				"Original candidate:",
+				"",
+				...fenced(row.originalCandidate, "json"),
+				"",
+			);
 	});
 	return out;
 }
 
 function renderRequirementCoverage(rows) {
 	const out = ["## Requirement coverage", ""];
-	if (rows.length === 0) return [...out, "No requirement-coverage rows were recorded.", ""];
+	if (rows.length === 0)
+		return [...out, "No requirement-coverage rows were recorded.", ""];
 	out.push("| Requirement | Status | Notes |", "|---|---|---|");
 	for (const row of rows) {
 		out.push(
@@ -480,9 +603,41 @@ function renderRequirementCoverage(rows) {
 	return out;
 }
 
+function renderScopeLimitations(rows) {
+	const out = ["## Nonblocking scope limitations", ""];
+	const limitations = asArray(rows).filter(
+		(row) =>
+			isRecord(row) &&
+			row.kind === "NONBLOCKING" &&
+			typeof row.text === "string" &&
+			row.text.trim(),
+	);
+	if (limitations.length === 0)
+		return [...out, "No nonblocking scope limitations were recorded.", ""];
+	for (const row of limitations)
+		out.push(`- ${safeInline(row.text)}`);
+	out.push("");
+	return out;
+}
+
+function renderNarrativeRisks(rows) {
+	const out = ["## Narrative risks and limitations", ""];
+	if (rows.length === 0)
+		return [...out, "No narrative risks were reported.", ""];
+	for (const risk of rows) out.push(`- ${safeInline(risk)}`);
+	out.push("");
+	return out;
+}
+
 function renderNoIssueNotes(rows) {
-	const out = ["## Preliminary no-issue observations (unverified)", "", "These model-authored notes are not independent conformance evidence.", ""];
-	if (rows.length === 0) return [...out, "No no-issue observations were recorded.", ""];
+	const out = [
+		"## Preliminary no-issue observations (unverified)",
+		"",
+		"These model-authored notes are not independent conformance evidence.",
+		"",
+	];
+	if (rows.length === 0)
+		return [...out, "No no-issue observations were recorded.", ""];
 	for (const row of rows) {
 		const text = typeof row === "string" ? row : stableStringify(row);
 		out.push(`- ${safeInline(text)}`);
@@ -514,25 +669,48 @@ function renderVerifierIntegrity(partition) {
 	}
 	if (asArray(partition.invalidVerifierResults).length > 0) {
 		out.push("", "Invalid verifier details:", "");
-		for (const row of partition.invalidVerifierResults) out.push(...fenced(row, "json"), "");
+		for (const row of partition.invalidVerifierResults)
+			out.push(...fenced(row, "json"), "");
 	}
 	return out;
 }
 
-function limitationRows({ sourceCoverageComplete, coverageComplete, duplicates, evidenceComplete, reportPresent, verdictConsistent }) {
+function limitationRows({
+	sourceCoverageComplete,
+	coverageComplete,
+	duplicates,
+	evidenceComplete,
+	reportPresent,
+	verdictConsistent,
+	reportOwnerLedgerConsistent,
+}) {
 	const rows = [];
 	if (!sourceCoverageComplete)
-		rows.push("Source lifecycle metadata is missing, partial, or inconsistent; complete conformance cannot be claimed.");
+		rows.push(
+			"Source lifecycle metadata is missing, partial, or inconsistent; complete conformance cannot be claimed.",
+		);
 	if (!coverageComplete)
-		rows.push("Candidate-to-verifier coverage or verifier integrity is incomplete or inconsistent.");
+		rows.push(
+			"Candidate-to-verifier coverage or verifier integrity is incomplete or inconsistent.",
+		);
 	if (duplicates.length > 0)
-		rows.push(`Canonical disposition IDs are duplicated: ${duplicates.join(", ")}.`);
+		rows.push(
+			`Canonical disposition IDs are duplicated: ${duplicates.join(", ")}.`,
+		);
 	if (!evidenceComplete)
-		rows.push("Local byte evidence or exact extracted-requirement reconciliation is incomplete, changed, or unverified; legacy locators cannot establish support or justify removal.");
+		rows.push(
+			"Local byte evidence or exact extracted-requirement reconciliation is incomplete, changed, or unverified; legacy locators cannot establish support or justify removal.",
+		);
 	if (!reportPresent)
 		rows.push("The narrative report synthesis is absent or malformed.");
+	else if (!reportOwnerLedgerConsistent)
+		rows.push(
+			"The narrative report owner ledger or reconciliation does not match the canonical partition ledger.",
+		);
 	else if (!verdictConsistent)
-		rows.push("The narrative report verdict contradicts the deterministic ledger verdict.");
+		rows.push(
+			"The narrative report verdict contradicts the deterministic ledger verdict.",
+		);
 	return rows;
 }
 
@@ -551,7 +729,8 @@ function renderCompletionSummary({ verdict, report, partition, limitations }) {
 		"## Key gaps and actions",
 		"",
 	];
-	if (keyRows.length === 0) out.push("- No actionable or unresolved finding disposition remains.");
+	if (keyRows.length === 0)
+		out.push("- No actionable or unresolved finding disposition remains.");
 	else {
 		for (const { label, row } of keyRows) {
 			const action = cleanText(row?.recommendedAction ?? row?.reason ?? "");
@@ -559,9 +738,14 @@ function renderCompletionSummary({ verdict, report, partition, limitations }) {
 				`- **${safeInline(label)}:** ${completionText(rowTitle(row, "Unresolved item"), 220)}${action ? ` — Action: ${completionText(action, 240)}` : ""}`,
 			);
 		}
-		out.push(`- **Next action:** ${completionText(report.recommendedNextAction, 350)}`);
+		out.push(
+			`- **Next action:** ${completionText(report.recommendedNextAction, 350)}`,
+		);
 		const omitted = finalFindings.length + needsHuman.length - keyRows.length;
-		if (omitted > 0) out.push(`- ${omitted} additional disposition row(s) are covered in the full report.`);
+		if (omitted > 0)
+			out.push(
+				`- ${omitted} additional disposition row(s) are covered in the full report.`,
+			);
 	}
 	out.push(
 		"",
@@ -574,13 +758,30 @@ function renderCompletionSummary({ verdict, report, partition, limitations }) {
 		"",
 	);
 	const reportRisks = asArray(report.risks).map(cleanText).filter(Boolean);
-	const combined = [...limitations, ...reportRisks];
-	if (combined.length === 0) out.push("- No source-coverage or renderer-integrity limitation was recorded.");
-	else for (const row of combined.slice(0, 6)) out.push(`- ${completionText(row, 220)}`);
-	return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+	const scopeLimitations = asArray(partition.scopeLimitations)
+		.filter((row) => row?.kind === "NONBLOCKING" && cleanText(row?.text))
+		.map((row) => `NONBLOCKING scope limitation: ${cleanText(row.text)}`);
+	const combined = [...limitations, ...scopeLimitations, ...reportRisks];
+	if (combined.length === 0)
+		out.push(
+			"- No source-coverage or renderer-integrity limitation was recorded.",
+		);
+	else
+		for (const row of combined.slice(0, 6))
+			out.push(`- ${completionText(row, 220)}`);
+	return out
+		.join("\n")
+		.replace(/\n{3,}/g, "\n\n")
+		.trim();
 }
 
-function renderMarkdown({ verdict, report, partition, completionSummaryMarkdown, limitations }) {
+function renderMarkdown({
+	verdict,
+	report,
+	partition,
+	completionSummaryMarkdown,
+	limitations,
+}) {
 	const executive = completionSummaryMarkdown
 		? completionSummaryMarkdown.replace(/^## /gm, "### ")
 		: `### Core conclusion\n\nRenderer status is not passed. The effective deterministic verdict is **${verdict}**; inspect Evidence and limitations before relying on this report.`;
@@ -598,6 +799,7 @@ function renderMarkdown({ verdict, report, partition, completionSummaryMarkdown,
 		"",
 		...renderFinalFindings(asArray(partition.finalFindings)),
 		...renderRequirementCoverage(asArray(partition.requirementCoverage)),
+		...renderScopeLimitations(partition.scopeLimitations),
 		...renderDispositionRows(
 			"Needs human review",
 			asArray(partition.needsHuman),
@@ -611,19 +813,30 @@ function renderMarkdown({ verdict, report, partition, completionSummaryMarkdown,
 			"No dropped finding is present in the canonical ledger.",
 		),
 		...renderNoIssueNotes(asArray(partition.noIssueNotes)),
+		...renderNarrativeRisks(asArray(report?.risks)),
 		...renderVerifierIntegrity(partition),
 		"## Byte evidence audit",
 		"",
-		...fenced(partition.evidenceGate ?? { complete: false, reason: "legacy partition has no byte gate" }, "json"),
+		...fenced(
+			partition.evidenceGate ?? {
+				complete: false,
+				reason: "legacy partition has no byte gate",
+			},
+			"json",
+		),
 		"",
 		"## Recommended next action",
 		"",
-		safeInline(report?.recommendedNextAction ?? "Resolve renderer blockers, then rerun the spec review."),
+		safeInline(
+			report?.recommendedNextAction ??
+				"Resolve renderer blockers, then rerun the spec review.",
+		),
 		"",
 		"## Evidence and limitations",
 		"",
 		`- Partition source lifecycle: ${partitionSourceCoverageComplete(partition) ? "complete" : "partial, missing, or inconsistent"}.`,
 		`- Canonical counts: ${asArray(partition.finalFindings).length} actionable, ${asArray(partition.needsHuman).length} needs-human, ${asArray(partition.droppedFindings).length} dropped.`,
+		`- Test execution attested: ${partition.testExecutionAttested === false ? "false (read-only inspection)" : "not attested"}.`,
 		"- The deterministic partition ledger controls findings, dispositions, counts, and the effective verdict; narrative synthesis cannot override it.",
 		...(limitations.length > 0
 			? limitations.map((row) => `- ${safeInline(row)}`)
@@ -635,7 +848,10 @@ function renderMarkdown({ verdict, report, partition, completionSummaryMarkdown,
 		"- [Structured source references](refs.json)",
 		"- [Canonical disposition ledger](source-ledger.json)",
 	];
-	return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+	return lines
+		.join("\n")
+		.replace(/\n{3,}/g, "\n\n")
+		.trim();
 }
 
 function blockedResult(reason) {
@@ -648,6 +864,8 @@ function blockedResult(reason) {
 		markdown: "",
 		verdict: "INCONCLUSIVE",
 		findingSummary: { final: 0, needsHuman: 0, dropped: 0 },
+		scopeLimitations: [],
+		testExecutionAttested: false,
 		renderedFindingIds: [],
 		renderedNeedsHumanIds: [],
 		renderedDroppedFindingIds: [],
@@ -667,7 +885,10 @@ function blockedResult(reason) {
 	};
 }
 
-export default async function renderSpecReviewReport({ sources, context = {} }) {
+export default async function renderSpecReviewReport({
+	sources,
+	context = {},
+}) {
 	let partition;
 	let report;
 	try {
@@ -676,38 +897,64 @@ export default async function renderSpecReviewReport({ sources, context = {} }) 
 	} catch (error) {
 		return blockedResult(error instanceof Error ? error.message : String(error));
 	}
-	if (!isRecord(partition)) return blockedResult("missing partition-findings control source");
+	if (!isRecord(partition))
+		return blockedResult("missing partition-findings control source");
 	const reportPresent = reportAvailable(report);
 	const finalFindings = asArray(partition.finalFindings);
 	const needsHuman = asArray(partition.needsHuman);
 	const droppedFindings = asArray(partition.droppedFindings);
-	const renderedFindingIds = finalFindings.map((row, index) => rowIdentity(row, "finding", index));
-	const renderedNeedsHumanIds = needsHuman.map((row, index) => rowIdentity(row, "needs-human", index));
-	const renderedDroppedFindingIds = droppedFindings.map((row, index) => rowIdentity(row, "dropped", index));
+	const renderedFindingIds = finalFindings.map((row, index) =>
+		rowIdentity(row, "finding", index),
+	);
+	const renderedNeedsHumanIds = needsHuman.map((row, index) =>
+		rowIdentity(row, "needs-human", index),
+	);
+	const renderedDroppedFindingIds = droppedFindings.map((row, index) =>
+		rowIdentity(row, "dropped", index),
+	);
 	const missingRequiredIds = [
 		...finalFindings.filter((row) => !cleanText(row?.id)),
 		...droppedFindings.filter((row) => !cleanText(row?.id)),
 	].length;
-	const duplicates = duplicateCanonicalIds(finalFindings, needsHuman, droppedFindings);
+	const duplicates = duplicateCanonicalIds(
+		finalFindings,
+		needsHuman,
+		droppedFindings,
+	);
 	const renderedAllCanonicalRows =
 		missingRequiredIds === 0 &&
 		renderedFindingIds.length === finalFindings.length &&
 		renderedNeedsHumanIds.length === needsHuman.length &&
 		renderedDroppedFindingIds.length === droppedFindings.length;
 	const sourceCoverageComplete =
-		partitionSourceCoverageComplete(partition) && finalSourceCoverageComplete(context);
+		partitionSourceCoverageComplete(partition) &&
+		finalSourceCoverageComplete(context);
 	const ownerLedgerReconciliationPassed = verifierOwnerLedgerComplete(partition);
-	const coverageComplete = verifierCoverageComplete(partition);
-	const evidenceComplete = await partitionEvidenceComplete(partition, context);
-	const requirementReconciliation = await partitionRequirementReconciliation(partition, context);
+	const runtimeCandidateUniverse = await rendererCandidateUniverse(context);
+	const coverageComplete = verifierCoverageComplete(partition, runtimeCandidateUniverse);
+	const evidenceAudit = await auditPartitionEvidence(partition, context);
+	const evidenceComplete = evidenceAudit.evidenceComplete;
+	const requirementReconciliation = evidenceAudit.requirementReconciliation;
+	const reportOwnerLedgerConsistent =
+		reportPresent &&
+		stableStringify(report.ownerLedger) ===
+			stableStringify(partition.verifierCoverage?.ownerLedger) &&
+		stableStringify(report.ownerLedgerReconciliation) ===
+			stableStringify(partition.verifierCoverage?.ownerLedgerReconciliation);
 	const ledgerVerdict = requiredVerdict(
 		partition,
 		sourceCoverageComplete,
 		coverageComplete,
 		requirementReconciliation,
 	);
-	const verdict = !evidenceComplete && ledgerVerdict === "CONFORMS" ? "INCONCLUSIVE" : ledgerVerdict;
-	const verdictConsistent = reportPresent && cleanText(report.verdict) === verdict;
+	const verdict =
+		!evidenceComplete && ledgerVerdict === "CONFORMS"
+			? "INCONCLUSIVE"
+			: ledgerVerdict;
+	const verdictConsistent =
+		reportPresent &&
+		cleanText(report.verdict) === verdict &&
+		reportOwnerLedgerConsistent;
 	const limitations = limitationRows({
 		sourceCoverageComplete,
 		coverageComplete,
@@ -715,6 +962,7 @@ export default async function renderSpecReviewReport({ sources, context = {} }) 
 		evidenceComplete,
 		reportPresent,
 		verdictConsistent,
+		reportOwnerLedgerConsistent,
 	});
 	const passed =
 		reportPresent &&
@@ -745,12 +993,15 @@ export default async function renderSpecReviewReport({ sources, context = {} }) 
 		renderedFindingIds,
 		renderedNeedsHumanIds,
 		renderedDroppedFindingIds,
+		scopeLimitations: asArray(partition.scopeLimitations),
+		testExecutionAttested: false,
 		passed,
 		markdown,
 	};
 
 	let sidecarPath;
 	let ledgerSidecarPath;
+	let sidecarFailure = null;
 	try {
 		if (context.cwd && context.runId && context.taskId) {
 			const taskDir = join(
@@ -765,25 +1016,33 @@ export default async function renderSpecReviewReport({ sources, context = {} }) 
 			await writeFile(join(taskDir, "final-report.md"), `${markdown}\n`, "utf8");
 			await writeFile(
 				join(taskDir, "source-ledger.json"),
-				`${stableStringify({ schema: "spec-review-source-ledger-v1", partition })}\n`,
+				`${stableStringify({ schema: "spec-review-source-ledger-v1", partition, report: report ?? null })}\n`,
 				"utf8",
 			);
 			sidecarPath = "final-report.md";
 			ledgerSidecarPath = "source-ledger.json";
 		}
-	} catch {
-		// Sidecars are non-authoritative; control remains deterministic.
+	} catch (error) {
+		// Sidecar publication is part of the documented delivery contract.
+		sidecarFailure = `sidecar publication failed (${error?.code ?? "unknown_error"})`;
 	}
+	const effectivePassed = passed && !sidecarFailure;
+	const effectiveBlockers = [
+		...blockers,
+		...(sidecarFailure ? [sidecarFailure] : []),
+	].slice(0, 32);
 
 	return {
 		schema: "spec-review-render-v1",
 		digest: `sha256:${createHash("sha256").update(stableStringify(controlForDigest)).digest("hex")}`,
-		status: passed ? "passed" : "failed",
-		...(blockers.length > 0 ? { blockers } : {}),
-		completionSummaryMarkdown,
+		status: effectivePassed ? "passed" : "failed",
+		...(effectiveBlockers.length > 0 ? { blockers: effectiveBlockers } : {}),
+		completionSummaryMarkdown: effectivePassed ? completionSummaryMarkdown : "",
 		markdown,
 		verdict,
 		findingSummary: controlForDigest.findingSummary,
+		scopeLimitations: asArray(partition.scopeLimitations),
+		testExecutionAttested: false,
 		renderedFindingIds,
 		renderedNeedsHumanIds,
 		renderedDroppedFindingIds,
@@ -801,7 +1060,7 @@ export default async function renderSpecReviewReport({ sources, context = {} }) 
 			renderedAllCanonicalRows,
 			duplicateCanonicalIds: duplicates,
 			actionableEvidenceComplete: evidenceComplete,
-			passed,
+			passed: effectivePassed,
 		},
 		...(sidecarPath ? { sidecarPath } : {}),
 		...(ledgerSidecarPath ? { ledgerSidecarPath } : {}),

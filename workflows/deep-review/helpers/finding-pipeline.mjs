@@ -33,8 +33,10 @@ const SEVERITY_ALIASES = {
 };
 
 function canonicalSeverity(value) {
-	const raw = String(value ?? "").trim().toLowerCase();
-	return SEVERITIES.includes(raw) ? raw : SEVERITY_ALIASES[raw] ?? "unknown";
+	const raw = String(value ?? "")
+		.trim()
+		.toLowerCase();
+	return SEVERITIES.includes(raw) ? raw : (SEVERITY_ALIASES[raw] ?? "unknown");
 }
 
 function conservativeSeverity(left, right) {
@@ -88,7 +90,7 @@ function normalizeText(value) {
 
 // Extract the most file-like token from evidence/title so dedup keys do not
 // depend on prose phrasing.
-function fileKeyOf(finding) {
+function _fileKeyOf(finding) {
 	const candidates = [finding.file, finding.evidence, finding.title]
 		.map((value) => String(value ?? ""))
 		.join(" ");
@@ -148,7 +150,7 @@ function tokenOverlap(a, b) {
 	return shared / Math.min(a.size, b.size);
 }
 
-const DUPLICATE_OVERLAP = 0.7;
+const _DUPLICATE_OVERLAP = 0.7;
 
 // Identity evidence (file/line/symbol) must survive the LLM reduce stage
 // unchanged, so it is carried as structured `locations` rather than left in
@@ -251,18 +253,20 @@ function verifierEvidenceRowsOf(value) {
 			continue;
 		}
 		const file = raw.file.trim();
-		const quote = raw.quote.trim();
+		// Evidence quotes are byte-facing contract values. Do not trim or
+		// normalize them: leading/trailing spaces and CR characters are part of
+		// the reviewed source bytes.
+		const quote = raw.quote;
 		const line = raw.line;
 		const lineEnd = raw.lineEnd;
 		const symbol = raw.symbol?.trim() ?? "";
 		if (!file || quote.length < 8 || !Number.isInteger(line) || line < 1) {
-			issues.push(`verifier evidence row ${index} had invalid file, line, or quote`);
+			issues.push(
+				`verifier evidence row ${index} had invalid file, line, or quote`,
+			);
 			continue;
 		}
-		if (
-			lineEnd !== undefined &&
-			(!Number.isInteger(lineEnd) || lineEnd < line)
-		) {
+		if (lineEnd !== undefined && (!Number.isInteger(lineEnd) || lineEnd < line)) {
 			issues.push(`verifier evidence row ${index} had an invalid lineEnd`);
 			continue;
 		}
@@ -278,7 +282,8 @@ function verifierEvidenceRowsOf(value) {
 }
 
 function verifierEvidenceGroundingIssues(rows, context = {}) {
-	if (rows.length === 0) return ["verifier supplied no structured evidence rows"];
+	if (rows.length === 0)
+		return ["verifier supplied no structured evidence rows"];
 	const issues = [];
 	const repoRoot = repoRootFromContext(context);
 	for (const row of rows) {
@@ -287,23 +292,22 @@ function verifierEvidenceGroundingIssues(rows, context = {}) {
 			repoRoot,
 			MAX_SOURCE_COVERAGE_FILE_BYTES,
 		);
-		if (!source.exists || source.tooLarge) {
+		if (!source.exists || source.tooLarge || source.invalidUtf8) {
 			issues.push(`${row.file}:${row.line} could not be read safely`);
 			continue;
 		}
-		const lines = source.text.split(/\r?\n/u);
+		// Split only on LF so CRLF evidence remains byte-distinct from LF.
+		const lines = source.text.split("\n");
 		const lineEnd = row.lineEnd ?? row.line;
 		if (row.line > lines.length || lineEnd > lines.length) {
 			issues.push(`${row.file}:${row.line}-${lineEnd} is outside the file`);
 			continue;
 		}
 		const scopedText = lines.slice(row.line - 1, lineEnd).join("\n");
-		if (
-			!scopedText
-				.replace(/\r\n/gu, "\n")
-				.includes(row.quote.replace(/\r\n/gu, "\n"))
-		) {
-			issues.push(`${row.file}:${row.line}-${lineEnd} did not contain the exact verifier quote`);
+		if (!scopedText.includes(row.quote)) {
+			issues.push(
+				`${row.file}:${row.line}-${lineEnd} did not contain the exact verifier quote`,
+			);
 		}
 	}
 	return issues;
@@ -327,16 +331,14 @@ function slimSourceStatus(status) {
 		...(status.extractionArtifact
 			? { extractionArtifact: String(status.extractionArtifact) }
 			: {}),
-		...(status.itemIdentity !== undefined
-			? { itemIdentity: String(status.itemIdentity) }
-			: {}),
+		...(status.itemIdentity === undefined
+			? {}
+			: { itemIdentity: String(status.itemIdentity) }),
 		...(status.placeholderSpecId
 			? { placeholderSpecId: String(status.placeholderSpecId) }
 			: {}),
 		status: String(status.status ?? "unknown"),
-		...(status.statusDetail
-			? { statusDetail: String(status.statusDetail) }
-			: {}),
+		...(status.statusDetail ? { statusDetail: String(status.statusDetail) } : {}),
 		...(status.errorType ? { errorType: String(status.errorType) } : {}),
 		...(status.lastMessage
 			? { lastMessage: String(status.lastMessage).slice(0, 500) }
@@ -399,8 +401,7 @@ function mergeSourceStatusSummary(directStatusSummary, partialFailures) {
 		),
 	);
 	const transitiveOnlyFailures = asObjects(partialFailures).filter(
-		(status) =>
-			!directFailureKeys.has(sourceStatusKey(slimSourceStatus(status))),
+		(status) => !directFailureKeys.has(sourceStatusKey(slimSourceStatus(status))),
 	);
 	return {
 		total:
@@ -446,13 +447,19 @@ function evidenceQuotesOf(finding) {
 	]);
 }
 
-function canonicalIdentityText(value) {
+function _canonicalIdentityText(value) {
 	return String(value ?? "")
 		.normalize("NFKC")
 		.replace(/\\r\\n?/g, "\\n")
 		.replace(/\\s+/g, " ")
 		.trim();
 }
+
+// These legacy identity helpers remain available to copied historical bundles;
+// the shipped path deliberately does not use them as dedup authority.
+void _fileKeyOf;
+void _DUPLICATE_OVERLAP;
+void _canonicalIdentityText;
 
 // Pull "line 46", "lines 46-90", "L46", or ":46" references out of evidence prose
 // so a reviewer that only mentioned the line in text still yields a structured
@@ -506,10 +513,8 @@ function isProductionLocationFile(file) {
 	const normalized = canonicalFilePath(file);
 	return Boolean(
 		normalized &&
-		!isTestPath(normalized) &&
-		!/(^|\/)(?:docs?|examples?|fixtures?|\.harness)(?:\/|$)/i.test(
-			normalized,
-		),
+			!isTestPath(normalized) &&
+			!/(^|\/)(?:docs?|examples?|fixtures?|\.harness)(?:\/|$)/i.test(normalized),
 	);
 }
 
@@ -554,9 +559,11 @@ function normalizeFinding(finding, index, provenance = {}) {
 		...(typeof finding.supportClassification === "string"
 			? { supportClassification: finding.supportClassification.trim() }
 			: {}),
-		...(typeof finding.supportingFindingId === "string" && finding.supportingFindingId.trim()
+		...(typeof finding.supportingFindingId === "string" &&
+		finding.supportingFindingId.trim()
 			? { supportingFindingId: finding.supportingFindingId.trim() }
 			: {}),
+		...(typeof finding.claim === "string" ? { claim: finding.claim } : {}),
 		severity: canonicalSeverity(finding.severity),
 		originalSeverity: String(finding.severity ?? "unknown"),
 		title: String(finding.title ?? "").trim(),
@@ -564,6 +571,7 @@ function normalizeFinding(finding, index, provenance = {}) {
 		locations: locationsOf({ ...finding, file: canonicalFilePath(finding.file) }),
 		evidence: finding.evidence ?? "",
 		evidenceQuotes: evidenceQuotesOf(finding),
+		reviewerEvidenceQuotes: evidenceQuotesOf(finding),
 		rationale: finding.rationale ?? "",
 		recommendedAction: contractText(finding.recommendedAction),
 		confidence: finding.confidence ?? "unknown",
@@ -602,7 +610,7 @@ function concreteDedupIdentity(a, b) {
 				location.line > 0 &&
 				Number.isInteger(location.lineEnd) &&
 				location.lineEnd >= location.line,
-			);
+		);
 	const rangesB = locationsOf(b)
 		.map((location) => ({
 			file: canonicalFilePath(location.file),
@@ -616,7 +624,7 @@ function concreteDedupIdentity(a, b) {
 				location.line > 0 &&
 				Number.isInteger(location.lineEnd) &&
 				location.lineEnd >= location.line,
-			);
+		);
 	const overlaps = rangesA.some((left) =>
 		rangesB.some(
 			(right) =>
@@ -626,22 +634,22 @@ function concreteDedupIdentity(a, b) {
 		),
 	);
 	if (!overlaps) return false;
-	const titleA = canonicalIdentityText(a.title);
-	const titleB = canonicalIdentityText(b.title);
+	const titleA = authorityTitle(a.title);
+	const titleB = authorityTitle(b.title);
 	const exactTitle = Boolean(titleA && titleA === titleB);
-	const exactQuote = evidenceQuotesOf(a).some((left) => {
-		const canonicalLeft = canonicalIdentityText(left);
-		return Boolean(
-			canonicalLeft &&
-			evidenceQuotesOf(b).some(
-				(right) => canonicalLeft === canonicalIdentityText(right),
-			),
-		);
-	});
-	// A fuzzy title or prose fragment is never an identity key. Exact title or
-	// explicit exact-quote corroboration is required after concrete location
-	// overlap; otherwise retain both findings and their provenance.
-	return exactTitle || exactQuote;
+	const exactQuote = evidenceQuotesOf(a).some((left) =>
+		evidenceQuotesOf(b).some((right) => left === right),
+	);
+	const explicitRootA = String(a.explicitRootCauseId ?? "").trim();
+	const explicitRootB = String(b.explicitRootCauseId ?? "").trim();
+	// rootCauseId is reviewer-produced metadata, not a globally authoritative
+	// runtime identity. It can corroborate a duplicate only when both producers
+	// supplied the same id and the claim-bearing payload also agrees. In
+	// particular, contradictory roots must never fall through to title/quote
+	// matching, and equal guessed roots must not erase differing causal claims.
+	if (!explicitRootA || !explicitRootB || explicitRootA !== explicitRootB)
+		return false;
+	return exactTitle && exactQuote && sameCausalPayload(a, b);
 }
 
 function ensureUniqueFindingIds(findings) {
@@ -676,8 +684,12 @@ function mergeDedupFinding(primary, duplicate) {
 		...quoteStrings(primary.counterEvidence),
 		...quoteStrings(duplicate.counterEvidence),
 	]);
-	primary.rationale = dedupeStrings([primary.rationale, duplicate.rationale]).join(" ");
-	primary.recommendedAction = primary.recommendedAction || duplicate.recommendedAction;
+	primary.rationale = dedupeStrings([
+		primary.rationale,
+		duplicate.rationale,
+	]).join(" ");
+	primary.recommendedAction =
+		primary.recommendedAction || duplicate.recommendedAction;
 	primary.sourceCoverageComplete = Boolean(
 		primary.sourceCoverageComplete && duplicate.sourceCoverageComplete,
 	);
@@ -685,10 +697,12 @@ function mergeDedupFinding(primary, duplicate) {
 		...(primary.sourceCoverageIssuePaths ?? []),
 		...(duplicate.sourceCoverageIssuePaths ?? []),
 	]);
-	if (duplicate.reviewerIdentity) primary.reviewerIdentities = dedupeOwners([
-		...(primary.reviewerIdentities ?? (primary.reviewerIdentity ? [primary.reviewerIdentity] : [])),
-		duplicate.reviewerIdentity,
-	]);
+	if (duplicate.reviewerIdentity)
+		primary.reviewerIdentities = dedupeOwners([
+			...(primary.reviewerIdentities ??
+				(primary.reviewerIdentity ? [primary.reviewerIdentity] : [])),
+			duplicate.reviewerIdentity,
+		]);
 	primary.severity = conservativeSeverity(primary.severity, duplicate.severity);
 	const existingIds = new Set([
 		primary.findingId,
@@ -847,16 +861,19 @@ function exactSourceQuoteIssue(row, path, context) {
 		pointer.file,
 		repoRoot,
 		MAX_SOURCE_COVERAGE_FILE_BYTES,
+		{ allowInvalidUtf8: row.status === "ocr-extracted" },
 	);
 	if (!source.exists) return "required source file is unavailable";
 	if (row.status === "ocr-extracted") {
+		// Binary originals are allowed for OCR, but a line-bounded source pointer
+		// cannot be honestly attested without a valid UTF-8 text representation.
+		if (pointer.line !== undefined && source.invalidUtf8)
+			return "required OCR source range is not valid UTF-8";
 		if (source.tooLarge) return "required OCR source is too large to bind";
 		if (!row.artifact) return "OCR artifact missing";
-		if (row.artifact !== row.artifact.trim()) return "OCR artifact path is invalid";
-		const artifactPathIssue = trustedOcrArtifactPathIssue(
-			row.artifact,
-			repoRoot,
-		);
+		if (row.artifact !== row.artifact.trim())
+			return "OCR artifact path is invalid";
+		const artifactPathIssue = trustedOcrArtifactPathIssue(row.artifact, repoRoot);
 		if (artifactPathIssue) return artifactPathIssue;
 		const artifact = readRepoText(
 			row.artifact,
@@ -868,27 +885,31 @@ function exactSourceQuoteIssue(row, path, context) {
 		}
 		const artifactTrustIssue = trustedOcrFileIssue(artifact);
 		if (artifactTrustIssue) return artifactTrustIssue;
-		const bindingIssue = ocrBindingIssue(
-			row,
-			path,
-			source,
-			artifact,
-			repoRoot,
-		);
+		const bindingIssue = ocrBindingIssue(row, path, source, artifact, repoRoot);
 		if (bindingIssue) return bindingIssue;
-		return artifact.text.replace(/\r\n/gu, "\n").includes(row.evidence.replace(/\r\n/gu, "\n"))
+		let scopedArtifact = artifact.text;
+		if (pointer.line !== undefined) {
+			const lines = artifact.text.split("\n");
+			if (pointer.line > lines.length || pointer.lineEnd > lines.length)
+				return "OCR source range is outside the artifact bounds";
+			scopedArtifact = lines.slice(pointer.line - 1, pointer.lineEnd).join("\n");
+		}
+		return scopedArtifact.includes(row.evidence)
 			? ""
-			: "OCR quote was not found in artifact";
+			: "OCR quote was not found in artifact range";
 	}
 	if (source.tooLarge) return "required source is too large to verify";
+	if (source.invalidUtf8) return "required source is not valid UTF-8";
 	let scopedText = source.text;
 	if (pointer.line !== undefined) {
-		const lines = source.text.split(/\r?\n/u);
-		if (pointer.line > lines.length) return "required source range is unavailable";
-		const end = Math.min(pointer.lineEnd, lines.length);
-		scopedText = lines.slice(pointer.line - 1, end).join("\n");
+		// Split only on LF. The CR in CRLF is source content and must remain in
+		// the scoped bytes; a terminal LF intentionally creates an empty line.
+		const lines = source.text.split("\n");
+		if (pointer.line > lines.length || pointer.lineEnd > lines.length)
+			return "required source range is outside the file";
+		scopedText = lines.slice(pointer.line - 1, pointer.lineEnd).join("\n");
 	}
-	return scopedText.replace(/\r\n/gu, "\n").includes(row.evidence.replace(/\r\n/gu, "\n"))
+	return scopedText.includes(row.evidence)
 		? ""
 		: "content quote was not found in required source range";
 }
@@ -924,11 +945,9 @@ function assessSourceCoverage(requiredValue, coverageValue, context = {}) {
 	const rows = asObjects(coverageValue).map((row) => ({
 		path: typeof row.path === "string" ? row.path : String(row.path ?? ""),
 		status: String(row.status ?? "").trim(),
-		evidence: String(row.evidence ?? "").trim(),
+		evidence: String(row.evidence ?? ""),
 		artifact:
-			typeof row.artifact === "string"
-				? row.artifact
-				: String(row.artifact ?? ""),
+			typeof row.artifact === "string" ? row.artifact : String(row.artifact ?? ""),
 		reason: String(row.reason ?? "").trim(),
 	}));
 	const requiredSet = new Set(requiredPaths);
@@ -939,7 +958,11 @@ function assessSourceCoverage(requiredValue, coverageValue, context = {}) {
 			continue;
 		}
 		if (matches.length > 1) {
-			issues.push({ path, status: "duplicate", reason: "coverage row duplicated" });
+			issues.push({
+				path,
+				status: "duplicate",
+				reason: "coverage row duplicated",
+			});
 			continue;
 		}
 		const row = matches[0];
@@ -1018,33 +1041,33 @@ function idArray(value) {
 function reviewerFindingShapeIsValid(finding) {
 	return Boolean(
 		finding &&
-		typeof finding === "object" &&
-		typeof finding.title === "string" &&
-		finding.title.trim() &&
-		typeof finding.file === "string" &&
-		finding.file.trim() &&
-		Array.isArray(finding.locations) &&
-		finding.locations.length > 0 &&
-		finding.locations.every(
-			(location) =>
-				location &&
-				typeof location === "object" &&
-				typeof location.file === "string" &&
-				location.file.trim(),
-		) &&
-		typeof finding.evidence === "string" &&
-		finding.evidence.trim() &&
-		Array.isArray(finding.evidenceQuotes) &&
-		finding.evidenceQuotes.length > 0 &&
-		finding.evidenceQuotes.every(
-			(quote) => typeof quote === "string" && quote.trim(),
-		) &&
-		typeof finding.rationale === "string" &&
-		finding.rationale.trim() &&
-		typeof finding.recommendedAction === "string" &&
-		finding.recommendedAction.trim() &&
-		typeof finding.confidence === "string" &&
-		["high", "medium", "low", "unknown"].includes(finding.confidence)
+			typeof finding === "object" &&
+			typeof finding.title === "string" &&
+			finding.title.trim() &&
+			typeof finding.file === "string" &&
+			finding.file.trim() &&
+			Array.isArray(finding.locations) &&
+			finding.locations.length > 0 &&
+			finding.locations.every(
+				(location) =>
+					location &&
+					typeof location === "object" &&
+					typeof location.file === "string" &&
+					location.file.trim(),
+			) &&
+			typeof finding.evidence === "string" &&
+			finding.evidence.trim() &&
+			Array.isArray(finding.evidenceQuotes) &&
+			finding.evidenceQuotes.length > 0 &&
+			finding.evidenceQuotes.every(
+				(quote) => typeof quote === "string" && quote.trim(),
+			) &&
+			typeof finding.rationale === "string" &&
+			finding.rationale.trim() &&
+			typeof finding.recommendedAction === "string" &&
+			finding.recommendedAction.trim() &&
+			typeof finding.confidence === "string" &&
+			["high", "medium", "low", "unknown"].includes(finding.confidence),
 	);
 }
 
@@ -1067,11 +1090,11 @@ function ownerFromStatus(status) {
 function ownerComplete(owner) {
 	return Boolean(
 		owner &&
-		owner.source &&
-		owner.specId &&
-		owner.taskId &&
-		owner.itemIdentity &&
-		owner.placeholderSpecId,
+			owner.source &&
+			owner.specId &&
+			owner.taskId &&
+			owner.itemIdentity &&
+			owner.placeholderSpecId,
 	);
 }
 
@@ -1092,19 +1115,20 @@ function reviewerStatusesForAlias(statuses, sourceId) {
 }
 
 function exactReviewerStatus(status, sourceId, lens) {
-	const expectedSpec = sourceId === "reviewers"
-		? status?.specId === `reviewers.${lens}`
-		: status?.specId === sourceId;
+	const expectedSpec =
+		sourceId === "reviewers"
+			? status?.specId === `reviewers.${lens}`
+			: status?.specId === sourceId;
 	return Boolean(
 		status &&
-		status.source === sourceId &&
-		expectedSpec &&
-		status.stageId === "reviewers" &&
-		status.status === "completed" &&
-		status.itemIdentity === lens &&
-		status.placeholderSpecId === "reviewers.item" &&
-		typeof status.taskId === "string" &&
-		status.taskId.trim(),
+			status.source === sourceId &&
+			expectedSpec &&
+			status.stageId === "reviewers" &&
+			status.status === "completed" &&
+			status.itemIdentity === lens &&
+			status.placeholderSpecId === "reviewers.item" &&
+			typeof status.taskId === "string" &&
+			status.taskId.trim(),
 	);
 }
 
@@ -1116,25 +1140,26 @@ function verifierStatusesForAlias(statuses, sourceId) {
 }
 
 function exactDevilAdvocateStatus(status, identity, sourceId = "") {
-	const expectedSpecId = sourceId && sourceId.startsWith("devil-advocate.")
-		? sourceId
-		: `devil-advocate.${identity}`;
+	const expectedSpecId =
+		sourceId && sourceId.startsWith("devil-advocate.")
+			? sourceId
+			: `devil-advocate.${identity}`;
 	return Boolean(
 		status &&
-		status.status === "completed" &&
-		status.source === sourceId &&
-		status.stageId === "devil-advocate" &&
-		status.specId === expectedSpecId &&
-		status.itemIdentity === identity &&
-		status.placeholderSpecId === "devil-advocate.item" &&
-		typeof status.taskId === "string" &&
-		status.taskId.trim(),
+			status.status === "completed" &&
+			status.source === sourceId &&
+			status.stageId === "devil-advocate" &&
+			status.specId === expectedSpecId &&
+			status.itemIdentity === identity &&
+			status.placeholderSpecId === "devil-advocate.item" &&
+			typeof status.taskId === "string" &&
+			status.taskId.trim(),
 	);
 }
 
 function canonicalTriageSourceEntries(sources) {
-	return Object.entries(sources ?? {}).filter(([sourceId]) =>
-		sourceId === "triage" || sourceId.startsWith("triage."),
+	return Object.entries(sources ?? {}).filter(
+		([sourceId]) => sourceId === "triage" || sourceId.startsWith("triage."),
 	);
 }
 
@@ -1160,7 +1185,8 @@ function reviewerCoverageLedger(sources, context, coverageIssues) {
 		triageSource?.[1]?.reviewLenses?.map((lens) => lens?.id),
 	);
 	const contextPlan = idArray(context?.plannedLensIds);
-	for (const id of contextPlan) if (!plannedLensIds.includes(id)) plannedLensIds.push(id);
+	for (const id of contextPlan)
+		if (!plannedLensIds.includes(id)) plannedLensIds.push(id);
 
 	const triageLenses = asObjects(triageSource?.[1]?.reviewLenses);
 	const lensById = new Map(
@@ -1185,16 +1211,31 @@ function reviewerCoverageLedger(sources, context, coverageIssues) {
 		const reasons = [];
 		if (owners.length !== 1) {
 			ownerBindingValid = false;
-			if (owners.length > 1) reasons.push("reviewer_alias_not_bound_to_exactly_one_status");
+			if (owners.length > 1)
+				reasons.push("reviewer_alias_not_bound_to_exactly_one_status");
 		}
 		if (owner && !owner.itemIdentity)
 			reasons.push("reviewer_materialized_identity_missing");
-		else if (owner && (!ownerComplete(owner) || !exactReviewerStatus(owners[0], sourceId, String(source?.lens ?? "").trim())))
+		else if (
+			owner &&
+			(!ownerComplete(owner) ||
+				!exactReviewerStatus(
+					owners[0],
+					sourceId,
+					String(source?.lens ?? "").trim(),
+				))
+		)
 			reasons.push("reviewer_materialized_status_identity_mismatch");
-		if (owner && (owner.placeholderSpecId !== "reviewers.item" || owner.itemIdentity !== String(source?.lens ?? "").trim()))
+		if (
+			owner &&
+			(owner.placeholderSpecId !== "reviewers.item" ||
+				owner.itemIdentity !== String(source?.lens ?? "").trim())
+		)
 			reasons.push("reviewer_lens_identity_mismatch");
-		if (!Array.isArray(source?.findings)) reasons.push("reviewer_control_missing_findings_array");
-		if (evidenceChecked.length === 0) reasons.push("reviewer_control_missing_evidenceChecked_attestation");
+		if (!Array.isArray(source?.findings))
+			reasons.push("reviewer_control_missing_findings_array");
+		if (evidenceChecked.length === 0)
+			reasons.push("reviewer_control_missing_evidenceChecked_attestation");
 		if (findings.length === 0 && noIssueNotes.length === 0)
 			reasons.push("empty_reviewer_output_missing_noIssueNotes_attestation");
 		const lensId = String(source?.lens ?? "").trim();
@@ -1213,36 +1254,82 @@ function reviewerCoverageLedger(sources, context, coverageIssues) {
 			materializedReviewerIds.push(owner.itemIdentity);
 			materializedReviewerSourceIds.push(sourceId);
 			ownerMap.push(owner);
-			if (owners[0].status === "completed" && reasons.length === 0) attestedLensIds.push(owner.itemIdentity);
+			if (owners[0].status === "completed" && reasons.length === 0)
+				attestedLensIds.push(owner.itemIdentity);
 		}
 		if (reasons.length === 0) validAttestationSourceIds.push(sourceId);
 		else coverageIssues.push({ source: sourceId, reason: reasons[0], reasons });
 	}
 	for (const status of rawStatuses) {
-		const isReviewer = status.stageId === "reviewers" || String(status.specId ?? "").startsWith("reviewers.");
+		const isReviewer =
+			status.stageId === "reviewers" ||
+			String(status.specId ?? "").startsWith("reviewers.");
 		if (!isReviewer) continue;
-		const identity = String(status.itemIdentity ?? "").trim();
-		if (status.status === "completed" && !reviewerEntries.some(([id]) => id === status.source || id === status.specId))
-			coverageIssues.push({ source: status.source ?? status.specId, reason: "materialized_reviewer_missing_control_output" });
+		if (
+			status.status === "completed" &&
+			!reviewerEntries.some(([id]) => id === status.source || id === status.specId)
+		)
+			coverageIssues.push({
+				source: status.source ?? status.specId,
+				reason: "materialized_reviewer_missing_control_output",
+			});
 	}
 	const materializedSet = new Set(materializedReviewerIds);
 	const plannedSet = new Set(plannedLensIds);
 	const attestedSet = new Set(attestedLensIds);
-	const missingPlannedLensIds = plannedLensIds.filter((id) => !materializedSet.has(id));
-	const unexpectedMaterializedReviewerIds = materializedReviewerIds.filter((id) => !plannedSet.has(id));
-	const duplicateMaterializedReviewerIds = materializedReviewerIds.filter((id, index) => materializedReviewerIds.indexOf(id) !== index);
-	const missingAttestedLensIds = plannedLensIds.filter((id) => !attestedSet.has(id));
-	const unexpectedAttestedLensIds = attestedLensIds.filter((id) => !plannedSet.has(id));
-	if (missingPlannedLensIds.length) coverageIssues.push({ source: "reviewers", reason: "planned_lens_missing_materialized_reviewer", missingLensIds: missingPlannedLensIds });
-	if (missingAttestedLensIds.length) coverageIssues.push({ source: "reviewers", reason: "materialized_reviewer_missing_attestation", missingLensIds: missingAttestedLensIds });
-	if (unexpectedMaterializedReviewerIds.length) coverageIssues.push({ source: "reviewers", reason: "materialized_reviewer_not_in_planned_lenses", unexpectedReviewerIds: unexpectedMaterializedReviewerIds });
-	if (unexpectedAttestedLensIds.length) coverageIssues.push({ source: "reviewers", reason: "attested_lens_not_in_planned_lenses", unexpectedLensIds: unexpectedAttestedLensIds });
-	if (duplicateMaterializedReviewerIds.length) coverageIssues.push({ source: "reviewers", reason: "duplicate_materialized_reviewer_identity", duplicateReviewerIds: [...new Set(duplicateMaterializedReviewerIds)] });
+	const missingPlannedLensIds = plannedLensIds.filter(
+		(id) => !materializedSet.has(id),
+	);
+	const unexpectedMaterializedReviewerIds = materializedReviewerIds.filter(
+		(id) => !plannedSet.has(id),
+	);
+	const duplicateMaterializedReviewerIds = materializedReviewerIds.filter(
+		(id, index) => materializedReviewerIds.indexOf(id) !== index,
+	);
+	const missingAttestedLensIds = plannedLensIds.filter(
+		(id) => !attestedSet.has(id),
+	);
+	const unexpectedAttestedLensIds = attestedLensIds.filter(
+		(id) => !plannedSet.has(id),
+	);
+	if (missingPlannedLensIds.length)
+		coverageIssues.push({
+			source: "reviewers",
+			reason: "planned_lens_missing_materialized_reviewer",
+			missingLensIds: missingPlannedLensIds,
+		});
+	if (missingAttestedLensIds.length)
+		coverageIssues.push({
+			source: "reviewers",
+			reason: "materialized_reviewer_missing_attestation",
+			missingLensIds: missingAttestedLensIds,
+		});
+	if (unexpectedMaterializedReviewerIds.length)
+		coverageIssues.push({
+			source: "reviewers",
+			reason: "materialized_reviewer_not_in_planned_lenses",
+			unexpectedReviewerIds: unexpectedMaterializedReviewerIds,
+		});
+	if (unexpectedAttestedLensIds.length)
+		coverageIssues.push({
+			source: "reviewers",
+			reason: "attested_lens_not_in_planned_lenses",
+			unexpectedLensIds: unexpectedAttestedLensIds,
+		});
+	if (duplicateMaterializedReviewerIds.length)
+		coverageIssues.push({
+			source: "reviewers",
+			reason: "duplicate_materialized_reviewer_identity",
+			duplicateReviewerIds: [...new Set(duplicateMaterializedReviewerIds)],
+		});
 	const uniqueIssues = [];
 	const seen = new Set();
 	for (const issue of coverageIssues) {
 		const key = `${issue.source ?? ""}|${issue.reason ?? ""}`;
-		if (!seen.has(key)) { seen.add(key); uniqueIssues.push(issue); }
+		if (!seen.has(key)) {
+			seen.add(key);
+			uniqueIssues.push(issue);
+		}
 	}
 	coverageIssues.splice(0, coverageIssues.length, ...uniqueIssues);
 	return {
@@ -1257,8 +1344,13 @@ function reviewerCoverageLedger(sources, context, coverageIssues) {
 		missingAttestedLensIds,
 		unexpectedMaterializedReviewerIds,
 		unexpectedAttestedLensIds,
-		duplicateMaterializedReviewerIds: [...new Set(duplicateMaterializedReviewerIds)],
-		setEquality: ownerBindingValid && sameSet(plannedLensIds, materializedReviewerIds) && sameSet(plannedLensIds, attestedLensIds),
+		duplicateMaterializedReviewerIds: [
+			...new Set(duplicateMaterializedReviewerIds),
+		],
+		setEquality:
+			ownerBindingValid &&
+			sameSet(plannedLensIds, materializedReviewerIds) &&
+			sameSet(plannedLensIds, attestedLensIds),
 		sourceStatuses: statuses,
 		sourceCoverageFailures,
 	};
@@ -1285,10 +1377,16 @@ function dedupFindings(sources, context = {}) {
 				source: sourceId,
 				valid: reviewerFindingShapeIsValid(finding),
 			});
-			normalized.push(normalizeFinding(finding, normalized.length, { source: sourceId }));
+			normalized.push(
+				normalizeFinding(finding, normalized.length, { source: sourceId }),
+			);
 		}
 	}
-	const reviewerCoverage = reviewerCoverageLedger(sources, context, coverageIssues);
+	const reviewerCoverage = reviewerCoverageLedger(
+		sources,
+		context,
+		coverageIssues,
+	);
 	const sourceCoverageFailuresBySource = new Map();
 	for (const failure of reviewerCoverage.sourceCoverageFailures) {
 		const failures = sourceCoverageFailuresBySource.get(failure.source) ?? [];
@@ -1403,7 +1501,9 @@ function dedupFindings(sources, context = {}) {
 			dedupFindingIds,
 			dispositionFindingIds: dedupFindingIds,
 			supportFindingIds: [],
-			lineageFindingIds: findings.flatMap((finding) => mergedFindingLineage(finding).slice(1).map(findingIdOf)),
+			lineageFindingIds: findings.flatMap((finding) =>
+				mergedFindingLineage(finding).slice(1).map(findingIdOf),
+			),
 			duplicates,
 		},
 	};
@@ -1452,8 +1552,7 @@ function repoRootFromContext(context = {}) {
 function pathIsInsideRoot(root, absolute) {
 	const relative = path.relative(root, absolute);
 	return (
-		relative === "" ||
-		(!relative.startsWith("..") && !path.isAbsolute(relative))
+		relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))
 	);
 }
 
@@ -1468,7 +1567,12 @@ function safeRepoRelativePath(file, repoRoot = process.cwd()) {
 	return path.relative(root, absolute).split(path.sep).join("/");
 }
 
-function readRepoText(file, repoRoot = process.cwd(), maxBytes = Infinity) {
+function readRepoText(
+	file,
+	repoRoot = process.cwd(),
+	maxBytes = Infinity,
+	{ allowInvalidUtf8 = false } = {},
+) {
 	const relative = safeRepoRelativePath(file, repoRoot);
 	if (!relative) return { relative: null, exists: false, text: "" };
 	const root = path.resolve(repoRoot);
@@ -1513,13 +1617,7 @@ function readRepoText(file, repoRoot = process.cwd(), maxBytes = Infinity) {
 				return { relative, exists: true, text: "", tooLarge: true };
 			}
 			const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, remaining));
-			const bytesRead = fs.readSync(
-				descriptor,
-				buffer,
-				0,
-				buffer.length,
-				null,
-			);
+			const bytesRead = fs.readSync(descriptor, buffer, 0, buffer.length, null);
 			if (bytesRead === 0) break;
 			totalBytes += bytesRead;
 			if (totalBytes > finiteLimit) {
@@ -1546,10 +1644,29 @@ function readRepoText(file, repoRoot = process.cwd(), maxBytes = Infinity) {
 			return { relative, exists: false, text: "" };
 		}
 		const bytes = Buffer.concat(chunks, totalBytes);
+		let text;
+		let invalidUtf8 = false;
+		try {
+			text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
+				bytes,
+			);
+		} catch {
+			invalidUtf8 = true;
+			if (!allowInvalidUtf8) {
+				return {
+					relative,
+					exists: true,
+					text: "",
+					invalidUtf8: true,
+				};
+			}
+			text = bytes.toString("utf8");
+		}
 		return {
 			relative,
 			exists: true,
-			text: bytes.toString("utf8"),
+			text,
+			...(invalidUtf8 ? { invalidUtf8: true } : {}),
 			sha256: createHash("sha256").update(bytes).digest("hex"),
 			mode: finalStat.mode,
 			uid: finalStat.uid,
@@ -1692,9 +1809,7 @@ function buildFindingContextPacket(finding, id, options = {}, context = {}) {
 				: {}),
 			...(location.symbol ? { symbol: location.symbol } : {}),
 			snippet,
-			matchedQuotes: quotes
-				.filter((quote) => snippet.includes(quote))
-				.slice(0, 3),
+			matchedQuotes: quotes.filter((quote) => snippet.includes(quote)).slice(0, 3),
 		});
 	}
 	for (const quote of quotes) {
@@ -1728,8 +1843,7 @@ function buildFindingContextPacket(finding, id, options = {}, context = {}) {
 		schema: CONTEXT_PACKET_SCHEMA,
 		findingId: id,
 		title: String(finding.title ?? "").trim(),
-		groundingStatus:
-			concreteEvidence.length > 0 ? "concrete" : "missing_context",
+		groundingStatus: concreteEvidence.length > 0 ? "concrete" : "missing_context",
 		locationsChecked: locationsOf(finding).slice(0, maxLocations),
 		evidenceQuotesChecked: quotes,
 		concreteEvidence,
@@ -1805,17 +1919,13 @@ function verdictEntryOf(source) {
 
 function findingTitleOf(entry) {
 	const finding = entry.finding;
-	if (finding && typeof finding === "object")
-		return String(finding.title ?? "");
+	if (finding && typeof finding === "object") return String(finding.title ?? "");
 	return String(finding ?? entry.title ?? "");
 }
 
 function primaryFileOf(item) {
 	return String(
-		item?.file ??
-			item?.locations?.[0]?.file ??
-			item?.reviewerFinding?.file ??
-			"",
+		item?.file ?? item?.locations?.[0]?.file ?? item?.reviewerFinding?.file ?? "",
 	);
 }
 
@@ -1849,10 +1959,18 @@ function explicitClassificationOf(item) {
 		.filter((value) => typeof value === "string" && value.trim())
 		.map((value) => value.trim().toLowerCase());
 	if (values.length === 0) return null;
-	if (values.some((value) => !SUPPORT_CLASSIFICATIONS.has(value) && !MATERIAL_CLASSIFICATIONS.has(value))) return "ambiguous";
-	const classifications = new Set(values.map((value) =>
-		SUPPORT_CLASSIFICATIONS.has(value) ? "support" : "material",
-	));
+	if (
+		values.some(
+			(value) =>
+				!SUPPORT_CLASSIFICATIONS.has(value) && !MATERIAL_CLASSIFICATIONS.has(value),
+		)
+	)
+		return "ambiguous";
+	const classifications = new Set(
+		values.map((value) =>
+			SUPPORT_CLASSIFICATIONS.has(value) ? "support" : "material",
+		),
+	);
 	return classifications.size === 1 ? [...classifications][0] : "ambiguous";
 }
 
@@ -1863,7 +1981,9 @@ function supportOnlyPathOf(item) {
 	]
 		.map(canonicalFilePath)
 		.filter(Boolean);
-	return files.length > 0 && files.every((file) => !isProductionLocationFile(file));
+	return (
+		files.length > 0 && files.every((file) => !isProductionLocationFile(file))
+	);
 }
 
 // Classification is deliberately structural. Do not infer support status from
@@ -1873,7 +1993,8 @@ function supportReasonOf(item) {
 	const classification = explicitClassificationOf(item);
 	if (classification === "support")
 		return supportOnlyPathOf(item) ? "explicit support classification" : null;
-	if (classification === "material" || classification === "ambiguous") return null;
+	if (classification === "material" || classification === "ambiguous")
+		return null;
 	if (supportOnlyPathOf(item)) return "support-only repository path";
 	return null;
 }
@@ -1889,12 +2010,17 @@ function supportNoteFromItem(item, reason, relatedRoot) {
 		locations: item.locations,
 		source: item.source ?? "unknown",
 		...(item.classification ? { classification: item.classification } : {}),
-		...(item.supportClassification ? { supportClassification: item.supportClassification } : {}),
-		...(item.reviewerIdentity ? { reviewerIdentity: { ...item.reviewerIdentity } } : {}),
+		...(item.supportClassification
+			? { supportClassification: item.supportClassification }
+			: {}),
+		...(item.reviewerIdentity
+			? { reviewerIdentity: { ...item.reviewerIdentity } }
+			: {}),
 		...(item.verifierOwner ? { verifierOwner: { ...item.verifierOwner } } : {}),
-		sourceLineage: Array.isArray(item.sourceLineage) && item.sourceLineage.length > 0
-			? [...item.sourceLineage]
-			: [item.source ?? "unknown"],
+		sourceLineage:
+			Array.isArray(item.sourceLineage) && item.sourceLineage.length > 0
+				? [...item.sourceLineage]
+				: [item.source ?? "unknown"],
 		mergedLineage: Array.isArray(item.mergedFindings)
 			? structuredClone(item.mergedFindings)
 			: Array.isArray(item.mergedLineage)
@@ -1908,12 +2034,14 @@ function supportNoteFromItem(item, reason, relatedRoot) {
 		evidenceQuotes: item.evidenceQuotes,
 		reason,
 		supportingFindingId:
-			(typeof item.supportingFindingId === "string" && item.supportingFindingId.trim()
+			typeof item.supportingFindingId === "string" &&
+			item.supportingFindingId.trim()
 				? item.supportingFindingId.trim()
-				: relatedRoot?.findingId ?? relatedRoot?.id),
+				: (relatedRoot?.findingId ?? relatedRoot?.id),
 		...(relatedRoot ? { supportingFindingOf: relatedRoot.title } : {}),
 		evidence: item.evidence,
 		counterEvidence: item.counterEvidence,
+		rationale: contractText(item.rationale),
 		recommendedAction: contractText(item.recommendedAction),
 	};
 }
@@ -1932,34 +2060,47 @@ function supportNeedsHumanItem(item, reason) {
 
 function isBehavioralRoot(item) {
 	const classification = explicitClassificationOf(item);
-	const files = [item.file, ...asObjects(item.locations).map((location) => location.file)]
+	const files = [
+		item.file,
+		...asObjects(item.locations).map((location) => location.file),
+	]
 		.map(canonicalFilePath)
 		.filter(Boolean);
-	return supportReasonOf(item) === null &&
+	return (
+		supportReasonOf(item) === null &&
 		classification !== "support" &&
 		classification !== "ambiguous" &&
-		files.some(isProductionLocationFile);
+		files.some(isProductionLocationFile)
+	);
 }
 
 function supportsRoot(item, root) {
-	const supportingId = typeof item.supportingFindingId === "string"
-		? item.supportingFindingId.trim()
-		: "";
+	const supportingId =
+		typeof item.supportingFindingId === "string"
+			? item.supportingFindingId.trim()
+			: "";
 	// A support reference may name only the surviving behavioral row. A root
 	// cause reference is accepted only when it was explicitly supplied by the
 	// reviewer; generated fallback root ids are not association authority.
-	if (supportingId && [root.findingId, root.id].includes(supportingId)) return true;
+	if (supportingId && [root.findingId, root.id].includes(supportingId))
+		return true;
 	const rootCauseId = String(root.rootCauseId ?? "").trim();
 	const explicitRootCauseId = String(root.explicitRootCauseId ?? "").trim();
 	const rootCauseIsValidated =
 		(explicitRootCauseId && explicitRootCauseId === rootCauseId) ||
 		(!explicitRootCauseId && root.generatedRootCauseId !== true);
-	if (supportingId && rootCauseIsValidated && supportingId === rootCauseId) return true;
-	return Boolean(rootCauseIsValidated && explicitRootCauseId && explicitRootCauseId === rootCauseId);
+	if (supportingId && rootCauseIsValidated && supportingId === rootCauseId)
+		return true;
+	// An explicit root ID on the root is not an association from this support
+	// row. Without an item-owned target, attaching it would manufacture
+	// provenance merely because an explicit root happens to exist.
+	return false;
 }
 
 function demoteSupportFindings(partitions, normalizationNotes) {
-	const roots = [...partitions.keep, ...partitions.weaken].filter(isBehavioralRoot);
+	const roots = [...partitions.keep, ...partitions.weaken].filter(
+		isBehavioralRoot,
+	);
 	const supportNotes = [];
 	const demoteFrom = (items) => {
 		const next = [];
@@ -2001,7 +2142,7 @@ function rootTextOf(item) {
 	]).join(" ");
 }
 
-function rootTokensOf(item) {
+function _rootTokensOf(item) {
 	return titleTokens({ title: rootTextOf(item) });
 }
 
@@ -2048,14 +2189,7 @@ const DISTINCT_ROOT_SIGNAL_GROUPS = [
 	},
 	{
 		name: "shutdown",
-		terms: [
-			"stop",
-			"shutdown",
-			"close failure",
-			"close error",
-			"flush",
-			"defer",
-		],
+		terms: ["stop", "shutdown", "close failure", "close error", "flush", "defer"],
 	},
 ];
 
@@ -2072,7 +2206,7 @@ function rootSignalGroupsOf(item) {
 	);
 }
 
-function sameSignalGroups(left, right) {
+function _sameSignalGroups(left, right) {
 	if (left.size !== right.size) return false;
 	for (const tag of left) if (!right.has(tag)) return false;
 	return true;
@@ -2122,7 +2256,7 @@ function rangesOverlapOrTouch(a, b, tolerance = 3) {
 	);
 }
 
-function locationsOverlapOrTouch(a, b) {
+function _locationsOverlapOrTouch(a, b) {
 	const rangesA = locationRangesOf(a);
 	const rangesB = locationRangesOf(b);
 	if (rangesA.length === 0 || rangesB.length === 0) return null;
@@ -2175,7 +2309,7 @@ function hasGeneratorLifecycleProtocol(item) {
 	return generatorSignal;
 }
 
-function sameLifecycleProtocolFinding(a, b) {
+function _sameLifecycleProtocolFinding(a, b) {
 	if (!hasGeneratorLifecycleProtocol(a) || !hasGeneratorLifecycleProtocol(b)) {
 		return false;
 	}
@@ -2184,34 +2318,61 @@ function sameLifecycleProtocolFinding(a, b) {
 	return productionLocationFilesOverlap(a, b);
 }
 
+function declaredRootIdOf(item) {
+	const explicit = String(item?.explicitRootCauseId ?? "").trim();
+	if (explicit) return explicit;
+	const root = String(item?.rootCauseId ?? "").trim();
+	return root && item?.generatedRootCauseId !== true ? root : "";
+}
+
+function causalIdentityPayload(item) {
+	return {
+		title: authorityTitle(item?.title),
+		// These are claim-bearing fields. Reviewer prose (rationale/action) and
+		// source wording are intentionally excluded because independent lenses
+		// commonly explain one defect differently.
+		claim: String(item?.claim ?? ""),
+		classification: String(item?.classification ?? ""),
+		supportClassification: String(item?.supportClassification ?? ""),
+		supportingFindingId: String(item?.supportingFindingId ?? ""),
+	};
+}
+
+function sameCausalPayload(a, b) {
+	return (
+		JSON.stringify(causalIdentityPayload(a)) ===
+		JSON.stringify(causalIdentityPayload(b))
+	);
+}
+
+// Retain the legacy lifecycle/token helpers for copied-bundle compatibility;
+// they are intentionally not identity authority for the shipped partition.
+void _rootTokensOf;
+void _sameSignalGroups;
+void _locationsOverlapOrTouch;
+void _sameLifecycleProtocolFinding;
+
 function sameRootFinding(a, b) {
+	const rootA = declaredRootIdOf(a);
+	const rootB = declaredRootIdOf(b);
+	// A producer-local root declaration is only a usable reparent relation when
+	// its claim-bearing payload agrees as well. This permits a later duplicate
+	// survivor to move across locations without treating an equal guessed id as
+	// proof of a globally shared cause.
+	if (!rootA || rootA !== rootB || !sameCausalPayload(a, b)) return false;
 	const fileA = primaryFileOf(a);
 	const fileB = primaryFileOf(b);
-	const crossFileProtocol =
-		fileA && fileB && fileA !== fileB && sameLifecycleProtocolFinding(a, b);
-	if (fileA && fileB && fileA !== fileB && !crossFileProtocol) return false;
-	const signalsA = rootSignalGroupsOf(a);
-	const signalsB = rootSignalGroupsOf(b);
-	const comparableSignals = signalsA.size > 0 && signalsB.size > 0;
-	if (
-		comparableSignals &&
-		!sameSignalGroups(signalsA, signalsB) &&
-		!crossFileProtocol
-	)
-		return false;
-	const locationOverlap = primaryLocationsOverlapOrTouch(a, b);
-	if (locationOverlap === false && !crossFileProtocol) return false;
-	const quoteOverlapCount = evidenceQuoteOverlapCount(a, b);
-	const titleOverlap = tokenOverlap(titleTokens(a), titleTokens(b));
-	if (crossFileProtocol) return true;
-	// Partition merges must be conservative: shared helper lines and broad
-	// evidence prose can describe distinct defects in the same function.
-	return (
-		locationOverlap === true &&
-		(titleOverlap >= 0.6 ||
-			(quoteOverlapCount > 0 &&
-				(titleOverlap >= 0.18 || quoteOverlapCount >= 2)))
+	if (fileA && fileB && fileA !== fileB) return false;
+	const exactQuote = evidenceQuotesOf(a).some((left) =>
+		evidenceQuotesOf(b).some((right) => left === right),
 	);
+	const materializedLineage =
+		asObjects(a?.mergedFindings ?? a?.mergedLineage).length > 0 ||
+		asObjects(b?.mergedFindings ?? b?.mergedLineage).length > 0;
+	// Reparenting may cross locations only when an exact quote corroborates the
+	// root or a prior dedup pass materialized duplicate lineage. A root plus a
+	// title alone is not a same-defect proof.
+	return exactQuote || materializedLineage;
 }
 
 function mergedFindingLineage(item) {
@@ -2227,6 +2388,7 @@ function mergedFindingLineage(item) {
 		file: item.file,
 		locations: item.locations,
 		evidenceQuotes: item.evidenceQuotes,
+		reviewerEvidenceQuotes: item.reviewerEvidenceQuotes,
 		evidence: item.evidence,
 		rationale: item.rationale,
 		verifierEvidence: item.verifierEvidence,
@@ -2234,27 +2396,36 @@ function mergedFindingLineage(item) {
 		recommendedAction: contractText(item.recommendedAction),
 		confidence: item.confidence,
 		...(item.classification ? { classification: item.classification } : {}),
-		...(item.supportClassification ? { supportClassification: item.supportClassification } : {}),
-		...(item.supportingFindingId ? { supportingFindingId: item.supportingFindingId } : {}),
-		...(item.explicitRootCauseId ? { explicitRootCauseId: item.explicitRootCauseId } : {}),
+		...(item.supportClassification
+			? { supportClassification: item.supportClassification }
+			: {}),
+		...(item.supportingFindingId
+			? { supportingFindingId: item.supportingFindingId }
+			: {}),
+		...(typeof item.claim === "string" ? { claim: item.claim } : {}),
+		...(item.explicitRootCauseId
+			? { explicitRootCauseId: item.explicitRootCauseId }
+			: {}),
 		...(item.generatedRootCauseId === true ? { generatedRootCauseId: true } : {}),
 		...(item.source ? { source: item.source } : {}),
-		...(item.reviewerIdentity ? { reviewerIdentity: { ...item.reviewerIdentity } } : {}),
+		...(item.reviewerIdentity
+			? { reviewerIdentity: { ...item.reviewerIdentity } }
+			: {}),
 		...(item.verifierOwner ? { verifierOwner: { ...item.verifierOwner } } : {}),
 		...(Array.isArray(item.reviewerIdentities)
-			? { reviewerIdentities: item.reviewerIdentities.map((owner) => ({ ...owner })) }
+			? {
+					reviewerIdentities: item.reviewerIdentities.map((owner) => ({ ...owner })),
+				}
 			: {}),
 		...(Array.isArray(item.sourceLineage)
 			? { sourceLineage: [...item.sourceLineage] }
 			: {}),
 	};
-	const declaredLineage = Array.isArray(item.mergedFindings) && item.mergedFindings.length > 0
-		? item.mergedFindings
-		: item.mergedLineage;
-	return [
-		current,
-		...asObjects(declaredLineage).flatMap(mergedFindingLineage),
-	];
+	const declaredLineage =
+		Array.isArray(item.mergedFindings) && item.mergedFindings.length > 0
+			? item.mergedFindings
+			: item.mergedLineage;
+	return [current, ...asObjects(declaredLineage).flatMap(mergedFindingLineage)];
 }
 
 function mergedFindingLineageKey(item) {
@@ -2274,9 +2445,7 @@ function mergeFindingItems(primary, duplicate) {
 	]);
 	primary.evidenceQuotes = dedupeEvidenceQuotes([
 		...(Array.isArray(primary.evidenceQuotes) ? primary.evidenceQuotes : []),
-		...(Array.isArray(duplicate.evidenceQuotes)
-			? duplicate.evidenceQuotes
-			: []),
+		...(Array.isArray(duplicate.evidenceQuotes) ? duplicate.evidenceQuotes : []),
 	]);
 	const lineage = [
 		...asObjects(primary.mergedFindings).flatMap(mergedFindingLineage),
@@ -2366,6 +2535,11 @@ function rootComparisonItem(item) {
 		file: item.file,
 		locations: item.locations,
 		evidenceQuotes: item.evidenceQuotes,
+		mergedFindings: item.mergedFindings,
+		mergedLineage: item.mergedLineage,
+		rootCauseId: item.rootCauseId,
+		explicitRootCauseId: item.explicitRootCauseId,
+		generatedRootCauseId: item.generatedRootCauseId,
 	};
 }
 
@@ -2375,9 +2549,18 @@ function mergeEquivalentRootFindings(partitions, normalizationNotes) {
 	for (const bucketName of ["keep", "weaken"]) {
 		const merged = [];
 		for (const item of partitions[bucketName]) {
+			// Support-only rows are associated after root normalization; never let
+			// their target ID make them look like an equivalent behavioral root.
+			if (supportReasonOf(item)) {
+				merged.push(item);
+				comparisonByItem.set(item, rootComparisonItem(item));
+				continue;
+			}
 			const comparison = rootComparisonItem(item);
-			const existing = merged.find((candidate) =>
-				sameRootFinding(comparisonByItem.get(candidate), comparison),
+			const existing = merged.find(
+				(candidate) =>
+					!supportReasonOf(candidate) &&
+					sameRootFinding(comparisonByItem.get(candidate), comparison),
 			);
 			if (!existing) {
 				merged.push(item);
@@ -2401,9 +2584,15 @@ function mergeEquivalentRootFindings(partitions, normalizationNotes) {
 
 	const remainingWeaken = [];
 	for (const item of partitions.weaken) {
+		if (supportReasonOf(item)) {
+			remainingWeaken.push(item);
+			continue;
+		}
 		const comparison = comparisonByItem.get(item) ?? rootComparisonItem(item);
-		const keepRoot = partitions.keep.find((candidate) =>
-			sameRootFinding(comparisonByItem.get(candidate), comparison),
+		const keepRoot = partitions.keep.find(
+			(candidate) =>
+				!supportReasonOf(candidate) &&
+				sameRootFinding(comparisonByItem.get(candidate), comparison),
 		);
 		if (!keepRoot) {
 			remainingWeaken.push(item);
@@ -2503,10 +2692,7 @@ function exactReportCount(value, field) {
 function boundedReportText(value, maxChars, truncation, fallback) {
 	const text = contractText(value) || contractText(fallback);
 	const rawLimit = Math.min(text.length, maxChars);
-	if (
-		text.length <= maxChars &&
-		JSON.stringify(text).length - 2 <= maxChars
-	) {
+	if (text.length <= maxChars && JSON.stringify(text).length - 2 <= maxChars) {
 		return text;
 	}
 	let low = 0;
@@ -2773,9 +2959,7 @@ function isolateReportPacket(sources, options) {
 	}
 	const packet = partition.reportPacket;
 	if (!packet || typeof packet !== "object" || Array.isArray(packet)) {
-		throw new Error(
-			"finding-pipeline: partition source is missing reportPacket",
-		);
+		throw new Error("finding-pipeline: partition source is missing reportPacket");
 	}
 	const serialized = JSON.stringify(packet);
 	if (packet.schema !== REPORT_PACKET_SCHEMA) {
@@ -3162,17 +3346,21 @@ function collectBatchVerdictRows({
 	const statusAvailable = owners.length > 0;
 	const statusValid = Boolean(
 		expectedMembers &&
-		(!statusAvailable || (owners.length === 1 && exactDevilAdvocateStatus(owners[0], batchId, sourceId))),
+			(!statusAvailable ||
+				(owners.length === 1 &&
+					exactDevilAdvocateStatus(owners[0], batchId, sourceId))),
 	);
 	if (!statusValid && statusAvailable) {
 		issues.push({
 			sourceId,
 			batchId,
 			findingId: "",
-			title: "Batch verifier source status is not bound to its exact materialized batch",
-			reason: owners.length !== 1
-				? "batch_source_status_not_unique"
-				: "batch_source_status_identity_mismatch",
+			title:
+				"Batch verifier source status is not bound to its exact materialized batch",
+			reason:
+				owners.length === 1
+					? "batch_source_status_identity_mismatch"
+					: "batch_source_status_not_unique",
 			expectedFindingIds: expectedMembers ? [...expectedMembers.keys()] : [],
 			rowCount: expectedMembers?.size ?? 0,
 		});
@@ -3305,9 +3493,7 @@ function batchIssueNeedsHumanItem(issue, reviewerFinding, fallbackId) {
 			? entry.counterEvidence
 			: [],
 		recommendedAction:
-			typeof entry.recommendedAction === "string"
-				? entry.recommendedAction
-				: "",
+			typeof entry.recommendedAction === "string" ? entry.recommendedAction : "",
 		note: `devil-advocate batch integrity issue: ${issue.reason}`,
 		batchIntegrityIssue: {
 			reason: issue.reason,
@@ -3335,14 +3521,13 @@ const SINGLETON_VERDICT_KEYS = new Set([
 	"evidence",
 	"counterEvidence",
 	"recommendedAction",
+	"evidenceUnavailableReason",
 ]);
 
 function singletonVerdictMalformedReason(entry) {
 	if (!entry || typeof entry !== "object" || Array.isArray(entry))
 		return "malformed_devil_advocate_control";
-	if (
-		Object.keys(entry).some((key) => !SINGLETON_VERDICT_KEYS.has(key))
-	)
+	if (Object.keys(entry).some((key) => !SINGLETON_VERDICT_KEYS.has(key)))
 		return "malformed_devil_advocate_extra_fields";
 	if ("schema" in entry && entry.schema !== "stage-control-v1")
 		return "malformed_devil_advocate_schema";
@@ -3359,6 +3544,15 @@ function singletonVerdictMalformedReason(entry) {
 	if (!Array.isArray(entry.counterEvidence))
 		return "malformed_devil_advocate_counterEvidence_array";
 	if (
+		entry.verdict === "NEEDS_HUMAN" &&
+		entry.evidence.length === 0 &&
+		(typeof entry.evidenceUnavailableReason !== "string" ||
+			!entry.evidenceUnavailableReason.trim())
+	)
+		return "needs_human_missing_evidence_unavailable_reason";
+	if (entry.verdict !== "NEEDS_HUMAN" && entry.evidence.length === 0)
+		return "malformed_devil_advocate_empty_evidence";
+	if (
 		entry.counterEvidence.some(
 			(value) => typeof value !== "string" || !value.trim(),
 		)
@@ -3367,18 +3561,18 @@ function singletonVerdictMalformedReason(entry) {
 	if (
 		entry.recommendedAction === undefined ||
 		entry.recommendedAction === null ||
-		(typeof entry.recommendedAction === "string" && !entry.recommendedAction.trim())
+		(typeof entry.recommendedAction === "string" &&
+			!entry.recommendedAction.trim())
 	)
 		return "malformed_devil_advocate_recommendedAction";
 	return null;
 }
 
 function verdictIntegrityNeedsHumanItem(issue, reviewerFinding, fallbackId) {
-	const entry = issue.entry && typeof issue.entry === "object" ? issue.entry : {};
+	const entry =
+		issue.entry && typeof issue.entry === "object" ? issue.entry : {};
 	const useReviewer = Boolean(reviewerFinding && issue.preserveFindingId);
-	const findingId = useReviewer
-		? findingIdOf(reviewerFinding)
-		: fallbackId;
+	const findingId = useReviewer ? findingIdOf(reviewerFinding) : fallbackId;
 	const sourceFinding =
 		entry.finding && typeof entry.finding === "object" ? entry.finding : {};
 	return {
@@ -3396,16 +3590,20 @@ function verdictIntegrityNeedsHumanItem(issue, reviewerFinding, fallbackId) {
 			: canonicalSeverity(sourceFinding.severity),
 		file: useReviewer ? reviewerFinding.file : sourceFinding.file,
 		locations: useReviewer
-			? reviewerFinding.locations ?? locationsOf(reviewerFinding)
+			? (reviewerFinding.locations ?? locationsOf(reviewerFinding))
 			: locationsOf(sourceFinding),
 		evidenceQuotes: useReviewer
-			? reviewerFinding.evidenceQuotes ?? evidenceQuotesOf(reviewerFinding)
+			? (reviewerFinding.evidenceQuotes ?? evidenceQuotesOf(reviewerFinding))
 			: evidenceQuotesOf(sourceFinding),
 		evidence: Array.isArray(entry.evidence) ? entry.evidence : [],
 		counterEvidence: Array.isArray(entry.counterEvidence)
 			? entry.counterEvidence
 			: [],
 		recommendedAction: contractText(entry.recommendedAction),
+		...(typeof entry.evidenceUnavailableReason === "string" &&
+		entry.evidenceUnavailableReason.trim()
+			? { evidenceUnavailableReason: entry.evidenceUnavailableReason.trim() }
+			: {}),
 		...(Array.isArray(reviewerFinding?.sourceLineage)
 			? { sourceLineage: [...reviewerFinding.sourceLineage] }
 			: {}),
@@ -3434,7 +3632,9 @@ function invalidReviewerLedger() {
 		materializedReviewerSourceIds: [],
 		validAttestationSourceIds: [],
 		ownerMap: [],
-		invalidAttestations: [{ source: "reviewers", reason: "missing_reviewer_ledger" }],
+		invalidAttestations: [
+			{ source: "reviewers", reason: "missing_reviewer_ledger" },
+		],
 		missingPlannedLensIds: [],
 		missingAttestedLensIds: [],
 		unexpectedMaterializedReviewerIds: [],
@@ -3554,7 +3754,10 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 		const suppliedId =
 			typeof row.entry.findingId === "string" ? row.entry.findingId.trim() : "";
 		if (suppliedId)
-			singletonIdCounts.set(suppliedId, (singletonIdCounts.get(suppliedId) ?? 0) + 1);
+			singletonIdCounts.set(
+				suppliedId,
+				(singletonIdCounts.get(suppliedId) ?? 0) + 1,
+			);
 	}
 	for (const row of singletonRows) {
 		const suppliedId =
@@ -3567,7 +3770,10 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 			entry: row.entry,
 		};
 		const reviewerFinding = suppliedId ? byFindingId.get(suppliedId) : null;
-		const owners = verifierStatusesForAlias(sourceStatusesOf(context), row.sourceId);
+		const owners = verifierStatusesForAlias(
+			sourceStatusesOf(context),
+			row.sourceId,
+		);
 		const owner = owners.length === 1 ? ownerFromStatus(owners[0]) : null;
 		const malformedReason = singletonVerdictMalformedReason(row.entry);
 		if (malformedReason) {
@@ -3587,7 +3793,10 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 			singletonIntegrityIssues.push(issue);
 			continue;
 		}
-		if (owners.length > 0 && !exactDevilAdvocateStatus(owners[0], suppliedId, row.sourceId)) {
+		if (
+			owners.length > 0 &&
+			!exactDevilAdvocateStatus(owners[0], suppliedId, row.sourceId)
+		) {
 			issue.reason = "verifier_source_status_identity_mismatch";
 			issue.expectedFindingIds = [suppliedId];
 			singletonIntegrityIssues.push(issue);
@@ -3609,7 +3818,10 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 			singletonIntegrityIssues.push(issue);
 			continue;
 		}
-		if (typeof row.entry.finding !== "string" || row.entry.finding !== reviewerFinding.title) {
+		if (
+			typeof row.entry.finding !== "string" ||
+			row.entry.finding !== reviewerFinding.title
+		) {
 			issue.preserveFindingId = true;
 			issue.reason = "findingId_title_mismatch_or_legacy_shape";
 			singletonIntegrityIssues.push(issue);
@@ -3628,10 +3840,7 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 	const duplicateBatchKeys = new Set();
 	const batchKeyCounts = new Map();
 	for (const row of verdictRows.filter((candidate) => candidate.batched)) {
-		batchKeyCounts.set(
-			row.batchKey,
-			(batchKeyCounts.get(row.batchKey) ?? 0) + 1,
-		);
+		batchKeyCounts.set(row.batchKey, (batchKeyCounts.get(row.batchKey) ?? 0) + 1);
 	}
 	for (const [key, count] of batchKeyCounts) {
 		if (count > 1) duplicateBatchKeys.add(key);
@@ -3654,10 +3863,7 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 	}
 
 	let integrityIssueIndex = 0;
-	for (const issue of [
-		...batchIssues,
-		...singletonIntegrityIssues,
-	]) {
+	for (const issue of [...batchIssues, ...singletonIntegrityIssues]) {
 		integrityIssueIndex += 1;
 		const reviewerFinding = issue.findingId
 			? byFindingId.get(issue.findingId)
@@ -3726,8 +3932,7 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 			);
 		}
 		const item = {
-			findingId:
-				reviewerFinding?.findingId ?? reviewerFinding?.id ?? fallbackId,
+			findingId: reviewerFinding?.findingId ?? reviewerFinding?.id ?? fallbackId,
 			originalFindingId:
 				reviewerFinding?.findingId ?? reviewerFinding?.id ?? fallbackId,
 			rootCauseId:
@@ -3736,15 +3941,23 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 				reviewerFinding?.id ??
 				fallbackId,
 			title: reviewerFinding?.title ?? title,
-			originalSeverity: reviewerFinding?.originalSeverity ?? reviewerFinding?.severity ?? "unknown",
+			...(typeof reviewerFinding?.claim === "string"
+				? { claim: reviewerFinding.claim }
+				: {}),
+			originalSeverity:
+				reviewerFinding?.originalSeverity ?? reviewerFinding?.severity ?? "unknown",
 			...(reviewerFinding?.source ? { source: reviewerFinding.source } : {}),
 			...(reviewerFinding?.reviewerIdentity
 				? { reviewerIdentity: { ...reviewerFinding.reviewerIdentity } }
 				: {}),
 			...(Array.isArray(reviewerFinding?.reviewerIdentities)
-				? { reviewerIdentities: reviewerFinding.reviewerIdentities.map((owner) => ({ ...owner })) }
+				? {
+						reviewerIdentities: reviewerFinding.reviewerIdentities.map((owner) => ({
+							...owner,
+						})),
+					}
 				: {}),
-				...(Array.isArray(reviewerFinding?.sourceLineage)
+			...(Array.isArray(reviewerFinding?.sourceLineage)
 				? { sourceLineage: [...reviewerFinding.sourceLineage] }
 				: {}),
 			...(reviewerFinding?.classification
@@ -3781,10 +3994,15 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 			locations: reviewerFinding
 				? (reviewerFinding.locations ?? locationsOf(reviewerFinding))
 				: locationsOf(
-						entry.finding && typeof entry.finding === "object"
-							? entry.finding
-							: {},
+						entry.finding && typeof entry.finding === "object" ? entry.finding : {},
 					),
+			reviewerEvidenceQuotes: dedupeEvidenceQuotes([
+				...(reviewerFinding?.reviewerEvidenceQuotes ??
+					reviewerFinding?.evidenceQuotes ??
+					[]),
+				...quoteStrings(entry.evidenceQuotes),
+				...quoteStrings(entry.evidenceQuote),
+			]),
 			evidenceQuotes: dedupeEvidenceQuotes([
 				...(reviewerFinding?.evidenceQuotes ?? []),
 				...quoteStrings(entry.evidenceQuotes),
@@ -3798,8 +4016,11 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 			verifierEvidence: verifierEvidenceQuotes,
 			counterEvidence: dedupeStrings(quoteStrings(entry.counterEvidence)),
 			recommendedAction,
-			sourceCoverageComplete:
-				reviewerFinding?.sourceCoverageComplete !== false,
+			...(typeof entry.evidenceUnavailableReason === "string" &&
+			entry.evidenceUnavailableReason.trim()
+				? { evidenceUnavailableReason: entry.evidenceUnavailableReason.trim() }
+				: {}),
+			sourceCoverageComplete: reviewerFinding?.sourceCoverageComplete !== false,
 			sourceCoverageIssuePaths: dedupeStrings(
 				reviewerFinding?.sourceCoverageIssuePaths ?? [],
 			),
@@ -3830,10 +4051,7 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 			!row.batched && structuredVerifierEvidence
 				? [
 						...verifierEvidenceResult.issues,
-						...verifierEvidenceGroundingIssues(
-							verifierEvidenceRows,
-							context,
-						),
+						...verifierEvidenceGroundingIssues(verifierEvidenceRows, context),
 					]
 				: [];
 		if (verifierEvidenceIssues.length > 0) {
@@ -3857,11 +4075,7 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 			continue;
 		}
 		const batchDemotionReason = row.batched
-			? conservativeBatchVerdictDemotionReason(
-					entry,
-					row.contextPacket,
-					context,
-				)
+			? conservativeBatchVerdictDemotionReason(entry, row.contextPacket, context)
 			: null;
 		if (batchDemotionReason) {
 			partitions.needsHuman.push({
@@ -3951,6 +4165,8 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 			file: finding.file,
 			locations: finding.locations ?? locationsOf(finding),
 			evidenceQuotes: finding.evidenceQuotes ?? evidenceQuotesOf(finding),
+			reviewerEvidenceQuotes:
+				finding.reviewerEvidenceQuotes ?? finding.evidenceQuotes ?? evidenceQuotesOf(finding),
 			...(Array.isArray(finding.sourceLineage)
 				? { sourceLineage: [...finding.sourceLineage] }
 				: {}),
@@ -3986,16 +4202,22 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 		0,
 	);
 
-	const expectedFindingIds = reviewerFindings
-		.map(findingIdOf)
-		.filter(Boolean);
+	const expectedFindingIds = reviewerFindings.map(findingIdOf).filter(Boolean);
 	const suppliedVerifierRows = [
 		...verdictRows.map((row) => ({
 			sourceId: row.sourceId,
 			...(row.batchId ? { batchId: row.batchId } : {}),
 			...(Number.isInteger(row.index) ? { index: row.index } : {}),
 			findingId: row.findingId ?? String(row.entry?.findingId ?? "").trim(),
-			...(row.owner ? { owner: { ...row.owner }, ownerSource: row.owner.source, ownerSpecId: row.owner.specId, ownerTaskId: row.owner.taskId, ownerItemIdentity: row.owner.itemIdentity } : {}),
+			...(row.owner
+				? {
+						owner: { ...row.owner },
+						ownerSource: row.owner.source,
+						ownerSpecId: row.owner.specId,
+						ownerTaskId: row.owner.taskId,
+						ownerItemIdentity: row.owner.itemIdentity,
+					}
+				: {}),
 			valid: !singletonIntegrityIssues.some(
 				(issue) => issue.sourceId === row.sourceId && issue.entry === row.entry,
 			),
@@ -4018,10 +4240,20 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 	];
 	for (const row of suppliedVerifierRows) {
 		if (row.owner) continue;
-		const owners = verifierStatusesForAlias(sourceStatusesOf(context), row.sourceId);
-		row.owner = owners.length === 1
-			? ownerFromStatus(owners[0])
-			: { source: row.sourceId ?? "", specId: "", taskId: "", itemIdentity: "", placeholderSpecId: "" };
+		const owners = verifierStatusesForAlias(
+			sourceStatusesOf(context),
+			row.sourceId,
+		);
+		row.owner =
+			owners.length === 1
+				? ownerFromStatus(owners[0])
+				: {
+						source: row.sourceId ?? "",
+						specId: "",
+						taskId: "",
+						itemIdentity: "",
+						placeholderSpecId: "",
+					};
 		row.ownerSource = row.owner.source;
 		row.ownerSpecId = row.owner.specId;
 		row.ownerTaskId = row.owner.taskId;
@@ -4036,8 +4268,13 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 		const identity = row.batchId ?? row.findingId;
 		if (!exactDevilAdvocateStatus(owners[0], identity, row.sourceId)) return true;
 		const expectedOwner = ownerFromStatus(owners[0]);
-		return ["source", "specId", "taskId", "itemIdentity", "placeholderSpecId"]
-			.some((key) => row.owner[key] !== expectedOwner[key]);
+		return [
+			"source",
+			"specId",
+			"taskId",
+			"itemIdentity",
+			"placeholderSpecId",
+		].some((key) => row.owner[key] !== expectedOwner[key]);
 	});
 	const verdictFindingIds = suppliedVerifierRows
 		.map((row) => row.findingId)
@@ -4054,16 +4291,21 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 		(id, index) => verdictFindingIds.indexOf(id) !== index,
 	);
 	const verifierStatusIssues = sourceStatusesOf(context)
-		.filter((status) =>
-			status?.stageId === "devil-advocate" ||
-			String(status?.specId ?? "").startsWith("devil-advocate.") ||
-			String(status?.source ?? "").startsWith("devil-advocate."),
+		.filter(
+			(status) =>
+				status?.stageId === "devil-advocate" ||
+				String(status?.specId ?? "").startsWith("devil-advocate.") ||
+				String(status?.source ?? "").startsWith("devil-advocate."),
 		)
 		.filter((status) => {
 			const identity = String(status.itemIdentity ?? "").trim();
-			return !identity ||
-				!((expectedIdSet.has(identity) || batchMembershipById.has(identity)) &&
-					exactDevilAdvocateStatus(status, identity, status.source ?? ""));
+			return (
+				!identity ||
+				!(
+					(expectedIdSet.has(identity) || batchMembershipById.has(identity)) &&
+					exactDevilAdvocateStatus(status, identity, status.source ?? "")
+				)
+			);
 		})
 		.map((status) => ({
 			sourceId: status.source ?? status.specId ?? "",
@@ -4074,13 +4316,21 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 		// This is the count of received verifier source rows before partitioning;
 		// the renderer reconciles it with partitionSummary.verdictsReceived.
 		verdictsReceived: verdictRows.length,
-		complete: missingVerifierFindingIds.length === 0 && orphanVerifierFindingIds.length === 0 && duplicateVerifierFindingIds.length === 0 && verifierOwnerIssues.length === 0 && verifierStatusIssues.length === 0,
+		complete:
+			missingVerifierFindingIds.length === 0 &&
+			orphanVerifierFindingIds.length === 0 &&
+			duplicateVerifierFindingIds.length === 0 &&
+			verifierOwnerIssues.length === 0 &&
+			verifierStatusIssues.length === 0,
 		expectedFindingIds,
 		verdictFindingIds,
 		missingFindingIds: [...new Set(missingVerifierFindingIds)],
 		orphanFindingIds: [...new Set(orphanVerifierFindingIds)],
 		duplicateFindingIds: [...new Set(duplicateVerifierFindingIds)],
-		ownerIssues: verifierOwnerIssues.map((row) => ({ sourceId: row.sourceId, findingId: row.findingId ?? "" })),
+		ownerIssues: verifierOwnerIssues.map((row) => ({
+			sourceId: row.sourceId,
+			findingId: row.findingId ?? "",
+		})),
 		statusIssues: verifierStatusIssues,
 		exactSetEquality:
 			missingVerifierFindingIds.length === 0 &&
@@ -4123,15 +4373,24 @@ function partitionVerdicts(sources, options = {}, context = {}) {
 		...partitions.weaken,
 		...partitions.drop,
 		...partitions.needsHuman,
-	].map((finding) => findingIdOf(finding)).filter(Boolean);
-	const supportFindingIds = supportNotes.map((note) => findingIdOf(note)).filter(Boolean);
+	]
+		.map((finding) => findingIdOf(finding))
+		.filter(Boolean);
+	const supportFindingIds = supportNotes
+		.map((note) => findingIdOf(note))
+		.filter(Boolean);
 	const lineageFindingIds = [
 		...partitions.keep,
 		...partitions.weaken,
 		...partitions.drop,
 		...partitions.needsHuman,
-	].flatMap((finding) => mergedFindingLineage(finding).slice(1).map(findingIdOf))
-		.concat(supportNotes.flatMap((note) => mergedFindingLineage(note).slice(1).map(findingIdOf)))
+	]
+		.flatMap((finding) => mergedFindingLineage(finding).slice(1).map(findingIdOf))
+		.concat(
+			supportNotes.flatMap((note) =>
+				mergedFindingLineage(note).slice(1).map(findingIdOf),
+			),
+		)
 		.filter(Boolean);
 	const sourceRawIds = idArray(dedupSummary.rawFindingIds);
 	const sourceDedupIds = idArray(dedupSummary.dedupFindingIds);

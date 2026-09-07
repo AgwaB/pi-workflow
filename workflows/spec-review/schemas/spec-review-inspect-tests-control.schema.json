@@ -1,25 +1,41 @@
 {
   "type": "object",
-  "required": [
-    "schema",
-    "digest",
-    "testMap"
-  ],
+  "required": ["schema", "digest", "testMap"],
   "properties": {
-    "schema": {
-      "type": "string",
-      "minLength": 1
-    },
-    "digest": {
-      "type": "string",
-      "minLength": 1
-    },
+    "schema": { "type": "string", "minLength": 1, "maxLength": 1200 },
+    "digest": { "type": "string", "minLength": 1, "maxLength": 1200 },
     "testMap": {
       "type": "array",
+      "maxItems": 60,
       "items": {
-        "type": "object"
-      },
-      "maxItems": 60
-    }
-  }
+        "type": "object",
+        "properties": {
+          "testOrFixture": { "type": "string", "maxLength": 240 },
+          "file": { "type": "string", "maxLength": 240 },
+          "evidence": { "type": "string", "maxLength": 400 },
+          "coveredBehavior": { "type": "string", "maxLength": 400 },
+          "relatedSignals": { "type": "array", "maxItems": 8, "items": { "type": "string", "maxLength": 80 } }
+        },
+        "additionalProperties": false
+      }
+    },
+    "coverageGapsSuspected": { "type": "array", "maxItems": 40, "items": { "type": "string", "maxLength": 240 } },
+    "notes": { "type": "array", "maxItems": 40, "items": { "type": "string", "maxLength": 240 } },
+    "scopeLimitations": {
+      "type": "array",
+      "maxItems": 40,
+      "items": {
+        "type": "object",
+        "required": ["kind", "text"],
+        "properties": {
+          "kind": { "type": "string", "const": "NONBLOCKING" },
+          "text": { "type": "string", "minLength": 1, "maxLength": 240 },
+          "blocking": { "type": "boolean", "const": false }
+        },
+        "additionalProperties": false
+      }
+    },
+    "testExecutionAttested": { "type": "boolean", "const": false }
+  },
+  "additionalProperties": false
 }

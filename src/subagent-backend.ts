@@ -129,6 +129,7 @@ import {
 	assertForeachBatchRecord,
 	foreachBatchLeaderTask,
 	foreachBatchTasks,
+	migrateForeachBatchFallbackTasks,
 	parseForeachBatchEnvelope,
 	reconstructForeachBatchItemOutput,
 	setForeachBatchPhase,
@@ -230,9 +231,7 @@ function bundledNodeModulePath(
 		resolve(MODULE_DIR, "..", "node_modules", packageName, ...parts),
 		resolve(MODULE_DIR, "..", "..", "node_modules", packageName, ...parts),
 	];
-	return (
-		candidates.find((candidate) => existsSync(candidate)) ?? candidates[0]!
-	);
+	return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0]!;
 }
 
 interface SubagentBackendHandle extends Record<string, unknown> {
@@ -393,9 +392,7 @@ interface SubagentInterruptResult {
 }
 
 interface SubagentApi {
-	runSubagent(
-		options: Record<string, unknown>,
-	): Promise<SubagentResultEnvelope>;
+	runSubagent(options: Record<string, unknown>): Promise<SubagentResultEnvelope>;
 	createDurableLaunchBarrierV2?(options: {
 		directory: string;
 		subjectSha256: string;
@@ -566,7 +563,8 @@ export async function assertSubagentExtensionsLoadable(
 		.errors.map(({ path, error }) => ({ path, error }))
 		.sort(
 			(left, right) =>
-				left.path.localeCompare(right.path) || left.error.localeCompare(right.error),
+				left.path.localeCompare(right.path) ||
+				left.error.localeCompare(right.error),
 		);
 	if (errors.length === 0) return;
 	throw new Error(
@@ -609,10 +607,7 @@ function enterWorkflowWorkerRoleEnv(): void {
 }
 
 function exitWorkflowWorkerRoleEnv(): void {
-	workflowWorkerRoleLaunchDepth = Math.max(
-		0,
-		workflowWorkerRoleLaunchDepth - 1,
-	);
+	workflowWorkerRoleLaunchDepth = Math.max(0, workflowWorkerRoleLaunchDepth - 1);
 	if (workflowWorkerRoleLaunchDepth > 0) {
 		process.env[PI_WORKFLOW_ROLE_ENV] = "worker";
 		return;
@@ -789,10 +784,7 @@ function validPersistedSharedBackoff(
 		return undefined;
 	const record = value as Record<string, unknown>;
 	const nextEligibleAtMs = record.nextEligibleAtMs;
-	if (
-		typeof nextEligibleAtMs !== "number" ||
-		!Number.isFinite(nextEligibleAtMs)
-	)
+	if (typeof nextEligibleAtMs !== "number" || !Number.isFinite(nextEligibleAtMs))
 		return undefined;
 	if (nextEligibleAtMs <= nowMs) return undefined;
 	if (nextEligibleAtMs - nowMs > MAX_PERSISTED_RATE_LIMIT_BACKOFF_MS)
@@ -800,8 +792,7 @@ function validPersistedSharedBackoff(
 	return {
 		nextEligibleAtMs,
 		retryAfterMs: Math.max(0, nextEligibleAtMs - nowMs),
-		updatedAt:
-			typeof record.updatedAt === "string" ? record.updatedAt : nowIso(),
+		updatedAt: typeof record.updatedAt === "string" ? record.updatedAt : nowIso(),
 	};
 }
 
@@ -816,14 +807,11 @@ async function loadPersistedSharedModelRateLimitBackoffs(): Promise<void> {
 	}
 	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
 	const nowMs = Date.now();
-	for (const [key, value] of Object.entries(
-		parsed as Record<string, unknown>,
-	)) {
+	for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
 		const state = validPersistedSharedBackoff(value, nowMs);
 		if (!state) continue;
 		const existing = sharedModelRateLimitBackoffs.get(key);
-		if (existing && existing.nextEligibleAtMs >= state.nextEligibleAtMs)
-			continue;
+		if (existing && existing.nextEligibleAtMs >= state.nextEligibleAtMs) continue;
 		sharedModelRateLimitBackoffs.set(key, state);
 	}
 }
@@ -850,9 +838,7 @@ async function withSharedRateLimitBackoffLock<T>(
 				continue;
 			}
 			if (Date.now() >= deadline) {
-				throw new Error(
-					`timed out acquiring shared rate-limit lock: ${lockDir}`,
-				);
+				throw new Error(`timed out acquiring shared rate-limit lock: ${lockDir}`);
 			}
 			await sleep(SHARED_RATE_LIMIT_BACKOFF_LOCK_RETRY_MS);
 		}
@@ -1200,8 +1186,7 @@ export function observeLiveModelWorkerCompletion(
 	}
 	if (state.baselineMs === undefined) {
 		if (
-			state.recentExecutionMs.length <
-			ADAPTIVE_LIVE_MODEL_WORKER_BASELINE_SAMPLES
+			state.recentExecutionMs.length < ADAPTIVE_LIVE_MODEL_WORKER_BASELINE_SAMPLES
 		) {
 			return;
 		}
@@ -1286,9 +1271,7 @@ function durableBarrierRecordForTask(
 	const handle = getSubagentHandle(task);
 	return (
 		(handle
-			? records.find(
-					(record) => record.backendAttemptId === handle.attemptId,
-				)
+			? records.find((record) => record.backendAttemptId === handle.attemptId)
 			: undefined) ?? records.at(-1)
 	);
 }
@@ -1337,24 +1320,17 @@ async function resolveDurableBarrierReleaseWithCancellation(
 		record,
 	);
 	if (signal.aborted)
-		return api.revokeDurableLaunchBarrierV2(
-			record.descriptor,
-			cancellation,
-		);
+		return api.revokeDurableLaunchBarrierV2(record.descriptor, cancellation);
 	let removeAbortListener = (): void => undefined;
 	const revokeOnAbort = new Promise<DurableLaunchBarrierResolution>(
 		(resolveCancellation, rejectCancellation) => {
 			const onAbort = (): void => {
 				void api
-					.revokeDurableLaunchBarrierV2(
-						record.descriptor,
-						cancellation,
-					)
+					.revokeDurableLaunchBarrierV2(record.descriptor, cancellation)
 					.then(resolveCancellation, rejectCancellation);
 			};
 			signal.addEventListener("abort", onAbort, { once: true });
-			removeAbortListener = () =>
-				signal.removeEventListener("abort", onAbort);
+			removeAbortListener = () => signal.removeEventListener("abort", onAbort);
 			if (signal.aborted) onAbort();
 		},
 	);
@@ -1385,8 +1361,12 @@ async function decideDurableBarrierCancellation(
 		throw new Error(
 			"installed @agwab/pi-subagent does not support durable launch barrier v2 cancellation",
 		);
-	const { cancellationId, reasonSha256 } =
-		durableBarrierCancellationIdentity(api, run, task, record);
+	const { cancellationId, reasonSha256 } = durableBarrierCancellationIdentity(
+		api,
+		run,
+		task,
+		record,
+	);
 	record.cancellation ??= {
 		cancellationId,
 		requestedAt: nowIso(),
@@ -1394,10 +1374,10 @@ async function decideDurableBarrierCancellation(
 		decision: "revoked",
 	};
 	await writeRunRecordDurable(cwd, run);
-	const resolution = await api.revokeDurableLaunchBarrierV2(
-		record.descriptor,
-		{ cancellationId, reasonSha256 },
-	);
+	const resolution = await api.revokeDurableLaunchBarrierV2(record.descriptor, {
+		cancellationId,
+		reasonSha256,
+	});
 	record.decisionSha256 = resolution.decision.decisionSha256;
 	if (resolution.outcome === "revoked") {
 		record.phase = "revoked";
@@ -1450,8 +1430,7 @@ export async function acknowledgeSubagentTaskInterrupted(
 			throw new Error(
 				"durable launch barrier cancellation evidence is unavailable",
 			);
-		barrierRecord.cancellation.interruptStatus =
-			acknowledgement.interruptStatus;
+		barrierRecord.cancellation.interruptStatus = acknowledgement.interruptStatus;
 		barrierRecord.cancellation.terminalAttemptId = acknowledgement.attemptId;
 		barrierRecord.cancellation.terminalStatus = acknowledgement.status;
 		barrierRecord.cancellation.terminalObservedAt = acknowledgement.observedAt;
@@ -1563,9 +1542,7 @@ function adaptiveLiveModelWorkerTelemetry(): Record<
 		providers[key] = {
 			limit: state.limit,
 			lastDecision: state.lastDecision,
-			...(state.baselineMs === undefined
-				? {}
-				: { baselineMs: state.baselineMs }),
+			...(state.baselineMs === undefined ? {} : { baselineMs: state.baselineMs }),
 			samples: state.recentExecutionMs.length,
 		};
 	}
@@ -1875,11 +1852,7 @@ function buildTaskUsageAttempt(options: {
 	const model =
 		firstStringValue(records, ["model"]) ?? options.task.runtime.model;
 	const thinking =
-		firstStringValue(records, [
-			"thinking",
-			"thinkingLevel",
-			"reasoningLevel",
-		]) ??
+		firstStringValue(records, ["thinking", "thinkingLevel", "reasoningLevel"]) ??
 		options.task.runtime.thinkingResolution?.resolved ??
 		options.task.runtime.thinking;
 	return {
@@ -2085,9 +2058,7 @@ function buildTaskToolResultBudgetAttempt(options: {
 		backendRunId: options.snapshot.runId,
 		backendAttemptId: options.snapshot.attemptId,
 		terminal: true,
-		...(reported
-			? { reported: true as const }
-			: { unavailable: true as const }),
+		...(reported ? { reported: true as const } : { unavailable: true as const }),
 		...normalizedToolResultBudgetValues(observed?.raw),
 		...(contextLengthExceeded === undefined ? {} : { contextLengthExceeded }),
 		...(contextOverflowRecovered === undefined
@@ -2211,8 +2182,7 @@ function updateTaskToolResultBudget(options: {
 		...(options.clearPendingConfiguration
 			? {}
 			: {
-					pendingConfiguration:
-						options.task.toolResultBudget?.pendingConfiguration,
+					pendingConfiguration: options.task.toolResultBudget?.pendingConfiguration,
 				}),
 	});
 }
@@ -2222,15 +2192,14 @@ function recordTaskToolResultBudgetPendingConfiguration(options: {
 	configuration: DynamicTaskToolResultBudgetConfiguration;
 	capturedAt: string;
 }): void {
-	const pendingConfiguration: WorkflowTaskToolResultBudgetConfigurationRecord =
-		{
-			configuredAt: options.capturedAt,
-			configured: options.configuration.configured,
-			configurationSource: options.configuration.source,
-			...(options.configuration.maxTotalChars === undefined
-				? {}
-				: { configuredMaxTotalChars: options.configuration.maxTotalChars }),
-		};
+	const pendingConfiguration: WorkflowTaskToolResultBudgetConfigurationRecord = {
+		configuredAt: options.capturedAt,
+		configured: options.configuration.configured,
+		configurationSource: options.configuration.source,
+		...(options.configuration.maxTotalChars === undefined
+			? {}
+			: { configuredMaxTotalChars: options.configuration.maxTotalChars }),
+	};
 	writeTaskToolResultBudgetRecord({
 		task: options.task,
 		attempts: options.task.toolResultBudget?.attempts ?? [],
@@ -2322,8 +2291,7 @@ function durationBetween(
 ): number | undefined {
 	const startedAtMs = isoTimestampMs(startedAt);
 	const completedAtMs = isoTimestampMs(completedAt);
-	if (startedAtMs === undefined || completedAtMs === undefined)
-		return undefined;
+	if (startedAtMs === undefined || completedAtMs === undefined) return undefined;
 	return Math.max(0, completedAtMs - startedAtMs);
 }
 
@@ -2346,9 +2314,7 @@ function recordTaskTimingTelemetry(
 	const sanitized = Object.fromEntries(
 		Object.entries(values).filter(
 			(entry): entry is [TimingTelemetryKey, number] =>
-				typeof entry[1] === "number" &&
-				Number.isFinite(entry[1]) &&
-				entry[1] >= 0,
+				typeof entry[1] === "number" && Number.isFinite(entry[1]) && entry[1] >= 0,
 		),
 	) as TimingTelemetryValues;
 	if (Object.keys(sanitized).length === 0) return;
@@ -2448,8 +2414,7 @@ function recordTaskLaunchTiming(
 					...(launchControls.adaptiveLiveModelWorkers === undefined
 						? {}
 						: {
-								adaptiveLiveModelWorkers:
-									launchControls.adaptiveLiveModelWorkers,
+								adaptiveLiveModelWorkers: launchControls.adaptiveLiveModelWorkers,
 							}),
 				}
 			: {}),
@@ -2602,8 +2567,7 @@ function recordTaskTerminalTiming(options: {
 		...(options.task.timing?.launchSlotReleaseDelayMs === undefined
 			? {}
 			: {
-					launchSlotReleaseDelayMs:
-						options.task.timing.launchSlotReleaseDelayMs,
+					launchSlotReleaseDelayMs: options.task.timing.launchSlotReleaseDelayMs,
 				}),
 		...(options.task.timing?.maxConcurrentLaunches === undefined
 			? {}
@@ -2620,8 +2584,7 @@ function recordTaskTerminalTiming(options: {
 		...(options.task.timing?.adaptiveLiveModelWorkers === undefined
 			? {}
 			: {
-					adaptiveLiveModelWorkers:
-						options.task.timing.adaptiveLiveModelWorkers,
+					adaptiveLiveModelWorkers: options.task.timing.adaptiveLiveModelWorkers,
 				}),
 		...taskTimingTelemetry(options.task.timing),
 		...(attempt.executionStartedAt === undefined
@@ -2675,10 +2638,8 @@ export function setSubagentLaunchControlsForTests(options?: {
 	beforeRunSubagentHookForTests = options?.beforeRunSubagent;
 	afterLaunchAuthorityRegisteredHookForTests =
 		options?.afterLaunchAuthorityRegistered;
-	beforeDurableBarrierReleaseHookForTests =
-		options?.beforeDurableBarrierRelease;
-	beforeDurableBarrierAckWaitHookForTests =
-		options?.beforeDurableBarrierAckWait;
+	beforeDurableBarrierReleaseHookForTests = options?.beforeDurableBarrierRelease;
+	beforeDurableBarrierAckWaitHookForTests = options?.beforeDurableBarrierAckWait;
 	launchSlotReleaseGeneration += 1;
 	activeLaunchSlots = 0;
 	activeLiveModelWorkerKeys.clear();
@@ -2707,12 +2668,7 @@ export async function cleanupSubagentRun(
 		const batch = activeForeachBatchRecordForTask(run, task);
 		if (batch && task.foreachBatch?.role === "member") continue;
 		try {
-			await acknowledgeSubagentTaskInterrupted(
-				cwd,
-				run,
-				task,
-				"workflow cleanup",
-			);
+			await acknowledgeSubagentTaskInterrupted(cwd, run, task, "workflow cleanup");
 			task.statusDetail = "cancellation_acknowledged";
 			task.lastMessage = "backend cancellation acknowledged";
 		} catch (error) {
@@ -2722,10 +2678,7 @@ export async function cleanupSubagentRun(
 		}
 	}
 	if (errors.length > 0) {
-		throw new AggregateError(
-			errors,
-			"one or more backend cancellations failed",
-		);
+		throw new AggregateError(errors, "one or more backend cancellations failed");
 	}
 }
 
@@ -2813,20 +2766,14 @@ export async function interruptSubagentTask(
 			{
 				operation: "cancellation acknowledgement status",
 				context,
-				timeoutMs: Math.min(
-					SUBAGENT_REFRESH_OPERATION_TIMEOUT_MS,
-					remainingMs,
-				),
+				timeoutMs: Math.min(SUBAGENT_REFRESH_OPERATION_TIMEOUT_MS, remainingMs),
 			},
 		);
 		if (snapshot !== null && snapshot.runId !== handle.runId)
 			throw new Error(
 				`subagent cancellation status run ${snapshot.runId} does not match ${handle.runId}`,
 			);
-		terminalStatus = exactTerminalAttempt(
-			snapshot?.attempts,
-			handle.attemptId,
-		);
+		terminalStatus = exactTerminalAttempt(snapshot?.attempts, handle.attemptId);
 		if (terminalStatus === undefined)
 			await sleep(Math.min(50, Math.max(1, deadline - Date.now())));
 	}
@@ -2871,8 +2818,7 @@ export async function launchSubagentTask(
 		if (backoffRemainingMs !== undefined && backoffRemainingMs > 0) {
 			const message = `waiting until ${task.launchRetry?.nextEligibleAt} before retrying transient-model launch after rate-limit backoff`;
 			const shouldWriteBackoffState =
-				task.statusDetail !== "retry_model_failure" ||
-				task.lastMessage !== message;
+				task.statusDetail !== "retry_model_failure" || task.lastMessage !== message;
 			task.statusDetail = "retry_model_failure";
 			task.lastMessage = message;
 			if (shouldWriteBackoffState) await writeRunRecord(cwd, run);
@@ -2893,12 +2839,7 @@ export async function launchSubagentTask(
 		await throwIfLaunchStopped(cwd, run.runId, leaseSignal, workflowStopSignal);
 		if (jitterMs > 0) {
 			await sleep(jitterMs);
-			await throwIfLaunchStopped(
-				cwd,
-				run.runId,
-				leaseSignal,
-				workflowStopSignal,
-			);
+			await throwIfLaunchStopped(cwd, run.runId, leaseSignal, workflowStopSignal);
 		}
 	}
 
@@ -2978,11 +2919,12 @@ export async function launchSubagentTask(
 	let launchApi: SubagentApi | undefined;
 	let durableBarrierDescriptor: DurableLaunchBarrierDescriptor | undefined;
 	let durableBarrierRecord: WorkflowDurableLaunchBarrierRecord | undefined;
-	const hardenedBatchRecord = task.foreachBatch
-		? (run.foreachBatches ?? []).find(
-				(record) => record.batchId === task.foreachBatch?.batchId,
-			)
-		: undefined;
+	const hardenedBatchRecord =
+		task.foreachBatch && !task.foreachBatch.batchingDisabled
+			? (run.foreachBatches ?? []).find(
+					(record) => record.batchId === task.foreachBatch?.batchId,
+				)
+			: undefined;
 	try {
 		await throwIfLaunchStopped(cwd, run.runId, leaseSignal, workflowStopSignal);
 		const launchAbortSignal = combineAbortSignals(
@@ -3087,8 +3029,7 @@ export async function launchSubagentTask(
 					),
 				});
 				if (
-					durableBarrierDescriptor.authorityBindingSha256 !==
-					authorityBindingSha256
+					durableBarrierDescriptor.authorityBindingSha256 !== authorityBindingSha256
 				)
 					throw new Error(
 						"durable launch barrier authority binding does not match external launch grant",
@@ -3114,8 +3055,7 @@ export async function launchSubagentTask(
 						launchAuthority.identitySha256 ||
 					durableBarrierDescriptor.authorityBindingSha256 !==
 						authorityBindingSha256 ||
-					durableBarrierRecord.authorityBindingSha256 !==
-						authorityBindingSha256
+					durableBarrierRecord.authorityBindingSha256 !== authorityBindingSha256
 				) {
 					throw new Error(
 						"durable launch barrier binding does not match launch authority",
@@ -3150,12 +3090,7 @@ export async function launchSubagentTask(
 		if (isLaunchGateSaturated()) {
 			task.lastMessage = `waiting for pi-subagent launch slot (${resolveMaxConcurrentLaunches()} max)`;
 			await writeRunRecord(cwd, run).catch(() => undefined);
-			await throwIfLaunchStopped(
-				cwd,
-				run.runId,
-				leaseSignal,
-				workflowStopSignal,
-			);
+			await throwIfLaunchStopped(cwd, run.runId, leaseSignal, workflowStopSignal);
 		}
 		launched = await runWithLaunchSlot(
 			async () => {
@@ -3184,8 +3119,7 @@ export async function launchSubagentTask(
 						? undefined
 						: [...compiledTask.runtime.tools];
 				subagentOptions.extensions = [...sealedLaunch.extensions];
-				if (sealedLaunch.captureToolCalls)
-					subagentOptions.captureToolCalls = true;
+				if (sealedLaunch.captureToolCalls) subagentOptions.captureToolCalls = true;
 				if (injectedSubagentApi === undefined)
 					await assertSubagentExtensionsLoadable(subagentOptions);
 				if (toolResultBudgetConfiguration?.maxTotalChars !== undefined) {
@@ -3307,9 +3241,7 @@ export async function launchSubagentTask(
 			}
 			const ready = await awaitSubagentOperation(
 				() =>
-					launchApi.waitForDurableLaunchBarrierV2Ready(
-						durableBarrierDescriptor,
-					),
+					launchApi.waitForDurableLaunchBarrierV2Ready(durableBarrierDescriptor),
 				{
 					operation: "durable launch barrier READY",
 					context: `workflow run ${run.runId} task ${task.taskId} (${task.specId})`,
@@ -3319,8 +3251,7 @@ export async function launchSubagentTask(
 			);
 			if (
 				ready.schema !== "pi-subagent-durable-launch-barrier-ready-v2" ||
-				ready.barrierIdentitySha256 !==
-					durableBarrierDescriptor.identitySha256 ||
+				ready.barrierIdentitySha256 !== durableBarrierDescriptor.identitySha256 ||
 				ready.challenge !== durableBarrierDescriptor.challenge ||
 				ready.decisionNonce !== durableBarrierDescriptor.decisionNonce ||
 				ready.subjectSha256 !== durableBarrierDescriptor.subjectSha256 ||
@@ -3381,26 +3312,19 @@ export async function launchSubagentTask(
 					cwd,
 					hardenedBatchRecord,
 				);
-				await assertForeachBatchCapability(
-					cwd,
-					hardenedBatchRecord,
-					capability,
-				);
+				await assertForeachBatchCapability(cwd, hardenedBatchRecord, capability);
 				const reservationSha256 = launchApi.durableLaunchBarrierDigest({
 					schema: "workflow-foreach-batch-dispatch-reservation-v1",
 					batchId: hardenedBatchRecord.batchId,
 					attemptKey: launchAuthority.attemptKey,
-					capabilitySubjectSha256:
-						hardenedBatchRecord.capabilitySubjectSha256,
+					capabilitySubjectSha256: hardenedBatchRecord.capabilitySubjectSha256,
 					stateRootSha256: hardenedBatchRecord.stateRootSha256,
 					releasePayloadSha256,
 				});
 				if (
 					hardenedBatchRecord.dispatch &&
-					(hardenedBatchRecord.dispatch.attemptKey !==
-						launchAuthority.attemptKey ||
-						hardenedBatchRecord.dispatch.reservationSha256 !==
-							reservationSha256)
+					(hardenedBatchRecord.dispatch.attemptKey !== launchAuthority.attemptKey ||
+						hardenedBatchRecord.dispatch.reservationSha256 !== reservationSha256)
 				)
 					throw new Error(
 						`foreach batch ${hardenedBatchRecord.batchId} dispatch reservation drift`,
@@ -3418,12 +3342,7 @@ export async function launchSubagentTask(
 			let preReleaseStopError: unknown;
 			let resolution: DurableLaunchBarrierResolution | undefined;
 			try {
-				await throwIfLaunchStopped(
-					cwd,
-					run.runId,
-					leaseSignal,
-					workflowStopSignal,
-				);
+				await throwIfLaunchStopped(cwd, run.runId, leaseSignal, workflowStopSignal);
 			} catch (error) {
 				preReleaseStopError = error;
 				const cancellation = durableBarrierCancellationIdentity(
@@ -3446,8 +3365,7 @@ export async function launchSubagentTask(
 				releasePayloadSha256,
 				launchAbortSignal,
 			);
-			durableBarrierRecord.decisionSha256 =
-				resolution.decision.decisionSha256;
+			durableBarrierRecord.decisionSha256 = resolution.decision.decisionSha256;
 			if (resolution.outcome === "revoked") {
 				const cancellation = durableBarrierCancellationIdentity(
 					launchApi,
@@ -3464,19 +3382,14 @@ export async function launchSubagentTask(
 				};
 				await writeRunRecordDurable(cwd, run);
 				if (preReleaseStopError !== undefined) throw preReleaseStopError;
-				if (launchAbortSignal?.aborted)
-					throw abortSignalError(launchAbortSignal);
-				throw new Error(
-					"durable launch barrier was revoked before release",
-				);
+				if (launchAbortSignal?.aborted) throw abortSignalError(launchAbortSignal);
+				throw new Error("durable launch barrier was revoked before release");
 			}
 			const release = resolution.decision;
 			if (
 				release.kind !== "released" ||
-				release.schema !==
-					"pi-subagent-durable-launch-barrier-decision-v2" ||
-				release.barrierIdentitySha256 !==
-					durableBarrierDescriptor.identitySha256 ||
+				release.schema !== "pi-subagent-durable-launch-barrier-decision-v2" ||
+				release.barrierIdentitySha256 !== durableBarrierDescriptor.identitySha256 ||
 				release.challenge !== durableBarrierDescriptor.challenge ||
 				release.decisionNonce !== durableBarrierDescriptor.decisionNonce ||
 				release.subjectSha256 !== durableBarrierDescriptor.subjectSha256 ||
@@ -3495,15 +3408,9 @@ export async function launchSubagentTask(
 			durableBarrierRecord.decisionSha256 = release.decisionSha256;
 			await writeRunRecordDurable(cwd, run);
 			if (preReleaseStopError !== undefined) throw preReleaseStopError;
-			if (launchAbortSignal?.aborted)
-				throw abortSignalError(launchAbortSignal);
+			if (launchAbortSignal?.aborted) throw abortSignalError(launchAbortSignal);
 			await beforeDurableBarrierAckWaitHookForTests?.();
-			await throwIfLaunchStopped(
-				cwd,
-				run.runId,
-				leaseSignal,
-				workflowStopSignal,
-			);
+			await throwIfLaunchStopped(cwd, run.runId, leaseSignal, workflowStopSignal);
 			const ack = await awaitSubagentOperation(
 				() =>
 					launchApi.waitForDurableLaunchBarrierV2Ack(
@@ -3519,8 +3426,7 @@ export async function launchSubagentTask(
 			);
 			if (
 				ack.schema !== "pi-subagent-durable-launch-barrier-ack-v2" ||
-				ack.barrierIdentitySha256 !==
-					durableBarrierDescriptor.identitySha256 ||
+				ack.barrierIdentitySha256 !== durableBarrierDescriptor.identitySha256 ||
 				ack.challenge !== durableBarrierDescriptor.challenge ||
 				ack.decisionNonce !== durableBarrierDescriptor.decisionNonce ||
 				ack.runId !== release.runId ||
@@ -3535,12 +3441,7 @@ export async function launchSubagentTask(
 			durableBarrierRecord.phase = "acknowledged";
 			durableBarrierRecord.ackSha256 = ack.ackSha256;
 			await writeRunRecordDurable(cwd, run);
-			await throwIfLaunchStopped(
-				cwd,
-				run.runId,
-				leaseSignal,
-				workflowStopSignal,
-			);
+			await throwIfLaunchStopped(cwd, run.runId, leaseSignal, workflowStopSignal);
 		} catch (error) {
 			const cancelled =
 				leaseSignal?.aborted === true ||
@@ -3684,7 +3585,10 @@ async function reconcileDurableLaunchBarrierTask(
 			record.backendAttemptId,
 			ready.attemptId,
 		);
-		if (handle && (handle.runId !== ready.runId || handle.attemptId !== ready.attemptId))
+		if (
+			handle &&
+			(handle.runId !== ready.runId || handle.attemptId !== ready.attemptId)
+		)
 			throw new Error(
 				"durable launch barrier recovered handle does not match READY",
 			);
@@ -3749,8 +3653,7 @@ async function reconcileDurableLaunchBarrierTask(
 				record.phase = "released";
 		} else {
 			record.releaseWinner = false;
-			if (record.phase !== "cancellation_acknowledged")
-				record.phase = "revoked";
+			if (record.phase !== "cancellation_acknowledged") record.phase = "revoked";
 		}
 		changed = true;
 	} else if (
@@ -3788,10 +3691,7 @@ async function reconcileDurableLaunchBarrierTask(
 		)
 			record.phase = "acknowledged";
 		changed = true;
-	} else if (
-		record.ackSha256 !== undefined ||
-		record.phase === "acknowledged"
-	) {
+	} else if (record.ackSha256 !== undefined || record.phase === "acknowledged") {
 		throw new Error(
 			"durable launch barrier persisted acknowledgement has no recoverable ACK receipt",
 		);
@@ -3803,8 +3703,7 @@ async function reconcileDurableLaunchBarrierTask(
 		record.phase === "release_won_cancellation_pending";
 	if (
 		cancellationPending ||
-		(state.ack === undefined &&
-			barrierRecoveryIsStale(task, record.descriptor))
+		(state.ack === undefined && barrierRecoveryIsStale(task, record.descriptor))
 	) {
 		await acknowledgeSubagentTaskInterrupted(
 			cwd,
@@ -3850,8 +3749,7 @@ export async function refreshRunFromSubagentArtifacts(
 	reconcileLiveModelWorkerSlots(run);
 
 	for (const [order, task] of run.tasks.entries()) {
-		if (isTerminalTaskStatus(task.status) || task.status !== "running")
-			continue;
+		if (isTerminalTaskStatus(task.status) || task.status !== "running") continue;
 		const activeBatch = activeForeachBatchRecordForTask(run, task);
 		if (activeBatch && task.foreachBatch?.role === "member") continue;
 		if (
@@ -3869,9 +3767,7 @@ export async function refreshRunFromSubagentArtifacts(
 				task.backendFiles = {
 					runsDir: toProjectPath(task.cwd, resolve(task.cwd, handle.runsDir)),
 					correlationId: `${run.runId}:${task.taskId}`,
-					...(handle.sessionId === undefined
-						? {}
-						: { sessionId: handle.sessionId }),
+					...(handle.sessionId === undefined ? {} : { sessionId: handle.sessionId }),
 				};
 				task.statusDetail = "running";
 				task.lastMessage = `adopted pi-subagent run ${handle.runId}/${handle.attemptId}`;
@@ -3879,8 +3775,7 @@ export async function refreshRunFromSubagentArtifacts(
 			}
 		}
 		if (task.durableLaunchBarrier) {
-			if (await reconcileDurableLaunchBarrierTask(cwd, run, task))
-				changed = true;
+			if (await reconcileDurableLaunchBarrierTask(cwd, run, task)) changed = true;
 			handle = getSubagentHandle(task);
 		}
 		if (
@@ -3926,16 +3821,11 @@ export async function refreshRunFromSubagentArtifacts(
 							"batch launch authority could not be correlated",
 						);
 					} else {
-					setTaskTerminal(
-						task,
-						"failed",
-						"launch_authority_recovery_failed",
-						{
+						setTaskTerminal(task, "failed", "launch_authority_recovery_failed", {
 							exitCode: 1,
 							lastMessage:
 								"registered launch authority could not be correlated; refusing duplicate spawn",
-						},
-					);
+						});
 					}
 				} else {
 					resetStaleLaunchClaim(task);
@@ -4212,12 +4102,7 @@ async function interruptTimedOutSubagent(
 	run: WorkflowRunRecord,
 	task: WorkflowTaskRunRecord,
 ): Promise<void> {
-	await acknowledgeSubagentTaskInterrupted(
-		cwd,
-		run,
-		task,
-		"workflow timeout",
-	);
+	await acknowledgeSubagentTaskInterrupted(cwd, run, task, "workflow timeout");
 }
 
 function markCancellationFailed(
@@ -4410,22 +4295,17 @@ async function materializeTerminalSubagentResult(
 		);
 	}
 	if (task.artifactGraph?.enabled && statusInfo.status === "completed") {
-		const changed = await materializeTerminalArtifactGraphResult(
-			cwd,
-			run,
-			task,
-			{
-				outputFile,
-				stderrFile,
-				resultFile,
-				completedAt,
-				startedAt,
-				exitCode,
-				subagentResult,
-				subagentToolCalls: failedToolCalls,
-				subagentToolCallsSummary: toolCalls,
-			},
-		);
+		const changed = await materializeTerminalArtifactGraphResult(cwd, run, task, {
+			outputFile,
+			stderrFile,
+			resultFile,
+			completedAt,
+			startedAt,
+			exitCode,
+			subagentResult,
+			subagentToolCalls: failedToolCalls,
+			subagentToolCallsSummary: toolCalls,
+		});
 		await recordTerminalParentSubagentChildEvent(run, task, snapshot);
 		return changed;
 	}
@@ -4441,28 +4321,22 @@ async function materializeTerminalSubagentResult(
 			snapshot,
 		})
 	) {
-		const changed = await materializeTerminalArtifactGraphResult(
-			cwd,
-			run,
-			task,
-			{
-				outputFile,
-				stderrFile,
-				resultFile,
-				completedAt,
-				startedAt,
-				exitCode,
-				subagentResult,
-				subagentToolCalls: failedToolCalls,
-				subagentToolCallsSummary: toolCalls,
-				salvage: {
-					failureKind:
-						statusInfo.failureKind ?? snapshot.failureKind ?? "model",
-					subagentStatus: snapshot.status,
-					subagentFailureKind: snapshot.failureKind,
-				},
+		const changed = await materializeTerminalArtifactGraphResult(cwd, run, task, {
+			outputFile,
+			stderrFile,
+			resultFile,
+			completedAt,
+			startedAt,
+			exitCode,
+			subagentResult,
+			subagentToolCalls: failedToolCalls,
+			subagentToolCallsSummary: toolCalls,
+			salvage: {
+				failureKind: statusInfo.failureKind ?? snapshot.failureKind ?? "model",
+				subagentStatus: snapshot.status,
+				subagentFailureKind: snapshot.failureKind,
 			},
-		);
+		});
 		await recordTerminalParentSubagentChildEvent(run, task, snapshot);
 		return changed;
 	}
@@ -4739,11 +4613,7 @@ async function commitTerminalForeachBatch(
 						`batch item ${task.taskId} is missing after envelope validation`,
 					);
 				const itemRawOutput = reconstructForeachBatchItemOutput(item);
-				const parseOptions = await foreachBatchMemberParseOptions(
-					cwd,
-					run,
-					task,
-				);
+				const parseOptions = await foreachBatchMemberParseOptions(cwd, run, task);
 				const parsed = await validateWorkflowOutputForBundle(
 					itemRawOutput,
 					parseOptions,
@@ -4860,6 +4730,9 @@ export async function recoverForeachBatchRuntime(
 			const capability = await issueForeachBatchCapability(cwd, record);
 			await assertForeachBatchCapability(cwd, record, capability);
 		}
+		if (record.phase === "fallback_applied")
+			changed =
+				migrateForeachBatchFallbackTasks(run, record) || changed;
 		foreachBatchTasks(run, record);
 		if (record.phase === "fallback_prepared") {
 			const reason =
@@ -4880,8 +4753,7 @@ export async function recoverForeachBatchRuntime(
 					cwd,
 					run,
 					record,
-					record.fallback?.reason ??
-						`batch backend terminal ${terminal.status}`,
+					record.fallback?.reason ?? `batch backend terminal ${terminal.status}`,
 				);
 				changed = true;
 				continue;
@@ -5215,7 +5087,10 @@ async function materializeTerminalArtifactGraphResultInner(
 		return retryOrFailArtifactGraphTask(task, {
 			reason: "workflow_output_invalid",
 			attempt,
-			message: buildWorkflowOutputRetryInstructions(written.parsed.issues, parseOptions),
+			message: buildWorkflowOutputRetryInstructions(
+				written.parsed.issues,
+				parseOptions,
+			),
 			...retrySession,
 		});
 	}
@@ -5487,9 +5362,7 @@ export async function checkRequiredArtifactReads(
 			})
 		: ledger;
 	const missing = requiredReads
-		.filter(
-			(required) => !requiredArtifactReadSatisfied(required, attemptLedger),
-		)
+		.filter((required) => !requiredArtifactReadSatisfied(required, attemptLedger))
 		.map(formatRequiredArtifactRead);
 	const projectionFailures: string[] = [];
 	for (const policy of requiredReadPolicy) {
@@ -5503,9 +5376,7 @@ export async function checkRequiredArtifactReads(
 			continue;
 		}
 		if (
-			!sourceArtifactRows.some((entry) =>
-				requiredReadPolicyMatches(entry, policy),
-			)
+			!sourceArtifactRows.some((entry) => requiredReadPolicyMatches(entry, policy))
 		) {
 			projectionFailures.push(formatRequiredReadPolicyName(policy));
 		}
@@ -6248,9 +6119,7 @@ function retryOrFailArtifactGraphTask(
 		...(options.repairMode === undefined
 			? {}
 			: { repairMode: options.repairMode }),
-		...(options.sessionId === undefined
-			? {}
-			: { sessionId: options.sessionId }),
+		...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
 	};
 	task.outputRetry = outputRetry;
 	delete task.backendHandle;
@@ -6452,7 +6321,8 @@ export async function prepareSubagentTaskLaunch(
 				"fetch-content",
 			),
 			maxInlineChars: fetchContentInlineCharsEnvValue(),
-			cacheEnabled: shouldUseFetchContentCache(tools) && legacyProvider.kind !== "extension",
+			cacheEnabled:
+				shouldUseFetchContentCache(tools) && legacyProvider.kind !== "extension",
 			providerKind: legacyProvider.kind,
 			requiredProviderTools: legacyProviderTools,
 			exposedProviderTools: legacyProviderTools,
@@ -6511,10 +6381,10 @@ export async function prepareSubagentTaskLaunch(
 			cacheDir: resolve(cwd, ".pi", "workflows", run.runId, "web-source-cache"),
 			provider: {
 				kind:
-					(providerExtensionPaths.length === 0 ||
-						providerExtensionPaths.every(
-							(path) => resolve(path) === BUNDLED_PI_WEB_ACCESS_EXTENSION,
-						))
+					providerExtensionPaths.length === 0 ||
+					providerExtensionPaths.every(
+						(path) => resolve(path) === BUNDLED_PI_WEB_ACCESS_EXTENSION,
+					)
 						? ("pi-web-access" as const)
 						: ("extension" as const),
 				extensionPath: providerExtensionPath,
@@ -6536,7 +6406,10 @@ export async function prepareSubagentTaskLaunch(
 			exposedWorkflowTools: (tools ?? []).filter((tool) =>
 				isWorkflowWebSourceTool(tool),
 			),
-			passthroughProviderTools: selectedNormalizedPassthroughTools(tools, toolProviders),
+			passthroughProviderTools: selectedNormalizedPassthroughTools(
+				tools,
+				toolProviders,
+			),
 			requiredProviderTools: (tools ?? []).includes("workflow_web_search")
 				? ["web_search"]
 				: [],
@@ -6741,8 +6614,7 @@ function selectedLegacyPassthroughTools(
 ): string[] {
 	return (tools ?? []).filter(
 		(tool) =>
-			!LEGACY_PROVIDER_TOOL_NAMES.has(tool) &&
-			!isWorkflowWebSourceTool(tool),
+			!LEGACY_PROVIDER_TOOL_NAMES.has(tool) && !isWorkflowWebSourceTool(tool),
 	);
 }
 
@@ -6754,7 +6626,8 @@ function selectedNormalizedPassthroughTools(
 		(tool) =>
 			!LEGACY_PROVIDER_TOOL_NAMES.has(tool) &&
 			!isWorkflowWebSourceTool(tool) &&
-			providers !== undefined && Object.hasOwn(providers, tool),
+			providers !== undefined &&
+			Object.hasOwn(providers, tool),
 	);
 }
 
@@ -6811,7 +6684,9 @@ async function resolveProviderExtensionRef(
 ): Promise<string> {
 	const trimmed = typeof ref === "string" ? ref.trim() : "";
 	if (!trimmed)
-		throw new Error(`provider extension ownership for ${tool} contains an empty reference`);
+		throw new Error(
+			`provider extension ownership for ${tool} contains an empty reference`,
+		);
 	if (/^(?:npm:|git:|github:|https?:|ssh:)/i.test(trimmed)) {
 		throw new Error(
 			`provider extension reference ${JSON.stringify(ref)} for ${tool} is not a local extension file; package/remote extension sources are unsupported for sealed provider ownership`,
@@ -6856,9 +6731,17 @@ function normalizedProviderToolOwnerPaths(
 	if (webSearchOwners.length) owners.web_search = webSearchOwners;
 	for (const tool of selectedNormalizedPassthroughTools(tools, toolProviders)) {
 		const configured = toolProviders?.[tool]?.extensions ?? [];
-		const unique = [...new Set(configured.filter((path): path is string => typeof path === "string" && path.trim() !== ""))];
+		const unique = [
+			...new Set(
+				configured.filter(
+					(path): path is string => typeof path === "string" && path.trim() !== "",
+				),
+			),
+		];
 		if (unique.length !== 1 || unique.length !== configured.length) {
-			throw new Error(`normalized provider ownership is missing or ambiguous for selected passthrough tool ${tool}`);
+			throw new Error(
+				`normalized provider ownership is missing or ambiguous for selected passthrough tool ${tool}`,
+			);
 		}
 		owners[tool] = unique;
 	}
@@ -6886,14 +6769,17 @@ function workflowWebSourceProviderExtensions(
 		// a custom fetch extension merely because it was attached to that tool;
 		// custom search and explicitly selected passthrough tools remain loaded.
 		if (
-			(tool === "workflow_web_search") ||
-			(!LEGACY_PROVIDER_TOOL_NAMES.has(tool) && !isWorkflowWebSourceTool(tool) && tool !== "code_search")
+			tool === "workflow_web_search" ||
+			(!LEGACY_PROVIDER_TOOL_NAMES.has(tool) &&
+				!isWorkflowWebSourceTool(tool) &&
+				tool !== "code_search")
 		)
 			add(toolProviders?.[tool]?.extensions);
 	}
 	// A shared provider may own code_search as well as a normalized search
 	// tool. Capture it in the generated wrapper so it can be re-exported once.
-	if (selected.includes("code_search")) add(toolProviders?.code_search?.extensions);
+	if (selected.includes("code_search"))
+		add(toolProviders?.code_search?.extensions);
 	if (selected.includes("workflow_web_search"))
 		add(toolProviders?.web_search?.extensions);
 	// Normalized fetch is always backed by the generated public-host-checked
@@ -6931,7 +6817,11 @@ function providerExtensionsForTools(
 	legacyProvider: LegacyProviderResolution,
 ): string[] {
 	const providers = new Set<string>();
-	const legacyTools = new Set(["web_search", "fetch_content", "get_search_content"]);
+	const legacyTools = new Set([
+		"web_search",
+		"fetch_content",
+		"get_search_content",
+	]);
 	for (const tool of tools ?? []) {
 		const customExtensions = toolProviders?.[tool]?.extensions;
 		const legacyOwnedByWrapper =
@@ -7023,9 +6913,7 @@ function toolCallArtifactRef(
 			typeof (artifact as SubagentArtifactRef).path === "string"
 		);
 	});
-	return ref
-		? { ...ref, artifactCwd: ref.artifactCwd ?? resultCwd }
-		: undefined;
+	return ref ? { ...ref, artifactCwd: ref.artifactCwd ?? resultCwd } : undefined;
 }
 
 function failedToolCallSummary(
@@ -7060,7 +6948,10 @@ function stringValue(value: unknown): string | undefined {
 	return typeof value === "string" ? value : undefined;
 }
 
-export type TaskArtifactLinkTestHook = (source: string, target: string) => void | Promise<void>;
+export type TaskArtifactLinkTestHook = (
+	source: string,
+	target: string,
+) => void | Promise<void>;
 
 let taskArtifactLinkForTests: TaskArtifactLinkTestHook | undefined;
 
@@ -7237,9 +7128,7 @@ function isPreClaimSubagentRecord(
 		timestampMs(record.startedAt) ??
 		timestampMs(record.attempts?.[0]?.startedAt) ??
 		timestampMs(record.updatedAt);
-	return (
-		recordStartedAtMs !== undefined && recordStartedAtMs < claimStartedAtMs
-	);
+	return recordStartedAtMs !== undefined && recordStartedAtMs < claimStartedAtMs;
 }
 
 function timestampMs(value: string | undefined): number | undefined {
@@ -7300,8 +7189,7 @@ function subagentRunsDir(
 function buildSystemPrompt(task: CompiledTask): string {
 	const workflowMaxDigestChars = task.artifactGraph?.output.maxDigestChars;
 	const workflowRefsMinItems = task.artifactGraph?.output.refsMinItems;
-	const workflowRefsUrlValidation =
-		task.artifactGraph?.output.refsUrlValidation;
+	const workflowRefsUrlValidation = task.artifactGraph?.output.refsUrlValidation;
 	const workflowOutputContract =
 		task.foreachBatchSynthetic?.schema === "workflow-foreach-batch-v1"
 			? [
@@ -7311,31 +7199,31 @@ function buildSystemPrompt(task: CompiledTask): string {
 					"Do not add a singleton control.digest field or any other outer-envelope key not required by the batch prompt.",
 				]
 			: task.artifactGraph?.enabled
-		? [
-				"# Workflow Output Contract",
-				"For this workflow task, the output protocol in the task prompt overrides any direct-response format in the agent definition.",
-				"Your final response must start exactly with <control> and end exactly with </refs>.",
-				"Do not include preambles, status updates, Markdown headings, or prose outside the required workflow output sections.",
-				"Never start with status text such as 'I have enough evidence' or 'Composing output'; put all explanatory prose inside <analysis> only.",
-				...(workflowMaxDigestChars !== undefined
-					? [
-							`The control.digest string is required and must be at most ${workflowMaxDigestChars} characters; prefer one short sentence.`,
-						]
-					: []),
-				...(workflowRefsMinItems !== undefined && workflowRefsMinItems > 0
-					? [
-							`The <refs> JSON array must include at least ${workflowRefsMinItems} item${workflowRefsMinItems === 1 ? "" : "s"}. Include URLs or local file paths used by the analysis.`,
-						]
-					: []),
-				...(workflowRefsUrlValidation
-					? [
-							"External URLs in <refs> are validated before completion. Use available workflow web tools to fetch/cache the URL and read exact evidence before citing it; replace stale or unreachable URLs with working canonical URLs or omit them.",
-						]
-					: []),
-			]
-		: [
-				"When complete, provide a concise final report with findings, changed files if any, and blockers.",
-			];
+				? [
+						"# Workflow Output Contract",
+						"For this workflow task, the output protocol in the task prompt overrides any direct-response format in the agent definition.",
+						"Your final response must start exactly with <control> and end exactly with </refs>.",
+						"Do not include preambles, status updates, Markdown headings, or prose outside the required workflow output sections.",
+						"Never start with status text such as 'I have enough evidence' or 'Composing output'; put all explanatory prose inside <analysis> only.",
+						...(workflowMaxDigestChars !== undefined
+							? [
+									`The control.digest string is required and must be at most ${workflowMaxDigestChars} characters; prefer one short sentence.`,
+								]
+							: []),
+						...(workflowRefsMinItems !== undefined && workflowRefsMinItems > 0
+							? [
+									`The <refs> JSON array must include at least ${workflowRefsMinItems} item${workflowRefsMinItems === 1 ? "" : "s"}. Include URLs or local file paths used by the analysis.`,
+								]
+							: []),
+						...(workflowRefsUrlValidation
+							? [
+									"External URLs in <refs> are validated before completion. Use available workflow web tools to fetch/cache the URL and read exact evidence before citing it; replace stale or unreachable URLs with working canonical URLs or omit them.",
+								]
+							: []),
+					]
+				: [
+						"When complete, provide a concise final report with findings, changed files if any, and blockers.",
+					];
 	const enabledTools = task.runtime.tools ?? [];
 	const toolPolicy = [
 		"# Effective Tool Policy",

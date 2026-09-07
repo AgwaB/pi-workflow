@@ -849,6 +849,8 @@ export interface LaunchBootstrapProvenanceRecord {
 		launchRetry: number;
 		outputRetry: number;
 		resume: number;
+		/** Physical batch/fallback attempt; absent for legacy/non-batch records. */
+		physicalAttempt?: number;
 	};
 	sessionId?: string;
 	backend: { id: string; type: string; mode: string };
@@ -1054,6 +1056,8 @@ export interface WorkflowForeachBatchTaskState {
 	batchId: string;
 	role: "leader" | "member";
 	phase: WorkflowForeachBatchPhase;
+	/** Durable identity of the physical batch/singleton attempt owning this task. */
+	physicalAttempt?: number;
 	/** Prevent a malformed/failed batch from being selected again for this item. */
 	batchingDisabled?: true;
 }

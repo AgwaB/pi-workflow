@@ -36,6 +36,14 @@ Experimental or candidate workflows should live outside the bundled `workflows/`
 
 Bundled workflows that verify source-backed claims can share the verification outcome ontology exported by the package: `verified`, `partially_supported`, `unsupported`, `conflicting`, and `verification_blocked`. Workflow helpers should keep dependency-free bundle-local shims in parity with that package export, because helper imports are bundled from the workflow spec directory. `verification_blocked` means verification could not complete because evidence, tool, source-access, or policy conditions blocked evaluation; it is never counted as verified. Deep-research uses this ontology. Workflows with different verdict models, such as finding disposition or ship readiness, should not be forced into it.
 
+## Evidence integrity and limitations
+
+- Research preserves planned-question coverage, source identities, gaps, and canonical claim ledgers. Use typed local file/range/quote evidence instead of ambiguous source labels. Recommendations cannot upgrade unsupported or blocked claims; positive recommendations derived from verified claims remain derived judgments. An over-budget synthesis projection blocks explicitly while retaining the canonical ledger.
+- Review keeps independently actionable defects separate even when they share code lines or quotes. It preserves synthesis rationale, risks, and actions, and distinguishes reviewer/source quotes from unavailable verifier evidence. Its final report describes the reviewed snapshot, not a new current-tree byte attestation.
+- Spec review grounds extracted requirements in declared local spec sources and checks the runtime candidate universe independently. A genuinely empty finding set can conform; forged zero counts or absent coverage cannot.
+- Impact review conserves original scope, finding, and action rows and enforces their risk floor. The final support helper derives canonical observation IDs, source provenance, and control-value hashes directly from all twelve source controls; models do not recopy ledgers. Model-written owner or resolution references are not human approval. Conservation cannot prove that the models discovered every defect, and impact citations do not independently attest source bytes.
+- Requested report-sidecar publication failures are surfaced rather than silently returning a clean completion with broken artifact links.
+
 ## Bundle layout
 
 Bundled workflows use directory-local bundles:

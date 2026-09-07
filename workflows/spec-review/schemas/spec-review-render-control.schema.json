@@ -66,6 +66,21 @@
       },
       "additionalProperties": false
     },
+    "scopeLimitations": {
+      "type": "array",
+      "maxItems": 40,
+      "items": {
+        "type": "object",
+        "required": ["kind", "text"],
+        "properties": {
+          "kind": { "type": "string", "const": "NONBLOCKING" },
+          "text": { "type": "string", "minLength": 1, "maxLength": 240 },
+          "blocking": { "type": "boolean", "const": false }
+        },
+        "additionalProperties": false
+      }
+    },
+    "testExecutionAttested": { "type": "boolean", "const": false },
     "blockers": { "type": "array", "items": { "type": "string" }, "maxItems": 32 },
     "sidecarPath": { "type": "string", "const": "final-report.md" },
     "ledgerSidecarPath": { "type": "string", "const": "source-ledger.json" }
