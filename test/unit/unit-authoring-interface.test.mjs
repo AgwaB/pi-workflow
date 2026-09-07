@@ -580,15 +580,10 @@ test("bundled deep-research compacts audit packets before executive final", asyn
 
 	assert.equal(finalAudit?.kind, "reduce");
 	assert.deepEqual(finalAudit.dependsOn, ["final-audit-packet.main"]);
-	assert.deepEqual(finalAudit.artifactGraph.requiredReads, [
-		{
-			source: "final-audit-packet",
-			artifact: "control",
-			path: "$.packet.synthesisInput",
-			maxChars: 24000,
-			count: 1,
-		},
-	]);
+	assert.deepEqual(finalAudit.artifactGraph.requiredReads,
+		["$.packet.synthesisInput.header", ...Array.from({ length: 8 }, (_, i) => `$.packet.synthesisInput.pages[${i}]`)]
+			.map((path) => ({ source: "final-audit-packet", artifact: "control", path, maxChars: 24000, count: 1 })),
+	);
 	assert.equal(finalAudit.artifactGraph.sourceProjection, undefined);
 	assert.equal(finalAudit.injectTask, true);
 	assert.match(finalAudit.compiledPrompt, /# Task/);

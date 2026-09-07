@@ -1,3 +1,4 @@
+import { buildSynthesisPages, reconstructSynthesisPages } from "../../workflows/deep-research/helpers/synthesis-pages.mjs";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -134,16 +135,14 @@ test("live research correction reconciles canonical slots and preserves blocked/
     },
   });
   assert.equal(validateJsonSchema(packet, packetSchema).valid, true);
-  const encodedProjection = JSON.stringify(packet.packet.synthesisInput);
-  assert.equal(packet.packet.synthesisInput.inputBudget.utf16Chars, encodedProjection.length);
-  assert(encodedProjection.length < 24000);
+  assert(packet.packet.synthesisInput.pages.every((page) => JSON.stringify(page).length <= 24000));
   const slots = packet.packet.factSlotCoverage;
   assert.deepEqual(slots.find((slot) => slot.slotId === "slot-005").verificationCandidateIds, ["claim-012", "claim-010"]);
   assert.deepEqual(packet.packet.factSlotReconciliation.addedReverseBindings, [
     { claimId: "claim-010", slotId: "slot-005" },
   ]);
   assert.equal(packet.packet.claimVerdictLedger.find((row) => row.id === "claim-010").evidence[0].lineStart, 1);
-  assert.equal(packet.packet.synthesisInput.claims.find((row) => row.id === "claim-010").evidence[0].quote, "TTL is 30 seconds; reread origin after expiry.");
+  assert.equal(reconstructSynthesisPages(packet.packet.synthesisInput).claimVerdictLedger.find((row) => row.id === "claim-010").evidence[0].quote, "TTL is 30 seconds; reread origin after expiry.");
 
   const rendered = await render({
     sources: {
@@ -207,7 +206,7 @@ test("live research correction reconciles canonical slots and preserves blocked/
 
   const collisionPacket = await makeReferencePacket([lead, { ...lead, id: "lead-0000" }]);
   collisionPacket.packet.preservedClaims[1].id = "claim-010";
-  collisionPacket.packet.synthesisInput.preservedClaims[1].id = "claim-010";
+  collisionPacket.packet.synthesisInput = buildSynthesisPages(collisionPacket.packet);
   const collisionRendered = await render({ sources: { "final-audit.main": referenceSynthesis, "final-audit-packet.main": collisionPacket } });
   assert.equal(collisionRendered.status, "failed");
   assert(collisionRendered.renderWarnings.some((warning) => warning.label === "ambiguous preserved claim ID"));

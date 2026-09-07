@@ -558,7 +558,7 @@
 		{
 			"name": "bundled deep-research compacts audit packets before executive final",
 			"occurrence": 1,
-			"sha256": "99ee72717c707ded2dd201709325f3bd11f8a2d544e21e07e5023a2cad836fd8",
+			"sha256": "d5de55d14f8ea2abb6c0884d06b30c846bb354e19704f23b3ab0c6e8e2d3b849",
 			"domain": "authoring-interface"
 		},
 		{
@@ -942,13 +942,13 @@
 		{
 			"name": "deep-research final-audit packet compacts deterministic ledgers",
 			"occurrence": 1,
-			"sha256": "9d665282971e81ebd3355e7e02f5c0a2eb0cdada5e84bb6c846d7ae83b6cec63",
+			"sha256": "f26a19ca70ee9d565a93dc07288abe451051ff4a3691c45dd1c1c1e8c78858e5",
 			"domain": "core-runtime"
 		},
 		{
 			"name": "deep-research final-audit packet does not preserve contradicted fact-slot values as filled",
 			"occurrence": 1,
-			"sha256": "b4e12bf3b4e178f4850f4e95c73acffcf1a8e87af5994f987d714c696485aed7",
+			"sha256": "caa04462b8d5f576f4487276573dfc0df9bfeb9cb04836b2b07db8041df31cd4",
 			"domain": "core-runtime"
 		},
 		{
@@ -978,7 +978,7 @@
 		{
 			"name": "deep-research P3 final-audit replay fixture preserves guardrail floors",
 			"occurrence": 1,
-			"sha256": "268a069065c0ba0a0d4a515432c36159f2ebd1877f79660c9629a4455292edf1",
+			"sha256": "d29055f6d9002c6abd7bd842f935ae943d1ef854a0f2035365d08d77b4591ed0",
 			"domain": "core-runtime"
 		},
 		{
@@ -996,7 +996,7 @@
 		{
 			"name": "deep-research renderer joins synthesis overlay against packet ledgers",
 			"occurrence": 1,
-			"sha256": "60aca372eae7bbce6246bdc555b901b350572c21e3387b87c13cc5103705faf8",
+			"sha256": "b7da2ef5dc0e99b743889fa0499b3fed9ddcd9e1e47a108873b580bd4f521b85",
 			"domain": "core-runtime"
 		},
 		{

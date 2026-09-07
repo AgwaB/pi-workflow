@@ -1,3 +1,4 @@
+import { buildSynthesisPages, reconstructSynthesisPages } from "../../workflows/deep-research/helpers/synthesis-pages.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
@@ -106,9 +107,9 @@ test("deep-research packet exposes invalid normalized candidate rows in synthesi
       invalidNormalizedCandidates: [{ index: 2, reason: "duplicate_normalized_candidate_id", nextStep: "repair" }],
     },
   }});
-  const integrity = packet.packet.synthesisInput.integritySummary;
+  const integrity = reconstructSynthesisPages(packet.packet.synthesisInput).verifierIntegrity;
   assert.equal(integrity.invalidNormalizedCandidateCount, 1);
-  assert.deepEqual(integrity.invalidNormalizedCandidateRows[0], packet.packet.verifierIntegrity.invalidNormalizedCandidateRows[0]);
+  assert.deepEqual(integrity.invalidNormalizedCandidateRows[0], JSON.parse(JSON.stringify(packet.packet.verifierIntegrity.invalidNormalizedCandidateRows[0])));
   assert.equal(packet.packet.overflowLedger.invalidNormalizedCandidateCount, 1);
 });
 
@@ -290,17 +291,6 @@ test("deep-research packet reconciliation blocks swapped and inconsistent final 
     schema: "deep-research-final-audit-packet-v1",
     digest: "packet",
     packet: {
-      synthesisInput: {
-        researchMetadata: {},
-        verdictCounts: { verified: 1, partiallySupported: 0, unsupported: 0, conflicting: 0, verificationBlocked: 0 },
-        factSlotStatusCounts: { filled: 1 },
-        integritySummary: { invalidNormalizedCandidateCount: 0, invalidNormalizedCandidateRows: [], verifierOwnerIssues: 0 },
-        researchScopeCoverage: [],
-        factSlots: [{ slotId: "slot-001", status: "filled" }],
-        claims: [{ id: "claim-001", status: "verified", verifierOwner: { source: "verify-claims.claim-001", stageId: "verify-claims", specId: "verify-claims.claim-001", taskId: "task-claim-001", itemIdentity: "claim-001", placeholderSpecId: "verify-claims.item", status: "completed" } }],
-        preservedClaims: [],
-        gaps: [],
-      },
       researchMetadataSeed: {},
       verdictCounts: { verified: 1, partiallySupported: 0, unsupported: 0, conflicting: 0, verificationBlocked: 0 },
       statusPartitions: { verified: ["claim-001"], partiallySupported: [], unsupported: [], conflicting: [], verificationBlocked: [] },
@@ -319,6 +309,7 @@ test("deep-research packet reconciliation blocks swapped and inconsistent final 
     },
   };
   const final = { schema: "deep-research-final-synthesis-v1", digest: "final", synthesis: { bottomLine: "Answer", keyFindingIds: ["claim-001"], recommendations: [], actionPlan: [], caveatNotes: [], parentDecisionNotes: [] } };
+  packet.packet.synthesisInput = buildSynthesisPages(packet.packet);
   const good = await researchRender({ sources: { "final-audit-packet": packet, "final-audit": final } });
   assert.equal(good.status, "passed");
   for (const mutate of [

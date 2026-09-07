@@ -1,3 +1,5 @@
+import { validateSynthesisPages } from "./synthesis-pages.mjs";
+
 // Deterministic evidence-backed renderer for deep-research.
 //
 // Input: final-audit.control.json from the full deep-research final stage.
@@ -638,20 +640,7 @@ function validFinalAuditPacket(packetSource) {
 				"preservedClaims",
 				"researchScopeCoverage",
 			].every((field) => boundedArray(packet[field], Infinity, isRecord)) &&
-			isRecord(synthesisInput) &&
-			[
-				"researchMetadata",
-				"verdictCounts",
-				"factSlotStatusCounts",
-				"integritySummary",
-			].every((field) => isRecord(synthesisInput[field])) &&
-			[
-				"researchScopeCoverage",
-				"factSlots",
-				"claims",
-				"preservedClaims",
-				"gaps",
-			].every((field) => boundedArray(synthesisInput[field], Infinity, isRecord)),
+			isRecord(synthesisInput),
 	);
 }
 
@@ -907,19 +896,20 @@ function packetHasCompleteContract(packet) {
 		isRecord(packet.invariantChecks) &&
 		Array.isArray(packet.invariantChecks.candidateIds) &&
 		Array.isArray(packet.invariantChecks.auditedClaimIds) &&
-		isRecord(packet.overflowLedger) &&
-		isRecord(packet.synthesisInput?.integritySummary)
+		isRecord(packet.overflowLedger)
 	);
 }
 
 function reconcileFinalPacket(packet, control) {
+	const blockers =
+		validModernFinalAudit(control) ||
+		packetHasCompleteContract(packet) ||
+		packet?.synthesisInput
+			? validateSynthesisPages(packet)
+			: [];
 	if (!packetHasCompleteContract(packet)) {
-		return { strict: false, passed: true, blockers: [], checks: {} };
+		return { strict: false, passed: blockers.length === 0, blockers, checks: {} };
 	}
-	const blockers = [];
-	const budgetBlock = packet.synthesisInput?.inputBudget?.budgetBlock;
-	if (isRecord(budgetBlock) && budgetBlock.status === "blocked")
-		blockers.push("synthesis input budget block is present");
 	const ledger = packet.claimVerdictLedger;
 	const questionIntegrity =
 		packet.researchQuestionIntegrity ??
@@ -1086,6 +1076,17 @@ function reconcileFinalPacket(packet, control) {
 		}
 	}
 	const integrity = packet.verifierIntegrity;
+	// Previously checked against the independently counted synthesis digest.
+	// Lossless pages copy the full metadata, so retain this canonical count gate
+	// directly rather than letting two identical contradictory copies agree.
+	if (
+		integrity.gateSummary?.sourceRefJoinFailures !== undefined &&
+		!numberMatches(
+			integrity.gateSummary.sourceRefJoinFailures,
+			asArray(packet.sourceRefJoinFailures).length,
+		)
+	)
+		blockers.push("gate source-ref count does not match rows");
 	const invalidNormalizedRows = asArray(
 		integrity.invalidNormalizedCandidateRows,
 	);
@@ -1158,65 +1159,7 @@ function reconcileFinalPacket(packet, control) {
 		if (!numberMatches(invIntegrity[field], expected))
 			blockers.push(`verifier integrity mismatch: ${field}`);
 	}
-	const synthesisClaims = asArray(packet.synthesisInput?.claims);
-	if (
-		synthesisClaims.length > 0 &&
-		!sameIdMultiset(synthesisClaims.map(claimIdOf), ledgerIds)
-	)
-		blockers.push("synthesis claim ledger does not match packet claim ledger");
-	const synthesisCounts = packet.synthesisInput?.verdictCounts;
-	if (isRecord(synthesisCounts)) {
-		for (const [key, value] of Object.entries(packetCounts)) {
-			const synthesisKey =
-				key === "partially_supported"
-					? "partiallySupported"
-					: key === "verification_blocked"
-						? "verificationBlocked"
-						: key;
-			if (
-				synthesisCounts[synthesisKey] !== undefined &&
-				Number(synthesisCounts[synthesisKey]) !== Number(value)
-			)
-				blockers.push(`synthesis count mismatch: ${key}`);
-		}
-	}
-	const synthesisIntegrity = packet.synthesisInput?.integritySummary;
-	if (isRecord(synthesisIntegrity)) {
-		const packetJoinFailures = Number(
-			integrity.gateSummary?.sourceRefJoinFailures ??
-				asArray(packet.sourceRefJoinFailures).length,
-		);
-		if (
-			synthesisIntegrity.sourceRefJoinFailures !== undefined &&
-			Number(synthesisIntegrity.sourceRefJoinFailures) !== packetJoinFailures
-		)
-			blockers.push("synthesis integrity source-ref count mismatch");
-		if (
-			synthesisIntegrity.invalidVerifierRows !== undefined &&
-			Number(synthesisIntegrity.invalidVerifierRows) !==
-				asArray(integrity.invalidVerifierRows).length
-		)
-			blockers.push("synthesis integrity verifier-row count mismatch");
-		if (
-			synthesisIntegrity.invalidNormalizedCandidateCount !== undefined &&
-			Number(synthesisIntegrity.invalidNormalizedCandidateCount) !==
-				invalidNormalizedRows.length
-		)
-			blockers.push(
-				"synthesis integrity invalid normalized candidate count mismatch",
-			);
-		const synthesisInvalidRows = asArray(
-			synthesisIntegrity.invalidNormalizedCandidateRows,
-		);
-		if (
-			synthesisInvalidRows.length !== invalidNormalizedRows.length ||
-			JSON.stringify(synthesisInvalidRows) !==
-				JSON.stringify(invalidNormalizedRows)
-		)
-			blockers.push(
-				"synthesis integrity invalid normalized candidate rows mismatch",
-			);
-	}
+
 	const finalClaims = asArray(control?.claimVerdictIndex?.claims);
 	for (const row of finalClaims) {
 		const id = claimIdOf(row);
@@ -1482,11 +1425,21 @@ function composeResearchReport(control, packetSource) {
 		if (!id) continue;
 		if (referenceIds.has(id)) {
 			referenceById.delete(id);
-			warnings.push({ section: "references", label: "ambiguous preserved claim ID", total: 1, rendered: 0, missingId: id });
+			warnings.push({
+				section: "references",
+				label: "ambiguous preserved claim ID",
+				total: 1,
+				rendered: 0,
+				missingId: id,
+			});
 			continue;
 		}
 		referenceIds.add(id);
-		referenceById.set(id, { ...row, status: "unverified", verdict: "unverified" });
+		referenceById.set(id, {
+			...row,
+			status: "unverified",
+			verdict: "unverified",
+		});
 	}
 
 	const keyFindingIds = stringArray(synthesis.keyFindingIds, 12);
