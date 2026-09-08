@@ -9,6 +9,9 @@ function usage() {
 Usage:
   pi-workflow inspect <run-id-or-prefix> [--failures] [--results] [--json]
   pi-workflow prune [--keep N] [--older-than DAYS] [--yes] [--json]
+  pi-workflow notices list [--json]
+  pi-workflow notices acknowledge <exact-run-id> --state <sha256> --reason <text>
+  pi-workflow notices clear <exact-run-id> [--json]
   pi-workflow supervise <run-id-or-prefix> [--poll-ms N] [--max-runtime-ms N]
   pi-workflow supervise --all [--poll-ms N] [--max-runtime-ms N]
 
@@ -34,6 +37,10 @@ if (command === "supervise") {
 
 if (command === "prune") {
   process.exit(await prune(args.slice(1)));
+}
+
+if (command === "notices") {
+  process.exit(await notices(args.slice(1)));
 }
 
 if (command !== "inspect") {
@@ -94,6 +101,23 @@ for (const task of selected) {
 }
 
 process.stdout.write(`${lines.join("\n")}\n`);
+
+async function notices(argv) {
+  try {
+    const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+    const buildDir = await resolveEngineDist(packageRoot);
+    const { executeWorkflowNoticesCommand } = await import(
+      pathToFileURL(join(buildDir, "workflow-notices.js")).href
+    );
+    process.stdout.write(
+      `${await executeWorkflowNoticesCommand(process.cwd(), argv)}\n`,
+    );
+    return 0;
+  } catch (error) {
+    process.stderr.write(`${error.message}\n`);
+    return 1;
+  }
+}
 
 async function prune(argv) {
   const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));

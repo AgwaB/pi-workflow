@@ -152,6 +152,9 @@ Usage:
   /workflow resume <run-id>
   /workflow stop <run-id>
   /workflow prune [--keep N] [--older-than DAYS] [--yes] [--json]
+  /workflow notices list [--json]
+  /workflow notices acknowledge <exact-run-id> --state <sha256> --reason <text>
+  /workflow notices clear <exact-run-id> [--json]
 
 /workflow opens the read-only workflow board TUI.
 /workflow <run-id> opens the board focused on that run.

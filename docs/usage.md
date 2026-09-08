@@ -56,6 +56,9 @@ Terminal CLI:
 ```bash
 pi-workflow inspect <run-id-or-prefix> [--failures] [--results] [--json]
 pi-workflow prune [--keep N] [--older-than DAYS] [--yes] [--json]
+pi-workflow notices list [--json]
+pi-workflow notices acknowledge <exact-run-id> --state <sha256> --reason <text>
+pi-workflow notices clear <exact-run-id> [--json]
 pi-workflow supervise <run-id-or-prefix> [--poll-ms N] [--max-runtime-ms N]
 pi-workflow supervise --all [--poll-ms N] [--max-runtime-ms N]
 ```
@@ -168,6 +171,21 @@ For reusable workflow authoring, `workflow-guide` includes validated scaffold bu
 Interactive `/workflow run` and `/workflow dynamic` slash commands use Pi's cancellable foreground loader while routing, validating, and completing the initial scheduling pass. After at least one backend task is actually running, the command returns and a compact `Active workflows` widget below the editor plus a footer status tracks top-level run progress. Launch/preparation states and stale `running` records with no running task are excluded. The widget is rebuilt from `.pi/workflows` after session reload, supports multiple active runs, and clears when none remain; open `/workflow` for the full board. Natural-language launch-only calls use the same background widget. Natural-language calls with `awaitTerminal: true`, and explicit `workflow_wait` calls, drive the existing scheduler until terminal or action-required blocked state and return only a bounded authoritative-output preview. They report retries, usage, degradation, and the artifact root. For an ordinary output-bearing `completed` run, active-session completion feedback asks the parent to present only the substantive result in the user's language: direct conclusion, key findings or recommendations, evidence level, and important limitations or open decisions. It does not ask the parent to repeat routine success metadata or list artifact paths. Clean `workflow_run`/`workflow_wait` terminal tool text follows the same result-only rule while keeping run ids, lifecycle state, retries, and artifact roots in structured tool details for programmatic consumers. A final control field named `completionSummaryMarkdown`, when present, is preferred over the full report for these handoffs. Degraded, failed, blocked, interrupted, duplicate-delivery, and output-missing outcomes still surface lifecycle state and the next useful action. `engineStatus` is the persisted lifecycle state; `semanticStatus` interprets the result. Output-bearing successes include `completed`, `completed_degraded`, `synthesized`, and `exhausted_with_output`; `completed_without_semantic_result` and `exhausted_without_output` explicitly report that no authoritative result exists. Blocked variants return `actionRequired: true`, while `failed`, `interrupted`, and `dynamic_incomplete` are unsuccessful terminal outcomes. New direct-dynamic runtime v4 reserves its last configured decision round for canonical synthesize-or-block validation; a controller that still produces no synthesis output fails with `dynamic_incomplete`. Historical v3 exhausted runs remain readable as `exhausted_without_output`.
 
 Not implemented: `/workflow continue` and `/workflow delegate`. Use `status`, `show`, `logs`, `wait`, `stop`, `resume`, and `pi-workflow inspect` for text/CLI inspection. The standalone CLI also offers `pi-workflow supervise <run-id>|--all` to drive scheduling from outside a Pi session (unfinished failed/interrupted or resumable blocked runs within the last 7 days are announced at session start with resume hints).
+
+### Acknowledge unfinished-run notices
+
+`/workflow notices list [--json]` lists eligible failed/interrupted root runs and dynamic-approval blocked runs, together with active or stale acknowledgements. It includes older runs even outside the session-start warning window. Copy the exact run id and SHA-256 state token from the list:
+
+```text
+/workflow notices acknowledge <exact-run-id> --state <sha256> --reason "Reviewed; preserving evidence without further action"
+/workflow notices clear <exact-run-id>
+```
+
+The standalone `pi-workflow notices` commands have the same arguments and behavior and do not start a Pi supervisor or schedule work. Put `--reason` last; all following text is the required per-run reason (maximum 2,000 characters). Paths, run-id prefixes, batch acknowledgements, and blank reasons are not accepted. `list` and `clear` support `--json`.
+
+Acknowledgements live only in `.pi/workflows/notice-acknowledgements.json`, separate from run records, artifacts, attempts, and existing notice timestamps. They bind the exact run id, status, update time, and SHA-256 of `run.json`. Only the unchanged acknowledged state is suppressed; changed state or new failures are eligible for warnings normally. Existing warning limits remain seven days, six-hour repeat deduplication, and five displayed runs. Clearing removes only that run's acknowledgement; normal warning deduplication still applies.
+
+Acknowledging is **not** completion, archiving, stop/resume approval, or a prohibition on resuming. Status, inspect, and history stay visible and unchanged. Invalid sidecar data suppresses no warnings; list and mutation report errors rather than overwrite it. Concurrent mutations serialize with a dedicated bounded lock and preserve unrelated entries. An abandoned lock requires manual inspection; it is not automatically reclaimed. Symlinked application-owned paths and non-regular or hard-linked evidence files are rejected. These local checks do not isolate against a hostile same-user process continuously replacing filesystem ancestors.
 
 ### Options and modes at a glance
 

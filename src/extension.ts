@@ -99,6 +99,11 @@ import {
 	resumeParentUsageTracking,
 } from "./workflow-parent-usage.js";
 import { summarizeWorkflowTerminal } from "./workflow-terminal.js";
+import {
+	executeWorkflowNoticesCommand,
+	noticeAcknowledgementMatch,
+	readNoticeAcknowledgements,
+} from "./workflow-notices.js";
 
 const UNFINISHED_RUN_NOTICE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const UNFINISHED_RUN_NOTICE_MAX_RUNS = 5;
@@ -2880,6 +2885,7 @@ export const WORKFLOW_KNOWN_ACTIONS: ReadonlySet<string> = new Set([
 	"resume",
 	"stop",
 	"prune",
+	"notices",
 	"--help",
 	"-h",
 ]);
@@ -2892,6 +2898,9 @@ export async function notifyUnfinishedRuns(
 	const index = await readFreshIndex(cwd);
 	if (!index?.runs?.length) return;
 	const unfinished = [];
+	// Invalid acknowledgement evidence must never suppress an ordinary warning.
+	const acknowledgements = await readNoticeAcknowledgements(cwd).catch(() => undefined);
+	const changedAcknowledgements = new Map<string, string>();
 	for (const run of index.runs) {
 		if (run.parentRunId && run.status !== "blocked") continue;
 		const updatedAtMs = Date.parse(run.updatedAt ?? "");
@@ -2900,6 +2909,14 @@ export async function notifyUnfinishedRuns(
 			nowMs - updatedAtMs > UNFINISHED_RUN_NOTICE_MAX_AGE_MS
 		) {
 			continue;
+		}
+		if (acknowledgements) {
+			const match = await noticeAcknowledgementMatch(cwd, acknowledgements, run);
+			if (match === "acknowledged") continue;
+			if (match === "changed") {
+				const entry = acknowledgements.acknowledgements.find(item => item.runId === run.runId)!;
+				changedAcknowledgements.set(run.runId, entry.acknowledgedAt);
+			}
 		}
 		if (
 			!run.parentRunId &&
@@ -2930,6 +2947,7 @@ export async function notifyUnfinishedRuns(
 		unfinished,
 		indexRunIds,
 		nowMs,
+		changedAcknowledgements,
 	);
 	if (needingNotice.length === 0) return;
 
@@ -2982,6 +3000,7 @@ async function selectRunsNeedingUnfinishedNotice<
 	unfinished: Run[],
 	indexRunIds: Set<string>,
 	nowMs: number,
+	changedAcknowledgements: Map<string, string> = new Map(),
 ): Promise<Run[]> {
 	const dir = join(cwd, ".pi", "workflows");
 	const file = join(dir, "unfinished-notices.json");
@@ -3012,6 +3031,8 @@ async function selectRunsNeedingUnfinishedNotice<
 			(entry.updatedAt ?? "") === (run.updatedAt ?? "");
 		if (
 			unchanged &&
+			!(changedAcknowledgements.has(run.runId) &&
+				lastNotifiedMs <= Date.parse(changedAcknowledgements.get(run.runId)!)) &&
 			Number.isFinite(lastNotifiedMs) &&
 			nowMs - lastNotifiedMs < UNFINISHED_RUN_NOTICE_DEDUPE_MS
 		) {
@@ -3070,6 +3091,12 @@ async function handleWorkflowCommand(
 		assertWorkflowActionAllowedForRole(action);
 		if (action === "help" || action === "--help" || action === "-h") {
 			emit(ctx, WORKFLOW_HELP, "info");
+			return;
+		}
+
+		if (action === "notices") {
+			const noticeArgs = tokenizeWorkflowRunArgs(args).slice(1).map(token => token.text);
+			emit(ctx, await executeWorkflowNoticesCommand(ctx.cwd, noticeArgs), "info");
 			return;
 		}
 
