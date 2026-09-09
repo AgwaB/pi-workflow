@@ -8,6 +8,7 @@ import {
 	FAST_MODES,
 	THINKING_LEVELS,
 	TOOL_CLASSIFICATIONS,
+	WORKFLOW_PROFILE_ROLES,
 	WORKTREE_POLICIES,
 	WorkflowValidationError,
 	type ArtifactGraphStageType,
@@ -57,6 +58,7 @@ const STAGE_KEYS = new Set([
 	"injectRuntimeTask",
 	"agent",
 	"role",
+	"profileRole",
 	"cwd",
 	"model",
 	"thinking",
@@ -184,6 +186,7 @@ const DYNAMIC_DECISION_LOOP_KEYS = new Set([
 ]);
 const DYNAMIC_DECISION_LOOP_PROFILE_KEYS = new Set([
 	"agent",
+	"profileRole",
 	"model",
 	"thinking",
 	"tools",
@@ -335,33 +338,76 @@ type DeclaredProfileStages = {
 };
 
 /**
- * Profile targets retain root ids and namespace dag children as `container.child`.
- * Keeping every collision lets validation reject an ambiguous target rather than
- * accidentally applying one raw child id to several nested stages.
+ * Profile targets retain root ids and namespace dag/loop children as
+ * `container.child`. Reserved `$...` suffixes address model-bearing slots that
+ * have no authored stage id. Keeping every collision lets validation reject an
+ * ambiguous target instead of applying it accidentally.
  */
 function collectDeclaredProfileStages(
 	spec: Record<string, unknown>,
 ): DeclaredProfileStages {
 	const byCanonicalId = new Map<string, Record<string, unknown>[]>();
 	const nestedCanonicalIdsByRawId = new Map<string, string[]>();
-	const visit = (stages: unknown, namespace?: string): void => {
-		if (!Array.isArray(stages)) return;
-		for (const stage of stages) {
-			if (!isRecord(stage) || typeof stage.id !== "string") continue;
-			const canonicalId = namespace ? `${namespace}.${stage.id}` : stage.id;
-			const targets = byCanonicalId.get(canonicalId) ?? [];
-			targets.push(stage);
-			byCanonicalId.set(canonicalId, targets);
-			if (namespace) {
-				const nestedTargets = nestedCanonicalIdsByRawId.get(stage.id) ?? [];
-				nestedTargets.push(canonicalId);
-				nestedCanonicalIdsByRawId.set(stage.id, nestedTargets);
+	const addTarget = (
+		canonicalId: string,
+		target: Record<string, unknown>,
+		rawId?: string,
+	): void => {
+		const targets = byCanonicalId.get(canonicalId) ?? [];
+		targets.push(target);
+		byCanonicalId.set(canonicalId, targets);
+		if (rawId !== undefined) {
+			const nestedTargets = nestedCanonicalIdsByRawId.get(rawId) ?? [];
+			nestedTargets.push(canonicalId);
+			nestedCanonicalIdsByRawId.set(rawId, nestedTargets);
+		}
+	};
+	const visitStage = (
+		stage: Record<string, unknown>,
+		canonicalId: string,
+		nestedRawId?: string,
+	): void => {
+		addTarget(canonicalId, stage, nestedRawId);
+		if (
+			(stage.type === "dag" || stage.type === "loop") &&
+			Array.isArray(stage.stages)
+		) {
+			for (const child of stage.stages) {
+				if (!isRecord(child) || typeof child.id !== "string") continue;
+				visitStage(child, `${canonicalId}.${child.id}`, child.id);
 			}
-			if (stage.type === "dag") visit(stage.stages, canonicalId);
+		}
+		if (stage.type === "loop" && isRecord(stage.onExhausted)) {
+			const exhausted = stage.onExhausted;
+			visitStage(
+				exhausted,
+				`${canonicalId}.$onExhausted`,
+				typeof exhausted.id === "string" ? exhausted.id : undefined,
+			);
+		}
+		if (stage.type === "dynamic") {
+			const dynamic = isRecord(stage.dynamic) ? stage.dynamic : undefined;
+			const decisionLoop = isRecord(dynamic?.decisionLoop)
+				? dynamic.decisionLoop
+				: undefined;
+			for (const slot of [
+				"planner",
+				"workerDefaults",
+				"verifier",
+				"synthesis",
+			] as const) {
+				const target = decisionLoop?.[slot];
+				if (isRecord(target)) addTarget(`${canonicalId}.$${slot}`, target);
+			}
 		}
 	};
 	const graph = spec.artifactGraph;
-	if (isRecord(graph)) visit(graph.stages);
+	if (isRecord(graph) && Array.isArray(graph.stages)) {
+		for (const stage of graph.stages) {
+			if (!isRecord(stage) || typeof stage.id !== "string") continue;
+			visitStage(stage, stage.id);
+		}
+	}
 	return { byCanonicalId, nestedCanonicalIdsByRawId };
 }
 
@@ -814,6 +860,22 @@ function validateStage(
 	optionalPositiveInteger(stage.maxItems, `${path}.maxItems`, issues);
 	validateSourcePolicy(stage.sourcePolicy, `${path}.sourcePolicy`, issues);
 	validateRole(stage.role, `${path}.role`, issues);
+	optionalEnum(
+		stage.profileRole,
+		WORKFLOW_PROFILE_ROLES,
+		`${path}.profileRole`,
+		issues,
+	);
+	if (
+		stage.profileRole !== undefined &&
+		(stage.support !== undefined || type === "dag" || type === "loop")
+	) {
+		issues.push({
+			path: `${path}.profileRole`,
+			message:
+				"is only valid on model-backed single/foreach/reduce/dynamic stages, not support/dag/loop containers",
+		});
+	}
 	validateWorkflowToolArray(stage.tools, `${path}.tools`, issues);
 	validateArtifactAccessToolPolicy(stage, type, path, issues);
 	validateStageRefs(stage.from, `${path}.from`, siblingIds, issues, {
@@ -1738,6 +1800,12 @@ function validateDynamicDecisionLoopProfile(
 	if (!profile) return;
 	rejectUnknownKeys(profile, DYNAMIC_DECISION_LOOP_PROFILE_KEYS, path, issues);
 	optionalString(profile.agent, `${path}.agent`, issues);
+	optionalEnum(
+		profile.profileRole,
+		WORKFLOW_PROFILE_ROLES,
+		`${path}.profileRole`,
+		issues,
+	);
 	optionalString(profile.model, `${path}.model`, issues);
 	optionalEnum(profile.thinking, THINKING_LEVELS, `${path}.thinking`, issues);
 	validateWorkflowToolArray(profile.tools, `${path}.tools`, issues);

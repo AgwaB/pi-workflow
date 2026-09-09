@@ -68,6 +68,7 @@
       {
         "id": "plan",
         "type": "single",
+        "profileRole": "planning",
         "tools": [],
         "output": {
           "analysis": {
@@ -90,6 +91,7 @@
       {
         "id": "research-questions",
         "type": "foreach",
+        "profileRole": "research-execution",
         "from": {
           "source": "plan",
           "path": "$.researchQuestions"
@@ -136,6 +138,7 @@
       {
         "id": "normalize-claims",
         "type": "reduce",
+        "profileRole": "synthesis",
         "from": [
           "plan",
           "research-questions",
@@ -193,6 +196,7 @@
       {
         "id": "verify-claims",
         "type": "foreach",
+        "profileRole": "verification",
         "injectRuntimeTask": true,
         "from": {
           "source": "sanitize-claims",
@@ -258,6 +262,7 @@
       {
         "id": "final-audit",
         "type": "reduce",
+        "profileRole": "final-judgment",
         "from": [
           "final-audit-packet"
         ],

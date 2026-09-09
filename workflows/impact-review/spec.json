@@ -22,6 +22,7 @@
           {
             "id": "change-scope",
             "type": "single",
+            "profileRole": "planning",
             "after": [],
             "output": {
               "controlSchema": "./schemas/change-scope-control.schema.json",
@@ -38,6 +39,7 @@
           {
             "id": "implementation-map",
             "type": "single",
+            "profileRole": "research-execution",
             "after": [],
             "output": {
               "controlSchema": "./schemas/implementation-map-control.schema.json",
@@ -54,6 +56,7 @@
           {
             "id": "validation-map",
             "type": "single",
+            "profileRole": "research-execution",
             "after": [],
             "output": {
               "controlSchema": "./schemas/validation-map-control.schema.json",
@@ -70,6 +73,7 @@
           {
             "id": "api-contract-impact",
             "type": "reduce",
+            "profileRole": "research-execution",
             "from": [
               "change-scope",
               "implementation-map"
@@ -119,6 +123,7 @@
           {
             "id": "state-data-impact",
             "type": "reduce",
+            "profileRole": "research-execution",
             "from": [
               "change-scope",
               "implementation-map"
@@ -168,6 +173,7 @@
           {
             "id": "validation-impact",
             "type": "reduce",
+            "profileRole": "verification",
             "from": [
               "change-scope",
               "validation-map"
@@ -217,6 +223,7 @@
           {
             "id": "docs-release-impact",
             "type": "reduce",
+            "profileRole": "research-execution",
             "from": [
               "change-scope",
               "implementation-map",
@@ -278,6 +285,7 @@
           {
             "id": "security-performance-impact",
             "type": "reduce",
+            "profileRole": "research-execution",
             "from": [
               "change-scope",
               "implementation-map"
@@ -327,6 +335,7 @@
           {
             "id": "contract-consistency",
             "type": "reduce",
+            "profileRole": "verification",
             "from": [
               "api-contract-impact",
               "state-data-impact",
@@ -388,6 +397,7 @@
           {
             "id": "regression-risk",
             "type": "reduce",
+            "profileRole": "synthesis",
             "from": [
               "api-contract-impact",
               "state-data-impact",
@@ -461,6 +471,7 @@
           {
             "id": "ship-readiness",
             "type": "reduce",
+            "profileRole": "final-judgment",
             "from": [
               "validation-impact",
               "docs-release-impact",
@@ -522,6 +533,7 @@
           {
             "id": "impact-synthesis",
             "type": "reduce",
+            "profileRole": "synthesis",
             "from": [
               "change-scope",
               "contract-consistency",

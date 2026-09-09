@@ -11,6 +11,7 @@ import type {
 	ThinkingLevel,
 	WorkflowRouteDecision,
 	WorkflowRouteDepth,
+	WorkflowExecutionProfileSelection,
 	WorkflowRunLaunchCapture,
 	WorkflowRunRecord,
 	WorkflowRunRouting,
@@ -71,7 +72,9 @@ export interface RoutedWorkflowRequest {
 	launch?: WorkflowRunLaunchCapture;
 	/** Named executionProfiles entry applied when the workflow path is chosen. */
 	executionProfile?: string;
-	/** True when an interactive caller deliberately selected a profile or Base. */
+	/** User-saved profile resolved to concrete run-start values. */
+	executionProfileOverride?: WorkflowExecutionProfileSelection["executionProfileOverride"];
+	/** True when an interactive caller deliberately resolved a profile or Base. */
 	executionProfileResolved?: boolean;
 	/**
 	 * Resolve an omitted profile only after routing chooses the named workflow.
@@ -79,7 +82,7 @@ export interface RoutedWorkflowRequest {
 	 */
 	resolveExecutionProfile?: (
 		workflowRef: string,
-	) => Promise<string | undefined>;
+	) => Promise<WorkflowExecutionProfileSelection | string | undefined>;
 }
 
 export type RoutedWorkflowOutcome =
@@ -302,15 +305,28 @@ async function startDecidedRun(
 		});
 		return { mode: "dynamic", routing: dynamicRouting, run };
 	}
-	const executionProfile = request.executionProfileResolved
-		? request.executionProfile
-		: (request.executionProfile ??
-			(await request.resolveExecutionProfile?.(request.requestedWorkflow)));
+	let profileSelection: WorkflowExecutionProfileSelection;
+	if (request.executionProfileResolved) {
+		profileSelection = {
+			executionProfile: request.executionProfile,
+			executionProfileOverride: request.executionProfileOverride,
+		};
+	} else if (request.executionProfile) {
+		profileSelection = { executionProfile: request.executionProfile };
+	} else {
+		const resolved = await request.resolveExecutionProfile?.(
+			request.requestedWorkflow,
+		);
+		profileSelection =
+			typeof resolved === "string"
+				? { executionProfile: resolved }
+				: (resolved ?? {});
+	}
 	const run = await runWorkflowSpec(request.requestedWorkflow, request.cwd, {
 		...commonOptions,
 		routing,
 		inputOverrides: { depth: routing.depth },
-		executionProfile,
+		...profileSelection,
 	});
 	return { mode: "workflow", routing, run };
 }

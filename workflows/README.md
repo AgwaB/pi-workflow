@@ -8,6 +8,7 @@ Run them from the project root by exact workflow name, for example:
 /workflow list
 /workflow show deep-research
 /workflow validate deep-research
+/workflow profile deep-research
 /workflow run deep-research "Research the current project architecture and verify the key claims. Use max depth."
 ```
 
@@ -22,7 +23,9 @@ For spec-less direct dynamic execution, use `/workflow dynamic "<task>"`; it doe
 | `spec-review` | `scout` | Use when you want to check whether requirements, an API spec, or a contract are reflected in the implementation and tests. |
 | `impact-review` | `scout` | Use before merging or releasing a change to check affected areas, risks, missing tests, and missing docs. |
 
-`deep-research` declares `low`, `medium`, and `high` execution profiles and explicitly defaults to `medium`. Interactive launches offer those profiles plus the base spec; headless omission uses the declared default. `low` is an explicit faster/cheaper quality trade-off, `low` and `medium` use profile-only max-2 batching for compatible `verify-claims` items, and `high` spends more reasoning while retaining singleton verification. Pass `--profile <name>` to bypass the prompt. Profile names are workflow-defined rather than reserved; see `docs/usage.md` for the optional profile schema and fallback guarantees.
+All four bundled workflows declare semantic `profileRole` values for every model-backed stage, so `/workflow profile <name>` offers Codex, Codex High, Claude, Mixed, and Custom with an exact stage preview. The private selection is reused for the same workflow definition across projects and applies to subsequent interactive, headless, and tool launches; an explicit declared `--profile` still wins. Missing model/capability combinations and stale definitions block rather than silently substitute or clamp.
+
+Separately, `deep-research` declares workflow-owned `low`, `medium`, and `high` execution profiles and defaults to `medium`. With no saved user profile, interactive launches offer those declared profiles plus Base and headless omission uses `medium`. `low` is an explicit faster/cheaper quality trade-off, `low` and `medium` use profile-only max-2 batching for compatible `verify-claims` items, and `high` spends more reasoning while retaining singleton verification. Pass `--profile <name>` to choose one explicitly. A saved user profile overlays model/thinking on the `medium` default and therefore preserves its batching. Declared names are workflow-defined rather than reserved; see `docs/usage.md` for both profile layers and fallback guarantees.
 
 Every official bundled workflow ends with the same user-facing completion envelope: a compact `completionSummaryMarkdown`, a workflow-specific `final-report.md` whose first detailed section is **Executive summary**, explicit evidence/limitations, and a final **Related artifacts** appendix. The deterministic renderer keeps each workflow's own authority model rather than forcing research verdicts onto review/readiness outputs. `deep-research` retains byte-identical `executive.md` plus claim-level `audit.md`; `deep-review` retains byte-identical `review.md`; `spec-review` and `impact-review` write `source-ledger.json`. Missing, partial, contradictory, or incompletely represented canonical inputs fail or block the final renderer instead of producing a clean completion.
 

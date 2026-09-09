@@ -5,6 +5,7 @@ import {
 	lstat,
 	mkdir,
 	open,
+	opendir,
 	realpath,
 	rm,
 	rename,
@@ -40,9 +41,9 @@ const PRIVATE_FILE =
 	constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NOFOLLOW;
 
 /**
- * Open every ancestor with O_NOFOLLOW and retain its descriptor while doing
- * the publication. Path operations are paired with descriptor/name identity
- * checks; a path-only mkdir/open would allow an ancestor swap to escape.
+ * Open every ancestor with O_NOFOLLOW, retain all descriptors during
+ * traversal, and retain the destination descriptor during publication. Path
+ * operations are paired with descriptor/name identity checks.
  */
 export async function ensurePrivateDirectory(path: string): Promise<void> {
 	const directory = await openPrivateDirectory(path, true);
@@ -51,6 +52,93 @@ export async function ensurePrivateDirectory(path: string): Promise<void> {
 		await directory.handle.chmod(0o700);
 		await directory.handle.sync().catch(ignoreDirectorySyncError);
 	} finally {
+		await directory.handle.close().catch(() => undefined);
+	}
+}
+
+/** Read a bounded private regular file without following path symlinks. */
+export async function readPrivateFileText(
+	path: string,
+	maxBytes = 1_048_576,
+): Promise<string> {
+	if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0 || maxBytes > 16_777_216)
+		throw new Error("private file size limit is invalid");
+	const absolute = resolve(path);
+	const parent = await openPrivateDirectory(dirname(absolute), false);
+	const target = join(parent.namedPath, basename(absolute));
+	let file: FileHandle | undefined;
+	try {
+		await assertNamedDirectory(parent);
+		file = await open(
+			target,
+			constants.O_RDONLY | NOFOLLOW | constants.O_NONBLOCK,
+		);
+		await assertSingleRegularFile(file, target);
+		const info = await file.stat();
+		if (info.size > maxBytes) throw new Error("private file exceeds size limit");
+		let content = Buffer.allocUnsafe(
+			Math.min(maxBytes + 1, Math.max(4_096, info.size + 1)),
+		);
+		let bytesRead = 0;
+		for (;;) {
+			if (bytesRead === content.length) {
+				if (content.length === maxBytes + 1) break;
+				const grown = Buffer.allocUnsafe(
+					Math.min(maxBytes + 1, content.length * 2),
+				);
+				content.copy(grown);
+				content = grown;
+			}
+			const next = await file.read(
+				content,
+				bytesRead,
+				content.length - bytesRead,
+				bytesRead,
+			);
+			if (next.bytesRead === 0) break;
+			bytesRead += next.bytesRead;
+		}
+		if (bytesRead > maxBytes) throw new Error("private file exceeds size limit");
+		await assertSingleRegularFile(file, target);
+		await assertNamedDirectory(parent);
+		return new TextDecoder("utf-8", { fatal: true }).decode(
+			content.subarray(0, bytesRead),
+		);
+	} finally {
+		await file?.close().catch(() => undefined);
+		await parent.handle.close().catch(() => undefined);
+	}
+}
+
+/** List a bounded private directory only while its path identity stays fixed. */
+export async function readPrivateDirectoryNames(
+	path: string,
+	maxEntries = 10_000,
+): Promise<string[]> {
+	if (
+		!Number.isSafeInteger(maxEntries) ||
+		maxEntries <= 0 ||
+		maxEntries > 100_000
+	) {
+		throw new Error("private directory entry limit is invalid");
+	}
+	const directory = await openPrivateDirectory(path, false);
+	let opened: Awaited<ReturnType<typeof opendir>> | undefined;
+	try {
+		await assertNamedDirectory(directory);
+		opened = await opendir(directory.namedPath);
+		const names: string[] = [];
+		for (;;) {
+			const entry = await opened.read();
+			if (!entry) break;
+			names.push(entry.name);
+			if (names.length > maxEntries)
+				throw new Error("private directory exceeds entry limit");
+		}
+		await assertNamedDirectory(directory);
+		return names;
+	} finally {
+		await opened?.close().catch(() => undefined);
 		await directory.handle.close().catch(() => undefined);
 	}
 }
@@ -69,6 +157,7 @@ export async function appendPrivateFile(
 		await file.chmod(0o600);
 		await file.writeFile(content);
 		await file.sync();
+		await assertSingleRegularFile(file, target);
 		await assertNamedDirectory(parent);
 	} finally {
 		await file?.close().catch(() => undefined);
@@ -90,8 +179,10 @@ export async function writePrivateFileAtomic(
 	try {
 		await assertNamedDirectory(parent);
 		file = await open(tmp, PRIVATE_FILE, 0o600);
+		await assertSingleRegularFile(file, tmp);
 		await file.writeFile(content);
 		await file.sync();
+		await assertSingleRegularFile(file, tmp);
 		await file.close();
 		file = undefined;
 		// Cancellation is checked before the commit. Once rename starts, commit
@@ -224,16 +315,21 @@ async function openPrivateParent(path: string): Promise<OpenDirectory> {
 	}
 }
 
-async function openPrivateDirectory(path: string, create: boolean): Promise<OpenDirectory> {
+async function openPrivateDirectory(
+	path: string,
+	create: boolean,
+): Promise<OpenDirectory> {
 	const absolute = resolve(path);
 	if (process.platform === "win32" || constants.O_NOFOLLOW === undefined) {
 		throw new Error("secure filesystem containment is unavailable on this platform");
 	}
 	const canonical = await canonicalDirectoryPath(absolute);
-	let current = await open(sep, READ_DIRECTORY);
+	const opened: Array<{ handle: FileHandle; path: string }> = [
+		{ handle: await open(sep, READ_DIRECTORY), path: sep },
+	];
 	let currentPath: string = sep;
 	try {
-		for (const component of canonical.slice(1).split(sep).filter(Boolean) ) {
+		for (const component of canonical.slice(1).split(sep).filter(Boolean)) {
 			const nextPath = join(currentPath, component);
 			if (create) {
 				try {
@@ -244,13 +340,19 @@ async function openPrivateDirectory(path: string, create: boolean): Promise<Open
 			}
 			const next = await open(nextPath, READ_DIRECTORY);
 			await assertDirectoryHandleMatchesPath(next, nextPath);
-			await current.close();
-			current = next;
+			opened.push({ handle: next, path: nextPath });
 			currentPath = nextPath;
 		}
-		return { handle: current, namedPath: absolute };
+		for (const ancestor of opened) {
+			await assertDirectoryHandleMatchesPath(ancestor.handle, ancestor.path);
+		}
+		const destination = opened.at(-1)!;
+		for (const ancestor of opened.slice(0, -1)) await ancestor.handle.close();
+		return { handle: destination.handle, namedPath: absolute };
 	} catch (error) {
-		await current.close().catch(() => undefined);
+		await Promise.all(
+			opened.map(({ handle }) => handle.close().catch(() => undefined)),
+		);
 		throw error;
 	}
 }
@@ -326,7 +428,7 @@ async function assertSingleRegularFile(
 	const opened = await file.stat();
 	const named = await lstat(path);
 	if (!opened.isFile() || !sameIdentity(opened, named))
-		throw new Error("secure file changed during write");
+		throw new Error("secure path is not a stable regular file");
 	if (opened.nlink !== 1) throw new Error("private file must not be hard-linked");
 }
 

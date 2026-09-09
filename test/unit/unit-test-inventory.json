@@ -2694,7 +2694,7 @@
 		{
 			"name": "workflow command completions and run arg parsing preserve task text",
 			"occurrence": 1,
-			"sha256": "325ab8b286915561ce2a4fb89a0760f93e7b73c432caa3be301a2c0310bbddcc",
+			"sha256": "ef9346d1cb5a7953ba52fbba12c81533cc33c6d42dd00acf5e384f086187743c",
 			"domain": "authoring-interface"
 		},
 		{

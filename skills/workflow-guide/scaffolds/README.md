@@ -24,7 +24,7 @@ cp -R skills/workflow-guide/scaffolds/foreach-reduce/* .pi/workflows/my-workflow
 
 Then edit:
 
-1. `spec.json` name, description, agents, tools, stages, prompts, and data dependencies.
+1. `spec.json` name, description, agents, tools, stages, prompts, data dependencies, and each model-backed stage's semantic `profileRole`. Reclassify roles when the adapted work changes purpose; do not copy them by stage-name analogy or confuse them with agent-context `role`.
 2. `schemas/*.json` fields consumed by `foreach.from`, reducers, support helpers, loop conditions, or required-read gates.
 3. `helpers/*.mjs` only for support scaffolds, keeping helper refs bundle-local (`./helpers/name.mjs`).
 

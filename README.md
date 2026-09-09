@@ -74,15 +74,20 @@ Interactive slash-command launches use Pi's cancellable foreground loader while 
 
 ### Execution profiles
 
-A workflow may optionally declare custom-named `executionProfiles` and a
-`defaultExecutionProfile`. Use `/workflow run --profile <name> ...` (or the
-optional `profile` field of `workflow_run`) to select one. If omitted,
-interactive runs offer the declared profiles plus the base workflow;
-non-interactive launches (including tool execution without a selector) use the
-declared default, or the base workflow when there is no default. They do not
-infer a profile called `medium`. `low`, `medium`, and `high` are conventions,
-not reserved names. See [the execution-profile reference](./docs/usage.md#execution-profiles)
-for override precedence and batching constraints.
+Use `/workflow profile [workflow]` in Pi's TUI to preview and privately save
+Codex, Codex High, Claude, Mixed, or a per-stage Custom model/thinking setup.
+The same exact workflow definition reuses that preference across projects;
+subsequent interactive, headless, routed, and `workflow_run` launches capture
+its effective values at run start. Missing model capabilities or a stale
+workflow definition block with an explanation rather than silently substituting.
+
+A workflow may separately declare custom-named `executionProfiles` and a
+`defaultExecutionProfile`. An explicit `/workflow run --profile <name> ...` (or
+`workflow_run.profile`) wins over a saved user profile. With neither, the prior
+interactive selector/default/Base behavior is unchanged. Authors add semantic
+`profileRole` values independently from agent-context `role`; see
+[the execution-profile reference](./docs/usage.md#execution-profiles) for the
+exact role matrix, persistence contract, precedence, and batching constraints.
 
 ## Usage: choose an execution mode
 
@@ -139,11 +144,13 @@ A small workflow definition looks like this:
       {
         "id": "plan",
         "type": "single",
+        "profileRole": "planning",
         "prompt": "Put machine-readable JSON in <control> with an items array."
       },
       {
         "id": "inspect",
         "type": "foreach",
+        "profileRole": "research-execution",
         "from": { "source": "plan", "path": "$.items" },
         "each": { "prompt": "Inspect this item: ${item}" }
       },
@@ -156,6 +163,7 @@ A small workflow definition looks like this:
       {
         "id": "report",
         "type": "reduce",
+        "profileRole": "synthesis",
         "from": ["plan", "prepare"],
         "prompt": "Use upstream workflow artifacts to write the final report."
       }

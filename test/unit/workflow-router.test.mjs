@@ -14,6 +14,7 @@ import { after, test } from "node:test";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 
 import { runWorkflow } from "../../.tmp/unit/engine.js";
+import { workflowDefinitionFingerprint } from "../../.tmp/unit/execution-profile.js";
 import {
 	parseWorkflowDynamicArgs,
 	parseWorkflowRunArgs,
@@ -30,6 +31,7 @@ import {
 	executeRoutedWorkflowRequest,
 	parseWorkflowRouterOutput,
 } from "../../.tmp/unit/workflow-router.js";
+import { loadWorkflowSpec } from "../../.tmp/unit/schema.js";
 
 initTheme(undefined, false);
 
@@ -360,6 +362,50 @@ test("routed profile resolver runs only after routing selects the named workflow
 		assert.deepEqual(run.executionProfile, {
 			name: "low",
 			stageOverrides: { main: { thinking: "low" } },
+		});
+	} finally {
+		setSubagentApiForTests(undefined);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("routed profile resolver carries a pre-resolved user profile only on the named workflow path", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout");
+		writeRoutableWorkflow(cwd);
+		const calls = installFakeSubagentApi(cwd, {
+			routerText: JSON.stringify({
+				route: "workflow",
+				depth: "standard",
+				confidence: 0.95,
+				reason: "workflow needed",
+			}),
+		});
+		const loaded = await loadWorkflowSpec("route-target", cwd);
+		const definitionFingerprint = workflowDefinitionFingerprint(loaded.spec);
+		const outcome = await executeRoutedWorkflowRequest(
+			routedRequest(cwd, {
+				resolveExecutionProfile: async () => ({
+					executionProfileOverride: {
+						name: "Mixed",
+						definitionFingerprint,
+						stageOverrides: {
+							main: { model: "saved/model", thinking: "medium" },
+						},
+					},
+				}),
+			}),
+		);
+		assert.equal(outcome.mode, "workflow");
+		assert.equal(calls.router, 1);
+		const run = await readRunRecord(cwd, outcome.run.runId);
+		assert.deepEqual(run.executionProfile, {
+			name: "Mixed",
+			definitionFingerprint,
+			stageOverrides: {
+				main: { model: "saved/model", thinking: "medium" },
+			},
 		});
 	} finally {
 		setSubagentApiForTests(undefined);
