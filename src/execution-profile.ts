@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import {
 	WORKFLOW_PROFILE_ROLES,
+	type ArtifactGraphStageSpec,
 	type ArtifactGraphWorkflowSpec,
 	type ExecutionProfileForeachBatch,
 	type ExecutionProfileStageOverride,
@@ -273,8 +274,9 @@ function applyOverride(
 	};
 }
 
-function stageRecord(stage: object): Record<string, unknown> {
-	return stage as Record<string, unknown>;
+function stageRecord(stage: ArtifactGraphStageSpec): Record<string, unknown> {
+	// SAFETY: parsed stage specs are validated plain JSON objects with string keys.
+	return stage as unknown as Record<string, unknown>;
 }
 
 function isModelBackedStage(stage: Record<string, unknown>): boolean {
