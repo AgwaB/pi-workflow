@@ -61,6 +61,7 @@ export interface WorkflowProfilePreview {
 export interface WorkflowProfileSelectOptions {
 	selected?: string;
 	searchable?: boolean;
+	cancelLabel?: "back" | "cancel";
 }
 
 export interface WorkflowProfileUi {
@@ -91,6 +92,7 @@ export interface ConfigureWorkflowProfileInput {
 	spec: ArtifactGraphWorkflowSpec;
 	specPath: string;
 	workflowLabel?: string;
+	backToWorkflows?: boolean;
 	availableModels: readonly WorkflowModelInfo[];
 	currentRuntime: WorkflowRuntimeDefaults;
 }
@@ -99,7 +101,7 @@ export type ConfigureWorkflowProfileResult =
 	| { status: "cancelled" }
 	| { status: "saved"; preference: WorkflowProfilePreference };
 
-type PreviewAction = "save" | "edit" | "back" | "cancelled";
+type PreviewAction = "save" | "edit" | "back";
 
 const PREVIEW_PAGE_ROWS = 6;
 const INHERIT_MODEL_LABEL = "Inherit current Pi model at run start";
@@ -188,7 +190,10 @@ export async function configureWorkflowExecutionProfile(
 				"Selection is saved for this workflow definition across projects.",
 			].join("\n"),
 			labels.map(({ label }) => label),
-			{ selected: labels.find(({ id }) => id === selectedProfile)?.label },
+			{
+				selected: labels.find(({ id }) => id === selectedProfile)?.label,
+				cancelLabel: input.backToWorkflows ? "back" : "cancel",
+			},
 		);
 		if (selectedLabel === undefined) return { status: "cancelled" };
 		const selected = labels.find(({ label }) => label === selectedLabel);
@@ -205,7 +210,6 @@ export async function configureWorkflowExecutionProfile(
 				built.error,
 				false,
 			);
-			if (action === "cancelled") return { status: "cancelled" };
 			if (action !== "save") continue;
 			if (built.error) continue;
 			const preference = await saveWorkflowProfilePreference(context, {
@@ -228,7 +232,6 @@ export async function configureWorkflowExecutionProfile(
 				built.error,
 				true,
 			);
-			if (action === "cancelled") return { status: "cancelled" };
 			if (action === "back") break;
 			if (action === "edit") {
 				custom = await editCustomStage(
@@ -354,7 +357,7 @@ async function selectPreviewAction(
 			);
 			selectedAction = actions.find(({ label }) => label === selected)?.id;
 		}
-		if (selectedAction === undefined) return "cancelled";
+		if (selectedAction === undefined) return "back";
 		if (selectedAction === "save") return "save";
 		if (selectedAction === "edit") return "edit";
 		if (selectedAction === "back") return "back";
@@ -424,41 +427,61 @@ async function editCustomStage(
 		id: slot.id,
 		label: `${slot.id} — ${slot.profileRole}`,
 	}));
-	const stageLabel = await ui.select(
-		"Choose a Custom stage to edit",
-		choices.map(({ label }) => label),
-		{ selected: choices.find(({ id }) => id === focus.stageId)?.label },
-	);
-	if (stageLabel === undefined) return custom;
-	const slot = choices.find(({ label }) => label === stageLabel);
-	if (!slot) return custom;
-	focus.stageId = slot.id;
-	const previous = custom.stages[slot.id]!;
-	const field = await ui.select(
-		`Edit ${slot.id}\nCurrent: ${formatAssignment(previous)}`,
-		[EDIT_MODEL, EDIT_THINKING, EDIT_BOTH],
-	);
-	if (field === undefined) return custom;
+	while (true) {
+		const stageLabel = await ui.select(
+			"Choose a Custom stage to edit",
+			choices.map(({ label }) => label),
+			{ selected: choices.find(({ id }) => id === focus.stageId)?.label },
+		);
+		if (stageLabel === undefined) return custom;
+		const slot = choices.find(({ label }) => label === stageLabel);
+		if (!slot) return custom;
+		focus.stageId = slot.id;
+		const assignment = await editStageAssignment(ui, context, slot.id, custom.stages[slot.id]!);
+		if (assignment) {
+			return { ...custom, stages: { ...custom.stages, [slot.id]: assignment } };
+		}
+	}
+}
 
+async function editStageAssignment(
+	ui: WorkflowProfileUi,
+	context: WorkflowProfileContext,
+	stageId: string,
+	previous: WorkflowCustomStageAssignment,
+): Promise<WorkflowCustomStageAssignment | undefined> {
+	let field: string | undefined;
+	while (true) {
+		field = await ui.select(
+			`Edit ${stageId}\nCurrent: ${formatAssignment(previous)}`,
+			[EDIT_MODEL, EDIT_THINKING, EDIT_BOTH],
+			{ selected: field },
+		);
+		if (field === undefined) return undefined;
+		const assignment = await selectStageAssignment(ui, context, previous, field);
+		if (assignment) return assignment;
+	}
+}
+
+async function selectStageAssignment(
+	ui: WorkflowProfileUi,
+	context: WorkflowProfileContext,
+	previous: WorkflowCustomStageAssignment,
+	field: string,
+): Promise<WorkflowCustomStageAssignment | undefined> {
 	let model = previous.model;
-	let thinking = previous.thinking;
-	if (field === EDIT_MODEL || field === EDIT_BOTH) {
-		const selectedModel = await selectModel(ui, context, model);
-		if (!selectedModel) return custom;
-		model = selectedModel;
+	while (true) {
+		if (field === EDIT_MODEL || field === EDIT_BOTH) {
+			const selected = await selectModel(ui, context, model);
+			if (!selected) return undefined;
+			model = selected;
+		}
+		if (field === EDIT_MODEL) return { model, thinking: previous.thinking };
+		const thinking = await selectThinking(ui, context, model, previous.thinking);
+		if (thinking) return { model, thinking };
+		if (field !== EDIT_BOTH) return undefined;
+		// In the combined editor, thinking's Back revisits the model draft.
 	}
-	if (field === EDIT_THINKING || field === EDIT_BOTH) {
-		const selectedThinking = await selectThinking(ui, context, model, thinking);
-		if (!selectedThinking) return custom;
-		thinking = selectedThinking;
-	}
-	return {
-		...custom,
-		stages: {
-			...custom.stages,
-			[slot.id]: { model, thinking },
-		},
-	};
 }
 
 async function selectModel(

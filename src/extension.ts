@@ -3229,33 +3229,40 @@ async function handleWorkflowCommand(
 					"Usage: /workflow profile [workflow-name-or-path]",
 				);
 			const profileUi = createNativeWorkflowProfileUi(ctx.ui);
-			let workflowRef: string | undefined = tokens[1];
-			if (!workflowRef) {
-				const workflows = await listWorkflows(ctx.cwd);
-				if (workflows.length === 0)
-					throw new Error("No workflows found to configure.");
-				const choices = await buildWorkflowProfilePickerChoices(
-					workflows,
-					(specPath) => loadWorkflowSpec(specPath, ctx.cwd),
-				);
-				workflowRef = await selectWorkflowProfileTarget(ctx.ui, choices);
-				if (workflowRef === undefined) {
+			let selectedWorkflowRef: string | undefined;
+			while (true) {
+				let workflowRef: string | undefined = tokens[1];
+				if (!workflowRef) {
+					const workflows = await listWorkflows(ctx.cwd);
+					if (workflows.length === 0)
+						throw new Error("No workflows found to configure.");
+					const choices = await buildWorkflowProfilePickerChoices(
+						workflows,
+						(specPath) => loadWorkflowSpec(specPath, ctx.cwd),
+					);
+					workflowRef = await selectWorkflowProfileTarget(ctx.ui, choices, selectedWorkflowRef);
+					if (workflowRef === undefined) {
+						emit(ctx, "Workflow profile selection cancelled; no settings were saved.", "info");
+						return;
+					}
+					selectedWorkflowRef = workflowRef;
+				}
+				const loaded = await loadWorkflowSpec(workflowRef, ctx.cwd);
+				const result = await configureWorkflowExecutionProfile({
+					ui: profileUi,
+					spec: loaded.spec,
+					specPath: loaded.specPath,
+					workflowLabel: loaded.spec.name ?? workflowRef,
+					backToWorkflows: !tokens[1],
+					availableModels: availableWorkflowModels(ctx) ?? [],
+					currentRuntime: currentRuntimeDefaults(ctx, api),
+				});
+				if (result.status === "saved") return;
+				if (tokens[1]) {
 					emit(ctx, "Workflow profile selection cancelled; no settings were saved.", "info");
 					return;
 				}
 			}
-			const loaded = await loadWorkflowSpec(workflowRef, ctx.cwd);
-			const result = await configureWorkflowExecutionProfile({
-				ui: profileUi,
-				spec: loaded.spec,
-				specPath: loaded.specPath,
-				workflowLabel: loaded.spec.name ?? workflowRef,
-				availableModels: availableWorkflowModels(ctx) ?? [],
-				currentRuntime: currentRuntimeDefaults(ctx, api),
-			});
-			if (result.status === "cancelled")
-				emit(ctx, "Workflow profile selection cancelled; no settings were saved.", "info");
-			return;
 		}
 
 		if (action === "run") {
