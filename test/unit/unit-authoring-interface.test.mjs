@@ -3576,6 +3576,7 @@ test("workflow command completions and run arg parsing preserve task text", () =
 			"validate",
 			"roles",
 			"agents",
+			"profile",
 			"run",
 			"dynamic",
 			"status",
@@ -3599,6 +3600,12 @@ test("workflow command completions and run arg parsing preserve task text", () =
 			(item) => item.value,
 		),
 		["validate review"],
+	);
+	assert.deepEqual(
+		workflowArgumentCompletions("profile re", workflows)?.map(
+			(item) => item.value,
+		),
+		["profile review"],
 	);
 	assert.deepEqual(
 		parseWorkflowRunArgs("run review Fix this:\n  const x = 1;"),

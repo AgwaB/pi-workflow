@@ -27,6 +27,7 @@
       {
         "id": "fetch",
         "type": "single",
+        "profileRole": "research-execution",
         "output": {
           "analysis": {
             "required": true
@@ -42,6 +43,7 @@
       {
         "id": "inspect",
         "type": "single",
+        "profileRole": "verification",
         "from": "fetch",
         "inputPolicy": {
           "requiredReads": [
@@ -64,6 +66,7 @@
       {
         "id": "report",
         "type": "reduce",
+        "profileRole": "synthesis",
         "from": [
           "fetch",
           "inspect"

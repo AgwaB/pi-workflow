@@ -17,6 +17,7 @@
       {
         "id": "intake",
         "type": "single",
+        "profileRole": "planning",
         "after": [],
         "output": {
           "controlSchema": "./schemas/intake-control.schema.json",
@@ -39,6 +40,7 @@
           {
             "id": "scan",
             "type": "single",
+            "profileRole": "research-execution",
             "after": [],
             "output": {
               "controlSchema": "./schemas/scan-control.schema.json",
@@ -55,6 +57,7 @@
           {
             "id": "review",
             "type": "single",
+            "profileRole": "verification",
             "after": "scan",
             "output": {
               "controlSchema": "./schemas/review-control.schema.json",
@@ -71,6 +74,7 @@
           {
             "id": "final",
             "type": "reduce",
+            "profileRole": "synthesis",
             "from": [
               "scan",
               "review"
@@ -93,6 +97,7 @@
       {
         "id": "report",
         "type": "reduce",
+        "profileRole": "final-judgment",
         "from": "analysis",
         "sourcePolicy": "require-success",
         "inputPolicy": {

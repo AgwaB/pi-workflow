@@ -202,20 +202,21 @@ import {
 } from "./foreach-batch-capability.js";
 import { workflowStateRootIdentity } from "./workflow-state-root.js";
 import {
-	EXECUTION_PROFILE_FOREACH_BATCH,
-	type ProfiledArtifactGraphStage,
+	applyExecutionProfileStageOverrides,
+	cloneExecutionProfileStageOverride,
+	workflowDefinitionFingerprint,
 } from "./execution-profile.js";
 import {
 	type CompiledDynamicWorkflowTask,
 	type CompiledTask,
 	type CompiledWorkflow,
-	type ExecutionProfileForeachBatch,
 	type ExecutionProfileStageOverride,
 	type WorkflowForeachBatchRecord,
 	WORKFLOW_RUN_TYPE,
 	type WorkflowRunLaunchCapture,
 	type WorkflowRunLaunchMetadata,
 	type WorkflowRunRecord,
+	type WorkflowCapturedExecutionProfile,
 	type WorkflowRunExecutionProfile,
 	type WorkflowRunRouting,
 	type WorkflowTaskRunRecord,
@@ -337,6 +338,11 @@ export interface WorkflowRunOptions {
 	 * recorded on the run record. Unknown names fail closed.
 	 */
 	executionProfile?: string;
+	/**
+	 * Pre-resolved user profile captured by an interactive/tool launch surface.
+	 * A declared executionProfile takes precedence when both are supplied.
+	 */
+	executionProfileOverride?: WorkflowCapturedExecutionProfile;
 }
 
 interface WorkflowScheduleOptions {
@@ -414,10 +420,30 @@ async function runLoadedWorkflowSpec(
 	provenance?: WorkflowRunRecord["provenance"],
 ): Promise<WorkflowRunRecord> {
 	if (options.launch) assertValidWorkflowRunLaunchCapture(options.launch);
+	const capturedProfile = !options.executionProfile
+		? options.executionProfileOverride
+		: undefined;
+	if (capturedProfile) {
+		const capturedDefinition = capturedProfile.definitionFingerprint;
+		if (
+			typeof capturedDefinition !== "string" ||
+			!/^[a-f0-9]{64}$/.test(capturedDefinition)
+		) {
+			throw new Error(
+				"pre-resolved execution profile has an invalid definition fingerprint",
+			);
+		}
+		if (capturedDefinition !== workflowDefinitionFingerprint(spec)) {
+			throw new Error(
+				"Workflow definition changed after the saved profile was resolved; the run was not started. Retry the launch so the profile can be revalidated.",
+			);
+		}
+	}
 	spec = applyDeclaredWorkflowInputOverrides(spec, options.inputOverrides);
 	const appliedProfile = applyWorkflowExecutionProfile(
 		spec,
 		options.executionProfile,
+		options.executionProfileOverride,
 	);
 	spec = appliedProfile.spec;
 	const compiled = await compileWorkflow(spec, {
@@ -567,15 +593,15 @@ async function persistWorkflowRunLaunch(
 }
 
 /**
- * Resolve a named execution profile into per-stage overrides. Explicit
- * selection only: no profile name means no change; an empty mapping is
- * identity and is still recorded. Nested dag children use canonical ids.
+ * Resolve a declared or pre-resolved execution profile into per-stage
+ * overrides. Explicit declared names win over saved selections. Empty mappings
+ * are identity and are still recorded for launch auditing.
  */
 function applyWorkflowExecutionProfile<Spec>(
 	spec: Spec,
 	profileName: string | undefined,
+	profileOverride: WorkflowCapturedExecutionProfile | undefined,
 ): { spec: Spec; record?: WorkflowRunExecutionProfile } {
-	if (!profileName) return { spec };
 	const profiles = (
 		spec as {
 			executionProfiles?: Record<
@@ -584,106 +610,57 @@ function applyWorkflowExecutionProfile<Spec>(
 			>;
 		}
 	).executionProfiles;
-	const mapping = profiles?.[profileName];
-	if (!mapping || typeof mapping !== "object" || Array.isArray(mapping)) {
-		const available = Object.keys(profiles ?? {}).sort((left, right) =>
-			left.localeCompare(right),
-		);
-		throw new Error(
-			available.length
-				? `unknown execution profile "${profileName}"; spec declares: ${available.join(", ")}`
-				: `unknown execution profile "${profileName}"; this workflow declares no executionProfiles`,
-		);
+	let selectedName = profileName;
+	let mapping: Record<string, ExecutionProfileStageOverride> | undefined;
+	if (profileName) {
+		mapping = profiles?.[profileName];
+		if (!mapping || typeof mapping !== "object" || Array.isArray(mapping)) {
+			const available = Object.keys(profiles ?? {}).sort((left, right) =>
+				left.localeCompare(right),
+			);
+			throw new Error(
+				available.length
+					? `unknown execution profile "${profileName}"; spec declares: ${available.join(", ")}`
+					: `unknown execution profile "${profileName}"; this workflow declares no executionProfiles`,
+			);
+		}
+	} else if (profileOverride) {
+		selectedName = profileOverride.name;
+		mapping = profileOverride.stageOverrides;
+		if (!mapping || typeof mapping !== "object" || Array.isArray(mapping)) {
+			throw new Error("pre-resolved execution profile has invalid stageOverrides");
+		}
 	}
+	if (!selectedName || !mapping) return { spec };
+	if (typeof selectedName !== "string" || !selectedName.trim())
+		throw new Error("execution profile name is empty or invalid");
 	const graph = (spec as { artifactGraph?: { stages?: unknown[] } })
 		.artifactGraph;
 	if (!graph || !Array.isArray(graph.stages)) {
 		throw new Error(
-			`execution profile "${profileName}" requires an artifact-graph workflow`,
+			`execution profile "${selectedName}" requires an artifact-graph workflow`,
 		);
 	}
-	const applyToStages = (stages: unknown[], namespace?: string): unknown[] =>
-		stages.map((stage) => {
-			if (!stage || typeof stage !== "object" || Array.isArray(stage))
-				return stage;
-			const record = stage as ProfiledArtifactGraphStage;
-			const id = record.id;
-			const canonicalId =
-				typeof id === "string"
-					? namespace
-						? `${namespace}.${id}`
-						: id
-					: undefined;
-			const override = canonicalId ? mapping[canonicalId] : undefined;
-			const nested =
-				record.type === "dag" && Array.isArray(record.stages)
-					? { stages: applyToStages(record.stages, canonicalId) }
-					: {};
-			if (override === undefined && !("stages" in nested)) return stage;
-			return {
-				...record,
-				...(override?.model === undefined ? {} : { model: override.model }),
-				...(override?.thinking === undefined
-					? {}
-					: { thinking: override.thinking }),
-				...(override?.foreachBatch === undefined
-					? {}
-					: {
-							[EXECUTION_PROFILE_FOREACH_BATCH]:
-								cloneExecutionProfileForeachBatch(override.foreachBatch),
-						}),
-				...nested,
-			};
-		});
-	const nextSpec = {
-		...(spec as Record<string, unknown>),
-		artifactGraph: {
-			...(graph as Record<string, unknown>),
-			stages: applyToStages(graph.stages),
-		},
-	} as Spec;
+	const stageOverrides = Object.fromEntries(
+		Object.entries(mapping).map(([stageId, override]) => [
+			stageId,
+			cloneExecutionProfileStageOverride(override),
+		]),
+	);
 	return {
-		spec: nextSpec,
+		spec: applyExecutionProfileStageOverrides(spec as never, stageOverrides, {
+			// Keep declared-profile precedence byte-compatible: authored each.*
+			// values remain above stage.*. Saved user profiles intentionally edit
+			// the effective foreach worker runtime.
+			foreachRuntimeTarget: profileName ? "stage" : "each",
+		}) as Spec,
 		record: {
-			name: profileName,
-			stageOverrides: Object.fromEntries(
-				Object.entries(mapping).map(([stageId, override]) => [
-					stageId,
-					cloneExecutionProfileStageOverride(override),
-				]),
-			),
+			name: selectedName,
+			...(profileName === undefined && profileOverride?.definitionFingerprint
+				? { definitionFingerprint: profileOverride.definitionFingerprint }
+				: {}),
+			stageOverrides,
 		},
-	};
-}
-
-function cloneExecutionProfileStageOverride(
-	override: ExecutionProfileStageOverride,
-): ExecutionProfileStageOverride {
-	return {
-		...(override.model === undefined ? {} : { model: override.model }),
-		...(override.thinking === undefined ? {} : { thinking: override.thinking }),
-		...(override.foreachBatch === undefined
-			? {}
-			: {
-					foreachBatch: cloneExecutionProfileForeachBatch(
-						override.foreachBatch,
-					),
-				}),
-	};
-}
-
-function cloneExecutionProfileForeachBatch(
-	batch: ExecutionProfileForeachBatch,
-): ExecutionProfileForeachBatch {
-	return {
-		maxItems: 2,
-		...(batch.groupBy === undefined
-			? {}
-			: {
-					groupBy: Array.isArray(batch.groupBy)
-						? [...batch.groupBy]
-						: batch.groupBy,
-				}),
 	};
 }
 

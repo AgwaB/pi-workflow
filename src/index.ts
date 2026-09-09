@@ -47,6 +47,10 @@ export type {
 	ExecutionProfileStageOverride,
 	FastMode,
 	WorkflowDefaults,
+	WorkflowCapturedExecutionProfile,
+	WorkflowExecutionProfileSelection,
+	WorkflowProfileRole,
+	WorkflowRunExecutionProfile,
 	WorkflowRunLaunchCapture,
 	WorkflowRunLaunchCommandMetadata,
 	WorkflowRunLaunchMetadata,
@@ -62,7 +66,7 @@ export type {
 	ThinkingLevel,
 	WorktreePolicy,
 } from "./types.js";
-export { WorkflowValidationError } from "./types.js";
+export { WORKFLOW_PROFILE_ROLES, WorkflowValidationError } from "./types.js";
 export { runDynamicDecisionLoop } from "./dynamic-decision-loop.js";
 export type {
 	DynamicDecisionLoopControllerContext,
@@ -143,6 +147,7 @@ Usage:
   /workflow roles <workflow-name-or-path>
   /workflow agents
   /workflow list
+  /workflow profile [workflow-name-or-path]
   /workflow run [--no-route] [--model MODEL] [--thinking LEVEL] [--profile NAME] <workflow-name-or-path> "<task>" [--detach] [--force-new]
   /workflow dynamic [--route] [--model MODEL] [--thinking LEVEL] "<task>" [--detach] [--force-new]
   /workflow status [run-id]
@@ -176,11 +181,17 @@ routing-log.jsonl for direct). Use --no-route to skip the router and start
 the requested workflow directly. /workflow dynamic still requires an
 explicit --route to enable the router pass.
 
+/workflow profile opens the native Pi picker for Codex, Codex High, Claude,
+Mixed, or one per-workflow Custom model/thinking setup. It saves a private user
+preference for the exact workflow definition; Custom may capture the current Pi
+model/thinking when a new run starts. The picker never starts a workflow or
+provider call.
+
 With --profile NAME, /workflow run applies a custom-named executionProfiles
-entry declared by the workflow spec and records it on the run. When omitted,
-interactive runs offer the declared profiles plus the base spec. Headless/print
-runs use defaultExecutionProfile when declared, otherwise the base spec.
-Explicit --profile bypasses the prompt. Routing asks only when the named
-workflow path is selected. Unknown names fail closed and list the declared
-profiles.
+entry declared by the workflow spec and records it on the run. Launch precedence
+is explicit --profile, then a saved user workflow profile, then the existing
+omitted behavior. Without a saved preference, interactive runs offer declared
+profiles plus Base; headless/print runs use defaultExecutionProfile when
+present, otherwise Base. Unknown names and unavailable saved model/thinking
+pairs fail closed without substitution or silent clamp.
 `;

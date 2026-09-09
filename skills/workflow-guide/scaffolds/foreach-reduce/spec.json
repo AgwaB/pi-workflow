@@ -17,6 +17,7 @@
       {
         "id": "extract-api-docs",
         "type": "single",
+        "profileRole": "research-execution",
         "after": [],
         "output": {
           "analysis": {
@@ -33,6 +34,7 @@
       {
         "id": "map-implementation-tests",
         "type": "single",
+        "profileRole": "research-execution",
         "after": [],
         "output": {
           "analysis": {
@@ -49,6 +51,7 @@
       {
         "id": "endpoint-work-items",
         "type": "reduce",
+        "profileRole": "synthesis",
         "from": [
           "extract-api-docs",
           "map-implementation-tests"
@@ -78,6 +81,7 @@
       {
         "id": "verify-endpoint-claims",
         "type": "foreach",
+        "profileRole": "verification",
         "from": {
           "source": "endpoint-work-items",
           "path": "$.endpoints"
@@ -100,6 +104,7 @@
       {
         "id": "report",
         "type": "reduce",
+        "profileRole": "final-judgment",
         "from": [
           "endpoint-work-items",
           "verify-endpoint-claims"

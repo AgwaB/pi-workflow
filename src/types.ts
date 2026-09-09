@@ -13,6 +13,13 @@ export const THINKING_LEVELS = [
 	"xhigh",
 ] as const;
 export const FAST_MODES = ["inherit", "off"] as const;
+export const WORKFLOW_PROFILE_ROLES = [
+	"planning",
+	"research-execution",
+	"synthesis",
+	"verification",
+	"final-judgment",
+] as const;
 export const APPROVAL_MODES = ["non-interactive", "on-request"] as const;
 export const WORKTREE_POLICIES = ["auto", "on", "off"] as const;
 export const TOOL_CLASSIFICATIONS = [
@@ -24,6 +31,7 @@ export const WORKFLOW_RUN_TYPE = "artifact-graph" as const;
 
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 export type FastMode = (typeof FAST_MODES)[number];
+export type WorkflowProfileRole = (typeof WORKFLOW_PROFILE_ROLES)[number];
 export type ApprovalMode = (typeof APPROVAL_MODES)[number];
 export type WorktreePolicy = (typeof WORKTREE_POLICIES)[number];
 export type ToolClassification = (typeof TOOL_CLASSIFICATIONS)[number];
@@ -144,8 +152,10 @@ export interface ArtifactGraphWorkflowSpec {
 	defaults?: WorkflowDefaults;
 	roles?: Record<string, RoleSpec>;
 	/**
-	 * Named execution profiles selected at run time. Stage keys are top-level ids
-	 * or canonical nested dag ids (`container.child`). Empty profiles are identity.
+	 * Named execution profiles selected at run time. Stage keys are top-level ids,
+	 * canonical nested dag/loop ids (`container.child`), loop exhaustion slots
+	 * (`loop.$onExhausted`), or dynamic decision slots (`stage.$planner`, etc.).
+	 * Empty profiles are identity.
 	 */
 	executionProfiles?: Record<
 		string,
@@ -187,6 +197,8 @@ export interface DynamicWorkflowNestedSpec {
 
 export interface DynamicDecisionLoopExecutionProfileSpec {
 	agent?: string;
+	/** Model-purpose metadata used only by workflow execution-profile presets. */
+	profileRole?: WorkflowProfileRole;
 	model?: string;
 	thinking?: ThinkingLevel;
 	tools?: WorkflowToolSpec[];
@@ -274,6 +286,8 @@ export interface ArtifactGraphStageSpec {
 	injectRuntimeTask?: boolean;
 	agent?: string;
 	role?: string | string[];
+	/** Model-purpose metadata, distinct from the agent-context `role` field. */
+	profileRole?: WorkflowProfileRole;
 	cwd?: string;
 	model?: string;
 	thinking?: ThinkingLevel;
@@ -1308,17 +1322,29 @@ export interface WorkflowTaskResumeEvent {
 export type WorkflowRouteDecision = "direct" | "dynamic" | "workflow";
 export type WorkflowRouteDepth = "quick" | "standard" | "max";
 
-/**
- * Audit record for the opt-in `--route` router pass. Present only on runs
- * started through routing; default runs never carry this field.
- */
+/** Effective declared or user-saved profile frozen into a new run. */
 export interface WorkflowRunExecutionProfile {
-	/** Selected declared profile name. */
+	/** Selected declared or user-saved profile name. */
 	name: string;
-	/** Canonical stage-id → complete profile overrides applied at compile time. */
+	/** Definition identity captured with a user-saved profile before launch. */
+	definitionFingerprint?: string;
+	/** Canonical stage-id → captured profile overrides applied at compile time. */
 	stageOverrides: Record<string, ExecutionProfileStageOverride>;
 }
 
+/** A user profile resolved against one exact authored definition before launch. */
+export interface WorkflowCapturedExecutionProfile
+	extends WorkflowRunExecutionProfile {
+	definitionFingerprint: string;
+}
+
+/** Launch-time profile choice: declared spec id or a captured user profile. */
+export interface WorkflowExecutionProfileSelection {
+	executionProfile?: string;
+	executionProfileOverride?: WorkflowCapturedExecutionProfile;
+}
+
+/** Audit record for the router pass; absent on runs started without routing. */
 export interface WorkflowRunRouting {
 	requested: string;
 	decided: WorkflowRouteDecision;

@@ -17,6 +17,7 @@
       {
         "id": "triage",
         "type": "single",
+        "profileRole": "planning",
         "inputPolicy": {
           "artifactAccess": "none"
         },
@@ -35,6 +36,7 @@
       {
         "id": "reviewers",
         "type": "foreach",
+        "profileRole": "research-execution",
         "injectRuntimeTask": true,
         "inputPolicy": {
           "artifactAccess": "none"
@@ -88,6 +90,7 @@
       {
         "id": "devil-advocate",
         "type": "foreach",
+        "profileRole": "verification",
         "injectRuntimeTask": true,
         "inputPolicy": {
           "artifactAccess": "none"
@@ -163,6 +166,7 @@
       {
         "id": "report",
         "type": "reduce",
+        "profileRole": "final-judgment",
         "injectRuntimeTask": true,
         "tools": [],
         "from": [

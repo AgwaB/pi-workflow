@@ -17,6 +17,7 @@
       {
         "id": "collect-candidates",
         "type": "single",
+        "profileRole": "research-execution",
         "output": {
           "analysis": {
             "required": true
@@ -32,6 +33,7 @@
       {
         "id": "verify-candidates",
         "type": "foreach",
+        "profileRole": "verification",
         "injectRuntimeTask": true,
         "from": {
           "source": "collect-candidates",
@@ -105,6 +107,7 @@
       {
         "id": "report",
         "type": "reduce",
+        "profileRole": "final-judgment",
         "injectRuntimeTask": true,
         "from": "gate-evidence",
         "sourcePolicy": "partial",

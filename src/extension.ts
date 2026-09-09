@@ -41,6 +41,8 @@ import {
 } from "./engine.js";
 import { WORKFLOW_COMMAND, WORKFLOW_HELP } from "./index.js";
 import { showWorkflowView } from "./workflow-view.js";
+import { configureWorkflowExecutionProfile } from "./workflow-profile-ui.js";
+import { resolveSavedWorkflowExecutionProfile } from "./workflow-profile-settings.js";
 import {
 	formatWorkflowPruneSummary,
 	pruneWorkflowRuns,
@@ -72,6 +74,7 @@ import { listWorkflows, resolveWorkflowRef } from "./workflow-specs.js";
 import {
 	type CompiledWorkflow,
 	type ThinkingLevel,
+	type WorkflowExecutionProfileSelection,
 	type WorkflowRunLaunchCapture,
 	type WorkflowRunRouting,
 	WorkflowValidationError,
@@ -2051,6 +2054,7 @@ interface WorkflowRunToolRequest {
 	timeoutMs?: number;
 	runtimeOverrides?: WorkflowRuntimeDefaults;
 	executionProfile?: string;
+	executionProfileOverride?: WorkflowExecutionProfileSelection["executionProfileOverride"];
 	executionProfileResolved?: boolean;
 }
 
@@ -2368,6 +2372,43 @@ export async function selectWorkflowExecutionProfile(
 	return ordered[selectedIndex];
 }
 
+/**
+ * Resolve launch precedence without changing the legacy declared-profile picker:
+ * explicit spec profile > saved user profile > existing omitted behavior.
+ */
+export async function resolveWorkflowExecutionProfileForLaunch(
+	workflow: string,
+	cwd: string,
+	explicitProfile: string | undefined,
+	options: {
+		select?: WorkflowProfileSelector;
+		loadedWorkflow?: Awaited<ReturnType<typeof loadWorkflowSpec>>;
+		availableModels?: ReturnType<typeof availableWorkflowModels>;
+		currentRuntime?: WorkflowRuntimeDefaults;
+		runtimeOverrides?: WorkflowRuntimeDefaults;
+	} = {},
+): Promise<WorkflowExecutionProfileSelection> {
+	if (explicitProfile) return { executionProfile: explicitProfile };
+	const loaded =
+		options.loadedWorkflow ?? (await loadWorkflowSpec(workflow, cwd));
+	const saved = await resolveSavedWorkflowExecutionProfile({
+		spec: loaded.spec,
+		specPath: loaded.specPath,
+		availableModels: options.availableModels ?? [],
+		currentRuntime: options.currentRuntime ?? {},
+		runtimeOverrides: options.runtimeOverrides,
+	});
+	if (saved) return { executionProfileOverride: saved };
+	const executionProfile = await selectWorkflowExecutionProfile(
+		workflow,
+		cwd,
+		undefined,
+		options.select,
+		loaded,
+	);
+	return executionProfile ? { executionProfile } : {};
+}
+
 function workflowLaunchTaskCounts(task: string): {
 	characters: number;
 	lines: number;
@@ -2432,16 +2473,30 @@ async function startWorkflowRunFromRequest(
 		throw new Error(
 			'This workflow needs a task. Usage: /workflow run <workflow-name-or-path> "<task>"',
 		);
-	const executionProfile = request.executionProfileResolved
-		? request.executionProfile
-		: await selectWorkflowExecutionProfile(
-				workflow,
-				ctx.cwd,
-				request.executionProfile,
-				ctx.hasUI
-					? (title, options) => ctx.ui.select(title, options)
-					: undefined,
-			);
+	const runtimeDefaults = currentRuntimeDefaults(ctx, api);
+	const availableModels = availableWorkflowModels(ctx);
+	const profileSelection: WorkflowExecutionProfileSelection =
+		request.executionProfileResolved
+			? {
+					executionProfile: request.executionProfile,
+					executionProfileOverride: request.executionProfileOverride,
+				}
+			: await resolveWorkflowExecutionProfileForLaunch(
+					workflow,
+					ctx.cwd,
+					request.executionProfile,
+					{
+						select: ctx.hasUI
+							? (title, options) => ctx.ui.select(title, options)
+							: undefined,
+						availableModels,
+						currentRuntime: runtimeDefaults,
+						runtimeOverrides: request.runtimeOverrides,
+					},
+				);
+	const selectedProfileName =
+		profileSelection.executionProfile ??
+		profileSelection.executionProfileOverride?.name;
 	let promptSchemaNotice = "";
 	let promptSchemaNoticeDigest: string | undefined;
 	const run = await runWorkflowSpec(workflow, ctx.cwd, {
@@ -2452,8 +2507,8 @@ async function startWorkflowRunFromRequest(
 				"workflow_run",
 				"named-workflow",
 				task,
-				executionProfile
-					? { kind: "named", name: executionProfile }
+				selectedProfileName
+					? { kind: "named", name: selectedProfileName }
 					: { kind: "base" },
 			),
 		[WORKFLOW_PROMPT_SCHEMA_DIAGNOSTIC_SINK]: (notice, digest) => {
@@ -2462,10 +2517,10 @@ async function startWorkflowRunFromRequest(
 			promptSchemaNotice = notice;
 		},
 		runtimeOverrides: request.runtimeOverrides,
-		runtimeDefaults: currentRuntimeDefaults(ctx, api),
-		availableModels: availableWorkflowModels(ctx),
+		runtimeDefaults,
+		availableModels,
 		dynamicUi: dynamicUiFromContext(ctx),
-		executionProfile,
+		...profileSelection,
 	});
 	const verb = workflowRunStartVerb(run.status);
 	if (request.awaitTerminal && !uiSessionSignal.aborted) {
@@ -2623,13 +2678,15 @@ async function handleRoutedRunRequest(
 		});
 	}
 	const requestedLabel = request.requestedWorkflow ?? "dynamic workflow";
+	const runtimeDefaults = currentRuntimeDefaults(ctx, api);
+	const availableModels = availableWorkflowModels(ctx);
 	const baseRequest = {
 		cwd: ctx.cwd,
 		task,
 		requestedWorkflow: request.requestedWorkflow,
 		runtimeOverrides: request.runtimeOverrides,
-		runtimeDefaults: currentRuntimeDefaults(ctx, api),
-		availableModels: availableWorkflowModels(ctx),
+		runtimeDefaults,
+		availableModels,
 		dynamicUi: dynamicUiFromContext(ctx),
 		launch: request.launch,
 	};
@@ -2704,17 +2761,22 @@ async function handleRoutedRunRequest(
 		return;
 	}
 
-	const executionProfile = workflowRef
-		? await selectWorkflowExecutionProfile(
+	const profileSelection = workflowRef
+		? await resolveWorkflowExecutionProfileForLaunch(
 				workflowRef,
 				ctx.cwd,
 				request.executionProfile,
-				ctx.hasUI
-					? (title, options) => ctx.ui.select(title, options)
-					: undefined,
-				preflightResult.loadedWorkflow,
+				{
+					select: ctx.hasUI
+						? (title, options) => ctx.ui.select(title, options)
+						: undefined,
+					loadedWorkflow: preflightResult.loadedWorkflow,
+					availableModels,
+					currentRuntime: runtimeDefaults,
+					runtimeOverrides: request.runtimeOverrides,
+				},
 			)
-		: undefined;
+		: {};
 	if (uiSessionSignal.aborted) return;
 
 	const outcomeResult = await withWorkflowLaunchForeground(
@@ -2725,7 +2787,7 @@ async function handleRoutedRunRequest(
 			const outcome = await executeResolvedRoutedWorkflowRequest(
 				{
 					...baseRequest,
-					executionProfile,
+					...profileSelection,
 					executionProfileResolved: Boolean(workflowRef),
 				},
 				routing,
@@ -2876,6 +2938,7 @@ export const WORKFLOW_KNOWN_ACTIONS: ReadonlySet<string> = new Set([
 	"validate",
 	"roles",
 	"agents",
+	"profile",
 	"run",
 	"dynamic",
 	"status",
@@ -3149,6 +3212,52 @@ async function handleWorkflowCommand(
 			return;
 		}
 
+		if (action === "profile") {
+			if (ctx.mode !== "tui" || !ctx.hasUI)
+				throw new Error(
+					"/workflow profile requires the interactive Pi TUI; it does not run in RPC/print/headless mode.",
+				);
+			if (tokens.length > 2)
+				throw new Error(
+					"Usage: /workflow profile [workflow-name-or-path]",
+				);
+			let workflowRef: string | undefined = tokens[1];
+			if (!workflowRef) {
+				const workflows = await listWorkflows(ctx.cwd);
+				if (workflows.length === 0)
+					throw new Error("No workflows found to configure.");
+				const choices = workflows.map((workflow) => ({
+					label: `${workflow.name} — ${toDisplayPath(workflow.specPath, ctx.cwd)}`,
+					ref: workflow.specPath,
+				}));
+				const selected = await ctx.ui.select(
+					"Choose a workflow to configure",
+					choices.map(({ label }) => label),
+				);
+				if (selected === undefined) {
+					emit(ctx, "Workflow profile selection cancelled; no settings were saved.", "info");
+					return;
+				}
+				workflowRef = choices.find(({ label }) => label === selected)?.ref;
+			}
+			if (!workflowRef) throw new Error("Unknown workflow selection.");
+			const loaded = await loadWorkflowSpec(workflowRef, ctx.cwd);
+			const result = await configureWorkflowExecutionProfile({
+				ui: {
+					select: (title, options) => ctx.ui.select(title, options),
+					notify: (message, level) => ctx.ui.notify(message, level),
+				},
+				spec: loaded.spec,
+				specPath: loaded.specPath,
+				workflowLabel: loaded.spec.name ?? workflowRef,
+				availableModels: availableWorkflowModels(ctx) ?? [],
+				currentRuntime: currentRuntimeDefaults(ctx, api),
+			});
+			if (result.status === "cancelled")
+				emit(ctx, "Workflow profile selection cancelled; no settings were saved.", "info");
+			return;
+		}
+
 		if (action === "run") {
 			const parsed = parseWorkflowRunArgs(args);
 			const launchCapture = workflowSlashLaunchCapture(
@@ -3213,14 +3322,21 @@ async function handleWorkflowCommand(
 				emit(ctx, preflightResult.guardNotice, "warning");
 				return;
 			}
-			const executionProfile = await selectWorkflowExecutionProfile(
+			const runtimeDefaults = currentRuntimeDefaults(ctx, api);
+			const availableModels = availableWorkflowModels(ctx);
+			const profileSelection = await resolveWorkflowExecutionProfileForLaunch(
 				specPath,
 				ctx.cwd,
 				parsed.profile,
-				ctx.hasUI
-					? (title, options) => ctx.ui.select(title, options)
-					: undefined,
-				preflightResult.loadedWorkflow,
+				{
+					select: ctx.hasUI
+						? (title, options) => ctx.ui.select(title, options)
+						: undefined,
+					loadedWorkflow: preflightResult.loadedWorkflow,
+					availableModels,
+					currentRuntime: runtimeDefaults,
+					runtimeOverrides,
+				},
 			);
 			if (uiSessionSignal.aborted) return;
 			emitWorkflowLaunchNotice(ctx, {
@@ -3239,7 +3355,7 @@ async function handleWorkflowCommand(
 							task: parsed.task,
 							detach: parsed.detach,
 							runtimeOverrides,
-							executionProfile,
+							...profileSelection,
 							executionProfileResolved: true,
 						},
 						ctx,
@@ -3966,6 +4082,11 @@ const WORKFLOW_ACTION_COMPLETIONS = [
 		label: "agents",
 		description: "List discoverable Pi agents",
 	},
+	{
+		value: "profile",
+		label: "profile",
+		description: "Configure a workflow execution profile",
+	},
 	{ value: "run", label: "run", description: "Start a workflow run" },
 	{
 		value: "dynamic",
@@ -4001,7 +4122,7 @@ export function workflowArgumentCompletions(
 		return matches.length > 0 ? matches : undefined;
 	}
 
-	const workflowNameCommands = ["run", "validate", "roles", "show"];
+	const workflowNameCommands = ["run", "validate", "roles", "profile", "show"];
 	for (const command of workflowNameCommands) {
 		if (!trimmed.startsWith(`${command} `)) continue;
 		const prefix = trimmed.slice(command.length + 1).trim();

@@ -40,6 +40,7 @@ Copy their proven conventions (see "Quality design patterns"), not just their st
 - For bounded iteration, use `loop` with fixed child stages, `maxRounds`, and deterministic `until`. Loop children are `single`/`reduce` only, run serially, and must not declare `from`/`after`: each child implicitly sources the earlier children of its round (for example `<loop>.r01.compare`), and the first child of every later round sources the previous round plus a `# Loop Carry-Forward Context` block. `until` must target the final child (`{ "stage": "<final-child>", "path": "$.field", "equals": true }`, or `all`/`any` combinators; predicates `equals`, `notEquals`, `lengthEquals`, `exists`), and that path must exist in the final child's control schema and few-shot example. Loops cannot be resumed; start a fresh run after changing the spec. See "Loop behavior" in `docs/usage.md` for the exact contract.
 - Agent-declared tools are the authority ceiling; workflow `tools` can only narrow them.
 - To reuse agent knowledge across stages, declare top-level `roles` (`fromAgent` extracts safe agent sections; `prompt` appends literal text). Compiled role text is injected as a `# Role Context` block; check the result with `/workflow roles <workflow>`. See "Roles" in `docs/usage.md`.
+- Independently classify every model-backed stage with `profileRole`: `planning`, `research-execution`, `synthesis`, `verification`, or `final-judgment`. This is required for Codex/Codex High/Claude/Mixed/Custom user profile coverage and must reflect the work's semantic purpose, never a stage-name guess. Put it on `single`/`foreach`/`reduce`/`dynamic` stages, nested DAG/loop children, and model-backed `onExhausted`; a dynamic stage's role classifies its generated-agent runtime defaults, and each present decision-loop `planner`/`workerDefaults`/`verifier`/`synthesis` profile object also needs its own role. Do not put it on support or DAG/loop containers. `profileRole` is not the agent-context `role` field.
 - Keep review/research workflows read-only unless the workflow explicitly documents managed-worktree mutation.
 - Write-capable workflows need explicit worktree policy, validation/check stages, and protected-path awareness.
 - In non-git workspaces with `worktreePolicy: "off"`, writes mutate the live directory.
@@ -77,7 +78,7 @@ When the workflow-definition request is vague, broad, or self-contradictory, do 
 When creating or changing a workflow:
 
 1. Identify the workflow goal and whether an existing workflow definition can be reused or adapted.
-2. Choose the workflow graph first: subagent stages plus support nodes where needed. Use `type: "dynamic"` only when static `foreach`/`dag`/`reduce` shapes cannot know the child work until runtime. If the graph choice materially affects cost, safety, output shape, or storage, state the chosen approach briefly before writing; otherwise proceed without asking about internal implementation details.
+2. Choose the workflow graph first: subagent stages plus support nodes where needed. Use `type: "dynamic"` only when static `foreach`/`dag`/`reduce` shapes cannot know the child work until runtime. If the graph choice materially affects cost, safety, output shape, or storage, state the chosen approach briefly before writing; otherwise proceed without asking about internal implementation details. Then assign every model-bearing stage/profile its semantic `profileRole`; do not infer roles from ids, omit nested/dynamic slots, or conflate this field with agent-context `role`.
 3. If one of the local scaffolds fits, copy it from `./scaffolds/` to the target workflow directory and adapt the copied files. Available scaffolds: `foreach-reduce`, `support-partition`, `dag-required-reads`, `matrix-dag`, `object-tool-fallback`, and `analysis-dossier`.
 4. Define every data dependency explicitly.
 5. Add `output.controlSchema` JSON Schema files for model outputs consumed by later stages; long prose belongs in `<analysis>`, not `<control>`.
@@ -137,6 +138,7 @@ Scaffold rules:
 4. Delete any scaffold schema/helper files the adapted spec no longer references. `/workflow validate` only checks referenced files, so orphaned `schemas/*.json` or `helpers/*.mjs` left over from the scaffold pass validation silently and become confusing dead assets. After adapting, confirm every file under `schemas/` and `helpers/` is referenced by the spec (`controlSchema`, `support.uses`, `dynamic.uses`) or a reachable bundle-local helper import, and remove the rest.
 5. Re-run `/workflow validate <copied-spec>` after adaptation and resolve every warning.
 6. Adaptation self-check — after editing, verify mechanically (grep) for every model stage, including fields you added that the scaffold never had:
+   - every model-backed stage and dynamic decision-loop profile has exactly one valid semantic `profileRole`; support and DAG/loop container nodes have none,
    - every enum field's allowed values appear verbatim in that stage's prompt (`must be exactly one of: ...`); a paraphrase of the values does not count,
    - every schema with `additionalProperties: false` has a prompt sentence naming the allowed top-level keys and forbidding any other key,
    - every schema `maxItems` cap is stated with its number plus overflow-to-`<analysis>` guidance,
@@ -266,6 +268,7 @@ Before handing off or recommending a reusable workflow run, verify or report as 
 - `readOnly` and tool lists match the intended side-effect policy.
 - Every `single.from`, `foreach.from`, `reduce.from`, support `from`, and `dag.outputFrom` reference resolves.
 - Every downstream-consumed control field has a schema and a bounded prompt contract.
+- Every model-backed `single`/`foreach`/`reduce`/`dynamic`, nested/loop-exhaustion model stage, and present dynamic decision-loop profile declares a semantic `profileRole`; support and DAG/loop containers do not. Verify this separately from agent-context `role`.
 - Every KEEP/WEAKEN or positive coverage claim citing local `file`/line/`quote` evidence passes through a deterministic byte-level evidence gate (support helper) before the final report; DROP requires verified counter-evidence before removal. A schema check alone is not a gate, and legacy locator strings or remote-only refs cannot substitute for byte attestation.
 - Loop stages: children declare no `from`/`after`, the `until` path exists in the final child's control schema and few-shot example, and the acceptance plan states that an interrupted loop is re-run, not resumed.
 - Support helper paths are bundle-local, `.mjs`, and trusted.

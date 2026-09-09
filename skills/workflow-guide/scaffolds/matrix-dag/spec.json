@@ -17,6 +17,7 @@
       {
         "id": "scope",
         "type": "single",
+        "profileRole": "planning",
         "output": {
           "controlSchema": "./schemas/scope-control.schema.json",
           "analysis": {
@@ -37,6 +38,7 @@
           {
             "id": "api",
             "type": "single",
+            "profileRole": "research-execution",
             "after": [],
             "output": {
               "controlSchema": "./schemas/lens-control.schema.json",
@@ -52,6 +54,7 @@
           {
             "id": "state",
             "type": "single",
+            "profileRole": "research-execution",
             "after": [],
             "output": {
               "controlSchema": "./schemas/lens-control.schema.json",
@@ -67,6 +70,7 @@
           {
             "id": "tests",
             "type": "single",
+            "profileRole": "verification",
             "after": [],
             "output": {
               "controlSchema": "./schemas/lens-control.schema.json",
@@ -82,6 +86,7 @@
           {
             "id": "docs",
             "type": "single",
+            "profileRole": "research-execution",
             "after": [],
             "output": {
               "controlSchema": "./schemas/lens-control.schema.json",
@@ -97,6 +102,7 @@
           {
             "id": "security",
             "type": "single",
+            "profileRole": "verification",
             "after": [],
             "output": {
               "controlSchema": "./schemas/lens-control.schema.json",
@@ -112,6 +118,7 @@
           {
             "id": "consistency",
             "type": "reduce",
+            "profileRole": "synthesis",
             "from": [
               "api",
               "state",
@@ -139,6 +146,7 @@
           {
             "id": "release",
             "type": "reduce",
+            "profileRole": "final-judgment",
             "from": [
               "docs",
               "security",
@@ -169,6 +177,7 @@
       {
         "id": "report",
         "type": "reduce",
+        "profileRole": "synthesis",
         "from": "matrix",
         "sourcePolicy": "require-success",
         "sourceProjection": {

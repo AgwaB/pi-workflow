@@ -158,7 +158,8 @@ For reusable workflow authoring, `workflow-guide` includes validated scaffold bu
 | `/workflow validate <workflow-name-or-path>` | Load and compile a workflow without starting a run. Reports blocked permission previews and warnings. A path may be a `.json` spec or a bundle directory containing `spec.json`. Non-interactive form for scripts and agents: `pi -p --no-session "/workflow validate <workflow-name-or-path>"` from the project directory. |
 | `/workflow roles <workflow-name-or-path>` | Show each compiled role: source agent, included/excluded sections, truncation, and the exact `# Role Context` block injected into task prompts that select it. |
 | `/workflow agents` | List discoverable Pi agents, model/thinking defaults, tool ceilings, and source paths. |
-| `/workflow run [--no-route] [--model MODEL] [--thinking LEVEL] [--profile NAME] <workflow-name-or-path> "<task>" [--detach] [--force-new]` | Start a named workflow run with the supplied runtime task. Routing is on by default: a low-cost direct-vs-dynamic-vs-requested-workflow router pass runs first and records its decision; `--no-route` skips it and starts the requested workflow directly (`--route` remains accepted as an explicit opt-in). `--profile NAME` applies a named `executionProfiles` entry declared by the spec (per-stage model, thinking, or batch overrides, recorded on the run record as `executionProfile`; unknown names fail closed). When `--profile` is omitted, an interactive run prompts when profiles exist; a declared `defaultExecutionProfile` is first, otherwise `Base (no profile)` is available. Headless/print/JSON launches, and `workflow_run` calls without an interactive selector, use the declared `defaultExecutionProfile`, or the base workflow when none is declared; they do not infer a profile from a name such as `medium`. Explicit `--profile` bypasses selection. Profile names are spec-defined labels, so `low`, `medium`, and `high` are conventions, not reserved names. Routing asks only after it selects the named workflow, never for direct/dynamic routes. `--detach` spawns a standalone supervisor process after the initial scheduling pass so the run keeps progressing after this Pi session exits (log: `.pi/workflows/<run-id>/supervise.log`). Dynamic controllers and `approval: "ask"` prompts in that first pass can still run inline; later detached/headless approval blocks require an interactive `/workflow resume <run-id>`. An identical active launch within 10 minutes is skipped unless `--force-new` is present. |
+| `/workflow profile [workflow-name-or-path]` | Open the native Pi picker for the workflow's user-wide execution profile. Choose Codex, Codex High, Claude, Mixed, or Custom; preview every model-backed stage; edit Custom model/thinking values; and save for the next run. Omitting the workflow opens a workflow picker. This command requires the interactive TUI and does not start a workflow or provider call. |
+| `/workflow run [--no-route] [--model MODEL] [--thinking LEVEL] [--profile NAME] <workflow-name-or-path> "<task>" [--detach] [--force-new]` | Start a named workflow run with the supplied runtime task. Routing is on by default: a low-cost direct-vs-dynamic-vs-requested-workflow router pass runs first and records its decision; `--no-route` skips it and starts the requested workflow directly (`--route` remains accepted as an explicit opt-in). `--profile NAME` applies a named `executionProfiles` entry declared by the spec (per-stage model, thinking, or batch overrides, recorded on the run record as `executionProfile`; unknown names fail closed). Launch precedence is explicit `--profile`, then a saved `/workflow profile` selection, then the prior omitted behavior: an interactive declared-profile selector, or `defaultExecutionProfile`/Base without a selector. Explicit `--profile` bypasses both saved and interactive selection. Declared profile names such as `low`, `medium`, and `high` are spec conventions, not the built-in user-profile names. Routing resolves a saved profile only after it selects the named workflow, never for direct/dynamic routes. `--detach` spawns a standalone supervisor process after the initial scheduling pass so the run keeps progressing after this Pi session exits (log: `.pi/workflows/<run-id>/supervise.log`). Dynamic controllers and `approval: "ask"` prompts in that first pass can still run inline; later detached/headless approval blocks require an interactive `/workflow resume <run-id>`. An identical active launch within 10 minutes is skipped unless `--force-new` is present. |
 | `/workflow dynamic [--route] [--model MODEL] [--thinking LEVEL] "<task>" [--detach] [--force-new]` | Start a spec-less direct dynamic run. The runtime uses a built-in trusted controller to plan/fan out/synthesize dynamically; no workflow name, user-selected spec, or generated spec is required. Unlike `/workflow run`, the router pass stays opt-in via `--route`; model, thinking, detach, duplicate-guard, and force-new controls match `/workflow run`. |
 | `/workflow status [run-id]` | Show all workflow runs in the current project, or one run. |
 | `/workflow show [--raw] <run-id-or-workflow-name>` | If the ref starts with `workflow_`, show formatted run details; otherwise show the workflow spec. `/workflow show --raw <run-id>` shows raw run details. |
@@ -193,16 +194,16 @@ Slash-command flags and LLM-tool parameters are different interfaces; do not tra
 
 | Surface | Routing | Model/thinking | Named profile | Completion/background controls |
 |---|---|---|---|---|
-| `/workflow run` (interactive or print) | On by default; `--no-route` disables, `--route` enables | `--model`, `--thinking` | `--profile` | Launch, then `/workflow wait`; `--detach`, `--force-new` |
+| `/workflow run` (interactive or print) | On by default; `--no-route` disables, `--route` enables | `--model`, `--thinking` | Saved user profile; explicit declared `--profile` wins | Launch, then `/workflow wait`; `--detach`, `--force-new` |
 | `/workflow dynamic` (interactive or print) | Off by default; `--route` enables | `--model`, `--thinking` | Not applicable | Launch, then `/workflow wait`; `--detach`, `--force-new` |
-| `workflow_run` tool | No router pass | Inherits session/spec; no model/thinking parameters | `profile` | `awaitTerminal` + optional `timeoutMs`, or `detach` |
+| `workflow_run` tool | No router pass | Inherits session/spec; no model/thinking parameters | Saved user profile; explicit declared `profile` wins | `awaitTerminal` + optional `timeoutMs`, or `detach` |
 | `workflow_dynamic` tool | No router pass | `model`, `thinking` | Not applicable | `awaitTerminal` + optional `timeoutMs`, or `detach` |
 | `workflow_wait` tool | Not applicable | Not applicable | Not applicable | `runId`, optional `timeoutMs`; session-bound wait only |
 | `pi-workflow` CLI | No launch command | Not applicable | Not applicable | `inspect` and `prune` accept `--json`; `supervise` drives existing runs with `--poll-ms`, `--max-runtime-ms`, and a run ref or `--all` |
 
 Scalar launch selectors (`--model`, `--profile`, `--thinking`, including its `--reasoning` alias) cannot be repeated, even with the same value or split across leading/trailing options. `--route` and `--no-route` conflict; quote task text containing literal option names. Both prune interfaces reject repeated scalar filters, unknown arguments, and invalid numbers: `--keep` requires a non-negative safe integer (at most `9007199254740991`), while `--older-than` accepts finite non-negative days, including fractions. Blank values are invalid. CLI supervise likewise rejects duplicate scalar options and a run ref combined with `--all`; `--poll-ms` accepts decimal integers from `250` to `2147483647`, and `--max-runtime-ms` from `1000` to `2147483647`.
 
-Thinking levels are `off`, `minimal`, `low`, `medium`, `high`, and `xhigh`. A tool's `timeoutMs` on launch requires `awaitTerminal: true`; waiting and detaching are mutually exclusive. Interactive profile omission offers a selector; without one, omission uses the declared default or base spec. For print/RPC/headless use, prefer text/tool results (`status`, `show`, `logs`, `inspect`) over interactive board controls; approval requiring a UI can block. `--json` is not a general slash-command launch flag.
+Thinking levels are `off`, `minimal`, `low`, `medium`, `high`, and `xhigh`. A tool's `timeoutMs` on launch requires `awaitTerminal: true`; waiting and detaching are mutually exclusive. With no saved user profile, interactive declared-profile omission offers the legacy selector; without one, omission uses the declared default or base spec. Saved user profiles apply equally to interactive, print/headless, and `workflow_run` launches. For print/RPC/headless use, prefer text/tool results (`status`, `show`, `logs`, `inspect`) over interactive board controls; approval requiring a UI can block. `--json` is not a general slash-command launch flag.
 
 ### Workflow board controls
 
@@ -325,15 +326,34 @@ Set user controls before launching Pi/supervisors so their child processes inher
 
 ### Execution profiles
 
-`executionProfiles` is an optional top-level map of custom profile names to stage overrides. A profile override object may contain **only** `model`, `thinking`, and `foreachBatch`; absent properties inherit normally. `defaultExecutionProfile`, when present, must name an entry in that map. With no selected profile, including a spec with no profiles or a headless launch of a spec that has no default, the base stage configuration is used.
+There are two compatible profile layers:
 
-Selection precedence is: an explicit `--profile` (or `workflow_run` `profile`) over omitted-profile selection; a declared default over the base workflow for non-interactive omission; and, for model/thinking values, explicit `--model`/`--thinking` runtime overrides over the selected profile, then normal stage/session/spec inheritance. A profile that does not set `model` does not pin a model.
+1. A workflow may declare custom-named `executionProfiles` in its spec. Each stage override may contain **only** `model`, `thinking`, and `foreachBatch`; absent properties inherit normally. `defaultExecutionProfile`, when present, must name one declared entry.
+2. A user may run `/workflow profile [workflow]` and save one of five definition-specific choices: Codex, Codex High, Claude, Mixed, or Custom. These choices synthesize model/thinking overrides from authored `profileRole` values; they do not rewrite the workflow spec or Pi's global model setting. When a declared default carries non-model metadata such as `foreachBatch`, the user profile overlays its model/thinking values without dropping that metadata.
+
+Launch precedence is: an explicit declared `--profile` (or `workflow_run` `profile`), then the saved user profile, then the existing omitted behavior (interactive declared-profile selector, or declared default/Base without a selector). Explicit `--model`/`--thinking` runtime overrides remain highest for runtime values. A saved profile never silently substitutes a missing model or clamps an unsupported profile thinking level: the launch explains the incompatible stage/model pair and blocks. This strict check is local to the new saved profile layer; existing declared-profile and runtime requested/resolved/clamp behavior is unchanged.
+
+The built-in role matrix is exact:
+
+| `profileRole` | Codex | Codex High | Claude | Mixed |
+|---|---|---|---|---|
+| `planning` | `openai-codex/gpt-5.6-sol` / `high` | `openai-codex/gpt-5.6-sol` / `xhigh` | `anthropic/claude-opus-4-8` / `high` | `anthropic/claude-opus-4-8` / `high` |
+| `research-execution` | `openai-codex/gpt-5.6-luna` / `medium` | `openai-codex/gpt-5.6-sol` / `high` | `anthropic/claude-opus-4-8` / `medium` | `openai-codex/gpt-5.6-luna` / `medium` |
+| `synthesis` | `openai-codex/gpt-5.6-luna` / `high` | `openai-codex/gpt-5.6-sol` / `xhigh` | `anthropic/claude-opus-4-8` / `high` | `anthropic/claude-opus-4-8` / `high` |
+| `verification` | `openai-codex/gpt-5.6-luna` / `high` | `openai-codex/gpt-5.6-sol` / `xhigh` | `anthropic/claude-opus-4-8` / `high` | `openai-codex/gpt-5.6-luna` / `high` |
+| `final-judgment` | `openai-codex/gpt-5.6-sol` / `xhigh` | `openai-codex/gpt-5.6-sol` / `xhigh` | `anthropic/claude-opus-4-8` / `high` | `anthropic/claude-opus-4-8` / `high` |
+
+Custom begins from the most recently selected built-in combination, restores its saved draft on later visits, and is not reset while browsing built-ins. Each stage's model and thinking can independently be fixed or inherit the current Pi value at the next run's start. The picker previews paged stage assignments and filters fixed thinking choices through Pi's actual model capability metadata. Esc/cancel and failed validation do not save. Opening, editing, previewing, and saving do not start a workflow or provider call.
+
+Declare `profileRole` on every model-backed `single`, `foreach`, `reduce`, and `dynamic` stage. Put it on the outer `foreach` stage (the selected runtime values are applied to `each`), on nested DAG/loop child stages, and on a loop's model-backed `onExhausted` stage. A dynamic stage's role classifies its generated-agent runtime defaults; for a dynamic decision loop, also put it on every present `planner`, `workerDefaults`, `verifier`, and `synthesis` profile object. Do not put it on support nodes or `dag`/`loop` containers. `profileRole` is semantic and independent of agent-context `role`; stage names are never used as a fallback. Missing or invalid coverage blocks only the saved user-profile feature with an actionable error, so older specs and their declared `executionProfiles` retain prior behavior.
+
+Saved settings live under `${PI_CODING_AGENT_DIR:-~/.pi/agent}/workflow-profiles/v1/` as private atomic files keyed by a canonical SHA-256 of the complete workflow definition. Canonically identical definitions reuse the selection across projects; two workflows that merely share a name do not collide. If a definition at the same source path changes, the old profile is reported as stale and is neither applied, deleted, nor migrated automatically. Malformed, symlinked, or non-regular exact settings fail closed without overwrite; hash-named candidates encountered by the bounded same-path stale scan also block rather than being silently skipped. A new run resolves inherited values and writes the captured profile stage mapping into the run record and frozen compiled artifact; explicit launch-time model/thinking overrides remain separately authoritative. Changing user settings or Pi defaults later does not change an active run or resume.
 
 `foreachBatch` is v1 profile-only batching, not a normal stage setting. It is valid only for a `foreach` target with `inputPolicy.artifactAccess: "none"`, and `maxItems` must be exactly `2`. The engine creates the batch prompt and result envelope; authors do not supply a batch prompt or envelope. A grouped pair is launched only when both adjacent logical items have the same usable `groupBy` value; if every fallback path is missing or empty, the whole would-be pair remains singleton. Missing, duplicate, extra, or individually invalid results discard the whole pair and rerun both items as singletons; one valid sibling is never accepted alone. A physical two-item launch still consumes two logical concurrency slots. Provider usage and timing are retained once on the durable batch record and attributed to its physical leader rather than double-counted across members. These constraints preserve ordinary per-item artifacts and downstream behavior.
 
 ### Deep-research execution profiles
 
-`deep-research` explicitly declares `defaultExecutionProfile: "medium"`, so a headless omitted-profile launch uses `medium`; interactive launch presents it first while still allowing the base spec. None of its profiles sets `model`, so current session/spec model resolution is retained. Its names are package conventions, not globally reserved names:
+`deep-research` explicitly declares `defaultExecutionProfile: "medium"`. When no user profile is saved, a headless omitted-profile launch uses `medium` and an interactive launch presents it first while still allowing the base spec. None of these declared profiles sets `model`, so current session/spec model resolution is retained. Their names are package conventions, not globally reserved names. A saved Codex/Claude/Mixed/Custom user profile instead overlays exact role-based model/thinking values on the `medium` default, preserving its verification batching; explicit `--profile low|medium|high` still wins:
 
 ```text
 /workflow run --profile low deep-research "Research this repository and summarize the architecture tradeoffs."
@@ -477,6 +497,7 @@ Dynamic workflows keep JSON as the source of truth while allowing trusted bundle
 {
   "id": "adaptive",
   "type": "dynamic",
+  "profileRole": "research-execution",
   "dynamic": {
     "uses": "./helpers/controller.mjs",
     "mode": "graph-splice",
@@ -547,23 +568,27 @@ Example diamond plus a DAG container consumed downstream:
       {
         "id": "plan",
         "type": "single",
+        "profileRole": "planning",
         "prompt": "Put machine-readable JSON in <control> with an items array."
       },
       {
         "id": "scan",
         "type": "foreach",
+        "profileRole": "research-execution",
         "from": { "source": "plan", "path": "$.items" },
         "each": { "prompt": "Scan this item: ${item}" }
       },
       {
         "id": "review",
         "type": "single",
+        "profileRole": "verification",
         "after": "plan",
         "prompt": "Run an independent review after planning finishes."
       },
       {
         "id": "merge",
         "type": "reduce",
+        "profileRole": "synthesis",
         "from": ["scan", "review"],
         "sourceProjection": { "include": ["$.digest"] },
         "prompt": "Merge both branch outputs."
@@ -574,14 +599,15 @@ Example diamond plus a DAG container consumed downstream:
         "from": "merge",
         "outputFrom": "final",
         "stages": [
-          { "id": "scan", "type": "single", "prompt": "Scan the merged findings." },
-          { "id": "review", "type": "single", "after": "scan", "prompt": "Review after the scan without scan output context." },
-          { "id": "final", "type": "reduce", "from": ["scan", "review"], "prompt": "Summarize the analysis children." }
+          { "id": "scan", "type": "single", "profileRole": "research-execution", "prompt": "Scan the merged findings." },
+          { "id": "review", "type": "single", "profileRole": "verification", "after": "scan", "prompt": "Review after the scan without scan output context." },
+          { "id": "final", "type": "reduce", "profileRole": "synthesis", "from": ["scan", "review"], "prompt": "Summarize the analysis children." }
         ]
       },
       {
         "id": "report",
         "type": "reduce",
+        "profileRole": "final-judgment",
         "from": "analysis",
         "inputPolicy": {
           "requiredReads": [
@@ -719,8 +745,8 @@ Minimal shape (the `until` condition must reference the final child stage):
   "maxRounds": 2,
   "until": { "stage": "draft", "path": "$.consistent", "equals": true },
   "stages": [
-    { "id": "compare", "type": "single", "prompt": "...", "output": { "controlSchema": "./schemas/compare-control.schema.json" } },
-    { "id": "draft", "type": "single", "prompt": "...", "output": { "controlSchema": "./schemas/draft-control.schema.json" } }
+    { "id": "compare", "type": "single", "profileRole": "verification", "prompt": "...", "output": { "controlSchema": "./schemas/compare-control.schema.json" } },
+    { "id": "draft", "type": "single", "profileRole": "synthesis", "prompt": "...", "output": { "controlSchema": "./schemas/draft-control.schema.json" } }
   ]
 }
 ```
@@ -876,7 +902,8 @@ Authoring checklist:
 5. Keep read-only workflows read-only.
 6. For write-capable workflows, choose a worktree policy and validation stage.
 7. Add JSON output contracts for model-produced data that later stages depend on.
-8. Run `/workflow validate <workflow-or-file>` before using the workflow.
+8. Declare a semantic `profileRole` on every model-backed stage and dynamic decision-loop profile so all five user execution-profile choices remain available.
+9. Run `/workflow validate <workflow-or-file>` before using the workflow.
 
 ### Roles
 
@@ -888,6 +915,8 @@ A workflow can declare reusable role context under top-level `roles`. Compiled r
 - `maxChars`: compiled role budget (default 12000). Longer content is truncated and flagged in `/workflow roles` output.
 
 A model stage may select one or more declared roles with `role` (a string or string array). When omitted, all declared roles are retained for compatibility. A `foreach` stage's `each.role` replaces the stage selection for its generated workers. `each.agent`, `each.tools`, `each.model`, `each.thinking`, `each.maxRuntimeMs`, `each.readOnly`, and `each.worktreePolicy` likewise override the stage values on the generated worker template; runtime command-line overrides still have highest precedence. Unknown role names fail during compilation.
+
+`profileRole` is a separate execution-profile classification; it does not select or alter the agent-context `role` above. Authors classify model work semantically as `planning`, `research-execution`, `synthesis`, `verification`, or `final-judgment`. Do not infer it from the stage id. See [Execution profiles](#execution-profiles) for placement and dynamic/nested addressing.
 
 `defaults.cwd` and `stage.cwd` are resolved from the project invocation directory and emitted as absolute task working directories. Dynamic stages do not accept an explicit `cwd`.
 
