@@ -30,6 +30,11 @@ type NativeUi = ExtensionCommandContext["ui"];
 type PreviewTheme = Pick<Theme, "bold" | "fg">;
 
 const MAX_VISIBLE_CHOICES = 10;
+const MAX_PROFILE_WIDTH = 100;
+
+function profileWidth(width: number): number {
+	return Math.max(1, Math.min(width, MAX_PROFILE_WIDTH));
+}
 const COLUMN_GAP = "  ";
 const TABLE_SIDE_PADDING = 1;
 
@@ -41,6 +46,7 @@ function supportsCustomUi(ui: NativeUi): boolean {
 export async function selectWorkflowProfileTarget(
 	ui: NativeUi,
 	choices: readonly WorkflowProfilePickerChoice[],
+	selectedRef?: string,
 ): Promise<string | undefined> {
 	if (!supportsCustomUi(ui)) {
 		const fallback = choices.map((choice, index) => ({
@@ -61,6 +67,7 @@ export async function selectWorkflowProfileTarget(
 			label,
 			description,
 		})),
+		{ selected: selectedRef, cancelLabel: "cancel" },
 	);
 }
 
@@ -90,7 +97,7 @@ export function renderWorkflowProfilePreview(
 	theme: PreviewTheme,
 	width: number,
 ): string[] {
-	const safeWidth = Math.max(1, width);
+	const safeWidth = profileWidth(width);
 	const title = [
 		theme.fg("accent", theme.bold(safeLine(preview.profileName))),
 		theme.fg(
@@ -153,7 +160,7 @@ async function selectNativeProfilePreview(
 	preview: WorkflowProfilePreview,
 ): Promise<WorkflowProfilePreviewMenuAction | undefined> {
 	const selected = await ui.custom<WorkflowProfilePreviewMenuAction | null>(
-		(tui, theme, _keybindings, done) => {
+		(tui, theme, keybindings, done) => {
 			const container = new Container();
 			container.addChild(
 				new DynamicBorder((text: string) => theme.fg("borderAccent", text)),
@@ -176,7 +183,7 @@ async function selectNativeProfilePreview(
 			container.addChild(
 				renderComponent((width) => [
 					fitLine(
-						` ${theme.fg("dim", "↑↓ navigate  enter select  esc cancel")}`,
+						` ${theme.fg("dim", "↑↓ navigate  enter select  esc back")}`,
 						width,
 					),
 				]),
@@ -185,10 +192,11 @@ async function selectNativeProfilePreview(
 				new DynamicBorder((text: string) => theme.fg("borderMuted", text)),
 			);
 			return {
-				render: (width) => container.render(width),
+				render: (width) => container.render(profileWidth(width)),
 				invalidate: () => container.invalidate(),
 				handleInput: (data) => {
-					actions.handleInput(data);
+					if (keybindings.matches(data, "tui.select.cancel")) done(null);
+					else actions.handleInput(data);
 					tui.requestRender();
 				},
 			};
@@ -217,7 +225,7 @@ async function selectNativeItem(
 		return {
 			get focused() { return picker.input.focused; },
 			set focused(value: boolean) { picker.input.focused = value; },
-			render: (width) => picker.render(title, width, tui.terminal.rows),
+			render: (width) => picker.render(title, profileWidth(width), tui.terminal.rows),
 			invalidate: () => picker.input.invalidate(),
 			handleInput: (data) => {
 				if (keybindings.matches(data, "tui.select.cancel")) done(null);
@@ -285,9 +293,10 @@ class ProfileChoiceList {
 		const detail = this.selection.searchable
 			? wrapTextWithAnsi(` Selected: ${this.selectedItem()?.label ?? "No matching models"}`, Math.max(1, width))
 			: [];
+		const cancel = `esc ${this.selection.cancelLabel ?? "back"}`;
 		const hints = this.selection.searchable
-			? wrapTextWithAnsi("type to filter  ↑↓/pgup/pgdn navigate  enter select  esc cancel", Math.max(1, width - 2))
-			: ["↑↓ navigate  enter select  esc cancel"];
+			? wrapTextWithAnsi(`type to filter  ↑↓/pgup/pgdn navigate  enter select  ${cancel}`, Math.max(1, width - 2))
+			: [`↑↓ navigate  enter select  ${cancel}`];
 		// Leave room for borders, count, hints and Pi's surrounding editor/footer.
 		this.visibleRows = Math.max(1, Math.min(
 			MAX_VISIBLE_CHOICES,

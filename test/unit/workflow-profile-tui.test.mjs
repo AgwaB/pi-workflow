@@ -89,7 +89,7 @@ test("120-model selector keeps focus visible on open, navigation, wrap and resiz
 	state.component.handleInput(PAGE_DOWN);
 	state.terminal.rows = 16;
 	lines = frame(state, 48);
-	assert.match(lines.join("\n"), /esc cancel/);
+	assert.match(lines.join("\n"), /esc back/);
 	assert.equal(pointed(lines), `→ ${LUNA}`);
 	assert.match(lines.join("\n"), /Selected: openai-codex\/gpt-5\.6-luna/);
 	state.component.handleInput(ENTER);
@@ -171,6 +171,46 @@ test("native preview actions share picker colors and preserve cancel and save id
 	const saved = profileUi.preview(preview);
 	state.component.handleInput(ENTER);
 	assert.equal(await saved, "save");
+});
+
+test("all native profile screens share a responsive maximum width and correct Back hints", async () => {
+	const { ui, profileUi, state } = harness();
+	const screens = [
+		() => selectWorkflowProfileTarget(ui, [
+			{ ref: "/private/first.json", label: "First", description: "Current: Codex" },
+			{ ref: "/private/second.json", label: "Second", description: "Current: Custom" },
+		], "/private/second.json"),
+		() => profileUi.select("Profiles", ["Codex", "Custom"]),
+		() => profileUi.select("Model", MODELS, { selected: LUNA, searchable: true }),
+		() => profileUi.preview({
+			profileName: "Custom", page: 1, pages: 1,
+			rows: [{ id: "plan", role: "planning", model: LUNA, thinking: "high" }],
+			actions: [{ id: "save", label: "Save for next run" }, { id: "back", label: "Back to profiles" }],
+		}),
+	];
+	for (const [index, open] of screens.entries()) {
+		const result = open();
+		for (const width of [48, 82, 100, 240, 500]) {
+			const lines = frame(state, width);
+			assert.equal(visibleWidth(lines[0]), Math.min(width, 100));
+			assert.equal(visibleWidth(lines.at(-1)), Math.min(width, 100));
+			assert.ok(lines.every((line) => visibleWidth(line) <= Math.min(width, 100)));
+			assert.match(lines.join("\n"), index === 0 ? /esc cancel/ : /esc back/);
+			if (index === 0) assert.match(pointed(lines), /Second/);
+		}
+		state.component.handleInput(ESC);
+		assert.equal(await result, undefined);
+	}
+});
+
+test("native preview Back accepts the injected cancel binding", async () => {
+	const { profileUi, state } = harness({ "tui.select.cancel": "ctrl+q" });
+	const result = profileUi.preview({
+		profileName: "Codex", page: 1, pages: 1, rows: [],
+		actions: [{ id: "back", label: "Back to profiles" }],
+	});
+	state.component.handleInput("\x11");
+	assert.equal(await result, undefined);
 });
 
 test("compatibility adapter retains the ordinary select flow without a native preview", async () => {

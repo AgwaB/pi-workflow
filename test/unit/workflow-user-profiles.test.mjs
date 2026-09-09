@@ -18,7 +18,7 @@ import {
 	collectWorkflowProfileStageSlots,
 } from "../../.tmp/unit/execution-profile.js";
 import { parseArtifactGraphWorkflowSpec } from "../../.tmp/unit/artifact-graph-schema.js";
-import { resolveWorkflowExecutionProfileForLaunch } from "../../.tmp/unit/extension.js";
+import workflowExtension, { resolveWorkflowExecutionProfileForLaunch } from "../../.tmp/unit/extension.js";
 import { loadWorkflowSpec } from "../../.tmp/unit/schema.js";
 import {
 	WORKFLOW_BUILTIN_PROFILE_IDS,
@@ -1166,6 +1166,99 @@ test("stage-edit cancellation restores the draft and saving applies only on conf
 		model: { kind: "fixed", value: OTHER },
 		thinking: { kind: "fixed", value: "low" },
 	});
+});
+
+test("Esc from native and fallback previews returns to profiles without saving", async () => {
+	for (const native of [false, true]) {
+		for (const profile of ["Codex", "Custom"]) {
+			const { agentDir, workflowPath } = setup(`ui-preview-back-${native}-${profile}`);
+			const spec = roleSpec();
+			writeSpec(workflowPath, spec);
+			const ui = new ScriptedUi([profile, undefined, undefined]);
+			if (native) ui.preview = async () => ui.script.shift();
+			const result = await configureWorkflowExecutionProfile({ ui, ...context(spec, workflowPath) });
+			assert.equal(result.status, "cancelled");
+			const profileCalls = ui.calls.filter(({ title }) => title.startsWith("Workflow execution profile"));
+			assert.equal(profileCalls.length, 2);
+			assert.equal(profileCalls[1].selection.selected, profile);
+			assert.equal(profileCalls[1].selection.cancelLabel, "cancel");
+			assert.equal(ui.script.length, 0);
+			assert.throws(() => statSync(agentDir), /ENOENT/);
+		}
+	}
+});
+
+test("Custom Esc unwinds every editor screen and discards incomplete assignments", async () => {
+	const { agentDir, workflowPath } = setup("ui-each-editor-back");
+	const spec = roleSpec();
+	writeSpec(workflowPath, spec);
+	const ui = new ScriptedUi([
+		"Custom", "Edit a stage…", "plan — planning", "Model and thinking",
+		OTHER, undefined, undefined, // thinking -> model -> field
+		"Thinking only", undefined, // thinking -> field
+		"Model only", undefined, // model -> field
+		undefined, undefined, undefined, undefined, // field -> stage -> preview -> profiles -> exit
+	]);
+	const result = await configureWorkflowExecutionProfile({ ui, ...context(spec, workflowPath) });
+	assert.equal(result.status, "cancelled");
+	assert.equal(ui.script.length, 0);
+	assert.deepEqual(ui.calls.map(({ title }) => title.split("\n")[0]), [
+		"Workflow execution profile — role-profile", "Custom — stage preview (1/1)",
+		"Choose a Custom stage to edit", "Edit plan", "Choose model",
+		`Choose thinking for ${OTHER}`, "Choose model", "Edit plan",
+		`Choose thinking for ${SOL}`, "Edit plan", "Choose model", "Edit plan",
+		"Choose a Custom stage to edit", "Custom — stage preview (1/1)",
+		"Workflow execution profile — role-profile",
+	]);
+	const models = ui.calls.filter(({ title }) => title.startsWith("Choose model"));
+	assert.equal(models[1].selection.selected, `${OTHER} (current setting)`);
+	assert.equal(models[2].selection.selected, `${SOL} (current setting)`);
+	const stages = ui.calls.filter(({ title }) => title === "Choose a Custom stage to edit");
+	assert.equal(stages[1].selection.selected, "plan — planning");
+	assert.equal(ui.calls[13].title, ui.calls[1].title, "abandoned edit never changes the draft");
+	assert.throws(() => statSync(agentDir), /ENOENT/);
+});
+
+test("combined editor retains model draft across Back and saves only after confirmation", async () => {
+	const { workflowPath } = setup("ui-combined-back-save");
+	const spec = roleSpec();
+	writeSpec(workflowPath, spec);
+	const ui = new ScriptedUi([
+		"Custom", "Edit a stage…", "plan — planning", "Model and thinking",
+		OTHER, undefined, `${OTHER} (current setting)`, "low", "Save for next run",
+	]);
+	const result = await configureWorkflowExecutionProfile({ ui, ...context(spec, workflowPath) });
+	assert.equal(result.status, "saved");
+	assert.equal(ui.script.length, 0);
+	assert.deepEqual(result.preference.custom.stages.plan, {
+		model: { kind: "fixed", value: OTHER }, thinking: { kind: "fixed", value: "low" },
+	});
+	assert.equal(ui.calls.filter(({ title }) => title.startsWith("Choose model"))[1].selection.selected, `${OTHER} (current setting)`);
+});
+
+test("actual profile command returns to workflow picker on Back and exits only at entry screen", async () => {
+	for (const explicit of [false, true]) {
+		const { root, agentDir, workflowPath } = setup(`ui-command-back-${explicit}`);
+		const spec = roleSpec("back-fixture");
+		const path = explicit ? workflowPath : join(root, ".pi/workflows/back-fixture/spec.json");
+		writeSpec(path, spec);
+		let handler;
+		workflowExtension({
+			on() {}, registerTool() {}, getThinkingLevel() { return "medium"; },
+			registerCommand(name, command) { if (name === "workflow") handler = command.handler; },
+		});
+		const chooseWorkflow = (_title, options) => options.find((option) => option.includes("back-fixture"));
+		const ui = new ScriptedUi(explicit ? [undefined] : [chooseWorkflow, undefined, undefined]);
+		await handler(explicit ? `profile ${path}` : "profile", { cwd: root, mode: "tui", hasUI: true, ui });
+		assert.equal(ui.script.length, 0, JSON.stringify(ui.notifications));
+		assert.equal(ui.notifications.length, 1);
+		assert.equal(ui.notifications[0].level, "info");
+		assert.match(ui.notifications[0].message, /cancelled; no settings were saved/);
+		assert.deepEqual(ui.calls.map(({ title }) => title.split("\n")[0]), explicit
+			? ["Workflow execution profile — back-fixture"]
+			: ["Choose a workflow to configure", "Workflow execution profile — back-fixture", "Choose a workflow to configure"]);
+		assert.throws(() => statSync(agentDir), /ENOENT/);
+	}
 });
 
 test("launch precedence is explicit, then saved, then the legacy declared selector", async () => {
