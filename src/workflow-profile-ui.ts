@@ -58,8 +58,17 @@ export interface WorkflowProfilePreview {
 	}>;
 }
 
+export interface WorkflowProfileSelectOptions {
+	selected?: string;
+	searchable?: boolean;
+}
+
 export interface WorkflowProfileUi {
-	select(title: string, options: string[]): Promise<string | undefined>;
+	select(
+		title: string,
+		options: string[],
+		selection?: WorkflowProfileSelectOptions,
+	): Promise<string | undefined>;
 	preview?(
 		preview: WorkflowProfilePreview,
 	): Promise<WorkflowProfilePreviewMenuAction | undefined>;
@@ -172,17 +181,14 @@ export async function configureWorkflowExecutionProfile(
 	const customFocus: { stageId?: string } = {};
 
 	while (true) {
-		const labels = profileLabels(
-			context,
-			previous?.selectedProfile,
-			selectedProfile,
-		);
+		const labels = profileLabels(context, previous?.selectedProfile);
 		const selectedLabel = await input.ui.select(
 			[
 				`Workflow execution profile — ${clip(input.workflowLabel ?? input.spec.name ?? "workflow", 68)}`,
 				"Selection is saved for this workflow definition across projects.",
 			].join("\n"),
 			labels.map(({ label }) => label),
+			{ selected: labels.find(({ id }) => id === selectedProfile)?.label },
 		);
 		if (selectedLabel === undefined) return { status: "cancelled" };
 		const selected = labels.find(({ label }) => label === selectedLabel);
@@ -258,9 +264,8 @@ function firstUsableProfile(context: WorkflowProfileContext): WorkflowUserProfil
 function profileLabels(
 	context: WorkflowProfileContext,
 	saved: WorkflowUserProfileId | undefined,
-	focused: WorkflowUserProfileId,
 ): Array<{ id: WorkflowUserProfileId; label: string }> {
-	const labels = [
+	return [
 		...WORKFLOW_BUILTIN_PROFILE_IDS.map((id) => {
 			const error = tryBuildProfile(context, id).error;
 			return {
@@ -273,10 +278,6 @@ function profileLabels(
 			label: `Custom${saved === "custom" ? " (saved)" : ""}`,
 		},
 	];
-	const focusedIndex = labels.findIndex(({ id }) => id === focused);
-	return focusedIndex <= 0
-		? labels
-		: [...labels.slice(focusedIndex), ...labels.slice(0, focusedIndex)];
 }
 
 function tryBuildProfile(
@@ -423,17 +424,13 @@ async function editCustomStage(
 		id: slot.id,
 		label: `${slot.id} — ${slot.profileRole}`,
 	}));
-	const focusedIndex = choices.findIndex(({ id }) => id === focus.stageId);
-	const stageChoices =
-		focusedIndex <= 0
-			? choices
-			: [...choices.slice(focusedIndex), ...choices.slice(0, focusedIndex)];
 	const stageLabel = await ui.select(
 		"Choose a Custom stage to edit",
-		stageChoices.map(({ label }) => label),
+		choices.map(({ label }) => label),
+		{ selected: choices.find(({ id }) => id === focus.stageId)?.label },
 	);
 	if (stageLabel === undefined) return custom;
-	const slot = stageChoices.find(({ label }) => label === stageLabel);
+	const slot = choices.find(({ label }) => label === stageLabel);
 	if (!slot) return custom;
 	focus.stageId = slot.id;
 	const previous = custom.stages[slot.id]!;
@@ -482,12 +479,12 @@ async function selectModel(
 			value: { kind: "fixed", value: model } as const,
 		})),
 	];
-	const ordered = focusCurrentChoice(choices);
 	const selected = await ui.select(
-		`Choose model\nCurrent Pi: ${context.currentRuntime.model ?? "unavailable"}`,
-		ordered.map(({ label }) => label),
+		`Choose model\nCurrent setting: ${current.kind === "fixed" ? current.value : "Pi model at run start"}\nCurrent Pi: ${context.currentRuntime.model ?? "unavailable"}`,
+		choices.map(({ label }) => label),
+		{ selected: currentChoiceLabel(choices), searchable: true },
 	);
-	return ordered.find(({ label }) => label === selected)?.value;
+	return choices.find(({ label }) => label === selected)?.value;
 }
 
 async function selectThinking(
@@ -510,21 +507,16 @@ async function selectThinking(
 			value: { kind: "fixed", value: thinking } as const,
 		})),
 	];
-	const ordered = focusCurrentChoice(choices);
 	const selected = await ui.select(
-		`Choose thinking for ${modelId ?? "unavailable model"}\nCurrent Pi: ${context.currentRuntime.thinking ?? "unavailable"}`,
-		ordered.map(({ label }) => label),
+		`Choose thinking for ${modelId ?? "unavailable model"}\nCurrent setting: ${current.kind === "fixed" ? current.value : "Pi thinking at run start"}\nCurrent Pi: ${context.currentRuntime.thinking ?? "unavailable"}`,
+		choices.map(({ label }) => label),
+		{ selected: currentChoiceLabel(choices) },
 	);
-	return ordered.find(({ label }) => label === selected)?.value;
+	return choices.find(({ label }) => label === selected)?.value;
 }
 
-function focusCurrentChoice<T extends { label: string }>(choices: T[]): T[] {
-	const currentIndex = choices.findIndex(({ label }) =>
-		label.endsWith(" (current setting)"),
-	);
-	return currentIndex <= 0
-		? choices
-		: [...choices.slice(currentIndex), ...choices.slice(0, currentIndex)];
+function currentChoiceLabel(choices: readonly { label: string }[]): string | undefined {
+	return choices.find(({ label }) => label.endsWith(" (current setting)"))?.label;
 }
 
 function formatAssignment(assignment: WorkflowCustomStageAssignment): string {
