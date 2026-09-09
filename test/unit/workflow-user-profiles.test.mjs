@@ -30,7 +30,14 @@ import {
 	saveWorkflowProfilePreference,
 	workflowProfileIdentity,
 } from "../../.tmp/unit/workflow-profile-settings.js";
-import { configureWorkflowExecutionProfile } from "../../.tmp/unit/workflow-profile-ui.js";
+import {
+	buildWorkflowProfilePickerChoices,
+	configureWorkflowExecutionProfile,
+} from "../../.tmp/unit/workflow-profile-ui.js";
+import {
+	renderWorkflowProfilePreview,
+	selectWorkflowProfileTarget,
+} from "../../.tmp/unit/workflow-profile-tui.js";
 
 const ROOT = mkdtempSync(join(tmpdir(), "pi-workflow-user-profiles-"));
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -739,6 +746,203 @@ test("preference reads and writes reject a symlinked settings ancestor", async (
 		/not a directory|must not be a symlink/,
 	);
 	assert.deepEqual(readdirSync(outside), []);
+});
+
+test("workflow picker hides paths and describes exact, absent, stale, and unavailable profiles", async () => {
+	const { root, workflowPath } = setup("ui-workflow-choices");
+	const currentSpec = roleSpec("current-profile");
+	const nonePath = join(root, "none", "spec.json");
+	const stalePath = join(root, "stale", "spec.json");
+	const unavailablePath = join(root, "unavailable", "spec.json");
+	writeSpec(workflowPath, currentSpec);
+	writeSpec(nonePath, roleSpec("no-profile"));
+	const oldStaleSpec = roleSpec("stale-profile");
+	writeSpec(stalePath, oldStaleSpec);
+	await saveWorkflowProfilePreference(
+		{ spec: currentSpec, specPath: workflowPath },
+		{ selectedProfile: "codex-high" },
+	);
+	await saveWorkflowProfilePreference(
+		{ spec: oldStaleSpec, specPath: stalePath },
+		{ selectedProfile: "mixed" },
+	);
+	const changedStaleSpec = roleSpec("stale-profile");
+	changedStaleSpec.artifactGraph.stages.push(
+		stage("new-stage", "research-execution"),
+	);
+	writeSpec(stalePath, changedStaleSpec);
+	writeSpec(unavailablePath, roleSpec("unavailable-profile"));
+	writeFileSync(unavailablePath, "{not-json\n");
+
+	const choices = await buildWorkflowProfilePickerChoices(
+		[
+			{ name: "current", specPath: workflowPath },
+			{ name: "none", specPath: nonePath },
+			{ name: "stale", specPath: stalePath },
+			{ name: "unavailable", specPath: unavailablePath },
+		],
+		(specPath) => loadWorkflowSpec(specPath, root),
+	);
+
+	assert.deepEqual(
+		choices.map(({ label, description }) => ({ label, description })),
+		[
+			{ label: "current", description: "Current: Codex High" },
+			{ label: "none", description: "Current: Not configured" },
+			{
+				label: "stale",
+				description: "Current: Not configured (outdated Mixed saved)",
+			},
+			{ label: "unavailable", description: "Current: Unavailable" },
+		],
+	);
+	assert.deepEqual(
+		choices.map(({ ref }) => ref),
+		[workflowPath, nonePath, stalePath, unavailablePath],
+	);
+	for (const { label, description } of choices) {
+		assert.doesNotMatch(label, /spec\.json|\//);
+		assert.doesNotMatch(description, /spec\.json|\//);
+	}
+});
+
+test("workflow picker text fallback remains path-free and preserves identity", async () => {
+	const selectedOptions = [];
+	const ui = {
+		select: async (_title, options) => {
+			selectedOptions.push(...options);
+			return options[1];
+		},
+	};
+	const selected = await selectWorkflowProfileTarget(ui, [
+		{
+			ref: "/private/first/spec.json",
+			label: "first",
+			description: "Current: Codex",
+		},
+		{
+			ref: "/private/second/spec.json",
+			label: "second",
+			description: "Current: Not configured",
+		},
+	]);
+
+	assert.equal(selected, "/private/second/spec.json");
+	assert.deepEqual(selectedOptions, [
+		"1. first — Current: Codex",
+		"2. second — Current: Not configured",
+	]);
+	assert.ok(selectedOptions.every((option) => !option.includes("/private/")));
+});
+
+test("structured profile preview preserves paging and action identity", async () => {
+	const { agentDir, workflowPath } = setup("ui-structured-preview");
+	const spec = roleSpec();
+	for (const [id, profileRole] of [
+		["extra-plan", "planning"],
+		["extra-research", "research-execution"],
+		["extra-final", "final-judgment"],
+	]) {
+		spec.artifactGraph.stages.push(stage(id, profileRole));
+	}
+	writeSpec(workflowPath, spec);
+	const ui = new ScriptedUi(["Codex", "next", "back", undefined]);
+	ui.previews = [];
+	ui.preview = async (preview) => {
+		ui.previews.push(structuredClone(preview));
+		return ui.script.shift();
+	};
+
+	const result = await configureWorkflowExecutionProfile({
+		ui,
+		...context(spec, workflowPath),
+	});
+
+	assert.equal(result.status, "cancelled");
+	assert.equal(ui.previews.length, 2);
+	assert.deepEqual(
+		ui.previews.map(({ page, pages, rows }) => ({
+			page,
+			pages,
+			rows: rows.map(({ id }) => id),
+		})),
+		[
+			{
+				page: 1,
+				pages: 2,
+				rows: ["plan", "research", "synthesize", "verify", "judge", "extra-plan"],
+			},
+			{
+				page: 2,
+				pages: 2,
+				rows: ["extra-research", "extra-final"],
+			},
+		],
+	);
+	assert.deepEqual(
+		ui.previews[0].actions.map(({ id }) => id),
+		["save", "next", "previous", "back"],
+	);
+	assert.throws(() => statSync(agentDir), /ENOENT/);
+});
+
+test("native preview renderer uses responsive columns and distinct semantic colors", () => {
+	const colors = [];
+	const theme = {
+		bold: (text) => text,
+		fg: (color, text) => {
+			colors.push(color);
+			return text;
+		},
+	};
+	const preview = {
+		profileName: "Codex High",
+		page: 1,
+		pages: 1,
+		rows: [
+			{
+				id: "triage",
+				role: "planning",
+				model: SOL,
+				thinking: "xhigh",
+			},
+			{
+				id: "reviewers",
+				role: "research-execution",
+				model: LUNA,
+				thinking: "high",
+			},
+		],
+		actions: [{ id: "save", label: "Save for next run" }],
+	};
+
+	const wide = renderWorkflowProfilePreview(preview, theme, 100);
+	assert.match(wide[1], /STAGE\s+ROLE\s+MODEL\s+THINKING/);
+	assert.match(wide[3], /triage\s+planning\s+openai-codex\/gpt-5\.6-sol\s+xhigh/);
+	assert.ok(wide.every((line) => Array.from(line).length <= 100));
+	for (const color of [
+		"syntaxFunction",
+		"syntaxType",
+		"syntaxString",
+		"thinkingXhigh",
+		"thinkingHigh",
+	]) {
+		assert.ok(colors.includes(color), `missing ${color}`);
+	}
+
+	const narrow = renderWorkflowProfilePreview(preview, theme, 48);
+	assert.equal(narrow.length, 1 + preview.rows.length * 2);
+	assert.ok(narrow.every((line) => Array.from(line).length <= 48));
+	assert.match(narrow[1], /triage \[planning\]/);
+	assert.match(narrow[2], /openai-codex\/gpt-5\.6-sol/);
+
+	const blocked = renderWorkflowProfilePreview(
+		{ ...preview, error: "first line\n- second line" },
+		theme,
+		100,
+	);
+	assert.match(blocked.at(-1), /Blocked: first line - second line/);
+	assert.doesNotMatch(blocked.at(-1), /�/);
 });
 
 test("profile picker exposes five choices and cancel performs no write", async () => {
