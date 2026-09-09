@@ -76,6 +76,8 @@ Interactive slash-command launches use Pi's cancellable foreground loader while 
 
 Use `/workflow profile [workflow]` in Pi's TUI to preview and privately save
 Codex, Codex High, Claude, Mixed, or a per-stage Custom model/thinking setup.
+Without a workflow argument, the picker shows each workflow's saved profile
+instead of its path; previews use colored stage/role/model/thinking columns.
 The same exact workflow definition reuses that preference across projects;
 subsequent interactive, headless, routed, and `workflow_run` launches capture
 its effective values at run start. Missing model capabilities or a stale

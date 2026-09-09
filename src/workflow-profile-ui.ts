@@ -22,6 +22,7 @@ import {
 	profileRuntimeForRole,
 	saveWorkflowProfilePreference,
 	workflowBuiltinProfileLabel,
+	workflowUserProfileLabel,
 	type InheritableWorkflowProfileValue,
 	type WorkflowBuiltinProfileId,
 	type WorkflowCustomProfile,
@@ -31,9 +32,49 @@ import {
 	type WorkflowUserProfileId,
 } from "./workflow-profile-settings.js";
 
+export type WorkflowProfilePreviewMenuAction =
+	| "save"
+	| "edit"
+	| "next"
+	| "previous"
+	| "back";
+
+export interface WorkflowProfilePreviewRow {
+	id: string;
+	role: string;
+	model: string;
+	thinking: string;
+}
+
+export interface WorkflowProfilePreview {
+	profileName: string;
+	page: number;
+	pages: number;
+	rows: readonly WorkflowProfilePreviewRow[];
+	error?: string;
+	actions: ReadonlyArray<{
+		id: WorkflowProfilePreviewMenuAction;
+		label: string;
+	}>;
+}
+
 export interface WorkflowProfileUi {
 	select(title: string, options: string[]): Promise<string | undefined>;
+	preview?(
+		preview: WorkflowProfilePreview,
+	): Promise<WorkflowProfilePreviewMenuAction | undefined>;
 	notify?(message: string, level?: "info" | "warning" | "error"): void;
+}
+
+export interface WorkflowProfilePickerWorkflow {
+	name: string;
+	specPath: string;
+}
+
+export interface WorkflowProfilePickerChoice {
+	ref: string;
+	label: string;
+	description: string;
 }
 
 export interface ConfigureWorkflowProfileInput {
@@ -50,12 +91,6 @@ export type ConfigureWorkflowProfileResult =
 	| { status: "saved"; preference: WorkflowProfilePreference };
 
 type PreviewAction = "save" | "edit" | "back" | "cancelled";
-type ProfilePreviewRow = {
-	id: string;
-	role: string;
-	model: string;
-	thinking: string;
-};
 
 const PREVIEW_PAGE_ROWS = 6;
 const INHERIT_MODEL_LABEL = "Inherit current Pi model at run start";
@@ -63,6 +98,44 @@ const INHERIT_THINKING_LABEL = "Inherit current Pi thinking at run start";
 const EDIT_MODEL = "Model only";
 const EDIT_THINKING = "Thinking only";
 const EDIT_BOTH = "Model and thinking";
+
+/** Build path-free workflow choices while preserving the path as hidden identity. */
+export async function buildWorkflowProfilePickerChoices(
+	workflows: readonly WorkflowProfilePickerWorkflow[],
+	loadWorkflow: (
+		specPath: string,
+	) => Promise<{ spec: ArtifactGraphWorkflowSpec; specPath: string }>,
+): Promise<WorkflowProfilePickerChoice[]> {
+	const choices: WorkflowProfilePickerChoice[] = [];
+	for (const workflow of workflows) {
+		let current = "Unavailable";
+		try {
+			const loadedWorkflow = await loadWorkflow(workflow.specPath);
+			const loadedPreference = await loadWorkflowProfilePreference(
+				loadedWorkflow.spec,
+				loadedWorkflow.specPath,
+			);
+			if (loadedPreference.preference) {
+				current = workflowUserProfileLabel(
+					loadedPreference.preference.selectedProfile,
+				);
+			} else if (loadedPreference.stalePreference) {
+				current = `Not configured (outdated ${workflowUserProfileLabel(loadedPreference.stalePreference.selectedProfile)} saved)`;
+			} else {
+				current = "Not configured";
+			}
+		} catch {
+			// Keep browsing available. Selecting this workflow reruns strict loading
+			// and surfaces the original validation or settings error.
+		}
+		choices.push({
+			ref: workflow.specPath,
+			label: workflow.name,
+			description: `Current: ${current}`,
+		});
+	}
+	return choices;
+}
 
 /**
  * Native Pi selection flow for one workflow's durable user profile. Merely
@@ -222,7 +295,7 @@ function tryBuildProfile(
 async function selectPreviewAction(
 	ui: WorkflowProfileUi,
 	profileName: string,
-	rows: readonly ProfilePreviewRow[],
+	rows: readonly WorkflowProfilePreviewRow[],
 	error: string | undefined,
 	editable: boolean,
 ): Promise<PreviewAction> {
@@ -233,34 +306,66 @@ async function selectPreviewAction(
 			page * PREVIEW_PAGE_ROWS,
 			(page + 1) * PREVIEW_PAGE_ROWS,
 		);
-		const title = [
-			`${profileName} — stage preview (${page + 1}/${pages})`,
-			...pageRows.map(
-				(row) =>
-					`${clip(row.id, 42)} [${row.role}]\n  ${clip(row.model, 68)} · ${row.thinking}`,
-			),
-			...(error ? [`Blocked: ${clip(error.replace(/\s+/g, " "), 180)}`] : []),
-		].join("\n");
-		const actions = [
-			...(error ? [] : ["Save for next run"]),
-			...(editable ? ["Edit a stage…"] : []),
-			...(pages > 1 ? ["Next preview page", "Previous preview page"] : []),
-			"Back to profiles",
+		const actions: WorkflowProfilePreview["actions"] = [
+			...(error ? [] : [{ id: "save" as const, label: "Save for next run" }]),
+			...(editable
+				? [{ id: "edit" as const, label: "Edit a stage…" }]
+				: []),
+			...(pages > 1
+				? [
+						{ id: "next" as const, label: "Next preview page" },
+						{ id: "previous" as const, label: "Previous preview page" },
+					]
+				: []),
+			{ id: "back" as const, label: "Back to profiles" },
 		];
-		const selected = await ui.select(title, actions);
-		if (selected === undefined) return "cancelled";
-		if (selected === "Save for next run") return "save";
-		if (selected === "Edit a stage…") return "edit";
-		if (selected === "Back to profiles") return "back";
-		if (selected === "Next preview page") page = (page + 1) % pages;
-		if (selected === "Previous preview page") page = (page - 1 + pages) % pages;
+		let selectedAction: WorkflowProfilePreviewMenuAction | undefined;
+		if (ui.preview) {
+			const preview: WorkflowProfilePreview = {
+				profileName,
+				page: page + 1,
+				pages,
+				rows: pageRows,
+				actions,
+			};
+			if (error) preview.error = error;
+			selectedAction = await ui.preview(preview);
+			if (
+				selectedAction !== undefined &&
+				!actions.some(({ id }) => id === selectedAction)
+			) {
+				throw new Error(`Unknown workflow profile preview action: ${selectedAction}`);
+			}
+		} else {
+			const title = [
+				`${profileName} — stage preview (${page + 1}/${pages})`,
+				...pageRows.map(
+					(row) =>
+						`${clip(row.id, 42)} [${row.role}]\n  ${clip(row.model, 68)} · ${row.thinking}`,
+				),
+				...(error
+					? [`Blocked: ${clip(error.replace(/\s+/g, " "), 180)}`]
+					: []),
+			].join("\n");
+			const selected = await ui.select(
+				title,
+				actions.map(({ label }) => label),
+			);
+			selectedAction = actions.find(({ label }) => label === selected)?.id;
+		}
+		if (selectedAction === undefined) return "cancelled";
+		if (selectedAction === "save") return "save";
+		if (selectedAction === "edit") return "edit";
+		if (selectedAction === "back") return "back";
+		if (selectedAction === "next") page = (page + 1) % pages;
+		if (selectedAction === "previous") page = (page - 1 + pages) % pages;
 	}
 }
 
 function builtinPreviewRows(
 	slots: readonly WorkflowProfileStageSlot[],
 	profileId: WorkflowBuiltinProfileId,
-): ProfilePreviewRow[] {
+): WorkflowProfilePreviewRow[] {
 	return slots.map((slot) => {
 		const runtime = profileRuntimeForRole(profileId, slot.profileRole!);
 		return {
@@ -276,7 +381,7 @@ function customPreviewRows(
 	slots: readonly WorkflowProfileStageSlot[],
 	custom: WorkflowCustomProfile,
 	currentRuntime: WorkflowRuntimeDefaults,
-): ProfilePreviewRow[] {
+): WorkflowProfilePreviewRow[] {
 	return slots.map((slot) => {
 		const assignment = custom.stages[slot.id]!;
 		let effective: { model: string; thinking: ThinkingLevel } | undefined;

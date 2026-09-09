@@ -41,7 +41,14 @@ import {
 } from "./engine.js";
 import { WORKFLOW_COMMAND, WORKFLOW_HELP } from "./index.js";
 import { showWorkflowView } from "./workflow-view.js";
-import { configureWorkflowExecutionProfile } from "./workflow-profile-ui.js";
+import {
+	buildWorkflowProfilePickerChoices,
+	configureWorkflowExecutionProfile,
+} from "./workflow-profile-ui.js";
+import {
+	createNativeWorkflowProfileUi,
+	selectWorkflowProfileTarget,
+} from "./workflow-profile-tui.js";
 import { resolveSavedWorkflowExecutionProfile } from "./workflow-profile-settings.js";
 import {
 	formatWorkflowPruneSummary,
@@ -3221,32 +3228,25 @@ async function handleWorkflowCommand(
 				throw new Error(
 					"Usage: /workflow profile [workflow-name-or-path]",
 				);
+			const profileUi = createNativeWorkflowProfileUi(ctx.ui);
 			let workflowRef: string | undefined = tokens[1];
 			if (!workflowRef) {
 				const workflows = await listWorkflows(ctx.cwd);
 				if (workflows.length === 0)
 					throw new Error("No workflows found to configure.");
-				const choices = workflows.map((workflow) => ({
-					label: `${workflow.name} — ${toDisplayPath(workflow.specPath, ctx.cwd)}`,
-					ref: workflow.specPath,
-				}));
-				const selected = await ctx.ui.select(
-					"Choose a workflow to configure",
-					choices.map(({ label }) => label),
+				const choices = await buildWorkflowProfilePickerChoices(
+					workflows,
+					(specPath) => loadWorkflowSpec(specPath, ctx.cwd),
 				);
-				if (selected === undefined) {
+				workflowRef = await selectWorkflowProfileTarget(ctx.ui, choices);
+				if (workflowRef === undefined) {
 					emit(ctx, "Workflow profile selection cancelled; no settings were saved.", "info");
 					return;
 				}
-				workflowRef = choices.find(({ label }) => label === selected)?.ref;
 			}
-			if (!workflowRef) throw new Error("Unknown workflow selection.");
 			const loaded = await loadWorkflowSpec(workflowRef, ctx.cwd);
 			const result = await configureWorkflowExecutionProfile({
-				ui: {
-					select: (title, options) => ctx.ui.select(title, options),
-					notify: (message, level) => ctx.ui.notify(message, level),
-				},
+				ui: profileUi,
 				spec: loaded.spec,
 				specPath: loaded.specPath,
 				workflowLabel: loaded.spec.name ?? workflowRef,
