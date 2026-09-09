@@ -147,8 +147,8 @@ class ScriptedUi {
 		this.notifications = [];
 	}
 
-	async select(title, options) {
-		this.calls.push({ title, options: [...options] });
+	async select(title, options, selection) {
+		this.calls.push({ title, options: [...options], selection });
 		const next = this.script.shift();
 		return typeof next === "function" ? next(title, options) : next;
 	}
@@ -886,7 +886,7 @@ test("structured profile preview preserves paging and action identity", async ()
 	assert.throws(() => statSync(agentDir), /ENOENT/);
 });
 
-test("native preview renderer uses responsive columns and distinct semantic colors", () => {
+test("native preview renderer uses responsive columns and the shared neutral palette", () => {
 	const colors = [];
 	const theme = {
 		bold: (text) => text,
@@ -920,15 +920,10 @@ test("native preview renderer uses responsive columns and distinct semantic colo
 	assert.match(wide[1], /STAGE\s+ROLE\s+MODEL\s+THINKING/);
 	assert.match(wide[3], /triage\s+planning\s+openai-codex\/gpt-5\.6-sol\s+xhigh/);
 	assert.ok(wide.every((line) => Array.from(line).length <= 100));
-	for (const color of [
-		"syntaxFunction",
-		"syntaxType",
-		"syntaxString",
-		"thinkingXhigh",
-		"thinkingHigh",
-	]) {
+	for (const color of ["accent", "text", "muted", "dim", "borderMuted"]) {
 		assert.ok(colors.includes(color), `missing ${color}`);
 	}
+	assert.ok(colors.every((color) => !/^(syntax|thinking)/.test(color)));
 
 	const narrow = renderWorkflowProfilePreview(preview, theme, 48);
 	assert.equal(narrow.length, 1 + preview.rows.length * 2);
@@ -960,6 +955,68 @@ test("profile picker exposes five choices and cancel performs no write", async (
 		ui.calls[0].options.map((label) => label.split(" ")[0]),
 		["Codex", "Codex", "Claude", "Mixed", "Custom"],
 	);
+	assert.throws(() => statSync(agentDir), /ENOENT/);
+});
+
+test("profile order is stable for every saved profile and unavailable built-ins", async () => {
+	const expected = ["Codex", "Codex High", "Claude", "Mixed", "Custom"];
+	for (const selectedProfile of [...WORKFLOW_BUILTIN_PROFILE_IDS, "custom"]) {
+		const { workflowPath } = setup(`ui-order-${selectedProfile}`);
+		const spec = roleSpec();
+		writeSpec(workflowPath, spec);
+		await saveWorkflowProfilePreference(
+			{ spec, specPath: workflowPath },
+			{ selectedProfile, custom: createCustomProfileFromBuiltin(spec, "mixed") },
+		);
+		const identity = await workflowProfileIdentity(spec, workflowPath);
+		const before = readFileSync(identity.settingsFile, "utf8");
+		const ui = new ScriptedUi([undefined]);
+		await configureWorkflowExecutionProfile({
+			ui,
+			...context(spec, workflowPath, { availableModels: MODELS.slice(2) }),
+		});
+		assert.deepEqual(
+			ui.calls[0].options.map((label) => label.replace(" (saved)", "").replace(" — unavailable", "")),
+			expected,
+		);
+		assert.match(ui.calls[0].selection.selected, /\(saved\)/);
+		assert.equal(readFileSync(identity.settingsFile, "utf8"), before);
+	}
+	const { agentDir, workflowPath } = setup("ui-order-first-usable");
+	const spec = roleSpec();
+	writeSpec(workflowPath, spec);
+	const ui = new ScriptedUi([undefined]);
+	await configureWorkflowExecutionProfile({
+		ui,
+		...context(spec, workflowPath, { availableModels: MODELS.slice(2) }),
+	});
+	assert.equal(ui.calls[0].options[0], "Codex — unavailable");
+	assert.equal(ui.calls[0].selection.selected, "Claude");
+	assert.throws(() => statSync(agentDir), /ENOENT/);
+});
+
+test("Custom model, thinking and stage focus do not rotate the underlying choices", async () => {
+	const { agentDir, workflowPath } = setup("ui-custom-stable-focus");
+	const spec = roleSpec();
+	writeSpec(workflowPath, spec);
+	const ui = new ScriptedUi([
+		"Custom", "Edit a stage…", "research — research-execution", "Model and thinking",
+		`${LUNA} (current setting)`, "medium (current setting)",
+		"Edit a stage…", undefined, undefined,
+	]);
+	const result = await configureWorkflowExecutionProfile({ ui, ...context(spec, workflowPath) });
+	assert.equal(result.status, "cancelled");
+	const modelCall = ui.calls.find(({ title }) => title.startsWith("Choose model"));
+	assert.equal(modelCall.options[0], "Inherit current Pi model at run start");
+	assert.equal(modelCall.selection.selected, `${LUNA} (current setting)`);
+	assert.equal(modelCall.selection.searchable, true);
+	assert.match(modelCall.title, /Current setting: openai-codex\/gpt-5\.6-luna/);
+	const thinkingCall = ui.calls.find(({ title }) => title.startsWith("Choose thinking"));
+	assert.equal(thinkingCall.options[0], "Inherit current Pi thinking at run start");
+	assert.equal(thinkingCall.selection.selected, "medium (current setting)");
+	const stageCalls = ui.calls.filter(({ title }) => title === "Choose a Custom stage to edit");
+	assert.deepEqual(stageCalls[1].options, stageCalls[0].options);
+	assert.equal(stageCalls[1].selection.selected, "research — research-execution");
 	assert.throws(() => statSync(agentDir), /ENOENT/);
 });
 
@@ -1014,7 +1071,8 @@ test("Custom starts from the browsed profile and an existing draft survives buil
 	const seededProfileCalls = seededUi.calls.filter(({ title }) =>
 		title.startsWith("Workflow execution profile"),
 	);
-	assert.equal(seededProfileCalls[1].options[0], "Claude");
+	assert.equal(seededProfileCalls[1].options[0], "Codex");
+	assert.equal(seededProfileCalls[1].selection.selected, "Claude");
 
 	const second = setup("ui-custom-restore");
 	writeSpec(second.workflowPath, spec);
@@ -1035,7 +1093,9 @@ test("Custom starts from the browsed profile and an existing draft survives buil
 		ui: restoredUi,
 		...context(spec, second.workflowPath),
 	});
-	assert.equal(restoredUi.calls[0].options[0], "Custom (saved)");
+	assert.equal(restoredUi.calls[0].options[0], "Codex");
+	assert.equal(restoredUi.calls[0].options[4], "Custom (saved)");
+	assert.equal(restoredUi.calls[0].selection.selected, "Custom (saved)");
 	const restoredPreview = restoredUi.calls.find(({ title }) =>
 		title.startsWith("Custom — stage preview"),
 	);
