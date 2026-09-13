@@ -1,3 +1,4 @@
+import { lstat } from "node:fs/promises";
 import { readFileLinesBounded } from "./workflow-preview.js";
 
 import { formatDynamicAuditSummary } from "./dynamic-audit.js";
@@ -19,6 +20,7 @@ import {
 	summarizeTaskFailureClasses,
 	supervisorPath,
 	updateIndex,
+	workflowsRoot,
 } from "./store.js";
 import { summarizeWorkflowTelemetry } from "./workflow-artifacts.js";
 import { buildWorkflowRunMetrics } from "./workflow-metrics.js";
@@ -118,10 +120,23 @@ export async function formatStatus(cwd: string): Promise<string> {
 		return formatHumanRunList(cwd, refreshed);
 	}
 
-	await reconcileActiveRuns(cwd);
+	const runs = await reconcileActiveRuns(cwd);
+	if (runs.length === 0 && !(await hasWorkflowState(cwd)))
+		return "No workflow runs found.";
 	const rebuilt = await updateIndex(cwd).catch(() => readIndex(cwd));
 	if (!rebuilt || rebuilt.runs.length === 0) return "No workflow runs found.";
 	return formatHumanRunList(cwd, rebuilt);
+}
+
+async function hasWorkflowState(cwd: string): Promise<boolean> {
+	try {
+		await lstat(workflowsRoot(cwd));
+		return true;
+	} catch (error) {
+		if (error instanceof Error && "code" in error && error.code === "ENOENT")
+			return false;
+		throw error;
+	}
 }
 
 interface FormatRefreshResult {
@@ -800,12 +815,15 @@ function formatRunUsageLine(run: WorkflowRunRecord): string | undefined {
 	return `usage=${parts.join(", ")}`;
 }
 
-async function reconcileActiveRuns(cwd: string): Promise<void> {
+async function reconcileActiveRuns(
+	cwd: string,
+): Promise<WorkflowRunRecord[]> {
 	const runs = await listRunRecords(cwd);
 	for (const run of runs) {
 		if (hasActiveSchedulerWork(run))
 			await refreshRunRecordingSupervisorError(cwd, run.runId);
 	}
+	return runs;
 }
 
 async function reconcileIndexedActiveRuns(

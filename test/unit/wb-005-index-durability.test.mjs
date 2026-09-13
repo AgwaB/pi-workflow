@@ -1,16 +1,19 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import { findDuplicateActiveRun } from "../../.tmp/unit/run-estimates.js";
+import { formatStatus } from "../../.tmp/unit/engine-format.js";
 import {
 	compiledWorkflowPath,
 	readFreshIndex,
 	readIndex,
 	setTaskTerminal,
 	withRunLease,
+	workflowIndexPath,
 	workflowRunDir,
 	workflowRunPath,
 	writeJsonAtomic,
@@ -105,6 +108,71 @@ test("WB-005 duplicate guard sees active run.json even when index is absent", as
 		"same task",
 	);
 	assert.equal(match.runId, run.runId);
+});
+
+test("formatStatus does not create workflow state in a project without runs", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "piwf-status-empty-"));
+	try {
+		assert.equal(await formatStatus(cwd), "No workflow runs found.");
+		assert.equal(
+			existsSync(join(cwd, ".pi", "workflows")),
+			false,
+			"empty status does not create workflow state",
+		);
+	} finally {
+		const { rm } = await import("node:fs/promises");
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+for (const state of ["corrupt", "orphaned", "directory"]) {
+	test(`empty formatStatus preserves existing ${state} index maintenance`, async () => {
+		const cwd = await mkdtemp(join(tmpdir(), "piwf-status-repair-"));
+		try {
+			await mkdir(join(cwd, ".pi", "workflows"), { recursive: true });
+			if (state === "corrupt") {
+				await writeFile(workflowIndexPath(cwd), "{invalid\n");
+			} else if (state === "orphaned") {
+				const run = runRecord(cwd, "removed-run");
+				await writeJsonAtomic(workflowRunPath(cwd, run.runId), run);
+				assert.equal((await readFreshIndex(cwd)).runs.length, 1);
+				await rm(workflowRunDir(cwd, run.runId), { recursive: true });
+			} else {
+				await mkdir(workflowIndexPath(cwd));
+			}
+			if (state === "directory") {
+				await assert.rejects(formatStatus(cwd), { code: "EISDIR" });
+			} else {
+				assert.equal(await formatStatus(cwd), "No workflow runs found.");
+				assert.deepEqual((await readIndex(cwd)).runs, []);
+			}
+		} finally {
+			await rm(cwd, { recursive: true, force: true });
+		}
+	});
+}
+
+test("concurrent first-run status still publishes a real run", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "piwf-status-first-run-"));
+	try {
+		const runId = "status-first-run";
+		const run = runRecord(cwd, runId);
+		setTaskTerminal(run.tasks[0], "completed", "completed");
+		run.status = "completed";
+		await writeJsonAtomic(workflowRunPath(cwd, runId), run);
+		const statuses = await Promise.all([
+			formatStatus(cwd),
+			formatStatus(cwd),
+			formatStatus(cwd),
+		]);
+		for (const status of statuses) assert.match(status, /status-first-run/);
+		const index = await readIndex(cwd);
+		assert.ok(index);
+		assert.deepEqual(index.runs.map((run) => run.runId), [runId]);
+	} finally {
+		const { rm } = await import("node:fs/promises");
+		await rm(cwd, { recursive: true, force: true });
+	}
 });
 
 test("resumeSupervisors does not create workflow state in a project without runs", async () => {
