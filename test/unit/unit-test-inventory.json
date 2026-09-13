@@ -1506,7 +1506,7 @@
 		{
 			"name": "fail-fast cleanup releases the global live model worker cap slot for other runs",
 			"occurrence": 1,
-			"sha256": "d477c1129724a5de1a15099aa1bb088133901c3b2c9b89cdae69dbff896919ac",
+			"sha256": "00bcf13dcdc21008a38143b24b6468306467b4e966b31ac194457b59acbe93c8",
 			"domain": "engine-store"
 		},
 		{
@@ -1590,7 +1590,7 @@
 		{
 			"name": "global live model worker cap defers saturated launches without waiting",
 			"occurrence": 1,
-			"sha256": "71f4b697aae3b67b6a3f1fe07ea631917e74e6330ed49862037aba31e4ff6a39",
+			"sha256": "48dc1537fab0efec948b36e6bb36880ebec690d289afc3926de265840b681288",
 			"domain": "engine-store"
 		},
 		{
@@ -2508,13 +2508,13 @@
 		{
 			"name": "subagent launch slot abort after acquisition releases slot before action",
 			"occurrence": 1,
-			"sha256": "f9a914f147826f8448302b15d683c327e1674e7eed6039f01d14cc27d217670b",
+			"sha256": "53086b41923a1c9e81bd6e19114977d128a42739030b1597bddd6e09c587bb6a",
 			"domain": "engine-store"
 		},
 		{
 			"name": "subagent launch slot wait abort removes queued waiter",
 			"occurrence": 1,
-			"sha256": "883dd977409c862f9c7bf65e438b49495144c15e53bba375a3d98b690e6afa4f",
+			"sha256": "7c08c358464d4797a40bb814a080de7471eb184c69c71269a97b3eae003bfe70",
 			"domain": "engine-store"
 		},
 		{

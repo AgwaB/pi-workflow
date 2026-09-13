@@ -727,6 +727,7 @@ async function recordTerminalParentSubagentChildEvent(
 
 let launchSlotReleaseDelayMsForTests: number | undefined;
 let transientRetryJitterForTests: (() => number) | undefined;
+let launchSlotQueuedHookForTests: (() => void) | undefined;
 let launchSlotAcquiredHookForTests: (() => void) | undefined;
 let beforeRunSubagentHookForTests: (() => void | Promise<void>) | undefined;
 let afterLaunchAuthorityRegisteredHookForTests:
@@ -1081,7 +1082,26 @@ async function acquireLaunchSlot(signal?: AbortSignal): Promise<() => void> {
 		activeLaunchSlots += 1;
 		return releaseLaunchSlot;
 	}
-	await waitForQueueTurn(launchWaitQueue, signal);
+	let turn: Promise<void>;
+	if (launchSlotQueuedHookForTests) {
+		const cancelWait = new AbortController();
+		const waitSignal = signal
+			? AbortSignal.any([signal, cancelWait.signal])
+			: cancelWait.signal;
+		turn = waitForQueueTurn(launchWaitQueue, waitSignal);
+		try {
+			launchSlotQueuedHookForTests();
+		} catch (error) {
+			// The observer must not abandon its registered waiter or hide an
+			// assertion behind cancellation. A resolved turn already owns a slot.
+			cancelWait.abort();
+			await turn.then(releaseLaunchSlot, () => undefined);
+			throw error;
+		}
+	} else {
+		turn = waitForQueueTurn(launchWaitQueue, signal);
+	}
+	await turn;
 	if (signal?.aborted) {
 		releaseLaunchSlot();
 		throw abortSignalError(signal);
@@ -2627,9 +2647,15 @@ export function subagentLaunchSlotStateForTests(): {
 	return { active: activeLaunchSlots, queued: launchWaitQueue.length };
 }
 
+/** Read-only snapshot of held live-worker reservations; does not reconcile/reset. */
+export function subagentLiveModelWorkerSlotCountForTests(): number {
+	return activeLiveModelWorkerKeys.size;
+}
+
 export function setSubagentLaunchControlsForTests(options?: {
 	releaseDelayMs?: number;
 	retryJitterMs?: number | (() => number);
+	onLaunchSlotQueued?: () => void;
 	onLaunchSlotAcquired?: () => void;
 	beforeRunSubagent?: () => void | Promise<void>;
 	afterLaunchAuthorityRegistered?: () => void | Promise<void>;
@@ -2646,6 +2672,7 @@ export function setSubagentLaunchControlsForTests(options?: {
 			: typeof options.retryJitterMs === "function"
 				? options.retryJitterMs
 				: () => Math.max(0, Math.floor(options.retryJitterMs as number));
+	launchSlotQueuedHookForTests = options?.onLaunchSlotQueued;
 	launchSlotAcquiredHookForTests = options?.onLaunchSlotAcquired;
 	beforeRunSubagentHookForTests = options?.beforeRunSubagent;
 	afterLaunchAuthorityRegisteredHookForTests =
