@@ -169,7 +169,8 @@ jobs:
           fi
 
       - name: Upload exact release artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        # v7.0.1 defaults archive to true, preserving this named ZIP artifact.
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-artifact
           path: |
@@ -263,10 +264,12 @@ jobs:
             printf 'NPM_CONFIG_TAG=%s\n' "$NPM_CONFIG_TAG"
           } >> "$GITHUB_ENV"
 
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+      # v8.0.1 defaults skip-decompress to false, preserving extraction; digest mismatches fail closed.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: release-artifact
           path: release-artifact
+          digest-mismatch: error
 
       - name: Publish exact promoted tarball and record registry envelopes
         env:
@@ -504,7 +507,8 @@ jobs:
 
       - name: Upload registry evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        # v7.0.1 defaults archive to true, preserving this named ZIP artifact.
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: publication-evidence
           path: |
@@ -566,15 +570,19 @@ jobs:
             printf 'NPM_CONFIG_TAG=%s\n' "$NPM_CONFIG_TAG"
           } >> "$GITHUB_ENV"
 
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+      # v8.0.1 defaults skip-decompress to false, preserving extraction; digest mismatches fail closed.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: release-artifact
           path: release-artifact
+          digest-mismatch: error
 
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+      # v8.0.1 defaults skip-decompress to false, preserving extraction; digest mismatches fail closed.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: publication-evidence
           path: publication-evidence
+          digest-mismatch: error
 
       - name: Cryptographically gate and verify exact npm provenance
         env:

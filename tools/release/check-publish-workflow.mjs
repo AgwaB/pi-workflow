@@ -8,8 +8,8 @@ import { parse } from "yaml";
 const ACTIONS = {
 	checkout: "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10",
 	setupNode: "actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e",
-	upload: "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
-	download: "actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0",
+	upload: "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+	download: "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
 };
 const EXACT_VERSION_VALIDATION_LINE = 'if ! [[ "$TARGET_VERSION" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then';
 const npmEnv = {
@@ -70,6 +70,13 @@ const negativeFixtures = [
 	["publish ruleset matcher treats plus as a wildcard", (c) => { c.jobs.publish.steps[3].run = c.jobs.publish.steps[3].run.replace("else expression += escape(character);", "else if (character === '+') expression += '[^/]+'; else expression += escape(character);"); }],
 	["verification checkout ref drifts", (c) => { c.jobs.verification.steps[0].with.ref = "main"; }],
 	["unrelated action ref", (c) => { c.jobs.verification.steps[1].uses = "actions/setup-node@v6"; }],
+	["artifact digest mismatch is not fail-closed", (c) => {
+		for (const job of [c.jobs.publish, c.jobs.verification]) {
+			for (const step of job.steps) {
+				if (step.uses === ACTIONS.download) step.with["digest-mismatch"] = "warn";
+			}
+		}
+	}],
 	["wrong registry", (c) => { c.jobs.publish.steps[3].run = c.jobs.publish.steps[3].run.replaceAll("https://registry.npmjs.org", "https://evil.example"); }],
 	["wrong npm tag", (c) => { c.jobs.publish.steps[3].run = c.jobs.publish.steps[3].run.replaceAll("--tag latest", "--tag next"); }],
 	["single-field npm view drift", (c) => { c.jobs.publish.steps[3].run = c.jobs.publish.steps[3].run.replace("name version dist", "dist"); }],
@@ -351,8 +358,8 @@ function validateSteps(jobName, steps) {
 			["run", "Create exact package and source-tree metadata"], ["action", ACTIONS.upload, { name: "release-artifact", path: "release-metadata.json\nagwab-pi-workflow-${{ steps.version.outputs.version }}.tgz\n", "if-no-files-found": "error", "retention-days": 7 }, "Upload exact release artifact"],
 		],
 		source: [["action", ACTIONS.checkout, { ref: "${{ github.sha }}", "fetch-depth": 0, "persist-credentials": false }], ["run", "Verify promoted release source identity"]],
-		publish: [["action", ACTIONS.setupNode, { "node-version": 24, "package-manager-cache": false }], ["run", "Bootstrap private npm config"], ["action", ACTIONS.download, { name: "release-artifact", path: "release-artifact" }], ["run", "Publish exact promoted tarball and record registry envelopes"], ["action", ACTIONS.upload, { name: "publication-evidence", path: "publication-before.json\npublication-state.json\npublication-after.json\ndist-tags.json\n", "if-no-files-found": "error", "retention-days": 7 }, "Upload registry evidence", "always()"]],
-		verification: [["action", ACTIONS.checkout, { ref: "${{ needs.source.outputs.release-commit }}", "fetch-depth": 1, "persist-credentials": false }], ["action", ACTIONS.setupNode, { "node-version": 24, "package-manager-cache": false }], ["run", "Bootstrap private npm config"], ["action", ACTIONS.download, { name: "release-artifact", path: "release-artifact" }], ["action", ACTIONS.download, { name: "publication-evidence", path: "publication-evidence" }], ["run", "Cryptographically gate and verify exact npm provenance"]],
+		publish: [["action", ACTIONS.setupNode, { "node-version": 24, "package-manager-cache": false }], ["run", "Bootstrap private npm config"], ["action", ACTIONS.download, { name: "release-artifact", path: "release-artifact", "digest-mismatch": "error" }], ["run", "Publish exact promoted tarball and record registry envelopes"], ["action", ACTIONS.upload, { name: "publication-evidence", path: "publication-before.json\npublication-state.json\npublication-after.json\ndist-tags.json\n", "if-no-files-found": "error", "retention-days": 7 }, "Upload registry evidence", "always()"]],
+		verification: [["action", ACTIONS.checkout, { ref: "${{ needs.source.outputs.release-commit }}", "fetch-depth": 1, "persist-credentials": false }], ["action", ACTIONS.setupNode, { "node-version": 24, "package-manager-cache": false }], ["run", "Bootstrap private npm config"], ["action", ACTIONS.download, { name: "release-artifact", path: "release-artifact", "digest-mismatch": "error" }], ["action", ACTIONS.download, { name: "publication-evidence", path: "publication-evidence", "digest-mismatch": "error" }], ["run", "Cryptographically gate and verify exact npm provenance"]],
 		release: [["run", "Create GitHub release for the exact published commit"]],
 	};
 	assert.ok(catalogs[jobName]);

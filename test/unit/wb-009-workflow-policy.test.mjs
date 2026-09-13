@@ -50,13 +50,37 @@ function shellForSyntax(script) { return script.replace(/\$\{\{[^\n]*?\}\}/g, "_
 		assert.deepEqual({
 			"actions/checkout": "df4cb1c069e1874edd31b4311f1884172cec0e10",
 			"actions/setup-node": "48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e",
-			"actions/upload-artifact": "ea165f8d65b6e75b540449e92b4886f43607fa02",
-			"actions/download-artifact": "634f93cb2916e3fdff6788551b99b062d0335ce0",
+			"actions/upload-artifact": "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+			"actions/download-artifact": "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
 		}[match[1]], match[2]);
 	}
 	for (const { path, script } of runScripts()) {
 		const result = spawnSync("bash", ["-n"], { input: shellForSyntax(script), encoding: "utf8" });
 		assert.equal(result.status, 0, `${path}: ${result.stderr}`);
+	}
+});
+
+test("WB-009 artifact migration preserves named ZIP and extraction defaults while failing closed on digest mismatch", () => {
+	const { build, publish, verification } = parsedWorkflow().jobs;
+	const uploads = [
+		build.steps.find((step) => step.uses?.startsWith("actions/upload-artifact@")),
+		publish.steps.find((step) => step.uses?.startsWith("actions/upload-artifact@")),
+	];
+	assert.equal(uploads.every(Boolean), true);
+	assert.deepEqual(uploads.map((step) => step.with.name), ["release-artifact", "publication-evidence"]);
+	for (const upload of uploads) {
+		assert.equal(upload.with.archive, undefined, "upload must retain v7's archive=true default");
+	}
+
+	const downloads = [
+		publish.steps.find((step) => step.uses?.startsWith("actions/download-artifact@")),
+		...verification.steps.filter((step) => step.uses?.startsWith("actions/download-artifact@")),
+	];
+	assert.equal(downloads.length, 3);
+	assert.deepEqual(downloads.map((step) => step.with.name), ["release-artifact", "release-artifact", "publication-evidence"]);
+	for (const download of downloads) {
+		assert.equal(download.with["skip-decompress"], undefined, "download must retain v8's skip-decompress=false default");
+		assert.equal(download.with["digest-mismatch"], "error", "digest mismatches must fail closed");
 	}
 });
 
