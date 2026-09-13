@@ -26,6 +26,7 @@ import {
 	type ArtifactGraphRequiredRead,
 	type ArtifactGraphStageSpec,
 	type ArtifactGraphWorkflowSpec,
+	type CompiledDynamicWorkflowTask,
 	type CompiledTask,
 	type CompiledTaskSafety,
 	type CompiledToolProvider,
@@ -82,6 +83,14 @@ interface ArtifactGraphCompilePlanBuildResult {
 	plan: any;
 	stageMetadata: Map<string, NonNullable<CompiledTask["artifactGraph"]>>;
 }
+
+type LoweredArtifactGraphFrom =
+	| ArtifactGraphStageSpec["from"]
+	| {
+			stage: string;
+			path: string;
+			streaming?: { enabled: true; minChunk?: number };
+	  };
 
 function compileWorkflowFailurePolicy(
 	policy: WorkflowFailurePolicy | undefined,
@@ -197,7 +206,9 @@ function lowerArtifactGraphStage(
 	return lowered;
 }
 
-function lowerArtifactGraphFrom(from: ArtifactGraphStageSpec["from"]): unknown {
+function lowerArtifactGraphFrom(
+	from: ArtifactGraphStageSpec["from"],
+): LoweredArtifactGraphFrom {
 	if (
 		from &&
 		typeof from === "object" &&
@@ -207,9 +218,7 @@ function lowerArtifactGraphFrom(from: ArtifactGraphStageSpec["from"]): unknown {
 		return {
 			stage: from.source,
 			path: from.path,
-			...((from as { streaming?: unknown }).streaming !== undefined
-				? { streaming: (from as { streaming?: unknown }).streaming }
-				: {}),
+			...(from.streaming !== undefined ? { streaming: from.streaming } : {}),
 		};
 	}
 	return from;
@@ -2226,7 +2235,7 @@ function buildDynamicTask(
 	]
 		.filter(Boolean)
 		.join("\n\n");
-	const helpers: Record<string, any> = {};
+	const helpers: CompiledDynamicWorkflowTask["helpers"] = {};
 	for (const [helperId, helper] of Object.entries(
 		isPlainRecord(dynamic.helpers) ? dynamic.helpers : {},
 	)) {
@@ -2249,7 +2258,7 @@ function buildDynamicTask(
 				: {}),
 		};
 	}
-	const workflows: Record<string, any> = {};
+	const workflows: CompiledDynamicWorkflowTask["workflows"] = {};
 	for (const [workflowId, workflow] of Object.entries(
 		isPlainRecord(dynamic.workflows) ? dynamic.workflows : {},
 	)) {

@@ -481,10 +481,18 @@ export function sha256Text(value: string): string {
 	return createHash("sha256").update(Buffer.from(value, "utf8")).digest("hex");
 }
 
+type CanonicalJsonValue =
+	| null
+	| string
+	| boolean
+	| number
+	| CanonicalJsonValue[]
+	| { [key: string]: CanonicalJsonValue };
+
 /** Stable JSON is used only for comparisons/digests, never as executable input. */
 export function canonicalJson(value: unknown): string | undefined {
 	const seen = new Set<object>();
-	const normalize = (current: unknown): unknown => {
+	const normalize = (current: unknown): CanonicalJsonValue | undefined => {
 		if (current === null) return null;
 		if (typeof current === "string" || typeof current === "boolean")
 			return current;
@@ -495,12 +503,16 @@ export function canonicalJson(value: unknown): string | undefined {
 			seen.add(current);
 			const values = current.map(normalize);
 			seen.delete(current);
-			return values.some((item) => item === undefined) ? undefined : values;
+			// SAFETY: the guard excludes undefined normalized entries; keep the
+			// existing some/map behavior, including sparse-array handling.
+			return values.some((item) => item === undefined)
+				? undefined
+				: (values as CanonicalJsonValue[]);
 		}
 		if (!current || typeof current !== "object" || seen.has(current))
 			return undefined;
 		seen.add(current);
-		const normalized: Record<string, unknown> = {};
+		const normalized: Record<string, CanonicalJsonValue> = {};
 		for (const key of Object.keys(current).sort((left, right) =>
 			left.localeCompare(right),
 		)) {
