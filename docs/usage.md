@@ -439,6 +439,29 @@ agents. Project `.pi/agents/` definitions win, then user
 `researcher`). Customize the workflow when you need a different role or
 stricter tool ceiling.
 
+### Agent resource inheritance
+
+For newly compiled runs, agent frontmatter `inheritSkills: false` disables
+initial ambient skill discovery in the child Pi process (`--no-skills`).
+Omitting it or using `true` preserves ordinary discovery; it does not copy
+the parent's loaded skills. Existing saved runs, including their resumed
+attempts and generated children, retain their original behavior even if
+an agent previously declared `false`. Start a new run to adopt the opt-out.
+
+This is a discovery control, **not complete resource isolation**. Required
+extensions and tools remain enabled; extensions can still add explicit
+skills after discovery. Project context remains disabled with
+`--no-context-files` regardless of `inheritProjectContext`. That flag does
+not suppress every supplemental resource such as `APPEND_SYSTEM.md`.
+`inheritProjectContext: true` and invalid inheritance values produce warnings,
+not context activation or validation errors. Dynamic-agent warnings are
+recorded in the saved compiled workflow when the agent is generated.
+
+The effective policy is bound to the prepared launch and versioned launch
+provenance; changing or omitting it after preparation is rejected. Legacy
+provenance is not automatically rewritten. These controls do not enable the
+experimental foreach cache layout or establish provider cache hits or savings.
+
 ### Local review evidence
 
 `spec-review` accepts typed local `evidence` and `counterEvidence` rows shaped as `{file, lineStart, lineEnd, quote, relevance?}`; each verifier array allows at most 64 rows. KEEP/WEAKEN require verified typed evidence, DROP requires verified typed counter-evidence before removal, and positive requirement coverage also requires typed bytes. Every typed citation must pass: one good quote cannot hide another failed citation. Legacy strings, including plausible file:line locators, URLs, and opaque web refs, remain display-only/unverified. They may accompany typed evidence but cannot replace it; preliminary mapping and no-issue notes are not conformance proof. This gate does not fetch or attest remote bytes.

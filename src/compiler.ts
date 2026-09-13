@@ -5,6 +5,10 @@ import { loadAgentByName } from "./agents.js";
 import { DYNAMIC_OUTPUT_PROFILES } from "./dynamic-profiles.js";
 import { stringifyPromptJson } from "./prompt-json.js";
 import { compileRole } from "./roles.js";
+import {
+	resourceInheritanceWarnings,
+	WORKFLOW_RESOURCE_POLICY_VERSION,
+} from "./resource-inheritance.js";
 import { EXECUTION_PROFILE_FOREACH_BATCH } from "./execution-profile.js";
 import {
 	classifyToolCapability,
@@ -1540,6 +1544,7 @@ async function compileArtifactGraphPlan(
 				},
 				overrides,
 			);
+			dynamicTask.resourcePolicyVersion = WORKFLOW_RESOURCE_POLICY_VERSION;
 			dynamicTask.runtime = {
 				...dynamicTask.runtime,
 				...resolvedDynamicRuntime,
@@ -1577,6 +1582,7 @@ async function compileArtifactGraphPlan(
 				issues,
 				`$.artifactGraph.stages.${jsonKey(stage.id)}.${each?.agent !== undefined ? "each.agent" : "agent"}`,
 			);
+			warnings.push(...resourceInheritanceWarnings(stageAgent));
 			validatedAgentPaths.add(stageAgent.sourcePath);
 		}
 		const selectedRoles = selectRoles(
@@ -1744,6 +1750,7 @@ async function compileArtifactGraphPlan(
 			systemPromptMode: stageAgent.systemPromptMode,
 			inheritProjectContext: stageAgent.inheritProjectContext,
 			inheritSkills: stageAgent.inheritSkills,
+			resourcePolicyVersion: WORKFLOW_RESOURCE_POLICY_VERSION,
 			roleNames: selectedRoles.names,
 			task: normalizedPrompt,
 			cwd: taskCwd,

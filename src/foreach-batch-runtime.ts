@@ -6,6 +6,7 @@ import type {
 	WorkflowRunRecord,
 	WorkflowTaskRunRecord,
 } from "./types.js";
+import { resolveWorkflowResourcePolicy } from "./resource-inheritance.js";
 
 export const FOREACH_BATCH_PROTOCOL_SCHEMA =
 	"workflow-foreach-batch-v1" as const;
@@ -519,7 +520,9 @@ export function canonicalJson(value: unknown): string | undefined {
  * that can alter a physical subagent launch or output contract.
  */
 export function foreachBatchExecutionSurfaceSha256(task: CompiledTask): string {
-	const canonical = canonicalJson({
+	// Keep this legacy surface byte-for-byte stable: absent marker means a
+	// historical task never silently adopts current resource semantics.
+	const legacySurface = {
 		kind: task.kind,
 		agent: task.agent,
 		agentPath: task.agentPath,
@@ -534,7 +537,17 @@ export function foreachBatchExecutionSurfaceSha256(task: CompiledTask): string {
 		runtime: task.runtime,
 		safety: task.safety,
 		artifactGraph: task.artifactGraph,
-	});
+	};
+	const resourcePolicy = resolveWorkflowResourcePolicy(task);
+	const canonical = canonicalJson(
+		resourcePolicy === undefined
+			? legacySurface
+			: {
+					...legacySurface,
+					resourcePolicyVersion: task.resourcePolicyVersion,
+					resourcePolicy,
+				},
+	);
 	if (canonical === undefined)
 		throw new Error("foreach batch execution surface is not canonical JSON");
 	return sha256Text(canonical);
