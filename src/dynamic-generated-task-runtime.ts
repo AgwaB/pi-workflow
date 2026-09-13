@@ -8,6 +8,10 @@ import {
 import { readOrRebuildDynamicState } from "./dynamic-state.js";
 import { sanitizeTaskId } from "./engine-run-graph.js";
 import { compactStrings } from "./strings.js";
+import {
+	resolveWorkflowResourcePolicy,
+	resourceInheritanceWarnings,
+} from "./resource-inheritance.js";
 import { fromProjectPath, isTerminalTaskStatus, readJson } from "./store.js";
 import {
 	classifyToolCapability,
@@ -106,6 +110,10 @@ export async function buildDynamicGeneratedCompiledTask(input: {
 	dynamic: CompiledDynamicWorkflowTask;
 	availableModels?: WorkflowModelInfo[];
 }): Promise<CompiledTask> {
+	// A resumed legacy controller must not adopt new inheritance semantics.
+	const controllerResourcePolicy = resolveWorkflowResourcePolicy(
+		input.controllerCompiledTask,
+	);
 	if (input.dynamic.budget.maxAgents <= 0) {
 		throw new Error("dynamic agent budget is exhausted");
 	}
@@ -264,7 +272,10 @@ export async function buildDynamicGeneratedCompiledTask(input: {
 	]
 		.filter(Boolean)
 		.join("\n\n");
-	return {
+	const resourceWarnings = controllerResourcePolicy
+		? resourceInheritanceWarnings(agentDefinition)
+		: [];
+	const compiledTask = {
 		id: input.generatedSpecId,
 		key: input.generatedSpecId,
 		specId: input.generatedSpecId,
@@ -277,6 +288,9 @@ export async function buildDynamicGeneratedCompiledTask(input: {
 		systemPromptMode: agentDefinition.systemPromptMode,
 		inheritProjectContext: agentDefinition.inheritProjectContext,
 		inheritSkills: agentDefinition.inheritSkills,
+		...(controllerResourcePolicy
+			? { resourcePolicyVersion: controllerResourcePolicy.version }
+			: {}),
 		roleNames: [],
 		task: input.request.prompt,
 		cwd: input.controllerCompiledTask.cwd,
@@ -322,12 +336,30 @@ export async function buildDynamicGeneratedCompiledTask(input: {
 			controllerSpecId: input.controllerSpecId,
 			opId: input.opId,
 			requestHash: input.requestHash,
+			...(resourceWarnings.length > 0 ? { resourceWarnings } : {}),
 			...(input.branchId ? { branchId: input.branchId } : {}),
 			...(effectiveOutputProfile
 				? { outputProfile: effectiveOutputProfile }
 				: {}),
 		},
 	} as CompiledTask;
+	restoreDynamicGeneratedResourceWarnings(input.compiledFlow, compiledTask);
+	return compiledTask;
+}
+
+export function restoreDynamicGeneratedResourceWarnings(
+	compiledFlow: CompiledWorkflow,
+	compiledTask: CompiledTask,
+): void {
+	if (!resolveWorkflowResourcePolicy(compiledTask)) return;
+	// Replay captured diagnostics, never re-read a possibly changed agent file.
+	const warnings = compiledTask.dynamicGenerated?.resourceWarnings;
+	if (!Array.isArray(warnings)) return;
+	for (const warning of warnings) {
+		if (typeof warning === "string" && !compiledFlow.warnings.includes(warning)) {
+			compiledFlow.warnings.push(warning);
+		}
+	}
 }
 
 // No controller-provided web budget exists in the dynamic-decision schema today;

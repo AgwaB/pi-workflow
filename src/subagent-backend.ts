@@ -76,6 +76,10 @@ import {
 	recordLaunchBootstrapProvenance,
 } from "./launch-bootstrap-provenance.js";
 import {
+	assertWorkflowResourcePolicyMatchesTask,
+	resolveWorkflowResourcePolicy,
+} from "./resource-inheritance.js";
+import {
 	assertCurrentWorkflowLaunchAuthority,
 	consumeRegisteredWorkflowLaunchAuthority,
 	consumeWorkflowLaunchAuthority,
@@ -2892,6 +2896,10 @@ export async function launchSubagentTask(
 	const basePreparedLaunch =
 		preparedLaunch ??
 		(await prepareSubagentTaskLaunch(cwd, run, task, compiledTask));
+	assertWorkflowResourcePolicyMatchesTask(
+		compiledTask,
+		basePreparedLaunch.resourcePolicy,
+	);
 	let sealedLaunch = basePreparedLaunch;
 	if (!basePreparedLaunch.authority) {
 		const provenance = await createLaunchBootstrapProvenance(
@@ -3104,6 +3112,10 @@ export async function launchSubagentTask(
 			async () => {
 				await beforeRunSubagentHookForTests?.();
 				await assertPreparedSubagentTaskLaunch(sealedLaunch);
+				assertWorkflowResourcePolicyMatchesTask(
+					compiledTask,
+					sealedLaunch.resourcePolicy,
+				);
 				await throwIfWorkflowStopRequested(cwd, run.runId);
 				throwIfAborted(leaseSignal);
 				throwIfAborted(workflowStopSignal);
@@ -3122,6 +3134,13 @@ export async function launchSubagentTask(
 					sealedLaunch,
 					launchAuthority.launchBootstrapSha256,
 				);
+				const sealedResourcePolicy = assertWorkflowResourcePolicyMatchesTask(
+					compiledTask,
+					sealedLaunch.resourcePolicy,
+				);
+				if (sealedResourcePolicy?.skillDiscovery === "disabled") {
+					subagentOptions.skills = [];
+				}
 				subagentOptions.tools =
 					compiledTask.runtime.tools === undefined
 						? undefined
@@ -6282,6 +6301,7 @@ export async function prepareSubagentTaskLaunch(
 	compiledTask: CompiledTask,
 	requireArtifactBinding = false,
 ): Promise<PreparedWorkflowTaskLaunch> {
+	const resourcePolicy = resolveWorkflowResourcePolicy(compiledTask);
 	const tools = compiledTask.runtime.tools;
 	const legacyProviderTools = selectedLegacyProviderTools(tools);
 	const providerResolutionTools = new Set(legacyProviderTools);
@@ -6453,6 +6473,7 @@ export async function prepareSubagentTaskLaunch(
 	const toolResultBudget = dynamicTaskToolResultBudgetConfiguration(task);
 	return {
 		extensions,
+		...(resourcePolicy === undefined ? {} : { resourcePolicy }),
 		...(toolProviders
 			? { toolProviders: clonePreparedToolProviders(toolProviders) }
 			: {}),

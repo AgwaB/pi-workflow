@@ -5596,12 +5596,19 @@ test("launch-bootstrap provenance persists before launch and rejects same-attemp
 		);
 		await writeStaticRunArtifacts(cwd, run, compiled, spec);
 		const prepared = await prepareDagTask(cwd, run, compiled, 0);
+		const preparedLaunch = await prepareSubagentTaskLaunch(
+			cwd,
+			run,
+			run.tasks[0],
+			prepared,
+		);
 		const provenance = await createLaunchBootstrapProvenance(
 			cwd,
 			run,
 			run.tasks[0],
 			prepared,
 			"pi-subagent/headless",
+			preparedLaunch,
 		);
 		const forgedPrepared = structuredClone(prepared);
 		forgedPrepared.compiledPrompt = "different prepared prompt";
@@ -5611,6 +5618,7 @@ test("launch-bootstrap provenance persists before launch and rejects same-attemp
 			run.tasks[0],
 			forgedPrepared,
 			"pi-subagent/headless",
+			preparedLaunch,
 		);
 		assert.notEqual(provenance.identitySha256, forged.identitySha256);
 		run.tasks[0].launchBootstrap = { version: 1, records: [forged] };

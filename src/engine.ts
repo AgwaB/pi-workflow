@@ -107,6 +107,7 @@ import {
 	isDynamicCompiledTaskPayload,
 	normalizeDynamicAgentRequest,
 	readDynamicGeneratedTaskResult,
+	restoreDynamicGeneratedResourceWarnings,
 } from "./dynamic-generated-task-runtime.js";
 import {
 	optionalEventString,
@@ -6792,6 +6793,7 @@ async function repairMissingDynamicGeneratedTask(
 		requestId: request.id,
 		branchId: optionalEventString(event.payload.branchId),
 	});
+	restoreDynamicGeneratedResourceWarnings(input.compiledFlow, compiledTask);
 	const existingCompiledIndex = input.compiledFlow.tasks.findIndex(
 		(task) => task.id === specId,
 	);
@@ -6929,6 +6931,7 @@ async function runDynamicAgentRequest(input: {
 			branchId: generationBranchId,
 		});
 		if (input.isSettled?.()) return undefined;
+		restoreDynamicGeneratedResourceWarnings(input.compiledFlow, compiledTask);
 		if (!previousGenerated) {
 			await recordDynamicEventAndUpdateState(input.cwd, input.run.runId, {
 				controllerSpecId: input.controllerTask.specId,

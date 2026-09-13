@@ -1614,7 +1614,7 @@
 		{
 			"name": "launch-bootstrap provenance persists before launch and rejects same-attempt divergence",
 			"occurrence": 1,
-			"sha256": "718058548f947be875a389d05903f27fb19b0319c60d4fe680827b0dd0d75177",
+			"sha256": "f2a8d38544119a050f98c2225a523058ad58527415d49a4cec04befc893e78a1",
 			"domain": "engine-store"
 		},
 		{

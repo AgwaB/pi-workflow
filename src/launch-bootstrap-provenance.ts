@@ -12,6 +12,10 @@ import {
 import { fromProjectPath, workflowRunDir } from "./store.js";
 import { workflowStateRootIdentity } from "./workflow-state-root.js";
 import {
+	assertWorkflowResourcePolicyMatchesTask,
+	isWorkflowResourcePolicy,
+} from "./resource-inheritance.js";
+import {
 	isWorkflowTaskSessionIdentity,
 	workflowTaskAttemptIdentity,
 	workflowTaskSessionId,
@@ -20,12 +24,15 @@ import type {
 	CompiledTask,
 	LaunchBootstrapProvenanceHistory,
 	LaunchBootstrapProvenanceRecord,
+	LaunchBootstrapProvenanceRecordBase,
 	WorkflowRunRecord,
 	WorkflowTaskRunRecord,
 } from "./types.js";
 
 export const LAUNCH_BOOTSTRAP_PROVENANCE_SCHEMA =
 	"pi-workflow-launch-bootstrap-provenance-v1" as const;
+export const LAUNCH_BOOTSTRAP_RESOURCE_POLICY_PROVENANCE_SCHEMA =
+	"pi-workflow-launch-bootstrap-provenance-v2" as const;
 export const EXTERNAL_LAUNCH_GRANT_SHA256_ENV =
 	"PI_WORKFLOW_EXTERNAL_LAUNCH_GRANT_SHA256" as const;
 export const REQUIRE_EXTERNAL_LAUNCH_GRANT_ENV =
@@ -56,12 +63,18 @@ export async function createLaunchBootstrapProvenance(
 		captureToolCalls: false,
 	},
 ): Promise<LaunchBootstrapProvenanceRecord> {
+	const resourcePolicy = assertWorkflowResourcePolicyMatchesTask(
+		preparedTask,
+		preparedLaunch.resourcePolicy,
+	);
 	const sessionId = workflowTaskSessionId(run, task);
 	const artifactIdentities = await artifactIdentity(cwd, run, task);
 	const stateRootIdentity = await workflowStateRootIdentity(cwd);
 	const externalGrantSha256 = externalLaunchGrantSha256();
-	const record: Omit<LaunchBootstrapProvenanceRecord, "identitySha256"> = {
-		schema: LAUNCH_BOOTSTRAP_PROVENANCE_SCHEMA,
+	const recordBase: Omit<
+		LaunchBootstrapProvenanceRecordBase,
+		"identitySha256"
+	> = {
 		workflow: {
 			type: run.type,
 			specPathSha256: sha256Text(run.specPath),
@@ -145,7 +158,18 @@ export async function createLaunchBootstrapProvenance(
 				: { artifactAccess: preparedTask.artifactGraph.artifactAccess }),
 		},
 	};
-	return { ...record, identitySha256: sha256Canonical(record) };
+	const record =
+		resourcePolicy === undefined
+			? { schema: LAUNCH_BOOTSTRAP_PROVENANCE_SCHEMA, ...recordBase }
+			: {
+					schema: LAUNCH_BOOTSTRAP_RESOURCE_POLICY_PROVENANCE_SCHEMA,
+					...recordBase,
+					resourcePolicy,
+				};
+	return {
+		...record,
+		identitySha256: sha256Canonical(record),
+	} as LaunchBootstrapProvenanceRecord;
 }
 
 /** Persist only an exact deterministic replay of a known attempt. */
@@ -164,6 +188,7 @@ export function recordLaunchBootstrapProvenance(
 		if (
 			!isValidLaunchBootstrapRecord(candidate) ||
 			!hasSameHistoryOwner(candidate, record) ||
+			candidate.schema !== record.schema ||
 			attempts.has(candidate.attempt.key)
 		)
 			throw new Error("launch-bootstrap provenance is malformed");
@@ -197,7 +222,9 @@ export function assertRecordedLaunchBootstrapProvenance(
 	for (const candidate of history.records) {
 		if (
 			!isValidLaunchBootstrapRecord(candidate) ||
-			(owner !== undefined && !hasSameHistoryOwner(candidate, owner)) ||
+			(owner !== undefined &&
+				(!hasSameHistoryOwner(candidate, owner) ||
+					candidate.schema !== owner.schema)) ||
 			attempts.has(candidate.attempt.key)
 		)
 			throw new Error("launch-bootstrap provenance is malformed");
@@ -346,8 +373,21 @@ function isValidLaunchBootstrapRecord(
 		!hasRequiredKeys(value, requiredRecordKeys)
 	)
 		return false;
+	const hasResourcePolicySchema =
+		value.schema === LAUNCH_BOOTSTRAP_RESOURCE_POLICY_PROVENANCE_SCHEMA;
 	if (
-		value.schema !== LAUNCH_BOOTSTRAP_PROVENANCE_SCHEMA ||
+		value.schema !== LAUNCH_BOOTSTRAP_PROVENANCE_SCHEMA &&
+		!hasResourcePolicySchema
+	)
+		return false;
+	if (
+		(hasResourcePolicySchema &&
+			(!hasRequiredKeys(value, ["resourcePolicy"]) ||
+				!isWorkflowResourcePolicy(value.resourcePolicy))) ||
+		(!hasResourcePolicySchema && Object.hasOwn(value, "resourcePolicy"))
+	)
+		return false;
+	if (
 		!isSha256(value.identitySha256) ||
 		!isWorkflow(value.workflow) ||
 		!nonEmptyString(value.runId) ||
@@ -422,6 +462,7 @@ const recordKeys = [
 	"effectiveLaunch",
 	"effectivePolicy",
 	"sourceDependencies",
+	"resourcePolicy",
 ] as const;
 const requiredRecordKeys = [
 	"schema",

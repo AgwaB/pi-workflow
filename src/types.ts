@@ -589,6 +589,12 @@ export interface CompiledDynamicWorkflowTask {
 	availableModels?: WorkflowModelInfo[];
 }
 
+export interface WorkflowResourcePolicy {
+	version: 1;
+	skillDiscovery: "ambient" | "disabled";
+	contextFiles: "disabled";
+}
+
 export interface CompiledArtifactGraphTask {
 	enabled: true;
 	output: {
@@ -624,6 +630,8 @@ export interface CompiledTask {
 	systemPromptMode?: string;
 	inheritProjectContext?: boolean;
 	inheritSkills?: boolean;
+	/** Absent means the task permanently retains pre-policy launch behavior. */
+	resourcePolicyVersion?: 1;
 	roleNames: string[];
 	task: string;
 	cwd: string;
@@ -664,6 +672,8 @@ export interface CompiledTask {
 		requestHash: string;
 		branchId?: string;
 		outputProfile?: string;
+		/** Captured diagnostics for event-only recovery; absent on legacy tasks. */
+		resourceWarnings?: string[];
 	};
 	/** Runtime-only synthetic carrier for one transparent foreach batch launch. */
 	foreachBatchSynthetic?: {
@@ -852,8 +862,7 @@ export interface WorkflowTaskTimingAggregateRecord {
 	incomplete?: boolean;
 }
 
-export interface LaunchBootstrapProvenanceRecord {
-	schema: "pi-workflow-launch-bootstrap-provenance-v1";
+export interface LaunchBootstrapProvenanceRecordBase {
 	identitySha256: string;
 	workflow: { type: string; specPathSha256: string };
 	runId: string;
@@ -918,6 +927,23 @@ export interface LaunchBootstrapProvenanceRecord {
 		artifactAccess?: string;
 	};
 }
+
+/** Byte-compatible launch provenance for tasks compiled before resource policy. */
+export interface LaunchBootstrapProvenanceRecordV1
+	extends LaunchBootstrapProvenanceRecordBase {
+	schema: "pi-workflow-launch-bootstrap-provenance-v1";
+}
+
+/** Explicit sealed resource-policy capture for newly compiled tasks. */
+export interface LaunchBootstrapProvenanceRecordV2
+	extends LaunchBootstrapProvenanceRecordBase {
+	schema: "pi-workflow-launch-bootstrap-provenance-v2";
+	resourcePolicy: WorkflowResourcePolicy;
+}
+
+export type LaunchBootstrapProvenanceRecord =
+	| LaunchBootstrapProvenanceRecordV1
+	| LaunchBootstrapProvenanceRecordV2;
 
 export interface LaunchBootstrapProvenanceHistory {
 	version: 1;
