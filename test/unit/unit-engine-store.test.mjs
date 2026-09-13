@@ -2,7 +2,7 @@
 import { withMaterializedRawHost } from './raw-host-fixture.mjs';
 const setSubagentApiForTests = withMaterializedRawHost(setRawApi);
 import { createHash } from "node:crypto";
-import { subagentLaunchSlotStateForTests } from "../../.tmp/unit/subagent-backend.js";
+import { subagentLaunchSlotStateForTests, subagentLiveModelWorkerSlotCountForTests } from "../../.tmp/unit/subagent-backend.js";
 import {
 	CACHE_SHAPE_METRICS_ENV,
 	DYNAMIC_WEB_SEARCH_BUDGET,
@@ -4516,72 +4516,122 @@ test("subagent launch gate honors env override and recovers slots after throw", 
 	}
 });
 
+// These tests assert slot state at lifecycle boundaries, not filesystem latency.
+// The local watchdog diagnoses stuck setup/settlement; it is not a release SLA.
+function launchSlotTestScope(cwd) {
+	const cleanup = new AbortController();
+	const pending = [];
+	const gates = [];
+	const track = (promise) => {
+		pending.push(promise);
+		void promise.catch(() => undefined);
+		return promise;
+	};
+	const wait = async (promise) => {
+		let timer;
+		try {
+			return await Promise.race([
+				promise,
+				new Promise((_, reject) => {
+					timer = setTimeout(() => reject(new Error("launch test lifecycle watchdog")), 10_000);
+				}),
+			]);
+		} finally {
+			clearTimeout(timer);
+		}
+	};
+	return {
+		track,
+		wait,
+		gate() {
+			const gate = Promise.withResolvers();
+			gates.push(gate);
+			return gate;
+		},
+		launch(fixture, signal) {
+			return track(launchSubagentTask(
+				cwd, fixture.run, fixture.task, fixture.compiledTask, signal, cleanup.signal,
+			));
+		},
+		async drain() {
+			cleanup.abort(new Error("launch test cleanup"));
+			for (const gate of gates) gate.resolve();
+			// Launch settlement can precede an aborted mock API's settlement.
+			for (let i = 0; i < pending.length; i++) await Promise.allSettled([pending[i]]);
+			await flushPendingIndexUpdatesForTests();
+		},
+	};
+}
+
 test("subagent launch slot wait abort removes queued waiter", async () => {
 	const cwd = makeProject();
 	const originalLaunchLimit = process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES;
 	const originalLiveLimit = process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS;
 	process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES = "1";
 	delete process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS;
-	setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
+	const scope = launchSlotTestScope(cwd);
+	const firstReady = Promise.withResolvers();
+	const queued = Promise.withResolvers();
+	const releaseFirst = scope.gate();
+	const controller = new AbortController();
+	let actions = 0;
+	setSubagentLaunchControlsForTests({
+		releaseDelayMs: 0,
+		retryJitterMs: 0,
+		onLaunchSlotQueued: () => queued.resolve(),
+		beforeRunSubagent: () => { actions += 1; },
+	});
 	try {
+		assert.deepEqual(subagentLaunchSlotStateForTests(), { active: 0, queued: 0 });
 		writeAgent(cwd, "unit-scout", "read");
 		let launches = 0;
-		const releases = [];
 		setSubagentApiForTests({
-			async runSubagent() {
-				launches += 1;
-				await new Promise((resolve) => releases.push(resolve));
-				return {
-					runId: `run_abort_queued_${launches}`,
-					attemptId: `attempt_abort_queued_${launches}`,
-					status: "running",
-				};
+			runSubagent() {
+				return scope.track((async () => {
+					launches += 1;
+					if (launches === 1) {
+						firstReady.resolve();
+						await releaseFirst.promise;
+					}
+					return {
+						runId: `run_abort_queued_${launches}`,
+						attemptId: `attempt_abort_queued_${launches}`,
+						status: "running",
+					};
+				})());
 			},
 		});
 		const first = makeSubagentLaunchFixture(cwd, "abort_queued_first");
 		const second = makeSubagentLaunchFixture(cwd, "abort_queued_second");
-		const firstLaunch = launchSubagentTask(
-			cwd,
-			first.run,
-			first.task,
-			first.compiledTask,
-		);
-		await eventually(() => assert.equal(releases.length, 1));
-		const controller = new AbortController();
-		const secondLaunch = launchSubagentTask(
-			cwd,
-			second.run,
-			second.task,
-			second.compiledTask,
-			controller.signal,
-		);
-		await eventually(() => assert.ok(second.task.timing?.launchQueuedAt));
-		await sleep(50);
-		controller.abort(new Error("lease lost while queued"));
-		await assert.rejects(secondLaunch, /lease lost while queued/);
+		const firstLaunch = scope.launch(first);
+		await scope.wait(Promise.race([firstReady.promise, firstLaunch]));
 		assert.equal(launches, 1);
-		releases.shift()();
-		await firstLaunch;
+		assert.equal(actions, 1);
+		assert.deepEqual(subagentLaunchSlotStateForTests(), { active: 1, queued: 0 });
+		const secondLaunch = scope.launch(second, controller.signal);
+		// launchQueuedAt precedes persisted wait status: wait for actual enqueue.
+		await scope.wait(Promise.race([queued.promise, secondLaunch]));
+		assert.ok(second.task.timing?.launchQueuedAt);
+		assert.equal(second.task.timing?.launchStartedAt, undefined);
+		assert.deepEqual(subagentLaunchSlotStateForTests(), { active: 1, queued: 1 });
+		controller.abort(new Error("lease lost while queued"));
+		// Abort dispatch must remove the waiter synchronously, while the owner holds.
+		assert.deepEqual(subagentLaunchSlotStateForTests(), { active: 1, queued: 0 });
+		await scope.wait(assert.rejects(secondLaunch, /lease lost while queued/));
+		assert.equal(launches, 1);
+		assert.equal(actions, 1);
+		releaseFirst.resolve();
+		assert.deepEqual(await scope.wait(firstLaunch), { kind: "launched" });
+		assert.deepEqual(subagentLaunchSlotStateForTests(), { active: 0, queued: 0 });
 
-		setSubagentApiForTests({
-			async runSubagent() {
-				launches += 1;
-				return {
-					runId: `run_abort_queued_${launches}`,
-					attemptId: `attempt_abort_queued_${launches}`,
-					status: "running",
-				};
-			},
-		});
 		const third = makeSubagentLaunchFixture(cwd, "abort_queued_third");
-		await Promise.race([
-			launchSubagentTask(cwd, third.run, third.task, third.compiledTask),
-			sleep(250).then(() => {
-				throw new Error("launch slot leaked after queued abort");
-			}),
-		]);
+		assert.deepEqual(await scope.wait(scope.launch(third)), { kind: "launched" });
 		assert.equal(launches, 2);
+		assert.equal(actions, 2);
+		assert.deepEqual(subagentLaunchSlotStateForTests(), { active: 0, queued: 0 });
 	} finally {
+		controller.abort(new Error("launch test cleanup"));
+		await scope.drain();
 		setSubagentApiForTests(undefined);
 		setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
 		if (originalLaunchLimit === undefined)
@@ -4608,6 +4658,7 @@ test("subagent launch slot abort after acquisition releases slot before action",
 	const controller = new AbortController();
 	const cleanup = new AbortController();
 	const firstReady = Promise.withResolvers();
+	const queued = Promise.withResolvers();
 	const releaseFirst = Promise.withResolvers();
 	const thirdReady = Promise.withResolvers();
 	const releaseThird = Promise.withResolvers();
@@ -4623,6 +4674,7 @@ test("subagent launch slot abort after acquisition releases slot before action",
 	setSubagentLaunchControlsForTests({
 		releaseDelayMs: 0,
 		retryJitterMs: 0,
+		onLaunchSlotQueued: () => queued.resolve(),
 		onLaunchSlotAcquired: () => {
 			slotAcquisitions += 1;
 			if (slotAcquisitions === 2) {
@@ -4675,9 +4727,8 @@ test("subagent launch slot abort after acquisition releases slot before action",
 			controller.signal,
 			cleanup.signal,
 		));
-		await eventually(() =>
-			assert.deepEqual(subagentLaunchSlotStateForTests(), { active: 1, queued: 1 }),
-		);
+		await Promise.race([queued.promise, secondLaunch]);
+		assert.deepEqual(subagentLaunchSlotStateForTests(), { active: 1, queued: 1 });
 		assert.match(second.task.lastMessage, /launch slot/);
 		releaseFirst.resolve();
 		await firstLaunch;
@@ -4789,7 +4840,9 @@ test("global live model worker cap defers saturated launches without waiting", a
 	process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES = "2";
 	process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS = "1";
 	setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
+	const scope = launchSlotTestScope(cwd);
 	try {
+		assert.equal(subagentLiveModelWorkerSlotCountForTests(), 0);
 		writeAgent(cwd, "unit-scout", "read");
 		let launches = 0;
 		setSubagentApiForTests({
@@ -4805,37 +4858,34 @@ test("global live model worker cap defers saturated launches without waiting", a
 		const first = makeSubagentLaunchFixture(cwd, "cap_set_first");
 		const second = makeSubagentLaunchFixture(cwd, "cap_set_second");
 		assert.equal(
-			(await launchSubagentTask(cwd, first.run, first.task, first.compiledTask))
+			(await scope.wait(scope.launch(first)))
 				.kind,
 			"launched",
 		);
 		assert.equal(launches, 1);
-		const secondLaunch = await Promise.race([
-			launchSubagentTask(cwd, second.run, second.task, second.compiledTask),
-			sleep(250).then(() => {
-				throw new Error(
-					"global worker cap admission blocked instead of deferring",
-				);
-			}),
-		]);
+		assert.equal(subagentLiveModelWorkerSlotCountForTests(), 1);
+		const secondLaunch = await scope.wait(scope.launch(second));
 		assert.equal(secondLaunch.kind, "capacity");
 		assert.equal(launches, 1);
 		assert.equal(second.task.status, "pending");
 		assert.match(second.task.lastMessage, /global pi-subagent worker slot/);
 		assert.equal(second.task.timing.waiting_for_global_worker_slot, true);
 
+		assert.equal(subagentLiveModelWorkerSlotCountForTests(), 1);
+		assert.deepEqual(subagentLaunchSlotStateForTests(), { active: 0, queued: 0 });
+
 		first.task.status = "completed";
 		first.task.statusDetail = "completed";
 		await refreshRunFromSubagentArtifacts(cwd, first.run);
-		const retryLaunch = await Promise.race([
-			launchSubagentTask(cwd, second.run, second.task, second.compiledTask),
-			sleep(250).then(() => {
-				throw new Error("global worker slot was not released for retry");
-			}),
-		]);
+		// Observe release before retry preparation can obscure (or repair) a leak.
+		assert.equal(subagentLiveModelWorkerSlotCountForTests(), 0);
+		const retryLaunch = await scope.wait(scope.launch(second));
 		assert.equal(retryLaunch.kind, "launched");
 		assert.equal(launches, 2);
+		assert.equal(subagentLiveModelWorkerSlotCountForTests(), 1);
+		assert.deepEqual(subagentLaunchSlotStateForTests(), { active: 0, queued: 0 });
 	} finally {
+		await scope.drain();
 		setSubagentApiForTests(undefined);
 		setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
 		if (originalLaunchLimit === undefined)
@@ -4933,7 +4983,9 @@ test("fail-fast cleanup releases the global live model worker cap slot for other
 	process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS = "1";
 	setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
 	const interrupts = [];
+	const scope = launchSlotTestScope(cwd);
 	try {
+		assert.equal(subagentLiveModelWorkerSlotCountForTests(), 0);
 		writeAgent(cwd, "unit-scout", "read");
 		let launches = 0;
 		setSubagentApiForTests({
@@ -4969,18 +5021,9 @@ test("fail-fast cleanup releases the global live model worker cap slot for other
 
 		// First run occupies the single global worker-cap slot.
 		const occupying = makeSubagentLaunchFixture(cwd, "ff_cap_occupying");
-		assert.equal(
-			(
-				await launchSubagentTask(
-					cwd,
-					occupying.run,
-					occupying.task,
-					occupying.compiledTask,
-				)
-			).kind,
-			"launched",
-		);
+		assert.equal((await scope.wait(scope.launch(occupying))).kind, "launched");
 		assert.equal(launches, 1);
+		assert.equal(subagentLiveModelWorkerSlotCountForTests(), 1);
 
 		// A fail-fast run with a running child that holds a backend handle; cleanup
 		// must interrupt it and release its worker-cap slot.
@@ -4995,18 +5038,23 @@ test("fail-fast cleanup releases the global live model worker cap slot for other
 			"fail-fast cleanup did not interrupt the running child",
 		);
 
+		// Cleaning an unrelated run must not free the occupying run's reservation.
+		assert.equal(subagentLiveModelWorkerSlotCountForTests(), 1);
+
 		// Release the occupying run's slot as well, then a fresh run must be able to
 		// launch without being blocked by a leaked slot.
 		await cleanupSubagentRun(cwd, occupying.run);
 		const third = makeSubagentLaunchFixture(cwd, "ff_cap_third");
-		const thirdLaunch = await Promise.race([
-			launchSubagentTask(cwd, third.run, third.task, third.compiledTask),
-			sleep(250).then(() => {
-				throw new Error("fail-fast cleanup leaked the global worker-cap slot");
-			}),
-		]);
+		assert.equal(subagentLiveModelWorkerSlotCountForTests(), 0);
+		assert.ok(interrupts.some((entry) => entry.runId === "run_ff_cap_1"),
+			"cleanup did not interrupt the slot owner");
+		const thirdLaunch = await scope.wait(scope.launch(third));
 		assert.equal(thirdLaunch.kind, "launched");
+		assert.equal(launches, 2);
+		assert.equal(subagentLiveModelWorkerSlotCountForTests(), 1);
+		assert.deepEqual(subagentLaunchSlotStateForTests(), { active: 0, queued: 0 });
 	} finally {
+		await scope.drain();
 		setSubagentApiForTests(undefined);
 		setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
 		if (originalLaunchLimit === undefined)
