@@ -283,6 +283,9 @@ interface SubagentRunStatusSnapshot {
 	metadata?: { contextLengthExceeded?: boolean; [key: string]: unknown };
 	completion?: unknown;
 	attempts?: SubagentAttemptSnapshot[];
+	// Older and newer subagent APIs may expose observability fields at the
+	// snapshot root; preserve access to those own extension fields as unknown.
+	[key: string]: unknown;
 }
 
 interface SubagentResultEnvelope {
@@ -1840,7 +1843,7 @@ function usageObservation(
 			present: true,
 		};
 	}
-	const snapshotRecord = snapshot as unknown as Record<string, unknown>;
+	const snapshotRecord = snapshot;
 	if (hasOwnValue(snapshotRecord, "usage")) {
 		return {
 			source: "subagent-snapshot",
@@ -1862,7 +1865,7 @@ function buildTaskUsageAttempt(options: {
 		? options.snapshot.metadata
 		: undefined;
 	const resultRecord = options.subagentResult;
-	const snapshotRecord = options.snapshot as unknown as Record<string, unknown>;
+	const snapshotRecord = options.snapshot;
 	const records = [
 		resultMetadata,
 		snapshotMetadata,
@@ -2019,7 +2022,7 @@ function toolResultBudgetObservation(
 			raw: subagentResult.toolResultBudget,
 		};
 	}
-	const snapshotRecord = snapshot as unknown as Record<string, unknown>;
+	const snapshotRecord = snapshot;
 	if (hasOwnValue(snapshotRecord, "toolResultBudget")) {
 		return {
 			source: "subagent-snapshot",
@@ -2052,7 +2055,7 @@ function buildTaskToolResultBudgetAttempt(options: {
 		? options.snapshot.metadata
 		: undefined;
 	const resultRecord = options.subagentResult;
-	const snapshotRecord = options.snapshot as unknown as Record<string, unknown>;
+	const snapshotRecord = options.snapshot;
 	const metadataRecords = [
 		resultMetadata,
 		snapshotMetadata,
@@ -5155,6 +5158,9 @@ async function materializeTerminalArtifactGraphResultInner(
 		task,
 		written.result.completedAt,
 	);
+	// SAFETY: the valid writer branch returns a validated result envelope, and
+	// applyTaskResultArtifact reads only its completedAt/exitCode/errorMessage
+	// fields; retain the envelope object without converting or reserializing it.
 	const changed = await applyTaskResultArtifact(cwd, task, {
 		resultFile: options.resultFile,
 		result: written.result as unknown as Record<string, unknown>,
