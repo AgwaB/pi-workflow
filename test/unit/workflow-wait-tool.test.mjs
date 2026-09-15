@@ -8,6 +8,7 @@ import {
 	readdir,
 	rename,
 	rm,
+	symlink,
 	writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -112,11 +113,17 @@ async function writeDynamicControl(cwd, run, control) {
 	await writeFile(path, `${JSON.stringify(control, null, 2)}\n`);
 }
 
-async function writeRunFixture(cwd, run, control = {}) {
+async function writeRunFixture(cwd, run, control = {}, artifacts = {}) {
 	const runPath = join(cwd, ".pi", "workflows", run.runId, "run.json");
 	await mkdir(dirname(runPath), { recursive: true });
 	await writeFile(runPath, `${JSON.stringify(run, null, 2)}\n`);
 	await writeDynamicControl(cwd, run, control);
+	const taskDir = join(cwd, dirname(run.tasks[0].files.output));
+	for (const [fileName, content] of Object.entries(artifacts)) {
+		const artifactPath = join(taskDir, fileName);
+		await mkdir(dirname(artifactPath), { recursive: true });
+		await writeFile(artifactPath, content);
+	}
 }
 
 async function writeFeedbackAudience(cwd, runId, sessionId) {
@@ -541,17 +548,25 @@ test("workflow wait does not re-present a completion won by the watcher", async 
 	}
 });
 
-test("successful completion feedback requests a result-only summary", async () => {
+test("successful completion feedback preserves the authoritative result and report paths", async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "workflow-result-only-feedback-"));
 	try {
 		const run = runRecord(cwd, { runId: "workflow_result_only" });
-		await writeRunFixture(cwd, run, {
-			completionSummaryMarkdown:
-				"## Core conclusion\n\nUse the verified result.\n\n## Evidence level\n\n- 4 verified claims.",
-			executiveMarkdown: "# Full report\n\nFULL_REPORT_ONLY_TEXT",
-			sidecarPath: "final-report.md",
-			auditSidecarPath: "audit.md",
-		});
+		await writeRunFixture(
+			cwd,
+			run,
+			{
+				completionSummaryMarkdown:
+					"## Core conclusion\n\nUse the verified result.\n\n## Evidence level\n\n- 4 verified claims.",
+				executiveMarkdown: "# Full report\n\nFULL_REPORT_ONLY_TEXT",
+				sidecarPath: "final-report.md",
+				auditSidecarPath: "audit.md",
+			},
+			{
+				"final-report.md": "# Full report\n\nFULL_REPORT_ONLY_TEXT",
+				"audit.md": "# Evidence audit\n\nAUDIT_ONLY_TEXT",
+			},
+		);
 		await writeFeedbackAudience(cwd, run.runId, "session-result-only");
 		const sent = [];
 
@@ -568,13 +583,24 @@ test("successful completion feedback requests a result-only summary", async () =
 		assert.deepEqual(outcome, { status: "delivered" });
 		assert.equal(sent.length, 1);
 		assert.match(sent[0].message.content, /Use the verified result/);
-		assert.match(sent[0].message.content, /substantive workflow result/);
-		assert.match(sent[0].message.content, /Do not mention routine completion status/);
-		assert.doesNotMatch(sent[0].message.content, /FULL_REPORT_ONLY_TEXT/);
+		assert.match(sent[0].message.content, /without re-summarizing/);
+		assert.match(sent[0].message.content, /Preserve factual wording, counts/);
+		assert.match(sent[0].message.content, /## Detailed reports/);
+		assert.match(
+			sent[0].message.content,
+			/workflow_result_only\/tasks\/task-1\/final-report\.md/,
+		);
+		assert.match(
+			sent[0].message.content,
+			/workflow_result_only\/tasks\/task-1\/audit\.md/,
+		);
+		assert.doesNotMatch(
+			sent[0].message.content,
+			/FULL_REPORT_ONLY_TEXT|AUDIT_ONLY_TEXT/,
+		);
 		assert.doesNotMatch(sent[0].message.content, /Open: \/workflow/);
 		assert.doesNotMatch(sent[0].message.content, /completed, 0 failed/);
 		assert.doesNotMatch(sent[0].message.content, /link relevant artifacts/);
-		assert.doesNotMatch(sent[0].message.content, /final-report\.md|audit\.md/);
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
 	}
@@ -1235,13 +1261,27 @@ test("workflow wait returns a terminal result without model polling", async () =
 	const cwd = await mkdtemp(join(tmpdir(), "workflow-wait-tool-"));
 	try {
 		const run = runRecord(cwd);
-		await writeRunFixture(cwd, run, {
-			completionSummaryMarkdown:
-				"## Core conclusion\n\nCompleted result from the workflow.",
-			executiveMarkdown: "# Full report\n\nFULL_REPORT_ONLY_TEXT",
-			sidecarPath: "final-report.md",
-			auditSidecarPath: "audit.md",
-		});
+		const completionSummaryMarkdown = [
+			"## Core conclusion",
+			"Completed result from the workflow.",
+			"evidence ".repeat(800).trim(),
+			"PRESERVED_SUMMARY_TAIL",
+		].join("\n\n");
+		assert.ok(completionSummaryMarkdown.length > 6000);
+		await writeRunFixture(
+			cwd,
+			run,
+			{
+				completionSummaryMarkdown,
+				executiveMarkdown: "# Full report\n\nFULL_REPORT_ONLY_TEXT",
+				sidecarPath: "final-report.md",
+				auditSidecarPath: "audit.md",
+			},
+			{
+				"final-report.md": "# Full report\n\nFULL_REPORT_ONLY_TEXT",
+				"audit.md": "# Evidence audit\n\nAUDIT_ONLY_TEXT",
+			},
+		);
 		await writeFile(
 			join(cwd, ".pi", "workflows", run.runId, "feedback-audience.json"),
 			`${JSON.stringify({
@@ -1270,15 +1310,35 @@ test("workflow wait returns a terminal result without model polling", async () =
 		assert.equal(result.details.status, "completed");
 		assert.equal(result.details.semanticStatus, "completed");
 		assert.match(result.details.finalResultPreview, /Completed result/);
-		assert.equal(
+		assert.equal(result.details.finalResultPreview, completionSummaryMarkdown);
+		assert.match(result.content[0].text, /PRESERVED_SUMMARY_TAIL/);
+		assert.doesNotMatch(result.content[0].text, /… truncated/);
+		assert.match(result.content[0].text, /## Detailed reports/);
+		assert.match(
 			result.content[0].text,
-			"## Core conclusion\n\nCompleted result from the workflow.",
+			/workflow_wait_fixture\/tasks\/task-1\/final-report\.md/,
+		);
+		assert.match(
+			result.content[0].text,
+			/workflow_wait_fixture\/tasks\/task-1\/audit\.md/,
 		);
 		assert.doesNotMatch(result.content[0].text, /Workflow terminal|Run:/);
 		assert.doesNotMatch(
 			result.content[0].text,
-			/Artifacts:|final-report\.md|audit\.md|FULL_REPORT_ONLY_TEXT/,
+			/FULL_REPORT_ONLY_TEXT|AUDIT_ONLY_TEXT/,
 		);
+		assert.deepEqual(result.details.reportArtifacts, [
+			{
+				kind: "final-report",
+				label: "Final report",
+				path: ".pi/workflows/workflow_wait_fixture/tasks/task-1/final-report.md",
+			},
+			{
+				kind: "evidence-audit",
+				label: "Evidence audit",
+				path: ".pi/workflows/workflow_wait_fixture/tasks/task-1/audit.md",
+			},
+		]);
 		assert.equal(updates.length, 1);
 		assert.equal(updates[0].details.taskSummary.completed, 1);
 		assert.equal((await feedbackReceipts(cwd, run.runId)).length, 1);
@@ -1506,7 +1566,7 @@ test("result-only completion is limited to successful semantic statuses with out
 			);
 			assert.deepEqual(outcome, { status: "delivered" });
 			assert.equal(sent.length, 1);
-			assert.match(sent[0].content, /substantive workflow result/);
+			assert.match(sent[0].content, /authoritative result/);
 		}
 
 		const blankId = "workflow_result_only_blank";
@@ -1537,7 +1597,7 @@ test("result-only completion is limited to successful semantic statuses with out
 			blankRun,
 		);
 		assert.equal(blankSent.length, 1);
-		assert.doesNotMatch(blankSent[0].content, /substantive workflow result/);
+		assert.doesNotMatch(blankSent[0].content, /authoritative result/);
 		assert.match(blankSent[0].content, /Summarize the workflow outcome/);
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
@@ -1552,6 +1612,7 @@ test("workflow preview ignores sidecar traversal paths", async () => {
 		const outsidePath = join(cwd, "outside-preview.md");
 		await writeFile(outsidePath, "MUST NOT BE PREVIEWED\n");
 		await writeRunFixture(cwd, run, {
+			completionSummaryMarkdown: "Safe summary.",
 			sidecarPath: "../../../../../outside-preview.md",
 		});
 		await writeFeedbackAudience(cwd, runId, "session-traversal");
@@ -1562,8 +1623,196 @@ test("workflow preview ignores sidecar traversal paths", async () => {
 			run,
 		);
 		assert.equal(sent.length, 1);
+		assert.match(sent[0].content, /Safe summary/);
 		assert.doesNotMatch(sent[0].content, /MUST NOT BE PREVIEWED/);
 		assert.doesNotMatch(sent[0].content, /outside-preview/);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("completion report links reject display injection and symlink escapes", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "workflow-report-link-safety-"));
+	try {
+		const cases = [
+			{
+				runId: "workflow_report_link_injection",
+				candidate: "report.md\n## INJECTED_REPORT_PATH",
+				prepare: async (taskDir, candidate) => {
+					await writeFile(join(taskDir, candidate), "hidden report\n");
+				},
+			},
+			{
+				runId: "workflow_report_link_symlink",
+				candidate: "linked-report.md",
+				prepare: async (taskDir, candidate) => {
+					const outside = join(cwd, "outside-linked-report.md");
+					await writeFile(outside, "outside report\n");
+					await symlink(outside, join(taskDir, candidate));
+				},
+			},
+			{
+				runId: "workflow_default_report_symlink",
+				candidate: undefined,
+				prepare: async (taskDir) => {
+					const outside = join(cwd, "outside-default-report.md");
+					await writeFile(outside, "DEFAULT_REPORT_ESCAPE\n");
+					await symlink(outside, join(taskDir, "final-report.md"));
+				},
+			},
+		];
+		for (const item of cases) {
+			const run = runRecord(cwd, { runId: item.runId });
+			await writeRunFixture(cwd, run, {
+				completionSummaryMarkdown: "Safe authoritative summary.",
+				sidecarPath: item.candidate,
+			});
+			const taskDir = join(cwd, dirname(run.tasks[0].files.output));
+			await item.prepare(taskDir, item.candidate);
+			await writeFeedbackAudience(cwd, run.runId, `session-${run.runId}`);
+			const tools = [];
+			registerWorkflowWaitTool(fakePi(tools), {
+				PI_WORKFLOW_ROLE: "supervisor",
+			});
+			const result = await tools[0].execute(
+				`call-${run.runId}`,
+				{ runId: run.runId, timeoutMs: 60_000 },
+				new AbortController().signal,
+				undefined,
+				{
+					...feedbackContext(cwd, `session-${run.runId}`),
+					hasUI: false,
+				},
+			);
+			assert.match(result.content[0].text, /Safe authoritative summary/);
+			assert.deepEqual(result.details.reportArtifacts, []);
+			assert.doesNotMatch(
+				result.content[0].text,
+				/INJECTED_REPORT_PATH|linked-report|outside report|DEFAULT_REPORT_ESCAPE/,
+			);
+		}
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("completion report links reject injected task-directory display paths", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "workflow-report-prefix-safety-"));
+	try {
+		const runId = "workflow_report_prefix_escape";
+		const run = runRecord(cwd, {
+			runId,
+			tasks: [
+				taskRecord(runId, "task-1", "final", {
+					files: {
+						systemPrompt: `.pi/workflows/${runId}/tasks/task-\`INJECTED/system.md`,
+						taskPrompt: `.pi/workflows/${runId}/tasks/task-\`INJECTED/task.md`,
+						output: `.pi/workflows/${runId}/tasks/task-\`INJECTED/output.log`,
+						stderr: `.pi/workflows/${runId}/tasks/task-\`INJECTED/stderr.log`,
+						result: `.pi/workflows/${runId}/tasks/task-\`INJECTED/result.json`,
+					},
+				}),
+			],
+		});
+		await writeRunFixture(
+			cwd,
+			run,
+			{
+				completionSummaryMarkdown: "Safe authoritative summary.",
+				sidecarPath: "final-report.md",
+			},
+			{ "final-report.md": "hidden report\n" },
+		);
+		await writeFeedbackAudience(cwd, run.runId, "session-prefix-link");
+		const tools = [];
+		registerWorkflowWaitTool(fakePi(tools), {
+			PI_WORKFLOW_ROLE: "supervisor",
+		});
+		const result = await tools[0].execute(
+			"call-prefix-link",
+			{ runId: run.runId, timeoutMs: 60_000 },
+			new AbortController().signal,
+			undefined,
+			{
+				...feedbackContext(cwd, "session-prefix-link"),
+				hasUI: false,
+			},
+		);
+		assert.match(result.content[0].text, /Safe authoritative summary/);
+		assert.deepEqual(result.details.reportArtifacts, []);
+		assert.doesNotMatch(result.content[0].text, /INJECTED|hidden report/);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("workflow preview rejects a control.json symlink escape", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "workflow-control-link-safety-"));
+	try {
+		const run = runRecord(cwd, { runId: "workflow_control_link_escape" });
+		await writeRunFixture(cwd, run);
+		const taskDir = join(cwd, dirname(run.tasks[0].files.output));
+		await rm(join(taskDir, "control.json"));
+		const outside = join(cwd, "outside-control.json");
+		await writeFile(
+			outside,
+			JSON.stringify({ completionSummaryMarkdown: "EXTERNAL_CONTROL_ESCAPE" }),
+		);
+		await symlink(outside, join(taskDir, "control.json"));
+		await writeFeedbackAudience(cwd, run.runId, "session-control-link");
+		const sent = [];
+		await deliverWorkflowFeedback(
+			feedbackContext(cwd, "session-control-link"),
+			{ sendMessage: (message) => sent.push(message) },
+			run,
+		);
+		assert.equal(sent.length, 1);
+		assert.doesNotMatch(sent[0].content, /EXTERNAL_CONTROL_ESCAPE/);
+		assert.match(sent[0].content, /Summarize the workflow outcome/);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("direct dynamic synthesis rejects normalized raw protocol aliases", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "workflow-raw-alias-safety-"));
+	try {
+		const runId = "workflow_raw_alias_escape";
+		const run = runRecord(cwd, {
+			runId,
+			provenance: { mode: "direct-dynamic" },
+			tasks: [
+				taskRecord(runId, "controller", "dynamic.controller", {
+					kind: "dynamic",
+					statusDetail: "dynamic_completed",
+				}),
+				taskRecord(runId, "synthesis", "dynamic.synthesis", {
+					dynamicGenerated: { outputProfile: "synthesis_v1" },
+				}),
+			],
+		});
+		await writeRunFixture(cwd, run, {
+			schema: "dynamic-controller-result-v1",
+			status: "synthesized",
+			outputTasks: ["dynamic.synthesis"],
+		});
+		const taskDir = join(cwd, dirname(run.tasks[1].files.output));
+		await writeDynamicControl(
+			cwd,
+			{ tasks: [run.tasks[1]] },
+			{ sidecarPath: "raw.md/." },
+		);
+		await writeFile(join(taskDir, "raw.md"), "RAW_ALIAS_ESCAPE\n");
+		await writeFeedbackAudience(cwd, runId, "session-raw-alias");
+		const sent = [];
+		await deliverWorkflowFeedback(
+			feedbackContext(cwd, "session-raw-alias"),
+			{ sendMessage: (message) => sent.push(message) },
+			run,
+		);
+		assert.equal(sent.length, 1);
+		assert.doesNotMatch(sent[0].content, /RAW_ALIAS_ESCAPE/);
+		assert.match(sent[0].content, /Summarize the workflow outcome/);
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
 	}

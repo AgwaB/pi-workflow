@@ -1389,7 +1389,8 @@ function isDeepResearchFinalSynthesisSchema(schema: JsonSchemaObject): boolean {
 	const schemaProperty = schema.properties?.schema;
 	return (
 		isJsonSchemaObject(schemaProperty) &&
-		schemaProperty.const === "deep-research-final-synthesis-v1"
+		(schemaProperty.const === "deep-research-final-synthesis-v1" ||
+			schemaProperty.const === "deep-research-final-synthesis-v2")
 	);
 }
 
@@ -1455,6 +1456,9 @@ function finalSynthesisCapsFromSchema(
 			contestedClaimIds: arrayMaxItems(properties.contestedClaimIds),
 		}),
 		rows: compactRowCaps({
+			comparisonRows: rowCaps(properties.comparisonRows, [
+				"supportingClaimIds",
+			]),
 			recommendations: rowCaps(properties.recommendations, [
 				"supportingClaimIds",
 			]),
