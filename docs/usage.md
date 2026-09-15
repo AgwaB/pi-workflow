@@ -146,7 +146,7 @@ valid.
 | `execution-router` | Decide whether a task should be handled directly, by an existing workflow, by a targeted verifier/subagent, or by a new/extended workflow. |
 | `workflow-guide` | Create, modify, review, validate, or explain workflow definitions after the authoring target is known. |
 
-For reusable workflow authoring, `workflow-guide` includes validated scaffold bundles for common graph shapes. Copy a scaffold, adapt prompts/schemas/stage ids, then run `/workflow validate` on the copied spec before use.
+For reusable workflow authoring, `workflow-guide` includes validated scaffold bundles for common graph shapes. Copy and adapt a scaffold, or use its documented provider-free initializer for already-fixed inputs, then run `/workflow validate` on the resulting spec before use.
 
 ## Commands
 
@@ -910,11 +910,14 @@ Use `workflows/` for repo-committed shared workflows and `.pi/workflows/` for lo
 
 | Scaffold | Use when |
 |---|---|
+| `fixed-inventory` | A caller-fixed 1–8 document set needs one editorial stakeholder-question extraction per document plus a deterministic exact-owner join. Its initializer writes a runnable bundle without a provider call; do not use it for inventory discovery or factual/conformance judgment. |
 | `foreach-reduce` | Extract a list of work items, verify each item, then synthesize a report. |
 | `support-partition` | Candidate findings need deterministic partitioning/dedup after verifier verdicts. |
 | `dag-required-reads` | A nested analysis DAG must expose one child output and force downstream artifact reads. |
 | `matrix-dag` | Multiple review lenses should run in parallel and then join through reducers. |
 | `object-tool-fallback` | A read-only workflow needs optional custom/web extraction fallback tooling. |
+
+For `fixed-inventory`, create a binding containing only `name`, optional `description`, and exact `{id,path}` items, then run `node skills/workflow-guide/scaffolds/fixed-inventory/initialize.mjs <binding.json> <fresh-or-empty-destination>`. The initializer validates and copies known IDs, paths, schemas, helpers, joins, and rendering deterministically; it does not inspect documents, launch a model, or decide that the inventory is complete. Review and validate the output before execution. See the scaffold README for the exact boundary.
 
 Authoring checklist:
 

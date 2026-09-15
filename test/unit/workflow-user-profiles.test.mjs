@@ -358,6 +358,7 @@ test("bundled workflows and authoring scaffolds expose complete built-in profile
 		"skills/workflow-guide/scaffolds/analysis-dossier/spec.json",
 		"skills/workflow-guide/scaffolds/dag-required-reads/spec.json",
 		"skills/workflow-guide/scaffolds/foreach-reduce/spec.json",
+		"skills/workflow-guide/scaffolds/fixed-inventory/spec.json",
 		"skills/workflow-guide/scaffolds/matrix-dag/spec.json",
 		"skills/workflow-guide/scaffolds/object-tool-fallback/spec.json",
 		"skills/workflow-guide/scaffolds/support-partition/spec.json",
