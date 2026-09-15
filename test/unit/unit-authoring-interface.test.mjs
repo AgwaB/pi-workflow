@@ -595,13 +595,15 @@ test("bundled deep-research compacts audit packets before executive final", asyn
 		/Do not make extra workflow_artifact reads/,
 	);
 	assert.match(finalAudit.compiledPrompt, /no factSlotCoverage/);
+	assert.match(finalAudit.compiledPrompt, /side_by_side_comparison/);
+	assert.match(finalAudit.compiledPrompt, /synthesis\.comparisonRows/);
 	assert.ok(
 		finalAudit.artifactGraph.output.controlSchemaPath.endsWith(
 			join(
 				"workflows",
 				"deep-research",
 				"schemas",
-				"deep-research-final-synthesis-control.schema.json",
+				"deep-research-final-synthesis-v2-control.schema.json",
 			),
 		),
 	);
@@ -609,6 +611,8 @@ test("bundled deep-research compacts audit packets before executive final", asyn
 		readFileSync(finalAudit.artifactGraph.output.controlSchemaPath, "utf8"),
 	);
 	const finalSynthesisProps = finalAuditSchema.properties.synthesis.properties;
+	assert.equal(finalAuditSchema.properties.schema.const, "deep-research-final-synthesis-v2");
+	assert.equal(finalSynthesisProps.comparisonRows.maxItems, 8);
 	assert.equal(finalSynthesisProps.keyFindingIds.maxItems, 12);
 	assert.equal(finalSynthesisProps.recommendations.maxItems, 12);
 	assert.equal(

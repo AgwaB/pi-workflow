@@ -396,14 +396,15 @@ function packetVerdictCounts(packet, fallback) {
 	if (!isRecord(verdicts)) return null;
 	const counts = coverageCounts(verdicts, fallback);
 	if (!counts) return null;
-	counts.total =
-		finiteNumber(packet?.invariantChecks?.candidateCount) ??
-		finiteNumber(verdicts.total) ??
+	const auditedStatusTotal =
 		counts.verified +
-			counts.partially_supported +
-			counts.unsupported +
-			counts.conflicting +
-			counts.verification_blocked;
+		counts.partially_supported +
+		counts.unsupported +
+		counts.conflicting +
+		counts.verification_blocked;
+	counts.total =
+		finiteNumber(packet?.invariantChecks?.auditedClaimCount) ??
+		auditedStatusTotal;
 	return counts;
 }
 
@@ -518,6 +519,19 @@ function boundedStringArray(value, maxItems) {
 	return boundedArray(value, maxItems, (item) => typeof item === "string");
 }
 
+function modernComparisonValid(item) {
+	return Boolean(
+		isRecord(item) &&
+			boundedString(item.area, 1, 200) &&
+			boundedString(item.subjectStatus, 1, 800) &&
+			boundedString(item.referencePattern, 1, 800) &&
+			boundedString(item.assessment, 1, 800) &&
+			boundedStringArray(item.supportingClaimIds, 8) &&
+			(!hasOwn(item, "evidenceStatus") ||
+				typeof item.evidenceStatus === "string"),
+	);
+}
+
 function modernRecommendationValid(item) {
 	return Boolean(
 		isRecord(item) &&
@@ -564,6 +578,7 @@ function validModernFinalAudit(control) {
 	const synthesis = control?.synthesis;
 	const synthesisKeys = [
 		"bottomLine",
+		"comparisonRows",
 		"keyFindingIds",
 		"recommendations",
 		"actionPlan",
@@ -572,12 +587,19 @@ function validModernFinalAudit(control) {
 		"notableUnsupportedClaimIds",
 		"contestedClaimIds",
 	];
+	const modernSchema =
+		control?.schema === "deep-research-final-synthesis-v1" ||
+		control?.schema === "deep-research-final-synthesis-v2";
+	const comparisonRowsValid = hasOwn(synthesis, "comparisonRows")
+		? boundedArray(synthesis.comparisonRows, 8, modernComparisonValid)
+		: control?.schema === "deep-research-final-synthesis-v1";
 	return Boolean(
 		exactKeys(control, ["schema", "digest", "synthesis"]) &&
-			control.schema === "deep-research-final-synthesis-v1" &&
+			modernSchema &&
 			boundedString(control.digest, 1, 1200) &&
 			exactKeys(synthesis, synthesisKeys) &&
 			boundedString(synthesis.bottomLine, 1, 4000) &&
+			comparisonRowsValid &&
 			boundedStringArray(synthesis.keyFindingIds, 12) &&
 			boundedArray(synthesis.recommendations, 12, modernRecommendationValid) &&
 			boundedArray(synthesis.actionPlan, 12, modernActionValid) &&
@@ -1366,6 +1388,16 @@ function coverageSummaryFromPacket(packet, fallback = {}) {
 		verification_blocked: 0,
 	});
 	if (!counts) return fallback;
+	const schemaCapDrops =
+		packet?.normalizerDiagnostics?.sanitizer?.schemaCapDrops;
+	const omittedPreserved = Array.isArray(schemaCapDrops)
+		? schemaCapDrops
+				.filter((row) => cleanText(row?.path).endsWith("preservedClaims"))
+				.reduce(
+					(total, row) => total + (finiteNumber(row?.droppedCount) ?? 0),
+					0,
+				)
+		: undefined;
 	return {
 		...fallback,
 		verified: counts.verified,
@@ -1379,6 +1411,11 @@ function coverageSummaryFromPacket(packet, fallback = {}) {
 			packet?.researchMetadataSeed?.researchQuestions ??
 			fallback.researchQuestions,
 		preserved: packet?.overflowLedger?.preservedClaimCount ?? fallback.preserved,
+		omittedVerificationCandidates:
+			packet?.overflowLedger?.omittedVerificationCandidateCount ??
+			fallback.omittedVerificationCandidates,
+		omittedPreserved:
+			omittedPreserved ?? fallback.omittedPreserved,
 		coverageGaps:
 			packet?.overflowLedger?.coverageGapCount ?? fallback.coverageGaps,
 	};
@@ -1501,6 +1538,10 @@ function composeResearchReport(control, packetSource) {
 			coverageSummary: coverageSummaryFromPacket(packet, {}),
 			factSlotCoverage: asArray(packet.factSlotCoverage),
 			mainFindings: keyFindingRows.map(claimToFinding),
+			comparisonRows: mapOverlayItems(
+				synthesis.comparisonRows,
+				"comparison snapshot",
+			),
 			recommendations: mapOverlayItems(
 				synthesis.recommendations,
 				"recommendations",
@@ -1591,6 +1632,16 @@ function mainFindingEntries(report) {
 	}));
 }
 
+function comparisonEntries(report) {
+	return asArray(report.comparisonRows).map((item) => ({
+		item,
+		area: cleanText(item?.area),
+		subjectStatus: cleanText(item?.subjectStatus),
+		referencePattern: cleanText(item?.referencePattern),
+		assessment: cleanText(item?.assessment),
+	}));
+}
+
 function recommendationEntries(report) {
 	return asArray(report.recommendations).map((item) => ({
 		item,
@@ -1610,6 +1661,25 @@ function actionEntries(report) {
 			(typeof item?.step === "string" && cleanText(item.step)) ||
 			stringifyItem(item),
 	}));
+}
+
+function renderComparisonSnapshot(report) {
+	const comparisons = comparisonEntries(report);
+	if (comparisons.length === 0) return [];
+	const out = [
+		"## Comparison snapshot",
+		"",
+		"| Area | Subject / current state | Reference pattern | Assessment |",
+		"|---|---|---|---|",
+	];
+	for (const { item, area, subjectStatus, referencePattern, assessment } of comparisons) {
+		const status = evidenceStatusOf(item) || "not specified";
+		out.push(
+			`| ${escapeTableCell(area)} | ${escapeTableCell(subjectStatus)} | ${escapeTableCell(referencePattern)} | ${escapeTableCell(`${assessment} — evidence: ${status}`)} |`,
+		);
+	}
+	out.push("");
+	return out;
 }
 
 function renderMainFindings(report) {
@@ -1750,17 +1820,18 @@ function selectCaveats(report) {
 }
 
 function renderCompletionSummary(report, claimSummary, slots, fallback) {
+	const comparisons = comparisonEntries(report).slice(0, 8);
 	const recommendations = recommendationEntries(report);
 	const primaryEntries = (
 		recommendations.length > 0 ? recommendations : mainFindingEntries(report)
-	).slice(0, 8);
+	).slice(0, comparisons.length > 0 ? 6 : 8);
 	const categoryOrder = [
-		"Decision note",
-		"Gap",
 		"Caveat",
+		"Gap",
 		"Contested",
 		"Unsupported",
 		"Unverified lead",
+		"Decision note",
 	];
 	const categoryRank = new Map(
 		categoryOrder.map((category, index) => [category, index]),
@@ -1774,13 +1845,28 @@ function renderCompletionSummary(report, claimSummary, slots, fallback) {
 				(categoryRank.get(left.kind) ?? categoryOrder.length) -
 				(categoryRank.get(right.kind) ?? categoryOrder.length),
 		)
-		.slice(0, 6);
+		.slice(0, 8);
 	const out = [
 		"## Core conclusion",
 		"",
 		completionText(summaryText(report, fallback)),
 		"",
 	];
+	if (comparisons.length > 0) {
+		out.push(
+			"## Comparison snapshot",
+			"",
+			"| Area | Subject / current state | Reference pattern | Assessment |",
+			"|---|---|---|---|",
+		);
+		for (const { item, area, subjectStatus, referencePattern, assessment } of comparisons) {
+			const status = evidenceStatusOf(item) || "not specified";
+			out.push(
+				`| ${escapeTableCell(area)} | ${escapeTableCell(subjectStatus)} | ${escapeTableCell(referencePattern)} | ${escapeTableCell(`${assessment} — evidence: ${status}`)} |`,
+			);
+		}
+		out.push("");
+	}
 	if (primaryEntries.length > 0) {
 		out.push("## Main recommendations", "");
 		for (const { item, text } of primaryEntries) {
@@ -1789,13 +1875,62 @@ function renderCompletionSummary(report, claimSummary, slots, fallback) {
 		}
 		out.push("");
 	}
+	const preservedLeads = finiteNumber(report?.coverageSummary?.preserved);
+	const omittedPreservedLeads = finiteNumber(
+		report?.coverageSummary?.omittedPreserved,
+	);
+	const omittedVerificationCandidates = finiteNumber(
+		report?.coverageSummary?.omittedVerificationCandidates,
+	);
+	const coverageGaps = finiteNumber(report?.coverageSummary?.coverageGaps);
 	out.push(
 		"## Evidence level",
 		"",
-		`- Claims: ${claimSummary.verified} verified, ${claimSummary.partially_supported} partially supported, ${claimSummary.unsupported} unsupported, ${claimSummary.conflicting} conflicting, ${claimSummary.verification_blocked} verification blocked.`,
+		`- Audited claims (${claimSummary.total} total): ${claimSummary.verified} verified, ${claimSummary.partially_supported} partially supported, ${claimSummary.unsupported} unsupported, ${claimSummary.conflicting} conflicting, ${claimSummary.verification_blocked} verification blocked.`,
 		`- Fact slots: ${slots.filled} filled, ${slots.partial} partial, ${slots.missingOrConflicting} missing/conflicting, ${slots.total} total.`,
-		"",
 	);
+	if (
+		preservedLeads !== undefined ||
+		omittedPreservedLeads !== undefined ||
+		omittedVerificationCandidates !== undefined ||
+		coverageGaps !== undefined
+	) {
+		const outsideDenominator = [];
+		outsideDenominator.push(
+			preservedLeads === undefined
+				? "preserved unverified lead count unavailable"
+				: `${preservedLeads} preserved unverified leads available to synthesis`,
+		);
+		outsideDenominator.push(
+			omittedPreservedLeads === undefined
+				? "additional schema-cap omission count unavailable"
+				: `${omittedPreservedLeads} additional leads omitted by a schema cap`,
+		);
+		outsideDenominator.push(
+			coverageGaps === undefined
+				? "coverage-gap count unavailable"
+				: `${coverageGaps} coverage gaps`,
+		);
+		if ((omittedVerificationCandidates ?? 0) > 0) {
+			outsideDenominator.push(
+				`${omittedVerificationCandidates} verification ${omittedVerificationCandidates === 1 ? "candidate" : "candidates"} omitted from audit`,
+			);
+		}
+		out.push(
+			`- Outside the audited-claim denominator: ${outsideDenominator.join(", ")}.`,
+		);
+	}
+	if (
+		claimSummary.unsupported === 0 &&
+		claimSummary.conflicting === 0 &&
+		claimSummary.verification_blocked === 0 &&
+		(preservedLeads ?? 0) > 0
+	) {
+		out.push(
+			`- The zero unsupported/conflicting/blocked counts apply only to the ${claimSummary.total} audited claims; preserved leads and gaps remain separate.`,
+		);
+	}
+	out.push("");
 	if (limitations.length > 0) {
 		out.push("## Remaining decisions and limits", "");
 		for (const { kind, text } of limitations) {
@@ -1936,12 +2071,14 @@ function renderResearchMarkdown(control, packetSource, options = {}) {
 	const factSlots = sortedFactSlots(report);
 	const slots = factSlotSummary(asArray(report.factSlotCoverage));
 	const findings = mainFindingEntries(report);
+	const comparisons = comparisonEntries(report);
 	const recommendations = recommendationEntries(report);
 	const actions = actionEntries(report);
 	const caveats = selectCaveats(report);
 	const allSourceIndex = uniqueStructuredUrls(
 		report.factSlotCoverage,
 		report.mainFindings,
+		report.comparisonRows,
 		report.recommendations,
 		report.actionPlan,
 		report.caveatedFindings,
@@ -1961,6 +2098,8 @@ function renderResearchMarkdown(control, packetSource, options = {}) {
 	const sectionCounts = {
 		findings: asArray(report.mainFindings).length,
 		renderedFindings: findings.length,
+		comparisonRows: asArray(report.comparisonRows).length,
+		renderedComparisonRows: comparisons.length,
 		recommendations: asArray(report.recommendations).length,
 		renderedRecommendations: recommendations.length,
 		actionItems: asArray(report.actionPlan).length,
@@ -1978,7 +2117,24 @@ function renderResearchMarkdown(control, packetSource, options = {}) {
 		sourceUrls: allSourceIndex.length,
 		renderedSourceUrls: sourceIndex.length,
 	};
+	const expectedShape = cleanText(
+		report?.researchMetadata?.expectedFinalShape,
+	)
+		.toLowerCase()
+		.replace(/[\s-]+/g, "_");
+	const comparisonShapeSatisfied =
+		control?.schema !== "deep-research-final-synthesis-v2" ||
+		expectedShape !== "side_by_side_comparison" ||
+		comparisons.length >= 3;
 	const warnings = [...renderWarnings(sectionCounts), ...composed.warnings];
+	if (!comparisonShapeSatisfied) {
+		warnings.push({
+			section: "comparisonRows",
+			label: "expected 3-8 side-by-side comparison rows",
+			total: 1,
+			rendered: 0,
+		});
+	}
 	const completionSummaryMarkdown = renderCompletionSummary(
 		report,
 		claimSummary,
@@ -1998,6 +2154,7 @@ function renderResearchMarkdown(control, packetSource, options = {}) {
 		reportExecutiveSummary,
 		"",
 		...renderResearchScopeAndMethod(report),
+		...renderComparisonSnapshot(report),
 		...renderMainFindings(report),
 		...renderRecommendations(report),
 		...renderActionPlan(report),
@@ -2020,6 +2177,7 @@ function renderResearchMarkdown(control, packetSource, options = {}) {
 		claimSummary,
 		factSlotSummary: slots,
 		sectionCounts,
+		comparisonShapeSatisfied,
 		renderWarnings: warnings,
 	};
 }
@@ -2271,6 +2429,7 @@ export default async function renderExecutive({
 		truncated && Number(rendered.sectionCounts.caveatsAndGaps ?? 0) > 0;
 	let passed =
 		renderedAllStructuredItems &&
+		rendered.comparisonShapeSatisfied &&
 		!truncatedWithOpenGaps &&
 		!serializationArtifact &&
 		packetReconciliation.passed;
@@ -2338,6 +2497,7 @@ export default async function renderExecutive({
 			truncated,
 			truncatedWithOpenGaps,
 			serializationArtifact,
+			expectedOutputShapeSatisfied: rendered.comparisonShapeSatisfied,
 			sidecarWriteSucceeded: sidecarErrors.length === 0,
 			packetReconciliationPassed: packetReconciliation.passed,
 			packetReconciliationBlockers: packetReconciliation.blockers,
