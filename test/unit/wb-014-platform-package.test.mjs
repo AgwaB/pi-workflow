@@ -24,6 +24,7 @@ const bundleSpecs = [
 	"skills/workflow-guide/scaffolds/analysis-dossier/spec.json",
 	"skills/workflow-guide/scaffolds/dag-required-reads/spec.json",
 	"skills/workflow-guide/scaffolds/foreach-reduce/spec.json",
+	"skills/workflow-guide/scaffolds/fixed-inventory/spec.json",
 	"skills/workflow-guide/scaffolds/matrix-dag/spec.json",
 	"skills/workflow-guide/scaffolds/object-tool-fallback/spec.json",
 	"skills/workflow-guide/scaffolds/support-partition/spec.json",
@@ -92,6 +93,8 @@ test("release checker is shell-free and requires all official default, public va
 	assert.match(source, /missing referenced workflow\/scaffold assets/i);
 	assert.match(source, /FORBIDDEN_CANDIDATE_PATTERN/);
 	for (const requiredPath of [
+		"skills/workflow-guide/scaffolds/fixed-inventory/initialize.mjs",
+		"skills/workflow-guide/scaffolds/fixed-inventory/helpers/exact-source-join.mjs",
 		"src/code-search-compat-extension.ts",
 		"dist/code-search-compat-extension.js",
 		"node_modules/pi-web-access/package.json",
@@ -274,6 +277,8 @@ test("npm dry-run package contains every local asset referenced by official, opt
 	for (const required of [
 		"workflows/README.md",
 		"skills/workflow-guide/scaffolds/README.md",
+		"skills/workflow-guide/scaffolds/fixed-inventory/initialize.mjs",
+		"skills/workflow-guide/scaffolds/fixed-inventory/helpers/exact-source-join.mjs",
 		"src/code-search-compat-extension.ts",
 		"dist/code-search-compat-extension.js",
 		"node_modules/pi-web-access/package.json",

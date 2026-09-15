@@ -119,6 +119,8 @@ Save it as a reusable project workflow.
 It should check concurrency, transaction safety, error handling, observability, and test risk.
 ```
 
+When the caller has already fixed a small document inventory, the `fixed-inventory` scaffold can bind it with static code instead of spending a model stage restating known IDs and paths. See [usage](docs/usage.md#authoring-workflows) for its editorial-only boundary and initializer.
+
 ## Workflow architecture
 
 A workflow is a deterministic stage graph for running one natural-language task through a reusable process.

@@ -1,0 +1,480 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "digest",
+    "status",
+    "coverage",
+    "plannedIds",
+    "acceptedIds",
+    "missingIds",
+    "rows",
+    "issues",
+    "executiveMarkdown",
+    "refs"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "fixed-final-v1"
+    },
+    "digest": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 600
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "completed",
+        "failed"
+      ]
+    },
+    "coverage": {
+      "type": "string",
+      "enum": [
+        "complete",
+        "partial"
+      ]
+    },
+    "plannedIds": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 8,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64
+      }
+    },
+    "acceptedIds": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 8,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64
+      }
+    },
+    "missingIds": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 8,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64
+      }
+    },
+    "inventoryOwner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "stageId",
+        "specId",
+        "taskId",
+        "status"
+      ],
+      "properties": {
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "stageId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "specId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "taskId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "status": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 30
+        },
+        "itemIdentity": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "placeholderSpecId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sourceGeneration": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "dispatchMap": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "version",
+            "generation",
+            "sourceTaskId",
+            "entries",
+            "digest"
+          ],
+          "properties": {
+            "version": {
+              "const": 1
+            },
+            "generation": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "sourceTaskId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 300
+            },
+            "entries": {
+              "type": "array",
+              "minItems": 0,
+              "maxItems": 8,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "itemIdentity",
+                  "taskId",
+                  "specId",
+                  "itemSourceTaskId",
+                  "itemSourceSpecId",
+                  "itemSourceKind",
+                  "itemRef",
+                  "itemHash"
+                ],
+                "properties": {
+                  "itemIdentity": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "taskId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 300
+                  },
+                  "specId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 300
+                  },
+                  "itemSourceTaskId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 300
+                  },
+                  "itemSourceSpecId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 300
+                  },
+                  "itemSourceKind": {
+                    "type": "string",
+                    "enum": [
+                      "control",
+                      "partial"
+                    ]
+                  },
+                  "itemRef": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  },
+                  "itemHash": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "perItemDispatch": {
+                    "const": true
+                  }
+                }
+              }
+            },
+            "digest": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        }
+      }
+    },
+    "rows": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "path",
+          "availability",
+          "questions",
+          "limitations"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+          },
+          "availability": {
+            "type": "string",
+            "enum": [
+              "accepted",
+              "unavailable"
+            ]
+          },
+          "owner": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "source",
+              "stageId",
+              "specId",
+              "taskId",
+              "status"
+            ],
+            "properties": {
+              "source": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 300
+              },
+              "stageId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 300
+              },
+              "specId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 300
+              },
+              "taskId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 300
+              },
+              "status": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 30
+              },
+              "itemIdentity": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "placeholderSpecId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 300
+              },
+              "generation": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "sourceGeneration": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "dispatchMap": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "version",
+                  "generation",
+                  "sourceTaskId",
+                  "entries",
+                  "digest"
+                ],
+                "properties": {
+                  "version": {
+                    "const": 1
+                  },
+                  "generation": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "sourceTaskId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 300
+                  },
+                  "entries": {
+                    "type": "array",
+                    "minItems": 0,
+                    "maxItems": 8,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "itemIdentity",
+                        "taskId",
+                        "specId",
+                        "itemSourceTaskId",
+                        "itemSourceSpecId",
+                        "itemSourceKind",
+                        "itemRef",
+                        "itemHash"
+                      ],
+                      "properties": {
+                        "itemIdentity": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 64
+                        },
+                        "taskId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 300
+                        },
+                        "specId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 300
+                        },
+                        "itemSourceTaskId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 300
+                        },
+                        "itemSourceSpecId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 300
+                        },
+                        "itemSourceKind": {
+                          "type": "string",
+                          "enum": [
+                            "control",
+                            "partial"
+                          ]
+                        },
+                        "itemRef": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 500
+                        },
+                        "itemHash": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        },
+                        "perItemDispatch": {
+                          "const": true
+                        }
+                      }
+                    }
+                  },
+                  "digest": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  }
+                }
+              }
+            }
+          },
+          "documentStatus": {
+            "type": "string",
+            "enum": [
+              "read",
+              "partial",
+              "unreadable"
+            ]
+          },
+          "questions": {
+            "type": "array",
+            "minItems": 0,
+            "maxItems": 6,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            }
+          },
+          "limitations": {
+            "type": "array",
+            "minItems": 0,
+            "maxItems": 8,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            }
+          }
+        }
+      }
+    },
+    "issues": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "source",
+          "detail"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "source": {
+            "type": "string",
+            "maxLength": 300
+          },
+          "detail": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          }
+        }
+      }
+    },
+    "executiveMarkdown": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 131072
+    },
+    "refs": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 0,
+      "items": {}
+    }
+  }
+}
