@@ -87,6 +87,7 @@
             "required": ["note"],
             "properties": {
               "note": { "type": "string", "minLength": 1, "maxLength": 1200 },
+              "readerNote": { "type": "string", "minLength": 1, "maxLength": 1200 },
               "relatedClaimIds": { "type": "array", "items": { "type": "string" }, "maxItems": 8 },
               "gapIds": { "type": "array", "items": { "type": "string" }, "maxItems": 8 }
             },

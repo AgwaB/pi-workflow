@@ -990,7 +990,7 @@
 		{
 			"name": "deep-research renderer emits evidence-backed report and sidecars",
 			"occurrence": 1,
-			"sha256": "5da7a34cc8defb3139c024bf835301245c8bbca09531eac7775d0d0c3be15d4e",
+			"sha256": "0de4734ec055c4175fd5e36830ac2e4a84a90e15158f0e3fb1a97df619aaa3e4",
 			"domain": "core-runtime"
 		},
 		{
