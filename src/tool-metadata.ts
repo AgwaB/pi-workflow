@@ -40,6 +40,33 @@ const NON_DOWNGRADABLE_TOOL_FLOORS: Record<string, TaskCapability> = {
 	bash: "mutation-capable",
 };
 
+// This is deliberately separate from mutation classification. A read-only
+// provider can still reach the network, while a shell can do both local and
+// network work. Unknown/custom providers stay unknown rather than receiving a
+// permissive name-based guess.
+const NETWORK_CAPABLE_TOOLS = new Set([
+	"bash",
+	"web_search",
+	"code_search",
+	"fetch_content",
+	"get_search_content",
+	"workflow_web_search",
+	"workflow_web_fetch_source",
+	"workflow_web_source_read",
+	"scrapling_fetch",
+]);
+const KNOWN_LOCAL_TOOLS = new Set([
+	"read",
+	"grep",
+	"find",
+	"ls",
+	"lsp_diagnostics",
+	"lsp_navigation",
+	"ast_grep_search",
+	"edit",
+	"write",
+]);
+
 const TOOL_AUTHORITY_COMPAT_ALIASES: Record<string, string[]> = {
 	workflow_web_search: ["web_search"],
 	workflow_web_fetch_source: ["fetch_content"],
@@ -89,8 +116,7 @@ export function providerFromToolObject(
 	tool: WorkflowToolObjectSpec,
 ): CompiledToolProvider | undefined {
 	const provider: CompiledToolProvider = {};
-	if (Array.isArray(tool.extensions))
-		provider.extensions = [...tool.extensions];
+	if (Array.isArray(tool.extensions)) provider.extensions = [...tool.extensions];
 	if (tool.classification !== undefined)
 		provider.classification = tool.classification;
 	if (tool.optional !== undefined) provider.optional = tool.optional;
@@ -187,11 +213,28 @@ export function effectiveToolClassification(
 	const providerClassification = toolProviders?.[tool]?.classification;
 	const builtinClassification = BUILTIN_TOOL_METADATA[tool]?.classification;
 	const floor = NON_DOWNGRADABLE_TOOL_FLOORS[tool];
-	return maxClassification(
-		floor,
-		builtinClassification,
-		providerClassification,
-	);
+	return maxClassification(floor, builtinClassification, providerClassification);
+}
+
+/** Provider extensions execute code, so auto-routing must not trust read-only metadata. */
+export function hasExecutableToolProviderExtension(
+	tool: string,
+	toolProviders: Record<string, CompiledToolProvider> | undefined,
+): boolean {
+	return (toolProviders?.[tool]?.extensions?.length ?? 0) > 0;
+}
+
+/** Trusted network posture for an effective selected tool. */
+export function toolNetworkCapability(
+	tool: string,
+	toolProviders: Record<string, CompiledToolProvider> | undefined,
+): "local" | "network" | "unknown" {
+	if (NETWORK_CAPABLE_TOOLS.has(tool)) return "network";
+	// An extension can change a normally local tool's behavior. Its network
+	// authority is not represented by tool classification, so fail closed.
+	if ((toolProviders?.[tool]?.extensions?.length ?? 0) > 0) return "unknown";
+	if (KNOWN_LOCAL_TOOLS.has(tool)) return "local";
+	return "unknown";
 }
 
 export function classifyToolCapability(
@@ -202,13 +245,11 @@ export function classifyToolCapability(
 ): TaskCapability {
 	if (tools === undefined)
 		return options.unspecifiedToolsCapability ?? "write-capable";
-	if (tools.length === 0)
-		return options.emptyToolsCapability ?? "write-capable";
+	if (tools.length === 0) return options.emptyToolsCapability ?? "write-capable";
 	if (
 		tools.some(
 			(tool) =>
-				effectiveToolClassification(tool, toolProviders) ===
-					"mutation-capable" ||
+				effectiveToolClassification(tool, toolProviders) === "mutation-capable" ||
 				effectiveToolClassification(tool, toolProviders) === undefined,
 		)
 	) {
@@ -297,10 +338,7 @@ function maxClassification(
 	let best: TaskCapability | undefined;
 	for (const value of values) {
 		if (!value) continue;
-		if (
-			!best ||
-			TOOL_CLASSIFICATION_RANK[value] > TOOL_CLASSIFICATION_RANK[best]
-		)
+		if (!best || TOOL_CLASSIFICATION_RANK[value] > TOOL_CLASSIFICATION_RANK[best])
 			best = value;
 	}
 	return best;

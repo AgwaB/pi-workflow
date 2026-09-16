@@ -1261,13 +1261,17 @@ test("workflow wait returns a terminal result without model polling", async () =
 	const cwd = await mkdtemp(join(tmpdir(), "workflow-wait-tool-"));
 	try {
 		const run = runRecord(cwd);
-		const completionSummaryMarkdown = [
+		const completionSummaryMarkdown = `\n  ${[
 			"## Core conclusion",
-			"Completed result from the workflow.",
+			"Completed result from the workflow.  ",
+			"Multibyte evidence: café 🚀  ",
 			"evidence ".repeat(800).trim(),
 			"PRESERVED_SUMMARY_TAIL",
-		].join("\n\n");
+		].join("\n\n")}\n\n`;
 		assert.ok(completionSummaryMarkdown.length > 6000);
+		assert.ok(completionSummaryMarkdown.startsWith("\n  ## Core conclusion"));
+		assert.ok(completionSummaryMarkdown.endsWith("\n\n"));
+		assert.match(completionSummaryMarkdown, /café 🚀  /);
 		await writeRunFixture(
 			cwd,
 			run,

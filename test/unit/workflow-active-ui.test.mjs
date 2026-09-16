@@ -196,7 +196,11 @@ test("foreground workflow launch uses a cancellable custom loader", async () => 
 	await Promise.resolve();
 	controller.abort();
 	assert.equal(await pending, WORKFLOW_LAUNCH_CANCELLED);
-	assert.equal(sessionOperationSignal.aborted, false);
+	assert.equal(
+		sessionOperationSignal.aborted,
+		true,
+		"session invalidation must abort the exact foreground operation signal",
+	);
 	finishLaunch("started");
 
 	let finishEscapedLaunch;

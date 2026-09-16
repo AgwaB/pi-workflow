@@ -106,7 +106,10 @@ export class WorkflowView implements Component {
 	private loadedTaskKey = "";
 	private previewGeneration = 0;
 	private selectionGeneration = 0;
-	private previewCache = new Map<string, { identity: string; lines: string[] }>();
+	private previewCache = new Map<
+		string,
+		{ identity: string; lines: string[] }
+	>();
 	private message = "";
 	private error = "";
 	private loading = true;
@@ -136,10 +139,7 @@ export class WorkflowView implements Component {
 
 	start(): void {
 		void this.reload(true);
-		this.timer = setInterval(
-			() => void this.reload(false),
-			REFRESH_INTERVAL_MS,
-		);
+		this.timer = setInterval(() => void this.reload(false), REFRESH_INTERVAL_MS);
 		this.timer.unref?.();
 	}
 
@@ -301,15 +301,21 @@ export class WorkflowView implements Component {
 		this.reloadActive = true;
 		try {
 			const generation = this.selectionGeneration;
-			const previousRunId = this.flows[this.selectedFlow]?.runId ?? this.detailRun?.runId;
+			const previousRunId =
+				this.flows[this.selectedFlow]?.runId ?? this.detailRun?.runId;
 			const flows = await loadFlowSummaries(this.cwd, this.initialRunId);
 			const supervisors = await loadRunSupervisors(this.cwd, flows);
 			if (this.closed || generation !== this.selectionGeneration) return;
 			this.error = "";
 			this.flows = flows;
 			this.supervisors = supervisors;
-			const previousIndex = flows.findIndex(flow => flow.runId === previousRunId);
-			this.selectedFlow = previousIndex >= 0 ? previousIndex : clampIndex(this.selectedFlow, flows.length);
+			const previousIndex = flows.findIndex(
+				(flow) => flow.runId === previousRunId,
+			);
+			this.selectedFlow =
+				previousIndex >= 0
+					? previousIndex
+					: clampIndex(this.selectedFlow, flows.length);
 			const selectedRunId = flows[this.selectedFlow]?.runId;
 			if (previousRunId && previousRunId !== selectedRunId)
 				this.clearLaunchCommand();
@@ -336,7 +342,9 @@ export class WorkflowView implements Component {
 				const selected = flows[this.selectedFlow];
 				if (selected) {
 					const detailRun = await readRunRecord(this.cwd, selected.runId);
-					const parentUsage = await readParentUsage(this.cwd, selected.runId).catch(() => undefined);
+					const parentUsage = await readParentUsage(this.cwd, selected.runId).catch(
+						() => undefined,
+					);
 					if (this.closed || generation !== this.selectionGeneration) return;
 					this.detailRun = detailRun;
 					this.parentUsage = parentUsage;
@@ -361,13 +369,22 @@ export class WorkflowView implements Component {
 
 	private async cachedPreview(path: string | undefined): Promise<string[]> {
 		if (!path) return [];
-		const info = await stat(fromProjectPath(this.cwd, path)).catch(() => undefined);
-		const identity = info ? `${info.dev}:${info.ino}:${info.size}:${info.mtimeMs}:${info.ctimeMs}` : "missing";
+		const info = await stat(fromProjectPath(this.cwd, path)).catch(
+			() => undefined,
+		);
+		const identity = info
+			? `${info.dev}:${info.ino}:${info.size}:${info.mtimeMs}:${info.ctimeMs}`
+			: "missing";
 		const cached = this.previewCache.get(path);
 		if (info && cached?.identity === identity) return cached.lines;
-		const lines = await readFileLinesBounded(this.cwd, path, TASK_ARTIFACT_MAX_LINES);
+		const lines = await readFileLinesBounded(
+			this.cwd,
+			path,
+			TASK_ARTIFACT_MAX_LINES,
+		);
 		if (!this.closed && info) {
-			if (this.previewCache.size >= 2) this.previewCache.delete(this.previewCache.keys().next().value!);
+			if (this.previewCache.size >= 2)
+				this.previewCache.delete(this.previewCache.keys().next().value!);
 			this.previewCache.set(path, { identity, lines });
 		}
 		return lines;
@@ -397,7 +414,7 @@ export class WorkflowView implements Component {
 		const previews = await Promise.all([
 			this.cachedPreview(task.files.output),
 			this.cachedPreview(task.files.taskPrompt),
-		]).catch(error => {
+		]).catch((error) => {
 			if (!this.closed && generation === this.previewGeneration) {
 				this.error = error instanceof Error ? error.message : String(error);
 				this.tui.requestRender();
@@ -406,8 +423,14 @@ export class WorkflowView implements Component {
 		});
 		if (!previews) return;
 		const [outputLines, promptLines] = previews;
-		if (this.closed || generation !== this.previewGeneration || this.mode !== "task" ||
-			this.detailRun?.runId !== runId || this.selectedTaskRecord()?.taskId !== task.taskId) return;
+		if (
+			this.closed ||
+			generation !== this.previewGeneration ||
+			this.mode !== "task" ||
+			this.detailRun?.runId !== runId ||
+			this.selectedTaskRecord()?.taskId !== task.taskId
+		)
+			return;
 		this.error = "";
 		this.outputLines = outputLines;
 		this.promptLines = promptLines;
@@ -426,10 +449,7 @@ export class WorkflowView implements Component {
 			return;
 		}
 		if (matchesKey(data, "up")) {
-			this.launchCommandScrollLine = Math.max(
-				0,
-				this.launchCommandScrollLine - 1,
-			);
+			this.launchCommandScrollLine = Math.max(0, this.launchCommandScrollLine - 1);
 			this.tui.requestRender();
 			return;
 		}
@@ -527,9 +547,7 @@ export class WorkflowView implements Component {
 		return JSON.stringify([run.runId, run.launch.command]);
 	}
 
-	private launchVerificationFailure(
-		run: WorkflowRunRecord,
-	): string | undefined {
+	private launchVerificationFailure(run: WorkflowRunRecord): string | undefined {
 		const identity = this.launchCommandMetadataIdentity(run);
 		const failure = this.launchVerificationFailures.get(run.runId);
 		return identity && failure?.identity === identity
@@ -562,18 +580,13 @@ export class WorkflowView implements Component {
 		const visible = wrapped.slice(start, end);
 		const lines = [
 			warning(this.theme, "Sensitive user input · control characters escaped"),
-			muted(
-				this.theme,
-				"Clipboard retention is controlled by the OS/terminal.",
-			),
+			muted(this.theme, "Clipboard retention is controlled by the OS/terminal."),
 			"",
 			...visible.map((line) => previewText(this.theme, line)),
 			"",
 			scrollIndicator(
 				this.theme,
-				wrapped.length === 0
-					? "0 / 0"
-					: `${start + 1}-${end} / ${wrapped.length}`,
+				wrapped.length === 0 ? "0 / 0" : `${start + 1}-${end} / ${wrapped.length}`,
 			),
 		];
 		return [
@@ -782,9 +795,7 @@ export class WorkflowView implements Component {
 					"Validation",
 					width,
 					validationLines,
-					taskValidationSummary(task)?.status === "invalid"
-						? "error"
-						: "warning",
+					taskValidationSummary(task)?.status === "invalid" ? "error" : "warning",
 				),
 				"",
 			);
@@ -864,10 +875,12 @@ export class WorkflowView implements Component {
 			const left = `${prefix}${marker} ${selected ? strong(this.theme, name) : name}`;
 			const detailRun =
 				this.detailRun?.runId === flow.runId ? this.detailRun : undefined;
-			const health = diagnoseWorkflowRunHealth(detailRun ?? {
-				...flow,
-				tasks: undefined, // The index omits runtime fields needed for task-level health.
-			});
+			const health = diagnoseWorkflowRunHealth(
+				detailRun ?? {
+					...flow,
+					tasks: undefined, // The index omits runtime fields needed for task-level health.
+				},
+			);
 			const healthText =
 				health.state === "completed"
 					? ""
@@ -933,10 +946,7 @@ export class WorkflowView implements Component {
 		const lines: string[] = [];
 		if (window.hiddenBefore > 0)
 			lines.push(
-				scrollIndicator(
-					this.theme,
-					`  ${window.hiddenBefore} more tasks above`,
-				),
+				scrollIndicator(this.theme, `  ${window.hiddenBefore} more tasks above`),
 			);
 		for (const { item: task, index } of window.rows) {
 			const selected = index === this.selectedTask;
@@ -1068,11 +1078,7 @@ export class WorkflowView implements Component {
 		if (!metrics) return [];
 		const lines = toolResultBudgetMetricLines(this.theme, metrics, false);
 		lines.push(
-			kvRow(
-				this.theme,
-				"coverage",
-				toolResultBudgetCoverageLabel(metrics, false),
-			),
+			kvRow(this.theme, "coverage", toolResultBudgetCoverageLabel(metrics, false)),
 		);
 		const attemptTotal = metrics.terminalAttempts || metrics.attempts;
 		if (attemptTotal > 0)
@@ -1093,11 +1099,7 @@ export class WorkflowView implements Component {
 		if (totals.tasks === 0 || !hasToolResultBudgetViewSignal(totals)) return [];
 		const lines = [
 			...toolResultBudgetMetricLines(this.theme, totals, true),
-			kvRow(
-				this.theme,
-				"coverage",
-				toolResultBudgetCoverageLabel(totals, true),
-			),
+			kvRow(this.theme, "coverage", toolResultBudgetCoverageLabel(totals, true)),
 		];
 		const other = toolResultBudgetOtherCoverageLabel(totals);
 		if (other) lines.push(kvRow(this.theme, "other", other));
@@ -1389,8 +1391,7 @@ export class WorkflowView implements Component {
 
 	private syncSelectedTaskId(tasks?: WorkflowTaskRunRecord[]): void {
 		const stageTasks =
-			tasks ??
-			(this.detailRun ? this.tasksForSelectedStage(this.detailRun) : []);
+			tasks ?? (this.detailRun ? this.tasksForSelectedStage(this.detailRun) : []);
 		this.selectedTaskId = stageTasks[this.selectedTask]?.taskId ?? "";
 	}
 
@@ -1426,11 +1427,7 @@ export class WorkflowView implements Component {
 				["updated", timestampText(flow.updatedAt)],
 				[
 					"elapsed",
-					elapsedText(
-						flow.createdAt,
-						flow.updatedAt,
-						flow.status === "running",
-					),
+					elapsedText(flow.createdAt, flow.updatedAt, flow.status === "running"),
 				],
 			]),
 			...(detailRun ? this.runUsageLines(detailRun) : []),
@@ -1501,9 +1498,7 @@ export class WorkflowView implements Component {
 				kvRow(
 					this.theme,
 					"command",
-					launch
-						? "unavailable (invalid metadata)"
-						: "unavailable (not captured)",
+					launch ? "unavailable (invalid metadata)" : "unavailable (not captured)",
 				),
 			];
 		}
@@ -1531,6 +1526,18 @@ export class WorkflowView implements Component {
 			accent(this.theme, "Launch"),
 			kvRow(this.theme, "source", source),
 			kvRow(this.theme, "route", route),
+			...(launch.schema === "pi-workflow-run-launch-v2"
+				? [
+						kvRow(
+							this.theme,
+							"selection",
+							launch.selection.recommendation === null
+								? `manual local fallback (unranked) → ${launch.selection.selected} (confirmed)`
+								: `${launch.selection.recommendation} → ${launch.selection.selected} (confirmed)`,
+						),
+						kvRow(this.theme, "candidate", launch.selection.candidateId.slice(0, 12)),
+					]
+				: []),
 			kvRow(this.theme, "profile", profile),
 			kvRow(this.theme, "task", `${chars} · ${lines}`),
 			kvRow(this.theme, "command", command),
@@ -1643,10 +1650,11 @@ export class WorkflowView implements Component {
 }
 
 function launchRouteSummary(
-	mode: "default-on" | "explicit-on" | "off",
+	mode: "default-on" | "explicit-on" | "off" | "auto-confirmed",
 	routing: WorkflowRunRecord["routing"],
 ): string {
 	if (mode === "off") return "off";
+	if (mode === "auto-confirmed") return "auto → confirmed";
 	const intent = mode === "default-on" ? "default" : "explicit";
 	if (
 		!routing ||
@@ -1744,8 +1752,7 @@ async function loadFlowSummaries(
 	if (
 		initialRunId &&
 		!flows.some(
-			(flow) =>
-				flow.runId === initialRunId || flow.runId.startsWith(initialRunId),
+			(flow) => flow.runId === initialRunId || flow.runId.startsWith(initialRunId),
 		)
 	) {
 		const run = await readRunRecord(cwd, initialRunId).catch(() => undefined);
@@ -1995,9 +2002,7 @@ function progressBar(
 ): string {
 	const safeCells = Math.max(1, cells);
 	const visibleProgress =
-		summary.running > 0
-			? summary.completed + summary.running
-			: summary.completed;
+		summary.running > 0 ? summary.completed + summary.running : summary.completed;
 	const filled =
 		summary.total <= 0
 			? 0
@@ -2167,7 +2172,9 @@ function taskValidationSummary(
 	task: WorkflowTaskRunRecord,
 ): { status: string; message: string } | undefined {
 	// Historical sidecars may carry this UI-only field; current run records do not.
-	const candidate = (task as WorkflowTaskRunRecord & { outputValidation?: unknown }).outputValidation;
+	const candidate = (
+		task as WorkflowTaskRunRecord & { outputValidation?: unknown }
+	).outputValidation;
 	if (!candidate || typeof candidate !== "object") return undefined;
 	const validation = candidate as Record<string, unknown>;
 	const status =
@@ -2184,7 +2191,9 @@ function taskValidationSummary(
 		typeof issue === "string"
 			? issue
 			: (issue?.message ?? issue?.path ?? issue?.code ?? "");
-	const message = String(validation.message ?? validation.reason ?? issueMessage);
+	const message = String(
+		validation.message ?? validation.reason ?? issueMessage,
+	);
 	if (status === "valid" && !message) return undefined;
 	return { status, message };
 }
@@ -2230,9 +2239,7 @@ function matchesKey(data: string, key: string): boolean {
 			matchesSpecialKey(data, 13, 0)
 		);
 	if (key === "backspace")
-		return (
-			data === "\u007f" || data === "\b" || matchesSpecialKey(data, 127, 0)
-		);
+		return data === "\u007f" || data === "\b" || matchesSpecialKey(data, 127, 0);
 	if (key === "ctrl+c")
 		return data === "\u0003" || matchesSpecialKey(data, 99, MOD_CTRL);
 	if (key === "ctrl+d")
@@ -2274,9 +2281,7 @@ function matchesSpecialKey(
 	if (!parsed) return false;
 	const codepoint =
 		KITTY_FUNCTIONAL_EQUIVALENTS.get(parsed.codepoint) ?? parsed.codepoint;
-	return (
-		codepoint === expectedCodepoint && parsed.modifier === expectedModifier
-	);
+	return codepoint === expectedCodepoint && parsed.modifier === expectedModifier;
 }
 
 function matchesPrintableKey(data: string, key: string): boolean {

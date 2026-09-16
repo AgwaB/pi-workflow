@@ -2,6 +2,18 @@
   "schemaVersion": 1,
   "name": "spec-review",
   "description": "Read-only spec conformance review: extract requirements from a referenced spec, map implementation and tests in parallel, verify candidate gaps, and produce an evidence-backed report without editing files.",
+  "routing": {
+    "useWhen": [
+      "A named specification, API contract, or acceptance criteria must be mapped to implementation and tests.",
+      "The requested output is a conformance or gap report."
+    ],
+    "avoidWhen": [
+      "The task is open-ended research, ordinary review, or implementation."
+    ],
+    "outputs": [
+      "Requirements-to-evidence conformance report."
+    ]
+  },
   "defaults": {
     "agent": "scout",
     "readOnly": true,

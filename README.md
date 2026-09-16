@@ -70,7 +70,15 @@ For a one-off adaptive workflow that should plan, fan out, and synthesize withou
 /workflow dynamic "Research this repository and summarize the architecture tradeoffs."
 ```
 
-Interactive slash-command launches use Pi's cancellable foreground loader while routing, validating, and completing the initial scheduling pass. Once at least one backend task is actually running, the command returns and Pi shows an `Active workflows` widget below the editor plus a compact footer status. The widget excludes launch/preparation states and stale `running` records with no running task, tracks top-level run progress, survives session reload by rebuilding from `.pi/workflows`, and disappears when no workflow remains active. Open `/workflow` for the full board.
+When you want a recommendation instead of choosing a path yourself, use the bounded comparison command:
+
+```text
+/workflow auto "Review the current diff for reliability and test coverage."
+```
+
+`/workflow auto` compares direct work, direct dynamic, and discoverable named workflows. In the TUI it requires a candidate choice and a separate final confirmation before it starts a workflow; in print/RPC/headless mode it only prints the recommendation and follow-up commands. `/workflow run` always starts the named workflow and `/workflow dynamic` always starts the direct dynamic runtime.
+
+Interactive slash-command launches use Pi's cancellable foreground loader while validating and completing the initial scheduling pass; `/workflow auto` uses it while comparing candidates. Once at least one backend task is actually running, the command returns and Pi shows an `Active workflows` widget below the editor plus a compact footer status. The widget excludes launch/preparation states and stale `running` records with no running task, tracks top-level run progress, survives session reload by rebuilding from `.pi/workflows`, and disappears when no workflow remains active. Open `/workflow` for the full board.
 
 ### Execution profiles
 
@@ -79,7 +87,7 @@ Codex, Codex High, Claude, Mixed, or a per-stage Custom model/thinking setup.
 Without a workflow argument, the picker shows each workflow's saved profile
 instead of its path; previews use colored stage/role/model/thinking columns.
 The same exact workflow definition reuses that preference across projects;
-subsequent interactive, headless, routed, and `workflow_run` launches capture
+subsequent interactive, headless, auto-confirmed, and `workflow_run` launches capture
 its effective values at run start. Missing model capabilities or a stale
 workflow definition block with an explanation rather than silently substituting.
 
@@ -93,7 +101,7 @@ exact role matrix, persistence contract, precedence, and batching constraints.
 
 ## Usage: choose an execution mode
 
-Use the bundled `execution-router` skill when you are not sure whether a task should be handled directly, by a targeted verifier/subagent, by an existing workflow, or by a new workflow:
+Use the bundled `execution-router` skill when you want a recommendation about whether a task should be handled directly, by a targeted verifier/subagent, by an existing workflow, or through a separate workflow-authoring request. The skill is advisory: it does not launch, validate, author, or redirect a workflow.
 
 ```text
 /skill:execution-router decide whether this repository review should use a single-agent pass, deep-review, or a targeted verifier.

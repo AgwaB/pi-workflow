@@ -4,6 +4,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 import type { WorkflowIndexRecord } from "./types.js";
+import { isWorkflowStopPendingError } from "./workflow-stop.js";
 
 export const WORKFLOW_ACTIVE_STATUS_KEY = "pi-workflow-active";
 export const WORKFLOW_ACTIVE_WIDGET_KEY = "pi-workflow-active";
@@ -109,7 +110,14 @@ export async function withWorkflowLaunchForeground<T>(
 	const outcome = await ctx.ui.custom<WorkflowLaunchOutcome<T>>(
 		(tui, theme, _keybindings, done) => {
 			const loader = new BorderedLoader(tui, theme, label);
-			const operationSignal = loader.signal;
+			// A session/cwd invalidation must abort the operation as well as close
+			// the loader. Callers use this exact signal to stop the one run they may
+			// have committed while the loader was being dismissed.
+			const cancellation = new AbortController();
+			const operationSignal = AbortSignal.any([
+				loader.signal,
+				cancellation.signal,
+			]);
 			let settled = false;
 			const finish = (value: WorkflowLaunchOutcome<T>) => {
 				if (settled) return;
@@ -117,7 +125,13 @@ export async function withWorkflowLaunchForeground<T>(
 				signal?.removeEventListener("abort", cancel);
 				done(value);
 			};
-			const cancel = () => finish({ kind: "cancelled" });
+			const cancel = () => {
+				if (!cancellation.signal.aborted)
+					cancellation.abort(
+						signal?.aborted ? signal.reason : loader.signal.reason,
+					);
+				finish({ kind: "cancelled" });
+			};
 			loader.onAbort = cancel;
 			signal?.addEventListener("abort", cancel, { once: true });
 
@@ -130,7 +144,13 @@ export async function withWorkflowLaunchForeground<T>(
 								? { kind: "cancelled" }
 								: { kind: "completed", value },
 						),
-					(error: unknown) => finish({ kind: "failed", error }),
+					(error: unknown) => {
+						// Escape dismisses the loader immediately, not the durable stop
+						// obligation. Keep pending cancellation visible in this session.
+						if (settled && operationSignal.aborted && !signal?.aborted && isWorkflowStopPendingError(error))
+							safeUiCall(() => ctx.ui.notify(error.message, "warning"));
+						finish({ kind: "failed", error });
+					},
 				);
 			return loader;
 		},

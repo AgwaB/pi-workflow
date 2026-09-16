@@ -2,6 +2,18 @@
   "schemaVersion": 1,
   "name": "deep-research",
   "description": "Planner-driven deep research workflow: plan research questions by depth, fan out question research, normalize/rank claims, verify selected claims, preserve a full audit final, and render a compact executive handoff.",
+  "routing": {
+    "useWhen": [
+      "The task needs broad source gathering, cross-source comparison, or claim verification.",
+      "The requested output is an evidence-qualified research report or decision memo."
+    ],
+    "avoidWhen": [
+      "A single narrow fact or a code patch is the final artifact."
+    ],
+    "outputs": [
+      "Source-grounded report with limitations and claim audit."
+    ]
+  },
   "defaults": {
     "maxRuntimeMs": 14400000,
     "agent": "researcher",

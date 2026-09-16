@@ -99,6 +99,7 @@ type RunLeaseTestHooks = {
 		initial: boolean;
 	}) => void | Promise<void>;
 	onBeforeAtomicRename?: (context: { file: string }) => void | Promise<void>;
+	onAfterStopIntentWrite?: (context: { file: string }) => void | Promise<void>;
 	onBeforeExclusiveLink?: (context: { file: string }) => void | Promise<void>;
 	onAfterAtomicRename?: (context: {
 		file: string;
@@ -200,9 +201,8 @@ const NOFOLLOW_DIRECTORY_FLAGS =
 	fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW;
 
 type WorkflowLaunchArtifactTestHooks = {
-	onAfterReadOpen?: (context: {
-		artifactPath: string;
-	}) => void | Promise<void>;
+	onAfterPrepare?: (context: { runPath: string }) => void | Promise<void>;
+	onAfterReadOpen?: (context: { artifactPath: string }) => void | Promise<void>;
 	onBeforeWriteRename?: (context: {
 		artifactPath: string;
 		tempPath: string;
@@ -254,7 +254,9 @@ async function ensurePhysicalDirectoryComponent(
 	return entry;
 }
 
-async function existingPhysicalDirectoryComponent(path: string): Promise<Stats> {
+async function existingPhysicalDirectoryComponent(
+	path: string,
+): Promise<Stats> {
 	const entry = await lstat(path);
 	if (entry.isSymbolicLink() || !entry.isDirectory())
 		throw unsafeWorkflowLaunchArtifactPath();
@@ -265,16 +267,23 @@ async function assertPhysicalWorkflowLaunchRunDirectory(
 	directory: PhysicalWorkflowLaunchRunDirectory,
 	requirePrivateMode = true,
 ): Promise<void> {
-	const [piStat, rootStat, runStat, rootHandleStat, runHandleStat, rootReal, runReal] =
-		await Promise.all([
-			lstat(directory.piPath),
-			lstat(directory.rootPath),
-			lstat(directory.runPath),
-			directory.rootHandle.stat(),
-			directory.runHandle.stat(),
-			realpath(directory.rootPath),
-			realpath(directory.runPath),
-		]);
+	const [
+		piStat,
+		rootStat,
+		runStat,
+		rootHandleStat,
+		runHandleStat,
+		rootReal,
+		runReal,
+	] = await Promise.all([
+		lstat(directory.piPath),
+		lstat(directory.rootPath),
+		lstat(directory.runPath),
+		directory.rootHandle.stat(),
+		directory.runHandle.stat(),
+		realpath(directory.rootPath),
+		realpath(directory.runPath),
+	]);
 	if (
 		piStat.isSymbolicLink() ||
 		rootStat.isSymbolicLink() ||
@@ -373,8 +382,7 @@ async function syncDirectoryHandle(directory: FileHandle): Promise<void> {
 		await directory.sync();
 	} catch (error) {
 		const code = (error as NodeJS.ErrnoException).code;
-		if (code !== "EINVAL" && code !== "ENOTSUP" && code !== "EPERM")
-			throw error;
+		if (code !== "EINVAL" && code !== "ENOTSUP" && code !== "EPERM") throw error;
 	}
 }
 
@@ -407,6 +415,7 @@ export async function prepareWorkflowLaunchCommandArtifactPath(
 		await assertLaunchArtifactReplaceable(
 			join(directory.runPath, WORKFLOW_LAUNCH_COMMAND_ARTIFACT),
 		);
+		await workflowLaunchArtifactTestHooks.onAfterPrepare?.({ runPath: directory.runPath });
 	} finally {
 		await closePhysicalWorkflowLaunchRunDirectory(directory);
 	}
@@ -617,35 +626,9 @@ export async function readWorkflowLaunchCommandArtifact(
 export function isWorkflowRunLaunchMetadata(
 	value: unknown,
 ): value is WorkflowRunLaunchMetadata {
-	if (
-		!isPlainRecordWithKeys(value, [
-			"schema",
-			"source",
-			"requestKind",
-			"routingMode",
-			"profile",
-			"task",
-			"command",
-		])
-	)
-		return false;
-	if (value.schema !== "pi-workflow-run-launch-v1") return false;
-	if (!isWorkflowLaunchSource(value.source)) return false;
-	if (
-		value.requestKind !== "named-workflow" &&
-		value.requestKind !== "direct-dynamic"
-	)
-		return false;
-	if (
-		value.routingMode !== "default-on" &&
-		value.routingMode !== "explicit-on" &&
-		value.routingMode !== "off"
-	)
-		return false;
-	if (!isWorkflowLaunchProfile(value.profile)) return false;
-	if (!isWorkflowLaunchTask(value.task)) return false;
-	if (!isWorkflowLaunchMetadataCommand(value.command)) return false;
-	return isWorkflowLaunchSemanticCombination(value);
+	return (
+		isWorkflowRunLaunchMetadataV1(value) || isWorkflowRunLaunchMetadataV2(value)
+	);
 }
 
 export function assertValidWorkflowRunLaunchCapture(
@@ -655,9 +638,8 @@ export function assertValidWorkflowRunLaunchCapture(
 		throw new Error("Invalid workflow launch metadata");
 }
 
-function isWorkflowRunLaunchCapture(
-	value: unknown,
-): value is WorkflowRunLaunchCapture {
+/** Keep the legacy shape isolated so historical v1 records stay strict/read-only. */
+function isWorkflowRunLaunchMetadataV1(value: unknown): boolean {
 	if (
 		!isPlainRecordWithKeys(value, [
 			"schema",
@@ -671,7 +653,7 @@ function isWorkflowRunLaunchCapture(
 	)
 		return false;
 	if (value.schema !== "pi-workflow-run-launch-v1") return false;
-	if (!isWorkflowLaunchSource(value.source)) return false;
+	if (!isWorkflowLaunchV1Source(value.source)) return false;
 	if (
 		value.requestKind !== "named-workflow" &&
 		value.requestKind !== "direct-dynamic"
@@ -683,24 +665,159 @@ function isWorkflowRunLaunchCapture(
 		value.routingMode !== "off"
 	)
 		return false;
-	if (!isWorkflowLaunchProfile(value.profile)) return false;
-	if (!isWorkflowLaunchTask(value.task)) return false;
 	if (
-		!isPlainRecordWithKeys(value.command, ["state", "text"]) &&
-		!isPlainRecordWithKeys(value.command, ["state", "reason"])
+		!isWorkflowLaunchProfile(value.profile) ||
+		!isWorkflowLaunchTask(value.task)
 	)
 		return false;
-	if (
-		value.command.state === "captured"
-			? typeof value.command.text !== "string"
-			: value.command.state !== "unavailable" ||
-				value.command.reason !== "not-a-command"
-	)
-		return false;
-	return isWorkflowLaunchSemanticCombination(value);
+	if (!isWorkflowLaunchMetadataCommand(value.command)) return false;
+	return isWorkflowLaunchV1SemanticCombination(value);
 }
 
-function isWorkflowLaunchSource(value: unknown): boolean {
+function isWorkflowRunLaunchMetadataV2(value: unknown): boolean {
+	if (
+		!isPlainRecordWithKeys(value, [
+			"schema",
+			"source",
+			"requestKind",
+			"routingMode",
+			"profile",
+			"task",
+			"selection",
+			"command",
+		])
+	)
+		return false;
+	if (value.schema !== "pi-workflow-run-launch-v2") return false;
+	if (
+		!isPlainRecordWithKeys(value.source, ["kind", "action"]) ||
+		value.source.kind !== "slash-command" ||
+		value.source.action !== "auto"
+	)
+		return false;
+	if (
+		value.requestKind !== "named-workflow" &&
+		value.requestKind !== "direct-dynamic"
+	)
+		return false;
+	if (value.routingMode !== "auto-confirmed") return false;
+	if (
+		!isWorkflowLaunchProfile(value.profile) ||
+		!isWorkflowLaunchTask(value.task)
+	)
+		return false;
+	if (!isWorkflowAutoSelection(value.selection)) return false;
+	const command = value.command;
+	if (!isWorkflowLaunchMetadataCommand(command)) return false;
+	if (command.state !== "captured") return false;
+	const selection = value.selection as Record<string, unknown>;
+	if (
+		selection.selected === "named-workflow" &&
+		value.requestKind !== "named-workflow"
+	)
+		return false;
+	if (
+		selection.selected === "direct-dynamic" &&
+		value.requestKind !== "direct-dynamic"
+	)
+		return false;
+	const profile = value.profile as Record<string, unknown>;
+	return value.requestKind === "direct-dynamic"
+		? profile.kind === "not-applicable"
+		: profile.kind !== "not-applicable";
+}
+
+function isWorkflowRunLaunchCapture(
+	value: unknown,
+): value is WorkflowRunLaunchCapture {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const record = value as Record<string, unknown>;
+	const command = record.command;
+	if (!isWorkflowLaunchCaptureCommand(command)) return false;
+	if (record.schema === "pi-workflow-run-launch-v1") {
+		if (
+			!isPlainRecordWithKeys(record, [
+				"schema",
+				"source",
+				"requestKind",
+				"routingMode",
+				"profile",
+				"task",
+				"command",
+			])
+		)
+			return false;
+		return isWorkflowRunLaunchMetadataV1({
+			...record,
+			command: captureCommandAsMetadata(command),
+		});
+	}
+	if (record.schema === "pi-workflow-run-launch-v2") {
+		if (
+			!isPlainRecordWithKeys(record, [
+				"schema",
+				"source",
+				"requestKind",
+				"routingMode",
+				"profile",
+				"task",
+				"selection",
+				"command",
+			])
+		)
+			return false;
+		if (
+			command.state !== "captured" ||
+			!isWorkflowAutoSlashCommandText(command.text)
+		)
+			return false;
+		return isWorkflowRunLaunchMetadataV2({
+			...record,
+			command: captureCommandAsMetadata(command),
+		});
+	}
+	return false;
+}
+
+/* Capture validation needs semantic fields but must not persist/reveal the raw command. */
+function captureCommandAsMetadata(
+	command: Record<string, unknown>,
+): Record<string, unknown> {
+	if (command.state === "captured") {
+		const text = command.text;
+		return {
+			state: "captured",
+			artifact: WORKFLOW_LAUNCH_COMMAND_ARTIFACT,
+			encoding: "utf-8",
+			bytes: typeof text === "string" ? Buffer.byteLength(text, "utf8") : -1,
+			sha256: "0".repeat(64),
+			fidelity: "pi-extension-command-v1",
+			sensitivity: "user-input",
+			disclosure: "explicit-only",
+		};
+	}
+	return { state: "unavailable", reason: "not-a-command" };
+}
+
+function isWorkflowAutoSlashCommandText(value: string): boolean {
+	return /^\/workflow\s+auto(?:\s|$)/i.test(value);
+}
+
+function isWorkflowLaunchCaptureCommand(
+	value: unknown,
+): value is
+	| { state: "captured"; text: string }
+	| { state: "unavailable"; reason: "not-a-command" } {
+	if (isPlainRecordWithKeys(value, ["state", "text"]))
+		return value.state === "captured" && typeof value.text === "string";
+	return (
+		isPlainRecordWithKeys(value, ["state", "reason"]) &&
+		value.state === "unavailable" &&
+		value.reason === "not-a-command"
+	);
+}
+
+function isWorkflowLaunchV1Source(value: unknown): boolean {
 	if (isPlainRecordWithKeys(value, ["kind", "action"]))
 		return (
 			value.kind === "slash-command" &&
@@ -733,7 +850,81 @@ function isWorkflowLaunchTask(value: unknown): boolean {
 	);
 }
 
-function isWorkflowLaunchMetadataCommand(value: unknown): boolean {
+function isWorkflowAutoSelection(value: unknown): boolean {
+	if (
+		!isPlainRecordWithKeys(value, [
+			"recommendation",
+			"selected",
+			"candidateId",
+			"candidateIdentitySha256",
+			"taskSha256",
+			"confirmed",
+			"effectiveRuntime",
+		])
+	)
+		return false;
+	if (
+		value.recommendation !== null &&
+		value.recommendation !== "direct" &&
+		value.recommendation !== "named-workflow" &&
+		value.recommendation !== "direct-dynamic"
+	)
+		return false;
+	if (value.selected !== "named-workflow" && value.selected !== "direct-dynamic")
+		return false;
+	// A non-null route is an accepted recommendation, not a historical
+	// alternative. Manual selection of any other local route is represented by
+	// null, so persisted provenance cannot imply a route the user did not take.
+	if (value.recommendation !== null && value.recommendation !== value.selected)
+		return false;
+	if (
+		typeof value.candidateId !== "string" ||
+		!/^[a-f0-9]{64}$/.test(value.candidateId)
+	)
+		return false;
+	if (
+		typeof value.candidateIdentitySha256 !== "string" ||
+		!/^[a-f0-9]{64}$/.test(value.candidateIdentitySha256)
+	)
+		return false;
+	if (
+		typeof value.taskSha256 !== "string" ||
+		!/^[a-f0-9]{64}$/.test(value.taskSha256)
+	)
+		return false;
+	if (value.confirmed !== true) return false;
+	if (
+		!value.effectiveRuntime ||
+		typeof value.effectiveRuntime !== "object" ||
+		Array.isArray(value.effectiveRuntime)
+	)
+		return false;
+	const runtime = value.effectiveRuntime as Record<string, unknown>;
+	if (
+		!Object.keys(runtime).every((key) => key === "model" || key === "thinking")
+	)
+		return false;
+	return (
+		(runtime.model === undefined || typeof runtime.model === "string") &&
+		(runtime.thinking === undefined ||
+			["off", "minimal", "low", "medium", "high", "xhigh"].includes(
+				runtime.thinking as string,
+			))
+	);
+}
+
+function isWorkflowLaunchMetadataCommand(value: unknown): value is
+	| { state: "unavailable"; reason: "not-a-command" }
+	| {
+			state: "captured";
+			artifact: typeof WORKFLOW_LAUNCH_COMMAND_ARTIFACT;
+			encoding: "utf-8";
+			bytes: number;
+			sha256: string;
+			fidelity: "pi-extension-command-v1";
+			sensitivity: "user-input";
+			disclosure: "explicit-only";
+	  } {
 	if (isPlainRecordWithKeys(value, ["state", "reason"]))
 		return value.state === "unavailable" && value.reason === "not-a-command";
 	return (
@@ -759,7 +950,7 @@ function isWorkflowLaunchMetadataCommand(value: unknown): boolean {
 	);
 }
 
-function isWorkflowLaunchSemanticCombination(
+function isWorkflowLaunchV1SemanticCombination(
 	value: Record<string, unknown>,
 ): boolean {
 	const source = value.source as Record<string, unknown>;
@@ -972,7 +1163,12 @@ export async function requestWorkflowStop(
 		requestedAt: nowIso(),
 		reason: "user",
 	};
-	await writeJsonAtomic(workflowStopIntentPath(cwd, runId), intent);
+	// Stop intent is an out-of-band control request, not a supervisor-owned run
+	// commit. An abort listener may inherit a lease that ends before this write;
+	// do not bind the independent request to that incidental async context.
+	const file = workflowStopIntentPath(cwd, runId);
+	await runLeaseContext.exit(() => writeJsonAtomic(file, intent));
+	await runLeaseTestHooks.onAfterStopIntentWrite?.({ file });
 	return intent;
 }
 
@@ -1065,26 +1261,47 @@ export async function acquireRunFileLease(
 	assertSafeRunId(runId);
 	if (!/^[a-z0-9-]+$/.test(name))
 		throw new Error(`Unsafe run-file lease name: ${name}`);
-	return acquireFileLeaseInDirectory(cwd, runId, name, workflowRunDir(cwd, runId), waitMs, acquireSignal);
+	return acquireFileLeaseInDirectory(
+		cwd,
+		runId,
+		name,
+		workflowRunDir(cwd, runId),
+		waitMs,
+		acquireSignal,
+	);
 }
 
 /** Serialize retention topology plans with first run-record publication.
  * Bounded acquisition; never used by read-only prune previews. */
 export async function acquireWorkflowTopologyLease(
-	cwd: string, waitMs = INDEX_LOCK_WAIT_MS, acquireSignal?: AbortSignal,
+	cwd: string,
+	waitMs = INDEX_LOCK_WAIT_MS,
+	acquireSignal?: AbortSignal,
 ): Promise<RunFileLease | undefined> {
 	const root = workflowsRoot(cwd);
 	await ensureDir(root);
 	for (const path of [resolve(root, ".."), root]) {
 		const info = await lstat(path);
-		if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("unsafe workflow topology root");
+		if (!info.isDirectory() || info.isSymbolicLink())
+			throw new Error("unsafe workflow topology root");
 	}
-	return acquireFileLeaseInDirectory(cwd, "topology", "retention", root, waitMs, acquireSignal);
+	return acquireFileLeaseInDirectory(
+		cwd,
+		"topology",
+		"retention",
+		root,
+		waitMs,
+		acquireSignal,
+	);
 }
 
 async function acquireFileLeaseInDirectory(
-	cwd: string, runId: string, name: string, dir: string,
-	waitMs: number, acquireSignal?: AbortSignal,
+	cwd: string,
+	runId: string,
+	name: string,
+	dir: string,
+	waitMs: number,
+	acquireSignal?: AbortSignal,
 ): Promise<RunFileLease | undefined> {
 	await ensureDir(dir);
 	const lockFile = join(dir, `${name}.lock`);
@@ -1261,15 +1478,20 @@ export async function withRunLease<T>(
 			const taskStatusCounts =
 				progress?.taskStatusCounts ?? carriedProgress.taskStatusCounts;
 			await assertLockOwner(lockFile, ownerId);
-			await writeJsonAtomic(supervisorFile, {
-				schemaVersion: 1,
-				ownerId,
-				pid: process.pid,
-				updatedAt: timestamp,
-				lockFile: toProjectPath(cwd, lockFile),
-				...(lastTaskTransitionAt ? { lastTaskTransitionAt } : {}),
-				...(taskStatusCounts ? { taskStatusCounts } : {}),
-			}, abortController.signal, () => assertLockOwner(lockFile, ownerId));
+			await writeJsonAtomic(
+				supervisorFile,
+				{
+					schemaVersion: 1,
+					ownerId,
+					pid: process.pid,
+					updatedAt: timestamp,
+					lockFile: toProjectPath(cwd, lockFile),
+					...(lastTaskTransitionAt ? { lastTaskTransitionAt } : {}),
+					...(taskStatusCounts ? { taskStatusCounts } : {}),
+				},
+				abortController.signal,
+				() => assertLockOwner(lockFile, ownerId),
+			);
 		};
 		const runHeartbeat = (): Promise<void> => {
 			const previous = heartbeatInFlight;
@@ -1362,10 +1584,7 @@ async function acquireLock(
 		try {
 			const handle = await open(lockFile, "wx");
 			try {
-				await handle.writeFile(
-					`${ownerId}\n${process.pid}\n${nowIso()}\n`,
-					"utf8",
-				);
+				await handle.writeFile(`${ownerId}\n${process.pid}\n${nowIso()}\n`, "utf8");
 			} finally {
 				await handle.close();
 			}
@@ -1479,10 +1698,7 @@ async function lockReclaimDecision(
 		snapshot.pid !== undefined &&
 		isProcessAlive(snapshot.pid) &&
 		!absoluteStale &&
-		!(await staleSupervisorLockOwnerWasNeverPublished(
-			lockFile,
-			snapshot.ownerId,
-		))
+		!(await staleSupervisorLockOwnerWasNeverPublished(lockFile, snapshot.ownerId))
 	)
 		return { reclaimable: false, durablyAbandoned: false };
 	return { reclaimable: true, durablyAbandoned: false };
@@ -1755,9 +1971,7 @@ export async function createRunRecord(
 		taskSummary: emptySummary(),
 		cwd: compiled.cwd,
 		backend: compiled.backend,
-		...(compiled.failurePolicy
-			? { failurePolicy: compiled.failurePolicy }
-			: {}),
+		...(compiled.failurePolicy ? { failurePolicy: compiled.failurePolicy } : {}),
 		...(options.parentRunId ? { parentRunId: options.parentRunId } : {}),
 		...(options.rootRunId ? { rootRunId: options.rootRunId } : {}),
 		...(hasDynamicController
@@ -1833,16 +2047,25 @@ export async function writeRunRecord(
 	Object.assign(run, derived);
 	if (isTerminalWorkflowStatus(run.status)) run.usage = runUsageRollup(run);
 	if (firstWrite) {
-		const topology = await acquireWorkflowTopologyLease(cwd, INDEX_LOCK_WAIT_MS, abortSignal);
+		const topology = await acquireWorkflowTopologyLease(
+			cwd,
+			INDEX_LOCK_WAIT_MS,
+			abortSignal,
+		);
 		if (!topology) throw new Error("workflow topology lease unavailable");
 		try {
 			// Another first writer may have published while this one waited.
 			const published = await readJson<WorkflowRunRecord>(runFile);
-			if (published && (published.parentRunId !== run.parentRunId || published.rootRunId !== run.rootRunId))
+			if (
+				published &&
+				(published.parentRunId !== run.parentRunId ||
+					published.rootRunId !== run.rootRunId)
+			)
 				throw new Error("workflow ancestry is immutable after publication");
 			if (run.parentRunId) {
 				const parent = await readRunRecord(cwd, run.parentRunId);
-				if (parent.runId !== run.parentRunId) throw new Error("workflow parent identity mismatch");
+				if (parent.runId !== run.parentRunId)
+					throw new Error("workflow parent identity mismatch");
 			}
 			await topology.assertOwner();
 			await assertActiveRunLease(cwd, run.runId, abortSignal);
@@ -1853,7 +2076,10 @@ export async function writeRunRecord(
 	} else {
 		// A published reference cannot move outside the topology protocol.
 		const previous = await readRunRecord(cwd, run.runId);
-		if (previous.parentRunId !== run.parentRunId || previous.rootRunId !== run.rootRunId)
+		if (
+			previous.parentRunId !== run.parentRunId ||
+			previous.rootRunId !== run.rootRunId
+		)
 			throw new Error("workflow ancestry is immutable after publication");
 		await writeJsonAtomic(runFile, run, abortSignal);
 	}
@@ -1954,7 +2180,10 @@ export async function writeCompiledRunArtifact(
 	);
 }
 
-export type StaticArtifactLinkTestHook = (source: string, target: string) => void | Promise<void>;
+export type StaticArtifactLinkTestHook = (
+	source: string,
+	target: string,
+) => void | Promise<void>;
 
 let staticArtifactLinkForTests: StaticArtifactLinkTestHook | undefined;
 
@@ -1976,7 +2205,11 @@ export async function writeStaticRunArtifacts(
 	await writeJsonAtomic(runSpec, originalSpec);
 	await writeCompiledRunArtifact(cwd, run.runId, compiled);
 	await copyWorkflowBundleArtifacts(cwd, run.specPath, bundleDir, originalSpec);
-	await linkIdenticalStaticArtifact(join(bundleDir, "spec.json"), runSpec, originalSpec);
+	await linkIdenticalStaticArtifact(
+		join(bundleDir, "spec.json"),
+		runSpec,
+		originalSpec,
+	);
 	rewriteCompiledBundlePathsInValue(run, bundleDir);
 	rewriteCompiledBundlePathsInValue(compiled, bundleDir);
 }
@@ -1987,8 +2220,15 @@ async function linkIdenticalStaticArtifact(
 	fallback: unknown,
 ): Promise<void> {
 	try {
-		const [sourceStat, targetStat] = await Promise.all([stat(source), stat(target)]);
-		if (!sourceStat.isFile() || !targetStat.isFile() || sourceStat.size !== targetStat.size)
+		const [sourceStat, targetStat] = await Promise.all([
+			stat(source),
+			stat(target),
+		]);
+		if (
+			!sourceStat.isFile() ||
+			!targetStat.isFile() ||
+			sourceStat.size !== targetStat.size
+		)
 			return;
 		const [sourceBytes, targetBytes] = await Promise.all([
 			readFile(source),
@@ -2018,8 +2258,7 @@ function rewriteCompiledBundlePathsInValue(
 ): void {
 	if (!value || typeof value !== "object") return;
 	if (Array.isArray(value)) {
-		for (const item of value)
-			rewriteCompiledBundlePathsInValue(item, bundleDir);
+		for (const item of value) rewriteCompiledBundlePathsInValue(item, bundleDir);
 		return;
 	}
 	const record = value as Record<string, any>;
@@ -2038,16 +2277,10 @@ function rewriteCompiledBundlePathsInValue(
 		);
 	}
 	if (record.kind === "dynamic" && record.dynamic?.uses) {
-		record.agentPath = join(
-			bundleDir,
-			stripBundleRefPrefix(record.dynamic.uses),
-		);
+		record.agentPath = join(bundleDir, stripBundleRefPrefix(record.dynamic.uses));
 	}
 	if (record.kind === "support" && record.support?.uses) {
-		record.agentPath = join(
-			bundleDir,
-			stripBundleRefPrefix(record.support.uses),
-		);
+		record.agentPath = join(bundleDir, stripBundleRefPrefix(record.support.uses));
 	}
 	if (record.dynamic) {
 		const dynamic = record.dynamic;
@@ -2073,10 +2306,7 @@ function rewriteCompiledBundlePathsInValue(
 		}
 		for (const workflow of Object.values(dynamic.workflows ?? {}) as any[]) {
 			if (workflow.uses) {
-				workflow.usesPath = join(
-					bundleDir,
-					stripBundleRefPrefix(workflow.uses),
-				);
+				workflow.usesPath = join(bundleDir, stripBundleRefPrefix(workflow.uses));
 			}
 		}
 	}
@@ -2087,6 +2317,41 @@ function rewriteCompiledBundlePathsInValue(
 
 function stripBundleRefPrefix(ref: string): string {
 	return ref.startsWith("./") ? ref.slice(2) : ref;
+}
+
+/**
+ * Enumerate exactly the source files the normal bundle copier will freeze.
+ * Auto selection uses this before confirmation so helper/import/schema changes
+ * cannot be confused with the selected candidate at launch time.
+ */
+export async function collectWorkflowBundleSourceFiles(
+	cwd: string,
+	specPath: string,
+	spec: unknown,
+): Promise<Array<{ relativePath: string; sourcePath: string }>> {
+	const sourceSpecPath = isAbsolute(specPath)
+		? specPath
+		: resolve(cwd, specPath);
+	const sourceRoot = await realpath(dirname(sourceSpecPath));
+	const collection = collectWorkflowBundleRefs(spec);
+	collection.refs.add(basename(sourceSpecPath));
+	await collectNestedWorkflowBundleRefs(sourceRoot, collection);
+	const files: Array<{ relativePath: string; sourcePath: string }> = [];
+	for (const relativePath of [...collection.refs].sort()) {
+		const normalized = normalizeBundleRelativeRef(relativePath);
+		if (!normalized)
+			throw new Error(
+				`workflow bundle ref escapes workflow directory: ${relativePath}`,
+			);
+		const sourcePath = await realpath(resolve(sourceRoot, normalized));
+		const escaped = relative(sourceRoot, sourcePath);
+		if (escaped === ".." || escaped.startsWith(`..${sep}`) || isAbsolute(escaped))
+			throw new Error(
+				`workflow bundle ref escapes workflow directory: ${relativePath}`,
+			);
+		files.push({ relativePath: normalized, sourcePath });
+	}
+	return files;
 }
 
 async function copyWorkflowBundleArtifacts(
@@ -2190,8 +2455,7 @@ async function collectNestedWorkflowBundleRefs(
 			}
 		}
 		for (const ref of [...collection.refs]) {
-			if (seenCode.has(ref) || !/\.(mjs|cjs|js|mts|cts|ts)$/.test(ref))
-				continue;
+			if (seenCode.has(ref) || !/\.(mjs|cjs|js|mts|cts|ts)$/.test(ref)) continue;
 			seenCode.add(ref);
 			const source = await readBundleText(sourceRoot, ref);
 			if (source === undefined) continue;
@@ -2354,11 +2618,7 @@ function visitWorkflowBundleRefs(
 			!Array.isArray(dynamic.workflows)
 		) {
 			for (const workflow of Object.values(dynamic.workflows)) {
-				if (
-					!workflow ||
-					typeof workflow !== "object" ||
-					Array.isArray(workflow)
-				)
+				if (!workflow || typeof workflow !== "object" || Array.isArray(workflow))
 					continue;
 				const workflowRecord = workflow as Record<string, unknown>;
 				if (typeof workflowRecord.uses === "string")
@@ -2409,8 +2669,7 @@ function visitWorkflowBundleRefs(
 		visitWorkflowBundleRefs(record.onExhausted, collection);
 	}
 	if (Array.isArray(record.stages)) {
-		for (const stage of record.stages)
-			visitWorkflowBundleRefs(stage, collection);
+		for (const stage of record.stages) visitWorkflowBundleRefs(stage, collection);
 	}
 	if (record.artifactGraph && typeof record.artifactGraph === "object") {
 		visitWorkflowBundleRefs(record.artifactGraph, collection);
@@ -2430,8 +2689,7 @@ function visitJsonSchemaBundleRefs(value: unknown, refs: Set<string>): void {
 		return;
 	}
 	const record = value as Record<string, unknown>;
-	if (typeof record.$ref === "string")
-		addJsonSchemaBundleRef(refs, record.$ref);
+	if (typeof record.$ref === "string") addJsonSchemaBundleRef(refs, record.$ref);
 	for (const item of Object.values(record))
 		visitJsonSchemaBundleRefs(item, refs);
 }
@@ -2590,10 +2848,7 @@ function stripJavaScriptComments(source: string): string {
 		if (char === "/" && next === "*") {
 			result += "  ";
 			i += 2;
-			while (
-				i < source.length &&
-				!(source[i] === "*" && source[i + 1] === "/")
-			) {
+			while (i < source.length && !(source[i] === "*" && source[i + 1] === "/")) {
 				result += source[i] === "\n" ? "\n" : " ";
 				i += 1;
 			}
@@ -2852,10 +3107,7 @@ function isRunRecordLike(value: unknown): value is WorkflowRunRecord {
 				typeof task === "object" &&
 				typeof (task as WorkflowTaskRunRecord).status === "string" &&
 				TASK_STATUSES.includes(
-					(task as WorkflowTaskRunRecord).status as keyof Omit<
-						TaskSummary,
-						"total"
-					>,
+					(task as WorkflowTaskRunRecord).status as keyof Omit<TaskSummary, "total">,
 				),
 		),
 	);
@@ -3071,8 +3323,7 @@ export function finalStageTasks(
 	);
 	const leaves = tasks.filter(
 		(task) =>
-			!dependedOn.has(task.specId) &&
-			!foreachPlaceholderSpecIds.has(task.specId),
+			!dependedOn.has(task.specId) && !foreachPlaceholderSpecIds.has(task.specId),
 	);
 	const regularLeaves = leaves.filter(
 		(task) => task.kind !== "support" && task.kind !== "dynamic",
@@ -3279,9 +3530,7 @@ function buildTaskResumeEvent(
 		at: nowIso(),
 		fromStatus: task.status,
 		fromStatusDetail: task.statusDetail,
-		...(task.lastMessage === undefined
-			? {}
-			: { lastMessage: task.lastMessage }),
+		...(task.lastMessage === undefined ? {} : { lastMessage: task.lastMessage }),
 		...(task.outputRetry?.attempts === undefined
 			? {}
 			: { outputRetryAttempts: task.outputRetry.attempts }),
@@ -3507,7 +3756,10 @@ export async function isWorkflowRunLeaseLive(
 	try {
 		const lock = await readLockSnapshot(lockFile);
 		if (lock) return !(await lockReclaimDecision(lockFile, lock)).reclaimable;
-		for (const file of [join(dir, "supervisor.json"), supervisorLeasePath(cwd, runId)]) {
+		for (const file of [
+			join(dir, "supervisor.json"),
+			supervisorLeasePath(cwd, runId),
+		]) {
 			try {
 				const record = JSON.parse(await readFile(file, "utf8")) as {
 					pid?: unknown;
@@ -3516,9 +3768,11 @@ export async function isWorkflowRunLeaseLive(
 				};
 				const heartbeatAt = record.heartbeatAt ?? record.updatedAt;
 				const pid = typeof record.pid === "number" ? record.pid : undefined;
-				const timestamp = typeof heartbeatAt === "string" ? Date.parse(heartbeatAt) : NaN;
+				const timestamp =
+					typeof heartbeatAt === "string" ? Date.parse(heartbeatAt) : NaN;
 				if (!Number.isFinite(timestamp) || pid === undefined) return true;
-				if (Date.now() - timestamp <= LEASE_STALE_MS && isProcessAlive(pid)) return true;
+				if (Date.now() - timestamp <= LEASE_STALE_MS && isProcessAlive(pid))
+					return true;
 			} catch (error) {
 				if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
 				return true;

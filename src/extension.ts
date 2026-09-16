@@ -47,6 +47,7 @@ import {
 } from "./workflow-profile-ui.js";
 import {
 	createNativeWorkflowProfileUi,
+	selectWorkflowAutoChoice,
 	selectWorkflowProfileTarget,
 } from "./workflow-profile-tui.js";
 import { resolveSavedWorkflowExecutionProfile } from "./workflow-profile-settings.js";
@@ -83,19 +84,28 @@ import {
 	type ThinkingLevel,
 	type WorkflowExecutionProfileSelection,
 	type WorkflowRunLaunchCapture,
-	type WorkflowRunRouting,
 	WorkflowValidationError,
 } from "./types.js";
 import {
-	executeResolvedRoutedWorkflowRequest,
-	resolveRoutedDirectAnswer,
-	resolveWorkflowRouting,
-	WORKFLOW_ROUTING_LOG_RELATIVE_PATH,
+	assertWorkflowAutoResolvedCandidateSafety,
+	formatWorkflowAutoRecommendation,
+	recommendWorkflowAuto,
+	workflowAutoDirectDraft,
+	type WorkflowAutoCandidate,
 } from "./workflow-router.js";
+import {
+	captureWorkflowAutoLaunchBinding,
+	workflowAutoLaunchBindingSettings,
+} from "./workflow-auto-binding.js";
+import { applyWorkflowExecutionProfile } from "./execution-profile.js";
 import {
 	toWorkflowModelInfo,
 	type WorkflowRuntimeDefaults,
 } from "./workflow-runtime.js";
+import {
+	DIRECT_DYNAMIC_RUNTIME_VERSION,
+	ensureDirectDynamicRuntimeBundle,
+} from "./dynamic-runtime-bundle.js";
 import {
 	clearActiveWorkflowUi,
 	renderActiveWorkflowUi,
@@ -148,9 +158,21 @@ const WORKFLOW_LIST_TOOL_PARAMETERS = {
 	type: "object",
 	additionalProperties: false,
 	properties: {
-		query: { type: "string", description: "Optional name or alias substring filter." },
-		offset: { type: "integer", minimum: 0, description: "Zero-based continuation offset (default 0)." },
-		limit: { type: "integer", minimum: 1, maximum: 20, description: "Page size (default/max 20)." },
+		query: {
+			type: "string",
+			description: "Optional name or alias substring filter.",
+		},
+		offset: {
+			type: "integer",
+			minimum: 0,
+			description: "Zero-based continuation offset (default 0).",
+		},
+		limit: {
+			type: "integer",
+			minimum: 1,
+			maximum: 20,
+			description: "Page size (default/max 20).",
+		},
 	},
 } as const;
 
@@ -265,7 +287,10 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 			() => workflowCompletionCache,
 		);
 		if (uiSessionSignal.aborted) return;
-		await resumeParentUsageTracking(ctx.cwd, workflowFeedbackSessionId(ctx) ?? "").catch(() => notifyParentUsageDeferred(ctx));
+		await resumeParentUsageTracking(
+			ctx.cwd,
+			workflowFeedbackSessionId(ctx) ?? "",
+		).catch(() => notifyParentUsageDeferred(ctx));
 		if (uiSessionSignal.aborted) return;
 		await resumeSupervisors(ctx.cwd, {
 			dynamicUi: dynamicUiFromContext(ctx),
@@ -291,14 +316,20 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 		clearWorkflowFeedbackTimersForCwd(ctx.cwd);
 		clearActiveWorkflowUiTimerForCwd(ctx.cwd);
 		clearActiveWorkflowUi(ctx);
-		await flushParentUsageTracking(ctx.cwd, workflowFeedbackSessionId(ctx) ?? "", true).catch(() => notifyParentUsageDeferred(ctx));
+		await flushParentUsageTracking(
+			ctx.cwd,
+			workflowFeedbackSessionId(ctx) ?? "",
+			true,
+		).catch(() => notifyParentUsageDeferred(ctx));
 	});
 
 	pi.on("message_end", async (event, ctx) => {
 		if (!isWorkflowSupervisorEnabled()) return;
-		await recordParentSessionUsage(ctx.cwd, event.message, workflowFeedbackSessionId(ctx) ?? "").catch(
-			() => notifyParentUsageDeferred(ctx),
-		);
+		await recordParentSessionUsage(
+			ctx.cwd,
+			event.message,
+			workflowFeedbackSessionId(ctx) ?? "",
+		).catch(() => notifyParentUsageDeferred(ctx));
 	});
 
 	registerWorkflowNaturalLanguageTools(pi);
@@ -307,9 +338,7 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 	pi.registerCommand(WORKFLOW_COMMAND, {
 		description: "Open the workflow board and inspect runs",
 		getArgumentCompletions(prefix) {
-			return (
-				workflowArgumentCompletions(prefix, workflowCompletionCache) ?? null
-			);
+			return workflowArgumentCompletions(prefix, workflowCompletionCache) ?? null;
 		},
 		handler: async (args, ctx) => {
 			await handleWorkflowCommand(args, ctx, pi);
@@ -318,7 +347,8 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 }
 
 function notifyParentUsageDeferred(ctx: ExtensionContext): void {
-	const message = "Parent usage accounting deferred after a write failure; pending totals will retry on the next message or flush. A sanitized diagnostic is saved with recovery.";
+	const message =
+		"Parent usage accounting deferred after a write failure; pending totals will retry on the next message or flush. A sanitized diagnostic is saved with recovery.";
 	if (ctx.hasUI) ctx.ui.notify(message, "warning");
 	else process.stderr.write(`${message}\n`);
 }
@@ -350,10 +380,23 @@ export function registerWorkflowNaturalLanguageTools(
 		) {
 			assertWorkflowToolAllowedForRole();
 			const request = parseWorkflowListToolParams(params);
-			const catalog = (await listWorkflows(ctx.cwd)).filter(workflow => !request.query ||
-				[workflow.name, ...workflow.aliases].some(name => name.toLowerCase().includes(request.query!)));
-			const workflows = await listWorkflowSummaries(ctx.cwd, catalog.slice(request.offset, request.offset + request.limit));
-			return boundedWorkflowListPage(workflows, catalog.length, request.offset, request.query);
+			const catalog = (await listWorkflows(ctx.cwd)).filter(
+				(workflow) =>
+					!request.query ||
+					[workflow.name, ...workflow.aliases].some((name) =>
+						name.toLowerCase().includes(request.query!),
+					),
+			);
+			const workflows = await listWorkflowSummaries(
+				ctx.cwd,
+				catalog.slice(request.offset, request.offset + request.limit),
+			);
+			return boundedWorkflowListPage(
+				workflows,
+				catalog.length,
+				request.offset,
+				request.query,
+			);
 		},
 	} as any);
 
@@ -605,11 +648,7 @@ async function workflowTerminalToolResult(
 		let preview = presentation?.preview;
 		waitSignal.throwIfAborted();
 		if (!deliveryAlreadyCompleted) {
-			delivery = await claimWorkflowFeedbackDelivery(
-				ctx,
-				run,
-				presentationLease,
-			);
+			delivery = await claimWorkflowFeedbackDelivery(ctx, run, presentationLease);
 			if (!delivery) {
 				deliveryAlreadyCompleted = await workflowFeedbackDeliveryRecorded(
 					ctx,
@@ -648,10 +687,7 @@ async function workflowTerminalToolResult(
 			!deliveryAlreadyCompleted &&
 			preview &&
 			isResultOnlyWorkflowSuccess(terminal.semanticStatus, preview)
-				? formatWorkflowResultPresentation(
-						preview,
-						presentation?.artifacts ?? [],
-					)
+				? formatWorkflowResultPresentation(preview, presentation?.artifacts ?? [])
 				: undefined;
 		const text =
 			resultOnlySummary ??
@@ -729,8 +765,7 @@ function spawnDetachedSupervisor(
 	try {
 		const child = spawn(process.execPath, [cliPath, "supervise", runId], {
 			cwd,
-			detached:
-				process.env.PI_WORKFLOW_CONTAIN_DETACHED_SUPERVISOR !== "1",
+			detached: process.env.PI_WORKFLOW_CONTAIN_DETACHED_SUPERVISOR !== "1",
 			stdio: ["ignore", fd, fd],
 		});
 		child.unref();
@@ -805,8 +840,7 @@ function watchWorkflowFeedback(
 				clear();
 				return;
 			}
-			if (run.status === "running" || Date.now() < nextDeliveryAttemptAt)
-				return;
+			if (run.status === "running" || Date.now() < nextDeliveryAttemptAt) return;
 
 			try {
 				const outcome = await deliverWorkflowFeedback(ctx, api, run, {
@@ -1194,16 +1228,15 @@ export async function deliverMissedWorkflowFeedback(
 	if (!canDeliverWorkflowFeedback(ctx) || signal?.aborted) return;
 	const index = await readFreshIndex(ctx.cwd);
 	if (signal?.aborted) return;
-	const recent = (index?.runs ?? [])
-		.filter((run) => {
-			const updatedAtMs = Date.parse(run.updatedAt ?? "");
-			return (
-				!run.parentRunId &&
-				Number.isFinite(updatedAtMs) &&
-				Date.now() - updatedAtMs <= UNFINISHED_RUN_NOTICE_MAX_AGE_MS &&
-				["completed", "failed", "blocked", "interrupted"].includes(run.status)
-			);
-		});
+	const recent = (index?.runs ?? []).filter((run) => {
+		const updatedAtMs = Date.parse(run.updatedAt ?? "");
+		return (
+			!run.parentRunId &&
+			Number.isFinite(updatedAtMs) &&
+			Date.now() - updatedAtMs <= UNFINISHED_RUN_NOTICE_MAX_AGE_MS &&
+			["completed", "failed", "blocked", "interrupted"].includes(run.status)
+		);
+	});
 	let delivered = 0;
 	for (const summary of recent) {
 		if (signal?.aborted) return;
@@ -1224,12 +1257,7 @@ export async function deliverMissedWorkflowFeedback(
 }
 
 export interface WorkflowFeedbackDeliveryOutcome {
-	status:
-		| "delivered"
-		| "already-delivered"
-		| "not-owner"
-		| "busy"
-		| "cancelled";
+	status: "delivered" | "already-delivered" | "not-owner" | "busy" | "cancelled";
 }
 
 export async function deliverWorkflowFeedback(
@@ -1257,11 +1285,7 @@ export async function deliverWorkflowFeedback(
 	let delivery: Awaited<ReturnType<typeof claimWorkflowFeedbackDelivery>>;
 	try {
 		if (deliverySignal.aborted) return { status: "cancelled" };
-		delivery = await claimWorkflowFeedbackDelivery(
-			ctx,
-			run,
-			presentationLease,
-		);
+		delivery = await claimWorkflowFeedbackDelivery(ctx, run, presentationLease);
 		if (!delivery) return { status: "already-delivered" };
 		if (deliverySignal.aborted) {
 			await delivery.release();
@@ -1376,10 +1400,7 @@ type WorkflowFeedbackDeliveryMarker =
 			runId: string;
 			sessionId: string;
 			legacyDelivered?: Record<string, string>;
-			deliveredEpochs: Record<
-				string,
-				{ status: string; deliveredAt: string }
-			>;
+			deliveredEpochs: Record<string, { status: string; deliveredAt: string }>;
 	  };
 
 interface WorkflowFeedbackDeliveryReceipt {
@@ -1573,11 +1594,7 @@ function parseWorkflowFeedbackDeliveryMarker(
 			throw permanentWorkflowFeedbackError(
 				`workflow ${runId} has an invalid v2 delivery status`,
 			);
-		assertWorkflowFeedbackTimestamp(
-			rawEntry.deliveredAt,
-			runId,
-			"v2 delivery",
-		);
+		assertWorkflowFeedbackTimestamp(rawEntry.deliveredAt, runId, "v2 delivery");
 		deliveredEpochs[epoch] = {
 			status: rawEntry.status,
 			deliveredAt: rawEntry.deliveredAt,
@@ -1805,10 +1822,7 @@ async function workflowFeedbackDeliveryRecorded(
 	run: WorkflowFeedbackRun,
 	presentationLease: RunFileLease,
 ): Promise<boolean> {
-	const sessionId = await assertWorkflowFeedbackBelongsToSession(
-		ctx,
-		run.runId,
-	);
+	const sessionId = await assertWorkflowFeedbackBelongsToSession(ctx, run.runId);
 	const epoch = workflowFeedbackTerminalEpoch(run);
 	const receiptFile = workflowFeedbackDeliveryReceiptPath(
 		ctx.cwd,
@@ -1816,12 +1830,7 @@ async function workflowFeedbackDeliveryRecorded(
 		epoch,
 	);
 	if (
-		await readWorkflowFeedbackDeliveryReceipt(
-			receiptFile,
-			run,
-			sessionId,
-			epoch,
-		)
+		await readWorkflowFeedbackDeliveryReceipt(receiptFile, run, sessionId, epoch)
 	)
 		return true;
 	// feedback-delivery.json is migration input only. Once the immutable
@@ -1858,10 +1867,7 @@ async function claimWorkflowFeedbackDelivery(
 > {
 	if (await workflowFeedbackDeliveryRecorded(ctx, run, presentationLease))
 		return undefined;
-	const sessionId = await assertWorkflowFeedbackBelongsToSession(
-		ctx,
-		run.runId,
-	);
+	const sessionId = await assertWorkflowFeedbackBelongsToSession(ctx, run.runId);
 	const epoch = workflowFeedbackTerminalEpoch(run);
 	const receiptFile = workflowFeedbackDeliveryReceiptPath(
 		ctx.cwd,
@@ -1894,8 +1900,9 @@ function isResultOnlyWorkflowSuccess(
 	semanticStatus: string,
 	preview: string | undefined,
 ): boolean {
-	return RESULT_ONLY_WORKFLOW_STATUSES.has(semanticStatus) &&
-		Boolean(preview?.trim());
+	return (
+		RESULT_ONLY_WORKFLOW_STATUSES.has(semanticStatus) && Boolean(preview?.trim())
+	);
 }
 
 function isDirectDynamicSynthesisTask(
@@ -2120,10 +2127,19 @@ async function readWorkflowResultPresentation(
 		}
 		return { preview: presentedPreview, artifacts };
 	};
-	const completionSummaryMarkdown = stringValue(
-		control?.completionSummaryMarkdown,
-	);
-	if (completionSummaryMarkdown)
+	// This is the authoritative terminal-summary field. Unlike fallback prose,
+	// its Markdown is an exact result payload: do not trim, normalize, or
+	// preview-truncate it before workflow_wait/terminal presentation.
+	const completionSummaryMarkdown =
+		typeof control?.completionSummaryMarkdown === "string"
+			? control.completionSummaryMarkdown
+			: undefined;
+	// Validate nonblankness separately from the payload returned above: trim is
+	// only a predicate here, never a transformation of authoritative Markdown.
+	if (
+		completionSummaryMarkdown !== undefined &&
+		completionSummaryMarkdown.trim() !== ""
+	)
 		return presentation(completionSummaryMarkdown, true);
 
 	if (isDirectDynamicSynthesisTask(run, task)) {
@@ -2220,17 +2236,39 @@ interface WorkflowWaitToolRequest {
 	timeoutMs?: number;
 }
 
-function parseWorkflowListToolParams(params: unknown): { offset: number; limit: number; query?: string } {
+function parseWorkflowListToolParams(params: unknown): {
+	offset: number;
+	limit: number;
+	query?: string;
+} {
 	if (params === undefined || params === null) return { offset: 0, limit: 20 };
-	if (!isPlainRecord(params)) throw new Error("workflow_list input must be an object");
-	const keys = Object.keys(params).filter(key => !["offset", "limit", "query"].includes(key));
-	if (keys.length) throw new Error(`workflow_list does not accept arguments: ${keys.join(", ")}`);
+	if (!isPlainRecord(params))
+		throw new Error("workflow_list input must be an object");
+	const keys = Object.keys(params).filter(
+		(key) => !["offset", "limit", "query"].includes(key),
+	);
+	if (keys.length)
+		throw new Error(
+			`workflow_list does not accept arguments: ${keys.join(", ")}`,
+		);
 	const offset = params.offset === undefined ? 0 : params.offset;
 	const limit = params.limit === undefined ? 20 : params.limit;
-	if (typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0) throw new Error("workflow_list offset must be a non-negative integer");
-	if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > 20) throw new Error("workflow_list limit must be an integer from 1 to 20");
-	if (params.query !== undefined && typeof params.query !== "string") throw new Error("workflow_list query must be a string");
-	return { offset, limit, query: (params.query as string | undefined)?.trim().toLowerCase() };
+	if (typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0)
+		throw new Error("workflow_list offset must be a non-negative integer");
+	if (
+		typeof limit !== "number" ||
+		!Number.isInteger(limit) ||
+		limit < 1 ||
+		limit > 20
+	)
+		throw new Error("workflow_list limit must be an integer from 1 to 20");
+	if (params.query !== undefined && typeof params.query !== "string")
+		throw new Error("workflow_list query must be a string");
+	return {
+		offset,
+		limit,
+		query: (params.query as string | undefined)?.trim().toLowerCase(),
+	};
 }
 
 function parseWorkflowRunToolParams(params: unknown): WorkflowRunToolRequest {
@@ -2284,11 +2322,7 @@ function parseWorkflowDynamicToolParams(
 		throw new Error(
 			"workflow_dynamic detach and awaitTerminal are mutually exclusive",
 		);
-	const model = optionalStringParam(
-		params,
-		"model",
-		"workflow_dynamic",
-	)?.trim();
+	const model = optionalStringParam(params, "model", "workflow_dynamic")?.trim();
 	const rawThinking = optionalStringParam(
 		params,
 		"thinking",
@@ -2323,9 +2357,7 @@ function parseWorkflowAwaitParams(
 ): { awaitTerminal: boolean; timeoutMs?: number } {
 	const value = params.awaitTerminal;
 	if (value !== undefined && typeof value !== "boolean")
-		throw new Error(
-			`${toolName} awaitTerminal must be a boolean when provided`,
-		);
+		throw new Error(`${toolName} awaitTerminal must be a boolean when provided`);
 	const timeoutMs = optionalWorkflowTimeoutParam(params, toolName);
 	const awaitTerminal = value === true;
 	if (timeoutMs !== undefined && !awaitTerminal)
@@ -2385,54 +2417,83 @@ async function listWorkflowSummaries(
 	const summaries: WorkflowListSummary[] = [];
 	// Keep metadata IO bounded independently from catalog discovery.
 	for (let offset = 0; offset < workflows.length; offset += 4) {
-		summaries.push(...await Promise.all(workflows.slice(offset, offset + 4).map(async (workflow) => {
-			let description: string | undefined;
-			let agent: string | undefined;
-			let readOnly: boolean | undefined;
-			try {
-				const loaded = await loadWorkflowSpec(workflow.specPath, cwd);
-				description = loaded.spec.description;
-				agent = (loaded.spec.defaults as { agent?: string } | undefined)?.agent;
-				readOnly = loaded.spec.defaults?.readOnly;
-			} catch {
-				// listWorkflows already filters runnable specs; omit optional metadata if a
-				// workflow disappears between discovery and summary formatting.
-			}
-			return {
-				name: workflow.name,
-				aliases: workflow.aliases,
-				specPath: toDisplayPath(workflow.specPath, cwd),
-				...(description ? { description: clipWorkflowMetadata(description, 512) } : {}),
-				...(agent ? { agent: clipWorkflowMetadata(agent, 128) } : {}),
-				...(readOnly !== undefined ? { readOnly } : {}),
-			};
-		})));
+		summaries.push(
+			...(await Promise.all(
+				workflows.slice(offset, offset + 4).map(async (workflow) => {
+					let description: string | undefined;
+					let agent: string | undefined;
+					let readOnly: boolean | undefined;
+					try {
+						const loaded = await loadWorkflowSpec(workflow.specPath, cwd);
+						description = loaded.spec.description;
+						agent = (loaded.spec.defaults as { agent?: string } | undefined)?.agent;
+						readOnly = loaded.spec.defaults?.readOnly;
+					} catch {
+						// listWorkflows already filters runnable specs; omit optional metadata if a
+						// workflow disappears between discovery and summary formatting.
+					}
+					return {
+						name: workflow.name,
+						aliases: workflow.aliases,
+						specPath: toDisplayPath(workflow.specPath, cwd),
+						...(description
+							? { description: clipWorkflowMetadata(description, 512) }
+							: {}),
+						...(agent ? { agent: clipWorkflowMetadata(agent, 128) } : {}),
+						...(readOnly !== undefined ? { readOnly } : {}),
+					};
+				}),
+			)),
+		);
 	}
 	return summaries;
 }
 
-function boundedWorkflowListPage(rows: WorkflowListSummary[], total: number, offset: number, query?: string) {
+function boundedWorkflowListPage(
+	rows: WorkflowListSummary[],
+	total: number,
+	offset: number,
+	query?: string,
+) {
 	const makePage = (workflows: WorkflowListSummary[]) => {
-		const nextOffset = offset + workflows.length < total ? offset + workflows.length : undefined;
+		const nextOffset =
+			offset + workflows.length < total ? offset + workflows.length : undefined;
 		const omitted = Math.max(0, total - offset - workflows.length);
-		const notice = nextOffset !== undefined
-			? `\n[${omitted} workflows omitted. Continue with workflow_list offset=${nextOffset}${query ? " and the same query" : ""}, or narrow query.]` : "";
+		const notice =
+			nextOffset !== undefined
+				? `\n[${omitted} workflows omitted. Continue with workflow_list offset=${nextOffset}${query ? " and the same query" : ""}, or narrow query.]`
+				: "";
 		return {
-			content: [{ type: "text", text: formatWorkflowListToolResult(workflows) + notice }],
+			content: [
+				{ type: "text", text: formatWorkflowListToolResult(workflows) + notice },
+			],
 			details: { workflows, total, nextOffset, omitted },
 		};
 	};
 	const fits = (page: ReturnType<typeof makePage>): boolean =>
-		[JSON.stringify(page.content, null, 2), JSON.stringify(page.details, null, 2), page.content[0]!.text]
-			.every(text => Buffer.byteLength(text) <= 50 * 1024 && text.split("\n").length <= 2_000);
+		[
+			JSON.stringify(page.content, null, 2),
+			JSON.stringify(page.details, null, 2),
+			page.content[0]!.text,
+		].every(
+			(text) =>
+				Buffer.byteLength(text) <= 50 * 1024 && text.split("\n").length <= 2_000,
+		);
 	const included: WorkflowListSummary[] = [];
 	for (let row of rows) {
 		if (!fits(makePage([...included, row]))) {
 			if (included.length > 0) break;
 			// Even pathological names/alias metadata must not cause a zero-progress
 			// continuation. Preserve the complete path; optional metadata can go.
-			row = { name: clipWorkflowMetadata(row.name, 256), aliases: [], specPath: row.specPath };
-			if (!fits(makePage([row]))) throw new Error("workflow_list spec path exceeds the response budget; narrow the catalog at its source");
+			row = {
+				name: clipWorkflowMetadata(row.name, 256),
+				aliases: [],
+				specPath: row.specPath,
+			};
+			if (!fits(makePage([row])))
+				throw new Error(
+					"workflow_list spec path exceeds the response budget; narrow the catalog at its source",
+				);
 		}
 		included.push(row);
 	}
@@ -2456,9 +2517,10 @@ function formatWorkflowListToolResult(
 		"Available workflows:",
 		"Metadata previews may be truncated; read the spec (full path in details), or /workflow show <name>. Use workflow_list query/offset for more workflows.",
 		...workflows.map((workflow) => {
-			const aliases = clipWorkflowMetadata(workflow.aliases
-				.filter((alias) => alias !== workflow.name)
-				.join(", "), 256);
+			const aliases = clipWorkflowMetadata(
+				workflow.aliases.filter((alias) => alias !== workflow.name).join(", "),
+				256,
+			);
 			const metadata = [
 				workflow.agent ? `agent=${workflow.agent}` : undefined,
 				workflow.readOnly !== undefined
@@ -2565,15 +2627,17 @@ function workflowLaunchTaskCounts(task: string): {
 	const runtimeTask = task.trim();
 	return {
 		characters: Array.from(runtimeTask).length,
-		lines:
-			runtimeTask.length === 0 ? 0 : runtimeTask.split(/\r\n|\r|\n/).length,
+		lines: runtimeTask.length === 0 ? 0 : runtimeTask.split(/\r\n|\r|\n/).length,
 	};
 }
 
 function workflowSlashLaunchCapture(
 	action: "run" | "dynamic",
 	requestKind: "named-workflow" | "direct-dynamic",
-	routingMode: WorkflowRunLaunchCapture["routingMode"],
+	routingMode: Extract<
+		WorkflowRunLaunchCapture,
+		{ schema: "pi-workflow-run-launch-v1" }
+	>["routingMode"],
 	task: string,
 	args: string,
 ): WorkflowRunLaunchCapture {
@@ -2614,6 +2678,10 @@ async function startWorkflowRunFromRequest(
 	api: ExtensionAPI,
 	uiSessionSignal = workflowUiSignalForCwd(ctx.cwd),
 	launch?: WorkflowRunLaunchCapture,
+	autoLaunchBinding?: NonNullable<
+		Parameters<typeof runWorkflowSpec>[2]
+	>["autoLaunchBinding"],
+	launchSignal?: AbortSignal,
 ): Promise<{ run: Awaited<ReturnType<typeof runWorkflowSpec>>; text: string }> {
 	const workflow = request.workflow.trim();
 	const task = request.task.trim();
@@ -2669,6 +2737,8 @@ async function startWorkflowRunFromRequest(
 		runtimeDefaults,
 		availableModels,
 		dynamicUi: dynamicUiFromContext(ctx),
+		...(autoLaunchBinding ? { autoLaunchBinding } : {}),
+		...(launchSignal ? { launchSignal } : {}),
 		...profileSelection,
 	});
 	const verb = workflowRunStartVerb(run.status);
@@ -2700,6 +2770,9 @@ async function startDynamicRunFromRequest(
 	uiSessionSignal = workflowUiSignalForCwd(ctx.cwd),
 	initialPlanSignal?: AbortSignal,
 	launch?: WorkflowRunLaunchCapture,
+	autoLaunchBinding?: NonNullable<
+		Parameters<typeof runDynamicTask>[1]
+	>["autoLaunchBinding"],
 ): Promise<{ run: Awaited<ReturnType<typeof runDynamicTask>>; text: string }> {
 	const task = request.task.trim();
 	if (!task)
@@ -2717,6 +2790,8 @@ async function startDynamicRunFromRequest(
 		runtimeDefaults: currentRuntimeDefaults(ctx, api),
 		availableModels: availableWorkflowModels(ctx),
 		dynamicUi: dynamicUiFromContext(ctx),
+		...(autoLaunchBinding ? { autoLaunchBinding } : {}),
+		...(initialPlanSignal ? { launchSignal: initialPlanSignal } : {}),
 	});
 	if (
 		ctx.mode === "tui" &&
@@ -2796,200 +2871,537 @@ export async function duplicateRunGuardNotice(
 	].join("\n");
 }
 
-async function handleRoutedRunRequest(
-	request: {
-		requestedWorkflow?: string;
-		task: string;
-		detach: boolean;
-		forceNew: boolean;
-		runtimeOverrides?: WorkflowRuntimeDefaults;
-		executionProfile?: string;
-		launch: WorkflowRunLaunchCapture;
-		usage: string;
-	},
+async function handleWorkflowAutoRequest(
+	args: string,
 	ctx: ExtensionCommandContext,
 	api: ExtensionAPI,
 	uiSessionSignal = workflowUiSignalForCwd(ctx.cwd),
 ): Promise<void> {
-	const task = request.task.trim();
-	if (!task)
-		throw new Error(`This workflow needs a task. Usage: ${request.usage}`);
-	if (request.requestedWorkflow) {
-		emitWorkflowLaunchNotice(ctx, {
-			kind: "routed-workflow",
-			workflow: request.requestedWorkflow,
-			detach: request.detach,
-		});
-	} else {
-		emitWorkflowLaunchNotice(ctx, {
-			kind: "routed-dynamic",
-			detach: request.detach,
-		});
+	const task = parseWorkflowAutoTask(args);
+	if (!task) {
+		throw new Error('This command needs a task. Usage: /workflow auto "<task>"');
 	}
-	const requestedLabel = request.requestedWorkflow ?? "dynamic workflow";
 	const runtimeDefaults = currentRuntimeDefaults(ctx, api);
-	const availableModels = availableWorkflowModels(ctx);
-	const baseRequest = {
-		cwd: ctx.cwd,
-		task,
-		requestedWorkflow: request.requestedWorkflow,
-		runtimeOverrides: request.runtimeOverrides,
-		runtimeDefaults,
-		availableModels,
-		dynamicUi: dynamicUiFromContext(ctx),
-		launch: request.launch,
-	};
-	const routingResult = await withWorkflowLaunchForeground(
+	const runtimeOverrides: WorkflowRuntimeDefaults = {};
+	let availableAgentNames: Iterable<string> | undefined;
+	try {
+		availableAgentNames = [...(await discoverAgents(ctx.cwd)).byAlias.keys()];
+	} catch {
+		// A malformed unrelated agent must not turn recommendation-only auto into
+		// an execution error; candidate readiness will require an availability check.
+		availableAgentNames = undefined;
+	}
+	const result = await withWorkflowLaunchForeground(
 		ctx,
-		`Routing ${requestedLabel}…`,
-		() => resolveWorkflowRouting(baseRequest),
+		"Comparing existing workflow candidates…",
+		(signal) =>
+			recommendWorkflowAuto({
+				cwd: ctx.cwd,
+				task,
+				runtimeDefaults,
+				runtimeOverrides,
+				availableModels: availableWorkflowModels(ctx),
+				availableAgentNames,
+				signal,
+			}),
 		uiSessionSignal,
 	);
-	if (routingResult === WORKFLOW_LAUNCH_CANCELLED) return;
-	let routing = routingResult;
+	if (result === WORKFLOW_LAUNCH_CANCELLED || uiSessionSignal.aborted) return;
+	emit(ctx, formatWorkflowAutoRecommendation(result), "info");
 
-	if (routing.decided === "direct") {
-		const directResult = await withWorkflowLaunchForeground(
+	// Print/JSON/RPC callers receive recommendation-only output and explicit
+	// follow-up commands; this branch cannot select or launch anything.
+	if (ctx.mode !== "tui" || !ctx.hasUI) return;
+	const recommendation = result.comparison?.recommendation;
+	const hasValidRecommendation =
+		result.status === "recommendation" && recommendation !== undefined;
+	// A failed/uncertain comparison does not erase already-safe local choices.
+	// Workflow choices never cross a disallowed transmission boundary; the direct
+	// editor draft remains local and still requires its own confirmation.
+	const localChoiceScope =
+		result.localChoiceScope ??
+		(result.transmission === "allowed" ? "all-safe" : "direct-only");
+	const localCandidates = result.candidates.filter(
+		(candidate) =>
+			candidate.readiness.startAllowed &&
+			(localChoiceScope === "all-safe" || candidate.kind === "direct"),
+	);
+	const canOfferLocalChoices = localCandidates.length > 0;
+	const clarifyChoice = "__workflow_auto_clarify__";
+	const choices = [
+		{
+			value: clarifyChoice,
+			label: "Review candidates or clarify constraints",
+			description:
+				"Keep this task local and make no launch; refine privacy, network, side-effect, or fit constraints.",
+		},
+		...(canOfferLocalChoices
+			? localCandidates.map((candidate) => {
+						const ranked =
+							hasValidRecommendation &&
+							recommendation?.candidateId === candidate.candidateId;
+						return {
+							value: candidate.candidateId,
+							label: ranked
+								? `Recommended: ${candidate.label}`
+								: candidate.kind === "direct"
+									? "Direct hand-off (local, unranked)"
+									: `Manual local fallback (unranked): ${candidate.label}`,
+							description: `${ranked ? "classifier recommendation" : "not ranked by a classifier"} · ${candidate.kind} · ${candidate.scope}${candidate.readiness.cautions.length ? ` · ${candidate.readiness.cautions[0]}` : ""}`,
+						};
+					})
+			: []),
+	];
+	const selectedId = await selectWorkflowAutoChoice(
+		ctx.ui,
+		canOfferLocalChoices
+			? hasValidRecommendation && localChoiceScope === "all-safe"
+				? "Choose an execution path (nothing starts yet)"
+				: localChoiceScope === "direct-only"
+					? "Choose a local direct hand-off (nothing starts yet)"
+					: "Choose a local manual fallback (unranked; nothing starts yet)"
+			: "Review auto-routing constraints (nothing starts)",
+		choices,
+		hasValidRecommendation && recommendation.confidence !== "low"
+			? recommendation.candidateId
+			: clarifyChoice,
+	);
+	if (!selectedId || uiSessionSignal.aborted) {
+		emit(ctx, "Auto selection cancelled. No workflow has been started.", "info");
+		return;
+	}
+	if (selectedId === clarifyChoice || !canOfferLocalChoices) {
+		emit(
 			ctx,
-			"Preparing direct answer…",
-			() => resolveRoutedDirectAnswer(baseRequest, routing),
-			uiSessionSignal,
+			"No execution was selected. Review the local candidate list and clarify task, privacy, network, or side-effect constraints before running /workflow auto again.",
+			"info",
 		);
-		if (directResult === WORKFLOW_LAUNCH_CANCELLED) return;
-		if (directResult.mode === "direct") {
-			if (uiSessionSignal.aborted) return;
-			const rerun = request.requestedWorkflow
-				? `/workflow run --no-route ${request.requestedWorkflow} "<task>"`
-				: `/workflow dynamic "<task>"`;
-			emit(
-				ctx,
-				[
-					"Router chose a direct answer instead of running the workflow.",
-					formatRoutingLine(directResult.routing),
-					`Routing recorded in ${WORKFLOW_ROUTING_LOG_RELATIVE_PATH}. To force the full workflow: ${rerun}`,
-					"",
-					directResult.answer,
-				].join("\n"),
-				"info",
+		return;
+	}
+	const selected = result.candidates.find(
+		(candidate) => candidate.candidateId === selectedId,
+	);
+	if (
+		!selected ||
+		!selected.readiness.startAllowed ||
+		!localCandidates.some(
+			(candidate) => candidate.candidateId === selected.candidateId,
+		)
+	) {
+		emit(
+			ctx,
+			"Selected candidate is no longer launchable. No workflow has been started.",
+			"warning",
+		);
+		return;
+	}
+	const recommendedCandidate = recommendation
+		? result.candidates.find(
+				(candidate) => candidate.candidateId === recommendation.candidateId,
+			)
+		: undefined;
+	if (recommendation && !recommendedCandidate) {
+		emit(
+			ctx,
+			"Auto recommendation became unavailable. No workflow has been started.",
+			"warning",
+		);
+		return;
+	}
+	// Selecting any other safe local path is a manual fallback, not an implicit
+	// acceptance of the classifier's route. Persist null provenance accordingly.
+	const recommended =
+		recommendedCandidate?.candidateId === selected.candidateId
+			? recommendedCandidate
+			: undefined;
+
+	if (selected.kind === "direct") {
+		const existing = ctx.ui.getEditorText();
+		if (existing.trim()) {
+			const replace = await ctx.ui.confirm(
+				"Replace current editor draft?",
+				"The selected direct path will prepare a normal parent request. Your current editor text will be replaced only if you continue.",
 			);
+			if (!replace || uiSessionSignal.aborted) return;
+		}
+		const confirmed = await ctx.ui.confirm(
+			"Confirm direct hand-off",
+			"Prepare this exact task as a normal parent request? This does not send it or start a workflow.",
+		);
+		if (!confirmed || uiSessionSignal.aborted) {
+			emit(ctx, "Auto launch cancelled. No workflow has been started.", "info");
 			return;
 		}
-		routing = directResult.routing;
-	}
-
-	const workflowRef =
-		routing.decided === "workflow" ? request.requestedWorkflow : undefined;
-	const launchLabel = workflowRef ?? "dynamic workflow";
-	const preflightResult = await withWorkflowLaunchForeground(
-		ctx,
-		`Validating ${launchLabel}…`,
-		async (launchSignal) => {
-			launchSignal.throwIfAborted();
-			const loadedWorkflow = workflowRef
-				? await loadWorkflowSpec(workflowRef, ctx.cwd)
-				: undefined;
-			launchSignal.throwIfAborted();
-			const guardNotice =
-				!request.detach && !request.forceNew
-					? await duplicateRunGuardNotice(
-							ctx.cwd,
-							workflowRef
-								? { kind: "spec", specRef: workflowRef }
-								: { kind: "dynamic" },
-							task,
-						)
-					: undefined;
-			launchSignal.throwIfAborted();
-			return { guardNotice, loadedWorkflow };
-		},
-		uiSessionSignal,
-	);
-	if (preflightResult === WORKFLOW_LAUNCH_CANCELLED) return;
-	if (preflightResult.guardNotice) {
-		emit(ctx, preflightResult.guardNotice, "warning");
+		ctx.ui.setEditorText(workflowAutoDirectDraft(task));
+		emit(
+			ctx,
+			"Prepared a normal parent request in the editor. Review and send it when ready; no workflow was started.",
+			"info",
+		);
 		return;
 	}
 
-	const profileSelection = workflowRef
-		? await resolveWorkflowExecutionProfileForLaunch(
-				workflowRef,
-				ctx.cwd,
-				request.executionProfile,
-				{
-					select: ctx.hasUI
-						? (title, options) => ctx.ui.select(title, options)
-						: undefined,
-					loadedWorkflow: preflightResult.loadedWorkflow,
-					availableModels,
-					currentRuntime: runtimeDefaults,
-					runtimeOverrides: request.runtimeOverrides,
-				},
-			)
-		: {};
+	const selectedProfile =
+		selected.kind === "named-workflow"
+			? await prepareWorkflowAutoNamedSelection(
+					selected,
+					task,
+					runtimeDefaults,
+					runtimeOverrides,
+					ctx,
+					uiSessionSignal,
+				)
+			: undefined;
+	if (selected.kind === "named-workflow" && !selectedProfile) return;
+	const selectedDynamicBinding =
+		selected.kind === "direct-dynamic"
+			? await prepareWorkflowAutoDynamicSelection(
+					selected,
+					task,
+					runtimeDefaults,
+					runtimeOverrides,
+					ctx,
+					uiSessionSignal,
+				)
+			: undefined;
+	if (selected.kind === "direct-dynamic" && !selectedDynamicBinding) return;
 	if (uiSessionSignal.aborted) return;
 
-	const outcomeResult = await withWorkflowLaunchForeground(
+	const launch = workflowAutoSlashLaunchCapture({
+		task,
+		args,
+		recommendation: recommended?.kind ?? null,
+		selected,
+		candidateIdentitySha256:
+			selectedProfile?.binding.candidateIdentitySha256 ??
+			selectedDynamicBinding?.candidateIdentitySha256 ??
+			selected.identitySha256,
+		profile: selectedProfile?.profile,
+		runtime: effectiveWorkflowAutoRuntime(runtimeDefaults, runtimeOverrides),
+	});
+	const confirmation = await ctx.ui.confirm(
+		"Confirm selected workflow launch",
+		workflowAutoConfirmationText(selected, recommended, selectedProfile?.profile),
+	);
+	if (!confirmation || uiSessionSignal.aborted) {
+		emit(ctx, "Auto launch cancelled. No workflow has been started.", "info");
+		return;
+	}
+	let launchClaimed = false;
+	const claimLaunch = (): boolean => {
+		if (launchClaimed) return false;
+		launchClaimed = true;
+		return true;
+	};
+	if (!claimLaunch()) return;
+
+	if (selected.kind === "named-workflow") {
+		const guard = await duplicateRunGuardNotice(
+			ctx.cwd,
+			{ kind: "spec", specRef: selected.specPath! },
+			task,
+		);
+		if (guard) {
+			emit(ctx, guard, "warning");
+			return;
+		}
+		const launchResult = await withWorkflowLaunchForeground(
+			ctx,
+			`Starting ${selected.label}…`,
+			async (launchSignal) => {
+				launchSignal.throwIfAborted();
+				const started = await startWorkflowRunFromRequest(
+					{
+						workflow: selected.specPath!,
+						task,
+						detach: false,
+						runtimeOverrides,
+						executionProfile: selectedProfile!.profile.executionProfile,
+						executionProfileOverride:
+							selectedProfile!.profile.executionProfileOverride,
+						executionProfileResolved: true,
+					},
+					ctx,
+					api,
+					uiSessionSignal,
+					launch,
+					selectedProfile!.binding,
+					launchSignal,
+				);
+				// The foreground loader may have been dismissed while run creation was
+				// committing. It owns this exact returned run, not a later lookup.
+				if (launchSignal.aborted && started.run.status === "running")
+					await stopRun(ctx.cwd, started.run.runId);
+				return started;
+			},
+			uiSessionSignal,
+		);
+		if (launchResult === WORKFLOW_LAUNCH_CANCELLED) return;
+		emitRunStartResult(ctx, launchResult.run.status, launchResult.text);
+		return;
+	}
+
+	const guard = await duplicateRunGuardNotice(
+		ctx.cwd,
+		{ kind: "dynamic" },
+		task,
+	);
+	if (guard) {
+		emit(ctx, guard, "warning");
+		return;
+	}
+	const launchResult = await withWorkflowLaunchForeground(
 		ctx,
-		`Starting ${launchLabel}…`,
+		"Starting dynamic workflow…",
 		async (launchSignal) => {
 			launchSignal.throwIfAborted();
-			const outcome = await executeResolvedRoutedWorkflowRequest(
-				{
-					...baseRequest,
-					...profileSelection,
-					executionProfileResolved: Boolean(workflowRef),
-				},
-				routing,
+			const started = await startDynamicRunFromRequest(
+				{ task, detach: false, runtimeOverrides },
+				ctx,
+				api,
+				uiSessionSignal,
+				launchSignal,
+				launch,
+				selectedDynamicBinding,
 			);
-			if (
-				launchSignal.aborted &&
-				outcome.mode !== "direct" &&
-				outcome.run.status === "running"
-			) {
-				await stopRun(ctx.cwd, outcome.run.runId);
-			}
-			return outcome;
+			if (launchSignal.aborted && started.run.status === "running")
+				await stopRun(ctx.cwd, started.run.runId);
+			return started;
 		},
 		uiSessionSignal,
 	);
-	if (outcomeResult === WORKFLOW_LAUNCH_CANCELLED) return;
-	const outcome = outcomeResult;
-	if (outcome.mode === "direct") return;
-	const routingLine = formatRoutingLine(outcome.routing);
-	const run = outcome.run;
-	const verb = workflowRunStartVerb(run.status);
-	if (run.status === "running" && !uiSessionSignal.aborted) {
-		await startWorkflowFeedbackTracking(ctx, api, run.runId, uiSessionSignal);
-	}
-
-	let detachNote = "";
-	if (request.detach && run.status === "running") {
-		spawnDetachedSupervisor(ctx.cwd, run.runId);
-		detachNote = formatDetachedSupervisorNote(run.runId);
-	}
-	if (uiSessionSignal.aborted) return;
-
-	const headline =
-		outcome.mode === "dynamic"
-			? `Dynamic workflow ${verb}`
-			: `Workflow ${verb}: ${run.name ?? "workflow"}`;
-	emitRunStartResult(
-		ctx,
-		run.status,
-		`${headline}\n${routingLine}\n${formatHumanRunLaunch(run)}${detachNote}\nOpen: /workflow ${run.runId}`,
-	);
+	if (launchResult === WORKFLOW_LAUNCH_CANCELLED) return;
+	emitRunStartResult(ctx, launchResult.run.status, launchResult.text);
 }
 
-function formatRoutingLine(routing: WorkflowRunRouting): string {
-	const elapsed =
-		routing.routerElapsedMs === undefined
-			? ""
-			: `, router ${formatRoutingElapsed(routing.routerElapsedMs)}`;
-	return `Routing: ${routing.requested} → ${routing.decided} (depth ${routing.depth}, confidence ${routing.confidence}${elapsed}) — ${routing.reason}`;
+async function prepareWorkflowAutoDynamicSelection(
+	candidate: WorkflowAutoCandidate,
+	task: string,
+	runtimeDefaults: WorkflowRuntimeDefaults,
+	runtimeOverrides: WorkflowRuntimeDefaults,
+	ctx: ExtensionCommandContext,
+	signal: AbortSignal,
+): Promise<Awaited<ReturnType<typeof captureWorkflowAutoLaunchBinding>> | undefined> {
+	try {
+		signal.throwIfAborted();
+		const specPath = await ensureDirectDynamicRuntimeBundle(ctx.cwd);
+		signal.throwIfAborted();
+		const loaded = await loadWorkflowSpec(specPath, ctx.cwd);
+		const compiled = await compileWorkflow(loaded.spec, {
+			cwd: ctx.cwd,
+			specPath: loaded.specPath,
+			task,
+			runtimeDefaults,
+			runtimeOverrides,
+			availableModels: availableWorkflowModels(ctx),
+		});
+		assertWorkflowAutoResolvedCandidateSafety(candidate, compiled, task);
+		signal.throwIfAborted();
+		return await captureWorkflowAutoLaunchBinding({
+			cwd: ctx.cwd,
+			candidateId: candidate.candidateId,
+			task,
+			specPath: loaded.specPath,
+			spec: loaded.spec,
+			selectionIdentitySha256: candidate.identitySha256,
+			runtimeVersion: DIRECT_DYNAMIC_RUNTIME_VERSION,
+			launchSettings: workflowAutoLaunchBindingSettings({
+				runtimeDefaults,
+				runtimeOverrides,
+			}),
+			compiledSettings: compiled,
+		});
+	} catch (error) {
+		if (signal.aborted) return undefined;
+		emit(
+			ctx,
+			`Auto selection could not be validated: ${error instanceof Error ? error.message : String(error)}. No workflow has been started.`,
+			"warning",
+		);
+		return undefined;
+	}
 }
 
-function formatRoutingElapsed(ms: number): string {
-	return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
+async function prepareWorkflowAutoNamedSelection(
+	candidate: WorkflowAutoCandidate,
+	task: string,
+	runtimeDefaults: WorkflowRuntimeDefaults,
+	runtimeOverrides: WorkflowRuntimeDefaults,
+	ctx: ExtensionCommandContext,
+	signal: AbortSignal,
+): Promise<
+	| {
+			profile: WorkflowExecutionProfileSelection;
+			binding: Awaited<ReturnType<typeof captureWorkflowAutoLaunchBinding>>;
+	  }
+	| undefined
+> {
+	if (!candidate.specPath || !candidate.spec || !candidate.specSha256) {
+		emit(
+			ctx,
+			"Selected workflow record is incomplete. No workflow has been started.",
+			"warning",
+		);
+		return undefined;
+	}
+	try {
+		signal.throwIfAborted();
+		const raw = await readFile(candidate.specPath);
+		if (createHash("sha256").update(raw).digest("hex") !== candidate.specSha256) {
+			emit(
+				ctx,
+				"Auto selection is stale: the selected workflow changed. Run /workflow auto again.",
+				"warning",
+			);
+			return undefined;
+		}
+		const loaded = await loadWorkflowSpec(candidate.specPath, ctx.cwd);
+		const profile = await resolveWorkflowExecutionProfileForLaunch(
+			candidate.specPath,
+			ctx.cwd,
+			undefined,
+			{
+				select: (title, options) => ctx.ui.select(title, options),
+				loadedWorkflow: loaded,
+				availableModels: availableWorkflowModels(ctx),
+				currentRuntime: runtimeDefaults,
+				runtimeOverrides,
+			},
+		);
+		signal.throwIfAborted();
+		const appliedProfile = applyWorkflowExecutionProfile(
+			loaded.spec,
+			profile.executionProfile,
+			profile.executionProfileOverride,
+		);
+		const compiled = await compileWorkflow(appliedProfile.spec, {
+			cwd: ctx.cwd,
+			specPath: loaded.specPath,
+			task,
+			runtimeDefaults,
+			runtimeOverrides,
+			availableModels: availableWorkflowModels(ctx),
+		});
+		assertWorkflowAutoResolvedCandidateSafety(candidate, compiled, task);
+		signal.throwIfAborted();
+		const binding = await captureWorkflowAutoLaunchBinding({
+			cwd: ctx.cwd,
+			candidateId: candidate.candidateId,
+			task,
+			specPath: loaded.specPath,
+			spec: loaded.spec,
+			launchSettings: workflowAutoLaunchBindingSettings({
+				executionProfile: profile.executionProfile,
+				executionProfileOverride: profile.executionProfileOverride,
+				runtimeDefaults,
+				runtimeOverrides,
+			}),
+			compiledSettings: compiled,
+		});
+		// The catalog choice was based on this exact source spec. Capture after
+		// profile resolution, then make sure the source did not change in that
+		// window before presenting the final launch confirmation.
+		const finalRaw = await readFile(loaded.specPath);
+		if (
+			createHash("sha256").update(finalRaw).digest("hex") !== candidate.specSha256
+		) {
+			emit(
+				ctx,
+				"Auto selection is stale: the selected workflow changed. Run /workflow auto again.",
+				"warning",
+			);
+			return undefined;
+		}
+		return { profile, binding };
+	} catch (error) {
+		if (signal.aborted) return undefined;
+		emit(
+			ctx,
+			`Auto selection could not be validated: ${error instanceof Error ? error.message : String(error)}. No workflow has been started.`,
+			"warning",
+		);
+		return undefined;
+	}
+}
+
+export function workflowAutoSlashLaunchCapture(input: {
+	task: string;
+	args: string;
+	recommendation: WorkflowAutoCandidate["kind"] | null;
+	selected: WorkflowAutoCandidate;
+	candidateIdentitySha256: string;
+	profile?: WorkflowExecutionProfileSelection;
+	runtime: WorkflowRuntimeDefaults;
+}): WorkflowRunLaunchCapture {
+	if (input.selected.kind === "direct")
+		throw new Error(
+			"Direct auto choice prepares an editor draft and cannot create launch metadata",
+		);
+	const selectedKind =
+		input.selected.kind === "named-workflow"
+			? "named-workflow"
+			: "direct-dynamic";
+	const profileName =
+		input.profile?.executionProfile ??
+		input.profile?.executionProfileOverride?.name;
+	return {
+		schema: "pi-workflow-run-launch-v2",
+		source: { kind: "slash-command", action: "auto" },
+		requestKind: selectedKind,
+		routingMode: "auto-confirmed",
+		profile:
+			selectedKind === "direct-dynamic"
+				? { kind: "not-applicable" }
+				: profileName
+					? { kind: "named", name: profileName }
+					: { kind: "base" },
+		task: workflowLaunchTaskCounts(input.task),
+		selection: {
+			recommendation: input.recommendation,
+			selected: selectedKind,
+			candidateId: input.selected.candidateId,
+			candidateIdentitySha256: input.candidateIdentitySha256,
+			taskSha256: createHash("sha256")
+				.update(input.task.trim(), "utf8")
+				.digest("hex"),
+			confirmed: true,
+			effectiveRuntime: input.runtime,
+		},
+		command: { state: "captured", text: `/workflow ${input.args}` },
+	};
+}
+
+function effectiveWorkflowAutoRuntime(
+	defaults: WorkflowRuntimeDefaults,
+	overrides: WorkflowRuntimeDefaults,
+): WorkflowRuntimeDefaults {
+	return {
+		...(defaults.model ? { model: defaults.model } : {}),
+		...(defaults.thinking ? { thinking: defaults.thinking } : {}),
+		...(overrides.model ? { model: overrides.model } : {}),
+		...(overrides.thinking ? { thinking: overrides.thinking } : {}),
+	};
+}
+
+function workflowAutoConfirmationText(
+	selected: WorkflowAutoCandidate,
+	recommended: WorkflowAutoCandidate | undefined,
+	profile?: WorkflowExecutionProfileSelection,
+): string {
+	const profileName =
+		profile?.executionProfile ?? profile?.executionProfileOverride?.name;
+	return [
+		`Selected: ${selected.label} (${selected.kind}; ${selected.scope}).`,
+		...(recommended
+			? [
+				`Recommendation: ${recommended.label}${recommended.candidateId === selected.candidateId ? " (selected)" : " (you chose another candidate)"}.`,
+			]
+			: [
+				"Manual local fallback: this candidate was not ranked by a classifier and is being selected only after local safety checks.",
+			]),
+		...(profileName ? [`Execution profile: ${profileName}.`] : []),
+		"This is the final confirmation. Starting will create a workflow run; cancelling starts nothing.",
+	].join("\n");
 }
 
 function workflowRunStartVerb(status: string): string {
@@ -3009,9 +3421,7 @@ async function openWorkflowBoard(
 	if (ctx.mode !== "tui" || !ctx.hasUI || printMode) {
 		emit(
 			ctx,
-			runId
-				? await formatRunStatus(ctx.cwd, runId)
-				: await formatStatus(ctx.cwd),
+			runId ? await formatRunStatus(ctx.cwd, runId) : await formatStatus(ctx.cwd),
 			"info",
 		);
 		return;
@@ -3035,8 +3445,7 @@ function dynamicUiFromContext(ctx: ExtensionContext): {
 		process.argv.includes("--print") || process.argv.includes("-p");
 	return {
 		hasUI: ctx.hasUI && !printMode,
-		confirm: (title, message, options) =>
-			ctx.ui.confirm(title, message, options),
+		confirm: (title, message, options) => ctx.ui.confirm(title, message, options),
 	};
 }
 
@@ -3088,6 +3497,7 @@ export const WORKFLOW_KNOWN_ACTIONS: ReadonlySet<string> = new Set([
 	"roles",
 	"agents",
 	"profile",
+	"auto",
 	"run",
 	"dynamic",
 	"status",
@@ -3111,7 +3521,9 @@ export async function notifyUnfinishedRuns(
 	if (!index?.runs?.length) return;
 	const unfinished = [];
 	// Invalid acknowledgement evidence must never suppress an ordinary warning.
-	const acknowledgements = await readNoticeAcknowledgements(cwd).catch(() => undefined);
+	const acknowledgements = await readNoticeAcknowledgements(cwd).catch(
+		() => undefined,
+	);
 	const changedAcknowledgements = new Map<string, string>();
 	for (const run of index.runs) {
 		if (run.parentRunId && run.status !== "blocked") continue;
@@ -3126,7 +3538,9 @@ export async function notifyUnfinishedRuns(
 			const match = await noticeAcknowledgementMatch(cwd, acknowledgements, run);
 			if (match === "acknowledged") continue;
 			if (match === "changed") {
-				const entry = acknowledgements.acknowledgements.find(item => item.runId === run.runId)!;
+				const entry = acknowledgements.acknowledgements.find(
+					(item) => item.runId === run.runId,
+				)!;
 				changedAcknowledgements.set(run.runId, entry.acknowledgedAt);
 			}
 		}
@@ -3134,9 +3548,7 @@ export async function notifyUnfinishedRuns(
 			!run.parentRunId &&
 			(run.status === "failed" || run.status === "interrupted")
 		) {
-			const fullRun = await readRunRecord(cwd, run.runId).catch(
-				() => undefined,
-			);
+			const fullRun = await readRunRecord(cwd, run.runId).catch(() => undefined);
 			if (isMockRunProvenance(fullRun?.provenance)) continue;
 			unfinished.push(run);
 			continue;
@@ -3167,8 +3579,7 @@ export async function notifyUnfinishedRuns(
 		.slice(0, UNFINISHED_RUN_NOTICE_MAX_RUNS)
 		.map((run) => {
 			const summary = run.taskSummary;
-			const blocked =
-				(summary as { blocked?: number } | undefined)?.blocked ?? 0;
+			const blocked = (summary as { blocked?: number } | undefined)?.blocked ?? 0;
 			const counts = summary
 				? ` (${summary.completed}/${summary.total} tasks completed, ${summary.failed} failed, ${summary.interrupted} interrupted${blocked ? `, ${blocked} blocked` : ""})`
 				: "";
@@ -3243,8 +3654,10 @@ async function selectRunsNeedingUnfinishedNotice<
 			(entry.updatedAt ?? "") === (run.updatedAt ?? "");
 		if (
 			unchanged &&
-			!(changedAcknowledgements.has(run.runId) &&
-				lastNotifiedMs <= Date.parse(changedAcknowledgements.get(run.runId)!)) &&
+			!(
+				changedAcknowledgements.has(run.runId) &&
+				lastNotifiedMs <= Date.parse(changedAcknowledgements.get(run.runId)!)
+			) &&
 			Number.isFinite(lastNotifiedMs) &&
 			nowMs - lastNotifiedMs < UNFINISHED_RUN_NOTICE_DEDUPE_MS
 		) {
@@ -3307,7 +3720,9 @@ async function handleWorkflowCommand(
 		}
 
 		if (action === "notices") {
-			const noticeArgs = tokenizeWorkflowRunArgs(args).slice(1).map(token => token.text);
+			const noticeArgs = tokenizeWorkflowRunArgs(args)
+				.slice(1)
+				.map((token) => token.text);
 			emit(ctx, await executeWorkflowNoticesCommand(ctx.cwd, noticeArgs), "info");
 			return;
 		}
@@ -3367,9 +3782,7 @@ async function handleWorkflowCommand(
 					"/workflow profile requires the interactive Pi TUI; it does not run in RPC/print/headless mode.",
 				);
 			if (tokens.length > 2)
-				throw new Error(
-					"Usage: /workflow profile [workflow-name-or-path]",
-				);
+				throw new Error("Usage: /workflow profile [workflow-name-or-path]");
 			const profileUi = createNativeWorkflowProfileUi(ctx.ui);
 			let selectedWorkflowRef: string | undefined;
 			while (true) {
@@ -3382,9 +3795,17 @@ async function handleWorkflowCommand(
 						workflows,
 						(specPath) => loadWorkflowSpec(specPath, ctx.cwd),
 					);
-					workflowRef = await selectWorkflowProfileTarget(ctx.ui, choices, selectedWorkflowRef);
+					workflowRef = await selectWorkflowProfileTarget(
+						ctx.ui,
+						choices,
+						selectedWorkflowRef,
+					);
 					if (workflowRef === undefined) {
-						emit(ctx, "Workflow profile selection cancelled; no settings were saved.", "info");
+						emit(
+							ctx,
+							"Workflow profile selection cancelled; no settings were saved.",
+							"info",
+						);
 						return;
 					}
 					selectedWorkflowRef = workflowRef;
@@ -3401,10 +3822,19 @@ async function handleWorkflowCommand(
 				});
 				if (result.status === "saved") return;
 				if (tokens[1]) {
-					emit(ctx, "Workflow profile selection cancelled; no settings were saved.", "info");
+					emit(
+						ctx,
+						"Workflow profile selection cancelled; no settings were saved.",
+						"info",
+					);
 					return;
 				}
 			}
+		}
+
+		if (action === "auto") {
+			await handleWorkflowAutoRequest(args, ctx, api);
+			return;
 		}
 
 		if (action === "run") {
@@ -3412,11 +3842,7 @@ async function handleWorkflowCommand(
 			const launchCapture = workflowSlashLaunchCapture(
 				"run",
 				"named-workflow",
-				parsed.route === false
-					? "off"
-					: parsed.route === true
-						? "explicit-on"
-						: "default-on",
+				"off",
 				parsed.task,
 				args,
 			);
@@ -3428,24 +3854,6 @@ async function handleWorkflowCommand(
 					? { model: parsed.model, thinking: parsed.thinking }
 					: undefined;
 			const uiSessionSignal = workflowUiSignalForCwd(ctx.cwd);
-			if (parsed.route ?? true) {
-				await handleRoutedRunRequest(
-					{
-						requestedWorkflow: specPath,
-						task: parsed.task,
-						detach: parsed.detach,
-						forceNew: Boolean(parsed.forceNew),
-						runtimeOverrides,
-						executionProfile: parsed.profile,
-						launch: launchCapture,
-						usage: '/workflow run <workflow-name-or-path> "<task>"',
-					},
-					ctx,
-					api,
-					uiSessionSignal,
-				);
-				return;
-			}
 			const preflightResult = await withWorkflowLaunchForeground(
 				ctx,
 				`Validating ${specPath}…`,
@@ -3529,7 +3937,7 @@ async function handleWorkflowCommand(
 			const launchCapture = workflowSlashLaunchCapture(
 				"dynamic",
 				"direct-dynamic",
-				parsed.route ? "explicit-on" : "off",
+				"off",
 				parsed.task,
 				args,
 			);
@@ -3538,22 +3946,6 @@ async function handleWorkflowCommand(
 					? { model: parsed.model, thinking: parsed.thinking }
 					: undefined;
 			const uiSessionSignal = workflowUiSignalForCwd(ctx.cwd);
-			if (parsed.route) {
-				await handleRoutedRunRequest(
-					{
-						task: parsed.task,
-						detach: parsed.detach,
-						forceNew: Boolean(parsed.forceNew),
-						runtimeOverrides,
-						launch: launchCapture,
-						usage: '/workflow dynamic --route "<task>"',
-					},
-					ctx,
-					api,
-					uiSessionSignal,
-				);
-				return;
-			}
 			const preflightResult = await withWorkflowLaunchForeground(
 				ctx,
 				"Validating dynamic workflow…",
@@ -3660,11 +4052,7 @@ async function handleWorkflowCommand(
 		}
 
 		if (action === "wait") {
-			const runId = requireArg(
-				tokens,
-				1,
-				"/workflow wait <run-id> [timeout-ms]",
-			);
+			const runId = requireArg(tokens, 1, "/workflow wait <run-id> [timeout-ms]");
 			const run = await waitForRun(
 				ctx.cwd,
 				runId,
@@ -3714,7 +4102,11 @@ async function handleWorkflowCommand(
 		}
 
 		if (action === "prune") {
-			const options = parseWorkflowPruneArgs(tokenizeWorkflowRunArgs(args).slice(1).map(token => token.text));
+			const options = parseWorkflowPruneArgs(
+				tokenizeWorkflowRunArgs(args)
+					.slice(1)
+					.map((token) => token.text),
+			);
 			const summary = await pruneWorkflowRuns(ctx.cwd, options);
 			emit(
 				ctx,
@@ -3726,9 +4118,7 @@ async function handleWorkflowCommand(
 			return;
 		}
 
-		throw new Error(
-			`Unknown /workflow action "${action}". Try /workflow help.`,
-		);
+		throw new Error(`Unknown /workflow action "${action}". Try /workflow help.`);
 	} catch (error) {
 		emit(ctx, formatError(error), "error");
 		if (!ctx.hasUI) process.exitCode = 1;
@@ -3867,23 +4257,18 @@ function emitWorkflowLaunchNotice(
 	ctx: ExtensionCommandContext,
 	request:
 		| { kind: "workflow"; workflow: string; detach: boolean }
-		| { kind: "dynamic"; detach: boolean }
-		| { kind: "routed-workflow"; workflow: string | undefined; detach: boolean }
-		| { kind: "routed-dynamic"; workflow?: undefined; detach: boolean },
+		| { kind: "dynamic"; detach: boolean },
 ): void {
 	if (ctx.hasUI) return;
 	const label =
 		request.kind === "dynamic"
 			? "dynamic workflow"
-			: request.kind === "routed-dynamic"
-				? "routed dynamic workflow"
-				: request.kind === "routed-workflow"
-					? `routed workflow: ${request.workflow ?? "workflow"}`
-					: `workflow: ${request.workflow}`;
-	const preparation = request.kind.startsWith("routed")
-		? "Routing request and preparing run…"
-		: "Preparing run and scheduling first task…";
-	emit(ctx, `Starting ${label}\n${preparation}`, "info");
+			: `workflow: ${request.workflow}`;
+	emit(
+		ctx,
+		`Starting ${label}\nPreparing run and scheduling first task…`,
+		"info",
+	);
 }
 
 export function parseWorkflowPruneArgs(args: string[]): {
@@ -3899,16 +4284,23 @@ export function parseWorkflowPruneArgs(args: string[]): {
 		else if (arg === "--json") options.json = true;
 		else if (arg === "--keep" || arg === "--older-than") {
 			const key = arg === "--keep" ? "keep" : "olderThanDays";
-			if (options[key] !== undefined) throw new Error(`Duplicate prune option ${arg}`);
+			if (options[key] !== undefined)
+				throw new Error(`Duplicate prune option ${arg}`);
 			const raw = args[++index];
-			if (!raw?.trim() || raw.startsWith("--")) throw new Error(`${arg} requires a numeric value`);
+			if (!raw?.trim() || raw.startsWith("--"))
+				throw new Error(`${arg} requires a numeric value`);
 			options[key] = Number(raw);
-		}
-		else throw new Error(`Unknown prune argument "${arg}"`);
+		} else throw new Error(`Unknown prune argument "${arg}"`);
 	}
-	if (options.keep !== undefined && (!Number.isSafeInteger(options.keep) || options.keep < 0))
+	if (
+		options.keep !== undefined &&
+		(!Number.isSafeInteger(options.keep) || options.keep < 0)
+	)
 		throw new Error("--keep requires a non-negative integer");
-	if (options.olderThanDays !== undefined && (!Number.isFinite(options.olderThanDays) || options.olderThanDays < 0))
+	if (
+		options.olderThanDays !== undefined &&
+		(!Number.isFinite(options.olderThanDays) || options.olderThanDays < 0)
+	)
 		throw new Error("--older-than requires a non-negative number of days");
 	return options;
 }
@@ -3953,7 +4345,6 @@ export function parseWorkflowRunArgs(args: string): {
 	specPath: string;
 	task: string;
 	detach: boolean;
-	route?: boolean;
 	forceNew?: boolean;
 	model?: string;
 	thinking?: ThinkingLevel;
@@ -3975,11 +4366,7 @@ export function parseWorkflowRunArgs(args: string): {
 
 	let taskTokenEnd = tokens.length;
 	while (taskTokenEnd > cursor + 1) {
-		const nextEnd = consumeTrailingRunOptionTokens(
-			tokens,
-			taskTokenEnd,
-			parsed,
-		);
+		const nextEnd = consumeTrailingRunOptionTokens(tokens, taskTokenEnd, parsed);
 		if (nextEnd === taskTokenEnd) break;
 		taskTokenEnd = nextEnd;
 	}
@@ -4000,7 +4387,6 @@ export function parseWorkflowRunArgs(args: string): {
 export function parseWorkflowDynamicArgs(args: string): {
 	task: string;
 	detach: boolean;
-	route?: boolean;
 	forceNew?: boolean;
 	model?: string;
 	thinking?: ThinkingLevel;
@@ -4018,16 +4404,13 @@ export function parseWorkflowDynamicArgs(args: string): {
 
 	let taskTokenEnd = tokens.length;
 	while (taskTokenEnd > cursor) {
-		const nextEnd = consumeTrailingRunOptionTokens(
-			tokens,
-			taskTokenEnd,
-			parsed,
-		);
+		const nextEnd = consumeTrailingRunOptionTokens(tokens, taskTokenEnd, parsed);
 		if (nextEnd === taskTokenEnd) break;
 		taskTokenEnd = nextEnd;
 	}
 
-	if (parsed.profile !== undefined) throw new Error("Workflow dynamic does not support --profile");
+	if (parsed.profile !== undefined)
+		throw new Error("Workflow dynamic does not support --profile");
 	assertNoUnconsumedOptions(tokens.slice(cursor, taskTokenEnd));
 	const taskStartToken = tokens[cursor];
 	if (!taskStartToken || taskTokenEnd <= cursor) return { task: "", ...parsed };
@@ -4041,7 +4424,6 @@ export function parseWorkflowDynamicArgs(args: string): {
 
 type WorkflowRunParsedOptions = {
 	detach: boolean;
-	route?: boolean;
 	forceNew?: boolean;
 	model?: string;
 	thinking?: ThinkingLevel;
@@ -4055,12 +4437,22 @@ interface WorkflowRunArgToken {
 	quoted: boolean;
 }
 
+function parseWorkflowAutoTask(args: string): string {
+	const body = args
+		.trim()
+		.replace(/^auto(?:\s+|$)/i, "")
+		.trim();
+	const tokens = tokenizeWorkflowRunArgs(body);
+	assertNoUnconsumedOptions(tokens);
+	return unquoteWorkflowTask(body);
+}
+
 function stripWorkflowRunCommand(input: string): string {
-	return input.replace(/^run(?:\s+|$)/, "");
+	return input.replace(/^run(?:\s+|$)/i, "");
 }
 
 function stripWorkflowDynamicCommand(input: string): string {
-	return input.replace(/^dynamic(?:\s+|$)/, "");
+	return input.replace(/^dynamic(?:\s+|$)/i, "");
 }
 
 function tokenizeWorkflowRunArgs(input: string): WorkflowRunArgToken[] {
@@ -4090,7 +4482,10 @@ function tokenizeWorkflowRunArgs(input: string): WorkflowRunArgToken[] {
 					escaped = true;
 					continue;
 				}
-				if (char === quote) { closed = true; break; }
+				if (char === quote) {
+					closed = true;
+					break;
+				}
 				text += char;
 			}
 			if (!closed) throw new Error("Unterminated quoted workflow argument");
@@ -4110,7 +4505,12 @@ function tokenizeWorkflowRunArgs(input: string): WorkflowRunArgToken[] {
 	return tokens;
 }
 
-const RUN_SCALAR_OPTIONS = ["--model", "--profile", "--thinking", "--reasoning"];
+const RUN_SCALAR_OPTIONS = [
+	"--model",
+	"--profile",
+	"--thinking",
+	"--reasoning",
+];
 
 /** Shared by both ends of run/dynamic input: duplicates never depend on scan order. */
 function consumeLeadingRunOptionTokens(
@@ -4120,21 +4520,31 @@ function consumeLeadingRunOptionTokens(
 ): number {
 	const token = tokens[index];
 	if (!token || token.quoted) return 0;
-	if (token.text === "--detach") { parsed.detach = true; return 1; }
-	if (token.text === "--force-new") { parsed.forceNew = true; return 1; }
-	if (token.text === "--route" || token.text === "--no-route") {
-		const route = token.text === "--route";
-		if (parsed.route !== undefined && parsed.route !== route)
-			throw new Error("Conflicting workflow options --route and --no-route");
-		parsed.route = route;
+	if (token.text === "--detach") {
+		parsed.detach = true;
 		return 1;
+	}
+	if (token.text === "--force-new") {
+		parsed.forceNew = true;
+		return 1;
+	}
+	if (token.text === "--route" || token.text === "--no-route") {
+		throw new Error(
+			`${token.text} is no longer supported: /workflow run and /workflow dynamic execute exactly what you selected. Use /workflow auto "<task>" for a recommendation.`,
+		);
 	}
 	for (const option of RUN_SCALAR_OPTIONS) {
 		const inline = optionValueFromEquals(token.text, option);
 		if (inline === undefined && token.text !== option) continue;
 		const value = inline ?? requiredOptionValue(tokens[index + 1], option);
-		const key = option === "--model" ? "model" : option === "--profile" ? "profile" : "thinking";
-		if (parsed[key] !== undefined) throw new Error(`Duplicate workflow option ${option}`);
+		const key =
+			option === "--model"
+				? "model"
+				: option === "--profile"
+					? "profile"
+					: "thinking";
+		if (parsed[key] !== undefined)
+			throw new Error(`Duplicate workflow option ${option}`);
 		if (key === "thinking") parsed.thinking = parseThinkingLevel(value);
 		else parsed[key] = value;
 		return inline === undefined ? 2 : 1;
@@ -4156,7 +4566,11 @@ function consumeTrailingRunOptionTokens(
 		consumeLeadingRunOptionTokens(tokens.slice(0, end), end - 2, parsed);
 		return end - 2;
 	}
-	const consumed = consumeLeadingRunOptionTokens(tokens.slice(0, end), end - 1, parsed);
+	const consumed = consumeLeadingRunOptionTokens(
+		tokens.slice(0, end),
+		end - 1,
+		parsed,
+	);
 	return end - consumed;
 }
 
@@ -4166,7 +4580,8 @@ function optionValueFromEquals(
 ): string | undefined {
 	if (!text.startsWith(`${option}=`)) return undefined;
 	const value = text.slice(option.length + 1);
-	if (!value.trim()) throw new Error(`Workflow run option ${option} requires a value`);
+	if (!value.trim())
+		throw new Error(`Workflow run option ${option} requires a value`);
 	return value;
 }
 
@@ -4174,15 +4589,23 @@ function requiredOptionValue(
 	token: WorkflowRunArgToken | undefined,
 	option: string,
 ): string {
-	if (!token || !token.text.trim() || (!token.quoted && token.text.startsWith("--")))
+	if (
+		!token ||
+		!token.text.trim() ||
+		(!token.quoted && token.text.startsWith("--"))
+	)
 		throw new Error(`Workflow run option ${option} requires a value`);
 	return token.text;
 }
 
-function assertNoUnconsumedOptions(tokens: readonly WorkflowRunArgToken[]): void {
+function assertNoUnconsumedOptions(
+	tokens: readonly WorkflowRunArgToken[],
+): void {
 	for (const token of tokens) {
 		if (!token.quoted && token.text.startsWith("--"))
-			throw new Error(`Unknown or misplaced workflow option ${token.text}; quote literal task text containing options`);
+			throw new Error(
+				`Unknown or misplaced workflow option ${token.text}; quote literal task text containing options`,
+			);
 	}
 }
 
@@ -4236,7 +4659,16 @@ const WORKFLOW_ACTION_COMPLETIONS = [
 		label: "profile",
 		description: "Configure a workflow execution profile",
 	},
-	{ value: "run", label: "run", description: "Start a workflow run" },
+	{
+		value: "auto",
+		label: "auto",
+		description: "Compare existing paths and confirm a selected launch",
+	},
+	{
+		value: "run",
+		label: "run",
+		description: "Start exactly the named workflow",
+	},
 	{
 		value: "dynamic",
 		label: "dynamic",
@@ -4290,8 +4722,15 @@ export function workflowArgumentCompletions(
 
 function parseWorkflowInteger(text: string, option: string): number {
 	const value = Number(text);
-	if (!/^\d+$/.test(text) || !Number.isSafeInteger(value) || value < 1 || value > 2_147_483_647)
-		throw new Error(`Workflow ${option} requires an integer from 1 to 2147483647`);
+	if (
+		!/^\d+$/.test(text) ||
+		!Number.isSafeInteger(value) ||
+		value < 1 ||
+		value > 2_147_483_647
+	)
+		throw new Error(
+			`Workflow ${option} requires an integer from 1 to 2147483647`,
+		);
 	return value;
 }
 

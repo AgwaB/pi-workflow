@@ -2,6 +2,18 @@
   "schemaVersion": 1,
   "name": "deep-review",
   "description": "Planner-gated deep review workflow: cheap triage selects review lenses, reviewers produce findings, deterministic dedup collapses duplicates, devil's advocate challenges findings, deterministic partition applies verdicts, bounded packet isolation feeds narrative synthesis, and the final renderer writes the full-ledger evidence-backed report.",
+  "routing": {
+    "useWhen": [
+      "A code or design review needs several evidence-grounded lenses and a false-positive challenge step.",
+      "The final artifact is a review report rather than a patch."
+    ],
+    "avoidWhen": [
+      "The task is direct implementation or a tiny coherent diff review."
+    ],
+    "outputs": [
+      "Evidence-backed review findings with dispositions."
+    ]
+  },
   "defaults": {
     "agent": "scout",
     "readOnly": true,

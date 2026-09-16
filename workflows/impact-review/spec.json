@@ -2,6 +2,18 @@
   "schemaVersion": 1,
   "name": "impact-review",
   "description": "Read-only DAG impact review: map a proposed or applied change, analyze contract, state/data, validation, docs/release, and security/performance impact in parallel, then join those lenses into ship-risk and action-plan synthesis without editing files.",
+  "routing": {
+    "useWhen": [
+      "A proposed or applied change needs an impact map across contracts, validation, release, and risk surfaces.",
+      "The requested output is a change-risk or readiness report."
+    ],
+    "avoidWhen": [
+      "The task is direct implementation or general source research."
+    ],
+    "outputs": [
+      "Impact, risk, and action-plan report."
+    ]
+  },
   "defaults": {
     "agent": "scout",
     "readOnly": true,

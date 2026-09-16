@@ -118,12 +118,12 @@ test("actual Pi RPC /workflow emits fallback and malformed launch commands stop 
   [
    "route-prefix",
    '/workflow run --route --no-route deep-research "task"',
-   /Conflicting/,
+   /no longer supported/,
   ],
   [
    "route-suffix",
    '/workflow run deep-research "task" --route --no-route',
-   /Conflicting/,
+   /no longer supported/,
   ],
   [
    "profile",

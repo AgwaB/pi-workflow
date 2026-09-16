@@ -77,6 +77,10 @@ interface CompileOptions {
 	cwd: string;
 	specPath?: string;
 	availableModels?: WorkflowModelInfo[];
+	/** Bounded routing preflight injects frontmatter-only agent metadata. */
+	agentLoader?: (name: string, cwd: string) => Promise<AgentDefinition | undefined>;
+	/** Avoid optional schema/warning file reads while deriving local routing facts. */
+	metadataOnly?: boolean;
 }
 
 interface ArtifactGraphCompilePlanBuildResult {
@@ -732,20 +736,22 @@ export async function compileWorkflow(
 	const foreachSpecDir = options.specPath
 		? dirname(resolve(options.cwd, options.specPath))
 		: options.cwd;
-	compiled.warnings.push(
-		...(await collectForeachPathWarnings(
-			spec.artifactGraph?.stages ?? [],
-			foreachSpecDir,
-		)),
-		...(await collectSourceProjectionWarnings(
-			spec.artifactGraph?.stages ?? [],
-			foreachSpecDir,
-		)),
-		...(await collectWorkflowQualityWarnings(
-			spec.artifactGraph?.stages ?? [],
-			foreachSpecDir,
-		)),
-	);
+	if (!options.metadataOnly) {
+		compiled.warnings.push(
+			...(await collectForeachPathWarnings(
+				spec.artifactGraph?.stages ?? [],
+				foreachSpecDir,
+			)),
+			...(await collectSourceProjectionWarnings(
+				spec.artifactGraph?.stages ?? [],
+				foreachSpecDir,
+			)),
+			...(await collectWorkflowQualityWarnings(
+				spec.artifactGraph?.stages ?? [],
+				foreachSpecDir,
+			)),
+		);
+	}
 	const failurePolicy = compileWorkflowFailurePolicy(spec.artifactGraph);
 	if (failurePolicy) compiled.failurePolicy = failurePolicy;
 	return compiled;
@@ -1431,6 +1437,7 @@ async function compileArtifactGraphPlan(
 			options.cwd,
 			agentCache,
 			"$.defaults.agent",
+			options.agentLoader,
 		);
 		return defaultAgent;
 	};
@@ -1443,6 +1450,7 @@ async function compileArtifactGraphPlan(
 						options.cwd,
 						agentCache,
 						`$.roles.${name}.fromAgent`,
+						options.agentLoader,
 					)
 				: undefined;
 			return compileRole(name, role, sourceAgent);
@@ -1584,6 +1592,7 @@ async function compileArtifactGraphPlan(
 						options.cwd,
 						agentCache,
 						`$.artifactGraph.stages.${jsonKey(stage.id)}.${each?.agent !== undefined ? "each.agent" : "agent"}`,
+						options.agentLoader,
 					);
 		if (!validatedAgentPaths.has(stageAgent.sourcePath)) {
 			validateAgentRuntime(
@@ -2499,10 +2508,13 @@ async function loadWorkflowAgent(
 	cwd: string,
 	cache: Map<string, AgentDefinition>,
 	path: string,
+	agentLoader?: (name: string, cwd: string) => Promise<AgentDefinition | undefined>,
 ): Promise<AgentDefinition> {
 	const cached = cache.get(name);
 	if (cached) return cached;
-	const agent = await loadAgentByName(name, cwd).catch(() => undefined);
+	const agent = await (agentLoader ?? loadAgentByName)(name, cwd).catch(
+		() => undefined,
+	);
 	if (!agent)
 		throw new WorkflowValidationError([
 			{ path, message: `unknown agent "${name}"` },
