@@ -3581,6 +3581,7 @@ test("workflow command completions and run arg parsing preserve task text", () =
 			"roles",
 			"agents",
 			"profile",
+			"auto",
 			"run",
 			"dynamic",
 			"status",

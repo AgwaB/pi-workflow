@@ -7,6 +7,8 @@ import {
 	type ExecutionProfileForeachBatch,
 	type ExecutionProfileStageOverride,
 	type WorkflowProfileRole,
+	type WorkflowCapturedExecutionProfile,
+	type WorkflowRunExecutionProfile,
 } from "./types.js";
 
 /** Stable identity for one complete parsed workflow definition. */
@@ -98,6 +100,76 @@ export function applyExecutionProfileStageOverrides<
 	};
 }
 
+/**
+ * Resolve a declared or UI-captured profile into an immutable stage overlay.
+ * Kept outside the engine so auto selection can bind the exact post-profile
+ * compile input before its separate launch confirmation.
+ */
+export function applyWorkflowExecutionProfile<Spec>(
+	spec: Spec,
+	profileName: string | undefined,
+	profileOverride: WorkflowCapturedExecutionProfile | undefined,
+): { spec: Spec; record?: WorkflowRunExecutionProfile } {
+	const profiles = (
+		spec as {
+			executionProfiles?: Record<
+				string,
+				Record<string, ExecutionProfileStageOverride>
+			>;
+		}
+	).executionProfiles;
+	let selectedName = profileName;
+	let mapping: Record<string, ExecutionProfileStageOverride> | undefined;
+	if (profileName) {
+		mapping = profiles?.[profileName];
+		if (!mapping || typeof mapping !== "object" || Array.isArray(mapping)) {
+			const available = Object.keys(profiles ?? {}).sort((left, right) =>
+				left.localeCompare(right),
+			);
+			throw new Error(
+				available.length
+					? `unknown execution profile "${profileName}"; spec declares: ${available.join(", ")}`
+					: `unknown execution profile "${profileName}"; this workflow declares no executionProfiles`,
+			);
+		}
+	} else if (profileOverride) {
+		selectedName = profileOverride.name;
+		mapping = profileOverride.stageOverrides;
+		if (!mapping || typeof mapping !== "object" || Array.isArray(mapping))
+			throw new Error("pre-resolved execution profile has invalid stageOverrides");
+	}
+	if (!selectedName || !mapping) return { spec };
+	if (typeof selectedName !== "string" || !selectedName.trim())
+		throw new Error("execution profile name is empty or invalid");
+	const graph = (spec as { artifactGraph?: { stages?: unknown[] } })
+		.artifactGraph;
+	if (!graph || !Array.isArray(graph.stages)) {
+		throw new Error(
+			`execution profile "${selectedName}" requires an artifact-graph workflow`,
+		);
+	}
+	const stageOverrides = Object.fromEntries(
+		Object.entries(mapping).map(([stageId, override]) => [
+			stageId,
+			cloneExecutionProfileStageOverride(override),
+		]),
+	);
+	return {
+		spec: applyExecutionProfileStageOverrides(spec as never, stageOverrides, {
+			// Authored profile values preserve each.* precedence; saved UI profiles
+			// deliberately target effective foreach workers.
+			foreachRuntimeTarget: profileName ? "stage" : "each",
+		}) as Spec,
+		record: {
+			name: selectedName,
+			...(profileName === undefined && profileOverride?.definitionFingerprint
+				? { definitionFingerprint: profileOverride.definitionFingerprint }
+				: {}),
+			stageOverrides,
+		},
+	};
+}
+
 export function cloneExecutionProfileStageOverride(
 	override: ExecutionProfileStageOverride,
 ): ExecutionProfileStageOverride {
@@ -107,9 +179,7 @@ export function cloneExecutionProfileStageOverride(
 		...(override.foreachBatch === undefined
 			? {}
 			: {
-					foreachBatch: cloneExecutionProfileForeachBatch(
-						override.foreachBatch,
-					),
+					foreachBatch: cloneExecutionProfileForeachBatch(override.foreachBatch),
 				}),
 	};
 }
@@ -122,9 +192,7 @@ export function cloneExecutionProfileForeachBatch(
 		...(batch.groupBy === undefined
 			? {}
 			: {
-					groupBy: Array.isArray(batch.groupBy)
-						? [...batch.groupBy]
-						: batch.groupBy,
+					groupBy: Array.isArray(batch.groupBy) ? [...batch.groupBy] : batch.groupBy,
 				}),
 	};
 }
@@ -133,10 +201,7 @@ function collectExecutionProfileTargets(
 	spec: ArtifactGraphWorkflowSpec,
 ): ExecutionProfileTarget[] {
 	const targets: ExecutionProfileTarget[] = [];
-	const visit = (
-		stage: Record<string, unknown>,
-		canonicalId: string,
-	): void => {
+	const visit = (stage: Record<string, unknown>, canonicalId: string): void => {
 		targets.push({
 			id: canonicalId,
 			profileRole: profileRoleOf(stage),
@@ -229,11 +294,7 @@ function mapStage(
 				if (!isRecord(profile)) continue;
 				nextLoop = {
 					...nextLoop,
-					[slot]: applyOverride(
-						profile,
-						mapping[`${canonicalId}.$${slot}`],
-						false,
-					),
+					[slot]: applyOverride(profile, mapping[`${canonicalId}.$${slot}`], false),
 				};
 			}
 			next = {
@@ -268,8 +329,9 @@ function applyOverride(
 		...(override.foreachBatch === undefined
 			? {}
 			: {
-					[EXECUTION_PROFILE_FOREACH_BATCH]:
-						cloneExecutionProfileForeachBatch(override.foreachBatch),
+					[EXECUTION_PROFILE_FOREACH_BATCH]: cloneExecutionProfileForeachBatch(
+						override.foreachBatch,
+					),
 				}),
 	};
 }

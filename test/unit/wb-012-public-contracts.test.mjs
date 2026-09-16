@@ -19,16 +19,29 @@ test("workflow name resolution follows documented priority and same-root ambigui
 		const validSpec = `${JSON.stringify({ schemaVersion: 1, defaults: { agent: "scout", readOnly: true, tools: ["read"] }, artifactGraph: { stages: [{ id: "main", type: "single", prompt: "Check." }] } })}\n`;
 		const shared = join(cwd, "workflows", "deep-review", "spec.json");
 		const privateSpec = join(cwd, ".pi", "workflows", "deep-review", "spec.json");
-		const globalSpec = join(home, ".pi", "agent", "workflows", "deep-review", "spec.json");
+		const globalSpec = join(
+			home,
+			".pi",
+			"agent",
+			"workflows",
+			"deep-review",
+			"spec.json",
+		);
 		for (const spec of [shared, privateSpec, globalSpec]) {
 			await mkdir(dirname(spec), { recursive: true });
 			await writeFile(spec, validSpec);
 		}
 		assert.equal((await resolveWorkflowRef("deep-review", cwd)).specPath, shared);
 		await rm(dirname(shared), { recursive: true });
-		assert.equal((await resolveWorkflowRef("deep-review", cwd)).specPath, privateSpec);
+		assert.equal(
+			(await resolveWorkflowRef("deep-review", cwd)).specPath,
+			privateSpec,
+		);
 		await rm(dirname(privateSpec), { recursive: true });
-		assert.equal((await resolveWorkflowRef("deep-review", cwd)).specPath, globalSpec);
+		assert.equal(
+			(await resolveWorkflowRef("deep-review", cwd)).specPath,
+			globalSpec,
+		);
 		await rm(dirname(globalSpec), { recursive: true });
 		assert.match(
 			(await resolveWorkflowRef("deep-review", cwd)).specPath,
@@ -58,15 +71,19 @@ test("public command and troubleshooting docs mirror runtime help", async () => 
 		readRoot("src/index.ts"),
 	]);
 	for (const command of [
-		'/workflow run [--no-route] [--model MODEL] [--thinking LEVEL] [--profile NAME] <workflow-name-or-path> "<task>" [--detach] [--force-new]',
-		'/workflow dynamic [--route] [--model MODEL] [--thinking LEVEL] "<task>" [--detach] [--force-new]',
+		'/workflow auto "<task>"',
+		'/workflow run [--model MODEL] [--thinking LEVEL] [--profile NAME] <workflow-name-or-path> "<task>" [--detach] [--force-new]',
+		'/workflow dynamic [--model MODEL] [--thinking LEVEL] "<task>" [--detach] [--force-new]',
 		"/workflow show [--raw] <run-id-or-workflow-name>",
 		"/workflow logs <run-id> [task-id-or-spec-id] [lines]",
 	]) {
 		assert.match(index, new RegExp(escapeRegExp(command)));
 		assert.ok(usage.includes(command), `usage missing command: ${command}`);
 	}
-	assert.equal((usage.match(/\| `\/workflow stop <run-id>` \|/g) ?? []).length, 1);
+	assert.equal(
+		(usage.match(/\| `\/workflow stop <run-id>` \|/g) ?? []).length,
+		1,
+	);
 	for (const movedDetail of [
 		/### Diagnose a failed run/,
 		/inspect <run-id> --failures --results/,
@@ -79,24 +96,29 @@ test("public command and troubleshooting docs mirror runtime help", async () => 
 	}
 });
 
-test("authoring skills describe all storage scopes and exact edge/support shapes", async () => {
+test("workflow-guide owns authoring detail while execution-router permits bounded discovery only", async () => {
 	const [guide, router, usage, bundled] = await Promise.all([
 		readRoot("skills/workflow-guide/SKILL.md"),
 		readRoot("skills/execution-router/SKILL.md"),
 		readRoot("docs/usage.md"),
 		readRoot("workflows/README.md"),
 	]);
-	for (const text of [guide, router]) {
+	for (const text of [guide]) {
 		assert.match(text, /project-private/);
 		assert.match(text, /project-shared/);
 		assert.match(text, /user\/global/);
 	}
 	assert.match(guide, /`single\.from`/);
 	assert.match(guide, /`after` is order-only/);
-	assert.match(router, /omit `type` and declare `support:/);
-	assert.doesNotMatch(router, /type: single \| foreach \| reduce \| dag \| support helper/);
-	assert.match(router, /`loop` and `dynamic` are supported but escalation-only/);
-	assert.match(router, /do not edit the installed package bundle in place/);
+	assert.match(router, /bounded read-only discovery/i);
+	assert.match(router, /`workflow_list`/);
+	assert.match(router, /Never invoke `workflow_run`, `workflow_dynamic`, `\/workflow run`, `\/workflow dynamic`, or `\/workflow auto`/);
+	assert.match(router, /separate authoring needed/i);
+	assert.doesNotMatch(router, /project-private/);
+	assert.match(
+		router,
+		/Do not require a graph, schema, helper, storage layout, task packet, promotion criteria/i,
+	);
 	for (const text of [usage, bundled]) {
 		const shared = text.indexOf("<cwd>/workflows/");
 		const privateRoot = text.indexOf("<cwd>/.pi/workflows/");

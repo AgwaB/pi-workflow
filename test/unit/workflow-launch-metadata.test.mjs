@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
 	chmod,
 	link,
@@ -16,7 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { runWorkflowSpec } from "../../.tmp/unit/engine.js";
+import { runDynamicTask, runWorkflowSpec } from "../../.tmp/unit/engine.js";
 import {
 	isWorkflowRunLaunchMetadata,
 	readWorkflowLaunchCommandArtifact,
@@ -128,188 +129,325 @@ test("launch metadata validation is closed and artifact reads fail closed on tam
 	}
 });
 
-test(
-	"launch artifact rejects symlinked workflow roots, run directories, and artifacts",
-	{ skip: process.platform === "win32" },
-	async () => {
-		const secret = "/workflow run symlink-sensitive";
-		const rootCwd = await mkdtemp(join(tmpdir(), "piwf-launch-root-link-"));
-		const runCwd = await mkdtemp(join(tmpdir(), "piwf-launch-run-link-"));
-		const artifactCwd = await mkdtemp(
-			join(tmpdir(), "piwf-launch-artifact-link-"),
+test("v2 auto launch metadata is distinct, strict, and cannot widen v1", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "piwf-launch-auto-v2-"));
+	const runId = "workflow_auto_v2";
+	try {
+		const command = await writeWorkflowLaunchCommandArtifact(
+			cwd,
+			runId,
+			'/workflow auto "review this"',
 		);
-		const outside = await mkdtemp(join(tmpdir(), "piwf-launch-outside-"));
-		try {
-			await mkdir(join(rootCwd, ".pi"), { recursive: true });
-			await symlink(outside, join(rootCwd, ".pi", "workflows"));
-			await assert.rejects(
-				() =>
-					writeWorkflowLaunchCommandArtifact(
-						rootCwd,
-						"workflow_root_link",
-						secret,
-					),
-				/Unsafe workflow launch artifact path/,
-			);
-
-			await mkdir(join(runCwd, ".pi", "workflows"), { recursive: true });
-			await symlink(outside, workflowRunDir(runCwd, "workflow_run_link"));
-			await assert.rejects(
-				() =>
-					writeWorkflowLaunchCommandArtifact(
-						runCwd,
-						"workflow_run_link",
-						secret,
-					),
-				/Unsafe workflow launch artifact path/,
-			);
-
-			const runId = "workflow_artifact_link";
-			const command = await writeWorkflowLaunchCommandArtifact(
-				artifactCwd,
-				runId,
-				secret,
-			);
-			const artifact = join(workflowRunDir(artifactCwd, runId), "launch-command.txt");
-			const outsideTarget = join(outside, "outside-command.txt");
-			await writeFile(outsideTarget, "outside remains unchanged", { mode: 0o600 });
-			await rm(artifact);
-			await symlink(outsideTarget, artifact);
-			await assert.rejects(
-				() =>
-					readWorkflowLaunchCommandArtifact(artifactCwd, {
-						runId,
-						launch: launchWith(command),
-					}),
-				/verification failed/,
-			);
-			await assert.rejects(
-				() =>
-					writeWorkflowLaunchCommandArtifact(artifactCwd, runId, secret),
-				/Unsafe workflow launch artifact path/,
-			);
-			assert.equal(await readFile(outsideTarget, "utf8"), "outside remains unchanged");
-			assert.equal(
-				(await readdir(outside)).some((name) => name === "launch-command.txt"),
-				false,
-			);
-		} finally {
-			await rm(rootCwd, { recursive: true, force: true });
-			await rm(runCwd, { recursive: true, force: true });
-			await rm(artifactCwd, { recursive: true, force: true });
-			await rm(outside, { recursive: true, force: true });
-		}
-	},
-);
-
-test(
-	"launch artifact read and commit reject path swaps without disclosing command bytes",
-	{ skip: process.platform === "win32" },
-	async () => {
-		const cwd = await mkdtemp(join(tmpdir(), "piwf-launch-swap-"));
-		const outside = await mkdtemp(join(tmpdir(), "piwf-launch-swap-outside-"));
-		const readRunId = "workflow_read_swap";
-		const writeRunId = "workflow_write_swap";
-		const readSecret = "/workflow run original-read-command";
-		const writeSecret = "/workflow run original-write-command";
-		try {
-			const command = await writeWorkflowLaunchCommandArtifact(
-				cwd,
-				readRunId,
-				readSecret,
-			);
-			setWorkflowLaunchArtifactTestHooksForTests({
-				async onAfterReadOpen({ artifactPath }) {
-					await rename(artifactPath, `${artifactPath}.opened`);
-					await symlink(join(outside, "replacement.txt"), artifactPath);
-				},
-			});
-			await writeFile(join(outside, "replacement.txt"), readSecret, {
-				mode: 0o600,
-			});
-			await assert.rejects(
-				() =>
-					readWorkflowLaunchCommandArtifact(cwd, {
-						runId: readRunId,
-						launch: launchWith(command),
-					}),
-				/verification failed/,
-			);
-
-			setWorkflowLaunchArtifactTestHooksForTests({
-				async onBeforeWriteRename() {
-					const original = workflowRunDir(cwd, writeRunId);
-					await rename(original, join(outside, "detached-run"));
-					await mkdir(join(outside, "replacement-run"));
-					await symlink(join(outside, "replacement-run"), original);
-				},
-			});
-			await assert.rejects(
-				() =>
-					writeWorkflowLaunchCommandArtifact(cwd, writeRunId, writeSecret),
-				/Unsafe workflow launch artifact path/,
-			);
-			assert.deepEqual(await readdir(join(outside, "replacement-run")), []);
-			for (const name of await readdir(join(outside, "detached-run"))) {
-				const contents = await readFile(join(outside, "detached-run", name));
-				assert.equal(contents.includes(Buffer.from(writeSecret)), false);
-			}
-		} finally {
-			setWorkflowLaunchArtifactTestHooksForTests();
-			await rm(cwd, { recursive: true, force: true });
-			await rm(outside, { recursive: true, force: true });
-		}
-	},
-);
-
-test(
-	"launch artifact hard-link races fail closed and zero escaped command bytes",
-	{ skip: process.platform === "win32" },
-	async () => {
-		const cwd = await mkdtemp(join(tmpdir(), "piwf-launch-hardlink-"));
-		const outside = await mkdtemp(
-			join(tmpdir(), "piwf-launch-hardlink-outside-"),
+		const task = "review this";
+		const launch = {
+			schema: "pi-workflow-run-launch-v2",
+			source: { kind: "slash-command", action: "auto" },
+			requestKind: "named-workflow",
+			routingMode: "auto-confirmed",
+			profile: { kind: "base" },
+			task: { characters: task.length, lines: 1 },
+			selection: {
+				recommendation: "named-workflow",
+				selected: "named-workflow",
+				candidateId: "a".repeat(64),
+				candidateIdentitySha256: "b".repeat(64),
+				taskSha256: createHash("sha256").update(task).digest("hex"),
+				confirmed: true,
+				effectiveRuntime: { thinking: "medium" },
+			},
+			command,
+		};
+		assert.equal(isWorkflowRunLaunchMetadata(launch), true);
+		assert.equal(
+			isWorkflowRunLaunchMetadata({
+				...launch,
+				selection: { ...launch.selection, recommendation: null },
+			}),
+			true,
+			"an explicitly unranked local manual fallback is valid v2 provenance",
 		);
-		const secret = "/workflow run hardlink-race-secret";
-		try {
-			for (const phase of ["before", "after"]) {
-				const runId = `workflow_hardlink_${phase}`;
-				const escaped = join(outside, `${phase}.txt`);
-				setWorkflowLaunchArtifactTestHooksForTests(
-					phase === "before"
-						? {
-								async onBeforeWriteRename({ tempPath }) {
-									await link(tempPath, escaped);
-								},
-							}
-						: {
-								async onAfterWriteRename({ artifactPath }) {
-									await link(artifactPath, escaped);
-								},
+		assert.equal(
+			isWorkflowRunLaunchMetadata({
+				...launch,
+				selection: { ...launch.selection, recommendation: "direct" },
+			}),
+			false,
+		);
+		assert.equal(
+			isWorkflowRunLaunchMetadata({
+				...launch,
+				selection: { ...launch.selection, confirmed: false },
+			}),
+			false,
+		);
+		assert.equal(
+			isWorkflowRunLaunchMetadata({
+				...launch,
+				source: { kind: "slash-command", action: "run" },
+			}),
+			false,
+		);
+		assert.equal(
+			isWorkflowRunLaunchMetadata({
+				...launch,
+				requestKind: "direct-dynamic",
+				selection: { ...launch.selection, selected: "named-workflow" },
+			}),
+			false,
+		);
+		assert.equal(
+			isWorkflowRunLaunchMetadata({
+				...launch,
+				schema: "pi-workflow-run-launch-v1",
+				routingMode: "auto-confirmed",
+			}),
+			false,
+		);
+		const specPath = join(cwd, "workflows", "missing-binding", "spec.json");
+		await mkdir(join(cwd, "workflows", "missing-binding"), { recursive: true });
+		await writeFile(
+			specPath,
+			JSON.stringify({
+				schemaVersion: 1,
+				name: "missing-binding",
+				defaults: { agent: "scout", readOnly: true, tools: ["read"] },
+				artifactGraph: {
+					stages: [{ id: "main", type: "single", prompt: "Check." }],
+				},
+			}),
+		);
+		await assert.rejects(
+			() =>
+				runWorkflowSpec(specPath, cwd, {
+					task,
+					launch: {
+						...launch,
+						command: { state: "captured", text: '/workflow auto "review this"' },
+					},
+				}),
+			/missing its in-memory selection binding/,
+		);
+		await assert.rejects(
+			() =>
+				runWorkflowSpec(specPath, cwd, {
+					task,
+					launch: {
+						...launch,
+						command: {
+							state: "captured",
+							text: '/workflow run missing-binding "review this"',
+						},
+					},
+				}),
+			/Invalid workflow launch metadata/,
+		);
+		const forgedDynamic = {
+			...launch,
+			requestKind: "direct-dynamic",
+			profile: { kind: "not-applicable" },
+			selection: {
+				...launch.selection,
+				recommendation: "direct-dynamic",
+				selected: "direct-dynamic",
+			},
+		};
+		assert.equal(isWorkflowRunLaunchMetadata(forgedDynamic), true);
+		await assert.rejects(
+			() =>
+				runWorkflowSpec(specPath, cwd, {
+					task,
+					launch: {
+						...forgedDynamic,
+						command: { state: "captured", text: '/workflow auto "review this"' },
+					},
+				}),
+			/does not match the requested execution path/,
+		);
+		await assert.rejects(
+			() =>
+				runDynamicTask(cwd, {
+					task,
+					launch: {
+						...forgedDynamic,
+						command: { state: "captured", text: '/workflow auto "review this"' },
+					},
+				}),
+			/missing its in-memory selection binding/,
+		);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("launch artifact rejects symlinked workflow roots, run directories, and artifacts", {
+	skip: process.platform === "win32",
+}, async () => {
+	const secret = "/workflow run symlink-sensitive";
+	const rootCwd = await mkdtemp(join(tmpdir(), "piwf-launch-root-link-"));
+	const runCwd = await mkdtemp(join(tmpdir(), "piwf-launch-run-link-"));
+	const artifactCwd = await mkdtemp(
+		join(tmpdir(), "piwf-launch-artifact-link-"),
+	);
+	const outside = await mkdtemp(join(tmpdir(), "piwf-launch-outside-"));
+	try {
+		await mkdir(join(rootCwd, ".pi"), { recursive: true });
+		await symlink(outside, join(rootCwd, ".pi", "workflows"));
+		await assert.rejects(
+			() =>
+				writeWorkflowLaunchCommandArtifact(rootCwd, "workflow_root_link", secret),
+			/Unsafe workflow launch artifact path/,
+		);
+
+		await mkdir(join(runCwd, ".pi", "workflows"), { recursive: true });
+		await symlink(outside, workflowRunDir(runCwd, "workflow_run_link"));
+		await assert.rejects(
+			() =>
+				writeWorkflowLaunchCommandArtifact(runCwd, "workflow_run_link", secret),
+			/Unsafe workflow launch artifact path/,
+		);
+
+		const runId = "workflow_artifact_link";
+		const command = await writeWorkflowLaunchCommandArtifact(
+			artifactCwd,
+			runId,
+			secret,
+		);
+		const artifact = join(
+			workflowRunDir(artifactCwd, runId),
+			"launch-command.txt",
+		);
+		const outsideTarget = join(outside, "outside-command.txt");
+		await writeFile(outsideTarget, "outside remains unchanged", { mode: 0o600 });
+		await rm(artifact);
+		await symlink(outsideTarget, artifact);
+		await assert.rejects(
+			() =>
+				readWorkflowLaunchCommandArtifact(artifactCwd, {
+					runId,
+					launch: launchWith(command),
+				}),
+			/verification failed/,
+		);
+		await assert.rejects(
+			() => writeWorkflowLaunchCommandArtifact(artifactCwd, runId, secret),
+			/Unsafe workflow launch artifact path/,
+		);
+		assert.equal(
+			await readFile(outsideTarget, "utf8"),
+			"outside remains unchanged",
+		);
+		assert.equal(
+			(await readdir(outside)).some((name) => name === "launch-command.txt"),
+			false,
+		);
+	} finally {
+		await rm(rootCwd, { recursive: true, force: true });
+		await rm(runCwd, { recursive: true, force: true });
+		await rm(artifactCwd, { recursive: true, force: true });
+		await rm(outside, { recursive: true, force: true });
+	}
+});
+
+test("launch artifact read and commit reject path swaps without disclosing command bytes", {
+	skip: process.platform === "win32",
+}, async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "piwf-launch-swap-"));
+	const outside = await mkdtemp(join(tmpdir(), "piwf-launch-swap-outside-"));
+	const readRunId = "workflow_read_swap";
+	const writeRunId = "workflow_write_swap";
+	const readSecret = "/workflow run original-read-command";
+	const writeSecret = "/workflow run original-write-command";
+	try {
+		const command = await writeWorkflowLaunchCommandArtifact(
+			cwd,
+			readRunId,
+			readSecret,
+		);
+		setWorkflowLaunchArtifactTestHooksForTests({
+			async onAfterReadOpen({ artifactPath }) {
+				await rename(artifactPath, `${artifactPath}.opened`);
+				await symlink(join(outside, "replacement.txt"), artifactPath);
+			},
+		});
+		await writeFile(join(outside, "replacement.txt"), readSecret, {
+			mode: 0o600,
+		});
+		await assert.rejects(
+			() =>
+				readWorkflowLaunchCommandArtifact(cwd, {
+					runId: readRunId,
+					launch: launchWith(command),
+				}),
+			/verification failed/,
+		);
+
+		setWorkflowLaunchArtifactTestHooksForTests({
+			async onBeforeWriteRename() {
+				const original = workflowRunDir(cwd, writeRunId);
+				await rename(original, join(outside, "detached-run"));
+				await mkdir(join(outside, "replacement-run"));
+				await symlink(join(outside, "replacement-run"), original);
+			},
+		});
+		await assert.rejects(
+			() => writeWorkflowLaunchCommandArtifact(cwd, writeRunId, writeSecret),
+			/Unsafe workflow launch artifact path/,
+		);
+		assert.deepEqual(await readdir(join(outside, "replacement-run")), []);
+		for (const name of await readdir(join(outside, "detached-run"))) {
+			const contents = await readFile(join(outside, "detached-run", name));
+			assert.equal(contents.includes(Buffer.from(writeSecret)), false);
+		}
+	} finally {
+		setWorkflowLaunchArtifactTestHooksForTests();
+		await rm(cwd, { recursive: true, force: true });
+		await rm(outside, { recursive: true, force: true });
+	}
+});
+
+test("launch artifact hard-link races fail closed and zero escaped command bytes", {
+	skip: process.platform === "win32",
+}, async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "piwf-launch-hardlink-"));
+	const outside = await mkdtemp(join(tmpdir(), "piwf-launch-hardlink-outside-"));
+	const secret = "/workflow run hardlink-race-secret";
+	try {
+		for (const phase of ["before", "after"]) {
+			const runId = `workflow_hardlink_${phase}`;
+			const escaped = join(outside, `${phase}.txt`);
+			setWorkflowLaunchArtifactTestHooksForTests(
+				phase === "before"
+					? {
+							async onBeforeWriteRename({ tempPath }) {
+								await link(tempPath, escaped);
 							},
-				);
-				await assert.rejects(
-					() => writeWorkflowLaunchCommandArtifact(cwd, runId, secret),
-					/Unsafe workflow launch artifact path/,
-				);
-				assert.equal(await readFile(escaped, "utf8"), "");
-				await assert.rejects(() => stat(workflowRunPath(cwd, runId)), {
-					code: "ENOENT",
-				});
-				await assert.rejects(
-					() =>
-						stat(join(workflowRunDir(cwd, runId), "launch-command.txt")),
-					{ code: "ENOENT" },
-				);
-				setWorkflowLaunchArtifactTestHooksForTests();
-			}
-		} finally {
+						}
+					: {
+							async onAfterWriteRename({ artifactPath }) {
+								await link(artifactPath, escaped);
+							},
+						},
+			);
+			await assert.rejects(
+				() => writeWorkflowLaunchCommandArtifact(cwd, runId, secret),
+				/Unsafe workflow launch artifact path/,
+			);
+			assert.equal(await readFile(escaped, "utf8"), "");
+			await assert.rejects(() => stat(workflowRunPath(cwd, runId)), {
+				code: "ENOENT",
+			});
+			await assert.rejects(
+				() => stat(join(workflowRunDir(cwd, runId), "launch-command.txt")),
+				{ code: "ENOENT" },
+			);
 			setWorkflowLaunchArtifactTestHooksForTests();
-			await rm(cwd, { recursive: true, force: true });
-			await rm(outside, { recursive: true, force: true });
 		}
-	},
-);
+	} finally {
+		setWorkflowLaunchArtifactTestHooksForTests();
+		await rm(cwd, { recursive: true, force: true });
+		await rm(outside, { recursive: true, force: true });
+	}
+});
 
 test("sidecar write failure prevents run record publication", async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "piwf-launch-write-failure-"));
@@ -362,8 +500,7 @@ test("sidecar write failure prevents run record publication", async () => {
 			code: "ENOENT",
 		});
 		await assert.rejects(
-			() =>
-				stat(join(workflowRunDir(cwd, runId), "launch-command.txt")),
+			() => stat(join(workflowRunDir(cwd, runId), "launch-command.txt")),
 			{ code: "ENOENT" },
 		);
 		for (const name of await readdir(workflowRunDir(cwd, runId))) {

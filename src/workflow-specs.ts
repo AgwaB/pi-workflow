@@ -1,4 +1,12 @@
-import { readFile, readdir, stat } from "node:fs/promises";
+import {
+	lstat,
+	open,
+	opendir,
+	readFile,
+	readdir,
+	realpath,
+	stat,
+} from "node:fs/promises";
 import {
 	basename,
 	dirname,
@@ -7,12 +15,20 @@ import {
 	join,
 	relative,
 	resolve,
+	sep,
 } from "node:path";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
-import { isArtifactGraphWorkflowSpecShape } from "./artifact-graph-schema.js";
+import {
+	isArtifactGraphWorkflowSpecShape,
+	parseArtifactGraphWorkflowSpec,
+} from "./artifact-graph-schema.js";
 import { piAgentDir } from "./pi-agent-dir.js";
-import { WorkflowValidationError } from "./types.js";
+import {
+	type ArtifactGraphWorkflowSpec,
+	WorkflowValidationError,
+} from "./types.js";
 
 const SPEC_EXTENSIONS = new Set([".json"]);
 const PACKAGE_WORKFLOW_ROOT = resolve(
@@ -25,6 +41,41 @@ const RESERVED_WORKFLOW_FILES = new Set([
 	"index-supervisor-error.json",
 ]);
 const SPEC_SCAN_CONCURRENCY = 16;
+
+/** Frozen auto-routing catalog bounds; see internal/maintenance/.../BOUNDS.md. */
+export const WORKFLOW_ROUTING_CATALOG_BOUNDS = Object.freeze({
+	maxCandidates: 48,
+	maxSpecBytes: 65_536,
+	maxAggregateBytes: 524_288,
+	maxRootEntries: 256,
+	maxJsonDepth: 16,
+	maxJsonNodes: 4_096,
+	ioConcurrency: 8,
+});
+
+class RoutingCatalogAggregateLimitError extends Error {}
+
+function assertBoundedRoutingCatalogJson(value: unknown): void {
+	const stack: Array<{ value: unknown; depth: number }> = [{ value, depth: 0 }];
+	let nodes = 0;
+	while (stack.length > 0) {
+		const item = stack.pop()!;
+		if (item.depth > WORKFLOW_ROUTING_CATALOG_BOUNDS.maxJsonDepth)
+			throw new Error(
+				`metadata exceeds JSON depth limit ${WORKFLOW_ROUTING_CATALOG_BOUNDS.maxJsonDepth}`,
+			);
+		nodes += 1;
+		if (nodes > WORKFLOW_ROUTING_CATALOG_BOUNDS.maxJsonNodes)
+			throw new Error(
+				`metadata exceeds JSON node limit ${WORKFLOW_ROUTING_CATALOG_BOUNDS.maxJsonNodes}`,
+			);
+		if (!item.value || typeof item.value !== "object") continue;
+		for (const child of Array.isArray(item.value)
+			? item.value
+			: Object.values(item.value as Record<string, unknown>))
+			stack.push({ value: child, depth: item.depth + 1 });
+	}
+}
 
 // Order-preserving bounded-concurrency map: keeps result[i] aligned with
 // items[i] while capping simultaneous filesystem operations so large workflow
@@ -45,7 +96,7 @@ async function mapBounded<T, R>(
 			while (true) {
 				const index = nextIndex;
 				nextIndex += 1;
-				if (index >= items.length) return;
+				if (index >= items.length) return undefined;
 				results[index] = await worker(items[index]!, index);
 			}
 		}),
@@ -77,6 +128,31 @@ interface WorkflowCandidate {
 interface WorkflowRoot {
 	path: string;
 	priority: number;
+	scope: WorkflowRoutingScope;
+}
+
+export type WorkflowRoutingScope =
+	| "project-shared"
+	| "project-private"
+	| "user"
+	| "package";
+
+/** A parsed, bounded metadata-only record for `/workflow auto`. */
+export interface WorkflowRoutingSpecRecord extends WorkflowSpecRecord {
+	scope: WorkflowRoutingScope;
+	priority: number;
+	bytes: number;
+	specSha256: string;
+	spec: ArtifactGraphWorkflowSpec;
+	ambiguousAliases: string[];
+}
+
+export interface WorkflowRoutingCatalog {
+	records: WorkflowRoutingSpecRecord[];
+	/** Candidates enumerated before the fixed cap; not a claim of full-root total. */
+	totalDiscovered: number;
+	partial: boolean;
+	issues: Array<{ specPath?: string; reason: string }>;
 }
 
 export async function resolveWorkflowRef(
@@ -109,7 +185,8 @@ export async function resolveWorkflowRef(
 		throw new WorkflowValidationError([
 			{
 				path: trimmed,
-				message: "workflow spec file not found (expected a .json spec or a bundle directory containing spec.json)",
+				message:
+					"workflow spec file not found (expected a .json spec or a bundle directory containing spec.json)",
 			},
 		]);
 	}
@@ -158,14 +235,16 @@ export async function listWorkflows(
 				// Discovery is a user-facing registry. Do not advertise a ref that
 				// the name resolver would reject (explicit path refs remain valid).
 				if (aliases.length === 0) return [];
-				return [{
-					name: aliases[1] ?? aliases[0]!,
-					fileName: basename(file),
-					aliases,
-					specPath: file,
-					workflowRoot: workflowRootFor(file, root.path),
-					priority: root.priority,
-				}];
+				return [
+					{
+						name: aliases[1] ?? aliases[0]!,
+						fileName: basename(file),
+						aliases,
+						specPath: file,
+						workflowRoot: workflowRootFor(file, root.path),
+						priority: root.priority,
+					},
+				];
 			});
 		}),
 	);
@@ -174,6 +253,348 @@ export async function listWorkflows(
 		const byName = left.name.localeCompare(right.name);
 		return byName !== 0 ? byName : left.specPath.localeCompare(right.specPath);
 	});
+}
+
+/**
+ * Registry-equivalent, metadata-only catalog for auto routing. It reads only
+ * direct JSON specs/bundle `spec.json` files under the normal four roots; it
+ * never imports helpers/controllers, validates external schemas, or scans run
+ * snapshots. Oversize and malformed entries are reported rather than parsed
+ * partially or silently substituted.
+ */
+export async function listWorkflowRoutingSpecs(
+	cwd: string,
+): Promise<WorkflowRoutingCatalog> {
+	const bounds = WORKFLOW_ROUTING_CATALOG_BOUNDS;
+	const issues: WorkflowRoutingCatalog["issues"] = [];
+	const candidates: Array<{ file: string; root: WorkflowRoot }> = [];
+	// Even an unreadable/oversize entry can win normal resolver precedence.
+	// Reserve its aliases without reading beyond the metadata budget.
+	const aliasClaims: Array<{ file: string; root: WorkflowRoot }> = [];
+	const resolvedPaths = new Map<string, string>();
+	let uncertainPriority = Number.POSITIVE_INFINITY;
+	for (const root of workflowRoots(cwd)) {
+		let discovered: { files: string[]; truncated: boolean };
+		try {
+			discovered = await listRoutingSpecFiles(root.path, bounds.maxRootEntries);
+		} catch (error) {
+			uncertainPriority = Math.min(uncertainPriority, root.priority);
+			issues.push({
+				specPath: root.path,
+				reason: `partial-catalog: could not enumerate workflow root: ${error instanceof Error ? error.message : String(error)}`,
+			});
+			continue;
+		}
+		if (discovered.truncated) {
+			uncertainPriority = Math.min(uncertainPriority, root.priority);
+			issues.push({
+				specPath: root.path,
+				reason: `partial-catalog: root entry limit ${bounds.maxRootEntries} reached`,
+			});
+		}
+		aliasClaims.push(...discovered.files.map((file) => ({ file, root })));
+		for (const file of discovered.files) {
+			if (candidates.length >= bounds.maxCandidates) {
+				issues.push({
+					reason: `partial-catalog: candidate limit ${bounds.maxCandidates} reached`,
+				});
+				break;
+			}
+			candidates.push({ file, root });
+		}
+		// Reaching the cap means lower-priority roots may not have been scanned,
+		// even when this root happened to contain exactly the final record.
+		if (candidates.length >= bounds.maxCandidates) {
+			if (
+				!issues.some(
+					(issue) =>
+						issue.reason ===
+						`partial-catalog: candidate limit ${bounds.maxCandidates} reached`,
+				)
+			)
+				issues.push({
+					reason: `partial-catalog: candidate limit ${bounds.maxCandidates} reached`,
+				});
+			break;
+		}
+	}
+
+	let aggregateBytes = 0;
+	const records: WorkflowRoutingSpecRecord[] = [];
+	for (const candidate of candidates) {
+		let text: string;
+		let bytes: number;
+		let safeFile: string;
+		try {
+			safeFile = await resolveRoutingSpecPath(candidate.file, candidate.root.path);
+			const result = await readUtf8SpecBounded(
+				safeFile,
+				bounds.maxSpecBytes,
+				bounds.maxAggregateBytes - aggregateBytes,
+			);
+			text = result.text;
+			bytes = result.bytes;
+		} catch (error) {
+			if (error instanceof RoutingCatalogAggregateLimitError) {
+				issues.push({
+					specPath: candidate.file,
+					reason: `partial-catalog: aggregate UTF-8 limit ${bounds.maxAggregateBytes} reached`,
+				});
+				break;
+			}
+			issues.push({
+				specPath: candidate.file,
+				reason: error instanceof Error ? error.message : String(error),
+			});
+			continue;
+		}
+		if (aggregateBytes + bytes > bounds.maxAggregateBytes) {
+			issues.push({
+				specPath: candidate.file,
+				reason: `partial-catalog: aggregate UTF-8 limit ${bounds.maxAggregateBytes} reached`,
+			});
+			break;
+		}
+		aggregateBytes += bytes;
+		let spec: ArtifactGraphWorkflowSpec;
+		try {
+			const parsed = JSON.parse(text);
+			assertBoundedRoutingCatalogJson(parsed);
+			if (!isArtifactGraphWorkflowSpecShape(parsed))
+				throw new Error("not an artifact-graph workflow spec");
+			spec = parseArtifactGraphWorkflowSpec(parsed);
+		} catch (error) {
+			issues.push({
+				specPath: candidate.file,
+				reason: `invalid metadata: ${error instanceof Error ? error.message : String(error)}`,
+			});
+			continue;
+		}
+		const aliases = aliasesFor(candidate.file, candidate.root.path);
+		if (aliases.length === 0) continue;
+		resolvedPaths.set(candidate.file, safeFile);
+		records.push({
+			name: aliases[1] ?? aliases[0]!,
+			fileName: basename(candidate.file),
+			aliases,
+			specPath: safeFile,
+			workflowRoot: workflowRootFor(candidate.file, candidate.root.path),
+			scope: candidate.root.scope,
+			priority: candidate.root.priority,
+			bytes,
+			specSha256: createHash("sha256").update(text, "utf8").digest("hex"),
+			spec,
+			ambiguousAliases: [],
+		});
+	}
+
+	const winning = resolveRoutingCatalogAliasWinners(
+		records,
+		aliasClaims.map(({ file, root }) => ({
+			specPath: resolvedPaths.get(file) ?? file,
+			aliases: aliasesFor(file, root.path),
+			priority: root.priority,
+		})),
+		uncertainPriority,
+	);
+	return {
+		records: winning,
+		totalDiscovered: candidates.length,
+		// Any excluded file means this is not a complete comparison universe.
+		// Keep invalid/oversize records visible as issues rather than claiming them unfit.
+		partial: issues.length > 0,
+		issues,
+	};
+}
+
+/**
+ * Resolve catalog precedence by every runnable alias, not just each record's
+ * display name. A lower-priority collision must not make the actual resolver's
+ * higher-priority winner look ambiguous. Collapse aliases that resolve to the
+ * same real spec so one physical workflow cannot create duplicate auto cards.
+ */
+function resolveRoutingCatalogAliasWinners(
+	records: readonly WorkflowRoutingSpecRecord[],
+	claims: readonly Pick<WorkflowRoutingSpecRecord, "specPath" | "aliases" | "priority">[],
+	uncertainPriority: number,
+): WorkflowRoutingSpecRecord[] {
+	const byIdentity = new Map<string, WorkflowRoutingSpecRecord[]>();
+	for (const record of records) {
+		const group = byIdentity.get(record.specPath) ?? [];
+		group.push(record);
+		byIdentity.set(record.specPath, group);
+	}
+
+	const aliasPriorities = new Map<string, Map<string, number>>();
+	for (const claim of claims) {
+		for (const alias of claim.aliases) {
+			const identities = aliasPriorities.get(alias) ?? new Map<string, number>();
+			const previous = identities.get(claim.specPath);
+			if (previous === undefined || claim.priority < previous)
+				identities.set(claim.specPath, claim.priority);
+			aliasPriorities.set(alias, identities);
+		}
+	}
+
+	const winnersByIdentity = new Map<
+		string,
+		{ aliases: string[]; unambiguousAliases: string[]; ambiguousAliases: string[] }
+	>();
+	for (const [alias, identities] of aliasPriorities) {
+		const priority = Math.min(...identities.values());
+		const winners = [...identities.entries()]
+			.filter(([, candidatePriority]) => candidatePriority === priority)
+			.map(([identity]) => identity);
+		for (const identity of winners) {
+			const current = winnersByIdentity.get(identity) ?? {
+				aliases: [],
+				unambiguousAliases: [],
+				ambiguousAliases: [],
+			};
+			current.aliases.push(alias);
+			if (winners.length === 1 && priority < uncertainPriority)
+				current.unambiguousAliases.push(alias);
+			else current.ambiguousAliases.push(alias);
+			winnersByIdentity.set(identity, current);
+		}
+	}
+
+	const winners: WorkflowRoutingSpecRecord[] = [];
+	for (const [identity, group] of byIdentity) {
+		const aliases = winnersByIdentity.get(identity);
+		if (!aliases) continue;
+		const base = [...group].sort(
+			(left, right) =>
+				left.priority - right.priority ||
+				left.specPath.localeCompare(right.specPath),
+		)[0]!;
+		const preferred = base.aliases[1] ?? base.aliases[0];
+		const orderedAliases = [...new Set(aliases.aliases)].sort();
+		const orderedUnambiguous = [...new Set(aliases.unambiguousAliases)].sort();
+		const launchAliases = orderedUnambiguous.length
+			? orderedUnambiguous
+			: orderedAliases;
+		const name =
+			(preferred && launchAliases.includes(preferred) ? preferred : undefined) ??
+			launchAliases[0]!;
+		winners.push({
+			...base,
+			name,
+			aliases: orderedAliases,
+			// Excluded entries and unenumerated higher/equal roots cannot grant
+			// an alias to a lower source merely because it fit the read budget.
+			ambiguousAliases:
+				orderedUnambiguous.length === 0
+					? [...new Set(aliases.ambiguousAliases)].sort()
+					: [],
+		});
+	}
+	return winners.sort(
+		(left, right) =>
+			left.name.localeCompare(right.name) ||
+			left.specPath.localeCompare(right.specPath),
+	);
+}
+
+async function listRoutingSpecFiles(
+	root: string,
+	maxEntries: number,
+): Promise<{ files: string[]; truncated: boolean }> {
+	let directory: Awaited<ReturnType<typeof opendir>>;
+	try {
+		directory = await opendir(root);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT")
+			return { files: [], truncated: false };
+		throw error;
+	}
+	const entries: Array<{
+		name: string;
+		isFile(): boolean;
+		isDirectory(): boolean;
+	}> = [];
+	let truncated = false;
+	for await (const entry of directory) {
+		if (entries.length >= maxEntries) {
+			truncated = true;
+			break;
+		}
+		entries.push(entry);
+	}
+	const files: string[] = [];
+	for (const entry of entries.sort((left, right) =>
+		left.name.localeCompare(right.name),
+	)) {
+		if (entry.isFile() && isSpecFileName(entry.name)) {
+			files.push(join(root, entry.name));
+			continue;
+		}
+		if (!entry.isDirectory()) continue;
+		const bundleRoot = join(root, entry.name);
+		if (await isWorkflowRunStateDirectory(bundleRoot)) continue;
+		const spec = join(bundleRoot, "spec.json");
+		if (await isFile(spec)) files.push(spec);
+	}
+	return { files, truncated };
+}
+
+/** Auto discovery does not follow a bundle spec symlink outside its declared root. */
+async function resolveRoutingSpecPath(
+	file: string,
+	root: string,
+): Promise<string> {
+	const entry = await lstat(file);
+	if (!entry.isFile() || entry.isSymbolicLink())
+		throw new Error("workflow metadata must be a regular non-symlink spec file");
+	const [resolvedRoot, resolvedFile] = await Promise.all([
+		realpath(root),
+		realpath(file),
+	]);
+	const escaped = relative(resolvedRoot, resolvedFile);
+	if (escaped === ".." || escaped.startsWith(`..${sep}`) || isAbsolute(escaped))
+		throw new Error("workflow metadata path escapes its discovery root");
+	return resolvedFile;
+}
+
+async function readUtf8SpecBounded(
+	file: string,
+	maxBytes: number,
+	remainingAggregateBytes: number,
+): Promise<{ text: string; bytes: number }> {
+	const pathBefore = await lstat(file);
+	if (!pathBefore.isFile() || pathBefore.isSymbolicLink())
+		throw new Error("not a regular non-symlink workflow spec file");
+	const handle = await open(file, "r");
+	try {
+		const before = await handle.stat();
+		if (
+			!before.isFile() ||
+			before.dev !== pathBefore.dev ||
+			before.ino !== pathBefore.ino
+		)
+			throw new Error("workflow spec path changed while metadata was opened");
+		if (before.size > maxBytes)
+			throw new Error(`metadata exceeds per-spec UTF-8 limit ${maxBytes}`);
+		if (before.size > remainingAggregateBytes)
+			throw new RoutingCatalogAggregateLimitError();
+		const buffer = Buffer.alloc(before.size);
+		const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+		const [after, pathAfter] = await Promise.all([handle.stat(), lstat(file)]);
+		if (
+			bytesRead !== before.size ||
+			after.size !== before.size ||
+			after.dev !== before.dev ||
+			after.ino !== before.ino ||
+			!pathAfter.isFile() ||
+			pathAfter.isSymbolicLink() ||
+			pathAfter.dev !== before.dev ||
+			pathAfter.ino !== before.ino
+		)
+			throw new Error("workflow spec changed while metadata was read");
+		return { text: buffer.toString("utf8"), bytes: buffer.byteLength };
+	} finally {
+		await handle.close();
+	}
 }
 
 function dedupeWorkflowRecords(
@@ -199,10 +620,14 @@ function dedupeWorkflowRecords(
 
 function workflowRoots(cwd: string): WorkflowRoot[] {
 	return uniqueWorkflowRoots([
-		{ path: resolve(cwd, "workflows"), priority: 0 },
-		{ path: resolve(cwd, ".pi", "workflows"), priority: 1 },
-		{ path: join(piAgentDir(), "workflows"), priority: 2 },
-		{ path: PACKAGE_WORKFLOW_ROOT, priority: 3 },
+		{ path: resolve(cwd, "workflows"), priority: 0, scope: "project-shared" },
+		{
+			path: resolve(cwd, ".pi", "workflows"),
+			priority: 1,
+			scope: "project-private",
+		},
+		{ path: join(piAgentDir(), "workflows"), priority: 2, scope: "user" },
+		{ path: PACKAGE_WORKFLOW_ROOT, priority: 3, scope: "package" },
 	]);
 }
 
@@ -282,10 +707,8 @@ async function listSpecFiles(root: string): Promise<string[]> {
 async function filterRunnableSpecFiles(
 	files: readonly string[],
 ): Promise<string[]> {
-	const checked = await mapBounded(
-		files,
-		SPEC_SCAN_CONCURRENCY,
-		async (file) => ((await isRunnableSpecFile(file)) ? file : null),
+	const checked = await mapBounded(files, SPEC_SCAN_CONCURRENCY, async (file) =>
+		(await isRunnableSpecFile(file)) ? file : null,
 	);
 	return checked.filter((file): file is string => file !== null);
 }

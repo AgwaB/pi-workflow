@@ -29,6 +29,13 @@ import type {
 type NativeUi = ExtensionCommandContext["ui"];
 type PreviewTheme = Pick<Theme, "bold" | "fg">;
 
+/** Small reusable bounded native picker for one-shot launch selection flows. */
+export interface WorkflowNativePickerChoice {
+	value: string;
+	label: string;
+	description?: string;
+}
+
 const MAX_VISIBLE_CHOICES = 10;
 const MAX_PROFILE_WIDTH = 100;
 
@@ -71,6 +78,40 @@ export async function selectWorkflowProfileTarget(
 	);
 }
 
+/** Auto routing uses the same bounded native picker as execution profiles. */
+export async function selectWorkflowAutoChoice(
+	ui: NativeUi,
+	title: string,
+	choices: readonly WorkflowNativePickerChoice[],
+	selected?: string,
+): Promise<string | undefined> {
+	if (choices.length === 0) return undefined;
+	if (!supportsCustomUi(ui)) {
+		const options = choices.map((choice) =>
+			choice.description
+				? `${safeLine(choice.label)} — ${safeLine(choice.description)}`
+				: safeLine(choice.label),
+		);
+		const selectedLabel = await ui.select(title, options);
+		const selectedIndex = options.findIndex((option) => option === selectedLabel);
+		return selectedIndex < 0 ? undefined : choices[selectedIndex]?.value;
+	}
+	return selectNativeItem(
+		ui,
+		title,
+		choices.map((choice) => ({
+			value: choice.value,
+			label: choice.label,
+			description: choice.description,
+		})),
+		{
+			selected,
+			searchable: choices.length > MAX_VISIBLE_CHOICES,
+			cancelLabel: "cancel",
+		},
+	);
+}
+
 /** Adapt Pi's custom-component API to the profile flow's testable UI boundary. */
 export function createNativeWorkflowProfileUi(ui: NativeUi): WorkflowProfileUi {
 	const profileUi: WorkflowProfileUi = {
@@ -100,10 +141,7 @@ export function renderWorkflowProfilePreview(
 	const safeWidth = profileWidth(width);
 	const title = [
 		theme.fg("accent", theme.bold(safeLine(preview.profileName))),
-		theme.fg(
-			"muted",
-			`  stage preview ${preview.page}/${preview.pages}`,
-		),
+		theme.fg("muted", `  stage preview ${preview.page}/${preview.pages}`),
 	].join("");
 	const lines = [fitLine(` ${title}`, safeWidth)];
 	const tableWidth = Math.max(1, safeWidth - TABLE_SIDE_PADDING * 2);
@@ -121,10 +159,7 @@ export function renderWorkflowProfilePreview(
 			),
 		);
 		lines.push(
-			fitLine(
-				theme.fg("borderMuted", ` ${"─".repeat(tableWidth)}`),
-				safeWidth,
-			),
+			fitLine(theme.fg("borderMuted", ` ${"─".repeat(tableWidth)}`), safeWidth),
 		);
 		for (const row of preview.rows) {
 			lines.push(
@@ -220,23 +255,30 @@ async function selectNativeItem(
 		if (item.description) safeItem.description = safeLine(item.description);
 		return safeItem;
 	});
-	const selected = await ui.custom<string | null>((tui, theme, keybindings, done) => {
-		const picker = new ProfileChoiceList(safeItems, selection, theme);
-		return {
-			get focused() { return picker.input.focused; },
-			set focused(value: boolean) { picker.input.focused = value; },
-			render: (width) => picker.render(title, profileWidth(width), tui.terminal.rows),
-			invalidate: () => picker.input.invalidate(),
-			handleInput: (data) => {
-				if (keybindings.matches(data, "tui.select.cancel")) done(null);
-				else if (keybindings.matches(data, "tui.select.confirm")) {
-					const item = picker.selectedItem();
-					if (item) done(item.value);
-				} else picker.handleInput(data, keybindings);
-				tui.requestRender();
-			},
-		};
-	});
+	const selected = await ui.custom<string | null>(
+		(tui, theme, keybindings, done) => {
+			const picker = new ProfileChoiceList(safeItems, selection, theme);
+			return {
+				get focused() {
+					return picker.input.focused;
+				},
+				set focused(value: boolean) {
+					picker.input.focused = value;
+				},
+				render: (width) =>
+					picker.render(title, profileWidth(width), tui.terminal.rows),
+				invalidate: () => picker.input.invalidate(),
+				handleInput: (data) => {
+					if (keybindings.matches(data, "tui.select.cancel")) done(null);
+					else if (keybindings.matches(data, "tui.select.confirm")) {
+						const item = picker.selectedItem();
+						if (item) done(item.value);
+					} else picker.handleInput(data, keybindings);
+					tui.requestRender();
+				},
+			};
+		},
+	);
 	return selected ?? undefined;
 }
 
@@ -253,7 +295,10 @@ class ProfileChoiceList {
 		private readonly theme: PreviewTheme,
 	) {
 		this.filtered = items;
-		this.index = Math.max(0, items.findIndex(({ value }) => value === selection.selected));
+		this.index = Math.max(
+			0,
+			items.findIndex(({ value }) => value === selection.selected),
+		);
 	}
 
 	selectedItem(): SelectItem | undefined {
@@ -283,7 +328,10 @@ class ProfileChoiceList {
 		this.filtered = this.items.filter(({ label }) =>
 			words.every((word) => label.toLowerCase().includes(word)),
 		);
-		this.index = Math.max(0, this.filtered.findIndex(({ value }) => value === selected));
+		this.index = Math.max(
+			0,
+			this.filtered.findIndex(({ value }) => value === selected),
+		);
 	}
 
 	render(title: string, width: number, terminalRows: number): string[] {
@@ -291,18 +339,36 @@ class ProfileChoiceList {
 		const header = renderTitle(title, theme, width);
 		const search = this.selection.searchable ? this.input.render(width) : [];
 		const detail = this.selection.searchable
-			? wrapTextWithAnsi(` Selected: ${this.selectedItem()?.label ?? "No matching models"}`, Math.max(1, width))
+			? wrapTextWithAnsi(
+					` Selected: ${this.selectedItem()?.label ?? "No matching models"}`,
+					Math.max(1, width),
+				)
 			: [];
 		const cancel = `esc ${this.selection.cancelLabel ?? "back"}`;
 		const hints = this.selection.searchable
-			? wrapTextWithAnsi(`type to filter  ↑↓/pgup/pgdn navigate  enter select  ${cancel}`, Math.max(1, width - 2))
+			? wrapTextWithAnsi(
+					`type to filter  ↑↓/pgup/pgdn navigate  enter select  ${cancel}`,
+					Math.max(1, width - 2),
+				)
 			: [`↑↓ navigate  enter select  ${cancel}`];
 		// Leave room for borders, count, hints and Pi's surrounding editor/footer.
-		this.visibleRows = Math.max(1, Math.min(
-			MAX_VISIBLE_CHOICES,
-			terminalRows - header.length - search.length - detail.length - hints.length - 8,
-		));
-		const list = new SelectList([...this.filtered], this.visibleRows, selectListTheme(theme));
+		this.visibleRows = Math.max(
+			1,
+			Math.min(
+				MAX_VISIBLE_CHOICES,
+				terminalRows -
+					header.length -
+					search.length -
+					detail.length -
+					hints.length -
+					8,
+			),
+		);
+		const list = new SelectList(
+			[...this.filtered],
+			this.visibleRows,
+			selectListTheme(theme),
+		);
 		list.setSelectedIndex(this.index);
 		return [
 			...new DynamicBorder((text) => theme.fg("borderAccent", text)).render(width),
@@ -316,13 +382,15 @@ class ProfileChoiceList {
 	}
 }
 
-function renderTitle(title: string, theme: PreviewTheme, width: number): string[] {
+function renderTitle(
+	title: string,
+	theme: PreviewTheme,
+	width: number,
+): string[] {
 	return title.split(/\r?\n/).map((line, index) => {
 		const text = safeLine(line);
 		const styled =
-			index === 0
-				? theme.fg("accent", theme.bold(text))
-				: theme.fg("muted", text);
+			index === 0 ? theme.fg("accent", theme.bold(text)) : theme.fg("muted", text);
 		return fitLine(` ${styled}`, width);
 	});
 }
@@ -348,8 +416,18 @@ function tableDimensions(
 	width: number,
 ): TableDimensions | undefined {
 	if (width < 64) return undefined;
-	const stage = boundedNaturalWidth("STAGE", rows.map(({ id }) => id), 10, 22);
-	const role = boundedNaturalWidth("ROLE", rows.map(({ role }) => role), 8, 20);
+	const stage = boundedNaturalWidth(
+		"STAGE",
+		rows.map(({ id }) => id),
+		10,
+		22,
+	);
+	const role = boundedNaturalWidth(
+		"ROLE",
+		rows.map(({ role }) => role),
+		8,
+		20,
+	);
 	const thinking = boundedNaturalWidth(
 		"THINKING",
 		rows.map(({ thinking }) => thinking),

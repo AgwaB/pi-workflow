@@ -144,10 +144,18 @@ export interface ExecutionProfileStageOverride {
 	foreachBatch?: ExecutionProfileForeachBatch;
 }
 
+/** Optional authored hints used only to compare existing execution candidates. */
+export interface WorkflowRoutingHints {
+	useWhen?: string[];
+	avoidWhen?: string[];
+	outputs?: string[];
+}
+
 export interface ArtifactGraphWorkflowSpec {
 	schemaVersion: 1;
 	name?: string;
 	description?: string;
+	routing?: WorkflowRoutingHints;
 	input?: unknown;
 	defaults?: WorkflowDefaults;
 	roles?: Record<string, RoleSpec>;
@@ -971,7 +979,7 @@ export interface WorkflowLaunchAuthorityRecord {
 				phase: "consumed";
 				backendRunId: string;
 				backendAttemptId: string;
-			};
+		  };
 }
 
 export interface WorkflowLaunchAuthorityHistory {
@@ -1370,7 +1378,7 @@ export interface WorkflowExecutionProfileSelection {
 	executionProfileOverride?: WorkflowCapturedExecutionProfile;
 }
 
-/** Audit record for the router pass; absent on runs started without routing. */
+/** Legacy routing audit retained for historical run records; new explicit launches omit it. */
 export interface WorkflowRunRouting {
 	requested: string;
 	decided: WorkflowRouteDecision;
@@ -1394,9 +1402,14 @@ export interface WorkflowRunProvenance {
 	[key: string]: unknown;
 }
 
-export type WorkflowRunLaunchSource =
+export type WorkflowRunLaunchV1Source =
 	| { kind: "slash-command"; action: "run" | "dynamic" }
 	| { kind: "tool"; name: "workflow_run" | "workflow_dynamic" };
+
+/** Includes `auto` for consumers that render either launch-provenance generation. */
+export type WorkflowRunLaunchSource =
+	| WorkflowRunLaunchV1Source
+	| { kind: "slash-command"; action: "auto" };
 
 export type WorkflowRunLaunchProfile =
 	| { kind: "named"; name: string }
@@ -1416,10 +1429,24 @@ export type WorkflowRunLaunchCommandMetadata =
 	  }
 	| { state: "unavailable"; reason: "not-a-command" };
 
-/** Structured creation-launch provenance. Exact command text lives in a private sidecar. */
-export interface WorkflowRunLaunchMetadata {
+export type WorkflowAutoRoute = "direct" | "named-workflow" | "direct-dynamic";
+
+/** Opaque selection facts recorded by a confirmed `/workflow auto` launch. */
+export interface WorkflowRunAutoSelectionMetadata {
+	/** Null means the user explicitly chose an unranked local manual fallback; non-null equals selected. */
+	recommendation: WorkflowAutoRoute | null;
+	selected: "named-workflow" | "direct-dynamic";
+	candidateId: string;
+	candidateIdentitySha256: string;
+	taskSha256: string;
+	confirmed: true;
+	effectiveRuntime: { model?: string; thinking?: ThinkingLevel };
+}
+
+/** Legacy structured launch provenance. Keep this exact v1 shape readable forever. */
+export interface WorkflowRunLaunchMetadataV1 {
 	schema: "pi-workflow-run-launch-v1";
-	source: WorkflowRunLaunchSource;
+	source: WorkflowRunLaunchV1Source;
 	requestKind: "named-workflow" | "direct-dynamic";
 	routingMode: "default-on" | "explicit-on" | "off";
 	profile: WorkflowRunLaunchProfile;
@@ -1427,18 +1454,44 @@ export interface WorkflowRunLaunchMetadata {
 	command: WorkflowRunLaunchCommandMetadata;
 }
 
-/** Non-persisted launch input carried from a launch surface to the engine. */
-export interface WorkflowRunLaunchCapture {
-	schema: "pi-workflow-run-launch-v1";
-	source: WorkflowRunLaunchSource;
+/** v2 is deliberately distinct from v1 rather than widening its strict enums. */
+export interface WorkflowRunLaunchMetadataV2 {
+	schema: "pi-workflow-run-launch-v2";
+	source: { kind: "slash-command"; action: "auto" };
 	requestKind: "named-workflow" | "direct-dynamic";
-	routingMode: "default-on" | "explicit-on" | "off";
+	routingMode: "auto-confirmed";
 	profile: WorkflowRunLaunchProfile;
 	task: { characters: number; lines: number };
+	selection: WorkflowRunAutoSelectionMetadata;
+	command: WorkflowRunLaunchCommandMetadata;
+}
+
+/** Structured creation-launch provenance. Exact command text lives in a private sidecar. */
+export type WorkflowRunLaunchMetadata =
+	| WorkflowRunLaunchMetadataV1
+	| WorkflowRunLaunchMetadataV2;
+
+export type WorkflowRunLaunchCaptureV1 = Omit<
+	WorkflowRunLaunchMetadataV1,
+	"command"
+> & {
 	command:
 		| { state: "captured"; text: string }
 		| { state: "unavailable"; reason: "not-a-command" };
-}
+};
+
+export type WorkflowRunLaunchCaptureV2 = Omit<
+	WorkflowRunLaunchMetadataV2,
+	"command"
+> & {
+	/** An auto launch is slash-command initiated and always retains its sidecar. */
+	command: { state: "captured"; text: string };
+};
+
+/** Non-persisted launch input carried from a launch surface to the engine. */
+export type WorkflowRunLaunchCapture =
+	| WorkflowRunLaunchCaptureV1
+	| WorkflowRunLaunchCaptureV2;
 
 /**
  * Deterministic claim-support accounting computed after a direct dynamic

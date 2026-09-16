@@ -99,9 +99,7 @@ test("estimateWorkflowDurationMs returns the median of the most recent completed
 		// Recent walls 2,4,...,16 minutes → median (8+10)/2 = 9 minutes. The two
 		// oldest runs have 100-minute walls and must fall outside the sample cap.
 		for (let i = 0; i < 8; i += 1) {
-			runs.push(
-				completedRun(`workflow_recent_${i}`, 2 * (i + 1), 60 + i * 10),
-			);
+			runs.push(completedRun(`workflow_recent_${i}`, 2 * (i + 1), 60 + i * 10));
 		}
 		runs.push(completedRun("workflow_old_1", 100, 500));
 		runs.push(completedRun("workflow_old_2", 100, 510));
@@ -158,7 +156,10 @@ test("formatApproxDuration renders compact durations", () => {
 	assert.equal(formatApproxDuration(125 * MINUTE_MS), "2h 5m");
 });
 
-function seedActiveDuplicate(cwd, { runId = "workflow_active1", ...rest } = {}) {
+function seedActiveDuplicate(
+	cwd,
+	{ runId = "workflow_active1", ...rest } = {},
+) {
 	writeIndex(cwd, [
 		indexRun(runId, {
 			name: "guard-target",
@@ -285,9 +286,7 @@ test("findDuplicateActiveRun ignores child, terminal, and mock runs and matches 
 					schemaVersion: 1,
 					runId,
 					status: "running",
-					...(runId === "workflow_mockrun"
-						? { provenance: { mode: "mock" } }
-						: {}),
+					...(runId === "workflow_mockrun" ? { provenance: { mode: "mock" } } : {}),
 					tasks: [],
 				},
 				compiled: { schemaVersion: 1, name: "guard-target", task, tasks: [] },
@@ -489,7 +488,7 @@ test("duplicate /workflow run start is blocked with the existing run id; --force
 			},
 		};
 
-		// Routing runs first; the duplicate workflow launch itself is blocked.
+		// Explicit run preserves its selected workflow; the duplicate launch is blocked.
 		await handler('run guard-target "Same task"', ctx);
 		assert.equal(notices.length, 1);
 		assert.equal(notices[0].level, "warning");
@@ -498,39 +497,35 @@ test("duplicate /workflow run start is blocked with the existing run id; --force
 			new RegExp(`Duplicate launch guard: run ${existingRunId} `),
 		);
 		assert.match(notices[0].message, /--force-new/);
-		assert.equal(calls.launches, 1);
+		assert.equal(calls.launches, 0);
 		assert.equal((await readIndex(cwd)).runs.length, 1);
 
 		// --force-new bypasses the guard and starts a new run. Assertions scan
 		// notices because the completion-feedback watcher may also notify.
 		notices.length = 0;
-		await handler('run --no-route --force-new guard-target "Same task"', ctx);
+		await handler('run --force-new guard-target "Same task"', ctx);
 		assert.ok(
 			notices.some((notice) =>
 				/Workflow started: guard-target/.test(notice.message),
 			),
 		);
 		assert.ok(
-			!notices.some((notice) =>
-				notice.message.includes("Duplicate launch guard"),
-			),
+			!notices.some((notice) => notice.message.includes("Duplicate launch guard")),
 		);
-		assert.equal(calls.launches, 2);
+		assert.equal(calls.launches, 1);
 
 		// Different task text starts normally without --force-new.
 		notices.length = 0;
-		await handler('run --no-route guard-target "A different task"', ctx);
+		await handler('run guard-target "A different task"', ctx);
 		assert.ok(
 			notices.some((notice) =>
 				/Workflow started: guard-target/.test(notice.message),
 			),
 		);
 		assert.ok(
-			!notices.some((notice) =>
-				notice.message.includes("Duplicate launch guard"),
-			),
+			!notices.some((notice) => notice.message.includes("Duplicate launch guard")),
 		);
-		assert.equal(calls.launches, 3);
+		assert.equal(calls.launches, 2);
 	} finally {
 		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
@@ -557,7 +552,7 @@ test("duplicateRunGuardNotice skips unresolvable workflow refs and blank tasks",
 	}
 });
 
-test("parseWorkflowRunArgs and parseWorkflowDynamicArgs parse --force-new like --route", () => {
+test("parseWorkflowRunArgs and parseWorkflowDynamicArgs parse --force-new at either boundary", () => {
 	assert.equal(
 		parseWorkflowRunArgs('run --force-new review "Task"').forceNew,
 		true,
@@ -572,6 +567,12 @@ test("parseWorkflowRunArgs and parseWorkflowDynamicArgs parse --force-new like -
 	);
 	assert.equal(literal.forceNew, undefined);
 	assert.equal(literal.task, "Keep literal --force-new inside");
-	assert.equal(parseWorkflowDynamicArgs('dynamic --force-new "Task"').forceNew, true);
-	assert.equal(parseWorkflowDynamicArgs('dynamic "Task" --force-new').forceNew, true);
+	assert.equal(
+		parseWorkflowDynamicArgs('dynamic --force-new "Task"').forceNew,
+		true,
+	);
+	assert.equal(
+		parseWorkflowDynamicArgs('dynamic "Task" --force-new').forceNew,
+		true,
+	);
 });

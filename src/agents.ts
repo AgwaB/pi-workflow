@@ -1,4 +1,5 @@
-import { lstat, readdir, readFile, realpath } from "node:fs/promises";
+import type { Dirent } from "node:fs";
+import { lstat, open, opendir, readdir, readFile, realpath } from "node:fs/promises";
 import {
 	basename,
 	dirname,
@@ -25,6 +26,21 @@ type AgentScope = AgentDefinition["scope"];
 export interface AgentRegistry {
 	agents: AgentDefinition[];
 	byAlias: Map<string, AgentDefinition>;
+}
+
+/** Only frontmatter is needed for bounded local routing safety checks. */
+export interface BoundedAgentMetadata {
+	agent: AgentDefinition;
+	bytes: number;
+}
+
+export const WORKFLOW_AGENT_METADATA_MAX_BYTES = 16_384;
+
+/** Optional routing-owned reservation hook for every metadata file read. */
+export interface AgentMetadataLoadOptions {
+	beforeRead?: () => void;
+	maxAliasCandidates?: number;
+	maxAliasRootEntries?: number;
 }
 
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
@@ -82,6 +98,89 @@ export async function loadAgentByName(
 
 	const registry = await discoverAgents(cwd);
 	return registry.byAlias.get(name);
+}
+
+/**
+ * Read only a bounded agent frontmatter prefix for routing metadata. This
+ * intentionally does not fall back to full registry discovery: aliases that
+ * cannot be resolved by a direct bounded path stay needs-check until selected.
+ */
+export async function loadAgentMetadataByName(
+	name: string,
+	cwd: string,
+	maxBytes = WORKFLOW_AGENT_METADATA_MAX_BYTES,
+	options: AgentMetadataLoadOptions = {},
+): Promise<BoundedAgentMetadata | undefined> {
+	if (!isSafeAgentName(name) || !Number.isSafeInteger(maxBytes) || maxBytes < 1)
+		return undefined;
+	const seen = new Set<string>();
+	const read = async (candidate: {
+		file: string;
+		root: string;
+		scope: AgentScope;
+	}): Promise<BoundedAgentMetadata | undefined> => {
+		const file = resolve(candidate.file);
+		if (seen.has(file)) return undefined;
+		seen.add(file);
+		// Missing direct candidates are not metadata reads. Do the bounded source
+		// open only after an lstat confirms that a candidate exists.
+		try {
+			await lstat(file);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+			throw error;
+		}
+		options.beforeRead?.();
+		return await readAgentMetadataFile(
+			candidate.file,
+			candidate.root,
+			candidate.scope,
+			maxBytes,
+		);
+	};
+	for (const candidate of candidateAgentPaths(name, cwd)) {
+		try {
+			const result = await read(candidate);
+			if (result) return result;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+			if (isProjectRootSymlinkError(error)) continue;
+			throw error;
+		}
+	}
+
+	// A frontmatter `name`/package alias can differ from its file name. Keep
+	// that compatibility without falling back to unbounded full-body registry
+	// discovery. File reads remain charged to the caller-owned budget.
+	const maxCandidates = Math.max(
+		1,
+		Math.min(64, Math.floor(options.maxAliasCandidates ?? 32)),
+	);
+	const maxRootEntries = Math.max(
+		1,
+		Math.min(256, Math.floor(options.maxAliasRootEntries ?? 64)),
+	);
+	let examined = 0;
+	for (const root of agentRoots(cwd)) {
+		const files = await listAgentMetadataFiles(
+			root.path,
+			root.scope,
+			maxRootEntries,
+		);
+		for (const file of files) {
+			if (examined >= maxCandidates) return undefined;
+			examined += 1;
+			try {
+				const result = await read({ file, root: root.path, scope: root.scope });
+				if (result?.agent.aliases.includes(name)) return result;
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+				if (isProjectRootSymlinkError(error)) continue;
+				throw error;
+			}
+		}
+	}
+	return undefined;
 }
 
 export function parseAgentMarkdown(
@@ -166,6 +265,203 @@ function candidateAgentPaths(
 			return [{ file, root: rootPath, scope: root.scope }];
 		});
 	});
+}
+
+async function listAgentMetadataFiles(
+	root: string,
+	scope: AgentScope,
+	maxEntries: number,
+): Promise<string[]> {
+	const files: string[] = [];
+	let entriesSeen = 0;
+	const visit = async (directoryPath: string, remainingDepth: number): Promise<void> => {
+		if (
+			files.length >= maxEntries ||
+			entriesSeen >= maxEntries ||
+			remainingDepth < 0
+		)
+			return;
+		let directory: Awaited<ReturnType<typeof opendir>>;
+		try {
+			if (scope === "project" && (await lstat(directoryPath)).isSymbolicLink())
+				return;
+			directory = await opendir(directoryPath);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+			throw error;
+		}
+		const entries: Dirent[] = [];
+		for await (const entry of directory) {
+			if (entriesSeen >= maxEntries) break;
+			entriesSeen += 1;
+			entries.push(entry);
+		}
+		for (const entry of entries.sort((left, right) =>
+			left.name.localeCompare(right.name),
+		)) {
+			if (files.length >= maxEntries) return;
+			const path = join(directoryPath, entry.name);
+			if (entry.isFile() && entry.name.endsWith(".md")) files.push(path);
+			else if (entry.isDirectory()) await visit(path, remainingDepth - 1);
+		}
+	};
+	await visit(resolve(root), 4);
+	return files;
+}
+
+async function readAgentMetadataFile(
+	file: string,
+	root: string,
+	scope: AgentScope,
+	maxBytes: number,
+): Promise<BoundedAgentMetadata> {
+	const rootPath = resolve(root);
+	const sourcePath = resolve(file);
+	const rootStat = await lstat(rootPath);
+	if (scope === "project" && rootStat.isSymbolicLink()) {
+		throw new WorkflowValidationError([
+			{
+				path: "$agent",
+				message: `agent root must not be a symlink: ${rootPath}`,
+			},
+		]);
+	}
+	if (!isPathInside(rootPath, sourcePath)) {
+		throw new WorkflowValidationError([
+			{ path: "$agent", message: `agent path escapes root: ${sourcePath}` },
+		]);
+	}
+	const realRoot = await realpath(rootPath);
+	const realSource = await realpath(sourcePath);
+	if (!isPathInside(realRoot, realSource)) {
+		throw new WorkflowValidationError([
+			{ path: "$agent", message: `agent symlink escapes root: ${sourcePath}` },
+		]);
+	}
+	const pathBefore = await lstat(realSource);
+	if (!pathBefore.isFile() || pathBefore.isSymbolicLink()) {
+		throw new WorkflowValidationError([
+			{ path: "$agent", message: `agent source must be a regular file: ${sourcePath}` },
+		]);
+	}
+	const handle = await open(realSource, "r");
+	try {
+		const before = await handle.stat();
+		if (
+			!before.isFile() ||
+			before.dev !== pathBefore.dev ||
+			before.ino !== pathBefore.ino
+		) {
+			throw new Error("agent metadata changed while opened");
+		}
+		// Read exactly through the closing frontmatter delimiter. In particular, do
+		// not use a max-sized prefix read: a short agent body would otherwise be
+		// fully read merely to derive routing facts.
+		const result = await readBoundedAgentFrontmatter(handle, before.size, maxBytes);
+		const [after, pathAfter] = await Promise.all([handle.stat(), lstat(realSource)]);
+		if (
+			after.size !== before.size ||
+			after.dev !== before.dev ||
+			after.ino !== before.ino ||
+			!pathAfter.isFile() ||
+			pathAfter.isSymbolicLink() ||
+			pathAfter.dev !== before.dev ||
+			pathAfter.ino !== before.ino
+		) {
+			throw new Error("agent metadata changed while read");
+		}
+		if (result.frontmatter === undefined)
+			throw new Error(`agent metadata frontmatter exceeds ${maxBytes} UTF-8 bytes`);
+		const parsed = parseAgentMarkdown(
+			result.frontmatter,
+			realSource,
+			scope,
+			realRoot,
+		);
+		return { agent: { ...parsed, body: "" }, bytes: result.bytes };
+	} finally {
+		await handle.close();
+	}
+}
+
+async function readBoundedAgentFrontmatter(
+	handle: Awaited<ReturnType<typeof open>>,
+	fileBytes: number,
+	maxBytes: number,
+): Promise<{ frontmatter: string | undefined; bytes: number }> {
+	const collected: number[] = [];
+	const oneByte = Buffer.allocUnsafe(1);
+	let lineStart = 0;
+	let sawOpeningDelimiter = false;
+	const delimiterAt = (start: number, end: number): boolean => {
+		let left = start;
+		let right = end;
+		while (left < right && (collected[left] === 0x20 || collected[left] === 0x09))
+			left += 1;
+		while (
+			right > left &&
+			(collected[right - 1] === 0x20 ||
+				collected[right - 1] === 0x09 ||
+				collected[right - 1] === 0x0d)
+		)
+			right -= 1;
+		return (
+			right - left === 3 &&
+			collected[left] === 0x2d &&
+			collected[left + 1] === 0x2d &&
+			collected[left + 2] === 0x2d
+		);
+	};
+	const completeLine = (end: number): string | undefined | null => {
+		const delimiter = delimiterAt(lineStart, end);
+		if (!sawOpeningDelimiter) {
+			if (!delimiter) return "";
+			sawOpeningDelimiter = true;
+			lineStart = end + 1;
+			return null;
+		}
+		if (delimiter) return Buffer.from(collected).toString("utf8");
+		lineStart = end + 1;
+		return null;
+	};
+
+	while (collected.length < maxBytes && collected.length < fileBytes) {
+		const { bytesRead } = await handle.read(oneByte, 0, 1, collected.length);
+		if (bytesRead !== 1) break;
+		collected.push(oneByte[0]!);
+		// `splitFrontmatter()` only recognizes a delimiter at byte zero. Reject a
+		// normal body as soon as that prefix is impossible instead of scanning to
+		// its first newline (which an adversarial body may omit).
+		if (
+			!sawOpeningDelimiter &&
+			((collected.length === 3 &&
+				(collected[0] !== 0x2d ||
+					collected[1] !== 0x2d ||
+					collected[2] !== 0x2d)) ||
+				(collected.length > 3 &&
+					oneByte[0] !== 0x20 &&
+					oneByte[0] !== 0x09 &&
+					oneByte[0] !== 0x0d &&
+					oneByte[0] !== 0x0a))
+		)
+			return { frontmatter: "", bytes: collected.length };
+		if (oneByte[0] !== 0x0a) continue;
+		const complete = completeLine(collected.length - 1);
+		if (complete !== null)
+			return { frontmatter: complete, bytes: collected.length };
+	}
+	// A final delimiter does not need a trailing newline. Conversely, a file
+	// without an opening delimiter is metadata-empty and must not cause a body
+	// read beyond its first line.
+	if (collected.length === fileBytes) {
+		const complete = completeLine(collected.length);
+		if (complete !== null)
+			return { frontmatter: complete, bytes: collected.length };
+	}
+	return {
+		frontmatter: sawOpeningDelimiter ? undefined : "",
+		bytes: collected.length,
+	};
 }
 
 async function readAgentFile(

@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { ArtifactGraphWorkflowSpec } from "./types.js";
@@ -25,21 +25,64 @@ export async function ensureDirectDynamicRuntimeBundle(
 		DIRECT_DYNAMIC_RUNTIME_VERSION,
 	);
 	await mkdir(bundleDir, { recursive: true });
+	const bundleEntry = await lstat(bundleDir);
+	if (!bundleEntry.isDirectory() || bundleEntry.isSymbolicLink())
+		throw new Error("Direct dynamic runtime bundle directory is unsafe");
 	const specPath = join(bundleDir, "spec.json");
-	await writeFile(
+	// The direct runtime is a versioned immutable input. Rewriting it on every
+	// launch leaves a selection-to-dispatch race and can corrupt an in-flight
+	// auto binding. A changed v4 payload must be introduced under a new runtime
+	// version, not silently replaced in an existing project runtime directory.
+	await ensureImmutableRuntimeFile(
 		join(bundleDir, "controller.mjs"),
 		directDynamicControllerSource(),
-		"utf8",
 	);
-	await writeFile(
+	await ensureImmutableRuntimeFile(
 		specPath,
 		`${JSON.stringify(directDynamicSpec(), null, 2)}\n`,
-		"utf8",
 	);
 	return specPath;
 }
 
-function directDynamicSpec(): ArtifactGraphWorkflowSpec {
+async function ensureImmutableRuntimeFile(
+	path: string,
+	expected: string,
+): Promise<void> {
+	for (let attempt = 0; attempt < 3; attempt += 1) {
+		try {
+			const before = await lstat(path);
+			if (!before.isFile() || before.isSymbolicLink())
+				throw new Error("not a regular file");
+			const text = await readFile(path, "utf8");
+			const after = await lstat(path);
+			if (
+				after.dev !== before.dev ||
+				after.ino !== before.ino ||
+				after.size !== before.size ||
+				after.isSymbolicLink()
+			)
+				continue;
+			if (text !== expected)
+				throw new Error(
+					"Direct dynamic runtime bundle bytes differ from this runtime version; use a fresh runtime version rather than replacing it.",
+				);
+			return;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			try {
+				await writeFile(path, expected, { encoding: "utf8", flag: "wx" });
+			} catch (writeError) {
+				if ((writeError as NodeJS.ErrnoException).code !== "EEXIST")
+					throw writeError;
+			}
+		}
+	}
+	throw new Error(
+		"Direct dynamic runtime bundle changed while it was initialized",
+	);
+}
+
+export function directDynamicSpec(): ArtifactGraphWorkflowSpec {
 	return {
 		schemaVersion: 1,
 		name: "dynamic",
