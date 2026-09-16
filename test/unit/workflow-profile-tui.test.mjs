@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { KeybindingsManager, TUI_KEYBINDINGS, visibleWidth } from "@earendil-works/pi-tui";
+import { KeybindingsManager, TUI_KEYBINDINGS, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import {
 	createNativeWorkflowProfileUi,
+	selectWorkflowAutoChoice,
 	selectWorkflowProfileTarget,
 } from "../../.tmp/unit/workflow-profile-tui.js";
 
@@ -211,6 +212,96 @@ test("native preview Back accepts the injected cancel binding", async () => {
 	});
 	state.component.handleInput("\x11");
 	assert.equal(await result, undefined);
+});
+
+test("auto picker shows names without competing description columns and bounds every frame", async () => {
+	const { ui, state } = harness();
+	const choices = Array.from({ length: 30 }, (_, index) => ({
+		value: `hidden-id-${index}`,
+		label: `workflow-${index}`,
+		description: `Description ${index}. ` + "A long explanation with 한국어 and readable details. ".repeat(20),
+	}));
+	const result = selectWorkflowAutoChoice(ui, "Choose how to run\nNo recommendation available. Choose an option.", choices, "hidden-id-15");
+	for (const rows of [16, 24, 40]) {
+		state.terminal.rows = rows;
+		for (const width of [32, 48, 82, 100, 240]) {
+			const lines = frame(state, width);
+			assert.ok(lines.every((line) => visibleWidth(line) <= Math.min(width, 100)));
+			assert.match(lines.join("\n"), /→ workflow-15/);
+			assert.doesNotMatch(lines.join("\n"), /hidden-id|Description 14|Description 16/);
+		}
+	}
+	state.component.handleInput(DOWN);
+	state.component.handleInput(ENTER);
+	assert.equal(await result, "hidden-id-16");
+});
+
+test("auto details preserve every wrapped line, scroll on resize, and never select on return", async () => {
+	const { ui, state } = harness();
+	state.terminal.rows = 16;
+	const label = "아주 긴 워크플로 이름 ".repeat(12) + "NAME-END";
+	const description = Array.from({ length: 70 }, (_, i) => `DETAIL-${i} 확인`).join(" ") + " CAUTION-END";
+	const result = selectWorkflowAutoChoice(ui, "Choose how to run", [{ value: "exact-id", label, description }]);
+	frame(state, 48);
+	state.component.handleInput("\t");
+	const seen = [];
+	const exactLines = new Map();
+	for (let index = 0; index < 150; index += 1) {
+		const lines = frame(state, 48);
+		seen.push(...lines);
+		const footer = lines.findIndex((line) => /^ \d+–\d+ \/ \d+ lines$/.test(line));
+		assert.ok(footer > 2);
+		const firstLine = Number(lines[footer].match(/\d+/)[0]) - 1;
+		lines.slice(2, footer).forEach((line, offset) => exactLines.set(firstLine + offset, line.slice(1)));
+		state.component.handleInput(DOWN);
+	}
+	assert.deepEqual([...exactLines.entries()].sort(([a], [b]) => a - b).map(([, line]) => line), wrapTextWithAnsi(`${label}\n${description}`, 46));
+	const text = seen.join("\n");
+	for (let i = 0; i < 70; i += 1) assert.match(text, new RegExp(`DETAIL-${i}\\b`));
+	assert.match(text, /NAME-END/);
+	assert.match(text, /CAUTION-END/);
+	state.terminal.rows = 24;
+	assert.match(frame(state, 100).join("\n"), /CAUTION-END/);
+	state.component.handleInput(ENTER);
+	assert.deepEqual(state.completions, [], "enter returns to choices, not a selection");
+	state.component.handleInput("\t");
+	state.component.handleInput(ESC);
+	assert.deepEqual(state.completions, [], "escape returns from details first");
+	state.component.handleInput(ESC);
+	assert.equal(await result, undefined);
+});
+
+test("auto search retains exact hidden IDs, no-match safety and injected navigation", async () => {
+	const { ui, state } = harness({ "tui.select.down": "ctrl+n", "tui.select.cancel": "ctrl+q" });
+	const choices = Array.from({ length: 15 }, (_, i) => ({ value: `id-${i}`, label: `option-${i}`, description: "Read this option." }));
+	const result = selectWorkflowAutoChoice(ui, "Choose how to run", choices);
+	frame(state, 48);
+	state.component.handleInput("\x0e");
+	assert.match(frame(state, 48).join("\n"), /→ option-1\b/);
+	state.component.handleInput("absent");
+	assert.match(frame(state, 48).join("\n"), /No matching choices/);
+	state.component.handleInput(ENTER);
+	assert.deepEqual(state.completions, []);
+	state.component.handleInput("\x15");
+	state.component.handleInput("option-13");
+	state.component.handleInput("\t");
+	assert.match(frame(state, 48).join("\n"), /Read this option/);
+	state.component.handleInput("\x11");
+	assert.deepEqual(state.completions, []);
+	state.component.handleInput(ENTER);
+	assert.equal(await result, "id-13");
+});
+
+test("auto compatibility picker keeps duplicate display names bound to distinct IDs", async () => {
+	const calls = [];
+	const result = await selectWorkflowAutoChoice({
+		select: async (title, options) => { calls.push({ title, options }); return options[1]; },
+	}, "Choose how to run", [
+		{ value: "first", label: "same", description: "Private first detail" },
+		{ value: "second", label: "same", description: "Private second detail" },
+	]);
+	assert.equal(result, "second");
+	assert.deepEqual(calls[0].options, ["1. same", "2. same"]);
 });
 
 test("compatibility adapter retains the ordinary select flow without a native preview", async () => {

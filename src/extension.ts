@@ -2907,11 +2907,12 @@ async function handleWorkflowAutoRequest(
 		uiSessionSignal,
 	);
 	if (result === WORKFLOW_LAUNCH_CANCELLED || uiSessionSignal.aborted) return;
-	emit(ctx, formatWorkflowAutoRecommendation(result), "info");
-
-	// Print/JSON/RPC callers receive recommendation-only output and explicit
-	// follow-up commands; this branch cannot select or launch anything.
-	if (ctx.mode !== "tui" || !ctx.hasUI) return;
+	// Keep the full diagnostic report for non-interactive callers, not above
+	// the interactive picker. This branch cannot select or launch anything.
+	if (ctx.mode !== "tui" || !ctx.hasUI) {
+		emit(ctx, formatWorkflowAutoRecommendation(result), "info");
+		return;
+	}
 	const recommendation = result.comparison?.recommendation;
 	const hasValidRecommendation =
 		result.status === "recommendation" && recommendation !== undefined;
@@ -2931,9 +2932,8 @@ async function handleWorkflowAutoRequest(
 	const choices = [
 		{
 			value: clarifyChoice,
-			label: "Review candidates or clarify constraints",
-			description:
-				"Keep this task local and make no launch; refine privacy, network, side-effect, or fit constraints.",
+			label: "Cancel",
+			description: "Close without starting anything.",
 		},
 		...(canOfferLocalChoices
 			? localCandidates.map((candidate) => {
@@ -2942,25 +2942,28 @@ async function handleWorkflowAutoRequest(
 							recommendation?.candidateId === candidate.candidateId;
 						return {
 							value: candidate.candidateId,
-							label: ranked
-								? `Recommended: ${candidate.label}`
-								: candidate.kind === "direct"
-									? "Direct hand-off (local, unranked)"
-									: `Manual local fallback (unranked): ${candidate.label}`,
-							description: `${ranked ? "classifier recommendation" : "not ranked by a classifier"} · ${candidate.kind} · ${candidate.scope}${candidate.readiness.cautions.length ? ` · ${candidate.readiness.cautions[0]}` : ""}`,
+							label: `${candidate.kind === "direct" ? "Current conversation" : candidate.label}${ranked ? " · recommended" : ""}`,
+							description: [
+								candidate.kind === "direct"
+									? "Prepare a draft in the editor. Nothing is sent automatically."
+									: candidate.kind === "direct-dynamic"
+										? "Plan the steps as the task progresses."
+										: candidate.description || "Run this workflow.",
+								`Source: ${candidate.scope}.`,
+								...candidate.readiness.cautions.map((caution) => `Note: ${caution}`),
+							].join(" "),
 						};
 					})
 			: []),
 	];
 	const selectedId = await selectWorkflowAutoChoice(
 		ctx.ui,
-		canOfferLocalChoices
-			? hasValidRecommendation && localChoiceScope === "all-safe"
-				? "Choose an execution path (nothing starts yet)"
-				: localChoiceScope === "direct-only"
-					? "Choose a local direct hand-off (nothing starts yet)"
-					: "Choose a local manual fallback (unranked; nothing starts yet)"
-			: "Review auto-routing constraints (nothing starts)",
+		"Choose how to run" +
+			(!canOfferLocalChoices || localChoiceScope === "direct-only"
+				? "\nWorkflows unavailable for this request."
+				: hasValidRecommendation
+					? ""
+					: "\nNo recommendation available. Choose an option."),
 		choices,
 		hasValidRecommendation && recommendation.confidence !== "low"
 			? recommendation.candidateId
@@ -2973,7 +2976,7 @@ async function handleWorkflowAutoRequest(
 	if (selectedId === clarifyChoice || !canOfferLocalChoices) {
 		emit(
 			ctx,
-			"No execution was selected. Review the local candidate list and clarify task, privacy, network, or side-effect constraints before running /workflow auto again.",
+			"Nothing started. You can revise the request and try /workflow auto again.",
 			"info",
 		);
 		return;
@@ -3391,16 +3394,13 @@ function workflowAutoConfirmationText(
 	const profileName =
 		profile?.executionProfile ?? profile?.executionProfileOverride?.name;
 	return [
-		`Selected: ${selected.label} (${selected.kind}; ${selected.scope}).`,
-		...(recommended
-			? [
-				`Recommendation: ${recommended.label}${recommended.candidateId === selected.candidateId ? " (selected)" : " (you chose another candidate)"}.`,
-			]
-			: [
-				"Manual local fallback: this candidate was not ranked by a classifier and is being selected only after local safety checks.",
-			]),
-		...(profileName ? [`Execution profile: ${profileName}.`] : []),
-		"This is the final confirmation. Starting will create a workflow run; cancelling starts nothing.",
+		`Workflow: ${selected.label}.`,
+		...(recommended && recommended.candidateId !== selected.candidateId
+			? [`You chose a different option from the recommendation (${recommended.label}).`]
+			: []),
+		...(profileName ? [`Profile: ${profileName}.`] : []),
+		...selected.readiness.cautions.map((caution) => `Note: ${caution}`),
+		"Start this workflow? Cancelling starts nothing.",
 	].join("\n");
 }
 
