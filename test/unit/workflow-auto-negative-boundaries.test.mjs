@@ -42,9 +42,10 @@ for (const task of ["Do not write to disk; do not use the network.", "Don't edit
 		const result = await recommendWorkflowAuto({ cwd, task, availableAgentNames: ["unit-agent"] });
 		assert.equal(calls, 0);
 		assert.notEqual(result.transmission, "allowed");
-		assert.equal(result.localChoiceScope, "direct-only");
-		assert.ok(result.candidates.filter((item) => item.kind !== "direct").every((item) => !item.readiness.startAllowed));
-		assert.equal(result.candidates.find((item) => item.kind === "direct").readiness.startAllowed, true);
+		assert.equal(result.localChoiceScope, "none");
+		assert.ok(result.candidates.length > 0);
+		assert.ok(result.candidates.every((item) => !item.readiness.startAllowed));
+		assert.equal(result.candidates.some((item) => item.kind === "direct"), false);
 	});
 }
 

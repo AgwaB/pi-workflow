@@ -90,7 +90,6 @@ import {
 	assertWorkflowAutoResolvedCandidateSafety,
 	formatWorkflowAutoRecommendation,
 	recommendWorkflowAuto,
-	workflowAutoDirectDraft,
 	type WorkflowAutoCandidate,
 } from "./workflow-router.js";
 import {
@@ -2917,15 +2916,15 @@ async function handleWorkflowAutoRequest(
 	const hasValidRecommendation =
 		result.status === "recommendation" && recommendation !== undefined;
 	// A failed/uncertain comparison does not erase already-safe local choices.
-	// Workflow choices never cross a disallowed transmission boundary; the direct
-	// editor draft remains local and still requires its own confirmation.
+	// Only workflow choices are offered; never cross a disallowed model boundary.
 	const localChoiceScope =
 		result.localChoiceScope ??
-		(result.transmission === "allowed" ? "all-safe" : "direct-only");
+		(result.transmission === "allowed" ? "all-safe" : "none");
 	const localCandidates = result.candidates.filter(
 		(candidate) =>
 			candidate.readiness.startAllowed &&
-			(localChoiceScope === "all-safe" || candidate.kind === "direct"),
+			candidate.kind !== "direct" &&
+			localChoiceScope === "all-safe",
 	);
 	const canOfferLocalChoices = localCandidates.length > 0;
 	const clarifyChoice = "__workflow_auto_clarify__";
@@ -2942,13 +2941,11 @@ async function handleWorkflowAutoRequest(
 							recommendation?.candidateId === candidate.candidateId;
 						return {
 							value: candidate.candidateId,
-							label: `${candidate.kind === "direct" ? "Current conversation" : candidate.label}${ranked ? " · recommended" : ""}`,
+							label: `${candidate.label}${ranked ? " · recommended" : ""}`,
 							description: [
-								candidate.kind === "direct"
-									? "Prepare a draft in the editor. Nothing is sent automatically."
-									: candidate.kind === "direct-dynamic"
-										? "Plan the steps as the task progresses."
-										: candidate.description || "Run this workflow.",
+								candidate.kind === "direct-dynamic"
+									? "Plan the steps as the task progresses."
+									: candidate.description || "Run this workflow.",
 								`Source: ${candidate.scope}.`,
 								...candidate.readiness.cautions.map((caution) => `Note: ${caution}`),
 							].join(" "),
@@ -2959,7 +2956,7 @@ async function handleWorkflowAutoRequest(
 	const selectedId = await selectWorkflowAutoChoice(
 		ctx.ui,
 		"Choose how to run" +
-			(!canOfferLocalChoices || localChoiceScope === "direct-only"
+			(!canOfferLocalChoices || localChoiceScope === "none"
 				? "\nWorkflows unavailable for this request."
 				: hasValidRecommendation
 					? ""
@@ -3017,32 +3014,6 @@ async function handleWorkflowAutoRequest(
 		recommendedCandidate?.candidateId === selected.candidateId
 			? recommendedCandidate
 			: undefined;
-
-	if (selected.kind === "direct") {
-		const existing = ctx.ui.getEditorText();
-		if (existing.trim()) {
-			const replace = await ctx.ui.confirm(
-				"Replace current editor draft?",
-				"The selected direct path will prepare a normal parent request. Your current editor text will be replaced only if you continue.",
-			);
-			if (!replace || uiSessionSignal.aborted) return;
-		}
-		const confirmed = await ctx.ui.confirm(
-			"Confirm direct hand-off",
-			"Prepare this exact task as a normal parent request? This does not send it or start a workflow.",
-		);
-		if (!confirmed || uiSessionSignal.aborted) {
-			emit(ctx, "Auto launch cancelled. No workflow has been started.", "info");
-			return;
-		}
-		ctx.ui.setEditorText(workflowAutoDirectDraft(task));
-		emit(
-			ctx,
-			"Prepared a normal parent request in the editor. Review and send it when ready; no workflow was started.",
-			"info",
-		);
-		return;
-	}
 
 	const selectedProfile =
 		selected.kind === "named-workflow"

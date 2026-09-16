@@ -171,14 +171,14 @@ function installBlockingDynamicSubagentApi(cwd, statusGate) {
 	return calls;
 }
 
-function validComparison(cards, selected = cards[0]) {
+function validComparison(cards, selected = cards.find((card) => card.readiness?.startAllowed) ?? cards[0]) {
 	return JSON.stringify({
 		status: "recommendation",
 		recommendation: {
 			candidateId: selected.candidateId,
 			confidence: "high",
 			reason: "The supplied metadata fits the task.",
-			alternatives: cards.slice(1, 2).map((card) => card.candidateId),
+			alternatives: cards.filter((card) => card.candidateId !== selected.candidateId).slice(0, 1).map((card) => card.candidateId),
 		},
 		assessments: cards.map((card) => ({
 			candidateId: card.candidateId,
@@ -554,7 +554,7 @@ test("routing agent metadata resolves a bounded frontmatter alias without readin
 	);
 });
 
-test("candidate construction blocks unsafe or unresolved named paths but never treats direct as an executable workflow", async () => {
+test("candidate construction offers workflows only and blocks unsafe or unresolved paths", async () => {
 	const cwd = project();
 	writeAgent(cwd);
 	writeSpec(cwd, "read-only-review");
@@ -579,7 +579,8 @@ test("candidate construction blocks unsafe or unresolved named paths but never t
 	const named = candidates.find(
 		(candidate) => candidate.label === "read-only-review",
 	);
-	assert.equal(direct?.readiness.startAllowed, true);
+	assert.equal(direct, undefined);
+	assert.ok(candidates.every((candidate) => ["named-workflow", "direct-dynamic"].includes(candidate.kind)));
 	assert.equal(dynamic?.readiness.status, "blocked");
 	assert.match(dynamic?.readiness.blockers.join(" ") ?? "", /researcher/);
 	assert.equal(named?.readiness.status, "blocked");
@@ -620,8 +621,9 @@ test("auto comparison sends bounded metadata once, has no tools, and never launc
 	assert.equal(result.status, "recommendation");
 	assert.equal(
 		result.comparison?.recommendation?.candidateId,
-		packet.candidateCards[0].candidateId,
+		packet.candidateCards.find((card) => card.readiness.startAllowed).candidateId,
 	);
+	assert.ok(packet.candidateCards.every((card) => card.kind !== "direct"));
 	assert.match(packet.responseContract.assessments, /non-empty evidenceFields/);
 	assert.equal(
 		JSON.stringify(packet).includes(cwd),
@@ -1252,13 +1254,13 @@ test("TUI keeps safe choices after no-fit without metadata noise or routing jarg
 					const screen = component.render?.(100).join("\n") ?? "";
 					if (/Comparing existing workflow candidates/.test(screen)) return;
 					pickerScreens.push(screen);
-					// No-fit defaults to clarify; one down-arrow explicitly chooses the
-					// local direct fallback, then confirmation prepares (not sends) it.
+					// No-fit defaults to Cancel. Selecting a workflow still requires
+					// confirmation; rejecting it must not launch or prepare a chat draft.
 					component.handleInput("tui.select.down");
 					component.handleInput("tui.select.confirm");
 				});
 			},
-			confirm: async () => true,
+			confirm: async () => false,
 			getEditorText: () => editor,
 			setEditorText: (value) => {
 				editor = value;
@@ -1273,17 +1275,18 @@ test("TUI keeps safe choices after no-fit without metadata noise or routing jarg
 	const pickerText = pickerScreens.join("\n");
 	assert.match(pickerText, /Choose how to run/);
 	assert.match(pickerText, /No recommendation available/);
-	assert.match(pickerText, /Current conversation/);
-	assert.doesNotMatch(pickerText, /Manual local fallback|unranked|classifier|named-workflow/);
+	assert.match(pickerText, /manual-fallback-review/);
+	assert.doesNotMatch(pickerText, /Current conversation|current conversation|Manual local fallback|unranked|classifier|named-workflow/);
 	assert.doesNotMatch(notices.map(({ message }) => message).join("\n"), /Auto route:|candidateId|schemas=|verification=/);
-	assert.match(editor, /Use a safe local fallback\./);
+	assert.equal(editor, "");
+	assert.equal((await readIndex(cwd))?.runs.length ?? 0, 0);
 	assert.ok(
-		notices.some(({ message }) => /no workflow was started/i.test(message)),
+		notices.some(({ message }) => /No workflow has been started/i.test(message)),
 	);
 });
 
 for (const task of ["Do not send this to any external model.", "Do not write to disk; do not use the network."]) {
-test(`TUI keeps the confirmed direct draft available under a transmission restriction: ${task}`, async () => {
+test(`TUI offers only cancellation under a transmission restriction: ${task}`, async () => {
 	const cwd = project();
 	let calls = 0;
 	setSubagentApiForTests({
@@ -1356,9 +1359,10 @@ test(`TUI keeps the confirmed direct draft available under a transmission restri
 	});
 	assert.equal(calls, 0);
 	assert.match(screens.join("\n"), /Workflows unavailable for this request/);
-	assert.match(screens.join("\n"), /Current conversation/);
-	assert.doesNotMatch(screens.join("\n"), /Dynamic workflow|manual|unranked|classifier/);
-	assert.ok(editor.includes(task));
+	assert.match(screens.join("\n"), /Cancel/);
+	assert.doesNotMatch(screens.join("\n"), /Current conversation|current conversation|Dynamic workflow|manual|unranked|classifier/);
+	assert.equal(editor, "");
+	assert.equal((await readIndex(cwd))?.runs.length ?? 0, 0);
 });
 }
 

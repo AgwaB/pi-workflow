@@ -76,7 +76,7 @@ When you want a recommendation instead of choosing a path yourself, use the boun
 /workflow auto "Review the current diff for reliability and test coverage."
 ```
 
-`/workflow auto` compares direct work, direct dynamic, and discoverable named workflows. In the TUI it requires a candidate choice and a separate final confirmation before it starts a workflow; in print/RPC/headless mode it only prints the recommendation and follow-up commands. `/workflow run` always starts the named workflow and `/workflow dynamic` always starts the direct dynamic runtime.
+`/workflow auto` compares dynamic and discoverable named workflows only; it does not offer a current-conversation choice. In the TUI it requires a candidate choice and a separate final confirmation before it starts a workflow; in print/RPC/headless mode it only prints the recommendation and follow-up commands. `/workflow run` always starts the named workflow and `/workflow dynamic` always starts the direct dynamic runtime.
 
 Interactive slash-command launches use Pi's cancellable foreground loader while validating and completing the initial scheduling pass; `/workflow auto` uses it while comparing candidates. Once at least one backend task is actually running, the command returns and Pi shows an `Active workflows` widget below the editor plus a compact footer status. The widget excludes launch/preparation states and stale `running` records with no running task, tracks top-level run progress, survives session reload by rebuilding from `.pi/workflows`, and disappears when no workflow remains active. Open `/workflow` for the full board.
 
