@@ -101,6 +101,10 @@ const WORKFLOW_AUTO_COMPARISON_TEXT_MAX_UTF8_BYTES = 480;
 
 export type WorkflowAutoCandidateKind = WorkflowAutoRoute;
 export type WorkflowAutoReadiness = "ready" | "needs-check" | "blocked";
+type WorkflowAutoTransmissionPolicy =
+	| "allowed"
+	| "blocked"
+	| "needs-clarification";
 export type WorkflowAutoComparisonStatus =
 	| "recommendation"
 	| "needs-clarification"
@@ -195,7 +199,7 @@ export interface WorkflowAutoResult {
 	shortlist: WorkflowAutoCandidate[];
 	comparison?: WorkflowAutoComparison;
 	reason?: string;
-	transmission: "allowed" | "blocked" | "needs-clarification";
+	transmission: WorkflowAutoTransmissionPolicy;
 	/** Workflow choices require an allowed external-model boundary. */
 	localChoiceScope?: "all-safe" | "none";
 }
@@ -207,8 +211,11 @@ export interface WorkflowAutoRequest {
 	runtimeDefaults?: WorkflowRuntimeDefaults;
 	availableModels?: WorkflowModelInfo[];
 	availableAgentNames?: Iterable<string>;
-	/** Host-owned policy may impose a stricter boundary, never override task privacy wording. */
-	transmissionPolicy?: "allowed" | "blocked" | "needs-clarification";
+	/**
+	 * Required structured host/user decision made before classifier dispatch.
+	 * Runtime omission fails closed; recognized task restrictions may only tighten it.
+	 */
+	transmissionPolicy: WorkflowAutoTransmissionPolicy;
 	signal?: AbortSignal;
 }
 
@@ -230,12 +237,25 @@ export async function recommendWorkflowAuto(
 	const catalog = await listWorkflowRoutingSpecs(request.cwd);
 	const constraints = inspectTaskConstraints(task);
 	const taskTransmission = transmissionPolicyFromConstraints(constraints);
-	const transmission =
-		taskTransmission === "allowed"
-			? (request.transmissionPolicy ?? "allowed")
-			: taskTransmission;
-	const localChoiceScope =
-		transmission === "allowed" ? "all-safe" : "none";
+	// Authorization comes from a structured host/user decision, never from an
+	// attempt to infer permission from task language. Omission is fail-closed;
+	// recognized task restrictions are a defense-in-depth downgrade only.
+	const requestedTransmission: WorkflowAutoTransmissionPolicy =
+		request.transmissionPolicy === "allowed" ||
+		request.transmissionPolicy === "blocked" ||
+		request.transmissionPolicy === "needs-clarification"
+			? request.transmissionPolicy
+			: "needs-clarification";
+	let transmission: WorkflowAutoTransmissionPolicy = "allowed";
+	if (requestedTransmission === "blocked" || taskTransmission === "blocked") {
+		transmission = "blocked";
+	} else if (
+		requestedTransmission === "needs-clarification" ||
+		taskTransmission === "needs-clarification"
+	) {
+		transmission = "needs-clarification";
+	}
+	const localChoiceScope = transmission === "allowed" ? "all-safe" : "none";
 	const candidates = createWorkflowAutoCandidates(catalog);
 	const shortlist = deterministicShortlist(candidates, task);
 	const available = request.availableAgentNames
@@ -271,10 +291,15 @@ export async function recommendWorkflowAuto(
 	if (transmission !== "allowed") {
 		for (const candidate of candidates)
 			applyCandidateGates(candidate, constraints, available);
-		const reason =
-			transmission === "blocked"
-				? "External model transmission is disallowed; showing the local catalog only."
-				: "It is unclear whether the task's network/privacy condition permits external model transmission; clarify before ranking.";
+		let reason =
+			"Recognized task constraints make external model transmission unclear; clarify before ranking.";
+		if (transmission === "blocked") {
+			reason =
+				"External model transmission is disallowed; showing the local catalog only.";
+		} else if (requestedTransmission !== "allowed") {
+			reason =
+				"External model transmission was not authorized by a structured host/user decision; no classifier was called.";
+		}
 		return unavailable(catalog, candidates, shortlist, reason, transmission);
 	}
 	await buildEffectiveWorkflowAutoCandidates(
@@ -1433,7 +1458,7 @@ function inspectTaskConstraints(task: string): TaskConstraints {
 
 function transmissionPolicyFromConstraints(
 	constraints: TaskConstraints,
-): "allowed" | "blocked" | "needs-clarification" {
+): WorkflowAutoTransmissionPolicy {
 	if (constraints.explicitNoExternalModel) return "blocked";
 	if (constraints.ambiguousTransmission) return "needs-clarification";
 	return "allowed";

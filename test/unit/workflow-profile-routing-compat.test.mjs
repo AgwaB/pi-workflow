@@ -22,6 +22,7 @@ after(() => {
 const SOL = "openai-codex/gpt-5.6-sol";
 const MODELS = [{ provider: "openai-codex", id: "gpt-5.6-sol", fullId: SOL, reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } }];
 const ROUTING = { useWhen: ["Review code."], avoidWhen: ["Implement a patch."], outputs: ["Review report."] };
+const MAX_ISO_TIMESTAMP = "9999-12-31T23:59:59.999Z";
 
 function fixture() {
 	const root = mkdtempSync(join(ROOT, "case-"));
@@ -40,21 +41,32 @@ function fixture() {
 	return { spec, specPath, availableModels: MODELS, currentRuntime: { model: SOL, thinking: "high" } };
 }
 
-async function writeLegacyPreference(context, selectedProfile = "codex-high", custom) {
+async function writeLegacyPreference(
+	context,
+	selectedProfile = "codex-high",
+	custom,
+	updatedAt = "2026-01-01T00:00:00.000Z",
+) {
 	const identity = await workflowProfileIdentity(context.spec, context.specPath);
 	const fingerprint = workflowDefinitionFingerprint(context.spec);
 	const path = join(dirname(identity.settingsFile), `${fingerprint}.json`);
 	mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-	writeFileSync(path, JSON.stringify({
-		schemaVersion: 1,
-		definitionFingerprint: fingerprint,
-		workflowName: context.spec.name,
-		sourcePathHashes: [identity.sourcePathHash],
-		selectedProfile,
-		stages: collectWorkflowProfileStageSlots(context.spec).map(({ id, profileRole }) => ({ id, profileRole })),
-		...(custom ? { custom } : {}),
-		updatedAt: "2026-01-01T00:00:00.000Z",
-	}), { mode: 0o600 });
+	writeFileSync(
+		path,
+		JSON.stringify({
+			schemaVersion: 1,
+			definitionFingerprint: fingerprint,
+			workflowName: context.spec.name,
+			sourcePathHashes: [identity.sourcePathHash],
+			selectedProfile,
+			stages: collectWorkflowProfileStageSlots(context.spec).map(
+				({ id, profileRole }) => ({ id, profileRole }),
+			),
+			...(custom ? { custom } : {}),
+			updatedAt,
+		}),
+		{ mode: 0o600 },
+	);
 	return path;
 }
 
@@ -162,6 +174,114 @@ test("the latest provably compatible choice wins over an older pre-routing setti
 	assert.deepEqual(readFileSync(legacy), before);
 });
 
+test("future legacy clocks cannot override sequential explicit saves on reload or launch", async () => {
+	const context = fixture();
+	context.spec.routing = ROUTING;
+	const future = "2099-06-01T00:00:00.000Z";
+	const legacy = await writeLegacyPreference(
+		context,
+		"mixed",
+		undefined,
+		future,
+	);
+	const before = readFileSync(legacy);
+	const first = await saveWorkflowProfilePreference(context, {
+		selectedProfile: "codex",
+	});
+	const second = await saveWorkflowProfilePreference(context, {
+		selectedProfile: "codex-high",
+	});
+	assert.ok(first.updatedAt > future);
+	assert.ok(second.updatedAt > first.updatedAt);
+	assert.equal(
+		(await loadWorkflowProfilePreference(context.spec, context.specPath))
+			.preference.selectedProfile,
+		"codex-high",
+	);
+	const captured = await resolveSavedWorkflowExecutionProfile(context);
+	assert.equal(captured.stageOverrides.plan.model, SOL);
+	assert.equal(captured.stageOverrides.plan.thinking, "xhigh");
+	assert.equal(
+		captured.definitionFingerprint,
+		workflowDefinitionFingerprint(context.spec),
+	);
+	assert.deepEqual(readFileSync(legacy), before);
+});
+
+test("clock rollback cannot reverse explicit save order", async (t) => {
+	const context = fixture();
+	context.spec.routing = ROUTING;
+	t.mock.timers.enable({
+		apis: ["Date"],
+		now: Date.parse("2030-01-01T00:00:00.000Z"),
+	});
+	const first = await saveWorkflowProfilePreference(context, {
+		selectedProfile: "codex",
+	});
+	t.mock.timers.setTime(Date.parse("2020-01-01T00:00:00.000Z"));
+	const second = await saveWorkflowProfilePreference(context, {
+		selectedProfile: "codex-high",
+	});
+	assert.ok(second.updatedAt > first.updatedAt);
+	assert.equal(
+		(await loadWorkflowProfilePreference(context.spec, context.specPath))
+			.preference.selectedProfile,
+		"codex-high",
+	);
+});
+
+test("concurrent explicit saves receive commit-ordered timestamps under the settings lock", async (t) => {
+	const context = fixture();
+	t.mock.timers.enable({
+		apis: ["Date"],
+		now: Date.parse("2030-01-01T00:00:00.000Z"),
+	});
+	const saves = await Promise.all([
+		saveWorkflowProfilePreference(context, { selectedProfile: "codex" }),
+		saveWorkflowProfilePreference(context, { selectedProfile: "codex-high" }),
+	]);
+	assert.notEqual(saves[0].updatedAt, saves[1].updatedAt);
+	const committedLast =
+		saves[0].updatedAt > saves[1].updatedAt ? saves[0] : saves[1];
+	const loaded = await loadWorkflowProfilePreference(
+		context.spec,
+		context.specPath,
+	);
+	assert.equal(loaded.preference.updatedAt, committedLast.updatedAt);
+	assert.equal(loaded.preference.selectedProfile, committedLast.selectedProfile);
+});
+
+test("an explicit save wins at the maximum canonical ISO timestamp without overflow", async () => {
+	const context = fixture();
+	context.spec.routing = ROUTING;
+	const legacy = await writeLegacyPreference(
+		context,
+		"mixed",
+		undefined,
+		MAX_ISO_TIMESTAMP,
+	);
+	const before = readFileSync(legacy);
+	const first = await saveWorkflowProfilePreference(context, {
+		selectedProfile: "codex",
+	});
+	const second = await saveWorkflowProfilePreference(context, {
+		selectedProfile: "codex-high",
+	});
+	assert.equal(first.updatedAt, MAX_ISO_TIMESTAMP);
+	assert.equal(second.updatedAt, MAX_ISO_TIMESTAMP);
+	assert.equal(
+		(await loadWorkflowProfilePreference(context.spec, context.specPath))
+			.preference.selectedProfile,
+		"codex-high",
+	);
+	assert.equal(
+		(await resolveSavedWorkflowExecutionProfile(context)).stageOverrides.plan
+			.thinking,
+		"xhigh",
+	);
+	assert.deepEqual(readFileSync(legacy), before);
+});
+
 test("legacy full hashes that cannot prove compatibility remain stale even with identical stage roles", async () => {
 	const context = fixture();
 	context.spec.routing = ROUTING;
@@ -174,10 +294,14 @@ test("legacy full hashes that cannot prove compatibility remain stale even with 
 
 test("a corrupt legacy exact file is not silently bypassed by the normalized identity", async () => {
 	const context = fixture();
+	await saveWorkflowProfilePreference(context, { selectedProfile: "codex" });
 	context.spec.routing = ROUTING;
 	const legacy = await writeLegacyPreference(context);
 	const corrupt = JSON.parse(readFileSync(legacy, "utf8"));
 	corrupt.definitionFingerprint = "a".repeat(64);
 	writeFileSync(legacy, JSON.stringify(corrupt));
-	await assert.rejects(loadWorkflowProfilePreference(context.spec, context.specPath), /definitionFingerprint does not match the settings filename/);
+	await assert.rejects(
+		loadWorkflowProfilePreference(context.spec, context.specPath),
+		/definitionFingerprint does not match the settings filename/,
+	);
 });

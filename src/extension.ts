@@ -2880,6 +2880,23 @@ async function handleWorkflowAutoRequest(
 	if (!task) {
 		throw new Error('This command needs a task. Usage: /workflow auto "<task>"');
 	}
+	let transmissionPolicy: "allowed" | "needs-clarification" =
+		"needs-clarification";
+	if (ctx.mode === "tui" && ctx.hasUI) {
+		const authorized = await ctx.ui.confirm(
+			"Allow auto comparison transmission",
+			"Send this task and bounded workflow metadata to the configured classifier model for one comparison? Cancel keeps the task local and starts nothing.",
+		);
+		if (!authorized || uiSessionSignal.aborted) {
+			emit(
+				ctx,
+				"Auto comparison cancelled before transmission. No task was sent and no workflow has been started.",
+				"info",
+			);
+			return;
+		}
+		transmissionPolicy = "allowed";
+	}
 	const runtimeDefaults = currentRuntimeDefaults(ctx, api);
 	const runtimeOverrides: WorkflowRuntimeDefaults = {};
 	let availableAgentNames: Iterable<string> | undefined;
@@ -2901,6 +2918,7 @@ async function handleWorkflowAutoRequest(
 				runtimeOverrides,
 				availableModels: availableWorkflowModels(ctx),
 				availableAgentNames,
+				transmissionPolicy,
 				signal,
 			}),
 		uiSessionSignal,
@@ -2936,21 +2954,21 @@ async function handleWorkflowAutoRequest(
 		},
 		...(canOfferLocalChoices
 			? localCandidates.map((candidate) => {
-						const ranked =
-							hasValidRecommendation &&
-							recommendation?.candidateId === candidate.candidateId;
-						return {
-							value: candidate.candidateId,
-							label: `${candidate.label}${ranked ? " · recommended" : ""}`,
-							description: [
-								candidate.kind === "direct-dynamic"
-									? "Plan the steps as the task progresses."
-									: candidate.description || "Run this workflow.",
-								`Source: ${candidate.scope}.`,
-								...candidate.readiness.cautions.map((caution) => `Note: ${caution}`),
-							].join(" "),
-						};
-					})
+					const ranked =
+						hasValidRecommendation &&
+						recommendation?.candidateId === candidate.candidateId;
+					return {
+						value: candidate.candidateId,
+						label: `${candidate.label}${ranked ? " · recommended" : ""}`,
+						description: [
+							candidate.kind === "direct-dynamic"
+								? "Plan the steps as the task progresses."
+								: candidate.description || "Run this workflow.",
+							`Source: ${candidate.scope}.`,
+							...candidate.readiness.cautions.map((caution) => `Note: ${caution}`),
+						].join(" "),
+					};
+				})
 			: []),
 	];
 	const selectedId = await selectWorkflowAutoChoice(

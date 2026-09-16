@@ -111,6 +111,10 @@ const MAX_SETTINGS_DIRECTORY_ENTRIES = MAX_STALE_SCAN_FILES + 64;
 const MAX_STALE_SCAN_BYTES = 16 * 1_048_576;
 const SETTINGS_LOCK_FILE = ".settings.lock";
 const SETTINGS_LOCK_WAIT_MS = 5_000;
+const MIN_PROFILE_UPDATED_AT = "0000-01-01T00:00:00.000Z";
+const MAX_PROFILE_UPDATED_AT = "9999-12-31T23:59:59.999Z";
+const MIN_PROFILE_UPDATED_AT_MS = Date.parse(MIN_PROFILE_UPDATED_AT);
+const MAX_PROFILE_UPDATED_AT_MS = Date.parse(MAX_PROFILE_UPDATED_AT);
 
 const BUILTIN_PROFILE_LABELS: Record<WorkflowBuiltinProfileId, string> = {
 	codex: "Codex",
@@ -211,26 +215,55 @@ async function readCompatibleProfilePreference(
 		identities.push({
 			...identity,
 			definitionFingerprint: fullFingerprint,
-			settingsFile: join(dirname(identity.settingsFile), `${fullFingerprint}.json`),
+			settingsFile: join(
+				dirname(identity.settingsFile),
+				`${fullFingerprint}.json`,
+			),
 		});
 	}
-	const compatible: WorkflowProfilePreference[] = [];
-	for (const candidateIdentity of identities) {
+	const compatible: Array<{
+		preference: WorkflowProfilePreference;
+		canonical: boolean;
+	}> = [];
+	for (const [index, candidateIdentity] of identities.entries()) {
 		const preference = await readPreferenceFile(candidateIdentity.settingsFile);
 		if (!preference) continue;
 		assertExactPreferenceMatches(preference, candidateIdentity, slots);
-		compatible.push(preference);
+		compatible.push({ preference, canonical: index === 0 });
 	}
 	// Preserve the latest explicit choice if both pre-routing and full-definition
-	// settings exist. On a timestamp tie, the canonical profile identity wins.
-	compatible.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
-	const selected = compatible[0];
+	// settings exist. At the ISO ceiling, the canonical tie-break lets a successful
+	// canonical save supersede an immutable legacy record without rewriting it.
+	compatible.sort(
+		(left, right) =>
+			right.preference.updatedAt.localeCompare(left.preference.updatedAt) ||
+			Number(right.canonical) - Number(left.canonical),
+	);
+	const selected = compatible[0]?.preference;
 	if (!selected) return undefined;
 	return {
 		...selected,
 		definitionFingerprint: identity.definitionFingerprint,
-		sourcePathHashes: [...new Set(compatible.flatMap((item) => item.sourcePathHashes))].sort(),
+		sourcePathHashes: [
+			...new Set(
+				compatible.flatMap(({ preference }) => preference.sourcePathHashes),
+			),
+		].sort((left, right) => left.localeCompare(right)),
 	};
+}
+
+function nextWorkflowProfileUpdatedAt(previous: string | undefined): string {
+	const boundedNow = Math.min(
+		MAX_PROFILE_UPDATED_AT_MS,
+		Math.max(MIN_PROFILE_UPDATED_AT_MS, Date.now()),
+	);
+	if (previous === undefined) return new Date(boundedNow).toISOString();
+	const previousMs = Date.parse(previous);
+	if (previousMs >= MAX_PROFILE_UPDATED_AT_MS) return MAX_PROFILE_UPDATED_AT;
+	// The settings lock turns updatedAt into a durable logical revision: every
+	// successful save advances beyond the selected compatible record even if the
+	// wall clock rolls back or a legacy record was dated in the future.
+	return new Date(Math.max(boundedNow, previousMs + 1)).toISOString();
 }
 
 export async function loadWorkflowProfilePreference(
@@ -293,13 +326,18 @@ export async function saveWorkflowProfilePreference(
 	},
 ): Promise<WorkflowProfilePreference> {
 	if (!WORKFLOW_USER_PROFILE_IDS.includes(selection.selectedProfile))
-		throw new Error(`Unknown workflow profile: ${String(selection.selectedProfile)}`);
+		throw new Error(
+			`Unknown workflow profile: ${String(selection.selectedProfile)}`,
+		);
 	const identity = await workflowProfileIdentity(context.spec, context.specPath);
 	const slots = requireProfileRoles(context.spec);
 	return withWorkflowProfileSettingsLock(
 		dirname(identity.settingsFile),
 		async (assertOwner) => {
-			const existing = await readCompatibleProfilePreference(context.spec, identity);
+			const existing = await readCompatibleProfilePreference(
+				context.spec,
+				identity,
+			);
 			const selectedCustom = selection.custom
 				? parseCustomProfile(selection.custom)
 				: undefined;
@@ -307,10 +345,7 @@ export async function saveWorkflowProfilePreference(
 			if (selection.selectedProfile === "custom" && !custom)
 				throw new Error("Custom workflow profile requires stage settings.");
 			const sourcePathHashes = Array.from(
-				new Set([
-					...(existing?.sourcePathHashes ?? []),
-					identity.sourcePathHash,
-				]),
+				new Set([...(existing?.sourcePathHashes ?? []), identity.sourcePathHash]),
 			).sort();
 			const preference = parseWorkflowProfilePreference({
 				schemaVersion: WORKFLOW_PROFILE_SETTINGS_SCHEMA_VERSION,
@@ -323,7 +358,7 @@ export async function saveWorkflowProfilePreference(
 					profileRole: profileRole!,
 				})),
 				...(custom ? { custom: cloneCustomProfile(custom) } : {}),
-				updatedAt: new Date().toISOString(),
+				updatedAt: nextWorkflowProfileUpdatedAt(existing?.updatedAt),
 			});
 			assertPreferenceMatchesSpec(preference, slots);
 			await assertOwner();

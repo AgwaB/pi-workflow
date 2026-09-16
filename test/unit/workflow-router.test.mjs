@@ -615,6 +615,7 @@ test("auto comparison sends bounded metadata once, has no tools, and never launc
 	const result = await recommendWorkflowAuto({
 		cwd,
 		task: "Review the supplied implementation.",
+		transmissionPolicy: "allowed",
 		availableAgentNames: ["unit-agent"],
 	});
 	assert.equal(calls, 1);
@@ -657,6 +658,7 @@ test("auto derives mutation-capable bash facts despite an authored readOnly decl
 	const result = await recommendWorkflowAuto({
 		cwd,
 		task: "Perform a read-only review with no changes.",
+		transmissionPolicy: "allowed",
 		availableAgentNames: ["unit-agent"],
 	});
 	assert.equal(calls, 1);
@@ -688,12 +690,15 @@ test("auto derives inherited bash and unknown custom tools before local safety-b
 	setSubagentApiForTests({
 		async runSubagent() {
 			calls += 1;
-			throw new Error("explicit local safety constraints must not invoke a classifier");
+			throw new Error(
+				"explicit local safety constraints must not invoke a classifier",
+			);
 		},
 	});
 	const result = await recommendWorkflowAuto({
 		cwd,
 		task: "Do a read-only review with no changes.",
+		transmissionPolicy: "allowed",
 		availableAgentNames: ["inherited-bash", "unknown-custom"],
 	});
 	assert.equal(calls, 1);
@@ -748,6 +753,7 @@ test("auto elevates local executable provider extensions inherited by a selected
 	const result = await recommendWorkflowAuto({
 		cwd,
 		task: "Do a read-only review with no changes.",
+		transmissionPolicy: "allowed",
 		availableAgentNames: ["unit-agent"],
 	});
 	assert.equal(calls, 1);
@@ -806,6 +812,7 @@ test("auto marks a nested external provider extension blocked before comparison"
 	const result = await recommendWorkflowAuto({
 		cwd,
 		task: "Review nested provider metadata.",
+		transmissionPolicy: "allowed",
 		availableAgentNames: ["unit-agent"],
 	});
 	const card = result.candidates.find(
@@ -865,6 +872,7 @@ test("auto comparison does not traverse helper import closures before a path is 
 	const result = await recommendWorkflowAuto({
 		cwd,
 		task: "Review the bounded workflow metadata.",
+		transmissionPolicy: "allowed",
 		availableAgentNames: ["unit-agent"],
 	});
 	const card = result.candidates.find(
@@ -877,11 +885,15 @@ test("auto comparison does not traverse helper import closures before a path is 
 	);
 	assert.ok(
 		result.shortlist.some(
-			(candidate) => candidate.kind === "named-workflow" && candidate.readiness.startAllowed,
+			(candidate) =>
+				candidate.kind === "named-workflow" && candidate.readiness.startAllowed,
 		),
 		"bounded metadata inspection retains a named workflow choice",
 	);
-	assert.equal(packetText.includes("HELPER_SOURCE_MUST_NOT_REACH_COMPARISON"), false);
+	assert.equal(
+		packetText.includes("HELPER_SOURCE_MUST_NOT_REACH_COMPARISON"),
+		false,
+	);
 });
 
 test("auto marks oversized and deeply nested declarative metadata as needs-check", async () => {
@@ -918,19 +930,27 @@ test("auto marks oversized and deeply nested declarative metadata as needs-check
 		},
 	});
 	let deep = { type: "string" };
-	for (let index = 0; index < WORKFLOW_AUTO_METADATA_BOUNDS.maxJsonDepth + 2; index += 1)
+	for (
+		let index = 0;
+		index < WORKFLOW_AUTO_METADATA_BOUNDS.maxJsonDepth + 2;
+		index += 1
+	)
 		deep = { nested: deep };
 	writeFileSync(join(deepRoot, "deep.schema.json"), JSON.stringify(deep));
 	const result = await recommendWorkflowAuto({
 		cwd,
 		task: "Review bounded declarative metadata.",
+		transmissionPolicy: "allowed",
 		availableAgentNames: ["unit-agent"],
 	});
 	for (const label of ["oversized-routing-schema", "deep-routing-schema"]) {
 		const card = result.candidates.find((candidate) => candidate.label === label);
 		assert.equal(card?.readiness.status, "needs-check", label);
 		assert.equal(card?.readiness.startAllowed, false, label);
-		assert.match(card?.readiness.cautions.join(" ") ?? "", /bounded workflow metadata/i);
+		assert.match(
+			card?.readiness.cautions.join(" ") ?? "",
+			/bounded workflow metadata/i,
+		);
 	}
 });
 
@@ -1053,6 +1073,7 @@ test("auto comparison reads only its bounded canonical output artifact", {
 		const result = await recommendWorkflowAuto({
 			cwd,
 			task: "Review this bounded output.",
+			transmissionPolicy: "allowed",
 			availableAgentNames: ["unit-agent"],
 		});
 		assert.equal(result.status, "routing-unavailable");
@@ -1089,36 +1110,21 @@ test("auto comparison accepts a valid multibyte UTF-8 artifact", async () => {
 	const result = await recommendWorkflowAuto({
 		cwd,
 		task: "Review valid UTF-8 output.",
+		transmissionPolicy: "allowed",
 		availableAgentNames: ["unit-agent"],
 	});
 	assert.equal(result.status, "recommendation");
 });
 
-test("headless /workflow auto is recommendation-only after the one comparison", async () => {
+test("headless /workflow auto fails closed without structured transmission authorization", async () => {
 	const cwd = project();
 	writeAgent(cwd);
 	writeSpec(cwd, "review-headless");
 	let calls = 0;
 	setSubagentApiForTests({
-		async runSubagent(options) {
+		async runSubagent() {
 			calls += 1;
-			const packet = JSON.parse(options.task);
-			assert.equal(packet.task, "SECRET ORIGINAL TASK");
-			const runId = "headless";
-			const attemptId = "headless";
-			const path = writeAutoOutput(
-				cwd,
-				runId,
-				attemptId,
-				validComparison(packet.candidateCards),
-			);
-			return {
-				runId,
-				attemptId,
-				status: "completed",
-				cwd,
-				artifacts: [{ type: "output", path }],
-			};
+			throw new Error("headless auto must not classify without authorization");
 		},
 	});
 	let handler;
@@ -1144,7 +1150,13 @@ test("headless /workflow auto is recommendation-only after the one comparison", 
 			},
 		},
 	});
-	assert.equal(calls, 1);
+	assert.equal(calls, 0);
+	assert.equal(
+		messages.some(({ message }) =>
+			/not authorized by a structured host\/user decision/.test(message),
+		),
+		true,
+	);
 	assert.equal(
 		messages.some(({ message }) =>
 			/No workflow has been started\./.test(message),
@@ -1172,7 +1184,54 @@ test("headless /workflow auto is recommendation-only after the one comparison", 
 		),
 		true,
 	);
-	assert.equal(calls, 1);
+	assert.equal(calls, 0);
+});
+
+test("TUI cancellation keeps a Korean no-transmit task out of the classifier", async () => {
+	const cwd = project();
+	let calls = 0;
+	setSubagentApiForTests({
+		async runSubagent() {
+			calls += 1;
+			throw new Error("cancelled auto must not classify");
+		},
+	});
+	let handler;
+	workflowExtension({
+		on() {},
+		registerCommand(name, command) {
+			if (name === "workflow") handler = command.handler;
+		},
+		registerTool() {},
+		sendMessage() {},
+		getThinkingLevel() {
+			return undefined;
+		},
+	});
+	const confirmations = [];
+	const notices = [];
+	await handler('auto "이 작업을 외부 모델로 보내지 마세요."', {
+		cwd,
+		mode: "tui",
+		hasUI: true,
+		ui: {
+			confirm(title) {
+				confirmations.push(title);
+				return false;
+			},
+			custom() {
+				throw new Error("cancelled transmission must not open a classifier loader");
+			},
+			notify(message, level) {
+				notices.push({ message, level });
+			},
+		},
+	});
+	assert.deepEqual(confirmations, ["Allow auto comparison transmission"]);
+	assert.equal(calls, 0);
+	assert.ok(
+		notices.some(({ message }) => /cancelled before transmission/i.test(message)),
+	);
 });
 
 test("TUI keeps safe choices after no-fit without metadata noise or routing jargon", async () => {
@@ -1260,7 +1319,7 @@ test("TUI keeps safe choices after no-fit without metadata noise or routing jarg
 					component.handleInput("tui.select.confirm");
 				});
 			},
-			confirm: async () => false,
+			confirm: async (title) => title === "Allow auto comparison transmission",
 			getEditorText: () => editor,
 			setEditorText: (value) => {
 				editor = value;
@@ -1276,8 +1335,14 @@ test("TUI keeps safe choices after no-fit without metadata noise or routing jarg
 	assert.match(pickerText, /Choose how to run/);
 	assert.match(pickerText, /No recommendation available/);
 	assert.match(pickerText, /manual-fallback-review/);
-	assert.doesNotMatch(pickerText, /Current conversation|current conversation|Manual local fallback|unranked|classifier|named-workflow/);
-	assert.doesNotMatch(notices.map(({ message }) => message).join("\n"), /Auto route:|candidateId|schemas=|verification=/);
+	assert.doesNotMatch(
+		pickerText,
+		/Current conversation|current conversation|Manual local fallback|unranked|classifier|named-workflow/,
+	);
+	assert.doesNotMatch(
+		notices.map(({ message }) => message).join("\n"),
+		/Auto route:|candidateId|schemas=|verification=/,
+	);
 	assert.equal(editor, "");
 	assert.equal((await readIndex(cwd))?.runs.length ?? 0, 0);
 	assert.ok(
@@ -1436,6 +1501,7 @@ test("TUI confirms an unranked named manual fallback with null v2 provenance", a
 		},
 	});
 	const notices = [];
+	const confirmations = [];
 	const keybindings = {
 		matches(data, action) {
 			return data === action;
@@ -1481,7 +1547,10 @@ test("TUI confirms an unranked named manual fallback with null v2 provenance", a
 				});
 			},
 			select: async (_title, options) => options[0],
-			confirm: async () => true,
+			confirm: async (title) => {
+				confirmations.push(title);
+				return true;
+			},
 			getEditorText: () => "",
 			setEditorText() {},
 			notify(message, level) {
@@ -1495,6 +1564,10 @@ test("TUI confirms an unranked named manual fallback with null v2 provenance", a
 		workerCalls > 0,
 		`confirmed named fallback launches only after selection: ${notices.map(({ message }) => message).join(" | ")}`,
 	);
+	assert.deepEqual(confirmations, [
+		"Allow auto comparison transmission",
+		"Confirm selected workflow launch",
+	]);
 	const launched = (await readIndex(cwd))?.runs.find(
 		(run) => run.name === "manual-provenance-review",
 	);
@@ -1504,7 +1577,7 @@ test("TUI confirms an unranked named manual fallback with null v2 provenance", a
 	assert.equal(persisted.launch?.selection.selected, "named-workflow");
 });
 
-test("host rejects model-invented candidates and explicit no-transmission sends no classifier request", async () => {
+test("structured transmission policy fails closed across languages and preserves detected denials", async () => {
 	const cwd = project();
 	writeAgent(cwd);
 	writeSpec(cwd, "review-c");
@@ -1545,13 +1618,52 @@ test("host rejects model-invented candidates and explicit no-transmission sends 
 	const invalid = await recommendWorkflowAuto({
 		cwd,
 		task: "review",
+		transmissionPolicy: "allowed",
 		availableAgentNames: ["unit-agent"],
 	});
 	assert.equal(invalid.status, "routing-unavailable");
 	assert.equal(calls, 1);
+
+	const unrecognizedWithoutPolicy = await recommendWorkflowAuto({
+		cwd,
+		task: "გთხოვთ გადახედოთ ამ ცვლილებას.",
+		availableAgentNames: ["unit-agent"],
+	});
+	assert.equal(unrecognizedWithoutPolicy.transmission, "needs-clarification");
+	assert.match(unrecognizedWithoutPolicy.reason ?? "", /not authorized/);
+	assert.equal(calls, 1);
+
+	const invalidPolicy = await recommendWorkflowAuto({
+		cwd,
+		task: "Review with an invalid runtime policy.",
+		transmissionPolicy: "permit",
+		availableAgentNames: ["unit-agent"],
+	});
+	assert.equal(invalidPolicy.transmission, "needs-clarification");
+	assert.equal(calls, 1);
+
+	const koreanProhibition = await recommendWorkflowAuto({
+		cwd,
+		task: "이 작업을 외부 모델로 보내지 마세요.",
+		transmissionPolicy: "blocked",
+		availableAgentNames: ["unit-agent"],
+	});
+	assert.equal(koreanProhibition.transmission, "blocked");
+	assert.equal(calls, 1);
+
+	const explicitlyAuthorized = await recommendWorkflowAuto({
+		cwd,
+		task: "გთხოვთ გადახედოთ ამ ცვლილებას.",
+		transmissionPolicy: "allowed",
+		availableAgentNames: ["unit-agent"],
+	});
+	assert.equal(explicitlyAuthorized.transmission, "allowed");
+	assert.equal(calls, 2);
+
 	const blocked = await recommendWorkflowAuto({
 		cwd,
 		task: "Do not send this task to any external model.",
+		transmissionPolicy: "allowed",
 		availableAgentNames: ["unit-agent"],
 	});
 	assert.equal(blocked.status, "routing-unavailable");
@@ -1559,6 +1671,7 @@ test("host rejects model-invented candidates and explicit no-transmission sends 
 	const notTransmitted = await recommendWorkflowAuto({
 		cwd,
 		task: "Do not transmit this task outside this machine.",
+		transmissionPolicy: "allowed",
 		availableAgentNames: ["unit-agent"],
 	});
 	assert.equal(notTransmitted.transmission, "blocked");
@@ -1569,7 +1682,7 @@ test("host rejects model-invented candidates and explicit no-transmission sends 
 		availableAgentNames: ["unit-agent"],
 	});
 	assert.equal(cannotOverrideTaskPrivacy.transmission, "blocked");
-	assert.equal(calls, 1);
+	assert.equal(calls, 2);
 });
 
 test("formatted recommendations never interpolate model prose or the original task into generic output", () => {
