@@ -130,6 +130,17 @@ In print, RPC, and other headless slash-command contexts, `/workflow auto` canno
 
 The `execution-router` skill remains advisory and recommendation-only. It may recommend a manual `/workflow run`, `/workflow dynamic`, `/workflow auto`, targeted verifier, or direct work, but it never executes or silently redirects a request.
 
+### Migrating from legacy automatic routing
+
+For scripts or habits based on the v0.9.0–v0.13.8 routing behavior:
+
+- Remove `--route` and `--no-route`; current explicit `run` and `dynamic` commands reject both flags. Use `run <name>` when the named workflow is authoritative, or `dynamic` when direct dynamic execution is authoritative.
+- To compare workflows instead, use interactive `/workflow auto "<task>"`. It asks for transmission authorization, a workflow choice, and final launch confirmation. It never offers a current-conversation/direct-chat candidate. For direct work, stay outside `/workflow`.
+- Do not assume headless `/workflow auto` sends a classifier request. It shows local information only; an API host calling `recommendWorkflowAuto` must supply its own explicit structured transmission policy.
+- Keep existing saved profiles. Compatible pre-routing/full-definition files remain readable without migration or deletion; execution-relevant definition changes still require a fresh explicit profile save.
+
+These are source-checkout migration instructions, not an announcement that a new package version has shipped. Package identity, supported-platform CI, and release approval must be established separately before publishing changed CLI behavior.
+
 ### Dynamic child transcript budget telemetry
 
 Dynamic-generated children receive a cumulative tool-result transcript cap of
