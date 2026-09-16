@@ -3039,7 +3039,7 @@ test("deep-research renderer emits evidence-backed report and sidecars", async (
 		assert.equal(result.renderMode, "evidence-backed-report");
 		assert.match(result.completionSummaryMarkdown, /## Core conclusion/);
 		assert.match(result.completionSummaryMarkdown, /## Main recommendations/);
-		assert.match(result.completionSummaryMarkdown, /## Evidence level/);
+		assert.match(result.completionSummaryMarkdown, /## Limits to keep in mind/);
 		assert.doesNotMatch(
 			result.completionSummaryMarkdown,
 			/final-report\.md|audit\.md|refs\.json|workflow_exec|task-final/,

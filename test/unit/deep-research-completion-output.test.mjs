@@ -47,6 +47,7 @@ function synthesis(comparisonRows) {
 			caveatNotes: [
 				{
 					note: "Unverified leads remain outside the audited claim denominator.",
+					readerNote: "Actual demand has not been established; validate it before investing.",
 					relatedClaimIds: ["claim-019"],
 					gapIds: ["gap-remaining-001"],
 				},
@@ -117,19 +118,19 @@ test("deep-research v2 renders a side-by-side completion with explicit evidence 
 		/\| Primary capability \| Verified in current evidence\./,
 	);
 	assert.match(result.completionSummaryMarkdown, /Treat as unknown, not absent/);
-	assert.match(result.completionSummaryMarkdown, /Audited claims \(48 total\)/);
+	assert.match(result.auditMarkdown, /Audited claims \(48 total\)/);
 	assert.match(
-		result.completionSummaryMarkdown,
+		result.auditMarkdown,
 		/Outside the audited-claim denominator: 24 preserved unverified leads available to synthesis, 23 additional leads omitted by a schema cap/,
 	);
 	assert.match(
-		result.completionSummaryMarkdown,
+		result.auditMarkdown,
 		/zero unsupported\/conflicting\/blocked counts apply only to the 48 audited claims/,
 	);
-	assert.match(
-		result.completionSummaryMarkdown,
-		/\*\*Caveat:\*\* Unverified leads remain outside the audited claim denominator/,
-	);
+	assert.match(result.auditMarkdown, /Unverified leads remain outside the audited claim denominator/);
+	assert.match(result.completionSummaryMarkdown, /Actual demand has not been established/);
+	assert.match(result.completionSummaryMarkdown, /Questions remain unanswered/);
+	assert.doesNotMatch(result.completionSummaryMarkdown, /Audited claims|Fact slots|schema.cap|denominator|evidence:|claim-\d/);
 	assert.doesNotMatch(result.completionSummaryMarkdown, /final-report\.md|audit\.md/);
 });
 
@@ -150,12 +151,11 @@ test("deep-research v2 keeps omitted verification candidates outside the audited
 
 	assert.equal(result.status, "passed", JSON.stringify(result.gates));
 	assert.equal(result.claimSummary.total, 48);
-	assert.match(result.completionSummaryMarkdown, /Audited claims \(48 total\)/);
-	assert.match(
-		result.completionSummaryMarkdown,
-		/1 verification candidate omitted from audit/,
-	);
-	assert.doesNotMatch(result.completionSummaryMarkdown, /Audited claims \(49 total\)/);
+	assert.match(result.auditMarkdown, /Audited claims \(48 total\)/);
+	assert.match(result.auditMarkdown, /1 verification candidate omitted from audit/);
+	assert.doesNotMatch(result.auditMarkdown, /Audited claims \(49 total\)/);
+	assert.match(result.completionSummaryMarkdown, /Questions remain unanswered/);
+	assert.doesNotMatch(result.completionSummaryMarkdown, /candidate omitted|denominator|Audited claims/);
 });
 
 test("deep-research v2 does not infer zero schema-cap omissions when diagnostics are absent", async () => {
@@ -169,11 +169,11 @@ test("deep-research v2 does not infer zero schema-cap omissions when diagnostics
 
 	assert.equal(result.status, "passed", JSON.stringify(result.gates));
 	assert.match(
-		result.completionSummaryMarkdown,
+		result.auditMarkdown,
 		/additional schema-cap omission count unavailable/,
 	);
 	assert.doesNotMatch(
-		result.completionSummaryMarkdown,
+		result.auditMarkdown,
 		/0 additional leads omitted by a schema cap/,
 	);
 });

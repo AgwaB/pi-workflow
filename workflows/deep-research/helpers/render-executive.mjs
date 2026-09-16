@@ -556,6 +556,7 @@ function modernCaveatValid(item) {
 	return Boolean(
 		isRecord(item) &&
 			boundedString(item.note, 1, 1200) &&
+			(!hasOwn(item, "readerNote") || boundedString(item.readerNote, 1, 1200)) &&
 			(!hasOwn(item, "relatedClaimIds") ||
 				boundedStringArray(item.relatedClaimIds, 8)) &&
 			(!hasOwn(item, "gapIds") || boundedStringArray(item.gapIds, 8)),
@@ -1819,62 +1820,103 @@ function selectCaveats(report) {
 	};
 }
 
+// Completion prose consumes raw strings and escapes once. Detailed report
+// helpers return already-escaped Markdown and must not be fed through this path.
+function completionItemText(item) {
+	if (typeof item === "string") return item;
+	for (const key of ["recommendation", "action", "step", "note", "finding", "summary", "bestValue", "claim"]) {
+		if (typeof item?.[key] === "string" && item[key].trim()) return item[key];
+	}
+	return "";
+}
+
+function readerEvidenceQualifier(item, korean) {
+	const status = evidenceStatusOf(item);
+	if (status === "derived") return korean ? "제안" : "Proposal";
+	const labels = {
+		verified: "",
+		partially_supported: korean ? "일부 근거만 확인됨" : "Only partly supported by the available sources",
+		unsupported: korean ? "뒷받침할 근거 부족" : "Insufficient supporting evidence",
+		conflicting: korean ? "출처 간 설명이 일치하지 않음" : "Sources disagree",
+		verification_blocked: korean ? "검증하지 못함" : "Could not be checked",
+		unverified: korean ? "추가 확인 필요" : "Not yet checked",
+	};
+	return labels[normalizeClaimStatus(status)] ?? labels.unverified;
+}
+
+function readerEvidenceLimits(report, claimSummary, slots, korean) {
+	const limits = [];
+	if (claimSummary.total === 0 || claimSummary.verified === 0) {
+		limits.push(korean
+			? "충분히 검증된 근거가 없어 결론을 확정할 수 없습니다."
+			: "There is not enough verified evidence to treat the conclusions as established.");
+	} else if (claimSummary.verified + claimSummary.conflicting < claimSummary.total || asArray(report.unsupportedFindings).length > 0) {
+		limits.push(korean
+			? "일부 근거를 충분히 확인하지 못했습니다. 해당 내용을 확정된 사실로 받아들이지 마세요."
+			: "Some evidence could not be fully checked. Do not treat those statements as established facts.");
+	}
+	if (claimSummary.conflicting > 0 || asArray(report.contestedFindings).length > 0) {
+		limits.push(korean
+			? "출처 간 설명이 일치하지 않는 부분이 있어 추가 확인이 필요합니다."
+			: "Some sources disagree; those conclusions need further checking.");
+	}
+	const coverage = report?.coverageSummary ?? {};
+	const counts = ["preserved", "omittedPreserved", "omittedVerificationCandidates", "coverageGaps"].map(key => finiteNumber(coverage[key]));
+	if (slots.filled < slots.total || counts.some(count => (count ?? 0) > 0) || asArray(report.remainingGaps).length > 0 || asArray(report.unverifiedButRelevant).length > 0) {
+		limits.push(korean
+			? "추가로 확인할 질문이 남아 있습니다. 확인된 일부 사실만으로 전체 결론이 입증된 것은 아닙니다."
+			: "Questions remain unanswered. Verifying some facts does not establish the whole conclusion.");
+	} else if (slots.total === 0 || counts.some(count => count === undefined)) {
+		limits.push(korean
+			? "조사가 필요한 범위를 모두 충족했는지는 확인하지 못했습니다."
+			: "The available record does not establish that all requested areas were covered.");
+	}
+	return limits;
+}
+
 function renderCompletionSummary(report, claimSummary, slots, fallback) {
+	const summary = summaryText(report, fallback);
+	// Fixed presentation labels follow Korean prose when present; other prose is
+	// retained verbatim and the parent may translate fixed labels as before.
+	const korean = /[가-힣]/u.test(summary);
 	const comparisons = comparisonEntries(report).slice(0, 8);
-	const recommendations = recommendationEntries(report);
-	const primaryEntries = (
-		recommendations.length > 0 ? recommendations : mainFindingEntries(report)
-	).slice(0, comparisons.length > 0 ? 6 : 8);
-	const categoryOrder = [
-		"Caveat",
-		"Gap",
-		"Contested",
-		"Unsupported",
-		"Unverified lead",
-		"Decision note",
-	];
-	const categoryRank = new Map(
-		categoryOrder.map((category, index) => [category, index]),
-	);
-	const limitations = caveatCategories(report)
-		.flatMap((category) =>
-			category.entries.map((entry) => ({ kind: category.kind, ...entry })),
-		)
-		.sort(
-			(left, right) =>
-				(categoryRank.get(left.kind) ?? categoryOrder.length) -
-				(categoryRank.get(right.kind) ?? categoryOrder.length),
-		)
-		.slice(0, 8);
-	const out = [
-		"## Core conclusion",
-		"",
-		completionText(summaryText(report, fallback)),
-		"",
-	];
-	if (comparisons.length > 0) {
-		out.push(
-			"## Comparison snapshot",
-			"",
-			"| Area | Subject / current state | Reference pattern | Assessment |",
-			"|---|---|---|---|",
-		);
+	const recommendations = asArray(report.recommendations);
+	const primary = (recommendations.length ? recommendations : asArray(report.mainFindings))
+		.slice(0, comparisons.length ? 6 : 8);
+	const out = ["## Core conclusion", "", completionText(summary), ""];
+	if (comparisons.length) {
+		out.push("## Comparison snapshot", "", "| Area | Subject / current state | Reference pattern | Assessment |", "|---|---|---|---|");
 		for (const { item, area, subjectStatus, referencePattern, assessment } of comparisons) {
-			const status = evidenceStatusOf(item) || "not specified";
-			out.push(
-				`| ${escapeTableCell(area)} | ${escapeTableCell(subjectStatus)} | ${escapeTableCell(referencePattern)} | ${escapeTableCell(`${assessment} — evidence: ${status}`)} |`,
-			);
+			const qualifier = readerEvidenceQualifier(item, korean);
+			const cells = [area, subjectStatus, referencePattern, `${assessment}${qualifier ? ` (${qualifier})` : ""}`];
+			out.push(`| ${cells.map(value => completionText(value).replace(/\r?\n/g, " ")).join(" | ")} |`);
 		}
 		out.push("");
 	}
-	if (primaryEntries.length > 0) {
+	if (primary.length) {
 		out.push("## Main recommendations", "");
-		for (const { item, text } of primaryEntries) {
-			const status = evidenceStatusOf(item) || "not specified";
-			out.push(`- ${completionText(text)} — evidence: ${completionText(status)}`);
+		if (recommendations.length) out.push(korean ? "아래 권고는 조사 결과를 바탕으로 한 제안입니다." : "These recommendations are proposals based on the research, not validated outcomes.", "");
+		for (const item of primary) {
+			const text = completionItemText(item);
+			if (!text) continue;
+			const qualifier = recommendations.length && evidenceStatusOf(item) === "derived" ? "" : readerEvidenceQualifier(item, korean);
+			out.push(`- ${completionText(`${text}${qualifier ? ` (${qualifier})` : ""}`)}`);
 		}
 		out.push("");
 	}
+	// Internal notes are retained in the report/audit, never copied as a fallback.
+	// Older controls have no readerNote: deterministic evidence limits still
+	// disclose incomplete/unknown coverage without exposing bookkeeping jargon.
+	const readerNotes = uniqueStrings(asArray(report.caveatedFindings).map(item => item?.readerNote), 4);
+	const limits = uniqueStrings([...readerEvidenceLimits(report, claimSummary, slots, korean), ...readerNotes]);
+	if (limits.length) {
+		out.push("## Limits to keep in mind", "", ...limits.map(text => `- ${completionText(text)}`), "");
+	}
+	return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function renderEvidenceAuditSummary(report, claimSummary, slots) {
+	const out = [];
 	const preservedLeads = finiteNumber(report?.coverageSummary?.preserved);
 	const omittedPreservedLeads = finiteNumber(
 		report?.coverageSummary?.omittedPreserved,
@@ -1931,13 +1973,6 @@ function renderCompletionSummary(report, claimSummary, slots, fallback) {
 		);
 	}
 	out.push("");
-	if (limitations.length > 0) {
-		out.push("## Remaining decisions and limits", "");
-		for (const { kind, text } of limitations) {
-			out.push(`- **${completionText(kind)}:** ${completionText(text)}`);
-		}
-		out.push("");
-	}
 	return out
 		.join("\n")
 		.replace(/\n{3,}/g, "\n\n")
@@ -2171,6 +2206,7 @@ function renderResearchMarkdown(control, packetSource, options = {}) {
 		.trim();
 	return {
 		markdown,
+		report,
 		completionSummaryMarkdown,
 		sourceIndex,
 		allSourceIndex,
@@ -2221,6 +2257,12 @@ function renderAuditMarkdown(control, packetSource, rendered) {
 		"# Research audit",
 		"",
 		"This artifact preserves the detailed claim/gap/source ledger behind `final-report.md`.",
+		"",
+		renderEvidenceAuditSummary(rendered.report, rendered.claimSummary, rendered.factSlotSummary),
+		"",
+		"## Synthesis caveats",
+		"",
+		...asArray(rendered.report.caveatedFindings).map(item => `- ${caveatText(item)}`),
 		"",
 		"## Claim verdict ledger",
 		"",
