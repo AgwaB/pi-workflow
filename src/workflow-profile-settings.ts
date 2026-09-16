@@ -175,7 +175,11 @@ export async function workflowProfileIdentity(
 	spec: ArtifactGraphWorkflowSpec,
 	specPath: string,
 ): Promise<WorkflowProfileIdentity> {
-	const definitionFingerprint = workflowDefinitionFingerprint(spec);
+	// Routing is comparison-only metadata, not execution/profile configuration.
+	// Run capture still binds the complete definition via workflowDefinitionFingerprint.
+	const profileDefinition = { ...spec };
+	delete profileDefinition.routing;
+	const definitionFingerprint = workflowDefinitionFingerprint(profileDefinition);
 	let canonicalPath: string;
 	try {
 		canonicalPath = await realpath(specPath);
@@ -195,20 +199,47 @@ export async function workflowProfileIdentity(
 	};
 }
 
+/** Read both profile identity generations without rewriting either settings file. */
+async function readCompatibleProfilePreference(
+	spec: ArtifactGraphWorkflowSpec,
+	identity: WorkflowProfileIdentity,
+): Promise<WorkflowProfilePreference | undefined> {
+	const slots = collectWorkflowProfileStageSlots(spec);
+	const identities = [identity];
+	const fullFingerprint = workflowDefinitionFingerprint(spec);
+	if (fullFingerprint !== identity.definitionFingerprint) {
+		identities.push({
+			...identity,
+			definitionFingerprint: fullFingerprint,
+			settingsFile: join(dirname(identity.settingsFile), `${fullFingerprint}.json`),
+		});
+	}
+	const compatible: WorkflowProfilePreference[] = [];
+	for (const candidateIdentity of identities) {
+		const preference = await readPreferenceFile(candidateIdentity.settingsFile);
+		if (!preference) continue;
+		assertExactPreferenceMatches(preference, candidateIdentity, slots);
+		compatible.push(preference);
+	}
+	// Preserve the latest explicit choice if both pre-routing and full-definition
+	// settings exist. On a timestamp tie, the canonical profile identity wins.
+	compatible.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+	const selected = compatible[0];
+	if (!selected) return undefined;
+	return {
+		...selected,
+		definitionFingerprint: identity.definitionFingerprint,
+		sourcePathHashes: [...new Set(compatible.flatMap((item) => item.sourcePathHashes))].sort(),
+	};
+}
+
 export async function loadWorkflowProfilePreference(
 	spec: ArtifactGraphWorkflowSpec,
 	specPath: string,
 ): Promise<WorkflowProfileLoadResult> {
 	const identity = await workflowProfileIdentity(spec, specPath);
-	const exact = await readPreferenceFile(identity.settingsFile);
-	if (exact) {
-		assertExactPreferenceMatches(
-			exact,
-			identity,
-			collectWorkflowProfileStageSlots(spec),
-		);
-		return { identity, preference: exact };
-	}
+	const exact = await readCompatibleProfilePreference(spec, identity);
+	if (exact) return { identity, preference: exact };
 
 	const root = dirname(identity.settingsFile);
 	let names: string[];
@@ -268,8 +299,7 @@ export async function saveWorkflowProfilePreference(
 	return withWorkflowProfileSettingsLock(
 		dirname(identity.settingsFile),
 		async (assertOwner) => {
-			const existing = await readPreferenceFile(identity.settingsFile);
-			if (existing) assertExactPreferenceMatches(existing, identity, slots);
+			const existing = await readCompatibleProfilePreference(context.spec, identity);
 			const selectedCustom = selection.custom
 				? parseCustomProfile(selection.custom)
 				: undefined;

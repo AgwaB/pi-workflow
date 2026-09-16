@@ -196,8 +196,8 @@ export interface WorkflowAutoResult {
 	comparison?: WorkflowAutoComparison;
 	reason?: string;
 	transmission: "allowed" | "blocked" | "needs-clarification";
-	/** A direct draft is local; workflow choices require an allowed model boundary. */
-	localChoiceScope?: "all-safe" | "direct-only";
+	/** Workflow choices require an allowed external-model boundary. */
+	localChoiceScope?: "all-safe" | "none";
 }
 
 export interface WorkflowAutoRequest {
@@ -235,7 +235,7 @@ export async function recommendWorkflowAuto(
 			? (request.transmissionPolicy ?? "allowed")
 			: taskTransmission;
 	const localChoiceScope =
-		transmission === "allowed" ? "all-safe" : "direct-only";
+		transmission === "allowed" ? "all-safe" : "none";
 	const candidates = createWorkflowAutoCandidates(catalog);
 	const shortlist = deterministicShortlist(candidates, task);
 	const available = request.availableAgentNames
@@ -250,7 +250,7 @@ export async function recommendWorkflowAuto(
 			shortlist,
 			"A concrete task is required before execution paths can be compared.",
 			"needs-clarification",
-			"direct-only",
+			"none",
 		);
 	}
 	if (Buffer.byteLength(task, "utf8") > WORKFLOW_AUTO_MAX_TASK_BYTES) {
@@ -266,8 +266,8 @@ export async function recommendWorkflowAuto(
 		);
 	}
 	// Enforce task/transmission gates before even bounded local metadata
-	// resolution. A direct editor draft remains local; model-backed workflow
-	// candidates are explicitly blocked by applyCandidateGates below.
+	// resolution. No conversation fallback is offered when workflow execution
+	// is disallowed; task-derived candidate gates remain fail-closed below.
 	if (transmission !== "allowed") {
 		for (const candidate of candidates)
 			applyCandidateGates(candidate, constraints, available);
@@ -412,50 +412,6 @@ async function buildEffectiveWorkflowAutoCandidates(
 function createWorkflowAutoCandidates(
 	catalog: WorkflowRoutingCatalog,
 ): WorkflowAutoCandidate[] {
-	const direct = baseCandidate({
-		kind: "direct",
-		label: "Handle in the current conversation",
-		scope: "parent",
-		description:
-			"No workflow or child run is created. The original task is handed back to the current parent conversation.",
-		routing: {
-			useWhen: [
-				"A coherent owner can produce the requested answer or patch directly.",
-			],
-			avoidWhen: [],
-			outputs: ["Parent response or patch."],
-		},
-		facts: {
-			stageCount: 1,
-			stageTypes: ["parent"],
-			agents: [],
-			tools: [],
-			readOnly: "unknown",
-			hasSupport: false,
-			hasDynamic: false,
-			requiresApproval: false,
-			usesNetwork: false,
-		},
-		comparison: {
-			description:
-				"No workflow or child run is created; the current parent conversation keeps ownership.",
-			purpose:
-				"Return the task to the current conversation without creating a workflow run.",
-			declaredOutputs: ["Parent response or patch."],
-			declaredSchemas: [],
-			declaredVerification: ["Verification remains under parent control."],
-			overhead: {
-				stages: 1,
-				executionStages: 0,
-				foreachStages: 0,
-				loopStages: 0,
-				dynamic: false,
-				support: false,
-			},
-			unknowns: [],
-		},
-
-	});
 	const dynamic = baseCandidate({
 		kind: "direct-dynamic",
 		label: "Dynamic workflow",
@@ -513,7 +469,7 @@ function createWorkflowAutoCandidates(
 
 	});
 	const named = catalog.records.map((record) => candidateFromRecord(record));
-	return [direct, dynamic, ...named];
+	return [dynamic, ...named];
 }
 
 class WorkflowAutoMetadataLimitError extends Error {}
@@ -1315,7 +1271,7 @@ function deterministicShortlist(
 	candidates: readonly WorkflowAutoCandidate[],
 	task: string,
 ): WorkflowAutoCandidate[] {
-	const [direct, dynamic, ...named] = candidates;
+	const [dynamic, ...named] = candidates;
 	const words = new Set(
 		task.toLocaleLowerCase().match(/[\p{L}\p{N}_-]{3,}/gu) ?? [],
 	);
@@ -1338,7 +1294,7 @@ function deterministicShortlist(
 			left.label.localeCompare(right.label) ||
 			left.candidateId.localeCompare(right.candidateId),
 	);
-	return [direct, dynamic, ...sortedNamed]
+	return [dynamic, ...sortedNamed]
 		.filter((candidate): candidate is WorkflowAutoCandidate => Boolean(candidate))
 		.slice(0, WORKFLOW_AUTO_MAX_CANDIDATE_CARDS);
 }
@@ -1946,7 +1902,7 @@ function unavailable(
 	reason: string,
 	transmission: "allowed" | "blocked" | "needs-clarification",
 	localChoiceScope: WorkflowAutoResult["localChoiceScope"] =
-		transmission === "allowed" ? "all-safe" : "direct-only",
+		transmission === "allowed" ? "all-safe" : "none",
 ): WorkflowAutoResult {
 	return {
 		status: "routing-unavailable",
