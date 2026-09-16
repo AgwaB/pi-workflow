@@ -36,6 +36,10 @@ export interface WorkflowNativePickerChoice {
 	description?: string;
 }
 
+type NativeSelectOptions = WorkflowProfileSelectOptions & {
+	detailsBelow?: boolean;
+};
+
 const MAX_VISIBLE_CHOICES = 10;
 const MAX_PROFILE_WIDTH = 100;
 
@@ -78,7 +82,7 @@ export async function selectWorkflowProfileTarget(
 	);
 }
 
-/** Auto routing uses the same bounded native picker as execution profiles. */
+/** Auto routing shows names first, with selected details below and a scrollable full view. */
 export async function selectWorkflowAutoChoice(
 	ui: NativeUi,
 	title: string,
@@ -87,11 +91,7 @@ export async function selectWorkflowAutoChoice(
 ): Promise<string | undefined> {
 	if (choices.length === 0) return undefined;
 	if (!supportsCustomUi(ui)) {
-		const options = choices.map((choice) =>
-			choice.description
-				? `${safeLine(choice.label)} — ${safeLine(choice.description)}`
-				: safeLine(choice.label),
-		);
+		const options = choices.map((choice, index) => `${index + 1}. ${safeLine(choice.label)}`);
 		const selectedLabel = await ui.select(title, options);
 		const selectedIndex = options.findIndex((option) => option === selectedLabel);
 		return selectedIndex < 0 ? undefined : choices[selectedIndex]?.value;
@@ -108,6 +108,7 @@ export async function selectWorkflowAutoChoice(
 			selected,
 			searchable: choices.length > MAX_VISIBLE_CHOICES,
 			cancelLabel: "cancel",
+			detailsBelow: true,
 		},
 	);
 }
@@ -244,7 +245,7 @@ async function selectNativeItem(
 	ui: NativeUi,
 	title: string,
 	items: readonly SelectItem[],
-	selection: WorkflowProfileSelectOptions = {},
+	selection: NativeSelectOptions = {},
 ): Promise<string | undefined> {
 	if (items.length === 0) return undefined;
 	const safeItems = items.map((item) => {
@@ -269,10 +270,13 @@ async function selectNativeItem(
 					picker.render(title, profileWidth(width), tui.terminal.rows),
 				invalidate: () => picker.input.invalidate(),
 				handleInput: (data) => {
-					if (keybindings.matches(data, "tui.select.cancel")) done(null);
-					else if (keybindings.matches(data, "tui.select.confirm")) {
-						const item = picker.selectedItem();
-						if (item) done(item.value);
+					if (keybindings.matches(data, "tui.select.cancel")) {
+						if (!picker.closeDetails()) done(null);
+					} else if (keybindings.matches(data, "tui.select.confirm")) {
+						if (!picker.closeDetails()) {
+							const item = picker.selectedItem();
+							if (item) done(item.value);
+						}
 					} else picker.handleInput(data, keybindings);
 					tui.requestRender();
 				},
@@ -288,10 +292,14 @@ class ProfileChoiceList {
 	private filtered: readonly SelectItem[];
 	private index: number;
 	private visibleRows = MAX_VISIBLE_CHOICES;
+	private detailsOpen = false;
+	private detailOffset = 0;
+	private detailRows = 1;
+	private detailTotal = 0;
 
 	constructor(
 		private readonly items: readonly SelectItem[],
-		private readonly selection: WorkflowProfileSelectOptions,
+		private readonly selection: NativeSelectOptions,
 		private readonly theme: PreviewTheme,
 	) {
 		this.filtered = items;
@@ -305,7 +313,27 @@ class ProfileChoiceList {
 		return this.filtered[this.index];
 	}
 
+	closeDetails(): boolean {
+		if (!this.detailsOpen) return false;
+		this.detailsOpen = false;
+		return true;
+	}
+
 	handleInput(data: string, keybindings: KeybindingsManager): void {
+		if (this.selection.detailsBelow && data === "\t") {
+			this.detailsOpen = !this.detailsOpen;
+			this.detailOffset = 0;
+			return;
+		}
+		if (this.detailsOpen) {
+			let delta = 0;
+			if (keybindings.matches(data, "tui.select.up")) delta = -1;
+			else if (keybindings.matches(data, "tui.select.down")) delta = 1;
+			else if (keybindings.matches(data, "tui.select.pageUp")) delta = -this.detailRows;
+			else if (keybindings.matches(data, "tui.select.pageDown")) delta = this.detailRows;
+			this.detailOffset = Math.max(0, Math.min(this.detailTotal - this.detailRows, this.detailOffset + delta));
+			return;
+		}
 		const count = this.filtered.length;
 		if (keybindings.matches(data, "tui.select.up")) {
 			this.index = count ? (this.index - 1 + count) % count : 0;
@@ -335,6 +363,7 @@ class ProfileChoiceList {
 	}
 
 	render(title: string, width: number, terminalRows: number): string[] {
+		if (this.selection.detailsBelow) return this.renderAuto(title, width, terminalRows);
 		const theme = this.theme;
 		const header = renderTitle(title, theme, width);
 		const search = this.selection.searchable ? this.input.render(width) : [];
@@ -377,6 +406,60 @@ class ProfileChoiceList {
 			...list.render(width).map((line) => theme.fg("text", line)),
 			...detail.map((line) => theme.fg("muted", line)),
 			...hints.map((hint) => fitLine(` ${theme.fg("dim", hint)}`, width)),
+			...new DynamicBorder((text) => theme.fg("borderMuted", text)).render(width),
+		];
+	}
+
+	private renderAuto(title: string, width: number, terminalRows: number): string[] {
+		const theme = this.theme;
+		const innerWidth = Math.max(1, width - 2);
+		const header = wrapTextWithAnsi(
+			this.detailsOpen ? "Option details" : title.split(/\r?\n/).map(safeLine).join("\n"),
+			innerWidth,
+		);
+		const search = !this.detailsOpen && this.selection.searchable ? this.input.render(width) : [];
+		const hints = wrapTextWithAnsi(
+			this.detailsOpen
+				? "↑↓/pgup/pgdn scroll  tab/enter/esc back"
+				: `${this.selection.searchable ? "type to filter  " : ""}↑↓ choose  enter next  tab details  esc cancel`,
+			innerWidth,
+		);
+		const bodyRows = Math.max(1, terminalRows - 6 - header.length - search.length - hints.length);
+		const selected = this.selectedItem();
+		const details = wrapTextWithAnsi(
+			selected ? `${selected.label}\n${selected.description ?? ""}` : "No matching choices",
+			innerWidth,
+		);
+		let body: string[];
+		if (this.detailsOpen) {
+			this.detailTotal = details.length;
+			this.detailRows = Math.max(1, bodyRows - 1);
+			this.detailOffset = Math.max(0, Math.min(this.detailOffset, details.length - this.detailRows));
+			body = details.slice(this.detailOffset, this.detailOffset + this.detailRows);
+			body.push(`${this.detailOffset + 1}–${Math.min(details.length, this.detailOffset + this.detailRows)} / ${details.length} lines`);
+		} else {
+			const detailRows = Math.min(3, Math.max(0, bodyRows - 3));
+			this.visibleRows = Math.max(1, Math.min(MAX_VISIBLE_CHOICES, bodyRows - detailRows - 1));
+			const start = Math.max(0, Math.min(this.index - Math.floor(this.visibleRows / 2), this.filtered.length - this.visibleRows));
+			body = this.filtered.slice(start, start + this.visibleRows).map((item, offset) => {
+				const active = start + offset === this.index;
+				return theme.fg(active ? "accent" : "text", truncateToWidth(`${active ? "→" : " "} ${item.label}`, innerWidth, "…"));
+			});
+			if (!body.length) body.push("No matching choices");
+			body.push(`${this.filtered.length ? this.index + 1 : 0} / ${this.filtered.length}`);
+			const summary = details.slice(0, detailRows);
+			if (summary.length && details.length > detailRows) {
+				const last = summary.length - 1;
+				summary[last] = `${truncateToWidth(summary[last] ?? "", Math.max(1, innerWidth - 1), "")}…`;
+			}
+			body.push(...summary.map((line) => theme.fg("muted", line)));
+		}
+		return [
+			...new DynamicBorder((text) => theme.fg("borderAccent", text)).render(width),
+			...header.map((line) => ` ${theme.fg("accent", line)}`),
+			...search,
+			...body.map((line) => fitLine(` ${line}`, width)),
+			...hints.map((line) => ` ${theme.fg("dim", line)}`),
 			...new DynamicBorder((text) => theme.fg("borderMuted", text)).render(width),
 		];
 	}

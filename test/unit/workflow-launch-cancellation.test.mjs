@@ -185,7 +185,7 @@ function interactiveContext(cwd, startLoaders, notices) {
 						done,
 					);
 					const screen = component.render?.(100).join("\n") ?? "";
-					if (/Choose an execution path/.test(screen)) {
+					if (/Choose how to run/.test(screen)) {
 						queueMicrotask(() => component.handleInput("tui.select.confirm"));
 					} else if (/Starting /.test(screen)) {
 						startLoaders.push(component);

@@ -1173,7 +1173,7 @@ test("headless /workflow auto is recommendation-only after the one comparison", 
 	assert.equal(calls, 1);
 });
 
-test("TUI keeps safe candidates as explicitly unranked local manual fallbacks after no-fit", async () => {
+test("TUI keeps safe choices after no-fit without metadata noise or routing jargon", async () => {
 	const cwd = project();
 	writeAgent(cwd);
 	writeSpec(cwd, "manual-fallback-review");
@@ -1270,10 +1270,12 @@ test("TUI keeps safe candidates as explicitly unranked local manual fallbacks af
 			setWidget() {},
 		},
 	});
-	assert.match(
-		pickerScreens.join("\n"),
-		/Choose a local manual fallback \(unranked; nothing starts yet\)/,
-	);
+	const pickerText = pickerScreens.join("\n");
+	assert.match(pickerText, /Choose how to run/);
+	assert.match(pickerText, /No recommendation available/);
+	assert.match(pickerText, /Current conversation/);
+	assert.doesNotMatch(pickerText, /Manual local fallback|unranked|classifier|named-workflow/);
+	assert.doesNotMatch(notices.map(({ message }) => message).join("\n"), /Auto route:|candidateId|schemas=|verification=/);
 	assert.match(editor, /Use a safe local fallback\./);
 	assert.ok(
 		notices.some(({ message }) => /no workflow was started/i.test(message)),
@@ -1353,7 +1355,9 @@ test(`TUI keeps the confirmed direct draft available under a transmission restri
 		},
 	});
 	assert.equal(calls, 0);
-	assert.match(screens.join("\n"), /local direct hand-off/);
+	assert.match(screens.join("\n"), /Workflows unavailable for this request/);
+	assert.match(screens.join("\n"), /Current conversation/);
+	assert.doesNotMatch(screens.join("\n"), /Dynamic workflow|manual|unranked|classifier/);
 	assert.ok(editor.includes(task));
 });
 }
