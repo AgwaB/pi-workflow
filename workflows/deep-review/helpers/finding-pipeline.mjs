@@ -854,9 +854,13 @@ function ocrBindingIssue(row, path, source, artifact, repoRoot) {
 
 function exactSourceQuoteIssue(row, path, context) {
 	if (!row.evidence) return "content quote missing";
+	if (/:\d+(?:-\d+)?(?:,\d+(?:-\d+)?)+$/u.test(path))
+		return "multiple source ranges are unsupported; plan each range as a separate pointer";
 	const pointer = parseSourceCoveragePointer(path);
 	if (!pointer) return "required source pointer is invalid";
 	const repoRoot = repoRootFromContext(context);
+	if (!safeRepoRelativePath(pointer.file, repoRoot))
+		return "required source path must be repository-relative within the runtime cwd; review other repositories separately";
 	const source = readRepoText(
 		pointer.file,
 		repoRoot,

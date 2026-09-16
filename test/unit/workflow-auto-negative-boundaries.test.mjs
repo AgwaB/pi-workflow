@@ -33,50 +33,119 @@ function put(cwd, relativePath, value) {
 	return path;
 }
 
-for (const task of ["Do not write to disk; do not use the network.", "Don't edit files; never access the internet.", "You must not modify code or use the network. Offline only."]) {
+for (const task of [
+	"Do not write to disk; do not use the network.",
+	"Don't edit files; never access the internet.",
+	"You must not modify code or use the network. Offline only.",
+]) {
 	test(`negative network constraints prevent classification and workflow choices: ${task}`, async () => {
 		const cwd = project();
 		put(cwd, "workflows/write-to-disk.json", spec("write-to-disk", false));
 		let calls = 0;
-		setSubagentApiForTests({ async runSubagent() { calls += 1; throw new Error("forbidden transport"); } });
-		const result = await recommendWorkflowAuto({ cwd, task, availableAgentNames: ["unit-agent"] });
+		setSubagentApiForTests({
+			async runSubagent() {
+				calls += 1;
+				throw new Error("forbidden transport");
+			},
+		});
+		const result = await recommendWorkflowAuto({
+			cwd,
+			task,
+			transmissionPolicy: "allowed",
+			availableAgentNames: ["unit-agent"],
+		});
 		assert.equal(calls, 0);
 		assert.notEqual(result.transmission, "allowed");
 		assert.equal(result.localChoiceScope, "none");
 		assert.ok(result.candidates.length > 0);
 		assert.ok(result.candidates.every((item) => !item.readiness.startAllowed));
-		assert.equal(result.candidates.some((item) => item.kind === "direct"), false);
+		assert.equal(
+			result.candidates.some((item) => item.kind === "direct"),
+			false,
+		);
 	});
 }
 
-for (const task of ["Do not write to disk.", "Don't change code.", "Never edit or modify files.", "Do not modify the source; review it."]) {
+for (const task of [
+	"Do not write to disk.",
+	"Don't change code.",
+	"Never edit or modify files.",
+	"Do not modify the source; review it.",
+]) {
 	test(`negative write verbs remain safety gates after classifier failure: ${task}`, async () => {
 		const cwd = project();
 		const unsafeSpec = spec("write-to-disk", false);
 		const path = put(cwd, "workflows/write-to-disk.json", unsafeSpec);
-		const safePath = put(cwd, "workflows/review-source.json", spec("review-source"));
+		const safePath = put(
+			cwd,
+			"workflows/review-source.json",
+			spec("review-source"),
+		);
 		let calls = 0;
-		setSubagentApiForTests({ async runSubagent() { calls += 1; throw new Error("offline classifier failure"); } });
-		const result = await recommendWorkflowAuto({ cwd, task, availableAgentNames: ["unit-agent"] });
+		setSubagentApiForTests({
+			async runSubagent() {
+				calls += 1;
+				throw new Error("offline classifier failure");
+			},
+		});
+		const result = await recommendWorkflowAuto({
+			cwd,
+			task,
+			transmissionPolicy: "allowed",
+			availableAgentNames: ["unit-agent"],
+		});
 		assert.equal(calls, 1);
 		assert.equal(result.status, "routing-unavailable");
 		const unsafe = result.candidates.find((item) => item.specPath === path);
 		assert.equal(unsafe.readiness.startAllowed, false);
 		assert.match(unsafe.readiness.blockers.join(" "), /read-only/);
-		assert.equal(result.candidates.find((item) => item.specPath === safePath).readiness.startAllowed, true, "a negated write verb must not block a read-only report as a patch request");
-		const compiled = await compileWorkflow(unsafeSpec, { cwd, specPath: path, task });
-		assert.throws(() => assertWorkflowAutoResolvedCandidateSafety(unsafe, compiled, task), /incompatible/);
+		assert.equal(
+			result.candidates.find((item) => item.specPath === safePath).readiness
+				.startAllowed,
+			true,
+			"a negated write verb must not block a read-only report as a patch request",
+		);
+		const compiled = await compileWorkflow(unsafeSpec, {
+			cwd,
+			specPath: path,
+			task,
+		});
+		assert.throws(
+			() => assertWorkflowAutoResolvedCandidateSafety(unsafe, compiled, task),
+			/incompatible/,
+		);
 	});
 }
 
 test("positive mutation request remains positive, not a read-only permission", async () => {
 	const cwd = project();
-	const path = put(cwd, "workflows/write-to-disk.json", spec("write-to-disk", false));
+	const path = put(
+		cwd,
+		"workflows/write-to-disk.json",
+		spec("write-to-disk", false),
+	);
 	const readPath = put(cwd, "workflows/review.json", spec("review"));
-	setSubagentApiForTests({ async runSubagent() { throw new Error("offline"); } });
-	const result = await recommendWorkflowAuto({ cwd, task: "Modify and fix the source.", availableAgentNames: ["unit-agent"] });
-	assert.equal(result.candidates.find((item) => item.specPath === path).readiness.startAllowed, true);
-	assert.equal(result.candidates.find((item) => item.specPath === readPath).readiness.startAllowed, false);
+	setSubagentApiForTests({
+		async runSubagent() {
+			throw new Error("offline");
+		},
+	});
+	const result = await recommendWorkflowAuto({
+		cwd,
+		task: "Modify and fix the source.",
+		transmissionPolicy: "allowed",
+		availableAgentNames: ["unit-agent"],
+	});
+	assert.equal(
+		result.candidates.find((item) => item.specPath === path).readiness
+			.startAllowed,
+		true,
+	);
+	assert.equal(
+		result.candidates.find((item) => item.specPath === readPath).readiness
+			.startAllowed,
+		false,
+	);
 });
 
 test("oversize higher-priority resolver owner cannot donate its alias to a catalog fallback", async () => {
