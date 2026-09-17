@@ -1435,9 +1435,9 @@ test("TUI confirms an unranked named manual fallback with null v2 provenance", a
 	const cwd = project();
 	writeAgent(cwd);
 	writeSpec(cwd, "manual-provenance-review");
-	// Keep the native picker searchable so the fake TUI selects by visible
-	// label rather than relying on incidental package-catalog ordering.
-	for (let index = 0; index < 6; index += 1)
+	// Keep the native picker searchable from project-local fixtures alone so the
+	// fake TUI never depends on an ambient package catalog or its ordering.
+	for (let index = 0; index < 10; index += 1)
 		writeSpec(cwd, `manual-provenance-extra-${index}`);
 	let workerCalls = 0;
 	setSubagentApiForTests({
