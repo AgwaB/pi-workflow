@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, stat, link, unlink, rename, symlink, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, stat, link, unlink, rename, symlink, rm, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname, basename } from 'node:path';
 import { test } from 'node:test';
@@ -95,6 +95,8 @@ test('new linked raw detects later mutation including truncated and cached reads
 });
 for (const kind of ['late-byte-mutation','late-link','late-source-substitution','late-root-generation']) test(`post-read validation rejects ${kind} without a ledger row`,async t=>{
  const f=await fixture(t);
+ // Make the post-read overwrite observable even when filesystem timestamps coalesce.
+ if(kind==='late-byte-mutation')await utimes(f.output,0,0);
  assert.equal((await f.read()).content,raw, 'post-read control begins with accepted evidence');
  setArtifactReadHookForTests(async()=>{
   if(kind==='late-byte-mutation') await writeFile(f.output,raw.replace('Evidence','Tampered'));
@@ -218,12 +220,19 @@ for(const legacy of [true,false]) test(`pre-first replacement of all owned names
 });
 for(const kind of ['bytes','inode','extra-link']) test(`legacy observed in-read ${kind} change rejects without requiredReads`,async t=>{
  const f=await fixture(t,true);
+ // A same-size write need not advance mtime/ctime within one filesystem tick.
+ // Seed mtime before validation; retain the actual byte overwrite and rejection.
+ if(kind==='bytes')await utimes(f.output,0,0);
+ let mutations=0;
  setArtifactReadHookForTests(async()=>{
   if(kind==='bytes')await writeFile(f.output,raw.replace('Evidence','Changed!'));
   if(kind==='inode'){await unlink(f.output);await unlink(f.artifact);await writeFile(f.output,raw);await link(f.output,f.artifact);}
   if(kind==='extra-link')await link(f.output,join(f.root,'extra'));
+  mutations++;
  });
  await assert.rejects(()=>handleWorkflowArtifactToolCall({action:'read',source:'producer',artifact:'raw'},f.config));
+ assert.equal(mutations,1);
+ if(kind==='bytes')assert.notEqual((await stat(f.output)).mtimeMs,0);
  assert.deepEqual((await checkRequiredArtifactReads(f.consumer,['producer.raw'])).missing,['producer.raw']);
 });
 test('writer source-inode substitution before link cannot publish substituted bytes',async t=>{

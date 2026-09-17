@@ -13,6 +13,9 @@ import { tmpdir } from "node:os";
 import { join, relative, dirname } from "node:path";
 import { after, test } from "node:test";
 
+import { compileWorkflow } from "../../.tmp/unit/compiler.js";
+import { applyExecutionProfileStageOverrides } from "../../.tmp/unit/execution-profile.js";
+import { loadWorkflowSpec } from "../../.tmp/unit/schema.js";
 import { buildForeachGeneratedTasks } from "../../.tmp/unit/engine-run-graph.js";
 import {
 	assertForeachBatchRecord,
@@ -32,10 +35,12 @@ import {
 } from "../../.tmp/unit/engine.js";
 import {
 	compiledWorkflowPath,
+	createWorkflowRunRecord,
 	readRunRecord,
 	withRunLease,
 	workflowRunDir,
 	writeRunRecord,
+	writeStaticRunArtifacts,
 } from "../../.tmp/unit/store.js";
 import {
 	launchSubagentTask,
@@ -1600,10 +1605,23 @@ test("an expired leader falls back the exact pair after backend refresh errors",
 			}),
 		});
 		setSubagentApiForTests(fake.api);
-		const started = await runWorkflow("batch-refresh-error", cwd, {
-			task: "Recover from refresh failure.",
-			executionProfile: "batched",
+		// Own refresh explicitly: runWorkflow attaches a watcher that can consume
+		// the polling error and apply fallback before our rejection assertion.
+		const loaded = await loadWorkflowSpec("batch-refresh-error", cwd);
+		const stageOverrides = structuredClone(loaded.spec.executionProfiles.batched);
+		const spec = applyExecutionProfileStageOverrides(loaded.spec, stageOverrides, {
+			foreachRuntimeTarget: "stage",
 		});
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			specPath: loaded.specPath,
+			task: "Recover from refresh failure.",
+		});
+		const { run: started } = await createWorkflowRunRecord(cwd, compiled, loaded.specPath);
+		started.executionProfile = { name: "batched", stageOverrides };
+		await writeStaticRunArtifacts(cwd, started, compiled, spec);
+		await writeRunRecord(cwd, started);
+		await scheduleRun(cwd, started.runId, compiled);
 		await refreshRun(cwd, started.runId);
 		await scheduleRun(cwd, started.runId);
 		const active = await readRunRecord(cwd, started.runId);

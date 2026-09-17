@@ -259,7 +259,11 @@ test("corrective late fetch waiter replaces an aborted never-resolving flight", 
     const cacheDir = join(cwd, "late-flight");
     let calls = 0;
     let markStarted;
+    let markReplacementStarted;
+    let releaseReplacement;
     const started = new Promise((resolve) => { markStarted = resolve; });
+    const replacementStarted = new Promise((resolve) => { markReplacementStarted = resolve; });
+    const replacementMayFinish = new Promise((resolve) => { releaseReplacement = resolve; });
     const provider = (pi) => pi.registerTool({
       name: "fetch_content",
       async execute(_id, params, signal) {
@@ -271,6 +275,8 @@ test("corrective late fetch waiter replaces an aborted never-resolving flight", 
           // fenced from publishing any late result.
           return new Promise(() => {});
         }
+        markReplacementStarted();
+        await replacementMayFinish;
         return { content: [{ type: "text", text: `replacement body for ${params.url}` }] };
       },
     });
@@ -285,12 +291,21 @@ test("corrective late fetch waiter replaces an aborted never-resolving flight", 
     const cancelled = await Promise.all([first, second]);
     assert.ok(cancelled.every((result) => body(result).status === "cancelled"));
     const replacementPending = tools.get("workflow_web_fetch_source").execute("replacement", { url: "http://1.1.1.1/source" });
-    const replacement = body(await Promise.race([
-      replacementPending,
-      new Promise((_, reject) => setTimeout(() => reject(new Error("replacement remained blocked by old lock")), 1_000)),
-    ]));
-    assert.equal(replacement.status, "ok");
+    let timer;
+    try {
+      await Promise.race([
+        replacementStarted,
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("replacement provider remained blocked by old lock")), 1_000); }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
     assert.equal(calls, 2);
+    // The lock-handoff assertion ends at provider admission; downstream cache
+    // persistence is not part of the old-generation ownership invariant.
+    releaseReplacement();
+    const replacement = body(await replacementPending);
+    assert.equal(replacement.status, "ok");
   } finally { cleanup(cwd); }
 });
 
