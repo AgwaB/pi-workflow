@@ -60,14 +60,16 @@ function shellForSyntax(script) { return script.replace(/\$\{\{[^\n]*?\}\}/g, "_
 	}
 });
 
-test("WB-009 artifact migration preserves named ZIP and extraction defaults while failing closed on digest mismatch", () => {
+test("WB-009 artifacts preserve ZIP and extraction defaults, bind publication evidence to its producing attempt, and fail closed on digest mismatch", () => {
 	const { build, publish, verification } = parsedWorkflow().jobs;
+	const publicationArtifact = "publication-evidence-${{ github.run_attempt }}";
+	assert.deepEqual(publish.outputs, { "publication-evidence-artifact": publicationArtifact });
 	const uploads = [
 		build.steps.find((step) => step.uses?.startsWith("actions/upload-artifact@")),
 		publish.steps.find((step) => step.uses?.startsWith("actions/upload-artifact@")),
 	];
 	assert.equal(uploads.every(Boolean), true);
-	assert.deepEqual(uploads.map((step) => step.with.name), ["release-artifact", "publication-evidence"]);
+	assert.deepEqual(uploads.map((step) => step.with.name), ["release-artifact", publicationArtifact]);
 	for (const upload of uploads) {
 		assert.equal(upload.with.archive, undefined, "upload must retain v7's archive=true default");
 	}
@@ -77,7 +79,7 @@ test("WB-009 artifact migration preserves named ZIP and extraction defaults whil
 		...verification.steps.filter((step) => step.uses?.startsWith("actions/download-artifact@")),
 	];
 	assert.equal(downloads.length, 3);
-	assert.deepEqual(downloads.map((step) => step.with.name), ["release-artifact", "release-artifact", "publication-evidence"]);
+	assert.deepEqual(downloads.map((step) => step.with.name), ["release-artifact", "release-artifact", "${{ needs.publish.outputs.publication-evidence-artifact }}"]);
 	for (const download of downloads) {
 		assert.equal(download.with["skip-decompress"], undefined, "download must retain v8's skip-decompress=false default");
 		assert.equal(download.with["digest-mismatch"], "error", "digest mismatches must fail closed");

@@ -153,12 +153,13 @@ function validateWorkflow(candidate) {
 	assert.equal(source["runs-on"], "ubuntu-latest");
 	assert.deepEqual(source.permissions, { contents: "read", "id-token": "none" });
 	assert.deepEqual(source.outputs, { "release-commit": "${{ steps.verify.outputs.release-commit }}" });
-	assertExactKeys(publish, ["needs", "runs-on", "environment", "permissions", "env", "steps"], "publish");
+	assertExactKeys(publish, ["needs", "runs-on", "environment", "permissions", "env", "outputs", "steps"], "publish");
 	assert.deepEqual(publish.needs, ["build", "source"]);
 	assert.equal(publish["runs-on"], "ubuntu-latest");
 	assert.equal(publish.environment, "npm-publish");
 	assert.deepEqual(publish.permissions, { actions: "read", contents: "read", "id-token": "write" });
 	assert.deepEqual(publish.env, npmEnv);
+	assert.deepEqual(publish.outputs, { "publication-evidence-artifact": "publication-evidence-${{ github.run_attempt }}" });
 	assertExactKeys(verification, ["needs", "runs-on", "permissions", "env", "steps"], "verification");
 	assert.deepEqual(verification.needs, ["build", "source", "publish"]);
 	assert.equal(verification["runs-on"], "ubuntu-latest");
@@ -358,8 +359,8 @@ function validateSteps(jobName, steps) {
 			["run", "Create exact package and source-tree metadata"], ["action", ACTIONS.upload, { name: "release-artifact", path: "release-metadata.json\nagwab-pi-workflow-${{ steps.version.outputs.version }}.tgz\n", "if-no-files-found": "error", "retention-days": 7 }, "Upload exact release artifact"],
 		],
 		source: [["action", ACTIONS.checkout, { ref: "${{ github.sha }}", "fetch-depth": 0, "persist-credentials": false }], ["run", "Verify promoted release source identity"]],
-		publish: [["action", ACTIONS.setupNode, { "node-version": 24, "package-manager-cache": false }], ["run", "Bootstrap private npm config"], ["action", ACTIONS.download, { name: "release-artifact", path: "release-artifact", "digest-mismatch": "error" }], ["run", "Publish exact promoted tarball and record registry envelopes"], ["action", ACTIONS.upload, { name: "publication-evidence", path: "publication-before.json\npublication-state.json\npublication-after.json\ndist-tags.json\n", "if-no-files-found": "error", "retention-days": 7 }, "Upload registry evidence", "always()"]],
-		verification: [["action", ACTIONS.checkout, { ref: "${{ needs.source.outputs.release-commit }}", "fetch-depth": 1, "persist-credentials": false }], ["action", ACTIONS.setupNode, { "node-version": 24, "package-manager-cache": false }], ["run", "Bootstrap private npm config"], ["action", ACTIONS.download, { name: "release-artifact", path: "release-artifact", "digest-mismatch": "error" }], ["action", ACTIONS.download, { name: "publication-evidence", path: "publication-evidence", "digest-mismatch": "error" }], ["run", "Cryptographically gate and verify exact npm provenance"]],
+		publish: [["action", ACTIONS.setupNode, { "node-version": 24, "package-manager-cache": false }], ["run", "Bootstrap private npm config"], ["action", ACTIONS.download, { name: "release-artifact", path: "release-artifact", "digest-mismatch": "error" }], ["run", "Publish exact promoted tarball and record registry envelopes"], ["action", ACTIONS.upload, { name: "publication-evidence-${{ github.run_attempt }}", path: "publication-before.json\npublication-state.json\npublication-after.json\ndist-tags.json\n", "if-no-files-found": "error", "retention-days": 7 }, "Upload registry evidence", "always()"]],
+		verification: [["action", ACTIONS.checkout, { ref: "${{ needs.source.outputs.release-commit }}", "fetch-depth": 1, "persist-credentials": false }], ["action", ACTIONS.setupNode, { "node-version": 24, "package-manager-cache": false }], ["run", "Bootstrap private npm config"], ["action", ACTIONS.download, { name: "release-artifact", path: "release-artifact", "digest-mismatch": "error" }], ["action", ACTIONS.download, { name: "${{ needs.publish.outputs.publication-evidence-artifact }}", path: "publication-evidence", "digest-mismatch": "error" }], ["run", "Cryptographically gate and verify exact npm provenance"]],
 		release: [["run", "Create GitHub release for the exact published commit"]],
 	};
 	assert.ok(catalogs[jobName]);
