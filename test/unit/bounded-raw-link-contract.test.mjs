@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import { writeWorkflowTaskArtifactBundle as writeBundle, setTaskArtifactLinkForTests, setWorkflowOutputArtifactWriteHookForTests } from '../../.tmp/unit/workflow-output-artifacts.js';
 import { readWorkflowArtifact, handleWorkflowArtifactToolCall, setArtifactValidatedHookForTests, setArtifactReadHookForTests } from '../../.tmp/unit/workflow-artifact-tool.js';
 import { checkRequiredArtifactReads } from '../../.tmp/unit/subagent-backend.js';
+import { parseManagedWorktreePath } from '../../.tmp/unit/workflow-raw-contract.js';
 
 // Explicit host publication fixture. Low-level writer round trips separately
 // omit this context and must remain independent; no result digest is promoted.
@@ -252,4 +253,59 @@ for (const code of ['EXDEV','EPERM','EOPNOTSUPP']) test(`${code} link failure is
  setTaskArtifactLinkForTests(()=>{throw Object.assign(new Error('link unavailable'),{code});});
  await writeWorkflowTaskArtifactBundle({taskDir:f.taskDir,rawOutput:raw});
  assert.equal(await readFile(f.artifact,'utf8'),raw); assert.equal((await stat(f.artifact)).nlink,1);
+});
+
+test('managed worktree parser accepts Windows drive and parent casing for one exact leaf',()=>{
+ const parsed=parseManagedWorktreePath({
+  project:'C:\\Repo',
+  runId:'run_1',
+  cwd:'c:/repo/.pi/workflows/run_1/worktrees/task-1',
+  worktreePath:'c:\\REPO\\.pi\\workflows\\run_1\\worktrees\\task-1',
+ },'win32');
+ assert.deepEqual(parsed,{
+  leaf:'task-1',
+  path:'c:\\REPO\\.pi\\workflows\\run_1\\worktrees\\task-1',
+ });
+});
+
+test('managed worktree parser accepts a fully qualified Windows UNC path',()=>{
+ const parsed=parseManagedWorktreePath({
+  project:'\\\\Server\\Share\\Repo',
+  runId:'run_1',
+  cwd:'\\\\server\\share\\repo\\.pi\\workflows\\run_1\\worktrees\\task-1',
+  worktreePath:'\\\\SERVER\\SHARE\\REPO\\.pi\\workflows\\run_1\\worktrees\\task-1',
+ },'win32');
+ assert.deepEqual(parsed,{
+  leaf:'task-1',
+  path:'\\\\SERVER\\SHARE\\REPO\\.pi\\workflows\\run_1\\worktrees\\task-1',
+ });
+});
+
+test('managed worktree parser keeps POSIX path identity case-sensitive',()=>{
+ assert.equal(parseManagedWorktreePath({
+  project:'/Repo',
+  runId:'run_1',
+  cwd:'/repo/.pi/workflows/run_1/worktrees/task-1',
+  worktreePath:'/repo/.pi/workflows/run_1/worktrees/task-1',
+ },'posix'),null);
+});
+
+test('managed worktree parser rejects relative, escaped, nested, cross-volume, and cwd-drift paths',()=>{
+ const valid={
+  project:'C:\\Repo',
+  runId:'run_1',
+  cwd:'C:\\Repo\\.pi\\workflows\\run_1\\worktrees\\task-1',
+  worktreePath:'C:\\Repo\\.pi\\workflows\\run_1\\worktrees\\task-1',
+ };
+ for(const candidate of [
+  {...valid,cwd:'task-1'},
+  {project:'\\Repo',runId:'run_1',cwd:'\\Repo\\.pi\\workflows\\run_1\\worktrees\\task-1',worktreePath:'\\Repo\\.pi\\workflows\\run_1\\worktrees\\task-1'},
+  {...valid,cwd:'\\Repo\\.pi\\workflows\\run_1\\worktrees\\task-1',worktreePath:'\\Repo\\.pi\\workflows\\run_1\\worktrees\\task-1'},
+  {project:'\\\\?\\C:\\Repo',runId:'run_1',cwd:'\\\\?\\C:\\Repo\\.pi\\workflows\\run_1\\worktrees\\task-1',worktreePath:'\\\\?\\C:\\Repo\\.pi\\workflows\\run_1\\worktrees\\task-1'},
+  {...valid,worktreePath:'C:\\Repo\\.pi\\workflows\\run_1\\worktrees\\task-1\\nested',cwd:'C:\\Repo\\.pi\\workflows\\run_1\\worktrees\\task-1\\nested'},
+  {...valid,worktreePath:'C:\\Repo\\.pi\\workflows\\run_1\\foreign\\task-1',cwd:'C:\\Repo\\.pi\\workflows\\run_1\\foreign\\task-1'},
+  {...valid,worktreePath:'D:\\Repo\\.pi\\workflows\\run_1\\worktrees\\task-1',cwd:'D:\\Repo\\.pi\\workflows\\run_1\\worktrees\\task-1'},
+  {...valid,cwd:'C:\\Repo\\.pi\\workflows\\run_1\\worktrees\\task-2'},
+  {...valid,runId:'../run_1'},
+ ]) assert.equal(parseManagedWorktreePath(candidate,'win32'),null);
 });
