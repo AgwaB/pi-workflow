@@ -6122,7 +6122,12 @@ test("artifactGraph mutation-capable agents publish from managed and shared loop
 			if (existsSync(mirrorRoot)) unlinkSync(mirrorRoot);
 			renameSync(movedMirrorRoot, mirrorRoot);
 		}
-		const movedWorktree = `${generated.cwd}-moved`;
+		const movedWorktree = join(
+			cwd,
+			"redirected-worktrees",
+			generated.taskId,
+		);
+		mkdirSync(dirname(movedWorktree), { recursive: true });
 		renameSync(generated.cwd, movedWorktree);
 		symlinkSync(movedWorktree, generated.cwd, linkType);
 		await assert.rejects(
