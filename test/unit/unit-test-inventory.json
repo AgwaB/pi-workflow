@@ -396,7 +396,7 @@
 		{
 			"name": "artifactGraph mutation-capable agents publish from managed and shared loop worktrees",
 			"occurrence": 1,
-			"sha256": "d899c002393adb0f00552ca1095633cb01c93f77676ca462e4f2b997e1da037e",
+			"sha256": "3d9b585fbecea8993f62958cb40e0076439551f4ecce576cad128b01e6bc9905",
 			"domain": "dynamic-runtime"
 		},
 		{

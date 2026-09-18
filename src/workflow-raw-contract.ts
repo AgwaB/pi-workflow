@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { constants, type Stats } from "node:fs";
 import { lstat, open, realpath, type FileHandle } from "node:fs/promises";
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, posix, relative, resolve, sep, type PlatformPath, win32 } from "node:path";
 import { hasNonSpawnableWorkflowLaunchAuthority } from "./launch-authority.js";
 import { workflowTaskAttemptIdentity, workflowTaskSessionId } from "./launch-session.js";
 import { foreachBatchTasks } from "./foreach-batch-runtime.js";
@@ -97,6 +97,68 @@ async function assertRawSourceAlias(run: WorkflowRunRecord, task: WorkflowTaskRu
 }
 const safeId = (value: unknown): value is string =>
 	typeof value === "string" && /^[A-Za-z0-9_.-]+$/.test(value) && value !== "." && value !== "..";
+type WorktreePathStyle = "native" | "posix" | "win32";
+
+function worktreePathApi(style: WorktreePathStyle): PlatformPath {
+	let resolved = style;
+	if (resolved === "native") {
+		resolved = process.platform === "win32" ? "win32" : "posix";
+	}
+	return resolved === "win32" ? win32 : posix;
+}
+
+function isFullyQualifiedAbsolutePath(value: string, pathApi: PlatformPath): boolean {
+	if (!pathApi.isAbsolute(value)) return false;
+	if (pathApi !== win32) return true;
+	const root = win32.parse(value).root;
+	if (/^[A-Za-z]:[\\/]$/.test(root)) return true;
+	return /^[/\\]{2}(?![?.](?:[/\\]|$))[^/\\]+[/\\][^/\\]+[/\\]$/.test(root);
+}
+
+function sameAbsolutePath(left: string, right: string, pathApi: PlatformPath): boolean {
+	if (!pathApi.isAbsolute(left) || !pathApi.isAbsolute(right)) return false;
+	const resolvedLeft = pathApi.resolve(left);
+	const resolvedRight = pathApi.resolve(right);
+	return pathApi.relative(resolvedLeft, resolvedRight) === "" &&
+		pathApi.relative(resolvedRight, resolvedLeft) === "";
+}
+
+export function parseManagedWorktreePath(
+	options: {
+		project: string;
+		runId: string;
+		cwd: string;
+		worktreePath: string;
+	},
+	style: WorktreePathStyle = "native",
+): { leaf: string; path: string } | null {
+	const pathApi = worktreePathApi(style);
+	if (
+		!safeId(options.runId) ||
+		!isFullyQualifiedAbsolutePath(options.project, pathApi) ||
+		!isFullyQualifiedAbsolutePath(options.cwd, pathApi) ||
+		!isFullyQualifiedAbsolutePath(options.worktreePath, pathApi)
+	) return null;
+	const root = pathApi.join(
+		pathApi.resolve(options.project),
+		".pi",
+		"workflows",
+		options.runId,
+		"worktrees",
+	);
+	const worktree = pathApi.resolve(options.worktreePath);
+	const relativePath = pathApi.relative(root, worktree);
+	const parts = relativePath.split(pathApi.sep).filter(Boolean);
+	if (parts.length !== 1) return null;
+	const leaf = parts[0];
+	if (
+		!safeId(leaf) ||
+		!sameAbsolutePath(options.cwd, worktree, pathApi) ||
+		!sameAbsolutePath(pathApi.join(root, leaf), worktree, pathApi)
+	) return null;
+	return { leaf, path: worktree };
+}
+
 function fail(): never { throw new Error("raw artifact ownership/link contract could not be established"); }
 export const rawDigest = (value: Buffer | string): string => createHash("sha256").update(value).digest("hex");
 export const sameInode = (a: RawFileVersion, b: RawFileVersion): boolean =>
@@ -173,7 +235,14 @@ async function backendMirrorRoot(options: {
 		worktree.branch === null ||
 		worktree.baseCwd === null
 	) fail();
-	const leaf = basename(resolve(worktree.path));
+	const lexicalWorktree = parseManagedWorktreePath({
+		project: lexicalProject,
+		runId: run.runId,
+		cwd: task.cwd,
+		worktreePath: worktree.path,
+	});
+	if (!lexicalWorktree) fail();
+	const { leaf } = lexicalWorktree;
 	const worktreeOwners = run.tasks.filter(candidate =>
 		candidate.taskId === leaf &&
 		candidate.worktree.enabled &&
@@ -190,16 +259,8 @@ async function backendMirrorRoot(options: {
 			task.specId.startsWith(`${record.loopId}.r`) &&
 			worktreeOwners[0]!.specId.startsWith(`${record.loopId}.r`)
 		) === true;
-	if (!safeId(leaf) || (leaf !== task.taskId && !sharedLoopWorktree)) fail();
-	const lexicalWorktree = join(
-		lexicalProject,
-		".pi",
-		"workflows",
-		run.runId,
-		"worktrees",
-		leaf,
-	);
-	const canonicalWorktree = join(
+	if (leaf !== task.taskId && !sharedLoopWorktree) fail();
+	const expectedWorktree = join(
 		project,
 		".pi",
 		"workflows",
@@ -207,13 +268,19 @@ async function backendMirrorRoot(options: {
 		"worktrees",
 		leaf,
 	);
+	const [canonicalTaskCwd, canonicalRecordedWorktree, canonicalExpectedWorktree] = await Promise.all([
+		realpath(task.cwd),
+		realpath(worktree.path),
+		realpath(expectedWorktree),
+	]);
 	if (
-		resolve(task.cwd) !== lexicalWorktree ||
-		resolve(worktree.path) !== lexicalWorktree ||
-		await realpath(task.cwd) !== canonicalWorktree ||
-		await realpath(worktree.path) !== canonicalWorktree
+		canonicalTaskCwd !== canonicalExpectedWorktree ||
+		canonicalRecordedWorktree !== canonicalExpectedWorktree ||
+		basename(canonicalExpectedWorktree) !== leaf
 	) fail();
-	return canonicalWorktree;
+	// Keep the canonical-project lexical path so directoryChain observes a
+	// worktree symlink or junction instead of validating only its realpath target.
+	return expectedWorktree;
 }
 
 export async function assertSafeRawTaskDirectory(taskDirectory: string): Promise<void> {
