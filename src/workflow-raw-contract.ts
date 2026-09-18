@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
 import { constants, type Stats } from "node:fs";
 import { lstat, open, realpath, type FileHandle } from "node:fs/promises";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { hasNonSpawnableWorkflowLaunchAuthority } from "./launch-authority.js";
 import { workflowTaskAttemptIdentity, workflowTaskSessionId } from "./launch-session.js";
 import { foreachBatchTasks } from "./foreach-batch-runtime.js";
-import type { WorkflowRunRecord, WorkflowTaskRunRecord } from "./types.js";
+import type { LaunchBootstrapProvenanceRecord, WorkflowRunRecord, WorkflowTaskRunRecord } from "./types.js";
 import { sourceNameForTask, dynamicOutputSourceName, dynamicOutputTaskSpecIds } from "./workflow-source-alias.js";
 
 // Host run records are the authority boundary. These hashes detect corruption;
@@ -108,7 +108,7 @@ async function directoryChain(project: string, path: string, identities: Map<str
 	const rel = relative(project, path);
 	if (rel.startsWith("..") || resolve(project, rel) !== path) fail();
 	let current = project;
-	for (const part of ["", ...rel.split("/").filter(Boolean)]) {
+	for (const part of ["", ...rel.split(sep).filter(Boolean)]) {
 		if (part) current = join(current, part);
 		if (identities.has(current)) continue;
 		const info = await lstat(current);
@@ -133,6 +133,87 @@ async function metadata(path: string, snapshots?: Map<string, Stats>): Promise<R
 		snapshots?.set(path, before);
 		return value;
 	} finally { await file.close(); }
+}
+
+function optionalRawDigest(value: string | null): string | undefined {
+	return value === null ? undefined : rawDigest(value);
+}
+
+function assertLaunchWorkspaceProvenance(
+	task: WorkflowTaskRunRecord,
+	provenance: LaunchBootstrapProvenanceRecord,
+): void {
+	const policy = provenance.effectivePolicy;
+	const worktree = task.worktree;
+	if (
+		policy.cwdSha256 !== rawDigest(task.cwd) ||
+		policy.worktree.enabled !== worktree.enabled ||
+		policy.worktree.pathSha256 !== optionalRawDigest(worktree.path) ||
+		policy.worktree.branchSha256 !== optionalRawDigest(worktree.branch) ||
+		policy.worktree.baseCwdSha256 !== optionalRawDigest(worktree.baseCwd)
+	) fail();
+}
+
+async function backendMirrorRoot(options: {
+	project: string;
+	lexicalProject: string;
+	run: WorkflowRunRecord;
+	task: WorkflowTaskRunRecord;
+	provenance: LaunchBootstrapProvenanceRecord;
+}): Promise<string> {
+	const { project, lexicalProject, run, task, provenance } = options;
+	assertLaunchWorkspaceProvenance(task, provenance);
+	const worktree = task.worktree;
+	if (!worktree.enabled) {
+		if (await realpath(task.cwd) !== project) fail();
+		return project;
+	}
+	if (
+		worktree.path === null ||
+		worktree.branch === null ||
+		worktree.baseCwd === null
+	) fail();
+	const leaf = basename(resolve(worktree.path));
+	const worktreeOwners = run.tasks.filter(candidate =>
+		candidate.taskId === leaf &&
+		candidate.worktree.enabled &&
+		candidate.worktree.path === worktree.path &&
+		candidate.worktree.branch === worktree.branch &&
+		candidate.worktree.baseCwd === worktree.baseCwd
+	);
+	const sharedLoopWorktree = worktreeOwners.length === 1 &&
+		run.loopWorktrees?.some(record =>
+			safeId(record.loopId) &&
+			record.path === worktree.path &&
+			record.branch === worktree.branch &&
+			record.baseCwd === worktree.baseCwd &&
+			task.specId.startsWith(`${record.loopId}.r`) &&
+			worktreeOwners[0]!.specId.startsWith(`${record.loopId}.r`)
+		) === true;
+	if (!safeId(leaf) || (leaf !== task.taskId && !sharedLoopWorktree)) fail();
+	const lexicalWorktree = join(
+		lexicalProject,
+		".pi",
+		"workflows",
+		run.runId,
+		"worktrees",
+		leaf,
+	);
+	const canonicalWorktree = join(
+		project,
+		".pi",
+		"workflows",
+		run.runId,
+		"worktrees",
+		leaf,
+	);
+	if (
+		resolve(task.cwd) !== lexicalWorktree ||
+		resolve(worktree.path) !== lexicalWorktree ||
+		await realpath(task.cwd) !== canonicalWorktree ||
+		await realpath(worktree.path) !== canonicalWorktree
+	) fail();
+	return canonicalWorktree;
 }
 
 export async function assertSafeRawTaskDirectory(taskDirectory: string): Promise<void> {
@@ -196,8 +277,19 @@ export async function establishRawOwner(taskDirectory: string, expected?: RawSel
 		const record = records[0]!;
 		if (!hasNonSpawnableWorkflowLaunchAuthority(run, executionTask, record.grant.backendId) || record.state.phase !== "consumed") fail();
 		const state = record.state;
-		if (!safeId(state.backendRunId) || !safeId(state.backendAttemptId) || await realpath(task.cwd) !== project) fail();
-		const mirrorRun = join(project, ".pi", "workflow-subagents", runId, executionTask.taskId, state.backendRunId);
+		if (!safeId(state.backendRunId) || !safeId(state.backendAttemptId)) fail();
+		const provenance = executionTask.launchBootstrap?.records.find(
+			candidate => candidate.identitySha256 === record.grant.launchBootstrapSha256,
+		);
+		if (!provenance) fail();
+		const mirrorRoot = await backendMirrorRoot({
+			project,
+			lexicalProject,
+			run,
+			task: executionTask,
+			provenance,
+		});
+		const mirrorRun = join(mirrorRoot, ".pi", "workflow-subagents", runId, executionTask.taskId, state.backendRunId);
 		const attemptDir = join(mirrorRun, "attempts", state.backendAttemptId);
 		await directoryChain(project, attemptDir, directories);
 		const mirror = await metadata(join(mirrorRun, "run.json"), snapshots);
@@ -240,6 +332,7 @@ export async function recheckRawOwner(owner: RawOwner): Promise<void> {
 	await Promise.all([...owner.directories].map(async ([path, before]) => {
 		const current = await lstat(path);
 		if (!current.isDirectory() || current.isSymbolicLink() || !sameInode(before, current)) fail();
+		return undefined;
 	}));
 	const unchanged = await Promise.all([...owner.metadata].map(async ([path, before]) => sameRawVersion(before, await lstat(path))));
 	if (unchanged.every(Boolean)) return;
