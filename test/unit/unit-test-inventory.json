@@ -1,7 +1,7 @@
 {
 	"schema": "pi-workflow-unit-test-inventory-v1",
 	"source": "unit.test.mjs",
-	"count": 533,
+	"count": 534,
 	"tests": [
 		{
 			"name": "adaptive live workers cap growth at configured live-worker limit",
@@ -391,6 +391,12 @@
 			"name": "artifactGraph dynamic treats explicit stopped result as clean completion",
 			"occurrence": 1,
 			"sha256": "79fa1b3c31c6f410542172854e9695ea8b36cd662043dcac5f054e8628dccff5",
+			"domain": "dynamic-runtime"
+		},
+		{
+			"name": "artifactGraph mutation-capable agents publish from managed and shared loop worktrees",
+			"occurrence": 1,
+			"sha256": "d899c002393adb0f00552ca1095633cb01c93f77676ca462e4f2b997e1da037e",
 			"domain": "dynamic-runtime"
 		},
 		{
