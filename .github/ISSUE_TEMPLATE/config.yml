@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/AgwaB/pi-workflow/security/advisories/new
+    about: Report suspected vulnerabilities privately. Do not disclose vulnerability details in public issues or pull requests.

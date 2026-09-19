@@ -1,0 +1,54 @@
+name: Change Proposal
+description: Propose a change that needs maintainer alignment before implementation
+title: "[Proposal]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Read [CONTRIBUTING.md](https://github.com/AgwaB/pi-workflow/blob/main/CONTRIBUTING.md) before proposing a change.
+        Search existing issues and pull requests first; continue an existing discussion instead of opening a duplicate.
+        Use this form for changes that require prior maintainer alignment. A bug report can serve as that discussion; a separate proposal is not needed for an agreed fix.
+        Do not include credentials, access tokens, or private data.
+        For suspected vulnerabilities, use [private security reporting](https://github.com/AgwaB/pi-workflow/security/advisories/new) instead of this form.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and intended outcome
+      description: What problem should be solved, who is affected, and what outcome do you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change and non-goals
+      description: Describe the smallest useful change and what it intentionally does not cover.
+    validations:
+      required: true
+  - type: textarea
+    id: related-work
+    attributes:
+      label: Related work
+      description: Link related issues, pull requests, workflows, or prior discussions when applicable.
+    validations:
+      required: false
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation plan
+      description: |
+        Describe how we could tell the change works: expected behavior, suggested checks, comparisons, or evidence.
+        If you are unsure how to test it, say so; a maintainer can help define the plan.
+    validations:
+      required: true
+  - type: dropdown
+    id: contribution-intent
+    attributes:
+      label: Do you plan to implement this change?
+      options:
+        - "Yes"
+        - "No"
+        - "Maybe"
+    validations:
+      required: true
