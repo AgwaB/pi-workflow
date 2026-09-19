@@ -1,0 +1,60 @@
+name: Bug Report
+description: Report a problem in pi-workflow
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Read [CONTRIBUTING.md](https://github.com/AgwaB/pi-workflow/blob/main/CONTRIBUTING.md) before filing a report.
+        Search existing issues and pull requests first. Keep the report focused and actionable.
+        Do not include credentials, access tokens, or private data.
+        For suspected vulnerabilities, use [private security reporting](https://github.com/AgwaB/pi-workflow/security/advisories/new) instead of this form.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: State the observed behavior and its impact. Include a relevant error message when available.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: |
+        Give the exact invocation and the smallest sanitized workflow definition, input, or configuration you can share.
+        When applicable, identify the workflow name/reference (bundled, custom, or direct dynamic) and invocation surface (slash command, tool, or CLI; interactive or headless).
+        If the issue is intermittent or you cannot isolate a minimal reproduction, describe the observed steps, conditions, and frequency if known. You do not need to rerun paid workflows just to file a report.
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: Explain what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: |
+        Include the pi-workflow version, Pi version, Node.js version, OS, and install method.
+        For model-dependent behavior, also include the provider/model, thinking level, and execution profile (if used).
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or additional context
+      description: |
+        Add relevant sanitized logs, screenshots, or other context.
+        If available, include the run ID, affected stage/task and observed status, and whether this was a new run or a resume.
+        Share only relevant sanitized excerpts, not the complete run directory.
+    validations:
+      required: false
