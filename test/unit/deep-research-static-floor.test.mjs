@@ -167,3 +167,52 @@ test("deep-research zero-candidate floor is scoped to repo-local claim-bearing p
 		false,
 	);
 });
+
+test("deep-research zero-candidate floor ignores dotted internal origin locators", async () => {
+	const { default: claimEvidenceGate } = await import(
+		`../../workflows/deep-research/helpers/claim-evidence-gate.mjs?test=${Date.now()}`
+	);
+	const sources = {
+		"plan.main": { factSlots: [{ id: "slot-scope" }] },
+		"normalize-input-packet.main": {
+			packet: {
+				research: {
+					evidenceGaps: [
+						{
+							originLocator: "research-questions.gap-001",
+							sourceId: "research-questions",
+							lead: "No research subject was supplied.",
+						},
+					],
+				},
+			},
+		},
+		"normalize-claims.main": {
+			claimInventory: {
+				verificationCandidates: [],
+				preservedClaims: [],
+				duplicates: [],
+			},
+		},
+	};
+
+	const audit = await claimEvidenceGate({ sources, context: {} });
+	assert.equal(audit.gateSummary.zeroCandidateFloorBlockers, 0);
+	assert.equal(
+		audit.remainingGaps.some(
+			(gap) => gap.evidenceState === "no_verification_candidates",
+		),
+		false,
+	);
+
+	const localAudit = await claimEvidenceGate({
+		sources: {
+			...sources,
+			"normalize-input-packet.main": {
+				packet: { research: { sources: [{ file: "evidence.mjs" }] } },
+			},
+		},
+		context: {},
+	});
+	assert.equal(localAudit.gateSummary.zeroCandidateFloorBlockers, 1);
+});

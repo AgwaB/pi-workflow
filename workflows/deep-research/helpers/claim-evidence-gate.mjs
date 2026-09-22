@@ -1229,18 +1229,36 @@ const REPO_LOCAL_SIGNAL_RE =
 	/\b(?:local[_ -]?repo|repo(?:sitory)?|codebase|source tree|workspace|filesystem|local file|file path|static analysis|static audit)\b/iu;
 const COMMON_REPO_PATH_RE =
 	/(?:^|[\s"'`()])(?:\.\/|\.\.\/|src\/|test\/|tests\/|workflows\/|internal\/|docs\/|agents\/|skills\/|tools\/|package\.json|tsconfig\.json|README\.md)(?:[\s"'`),.:;]|\/|$)/iu;
+// Filename-shaped text is a local signal only when its field can carry a
+// source locator. Generated metadata such as originLocator stays opaque.
+const REPO_LOCAL_LOCATOR_FIELDS = new Set([
+	"file",
+	"files",
+	"path",
+	"paths",
+	"repo",
+	"repoPath",
+	"localPath",
+	"source",
+	"sourceRef",
+	"sourceRefs",
+	"url",
+	"sourceUrl",
+	"sourceUrls",
+]);
 
 function hasRepoLocalSignal(
 	value,
 	seen = new Set(),
 	budget = { remaining: 200 },
+	allowConservativeLocator = false,
 ) {
 	if (budget.remaining <= 0) return false;
 	if (typeof value === "string") {
 		budget.remaining -= 1;
 		const text = value.trim();
 		return (
-			looksLikeLocalSourceRef(text) ||
+			(allowConservativeLocator && looksLikeLocalSourceRef(text)) ||
 			REPO_LOCAL_SIGNAL_RE.test(text) ||
 			COMMON_REPO_PATH_RE.test(text)
 		);
@@ -1249,7 +1267,8 @@ function hasRepoLocalSignal(
 		if (seen.has(value)) return false;
 		seen.add(value);
 		for (const item of value) {
-			if (hasRepoLocalSignal(item, seen, budget)) return true;
+			if (hasRepoLocalSignal(item, seen, budget, allowConservativeLocator))
+				return true;
 		}
 		return false;
 	}
@@ -1259,25 +1278,10 @@ function hasRepoLocalSignal(
 	for (const [key, item] of Object.entries(value)) {
 		budget.remaining -= 1;
 		if (budget.remaining <= 0) return false;
-		if (
-			[
-				"sourceType",
-				"sourceQuality",
-				"sourcePriority",
-				"expectedSourceTypes",
-			].includes(key) &&
-			hasRepoLocalSignal(item, seen, budget)
-		)
-			return true;
-		if (
-			["file", "path", "repo", "repoPath", "localPath", "sourceRef"].includes(
-				key,
-			) &&
-			(typeof item === "string" || Array.isArray(item)) &&
-			hasRepoLocalSignal(item, seen, budget)
-		)
-			return true;
-		if (hasRepoLocalSignal(item, seen, budget)) return true;
+		const locatorField =
+			REPO_LOCAL_LOCATOR_FIELDS.has(key) &&
+			(typeof item === "string" || Array.isArray(item));
+		if (hasRepoLocalSignal(item, seen, budget, locatorField)) return true;
 	}
 	return false;
 }
@@ -1311,24 +1315,38 @@ function hasClaimBearingPlan(plan, normalized) {
 	);
 }
 
-function collectRepoLocalHints(value, hints = new Set(), seen = new Set()) {
+function collectRepoLocalHints(
+	value,
+	hints = new Set(),
+	seen = new Set(),
+	allowConservativeLocator = false,
+) {
 	if (hints.size >= 6) return hints;
 	if (typeof value === "string") {
 		const text = value.trim();
-		if (looksLikeLocalSourceRef(text)) hints.add(text);
+		if (
+			(allowConservativeLocator && looksLikeLocalSourceRef(text)) ||
+			COMMON_REPO_PATH_RE.test(text)
+		)
+			hints.add(text);
 		return hints;
 	}
 	if (Array.isArray(value)) {
 		if (seen.has(value)) return hints;
 		seen.add(value);
-		for (const item of value) collectRepoLocalHints(item, hints, seen);
+		for (const item of value)
+			collectRepoLocalHints(item, hints, seen, allowConservativeLocator);
 		return hints;
 	}
 	if (!value || typeof value !== "object") return hints;
 	if (seen.has(value)) return hints;
 	seen.add(value);
-	for (const item of Object.values(value))
-		collectRepoLocalHints(item, hints, seen);
+	for (const [key, item] of Object.entries(value)) {
+		const locatorField =
+			REPO_LOCAL_LOCATOR_FIELDS.has(key) &&
+			(typeof item === "string" || Array.isArray(item));
+		collectRepoLocalHints(item, hints, seen, locatorField);
+	}
 	return hints;
 }
 
