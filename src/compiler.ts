@@ -3,6 +3,7 @@ import { dirname, resolve } from "node:path";
 
 import { loadAgentByName } from "./agents.js";
 import { DYNAMIC_OUTPUT_PROFILES } from "./dynamic-profiles.js";
+import { isModelTaskMaxRuntimeMs } from "./model-task-runtime.js";
 import { stringifyPromptJson } from "./prompt-json.js";
 import { compileRole } from "./roles.js";
 import {
@@ -2461,6 +2462,9 @@ function compileDynamicDecisionLoopProfile(
 		runtimePriority.runtimeDefaults,
 		runtimePriority.specRuntimeDefaults,
 	);
+	const maxRuntimeMs = isModelTaskMaxRuntimeMs(value.maxRuntimeMs)
+		? value.maxRuntimeMs
+		: undefined;
 	return {
 		...(typeof value.agent === "string" && value.agent.trim()
 			? { agent: value.agent.trim() }
@@ -2473,9 +2477,7 @@ function compileDynamicDecisionLoopProfile(
 		...(typeof value.outputProfile === "string" && value.outputProfile.trim()
 			? { outputProfile: value.outputProfile.trim() }
 			: {}),
-		...(positiveInteger(value.maxRuntimeMs) !== undefined
-			? { maxRuntimeMs: positiveInteger(value.maxRuntimeMs) }
-			: {}),
+		...(maxRuntimeMs === undefined ? {} : { maxRuntimeMs }),
 	};
 }
 

@@ -94,11 +94,13 @@ import {
 	applyTaskResultArtifact,
 	isTaskTimedOut,
 	markTaskTimedOut,
+	resultCompletedAfterTimeout,
 } from "./result.js";
 import type {
 	BackendLaunchResult,
 	PreparedWorkflowTaskLaunch,
 } from "./backend.js";
+import { modelTaskRuntimeDeadlineMs } from "./model-task-runtime.js";
 import {
 	readWorkflowArtifactReadLedger,
 	type WorkflowArtifactReadLedgerRecord,
@@ -3069,6 +3071,7 @@ export async function launchSubagentTask(
 					...(authorityBindingSha256 === undefined
 						? {}
 						: { authorityBindingSha256 }),
+					// Launch coordination stays bounded even when model task wall time is unlimited.
 					timeoutMs: Math.min(
 						120_000,
 						Math.max(30_000, compiledTask.runtime.maxRuntimeMs ?? 30_000),
@@ -3110,6 +3113,9 @@ export async function launchSubagentTask(
 			}
 		}
 		await throwIfLaunchStopped(cwd, run.runId, leaseSignal, workflowStopSignal);
+		const taskTimeoutMs = modelTaskRuntimeDeadlineMs(
+			compiledTask.runtime.maxRuntimeMs,
+		);
 		const subagentOptions: Record<string, unknown> = {
 			cwd: task.cwd,
 			backend: "headless",
@@ -3122,7 +3128,7 @@ export async function launchSubagentTask(
 			asyncDependency: "needed-before-final",
 			workspace: "shared",
 			worktreePolicy: "never",
-			timeoutMs: compiledTask.runtime.maxRuntimeMs,
+			...(taskTimeoutMs === undefined ? {} : { timeoutMs: taskTimeoutMs }),
 			runsDir,
 			correlationId,
 			...(sessionId === undefined ? {} : { sessionId }),
@@ -7320,16 +7326,4 @@ function buildSystemPrompt(task: CompiledTask): string {
 				]
 			: []),
 	].join("\n");
-}
-
-function resultCompletedAfterTimeout(
-	task: WorkflowTaskRunRecord,
-	completedAt: string,
-): boolean {
-	if (!task.startedAt || !task.runtime.maxRuntimeMs) return false;
-	const startedAtMs = Date.parse(task.startedAt);
-	const completedAtMs = Date.parse(completedAt);
-	if (!Number.isFinite(startedAtMs) || !Number.isFinite(completedAtMs))
-		return false;
-	return completedAtMs - startedAtMs > task.runtime.maxRuntimeMs;
 }

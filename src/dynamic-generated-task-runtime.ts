@@ -5,6 +5,7 @@ import {
 	isDynamicOutputProfile,
 	type DynamicOutputProfile,
 } from "./dynamic-profiles.js";
+import { isModelTaskMaxRuntimeMs } from "./model-task-runtime.js";
 import { readOrRebuildDynamicState } from "./dynamic-state.js";
 import { sanitizeTaskId } from "./engine-run-graph.js";
 import { compactStrings } from "./strings.js";
@@ -414,8 +415,8 @@ function assertDynamicExecutionProfileRequest(
 		);
 	}
 	if (
-		request.maxRuntimeMs &&
-		profile?.maxRuntimeMs &&
+		request.maxRuntimeMs !== undefined &&
+		profile?.maxRuntimeMs !== undefined &&
 		request.maxRuntimeMs !== profile.maxRuntimeMs
 	) {
 		throw new Error(
@@ -769,7 +770,7 @@ export function normalizeDynamicAgentRequest(
 		readOnly: optionalDynamicBoolean(record.readOnly, "readOnly"),
 		model: optionalDynamicString(record.model, "model"),
 		thinking: optionalDynamicThinking(record.thinking),
-		maxRuntimeMs: optionalDynamicPositiveInteger(
+		maxRuntimeMs: optionalDynamicModelTaskMaxRuntimeMs(
 			record.maxRuntimeMs,
 			"maxRuntimeMs",
 		),
@@ -892,13 +893,15 @@ function optionalDynamicBoolean(
 	return value;
 }
 
-function optionalDynamicPositiveInteger(
+function optionalDynamicModelTaskMaxRuntimeMs(
 	value: unknown,
 	field: string,
 ): number | undefined {
 	if (value === undefined) return undefined;
-	if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
-		throw new Error(`ctx.agent() ${field} must be a positive integer`);
+	if (!isModelTaskMaxRuntimeMs(value)) {
+		throw new Error(
+			`ctx.agent() ${field} must be 0 or a positive safe integer`,
+		);
 	}
 	return value;
 }

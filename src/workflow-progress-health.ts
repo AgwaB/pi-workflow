@@ -144,7 +144,11 @@ export function classifyWorkflowTaskDuration(
 		.join(" ")
 		.toLowerCase();
 	const maxRuntimeMs = task.runtime?.maxRuntimeMs;
-	if (maxRuntimeMs !== undefined && Number.isFinite(maxRuntimeMs)) {
+	if (
+		maxRuntimeMs !== undefined &&
+		Number.isFinite(maxRuntimeMs) &&
+		maxRuntimeMs > 0
+	) {
 		if (maxRuntimeMs <= 5 * 60_000) return "short";
 		if (maxRuntimeMs >= 60 * 60_000) return "long";
 	}
