@@ -525,6 +525,8 @@ Each of `useWhen`, `avoidWhen`, and `outputs` is optional, contains at most 12 u
 
 `fast: "on"` is intentionally unsupported in workflow specs; omit `fast` or use `"off"`/`"inherit"` where runtime defaults expose the field.
 
+Per-model-task `maxRuntimeMs` accepts a positive safe integer. An explicit `maxRuntimeMs: 0` is an opt-in sentinel that disables only pi-workflow's wall-time deadline for that model task. Zero is preserved through workflow defaults, model-backed stages and `foreach.each`, loop task templates, dynamic decision-loop execution profiles, and normalized `ctx.agent()` requests; omission retains the existing finite defaults and inheritance. Dynamic controller/helper budgets such as `dynamic.budget.maxRuntimeMs` remain strictly positive and finite. The sentinel does not disable provider or transport limits, launch READY/acknowledgement/control-operation deadlines, or explicit cancellation: `/workflow stop` and session/lease cancellation still interrupt unlimited tasks.
+
 Public workflow definitions separate three layers:
 
 - **Workflow layer**: graph/control/data-dependency fields such as `id`, `from`, `after`, `sourcePolicy`, `sourceProjection`, scheduling, and artifacts.

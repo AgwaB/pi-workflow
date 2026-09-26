@@ -1,6 +1,7 @@
 import { isAbsolute } from "node:path";
 
 import { DYNAMIC_OUTPUT_PROFILES } from "./dynamic-profiles.js";
+import { isModelTaskMaxRuntimeMs } from "./model-task-runtime.js";
 import { compactStrings } from "./strings.js";
 import { isSimpleJsonPath } from "./workflow-runtime.js";
 import {
@@ -848,7 +849,7 @@ function validateStage(
 	);
 	optionalBoolean(stage.readOnly, `${path}.readOnly`, issues);
 	optionalBoolean(stage.injectRuntimeTask, `${path}.injectRuntimeTask`, issues);
-	optionalPositiveInteger(stage.maxRuntimeMs, `${path}.maxRuntimeMs`, issues);
+	optionalModelTaskMaxRuntimeMs(stage.maxRuntimeMs, `${path}.maxRuntimeMs`, issues);
 	optionalPositiveInteger(
 		stage.maxConcurrency,
 		`${path}.maxConcurrency`,
@@ -1801,7 +1802,7 @@ function validateDynamicDecisionLoopProfile(
 		`${path}.outputProfile`,
 		issues,
 	);
-	optionalPositiveInteger(profile.maxRuntimeMs, `${path}.maxRuntimeMs`, issues);
+	optionalModelTaskMaxRuntimeMs(profile.maxRuntimeMs, `${path}.maxRuntimeMs`, issues);
 }
 
 function validateDynamicOutputProfileArray(
@@ -1917,7 +1918,7 @@ function validateForeachStage(
 	optionalBoolean(each.readOnly, `${path}.each.readOnly`, issues);
 	optionalString(each.model, `${path}.each.model`, issues);
 	optionalEnum(each.thinking, THINKING_LEVELS, `${path}.each.thinking`, issues);
-	optionalPositiveInteger(
+	optionalModelTaskMaxRuntimeMs(
 		each.maxRuntimeMs,
 		`${path}.each.maxRuntimeMs`,
 		issues,
@@ -2245,7 +2246,11 @@ function validateDefaults(
 		`${path}.maxConcurrency`,
 		issues,
 	);
-	optionalPositiveInteger(defaults.maxRuntimeMs, `${path}.maxRuntimeMs`, issues);
+	optionalModelTaskMaxRuntimeMs(
+		defaults.maxRuntimeMs,
+		`${path}.maxRuntimeMs`,
+		issues,
+	);
 	validateWorkflowToolArray(defaults.tools, `${path}.tools`, issues);
 }
 
@@ -2649,6 +2654,20 @@ function validateBackend(
 		issues.push({
 			path: `${path}.mode`,
 			message: 'must be "headless"',
+		});
+	}
+}
+
+function optionalModelTaskMaxRuntimeMs(
+	value: unknown,
+	path: string,
+	issues: ValidationIssue[],
+): void {
+	if (value === undefined) return;
+	if (!isModelTaskMaxRuntimeMs(value)) {
+		issues.push({
+			path,
+			message: "must be 0 or a positive safe integer",
 		});
 	}
 }

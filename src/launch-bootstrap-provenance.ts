@@ -9,6 +9,7 @@ import {
 	WORKFLOW_SOURCE_MANIFEST_SCHEMA,
 	normalizeWorkflowSourceManifest,
 } from "./workflow-artifact-tool.js";
+import { isModelTaskMaxRuntimeMs } from "./model-task-runtime.js";
 import { fromProjectPath, workflowRunDir } from "./store.js";
 import { workflowStateRootIdentity } from "./workflow-state-root.js";
 import {
@@ -620,7 +621,7 @@ function isEffectivePolicy(value: unknown): boolean {
 		!optionalString(value.fast) ||
 		!nonEmptyString(value.approvalMode) ||
 		(value.maxRuntimeMs !== undefined &&
-			!positiveInteger(value.maxRuntimeMs)) ||
+			!isModelTaskMaxRuntimeMs(value.maxRuntimeMs)) ||
 		!isSha256(value.cwdSha256) ||
 		!optionalSha256(value.stateRootSha256)
 	)
@@ -721,10 +722,6 @@ function optionalSha256(value: unknown): boolean {
 
 function nonNegativeInteger(value: unknown): value is number {
 	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-}
-
-function positiveInteger(value: unknown): value is number {
-	return nonNegativeInteger(value) && value > 0;
 }
 
 function optionalJson(value: unknown): boolean {

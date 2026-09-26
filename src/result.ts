@@ -1,3 +1,4 @@
+import { modelTaskRuntimeDeadlineMs } from "./model-task-runtime.js";
 import type { WorkflowTaskRunRecord } from "./types.js";
 import { nowIso, setTaskTerminal } from "./store.js";
 
@@ -9,8 +10,24 @@ export interface TaskResultArtifact {
 }
 
 export function isTaskTimedOut(task: WorkflowTaskRunRecord): boolean {
-	if (!task.startedAt || !task.runtime.maxRuntimeMs) return false;
-	return Date.now() - Date.parse(task.startedAt) > task.runtime.maxRuntimeMs;
+	if (!task.startedAt) return false;
+	const deadlineMs = modelTaskRuntimeDeadlineMs(task.runtime.maxRuntimeMs);
+	if (deadlineMs === undefined) return false;
+	return Date.now() - Date.parse(task.startedAt) > deadlineMs;
+}
+
+export function resultCompletedAfterTimeout(
+	task: WorkflowTaskRunRecord,
+	completedAt: string,
+): boolean {
+	if (!task.startedAt) return false;
+	const deadlineMs = modelTaskRuntimeDeadlineMs(task.runtime.maxRuntimeMs);
+	if (deadlineMs === undefined) return false;
+	const startedAtMs = Date.parse(task.startedAt);
+	const completedAtMs = Date.parse(completedAt);
+	if (!Number.isFinite(startedAtMs) || !Number.isFinite(completedAtMs))
+		return false;
+	return completedAtMs - startedAtMs > deadlineMs;
 }
 
 export function markTaskTimedOut(task: WorkflowTaskRunRecord): void {

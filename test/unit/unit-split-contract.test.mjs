@@ -13,9 +13,10 @@ const domainFiles = [
 	"unit-core-runtime.test.mjs",
 	"unit-dynamic-runtime.test.mjs",
 	"unit-engine-store.test.mjs",
+	"unit-model-task-runtime.test.mjs",
 ];
 
-test("unit domain split preserves the exact 534-test inventory", () => {
+test("unit domain split preserves the exact 540-test inventory", () => {
 	assert.equal(existsSync(join(unitDir, "unit.test.mjs")), false);
 	let inventory;
 	try {
@@ -26,7 +27,7 @@ test("unit domain split preserves the exact 534-test inventory", () => {
 		assert.fail(`invalid unit-test inventory JSON: ${error}`);
 	}
 	assert.equal(inventory.schema, "pi-workflow-unit-test-inventory-v1");
-	assert.equal(inventory.count, 534);
+	assert.equal(inventory.count, 540);
 
 	const actual = [];
 	const occurrences = new Map();

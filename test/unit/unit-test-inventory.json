@@ -1,7 +1,7 @@
 {
 	"schema": "pi-workflow-unit-test-inventory-v1",
 	"source": "unit.test.mjs",
-	"count": 534,
+	"count": 540,
 	"tests": [
 		{
 			"name": "adaptive live workers cap growth at configured live-worker limit",
@@ -604,6 +604,12 @@
 			"domain": "core-runtime"
 		},
 		{
+			"name": "compiled and run-record serialization retain an explicit zero",
+			"occurrence": 1,
+			"sha256": "ffee05ebd8ee61750e54f3ad419da392c5369db947cf95b99d4be90020136465",
+			"domain": "model-task-runtime"
+		},
+		{
 			"name": "compiler accepts deprecated dynamic decision-loop no-op fields",
 			"occurrence": 1,
 			"sha256": "9d05c2773c1eb88dab89b4bbf56b445542f0da988db494947cfb162f41741c5c",
@@ -710,6 +716,12 @@
 			"occurrence": 1,
 			"sha256": "d4c2a269fb9a1d969f3d76531515625a6b47e9b691cd4a698938de6052769917",
 			"domain": "authoring-interface"
+		},
+		{
+			"name": "compiler preserves unlimited defaults, stage and foreach overrides, loop templates, and omission defaults",
+			"occurrence": 1,
+			"sha256": "9be8f2cdcdf4a43579589069dee11ac3c9627b060da9e29ac25f56368eb2c804",
+			"domain": "model-task-runtime"
 		},
 		{
 			"name": "compiler rejects a static foreach prompt cap below its Unicode boundary",
@@ -1246,6 +1258,12 @@
 			"domain": "dynamic-runtime"
 		},
 		{
+			"name": "dynamic decision profiles and ctx.agent requests preserve zero with request/profile/budget precedence",
+			"occurrence": 1,
+			"sha256": "b5922608b2e631006a9fa1da3a6530539ab8e570c3b91dee839ca4e1a08400cb",
+			"domain": "model-task-runtime"
+		},
+		{
 			"name": "dynamic event ledger writes monotonic events and rebuilds state",
 			"occurrence": 1,
 			"sha256": "ee30988022df5d5c29a7b3f99e7d0c1934895bfe2ac6db66291cd38be120deb6",
@@ -1724,6 +1742,12 @@
 			"occurrence": 1,
 			"sha256": "3a6a5b03b84750944d626850b6b75fc2b3c9d88da86f7593794e6e372ae7a49c",
 			"domain": "authoring-interface"
+		},
+		{
+			"name": "model-task maxRuntimeMs accepts only zero or positive safe integers while controller budgets stay positive",
+			"occurrence": 1,
+			"sha256": "a927d56d0d60a90afb9beefdc52bf1cd9a35735365dbda3d5accee7bb9cfb6da",
+			"domain": "model-task-runtime"
 		},
 		{
 			"name": "narrow tool scopes inherit metadata for strings and override it for objects",
@@ -2584,6 +2608,12 @@
 			"domain": "authoring-interface"
 		},
 		{
+			"name": "unlimited launches omit backend timeout, persist zero provenance, and remain manually cancellable",
+			"occurrence": 1,
+			"sha256": "07e47d0dfa1df718023d375f6ecbd6fea6e8e4275da7716543c22e8c9e94ed76",
+			"domain": "model-task-runtime"
+		},
+		{
 			"name": "watchRun drops missing runs without recreating supervisor artifacts",
 			"occurrence": 1,
 			"sha256": "27134da6545e8cff6bb67e2981a4d4eefb77b3d91ec4319fd786154814fc8acd",
@@ -3200,6 +3230,12 @@
 			"occurrence": 1,
 			"sha256": "7cb9c5aadadacfb26ae1a5f883a99e64fc429a139308ef5bc1e9bde0810aaf88",
 			"domain": "authoring-interface"
+		},
+		{
+			"name": "zero disables active and late-result deadlines while finite timeout rejection remains",
+			"occurrence": 1,
+			"sha256": "bb2a4ab67b4b900aeb0e0dd630e3b6b4faeda03a592cdab439a188d41ead5928",
+			"domain": "model-task-runtime"
 		},
 		{
 			"name": "zero transient retry override fails the first transient model failure",
