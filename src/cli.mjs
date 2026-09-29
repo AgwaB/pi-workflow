@@ -21,6 +21,8 @@ Pi session that started them exits. The run lease arbitrates with any
 in-session supervisor. Exit codes: 0 completed, 1 failed/interrupted, 2 blocked.
 For --all, only runs observed running are included; failure takes precedence
 over blocked. Empty batches succeed; historical terminal runs are ignored.
+--max-runtime-ms 0 disables the supervisor deadline. Without an explicit value,
+a single run with maxRounds:null uses no deadline; other runs retain 4 hours.
 `;
 }
 
@@ -155,8 +157,8 @@ async function supervise(argv) {
       const raw = argv[++index];
       const value = Number(raw);
       const minimum = arg === "--poll-ms" ? 250 : 1_000;
-      if (!raw || !/^\d+$/.test(raw) || !Number.isSafeInteger(value) || value < minimum || value > 2_147_483_647) {
-        process.stderr.write(`${arg} requires an integer from ${minimum} to 2147483647.\n`);
+      if (!raw || !/^\d+$/.test(raw) || !Number.isSafeInteger(value) || (value < minimum && !(arg === "--max-runtime-ms" && value === 0)) || value > 2_147_483_647) {
+        process.stderr.write(`${arg} requires an integer from ${minimum} to 2147483647${arg === "--max-runtime-ms" ? ", or 0 for unlimited" : ""}.\n`);
         return 1;
       }
       if (arg === "--poll-ms") pollMs = value;
@@ -185,11 +187,18 @@ async function supervise(argv) {
   processRole.assertWorkflowActionAllowedForRole("supervise");
 
   const cwd = process.cwd();
-  const runId = runRef ? (await store.readRunRecord(cwd, runRef)).runId : undefined;
+  const initialRun = runRef ? await store.readRunRecord(cwd, runRef) : undefined;
+  const runId = initialRun?.runId;
+  if (runId && initialRun.status === "running" && !seen.has("--max-runtime-ms")) {
+    const compiled = JSON.parse(await readFile(store.compiledWorkflowPath(cwd, runId), "utf8"));
+    if (compiled.stages?.some(stage => stage.type === "loop" && stage.maxRounds === null)) {
+      maxRuntimeMs = 0;
+    }
+  }
   const lastPrinted = new Map();
   const supervised = new Set();
-  const deadline = Date.now() + maxRuntimeMs;
-  log(`supervising ${runId ?? "all running runs"} in ${cwd} (poll ${pollMs}ms)`);
+  const deadline = maxRuntimeMs === 0 ? undefined : Date.now() + maxRuntimeMs;
+  log(`supervising ${runId ?? "all running runs"} in ${cwd} (poll ${pollMs}ms; runtime ${maxRuntimeMs === 0 ? "unlimited" : `${maxRuntimeMs}ms`})`);
 
   while (true) {
     const runs = runId
@@ -226,7 +235,7 @@ async function supervise(argv) {
       return outcomes.some(run => run.status === "blocked") ? 2 : 0;
     }
 
-    if (Date.now() >= deadline) {
+    if (deadline !== undefined && Date.now() >= deadline) {
       log(`giving up after --max-runtime-ms ${maxRuntimeMs}; run(s) still in progress`);
       return 1;
     }
