@@ -42,8 +42,8 @@ export interface WorkflowAutoLaunchBinding {
 export function workflowAutoLaunchBindingSettings(input: {
 	executionProfile?: unknown;
 	executionProfileOverride?: unknown;
-	runtimeDefaults?: { model?: unknown; thinking?: unknown };
-	runtimeOverrides?: { model?: unknown; thinking?: unknown };
+	runtimeDefaults?: { model?: unknown; thinking?: unknown; fast?: unknown };
+	runtimeOverrides?: { model?: unknown; thinking?: unknown; fast?: unknown };
 }): Record<string, unknown> {
 	return {
 		executionProfile: input.executionProfile ?? null,
@@ -51,10 +51,16 @@ export function workflowAutoLaunchBindingSettings(input: {
 		runtimeDefaults: {
 			model: input.runtimeDefaults?.model ?? null,
 			thinking: input.runtimeDefaults?.thinking ?? null,
+			...(input.runtimeDefaults?.fast === undefined
+				? {}
+				: { fast: input.runtimeDefaults.fast }),
 		},
 		runtimeOverrides: {
 			model: input.runtimeOverrides?.model ?? null,
 			thinking: input.runtimeOverrides?.thinking ?? null,
+			...(input.runtimeOverrides?.fast === undefined
+				? {}
+				: { fast: input.runtimeOverrides.fast }),
 		},
 	};
 }

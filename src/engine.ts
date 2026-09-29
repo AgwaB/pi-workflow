@@ -482,6 +482,14 @@ async function runLoadedWorkflowSpec(
 			throw new Error(
 				"Auto selection is stale: task changed before launch. Run /workflow auto again.",
 			);
+		const effectiveFast =
+			options.runtimeOverrides?.fast === "on" ||
+			options.runtimeOverrides?.fast === "off"
+				? options.runtimeOverrides.fast
+				: options.runtimeDefaults?.fast === "on" ||
+						options.runtimeDefaults?.fast === "off"
+					? options.runtimeDefaults.fast
+					: undefined;
 		const effectiveRuntime = {
 			...(options.runtimeDefaults?.model
 				? { model: options.runtimeDefaults.model }
@@ -495,11 +503,13 @@ async function runLoadedWorkflowSpec(
 			...(options.runtimeOverrides?.thinking
 				? { thinking: options.runtimeOverrides.thinking }
 				: {}),
+			...(effectiveFast ? { fast: effectiveFast } : {}),
 		};
 		if (
 			effectiveRuntime.model !== options.launch.selection.effectiveRuntime.model ||
 			effectiveRuntime.thinking !==
-				options.launch.selection.effectiveRuntime.thinking
+				options.launch.selection.effectiveRuntime.thinking ||
+			effectiveRuntime.fast !== options.launch.selection.effectiveRuntime.fast
 		)
 			throw new Error(
 				"Auto selection is stale: runtime changed before launch. Run /workflow auto again.",

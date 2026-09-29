@@ -901,7 +901,9 @@ function isWorkflowAutoSelection(value: unknown): boolean {
 		return false;
 	const runtime = value.effectiveRuntime as Record<string, unknown>;
 	if (
-		!Object.keys(runtime).every((key) => key === "model" || key === "thinking")
+		!Object.keys(runtime).every(
+			(key) => key === "model" || key === "thinking" || key === "fast",
+		)
 	)
 		return false;
 	return (
@@ -909,7 +911,8 @@ function isWorkflowAutoSelection(value: unknown): boolean {
 		(runtime.thinking === undefined ||
 			["off", "minimal", "low", "medium", "high", "xhigh"].includes(
 				runtime.thinking as string,
-			))
+			)) &&
+		(runtime.fast === undefined || runtime.fast === "on" || runtime.fast === "off")
 	);
 }
 
@@ -3676,8 +3679,10 @@ export function createTaskRunRecord(
 			: "pending",
 		runtime: {
 			model: task.runtime.model,
+			...(task.runtime.api === undefined ? {} : { api: task.runtime.api }),
 			thinking: task.runtime.thinking,
 			thinkingResolution: task.runtime.thinkingResolution,
+			...(task.runtime.fast === undefined ? {} : { fast: task.runtime.fast }),
 			approvalMode: task.runtime.approvalMode,
 			maxRuntimeMs: task.runtime.maxRuntimeMs,
 		},

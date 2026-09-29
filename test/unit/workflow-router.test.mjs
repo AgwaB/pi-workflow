@@ -198,9 +198,10 @@ test("auto v2 command capture preserves the supplied slash arguments exactly onc
 		recommendation: "direct-dynamic",
 		selected: { kind: "direct-dynamic", candidateId: "a".repeat(64) },
 		candidateIdentitySha256: "b".repeat(64),
-		runtime: { thinking: "low" },
+		runtime: { thinking: "low", fast: "on" },
 	});
 	assert.equal(capture.schema, "pi-workflow-run-launch-v2");
+	assert.equal(capture.selection.effectiveRuntime.fast, "on");
 	assert.deepEqual(capture.command, {
 		state: "captured",
 		text: '/workflow auto "review"',
@@ -211,9 +212,10 @@ test("auto v2 command capture preserves the supplied slash arguments exactly onc
 		recommendation: null,
 		selected: { kind: "named-workflow", candidateId: "c".repeat(64) },
 		candidateIdentitySha256: "d".repeat(64),
-		runtime: {},
+		runtime: { fast: "inherit" },
 	});
 	assert.equal(manualFallback.selection.recommendation, null);
+	assert.equal("fast" in manualFallback.selection.effectiveRuntime, false);
 	assert.throws(
 		() =>
 			workflowAutoSlashLaunchCapture({
