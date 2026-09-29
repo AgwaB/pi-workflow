@@ -226,7 +226,7 @@ Slash-command flags and LLM-tool parameters are different interfaces; do not tra
 | `workflow_wait` tool | Not applicable | Not applicable | Not applicable | `runId`, optional `timeoutMs`; session-bound wait only |
 | `pi-workflow` CLI | No launch command | Not applicable | Not applicable | `inspect` and `prune` accept `--json`; `supervise` drives existing runs with `--poll-ms`, `--max-runtime-ms`, and a run ref or `--all` |
 
-Scalar launch selectors (`--model`, `--profile`, `--thinking`, including its `--reasoning` alias) cannot be repeated, even with the same value or split across leading/trailing options. `--route` and `--no-route` are retired and reject outside quoted task text; use `/workflow auto "<task>"` for a recommendation. Quote task text containing literal option names. Both prune interfaces reject repeated scalar filters, unknown arguments, and invalid numbers: `--keep` requires a non-negative safe integer (at most `9007199254740991`), while `--older-than` accepts finite non-negative days, including fractions. Blank values are invalid. CLI supervise likewise rejects duplicate scalar options and a run ref combined with `--all`; `--poll-ms` accepts decimal integers from `250` to `2147483647`, and `--max-runtime-ms` from `1000` to `2147483647`.
+Scalar launch selectors (`--model`, `--profile`, `--thinking`, including its `--reasoning` alias) cannot be repeated, even with the same value or split across leading/trailing options. `--route` and `--no-route` are retired and reject outside quoted task text; use `/workflow auto "<task>"` for a recommendation. Quote task text containing literal option names. Both prune interfaces reject repeated scalar filters, unknown arguments, and invalid numbers: `--keep` requires a non-negative safe integer (at most `9007199254740991`), while `--older-than` accepts finite non-negative days, including fractions. Blank values are invalid. CLI supervise likewise rejects duplicate scalar options and a run ref combined with `--all`; `--poll-ms` accepts decimal integers from `250` to `2147483647`, and `--max-runtime-ms` accepts `0` (no supervisor deadline) or integers from `1000` to `2147483647`. Without an explicit override, a single-run supervisor (including `--detach`) automatically removes its deadline when the frozen compiled workflow contains a `maxRounds: null` loop. Other runs and `--all` retain the four-hour supervisor default; use explicit `--max-runtime-ms 0` for an unlimited `--all` supervisor.
 
 Thinking levels are `off`, `minimal`, `low`, `medium`, `high`, and `xhigh`. A tool's `timeoutMs` on launch requires `awaitTerminal: true`; waiting and detaching are mutually exclusive. With no saved user profile, interactive declared-profile omission offers the legacy selector; without one, omission uses the declared default or base spec. Saved user profiles apply equally to interactive, print/headless, and `workflow_run` launches. For print/RPC/headless use, prefer text/tool results (`status`, `show`, `logs`, `inspect`) over interactive board controls; approval requiring a UI can block. `--json` is not a general slash-command launch flag.
 
@@ -791,7 +791,7 @@ A `loop` stage repeats a fixed child stage subgraph once per round.
 Required loop fields:
 
 - `id`
-- `maxRounds`
+- `maxRounds`: a positive integer, or explicit `null` for no round cap
 - `until`
 - at least two child `stages`
 
@@ -831,14 +831,16 @@ Data flow inside a loop is implicit, not authored:
 
 - Leaf: `{ "stage": "<final-child-id>", "path": "$.field", ... }` plus one predicate: `equals` / `notEquals` (string, number, boolean, or null, compared with `Object.is`), `lengthEquals` (integer, array or string length), or `exists` (boolean). If several predicates are present only the first in the order `exists`, `equals`, `notEquals`, `lengthEquals` is evaluated; a leaf with no predicate, no `path`, or an unreadable value never matches. `source` is accepted as an alias for `stage`; the referenced child must be the final child stage, and `path` uses the same `$`-prefixed simple dot/bracket syntax as `foreach.from`, read from that child's `control.json`.
 - Combinators: `{ "all": [ ...conditions ] }` and `{ "any": [ ...conditions ] }` nest leaves or further combinators. Every nested leaf must reference the existing final child stage; when both `source` and `stage` are supplied, they must agree.
-- Put the `until` path in the final child's control schema and show it in that stage's few-shot example; a missing path evaluates as not satisfied and the loop runs to `maxRounds`.
+- Put the `until` path in the final child's control schema and show it in that stage's few-shot example; a missing path evaluates as not satisfied, so the loop continues subject to its configured stop conditions.
 
 A loop stops when:
 
 - `until` evaluates true (`loopStates[].status: "completed"`),
-- `maxRounds` is exhausted (`"exhausted"`),
+- a positive `maxRounds` is exhausted (`"exhausted"`; never for `maxRounds: null`),
 - no-progress detection fires (`"stopped_no_progress"`): from round 2 on, the metric at `progressPath` (default `$.blockingFailures`; array/string length or a finite number) read from the designated check stage's control is compared with the previous round and the loop stops when it did not decrease,
 - or a blocking failure prevents scheduling.
+
+`maxRounds: null` is an explicit opt-in to an unlimited number of rounds. With `progressPath` omitted, such a loop has no automatic no-progress cutoff: it continues until `until` is true, a blocking failure occurs, or it is explicitly stopped. Supplying `progressPath` opts an unlimited loop into the same no-progress rule above. Positive `maxRounds` and persisted bounded loops retain the legacy default `$.blockingFailures` metric. This does not remove model-task deadlines; set `maxRuntimeMs: 0` separately when those should be unlimited. No finite number is substituted for `null`. If `until` is still false and a round has a failed, interrupted, or skipped child, an unlimited loop stops with loop status `failed`, allowing downstream partial-policy cleanup/report stages to run. A completed child returning an unsuccessful domain verdict is still eligible for another round.
 
 An optional `onExhausted` stage runs once when the loop ends by exhaustion or no progress. Round count and outcome appear in `/workflow status`, `/workflow show`, and `run.json` `loopStates`. `/workflow resume` does not support loop workflows yet, so fix the spec and start a fresh run instead of resuming an interrupted loop.
 

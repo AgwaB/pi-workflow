@@ -1989,7 +1989,7 @@ function validateLoopStage(
 			path: `${path}.maxRounds`,
 			message: "loop stages must declare maxRounds",
 		});
-	} else {
+	} else if (stage.maxRounds !== null) {
 		optionalPositiveInteger(stage.maxRounds, `${path}.maxRounds`, issues);
 	}
 	validateOptionalJsonPath(stage.progressPath, `${path}.progressPath`, issues);

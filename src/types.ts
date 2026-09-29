@@ -343,7 +343,8 @@ export interface ArtifactGraphStageSpec {
 	support?: { uses: string; options?: Record<string, unknown> };
 	dynamic?: DynamicWorkflowStageSpec;
 	until?: unknown;
-	maxRounds?: number;
+	/** Explicit null removes the round cap; omission is invalid for loops. */
+	maxRounds?: number | null;
 	progressPath?: string;
 	onExhausted?: ArtifactGraphStageSpec;
 }
@@ -440,6 +441,7 @@ export type LoopUntilCondition =
 	| { any: LoopUntilCondition[] };
 
 export type LoopResultStatus =
+	| "failed"
 	| "completed"
 	| "exhausted"
 	| "stopped_no_progress";
@@ -457,7 +459,7 @@ export interface CompiledLoopStageRecord {
 	id: string;
 	type: "loop";
 	sourcePolicy?: string;
-	maxRounds: number;
+	maxRounds: number | null;
 	until: LoopUntilCondition;
 	childStageIds: string[];
 	childTemplates: CompiledTask[];

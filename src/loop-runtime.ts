@@ -106,7 +106,17 @@ export async function scheduleLoop(
 		return true;
 	}
 
-	if (currentRound >= loopStage.maxRounds) {
+	if (
+		loopStage.maxRounds === null &&
+		roundTasks.some((task) => task.status !== "completed")
+	) {
+		await finalizeLoop(
+			cwd, run, compiledFlow, placeholderRunTask, loopStage, "failed", currentRound,
+		);
+		return true;
+	}
+
+	if (loopStage.maxRounds !== null && currentRound >= loopStage.maxRounds) {
 		await stopLoopOrRunOnExhausted(
 			cwd,
 			run,
@@ -442,7 +452,7 @@ async function finalizeLoop(
 	state.status = status;
 	state.awaitingOnExhausted = false;
 	state.updatedAt = new Date().toISOString();
-	setTaskTerminal(placeholderRunTask, "completed", `loop_${status}`, {
+	setTaskTerminal(placeholderRunTask, status === "failed" ? "failed" : "completed", `loop_${status}`, {
 		lastMessage: summary,
 	});
 	await writeRunRecord(cwd, run);
@@ -531,6 +541,10 @@ async function loopHasNoProgress(
 	round: number,
 ): Promise<boolean> {
 	if (round <= 1) return false;
+	// Unlimited loops use only their until condition unless progress is explicit.
+	// Bounded and persisted legacy loops retain the default progress metric.
+	if (loopStage.maxRounds === null && loopStage.progressPath === undefined)
+		return false;
 	const current = await readLoopProgressMetric(
 		cwd,
 		run,
@@ -828,7 +842,9 @@ function buildLoopResultSummary(
 	finalCheck: unknown,
 ): string {
 	const statusText =
-		status === "completed"
+		status === "failed"
+			? "Loop stopped because a child did not complete successfully"
+			: status === "completed"
 			? "Loop completed"
 			: status === "exhausted"
 				? "Loop exhausted before until condition passed"

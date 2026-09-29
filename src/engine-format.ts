@@ -319,7 +319,9 @@ export function formatLoopSummaryLines(run: WorkflowRunRecord): string[] {
 	return states.map((state) => {
 		const rounds = `${state.round} round${state.round === 1 ? "" : "s"}`;
 		const outcome =
-			state.status === "completed"
+			state.status === "failed"
+				? "stopped: a loop child did not complete successfully"
+				: state.status === "completed"
 				? "stopped: until condition met"
 				: state.status === "exhausted"
 					? "exhausted: maxRounds reached before the until condition was met"
