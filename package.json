@@ -66,6 +66,7 @@
     ]
   },
   "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*"
   },
@@ -89,6 +90,9 @@
     "access": "public"
   },
   "peerDependenciesMeta": {
+    "@earendil-works/pi-ai": {
+      "optional": false
+    },
     "@earendil-works/pi-coding-agent": {
       "optional": false
     },

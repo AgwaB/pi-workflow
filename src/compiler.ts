@@ -51,6 +51,7 @@ import {
 	type WorkflowRuntimeDefaults,
 	type WorkflowRuntimeResolutionInput,
 } from "./workflow-runtime.js";
+import { resolveWorkflowFastModeConfig } from "./workflow-fast-mode-extension.js";
 
 const DELEGATION_TOOLS = new Set([
 	"skill_test_subagent",
@@ -1372,7 +1373,11 @@ function runtimeSettings(value: unknown): WorkflowRuntimeDefaults | undefined {
 		typeof value.thinking === "string" && value.thinking.trim()
 			? (value.thinking.trim() as ThinkingLevel)
 			: undefined;
-	return model || thinking ? { model, thinking } : undefined;
+	const fast =
+		value.fast === "inherit" || value.fast === "off" || value.fast === "on"
+			? value.fast
+			: undefined;
+	return model || thinking || fast ? { model, thinking, fast } : undefined;
 }
 
 function formatRoleText(
@@ -1543,6 +1548,10 @@ async function compileArtifactGraphPlan(
 				},
 				{ availableModels: options.availableModels },
 			);
+			resolveWorkflowFastModeConfig(
+				resolvedDynamicRuntime,
+				options.availableModels,
+			);
 			const dynamicTask = buildDynamicTask(
 				stage,
 				taskId,
@@ -1671,17 +1680,11 @@ async function compileArtifactGraphPlan(
 		const filteredToolSelection = filterToolSelection(toolSelection);
 		const requestedRuntime = selectWorkflowRuntime(
 			runtimeOverrides,
-			runtimeSettings(
-				each
-					? {
-							...stage,
-							model: each.model ?? stage.model,
-							thinking: each.thinking ?? stage.thinking,
-						}
-					: stage,
-			),
+			runtimeSettings(each),
+			runtimeSettings(stage),
 			runtimeDefaults,
 			specRuntimeDefaults,
+			runtimeSettings(stageAgent),
 		);
 		const resolvedRuntime = await resolveWorkflowRuntime(
 			requestedRuntime,
@@ -1695,6 +1698,7 @@ async function compileArtifactGraphPlan(
 				availableModels: options.availableModels,
 			},
 		);
+		resolveWorkflowFastModeConfig(resolvedRuntime, options.availableModels);
 		const runtime = {
 			approvalMode:
 				stage.approvalMode ?? spec.defaults?.approvalMode ?? "non-interactive",
@@ -2063,20 +2067,6 @@ async function compileArtifactGraphPlan(
 			path: "$.defaults.backend.mode",
 			message: 'must be "headless"',
 		});
-	if (spec.fast === "on")
-		issues.push({ path: "$.fast", message: "fast:on is not supported" });
-	if (spec.defaults?.fast === "on")
-		issues.push({
-			path: "$.defaults.fast",
-			message: "fast:on is not supported",
-		});
-	for (const [index, stage] of stages.entries()) {
-		if (stage?.fast === "on")
-			issues.push({
-				path: `$.artifactGraph.stages[${index}].fast`,
-				message: "fast:on is not supported",
-			});
-	}
 	if (issues.length > 0) throw new WorkflowValidationError(issues);
 
 	const failurePolicy = compileWorkflowFailurePolicy(spec.artifactGraph);

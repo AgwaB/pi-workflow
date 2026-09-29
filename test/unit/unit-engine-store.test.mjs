@@ -935,10 +935,13 @@ test("schema and compiler support pi-subagent headless backend", async () => {
 				workflowSpec("unit-scout", { defaults: { backend: { mode: "tmux" } } }),
 			),
 		);
-		assertThrowsFlow(() =>
-			parseWorkflow(workflowSpec("unit-scout", { defaults: { fast: "on" } })),
+		assert.equal(
+			parseWorkflow(
+				workflowSpec("unit-scout", { defaults: { fast: "on" } }),
+			).defaults.fast,
+			"on",
 		);
-		assertThrowsFlow(() =>
+		assert.equal(
 			parseWorkflow(
 				workflowSpec("unit-scout", {
 					artifactGraph: {
@@ -947,7 +950,8 @@ test("schema and compiler support pi-subagent headless backend", async () => {
 						],
 					},
 				}),
-			),
+			).artifactGraph.stages[0].fast,
+			"on",
 		);
 	} finally {
 		rmSync(cwd, {

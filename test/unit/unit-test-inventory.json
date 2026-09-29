@@ -2322,7 +2322,7 @@
 		{
 			"name": "schema and compiler support pi-subagent headless backend",
 			"occurrence": 1,
-			"sha256": "ca1bacf78307dff6e033b4b04789cfb4b33556bbc52263d5752ba370eb45d97b",
+			"sha256": "27116461b97e2eaa12b9a9a16641c498df4bb411c12effde5642771cd658ea6d",
 			"domain": "engine-store"
 		},
 		{

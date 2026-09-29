@@ -72,6 +72,7 @@ export async function createLaunchBootstrapProvenance(
 	const artifactIdentities = await artifactIdentity(cwd, run, task);
 	const stateRootIdentity = await workflowStateRootIdentity(cwd);
 	const externalGrantSha256 = externalLaunchGrantSha256();
+	const preparedRuntimeApi = (preparedTask.runtime as { api?: string }).api;
 	const recordBase: Omit<
 		LaunchBootstrapProvenanceRecordBase,
 		"identitySha256"
@@ -116,6 +117,9 @@ export async function createLaunchBootstrapProvenance(
 			...(preparedTask.runtime.model === undefined
 				? {}
 				: { model: preparedTask.runtime.model }),
+			...(preparedRuntimeApi === undefined
+				? {}
+				: { api: preparedRuntimeApi }),
 			...(preparedTask.runtime.thinking === undefined
 				? {}
 				: { thinking: preparedTask.runtime.thinking }),
@@ -590,7 +594,8 @@ function isExtensionIdentity(value: unknown): boolean {
 		isRecord(value.generated) &&
 		hasExactKeys(value.generated, ["kind", "wrapperSha256", "configSha256"]) &&
 		(value.generated.kind === "fetch-cache" ||
-			value.generated.kind === "web-source") &&
+			value.generated.kind === "web-source" ||
+			value.generated.kind === "openai-fast") &&
 		isSha256(value.generated.wrapperSha256) &&
 		isSha256(value.generated.configSha256)
 	);
@@ -604,6 +609,7 @@ function isEffectivePolicy(value: unknown): boolean {
 			"toolProvidersSha256",
 			"externalLaunchGrantSha256",
 			"model",
+			"api",
 			"thinking",
 			"fast",
 			"approvalMode",
@@ -617,6 +623,7 @@ function isEffectivePolicy(value: unknown): boolean {
 		!isSha256(value.toolProvidersSha256) ||
 		!optionalSha256(value.externalLaunchGrantSha256) ||
 		!optionalString(value.model) ||
+		!optionalString(value.api) ||
 		!optionalString(value.thinking) ||
 		!optionalString(value.fast) ||
 		!nonEmptyString(value.approvalMode) ||

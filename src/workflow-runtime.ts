@@ -1,4 +1,8 @@
-import { THINKING_LEVELS, type ThinkingLevel } from "./types.js";
+import {
+	THINKING_LEVELS,
+	type FastMode,
+	type ThinkingLevel,
+} from "./types.js";
 
 export type WorkflowModelThinkingLevelMap = Partial<
 	Record<ThinkingLevel, string | null>
@@ -8,6 +12,7 @@ export interface WorkflowModelInfo {
 	provider: string;
 	id: string;
 	fullId: string;
+	api?: string;
 	reasoning?: boolean;
 	thinkingLevelMap?: WorkflowModelThinkingLevelMap;
 }
@@ -15,6 +20,7 @@ export interface WorkflowModelInfo {
 export interface WorkflowRuntimeDefaults {
 	model?: string;
 	thinking?: ThinkingLevel;
+	fast?: FastMode;
 }
 
 export interface WorkflowRuntimeThinkingResolution {
@@ -25,8 +31,10 @@ export interface WorkflowRuntimeThinkingResolution {
 
 export interface WorkflowRuntimeResolutionInput {
 	model?: string;
+	api?: string;
 	thinking?: ThinkingLevel;
 	thinkingResolution?: WorkflowRuntimeThinkingResolution;
+	fast?: FastMode;
 }
 
 export interface WorkflowRuntimeResolutionContext {
@@ -69,9 +77,11 @@ export function selectWorkflowRuntime(
 			break;
 		}
 	}
+	const fast = layers.map(fastOf).find((value) => value !== undefined);
 	return {
 		...(model ? { model } : {}),
 		...(thinking ? { thinking } : {}),
+		...(fast ? { fast } : {}),
 	};
 }
 
@@ -81,9 +91,14 @@ function modelOf(layer: WorkflowRuntimeLayer): string | undefined {
 		: undefined;
 }
 
+function fastOf(layer: WorkflowRuntimeLayer): Exclude<FastMode, "inherit"> | undefined {
+	return layer?.fast === "on" || layer?.fast === "off" ? layer.fast : undefined;
+}
+
 export function toWorkflowModelInfo(model: {
 	provider: string;
 	id: string;
+	api?: string;
 	reasoning?: boolean;
 	thinkingLevelMap?: WorkflowModelThinkingLevelMap;
 }): WorkflowModelInfo {
@@ -91,6 +106,7 @@ export function toWorkflowModelInfo(model: {
 		provider: model.provider,
 		id: model.id,
 		fullId: `${model.provider}/${model.id}`,
+		api: model.api,
 		reasoning: model.reasoning,
 		thinkingLevelMap: model.thinkingLevelMap,
 	};
@@ -109,12 +125,20 @@ export async function resolveWorkflowRuntime(
 	const effectiveThinking =
 		runtime.thinking ?? thinking ?? options.defaults?.thinking;
 	const thinkingResolution = resolveThinking(model, effectiveThinking, options);
+	const fast = fastOf(runtime) ?? fastOf(options.defaults);
+	const api =
+		fast === "on" && model
+			? (options.availableModels?.find((candidate) => candidate.fullId === model)
+					?.api ?? runtime.api)
+			: undefined;
 	return {
 		...(model ? { model } : {}),
+		...(api ? { api } : {}),
 		...(thinkingResolution?.resolved
 			? { thinking: thinkingResolution.resolved }
 			: {}),
 		...(thinkingResolution ? { thinkingResolution } : {}),
+		...(fast ? { fast } : {}),
 	};
 }
 

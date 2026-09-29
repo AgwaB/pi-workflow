@@ -3357,7 +3357,13 @@ export function workflowAutoSlashLaunchCapture(input: {
 				.update(input.task.trim(), "utf8")
 				.digest("hex"),
 			confirmed: true,
-			effectiveRuntime: input.runtime,
+			effectiveRuntime: {
+				...(input.runtime.model ? { model: input.runtime.model } : {}),
+				...(input.runtime.thinking ? { thinking: input.runtime.thinking } : {}),
+				...(input.runtime.fast === "on" || input.runtime.fast === "off"
+					? { fast: input.runtime.fast }
+					: {}),
+			},
 		},
 		command: { state: "captured", text: `/workflow ${input.args}` },
 	};
@@ -3366,12 +3372,23 @@ export function workflowAutoSlashLaunchCapture(input: {
 function effectiveWorkflowAutoRuntime(
 	defaults: WorkflowRuntimeDefaults,
 	overrides: WorkflowRuntimeDefaults,
-): WorkflowRuntimeDefaults {
+): {
+	model?: string;
+	thinking?: ThinkingLevel;
+	fast?: "on" | "off";
+} {
+	const fast =
+		overrides.fast === "on" || overrides.fast === "off"
+			? overrides.fast
+			: defaults.fast === "on" || defaults.fast === "off"
+				? defaults.fast
+				: undefined;
 	return {
 		...(defaults.model ? { model: defaults.model } : {}),
 		...(defaults.thinking ? { thinking: defaults.thinking } : {}),
 		...(overrides.model ? { model: overrides.model } : {}),
 		...(overrides.thinking ? { thinking: overrides.thinking } : {}),
+		...(fast ? { fast } : {}),
 	};
 }
 

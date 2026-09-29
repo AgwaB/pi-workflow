@@ -34,7 +34,9 @@ import {
 	resolveWorkflowRuntime,
 	selectWorkflowRuntime,
 	type WorkflowModelInfo,
+	type WorkflowRuntimeDefaults,
 } from "./workflow-runtime.js";
+import { resolveWorkflowFastModeConfig } from "./workflow-fast-mode-extension.js";
 
 const DYNAMIC_OUTPUT_MAX_DIGEST_CHARS = 1000;
 const DYNAMIC_DELEGATION_TOOLS = new Set([
@@ -201,6 +203,18 @@ export async function buildDynamicGeneratedCompiledTask(input: {
 		runtimeSettings(input.controllerCompiledTask.runtime),
 		runtimeSettings(agentDefinition),
 	);
+	const controllerRuntimeApi = (
+		input.controllerCompiledTask.runtime as { api?: string }
+	).api;
+	if (
+		selectedRuntime.fast === "on" &&
+		selectedRuntime.model === input.controllerCompiledTask.runtime.model &&
+		controllerRuntimeApi
+	) {
+		selectedRuntime.api = controllerRuntimeApi;
+	}
+	const availableModels =
+		input.availableModels ?? input.dynamic.availableModels;
 	const resolvedRuntime = await resolveWorkflowRuntime(
 		selectedRuntime,
 		{
@@ -209,8 +223,9 @@ export async function buildDynamicGeneratedCompiledTask(input: {
 			taskId: input.request.id,
 			agent: requestedAgent,
 		},
-		{ availableModels: input.availableModels ?? input.dynamic.availableModels },
+		{ availableModels },
 	);
+	resolveWorkflowFastModeConfig(resolvedRuntime, availableModels);
 	const unknownTools = (tools ?? []).filter(
 		(tool) => effectiveToolClassification(tool, toolProviders) === undefined,
 	);
@@ -799,9 +814,7 @@ function requiredDynamicString(
 	return value.trim();
 }
 
-function runtimeSettings(
-	value: unknown,
-): { model?: string; thinking?: ThinkingLevel } | undefined {
+function runtimeSettings(value: unknown): WorkflowRuntimeDefaults | undefined {
 	if (!value || typeof value !== "object" || Array.isArray(value))
 		return undefined;
 	const record = value as Record<string, unknown>;
@@ -813,7 +826,11 @@ function runtimeSettings(
 		typeof record.thinking === "string" && record.thinking.trim()
 			? (record.thinking.trim() as ThinkingLevel)
 			: undefined;
-	return model || thinking ? { model, thinking } : undefined;
+	const fast =
+		record.fast === "inherit" || record.fast === "off" || record.fast === "on"
+			? record.fast
+			: undefined;
+	return model || thinking || fast ? { model, thinking, fast } : undefined;
 }
 
 function optionalDynamicString(

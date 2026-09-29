@@ -176,6 +176,7 @@ export function cloneExecutionProfileStageOverride(
 	return {
 		...(override.model === undefined ? {} : { model: override.model }),
 		...(override.thinking === undefined ? {} : { thinking: override.thinking }),
+		...(override.fast === undefined ? {} : { fast: override.fast }),
 		...(override.foreachBatch === undefined
 			? {}
 			: {
@@ -318,6 +319,7 @@ function applyOverride(
 	const runtimeOverride = {
 		...(override.model === undefined ? {} : { model: override.model }),
 		...(override.thinking === undefined ? {} : { thinking: override.thinking }),
+		...(override.fast === undefined ? {} : { fast: override.fast }),
 	};
 	const runtimeTarget =
 		foreach && isRecord(target.each)

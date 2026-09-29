@@ -27,7 +27,7 @@ export interface PreparedWorkflowTaskLaunch {
 	/** Provider metadata retained for launch auditing and wrapper preparation. */
 	toolProviders?: Record<string, CompiledToolProvider>;
 	generatedExtensions: Array<{
-		kind: "fetch-cache" | "web-source";
+		kind: "fetch-cache" | "web-source" | "openai-fast";
 		path: string;
 		expectedBytes: string;
 		config: unknown;

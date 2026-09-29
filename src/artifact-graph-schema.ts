@@ -38,6 +38,7 @@ export const WORKFLOW_ROUTING_HINT_MAX_UTF8_BYTES = 480;
 const EXECUTION_PROFILE_OVERRIDE_KEYS = new Set([
 	"model",
 	"thinking",
+	"fast",
 	"foreachBatch",
 ]);
 const EXECUTION_PROFILE_FOREACH_BATCH_KEYS = new Set(["maxItems", "groupBy"]);
@@ -194,6 +195,7 @@ const DYNAMIC_DECISION_LOOP_PROFILE_KEYS = new Set([
 	"profileRole",
 	"model",
 	"thinking",
+	"fast",
 	"tools",
 	"outputProfile",
 	"maxRuntimeMs",
@@ -224,6 +226,7 @@ const EACH_KEYS = new Set([
 	"readOnly",
 	"model",
 	"thinking",
+	"fast",
 	"maxRuntimeMs",
 	"worktreePolicy",
 	"itemIdentityPath",
@@ -495,6 +498,7 @@ function validateExecutionProfileStageOverride(
 	rejectUnknownKeys(override, EXECUTION_PROFILE_OVERRIDE_KEYS, path, issues);
 	optionalString(override.model, `${path}.model`, issues);
 	optionalEnum(override.thinking, THINKING_LEVELS, `${path}.thinking`, issues);
+	optionalEnum(override.fast, FAST_MODES, `${path}.fast`, issues);
 	validateExecutionProfileForeachBatch(
 		override.foreachBatch,
 		`${path}.foreachBatch`,
@@ -1795,6 +1799,7 @@ function validateDynamicDecisionLoopProfile(
 	);
 	optionalString(profile.model, `${path}.model`, issues);
 	optionalEnum(profile.thinking, THINKING_LEVELS, `${path}.thinking`, issues);
+	optionalEnum(profile.fast, FAST_MODES, `${path}.fast`, issues);
 	validateWorkflowToolArray(profile.tools, `${path}.tools`, issues);
 	optionalEnum(
 		profile.outputProfile,
@@ -1918,6 +1923,7 @@ function validateForeachStage(
 	optionalBoolean(each.readOnly, `${path}.each.readOnly`, issues);
 	optionalString(each.model, `${path}.each.model`, issues);
 	optionalEnum(each.thinking, THINKING_LEVELS, `${path}.each.thinking`, issues);
+	optionalEnum(each.fast, FAST_MODES, `${path}.each.fast`, issues);
 	optionalModelTaskMaxRuntimeMs(
 		each.maxRuntimeMs,
 		`${path}.each.maxRuntimeMs`,

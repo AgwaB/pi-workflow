@@ -113,6 +113,11 @@ import {
 	buildWorkflowWebSourceExtensionWrapper,
 	writeWorkflowWebSourceExtensionWrapper,
 } from "./workflow-web-source-extension.js";
+import {
+	buildWorkflowFastModeExtensionWrapper,
+	resolveWorkflowFastModeConfig,
+	writeWorkflowFastModeExtensionWrapper,
+} from "./workflow-fast-mode-extension.js";
 import { isWorkflowWebSourceTool } from "./workflow-web-source.js";
 import {
 	buildWorkflowOutputRetryInstructions,
@@ -221,6 +226,10 @@ const WORKFLOW_FETCH_CACHE_EXTENSION_IMPORT = resolve(
 const WORKFLOW_WEB_SOURCE_EXTENSION_IMPORT = resolve(
 	MODULE_DIR,
 	`workflow-web-source-extension${extname(MODULE_PATH)}`,
+);
+const WORKFLOW_FAST_MODE_EXTENSION_IMPORT = resolve(
+	MODULE_DIR,
+	`workflow-fast-mode-extension${extname(MODULE_PATH)}`,
 );
 const TOOL_PROVIDER_EXTENSIONS: Record<string, string[]> = {
 	web_search: [BUNDLED_PI_WEB_ACCESS_EXTENSION],
@@ -2844,13 +2853,6 @@ export async function launchSubagentTask(
 ): Promise<BackendLaunchResult> {
 	if (task.status !== "pending") return { kind: "launched" };
 	if (task.backendHandle || task.pid) return { kind: "launched" };
-
-	if ((compiledTask.runtime.fast as string | undefined) === "on") {
-		return {
-			kind: "fatal",
-			message: "fast:on is not supported for pi-workflow execution.",
-		};
-	}
 
 	await throwIfLaunchStopped(cwd, run.runId, leaseSignal, workflowStopSignal);
 
@@ -6340,6 +6342,7 @@ export async function prepareSubagentTaskLaunch(
 	compiledTask: CompiledTask,
 	requireArtifactBinding = false,
 ): Promise<PreparedWorkflowTaskLaunch> {
+	const fastModeConfig = resolveWorkflowFastModeConfig(compiledTask.runtime);
 	const resourcePolicy = resolveWorkflowResourcePolicy(compiledTask);
 	const tools = compiledTask.runtime.tools;
 	const legacyProviderTools = selectedLegacyProviderTools(tools);
@@ -6507,6 +6510,28 @@ export async function prepareSubagentTaskLaunch(
 			),
 			wrapperPath,
 		]);
+	}
+
+	// Keep the Fast request hook last among task extensions. Its provider guard
+	// also reasserts the sealed model/tier after the complete payload-hook chain.
+	if (fastModeConfig) {
+		const wrapperPath = join(taskDir, "workflow-fast-mode-extension.ts");
+		const expectedBytes = buildWorkflowFastModeExtensionWrapper({
+			importPath: WORKFLOW_FAST_MODE_EXTENSION_IMPORT,
+			config: fastModeConfig,
+		});
+		await writeWorkflowFastModeExtensionWrapper({
+			wrapperPath,
+			importPath: WORKFLOW_FAST_MODE_EXTENSION_IMPORT,
+			config: fastModeConfig,
+		});
+		extensions.push(wrapperPath);
+		generatedExtensions.push({
+			kind: "openai-fast",
+			path: wrapperPath,
+			expectedBytes,
+			config: fastModeConfig,
+		});
 	}
 
 	const toolResultBudget = dynamicTaskToolResultBudgetConfiguration(task);

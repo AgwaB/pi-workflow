@@ -12,7 +12,7 @@ export const THINKING_LEVELS = [
 	"high",
 	"xhigh",
 ] as const;
-export const FAST_MODES = ["inherit", "off"] as const;
+export const FAST_MODES = ["inherit", "off", "on"] as const;
 export const WORKFLOW_PROFILE_ROLES = [
 	"planning",
 	"research-execution",
@@ -141,6 +141,7 @@ export interface WorkflowForeachBatchGrouping {
 export interface ExecutionProfileStageOverride {
 	model?: string;
 	thinking?: ThinkingLevel;
+	fast?: FastMode;
 	foreachBatch?: ExecutionProfileForeachBatch;
 }
 
@@ -209,6 +210,7 @@ export interface DynamicDecisionLoopExecutionProfileSpec {
 	profileRole?: WorkflowProfileRole;
 	model?: string;
 	thinking?: ThinkingLevel;
+	fast?: FastMode;
 	tools?: WorkflowToolSpec[];
 	outputProfile?: string;
 	maxRuntimeMs?: number;
@@ -281,6 +283,7 @@ export interface ArtifactGraphForeachSpec {
 	readOnly?: boolean;
 	model?: string;
 	thinking?: ThinkingLevel;
+	fast?: FastMode;
 	maxRuntimeMs?: number;
 	worktreePolicy?: WorktreePolicy;
 	itemIdentityPath?: string;
@@ -407,6 +410,7 @@ export interface PermissionPreview {
 
 export interface CompiledTaskRuntime {
 	model?: string;
+	api?: string;
 	thinking?: ThinkingLevel;
 	thinkingResolution?: WorkflowRuntimeThinkingResolution;
 	fast?: FastMode;
@@ -536,6 +540,7 @@ export interface CompiledDynamicDecisionLoopExecutionProfile {
 	agent?: string;
 	model?: string;
 	thinking?: ThinkingLevel;
+	fast?: FastMode;
 	tools?: string[];
 	toolProviders?: Record<string, CompiledToolProvider>;
 	outputProfile?: string;
@@ -897,7 +902,7 @@ export interface LaunchBootstrapProvenanceRecordBase {
 		extensions: Array<{
 			pathSha256: string;
 			generated?: {
-				kind: "fetch-cache" | "web-source";
+				kind: "fetch-cache" | "web-source" | "openai-fast";
 				wrapperSha256: string;
 				configSha256: string;
 			};
@@ -916,6 +921,7 @@ export interface LaunchBootstrapProvenanceRecordBase {
 		toolProvidersSha256: string;
 		externalLaunchGrantSha256?: string;
 		model?: string;
+		api?: string;
 		thinking?: string;
 		fast?: string;
 		approvalMode: string;
@@ -1195,6 +1201,7 @@ export interface WorkflowTaskRunRecord {
 	statusDetail: string;
 	runtime: {
 		model?: string;
+		api?: string;
 		thinking?: ThinkingLevel;
 		thinkingResolution?: WorkflowRuntimeThinkingResolution;
 		fast?: FastMode;
@@ -1442,7 +1449,11 @@ export interface WorkflowRunAutoSelectionMetadata {
 	candidateIdentitySha256: string;
 	taskSha256: string;
 	confirmed: true;
-	effectiveRuntime: { model?: string; thinking?: ThinkingLevel };
+	effectiveRuntime: {
+		model?: string;
+		thinking?: ThinkingLevel;
+		fast?: Exclude<FastMode, "inherit">;
+	};
 }
 
 /** Legacy structured launch provenance. Keep this exact v1 shape readable forever. */
