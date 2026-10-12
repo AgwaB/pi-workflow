@@ -1078,6 +1078,7 @@ Scope order is agent frontmatter fallback < `defaults.tools` < stage `tools`: th
 
 - `/workflow` is an orchestrator, not an OS sandbox.
 - Workers run through `@agwab/pi-subagent`; sandbox/worktree behavior follows that package.
+- The bundled engine is pinned by the lockfile to `@agwab/pi-subagent` 0.7.0. Its `metadata.outputPartial: true` marks unverified recovery text from a failed/cancelled attempt. Workflow retains that text for diagnosis but never promotes it to successful output or artifact-graph salvage, even if it contains valid-looking output sections. This is distinct from explicitly declared streaming `<partial-control>` publications. Engine tool `answerPreview` is not a workflow result: workflow consumes the artifact-backed code API.
 - Workflow tool lists can only narrow agent-declared tool authority, even when object-form provider metadata is used.
 - `readOnly: true` is a safety declaration used for capability/worktree classification; it does not isolate the filesystem or make mutation-capable tools safe.
 - Write-capable workflows should use managed worktrees in git repositories.
