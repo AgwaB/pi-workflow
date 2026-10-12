@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import fs, {
 	access,
+	lstat,
 	mkdir,
 	mkdtemp,
 	readFile,
+	rename,
 	rm,
 	writeFile,
 } from "node:fs/promises";
@@ -136,8 +138,16 @@ test("a topology retry rechecks and refuses a replacement run generation", {
 		]);
 		assert.equal(first, "retry");
 
-		await rm(runDir, { recursive: true, force: true });
+		const previous = await lstat(runDir);
+		// Keep the old inode alive: unlink/recreate may reuse it immediately on Linux.
+		await rename(runDir, `${runDir}.retained`);
 		await mkdir(runDir);
+		const replacement = await lstat(runDir);
+		assert.notDeepEqual(
+			[replacement.dev, replacement.ino],
+			[previous.dev, previous.ino],
+			"the fixture must replace the directory generation",
+		);
 		await writeFile(join(runDir, "replacement-marker"), "new generation\n");
 		continueRetryRead.resolve();
 		const result = await outcome;
