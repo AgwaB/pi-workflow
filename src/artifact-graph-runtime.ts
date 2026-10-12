@@ -6,6 +6,7 @@ import { hashDynamicRequest } from "./dynamic-events.js";
 import { stringifyPromptJson } from "./prompt-json.js";
 import { compactStrings } from "./strings.js";
 import { loadWorkflowHelper } from "./workflow-helpers.js";
+import { prepareWorkflowNativeTaskPolicy } from "./workflow-native-tool-policy.js";
 import {
 	WORKFLOW_ARTIFACT_TOOL_NAME,
 	writeWorkflowArtifactExtensionWrapper,
@@ -21,7 +22,10 @@ import {
 	readWorkflowPartialOutputLedger,
 	writeWorkflowPartialOutputLedgerFromFile,
 } from "./workflow-partial-output.js";
-import type { JsonSchema } from "./json-schema.js";
+import {
+	type JsonSchema,
+	validateJsonSchemaSubset,
+} from "./json-schema.js";
 import {
 	buildRunSourceContext,
 	readOutputText,
@@ -924,7 +928,25 @@ async function readTaskControlJsonSchema(
 ): Promise<JsonSchema | undefined> {
 	const schemaPath = task.artifactGraph?.output.controlSchemaPath;
 	if (!schemaPath) return undefined;
-	return JSON.parse(await readFile(schemaPath, "utf8")) as JsonSchema;
+	const source = await readFile(schemaPath, "utf8");
+	let schema: unknown;
+	try {
+		schema = JSON.parse(source);
+	} catch (error) {
+		throw new Error(`task ${task.taskId} control schema is not valid JSON`, {
+			cause: error,
+		});
+	}
+	const validation = validateJsonSchemaSubset(schema);
+	if (!validation.valid) {
+		throw new Error(
+			`task ${task.taskId} control schema is not supported: ${validation.issues
+				.map((issue) => `${issue.path}: ${issue.message}`)
+				.join("; ")}`,
+		);
+	}
+	// SAFETY: the recursive subset validator has verified every supported schema node.
+	return schema as JsonSchema;
 }
 
 export function normalizeDynamicControllerOutput(value: unknown): {
@@ -1043,7 +1065,7 @@ export async function prepareDagTask(
 		run,
 	),
 ): Promise<CompiledWorkflow["tasks"][number]> {
-	const compiledTask = compiledFlow.tasks[index]!;
+	const compiledTask = prepareWorkflowNativeTaskPolicy(compiledFlow.tasks[index]!, run.nativeHost);
 	const task = run.tasks[index]!;
 	const contextDependsOn =
 		compiledTask.contextDependsOn ?? compiledTask.dependsOn ?? [];
@@ -1246,6 +1268,10 @@ async function prepareArtifactGraphTask(
 		cwd: task.cwd,
 		runtime: {
 			...compiledTask.runtime,
+			// Artifact access must not opt an explicitly tool-free task into native tools.
+			...(compiledTask.runtime.tools?.length === 0
+				? { nativeToolsEnabled: false }
+				: {}),
 			tools: uniqueStrings([
 				...(compiledTask.runtime.tools ?? []),
 				WORKFLOW_ARTIFACT_TOOL_NAME,

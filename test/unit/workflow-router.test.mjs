@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { drainWorkflowFixture } from "./workflow-fixture-lifecycle.mjs";
 import {
 	mkdtempSync,
 	mkdirSync,
@@ -303,8 +304,9 @@ test("cancelling a dynamic foreground launch reclaims the created run", async ()
 			setWidget() {},
 		},
 	};
+	let launch;
 	try {
-		const launch = handler('dynamic --force-new "Cancellation recovery task."', ctx);
+		launch = handler('dynamic --force-new "Cancellation recovery task."', ctx);
 		for (let attempt = 0; attempt < 1_000; attempt += 1) {
 			if (dynamicLoader && calls.launches > 0) break;
 			await new Promise((resolve) => setTimeout(resolve, 10));
@@ -330,6 +332,10 @@ test("cancelling a dynamic foreground launch reclaims the created run", async ()
 		);
 	} finally {
 		releaseStatus?.();
+		await launch?.catch(() => undefined);
+		for (const run of (await readIndex(cwd))?.runs ?? []) {
+			await drainWorkflowFixture(cwd, run.runId);
+		}
 		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
 	}

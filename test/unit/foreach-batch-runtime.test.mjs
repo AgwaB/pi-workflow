@@ -1239,10 +1239,27 @@ for (const kind of ["backend", "salvage", "batch", "dynamic"])
 				});
 				let started, error;
 				try {
-					started = await runWorkflow("owner-drift", cwd, {
+					// Own every refresh: a runWorkflow watcher can consume the injected
+					// publication rejection before this test observes the boundary.
+					const loaded = await loadWorkflowSpec("owner-drift", cwd);
+					const stageOverrides = kind === "batch"
+						? structuredClone(loaded.spec.executionProfiles.batched)
+						: undefined;
+					const spec = stageOverrides
+						? applyExecutionProfileStageOverrides(loaded.spec, stageOverrides, {
+							foreachRuntimeTarget: "stage",
+						})
+						: loaded.spec;
+					const compiled = await compileWorkflow(spec, {
+						cwd,
+						specPath: loaded.specPath,
 						task: "Joined local publication drift",
-						...(kind === "batch" ? { executionProfile: "batched" } : {}),
 					});
+					({ run: started } = await createWorkflowRunRecord(cwd, compiled, loaded.specPath));
+					if (stageOverrides) started.executionProfile = { name: "batched", stageOverrides };
+					await writeStaticRunArtifacts(cwd, started, compiled, spec);
+					await writeRunRecord(cwd, started);
+					await scheduleRun(cwd, started.runId, compiled);
 					// Drive only to the rejected publication boundary; do not launch recovery
 					// attempts after this deliberately corrupted host state.
 					for (let i = 0; i < 5 && !hits; i++) {
@@ -1254,7 +1271,7 @@ for (const kind of ["backend", "salvage", "batch", "dynamic"])
 				}
 				assert.ok(
 					hits > 0,
-					"the actual publisher must reach the establishment fence",
+					`the actual publisher must reach the establishment fence: ${error?.stack ?? "no publication error"}`,
 				);
 				assert.ok(
 					error || kind === "dynamic",
@@ -1354,6 +1371,17 @@ test("stop and resume clear an active group as a unit and resume as singletons",
 
 test("restart recovers a prepared exact pair without inferring adjacency", async () => {
 	const cwd = makeProject();
+	let started;
+	const firstBatch = Promise.withResolvers();
+	const replacementBatch = Promise.withResolvers();
+	const waitForBatch = async (event) => {
+		let timer;
+		try {
+			await Promise.race([event.promise, new Promise((_, reject) => {
+				timer = setTimeout(() => reject(new Error("batch fixture lifecycle watchdog")), 10_000);
+			})]);
+		} finally { clearTimeout(timer); }
+	};
 	try {
 		writeAgent(cwd);
 		const items = writeWorkflow(cwd, "batch-prepared-recovery", {
@@ -1370,63 +1398,65 @@ test("restart recovers a prepared exact pair without inferring adjacency", async
 				refs: [],
 			}),
 		});
+		const runSubagent = fake.api.runSubagent;
+		fake.api.runSubagent = async (...args) => {
+			const result = await runSubagent(...args);
+			const count = fake.launches.filter((launch) => launch.kind === "batch").length;
+			if (count >= 1) firstBatch.resolve();
+			if (count >= 2) replacementBatch.resolve();
+			return result;
+		};
 		setSubagentApiForTests(fake.api);
-		const started = await runWorkflow("batch-prepared-recovery", cwd, {
+		started = await runWorkflow("batch-prepared-recovery", cwd, {
 			task: "Recover prepared pair.",
 			executionProfile: "batched",
 		});
 		await refreshRun(cwd, started.runId);
 		await scheduleRun(cwd, started.runId);
-		const prepared = await readRunRecord(cwd, started.runId);
-		const record = prepared.foreachBatches?.[0];
-		assert.ok(record);
-		const [leaderMember, memberMember] = record.members;
-		const leader = prepared.tasks.find(
-			(task) => task.taskId === leaderMember.taskId,
-		);
-		const member = prepared.tasks.find(
-			(task) => task.taskId === memberMember.taskId,
-		);
-		assert.ok(leader && member);
-
-		// Simulate a persisted pre-spawn launch boundary: no handle exists, but
-		// exact membership and prepared prompts do. Recovery must reuse this record.
-		record.phase = "launching";
-		leader.status = "pending";
-		leader.statusDetail = "pending";
-		leader.backendHandle = undefined;
-		leader.backendFiles = undefined;
-		leader.launchBootstrap = undefined;
-		leader.launchAuthority = undefined;
-		member.status = "running";
-		member.statusDetail = "batch_launching";
-		leader.foreachBatch = {
-			batchId: record.batchId,
-			role: "leader",
-			phase: "launching",
-		};
-		member.foreachBatch = {
-			batchId: record.batchId,
-			role: "member",
-			phase: "launching",
-		};
-		await withRunLease(cwd, started.runId, async () => {
+		await waitForBatch(firstBatch);
+		await withWorkflowFixtureLease(cwd, started.runId, async () => {
+			const prepared = await readRunRecord(cwd, started.runId);
+			const record = prepared.foreachBatches?.[0];
+			assert.ok(record);
+			const memberIds = record.members.map((entry) => entry.taskId);
+			const leader = prepared.tasks.find((task) => task.taskId === memberIds[0]);
+			const member = prepared.tasks.find((task) => task.taskId === memberIds[1]);
+			assert.ok(leader && member);
+			// Persist a pre-spawn boundary while owning the lease, not a stale
+			// snapshot that a concurrently active watcher may overwrite.
+			record.phase = "launching";
+			leader.status = "pending";
+			leader.statusDetail = "pending";
+			leader.backendHandle = undefined;
+			leader.backendFiles = undefined;
+			leader.launchBootstrap = undefined;
+			leader.launchAuthority = undefined;
+			member.status = "running";
+			member.statusDetail = "batch_launching";
+			leader.foreachBatch = { batchId: record.batchId, role: "leader", phase: "launching" };
+			member.foreachBatch = { batchId: record.batchId, role: "member", phase: "launching" };
+			const others = prepared.tasks.filter((task) => !memberIds.includes(task.taskId));
+			assert.ok(others.length > 0);
+			prepared.tasks = [leader, ...others, member];
+			const compiledPath = compiledWorkflowPath(cwd, started.runId);
+			const compiled = JSON.parse(readFileSync(compiledPath, "utf8"));
+			compiled.tasks = prepared.tasks.map((task) => {
+				const found = compiled.tasks.find((entry) => entry.id === task.specId);
+				assert.ok(found);
+				return found;
+			});
+			writeFileSync(compiledPath, JSON.stringify(compiled));
 			await writeRunRecord(cwd, prepared);
+			assert.equal(await recoverForeachBatchRuntimeForTests(cwd, prepared), true);
+			const recovered = await readRunRecord(cwd, started.runId);
+			assert.equal(recovered.foreachBatches[0].phase, "prepared");
+			assert.deepEqual(recovered.foreachBatches[0].members.map((entry) => entry.taskId), memberIds);
+			assert.equal(recovered.tasks[0].foreachBatch.role, "leader");
+			assert.equal(recovered.tasks.at(-1).foreachBatch.role, "member");
+			assert.ok(recovered.tasks.length > 2, "exact members are not adjacent");
 		});
-
-		await refreshRun(cwd, started.runId);
-		const recoveredPrepared = await readRunRecord(cwd, started.runId);
-		assert.ok(
-			["prepared", "running"].includes(
-				recoveredPrepared.foreachBatches?.[0]?.phase,
-			),
-			"recovery may be observed before or immediately after replacement launch",
-		);
-		assert.deepEqual(
-			recoveredPrepared.foreachBatches?.[0]?.members.map((entry) => entry.taskId),
-			[leaderMember.taskId, memberMember.taskId],
-		);
 		await scheduleRun(cwd, started.runId);
+		await waitForBatch(replacementBatch);
 		assert.equal(
 			fake.launches.filter((launch) => launch.kind === "batch").length,
 			2,
@@ -1436,6 +1466,7 @@ test("restart recovers a prepared exact pair without inferring adjacency", async
 		const completed = await waitForRun(cwd, started.runId, 20_000);
 		assert.equal(completed.status, "completed");
 	} finally {
+		if (started) await drainWorkflowFixture(cwd, started.runId);
 		setSubagentApiForTests(undefined);
 		rmSync(cwd, { recursive: true, force: true });
 	}
@@ -1532,10 +1563,23 @@ test("restart recovers terminal and partial-demux boundaries from durable batch 
 			}),
 		});
 		setSubagentApiForTests(fake.api);
-		const started = await runWorkflow("batch-recovery", cwd, {
-			task: "Recover batch demux.",
-			executionProfile: "batched",
+		// Model a restart without a live supervisor: otherwise the old watcher
+		// can consume the one-shot write failure before this test's refresh.
+		const loaded = await loadWorkflowSpec("batch-recovery", cwd);
+		const stageOverrides = structuredClone(loaded.spec.executionProfiles.batched);
+		const spec = applyExecutionProfileStageOverrides(loaded.spec, stageOverrides, {
+			foreachRuntimeTarget: "stage",
 		});
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			specPath: loaded.specPath,
+			task: "Recover batch demux.",
+		});
+		const { run: started } = await createWorkflowRunRecord(cwd, compiled, loaded.specPath);
+		started.executionProfile = { name: "batched", stageOverrides };
+		await writeStaticRunArtifacts(cwd, started, compiled, spec);
+		await writeRunRecord(cwd, started);
+		await scheduleRun(cwd, started.runId, compiled);
 		await refreshRun(cwd, started.runId);
 		await scheduleRun(cwd, started.runId);
 		assert.deepEqual(
@@ -1559,6 +1603,7 @@ test("restart recovers terminal and partial-demux boundaries from durable batch 
 			() => refreshRun(cwd, started.runId),
 			/simulated partial demux crash/,
 		);
+		assert.equal(injectedFailure, true, "the owned refresh reaches the crash boundary");
 		setWorkflowOutputArtifactWriteHookForTests(undefined);
 		const partial = await readRunRecord(cwd, started.runId);
 		assert.equal(partial.foreachBatches?.[0]?.phase, "committing");

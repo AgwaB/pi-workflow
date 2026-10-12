@@ -909,16 +909,20 @@ test("WB-001 actual 0.24.2 mixed loader exposes selected tools and one lifecycle
 
 test("WB-001 legacy custom ownership is wrapped, preflighted, and mixed tools remain additive", async () => {
 	const cwd = makeProject();
+	const previousConfigDir = process.env.PI_CODING_AGENT_DIR;
+	const agentDir = join(cwd, "agent");
+	mkdirSync(agentDir, { recursive: true });
+	process.env.PI_CODING_AGENT_DIR = agentDir;
 	try {
 		const customProvider = join(cwd, "custom-legacy-provider.mjs");
 		const unrelatedProvider = join(cwd, "unrelated-provider.mjs");
 		writeFileSync(customProvider, `export default function customLegacyProvider(pi) {
-	pi.registerTool({ name: "fetch_content", async execute() { return { content: [{ type: "text", text: "custom fetch" }], details: { responseId: "custom-id" } }; } });
-	pi.registerTool({ name: "get_search_content", async execute() { return { content: [{ type: "text", text: "custom read" }], details: { responseId: "custom-id" } }; } });
+	pi.registerTool({ parameters: { type: "object", properties: {} }, name: "fetch_content", async execute() { return { content: [{ type: "text", text: "custom fetch" }], details: { responseId: "custom-id" } }; } });
+	pi.registerTool({ parameters: { type: "object", properties: {} }, name: "get_search_content", async execute() { return { content: [{ type: "text", text: "custom read" }], details: { responseId: "custom-id" } }; } });
 }
 `);
 		writeFileSync(unrelatedProvider, `export default function unrelatedProvider(pi) {
-	pi.registerTool({ name: "custom_tool", async execute() { return { content: [{ type: "text", text: "unrelated" }] }; } });
+	pi.registerTool({ parameters: { type: "object", properties: {} }, name: "custom_tool", async execute() { return { content: [{ type: "text", text: "unrelated" }] }; } });
 }
 `);
 		const prepared = await prepareSubagentTaskLaunch(
@@ -976,7 +980,16 @@ test("WB-001 legacy custom ownership is wrapped, preflighted, and mixed tools re
 			() => prepareSubagentTaskLaunch(cwd, { runId: "legacy-multiple" }, { taskId: "task", files: { result: ".tmp/legacy-multiple-result.json" } }, { runtime: { tools: ["fetch_content"], toolProviders: { fetch_content: { extensions: [customProvider, unrelatedProvider] } } } }),
 			/legacy provider ownership is incompatible/,
 		);
+		// Additive preflight must still reject an ambient duplicate. Own that
+		// ambient fixture instead of depending on the developer's installed tools.
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ extensions: [customProvider] }));
+		await assert.rejects(
+			() => assertSubagentExtensionsLoadable({ cwd, extensions: prepared.extensions }),
+			/Tool "(?:fetch_content|get_search_content)" conflicts/,
+		);
 	} finally {
+		if (previousConfigDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousConfigDir;
 		removeProject(cwd);
 	}
 });

@@ -1,4 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { isDeepStrictEqual } from "node:util";
+import { assertWorkflowNativeHostContext, resolveWorkflowNativeHostContext } from "./workflow-native-host-context.js";
 import { constants as fsConstants, type Stats } from "node:fs";
 import {
 	cp,
@@ -1963,6 +1965,10 @@ export async function createRunRecord(
 		createTaskRunRecord(cwd, runId, task, index),
 	);
 	const hasDynamicController = compiledWorkflowHasDynamicController(compiled);
+	const nativeHost = options.parentRunId
+		? (await readJson<WorkflowRunRecord>(workflowRunPath(cwd, options.parentRunId)))?.nativeHost
+		: resolveWorkflowNativeHostContext(cwd);
+	if (nativeHost !== undefined) assertWorkflowNativeHostContext(nativeHost);
 	const run = deriveRunStatus({
 		schemaVersion: 1,
 		runId,
@@ -1974,6 +1980,7 @@ export async function createRunRecord(
 		taskSummary: emptySummary(),
 		cwd: compiled.cwd,
 		backend: compiled.backend,
+		...(nativeHost === undefined ? {} : { nativeHost }),
 		...(compiled.failurePolicy ? { failurePolicy: compiled.failurePolicy } : {}),
 		...(options.parentRunId ? { parentRunId: options.parentRunId } : {}),
 		...(options.rootRunId ? { rootRunId: options.rootRunId } : {}),
@@ -2065,6 +2072,8 @@ export async function writeRunRecord(
 					published.rootRunId !== run.rootRunId)
 			)
 				throw new Error("workflow ancestry is immutable after publication");
+			if (published && !isDeepStrictEqual(published.nativeHost, run.nativeHost))
+				throw new Error("workflow native host context is immutable after publication");
 			if (run.parentRunId) {
 				const parent = await readRunRecord(cwd, run.parentRunId);
 				if (parent.runId !== run.parentRunId)
@@ -2084,6 +2093,8 @@ export async function writeRunRecord(
 			previous.rootRunId !== run.rootRunId
 		)
 			throw new Error("workflow ancestry is immutable after publication");
+		if (!isDeepStrictEqual(previous.nativeHost, run.nativeHost))
+			throw new Error("workflow native host context is immutable after publication");
 		await writeJsonAtomic(runFile, run, abortSignal);
 	}
 	assertLeaseNotAborted(abortSignal);
@@ -3017,6 +3028,7 @@ export async function readRunRecord(
 	// scheduler recovery, foreach batch lookup, or terminal demux can build a
 	// taskId map that silently selects one duplicate.
 	assertUniqueRunTaskIds(run);
+	if (run.nativeHost !== undefined) assertWorkflowNativeHostContext(run.nativeHost);
 	if (run.runId !== containingRunId) {
 		throw new Error(
 			`Workflow run record identity does not match containing directory: ${file}`,

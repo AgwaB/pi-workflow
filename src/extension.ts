@@ -19,6 +19,10 @@ import {
 import { fileURLToPath } from "node:url";
 
 import { discoverAgents } from "./agents.js";
+import {
+	captureWorkflowNativeHostContext,
+	withWorkflowNativeHostContext,
+} from "./workflow-native-host-context.js";
 import { compileWorkflow } from "./compiler.js";
 import {
 	formatLogs,
@@ -275,7 +279,10 @@ const WORKFLOW_DYNAMIC_TOOL_PARAMETERS = {
 
 export default function workflowExtension(pi: ExtensionAPI): void {
 	let workflowCompletionCache: Array<{ name: string }> = [];
+	let releaseNativeHostContext: (() => void) | undefined;
 	pi.on("session_start", async (event, ctx) => {
+		releaseNativeHostContext?.();
+		releaseNativeHostContext = captureWorkflowNativeHostContext(pi, ctx);
 		invalidateWorkflowUiSession(ctx.cwd);
 		clearWorkflowFeedbackTimersForCwd(ctx.cwd);
 		clearActiveWorkflowUiTimerForCwd(ctx.cwd);
@@ -311,6 +318,8 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
+		releaseNativeHostContext?.();
+		releaseNativeHostContext = undefined;
 		invalidateWorkflowUiSession(ctx.cwd);
 		clearWorkflowFeedbackTimersForCwd(ctx.cwd);
 		clearActiveWorkflowUiTimerForCwd(ctx.cwd);
@@ -340,7 +349,7 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 			return workflowArgumentCompletions(prefix, workflowCompletionCache) ?? null;
 		},
 		handler: async (args, ctx) => {
-			await handleWorkflowCommand(args, ctx, pi);
+			await withWorkflowNativeHostContext(ctx, () => handleWorkflowCommand(args, ctx, pi));
 		},
 	});
 }
@@ -1000,7 +1009,14 @@ async function readWorkflowFeedbackAudience(
 		!audience.sessionId.trim()
 	)
 		return undefined;
-	return audience as unknown as WorkflowFeedbackAudience;
+	return {
+		schema: WORKFLOW_FEEDBACK_AUDIENCE_SCHEMA,
+		runId,
+		sessionId: audience.sessionId,
+		...(typeof audience.boundAt === "string"
+			? { boundAt: audience.boundAt }
+			: {}),
+	};
 }
 
 async function bindWorkflowFeedbackAudience(
@@ -1715,7 +1731,15 @@ function parseWorkflowFeedbackDeliveryReceipt(
 		run.runId,
 		"delivery receipt",
 	);
-	return value as unknown as WorkflowFeedbackDeliveryReceipt;
+	return {
+		schema: WORKFLOW_FEEDBACK_DELIVERY_RECEIPT_SCHEMA,
+		runId: run.runId,
+		sessionId,
+		epoch,
+		status: run.status,
+		deliveredAt: value.deliveredAt,
+		presentationOwnerId: value.presentationOwnerId,
+	};
 }
 
 async function readWorkflowFeedbackDeliveryReceipt(
@@ -2715,31 +2739,33 @@ async function startWorkflowRunFromRequest(
 		profileSelection.executionProfileOverride?.name;
 	let promptSchemaNotice = "";
 	let promptSchemaNoticeDigest: string | undefined;
-	const run = await runWorkflowSpec(workflow, ctx.cwd, {
-		task,
-		launch:
-			launch ??
-			workflowToolLaunchCapture(
-				"workflow_run",
-				"named-workflow",
-				task,
-				selectedProfileName
-					? { kind: "named", name: selectedProfileName }
-					: { kind: "base" },
-			),
-		[WORKFLOW_PROMPT_SCHEMA_DIAGNOSTIC_SINK]: (notice, digest) => {
-			if (digest === promptSchemaNoticeDigest) return;
-			promptSchemaNoticeDigest = digest;
-			promptSchemaNotice = notice;
-		},
-		runtimeOverrides: request.runtimeOverrides,
-		runtimeDefaults,
-		availableModels,
-		dynamicUi: dynamicUiFromContext(ctx),
-		...(autoLaunchBinding ? { autoLaunchBinding } : {}),
-		...(launchSignal ? { launchSignal } : {}),
-		...profileSelection,
-	});
+	const run = await withWorkflowNativeHostContext(ctx, () =>
+		runWorkflowSpec(workflow, ctx.cwd, {
+			task,
+			launch:
+				launch ??
+				workflowToolLaunchCapture(
+					"workflow_run",
+					"named-workflow",
+					task,
+					selectedProfileName
+						? { kind: "named", name: selectedProfileName }
+						: { kind: "base" },
+				),
+			[WORKFLOW_PROMPT_SCHEMA_DIAGNOSTIC_SINK]: (notice, digest) => {
+				if (digest === promptSchemaNoticeDigest) return;
+				promptSchemaNoticeDigest = digest;
+				promptSchemaNotice = notice;
+			},
+			runtimeOverrides: request.runtimeOverrides,
+			runtimeDefaults,
+			availableModels,
+			dynamicUi: dynamicUiFromContext(ctx),
+			...(autoLaunchBinding ? { autoLaunchBinding } : {}),
+			...(launchSignal ? { launchSignal } : {}),
+			...profileSelection,
+		}),
+	);
 	const verb = workflowRunStartVerb(run.status);
 	if (request.awaitTerminal && !uiSessionSignal.aborted) {
 		await requireAwaitTerminalParentTracking(ctx, run.runId, uiSessionSignal);
@@ -2778,20 +2804,22 @@ async function startDynamicRunFromRequest(
 		throw new Error(
 			'This dynamic workflow needs a task. Usage: /workflow dynamic "<task>"',
 		);
-	let run = await runDynamicTask(ctx.cwd, {
-		task,
-		launch:
-			launch ??
-			workflowToolLaunchCapture("workflow_dynamic", "direct-dynamic", task, {
-				kind: "not-applicable",
-			}),
-		runtimeOverrides: request.runtimeOverrides,
-		runtimeDefaults: currentRuntimeDefaults(ctx, api),
-		availableModels: availableWorkflowModels(ctx),
-		dynamicUi: dynamicUiFromContext(ctx),
-		...(autoLaunchBinding ? { autoLaunchBinding } : {}),
-		...(initialPlanSignal ? { launchSignal: initialPlanSignal } : {}),
-	});
+	let run = await withWorkflowNativeHostContext(ctx, () =>
+		runDynamicTask(ctx.cwd, {
+			task,
+			launch:
+				launch ??
+				workflowToolLaunchCapture("workflow_dynamic", "direct-dynamic", task, {
+					kind: "not-applicable",
+				}),
+			runtimeOverrides: request.runtimeOverrides,
+			runtimeDefaults: currentRuntimeDefaults(ctx, api),
+			availableModels: availableWorkflowModels(ctx),
+			dynamicUi: dynamicUiFromContext(ctx),
+			...(autoLaunchBinding ? { autoLaunchBinding } : {}),
+			...(initialPlanSignal ? { launchSignal: initialPlanSignal } : {}),
+		}),
+	);
 	if (
 		ctx.mode === "tui" &&
 		initialPlanSignal &&
@@ -3173,7 +3201,9 @@ async function prepareWorkflowAutoDynamicSelection(
 	runtimeOverrides: WorkflowRuntimeDefaults,
 	ctx: ExtensionCommandContext,
 	signal: AbortSignal,
-): Promise<Awaited<ReturnType<typeof captureWorkflowAutoLaunchBinding>> | undefined> {
+): Promise<
+	Awaited<ReturnType<typeof captureWorkflowAutoLaunchBinding>> | undefined
+> {
 	try {
 		signal.throwIfAborted();
 		const specPath = await ensureDirectDynamicRuntimeBundle(ctx.cwd);
@@ -3402,7 +3432,9 @@ function workflowAutoConfirmationText(
 	return [
 		`Workflow: ${selected.label}.`,
 		...(recommended && recommended.candidateId !== selected.candidateId
-			? [`You chose a different option from the recommendation (${recommended.label}).`]
+			? [
+					`You chose a different option from the recommendation (${recommended.label}).`,
+				]
 			: []),
 		...(profileName ? [`Profile: ${profileName}.`] : []),
 		...selected.readiness.cautions.map((caution) => `Note: ${caution}`),

@@ -68,7 +68,7 @@ test("compile to prepare preserves supported normalized owners and re-exports sh
   try {
     mkdirSync(join(cwd, ".pi", "agents"), { recursive: true });
     writeFileSync(join(cwd, ".pi", "agents", "owner.md"), `---\nname: owner\ndescription: owner\ntools: [workflow_web_search, workflow_web_fetch_source, code_search]\nreadOnly: true\n---\nOwner.\n`);
-    writeFileSync(join(cwd, "provider.mjs"), `export default pi => {\n  pi.registerTool({ name: "web_search", async execute() { return { content: [{ type: "text", text: "search" }] }; } });\n  pi.registerTool({ name: "code_search", async execute() { return { content: [{ type: "text", text: "code" }] }; } });\n  pi.registerTool({ name: "not_selected", async execute() {} });\n};\n`);
+    writeFileSync(join(cwd, "provider.mjs"), `export default pi => {\n  pi.registerTool({ parameters: { type: "object", properties: {} }, name: "web_search", async execute() { return { content: [{ type: "text", text: "search" }] }; } });\n  pi.registerTool({ parameters: { type: "object", properties: {} }, name: "code_search", async execute() { return { content: [{ type: "text", text: "code" }] }; } });\n  pi.registerTool({ parameters: { type: "object", properties: {} }, name: "not_selected", async execute() {} });\n};\n`);
     const spec = {
       schemaVersion: 1,
       name: "owner",
@@ -124,7 +124,7 @@ test("compile to prepare rejects custom normalized fetch ownership before dispat
 test("shared legacy provider wrapper re-exports selected code_search exactly once", async () => {
   const cwd = project();
   try {
-    writeFileSync(join(cwd, "shared.mjs"), `export default pi => {\n  pi.registerTool({ name: "fetch_content", async execute() { return { content: [{ type: "text", text: "fetch" }] }; } });\n  pi.registerTool({ name: "code_search", async execute() { return { content: [{ type: "text", text: "code" }] }; } });\n  pi.registerTool({ name: "not_selected", async execute() {} });\n};\n`);
+    writeFileSync(join(cwd, "shared.mjs"), `export default pi => {\n  pi.registerTool({ parameters: { type: "object", properties: {} }, name: "fetch_content", async execute() { return { content: [{ type: "text", text: "fetch" }] }; } });\n  pi.registerTool({ parameters: { type: "object", properties: {} }, name: "code_search", async execute() { return { content: [{ type: "text", text: "code" }] }; } });\n  pi.registerTool({ parameters: { type: "object", properties: {} }, name: "not_selected", async execute() {} });\n};\n`);
     const prepared = await (await import("../../.tmp/unit/subagent-backend.js")).prepareSubagentTaskLaunch(
       cwd, { runId: "legacy-shared" }, { taskId: "task", files: { result: ".tmp/result.json" } }, {
         runtime: {

@@ -5,7 +5,6 @@ import { pathToFileURL } from "node:url";
 import {
 	clampThinkingLevel,
 	type Api,
-	type Context,
 	type Model,
 	type ModelThinkingLevel,
 	type OpenAICodexResponsesOptions,
@@ -209,7 +208,7 @@ export function createWorkflowFastProviderStream(
 ) {
 	return (
 		model: Model<Api>,
-		requestContext: Context,
+		requestContext: Parameters<typeof streamOpenAIResponses>[1],
 		options?: SimpleStreamOptions,
 	) => {
 		try {

@@ -219,6 +219,8 @@ import {
 	issueForeachBatchCapability,
 } from "./foreach-batch-capability.js";
 import { workflowStateRootIdentity } from "./workflow-state-root.js";
+import { prepareWorkflowNativeTaskPolicy } from "./workflow-native-tool-policy.js";
+import { withResolvedWorkflowNativeHostContext } from "./workflow-native-host-context.js";
 import {
 	applyWorkflowExecutionProfile,
 	workflowDefinitionFingerprint,
@@ -451,6 +453,21 @@ async function runLoadedWorkflowSpec(
 	diagnosticsPolicy: PromptSchemaDiagnosticsPolicy,
 	provenance?: WorkflowRunRecord["provenance"],
 ): Promise<WorkflowRunRecord> {
+	return withResolvedWorkflowNativeHostContext(cwd, () =>
+		runLoadedWorkflowSpecInNativeHostScope(
+			cwd, specPath, spec, options, diagnosticsPolicy, provenance,
+		),
+	);
+}
+
+async function runLoadedWorkflowSpecInNativeHostScope(
+	cwd: string,
+	specPath: string,
+	spec: Parameters<typeof compileWorkflow>[0],
+	options: WorkflowRunDiagnosticOptions,
+	diagnosticsPolicy: PromptSchemaDiagnosticsPolicy,
+	provenance?: WorkflowRunRecord["provenance"],
+): Promise<WorkflowRunRecord> {
 	options.launchSignal?.throwIfAborted();
 	if (options.launch) assertValidWorkflowRunLaunchCapture(options.launch);
 	if (options.launch?.schema === "pi-workflow-run-launch-v2") {
@@ -565,10 +582,17 @@ async function runLoadedWorkflowSpec(
 		options.executionProfileOverride,
 	);
 	spec = appliedProfile.spec;
+	// Nested compilation must follow the parent's persisted host decision. In
+	// particular, a legacy parent with no nativeHost stays legacy even when the
+	// resumed supervisor currently has an active native host.
+	const inheritedNativeHost = options.parentRunId
+		? ((await readRunRecord(cwd, options.parentRunId)).nativeHost ?? null)
+		: undefined;
 	const compiled = await compileWorkflow(spec, {
 		cwd,
 		specPath,
 		task: options.task,
+		nativeHost: inheritedNativeHost,
 		runtimeOverrides: options.runtimeOverrides,
 		runtimeDefaults: options.runtimeDefaults,
 		availableModels: options.availableModels,
@@ -691,13 +715,19 @@ async function runLoadedWorkflowSpec(
 		dynamicUi: options.dynamicUi,
 		availableModels: options.availableModels,
 	};
-	const unbindLaunchSignal = bindWorkflowLaunchSignal(cwd, initialized.runId, options.launchSignal);
+	const unbindLaunchSignal = bindWorkflowLaunchSignal(
+		cwd,
+		initialized.runId,
+		options.launchSignal,
+	);
 	let launchStop: Promise<void> | undefined;
 	const requestLaunchStop = (): Promise<void> => {
 		if (!options.launchSignal?.aborted) return Promise.resolve();
 		// Persist once; the in-memory signal already fences dispatch while this
 		// write is pending. Drain it before removing the launch-owned fence.
-		return launchStop ??= requestWorkflowStop(cwd, initialized.runId).then(() => undefined);
+		return (launchStop ??= requestWorkflowStop(cwd, initialized.runId).then(
+			() => undefined,
+		));
 	};
 	const onLaunchAbort = () => {
 		// The stop intent is durable and the scheduler/lease path owns cleanup.
@@ -715,9 +745,12 @@ async function runLoadedWorkflowSpec(
 			// Terminal status alone does not prove the durable intent was cleared.
 			// Retry the terminal-capable finalizer under the normal supervisor lease.
 			const current = await readRunRecord(cwd, initialized.runId);
-			scheduled = (await confirmRequestedWorkflowStop(cwd, initialized.runId, current)).run;
+			scheduled = (
+				await confirmRequestedWorkflowStop(cwd, initialized.runId, current)
+			).run;
 		}
-		if (shouldWatchRun(scheduled)) watchRun(cwd, scheduled.runId, scheduleOptions);
+		if (shouldWatchRun(scheduled))
+			watchRun(cwd, scheduled.runId, scheduleOptions);
 		return scheduled;
 	} finally {
 		options.launchSignal?.removeEventListener("abort", onLaunchAbort);
@@ -976,7 +1009,10 @@ export async function stopRun(
 	runIdOrPrefix: string,
 ): Promise<StopRunSummary> {
 	const current = await readRunRecord(cwd, runIdOrPrefix);
-	if (isTerminalWorkflowStatus(current.status) && !(await readWorkflowStopIntent(cwd, current.runId))) {
+	if (
+		isTerminalWorkflowStatus(current.status) &&
+		!(await readWorkflowStopIntent(cwd, current.runId))
+	) {
 		throw new Error(
 			`stop requires a non-terminal run; ${current.runId} is ${current.status}`,
 		);
@@ -1414,7 +1450,7 @@ function logicalDependencySpecIdsForResume(
 	return dependenciesBySpecId;
 }
 function cloneInvalidationSnapshot<T>(value: T): T {
-	return JSON.parse(JSON.stringify(value)) as T;
+	return structuredClone(value);
 }
 
 function sameForeachInvalidationChild(
@@ -2808,8 +2844,10 @@ type ForeachBatchLaunchOutcome =
 function eligibleForeachBatchChild(
 	task: WorkflowTaskRunRecord,
 	compiledTask: CompiledTask,
+	nativeHost: WorkflowRunRecord["nativeHost"],
 ): boolean {
 	const grouping = compiledTask.foreachGenerated?.batch;
+	const safety = prepareWorkflowNativeTaskPolicy(compiledTask, nativeHost).safety;
 	return Boolean(
 		task.status === "pending" &&
 			!task.backendHandle &&
@@ -2819,8 +2857,8 @@ function eligibleForeachBatchChild(
 			grouping?.enabled === true &&
 			compiledTask.artifactGraph?.enabled &&
 			compiledTask.artifactGraph.artifactAccess === "none" &&
-			!compiledTask.safety.requiresWorktree &&
-			compiledTask.safety.sharedCwdSafe,
+			!safety.requiresWorktree &&
+			safety.sharedCwdSafe,
 	);
 }
 
@@ -2868,7 +2906,7 @@ function newForeachBatchLaunchPlan(
 	if (
 		!leaderTask ||
 		!leaderCompiled ||
-		!eligibleForeachBatchChild(leaderTask, leaderCompiled) ||
+		!eligibleForeachBatchChild(leaderTask, leaderCompiled, run.nativeHost) ||
 		!dependenciesReady(leaderCompiled, bySpecId, compiledFlow, leaderTask)
 	)
 		return undefined;
@@ -2878,7 +2916,7 @@ function newForeachBatchLaunchPlan(
 	if (
 		!memberTask ||
 		!memberCompiled ||
-		!eligibleForeachBatchChild(memberTask, memberCompiled) ||
+		!eligibleForeachBatchChild(memberTask, memberCompiled, run.nativeHost) ||
 		!dependenciesReady(memberCompiled, bySpecId, compiledFlow, memberTask)
 	)
 		return undefined;
@@ -2933,8 +2971,8 @@ function preparedForeachBatchLaunchPlan(
 	if (
 		!leaderCompiled ||
 		!memberCompiled ||
-		!eligibleForeachBatchChild(first, leaderCompiled) ||
-		!eligibleForeachBatchChild(second, memberCompiled)
+		!eligibleForeachBatchChild(first, leaderCompiled, run.nativeHost) ||
+		!eligibleForeachBatchChild(second, memberCompiled, run.nativeHost)
 	) {
 		throw new Error(
 			`foreach batch ${record.batchId} prepared members are no longer launchable`,
@@ -5250,6 +5288,14 @@ async function launchPendingTaskAt(
 			validationSnapshot,
 		);
 		await throwIfWorkflowStopRequested(cwd, run.runId);
+		if (run.nativeHost !== undefined && compiledTask.runtime.nativeToolsEnabled === undefined &&
+			launchTask.safety.permission.status === "blocked") {
+			setTaskTerminal(task, "blocked", launchTask.safety.permission.statusDetail ?? "needs_attention", {
+				lastMessage: launchTask.safety.permission.reason,
+			});
+			await writeRunRecord(cwd, run);
+			return false;
+		}
 		if (task.outputRetry) {
 			launchTask = await prepareArtifactGraphRetryTask(cwd, task, launchTask);
 			await throwIfWorkflowStopRequested(cwd, run.runId);

@@ -2026,8 +2026,11 @@ test("cancelling workflow wait does not mutate the workflow", async () => {
 	}
 });
 
-test("awaitTerminal retries feedback binding for an immediately terminal support run", async () => {
+test("awaitTerminal retries feedback binding for an immediately terminal support run", async (t) => {
 	const cwd = await mkdtemp(join(tmpdir(), "workflow-wait-immediate-terminal-"));
+	// Exercise a transient failure inside the retry budget, independently of
+	// filesystem/scheduler latency. Real deadline exhaustion is tested separately.
+	t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
 	try {
 		let bindAttempts = 0;
 		setWorkflowFeedbackBindWaitMsForTests(200);
@@ -2035,7 +2038,10 @@ test("awaitTerminal retries feedback binding for an immediately terminal support
 			onBeforeHeartbeat({ name, initial }) {
 				if (name !== "feedback-audience" || !initial) return;
 				bindAttempts += 1;
-				if (bindAttempts === 1) throw new Error("transient audience bind failure");
+				if (bindAttempts === 1) {
+					t.mock.timers.tick(50);
+					throw new Error("transient audience bind failure");
+				}
 			},
 		});
 		const workflowDir = join(cwd, "workflows", "immediate");
@@ -2082,7 +2088,7 @@ test("awaitTerminal retries feedback binding for an immediately terminal support
 			),
 		);
 		assert.equal(audience.sessionId, "session-immediate");
-		assert.ok(bindAttempts >= 2);
+		assert.equal(bindAttempts, 2);
 	} finally {
 		setRunLeaseTestHooksForTests(undefined);
 		setWorkflowFeedbackBindWaitMsForTests(undefined);
@@ -2090,8 +2096,10 @@ test("awaitTerminal retries feedback binding for an immediately terminal support
 	}
 });
 
-test("awaitTerminal bind failure reports run id and deterministic wait recovery", async () => {
+test("awaitTerminal bind failure reports run id and deterministic wait recovery", async (t) => {
 	const cwd = await mkdtemp(join(tmpdir(), "workflow-wait-bind-failure-"));
+	t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+	let bindAttempts = 0;
 	try {
 		const workflowDir = join(cwd, "workflows", "bind-failure");
 		await mkdir(join(workflowDir, "helpers"), { recursive: true });
@@ -2115,8 +2123,11 @@ test("awaitTerminal bind failure reports run id and deterministic wait recovery"
 		setWorkflowFeedbackBindWaitMsForTests(25);
 		setRunLeaseTestHooksForTests({
 			onBeforeHeartbeat({ name, initial }) {
-				if (name === "feedback-audience" && initial)
+				if (name === "feedback-audience" && initial) {
+					bindAttempts += 1;
+					t.mock.timers.tick(26);
 					throw new Error("persistent audience bind failure");
+				}
 			},
 		});
 		const tools = [];
@@ -2142,6 +2153,7 @@ test("awaitTerminal bind failure reports run id and deterministic wait recovery"
 			bindError = error;
 		}
 		assert.ok(bindError instanceof Error);
+		assert.equal(bindAttempts, 1, "an exhausted bind deadline must not launch another retry");
 		const runId = bindError.message.match(/workflow (workflow_[^ ]+) started/)?.[1];
 		assert.ok(runId, `missing run id in: ${bindError.message}`);
 		assert.match(bindError.message, new RegExp(`/workflow wait ${runId}$`));

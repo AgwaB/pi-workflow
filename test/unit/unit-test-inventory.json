@@ -1620,7 +1620,7 @@
 		{
 			"name": "global live model worker cap unset does not gate launches",
 			"occurrence": 1,
-			"sha256": "ecc63138a2916688da12dfc8c9e1717f41562719b8115ced8ed83b782993212f",
+			"sha256": "0dff7fe84abad0c06c242d0407c5e9b79d4b30ae609201d96a029da8c04c73db",
 			"domain": "engine-store"
 		},
 		{
@@ -1662,7 +1662,7 @@
 		{
 			"name": "launch-bootstrap seals ambient extensions and rejects generated-wrapper drift before runSubagent",
 			"occurrence": 1,
-			"sha256": "f9dab42172fc69aeca47919fa810fba17e53cc766da0fcd60ed735f318b54039",
+			"sha256": "07866021dc66b5422d9888c5f731cc9942f8ea1a7da52e7509402785c628cc9b",
 			"domain": "engine-store"
 		},
 		{
@@ -2478,7 +2478,7 @@
 		{
 			"name": "subagent launch detaches validated options from post-registration mutation",
 			"occurrence": 1,
-			"sha256": "4f5a0787efbdec7f312cde800e9ec7e0222b0be07d1bdcaa52138f8c55f882fd",
+			"sha256": "0335c89e08b4c72ce0d37d1a615670378725962cea62b97fc3e9d3732b8ade0d",
 			"domain": "engine-store"
 		},
 		{

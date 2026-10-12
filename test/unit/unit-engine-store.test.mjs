@@ -4791,35 +4791,43 @@ test("global live model worker cap unset does not gate launches", async () => {
 	process.env.PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES = "2";
 	delete process.env.PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS;
 	setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
+	const scope = launchSlotTestScope(cwd);
+	const bothEntered = Promise.withResolvers();
+	const release = scope.gate();
 	try {
 		writeAgent(cwd, "unit-scout", "read");
 		let active = 0;
 		let maxActive = 0;
-		const releases = [];
+		let calls = 0;
 		setSubagentApiForTests({
 			async runSubagent() {
+				const call = ++calls;
 				active += 1;
 				maxActive = Math.max(maxActive, active);
-				await new Promise((resolve) => releases.push(resolve));
+				if (active === 2) bothEntered.resolve();
+				await release.promise;
 				active -= 1;
 				return {
-					runId: `run_cap_unset_${maxActive}`,
-					attemptId: `attempt_cap_unset_${maxActive}`,
+					runId: `run_cap_unset_${call}`,
+					attemptId: `attempt_cap_unset_${call}`,
 					status: "running",
 				};
 			},
 		});
 		const first = makeSubagentLaunchFixture(cwd, "cap_unset_first");
 		const second = makeSubagentLaunchFixture(cwd, "cap_unset_second");
-		const launches = [
-			launchSubagentTask(cwd, first.run, first.task, first.compiledTask),
-			launchSubagentTask(cwd, second.run, second.task, second.compiledTask),
-		];
-		await eventually(() => assert.equal(releases.length, 2));
+		const launches = [scope.launch(first), scope.launch(second)];
+		await scope.wait(Promise.race([
+			bothEntered.promise,
+			Promise.all(launches).then(() => { throw new Error("launches settled without concurrent worker entry"); }),
+		]));
 		assert.equal(maxActive, 2);
-		while (releases.length > 0) releases.shift()();
-		await Promise.all(launches);
+		assert.equal(calls, 2);
+		assert.deepEqual(subagentLaunchSlotStateForTests(), { active: 2, queued: 0 });
+		release.resolve();
+		assert.deepEqual(await scope.wait(Promise.all(launches)), [{ kind: "launched" }, { kind: "launched" }]);
 	} finally {
+		await scope.drain();
 		setSubagentApiForTests(undefined);
 		setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
 		if (originalLaunchLimit === undefined)
@@ -5997,6 +6005,7 @@ test("launch-bootstrap seals ambient extensions and rejects generated-wrapper dr
 		);
 		assert.notEqual(first.identitySha256, changed.identitySha256);
 		setSubagentApiForTests({
+			supportsExplicitExtensionIsolation: () => true,
 			async runSubagent(options) {
 				launches += 1;
 				assert(options.extensions.includes("/tmp/bootstrap-a.mjs"));
@@ -6550,6 +6559,7 @@ test("subagent launch detaches validated options from post-registration mutation
 		issueWorkflowLaunchAuthority(fixture.task, authority);
 		const authorized = { ...prepared, authority };
 		setSubagentApiForTests({
+			supportsExplicitExtensionIsolation: () => true,
 			async runSubagent(options) {
 				launches += 1;
 				assert.deepEqual(options.extensions, ["/tmp/sealed-original.mjs"]);
