@@ -22,10 +22,62 @@ This installs:
 | Component | Supported/tested boundary |
 |---|---|
 | Node.js | Requires `>=22.19.0`; CI runs the exact minimum `22.19.0` and current Node `24` on Linux and macOS. |
-| Pi | The lockfile-tested SDK/extension baseline is `0.84.4`. The peer dependency is `*`: npm accepts other Pi versions, but this is not a claim that every version has been tested. |
+| Pi | The implementation and validation baseline is Pi `1.1.0`; older Pi versions are outside the supported validation scope. The peer dependency is `*`: npm accepts other Pi versions, but this is not a claim that every version has been tested. |
 | Pi `0.85.0` | Compatibility is blocked by its upstream package's missing `@earendil-works/pi-server` dependency. A version-print command alone does not establish working SDK, RPC, or extension loading. |
 
 For checkout validation, use `npm ci --legacy-peer-deps`, then `npm run validate` and `npm run e2e`. Validation checks dependency declarations against the lock and installed package versions against locked versions, including nested dependencies; absent platform-optional packages are allowed. This read-only drift check neither updates dependencies nor verifies package-content integrity. Do not patch installed Pi files to claim compatibility.
+
+### Native codemode and MCP in workflow children
+
+New workflows started from a Pi 1.1 native-MCP-capable session provide Pi's full
+`codemode` (including its model helpers), `tool_search`, and native MCP to model
+children. This uses Pi's built-in implementations, not `pi-mcp-adapter`.
+The ordinary stage tool selection stays in place. Native expansion intentionally
+includes **all active MCP servers**, even if an authored selector names only one
+server. An explicit empty `tools: []` opts out of native expansion, including on
+retry; the existing automatic `workflow_artifact` access is still available unless
+`inputPolicy.artifactAccess` is `none`. Native MCP `enabled: false`, hidden tool
+exposure, trust checks and Pi tool-call permission hooks remain effective.
+The native ceiling also includes `list_mcp_resources`,
+`list_mcp_resource_templates`, and `read_mcp_resource`.
+
+With an engine exposing `supportsExplicitExtensionIsolation()`, workflow children
+load the sealed explicit extension list with ambient discovery disabled. That
+choice is recorded in launch provenance and checked again before dispatch.
+Older engines retain additive discovery: preflight still rejects duplicate
+registrations rather than hiding an actual child collision. A sealed isolated
+launch fails closed if the engine no longer supports that contract.
+
+Full codemode and arbitrary MCP tools are conservatively mutation-capable, not
+read-only. The effective selection is used for safety, worktree and approval
+checks as well as the launch prompt. `worktreePolicy: auto` therefore isolates
+native-enabled model tasks; `on-request` approval blocks mutation-capable tasks.
+An explicit worktree opt-out does not make those tasks read-only, and a worktree
+cannot contain remote MCP side effects. Dynamic agent ceilings and decision-loop
+allowlists still constrain authored selections; native expansion is a separate,
+intentional host default.
+
+Children connect independently to the servers configured in the parent's agent
+`mcp.json` and trusted-project `.pi/mcp.json`. Parent project precedence and
+relative stdio working-directory resolution are preserved even when a child
+works in another directory. Servers connect at child-session startup; tools are
+called only when needed. Connections do not depend on the parent process staying
+alive. This can create one connection/server process per child.
+
+The run stores only the original configuration-directory references and project
+trust decision—not MCP configuration contents, headers, or tokens. Later children
+read the current files at those references. Nested workflows inherit those same
+references, including nested starts made by a detached controller. Explicit trust
+revocation in Pi's trust store prevents loading parent project MCP configuration.
+Changing the agent directory fails rather than silently using different credentials.
+Authentication remains Pi's responsibility; authenticate servers in the parent
+before unattended execution when interactive login is needed.
+
+This is **file-configuration inheritance**, not transfer of live MCP connections
+or temporary `registerMcpServer()` registrations. CLI/SDK runs without a captured
+parent Pi context, pre-existing runs, and legacy Pi hosts retain their previous
+launch behavior. A new native-enabled run requires a native-capable Pi host on
+resume; it does not silently downgrade on legacy Pi.
 
 For local development, install the checkout as a package source:
 

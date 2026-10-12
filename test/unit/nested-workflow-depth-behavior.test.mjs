@@ -168,7 +168,12 @@ test('cancellation stops local nested controllers without authorizing another si
                 await new Promise(r => setTimeout(r, 10));
             }
         }
-        await h.stopRun(f.cwd, f.run.runId);
+        try { await h.stopRun(f.cwd, f.run.runId); }
+        catch (error) {
+            if (error?.name !== 'WorkflowStopPending') throw error;
+            // Durable stop may need longer than the bounded confirmation call.
+            // The owned scheduler must still settle before final assertions.
+        }
         await running;
         const [child] = await children(f.cwd, f.run.runId);
         assert.equal((await children(f.cwd, f.run.runId)).length, 1);
@@ -204,7 +209,9 @@ test('runtime deadline still bounds a controller after successful sibling workfl
         } });
         running = h.scheduleRun(f.cwd, f.run.runId);
         const watchdog = new Promise((_, reject) => {
-            timer = realSetTimeout(() => { timedOut = true; reject(new Error('deadline fixture did not settle within 5000ms')); }, 5000);
+            // Real time bounds fixture setup/teardown only; the product deadline
+            // remains the exact mocked 100 + 499 + 1 ms boundary below.
+            timer = realSetTimeout(() => { timedOut = true; reject(new Error('deadline fixture lifecycle watchdog (15000ms)')); }, 15000);
         });
         // Attach the rejection handler immediately, including during filesystem reads.
         void watchdog.catch(() => {});
@@ -235,7 +242,11 @@ test('runtime deadline still bounds a controller after successful sibling workfl
         setDynamicControllerHooksForTests();
         t.mock.timers.reset();
         h.setIndexUpdateDebounceMsForTests(undefined);
-        if (running) { await h.stopRun(f.cwd, f.run.runId); await running; }
+        if (running) {
+            try { await h.stopRun(f.cwd, f.run.runId); }
+            catch (error) { if (error?.name !== 'WorkflowStopPending') throw error; }
+            await running;
+        }
         await f.close();
     }
 });

@@ -417,6 +417,8 @@ export interface CompiledTaskRuntime {
 	approvalMode: ApprovalMode;
 	tools?: string[];
 	toolProviders?: Record<string, CompiledToolProvider>;
+	/** Native host tools were deliberately enabled (or explicitly disabled). */
+	nativeToolsEnabled?: boolean;
 	maxRuntimeMs?: number;
 }
 
@@ -899,10 +901,11 @@ export interface LaunchBootstrapProvenanceRecordBase {
 		configSha256: string;
 	};
 	effectiveLaunch: {
+		noExtensions?: true;
 		extensions: Array<{
 			pathSha256: string;
 			generated?: {
-				kind: "fetch-cache" | "web-source" | "openai-fast";
+				kind: "fetch-cache" | "web-source" | "openai-fast" | "native-host";
 				wrapperSha256: string;
 				configSha256: string;
 			};
@@ -1542,6 +1545,8 @@ export interface WorkflowRunDegradation {
 
 export interface WorkflowRunRecord {
 	schemaVersion: 1;
+	/** Parent native MCP discovery references, fixed for this run and its children. */
+	nativeHost?: import("./workflow-native-host-context.js").WorkflowNativeHostContext;
 	runId: string;
 	name?: string;
 	description?: string;

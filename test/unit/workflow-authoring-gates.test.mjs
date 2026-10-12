@@ -8,6 +8,10 @@ import { fileURLToPath } from "node:url";
 
 import { compileWorkflow } from "../../.tmp/unit/compiler.js";
 import {
+	assertPromptSchemaDiagnosticsAllowRun,
+	workflowPromptSchemaDiagnostics,
+} from "../../.tmp/unit/prompt-schema-diagnostics.js";
+import {
 	formatHumanRunDetails,
 	formatHumanRunStatus,
 	formatLoopSummaryLines,
@@ -123,6 +127,50 @@ test("inspect --failures --results keeps failure-only listing when a task failed
 		assert.match(result.stdout, /FAILED BODY/);
 		assert.doesNotMatch(result.stdout, /task-1/);
 		assert.doesNotMatch(result.stdout, /showing every task result/);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("strict prompt diagnostics skip dynamic helpers but still reject model prompt drift", async () => {
+	const cwd = await scratch("dynamic-shape-warning");
+	try {
+		await writeFile(join(cwd, "helper.mjs"), "export default async function () { return {}; }\n");
+		await writeFile(join(cwd, "control.json"), JSON.stringify({
+			type: "object",
+			required: ["result"],
+			properties: { result: { type: "object", properties: { value: { type: "number" } } } },
+		}));
+		const specPath = join(cwd, "spec.json");
+		const spec = {
+			schemaVersion: 1,
+			defaults: { agent: "scout", readOnly: true, tools: ["read"] },
+			artifactGraph: { stages: [{
+				id: "helper",
+				type: "dynamic",
+				dynamic: { uses: "./helper.mjs", mode: "graph-splice" },
+				output: { controlSchema: "./control.json" },
+			}] },
+		};
+		const compile = async () => {
+			await writeFile(specPath, JSON.stringify(spec));
+			const loaded = await loadWorkflowSpec(specPath, cwd);
+			return compileWorkflow(loaded.spec, { cwd, specPath: loaded.specPath });
+		};
+		const strict = { PI_WORKFLOW_STRICT_PROMPT_SCHEMA: "1" };
+		const helper = await compile();
+		assert.deepEqual(helper.warnings, []);
+		assert.doesNotThrow(() => assertPromptSchemaDiagnosticsAllowRun(workflowPromptSchemaDiagnostics(helper), strict));
+		spec.artifactGraph.stages.push({
+			id: "model",
+			type: "single",
+			prompt: "Return the result.",
+			output: { controlSchema: "./control.json" },
+		});
+		const mixed = await compile();
+		assert.ok(mixed.warnings.some(warning => /stage "model".*control shape/.test(warning)));
+		assert.ok(mixed.warnings.every(warning => !warning.includes('stage "helper"')));
+		assert.throws(() => assertPromptSchemaDiagnosticsAllowRun(workflowPromptSchemaDiagnostics(mixed), strict), /Strict prompt\/schema validation rejected/);
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
 	}

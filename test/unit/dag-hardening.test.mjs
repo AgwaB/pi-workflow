@@ -17,6 +17,8 @@ import { markFailFastCancellations } from "../../.tmp/unit/engine-run-graph.js";
 import {
 	checkRequiredArtifactReads,
 	launchSubagentTask,
+	refreshRunFromSubagentArtifacts,
+	subagentLiveModelWorkerSlotCountForTests,
 } from "../../.tmp/unit/subagent-backend.js";
 import {
 	listRunRecords,
@@ -80,11 +82,20 @@ function writeAbortResolvingHelper(cwd) {
 
 function writeAbortIgnoringReleasableHelper(cwd) {
 	const workflowDir = join(cwd, "workflows");
+	const key = `pi-workflow-test-support-release:${cwd}`;
+	const gate = deferred();
 	mkdirSync(workflowDir, { recursive: true });
 	writeFileSync(
 		join(workflowDir, "ignore-helper.mjs"),
-		`import { access, writeFile } from "node:fs/promises";\nconst releaseFile = ${JSON.stringify(join(cwd, "helper-release"))};\nexport default async function helper() {\n  await writeFile(${JSON.stringify(join(cwd, "helper-started"))}, "started", "utf8");\n  for (;;) {\n    try { await access(releaseFile); return { analysis: "released" }; } catch {}\n    await new Promise((resolve) => setTimeout(resolve, 25));\n  }\n}\n`,
+		`import { writeFile } from "node:fs/promises";\nconst gate = globalThis[Symbol.for(${JSON.stringify(key)})];\nexport default async function helper() {\n  await writeFile(${JSON.stringify(join(cwd, "helper-started"))}, "started", "utf8");\n  await gate.promise;\n  return { analysis: "released" };\n}\n`,
 	);
+	// Release is test-owned synchronization, not filesystem polling competing
+	// with the unchanged watchdog that checks actual scheduler cleanup.
+	globalThis[Symbol.for(key)] = gate;
+	return {
+		release: gate.resolve,
+		dispose: () => { delete globalThis[Symbol.for(key)]; },
+	};
 }
 
 test("two-level nested dag requiredReads and requiredReadPolicy are namespaced like runtime sources", async () => {
@@ -257,8 +268,9 @@ test("requiredReads targeting after-only sources fail before backend launch", as
 test("stopRun reports pending when an in-process support helper ignores abort", async () => {
 	const cwd = makeProject();
 	let scheduling;
+	let helper;
 	try {
-		writeAbortIgnoringReleasableHelper(cwd);
+		helper = writeAbortIgnoringReleasableHelper(cwd);
 		const spec = workflowSpec("unit-scout", {
 			artifactGraph: {
 				stages: [
@@ -290,7 +302,7 @@ test("stopRun reports pending when an in-process support helper ignores abort", 
 			/could not be confirmed stopped|still pending/,
 		);
 		assert.ok(await readWorkflowStopIntent(cwd, run.runId));
-		writeFileSync(join(cwd, "helper-release"), "release", "utf8");
+		helper.release();
 		await Promise.race([
 			scheduling,
 			sleep(1500).then(() => {
@@ -301,9 +313,10 @@ test("stopRun reports pending when an in-process support helper ignores abort", 
 		assert.equal(taskBySpec(finalRun, "block.main").status, "interrupted");
 		assert.equal(await readWorkflowStopIntent(cwd, run.runId), undefined);
 	} finally {
-		writeFileSync(join(cwd, "helper-release"), "release", "utf8");
+		helper?.release();
 		if (scheduling)
 			await Promise.race([scheduling.catch(() => undefined), sleep(500)]);
+		helper?.dispose();
 		cleanup(cwd);
 	}
 });
@@ -1273,15 +1286,16 @@ test("successful fail-fast interruption releases the live model worker slot imme
 		const cancelled = await readRunRecord(cwd, run.runId);
 		assert.equal(taskBySpec(cancelled, "running.main").status, "interrupted");
 		assert.equal(interrupts, 1);
+		// Release is a state invariant, not a deadline for a new filesystem launch.
+		assert.equal(subagentLiveModelWorkerSlotCountForTests(), 0);
 
 		const next = makeSubagentLaunchFixture(cwd, "after_fail_fast_release");
-		const nextLaunch = await Promise.race([
-			launchSubagentTask(cwd, next.run, next.task, next.compiledTask),
-			sleep(500).then(() => {
-				throw new Error("fail-fast cancellation leaked live worker capacity");
-			}),
-		]);
+		const nextLaunch = await launchSubagentTask(cwd, next.run, next.task, next.compiledTask);
 		assert.equal(nextLaunch.kind, "launched");
+		next.task.status = "completed";
+		next.task.statusDetail = "completed";
+		await refreshRunFromSubagentArtifacts(cwd, next.run);
+		assert.equal(subagentLiveModelWorkerSlotCountForTests(), 0);
 	} finally {
 		setSubagentApiForTests(undefined);
 		setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });

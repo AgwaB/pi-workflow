@@ -37,6 +37,7 @@ import {
 	type WorkflowRuntimeDefaults,
 } from "./workflow-runtime.js";
 import { resolveWorkflowFastModeConfig } from "./workflow-fast-mode-extension.js";
+import { applyWorkflowNativeToolPolicy } from "./workflow-native-tool-policy.js";
 
 const DYNAMIC_OUTPUT_MAX_DIGEST_CHARS = 1000;
 const DYNAMIC_DELEGATION_TOOLS = new Set([
@@ -160,16 +161,16 @@ export async function buildDynamicGeneratedCompiledTask(input: {
 			`dynamic agent ${agentDefinition.displayName} declares maxSubagentDepth > 0, which is invalid in dynamic generated tasks`,
 		);
 	}
-	const tools =
+	const authoredTools =
 		executionProfile?.tools ?? input.request.tools ?? agentDefinition.tools;
 	if (input.request.tools && !executionProfile && !agentDefinition.tools) {
 		throw new Error(
 			`dynamic agent ${requestedAgent} does not declare a tools authority ceiling`,
 		);
 	}
-	if (tools && agentDefinition.tools) {
+	if (authoredTools && agentDefinition.tools) {
 		const allowed = new Set(agentDefinition.tools);
-		const missing = tools.filter(
+		const missing = authoredTools.filter(
 			(tool) => !toolAllowedByAuthorityCeiling(tool, allowed),
 		);
 		if (missing.length > 0) {
@@ -178,7 +179,7 @@ export async function buildDynamicGeneratedCompiledTask(input: {
 			);
 		}
 	}
-	const forbiddenDelegationTools = (tools ?? []).filter((tool) =>
+	const forbiddenDelegationTools = (authoredTools ?? []).filter((tool) =>
 		DYNAMIC_DELEGATION_TOOLS.has(tool),
 	);
 	if (forbiddenDelegationTools.length > 0) {
@@ -186,16 +187,32 @@ export async function buildDynamicGeneratedCompiledTask(input: {
 			`dynamic agent ${requestedAgent} declares invalid delegation/orchestration tools: ${forbiddenDelegationTools.join(", ")}`,
 		);
 	}
-	const toolProviders =
+	const authoredToolProviders =
 		executionProfile?.toolProviders ??
 		providersForSelectedTools(
-			tools,
+			authoredTools,
 			new Map(
-				Object.entries(
-					input.controllerCompiledTask.runtime.toolProviders ?? {},
-				),
+				Object.entries(input.controllerCompiledTask.runtime.toolProviders ?? {}),
 			),
 		);
+	// Agent ceilings and decision-loop allowlists govern authored selections.
+	// Native host expansion is separately approved, but its mutation surface must
+	// still participate in unknown-tool, worktree, and capability policy below.
+	assertDynamicExecutionPolicy({
+		dynamic: input.dynamic,
+		agent: requestedAgent,
+		tools: authoredTools,
+	});
+	// The persisted run is authoritative, including native runs saved before the
+	// explicit eligibility marker was introduced. Legacy runs have no nativeHost.
+	const effectiveNativeHost = input.run.nativeHost;
+	const nativeToolPolicy = applyWorkflowNativeToolPolicy(
+		authoredTools,
+		authoredToolProviders,
+		effectiveNativeHost,
+	);
+	const tools = nativeToolPolicy.tools;
+	const toolProviders = nativeToolPolicy.toolProviders;
 	const selectedRuntime = selectWorkflowRuntime(
 		input.dynamic.runtimeOverrides,
 		runtimeSettings(input.request),
@@ -213,8 +230,7 @@ export async function buildDynamicGeneratedCompiledTask(input: {
 	) {
 		selectedRuntime.api = controllerRuntimeApi;
 	}
-	const availableModels =
-		input.availableModels ?? input.dynamic.availableModels;
+	const availableModels = input.availableModels ?? input.dynamic.availableModels;
 	const resolvedRuntime = await resolveWorkflowRuntime(
 		selectedRuntime,
 		{
@@ -234,11 +250,6 @@ export async function buildDynamicGeneratedCompiledTask(input: {
 			`dynamic agent requested tools without trusted classification metadata: ${unknownTools.join(", ")}`,
 		);
 	}
-	assertDynamicExecutionPolicy({
-		dynamic: input.dynamic,
-		agent: requestedAgent,
-		tools,
-	});
 	const capability = dynamicTaskCapability(tools, toolProviders);
 	const requiresWorktree = capability !== "read-only";
 	const inputDependsOn = dynamicInputDependencySpecIds(
@@ -317,6 +328,9 @@ export async function buildDynamicGeneratedCompiledTask(input: {
 			...resolvedRuntime,
 			tools,
 			...(toolProviders ? { toolProviders } : {}),
+			...(nativeToolPolicy.nativeToolsEnabled === undefined
+				? {}
+				: { nativeToolsEnabled: nativeToolPolicy.nativeToolsEnabled }),
 			maxRuntimeMs:
 				input.request.maxRuntimeMs ??
 				executionProfile?.maxRuntimeMs ??
@@ -354,9 +368,7 @@ export async function buildDynamicGeneratedCompiledTask(input: {
 			requestHash: input.requestHash,
 			...(resourceWarnings.length > 0 ? { resourceWarnings } : {}),
 			...(input.branchId ? { branchId: input.branchId } : {}),
-			...(effectiveOutputProfile
-				? { outputProfile: effectiveOutputProfile }
-				: {}),
+			...(effectiveOutputProfile ? { outputProfile: effectiveOutputProfile } : {}),
 		},
 	} as CompiledTask;
 	restoreDynamicGeneratedResourceWarnings(input.compiledFlow, compiledTask);
@@ -558,8 +570,7 @@ function validateDynamicGeneratedDependencies(input: {
 		);
 		if (!runTask || !compiledTask) continue;
 		if (
-			compiledTask.dynamicGenerated?.controllerSpecId !==
-				input.controllerSpecId &&
+			compiledTask.dynamicGenerated?.controllerSpecId !== input.controllerSpecId &&
 			!isTerminalTaskStatus(runTask.status)
 		) {
 			throw new Error(
@@ -567,8 +578,7 @@ function validateDynamicGeneratedDependencies(input: {
 			);
 		}
 		if (
-			compiledTask.dynamicGenerated?.controllerSpecId !==
-				input.controllerSpecId &&
+			compiledTask.dynamicGenerated?.controllerSpecId !== input.controllerSpecId &&
 			compiledTaskTransitivelyDependsOn(
 				input.compiledFlow,
 				compiledTask.id,
@@ -795,9 +805,7 @@ export function normalizeDynamicAgentRequest(
 			inputs
 				.filter((input) => input.required)
 				.map((input) => input.name)
-				.filter(
-					(name) => splitDynamicArtifactName(name).artifact !== undefined,
-				),
+				.filter((name) => splitDynamicArtifactName(name).artifact !== undefined),
 		dependsOn: optionalDynamicStringArray(record.dependsOn, "dependsOn"),
 		compact: record.compact !== false,
 	};
@@ -916,9 +924,7 @@ function optionalDynamicModelTaskMaxRuntimeMs(
 ): number | undefined {
 	if (value === undefined) return undefined;
 	if (!isModelTaskMaxRuntimeMs(value)) {
-		throw new Error(
-			`ctx.agent() ${field} must be 0 or a positive safe integer`,
-		);
+		throw new Error(`ctx.agent() ${field} must be 0 or a positive safe integer`);
 	}
 	return value;
 }

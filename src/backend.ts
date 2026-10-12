@@ -22,12 +22,15 @@ export type BackendLaunchResult =
 
 export interface PreparedWorkflowTaskLaunch {
 	extensions: string[];
+	/** Sealed explicit-only discovery; absent preserves legacy additive loading. */
+	noExtensions?: true;
+	nativeHost?: import("./workflow-native-host-context.js").WorkflowNativeHostContext;
 	/** Present only for a versioned compiled task and sealed before launch. */
 	resourcePolicy?: WorkflowResourcePolicy;
 	/** Provider metadata retained for launch auditing and wrapper preparation. */
 	toolProviders?: Record<string, CompiledToolProvider>;
 	generatedExtensions: Array<{
-		kind: "fetch-cache" | "web-source" | "openai-fast";
+		kind: "fetch-cache" | "web-source" | "openai-fast" | "native-host";
 		path: string;
 		expectedBytes: string;
 		config: unknown;

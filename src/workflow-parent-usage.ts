@@ -3,7 +3,15 @@ import { lstat } from "node:fs/promises";
 import { join } from "node:path";
 
 import { normalizedUsageValues } from "./subagent-backend.js";
-import { acquireRunFileLease, acquireWorkflowTopologyLease, nowIso, readIndex, readJson, workflowRunDir, writeJsonAtomicDurable } from "./store.js";
+import {
+	acquireRunFileLease,
+	acquireWorkflowTopologyLease,
+	nowIso,
+	readIndex,
+	readJson,
+	workflowRunDir,
+	writeJsonAtomicDurable,
+} from "./store.js";
 import type { WorkflowTaskUsageValues } from "./types.js";
 
 /** Parent assistant usage is a sidecar: the scheduler owns run.json. */
@@ -27,10 +35,40 @@ export interface WorkflowParentUsageRecord extends WorkflowTaskUsageValues {
 }
 
 const ACCUMULATED_USAGE_KEYS = [
-	"inputTokens", "outputTokens", "totalTokens", "cachedInputTokens",
-	"cacheCreationInputTokens", "cacheReadInputTokens", "reasoningTokens", "costUsd",
+	"inputTokens",
+	"outputTokens",
+	"totalTokens",
+	"cachedInputTokens",
+	"cacheCreationInputTokens",
+	"cacheReadInputTokens",
+	"reasoningTokens",
+	"costUsd",
 ] as const satisfies readonly (keyof WorkflowTaskUsageValues)[];
-const TERMINAL_INDEX_STATUSES = new Set(["completed", "failed", "blocked", "interrupted"]);
+const TERMINAL_INDEX_STATUSES = new Set([
+	"completed",
+	"failed",
+	"blocked",
+	"interrupted",
+]);
+const PARENT_USAGE_TOPOLOGY_ATTEMPTS = 3;
+const PARENT_USAGE_TOPOLOGY_RETRY_CAP_MS = [25, 100] as const;
+
+class ParentUsageTopologyBusyError extends Error {
+	constructor(runId: string) {
+		super(`Parent usage topology busy: ${runId}`);
+		this.name = "ParentUsageTopologyBusyError";
+	}
+}
+
+function waitBeforeTopologyRetry(attempt: number): Promise<void> {
+	const capMs =
+		PARENT_USAGE_TOPOLOGY_RETRY_CAP_MS[
+			Math.min(attempt, PARENT_USAGE_TOPOLOGY_RETRY_CAP_MS.length - 1)
+		]!;
+	const delayMs = 1 + Math.floor(Math.random() * capMs);
+	return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
 // Backward-compatible owner-omitting API calls are process-local, not a claim
 // on a persisted Pi session. A different process cannot resume this identity.
 const localOwner = `process:${randomUUID()}`;
@@ -46,18 +84,27 @@ interface TrackedRun {
 	lastWriteFailure?: WorkflowParentUsageRecord["lastWriteFailure"];
 }
 const trackedRuns = new Map<string, TrackedRun>();
-const trackedRunKey = (cwd: string, runId: string, sessionId: string): string => `${cwd}\0${runId}\0${sessionId}`;
-const parentUsageFile = (cwd: string, runId: string): string => join(workflowRunDir(cwd, runId), PARENT_USAGE_FILE);
+const trackedRunKey = (cwd: string, runId: string, sessionId: string): string =>
+	`${cwd}\0${runId}\0${sessionId}`;
+const parentUsageFile = (cwd: string, runId: string): string =>
+	join(workflowRunDir(cwd, runId), PARENT_USAGE_FILE);
 
 async function stillTrackedGeneration(entry: TrackedRun): Promise<boolean> {
 	if (entry.removed) return false;
 	const index = await readIndex(entry.cwd);
-	const info = await lstat(workflowRunDir(entry.cwd, entry.runId)).catch((error: NodeJS.ErrnoException) => {
-		if (error.code === "ENOENT") return undefined;
-		throw error;
-	});
-	if (!index?.runs.some(run => run.runId === entry.runId) ||
-		(entry.directoryIdentity && (!info || info.dev !== entry.directoryIdentity.dev || info.ino !== entry.directoryIdentity.ino))) {
+	const info = await lstat(workflowRunDir(entry.cwd, entry.runId)).catch(
+		(error: NodeJS.ErrnoException) => {
+			if (error.code === "ENOENT") return undefined;
+			throw error;
+		},
+	);
+	if (
+		!index?.runs.some((run) => run.runId === entry.runId) ||
+		(entry.directoryIdentity &&
+			(!info ||
+				info.dev !== entry.directoryIdentity.dev ||
+				info.ino !== entry.directoryIdentity.ino))
+	) {
 		entry.removed = true;
 		trackedRuns.delete(trackedRunKey(entry.cwd, entry.runId, entry.sessionId));
 		return false;
@@ -67,83 +114,159 @@ async function stillTrackedGeneration(entry: TrackedRun): Promise<boolean> {
 	return true;
 }
 
-async function mutate(entry: TrackedRun, update: (record: WorkflowParentUsageRecord) => void): Promise<void> {
+async function mutate(
+	entry: TrackedRun,
+	update: (record: WorkflowParentUsageRecord) => void,
+): Promise<void> {
 	// The read-only check also avoids recreating an entirely removed workflows root.
-	if (!await stillTrackedGeneration(entry)) return;
+	if (!(await stillTrackedGeneration(entry))) return;
 	const topology = await acquireWorkflowTopologyLease(entry.cwd, 5_000);
-	if (!topology) throw new Error(`Parent usage topology busy: ${entry.runId}`);
+	if (!topology) throw new ParentUsageTopologyBusyError(entry.runId);
 	let lease: Awaited<ReturnType<typeof acquireRunFileLease>>;
 	try {
 		// Prune may have detached this generation while the topology lease waited.
-		if (!await stillTrackedGeneration(entry)) return;
-		lease = await acquireRunFileLease(entry.cwd, entry.runId, "parent-usage", 5_000, topology.signal);
+		if (!(await stillTrackedGeneration(entry))) return;
+		lease = await acquireRunFileLease(
+			entry.cwd,
+			entry.runId,
+			"parent-usage",
+			5_000,
+			topology.signal,
+		);
 		if (!lease) throw new Error(`Parent usage sidecar busy: ${entry.runId}`);
 		const info = await lstat(workflowRunDir(entry.cwd, entry.runId));
-		if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("Unsafe parent usage run directory");
+		if (!info.isDirectory() || info.isSymbolicLink())
+			throw new Error("Unsafe parent usage run directory");
 		entry.directoryIdentity ??= { dev: info.dev, ino: info.ino };
 		const assertOwner = async (): Promise<void> => {
 			await topology.assertOwner();
 			await lease!.assertOwner();
 			const current = await lstat(workflowRunDir(entry.cwd, entry.runId));
-			if (!current.isDirectory() || current.dev !== entry.directoryIdentity!.dev || current.ino !== entry.directoryIdentity!.ino)
+			if (
+				!current.isDirectory() ||
+				current.dev !== entry.directoryIdentity!.dev ||
+				current.ino !== entry.directoryIdentity!.ino
+			)
 				throw new Error("Parent usage run generation changed");
 		};
-		const existing = await readJson<WorkflowParentUsageRecord>(parentUsageFile(entry.cwd, entry.runId));
+		const existing = await readJson<WorkflowParentUsageRecord>(
+			parentUsageFile(entry.cwd, entry.runId),
+		);
 		// Also check durable feedback ownership when it exists. Legacy sidecars
 		// remain readable but frozen, even if a caller explicitly begins tracking.
-		const audience = await readJson<{ schema?: string; runId?: string; sessionId?: string }>(
-			join(workflowRunDir(entry.cwd, entry.runId), "feedback-audience.json"),
-		);
-		if (existing && (existing.schema !== PARENT_USAGE_SCHEMA || existing.runId !== entry.runId || existing.sessionId !== entry.sessionId)) return;
-		if (audience && (audience.schema !== "workflow-feedback-audience-v1" || audience.runId !== entry.runId || audience.sessionId !== entry.sessionId)) return;
+		const audience = await readJson<{
+			schema?: string;
+			runId?: string;
+			sessionId?: string;
+		}>(join(workflowRunDir(entry.cwd, entry.runId), "feedback-audience.json"));
+		if (
+			existing &&
+			(existing.schema !== PARENT_USAGE_SCHEMA ||
+				existing.runId !== entry.runId ||
+				existing.sessionId !== entry.sessionId)
+		)
+			return;
+		if (
+			audience &&
+			(audience.schema !== "workflow-feedback-audience-v1" ||
+				audience.runId !== entry.runId ||
+				audience.sessionId !== entry.sessionId)
+		)
+			return;
 		const record: WorkflowParentUsageRecord = existing ?? {
-			schema: PARENT_USAGE_SCHEMA, source: "parent-session", runId: entry.runId,
-			sessionId: entry.sessionId, startedAt: nowIso(), updatedAt: nowIso(), assistantMessages: 0,
+			schema: PARENT_USAGE_SCHEMA,
+			source: "parent-session",
+			runId: entry.runId,
+			sessionId: entry.sessionId,
+			startedAt: nowIso(),
+			updatedAt: nowIso(),
+			assistantMessages: 0,
 		};
 		update(record);
 		if (entry.lastWriteFailure) record.lastWriteFailure = entry.lastWriteFailure;
-		await writeJsonAtomicDurable(parentUsageFile(entry.cwd, entry.runId), record, lease.signal, assertOwner);
+		await writeJsonAtomicDurable(
+			parentUsageFile(entry.cwd, entry.runId),
+			record,
+			lease.signal,
+			assertOwner,
+		);
 	} finally {
-		try { await lease?.release(); }
-		finally { await topology.release(); }
+		try {
+			await lease?.release();
+		} finally {
+			await topology.release();
+		}
 	}
 }
 
 /** Retry a failed head before later operations. A rejected caller does not poison the queue. */
 function drain(entry: TrackedRun): Promise<void> {
-	entry.pendingWrite = entry.pendingWrite.catch(() => undefined).then(async () => {
-		while (entry.operations.length > 0) {
-			if (entry.removed) {
-				entry.operations.length = 0;
-				return;
-			}
-			try {
-				await entry.operations[0]!();
+	entry.pendingWrite = entry.pendingWrite
+		.catch(() => undefined)
+		.then(async () => {
+			while (entry.operations.length > 0) {
+				if (entry.removed) {
+					entry.operations.length = 0;
+					return;
+				}
+				const operation = entry.operations[0]!;
+				for (let attempt = 0; ; attempt += 1) {
+					try {
+						await operation();
+						break;
+					} catch (error) {
+						if (
+							error instanceof ParentUsageTopologyBusyError &&
+							attempt + 1 < PARENT_USAGE_TOPOLOGY_ATTEMPTS
+						) {
+							await waitBeforeTopologyRetry(attempt);
+							continue;
+						}
+						entry.lastWriteFailure = {
+							code: "parent_usage_write_failed",
+							at: nowIso(),
+						};
+						throw error;
+					}
+				}
 				entry.operations.shift();
-			} catch (error) {
-				entry.lastWriteFailure = { code: "parent_usage_write_failed", at: nowIso() };
-				throw error;
 			}
-		}
-	});
+		});
 	// Begin is synchronous and some legacy callers don't await flush.
 	void entry.pendingWrite.catch(() => undefined);
 	return entry.pendingWrite;
 }
 
 /** Begin is still synchronous; queued initialization persists even before a turn. */
-export function beginParentUsageTracking(cwd: string, runId: string, sessionId = localOwner): void {
+export function beginParentUsageTracking(
+	cwd: string,
+	runId: string,
+	sessionId = localOwner,
+): void {
 	if (!sessionId.trim()) return;
 	const key = trackedRunKey(cwd, runId, sessionId);
 	if (trackedRuns.has(key)) return;
-	const entry: TrackedRun = { cwd, runId, sessionId, pendingWrite: Promise.resolve(), operations: [] };
+	const entry: TrackedRun = {
+		cwd,
+		runId,
+		sessionId,
+		pendingWrite: Promise.resolve(),
+		operations: [],
+	};
 	trackedRuns.set(key, entry);
-	entry.operations.push(() => mutate(entry, (record) => { delete record.completedAt; }));
+	entry.operations.push(() =>
+		mutate(entry, (record) => {
+			delete record.completedAt;
+		}),
+	);
 	void drain(entry);
 }
 
 /** Resume only this known owner; preserve historical totals on a resumed run. */
-export async function resumeParentUsageTracking(cwd: string, sessionId = localOwner): Promise<void> {
+export async function resumeParentUsageTracking(
+	cwd: string,
+	sessionId = localOwner,
+): Promise<void> {
 	const index = await readIndex(cwd);
 	for (const run of index?.runs ?? []) {
 		if (run.status !== "running") continue;
@@ -154,57 +277,87 @@ export async function resumeParentUsageTracking(cwd: string, sessionId = localOw
 	await flushParentUsageTracking(cwd, sessionId);
 }
 
-export async function readParentUsage(cwd: string, runId: string): Promise<WorkflowParentUsageRecord | undefined> {
-	const record = await readJson<WorkflowParentUsageRecord>(parentUsageFile(cwd, runId));
+export async function readParentUsage(
+	cwd: string,
+	runId: string,
+): Promise<WorkflowParentUsageRecord | undefined> {
+	const record = await readJson<WorkflowParentUsageRecord>(
+		parentUsageFile(cwd, runId),
+	);
 	return record?.schema === PARENT_USAGE_SCHEMA ? record : undefined;
 }
 
 /** Feed message_end into owned active runs; terminal wrap-up is counted once. */
-export async function recordParentSessionUsage(cwd: string, message: unknown, sessionId = localOwner, messageId?: string): Promise<void> {
+export async function recordParentSessionUsage(
+	cwd: string,
+	message: unknown,
+	sessionId = localOwner,
+	messageId?: string,
+): Promise<void> {
 	if (typeof message !== "object" || message === null) return;
 	const msg = message as Record<string, unknown>;
 	if (msg.role !== "assistant" || msg.usage == null) return;
 	const values = normalizedUsageValues(msg.usage);
 	// Pi messages carry timestamps. Explicit session-entry IDs are preferred;
 	// timestamp + content hashing also deduplicates same-session process replay.
-	const receipt = messageId ?? (typeof msg.timestamp === "number"
-		? createHash("sha256").update(JSON.stringify(message)).digest("hex") : randomUUID());
-	const tracked = [...trackedRuns.values()].filter(e => e.cwd === cwd && e.sessionId === sessionId);
-	await Promise.all(tracked.map(entry => {
-		let terminal: boolean | undefined;
-		entry.operations.push(async () => {
-			// Preserve the original intent across retries if the run finishes while
-			// its sidecar is busy; don't turn an earlier turn into the wrap-up.
-			if (terminal === undefined) {
-				const index = await readIndex(cwd);
-				terminal = TERMINAL_INDEX_STATUSES.has(index?.runs.find(r => r.runId === entry.runId)?.status ?? "");
-			}
-			await mutate(entry, record => {
-				if (record.completedAt && terminal) return;
-				if (!record.messageIds?.includes(receipt)) {
-					for (const key of ACCUMULATED_USAGE_KEYS) {
-						const value = values[key];
-						if (typeof value === "number") record[key] = (record[key] ?? 0) + value;
-					}
-					record.assistantMessages += 1;
-					record.updatedAt = nowIso();
-					(record.messageIds ??= []).push(receipt);
+	const receipt =
+		messageId ??
+		(typeof msg.timestamp === "number"
+			? createHash("sha256").update(JSON.stringify(message)).digest("hex")
+			: randomUUID());
+	const tracked = [...trackedRuns.values()].filter(
+		(e) => e.cwd === cwd && e.sessionId === sessionId,
+	);
+	await Promise.all(
+		tracked.map((entry) => {
+			let terminal: boolean | undefined;
+			entry.operations.push(async () => {
+				// Preserve the original intent across retries if the run finishes while
+				// its sidecar is busy; don't turn an earlier turn into the wrap-up.
+				if (terminal === undefined) {
+					const index = await readIndex(cwd);
+					terminal = TERMINAL_INDEX_STATUSES.has(
+						index?.runs.find((r) => r.runId === entry.runId)?.status ?? "",
+					);
 				}
-				if (terminal) record.completedAt = nowIso();
+				await mutate(entry, (record) => {
+					if (record.completedAt && terminal) return;
+					if (!record.messageIds?.includes(receipt)) {
+						for (const key of ACCUMULATED_USAGE_KEYS) {
+							const value = values[key];
+							if (typeof value === "number") record[key] = (record[key] ?? 0) + value;
+						}
+						record.assistantMessages += 1;
+						record.updatedAt = nowIso();
+						(record.messageIds ??= []).push(receipt);
+					}
+					if (terminal) record.completedAt = nowIso();
+				});
+				if (terminal)
+					trackedRuns.delete(trackedRunKey(cwd, entry.runId, sessionId));
 			});
-			if (terminal) trackedRuns.delete(trackedRunKey(cwd, entry.runId, sessionId));
-		});
-		return drain(entry);
-	}));
+			return drain(entry);
+		}),
+	);
 }
 
-export async function flushParentUsageTracking(cwd: string, sessionId = localOwner, detach = false): Promise<void> {
-	const entries = [...trackedRuns.entries()].filter(([, e]) => e.cwd === cwd && e.sessionId === sessionId);
-	await Promise.all(entries.map(async ([key, entry]) => {
-		await drain(entry);
-		// A failed detach must retain uncommitted deltas for the next flush/resume.
-		if (detach && entry.operations.length === 0) trackedRuns.delete(key);
-	}));
+export async function flushParentUsageTracking(
+	cwd: string,
+	sessionId = localOwner,
+	detach = false,
+): Promise<void> {
+	const entries = [...trackedRuns.entries()].filter(
+		([, e]) => e.cwd === cwd && e.sessionId === sessionId,
+	);
+	await Promise.all(
+		entries.map(async ([key, entry]) => {
+			await drain(entry);
+			// A failed detach must retain uncommitted deltas for the next flush/resume.
+			if (detach && entry.operations.length === 0) trackedRuns.delete(key);
+		}),
+	);
 }
 
-export function resetParentUsageTrackingForTests(): void { trackedRuns.clear(); }
+export function resetParentUsageTrackingForTests(): void {
+	trackedRuns.clear();
+}

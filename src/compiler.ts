@@ -52,6 +52,12 @@ import {
 	type WorkflowRuntimeResolutionInput,
 } from "./workflow-runtime.js";
 import { resolveWorkflowFastModeConfig } from "./workflow-fast-mode-extension.js";
+import {
+	assertWorkflowNativeHostContext,
+	resolveWorkflowNativeHostContext,
+	type WorkflowNativeHostContext,
+} from "./workflow-native-host-context.js";
+import { applyWorkflowNativeToolPolicy } from "./workflow-native-tool-policy.js";
 
 const DELEGATION_TOOLS = new Set([
 	"skill_test_subagent",
@@ -75,12 +81,17 @@ const DEFAULT_DYNAMIC_DECISION_LOOP_MAX_ROUNDS = 4;
 const DEFAULT_DYNAMIC_DECISION_LOOP_MAX_ACTIONS = 6;
 const DEFAULT_DYNAMIC_DECISION_LOOP_MAX_STALLS = 3;
 
-interface CompileOptions {
+export interface CompileOptions {
 	cwd: string;
 	specPath?: string;
 	availableModels?: WorkflowModelInfo[];
+	/** `undefined` resolves the active host; `null` intentionally preserves legacy behavior. */
+	nativeHost?: WorkflowNativeHostContext | null;
 	/** Bounded routing preflight injects frontmatter-only agent metadata. */
-	agentLoader?: (name: string, cwd: string) => Promise<AgentDefinition | undefined>;
+	agentLoader?: (
+		name: string,
+		cwd: string,
+	) => Promise<AgentDefinition | undefined>;
 	/** Avoid optional schema/warning file reads while deriving local routing facts. */
 	metadataOnly?: boolean;
 }
@@ -243,7 +254,9 @@ function appendWorkflowOutputInstructions(
 ): string {
 	const controlSchema = stage.output?.controlSchema;
 	const analysisRequired = stage.output?.analysis?.required ?? true;
-	const refsRequired = (stage.output?.refs?.required ?? true) || (stage.output?.refs?.minItems ?? 0) > 0;
+	const refsRequired =
+		(stage.output?.refs?.required ?? true) ||
+		(stage.output?.refs?.minItems ?? 0) > 0;
 	return [
 		prompt,
 		"# Workflow Output Protocol",
@@ -251,7 +264,9 @@ function appendWorkflowOutputInstructions(
 			? "Return your final answer exactly as these three sections, in this order, with no prose outside the tags:"
 			: "Return your final answer using these sections in this order, at most once each, with no prose outside the tags. Optional sections may be omitted:",
 		"<control>{...}</control>",
-		analysisRequired ? "<analysis>...</analysis>" : "<analysis>...</analysis> (optional)",
+		analysisRequired
+			? "<analysis>...</analysis>"
+			: "<analysis>...</analysis> (optional)",
 		refsRequired ? "<refs>[]</refs>" : "<refs>[]</refs> (optional)",
 		"The <control> section must be valid JSON object data for the workflow control plane.",
 		"The control object must include a non-empty string `schema` and a concise non-empty string `digest`.",
@@ -317,8 +332,7 @@ function artifactGraphTaskMetadata(
 				: {}),
 			...(inputPolicy.invalidateOnDependencyResume !== undefined
 				? {
-						invalidateOnDependencyResume:
-							inputPolicy.invalidateOnDependencyResume,
+						invalidateOnDependencyResume: inputPolicy.invalidateOnDependencyResume,
 					}
 				: {}),
 			...(inputPolicy.maxCompiledPromptChars !== undefined
@@ -659,8 +673,7 @@ function classifySafety(
 		readOnlyDeclared &&
 			tools &&
 			tools.every(
-				(tool) =>
-					effectiveToolClassification(tool, toolProviders) === "read-only",
+				(tool) => effectiveToolClassification(tool, toolProviders) === "read-only",
 			),
 	);
 	const requiresWorktree =
@@ -672,12 +685,7 @@ function classifySafety(
 		sharedCwdSafe,
 		worktreePolicy,
 		requiresWorktree,
-		permission: permissionPreview(
-			tools,
-			toolProviders,
-			capability,
-			approvalMode,
-		),
+		permission: permissionPreview(tools, toolProviders, capability, approvalMode),
 	};
 }
 
@@ -779,9 +787,7 @@ async function collectForeachPathWarnings(
 		if (schemaCache.has(controlSchema)) return schemaCache.get(controlSchema);
 		let schema: any;
 		try {
-			schema = JSON.parse(
-				await readFile(resolve(specDir, controlSchema), "utf8"),
-			);
+			schema = JSON.parse(await readFile(resolve(specDir, controlSchema), "utf8"));
 		} catch {
 			schema = undefined;
 		}
@@ -947,9 +953,7 @@ async function collectSourceProjectionWarnings(
 		if (schemaCache.has(controlSchema)) return schemaCache.get(controlSchema);
 		let schema: any;
 		try {
-			schema = JSON.parse(
-				await readFile(resolve(specDir, controlSchema), "utf8"),
-			);
+			schema = JSON.parse(await readFile(resolve(specDir, controlSchema), "utf8"));
 		} catch {
 			schema = undefined;
 		}
@@ -989,8 +993,7 @@ async function collectSourceProjectionWarnings(
 		for (const path of include) {
 			if (typeof path !== "string" || !path.startsWith("$.")) continue;
 			const segments = path.slice(2).split(".");
-			if (segments.some((segment) => !/^[A-Za-z0-9_-]+$/.test(segment)))
-				continue;
+			if (segments.some((segment) => !/^[A-Za-z0-9_-]+$/.test(segment))) continue;
 			const resolvable = schemas.some(({ schema }) =>
 				projectionPathResolvable(schema, segments),
 			);
@@ -1025,8 +1028,7 @@ function projectionPathResolvable(schema: any, segments: string[]): boolean {
 		}
 		if (
 			node.additionalProperties === true ||
-			(node.additionalProperties &&
-				typeof node.additionalProperties === "object")
+			(node.additionalProperties && typeof node.additionalProperties === "object")
 		) {
 			return true;
 		}
@@ -1052,14 +1054,14 @@ async function collectWorkflowQualityWarnings(
 		if (typeof controlSchema !== "string") continue;
 		let schema: any;
 		try {
-			schema = JSON.parse(
-				await readFile(resolve(specDir, controlSchema), "utf8"),
-			);
+			schema = JSON.parse(await readFile(resolve(specDir, controlSchema), "utf8"));
 		} catch {
 			continue;
 		}
 		schemaByStageId.set(stage.id, schema);
 		if (stage.support && typeof stage.support === "object") continue;
+		// Dynamic helpers reject prompt fields and do not execute a model prompt.
+		if (stage.type === "dynamic") continue;
 		const prompt = stagePromptText(stage);
 
 		if (
@@ -1226,9 +1228,7 @@ function complexControlShapeFields(
 			});
 		}
 		if (isRequired) {
-			findings.push(
-				...nestedComplexControlShapeFields(child, prompt, childPath),
-			);
+			findings.push(...nestedComplexControlShapeFields(child, prompt, childPath));
 		}
 	}
 	return findings;
@@ -1306,9 +1306,7 @@ function fragileRequiredItemFields(
 		const childPath = `${parentPath}.${key}`;
 		if (child?.type === "array" && child.items?.type === "object") {
 			const required = Array.isArray(child.items.required)
-				? child.items.required.filter(
-						(item: unknown) => typeof item === "string",
-					)
+				? child.items.required.filter((item: unknown) => typeof item === "string")
 				: [];
 			for (const requiredKey of required) {
 				if (isDriftProneRequiredItemKey(String(key), requiredKey)) {
@@ -1318,9 +1316,7 @@ function fragileRequiredItemFields(
 					});
 				}
 			}
-			findings.push(
-				...fragileRequiredItemFields(child.items, `${childPath}[]`),
-			);
+			findings.push(...fragileRequiredItemFields(child.items, `${childPath}[]`));
 		} else if (child?.type === "object") {
 			findings.push(...fragileRequiredItemFields(child, childPath));
 		}
@@ -1402,9 +1398,10 @@ function selectRoles(
 	issues: ValidationIssue[],
 ): { selected: typeof roles; names: string[] } {
 	const names = roleSelection(selection);
-	if (names === undefined) return { selected: roles, names: roles.map((role) => role.name) };
+	if (names === undefined)
+		return { selected: roles, names: roles.map((role) => role.name) };
 	const byName = new Map(roles.map((role) => [role.name, role]));
-	const selected: typeof roles[number][] = [];
+	const selected: (typeof roles)[number][] = [];
 	for (const name of names) {
 		const role = byName.get(name);
 		if (!role) {
@@ -1434,6 +1431,11 @@ async function compileArtifactGraphPlan(
 	const specDir = options.specPath
 		? dirname(resolve(options.cwd, options.specPath))
 		: options.cwd;
+	const nativeHost =
+		options.nativeHost === undefined
+			? resolveWorkflowNativeHostContext(options.cwd)
+			: (options.nativeHost ?? undefined);
+	if (nativeHost !== undefined) assertWorkflowNativeHostContext(nativeHost);
 	const agentName = spec.defaults?.agent ?? "scout";
 	const agentCache = new Map<string, AgentDefinition>();
 	let defaultAgent: AgentDefinition | undefined;
@@ -1532,6 +1534,11 @@ async function compileArtifactGraphPlan(
 				dynamicToolPath,
 			);
 			const dynamicToolSelection = filterToolSelection(rawDynamicToolSelection);
+			const effectiveDynamicToolPolicy = applyWorkflowNativeToolPolicy(
+				dynamicToolSelection.tools,
+				dynamicToolSelection.toolProviders,
+				nativeHost,
+			);
 			const requestedRuntime = selectWorkflowRuntime(
 				runtimeOverrides,
 				runtimeSettings(stage),
@@ -1579,17 +1586,20 @@ async function compileArtifactGraphPlan(
 			if (options.availableModels?.length) {
 				dynamicTask.dynamic.availableModels = options.availableModels;
 			}
-			if (dynamicToolSelection.tools || dynamicToolSelection.toolProviders) {
-				dynamicTask.runtime = {
-					...dynamicTask.runtime,
-					...(dynamicToolSelection.tools
-						? { tools: dynamicToolSelection.tools }
-						: {}),
-					...(dynamicToolSelection.toolProviders
-						? { toolProviders: dynamicToolSelection.toolProviders }
-						: {}),
-				};
-			}
+			dynamicTask.runtime = {
+				...dynamicTask.runtime,
+				...(effectiveDynamicToolPolicy.tools === undefined
+					? {}
+					: { tools: effectiveDynamicToolPolicy.tools }),
+				...(effectiveDynamicToolPolicy.toolProviders === undefined
+					? {}
+					: { toolProviders: effectiveDynamicToolPolicy.toolProviders }),
+				...(effectiveDynamicToolPolicy.nativeToolsEnabled === undefined
+					? {}
+					: {
+							nativeToolsEnabled: effectiveDynamicToolPolicy.nativeToolsEnabled,
+						}),
+			};
 			return dynamicTask;
 		}
 
@@ -1678,6 +1688,11 @@ async function compileArtifactGraphPlan(
 		validateToolSubset(toolSelection.tools, stageAgent, issues, toolPath);
 		validateDelegationBoundary(toolSelection.tools, issues, toolPath);
 		const filteredToolSelection = filterToolSelection(toolSelection);
+		const effectiveToolPolicy = applyWorkflowNativeToolPolicy(
+			filteredToolSelection.tools,
+			filteredToolSelection.toolProviders,
+			nativeHost,
+		);
 		const requestedRuntime = selectWorkflowRuntime(
 			runtimeOverrides,
 			runtimeSettings(each),
@@ -1703,10 +1718,13 @@ async function compileArtifactGraphPlan(
 			approvalMode:
 				stage.approvalMode ?? spec.defaults?.approvalMode ?? "non-interactive",
 			...resolvedRuntime,
-			tools: filteredToolSelection.tools,
-			...(filteredToolSelection.toolProviders
-				? { toolProviders: filteredToolSelection.toolProviders }
+			tools: effectiveToolPolicy.tools,
+			...(effectiveToolPolicy.toolProviders
+				? { toolProviders: effectiveToolPolicy.toolProviders }
 				: {}),
+			...(effectiveToolPolicy.nativeToolsEnabled === undefined
+				? {}
+				: { nativeToolsEnabled: effectiveToolPolicy.nativeToolsEnabled }),
 			maxRuntimeMs:
 				each?.maxRuntimeMs ??
 				stage.maxRuntimeMs ??
@@ -1739,8 +1757,7 @@ async function compileArtifactGraphPlan(
 		if (readOnlyDeclared && safety.capability !== "read-only") {
 			const mutatingTools = (runtime.tools ?? []).filter(
 				(tool: string) =>
-					effectiveToolClassification(tool, runtime.toolProviders) !==
-					"read-only",
+					effectiveToolClassification(tool, runtime.toolProviders) !== "read-only",
 			);
 			warnings.push(
 				`stage "${stage.id}" declares readOnly: true but has ${safety.capability} tools (${mutatingTools.join(", ") || "unknown"}); readOnly filters tools but does not prevent these from mutating. Remove the tool or rely on worktree isolation.`,
@@ -1922,10 +1939,7 @@ async function compileArtifactGraphPlan(
 	for (const stage of stages) {
 		const currentStageTaskKeys: string[] = [];
 		const fromDependencyKeys = dependencyKeysForStage(stage, stageTaskKeys);
-		const afterDependencyKeys = afterDependencyKeysForStage(
-			stage,
-			stageTaskKeys,
-		);
+		const afterDependencyKeys = afterDependencyKeysForStage(stage, stageTaskKeys);
 		const explicitDependencyKeys = uniqueDependencyKeys([
 			...fromDependencyKeys,
 			...afterDependencyKeys,
@@ -2291,8 +2305,7 @@ function buildDynamicTask(
 		runtime: {
 			approvalMode: "non-interactive",
 			...controllerRuntime,
-			maxRuntimeMs:
-				dynamic.budget?.maxRuntimeMs ?? DEFAULT_DYNAMIC_MAX_RUNTIME_MS,
+			maxRuntimeMs: dynamic.budget?.maxRuntimeMs ?? DEFAULT_DYNAMIC_MAX_RUNTIME_MS,
 		},
 		safety: {
 			readOnlyDeclared: false,
@@ -2321,8 +2334,7 @@ function buildDynamicTask(
 					dynamic.budget?.maxNestedWorkflowDepth ??
 					DEFAULT_DYNAMIC_MAX_NESTED_WORKFLOW_DEPTH,
 				maxGraphMutations:
-					dynamic.budget?.maxGraphMutations ??
-					DEFAULT_DYNAMIC_MAX_GRAPH_MUTATIONS,
+					dynamic.budget?.maxGraphMutations ?? DEFAULT_DYNAMIC_MAX_GRAPH_MUTATIONS,
 				maxHelperRuns:
 					dynamic.budget?.maxHelperRuns ?? DEFAULT_DYNAMIC_MAX_HELPER_RUNS,
 			},
@@ -2370,10 +2382,7 @@ function compileDynamicDecisionLoop(
 			value.workerDefaults,
 			runtimePriority,
 		),
-		verifier: compileDynamicDecisionLoopProfile(
-			value.verifier,
-			runtimePriority,
-		),
+		verifier: compileDynamicDecisionLoopProfile(value.verifier, runtimePriority),
 		synthesis: compileDynamicDecisionLoopProfile(
 			value.synthesis,
 			runtimePriority,
@@ -2396,8 +2405,7 @@ function compileDynamicDecisionLoop(
 			positiveInteger(value.maxActionsPerRound) ??
 			DEFAULT_DYNAMIC_DECISION_LOOP_MAX_ACTIONS,
 		repair: {
-			maxAttempts:
-				positiveInteger(recordValue(value.repair, "maxAttempts")) ?? 2,
+			maxAttempts: positiveInteger(recordValue(value.repair, "maxAttempts")) ?? 2,
 		},
 		stateIndex: {
 			...(maxFindings !== undefined ? { maxFindings } : {}),
@@ -2500,7 +2508,10 @@ async function loadWorkflowAgent(
 	cwd: string,
 	cache: Map<string, AgentDefinition>,
 	path: string,
-	agentLoader?: (name: string, cwd: string) => Promise<AgentDefinition | undefined>,
+	agentLoader?: (
+		name: string,
+		cwd: string,
+	) => Promise<AgentDefinition | undefined>,
 ): Promise<AgentDefinition> {
 	const cached = cache.get(name);
 	if (cached) return cached;
@@ -2562,12 +2573,7 @@ async function compileLoopChildTemplates(
 				? explicitDependencyKeys
 				: previousChildTaskKeys;
 		const addChildTask = async (taskId: string, prompt: string) => {
-			const template = await buildTask(
-				childStage,
-				taskId,
-				prompt,
-				dependencyKeys,
-			);
+			const template = await buildTask(childStage, taskId, prompt, dependencyKeys);
 			childTemplates.push(template);
 			currentChildTaskKeys.push(template.id);
 		};

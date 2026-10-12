@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { workflowNativeLaunchTools } from "./workflow-native-host-context.js";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
@@ -68,6 +69,17 @@ export async function createLaunchBootstrapProvenance(
 		preparedTask,
 		preparedLaunch.resourcePolicy,
 	);
+	const expectedNativeHost = preparedTask.runtime.nativeToolsEnabled === false || preparedTask.runtime.tools?.length === 0
+		? undefined
+		: run.nativeHost;
+	if (canonicalJson(preparedLaunch.nativeHost ?? null) !== canonicalJson(expectedNativeHost ?? null)) {
+		throw new Error("workflow native host context does not match the run");
+	}
+	const nativeExtensions = preparedLaunch.generatedExtensions.filter((entry) => entry.kind === "native-host");
+	if (nativeExtensions.length !== (expectedNativeHost === undefined ? 0 : 1) ||
+		(expectedNativeHost !== undefined && canonicalJson(nativeExtensions[0]?.config) !== canonicalJson(expectedNativeHost))) {
+		throw new Error("workflow native host extension does not match the run");
+	}
 	const sessionId = workflowTaskSessionId(run, task);
 	const artifactIdentities = await artifactIdentity(cwd, run, task);
 	const stateRootIdentity = await workflowStateRootIdentity(cwd);
@@ -107,7 +119,7 @@ export async function createLaunchBootstrapProvenance(
 			: { artifacts: artifactIdentities }),
 		effectiveLaunch: launchIdentity(preparedLaunch),
 		effectivePolicy: {
-			tools: [...(preparedTask.runtime.tools ?? [])],
+			tools: workflowNativeLaunchTools(preparedTask.runtime.tools, preparedLaunch.nativeHost) ?? [],
 			toolProvidersSha256: sha256Canonical(
 				preparedTask.runtime.toolProviders ?? {},
 			),
@@ -271,6 +283,7 @@ function launchIdentity(
 	preparedLaunch: PreparedWorkflowTaskLaunch,
 ): LaunchBootstrapProvenanceRecord["effectiveLaunch"] {
 	if (
+		(preparedLaunch.noExtensions !== undefined && preparedLaunch.noExtensions !== true) ||
 		!Array.isArray(preparedLaunch.extensions) ||
 		new Set(preparedLaunch.extensions).size !== preparedLaunch.extensions.length
 	)
@@ -289,6 +302,7 @@ function launchIdentity(
 	)
 		throw new Error("launch-bootstrap prepared extensions are invalid");
 	return {
+		...(preparedLaunch.noExtensions === true ? { noExtensions: true as const } : {}),
 		extensions: preparedLaunch.extensions.map((path) => {
 			if (typeof path !== "string" || path.length === 0)
 				throw new Error("launch-bootstrap prepared extensions are invalid");
@@ -552,10 +566,12 @@ function isEffectiveLaunch(value: unknown): boolean {
 		!isRecord(value) ||
 		!hasAllowedKeys(value, [
 			"extensions",
+			"noExtensions",
 			"captureToolCalls",
 			"toolResultBudgetSha256",
 			"artifactBinding",
 		]) ||
+		(value.noExtensions !== undefined && value.noExtensions !== true) ||
 		!Array.isArray(value.extensions) ||
 		typeof value.captureToolCalls !== "boolean" ||
 		!optionalSha256(value.toolResultBudgetSha256) ||
@@ -595,7 +611,8 @@ function isExtensionIdentity(value: unknown): boolean {
 		hasExactKeys(value.generated, ["kind", "wrapperSha256", "configSha256"]) &&
 		(value.generated.kind === "fetch-cache" ||
 			value.generated.kind === "web-source" ||
-			value.generated.kind === "openai-fast") &&
+			value.generated.kind === "openai-fast" ||
+			value.generated.kind === "native-host") &&
 		isSha256(value.generated.wrapperSha256) &&
 		isSha256(value.generated.configSha256)
 	);

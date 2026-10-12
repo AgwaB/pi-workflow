@@ -145,6 +145,7 @@ async function fixture(name, options = {}) {
 
 function installFakeApi(captured) {
 	setSubagentApiForTests({
+		supportsExplicitExtensionIsolation: () => true,
 		async runSubagent(options) {
 			captured.push(structuredClone(options));
 			return {

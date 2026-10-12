@@ -1,4 +1,8 @@
 import { randomBytes } from "node:crypto";
+import {
+	assertWorkflowNativeHostContext,
+	buildWorkflowNativeHostExtensionWrapper,
+} from "./workflow-native-host-context.js";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import {
 	copyFile,
@@ -44,7 +48,10 @@ import type {
 	WorkflowForeachBatchRecord,
 	WorkflowToolResultBudgetConfigurationSource,
 } from "./types.js";
-import type { JsonSchema } from "./json-schema.js";
+import {
+	type JsonSchema,
+	validateJsonSchemaSubset,
+} from "./json-schema.js";
 import { piAgentDir } from "./pi-agent-dir.js";
 import {
 	normalizedToolResultBudgetValues,
@@ -226,6 +233,10 @@ const WORKFLOW_FETCH_CACHE_EXTENSION_IMPORT = resolve(
 const WORKFLOW_WEB_SOURCE_EXTENSION_IMPORT = resolve(
 	MODULE_DIR,
 	`workflow-web-source-extension${extname(MODULE_PATH)}`,
+);
+const WORKFLOW_NATIVE_HOST_EXTENSION_IMPORT = resolve(
+	MODULE_DIR,
+	`workflow-native-host-extension${extname(MODULE_PATH)}`,
 );
 const WORKFLOW_FAST_MODE_EXTENSION_IMPORT = resolve(
 	MODULE_DIR,
@@ -410,6 +421,7 @@ interface SubagentInterruptResult {
 }
 
 interface SubagentApi {
+	supportsExplicitExtensionIsolation?(): boolean;
 	runSubagent(options: Record<string, unknown>): Promise<SubagentResultEnvelope>;
 	createDurableLaunchBarrierV2?(options: {
 		directory: string;
@@ -535,9 +547,18 @@ export interface OneShotSubagentEnvelope {
 export async function runOneShotSubagentCall(
 	options: Record<string, unknown>,
 ): Promise<OneShotSubagentEnvelope> {
-	await assertSubagentExtensionsLoadable(options);
 	const api = await loadSubagentApi();
-	return (await api.runSubagent(options)) as OneShotSubagentEnvelope;
+	const launchOptions = { ...options };
+	if (Array.isArray(options.extensions) && api.supportsExplicitExtensionIsolation?.() === true)
+		launchOptions.noExtensions = true;
+	assertExtensionIsolationSupported(api, launchOptions.noExtensions);
+	await assertSubagentExtensionsLoadable(launchOptions);
+	return (await api.runSubagent(launchOptions)) as OneShotSubagentEnvelope;
+}
+
+function assertExtensionIsolationSupported(api: SubagentApi, noExtensions: unknown): void {
+	if (noExtensions === true && api.supportsExplicitExtensionIsolation?.() !== true)
+		throw new Error("Installed subagent engine does not support explicit extension isolation; refusing an additive child launch");
 }
 
 interface ExtensionPreflightLoader {
@@ -569,7 +590,9 @@ export async function assertSubagentExtensionsLoadable(
 		cwd,
 		agentDir: piSdk.getAgentDir(),
 		additionalExtensionPaths: extensions?.length ? extensions : undefined,
-		noExtensions: extensions !== undefined && extensions.length === 0,
+		// This option is also sent to a capability-checked child runner.
+		// Old engines remain additive and must still expose ambient collisions.
+		noExtensions: options.noExtensions === true || (extensions !== undefined && extensions.length === 0),
 		noSkills: true,
 		noPromptTemplates: true,
 		noThemes: true,
@@ -2965,6 +2988,11 @@ export async function launchSubagentTask(
 	const authorityBindingSha256 =
 		launchBootstrap.effectivePolicy.externalLaunchGrantSha256;
 	const toolResultBudgetConfiguration = sealedLaunch.toolResultBudget;
+	const effectiveLaunchTools =
+		compiledTask.runtime.tools === undefined && sealedLaunch.nativeHost === undefined
+			? undefined
+			: [...launchBootstrap.effectivePolicy.tools];
+	const systemPrompt = buildSystemPrompt(compiledTask, effectiveLaunchTools);
 	let releaseLiveModelWorkerSlot: (() => void) | undefined;
 	let launchApi: SubagentApi | undefined;
 	let durableBarrierDescriptor: DurableLaunchBarrierDescriptor | undefined;
@@ -3009,7 +3037,7 @@ export async function launchSubagentTask(
 		await throwIfLaunchStopped(cwd, run.runId, leaseSignal, workflowStopSignal);
 		await rm(resultFile, { force: true });
 		await throwIfLaunchStopped(cwd, run.runId, leaseSignal, workflowStopSignal);
-		await writeFile(systemPromptFile, buildSystemPrompt(compiledTask), "utf8");
+		await writeFile(systemPromptFile, systemPrompt, "utf8");
 		await throwIfLaunchStopped(cwd, run.runId, leaseSignal, workflowStopSignal);
 		await writeFile(taskPromptFile, compiledTask.compiledPrompt, "utf8");
 		await throwIfLaunchStopped(cwd, run.runId, leaseSignal, workflowStopSignal);
@@ -3122,7 +3150,7 @@ export async function launchSubagentTask(
 			cwd: task.cwd,
 			backend: "headless",
 			task: compiledTask.compiledPrompt,
-			systemPrompt: buildSystemPrompt(compiledTask),
+			systemPrompt,
 			model: compiledTask.runtime.model,
 			thinking: compiledTask.runtime.thinking,
 			async: true,
@@ -3179,11 +3207,12 @@ export async function launchSubagentTask(
 				if (sealedResourcePolicy?.skillDiscovery === "disabled") {
 					subagentOptions.skills = [];
 				}
-				subagentOptions.tools =
-					compiledTask.runtime.tools === undefined
-						? undefined
-						: [...compiledTask.runtime.tools];
+				subagentOptions.tools = effectiveLaunchTools === undefined
+					? undefined
+					: [...effectiveLaunchTools];
 				subagentOptions.extensions = [...sealedLaunch.extensions];
+				assertExtensionIsolationSupported(api, sealedLaunch.noExtensions);
+				if (sealedLaunch.noExtensions === true) subagentOptions.noExtensions = true;
 				if (sealedLaunch.captureToolCalls) subagentOptions.captureToolCalls = true;
 				if (injectedSubagentApi === undefined)
 					await assertSubagentExtensionsLoadable(subagentOptions);
@@ -5187,7 +5216,25 @@ async function readTaskControlJsonSchema(
 ): Promise<JsonSchema | undefined> {
 	const schemaPath = task.artifactGraph?.output.controlSchemaPath;
 	if (!schemaPath) return undefined;
-	return JSON.parse(await readFile(schemaPath, "utf8")) as JsonSchema;
+	const source = await readFile(schemaPath, "utf8");
+	let schema: unknown;
+	try {
+		schema = JSON.parse(source);
+	} catch (error) {
+		throw new Error(`task ${task.taskId} control schema is not valid JSON`, {
+			cause: error,
+		});
+	}
+	const validation = validateJsonSchemaSubset(schema);
+	if (!validation.valid) {
+		throw new Error(
+			`task ${task.taskId} control schema is not supported: ${validation.issues
+				.map((issue) => `${issue.path}: ${issue.message}`)
+				.join("; ")}`,
+		);
+	}
+	// SAFETY: the recursive subset validator has verified every supported schema node.
+	return schema as JsonSchema;
 }
 
 async function directDynamicSynthesisAllowedRefLocators(
@@ -6512,6 +6559,24 @@ export async function prepareSubagentTaskLaunch(
 		]);
 	}
 
+	const nativeHost = compiledTask.runtime.nativeToolsEnabled === false || tools?.length === 0
+		? undefined
+		: run.nativeHost;
+	if (nativeHost !== undefined) {
+		assertWorkflowNativeHostContext(nativeHost);
+		const wrapperPath = join(taskDir, "workflow-native-host-extension.ts");
+		const expectedBytes = buildWorkflowNativeHostExtensionWrapper({
+			importPath: WORKFLOW_NATIVE_HOST_EXTENSION_IMPORT,
+			config: nativeHost,
+		});
+		await mkdir(taskDir, { recursive: true });
+		await writeFile(wrapperPath, expectedBytes, "utf8");
+		extensions.push(wrapperPath);
+		generatedExtensions.push({
+			kind: "native-host", path: wrapperPath, expectedBytes, config: { ...nativeHost },
+		});
+	}
+
 	// Keep the Fast request hook last among task extensions. Its provider guard
 	// also reasserts the sealed model/tier after the complete payload-hook chain.
 	if (fastModeConfig) {
@@ -6535,9 +6600,12 @@ export async function prepareSubagentTaskLaunch(
 	}
 
 	const toolResultBudget = dynamicTaskToolResultBudgetConfiguration(task);
+	const api = await loadSubagentApi();
 	return {
 		extensions,
+		...(api.supportsExplicitExtensionIsolation?.() === true ? { noExtensions: true as const } : {}),
 		...(resourcePolicy === undefined ? {} : { resourcePolicy }),
+		...(nativeHost === undefined ? {} : { nativeHost: { ...nativeHost } }),
 		...(toolProviders
 			? { toolProviders: clonePreparedToolProviders(toolProviders) }
 			: {}),
@@ -7279,7 +7347,7 @@ function subagentRunsDir(
 	return `${DEFAULT_SUBAGENT_RUNS_ROOT}/${run.runId}/${task.taskId}`;
 }
 
-function buildSystemPrompt(task: CompiledTask): string {
+function buildSystemPrompt(task: CompiledTask, effectiveLaunchTools: readonly string[] | undefined): string {
 	const workflowMaxDigestChars = task.artifactGraph?.output.maxDigestChars;
 	const workflowRefsMinItems = task.artifactGraph?.output.refsMinItems;
 	const workflowRefsUrlValidation = task.artifactGraph?.output.refsUrlValidation;
@@ -7317,13 +7385,20 @@ function buildSystemPrompt(task: CompiledTask): string {
 				: [
 						"When complete, provide a concise final report with findings, changed files if any, and blockers.",
 					];
-	const enabledTools = task.runtime.tools ?? [];
+	const enabledTools = effectiveLaunchTools ?? [];
 	const toolPolicy = [
 		"# Effective Tool Policy",
-		enabledTools.length > 0
-			? `Only these tools are enabled for this workflow task: ${enabledTools.join(", ")}.`
-			: "No tools are enabled for this workflow task.",
-		"If the agent definition below mentions tools that are not in this enabled list, ignore those mentions; unavailable tools cannot be called in this workflow run.",
+		effectiveLaunchTools === undefined
+			? "Tool availability follows the host's default tool selection."
+			: enabledTools.length > 0
+				? `Only these tools are enabled for this workflow task: ${enabledTools.join(", ")}.`
+				: "No tools are enabled for this workflow task.",
+		effectiveLaunchTools === undefined
+			? "Use only tools actually available from the host."
+			: "If the agent definition below mentions tools that are not in this enabled list, ignore those mentions; unavailable tools cannot be called in this workflow run.",
+		enabledTools.includes("mcp__*")
+			? "mcp__* includes matching active MCP tools, not a literal callable name. Discover them through tool_search or codemode; trust, exposure and permission checks still apply."
+			: undefined,
 		enabledTools.includes("workflow_web_fetch_source") ||
 		enabledTools.includes("workflow_web_source_read")
 			? "Workflow web-source tools return compact source cards. Preserve sourceRef values in structured outputs. Use workflow_web_source_read for exact evidence snippets; when several snippets are needed from the same sourceRef, batch them with queries:[...] or reads:[...] instead of making repeated calls. If the exact quote is unknown, pass claim plus 2-6 distinctive terms to harvest a candidate source window and preserve its match metadata. Do not read workflow cache files directly."
