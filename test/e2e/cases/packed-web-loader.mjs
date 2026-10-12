@@ -313,7 +313,7 @@ try {
 		const subagentPackage = consumerRequire(
 			join(packageRoot, "node_modules", "@agwab", "pi-subagent", "package.json"),
 		);
-		assert.match(subagentPackage.version, /^0\.6\.\d+$/);
+		assert.equal(subagentPackage.version, "0.7.0");
 		const subagentRequire = createRequire(
 			join(packageRoot, "node_modules", "@agwab", "pi-subagent", "package.json"),
 		);
@@ -329,9 +329,11 @@ try {
 			"readDurableLaunchBarrierV2State",
 			"waitForDurableLaunchBarrierV2Ack",
 			"pruneSubagentRuns",
+			"supportsExplicitExtensionIsolation",
 		]) {
 			assert.equal(typeof subagentApi[name], "function", `missing bundled API ${name}`);
 		}
+		assert.equal(subagentApi.supportsExplicitExtensionIsolation(), true);
 
 		execFileSync(process.execPath, [join(packageRoot, "src", "cli.mjs"), "--help"], {
 			cwd: consumerProject,

@@ -4450,7 +4450,9 @@ async function materializeTerminalSubagentResult(
 			failureKind: snapshot.failureKind,
 			resultPath: resultRef?.path,
 			artifactCwd: resultRef?.artifactCwd,
-			metadata: snapshot.metadata,
+			metadata: hasPartialSubagentOutput(snapshot, subagentResult)
+				? { ...snapshot.metadata, outputPartial: true }
+				: snapshot.metadata,
 			completion: snapshot.completion,
 			toolsConfigured: task.tools,
 			toolCalls: toolCalls?.summary,
@@ -6257,6 +6259,16 @@ function retryOrFailArtifactGraphTask(
 	return true;
 }
 
+function hasPartialSubagentOutput(
+	snapshot: SubagentRunStatusSnapshot,
+	result: Record<string, unknown> | undefined,
+): boolean {
+	return (
+		snapshot.metadata?.outputPartial === true ||
+		(result?.metadata as Record<string, unknown> | undefined)?.outputPartial === true
+	);
+}
+
 function shouldAttemptArtifactGraphSalvage(options: {
 	task: WorkflowTaskRunRecord;
 	statusInfo: {
@@ -6273,6 +6285,7 @@ function shouldAttemptArtifactGraphSalvage(options: {
 }): boolean {
 	if (!options.task.artifactGraph?.enabled) return false;
 	if (options.statusInfo.status !== "failed") return false;
+	if (hasPartialSubagentOutput(options.snapshot, options.subagentResult)) return false;
 	const failureKind =
 		options.statusInfo.failureKind ?? options.snapshot.failureKind;
 	if (
@@ -6317,6 +6330,13 @@ function workflowStatusFromSubagent(
 		(result?.metadata as any)?.contextLengthExceeded ??
 			snapshot.metadata?.contextLengthExceeded,
 	);
+	const outputPartial = hasPartialSubagentOutput(snapshot, result);
+	if (snapshot.status === "completed" && outputPartial)
+		return {
+			status: "failed",
+			failureKind: "partial_output",
+			errorMessage: "child Pi reported unverified partial output",
+		};
 	if (snapshot.status === "completed" && outputBytes === 0)
 		return {
 			status: "failed",
@@ -6328,6 +6348,7 @@ function workflowStatusFromSubagent(
 		snapshot.failureKind === "model" &&
 		outputBytes > 0 &&
 		snapshot.metadata?.stopReason === "stop" &&
+		!outputPartial &&
 		!contextLengthExceeded
 	) {
 		return { status: "completed" };
