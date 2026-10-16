@@ -138,7 +138,7 @@ const BUILTIN_ROLE_RUNTIME: Record<
 		planning: { model: SOL_MODEL, thinking: "xhigh" },
 		"research-execution": { model: SOL_MODEL, thinking: "high" },
 		synthesis: { model: SOL_MODEL, thinking: "xhigh" },
-		verification: { model: SOL_MODEL, thinking: "xhigh" },
+		verification: { model: SOL_MODEL, thinking: "max" },
 		"final-judgment": { model: SOL_MODEL, thinking: "xhigh" },
 	},
 	claude: {

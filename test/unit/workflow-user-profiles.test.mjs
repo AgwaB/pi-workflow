@@ -62,7 +62,7 @@ const MODELS = [
 		id: "gpt-6.1-sol",
 		fullId: SOL,
 		reasoning: true,
-		thinkingLevelMap: { xhigh: "xhigh" },
+		thinkingLevelMap: { xhigh: "xhigh", max: "max" },
 	},
 	{
 		provider: "openai-codex",
@@ -345,6 +345,10 @@ test("all four built-ins use the approved exact role matrix", () => {
 	assert.deepEqual(profileRuntimeForRole("codex-high", "final-judgment"), {
 		model: SOL,
 		thinking: "xhigh",
+	});
+	assert.deepEqual(profileRuntimeForRole("codex-high", "verification"), {
+		model: SOL,
+		thinking: "max",
 	});
 });
 
