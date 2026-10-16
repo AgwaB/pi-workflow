@@ -131,7 +131,7 @@ test("WB-009 privileged npm OIDC job is repository-free and verification is subs
 	assert.match(publish, /registry_error_is_permanent\(\)/);
 	assert.match(publish, /registry_error_is_retryable\(\)/);
 	assert.match(publish, /observe_registry_until_visible\(\)/);
-	assert.match(publish, /max_attempts=40/);
+	assert.match(publish, /max_attempts=150/);
 	assert.match(publish, /latest dist-tag has not converged/);
 	assert.match(publish, /observe_registry_until_visible publication-after\.json dist-tags\.json/);
 	assert.match(publish, /publication-before\.json/);
@@ -301,15 +301,15 @@ exit 2
 		await rm(sleepFile, { force: true });
 		const fullBudget = invoke(helper, "missing");
 		assert.notEqual(fullBudget.status, 0);
-		assert.equal(await readFile(stateFile, "utf8"), "40");
+		assert.equal(await readFile(stateFile, "utf8"), "150");
 		const fullSleeps = (await readFile(sleepFile, "utf8")).trim().split("\n").map(Number);
-		assert.equal(fullSleeps.length, 39);
-		assert.equal(fullSleeps.reduce((sum, seconds) => sum + seconds, 0), 370);
-		assert.ok(fullSleeps.reduce((sum, seconds) => sum + seconds, 0) >= 360);
-		assert.match(fullBudget.stderr, /after 40 attempts/);
+		assert.equal(fullSleeps.length, 149);
+		assert.equal(fullSleeps.reduce((sum, seconds) => sum + seconds, 0), 1470);
+		assert.ok(fullSleeps.reduce((sum, seconds) => sum + seconds, 0) >= 1200);
+		assert.match(fullBudget.stderr, /after 150 attempts/);
 
 		await writeFile(stateFile, "0");
-		const bounded = invoke(helper.replace("max_attempts=40", "max_attempts=3"), "missing");
+		const bounded = invoke(helper.replace("max_attempts=150", "max_attempts=3"), "missing");
 		assert.notEqual(bounded.status, 0);
 		assert.equal(await readFile(stateFile, "utf8"), "3");
 		assert.match(bounded.stderr, /after 3 attempts/);
