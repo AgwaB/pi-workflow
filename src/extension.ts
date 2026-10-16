@@ -271,7 +271,7 @@ const WORKFLOW_DYNAMIC_TOOL_PARAMETERS = {
 		thinking: {
 			type: "string",
 			description: "Optional thinking/reasoning level override.",
-			enum: ["off", "minimal", "low", "medium", "high", "xhigh"],
+			enum: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
 		},
 	},
 	required: ["task"],
@@ -3519,7 +3519,8 @@ function isThinkingLevel(value: string | undefined): value is ThinkingLevel {
 		value === "low" ||
 		value === "medium" ||
 		value === "high" ||
-		value === "xhigh"
+		value === "xhigh" ||
+		value === "max"
 	);
 }
 
@@ -4670,7 +4671,7 @@ function unquoteWorkflowTask(input: string): string {
 function parseThinkingLevel(value: string): ThinkingLevel {
 	if (isThinkingLevel(value)) return value;
 	throw new Error(
-		`Invalid workflow thinking level "${value}". Supported: off, minimal, low, medium, high, xhigh`,
+		`Invalid workflow thinking level "${value}". Supported: off, minimal, low, medium, high, xhigh, max`,
 	);
 }
 

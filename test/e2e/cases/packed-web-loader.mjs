@@ -313,7 +313,7 @@ try {
 		const subagentPackage = consumerRequire(
 			join(packageRoot, "node_modules", "@agwab", "pi-subagent", "package.json"),
 		);
-		assert.equal(subagentPackage.version, "0.7.1");
+		assert.equal(subagentPackage.version, "0.7.2");
 		const subagentRequire = createRequire(
 			join(packageRoot, "node_modules", "@agwab", "pi-subagent", "package.json"),
 		);

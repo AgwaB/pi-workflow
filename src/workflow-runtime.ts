@@ -157,8 +157,8 @@ export function splitKnownThinkingSuffix(model: string): {
 }
 
 // Mirrors pi-ai getSupportedThinkingLevels: a non-reasoning model only
-// supports "off", and "xhigh" is opt-in via an explicit thinkingLevelMap
-// entry. When no model info is available (model not in the registry), defer
+// supports "off", and "xhigh" and "max" are opt-in via an explicit
+// thinkingLevelMap entry. When no model info is available (model not in the registry), defer
 // to the child pi CLI clamp by allowing every level.
 export function getSupportedThinkingLevels(
 	model: WorkflowModelInfo | undefined,
@@ -169,7 +169,7 @@ export function getSupportedThinkingLevels(
 	return THINKING_LEVELS.filter((level) => {
 		const mapped = model.thinkingLevelMap?.[level];
 		if (mapped === null) return false;
-		if (level === "xhigh") return mapped !== undefined;
+		if (level === "xhigh" || level === "max") return mapped !== undefined;
 		return true;
 	});
 }

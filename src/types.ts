@@ -11,6 +11,7 @@ export const THINKING_LEVELS = [
 	"medium",
 	"high",
 	"xhigh",
+	"max",
 ] as const;
 export const FAST_MODES = ["inherit", "off", "on"] as const;
 export const WORKFLOW_PROFILE_ROLES = [
