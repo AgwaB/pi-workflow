@@ -911,7 +911,7 @@ function isWorkflowAutoSelection(value: unknown): boolean {
 	return (
 		(runtime.model === undefined || typeof runtime.model === "string") &&
 		(runtime.thinking === undefined ||
-			["off", "minimal", "low", "medium", "high", "xhigh"].includes(
+			["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(
 				runtime.thinking as string,
 			)) &&
 		(runtime.fast === undefined || runtime.fast === "on" || runtime.fast === "off")

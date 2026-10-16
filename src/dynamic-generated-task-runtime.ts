@@ -937,7 +937,8 @@ function optionalDynamicThinking(value: unknown): ThinkingLevel | undefined {
 		value === "low" ||
 		value === "medium" ||
 		value === "high" ||
-		value === "xhigh"
+		value === "xhigh" ||
+		value === "max"
 	) {
 		return value;
 	}
