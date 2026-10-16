@@ -13,7 +13,7 @@ const PAGE_UP = "\x1b[5~";
 const PAGE_DOWN = "\x1b[6~";
 const ENTER = "\r";
 const ESC = "\x1b";
-const LUNA = "openai-codex/gpt-5.6-luna";
+const LUNA = "openai-codex/gpt-6-luna";
 const MODELS = [
 	"Inherit current Pi model at run start",
 	...Array.from({ length: 118 }, (_, index) => `catalog/model-${String(index).padStart(3, "0")}`),
@@ -79,7 +79,7 @@ test("120-model selector keeps focus visible on open, navigation, wrap and resiz
 	});
 	let lines = frame(state);
 	assert.equal(pointed(lines), `→ ${LUNA}`);
-	assert.match(lines.join("\n"), /Selected: openai-codex\/gpt-5\.6-luna/);
+	assert.match(lines.join("\n"), /Selected: openai-codex\/gpt-6-luna/);
 	assert.match(lines.join("\n"), /\(120\/120\)/);
 	assert.ok(lines.filter((line) => /catalog\/model/.test(line)).length <= 9);
 	state.component.handleInput(DOWN);
@@ -92,7 +92,7 @@ test("120-model selector keeps focus visible on open, navigation, wrap and resiz
 	lines = frame(state, 48);
 	assert.match(lines.join("\n"), /esc back/);
 	assert.equal(pointed(lines), `→ ${LUNA}`);
-	assert.match(lines.join("\n"), /Selected: openai-codex\/gpt-5\.6-luna/);
+	assert.match(lines.join("\n"), /Selected: openai-codex\/gpt-6-luna/);
 	state.component.handleInput(ENTER);
 	assert.equal(await result, LUNA);
 });

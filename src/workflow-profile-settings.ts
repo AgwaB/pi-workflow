@@ -101,9 +101,9 @@ export interface WorkflowProfileLoadResult {
 
 type BuiltinRoleRuntime = { model: string; thinking: ThinkingLevel };
 
-const SOL_MODEL = "openai-codex/gpt-5.6-sol";
-const LUNA_MODEL = "openai-codex/gpt-5.6-luna";
-const OPUS_MODEL = "anthropic/claude-opus-4-8";
+const SOL_MODEL = "openai-codex/gpt-6.1-sol";
+const LUNA_MODEL = "openai-codex/gpt-6-luna";
+const OPUS_MODEL = "anthropic/claude-opus-5-5";
 const SETTINGS_DIRECTORY = join("workflow-profiles", "v1");
 const SETTINGS_FILE_PATTERN = /^[a-f0-9]{64}\.json$/;
 const MAX_STALE_SCAN_FILES = 2_000;

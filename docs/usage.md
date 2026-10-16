@@ -414,11 +414,11 @@ The built-in role matrix is exact:
 
 | `profileRole` | Codex | Codex High | Claude | Mixed |
 |---|---|---|---|---|
-| `planning` | `openai-codex/gpt-5.6-sol` / `high` | `openai-codex/gpt-5.6-sol` / `xhigh` | `anthropic/claude-opus-4-8` / `high` | `anthropic/claude-opus-4-8` / `high` |
-| `research-execution` | `openai-codex/gpt-5.6-luna` / `medium` | `openai-codex/gpt-5.6-sol` / `high` | `anthropic/claude-opus-4-8` / `medium` | `openai-codex/gpt-5.6-luna` / `medium` |
-| `synthesis` | `openai-codex/gpt-5.6-luna` / `high` | `openai-codex/gpt-5.6-sol` / `xhigh` | `anthropic/claude-opus-4-8` / `high` | `anthropic/claude-opus-4-8` / `high` |
-| `verification` | `openai-codex/gpt-5.6-luna` / `high` | `openai-codex/gpt-5.6-sol` / `xhigh` | `anthropic/claude-opus-4-8` / `high` | `openai-codex/gpt-5.6-luna` / `high` |
-| `final-judgment` | `openai-codex/gpt-5.6-sol` / `xhigh` | `openai-codex/gpt-5.6-sol` / `xhigh` | `anthropic/claude-opus-4-8` / `high` | `anthropic/claude-opus-4-8` / `high` |
+| `planning` | `openai-codex/gpt-6.1-sol` / `high` | `openai-codex/gpt-6.1-sol` / `xhigh` | `anthropic/claude-opus-5-5` / `high` | `anthropic/claude-opus-5-5` / `high` |
+| `research-execution` | `openai-codex/gpt-6-luna` / `medium` | `openai-codex/gpt-6.1-sol` / `high` | `anthropic/claude-opus-5-5` / `medium` | `openai-codex/gpt-6-luna` / `medium` |
+| `synthesis` | `openai-codex/gpt-6-luna` / `high` | `openai-codex/gpt-6.1-sol` / `xhigh` | `anthropic/claude-opus-5-5` / `high` | `anthropic/claude-opus-5-5` / `high` |
+| `verification` | `openai-codex/gpt-6-luna` / `high` | `openai-codex/gpt-6.1-sol` / `xhigh` | `anthropic/claude-opus-5-5` / `high` | `openai-codex/gpt-6-luna` / `high` |
+| `final-judgment` | `openai-codex/gpt-6.1-sol` / `xhigh` | `openai-codex/gpt-6.1-sol` / `xhigh` | `anthropic/claude-opus-5-5` / `high` | `anthropic/claude-opus-5-5` / `high` |
 
 Custom begins from the most recently selected built-in combination, restores its saved draft on later visits, and is not reset while browsing built-ins. Each stage's model and thinking can independently be fixed or inherit the current Pi value at the next run's start. The picker previews paged stage assignments and filters fixed thinking choices through Pi's actual model capability metadata. The native Custom model picker opens on the current setting in a bounded, scrolling list. Type provider/model words to filter locally, use arrows or Page Up/Page Down to navigate, and inspect the wrapped selected-model label below the list. Resizing keeps the highlighted selection in view; an empty search result cannot be selected. Esc goes back one screen: thinking → model (when editing both) → field → stage → preview → profiles → workflows. With an explicit workflow argument, profiles is the entry screen; otherwise workflows is the entry screen. Esc at the entry screen closes the flow. Back keeps completed Custom draft edits within the profile flow but discards an incomplete stage assignment when leaving its field editor; returning to the workflow picker discards the unsaved flow. Only **Save for next run** persists settings. Esc and failed validation do not save. Opening, editing, previewing, and saving do not start a workflow or provider call.
 
