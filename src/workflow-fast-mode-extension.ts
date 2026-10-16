@@ -27,14 +27,23 @@ type WorkflowFastApi = "openai-responses" | "openai-codex-responses";
 const WORKFLOW_FAST_MODEL_APIS = new Map<string, WorkflowFastApi>([
 	["openai/gpt-5.4", "openai-responses"],
 	["openai/gpt-5.5", "openai-responses"],
+	["openai/gpt-5.6-sol", "openai-responses"],
+	["openai/gpt-5.6-terra", "openai-responses"],
+	["openai/gpt-5.6-luna", "openai-responses"],
+	["openai/gpt-6-astra", "openai-responses"],
+	["openai/gpt-6-sol", "openai-responses"],
+	["openai/gpt-6-luna", "openai-responses"],
+	["openai/gpt-6.1-sol", "openai-responses"],
 	["openai-codex/gpt-5.4", "openai-codex-responses"],
 	["openai-codex/gpt-5.5", "openai-codex-responses"],
+	["openai-codex/gpt-5.6", "openai-codex-responses"],
 	["openai-codex/gpt-5.6-sol", "openai-codex-responses"],
 	["openai-codex/gpt-5.6-terra", "openai-codex-responses"],
 	["openai-codex/gpt-5.6-luna", "openai-codex-responses"],
 	["openai-codex/gpt-6-astra", "openai-codex-responses"],
 	["openai-codex/gpt-6-sol", "openai-codex-responses"],
 	["openai-codex/gpt-6-luna", "openai-codex-responses"],
+	["openai-codex/gpt-6.1-sol", "openai-codex-responses"],
 ]);
 
 export interface WorkflowFastModeConfig {
