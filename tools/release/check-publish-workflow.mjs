@@ -26,7 +26,7 @@ const runDigests = {
 	"build:Release validation in read-only privilege context": "2dcf0cae26e5fbb692c48fcf6d85a57e02342aeb1e23fdb76311b35245c7c01e",
 	"build:Create exact package and source-tree metadata": "62304bd3eccd8703a5af4380b5c5a556e6156acf16f40db4da61dec51ed301ca",
 	"source:Verify promoted release source identity": "b3f7b5a016768071b5bec9b71e0717c834ceb06ea8c5c186caf5222ad38d46b0",
-	"publish:Publish exact promoted tarball and record registry envelopes": "9941ccbc2a373c45ec97dee3b377bae82847f31b041185a922139d18fcc4b670",
+	"publish:Publish exact promoted tarball and record registry envelopes": "aec0740b27a72549692c0f3b0d1f4355888e2f002513f7eea275683f04b4543f",
 	"verification:Cryptographically gate and verify exact npm provenance": "ebb058402cac8e5ab8dd5d53ec38ab63cb88f7362ee4a78707f7b0be563df346",
 	"release:Create GitHub release for the exact published commit": "1c548669986532b1366629fbc7c276231bcd12094bda315768938cd3e08ba175",
 };
@@ -81,8 +81,8 @@ const negativeFixtures = [
 	["wrong npm tag", (c) => { c.jobs.publish.steps[3].run = c.jobs.publish.steps[3].run.replaceAll("--tag latest", "--tag next"); }],
 	["single-field npm view drift", (c) => { c.jobs.publish.steps[3].run = c.jobs.publish.steps[3].run.replace("name version dist", "dist"); }],
 	["missing registry visibility reconciliation", (c) => { c.jobs.publish.steps[3].run = c.jobs.publish.steps[3].run.replace("observe_registry_until_visible publication-after.json dist-tags.json", "true # registry visibility reconciliation removed"); }],
-	["unbounded registry visibility reconciliation", (c) => { c.jobs.publish.steps[3].run = c.jobs.publish.steps[3].run.replace("max_attempts=40", "max_attempts=0"); }],
-	["registry visibility budget is below the observed publication window", (c) => { c.jobs.publish.steps[3].run = c.jobs.publish.steps[3].run.replace("max_attempts=40", "max_attempts=30"); }],
+	["unbounded registry visibility reconciliation", (c) => { c.jobs.publish.steps[3].run = c.jobs.publish.steps[3].run.replace("max_attempts=150", "max_attempts=0"); }],
+	["registry visibility budget is below the observed publication window", (c) => { c.jobs.publish.steps[3].run = c.jobs.publish.steps[3].run.replace("max_attempts=150", "max_attempts=40"); }],
 	["publication state evidence is omitted", (c) => { c.jobs.publish.steps[4].with.path = c.jobs.publish.steps[4].with.path.replace("publication-state.json\n", ""); }],
 	["failed publication evidence is not preserved", (c) => { delete c.jobs.publish.steps[4].if; }],
 	["accepted publication state is not recorded", (c) => { c.jobs.publish.steps[3].run = c.jobs.publish.steps[3].run.replace("write_publication_state false succeeded", "true # accepted publication state omitted"); }],
@@ -243,9 +243,9 @@ function validateWorkflow(candidate) {
 	const registryAttempts = Number(registryAttemptsMatch[1]);
 	const registrySleepBudget = Array.from({ length: registryAttempts - 1 }, (_, index) => index + 1)
 		.reduce((seconds, attempt) => seconds + (attempt < 6 ? attempt * 2 : 10), 0);
-	assert.equal(registryAttempts, 40);
-	assert.equal(registrySleepBudget, 370);
-	assert.ok(registrySleepBudget >= 360 && registrySleepBudget <= 600, "registry visibility wait must be bounded beyond the observed 310-second publication window");
+	assert.equal(registryAttempts, 150);
+	assert.equal(registrySleepBudget, 1470);
+	assert.ok(registrySleepBudget >= 1200 && registrySleepBudget <= 1800, "registry visibility wait must be bounded beyond the observed 798-second publication window");
 	assert.match(registryObservation, /while \[ "\$attempt" -le "\$max_attempts" \]/);
 	assert.equal((registryObservation.match(/registry_error_is_permanent "\$publication_error" \|\| ! registry_error_is_retryable "\$publication_error"/g) ?? []).length, 2);
 	assert.match(registryObservation, /latest dist-tag has not converged/);

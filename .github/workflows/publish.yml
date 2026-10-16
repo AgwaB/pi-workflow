@@ -383,7 +383,7 @@ jobs:
             tags_output="$2"
             metadata_tmp="${metadata_output}.tmp"
             tags_tmp="${tags_output}.tmp"
-            max_attempts=40
+            max_attempts=150
             attempt=1
             last_reason="registry state is not visible"
             while [ "$attempt" -le "$max_attempts" ]; do
