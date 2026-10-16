@@ -52,27 +52,27 @@ after(() => {
 	rmSync(ROOT, { recursive: true, force: true });
 });
 
-const SOL = "openai-codex/gpt-5.6-sol";
-const LUNA = "openai-codex/gpt-5.6-luna";
-const OPUS = "anthropic/claude-opus-4-8";
+const SOL = "openai-codex/gpt-6.1-sol";
+const LUNA = "openai-codex/gpt-6-luna";
+const OPUS = "anthropic/claude-opus-5-5";
 const OTHER = "local/other";
 const MODELS = [
 	{
 		provider: "openai-codex",
-		id: "gpt-5.6-sol",
+		id: "gpt-6.1-sol",
 		fullId: SOL,
 		reasoning: true,
 		thinkingLevelMap: { xhigh: "xhigh" },
 	},
 	{
 		provider: "openai-codex",
-		id: "gpt-5.6-luna",
+		id: "gpt-6-luna",
 		fullId: LUNA,
 		reasoning: true,
 	},
 	{
 		provider: "anthropic",
-		id: "claude-opus-4-8",
+		id: "claude-opus-5-5",
 		fullId: OPUS,
 		reasoning: true,
 	},
@@ -399,7 +399,7 @@ test("missing models, unsupported thinking, and missing roles fail without subst
 				context(spec, workflowPath, { availableModels: MODELS.slice(1) }),
 				"codex",
 			),
-		/profile cannot be applied.*model openai-codex\/gpt-5\.6-sol is not available/s,
+		/profile cannot be applied.*model openai-codex\/gpt-6\.1-sol is not available/s,
 	);
 	assert.doesNotThrow(() =>
 		buildWorkflowExecutionProfile(
@@ -919,7 +919,7 @@ test("native preview renderer uses responsive columns and the shared neutral pal
 
 	const wide = renderWorkflowProfilePreview(preview, theme, 100);
 	assert.match(wide[1], /STAGE\s+ROLE\s+MODEL\s+THINKING/);
-	assert.match(wide[3], /triage\s+planning\s+openai-codex\/gpt-5\.6-sol\s+xhigh/);
+	assert.match(wide[3], /triage\s+planning\s+openai-codex\/gpt-6\.1-sol\s+xhigh/);
 	assert.ok(wide.every((line) => Array.from(line).length <= 100));
 	for (const color of ["accent", "text", "muted", "dim", "borderMuted"]) {
 		assert.ok(colors.includes(color), `missing ${color}`);
@@ -930,7 +930,7 @@ test("native preview renderer uses responsive columns and the shared neutral pal
 	assert.equal(narrow.length, 1 + preview.rows.length * 2);
 	assert.ok(narrow.every((line) => Array.from(line).length <= 48));
 	assert.match(narrow[1], /triage \[planning\]/);
-	assert.match(narrow[2], /openai-codex\/gpt-5\.6-sol/);
+	assert.match(narrow[2], /openai-codex\/gpt-6\.1-sol/);
 
 	const blocked = renderWorkflowProfilePreview(
 		{ ...preview, error: "first line\n- second line" },
@@ -1011,7 +1011,7 @@ test("Custom model, thinking and stage focus do not rotate the underlying choice
 	assert.equal(modelCall.options[0], "Inherit current Pi model at run start");
 	assert.equal(modelCall.selection.selected, `${LUNA} (current setting)`);
 	assert.equal(modelCall.selection.searchable, true);
-	assert.match(modelCall.title, /Current setting: openai-codex\/gpt-5\.6-luna/);
+	assert.match(modelCall.title, /Current setting: openai-codex\/gpt-6-luna/);
 	const thinkingCall = ui.calls.find(({ title }) => title.startsWith("Choose thinking"));
 	assert.equal(thinkingCall.options[0], "Inherit current Pi thinking at run start");
 	assert.equal(thinkingCall.selection.selected, "medium (current setting)");

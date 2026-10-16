@@ -19,8 +19,8 @@ after(() => {
 	else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
 	rmSync(ROOT, { recursive: true, force: true });
 });
-const SOL = "openai-codex/gpt-5.6-sol";
-const MODELS = [{ provider: "openai-codex", id: "gpt-5.6-sol", fullId: SOL, reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } }];
+const SOL = "openai-codex/gpt-6.1-sol";
+const MODELS = [{ provider: "openai-codex", id: "gpt-6.1-sol", fullId: SOL, reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } }];
 const ROUTING = { useWhen: ["Review code."], avoidWhen: ["Implement a patch."], outputs: ["Review report."] };
 const MAX_ISO_TIMESTAMP = "9999-12-31T23:59:59.999Z";
 
