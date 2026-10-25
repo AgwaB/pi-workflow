@@ -2164,6 +2164,23 @@ test("awaitTerminal bind failure reports run id and deterministic wait recovery"
 	}
 });
 
+test("workflow tools defer only when PI_WORKFLOW_TOOL_EXPOSURE=deferred", () => {
+	const register = (tools, env) => {
+		registerWorkflowNaturalLanguageTools(fakePi(tools), env);
+		registerWorkflowWaitTool(fakePi(tools), env);
+	};
+	const direct = [];
+	register(direct, { PI_WORKFLOW_ROLE: "supervisor" });
+	assert.ok(direct.some((tool) => tool.name === WORKFLOW_WAIT_TOOL));
+	assert.ok(direct.length >= 4);
+	assert.ok(direct.every((tool) => tool.exposure === undefined));
+
+	const deferred = [];
+	register(deferred, { PI_WORKFLOW_ROLE: "supervisor", PI_WORKFLOW_TOOL_EXPOSURE: "deferred" });
+	assert.equal(deferred.length, direct.length);
+	assert.ok(deferred.every((tool) => tool.exposure === "deferred"));
+});
+
 test("workflow launch tools expose and enforce terminal wait options", async () => {
 	const tools = [];
 	registerWorkflowNaturalLanguageTools(fakePi(tools), {
