@@ -361,13 +361,20 @@ function notifyParentUsageDeferred(ctx: ExtensionContext): void {
 	else process.stderr.write(`${message}\n`);
 }
 
+// Opt-in: keep workflow tools out of every request until tool_search loads them.
+function workflowToolExposure(env: NodeJS.ProcessEnv): { exposure?: "deferred" } {
+	return env.PI_WORKFLOW_TOOL_EXPOSURE === "deferred" ? { exposure: "deferred" } : {};
+}
+
 export function registerWorkflowNaturalLanguageTools(
 	pi: ExtensionAPI,
 	env: NodeJS.ProcessEnv = process.env,
 ): void {
 	if (!isWorkflowSupervisorEnabled(env)) return;
+	const exposure = workflowToolExposure(env);
 
 	pi.registerTool({
+		...exposure,
 		name: WORKFLOW_LIST_TOOL,
 		label: "List Workflows",
 		description:
@@ -409,6 +416,7 @@ export function registerWorkflowNaturalLanguageTools(
 	} as any);
 
 	pi.registerTool({
+		...exposure,
 		name: WORKFLOW_RUN_TOOL,
 		label: "Run Workflow",
 		description:
@@ -457,6 +465,7 @@ export function registerWorkflowNaturalLanguageTools(
 	} as any);
 
 	pi.registerTool({
+		...exposure,
 		name: WORKFLOW_DYNAMIC_TOOL,
 		label: "Run Dynamic Workflow",
 		description:
@@ -519,6 +528,7 @@ export function registerWorkflowWaitTool(
 ): void {
 	if (!isWorkflowSupervisorEnabled(env)) return;
 	pi.registerTool({
+		...workflowToolExposure(env),
 		name: WORKFLOW_WAIT_TOOL,
 		label: "Wait for Workflow",
 		description:
