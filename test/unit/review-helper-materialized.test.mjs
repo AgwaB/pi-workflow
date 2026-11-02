@@ -13,9 +13,53 @@ const citation = { file: "source.ts", lineStart: 1, lineEnd: 1, quote };
 const candidate = { id: "finding-001", title: "Local gap", claim: "Gap", severity: "medium", requirementIds: ["REQ-1"], specEvidence: [], implementationEvidence: [], testEvidence: [], uncertainty: "Verify" };
 const readControl = async (cwd, task) => JSON.parse(await readFile(join(dirname(join(cwd, task.files.result)), "control.json"), "utf8"));
 
-async function withRun(bundlePath, name, fn) {
+function collapseMaterializedCleanupErrors(errors) {
+  if (errors.length === 0) return undefined;
+  if (errors.length === 1) return errors[0];
+  return new AggregateError(errors, "materialized fixture teardown failed");
+}
+
+async function cleanupMaterializedRun(cwd, beforeRemove) {
+  const errors = [];
+  try {
+    await h.flushPendingIndexUpdatesForTests();
+  } catch (error) {
+    errors.push(error);
+    return collapseMaterializedCleanupErrors(errors);
+  }
+  try {
+    h.setSubagentApiForTests(undefined);
+    h.setIndexUpdateDebounceMsForTests(undefined);
+  } catch (error) {
+    errors.push(error);
+  }
+  if (errors.length === 0) {
+    try {
+      if (beforeRemove) await beforeRemove(cwd);
+      await rm(cwd, { recursive: true, force: true });
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  return collapseMaterializedCleanupErrors(errors);
+}
+
+function throwMaterializedRunFailures(primaryFailure, cleanupFailure) {
+  if (primaryFailure && cleanupFailure) {
+    throw new AggregateError(
+      [primaryFailure, cleanupFailure],
+      "materialized test body and teardown failed",
+    );
+  }
+  if (cleanupFailure) throw cleanupFailure;
+  if (primaryFailure) throw primaryFailure;
+}
+
+async function withRun(bundlePath, name, fn, beforeRemove) {
   const cwd = await mkdtemp(join(tmpdir(), "helper-materialized-"));
   let current;
+  let primaryFailure;
+  let cleanupFailure;
   try {
     h.writeAgent(cwd, "scout", "read, grep, find, ls");
     await writeFile(join(cwd, "source.ts"), `${quote}\n`);
@@ -51,7 +95,12 @@ async function withRun(bundlePath, name, fn) {
       await cp(join(cwd, ".pi", "workflows", run.runId), join(destination, run.runId), { recursive: true });
       await writeFile(join(destination, "summary.json"), JSON.stringify({ fixtureCwd: cwd, runId: run.runId, launches: launches.map(row => ({ agent: row.agent, model: row.model, tools: row.tools })), tasks: current.tasks.map(task => ({ specId: task.specId, taskId: task.taskId, status: task.status, foreachGenerated: task.foreachGenerated })) }, null, 2));
     }
-  } finally { h.setSubagentApiForTests(undefined); await rm(cwd, { recursive: true, force: true }); }
+  } catch (error) {
+    primaryFailure = error;
+  } finally {
+    cleanupFailure = await cleanupMaterializedRun(cwd, beforeRemove);
+  }
+  throwMaterializedRunFailures(primaryFailure, cleanupFailure);
 }
 
 for (const mode of ["grounded", "drop-grounded", "legacy", "drop-unverified", "missing-file", "report-absent", "mapping-missing"]) {
@@ -136,3 +185,38 @@ for (const mode of ["grounded", "symlink", "identity-mismatch"]) {
     assert.equal(gated.value.partitions.needsHuman.length, mode === "grounded" ? 0 : 1);
   }));
 }
+
+test("materialized fixture cleanup flushes an advisory index update before removal", async () => {
+  const expectedName = "materialized cleanup pending index update";
+  let runId;
+  await withRun(
+    "workflows/spec-review",
+    "materialized-index-drain",
+    async ({ cwd, run }) => {
+      runId = run.runId;
+      await h.flushPendingIndexUpdatesForTests();
+      const before = JSON.parse(
+        await readFile(join(cwd, ".pi", "workflows", "index.json"), "utf8"),
+      );
+      const indexedBefore = before.runs.find((entry) => entry.runId === runId);
+      assert.ok(indexedBefore);
+      assert.notEqual(indexedBefore.name, expectedName);
+
+      h.setIndexUpdateDebounceMsForTests(60_000);
+      run.name = expectedName;
+      await h.writeRunRecord(cwd, run);
+    },
+    async (cwd) => {
+      const index = JSON.parse(
+        await readFile(join(cwd, ".pi", "workflows", "index.json"), "utf8"),
+      );
+      const indexed = index.runs.find((entry) => entry.runId === runId);
+      assert.ok(indexed);
+      assert.equal(
+        indexed.name,
+        expectedName,
+        "fixture removal follows the forced advisory index flush",
+      );
+    },
+  );
+});

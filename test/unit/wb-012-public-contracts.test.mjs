@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { realpathSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -11,10 +12,12 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const readRoot = (path) => readFile(join(root, path), "utf8");
 
 test("workflow name resolution follows documented priority and same-root ambiguity", async () => {
-	const cwd = await mkdtemp(join(tmpdir(), "pi-workflow-resolution-contract-"));
+	const cwd = realpathSync(await mkdtemp(join(tmpdir(), "pi-workflow-resolution-contract-")));
 	const home = join(cwd, "home");
 	const previousHome = process.env.HOME;
+	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 	process.env.HOME = home;
+	process.env.PI_CODING_AGENT_DIR = join(home, ".pi", "agent");
 	try {
 		const validSpec = `${JSON.stringify({ schemaVersion: 1, defaults: { agent: "scout", readOnly: true, tools: ["read"] }, artifactGraph: { stages: [{ id: "main", type: "single", prompt: "Check." }] } })}\n`;
 		const shared = join(cwd, "workflows", "deep-review", "spec.json");
@@ -60,6 +63,8 @@ test("workflow name resolution follows documented priority and same-root ambigui
 	} finally {
 		if (previousHome === undefined) delete process.env.HOME;
 		else process.env.HOME = previousHome;
+		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
 		await rm(cwd, { recursive: true, force: true });
 	}
 });

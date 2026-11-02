@@ -1,17 +1,256 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, rm, symlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { startRpcSession } from "./surface-rpc-harness.mjs";
+import workflowExtension, { GOAL_TOOL } from "../../.tmp/unit/extension.js";
 
-// Startup readiness (cold subprocess boot + extension compile) is budgeted apart
+// Startup readiness (cold subprocess boot + built extension load) is budgeted apart
 // from post-ready RPC operations: the first get_commands response absorbs boot
 // latency, which grows under parallel CI load, while every command afterwards is
 // held to a tight operation deadline. The whole test carries a finite timeout so
 // a wedged child fails the case instead of hanging the run.
 const STARTUP_BUDGET_MS = 30000;
 const OPERATION_BUDGET_MS = 10000;
+
+function fakeWorkflowSurface() {
+ const commands = new Map(), tools = [];
+ workflowExtension({
+  on() {},
+  registerCommand(name, command) { commands.set(name, command); },
+  registerTool(tool) { tools.push(tool); },
+  getThinkingLevel() { return "medium"; },
+ });
+ return { workflow: commands.get("workflow"), tools };
+}
+
+test("registered /workflow goal authoring preserves literal JSON and save-only has no execution effect", async (t) => {
+ const cwd = await mkdtemp(join(tmpdir(), "surface-goal-author-"));
+ t.after(() => rm(cwd, { recursive: true, force: true }));
+ const { workflow, tools } = fakeWorkflowSurface();
+ assert.equal(tools.find(tool => tool.name === GOAL_TOOL)?.name, "workflow_goal");
+ let confirmations = 0;
+ const notices = [];
+ const choices = [
+  "Deterministic exact JSON value",
+  "Read and verify only",
+  "Save definition",
+ ];
+ const inputs = [
+  '{"reserved":{"constructor":["x"],"__proto__":0},"fraction":1.5}',
+  "",
+  "",
+  "",
+  "",
+  "goals/literal.json",
+ ];
+ const ctx = {
+  cwd, hasUI: true, mode: "tui",
+  model: { provider: "fixture", id: "model" },
+  modelRegistry: { getAvailable() { return []; } },
+  ui: {
+   input: async () => inputs.shift(),
+   select: async () => choices.shift(),
+   confirm: async () => { confirmations++; return true; },
+   notify: (text, level) => notices.push({ text, level }),
+  },
+ };
+ await workflow.handler("goal create preserve literal JSON", ctx);
+ const saved = JSON.parse(await readFile(join(cwd, "goals", "literal.json"), "utf8"));
+ assert.deepEqual(
+  saved.goal.criteria[0].verifier.config.expected,
+  JSON.parse('{"reserved":{"constructor":["x"],"__proto__":0},"fraction":1.5}'),
+ );
+ assert.deepEqual(saved.goal.criteria[0].verifier.subject, {
+  resultSlot: "result", artifact: "control", path: "$.result",
+ });
+ assert.equal(confirmations, 0, "save-only does not request execution confirmation");
+ assert.ok(notices.some(({ text }) => /no run was created/i.test(text)));
+ assert.equal((await readFile(join(cwd, ".pi", "goals", "current"), "utf8").catch(error => error.code)), "ENOENT");
+ await assert.rejects(() => tools.find(tool => tool.name === GOAL_TOOL).execute(
+  "call", { action: "create", request: "must not mutate" }, new AbortController().signal, undefined, { cwd },
+ ), /rejects unknown fields and accessors/);
+ await assert.rejects(() => tools.find(tool => tool.name === GOAL_TOOL).execute(
+  "call", { action: "create" }, new AbortController().signal, undefined, { cwd },
+ ), /Ordinary Goal tool is read-only/);
+ assert.equal((await readFile(join(cwd, ".pi", "goals", "current"), "utf8").catch(error => error.code)), "ENOENT");
+});
+
+test("registered /workflow goal rubric authoring selects the ordinary engine producer", async (t) => {
+ const cwd = await mkdtemp(join(tmpdir(), "surface-goal-rubric-"));
+ t.after(() => rm(cwd, { recursive: true, force: true }));
+ const { workflow } = fakeWorkflowSurface();
+ const statement = "Compare both original sources and preserve contradictions and unknowns.";
+ const inputs = [statement, "inputs", "", "", "", "goals/research.json"];
+ const choices = ["Model-rubric statement", "Read and verify only", "Save definition"];
+ const notices = [];
+ await workflow.handler("goal create compare original sources", {
+  cwd, hasUI: true, mode: "tui",
+  ui: {
+   input: async () => inputs.shift(),
+   select: async () => choices.shift(),
+   confirm: async () => { throw new Error("save-only must not execute or overwrite"); },
+   notify: (text) => notices.push(text),
+  },
+ });
+ assert.ok(notices.some(text => /no run was created/i.test(text)), JSON.stringify(notices));
+ const saved = JSON.parse(await readFile(join(cwd, "goals/research.json"), "utf8"));
+ assert.deepEqual(saved.goal.criteria[0].verifier, {
+  kind: "model-rubric",
+  producerId: "json-control-rubric-v1",
+  target: "artifact",
+  subject: { resultSlot: "result", artifact: "control", path: "$.result" },
+  config: { rubric: { statement }, minScore: 1 },
+ });
+ assert.equal(inputs.length, 0);
+ assert.equal(choices.length, 0);
+});
+
+test("registered /workflow goal cancellation and readonly dispatch do not enter authoring", async (t) => {
+ const cwd = await mkdtemp(join(tmpdir(), "surface-goal-cancel-"));
+ t.after(() => rm(cwd, { recursive: true, force: true }));
+ const { workflow } = fakeWorkflowSurface();
+ const notices = [];
+ let inputs = 0;
+ const ctx = {
+  cwd, hasUI: true, mode: "tui",
+  ui: {
+   input: async () => { inputs++; return undefined; },
+   select: async () => undefined,
+   confirm: async () => { throw new Error("confirmation must not occur"); },
+   notify: (text, level) => notices.push({ text, level }),
+  },
+ };
+ await workflow.handler("goal", ctx);
+ assert.equal(inputs, 1);
+ assert.equal(notices.some(({ text }) => /cancelled/i.test(text)), true);
+ await workflow.handler("goal list", ctx);
+ assert.equal(inputs, 1, "read-only list never prompts for authoring");
+ assert.ok(notices.some(({ text }) => /No goals found/i.test(text)));
+ const scopeCancelled = {
+  ...ctx,
+  ui: {
+   input: async (title) => title === "Allowed scope paths (comma-separated; blank for none)" ? undefined : "1",
+   select: async (title) => title === "Completion criterion semantics" ? "Deterministic exact JSON value" : undefined,
+   confirm: async () => { throw new Error("scope cancellation must not confirm"); },
+   notify: (text, level) => notices.push({ text, level }),
+  },
+ };
+ await workflow.handler("goal create cancelled scope", scopeCancelled);
+ assert.equal((await readFile(join(cwd, ".pi", "goals", "current"), "utf8").catch(error => error.code)), "ENOENT");
+});
+
+test("registered /workflow goal save-only retains every JSON literal shape without a runtime", async (t) => {
+ const cwd = await mkdtemp(join(tmpdir(), "surface-goal-literals-"));
+ t.after(() => rm(cwd, { recursive: true, force: true }));
+ const literals = [
+  "true",
+  "1.5",
+  '["a",2,null]',
+  '{"__proto__":{"constructor":"reserved"},"nested":{"x":0}}',
+ ];
+ for (const [index, literal] of literals.entries()) {
+  const { workflow } = fakeWorkflowSurface();
+  const notices = [];
+  const inputs = [literal, "", "", "", "", `goals/literal-${index}.json`];
+  const choices = ["Deterministic exact JSON value", "Read and verify only", "Save definition"];
+  await workflow.handler(`goal create literal ${index}`, {
+   cwd, hasUI: true, mode: "tui",
+   ui: {
+    input: async () => inputs.shift(),
+    select: async () => choices.shift(),
+    confirm: async () => { throw new Error("new save must not overwrite or execute"); },
+    notify: (text, level) => notices.push({ text, level }),
+   },
+  });
+  const saved = JSON.parse(await readFile(join(cwd, `goals/literal-${index}.json`), "utf8"));
+  assert.deepEqual(saved.goal.criteria[0].verifier.config.expected, JSON.parse(literal));
+  assert.ok(notices.some(({ text }) => /no run was created/i.test(text)));
+ }
+ assert.equal((await readFile(join(cwd, ".pi", "goals", "current"), "utf8").catch(error => error.code)), "ENOENT");
+});
+
+test("registered /workflow goal actions never fall through to authoring", async (t) => {
+ const cwd = await mkdtemp(join(tmpdir(), "surface-goal-actions-"));
+ t.after(() => rm(cwd, { recursive: true, force: true }));
+ const { workflow } = fakeWorkflowSurface();
+ let prompts = 0;
+ const ctx = {
+  cwd, hasUI: true, mode: "tui",
+  ui: {
+   input: async () => { prompts++; throw new Error("action must not author"); },
+   select: async () => { prompts++; throw new Error("action must not author"); },
+   confirm: async () => { prompts++; throw new Error("action must not author"); },
+   notify() {},
+  },
+ };
+ for (const action of [
+  "list", "status", "criteria missing-goal", "evidence missing-goal",
+  "wait missing-goal", "pause missing-goal", "resume missing-goal",
+  "cancel missing-goal", "apply missing-goal", "recover missing-goal",
+  "background missing-goal revoke",
+ ]) await workflow.handler(`goal ${action}`, ctx);
+ assert.equal(prompts, 0);
+});
+
+test("registered /workflow goal rejects symlink definitions and fences overwrite changes", async (t) => {
+ const cwd = await mkdtemp(join(tmpdir(), "surface-goal-persistence-"));
+ t.after(() => rm(cwd, { recursive: true, force: true }));
+ await mkdir(join(cwd, "outside"));
+ await writeFile(join(cwd, "outside", "definition.json"), "{}");
+ await symlink(join(cwd, "outside"), join(cwd, "linked"));
+ const { workflow } = fakeWorkflowSurface();
+ const author = (path, onConfirm = async () => true) => {
+  const inputs = ["true", "", "", "", "", path];
+  const choices = ["Deterministic exact JSON value", "Read and verify only", "Save definition"];
+  return {
+   cwd, hasUI: true, mode: "tui",
+   ui: {
+    input: async () => inputs.shift(),
+    select: async () => choices.shift(),
+    confirm: onConfirm,
+    notify() {},
+   },
+  };
+ };
+ await workflow.handler("goal create symlink", author("linked/definition.json"));
+ assert.equal(await readFile(join(cwd, "outside", "definition.json"), "utf8"), "{}");
+ await mkdir(join(cwd, "goals"));
+ const target = join(cwd, "goals", "race.json");
+ await writeFile(target, '{"old":true}\n');
+ await workflow.handler("goal create race", author("goals/race.json", async () => {
+  await writeFile(target, '{"changed":true}\n');
+  return true;
+ }));
+ assert.equal(await readFile(target, "utf8"), '{"changed":true}\n');
+});
+
+test("registered /workflow goal profile path saves the definition without a runtime or execution", async (t) => {
+ const cwd = await mkdtemp(join(tmpdir(), "surface-goal-profile-"));
+ t.after(() => rm(cwd, { recursive: true, force: true }));
+ const { workflow } = fakeWorkflowSurface();
+ const inputs = ["true", "", "", "", "", "goals/profile.json"];
+ const notices = [];
+ await workflow.handler("goal create profile save", {
+  cwd, hasUI: true, mode: "tui",
+  ui: {
+   input: async () => inputs.shift(),
+   select: async (title) => title.startsWith("Completion")
+    ? "Deterministic exact JSON value"
+    : title === "Allowed effects"
+     ? "Read and verify only"
+     : title.startsWith("Goal preview")
+      ? "Save definition and select execution profile"
+      : undefined,
+   confirm: async () => { throw new Error("profile-only must not confirm execution"); },
+   notify: (text, level) => notices.push({ text, level }),
+  },
+ });
+ assert.equal(JSON.parse(await readFile(join(cwd, "goals/profile.json"), "utf8")).goal.objective, "profile save");
+ assert.ok(notices.some(({ text }) => /profile selection cancelled/i.test(text)));
+ assert.equal((await readFile(join(cwd, ".pi", "goals", "current"), "utf8").catch(error => error.code)), "ENOENT");
+});
 
 // A real locked Pi subprocess. Only registered custom commands are sent: no
 // provider credentials, model request, workflow launch, or user configuration.
@@ -46,7 +285,7 @@ test("actual Pi RPC /workflow emits fallback and malformed launch commands stop 
    "--no-context-files",
    "--no-tools",
    "-e",
-   resolve("src/extension.ts"),
+   resolve(".tmp/unit/extension.js"),
    "-e",
    guard,
   ],
@@ -73,6 +312,11 @@ test("actual Pi RPC /workflow emits fallback and malformed launch commands stop 
  });
  assert.equal(commands.success, true);
  assert.ok(commands.data.commands.some((c) => c.name === "workflow"));
+ assert.equal(
+  commands.data.commands.some((c) => c.name === "goal"),
+  false,
+  "Goal is available only as /workflow goal, never as a standalone slash command",
+ );
  send({ id: "context", type: "prompt", message: "/surface-context" });
  await op(
   (e) => e.method === "notify" && e.message === "mode=rpc;hasUI=true",
@@ -83,6 +327,13 @@ test("actual Pi RPC /workflow emits fallback and malformed launch commands stop 
   (e) =>
    e.method === "notify" && /No workflow runs|Workflow runs/i.test(e.message),
   "/workflow board notify",
+ );
+ send({ id: "goal-list", type: "prompt", message: "/workflow goal list" });
+ await op(
+  (e) =>
+   e.method === "notify" &&
+   /^No goals found in ordinary workflow-engine records\./.test(e.message),
+  "/workflow goal list read-only dispatch",
  );
  for (const [id, message] of [
   ["missing", '/workflow run deep-research "task" --model'],

@@ -411,7 +411,8 @@ for (const selectedKind of ["named-workflow", "direct-dynamic"]) {
 			fixture = await setup(selectedKind);
 			setWorkflowLaunchArtifactTestHooksForTests({ onAfterWriteRename({ artifactPath }) { runDirectory = dirname(artifactPath); } });
 			setRunLeaseTestHooksForTests({
-				async onBeforeAtomicRename({ file }) {
+				// Stop intent is published first-writer-wins through an exclusive link.
+				async onBeforeExclusiveLink({ file }) {
 					if (basename(file) !== "stop-intent.json") return;
 					stopStarted = true;
 					await stopGate;

@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { types as utilTypes } from "node:util";
 
 import { loadAgentByName } from "./agents.js";
 import { DYNAMIC_OUTPUT_PROFILES } from "./dynamic-profiles.js";
@@ -10,7 +11,13 @@ import {
 	resourceInheritanceWarnings,
 	WORKFLOW_RESOURCE_POLICY_VERSION,
 } from "./resource-inheritance.js";
-import { EXECUTION_PROFILE_FOREACH_BATCH } from "./execution-profile.js";
+import { loadWorkflowSpec } from "./schema.js";
+import { parseGoalWorkflowSpec } from "./goal-workflow-schema.js";
+import {
+	EXECUTION_PROFILE_FOREACH_BATCH,
+	GOAL_EXECUTION_PROFILE,
+	workflowDefinitionFingerprint,
+} from "./execution-profile.js";
 import {
 	classifyToolCapability,
 	effectiveToolClassification,
@@ -28,9 +35,12 @@ import {
 	type ArtifactGraphStageSpec,
 	type ArtifactGraphWorkflowSpec,
 	type CompiledDynamicWorkflowTask,
+	type GoalWorkflowSpec,
+	type WorkflowSpec,
 	type CompiledTask,
 	type CompiledTaskSafety,
 	type CompiledToolProvider,
+	type ExecutionProfileStageOverride,
 	type ExecutionProfileForeachBatch,
 	WorkflowValidationError,
 	type PermissionPreview,
@@ -94,6 +104,12 @@ export interface CompileOptions {
 	) => Promise<AgentDefinition | undefined>;
 	/** Avoid optional schema/warning file reads while deriving local routing facts. */
 	metadataOnly?: boolean;
+	/**
+	 * Trusted-host sealed inventory. When supplied (including an empty map), it
+	 * is authoritative for names, aliases, and roles.fromAgent; ambient agent
+	 * discovery is never consulted.
+	 */
+	agentDefinitions?: ReadonlyMap<string, AgentDefinition>;
 }
 
 interface ArtifactGraphCompilePlanBuildResult {
@@ -241,7 +257,7 @@ function lowerArtifactGraphFrom(
 	return from;
 }
 
-function lowerArtifactGraphPrompt(
+export function lowerArtifactGraphPrompt(
 	stage: ArtifactGraphStageSpec,
 ): string | undefined {
 	if (stage.type === "dag" || isSupportStage(stage)) return stage.prompt;
@@ -732,13 +748,39 @@ function jsonKey(key: string): string {
 }
 
 export async function compileWorkflow(
-	spec: ArtifactGraphWorkflowSpec,
+	spec: WorkflowSpec,
 	options: CompileOptions & {
 		task?: string;
 		runtimeOverrides?: WorkflowRuntimeDefaults;
 		runtimeDefaults?: WorkflowRuntimeDefaults;
 	},
 ): Promise<any> {
+	if (utilTypes.isProxy(spec))
+		throw new WorkflowValidationError([{ path: "goal", message: "must contain only JSON values" }]);
+	if ("goal" in spec) {
+		const descriptors = Object.getOwnPropertyDescriptors(spec);
+		const profileDescriptor = Object.getOwnPropertyDescriptor(spec, GOAL_EXECUTION_PROFILE);
+		if (profileDescriptor && !("value" in profileDescriptor))
+			throw new WorkflowValidationError([{ path: "goal", message: "internal execution profile must be a data property" }]);
+		// Remove only the known compiler metadata, preserving every authored
+		// descriptor for strict validation (including unknown symbols/getters).
+		Reflect.deleteProperty(descriptors, GOAL_EXECUTION_PROFILE);
+		const definition = parseGoalWorkflowSpec(Object.create(Object.getPrototypeOf(spec), descriptors));
+		const policySpec: ArtifactGraphWorkflowSpec = {
+			schemaVersion: spec.schemaVersion,
+			name: spec.name,
+			description: spec.description,
+			input: spec.input,
+			defaults: spec.defaults,
+			artifactGraph: { stages: [{ id: "goal", type: "goal", goal: { uses: options.specPath ?? "" } }] },
+		};
+		const plan = buildArtifactGraphCompilePlan(policySpec, options);
+		plan.plan.stages[0].goalDefinition = definition;
+		plan.plan.stages[0][GOAL_EXECUTION_PROFILE] = profileDescriptor?.value;
+		const compiled = await compileArtifactGraphPlan(plan.plan, options);
+		annotateArtifactGraphCompiledWorkflow(compiled, plan.stageMetadata);
+		return compiled;
+	}
 	const compilePlan = buildArtifactGraphCompilePlan(spec, options);
 	const compiled = await compileArtifactGraphPlan(compilePlan.plan, options);
 	annotateArtifactGraphCompiledWorkflow(compiled, compilePlan.stageMetadata);
@@ -1438,28 +1480,28 @@ async function compileArtifactGraphPlan(
 	if (nativeHost !== undefined) assertWorkflowNativeHostContext(nativeHost);
 	const agentName = spec.defaults?.agent ?? "scout";
 	const agentCache = new Map<string, AgentDefinition>();
-	let defaultAgent: AgentDefinition | undefined;
-	const getDefaultAgent = async (): Promise<AgentDefinition> => {
-		defaultAgent ??= await loadWorkflowAgent(
-			agentName,
+	const sealedAgentInventory = options.agentDefinitions !== undefined;
+	if (options.agentDefinitions)
+		seedAuthoritativeAgentCache(options.agentDefinitions, agentCache);
+	const getAgent = (name: string, path: string) =>
+		loadWorkflowAgent(
+			name,
 			options.cwd,
 			agentCache,
-			"$.defaults.agent",
+			path,
+			sealedAgentInventory,
 			options.agentLoader,
 		);
+	let defaultAgent: AgentDefinition | undefined;
+	const getDefaultAgent = async (): Promise<AgentDefinition> => {
+		defaultAgent ??= await getAgent(agentName, "$.defaults.agent");
 		return defaultAgent;
 	};
 	const roleEntries = Object.entries(spec.roles ?? {});
 	const roles = await Promise.all(
 		roleEntries.map(async ([name, role]: [string, any]) => {
 			const sourceAgent = role.fromAgent
-				? await loadWorkflowAgent(
-						role.fromAgent,
-						options.cwd,
-						agentCache,
-						`$.roles.${name}.fromAgent`,
-						options.agentLoader,
-					)
+				? await getAgent(role.fromAgent, `$.roles.${name}.fromAgent`)
 				: undefined;
 			return compileRole(name, role, sourceAgent);
 		}),
@@ -1500,6 +1542,13 @@ async function compileArtifactGraphPlan(
 				? stage.each
 				: undefined;
 		const taskCwd = resolve(workflowCwd, stage.cwd ?? ".");
+		if (stage.type === "goal") {
+			const usesPath = resolve(specDir, stage.goal.uses);
+			const definition = stage.goalDefinition ?? (await loadWorkflowSpec(usesPath, options.cwd)).spec;
+			if (!("goal" in definition))
+				throw new WorkflowValidationError([{ path: `${stage.id}.goal.uses`, message: "must reference a JSON Goal workflow definition" }]);
+			return buildGoalPolicyTask(stage, definition, usesPath, key, taskId, taskCwd, dependencyKeys, overrides);
+		}
 		if (isSupportStage(stage)) {
 			return buildSupportTask(
 				stage,
@@ -1607,12 +1656,9 @@ async function compileArtifactGraphPlan(
 		const stageAgent =
 			stageAgentName === agentName
 				? await getDefaultAgent()
-				: await loadWorkflowAgent(
+				: await getAgent(
 						stageAgentName,
-						options.cwd,
-						agentCache,
 						`$.artifactGraph.stages.${jsonKey(stage.id)}.${each?.agent !== undefined ? "each.agent" : "agent"}`,
-						options.agentLoader,
 					);
 		if (!validatedAgentPaths.has(stageAgent.sourcePath)) {
 			validateAgentRuntime(
@@ -2131,6 +2177,50 @@ function isSupportStage(stage: any): boolean {
 	return stage?.support !== undefined && stage?.type === undefined;
 }
 
+function buildGoalPolicyTask(
+	stage: { id: string; goalDefinition?: GoalWorkflowSpec; [GOAL_EXECUTION_PROFILE]?: Readonly<Record<string, ExecutionProfileStageOverride>> },
+	definition: GoalWorkflowSpec,
+	usesPath: string,
+	key: string,
+	taskId: string,
+	cwd: string,
+	dependencyKeys: string[],
+	overrides: Partial<CompiledTask>,
+): CompiledTask {
+	return {
+		id: key,
+		taskId,
+		stageId: stage.id,
+		agent: "goal-policy",
+		agentPath: usesPath,
+		agentSystemPrompt: "",
+		roleNames: [],
+		task: definition.goal.objective,
+		cwd,
+		explicitCwd: false,
+		explicitWorktreePolicy: false,
+		runtime: { approvalMode: "non-interactive" },
+		safety: {
+			readOnlyDeclared: true,
+			capability: "read-only",
+			sharedCwdSafe: true,
+			worktreePolicy: "off",
+			requiresWorktree: false,
+			permission: { status: "pending" },
+		},
+		compiledPrompt: "",
+		kind: "goal",
+		dependsOn: [...dependencyKeys],
+		goal: {
+			usesPath,
+			definition,
+			definitionFingerprint: workflowDefinitionFingerprint(definition),
+			...(stage[GOAL_EXECUTION_PROFILE] === undefined ? {} : { profileOverrides: { ...stage[GOAL_EXECUTION_PROFILE] } }),
+		},
+		...overrides,
+	};
+}
+
 function isDynamicStage(stage: any): boolean {
 	return stage?.type === "dynamic" && stage?.dynamic !== undefined;
 }
@@ -2503,11 +2593,37 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function seedAuthoritativeAgentCache(
+	definitions: ReadonlyMap<string, AgentDefinition>,
+	cache: Map<string, AgentDefinition>,
+): void {
+	for (const [key, agent] of definitions) {
+		for (const alias of new Set([
+			key,
+			agent.name,
+			agent.displayName,
+			...agent.aliases,
+		])) {
+			const existing = cache.get(alias);
+			if (existing && existing !== agent) {
+				throw new WorkflowValidationError([
+					{
+						path: "$.agents",
+						message: `sealed agent alias is ambiguous: "${alias}"`,
+					},
+				]);
+			}
+			cache.set(alias, agent);
+		}
+	}
+}
+
 async function loadWorkflowAgent(
 	name: string,
 	cwd: string,
 	cache: Map<string, AgentDefinition>,
 	path: string,
+	sealedInventory = false,
 	agentLoader?: (
 		name: string,
 		cwd: string,
@@ -2515,9 +2631,9 @@ async function loadWorkflowAgent(
 ): Promise<AgentDefinition> {
 	const cached = cache.get(name);
 	if (cached) return cached;
-	const agent = await (agentLoader ?? loadAgentByName)(name, cwd).catch(
-		() => undefined,
-	);
+	const agent = sealedInventory
+		? undefined
+		: await (agentLoader ?? loadAgentByName)(name, cwd).catch(() => undefined);
 	if (!agent)
 		throw new WorkflowValidationError([
 			{ path, message: `unknown agent "${name}"` },

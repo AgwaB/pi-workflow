@@ -357,6 +357,7 @@ function formatHumanRunCard(
 	lines.push(...formatLoopSummaryLines(run));
 	const usage = options.includeUsage ? formatHumanUsageLine(run) : undefined;
 	if (usage) lines.push(usage);
+	lines.push(...formatGoalPolicyUsageLines(run));
 	lines.push(...formatWarnings(run, options));
 	const problem = firstProblemTask(run);
 	if (problem)
@@ -740,6 +741,16 @@ function formatSummaryProgress(
 	return parts.join(" · ");
 }
 
+function formatGoalPolicyUsageLines(run: WorkflowRunRecord): string[] {
+	return run.tasks.filter(task => task.kind === "goal").map(task => {
+		const usage = task.goalRoot?.usage ?? task.goal?.usage;
+		const metrics = usage?.metrics;
+		const coverage = metrics ? ` · observed costUsd ${metrics.observed.costUsd ?? "unknown"} · usage coverage ${metrics.incomplete ? "incomplete" : "complete"} (${metrics.observed.contributingTaskIds.length} reporting, ${metrics.observed.omittedTaskIds.length} omitted)` : "";
+		const originApply = task.goal?.originApply ? ` · origin apply ${task.goal.originApply.status} (${task.goal.originApply.paths.filter(path => path.state === "applied").length}/${task.goal.originApply.paths.length} paths)` : "";
+		return `Goal ${task.specId}: ${task.goal?.state ?? "not admitted"} · requests ${usage?.requests ?? "unknown"} · costMicros ${usage?.costMicros ?? "unknown"}${coverage}${originApply}`;
+	});
+}
+
 function runFailurePolicyEnabled(run: WorkflowRunRecord): boolean {
 	const policy = run.failurePolicy;
 	return (
@@ -771,6 +782,7 @@ export function formatRun(
 	);
 	const usageLine = formatRunUsageLine(run);
 	if (usageLine) lines.push(usageLine);
+	lines.push(...formatGoalPolicyUsageLines(run));
 	const captureLagWarning = formatTerminalCaptureLagWarning(run);
 	if (captureLagWarning) lines.push(captureLagWarning);
 	const toolResultBudgetSignal = formatRawToolResultBudgetSignal(run);

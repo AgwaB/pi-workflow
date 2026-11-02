@@ -80,17 +80,7 @@ export function dynamicEventsPath(cwd: string, runId: string): string {
 	return join(dynamicRunDir(cwd, runId), "events.jsonl");
 }
 
-export async function readDynamicEvents(
-	cwd: string,
-	runId: string,
-): Promise<DynamicWorkflowEvent[]> {
-	let text: string;
-	try {
-		text = await readFile(dynamicEventsPath(cwd, runId), "utf8");
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-		throw error;
-	}
+export function parseDynamicEventsText(text: string): DynamicWorkflowEvent[] {
 	const events: DynamicWorkflowEvent[] = [];
 	const lines = text.split(/\r?\n/);
 	for (const [index, line] of lines.entries()) {
@@ -106,6 +96,20 @@ export async function readDynamicEvents(
 		events.push(assertDynamicEvent(parsed, index + 1));
 	}
 	return events;
+}
+
+export async function readDynamicEvents(
+	cwd: string,
+	runId: string,
+): Promise<DynamicWorkflowEvent[]> {
+	let text: string;
+	try {
+		text = await readFile(dynamicEventsPath(cwd, runId), "utf8");
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+		throw error;
+	}
+	return parseDynamicEventsText(text);
 }
 
 export function appendDynamicEvent(

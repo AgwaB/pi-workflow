@@ -14,6 +14,7 @@ import {
 	refreshRunFromSubagentArtifacts,
 } from "./subagent-backend.js";
 import { isWorkflowStopRequestedError } from "./workflow-stop.js";
+import { assertNotProtectedGoalEngineRun } from "./goal-protected-legacy.js";
 
 export type BackendLaunchResult =
 	| { kind: "launched" }
@@ -113,9 +114,8 @@ const subagentHeadlessBackend: WorkflowBackend = {
 	},
 };
 
-export function resolveWorkflowBackend(
-	run: WorkflowRunRecord,
-): WorkflowBackend {
+export function resolveWorkflowBackend(run: WorkflowRunRecord): WorkflowBackend {
+	assertNotProtectedGoalEngineRun(run);
 	if (run.backend.type === "local-pi" && run.backend.mode === "headless")
 		return subagentHeadlessBackend;
 	throw new Error(

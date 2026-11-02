@@ -28,6 +28,8 @@ const BUILTIN_TOOL_METADATA: Record<string, CompiledToolProvider> = {
 	workflow_web_search: { classification: "read-only" },
 	workflow_web_fetch_source: { classification: "read-only" },
 	workflow_web_source_read: { classification: "read-only" },
+	goal_candidate_read: { classification: "read-only" },
+	goal_candidate_write: { classification: "write-capable" },
 	scrapling_fetch: { classification: "read-only" },
 	edit: { classification: "write-capable" },
 	write: { classification: "write-capable" },
@@ -37,6 +39,7 @@ const BUILTIN_TOOL_METADATA: Record<string, CompiledToolProvider> = {
 const NON_DOWNGRADABLE_TOOL_FLOORS: Record<string, TaskCapability> = {
 	edit: "write-capable",
 	write: "write-capable",
+	goal_candidate_write: "write-capable",
 	bash: "mutation-capable",
 };
 

@@ -341,7 +341,7 @@ test("built launch selection isolates code_search and preserves additive custom 
 	const launch = async (tools, toolProviders) =>
 		prepareSubagentTaskLaunch(
 			root,
-			{ runId: "code-search-test" },
+			{ runId: "code-search-test", cwd: root },
 			{
 				taskId: "main",
 				files: { result: ".tmp/code-search-test-result.json" },
@@ -405,7 +405,7 @@ test("explicit custom code_search owner registers once and keeps web provider ad
 		);
 		const prepared = await prepareSubagentTaskLaunch(
 			root,
-			{ runId: "code-search-custom-owner" },
+			{ runId: "code-search-custom-owner", cwd: root },
 			{
 				taskId: "custom-owner",
 				files: {
@@ -488,7 +488,7 @@ test("multiple explicit code_search owners retain duplicate preflight failure se
 		);
 		const prepared = await prepareSubagentTaskLaunch(
 			root,
-			{ runId: "code-search-duplicate-owner" },
+			{ runId: "code-search-duplicate-owner", cwd: root },
 			{
 				taskId: "duplicate-owner",
 				files: { result: ".tmp/code-search-duplicate-owner-result.json" },

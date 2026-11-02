@@ -3584,6 +3584,7 @@ test("workflow command completions and run arg parsing preserve task text", () =
 			"auto",
 			"run",
 			"dynamic",
+			"goal",
 			"status",
 			"show",
 			"logs",

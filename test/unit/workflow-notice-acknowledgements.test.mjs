@@ -130,10 +130,10 @@ async function slash(cwd, text) {
 		on() {},
 		registerTool() {},
 		registerCommand(name, definition) {
-			assert.equal(name, "workflow");
-			handler = definition.handler;
+			if (name === "workflow") handler = definition.handler;
 		},
 	});
+	assert.equal(typeof handler, "function");
 	const output = [];
 	await handler(text, {
 		cwd,

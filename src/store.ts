@@ -52,7 +52,7 @@ import {
 	type TaskSummary,
 } from "./types.js";
 import { buildWorkflowRunMetrics } from "./workflow-metrics.js";
-import { assertUniqueRunTaskIds } from "./foreach-batch-runtime.js";
+import { assertUniqueRunTaskIds, canonicalJson } from "./foreach-batch-runtime.js";
 
 export const TERMINAL_INDEX_LIMIT = 50;
 export const LEASE_STALE_MS = 30_000;
@@ -99,6 +99,7 @@ type RunLeaseTestHooks = {
 		runId: string;
 		name: string;
 		initial: boolean;
+		ownerId: string;
 	}) => void | Promise<void>;
 	onBeforeAtomicRename?: (context: { file: string }) => void | Promise<void>;
 	onAfterStopIntentWrite?: (context: { file: string }) => void | Promise<void>;
@@ -192,6 +193,13 @@ export function workflowIndexPath(cwd: string): string {
 
 export function compiledWorkflowPath(cwd: string, runId: string): string {
 	return join(workflowRunDir(cwd, runId), "compiled.json");
+}
+
+export async function readCompiledWorkflow(
+	cwd: string,
+	runId: string,
+): Promise<CompiledWorkflow | undefined> {
+	return readJson<CompiledWorkflow>(compiledWorkflowPath(cwd, runId));
 }
 
 export function supervisorPath(cwd: string, runId: string): string {
@@ -1171,10 +1179,17 @@ export async function requestWorkflowStop(
 	// Stop intent is an out-of-band control request, not a supervisor-owned run
 	// commit. An abort listener may inherit a lease that ends before this write;
 	// do not bind the independent request to that incidental async context.
+	// The first published intent wins; later requests observe the original.
 	const file = workflowStopIntentPath(cwd, runId);
-	await runLeaseContext.exit(() => writeJsonAtomic(file, intent));
-	await runLeaseTestHooks.onAfterStopIntentWrite?.({ file });
-	return intent;
+	if (await runLeaseContext.exit(() => writeJsonExclusive(file, intent))) {
+		await runLeaseTestHooks.onAfterStopIntentWrite?.({ file });
+		return intent;
+	}
+	const original = await readJson<Partial<WorkflowStopIntentRecord>>(file);
+	if (!original || original.schemaVersion !== 1 || original.runId !== runId ||
+		typeof original.requestedAt !== "string" || original.reason !== "user")
+		throw new Error(`Original workflow stop intent unavailable or invalid for ${runId}`);
+	return original as WorkflowStopIntentRecord;
 }
 
 export async function readWorkflowStopIntent(
@@ -1347,6 +1362,7 @@ async function acquireFileLeaseInDirectory(
 			runId,
 			name,
 			initial,
+			ownerId,
 		});
 		await assertLockOwner(lockFile, ownerId);
 		const now = new Date();
@@ -1423,6 +1439,12 @@ async function acquireFileLeaseInDirectory(
 	};
 }
 
+/** Background continuations must not inherit the caller's short-lived lease.
+ * This does not acquire a lease or authorize any write. */
+export function outsideRunLeaseContext<T>(action: () => T): T {
+	return runLeaseContext.exit(action);
+}
+
 export async function withRunLease<T>(
 	cwd: string,
 	runId: string,
@@ -1467,6 +1489,7 @@ export async function withRunLease<T>(
 				runId,
 				name: "run",
 				initial,
+				ownerId,
 			});
 			assertLeaseNotAborted(abortController.signal);
 			await assertLockOwner(lockFile, ownerId);
@@ -2036,10 +2059,29 @@ function runUsageRollup(run: WorkflowRunRecord): WorkflowRunUsageRollup {
 	};
 }
 
+function goalProfileCaptureInventory(run: WorkflowRunRecord): string {
+	assertUniqueRunTaskIds(run);
+	const identities = new Set<string>();
+	const captures = run.tasks.filter(task => task.goalProfileConfiguration !== undefined)
+		.map(task => {
+			if (typeof task.specId !== "string" || task.specId === "")
+				throw new Error("Goal profile capture spec identity is invalid");
+			const identity = JSON.stringify([task.taskId, task.specId]);
+			if (identities.has(identity))
+				throw new Error("Goal profile capture identity is duplicated");
+			identities.add(identity);
+			return { identity, kind: task.kind, configuration: task.goalProfileConfiguration };
+		}).sort((a, b) => a.identity < b.identity ? -1 : a.identity > b.identity ? 1 : 0);
+	const inventory = canonicalJson(captures);
+	if (inventory === undefined) throw new Error("Goal profile capture inventory is unavailable");
+	return inventory;
+}
+
 export async function writeRunRecord(
 	cwd: string,
 	run: WorkflowRunRecord,
 	abortSignal?: AbortSignal,
+	authorityFence?: () => void,
 ): Promise<void> {
 	await assertActiveRunLease(cwd, run.runId, abortSignal);
 	assertLeaseNotAborted(abortSignal);
@@ -2053,9 +2095,110 @@ export async function writeRunRecord(
 	}
 	assertLeaseNotAborted(abortSignal);
 	run.updatedAt = nowIso();
+	const previousUsageRecord = firstWrite ? undefined : await readRunRecord(cwd, run.runId);
+	// Reuse the provider-reported rollup at the durable writer, including when a
+	// failed dependency prevents policy evaluation. Root lineage, not the whole
+	// run or current dependencies alone, bounds cumulative Goal spend.
+	for (const task of run.tasks) {
+		if (task.kind !== "goal" || (!task.goalRoot && !task.goal?.state.startsWith("engine:"))) continue;
+		const ids = new Set(task.goalRoot
+			? task.goalRoot.generations.flatMap(generation => [generation.plannerSpecId, ...Object.values(generation.slots),
+				...Object.values(generation.verifiers ?? {})])
+			: task.dependsOn);
+		const selected = run.tasks.filter(candidate => ids.has(candidate.specId));
+		// Parent-only metrics cannot establish complete nested-family coverage.
+		// Reservations are data, not authority to fetch/reconstruct child custody.
+		const childCoverageUnavailable = task.goalRoot?.generations.some(generation =>
+			Object.keys(generation.children ?? {}).length > 0) ?? false;
+		let requestCoverageIncomplete = false;
+		for (const candidate of selected) {
+			if (previousUsageRecord?.tasks.some(previous => previous.taskId === candidate.taskId && previous.goalRequestUsageIncomplete))
+				candidate.goalRequestUsageIncomplete = true;
+			// Original producer receipts are accounting evidence only. Reading them
+			// cannot acquire custody, refund a cap, or authorize resume/transmission.
+			const directory = join(taskDir(cwd, run.runId, candidate.taskId), "artifacts", "request-reservations");
+			let files: string[] = [];
+			try { files = await readdir(directory); }
+			catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+			for (const file of files) {
+				// Atomic/exclusive writers stage unpublished dot-prefixed .tmp files.
+				// Only original producer SHA-256 receipt names are published evidence.
+				if (!/^[a-f0-9]{64}\.json$/.test(file)) continue;
+				const record = await readJson<{ schema?: string; phase?: string }>(join(directory, file));
+				if (record?.schema !== "goal-request-reservation-v1" || record.phase === "unknown")
+					candidate.goalRequestUsageIncomplete = true;
+				if (record?.phase !== "settled") requestCoverageIncomplete = true;
+			}
+			if (candidate.goalRequestUsageIncomplete) requestCoverageIncomplete = true;
+		}
+		const metrics = buildWorkflowRunMetrics({ ...run, tasks: selected }).totals.usage;
+		if (requestCoverageIncomplete || childCoverageUnavailable) {
+			metrics.incomplete = true;
+			metrics.incompleteTaskIds = [...new Set([...metrics.incompleteTaskIds,
+				...selected.filter(candidate => candidate.goalRequestUsageIncomplete).map(candidate => candidate.taskId)])];
+		}
+		const missing = [...ids].filter(id => !selected.some(candidate => candidate.specId === id));
+		if (missing.length || ids.size === 0) {
+			metrics.incomplete = true;
+			metrics.unavailable = true;
+			metrics.observed.omittedTaskIds.push(...missing);
+		}
+		if (selected.length === 0) {
+			metrics.costUsd = null;
+			metrics.observed.costUsd = null;
+		}
+		if (metrics.incomplete) {
+			metrics.inputTokens = null;
+			metrics.outputTokens = null;
+			metrics.totalTokens = null;
+			metrics.costUsd = null;
+		}
+		// Attempts are not provider requests. Partial observed spend is shown
+		// separately; costMicros is a complete total only when coverage is known.
+		// Keep the original engine's final live-ledger observation as data only.
+		// Pending/resumed/replanned/UNKNOWN policies cannot inherit terminal counts.
+		const reportedRequests = task.goal?.usage?.requests;
+		const childRunIds = new Set(task.goalRoot?.generations.flatMap(generation =>
+			Object.values(generation.children ?? {}).map(child => child.runId)) ?? []);
+		// Only the original runtime can report a complete live family count. This
+		// writer preserves that terminal observation; child IDs never mint it.
+		const missingRequests = missing.filter(id => !childRunIds.has(id));
+		const requests = task.status === "completed" && task.goal?.state === "engine:achieved" &&
+			task.goalRoot?.generations.at(-1)?.outcome === "achieved" && !requestCoverageIncomplete && !missingRequests.length &&
+			typeof reportedRequests === "number" && Number.isSafeInteger(reportedRequests) && reportedRequests >= 0
+			? reportedRequests : null;
+		const usage = { requests, costMicros: ids.size > 0 && !metrics.incomplete && metrics.costUsd !== null
+			? Math.round(metrics.costUsd * 1_000_000) : null, metrics };
+		if (task.goalRoot) task.goalRoot.usage = usage;
+		if (task.goal) task.goal.usage = usage;
+	}
 	const derived = deriveRunStatus(run);
 	Object.assign(run, derived);
 	if (isTerminalWorkflowStatus(run.status)) run.usage = runUsageRollup(run);
+	const proposedProfiles = goalProfileCaptureInventory(run);
+	let observedPublication = !firstWrite;
+	const assertPublishedRunCurrent = async () => {
+		authorityFence?.();
+		let previous: WorkflowRunRecord;
+		try {
+			previous = JSON.parse(await readFile(runFile, "utf8")) as WorkflowRunRecord;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			if (observedPublication)
+				throw new Error("Published workflow run is unavailable; durable evidence cannot be rewritten");
+			authorityFence?.();
+			return;
+		}
+		authorityFence?.();
+		if (!previous || !Array.isArray(previous.tasks))
+			throw new Error("Published workflow run is invalid; durable evidence cannot be rewritten");
+		observedPublication = true;
+		if (previous.runId !== run.runId || previous.parentRunId !== run.parentRunId ||
+			previous.rootRunId !== run.rootRunId)
+			throw new Error("workflow ancestry is immutable after publication");
+		if (goalProfileCaptureInventory(previous) !== proposedProfiles)
+			throw new Error("Goal profile configuration changed; ordinary run writes cannot replace durable capture evidence");
+	};
 	if (firstWrite) {
 		const topology = await acquireWorkflowTopologyLease(
 			cwd,
@@ -2081,12 +2224,18 @@ export async function writeRunRecord(
 			}
 			await topology.assertOwner();
 			await assertActiveRunLease(cwd, run.runId, abortSignal);
-			await writeJsonAtomic(runFile, run, abortSignal, topology.assertOwner);
+			await writeJsonAtomic(runFile, run, abortSignal, async () => {
+				await assertPublishedRunCurrent();
+				await topology.assertOwner();
+				authorityFence?.();
+			});
 		} finally {
 			await topology.release();
 		}
 	} else {
 		// A published reference cannot move outside the topology protocol.
+		// Status/accounting writes cannot restore stale profile authority or move
+		// published ancestry. Explicit profile transitions have their own protocol.
 		const previous = await readRunRecord(cwd, run.runId);
 		if (
 			previous.parentRunId !== run.parentRunId ||
@@ -2095,7 +2244,7 @@ export async function writeRunRecord(
 			throw new Error("workflow ancestry is immutable after publication");
 		if (!isDeepStrictEqual(previous.nativeHost, run.nativeHost))
 			throw new Error("workflow native host context is immutable after publication");
-		await writeJsonAtomic(runFile, run, abortSignal);
+		await writeJsonAtomic(runFile, run, abortSignal, assertPublishedRunCurrent);
 	}
 	assertLeaseNotAborted(abortSignal);
 	if (isTerminalWorkflowStatus(run.status))
@@ -2161,6 +2310,7 @@ export async function writeRunRecordDurable(
 
 export async function flushPendingIndexUpdatesForTests(): Promise<number> {
 	let flushed = 0;
+	const failures: unknown[] = [];
 	while (true) {
 		const pending = [...pendingIndexUpdates.values()];
 		pendingIndexUpdates.clear();
@@ -2169,8 +2319,15 @@ export async function flushPendingIndexUpdatesForTests(): Promise<number> {
 			updateIndex(item.cwd, [...item.runIds]),
 		);
 		const inFlight = [...inFlightIndexUpdates];
-		if (scheduled.length === 0 && inFlight.length === 0) return flushed;
-		await Promise.all([...scheduled, ...inFlight]);
+		if (scheduled.length === 0 && inFlight.length === 0) {
+			if (failures.length === 1) throw failures[0];
+			if (failures.length > 1)
+				throw new AggregateError(failures, "Multiple pending workflow index updates failed");
+			return flushed;
+		}
+		const outcomes = await Promise.allSettled([...scheduled, ...inFlight]);
+		for (const outcome of outcomes)
+			if (outcome.status === "rejected") failures.push(outcome.reason);
 		flushed += pending.length;
 	}
 }

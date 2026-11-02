@@ -9,11 +9,15 @@ function usage() {
 Usage:
   pi-workflow inspect <run-id-or-prefix> [--failures] [--results] [--json]
   pi-workflow prune [--keep N] [--older-than DAYS] [--yes] [--json]
+  pi-workflow prune --goal-family <exact-run-id> [--yes] [--json]
   pi-workflow notices list [--json]
   pi-workflow notices acknowledge <exact-run-id> --state <sha256> --reason <text>
   pi-workflow notices clear <exact-run-id> [--json]
   pi-workflow supervise <run-id-or-prefix> [--poll-ms N] [--max-runtime-ms N]
   pi-workflow supervise --all [--poll-ms N] [--max-runtime-ms N]
+
+Goal authoring, execution and inspection use /workflow goal or the read-only
+workflow_goal tool inside Pi; there is no CLI goal subcommand.
 
 supervise drives workflow scheduling from a standalone process until the
 target run(s) reach a terminal status, so runs keep progressing after the
@@ -43,6 +47,11 @@ if (command === "prune") {
 
 if (command === "notices") {
   process.exit(await notices(args.slice(1)));
+}
+
+if (command === "goal") {
+  process.stderr.write("pi-workflow has no goal subcommand; use /workflow goal or the workflow_goal tool inside Pi.\n");
+  process.exit(1);
 }
 
 if (command !== "inspect") {
@@ -189,6 +198,12 @@ async function supervise(argv) {
   const cwd = process.cwd();
   const initialRun = runRef ? await store.readRunRecord(cwd, runRef) : undefined;
   const runId = initialRun?.runId;
+  if (initialRun && requiresGoalHostRebind(initialRun)) {
+    process.stderr.write(
+      `Run ${initialRun.runId} is recovery-required: explicit current Goal host rebind is required; standalone supervise will not schedule it.\n`,
+    );
+    return 2;
+  }
   if (runId && initialRun.status === "running" && !seen.has("--max-runtime-ms")) {
     const compiled = JSON.parse(await readFile(store.compiledWorkflowPath(cwd, runId), "utf8"));
     if (compiled.stages?.some(stage => stage.type === "loop" && stage.maxRounds === null)) {
@@ -197,13 +212,20 @@ async function supervise(argv) {
   }
   const lastPrinted = new Map();
   const supervised = new Set();
+  const skippedGoalRoots = new Set();
   const deadline = maxRuntimeMs === 0 ? undefined : Date.now() + maxRuntimeMs;
   log(`supervising ${runId ?? "all running runs"} in ${cwd} (poll ${pollMs}ms; runtime ${maxRuntimeMs === 0 ? "unlimited" : `${maxRuntimeMs}ms`})`);
 
   while (true) {
-    const runs = runId
+    const candidates = runId
       ? [await store.readRunRecord(cwd, runId)]
       : (await store.listRunRecords(cwd)).filter((run) => run.status === "running" && !run.parentRunId);
+    const runs = candidates.filter((run) => {
+      if (!requiresGoalHostRebind(run)) return true;
+      skippedGoalRoots.add(run.runId);
+      log(`skipping ${run.runId}: recovery-required; explicit current Goal host rebind is required`);
+      return false;
+    });
 
     for (const run of runs) {
       if (run.status !== "running") continue;
@@ -227,12 +249,12 @@ async function supervise(argv) {
         log(`done: ${run.runId} ${run.status}`);
         return run.status === "completed" ? 0 : run.status === "blocked" ? 2 : 1;
       }
-    } else if (!refreshed.some((run) => run.status === "running")) {
+    } else if (!refreshed.some((run) => run.status === "running" && !requiresGoalHostRebind(run))) {
       log("done: no running runs remain");
       const outcomes = refreshed.filter(run => supervised.has(run.runId));
       // Failure/interruption takes precedence over blocked, then completed.
       if (outcomes.length !== supervised.size || outcomes.some(run => !["completed", "blocked"].includes(run.status))) return 1;
-      return outcomes.some(run => run.status === "blocked") ? 2 : 0;
+      return skippedGoalRoots.size > 0 || outcomes.some(run => run.status === "blocked") ? 2 : 0;
     }
 
     if (deadline !== undefined && Date.now() >= deadline) {
@@ -241,6 +263,12 @@ async function supervise(argv) {
     }
     await new Promise((resolveSleep) => setTimeout(resolveSleep, pollMs));
   }
+}
+
+/** Standalone supervision cannot recreate either a Goal engine binding or the
+ * current interactive policy host that admitted a mixed workflow root. */
+function requiresGoalHostRebind(run) {
+  return run.goal !== undefined || run.goalParticipation?.schemaVersion === 1;
 }
 
 function log(message) {
@@ -259,6 +287,7 @@ async function resolveEngineDist(packageRoot) {
   return buildDir;
 }
 
+
 async function readRun(cwd, ref) {
   const root = join(cwd, ".pi", "workflows");
   const direct = isAbsolute(ref) ? ref : join(root, ref, "run.json");
@@ -275,7 +304,12 @@ async function readRun(cwd, ref) {
 }
 
 async function readJson(path) {
-  return JSON.parse(await readFile(path, "utf8"));
+  const source = await readFile(path, "utf8");
+  try {
+    return JSON.parse(source);
+  } catch (error) {
+    throw new Error(`invalid JSON at ${path}`, { cause: error });
+  }
 }
 
 function indent(text, prefix) {

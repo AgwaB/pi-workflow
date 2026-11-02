@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import dns from "node:dns/promises";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -14,6 +16,19 @@ import {
 const body = (result) => JSON.parse(result.content[0].text);
 const project = () => mkdtempSync(join(tmpdir(), "normalized-provider-corrective-"));
 const cleanup = (path) => rmSync(path, { recursive: true, force: true });
+
+test.beforeEach((t) => {
+  const lookup = t.mock.method(dns, "lookup", async (hostname, options) => {
+    assert.equal(hostname, "1.1.1.1", "only the fixture's public address may resolve");
+    assert.deepEqual(options, { all: true, verbatim: true });
+    return [{ address: hostname, family: 4 }];
+  });
+  syncBuiltinESMExports();
+  t.after(() => {
+    lookup.mock.restore();
+    syncBuiltinESMExports();
+  });
+});
 
 function register(config, extensions) {
   const tools = new Map();
@@ -89,7 +104,7 @@ test("compile to prepare preserves supported normalized owners and re-exports sh
       code_search: { extensions: ["./provider.mjs"], classification: "read-only" },
     });
     const prepared = await (await import("../../.tmp/unit/subagent-backend.js")).prepareSubagentTaskLaunch(
-      cwd, { runId: "compile-prepare" }, { taskId: "task", files: { result: ".tmp/result.json" } }, compiled.tasks[0],
+      cwd, { runId: "compile-prepare", cwd }, { taskId: "task", files: { result: ".tmp/result.json" } }, compiled.tasks[0],
     );
     const wrapper = prepared.generatedExtensions.find((entry) => entry.kind === "web-source");
     assert(wrapper);
@@ -115,7 +130,7 @@ test("compile to prepare rejects custom normalized fetch ownership before dispat
     writeFileSync(join(cwd, "provider.mjs"), "export default pi => pi.registerTool({ name: 'fetch_content', async execute() {} });\n");
     const compiled = await compileWorkflow({ schemaVersion: 1, name: "owner", defaults: { agent: "owner", tools: [{ name: "workflow_web_fetch_source", extensions: ["./provider.mjs"], classification: "read-only" }] }, artifactGraph: { stages: [{ id: "main", type: "single", prompt: "Fetch." }] } }, { cwd, task: "check" });
     await assert.rejects(
-      () => import("../../.tmp/unit/subagent-backend.js").then(({ prepareSubagentTaskLaunch }) => prepareSubagentTaskLaunch(cwd, { runId: "reject" }, { taskId: "task", files: { result: ".tmp/result.json" } }, compiled.tasks[0])),
+      () => import("../../.tmp/unit/subagent-backend.js").then(({ prepareSubagentTaskLaunch }) => prepareSubagentTaskLaunch(cwd, { runId: "reject", cwd }, { taskId: "task", files: { result: ".tmp/result.json" } }, compiled.tasks[0])),
       /unsupported normalized provider ownership/,
     );
   } finally { cleanup(cwd); }
@@ -126,7 +141,7 @@ test("shared legacy provider wrapper re-exports selected code_search exactly onc
   try {
     writeFileSync(join(cwd, "shared.mjs"), `export default pi => {\n  pi.registerTool({ parameters: { type: "object", properties: {} }, name: "fetch_content", async execute() { return { content: [{ type: "text", text: "fetch" }] }; } });\n  pi.registerTool({ parameters: { type: "object", properties: {} }, name: "code_search", async execute() { return { content: [{ type: "text", text: "code" }] }; } });\n  pi.registerTool({ parameters: { type: "object", properties: {} }, name: "not_selected", async execute() {} });\n};\n`);
     const prepared = await (await import("../../.tmp/unit/subagent-backend.js")).prepareSubagentTaskLaunch(
-      cwd, { runId: "legacy-shared" }, { taskId: "task", files: { result: ".tmp/result.json" } }, {
+      cwd, { runId: "legacy-shared", cwd }, { taskId: "task", files: { result: ".tmp/result.json" } }, {
         runtime: {
           tools: ["fetch_content", "code_search"],
           toolProviders: {
@@ -151,7 +166,7 @@ test("legacy ownership rejects missing and multi-entry refs while relative refs 
   try {
     writeFileSync(join(cwd, "legacy.mjs"), "export default pi => pi.registerTool({ name: 'fetch_content', async execute() {} });\n");
     const { prepareSubagentTaskLaunch } = await import("../../.tmp/unit/subagent-backend.js");
-    const run = { runId: "legacy-contract" };
+    const run = { runId: "legacy-contract", cwd };
     const task = { taskId: "task", files: { result: ".tmp/result.json" } };
     const runtime = (extensions) => ({ runtime: { tools: ["fetch_content"], toolProviders: { fetch_content: { extensions } } } });
     const relativePrepared = await prepareSubagentTaskLaunch(cwd, run, task, runtime(["./legacy.mjs"]));
@@ -285,9 +300,18 @@ test("corrective late fetch waiter replaces an aborted never-resolving flight", 
     const secondController = new AbortController();
     const first = tools.get("workflow_web_fetch_source").execute("first", { url: "http://1.1.1.1/source" }, firstController.signal);
     const second = tools.get("workflow_web_fetch_source").execute("second", { url: "http://1.1.1.1/source" }, secondController.signal);
-    await started;
-    firstController.abort();
-    secondController.abort();
+    try {
+      await Promise.race([
+        started,
+        first.then((result) => {
+          throw new Error(`first fetch settled before provider entry: ${JSON.stringify(body(result))}`);
+        }),
+      ]);
+    } finally {
+      firstController.abort();
+      secondController.abort();
+      await Promise.allSettled([first, second]);
+    }
     const cancelled = await Promise.all([first, second]);
     assert.ok(cancelled.every((result) => body(result).status === "cancelled"));
     const replacementPending = tools.get("workflow_web_fetch_source").execute("replacement", { url: "http://1.1.1.1/source" });

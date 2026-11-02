@@ -44,6 +44,25 @@ type RefreshRunForDynamicCall = (
 	runIdOrPrefix: string,
 ) => Promise<WorkflowRunRecord>;
 
+type PreparedGoalNestedWorkflowRuntime = Readonly<{
+	runWorkflowSpec: RunWorkflowSpecForDynamicCall;
+	refreshRun: RefreshRunForDynamicCall;
+}>;
+
+type PrepareGoalNestedWorkflowRuntime = (input: {
+	readonly runId: string;
+	readonly controllerTaskId: string;
+	readonly controllerSpecId: string;
+	readonly workflowId: string;
+	readonly uses: string;
+	readonly specPath: string;
+	readonly specHash: string;
+	readonly task: string;
+	readonly wait: boolean;
+	readonly callIndex: number;
+	readonly requestHash: string;
+}) => Promise<PreparedGoalNestedWorkflowRuntime>;
+
 type DynamicHelperWorkerRunner = (input: {
 	ref: string;
 	specPath: string;
@@ -69,6 +88,63 @@ function isPlainDynamicRecord(
 	value: unknown,
 ): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+async function readNestedRunIfPresent(
+	cwd: string,
+	runId: string,
+): Promise<WorkflowRunRecord | undefined> {
+	try {
+		return await readRunRecord(cwd, runId);
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException | undefined)?.code;
+		if (
+			code === "ENOENT" ||
+			(error instanceof Error && error.message === `Flow run not found: ${runId}`)
+		)
+			return undefined;
+		throw error;
+	}
+}
+
+async function prepareGoalNestedRuntime(input: {
+	readonly prepare: PrepareGoalNestedWorkflowRuntime | undefined;
+	readonly nestedRunId: string | undefined;
+	readonly controllerTaskId: string;
+	readonly controllerSpecId: string;
+	readonly workflowId: string;
+	readonly uses: string;
+	readonly specPath: string;
+	readonly specHash: string;
+	readonly task: string;
+	readonly wait: boolean;
+	readonly callIndex: number;
+	readonly requestHash: string;
+}): Promise<PreparedGoalNestedWorkflowRuntime | undefined> {
+	if (!input.prepare) return undefined;
+	if (!input.nestedRunId)
+		throw new Error(
+			"Goal nested workflow replay has no reserved child run identity",
+		);
+	const prepared = await input.prepare({
+		runId: input.nestedRunId,
+		controllerTaskId: input.controllerTaskId,
+		controllerSpecId: input.controllerSpecId,
+		workflowId: input.workflowId,
+		uses: input.uses,
+		specPath: input.specPath,
+		specHash: input.specHash,
+		task: input.task,
+		wait: input.wait,
+		callIndex: input.callIndex,
+		requestHash: input.requestHash,
+	});
+	if (
+		typeof prepared.runWorkflowSpec !== "function" ||
+		typeof prepared.refreshRun !== "function"
+	)
+		throw new Error("Goal nested workflow runtime preparation is invalid");
+	return prepared;
 }
 
 function remainingDynamicRuntimeMs(
@@ -102,6 +178,7 @@ export async function runDynamicNestedWorkflowCall(input: {
 	callIndex: number;
 	workflowInput: unknown;
 	isSettled?: () => boolean;
+	prepareGoalNestedWorkflow?: PrepareGoalNestedWorkflowRuntime;
 }): Promise<unknown> {
 	await assertDynamicRuntimeBudgetAvailable({
 		cwd: input.cwd,
@@ -154,15 +231,34 @@ export async function runDynamicNestedWorkflowCall(input: {
 		.reverse()
 		.map((event) => event.payload.result)
 		.find((result) => result !== undefined);
-	if (!normalizedInput.wait && previousNonWaitingSnapshot !== undefined) {
-		return previousNonWaitingSnapshot;
-	}
-	if (previousCompleted) return previousCompleted.payload.result;
 	let nestedRunId = optionalEventString(
 		[...previousStarts]
 			.reverse()
 			.find((event) => optionalEventString(event.payload.runId))?.payload.runId,
 	);
+	const prepareGoalRuntime = () =>
+		prepareGoalNestedRuntime({
+			prepare: input.prepareGoalNestedWorkflow,
+			nestedRunId,
+			controllerTaskId: input.controllerTask.taskId,
+			controllerSpecId: input.controllerTask.specId,
+			workflowId,
+			uses: workflowSpec.uses,
+			specPath: nestedSpecPath,
+			specHash: request.specHash,
+			task: normalizedInput.task,
+			wait: normalizedInput.wait,
+			callIndex: input.callIndex,
+			requestHash,
+		});
+	if (!normalizedInput.wait && previousNonWaitingSnapshot !== undefined) {
+		await prepareGoalRuntime();
+		return previousNonWaitingSnapshot;
+	}
+	if (previousCompleted) {
+		await prepareGoalRuntime();
+		return previousCompleted.payload.result;
+	}
 	if (!nestedRunId) {
 		await assertDynamicNestedWorkflowBudgetAvailable({
 			cwd: input.cwd,
@@ -185,9 +281,11 @@ export async function runDynamicNestedWorkflowCall(input: {
 			},
 		});
 	}
-	let nestedRun = await readRunRecord(input.cwd, nestedRunId).catch(
-		() => undefined,
-	);
+	const preparedGoalRuntime = await prepareGoalRuntime();
+	const runWorkflowSpec =
+		preparedGoalRuntime?.runWorkflowSpec ?? input.runWorkflowSpec;
+	const refreshRun = preparedGoalRuntime?.refreshRun ?? input.refreshRun;
+	let nestedRun = await readNestedRunIfPresent(input.cwd, nestedRunId);
 	if (!nestedRun) {
 		// A durable start reservation may survive a restart without a child run.
 		// Revalidate ancestry before executing it, not just before reserving it.
@@ -199,7 +297,7 @@ export async function runDynamicNestedWorkflowCall(input: {
 		});
 		if (input.isSettled?.()) return undefined;
 		await throwIfWorkflowStopRequested(input.cwd, input.run.runId);
-		nestedRun = await input.runWorkflowSpec(nestedSpecPath, input.cwd, {
+		nestedRun = await runWorkflowSpec(nestedSpecPath, input.cwd, {
 			task: normalizedInput.task,
 			dynamicUi: input.dynamicUi,
 			runId: nestedRunId,
@@ -225,7 +323,7 @@ export async function runDynamicNestedWorkflowCall(input: {
 		});
 		if (result !== undefined) return result;
 	}
-	nestedRun = await input.refreshRun(input.cwd, nestedRunId);
+	nestedRun = await refreshRun(input.cwd, nestedRunId);
 	if (!normalizedInput.wait) {
 		const result = await buildNestedWorkflowResult(input.cwd, nestedRun);
 		if (input.isSettled?.()) return undefined;
@@ -326,7 +424,7 @@ async function assertDynamicNestedWorkflowBudgetAvailable(input: {
 	}
 }
 
-function normalizeDynamicNestedWorkflowInput(
+export function normalizeDynamicNestedWorkflowInput(
 	value: unknown,
 ): DynamicNestedWorkflowInput {
 	if (typeof value === "string") return { task: value, wait: true };

@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import dns from "node:dns/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -115,12 +117,24 @@ test("cache-object EEXIST materializes the validated durable winner", async () =
   }
 });
 
-test("provider URL validation abort does not publish a negative cache or source", async () => {
+test("provider URL validation abort does not publish a negative cache or source", async (t) => {
+  const lookup = t.mock.method(dns, "lookup", async (hostname, options) => {
+    assert.equal(hostname, "1.1.1.1");
+    assert.deepEqual(options, { all: true, verbatim: true });
+    await new Promise(setImmediate);
+    return [{ address: hostname, family: 4 }];
+  });
+  syncBuiltinESMExports();
+  t.after(() => {
+    lookup.mock.restore();
+    syncBuiltinESMExports();
+  });
   const cwd = project();
   try {
     const cacheDir = join(cwd, "web-cache");
     const registered = new Map();
     const controller = new AbortController();
+    let providerCalls = 0;
     const pi = { registerTool(tool) { registered.set(tool.name, tool); } };
     registerWorkflowWebSourceExtension(pi, {
       schema: "workflow-web-source-launch-config-v1",
@@ -131,12 +145,15 @@ test("provider URL validation abort does not publish a negative cache or source"
     }, (providerPi) => providerPi.registerTool({
       name: "fetch_content",
       async execute() {
+        providerCalls++;
         setImmediate(() => controller.abort());
         const urls = Array.from({ length: 100 }, (_, index) => `http://1.1.1.1/result-${index}`);
         return { content: [{ type: "text", text: "provider body" }], details: { urls, urlCount: urls.length } };
       },
     }));
     const result = body(await registered.get("workflow_web_fetch_source").execute("cancel-validation", { url: "http://1.1.1.1/source" }, controller.signal));
+    assert.equal(providerCalls, 1, "the original provider executes before URL-validation cancellation");
+    assert.equal(controller.signal.aborted, true);
     assert.equal(result.status, "cancelled");
     assert.equal(readdirSync(cacheDir, { withFileTypes: true }).some((entry) => entry.name === "sources"), false);
     assert.equal(readdirSync(cacheDir, { withFileTypes: true }).some((entry) => entry.name === "fetch-negative-cache"), false);

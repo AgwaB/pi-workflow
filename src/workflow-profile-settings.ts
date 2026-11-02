@@ -18,11 +18,11 @@ import {
 import {
 	THINKING_LEVELS,
 	WORKFLOW_PROFILE_ROLES,
-	type ArtifactGraphWorkflowSpec,
 	type ExecutionProfileStageOverride,
 	type ThinkingLevel,
 	type WorkflowCapturedExecutionProfile,
 	type WorkflowProfileRole,
+	type WorkflowSpec,
 } from "./types.js";
 import {
 	getSupportedThinkingLevels,
@@ -86,11 +86,13 @@ export interface WorkflowProfileIdentity {
 }
 
 export interface WorkflowProfileContext {
-	spec: ArtifactGraphWorkflowSpec;
+	spec: WorkflowSpec;
 	specPath: string;
 	availableModels: readonly WorkflowModelInfo[];
 	currentRuntime: WorkflowRuntimeDefaults;
 	runtimeOverrides?: WorkflowRuntimeDefaults;
+	/** Internal parent policy projection for Goal child workflow slots. */
+	defaultProfileRole?: WorkflowProfileRole;
 }
 
 export interface WorkflowProfileLoadResult {
@@ -176,12 +178,12 @@ export function workflowProfileSettingsRoot(): string {
 }
 
 export async function workflowProfileIdentity(
-	spec: ArtifactGraphWorkflowSpec,
+	spec: WorkflowSpec,
 	specPath: string,
 ): Promise<WorkflowProfileIdentity> {
 	// Routing is comparison-only metadata, not execution/profile configuration.
 	// Run capture still binds the complete definition via workflowDefinitionFingerprint.
-	const profileDefinition = { ...spec };
+	const profileDefinition: Record<string, unknown> = { ...spec };
 	delete profileDefinition.routing;
 	const definitionFingerprint = workflowDefinitionFingerprint(profileDefinition);
 	let canonicalPath: string;
@@ -205,7 +207,7 @@ export async function workflowProfileIdentity(
 
 /** Read both profile identity generations without rewriting either settings file. */
 async function readCompatibleProfilePreference(
-	spec: ArtifactGraphWorkflowSpec,
+	spec: WorkflowSpec,
 	identity: WorkflowProfileIdentity,
 ): Promise<WorkflowProfilePreference | undefined> {
 	const slots = collectWorkflowProfileStageSlots(spec);
@@ -267,7 +269,7 @@ function nextWorkflowProfileUpdatedAt(previous: string | undefined): string {
 }
 
 export async function loadWorkflowProfilePreference(
-	spec: ArtifactGraphWorkflowSpec,
+	spec: WorkflowSpec,
 	specPath: string,
 ): Promise<WorkflowProfileLoadResult> {
 	const identity = await workflowProfileIdentity(spec, specPath);
@@ -401,7 +403,10 @@ export function buildWorkflowExecutionProfile(
 ): WorkflowCapturedExecutionProfile {
 	if (!WORKFLOW_USER_PROFILE_IDS.includes(profileId))
 		throw new Error(`Unknown workflow profile: ${String(profileId)}`);
-	const slots = requireProfileRoles(context.spec);
+	const slots = requireProfileRoles(
+		context.spec,
+		context.defaultProfileRole,
+	);
 	const stageOverrides = baseStageOverrides(context.spec);
 	if (profileId === "custom") {
 		if (!custom) throw new Error("Saved Custom workflow profile has no stage settings.");
@@ -447,7 +452,7 @@ export function buildWorkflowExecutionProfile(
 }
 
 export function createCustomProfileFromBuiltin(
-	spec: ArtifactGraphWorkflowSpec,
+	spec: WorkflowSpec,
 	profileId: WorkflowBuiltinProfileId,
 ): WorkflowCustomProfile {
 	if (!WORKFLOW_BUILTIN_PROFILE_IDS.includes(profileId))
@@ -472,7 +477,7 @@ export function createCustomProfileFromBuiltin(
 }
 
 export function createInheritedCustomProfile(
-	spec: ArtifactGraphWorkflowSpec,
+	spec: WorkflowSpec,
 ): WorkflowCustomProfile {
 	const slots = requireProfileRoles(spec);
 	return {
@@ -502,7 +507,7 @@ export function profileRuntimeForRole(
 
 export function formatStaleWorkflowProfileError(
 	preference: WorkflowProfilePreference,
-	currentSpec: ArtifactGraphWorkflowSpec,
+	currentSpec: WorkflowSpec,
 ): string {
 	const currentSlots = collectWorkflowProfileStageSlots(currentSpec);
 	const previous = new Map(preference.stages.map((stage) => [stage.id, stage]));
@@ -552,22 +557,28 @@ export function effectiveCustomStageAssignment(
 }
 
 function requireProfileRoles(
-	spec: ArtifactGraphWorkflowSpec,
+	spec: WorkflowSpec,
+	defaultProfileRole?: WorkflowProfileRole,
 ): WorkflowProfileStageSlot[] {
 	const slots = collectWorkflowProfileStageSlots(spec);
 	const missing = slots.filter(({ profileRole }) => profileRole === undefined);
-	if (missing.length > 0) {
+	if (missing.length > 0 && !defaultProfileRole) {
 		throw new Error(
 			`Workflow profile roles are missing or invalid for model-backed stage slot(s): ${missing
 				.map(({ id }) => id)
 				.join(", ")}. Add profileRole (${WORKFLOW_PROFILE_ROLES.join(", ")}) to each model-backed stage and dynamic decision profile. Existing declared executionProfiles remain usable without this metadata.`,
 		);
 	}
-	return slots;
+	return defaultProfileRole
+		? slots.map((slot) => ({
+				...slot,
+				profileRole: slot.profileRole ?? defaultProfileRole,
+			}))
+		: slots;
 }
 
 function baseStageOverrides(
-	spec: ArtifactGraphWorkflowSpec,
+	spec: WorkflowSpec,
 ): Record<string, ExecutionProfileStageOverride> {
 	const profileName = spec.defaultExecutionProfile;
 	const mapping = profileName ? spec.executionProfiles?.[profileName] : undefined;

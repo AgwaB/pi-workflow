@@ -10,6 +10,10 @@ import {
 	type FileHandle,
 } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
+import {
+	readCommittedArtifactExact,
+	type CommittedArtifactReadRoot,
+} from "./committed-artifact-read.js";
 import { assertNoRawIntegrityAnchor, checkRawLinks, establishRawOwner, hashRawDescriptor, rawDigest, readRawIntegrity, recheckRawOwner, sameRawVersion, type RawOwner, type RawIntegrity, type RawSourceTuple } from "./workflow-raw-contract.js";
 
 import {
@@ -112,6 +116,19 @@ export interface WorkflowArtifactToolConfig {
 	runDir?: string;
 	maxBytes?: number;
 	maxLines?: number;
+	/** Long-lived hosts must not reuse process-local worker caches across attempts. */
+	cache?: boolean;
+	/** Source-owned original identity and post-publication version; never serialized. */
+	committedReadRoot?: CommittedArtifactReadRoot;
+	/** In-process host custody check; never serialized into a tool request or result. */
+	validateRead?: (claim: {
+		phase: "before-read" | "after-read";
+		manifest: WorkflowSourceManifest;
+		source: WorkflowSourceManifestSource;
+		artifact: WorkflowArtifactKind;
+		ref: WorkflowArtifactRef;
+		bytes?: Buffer;
+	}) => Buffer | void | Promise<Buffer | void>;
 }
 
 export interface WorkflowArtifactListEntry {
@@ -426,6 +443,9 @@ export async function readWorkflowArtifact(
 		path?: string;
 		maxItems?: number;
 		maxChars?: number;
+		expectedBytes?: Buffer;
+		committedReadRoot?: CommittedArtifactReadRoot;
+		captureBytes?: (bytes: Buffer) => void | Promise<void>;
 	} = {},
 ): Promise<WorkflowArtifactReadResult> {
 	const resolved = resolveWorkflowArtifact(
@@ -435,54 +455,87 @@ export async function readWorkflowArtifact(
 		options,
 	);
 	const artifactPath = resolved.ref.path;
-	const opened = await openValidatedArtifactFile({
-		artifactPath,
-		runDir: options.runDir,
-		label: `${sourceName}.${artifact}`,
-		rawSource: artifact === "raw" ? { runId: manifest.runId, ...rawSourceTuple(resolved.source), sources: manifest.sources.map(rawSourceTuple) } : undefined,
-	});
+	let opened: Awaited<ReturnType<typeof openValidatedArtifactFile>> | undefined;
 	let fullRawBytes: Buffer | undefined;
+	let capturedBytes: Buffer | undefined;
+	let result: WorkflowArtifactReadResult;
+	let validated = false;
+	let validationAttempted = false;
 	try {
+		opened = await openValidatedArtifactFile({
+			artifactPath,
+			runDir: options.runDir,
+			label: `${sourceName}.${artifact}`,
+			rawSource: artifact === "raw" ? { runId: manifest.runId, ...rawSourceTuple(resolved.source), sources: manifest.sources.map(rawSourceTuple) } : undefined,
+		});
+		if (options.captureBytes !== undefined) {
+			if (options.expectedBytes === undefined || options.committedReadRoot === undefined)
+				throw new Error("workflow artifact committed capture requires retained bytes and containment");
+			capturedBytes = await readCommittedArtifactExact({
+				path: artifactPath,
+				containmentRoot: options.committedReadRoot,
+				expectedBytes: options.expectedBytes,
+				label: `${sourceName}.${artifact}`,
+			});
+		}
+		if (capturedBytes !== undefined && opened.fileStat.size !== capturedBytes.length)
+			throw new Error(`workflow artifact changed before committed capture: ${sourceName}.${artifact}`);
+		const artifactBytes = opened.fileStat.size;
 		if (options.path !== undefined) {
-			return { ...await readProjectedWorkflowArtifact({
+			result = { ...await readProjectedWorkflowArtifact({
 				source: resolved.source.source,
 				artifact: resolved.artifact,
 				file: opened.file,
-				bytes: opened.fileStat.size,
+				bytesContent: capturedBytes,
+				bytes: artifactBytes,
 				mediaType: resolved.ref.mediaType,
 				path: options.path,
 				maxItems: options.maxItems,
 				maxChars: options.maxChars,
 			}), ...(opened.rawAssurance ? { rawAssurance: opened.rawAssurance } : {}) };
-		}
-		if (options.maxItems !== undefined || options.maxChars !== undefined) {
+		} else if (options.maxItems !== undefined || options.maxChars !== undefined) {
 			throw new Error("workflow_artifact maxItems/maxChars require path");
+		} else {
+			const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
+			const maxLines = options.maxLines ?? DEFAULT_MAX_LINES;
+			const sizeTruncated = artifactBytes > maxBytes;
+			if (artifact === "raw" && !sizeTruncated)
+				fullRawBytes = capturedBytes ?? await opened.file.readFile();
+			const text = capturedBytes !== undefined
+				? (sizeTruncated ? capturedBytes.subarray(0, maxBytes) : capturedBytes).toString("utf8")
+				: fullRawBytes ? fullRawBytes.toString("utf8") : sizeTruncated
+					? await readUtf8Prefix(opened.file, maxBytes)
+					: await opened.file.readFile({ encoding: "utf8" });
+			const bytes = artifactBytes;
+			const truncated = truncateHead(text, {
+				maxBytes,
+				maxLines,
+			});
+			result = {
+				source: resolved.source.source,
+				artifact: resolved.artifact,
+				content: truncated.content,
+				bytes,
+				returnedBytes: Buffer.byteLength(truncated.content, "utf8"),
+				truncated: truncated.truncated || sizeTruncated,
+				mediaType: resolved.ref.mediaType,
+				...(opened.rawAssurance ? { rawAssurance: opened.rawAssurance } : {}),
+			};
 		}
-		const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
-		const maxLines = options.maxLines ?? DEFAULT_MAX_LINES;
-		const sizeTruncated = opened.fileStat.size > maxBytes;
-		if (artifact === "raw" && !sizeTruncated) fullRawBytes = await opened.file.readFile();
-		const text = fullRawBytes ? fullRawBytes.toString("utf8") : sizeTruncated
-			? await readUtf8Prefix(opened.file, maxBytes)
-			: await opened.file.readFile({ encoding: "utf8" });
-		const bytes = opened.fileStat.size;
-		const truncated = truncateHead(text, {
-			maxBytes,
-			maxLines,
-		});
-		return {
-			source: resolved.source.source,
-			artifact: resolved.artifact,
-			content: truncated.content,
-			bytes,
-			returnedBytes: Buffer.byteLength(truncated.content, "utf8"),
-			truncated: truncated.truncated || sizeTruncated,
-			mediaType: resolved.ref.mediaType,
-			...(opened.rawAssurance ? { rawAssurance: opened.rawAssurance } : {}),
-		};
+		validationAttempted = true;
+		await opened.validateAfterRead(fullRawBytes);
+		validated = true;
+		if (capturedBytes !== undefined) await options.captureBytes?.(capturedBytes);
+		return result;
 	} finally {
-		try { await opened.validateAfterRead(fullRawBytes); }
-		finally { await opened.file.close(); }
+		try {
+			// A read failure still observes post-read drift; a failed validation is
+			// not repeated.
+			if (opened !== undefined && !validated && !validationAttempted)
+				await opened.validateAfterRead(fullRawBytes);
+		} finally {
+			await opened?.file.close();
+		}
 	}
 }
 
@@ -528,7 +581,7 @@ async function openValidatedArtifactFile(options: {
 	await artifactValidatedHookForTests?.();
 	const file = await open(
 		options.artifactPath,
-		fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+		fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
 	);
 	try {
 		const fileStat = await file.stat();
@@ -569,13 +622,16 @@ async function readProjectedWorkflowArtifact(options: {
 	source: string;
 	artifact: WorkflowArtifactKind;
 	file: FileHandle;
+	bytesContent?: Buffer;
 	bytes: number;
 	mediaType?: string;
 	path: string;
 	maxItems?: number;
 	maxChars?: number;
 }): Promise<WorkflowArtifactReadResult> {
-	const parsed = JSON.parse(await options.file.readFile({ encoding: "utf8" }));
+	const parsed = JSON.parse(options.bytesContent === undefined
+		? await options.file.readFile({ encoding: "utf8" })
+		: options.bytesContent.toString("utf8"));
 	let effectivePath = options.path;
 	let resolved: unknown;
 	for (const candidatePath of projectionPathCandidates(
@@ -876,7 +932,8 @@ export async function handleWorkflowArtifactToolCall(
 	if (!input.artifact)
 		throw new Error("workflow_artifact read requires artifact");
 	const dedupKey = workflowArtifactReadDedupKey(config, accessMode, input);
-	const cachedRead = input.artifact !== "raw" && workflowExperimentalFlagEnabled(
+	const cachedRead = config.validateRead === undefined &&
+		config.cache !== false && input.artifact !== "raw" && workflowExperimentalFlagEnabled(
 		EXPERIMENTAL_TOOL_DEDUP_ENV,
 	)
 		? workflowArtifactReadDedupCache.get(dedupKey)
@@ -933,8 +990,24 @@ export async function handleWorkflowArtifactToolCall(
 		input.artifact,
 		{ accessMode },
 	);
+	let expectedBytes: Buffer | undefined;
+	if (config.validateRead !== undefined) {
+		if (config.committedReadRoot === undefined)
+			throw new Error("validated workflow artifact read has no source-owned root commitment");
+		const commitment = await config.validateRead({
+			phase: "before-read",
+			manifest,
+			source: resolvedArtifact.source,
+			artifact: resolvedArtifact.artifact,
+			ref: resolvedArtifact.ref,
+		});
+		if (!Buffer.isBuffer(commitment))
+			throw new Error("validated workflow artifact read has no retained byte commitment");
+		expectedBytes = commitment;
+	}
 	const completedCacheKey =
-		input.artifact !== "raw" && resolvedArtifact.source.status === "completed"
+		config.validateRead === undefined &&
+		config.cache !== false && input.artifact !== "raw" && resolvedArtifact.source.status === "completed"
 			? completedArtifactReadCacheKey(
 					config,
 					accessMode,
@@ -959,6 +1032,20 @@ export async function handleWorkflowArtifactToolCall(
 				path: input.path,
 				maxItems: input.maxItems,
 				maxChars: input.maxChars,
+				...(config.validateRead === undefined ? {} : {
+					expectedBytes: expectedBytes!,
+					committedReadRoot: config.committedReadRoot,
+					captureBytes: async (bytes: Buffer) => {
+						await config.validateRead?.({
+							phase: "after-read",
+							manifest,
+							source: resolvedArtifact.source,
+							artifact: resolvedArtifact.artifact,
+							ref: resolvedArtifact.ref,
+							bytes,
+						});
+					},
+				}),
 			},
 		);
 		if (completedCacheKey !== undefined)
@@ -985,7 +1072,8 @@ export async function handleWorkflowArtifactToolCall(
 			? {}
 			: { maxChars: read.projection.maxChars }),
 	});
-	if (workflowExperimentalFlagEnabled(EXPERIMENTAL_TOOL_DEDUP_ENV)) {
+	if (config.validateRead === undefined &&
+		config.cache !== false && workflowExperimentalFlagEnabled(EXPERIMENTAL_TOOL_DEDUP_ENV)) {
 		workflowArtifactReadDedupCache.set(dedupKey, read);
 	}
 	const projectionLabel = read.projection

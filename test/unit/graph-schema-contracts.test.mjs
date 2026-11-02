@@ -5,14 +5,165 @@ import test from "node:test";
 import ts from "typescript";
 import { compileWorkflow } from "../../.tmp/unit/compiler.js";
 import { parseWorkflow, loadWorkflowSpec } from "../../.tmp/unit/schema.js";
+import { containsGoalWorkflowDeclarationText, goalWorkflowInput } from "../../.tmp/unit/goal-json.js";
 import { validateJsonSchema, validateJsonSchemaSubset } from "../../.tmp/unit/json-schema.js";
 import { projectArtifactGraphControl } from "../../.tmp/unit/artifact-graph-runtime.js";
-import { writeJsonAtomic, writeRunRecord } from "../../.tmp/unit/store.js";
+import { runWorkflowSpec, resumeSupervisors, stopRun } from "../../.tmp/unit/engine.js";
+import { formatRun } from "../../.tmp/unit/engine-format.js";
+import { readRunRecord, readWorkflowStopIntent, writeJsonAtomic, writeRunRecord } from "../../.tmp/unit/store.js";
 import { completeTask, createWorkflowRunRecord, makeProject, scheduleRun, setSubagentApiForTests, writeAgent, writeStaticRunArtifacts } from "./unit-test-support.mjs";
 
 function graph(stages) {
 	return { schemaVersion: 1, defaults: { agent: "unit-scout", tools: ["read"], readOnly: true }, artifactGraph: { stages } };
 }
+
+test("Goal file loading rejects duplicate keys and escaped aliases before JSON loses them", async () => {
+	const cwd = makeProject();
+	try {
+		const spec = JSON.parse(readFileSync(new URL("../../workflows/goal-example/spec.json", import.meta.url), "utf8"));
+		const rootPath = join(cwd, "duplicate-goal.json");
+		writeFileSync(rootPath, JSON.stringify(spec).replace('"objective":', '"objective":"first","\\u006fbjective":'));
+		await assert.rejects(() => loadWorkflowSpec(rootPath, cwd), /duplicate key/);
+		const mixedPath = join(cwd, "duplicate-embedded-goal.json");
+		writeFileSync(mixedPath, '{"schemaVersion":1,"artifactGraph":{"stages":[{"id":"policy","type":"goal","goal":{"uses":"./first.json","\\u0075ses":"./second.json"}}]}}');
+		await assert.rejects(() => loadWorkflowSpec(mixedPath, cwd), /duplicate key/);
+	} finally { rmSync(cwd, { recursive: true, force: true }); }
+});
+
+test("raw structural Goal routing rejects overwritten containers without routing ordinary literal data", async () => {
+	const cwd = makeProject();
+	try {
+		const ordinary = '{"schemaVersion":1,"defaults":{"agent":"unit-scout","tools":["read"],"readOnly":true},"artifactGraph":{"stages":[{"id":"one","type":"single","prompt":"literal {\\"goal\\":{\\"not\\":\\"declaration\\"}}"}]}}';
+		for (const [name, text] of [
+			["duplicate-artifact-graph", '{"schemaVersion":1,"artifactGraph":{"stages":[{"id":"old","type":"goal","goal":{"uses":"./goal.json"}}]},"artifactGraph":{"stages":[{"id":"ordinary","type":"single"}]}}'],
+			["escaped-artifact-graph", '{"schemaVersion":1,"art\\u0069factGraph":{"stages":[{"id":"old","type":"goal","goal":{"uses":"./goal.json"}}]},"artifactGraph":{"stages":[{"id":"ordinary","type":"single"}]}}'],
+			["duplicate-stages", '{"schemaVersion":1,"artifactGraph":{"stages":[{"id":"old","type":"goal","goal":{"uses":"./goal.json"}}],"st\\u0061ges":[{"id":"ordinary","type":"single"}]}}'],
+		]) {
+			const path = join(cwd, `${name}.json`);
+			writeFileSync(path, text);
+			await assert.rejects(() => loadWorkflowSpec(path, cwd), /duplicate key/);
+		}
+		const literalPath = join(cwd, "ordinary-prompt.json");
+		writeFileSync(literalPath, ordinary);
+		assert.equal((await loadWorkflowSpec(literalPath, cwd)).spec.artifactGraph.stages[0].id, "one");
+		const inputPath = join(cwd, "ordinary-input.json");
+		writeFileSync(inputPath, '{"schemaVersion":1,"input":{"goal":{"nested":"ordinary data"},"fraction":1.5},"defaults":{"agent":"unit-scout","tools":["read"],"readOnly":true},"artifactGraph":{"stages":[{"id":"one","type":"single"}]}}');
+		const input = await loadWorkflowSpec(inputPath, cwd);
+		assert.equal(input.spec.input.goal.nested, "ordinary data");
+		assert.equal(input.spec.input.fraction, 1.5);
+	} finally { rmSync(cwd, { recursive: true, force: true }); }
+});
+
+test("raw Goal declaration scan is iterative and ignores deep ordinary input/prompt data", async () => {
+	const deep = `${'{"input":'.repeat(2200)}{"goal":{"literal":"ordinary"}}${"}".repeat(2200)}`;
+	assert.equal(containsGoalWorkflowDeclarationText(deep), false);
+	assert.equal(containsGoalWorkflowDeclarationText(
+		`{"prompt":"${"x".repeat(17000)} {\\"goal\\":{\\"literal\\":true}}"}`,
+	), false);
+	assert.equal(containsGoalWorkflowDeclarationText(
+		'{"artifactGraph":{"stages":[{"id":"declared","goal":{"uses":"./goal.json"}}]}}',
+	), true);
+	assert.throws(() => goalWorkflowInput(`{"goal":${deep}}`), /depth|complexity/);
+	const cwd = makeProject();
+	try {
+		const path = join(cwd, "deep-ordinary.json");
+		writeFileSync(path,
+			`{"schemaVersion":1,"input":${deep},"defaults":{"agent":"unit-scout","tools":["read"],"readOnly":true},"artifactGraph":{"stages":[{"id":"one","type":"single","prompt":"${"x".repeat(17000)}"}]}}`);
+		const loaded = await loadWorkflowSpec(path, cwd);
+		assert.equal(loaded.spec.artifactGraph.stages[0].prompt.length, 17000);
+		let value = loaded.spec.input;
+		for (let depth = 0; depth < 2200; depth++) value = value.input;
+		assert.equal(value.goal.literal, "ordinary");
+	} finally { rmSync(cwd, { recursive: true, force: true }); }
+});
+
+test("Goal JSON compiles as a non-provider policy without minting SDK authority", async () => {
+	const cwd = makeProject();
+	try {
+		const spec = JSON.parse(readFileSync(new URL("../../workflows/goal-example/spec.json", import.meta.url), "utf8"));
+		const parsed = parseWorkflow(spec);
+		const compiled = await compileWorkflow(parsed, { cwd, task: "A new target" });
+		assert.equal(compiled.tasks.length, 1);
+		const policy = compiled.tasks[0];
+		assert.equal(policy.kind, "goal");
+		assert.equal(policy.agentSystemPrompt, "");
+		assert.equal(policy.compiledPrompt, "");
+		assert.equal(policy.runtime.model, undefined);
+		assert.equal(policy.runtime.tools, undefined);
+		assert.equal(compiled.backend.type, "local-pi");
+		assert.deepEqual(policy.goal.definition, parsed);
+		assert.equal(compiled.goal, undefined);
+		assert.deepEqual(parsed, spec);
+	} finally { rmSync(cwd, { recursive: true, force: true }); }
+});
+
+test("embedded Goal preserves ordinary sibling runtime and exact dependency barrier", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const goalSpec = JSON.parse(readFileSync(new URL("../../workflows/goal-example/spec.json", import.meta.url), "utf8"));
+		writeFileSync(join(cwd, "goal.json"), JSON.stringify(goalSpec));
+		const spec = parseWorkflow(graph([
+			{ id: "before", type: "single", prompt: "Read only." },
+			{ id: "review", type: "goal", goal: { uses: "./goal.json" }, after: "before" },
+			{ id: "after", type: "single", prompt: "Use only achieved Goal output.", after: "review" },
+		]));
+		const compiled = await compileWorkflow(spec, { cwd, task: "Review" });
+		assert.deepEqual(compiled.tasks.map(task => task.kind), ["single", "goal", "single"]);
+		assert.deepEqual(compiled.tasks[1].dependsOn, ["before.main"]);
+		assert.deepEqual(compiled.tasks[2].dependsOn, ["review.main"]);
+		assert.equal(compiled.tasks[0].agent, "unit-scout");
+		assert.equal(compiled.tasks[2].agent, "unit-scout");
+		assert.equal(compiled.tasks[1].goal.definition.name, goalSpec.name);
+		assert.equal(compiled.backend.type, "local-pi");
+		assert.equal(compiled.tasks[0].goal, undefined);
+		assert.equal(compiled.tasks[2].goal, undefined);
+	} finally { rmSync(cwd, { recursive: true, force: true }); }
+});
+
+test("mixed Goal ancestry without a current interactive host schedules no ordinary or Goal provider effects", async () => {
+	const cwd = makeProject();
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		const goalSpec = JSON.parse(readFileSync(new URL("../../workflows/goal-example/spec.json", import.meta.url), "utf8"));
+		writeFileSync(join(cwd, "goal.json"), JSON.stringify(goalSpec));
+		const spec = parseWorkflow(graph([
+			{ id: "before", type: "single", prompt: "No automatic mixed-root recovery." },
+			{ id: "review", type: "goal", goal: { uses: "./goal.json" }, after: "before" },
+			{ id: "after", type: "single", prompt: "Goal achievement is required.", after: "review" },
+		]));
+		const specPath = join(cwd, "mixed.json");
+		writeFileSync(specPath, JSON.stringify(spec));
+		let launches = 0;
+		setSubagentApiForTests({
+			async runSubagent() { launches++; assert.fail("unbound Goal ancestry must not dispatch"); },
+			async getSubagentStatus() { return null; }, async reconcileSubagentRun() { return {}; }, async interruptSubagent() { return {}; },
+		});
+		const run = await runWorkflowSpec(specPath, cwd);
+		assert.equal(launches, 0);
+		assert.deepEqual(run.goalParticipation, { schemaVersion: 1, resumeRequired: true, goalPaths: ["review"] });
+		assert.equal(run.tasks.find(task => task.kind === "goal").statusDetail, "goal_host_resume_required");
+		assert.notEqual(run.status, "completed");
+		assert.equal(run.backend.type, "local-pi");
+		assert.match(formatRun(run), /Goal review\.main: not admitted · requests unknown · costMicros unknown/);
+		const policy = run.tasks.find(task => task.kind === "goal");
+		policy.goal = { goalId: "display-only", contractHash: "a".repeat(64), state: "draft", usage: { requests: 0, costMicros: null } };
+		assert.match(formatRun(run), /requests 0 · costMicros unknown/);
+		await resumeSupervisors(cwd);
+		assert.equal(launches, 0);
+		// Persisted rows deliberately provide no source-owned cancellation authority.
+		run.status = "running";
+		policy.status = "running";
+		policy.statusDetail = "synthetic_unbound_policy";
+		await writeRunRecord(cwd, run);
+		await assert.rejects(() => stopRun(cwd, run.runId), /could not confirm cancellation/);
+		const afterStop = await readRunRecord(cwd, run.runId);
+		assert.equal(afterStop.tasks.find(task => task.kind === "goal").status, "running");
+		assert.notEqual(afterStop.status, "interrupted");
+		assert.ok(await readWorkflowStopIntent(cwd, run.runId));
+		assert.equal(launches, 0);
+	} finally { setSubagentApiForTests(undefined); rmSync(cwd, { recursive: true, force: true }); }
+});
 
 for (const depth of [1, 2]) {
 	test(`scheduler executes every identified foreach item from a ${depth}-level nested producer output`, async () => {

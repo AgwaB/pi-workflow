@@ -39,8 +39,20 @@ export type ToolClassification = (typeof TOOL_CLASSIFICATIONS)[number];
 export type WorkflowRunType = typeof WORKFLOW_RUN_TYPE;
 
 export interface BackendOptions {
+	/** Authored workflows may select only the normal backend. */
 	type?: "local-pi";
 	mode?: "auto" | "headless";
+}
+
+/** Engine-owned persisted backend marker; goal-sdk is never author-selectable. */
+export type WorkflowPersistedBackend =
+	| { type: "local-pi"; mode: "headless" }
+	| { type: "goal-sdk"; mode: "sealed" };
+
+/** Persisted binding of the removed protected Goal engine; only detected, never executed. */
+export interface WorkflowGoalEngineRecord {
+	binding: unknown;
+	bindingHash: string;
 }
 
 export interface WorkflowBackendHandle {
@@ -94,7 +106,8 @@ export type ArtifactGraphStageType =
 	| "foreach"
 	| "loop"
 	| "dag"
-	| "dynamic";
+	| "dynamic"
+	| "goal";
 
 export type WorkflowArtifactKind = "control" | "analysis" | "refs" | "raw";
 
@@ -178,6 +191,93 @@ export interface ArtifactGraphWorkflowSpec {
 		maxConcurrency?: number;
 	};
 }
+
+export type GoalWorkflowEffect =
+	| "read"
+	| "candidate-write"
+	| "verify"
+	| "origin-apply"
+	| "workflow-create";
+
+/** Authenticated host receipts retained while a live admitted Goal source is
+ * read across worker generations. Cursors remain opaque evidence, never a
+ * capability reconstructed from worker output. */
+export interface GoalCandidateSourceReadReceipt {
+	path: string;
+	expectedDigest: string;
+	sourceDigest: string;
+	/** Durable host artifact containing this receipt, never continuation authority. */
+	evidenceRef: string;
+	cursor: string | null;
+	nextCursor: string | null;
+	eof: boolean;
+	encoding: "utf8" | "base64";
+	content: string;
+	returnedBytes: number;
+	returnedLines: number;
+}
+
+/** Nonserializable original-host continuation authority for source pages. */
+export interface GoalCandidateSourceReadContinuation {
+	resolve(path: string, cursor?: string): string | undefined;
+	settle(receipt: GoalCandidateSourceReadReceipt): void;
+	/** Acknowledged candidate publication invalidates only its prior source epoch. */
+	invalidate(path: string, expectedDigest: string): void;
+	/** Bounded host evidence passed explicitly to a later worker, not worker coverage. */
+	handoff(path: string, expectedDigest: string): readonly Omit<GoalCandidateSourceReadReceipt, "encoding" | "content">[];
+}
+
+export interface GoalWorkflowDefinition {
+	objective: string;
+	criteria: Array<{
+		id: string;
+		verifier: {
+			kind: "deterministic" | "model-rubric" | "human";
+			producerId: string;
+			target: "artifact" | "candidate" | "origin";
+			subject: { resultSlot: string; artifact: WorkflowArtifactKind; path?: string };
+			config: unknown;
+		};
+	}>;
+	authority: {
+		allowedPaths: string[];
+		protectedPaths: string[];
+		allowedEffects: GoalWorkflowEffect[];
+	};
+	nesting: { maxDepth: number };
+	limits?: { requests?: number | null; costMicros?: number | null };
+	workflows?: Record<string, DynamicWorkflowNestedSpec>;
+}
+
+/** Advisory selection only; a declared ID is not nested execution authority. */
+export interface GoalRootProposedTask {
+	id: string;
+	prompt: string;
+	workflow?: string;
+}
+
+export interface GoalRootPlan {
+	schema: "goal-root-plan-v1";
+	digest: string;
+	proposedTasks: GoalRootProposedTask[];
+}
+
+export interface GoalWorkflowSpec {
+	schemaVersion: 1;
+	name?: string;
+	description?: string;
+	input?: unknown;
+	defaults?: WorkflowDefaults;
+	roles?: Record<string, RoleSpec>;
+	executionProfiles?: Record<
+		string,
+		Record<string, ExecutionProfileStageOverride>
+	>;
+	defaultExecutionProfile?: string;
+	goal: GoalWorkflowDefinition;
+}
+
+export type WorkflowSpec = ArtifactGraphWorkflowSpec | GoalWorkflowSpec;
 
 export interface DynamicWorkflowBudgetSpec {
 	maxAgents?: number;
@@ -346,6 +446,7 @@ export interface ArtifactGraphStageSpec {
 	outputFrom?: string;
 	support?: { uses: string; options?: Record<string, unknown> };
 	dynamic?: DynamicWorkflowStageSpec;
+	goal?: { uses: string };
 	until?: unknown;
 	/** Explicit null removes the round cap; omission is invalid for loops. */
 	maxRounds?: number | null;
@@ -671,6 +772,7 @@ export interface CompiledTask {
 	foreach?: {
 		from: unknown;
 		prompt: string;
+		/** Goal-child admission accepts this only as a finite positive safe integer. */
 		maxItems?: number;
 		/** Profile-only v1 batch metadata; base authored stages cannot set it. */
 		batch?: ExecutionProfileForeachBatch;
@@ -683,11 +785,18 @@ export interface CompiledTask {
 		uses: string;
 		options?: Record<string, unknown>;
 	};
+	goal?: {
+		usesPath: string;
+		definition: GoalWorkflowSpec;
+		definitionFingerprint: string;
+		profileOverrides?: Record<string, ExecutionProfileStageOverride>;
+	};
 	dynamic?: CompiledDynamicWorkflowTask;
 	dynamicGenerated?: {
 		controllerSpecId: string;
 		opId: string;
 		requestHash: string;
+		profileSlot?: "planner" | "workerDefaults" | "verifier" | "synthesis";
 		branchId?: string;
 		outputProfile?: string;
 		/** Captured diagnostics for event-only recovery; absent on legacy tasks. */
@@ -1222,6 +1331,38 @@ export interface WorkflowTaskRunRecord {
 		warning: string | null;
 		snapshot?: WorktreeSnapshotRecord;
 	};
+	/** Goal-host workspace receipt; never interpreted as qualification. */
+	goalWorkspace?: { bindingDigest: string; revision: number };
+	/** Immutable per-Goal profile evidence; it grants neither admission nor recovery. */
+	goalProfileConfiguration?: import("./goal-types.js").WorkflowGoalProfileConfiguration;
+	/** Read-only request outcome evidence; never cap or resume authority. */
+	goalRequestUsageIncomplete?: true;
+	/** Engine-owned root generations; never authored or supplied by a planner. */
+	goalRoot?: {
+		definitionFingerprint: string;
+		usage?: { requests: number | null; costMicros: number | null; metrics: import("./workflow-metrics.js").WorkflowUsageMetrics };
+		generations: Array<{
+			generation: number;
+			plannerSpecId: string;
+			workerControllerSpecId: string;
+			slots: Record<string, string>;
+			/** Criterion-indexed original verification tasks, never worker result slots. */
+			verifiers?: Record<string, string>;
+			/** Observational child reservations; never restored execution issuers. */
+			children?: Record<string, { workflowId: string; runId: string; requestHash: string; specHash: string }>;
+			planFingerprint?: string;
+			failedCandidateFingerprint?: string;
+			outcome?: "not-achieved" | "achieved";
+		}>;
+	};
+	goal?: {
+		goalId: string;
+		contractHash: string;
+		state: string;
+		usage?: { requests: number | null; costMicros: number | null; metrics?: import("./workflow-metrics.js").WorkflowUsageMetrics };
+		/** Ordinary Goal origin application outcome; evidence only, never write authority. */
+		originApply?: import("./goal-workflow-origin-apply.js").WorkflowGoalOriginApplyRecord;
+	};
 	backendTaskId: string;
 	pid?: number;
 	launchToken?: string;
@@ -1262,6 +1403,8 @@ export interface WorkflowTaskRunRecord {
 	launchBootstrap?: LaunchBootstrapProvenanceHistory;
 	/** Internal host-owned launch grant; not an external authority or public API. */
 	launchAuthority?: WorkflowLaunchAuthorityHistory;
+	/** Digest of the immutable, host-written SDK terminal anchor in this task directory. */
+	goalSdkTerminalAnchor?: string;
 	/** General pi-subagent durable launch barrier receipts, retained by attempt. */
 	durableLaunchBarrier?: WorkflowDurableLaunchBarrierHistory;
 	startedAt?: string;
@@ -1297,6 +1440,7 @@ export interface WorkflowTaskRunRecord {
 		controllerSpecId: string;
 		opId: string;
 		requestHash: string;
+		profileSlot?: "planner" | "workerDefaults" | "verifier" | "synthesis";
 		branchId?: string;
 		outputProfile?: string;
 	};
@@ -1557,7 +1701,26 @@ export interface WorkflowRunRecord {
 	degradation?: WorkflowRunDegradation;
 	taskSummary: TaskSummary;
 	cwd: string;
-	backend: { type: "local-pi"; mode: "headless" };
+	backend: WorkflowPersistedBackend;
+	/** Engine-owned Goal binding; absent for normal workflows. */
+	goal?: WorkflowGoalEngineRecord;
+	/** Ordinary child lineage is observation, never a persisted admission issuer. */
+	goalChild?: {
+		definitionKind: "artifact-graph" | "standalone-goal";
+		parentRunId: string; policySpecId: string; generation: number; slot: string;
+		controllerTaskId: string; controllerSpecId: string; workflowId: string;
+		sourceHash: string; sourceBytesHex: string; definitionFingerprint: string; specHash: string; requestHash: string; runId: string;
+		/** Original embedded source observations only; never an admission or recovery issuer. */
+		embeddedGoalSources?: Array<{
+			stageId: string; usesPath: string; sourceHash: string; sourceBytesHex: string; definitionFingerprint: string;
+		}>;
+		ordinaryProfile?: { model: string; thinking?: ThinkingLevel };
+	};
+	goalParticipation?: {
+		schemaVersion: 1;
+		resumeRequired: boolean;
+		goalPaths: string[];
+	};
 	failurePolicy?: Required<WorkflowFailurePolicy>;
 	parentRunId?: string;
 	rootRunId?: string;
@@ -1656,7 +1819,9 @@ export interface CompiledWorkflow {
 	type: WorkflowRunType;
 	task?: string;
 	cwd: string;
-	backend: { type: "local-pi"; mode: "headless" };
+	backend: WorkflowPersistedBackend;
+	/** Engine-owned Goal binding; absent from authored workflow schemas. */
+	goal?: WorkflowGoalEngineRecord;
 	maxConcurrency: number;
 	failurePolicy?: Required<WorkflowFailurePolicy>;
 	roles: CompiledRole[];
