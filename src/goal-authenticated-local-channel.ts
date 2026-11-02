@@ -247,9 +247,6 @@ export async function openGoalAuthenticatedLocalChannel(input: {
     if (closed) { socket.destroy(); return; } server.injectSocket(socket);
   });
   await new Promise<void>((resolve, reject) => { listener.once("error", reject); listener.listen(input.socketPath, resolve); });
-  // A listening endpoint alone never keeps the host process alive; active
-  // Goal work holds its own handles, and drain/stop still close the endpoint.
-  listener.unref();
   const originalEndpoint = await lstat(input.socketPath);
   const endpointIdentity = { dev: originalEndpoint.dev, ino: originalEndpoint.ino };
   const drain = () => draining ??= (async () => {
