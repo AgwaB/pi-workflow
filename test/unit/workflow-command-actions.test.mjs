@@ -23,8 +23,12 @@ function helpActions() {
 
 function handledActions() {
 	const source = readFileSync(join(repoRoot, "src", "extension.ts"), "utf8");
+	const start = source.indexOf("async function handleWorkflowCommand(");
+	assert.notEqual(start, -1, "missing /workflow command handler");
+	const end = source.indexOf("\n}\n", start);
+	assert.notEqual(end, -1, "missing /workflow command handler end");
 	const actions = new Set();
-	for (const match of source.matchAll(/action === "([^"]+)"/g)) actions.add(match[1]);
+	for (const match of source.slice(start, end).matchAll(/action === "([^"]+)"/g)) actions.add(match[1]);
 	return actions;
 }
 

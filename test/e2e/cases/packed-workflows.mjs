@@ -18,6 +18,7 @@ const { compileWorkflow } = await import(
 const officialNames = [
 	"deep-research",
 	"deep-review",
+	"goal-example",
 	"impact-review",
 	"spec-review",
 ];
@@ -38,6 +39,10 @@ for (const name of officialNames) {
 	});
 	assert.ok(compiled.artifactGraph?.enabled, `${name} did not compile as artifact graph`);
 	assert.ok(compiled.tasks.length > 0, `${name} compiled without tasks`);
+	if (name === "goal-example") {
+		assert.ok("goal" in loaded.spec);
+		assert.equal(compiled.tasks.filter((task) => task.kind === "goal").length, 1);
+	}
 	for (const relativeRef of localFileRefs(loaded.spec)) {
 		await access(resolve(dirname(loaded.specPath), relativeRef));
 	}

@@ -345,6 +345,9 @@ export async function establishRawOwner(taskDirectory: string, expected?: RawSel
 		if (!hasNonSpawnableWorkflowLaunchAuthority(run, executionTask, record.grant.backendId) || record.state.phase !== "consumed") fail();
 		const state = record.state;
 		if (!safeId(state.backendRunId) || !safeId(state.backendAttemptId)) fail();
+		// Records of the removed protected Goal engine (goal-sdk/sealed) and any
+		// other backend fail closed here.
+		if (record.grant.backendId !== "pi-subagent/headless") fail();
 		const provenance = executionTask.launchBootstrap?.records.find(
 			candidate => candidate.identitySha256 === record.grant.launchBootstrapSha256,
 		);

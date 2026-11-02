@@ -11,6 +11,7 @@ import {
 } from "node:fs";
 import { delimiter, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { captureCompiledTree, writeCompiledManifest } from "./compiled-artifact-proof.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const resultRoot = join(root, ".tmp", "test-results", "e2e");
@@ -160,9 +161,15 @@ function nodeEval(label, code, options = {}) {
 }
 
 function ensureCompiledArtifacts() {
-	run("test-build", "npm", ["run", "test:build"], {
+	const result = run("test-build", "npm", ["run", "test:build"], {
 		timeoutMs: 180_000,
 	});
+	if (result.status === 0 && !result.signal && !result.error) {
+		writeCompiledManifest(
+			join(resultDir, "compiled-artifacts.json"),
+			captureCompiledTree(join(root, ".tmp", "unit")),
+		);
+	}
 }
 
 function assertNoLegacyTerms() {

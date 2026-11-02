@@ -2544,17 +2544,15 @@ async function writeValidWorkflowOutputBundle(
 	return { valid: true, parsed, result, files };
 }
 
+export const WORKFLOW_TASK_ARTIFACT_FILES = Object.freeze({
+	control: "control.json", analysis: "analysis.md", refs: "refs.json", raw: "raw.md", result: "result.json",
+});
 function artifactFileMap(
 	taskDir: string,
 	options: WorkflowTaskArtifactBundleOptions,
 ): Record<string, string> {
-	const files: Record<string, string> = {
-		control: join(taskDir, "control.json"),
-		analysis: join(taskDir, "analysis.md"),
-		refs: join(taskDir, "refs.json"),
-		raw: join(taskDir, "raw.md"),
-		result: join(taskDir, "result.json"),
-	};
+	const files: Record<string, string> = Object.fromEntries(Object.entries(WORKFLOW_TASK_ARTIFACT_FILES)
+		.map(([kind, name]) => [kind, join(taskDir, name)]));
 	if (options.prompt !== undefined) files.prompt = join(taskDir, "prompt.md");
 	if (options.systemPrompt !== undefined)
 		files["system-prompt"] = join(taskDir, "system-prompt.md");

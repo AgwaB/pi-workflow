@@ -21,12 +21,14 @@ const execFileAsync = promisify(execFile);
 import { awaitWithinWorkflowWaitBoundary } from "../../.tmp/unit/engine.js";
 import {
 	acquireRunFileLease,
+	flushPendingIndexUpdatesForTests,
 	setRunLeaseTestHooksForTests,
 } from "../../.tmp/unit/store.js";
 import {
 	deliverWorkflowFeedback,
 	setWorkflowFeedbackBindWaitMsForTests,
 	setWorkflowFeedbackPollMsForTests,
+	stopWorkflowFeedbackAndDrainForTests,
 	watchWorkflowFeedbackForTests,
 	WORKFLOW_DYNAMIC_TOOL,
 	WORKFLOW_RUN_TOOL,
@@ -1005,7 +1007,13 @@ test("feedback watcher single-flights delivery and retries a failed send", async
 		await reclaimed.release();
 	} finally {
 		controller.abort();
-		setWorkflowFeedbackPollMsForTests(undefined);
+		rejectFirst?.(new Error("fixture cleanup"));
+		try {
+			await stopWorkflowFeedbackAndDrainForTests(cwd, "workflow_watcher_retry");
+			await flushPendingIndexUpdatesForTests();
+		} finally {
+			setWorkflowFeedbackPollMsForTests(undefined);
+		}
 		await rm(cwd, { recursive: true, force: true });
 	}
 });
@@ -1043,7 +1051,12 @@ test("feedback watcher stops after retry exhaustion and warns once", async () =>
 		assert.equal(warnings.length, 1);
 	} finally {
 		controller.abort();
-		setWorkflowFeedbackPollMsForTests(undefined);
+		try {
+			await stopWorkflowFeedbackAndDrainForTests(cwd, "workflow_watcher_exhausted");
+			await flushPendingIndexUpdatesForTests();
+		} finally {
+			setWorkflowFeedbackPollMsForTests(undefined);
+		}
 		await rm(cwd, { recursive: true, force: true });
 	}
 });
@@ -1237,7 +1250,12 @@ test("feedback watcher classifies invalid delivery markers as permanent", async 
 		assert.equal(warnings.length, 1);
 	} finally {
 		controller.abort();
-		setWorkflowFeedbackPollMsForTests(undefined);
+		try {
+			await stopWorkflowFeedbackAndDrainForTests(cwd, "workflow_watcher_permanent");
+			await flushPendingIndexUpdatesForTests();
+		} finally {
+			setWorkflowFeedbackPollMsForTests(undefined);
+		}
 		await rm(cwd, { recursive: true, force: true });
 	}
 });

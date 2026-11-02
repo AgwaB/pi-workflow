@@ -1,7 +1,7 @@
 {
 	"schema": "pi-workflow-unit-test-inventory-v1",
 	"source": "unit.test.mjs",
-	"count": 540,
+	"count": 543,
 	"tests": [
 		{
 			"name": "adaptive live workers cap growth at configured live-worker limit",
@@ -364,9 +364,15 @@
 			"domain": "dynamic-runtime"
 		},
 		{
+			"name": "artifactGraph dynamic runtime budget charges active time before resuming children",
+			"occurrence": 1,
+			"sha256": "aa2e29d976c28217e58e2bc1ecf209f214a386ad9d24d671ad3025e00033552c",
+			"domain": "dynamic-runtime"
+		},
+		{
 			"name": "artifactGraph dynamic runtime budget excludes suspended child wait time",
 			"occurrence": 1,
-			"sha256": "1c54c67c402d38a33eb056540e82b7e885ab7983b6813378d482b838e0d33342",
+			"sha256": "88f97db195d31ff989a962590ba1c11876d76db40ff9b338e03e967e2e644902",
 			"domain": "dynamic-runtime"
 		},
 		{
@@ -474,7 +480,7 @@
 		{
 			"name": "artifactGraph runtime foreach materializes items from a dag container output",
 			"occurrence": 1,
-			"sha256": "7c91d27f73b2dd119e2deb82affb3cab3965a7c92c55bd85dd9960f181f61f85",
+			"sha256": "96b492c26c9286493d1631dfbc2f0f4592df15ce865fe404130ef24cff6d4e0c",
 			"domain": "artifact-web"
 		},
 		{
@@ -810,7 +816,7 @@
 		{
 			"name": "concurrent same-attempt launch calls invoke runSubagent once",
 			"occurrence": 1,
-			"sha256": "03ec4acd9cea24559f7dfaeef61db3a4c4d6205c5b9f1960e3c8f47e517690c1",
+			"sha256": "d114d4534bf6fc2082c2575be98762e783d3faecd2584c10eb874a4e92dcb1d0",
 			"domain": "engine-store"
 		},
 		{
@@ -1606,6 +1612,12 @@
 			"domain": "core-runtime"
 		},
 		{
+			"name": "G05 reserved nested workflow corruption fails closed without blind resend",
+			"occurrence": 1,
+			"sha256": "187ebaa288b3cb7a7c269627977a9535337ce3ce8723d4fd49faecb9537751bd",
+			"domain": "dynamic-runtime"
+		},
+		{
 			"name": "global live model worker cap defers in leased scheduler without hanging",
 			"occurrence": 1,
 			"sha256": "83ad11d0eb6fa9d4e860c4f5bb5e7fa7c15ee71cd706c9aa8f2351d5096f1186",
@@ -1662,7 +1674,7 @@
 		{
 			"name": "launch-bootstrap seals ambient extensions and rejects generated-wrapper drift before runSubagent",
 			"occurrence": 1,
-			"sha256": "07866021dc66b5422d9888c5f731cc9942f8ea1a7da52e7509402785c628cc9b",
+			"sha256": "44ba65c37f62c40b3247415c82c4b28aa26dc9ac09e7132a338237efd041acbf",
 			"domain": "engine-store"
 		},
 		{
@@ -1824,7 +1836,7 @@
 		{
 			"name": "oauth provider rate-limit without retry hint uses subscription-window backoff",
 			"occurrence": 1,
-			"sha256": "6e2f51bd9c192327dadd30a3717f31d0c42284ef001e8b83b8e3ee5f41d7f3f7",
+			"sha256": "46fa37e7447739f3167846db674301bc833507c69f2a65d66d7932f44156e666",
 			"domain": "engine-store"
 		},
 		{
@@ -1968,7 +1980,7 @@
 		{
 			"name": "refresh polls subagent status in a bounded pool and records latency telemetry",
 			"occurrence": 1,
-			"sha256": "4110d32d8324947f90438b176ac85d9de0fe544e3d32d090d50b8969b2882b60",
+			"sha256": "1fd42e31eef2184d3c84c75d65735e0d9732b70b6ca0e93b7a3ca1dd9c46194d",
 			"domain": "engine-store"
 		},
 		{
@@ -2352,7 +2364,7 @@
 		{
 			"name": "shared rate-limit backoff survives process restarts via persisted state",
 			"occurrence": 1,
-			"sha256": "bcea699a7d75516d727c68c410e20ee080beeec1da0dfaaae8674d2c5b26d60f",
+			"sha256": "4fb3ca8f899ea86cba528544d3925549de6e0bf7d28e12e03c366495f73bf412",
 			"domain": "engine-store"
 		},
 		{
@@ -2478,7 +2490,7 @@
 		{
 			"name": "subagent launch detaches validated options from post-registration mutation",
 			"occurrence": 1,
-			"sha256": "0335c89e08b4c72ce0d37d1a615670378725962cea62b97fc3e9d3732b8ade0d",
+			"sha256": "afdca4ce23616a6d2858a0018ca1017ece40a43be1ff62b22a8ffc17973f3bd2",
 			"domain": "engine-store"
 		},
 		{
@@ -2682,7 +2694,7 @@
 		{
 			"name": "workflow artifact bundle validates unique ref URLs concurrently",
 			"occurrence": 1,
-			"sha256": "8ab00841d5445f53c04a4baf8918cf44d537515ec37bde071f724e9639e1d532",
+			"sha256": "e803f3f6a7ad9a6595302c7b343aaface0ed7565508bbe813794c859f686a904",
 			"domain": "artifact-web"
 		},
 		{
@@ -2730,7 +2742,7 @@
 		{
 			"name": "workflow command completions and run arg parsing preserve task text",
 			"occurrence": 1,
-			"sha256": "26c279193025e33672725f21cee9c5c0ca1a3e1f34dd385c8dc3e151667f82fd",
+			"sha256": "811387396af4e38b7375cbc90aa6d71f0d26684796109b50c392c5df6d317266",
 			"domain": "authoring-interface"
 		},
 		{
@@ -2773,6 +2785,12 @@
 			"name": "workflow index debounces nonterminal updates but publishes terminal runs immediately",
 			"occurrence": 1,
 			"sha256": "ff0a8930e352e5f459ba6fae5d304cd5790c86cdd2677aadf7341d4cea3d6f13",
+			"domain": "engine-store"
+		},
+		{
+			"name": "workflow index explicit drain preserves failures from every pending cwd",
+			"occurrence": 1,
+			"sha256": "2c87e9443c535f21cc6264c19cfa925dfa065674aaec9a67ac4fe7becc160cfb",
 			"domain": "engine-store"
 		},
 		{

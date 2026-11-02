@@ -2,9 +2,12 @@ import { readFile, realpath } from "node:fs/promises";
 import { dirname, extname, isAbsolute, relative, resolve } from "node:path";
 
 import { parseArtifactGraphWorkflowSpec } from "./artifact-graph-schema.js";
+import { parseGoalWorkflowSpec } from "./goal-workflow-schema.js";
+import { containsGoalWorkflowDeclarationText, goalWorkflowInput } from "./goal-json.js";
 import { validateJsonSchemaSubset } from "./json-schema.js";
 import {
 	type ArtifactGraphWorkflowSpec,
+	type WorkflowSpec,
 	WorkflowValidationError,
 	type ValidationIssue,
 } from "./types.js";
@@ -14,7 +17,7 @@ import {
 } from "./workflow-specs.js";
 
 export interface LoadedWorkflowSpec extends ResolvedWorkflowSpecRef {
-	spec: ArtifactGraphWorkflowSpec;
+	spec: WorkflowSpec;
 }
 
 export async function loadWorkflowSpec(
@@ -40,7 +43,9 @@ export async function loadWorkflowSpec(
 	}
 
 	const spec = parseWorkflow(parsed);
-	await validateArtifactGraphControlSchemaFiles(spec, resolved.specPath);
+	if ("artifactGraph" in spec) {
+		await validateArtifactGraphControlSchemaFiles(spec, resolved.specPath);
+	}
 	return {
 		...resolved,
 		spec,
@@ -110,11 +115,20 @@ function parseSpecText(text: string, specPath: string): unknown {
 	const extension = extname(specPath).toLowerCase();
 	if (extension === ".yaml" || extension === ".yml")
 		throw new Error("YAML workflow specs are not supported; use JSON (.json).");
-	return JSON.parse(text);
+	const parsed: unknown = JSON.parse(text);
+	return containsGoalWorkflowDeclarationText(text) ? goalWorkflowInput(text) : parsed;
 }
 
 export const loadWorkflow = loadWorkflowSpec;
 
-export function parseWorkflow(value: unknown): ArtifactGraphWorkflowSpec {
+export function parseWorkflow(value: unknown): WorkflowSpec {
+	if (
+		value !== null &&
+		typeof value === "object" &&
+		!Array.isArray(value) &&
+		Object.hasOwn(value, "goal")
+	) {
+		return parseGoalWorkflowSpec(value);
+	}
 	return parseArtifactGraphWorkflowSpec(value);
 }

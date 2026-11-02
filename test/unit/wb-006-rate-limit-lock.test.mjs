@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -12,7 +12,7 @@ const backendModuleUrl = new URL(
 	import.meta.url,
 ).href;
 
-async function recordInChild(home, model, backoffMs) {
+async function recordInChild(home, agentDir, model, backoffMs) {
 	const script = `
 		const backend = await import(process.argv[1]);
 		await backend.recordSharedModelRateLimitBackoffForTests(process.argv[2], Number(process.argv[3]));
@@ -21,25 +21,27 @@ async function recordInChild(home, model, backoffMs) {
 		process.execPath,
 		["--input-type=module", "-e", script, backendModuleUrl, model, String(backoffMs)],
 		{
-			env: { ...process.env, HOME: home },
+			env: { ...process.env, HOME: home, PI_CODING_AGENT_DIR: agentDir },
 			maxBuffer: 1024 * 1024,
 		},
 	);
 }
 
-test("WB-006 concurrent processes preserve distinct keys and the longest same-key cooldown", async () => {
+test("WB-006 concurrent processes preserve distinct keys and the longest same-key cooldown", async (t) => {
 	const home = await mkdtemp(join(tmpdir(), "piwf-wb006-home-"));
+	t.after(() => rm(home, { recursive: true, force: true }));
+	const agentDir = join(home, ".pi", "agent");
 	const startedAt = Date.now();
 	await Promise.all([
-		recordInChild(home, "provider-a/model", 70_000),
-		recordInChild(home, "provider-b/model", 80_000),
-		recordInChild(home, "provider-c/model", 90_000),
-		recordInChild(home, "provider-shared/model-a", 15_000),
-		recordInChild(home, "provider-shared/model-b", 120_000),
-		recordInChild(home, "provider-shared/model-c", 25_000),
+		recordInChild(home, agentDir, "provider-a/model", 70_000),
+		recordInChild(home, agentDir, "provider-b/model", 80_000),
+		recordInChild(home, agentDir, "provider-c/model", 90_000),
+		recordInChild(home, agentDir, "provider-shared/model-a", 15_000),
+		recordInChild(home, agentDir, "provider-shared/model-b", 120_000),
+		recordInChild(home, agentDir, "provider-shared/model-c", 25_000),
 	]);
 
-	const file = join(home, ".pi", "agent", "model-rate-limit-backoff.json");
+	const file = join(agentDir, "model-rate-limit-backoff.json");
 	const persisted = JSON.parse(await readFile(file, "utf8"));
 	assert.deepEqual(
 		Object.keys(persisted).sort(),

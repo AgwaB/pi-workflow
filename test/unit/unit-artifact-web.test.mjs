@@ -1598,8 +1598,34 @@ test("artifactGraph runtime foreach repairs compiled/run mismatch after material
 
 test("artifactGraph runtime foreach materializes items from a dag container output", async () => {
 	const cwd = makeProject();
+	let fixtureRunId;
+	const launches = [];
+	const fixtureAttempts = new Map();
+	const cancellations = [];
 	try {
 		writeAgent(cwd, "unit-scout", "read");
+		setSubagentApiForTests({
+			async runSubagent(options) {
+				launches.push(options);
+				const attempt = {
+					runId: `run_container_fixture_${launches.length}`,
+					attemptId: `attempt_container_fixture_${launches.length}`,
+					status: "running",
+				};
+				fixtureAttempts.set(attempt.runId, attempt);
+				return attempt;
+			},
+			async getSubagentStatus() { return null; },
+			async reconcileSubagentRun() { return {}; },
+			async interruptSubagent({ runId, attemptId }) {
+				assert.equal(fixtureAttempts.get(runId)?.attemptId, attemptId);
+				assert.equal(fixtureAttempts.get(runId).status, "running");
+				cancellations.push({ runId, attemptId });
+				fixtureAttempts.get(runId).status = "cancelled";
+				return { runId, status: "interrupt-requested", interruptedAttempts: [attemptId],
+					record: { attempts: [{ attemptId, status: "cancelled" }] } };
+			},
+		});
 		const spec = workflowSpec("unit-scout", {
 			artifactGraph: {
 				stages: [
@@ -1641,6 +1667,7 @@ test("artifactGraph runtime foreach materializes items from a dag container outp
 			compiled,
 			join(cwd, "workflows", "unit.json"),
 		);
+		fixtureRunId = run.runId;
 		await writeStaticRunArtifacts(cwd, run, compiled, spec);
 
 		await completeTask(cwd, run.tasks[0], {
@@ -1653,6 +1680,11 @@ test("artifactGraph runtime foreach materializes items from a dag container outp
 
 		await scheduleRun(cwd, run.runId);
 		const materialized = await readRunRecord(cwd, run.runId);
+		assert.equal(launches.length, 2, "exactly the materialized items use the fixture backend");
+		assert.deepEqual(materialized.tasks.filter(task => task.stageId === "verify")
+			.map(task => task.backendHandle?.runId).sort(),
+		["run_container_fixture_1", "run_container_fixture_2"],
+		"each materialized item has a distinct owned fixture backend");
 		assert.deepEqual(
 			materialized.tasks.map((task) => task.specId),
 			[
@@ -1672,13 +1704,22 @@ test("artifactGraph runtime foreach materializes items from a dag container outp
 			["verify.item_a", "verify.item_b"],
 		);
 	} finally {
-		await flushPendingIndexUpdatesForTests().catch(() => undefined);
-		rmSync(cwd, {
-			recursive: true,
-			force: true,
-			maxRetries: 5,
-			retryDelay: 10,
-		});
+		let drained = false;
+		try {
+			if (fixtureRunId) await drainWorkflowFixture(cwd, fixtureRunId);
+			assert.deepEqual(cancellations.map(item => `${item.runId}/${item.attemptId}`).sort(),
+				[...fixtureAttempts.values()].map(item => `${item.runId}/${item.attemptId}`).sort(),
+				"every original fixture attempt is cancelled exactly once before backend reset");
+			drained = true;
+		} finally {
+			setSubagentApiForTests(undefined);
+			if (drained) rmSync(cwd, {
+				recursive: true,
+				force: true,
+				maxRetries: 5,
+				retryDelay: 10,
+			});
+		}
 	}
 });
 
@@ -8822,54 +8863,58 @@ test("workflow artifact bundle can validate strict ref URL availability", async 
 test("workflow artifact bundle validates unique ref URLs concurrently", async () => {
 	const taskDir = mkdtempSync(join(tmpdir(), "workflow-ref-url-concurrent-"));
 	const originalFetch = globalThis.fetch;
-	const delayMs = 120;
 	const refs = [
 		{ url: "https://a.example.test/one" },
 		{ url: "https://b.example.test/two" },
 		{ url: "https://c.example.test/three" },
 		{ url: "https://d.example.test/four" },
 	];
-	let inFlight = 0;
-	let maxInFlight = 0;
+	const expectedUrls = new Set(refs.map((ref) => ref.url));
+	const expectedHosts = new Set(
+		refs.map((ref) => new URL(ref.url).host),
+	);
+	const allHostsEntered = Promise.withResolvers();
+	const releaseFetches = Promise.withResolvers();
+	const enteredUrls = new Set();
+	const enteredHosts = new Set();
 	let callCount = 0;
+	let writing;
 	try {
-		globalThis.fetch = async () => {
+		globalThis.fetch = async (url) => {
+			const href = String(url);
 			callCount += 1;
-			inFlight += 1;
-			maxInFlight = Math.max(maxInFlight, inFlight);
-			try {
-				await sleep(delayMs);
-				return {
-					ok: true,
-					status: 200,
-					url: "https://example.test/ok",
-					arrayBuffer: async () => new ArrayBuffer(0),
-				};
-			} finally {
-				inFlight -= 1;
+			enteredUrls.add(href);
+			enteredHosts.add(new URL(href).host);
+			if (enteredHosts.size === expectedHosts.size) {
+				allHostsEntered.resolve();
 			}
+			await releaseFetches.promise;
+			return {
+				ok: true,
+				status: 200,
+				url: href,
+				arrayBuffer: async () => new ArrayBuffer(0),
+			};
 		};
 
-		const startedAt = Date.now();
-		const written = await writeWorkflowTaskArtifactBundle({
+		writing = writeWorkflowTaskArtifactBundle({
 			taskDir,
 			rawOutput: workflowOutputRawWithRefs(refs),
 			refsMinItems: 1,
 			refsUrlValidation: { timeoutMs: 1_000, maxUrls: refs.length },
 		});
-		const elapsedMs = Date.now() - startedAt;
+		await allHostsEntered.promise;
+		assert.equal(callCount, refs.length);
+		assert.deepEqual([...enteredUrls].sort(), [...expectedUrls].sort());
+		assert.deepEqual([...enteredHosts].sort(), [...expectedHosts].sort());
+		releaseFetches.resolve();
+		const written = await writing;
 
 		assert.equal(written.valid, true, JSON.stringify(written.parsed.issues));
 		assert.equal(callCount, refs.length);
-		assert.ok(
-			maxInFlight > 1,
-			`expected concurrent fetches, saw ${maxInFlight}`,
-		);
-		assert.ok(
-			elapsedMs < delayMs * refs.length,
-			`expected concurrent validation below serial lower bound, elapsed ${elapsedMs}ms`,
-		);
 	} finally {
+		releaseFetches.resolve();
+		await Promise.allSettled(writing ? [writing] : []);
 		globalThis.fetch = originalFetch;
 		rmSync(taskDir, { recursive: true, force: true });
 	}

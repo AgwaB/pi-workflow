@@ -4,6 +4,7 @@ import {
 	buildWorkflowNativeHostExtensionWrapper,
 } from "./workflow-native-host-context.js";
 import { existsSync, readFileSync, rmSync } from "node:fs";
+import { prepareWorkflowGoalCandidateChannel, prepareWorkflowGoalRequestChannel, assertWorkflowGoalCandidateExtensions, assertWorkflowGoalRequestLaunchCurrent, restrictWorkflowGoalCandidateLaunch } from "./goal-workflow-runtime.js";
 import {
 	copyFile,
 	link,
@@ -423,6 +424,7 @@ interface SubagentInterruptResult {
 interface SubagentApi {
 	supportsExplicitExtensionIsolation?(): boolean;
 	runSubagent(options: Record<string, unknown>): Promise<SubagentResultEnvelope>;
+	supportsExplicitExtensionIsolation?(): boolean;
 	createDurableLaunchBarrierV2?(options: {
 		directory: string;
 		subjectSha256: string;
@@ -526,6 +528,15 @@ function hasDurableLaunchBarrierApi(
 		typeof api.readDurableLaunchBarrierV2State === "function" &&
 		typeof api.waitForDurableLaunchBarrierV2Ack === "function"
 	);
+}
+
+export async function readWorkflowDurableLaunchBarrierState(
+	descriptor: DurableLaunchBarrierDescriptor,
+): Promise<DurableLaunchBarrierState> {
+	const api = await loadSubagentApi();
+	if (!hasDurableLaunchBarrierApi(api))
+		throw new Error("Durable launch barrier v2 observation is unavailable");
+	return api.readDurableLaunchBarrierV2State(descriptor);
 }
 
 function isSha256Digest(value: unknown): value is string {
@@ -2741,6 +2752,12 @@ export async function cleanupSubagentRun(
 	const errors: unknown[] = [];
 	for (const task of run.tasks) {
 		if (task.status !== "running") continue;
+		if (task.kind === "goal") {
+			task.statusDetail = "goal_cancellation_requires_current_host";
+			task.lastMessage = "Goal cancellation requires its source-owned controller and confirmed descendant drain.";
+			errors.push(new Error(task.lastMessage));
+			continue;
+		}
 		const batch = activeForeachBatchRecordForTask(run, task);
 		if (batch && task.foreachBatch?.role === "member") continue;
 		try {
@@ -2957,6 +2974,7 @@ export async function launchSubagentTask(
 		compiledTask,
 		basePreparedLaunch.resourcePolicy,
 	);
+	restrictWorkflowGoalCandidateLaunch(run, task, [leaseSignal, workflowStopSignal]);
 	let sealedLaunch = basePreparedLaunch;
 	if (!basePreparedLaunch.authority) {
 		const provenance = await createLaunchBootstrapProvenance(
@@ -2968,6 +2986,8 @@ export async function launchSubagentTask(
 			basePreparedLaunch,
 		);
 		recordLaunchBootstrapProvenance(task, provenance);
+		await assertPreparedSubagentTaskLaunch(basePreparedLaunch);
+		assertWorkflowGoalRequestLaunchCurrent(basePreparedLaunch.extensions);
 		const authority = createWorkflowLaunchAuthority(
 			run,
 			task,
@@ -2978,6 +2998,7 @@ export async function launchSubagentTask(
 		sealedLaunch = { ...basePreparedLaunch, authority };
 		await writeRunRecord(cwd, run);
 	}
+	await assertPreparedSubagentTaskLaunch(sealedLaunch);
 	const launchAuthority = sealedLaunch.authority;
 	if (!launchAuthority)
 		throw new Error("workflow launch authority is unavailable");
@@ -3068,7 +3089,10 @@ export async function launchSubagentTask(
 		const api = await loadSubagentApi();
 		launchApi = api;
 		await throwIfLaunchStopped(cwd, run.runId, leaseSignal, workflowStopSignal);
+		await assertPreparedSubagentTaskLaunch(sealedLaunch);
 		const durableBarrierAvailable = hasDurableLaunchBarrierApi(api);
+		if ((compiledTask.runtime.tools?.includes("goal_candidate_write") || sealedLaunch.extensions.some(path => path.endsWith("/budget.mjs"))) && !durableBarrierAvailable)
+			throw new Error("Goal coding worker requires original durable READY/release launch authority");
 		if (
 			!durableBarrierAvailable &&
 			injectedSubagentApi === undefined &&
@@ -3107,6 +3131,7 @@ export async function launchSubagentTask(
 						Math.max(30_000, compiledTask.runtime.maxRuntimeMs ?? 30_000),
 					),
 				});
+				await assertPreparedSubagentTaskLaunch(sealedLaunch);
 				if (
 					durableBarrierDescriptor.authorityBindingSha256 !== authorityBindingSha256
 				)
@@ -3124,7 +3149,9 @@ export async function launchSubagentTask(
 				};
 				history.records.push(durableBarrierRecord);
 				task.durableLaunchBarrier = history;
+				await assertPreparedSubagentTaskLaunch(sealedLaunch);
 				await writeRunRecordDurable(cwd, run);
+				await assertPreparedSubagentTaskLaunch(sealedLaunch);
 			} else {
 				durableBarrierDescriptor = durableBarrierRecord.descriptor;
 				if (
@@ -3221,6 +3248,8 @@ export async function launchSubagentTask(
 						maxTotalChars: toolResultBudgetConfiguration.maxTotalChars,
 					};
 				}
+				await assertPreparedSubagentTaskLaunch(sealedLaunch);
+				assertWorkflowGoalRequestLaunchCurrent(sealedLaunch.extensions);
 				registerWorkflowLaunchAuthority(
 					run,
 					task,
@@ -3232,11 +3261,14 @@ export async function launchSubagentTask(
 				await throwIfWorkflowStopRequested(cwd, run.runId);
 				throwIfAborted(leaseSignal);
 				throwIfAborted(workflowStopSignal);
+				await assertPreparedSubagentTaskLaunch(sealedLaunch);
 				return awaitSubagentOperation(
 					async () => {
 						await throwIfWorkflowStopRequested(cwd, run.runId);
 						throwIfAborted(leaseSignal);
 						throwIfAborted(workflowStopSignal);
+						await assertPreparedSubagentTaskLaunch(sealedLaunch);
+						assertWorkflowGoalRequestLaunchCurrent(sealedLaunch.extensions);
 						return runSubagentWithWorkflowWorkerRole(api, subagentOptions);
 					},
 					{
@@ -3844,6 +3876,7 @@ export async function refreshRunFromSubagentArtifacts(
 
 	for (const [order, task] of run.tasks.entries()) {
 		if (isTerminalTaskStatus(task.status) || task.status !== "running") continue;
+		if (task.kind === "goal") continue;
 		const activeBatch = activeForeachBatchRecordForTask(run, task);
 		if (activeBatch && task.foreachBatch?.role === "member") continue;
 		if (
@@ -6621,8 +6654,23 @@ export async function prepareSubagentTaskLaunch(
 	}
 
 	const toolResultBudget = dynamicTaskToolResultBudgetConfiguration(task);
+	// Goal candidate/request tasks launch with only their admitted channel
+	// extensions. An opted-in Fast request hook stays last; ambient, web and
+	// native-host wrappers are never added to a Goal channel launch.
+	const candidateChannel = await prepareWorkflowGoalCandidateChannel(cwd, run, task, compiledTask);
+	const requestChannel = await prepareWorkflowGoalRequestChannel(cwd, run, task, compiledTask);
+	if (candidateChannel || requestChannel) {
+		const fast = generatedExtensions.filter(extension => extension.kind === "openai-fast").map(extension => extension.path);
+		extensions = [
+			...(candidateChannel ? [candidateChannel.extensionPath] : []),
+			...(requestChannel ? [requestChannel.extensionPath] : []),
+			...fast,
+		];
+		for (let index = generatedExtensions.length - 1; index >= 0; index -= 1)
+			if (!extensions.includes(generatedExtensions[index]!.path)) generatedExtensions.splice(index, 1);
+	}
 	const api = await loadSubagentApi();
-	return {
+	const launch: PreparedWorkflowTaskLaunch = {
 		extensions,
 		...(api.supportsExplicitExtensionIsolation?.() === true ? { noExtensions: true as const } : {}),
 		...(resourcePolicy === undefined ? {} : { resourcePolicy }),
@@ -6635,6 +6683,7 @@ export async function prepareSubagentTaskLaunch(
 		...(toolResultBudget === undefined ? {} : { toolResultBudget }),
 		...(artifactBinding === undefined ? {} : { artifactBinding }),
 	};
+	return launch;
 }
 
 async function sealArtifactBinding(
@@ -6670,6 +6719,7 @@ async function sealArtifactBinding(
 async function assertPreparedSubagentTaskLaunch(
 	preparedLaunch: PreparedWorkflowTaskLaunch,
 ): Promise<void> {
+	await assertWorkflowGoalCandidateExtensions(preparedLaunch.extensions);
 	if (preparedLaunch.artifactBinding) {
 		let actualManifest: string;
 		let actualWrapper: string;
@@ -6697,6 +6747,7 @@ async function assertPreparedSubagentTaskLaunch(
 		if (actual !== extension.expectedBytes)
 			throw new Error("launch-bootstrap generated extension drift detected");
 	}
+	await assertWorkflowGoalCandidateExtensions(preparedLaunch.extensions);
 }
 
 function selectedLegacyProviderTools(
@@ -7392,6 +7443,7 @@ function buildSystemPrompt(task: CompiledTask, effectiveLaunchTools: readonly st
 									`The control.digest string is required and must be at most ${workflowMaxDigestChars} characters; prefer one short sentence.`,
 								]
 							: []),
+						"An exact schema or digest specified by the task overrides these defaults; copy that value verbatim.",
 						...(workflowRefsMinItems !== undefined && workflowRefsMinItems > 0
 							? [
 									`The <refs> JSON array must include at least ${workflowRefsMinItems} item${workflowRefsMinItems === 1 ? "" : "s"}. Include URLs or local file paths used by the analysis.`,

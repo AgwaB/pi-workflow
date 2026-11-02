@@ -3,9 +3,10 @@ import { createHash } from "node:crypto";
 import {
 	WORKFLOW_PROFILE_ROLES,
 	type ArtifactGraphStageSpec,
-	type ArtifactGraphWorkflowSpec,
 	type ExecutionProfileForeachBatch,
 	type ExecutionProfileStageOverride,
+	type GoalWorkflowSpec,
+	type WorkflowSpec,
 	type WorkflowProfileRole,
 	type WorkflowCapturedExecutionProfile,
 	type WorkflowRunExecutionProfile,
@@ -20,9 +21,14 @@ export function workflowDefinitionFingerprint(spec: unknown): string {
 export const EXECUTION_PROFILE_FOREACH_BATCH = Symbol(
 	"workflow.executionProfileForeachBatch",
 );
+/** Internal concrete profile capture for Goal policy nodes; never authored JSON. */
+export const GOAL_EXECUTION_PROFILE = Symbol("workflow.goalExecutionProfile");
 
 export type ProfiledArtifactGraphStage = Record<string, unknown> & {
 	[EXECUTION_PROFILE_FOREACH_BATCH]?: ExecutionProfileForeachBatch;
+	[GOAL_EXECUTION_PROFILE]?: Readonly<
+		Record<string, ExecutionProfileStageOverride>
+	>;
 };
 
 export interface WorkflowProfileStageSlot {
@@ -30,8 +36,8 @@ export interface WorkflowProfileStageSlot {
 	id: string;
 	/** Authored model-purpose role; absent on legacy/incomplete profile specs. */
 	profileRole?: WorkflowProfileRole;
-	/** True for a dynamic decision-loop profile rather than an artifact stage. */
-	kind: "stage" | "dynamic-profile";
+	/** Supervisory roles are profile slots, not provider-backed artifact stages. */
+	kind: "stage" | "dynamic-profile" | "goal-profile";
 }
 
 type ExecutionProfileTarget = WorkflowProfileStageSlot & {
@@ -51,11 +57,11 @@ const DYNAMIC_PROFILE_SLOTS = [
  * exhaustion stages and declared dynamic decision profiles are included.
  */
 export function collectWorkflowProfileStageSlots(
-	spec: ArtifactGraphWorkflowSpec,
+	spec: WorkflowSpec,
 ): WorkflowProfileStageSlot[] {
 	return collectExecutionProfileTargets(spec)
 		.filter(({ target, kind }) =>
-			kind === "dynamic-profile" ? true : isModelBackedStage(target),
+			kind !== "stage" || isModelBackedStage(target),
 		)
 		.map(({ id, profileRole, kind }) => ({ id, profileRole, kind }));
 }
@@ -67,12 +73,13 @@ export interface ApplyExecutionProfileStageOverridesOptions {
 
 /** Apply one already-validated mapping without mutating the authored spec. */
 export function applyExecutionProfileStageOverrides<
-	Spec extends ArtifactGraphWorkflowSpec,
+	Spec extends WorkflowSpec,
 >(
 	spec: Spec,
 	mapping: Readonly<Record<string, ExecutionProfileStageOverride>>,
 	options: ApplyExecutionProfileStageOverridesOptions = {},
 ): Spec {
+	if (Object.keys(mapping).length === 0) return spec;
 	const targets = collectExecutionProfileTargets(spec);
 	const targetIds = new Set(targets.map(({ id }) => id));
 	const unknown = Object.keys(mapping).filter((id) => !targetIds.has(id));
@@ -82,6 +89,12 @@ export function applyExecutionProfileStageOverrides<
 		);
 	}
 
+	if (isGoalWorkflowSpec(spec)) {
+		return {
+			...spec,
+			[GOAL_EXECUTION_PROFILE]: goalProfileOverrides("goal", mapping),
+		};
+	}
 	const graph = spec.artifactGraph;
 	const stages = graph.stages.map((stage) =>
 		mapStage(
@@ -143,7 +156,7 @@ export function applyWorkflowExecutionProfile<Spec>(
 		throw new Error("execution profile name is empty or invalid");
 	const graph = (spec as { artifactGraph?: { stages?: unknown[] } })
 		.artifactGraph;
-	if (!graph || !Array.isArray(graph.stages)) {
+	if ((!graph || !Array.isArray(graph.stages)) && !("goal" in (spec as object))) {
 		throw new Error(
 			`execution profile "${selectedName}" requires an artifact-graph workflow`,
 		);
@@ -199,9 +212,20 @@ export function cloneExecutionProfileForeachBatch(
 }
 
 function collectExecutionProfileTargets(
-	spec: ArtifactGraphWorkflowSpec,
+	spec: WorkflowSpec,
 ): ExecutionProfileTarget[] {
 	const targets: ExecutionProfileTarget[] = [];
+	if (isGoalWorkflowSpec(spec)) {
+		for (const [slot, profileRole] of GOAL_PROFILE_SLOTS) {
+			targets.push({
+				id: `goal.$${slot}`,
+				profileRole,
+				kind: "goal-profile",
+				target: { profileRole },
+			});
+		}
+		return targets;
+	}
 	const visit = (stage: Record<string, unknown>, canonicalId: string): void => {
 		targets.push({
 			id: canonicalId,
@@ -209,6 +233,16 @@ function collectExecutionProfileTargets(
 			kind: "stage",
 			target: stage,
 		});
+		if (stage.type === "goal" && isRecord(stage.goal)) {
+			for (const [slot, profileRole] of GOAL_PROFILE_SLOTS) {
+				targets.push({
+					id: `${canonicalId}.$${slot}`,
+					profileRole,
+					kind: "goal-profile",
+					target: { profileRole },
+				});
+			}
+		}
 
 		if (
 			(stage.type === "dag" || stage.type === "loop") &&
@@ -307,7 +341,35 @@ function mapStage(
 			};
 		}
 	}
+	if (stage.type === "goal" && isRecord(stage.goal)) {
+		const profile = goalProfileOverrides(canonicalId, mapping);
+		if (Object.keys(profile).length > 0)
+			next = { ...next, [GOAL_EXECUTION_PROFILE]: profile };
+	}
 	return next;
+}
+
+const GOAL_PROFILE_SLOTS: ReadonlyArray<
+	readonly [string, WorkflowProfileRole]
+> = [
+	["planner", "planning"],
+	["worker", "research-execution"],
+	["verifier", "verification"],
+	["synthesis", "synthesis"],
+	["judge", "final-judgment"],
+];
+
+function goalProfileOverrides(
+	canonicalId: string,
+	mapping: Readonly<Record<string, ExecutionProfileStageOverride>>,
+): Readonly<Record<string, ExecutionProfileStageOverride>> {
+	const entries = Object.entries(mapping)
+		.filter(([id]) => id.startsWith(`${canonicalId}.$`))
+		.map(([id, override]) => [
+			id,
+			Object.freeze(cloneExecutionProfileStageOverride(override)),
+		] as const);
+	return Object.freeze(Object.fromEntries(entries));
 }
 
 function applyOverride(
@@ -341,6 +403,10 @@ function applyOverride(
 function stageRecord(stage: ArtifactGraphStageSpec): Record<string, unknown> {
 	// SAFETY: parsed stage specs are validated plain JSON objects with string keys.
 	return stage as unknown as Record<string, unknown>;
+}
+
+function isGoalWorkflowSpec(spec: WorkflowSpec): spec is GoalWorkflowSpec {
+	return "goal" in spec;
 }
 
 function isModelBackedStage(stage: Record<string, unknown>): boolean {

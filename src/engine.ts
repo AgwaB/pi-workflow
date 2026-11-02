@@ -1,12 +1,6 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
-import {
-	appendFile,
-	mkdir,
-	rename,
-	rm,
-	stat,
-	writeFile,
-} from "node:fs/promises";
+import { appendFile, mkdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
@@ -25,8 +19,10 @@ import {
 	assertValidWorkflowRunLaunchCapture,
 	assertWorkflowRunAvailable,
 	createRunRecord,
+	deriveRunStatus,
 	createTaskRunRecord,
 	compiledWorkflowPath,
+	readCompiledWorkflow,
 	FAIL_FAST_CANCELLED_STATUS_DETAIL,
 	fromProjectPath,
 	initializeRunRecordDirectories,
@@ -48,14 +44,111 @@ import {
 	toProjectPath,
 	updateIndex,
 	withRunLease,
+	outsideRunLeaseContext,
 	workflowRunPath,
-	writeJsonAtomic,
-	writeRunRecord,
 	writeCompiledRunArtifact,
+	writeJsonAtomic,
+	writeJsonExclusive,
+	syncFileAndDirectory,
+	writeRunRecord as writeOriginalRunRecord,
 	writeStaticRunArtifacts,
 	writeWorkflowLaunchCommandArtifact,
 } from "./store.js";
 import { resolveWorkflowBackend } from "./backend.js";
+import { workflowTaskAttemptIdentity, workflowTaskSessionId } from "./launch-session.js";
+import { readPublishedWorkflowGoalPolicyControl } from "./goal-workflow-evidence.js";
+
+function retainedPublishedWorkflowGoalEvidenceRefs(input: {
+	control: Record<string, unknown>;
+	run: WorkflowRunRecord;
+	task: WorkflowTaskRunRecord;
+	goalId: string;
+	contractHash: string;
+}): string[] {
+	const { control, run, task } = input;
+	if (control.schema !== "goal-policy-result-v1" ||
+		control.goalId !== input.goalId ||
+		control.contractHash !== input.contractHash)
+		throw new Error("Goal prior policy publication identity mismatch");
+	const directory = `.pi/workflows/${run.runId}/tasks/${task.taskId}/goal-evidence`;
+	const scoped = (value: unknown): value is string =>
+		typeof value === "string" &&
+		new RegExp(`^${directory.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/[a-f0-9]{64}\\.json$`).test(value);
+	const current = control.evidenceRefs;
+	const retained = control.retainedEvidenceRefs;
+	if (!Array.isArray(current) || current.length !== 1 || !current.every(scoped) ||
+		!Array.isArray(retained) || retained.length === 0 || !retained.every(scoped) ||
+		new Set(retained).size !== retained.length || !retained.includes(current[0]) ||
+		!control.oracle || typeof control.oracle !== "object" || Array.isArray(control.oracle))
+		throw new Error("Goal prior policy publication references mismatch");
+	return [...retained];
+}
+
+/** Content-addressed task artifacts are observations, never admission authority. */
+export async function persistWorkflowGoalOracleEvidence(input: {
+	cwd: string; run: WorkflowRunRecord; task: WorkflowTaskRunRecord;
+	evidence: Readonly<Record<string, unknown>>; generation: number | null;
+	stopSignal: AbortSignal; assertCurrent: () => Promise<void>;
+}): Promise<string> {
+	const current = async () => { input.stopSignal.throwIfAborted(); await input.assertCurrent(); input.stopSignal.throwIfAborted(); };
+	await current();
+	if (resolve(input.cwd) !== resolve(input.run.cwd) || input.evidence.cwd !== resolve(input.cwd) ||
+		input.evidence.runId !== input.run.runId || input.evidence.policySpecId !== input.task.specId)
+		throw new Error("Goal oracle evidence original execution binding changed");
+	const evidence = { ...input.evidence, policyTaskId: input.task.taskId, generation: input.generation,
+		policyAttemptKey: workflowTaskAttemptIdentity(input.task, workflowTaskSessionId(input.run, input.task)) };
+	const digest = workflowDefinitionFingerprint(evidence);
+	const file = join(dirname(fromProjectPath(input.cwd, input.task.files.result)), "goal-evidence", `${digest}.json`);
+	await writeJsonExclusive(file, { schema: "goal-oracle-receipt-v1", digest, evidence }, input.stopSignal, current);
+	await current();
+	const stored = await readJson<{ digest: string; evidence: unknown }>(file);
+	await current();
+	if (!stored || stored.digest !== digest || workflowDefinitionFingerprint(stored.evidence) !== digest)
+		throw new Error("Goal oracle evidence publication mismatch or uncertainty");
+	await syncFileAndDirectory(file);
+	await current();
+	return toProjectPath(input.cwd, file);
+}
+import {
+	assertNoProtectedGoalEngineArtifacts,
+	assertNotProtectedGoalEngineRun,
+	isProtectedGoalEngineRun,
+} from "./goal-protected-legacy.js";
+import {
+	goalCompiledMaterializationDigest,
+	persistGoalGeneratedMaterialization as persistOriginalGoalGeneratedMaterialization,
+	recoverGoalGeneratedMaterialization,
+} from "./goal-generated-materialization.js";
+import { goalHash } from "./goal-json.js";
+
+import { assertHumanFamilyKnown, assertPreparedWorkflowGoalPolicyCurrent, assertWorkflowGoalProfileConfigurationCurrent, beginWorkflowGoalInitializationBindings, bindWorkflowGoalRequestTask, bindWorkflowGoalCandidateWorker, captureWorkflowGoalScopedTaskRuntime, captureWorkflowEngineGoalVerifierTask, observeWorkflowGoalCandidate, applyWorkflowGoalCandidateToOrigin, completeWorkflowGoalInitializationBindings, executeWorkflowEngineGoalPolicy, markWorkflowGoalProfilePublicationUnknown, prepareWorkflowEngineGoalRootPlanner, prepareWorkflowEngineGoalWorkers, prepareWorkflowEngineGoalVerifiers, prepareWorkflowEngineGoalVerifierRequest, prepareWorkflowEngineGoalReplanner, prepareWorkflowEngineGoalResume, prepareWorkflowGoalPolicy, prepareWorkflowGoalRootMaterializationPublication, publishWorkflowGoalProfileConfiguration, revokeWorkflowGoalInitializationBindings, workflowGoalProfileConfiguration, workflowEngineGoalAgentDefinitions, workflowEngineGoalVerifierSnapshot, captureWorkflowGoalHumanReview, consumeWorkflowGoalHumanReview, revokeWorkflowGoalHumanReview, type PreparedWorkflowGoalPolicyAdmission, type PreparedWorkflowGoalVerifierRequest, type WorkflowGoalPolicyHost } from "./goal-workflow-runtime.js";
+import type { WorkflowGoalOriginApplyRecord } from "./goal-workflow-origin-apply.js";
+import {
+	assertWorkflowGoalProfileExceptionCurrent,
+	goalPolicyRequest,
+	goalWorkerUserGuidance,
+	captureWorkflowGoalChildProfileException,
+	captureWorkflowGoalProfileException,
+	discardWorkflowGoalProfileException,
+	previewWorkflowGoalProfileException,
+	recheckWorkflowGoalProfileExceptionSources,
+	stageWorkflowGoalProfileException,
+	workflowGoalChildProfileExceptionOwner,
+	workflowGoalProfilePublicationUnknown,
+	type PreparedWorkflowGoalProfileException,
+	type WorkflowGoalProfileExceptionOption,
+	type WorkflowGoalProfileExceptionPreview,
+} from "./goal-workflow-runtime.js";
+import type { GoalProfileRuntimePatch } from "./goal-types.js";
+import { assertWorkflowGoalChildCurrent, observeWorkflowGoalChildCurrent, hasActiveWorkflowGoalChild, bindWorkflowGoalChildCompiled, bindWorkflowGoalChildRun, captureWorkflowGoalChildEffectiveProfiles, recordWorkflowGoalRejectedGeneration, recordWorkflowGoalRejectedPlannerGeneration, assertWorkflowGoalRejectedPlannerProposalProgress,
+	prepareWorkflowGoalDerivedPolicy, publishWorkflowGoalChildMaterialization,
+	prepareWorkflowGoalChildForeach, assertWorkflowGoalChildForeachCurrent, publishWorkflowGoalChildForeach, failWorkflowGoalChildForeach, failWorkflowGoalChildForeachAdmission, workflowGoalChildForeachPublicationUnknown,
+	prepareWorkflowGoalChildAdmission, settledWorkflowGoalChildRequests, settleWorkflowGoalChildStagePredecessors, workflowGoalChildCompilation, workflowGoalChildLineage, workflowGoalChildOutputTask,
+	workflowGoalChildStopSignal,
+	beginWorkflowGoalChildRecovery, takeWorkflowGoalChildRecovery,
+	assertWorkflowEngineGoalCancellation,
+	captureWorkflowGoalUnlaunchedStop, retireWorkflowGoalUnlaunched,
+	type PreparedWorkflowGoalChildAdmission, type PreparedWorkflowGoalChildRecovery } from "./goal-workflow-runtime.js";
 import {
 	createLaunchBootstrapProvenance,
 	recordLaunchBootstrapProvenance,
@@ -112,6 +205,7 @@ import {
 	assertDynamicGenerationBudgetAvailable,
 	buildDynamicGeneratedCompiledTask,
 	dynamicGeneratedInsertIndex,
+	dynamicGeneratedOutputProfile,
 	isDynamicCompiledTaskPayload,
 	normalizeDynamicAgentRequest,
 	readDynamicGeneratedTaskResult,
@@ -143,7 +237,6 @@ import {
 	nextTaskRecordIndex,
 	reconcileDynamicGeneratedRunRecords,
 	reconcileForeachGeneratedRunRecords,
-	recoverStaleRunningDynamicControllers,
 	removeForeachGeneratedTasksForPlaceholders,
 	recoverStaleRunningSupportTasks,
 	replaceDependencyList,
@@ -220,14 +313,19 @@ import {
 } from "./foreach-batch-capability.js";
 import { workflowStateRootIdentity } from "./workflow-state-root.js";
 import { prepareWorkflowNativeTaskPolicy } from "./workflow-native-tool-policy.js";
-import { withResolvedWorkflowNativeHostContext } from "./workflow-native-host-context.js";
+import {
+	withResolvedWorkflowNativeHostContext,
+	withoutWorkflowNativeHostContext,
+} from "./workflow-native-host-context.js";
 import {
 	applyWorkflowExecutionProfile,
 	workflowDefinitionFingerprint,
 } from "./execution-profile.js";
 import {
+	type ArtifactGraphWorkflowSpec,
 	type CompiledDynamicWorkflowTask,
 	type CompiledTask,
+	type AgentDefinition,
 	type CompiledWorkflow,
 	type WorkflowForeachBatchRecord,
 	WORKFLOW_RUN_TYPE,
@@ -244,7 +342,7 @@ import {
 	isRefreshPollAggregateError,
 	POLL_INTERVAL_MS,
 	recordSupervisorError,
-	refreshRun,
+	refreshRun as refreshOriginalRun,
 	refreshRunOrRecordPollError,
 	schedulerPollDelayMs,
 	shouldWatchRun,
@@ -255,7 +353,25 @@ import {
 export { buildRunSourceContext } from "./workflow-source-context-runtime.js";
 export { evaluateLoopUntilCondition } from "./loop-runtime.js";
 export type { DynamicWorkflowUi } from "./dynamic-controller-policy.js";
-export { refreshRun } from "./engine-wait.js";
+export async function refreshRun(cwd: string, runIdOrPrefix: string,
+	goalChildAdmission?: PreparedWorkflowGoalChildAdmission, onPublicationPending?: () => void): Promise<WorkflowRunRecord> {
+	const current = await readRunRecord(cwd, runIdOrPrefix);
+	if (current.goalChild) {
+		if (!goalChildAdmission) throw new Error("Goal child cold/plain refresh has no original live admission");
+		const observed = await observeWorkflowGoalChildCurrent(goalChildAdmission, () => {
+			onPublicationPending?.();
+			dynamicControllerTestHooks.onSchedulerObservation?.(Object.freeze({
+				cwd, runId: current.runId, phase: "watch-refresh", boundary: "publication-join", admissionPresent: true,
+			}));
+		});
+		if (observed.run.runId !== current.runId) throw new Error("Goal child refresh original reservation changed");
+		const refreshed = await refreshOriginalRun(cwd, current.runId);
+		const settled = await observeWorkflowGoalChildCurrent(goalChildAdmission);
+		if (settled.run.runId !== refreshed.runId) throw new Error("Goal child refresh original reservation changed");
+		return settled.run;
+	}
+	return refreshOriginalRun(cwd, runIdOrPrefix);
+}
 export {
 	detectRunStall,
 	formatHumanRunLaunch,
@@ -291,12 +407,42 @@ type DynamicControllerTestHookContext = {
 };
 
 type DynamicControllerTestHooks = {
+	nowMs?: () => number;
 	beforeControllerWorkerLaunch?: (
 		context: DynamicControllerTestHookContext,
 	) => void | Promise<void>;
 	beforeDynamicResultCommit?: (
 		context: DynamicControllerTestHookContext,
 	) => void | Promise<void>;
+	onWatcherScheduleResult?: (context: Readonly<{
+		cwd: string;
+		runId: string;
+		mtimeMs: number | undefined;
+		scheduled: boolean;
+	}>) => void;
+	onSchedulerObservation?: (context: Readonly<{
+		cwd: string;
+		runId: string;
+		phase: "pre-schedule" | "watch-refresh" | "watch-schedule" | "schedule-lease" | "dag-eligibility" | "foreach-materialization" | "goal-child-wait";
+		boundary?: string;
+		error?: string;
+		admissionPresent: boolean;
+		leaseActive?: boolean;
+		running?: number;
+		maxConcurrency?: number;
+		tasks?: ReadonlyArray<Readonly<{
+			specId: string;
+			kind: CompiledTask["kind"];
+			status: WorkflowTaskRunRecord["status"] | undefined;
+			dependsOn: readonly string[];
+			dependencyStatuses: readonly (WorkflowTaskRunRecord["status"] | undefined)[];
+			ready: boolean;
+		}>>;
+	}>) => void | Promise<void>;
+	onHumanJudgmentPublication?: (context: Readonly<{ cwd: string; runId: string;
+		phase: "before-publication-read" | "published-before-ack" }>) => void | Promise<void>;
+	onGoalGeneratedPublication?: (context: Readonly<{ cwd: string; runId: string;
+		phase: "compiled-written" }>) => void | Promise<void>;
 };
 
 let dynamicControllerTestHooks: DynamicControllerTestHooks = {};
@@ -330,10 +476,811 @@ export function setForeachMaterializationPersistenceHookForTests(
 const supervisorTimers = new Map<string, ReturnType<typeof setInterval>>();
 const supervisorRunMtimes = new Map<string, number>();
 const supervisorErrorCounts = new Map<string, number>();
+const supervisorWork = new Map<string, Set<Promise<void>>>();
+const liveGoalPolicyHosts = new Map<string, WorkflowGoalPolicyHost>();
+const liveGoalChildAdmissions = new Map<string, PreparedWorkflowGoalChildAdmission>();
+
+async function writeRunRecord(...args: Parameters<typeof writeOriginalRunRecord>): Promise<void> {
+	const key = `${resolve(args[0])}\0${args[1].runId}`;
+	const live = liveGoalPolicyAdmissions.get(key);
+	const compiledDigest = live && workflowDefinitionFingerprint(live.compiled);
+	const assertCurrent = () => {
+		args[3]?.();
+		if (workflowGoalChildForeachPublicationUnknown(args[0], args[1].runId))
+			throw new Error("Goal child original publication UNKNOWN; durable evidence cannot be rewritten");
+		if (liveGoalPolicyAdmissions.get(key) !== live)
+			throw new Error("Goal run writer original live admission changed");
+		if (!live) return;
+		if ([...live.admissions.values()].some(workflowGoalProfilePublicationUnknown))
+			throw new Error("Goal root original publication UNKNOWN; durable evidence cannot be rewritten");
+		if (live.publicationPending || liveGoalPolicyHosts.get(key) !== live.host ||
+			live.host.runtime !== live.runtime ||
+			workflowDefinitionFingerprint(live.compiled) !== compiledDigest)
+			throw new Error("Goal run writer original publication changed or pending");
+		for (const [id, prepared] of live.admissions) {
+			const task = args[1].tasks.find(task => task.specId === id);
+			const policy = live.compiled.tasks.find(task => task.id === id);
+			if (!task || !policy) throw new Error("Goal run writer original policy unavailable");
+			assertWorkflowGoalProfileConfigurationCurrent(prepared, task.goalProfileConfiguration, policy);
+		}
+	};
+	assertCurrent();
+	const work = writeOriginalRunRecord(args[0], args[1], args[2], assertCurrent);
+	// Register before yielding: publication claims the same original owner and
+	// drains these promises, including renames already submitted to the filesystem.
+	live?.runWrites.add(work);
+	try {
+		await work;
+	} finally {
+		live?.runWrites.delete(work);
+	}
+}
+/** Goal-participating runs publish generated tasks through their original live
+ * admission; ordinary runs keep the bundle-path-rewriting compiled writer. */
+async function persistDynamicGeneratedMaterialization(
+	cwd: string,
+	run: WorkflowRunRecord,
+	compiledFlow: CompiledWorkflow,
+	beforeCompiledDigest: string | undefined,
+): Promise<void> {
+	const key = `${resolve(cwd)}\0${run.runId}`;
+	if (run.goalParticipation !== undefined || run.goalChild !== undefined ||
+		liveGoalChildAdmissions.has(key) || liveGoalPolicyAdmissions.has(key)) {
+		await persistGoalGeneratedMaterialization(cwd, run, compiledFlow, beforeCompiledDigest);
+		return;
+	}
+	await writeCompiledRunArtifact(cwd, run.runId, compiledFlow);
+	await writeRunRecord(cwd, run);
+}
+async function persistGoalGeneratedMaterialization(...args: Parameters<typeof persistOriginalGoalGeneratedMaterialization>) {
+	const key = `${resolve(args[0])}\0${args[1].runId}`;
+	const admission = liveGoalChildAdmissions.get(key);
+	if (admission) return publishWorkflowGoalChildMaterialization(admission, args[2],
+		async publication => {
+			if (!publication) return persistOriginalGoalGeneratedMaterialization(...args);
+			const [cwd, run, compiled, beforeDigest] = args;
+			const { beforeRun, beforeCompiled, afterRun, afterCompiled, assertCurrent } = publication;
+			const runFingerprint = (record: WorkflowRunRecord) => {
+				const { updatedAt, ...stable } = record;
+				return workflowDefinitionFingerprint(stable);
+			};
+			const checkPair = async (expectedRun: WorkflowRunRecord, expectedCompiled: CompiledWorkflow) => {
+				await assertCurrent();
+				const currentRun = await readRunRecord(cwd, run.runId);
+				const currentCompiled = await readCompiledWorkflow(cwd, run.runId);
+				if (!currentCompiled || runFingerprint(currentRun) !== runFingerprint(expectedRun) ||
+					workflowDefinitionFingerprint(currentCompiled) !== workflowDefinitionFingerprint(expectedCompiled))
+					throw new Error("Goal child generated publication durable pair changed");
+				await assertCurrent();
+			};
+			const assertCommitCurrent = async () => {
+				await assertCurrent();
+				if (runFingerprint(run) !== runFingerprint(afterRun) ||
+					workflowDefinitionFingerprint(compiled) !== workflowDefinitionFingerprint(afterCompiled))
+					throw new Error("Goal child generated publication in-memory graph changed");
+			};
+			let preparedRun = beforeRun;
+			if (run.goal !== undefined) {
+				if (beforeDigest !== goalCompiledMaterializationDigest(beforeCompiled))
+					throw new Error("Goal generated materialization baseline changed");
+				preparedRun = { ...afterRun, goalGeneratedMaterialization: {
+					schema: "goal-generated-materialization-v1", beforeCompiledDigest: beforeDigest,
+					afterCompiled, afterCompiledDigest: goalCompiledMaterializationDigest(afterCompiled),
+					afterRunTasksDigest: goalHash(afterRun.tasks),
+				} } as WorkflowRunRecord;
+				await checkPair(beforeRun, beforeCompiled);
+				await writeJsonAtomic(workflowRunPath(cwd, run.runId), preparedRun, undefined, assertCommitCurrent);
+			}
+			await checkPair(preparedRun, beforeCompiled);
+			await writeJsonAtomic(compiledWorkflowPath(cwd, run.runId), afterCompiled, undefined, assertCommitCurrent);
+			await dynamicControllerTestHooks.onGoalGeneratedPublication?.(Object.freeze({ cwd,
+				runId: run.runId, phase: "compiled-written" }));
+			await checkPair(preparedRun, afterCompiled);
+			await writeJsonAtomic(workflowRunPath(cwd, run.runId), afterRun, undefined, assertCommitCurrent);
+			await checkPair(afterRun, afterCompiled);
+			if (runFingerprint(run) !== runFingerprint(afterRun) ||
+				workflowDefinitionFingerprint(compiled) !== workflowDefinitionFingerprint(afterCompiled))
+				throw new Error("Goal child generated publication in-memory graph changed");
+		}, args[1]);
+	const live = liveGoalPolicyAdmissions.get(key);
+	if (!live && args[1].goalParticipation && !isProtectedGoalEngineRun(args[1]))
+		throw new Error("Goal generated publication requires original live admission; cold/foreign persistence denied");
+	if (live) {
+		const [cwd, run, compiled, beforeDigest] = args;
+		if (live.publicationPending)
+			throw new Error("Goal root generated publication already pending");
+		live.publicationPending = true;
+		try {
+		await Promise.allSettled([...live.runWrites]);
+		const assertLiveCurrent = () => {
+			if (liveGoalPolicyAdmissions.get(key) !== live ||
+				liveGoalPolicyHosts.get(key) !== live.host ||
+				live.host.runtime !== live.runtime ||
+				run.runId !== args[1].runId || resolve(run.cwd) !== resolve(cwd) ||
+				run.rootRunId !== undefined || run.parentRunId !== undefined ||
+				!run.goalParticipation || isProtectedGoalEngineRun(run) ||
+				live.rootRunId !== run.runId ||
+				live.executionProfileHash !== workflowDefinitionFingerprint(run.executionProfile ?? null))
+				throw new Error("Goal root generated publication original live host changed");
+			for (const [id, prepared] of live.admissions) {
+				if (workflowGoalProfilePublicationUnknown(prepared))
+					throw new Error("Goal root original publication UNKNOWN; durable evidence cannot be rewritten");
+				const policy = live.compiled.tasks.find(task => task.id === id);
+				if (!policy) throw new Error("Goal root generated publication original policy unavailable");
+				assertWorkflowGoalProfileConfigurationCurrent(prepared,
+					run.tasks.find(task => task.specId === id)?.goalProfileConfiguration, policy);
+			}
+		};
+		assertLiveCurrent();
+		const beforeRun = await readRunRecord(cwd, run.runId);
+		assertLiveCurrent();
+		const beforeCompiled = await readCompiledWorkflow(cwd, run.runId);
+		assertLiveCurrent();
+		if (!beforeCompiled)
+			throw new Error("Goal root generated publication original compiled unavailable");
+		const durableBeforeDigest = workflowDefinitionFingerprint(beforeCompiled);
+		if ((beforeDigest !== undefined && beforeDigest !== goalCompiledMaterializationDigest(beforeCompiled)) ||
+			durableBeforeDigest !== workflowDefinitionFingerprint(live.compiled))
+			throw new Error("Goal root generated materialization baseline changed");
+		const afterRun = JSON.parse(JSON.stringify(deriveRunStatus(run))) as WorkflowRunRecord;
+		if (workflowDefinitionFingerprint(compiled) === durableBeforeDigest &&
+			workflowDefinitionFingerprint(afterRun) === workflowDefinitionFingerprint(beforeRun)) {
+			await throwIfWorkflowStopRequested(cwd, run.runId);
+			await assertOrdinaryGoalCommandCurrent(cwd, beforeRun, live.host);
+			assertLiveCurrent();
+			const currentRun = await readRunRecord(cwd, run.runId);
+			assertLiveCurrent();
+			const currentCompiled = await readCompiledWorkflow(cwd, run.runId);
+			assertLiveCurrent();
+			if (!currentCompiled ||
+				workflowDefinitionFingerprint(currentRun) !== workflowDefinitionFingerprint(beforeRun) ||
+				workflowDefinitionFingerprint(currentCompiled) !== durableBeforeDigest)
+				throw new Error("Goal root unchanged publication durable pair changed");
+			await assertOrdinaryGoalCommandCurrent(cwd, currentRun, live.host);
+			await throwIfWorkflowStopRequested(cwd, run.runId);
+			assertLiveCurrent();
+			if (workflowDefinitionFingerprint(deriveRunStatus(run)) !== workflowDefinitionFingerprint(afterRun) ||
+				workflowDefinitionFingerprint(compiled) !== durableBeforeDigest ||
+				workflowDefinitionFingerprint(live.compiled) !== durableBeforeDigest)
+				throw new Error("Goal root unchanged publication in-memory graph changed");
+			return;
+		}
+		const afterCompiled = JSON.parse(JSON.stringify(compiled)) as CompiledWorkflow;
+		const publication = await prepareWorkflowGoalRootMaterializationPublication({
+			cwd, runId: run.runId, admissions: live.admissions, liveCompiled: live.compiled,
+			beforeRun, beforeCompiled, proposedRun: afterRun, proposedCompiled: compiled,
+		});
+		const assertProposedCurrent = () => {
+			assertLiveCurrent();
+			if (workflowDefinitionFingerprint(deriveRunStatus(run)) !== workflowDefinitionFingerprint(afterRun) ||
+				workflowDefinitionFingerprint(compiled) !== workflowDefinitionFingerprint(afterCompiled))
+				throw new Error("Goal root generated publication in-memory proposal changed");
+		};
+		const checkPair = async (expectedRun: WorkflowRunRecord, expectedCompiled: CompiledWorkflow) => {
+			assertProposedCurrent();
+			await publication.assertCurrent();
+			assertProposedCurrent();
+			const currentRun = await readRunRecord(cwd, run.runId);
+			assertProposedCurrent();
+			const currentCompiled = await readCompiledWorkflow(cwd, run.runId);
+			assertProposedCurrent();
+			if (!currentCompiled || workflowDefinitionFingerprint(currentRun) !== workflowDefinitionFingerprint(expectedRun) ||
+				workflowDefinitionFingerprint(currentCompiled) !== workflowDefinitionFingerprint(expectedCompiled))
+				throw new Error("Goal root generated publication durable pair changed");
+			await publication.assertCurrent();
+			assertProposedCurrent();
+		};
+		let writeStarted = false;
+		const assertCommitCurrent = async () => {
+			assertProposedCurrent();
+			await publication.assertCurrent();
+			assertProposedCurrent();
+		};
+		try {
+			await checkPair(beforeRun, beforeCompiled);
+			writeStarted = true;
+			await writeJsonAtomic(compiledWorkflowPath(cwd, run.runId), afterCompiled, undefined, assertCommitCurrent);
+			await dynamicControllerTestHooks.onGoalGeneratedPublication?.(Object.freeze({ cwd,
+				runId: run.runId, phase: "compiled-written" }));
+			await checkPair(beforeRun, afterCompiled);
+			await writeJsonAtomic(workflowRunPath(cwd, run.runId), afterRun, undefined, assertCommitCurrent);
+			await checkPair(afterRun, afterCompiled);
+			publication.publish();
+			assertProposedCurrent();
+			return;
+		} catch (error) {
+			if (writeStarted) publication.fail();
+			throw error;
+		}
+		} finally {
+			live.publicationPending = false;
+		}
+	}
+	return persistOriginalGoalGeneratedMaterialization(...args);
+}
+const liveGoalPolicyAdmissions = new Map<string, {
+	readonly host: WorkflowGoalPolicyHost;
+	readonly runtime: WorkflowGoalPolicyHost["runtime"];
+	readonly rootRunId: string;
+	readonly executionProfileHash: string;
+	readonly admissions: ReadonlyMap<string, PreparedWorkflowGoalPolicyAdmission>;
+	readonly compiled: CompiledWorkflow;
+	readonly runWrites: Set<Promise<void>>;
+	publicationPending: boolean;
+}>();
 const MAX_SUPERVISOR_CONSECUTIVE_ERRORS = 3;
+
+export async function assertOrdinaryGoalCommandCurrent(cwd: string, run: WorkflowRunRecord,
+	host: WorkflowGoalPolicyHost): Promise<void> {
+	const live = liveGoalPolicyAdmissions.get(`${resolve(cwd)}\0${run.runId}`);
+	if (!live || !run.goalParticipation || isProtectedGoalEngineRun(run) || resolve(run.cwd) !== resolve(cwd) ||
+		host.executionFoundation !== "workflow-engine" || host.runtime !== live.runtime ||
+		live.rootRunId !== (run.rootRunId ?? run.runId) ||
+		live.executionProfileHash !== workflowDefinitionFingerprint(run.executionProfile ?? null))
+		throw new Error("Ordinary Goal command requires original same-live-session host; cold/foreign action denied");
+	const compiled = await readCompiledWorkflow(cwd, run.runId);
+	if (!compiled) throw new Error("Ordinary Goal original compiled admission unavailable");
+	for (const policy of compiled.tasks.filter(task => task.kind === "goal")) {
+		const prepared = live.admissions.get(policy.id);
+		if (!prepared) throw new Error("Ordinary Goal original admission missing");
+		assertPreparedWorkflowGoalPolicyCurrent({ host: live.host, cwd, policy,
+			request: goalPolicyRequest(policy, compiled.task), ancestryRootRunId: live.rootRunId,
+			parentRunId: run.runId, executionProfileName: run.executionProfile?.name,
+			assertCurrent: async () => {} }, prepared);
+		assertWorkflowGoalProfileConfigurationCurrent(prepared,
+			run.tasks.find(task => task.specId === policy.id)?.goalProfileConfiguration, policy);
+	}
+}
+
+function humanAcceptancePolicy(policy: CompiledWorkflow["tasks"][number]): boolean {
+	return policy.kind === "goal" && policy.goal!.definition.goal.criteria.some((criterion) =>
+		criterion.verifier.kind === "human" &&
+		criterion.verifier.producerId === "human-acceptance-v1" &&
+		criterion.verifier.target === "artifact" &&
+		criterion.verifier.subject.artifact === "control" &&
+		typeof (criterion.verifier.config as { condition?: { statement?: unknown } }).condition?.statement === "string");
+}
+
+async function currentWorkflowGoalHumanReview(
+	cwd: string,
+	runId: string,
+	host: WorkflowGoalPolicyHost,
+): Promise<{ run: WorkflowRunRecord; compiled: CompiledWorkflow; policy: CompiledWorkflow["tasks"][number];
+	task: WorkflowTaskRunRecord; prepared: PreparedWorkflowGoalPolicyAdmission; live: NonNullable<typeof liveGoalPolicyAdmissions extends Map<string, infer T> ? T : never> }> {
+	const run = await readRunRecord(cwd, runId);
+	const live = liveGoalPolicyAdmissions.get(`${resolve(cwd)}\0${runId}`);
+	if (!live || run.runId !== runId || run.rootRunId !== undefined || run.parentRunId !== undefined || live.rootRunId !== runId ||
+		!run.goalParticipation || isProtectedGoalEngineRun(run) || resolve(run.cwd) !== resolve(cwd) ||
+		host.executionFoundation !== "workflow-engine" || host.runtime !== live.runtime ||
+		live.executionProfileHash !== workflowDefinitionFingerprint(run.executionProfile ?? null))
+		throw new Error("Human Goal judgment requires the original live root host and admission.");
+	const compiled = await readCompiledWorkflow(cwd, runId);
+	if (!compiled) throw new Error("Human Goal judgment requires the original compiled workflow.");
+	const matches = compiled.tasks.filter(humanAcceptancePolicy);
+	if (matches.length !== 1) throw new Error("Human Goal judgment requires exactly one human-acceptance-v1 artifact/control condition.");
+	const policy = matches[0]!;
+	const task = run.tasks.find(candidate => candidate.specId === policy.id);
+	const prepared = live.admissions.get(policy.id);
+	if (prepared) assertHumanFamilyKnown(prepared);
+	if (!task || !prepared || task.status !== "running" || task.statusDetail !== "goal_waiting_user")
+		throw new Error("Human Goal judgment is not currently waiting on this original policy.");
+	await throwIfWorkflowStopRequested(cwd, runId);
+	try {
+		assertPreparedWorkflowGoalPolicyCurrent({ host: live.host, cwd, policy,
+			request: goalPolicyRequest(policy, compiled.task), ancestryRootRunId: runId,
+			parentRunId: runId, executionProfileName: run.executionProfile?.name,
+			assertCurrent: () => throwIfWorkflowStopRequested(cwd, runId) }, prepared);
+	} catch (cause) {
+		throw new Error("Human Goal original compiled contract or admission changed; judgment is stale.", { cause });
+	}
+	return { run, compiled, policy, task, prepared, live };
+}
+
+const workflowGoalHumanReviewStops = new WeakMap<object, { dispose(): void }>();
+
+export async function beginWorkflowGoalHumanReview(
+	cwd: string,
+	runId: string,
+	host: WorkflowGoalPolicyHost,
+	signal: AbortSignal,
+): Promise<{ capability: object; snapshot: Readonly<object> }> {
+	signal.throwIfAborted();
+	const current = await currentWorkflowGoalHumanReview(cwd, runId, host);
+	const stop = createWorkflowStopSignal(cwd, runId);
+	try {
+		const reviewSignal = AbortSignal.any([signal, stop.signal]);
+		reviewSignal.throwIfAborted();
+		const input = { host: current.live.host, cwd, policy: current.policy,
+			request: goalPolicyRequest(current.policy, current.compiled.task), ancestryRootRunId: runId,
+			parentRunId: runId, executionProfileName: current.run.executionProfile?.name,
+			stopSignal: reviewSignal, assertCurrent: () => throwIfWorkflowStopRequested(cwd, runId) };
+		const review = await captureWorkflowGoalHumanReview(input, current.prepared, reviewSignal);
+		await currentWorkflowGoalHumanReview(cwd, runId, host);
+		reviewSignal.throwIfAborted();
+		workflowGoalHumanReviewStops.set(review.capability, stop);
+		return review;
+	} catch (error) {
+		stop.dispose();
+		throw error;
+	}
+}
+
+export function discardWorkflowGoalHumanReview(capability: object): void {
+	revokeWorkflowGoalHumanReview(capability);
+	workflowGoalHumanReviewStops.get(capability)?.dispose();
+	workflowGoalHumanReviewStops.delete(capability);
+}
+
+type WorkflowGoalProfileExceptionCommandState = {
+	readonly cwd: string;
+	readonly runId: string;
+	readonly parentRunId: string;
+	readonly child?: PreparedWorkflowGoalChildAdmission;
+	readonly host: WorkflowGoalPolicyHost;
+	readonly live: NonNullable<ReturnType<typeof liveGoalPolicyAdmissions.get>>;
+	readonly captures: readonly {
+		readonly capability: PreparedWorkflowGoalProfileException;
+		readonly prepared: PreparedWorkflowGoalPolicyAdmission;
+		readonly options: readonly WorkflowGoalProfileExceptionOption[];
+	}[];
+	readonly stop: { dispose(): void; signal: AbortSignal };
+	preview?: {
+		readonly selection: object;
+		readonly value: WorkflowGoalProfileExceptionPreview;
+		readonly rendered: string;
+	};
+};
+const workflowGoalProfileExceptions = new WeakMap<object, WorkflowGoalProfileExceptionCommandState>();
+
+async function currentWorkflowGoalProfileException(
+	cwd: string,
+	runId: string,
+	host: WorkflowGoalPolicyHost,
+	expected?: WorkflowGoalProfileExceptionCommandState,
+): Promise<{ run: WorkflowRunRecord; compiled: CompiledWorkflow; parentRun?: WorkflowRunRecord;
+	live: NonNullable<ReturnType<typeof liveGoalPolicyAdmissions.get>> }> {
+	const key = `${resolve(cwd)}\0${runId}`;
+	const run = await readRunRecord(cwd, runId);
+	const child = expected?.child ?? liveGoalChildAdmissions.get(key);
+	const owner = child && await workflowGoalChildProfileExceptionOwner(child);
+	const parentRunId = owner?.parentRunId ?? runId;
+	const parentKey = `${resolve(cwd)}\0${parentRunId}`;
+	const live = liveGoalPolicyAdmissions.get(parentKey);
+	const parentRun = child ? await readRunRecord(cwd, parentRunId) : undefined;
+	if (!live || (expected && (live !== expected.live || child !== expected.child ||
+			parentRunId !== expected.parentRunId)) ||
+		run.runId !== runId || !(parentRun ?? run).goalParticipation || isProtectedGoalEngineRun(run) ||
+		resolve(run.cwd) !== resolve(cwd) ||
+		(child
+			? run.parentRunId !== parentRunId || run.rootRunId !== owner?.rootRunId ||
+				parentRun?.runId !== parentRunId || parentRun.rootRunId !== undefined ||
+				parentRun.parentRunId !== undefined || live.rootRunId !== owner?.rootRunId
+			: run.rootRunId !== undefined || run.parentRunId !== undefined || live.rootRunId !== runId) ||
+		host.executionFoundation !== "workflow-engine" ||
+		host.runtime !== live.runtime ||
+		live.executionProfileHash !== workflowDefinitionFingerprint((parentRun ?? run).executionProfile ?? null))
+		throw new Error("Goal profile exception requires the original retained live root host and exact child admission");
+	const durableCompiled = await readCompiledWorkflow(cwd, runId);
+	if (liveGoalPolicyAdmissions.get(parentKey) !== live ||
+		(child && liveGoalChildAdmissions.get(key) !== child) ||
+		!durableCompiled ||
+		(!child && workflowDefinitionFingerprint(durableCompiled) !== workflowDefinitionFingerprint(live.compiled)))
+		throw new Error("Goal profile exception original compiled inventory changed");
+	if (child) await assertWorkflowGoalChildCurrent(child, run, durableCompiled);
+	await throwIfWorkflowStopRequested(cwd, runId);
+	if (liveGoalPolicyAdmissions.get(parentKey) !== live ||
+		(child && liveGoalChildAdmissions.get(key) !== child))
+		throw new Error("Goal profile exception original live admission changed");
+	for (const policy of live.compiled.tasks.filter(task => task.kind === "goal")) {
+		const prepared = live.admissions.get(policy.id);
+		const task = (parentRun ?? run).tasks.find(candidate => candidate.specId === policy.id);
+		if (!prepared || !task)
+			throw new Error("Goal profile exception original policy inventory is incomplete");
+		assertPreparedWorkflowGoalPolicyCurrent({ host: live.host, cwd, policy,
+			request: goalPolicyRequest(policy, live.compiled.task), ancestryRootRunId: live.rootRunId,
+			parentRunId, executionProfileName: (parentRun ?? run).executionProfile?.name,
+			assertCurrent: () => throwIfWorkflowStopRequested(cwd, parentRunId) }, prepared);
+		assertWorkflowGoalProfileConfigurationCurrent(prepared,
+			task.goalProfileConfiguration, policy);
+	}
+	if (expected) {
+		const exceptionCompiled = child ? durableCompiled : live.compiled;
+		for (const capture of expected.captures) {
+			await recheckWorkflowGoalProfileExceptionSources(
+				capture.capability, run, exceptionCompiled, parentRun);
+			if (liveGoalPolicyAdmissions.get(parentKey) !== live ||
+				(child && liveGoalChildAdmissions.get(key) !== child) ||
+				(!child && workflowDefinitionFingerprint(durableCompiled) !== workflowDefinitionFingerprint(live.compiled)))
+				throw new Error("Goal profile exception source or inventory changed");
+			assertWorkflowGoalProfileExceptionCurrent(capture.capability, run, exceptionCompiled, parentRun);
+		}
+	}
+	return { run, compiled: durableCompiled, ...(parentRun ? { parentRun } : {}), live };
+}
+
+export async function beginWorkflowGoalProfileException(
+	cwd: string,
+	runId: string,
+	host: WorkflowGoalPolicyHost,
+	signal: AbortSignal,
+): Promise<{ capability: object; options: readonly WorkflowGoalProfileExceptionOption[] }> {
+	signal.throwIfAborted();
+	const current = await currentWorkflowGoalProfileException(cwd, runId, host);
+	signal.throwIfAborted();
+	const stop = createWorkflowStopSignal(cwd, runId);
+	const captures: Array<{
+		capability: PreparedWorkflowGoalProfileException;
+		prepared: PreparedWorkflowGoalPolicyAdmission;
+		options: readonly WorkflowGoalProfileExceptionOption[];
+	}> = [];
+	try {
+		const child = liveGoalChildAdmissions.get(`${resolve(cwd)}\0${runId}`);
+		if (child) {
+			if (!current.parentRun)
+				throw new Error("Goal child profile exception original parent inventory unavailable");
+			const capture = await captureWorkflowGoalChildProfileException(
+				child, current.parentRun, current.run, current.compiled);
+			if (capture) captures.push({ ...capture,
+				prepared: current.live.admissions.get(
+					capture.options[0]!.policySpecId)! });
+		} else {
+			for (const policy of current.live.compiled.tasks.filter(task => task.kind === "goal")) {
+				const prepared = current.live.admissions.get(policy.id)!;
+				const input = { host: current.live.host, cwd, policy,
+					request: goalPolicyRequest(policy, current.live.compiled.task), ancestryRootRunId: runId,
+					parentRunId: runId, executionProfileName: current.run.executionProfile?.name,
+					stopSignal: stop.signal, assertCurrent: () => throwIfWorkflowStopRequested(cwd, runId) };
+				const capture = captureWorkflowGoalProfileException(
+					input, prepared, current.run, current.live.compiled);
+				if (capture) captures.push({ ...capture, prepared });
+			}
+		}
+		if (captures.length === 0)
+			throw new Error("Goal profile exception has no actual pending captured root, static child, or exact materialized item scope");
+		const capability = Object.freeze({});
+		const state: WorkflowGoalProfileExceptionCommandState = {
+			cwd: resolve(cwd), runId,
+			parentRunId: current.parentRun?.runId ?? runId,
+			...(child ? { child } : {}),
+			host, live: current.live, captures, stop,
+		};
+		workflowGoalProfileExceptions.set(capability, state);
+		await currentWorkflowGoalProfileException(cwd, runId, host, state);
+		signal.throwIfAborted();
+		return { capability, options: Object.freeze(captures.flatMap(capture => capture.options)) };
+	} catch (error) {
+		for (const capture of captures) discardWorkflowGoalProfileException(capture.capability);
+		stop.dispose();
+		throw error;
+	}
+}
+
+export async function assertWorkflowGoalProfileExceptionCommandCurrent(
+	capability: object,
+	signal: AbortSignal,
+): Promise<void> {
+	const state = workflowGoalProfileExceptions.get(capability);
+	if (!state) throw new Error("Goal profile exception one-use capability unavailable");
+	signal.throwIfAborted();
+	state.stop.signal.throwIfAborted();
+	await currentWorkflowGoalProfileException(state.cwd, state.runId, state.host, state);
+	signal.throwIfAborted();
+	state.stop.signal.throwIfAborted();
+}
+
+export function previewWorkflowGoalProfileExceptionCommand(
+	capability: object,
+	selection: object,
+	runtime: GoalProfileRuntimePatch,
+	reason: string,
+): WorkflowGoalProfileExceptionPreview {
+	const state = workflowGoalProfileExceptions.get(capability);
+	const capture = state?.captures.find(candidate =>
+		candidate.options.some(option => option.selection === selection));
+	if (!state || !capture)
+		throw new Error("Goal profile exception opaque selection is unavailable");
+	const preview = previewWorkflowGoalProfileException(
+		capture.capability, selection, runtime, reason);
+	if (state.preview)
+		throw new Error("Goal profile exception preview capability already bound");
+	state.preview = {
+		selection,
+		value: preview,
+		rendered: JSON.stringify(preview, null, 2),
+	};
+	return preview;
+}
+
+export function discardWorkflowGoalProfileExceptionCommand(capability: object): void {
+	const state = workflowGoalProfileExceptions.get(capability);
+	workflowGoalProfileExceptions.delete(capability);
+	if (!state) return;
+	for (const capture of state.captures)
+		discardWorkflowGoalProfileException(capture.capability);
+	state.stop.dispose();
+}
+
+export async function submitWorkflowGoalProfileException(
+	capability: object,
+	selection: object,
+	preview: WorkflowGoalProfileExceptionPreview,
+	renderedPreview: string,
+	signal: AbortSignal,
+): Promise<WorkflowRunRecord | undefined> {
+	const state = workflowGoalProfileExceptions.get(capability);
+	workflowGoalProfileExceptions.delete(capability);
+	const selected = state?.captures.find(candidate =>
+		candidate.options.some(option => option.selection === selection));
+	if (!state || !selected || state.preview?.selection !== selection ||
+		state.preview.value !== preview || state.preview.rendered !== renderedPreview ||
+		renderedPreview !== JSON.stringify(preview, null, 2))
+		throw new Error("Goal profile exception one-use capability unavailable");
+	let transition: ReturnType<typeof stageWorkflowGoalProfileException> | undefined;
+	let wrote = false;
+	let publicationClaimed = false;
+	try {
+		signal.throwIfAborted();
+		state.stop.signal.throwIfAborted();
+		await currentWorkflowGoalProfileException(state.cwd, state.runId, state.host, state);
+		signal.throwIfAborted();
+		state.stop.signal.throwIfAborted();
+		const confirmed = await state.live.host.confirm(preview);
+		await currentWorkflowGoalProfileException(state.cwd, state.runId, state.host, state);
+		signal.throwIfAborted();
+		state.stop.signal.throwIfAborted();
+		if (!confirmed) return undefined;
+		type LeaseContextRunner = ReturnType<typeof AsyncLocalStorage.snapshot>;
+		const publishUnderLeases = async (
+			parentLeaseSignal: AbortSignal,
+			runInParentLeaseContext: LeaseContextRunner,
+			childLeaseSignal?: AbortSignal,
+			runInChildLeaseContext?: LeaseContextRunner,
+		) => {
+			const leaseSignal = childLeaseSignal ?? parentLeaseSignal;
+			const runInLeaseContext = runInChildLeaseContext ?? runInParentLeaseContext;
+			const combined = AbortSignal.any([signal, parentLeaseSignal, leaseSignal, state.stop.signal]);
+			const assertLeaseOwnersCurrent = async () => {
+				combined.throwIfAborted();
+				assertScheduleLeaseActive(parentLeaseSignal);
+				assertScheduleLeaseActive(leaseSignal);
+				await runInParentLeaseContext(() =>
+					assertRunLeaseOwnership(state.cwd, state.parentRunId, parentLeaseSignal));
+				if (state.child) {
+					await runInLeaseContext(() =>
+						assertRunLeaseOwnership(state.cwd, state.runId, leaseSignal));
+				}
+				combined.throwIfAborted();
+				assertScheduleLeaseActive(parentLeaseSignal);
+				assertScheduleLeaseActive(leaseSignal);
+			};
+			const assertOtherLeaseForParentWrite = state.child
+				? () => runInLeaseContext(() =>
+					assertRunLeaseOwnership(state.cwd, state.runId, leaseSignal))
+				: undefined;
+			const assertOtherLeaseForChildWrite = state.child
+				? () => runInParentLeaseContext(() =>
+					assertRunLeaseOwnership(state.cwd, state.parentRunId, parentLeaseSignal))
+				: undefined;
+			await assertLeaseOwnersCurrent();
+			if (liveGoalPolicyAdmissions.get(`${state.cwd}\0${state.parentRunId}`) !== state.live ||
+				state.live.publicationPending)
+				throw new Error("Goal profile exception original publication owner changed or pending");
+			state.live.publicationPending = true;
+			publicationClaimed = true;
+			await Promise.allSettled([...state.live.runWrites]);
+			await assertLeaseOwnersCurrent();
+			const current = await currentWorkflowGoalProfileException(
+				state.cwd, state.runId, state.host, state);
+			await assertLeaseOwnersCurrent();
+			const previewHash = workflowDefinitionFingerprint(renderedPreview);
+			const transitionCompiled = state.child ? current.compiled : state.live.compiled;
+			transition = stageWorkflowGoalProfileException(
+				selected.capability, selection, preview, previewHash,
+				new Date().toISOString(), current.run, transitionCompiled, current.parentRun);
+			for (const capture of state.captures) {
+				if (capture !== selected)
+					discardWorkflowGoalProfileException(capture.capability);
+			}
+			const assertTransitionCurrent = async () => {
+				await assertLeaseOwnersCurrent();
+				if (liveGoalPolicyAdmissions.get(`${state.cwd}\0${state.parentRunId}`) !== state.live ||
+					(state.child && liveGoalChildAdmissions.get(`${state.cwd}\0${state.runId}`) !== state.child) ||
+					state.host.runtime !== state.live.runtime)
+					throw new Error("Goal profile exception original live owner changed");
+				await transition!.recheckSources();
+				await assertLeaseOwnersCurrent();
+				await throwIfWorkflowStopRequested(state.cwd, state.runId);
+				await assertLeaseOwnersCurrent();
+				const durableRun = await readRunRecord(state.cwd, state.runId);
+				await assertLeaseOwnersCurrent();
+				const durableCompiled = await readCompiledWorkflow(state.cwd, state.runId);
+				await assertLeaseOwnersCurrent();
+				if (!durableCompiled)
+					throw new Error("Goal profile exception durable compiled inventory unavailable");
+				const durableParentRun = state.child
+					? await readRunRecord(state.cwd, state.parentRunId) : undefined;
+				await assertLeaseOwnersCurrent();
+				transition!.assertUnpublished(durableRun, durableCompiled, durableParentRun);
+				return durableRun;
+			};
+			await assertTransitionCurrent();
+			transition.activateInFlightRequests();
+			wrote = true;
+			if (state.child) {
+				await runInParentLeaseContext(() => writeJsonAtomic(
+					workflowRunPath(state.cwd, state.parentRunId),
+					transition!.parentRun!,
+					parentLeaseSignal,
+					assertOtherLeaseForParentWrite,
+				));
+				await assertTransitionCurrent();
+				await runInLeaseContext(() => writeJsonAtomic(
+					compiledWorkflowPath(state.cwd, state.runId),
+					transition!.compiled,
+					leaseSignal,
+					assertOtherLeaseForChildWrite,
+				));
+				await assertTransitionCurrent();
+				await runInLeaseContext(() => writeJsonAtomic(
+					workflowRunPath(state.cwd, state.runId),
+					transition!.run,
+					leaseSignal,
+					assertOtherLeaseForChildWrite,
+				));
+			} else {
+				await runInParentLeaseContext(() => writeJsonAtomic(
+					compiledWorkflowPath(state.cwd, state.runId),
+					transition!.compiled,
+					parentLeaseSignal,
+				));
+				await assertTransitionCurrent();
+				await runInParentLeaseContext(() => writeJsonAtomic(
+					workflowRunPath(state.cwd, state.runId),
+					transition!.run,
+					parentLeaseSignal,
+				));
+			}
+			await assertTransitionCurrent();
+			await assertLeaseOwnersCurrent();
+			transition.publish();
+			return transition.run;
+		};
+		const result = await withRunLease(state.cwd, state.parentRunId, async parentLeaseSignal => {
+			const runInParentLeaseContext = AsyncLocalStorage.snapshot();
+			if (!state.child) {
+				return publishUnderLeases(
+					parentLeaseSignal, runInParentLeaseContext);
+			}
+			const childResult = await withRunLease(state.cwd, state.runId,
+				async childLeaseSignal => {
+					const runInChildLeaseContext = AsyncLocalStorage.snapshot();
+					const published = await publishUnderLeases(
+						parentLeaseSignal,
+						runInParentLeaseContext,
+						childLeaseSignal,
+						runInChildLeaseContext,
+					);
+					await runInParentLeaseContext(() =>
+						assertRunLeaseOwnership(state.cwd, state.parentRunId, parentLeaseSignal));
+					await runInChildLeaseContext(() =>
+						assertRunLeaseOwnership(state.cwd, state.runId, childLeaseSignal));
+					return published;
+				});
+			if (!childResult)
+				throw new Error(`Goal profile exception for ${state.runId} denied: original child run lease is busy; no configuration was changed.`);
+			await runInParentLeaseContext(() =>
+				assertRunLeaseOwnership(state.cwd, state.parentRunId, parentLeaseSignal));
+			return childResult;
+		});
+		if (!result) {
+			throw new Error(`Goal profile exception for ${state.runId} denied: original run lease is busy; no configuration was changed.`);
+		}
+		return result;
+	} catch (error) {
+		if (wrote) transition?.uncertain();
+		throw error;
+	} finally {
+		if (publicationClaimed) state.live.publicationPending = false;
+		for (const capture of state.captures)
+			discardWorkflowGoalProfileException(capture.capability);
+		state.stop.dispose();
+	}
+}
+
+export async function submitWorkflowGoalHumanReview(
+	cwd: string,
+	runId: string,
+	host: WorkflowGoalPolicyHost,
+	capability: object,
+	decision: "accept" | "reject",
+	signal: AbortSignal,
+): Promise<WorkflowRunRecord> {
+	const review = (() => {
+		try { return consumeWorkflowGoalHumanReview(capability); }
+		finally {
+			workflowGoalHumanReviewStops.get(capability)?.dispose();
+			workflowGoalHumanReviewStops.delete(capability);
+		}
+	})();
+	signal.throwIfAborted();
+	let submission: Awaited<ReturnType<typeof review.stage>> | undefined;
+	const result = await withRunLease(cwd, runId, async (leaseSignal) => {
+		const stop = createWorkflowStopSignal(cwd, runId);
+		try {
+			const reviewSignal = AbortSignal.any([signal, leaseSignal, stop.signal]);
+			reviewSignal.throwIfAborted();
+			const current = await currentWorkflowGoalHumanReview(cwd, runId, host);
+			reviewSignal.throwIfAborted();
+			assertScheduleLeaseActive(leaseSignal);
+			const inventory = workflowDefinitionFingerprint({ compiled: current.compiled, lineage: current.task.goalRoot });
+			const input = { host: current.live.host, cwd, policy: current.policy,
+				request: goalPolicyRequest(current.policy, current.compiled.task), ancestryRootRunId: runId,
+				parentRunId: runId, executionProfileName: current.run.executionProfile?.name,
+				stopSignal: reviewSignal, assertCurrent: async () => {
+					reviewSignal.throwIfAborted(); assertScheduleLeaseActive(leaseSignal);
+					const latest = await currentWorkflowGoalHumanReview(cwd, runId, host);
+					reviewSignal.throwIfAborted(); assertScheduleLeaseActive(leaseSignal);
+					if (latest.live !== current.live || latest.prepared !== current.prepared ||
+						inventory !== workflowDefinitionFingerprint({ compiled: latest.compiled, lineage: latest.task.goalRoot }))
+						throw new Error("Goal human original root inventory changed during judgment");
+				} };
+			await review.validate(input, current.prepared);
+			reviewSignal.throwIfAborted();
+			submission = await review.stage(input, current.prepared, decision);
+			reviewSignal.throwIfAborted();
+			assertScheduleLeaseActive(leaseSignal);
+			await dynamicControllerTestHooks.onHumanJudgmentPublication?.({ cwd, runId, phase: "before-publication-read" });
+			const refreshed = await currentWorkflowGoalHumanReview(cwd, runId, host);
+			reviewSignal.throwIfAborted(); assertScheduleLeaseActive(leaseSignal);
+			if (inventory !== workflowDefinitionFingerprint({ compiled: refreshed.compiled, lineage: refreshed.task.goalRoot }))
+				throw new Error("Goal human original oracle inventory changed before publication");
+			refreshed.task.status = "pending";
+			refreshed.task.statusDetail = "goal_human_review_decided";
+			refreshed.task.lastMessage = "Original human judgment recorded; the policy oracle will publish the decision.";
+			await writeRunRecord(cwd, refreshed.run);
+			reviewSignal.throwIfAborted(); assertScheduleLeaseActive(leaseSignal);
+			let acknowledged = false;
+			let publicationError: unknown;
+			await scheduleDag(cwd, refreshed.run, refreshed.compiled, {
+				goalPolicyHost: refreshed.live.host,
+				goalPolicyAdmissions: refreshed.live.admissions,
+				goalHumanSubmission: { token: submission.token, acknowledge: async () => {
+					try {
+						await dynamicControllerTestHooks.onHumanJudgmentPublication?.({ cwd, runId, phase: "published-before-ack" });
+						await submission!.commit();
+						acknowledged = true;
+					} catch (error) {
+						publicationError = error;
+						submission!.uncertain();
+						throw error;
+					}
+				} },
+			}, leaseSignal);
+			if (!acknowledged) throw publicationError ?? new Error("Goal human publication UNKNOWN: original oracle acknowledgment unavailable");
+			assertScheduleLeaseActive(leaseSignal);
+			const published = await readRunRecord(cwd, runId);
+			reviewSignal.throwIfAborted(); assertScheduleLeaseActive(leaseSignal);
+			return published;
+		} catch (error) {
+			submission?.uncertain();
+			throw error;
+		} finally {
+			stop.dispose();
+		}
+	}).catch(error => { submission?.uncertain(); throw error; });
+	try { signal.throwIfAborted(); }
+	catch (error) { submission?.uncertain(); throw error; }
+	if (!result) {
+		await currentWorkflowGoalHumanReview(cwd, runId, host);
+		signal.throwIfAborted();
+		throw new Error(`Goal human judgment for ${runId} denied: original run lease is busy; no judgment or provider action was taken.`);
+	}
+	return result;
+}
 
 export interface WorkflowRunOptions {
 	task?: string;
+	goalPolicyHost?: WorkflowGoalPolicyHost;
 	runtimeOverrides?: WorkflowRuntimeDefaults;
 	runtimeDefaults?: WorkflowRuntimeDefaults;
 	availableModels?: WorkflowModelInfo[];
@@ -366,9 +1313,18 @@ export interface WorkflowRunOptions {
 	executionProfileOverride?: WorkflowCapturedExecutionProfile;
 }
 
-interface WorkflowScheduleOptions {
+export interface WorkflowScheduleOptions {
+	/** Same-lease provisional judgment; never persisted or recreated by readers. */
+	goalHumanSubmission?: { token: object; acknowledge(): Promise<void> };
 	dynamicUi?: DynamicWorkflowUi;
 	availableModels?: WorkflowModelInfo[];
+	/** Process-local interactive Goal host; persisted graph data cannot recreate it. */
+	goalPolicyHost?: WorkflowGoalPolicyHost;
+	goalPolicyAdmissions?: ReadonlyMap<string, PreparedWorkflowGoalPolicyAdmission>;
+	/** Opaque same-process original reservation, never restored from run.json. */
+	goalChildAdmission?: PreparedWorkflowGoalChildAdmission;
+	/** One-use original root permission; neither lineage nor admission alone authorizes resume. */
+	goalChildRecovery?: PreparedWorkflowGoalChildRecovery;
 }
 
 interface WorkflowWaitOptions extends WorkflowScheduleOptions {
@@ -386,6 +1342,8 @@ type WorkflowRunDiagnosticOptions = WorkflowRunOptions & {
 		notice: string,
 		digest: string,
 	) => void;
+	/** Internal trusted Goal entry fields; never inferred by normal launches. */
+	goalChildAdmission?: PreparedWorkflowGoalChildAdmission;
 };
 
 export async function runWorkflowSpec(
@@ -445,6 +1403,24 @@ export async function runDynamicTask(
 	);
 }
 
+/** Auto selection only admits artifact-graph workflows; Goal definitions are never candidates. */
+function autoLaunchArtifactGraphSpec(spec: Parameters<typeof compileWorkflow>[0]): ArtifactGraphWorkflowSpec {
+	if (!("artifactGraph" in spec)) throw new Error("Auto-confirmed launches require an artifact-graph workflow");
+	return spec;
+}
+
+/** A Goal root definition or an artifact graph with an embedded Goal stage. */
+function specParticipatesInGoal(spec: unknown): boolean {
+	if (!spec || typeof spec !== "object" || Array.isArray(spec)) return false;
+	if (Object.hasOwn(spec, "goal")) return true;
+	const graph = (spec as Record<string, unknown>).artifactGraph;
+	if (!graph || typeof graph !== "object" || Array.isArray(graph)) return false;
+	const stages = (graph as Record<string, unknown>).stages;
+	return Array.isArray(stages) && stages.some(stage =>
+		stage !== null && typeof stage === "object" && !Array.isArray(stage) &&
+		(stage as Record<string, unknown>).type === "goal");
+}
+
 async function runLoadedWorkflowSpec(
 	cwd: string,
 	specPath: string,
@@ -453,11 +1429,14 @@ async function runLoadedWorkflowSpec(
 	diagnosticsPolicy: PromptSchemaDiagnosticsPolicy,
 	provenance?: WorkflowRunRecord["provenance"],
 ): Promise<WorkflowRunRecord> {
-	return withResolvedWorkflowNativeHostContext(cwd, () =>
-		runLoadedWorkflowSpecInNativeHostScope(
-			cwd, specPath, spec, options, diagnosticsPolicy, provenance,
-		),
+	const run = () => runLoadedWorkflowSpecInNativeHostScope(
+		cwd, specPath, spec, options, diagnosticsPolicy, provenance,
 	);
+	// Goal-participating runs keep the legacy tool surface: native host tools
+	// (codemode/MCP) would widen the consented Goal authority.
+	return options.goalChildAdmission !== undefined || specParticipatesInGoal(spec)
+		? withoutWorkflowNativeHostContext(run)
+		: withResolvedWorkflowNativeHostContext(cwd, run);
 }
 
 async function runLoadedWorkflowSpecInNativeHostScope(
@@ -469,6 +1448,12 @@ async function runLoadedWorkflowSpecInNativeHostScope(
 	provenance?: WorkflowRunRecord["provenance"],
 ): Promise<WorkflowRunRecord> {
 	options.launchSignal?.throwIfAborted();
+	const childCapture = options.goalChildAdmission
+		? await workflowGoalChildCompilation(options.goalChildAdmission) : undefined;
+	if (childCapture && (specPath !== childCapture.specPath || options.runId !== childCapture.runId ||
+		options.parentRunId !== childCapture.parentRunId || options.task !== childCapture.task ||
+		workflowDefinitionFingerprint(spec) !== workflowDefinitionFingerprint(childCapture.definition)))
+		throw new Error("Goal child launch differs from original reserved source/request");
 	if (options.launch) assertValidWorkflowRunLaunchCapture(options.launch);
 	if (options.launch?.schema === "pi-workflow-run-launch-v2") {
 		const actualRequestKind =
@@ -546,7 +1531,7 @@ async function runLoadedWorkflowSpecInNativeHostScope(
 		await assertWorkflowAutoLaunchBindingCurrent(
 			cwd,
 			options.autoLaunchBinding,
-			spec,
+			autoLaunchArtifactGraphSpec(spec),
 			options.task,
 			specPath,
 			workflowAutoLaunchBindingSettings({
@@ -556,8 +1541,10 @@ async function runLoadedWorkflowSpecInNativeHostScope(
 				runtimeOverrides: options.runtimeOverrides,
 			}),
 		);
-	const capturedProfile = !options.executionProfile
-		? options.executionProfileOverride
+	const executionProfile = childCapture?.executionProfile ? undefined : options.executionProfile;
+	const executionProfileOverride = childCapture?.executionProfile ?? options.executionProfileOverride;
+	const capturedProfile = !executionProfile
+		? executionProfileOverride
 		: undefined;
 	if (capturedProfile) {
 		const capturedDefinition = capturedProfile.definitionFingerprint;
@@ -578,17 +1565,26 @@ async function runLoadedWorkflowSpecInNativeHostScope(
 	spec = applyDeclaredWorkflowInputOverrides(spec, options.inputOverrides);
 	const appliedProfile = applyWorkflowExecutionProfile(
 		spec,
-		options.executionProfile,
-		options.executionProfileOverride,
+		executionProfile,
+		executionProfileOverride,
 	);
 	spec = appliedProfile.spec;
+	if (childCapture?.embeddedGoalPolicies?.length) {
+		if (!("artifactGraph" in spec)) throw new Error("Goal embedded capture requires its original ordinary wrapper");
+		spec = { ...spec, artifactGraph: { ...spec.artifactGraph,
+			stages: spec.artifactGraph.stages.map(stage => {
+				const captured = childCapture.embeddedGoalPolicies.find(policy => policy.stageId === stage.id);
+				return captured ? { ...stage, goalDefinition: captured.definition } : stage;
+			}),
+		} };
+	}
 	// Nested compilation must follow the parent's persisted host decision. In
 	// particular, a legacy parent with no nativeHost stays legacy even when the
 	// resumed supervisor currently has an active native host.
 	const inheritedNativeHost = options.parentRunId
 		? ((await readRunRecord(cwd, options.parentRunId)).nativeHost ?? null)
 		: undefined;
-	const compiled = await compileWorkflow(spec, {
+	let compiled = await compileWorkflow(spec, {
 		cwd,
 		specPath,
 		task: options.task,
@@ -596,7 +1592,10 @@ async function runLoadedWorkflowSpecInNativeHostScope(
 		runtimeOverrides: options.runtimeOverrides,
 		runtimeDefaults: options.runtimeDefaults,
 		availableModels: options.availableModels,
+		agentDefinitions: childCapture?.agents,
 	});
+	if (options.goalChildAdmission)
+		compiled = await captureWorkflowGoalChildEffectiveProfiles(options.goalChildAdmission, compiled);
 	if (options.autoLaunchBinding)
 		options.autoLaunchBinding = sealWorkflowAutoLaunchBindingCompiled(
 			options.autoLaunchBinding,
@@ -629,19 +1628,114 @@ async function runLoadedWorkflowSpecInNativeHostScope(
 		: undefined;
 	if (launchCapture) assertValidWorkflowRunLaunchCapture(launchCapture);
 	const runId = options.runId ?? makeRunId();
+	const ancestryRootRunId = childCapture?.rootRunId ?? options.parentRunId ?? runId;
 	options.launchSignal?.throwIfAborted();
 	await assertWorkflowRunAvailable(cwd, runId);
 	options.launchSignal?.throwIfAborted();
+	const goalPolicyAdmissions = new Map<string, PreparedWorkflowGoalPolicyAdmission>();
+	if (options.goalPolicyHost) {
+		for (const policy of compiled.tasks.filter((task: CompiledTask) => task.kind === "goal")) {
+			const input = {
+				host: options.goalPolicyHost, cwd, policy,
+				request: goalPolicyRequest(policy, compiled.task),
+				ancestryRootRunId,
+				parentRunId: runId,
+				executionProfileName: appliedProfile.record?.name,
+				assertCurrent: () => throwIfWorkflowStopRequested(cwd, runId),
+			};
+			const prepared = options.goalChildAdmission
+				? await prepareWorkflowGoalDerivedPolicy(options.goalChildAdmission, input)
+				: await prepareWorkflowGoalPolicy(input);
+			if (!prepared) throw new Error("Goal execution confirmation cancelled; no workflow run was created");
+			goalPolicyAdmissions.set(policy.id, prepared);
+		}
+	}
+	if (("goal" in spec || childCapture?.embeddedGoalPolicies?.length) &&
+		options.goalPolicyHost?.executionFoundation === "workflow-engine") {
+	for (const policy of compiled.tasks.filter((task: CompiledTask) => task.kind === "goal")) {
+		const prepared = goalPolicyAdmissions.get(policy.id)!;
+		const plannerSpec = prepareWorkflowEngineGoalRootPlanner({
+			host: options.goalPolicyHost, cwd, policy,
+			request: goalPolicyRequest(policy, compiled.task),
+			ancestryRootRunId, parentRunId: runId,
+			executionProfileName: appliedProfile.record?.name,
+			assertCurrent: () => throwIfWorkflowStopRequested(cwd, runId),
+		}, prepared);
+		const planning = await compileWorkflow(plannerSpec, { cwd, specPath,
+			agentDefinitions: workflowEngineGoalAgentDefinitions({ host: options.goalPolicyHost, cwd, policy,
+				request: goalPolicyRequest(policy, compiled.task), ancestryRootRunId,
+				parentRunId: runId, executionProfileName: appliedProfile.record?.name,
+				assertCurrent: () => throwIfWorkflowStopRequested(cwd, runId) }, prepared),
+			availableModels: [...options.goalPolicyHost.availableModels] });
+		const predecessors = [...policy.dependsOn];
+		for (let index = 0; index < planning.tasks.length; index++) {
+			const planner = planning.tasks[index] as CompiledTask;
+			planner.dependsOn = [...predecessors];
+			planning.tasks[index] = captureWorkflowGoalScopedTaskRuntime({
+				host: options.goalPolicyHost, cwd, policy,
+				request: goalPolicyRequest(policy, compiled.task), ancestryRootRunId, parentRunId: runId,
+				executionProfileName: appliedProfile.record?.name,
+				assertCurrent: () => throwIfWorkflowStopRequested(cwd, runId),
+			}, prepared, planner, 0, "planning");
+		}
+		policy.dependsOn = planning.tasks.map((task: CompiledTask) => task.id);
+		compiled.tasks.unshift(...planning.tasks);
+		compiled.warnings.push(...planning.warnings);
+	}
+	}
+	if (options.goalChildAdmission) {
+		await bindWorkflowGoalChildCompiled(options.goalChildAdmission, compiled);
+	}
 	const { run } = await createRunRecord(cwd, compiled, specPath, {
 		runId,
 		parentRunId: options.parentRunId,
-		rootRunId: options.parentRunId,
+		rootRunId: childCapture?.rootRunId ?? options.parentRunId,
 		initialize: false,
 	});
+	if (options.goalChildAdmission) {
+		run.goalChild = workflowGoalChildLineage(options.goalChildAdmission);
+	}
+	const goalPaths = compiled.tasks.filter((task: CompiledTask) => task.kind === "goal").map((task: CompiledTask) => task.stageId ?? task.id);
+	if (goalPaths.length > 0)
+		run.goalParticipation = { schemaVersion: 1, resumeRequired: options.goalPolicyHost === undefined, goalPaths };
 	if (provenance) run.provenance = provenance;
 	if (options.routing) run.routing = options.routing;
 	if (appliedProfile.record) run.executionProfile = appliedProfile.record;
+	if (options.goalPolicyHost?.executionFoundation === "workflow-engine") {
+		for (const policy of compiled.tasks.filter((value: CompiledTask) => value.kind === "goal")) {
+			const prepared = goalPolicyAdmissions.get(policy.id)!;
+			const root = run.tasks.find(value => value.specId === policy.id)!;
+			root.goalProfileConfiguration = workflowGoalProfileConfiguration(prepared);
+		}
+	}
+	const bindPublishedGoalRequests = () => {
+		if (options.goalPolicyHost?.executionFoundation !== "workflow-engine") return;
+		for (const policy of compiled.tasks.filter((value: CompiledTask) => value.kind === "goal")) {
+			const prepared = goalPolicyAdmissions.get(policy.id)!;
+			const root = run.tasks.find(value => value.specId === policy.id)!;
+			for (const planner of compiled.tasks.filter((value: CompiledTask) =>
+				policy.dependsOn.includes(value.id) && value.id.startsWith(`${policy.stageId ?? policy.id}.$rootPlanner`))) {
+				bindWorkflowGoalRequestTask({ host: options.goalPolicyHost, cwd, policy,
+					request: goalPolicyRequest(policy, compiled.task), ancestryRootRunId,
+					parentRunId: runId, executionProfileName: appliedProfile.record?.name,
+					assertCurrent: () => throwIfWorkflowStopRequested(cwd, runId) }, prepared, run, root,
+					run.tasks.find(value => value.specId === planner.id)!, planner, 0, "planning");
+			}
+		}
+	};
 	let initialized: WorkflowRunRecord | undefined;
+	const liveKey = `${resolve(cwd)}\0${runId}`;
+	const assertNoInitialLiveBindings = () => {
+		if (liveGoalChildAdmissions.has(liveKey) || liveGoalPolicyHosts.has(liveKey) ||
+			liveGoalPolicyAdmissions.has(liveKey))
+			throw new Error("Goal initialization cannot replace existing live bindings");
+	};
+	let installedChild: typeof options.goalChildAdmission;
+	let installedHost: typeof options.goalPolicyHost;
+	let installedAdmission: ReturnType<typeof liveGoalPolicyAdmissions.get>;
+	beginWorkflowGoalInitializationBindings(run);
+	try {
+	assertNoInitialLiveBindings();
 	try {
 		if (launchCapture?.command.state === "captured")
 			await prepareWorkflowLaunchCommandArtifactPath(cwd, runId);
@@ -649,6 +1743,7 @@ async function runLoadedWorkflowSpecInNativeHostScope(
 		initialized = await withRunLease(cwd, run.runId, async (leaseSignal) => {
 			options.launchSignal?.throwIfAborted();
 			await assertRunLeaseOwnership(cwd, run.runId, leaseSignal);
+			if (options.goalChildAdmission) await assertWorkflowGoalChildCurrent(options.goalChildAdmission, run, compiled);
 			const existing = await readJson(workflowRunPath(cwd, run.runId));
 			if (existing !== undefined) {
 				throw new Error(
@@ -674,7 +1769,7 @@ async function runLoadedWorkflowSpecInNativeHostScope(
 				await assertWorkflowAutoLaunchBindingCurrent(
 					cwd,
 					options.autoLaunchBinding,
-					spec,
+					autoLaunchArtifactGraphSpec(spec),
 					options.task,
 					specPath,
 					workflowAutoLaunchBindingSettings({
@@ -693,11 +1788,30 @@ async function runLoadedWorkflowSpecInNativeHostScope(
 			options.launchSignal?.throwIfAborted();
 			await writeRunRecord(cwd, run, leaseSignal);
 			const persisted = await readRunRecord(cwd, run.runId);
-			if (persisted.runId !== run.runId || persisted.createdAt !== run.createdAt) {
+			const persistedCompiled = await readCompiledWorkflow(cwd, run.runId);
+			if (
+				persisted.runId !== run.runId ||
+				persisted.createdAt !== run.createdAt || !persistedCompiled ||
+				workflowDefinitionFingerprint(persistedCompiled) !== workflowDefinitionFingerprint(compiled)
+			) {
 				throw new Error(
 					`Cannot initialize workflow run ${run.runId}: persisted run identity changed`,
 				);
 			}
+			if (options.goalPolicyHost?.executionFoundation === "workflow-engine") {
+				for (const policy of compiled.tasks.filter((task: CompiledTask) => task.kind === "goal")) {
+					const prepared = goalPolicyAdmissions.get(policy.id);
+					const task = persisted.tasks.find(candidate => candidate.specId === policy.id);
+					if (!prepared || !task || goalHash(task.goalProfileConfiguration) !==
+						goalHash(workflowGoalProfileConfiguration(prepared)))
+						throw new Error("Goal initial profile publication readback changed");
+					publishWorkflowGoalProfileConfiguration(prepared);
+					assertWorkflowGoalProfileConfigurationCurrent(prepared, task.goalProfileConfiguration, policy);
+				}
+			}
+			if (options.goalChildAdmission)
+				await bindWorkflowGoalChildRun(options.goalChildAdmission, run, compiled);
+			bindPublishedGoalRequests();
 			return persisted;
 		});
 	} catch (error) {
@@ -710,10 +1824,54 @@ async function runLoadedWorkflowSpecInNativeHostScope(
 			`Could not acquire supervisor lease to initialize ${run.runId}; another supervisor may be active`,
 		);
 	}
+	const liveAdmission = options.goalPolicyHost?.executionFoundation === "workflow-engine" && goalPolicyAdmissions.size > 0
+		? {
+			host: options.goalPolicyHost, rootRunId: ancestryRootRunId,
+			runtime: options.goalPolicyHost.runtime,
+			executionProfileHash: workflowDefinitionFingerprint(appliedProfile.record ?? null),
+			admissions: new Map(goalPolicyAdmissions),
+			compiled,
+			runWrites: new Set<Promise<void>>(),
+			publicationPending: false,
+		} : undefined;
+	assertNoInitialLiveBindings();
+	if (options.goalChildAdmission) {
+		liveGoalChildAdmissions.set(liveKey, options.goalChildAdmission);
+		installedChild = options.goalChildAdmission;
+	}
+	if (options.goalPolicyHost && goalPolicyAdmissions.size > 0) {
+		liveGoalPolicyHosts.set(liveKey, options.goalPolicyHost);
+		installedHost = options.goalPolicyHost;
+	}
+	if (liveAdmission) {
+		liveGoalPolicyAdmissions.set(liveKey, liveAdmission);
+		installedAdmission = liveAdmission;
+	}
+	completeWorkflowGoalInitializationBindings(run);
+	await dynamicControllerTestHooks.onSchedulerObservation?.(Object.freeze({
+		cwd, runId, phase: "pre-schedule",
+		admissionPresent: options.goalChildAdmission !== undefined,
+		leaseActive: false,
+	}));
+	} catch (error) {
+		if (installedChild && liveGoalChildAdmissions.get(liveKey) === installedChild)
+			liveGoalChildAdmissions.delete(liveKey);
+		if (installedHost && liveGoalPolicyHosts.get(liveKey) === installedHost)
+			liveGoalPolicyHosts.delete(liveKey);
+		if (installedAdmission && liveGoalPolicyAdmissions.get(liveKey) === installedAdmission)
+			liveGoalPolicyAdmissions.delete(liveKey);
+		for (const prepared of goalPolicyAdmissions.values())
+			markWorkflowGoalProfilePublicationUnknown(prepared);
+		revokeWorkflowGoalInitializationBindings(run);
+		throw error;
+	}
 
-	const scheduleOptions = {
+	const scheduleOptions: WorkflowScheduleOptions = {
 		dynamicUi: options.dynamicUi,
 		availableModels: options.availableModels,
+		goalPolicyHost: options.goalPolicyHost,
+		goalPolicyAdmissions,
+		goalChildAdmission: options.goalChildAdmission,
 	};
 	const unbindLaunchSignal = bindWorkflowLaunchSignal(
 		cwd,
@@ -899,6 +2057,15 @@ export async function waitForRun(
 	timeoutMs?: number,
 	options: WorkflowWaitOptions = {},
 ): Promise<WorkflowRunRecord> {
+	return waitForRunWithForegroundSupervisor(cwd, runIdOrPrefix, timeoutMs, options);
+}
+
+async function waitForRunWithForegroundSupervisor(
+	cwd: string,
+	runIdOrPrefix: string,
+	timeoutMs?: number,
+	options: WorkflowWaitOptions = {},
+): Promise<WorkflowRunRecord> {
 	const timeout = clampTimeout(timeoutMs);
 	const timeoutDeadline = Date.now() + timeout;
 	const { waitSignal, waitDeadlineMs, onWaitProgress, ...scheduleOptions } =
@@ -911,7 +2078,13 @@ export async function waitForRun(
 	const initialRemaining = deadline - Date.now();
 	if (initialRemaining <= 0) throw new Error(initialTimeoutMessage);
 	let run = await awaitWithinWorkflowWaitBoundary(
-		refreshRunOrRecordPollError(cwd, runIdOrPrefix),
+		scheduleOptions.goalChildAdmission !== undefined
+			? refreshRun(cwd, runIdOrPrefix, scheduleOptions.goalChildAdmission)
+			: refreshRunOrRecordPollError(
+			cwd,
+			runIdOrPrefix,
+			undefined,
+		),
 		initialRemaining,
 		waitSignal,
 		initialTimeoutMessage,
@@ -930,7 +2103,13 @@ export async function waitForRun(
 		onWaitProgress?.(run);
 		if (!hasActiveSchedulerWork(run)) return run;
 		run = await awaitWithinWorkflowWaitBoundary(
-			refreshRunOrRecordPollError(cwd, run.runId, run),
+			scheduleOptions.goalChildAdmission !== undefined
+				? refreshRun(cwd, run.runId, scheduleOptions.goalChildAdmission)
+				: refreshRunOrRecordPollError(
+				cwd,
+				run.runId,
+				run,
+			),
 			deadline - Date.now(),
 			waitSignal,
 			timeoutMessage,
@@ -945,7 +2124,13 @@ export async function waitForRun(
 			timeoutMessage,
 		);
 		run = await awaitWithinWorkflowWaitBoundary(
-			refreshRunOrRecordPollError(cwd, run.runId, run),
+			scheduleOptions.goalChildAdmission !== undefined
+				? refreshRun(cwd, run.runId, scheduleOptions.goalChildAdmission)
+				: refreshRunOrRecordPollError(
+				cwd,
+				run.runId,
+				run,
+			),
 			deadline - Date.now(),
 			waitSignal,
 			timeoutMessage,
@@ -993,7 +2178,11 @@ async function confirmStopRunUntil(
 	latest: WorkflowRunRecord,
 ): Promise<StopRunConfirmation> {
 	if (Date.now() > deadline) return { latest };
-	const stopped = await finalizeStopRunWithLease(cwd, runId);
+	const stopped = await finalizeStopRunWithLease(
+		cwd,
+		runId,
+		new Set(),
+	);
 	if (stopped) return { stopped, latest: stopped.run };
 	const refreshed = await readRunRecord(cwd, runId).catch(() => latest);
 	const intentPending = await readWorkflowStopIntent(cwd, runId);
@@ -1001,14 +2190,22 @@ async function confirmStopRunUntil(
 		return { latest: refreshed };
 	}
 	await sleep(STOP_RUN_LEASE_RETRY_MS);
-	return confirmStopRunUntil(cwd, runId, deadline, refreshed);
+	return confirmStopRunUntil(
+		cwd,
+		runId,
+		deadline,
+		refreshed,
+	);
 }
 
 export async function stopRun(
 	cwd: string,
 	runIdOrPrefix: string,
+	ordinaryGoalHost?: WorkflowGoalPolicyHost,
 ): Promise<StopRunSummary> {
 	const current = await readRunRecord(cwd, runIdOrPrefix);
+	if (ordinaryGoalHost) await assertOrdinaryGoalCommandCurrent(cwd, current, ordinaryGoalHost);
+	assertNotProtectedGoalEngineRun(current);
 	if (
 		isTerminalWorkflowStatus(current.status) &&
 		!(await readWorkflowStopIntent(cwd, current.runId))
@@ -1126,6 +2323,12 @@ async function cascadeWorkflowStopToDescendants(
 ): Promise<DescendantStopResult> {
 	const errors: string[] = [];
 	const pendingRunIds = new Set<string>();
+	const alreadyTerminal = async (runId: string): Promise<boolean> => {
+		const record = await readJson<WorkflowRunRecord>(workflowRunPath(cwd, runId));
+		if (!record) return false;
+		if (record.runId !== runId) throw new Error("Descendant stop run identity changed");
+		return isTerminalWorkflowStatus(deriveRunStatus(record).status);
+	};
 	const registeredChildRunIds = new Set(
 		(await listRegisteredDynamicChildRunIds(cwd, parentRunId)).filter(
 			(runId) => !excludedRunIds.has(runId),
@@ -1136,8 +2339,12 @@ async function cascadeWorkflowStopToDescendants(
 	// its own stop intent during its first scheduler pass.
 	for (const runId of registeredChildRunIds) {
 		try {
+			if (await alreadyTerminal(runId)) continue;
 			await requestWorkflowStop(cwd, runId);
 		} catch (error) {
+			// Another original stop owner may have consumed the intent after
+			// exclusive publication collided. Never recreate a terminal fence.
+			if (await alreadyTerminal(runId)) continue;
 			pendingRunIds.add(runId);
 			errors.push(
 				`${runId}: ${error instanceof Error ? error.message : String(error)}`,
@@ -1155,8 +2362,10 @@ async function cascadeWorkflowStopToDescendants(
 	for (const { run } of activeDescendants) {
 		if (registeredChildRunIds.has(run.runId)) continue;
 		try {
+			if (await alreadyTerminal(run.runId)) continue;
 			await requestWorkflowStop(cwd, run.runId);
 		} catch (error) {
+			if (await alreadyTerminal(run.runId)) continue;
 			pendingRunIds.add(run.runId);
 			errors.push(
 				`${run.runId}: ${error instanceof Error ? error.message : String(error)}`,
@@ -1212,6 +2421,61 @@ function descendantStopPendingMessage(
 	return `Workflow stop for ${runId} is waiting for descendant workflow run(s) to stop: ${pending}${suffix}${errors}`;
 }
 
+async function cleanupWorkflowOwnedRun(
+	cwd: string,
+	run: WorkflowRunRecord,
+): Promise<void> {
+	captureWorkflowGoalUnlaunchedStop(run);
+	const ordinaryPolicies = run.tasks.filter(task => task.kind === "goal" &&
+		task.status === "running" && (!task.goal || task.goal.state.startsWith("engine:")));
+	let ordinaryCancellationConfirmed = false;
+	let ordinaryBackendMembersCleaned = false;
+	if (ordinaryPolicies.length && run.goalParticipation && !isProtectedGoalEngineRun(run)) {
+		const key = `${resolve(cwd)}\0${run.runId}`;
+		const live = liveGoalPolicyAdmissions.get(key), host = liveGoalPolicyHosts.get(key);
+		const compiled = await readCompiledWorkflow(cwd, run.runId);
+		const stop = await readWorkflowStopIntent(cwd, run.runId);
+		if (!live || !host || host !== live.host || !compiled || !stop || stop.runId !== run.runId)
+			throw new Error("Goal cancellation requires original live admission and stop intent; stop remains pending");
+		await assertOrdinaryGoalCommandCurrent(cwd, run, host);
+		const assertCurrent = async () => {
+			await assertOrdinaryGoalCommandCurrent(cwd, run, host);
+			if (liveGoalPolicyAdmissions.get(key) !== live || liveGoalPolicyHosts.get(key) !== host ||
+				workflowDefinitionFingerprint(await readWorkflowStopIntent(cwd, run.runId) ?? null) !== workflowDefinitionFingerprint(stop) ||
+				workflowDefinitionFingerprint(await readCompiledWorkflow(cwd, run.runId) ?? null) !== workflowDefinitionFingerprint(compiled))
+				throw new Error("Goal cancellation original stop/admission/profile changed; stop remains pending");
+		};
+		// Only the source-owned nonprovider policies are withheld here. Every real
+		// backend member (and every private Goal) retains original cleanup routing.
+		const backendMembers = run.tasks.filter(task => !ordinaryPolicies.includes(task));
+		if (backendMembers.some(task => task.status === "running")) {
+			await resolveWorkflowBackend(run).cleanupRun(cwd, { ...run, tasks: backendMembers });
+			ordinaryBackendMembersCleaned = true;
+		}
+		await writeRunRecord(cwd, run);
+		for (const task of ordinaryPolicies) {
+			const policy = compiled.tasks.find(source => source.id === task.specId && source.kind === "goal");
+			const prepared = policy && live.admissions.get(policy.id);
+			if (!policy?.goal || !prepared)
+				throw new Error("Goal cancellation original nonprovider policy missing; stop remains pending");
+			await assertWorkflowEngineGoalCancellation({ host, cwd, policy,
+				request: goalPolicyRequest(policy, compiled.task), ancestryRootRunId: live.rootRunId,
+				parentRunId: run.runId, executionProfileName: run.executionProfile?.name, assertCurrent },
+				prepared, run, compiled.tasks);
+		}
+		await assertCurrent();
+		for (const task of ordinaryPolicies)
+			setTaskTerminal(task, "interrupted", "workflow_stopped", {
+				exitCode: 130, lastMessage: "Workflow stopped by user request",
+			});
+		ordinaryCancellationConfirmed = true;
+	}
+	if (run.tasks.some(task => task.kind === "goal" && task.goal && task.status !== "completed" && !task.goal.state.startsWith("engine:")))
+		throw new Error("Goal cancellation requires an ordinary workflow-engine Goal; stop intent remains pending");
+	if (!ordinaryBackendMembersCleaned) await resolveWorkflowBackend(run).cleanupRun(cwd, run);
+	if (ordinaryCancellationConfirmed) await writeRunRecord(cwd, run);
+}
+
 async function finalizeStopRunWithLease(
 	cwd: string,
 	runId: string,
@@ -1230,7 +2494,12 @@ async function finalizeStopRunWithLease(
 	}
 	if (descendantStop.pendingRunIds.length > 0) return undefined;
 	return await withRunLease(cwd, runId, async () => {
+		// A failed original publication is not an admitted inventory for cleanup.
+		// Leave its exact bytes and durable stop intent intact, including foreign
+		// final-write bytes. The parent remains pending/UNKNOWN, never stopped.
+		if (workflowGoalChildForeachPublicationUnknown(cwd, runId)) return undefined;
 		const run = await readRunRecord(cwd, runId);
+		assertNotProtectedGoalEngineRun(run);
 		if (isTerminalWorkflowStatus(run.status)) {
 			await clearTerminalWorkflowStopIntentIfPresent(cwd, run);
 			// Another scheduler may have consumed the durable stop intent before
@@ -1245,15 +2514,36 @@ async function finalizeStopRunWithLease(
 		await writeRunRecord(cwd, run);
 		let cleanupError: unknown;
 		try {
-			await resolveWorkflowBackend(run).cleanupRun(cwd, run);
+			await cleanupWorkflowOwnedRun(cwd, run);
 		} catch (error) {
 			cleanupError = error;
+		}
+		const cleanupCauses: string[] = [];
+		const pendingCauses: unknown[] = cleanupError ? [cleanupError] : [];
+		const seenCauses = new Set<unknown>();
+		while (pendingCauses.length && cleanupCauses.length < 8) {
+			const cause = pendingCauses.shift();
+			if (seenCauses.has(cause)) continue;
+			seenCauses.add(cause);
+			cleanupCauses.push((cause instanceof Error ? cause.message : String(cause)).slice(0, 256));
+			if (cause instanceof Error && cause.cause !== undefined) pendingCauses.push(cause.cause);
+			if (cause instanceof AggregateError) pendingCauses.push(...cause.errors.slice(0, 8));
+		}
+		const cleanupDetail = cleanupCauses.length ? `; cleanup cause: ${cleanupCauses.join(" -> ")}` : "";
+		if (cleanupError && (isProtectedGoalEngineRun(run) || run.goalParticipation !== undefined || run.goalChild !== undefined)) {
+			// Goal cleanup uncertainty retains running/pending state and durable stop
+			// intent. A thrown SDK/backend cleanup is never a terminal observation.
+			await writeRunRecord(cwd, run);
+			throw new Error(
+				`Workflow stop could not confirm cancellation for ${run.runId}; Goal effects remain active, pending, or unknown${cleanupDetail}`,
+				{ cause: cleanupError },
+			);
 		}
 		const interruptedTaskIds = markRunStopped(run);
 		await writeRunRecord(cwd, run);
 		if (cleanupError) {
 			throw new Error(
-				`Workflow stop could not confirm cancellation for ${run.runId}; worker state remains observable`,
+				`Workflow stop could not confirm cancellation for ${run.runId}; worker state remains observable${cleanupDetail}`,
 				{ cause: cleanupError },
 			);
 		}
@@ -1282,7 +2572,7 @@ async function finalizeStopIntentIfRequested(
 		return true;
 	}
 	await writeRunRecord(cwd, run);
-	await resolveWorkflowBackend(run).cleanupRun(cwd, run);
+	await cleanupWorkflowOwnedRun(cwd, run);
 	const interruptedTaskIds = markRunStopped(run);
 	if (interruptedTaskIds.length > 0) await writeRunRecord(cwd, run);
 	await clearWorkflowStopIntent(cwd, run.runId);
@@ -2496,7 +3786,56 @@ export async function resumeRun(
 	options: WorkflowScheduleOptions = {},
 ): Promise<ResumeRunSummary> {
 	const current = await readRunRecord(cwd, runIdOrPrefix);
+	let childResumeAdmission: PreparedWorkflowGoalChildAdmission | undefined;
+	if (current.goalChild) {
+		if (!options.goalChildRecovery)
+			throw new Error("Goal child explicit/plain recovery cannot restore original reserved admission");
+		childResumeAdmission = await beginWorkflowGoalChildRecovery(options.goalChildRecovery, cwd, current);
+		options = { ...options, goalChildAdmission: childResumeAdmission, goalChildRecovery: undefined };
+	}
 	assertRunResumableForResume(current);
+	const ordinaryGoal = current.goalParticipation !== undefined && !isProtectedGoalEngineRun(current);
+	const liveAdmission = ordinaryGoal ? liveGoalPolicyAdmissions.get(`${resolve(cwd)}\0${current.runId}`) : undefined;
+	if (ordinaryGoal) {
+		if (childResumeAdmission && liveAdmission)
+			options = { ...options, goalPolicyHost: liveAdmission.host };
+		if (!liveAdmission || resolve(current.cwd) !== resolve(cwd) ||
+			options.goalPolicyHost?.executionFoundation !== "workflow-engine" ||
+			options.goalPolicyHost.runtime !== liveAdmission.runtime ||
+			liveAdmission.rootRunId !== (current.rootRunId ?? current.runId))
+			throw new Error("Goal explicit resume requires original same-live-session host and admissions; cold/foreign recovery denied");
+		options = { ...options, goalPolicyHost: liveAdmission.host, goalPolicyAdmissions: liveAdmission.admissions };
+	}
+	const assertOrdinaryGoalResume = async (run: WorkflowRunRecord, compiled: CompiledWorkflow) => {
+		const permissions: Array<() => void> = [];
+		if (childResumeAdmission) {
+			if (workflowDefinitionFingerprint(run) !== workflowDefinitionFingerprint(current))
+				throw new Error("Goal child recovery interrupted record changed under resume lease");
+			await assertWorkflowGoalChildCurrent(childResumeAdmission, run, compiled);
+			return permissions;
+		}
+		if (!liveAdmission) return permissions;
+		if (run.status !== "interrupted" || resolve(run.cwd) !== resolve(cwd) || liveAdmission.host !== options.goalPolicyHost ||
+			liveAdmission.host.runtime !== liveAdmission.runtime ||
+			liveAdmission.rootRunId !== (run.rootRunId ?? run.runId) ||
+			liveAdmission.executionProfileHash !== workflowDefinitionFingerprint(run.executionProfile ?? null))
+			throw new Error("Goal explicit resume requires original interrupted live run");
+		for (const policy of compiled.tasks.filter(task => task.kind === "goal")) {
+			const prepared = liveAdmission.admissions.get(policy.id);
+			if (!prepared) throw new Error("Goal explicit resume original admission missing");
+			permissions.push(await prepareWorkflowEngineGoalResume({ host: liveAdmission.host, cwd, policy,
+				request: goalPolicyRequest(policy, compiled.task), ancestryRootRunId: run.rootRunId ?? run.runId,
+				parentRunId: run.runId, executionProfileName: run.executionProfile?.name,
+				assertCurrent: () => throwIfWorkflowStopRequested(cwd, run.runId) }, prepared, run, compiled.tasks));
+		}
+		return permissions;
+	};
+	if (ordinaryGoal) {
+		const compiled = await readCompiledWorkflow(cwd, current.runId);
+		if (!compiled) throw new Error("Goal explicit resume compiled binding missing");
+		await assertOrdinaryGoalResume(current, compiled);
+	}
+	assertNotProtectedGoalEngineRun(current);
 
 	const resetTaskIds: string[] = [];
 	const updated = await withRunLease(cwd, current.runId, async (leaseSignal) => {
@@ -2510,6 +3849,11 @@ export async function resumeRun(
 		if (!activeCompiledFlow) {
 			throw new Error(`Cannot resume ${run.runId}: compiled workflow is missing`);
 		}
+		await assertOrdinaryGoalResume(run, activeCompiledFlow);
+		assertResumeLeaseActive(leaseSignal);
+		await recoverPreparedForeachMaterialization(cwd, run, activeCompiledFlow);
+		await recoverGoalGeneratedMaterialization(cwd, run, activeCompiledFlow);
+		assertNoProtectedGoalEngineArtifacts(run, activeCompiledFlow);
 		assertUnsupportedLegacyPreparedInvalidation(run, activeCompiledFlow);
 		const prepared = preparedInvalidationPlan(run, activeCompiledFlow);
 		if (!prepared) assertRunTaskPositionalAlignment(run, activeCompiledFlow);
@@ -2517,6 +3861,8 @@ export async function resumeRun(
 
 		const planned =
 			prepared ?? dependencyResumeInvalidationPlan(run, activeCompiledFlow);
+		if (childResumeAdmission && planned)
+			throw new Error("Goal child recovery cannot invalidate original completed predecessors");
 		if (planned) {
 			assertDependencyInvalidationRematerializable(
 				run,
@@ -2525,11 +3871,17 @@ export async function resumeRun(
 			);
 		}
 		await resumeLeaseMutation(cwd, run.runId, leaseSignal, () =>
-			resolveWorkflowBackend(run).cleanupRun(cwd, run),
+			cleanupWorkflowOwnedRun(cwd, run),
 		);
+		const resumePermissions = await assertOrdinaryGoalResume(run, activeCompiledFlow);
+		assertResumeLeaseActive(leaseSignal);
 		if (!planned) {
 			await resumeLeaseMutation(cwd, run.runId, leaseSignal, async () => {
+				for (const publish of resumePermissions) publish();
 				for (const task of run.tasks) {
+					if (childResumeAdmission && task.status === "completed") continue;
+					if (childResumeAdmission && task.status !== "interrupted")
+						throw new Error("Goal child recovery resets only original interrupted attempts");
 					if (resetTaskForResume(task)) resetTaskIds.push(task.taskId);
 				}
 				if (resetTaskIds.length > 0) await writeRunRecord(cwd, run, leaseSignal);
@@ -2539,6 +3891,7 @@ export async function resumeRun(
 
 		if (!prepared) {
 			await resumeLeaseMutation(cwd, run.runId, leaseSignal, async () => {
+				for (const publish of resumePermissions) publish();
 				run.invalidationJournal = {
 					generation: planned.generation,
 					idempotencyKey: planned.idempotencyKey,
@@ -2632,6 +3985,9 @@ export async function resumeSupervisors(
 	try {
 		const runs = await listRunRecords(cwd);
 		for (const run of runs) {
+			// Generic startup recovery has no Goal host authority. Goal runs remain
+			// durable and require an explicit host rebind through schedule/resume.
+			if (isProtectedGoalEngineRun(run) || run.goalParticipation !== undefined || run.goalChild !== undefined) continue;
 			if (hasActiveSchedulerWork(run)) {
 				await scheduleRun(cwd, run.runId, undefined, options).catch((error) =>
 					recordSupervisorError(cwd, run.runId, error),
@@ -2659,6 +4015,25 @@ function unwatchRun(cwd: string, runId: string): void {
 	supervisorErrorCounts.delete(key);
 }
 
+/** Test teardown must join owned polling work before deleting its run files. */
+export async function stopWorkflowWatchersForTests(cwds: readonly string[]): Promise<number> {
+	const roots = new Set(cwds);
+	const owns = (key: string): boolean => roots.has(key.slice(0, key.indexOf("\0")));
+	let stopped = 0;
+	for (;;) {
+		for (const key of [...supervisorTimers.keys()].filter(owns)) {
+			const separator = key.indexOf("\0");
+			unwatchRun(key.slice(0, separator), key.slice(separator + 1));
+			stopped += 1;
+		}
+		const pending = [...supervisorWork.entries()]
+			.filter(([key]) => owns(key))
+			.flatMap(([, work]) => [...work]);
+		if (pending.length === 0) return stopped;
+		await Promise.all(pending);
+	}
+}
+
 export function watchRun(
 	cwd: string,
 	runId: string,
@@ -2668,37 +4043,61 @@ export function watchRun(
 	if (supervisorTimers.has(key)) return;
 
 	const timer = setInterval(() => {
-		void (async () => {
+		const work = (async () => {
 			const previousMtime = supervisorRunMtimes.get(key);
 			const beforeMtime = await readRunMtimeMs(cwd, runId);
-			const refreshed = await refreshRun(cwd, runId);
+			dynamicControllerTestHooks.onSchedulerObservation?.(Object.freeze({
+				cwd, runId, phase: "watch-refresh", admissionPresent: options.goalChildAdmission !== undefined,
+			}));
+			const refreshed = await refreshRun(cwd, runId, options.goalChildAdmission);
 			const afterMtime = await readRunMtimeMs(cwd, runId);
 			const currentMtime = afterMtime ?? beforeMtime;
-			if (currentMtime !== undefined) supervisorRunMtimes.set(key, currentMtime);
 
 			if (hasActiveSchedulerWork(refreshed)) {
 				const unchanged =
 					previousMtime !== undefined &&
 					currentMtime !== undefined &&
 					currentMtime <= previousMtime;
-				if (!unchanged) await scheduleRun(cwd, runId, undefined, options);
+				// Pending inventory may outlive occupied launch slots without a run-file
+				// write. Retry only through the original scheduler and its admission gates.
+				if (!unchanged || refreshed.tasks.some(task => task.status === "pending")) {
+					dynamicControllerTestHooks.onSchedulerObservation?.(Object.freeze({
+						cwd, runId, phase: "watch-schedule", admissionPresent: options.goalChildAdmission !== undefined,
+					}));
+					const scheduled = await scheduleRun(cwd, runId, undefined, options);
+					// A busy original lease is not a handled change. Leave it dirty until
+					// an actual scheduling pass obtains custody, even if bytes stay unchanged.
+					if (scheduled === undefined) supervisorRunMtimes.delete(key);
+					else if (currentMtime !== undefined) supervisorRunMtimes.set(key, currentMtime);
+					dynamicControllerTestHooks.onWatcherScheduleResult?.(Object.freeze({
+						cwd, runId, mtimeMs: currentMtime, scheduled: scheduled !== undefined,
+					}));
+				}
 				supervisorErrorCounts.delete(key);
 				return;
 			}
 
 			supervisorErrorCounts.delete(key);
 			unwatchRun(cwd, runId);
-		})().catch((error) => {
+		})().catch(async (error) => {
 			if (isMissingRunError(error)) {
 				unwatchRun(cwd, runId);
 				return;
 			}
 			const failures = (supervisorErrorCounts.get(key) ?? 0) + 1;
 			supervisorErrorCounts.set(key, failures);
-			void recordSupervisorError(cwd, runId, error).finally(() => {
-				if (failures >= MAX_SUPERVISOR_CONSECUTIVE_ERRORS) unwatchRun(cwd, runId);
+			await recordSupervisorError(cwd, runId, error).finally(() => {
+				if (failures >= MAX_SUPERVISOR_CONSECUTIVE_ERRORS)
+					unwatchRun(cwd, runId);
 			});
 		});
+		const pending = supervisorWork.get(key) ?? new Set<Promise<void>>();
+		supervisorWork.set(key, pending);
+		const tracked = work.finally(() => {
+			pending.delete(tracked);
+			if (pending.size === 0) supervisorWork.delete(key);
+		});
+		pending.add(tracked);
 	}, POLL_INTERVAL_MS);
 
 	timer.unref?.();
@@ -2747,7 +4146,66 @@ export async function scheduleRun(
 ): Promise<WorkflowRunRecord | undefined> {
 	return withRunLease(cwd, runId, async (leaseSignal) => {
 		assertScheduleLeaseActive(leaseSignal);
+		dynamicControllerTestHooks.onSchedulerObservation?.(Object.freeze({
+			cwd, runId, phase: "schedule-lease", admissionPresent: options.goalChildAdmission !== undefined,
+			leaseActive: !leaseSignal.aborted,
+		}));
 		let run = await readRunRecord(cwd, runId);
+		if (run.goalChild) {
+			if (!options.goalChildAdmission) throw new Error("Goal child cold/foreign scheduling has no live original admission");
+			const childCompiled = compiled ?? await readCompiledWorkflow(cwd, runId);
+			if (!childCompiled) throw new Error("Goal child compiled inventory unavailable");
+			await assertWorkflowGoalChildCurrent(options.goalChildAdmission, run, childCompiled);
+		}
+		if (run.goalParticipation !== undefined && options.goalPolicyHost === undefined) {
+			run.goalParticipation.resumeRequired = true;
+			for (const task of run.tasks) {
+				if (task.kind !== "goal" || task.status !== "pending") continue;
+				setTaskTerminal(task, "blocked", "goal_host_resume_required", { lastMessage: "Goal participation requires an explicit current host rebind; no new effects were scheduled." });
+			}
+			await writeRunRecord(cwd, run);
+			return run;
+		}
+		let recoveredCompiledFlow = compiled;
+		if (run.goalParticipation !== undefined && options.goalPolicyHost) {
+			recoveredCompiledFlow ??= await readCompiledWorkflow(cwd, run.runId);
+			if (!recoveredCompiledFlow) throw new Error("Goal policy compiled workflow binding is missing");
+			try {
+				const policies = recoveredCompiledFlow.tasks.filter(policy => policy.kind === "goal");
+				for (const record of run.tasks.filter(task => task.goal !== undefined)) {
+					if (!policies.some(policy => policy.id === record.specId))
+						throw new Error("Goal policy identity has no current compiled binding");
+				}
+				if (options.goalPolicyHost.executionFoundation === "workflow-engine") {
+					for (const policy of policies) {
+						const prepared = options.goalPolicyAdmissions?.get(policy.id);
+						if (!prepared) throw new Error("Goal normal engine requires fresh current consent; cold recovery cannot replay admission");
+						assertPreparedWorkflowGoalPolicyCurrent({
+							host: options.goalPolicyHost, cwd, policy,
+							request: goalPolicyRequest(policy, recoveredCompiledFlow.task),
+							ancestryRootRunId: run.rootRunId ?? run.runId, parentRunId: run.runId,
+							executionProfileName: run.executionProfile?.name,
+							assertCurrent: () => throwIfWorkflowStopRequested(cwd, run.runId),
+						}, prepared);
+					}
+					for (const record of run.tasks) {
+						if (record.kind === "goal" && record.status === "running" && record.statusDetail === "goal_catalog_child_waiting")
+							record.status = "pending";
+					}
+				}
+				run.goalParticipation.resumeRequired = false;
+				await writeRunRecord(cwd, run);
+			} catch (error) {
+				run.goalParticipation.resumeRequired = true;
+				for (const task of run.tasks) {
+					if (task.kind === "goal" && task.status === "pending")
+						setTaskTerminal(task, "blocked", "goal_host_resume_required", { lastMessage: error instanceof Error ? error.message : String(error) });
+				}
+				await writeRunRecord(cwd, run);
+				return run;
+			}
+		}
+		assertNotProtectedGoalEngineRun(run);
 		try {
 			run = await resolveWorkflowBackend(run).refreshRun(cwd, run);
 		} catch (error) {
@@ -2765,8 +4223,12 @@ export async function scheduleRun(
 		)
 			return run;
 
-		const compiledFlow = compiled ?? (await readCompiledWorkflow(cwd, run.runId));
+		const compiledFlow =
+			recoveredCompiledFlow ?? (await readCompiledWorkflow(cwd, run.runId));
 		if (!compiledFlow) return run;
+		await recoverPreparedForeachMaterialization(cwd, run, compiledFlow);
+		await recoverGoalGeneratedMaterialization(cwd, run, compiledFlow);
+		assertNoProtectedGoalEngineArtifacts(run, compiledFlow);
 
 		if (compiledFlow.type !== WORKFLOW_RUN_TYPE) {
 			throw new Error(`unsupported compiled workflow type: ${compiledFlow.type}`);
@@ -3468,7 +4930,10 @@ async function scheduleDagPass(
 			compiledFlow,
 		);
 		assertRunTaskPositionalAlignment(run, compiledFlow);
-		if (await finalizeStopIntentIfRequested(cwd, run)) return false;
+		if (
+			await finalizeStopIntentIfRequested(cwd, run)
+		)
+			return false;
 		const staleDynamicRecovered = recoverStaleRunningDynamicControllers(
 			run,
 			compiledFlow,
@@ -3481,14 +4946,22 @@ async function scheduleDagPass(
 			await writeRunRecord(cwd, run);
 	}
 
-	if (await finalizeStopIntentIfRequested(cwd, run)) return false;
+	if (await finalizeStopIntentIfRequested(cwd, run))
+		return false;
 
 	const changed = markDagDependentsSkipped(run, compiledFlow);
 	if (changed) {
 		await writeRunRecord(cwd, run);
 		run = await readRunRecord(cwd, run.runId);
 	}
-	if (await applyFailFastCancellation(cwd, run, compiledFlow)) return true;
+	if (
+		await applyFailFastCancellation(
+			cwd,
+			run,
+			compiledFlow,
+		)
+	)
+		return true;
 
 	const maxConcurrency = Math.max(
 		1,
@@ -3498,6 +4971,17 @@ async function scheduleDagPass(
 	const bySpecId = new Map(run.tasks.map((task) => [task.specId, task]));
 	const dispatchMapValidationSnapshot =
 		createArtifactGraphRuntimeValidationSnapshot(run);
+	dynamicControllerTestHooks.onSchedulerObservation?.(Object.freeze({
+		cwd, runId: run.runId, phase: "dag-eligibility",
+		admissionPresent: options.goalChildAdmission !== undefined,
+		leaseActive: leaseSignal !== undefined && !leaseSignal.aborted, running, maxConcurrency,
+		tasks: Object.freeze(compiledFlow.tasks.map(task => Object.freeze({
+			specId: task.id, kind: task.kind, status: bySpecId.get(task.id)?.status,
+			dependsOn: Object.freeze([...(task.dependsOn ?? [])]),
+			dependencyStatuses: Object.freeze((task.dependsOn ?? []).map(id => bySpecId.get(id)?.status)),
+			ready: dependenciesReady(task, bySpecId, compiledFlow, bySpecId.get(task.id)),
+		}))),
+	}));
 
 	for (
 		let index = 0;
@@ -3505,7 +4989,8 @@ async function scheduleDagPass(
 		index += 1
 	) {
 		assertScheduleLeaseActive(leaseSignal);
-		if (await finalizeStopIntentIfRequested(cwd, run)) return false;
+		if (await finalizeStopIntentIfRequested(cwd, run))
+			return false;
 		const task = run.tasks[index];
 		const compiledTask = compiledFlow.tasks[index];
 		if (!task || !compiledTask || task.status !== "pending") continue;
@@ -3536,7 +5021,8 @@ async function scheduleDagPass(
 				index,
 				compiledTask,
 			);
-			if (await finalizeStopIntentIfRequested(cwd, run)) return false;
+			if (await finalizeStopIntentIfRequested(cwd, run))
+				return false;
 			if (changed) return true;
 			continue;
 		}
@@ -3549,8 +5035,11 @@ async function scheduleDagPass(
 				index,
 				compiledTask,
 				dispatchMapValidationSnapshot,
+				options.goalChildAdmission,
+				leaseSignal,
 			);
-			if (await finalizeStopIntentIfRequested(cwd, run)) return false;
+			if (await finalizeStopIntentIfRequested(cwd, run))
+				return false;
 			if (changed) return true;
 			if (foreachStreamingEnabled(compiledTask)) continue;
 		}
@@ -3633,12 +5122,43 @@ async function scheduleDagPass(
 			return true;
 		}
 		assertScheduleLeaseActive(leaseSignal);
-		if (await finalizeStopIntentIfRequested(cwd, run)) return false;
-		if (await applyFailFastCancellation(cwd, run, compiledFlow)) return true;
-		if (await finalizeStopIntentIfRequested(cwd, run)) return false;
+		if (await finalizeStopIntentIfRequested(cwd, run))
+			return false;
+		if (
+			await applyFailFastCancellation(
+				cwd,
+				run,
+				compiledFlow,
+			)
+		)
+			return true;
+		if (await finalizeStopIntentIfRequested(cwd, run))
+			return false;
 		if (launched && run.tasks[index]?.status === "running") running += 1;
 	}
 	return false;
+}
+
+function recoverStaleRunningDynamicControllers(
+	run: WorkflowRunRecord,
+	compiledFlow: CompiledWorkflow,
+): boolean {
+	assertRunTaskPositionalAlignment(run, compiledFlow);
+	let changed = false;
+	for (const [index, task] of run.tasks.entries()) {
+		const compiledTask = compiledFlow.tasks[index];
+		if (task.status !== "running")
+			continue;
+		if (compiledTask?.kind !== "dynamic") continue;
+		task.status = "pending";
+		task.statusDetail = "recovered_stale_dynamic_controller";
+		task.lastMessage =
+			"recovered stale in-process dynamic controller after scheduler restart";
+		task.pid = undefined;
+		task.backendHandle = undefined;
+		changed = true;
+	}
+	return changed;
 }
 
 async function applyFailFastCancellation(
@@ -3646,6 +5166,7 @@ async function applyFailFastCancellation(
 	run: WorkflowRunRecord,
 	compiledFlow: CompiledWorkflow,
 ): Promise<boolean> {
+	assertNotProtectedGoalEngineRun(run);
 	const summary = markFailFastCancellations(run, compiledFlow);
 	if (summary.cancelledTaskIds.length === 0) return false;
 	await writeRunRecord(cwd, run);
@@ -4367,6 +5888,7 @@ export function recoverPreparedForeachMaterializationForTests(
 ): boolean {
 	const journal = foreachMaterializationJournal(run, compiledFlow);
 	if (!journal) return false;
+	if (run.goalChild) throw new Error("Goal child foreach materialization UNKNOWN; disk replay is denied");
 	applyForeachMaterializationJournal(run, compiledFlow, journal);
 	delete (run as WorkflowRunWithForeachMaterializationJournal)
 		.foreachMaterializationJournal;
@@ -4379,6 +5901,7 @@ async function recoverPreparedForeachMaterialization(
 ): Promise<boolean> {
 	const journal = foreachMaterializationJournal(run, compiledFlow);
 	if (!journal) return false;
+	if (run.goalChild) throw new Error("Goal child foreach materialization UNKNOWN; disk replay is denied");
 	applyForeachMaterializationJournal(run, compiledFlow, journal);
 	await writeJsonAtomic(compiledWorkflowPath(cwd, run.runId), compiledFlow);
 	delete (run as WorkflowRunWithForeachMaterializationJournal)
@@ -4392,19 +5915,37 @@ async function persistForeachMaterialization(
 	run: WorkflowRunRecord,
 	compiledFlow: CompiledWorkflow,
 	journal: ForeachMaterializationJournal,
+	observe?: (boundary: string) => void,
+	assertCurrent?: () => Promise<void>,
+	expectedPublication?: { run: WorkflowRunRecord; compiled: CompiledWorkflow },
+	leaseSignal?: AbortSignal,
 ): Promise<void> {
+	const publicationAwait = async (effect: () => Promise<unknown>) => {
+		await assertCurrent?.();
+		await effect();
+		await assertCurrent?.();
+	};
 	(
 		run as WorkflowRunWithForeachMaterializationJournal
 	).foreachMaterializationJournal = journal;
-	await writeRunRecord(cwd, run);
-	await foreachMaterializationPersistenceHookForTests?.("prepared-run-written");
-	applyForeachMaterializationJournal(run, compiledFlow, journal);
-	await writeJsonAtomic(compiledWorkflowPath(cwd, run.runId), compiledFlow);
-	await foreachMaterializationPersistenceHookForTests?.("compiled-written");
+	observe?.("journal-write-before");
+	await publicationAwait(() => writeRunRecord(cwd, run, leaseSignal));
+	observe?.("journal-write-after");
+	await publicationAwait(async () => foreachMaterializationPersistenceHookForTests?.("prepared-run-written"));
+	if (expectedPublication) {
+		Object.assign(run, structuredClone(expectedPublication.run));
+		Object.assign(compiledFlow, structuredClone(expectedPublication.compiled));
+	} else applyForeachMaterializationJournal(run, compiledFlow, journal);
+	observe?.("compiled-write-before");
+	await publicationAwait(() => writeJsonAtomic(compiledWorkflowPath(cwd, run.runId), compiledFlow, leaseSignal));
+	observe?.("compiled-write-after");
+	await publicationAwait(async () => foreachMaterializationPersistenceHookForTests?.("compiled-written"));
 	delete (run as WorkflowRunWithForeachMaterializationJournal)
 		.foreachMaterializationJournal;
-	await writeRunRecord(cwd, run);
-	await foreachMaterializationPersistenceHookForTests?.("run-written");
+	observe?.("run-write-before");
+	await publicationAwait(() => writeRunRecord(cwd, run, leaseSignal));
+	observe?.("run-write-after");
+	await publicationAwait(async () => foreachMaterializationPersistenceHookForTests?.("run-written"));
 }
 async function materializeForeachTask(
 	cwd: string,
@@ -4413,8 +5954,41 @@ async function materializeForeachTask(
 	index: number,
 	template: CompiledTask,
 	validationSnapshot: ArtifactGraphRuntimeValidationSnapshot,
+	goalChildAdmission?: PreparedWorkflowGoalChildAdmission,
+	leaseSignal?: AbortSignal,
+): Promise<boolean> {
+	try {
+		return await materializeForeachTaskUnderLease(cwd, run, compiledFlow, index, template,
+			validationSnapshot, goalChildAdmission, leaseSignal);
+	} catch (error) {
+		if (!goalChildAdmission) throw error;
+		failWorkflowGoalChildForeachAdmission(goalChildAdmission);
+		throw error;
+	}
+}
+
+async function materializeForeachTaskUnderLease(
+	cwd: string,
+	run: WorkflowRunRecord,
+	compiledFlow: CompiledWorkflow,
+	index: number,
+	template: CompiledTask,
+	validationSnapshot: ArtifactGraphRuntimeValidationSnapshot,
+	goalChildAdmission?: PreparedWorkflowGoalChildAdmission,
+	leaseSignal?: AbortSignal,
 ): Promise<boolean> {
 	const templateRunTask = run.tasks[index];
+	const observe = (boundary: string, error?: unknown) => dynamicControllerTestHooks.onSchedulerObservation?.(Object.freeze({
+		cwd, runId: run.runId, phase: "foreach-materialization", boundary,
+		admissionPresent: goalChildAdmission !== undefined,
+		leaseActive: leaseSignal !== undefined && !leaseSignal.aborted,
+		error: error === undefined ? undefined : error instanceof Error ? error.message : String(error),
+	}));
+	dynamicControllerTestHooks.onSchedulerObservation?.(Object.freeze({
+		cwd, runId: run.runId, phase: "foreach-materialization",
+		admissionPresent: goalChildAdmission !== undefined,
+		leaseActive: leaseSignal !== undefined && !leaseSignal.aborted,
+	}));
 	if (!templateRunTask || !template.foreach || !template.stageId) return false;
 
 	const sourceStageIds = sourceStageIdsForFrom(template.foreach.from);
@@ -4448,6 +6022,7 @@ async function materializeForeachTask(
 		await writeRunRecord(cwd, run);
 		return true;
 	}
+	observe("extract-before");
 	const extracted = await extractArtifactGraphForeachItems(
 		cwd,
 		run,
@@ -4460,6 +6035,7 @@ async function materializeForeachTask(
 		sourceTasks,
 		validationSnapshot,
 	);
+	observe("extract-after");
 
 	if (extracted.error) {
 		setTaskTerminal(templateRunTask, "blocked", "foreach_expansion_blocked", {
@@ -4650,13 +6226,63 @@ async function materializeForeachTask(
 			return true;
 		}
 	}
-	await persistForeachMaterialization(cwd, run, compiledFlow, {
+	const createJournal = (): ForeachMaterializationJournal => ({
 		status: "prepared",
 		placeholderSpecId,
 		replacePlaceholder: !dispatchContext && generatedTasks.length > 0,
 		generatedTasks,
 		generatedRunTasks,
 	});
+	let journal: ForeachMaterializationJournal | undefined;
+	if (run.goalChild && !goalChildAdmission)
+		throw new Error("Goal child foreach requires original live admission");
+	if (goalChildAdmission) await assertRunLeaseOwnership(cwd, run.runId, leaseSignal);
+	observe("prepare-transition-before");
+	let expectedPublication: { run: WorkflowRunRecord; compiled: CompiledWorkflow } | undefined;
+	const transition = goalChildAdmission
+		? await prepareWorkflowGoalChildForeach(goalChildAdmission, run, compiledFlow,
+			template, generatedTasks, generatedRunTasks, items, (originalRun, originalCompiled) => {
+				journal = createJournal();
+				applyForeachMaterializationJournal(originalRun, originalCompiled, structuredClone(journal));
+				expectedPublication = { run: originalRun, compiled: originalCompiled };
+			}).catch(error => {
+			dynamicControllerTestHooks.onSchedulerObservation?.(Object.freeze({
+				cwd, runId: run.runId, phase: "foreach-materialization", boundary: "prepare-transition-error",
+				admissionPresent: true, leaseActive: leaseSignal !== undefined && !leaseSignal.aborted,
+				error: error instanceof Error ? error.message : String(error),
+			}));
+			throw error;
+		})
+		: undefined;
+	journal ??= createJournal();
+	observe("prepare-transition-after");
+	const assertCurrent = transition ? async () => {
+		await assertRunLeaseOwnership(cwd, run.runId, leaseSignal);
+		await assertWorkflowGoalChildForeachCurrent(transition);
+		await assertRunLeaseOwnership(cwd, run.runId, leaseSignal);
+	} : undefined;
+	try {
+		await assertCurrent?.();
+		await persistForeachMaterialization(cwd, run, compiledFlow, journal, observe, assertCurrent, expectedPublication, leaseSignal);
+		if (transition) {
+			await assertCurrent!();
+			const persisted = await readRunRecord(cwd, run.runId);
+			await assertWorkflowGoalChildForeachCurrent(transition, persisted);
+			await assertCurrent!();
+			const persistedCompiled = await readCompiledWorkflow(cwd, run.runId);
+			await assertWorkflowGoalChildForeachCurrent(transition, persisted, persistedCompiled ?? undefined);
+			await assertCurrent!();
+			if (!persistedCompiled || workflowDefinitionFingerprint(persistedCompiled) !== workflowDefinitionFingerprint(compiledFlow))
+				throw new Error("Goal child foreach materialization UNKNOWN; original compiled publication differs");
+			observe("commit-transition-before");
+			await publishWorkflowGoalChildForeach(transition, persisted, persistedCompiled);
+			observe("commit-transition-after");
+		}
+	} catch (error) {
+		observe("transition-error", error);
+		if (transition) failWorkflowGoalChildForeach(transition);
+		throw error;
+	}
 	return true;
 }
 
@@ -4781,6 +6407,8 @@ async function materializeStreamingForeachTask(input: {
 	minChunk: number;
 	partialLedgerPathsBySourceSpecId: Map<string, ReadonlySet<string>>;
 }): Promise<boolean> {
+	const beforeCompiledDigest = input.run.goal === undefined
+		? undefined : goalCompiledMaterializationDigest(input.compiledFlow);
 	const sourceTaskSpecIdSet = new Set(input.sourceTaskSpecIds);
 	const perItemDispatch = workflowExperimentalFlagEnabled(PER_ITEM_DISPATCH_ENV);
 	const existingGeneratedTasks = input.compiledFlow.tasks.filter(
@@ -5017,11 +6645,12 @@ async function materializeStreamingForeachTask(input: {
 	}
 
 	if (!changed) return false;
-	await writeJsonAtomic(
-		compiledWorkflowPath(input.cwd, input.run.runId),
+	await persistGoalGeneratedMaterialization(
+		input.cwd,
+		input.run,
 		input.compiledFlow,
+		beforeCompiledDigest,
 	);
-	await writeRunRecord(input.cwd, input.run);
 	return true;
 }
 
@@ -5267,6 +6896,19 @@ async function launchPendingTaskAt(
 	const task = run.tasks[index];
 	if (!task || task.status !== "pending") return false;
 	if (task.backendHandle || task.pid) return false;
+	retireWorkflowGoalUnlaunched(run, task);
+	// A root candidate requiring artifact repair is UNKNOWN, not an original
+	// deterministic oracle failure. Ordinary output repair must not spend another
+	// provider attempt outside the admitted generation transition.
+	if (task.outputRetry && run.tasks.some(root => root.kind === "goal" &&
+		root.goalRoot?.generations.some(generation => generation.plannerSpecId === task.specId ||
+			Object.values(generation.slots).includes(task.specId) || Object.values(generation.verifiers ?? {}).includes(task.specId)))) {
+		setTaskTerminal(task, "blocked", "goal_candidate_artifact_unknown", {
+			lastMessage: "Goal candidate terminal artifact is unavailable or invalid; UNKNOWN requires recovery, not automatic provider repair.",
+		});
+		await writeRunRecord(cwd, run);
+		return false;
+	}
 
 	const compiledTask = compiledFlow.tasks[index];
 	if (!compiledTask) {
@@ -5279,6 +6921,9 @@ async function launchPendingTaskAt(
 
 	let launchTask: CompiledWorkflow["tasks"][number] | undefined;
 	let prepareComplete = false;
+	let launchStopSignal: AbortSignal | undefined;
+	const parentStopSignal = options.goalChildAdmission
+		? workflowGoalChildStopSignal(options.goalChildAdmission) : undefined;
 	try {
 		launchTask = await prepareDagTask(
 			cwd,
@@ -5303,19 +6948,585 @@ async function launchPendingTaskAt(
 		assertFinalCompiledPromptWithinCap(launchTask);
 		prepareComplete = true;
 		await throwIfWorkflowStopRequested(cwd, run.runId);
-
-		if (launchTask.kind === "support") {
-			await persistFinalPromptMetadata(cwd, run, task, launchTask);
-			return await executeSupportTask(
+		// Records from the removed protected Goal engine never reach support,
+		// dynamic, or backend execution.
+		assertNoProtectedGoalEngineArtifacts(run, compiledFlow);
+		if (launchTask.kind === "goal") {
+			if (!options.goalPolicyHost) {
+				setTaskTerminal(task, "blocked", "goal_host_unavailable", { lastMessage: "A confirmed current Goal host is required; a policy node is not a provider task." });
+				await writeRunRecord(cwd, run);
+				return false;
+			}
+			task.status = "running";
+			task.statusDetail = "goal_policy_running";
+			task.startedAt ??= new Date().toISOString();
+			await writeRunRecord(cwd, run);
+			const stop = createWorkflowStopSignal(cwd, run.runId);
+			launchStopSignal = stop.signal;
+			let result: Awaited<ReturnType<typeof executeWorkflowEngineGoalPolicy>> | null;
+			let originApply: WorkflowGoalOriginApplyRecord | undefined;
+			try {
+			const policyInput = {
+				host: options.goalPolicyHost,
 				cwd,
-				run,
-				task,
-				launchTask,
-				validationSnapshot,
-			);
+				policy: launchTask,
+				existingGoal: task.goal,
+				stopSignal: leaseSignal ? AbortSignal.any([stop.signal, leaseSignal]) : stop.signal,
+				request: goalPolicyRequest(launchTask, compiledFlow.task),
+				preparedAdmission: options.goalPolicyAdmissions?.get(launchTask.id),
+				ancestryRootRunId: run.rootRunId ?? run.runId,
+				parentRunId: run.runId,
+				executionProfileName: run.executionProfile?.name,
+				assertCurrent: () => throwIfWorkflowStopRequested(cwd, run.runId),
+				registered: async (goalId: string, contractHash: string) => {
+					task.goal = { goalId, contractHash, state: "admitted", usage: { requests: null, costMicros: null } };
+					await writeRunRecord(cwd, run);
+				},
+			};
+			if (options.goalPolicyHost.executionFoundation === "workflow-engine") {
+				const originalCurrent = policyInput.assertCurrent;
+				policyInput.assertCurrent = async () => {
+					await originalCurrent();
+					policyInput.stopSignal.throwIfAborted();
+					if (!policyInput.preparedAdmission) throw new Error("Goal engine original admission unavailable");
+					assertPreparedWorkflowGoalPolicyCurrent(policyInput, policyInput.preparedAdmission);
+				};
+				const plannerId = `${launchTask.stageId ?? launchTask.id}.$rootPlanner`;
+				const initialPlanner = run.tasks.find(candidate => candidate.stageId === plannerId);
+				if (initialPlanner && !task.goalRoot) {
+					task.goalRoot = { definitionFingerprint: launchTask.goal!.definitionFingerprint,
+						generations: [{ generation: 0, plannerSpecId: initialPlanner.specId,
+							workerControllerSpecId: task.specId, slots: {} }] };
+					await persistGoalGeneratedMaterialization(cwd, run, compiledFlow, undefined);
+				}
+				const lineage = task.goalRoot;
+				if (lineage && lineage.definitionFingerprint !== launchTask.goal!.definitionFingerprint)
+					throw new Error("Root generation immutable definition changed");
+				const generation = lineage?.generations.at(-1);
+				const childSources: Array<{ taskId: string; control: unknown; identity: unknown }> = [];
+				const terminalChildren = new Map<string, () => Promise<number | null>>();
+				const planner = generation && run.tasks.find(candidate => candidate.specId === generation.plannerSpecId);
+				if (planner) {
+					if (planner.status !== "completed") throw new Error("Root planner has no terminal artifact");
+					const prepared = policyInput.preparedAdmission;
+					if (!prepared) throw new Error("Root workers require fresh admission; recovery cannot replay");
+					const control = await readArtifactGraphControl(cwd, planner);
+					await policyInput.assertCurrent();
+					const planFingerprint = workflowDefinitionFingerprint(control);
+					if (generation!.planFingerprint && generation!.planFingerprint !== planFingerprint)
+						throw new Error("Root original generation planner control changed");
+					if (lineage!.generations.slice(0, -1).some(previous => previous.planFingerprint === planFingerprint))
+						throw new Error("Root replan exhausted: unchanged prior plan");
+					// A completed, immutable planner artifact with the exact plan
+					// envelope but a wrong definition digest is a known producer
+					// failure, not authority to repair its claim. Materialize one
+					// normal, newly authorized planner attempt; malformed envelopes
+					// and every other control failure remain rejected below.
+					const malformedPlan = control && typeof control === "object" && !Array.isArray(control) &&
+						Object.keys(control).every(key => ["schema", "digest", "proposedTasks"].includes(key)) &&
+						(control as Record<string, unknown>).schema === "goal-root-plan-v1" &&
+						typeof (control as Record<string, unknown>).digest === "string" &&
+						Array.isArray((control as Record<string, unknown>).proposedTasks) &&
+						(control as Record<string, unknown>).digest !== launchTask.goal!.definitionFingerprint;
+					if (malformedPlan) {
+						assertWorkflowGoalRejectedPlannerProposalProgress(policyInput, prepared, control);
+						generation!.planFingerprint = planFingerprint;
+						generation!.outcome = "not-achieved";
+						await recordWorkflowGoalRejectedPlannerGeneration(policyInput, prepared, run, control);
+						await policyInput.assertCurrent();
+						const next = generation!.generation + 1;
+						const correction = prepareWorkflowEngineGoalReplanner(policyInput, prepared, [{
+							kind: "planner",
+							taskId: planner.specId,
+							control,
+							definition: launchTask.goal!.definition,
+							identity: { runId: run.runId, taskId: planner.taskId, specId: planner.specId,
+								generation: generation!.generation },
+						}], generation!.generation);
+						await policyInput.assertCurrent();
+						const ids: string[] = [];
+						try {
+							await runDynamicAgentRequest({ cwd, run, compiledFlow,
+								controllerIndex: compiledFlow.tasks.findIndex(candidate => candidate.id === compiledTask.id),
+								controllerTask: { ...task, specId: `${task.specId}.$generation${next}.planner` },
+								controllerCompiledTask: compiledTask, dynamic: correction.dynamic,
+								request: { id: `$generation${next}.planner`, profile: "planner", prompt: correction.prompt,
+									readOnly: true, inputs: [], requiredReads: [], compact: false },
+								generatedTaskIds: ids, availableModels: [...options.goalPolicyHost.availableModels], artifactAccess: "none",
+								onFreshGeneratedTask: async replacement => captureWorkflowGoalScopedTaskRuntime(
+									policyInput, prepared, replacement, next, "planning"),
+								agentDefinitions: workflowEngineGoalAgentDefinitions(policyInput, prepared),
+								assertCurrent: policyInput.assertCurrent,
+								onGeneratedTask: async (replacement, compiledReplacement) => {
+									bindWorkflowGoalRequestTask(policyInput, prepared, run, task, replacement, compiledReplacement, next, "planning");
+									lineage!.generations.push({ generation: next, plannerSpecId: replacement.specId,
+										workerControllerSpecId: `${task.specId}.$generation${next}.workers`, slots: {} });
+									compiledTask.dependsOn = [replacement.specId];
+									compiledTask.contextDependsOn = [replacement.specId];
+									task.dependsOn = [replacement.specId];
+									task.status = "pending"; task.statusDetail = "goal_replan_materialized";
+									task.lastMessage = "Original immutable planner digest was rejected; captured correction planner receives the failed control.";
+								} });
+						} catch (error) { if (!(error instanceof DynamicControllerSuspended)) throw error; }
+						await policyInput.assertCurrent();
+						return true;
+					}
+					if (await hasActiveWorkflowGoalChild(policyInput, prepared, run)) {
+						dynamicControllerTestHooks.onSchedulerObservation?.(Object.freeze({
+							cwd, runId: run.runId, phase: "goal-child-wait",
+							admissionPresent: true, leaseActive: !leaseSignal?.aborted,
+						}));
+						task.status = "running";
+						task.statusDetail = "goal_catalog_child_waiting";
+						task.lastMessage = "Waiting for original admitted Goal child; no parent continuation effects.";
+						await policyInput.assertCurrent();
+						await writeRunRecord(cwd, run);
+						return false;
+					}
+					const phase = prepareWorkflowEngineGoalWorkers(policyInput, prepared, control);
+					generation!.planFingerprint = planFingerprint;
+					const admittedChildren = new Map<string, PreparedWorkflowGoalChildAdmission>();
+					if (phase.children.length > 0) {
+						// Nested depth readers require the original launching controller's
+						// budget before workflow.started, including Goal-owned controllers.
+						await ensureDynamicControllerInitialized(cwd, run.runId, {
+							controllerSpecId: generation!.workerControllerSpecId,
+							controllerTaskId: task.taskId, stageId: task.stageId,
+							dynamic: phase.dynamic,
+							contentFingerprint: workflowDefinitionFingerprint({
+								definition: launchTask.goal!.definitionFingerprint, planFingerprint,
+							}),
+						});
+						await policyInput.assertCurrent();
+					}
+					for (const proposal of phase.children) {
+						let childAdmission: PreparedWorkflowGoalChildAdmission | undefined;
+						try {
+							await runDynamicNestedWorkflowCall({ runWorkflowSpec, refreshRun,
+								isResumableDynamicApprovalBlockedRun, cwd, run,
+								controllerTask: { ...task, specId: generation!.workerControllerSpecId },
+								helperSpecPath: launchTask.goal!.usesPath, dynamic: phase.dynamic,
+								workflowId: proposal.workflow, callIndex: 1,
+								workflowInput: { task: `${proposal.prompt}\n\n${goalWorkerUserGuidance(
+									(phase.dynamic.decisionLoop?.workerDefaults?.tools ?? []).includes("goal_candidate_write"),
+									(phase.dynamic.decisionLoop?.workerDefaults?.tools ?? []).includes("goal_candidate_read"),
+								)}`, wait: true },
+								isSettled: () => stop.signal.aborted,
+								prepareGoalNestedWorkflow: async reservation => {
+									await policyInput.assertCurrent();
+									const previous = generation!.children?.[proposal.id];
+									const child = { workflowId: reservation.workflowId, runId: reservation.runId,
+										specHash: reservation.specHash, requestHash: reservation.requestHash };
+									if (previous && workflowDefinitionFingerprint(previous) !== workflowDefinitionFingerprint(child))
+										throw new Error("Goal child generation reserved lineage changed");
+									childAdmission = await prepareWorkflowGoalChildAdmission(policyInput, prepared,
+										generation!.generation, proposal.id, reservation);
+									const admission = childAdmission;
+									if (previous) {
+										if (generation!.slots[proposal.id] !== reservation.runId)
+											throw new Error("Goal child generation reserved slot changed");
+									} else {
+										generation!.children ??= {};
+										generation!.children[proposal.id] = child;
+										generation!.slots[proposal.id] = reservation.runId;
+										await persistGoalGeneratedMaterialization(cwd, run, compiledFlow, undefined);
+										await assertWorkflowGoalChildCurrent(admission);
+									}
+									return {
+										runWorkflowSpec: (path, childCwd, childOptions) => outsideRunLeaseContext(async () => {
+											if (path !== reservation.specPath || childCwd !== cwd || childOptions.runId !== reservation.runId ||
+												childOptions.parentRunId !== run.runId || childOptions.task !== reservation.task)
+												throw new Error("Goal child reserved launch changed");
+											const capture = await workflowGoalChildCompilation(admission);
+											return runWorkflowSpec(path, childCwd, { ...childOptions, goalChildAdmission: admission,
+												goalPolicyHost: options.goalPolicyHost,
+												runtimeDefaults: capture.runtimeDefaults, availableModels: capture.availableModels });
+										}),
+										refreshRun: (childCwd, childId) => outsideRunLeaseContext(async () => {
+											if (childCwd !== cwd || childId !== reservation.runId) throw new Error("Goal child reserved refresh changed");
+											const recovery = takeWorkflowGoalChildRecovery(admission);
+											if (recovery) await resumeRun(childCwd, childId, { goalChildRecovery: recovery });
+											return refreshRun(childCwd, childId, admission, () => {
+												dynamicControllerTestHooks.onSchedulerObservation?.(Object.freeze({
+													cwd: childCwd, runId: childId, phase: "watch-refresh",
+													boundary: "root-publication-join", admissionPresent: true,
+												}));
+											});
+										}),
+									};
+								},
+							});
+						} catch (error) {
+							if (!(error instanceof DynamicControllerSuspended)) {
+								const childId = generation!.slots[proposal.id];
+								const child = childId ? await outsideRunLeaseContext(() => readRunRecord(cwd, childId)).catch(() => undefined) : undefined;
+								if (child?.status === "blocked") {
+									const details = child.tasks.filter(value => value.status === "blocked").slice(0, 4)
+										.map(value => ({ specId: value.specId, statusDetail: value.statusDetail,
+											reason: value.lastMessage?.slice(0, 512) }));
+									throw new Error(`Goal child ${childId} blocked: ${JSON.stringify(details).slice(0, 2048)}; ${String(error).slice(0, 512)}`, { cause: error });
+								}
+								throw error;
+							}
+							task.status = "running";
+							task.statusDetail = "goal_catalog_child_waiting";
+							task.lastMessage = error.message;
+							await writeRunRecord(cwd, run);
+							return false;
+						}
+						if (!childAdmission) throw new Error("Goal child original admission unavailable after nested result");
+						admittedChildren.set(proposal.id, childAdmission);
+					}
+					if (phase.requests.some(request => !generation!.slots[request.id])) {
+					const generatedTaskIds: string[] = [];
+					for (const request of phase.requests) {
+						const existing = generation!.slots[request.id];
+						if (existing) { generatedTaskIds.push(existing); continue; }
+						await policyInput.assertCurrent();
+						try {
+							await runDynamicAgentRequest({ cwd, run, compiledFlow,
+								controllerIndex: compiledFlow.tasks.findIndex(candidate => candidate.id === compiledTask.id),
+								controllerTask: { ...task, specId: generation!.workerControllerSpecId }, controllerCompiledTask: compiledTask, dynamic: phase.dynamic,
+								request: { ...request, id: generation!.generation === 0 ? request.id : `$generation${generation!.generation}.${request.id}` },
+								generatedTaskIds, availableModels: [...options.goalPolicyHost.availableModels],
+								onFreshGeneratedTask: async worker => captureWorkflowGoalScopedTaskRuntime(
+									policyInput, prepared, worker, generation!.generation, "research-execution"),
+								agentDefinitions: workflowEngineGoalAgentDefinitions(policyInput, prepared),
+								artifactAccess: "none", assertCurrent: policyInput.assertCurrent,
+								onGeneratedTask: async (worker, compiledWorker) => {
+									bindWorkflowGoalRequestTask(policyInput, prepared, run, task, worker, compiledWorker, generation!.generation, "research-execution");
+									bindWorkflowGoalCandidateWorker(policyInput, prepared, run, task, worker, compiledWorker, generation!.generation);
+								} });
+						} catch (error) {
+							if (!(error instanceof DynamicControllerSuspended)) throw error;
+						}
+						generation!.slots[request.id] = generatedTaskIds.at(-1)!;
+					}
+					compiledTask.dependsOn = generatedTaskIds;
+					compiledTask.contextDependsOn = generatedTaskIds;
+					task.dependsOn = [...generatedTaskIds];
+					task.status = "pending";
+					task.statusDetail = "goal_workers_materialized";
+					task.lastMessage = "Validated read-only worker phase materialized; immutable oracle awaits terminal artifacts.";
+					await persistGoalGeneratedMaterialization(cwd, run, compiledFlow, undefined);
+					return true;
+					}
+					if (admittedChildren.size && phase.requests.length) {
+						const dependencies = phase.requests.map(request => generation!.slots[request.id]);
+						const workers = dependencies.map(id => run.tasks.find(worker => worker.specId === id));
+						if (workers.some(worker => worker && ["pending", "running"].includes(worker.status))) {
+							compiledTask.dependsOn = [...dependencies]; compiledTask.contextDependsOn = [...dependencies];
+							task.dependsOn = [...dependencies]; task.status = "pending";
+							task.statusDetail = "goal_workers_materialized";
+							await policyInput.assertCurrent();
+							await persistGoalGeneratedMaterialization(cwd, run, compiledFlow, undefined);
+							return true;
+						}
+						if (workers.some(worker => worker?.status !== "completed"))
+							throw new Error("Goal mixed oracle requires original terminal local workers");
+					}
+					for (const [slot, admission] of admittedChildren) {
+						const childId = generation!.slots[slot];
+						const readTerminalChild = async () => {
+							await policyInput.assertCurrent();
+							await assertWorkflowGoalChildCurrent(admission);
+							const childRun = await readRunRecord(cwd, childId);
+							await assertWorkflowGoalChildCurrent(admission, childRun);
+							const childCompiled = await readCompiledWorkflow(cwd, childId);
+							if (!childCompiled || childRun.status !== "completed" || childRun.tasks.length !== childCompiled.tasks.length ||
+								new Set(childRun.tasks.map(task => task.specId)).size !== childCompiled.tasks.length)
+								throw new Error("Goal child original terminal artifact unavailable");
+							await assertWorkflowGoalChildCurrent(admission, childRun, childCompiled);
+							const settledRequests = await settledWorkflowGoalChildRequests(admission, childRun, childCompiled);
+							await assertWorkflowGoalChildCurrent(admission, childRun, childCompiled);
+							await policyInput.assertCurrent();
+							return { childRun, childCompiled, settledRequests };
+						};
+						terminalChildren.set(slot, async () => (await readTerminalChild()).settledRequests);
+						const { childRun, childCompiled, settledRequests } = await readTerminalChild();
+						const output = workflowGoalChildOutputTask(childCompiled);
+						const producer = childRun.tasks.find(task => task.specId === output.id);
+						if (!producer || producer.status !== "completed")
+							throw new Error("Goal child original terminal sink unavailable");
+						const candidateSource = output.runtime.tools?.includes("goal_candidate_write") === true;
+						const childControl = settledRequests === null ? undefined : candidateSource
+							? await observeWorkflowGoalCandidate(policyInput, policyInput.preparedAdmission!, childRun, producer)
+							: await readArtifactGraphControl(cwd, producer);
+						await assertWorkflowGoalChildCurrent(admission, childRun, childCompiled);
+						await policyInput.assertCurrent();
+						childSources.push({ taskId: slot, control: childControl, identity: {
+							runId: childRun.runId, taskId: producer.taskId, specId: producer.specId,
+							generation: generation!.generation,
+							attemptKey: workflowTaskAttemptIdentity(producer, workflowTaskSessionId(childRun, producer)),
+							backendTaskId: producer.backendTaskId ?? null,
+							backendAttemptId: producer.durableLaunchBarrier?.records.find(record => record.attemptKey ===
+								workflowTaskAttemptIdentity(producer, workflowTaskSessionId(childRun, producer)))?.backendAttemptId ?? null,
+							kind: candidateSource ? "host-candidate-snapshot" : "workflow-control-artifact",
+							artifact: toProjectPath(cwd, join(dirname(fromProjectPath(cwd, producer.files.result)), "control.json")),
+						} });
+					}
+				}
+				const sources: Array<{ taskId: string; control: unknown; identity: unknown }> = childSources;
+				for (const dependency of lineage ? Object.entries(generation!.slots)
+					.filter(([slot]) => !generation!.children?.[slot]).map(([, id]) => id) : launchTask.dependsOn ?? []) {
+					const producer = run.tasks.find(candidate => candidate.specId === dependency);
+					if (lineage && producer && compiledFlow.tasks.find(candidate => candidate.id === producer.specId)
+						?.dynamicGenerated?.controllerSpecId !== generation!.workerControllerSpecId)
+						throw new Error("Root oracle source has no exact current generation binding");
+					if (producer?.status === "completed" && producer.artifactGraph?.enabled)
+						sources.push({ taskId: lineage ?
+							Object.entries(generation!.slots).find(([, id]) => id === producer.specId)?.[0] ?? "unbound" :
+							producer.stageId ?? producer.specId, identity: {
+								runId: run.runId, taskId: producer.taskId, specId: producer.specId,
+								generation: generation?.generation ?? null,
+								attemptKey: workflowTaskAttemptIdentity(producer, workflowTaskSessionId(run, producer)),
+								backendTaskId: producer.backendTaskId ?? null,
+								backendAttemptId: producer.durableLaunchBarrier?.records.at(-1)?.backendAttemptId ?? null,
+								kind: lineage && launchTask.goal!.definition.goal.authority.allowedEffects.includes("candidate-write")
+									? "host-candidate-snapshot" : "workflow-control-artifact",
+								artifact: toProjectPath(cwd, join(dirname(fromProjectPath(cwd, producer.files.result)), "control.json")),
+							}, control: lineage && launchTask.goal!.definition.goal.authority.allowedEffects.includes("candidate-write")
+								? await observeWorkflowGoalCandidate(policyInput, policyInput.preparedAdmission!, run, producer)
+								: await readArtifactGraphControl(cwd, producer) });
+				}
+				if (generation && !generation.verifiers && launchTask.goal!.definition.goal.criteria.some(c => c.verifier.kind === "model-rubric")) {
+					const prepared = policyInput.preparedAdmission!;
+					const verification = await prepareWorkflowEngineGoalVerifiers(policyInput, prepared, generation.generation, sources);
+					await policyInput.assertCurrent();
+					if (!verification) throw new Error("Goal rubric original verification phase unavailable");
+					generation.verifiers = {};
+					const ids: string[] = [];
+					for (const verifierRequest of verification.requests) {
+						const { criterionId } = verifierRequest;
+						let verifierPreparation: PreparedWorkflowGoalVerifierRequest | undefined;
+						try {
+							await runDynamicAgentRequest({ cwd, run, compiledFlow,
+								controllerIndex: compiledFlow.tasks.findIndex(candidate => candidate.id === compiledTask.id),
+								controllerTask: { ...task, specId: `${task.specId}.$generation${generation.generation}.verifiers` },
+								controllerCompiledTask: compiledTask, dynamic: verification.dynamic,
+								requestId: verifierRequest.requestId,
+								prepareGeneratedRequest: async identity => {
+									const preparedRequest = prepareWorkflowEngineGoalVerifierRequest(policyInput, prepared,
+										generation!.generation, verification.dynamic, verifierRequest, identity);
+									verifierPreparation = preparedRequest.preparation;
+									return preparedRequest;
+								},
+								onFreshGeneratedTask: async verifier => {
+									if (!verifierPreparation)
+										throw new Error("Goal rubric generated request preparation unavailable");
+									return captureWorkflowEngineGoalVerifierTask(policyInput, prepared,
+										verifierPreparation, verifier);
+								},
+								generatedTaskIds: ids,
+								availableModels: [...options.goalPolicyHost.availableModels], artifactAccess: "none",
+								agentDefinitions: workflowEngineGoalAgentDefinitions(policyInput, prepared), assertCurrent: policyInput.assertCurrent,
+								onGeneratedTask: async (verifier, compiledVerifier) => {
+									if (!verifierPreparation)
+										throw new Error("Goal rubric generated request preparation unavailable");
+									bindWorkflowGoalRequestTask(policyInput, prepared, run, task, verifier, compiledVerifier,
+										generation!.generation, "verification",
+										workflowEngineGoalVerifierSnapshot(verifierPreparation));
+								} });
+						} catch (error) { if (!(error instanceof DynamicControllerSuspended)) throw error; }
+						generation.verifiers[criterionId] = ids.at(-1)!;
+					}
+					compiledTask.dependsOn = [...ids]; compiledTask.contextDependsOn = [...ids]; task.dependsOn = [...ids];
+					task.status = "pending"; task.statusDetail = "goal_verifiers_materialized";
+					task.lastMessage = "Original verification tasks consume immutable completed worker subjects; oracle awaits terminal verification.";
+					await persistGoalGeneratedMaterialization(cwd, run, compiledFlow, undefined);
+					return true;
+				}
+				result = await executeWorkflowEngineGoalPolicy({ ...policyInput, sources,
+					humanSubmission: options.goalHumanSubmission?.token,
+					requestAccounting: { run, compiled: compiledFlow } });
+				await policyInput.assertCurrent();
+				if (result.automatic.waitingUser) {
+					if (result.state !== "waiting-user" || result.automatic.recoveryRequired)
+						throw new Error("Goal human review waiting result is invalid");
+				}
+				if (!result.evidence) throw new Error("Goal oracle observation unavailable");
+				if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(run.runId) ||
+					!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(task.taskId) ||
+					task.files.result !== `.pi/workflows/${run.runId}/tasks/${task.taskId}/result.json`)
+					throw new Error("Goal policy evidence result path mismatch");
+				const expectedEvidenceDirectory =
+					`.pi/workflows/${run.runId}/tasks/${task.taskId}/goal-evidence`;
+				let evidenceRefs: string[] = [];
+				if (task.rawArtifactIntegrity) {
+					await policyInput.assertCurrent();
+					const previous = await readPublishedWorkflowGoalPolicyControl(cwd, run.runId, task);
+					await policyInput.assertCurrent();
+					evidenceRefs = retainedPublishedWorkflowGoalEvidenceRefs({
+						control: previous,
+						run,
+						task,
+						goalId: result.goalId,
+						contractHash: result.contractHash,
+					});
+				}
+				const evidenceRef = await persistWorkflowGoalOracleEvidence({ cwd, run, task, evidence: result.evidence,
+					generation: generation?.generation ?? null, stopSignal: stop.signal, assertCurrent: policyInput.assertCurrent });
+				await policyInput.assertCurrent();
+				if (!new RegExp(`^${expectedEvidenceDirectory.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/[a-f0-9]{64}\\.json$`)
+					.test(evidenceRef))
+					throw new Error("Goal current oracle evidence reference scope mismatch");
+				if (!evidenceRefs.includes(evidenceRef)) evidenceRefs.push(evidenceRef);
+				result = { ...result, evidenceRefs: [evidenceRef] };
+				await policyInput.assertCurrent();
+				await writeArtifactGraphDynamicResult(cwd, task, {
+					control: { schema: "goal-policy-result-v1", digest: `Goal ${result.goalId} exact oracle observations persisted`,
+						goalId: result.goalId, contractHash: result.contractHash, evidenceRefs: result.evidenceRefs,
+						retainedEvidenceRefs: evidenceRefs,
+						oracle: result.evidence },
+					analysis: "Exact original-oracle observations are retained in immutable workflow task evidence artifacts; hashes are not authority.",
+					refs: evidenceRefs.map(path => ({ id: path, path })),
+				});
+				await policyInput.assertCurrent();
+				stop.signal.throwIfAborted();
+				if (options.goalHumanSubmission) {
+					// Persist the exact oracle result before accepting its provisional judgment.
+					// A failed write/read/ACK latches UNKNOWN, retaining any published bytes.
+					task.goal = { goalId: result.goalId, contractHash: result.contractHash,
+						state: "engine:waiting-user", usage: { ...result.usage } };
+					task.status = "running";
+					task.statusDetail = "goal_waiting_user";
+					await writeRunRecord(cwd, run);
+					const published = await readRunRecord(cwd, run.runId);
+					const publishedTask = published.tasks.find(candidate => candidate.taskId === task.taskId);
+					if (!publishedTask || publishedTask.statusDetail !== "goal_waiting_user" ||
+						workflowDefinitionFingerprint(publishedTask.goal) !== workflowDefinitionFingerprint(task.goal))
+						throw new Error("Goal human original oracle run publication changed or uncertain");
+					await policyInput.assertCurrent();
+					await options.goalHumanSubmission.acknowledge();
+				}
+				if (lineage && generation && result.state === "not-achieved") {
+					if (!Object.values(generation.slots).length)
+						throw new Error("Root replan requires exact known terminal workers");
+					for (const [slot, id] of Object.entries(generation.slots)) {
+						if (generation.children?.[slot]) {
+							const terminal = terminalChildren.get(slot);
+							if (generation.children[slot].runId !== id || !terminal || await terminal() === null)
+								throw new Error("Root replan requires exact known terminal child custody and settlement");
+						} else if (run.tasks.find(candidate => candidate.specId === id)?.status !== "completed") {
+							throw new Error("Root replan requires exact known terminal workers");
+						}
+					}
+					await policyInput.assertCurrent();
+					stop.signal.throwIfAborted();
+					// Progress is measured on immutable oracle subjects, not model-authored
+					// digests/claims which can vary while the actual candidate is unchanged.
+					const candidateFingerprint = workflowDefinitionFingerprint(launchTask.goal!.definition.goal.criteria.map(criterion => {
+						const subject = criterion.verifier.subject;
+						const control = sources.find(source => source.taskId === subject.resultSlot)!.control;
+						return { criterionId: criterion.id, value: subject.path ? readSimpleJsonPath(control, subject.path) : control };
+					}));
+					if (lineage.generations.some(previous => previous.failedCandidateFingerprint === candidateFingerprint))
+						throw new Error("Root replan exhausted: unchanged failed candidate");
+					// Commit the original oracle artifact metadata before staging a new
+					// graph. Its integrity is not a generated-source publication change.
+					await writeRunRecord(cwd, run);
+					await policyInput.assertCurrent();
+					generation.failedCandidateFingerprint = candidateFingerprint;
+					generation.outcome = "not-achieved";
+					const next = generation.generation + 1;
+					const prepared = policyInput.preparedAdmission!;
+					await recordWorkflowGoalRejectedGeneration(policyInput, prepared, run);
+					const replan = prepareWorkflowEngineGoalReplanner(policyInput, prepared, sources.map(source => ({
+						kind: "oracle" as const, ...source,
+					})), generation.generation);
+					await policyInput.assertCurrent();
+					const ids: string[] = [];
+					try {
+						await runDynamicAgentRequest({ cwd, run, compiledFlow,
+							controllerIndex: compiledFlow.tasks.findIndex(candidate => candidate.id === compiledTask.id),
+							controllerTask: { ...task, specId: `${task.specId}.$generation${next}.planner` },
+							controllerCompiledTask: compiledTask, dynamic: replan.dynamic,
+							request: { id: `$generation${next}.planner`, profile: "planner", prompt: replan.prompt,
+								readOnly: true, inputs: [], requiredReads: [], compact: false },
+							generatedTaskIds: ids, availableModels: [...options.goalPolicyHost.availableModels], artifactAccess: "none",
+							onFreshGeneratedTask: async planner => captureWorkflowGoalScopedTaskRuntime(
+								policyInput, prepared, planner, next, "planning"),
+							agentDefinitions: workflowEngineGoalAgentDefinitions(policyInput, prepared),
+							assertCurrent: policyInput.assertCurrent,
+							onGeneratedTask: async (planner, compiledPlanner) => {
+								bindWorkflowGoalRequestTask(policyInput, prepared, run, task, planner, compiledPlanner, next, "planning");
+								lineage.generations.push({ generation: next, plannerSpecId: planner.specId,
+									workerControllerSpecId: `${task.specId}.$generation${next}.workers`, slots: {} });
+								compiledTask.dependsOn = [planner.specId];
+								compiledTask.contextDependsOn = [planner.specId];
+								task.dependsOn = [planner.specId];
+								task.status = "pending"; task.statusDetail = "goal_replan_materialized";
+								task.lastMessage = "Original oracle rejected known terminal candidate; captured planner receives actual failed evidence.";
+							} });
+					} catch (error) { if (!(error instanceof DynamicControllerSuspended)) throw error; }
+					await policyInput.assertCurrent();
+					return true;
+				}
+				if (generation && result.achieved) generation.outcome = "achieved";
+				if (result.achieved && lineage) {
+					// Record the achieved Goal first so every application step is durable.
+					const goalRecord = { goalId: result.goalId, contractHash: result.contractHash,
+						state: `engine:${result.state}`, usage: { ...result.usage } };
+					originApply = await applyWorkflowGoalCandidateToOrigin(policyInput, policyInput.preparedAdmission!, {
+						signal: policyInput.stopSignal,
+						onProgress: async record => {
+							task.goal = { ...goalRecord, originApply: structuredClone(record) };
+							await writeRunRecord(cwd, run);
+						},
+					});
+				}
+				result = { ...result, state: `engine:${result.state}` };
+			} else throw new Error("Goal policy host must use the ordinary workflow engine");
+			} finally {
+				stop.dispose();
+			}
+			if (!result) {
+				setTaskTerminal(task, "blocked", "goal_confirmation_cancelled", { lastMessage: "Goal confirmation cancelled; no Goal execution was admitted." });
+			} else {
+				task.goal = { goalId: result.goalId, contractHash: result.contractHash, state: result.state, usage: { ...result.usage },
+					...(originApply ? { originApply: structuredClone(originApply) } : {}) };
+				const originApplied = !originApply || originApply.status === "applied" || originApply.status === "no-changes";
+				if (!result.achieved && result.automatic.waitingUser && !result.automatic.recoveryRequired) {
+					task.status = "running";
+					task.statusDetail = "goal_waiting_user";
+					task.completedAt = undefined;
+					task.lastMessage = "Goal awaits an explicit original human judgment; no provider or successor was launched.";
+				} else if (!result.achieved && !result.automatic.recoveryRequired &&
+					(result.automatic.canAutomaticallyContinue || result.automatic.waitingChild)) {
+					task.status = "running";
+					task.statusDetail = "goal_policy_waiting";
+					task.completedAt = undefined;
+					task.lastMessage = "Goal policy retains current custody; the downstream success barrier remains closed.";
+				} else if (!result.achieved) {
+					setTaskTerminal(task, "blocked", "goal_criteria_not_achieved", { lastMessage: `Goal remains ${result.state}; the downstream success barrier is closed.` });
+				} else if (!originApplied) {
+					setTaskTerminal(task, "blocked", `goal_origin_apply_${originApply!.status}`, {
+						lastMessage: `Goal criteria were achieved in the candidate, but origin application ${originApply!.status}: ${originApply!.reason ?? "see originApply paths"}`,
+					});
+				} else {
+					if (!result.evidence) await writeArtifactGraphDynamicResult(cwd, task, {
+						control: { schema: "goal-policy-result-v1", digest: `Goal ${result.goalId} achieved with current criteria and known effects`, goalId: result.goalId, contractHash: result.contractHash, evidenceRefs: result.evidenceRefs },
+						analysis: `Goal ${result.goalId} achieved. Evidence remains in its existing Goal and workflow journals.`, refs: result.evidenceRefs.map(digest => ({ id: digest, digest })),
+					});
+					setTaskTerminal(task, "completed", "goal_achieved", { exitCode: 0,
+						...(originApply?.status === "applied" ? { lastMessage: `Goal achieved; applied ${originApply.paths.length} candidate path(s) to the working tree.` } : {}) });
+				}
+			}
+			await writeRunRecord(cwd, run);
+			return result?.achieved === true && (!originApply || originApply.status === "applied" || originApply.status === "no-changes");
 		}
-		if (launchTask.kind === "dynamic") {
+
+		if (launchTask.kind === "support" || launchTask.kind === "dynamic") {
 			await persistFinalPromptMetadata(cwd, run, task, launchTask);
+			if (launchTask.kind === "support") {
+				return await executeSupportTask(
+					cwd,
+					run,
+					task,
+					launchTask,
+					validationSnapshot,
+				);
+			}
 			return await executeDynamicControllerTask(
 				cwd,
 				run,
@@ -5329,15 +7540,18 @@ async function launchPendingTaskAt(
 		}
 		const worktreeLaunchTask = applyExistingLoopWorktree(run, task, launchTask);
 		await ensureManagedWorktree(cwd, run, task, worktreeLaunchTask);
-		await throwIfWorkflowStopRequested(cwd, run.runId);
 		recordCreatedLoopWorktree(run, task, worktreeLaunchTask);
+		await throwIfWorkflowStopRequested(cwd, run.runId);
 		await writeRunRecord(cwd, run);
 		const backend = resolveWorkflowBackend(run);
 		const stop = createWorkflowStopSignal(cwd, run.runId);
+		launchStopSignal = stop.signal;
 		let launch;
 		try {
 			await throwIfWorkflowStopRequested(cwd, run.runId);
 			await persistFinalPromptMetadata(cwd, run, task, worktreeLaunchTask);
+			if (options.goalChildAdmission)
+				await settleWorkflowGoalChildStagePredecessors(options.goalChildAdmission, run, compiledFlow, task);
 			const preparedLaunch = await backend.prepareTaskLaunch(
 				cwd,
 				run,
@@ -5380,7 +7594,71 @@ async function launchPendingTaskAt(
 		return launch.kind === "launched";
 	} catch (error) {
 		if (leaseSignal?.aborted) throw error;
+		// Terminal settlement may already have cleared the transient handle. The
+		// consumed native grant owns the attempt identity; snapshot it before awaits.
+		const originalGrant = task.launchAuthority?.records.at(-1);
+		const originalNativeAttempt = originalGrant?.state.phase === "consumed" &&
+			originalGrant.grant.backendId === "pi-subagent/headless"
+			? {
+				grant: originalGrant,
+				fingerprint: workflowDefinitionFingerprint(originalGrant),
+				backendRunId: originalGrant.state.backendRunId,
+				backendAttemptId: originalGrant.state.backendAttemptId,
+			}
+			: undefined;
+		// SDK/provider callbacks may wrap a real stop denial in a generic error.
+		// Keep the original observer's evidence even after its timer is disposed.
+		let stopRequested = isWorkflowStopRequestedError(error) ||
+			launchStopSignal?.aborted === true;
+		if (!stopRequested) {
+			await assertRunLeaseOwnership(cwd, run.runId, leaseSignal);
+			stopRequested = (await readWorkflowStopIntent(cwd, run.runId)) !== undefined;
+			if (!stopRequested && options.goalChildAdmission) {
+				// The parent's fence can precede the descendant fence. Only the live
+				// opaque reservation, not persisted Goal flags, supplies that parent.
+				const lineage = workflowGoalChildLineage(options.goalChildAdmission);
+				const lineageHash = workflowDefinitionFingerprint(lineage);
+				if (lineage.runId === run.runId && lineage.parentRunId === run.parentRunId &&
+					workflowDefinitionFingerprint(run.goalChild) === lineageHash) {
+					const intent = await readWorkflowStopIntent(cwd, lineage.parentRunId);
+					stopRequested = intent !== undefined &&
+						workflowDefinitionFingerprint(workflowGoalChildLineage(options.goalChildAdmission)) === lineageHash &&
+						lineage.runId === run.runId && lineage.parentRunId === run.parentRunId &&
+						workflowDefinitionFingerprint(run.goalChild) === lineageHash;
+				}
+			}
+			await assertRunLeaseOwnership(cwd, run.runId, leaseSignal);
+		}
+		stopRequested ||= launchStopSignal?.aborted === true;
 		const durableBarrierRecord = task.durableLaunchBarrier?.records.at(-1);
+		// A genuine child cancellation can outlive its legitimately retired fence.
+		// Cleanup also cancels failed launches: its ACK alone does not prove a stop.
+		// Require the original live parent's stop observation and consumed attempt.
+		if (!stopRequested && options.goalChildAdmission && parentStopSignal?.aborted &&
+			isWorkflowStopRequestedError(parentStopSignal.reason) &&
+			durableBarrierRecord?.phase === "cancellation_acknowledged") {
+			const lineage = workflowGoalChildLineage(options.goalChildAdmission);
+			const grant = task.launchAuthority?.records.at(-1);
+			stopRequested = lineage.runId === run.runId && lineage.parentRunId === run.parentRunId &&
+				workflowDefinitionFingerprint(run.goalChild) === workflowDefinitionFingerprint(lineage) &&
+				originalNativeAttempt !== undefined && grant === originalNativeAttempt.grant &&
+				workflowDefinitionFingerprint(grant) === originalNativeAttempt.fingerprint &&
+				grant?.state.phase === "consumed" && grant.grant.backendId === "pi-subagent/headless" &&
+				grant.grant.runId === run.runId && grant.grant.task.taskId === task.taskId &&
+				grant.grant.task.specId === task.specId &&
+				durableBarrierRecord.releaseWinner === true &&
+				durableBarrierRecord.attemptKey === grant.grant.attemptKey &&
+				durableBarrierRecord.descriptor.subjectSha256 === grant.grant.identitySha256 &&
+				durableBarrierRecord.launchAuthoritySha256 === grant.grant.identitySha256 &&
+				!!originalNativeAttempt.backendRunId && !!originalNativeAttempt.backendAttemptId &&
+				durableBarrierRecord.backendRunId === originalNativeAttempt.backendRunId &&
+				durableBarrierRecord.backendRunId === task.backendTaskId &&
+				durableBarrierRecord.backendAttemptId === originalNativeAttempt.backendAttemptId &&
+				!!durableBarrierRecord.backendAttemptId &&
+				durableBarrierRecord.cancellation?.terminalAttemptId === durableBarrierRecord.backendAttemptId &&
+				durableBarrierRecord.cancellation.terminalStatus === "cancelled" &&
+				!!durableBarrierRecord.cancellation.terminalObservedAt;
+		}
 		if (
 			task.backendHandle &&
 			durableBarrierRecord &&
@@ -5391,7 +7669,18 @@ async function launchPendingTaskAt(
 			await writeRunRecord(cwd, run).catch(() => undefined);
 			throw error;
 		}
-		if (isWorkflowStopRequestedError(error)) {
+		if (stopRequested) {
+			if (compiledTask.kind === "goal" &&
+				options.goalPolicyHost?.executionFoundation === "workflow-engine") {
+				// An aborted policy continuation is not descendant cancellation proof.
+				// The existing stop owner must complete source-owned family cleanup.
+				task.status = "running";
+				task.statusDetail = "cancellation_pending";
+				task.lastMessage =
+					"workflow stop is waiting for source-owned Goal family cancellation confirmation";
+				await writeRunRecord(cwd, run);
+				return false;
+			}
 			if (
 				task.backendHandle &&
 				durableBarrierRecord &&
@@ -5438,9 +7727,11 @@ async function executeDynamicControllerTask(
 	options: WorkflowScheduleOptions = {},
 	validationSnapshot: ArtifactGraphRuntimeValidationSnapshot,
 ): Promise<boolean> {
+	const nowMs = dynamicControllerTestHooks.nowMs ?? Date.now;
 	if (!compiledTask.dynamic) {
 		throw new Error("dynamic metadata is missing");
 	}
+	assertNotProtectedGoalEngineRun(run);
 	task.status = "running";
 	task.statusDetail = "running";
 	task.startedAt = task.startedAt ?? new Date().toISOString();
@@ -5542,13 +7833,13 @@ async function executeDynamicControllerTask(
 			)
 		: await readSupportSources(cwd, run, compiledTask.dependsOn ?? []);
 	await throwIfWorkflowStopRequested(cwd, run.runId);
-
-	const activeRuntimeStartedAt = Date.now();
+	const attemptStartedAt = Date.now();
+	const activeRuntimeStartedAt = nowMs === Date.now ? attemptStartedAt : nowMs();
 	let activeRuntimeRecorded = false;
 	const recordActiveRuntime = async (): Promise<void> => {
 		if (activeRuntimeRecorded) return;
 		activeRuntimeRecorded = true;
-		const elapsedMs = Math.max(0, Date.now() - activeRuntimeStartedAt);
+		const elapsedMs = Math.max(0, nowMs() - activeRuntimeStartedAt);
 		if (elapsedMs === 0) return;
 		await recordDynamicRuntimeUsage(cwd, run.runId, task.specId, elapsedMs).catch(
 			() => undefined,
@@ -5558,7 +7849,7 @@ async function executeDynamicControllerTask(
 	const stop = createWorkflowStopSignal(cwd, run.runId);
 	try {
 		const structuredOutput = await runDynamicControllerWorker({
-			attemptStartedAt: activeRuntimeStartedAt,
+			attemptStartedAt,
 			cwd,
 			run,
 			compiledFlow,
@@ -5760,6 +8051,35 @@ function dynamicDecisionLoopModuleUrl(): string {
 	return new URL("./dynamic-decision-loop.js", import.meta.url).href;
 }
 
+async function buildDynamicControllerInvocation(
+	input: Pick<Parameters<typeof runDynamicControllerWorker>[0],
+		"cwd" | "run" | "compiledFlow" | "controllerTask" | "controllerCompiledTask" |
+		"sources" | "dynamic" | "availableModels">,
+	state: Awaited<ReturnType<typeof readOrRebuildDynamicState>>,
+): Promise<Readonly<{
+	task: unknown; sources: Record<string, unknown>; controllerStageId: string;
+	generatedTaskIds: readonly string[]; generatedBranchTaskIds: readonly string[];
+	budgetRemaining: Record<string, number>; availableTools: unknown;
+	decisionLoop: unknown; engineCapabilities: typeof DYNAMIC_CONTROLLER_ENGINE_CAPABILITIES;
+}>> {
+	const controller = state.controllers[input.controllerTask.specId];
+	return Object.freeze({
+		task: input.compiledFlow.task ?? input.controllerCompiledTask.task,
+		sources: input.sources,
+		controllerStageId: input.controllerTask.stageId ??
+			input.controllerTask.specId.replace(/\.controller$/, ""),
+		generatedTaskIds: Object.freeze([...(controller?.generatedTaskIds ?? [])]),
+		generatedBranchTaskIds: Object.freeze((controller?.branches ?? [])
+			.map(branch => branch.specId)
+			.filter((specId): specId is string => typeof specId === "string")),
+		budgetRemaining: Object.freeze(await currentDynamicBudgetRemaining(input)),
+		availableTools: buildAvailableToolView(input.controllerCompiledTask.runtime.tools,
+			input.controllerCompiledTask.runtime.toolProviders),
+		decisionLoop: input.dynamic.decisionLoop ?? null,
+		engineCapabilities: DYNAMIC_CONTROLLER_ENGINE_CAPABILITIES,
+	});
+}
+
 async function runDynamicControllerWorker(input: {
 	attemptStartedAt: number;
 	cwd: string;
@@ -5775,21 +8095,14 @@ async function runDynamicControllerWorker(input: {
 	availableModels?: WorkflowModelInfo[];
 	stopSignal?: AbortSignal;
 }): Promise<unknown> {
+	assertNotProtectedGoalEngineRun(input.run);
 	const resolved = await resolveWorkflowHelperRef(
 		input.dynamic.uses,
 		input.helperSpecPath,
 		{ label: "dynamic controller" },
 	);
-	const controllerStageId =
-		input.controllerTask.stageId ??
-		input.controllerTask.specId.replace(/\.controller$/, "");
 	const state = await readOrRebuildDynamicState(input.cwd, input.run.runId);
-	const controllerState = state.controllers[input.controllerTask.specId];
-	const generatedTaskIds = [...(controllerState?.generatedTaskIds ?? [])];
-	const generatedBranchTaskIds = (controllerState?.branches ?? [])
-		.map((branch) => branch.specId)
-		.filter((specId): specId is string => typeof specId === "string");
-	const budgetRemaining = await currentDynamicBudgetRemaining(input);
+	const invocation = await buildDynamicControllerInvocation(input, state);
 	const replayPrefix = {
 		opIds: await priorDynamicOperationOpIds(input),
 		cursor: 0,
@@ -5806,18 +8119,7 @@ async function runDynamicControllerWorker(input: {
 		workerData: {
 			controllerUrl: pathToFileURL(resolved.path).href,
 			decisionLoopModuleUrl: dynamicDecisionLoopModuleUrl(),
-			engineCapabilities: DYNAMIC_CONTROLLER_ENGINE_CAPABILITIES,
-			task: input.compiledFlow.task ?? input.controllerCompiledTask.task,
-			sources: input.sources,
-			controllerStageId,
-			generatedTaskIds,
-			generatedBranchTaskIds,
-			budgetRemaining,
-			availableTools: buildAvailableToolView(
-				input.controllerCompiledTask.runtime.tools,
-				input.controllerCompiledTask.runtime.toolProviders,
-			),
-			decisionLoop: input.dynamic.decisionLoop,
+			...invocation,
 		},
 	});
 	const helperCallCounts = new Map<string, number>();
@@ -5825,13 +8127,11 @@ async function runDynamicControllerWorker(input: {
 	const agentOpIds = new Set<string>();
 	const replayedOpIds = new Set<string>();
 	let settled = false;
-	let currentGeneratedTaskIds = generatedTaskIds;
-	const deadline =
-		input.attemptStartedAt +
-		remainingDynamicRuntimeMs(
-			input.dynamic,
-			state.controllers[input.controllerTask.specId]?.counters.runtimeMs ?? 0,
-		);
+	let currentGeneratedTaskIds = [...invocation.generatedTaskIds];
+	const deadline = input.attemptStartedAt + remainingDynamicRuntimeMs(
+		input.dynamic,
+		state.controllers[input.controllerTask.specId]?.counters.runtimeMs ?? 0,
+	);
 	const timeoutMs = Math.max(0, deadline - Date.now());
 	const attemptAbort = new AbortController();
 	const attemptInput = { ...input, stopSignal: attemptAbort.signal };
@@ -6011,13 +8311,15 @@ async function handleDynamicWorkerMessage(
 		setGeneratedTaskIds: (ids: string[]) => void;
 		isSettled: () => boolean;
 		postResult: (
-			id: number,
+			id: number | string,
 			result: {
 				value?: unknown;
 				error?: { name: string; message: string };
 				budgetRemaining?: Record<string, number>;
 			},
-		) => void;
+		) => void | Promise<void>;
+		waitForGeneratedTask?: (task: WorkflowTaskRunRecord) => Promise<unknown>;
+		onGeneratedTask?: (task: WorkflowTaskRunRecord, compiledTask: CompiledTask) => Promise<void>;
 		finish: (callback: () => void) => void;
 		resolve: (value: unknown) => void;
 		reject: (error: unknown) => void;
@@ -6047,7 +8349,8 @@ async function handleDynamicWorkerMessage(
 		state.finish(() => state.reject(dynamicWorkerError(message.error)));
 		return;
 	}
-	if (message.type !== "op" || typeof message.id !== "number") return;
+	if (message.type !== "op" || (typeof message.id !== "number" && typeof message.id !== "string")) return;
+	let publishingResult = false;
 	try {
 		let value: unknown;
 		if (message.op === "phase") {
@@ -6079,6 +8382,8 @@ async function handleDynamicWorkerMessage(
 			state.replayedOpIds.add(replayOpId);
 			value = await runDynamicAgentRequest({
 				...input,
+				waitForGeneratedTask: state.waitForGeneratedTask,
+				onGeneratedTask: state.onGeneratedTask,
 				request,
 				generatedTaskIds: state.getGeneratedTaskIds(),
 				isSettled: state.isSettled,
@@ -6187,6 +8492,7 @@ async function handleDynamicWorkerMessage(
 			const opId = `${input.controllerTask.specId}:helper:${helperId}:${String(count).padStart(3, "0")}`;
 			assertDynamicReplayPrefix(state.replayPrefix, opId);
 			state.replayedOpIds.add(opId);
+			assertNotProtectedGoalEngineRun(input.run);
 			value = await runDynamicHelperCall({
 				runDynamicHelperWorker,
 				cwd: input.cwd,
@@ -6202,6 +8508,7 @@ async function handleDynamicWorkerMessage(
 				stopSignal: input.stopSignal,
 			});
 		} else if (message.op === "workflow") {
+			assertNotProtectedGoalEngineRun(input.run);
 			const workflowId = requiredDynamicString(
 				message.name,
 				"workflow name",
@@ -6231,11 +8538,14 @@ async function handleDynamicWorkerMessage(
 			throw new Error(`unsupported dynamic controller op: ${message.op}`);
 		}
 		if (state.isSettled()) return;
-		state.postResult(message.id, {
+		const budgetRemaining = await currentDynamicBudgetRemaining(input);
+		publishingResult = true;
+		await state.postResult(message.id, {
 			value,
-			budgetRemaining: await currentDynamicBudgetRemaining(input),
+			budgetRemaining,
 		});
 	} catch (error) {
+		if (publishingResult) throw error;
 		if (state.isSettled()) {
 			if (
 				error === input.stopSignal?.reason ||
@@ -6260,7 +8570,7 @@ async function handleDynamicWorkerMessage(
 			state.finish(() => state.reject(error));
 			return;
 		}
-		state.postResult(message.id, {
+		await state.postResult(message.id, {
 			error: serializeDynamicWorkerError(error),
 			budgetRemaining: await currentDynamicBudgetRemaining(input).catch(
 				() => undefined,
@@ -6462,12 +8772,15 @@ async function currentDynamicBudgetRemaining(input: {
 	run: WorkflowRunRecord;
 	controllerTask: WorkflowTaskRunRecord;
 	dynamic: CompiledDynamicWorkflowTask;
-}): Promise<Record<string, number>> {
+}): Promise<Readonly<{
+	maxAgents: number; maxConcurrency: number; maxRuntimeMs: number;
+	maxNestedWorkflowDepth: number; maxGraphMutations: number; maxHelperRuns: number;
+}>> {
 	const state = await readOrRebuildDynamicState(input.cwd, input.run.runId);
 	const run = await readRunRecord(input.cwd, input.run.runId).catch(
 		() => input.run,
 	);
-	return dynamicBudgetRemaining(
+	const remaining = dynamicBudgetRemaining(
 		input.dynamic,
 		state.controllers[input.controllerTask.specId]?.counters,
 		countRunningDynamicAgents(
@@ -6481,6 +8794,17 @@ async function currentDynamicBudgetRemaining(input: {
 			input.dynamic.budget.maxNestedWorkflowDepth,
 		),
 	);
+	const budget = {
+		maxAgents: remaining.maxAgents,
+		maxConcurrency: remaining.maxConcurrency,
+		maxRuntimeMs: remaining.maxRuntimeMs,
+		maxNestedWorkflowDepth: remaining.maxNestedWorkflowDepth,
+		maxGraphMutations: remaining.maxGraphMutations,
+		maxHelperRuns: remaining.maxHelperRuns,
+	};
+	if (Object.values(budget).some(value => !Number.isSafeInteger(value) || value < 0))
+		throw new Error("Goal source helper current budget is unavailable");
+	return Object.freeze(budget);
 }
 
 function countRunningDynamicAgents(
@@ -6889,6 +9213,8 @@ async function repairMissingDynamicGeneratedTask(
 		);
 	}
 	const request = normalizeDynamicAgentRequest(event.payload.request);
+	const beforeCompiledDigest = input.run.goal === undefined
+		? undefined : goalCompiledMaterializationDigest(input.compiledFlow);
 	let compiledTask = input.compiledFlow.tasks.find((task) => task.id === specId);
 	compiledTask ??= isDynamicCompiledTaskPayload(event.payload.compiledTask)
 		? event.payload.compiledTask
@@ -6915,7 +9241,9 @@ async function repairMissingDynamicGeneratedTask(
 		opId: event.opId,
 		requestHash: event.requestHash ?? hashDynamicRequest(request),
 		requestId: request.id,
+		profile: request.profile,
 		branchId: optionalEventString(event.payload.branchId),
+		outputProfile: dynamicGeneratedOutputProfile(input.dynamic, request),
 	});
 	restoreDynamicGeneratedResourceWarnings(input.compiledFlow, compiledTask);
 	const existingCompiledIndex = input.compiledFlow.tasks.findIndex(
@@ -6939,8 +9267,7 @@ async function repairMissingDynamicGeneratedTask(
 		nextTaskRecordIndex(input.run),
 	);
 	input.run.tasks.splice(insertAt, 0, runTask);
-	await writeCompiledRunArtifact(input.cwd, input.run.runId, input.compiledFlow);
-	await writeRunRecord(input.cwd, input.run);
+	await persistDynamicGeneratedMaterialization(input.cwd, input.run, input.compiledFlow, beforeCompiledDigest);
 	return runTask;
 }
 
@@ -6952,29 +9279,89 @@ async function runDynamicAgentRequest(input: {
 	controllerTask: WorkflowTaskRunRecord;
 	controllerCompiledTask: CompiledTask;
 	dynamic: CompiledDynamicWorkflowTask;
-	request: unknown;
+	request?: unknown;
+	requestId?: unknown;
+	prepareGeneratedRequest?: (identity: Readonly<{
+		requestId: string;
+		generatedSpecId: string;
+		opId: string;
+		historical: boolean;
+	}>) => Promise<Readonly<{
+		request: unknown;
+		dynamic: CompiledDynamicWorkflowTask;
+	}>>;
 	generatedTaskIds: string[];
 	isSettled?: () => boolean;
+	/** Original source-only projection before the NEW materialization is published. */
+	onFreshGeneratedTask?: (compiledTask: CompiledTask) => Promise<CompiledTask>;
 	availableModels?: WorkflowModelInfo[];
+	waitForGeneratedTask?: (task: WorkflowTaskRunRecord) => Promise<unknown>;
+	onGeneratedTask?: (task: WorkflowTaskRunRecord, compiledTask: CompiledTask) => Promise<void>;
+	artifactAccess?: "enabled" | "none";
+	assertCurrent?: () => Promise<void>;
+	readonly agentDefinitions?: ReadonlyMap<string, AgentDefinition>;
 }): Promise<unknown> {
-	await assertDynamicRuntimeBudgetAvailable({
-		cwd: input.cwd,
-		runId: input.run.runId,
-		controllerSpecId: input.controllerTask.specId,
-		dynamic: input.dynamic,
-	});
-	const request = normalizeDynamicAgentRequest(input.request);
+	await input.assertCurrent?.();
 	const controllerStageId =
 		input.controllerTask.stageId ??
 		input.controllerTask.specId.replace(/\.controller$/, "");
-	let generatedSpecId = `${controllerStageId}.${request.id}`;
-	const opId = `${input.controllerTask.specId}:agent:${request.id}`;
+	let effectiveDynamic = input.dynamic;
+	let request: ReturnType<typeof normalizeDynamicAgentRequest>;
+	let opId: string;
+	let generatedSpecId: string;
+	let events: Awaited<ReturnType<typeof readDynamicEvents>>;
+	let previousByOpId: Awaited<ReturnType<typeof readDynamicEvents>>;
+	if (input.prepareGeneratedRequest) {
+		if ("request" in input || input.requestId === undefined)
+			throw new Error("dynamic prepared agent request route is invalid");
+		const requestIdentity = normalizeDynamicAgentRequest({
+			id: input.requestId,
+			prompt: "dynamic generated request identity",
+		});
+		opId = `${input.controllerTask.specId}:agent:${requestIdentity.id}`;
+		events = await readDynamicEvents(input.cwd, input.run.runId);
+		previousByOpId = events.filter(
+			(event) => event.opId === opId && event.type === "task.generated",
+		);
+		const historical = previousByOpId.at(-1);
+		generatedSpecId =
+			optionalEventString(historical?.payload.taskId) ??
+			`${controllerStageId}.${requestIdentity.id}`;
+		const preparedRequest = await input.prepareGeneratedRequest({
+			requestId: requestIdentity.id,
+			generatedSpecId,
+			opId,
+			historical: historical !== undefined,
+		});
+		effectiveDynamic = preparedRequest.dynamic;
+		request = normalizeDynamicAgentRequest(preparedRequest.request);
+		if (request.id !== requestIdentity.id)
+			throw new Error("dynamic prepared agent request id changed");
+		await assertDynamicRuntimeBudgetAvailable({
+			cwd: input.cwd,
+			runId: input.run.runId,
+			controllerSpecId: input.controllerTask.specId,
+			dynamic: effectiveDynamic,
+		});
+	} else {
+		if (input.requestId !== undefined)
+			throw new Error("dynamic prepared agent request callback is unavailable");
+		await assertDynamicRuntimeBudgetAvailable({
+			cwd: input.cwd,
+			runId: input.run.runId,
+			controllerSpecId: input.controllerTask.specId,
+			dynamic: effectiveDynamic,
+		});
+		request = normalizeDynamicAgentRequest(input.request);
+		opId = `${input.controllerTask.specId}:agent:${request.id}`;
+		generatedSpecId = `${controllerStageId}.${request.id}`;
+		events = await readDynamicEvents(input.cwd, input.run.runId);
+		previousByOpId = events.filter(
+			(event) => event.opId === opId && event.type === "task.generated",
+		);
+	}
 	const requestHash = hashDynamicRequest(request);
 	const branchId = request.branchId;
-	const events = await readDynamicEvents(input.cwd, input.run.runId);
-	const previousByOpId = events.filter(
-		(event) => event.opId === opId && event.type === "task.generated",
-	);
 	const divergent = previousByOpId.find(
 		(event) => event.requestHash !== requestHash,
 	);
@@ -6992,7 +9379,10 @@ async function runDynamicAgentRequest(input: {
 	const previousGeneratedSpecId = optionalEventString(
 		previousGenerated?.payload.taskId,
 	);
-	if (previousGeneratedSpecId) generatedSpecId = previousGeneratedSpecId;
+	if (input.prepareGeneratedRequest) {
+		if (previousGeneratedSpecId && previousGeneratedSpecId !== generatedSpecId)
+			throw new Error("dynamic prepared agent generated task identity changed");
+	} else if (previousGeneratedSpecId) generatedSpecId = previousGeneratedSpecId;
 	const generationOpId = previousGenerated?.opId ?? opId;
 	const generationRequestHash = previousGenerated?.requestHash ?? requestHash;
 	const generationBranchId =
@@ -7013,16 +9403,19 @@ async function runDynamicAgentRequest(input: {
 			opId: generationOpId,
 			requestHash: generationRequestHash,
 			requestId: generationRequest.id,
+			profile: generationRequest.profile,
 			branchId: generationBranchId,
+			outputProfile: dynamicGeneratedOutputProfile(effectiveDynamic, generationRequest),
 		});
 	}
+	const reattachingMaterializedTask = compiledTask !== undefined && runTask !== undefined;
 	if (!compiledTask || !runTask) {
 		if (!previousGenerated) {
 			await assertDynamicGenerationBudgetAvailable({
 				cwd: input.cwd,
 				runId: input.run.runId,
 				controllerSpecId: input.controllerTask.specId,
-				dynamic: input.dynamic,
+				dynamic: effectiveDynamic,
 			});
 		}
 		const recordedCompiledTask = previousGenerated?.payload.compiledTask;
@@ -7040,19 +9433,26 @@ async function runDynamicAgentRequest(input: {
 					requestHash: generationRequestHash,
 					branchId: generationBranchId,
 					request: generationRequest,
-					dynamic: input.dynamic,
+					dynamic: effectiveDynamic,
 					availableModels: input.availableModels,
+					artifactAccess: input.artifactAccess,
+					agentDefinitions: input.agentDefinitions,
 				});
+		if (!previousGenerated)
+			compiledTask = await input.onFreshGeneratedTask?.(compiledTask) ?? compiledTask;
 		assertDynamicGeneratedMetadataMatches(compiledTask, {
 			controllerSpecId: input.controllerTask.specId,
 			opId: generationOpId,
 			requestHash: generationRequestHash,
 			requestId: generationRequest.id,
+			profile: generationRequest.profile,
 			branchId: generationBranchId,
+			outputProfile: dynamicGeneratedOutputProfile(effectiveDynamic, generationRequest),
 		});
 		if (input.isSettled?.()) return undefined;
 		restoreDynamicGeneratedResourceWarnings(input.compiledFlow, compiledTask);
 		if (!previousGenerated) {
+			await input.assertCurrent?.();
 			await recordDynamicEventAndUpdateState(input.cwd, input.run.runId, {
 				controllerSpecId: input.controllerTask.specId,
 				type: "task.generated",
@@ -7066,6 +9466,8 @@ async function runDynamicAgentRequest(input: {
 				},
 			});
 		}
+		const beforeCompiledDigest = input.run.goal === undefined
+			? undefined : goalCompiledMaterializationDigest(input.compiledFlow);
 		const existingRunIndex = runTask ? input.run.tasks.indexOf(runTask) : -1;
 		const existingCompiledIndex = input.compiledFlow.tasks.indexOf(compiledTask);
 		const insertAt =
@@ -7093,14 +9495,13 @@ async function runDynamicAgentRequest(input: {
 		if (!input.generatedTaskIds.includes(generatedSpecId)) {
 			input.generatedTaskIds.push(generatedSpecId);
 		}
-		await writeCompiledRunArtifact(
-			input.cwd,
-			input.run.runId,
-			input.compiledFlow,
-		);
-		await writeRunRecord(input.cwd, input.run);
+		await input.onGeneratedTask?.(runTask, compiledTask);
+		await persistDynamicGeneratedMaterialization(input.cwd, input.run, input.compiledFlow, beforeCompiledDigest);
 	}
 
+	await input.assertCurrent?.();
+	if (!input.generatedTaskIds.includes(generatedSpecId)) input.generatedTaskIds.push(generatedSpecId);
+	if (reattachingMaterializedTask) await input.onGeneratedTask?.(runTask, compiledTask);
 	if (runTask.status === "completed") {
 		return await readDynamicGeneratedTaskResult(input.cwd, runTask);
 	}
@@ -7109,6 +9510,7 @@ async function runDynamicAgentRequest(input: {
 			`dynamic generated task ${generatedSpecId} ended with ${runTask.status}: ${runTask.lastMessage ?? runTask.statusDetail}`,
 		);
 	}
+	if (input.waitForGeneratedTask !== undefined) return await input.waitForGeneratedTask(runTask);
 	throw new DynamicControllerSuspended(
 		`waiting for dynamic generated task ${generatedSpecId} (${runTask.status})`,
 	);
@@ -7366,13 +9768,6 @@ function recordCreatedLoopWorktree(
 
 function uniqueStrings(values: readonly string[]): string[] {
 	return [...new Set(values.filter((value) => value.trim().length > 0))];
-}
-
-async function readCompiledWorkflow(
-	cwd: string,
-	runId: string,
-): Promise<CompiledWorkflow | undefined> {
-	return readJson<CompiledWorkflow>(compiledWorkflowPath(cwd, runId));
 }
 
 export async function runWorkflow(

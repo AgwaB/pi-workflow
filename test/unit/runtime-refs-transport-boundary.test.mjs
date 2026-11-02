@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import net from 'node:net';
 import dns from 'node:dns/promises';
 import {syncBuiltinESMExports} from 'node:module';
 import {mkdtemp,rm} from 'node:fs/promises';
@@ -7,6 +8,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import test from 'node:test';
+
 
 async function withinWatchdog(promise, message) {
  let timer;
@@ -17,6 +19,7 @@ async function withinWatchdog(promise, message) {
 test('refs URL probe settles an abruptly closed GET response after HEAD fallback', async () => {
  const originalRequest=http.request,originalLookup=dns.lookup;
  const root=await mkdtemp(join(tmpdir(),'piwf-refs-local-'));
+ const socketPath=join(root,'refs.sock');
  let requests=0,getResponse,clientData=false,clientAborted=false,pending;
  const server=http.createServer((req,res)=>{
   requests++;
@@ -24,13 +27,15 @@ test('refs URL probe settles an abruptly closed GET response after HEAD fallback
   getResponse=res;
   res.writeHead(200,{'content-type':'text/plain'});res.write('partial');
  });
- await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+ await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(socketPath,resolve);});
  try {
-  // Public DNS validation is exercised, but transport stays on disposable loopback.
+  // Public DNS validation is exercised; the original socket guard restricts
+  // transport to this fixture's owned Unix socket.
   dns.lookup=async hostname=>{assert.equal(hostname,'fixture.invalid');return [{address:'93.184.216.34',family:4}];};
   http.request=(url,options,callback)=>{
    assert.equal(url.hostname,'fixture.invalid');
-   return originalRequest(new URL('http://127.0.0.1:'+server.address().port+'/'),{method:options.method,headers:options.headers},response=>{
+   return new http.ClientRequest({method:options.method,headers:options.headers,path:'/',agent:undefined,
+    createConnection:()=>net.createConnection({path:socketPath})},response=>{
     callback(response);
     if(options.method==='GET'){
      response.once('aborted',()=>{clientAborted=true;});

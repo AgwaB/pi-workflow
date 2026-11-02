@@ -96,6 +96,9 @@ export type {
 	WorkflowAutoRoute,
 	WorkflowRunProvenance,
 	ArtifactGraphWorkflowSpec,
+	GoalWorkflowSpec,
+	GoalWorkflowDefinition,
+	WorkflowSpec,
 	ArtifactGraphStageSpec,
 	ArtifactGraphStageType,
 	WorkflowArtifactKind,
@@ -187,6 +190,7 @@ Usage:
   /workflow list
   /workflow profile [workflow-name-or-path]
   /workflow auto "<task>"
+  /workflow goal [create <objective>]
   /workflow run [--model MODEL] [--thinking LEVEL] [--profile NAME] <workflow-name-or-path> "<task>" [--detach] [--force-new]
   /workflow dynamic [--model MODEL] [--thinking LEVEL] "<task>" [--detach] [--force-new]
   /workflow status [run-id]
@@ -196,6 +200,7 @@ Usage:
   /workflow resume <run-id>
   /workflow stop <run-id>
   /workflow prune [--keep N] [--older-than DAYS] [--yes] [--json]
+  /workflow prune --goal-family <exact-run-id> [--yes] [--json]
   /workflow notices list [--json]
   /workflow notices acknowledge <exact-run-id> --state <sha256> --reason <text>
   /workflow notices clear <exact-run-id> [--json]
@@ -204,6 +209,13 @@ Usage:
 /workflow <run-id> opens the board focused on that run.
 /workflow dynamic starts a spec-less direct dynamic run: no workflow name,
 user-selected spec, or generated workflow spec is required.
+
+--goal-family previews only an isolated standalone single-generation achieved
+ordinary Goal root with an original artifact oracle and complete settled
+request/effect evidence; --yes deletes that exact root after identity/liveness
+checks. Other ordinary/private/mixed/multi-generation families stay protected.
+Do not combine this selector with generic retention filters. This narrow
+exception does not establish whole AC14 completion or live/provider acceptance.
 
 With --detach, a standalone supervisor process (pi-workflow supervise) keeps
 the run progressing after this session exits.
@@ -235,4 +247,9 @@ omitted behavior. Without a saved preference, interactive runs offer declared
 profiles plus Base; headless/print runs use defaultExecutionProfile when
 present, otherwise Base. Unknown names and unavailable saved model/thinking
 pairs fail closed without substitution or silent clamp.
+
+/workflow goal is the only interactive Goal authoring surface. It collects
+completion semantics and scope, saves a reusable JSON definition only on an
+explicit Save choice, and executes through the selected profile. It also hosts
+Goal list/status/criteria/evidence inspection and interactive lifecycle actions.
 `;

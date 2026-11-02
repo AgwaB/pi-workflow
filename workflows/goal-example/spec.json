@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "name": "deduplicate-values-goal",
+  "input": { "values": ["b", "a", "b"] },
+  "executionProfiles": {
+    "capture": {
+      "goal.$planner": {},
+      "goal.$worker": {},
+      "goal.$verifier": {},
+      "goal.$synthesis": {},
+      "goal.$judge": {}
+    }
+  },
+  "defaultExecutionProfile": "capture",
+  "goal": {
+    "objective": "입력 values의 문자열을 오름차순 정렬하고 중복을 제거한 결과를 control artifact로 만든다",
+    "criteria": [
+      {
+        "id": "exact-values",
+        "verifier": {
+          "kind": "deterministic",
+          "producerId": "json-exact-value-v1",
+          "target": "artifact",
+          "subject": { "resultSlot": "goal-result", "artifact": "control", "path": "$.result" },
+          "config": {
+            "comparison": "canonical-json-equality",
+            "expected": { "values": ["a", "b"] }
+          }
+        }
+      }
+    ],
+    "authority": {
+      "allowedPaths": [],
+      "protectedPaths": [],
+      "allowedEffects": ["read", "verify", "workflow-create"]
+    },
+    "nesting": { "maxDepth": 3 }
+  }
+}

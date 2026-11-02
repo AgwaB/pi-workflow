@@ -16,6 +16,7 @@ import {
 	setTaskTerminal,
 	writeRunRecord,
 } from "../../.tmp/unit/store.js";
+import { EXPERIMENTAL_TOOL_DEDUP_ENV } from "../../.tmp/unit/experimental-speed-flags.js";
 
 function artifactManifest(runId, taskId, artifactPath, status) {
 	return {
@@ -83,6 +84,36 @@ test("WB-017 memoizes completed artifact reads with identical output and ledger 
 	assert.equal(ledger.length, 2);
 	assert.equal(ledger[0].returnedBytes, ledger[1].returnedBytes);
 	assert.equal(ledger[0].bytes, ledger[1].bytes);
+});
+
+test("long-lived Goal host reads bypass both worker caches and retain real ledger rows", async (t) => {
+	clearCompletedArtifactReadCacheForTests();
+	const previous = process.env[EXPERIMENTAL_TOOL_DEDUP_ENV];
+	process.env[EXPERIMENTAL_TOOL_DEDUP_ENV] = "1";
+	t.after(() => {
+		if (previous === undefined) delete process.env[EXPERIMENTAL_TOOL_DEDUP_ENV];
+		else process.env[EXPERIMENTAL_TOOL_DEDUP_ENV] = previous;
+		clearCompletedArtifactReadCacheForTests();
+		setArtifactValidatedHookForTests(undefined);
+	});
+	const fixture = await artifactFixture("completed");
+	t.after(() => rm(fixture.cwd, { recursive: true, force: true }));
+	let opens = 0;
+	setArtifactValidatedHookForTests(() => { opens++; });
+	const params = { action: "read", source: "producer", artifact: "analysis" };
+	await handleWorkflowArtifactToolCall(params, fixture.config);
+	await writeFile(fixture.artifactPath, "current attempt output\n");
+	const config = { ...fixture.config, cache: false };
+	const first = await handleWorkflowArtifactToolCall(params, config);
+	const second = await handleWorkflowArtifactToolCall(params, config);
+	assert.match(first.content[0].text, /current attempt output/);
+	assert.deepEqual(second, first);
+	assert.equal(first.details.duplicate, undefined);
+	assert.equal(opens, 3);
+	const ledger = await readWorkflowArtifactReadLedger(fixture.ledgerPath);
+	assert.equal(ledger.length, 3);
+	assert.equal(ledger[1].returnedBytes, Buffer.byteLength("current attempt output\n"));
+	assert.equal(ledger[2].returnedBytes, ledger[1].returnedBytes);
 });
 
 test("WB-017 never memoizes running sources", async (t) => {

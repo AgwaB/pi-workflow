@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { constants } from "node:fs";
+import { constants, lstatSync } from "node:fs";
 import {
 	link,
 	lstat,
@@ -13,6 +13,7 @@ import {
 	type FileHandle,
 } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
+import { isProxy } from "node:util/types";
 
 let tempSuffixForTests: (() => string) | undefined;
 let beforeRenameForTests:
@@ -39,6 +40,7 @@ const DIRECTORY = constants.O_DIRECTORY ?? 0;
 const READ_DIRECTORY = constants.O_RDONLY | DIRECTORY | NOFOLLOW;
 const PRIVATE_FILE =
 	constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NOFOLLOW;
+export const PRIVATE_DIRECTORY_READ_BATCH_MAX = 4;
 
 /**
  * Open every ancestor with O_NOFOLLOW, retain all descriptors during
@@ -65,10 +67,153 @@ export async function readPrivateFileText(
 		throw new Error("private file size limit is invalid");
 	const absolute = resolve(path);
 	const parent = await openPrivateDirectory(dirname(absolute), false);
+	try {
+		return await readPrivateFileFromDirectory(parent, absolute, maxBytes);
+	} finally {
+		await parent.handle.close().catch(() => undefined);
+	}
+}
+
+/** Retain only a directory descriptor within one read operation. Every file
+ * rechecks named ancestors and its own descriptor; no file bytes are cached. */
+export async function withPrivateDirectoryReader<T>(
+	path: string,
+	operation: (
+		read: (name: string, maxBytes: number) => Promise<string>,
+		readBatch: (
+			names: readonly string[],
+			maxBytes: number,
+		) => Promise<readonly string[]>,
+	) => Promise<T>,
+): Promise<T> {
+	const absolute = resolve(path);
+	const ancestors: Array<{ path: string; dev: number; ino: number; mode: number; uid: number }> = [];
+	const paths = new Set<string>();
+	// Pin both spellings of the allowed platform aliases, including ancestors
+	// such as /private which do not appear in a caller's /var spelling.
+	for (const spelling of [absolute, await canonicalDirectoryPath(absolute)]) {
+		let cursor: string = sep;
+		for (const component of ["", ...spelling.slice(1).split(sep).filter(Boolean)]) {
+			if (component) cursor = join(cursor, component);
+			if (paths.has(cursor)) continue;
+			paths.add(cursor);
+			const info = await lstat(cursor);
+			if (!info.isDirectory() && !(info.isSymbolicLink() && isAllowedSystemDirectoryAlias(cursor)))
+				throw new Error("secure directory ancestor must not be a symlink");
+			ancestors.push({ path: cursor, dev: info.dev, ino: info.ino, mode: info.mode, uid: info.uid });
+		}
+	}
+	const parent = await openPrivateDirectory(absolute, false);
+	let active = true;
+	let pending: Promise<unknown> | undefined;
+	const assertAncestors = async (): Promise<void> => {
+		// A finite already-captured path inventory; keep every fresh no-follow
+		// identity check without scheduling a thread-pool round trip per ancestor.
+		// File opens/reads and the descriptor/name check still yield to controls.
+		for (const before of ancestors) {
+			const now = lstatSync(before.path);
+			if (!sameIdentity(before, now) || before.mode !== now.mode || before.uid !== now.uid)
+				throw new Error("secure directory ancestor changed during read");
+		}
+		await assertNamedDirectory(parent);
+	};
+	try {
+		await assertAncestors();
+		const admit = (): Error | undefined => {
+			if (!active || pending !== undefined)
+				return new Error("private directory reader is closed or busy");
+		};
+		const settle = <R>(reading: Promise<R>): Promise<R> => {
+			pending = reading;
+			void reading.then(() => { pending = undefined; }, () => { pending = undefined; });
+			return reading;
+		};
+		const read = (name: string, maxBytes: number): Promise<string> => {
+			const denied = admit();
+			if (denied) return Promise.reject(denied);
+			if (!name || name === "." || name === ".." || basename(name) !== name ||
+				name.includes("\\") || name.includes("\0"))
+				return Promise.reject(new Error("private directory reader requires one file name"));
+			const reading = readPrivateFileFromDirectory(parent, join(absolute, name), maxBytes, assertAncestors);
+			return settle(reading);
+		};
+		const readBatch = (
+			input: readonly string[],
+			maxBytes: number,
+		): Promise<readonly string[]> => {
+			const denied = admit();
+			if (denied) return Promise.reject(denied);
+			if (isProxy(input) || !Array.isArray(input) ||
+				Object.getPrototypeOf(input) !== Array.prototype ||
+				input.length < 1 || input.length > PRIVATE_DIRECTORY_READ_BATCH_MAX)
+				return Promise.reject(new Error("private directory reader batch requires 1 to 4 file names"));
+			const ownNames = Object.getOwnPropertyNames(input);
+			if (ownNames.length !== input.length + 1 ||
+				ownNames[ownNames.length - 1] !== "length" ||
+				Object.getOwnPropertySymbols(input).length !== 0)
+				return Promise.reject(new Error("private directory reader batch requires own data file names"));
+			const descriptors = Object.getOwnPropertyDescriptors(input);
+			const names: string[] = [];
+			const unique = new Set<string>();
+			for (let index = 0; index < input.length; index++) {
+				const descriptor = descriptors[String(index)];
+				if (descriptor === undefined || !("value" in descriptor))
+					return Promise.reject(new Error("private directory reader batch requires own data file names"));
+				const name = descriptor.value;
+				if (typeof name !== "string" || !name || name === "." || name === ".." ||
+					basename(name) !== name || name.includes("\\") || name.includes("\0"))
+					return Promise.reject(new Error("private directory reader requires one file name"));
+				if (unique.has(name))
+					return Promise.reject(new Error("private directory reader batch file names must be unique"));
+				unique.add(name);
+				names.push(name);
+			}
+			if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0 || maxBytes > 16_777_216)
+				return Promise.reject(new Error("private file size limit is invalid"));
+			const readings = names.map((name) =>
+				readPrivateFileFromDirectory(parent, join(absolute, name), maxBytes, assertAncestors));
+			const reading = Promise.allSettled(readings).then((results) => {
+				const failures: unknown[] = [];
+				const values: string[] = [];
+				for (const result of results) {
+					if (result.status === "rejected") failures.push(result.reason);
+					else values.push(result.value);
+				}
+				if (failures.length === 1) throw failures[0];
+				if (failures.length > 1) {
+					const first = failures[0];
+					throw new AggregateError(
+						failures,
+						first instanceof Error ? first.message : String(first),
+					);
+				}
+				return values;
+			});
+			return settle(reading);
+		};
+		return await operation(read, readBatch);
+	} finally {
+		active = false;
+		try {
+			await pending;
+		} finally {
+			await parent.handle.close().catch(() => undefined);
+		}
+	}
+}
+
+async function readPrivateFileFromDirectory(
+	parent: OpenDirectory,
+	absolute: string,
+	maxBytes: number,
+	assertParent: () => Promise<void> = () => assertNamedDirectory(parent),
+): Promise<string> {
+	if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0 || maxBytes > 16_777_216)
+		throw new Error("private file size limit is invalid");
 	const target = join(parent.namedPath, basename(absolute));
 	let file: FileHandle | undefined;
 	try {
-		await assertNamedDirectory(parent);
+		await assertParent();
 		file = await open(
 			target,
 			constants.O_RDONLY | NOFOLLOW | constants.O_NONBLOCK,
@@ -80,7 +225,7 @@ export async function readPrivateFileText(
 			Math.min(maxBytes + 1, Math.max(4_096, info.size + 1)),
 		);
 		let bytesRead = 0;
-		for (;;) {
+		for (; ;) {
 			if (bytesRead === content.length) {
 				if (content.length === maxBytes + 1) break;
 				const grown = Buffer.allocUnsafe(
@@ -100,13 +245,12 @@ export async function readPrivateFileText(
 		}
 		if (bytesRead > maxBytes) throw new Error("private file exceeds size limit");
 		await assertSingleRegularFile(file, target);
-		await assertNamedDirectory(parent);
+		await assertParent();
 		return new TextDecoder("utf-8", { fatal: true }).decode(
 			content.subarray(0, bytesRead),
 		);
 	} finally {
 		await file?.close().catch(() => undefined);
-		await parent.handle.close().catch(() => undefined);
 	}
 }
 
@@ -213,7 +357,7 @@ export async function publishPrivateGenerationDirectory(
 	path: string,
 	ownerName: string,
 	ownerContent: string | Uint8Array,
-): Promise<void> {
+): Promise<Readonly<{ dev: number; ino: number; nlink: number }>> {
 	const absolute = resolve(path);
 	if (!ownerName || basename(ownerName) !== ownerName || ownerName === "." || ownerName === "..")
 		throw new Error("generation owner name must be a single path component");
@@ -235,19 +379,34 @@ export async function publishPrivateGenerationDirectory(
 			await owner.close().catch(() => undefined);
 		}
 		await generation.sync().catch(ignoreDirectorySyncError);
+		const identity = await generation.stat();
 		await assertDestinationAbsent(parent, basename(absolute));
 		await beforeRenameForTests?.(absolute, temporaryPath);
 		await assertNamedDirectory(parent);
 		// Recheck after the hook: generation publication must not replace a
 		// destination created while the generation was being prepared.
 		await assertDestinationAbsent(parent, basename(absolute));
+		await assertDirectoryHandleMatchesPath(generation, temporary);
 		await rename(temporary, join(parent.namedPath, basename(absolute)));
-		const published = await open(join(parent.namedPath, basename(absolute)), READ_DIRECTORY);
-		await published.close().catch(() => undefined);
+		await assertDirectoryHandleMatchesPath(generation, absolute);
 		await parent.handle.sync().catch(ignoreDirectorySyncError);
+		await assertNamedDirectory(parent);
+		await assertDirectoryHandleMatchesPath(generation, absolute);
+		const current = await generation.stat();
+		if (current.nlink !== identity.nlink || current.mode !== identity.mode)
+			throw new Error("secure generation changed during publication");
+		return Object.freeze({ dev: identity.dev, ino: identity.ino, nlink: identity.nlink });
 	} finally {
+		// A substituted preparation name is not owned cleanup work.
+		if (generation) {
+			try {
+				await assertDirectoryHandleMatchesPath(generation, temporary);
+				await removeTemporaryPath(parent, temporary, true);
+			} catch {
+				// Preserve absent, substituted, or unobservable names.
+			}
+		}
 		await generation?.close().catch(() => undefined);
-		await removeTemporaryPath(parent, temporary, true);
 		await parent.handle.close().catch(() => undefined);
 	}
 }

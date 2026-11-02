@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
+import fsPromises from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import {
 	link,
 	mkdir,
 	mkdtemp,
 	readFile,
+	realpath,
 	rename,
 	rm,
 	stat,
@@ -38,11 +41,69 @@ test("private generation publication crash leaves no ownerless live lock", async
 		);
 		await assert.rejects(stat(target), { code: "ENOENT" });
 		setSecureAtomicBeforeRenameHookForTests(undefined);
-		await publishPrivateGenerationDirectory(target, "owner.json", '{"ownerId":"test"}\\n');
-		assert.equal((await stat(target)).isDirectory(), true);
+		const identity = await publishPrivateGenerationDirectory(target, "owner.json", '{"ownerId":"test"}\\n');
+		const published = await stat(target);
+		assert.equal(published.isDirectory(), true);
+		assert.deepEqual(identity, { dev: published.dev, ino: published.ino, nlink: published.nlink });
 		assert.equal((await stat(join(target, "owner.json"))).isFile(), true);
 	} finally {
 		setSecureAtomicBeforeRenameHookForTests(undefined);
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("private generation publication preserves a byte-identical substituted preparation", async () => {
+	const root = await mkdtemp(join(tmpdir(), "piwf-wb008-generation-substitution-"));
+	const target = join(root, "lock"), retained = join(root, "original");
+	let substituted;
+	const owner = '{"ownerId":"test"}\\n';
+	try {
+		setSecureAtomicBeforeRenameHookForTests(async (_path, temporary) => {
+			substituted = temporary;
+			await rename(temporary, retained);
+			await mkdir(temporary, { mode: 0o700 });
+			await writeFile(join(temporary, "owner.json"), owner, { mode: 0o600 });
+			await writeFile(join(temporary, "foreign"), "preserve");
+		});
+		await assert.rejects(publishPrivateGenerationDirectory(target, "owner.json", owner),
+			/secure directory changed during write/);
+		assert.equal(await readFile(join(substituted, "owner.json"), "utf8"), owner);
+		assert.equal(await readFile(join(substituted, "foreign"), "utf8"), "preserve");
+		assert.equal(await readFile(join(retained, "owner.json"), "utf8"), owner);
+		await assert.rejects(stat(target), { code: "ENOENT" });
+	} finally {
+		setSecureAtomicBeforeRenameHookForTests(undefined);
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("private generation publication rejects replacement after rename", async (t) => {
+	const root = await realpath(await mkdtemp(join(tmpdir(), "piwf-wb008-generation-published-")));
+	const target = join(root, "lock"), retained = join(root, "original");
+	const owner = '{"ownerId":"test"}\\n';
+	const originalRename = fsPromises.rename;
+	let substituted = false;
+	try {
+		t.mock.method(fsPromises, "rename", async (from, to) => {
+			await originalRename(from, to);
+			if (to === target && !substituted) {
+				substituted = true;
+				await originalRename(target, retained);
+				await mkdir(target, { mode: 0o700 });
+				await writeFile(join(target, "owner.json"), owner, { mode: 0o600 });
+				await writeFile(join(target, "foreign"), "preserve");
+			}
+		});
+		syncBuiltinESMExports();
+		await assert.rejects(publishPrivateGenerationDirectory(target, "owner.json", owner),
+			/secure directory changed during write/);
+		assert.equal(substituted, true);
+		assert.equal(await readFile(join(target, "owner.json"), "utf8"), owner);
+		assert.equal(await readFile(join(target, "foreign"), "utf8"), "preserve");
+		assert.equal(await readFile(join(retained, "owner.json"), "utf8"), owner);
+	} finally {
+		t.mock.restoreAll();
+		syncBuiltinESMExports();
 		await rm(root, { recursive: true, force: true });
 	}
 });

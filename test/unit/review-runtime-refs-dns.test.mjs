@@ -20,12 +20,22 @@ test('HTTP-01 refs DNS timeout settles and late DNS never dispatches HTTP', asyn
 });
 test('HTTP-01 successful preflight still rechecks DNS at connect time',async()=>{
  const originalLookup=dns.lookup,originalRequest=http.request;const root=await mkdtemp(join(tmpdir(),'piwf-refs-rebinding-'));let lookups=0,connections=0,requests=0;
- const server=http.createServer((_req,res)=>{connections++;res.end('must not reach private transport');});await new Promise(r=>server.listen(0,'127.0.0.1',r));
  try{
   dns.lookup=async hostname=>{assert.equal(hostname,'rebind.invalid');lookups++;return [{address:lookups%2?'93.184.216.34':'127.0.0.1',family:4}];};
-  http.request=(url,options,callback)=>{requests++;assert.equal(typeof options.lookup,'function','connect resolver policy cannot be dropped');return originalRequest(url,options,callback);};syncBuiltinESMExports();
-  const raw=`<control>{"schema":"stage-control-v1","digest":"done"}</control>\n<analysis>fixture</analysis>\n<refs>[{"url":"http://rebind.invalid:${server.address().port}/"}]</refs>`;
+  http.request=(url,options,callback)=>{
+   requests++;assert.equal(url.hostname,'rebind.invalid');assert.equal(typeof options.lookup,'function','connect resolver policy cannot be dropped');
+   // Exercise the original connect resolver through ClientRequest without
+   // opening any transport, including when a regression admits the address.
+   return new http.ClientRequest(url,{...options,agent:undefined,createConnection(connectionOptions,connected){
+    assert.equal(connectionOptions.hostname,'rebind.invalid');
+    options.lookup(connectionOptions.hostname,{all:true},error=>{
+     if(!error)connections++;
+     connected(error??new Error('unexpected admitted transport'));
+    });
+   }},callback);
+  };syncBuiltinESMExports();
+  const raw='<control>{"schema":"stage-control-v1","digest":"done"}</control>\n<analysis>fixture</analysis>\n<refs>[{"url":"http://rebind.invalid/"}]</refs>';
   const result=await writeWorkflowTaskArtifactBundle({taskDir:root,rawOutput:raw,refsMinItems:1,refsUrlValidation:{timeoutMs:100,maxUrls:1}});
   assert.equal(result.valid,false);assert.match(JSON.stringify(result),/private host blocked/);assert.equal(requests,2);assert.equal(lookups,4);assert.equal(connections,0);
- }finally{dns.lookup=originalLookup;http.request=originalRequest;syncBuiltinESMExports();server.closeAllConnections();await new Promise(r=>server.close(r));await rm(root,{recursive:true,force:true});}
+ }finally{dns.lookup=originalLookup;http.request=originalRequest;syncBuiltinESMExports();await rm(root,{recursive:true,force:true});}
 });

@@ -2,9 +2,10 @@ import {
 	collectWorkflowProfileStageSlots,
 	type WorkflowProfileStageSlot,
 } from "./execution-profile.js";
+import type { GoalProfileRuntimePatch } from "./goal-types.js";
 import type {
-	ArtifactGraphWorkflowSpec,
 	ThinkingLevel,
+	WorkflowSpec,
 } from "./types.js";
 import {
 	getSupportedThinkingLevels,
@@ -89,7 +90,7 @@ export interface WorkflowProfilePickerChoice {
 
 export interface ConfigureWorkflowProfileInput {
 	ui: WorkflowProfileUi;
-	spec: ArtifactGraphWorkflowSpec;
+	spec: WorkflowSpec;
 	specPath: string;
 	workflowLabel?: string;
 	backToWorkflows?: boolean;
@@ -101,7 +102,25 @@ export type ConfigureWorkflowProfileResult =
 	| { status: "cancelled" }
 	| { status: "saved"; preference: WorkflowProfilePreference };
 
+export interface CollectWorkflowProfileRuntimeOverrideInput {
+	ui: WorkflowProfileUi;
+	capturedRuntime: Readonly<{
+		model: string;
+		thinking: ThinkingLevel;
+	}>;
+	availableModels: readonly WorkflowModelInfo[];
+	displayLabel: string;
+}
+
+export type CollectWorkflowProfileRuntimeOverrideResult =
+	| { status: "cancelled" }
+	| { status: "selected"; override: GoalProfileRuntimePatch };
+
 type PreviewAction = "save" | "edit" | "back";
+type FixedChoice<T> = {
+	label: string;
+	value: { kind: "fixed"; value: T };
+};
 
 const PREVIEW_PAGE_ROWS = 6;
 const INHERIT_MODEL_LABEL = "Inherit current Pi model at run start";
@@ -110,12 +129,119 @@ const EDIT_MODEL = "Model only";
 const EDIT_THINKING = "Thinking only";
 const EDIT_BOTH = "Model and thinking";
 
+/**
+ * Collect an untrusted, run-local runtime proposal. This flow does not save a
+ * profile, confirm a revision, or read the current Pi runtime.
+ */
+export async function collectWorkflowProfileRuntimeOverride(
+	input: CollectWorkflowProfileRuntimeOverrideInput,
+): Promise<CollectWorkflowProfileRuntimeOverrideResult> {
+	// Capture all caller-owned input before the first await. In particular,
+	// support is reduced to immutable primitive arrays so later caller mutation
+	// cannot alter the choices or validation performed by this interaction.
+	const ui = input.ui;
+	const displayLabel = requireNonEmptyString(input.displayLabel, "displayLabel");
+	const originalModel = requireNonEmptyString(
+		input.capturedRuntime.model,
+		"capturedRuntime.model",
+	);
+	const originalThinking = input.capturedRuntime.thinking;
+	const modelOptions = [...input.availableModels]
+		.map((model) => ({
+			fullId: requireNonEmptyString(model.fullId, "availableModels[].fullId"),
+			supportedThinking: [...getSupportedThinkingLevels(model)],
+		}))
+		.sort((left, right) => left.fullId.localeCompare(right.fullId));
+	const duplicateModel = modelOptions.find(
+		(model, index) =>
+			index > 0 && model.fullId === modelOptions[index - 1]!.fullId,
+	);
+	if (duplicateModel) {
+		throw new Error(`Duplicate available model: ${duplicateModel.fullId}`);
+	}
+	const originalModelInfo = modelOptions.find(
+		({ fullId }) => fullId === originalModel,
+	);
+	if (!originalModelInfo) {
+		throw new Error(`Captured model is not available: ${originalModel}`);
+	}
+	if (!originalModelInfo.supportedThinking.includes(originalThinking)) {
+		throw new Error(
+			`Captured thinking ${originalThinking} is not supported by ${originalModel}`,
+		);
+	}
+
+	const field = await selectStrictChoice(
+		ui,
+		[
+			`Runtime override — ${clip(displayLabel, 68)}`,
+			`Captured runtime: ${originalModel} · ${originalThinking}`,
+			"This only proposes an in-memory override.",
+		].join("\n"),
+		[
+			{ label: EDIT_MODEL, value: EDIT_MODEL },
+			{ label: EDIT_THINKING, value: EDIT_THINKING },
+			{ label: EDIT_BOTH, value: EDIT_BOTH },
+		],
+	);
+	if (field === undefined) return { status: "cancelled" };
+
+	if (field === EDIT_THINKING) {
+		const thinking = await selectConcreteThinking(
+			ui,
+			originalModel,
+			originalThinking,
+			originalModelInfo.supportedThinking,
+		);
+		return thinking === undefined
+			? { status: "cancelled" }
+			: { status: "selected", override: { thinking } };
+	}
+
+	let model = originalModel;
+	let modelError: string | undefined;
+	while (true) {
+		const selectedModel = await selectConcreteModel(
+			ui,
+			modelOptions.map(({ fullId }) => fullId),
+			model,
+			modelError,
+		);
+		if (selectedModel === undefined) return { status: "cancelled" };
+		model = selectedModel;
+		const selectedModelInfo = modelOptions.find(
+			({ fullId }) => fullId === model,
+		)!;
+
+		if (field === EDIT_MODEL) {
+			if (selectedModelInfo.supportedThinking.includes(originalThinking)) {
+				return { status: "selected", override: { model } };
+			}
+			modelError = `${model} does not support captured thinking ${originalThinking}; choose a compatible model.`;
+			ui.notify?.(modelError, "warning");
+			continue;
+		}
+
+		const thinking = await selectConcreteThinking(
+			ui,
+			model,
+			originalThinking,
+			selectedModelInfo.supportedThinking,
+		);
+		if (thinking !== undefined) {
+			return { status: "selected", override: { model, thinking } };
+		}
+		// In the combined editor, thinking's Back revisits the retained model draft.
+		modelError = undefined;
+	}
+}
+
 /** Build path-free workflow choices while preserving the path as hidden identity. */
 export async function buildWorkflowProfilePickerChoices(
 	workflows: readonly WorkflowProfilePickerWorkflow[],
 	loadWorkflow: (
 		specPath: string,
-	) => Promise<{ spec: ArtifactGraphWorkflowSpec; specPath: string }>,
+	) => Promise<{ spec: WorkflowSpec; specPath: string }>,
 ): Promise<WorkflowProfilePickerChoice[]> {
 	const choices: WorkflowProfilePickerChoice[] = [];
 	for (const workflow of workflows) {
@@ -489,18 +615,15 @@ async function selectModel(
 	context: WorkflowProfileContext,
 	current: InheritableWorkflowProfileValue<string>,
 ): Promise<InheritableWorkflowProfileValue<string> | undefined> {
-	const fixed = [...context.availableModels]
-		.map(({ fullId }) => fullId)
-		.sort((left, right) => left.localeCompare(right));
 	const choices = [
 		{
 			label: `${INHERIT_MODEL_LABEL}${current.kind === "inherit" ? " (current setting)" : ""}`,
 			value: { kind: "inherit" } as const,
 		},
-		...fixed.map((model) => ({
-			label: `${model}${current.kind === "fixed" && current.value === model ? " (current setting)" : ""}`,
-			value: { kind: "fixed", value: model } as const,
-		})),
+		...fixedModelChoices(
+			context.availableModels.map(({ fullId }) => fullId),
+			current.kind === "fixed" ? current.value : undefined,
+		),
 	];
 	const selected = await ui.select(
 		`Choose model\nCurrent setting: ${current.kind === "fixed" ? current.value : "Pi model at run start"}\nCurrent Pi: ${context.currentRuntime.model ?? "unavailable"}`,
@@ -525,10 +648,10 @@ async function selectThinking(
 			label: `${INHERIT_THINKING_LABEL}${current.kind === "inherit" ? " (current setting)" : ""}`,
 			value: { kind: "inherit" } as const,
 		},
-		...supported.map((thinking) => ({
-			label: `${thinking}${current.kind === "fixed" && current.value === thinking ? " (current setting)" : ""}`,
-			value: { kind: "fixed", value: thinking } as const,
-		})),
+		...fixedThinkingChoices(
+			supported,
+			current.kind === "fixed" ? current.value : undefined,
+		),
 	];
 	const selected = await ui.select(
 		`Choose thinking for ${modelId ?? "unavailable model"}\nCurrent setting: ${current.kind === "fixed" ? current.value : "Pi thinking at run start"}\nCurrent Pi: ${context.currentRuntime.thinking ?? "unavailable"}`,
@@ -536,6 +659,88 @@ async function selectThinking(
 		{ selected: currentChoiceLabel(choices) },
 	);
 	return choices.find(({ label }) => label === selected)?.value;
+}
+
+async function selectConcreteModel(
+	ui: WorkflowProfileUi,
+	models: readonly string[],
+	current: string,
+	error?: string,
+): Promise<string | undefined> {
+	const choices = fixedModelChoices(models, current);
+	return selectStrictChoice(
+		ui,
+		[
+			"Choose model",
+			`Captured model: ${current}`,
+			...(error ? [`Blocked: ${error}`] : []),
+		].join("\n"),
+		choices.map(({ label, value }) => ({ label, value: value.value })),
+		{ selected: currentChoiceLabel(choices), searchable: true },
+	);
+}
+
+async function selectConcreteThinking(
+	ui: WorkflowProfileUi,
+	model: string,
+	current: ThinkingLevel,
+	supported: readonly ThinkingLevel[],
+): Promise<ThinkingLevel | undefined> {
+	const choices = fixedThinkingChoices(supported, current);
+	return selectStrictChoice(
+		ui,
+		`Choose thinking for ${model}\nCaptured thinking: ${current}`,
+		choices.map(({ label, value }) => ({ label, value: value.value })),
+		{ selected: currentChoiceLabel(choices) },
+	);
+}
+
+function fixedModelChoices(
+	models: readonly string[],
+	current: string | undefined,
+): FixedChoice<string>[] {
+	return [...models]
+		.sort((left, right) => left.localeCompare(right))
+		.map((model) => ({
+			// Quote the entire marker-containing namespace, including quoted IDs,
+			// so literal model names cannot impersonate the selection annotation.
+			label: `${model.includes(" (current setting)") ? JSON.stringify(model) : model}${current === model ? " (current setting)" : ""}`,
+			value: { kind: "fixed", value: model },
+		}));
+}
+
+function fixedThinkingChoices(
+	supported: readonly ThinkingLevel[],
+	current: ThinkingLevel | undefined,
+): FixedChoice<ThinkingLevel>[] {
+	return supported.map((thinking) => ({
+		label: `${thinking}${current === thinking ? " (current setting)" : ""}`,
+		value: { kind: "fixed", value: thinking },
+	}));
+}
+
+async function selectStrictChoice<T>(
+	ui: WorkflowProfileUi,
+	title: string,
+	choices: readonly { label: string; value: T }[],
+	selection?: WorkflowProfileSelectOptions,
+): Promise<T | undefined> {
+	const selected = await ui.select(
+		title,
+		choices.map(({ label }) => label),
+		selection,
+	);
+	if (selected === undefined) return undefined;
+	const choice = choices.find(({ label }) => label === selected);
+	if (!choice) throw new Error(`Unknown workflow runtime override choice: ${selected}`);
+	return choice.value;
+}
+
+function requireNonEmptyString(value: string, path: string): string {
+	if (typeof value !== "string" || value.trim().length === 0) {
+		throw new Error(`${path} must be a non-empty string`);
+	}
+	return value;
 }
 
 function currentChoiceLabel(choices: readonly { label: string }[]): string | undefined {

@@ -117,6 +117,515 @@ pi-workflow supervise --all [--poll-ms N] [--max-runtime-ms N]
 
 `/workflow` with no arguments opens the read-only workflow board TUI. `/workflow <run-id>` opens the board focused on that run.
 
+### Goal
+
+The Goal surface is `/workflow goal` and the read-only `workflow_goal` tool.
+There is no standalone `/goal` command and no `pi-workflow goal` CLI subcommand.
+The product execution path is the ordinary workflow-engine Goal: author or select
+a Goal definition, confirm it once, and the Goal plans, runs workers or admitted
+child workflows, verifies every criterion and replans within the confirmed scope
+without further approvals. Local fixture tests are not evidence that a specific
+installed package or provider behaves the same way.
+
+**Applying results.** A coding Goal works in a separate candidate workspace. If
+the confirmed definition's `allowedEffects` include both `candidate-write` and
+`origin-apply` (the authoring choice "Candidate/origin writes, read, and
+verify"), an achieved Goal copies its verified candidate changes for the allowed
+paths into the working tree. Each changed path must still hold the bytes the
+candidate started from; if any allowed path, Git `HEAD`/index or protected path
+changed meanwhile, nothing is written and the Goal stays blocked as
+`goal_origin_apply_conflict`. Files are written one at a time (temporary file and
+rename); Git `HEAD` and the index are never changed. The per-path outcome is
+recorded in the Goal task (`originApply`) and shown by `/workflow goal status`.
+A stop before or during application leaves the remaining paths unapplied and is
+never replayed automatically. Without `origin-apply`, results stay in the
+candidate only.
+
+**Tool surface.** Goal runs (a Goal definition, an artifact graph with an
+embedded Goal stage, or a Goal-admitted child workflow) never inherit the native
+host tool expansion (codemode, MCP) described above; their workers keep exactly
+the tools admitted by the confirmed Goal scope. Candidate and request channel
+launches carry only their channel extensions, plus an opted-in Fast request hook.
+
+**Removed protected runtime.** An earlier experimental protected Goal runtime
+(`/workflow goal protected ...`, the `pi-workflow goal` store CLI, and its private
+SDK/native/Docker/signed-deployment machinery) is not part of this build. Run
+records it created (a `goal-sdk` backend or persisted `goal` binding) are rejected
+rather than refreshed, resumed, stopped or cleaned, and `.pi/goals` stores are not
+read by the Goal commands.
+
+```text
+/workflow goal help
+/workflow goal create <objective>
+/workflow goal run <saved-workflow-ref> "<new target>"
+/workflow goal list
+/workflow goal status [runId|goal_engine_ID]
+/workflow goal criteria <runId|goal_engine_ID>
+/workflow goal evidence <runId|goal_engine_ID>
+```
+
+These commands and the read-only `workflow_goal` tool inspect ordinary
+workflow-engine records under `.pi/workflows/<runId>`, without creating missing
+records or starting workers. Identifiers are exact workflow run IDs or exact
+`goal_engine_...` IDs.
+Interactive `create` authors a reusable JSON Goal definition. Authoring and saving
+do not require a live execution backend. Saving, selecting a profile, and executing
+are distinct choices; save-only does not start a run. Cancellation does not grant
+consent or launch providers. Existing files are not silently overwritten.
+
+A definition has exactly one root: `goal` or `artifactGraph`. A Goal declares its
+objective, criteria and verifier selectors/configuration, relative path/effect
+ceilings, optional limits, and finite nesting depth (default 3). A graph can embed
+a non-provider policy stage using `type: "goal"` and `goal.uses` pointing to a JSON
+Goal definition. JSON declarations never register a producer or grant backend,
+credential, workspace, or write authority.
+
+`goal.authority.allowedPaths: []` preserves an empty origin-filesystem scope for
+artifact-only criteria; it never defaults to the working directory. An authored
+definition's scope cannot be replaced by an origin-scope override. Host-managed
+artifact publication still requires its separate current custody and consent.
+
+An oracle can declare `subject.path` to compare one exact JSON value from a
+`control` or `refs` artifact, for example `$.result`. The normal control envelope
+still carries its schema/digest metadata. No implicit field stripping, wildcard
+selection, or missing-value-to-null conversion occurs. A bounded/unreadable
+artifact is an acquisition gap, not an independently verified failure.
+
+Goal profile slots are `goal.$planner`, `$worker`, `$verifier`, `$synthesis`, and
+`$judge`; embedded policies use their canonical stage path as the prefix. Concrete
+launch settings are captured from the selected workflow profile. Resume uses the
+captured profile, not a new Pi model/thinking selection. In child profile captures,
+ordinary model-backed stages without `profileRole` inherit the captured worker
+(`research-execution`) role, including nested stages and foreach templates.
+Explicit roles remain distinct. Unmarked dynamic decision-profile slots inherit
+their host-defined planner, worker, verifier, or synthesis role. The child capture
+projects confirmed role settings over authored and saved model/thinking defaults,
+without changing the child source fingerprint. Conflicting explicit runtime
+overrides still require separately admitted authority; saved child preferences
+cannot grant it. Profile projection alone does not admit an ordinary or dynamic
+child through the execution boundary.
+Admitted ordinary catalog children receive a child-definition-bound projection
+before compilation: saved, default, and stage model/thinking preferences cannot
+replace the captured root role settings. Explicit stage roles are projected from
+the original captured definition, while unmarked stages continue to inherit the
+worker role. This path still rejects backend indirection and profile batching;
+those admission restrictions are independent of valid semantic profile marks.
+Agent and foreach-item model/thinking
+defaults are also projected onto the root worker settings before materialization.
+Agent tool ceilings, read-only status, depth and other runtime restrictions remain
+independently enforced. Those restrictions are
+execution-admission boundaries, not permission to recapture a profile on resume.
+Request/cost limits are
+optional; unavailable usage is displayed as unknown, not zero. A strict cap needs
+enforceable source-owned accounting rather than a claimed worker cost.
+Ordinary workflow-engine execution does not support non-null `costMicros` caps,
+including zero, even when an observed cost is available; observed usage is not
+preeffect cost-reservation authority.
+
+Ordinary artifact/control criteria support both the deterministic
+`json-exact-value-v1` oracle and `kind: "model-rubric"` with
+`producerId: "json-control-rubric-v1"`, `target: "artifact"`, and
+`subject.artifact: "control"`. The rubric config has exactly
+`{ "rubric": "Evaluate the authored requirement", "minScore": 0.8 }`:
+`rubric` is a nonempty string and `minScore` is a finite number in `[0, 1]`.
+Rubric execution requires `verify` in the original `allowedEffects`, before
+consent; declaring a producer does not grant that effect.
+
+The original scheduler launches a separate verification task using the captured
+verification-role model/thinking and the same cumulative root budgets as planning
+and workers. Artifact-only verification is tool-free. When the original producer
+has admitted scoped source custody, verification instead receives only
+`goal_candidate_read` and must read each admitted original path through EOF; it
+still has no raw filesystem, command, write, effect, or approval authority. The
+immutable model input snapshot binds the original objective, captured invocation
+request, criterion, generation, original worker subject, and captured verification
+profile. The request retains the objective plus a distinct trimmed invocation
+target. Direct workers and catalog children receive that exact request as separate
+host-owned scope context even when proposed work omits the target; proposed work
+bytes remain unchanged. Objective and request identify scope only, never new
+criteria, evidence, permissions or thresholds. Only the authored rubric supplies
+scoring requirements. Cold inspection reconstructs the request from the original
+compiled invocation, not a verifier claim. Human judgment snapshots remain free
+of model-only objective, request and profile fields.
+
+The model control has exactly `schema`, `digest`, `score`, and `reason`.
+`schema` is `dynamic-task-result-v1`; `digest` is a nonblank descriptive string
+of at most 1000 characters and is never identity or authority; `score` is finite
+and in `[0, 1]`; and `reason` is nonblank and at most 4096 characters. The host,
+not the model, binds identity through the original observation criterion and the
+verification `runId`, `specId`, `taskId`, `attemptKey`, `subjectDigest`, and
+`inputDigest`, while retaining the exact raw model control. Extra model identity
+fields, including `criterionId`, are rejected. Only the host applies the immutable
+`minScore` threshold; a worker's achievement claim is not an oracle result. A
+valid below-threshold result is not-met and permits bounded replanning against the
+same immutable criteria and remaining budget. Malformed, stale, missing or
+unsettled verification remains UNKNOWN, not achievement or permission to
+continue.
+
+Human artifact/control criteria with `kind: "human"` and
+`producerId: "human-acceptance-v1"` await genuine original-session TUI judgment.
+Their config is `{ "condition": { "statement": "Review this criterion" } }`.
+Use `/workflow goal judge <runId>` with no inline verdict or tool arguments.
+The dialog displays the immutable criterion and exact captured untrusted subject;
+acceptance decides only that criterion, never widens effects or grants execution
+consent again. Dismissal leaves it pending. Stopping the run revokes a held dialog;
+a later selection cannot take effect. `waiting-user` means pending human judgment,
+with no automatic provider work. Rejection permits bounded new work only after
+all human gates resolve, under the original criteria and remaining budget.
+Unsupported producers, including `owner-approval-v1`, remain UNKNOWN; rubric
+scores and forged booleans cannot supply human judgment. `workflow_goal` remains
+strictly read-only and cannot judge.
+
+Human selection consumes its original one-use capability before submission.
+The decision is provisional only within that submission's original run lease;
+it becomes accepted in memory only after exact oracle receipt/artifact and run
+publication, with the original generation, subject and stop authority rechecked.
+An error after staging latches the original family UNKNOWN: another criterion
+cannot publish the failed selection, achieve the goal, or launch more work.
+Published partial receipts remain evidence, not acknowledged decision authority;
+publication uncertainty is never silently rolled back or retried. There is no
+automatic recovery for this latch. A validation error before staging does not
+change a decision; a fresh genuine review may be possible, but the consumed
+capability cannot be reused.
+
+Public status/criteria/evidence reads validate retained deterministic, rubric and
+human observations, not live authority. The exact current result artifact's
+`evidenceRefs` selects presentation for the same generation and policy attempt;
+pending and decided receipts remain retained and validated. Missing or ambiguous
+bindings show UNKNOWN; malformed or conflicting evidence fails strictly without
+repair. Source bindings currently require the producer in the same run: child-run
+subjects are explicitly unavailable rather than mistaken for parent producers.
+These read checks do not establish model quality or live/provider qualification.
+
+Explicit same-live-session
+resume can authorize a fresh attempt for an interrupted current-generation
+verifier only after original native cancellation settlement and complete original
+attempt/grant/ACK/request-channel custody. Earlier rejected generations remain
+observation-only: their original frozen rubric subject, published oracle evidence
+and in-memory rejection snapshot are checked without re-evaluating an evolved
+candidate workspace. Historical planners, workers and verifiers are never reset,
+replayed or granted new permissions. Missing original custody, altered snapshots,
+changed immutable definitions and UNKNOWN settlement deny before root mutation;
+serialized hashes cannot restore authority. Current verifier recovery still
+checks the exact current worker/candidate source, and all generations count
+toward the original cumulative budget. Cold recovery remains unavailable for
+these original live channels. These bounded oracle paths do
+not establish general nested/dynamic/foreach execution, origin apply, or arbitrary
+stage-profile support. Fixture results establish neither real-provider rubric
+quality nor live/provider qualification.
+
+Optional `goal.workflows` reuses the bundle-local `./...json` reference map.
+The original single confirmation freezes the catalog source, agents and selected
+profile; persisted child lineage is not launch or recovery authority. Every
+original artifact-oracle result slot may select a distinct declared catalog ID,
+each referencing one ordinary child of one or more original `single` stages, with explicit `workflow-create`
+authority. Goal depth counts Goal entries, not ordinary wrappers: a plain child
+without a Goal stage is permitted at root `maxDepth: 1`; standalone or embedded
+Goal children require remaining Goal depth. Plans must cover every slot exactly once.
+Tool-free artifact-only plans may combine ordinary generated workers and declared
+children; reusing a child ID across slots is rejected before child effects.
+Source-read or candidate-write plans may select a captured sequential chain of
+scoped `single` stages per child. Each stage explicitly declares
+`goal_candidate_read`; only coding stages declare `goal_candidate_write`, and
+candidate-write plans require a coding terminal sink. Tools must fit the original
+root admission and each stage's captured agent ceiling; a read-only researcher
+stage cannot inherit a later coder's write authority. These children reuse the original
+root candidate workspace, scope, protected paths and model/thinking, not another
+workspace or source authority. Coding children must author `worktreePolicy: "off"`
+in the captured stage or defaults before the original confirmation; `on`, `auto`
+and conflicting isolation settings are rejected. Read-only children keep the
+ordinary safe automatic policy. Canonical mediated-tool metadata classifies reads
+as read-only and writes as write-capable with a non-downgradable write floor;
+classification does not grant tools outside the original Goal channel. Compiler
+safety and permission previews are retained unchanged, including coding tasks'
+unsafe shared-origin classification: writes target only the scoped candidate
+workspace, never origin files. Candidate-write result slots use host-observed
+candidate bytes against the immutable oracle, never child achievement claims or
+origin apply. This scoped-write path does not admit recursive, dynamic or foreach children.
+Tool-free children remain read-only and may contain multiple stages. These scoped children
+exclude helpers, support nodes, Goal stages and generated tasks. Only original safe ordering
+dependencies are admitted (`after` may reference preceding stages; omitted ordering
+keeps the compiler's ordinary pipeline). Input sourcing via `from`, artifact access,
+required reads and raw source tools is not supported; scoped candidate reads are
+mediated operations, not graph input sourcing. Ordering is not data mediation.
+Scoped chains permit only the immediately preceding stage as a dependency (or
+the compiler's omitted-order sequential default), not branching or independent
+stages. Every predecessor's original request and candidate-channel attempts must
+be acknowledged, settled and retired before the successor's preparation and
+launch authority. Each stage receives its own original run/task/attempt/grant
+binding to the same scoped workspace; prior callbacks cannot replay operations
+or requests. No workspace clone, helper, artifact `from`, or compiler-safety
+rewrite supplies stage authority.
+The original compiled dependency graph must have exactly one terminal sink. Its
+actual control artifact, task, attempt and backend are the fixed result-slot source,
+never the last array entry or a proxy result. Zero or multiple sinks fail closed
+before confirmation. The original scheduler runs
+generated workers and the original nested runner owns child reservations; an
+oracle waits for both groups' terminal artifacts and settled family coverage.
+Planner, every child stage and local-worker requests share the same cumulative root cap,
+including replans; incomplete coverage remains unknown and cannot achieve the
+Goal or authorize a successor. Coverage includes every child task's attempts,
+grants and original request/candidate-channel promises, not just the output sink; exhausting the cap
+before any stage finishes cannot establish achievement. Explicit root resume in the original live session
+can recover a stopped current-generation admitted family, including a completed
+catalog child and an interrupted generated local worker. Completed children keep
+their exact results and are not dispatched or given child-resume permission;
+interrupted members require original cancellation acknowledgements and new
+attempts under the unchanged cumulative budget and captured profile. Every child
+must retain its original source, compiled inventory, admission and settled request
+and candidate-channel custody before any family resume permission is installed.
+Scoped child attempts must drain their original channels; missing promises fail
+closed rather than silently accepting missing drains. Stop and replacement retire
+old callbacks, including candidate reads. An interrupted sequential scoped candidate
+child can recover only through the original root's same-live-session, one-use
+permission after every task's original request and candidate attempts have drained,
+with complete grant, backend ACK and cancellation coverage. Completed readers keep
+their original task, raw/control bytes and receipts: they are never reset or
+redispatched, and their retired callbacks remain denied while the writer's new
+original attempt accesses the existing candidate workspace. Missing predecessor
+ACKs or pending, lost-ACK or UNKNOWN candidate/request effects cannot authorize
+a successor, cancellation completion or resume; an unproven stop retains its intent.
+The root's immutable oracle observes candidate bytes, not a worker's accepted claim.
+Existing single-stage scoped recovery is unchanged. A later replanned
+generation can resume only when every earlier generation retains its original
+not-achieved oracle outcome and completed children, grants, acknowledgements,
+profiles, reservations and settled request/candidate channels. Earlier generations are
+validated read-only against original live captures: no rebinding, new attempts,
+child-resume permissions or old callback revival. Only current-generation members
+use the root-authorized recovery path, with the entire family rechecked before
+root reset or permission publication. Changing an admitted child source invalidates
+its identity even after byte restoration; this is not a recovery mechanism.
+For a nonrecursive, no-source, tool-free ordered child pipeline in that same live
+session, root-only recovery may retain completed predecessor stages and recover
+only an interrupted terminal sink. The original child ID, unique sink, completed
+predecessor raw/control/grant/request custody, cumulative cap and fixed profile
+remain unchanged; the terminal task receives a new attempt only after predecessor
+ACK and terminal-cancellation proof. Root reset, child reset, dispatch, or request
+is denied when either proof is missing. The same root-only recovery can also
+recover an interrupted reader with a never-launched pending successor, including
+an admitted candidate reader/writer pipeline. The pending task requires its exact
+original live child admission, compiled identity and in-memory launch/request/
+candidate binding custody, captured before stop cleanup and rechecked across
+family settlement. The store's initial task-ID backend placeholder is captured
+exactly, not treated as a native worker or launch receipt; changing it or adding
+a backend handle invalidates that custody. Child cleanup uncertainty retains the
+child's nonterminal state and stop intent, even without root participation metadata.
+Its first launch follows full predecessor settlement; the
+interrupted reader receives a fresh attempt under the same child ID, cumulative
+budget and captured profile, without another consent. Missing disk grants or
+receipts never prove that a task was unlaunched: erasing a launched reader's
+receipts denies recovery before root/child reset or successor dispatch. No grants
+or cancellation acknowledgements are fabricated for the pending task.
+Stopping the ordinary nonprovider policy
+also requires its original live admission and stop intent, descendant ACK/cancellation
+coverage, drained original request/candidate channels and a known settled budget.
+Missing custody or UNKNOWN channel effects leave the root cancellation pending and
+retain the stop intent; a command notification alone is not cancellation proof.
+Cold, foreign, raw-source-enabled, recursive and dynamic child recovery remain
+unsupported; UNKNOWN custody fails closed before root reset. The only warm
+foreach recovery is an interrupted original live root resuming its exact
+registered tool-free producer/bounded-items/collector child after the original
+acknowledged materialization. The captured `maxItems`, generated inventory and
+unique collector must remain exact. Completed executable tasks retain their native
+ACKs and are never replayed; launched interrupted tasks require genuine cancellation
+ACKs, while never-launched interrupted tasks require their original live bindings,
+not invented receipts. The original branded structural placeholder remains
+`foreach_empty` or `foreach_materialized`, without grants. Recovery preserves the
+child ID, generated IDs, completed grants, consent, captured profile and cumulative
+shared budget; only interrupted executable tasks receive fresh attempts. Missing
+ACKs, structural integrity or live registry denies before any family reset or
+dispatch. Cold recovery and partial-journal replay remain unsupported. Foreach
+materialization checks both the original root
+and exact admitted child's durable stop intents across publication boundaries.
+A child-only stop after journal publication retains the prepared journal as
+UNKNOWN custody without publishing compiled/final inventory or replaying it;
+cancellation observation remains permitted without admitting new execution.
+For example,
+these are fragments of a single-slot enclosing Goal object:
+
+```json
+{
+  "workflows": { "declared": { "uses": "./child.json" } },
+  "authority": { "allowedPaths": [], "allowedEffects": ["verify", "workflow-create"] },
+  "nesting": { "maxDepth": 1 },
+  "limits": { "requests": 2 }
+}
+```
+
+The corresponding criterion's deterministic verifier can select that result:
+
+```json
+{
+  "kind": "deterministic",
+  "producerId": "json-exact-value-v1",
+  "target": "artifact",
+  "subject": { "resultSlot": "result", "artifact": "control", "path": "$.result.accepted" },
+  "config": { "comparison": "canonical-json-equality", "expected": true }
+}
+```
+
+The referenced `child.json` uses the existing artifact graph schema:
+
+```json
+{
+  "schemaVersion": 1,
+  "artifactGraph": {
+    "stages": [{
+      "id": "research",
+      "type": "single",
+      "agent": "researcher",
+      "tools": [],
+      "readOnly": true,
+      "inputPolicy": { "artifactAccess": "none" },
+      "prompt": "Return the requested advisory result as control data.",
+      "output": { "analysis": { "required": true }, "refs": { "required": true } }
+    }]
+  }
+}
+```
+
+Captured agents need a finite, trusted read-only tool ceiling and depth zero;
+omitted agent depth normalizes to zero. Authored stage/default tools and the
+effective compiled/runtime tools remain `[]`: no source reads, network tools or
+recursive controller are enabled, even when the shipped agent's ceiling lists
+read-only tools. The child inherits the selected parent worker model/thinking
+and uses the original shared request cap, not a separate child allowance.
+The admitted foreach topology is limited to a tool-free, read-only single
+producer, one non-streaming foreach with explicit positive `maxItems` and stable
+`each.itemIdentityPath`, and one unique terminal collector. Its captured agent,
+model, thinking and tool ceilings remain unchanged. The retained structural
+placeholder makes no request and receives no launch grant; zero items still run
+the collector. Two items require five shared requests including the root planner;
+a cap of four denies the collector before transmission. Exceeding `maxItems`
+blocks before any item launch. Partial materialization remains UNKNOWN.
+Journal, compiled inventory and final run publication remain fenced by the
+original admission and root stop checks. A stop after journal publication keeps
+that journal without publishing the compiled inventory or final run. The full
+published run, including unchanged collector identity and artifact paths, must
+match the captured original transition before admission commits; only the
+original writer's refreshed run timestamp is excluded from comparison. Rejected
+publication retains partial bytes and grants no further launches; neither a
+plain refresh nor disk replay acquires replacement authority. Stop can report
+pending cancellation or strict UNKNOWN topology recovery failure, not success.
+General dynamic and recursive child workflows, and every foreach recovery
+outside that exact warm boundary, remain unsupported by this bounded topology.
+Several child slots run sequentially at concurrency one; per-phase agent and
+graph-mutation ceilings equal the original slot count. A planner plus two child
+requests needs a shared cap of at least three, not two separate child budgets.
+Unsupported cost or incomplete family usage/settlement stays UNKNOWN, not zero
+or achieved. This bounded candidate does not establish general dynamic/nested
+workflow support, general family closure/recovery or live/provider acceptance.
+
+`/workflow goal profile <runId>` can explicitly override model/thinking for an
+eligible captured, never-launched root task, or one already-materialized pending
+foreach item in a directly admitted ordinary Goal-owned child. A pending single
+task in a fully static ordinary child is also eligible; static-task exceptions
+are not offered in children containing foreach, dynamic, or embedded Goal stages.
+It requires the retained original
+live host, an exact scope preview, a nonempty reason, and a new confirmation.
+Acceptance appends a predecessor-linked capture revision; it does not change
+saved profile preferences, root role defaults, sibling items, or shared quotas.
+Cancellation, stale authority, reserved/started items, and lease contention do
+not grant replacement execution authority. Ambiguous publication preserves
+UNKNOWN and committed evidence without rollback. Future-template/all-items
+overrides, generated dynamic tasks, arbitrary descendant branches, and cold profile recapture are not admitted
+by this bounded path.
+Ordinary status and accounting writes cannot replace a published profile capture
+or restore a stale capture over changed durable evidence. Such a rejected write
+may leave the run nonterminal; it is not evidence of successful cancellation or
+permission to retry an UNKNOWN request.
+
+A declared child may also be a bounded standalone Goal with its own
+immutable criteria. Its criteria may use exact JSON values or model rubrics
+(`json-control-rubric-v1`); a rubric child must itself allow `verify`, and its
+verification runs with the inherited verifier role. Its source, authority and role profile are captured before
+the first Goal's host confirmation. It inherits that confirmed root's profile,
+shared request budget and original engine admission; it does not request a second
+confirmation or receive a fresh allowance. Scope/effect widening is rejected
+before confirmation. Standalone Goal descendants inherit the confirmed root's
+role-specific model and thinking settings. Their authored defaults and saved
+default profile remain in the immutable source capture but do not override that
+inheritance or require those unused models to be available. Inheritance alone
+does not authorize an exception or change ordinary artifact-graph admission.
+The original nested runner
+executes the child planner and worker, then evaluates the child's oracle.
+The parent independently evaluates its own immutable oracle against the actual
+child result: child achievement alone cannot achieve the parent. A parent planner,
+child planner and child worker consume three actual requests; a shared cap of two
+denies the child worker. Authored standalone Goal descendants are recursively
+captured before confirmation. Goal depth starts at one; the default depth-three
+chain permits a root, child and grandchild, while depth four, active ancestor
+cycles and reduced child-depth violations are rejected before execution.
+The three planners and final worker share four physical requests, counted once
+through the original descendant inventory, grants, acknowledgements and settled
+channels. Completed descendant observation cannot grant new execution, and changed
+authored source or missing descendant evidence prevents parent achievement.
+
+Within that already-confirmed subtree, a captured ordinary wrapper may contain
+one tool-free prework stage followed by one terminal embedded Goal. The wrapper
+retains its ordinary artifact-graph identity and does not increment Goal depth.
+Root planning, ordinary prework, embedded planning and embedded work share four
+requests and the same confirmation. All wrapper and embedded Goal sources are
+captured before confirmation; the parent evaluates the actual embedded oracle.
+Generated publication checks the durable run/compiled pair at each write boundary
+and after publication before committing its private inventory. Mutation or stop
+after the compiled write preserves the exact partial bytes, poisons admission,
+and prevents generated-worker dispatch. Pending observers join the original
+publication rather than recreate authority. These checks do not provide arbitrary
+filesystem compare-and-swap atomicity against unrelated writers.
+
+For a standalone three-Goal chain, same-session root pause/resume can recover
+an interrupted final worker after its provider response and request settlement
+are known and its original native cancellation is acknowledged. Whole-family
+preflight precedes reset; all three completed planners retain their grants, run
+IDs, criteria and captured profile. Only the interrupted worker retries, consuming
+the fifth cumulative request; a cap of four denies that transmission. A sent
+request without a terminal response remains UNKNOWN and cannot acquire recovery
+authority. Neither case permits direct child/grandchild resume or new consent.
+
+Cold child refresh/resume cannot recreate this private admission. The focused
+SDK fixtures and scoped review do not qualify general ordinary/dynamic recursion,
+mixed-wrapper warm recovery, all concurrent stop races or live/provider behavior.
+
+Execute requires current interactive consent bound to the displayed definition,
+profile, roots, effects and oracles. Missing or changed source is rejected before
+policy effects. A model tool call or standalone CLI string cannot replace this
+consent. Successful policy dependencies require current independent verification
+and proven effect drain; ordinary sibling tasks retain their own backend and scope.
+Optional user request/cost limits are shown before consent: a blank limit is no
+cap, while an explicit finite nonnegative integer—including zero—remains the
+authored cap; unavailable usage remains unknown, not zero.
+
+| Guarded interface | Current boundary |
+|---|---|
+| `/workflow goal create <objective>` | Author/save/profile flow; execution is an explicit choice with scoped consent. |
+| `/workflow goal run <ref> "<target>"` | Launches a saved definition as a new named workflow run, not a replacement identity for an interrupted Goal. |
+| `/workflow goal pause\|cancel <runId\|goal_engine_ID>` | Both stop the enclosing ordinary workflow run through its original live interactive host. A stop acknowledgement is not proof that descendants and effects have drained; ordinary cancellation is not a separate irreversible lifecycle. |
+| `/workflow goal resume <runId\|goal_engine_ID>` | Requires original live interactive admission/profile and settled recoverable work. It does not provide cold recovery or permission to replay UNKNOWN effects. |
+
+Ordinary Goal commands do not support `wait`, `apply`, `recover`, or `background`;
+ordinary origin application happens automatically on achievement when consented
+(see "Applying results").
+Use `/workflow goal help` for the controls. Help and registration never grant
+origin-write authority.
+
+Successful workflow tasks do not by themselves satisfy a Goal criterion.
+Independent verifier receipts must establish each criterion; failed or missing
+verification remains unmet or unknown. Preserve interrupted-run evidence and use
+`status`/`evidence` to inspect it rather than forcing a restart.
+
+The source-owned planner can select a fresh corrective generation after measured
+physical drain and independent failed verification. Prior selections, failure
+receipts and request/cost totals remain retained; two no-progress observations
+block further attempts. The bounded planning input encodes repeated history in
+lossless tables, not summaries. Finalizer accounting is complete only when both
+drain and producer finalization supply authenticated measurements; absent usage
+remains unknown.
+
+Candidate/origin writes require explicit physical scope and independent candidate
+verification. Read-only selection never grants these effects implicitly, and no
+command authorizes cold recovery.
+
 ## Natural-language invocation
 
 The extension also registers LLM-callable tools for normal chat requests:
@@ -127,6 +636,7 @@ The extension also registers LLM-callable tools for normal chat requests:
 | `workflow_run` | Start a run when the user explicitly asks to use/run/start a named workflow and provides a concrete task. Set `awaitTerminal: true` when the current turn needs the final result. |
 | `workflow_dynamic` | Start a spec-less direct dynamic run when the user explicitly asks for dynamic workflow execution and provides a concrete task. Optional `model` and `thinking` (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`) values override the controller defaults. Set `awaitTerminal: true` when synthesis must return in the current turn. |
 | `workflow_wait` | Wait for an existing run id or unambiguous prefix to reach terminal state without model-driven file polling, then return semantic status and a bounded final-result preview. |
+| `workflow_goal` | Inspect Goal list/status/criteria/evidence without granting execution, write, or lifecycle authority. |
 
 Examples:
 
@@ -930,13 +1440,66 @@ Subagent worker artifacts are stored under `.pi/workflow-subagents/` by default 
 
 ### Retention
 
+Generic pruning protects all Goal children and their related workflow families, including ordinary Goal recovery and judgment evidence and interrupted, failed, completed, orphaned or partial records. Even a malformed `goalChild` marker is a protection hint, never authority. `--yes` does not override Goal protection. A narrow explicit exception is `pi-workflow prune --goal-family <exact-run-id>` (or `/workflow prune --goal-family <exact-run-id>`): preview an achieved ordinary Goal closure; add `--yes` to delete it. Sequential standalone replans require every earlier generation's original not-achieved deterministic artifact oracle and a final achieved generation. Recursive standalone Goal families additionally require exact parent-child reservations, each ancestor's remaining depth, original captured source bytes bound to the source/spec hashes and compiler definition, and complete shared request accounting. Missing original source capture is a refusal, not permission to reconstruct it from a current authored file. Preview is read-only. Closure requires complete settled request/effect evidence, unique original generation membership, and agreement between current, retained and artifact-path oracle references. Existing topology and supervisor leases fence detachment. All original family members are quarantined and revalidated before irreversible purge. Descendants purge before ancestors, and each mirror purges before its primary evidence; failures report only actually completed member purges. Partial or uncertain detachment preserves recovery evidence. Native observations after relocation require the unchanged original bytes and physical custody, not replacement SDK descriptors or execution authority. Mixed ordinary-wrapper and private Goal families remain outside this ordinary selector; it cannot be combined with generic retention filters. This bounded closure does not establish live/provider acceptance.
+
+The covered sequential-family case is one parent and one standalone child that
+replans after a rejected original oracle. Prior failed-candidate fingerprints
+must match the original criterion subjects, not merely verifier outcomes.
+Each oracle source must name its exact generation slot's executable, or the
+selected child's Goal policy; a rehashed receipt cannot substitute a later
+generation's worker. Current singleton evidence and complete rejected-generation
+history remain distinct. A bounded root replan also covers two distinct captured
+standalone children: the first child succeeds but fails the parent's unchanged
+oracle; a different child then satisfies it. Historical child usage retains its
+exact completion-time request prefix, not the family's later total. Pruning
+derives that prefix from checked generations, sequential child events and
+receipts bound to their original consumed native grants and barriers. Swapped
+receipts, changed prefixes, omitted children and later-child substitutions are
+refused before detach. Ambiguous concurrent child order remains unsupported.
+These offline checks do not qualify general mixed families, root-replan
+stop/resume, or live adaptive behavior.
+
+A single achieved generation may also contain a local read-only worker and a
+standalone Goal child. Explicit family pruning checks both original slot
+memberships, their settled request receipts and the parent's independent oracle;
+local worker slots are not child references. Missing child lineage or a local
+slot without its original executable remains a refusal.
+
+One bounded mixed child is also covered: an ordinary wrapper containing an
+explicitly tool-free, read-only single prework stage followed by one embedded
+Goal. Cold closure requires original wrapper and embedded-source captures,
+the captured prework profile, the canonical compiled prompt and dependency,
+the exact executable inventory and original native request receipts. The
+prework contributes to shared usage before the embedded Goal planner; the
+wrapper itself adds no Goal depth. Deleted authored source files do not replace
+these captures, and missing captures are refused rather than reconstructed.
+Arbitrary dynamic/Worker stages, additional executables, uncaptured defaults
+and broader mixed shapes remain protected.
+
 Nothing is deleted automatically. Run `pi-workflow prune` or `/workflow prune` to preview terminal runs beyond the retention window; add `--yes` to delete them. Task `output.log` and `raw.md` may share storage only within the runtime's bounded run/task/attempt link contract. Raw reads validate exact ownership and source identity, canonical containment, and complete inode-link accounting; arbitrary, external, unaccounted links and observed substitutions fail closed. New host-owned publication requires a trusted host-recorded digest: a result-sidecar digest alone is not authority, and failed owner establishment cannot silently produce fresh legacy data. Link failures after valid ownership can use independent authoritative bytes while retaining their host binding.
 
 Raw read results and read-ledger rows include `rawAssurance`. `host_digest_verified` means the complete bytes match the trusted host binding, even when the returned view is truncated. Known legacy layouts expose their current scoped contents as `legacy_scoped_unattested`, with `originalBytes: "unattested"`; this does not attest historical final-answer bytes. Low-level writers without host publication context use independent storage and report `independent_unattested`, not host verification. These checks do not migrate old data, expand the allowed filesystem scope, prove semantic correctness, or authenticate an arbitrarily falsified host record. Do not infer assurance or physical savings from a filename, and do not rewrite historical artifacts by hand.
 
 Retention keeps the newest 50 terminal runs by default; `--keep` changes that count, and `--older-than` additionally restricts deletion to older terminal records. Preview is read-only: it acquires no topology/supervisor leases and performs no quarantine, deletion, or index write. Destructive pruning coordinates with first run publication through a workflow-root topology lease and checks candidate supervisor leases and generation identity again before detachment. Live or indeterminate supervisor leases protect a run. Every retained child protects its ancestors, regardless of child status; selected children purge before parents, and failed child purges or retained primary quarantines continue to protect ancestry. Unknown, unreadable, ambiguous, or cyclic references are protected rather than guessed. Preview conservatively reports retained-child protection instead of simulating successful child deletion.
 
-Prune JSON distinguishes canonical detachment from successful purge: `detached: true` alone does not mean `deleted: true` or `purged: true`. A pre-detach failure retains the canonical run and may leave a quarantined mirror; a post-detach failure can leave both quarantined trees. `retainedEvidencePath` and `retainedMirrorPath`, when present, identify recovery evidence and are also printed in text. Any canonical detachment triggers an index refresh even if purge fails; a recreated same-ID generation is preserved. Unprotected selected-run failures produce `summary.error` and CLI exit 1. `deletedBytes` credits only fully purged candidates, never retained quarantine bytes; partial purge may therefore understate freed bytes. Retention recovery is manual: inspect the reported paths and current generation before restoring or removing evidence. Prune neither automatically restores over a new run nor automatically deletes retained recovery evidence.
+Prune JSON distinguishes canonical detachment from successful purge: `detached: true` alone does not mean `deleted: true` or `purged: true`. A pre-detach failure retains the canonical run and may leave a quarantined mirror; a post-detach failure can leave both quarantined trees. `retainedEvidencePath` and `retainedMirrorPath` identify recovery locations and are also printed in text. Ordinary per-run detachment triggers an index refresh even if purge fails; explicit ordinary-family indexing follows successful whole-family revalidation. `indexUpdated` reports whether that update completed. A recreated same-ID generation is preserved. Unprotected selected-run failures produce `summary.error` and CLI exit 1.
+
+For an explicit ordinary Goal family, purge observes the original quarantine
+after both successful and failed removal calls. Confirmed absent roots are not
+reported as retained; a member is `deleted`/`purged` only when both roots are gone.
+`deletedBytes` counts confirmed removed original logical file bytes, including
+partial removal. Hard links across primary and mirror roots count once, and
+bytes are credited only after their last selected-root link disappears.
+The operation's own supervisor lease is excluded. New or replaced directories,
+changed files and unreadable observations stop further purge. A row error
+containing `purge observation incomplete` means its paths are last-known,
+unverified recovery locations and its byte accounting is only a confirmed lower
+bound: zero does not prove no data was removed. Other prune modes credit only
+fully purged candidates and can understate partial deletion.
+
+Retention recovery is manual: inspect the reported errors, paths and current
+generation before restoring or removing evidence. Prune neither retries failed
+purges automatically nor restores over a new run.
 
 All four bundled workflows use a common completion envelope while preserving workflow-specific verdicts and evidence models. A successful final renderer writes a compact `completionSummaryMarkdown` for lossless parent handoff and `final-report.md` as the stable user-facing sidecar; completion delivery appends its safe project-relative path and any declared evidence-audit path. The first detailed section is **Executive summary**, evidence and limitations remain explicit, and supporting links appear only in the final **Related artifacts** section. `deep-research` keeps byte-identical `executive.md` plus its claim-level `audit.md`; `deep-review` keeps byte-identical `review.md`; `spec-review` and `impact-review` keep their canonical source controls in `source-ledger.json`. Missing, partial, contradictory, or incompletely rendered canonical ledgers fail or block the final support task instead of producing a clean completion.
 

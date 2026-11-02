@@ -9,13 +9,18 @@ import { runDynamicDecisionPersistCall, normalizeDynamicFanoutPlanRequest } from
 import { runDynamicDecisionLoop } from '../../.tmp/unit/dynamic-decision-loop.js';
 import { extractDynamicStateArtifact, assembleDynamicStateIndex } from '../../.tmp/unit/dynamic-state-index.js';
 import { buildFanoutBranchPlanRequests } from '../../.tmp/unit/dynamic-loop-actions.js';
+import { runDynamicHelperCall } from '../../.tmp/unit/dynamic-controller-calls.js';
+import { DynamicControllerBudgetBlocked } from '../../.tmp/unit/dynamic-controller-errors.js';
 
 const decision = (round, actions, status = 'continue') => ({schema:'dynamic-decision-v1',decisionId:`decision-${round}`,round,phase:'round',status,nextActions:actions});
 const work = (id, dependsOn) => ({type:'add_work_item',actionId:`add-${id}`,workItemId:id,prompt:`Research ${id}`, ...(dependsOn ? {dependsOn} : {})});
 const loop = {verifier:{agent:'unit-scout',tools:['read']},synthesis:{agent:'unit-scout',tools:['read']},planner:{agent:'unit-scout',tools:['read'],outputProfile:'generic_summary_v1'},workerDefaults:{agent:'unit-scout',tools:['read'],outputProfile:'candidate_findings_v1'},allowedAgents:['unit-scout'],allowedTools:['read'],maxDecisionRounds:3,maxActionsPerRound:3};
 async function fixture(t, controller, dynamic, helpers = {}) {
  const dir = await mkdtemp(join(tmpdir(), 'piwf-dynamic-regression-'));
- t.after(() => rm(dir, {recursive:true,force:true}));
+ t.after(async () => {
+  await h.flushPendingIndexUpdatesForTests();
+  await rm(dir, {recursive:true,force:true});
+ });
  h.captureSubagentPrompts([]); h.writeAgent(dir,'unit-scout','read');
  const bundle=join(dir,'bundle'); await mkdir(bundle); await writeFile(join(bundle,'controller.mjs'),controller.replaceAll('$ROOT', dir));
  for (const [name, code] of Object.entries(helpers)) await writeFile(join(bundle,name),code.replaceAll('$ROOT',dir));
@@ -23,7 +28,7 @@ async function fixture(t, controller, dynamic, helpers = {}) {
  const specPath=join(bundle,'spec.json'); await writeFile(specPath,JSON.stringify(spec));
  const compiled=await h.compileWorkflow(spec,{cwd:dir,task:'Local fake-only regression',specPath});
  const {run}=await h.createWorkflowRunRecord(dir,compiled,specPath); await h.writeStaticRunArtifacts(dir,run,compiled,spec); await h.writeRunRecord(dir,run);
- return {dir,run};
+ return {dir,run,compiled,specPath};
 }
 async function schedule(f) { await h.scheduleRun(f.dir,f.run.runId); return h.readRunRecord(f.dir,f.run.runId); }
 async function finish(f,r,id,control) { await h.completeTask(f.dir,h.taskBySpec(r,`adaptive.${id}`),control); await h.writeRunRecord(f.dir,r); }
@@ -61,18 +66,49 @@ test('invalid decision attempts retain immutable distinct event-linked raw and v
  await assert.rejects(runDynamicDecisionPersistCall({...attempts[0],rawDecision:{bad:'changed'}}),/request changed/);
 });
 
-test('controller deadline terminates late-started helper and persists terminal evidence before settlement', async t => {
- const f=await fixture(t,`export default async ctx => { await new Promise(r=>setTimeout(r,650)); await ctx.helper('slow'); return {control:{digest:'done'}}; };`,{budget:{maxRuntimeMs:1000},helpers:{slow:{uses:'./slow.mjs'}}},{'slow.mjs':`import {writeFile} from 'node:fs/promises'; export default async () => { await new Promise(r=>setTimeout(r,650)); await writeFile('$ROOT/late-marker','late'); return {ok:true}; };`});
- const r=await schedule(f); assert.equal(h.taskBySpec(r,'adaptive.controller').statusDetail,'dynamic_budget_blocked');
+test('controller deadline terminates an entered helper and persists terminal evidence before settlement', async t => {
+ const f=await fixture(t,`export default async ctx => { await ctx.helper('slow'); return {control:{digest:'done'}}; };`,{budget:{maxRuntimeMs:1000},helpers:{slow:{uses:'./slow.mjs'}}},{'slow.mjs':`import {access,writeFile} from 'node:fs/promises'; export default async () => { await writeFile('$ROOT/helper-entered','entered'); for (;;) { try { await access('$ROOT/helper-release'); break; } catch (error) { if (error.code !== 'ENOENT') throw error; } await new Promise(r=>setTimeout(r,10)); } await writeFile('$ROOT/late-marker','late'); return {ok:true}; };`});
+ const r=await schedule(f); const controller=h.taskBySpec(r,'adaptive.controller');
+ assert.equal(controller.status,'blocked'); assert.equal(controller.statusDetail,'dynamic_budget_blocked');
  const events=await h.readDynamicEvents(f.dir,r.runId);
- const started=events.find(e=>e.type==='helper.started'); assert.ok(started);
- const terminal=events.find(e=>e.type==='helper.cancelled');
+ const starts=events.filter(e=>e.type==='helper.started'); assert.equal(starts.length,1,JSON.stringify({controller,events}));
+ await access(join(f.dir,'helper-entered')); // Durable admission alone does not prove physical helper entry.
+ const started=starts[0]; const terminals=events.filter(e=>e.type==='helper.cancelled');
+ assert.equal(terminals.length,1,'helper must have durable cancellation at controller settlement');
+ const terminal=terminals[0];
+ assert.equal(started.opId,'adaptive.controller:helper:slow:001');
+ assert.match(started.requestHash,/^[a-f0-9]{64}$/);
+ assert.equal(terminal.opId,started.opId); assert.equal(terminal.requestHash,started.requestHash);
+ assert.equal(events.filter(e=>e.type==='helper.completed'||e.type==='helper.failed').length,0);
  const ledger=JSON.stringify(events);
+ await writeFile(join(f.dir,'helper-release'),'release after settlement');
  await new Promise(r=>setTimeout(r,800));
  await assert.rejects(access(join(f.dir,'late-marker')), {code:'ENOENT'}, 'owned helper must not write a local marker after controller settlement');
- assert.ok(terminal,'helper must have durable cancellation at controller settlement');
- assert.equal(terminal.opId,started.opId); assert.equal(terminal.requestHash,started.requestHash);
  assert.equal(JSON.stringify(await h.readDynamicEvents(f.dir,r.runId)),ledger,'no post-settlement ledger writes');
+});
+
+test('late helper admission inherits the exact remaining controller deadline without resetting its budget', async t => {
+ for (const [offset, expected] of [[350,350],[-1,0]]) await t.test(`deadline offset ${offset}`, async t => {
+  const f=await fixture(t,`export default async ctx => ctx.helper('slow');`,{budget:{maxRuntimeMs:1000},helpers:{slow:{uses:'./slow.mjs'}}},{'slow.mjs':`export default async () => ({ok:true});`});
+  const fixedNow=Date.now(); const clock=t.mock.method(Date,'now',()=>fixedNow);
+  const failure=new DynamicControllerBudgetBlocked('fixture inherited deadline exhausted'); let calls=0;
+  try {
+   await assert.rejects(runDynamicHelperCall({
+    cwd:f.dir,run:f.run,controllerTask:h.taskBySpec(f.run,'adaptive.controller'),
+    helperSpecPath:f.specPath,dynamic:f.compiled.tasks[0].dynamic,
+    helperId:'slow',callIndex:1,helperInput:undefined,deadline:fixedNow+offset,
+    runDynamicHelperWorker:async input=>{ calls+=1; assert.equal(input.timeoutMs,expected); throw failure; },
+   }),error=>error===failure);
+   assert.equal(calls,1);
+   const events=await h.readDynamicEvents(f.dir,f.run.runId);
+   const starts=events.filter(e=>e.type==='helper.started'); const terminals=events.filter(e=>e.type==='helper.cancelled');
+   assert.equal(starts.length,1); assert.equal(terminals.length,1);
+   assert.equal(starts[0].opId,'adaptive.controller:helper:slow:001');
+   assert.match(starts[0].requestHash,/^[a-f0-9]{64}$/);
+   assert.equal(terminals[0].opId,starts[0].opId); assert.equal(terminals[0].requestHash,starts[0].requestHash);
+   assert.equal(events.filter(e=>e.type==='helper.completed'||e.type==='helper.failed').length,0);
+  } finally { clock.mock.restore(); }
+ });
 });
 
 test('later-round uppercase dependency chain and cross-round verification preserve finding provenance through real scheduler', async t => {

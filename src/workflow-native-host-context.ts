@@ -219,6 +219,11 @@ export function withWorkflowNativeHostContext<T>(
 	);
 }
 
+/** Goal-participating launches never inherit ambient native host tools. */
+export function withoutWorkflowNativeHostContext<T>(operation: () => T): T {
+	return activeSessionContext.run(null, operation);
+}
+
 /** Freeze a direct launch's host decision, including absence, across async work. */
 export function withResolvedWorkflowNativeHostContext<T>(
 	cwd: string,

@@ -31,6 +31,7 @@ import {
 	runWorkflow,
 	scheduleRun,
 	stopRun,
+	stopWorkflowWatchersForTests,
 	waitForRun,
 } from "../../.tmp/unit/engine.js";
 import {
@@ -757,6 +758,7 @@ test("profile-only batching uses one physical launch, preserves per-item artifac
 			task: "Run batched items.",
 			executionProfile: "batched",
 		});
+		await stopWorkflowWatchersForTests([cwd]);
 
 		// Complete source and launch the pair. The tail must remain pending while
 		// two logical member records occupy maxConcurrency=2.
@@ -789,8 +791,13 @@ test("profile-only batching uses one physical launch, preserves per-item artifac
 			undefined,
 			"member must never own a backend handle",
 		);
+		const pollsBeforeRefresh = fake.batchStatusCalls();
 		await refreshRun(cwd, started.runId);
-		assert.equal(fake.batchStatusCalls(), 1, "only the leader is polled");
+		assert.equal(
+			fake.batchStatusCalls() - pollsBeforeRefresh,
+			1,
+			"only the leader is polled by the explicit refresh",
+		);
 		assert.equal(
 			fake.launches.length,
 			2,

@@ -8,6 +8,10 @@ import {
 	writeJsonAtomic,
 } from "./store.js";
 import type { WorkflowRunRecord } from "./types.js";
+import {
+	assertNotProtectedGoalEngineRun,
+	isProtectedGoalEngineRun,
+} from "./goal-protected-legacy.js";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 60_000;
 const MAX_WAIT_TIMEOUT_MS = 14_400_000;
@@ -18,11 +22,13 @@ export async function refreshRun(
 	runIdOrPrefix: string,
 ): Promise<WorkflowRunRecord> {
 	const current = await readRunRecord(cwd, runIdOrPrefix);
+	assertNotProtectedGoalEngineRun(current);
 	const refreshed = await withRunLease(cwd, current.runId, async () => {
 		const run = await readRunRecord(cwd, current.runId);
 		return resolveWorkflowBackend(run).refreshRun(cwd, run);
 	});
-	return refreshed ?? current;
+	if (refreshed) return refreshed;
+	return current;
 }
 
 export function hasActiveSchedulerWork(
@@ -74,6 +80,7 @@ export async function refreshRunOrRecordPollError(
 	} catch (error) {
 		if (!isRefreshPollAggregateError(error)) throw error;
 		const run = fallbackRun ?? (await readRunRecord(cwd, runIdOrPrefix));
+		if (isProtectedGoalEngineRun(run)) throw error;
 		await recordSupervisorError(cwd, run.runId, error);
 		return run;
 	}

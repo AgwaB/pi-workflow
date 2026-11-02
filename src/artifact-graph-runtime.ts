@@ -3,10 +3,12 @@ import { dirname, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { hashDynamicRequest } from "./dynamic-events.js";
+import { goalHash } from "./goal-json.js";
 import { stringifyPromptJson } from "./prompt-json.js";
 import { compactStrings } from "./strings.js";
 import { loadWorkflowHelper } from "./workflow-helpers.js";
 import { prepareWorkflowNativeTaskPolicy } from "./workflow-native-tool-policy.js";
+import { assertNotProtectedGoalEngineRun } from "./goal-protected-legacy.js";
 import {
 	WORKFLOW_ARTIFACT_TOOL_NAME,
 	writeWorkflowArtifactExtensionWrapper,
@@ -76,6 +78,7 @@ export async function executeSupportTask(
 	if (!compiledTask.support) {
 		throw new Error("support metadata is missing");
 	}
+	assertNotProtectedGoalEngineRun(run);
 	task.status = "running";
 	task.statusDetail = "running";
 	task.startedAt = task.startedAt ?? new Date().toISOString();
@@ -1056,6 +1059,20 @@ export function supportOutputRefs(
 			: [];
 	return urls.filter((url): url is string => typeof url === "string");
 }
+export const workflowTaskProfileBinding = (task: CompiledTask): string => goalHash({
+	agent: task.agent, agentPath: task.agentPath,
+	agentSystemPrompt: task.agentSystemPrompt, runtime: task.runtime,
+});
+
+// Only the compiler-owned preparation producer can attest a lowering. Capture
+// its source before awaits and check its exact result again at consumption.
+const preparedTaskProfiles = new WeakMap<CompiledTask, { source: CompiledTask; canonical: string; launch: string }>();
+export function isOriginalPreparedTaskProfile(task: CompiledTask, canonical: string): boolean {
+	const original = preparedTaskProfiles.get(task);
+	return original?.canonical === canonical && workflowTaskProfileBinding(original.source) === canonical &&
+		original.launch === workflowTaskProfileBinding(task);
+}
+
 export async function prepareDagTask(
 	cwd: string,
 	run: WorkflowRunRecord,
@@ -1065,7 +1082,17 @@ export async function prepareDagTask(
 		run,
 	),
 ): Promise<CompiledWorkflow["tasks"][number]> {
-	const compiledTask = prepareWorkflowNativeTaskPolicy(compiledFlow.tasks[index]!, run.nativeHost);
+	// Canonical profile binding is taken from the frozen compiled task; the
+	// native host policy only lowers the launch copy.
+	const sourceTask = compiledFlow.tasks[index]!;
+	const canonical = workflowTaskProfileBinding(sourceTask);
+	const compiledTask = prepareWorkflowNativeTaskPolicy(sourceTask, run.nativeHost);
+	const seal = (prepared: CompiledTask): CompiledTask => {
+		if (workflowTaskProfileBinding(sourceTask) !== canonical)
+			throw new Error("Canonical task profile changed during launch preparation");
+		preparedTaskProfiles.set(prepared, { source: sourceTask, canonical, launch: workflowTaskProfileBinding(prepared) });
+		return prepared;
+	};
 	const task = run.tasks[index]!;
 	const contextDependsOn =
 		compiledTask.contextDependsOn ?? compiledTask.dependsOn ?? [];
@@ -1079,11 +1106,11 @@ export async function prepareDagTask(
 			validationSnapshot,
 		);
 		assertFinalCompiledPromptWithinCap(preparedTask);
-		return preparedTask;
+		return seal(preparedTask);
 	}
 	if (contextDependsOn.length === 0) {
 		assertFinalCompiledPromptWithinCap(compiledTask);
-		return compiledTask;
+		return seal(compiledTask);
 	}
 
 	const bySpecId = new Map(
@@ -1120,7 +1147,7 @@ export async function prepareDagTask(
 		].join("\n\n"),
 	};
 	assertFinalCompiledPromptWithinCap(preparedTask);
-	return preparedTask;
+	return seal(preparedTask);
 }
 
 type PerItemLedgerProjection = {

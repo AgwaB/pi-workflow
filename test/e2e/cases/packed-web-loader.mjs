@@ -16,9 +16,14 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import {
+	assertArtifactFileUnchanged, assertPackedArchiveUnchanged, assertCompiledTreesEqual,
+	assertCompiledTreeUnchanged, captureArtifactFile, captureCompiledTree,
+	capturePackedArchive, readCompiledManifest,
+} from "../compiled-artifact-proof.mjs";
 
 const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
-const consumerRoot = mkdtempSync(join(tmpdir(), "pi-workflow-packed-web-loader-"));
+const consumerRoot = realpathSync(mkdtempSync(join(tmpdir(), "pi-workflow-packed-web-loader-")));
 const packDir = join(consumerRoot, "pack");
 const unpackDir = join(consumerRoot, "consumer");
 const packageRoot = join(unpackDir, "package");
@@ -44,6 +49,16 @@ Object.assign(process.env, {
 });
 
 try {
+	assert.ok(process.env.PI_WORKFLOW_E2E_PROCESS_LOG, "packed proof requires the original E2E evidence directory");
+	const evidenceDir = dirname(process.env.PI_WORKFLOW_E2E_PROCESS_LOG);
+	const compileManifestPath = join(evidenceDir, "compiled-artifacts.json");
+	const compileManifest = readCompiledManifest(compileManifestPath, join(sourceRoot, ".tmp", "unit"));
+	const sourceDist = captureCompiledTree(join(sourceRoot, "dist"));
+	const sourceInputs = Object.fromEntries(["package.json", "tsconfig.json"].map(name => {
+		const captured = captureArtifactFile(join(sourceRoot, name));
+		return [name, { size: captured.size, sha256: captured.sha256, identity: captured.identity }];
+	}));
+	assertCompiledTreesEqual(compileManifest.tree, sourceDist);
 	const packOutput = execFileSync(
 		"npm",
 		["pack", "--pack-destination", packDir, "--silent", "--ignore-scripts"],
@@ -61,12 +76,17 @@ try {
 			},
 		},
 	);
-	const tarballName = packOutput.trim().split(/\r?\n/).at(-1);
-	assert.ok(tarballName, "npm pack did not report a tarball");
-	execFileSync("tar", ["-xzf", join(packDir, tarballName), "-C", unpackDir], {
+	const archive = capturePackedArchive(packDir, packOutput);
+	assertPackedArchiveUnchanged(archive.path, archive);
+	execFileSync("tar", ["-xzf", archive.path, "-C", unpackDir], {
 		cwd: consumerRoot,
 		timeout: 60_000,
 	});
+	assertPackedArchiveUnchanged(archive.path, archive);
+	const packedDist = captureCompiledTree(join(packageRoot, "dist"));
+	assertCompiledTreesEqual(compileManifest.tree, packedDist);
+	assertCompiledTreeUnchanged(sourceDist);
+	assertArtifactFileUnchanged(compileManifestPath, compileManifest);
 	assert.ok(existsSync(join(packageRoot, "node_modules", "pi-web-access", "storage.ts")));
 
 	// A tarball consumer supplies the package's required Pi peer. Link the local
@@ -80,7 +100,7 @@ try {
 			"dir",
 		);
 	}
-	for (const packageName of ["typebox"]) {
+	for (const packageName of ["typebox", "ssh2"]) {
 		const target = join(packageRoot, "node_modules", packageName);
 		if (!existsSync(target)) {
 			symlinkSync(join(sourceRoot, "node_modules", packageName), target, "dir");
@@ -359,6 +379,15 @@ try {
 	}
 	assert.deepEqual(networkResources, [], "packed loader attempted network activity");
 	assert.equal(loadedToolExecutions, 0, "packed loader executed a provider/tool implementation");
+	for (const snapshot of [compileManifest.tree, sourceDist, packedDist]) assertCompiledTreeUnchanged(snapshot);
+	assertArtifactFileUnchanged(compileManifestPath, compileManifest);
+	assertPackedArchiveUnchanged(archive.path, archive);
+	for (const [name, captured] of Object.entries(sourceInputs)) assertArtifactFileUnchanged(join(sourceRoot, name), captured);
+	writeFileSync(join(evidenceDir, "packed-dist-correspondence.json"), `${JSON.stringify({
+		schema: "packed-dist-correspondence-v1", distOnly: true,
+		compileManifest: { sha256: compileManifest.sha256, size: compileManifest.size, identity: compileManifest.identity },
+		compiled: compileManifest.tree, sourceDist, packedDist, archive, sourceInputs,
+	})}\n`, { flag: "wx", mode: 0o600 });
 	console.log("validated no-install packed consumer plus legacy, normalized, and mixed real-Pi wrappers");
 } finally {
 	rmSync(consumerRoot, { recursive: true, force: true });

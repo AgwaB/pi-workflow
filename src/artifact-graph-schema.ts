@@ -56,6 +56,7 @@ const STAGE_TYPES = new Set<ArtifactGraphStageType>([
 	"loop",
 	"dag",
 	"dynamic",
+	"goal",
 ]);
 const STAGE_KEYS = new Set([
 	"id",
@@ -87,6 +88,7 @@ const STAGE_KEYS = new Set([
 	"outputFrom",
 	"support",
 	"dynamic",
+	"goal",
 	"until",
 	"maxRounds",
 	"progressPath",
@@ -409,6 +411,17 @@ function collectDeclaredProfileStages(
 				if (isRecord(target)) addTarget(`${canonicalId}.$${slot}`, target);
 			}
 		}
+		if (stage.type === "goal" && isRecord(stage.goal)) {
+			for (const slot of [
+				"planner",
+				"worker",
+				"verifier",
+				"synthesis",
+				"judge",
+			] as const) {
+				addTarget(`${canonicalId}.$${slot}`, { type: "goal" });
+			}
+		}
 	};
 	const graph = spec.artifactGraph;
 	if (isRecord(graph) && Array.isArray(graph.stages)) {
@@ -418,6 +431,35 @@ function collectDeclaredProfileStages(
 		}
 	}
 	return { byCanonicalId, nestedCanonicalIdsByRawId };
+}
+
+/** Validates shared authored metadata for a root Goal workflow definition. */
+export function validateGoalWorkflowMetadata(
+	spec: Record<string, unknown>,
+	issues: ValidationIssue[],
+): void {
+	validateDefaults(spec.defaults, "$.defaults", issues);
+	validateRoles(spec.roles, "$.roles", issues);
+	const slots = new Map<string, readonly Record<string, unknown>[]>();
+	for (const slot of [
+		"planner",
+		"worker",
+		"verifier",
+		"synthesis",
+		"judge",
+	] as const) {
+		slots.set(`goal.$${slot}`, [{ type: "goal" }]);
+	}
+	validateExecutionProfiles(
+		spec.executionProfiles,
+		{ byCanonicalId: slots, nestedCanonicalIdsByRawId: new Map() },
+		issues,
+	);
+	validateDefaultExecutionProfile(
+		spec.defaultExecutionProfile,
+		spec.executionProfiles,
+		issues,
+	);
 }
 
 function validateDefaultExecutionProfile(
@@ -901,6 +943,7 @@ function validateStage(
 	validateOutput(stage.output, `${path}.output`, issues);
 	validateSupportStage(stage, type, path, issues);
 	validateDynamicStage(stage, type, path, issues);
+	validateGoalStage(stage, type, path, issues);
 	validateForeachStage(stage, type, path, issues);
 	validateLoopStage(stage, type, path, siblingIds, sourceIds, issues);
 	validateDagStage(stage, type, path, issues);
@@ -921,7 +964,8 @@ function validateStageType(
 	if (!STAGE_TYPES.has(type as ArtifactGraphStageType)) {
 		issues.push({
 			path,
-			message: "must be one of: single, reduce, foreach, loop, dag, dynamic",
+			message:
+				"must be one of: single, reduce, foreach, loop, dag, dynamic, goal",
 		});
 		return undefined;
 	}
@@ -1589,6 +1633,51 @@ function validateDynamicStage(
 	);
 }
 
+function validateGoalStage(
+	stage: Record<string, unknown>,
+	type: ArtifactGraphStageType | undefined,
+	path: string,
+	issues: ValidationIssue[],
+): void {
+	if (type !== "goal") {
+		if (stage.goal !== undefined) {
+			issues.push({ path: `${path}.goal`, message: "is only valid for goal stages" });
+		}
+		return;
+	}
+	const goal = recordAt(stage.goal, `${path}.goal`, issues);
+	if (!goal) return;
+	rejectUnknownKeys(goal, new Set(["uses"]), `${path}.goal`, issues);
+	const uses = requiredString(goal.uses, `${path}.goal.uses`, issues);
+	if (uses !== undefined)
+		validateWorkflowBundleJsonRef(uses, `${path}.goal.uses`, issues);
+	for (const key of [
+		"prompt",
+		"injectRuntimeTask",
+		"agent",
+		"role",
+		"profileRole",
+		"cwd",
+		"model",
+		"thinking",
+		"fast",
+		"approvalMode",
+		"tools",
+		"readOnly",
+		"worktreePolicy",
+		"maxRuntimeMs",
+		"maxConcurrency",
+		"maxItems",
+	] as const) {
+		if (stage[key] !== undefined) {
+			issues.push({
+				path: `${path}.${key}`,
+				message: "is not allowed for goal stages",
+			});
+		}
+	}
+}
+
 function validateDynamicBudget(
 	value: unknown,
 	path: string,
@@ -1696,7 +1785,7 @@ function validateDynamicHelpers(
 	}
 }
 
-function validateDynamicWorkflows(
+export function validateDynamicWorkflows(
 	value: unknown,
 	path: string,
 	issues: ValidationIssue[],

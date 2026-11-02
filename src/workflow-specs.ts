@@ -24,6 +24,7 @@ import {
 	isArtifactGraphWorkflowSpecShape,
 	parseArtifactGraphWorkflowSpec,
 } from "./artifact-graph-schema.js";
+import { isGoalWorkflowSpecShape } from "./goal-workflow-schema.js";
 import { piAgentDir } from "./pi-agent-dir.js";
 import {
 	type ArtifactGraphWorkflowSpec,
@@ -716,9 +717,8 @@ async function filterRunnableSpecFiles(
 async function isRunnableSpecFile(file: string): Promise<boolean> {
 	if (extname(file).toLowerCase() !== ".json") return false;
 	try {
-		return isArtifactGraphWorkflowSpecShape(
-			JSON.parse(await readFile(file, "utf8")),
-		);
+		const spec = JSON.parse(await readFile(file, "utf8"));
+		return isArtifactGraphWorkflowSpecShape(spec) || isGoalWorkflowSpecShape(spec);
 	} catch {
 		return false;
 	}

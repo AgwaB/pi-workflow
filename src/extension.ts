@@ -6,7 +6,7 @@ import type {
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { closeSync, openSync } from "node:fs";
-import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import {
 	dirname,
 	isAbsolute as isAbsolutePath,
@@ -24,6 +24,9 @@ import {
 	withWorkflowNativeHostContext,
 } from "./workflow-native-host-context.js";
 import { compileWorkflow } from "./compiler.js";
+import { createWorkflowGoalEngineRuntime, type WorkflowGoalEngineRuntime } from "./goal-workflow-engine-runtime.js";
+import { installGoalHostSessionIssuer } from "./goal-host-session.js";
+import type { WorkflowGoalPolicyHost } from "./goal-workflow-runtime.js";
 import {
 	formatLogs,
 	formatHumanRunLaunch,
@@ -37,9 +40,17 @@ import {
 	refreshRun,
 	resumeRun,
 	resumeSupervisors,
+	beginWorkflowGoalHumanReview,
+	beginWorkflowGoalProfileException,
+	assertWorkflowGoalProfileExceptionCommandCurrent,
+	discardWorkflowGoalHumanReview,
+	discardWorkflowGoalProfileExceptionCommand,
 	stopRun,
 	runDynamicTask,
 	runWorkflowSpec,
+	submitWorkflowGoalHumanReview,
+	submitWorkflowGoalProfileException,
+	previewWorkflowGoalProfileExceptionCommand,
 	WORKFLOW_PROMPT_SCHEMA_DIAGNOSTIC_SINK,
 	waitForRun,
 } from "./engine.js";
@@ -47,6 +58,7 @@ import { WORKFLOW_COMMAND, WORKFLOW_HELP } from "./index.js";
 import { showWorkflowView } from "./workflow-view.js";
 import {
 	buildWorkflowProfilePickerChoices,
+	collectWorkflowProfileRuntimeOverride,
 	configureWorkflowExecutionProfile,
 } from "./workflow-profile-ui.js";
 import {
@@ -73,6 +85,7 @@ import {
 	acquireRunFileLease,
 	fromProjectPath,
 	isMockRunProvenance,
+	isSafeRunId,
 	readFreshIndex,
 	readJson,
 	readRunRecord,
@@ -82,9 +95,11 @@ import {
 	writeJsonExclusive,
 } from "./store.js";
 import { loadWorkflowSpec } from "./schema.js";
+import { parseGoalWorkflowSpec } from "./goal-workflow-schema.js";
 import { listWorkflows, resolveWorkflowRef } from "./workflow-specs.js";
 import {
 	type CompiledWorkflow,
+	type GoalWorkflowSpec,
 	type ThinkingLevel,
 	type WorkflowExecutionProfileSelection,
 	type WorkflowRunLaunchCapture,
@@ -146,6 +161,10 @@ const WORKFLOW_FEEDBACK_BIND_RETRY_MS = 50;
 let workflowFeedbackPollMs = RUN_FEEDBACK_POLL_MS;
 let workflowFeedbackBindWaitMs = WORKFLOW_FEEDBACK_BIND_WAIT_MS;
 const runFeedbackTimers = new Map<string, ReturnType<typeof setInterval>>();
+const runFeedbackInFlight = new Map<
+	string,
+	Map<ReturnType<typeof setInterval>, Set<Promise<void>>>
+>();
 const activeWorkflowUiTimers = new Map<
 	string,
 	ReturnType<typeof setInterval>
@@ -156,6 +175,30 @@ export const WORKFLOW_LIST_TOOL = "workflow_list" as const;
 export const WORKFLOW_RUN_TOOL = "workflow_run" as const;
 export const WORKFLOW_DYNAMIC_TOOL = "workflow_dynamic" as const;
 export const WORKFLOW_WAIT_TOOL = "workflow_wait" as const;
+
+export const GOAL_TOOL = "workflow_goal" as const;
+
+const GOAL_TOOL_PARAMETERS = {
+	type: "object",
+	additionalProperties: false,
+	properties: {
+		action: {
+			type: "string",
+			enum: [
+				"list",
+				"status",
+				"criteria",
+				"evidence",
+			],
+		},
+		goalId: {
+			type: "string",
+			description:
+				"Exact ordinary workflow run ID or goal_engine ID. Required except for list and status of all recorded Goals.",
+		},
+	},
+	required: ["action"],
+} as const;
 
 const WORKFLOW_LIST_TOOL_PARAMETERS = {
 	type: "object",
@@ -280,6 +323,9 @@ const WORKFLOW_DYNAMIC_TOOL_PARAMETERS = {
 export default function workflowExtension(pi: ExtensionAPI): void {
 	let workflowCompletionCache: Array<{ name: string }> = [];
 	let releaseNativeHostContext: (() => void) | undefined;
+	const goalProduct = isWorkflowSupervisorEnabled()
+		? { runtime: createWorkflowGoalEngineRuntime(installGoalHostSessionIssuer(pi)) }
+		: undefined;
 	pi.on("session_start", async (event, ctx) => {
 		releaseNativeHostContext?.();
 		releaseNativeHostContext = captureWorkflowNativeHostContext(pi, ctx);
@@ -342,6 +388,7 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 
 	registerWorkflowNaturalLanguageTools(pi);
 	registerWorkflowWaitTool(pi);
+	registerGoalTool(pi, process.env);
 
 	pi.registerCommand(WORKFLOW_COMMAND, {
 		description: "Open the workflow board and inspect runs",
@@ -349,7 +396,7 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 			return workflowArgumentCompletions(prefix, workflowCompletionCache) ?? null;
 		},
 		handler: async (args, ctx) => {
-			await withWorkflowNativeHostContext(ctx, () => handleWorkflowCommand(args, ctx, pi));
+			await withWorkflowNativeHostContext(ctx, () => handleWorkflowCommand(args, ctx, pi, goalProduct));
 		},
 	});
 }
@@ -563,6 +610,57 @@ export function registerWorkflowWaitTool(
 	} as any);
 }
 
+export function registerGoalTool(
+	pi: ExtensionAPI,
+	env: NodeJS.ProcessEnv = process.env,
+): void {
+	if (!isWorkflowSupervisorEnabled(env)) return;
+	pi.registerTool({
+		name: GOAL_TOOL,
+		label: "Workflow Goal",
+		description:
+			"Inspect current Goal state. Model-tool mutations cannot mint trusted user provenance or execution authority.",
+		promptSnippet:
+			"Use workflow_goal only to inspect existing Goal state.",
+		promptGuidelines: [
+			"Read ordinary workflow-engine Goal records only; list/status/criteria/evidence never start workers.",
+			"Do not treat Goal registration as production activation or dispatch authority.",
+			"Status is a concise persisted observation, not live freshness; criteria exposes the original profile and criteria, evidence exposes exact receipts and artifact references.",
+			"Tool create/control/wait/recover/apply/background requests have no authority. Author via interactive /workflow goal create, execute via goal run; pause/cancel/resume require the original admitted live interactive session.",
+			"Missing or ambiguous evidence is UNKNOWN, never reconstructed achievement. Protected G002 runtime APIs retain separate internal authority.",
+		],
+		parameters: GOAL_TOOL_PARAMETERS as any,
+		async execute(
+			_toolCallId: string,
+			params: unknown,
+			_signal: AbortSignal,
+			_onUpdate: unknown,
+			ctx: ExtensionContext,
+		) {
+			assertWorkflowToolAllowedForRole();
+			const commands = await import("./goal-workflow-commands.js");
+			const request = commands.parseOrdinaryWorkflowGoalTool(params);
+			if (!request.goalId) {
+				const runs = await commands.listOrdinaryWorkflowGoals(ctx.cwd);
+				const observations = await Promise.all(runs.map(run => commands.readOrdinaryWorkflowGoal(ctx.cwd, "status", run, run.tasks.filter(t => t.kind === "goal"))));
+				return {
+					content: [{ type: "text", text: observations.length ? observations.map(commands.summarizeOrdinaryWorkflowGoal).join("\n\n") : "No goals found in ordinary workflow-engine records." }],
+					details: { namespace: "ordinary-workflow-engine", runs: observations },
+				};
+			}
+			const { run, tasks } = await commands.resolveOrdinaryWorkflowGoal(ctx.cwd, request.goalId, true);
+			const result = await commands.readOrdinaryWorkflowGoal(ctx.cwd, request.action, run, tasks);
+			return {
+				content: [
+					{ type: "text", text: request.action === "status" ? commands.summarizeOrdinaryWorkflowGoal(result) : JSON.stringify(result, null, 2) },
+				],
+				details: result,
+			};
+		},
+	} as any);
+}
+
+
 function emitWorkflowWaitProgress(
 	onUpdate: unknown,
 	run: Awaited<ReturnType<typeof refreshRun>>,
@@ -590,6 +688,15 @@ function pauseWorkflowFeedbackWatcher(cwd: string, runId: string): boolean {
 	clearInterval(timer);
 	runFeedbackTimers.delete(key);
 	return true;
+}
+
+export async function stopWorkflowFeedbackAndDrainForTests(
+	cwd: string,
+	runId: string,
+): Promise<void> {
+	pauseWorkflowFeedbackWatcher(cwd, runId);
+	const owners = runFeedbackInFlight.get(`${cwd}\0${runId}`);
+	await Promise.all(Array.from(owners?.values() ?? []).flatMap(polls => Array.from(polls)));
 }
 
 export function setWorkflowFeedbackPollMsForTests(value?: number): void {
@@ -835,8 +942,6 @@ function watchWorkflowFeedback(
 		}
 	};
 	const poll = async (): Promise<void> => {
-		if (pollInFlight) return;
-		pollInFlight = true;
 		try {
 			if (signal.aborted) {
 				clear();
@@ -884,10 +989,31 @@ function watchWorkflowFeedback(
 		}
 	};
 
-	void refreshActiveWorkflowUi(ctx, signal).catch(() => undefined);
-	timer = setInterval(() => void poll(), workflowFeedbackPollMs);
+	const inFlight = new Set<Promise<void>>();
+	const track = (work: () => Promise<void>): void => {
+		const owner = timer!;
+		let owners = runFeedbackInFlight.get(key);
+		if (!owners) {
+			owners = new Map();
+			runFeedbackInFlight.set(key, owners);
+		}
+		owners.set(owner, inFlight);
+		// Register custody before work can call any fixture or delivery hook.
+		const pending = Promise.resolve().then(work).finally(() => {
+			inFlight.delete(pending);
+			if (inFlight.size === 0 && owners.get(owner) === inFlight) owners.delete(owner);
+			if (owners.size === 0 && runFeedbackInFlight.get(key) === owners) runFeedbackInFlight.delete(key);
+		});
+		inFlight.add(pending);
+	};
+	timer = setInterval(() => {
+		if (pollInFlight) return;
+		pollInFlight = true;
+		track(poll);
+	}, workflowFeedbackPollMs);
 	timer.unref?.();
 	runFeedbackTimers.set(key, timer);
+	track(() => refreshActiveWorkflowUi(ctx, signal).catch(() => undefined));
 }
 
 export function watchWorkflowFeedbackForTests(
@@ -2715,6 +2841,7 @@ async function startWorkflowRunFromRequest(
 		Parameters<typeof runWorkflowSpec>[2]
 	>["autoLaunchBinding"],
 	launchSignal?: AbortSignal,
+	goalPolicyHost?: WorkflowGoalPolicyHost,
 ): Promise<{ run: Awaited<ReturnType<typeof runWorkflowSpec>>; text: string }> {
 	const workflow = request.workflow.trim();
 	const task = request.task.trim();
@@ -2723,6 +2850,13 @@ async function startWorkflowRunFromRequest(
 		throw new Error(
 			'This workflow needs a task. Usage: /workflow run <workflow-name-or-path> "<task>"',
 		);
+	if (request.detach) {
+		const loaded = await loadWorkflowSpec(workflow, ctx.cwd);
+		if (containsGoalWorkflowPolicy(loaded.spec))
+			throw new Error(
+				"Goal-participating workflows cannot detach without explicit qualified Goal supervisor custody.",
+			);
+	}
 	const runtimeDefaults = currentRuntimeDefaults(ctx, api);
 	const availableModels = availableWorkflowModels(ctx);
 	const profileSelection: WorkflowExecutionProfileSelection =
@@ -2773,6 +2907,7 @@ async function startWorkflowRunFromRequest(
 			dynamicUi: dynamicUiFromContext(ctx),
 			...(autoLaunchBinding ? { autoLaunchBinding } : {}),
 			...(launchSignal ? { launchSignal } : {}),
+			...(goalPolicyHost ? { goalPolicyHost } : {}),
 			...profileSelection,
 		}),
 	);
@@ -2796,6 +2931,29 @@ async function startWorkflowRunFromRequest(
 		run,
 		text: `${promptSchemaNotice ? `${promptSchemaNotice}\n` : ""}Workflow ${verb}: ${run.name ?? "workflow"}\n${formatHumanRunLaunch(run)}${detachNote}\nOpen: /workflow ${run.runId}`,
 	};
+}
+
+/** Auto candidates come from the artifact-graph routing catalog; never a Goal definition. */
+function autoArtifactGraphSpec(spec: Awaited<ReturnType<typeof loadWorkflowSpec>>["spec"]) {
+	if (!("artifactGraph" in spec)) throw new Error("Auto-confirmed launches require an artifact-graph workflow");
+	return spec;
+}
+
+function containsGoalWorkflowPolicy(value: unknown): boolean {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const spec = value as Record<string, unknown>;
+	if (Object.hasOwn(spec, "goal")) return true;
+	const graph = spec.artifactGraph;
+	if (!graph || typeof graph !== "object" || Array.isArray(graph)) return false;
+	const stages = (graph as Record<string, unknown>).stages;
+	return Array.isArray(stages) && stages.some(
+		(stage) =>
+			stage !== null &&
+			typeof stage === "object" &&
+			!Array.isArray(stage) &&
+			(stage as Record<string, unknown>).type === "goal" &&
+			Object.hasOwn(stage as object, "goal"),
+	);
 }
 
 async function startDynamicRunFromRequest(
@@ -3234,7 +3392,7 @@ async function prepareWorkflowAutoDynamicSelection(
 			candidateId: candidate.candidateId,
 			task,
 			specPath: loaded.specPath,
-			spec: loaded.spec,
+			spec: autoArtifactGraphSpec(loaded.spec),
 			selectionIdentitySha256: candidate.identitySha256,
 			runtimeVersion: DIRECT_DYNAMIC_RUNTIME_VERSION,
 			launchSettings: workflowAutoLaunchBindingSettings({
@@ -3321,7 +3479,7 @@ async function prepareWorkflowAutoNamedSelection(
 			candidateId: candidate.candidateId,
 			task,
 			specPath: loaded.specPath,
-			spec: loaded.spec,
+			spec: autoArtifactGraphSpec(loaded.spec),
 			launchSettings: workflowAutoLaunchBindingSettings({
 				executionProfile: profile.executionProfile,
 				executionProfileOverride: profile.executionProfileOverride,
@@ -3547,6 +3705,7 @@ export const WORKFLOW_KNOWN_ACTIONS: ReadonlySet<string> = new Set([
 	"agents",
 	"profile",
 	"auto",
+	"goal",
 	"run",
 	"dynamic",
 	"status",
@@ -3737,10 +3896,477 @@ async function selectRunsNeedingUnfinishedNotice<
 	return needing;
 }
 
+function goalAuthoringPath(cwd: string, value: string): string {
+	if (
+		!value ||
+		value !== value.trim() ||
+		value.startsWith("/") ||
+		value.includes("\\") ||
+		value.split("/").some((part) => !part || part === "." || part === "..") ||
+		!value.endsWith(".json")
+	)
+		throw new Error("Goal definition path must be a safe relative .json path");
+	return resolvePath(cwd, value);
+}
+
+function goalAuthoringPaths(value: string): string[] {
+	const paths = value.split(",").map(path => path.trim()).filter(Boolean);
+	if (paths.some(path => path.startsWith("/") || path.includes("\\") || path.split("/").some(part => !part || part === "." || part === "..")))
+		throw new Error("Goal scope paths must be safe relative paths");
+	return paths;
+}
+
+async function prepareGoalDefinitionPath(
+	cwd: string,
+	file: string,
+	createParents = false,
+): Promise<void> {
+	const root = await realpath(cwd);
+	const relativeFile = relative(root, file);
+	if (relativeFile.startsWith("..") || isAbsolutePath(relativeFile))
+		throw new Error("Goal definition path resolves outside the current project.");
+	let parent = root;
+	for (const segment of relativeFile.split("/").slice(0, -1)) {
+		parent = join(parent, segment);
+		let entry = await lstat(parent).catch((error: NodeJS.ErrnoException) => {
+			if (error.code === "ENOENT") return undefined;
+			throw error;
+		});
+		if (!entry) {
+			if (!createParents) break;
+			await mkdir(parent).catch((error: NodeJS.ErrnoException) => {
+				if (error.code !== "EEXIST") throw error;
+			});
+			entry = await lstat(parent);
+		}
+		if (!entry || entry.isSymbolicLink() || !entry.isDirectory())
+			throw new Error("Goal definition path cannot traverse a symbolic link or non-directory.");
+	}
+	const existing = await lstat(file).catch((error: NodeJS.ErrnoException) => {
+		if (error.code === "ENOENT") return undefined;
+		throw error;
+	});
+	if (existing?.isSymbolicLink())
+		throw new Error("Goal definition path cannot be a symbolic link.");
+}
+
+function workflowGoalPolicyHost(
+	ctx: ExtensionContext,
+	api: ExtensionAPI,
+	goalProduct: { runtime: WorkflowGoalEngineRuntime } | undefined,
+): WorkflowGoalPolicyHost | undefined {
+	if (!goalProduct || !ctx.hasUI || ctx.mode !== "tui") return undefined;
+	let runtimeDefaults: WorkflowGoalPolicyHost["currentRuntime"] | undefined;
+	let models: WorkflowGoalPolicyHost["availableModels"] | undefined;
+	return {
+		executionFoundation: "workflow-engine",
+		runtime: goalProduct.runtime,
+		get currentRuntime() {
+			return runtimeDefaults ??= currentRuntimeDefaults(ctx, api);
+		},
+		get availableModels() {
+			return models ??= availableWorkflowModels(ctx) ?? [];
+		},
+		confirm: (preview) => ctx.ui.confirm(
+			"schema" in preview && preview.schema === "workflow-goal-profile-exception-preview-v1"
+				? "Confirm Goal profile exception"
+				: "Confirm Goal execution",
+			JSON.stringify(preview, null, 2),
+		),
+	};
+}
+
+async function handleWorkflowGoalCommand(
+	args: string,
+	ctx: ExtensionCommandContext,
+	api: ExtensionAPI,
+	goalProduct: { runtime: WorkflowGoalEngineRuntime } | undefined,
+): Promise<void> {
+	const suffix = args.trim().slice("goal".length).trim();
+	if (suffix === "help" || suffix === "--help" || suffix === "-h") {
+		emit(ctx, (await import("./goal-workflow-commands.js")).WORKFLOW_GOAL_HELP, "info");
+		return;
+	}
+	if (/^profile(?:\s|$)/.test(suffix)) {
+		const [, runId, ...extra] = suffix.split(/\s+/);
+		if (!runId || extra.length)
+			throw new Error("Goal profile requires exactly one workflow run ID; scope and runtime are selected only in the TUI.");
+		assertWorkflowActionAllowedForRole("goal");
+		if (!ctx.hasUI || ctx.mode !== "tui" || typeof ctx.ui.select !== "function" ||
+			typeof ctx.ui.input !== "function")
+			throw new Error("Goal profile exception requires the interactive Pi TUI.");
+		const host = workflowGoalPolicyHost(ctx, api, goalProduct);
+		if (!host) throw new Error("Goal profile exception requires the original live interactive host.");
+		const dialog = new AbortController();
+		const dialogSignal = AbortSignal.any([workflowUiSignalForCwd(ctx.cwd), dialog.signal]);
+		let capability: object | undefined;
+		let consumed = false;
+		try {
+			const prepared = await beginWorkflowGoalProfileException(
+				ctx.cwd, runId, host, dialogSignal);
+			capability = prepared.capability;
+			const profileUi = createNativeWorkflowProfileUi(ctx.ui);
+			const labels = prepared.options.map(option => option.name);
+			const selectedName = await profileUi.select(
+				"Select one actual pending NEVER-launched root task, static child task, or exact materialized foreach item",
+				labels,
+			);
+			await assertWorkflowGoalProfileExceptionCommandCurrent(
+				prepared.capability, dialogSignal);
+			if (selectedName === undefined) {
+				discardWorkflowGoalProfileExceptionCommand(prepared.capability);
+				consumed = true;
+				emit(ctx, "Goal profile exception cancelled; no configuration or preference was changed.", "info");
+				return;
+			}
+			const matches = prepared.options.filter(option => option.name === selectedName);
+			if (matches.length !== 1)
+				throw new Error("Goal profile exception returned an unavailable opaque selection");
+			const selected = matches[0]!;
+			const checkedProfileUi: Parameters<typeof collectWorkflowProfileRuntimeOverride>[0]["ui"] = {
+				select: async (title, options, selection) => {
+					const value = await profileUi.select(title, options, selection);
+					await assertWorkflowGoalProfileExceptionCommandCurrent(
+						prepared.capability, dialogSignal);
+					return value;
+				},
+				notify: profileUi.notify,
+			};
+			const runtime = await collectWorkflowProfileRuntimeOverride({
+				ui: checkedProfileUi,
+				capturedRuntime: selected.capturedRuntime,
+				availableModels: host.availableModels,
+				displayLabel: selected.name,
+			});
+			await assertWorkflowGoalProfileExceptionCommandCurrent(
+				prepared.capability, dialogSignal);
+			if (runtime.status === "cancelled") {
+				discardWorkflowGoalProfileExceptionCommand(prepared.capability);
+				consumed = true;
+				emit(ctx, "Goal profile exception cancelled; no configuration or preference was changed.", "info");
+				return;
+			}
+			const reason = await ctx.ui.input("Mandatory reason for this run-only Goal branch exception");
+			await assertWorkflowGoalProfileExceptionCommandCurrent(
+				prepared.capability, dialogSignal);
+			if (reason === undefined) {
+				discardWorkflowGoalProfileExceptionCommand(prepared.capability);
+				consumed = true;
+				emit(ctx, "Goal profile exception cancelled; no configuration or preference was changed.", "info");
+				return;
+			}
+			if (reason.trim().length === 0)
+				throw new Error("Goal profile exception requires a non-empty reason.");
+			const preview = previewWorkflowGoalProfileExceptionCommand(
+				prepared.capability, selected.selection, runtime.override, reason);
+			const renderedPreview = JSON.stringify(preview, null, 2);
+			consumed = true;
+			const updated = await submitWorkflowGoalProfileException(
+				prepared.capability,
+				selected.selection,
+				preview,
+				renderedPreview,
+				dialogSignal,
+			);
+			if (!updated) {
+				emit(ctx, "Goal profile exception declined; no configuration or preference was changed.", "info");
+				return;
+			}
+			emit(ctx, `Goal profile exception accepted for ${updated.runId}; capture revision appended for ${selected.name}.`, "info");
+			return;
+		} finally {
+			dialog.abort();
+			if (capability && !consumed)
+				discardWorkflowGoalProfileExceptionCommand(capability);
+		}
+	}
+	if (/^judge(?:\s|$)/.test(suffix)) {
+		const [, runId, ...extra] = suffix.split(/\s+/);
+		if (!runId || extra.length) throw new Error("Goal judge requires exactly one workflow run ID; verdicts are selected only in the TUI.");
+		assertWorkflowActionAllowedForRole("goal");
+		if (!ctx.hasUI || ctx.mode !== "tui" || typeof ctx.ui.select !== "function")
+			throw new Error("Goal judgment requires the interactive Pi TUI.");
+		const host = workflowGoalPolicyHost(ctx, api, goalProduct);
+		if (!host) throw new Error("Goal judgment requires the original live interactive host.");
+		const uiSignal = workflowUiSignalForCwd(ctx.cwd);
+		const dialog = new AbortController();
+		const dialogSignal = AbortSignal.any([uiSignal, dialog.signal]);
+		let capability: object | undefined;
+		let consumed = false;
+		try {
+			const review = await beginWorkflowGoalHumanReview(ctx.cwd, runId, host, dialogSignal);
+			capability = review.capability;
+			const snapshot = review.snapshot as Readonly<Record<string, unknown>>;
+			const criterion = snapshot.criterion as Readonly<Record<string, unknown>> | undefined;
+			const verifier = criterion?.verifier as Readonly<Record<string, unknown>> | undefined;
+			const condition = (verifier?.config as Readonly<Record<string, unknown>> | undefined)?.condition as Readonly<Record<string, unknown>> | undefined;
+			const title = [
+				"Human Goal judgment — untrusted evidence",
+				`Run: ${snapshot.runId}; policy: ${snapshot.policySpecId}; generation: ${snapshot.generation}; criterion: ${snapshot.criterionId}`,
+				`Definition: ${snapshot.definitionFingerprint}; subject digest: ${snapshot.subjectDigest}`,
+				`Condition: ${String(condition?.statement ?? "unavailable")}`,
+				`Subject: ${String(snapshot.subjectBytes ?? "unavailable")}`,
+				`Provenance: ${JSON.stringify(snapshot.source ?? "unavailable")}`,
+			].join("\n");
+			const choice = await ctx.ui.select(title, ["Accept this criterion", "Reject this criterion", "Leave pending"]);
+			if (choice === "Accept this criterion" || choice === "Reject this criterion") {
+				consumed = true;
+				const run = await submitWorkflowGoalHumanReview(
+					ctx.cwd,
+					runId,
+					host,
+					review.capability,
+					choice === "Accept this criterion" ? "accept" : "reject",
+					dialogSignal,
+				);
+				emit(ctx, `Human Goal judgment recorded for ${run.runId}; original policy scheduling resumed.`, "info");
+				return;
+			}
+			discardWorkflowGoalHumanReview(review.capability);
+			consumed = true;
+			emit(ctx, "Human Goal judgment left pending; no decision or provider action was taken.", "info");
+			return;
+		} finally {
+			dialog.abort();
+			if (capability && !consumed) discardWorkflowGoalHumanReview(capability);
+		}
+	}
+	if (/^(?:list|status|criteria|evidence|wait|pause|resume|cancel|apply|recover|background)(?: |$)/.test(suffix)) {
+		const commands = await import("./goal-workflow-commands.js");
+		const [action, id, ...extra] = suffix.split(/\s+/);
+		if (action === "list" || (action === "status" && !id)) {
+			if (extra.length || (action === "list" && id)) throw new Error("Ordinary Goal list takes no identifier");
+			const runs = await commands.listOrdinaryWorkflowGoals(ctx.cwd);
+			if (action === "status" && ctx.hasUI && runs.length) {
+				const observations = await Promise.all(runs.map(run => commands.readOrdinaryWorkflowGoal(ctx.cwd, "status", run, run.tasks.filter(t => t.kind === "goal"))));
+				emit(ctx, observations.map(commands.summarizeOrdinaryWorkflowGoal).join("\n\n"), "info");
+				return;
+			}
+			emit(ctx, runs.length ? JSON.stringify({ namespace: "ordinary-workflow-engine", runs: runs.map(run => ({
+				runId: run.runId, status: run.status, goals: run.tasks.filter(t => t.kind === "goal").map(t => ({
+					goalId: t.goal?.goalId ?? "unavailable", state: t.goal?.state ?? "UNKNOWN", generation: t.goalRoot?.generations.at(-1)?.generation ?? 0,
+					failureOrUnknown: t.lastMessage ?? null, usage: t.goalRoot?.usage ?? t.goal?.usage ?? "UNKNOWN" })) })) }, null, 2)
+				: "No goals found in ordinary workflow-engine records.", "info");
+			return;
+		}
+		if (!id || extra.length) throw new Error("Ordinary Goal commands require exactly one workflow run ID or exact goal_engine ID");
+		if (!["status", "criteria", "evidence", "pause", "cancel", "resume"].includes(action!))
+			throw new Error("Unsupported Goal action; no apply/background/cold recovery command. Use /workflow goal help.");
+		const { run, tasks } = await commands.resolveOrdinaryWorkflowGoal(ctx.cwd, id);
+		if (["status", "criteria", "evidence"].includes(action!)) {
+			const result = await commands.readOrdinaryWorkflowGoal(ctx.cwd, action!, run, tasks);
+			emit(ctx, action === "status" && ctx.hasUI ? commands.summarizeOrdinaryWorkflowGoal(result) : JSON.stringify(result, null, 2), "info");
+			return;
+		}
+		assertWorkflowActionAllowedForRole("goal");
+		if (!ctx.hasUI || ctx.mode !== "tui") throw new Error("Ordinary Goal mutations require the interactive Pi TUI.");
+		const host = workflowGoalPolicyHost(ctx, api, goalProduct);
+		if (!host) throw new Error("Ordinary Goal original live interactive host unavailable");
+		const uiSessionSignal = action === "resume" ? workflowUiSignalForCwd(ctx.cwd) : undefined;
+		const updated = action === "resume"
+			? (await resumeRun(ctx.cwd, run.runId, { dynamicUi: dynamicUiFromContext(ctx), goalPolicyHost: host })).run
+			: (await stopRun(ctx.cwd, run.runId, host)).run;
+		if (uiSessionSignal) {
+			if (updated.status === "running" && !uiSessionSignal.aborted) {
+				await startWorkflowFeedbackTracking(ctx, api, updated.runId, uiSessionSignal);
+			}
+			if (uiSessionSignal.aborted) return;
+		}
+		emit(ctx, `Ordinary workflow-engine Goal ${action}: ${updated.runId} ${updated.status}. Stop does not apply origin changes; resume retains original admission/profile.`, "warning");
+		return;
+	}
+	if (suffix === "protected" || suffix.startsWith("protected "))
+		throw new Error("The protected Goal interface is not part of this build; use the ordinary /workflow goal commands (see /workflow goal help).");
+	if (!ctx.hasUI || ctx.mode !== "tui")
+		throw new Error("/workflow goal authoring and execution require the interactive Pi TUI.");
+	assertWorkflowActionAllowedForRole("goal");
+	if (typeof ctx.ui.input !== "function" || typeof ctx.ui.select !== "function")
+		throw new Error("Goal authoring UI unavailable; no definition or run was created.");
+	if (suffix.startsWith("run ")) {
+		await handleWorkflowCommand(suffix, ctx, api, goalProduct);
+		return;
+	}
+	if (suffix && !suffix.startsWith("create "))
+		throw new Error("Unknown /workflow goal action. Use /workflow goal help.");
+	let objective = suffix.startsWith("create ") ? suffix.slice("create ".length).trim() : "";
+	if (!objective) objective = (await ctx.ui.input("Goal objective"))?.trim() ?? "";
+	if (!objective) {
+		emit(ctx, "Goal authoring cancelled; no definition, profile preference, or run was created.", "info");
+		return;
+	}
+	const criterionKind = await ctx.ui.select("Completion criterion semantics", [
+		"Deterministic exact JSON value",
+		"Model-rubric statement",
+		"Human acceptance condition",
+	]);
+	if (!criterionKind) return;
+	const criterionText = await ctx.ui.input(
+		criterionKind === "Deterministic exact JSON value"
+			? "Expected JSON value"
+			: criterionKind === "Model-rubric statement"
+				? "Model rubric statement"
+				: "Human acceptance condition",
+	);
+	if (!criterionText?.trim()) return;
+	let verifier: GoalWorkflowSpec["goal"]["criteria"][number]["verifier"];
+	if (criterionKind === "Deterministic exact JSON value") {
+		let expected: unknown;
+		try { expected = JSON.parse(criterionText); } catch { throw new Error("Expected deterministic completion value must be valid JSON."); }
+		verifier = {
+			kind: "deterministic", producerId: "json-exact-value-v1", target: "artifact",
+			subject: { resultSlot: "result", artifact: "control", path: "$.result" },
+			config: { comparison: "canonical-json-equality", expected },
+		};
+	} else {
+		verifier = {
+			kind: criterionKind === "Model-rubric statement" ? "model-rubric" : "human",
+			producerId: criterionKind === "Model-rubric statement" ? "json-control-rubric-v1" : "human-acceptance-v1",
+			target: "artifact", subject: { resultSlot: "result", artifact: "control", path: "$.result" },
+			config: criterionKind === "Model-rubric statement"
+				? { rubric: { statement: criterionText.trim() }, minScore: 1 }
+				: { condition: { statement: criterionText.trim() } },
+		};
+	}
+	const allowedPathsInput = await ctx.ui.input("Allowed scope paths (comma-separated; blank for none)");
+	if (allowedPathsInput === undefined) return;
+	const protectedPathsInput = await ctx.ui.input("Protected scope paths (comma-separated; blank for none)");
+	if (protectedPathsInput === undefined) return;
+	const allowedPaths = goalAuthoringPaths(allowedPathsInput);
+	const protectedPaths = goalAuthoringPaths(protectedPathsInput);
+	const effectsChoice = await ctx.ui.select("Allowed effects", [
+		"Read and verify only",
+		"Candidate writes, read, and verify",
+		"Candidate/origin writes, read, and verify",
+	]);
+	if (!effectsChoice) return;
+	const allowedEffects = effectsChoice === "Read and verify only"
+		? ["read", "verify", "workflow-create"] as const
+		: effectsChoice === "Candidate writes, read, and verify"
+			? ["read", "candidate-write", "verify", "workflow-create"] as const
+			: ["read", "candidate-write", "verify", "origin-apply", "workflow-create"] as const;
+	const readOptionalLimit = async (label: string): Promise<number | undefined | null> => {
+		const text = await ctx.ui.input(label);
+		if (text === undefined) return null;
+		if (text.trim() === "") return undefined;
+		const value = Number(text);
+		if (!/^\d+$/u.test(text) || !Number.isSafeInteger(value) || value < 0)
+			throw new Error(`Goal ${label} requires a nonnegative safe integer or blank for no cap.`);
+		return value;
+	};
+	const requestLimit = await readOptionalLimit("Request cap (blank for no cap)");
+	if (requestLimit === null) return;
+	const costLimit = await readOptionalLimit("Cost cap in micros (blank for no cap)");
+	if (costLimit === null) return;
+	const limits = requestLimit === undefined && costLimit === undefined ? undefined : {
+		...(requestLimit === undefined ? {} : { requests: requestLimit }),
+		...(costLimit === undefined ? {} : { costMicros: costLimit }),
+	};
+	const definition: GoalWorkflowSpec = {
+		schemaVersion: 1,
+		name: "goal",
+		goal: {
+			objective,
+			criteria: [{ id: "completion", verifier }],
+			authority: { allowedPaths, protectedPaths, allowedEffects: [...allowedEffects] },
+			nesting: { maxDepth: 3 },
+			...(limits === undefined ? {} : { limits }),
+		},
+	};
+	parseGoalWorkflowSpec(definition);
+	const defaultPath = "workflows/goal.json";
+	const definitionPathInput = await ctx.ui.input(`Definition JSON path (default ${defaultPath})`);
+	if (definitionPathInput === undefined) return;
+	const definitionPath = goalAuthoringPath(
+		await realpath(ctx.cwd),
+		definitionPathInput.trim() || defaultPath,
+	);
+	const preview = [
+		`Objective: ${objective}`,
+		`Criterion: ${criterionKind}: ${criterionText.trim()}`,
+		...(criterionKind === "Model-rubric statement" ? ["Minimum rubric score: 1 (full satisfaction)"] : []),
+		`Allowed paths: ${allowedPaths.join(", ") || "none"}`,
+		`Protected paths: ${protectedPaths.join(", ") || "none"}`,
+		`Effects: ${allowedEffects.join(", ")}`,
+		"Maximum nested depth: 3",
+		`Request cap: ${requestLimit === undefined ? "no cap" : requestLimit}`,
+		`Cost cap (micros): ${costLimit === undefined ? "no cap" : costLimit}`,
+		"Usage: unknown until execution begins",
+	].join("\n");
+	const action = await ctx.ui.select(`Goal preview\n${preview}`, [
+		"Save definition",
+		"Save definition and select execution profile",
+		"Execute saved definition",
+	]);
+	if (!action) return;
+	await prepareGoalDefinitionPath(ctx.cwd, definitionPath);
+	const existingText = await readFile(definitionPath, "utf8").then(
+		(text) => text,
+		(error: NodeJS.ErrnoException) => {
+			if (error.code === "ENOENT") return undefined;
+			throw error;
+		},
+	);
+	const exists = existingText !== undefined;
+	if (exists && !await ctx.ui.confirm("Overwrite Goal definition", definitionPath)) return;
+	await prepareGoalDefinitionPath(ctx.cwd, definitionPath, true);
+	if (exists) await writeJsonAtomic(definitionPath, definition, undefined, async () => {
+		const current = await readFile(definitionPath, "utf8");
+		if (current !== existingText)
+			throw new Error("Goal definition changed after overwrite confirmation; save was not applied.");
+	});
+	else {
+		const created = await writeJsonExclusive(definitionPath, definition);
+		if (!created) throw new Error("Goal definition appeared during save; choose overwrite explicitly.");
+	}
+	if (action === "Save definition and select execution profile") {
+		const profileResult = await configureWorkflowExecutionProfile({
+			ui: createNativeWorkflowProfileUi(ctx.ui),
+			spec: definition,
+			specPath: definitionPath,
+			workflowLabel: definition.name,
+			availableModels: availableWorkflowModels(ctx) ?? [],
+			currentRuntime: currentRuntimeDefaults(ctx, api),
+		});
+		if (profileResult.status === "cancelled") {
+			emit(ctx, "Goal definition was saved; execution profile selection cancelled.", "info");
+			return;
+		}
+	}
+	if (action !== "Execute saved definition") {
+		emit(ctx, action === "Save definition"
+			? "Goal definition saved; no run was created."
+			: "Goal definition and execution profile preference saved; no run was created.", "info");
+		return;
+	}
+	if (!goalProduct)
+		throw new Error("Goal interactive workflow session unavailable.");
+	const host = workflowGoalPolicyHost(ctx, api, goalProduct)!;
+	const profileSelection = await resolveWorkflowExecutionProfileForLaunch(
+		definitionPath,
+		ctx.cwd,
+		undefined,
+		{
+			select: (title, options) => ctx.ui.select(title, options),
+			availableModels: [...host.availableModels],
+			currentRuntime: host.currentRuntime,
+		},
+	);
+	const run = await runWorkflowSpec(definitionPath, ctx.cwd, {
+		task: objective,
+		runtimeDefaults: host.currentRuntime,
+		availableModels: [...host.availableModels],
+		goalPolicyHost: host,
+		...profileSelection,
+		launch: workflowSlashLaunchCapture("run", "named-workflow", "off", objective, "goal"),
+	});
+	emit(ctx, formatHumanRunLaunch(run), run.status === "blocked" ? "warning" : "info");
+}
+
 async function handleWorkflowCommand(
 	args: string,
 	ctx: ExtensionCommandContext,
 	api: ExtensionAPI,
+	goalProduct?: { runtime: WorkflowGoalEngineRuntime },
 ): Promise<void> {
 	const tokens = splitArgs(args);
 
@@ -3752,6 +4378,10 @@ async function handleWorkflowCommand(
 		}
 
 		const action = tokens[0] ?? "help";
+		if (action === "goal") {
+			await handleWorkflowGoalCommand(args, ctx, api, goalProduct);
+			return;
+		}
 		if (
 			tokens.length === 1 &&
 			!WORKFLOW_KNOWN_ACTIONS.has(action) &&
@@ -3968,6 +4598,9 @@ async function handleWorkflowCommand(
 						api,
 						uiSessionSignal,
 						launchCapture,
+						undefined,
+						undefined,
+						workflowGoalPolicyHost(ctx, api, goalProduct),
 					);
 					if (launchSignal.aborted && launch.run.status === "running")
 						await stopRun(ctx.cwd, launch.run.runId);
@@ -4125,6 +4758,7 @@ async function handleWorkflowCommand(
 			const uiSessionSignal = workflowUiSignalForCwd(ctx.cwd);
 			const { run, resetTaskIds } = await resumeRun(ctx.cwd, runId, {
 				dynamicUi: dynamicUiFromContext(ctx),
+				goalPolicyHost: workflowGoalPolicyHost(ctx, api, goalProduct),
 			});
 			if (run.status === "running" && !uiSessionSignal.aborted) {
 				await startWorkflowFeedbackTracking(ctx, api, runId, uiSessionSignal);
@@ -4325,12 +4959,20 @@ export function parseWorkflowPruneArgs(args: string[]): {
 	olderThanDays?: number;
 	yes?: boolean;
 	json?: boolean;
+	terminalWorkflowGoalRoot?: string;
 } {
 	const options: ReturnType<typeof parseWorkflowPruneArgs> = {};
 	for (let index = 0; index < args.length; index += 1) {
 		const arg = args[index];
 		if (arg === "--yes") options.yes = true;
 		else if (arg === "--json") options.json = true;
+		else if (arg === "--goal-family") {
+			if (options.terminalWorkflowGoalRoot !== undefined) throw new Error("Duplicate prune option --goal-family");
+			const id = args[++index];
+			if (!id || id.startsWith("--") || !isSafeRunId(id))
+				throw new Error("--goal-family requires an exact safe workflow run ID");
+			options.terminalWorkflowGoalRoot = id;
+		}
 		else if (arg === "--keep" || arg === "--older-than") {
 			const key = arg === "--keep" ? "keep" : "olderThanDays";
 			if (options[key] !== undefined)
@@ -4351,6 +4993,8 @@ export function parseWorkflowPruneArgs(args: string[]): {
 		(!Number.isFinite(options.olderThanDays) || options.olderThanDays < 0)
 	)
 		throw new Error("--older-than requires a non-negative number of days");
+	if (options.terminalWorkflowGoalRoot !== undefined && (options.keep !== undefined || options.olderThanDays !== undefined))
+		throw new Error("--goal-family cannot mix retention filters");
 	return options;
 }
 
@@ -4722,6 +5366,11 @@ const WORKFLOW_ACTION_COMPLETIONS = [
 		value: "dynamic",
 		label: "dynamic",
 		description: "Start a spec-less direct dynamic workflow run",
+	},
+	{
+		value: "goal",
+		label: "goal",
+		description: "Author, save, and run a Goal workflow",
 	},
 	{ value: "status", label: "status", description: "Show workflow run status" },
 	{ value: "show", label: "show", description: "Show a run or workflow spec" },

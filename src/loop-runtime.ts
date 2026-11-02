@@ -1,6 +1,10 @@
-import { readFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 
-import { readArtifactGraphControl } from "./artifact-graph-runtime.js";
+import {
+	goalCompiledMaterializationDigest,
+	persistGoalGeneratedMaterialization,
+} from "./goal-generated-materialization.js";
+import { readPrivateFileText } from "./secure-atomic-write.js";
 import {
 	assertLoopTaskPositionalAlignment,
 	compiledTaskSpecId,
@@ -9,11 +13,9 @@ import {
 	upsertCompiledLoopTasksAtInsertion,
 } from "./engine-run-graph.js";
 import {
-	compiledWorkflowPath,
 	fromProjectPath,
 	isTerminalTaskStatus,
 	setTaskTerminal,
-	writeJsonAtomic,
 	writeRunRecord,
 } from "./store.js";
 import type {
@@ -26,6 +28,8 @@ import type {
 	WorkflowTaskRunRecord,
 } from "./types.js";
 import { readSimpleJsonPath } from "./workflow-runtime.js";
+
+const LOOP_EVIDENCE_MAX_BYTES = 8 * 1024 * 1024;
 
 const LOOP_CARRY_FORWARD_MAX_CHARS = 4000;
 const LOOP_SUMMARY_MAX_CHARS = 1200;
@@ -212,78 +216,59 @@ async function stopLoopOrRunOnExhausted(
 	);
 }
 
-async function materializeLoopRound(
+export async function reconstructLoopRoundTasks(
 	cwd: string,
 	run: WorkflowRunRecord,
 	compiledFlow: CompiledWorkflow,
-	placeholderIndex: number,
 	placeholder: CompiledTask,
 	loopStage: any,
 	round: number,
-): Promise<void> {
+): Promise<CompiledTask[]> {
 	const childTemplates = (loopStage.childTemplates ?? []) as CompiledTask[];
 	const roundTag = `r${String(round).padStart(2, "0")}`;
 	const countsByChildStage = new Map<string, number>();
 	for (const template of childTemplates) {
-		const childStageId =
-			template.stageId ?? template.id.split(".")[0] ?? "child";
+		const childStageId = template.stageId ?? template.id.split(".")[0] ?? "child";
 		countsByChildStage.set(
 			childStageId,
 			(countsByChildStage.get(childStageId) ?? 0) + 1,
 		);
 	}
-
 	const localToRoundSpecId = new Map<string, string>();
 	for (const template of childTemplates) {
-		const childStageId =
-			template.stageId ?? template.id.split(".")[0] ?? "child";
+		const childStageId = template.stageId ?? template.id.split(".")[0] ?? "child";
 		const childTaskId = template.taskId ?? "main";
 		const singleTaskChild = (countsByChildStage.get(childStageId) ?? 0) === 1;
-		const specId =
+		localToRoundSpecId.set(
+			template.id,
 			singleTaskChild && childTaskId === "main"
 				? `${loopStage.id}.${roundTag}.${childStageId}`
-				: `${loopStage.id}.${roundTag}.${childStageId}.${childTaskId}`;
-		localToRoundSpecId.set(template.id, specId);
+				: `${loopStage.id}.${roundTag}.${childStageId}.${childTaskId}`,
+		);
 	}
-
-	const entryDependsOn =
-		round === 1
-			? [...(placeholder.dependsOn ?? [])]
-			: getLoopRoundRunTasks(run, compiledFlow, loopStage.id, round - 1).map(
-					(task) => task.specId,
-				);
+	const entryDependsOn = round === 1
+		? [...(placeholder.dependsOn ?? [])]
+		: getLoopRoundRunTasks(run, compiledFlow, loopStage.id, round - 1)
+			.map((task) => task.specId);
 	const firstChildStageId = loopStage.childStageIds?.[0];
-	const carryForward =
-		round > 1
-			? await buildLoopCarryForwardContext(
-					cwd,
-					run,
-					compiledFlow,
-					loopStage,
-					loopStage.id,
-					round,
-				)
-			: "";
-	const generatedTasks = childTemplates.map((template) => {
-		const childStageId =
-			template.stageId ?? template.id.split(".")[0] ?? "child";
+	const carryForward = round > 1
+		? await buildLoopCarryForwardContext(
+				cwd,
+				run,
+				compiledFlow,
+				loopStage,
+				loopStage.id,
+				round,
+			)
+		: "";
+	return childTemplates.map((template) => {
+		const childStageId = template.stageId ?? template.id.split(".")[0] ?? "child";
 		const childTaskId = template.taskId ?? "main";
 		const roundStageId = `${loopStage.id}.${roundTag}.${childStageId}`;
 		const rawDependsOn = template.dependsOn ?? [];
-		const dependsOn =
-			rawDependsOn.length > 0
-				? rawDependsOn.map((dep) => localToRoundSpecId.get(dep) ?? dep)
-				: [...entryDependsOn];
-		const sourcePolicy =
-			childStageId === firstChildStageId && round > 1
-				? "partial"
-				: loopChildSourcePolicy(loopStage, childStageId);
-		ensureGeneratedStageRecord(
-			compiledFlow,
-			roundStageId,
-			template.kind,
-			sourcePolicy,
-		);
+		const dependsOn = rawDependsOn.length > 0
+			? rawDependsOn.map((dependency) => localToRoundSpecId.get(dependency) ?? dependency)
+			: [...entryDependsOn];
 		const loopRoundPrompt = [
 			template.compiledPrompt,
 			"# Loop Round",
@@ -293,9 +278,7 @@ async function materializeLoopRound(
 			carryForward && childStageId === firstChildStageId
 				? `# Loop Carry-Forward Context\n\n${carryForward}`
 				: undefined,
-		]
-			.filter(Boolean)
-			.join("\n\n");
+		].filter(Boolean).join("\n\n");
 		const specId = localToRoundSpecId.get(template.id)!;
 		return {
 			...template,
@@ -317,6 +300,82 @@ async function materializeLoopRound(
 			},
 		} as CompiledTask;
 	});
+}
+
+export async function reconstructLoopExhaustedTask(
+	cwd: string,
+	run: WorkflowRunRecord,
+	compiledFlow: CompiledWorkflow,
+	loopStage: any,
+	status: LoopResultStatus,
+	round: number,
+): Promise<CompiledTask | undefined> {
+	const template = loopStage.onExhausted?.template as CompiledTask | undefined;
+	if (!template) return undefined;
+	const stageId = `${loopStage.id}.onExhausted`;
+	const specId = `${stageId}.${loopStage.onExhausted.stageId ?? "summary"}`;
+	const dependsOn = getLoopRunTasksThroughRound(
+		run,
+		compiledFlow,
+		loopStage.id,
+		round,
+	).map((task) => task.specId);
+	const context = await buildLoopTerminalContext(
+		cwd,
+		run,
+		compiledFlow,
+		loopStage,
+		status,
+		round,
+	);
+	return {
+		...template,
+		id: specId,
+		key: specId,
+		specId,
+		taskId: loopStage.onExhausted.stageId ?? "summary",
+		stageId,
+		dependsOn,
+		compiledPrompt: [
+			template.compiledPrompt,
+			"# Loop Exhaustion Context",
+			context,
+		].join("\n\n"),
+		loopExhausted: { loopId: loopStage.id, status },
+	} as CompiledTask;
+}
+
+async function materializeLoopRound(
+	cwd: string,
+	run: WorkflowRunRecord,
+	compiledFlow: CompiledWorkflow,
+	placeholderIndex: number,
+	placeholder: CompiledTask,
+	loopStage: any,
+	round: number,
+): Promise<void> {
+	const beforeCompiledDigest = run.goal === undefined
+		? undefined : goalCompiledMaterializationDigest(compiledFlow);
+	const generatedTasks = await reconstructLoopRoundTasks(
+		cwd,
+		run,
+		compiledFlow,
+		placeholder,
+		loopStage,
+		round,
+	);
+	for (const task of generatedTasks) {
+		const childStageId = task.loopChild!.childStageId;
+		const sourcePolicy = task.loopChild!.firstChildStage && round > 1
+			? "partial"
+			: loopChildSourcePolicy(loopStage, childStageId);
+		ensureGeneratedStageRecord(
+			compiledFlow,
+			task.stageId!,
+			task.kind,
+			sourcePolicy,
+		);
+	}
 
 	upsertCompiledLoopTasksAtInsertion(
 		compiledFlow,
@@ -340,8 +399,12 @@ async function materializeLoopRound(
 	state.updatedAt = new Date().toISOString();
 	run.round = round;
 
-	await writeJsonAtomic(compiledWorkflowPath(cwd, run.runId), compiledFlow);
-	await writeRunRecord(cwd, run);
+	await persistGoalGeneratedMaterialization(
+		cwd,
+		run,
+		compiledFlow,
+		beforeCompiledDigest,
+	);
 }
 
 async function materializeLoopOnExhausted(
@@ -352,17 +415,9 @@ async function materializeLoopOnExhausted(
 	status: LoopResultStatus,
 	round: number,
 ): Promise<void> {
-	const template = loopStage.onExhausted?.template as CompiledTask | undefined;
-	if (!template) return;
-	const stageId = `${loopStage.id}.onExhausted`;
-	const specId = `${stageId}.${loopStage.onExhausted.stageId ?? "summary"}`;
-	const dependsOn = getLoopRunTasksThroughRound(
-		run,
-		compiledFlow,
-		loopStage.id,
-		round,
-	).map((task) => task.specId);
-	const context = await buildLoopTerminalContext(
+	const beforeCompiledDigest = run.goal === undefined
+		? undefined : goalCompiledMaterializationDigest(compiledFlow);
+	const task = await reconstructLoopExhaustedTask(
 		cwd,
 		run,
 		compiledFlow,
@@ -370,21 +425,9 @@ async function materializeLoopOnExhausted(
 		status,
 		round,
 	);
-	const task: CompiledTask = {
-		...template,
-		id: specId,
-		key: specId,
-		specId,
-		taskId: loopStage.onExhausted.stageId ?? "summary",
-		stageId,
-		dependsOn,
-		compiledPrompt: [
-			template.compiledPrompt,
-			"# Loop Exhaustion Context",
-			context,
-		].join("\n\n"),
-		loopExhausted: { loopId: loopStage.id, status },
-	} as CompiledTask;
+	if (!task) return;
+	const stageId = task.stageId!;
+	const specId = compiledTaskSpecId(task);
 
 	ensureGeneratedStageRecord(compiledFlow, stageId, "reduce", "partial");
 	const placeholderIndex = compiledFlow.tasks.findIndex(
@@ -411,8 +454,12 @@ async function materializeLoopOnExhausted(
 	state.onExhaustedSpecId = specId;
 	state.updatedAt = new Date().toISOString();
 
-	await writeJsonAtomic(compiledWorkflowPath(cwd, run.runId), compiledFlow);
-	await writeRunRecord(cwd, run);
+	await persistGoalGeneratedMaterialization(
+		cwd,
+		run,
+		compiledFlow,
+		beforeCompiledDigest,
+	);
 }
 
 async function finalizeLoop(
@@ -532,7 +579,7 @@ export async function evaluateLoopUntilCondition(
 	return false;
 }
 
-async function loopHasNoProgress(
+export async function loopHasNoProgress(
 	cwd: string,
 	run: WorkflowRunRecord,
 	compiledFlow: CompiledWorkflow,
@@ -661,11 +708,15 @@ async function readLoopStageStructuredOutput(
 	);
 	if (!entry || entry.runTask.status !== "completed") return undefined;
 	try {
+		const resultPath = fromProjectPath(cwd, entry.runTask.files.result);
 		if (entry.compiledTask.artifactGraph?.enabled) {
-			return await readArtifactGraphControl(cwd, entry.runTask);
+			return JSON.parse(await readPrivateFileText(
+				join(dirname(resultPath), "control.json"),
+				LOOP_EVIDENCE_MAX_BYTES,
+			));
 		}
 		const result = JSON.parse(
-			await readFile(fromProjectPath(cwd, entry.runTask.files.result), "utf8"),
+			await readPrivateFileText(resultPath, LOOP_EVIDENCE_MAX_BYTES),
 		);
 		return result?.structuredOutput;
 	} catch (error) {

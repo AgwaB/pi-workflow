@@ -7,7 +7,9 @@ import { pathToFileURL } from "node:url";
 import { startRpcSession } from "./surface-rpc-harness.mjs";
 
 const REAL_CLI = resolve("node_modules/@earendil-works/pi-coding-agent/dist/cli.js");
-const EXTENSION = resolve("src/extension.ts");
+// test:build compiles the exact candidate once. Avoid re-transpiling the entire
+// extension graph in each cold child while the default suite is in flight.
+const EXTENSION = resolve(".tmp/unit/extension.js");
 
 async function fixture(t) {
 	const cwd = await mkdtemp(join(tmpdir(), "surface-rpc-readiness-"));

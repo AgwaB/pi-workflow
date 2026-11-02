@@ -21,6 +21,7 @@ import {
 	toolAllowedByAuthorityCeiling,
 } from "./tool-metadata.js";
 import type {
+	AgentDefinition,
 	CompiledDynamicWorkflowTask,
 	CompiledTask,
 	CompiledToolProvider,
@@ -99,6 +100,16 @@ export async function assertDynamicGenerationBudgetAvailable(input: {
 	}
 }
 
+export function dynamicGeneratedProfileSlot(
+	profile: string | undefined,
+): "planner" | "workerDefaults" | "verifier" | "synthesis" | undefined {
+	if (profile === "worker" || profile === "workerDefaults")
+		return "workerDefaults";
+	if (profile === "planner" || profile === "verifier" || profile === "synthesis")
+		return profile;
+	return undefined;
+}
+
 export async function buildDynamicGeneratedCompiledTask(input: {
 	cwd: string;
 	run: WorkflowRunRecord;
@@ -113,6 +124,10 @@ export async function buildDynamicGeneratedCompiledTask(input: {
 	request: DynamicAgentRequest;
 	dynamic: CompiledDynamicWorkflowTask;
 	availableModels?: WorkflowModelInfo[];
+	/** Trusted callers may supply their already-captured immutable agent inventory. */
+	agentDefinitions?: ReadonlyMap<string, AgentDefinition>;
+	/** Trusted producer policy, never selected by model requests. */
+	artifactAccess?: "enabled" | "none";
 }): Promise<CompiledTask> {
 	// A resumed legacy controller must not adopt new inheritance semantics.
 	const controllerResourcePolicy = resolveWorkflowResourcePolicy(
@@ -125,10 +140,13 @@ export async function buildDynamicGeneratedCompiledTask(input: {
 		input.dynamic,
 		input.request.profile,
 	);
+	const profileSlot = dynamicGeneratedProfileSlot(input.request.profile);
 	if (executionProfile)
 		assertDynamicExecutionProfileRequest(input.request, executionProfile);
-	const effectiveOutputProfile =
-		input.request.outputProfile ?? executionProfile?.outputProfile;
+	const effectiveOutputProfile = dynamicGeneratedOutputProfile(
+		input.dynamic,
+		input.request,
+	);
 	if (effectiveOutputProfile) {
 		assertDynamicOutputProfileAllowed(input.dynamic, effectiveOutputProfile);
 	}
@@ -152,7 +170,9 @@ export async function buildDynamicGeneratedCompiledTask(input: {
 			"dynamic agent tool overrides are not allowed by workflow permissions",
 		);
 	}
-	const agentDefinition = await loadAgentByName(requestedAgent, input.cwd);
+	const agentDefinition = input.agentDefinitions
+		? input.agentDefinitions.get(requestedAgent)
+		: await loadAgentByName(requestedAgent, input.cwd);
 	if (!agentDefinition) {
 		throw new Error(`Agent not found: ${requestedAgent}`);
 	}
@@ -359,7 +379,7 @@ export async function buildDynamicGeneratedCompiledTask(input: {
 				maxDigestChars: DYNAMIC_OUTPUT_MAX_DIGEST_CHARS,
 			},
 			requiredReads: input.request.requiredReads,
-			artifactAccess: "enabled",
+			artifactAccess: input.artifactAccess ?? "enabled",
 			sourceProjection: dynamicInputSourceProjection(input.request.inputs),
 		},
 		dynamicGenerated: {
@@ -367,6 +387,7 @@ export async function buildDynamicGeneratedCompiledTask(input: {
 			opId: input.opId,
 			requestHash: input.requestHash,
 			...(resourceWarnings.length > 0 ? { resourceWarnings } : {}),
+			...(profileSlot ? { profileSlot } : {}),
 			...(input.branchId ? { branchId: input.branchId } : {}),
 			...(effectiveOutputProfile ? { outputProfile: effectiveOutputProfile } : {}),
 		},
@@ -523,6 +544,14 @@ export function isDynamicCompiledTaskPayload(
 	);
 }
 
+export function dynamicGeneratedOutputProfile(
+	dynamic: CompiledDynamicWorkflowTask,
+	request: { profile?: string; outputProfile?: string },
+): string | undefined {
+	return request.outputProfile ??
+		dynamicDecisionLoopProfile(dynamic, request.profile)?.outputProfile;
+}
+
 export function assertDynamicGeneratedMetadataMatches(
 	compiledTask: CompiledTask,
 	expected: {
@@ -530,7 +559,9 @@ export function assertDynamicGeneratedMetadataMatches(
 		opId: string;
 		requestHash: string;
 		requestId: string;
+		profile?: string;
 		branchId?: string;
+		outputProfile?: string;
 	},
 ): void {
 	const actual = compiledTask.dynamicGenerated;
@@ -539,7 +570,9 @@ export function assertDynamicGeneratedMetadataMatches(
 		actual.controllerSpecId !== expected.controllerSpecId ||
 		actual.opId !== expected.opId ||
 		actual.requestHash !== expected.requestHash ||
-		(expected.branchId !== undefined && actual.branchId !== expected.branchId)
+		actual.profileSlot !== dynamicGeneratedProfileSlot(expected.profile) ||
+		actual.branchId !== expected.branchId ||
+		actual.outputProfile !== expected.outputProfile
 	) {
 		throw new Error(
 			`dynamic agent request changed for id "${expected.requestId}"; generated task metadata does not match replay request`,
@@ -994,6 +1027,7 @@ function appendDynamicOutputInstructions(
 		"The <control> section must be valid JSON object data with non-empty string `schema` and `digest` fields.",
 		`The control.digest string must be at most ${maxDigestChars} characters; prefer one short sentence.`,
 		"Use schema `dynamic-task-result-v1` unless the dynamic controller asks for a more specific control schema.",
+		"An exact schema or digest specified by the task overrides these defaults; copy that value verbatim.",
 		refsMinItems !== undefined && refsMinItems > 0
 			? `The <refs> JSON array must include at least ${refsMinItems} item${refsMinItems === 1 ? "" : "s"}. Include URLs or local file paths used by the analysis. Verify external URLs with available workflow web fetch/source-read tools before including them; do not include stale, guessed, or unreachable URLs.`
 			: undefined,

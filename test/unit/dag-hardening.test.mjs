@@ -2,12 +2,14 @@ import assert from "node:assert/strict";
 import {
 	existsSync,
 	mkdirSync,
+	mkdtempSync,
 	readFileSync,
 	rmSync,
 	writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { beforeEach } from "node:test";
 
 import { compileWorkflow } from "../../.tmp/unit/compiler.js";
 import { setSupportHelperPreparedHookForTests } from "../../.tmp/unit/artifact-graph-runtime.js";
@@ -34,6 +36,7 @@ import {
 	createDynamicControllerRun,
 	createWorkflowRunRecord,
 	eventually,
+	flushPendingIndexUpdatesForTests,
 	makeProject,
 	makeSubagentLaunchFixture,
 	prepareDagTask,
@@ -60,6 +63,132 @@ function deferred() {
 		resolve = innerResolve;
 	});
 	return { promise, resolve };
+}
+
+const DAG_FIXTURE_TEARDOWN_WATCHDOG_MS = 500;
+const unsettledDagSchedulings = new Set();
+
+function makeDagWatchdogFixture() {
+	return mkdtempSync(join(tmpdir(), "pi-workflow-dag-watchdog-"));
+}
+
+function assertNoUnsettledDagScheduling() {
+	assert.equal(
+		unsettledDagSchedulings.size,
+		0,
+		"DAG scheduling remains unsettled after fixture teardown watchdog; later test setup is quarantined",
+	);
+}
+
+beforeEach(assertNoUnsettledDagScheduling);
+
+function observeDagScheduling(promise) {
+	void promise.catch(() => undefined);
+	unsettledDagSchedulings.add(promise);
+	void promise.then(
+		() => unsettledDagSchedulings.delete(promise),
+		() => unsettledDagSchedulings.delete(promise),
+	);
+	return promise;
+}
+
+async function settleDagScheduling(scheduling, timeoutMs) {
+	if (!scheduling) return { settled: true, rejected: false };
+	let timer;
+	try {
+		return await Promise.race([
+			scheduling.then(
+				() => ({ settled: true, rejected: false }),
+				(error) => ({ settled: true, rejected: true, error }),
+			),
+			new Promise((resolve) => {
+				timer = setTimeout(
+					() => resolve({ settled: false, rejected: false }),
+					timeoutMs,
+				);
+			}),
+		]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+function collapseDagTeardownErrors(errors) {
+	if (errors.length === 0) return undefined;
+	if (errors.length === 1) return errors[0];
+	return new AggregateError(errors, "DAG fixture teardown failed");
+}
+
+async function cleanupDagFixture({
+	cwd,
+	scheduling,
+	runId,
+	schedulingCompleted,
+	release,
+	reset = () => {},
+	remove = cleanup,
+	watchdogMs = DAG_FIXTURE_TEARDOWN_WATCHDOG_MS,
+}) {
+	const errors = [];
+	if (scheduling && !schedulingCompleted && runId) {
+		try {
+			await requestWorkflowStop(cwd, runId);
+		} catch (error) {
+			errors.push(error);
+		}
+	}
+	try {
+		if (release) await release();
+	} catch (error) {
+		errors.push(error);
+	}
+
+	let outcome;
+	try {
+		outcome = await settleDagScheduling(scheduling, watchdogMs);
+	} catch (error) {
+		errors.push(error);
+		return collapseDagTeardownErrors(errors);
+	}
+	if (!outcome.settled) {
+		errors.push(
+			new Error(
+				`DAG fixture scheduling did not settle within ${watchdogMs}ms; fixture retained at ${cwd}`,
+			),
+		);
+		return collapseDagTeardownErrors(errors);
+	}
+	if (outcome.rejected) errors.push(outcome.error);
+
+	try {
+		await flushPendingIndexUpdatesForTests();
+	} catch (error) {
+		errors.push(error);
+	}
+	try {
+		await reset();
+	} catch (error) {
+		errors.push(error);
+	}
+	if (errors.length === 0) {
+		try {
+			await remove(cwd);
+		} catch (error) {
+			errors.push(error);
+		}
+	}
+	return collapseDagTeardownErrors(errors);
+}
+
+function throwDagTestFailures(primaryFailure, cleanupFailure) {
+	if (primaryFailure && cleanupFailure) {
+		throw new AggregateError(
+			[primaryFailure, cleanupFailure],
+			"DAG test body and teardown failed",
+		);
+	}
+	if (cleanupFailure) throw cleanupFailure;
+	if (primaryFailure) throw primaryFailure;
 }
 
 function writeAbortRejectingHelper(cwd) {
@@ -322,7 +451,12 @@ test("stopRun reports pending when an in-process support helper ignores abort", 
 });
 
 test("stopRun writes durable intent and cooperatively cancels a blocked async support helper", async () => {
-	const cwd = makeProject();
+	const cwd = makeDagWatchdogFixture();
+	let scheduling;
+	let runId;
+	let schedulingCompleted = false;
+	let primaryFailure;
+	let cleanupFailure;
 	try {
 		writeAbortRejectingHelper(cwd);
 		const spec = workflowSpec("unit-scout", {
@@ -344,15 +478,17 @@ test("stopRun writes durable intent and cooperatively cancels a blocked async su
 			specPath: "workflows/unit.json",
 		});
 		const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
+		runId = run.runId;
 		await writeStaticRunArtifacts(cwd, run, compiled, spec);
 		await writeRunRecord(cwd, run);
-		const scheduling = scheduleRun(cwd, run.runId);
+		scheduling = observeDagScheduling(scheduleRun(cwd, run.runId));
 		await eventually(
 			() => assert.equal(existsSync(join(cwd, "helper-started")), true),
 			1500,
 		);
 		const stopped = await stopRun(cwd, run.runId);
 		await scheduling;
+		schedulingCompleted = true;
 		const finalRun = await readRunRecord(cwd, run.runId);
 		assert.equal(taskBySpec(finalRun, "block.main").status, "interrupted");
 		assert.equal(
@@ -363,14 +499,27 @@ test("stopRun writes durable intent and cooperatively cancels a blocked async su
 			taskBySpec(finalRun, "block.main").taskId,
 		]);
 		assert.equal(stopped.run.runId, run.runId);
+	} catch (error) {
+		primaryFailure = error;
 	} finally {
-		cleanup(cwd);
+		cleanupFailure = await cleanupDagFixture({
+			cwd,
+			scheduling,
+			runId,
+			schedulingCompleted,
+		});
 	}
+	throwDagTestFailures(primaryFailure, cleanupFailure);
 });
 
 test("stop intent during support helper preparation prevents helper invocation and artifact commit", async () => {
-	const cwd = makeProject();
+	const cwd = makeDagWatchdogFixture();
 	const releasePreparation = deferred();
+	let scheduling;
+	let runId;
+	let schedulingCompleted = false;
+	let primaryFailure;
+	let cleanupFailure;
 	try {
 		mkdirSync(join(cwd, "workflows"), { recursive: true });
 		writeFileSync(
@@ -400,9 +549,10 @@ test("stop intent during support helper preparation prevents helper invocation a
 			specPath: "workflows/unit.json",
 		});
 		const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
+		runId = run.runId;
 		await writeStaticRunArtifacts(cwd, run, compiled, spec);
 		await writeRunRecord(cwd, run);
-		const scheduling = scheduleRun(cwd, run.runId);
+		scheduling = observeDagScheduling(scheduleRun(cwd, run.runId));
 		await eventually(
 			() => assert.equal(existsSync(join(cwd, "helper-prepared")), true),
 			1500,
@@ -410,22 +560,36 @@ test("stop intent during support helper preparation prevents helper invocation a
 		await requestWorkflowStop(cwd, run.runId);
 		releasePreparation.resolve();
 		await scheduling;
+		schedulingCompleted = true;
 		const finalRun = await readRunRecord(cwd, run.runId);
 		const support = taskBySpec(finalRun, "support.main");
 		assert.equal(existsSync(join(cwd, "helper-invoked")), false);
 		assert.equal(existsSync(join(cwd, support.files.result)), false);
 		assert.equal(support.status, "interrupted");
 		assert.equal(support.statusDetail, "workflow_stopped");
+	} catch (error) {
+		primaryFailure = error;
 	} finally {
-		setSupportHelperPreparedHookForTests(undefined);
-		releasePreparation.resolve();
-		cleanup(cwd);
+		cleanupFailure = await cleanupDagFixture({
+			cwd,
+			scheduling,
+			runId,
+			schedulingCompleted,
+			release: () => releasePreparation.resolve(),
+			reset: () => setSupportHelperPreparedHookForTests(undefined),
+		});
 	}
+	throwDagTestFailures(primaryFailure, cleanupFailure);
 });
 
 test("stop intent during backend launch preparation prevents runSubagent side effects", async () => {
-	const cwd = makeProject();
+	const cwd = makeDagWatchdogFixture();
 	const releasePreparation = deferred();
+	let scheduling;
+	let runId;
+	let schedulingCompleted = false;
+	let primaryFailure;
+	let cleanupFailure;
 	try {
 		writeAgent(cwd, "unit-scout", "read");
 		let launches = 0;
@@ -463,9 +627,10 @@ test("stop intent during backend launch preparation prevents runSubagent side ef
 			compiled,
 			join(cwd, "workflows", "unit.json"),
 		);
+		runId = run.runId;
 		await writeStaticRunArtifacts(cwd, run, compiled, spec);
 		await writeRunRecord(cwd, run);
-		const scheduling = scheduleRun(cwd, run.runId);
+		scheduling = observeDagScheduling(scheduleRun(cwd, run.runId));
 		await eventually(
 			() => assert.equal(existsSync(join(cwd, "backend-prepared")), true),
 			1500,
@@ -473,18 +638,156 @@ test("stop intent during backend launch preparation prevents runSubagent side ef
 		await requestWorkflowStop(cwd, run.runId);
 		releasePreparation.resolve();
 		await scheduling;
+		schedulingCompleted = true;
 		const finalRun = await readRunRecord(cwd, run.runId);
 		const worker = taskBySpec(finalRun, "worker.main");
 		assert.equal(launches, 0);
 		assert.equal(worker.backendHandle, undefined);
 		assert.equal(worker.status, "interrupted");
 		assert.equal(worker.statusDetail, "workflow_stopped");
+	} catch (error) {
+		primaryFailure = error;
 	} finally {
-		setSubagentApiForTests(undefined);
-		setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
-		releasePreparation.resolve();
-		cleanup(cwd);
+		cleanupFailure = await cleanupDagFixture({
+			cwd,
+			scheduling,
+			runId,
+			schedulingCompleted,
+			release: () => releasePreparation.resolve(),
+			reset: () => {
+				setSubagentApiForTests(undefined);
+				setSubagentLaunchControlsForTests({
+					releaseDelayMs: 0,
+					retryJitterMs: 0,
+				});
+			},
+		});
 	}
+	throwDagTestFailures(primaryFailure, cleanupFailure);
+});
+
+test("DAG teardown joins prepared scheduling before reset and removal after an early assertion", async () => {
+	const cwd = makeDagWatchdogFixture();
+	const releasePreparation = deferred();
+	let scheduling;
+	let runId;
+	let schedulingSettled = false;
+	let resetAfterSettlement = false;
+	let removedAfterSettlement = false;
+	let primaryFailure;
+	let cleanupFailure;
+	try {
+		writeAgent(cwd, "unit-scout", "read");
+		setSubagentApiForTests({
+			async runSubagent() {
+				throw new Error("runSubagent must not run after the forced teardown");
+			},
+			async getSubagentStatus() {
+				return null;
+			},
+			async reconcileSubagentRun() {
+				return {};
+			},
+			async interruptSubagent() {
+				return {};
+			},
+		});
+		setSubagentLaunchControlsForTests({
+			releaseDelayMs: 0,
+			retryJitterMs: 0,
+			beforeRunSubagent: async () => {
+				writeFileSync(join(cwd, "backend-prepared"), "prepared", "utf8");
+				await releasePreparation.promise;
+			},
+		});
+		const spec = workflowSpec("unit-scout", {
+			artifactGraph: {
+				stages: [{ id: "worker", type: "single", prompt: "Worker." }],
+			},
+		});
+		const compiled = await compileWorkflow(spec, {
+			cwd,
+			task: "Force teardown before backend launch completes",
+		});
+		const { run } = await createWorkflowRunRecord(
+			cwd,
+			compiled,
+			join(cwd, "workflows", "unit.json"),
+		);
+		runId = run.runId;
+		await writeStaticRunArtifacts(cwd, run, compiled, spec);
+		await writeRunRecord(cwd, run);
+		scheduling = observeDagScheduling(scheduleRun(cwd, run.runId));
+		void scheduling.then(
+			() => {
+				schedulingSettled = true;
+			},
+			() => {
+				schedulingSettled = true;
+			},
+		);
+		await eventually(
+			() => assert.equal(existsSync(join(cwd, "backend-prepared")), true),
+			1500,
+		);
+		assert.fail("forced early DAG teardown assertion");
+	} catch (error) {
+		primaryFailure = error;
+	} finally {
+		cleanupFailure = await cleanupDagFixture({
+			cwd,
+			scheduling,
+			runId,
+			schedulingCompleted: false,
+			release: () => releasePreparation.resolve(),
+			reset: () => {
+				assert.equal(
+					schedulingSettled,
+					true,
+					"mock reset waits for prepared scheduling",
+				);
+				resetAfterSettlement = true;
+				setSubagentApiForTests(undefined);
+				setSubagentLaunchControlsForTests({
+					releaseDelayMs: 0,
+					retryJitterMs: 0,
+				});
+			},
+			remove: (path) => {
+				assert.equal(
+					schedulingSettled,
+					true,
+					"fixture removal waits for prepared scheduling",
+				);
+				removedAfterSettlement = true;
+				cleanup(path);
+			},
+		});
+	}
+	if (cleanupFailure)
+		throwDagTestFailures(primaryFailure, cleanupFailure);
+	assert.match(String(primaryFailure), /forced early DAG teardown assertion/);
+	assert.equal(cleanupFailure, undefined);
+	assert.equal(resetAfterSettlement, true);
+	assert.equal(removedAfterSettlement, true);
+	assert.equal(existsSync(cwd), false);
+	assert.throws(
+		() => throwDagTestFailures(primaryFailure, cleanupFailure),
+		/forced early DAG teardown assertion/,
+	);
+	const aggregatePrimaryFailure = new Error("distinct DAG primary failure");
+	const aggregateCleanupFailure = new Error("distinct DAG cleanup failure");
+	assert.throws(
+		() =>
+			throwDagTestFailures(aggregatePrimaryFailure, aggregateCleanupFailure),
+		(error) => {
+			assert.equal(error instanceof AggregateError, true);
+			assert.equal(error.errors.length, 2);
+			assert.equal(error.errors[0], aggregatePrimaryFailure);
+			assert.equal(error.errors[1], aggregateCleanupFailure);
+			return true;
+		},
+	);
 });
 
 test("stop during support prevents later independent backend launches and records interrupted support", async () => {
@@ -761,8 +1064,12 @@ test("stop intent immediately before dynamic result commit prevents completed ar
 });
 
 test("stop during dynamic helper terminates helper worker before delayed side effect", async () => {
-	const cwd = makeProject();
+	const cwd = makeDagWatchdogFixture();
 	let scheduling;
+	let runId;
+	let schedulingCompleted = false;
+	let primaryFailure;
+	let cleanupFailure;
 	try {
 		writeAgent(cwd, "unit-scout", "read");
 		const workflowDir = join(cwd, "workflows", "bundle");
@@ -810,31 +1117,44 @@ test("stop during dynamic helper terminates helper worker before delayed side ef
 			specPath,
 		});
 		const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
+		runId = run.runId;
 		await writeStaticRunArtifacts(cwd, run, compiled, spec);
 		await writeRunRecord(cwd, run);
-		scheduling = scheduleRun(cwd, run.runId);
+		scheduling = observeDagScheduling(scheduleRun(cwd, run.runId));
 		await eventually(
 			() => assert.equal(existsSync(join(cwd, "dynamic-helper-started")), true),
 			1500,
 		);
 		await stopRun(cwd, run.runId);
 		await scheduling;
+		schedulingCompleted = true;
 		await sleep(500);
 		const finalRun = await readRunRecord(cwd, run.runId);
 		const controller = taskBySpec(finalRun, "adaptive.controller");
 		assert.equal(controller.status, "interrupted");
 		assert.equal(controller.statusDetail, "workflow_stopped");
 		assert.equal(existsSync(join(cwd, "dynamic-helper-after-stop")), false);
+	} catch (error) {
+		primaryFailure = error;
 	} finally {
-		if (scheduling)
-			await Promise.race([scheduling.catch(() => undefined), sleep(500)]);
-		cleanup(cwd);
+		cleanupFailure = await cleanupDagFixture({
+			cwd,
+			scheduling,
+			runId,
+			schedulingCompleted,
+			reset: () => setDynamicControllerHooksForTests(),
+		});
 	}
+	throwDagTestFailures(primaryFailure, cleanupFailure);
 });
 
 test("existing stop intent prevents dynamic nested workflow launch", async () => {
-	const cwd = makeProject();
+	const cwd = makeDagWatchdogFixture();
 	let scheduling;
+	let runId;
+	let schedulingCompleted = false;
+	let primaryFailure;
+	let cleanupFailure;
 	try {
 		writeAgent(cwd, "unit-scout", "read");
 		const workflowDir = join(cwd, "workflows", "bundle");
@@ -896,9 +1216,10 @@ test("existing stop intent prevents dynamic nested workflow launch", async () =>
 			specPath,
 		});
 		const { run } = await createWorkflowRunRecord(cwd, compiled, specPath);
+		runId = run.runId;
 		await writeStaticRunArtifacts(cwd, run, compiled, spec);
 		await writeRunRecord(cwd, run);
-		scheduling = scheduleRun(cwd, run.runId);
+		scheduling = observeDagScheduling(scheduleRun(cwd, run.runId));
 		await eventually(
 			() =>
 				assert.equal(existsSync(join(cwd, "nested-controller-ready")), true),
@@ -907,6 +1228,7 @@ test("existing stop intent prevents dynamic nested workflow launch", async () =>
 		await requestWorkflowStop(cwd, run.runId);
 		writeFileSync(releaseFile, "release", "utf8");
 		await scheduling;
+		schedulingCompleted = true;
 		const finalRun = await readRunRecord(cwd, run.runId);
 		const controller = taskBySpec(finalRun, "adaptive.controller");
 		const childRuns = (await listRunRecords(cwd)).filter(
@@ -916,12 +1238,19 @@ test("existing stop intent prevents dynamic nested workflow launch", async () =>
 		assert.equal(controller.statusDetail, "workflow_stopped");
 		assert.equal(childRuns.length, 0);
 		assert.equal(existsSync(join(cwd, "nested-launched")), false);
+	} catch (error) {
+		primaryFailure = error;
 	} finally {
-		writeFileSync(join(cwd, "release-nested-call"), "release", "utf8");
-		if (scheduling)
-			await Promise.race([scheduling.catch(() => undefined), sleep(500)]);
-		cleanup(cwd);
+		cleanupFailure = await cleanupDagFixture({
+			cwd,
+			scheduling,
+			runId,
+			schedulingCompleted,
+			release: () =>
+				writeFileSync(join(cwd, "release-nested-call"), "release", "utf8"),
+		});
 	}
+	throwDagTestFailures(primaryFailure, cleanupFailure);
 });
 
 test("parent stop fences a registered nested child before its run record exists", async () => {
@@ -1280,6 +1609,7 @@ test("successful fail-fast interruption releases the live model worker slot imme
 			taskBySpec(run, "running.main"),
 			preparedRunning,
 		);
+		assert.equal(subagentLiveModelWorkerSlotCountForTests(), 1);
 		await completeTask(cwd, taskBySpec(run, "failed.main"), {}, "failed");
 		await writeRunRecord(cwd, run);
 		await scheduleRun(cwd, run.runId);

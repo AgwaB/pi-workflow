@@ -16,7 +16,12 @@ import { after, test } from "node:test";
 import {
 	applyExecutionProfileStageOverrides,
 	collectWorkflowProfileStageSlots,
+	GOAL_EXECUTION_PROFILE,
 } from "../../.tmp/unit/execution-profile.js";
+import {
+	captureGoalChildProfile,
+	captureGoalWorkflowProfile,
+} from "../../.tmp/unit/goal-profile.js";
 import { parseArtifactGraphWorkflowSpec } from "../../.tmp/unit/artifact-graph-schema.js";
 import workflowExtension, { resolveWorkflowExecutionProfileForLaunch } from "../../.tmp/unit/extension.js";
 import { loadWorkflowSpec } from "../../.tmp/unit/schema.js";
@@ -32,6 +37,7 @@ import {
 } from "../../.tmp/unit/workflow-profile-settings.js";
 import {
 	buildWorkflowProfilePickerChoices,
+	collectWorkflowProfileRuntimeOverride,
 	configureWorkflowExecutionProfile,
 } from "../../.tmp/unit/workflow-profile-ui.js";
 import {
@@ -1241,6 +1247,188 @@ test("combined editor retains model draft across Back and saves only after confi
 	assert.equal(ui.calls.filter(({ title }) => title.startsWith("Choose model"))[1].selection.selected, `${OTHER} (current setting)`);
 });
 
+test("runtime override collector returns only selected fields and snapshots caller input", async () => {
+	const capturedRuntime = { model: SOL, thinking: "high" };
+	const availableModels = structuredClone(MODELS);
+	const modelUi = new ScriptedUi([
+		() => {
+			capturedRuntime.model = OPUS;
+			capturedRuntime.thinking = "low";
+			availableModels.splice(0);
+			return "Model only";
+		},
+		LUNA,
+	]);
+	const modelResult = await collectWorkflowProfileRuntimeOverride({
+		ui: modelUi,
+		capturedRuntime,
+		availableModels,
+		displayLabel: "branch reviewer",
+	});
+	assert.deepEqual(modelResult, {
+		status: "selected",
+		override: { model: LUNA },
+	});
+	assert.deepEqual(capturedRuntime, { model: OPUS, thinking: "low" });
+	assert.deepEqual(availableModels, []);
+
+	const thinkingRuntime = { model: SOL, thinking: "high" };
+	const thinkingModels = structuredClone(MODELS);
+	const thinkingModelsBefore = structuredClone(thinkingModels);
+	const thinkingResult = await collectWorkflowProfileRuntimeOverride({
+		ui: new ScriptedUi(["Thinking only", "low"]),
+		capturedRuntime: thinkingRuntime,
+		availableModels: thinkingModels,
+		displayLabel: "branch reviewer",
+	});
+	assert.deepEqual(thinkingResult, {
+		status: "selected",
+		override: { thinking: "low" },
+	});
+	assert.deepEqual(thinkingRuntime, { model: SOL, thinking: "high" });
+	assert.deepEqual(thinkingModels, thinkingModelsBefore);
+});
+
+test("runtime override collector supports a changed model and supported thinking", async () => {
+	const result = await collectWorkflowProfileRuntimeOverride({
+		ui: new ScriptedUi(["Model and thinking", LUNA, "high"]),
+		capturedRuntime: { model: SOL, thinking: "xhigh" },
+		availableModels: MODELS,
+		displayLabel: "research branch",
+	});
+	assert.deepEqual(result, {
+		status: "selected",
+		override: { model: LUNA, thinking: "high" },
+	});
+});
+
+test("runtime override model-only rejects incompatible retained thinking and reprompts", async () => {
+	const ui = new ScriptedUi(["Model only", LUNA, OTHER]);
+	const result = await collectWorkflowProfileRuntimeOverride({
+		ui,
+		capturedRuntime: { model: SOL, thinking: "xhigh" },
+		availableModels: MODELS,
+		displayLabel: "verification branch",
+	});
+	assert.deepEqual(result, {
+		status: "selected",
+		override: { model: OTHER },
+	});
+	const modelCalls = ui.calls.filter(({ title }) => title.startsWith("Choose model"));
+	assert.equal(modelCalls.length, 2);
+	assert.match(modelCalls[1].title, /does not support captured thinking xhigh/);
+	assert.equal(modelCalls[1].selection.selected, `${LUNA} (current setting)`);
+	assert.deepEqual(ui.notifications, [{
+		message: `${LUNA} does not support captured thinking xhigh; choose a compatible model.`,
+		level: "warning",
+	}]);
+});
+
+test("runtime override model labels cannot impersonate the current-setting marker", async () => {
+	const names = [SOL, `${SOL} (current setting)`, JSON.stringify(`${SOL} (current setting)`)];
+	for (const current of names) {
+		for (const target of names) {
+			let calls = 0;
+			const result = await collectWorkflowProfileRuntimeOverride({
+				ui: {
+					async select(_title, options, selection) {
+						if (++calls === 1) return "Model only";
+						const label = (name) => `${name.includes(" (current setting)") ? JSON.stringify(name) : name}${name === current ? " (current setting)" : ""}`;
+						assert.equal(new Set(options).size, names.length);
+						assert.equal(selection.selected, label(current));
+						assert.equal(options.filter((option) => option.endsWith(" (current setting)")).length, 1);
+						assert.ok(options.includes(label(target)));
+						return label(target);
+					},
+				},
+				capturedRuntime: { model: current, thinking: "high" },
+				availableModels: names.map((fullId) => ({ ...MODELS[0], fullId })),
+				displayLabel: "exact model identity",
+			});
+			assert.deepEqual(result, { status: "selected", override: { model: target } });
+			assert.equal(calls, 2);
+		}
+	}
+});
+
+test("runtime override cancellation at each terminal level performs no preference write", async () => {
+	const { agentDir } = setup("ui-runtime-override-cancel");
+	for (const script of [
+		[undefined],
+		["Model only", undefined],
+		["Thinking only", undefined],
+		["Model and thinking", undefined],
+	]) {
+		const result = await collectWorkflowProfileRuntimeOverride({
+			ui: new ScriptedUi(script),
+			capturedRuntime: { model: SOL, thinking: "high" },
+			availableModels: MODELS,
+			displayLabel: "cancel branch",
+		});
+		assert.deepEqual(result, { status: "cancelled" });
+	}
+	assert.throws(() => statSync(agentDir), /ENOENT/);
+});
+
+test("runtime override combined Back retains the model draft", async () => {
+	const ui = new ScriptedUi([
+		"Model and thinking",
+		LUNA,
+		undefined,
+		`${LUNA} (current setting)`,
+		"medium",
+	]);
+	const result = await collectWorkflowProfileRuntimeOverride({
+		ui,
+		capturedRuntime: { model: SOL, thinking: "high" },
+		availableModels: MODELS,
+		displayLabel: "combined branch",
+	});
+	assert.deepEqual(result, {
+		status: "selected",
+		override: { model: LUNA, thinking: "medium" },
+	});
+	const modelCalls = ui.calls.filter(({ title }) => title.startsWith("Choose model"));
+	assert.equal(modelCalls.length, 2);
+	assert.equal(modelCalls[1].selection.selected, `${LUNA} (current setting)`);
+});
+
+test("runtime override choices contain no inheritance or current Pi runtime text", async () => {
+	const ui = new ScriptedUi([
+		"Model and thinking",
+		`${SOL} (current setting)`,
+		"high (current setting)",
+	]);
+	await collectWorkflowProfileRuntimeOverride({
+		ui,
+		capturedRuntime: { model: SOL, thinking: "high" },
+		availableModels: MODELS,
+		displayLabel: "text branch",
+	});
+	for (const { title, options } of ui.calls) {
+		assert.doesNotMatch(title, /current Pi|inherit/i);
+		assert.ok(options.every((option) => !/current Pi|inherit/i.test(option)));
+	}
+});
+
+test("runtime override collector fails closed on unknown selections", async () => {
+	for (const script of [
+		["not a field"],
+		["Model only", "not a model"],
+		["Thinking only", "not thinking"],
+	]) {
+		await assert.rejects(
+			collectWorkflowProfileRuntimeOverride({
+				ui: new ScriptedUi(script),
+				capturedRuntime: { model: SOL, thinking: "high" },
+				availableModels: MODELS,
+				displayLabel: "unknown branch",
+			}),
+			/Unknown workflow runtime override choice/,
+		);
+	}
+});
+
 test("actual profile command returns to workflow picker on Back and exits only at entry screen", async () => {
 	for (const explicit of [false, true]) {
 		const { root, agentDir, workflowPath } = setup(`ui-command-back-${explicit}`);
@@ -1316,4 +1504,103 @@ test("launch precedence is explicit, then saved, then the legacy declared select
 		(await workflowProfileIdentity(spec, workflowPath)).definitionFingerprint,
 	);
 	assert.deepEqual(saved.executionProfileOverride, resolved);
+});
+
+test("Goal profile slots use canonical root and embedded namespaces without provider fields", () => {
+	const root = {
+		schemaVersion: 1,
+		name: "goal-root",
+		goal: {},
+	};
+	assert.deepEqual(
+		collectWorkflowProfileStageSlots(root).map(({ id, profileRole }) => [id, profileRole]),
+		[
+			["goal.$planner", "planning"],
+			["goal.$worker", "research-execution"],
+			["goal.$verifier", "verification"],
+			["goal.$synthesis", "synthesis"],
+			["goal.$judge", "final-judgment"],
+		],
+	);
+	assert.strictEqual(applyExecutionProfileStageOverrides(root, {}), root);
+	const profiledRoot = applyExecutionProfileStageOverrides(root, {
+		"goal.$planner": { model: OTHER, thinking: "medium" },
+	});
+	assert.deepEqual(profiledRoot[GOAL_EXECUTION_PROFILE], {
+		"goal.$planner": { model: OTHER, thinking: "medium" },
+	});
+	assert.equal(profiledRoot.model, undefined);
+
+	const embedded = {
+		schemaVersion: 1,
+		artifactGraph: {
+			stages: [{
+				id: "review",
+				type: "dag",
+				stages: [{ id: "reviewA", type: "goal", goal: { uses: "goal.json" } }],
+			}],
+		},
+	};
+	const profiledEmbedded = applyExecutionProfileStageOverrides(embedded, {
+		"review.reviewA.$worker": { model: LUNA, thinking: "high" },
+	});
+	const policy = profiledEmbedded.artifactGraph.stages[0].stages[0];
+	assert.deepEqual(policy[GOAL_EXECUTION_PROFILE], {
+		"review.reviewA.$worker": { model: LUNA, thinking: "high" },
+	});
+	assert.equal(policy.model, undefined);
+	assert.equal(policy.thinking, undefined);
+});
+
+test("Goal captures concrete parent roles and overrides child defaults without runtime escalation", () => {
+	const goal = {
+		schemaVersion: 1,
+		name: "goal-profile",
+		goal: {},
+	};
+	const profile = captureGoalWorkflowProfile({
+		spec: goal,
+		selection: { profileId: "mixed" },
+		currentRuntime: { model: OTHER, thinking: "medium" },
+		availableModels: MODELS,
+		environmentDigest: "a".repeat(64),
+	});
+	assert.deepEqual(
+		profile.roles.map(({ role, model, thinking }) => [role, model, thinking]),
+		[
+			["planning", OPUS, "high"],
+			["research-execution", LUNA, "medium"],
+			["synthesis", OPUS, "high"],
+			["verification", LUNA, "high"],
+			["final-judgment", OPUS, "high"],
+		],
+	);
+	const child = roleSpec("goal-child");
+	delete child.artifactGraph.stages[0].profileRole;
+	child.defaultExecutionProfile = "authored";
+	child.executionProfiles = {
+		authored: { plan: { model: OTHER, thinking: "low" } },
+	};
+	const originalProfile = structuredClone(profile);
+	for (const role of [undefined, "research-execution", "planning"]) {
+		if (role === undefined) delete child.artifactGraph.stages[0].profileRole;
+		else child.artifactGraph.stages[0].profileRole = role;
+		const originalChild = structuredClone(child);
+		const context = {
+			profile, spec: child, bundleDigest: "b".repeat(64), availableModels: MODELS,
+		};
+		const capture = captureGoalChildProfile(context);
+		assert.deepEqual(capture.executionProfile.stageOverrides.plan, {
+			model: role === "planning" ? OPUS : LUNA,
+			thinking: role === "planning" ? "high" : "medium",
+		});
+		assert.throws(() => captureGoalChildProfile({
+			...context, runtimeOverrides: { model: OTHER },
+		}), /Goal runtime override conflict: plan\/model/);
+		assert.throws(() => captureGoalChildProfile({
+			...context, runtimeOverrides: { thinking: "low" },
+		}), /Goal runtime override conflict: plan\/thinking/);
+		assert.deepEqual(child, originalChild);
+		assert.deepEqual(profile, originalProfile);
+	}
 });
