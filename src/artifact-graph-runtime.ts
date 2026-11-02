@@ -2054,6 +2054,11 @@ export async function prepareArtifactGraphRetryTask(
 		compiledPrompt: [...retrySections, preview].join("\n\n"),
 	};
 	assertFinalCompiledPromptWithinCap(retryTask);
+	// Only the prompt changes: the retry inherits the preparation attestation of
+	// its sealed source when the profile binding is unchanged.
+	const original = preparedTaskProfiles.get(preparedTask);
+	if (original && original.launch === workflowTaskProfileBinding(retryTask))
+		preparedTaskProfiles.set(retryTask, original);
 	return retryTask;
 }
 

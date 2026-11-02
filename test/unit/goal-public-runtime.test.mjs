@@ -322,9 +322,10 @@ async function waitForOriginalEndpointRetirement(callback, signal) {
   assert.ok(original, "retirement requires original callback endpoint capture");
   const { lstatSync } = await import("node:fs");
   await new Promise((resolveWait, reject) => {
-    let watcher;
+    let watcher, poll;
     const finish = error => {
       watcher?.close();
+      clearInterval(poll);
       signal.removeEventListener("abort", abort);
       if (error) reject(error); else resolveWait();
     };
@@ -340,7 +341,15 @@ async function waitForOriginalEndpointRetirement(callback, signal) {
         else finish(error);
       }
     };
-    watcher = watch(dirname(original.socketPath), inspect);
+    // A drained channel also removes its private socket directory; an absent
+    // directory is the same retirement as an absent endpoint. Directory watches
+    // can miss events once the watched directory itself is removed, so poll too.
+    poll = setInterval(inspect, 50);
+    try { watcher = watch(dirname(original.socketPath), inspect); }
+    catch (error) {
+      if (error.code === "ENOENT") { inspect(); return; }
+      throw error;
+    }
     watcher.once("error", finish);
     signal.addEventListener("abort", abort, { once: true });
     if (signal.aborted) abort(); else inspect();
@@ -376,6 +385,8 @@ test("physical candidate retirement observer rejects live replaced and unbound e
   await assert.rejects(captureOriginalEndpoint(() => {}, socketPath), /original live Unix endpoint/);
   await rm(socketPath);
   await assertOriginalCandidateRetired(callback, [], "replacement removed");
+  await rm(directory, { recursive: true, force: true });
+  await waitForOriginalEndpointRetirement(callback, t.signal);
 });
 
 test("candidate transport rejects missing non-socket and symlink endpoints before connection", async t => {
@@ -2194,8 +2205,12 @@ test("ordinary run writes preserve published Goal profile evidence across final 
   }
 });
 
-for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget, sourceMode, codex, closure, catalog, rubric, backendLateUnknown, originApply] of [[false, false, false],
+for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget, sourceMode, codex, closure, catalog, rubric, backendLateUnknown, originApply, commandOracle, scopeDirectory, recoveryMode] of [[false, false, false],
+  [false, false, false, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true, true, true],
+  [false, false, false, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true, true, false, true],
+  [false, false, false, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true, true, false, "cap-used"],
   [false, false, false, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true],
+  [false, false, false, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true, true],
   [false, false, false, undefined, false, 6, undefined, false, false, undefined, "native source-complete success", undefined, true], [true, false, false], [false, true, false], [true, false, true], [false, false, true],
   [false, false, false, undefined, true, 3, "no-read", false, false, true, "child source reads"],
   ...["success", "cap2", "replan", "malformed", "human", "no-verify", "warm", "replan warm",
@@ -2210,12 +2225,12 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
   // 6=initial A/B + two B continuations + final; 7 leaves one request beyond
   // the eviction fixture's six physical sends; 10=planner + worker + two
   // four-turn verifiers; 12 is two complete six-request generations.
-  ...["success", "malformed", "model criterion echo", "old exact hash echo", "human", "warm",
+  ...["success", "malformed", "output repair", "output repair exhausted", "worker output repair", "model criterion echo", "old exact hash echo", "human", "warm",
     "source-empty-analysis", "source-whitespace-analysis", "source-missing-analysis",
     "source-tampered-content", "source-custody-revoked-after-native",
     "source-payload-replaced", "source-payload-mutated"].map(mode =>
-    [false, false, false, undefined, false, 6, undefined, false, false, undefined,
-      `native source-complete ${mode}`]),
+    [false, false, false, undefined, false, mode === "output repair" ? 10 : mode === "worker output repair" ? 7 : 6,
+      undefined, false, false, undefined, `native source-complete ${mode}`]),
   [false, false, false, undefined, false, 3, undefined, false, false, undefined,
     "native source-complete source-no-coverage"],
   ...["source-one-coverage", "source-partial-coverage", "source-suffix-coverage",
@@ -2370,7 +2385,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
   [false, false, false, undefined, false, "accounting-ack"],
   [false, false, false, undefined, false, 5, "no-read", false, false, "foreach actual backend late UNKNOWN", undefined, true],
   [false, false, false, undefined, false, 0], [false, false, false, undefined, false, "cost0"],
-  [false, false, false, undefined, false, "cost1"]]) test(backendLateUnknown ? "ordinary Goal actual backend late UNKNOWN blocks queued second native API before provider launch" : rubric ? `ordinary Goal original SDK model rubric ${rubric}${rubric === "warm" || rubric === "replan warm" ? " same-live reattachment retains the original captured profile" : ""}${originApply ? " with origin apply" : ""}` : catalog === "ordinary child maxDepth one" ? "ordinary child maxDepth one runs plain artifact graph" : catalog ? `ordinary Goal admitted catalog ${typeof catalog === "string" && catalog.startsWith("children ") ? catalog : `child ${typeof catalog === "string" ? catalog : requestBudget === 2 ? "success" : "exhausted root cap"}`}` : closure ? ordinaryClosureProducerName : `ordinary candidate workers invoke admitted physical callbacks and preserve bytes across replan${codex ? " with captured Codex SSE" : ""}${sourceMode ? ` with scoped source ${sourceMode}` : ""}${uncertain ? " with UNKNOWN outcome" : ""}${custom ? " with explicit custom agent" : ""}${warm ? " with explicit same-live-session resume" : ""}${evidenceFailure ? ` with evidence ${evidenceFailure}` : ""}${commandMode ? " through registered Goal commands" : ""}${requestBudget !== undefined ? ` with native request budget ${requestBudget}` : ""}${originApply ? " with origin apply" : ""}`, { timeout: backendLateUnknown || rubric || catalog || requestBudget === "candidate-policy-configuration-custody" || warm && commandMode ? 30_000 : undefined }, async t => {
+  [false, false, false, undefined, false, "cost1"]]) test(backendLateUnknown ? "ordinary Goal actual backend late UNKNOWN blocks queued second native API before provider launch" : rubric ? `ordinary Goal original SDK model rubric ${rubric}${rubric === "warm" || rubric === "replan warm" ? " same-live reattachment retains the original captured profile" : ""}${originApply ? " with origin apply" : ""}` : catalog === "ordinary child maxDepth one" ? "ordinary child maxDepth one runs plain artifact graph" : catalog ? `ordinary Goal admitted catalog ${typeof catalog === "string" && catalog.startsWith("children ") ? catalog : `child ${typeof catalog === "string" ? catalog : requestBudget === 2 ? "success" : "exhausted root cap"}`}` : closure ? ordinaryClosureProducerName : `ordinary candidate workers invoke admitted physical callbacks and preserve bytes across replan${codex ? " with captured Codex SSE" : ""}${sourceMode ? ` with scoped source ${sourceMode}` : ""}${uncertain ? " with UNKNOWN outcome" : ""}${custom ? " with explicit custom agent" : ""}${warm ? " with explicit same-live-session resume" : ""}${evidenceFailure ? ` with evidence ${evidenceFailure}` : ""}${commandMode ? " through registered Goal commands" : ""}${requestBudget !== undefined ? ` with native request budget ${requestBudget}` : ""}${originApply ? " with origin apply" : ""}${commandOracle ? " judged by a sandboxed command" : ""}${scopeDirectory ? " refuses a directory scope before consent" : ""}${recoveryMode ? ` recovering an interrupted run${recoveryMode === "cap-used" ? " whose requests used the cap" : ""}` : ""}`, { timeout: backendLateUnknown || rubric || catalog || requestBudget === "candidate-policy-configuration-custody" || warm && commandMode ? 30_000 : undefined }, async t => {
   const { runWorkflowSpec, stopRun, resumeRun, stopWorkflowWatchersForTests } = await import("../../.tmp/unit/engine.js");
   const closureGenerations = closure === "replan-three-criteria" ? 3 : closure === "replan" ? 2 : 1;
   const { readRunRecord, readCompiledWorkflow, supervisorPath, flushPendingIndexUpdatesForTests } = await import("../../.tmp/unit/store.js");
@@ -2417,6 +2432,10 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
   const nativeSourceDeclaredBudget = !nativeSourceComplete ? undefined :
     nativeReadonlyResearch ? 6 :
     verifierProfileException ? 10 :
+    // planner + worker + two complete four-turn verifier attempts.
+    rubricMode === "output repair" ? 10 :
+    // planner + two candidate worker attempts + one four-turn verifier.
+    rubricMode === "worker output repair" ? 7 :
     rubricReplan ? 12 :
     rubricMode === "source-native-evicted" ? 7 :
     rubricMode === "source-no-coverage" ? 3 :
@@ -2915,6 +2934,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
   }
   const budgetModel = codex ? codexFixtureModel : "openai/gpt-5.1";
   const rubricModel = "openai/gpt-5.2", rubricOutputs = [], rubricCandidateReads = [], rubricUsage = [];
+  let workerOutputRepairAttempts = 0, commandOracleReplans = 0, recoveryPlannerPrompts = 0, temporaryDirectoriesBefore;
   const rubricDigest = "Evaluated the immutable worker subject against the authored rubric.";
   const nativeSourceVerifierEvidence = [];
   let oldReplanNativeFailureEvidence;
@@ -2999,6 +3019,17 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
     [`goal.$${role}`, { model: requestBudget !== undefined && !(requestBudget === "mixed-provider" && role === "worker") ? budgetModel : "fixture/model", thinking: role === "worker" ? "medium" : "high" }])) }, defaultExecutionProfile: "captured" };
   if (ordinaryChildMaxDepthOne) definition.goal.nesting.maxDepth = 1;
   if (originApply) definition.goal.authority.allowedEffects = ["read", "candidate-write", "verify", "origin-apply", "workflow-create"];
+  if (scopeDirectory) {
+    await mkdir(join(cwd, "protected-dir"));
+    await writeFile(join(cwd, "protected-dir", "kept.txt"), "kept");
+    definition.goal.authority.protectedPaths = ["protected-dir"];
+  }
+  if (commandOracle) definition.goal.criteria[0].verifier = {
+    kind: "deterministic", producerId: "command-exit-v1", target: "candidate",
+    subject: { resultSlot: "result", artifact: "control" },
+    config: { argv: [process.execPath, "-e",
+      "const v=require('fs').readFileSync('a.txt','utf8'); console.log('candidate='+v); process.exit(v==='correct'?0:3)"],
+      timeoutMs: 30000 } };
   if (sourceMode) {
     definition.goal.objective = "Research the admitted source; evaluate the original research result, not mere source access";
     definition.goal.criteria[0].verifier.subject.path = "$.result.accepted";
@@ -3165,7 +3196,27 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
   if (requestBudget === "null/null") definition.goal.limits = { requests: null, costMicros: null };
   if (requestBudget === "empty") definition.goal.limits = {};
   if (requestBudget === "cost0" || requestBudget === "cost1") definition.goal.limits = { requests: null, costMicros: requestBudget === "cost0" ? 0 : 1 };
+  if (recoveryMode === "cap-used") definition.goal.limits = { requests: 2 };
   await writeFile(join(cwd, "goal.json"), JSON.stringify(definition));
+  let recoveryPlan;
+  if (recoveryMode) {
+    // An interrupted run's plan as planWorkflowGoalRecovery builds it.
+    const { loadWorkflowSpec } = await import("../../.tmp/unit/schema.js");
+    const { parseGoalWorkflowSpec } = await import("../../.tmp/unit/goal-workflow-schema.js");
+    const { observeGoalWorkspaceOrigin } = await import("../../.tmp/unit/goal-workspace-host.js");
+    const { goalRecoveryBaselineHash } = await import("../../.tmp/unit/goal-workflow-recovery.js");
+    const parsed = parseGoalWorkflowSpec((await loadWorkflowSpec(join(cwd, "goal.json"), cwd)).spec);
+    const repository = existsSync(join(cwd, ".git")) ? "git" : "nonGit";
+    const origin = await observeGoalWorkspaceOrigin({ originRoot: cwd, repository, scope: ["a.txt"],
+      protectedPaths: ["protected.txt"], controlRoots: existsSync(join(cwd, ".pi")) ? [join(cwd, ".pi")] : [] });
+    recoveryPlan = { schema: "goal-recovery-plan-v1", fromRunId: "workflow_mvzolder_000000",
+      definitionFingerprint: workflowDefinitionFingerprint(parsed), priorRequests: 2, priorGenerations: 1,
+      feedbackGeneration: 0, feedback: [{ criterionId: "exact", verdict: "not-met", reason: null,
+        detail: { exitCode: 3, signal: null, timedOut: false, stdoutTail: "candidate=partial\n", stderrTail: "" } }],
+      seed: { generation: 0, workspaceId: "goal-interrupted", baselineHash: goalRecoveryBaselineHash(parsed, "goal-interrupted", origin),
+        files: [{ path: "a.txt", value: { kind: "file", links: 1, mode: "0644", hex: Buffer.from("partial").toString("hex") } }] },
+      seedSkipped: null };
+  }
   const invocationTarget = childRubric ? "  Inspect reusable child target B with exact scope  "
     : rubricMode === "success" || humanSlice ? "  Inspect reusable direct target A with exact scope  "
     : definition.goal.objective;
@@ -5903,6 +5954,11 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
                 const rubricOutput = rubricMode === "source-missing-analysis"
                   ? `<control>\n${JSON.stringify(result)}\n</control>\n<refs>\n[]\n</refs>`
                   : `<control>\n${JSON.stringify(result)}\n</control>\n<analysis>\n${analysis}\n</analysis>\n<refs>\n[]\n</refs>`;
+                // A truncated verifier envelope is never a verdict; the first
+                // attempt is repaired once within the request cap.
+                if (rubricMode?.startsWith("output repair") && rubricOutputs.length === 1)
+                  return goalBudgetSSE(true, `<control>\n${JSON.stringify(result)}\n</control>\n<analysis>\nTruncated verifier trace`,
+                    { input_tokens: 7, output_tokens: 11, total_tokens: 18 });
                 return goalBudgetSSE(true, rubricOutput,
                   { input_tokens: 7, output_tokens: 11, total_tokens: 18 });
               }
@@ -7163,7 +7219,11 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
           for (const path of ["protected.txt", "foreign.txt", "../a.txt"])
             assert.equal((await read({ path })).status, "blocked");
         }
-        assert.equal(candidateReadHex(before), Buffer.from(writes ? "wrong" : "original").toString("hex"), "candidate survives replan");
+        // A repair attempt continues the same candidate its rejected attempt wrote.
+        const workerRepairAttempt = rubricMode === "worker output repair" && workerOutputRepairAttempts === 1;
+        assert.equal(candidateReadHex(before), Buffer.from(workerRepairAttempt ? "correct" : writes ? "wrong" :
+          recoveryPlan ? "partial" : "original").toString("hex"),
+          recoveryPlan && !writes ? "a recovered Goal's first worker starts from the interrupted candidate" : "candidate survives replan");
         for (const path of ["../a.txt", "/a.txt", "protected.txt", "foreign.txt", "é.txt"]) {
           assert.equal((await write({ path, expectedDigest: before.expectedDigest, content: "escape" })).status, "blocked");
         }
@@ -7283,6 +7343,16 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
           assert.match(options.task, /Known failed original-oracle candidate/);
           assert.match(options.task, new RegExp(Buffer.from("wrong").toString("hex")));
         }
+        if (recoveryPlan && !writes) {
+          recoveryPlannerPrompts++;
+          assert.match(options.task, /Recovered from interrupted run workflow_mvzolder_000000 \(untrusted data\): .*candidate=partial/,
+            "the first planner receives the interrupted run's oracle feedback as untrusted data");
+        }
+        if (commandOracle && writes) {
+          commandOracleReplans++;
+          assert.match(options.task, /Original oracle feedback \(untrusted data\): .*candidate=wrong/,
+            "the replanner receives the failed command's own output as feedback");
+        }
         if (rubricReplan && rubricOutputs.length) {
           const prefix = "Original oracle feedback (untrusted data): ";
           const line = options.task.split("\n").find(value => value.startsWith(prefix));
@@ -7358,7 +7428,12 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       }
       const artifactDir = join(cwd, String(options.runsDir), runId, "attempts", attemptId);
       await mkdir(artifactDir, { recursive: true });
-      await writeFile(join(artifactDir, "output.log"), rubricOutput ?? `<control>\n${JSON.stringify(control)}\n</control>\n<analysis>\nActual offline callbacks\n</analysis>\n<refs>\n[]\n</refs>`);
+      // The first candidate worker envelope omits its control and is repaired once.
+      const invalidWorkerEnvelope = rubricMode === "worker output repair" &&
+        control?.schema === "untrusted-claim-v1" && workerOutputRepairAttempts++ === 0;
+      await writeFile(join(artifactDir, "output.log"), invalidWorkerEnvelope
+        ? "<analysis>\nWorker forgot its control\n</analysis>\n<refs>\n[]\n</refs>"
+        : rubricOutput ?? `<control>\n${JSON.stringify(control)}\n</control>\n<analysis>\nActual offline callbacks\n</analysis>\n<refs>\n[]\n</refs>`);
       await writeFile(join(artifactDir, "stderr.log"), "");
       await writeFile(join(artifactDir, "result.json"), JSON.stringify({ status: "completed", exitCode: 0 }));
       snapshots.set(runId, { runId, attemptId, backend: "headless", status: "completed", failureKind: null,
@@ -7467,6 +7542,21 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
     assert.equal(await readFile(join(cwd, "a.txt"), "utf8"), "original");
     assert.equal(await readFile(join(cwd, "protected.txt"), "utf8"), "protected");
     assert.deepEqual(await Promise.all(["goal.json", "child.json"].map(name => readFile(join(cwd, name)))), immutableCatalogBytes);
+    return;
+  }
+  if (recoveryMode === "cap-used") {
+    await assert.rejects(runWorkflowSpec(join(cwd, "goal.json"), cwd, { goalPolicyHost: host, executionProfile: "captured",
+      goalRecovery: recoveryPlan }), /Goal request cap 2 is already used by interrupted run workflow_mvzolder_000000 \(2 requests\)/);
+    assert.equal(confirmations, 0, "a recovery never extends the request cap");
+    assert.equal(calls.length, 0); assert.equal(budgetPhysicalRequests, 0); assert.equal(writes, 0);
+    return;
+  }
+  if (scopeDirectory) {
+    await assert.rejects(runWorkflowSpec(join(cwd, "goal.json"), cwd, { goalPolicyHost: host, executionProfile: "captured" }),
+      /Goal scope cannot be observed before consent: .*protected-dir/);
+    assert.equal(confirmations, 0, "an unobservable scope never reaches consent");
+    assert.equal(calls.length, 0); assert.equal(budgetPhysicalRequests, 0); assert.equal(writes, 0);
+    assert.equal(await readFile(join(cwd, "protected-dir", "kept.txt"), "utf8"), "kept");
     return;
   }
   if (rubricMode === "no-verify" || rubricMode === "human-acceptance no-verify") {
@@ -7842,7 +7932,18 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
         workflowDefinitionFingerprint(JSON.parse(JSON.stringify(originalPreview))),
         "original consent binds the rendered fractional rubric without integer coercion");
     }
-  } else run = await runWorkflowSpec(join(cwd, "goal.json"), cwd, { goalPolicyHost: host, executionProfile: "captured" });
+  } else {
+    temporaryDirectoriesBefore = new Set((await import("../../.tmp/unit/goal-workflow-runtime.js")).goalTemporaryDirectoriesForTests());
+    run = await runWorkflowSpec(join(cwd, "goal.json"), cwd, { goalPolicyHost: host, executionProfile: "captured",
+      ...(recoveryPlan ? { goalRecovery: recoveryPlan } : {}) });
+  }
+  if (recoveryPlan) {
+    const { goalRecoveryPreview } = await import("../../.tmp/unit/goal-workflow-recovery.js");
+    assert.deepEqual(originalPreview.recovery, goalRecoveryPreview(recoveryPlan, null), "consent shows the recovery");
+    assert.deepEqual((await readRunRecord(cwd, run.runId)).goalRecovery, { fromRunId: "workflow_mvzolder_000000",
+      priorRequests: 2, feedbackGeneration: 0, seededPaths: ["a.txt"] });
+    assert.equal(recoveryPlannerPrompts, 1, "only the first planner carries the recovery note");
+  }
   async function assertBackendLateUnknown() {
     if (backendLateHookError) throw backendLateHookError;
     assert.ok(backendLateUnknownEvidence,
@@ -12160,6 +12261,44 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       "cold criteria/evidence reads preserve the exact original generated history");
       return;
     }
+    if (nativeSourceComplete && rubricMode === "worker output repair") {
+      const worker = run.tasks.find(task => task.specId === root.goalRoot.generations[0].slots.result);
+      assert.ok(worker, diagnostic);
+      assert.equal(run.status, "completed", diagnostic);
+      assert.equal(root.goal?.state, "engine:achieved", diagnostic);
+      assert.equal(root.goalRoot.generations.length, 1, "a worker repair is not a replan");
+      assert.equal(worker.outputRetry?.attempts, 1, "exactly one repair attempt produced the worker envelope");
+      assert.ok(existsSync(join(cwd, dirname(worker.files.result), "result.invalid-attempt-1.json")));
+      assert.equal(workerOutputRepairAttempts, 2);
+      assert.equal(budgetPhysicalRequests, 7, "planner, two worker attempts and one four-turn verifier");
+      return;
+    }
+    if (nativeSourceComplete && rubricMode?.startsWith("output repair")) {
+      const verifier = run.tasks.find(task =>
+        Object.values(root.goalRoot.generations[0].verifiers ?? {}).includes(task.specId));
+      assert.ok(verifier, diagnostic);
+      if (rubricMode === "output repair exhausted") {
+        assert.equal(verifier.status, "blocked", diagnostic);
+        assert.equal(verifier.statusDetail, "goal_candidate_artifact_unknown", diagnostic);
+        assert.match(verifier.lastMessage, /Goal request cap exhausted; no output repair/, diagnostic);
+        assert.notEqual(root.goal?.state, "engine:achieved", diagnostic);
+        assert.equal(rubricOutputs.length, 1, "no repair is sent beyond the request cap");
+        assert.equal(budgetPhysicalRequests, 6, diagnostic);
+        return;
+      }
+      assert.equal(run.status, "completed", diagnostic);
+      assert.equal(root.goal?.state, "engine:achieved", diagnostic);
+      assert.equal(root.goalRoot.generations.length, 1, "a verifier repair is not a replan");
+      assert.equal(verifier.status, "completed", diagnostic);
+      assert.equal(verifier.outputRetry?.attempts, 1, "exactly one repair attempt produced the verdict");
+      assert.ok(existsSync(join(cwd, dirname(verifier.files.result), "result.invalid-attempt-1.json")),
+        "the truncated verifier envelope is retained as rejected evidence");
+      assert.equal(rubricOutputs.length, 2, "the truncated and the repaired verdict were both produced");
+      assert.equal(budgetPhysicalRequests, 10,
+        "planner, worker and two complete source-reading verifier attempts within the cap");
+      assert.equal(root.goal.usage.requests, 10, diagnostic);
+      return;
+    }
     const explicitNativeContextDenial = nativeSourceComplete &&
       (verifierToolTamper || rubricMode === "source-native-evicted" || nativePayloadDenied);
     const explicitNativeAdmissionDenial = explicitNativeContextDenial ||
@@ -15032,6 +15171,9 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       assert.deepEqual(expanded.details.policies[0].criteria[0].criterion, definition.goal.criteria[0]);
       if (action === "evidence") assert.ok(expanded.details.policies[0].evidence.every(e => e.path.startsWith(`.pi/workflows/${run.runId}/`)));
       else assert.ok(Array.isArray(expanded.details.policies[0].evidenceRefs));
+      if (commandOracle) assert.deepEqual(Object.keys(expanded.details.policies[0].criteria[0].command ?? {}),
+        ["exitCode", "signal", "timedOut", "durationMs"], "criteria reads report the recorded command result");
+      if (commandOracle) assert.equal(expanded.details.policies[0].criteria[0].command.exitCode, 0);
       assert.match(expanded.content[0].text, /captured/);
       if (uncertain) {
         assert.equal(expanded.details.policies[0].goalId, "unavailable");
@@ -15073,9 +15215,11 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       }
     }
     for (const suffix of [`status ../escape`, `status goal_engine_bad`, `status private-goal-id`,
-      `apply ${run.runId}`, `background ${run.runId}`, `recover ${run.runId}`, `wait ${run.runId}`]) {
+      `apply ${run.runId}`, `background ${run.runId}`, `wait ${run.runId}`]) {
       assert.match(await invoke(suffix, readContext, 1), /Invalid|exact|unavailable|Unsupported/);
     }
+    assert.match(await invoke(`recover ${run.runId}`, readContext, 1), /Goal recovery requires the interactive Pi TUI/,
+      "cold recovery is a TUI mutation, never a read");
     // The reading installation is not the producer for directly created fixture runs.
     if (!commandMode) for (const action of ["pause", "cancel", "resume"])
       assert.match(await invoke(`${action} ${run.runId}`), /same-live-session|non-terminal|resumable|interrupted|requires/);
@@ -15133,6 +15277,17 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       const observation = evidence.observations[0];
       verdicts.push(observation.verdict);
       assert.deepEqual(observation.criterion, definition.goal.criteria[0]);
+      if (commandOracle) {
+        assert.equal(commandOracleReplans, 1, "exactly one replan received the command feedback");
+        // The sandboxed command, not the candidate bytes, decides the verdict.
+        assert.equal(observation.expectedHash, null);
+        assert.equal(observation.verification.schema, "goal-command-verification-v1");
+        assert.equal(observation.verification.sandbox, "macos-seatbelt");
+        assert.equal(observation.verification.exitCode, observation.verdict === "met" ? 0 : 3);
+        assert.match(observation.verification.stdoutTail,
+          observation.verdict === "met" ? /candidate=correct/ : /candidate=wrong/);
+        assert.equal(observation.reason, null);
+      } else
       assert.equal(observation.expectedHash, workflowDefinitionFingerprint(Buffer.from("correct").toString("hex")));
       assert.equal(observation.valueHash, workflowDefinitionFingerprint(observation.value));
       const source = observation.sources[0];
@@ -15160,6 +15315,12 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
     assert.deepEqual(verdicts.sort(), warm ? ["met"] : ["met", "not-met"]);
     assert.deepEqual(await readdir(evidenceDir), names, "identical evaluation creates no duplicate receipt");
     await assertOriginalCandidateRetired(oldRead, [{ path: "a.txt" }], "final source channel is drained before durable proof is read");
+    if (commandOracle) {
+      const { goalTemporaryDirectoriesForTests } = await import("../../.tmp/unit/goal-workflow-runtime.js");
+      const remaining = goalTemporaryDirectoriesForTests().filter(directory => !temporaryDirectoriesBefore.has(directory));
+      assert.deepEqual(remaining.map(directory => basename(directory).replace(/-[^-]+$/, "")), ["pi-goal-candidate"],
+        "drained request and candidate socket directories are removed; only the process-lifetime workspace remains");
+    }
     const published = JSON.parse(await readFile(join(cwd, dirname(root.files.result), "control.json"), "utf8"));
     assert.equal(published.evidenceRefs.length, 1, "current publication identifies only the current immutable oracle receipt");
     assert.equal(published.retainedEvidenceRefs.length, names.length, "publication retains all original generation receipts");
@@ -18826,7 +18987,7 @@ test("normal engine Goal consumes real support artifacts after consent and cance
   const { scheduleRun } = await import("../../.tmp/unit/engine.js");
   const boundaryApi = await import("@agwab/pi-subagent/api");
   const { workflowRunPath } = await import("../../.tmp/unit/store.js");
-  for (const boundary of ["stop-replanner", "unknown-subject", "failed-worker", "missing-control", "cold-admission", "ack-swap"]) {
+  for (const boundary of ["stop-replanner", "unknown-subject", "failed-worker", "missing-control", "repaired-control", "cold-admission", "ack-swap"]) {
     let confirmations = 0;
     host.confirm = async () => { confirmations++; return true; };
     const launches = [];
@@ -18904,10 +19065,13 @@ test("normal engine Goal consumes real support artifacts after consent and cance
           snapshots.set(runId, { runId, attemptId, backend: "headless", status: "running",
             attempts: [{ attemptId, status: "running" }] });
         } else {
-          assert.ok(launches.length <= 2, `${boundary} must not launch a replanner or revised worker`);
-          const control = launches.length === 1 ? plan : boundary === "missing-control" ? undefined :
+          // An invalid worker envelope gets exactly one automatic repair attempt.
+          const repairing = ["missing-control", "repaired-control"].includes(boundary);
+          assert.ok(launches.length <= (repairing ? 3 : 2), `${boundary} must not launch a replanner or revised worker`);
+          const control = launches.length === 1 ? plan :
+            boundary === "missing-control" || boundary === "repaired-control" && launches.length === 2 ? undefined :
             { schema: "actual-worker-v1", digest: "NONAUTHORITY boundary", achieved: true,
-              result: boundary === "unknown-subject" ? undefined : { accepted: false } };
+              result: boundary === "unknown-subject" ? undefined : { accepted: boundary === "repaired-control" } };
           await terminalize(runId, attemptId, options,
             boundary === "failed-worker" && launches.length === 2 ? "failed" : "completed", control);
         }
@@ -18978,8 +19142,21 @@ test("normal engine Goal consumes real support artifacts after consent and cance
         observer.close(); observer = undefined;
         await checking;
         await stopWorkflowWatchersForTests([cwd]);
-        assert.equal(launches.length, 2, `${boundary} has no automatic replan/provider attempt`);
+        assert.equal(launches.length, ["missing-control", "repaired-control"].includes(boundary) ? 3 : 2,
+          `${boundary} has no automatic replan and at most one output repair attempt`);
         const oracle = connected.tasks.find(task => task.kind === "goal");
+        if (boundary === "repaired-control") {
+          const worker = connected.tasks.find(task => task.specId === "goal.result");
+          assert.equal(worker.status, "completed");
+          assert.equal(worker.outputRetry?.attempts, 1, "the accepted control comes from the single repair attempt");
+          assert.ok(existsSync(join(cwd, dirname(worker.files.result), "result.invalid-attempt-1.json")),
+            "the rejected first envelope is retained as evidence");
+          assert.equal(oracle.status, "completed");
+          assert.equal(oracle.goal.state, "engine:achieved");
+          assert.equal(oracle.goalRoot.generations.length, 1, "repair is not a replan");
+          assert.equal(confirmations, 1);
+          continue;
+        }
         assert.equal(oracle.status, ["failed-worker", "missing-control"].includes(boundary) ? "skipped" : boundary === "ack-swap" ? "failed" : "blocked",
           "upstream failures and explicit custody rejection never become oracle achievement");
         assert.notEqual(oracle.goal?.state, "engine:achieved");
@@ -19006,7 +19183,8 @@ test("normal engine Goal consumes real support artifacts after consent and cance
           const worker = connected.tasks.find(task => task.specId === "goal.result");
           assert.equal(worker.status, "blocked");
           assert.equal(worker.statusDetail, "goal_candidate_artifact_unknown");
-          assert.match(worker.lastMessage, /UNKNOWN requires recovery/);
+          assert.match(worker.lastMessage, /UNKNOWN requires recovery \(Goal output repair limit \(1\) reached\)/);
+          assert.equal(worker.outputRetry?.attempts, 2, "the repair attempt itself was also invalid");
         }
         if (boundary === "ack-swap") {
           assert.equal(swappedAck, true, "only durable ACK bytes changed; original in-memory producer is retained");

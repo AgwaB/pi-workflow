@@ -8,6 +8,8 @@ import { workflowDefinitionFingerprint } from "./execution-profile.js";
 import { workflowTaskAttemptIdentity, workflowTaskSessionId } from "./launch-session.js";
 import { assertRecordedLaunchBootstrapProvenance } from "./launch-bootstrap-provenance.js";
 import { hashDynamicRequest, parseDynamicEventsText } from "./dynamic-events.js";
+import { goalCommandVerdict, isGoalCommandVerification } from "./goal-command-verifier.js";
+import { readWorkflowGoalRecoveredBy } from "./goal-workflow-recovery.js";
 import { goalHash, goalWorkflowJson } from "./goal-json.js";
 import { parseGoalProfileCaptureRevisionHistory, parseGoalProfileScope } from "./goal-profile.js";
 import { readSimpleJsonPath } from "./workflow-runtime.js";
@@ -16,11 +18,12 @@ import {
   goalPolicyRequest,
   observeOriginalWorkflowGoalHumanEvidence,
   observeWorkflowGoalArtifactCriterion,
+  isGoalCommandCriterion,
 } from "./goal-workflow-runtime.js";
 import type { WorkflowRunRecord, WorkflowTaskRunRecord, CompiledWorkflow } from "./types.js";
 import type { GoalProfileCaptureRevision, GoalProfileScope } from "./goal-types.js";
 
-export const WORKFLOW_GOAL_HELP = "Ordinary workflow-engine Goal controls: /workflow goal list | status/criteria/evidence <runId|goal_engine_ID> | pause/cancel/resume <runId|goal_engine_ID> | judge <runId> | profile <runId>. Profile is a run-only exception under the original live root for an actual captured pending NEVER-launched root task, static child task, or exact materialized foreach item; it saves no preference and requires opaque TUI scope/runtime selection, a reason, and one final full-JSON confirmation. Judge requires the original genuine interactive Pi TUI, takes no inline verdict, and accepts or rejects only the displayed immutable criterion (no effect widening). Dismiss leaves pending; stopping revokes a held dialog. Waiting-user means pending human judgment, not provider work. Unsupported human producers remain UNKNOWN. Pause and cancel stop the ordinary run; resume requires its original live interactive session and admission (no cold or UNKNOWN recovery). Read commands and workflow_goal are strictly read-only. There is no apply command: when the consented definition allows candidate-write and origin-apply, an achieved coding Goal applies its verified candidate to the allowed paths automatically, and a changed origin writes nothing. No ordinary background/recover/wait support. Author: /workflow goal create <objective>; execute: /workflow goal run <workflow> \"task\".";
+export const WORKFLOW_GOAL_HELP = "Ordinary workflow-engine Goal controls: /workflow goal list | status/criteria/evidence <runId|goal_engine_ID> | pause/cancel/resume/recover <runId|goal_engine_ID> | judge <runId> | profile <runId>. Profile is a run-only exception under the original live root for an actual captured pending NEVER-launched root task, static child task, or exact materialized foreach item; it saves no preference and requires opaque TUI scope/runtime selection, a reason, and one final full-JSON confirmation. Judge requires the original genuine interactive Pi TUI, takes no inline verdict, and accepts or rejects only the displayed immutable criterion (no effect widening). Dismiss leaves pending; stopping revokes a held dialog. Waiting-user means pending human judgment, not provider work. Unsupported human producers remain UNKNOWN. Pause and cancel stop the ordinary run; resume requires its original live interactive session and admission. After that session ended, recover <runId> starts a new run of the same definition with fresh consent, prior requests counted, the last oracle feedback and, when the origin is unchanged, the last observed candidate. Read commands and workflow_goal are strictly read-only. There is no apply command: when the consented definition allows candidate-write and origin-apply, an achieved coding Goal applies its verified candidate to the allowed paths automatically, and a changed origin writes nothing. No ordinary background/wait support. Author: /workflow goal create <objective>; execute: /workflow goal run <workflow> \"task\".";
 
 export function parseOrdinaryWorkflowGoalTool(input: unknown): { action: "list" | "status" | "criteria" | "evidence"; goalId?: string } {
   // Check proxies before any reflective operation: even getPrototypeOf can run a trap.
@@ -516,7 +519,15 @@ export async function readOrdinaryWorkflowGoal(cwd: string, action: string, run:
               workflowDefinitionFingerprint(oracleValue) !== workflowDefinitionFingerprint(observation.value))
             throw new Error("Ordinary Goal exact oracle subject mismatch");
         }
-        if (criterion.verifier.kind === "deterministic") {
+        if (isGoalCommandCriterion(criterion)) {
+          // Stored command results are reported as recorded; the verdict must
+          // follow the recorded exit code.
+          if (observation.verdict !== "unknown" && (!isGoalCommandVerification(observation.verification) ||
+              goalCommandVerdict(observation.verification) !== observation.verdict ||
+              workflowDefinitionFingerprint(observation.verification.argv) !==
+                workflowDefinitionFingerprint((criterion.verifier.config as { argv?: unknown }).argv)))
+            throw new Error("Ordinary Goal exact command verification mismatch");
+        } else if (criterion.verifier.kind === "deterministic") {
           const derived = observeWorkflowGoalArtifactCriterion(criterion, observation.sources);
           const derivedHasValue = Object.hasOwn(derived, "value");
           if (derived.expectedHash !== observation.expectedHash ||
@@ -708,9 +719,14 @@ export async function readOrdinaryWorkflowGoal(cwd: string, action: string, run:
           ? observeOriginalWorkflowGoalHumanEvidence(observation.humanJudgment.snapshot, currentReceipt.digest,
             observation.humanJudgment, observation.verdict)
           : observation?.verdict ?? "UNKNOWN";
+        const command = isGoalCommandCriterion(criterion) && isGoalCommandVerification(observation?.verification)
+          ? { exitCode: observation.verification.exitCode, signal: observation.verification.signal,
+            timedOut: observation.verification.timedOut, durationMs: observation.verification.durationMs }
+          : undefined;
         return { criterion, verdict, reason: verdict === "UNKNOWN" && criterion.verifier.kind === "human"
           ? "No matching committed original human observation; hashes are integrity only, not authority or freshness"
-          : observation?.reason ?? (observations ? null : "Exact evidence unavailable or ambiguous; no reconstructed proof") };
+          : observation?.reason ?? (observations ? null : "Exact evidence unavailable or ambiguous; no reconstructed proof"),
+          ...(command ? { command } : {}) };
       }),
       ...(action === "evidence" ? { evidence } : { evidenceRefs: evidence.map(e => e.path) }),
       unpublishedEvidenceRefs,
@@ -718,6 +734,7 @@ export async function readOrdinaryWorkflowGoal(cwd: string, action: string, run:
   }
   return { namespace: "ordinary-workflow-engine", runId: run.runId, rootRunId: run.rootRunId ?? run.runId,
     runStatus: run.status, observedUsage: run.usage ?? "UNKNOWN",
+    recovery: run.goalRecovery ?? null, recoveredBy: await readWorkflowGoalRecoveredBy(cwd, run.runId),
     currentWork: run.tasks.filter(t => t.status === "running" || t.status === "blocked").map(t => ({ specId: t.specId, status: t.status })), policies };
 }
 
@@ -730,6 +747,8 @@ export function summarizeOrdinaryWorkflowGoal(data: Awaited<ReturnType<typeof re
   const usage = typeof data.observedUsage === "object" ? data.observedUsage : undefined;
   return [
     `Ordinary workflow-engine Goal ${data.runId}: recorded run ${data.runStatus} (persisted observation, not live freshness).`,
+    ...(data.recoveredBy ? [`Recovered as ${data.recoveredBy}; this interrupted run is kept as recorded.`] : []),
+    ...(data.recovery ? [`Recovered from ${data.recovery.fromRunId}: ${data.recovery.priorRequests} prior request(s) count against the cap; ${data.recovery.seededPaths.length ? `started from its last candidate (${data.recovery.seededPaths.join(", ")})` : "started from the origin"}.`] : []),
     ...data.policies.map(p => {
       const counts = { met: 0, "not-met": 0, pending: 0, UNKNOWN: 0 };
       for (const c of p.criteria) counts[c.verdict === "met" ? "met" : c.verdict === "not-met" ? "not-met" : c.verdict === "pending" ? "pending" : "UNKNOWN"]++;

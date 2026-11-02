@@ -139,7 +139,34 @@ rename); Git `HEAD` and the index are never changed. The per-path outcome is
 recorded in the Goal task (`originApply`) and shown by `/workflow goal status`.
 A stop before or during application leaves the remaining paths unapplied and is
 never replayed automatically. Without `origin-apply`, results stay in the
-candidate only.
+candidate only; every observed candidate byte is kept in the run's Goal evidence,
+and the private temporary candidate copy is removed when Pi exits.
+
+**Command criteria (sandboxed).** A coding Goal can be judged by a command
+the author writes into the definition. The command is shown at consent; models
+cannot change it. When the worker finishes, the host copies the working tree
+(excluding `.git` and `.pi`; `node_modules` is shared read-only), overlays the
+current candidate files, and runs the command there with the macOS Seatbelt
+sandbox: writes only inside that copy and a private temp/home, no IP networking
+(local servers cannot bind either), no reads of common credential stores
+(`~/.ssh`, `~/.aws`, `~/.config`, `~/.pi`, …), a scrubbed environment and a time
+limit. Exit code 0 meets the criterion; any other result fails it and the
+command's output tail becomes replanning feedback. The origin and the candidate
+workspace are never written by the command. Without the sandbox (non-macOS
+hosts) the Goal is refused before consent. Requires `candidate-write` and
+`verify`. Workers write only `allowedPaths`, so keep the tests outside them;
+`protectedPaths` takes exact files (for example `test/csv.test.mjs`), not
+directories.
+
+```json
+{ "id": "tests-pass", "verifier": { "kind": "deterministic", "producerId": "command-exit-v1",
+  "target": "candidate", "subject": { "resultSlot": "result", "artifact": "control" },
+  "config": { "argv": ["node", "--test"], "timeoutMs": 120000 } } }
+```
+
+`argv` is executed directly (no shell); `timeoutMs` is 1000–600000 (default
+120000) and an optional `cwd` is a relative directory inside the copy. Command
+criteria are supported for root Goals; declared child Goals cannot use them yet.
 
 **Tool surface.** Goal runs (a Goal definition, an artifact graph with an
 embedded Goal stage, or a Goal-admitted child workflow) never inherit the native
@@ -602,12 +629,21 @@ authored cap; unavailable usage remains unknown, not zero.
 | `/workflow goal run <ref> "<target>"` | Launches a saved definition as a new named workflow run, not a replacement identity for an interrupted Goal. |
 | `/workflow goal pause\|cancel <runId\|goal_engine_ID>` | Both stop the enclosing ordinary workflow run through its original live interactive host. A stop acknowledgement is not proof that descendants and effects have drained; ordinary cancellation is not a separate irreversible lifecycle. |
 | `/workflow goal resume <runId\|goal_engine_ID>` | Requires original live interactive admission/profile and settled recoverable work. It does not provide cold recovery or permission to replay UNKNOWN effects. |
+| `/workflow goal recover <runId\|goal_engine_ID>` | Cold recovery after the original Pi session ended: starts a **new** run of the same definition with fresh consent. See "Recovering an interrupted Goal". |
 
-Ordinary Goal commands do not support `wait`, `apply`, `recover`, or `background`;
+Ordinary Goal commands do not support `wait`, `apply`, or `background`;
 ordinary origin application happens automatically on achievement when consented
 (see "Applying results").
 Use `/workflow goal help` for the controls. Help and registration never grant
 origin-write authority.
+
+**Output repair.** When a Goal planner, worker or verifier ends with an invalid
+output envelope (missing or empty `<control>`/`<analysis>`/`<refs>` sections),
+that same task is retried once as a new attempt. The retry counts against the
+Goal request cap and needs every earlier request settled; a coding worker
+continues in the same candidate workspace. Verifier envelopes are never
+salvaged from truncated output. If the retry is also invalid or the cap has no
+room, the task stays UNKNOWN and the Goal is blocked rather than guessed.
 
 Successful workflow tasks do not by themselves satisfy a Goal criterion.
 Independent verifier receipts must establish each criterion; failed or missing
@@ -623,8 +659,29 @@ drain and producer finalization supply authenticated measurements; absent usage
 remains unknown.
 
 Candidate/origin writes require explicit physical scope and independent candidate
-verification. Read-only selection never grants these effects implicitly, and no
-command authorizes cold recovery.
+verification. Read-only selection never grants these effects implicitly.
+
+**Recovering an interrupted Goal.** If Pi exits or crashes while a root Goal
+runs, its record stays as it was and `resume` cannot continue it, because the
+consent, request budget and candidate workspace lived in that session. In a new
+session, `/workflow goal recover <runId>` starts a new run instead:
+
+- The definition file must be byte-for-byte the definition originally consented
+  to (same fingerprint); otherwise start it fresh with `/workflow goal run`.
+- The consent preview shows a `recovery` section. Every request reservation of
+  the interrupted run family counts against the request cap (an in-flight
+  request may have been sent), so a recovery never extends the cap.
+- The last original oracle feedback (verdicts, command output, rubric reasons)
+  is given to the new planner as untrusted data.
+- If the origin is exactly as the interrupted run's last observed candidate
+  saw it, the new candidate workspace starts from that candidate's changed
+  files. Edits a worker made after that observation are not recovered. When
+  the origin changed, a file was deleted, a changed file is too large to keep
+  inline, or a file mode changed, the run starts from the origin and the
+  preview says why.
+- The interrupted run is never resumed or rewritten; a `goal-recovery.json`
+  marker records which run recovered it, and it cannot be recovered twice.
+  A run still owned by a live session is refused.
 
 ## Natural-language invocation
 

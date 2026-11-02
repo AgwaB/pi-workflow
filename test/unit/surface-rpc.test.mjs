@@ -171,6 +171,43 @@ test("registered /workflow goal save-only retains every JSON literal shape witho
  assert.equal((await readFile(join(cwd, ".pi", "goals", "current"), "utf8").catch(error => error.code)), "ENOENT");
 });
 
+test("registered /workflow goal authors a sandboxed command criterion without a shell", async (t) => {
+ const cwd = await mkdtemp(join(tmpdir(), "surface-goal-command-"));
+ t.after(() => rm(cwd, { recursive: true, force: true }));
+ const author = (command, effects, path) => {
+  const inputs = [command, "src/a.mjs", "test/a.test.mjs", "", "", path];
+  const choices = ["Command exit code (sandboxed)", effects, "Save definition"];
+  const previews = [], notices = [];
+  return { previews, notices, ctx: {
+   cwd, hasUI: true, mode: "tui",
+   ui: {
+    input: async () => inputs.shift(),
+    select: async (title) => { previews.push(title); return choices.shift(); },
+    confirm: async () => { throw new Error("new save must not overwrite or execute"); },
+    notify: (text, level) => notices.push({ text, level }),
+   },
+  } };
+ };
+ const words = author("node --test test/a.test.mjs", "Candidate writes, read, and verify", "goals/words.json");
+ await fakeWorkflowSurface().workflow.handler("goal create make tests pass", words.ctx);
+ const saved = JSON.parse(await readFile(join(cwd, "goals/words.json"), "utf8"));
+ assert.deepEqual(saved.goal.criteria[0].verifier, {
+  kind: "deterministic", producerId: "command-exit-v1", target: "candidate",
+  subject: { resultSlot: "result", artifact: "control" },
+  config: { argv: ["node", "--test", "test/a.test.mjs"] },
+ });
+ assert.match(words.previews.at(-1), /macOS sandbox/);
+ const json = author('["node","-e","process.exit(0)"]', "Candidate writes, read, and verify", "goals/json.json");
+ await fakeWorkflowSurface().workflow.handler("goal create json argv", json.ctx);
+ assert.deepEqual(JSON.parse(await readFile(join(cwd, "goals/json.json"), "utf8")).goal.criteria[0].verifier.config.argv,
+  ["node", "-e", "process.exit(0)"], "a JSON argv keeps arguments containing spaces");
+ const readOnly = author("node --test", "Read and verify only", "goals/read-only.json");
+ await fakeWorkflowSurface().workflow.handler("goal create read only", readOnly.ctx);
+ assert.ok(readOnly.notices.some(({ text, level }) => level === "error" && /candidate-writing effect/.test(text)),
+  "a read-only command criterion is refused");
+ assert.equal(await readFile(join(cwd, "goals/read-only.json"), "utf8").catch(error => error.code), "ENOENT");
+});
+
 test("registered /workflow goal actions never fall through to authoring", async (t) => {
  const cwd = await mkdtemp(join(tmpdir(), "surface-goal-actions-"));
  t.after(() => rm(cwd, { recursive: true, force: true }));
