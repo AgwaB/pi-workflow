@@ -4,7 +4,7 @@ import {
 	buildWorkflowNativeHostExtensionWrapper,
 } from "./workflow-native-host-context.js";
 import { existsSync, readFileSync, rmSync } from "node:fs";
-import { prepareWorkflowGoalCandidateChannel, prepareWorkflowGoalRequestChannel, assertWorkflowGoalCandidateExtensions, assertWorkflowGoalRequestLaunchCurrent, restrictWorkflowGoalCandidateLaunch } from "./goal-workflow-runtime.js";
+import { isWorkflowGoalStrictOutputTask, prepareWorkflowGoalCandidateChannel, prepareWorkflowGoalRequestChannel, assertWorkflowGoalCandidateExtensions, assertWorkflowGoalRequestLaunchCurrent, restrictWorkflowGoalCandidateLaunch } from "./goal-workflow-runtime.js";
 import {
 	copyFile,
 	link,
@@ -5105,6 +5105,9 @@ async function materializeTerminalArtifactGraphResultInner(
 		maxDigestChars: artifactOptions?.maxDigestChars,
 		controlJsonSchema,
 		outputProfile: task.dynamicGenerated?.outputProfile,
+		// Goal verifiers are judged on their exact envelope; a salvaged truncated
+		// verdict is repaired by a new attempt instead.
+		...(isWorkflowGoalStrictOutputTask(run, task) ? { strictSections: true } : {}),
 	};
 	const parsed = parseWorkflowOutputForBundle(rawOutput, parseOptions);
 	const attempt = (task.outputRetry?.attempts ?? 0) + 1;

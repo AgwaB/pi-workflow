@@ -114,8 +114,10 @@ export interface GoalPlannerPhaseSnapshot {
 export function buildGoalPlannerPhaseTemplate<Snapshot extends GoalPlannerPhaseSnapshot>(input: {
   readonly snapshot: Snapshot;
   readonly plannerId: string;
+  /** Untrusted context carried from an interrupted run being recovered. */
+  readonly recoveryNote?: string;
 }): ArtifactGraphWorkflowSpec {
-  const { snapshot, plannerId } = input;
+  const { snapshot, plannerId, recoveryNote } = input;
   const { definition, profile } = snapshot;
   const resultSlots = [...new Set(definition.goal.criteria.map(criterion => criterion.verifier.subject.resultSlot))];
   const role = profile.roles.find(value => value.role === "planning")!;
@@ -134,7 +136,8 @@ export function buildGoalPlannerPhaseTemplate<Snapshot extends GoalPlannerPhaseS
       `digest must equal ${workflowDefinitionFingerprint(definition)}. The exact immutable original resultSlot IDs are ${JSON.stringify(resultSlots)}. proposedTasks must contain exactly one {id,prompt} per listed ID. A direct worker proposal {id,prompt} with no workflow is allowed and required when no child workflow is selected; the admitted workflow catalog may be empty. The workflow field is optional and may select only an admitted catalog ID. Scoped original read admission permits mediated source reads; only original candidate-write admission permits coding. Source-free workers remain tool-free. No paths, specs, roles, tools, profiles, models or oracle changes are accepted.`,
       "Workflow selection is optional; plans do not need to select a child for every result slot. When selected, plans may select only declared admitted children. Source-aware children have original sequential scoped candidate stages and a unique terminal sink, with explicit per-stage goal_candidate_read and goal_candidate_write only when originally admitted. They reuse the root candidate workspace and captured per-stage agents/tools/profile ceilings, never source their inputs or apply origins. Every predecessor's original request and candidate attempts must settle and retire before successor authority. Tool-free children may retain original safe pipeline dependencies and the unique terminal sink. Each selected child slot uses a distinct catalog ID. Nested Goal children are available only from the immutable captured descendant catalog within the remaining authored depth, and use the captured inherited worker profile. Per-phase agent and graph-mutation ceilings equal the original resultSlot count. All slots run at concurrency one and share the original root request budget, including every child stage; selecting another workflow does not replenish it. Root input and byte ceilings remain original. No execution-phase model may replan.",
       `Admitted workflow IDs: ${JSON.stringify(snapshot.workflows.map(child => child.id))}`,
-      `Immutable admitted Goal: ${JSON.stringify({ ...plannerPreview, definition: plannerDefinition })}`].join("\n\n"),
+      `Immutable admitted Goal: ${JSON.stringify({ ...plannerPreview, definition: plannerDefinition })}`,
+      ...(recoveryNote ? [recoveryNote] : [])].join("\n\n"),
     output: { analysis: { required: true }, refs: { required: true } },
   }] } };
 }

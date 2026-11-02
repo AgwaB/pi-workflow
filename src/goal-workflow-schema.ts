@@ -1,5 +1,6 @@
 import { validateDynamicWorkflows, validateGoalWorkflowMetadata } from "./artifact-graph-schema.js";
 import { cloneGoalWorkflowData } from "./goal-json.js";
+import { GOAL_COMMAND_VERIFIER_PRODUCER, goalCommandVerifierConfigIssues } from "./goal-command-verifier.js";
 import { isSimpleJsonPath } from "./workflow-runtime.js";
 import {
 	type GoalWorkflowSpec,
@@ -211,7 +212,14 @@ function validateVerifier(value: unknown, path: string, issues: ValidationIssue[
 		issues.push({ path: `${path}.config`, message: "is required" });
 		return;
 	}
-	if (kind === "deterministic") {
+	if (kind === "deterministic" && verifier.producerId === GOAL_COMMAND_VERIFIER_PRODUCER) {
+		// The command is user-authored, shown at consent and run by the host in a
+		// sandboxed copy of the candidate; its exit code is the verdict.
+		if (verifier.target !== "candidate" || subject?.artifact !== "control" || subject?.path !== undefined)
+			issues.push({ path, message: `${GOAL_COMMAND_VERIFIER_PRODUCER} requires target candidate and subject artifact control without path` });
+		for (const message of goalCommandVerifierConfigIssues(verifier.config))
+			issues.push({ path: `${path}.config`, message });
+	} else if (kind === "deterministic") {
 		validateDeterministicConfig(
 			verifier.config,
 			String(verifier.producerId),

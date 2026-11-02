@@ -115,6 +115,8 @@ export interface ParseWorkflowOutputOptions {
 	controlContract?: StructuredContract;
 	controlJsonSchema?: JsonSchema;
 	outputProfile?: string;
+	/** Reject instead of salvaging incomplete or surrounded sections. */
+	strictSections?: boolean;
 }
 
 export interface RefsUrlValidationOptions {
@@ -292,7 +294,7 @@ export function parseWorkflowOutputForBundle(
 	options: ParseWorkflowOutputOptions = {},
 ): ParsedWorkflowOutput {
 	const parsed = parseWorkflowOutput(raw, options);
-	if (parsed.valid) return parsed;
+	if (parsed.valid || options.strictSections) return parsed;
 	return parseSanitizedWorkflowOutput(parsed.raw, options) ?? parsed;
 }
 

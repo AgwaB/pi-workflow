@@ -12,14 +12,26 @@ import type { AgentDefinition, GoalCandidateSourceReadContinuation, GoalCandidat
 import type { CompiledDynamicWorkflowTask } from "./types.js";
 import { buildWorkflowExecutionProfile, createInheritedCustomProfile } from "./workflow-profile-settings.js";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, type FileHandle } from "node:fs/promises";
-import { constants } from "node:fs";
+import { lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rm, type FileHandle } from "node:fs/promises";
+import { constants, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { channel as diagnosticChannel } from "node:diagnostics_channel";
 import { parseWorkflow } from "./schema.js";
 import { sameRawVersion } from "./workflow-raw-contract.js";
-import { prepareGoalWorkspaceHost, type GoalWorkspaceHostHandle } from "./goal-workspace-host.js";
+import { observeGoalWorkspaceOrigin, prepareGoalWorkspaceHost, type GoalWorkspaceHostHandle } from "./goal-workspace-host.js";
+import {
+  goalRecoveryPreview,
+  seedWorkflowGoalRecoveryCandidate,
+  type WorkflowGoalRecoveryPlan,
+} from "./goal-workflow-recovery.js";
+import {
+  GOAL_COMMAND_VERIFIER_PRODUCER,
+  goalCommandSandboxAvailable,
+  goalCommandVerdict,
+  runGoalCommandVerifier,
+  type GoalCommandVerifierConfig,
+} from "./goal-command-verifier.js";
 import { applyGoalCandidateToOrigin, type WorkflowGoalOriginApplyRecord } from "./goal-workflow-origin-apply.js";
 import { GOAL_CANDIDATE_TOOLS, type GoalCandidateTool, openGoalCandidateToolChannel, createGoalRequestBudget, openGoalRequestBudgetChannel } from "./workflow-goal-workspace-tools.js";
 import { goalHash } from "./goal-json.js";
@@ -36,6 +48,13 @@ import type { CompiledTask, CompiledWorkflow, WorkflowCapturedExecutionProfile }
 import type { WorkflowModelInfo, WorkflowRuntimeDefaults } from "./workflow-runtime.js";
 import type { GoalProfileRuntimePatch, GoalProfileScope, WorkflowGoalProfileConfiguration } from "./goal-types.js";
 import type { WorkflowProfileRole } from "./types.js";
+
+/** A criterion judged by a user-authored, sandboxed command's exit code. */
+export function isGoalCommandCriterion(criterion: GoalWorkflowSpec["goal"]["criteria"][number]): boolean {
+  return criterion.verifier.kind === "deterministic" &&
+    criterion.verifier.producerId === GOAL_COMMAND_VERIFIER_PRODUCER &&
+    criterion.verifier.target === "candidate";
+}
 
 const requestDiagnostics = diagnosticChannel("pi-workflow:goal-request");
 
@@ -64,6 +83,8 @@ export interface WorkflowEngineGoalPreview {
   /** Remaining Goal-entry depth, counting this Goal as one entry. */
   readonly remainingDepth: number;
   readonly exclusions: readonly string[];
+  /** Interrupted run this admission recovers, shown at consent. */
+  readonly recovery?: ReturnType<typeof goalRecoveryPreview>;
 }
 
 /** Frozen observations, never launch authority. Only the prepared admission
@@ -154,6 +175,8 @@ type PolicyPreparation = {
   readonly executionProfileName?: string;
   readonly assertCurrent: () => Promise<void>;
   readonly stopSignal?: AbortSignal;
+  /** Cold recovery of an interrupted root run; root admissions only. */
+  readonly recovery?: WorkflowGoalRecoveryPlan;
 };
 // Input identity is minted only by the original reserved-child adapter.
 const derivedGoalInputs = new WeakMap<PolicyPreparation, PreparedWorkflowGoalChildAdmission>();
@@ -177,7 +200,9 @@ const preparedPolicies = new WeakMap<PreparedWorkflowGoalPolicyAdmission, {
     verifierPreparations?: Map<string, PreparedWorkflowGoalVerifierRequest>;
     workspace?: Promise<GoalWorkspaceHostHandle>;
     sourceProgress?: GoalCandidateSourceReadContinuation;
-    restriction?: { current(): Promise<void>; live(): void } };
+    restriction?: { current(): Promise<void>; live(): void };
+    /** Cold recovery carried into this admission; the seed is written once. */
+    recovery?: { readonly plan: WorkflowGoalRecoveryPlan; seeded: boolean } };
 }>();
 type GoalProfilePublication = {
   configuration: WorkflowGoalProfileConfiguration;
@@ -4457,6 +4482,104 @@ function previewWorkflowGoalProfileExceptionForState(
   });
 }
 
+/**
+ * Observe the admitted scope exactly as the candidate workspace will at
+ * launch, without creating any workspace, so an unobservable scope (for
+ * example a directory in protectedPaths) is refused before consent.
+ */
+export async function assertGoalScopeObservableBeforeConsent(cwd: string, definition: GoalWorkflowSpec): Promise<void> {
+  const authority = definition.goal.authority;
+  const repository = await lstat(join(cwd, ".git")).then(() => "git" as const, (error: NodeJS.ErrnoException) => {
+    if (error.code !== "ENOENT") throw error;
+    return "nonGit" as const;
+  });
+  // .pi is created with the run; before then no admitted path can overlap it.
+  const controlRoots = await lstat(join(cwd, ".pi")).then(() => [join(cwd, ".pi")], (error: NodeJS.ErrnoException) => {
+    if (error.code !== "ENOENT") throw error;
+    return [];
+  });
+  try {
+    await observeGoalWorkspaceOrigin({ originRoot: cwd, repository,
+      scope: [...authority.allowedPaths].sort(), protectedPaths: [...authority.protectedPaths].sort(), controlRoots });
+  } catch (error) {
+    throw new Error(`Goal scope cannot be observed before consent: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/** Goal rubric verifiers must emit their exact envelope; salvage is not a verdict. */
+export function isWorkflowGoalStrictOutputTask(run: WorkflowRunRecord, task: WorkflowTaskRunRecord): boolean {
+  if (typeof run.cwd !== "string") return false;
+  const key = workerKey(run, task.specId);
+  return requestBindings.get(key)?.role === "verification" || candidateWorkers.get(key)?.discriminator === "verifier";
+}
+
+/** Private Goal temp directories of this process, removed at the latest on exit. */
+const goalTemporaryDirectories = new Set<string>();
+let goalTemporaryCleanupInstalled = false;
+export function trackGoalTemporaryDirectory(path: string): string {
+  goalTemporaryDirectories.add(path);
+  if (!goalTemporaryCleanupInstalled) {
+    goalTemporaryCleanupInstalled = true;
+    process.once("exit", () => {
+      for (const directory of goalTemporaryDirectories) {
+        try { rmSync(directory, { recursive: true, force: true }); } catch { /* best effort at exit */ }
+      }
+    });
+  }
+  return path;
+}
+async function removeGoalTemporaryDirectory(path: string): Promise<void> {
+  await rm(path, { recursive: true, force: true });
+  goalTemporaryDirectories.delete(path);
+}
+/** Test observation of directories still owned by this process. */
+export function goalTemporaryDirectoriesForTests(): readonly string[] {
+  return [...goalTemporaryDirectories];
+}
+
+/** Request cap left for this admission after an interrupted run's requests. */
+function goalEffectiveRequestCap(engine: { readonly preview: WorkflowEngineGoalPreview;
+  readonly recovery?: { readonly plan: WorkflowGoalRecoveryPlan } }): number | undefined {
+  const cap = engine.preview.definition.goal.limits?.requests ?? undefined;
+  return cap === undefined ? undefined : Math.max(0, cap - (engine.recovery?.plan.priorRequests ?? 0));
+}
+
+/** Automatic output repairs per Goal task (user policy: one). */
+const GOAL_OUTPUT_REPAIR_ATTEMPTS = 1;
+/** Candidate channel key → prior attempt key admitted for one output repair. */
+const outputRepairAdmissions = new Map<string, string>();
+
+/**
+ * Admit the single automatic output repair of an admitted Goal task (planner,
+ * worker or verifier) whose previous attempt ended with an invalid output
+ * envelope. The repair is a new attempt of the same task: every prior request
+ * must be settled and the Goal request cap must leave room for it. Returns the
+ * refusal reason, or undefined when admitted; a refused task stays UNKNOWN.
+ */
+export async function admitWorkflowGoalOutputRepair(run: WorkflowRunRecord,
+  task: WorkflowTaskRunRecord): Promise<string | undefined> {
+  if (!task.outputRetry || task.outputRetry.attempts > GOAL_OUTPUT_REPAIR_ATTEMPTS)
+    return `Goal output repair limit (${GOAL_OUTPUT_REPAIR_ATTEMPTS}) reached`;
+  if (typeof run.cwd !== "string") return "Goal output repair requires the original run root";
+  const key = workerKey(run, task.specId);
+  const request = requestBindings.get(key), candidate = candidateWorkers.get(key);
+  const prepared = request?.prepared ?? candidate?.prepared;
+  const engine = prepared ? preparedPolicies.get(prepared)?.engine : undefined;
+  if (!prepared || !engine) return "Goal output repair has no original live admission";
+  assertPreparedWorkflowGoalPolicyCurrent((request ?? candidate)!.input, prepared);
+  if (engine.budget) {
+    const settled = await engine.budget.settledRequestCount();
+    if (settled === null) return "Goal output repair requires settled prior requests";
+    const limit = goalEffectiveRequestCap(engine);
+    if (limit != null && settled >= limit) return "Goal request cap exhausted; no output repair";
+  }
+  const priorRequest = requestChannels.get(key);
+  if (priorRequest) requestResumeAttempts.set(key, priorRequest.attemptKey);
+  const priorCandidate = candidatePreparations.get(key);
+  if (priorCandidate) outputRepairAdmissions.set(key, priorCandidate.attemptKey);
+  return undefined;
+}
+
 export async function prepareWorkflowGoalRequestChannel(cwd: string, run: WorkflowRunRecord,
   task: WorkflowTaskRunRecord, compiled: CompiledTask) {
   const key = typeof run.cwd === "string" ? workerKey(run, task.specId) : undefined;
@@ -4776,7 +4899,10 @@ export async function prepareWorkflowGoalRequestChannel(cwd: string, run: Workfl
       sourceVerifier.prepared !== prepared || sourceVerifier.input !== binding.input ||
       sourceVerifier.task.taskId !== task.taskId || sourceVerifier.generation !== binding.generation))
     throw new Error("Goal request original source verifier unavailable");
-  const directory = await mkdtemp(join(tmpdir(), "pi-goal-requests-")); live();
+  const directory = trackGoalTemporaryDirectory(await mkdtemp(join(tmpdir(), "pi-goal-requests-")));
+  // The private socket directory is removed once its channel has drained.
+  const removeDirectory = () => removeGoalTemporaryDirectory(directory);
+  try { live(); } catch (error) { await removeDirectory(); throw error; }
   const channel = await openGoalRequestBudgetChannel({ directory: join(directory, "rpc"),
     evidenceRoot: join(taskDir(cwd, run.runId, task.taskId), "artifacts", "request-reservations"),
     identity: { cwd, runId: run.runId, taskId: task.taskId, policy: binding.policySpecId, generation: binding.generation },
@@ -4787,10 +4913,10 @@ export async function prepareWorkflowGoalRequestChannel(cwd: string, run: Workfl
       if (captureNativeReads && candidateWorkers.get(key) !== sourceVerifier)
         throw new Error("Goal request original source verifier changed");
       return authority!;
-    }, live, stopped: stop.signal });
+    }, live, stopped: stop.signal }).catch(async (error: unknown) => { await removeDirectory(); throw error; });
   requestChannel = channel;
   const drain = channel.drain;
-  channel.drain = async () => { retired = true; stop.dispose(); await drain(); };
+  channel.drain = async () => { retired = true; stop.dispose(); await drain(); await removeDirectory(); };
   // Revocation may prevent any terminal run write. Retire through the original
   // owner checks, without requiring READY/release while a valid launch is pending.
   const timer = setInterval(() => {
@@ -5117,15 +5243,17 @@ export async function prepareWorkflowGoalCandidateChannel(cwd: string, run: Work
       await channel.assertExtensionCurrent();
       return channel;
     }
-    if (candidateResumeAttempts.get(key) !== existing.attemptKey ||
-        !task.resumeEvents?.some(event => event.fromStatus === "interrupted"))
+    const replacement = outputRepairAdmissions.get(key) === existing.attemptKey
+      ? outputRepairAdmissions : candidateResumeAttempts;
+    if (replacement.get(key) !== existing.attemptKey ||
+        (replacement === candidateResumeAttempts && !task.resumeEvents?.some(event => event.fromStatus === "interrupted")))
       throw new Error("Goal candidate changed attempt requires explicit settled live resume");
     await (await existing.channel).drain();
     assertPreparedWorkflowGoalPolicyCurrent(input, prepared);
     await input.assertCurrent();
-    if (candidatePreparations.get(key) !== existing || candidateResumeAttempts.get(key) !== existing.attemptKey)
+    if (candidatePreparations.get(key) !== existing || replacement.get(key) !== existing.attemptKey)
       throw new Error("Goal candidate resume attempt changed during drain");
-    candidateResumeAttempts.delete(key);
+    replacement.delete(key);
   }
   const attempts = candidateAttempts.get(key) ??
     new Map<string, NonNullable<ReturnType<typeof candidatePreparations.get>>>();
@@ -5489,7 +5617,9 @@ export async function prepareWorkflowGoalCandidateChannel(cwd: string, run: Work
       goalHash({ ownerRunId: owner.rootRunId, ownerTaskId: ownerTask.taskId, policy: owner.policy.id,
         generation: boundGeneration }));
     await mkdir(directory, { recursive: true, mode: 0o700 });
-    const candidateDirectory = await mkdtemp(join(tmpdir(), "pi-goal-candidate-"));
+    // Evidence keeps every observed candidate byte in the run directory; this
+    // private working copy lives only as long as the Pi process.
+    const candidateDirectory = trackGoalTemporaryDirectory(await mkdtemp(join(tmpdir(), "pi-goal-candidate-")));
     await current(false); live();
     // Catalog captures include parsed agent optional fields with own undefined
     // values. Fingerprint the complete frozen compiler capture, not authored Goal JSON.
@@ -5508,6 +5638,14 @@ export async function prepareWorkflowGoalCandidateChannel(cwd: string, run: Work
           engine.sourceProgress !== capturedBinding.sourceEvidence.sourceProgress ||
           workspace !== capturedBinding.sourceEvidence.workspace))
       throw new Error("Goal verifier original producer workspace changed");
+    // A recovered Goal starts from the interrupted run's last observed
+    // candidate, written once before the first worker sees the workspace.
+    const recovering = engine.recovery;
+    if (recovering?.plan.seed && !recovering.seeded && capturedBinding.discriminator !== "verifier") {
+      recovering.seeded = true;
+      await seedWorkflowGoalRecoveryCandidate(workspace, engine.preview.definition, recovering.plan);
+      await current(false); live();
+    }
     engine.restriction = { current: async () => { await current(true); }, live };
     const sourceProgress = capturedBinding.discriminator === "verifier"
       ? capturedBinding.sourceEvidence.sourceProgress
@@ -5522,21 +5660,22 @@ export async function prepareWorkflowGoalCandidateChannel(cwd: string, run: Work
       goalHash({ ownerRunId: owner.rootRunId, ownerTaskId: ownerTask.taskId, policy: owner.policy.id,
         generation: boundGeneration }));
     await mkdir(directory, { recursive: true, mode: 0o700 });
-    const socketDirectory = await mkdtemp(join(tmpdir(), "pi-goal-candidate-rpc-"));
-    await current(false); live();
+    const socketDirectory = trackGoalTemporaryDirectory(await mkdtemp(join(tmpdir(), "pi-goal-candidate-rpc-")));
+    const removeSocketDirectory = () => removeGoalTemporaryDirectory(socketDirectory);
+    try { await current(false); live(); } catch (error) { await removeSocketDirectory(); throw error; }
     const channel = await openGoalCandidateToolChannel({
       directory: join(socketDirectory, "rpc"), attemptKey, workspace, tools,
       evidenceRoot: join(taskDir(cwd, run.runId, task.taskId), "artifacts", "candidate-operations"),
       identity: { cwd, runId: run.runId, taskId: task.taskId, specId: task.specId, generation: boundGeneration },
       sourceProgress,
       assertCurrent: async () => (await current(true))!, assertLive: live, stopped: stop.signal,
-    }) as GoalCandidateChannelBinding;
+    }).catch(async (error: unknown) => { await removeSocketDirectory(); throw error; }) as GoalCandidateChannelBinding;
     Object.defineProperties(channel, {
       [candidateChannelDiscriminatorBrand]: { value: capturedBinding.discriminator },
       [candidateChannelBindingBrand]: { value: capturedBinding },
     });
     const originalDrain = channel.drain;
-    channel.drain = async () => { retired = true; stop.dispose(); await originalDrain(); };
+    channel.drain = async () => { retired = true; stop.dispose(); await originalDrain(); await removeSocketDirectory(); };
     candidateChannels.set(key, channel);
     candidateExtensionPaths.add(channel.extensionPath);
     // Independently retire terminal, replaced, or revoked attempts; requests
@@ -6884,6 +7023,11 @@ function derivedGoalOracleSupported(verifier: GoalWorkflowSpec["goal"]["criteria
   return verifier.kind === "model-rubric" && verifier.producerId === "json-control-rubric-v1" && effects.includes("verify");
 }
 
+function withoutRecovery(preview: WorkflowEngineGoalPreview): WorkflowEngineGoalPreview {
+  const { recovery: _recovery, ...rest } = preview;
+  return rest;
+}
+
 export async function prepareWorkflowGoalPolicy(input: PolicyPreparation): Promise<PreparedWorkflowGoalPolicyAdmission | null> {
   assertWorkflowGoalEngineRuntime(input.host.runtime);
   const policy = input.policy.goal;
@@ -6905,7 +7049,7 @@ export async function prepareWorkflowGoalPolicy(input: PolicyPreparation): Promi
     const profile = freezeData({ ...root.preview.profile, templateFingerprint: policy.definitionFingerprint });
     const prepared = Object.freeze({ [policyAdmissionBrand]: true as const });
     preparedPolicies.set(prepared, { runtime: input.host.runtime, binding: policyPreparationBinding(input),
-      engine: { session: root.session, preview: freezeData({ ...root.preview, request: input.request,
+      engine: { session: root.session, preview: freezeData({ ...withoutRecovery(root.preview), request: input.request,
         definition, profile, workflows: capture.workflows,
         remainingDepth: capture.remainingDepth }), agents: root.agents, workerAgent: root.workerAgent,
         recheckSources: async () => { await assertWorkflowGoalChildCurrent(derived); await root.recheckSources(); },
@@ -6953,6 +7097,30 @@ export async function prepareWorkflowGoalPolicy(input: PolicyPreparation): Promi
         supportedWorkflowGoalHumanCriterion(criterion)) &&
         !definition.goal.authority.allowedEffects.includes("verify"))
       throw new Error("Goal model rubric or human oracle requires original verify permission before consent");
+    if (definition.goal.criteria.some(isGoalCommandCriterion)) {
+      if (!definition.goal.authority.allowedEffects.includes("verify") ||
+          !definition.goal.authority.allowedEffects.includes("candidate-write"))
+        throw new Error("Goal command verifier requires verify and candidate-write permissions before consent");
+      if (!goalCommandSandboxAvailable())
+        throw new Error("Goal command verifier requires the macOS sandbox (sandbox-exec); not available on this host");
+    }
+    const recovery = input.recovery;
+    const requestCap = definition.goal.limits?.requests ?? undefined;
+    if (recovery) {
+      if (recovery.schema !== "goal-recovery-plan-v1" || recovery.definitionFingerprint !== policy.definitionFingerprint ||
+          derivedGoalInputs.has(input) || input.parentRunId !== input.ancestryRootRunId)
+        throw new Error("Goal recovery requires the original top-level Goal definition");
+      if (requestCap !== undefined && recovery.priorRequests >= requestCap)
+        throw new Error(`Goal request cap ${requestCap} is already used by interrupted run ${recovery.fromRunId} ` +
+          `(${recovery.priorRequests} requests); nothing remains to recover with`);
+    }
+    // The candidate workspace observes exactly these paths at launch; refuse a
+    // scope it cannot observe (for example a directory) before any consent or
+    // provider request instead of failing after the planner has run.
+    if (goalWorkerTools(definition).length) {
+      await assertGoalScopeObservableBeforeConsent(input.cwd, definition);
+      live();
+    }
     if (!executionProfile) {
       const inherited = buildWorkflowExecutionProfile({
         spec: definition, specPath: policy.usesPath, currentRuntime: originalEnvironment ?? input.host.currentRuntime,
@@ -7287,6 +7455,7 @@ export async function prepareWorkflowGoalPolicy(input: PolicyPreparation): Promi
         ...(definition.goal.authority.allowedEffects.includes("origin-apply") &&
           definition.goal.authority.allowedEffects.includes("candidate-write") ? [] : ["origin-apply"]),
         "arbitrary-commands", "cost-accounting", "child-family-budget-accounting", "non-deterministic-replan"],
+      ...(recovery ? { recovery: goalRecoveryPreview(recovery, requestCap ?? null) } : {}),
     });
     const recheck = async () => {
       for (const check of sourceChecks) await check();
@@ -7302,7 +7471,9 @@ export async function prepareWorkflowGoalPolicy(input: PolicyPreparation): Promi
     const prepared = Object.freeze({ [policyAdmissionBrand]: true as const });
     preparedPolicies.set(prepared, { runtime: input.host.runtime, binding: policyPreparationBinding(input),
       engine: { session, preview, agents, workerAgent, recheckSources: recheck,
-        budget: createGoalRequestBudget(definition.goal.limits?.requests ?? undefined), requestAttempts: new Map() } });
+        budget: createGoalRequestBudget(requestCap === undefined ? undefined :
+          Math.max(0, requestCap - (recovery?.priorRequests ?? 0))), requestAttempts: new Map(),
+        ...(recovery ? { recovery: { plan: recovery, seeded: false } } : {}) } });
     const acceptedRevision = parseGoalProfileCaptureRevision({
       ...proposal,
       confirmation: { provenance: "original-live-tui", previewHash, confirmedAt: new Date().toISOString() },
@@ -7329,9 +7500,16 @@ export function prepareWorkflowEngineGoalRootPlanner(input: PolicyPreparation,
   if (definition.goal.limits?.costMicros != null)
     throw new Error("Goal root planner requires preeffect request/cost reservation; ordinary engine budget binding unavailable");
   engine.rootPlanning = true;
+  const recovery = engine.recovery?.plan;
   const planner = buildGoalPlannerPhaseTemplate({
     snapshot: engine.preview,
     plannerId: `${input.policy.stageId ?? input.policy.id}.$rootPlanner`,
+    ...(recovery ? { recoveryNote: `Recovered from interrupted run ${recovery.fromRunId} (untrusted data): ${JSON.stringify({
+      priorGenerations: recovery.priorGenerations, feedbackGeneration: recovery.feedbackGeneration,
+      originalOracleFeedback: recovery.feedback,
+      candidateWorkspaceStartsFrom: recovery.seed
+        ? { generation: recovery.seed.generation, paths: recovery.seed.files.map(file => file.path) }
+        : "the current origin" })}. Plan the remaining work from this state; the oracle is unchanged.` } : {}),
   });
   return freezeData(planner);
 }
@@ -7371,10 +7549,11 @@ export function prepareWorkflowEngineGoalWorkers(input: PolicyPreparation,
       Object.keys(data).some(key => !["schema", "digest", "proposedTasks"].includes(key)) ||
       data.schema !== "goal-root-plan-v1" || data.digest !== workflowDefinitionFingerprint(definition) ||
       !Array.isArray(data.proposedTasks)) throw new Error("Goal plan must preserve immutable definition digest");
-  if (definition.goal.criteria.some(({ verifier: v }) => v.kind !== "human" &&
+  if (definition.goal.criteria.some(criterion => { const v = criterion.verifier;
+    return v.kind !== "human" && !isGoalCommandCriterion(criterion) &&
       (!(v.kind === "deterministic" && v.producerId === "json-exact-value-v1") &&
        !(v.kind === "model-rubric" && v.producerId === "json-control-rubric-v1") ||
-       v.target !== "artifact" || v.subject.artifact !== "control")))
+       v.target !== "artifact" || v.subject.artifact !== "control"); }))
     throw new Error("Root worker oracle kind unavailable");
   const slots = new Set(definition.goal.criteria.map(c => c.verifier.subject.resultSlot));
   const seen = new Set<string>();
@@ -8305,15 +8484,41 @@ export async function executeWorkflowEngineGoalPolicy(input: PolicyPreparation &
       humanResults.set(criterion.id, { verdict: "unknown", reason: error instanceof Error ? error.message : "Goal human observation unavailable" });
     }
   }
+  // Command criteria run the user-authored command against a sandboxed copy of
+  // the exact candidate observed as the subject; the exit code is the verdict.
+  const commandResults = new Map<string, { verdict: string; reason: string | null; verification?: unknown }>();
+  for (const criterion of definition.goal.criteria.filter(isGoalCommandCriterion)) {
+    try {
+      const matching = input.sources.filter(source => source.taskId === criterion.verifier.subject.resultSlot);
+      const control = matching.length === 1 ? matching[0].control as { schema?: unknown; candidate?: unknown } | undefined : undefined;
+      if (control?.schema !== "goal-candidate-evidence-v1" || control.candidate === undefined)
+        throw new Error("Goal command verifier subject candidate unavailable");
+      const engine = preparedPolicies.get(prepared)?.engine;
+      if (!engine?.workspace) throw new Error("Goal command verifier requires the original candidate workspace");
+      const workspace = await engine.workspace;
+      await input.assertCurrent(); assertPreparedWorkflowGoalPolicyCurrent(input, prepared);
+      const verification = await runGoalCommandVerifier({ originRoot: input.cwd, workspace,
+        config: criterion.verifier.config as unknown as GoalCommandVerifierConfig, signal: input.stopSignal,
+        expectedCandidateHash: goalHash(control.candidate) });
+      await input.assertCurrent(); assertPreparedWorkflowGoalPolicyCurrent(input, prepared);
+      commandResults.set(criterion.id, { verdict: goalCommandVerdict(verification), reason: null, verification });
+    } catch (error) {
+      await input.assertCurrent(); assertPreparedWorkflowGoalPolicyCurrent(input, prepared); input.stopSignal.throwIfAborted();
+      commandResults.set(criterion.id, { verdict: "unknown",
+        reason: error instanceof Error ? error.message : "Goal command verification unavailable" });
+    }
+  }
   const collectObservations = () => definition.goal.criteria.map(criterion => {
     const { verdict, reason, ...artifact } = observeWorkflowGoalArtifactCriterion(criterion, input.sources);
     const rubric = rubricObservations.get(criterion.id);
     const human = humanResults.get(criterion.id);
+    const command = commandResults.get(criterion.id);
     return { ...artifact,
       ...(rubric?.result === undefined ? {} : { verification: rubric.result }),
+      ...(command?.verification === undefined ? {} : { verification: command.verification }),
       ...(human?.judgment === undefined ? {} : { humanJudgment: human.judgment }),
-      verdict: human ? human.verdict : rubric ? rubric.verdict : verdict,
-      reason: human ? human.reason : rubric ? rubric.reason : reason };
+      verdict: human ? human.verdict : rubric ? rubric.verdict : command ? command.verdict : verdict,
+      reason: human ? human.reason : rubric ? rubric.reason : command ? command.reason : reason };
   });
   let observations = collectObservations();
   let unknown = observations.some(observation => observation.verdict === "unknown");

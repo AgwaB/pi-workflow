@@ -27,6 +27,7 @@ import { compileWorkflow } from "./compiler.js";
 import { createWorkflowGoalEngineRuntime, type WorkflowGoalEngineRuntime } from "./goal-workflow-engine-runtime.js";
 import { installGoalHostSessionIssuer } from "./goal-host-session.js";
 import type { WorkflowGoalPolicyHost } from "./goal-workflow-runtime.js";
+import type { WorkflowGoalRecoveryPlan } from "./goal-workflow-recovery.js";
 import {
 	formatLogs,
 	formatHumanRunLaunch,
@@ -39,6 +40,7 @@ import {
 	formatStatus,
 	refreshRun,
 	resumeRun,
+	hasLiveWorkflowGoalAdmission,
 	resumeSupervisors,
 	beginWorkflowGoalHumanReview,
 	beginWorkflowGoalProfileException,
@@ -2842,6 +2844,7 @@ async function startWorkflowRunFromRequest(
 	>["autoLaunchBinding"],
 	launchSignal?: AbortSignal,
 	goalPolicyHost?: WorkflowGoalPolicyHost,
+	goalRecovery?: WorkflowGoalRecoveryPlan,
 ): Promise<{ run: Awaited<ReturnType<typeof runWorkflowSpec>>; text: string }> {
 	const workflow = request.workflow.trim();
 	const task = request.task.trim();
@@ -2908,6 +2911,7 @@ async function startWorkflowRunFromRequest(
 			...(autoLaunchBinding ? { autoLaunchBinding } : {}),
 			...(launchSignal ? { launchSignal } : {}),
 			...(goalPolicyHost ? { goalPolicyHost } : {}),
+			...(goalRecovery ? { goalRecovery } : {}),
 			...profileSelection,
 		}),
 	);
@@ -4150,8 +4154,12 @@ async function handleWorkflowGoalCommand(
 			return;
 		}
 		if (!id || extra.length) throw new Error("Ordinary Goal commands require exactly one workflow run ID or exact goal_engine ID");
+		if (action === "recover") {
+			await recoverWorkflowGoal(id, ctx, api, goalProduct);
+			return;
+		}
 		if (!["status", "criteria", "evidence", "pause", "cancel", "resume"].includes(action!))
-			throw new Error("Unsupported Goal action; no apply/background/cold recovery command. Use /workflow goal help.");
+			throw new Error("Unsupported Goal action; no apply/background command. Use /workflow goal help.");
 		const { run, tasks } = await commands.resolveOrdinaryWorkflowGoal(ctx.cwd, id);
 		if (["status", "criteria", "evidence"].includes(action!)) {
 			const result = await commands.readOrdinaryWorkflowGoal(ctx.cwd, action!, run, tasks);
@@ -4194,10 +4202,12 @@ async function handleWorkflowGoalCommand(
 		emit(ctx, "Goal authoring cancelled; no definition, profile preference, or run was created.", "info");
 		return;
 	}
+	const commandCriterion = "Command exit code (sandboxed)";
 	const criterionKind = await ctx.ui.select("Completion criterion semantics", [
 		"Deterministic exact JSON value",
 		"Model-rubric statement",
 		"Human acceptance condition",
+		commandCriterion,
 	]);
 	if (!criterionKind) return;
 	const criterionText = await ctx.ui.input(
@@ -4205,11 +4215,24 @@ async function handleWorkflowGoalCommand(
 			? "Expected JSON value"
 			: criterionKind === "Model-rubric statement"
 				? "Model rubric statement"
-				: "Human acceptance condition",
+				: criterionKind === commandCriterion
+					? 'Verification command (JSON argv array, or space-separated words; no shell), e.g. node --test'
+					: "Human acceptance condition",
 	);
 	if (!criterionText?.trim()) return;
 	let verifier: GoalWorkflowSpec["goal"]["criteria"][number]["verifier"];
-	if (criterionKind === "Deterministic exact JSON value") {
+	if (criterionKind === commandCriterion) {
+		const text = criterionText.trim();
+		let argv: unknown;
+		if (text.startsWith("[")) {
+			try { argv = JSON.parse(text); } catch { throw new Error("Verification command JSON argv is invalid."); }
+		} else argv = text.split(/\s+/u);
+		verifier = {
+			kind: "deterministic", producerId: "command-exit-v1", target: "candidate",
+			subject: { resultSlot: "result", artifact: "control" },
+			config: { argv } as unknown as GoalWorkflowSpec["goal"]["criteria"][number]["verifier"]["config"],
+		};
+	} else if (criterionKind === "Deterministic exact JSON value") {
 		let expected: unknown;
 		try { expected = JSON.parse(criterionText); } catch { throw new Error("Expected deterministic completion value must be valid JSON."); }
 		verifier = {
@@ -4244,6 +4267,8 @@ async function handleWorkflowGoalCommand(
 		: effectsChoice === "Candidate writes, read, and verify"
 			? ["read", "candidate-write", "verify", "workflow-create"] as const
 			: ["read", "candidate-write", "verify", "origin-apply", "workflow-create"] as const;
+	if (criterionKind === commandCriterion && effectsChoice === "Read and verify only")
+		throw new Error("A command criterion runs against candidate writes; choose a candidate-writing effect.");
 	const readOptionalLimit = async (label: string): Promise<number | undefined | null> => {
 		const text = await ctx.ui.input(label);
 		if (text === undefined) return null;
@@ -4284,6 +4309,10 @@ async function handleWorkflowGoalCommand(
 		`Objective: ${objective}`,
 		`Criterion: ${criterionKind}: ${criterionText.trim()}`,
 		...(criterionKind === "Model-rubric statement" ? ["Minimum rubric score: 1 (full satisfaction)"] : []),
+		...(criterionKind === commandCriterion ? [
+			"Command runs on a copy of the working tree with the candidate applied, inside the macOS sandbox",
+			"(no network, writes only inside the copy, default time limit 120 s); exit code 0 means met",
+		] : []),
 		`Allowed paths: ${allowedPaths.join(", ") || "none"}`,
 		`Protected paths: ${protectedPaths.join(", ") || "none"}`,
 		`Effects: ${allowedEffects.join(", ")}`,
@@ -4360,6 +4389,55 @@ async function handleWorkflowGoalCommand(
 		launch: workflowSlashLaunchCapture("run", "named-workflow", "off", objective, "goal"),
 	});
 	emit(ctx, formatHumanRunLaunch(run), run.status === "blocked" ? "warning" : "info");
+}
+
+/**
+ * Cold recovery: a new run of the interrupted Goal's original definition, with
+ * fresh consent, prior requests counted against the cap, the last original
+ * oracle feedback, and the last observed candidate when the origin is
+ * unchanged. The interrupted run is left as recorded and marked recovered.
+ */
+async function recoverWorkflowGoal(
+	id: string,
+	ctx: ExtensionCommandContext,
+	api: ExtensionAPI,
+	goalProduct: { runtime: WorkflowGoalEngineRuntime } | undefined,
+): Promise<void> {
+	assertWorkflowActionAllowedForRole("goal");
+	if (!ctx.hasUI || ctx.mode !== "tui") throw new Error("Goal recovery requires the interactive Pi TUI.");
+	const host = workflowGoalPolicyHost(ctx, api, goalProduct);
+	if (!host) throw new Error("Goal recovery requires the live interactive Goal host");
+	const recovery = await import("./goal-workflow-recovery.js");
+	const commands = await import("./goal-workflow-commands.js");
+	const { run } = await commands.resolveOrdinaryWorkflowGoal(ctx.cwd, id);
+	const release = await recovery.claimWorkflowGoalRecovery(ctx.cwd, run.runId);
+	let recovered: string | undefined;
+	try {
+		const launch = await recovery.planWorkflowGoalRecovery(ctx.cwd, run.runId,
+			(runId) => hasLiveWorkflowGoalAdmission(ctx.cwd, runId));
+		const uiSessionSignal = workflowUiSignalForCwd(ctx.cwd);
+		const result = await startWorkflowRunFromRequest(
+			{
+				workflow: launch.specPath,
+				task: launch.task,
+				detach: false,
+				...(launch.executionProfile ? { executionProfile: launch.executionProfile } : {}),
+			},
+			ctx, api, uiSessionSignal,
+			workflowSlashLaunchCapture("run", "named-workflow", "off", launch.task, `goal recover ${run.runId}`),
+			undefined, undefined, host, launch.plan,
+		);
+		recovered = result.run.runId;
+		await recovery.completeWorkflowGoalRecovery(ctx.cwd, run.runId, recovered);
+		if (!uiSessionSignal.aborted) {
+			emit(ctx, `Goal ${run.runId} recovered as ${recovered} (${launch.plan.priorRequests} prior request(s) counted; ` +
+				`${launch.plan.seed ? `continuing from the last candidate of generation ${launch.plan.seed.generation}` :
+					launch.plan.seedSkipped ? `starting from the origin: ${launch.plan.seedSkipped}` : "starting from the origin"}).`, "info");
+			emitRunStartResult(ctx, result.run.status, result.text);
+		}
+	} finally {
+		if (!recovered) await release();
+	}
 }
 
 async function handleWorkflowCommand(

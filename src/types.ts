@@ -1716,6 +1716,13 @@ export interface WorkflowRunRecord {
 		}>;
 		ordinaryProfile?: { model: string; thinking?: ThinkingLevel };
 	};
+	/** Cold recovery of an interrupted root Goal run (see goal-workflow-recovery). */
+	goalRecovery?: {
+		fromRunId: string;
+		priorRequests: number;
+		feedbackGeneration: number | null;
+		seededPaths: string[];
+	};
 	goalParticipation?: {
 		schemaVersion: 1;
 		resumeRequired: boolean;

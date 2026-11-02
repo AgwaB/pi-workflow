@@ -121,8 +121,9 @@ import {
 } from "./goal-generated-materialization.js";
 import { goalHash } from "./goal-json.js";
 
-import { assertHumanFamilyKnown, assertPreparedWorkflowGoalPolicyCurrent, assertWorkflowGoalProfileConfigurationCurrent, beginWorkflowGoalInitializationBindings, bindWorkflowGoalRequestTask, bindWorkflowGoalCandidateWorker, captureWorkflowGoalScopedTaskRuntime, captureWorkflowEngineGoalVerifierTask, observeWorkflowGoalCandidate, applyWorkflowGoalCandidateToOrigin, completeWorkflowGoalInitializationBindings, executeWorkflowEngineGoalPolicy, markWorkflowGoalProfilePublicationUnknown, prepareWorkflowEngineGoalRootPlanner, prepareWorkflowEngineGoalWorkers, prepareWorkflowEngineGoalVerifiers, prepareWorkflowEngineGoalVerifierRequest, prepareWorkflowEngineGoalReplanner, prepareWorkflowEngineGoalResume, prepareWorkflowGoalPolicy, prepareWorkflowGoalRootMaterializationPublication, publishWorkflowGoalProfileConfiguration, revokeWorkflowGoalInitializationBindings, workflowGoalProfileConfiguration, workflowEngineGoalAgentDefinitions, workflowEngineGoalVerifierSnapshot, captureWorkflowGoalHumanReview, consumeWorkflowGoalHumanReview, revokeWorkflowGoalHumanReview, type PreparedWorkflowGoalPolicyAdmission, type PreparedWorkflowGoalVerifierRequest, type WorkflowGoalPolicyHost } from "./goal-workflow-runtime.js";
+import { admitWorkflowGoalOutputRepair, assertHumanFamilyKnown, assertPreparedWorkflowGoalPolicyCurrent, assertWorkflowGoalProfileConfigurationCurrent, beginWorkflowGoalInitializationBindings, bindWorkflowGoalRequestTask, bindWorkflowGoalCandidateWorker, captureWorkflowGoalScopedTaskRuntime, captureWorkflowEngineGoalVerifierTask, observeWorkflowGoalCandidate, applyWorkflowGoalCandidateToOrigin, completeWorkflowGoalInitializationBindings, executeWorkflowEngineGoalPolicy, markWorkflowGoalProfilePublicationUnknown, prepareWorkflowEngineGoalRootPlanner, prepareWorkflowEngineGoalWorkers, prepareWorkflowEngineGoalVerifiers, prepareWorkflowEngineGoalVerifierRequest, prepareWorkflowEngineGoalReplanner, prepareWorkflowEngineGoalResume, prepareWorkflowGoalPolicy, prepareWorkflowGoalRootMaterializationPublication, publishWorkflowGoalProfileConfiguration, revokeWorkflowGoalInitializationBindings, workflowGoalProfileConfiguration, workflowEngineGoalAgentDefinitions, workflowEngineGoalVerifierSnapshot, captureWorkflowGoalHumanReview, consumeWorkflowGoalHumanReview, revokeWorkflowGoalHumanReview, type PreparedWorkflowGoalPolicyAdmission, type PreparedWorkflowGoalVerifierRequest, type WorkflowGoalPolicyHost } from "./goal-workflow-runtime.js";
 import type { WorkflowGoalOriginApplyRecord } from "./goal-workflow-origin-apply.js";
+import type { WorkflowGoalRecoveryPlan } from "./goal-workflow-recovery.js";
 import {
 	assertWorkflowGoalProfileExceptionCurrent,
 	goalPolicyRequest,
@@ -709,6 +710,11 @@ const liveGoalPolicyAdmissions = new Map<string, {
 	publicationPending: boolean;
 }>();
 const MAX_SUPERVISOR_CONSECUTIVE_ERRORS = 3;
+
+/** Whether this process still holds the original live admission of a Goal run. */
+export function hasLiveWorkflowGoalAdmission(cwd: string, runId: string): boolean {
+	return liveGoalPolicyAdmissions.has(`${resolve(cwd)}\0${runId}`);
+}
 
 export async function assertOrdinaryGoalCommandCurrent(cwd: string, run: WorkflowRunRecord,
 	host: WorkflowGoalPolicyHost): Promise<void> {
@@ -1311,6 +1317,8 @@ export interface WorkflowRunOptions {
 	 * A declared executionProfile takes precedence when both are supplied.
 	 */
 	executionProfileOverride?: WorkflowCapturedExecutionProfile;
+	/** Cold recovery of an interrupted root Goal run, shown at this run's consent. */
+	goalRecovery?: WorkflowGoalRecoveryPlan;
 }
 
 export interface WorkflowScheduleOptions {
@@ -1635,6 +1643,9 @@ async function runLoadedWorkflowSpecInNativeHostScope(
 	const goalPolicyAdmissions = new Map<string, PreparedWorkflowGoalPolicyAdmission>();
 	if (options.goalPolicyHost) {
 		for (const policy of compiled.tasks.filter((task: CompiledTask) => task.kind === "goal")) {
+			if (options.goalRecovery && (options.goalChildAdmission || !("goal" in spec) ||
+				policy.goal?.definitionFingerprint !== options.goalRecovery.definitionFingerprint))
+				throw new Error("Goal recovery requires the original top-level Goal definition");
 			const input = {
 				host: options.goalPolicyHost, cwd, policy,
 				request: goalPolicyRequest(policy, compiled.task),
@@ -1642,6 +1653,7 @@ async function runLoadedWorkflowSpecInNativeHostScope(
 				parentRunId: runId,
 				executionProfileName: appliedProfile.record?.name,
 				assertCurrent: () => throwIfWorkflowStopRequested(cwd, runId),
+				...(options.goalRecovery ? { recovery: options.goalRecovery } : {}),
 			};
 			const prepared = options.goalChildAdmission
 				? await prepareWorkflowGoalDerivedPolicy(options.goalChildAdmission, input)
@@ -1698,6 +1710,12 @@ async function runLoadedWorkflowSpecInNativeHostScope(
 	const goalPaths = compiled.tasks.filter((task: CompiledTask) => task.kind === "goal").map((task: CompiledTask) => task.stageId ?? task.id);
 	if (goalPaths.length > 0)
 		run.goalParticipation = { schemaVersion: 1, resumeRequired: options.goalPolicyHost === undefined, goalPaths };
+	if (options.goalRecovery) run.goalRecovery = {
+		fromRunId: options.goalRecovery.fromRunId,
+		priorRequests: options.goalRecovery.priorRequests,
+		feedbackGeneration: options.goalRecovery.feedbackGeneration,
+		seededPaths: options.goalRecovery.seed?.files.map(file => file.path) ?? [],
+	};
 	if (provenance) run.provenance = provenance;
 	if (options.routing) run.routing = options.routing;
 	if (appliedProfile.record) run.executionProfile = appliedProfile.record;
@@ -6897,17 +6915,21 @@ async function launchPendingTaskAt(
 	if (!task || task.status !== "pending") return false;
 	if (task.backendHandle || task.pid) return false;
 	retireWorkflowGoalUnlaunched(run, task);
-	// A root candidate requiring artifact repair is UNKNOWN, not an original
-	// deterministic oracle failure. Ordinary output repair must not spend another
-	// provider attempt outside the admitted generation transition.
+	// A Goal generation task whose output envelope was invalid gets one
+	// automatic repair attempt when every prior request is settled and the Goal
+	// request cap leaves room. Otherwise its artifact stays UNKNOWN: it is not an
+	// original oracle failure and is never repaired outside that admission.
 	if (task.outputRetry && run.tasks.some(root => root.kind === "goal" &&
 		root.goalRoot?.generations.some(generation => generation.plannerSpecId === task.specId ||
 			Object.values(generation.slots).includes(task.specId) || Object.values(generation.verifiers ?? {}).includes(task.specId)))) {
-		setTaskTerminal(task, "blocked", "goal_candidate_artifact_unknown", {
-			lastMessage: "Goal candidate terminal artifact is unavailable or invalid; UNKNOWN requires recovery, not automatic provider repair.",
-		});
-		await writeRunRecord(cwd, run);
-		return false;
+		const refused = await admitWorkflowGoalOutputRepair(run, task);
+		if (refused !== undefined) {
+			setTaskTerminal(task, "blocked", "goal_candidate_artifact_unknown", {
+				lastMessage: `Goal candidate terminal artifact is unavailable or invalid; UNKNOWN requires recovery (${refused}).`,
+			});
+			await writeRunRecord(cwd, run);
+			return false;
+		}
 	}
 
 	const compiledTask = compiledFlow.tasks[index];
