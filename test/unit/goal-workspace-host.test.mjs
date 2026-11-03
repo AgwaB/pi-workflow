@@ -2805,18 +2805,20 @@ async function nativeReadFixture(t, root, name, attemptKey = name) {
   return { workspace, opened, read: registrations.get("goal_candidate_read"), attemptKey };
 }
 
-async function nativeRequestWrapperFixture(t, root, name) {
+async function nativeRequestWrapperFixture(t, root, name, { serviceTier, captureNativeReads = true } = {}) {
   const budget = createGoalRequestBudget(1);
   const request = await openGoalRequestBudgetChannel({
     directory: join(root, `r-${goalHash(name).slice(0, 8)}`), evidenceRoot: join(root, `${name}-request-evidence`),
     identity: { test: name }, attemptKey: name, model: "openai/native-fixture", budget,
     current: async () => `${name}-authority`, live() {}, stopped: new AbortController().signal,
-    captureNativeReads: true,
+    ...(captureNativeReads ? { captureNativeReads: true } : {}), ...(serviceTier ? { serviceTier } : {}),
   });
   const extension = await readFile(request.extensionPath, "utf8");
   const marker = "registerGoalRequestBudget(pi, ";
-  const binding = JSON.parse(extension.slice(extension.indexOf(marker) + marker.length,
-    extension.lastIndexOf(', "openai/native-fixture", true);')));
+  const suffix = serviceTier ? `, "openai/native-fixture", ${captureNativeReads}, ${JSON.stringify(serviceTier)});`
+    : captureNativeReads ? ', "openai/native-fixture", true);' : ', "openai/native-fixture");';
+  assert.ok(extension.endsWith(`${suffix}\n`), "the generated extension carries exactly the admitted arguments");
+  const binding = JSON.parse(extension.slice(extension.indexOf(marker) + marker.length, extension.lastIndexOf(suffix)));
   const model = { provider: "openai", id: "native-fixture", api: "openai-responses" };
   const counters = { providerCalls: 0, reservations: 0, physicalFetches: 0 };
   const bodies = [];
@@ -2863,7 +2865,7 @@ async function nativeRequestWrapperFixture(t, root, name) {
   registerGoalRequestBudget({
     on(name, handler) { handlers.set(name, handler); },
     registerProvider(provider) { registered = provider; },
-  }, binding, "openai/native-fixture", true);
+  }, binding, "openai/native-fixture", captureNativeReads, serviceTier);
   handlers.get("session_start")({}, {
     model,
     modelRegistry: {
@@ -3166,6 +3168,44 @@ test("native request wrapper denies unmatched reads pre-provider and allows ACKe
   const witness = allowed.request.lastSettledNativeReadWitness();
   assert.equal(witness.coverage, "complete");
   assert.ok(witness.sourceChars > 0 && witness.sourceChars < 261_600);
+});
+
+test("Goal Fast requests the priority tier inside the guarded request, for plain and source-reading requests", async t => {
+  const root = await disposableRoot(t);
+  const plain = await nativeRequestWrapperFixture(t, root, "fast-plain", { serviceTier: "priority", captureNativeReads: false });
+  // A later payload hook that drops the tier cannot remove it.
+  const events = await plain.run({ messages: [] }, payload => ({ ...payload, service_tier: undefined, extra: true }));
+  assert.equal(events.at(-1)?.type, "done");
+  assert.equal(plain.bodies[0].service_tier, "priority");
+  assert.equal(plain.bodies[0].extra, true, "other payload hooks still apply");
+  assert.deepEqual(plain.counters, { providerCalls: 1, reservations: 1, physicalFetches: 1 });
+  await plain.request.drain();
+
+  const unset = await nativeRequestWrapperFixture(t, root, "fast-unset", { captureNativeReads: false });
+  assert.equal((await unset.run({ messages: [] })).at(-1)?.type, "done");
+  assert.equal(Object.hasOwn(unset.bodies[0], "service_tier"), false, "no tier without the Goal opt-in");
+  await unset.request.drain();
+
+  const mismatched = await nativeRequestWrapperFixture(t, root, "fast-mismatch", { serviceTier: "priority", captureNativeReads: false });
+  const mismatchEvents = await mismatched.run({ messages: [] }, undefined, { model: "another-model", input: [] });
+  assert.equal(mismatchEvents.at(-1)?.type, "error", "a payload for another model is not tiered or sent");
+  assert.equal(mismatched.counters.physicalFetches, 0);
+  await mismatched.request.drain();
+
+  const name = "fast-source";
+  const source = await nativeReadFixture(t, root, `${name}-source`, name);
+  const params = { path: "batch.txt", maxPages: 2 };
+  const partial = await source.read.execute("fast-source-read", params);
+  const native = await nativeRequestWrapperFixture(t, root, name, { serviceTier: "priority" });
+  const nativeEvents = await native.run({ messages: nativeReadTurn("fast-source-read", params, partial), tools: [source.read] });
+  assert.equal(nativeEvents.at(-1)?.type, "done");
+  assert.equal(native.bodies[0].service_tier, "priority", "the source verifier's frozen payload carries the tier");
+  await native.request.drain();
+  assert.equal(native.request.lastSettledNativeReadWitness().coverage, "complete");
+
+  await assert.rejects(openGoalRequestBudgetChannel({ directory: join(root, "bad-tier"), evidenceRoot: join(root, "bad-tier-evidence"),
+    identity: {}, attemptKey: "bad", model: "openai/native-fixture", budget: createGoalRequestBudget(1),
+    current: async () => "a", live() {}, stopped: new AbortController().signal, serviceTier: "flex" }), /must be priority/);
 });
 
 test("source-qualified payload hook permits only frozen identity or undefined observation", async t => {

@@ -5,6 +5,7 @@ import { workflowTaskProfileBinding, isOriginalPreparedTaskProfile, readArtifact
 import { buildGoalProfileCaptureRevisionProposal, captureGoalChildProfile, captureGoalWorkflowProfile, assertGoalProfileCaptureRevisionAvailable, assertGoalProfileCaptureRevisionProposalAvailable, parseGoalProfileCaptureRevision, parseGoalProfileCaptureRevisionHistory, parseGoalProfileCaptureRevisionProposal, resolveGoalProfileRuntime, resolveGoalProfileProposalRuntime } from "./goal-profile.js";
 import { goalGenerationLimit, parseGoalWorkflowSpec } from "./goal-workflow-schema.js";
 import { readSimpleJsonPath } from "./workflow-runtime.js";
+import { resolveWorkflowFastModeConfig, WORKFLOW_FAST_SERVICE_TIER, workflowFastEligibleModelIds } from "./workflow-fast-mode-extension.js";
 import { cloneGoalWorkflowData, goalWorkflowJson } from "./goal-json.js";
 import { loadAgentByName } from "./agents.js";
 import { effectiveToolClassification } from "./tool-metadata.js";
@@ -4971,11 +4972,20 @@ export async function prepareWorkflowGoalRequestChannel(cwd: string, run: Workfl
   // The private socket directory is removed once its channel has drained.
   const removeDirectory = () => removeGoalTemporaryDirectory(directory);
   try { live(); } catch (error) { await removeDirectory(); throw error; }
+  // Fast is the root Goal definition's setting for every model request of the
+  // family (children inherit the root role models, checked before consent).
+  let familyRoot = prepared;
+  for (let ancestor = derivedPolicyChildren.get(familyRoot); ancestor; ancestor = derivedPolicyChildren.get(familyRoot))
+    familyRoot = childAdmissions.get(ancestor)!.prepared;
+  const fast = preparedPolicies.get(familyRoot)!.engine!.preview.definition.defaults?.fast === "on";
+  if (fast && !workflowFastEligibleModelIds().includes(compiled.runtime.model!))
+    throw new Error(`Goal Fast request model is not Fast-eligible: ${compiled.runtime.model}`);
   const channel = await openGoalRequestBudgetChannel({ directory: join(directory, "rpc"),
     evidenceRoot: join(taskDir(cwd, run.runId, task.taskId), "artifacts", "request-reservations"),
     identity: { cwd, runId: run.runId, taskId: task.taskId, policy: binding.policySpecId, generation: binding.generation },
     attemptKey, model: compiled.runtime.model!, budget: engine.budget!,
     ...(captureNativeReads ? { captureNativeReads: true as const } : {}),
+    ...(fast ? { serviceTier: WORKFLOW_FAST_SERVICE_TIER } : {}),
     current: async () => {
       const authority = await current(true);
       if (captureNativeReads && candidateWorkers.get(key) !== sourceVerifier)
@@ -7221,6 +7231,16 @@ export async function prepareWorkflowGoalPolicy(input: PolicyPreparation): Promi
       currentRuntime: originalEnvironment!, availableModels: input.host.availableModels,
       environmentDigest: workflowDefinitionFingerprint({ cwd: input.cwd, models: input.host.availableModels }),
     });
+    // Fast applies to every model request of the Goal, so every role model
+    // must be Fast-eligible; refuse before consent otherwise.
+    if (definition.defaults?.fast === "on")
+      for (const role of profile.roles) {
+        try { resolveWorkflowFastModeConfig({ fast: "on", model: role.model }, input.host.availableModels); }
+        catch (error) {
+          throw new Error(`Goal defaults.fast "on" cannot apply to the ${role.role} role: ` +
+            `${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
     const coding = definition.goal.authority.allowedEffects.includes("candidate-write");
     const tools = goalWorkerTools(definition);
     const mediated = tools.length > 0;

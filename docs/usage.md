@@ -238,9 +238,15 @@ launch settings are captured from the selected workflow profile. Resume uses the
 captured profile, not a new Pi model/thinking selection. Role model/thinking come
 only from that profile (declared `executionProfiles` or the current Pi setting);
 a Goal definition's `defaults.model`/`defaults.thinking` do not change them (the
-consent preview shows the captured role settings). Fast (`fast` in `defaults` or
-`executionProfiles`) is not supported for Goal runs yet and is refused before
-consent. In child profile captures,
+consent preview shows the captured role settings). Fast is one Goal-wide
+setting of the root Goal: `defaults.fast: "on"` requests OpenAI's priority tier
+for every model request of the Goal family (planner, workers, verifiers, catalog
+children and nested child Goals, which inherit the root role models and cannot set
+Fast themselves). The Goal request guard sets the
+tier inside the counted request, so no separate Fast hook is loaded, and every
+role model must be Fast-eligible or the Goal is refused before consent. Whether
+the provider actually serves the request at priority is its decision (the
+reported tier drives cost). Per-role `fast` in `executionProfiles` is refused. In child profile captures,
 ordinary model-backed stages without `profileRole` inherit the captured worker
 (`research-execution`) role, including nested stages and foreach templates.
 Explicit roles remain distinct. Unmarked dynamic decision-profile slots inherit

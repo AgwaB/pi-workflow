@@ -15992,6 +15992,24 @@ test("declared nested Goal with a model-rubric criterion is admitted for consent
     /Goal execution confirmation cancelled; no workflow run was created/);
   assert.equal(previews.length, 1, "the nested rubric child reaches the single consent preview");
   assert.equal(previews[0].workflows[0].definition.goal.criteria[0].verifier.kind, "model-rubric");
+  // Goal-wide Fast needs every role model to be Fast-eligible.
+  const fastParent = { ...explicitChildCatalogDefinition({ standaloneGoal: { uses: "./child.json" } }), defaults: { fast: "on" } };
+  await writeFile(parentPath, JSON.stringify(fastParent));
+  await assert.rejects(runWorkflowSpec(parentPath, cwd, { goalPolicyHost: meteredHost }),
+    /Goal defaults\.fast "on" cannot apply to the planning role: fast:on is not supported for model "openai-codex\/gpt-test"/);
+  assert.equal(previews.length, 1, "an ineligible Fast model is refused before consent");
+  const fastHost = { ...host, currentRuntime: { model: "openai-codex/gpt-6-luna", thinking: "high" },
+    availableModels: [{ provider: "openai-codex", id: "gpt-6-luna", fullId: "openai-codex/gpt-6-luna", api: "openai-codex-responses", reasoning: true }] };
+  await assert.rejects(runWorkflowSpec(parentPath, cwd, { goalPolicyHost: fastHost }),
+    /Goal execution confirmation cancelled; no workflow run was created/);
+  assert.equal(previews.length, 2, "an eligible Fast Goal reaches consent");
+  assert.equal(previews[1].definition.defaults.fast, "on", "the consent preview shows the Goal-wide Fast setting");
+  // Fast is the root's family-wide setting; a nested Goal cannot set its own.
+  await writeFile(parentPath, JSON.stringify(explicitChildCatalogDefinition({ standaloneGoal: { uses: "./child.json" } })));
+  await writeFile(join(cwd, "child.json"), JSON.stringify({ ...rubricChild(["read", "verify", "workflow-create"]), defaults: { fast: "on" } }));
+  await assert.rejects(runWorkflowSpec(parentPath, cwd, { goalPolicyHost: fastHost }),
+    /Goal standalone child defaults exceed original derived admission/);
+  assert.equal(previews.length, 2, "a nested Goal's own Fast is refused before consent");
   assert.equal(nativeCalls, 0);
 });
 
