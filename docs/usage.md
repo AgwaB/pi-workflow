@@ -207,10 +207,29 @@ records or starting workers. The `workflow_goal` tool takes exact workflow run
 IDs or exact `goal_engine_...` IDs; slash commands also accept a unique run-ID
 prefix. Listing all Goals reports a run whose records cannot be verified on its
 own line instead of failing the whole list.
-Interactive `create` authors a reusable JSON Goal definition. Authoring and saving
+Interactive `create` authors a reusable JSON Goal definition. It asks for the
+completion criteria (up to eight; the Goal is achieved only when all hold), the
+allowed and protected paths, the allowed effects, request and cost caps, the
+attempt limit (first plan plus replans, `limits.generations`), Fast, and the file
+path; the Goal is named after that file. Authoring and saving
 do not require a live execution backend. Saving, selecting a profile, and executing
 are distinct choices; save-only does not start a run. Cancellation does not grant
 consent or launch providers. Existing files are not silently overwritten.
+
+**Consent screen.** Running a Goal shows one summary above the choices *Run this
+Goal*, *Show full details* and *Cancel*: objective, this run's target, each
+criterion (command, rubric, human or exact value), the paths it may change and the
+protected ones, the allowed effects (whether verified changes are applied to the
+working tree), child workflows, role models, request/cost/attempt limits, Fast, and
+for a recovery what it continues from. *Show full details* opens the complete preview
+the consent is bound to in a read-only viewer and returns to the summary. While a
+Goal runs, the status line shows its attempt and phase, for example
+`● Goal csv-parser · attempt 2 · verifying`. `/workflow goal status` and the
+completion message report the outcome in plain lines: whether it was achieved, each
+criterion as met / not met / waiting for your judgment / unknown (no verified
+evidence), attempts, requests, cost, what was applied to the working tree, why it
+stopped, and the next useful command. A recorded achievement whose evidence cannot be
+verified is reported as such, not as achieved.
 
 A definition has exactly one root: `goal` or `artifactGraph`. A Goal declares its
 objective, criteria and verifier selectors/configuration, relative path/effect

@@ -53,6 +53,7 @@ import {
 } from "./types.js";
 import { buildWorkflowRunMetrics } from "./workflow-metrics.js";
 import { assertUniqueRunTaskIds, canonicalJson } from "./foreach-batch-runtime.js";
+import { summarizeGoalProgress } from "./goal-progress.js";
 
 export const TERMINAL_INDEX_LIMIT = 50;
 export const LEASE_STALE_MS = 30_000;
@@ -3405,6 +3406,7 @@ function buildIndexEntry(
 	cwd: string,
 	run: WorkflowRunRecord,
 ): WorkflowIndexRunEntry {
+	const goal = run.status === "running" ? summarizeGoalProgress(run) : undefined;
 	return {
 		runId: run.runId,
 		name: run.name,
@@ -3419,6 +3421,7 @@ function buildIndexEntry(
 		rootRunId: run.rootRunId,
 		round: run.round,
 		fanout: run.fanout,
+		...(goal ? { goal } : {}),
 		runJson: toProjectPath(cwd, workflowRunPath(cwd, run.runId)),
 	};
 }

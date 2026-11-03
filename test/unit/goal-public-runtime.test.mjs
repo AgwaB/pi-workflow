@@ -261,11 +261,11 @@ async function sendCandidateAndLoseAck(binding, data) {
 test("ordinary Goal summary preserves stopping and unknown usage without mutating evidence", async () => {
   const { summarizeOrdinaryWorkflowGoal } = await import("../../.tmp/unit/goal-workflow-commands.js");
   for (const [observedUsage, expectedUsage] of [
-    ["UNKNOWN", "Recorded usage: tokens UNKNOWN, cost USD UNKNOWN."],
+    ["UNKNOWN", "Tokens: unknown"],
     [{ totalTokens: 0, costUsd: 0, tasksReporting: 0, taskCount: 1 },
-      "Recorded usage: tokens 0, cost USD 0 (partial coverage; remaining usage UNKNOWN)."],
+      "Tokens: 0 (some tasks did not report usage)"],
     [{ totalTokens: NaN, costUsd: Infinity, tasksReporting: 1, taskCount: 1 },
-      "Recorded usage: tokens UNKNOWN, cost USD UNKNOWN."],
+      "Tokens: unknown"],
   ]) {
     const data = {
       runId: "workflow_summary_fixture", runStatus: "running", observedUsage,
@@ -283,15 +283,15 @@ test("ordinary Goal summary preserves stopping and unknown usage without mutatin
     };
     const before = structuredClone(data);
     const summary = summarizeOrdinaryWorkflowGoal(data);
-    assert.match(summary, /recorded run running \(persisted observation, not live freshness\)/);
-    assert.match(summary, /recorded cancellation_pending; task running; generation 2/);
-    assert.match(summary, /criteria 4 \(1 met, 1 not-met, 1 pending human judgment, 1 UNKNOWN\)/);
-    assert.match(summary, /profile captured\. Evidence unavailable\/UNKNOWN/);
-    assert.match(summary, /Blocking\/UNKNOWN: Stopping: original descendant drain remains UNKNOWN/);
-    assert.match(summary, /Recorded Goal usage: requests UNKNOWN, cost micros UNKNOWN/);
-    assert.match(summary, /Current recorded work: candidate running, verification blocked/);
-    assert.ok(summary.split("\n").includes(expectedUsage));
-    assert.match(summary, /criteria <runId\|goal_engine_ID>.*evidence <runId\|goal_engine_ID>/);
+    const lines = summary.split("\n");
+    assert.equal(lines[0], "Goal (workflow_summary_fixture) — running", "a stopping run with a pending criterion is not waiting for judgment");
+    assert.ok(lines.includes("Criteria: 1 of 4 met, 1 not met, 1 waiting for your judgment, 1 unknown (no verified evidence)"));
+    assert.ok(lines.includes("Used: attempts 3 · requests unknown · cost unknown"));
+    assert.ok(lines.includes("Why: Stopping: original descendant drain remains UNKNOWN"));
+    assert.ok(lines.includes("Now: candidate running, verification blocked"));
+    assert.ok(lines.includes(expectedUsage), summary);
+    assert.equal(lines.at(-1), "Next: pause or cancel: /workflow goal pause|cancel workflow_summary_fixture · " +
+      "details: /workflow goal criteria|evidence workflow_summary_fixture");
     assert.doesNotMatch(summary, /DO_NOT_EXPAND_DEFINITION_IN_SUMMARY/);
     assert.ok(summary.length < 2000);
     assert.deepEqual(data, before, "formatting must not change the supplied persisted observation");
@@ -333,6 +333,31 @@ function goalSessionFence(t) {
       let closing;
       shutdowns.push(() => closing ??= Promise.resolve().then(() =>
         handler({ type: "session_shutdown", reason: "quit" }, context())));
+    },
+  };
+}
+
+/**
+ * Goal consent as a person uses it in the TUI: read the one-screen summary,
+ * open the full details, then run or cancel. `decide(title, preview)` sees the
+ * full preview the consent is bound to.
+ */
+function goalConsentUi(ui, decide) {
+  let opened;
+  return { ...ui,
+    async select(title, options) {
+      const match = /^(Confirm Goal (?:execution|profile exception))\n/.exec(title);
+      if (!match) return ui.select(title, options);
+      assert.ok(title.split("\n").length <= 40, `the consent summary fits on one screen:\n${title}`);
+      assert.deepEqual(options.slice(1), ["Show full details", "Cancel"]);
+      if (!opened) return "Show full details";
+      const preview = opened; opened = undefined;
+      return (await decide(match[1], preview)) ? options[0] : "Cancel";
+    },
+    async editor(title, text) {
+      assert.match(title, /^Confirm Goal (?:execution|profile exception): full details/);
+      opened = JSON.parse(text);
+      return text;
     },
   };
 }
@@ -2883,7 +2908,10 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
               assert.ok(heldPublication, "original observer joins during compiled-before-ACK hold");
               assert.equal(observation.runId, heldPublication.child.runId);
               const parent = await readRunRecord(cwd, heldPublication.child.parentRunId);
-              assert.equal(parent.tasks.find(task => task.goalRoot).status, "running", "concurrent original observer cannot falsely fail the root");
+              // The scheduler moves a Goal waiting on its child between running and
+              // pending; the property is that the observer never fails the root.
+              assert.ok(["running", "pending"].includes(parent.tasks.find(task => task.goalRoot).status),
+                "concurrent original observer cannot falsely fail the root");
               assert.deepEqual({ calls: calls.length, requests: budgetPhysicalRequests }, { calls: 2, requests: 2 });
               const child = await readRunRecord(cwd, observation.runId);
               assert.equal(child.foreachMaterializationJournal.status, "prepared");
@@ -3530,17 +3558,19 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
   }
   const commands = new Map(), commandHandlers = new Map(), commandMessages = [], commandTools = new Map();
   const terminalNotifications = [];
+  const completionMessages = [];
   let stopFeedback, runtimeCaptures = 0;
   if (commandMode || rubric || foreachProfileException) (await import("@earendil-works/pi-coding-agent")).initTheme(undefined, false);
   workflowExtension({ on(name, fn) { const listeners = commandHandlers.get(name) ?? []; listeners.push(fn); commandHandlers.set(name, listeners); },
-    registerCommand(name, value) { commands.set(name, value); }, registerTool(value) { commandTools.set(value.name, value); }, getThinkingLevel() { runtimeCaptures++; return "high"; }, sendMessage() {} });
+    registerCommand(name, value) { commands.set(name, value); }, registerTool(value) { commandTools.set(value.name, value); }, getThinkingLevel() { runtimeCaptures++; return "high"; },
+    sendMessage(message) { completionMessages.push(message); } });
   // The extension installs its Goal host session issuer first (before UI handlers).
   goalFence.own(commandHandlers.get("session_shutdown")?.[0], () => commandContext);
   let commandSessionId = "coding-command-session";
   const commandContext = { cwd, hasUI: true, mode: "tui", model: { provider: "fixture", id: "model" },
     modelRegistry: { getAvailable: () => host.availableModels },
     sessionManager: { getSessionId: () => commandSessionId, getSessionFile: () => join(cwd, "command-session.jsonl"), getCwd: () => cwd },
-    ui: { notify(message, level) {
+    ui: goalConsentUi({ notify(message, level) {
       const notification = { message, level };
       commandMessages.push(notification);
       terminalNotifications.push(notification);
@@ -3550,8 +3580,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
         component = factory({ requestRender() {} }, { fg(_role, value) { return value; } }, undefined, done); }); },
       setStatus() {}, setWidget() {},
       select: async (_title, options) => options.find(value => value.includes("captured")) ?? options[0],
-      confirm: async (title, text) => title === "Confirm Goal execution" || title === "Confirm Goal profile exception"
-        ? host.confirm(JSON.parse(text)) : true } };
+      confirm: async () => true }, (_title, preview) => host.confirm(preview)) };
   const invoke = async (suffix, context = commandContext, expectedExitCode = 0) => {
     commandMessages.length = 0;
     const stdout = process.stdout.write, stderr = process.stderr.write;
@@ -9059,6 +9088,14 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
     assert.equal(terminalObservation.notice.level, "error");
     assert.equal(terminalObservation.notice.message.startsWith(`Workflow ${originalRunId} ${run.status} (`), true,
       "UNKNOWN feedback is the original root's terminal notice");
+    // The completion message shows the readable Goal status, not its evidence record.
+    const completion = completionMessages.findLast(message => message.customType === "workflow-completion" &&
+      message.content.includes(originalRunId));
+    assert.ok(completion, "the Goal completion message was sent");
+    assert.match(completion.content, new RegExp(`^Goal \\S+ \\(${originalRunId}\\) — `, "m"), completion.content);
+    assert.match(completion.content, /^Criteria: \d+ of \d+ met/m);
+    assert.match(completion.content, new RegExp(`^Next: .*continue: /workflow goal recover ${originalRunId}`, "m"));
+    assert.doesNotMatch(completion.content, /goal-candidate-evidence-v1|"controlHash"|truncated; open/);
     await joinNativeCallbacks();
     await stopWorkflowFeedbackAndDrainForTests(cwd, originalRunId);
     assert.ok(terminalNotifications.includes(terminalObservation.notice));
@@ -9406,18 +9443,16 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
         const stoppedSummary = await commandTools.get(GOAL_TOOL).execute("pending-stop-status",
           { action: "status", goalId: run.runId }, new AbortController().signal, undefined, { cwd });
         const stoppedText = stoppedSummary.content[0].text;
-        assert.match(stoppedText, /recorded run running \(persisted observation, not live freshness\)/);
-        assert.match(stoppedText, /recorded UNKNOWN; task running; generation 0/);
-        assert.match(stoppedText, /criteria 1 \(0 met, 0 not-met, 0 pending human judgment, 1 UNKNOWN\)/);
-        assert.ok(stoppedText.includes(`profile ${stopped.executionProfile.name}.`));
-        assert.match(stoppedText, /Evidence unavailable\/UNKNOWN/);
-        assert.match(stoppedText, /Blocking\/UNKNOWN: cancellation_pending/);
-        assert.match(stoppedText, /Recorded Goal usage: requests UNKNOWN, cost micros UNKNOWN/);
-        assert.ok(stoppedText.includes(`Current recorded work: ${stoppedPolicy.specId} running`));
+        assert.ok(stoppedText.startsWith(`Goal ${definition.name} (${run.runId}) — running\n`), stoppedText);
+        assert.match(stoppedText, /^Criteria: 0 of 1 met, 1 unknown \(no verified evidence\)$/m);
+        assert.match(stoppedText, /^Used: attempts 1 · requests unknown · cost unknown$/m);
+        assert.match(stoppedText, /^Why: .+$/m, "the stop that is still settling is named");
+        assert.ok(stoppedText.includes(`Now: ${stoppedPolicy.specId} running`));
         assert.equal(stoppedSummary.details.observedUsage, "UNKNOWN",
           "pending root has no aggregate run usage; child observations cannot fabricate that total");
-        assert.match(stoppedText, /Recorded usage: tokens UNKNOWN, cost USD UNKNOWN\./);
-        assert.match(stoppedText, /criteria <runId\|goal_engine_ID>.*evidence <runId\|goal_engine_ID>/);
+        assert.match(stoppedText, /^Tokens: unknown$/m);
+        assert.doesNotMatch(stoppedText, /pause or cancel/, "a stop already in progress is not offered again");
+        assert.match(stoppedText, new RegExp(`^Next: details: /workflow goal criteria\\|evidence ${run.runId}$`, "m"));
         assert.ok(stoppedText.length < 2000);
         assert.doesNotMatch(stoppedText, /originalDefinition|"candidate"|"hex"/);
         assert.equal(await invoke(`status ${run.runId}`), stoppedText);
@@ -11800,11 +11835,11 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       const { listRunRecords: listRuns } = await import("../../.tmp/unit/store.js");
       const runsBefore = (await listRuns(cwd)).map(record => record.runId).sort();
       let recoverPreview;
-      const declining = { ...commandContext, ui: { ...commandContext.ui, confirm: async (title, text) => {
+      const declining = { ...commandContext, ui: goalConsentUi(commandContext.ui, async (title, preview) => {
         if (title !== "Confirm Goal execution") return true;
-        recoverPreview = JSON.parse(text);
+        recoverPreview = preview;
         return false;
-      } } };
+      }) };
       // The original run deliberately rewrote its project agent after consent;
       // a recovery captures agents afresh, so restore the bundled one.
       await rm(join(cwd, ".pi", "agents", `${chosenName}.md`), { force: true });
@@ -15211,8 +15246,8 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
     const recordPath = join(cwd, ".pi", "workflows", run.runId, "run.json"), bytes = await readFile(recordPath, "utf8");
     const status = await commandTools.get(GOAL_TOOL).execute("original-accounting-status", { action: "status", goalId: run.runId },
       new AbortController().signal, undefined, { cwd });
-    assert.match(status.content[0].text, /cost micros UNKNOWN/);
-    assert.match(status.content[0].text, /partial coverage; remaining usage UNKNOWN/);
+    assert.match(status.content[0].text, /^Used: attempts \d+ · requests unknown · cost unknown$/m);
+    assert.match(status.content[0].text, /^Tokens: .+ \(some tasks did not report usage\)$/m);
     assert.equal(await readFile(recordPath, "utf8"), bytes, "registered status is inert evidence, not reservation authority");
     const cold = spawnSync(process.execPath, ["--import", resolve("test/e2e/no-external-actions-guard.mjs"),
       "--input-type=module", "--eval", `import assert from 'node:assert/strict';
@@ -15386,18 +15421,16 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
     assert.equal(summary.details.runStatus, run.status);
     assert.deepEqual(summary.details.policies[0].originalDefinition, definition);
     assert.equal(summary.details.policies[0].originalProfile.name, "captured");
-    assert.ok(summary.content[0].text.includes(`recorded run ${run.status} (persisted observation, not live freshness)`));
-    assert.ok(summary.content[0].text.includes(`recorded ${uncertain ? "UNKNOWN" : root.goal.state}; task ${root.status}; generation ${root.goalRoot.generations.at(-1).generation}`));
-    assert.match(summary.content[0].text, uncertain
-      ? /criteria 1 \(0 met, 0 not-met, 0 pending human judgment, 1 UNKNOWN\)/
-      : new RegExp(`criteria ${definition.goal.criteria.length} \\(${definition.goal.criteria.length} met, 0 not-met, 0 pending human judgment, 0 UNKNOWN\\)`));
-    assert.match(summary.content[0].text, /profile captured\./);
-    assert.match(summary.content[0].text, uncertain ? /Evidence unavailable\/UNKNOWN/ : /Evidence persisted/);
-    assert.match(summary.content[0].text, /Blocking\/UNKNOWN:/);
-    assert.match(summary.content[0].text, /Recorded Goal usage: requests .+, cost micros .+/);
-    assert.match(summary.content[0].text, /Current recorded work:/);
-    assert.match(summary.content[0].text, /Recorded usage: tokens .+, cost USD .+/);
-    assert.match(summary.content[0].text, /criteria <runId\|goal_engine_ID>.*evidence <runId\|goal_engine_ID>/);
+    const statusText = summary.content[0].text;
+    assert.ok(statusText.startsWith(`Goal ${definition.name} (${run.runId}) — ${uncertain ? "" : "achieved"}`), statusText);
+    assert.match(statusText, uncertain
+      ? /^Criteria: 0 of 1 met, 1 unknown \(no verified evidence\)$/m
+      : new RegExp(`^Criteria: ${definition.goal.criteria.length} of ${definition.goal.criteria.length} met$`, "m"));
+    if (!uncertain) for (const criterion of definition.goal.criteria)
+      assert.ok(statusText.includes(`  ✓ ${criterion.id} — met`), statusText);
+    assert.match(statusText, new RegExp(`^Used: attempts ${root.goalRoot.generations.at(-1).generation + 1} · requests .+ · cost .+$`, "m"));
+    assert.match(statusText, /^Tokens: .+$/m);
+    assert.match(statusText, new RegExp(`^Next: .*details: /workflow goal criteria\\|evidence ${run.runId}$`, "m"));
     assert.ok(summary.content[0].text.length < 2000);
     assert.doesNotMatch(summary.content[0].text, /originalDefinition|"candidate"|"hex"/);
     if (uncertain) assert.match(summary.content[0].text, /UNKNOWN|unknown/);
@@ -15517,7 +15550,11 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
         assert.equal(historical.policies[0].criteria[0].verdict, "UNKNOWN");
         assert.match(historical.policies[0].criteria[0].reason, /unavailable/);
         const unavailable = await invokeTool({ action: "status", goalId: run.runId });
-        assert.match(unavailable.content[0].text, /1 UNKNOWN|unavailable\/UNKNOWN/);
+        const criteriaCount = definition.goal.criteria.length;
+        assert.match(unavailable.content[0].text,
+          new RegExp(`^Criteria: 0 of ${criteriaCount} met, ${criteriaCount} unknown \\(no verified evidence\\)$`, "m"));
+        assert.match(unavailable.content[0].text, / — recorded as achieved, but its evidence could not be verified$/m,
+          "a recorded achievement without verifiable evidence is not shown as plainly achieved");
         assert.equal(unavailable.details.policies[0].criteria[0].verdict, "UNKNOWN");
       } finally { await rename(hidden, dir); }
     }
@@ -16918,12 +16955,12 @@ for (const [name, cap, expected, recursive, terminalFault, mixed, depthDenied, g
   const commandContext = { cwd, hasUI: true, mode: "tui", model: { provider: "openai", id: "gpt-5.1" },
     modelRegistry: { getAvailable: () => host.availableModels },
     sessionManager: { getSessionId: () => "one-level-sdk", getSessionFile: () => join(cwd, "session.jsonl"), getCwd: () => cwd },
-    ui: { notify(message, level) { commandMessages.push({ message, level }); }, input: async () => "",
+    ui: goalConsentUi({ notify(message, level) { commandMessages.push({ message, level }); }, input: async () => "",
       custom(factory) { return new Promise(resolve => { let component; const done = value => { component?.dispose?.(); resolve(value); };
         component = factory({ requestRender() {} }, { fg(_role, value) { return value; } }, undefined, done); }); },
       setStatus() {}, setWidget() {},
       select: async (_title, options) => options.find(value => value.includes("captured")) ?? options[0],
-      confirm: async (title, text) => title === "Confirm Goal execution" ? host.confirm(JSON.parse(text)) : true } };
+      confirm: async () => true }, (_title, preview) => host.confirm(preview)) };
   const invoke = async suffix => {
     commandMessages.length = 0;
     await commands.get("workflow").handler(`goal ${suffix}`, commandContext);
@@ -19534,8 +19571,8 @@ async function savedGoalRegistryFixture(t) {
     registerCommand(name, definition) { commands.set(name, definition); },
     getThinkingLevel() { return "medium"; },
   });
-  const inputs = ['{"values":["saved"]}', "src", ".pi", "", "", "workflows/saved-goal.json"];
-  const choices = ["Deterministic exact JSON value", "Read and verify only", "Save definition"];
+  const inputs = ['{"values":["saved"]}', "src", ".pi", "", "", "", "workflows/saved-goal.json"];
+  const choices = ["Deterministic exact JSON value", "Done adding criteria", "Read and verify only", "Fast off", "Save definition"];
   await commands.get("workflow").handler("goal create reuse exact saved result", {
     cwd, hasUI: true, mode: "tui", ui: {
       input: async () => inputs.shift(), select: async () => choices.shift(),
@@ -19646,8 +19683,8 @@ test("registered /workflow goal authors a finite reusable scope and saves withou
     getThinkingLevel() { return "medium"; },
   });
   assert.equal(commands.has("goal"), false);
-  const inputs = ['{"values":["a","b"]}', "src", ".pi", "", "", "goals/saved.json"];
-  const choices = ["Deterministic exact JSON value", "Read and verify only", "Save definition"];
+  const inputs = ['{"values":["a","b"]}', "src", ".pi", "", "", "", "goals/saved.json"];
+  const choices = ["Deterministic exact JSON value", "Done adding criteria", "Read and verify only", "Fast off", "Save definition"];
   const messages = [];
   await commands.get("workflow").handler("goal help", {
     cwd, hasUI: true, mode: "tui",
@@ -19700,7 +19737,7 @@ test("registered /workflow goal profile cancellation preserves only the saved de
     getThinkingLevel() { return "medium"; },
   });
   const definitionPath = join(cwd, "goals", "saved.json");
-  const inputs = ["true", "src", ".pi", "", "", "goals/saved.json"];
+  const inputs = ["true", "src", ".pi", "", "", "", "goals/saved.json"];
   const messages = [];
   let savedBytes;
   let savedIdentity;
@@ -19711,7 +19748,9 @@ test("registered /workflow goal profile cancellation preserves only the saved de
       input: async () => inputs.shift(),
       select: async (title, choices) => {
         if (title.startsWith("Completion")) return "Deterministic exact JSON value";
+        if (title.endsWith("the Goal is achieved only when all hold")) return "Done adding criteria";
         if (title === "Allowed effects") return "Read and verify only";
+        if (title === "Fast processing") return "Fast off";
         if (title.startsWith("Goal preview\n")) return "Save definition and select execution profile";
         assert.match(title, /^Workflow execution profile/);
         assert.ok(choices.length > 0);
@@ -19755,7 +19794,8 @@ test("registered /workflow goal cancellation never writes a definition or Goal n
       input: async title => title.startsWith("Request cap") ? undefined : (
         title.startsWith("Expected JSON") ? "true" : ""
       ),
-      select: async title => title.startsWith("Completion") ? "Deterministic exact JSON value" : undefined,
+      select: async title => title.startsWith("Completion") ? "Deterministic exact JSON value"
+        : title.endsWith("the Goal is achieved only when all hold") ? "Done adding criteria" : undefined,
       confirm: async () => { throw new Error("cancelled authoring must not confirm"); },
       notify() {},
     },
@@ -19773,7 +19813,7 @@ test("registered /workflow goal final preview cancellation leaves the workspace 
     registerCommand(name, definition) { commands.set(name, definition); },
     getThinkingLevel() { return "medium"; },
   });
-  const inputs = ["true", "src", ".pi", "", "", "goals/cancelled.json"];
+  const inputs = ["true", "src", ".pi", "", "", "", "goals/cancelled.json"];
   const selections = [];
   const messages = [];
   await commands.get("workflow").handler("goal create cancel final preview", {
@@ -19783,7 +19823,9 @@ test("registered /workflow goal final preview cancellation leaves the workspace 
       select: async (title, choices) => {
         selections.push(title);
         if (title.startsWith("Completion")) return "Deterministic exact JSON value";
+        if (title.endsWith("the Goal is achieved only when all hold")) return "Done adding criteria";
         if (title === "Allowed effects") return "Read and verify only";
+        if (title === "Fast processing") return "Fast off";
         assert.match(title, /^Goal preview\n/);
         assert.match(title, /Objective: cancel final preview/);
         assert.deepEqual(choices, [
@@ -19798,8 +19840,8 @@ test("registered /workflow goal final preview cancellation leaves the workspace 
     },
   });
   assert.equal(inputs.length, 0, "all authoring inputs precede final preview cancellation");
-  assert.equal(selections.length, 3, "cancellation reaches the final preview, not an earlier prompt");
-  assert.match(selections[2], /^Goal preview\n/);
+  assert.equal(selections.length, 5, "cancellation reaches the final preview, not an earlier prompt");
+  assert.match(selections[4], /^Goal preview\n/);
   assert.deepEqual(messages, [], "cancellation is not an error or a save/launch result");
   assert.deepEqual(await readdir(cwd), [], "no definition, profile, private namespace or workflow is persisted");
 });
@@ -19813,7 +19855,7 @@ test("registered /workflow goal preserves explicit zero user caps", async t => {
     registerCommand(name, definition) { commands.set(name, definition); },
     getThinkingLevel() { return "medium"; },
   });
-  const inputs = ['true', "", "", "0", "0", "goals/zero-caps.json"];
+  const inputs = ['true', "", "", "0", "0", "", "goals/zero-caps.json"];
   let preview = "";
   await commands.get("workflow").handler("goal create preserve zero caps", {
     cwd, hasUI: true, mode: "tui",

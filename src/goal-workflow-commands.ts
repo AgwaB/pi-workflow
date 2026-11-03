@@ -423,7 +423,8 @@ async function assertExactVerifierLaunchIdentity(cwd: string, run: WorkflowRunRe
     throw new Error("Ordinary Goal exact verifier source/launch identity mismatch");
 }
 
-export async function readOrdinaryWorkflowGoal(cwd: string, action: string, run: WorkflowRunRecord, tasks: WorkflowTaskRunRecord[]) {
+export async function readOrdinaryWorkflowGoal(cwd: string, action: string, run: WorkflowRunRecord, tasks: WorkflowTaskRunRecord[],
+  options: { justFinished?: boolean } = {}) {
   const compiled: CompiledWorkflow = await json(await safePath(cwd, `.pi/workflows/${run.runId}/compiled.json`));
   const policies = [];
   for (const task of tasks) {
@@ -734,7 +735,10 @@ export async function readOrdinaryWorkflowGoal(cwd: string, action: string, run:
   }
   return { namespace: "ordinary-workflow-engine", runId: run.runId, rootRunId: run.rootRunId ?? run.runId,
     runStatus: run.status, observedUsage: run.usage ?? "UNKNOWN",
-    recovery: run.goalRecovery ?? null, recoveredBy: await readWorkflowGoalRecoveredBy(cwd, run.runId),
+    // A run that has only just finished cannot have a recovery successor yet;
+    // skip the scan of every run record for its completion message.
+    recovery: run.goalRecovery ?? null,
+    recoveredBy: options.justFinished ? null : await readWorkflowGoalRecoveredBy(cwd, run.runId),
     currentWork: run.tasks.filter(t => t.status === "running" || t.status === "blocked").map(t => ({ specId: t.specId, status: t.status })), policies };
 }
 
@@ -768,21 +772,67 @@ export async function readOrdinaryWorkflowGoalStatuses(cwd: string): Promise<{
   return { text, runs: results };
 }
 
+/** Readable status of one Goal run: what happened, what holds, what to do next. */
 export function summarizeOrdinaryWorkflowGoal(data: Awaited<ReturnType<typeof readOrdinaryWorkflowGoal>>): string {
-  const number = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? String(value) : "UNKNOWN";
+  const finite = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
+  const clip = (value: string, width: number) => {
+    const line = value.replace(/\s+/g, " ").trim();
+    return line.length <= width ? line : `${line.slice(0, width - 1)}…`;
+  };
   const usage = typeof data.observedUsage === "object" ? data.observedUsage : undefined;
-  return [
-    `Ordinary workflow-engine Goal ${data.runId}: recorded run ${data.runStatus} (persisted observation, not live freshness).`,
-    ...(data.recoveredBy ? [`Recovered as ${data.recoveredBy}; this interrupted run is kept as recorded.`] : []),
-    ...(data.recovery ? [`Recovered from ${data.recovery.fromRunId}: ${data.recovery.priorRequests} prior request(s) count against the cap; ${data.recovery.seededPaths.length ? `started from its last candidate (${data.recovery.seededPaths.join(", ")})` : "started from the origin"}.`] : []),
-    ...data.policies.map(p => {
-      const counts = { met: 0, "not-met": 0, pending: 0, UNKNOWN: 0 };
-      for (const c of p.criteria) counts[c.verdict === "met" ? "met" : c.verdict === "not-met" ? "not-met" : c.verdict === "pending" ? "pending" : "UNKNOWN"]++;
-      const profile = typeof p.originalProfile === "object" ? p.originalProfile.name : "UNKNOWN";
-      return `${p.goalId}: recorded ${p.state}; task ${p.taskStatus}; generation ${p.generation}; criteria ${p.criteria.length} (${counts.met} met, ${counts["not-met"]} not-met, ${counts.pending} pending human judgment, ${counts.UNKNOWN} UNKNOWN); profile ${profile}. Evidence ${p.exactEvidenceAvailability}. Blocking/UNKNOWN: ${p.statusDetail ?? p.importantFailureOrUnknown ?? (counts.UNKNOWN ? "Exact criterion evidence unavailable" : "none recorded")}. Recorded Goal usage: requests ${number(p.usage.requests)}, cost micros ${number(p.usage.costMicros)}.${p.originApply ? ` Origin apply ${p.originApply.status}: ${p.originApply.paths.map(path => `${path.path} ${path.state}`).join(", ") || "no paths"}.` : ""}`;
-    }),
-    `Current recorded work: ${data.currentWork.map(t => `${t.specId} ${t.status}`).join(", ") || "none recorded"}.`,
-    `Recorded usage: tokens ${number(usage?.totalTokens)}, cost USD ${number(usage?.costUsd)}${usage && usage.tasksReporting < usage.taskCount ? " (partial coverage; remaining usage UNKNOWN)" : ""}.`,
-    "Expanded original profile and criteria: criteria <runId|goal_engine_ID>; exact evidence and artifact references: evidence <runId|goal_engine_ID>.",
-  ].join("\n");
+  const lines: string[] = [];
+  let next: string[] = [];
+  for (const p of data.policies) {
+    const counts = { met: 0, "not-met": 0, pending: 0, UNKNOWN: 0 };
+    for (const c of p.criteria) counts[c.verdict === "met" ? "met" : c.verdict === "not-met" ? "not-met" : c.verdict === "pending" ? "pending" : "UNKNOWN"]++;
+    const achieved = p.state === "engine:achieved";
+    const waiting = !achieved && (p.statusDetail === "goal_waiting_user" || (counts.pending > 0 && p.taskStatus === "blocked"));
+    const state = achieved ? (counts.UNKNOWN ? "recorded as achieved, but its evidence could not be verified" : "achieved")
+      : waiting ? "waiting for your judgment"
+        : data.runStatus === "running" ? "running"
+          : data.runStatus === "interrupted" ? "stopped before finishing"
+            : data.runStatus === "failed" || data.runStatus === "completed" ? "not achieved" : data.runStatus;
+    const name = typeof p.originalDefinition?.name === "string" ? `${p.originalDefinition.name} ` : "";
+    lines.push(`Goal ${name}(${data.runId}) — ${state}`);
+    const parts = [`${counts.met} of ${p.criteria.length} met`,
+      ...(counts["not-met"] ? [`${counts["not-met"]} not met`] : []),
+      ...(counts.pending ? [`${counts.pending} waiting for your judgment`] : []),
+      ...(counts.UNKNOWN ? [`${counts.UNKNOWN} unknown (no verified evidence)`] : [])];
+    lines.push(`Criteria: ${parts.join(", ")}`);
+    for (const c of p.criteria.slice(0, 8)) {
+      const id = typeof c.criterion?.id === "string" ? c.criterion.id : undefined;
+      if (!id) continue;
+      const mark = c.verdict === "met" ? "✓" : c.verdict === "not-met" ? "✗" : c.verdict === "pending" ? "…" : "?";
+      const label = c.verdict === "met" ? "met" : c.verdict === "not-met" ? "not met" : c.verdict === "pending" ? "waiting for your judgment" : "unknown";
+      const command = c.command ? ` (exit ${c.command.timedOut ? "timeout" : c.command.signal ?? c.command.exitCode})` : "";
+      const reason = c.verdict !== "met" && typeof c.reason === "string" && c.reason ? `: ${clip(c.reason, 100)}` : "";
+      lines.push(`  ${mark} ${id} — ${label}${command}${reason}`);
+    }
+    if (p.criteria.length > 8) lines.push(`  … and ${p.criteria.length - 8} more`);
+    const attempts = finite(p.generation) ? `attempts ${p.generation + 1}` : "attempts unknown";
+    const requests = finite(p.usage.requests) ? `requests ${p.usage.requests}` : "requests unknown";
+    const cost = finite(p.usage.costMicros) ? `cost $${(p.usage.costMicros / 1_000_000).toFixed(4)}` : "cost unknown";
+    lines.push(`Used: ${attempts} · ${requests} · ${cost}`);
+    if (p.originApply) {
+      const paths = p.originApply.paths;
+      lines.push(p.originApply.status === "applied" && paths.every(path => path.state === "applied")
+        ? `Working tree: applied ${paths.map(path => path.path).join(", ") || "(no changed paths)"}`
+        : `Working tree: ${p.originApply.status} — ${paths.map(path => `${path.path} (${path.state})`).join(", ") || "no paths"}`);
+    }
+    const problem = !achieved && !waiting ? (p.importantFailureOrUnknown ?? p.statusDetail) : undefined;
+    if (problem) lines.push(`Why: ${clip(problem, 200)}`);
+    else if (counts.UNKNOWN && !achieved) lines.push("Why: exact criterion evidence is unavailable");
+    if (data.runStatus === "running" && !waiting && p.statusDetail !== "cancellation_pending")
+      next.push(`pause or cancel: /workflow goal pause|cancel ${data.runId}`);
+    if (waiting) next.push(`judge: /workflow goal judge ${data.runId}`);
+    if (!achieved && !waiting && ["failed", "interrupted", "completed"].includes(data.runStatus) && !data.recoveredBy)
+      next.push(`continue: /workflow goal recover ${data.runId}`);
+  }
+  if (data.recovery) lines.push(`Continues ${data.recovery.fromRunId}: its ${data.recovery.priorRequests} request(s) count against the cap; ${data.recovery.seededPaths.length ? `started from its last candidate (${data.recovery.seededPaths.join(", ")})` : "started from the working tree"}.`);
+  if (data.recoveredBy) lines.push(`Continued as ${data.recoveredBy}; this run is kept as recorded.`);
+  if (data.currentWork.length) lines.push(`Now: ${data.currentWork.map(t => `${t.specId} ${t.status}`).join(", ")}`);
+  lines.push(`Tokens: ${finite(usage?.totalTokens) ? usage!.totalTokens : "unknown"}${usage && usage.tasksReporting < usage.taskCount ? " (some tasks did not report usage)" : ""}`);
+  next = [...new Set(next)];
+  lines.push(`Next: ${[...next, `details: /workflow goal criteria|evidence ${data.runId}`].join(" · ")}`);
+  return lines.join("\n");
 }

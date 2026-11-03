@@ -53,6 +53,8 @@ export function formatActiveWorkflowLines(
 			const elapsed = Number.isFinite(createdAtMs)
 				? ` · ${formatElapsed(nowMs - createdAtMs)}`
 				: "";
+			if (run.goal)
+				return `● Goal ${truncateLabel(run.name ?? run.runId, 28)} · attempt ${run.goal.attempt} · ${run.goal.phase}${elapsed}`;
 			return `● ${truncateLabel(run.name ?? run.runId, 28)} ${visibleProgress(run)}/${run.taskSummary.total} running${elapsed}`;
 		}),
 	];
@@ -72,9 +74,12 @@ export function renderActiveWorkflowUi(
 		clearActiveWorkflowUi(ctx);
 		return;
 	}
+	const only = runs[0];
 	const status =
 		runs.length === 1
-			? `● ${truncateLabel(runs[0].name ?? runs[0].runId, 18)} ${visibleProgress(runs[0])}/${runs[0].taskSummary.total}`
+			? only.goal
+				? `● Goal ${truncateLabel(only.name ?? only.runId, 18)} · attempt ${only.goal.attempt} · ${only.goal.phase}`
+				: `● ${truncateLabel(only.name ?? only.runId, 18)} ${visibleProgress(only)}/${only.taskSummary.total}`
 			: `● workflows ${runs.length} active`;
 	safeUiCall(() => ctx.ui.setStatus(WORKFLOW_ACTIVE_STATUS_KEY, status));
 	safeUiCall(() =>

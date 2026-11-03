@@ -8,6 +8,7 @@ import { createHash } from "node:crypto";
 import { closeSync, openSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import {
+	basename,
 	dirname,
 	isAbsolute as isAbsolutePath,
 	join,
@@ -2238,6 +2239,19 @@ async function readWorkflowResultPresentation(
 	run: Awaited<ReturnType<typeof refreshRun>>,
 	outputTaskIds: string[],
 ): Promise<WorkflowResultPresentation | undefined> {
+	// A Goal's output task holds its evidence record; present the readable
+	// Goal status instead (evidence stays one command away).
+	if (run.goalParticipation && !run.parentRunId && run.tasks.some((candidate) => candidate.kind === "goal")) {
+		try {
+			// Read only this run's Goal evidence; resolving by ID would scan every run.
+			const commands = await import("./goal-workflow-commands.js");
+			const data = await commands.readOrdinaryWorkflowGoal(cwd, "status", run,
+				run.tasks.filter((candidate) => candidate.kind === "goal"), { justFinished: true });
+			return { preview: commands.summarizeOrdinaryWorkflowGoal(data), artifacts: [] };
+		} catch {
+			// Fall back to the generic output presentation.
+		}
+	}
 	const task = outputTaskIds
 		.map((id) =>
 			run.tasks.find(
@@ -3970,13 +3984,33 @@ function workflowGoalPolicyHost(
 		get availableModels() {
 			return models ??= availableWorkflowModels(ctx) ?? [];
 		},
-		confirm: (preview) => ctx.ui.confirm(
-			"schema" in preview && preview.schema === "workflow-goal-profile-exception-preview-v1"
-				? "Confirm Goal profile exception"
-				: "Confirm Goal execution",
-			JSON.stringify(preview, null, 2),
-		),
+		confirm: (preview) => confirmGoalPreview(ctx, preview),
 	};
+}
+
+/**
+ * Goal consent: a one-screen summary above the choices, with the full preview
+ * (what the consent is bound to) one choice away. A host without a selector or
+ * viewer falls back to the full preview in a plain confirmation.
+ */
+async function confirmGoalPreview(ctx: ExtensionContext, preview: object): Promise<boolean> {
+	const consent = await import("./goal-consent-summary.js");
+	const exception = consent.isGoalProfileExceptionPreview(preview);
+	const title = exception ? "Confirm Goal profile exception" : "Confirm Goal execution";
+	const details = JSON.stringify(preview, null, 2);
+	if (typeof ctx.ui.select !== "function" || typeof ctx.ui.editor !== "function")
+		return ctx.ui.confirm(title, details);
+	const summary = exception
+		? consent.formatGoalProfileExceptionConsent(preview)
+		: consent.formatGoalExecutionConsent(preview);
+	const accept = exception ? consent.GOAL_CONSENT_APPLY_EXCEPTION : consent.GOAL_CONSENT_RUN;
+	for (;;) {
+		const choice = await ctx.ui.select(`${title}\n${summary}`,
+			[accept, consent.GOAL_CONSENT_DETAILS, consent.GOAL_CONSENT_CANCEL]);
+		if (choice !== consent.GOAL_CONSENT_DETAILS) return choice === accept;
+		// Read-only view: edits are ignored.
+		await ctx.ui.editor(`${title}: full details (read-only; close to return)`, details);
+	}
 }
 
 async function handleWorkflowGoalCommand(
@@ -4201,53 +4235,70 @@ async function handleWorkflowGoalCommand(
 		return;
 	}
 	const commandCriterion = "Command exit code (sandboxed)";
-	const criterionKind = await ctx.ui.select("Completion criterion semantics", [
-		"Deterministic exact JSON value",
-		"Model-rubric statement",
-		"Human acceptance condition",
-		commandCriterion,
-	]);
-	if (!criterionKind) return;
-	const criterionText = await ctx.ui.input(
-		criterionKind === "Deterministic exact JSON value"
-			? "Expected JSON value"
-			: criterionKind === "Model-rubric statement"
-				? "Model rubric statement"
-				: criterionKind === commandCriterion
-					? 'Verification command (JSON argv array, or space-separated words; no shell), e.g. node --test'
-					: "Human acceptance condition",
-	);
-	if (!criterionText?.trim()) return;
-	let verifier: GoalWorkflowSpec["goal"]["criteria"][number]["verifier"];
-	if (criterionKind === commandCriterion) {
-		const text = criterionText.trim();
-		let argv: unknown;
-		if (text.startsWith("[")) {
-			try { argv = JSON.parse(text); } catch { throw new Error("Verification command JSON argv is invalid."); }
-		} else argv = text.split(/\s+/u);
-		verifier = {
-			kind: "deterministic", producerId: "command-exit-v1", target: "candidate",
-			subject: { resultSlot: "result", artifact: "control" },
-			config: { argv } as unknown as GoalWorkflowSpec["goal"]["criteria"][number]["verifier"]["config"],
-		};
-	} else if (criterionKind === "Deterministic exact JSON value") {
-		let expected: unknown;
-		try { expected = JSON.parse(criterionText); } catch { throw new Error("Expected deterministic completion value must be valid JSON."); }
-		verifier = {
-			kind: "deterministic", producerId: "json-exact-value-v1", target: "artifact",
-			subject: { resultSlot: "result", artifact: "control", path: "$.result" },
-			config: { comparison: "canonical-json-equality", expected },
-		};
-	} else {
-		verifier = {
-			kind: criterionKind === "Model-rubric statement" ? "model-rubric" : "human",
-			producerId: criterionKind === "Model-rubric statement" ? "json-control-rubric-v1" : "human-acceptance-v1",
-			target: "artifact", subject: { resultSlot: "result", artifact: "control", path: "$.result" },
-			config: criterionKind === "Model-rubric statement"
-				? { rubric: { statement: criterionText.trim() }, minScore: 1 }
-				: { condition: { statement: criterionText.trim() } },
-		};
+	const MORE_DONE = "Done adding criteria";
+	const MORE_ADD = "Add another criterion";
+	const MAX_AUTHORED_CRITERIA = 8;
+	type AuthoredVerifier = GoalWorkflowSpec["goal"]["criteria"][number]["verifier"];
+	const criteria: { id: string; kind: string; text: string; verifier: AuthoredVerifier }[] = [];
+	for (;;) {
+		const index = criteria.length + 1;
+		const criterionKind = await ctx.ui.select(
+			index === 1 ? "Completion criterion semantics" : `Criterion ${index} semantics`, [
+				"Deterministic exact JSON value",
+				"Model-rubric statement",
+				"Human acceptance condition",
+				commandCriterion,
+			]);
+		if (!criterionKind) return;
+		const criterionText = await ctx.ui.input(
+			criterionKind === "Deterministic exact JSON value"
+				? "Expected JSON value"
+				: criterionKind === "Model-rubric statement"
+					? "Model rubric statement"
+					: criterionKind === commandCriterion
+						? 'Verification command (JSON argv array, or space-separated words; no shell), e.g. node --test'
+						: "Human acceptance condition",
+		);
+		if (!criterionText?.trim()) return;
+		let verifier: AuthoredVerifier;
+		if (criterionKind === commandCriterion) {
+			const text = criterionText.trim();
+			let argv: unknown;
+			if (text.startsWith("[")) {
+				try { argv = JSON.parse(text); } catch { throw new Error("Verification command JSON argv is invalid."); }
+			} else argv = text.split(/\s+/u);
+			verifier = {
+				kind: "deterministic", producerId: "command-exit-v1", target: "candidate",
+				subject: { resultSlot: "result", artifact: "control" },
+				config: { argv } as unknown as AuthoredVerifier["config"],
+			};
+		} else if (criterionKind === "Deterministic exact JSON value") {
+			let expected: unknown;
+			try { expected = JSON.parse(criterionText); } catch { throw new Error("Expected deterministic completion value must be valid JSON."); }
+			verifier = {
+				kind: "deterministic", producerId: "json-exact-value-v1", target: "artifact",
+				subject: { resultSlot: "result", artifact: "control", path: "$.result" },
+				config: { comparison: "canonical-json-equality", expected },
+			};
+		} else {
+			verifier = {
+				kind: criterionKind === "Model-rubric statement" ? "model-rubric" : "human",
+				producerId: criterionKind === "Model-rubric statement" ? "json-control-rubric-v1" : "human-acceptance-v1",
+				target: "artifact", subject: { resultSlot: "result", artifact: "control", path: "$.result" },
+				config: criterionKind === "Model-rubric statement"
+					? { rubric: { statement: criterionText.trim() }, minScore: 1 }
+					: { condition: { statement: criterionText.trim() } },
+			};
+		}
+		criteria.push({ id: index === 1 ? "completion" : `completion-${index}`, kind: criterionKind, text: criterionText.trim(), verifier });
+		if (criteria.length >= MAX_AUTHORED_CRITERIA) break;
+		const more = await ctx.ui.select(
+			`${criteria.length === 1 ? "1 criterion" : `${criteria.length} criteria`} so far; the Goal is achieved only when all hold`,
+			[MORE_DONE, MORE_ADD]);
+		if (!more) return;
+		if (more === MORE_DONE) break;
 	}
+	const hasCommandCriterion = criteria.some((criterion) => criterion.kind === commandCriterion);
 	const allowedPathsInput = await ctx.ui.input("Allowed scope paths (comma-separated; blank for none)");
 	if (allowedPathsInput === undefined) return;
 	const protectedPathsInput = await ctx.ui.input("Protected scope paths (comma-separated; blank for none)");
@@ -4265,7 +4316,7 @@ async function handleWorkflowGoalCommand(
 		: effectsChoice === "Candidate writes, read, and verify"
 			? ["read", "candidate-write", "verify", "workflow-create"] as const
 			: ["read", "candidate-write", "verify", "origin-apply", "workflow-create"] as const;
-	if (criterionKind === commandCriterion && effectsChoice === "Read and verify only")
+	if (hasCommandCriterion && effectsChoice === "Read and verify only")
 		throw new Error("A command criterion runs against candidate writes; choose a candidate-writing effect.");
 	const readOptionalLimit = async (label: string): Promise<number | undefined | null> => {
 		const text = await ctx.ui.input(label);
@@ -4280,16 +4331,30 @@ async function handleWorkflowGoalCommand(
 	if (requestLimit === null) return;
 	const costLimit = await readOptionalLimit("Cost cap in micros (blank for no cap)");
 	if (costLimit === null) return;
-	const limits = requestLimit === undefined && costLimit === undefined ? undefined : {
+	const attemptsText = await ctx.ui.input("Attempt limit: first plan plus replans, 1-100 (blank for 10)");
+	if (attemptsText === undefined) return;
+	let generations: number | undefined;
+	if (attemptsText.trim()) {
+		generations = Number(attemptsText.trim());
+		if (!/^\d+$/u.test(attemptsText.trim()) || generations < 1 || generations > 100)
+			throw new Error("Goal attempt limit must be an integer from 1 to 100, or blank for 10.");
+	}
+	const FAST_OFF = "Fast off";
+	const FAST_ON = "Fast on (OpenAI priority tier; every role model must support it)";
+	const fastChoice = await ctx.ui.select("Fast processing", [FAST_OFF, FAST_ON]);
+	if (!fastChoice) return;
+	const limits = requestLimit === undefined && costLimit === undefined && generations === undefined ? undefined : {
 		...(requestLimit === undefined ? {} : { requests: requestLimit }),
 		...(costLimit === undefined ? {} : { costMicros: costLimit }),
+		...(generations === undefined ? {} : { generations }),
 	};
 	const definition: GoalWorkflowSpec = {
 		schemaVersion: 1,
 		name: "goal",
+		...(fastChoice === FAST_ON ? { defaults: { fast: "on" as const } } : {}),
 		goal: {
 			objective,
-			criteria: [{ id: "completion", verifier }],
+			criteria: criteria.map(({ id, verifier }) => ({ id, verifier })),
 			authority: { allowedPaths, protectedPaths, allowedEffects: [...allowedEffects] },
 			nesting: { maxDepth: 3 },
 			...(limits === undefined ? {} : { limits }),
@@ -4303,20 +4368,30 @@ async function handleWorkflowGoalCommand(
 		await realpath(ctx.cwd),
 		definitionPathInput.trim() || defaultPath,
 	);
+	// Name the Goal after its file so status lines say which Goal they are.
+	const derivedName = basename(definitionPath).replace(/\.json$/iu, "").trim();
+	if (derivedName) {
+		definition.name = derivedName;
+		parseGoalWorkflowSpec(definition);
+	}
 	const preview = [
+		`Goal: ${definition.name}`,
 		`Objective: ${objective}`,
-		`Criterion: ${criterionKind}: ${criterionText.trim()}`,
-		...(criterionKind === "Model-rubric statement" ? ["Minimum rubric score: 1 (full satisfaction)"] : []),
-		...(criterionKind === commandCriterion ? [
+		...criteria.map((criterion, index) =>
+			`Criterion ${index + 1}${criteria.length > 1 ? " (all must hold)" : ""}: ${criterion.kind}: ${criterion.text}`),
+		...(criteria.some((criterion) => criterion.kind === "Model-rubric statement") ? ["Minimum rubric score: 1 (full satisfaction)"] : []),
+		...(hasCommandCriterion ? [
 			"Command runs on a copy of the working tree with the candidate applied, inside the macOS sandbox",
 			"(no network, writes only inside the copy, default time limit 120 s); exit code 0 means met",
 		] : []),
 		`Allowed paths: ${allowedPaths.join(", ") || "none"}`,
 		`Protected paths: ${protectedPaths.join(", ") || "none"}`,
-		`Effects: ${allowedEffects.join(", ")}`,
+		`Effects: ${(await import("./goal-consent-summary.js")).describeGoalEffects(allowedEffects, false)}`,
 		"Maximum nested depth: 3",
 		`Request cap: ${requestLimit === undefined ? "no cap" : requestLimit}`,
 		`Cost cap (micros): ${costLimit === undefined ? "no cap" : costLimit}`,
+		`Attempt limit (plan + replans): ${generations ?? 10}`,
+		`Fast: ${fastChoice === FAST_ON ? "on (OpenAI priority tier)" : "off"}`,
 		"Usage: unknown until execution begins",
 	].join("\n");
 	const action = await ctx.ui.select(`Goal preview\n${preview}`, [

@@ -34,11 +34,14 @@ test("registered /workflow goal authoring preserves literal JSON and save-only h
  const notices = [];
  const choices = [
   "Deterministic exact JSON value",
+  "Done adding criteria",
   "Read and verify only",
+  "Fast off",
   "Save definition",
  ];
  const inputs = [
   '{"reserved":{"constructor":["x"],"__proto__":0},"fraction":1.5}',
+  "",
   "",
   "",
   "",
@@ -82,8 +85,8 @@ test("registered /workflow goal rubric authoring selects the ordinary engine pro
  t.after(() => rm(cwd, { recursive: true, force: true }));
  const { workflow } = fakeWorkflowSurface();
  const statement = "Compare both original sources and preserve contradictions and unknowns.";
- const inputs = [statement, "inputs", "", "", "", "goals/research.json"];
- const choices = ["Model-rubric statement", "Read and verify only", "Save definition"];
+ const inputs = [statement, "inputs", "", "", "", "", "goals/research.json"];
+ const choices = ["Model-rubric statement", "Done adding criteria", "Read and verify only", "Fast off", "Save definition"];
  const notices = [];
  await workflow.handler("goal create compare original sources", {
   cwd, hasUI: true, mode: "tui",
@@ -132,7 +135,8 @@ test("registered /workflow goal cancellation and readonly dispatch do not enter 
   ...ctx,
   ui: {
    input: async (title) => title === "Allowed scope paths (comma-separated; blank for none)" ? undefined : "1",
-   select: async (title) => title === "Completion criterion semantics" ? "Deterministic exact JSON value" : undefined,
+   select: async (title) => title === "Completion criterion semantics" ? "Deterministic exact JSON value"
+    : title.endsWith("the Goal is achieved only when all hold") ? "Done adding criteria" : undefined,
    confirm: async () => { throw new Error("scope cancellation must not confirm"); },
    notify: (text, level) => notices.push({ text, level }),
   },
@@ -153,8 +157,8 @@ test("registered /workflow goal save-only retains every JSON literal shape witho
  for (const [index, literal] of literals.entries()) {
   const { workflow } = fakeWorkflowSurface();
   const notices = [];
-  const inputs = [literal, "", "", "", "", `goals/literal-${index}.json`];
-  const choices = ["Deterministic exact JSON value", "Read and verify only", "Save definition"];
+  const inputs = [literal, "", "", "", "", "", `goals/literal-${index}.json`];
+  const choices = ["Deterministic exact JSON value", "Done adding criteria", "Read and verify only", "Fast off", "Save definition"];
   await workflow.handler(`goal create literal ${index}`, {
    cwd, hasUI: true, mode: "tui",
    ui: {
@@ -175,8 +179,8 @@ test("registered /workflow goal authors a sandboxed command criterion without a 
  const cwd = await mkdtemp(join(tmpdir(), "surface-goal-command-"));
  t.after(() => rm(cwd, { recursive: true, force: true }));
  const author = (command, effects, path) => {
-  const inputs = [command, "src/a.mjs", "test/a.test.mjs", "", "", path];
-  const choices = ["Command exit code (sandboxed)", effects, "Save definition"];
+  const inputs = [command, "src/a.mjs", "test/a.test.mjs", "", "", "", path];
+  const choices = ["Command exit code (sandboxed)", "Done adding criteria", effects, "Fast off", "Save definition"];
   const previews = [], notices = [];
   return { previews, notices, ctx: {
    cwd, hasUI: true, mode: "tui",
@@ -214,8 +218,9 @@ test("registered /workflow goal create writes nothing when cancelled at any prom
  const { readdir } = await import("node:fs/promises");
  // The complete authoring dialog in order: [kind, answer].
  const dialog = [
-  ["select", "Deterministic exact JSON value"], ["input", "true"], ["input", "src/a.mjs"], ["input", ""],
-  ["select", "Candidate writes, read, and verify"], ["input", ""], ["input", ""], ["input", "goals/out.json"],
+  ["select", "Deterministic exact JSON value"], ["input", "true"], ["select", "Done adding criteria"],
+  ["input", "src/a.mjs"], ["input", ""], ["select", "Candidate writes, read, and verify"],
+  ["input", ""], ["input", ""], ["input", ""], ["select", "Fast off"], ["input", "goals/out.json"],
   ["select", "Save definition"],
  ];
  const author = async (cancelAt) => {
@@ -240,6 +245,48 @@ test("registered /workflow goal create writes nothing when cancelled at any prom
  assert.equal(await author(-1), dialog.length);
  assert.equal(JSON.parse(await readFile(join(cwd, "goals", "out.json"), "utf8")).goal.objective, "make a true",
   "the same dialog without cancellation saves the definition");
+});
+
+test("registered /workflow goal create authors several criteria, an attempt limit and Fast", async (t) => {
+ const cwd = await mkdtemp(join(tmpdir(), "surface-goal-several-"));
+ t.after(() => rm(cwd, { recursive: true, force: true }));
+ const inputs = ["node --test", "The code is readable", "src/a.mjs", "", "30", "", "4", "goals/csv-parser.json"];
+ const choices = ["Command exit code (sandboxed)", "Add another criterion", "Model-rubric statement", "Done adding criteria",
+  "Candidate/origin writes, read, and verify", "Fast on (OpenAI priority tier; every role model must support it)", "Save definition"];
+ const titles = [];
+ await fakeWorkflowSurface().workflow.handler("goal create make csv parsing correct", {
+  cwd, hasUI: true, mode: "tui",
+  ui: {
+   input: async (title) => { titles.push(title); return inputs.shift(); },
+   select: async (title) => { titles.push(title); return choices.shift(); },
+   confirm: async () => { throw new Error("new save must not overwrite or execute"); },
+   notify() {},
+  },
+ });
+ const saved = JSON.parse(await readFile(join(cwd, "goals/csv-parser.json"), "utf8"));
+ assert.equal(saved.name, "csv-parser", "the Goal is named after its file");
+ assert.deepEqual(saved.defaults, { fast: "on" });
+ assert.deepEqual(saved.goal.limits, { requests: 30, generations: 4 });
+ assert.deepEqual(saved.goal.criteria.map(criterion => [criterion.id, criterion.verifier.producerId]),
+  [["completion", "command-exit-v1"], ["completion-2", "json-control-rubric-v1"]]);
+ assert.ok(titles.includes("Criterion 2 semantics"));
+ assert.ok(titles.includes("1 criterion so far; the Goal is achieved only when all hold"));
+ assert.ok(titles.includes("2 criteria so far; the Goal is achieved only when all hold"));
+ const preview = titles.find(title => title.startsWith("Goal preview"));
+ assert.match(preview, /^Goal: csv-parser$/m);
+ assert.match(preview, /^Criterion 1 \(all must hold\): Command exit code \(sandboxed\): node --test$/m);
+ assert.match(preview, /^Criterion 2 \(all must hold\): Model-rubric statement: The code is readable$/m);
+ assert.match(preview, /^Attempt limit \(plan \+ replans\): 4$/m);
+ assert.match(preview, /^Fast: on \(OpenAI priority tier\)$/m);
+ const refused = ["node --test", "src/a.mjs", "", "", "", "0"];
+ const refusedChoices = ["Command exit code (sandboxed)", "Done adding criteria", "Candidate writes, read, and verify"];
+ const notices = [];
+ await fakeWorkflowSurface().workflow.handler("goal create bad limit", {
+  cwd, hasUI: true, mode: "tui",
+  ui: { input: async () => refused.shift(), select: async () => refusedChoices.shift(),
+   confirm: async () => { throw new Error("must not confirm"); }, notify: (text, level) => notices.push({ text, level }) },
+ });
+ assert.ok(notices.some(({ text, level }) => level === "error" && /attempt limit must be an integer from 1 to 100/.test(text)));
 });
 
 test("registered /workflow goal actions never fall through to authoring", async (t) => {
@@ -273,8 +320,8 @@ test("registered /workflow goal rejects symlink definitions and fences overwrite
  await symlink(join(cwd, "outside"), join(cwd, "linked"));
  const { workflow } = fakeWorkflowSurface();
  const author = (path, onConfirm = async () => true) => {
-  const inputs = ["true", "", "", "", "", path];
-  const choices = ["Deterministic exact JSON value", "Read and verify only", "Save definition"];
+  const inputs = ["true", "", "", "", "", "", path];
+  const choices = ["Deterministic exact JSON value", "Done adding criteria", "Read and verify only", "Fast off", "Save definition"];
   return {
    cwd, hasUI: true, mode: "tui",
    ui: {
@@ -301,7 +348,7 @@ test("registered /workflow goal profile path saves the definition without a runt
  const cwd = await mkdtemp(join(tmpdir(), "surface-goal-profile-"));
  t.after(() => rm(cwd, { recursive: true, force: true }));
  const { workflow } = fakeWorkflowSurface();
- const inputs = ["true", "", "", "", "", "goals/profile.json"];
+ const inputs = ["true", "", "", "", "", "", "goals/profile.json"];
  const notices = [];
  await workflow.handler("goal create profile save", {
   cwd, hasUI: true, mode: "tui",
@@ -309,7 +356,11 @@ test("registered /workflow goal profile path saves the definition without a runt
    input: async () => inputs.shift(),
    select: async (title) => title.startsWith("Completion")
     ? "Deterministic exact JSON value"
-    : title === "Allowed effects"
+    : title.endsWith("the Goal is achieved only when all hold")
+     ? "Done adding criteria"
+     : title === "Fast processing"
+      ? "Fast off"
+      : title === "Allowed effects"
      ? "Read and verify only"
      : title.startsWith("Goal preview")
       ? "Save definition and select execution profile"

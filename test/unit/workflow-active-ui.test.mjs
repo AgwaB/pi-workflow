@@ -219,3 +219,25 @@ test("foreground workflow launch uses a cancellable custom loader", async () => 
 	assert.equal(escapedOperationSignal.aborted, true);
 	finishEscapedLaunch("started");
 });
+
+test("a running Goal shows its attempt and phase instead of a task count", () => {
+	const statuses = [];
+	const widgets = [];
+	const ctx = {
+		hasUI: true,
+		ui: {
+			setStatus(key, value) { statuses.push({ key, value }); },
+			setWidget(key, value, options) { widgets.push({ key, value, options }); },
+		},
+	};
+	const goal = run({ name: "csv-parser", goal: { attempt: 2, phase: "verifying" } });
+	renderActiveWorkflowUi(ctx, index([goal]));
+	assert.deepEqual(statuses.at(-1), {
+		key: WORKFLOW_ACTIVE_STATUS_KEY,
+		value: "● Goal csv-parser · attempt 2 · verifying",
+	});
+	assert.equal(
+		formatActiveWorkflowLines([goal], Date.parse("2026-07-22T00:02:00.000Z"))[1],
+		"● Goal csv-parser · attempt 2 · verifying · 2m",
+	);
+});
