@@ -1634,7 +1634,11 @@ export async function openGoalRequestBudgetChannel(input: {
   directory: string; evidenceRoot: string; identity: unknown; attemptKey: string; model: string;
   budget: ReturnType<typeof createGoalRequestBudget>; current(): Promise<string>; live(): void; stopped: AbortSignal;
   captureNativeReads?: true;
+  /** Fast: the Goal definition opted in and the model is Fast-eligible. */
+  serviceTier?: "priority";
 }) {
+  if (input.serviceTier !== undefined && input.serviceTier !== "priority")
+    throw new Error("Goal request service tier must be priority when set");
   const socketPath = join(input.directory, "requests.sock");
   let prefix = "";
   let requestChannelId = "";
@@ -1700,7 +1704,11 @@ export async function openGoalRequestBudgetChannel(input: {
   const abort = () => { void drain().catch(() => undefined); };
   input.stopped.addEventListener("abort", abort, { once: true });
   const extensionPath = join(input.directory, "budget.mjs");
-  const bytes = `import { registerGoalRequestBudget } from ${JSON.stringify(import.meta.url)};\nexport default pi => registerGoalRequestBudget(pi, ${JSON.stringify(channel)}, ${JSON.stringify(input.model)}${input.captureNativeReads === true ? ", true" : ""});\n`;
+  // Trailing arguments appear only when set, so existing extension bytes are unchanged.
+  const trailing = input.serviceTier !== undefined
+    ? `, ${input.captureNativeReads === true}, ${JSON.stringify(input.serviceTier)}`
+    : input.captureNativeReads === true ? ", true" : "";
+  const bytes = `import { registerGoalRequestBudget } from ${JSON.stringify(import.meta.url)};\nexport default pi => registerGoalRequestBudget(pi, ${JSON.stringify(channel)}, ${JSON.stringify(input.model)}${trailing});\n`;
   await writeFile(extensionPath, bytes, { mode: 0o600 });
   if (input.stopped.aborted) await drain();
   return { extensionPath, drain, assertLaunchCurrent() {
@@ -1719,7 +1727,9 @@ export async function openGoalRequestBudgetChannel(input: {
 /** Native registration retains the original auth/catalog and stream producers across SDK recomposition.
  * Only the locked OpenAI HTTP adapters are qualified here; no WebSocket/custom fallback. */
 export function registerGoalRequestBudget(pi: ExtensionAPI, channel: GoalCandidateToolChannel, selectedModel: string,
-  captureNativeReads = false): void {
+  captureNativeReads = false, serviceTier?: "priority"): void {
+  if (serviceTier !== undefined && serviceTier !== "priority")
+    throw new Error("Goal request service tier must be priority when set");
   let installed = false, retired = false;
   pi.on("session_shutdown", () => {
     retired = true;
@@ -1786,6 +1796,22 @@ export function registerGoalRequestBudget(pi: ExtensionAPI, channel: GoalCandida
           return snapshot;
         }
         : originalOnPayload;
+      // Fast: request the priority tier inside the guarded request, the same
+      // payload field the workflow Fast hook sets. A source-reading verifier
+      // snapshots this tiered payload, so it may not be replaced afterwards.
+      const tieredOnPayload = serviceTier === undefined ? guardedOnPayload
+        : async (payload: unknown, payloadModel: typeof actual): Promise<unknown> => {
+          if (!payload || typeof payload !== "object" || Array.isArray(payload) ||
+              (payload as Record<string, unknown>).model !== actual.id)
+            throw new Error("Goal request Fast requires the original object provider payload");
+          const tiered = { ...(payload as Record<string, unknown>), service_tier: serviceTier };
+          const next = guardedOnPayload === undefined ? undefined : await guardedOnPayload(tiered, payloadModel);
+          if (captureNativeReads) return next;
+          const final = (next ?? tiered) as Record<string, unknown>;
+          if (!final || typeof final !== "object" || Array.isArray(final))
+            throw new Error("Goal request Fast requires an object provider payload");
+          return final.service_tier === serviceTier ? final : { ...final, service_tier: serviceTier };
+        };
       const fetch: typeof globalThis.fetch = async (url, init) => {
         operation = "transport-check";
         check();
@@ -1827,7 +1853,7 @@ export function registerGoalRequestBudget(pi: ExtensionAPI, channel: GoalCandida
           // producer runs; auto never authorizes WebSocket or a fallback here.
           operation = "provider-stream";
           const stream = original[method](actual, context, {
-            ...options, onPayload: guardedOnPayload, fetch, maxRetries: 0, transport: "sse",
+            ...options, onPayload: tieredOnPayload, fetch, maxRetries: 0, transport: "sse",
           });
           for await (const event of stream) {
             if (event.type === "done" || event.type === "error") {

@@ -124,6 +124,7 @@ import { goalHash } from "./goal-json.js";
 import { admitWorkflowGoalOutputRepair, assertHumanFamilyKnown, assertPreparedWorkflowGoalPolicyCurrent, assertWorkflowGoalProfileConfigurationCurrent, beginWorkflowGoalInitializationBindings, bindWorkflowGoalRequestTask, bindWorkflowGoalCandidateWorker, captureWorkflowGoalScopedTaskRuntime, captureWorkflowEngineGoalVerifierTask, observeWorkflowGoalCandidate, applyWorkflowGoalCandidateToOrigin, completeWorkflowGoalInitializationBindings, executeWorkflowEngineGoalPolicy, markWorkflowGoalProfilePublicationUnknown, prepareWorkflowEngineGoalRootPlanner, prepareWorkflowEngineGoalWorkers, prepareWorkflowEngineGoalVerifiers, prepareWorkflowEngineGoalVerifierRequest, prepareWorkflowEngineGoalReplanner, prepareWorkflowEngineGoalResume, prepareWorkflowGoalPolicy, prepareWorkflowGoalRootMaterializationPublication, publishWorkflowGoalProfileConfiguration, revokeWorkflowGoalInitializationBindings, workflowGoalProfileConfiguration, workflowEngineGoalAgentDefinitions, workflowEngineGoalVerifierSnapshot, captureWorkflowGoalHumanReview, consumeWorkflowGoalHumanReview, revokeWorkflowGoalHumanReview, type PreparedWorkflowGoalPolicyAdmission, type PreparedWorkflowGoalVerifierRequest, type WorkflowGoalPolicyHost } from "./goal-workflow-runtime.js";
 import type { WorkflowGoalOriginApplyRecord } from "./goal-workflow-origin-apply.js";
 import type { WorkflowGoalRecoveryPlan } from "./goal-workflow-recovery.js";
+import { goalGenerationLimit } from "./goal-workflow-schema.js";
 import {
 	assertWorkflowGoalProfileExceptionCurrent,
 	goalPolicyRequest,
@@ -710,6 +711,19 @@ const liveGoalPolicyAdmissions = new Map<string, {
 	publicationPending: boolean;
 }>();
 const MAX_SUPERVISOR_CONSECUTIVE_ERRORS = 3;
+
+/**
+ * A Goal may use `limits.generations` generations (default 10), counting those
+ * of the run it recovers; a replan beyond that ends the Goal as exhausted.
+ */
+function assertWorkflowGoalGenerationAvailable(run: WorkflowRunRecord, policy: CompiledTask, next: number): void {
+	const definition = policy.goal?.definition;
+	if (!definition || !("goal" in definition)) return;
+	const limit = goalGenerationLimit(definition);
+	const prior = run.goalRecovery?.priorGenerations ?? 0;
+	if (prior + next >= limit)
+		throw new Error(`Root replan exhausted: generation limit (${limit}) reached`);
+}
 
 /** Whether this process still holds the original live admission of a Goal run. */
 export function hasLiveWorkflowGoalAdmission(cwd: string, runId: string): boolean {
@@ -1713,6 +1727,7 @@ async function runLoadedWorkflowSpecInNativeHostScope(
 	if (options.goalRecovery) run.goalRecovery = {
 		fromRunId: options.goalRecovery.fromRunId,
 		priorRequests: options.goalRecovery.priorRequests,
+		priorGenerations: options.goalRecovery.priorGenerations,
 		feedbackGeneration: options.goalRecovery.feedbackGeneration,
 		seededPaths: options.goalRecovery.seed?.files.map(file => file.path) ?? [],
 	};
@@ -6919,9 +6934,13 @@ async function launchPendingTaskAt(
 	// automatic repair attempt when every prior request is settled and the Goal
 	// request cap leaves room. Otherwise its artifact stays UNKNOWN: it is not an
 	// original oracle failure and is never repaired outside that admission.
-	if (task.outputRetry && run.tasks.some(root => root.kind === "goal" &&
+	// The first (root) planner precedes any generation record: it is the
+	// policy task's own `$rootPlanner` dependency (never an ordinary upstream).
+	if (task.outputRetry && run.tasks.some(root => root.kind === "goal" && (
+		(!root.goalRoot?.generations.length && root.dependsOn?.includes(task.specId) &&
+			task.stageId === `${root.stageId ?? root.specId}.$rootPlanner`) ||
 		root.goalRoot?.generations.some(generation => generation.plannerSpecId === task.specId ||
-			Object.values(generation.slots).includes(task.specId) || Object.values(generation.verifiers ?? {}).includes(task.specId)))) {
+			Object.values(generation.slots).includes(task.specId) || Object.values(generation.verifiers ?? {}).includes(task.specId))))) {
 		const refused = await admitWorkflowGoalOutputRepair(run, task);
 		if (refused !== undefined) {
 			setTaskTerminal(task, "blocked", "goal_candidate_artifact_unknown", {
@@ -7052,6 +7071,7 @@ async function launchPendingTaskAt(
 						(control as Record<string, unknown>).digest !== launchTask.goal!.definitionFingerprint;
 					if (malformedPlan) {
 						assertWorkflowGoalRejectedPlannerProposalProgress(policyInput, prepared, control);
+						assertWorkflowGoalGenerationAvailable(run, launchTask, generation!.generation + 1);
 						generation!.planFingerprint = planFingerprint;
 						generation!.outcome = "not-achieved";
 						await recordWorkflowGoalRejectedPlannerGeneration(policyInput, prepared, run, control);
@@ -7444,6 +7464,7 @@ async function launchPendingTaskAt(
 					}));
 					if (lineage.generations.some(previous => previous.failedCandidateFingerprint === candidateFingerprint))
 						throw new Error("Root replan exhausted: unchanged failed candidate");
+					assertWorkflowGoalGenerationAvailable(run, launchTask, generation.generation + 1);
 					// Commit the original oracle artifact metadata before staging a new
 					// graph. Its integrity is not a generated-source publication change.
 					await writeRunRecord(cwd, run);

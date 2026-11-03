@@ -1,6 +1,5 @@
-import { lstat, open, readdir, readFile, rm, writeFile } from "node:fs/promises";
-import { constants } from "node:fs";
-import { dirname, join } from "node:path";
+import { lstat, readdir, readFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { goalHash } from "./goal-json.js";
 import { workflowDefinitionFingerprint } from "./execution-profile.js";
 import { parseGoalWorkflowSpec } from "./goal-workflow-schema.js";
@@ -16,7 +15,8 @@ import {
 	type GoalWorkspaceCandidate,
 	type GoalWorkspacePath,
 } from "./goal-workspace.js";
-import { isWorkflowRunLeaseLive, listRunRecords, readCompiledWorkflow, readRunRecord, workflowRunDir } from "./store.js";
+import { acquireRunFileLease, isWorkflowRunLeaseLive, listRunRecords, readCompiledWorkflow, readRunRecord, workflowRunDir,
+	writeJsonAtomicDurable } from "./store.js";
 import type { CompiledTask, GoalWorkflowSpec, WorkflowRunRecord } from "./types.js";
 
 /**
@@ -32,6 +32,7 @@ import type { CompiledTask, GoalWorkflowSpec, WorkflowRunRecord } from "./types.
 const FEEDBACK_TEXT_LIMIT = 4_096;
 const FEEDBACK_TOTAL_LIMIT = 16_384;
 const MARKER = "goal-recovery.json";
+const MAX_RECEIPT_BYTES = 4 * 1024 * 1024;
 
 export interface WorkflowGoalRecoveryFeedback {
 	readonly criterionId: string;
@@ -77,65 +78,52 @@ export interface WorkflowGoalRecoveryLaunch {
 	readonly plan: WorkflowGoalRecoveryPlan;
 }
 
-type RecoveryMarker =
-	| { schema: "goal-recovery-marker-v1"; state: "claimed"; pid: number; at: string }
-	| { schema: "goal-recovery-marker-v1"; state: "recovered"; recoveredRunId: string; at: string };
-
-function isProcessAlive(pid: number): boolean {
-	try { process.kill(pid, 0); return true; }
-	catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }
+interface RecoveryMarker {
+	readonly schema: "goal-recovery-marker-v1";
+	readonly state: "recovered";
+	readonly recoveredRunId: string;
+	readonly at: string;
 }
 
 async function readMarker(cwd: string, runId: string): Promise<RecoveryMarker | null> {
 	try {
 		const value = JSON.parse(await readFile(join(workflowRunDir(cwd, runId), MARKER), "utf8")) as RecoveryMarker;
-		return value?.schema === "goal-recovery-marker-v1" ? value : null;
+		return value?.schema === "goal-recovery-marker-v1" && value.state === "recovered" &&
+			typeof value.recoveredRunId === "string" ? value : null;
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-		throw error;
+		// An unreadable marker is not authority; the successor's own record decides.
+		return null;
 	}
-}
-
-/** The run that recovered this one, if any. */
-export async function readWorkflowGoalRecoveredBy(cwd: string, runId: string): Promise<string | null> {
-	const marker = await readMarker(cwd, runId).catch(() => null);
-	return marker?.state === "recovered" ? marker.recoveredRunId : null;
 }
 
 /**
- * Exclusively claim recovery of a run so two sessions cannot recover it at
- * once. A stale claim of a dead process is replaced.
+ * The run that recovered this one, if any. The successor's run record (written
+ * when it is created) is authoritative; the marker only speeds up the lookup
+ * and survives a crash between the two writes in either order.
+ */
+export async function readWorkflowGoalRecoveredBy(cwd: string, runId: string,
+	records?: readonly WorkflowRunRecord[]): Promise<string | null> {
+	const successor = (records ?? await listRunRecords(cwd).catch(() => [] as WorkflowRunRecord[]))
+		.find(record => record.goalRecovery?.fromRunId === runId);
+	if (successor) return successor.runId;
+	return (await readMarker(cwd, runId))?.recoveredRunId ?? null;
+}
+
+/**
+ * Hold the interrupted run's recovery lease for the whole recover command, so
+ * a second recovery (in this or another session) is refused while consent is
+ * pending. The store lease reclaims the lease of a dead owner.
  */
 export async function claimWorkflowGoalRecovery(cwd: string, runId: string): Promise<() => Promise<void>> {
-	const file = join(workflowRunDir(cwd, runId), MARKER);
-	for (let attempt = 0; attempt < 2; attempt++) {
-		try {
-			const handle = await open(file, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o644);
-			try {
-				await handle.writeFile(JSON.stringify({ schema: "goal-recovery-marker-v1", state: "claimed",
-					pid: process.pid, at: new Date().toISOString() } satisfies RecoveryMarker));
-				await handle.sync();
-			} finally { await handle.close(); }
-			return async () => {
-				const current = await readMarker(cwd, runId).catch(() => null);
-				if (current?.state === "claimed" && current.pid === process.pid) await rm(file, { force: true });
-			};
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-			const existing = await readMarker(cwd, runId);
-			if (existing?.state === "recovered")
-				throw new Error(`Goal run ${runId} was already recovered as ${existing.recoveredRunId}; recover that run instead`);
-			if (existing?.state === "claimed" && existing.pid !== process.pid && isProcessAlive(existing.pid))
-				throw new Error(`Goal run ${runId} is being recovered by another session (pid ${existing.pid})`);
-			await rm(file, { force: true });
-		}
-	}
-	throw new Error(`Goal recovery claim for ${runId} could not be created`);
+	const lease = await acquireRunFileLease(cwd, runId, "goal-recovery", 0);
+	if (!lease) throw new Error(`Goal run ${runId} is being recovered by another command; try again after it finishes`);
+	return () => lease.release();
 }
 
 export async function completeWorkflowGoalRecovery(cwd: string, runId: string, recoveredRunId: string): Promise<void> {
-	await writeFile(join(workflowRunDir(cwd, runId), MARKER), JSON.stringify({ schema: "goal-recovery-marker-v1",
-		state: "recovered", recoveredRunId, at: new Date().toISOString() } satisfies RecoveryMarker));
+	await writeJsonAtomicDurable(join(workflowRunDir(cwd, runId), MARKER), { schema: "goal-recovery-marker-v1",
+		state: "recovered", recoveredRunId, at: new Date().toISOString() } satisfies RecoveryMarker);
 }
 
 async function countRequestReservations(cwd: string, runId: string): Promise<number> {
@@ -185,19 +173,34 @@ async function latestOracleReceipt(cwd: string, run: WorkflowRunRecord, root: Wo
 		if (error.code === "ENOENT") return [] as string[];
 		throw error;
 	});
-	let latest: OracleReceipt | null = null;
+	const criteria = policy.goal?.definition && "goal" in policy.goal.definition
+		? policy.goal.definition.goal.criteria : [];
+	const generations = root.goalRoot?.generations.length ?? 0;
+	let latest: (OracleReceipt & { mtimeMs: number }) | null = null;
 	for (const name of names.filter(value => /^[a-f0-9]{64}\.json$/.test(value)).sort()) {
-		const receipt = JSON.parse(await readFile(join(directory, name), "utf8")) as { digest?: unknown; evidence?: Record<string, unknown> };
-		const evidence = receipt.evidence;
-		// Only original, self-consistent receipts of this run and definition feed recovery.
+		const path = join(directory, name);
+		// Regular, bounded files only; anything else is not original evidence.
+		const info = await lstat(path).catch(() => null);
+		if (!info?.isFile() || info.size > MAX_RECEIPT_BYTES) continue;
+		let receipt: { digest?: unknown; evidence?: Record<string, unknown> };
+		try { receipt = JSON.parse(await readFile(path, "utf8")); } catch { continue; }
+		const evidence = receipt?.evidence;
+		// Only self-consistent receipts of a generation this run recorded, for
+		// exactly the consented criteria, feed recovery.
 		if (!evidence || receipt.digest !== name.slice(0, -5) || workflowDefinitionFingerprint(evidence) !== receipt.digest ||
 			evidence.schema !== "goal-oracle-observation-v1" || evidence.runId !== run.runId ||
 			evidence.definitionFingerprint !== policy.goal?.definitionFingerprint ||
-			!Number.isSafeInteger(evidence.generation) || !Array.isArray(evidence.observations))
+			!Number.isSafeInteger(evidence.generation) || (evidence.generation as number) < 0 ||
+			(evidence.generation as number) >= generations ||
+			!Array.isArray(evidence.observations) || evidence.observations.length !== criteria.length ||
+			(evidence.observations as Record<string, unknown>[]).some((observation, index) =>
+				workflowDefinitionFingerprint(observation?.criterion ?? null) !== workflowDefinitionFingerprint(criteria[index])))
 			continue;
 		const generation = evidence.generation as number;
-		if (!latest || generation > latest.generation)
-			latest = { generation, observations: evidence.observations as Record<string, unknown>[] };
+		// Within a generation (for example pending then decided human judgment)
+		// the most recently written receipt is the last observation.
+		if (!latest || generation > latest.generation || (generation === latest.generation && info.mtimeMs > latest.mtimeMs))
+			latest = { generation, observations: evidence.observations as Record<string, unknown>[], mtimeMs: info.mtimeMs };
 	}
 	return latest;
 }
@@ -264,7 +267,8 @@ async function recoverySeed(cwd: string, definition: GoalWorkflowSpec, generatio
 
 /**
  * Inspect an interrupted root Goal run and plan its recovery. Throws with the
- * reason when the run cannot be recovered. Reads only; claims nothing.
+ * reason when the run cannot be recovered. Changes nothing durable (a free
+ * supervisor lease may be taken and released to prove no owner holds it).
  */
 export async function planWorkflowGoalRecovery(cwd: string, runIdOrPrefix: string,
 	isLive: (runId: string) => boolean): Promise<WorkflowGoalRecoveryLaunch> {
@@ -276,18 +280,32 @@ export async function planWorkflowGoalRecovery(cwd: string, runIdOrPrefix: strin
 	const policies = compiled?.tasks.filter(task => task.kind === "goal") ?? [];
 	const policy = policies[0];
 	const root = policy && run.tasks.find(task => task.specId === policy.id);
-	if (!compiled || policies.length !== 1 || !policy?.goal || !root)
-		throw new Error("Goal recovery supports a single top-level Goal definition run");
+	// Only a run of a top-level Goal definition is recovered: an embedded Goal
+	// stage would otherwise be relaunched without its surrounding workflow.
+	if (!compiled || policies.length !== 1 || !policy?.goal || !root || policy.stageId !== "goal" ||
+		typeof run.specPath !== "string" || resolve(run.specPath) !== resolve(policy.goal.usesPath))
+		throw new Error("Goal recovery supports runs of a top-level Goal definition; recover workflows with an embedded Goal stage by running them again");
 	if (root.goal?.state === "engine:achieved") throw new Error(`Goal run ${run.runId} already achieved its Goal`);
-	if (isLive(run.runId))
+	// A paused or blocked run of this session may still hold work; it continues
+	// with resume. A finished run (for example replanning exhausted) cannot
+	// usefully resume and may be recovered as a new run.
+	if (isLive(run.runId) && run.status !== "failed" && run.status !== "completed")
 		throw new Error(`Goal run ${run.runId} is still live in this session; use /workflow goal resume ${run.runId}`);
-	const family = (await listRunRecords(cwd)).filter(record => record.runId === run.runId ||
+	const records = await listRunRecords(cwd);
+	const family = records.filter(record => record.runId === run.runId ||
 		(record.rootRunId ?? record.runId) === run.runId);
 	if (!family.some(record => record.runId === run.runId)) family.push(run);
-	for (const member of family)
-		if (await isWorkflowRunLeaseLive(cwd, member.runId))
+	// The heartbeat check is conservative (a run finished seconds ago still
+	// looks live); a supervisor lease that can actually be taken proves no
+	// owner holds the run.
+	for (const member of family) {
+		if (!await isWorkflowRunLeaseLive(cwd, member.runId)) continue;
+		const supervisor = await acquireRunFileLease(cwd, member.runId, "supervisor", 0);
+		if (!supervisor)
 			throw new Error(`Goal run ${member.runId} is still owned by a live session; recover it after that session ends`);
-	const recoveredBy = await readWorkflowGoalRecoveredBy(cwd, run.runId);
+		await supervisor.release();
+	}
+	const recoveredBy = await readWorkflowGoalRecoveredBy(cwd, run.runId, records);
 	if (recoveredBy) throw new Error(`Goal run ${run.runId} was already recovered as ${recoveredBy}; recover that run instead`);
 
 	// The current definition must be exactly the one originally consented to.
@@ -326,7 +344,11 @@ export async function planWorkflowGoalRecovery(cwd: string, runIdOrPrefix: strin
 	const { seed, skipped } = receipt
 		? await recoverySeed(cwd, definition, receipt.generation, receiptCandidate(receipt))
 		: { seed: null, skipped: null };
-	const executionProfile = run.executionProfile?.name;
+	// A named profile the definition declares is selected again; any other
+	// (ad-hoc) profile is chosen afresh at the new launch.
+	const recordedProfile = run.executionProfile?.name;
+	const executionProfile = recordedProfile && definition.executionProfiles &&
+		Object.hasOwn(definition.executionProfiles, recordedProfile) ? recordedProfile : undefined;
 	return {
 		specPath: usesPath,
 		task: compiled.task ?? definition.goal.objective,
@@ -336,7 +358,7 @@ export async function planWorkflowGoalRecovery(cwd: string, runIdOrPrefix: strin
 			fromRunId: run.runId,
 			definitionFingerprint: policy.goal.definitionFingerprint,
 			priorRequests,
-			priorGenerations: root.goalRoot?.generations.length ?? 0,
+			priorGenerations: (run.goalRecovery?.priorGenerations ?? 0) + (root.goalRoot?.generations.length ?? 0),
 			feedbackGeneration: receipt?.generation ?? null,
 			feedback,
 			seed,
@@ -389,12 +411,14 @@ export async function seedWorkflowGoalRecoveryCandidate(workspace: GoalWorkspace
 }
 
 /** Consent and status view of a recovery plan. */
-export function goalRecoveryPreview(plan: WorkflowGoalRecoveryPlan, requestCap: number | null | undefined) {
+export function goalRecoveryPreview(plan: WorkflowGoalRecoveryPlan, requestCap: number | null | undefined,
+	generationLimit?: number) {
 	return {
 		fromRunId: plan.fromRunId,
 		priorRequests: plan.priorRequests,
 		remainingRequests: requestCap == null ? null : Math.max(0, requestCap - plan.priorRequests),
 		priorGenerations: plan.priorGenerations,
+		...(generationLimit === undefined ? {} : { remainingGenerations: Math.max(0, generationLimit - plan.priorGenerations) }),
 		feedbackGeneration: plan.feedbackGeneration,
 		feedbackCriteria: plan.feedback.map(entry => `${entry.criterionId}: ${entry.verdict}`),
 		carriedCandidate: plan.seed ? plan.seed.files.map(file => file.path) : [],

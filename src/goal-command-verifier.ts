@@ -14,9 +14,10 @@ import {
 	writeFile,
 	chmod,
 	unlink,
+	access,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, isAbsolute, join, sep } from "node:path";
 import { constants } from "node:fs";
 import { goalHash } from "./goal-json.js";
 import { goalFileContentIdentity, goalWorkspacePathCheck, type GoalFileValue } from "./goal-workspace.js";
@@ -27,7 +28,14 @@ export const GOAL_COMMAND_VERIFIER_PRODUCER = "command-exit-v1";
 export const GOAL_COMMAND_DEFAULT_TIMEOUT_MS = 120_000;
 export const GOAL_COMMAND_MAX_TIMEOUT_MS = 600_000;
 const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
-const OUTPUT_TAIL_BYTES = 16_384;
+/** sandbox-exec's exit status when exec of the sandboxed command fails. */
+const SANDBOX_EXEC_FAILURE = 71;
+/**
+ * Retained output per stream. Evidence and replanning feedback are bounded
+ * Goal JSON whose strings must stay under 16384 characters, so the tail plus
+ * its truncation marker stays well inside that.
+ */
+const OUTPUT_TAIL_BYTES = 8_192;
 /** After exit or timeout, stop waiting for output held open by escaped descendants. */
 const OUTPUT_DRAIN_GRACE_MS = 2_000;
 const MAX_COPY_FILES = 50_000;
@@ -75,6 +83,41 @@ export function goalCommandVerifierConfigIssues(value: unknown): string[] {
 	return issues;
 }
 
+/**
+ * Before consent: the configured cwd must be a directory of the origin and a
+ * bare command name must resolve on PATH (a relative path must exist in the
+ * cwd), so a misconfigured command is refused instead of judging every
+ * candidate not-met.
+ */
+export async function goalCommandVerifierPreflightIssues(originRoot: string,
+	config: GoalCommandVerifierConfig): Promise<string[]> {
+	const issues: string[] = [];
+	const cwd = config.cwd ? join(originRoot, ...config.cwd.split("/")) : originRoot;
+	if (!(await lstat(cwd).catch(() => null))?.isDirectory())
+		issues.push(`cwd ${JSON.stringify(config.cwd)} is not a directory of the working tree`);
+	else {
+		const root = await realpath(originRoot), physical = await realpath(cwd);
+		if (physical !== root && !physical.startsWith(`${root}${sep}`))
+			issues.push(`cwd ${JSON.stringify(config.cwd)} leaves the working tree through a symbolic link`);
+	}
+	const command = config.argv[0]!;
+	const executable = async (path: string) => {
+		try { await access(path, constants.X_OK); return (await lstat(path).catch(() => null))?.isDirectory() !== true; }
+		catch { return false; }
+	};
+	if (command.includes("/")) {
+		if (!(await executable(isAbsolute(command) ? command : join(cwd, command))))
+			issues.push(`command ${JSON.stringify(command)} is not an executable file`);
+	} else {
+		// Same lookup as the sandboxed run: relative (and empty) PATH entries
+		// resolve against the command's working directory.
+		const found = await Promise.all((process.env.PATH ?? "/usr/bin:/bin").split(delimiter)
+			.map(directory => executable(join(isAbsolute(directory) ? directory : join(cwd, directory), command))));
+		if (!found.includes(true)) issues.push(`command ${JSON.stringify(command)} was not found on PATH`);
+	}
+	return issues;
+}
+
 /** The command verifier only runs under the macOS Seatbelt sandbox. */
 export function goalCommandSandboxAvailable(): boolean {
 	return process.platform === "darwin" && existsSync(SANDBOX_EXEC);
@@ -106,8 +149,8 @@ export function goalCommandSandboxProfile(writableRoot: string, home = homedir()
 	].join("\n");
 }
 
-async function copyTree(source: string, target: string, budget: { files: number; bytes: number },
-	top = true): Promise<void> {
+async function copyTree(source: string, target: string,
+	budget: { files: number; bytes: number; maxFiles: number; maxBytes: number }, top = true): Promise<void> {
 	await mkdir(target, { recursive: true });
 	for (const entry of await readdir(source, { withFileTypes: true })) {
 		// Repository metadata and workflow run state are not part of the tree under test.
@@ -123,7 +166,7 @@ async function copyTree(source: string, target: string, budget: { files: number;
 		if (!entry.isFile()) continue;
 		const info = await lstat(from);
 		budget.files += 1; budget.bytes += info.size;
-		if (budget.files > MAX_COPY_FILES || budget.bytes > MAX_COPY_BYTES)
+		if (budget.files > budget.maxFiles || budget.bytes > budget.maxBytes)
 			throw new Error("Goal command verifier workspace is too large to copy");
 		await copyFile(from, to);
 		await chmod(to, info.mode & 0o777);
@@ -164,7 +207,10 @@ async function assertRealDirectoryPath(work: string, relativePath: string): Prom
 
 function tail(chunks: Buffer[], total: number): string {
 	const all = Buffer.concat(chunks);
-	const kept = all.length > OUTPUT_TAIL_BYTES ? all.subarray(all.length - OUTPUT_TAIL_BYTES) : all;
+	let start = all.length > OUTPUT_TAIL_BYTES ? all.length - OUTPUT_TAIL_BYTES : 0;
+	// Start on a UTF-8 character boundary rather than inside a multibyte character.
+	while (start > 0 && start < all.length && (all[start]! & 0xc0) === 0x80) start++;
+	const kept = all.subarray(start);
 	return (total > kept.length ? "…" : "") + kept.toString("utf8");
 }
 
@@ -180,6 +226,8 @@ export async function runGoalCommandVerifier(input: {
 	readonly signal?: AbortSignal;
 	/** The candidate observed as the criterion subject; a different candidate is not run. */
 	readonly expectedCandidateHash?: string;
+	/** Test-only lower copy ceilings. */
+	readonly copyLimits?: { readonly files?: number; readonly bytes?: number };
 }): Promise<GoalCommandVerification> {
 	const issues = goalCommandVerifierConfigIssues(input.config);
 	if (issues.length) throw new Error(`Goal command verifier config invalid: ${issues.join("; ")}`);
@@ -191,7 +239,8 @@ export async function runGoalCommandVerifier(input: {
 	const root = await realpath(await mkdtemp(join(tmpdir(), "goal-verify-")));
 	try {
 		const work = join(root, "work");
-		await copyTree(await realpath(input.originRoot), work, { files: 0, bytes: 0 });
+		await copyTree(await realpath(input.originRoot), work, { files: 0, bytes: 0,
+			maxFiles: input.copyLimits?.files ?? MAX_COPY_FILES, maxBytes: input.copyLimits?.bytes ?? MAX_COPY_BYTES });
 		const candidate = await input.workspace.inspectCandidate();
 		if (input.expectedCandidateHash !== undefined && goalHash(candidate) !== input.expectedCandidateHash)
 			throw new Error("Goal candidate changed before command verification");
@@ -211,10 +260,20 @@ export async function runGoalCommandVerifier(input: {
 		const home = join(root, "home"), temp = join(root, "tmp");
 		await mkdir(home); await mkdir(temp);
 		const cwd = input.config.cwd ? join(work, ...input.config.cwd.split("/")) : work;
+		const cwdInfo = await lstat(cwd).catch(() => null);
+		if (!cwdInfo?.isDirectory())
+			throw new Error(`Goal command verifier cwd is not a directory in the working tree: ${input.config.cwd}`);
+		// A symlinked ancestor must not move the command outside the copy.
+		const physicalCwd = await realpath(cwd);
+		if (physicalCwd !== work && !physicalCwd.startsWith(`${work}${sep}`))
+			throw new Error(`Goal command verifier cwd leaves the working tree copy: ${input.config.cwd}`);
 		const timeoutMs = input.config.timeoutMs ?? GOAL_COMMAND_DEFAULT_TIMEOUT_MS;
+		// A stop during copy/overlay must not start the command.
+		input.signal?.throwIfAborted();
 		const started = Date.now();
 		const outcome = await new Promise<{ exitCode: number | null; signal: string | null; timedOut: boolean;
 			stdout: string; stderr: string }>((resolve, reject) => {
+			if (input.signal?.aborted) { reject(input.signal.reason); return; }
 			const child = spawn(SANDBOX_EXEC, ["-p", goalCommandSandboxProfile(root), ...input.config.argv], {
 				cwd, detached: true, stdio: ["ignore", "pipe", "pipe"],
 				env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: home, TMPDIR: temp, LANG: "en_US.UTF-8",
@@ -238,7 +297,9 @@ export async function runGoalCommandVerifier(input: {
 			input.signal?.addEventListener("abort", onAbort, { once: true });
 			child.once("error", error => { clearTimeout(timer); clearTimeout(drain);
 				input.signal?.removeEventListener("abort", onAbort); reject(error); });
-			child.once("exit", () => { killGroup(); drainSoon(); });
+			// The deadline applies to the command, not to draining output held by
+			// escaped descendants after it exited.
+			child.once("exit", () => { clearTimeout(timer); killGroup(); drainSoon(); });
 			child.once("close", (exitCode, signal) => {
 				clearTimeout(timer); clearTimeout(drain); input.signal?.removeEventListener("abort", onAbort);
 				killGroup();
@@ -246,6 +307,10 @@ export async function runGoalCommandVerifier(input: {
 			});
 		});
 		input.signal?.throwIfAborted();
+		// sandbox-exec exits 71 when it cannot exec the command itself: that is a
+		// definition problem, not a verdict about the candidate.
+		if (outcome.exitCode === SANDBOX_EXEC_FAILURE && /^sandbox-exec: execvp\(\) of .* failed/m.test(outcome.stderr))
+			throw new Error(`Goal command verifier could not start ${JSON.stringify(input.config.argv[0])}: ${outcome.stderr.trim()}`);
 		return Object.freeze({
 			schema: "goal-command-verification-v1" as const,
 			argv: Object.freeze([...input.config.argv]),

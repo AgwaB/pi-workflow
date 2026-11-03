@@ -3,8 +3,9 @@ import { buildGoalPlannerPhaseTemplate, buildGoalWorkerPhaseTemplate, buildGoalW
 import { buildDynamicGeneratedCompiledTask, normalizeDynamicAgentRequest } from "./dynamic-generated-task-runtime.js";
 import { workflowTaskProfileBinding, isOriginalPreparedTaskProfile, readArtifactGraphControl } from "./artifact-graph-runtime.js";
 import { buildGoalProfileCaptureRevisionProposal, captureGoalChildProfile, captureGoalWorkflowProfile, assertGoalProfileCaptureRevisionAvailable, assertGoalProfileCaptureRevisionProposalAvailable, parseGoalProfileCaptureRevision, parseGoalProfileCaptureRevisionHistory, parseGoalProfileCaptureRevisionProposal, resolveGoalProfileRuntime, resolveGoalProfileProposalRuntime } from "./goal-profile.js";
-import { parseGoalWorkflowSpec } from "./goal-workflow-schema.js";
+import { goalGenerationLimit, parseGoalWorkflowSpec } from "./goal-workflow-schema.js";
 import { readSimpleJsonPath } from "./workflow-runtime.js";
+import { resolveWorkflowFastModeConfig, WORKFLOW_FAST_SERVICE_TIER, workflowFastEligibleModelIds } from "./workflow-fast-mode-extension.js";
 import { cloneGoalWorkflowData, goalWorkflowJson } from "./goal-json.js";
 import { loadAgentByName } from "./agents.js";
 import { effectiveToolClassification } from "./tool-metadata.js";
@@ -29,6 +30,7 @@ import {
   GOAL_COMMAND_VERIFIER_PRODUCER,
   goalCommandSandboxAvailable,
   goalCommandVerdict,
+  goalCommandVerifierPreflightIssues,
   runGoalCommandVerifier,
   type GoalCommandVerifierConfig,
 } from "./goal-command-verifier.js";
@@ -83,6 +85,8 @@ export interface WorkflowEngineGoalPreview {
   /** Remaining Goal-entry depth, counting this Goal as one entry. */
   readonly remainingDepth: number;
   readonly exclusions: readonly string[];
+  /** Generations (first plan plus replans) this Goal may use. */
+  readonly generationLimit?: number;
   /** Interrupted run this admission recovers, shown at consent. */
   readonly recovery?: ReturnType<typeof goalRecoveryPreview>;
 }
@@ -4513,6 +4517,35 @@ export function isWorkflowGoalStrictOutputTask(run: WorkflowRunRecord, task: Wor
   return requestBindings.get(key)?.role === "verification" || candidateWorkers.get(key)?.discriminator === "verifier";
 }
 
+/**
+ * Strict verdict of a model-rubric verifier control: exactly
+ * {schema, digest, score, reason} with a score in [0, 1]; met when the score
+ * reaches the authored minimum. Anything else is not a verdict.
+ */
+export function goalRubricVerdict(rawResult: unknown, minScore: number): "met" | "not-met" {
+  if (!rawResult || typeof rawResult !== "object" || Array.isArray(rawResult))
+    throw new Error("Goal rubric malformed or foreign result");
+  const result = rawResult as Record<string, unknown>;
+  if (Object.keys(result).length !== 4 || Object.keys(result).some(key => !["schema", "digest", "score", "reason"].includes(key)) ||
+      result.schema !== "dynamic-task-result-v1" ||
+      typeof result.digest !== "string" || !result.digest.trim() || result.digest.length > 1000 ||
+      typeof result.score !== "number" || !Number.isFinite(result.score) || result.score < 0 || result.score > 1 ||
+      typeof result.reason !== "string" || !result.reason.trim() || result.reason.length > 4096)
+    throw new Error("Goal rubric malformed or foreign result");
+  return result.score >= minScore ? "met" : "not-met";
+}
+
+/**
+ * Combined outcome of one generation's criteria: any UNKNOWN makes the whole
+ * outcome UNKNOWN; otherwise a pending human judgment waits for the user; the
+ * Goal is met only when every criterion is met.
+ */
+export function goalOracleOutcome(verdicts: readonly string[]): { unknown: boolean; waitingUser: boolean; met: boolean } {
+  const unknown = verdicts.some(verdict => verdict === "unknown");
+  return { unknown, waitingUser: !unknown && verdicts.some(verdict => verdict === "pending"),
+    met: !unknown && verdicts.length > 0 && verdicts.every(verdict => verdict === "met") };
+}
+
 /** Private Goal temp directories of this process, removed at the latest on exit. */
 const goalTemporaryDirectories = new Set<string>();
 let goalTemporaryCleanupInstalled = false;
@@ -4535,6 +4568,42 @@ async function removeGoalTemporaryDirectory(path: string): Promise<void> {
 /** Test observation of directories still owned by this process. */
 export function goalTemporaryDirectoriesForTests(): readonly string[] {
   return [...goalTemporaryDirectories];
+}
+
+/** Providers whose Goal requests are reserved, metered and settled. */
+export function isGoalMeteredModel(model: string | undefined): boolean {
+  return !!model && (model.startsWith("openai/") || model.startsWith("openai-codex/"));
+}
+
+/**
+ * A request cap, a model rubric and human judgment all need settled request
+ * accounting, which only metered providers have. Refuse such a Goal before
+ * consent instead of letting every verdict end UNKNOWN (or the first request
+ * be refused) after the user confirmed it.
+ */
+function assertGoalRequestAccountingAvailable(definition: GoalWorkflowSpec,
+  profile: WorkflowEngineGoalPreview["profile"], workflows: readonly WorkflowGoalChildCapture[]): void {
+  // Declared child Goals run on the root's inherited profile and budget.
+  const goals: GoalWorkflowSpec[] = [definition];
+  const visit = (captures: readonly WorkflowGoalChildCapture[]) => {
+    for (const capture of captures) {
+      if ("goal" in capture.definition) goals.push(capture.definition);
+      visit(capture.workflows);
+    }
+  };
+  visit(workflows);
+  const criteria = goals.flatMap(goal => goal.goal.criteria);
+  const rubric = criteria.some(criterion => criterion.verifier.kind === "model-rubric");
+  const human = criteria.some(criterion => criterion.verifier.kind === "human");
+  const capped = goals.some(goal => goal.goal.limits?.requests != null);
+  if (!rubric && !human && !capped) return;
+  const sending = ["planning", "research-execution", ...(rubric ? ["verification"] : [])];
+  const unmetered = profile.roles.filter(role => sending.includes(role.role) && !isGoalMeteredModel(role.model));
+  if (!unmetered.length) return;
+  const needs = [capped ? "a request cap" : "", rubric ? "a model rubric" : "", human ? "human judgment" : ""]
+    .filter(Boolean).join(", ");
+  throw new Error(`Goal with ${needs} needs request accounting, which only openai/ and openai-codex/ models provide; ` +
+    `${unmetered.map(role => `${role.role} uses ${role.model ?? "an unknown model"}`).join(", ")}`);
 }
 
 /** Request cap left for this admission after an interrupted run's requests. */
@@ -4903,11 +4972,20 @@ export async function prepareWorkflowGoalRequestChannel(cwd: string, run: Workfl
   // The private socket directory is removed once its channel has drained.
   const removeDirectory = () => removeGoalTemporaryDirectory(directory);
   try { live(); } catch (error) { await removeDirectory(); throw error; }
+  // Fast is the root Goal definition's setting for every model request of the
+  // family (children inherit the root role models, checked before consent).
+  let familyRoot = prepared;
+  for (let ancestor = derivedPolicyChildren.get(familyRoot); ancestor; ancestor = derivedPolicyChildren.get(familyRoot))
+    familyRoot = childAdmissions.get(ancestor)!.prepared;
+  const fast = preparedPolicies.get(familyRoot)!.engine!.preview.definition.defaults?.fast === "on";
+  if (fast && !workflowFastEligibleModelIds().includes(compiled.runtime.model!))
+    throw new Error(`Goal Fast request model is not Fast-eligible: ${compiled.runtime.model}`);
   const channel = await openGoalRequestBudgetChannel({ directory: join(directory, "rpc"),
     evidenceRoot: join(taskDir(cwd, run.runId, task.taskId), "artifacts", "request-reservations"),
     identity: { cwd, runId: run.runId, taskId: task.taskId, policy: binding.policySpecId, generation: binding.generation },
     attemptKey, model: compiled.runtime.model!, budget: engine.budget!,
     ...(captureNativeReads ? { captureNativeReads: true as const } : {}),
+    ...(fast ? { serviceTier: WORKFLOW_FAST_SERVICE_TIER } : {}),
     current: async () => {
       const authority = await current(true);
       if (captureNativeReads && candidateWorkers.get(key) !== sourceVerifier)
@@ -4971,7 +5049,13 @@ async function settledWorkflowGoalRequests(input: PolicyPreparation,
       !lineage.generations.length) return null;
   const covered = familyCoverage ?? new Set<string>();
   for (const generation of lineage.generations) {
-    if (!Object.keys(generation.slots).length) return null;
+    // A planner rejected for a wrong definition digest (captured under the
+    // original admission) is a complete generation of one planner request; any
+    // other generation without workers is unfinished.
+    const rejectedPlanner = !Object.keys(generation.slots).length && generation.outcome === "not-achieved" &&
+      !!generation.planFingerprint && generation.verifiers === undefined && generation.children === undefined &&
+      generation.failedCandidateFingerprint === undefined && !!engine.rejectedGenerations?.has(generation.generation);
+    if (!Object.keys(generation.slots).length && !rejectedPlanner) return null;
     const members: Array<{ memberRun: WorkflowRunRecord; memberCompiled: CompiledWorkflow; specId: string; role: GoalRequestRole }> =
       [{ memberRun: run, memberCompiled: compiled, specId: generation.plannerSpecId, role: "planning" }];
     for (const specId of Object.values(generation.verifiers ?? {}))
@@ -7103,6 +7187,12 @@ export async function prepareWorkflowGoalPolicy(input: PolicyPreparation): Promi
         throw new Error("Goal command verifier requires verify and candidate-write permissions before consent");
       if (!goalCommandSandboxAvailable())
         throw new Error("Goal command verifier requires the macOS sandbox (sandbox-exec); not available on this host");
+      for (const criterion of definition.goal.criteria.filter(isGoalCommandCriterion)) {
+        const issues = await goalCommandVerifierPreflightIssues(input.cwd,
+          criterion.verifier.config as unknown as GoalCommandVerifierConfig);
+        if (issues.length) throw new Error(`Goal command criterion ${criterion.id} cannot run before consent: ${issues.join("; ")}`);
+      }
+      live();
     }
     const recovery = input.recovery;
     const requestCap = definition.goal.limits?.requests ?? undefined;
@@ -7113,6 +7203,9 @@ export async function prepareWorkflowGoalPolicy(input: PolicyPreparation): Promi
       if (requestCap !== undefined && recovery.priorRequests >= requestCap)
         throw new Error(`Goal request cap ${requestCap} is already used by interrupted run ${recovery.fromRunId} ` +
           `(${recovery.priorRequests} requests); nothing remains to recover with`);
+      if (recovery.priorGenerations >= goalGenerationLimit(definition))
+        throw new Error(`Goal generation limit ${goalGenerationLimit(definition)} is already used by interrupted run ` +
+          `${recovery.fromRunId} (${recovery.priorGenerations} generations); nothing remains to recover with`);
     }
     // The candidate workspace observes exactly these paths at launch; refuse a
     // scope it cannot observe (for example a directory) before any consent or
@@ -7138,6 +7231,16 @@ export async function prepareWorkflowGoalPolicy(input: PolicyPreparation): Promi
       currentRuntime: originalEnvironment!, availableModels: input.host.availableModels,
       environmentDigest: workflowDefinitionFingerprint({ cwd: input.cwd, models: input.host.availableModels }),
     });
+    // Fast applies to every model request of the Goal, so every role model
+    // must be Fast-eligible; refuse before consent otherwise.
+    if (definition.defaults?.fast === "on")
+      for (const role of profile.roles) {
+        try { resolveWorkflowFastModeConfig({ fast: "on", model: role.model }, input.host.availableModels); }
+        catch (error) {
+          throw new Error(`Goal defaults.fast "on" cannot apply to the ${role.role} role: ` +
+            `${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
     const coding = definition.goal.authority.allowedEffects.includes("candidate-write");
     const tools = goalWorkerTools(definition);
     const mediated = tools.length > 0;
@@ -7205,6 +7308,10 @@ export async function prepareWorkflowGoalPolicy(input: PolicyPreparation): Promi
         const parentCap = parent.goal.limits?.requests, childCap = child.goal.limits?.requests;
         if (childCap != null && parentCap != null && childCap > parentCap)
           throw new Error(`${boundary}: request cap exceeds the immutable parent cap`);
+        // A child Goal spends from its root's single request budget; a smaller
+        // child cap would be accepted but not enforced, so it is refused.
+        if (childCap != null && childCap !== parentCap)
+          throw new Error(`${boundary}: a child request cap must be omitted or equal to the parent cap; the child shares the parent's request budget`);
         if (childAuthority.allowedPaths.length ||
             childAuthority.allowedEffects.includes("candidate-write") || child.goal.limits?.costMicros != null ||
             child.goal.criteria.some(({ verifier }) => !derivedGoalOracleSupported(verifier, child.goal.authority.allowedEffects)))
@@ -7284,6 +7391,10 @@ export async function prepareWorkflowGoalPolicy(input: PolicyPreparation): Promi
         const parentCap = definition.goal.limits?.requests, childCap = child.goal.limits?.requests;
         if (childCap != null && parentCap != null && childCap > parentCap)
           throw new Error(`${boundary}: request cap exceeds the immutable parent cap`);
+        // A child Goal spends from its root's single request budget; a smaller
+        // child cap would be accepted but not enforced, so it is refused.
+        if (childCap != null && childCap !== parentCap)
+          throw new Error(`${boundary}: a child request cap must be omitted or equal to the parent cap; the child shares the parent's request budget`);
         if (childAuthority.allowedPaths.length ||
             childAuthority.allowedEffects.includes("candidate-write") || child.goal.limits?.costMicros != null ||
             child.goal.criteria.some(({ verifier }) => !derivedGoalOracleSupported(verifier, child.goal.authority.allowedEffects)))
@@ -7449,13 +7560,15 @@ export async function prepareWorkflowGoalPolicy(input: PolicyPreparation): Promi
     }
     const proposal = profileProposal(profile, originalEnvironment!);
     assertGoalProfileCaptureRevisionProposalAvailable(proposal, profile, input.host.availableModels);
+    assertGoalRequestAccountingAvailable(definition, profile, workflows);
     const preview = freezeData<WorkflowEngineGoalPreview>({ executionFoundation: "workflow-engine",
       request: input.request, definition, profile, profileProposal: proposal, workflows, remainingDepth: rootRemainingDepth,
       exclusions: ["deployment", "credentials", "protected-backend-qualification",
         ...(definition.goal.authority.allowedEffects.includes("origin-apply") &&
           definition.goal.authority.allowedEffects.includes("candidate-write") ? [] : ["origin-apply"]),
         "arbitrary-commands", "cost-accounting", "child-family-budget-accounting", "non-deterministic-replan"],
-      ...(recovery ? { recovery: goalRecoveryPreview(recovery, requestCap ?? null) } : {}),
+      generationLimit: goalGenerationLimit(definition),
+      ...(recovery ? { recovery: goalRecoveryPreview(recovery, requestCap ?? null, goalGenerationLimit(definition)) } : {}),
     });
     const recheck = async () => {
       for (const check of sourceChecks) await check();
@@ -8426,15 +8539,8 @@ export async function executeWorkflowEngineGoalPolicy(input: PolicyPreparation &
       const sections = /^\s*<control>([\s\S]*?)<\/control>\s*<analysis>([\s\S]*?)<\/analysis>\s*<refs>([\s\S]*?)<\/refs>\s*$/.exec(output);
       if (!sections || !sections[2].trim()) throw new Error("Goal rubric analysis is missing or empty");
       const config = criterion.verifier.config as { minScore: number };
-      if (!rawResult || typeof rawResult !== "object" || Array.isArray(rawResult))
-        throw new Error("Goal rubric malformed or foreign result");
+      const rubricVerdict = goalRubricVerdict(rawResult, config.minScore);
       const result = rawResult as Record<string, unknown>;
-      if (Object.keys(result).length !== 4 || Object.keys(result).some(key => !["schema", "digest", "score", "reason"].includes(key)) ||
-          result.schema !== "dynamic-task-result-v1" ||
-          typeof result.digest !== "string" || !result.digest.trim() || result.digest.length > 1000 ||
-          typeof result.score !== "number" || !Number.isFinite(result.score) || result.score < 0 || result.score > 1 ||
-          typeof result.reason !== "string" || !result.reason.trim() || result.reason.length > 4096)
-        throw new Error("Goal rubric malformed or foreign result");
       const after = await readRunRecord(input.cwd, durable.runId); await input.assertCurrent();
       if (workflowDefinitionFingerprint(after.tasks.find(task => task.specId === specId)) !== workflowDefinitionFingerprint(verifier))
         throw new Error("Goal rubric verification attempt changed");
@@ -8444,7 +8550,7 @@ export async function executeWorkflowEngineGoalPolicy(input: PolicyPreparation &
         digest: workflowDefinitionFingerprint(verifier), assertSourceCustody });
       observation = { result: { control: cloneGoalWorkflowData(result), taskId: verifier.taskId, specId, runId: durable.runId,
         attemptKey, subjectDigest: workflowDefinitionFingerprint(snapshot.source), inputDigest: workflowDefinitionFingerprint(snapshot) },
-        verdict: result.score >= config.minScore ? "met" : "not-met", reason: null };
+        verdict: rubricVerdict, reason: null };
     } catch (error) {
       await input.assertCurrent(); assertPreparedWorkflowGoalPolicyCurrent(input, prepared); input.stopSignal.throwIfAborted();
       observation = { verdict: "unknown", reason: error instanceof Error ? error.message : "Goal rubric observation unavailable" };
@@ -8521,9 +8627,10 @@ export async function executeWorkflowEngineGoalPolicy(input: PolicyPreparation &
       reason: human ? human.reason : rubric ? rubric.reason : command ? command.reason : reason };
   });
   let observations = collectObservations();
-  let unknown = observations.some(observation => observation.verdict === "unknown");
-  const waitingUser = !unknown && observations.some(observation => observation.verdict === "pending");
-  let met = !unknown && observations.every(observation => observation.verdict === "met");
+  const outcome = goalOracleOutcome(observations.map(observation => observation.verdict));
+  let unknown = outcome.unknown;
+  const waitingUser = outcome.waitingUser;
+  let met = outcome.met;
   const requests = (met || rubricObservations.size > 0 || humanResults.size > 0) && input.requestAccounting ? await settledWorkflowGoalRequests(input, prepared,
     input.requestAccounting.run, input.requestAccounting.compiled) : null;
   if (humanResults.size > 0 && requests === null) { met = false; unknown = true; }

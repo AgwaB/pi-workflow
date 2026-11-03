@@ -742,6 +742,32 @@ export async function formatOrdinaryWorkflowGoal(cwd: string, action: string, ru
   return JSON.stringify(await readOrdinaryWorkflowGoal(cwd, action, run, tasks), null, 2);
 }
 
+/**
+ * Status of every ordinary Goal run. Runs are read a few at a time, and a run
+ * whose records cannot be verified is reported on its own line instead of
+ * failing the whole listing.
+ */
+export async function readOrdinaryWorkflowGoalStatuses(cwd: string): Promise<{
+  text: string; runs: Array<Awaited<ReturnType<typeof readOrdinaryWorkflowGoal>> | { runId: string; error: string }>;
+}> {
+  const runs = await listOrdinaryWorkflowGoals(cwd);
+  const results: Array<Awaited<ReturnType<typeof readOrdinaryWorkflowGoal>> | { runId: string; error: string }> =
+    new Array(runs.length);
+  let next = 0;
+  const worker = async () => {
+    for (let index = next++; index < runs.length; index = next++) {
+      const run = runs[index]!;
+      try { results[index] = await readOrdinaryWorkflowGoal(cwd, "status", run, run.tasks.filter(t => t.kind === "goal")); }
+      catch (error) { results[index] = { runId: run.runId, error: error instanceof Error ? error.message : String(error) }; }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(4, runs.length) }, worker));
+  const text = results.length ? results.map(result => "error" in result
+    ? `Ordinary workflow-engine Goal ${result.runId}: records could not be verified (${result.error}); use status ${result.runId} for details.`
+    : summarizeOrdinaryWorkflowGoal(result)).join("\n\n") : "No goals found in ordinary workflow-engine records.";
+  return { text, runs: results };
+}
+
 export function summarizeOrdinaryWorkflowGoal(data: Awaited<ReturnType<typeof readOrdinaryWorkflowGoal>>): string {
   const number = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? String(value) : "UNKNOWN";
   const usage = typeof data.observedUsage === "object" ? data.observedUsage : undefined;

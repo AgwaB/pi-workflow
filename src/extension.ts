@@ -629,7 +629,7 @@ export function registerGoalTool(
 			"Do not treat Goal registration as production activation or dispatch authority.",
 			"Status is a concise persisted observation, not live freshness; criteria exposes the original profile and criteria, evidence exposes exact receipts and artifact references.",
 			"Tool create/control/wait/recover/apply/background requests have no authority. Author via interactive /workflow goal create, execute via goal run; pause/cancel/resume require the original admitted live interactive session.",
-			"Missing or ambiguous evidence is UNKNOWN, never reconstructed achievement. Protected G002 runtime APIs retain separate internal authority.",
+			"Missing or ambiguous evidence is UNKNOWN, never reconstructed achievement.",
 		],
 		parameters: GOAL_TOOL_PARAMETERS as any,
 		async execute(
@@ -643,11 +643,10 @@ export function registerGoalTool(
 			const commands = await import("./goal-workflow-commands.js");
 			const request = commands.parseOrdinaryWorkflowGoalTool(params);
 			if (!request.goalId) {
-				const runs = await commands.listOrdinaryWorkflowGoals(ctx.cwd);
-				const observations = await Promise.all(runs.map(run => commands.readOrdinaryWorkflowGoal(ctx.cwd, "status", run, run.tasks.filter(t => t.kind === "goal"))));
+				const statuses = await commands.readOrdinaryWorkflowGoalStatuses(ctx.cwd);
 				return {
-					content: [{ type: "text", text: observations.length ? observations.map(commands.summarizeOrdinaryWorkflowGoal).join("\n\n") : "No goals found in ordinary workflow-engine records." }],
-					details: { namespace: "ordinary-workflow-engine", runs: observations },
+					content: [{ type: "text", text: statuses.text }],
+					details: { namespace: "ordinary-workflow-engine", runs: statuses.runs },
 				};
 			}
 			const { run, tasks } = await commands.resolveOrdinaryWorkflowGoal(ctx.cwd, request.goalId, true);
@@ -4142,8 +4141,7 @@ async function handleWorkflowGoalCommand(
 			if (extra.length || (action === "list" && id)) throw new Error("Ordinary Goal list takes no identifier");
 			const runs = await commands.listOrdinaryWorkflowGoals(ctx.cwd);
 			if (action === "status" && ctx.hasUI && runs.length) {
-				const observations = await Promise.all(runs.map(run => commands.readOrdinaryWorkflowGoal(ctx.cwd, "status", run, run.tasks.filter(t => t.kind === "goal"))));
-				emit(ctx, observations.map(commands.summarizeOrdinaryWorkflowGoal).join("\n\n"), "info");
+				emit(ctx, (await commands.readOrdinaryWorkflowGoalStatuses(ctx.cwd)).text, "info");
 				return;
 			}
 			emit(ctx, runs.length ? JSON.stringify({ namespace: "ordinary-workflow-engine", runs: runs.map(run => ({
@@ -4436,7 +4434,9 @@ async function recoverWorkflowGoal(
 			emitRunStartResult(ctx, result.run.status, result.text);
 		}
 	} finally {
-		if (!recovered) await release();
+		// The successor run (and the marker) now prevent a second recovery; the
+		// lease only guarded the consent window.
+		await release();
 	}
 }
 

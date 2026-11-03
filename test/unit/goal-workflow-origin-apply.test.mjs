@@ -194,6 +194,25 @@ test("origin apply revalidates untouched scope and root after each durable in-fl
 	assert.deepEqual(await readdir(elsewhere), ["a.txt"], "no directory or staged file is created through the replaced root");
 });
 
+test("a stop that arrives while a path's in-flight record is persisted leaves that path unwritten", async t => {
+	const { origin, workspace } = await fixture(t, { files: { "a.txt": "a", "b.txt": "b" }, scope: ["a.txt", "b.txt"] });
+	await candidateWrite(workspace, "a.txt", "a2");
+	await candidateWrite(workspace, "b.txt", "b2");
+	const stop = new AbortController();
+	const states = [];
+	const record = await applyGoalCandidateToOrigin({ originRoot: origin, workspace, controlRoots: [], signal: stop.signal,
+		onProgress: async value => {
+			states.push(value.paths.map(path => path.state).join(","));
+			// The stop arrives exactly while the second path is being recorded as in flight.
+			if (value.paths[1].state === "unknown") stop.abort();
+		} });
+	assert.equal(record.status, "interrupted", JSON.stringify(record));
+	assert.deepEqual(record.paths.map(({ path, state }) => [path, state]), [["a.txt", "applied"], ["b.txt", "pending"]]);
+	assert.equal(await readFile(join(origin, "a.txt"), "utf8"), "a2");
+	assert.equal(await readFile(join(origin, "b.txt"), "utf8"), "b", "the stopped path was never written");
+	assert.equal(states.at(-1), "applied,pending", "the durable record no longer claims an in-flight write");
+});
+
 test("origin apply writes several changed paths in order and accepts its own earlier writes", async t => {
 	const { origin, workspace } = await fixture(t, { git: true, files: { "a.txt": "a\n", "b.txt": "b\n", "c.txt": "c\n" }, scope: ["a.txt", "b.txt", "c.txt"] });
 	await candidateWrite(workspace, "a.txt", "a2\n");

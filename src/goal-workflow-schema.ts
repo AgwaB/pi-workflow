@@ -43,7 +43,15 @@ const AUTHORITY_KEYS = new Set([
 	"allowedEffects",
 ]);
 const NESTING_KEYS = new Set(["maxDepth"]);
-const LIMITS_KEYS = new Set(["requests", "costMicros"]);
+const LIMITS_KEYS = new Set(["requests", "costMicros", "generations"]);
+/** Generations (first plan plus replans) a Goal may use when `limits.generations` is unset. */
+export const GOAL_DEFAULT_GENERATION_LIMIT = 10;
+export const GOAL_MAX_GENERATION_LIMIT = 100;
+
+/** Effective generation limit of a Goal definition. */
+export function goalGenerationLimit(definition: GoalWorkflowSpec): number {
+	return definition.goal.limits?.generations ?? GOAL_DEFAULT_GENERATION_LIMIT;
+}
 const DETERMINISTIC_CONFIG_KEYS = new Set(["comparison", "expected"]);
 
 const FORBIDDEN_CONFIG_FIELDS = new Set([
@@ -127,6 +135,18 @@ export function parseGoalWorkflowSpec(value: unknown): GoalWorkflowSpec {
 			message: "is not allowed in a public Goal workflow definition",
 		});
 	}
+	// Fast is one Goal-wide setting (defaults.fast) applied by the Goal request
+	// guard; a Goal profile carries only model/thinking per role, so a per-role
+	// Fast would show at consent but never reach a request.
+	if (isRecord(spec.executionProfiles))
+		for (const [name, profile] of Object.entries(spec.executionProfiles))
+			if (isRecord(profile))
+				for (const [slot, override] of Object.entries(profile))
+					if (isRecord(override) && Object.hasOwn(override, "fast"))
+						issues.push({
+							path: `$.executionProfiles.${name}.${slot}.fast`,
+							message: "per-role Fast is not supported for Goal runs; set defaults.fast for the whole Goal",
+						});
 	validateGoal(spec.goal, "$.goal", issues);
 	assertValidatedGoalWorkflowSpec(data, issues);
 	const parsed = data;
@@ -170,6 +190,8 @@ function validateCriteria(value: unknown, path: string, issues: ValidationIssue[
 		return;
 	}
 	const ids = new Set<string>();
+	const criterionExecutionIds = new Map<string, string>();
+	const slotExecutionIds = new Map<string, string>();
 	for (const [index, entry] of value.entries()) {
 		const criterionPath = `${path}[${index}]`;
 		const criterion = recordAt(entry, criterionPath, issues);
@@ -179,9 +201,47 @@ function validateCriteria(value: unknown, path: string, issues: ValidationIssue[
 		if (id !== undefined) {
 			if (ids.has(id)) issues.push({ path: `${criterionPath}.id`, message: "must be unique" });
 			ids.add(id);
+			validateExecutionId(id, `${criterionPath}.id`, GOAL_CRITERION_ID_MAX, criterionExecutionIds, issues);
 		}
 		validateVerifier(criterion.verifier, `${criterionPath}.verifier`, issues);
+		const slot = (criterion.verifier as { subject?: { resultSlot?: unknown } } | undefined)?.subject?.resultSlot;
+		if (typeof slot === "string" && ID_PATTERN.test(slot)) {
+			const path = `${criterionPath}.verifier.subject.resultSlot`;
+			if (reservedGoalSlot(goalExecutionId(slot)))
+				issues.push({ path, message: `"${slot}" is reserved for Goal planner/verifier identities` });
+			else validateExecutionId(slot, path, GOAL_SLOT_ID_MAX, slotExecutionIds, issues);
+		}
 	}
+}
+
+/**
+ * Goal slots and criteria become generated task identities
+ * (`generation<N>.<slot>`, `generation<N>.verify.<criterion>`), which are
+ * lowercased, have other punctuation replaced by "-" and are cut at 64
+ * characters. Distinct authored IDs must stay distinct after that, so a valid
+ * definition cannot fail only after requests were spent.
+ * Mirrors sanitizeTaskId in engine-run-graph.ts.
+ */
+export function goalExecutionId(id: string): string {
+	return id.trim().toLowerCase().replace(/[^a-z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
+}
+/** Room for "generation9999.verify." and "generation9999." prefixes. */
+const GOAL_CRITERION_ID_MAX = 64 - "generation9999.verify.".length;
+const GOAL_SLOT_ID_MAX = 64 - "generation9999.".length;
+/** Slot identities that would equal a planner, verifier or controller request. */
+function reservedGoalSlot(execution: string): boolean {
+	return execution === "controller" || execution === "planner" || execution.startsWith("verify.") ||
+		/^generation\d+(?:\.|$)/.test(execution);
+}
+
+function validateExecutionId(id: string, path: string, max: number, seen: Map<string, string>,
+	issues: ValidationIssue[]): void {
+	const execution = goalExecutionId(id);
+	if (!execution) issues.push({ path, message: "must contain a letter or number" });
+	else if (id.length > max) issues.push({ path, message: `must be at most ${max} characters` });
+	else if (seen.has(execution) && seen.get(execution) !== id)
+		issues.push({ path, message: `collides with "${seen.get(execution)}" once lowercased and normalized` });
+	seen.set(execution, id);
 }
 
 function validateVerifier(value: unknown, path: string, issues: ValidationIssue[]): void {
@@ -375,6 +435,9 @@ function validateLimits(value: unknown, path: string, issues: ValidationIssue[])
 			issues.push({ path: `${path}.${key}`, message: "must be null or a finite non-negative integer" });
 		}
 	}
+	if (limits.generations !== undefined && (!Number.isSafeInteger(limits.generations) ||
+		(limits.generations as number) < 1 || (limits.generations as number) > GOAL_MAX_GENERATION_LIMIT))
+		issues.push({ path: `${path}.generations`, message: `must be an integer from 1 to ${GOAL_MAX_GENERATION_LIMIT}` });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

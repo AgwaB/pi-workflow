@@ -208,6 +208,40 @@ test("registered /workflow goal authors a sandboxed command criterion without a 
  assert.equal(await readFile(join(cwd, "goals/read-only.json"), "utf8").catch(error => error.code), "ENOENT");
 });
 
+test("registered /workflow goal create writes nothing when cancelled at any prompt", async (t) => {
+ const cwd = await mkdtemp(join(tmpdir(), "surface-goal-cancel-each-"));
+ t.after(() => rm(cwd, { recursive: true, force: true }));
+ const { readdir } = await import("node:fs/promises");
+ // The complete authoring dialog in order: [kind, answer].
+ const dialog = [
+  ["select", "Deterministic exact JSON value"], ["input", "true"], ["input", "src/a.mjs"], ["input", ""],
+  ["select", "Candidate writes, read, and verify"], ["input", ""], ["input", ""], ["input", "goals/out.json"],
+  ["select", "Save definition"],
+ ];
+ const author = async (cancelAt) => {
+  let step = 0;
+  const answer = (kind) => {
+   const current = step++;
+   assert.equal(dialog[current]?.[0], kind, `prompt ${current} is a ${dialog[current]?.[0]}`);
+   return current === cancelAt ? undefined : dialog[current][1];
+  };
+  await fakeWorkflowSurface().workflow.handler("goal create make a true", {
+   cwd, hasUI: true, mode: "tui",
+   ui: { input: async () => answer("input"), select: async () => answer("select"),
+    confirm: async () => { throw new Error("cancelled authoring must not confirm"); }, notify() {} },
+  });
+  return step;
+ };
+ for (let cancelAt = 0; cancelAt < dialog.length; cancelAt++) {
+  const asked = await author(cancelAt);
+  assert.equal(asked, cancelAt + 1, `authoring stops at the cancelled prompt ${cancelAt}`);
+  assert.deepEqual(await readdir(cwd), [], `cancelling prompt ${cancelAt} writes nothing`);
+ }
+ assert.equal(await author(-1), dialog.length);
+ assert.equal(JSON.parse(await readFile(join(cwd, "goals", "out.json"), "utf8")).goal.objective, "make a true",
+  "the same dialog without cancellation saves the definition");
+});
+
 test("registered /workflow goal actions never fall through to authoring", async (t) => {
  const cwd = await mkdtemp(join(tmpdir(), "surface-goal-actions-"));
  t.after(() => rm(cwd, { recursive: true, force: true }));

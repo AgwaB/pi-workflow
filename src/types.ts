@@ -245,7 +245,8 @@ export interface GoalWorkflowDefinition {
 		allowedEffects: GoalWorkflowEffect[];
 	};
 	nesting: { maxDepth: number };
-	limits?: { requests?: number | null; costMicros?: number | null };
+	/** generations: first plan plus replans (default 10). */
+	limits?: { requests?: number | null; costMicros?: number | null; generations?: number };
 	workflows?: Record<string, DynamicWorkflowNestedSpec>;
 }
 
@@ -1720,6 +1721,8 @@ export interface WorkflowRunRecord {
 	goalRecovery?: {
 		fromRunId: string;
 		priorRequests: number;
+		/** Generations used by the recovered chain; they count against limits.generations. */
+		priorGenerations?: number;
 		feedbackGeneration: number | null;
 		seededPaths: string[];
 	};
