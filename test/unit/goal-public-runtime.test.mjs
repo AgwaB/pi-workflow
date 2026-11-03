@@ -3,7 +3,7 @@ import test from "node:test";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { randomBytes } from "node:crypto";
-import { constants, existsSync, watch } from "node:fs";
+import { constants, existsSync, lstatSync, watch } from "node:fs";
 import fsPromises from "node:fs/promises";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { channel as diagnosticsChannel } from "node:diagnostics_channel";
@@ -25,7 +25,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { tmpdir, loadavg as osLoadAverage, availableParallelism as osCpuCount } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -298,6 +298,79 @@ test("ordinary Goal summary preserves stopping and unknown usage without mutatin
   }
 });
 
+/**
+ * Test-only watchdog scale. Internal waits and per-test timeouts here are
+ * liveness guards, not performance assertions; under heavy machine load they
+ * expire although the behaviour is correct. PIWF_TEST_TIME_FACTOR (1-10) wins;
+ * otherwise the factor follows the one-minute load per CPU, capped at 3.
+ */
+const testTimeFactor = (() => {
+  if (process.env.PIWF_TEST_TIME_FACTOR !== undefined) {
+    const factor = Number(process.env.PIWF_TEST_TIME_FACTOR);
+    assert.ok(Number.isFinite(factor) && factor >= 1 && factor <= 10, "PIWF_TEST_TIME_FACTOR must be 1-10");
+    return factor;
+  }
+  const load = osLoadAverage()[0] / Math.max(1, osCpuCount());
+  return Math.min(3, Math.max(1, Math.round(load * 10) / 10));
+})();
+const testMs = ms => Math.ceil(ms * testTimeFactor);
+
+/**
+ * When a Goal test fails or times out, fence every Goal host session it
+ * installed so its live runs' channels drain and the test file can still
+ * finish. Create it before the test's other teardown: after hooks run in
+ * registration order, and passing tests keep their own stop/teardown order.
+ */
+function goalSessionFence(t) {
+  const shutdowns = [];
+  t.after(async () => {
+    if (t.passed) return;
+    await Promise.allSettled(shutdowns.map(shutdown => shutdown()));
+  });
+  return {
+    own(handler, context = () => ({})) {
+      if (typeof handler !== "function") return;
+      let closing;
+      shutdowns.push(() => closing ??= Promise.resolve().then(() =>
+        handler({ type: "session_shutdown", reason: "quit" }, context())));
+    },
+  };
+}
+
+/**
+ * Teardown join for a failed test. A failure can leave a fake native callback
+ * that never settles; an unbounded join then keeps the whole test file from
+ * finishing. Passing tests still join without a bound.
+ */
+async function joinAfterFailure(t, label, work, ms = testMs(30_000)) {
+  if (t.passed === true) return await work;
+  let timer;
+  try {
+    return await Promise.race([work, new Promise(resolve => {
+      timer = setTimeout(() => {
+        console.error(`TEST_ONLY ${label} did not settle ${ms}ms after a failure; teardown continues, evidence retained`);
+        resolve(undefined);
+      }, ms);
+    })]);
+  } finally { clearTimeout(timer); }
+}
+
+/**
+ * A denial must not touch the parent Goal run, but the engine keeps scheduling
+ * it meanwhile (for example a Goal task waiting on its child moves between
+ * running and pending). Compare everything except those scheduling fields.
+ */
+function assertParentGoalCustodyUnchanged(afterBytes, beforeBytes, message = "parent Goal run custody unchanged") {
+  const custody = bytes => {
+    const run = JSON.parse(Buffer.from(bytes).toString("utf8"));
+    delete run.updatedAt; delete run.taskSummary;
+    for (const task of run.tasks ?? [])
+      for (const key of ["status", "statusDetail", "lastMessage", "startedAt", "completedAt", "updatedAt"]) delete task[key];
+    return run;
+  };
+  assert.deepEqual(custody(afterBytes), custody(beforeBytes), message);
+}
+
 const originalEndpoints = new WeakMap();
 async function captureOriginalEndpoint(callback, socketPath) {
   assert.equal(originalEndpoints.has(callback), false, "original callback cannot be rebound");
@@ -320,7 +393,6 @@ async function assertOriginalCandidateRetired(callback, args, message) {
 async function waitForOriginalEndpointRetirement(callback, signal) {
   const original = originalEndpoints.get(callback);
   assert.ok(original, "retirement requires original callback endpoint capture");
-  const { lstatSync } = await import("node:fs");
   await new Promise((resolveWait, reject) => {
     let watcher, poll;
     const finish = error => {
@@ -445,7 +517,7 @@ test("repeated and concurrent stop requests preserve the original physical inten
   assert.equal(await readFile(path, "utf8"), "{", "malformed original intent is not overwritten");
 });
 
-test("concurrent first stop publication preserves the winning bytes and inode", { timeout: 30_000 }, async t => {
+test("concurrent first stop publication preserves the winning bytes and inode", { timeout: testMs(30_000) }, async t => {
   const { requestWorkflowStop, workflowStopIntentPath, setRunLeaseTestHooksForTests } =
     await import("../../.tmp/unit/store.js");
   const cwd = await mkdtemp(join(tmpdir(), "goal-stop-first-publication-"));
@@ -501,7 +573,7 @@ test("concurrent first stop publication preserves the winning bytes and inode", 
   }
 });
 
-test("original feedback stop and drain retains in-flight delivery and replacement ownership", { timeout: 30_000 }, async t => {
+test("original feedback stop and drain retains in-flight delivery and replacement ownership", { timeout: testMs(30_000) }, async t => {
   // NONAUTHORITY: local terminal records exercise observer lifetime, not admission.
   const cwd = await mkdtemp(join(tmpdir(), "goal-feedback-drain-"));
   const runId = "original_feedback_drain", sessionId = "feedback-drain-session";
@@ -1059,7 +1131,7 @@ test("AC9 native original reservation creation requires proven exclusive ownersh
   });
 });
 
-test("AC9 original request budget poisons bound currentness failures without refund or invented ACK", { timeout: 30_000 }, async t => {
+test("AC9 original request budget poisons bound currentness failures without refund or invented ACK", { timeout: testMs(30_000) }, async t => {
   const { createGoalRequestBudget, openGoalRequestBudgetChannel } =
     await import("../../.tmp/unit/workflow-goal-workspace-tools.js");
   const { setRunLeaseTestHooksForTests } = await import("../../.tmp/unit/store.js");
@@ -1221,7 +1293,7 @@ test("AC9 original request budget poisons bound currentness failures without ref
   });
 });
 
-test("AC9 request launch admission drains appended generations without blocking healthy in-flight requests", { timeout: 30_000 }, async t => {
+test("AC9 request launch admission drains appended generations without blocking healthy in-flight requests", { timeout: testMs(30_000) }, async t => {
   const { createGoalRequestBudget } = await import("../../.tmp/unit/workflow-goal-workspace-tools.js");
   const deferred = () => {
     let resolve;
@@ -1465,7 +1537,7 @@ const requestPairs = [
   ]),
 ];
 
-test("candidate retirement joins an admitted denial response before closing its connection", { timeout: 30000 }, async t => {
+test("candidate retirement joins an admitted denial response before closing its connection", { timeout: testMs(30_000) }, async t => {
   const { openGoalCandidateToolChannel, registerGoalCandidateTools } = await import("../../.tmp/unit/workflow-goal-workspace-tools.js");
   const { prepareGoalWorkspaceHost } = await import("../../.tmp/unit/goal-workspace-host.js");
   const root = await realpath(await mkdtemp(join(tmpdir(), "goal-candidate-drain-")));
@@ -1523,6 +1595,54 @@ test("candidate retirement joins an admitted denial response before closing its 
   assert.equal(writes, 0);
   assert.equal(await readFile(join(root, "candidate", "a.txt"), "utf8"), "original");
   assert.equal(await readFile(join(root, "origin", "a.txt"), "utf8"), "original");
+});
+
+test("stop refuses candidate callbacks at once although the endpoint file is removed after its drain", { timeout: testMs(30_000) }, async t => {
+  const { openGoalCandidateToolChannel, registerGoalCandidateTools } = await import("../../.tmp/unit/workflow-goal-workspace-tools.js");
+  const { prepareGoalWorkspaceHost } = await import("../../.tmp/unit/goal-workspace-host.js");
+  const root = await realpath(await mkdtemp(join(tmpdir(), "goal-candidate-stop-")));
+  const stop = new AbortController();
+  let channel, inspections = 0, writes = 0;
+  t.after(async () => {
+    stop.abort();
+    await channel?.drain();
+    if (t.passed) await rm(root, { recursive: true, force: true });
+    else console.error(`TEST_ONLY candidate stop evidence retained at ${root}`);
+  });
+  await mkdir(join(root, "origin"));
+  await writeFile(join(root, "origin", "a.txt"), "original");
+  // Physical transport fixture only; this cannot publish or authorize a Goal.
+  const physical = await prepareGoalWorkspaceHost({ originRoot: join(root, "origin"), workspaceRoot: join(root, "candidate"),
+    artifactRoot: join(root, "source-artifacts"),
+    workspaceId: "stop-fixture", repository: "nonGit", mode: "mutation", scope: ["a.txt"], protectedPaths: [] },
+    { assertCurrent: async () => stop.signal.throwIfAborted(), assertLive: () => stop.signal.throwIfAborted() });
+  const workspace = { ...physical,
+    inspectCandidate: async () => { inspections++; return physical.inspectCandidate(); },
+    writeCandidate: async (...args) => { writes++; return physical.writeCandidate(...args); } };
+  channel = await openGoalCandidateToolChannel({ directory: join(root, "rpc"), evidenceRoot: join(root, "artifacts"),
+    tools: ["goal_candidate_read", "goal_candidate_write"], identity: { fixture: "NONAUTHORITY-stop" },
+    attemptKey: "original-attempt", workspace, stopped: stop.signal, assertLive: () => stop.signal.throwIfAborted(),
+    assertCurrent: async () => "NONAUTHORITY-original-attempt" });
+  const tools = new Map();
+  registerGoalCandidateTools({ registerTool(tool) { tools.set(tool.name, tool); }, on() {}, setActiveTools() {} }, channel.channel);
+  const read = (await tools.get("goal_candidate_read").execute("before-stop", { path: "a.txt" }, t.signal)).details;
+  assert.equal(read.status, "ok");
+  const socketPath = channel.channel.socketPath, priorInspections = inspections;
+  stop.abort();
+  // The drain checks the endpoint identity before closing it, so the file is
+  // still present in this tick; it must not grant anything.
+  assert.equal(lstatSync(socketPath).isSocket(), true, "the endpoint file outlives the stop for a moment");
+  const after = await Promise.allSettled([
+    tools.get("goal_candidate_read").execute("after-stop-read", { path: "a.txt" }, t.signal),
+    tools.get("goal_candidate_write").execute("after-stop-write",
+      { path: "a.txt", expectedDigest: read.expectedDigest, content: "must-not-write" }, t.signal)]);
+  for (const outcome of after)
+    assert.ok(outcome.status === "rejected" || outcome.value.details.status !== "ok", JSON.stringify(outcome.value?.details));
+  assert.equal(inspections, priorInspections, "no candidate bytes are inspected after stop");
+  assert.equal(writes, 0);
+  await channel.drain();
+  assert.throws(() => lstatSync(socketPath), { code: "ENOENT" }, "the drained endpoint is gone");
+  assert.equal(await readFile(join(root, "candidate", "a.txt"), "utf8"), "original");
 });
 
 test("NONAUTHORITY candidate page rejects mismatched whole-source line census", async t => {
@@ -1874,7 +1994,7 @@ test(`NONAUTHORITY offline ordinary Goal cold producer exact-root prune acceptan
     const producer = spawnSync(process.execPath, ["--import", resolve("test/e2e/no-external-actions-guard.mjs"),
       "--test", "--test-reporter=tap", `--test-name-pattern=^${ordinaryClosureProducerName}$`, resolve("test/unit/goal-public-runtime.test.mjs")], {
       env: producerEnv,
-      encoding: "utf8", timeout: 60_000, maxBuffer: 8 * 1024 * 1024,
+      encoding: "utf8", timeout: testMs(60_000), maxBuffer: 8 * 1024 * 1024,
     });
     // Join the real producer, including its normal test cleanup; no lease surgery.
     if (existsSync(receiptPath)) cwd = JSON.parse(await readFile(receiptPath, "utf8")).cwd;
@@ -2205,9 +2325,15 @@ test("ordinary run writes preserve published Goal profile evidence across final 
   }
 });
 
-for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget, sourceMode, codex, closure, catalog, rubric, backendLateUnknown, originApply, commandOracle, scopeDirectory, recoveryMode] of [[false, false, false],
+for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget, sourceMode, codex, closure, catalog, rubric, backendLateUnknown, originApply, commandOracle, scopeDirectory, recoveryMode, generationLimit, noProgress] of [[false, false, false],
+  [false, false, false, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true, true, false, undefined, undefined, true],
+  [false, false, false, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true, true, false, undefined, undefined, "plan"],
+  [false, false, false, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true, true, false, undefined, 1],
+  [false, false, false, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true, true, false, "generations-used"],
   [false, false, false, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true, true, true],
   [false, false, false, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true, true, false, true],
+  [false, false, false, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true, "multiple"],
+  [false, false, false, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true, "mixed"],
   [false, false, false, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true, true, false, "cap-used"],
   [false, false, false, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true],
   [false, false, false, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true, true],
@@ -2225,11 +2351,12 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
   // 6=initial A/B + two B continuations + final; 7 leaves one request beyond
   // the eviction fixture's six physical sends; 10=planner + worker + two
   // four-turn verifiers; 12 is two complete six-request generations.
-  ...["success", "malformed", "output repair", "output repair exhausted", "worker output repair", "model criterion echo", "old exact hash echo", "human", "warm",
+  ...["success", "malformed", "output repair", "output repair exhausted", "output repair twice invalid", "worker output repair", "planner output repair", "model criterion echo", "old exact hash echo", "human", "warm",
     "source-empty-analysis", "source-whitespace-analysis", "source-missing-analysis",
     "source-tampered-content", "source-custody-revoked-after-native",
     "source-payload-replaced", "source-payload-mutated"].map(mode =>
-    [false, false, false, undefined, false, mode === "output repair" ? 10 : mode === "worker output repair" ? 7 : 6,
+    [false, false, false, undefined, false, mode === "output repair" || mode === "output repair twice invalid" ? 10 :
+      mode === "worker output repair" || mode === "planner output repair" ? 7 : 6,
       undefined, false, false, undefined, `native source-complete ${mode}`]),
   [false, false, false, undefined, false, 3, undefined, false, false, undefined,
     "native source-complete source-no-coverage"],
@@ -2385,7 +2512,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
   [false, false, false, undefined, false, "accounting-ack"],
   [false, false, false, undefined, false, 5, "no-read", false, false, "foreach actual backend late UNKNOWN", undefined, true],
   [false, false, false, undefined, false, 0], [false, false, false, undefined, false, "cost0"],
-  [false, false, false, undefined, false, "cost1"]]) test(backendLateUnknown ? "ordinary Goal actual backend late UNKNOWN blocks queued second native API before provider launch" : rubric ? `ordinary Goal original SDK model rubric ${rubric}${rubric === "warm" || rubric === "replan warm" ? " same-live reattachment retains the original captured profile" : ""}${originApply ? " with origin apply" : ""}` : catalog === "ordinary child maxDepth one" ? "ordinary child maxDepth one runs plain artifact graph" : catalog ? `ordinary Goal admitted catalog ${typeof catalog === "string" && catalog.startsWith("children ") ? catalog : `child ${typeof catalog === "string" ? catalog : requestBudget === 2 ? "success" : "exhausted root cap"}`}` : closure ? ordinaryClosureProducerName : `ordinary candidate workers invoke admitted physical callbacks and preserve bytes across replan${codex ? " with captured Codex SSE" : ""}${sourceMode ? ` with scoped source ${sourceMode}` : ""}${uncertain ? " with UNKNOWN outcome" : ""}${custom ? " with explicit custom agent" : ""}${warm ? " with explicit same-live-session resume" : ""}${evidenceFailure ? ` with evidence ${evidenceFailure}` : ""}${commandMode ? " through registered Goal commands" : ""}${requestBudget !== undefined ? ` with native request budget ${requestBudget}` : ""}${originApply ? " with origin apply" : ""}${commandOracle ? " judged by a sandboxed command" : ""}${scopeDirectory ? " refuses a directory scope before consent" : ""}${recoveryMode ? ` recovering an interrupted run${recoveryMode === "cap-used" ? " whose requests used the cap" : ""}` : ""}`, { timeout: backendLateUnknown || rubric || catalog || requestBudget === "candidate-policy-configuration-custody" || warm && commandMode ? 30_000 : undefined }, async t => {
+  [false, false, false, undefined, false, "cost1"]]) test(backendLateUnknown ? "ordinary Goal actual backend late UNKNOWN blocks queued second native API before provider launch" : rubric ? `ordinary Goal original SDK model rubric ${rubric}${rubric === "warm" || rubric === "replan warm" ? " same-live reattachment retains the original captured profile" : ""}${originApply ? " with origin apply" : ""}` : catalog === "ordinary child maxDepth one" ? "ordinary child maxDepth one runs plain artifact graph" : catalog ? `ordinary Goal admitted catalog ${typeof catalog === "string" && catalog.startsWith("children ") ? catalog : `child ${typeof catalog === "string" ? catalog : requestBudget === 2 ? "success" : "exhausted root cap"}`}` : closure ? ordinaryClosureProducerName : `ordinary candidate workers invoke admitted physical callbacks and preserve bytes across replan${codex ? " with captured Codex SSE" : ""}${sourceMode ? ` with scoped source ${sourceMode}` : ""}${uncertain ? " with UNKNOWN outcome" : ""}${custom ? " with explicit custom agent" : ""}${warm ? " with explicit same-live-session resume" : ""}${evidenceFailure ? ` with evidence ${evidenceFailure}` : ""}${commandMode ? " through registered Goal commands" : ""}${requestBudget !== undefined ? ` with native request budget ${requestBudget}` : ""}${originApply ? " with origin apply" : ""}${commandOracle ? ` judged by ${commandOracle === "multiple" ? "two sandboxed commands" : commandOracle === "mixed" ? "a sandboxed command and an exact value" : "a sandboxed command"}` : ""}${scopeDirectory ? " refuses a directory scope before consent" : ""}${recoveryMode ? ` recovering an interrupted run${recoveryMode === "cap-used" ? " whose requests used the cap" : recoveryMode === "generations-used" ? " whose generations used the limit" : ""}` : ""}${generationLimit ? ` stopped by a generation limit of ${generationLimit}` : ""}${noProgress === "plan" ? " stopped when the plan repeats" : noProgress ? " stopped when a failed candidate repeats" : ""}`, { timeout: backendLateUnknown || rubric || catalog || requestBudget === "candidate-policy-configuration-custody" || warm && commandMode ? testMs(30_000) : undefined }, async t => {
   const { runWorkflowSpec, stopRun, resumeRun, stopWorkflowWatchersForTests } = await import("../../.tmp/unit/engine.js");
   const closureGenerations = closure === "replan-three-criteria" ? 3 : closure === "replan" ? 2 : 1;
   const { readRunRecord, readCompiledWorkflow, supervisorPath, flushPendingIndexUpdatesForTests } = await import("../../.tmp/unit/store.js");
@@ -2433,9 +2560,10 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
     nativeReadonlyResearch ? 6 :
     verifierProfileException ? 10 :
     // planner + worker + two complete four-turn verifier attempts.
-    rubricMode === "output repair" ? 10 :
-    // planner + two candidate worker attempts + one four-turn verifier.
-    rubricMode === "worker output repair" ? 7 :
+    rubricMode === "output repair" || rubricMode === "output repair twice invalid" ? 10 :
+    // planner + two candidate worker attempts + one four-turn verifier
+    // (or two planner attempts + worker + verifier).
+    rubricMode === "worker output repair" || rubricMode === "planner output repair" ? 7 :
     rubricReplan ? 12 :
     rubricMode === "source-native-evicted" ? 7 :
     rubricMode === "source-no-coverage" ? 3 :
@@ -2572,6 +2700,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
   let candidatePolicyTamperedRun;
   const candidatePolicyRejection = candidatePolicyConfigurationCustody ? Promise.withResolvers() : undefined;
   const cwd = await realpath(await mkdtemp(join(closure ? dirname(process.env.PIWF_TEST_ORDINARY_CLOSURE_RECEIPT) : tmpdir(), "goal-coding-callback-")));
+  const goalFence = goalSessionFence(t);
   let run, closureReceipt, childStartedResolve, releaseChild, stoppedChild, lateChildSend, lateChildRejection;
   let observeOriginalChildStop, retainedOriginalChildStop;
   let observeParentGoalReentry;
@@ -2823,11 +2952,11 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       await stopRun(cwd, run.runId);
     stopSettled = true;
   } finally {
-    await joinNativeCallbacks();
-    if (run) await stopWorkflowFeedbackAndDrainForTests(cwd, run.runId);
-    await stopWorkflowWatchersForTests([cwd]);
-    await joinNativeCallbacks();
-    await stopWorkflowWatchersForTests([cwd]);
+    await joinAfterFailure(t, "native callback join", joinNativeCallbacks());
+    if (run) await joinAfterFailure(t, "feedback drain", stopWorkflowFeedbackAndDrainForTests(cwd, run.runId));
+    await joinAfterFailure(t, "watcher stop", stopWorkflowWatchersForTests([cwd]));
+    await joinAfterFailure(t, "final native callback join", joinNativeCallbacks());
+    await joinAfterFailure(t, "final watcher stop", stopWorkflowWatchersForTests([cwd]));
     setRunLeaseTestHooksForTests(); setSubagentApiForTests(undefined);
     await flushPendingIndexUpdatesForTests();
     if (t.passed === true && stopSettled && !closureReceipt && !expectedUnknownStop &&
@@ -2915,6 +3044,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
   await writeFile(join(cwd, "protected.txt"), "protected");
   const handlers = new Map();
   const session = installGoalHostSessionIssuer({ on(name, fn) { handlers.set(name, fn); } });
+  goalFence.own(handlers.get("session_shutdown"));
   await handlers.get("session_start")({}, { cwd, sessionManager: {
     getSessionId: () => "coding-session", getSessionFile: () => join(cwd, "session.jsonl"), getCwd: () => cwd,
   } });
@@ -2934,7 +3064,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
   }
   const budgetModel = codex ? codexFixtureModel : "openai/gpt-5.1";
   const rubricModel = "openai/gpt-5.2", rubricOutputs = [], rubricCandidateReads = [], rubricUsage = [];
-  let workerOutputRepairAttempts = 0, commandOracleReplans = 0, recoveryPlannerPrompts = 0, temporaryDirectoriesBefore;
+  let workerOutputRepairAttempts = 0, plannerOutputRepairAttempts = 0, commandOracleReplans = 0, recoveryPlannerPrompts = 0, temporaryDirectoriesBefore;
   const rubricDigest = "Evaluated the immutable worker subject against the authored rubric.";
   const nativeSourceVerifierEvidence = [];
   let oldReplanNativeFailureEvidence;
@@ -3028,8 +3158,18 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
     kind: "deterministic", producerId: "command-exit-v1", target: "candidate",
     subject: { resultSlot: "result", artifact: "control" },
     config: { argv: [process.execPath, "-e",
-      "const v=require('fs').readFileSync('a.txt','utf8'); console.log('candidate='+v); process.exit(v==='correct'?0:3)"],
+      // A failing run is noisy (more than the retained tail) and multibyte, like a real test suite.
+      "const v=require('fs').readFileSync('a.txt','utf8'); if (v!=='correct') console.log('é'.repeat(12000)+'x'.repeat(20000)); console.log('candidate='+v); process.exit(v==='correct'?0:3)"],
       timeoutMs: 30000 } };
+  // Every criterion must be met: a second always-passing command, or the exact
+  // candidate value next to the command.
+  if (commandOracle === "multiple") definition.goal.criteria.push({ id: "lint", verifier: {
+    kind: "deterministic", producerId: "command-exit-v1", target: "candidate", subject: { resultSlot: "result", artifact: "control" },
+    config: { argv: [process.execPath, "-e", "console.log('lint ok')"] } } });
+  if (commandOracle === "mixed") definition.goal.criteria.push({ id: "value", verifier: { kind: "deterministic",
+    producerId: "json-exact-value-v1", target: "artifact",
+    subject: { resultSlot: "result", artifact: "control", path: "$.candidate.files[0].value.hex" },
+    config: { comparison: "canonical-json-equality", expected: Buffer.from("correct").toString("hex") } } });
   if (sourceMode) {
     definition.goal.objective = "Research the admitted source; evaluate the original research result, not mere source access";
     definition.goal.criteria[0].verifier.subject.path = "$.result.accepted";
@@ -3197,6 +3337,8 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
   if (requestBudget === "empty") definition.goal.limits = {};
   if (requestBudget === "cost0" || requestBudget === "cost1") definition.goal.limits = { requests: null, costMicros: requestBudget === "cost0" ? 0 : 1 };
   if (recoveryMode === "cap-used") definition.goal.limits = { requests: 2 };
+  if (recoveryMode === "generations-used") definition.goal.limits = { generations: 1 };
+  if (generationLimit) definition.goal.limits = { generations: generationLimit };
   await writeFile(join(cwd, "goal.json"), JSON.stringify(definition));
   let recoveryPlan;
   if (recoveryMode) {
@@ -3392,6 +3534,8 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
   if (commandMode || rubric || foreachProfileException) (await import("@earendil-works/pi-coding-agent")).initTheme(undefined, false);
   workflowExtension({ on(name, fn) { const listeners = commandHandlers.get(name) ?? []; listeners.push(fn); commandHandlers.set(name, listeners); },
     registerCommand(name, value) { commands.set(name, value); }, registerTool(value) { commandTools.set(value.name, value); }, getThinkingLevel() { runtimeCaptures++; return "high"; }, sendMessage() {} });
+  // The extension installs its Goal host session issuer first (before UI handlers).
+  goalFence.own(commandHandlers.get("session_shutdown")?.[0], () => commandContext);
   let commandSessionId = "coding-command-session";
   const commandContext = { cwd, hasUI: true, mode: "tui", model: { provider: "fixture", id: "model" },
     modelRegistry: { getAvailable: () => host.availableModels },
@@ -3534,7 +3678,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       payloads: foreachProfileExceptionSdkPayloadEvidence,
     }, effectsAtRequestBoundary,
     "denial adds no remint, retry, provider request, candidate write, or profile append");
-    assert.deepEqual(await readFile(parentRunFile), parentBefore);
+    assertParentGoalCustodyUnchanged(await readFile(parentRunFile), parentBefore);
     assert.deepEqual((await readRunRecord(cwd, actualRun.parentRunId)).tasks
       .find(task => task.goalProfileConfiguration).goalProfileConfiguration,
     parentConfigurationBefore);
@@ -4117,7 +4261,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
                 const firstEntry = await Promise.race([verifierFirstSdkEntered.promise, cancelled]);
                 assert.equal(firstEntry.runId, basename(dirname(lockFile)),
                   "the owned supervisor release belongs to the root whose first verifier entered the SDK");
-                const deadline = Date.now() + 2_000;
+                const deadline = Date.now() + testMs(2_000);
                 let physicallyReleased = false;
                 do {
                   try {
@@ -4429,7 +4573,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
             setImmediate(async () => {
               try {
                 t.signal.throwIfAborted();
-                const deadline = Date.now() + 2_000;
+                const deadline = Date.now() + testMs(2_000);
                 let physicallyReleased = false;
                 do {
                   const locks = [lockFile, join(cwd, ".pi", "workflows",
@@ -5396,7 +5540,10 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
             }
           }
         }
-        const canonical = source.tasks[taskIndex];
+        // Correlate by identity: run-record and compiled task order can differ
+        // once foreach items are materialized.
+        const canonical = source.tasks.find(task => task.id === owner.tasks[taskIndex].specId);
+        assert.ok(canonical, "the launched task has its compiled source");
         if (verifierProfileException && separateLaunchAcceptance) {
           assert.equal(operationalVerifierLaunch, true);
           assert.equal(originalGenerations.at(-1).verifiers["sibling-quality"], canonical.id);
@@ -5956,7 +6103,8 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
                   : `<control>\n${JSON.stringify(result)}\n</control>\n<analysis>\n${analysis}\n</analysis>\n<refs>\n[]\n</refs>`;
                 // A truncated verifier envelope is never a verdict; the first
                 // attempt is repaired once within the request cap.
-                if (rubricMode?.startsWith("output repair") && rubricOutputs.length === 1)
+                if (rubricMode?.startsWith("output repair") &&
+                    (rubricOutputs.length === 1 || rubricMode === "output repair twice invalid"))
                   return goalBudgetSSE(true, `<control>\n${JSON.stringify(result)}\n</control>\n<analysis>\nTruncated verifier trace`,
                     { input_tokens: 7, output_tokens: 11, total_tokens: 18 });
                 return goalBudgetSSE(true, rubricOutput,
@@ -6073,8 +6221,8 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
                       payloads: foreachProfileExceptionSdkPayloadEvidence,
                     }, effectsBeforeDenial,
                     "denial launches no profile candidate, provider request, or additional write");
-                    assert.deepEqual(await readFile(parentRunFile), parentBefore,
-                      "denial preserves the original parent run and profile history bytes");
+                    assertParentGoalCustodyUnchanged(await readFile(parentRunFile), parentBefore,
+                      "denial preserves the original parent run and profile history");
                     assert.deepEqual((await readRunRecord(cwd, actualRun.parentRunId)).tasks
                       .find(task => task.goalProfileConfiguration).goalProfileConfiguration,
                     parentConfigurationBefore, "denial appends no accepted profile revision");
@@ -7221,7 +7369,8 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
         }
         // A repair attempt continues the same candidate its rejected attempt wrote.
         const workerRepairAttempt = rubricMode === "worker output repair" && workerOutputRepairAttempts === 1;
-        assert.equal(candidateReadHex(before), Buffer.from(workerRepairAttempt ? "correct" : writes ? "wrong" :
+        assert.equal(candidateReadHex(before), Buffer.from(noProgress ? ["original", "wrong-a", "wrong-b"][writes] :
+          workerRepairAttempt ? "correct" : writes ? "wrong" :
           recoveryPlan ? "partial" : "original").toString("hex"),
           recoveryPlan && !writes ? "a recovered Goal's first worker starts from the interrupted candidate" : "candidate survives replan");
         for (const path of ["../a.txt", "/a.txt", "protected.txt", "foreign.txt", "é.txt"]) {
@@ -7237,7 +7386,8 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
             if (!failed && file.includes("candidate-operations")) { failed = true; throw new Error("injected integrated outcome failure"); }
           } });
         }
-        const content = rubric && !rubricReplan && !humanReplan || candidateSequentialWarm || writes ? "correct" : "wrong";
+        const content = noProgress ? (noProgress === "plan" ? ["wrong-a", "wrong-b", "wrong-c"] : ["wrong-a", "wrong-b", "wrong-a"])[writes] :
+          rubric && !rubricReplan && !humanReplan || candidateSequentialWarm || writes ? "correct" : "wrong";
         let restoreCandidateWriteObserver, candidateWriteObserverError;
         if (candidatePolicyConfigurationCustody) {
           const rootRecord = (await (await import("../../.tmp/unit/store.js")).listRunRecords(cwd))
@@ -7421,7 +7571,8 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
               "Produce the first measured progress item and keep the steady criterion true",
               "Add an independently corroborating second item after the first incomplete result",
               "Reconcile the third item against both prior observations after the second incomplete result",
-            ][writes] : writes ? "Correct previous physical candidate" : "Write initial physical candidate",
+            ][writes] : noProgress === true ? `Attempt ${writes} at a physical candidate` :
+              writes ? "Correct previous physical candidate" : "Write initial physical candidate",
             ...(catalog &&
               !(mixedCatalog && criterion.verifier.subject.resultSlot === "second")
               ? { workflow: criterion.verifier.subject.resultSlot === "second" ? "second" : "declared" } : {}) })) };
@@ -7430,7 +7581,9 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       await mkdir(artifactDir, { recursive: true });
       // The first candidate worker envelope omits its control and is repaired once.
       const invalidWorkerEnvelope = rubricMode === "worker output repair" &&
-        control?.schema === "untrusted-claim-v1" && workerOutputRepairAttempts++ === 0;
+        control?.schema === "untrusted-claim-v1" && workerOutputRepairAttempts++ === 0 ||
+        // The first planner envelope omits its control and is repaired once, not replanned.
+        rubricMode === "planner output repair" && control?.schema === "goal-root-plan-v1" && plannerOutputRepairAttempts++ === 0;
       await writeFile(join(artifactDir, "output.log"), invalidWorkerEnvelope
         ? "<analysis>\nWorker forgot its control\n</analysis>\n<refs>\n[]\n</refs>"
         : rubricOutput ?? `<control>\n${JSON.stringify(control)}\n</control>\n<analysis>\nActual offline callbacks\n</analysis>\n<refs>\n[]\n</refs>`);
@@ -7542,6 +7695,13 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
     assert.equal(await readFile(join(cwd, "a.txt"), "utf8"), "original");
     assert.equal(await readFile(join(cwd, "protected.txt"), "utf8"), "protected");
     assert.deepEqual(await Promise.all(["goal.json", "child.json"].map(name => readFile(join(cwd, name)))), immutableCatalogBytes);
+    return;
+  }
+  if (recoveryMode === "generations-used") {
+    await assert.rejects(runWorkflowSpec(join(cwd, "goal.json"), cwd, { goalPolicyHost: host, executionProfile: "captured",
+      goalRecovery: recoveryPlan }), /Goal generation limit 1 is already used by interrupted run workflow_mvzolder_000000 \(1 generations\)/);
+    assert.equal(confirmations, 0, "a recovery never extends the generation limit");
+    assert.equal(calls.length, 0); assert.equal(writes, 0);
     return;
   }
   if (recoveryMode === "cap-used") {
@@ -7939,9 +8099,10 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
   }
   if (recoveryPlan) {
     const { goalRecoveryPreview } = await import("../../.tmp/unit/goal-workflow-recovery.js");
-    assert.deepEqual(originalPreview.recovery, goalRecoveryPreview(recoveryPlan, null), "consent shows the recovery");
+    assert.deepEqual(originalPreview.recovery, goalRecoveryPreview(recoveryPlan, null, 10), "consent shows the recovery");
+    assert.equal(originalPreview.generationLimit, 10, "consent shows the default generation limit");
     assert.deepEqual((await readRunRecord(cwd, run.runId)).goalRecovery, { fromRunId: "workflow_mvzolder_000000",
-      priorRequests: 2, feedbackGeneration: 0, seededPaths: ["a.txt"] });
+      priorRequests: 2, priorGenerations: 1, feedbackGeneration: 0, seededPaths: ["a.txt"] });
     assert.equal(recoveryPlannerPrompts, 1, "only the first planner carries the recovery note");
   }
   async function assertBackendLateUnknown() {
@@ -8094,7 +8255,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
     const engine = await import("../../.tmp/unit/engine.js");
     const runtime = await import("../../.tmp/unit/goal-workflow-runtime.js");
     const { readArtifactGraphControl } = await import("../../.tmp/unit/artifact-graph-runtime.js");
-    const deadline = Date.now() + 15_000;
+    const deadline = Date.now() + testMs(15_000);
     while (Date.now() < deadline && !run.tasks.some(task => task.statusDetail === "goal_waiting_user")) {
       await new Promise(resolve => setTimeout(resolve, 25));
       run = await readRunRecord(cwd, run.runId);
@@ -8514,7 +8675,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
         assert.equal(await readFile(${JSON.stringify(file)}, 'utf8'), ${JSON.stringify(bytes)});
         assert.equal(await readFile(${JSON.stringify(recordPath)}, 'utf8'), ${JSON.stringify(recordBytes)});
         console.log('cold accepted human claim unattested');
-      `], { encoding: "utf8", timeout: 10_000 });
+      `], { encoding: "utf8", timeout: testMs(10_000) });
       assert.equal(cold.status, 0, cold.stderr);
       assert.match(cold.stdout, /cold accepted human claim unattested/);
       assert.equal(await readFile(file, "utf8"), bytes);
@@ -10945,7 +11106,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
     return;
   }
   if (warm) {
-    const readyDeadline = Date.now() + 10_000;
+    const readyDeadline = Date.now() + testMs(10_000);
     while (Date.now() < readyDeadline) {
       run = await readRunRecord(cwd, run.runId);
       if (writes === 1 && run.tasks.some(task => task.status === "running" &&
@@ -11027,6 +11188,11 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
     assert.equal(run.status, "interrupted");
     const stoppedWorker = run.tasks.find(task => task.taskId === originalWorker.taskId);
     assert.equal(stoppedWorker.durableLaunchBarrier.records.at(-1).phase, "cancellation_acknowledged");
+    // Stop refuses old callbacks at once (the endpoint drops new connections);
+    // the endpoint file is removed when its drain finishes, which can lag the
+    // returned stop under load.
+    await assert.rejects(oldRead({ path: "a.txt" }), "root stop at once refuses old callbacks");
+    await waitForOriginalEndpointRetirement(oldRead, AbortSignal.any([t.signal, AbortSignal.timeout(testMs(10_000))]));
     await assertOriginalCandidateRetired(oldRead, [{ path: "a.txt" }], "root stop permanently invalidates old callbacks");
     // Join the original interrupted writer after genuine stop feedback, not a
     // manufactured retention lease. Warm resume below still uses its admission.
@@ -11087,12 +11253,13 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       "--input-type=module", "--eval", `import { resumeRun } from ${JSON.stringify(pathToFileURL(resolve(".tmp/unit/engine.js")).href)};
         try { await resumeRun(${JSON.stringify(cwd)}, ${JSON.stringify(run.runId)}); process.exitCode = 1; }
         catch (error) { if (!/original same-live-session host/.test(String(error))) throw error; console.log("cold resume denied"); }`],
-      { encoding: "utf8", timeout: 10_000 });
+      { encoding: "utf8", timeout: testMs(10_000) });
     assert.equal(cold.status, 0, cold.stderr);
     assert.match(cold.stdout, /cold resume denied/);
     assert.equal(await readFile(recordPath, "utf8"), originalRecord, "cold process cannot reset durable tasks");
     const foreignHandlers = new Map();
     const foreignSession = installGoalHostSessionIssuer({ on(name, handler) { foreignHandlers.set(name, handler); } });
+    goalFence.own(foreignHandlers.get("session_shutdown"));
     await foreignHandlers.get("session_start")({}, { cwd, sessionManager: {
       getSessionId: () => "foreign-coding-session", getSessionFile: () => join(cwd, "foreign-session.jsonl"), getCwd: () => cwd,
     } });
@@ -11263,7 +11430,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
   }
   function watchOriginalDurableTerminal(originalRunId) {
     return new Promise((resolveRun, rejectRun) => {
-    const deadline = Date.now() + 20_000;
+    const deadline = Date.now() + testMs(20_000);
     let watcher;
     let timer;
     let inspecting = false;
@@ -11287,7 +11454,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
     watcher = watch(join(cwd, ".pi", "workflows", originalRunId), () => { void inspect(); });
     watcher.once("error", error => finish(error));
     t.signal.addEventListener("abort", abort, { once: true });
-    timer = setTimeout(() => finish(new Error(`original durable run did not terminate within 20000ms: ${originalRunId}`)),
+    timer = setTimeout(() => finish(new Error(`original durable run did not terminate within ${testMs(20_000)}ms: ${originalRunId}`)),
       Math.max(0, deadline - Date.now()));
     if (t.signal.aborted) abort(); else void inspect();
     });
@@ -11295,7 +11462,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
   function watchOriginalTerminalAndFeedback(originalRunId, feedback,
     { executionWithinOuterDeadline = false } = {}) {
     return new Promise((resolveObservation, rejectObservation) => {
-      const deadline = executionWithinOuterDeadline ? undefined : Date.now() + 20_000;
+      const deadline = executionWithinOuterDeadline ? undefined : Date.now() + testMs(20_000);
       let watcher;
       let timer;
       let inspecting = false;
@@ -11315,8 +11482,8 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       const armNoticeDeadline = () => {
         if (timer) return;
         timer = setTimeout(() => finish(new Error(
-          `original run terminal/feedback did not both arrive within 20000ms: ${originalRunId}`)),
-        Math.max(0, (deadline ?? Date.now() + 20_000) - Date.now()));
+          `original run terminal/feedback did not both arrive within ${testMs(20_000)}ms: ${originalRunId}`)),
+        Math.max(0, (deadline ?? Date.now() + testMs(20_000)) - Date.now()));
       };
       const inspect = async () => {
         if (inspecting || observedRun) return;
@@ -11401,7 +11568,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
         stage = "original-root-terminal-feedback";
       }
       if (!staticChildSdkUncertainty && !staticProfileBridgeCustodyUncertainty) {
-        const deadline = Date.now() + 20_000;
+        const deadline = Date.now() + testMs(20_000);
         do {
           await new Promise(resolve => setTimeout(resolve, 10));
           run = await readRunRecord(cwd, run.runId);
@@ -11426,7 +11593,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
     });
     const deadline = new Promise((_, reject) => {
       custodyTimer = setTimeout(() =>
-        reject(new Error("Original owner revocation and durable failure did not settle within 20000ms")), 20_000);
+        reject(new Error(`Original owner revocation and durable failure did not settle within ${testMs(20_000)}ms`)), testMs(20_000));
     });
     try {
       const evidence = await Promise.race([
@@ -11597,7 +11764,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       await joinNativeCallbacks();
       joinedReplanCompletion = true;
     } else {
-      const deadline = Date.now() + 20_000;
+      const deadline = Date.now() + testMs(20_000);
       while (Date.now() < deadline && run.tasks.some(task => ["pending", "running"].includes(task.status))) {
         await new Promise(resolve => setTimeout(resolve, 100));
         run = await readRunRecord(cwd, run.runId);
@@ -11613,6 +11780,58 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       `original watcher did not publish terminal run state after callback join: ${JSON.stringify(run.tasks.map(task => ({
         specId: task.specId, status: task.status, detail: task.statusDetail, message: task.lastMessage,
       })))}`);
+  if (noProgress) {
+    await joinNativeCallbacks();
+    const root = run.tasks.find(task => task.goalRoot);
+    const diagnostic = JSON.stringify(run.tasks.map(task => [task.specId, task.status, task.statusDetail, task.lastMessage]));
+    assert.notEqual(root.goal?.state, "engine:achieved", diagnostic);
+    if (noProgress === "plan") {
+      assert.match(root.lastMessage ?? "", /Root replan exhausted: unchanged prior plan/, diagnostic);
+      assert.equal(writes, 2, "the repeated plan never reaches a worker");
+    } else {
+      assert.match(root.lastMessage ?? "", /Root replan exhausted: unchanged failed candidate/, diagnostic);
+      assert.equal(root.goalRoot.generations.length, 3, "A, B, then A again: the repeat ends replanning");
+      assert.equal(writes, 3);
+      assert.equal(commandOracleReplans, 2, "each new candidate was judged and fed back");
+    }
+    assert.equal(await readFile(join(cwd, "a.txt"), "utf8"), "original", "nothing is applied");
+    if (noProgress === true) {
+      // The exhausted Goal can be recovered; declining that consent changes nothing.
+      const { listRunRecords: listRuns } = await import("../../.tmp/unit/store.js");
+      const runsBefore = (await listRuns(cwd)).map(record => record.runId).sort();
+      let recoverPreview;
+      const declining = { ...commandContext, ui: { ...commandContext.ui, confirm: async (title, text) => {
+        if (title !== "Confirm Goal execution") return true;
+        recoverPreview = JSON.parse(text);
+        return false;
+      } } };
+      // The original run deliberately rewrote its project agent after consent;
+      // a recovery captures agents afresh, so restore the bundled one.
+      await rm(join(cwd, ".pi", "agents", `${chosenName}.md`), { force: true });
+      // A fresh interactive command session, as after reopening Pi.
+      for (const fn of commandHandlers.get("session_start") ?? []) await fn({}, commandContext);
+      const message = await invoke(`recover ${run.runId}`, declining);
+      assert.match(message, /confirmation cancelled; no workflow run was created/, message);
+      assert.equal(recoverPreview?.recovery?.fromRunId, run.runId, "the recovery consent showed what is carried over");
+      assert.equal(recoverPreview.recovery.priorGenerations, 3);
+      assert.deepEqual((await listRuns(cwd)).map(record => record.runId).sort(), runsBefore, "no run was created");
+      const runDir = join(cwd, ".pi", "workflows", run.runId);
+      assert.equal(existsSync(join(runDir, "goal-recovery.json")), false, "no recovery marker");
+      assert.equal(existsSync(join(runDir, "goal-recovery.lock")), false, "the recovery claim was released");
+    }
+    return;
+  }
+  if (generationLimit) {
+    await joinNativeCallbacks();
+    const root = run.tasks.find(task => task.goalRoot);
+    const diagnostic = JSON.stringify(run.tasks.map(task => [task.specId, task.status, task.statusDetail, task.lastMessage]));
+    assert.notEqual(root.goal?.state, "engine:achieved", diagnostic);
+    assert.equal(root.goalRoot.generations.length, generationLimit, "no generation beyond the limit is planned");
+    assert.match(root.lastMessage ?? "", /generation limit \(1\) reached/, diagnostic);
+    assert.equal(await readFile(join(cwd, "a.txt"), "utf8"), "original", "an exhausted Goal applies nothing");
+    assert.equal(writes, 1, "only the first generation's worker wrote");
+    return;
+  }
   if (backendLateUnknown) {
     await joinNativeCallbacks();
     for (const callback of nativeCallbacks.values()) {
@@ -11754,7 +11973,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       const result = await readOrdinaryWorkflowGoal(cwd,'evidence',run,tasks);
       assert.equal(result.policies[0].criteria[0].verdict,'met');
       assert.equal(result.policies[0].exactEvidenceAvailability,'persisted');
-      console.log('cold persisted child observation only');`], { encoding: "utf8", timeout: 10_000 });
+      console.log('cold persisted child observation only');`], { encoding: "utf8", timeout: testMs(10_000) });
     assert.equal(cold.status, 0, cold.stderr);
     assert.match(cold.stdout, /cold persisted child observation only/);
     assert.deepEqual(await readFile(receiptFile), bytes);
@@ -12246,7 +12465,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
             assert.equal(result.policies[0].exactEvidenceAvailability, "persisted");
           }
           console.log("cold readonly research evidence accepted");
-        `], { encoding: "utf8", timeout: 10_000 });
+        `], { encoding: "utf8", timeout: testMs(10_000) });
       assert.equal(cold.status, 0, cold.stderr);
       assert.match(cold.stdout,
         /cold readonly research evidence accepted/);
@@ -12259,6 +12478,18 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       assert.deepEqual(await readFile(join(cwd, ".pi", "workflows",
         run.runId, "dynamic", "events.jsonl")), immutableDynamicEventBytes,
       "cold criteria/evidence reads preserve the exact original generated history");
+      return;
+    }
+    if (nativeSourceComplete && rubricMode === "planner output repair") {
+      const planner = run.tasks.find(task => task.specId === root.goalRoot.generations[0].plannerSpecId);
+      assert.ok(planner, diagnostic);
+      assert.equal(run.status, "completed", diagnostic);
+      assert.equal(root.goal?.state, "engine:achieved", diagnostic);
+      assert.equal(root.goalRoot.generations.length, 1, "a planner repair is not a replan");
+      assert.equal(planner.outputRetry?.attempts, 1, "exactly one repair attempt produced the plan");
+      assert.ok(existsSync(join(cwd, dirname(planner.files.result), "result.invalid-attempt-1.json")));
+      assert.equal(plannerOutputRepairAttempts, 2);
+      assert.equal(budgetPhysicalRequests, 7, "two planner attempts, worker and one four-turn verifier");
       return;
     }
     if (nativeSourceComplete && rubricMode === "worker output repair") {
@@ -12277,6 +12508,15 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       const verifier = run.tasks.find(task =>
         Object.values(root.goalRoot.generations[0].verifiers ?? {}).includes(task.specId));
       assert.ok(verifier, diagnostic);
+      if (rubricMode === "output repair twice invalid") {
+        assert.equal(verifier.status, "blocked", diagnostic);
+        assert.equal(verifier.statusDetail, "goal_candidate_artifact_unknown", diagnostic);
+        assert.match(verifier.lastMessage, /Goal output repair limit \(1\) reached/, diagnostic);
+        assert.notEqual(root.goal?.state, "engine:achieved", diagnostic);
+        assert.equal(rubricOutputs.length, 2, "exactly one repair is attempted even with budget left");
+        assert.equal(budgetPhysicalRequests, 10, diagnostic);
+        return;
+      }
       if (rubricMode === "output repair exhausted") {
         assert.equal(verifier.status, "blocked", diagnostic);
         assert.equal(verifier.statusDetail, "goal_candidate_artifact_unknown", diagnostic);
@@ -12602,13 +12842,19 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
             sent: true,
             commitmentPresent: true,
           }, "the original request diagnostic preserves the post-send source-admission cause");
-          const originDriftReason = "Goal protected origin inputs, HEAD, index, or bytes drifted";
-          assert.ok(denialReason === originDriftReason ||
-            denialReason === "Goal authenticated frame truncated or trailing" &&
+          // The tampered origin file is caught either by the whole-origin
+          // comparison or, when the write lands mid-read, by that file's own
+          // observation; the lost settlement frame surfaces as a truncated
+          // frame or a closed stream. All are the same fail-closed outcome.
+          const originDrift = reason => reason === "Goal protected origin inputs, HEAD, index, or bytes drifted" ||
+            reason === "Goal path changed during observation: b.txt";
+          assert.ok(originDrift(denialReason) ||
+            ["Goal authenticated frame truncated or trailing", "Goal authenticated stream closed"].includes(denialReason) &&
             nativeRequestDiagnostics.some(event =>
               event.phase === "observer-retired" &&
-              event.attemptKey === denial.attemptKey && event.reason === originDriftReason),
-          "a lost settlement frame requires the same original observer's explicit origin-drift retirement");
+              event.attemptKey === denial.attemptKey && originDrift(event.reason)),
+          `a lost settlement frame requires the same original observer's explicit origin-drift retirement: ${JSON.stringify({
+            denialReason, events: nativeRequestDiagnostics.filter(event => event.attemptKey === denial?.attemptKey) })}`);
           assert.equal(nativeRequestDiagnostics.some(event =>
             event.attemptKey === deniedVerifier.launchAuthority.records.at(-1).grant.attemptKey &&
             event.reason === "Goal request cap exhausted"), false,
@@ -14833,7 +15079,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
           import { refreshRun, resumeRun } from ${JSON.stringify(pathToFileURL(resolve(".tmp/unit/engine.js")).href)};
           await assert.rejects(refreshRun(${JSON.stringify(cwd)}, ${JSON.stringify(child.runId)}), /Goal child cold\\/plain refresh has no original live admission/);
           await assert.rejects(resumeRun(${JSON.stringify(cwd)}, ${JSON.stringify(child.runId)}), /Goal child explicit\\/plain recovery cannot restore original reserved admission/);
-          console.log("cold child recovery denied");`], { encoding: "utf8", timeout: 10_000 });
+          console.log("cold child recovery denied");`], { encoding: "utf8", timeout: testMs(10_000) });
       assert.equal(cold.status, 0, cold.stderr);
       assert.match(cold.stdout, /cold child recovery denied/);
       assert.deepEqual({ calls: calls.length, requests: budgetPhysicalRequests, writes, confirmations }, counters,
@@ -14936,6 +15182,8 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
         assert.equal(root.goalRoot.generations[1].failedCandidateFingerprint,
           workflowDefinitionFingerprint([{ criterionId: "exact", value: false }]),
           "only the actual candidate, never the rejected planner claim, is an oracle subject");
+        assert.equal(root.goal.usage.requests, calls.length,
+          "the rejected planner's settled request is counted, so final accounting stays known");
       } else {
         assert.equal(calls.length, 4);
         assert.deepEqual(root.goalRoot.generations.map(g => g.outcome), ["not-achieved", "achieved"], JSON.stringify(run.tasks));
@@ -14973,7 +15221,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
         const u=r.tasks.find(t=>t.goalRoot).goalRoot.usage;
         assert.equal(u.requests,null);
         assert.equal(u.costMicros,null); assert.equal(u.metrics.totalTokens,null); assert.equal(u.metrics.incomplete,true);
-        console.log('cold accounting UNKNOWN retained');`], { encoding: "utf8", timeout: 10000 });
+        console.log('cold accounting UNKNOWN retained');`], { encoding: "utf8", timeout: testMs(10_000) });
     assert.equal(cold.status, 0, cold.stderr); assert.match(cold.stdout, /cold accounting UNKNOWN retained/);
     assert.equal(calls.length, 2); return;
   }
@@ -15142,7 +15390,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
     assert.ok(summary.content[0].text.includes(`recorded ${uncertain ? "UNKNOWN" : root.goal.state}; task ${root.status}; generation ${root.goalRoot.generations.at(-1).generation}`));
     assert.match(summary.content[0].text, uncertain
       ? /criteria 1 \(0 met, 0 not-met, 0 pending human judgment, 1 UNKNOWN\)/
-      : /criteria 1 \(1 met, 0 not-met, 0 pending human judgment, 0 UNKNOWN\)/);
+      : new RegExp(`criteria ${definition.goal.criteria.length} \\(${definition.goal.criteria.length} met, 0 not-met, 0 pending human judgment, 0 UNKNOWN\\)`));
     assert.match(summary.content[0].text, /profile captured\./);
     assert.match(summary.content[0].text, uncertain ? /Evidence unavailable\/UNKNOWN/ : /Evidence persisted/);
     assert.match(summary.content[0].text, /Blocking\/UNKNOWN:/);
@@ -15243,6 +15491,25 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
         await writeFile(file, JSON.stringify(sourceCorrupted));
         await assert.rejects(invokeTool({ action: "status", goalId: run.runId }), /hash\/scope mismatch/);
       } finally { await writeFile(file, bytes); }
+      if (commandOracle) {
+        // A self-consistent (rehashed) receipt whose verdict contradicts its
+        // recorded exit code is still rejected by every read.
+        for (const name of names) {
+          const receipt = JSON.parse(await readFile(join(dir, name), "utf8"));
+          if (receipt.evidence.observations[0].verdict !== "not-met") continue;
+          receipt.evidence.observations[0].verdict = "met";
+          receipt.digest = workflowDefinitionFingerprint(receipt.evidence);
+          const forged = join(dir, `${receipt.digest}.json`);
+          try {
+            await writeFile(forged, JSON.stringify(receipt));
+            await assert.rejects(invokeTool({ action: "status", goalId: run.runId }), /exact command verification mismatch/);
+            // Listing every Goal reports the unverifiable run on its own line instead of failing.
+            const all = await invokeTool({ action: "status" });
+            assert.match(all.content[0].text, new RegExp(`Goal ${run.runId}: records could not be verified \\(.*exact command verification mismatch`));
+            assert.ok(all.details.runs.some(entry => entry.runId === run.runId && entry.error));
+          } finally { await rm(forged, { force: true }); }
+        }
+      }
       const hidden = `${dir}-historical-fixture`;
       await rename(dir, hidden);
       try {
@@ -15287,6 +15554,15 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
         assert.match(observation.verification.stdoutTail,
           observation.verdict === "met" ? /candidate=correct/ : /candidate=wrong/);
         assert.equal(observation.reason, null);
+        if (commandOracle !== true) {
+          assert.equal(evidence.observations.length, 2, "every criterion is observed in every generation");
+          const second = evidence.observations[1];
+          assert.deepEqual(second.criterion, definition.goal.criteria[1]);
+          // The always-passing command is met even when the candidate is wrong;
+          // the exact value follows the candidate like the first command.
+          assert.equal(second.verdict, commandOracle === "multiple" ? "met" : observation.verdict);
+          if (commandOracle === "multiple") assert.match(second.verification.stdoutTail, /lint ok/);
+        }
       } else
       assert.equal(observation.expectedHash, workflowDefinitionFingerprint(Buffer.from("correct").toString("hex")));
       assert.equal(observation.valueHash, workflowDefinitionFingerprint(observation.value));
@@ -15356,7 +15632,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       await rm(join(cwd, ".pi", "agents", `${chosenName}.md`), { force: true });
       for (const order of [["policyA", "policyB"], ["policyB", "policyA"]]) {
         await t.test(`profile exception rejects actual empty policy inventory in ${order.join("/")} order`,
-          { timeout: 30_000 }, async () => {
+          { timeout: testMs(30_000) }, async () => {
           const workflow = { schemaVersion: 1, artifactGraph: { stages: [
             { id: "result", support: { uses: "./profile-empty-support.mjs" } },
             ...order.map(id => ({ id, type: "goal", goal: { uses: "./profile-empty-policy.json" }, after: "result" })),
@@ -15639,6 +15915,12 @@ test("declared nested Goal denies authority widening and unsupported original de
     ["effects widening", child => { child.goal.authority.allowedEffects.push("candidate-write"); }, /allowedEffects widen the immutable parent effects/],
     ["protection weakening", child => { child.goal.authority.protectedPaths = []; }, /protectedPaths weaken the immutable parent scope/],
     ["unqualified child cost meter", child => { child.goal.limits = { costMicros: 1 }; }, /original derived Goal admission is unsupported/],
+    ["lower child request cap", child => { child.goal.limits = { requests: 0 }; },
+      /child request cap must be omitted or equal to the parent cap/],
+    ["child command criterion", child => {
+      child.goal.criteria = [{ id: "tests", verifier: { kind: "deterministic", producerId: "command-exit-v1", target: "candidate",
+        subject: { resultSlot: "result", artifact: "control" }, config: { argv: [process.execPath, "-e", "0"] } } }];
+    }, /original derived Goal admission is unsupported/],
     ["recursive child missing descendant source", child => {
       child.goal.authority.allowedEffects = ["verify", "workflow-create"];
       child.goal.workflows = { deeper: { uses: "./deeper.json" } };
@@ -15699,7 +15981,14 @@ test("declared nested Goal with a model-rubric criterion is admitted for consent
     /Declared Goal child standaloneGoal denied before consent: original derived Goal admission is unsupported/);
   assert.equal(previews.length, 0, "a rubric child without verify is denied before consent");
   await writeFile(join(cwd, "child.json"), JSON.stringify(rubricChild(["read", "verify", "workflow-create"])));
+  // The inherited verifier role must have request accounting, or the child's
+  // rubric verdict could never be settled.
   await assert.rejects(runWorkflowSpec(parentPath, cwd, { goalPolicyHost: host }),
+    /needs request accounting, which only openai\/ and openai-codex\/ models provide; .*verification uses fixture\/model/);
+  assert.equal(previews.length, 0, "an unmetered profile is refused before consent");
+  const meteredHost = { ...host, currentRuntime: { model: "openai-codex/gpt-test", thinking: "high" },
+    availableModels: [{ provider: "openai-codex", id: "gpt-test", fullId: "openai-codex/gpt-test", reasoning: true }] };
+  await assert.rejects(runWorkflowSpec(parentPath, cwd, { goalPolicyHost: meteredHost }),
     /Goal execution confirmation cancelled; no workflow run was created/);
   assert.equal(previews.length, 1, "the nested rubric child reaches the single consent preview");
   assert.equal(previews[0].workflows[0].definition.goal.criteria[0].verifier.kind, "model-rubric");
@@ -15772,7 +16061,7 @@ test(mode === "sequential"
     : "one-level Goal to standalone Goal actual SDK parent planner child planner worker and independent immutable oracles";
   const producer = spawnSync(process.execPath, ["--import", resolve("test/e2e/no-external-actions-guard.mjs"),
     "--test", "--test-reporter=tap", `--test-name-pattern=^${producerName}$`, resolve("test/unit/goal-public-runtime.test.mjs")],
-    { env, encoding: "utf8", timeout: 60_000, maxBuffer: 8 * 1024 * 1024 });
+    { env, encoding: "utf8", timeout: testMs(60_000), maxBuffer: 8 * 1024 * 1024 });
   assert.equal(producer.error, undefined, `${producer.error}\n${producer.stdout}\n${producer.stderr}`);
   assert.equal(producer.signal, null);
   assert.equal(producer.status, 0, `${producer.stdout}\n${producer.stderr}`);
@@ -16383,7 +16672,7 @@ for (const [name, cap, expected, recursive, terminalFault, mixed, depthDenied, g
   ["mixed ordinary wrapper Goal rejects compiled mutation after compiled first write", 4, true, true, undefined, true, undefined, "compiled"],
   ["mixed ordinary wrapper Goal child stop after compiled write preserves original publication", 4, true, true, undefined, true, undefined, "child-stop"],
   ["mixed ordinary wrapper Goal root stop after compiled write preserves original publication", 4, true, true, undefined, true, undefined, "root-stop"],
-]) test(name, { timeout: 60_000 }, async t => {
+]) test(name, { timeout: testMs(60_000) }, async t => {
   const profileBeforeSend = terminalFault === "profile-before-send" || terminalFault === "profile-history-before-send";
   const { runWorkflowSpec, refreshRun, resumeRun, stopWorkflowWatchersForTests,
     setDynamicControllerHooksForTests } = await import("../../.tmp/unit/engine.js");
@@ -16393,6 +16682,7 @@ for (const [name, cap, expected, recursive, terminalFault, mixed, depthDenied, g
   const api = await import("@agwab/pi-subagent/api");
   const familyReceiptPath = process.env.PIWF_TEST_ORDINARY_FAMILY_RECEIPT;
   const cwd = await mkdtemp(join(familyReceiptPath ? dirname(familyReceiptPath) : tmpdir(), "goal-one-level-sdk-"));
+  const goalFence = goalSessionFence(t);
   const nestedProfileDenial = mixed === "profile-denial";
   const rootPublicationStop = generatedPublicationFault === "initial-root-stop" ||
     generatedPublicationFault === "retained-root-stop";
@@ -16454,7 +16744,7 @@ for (const [name, cap, expected, recursive, terminalFault, mixed, depthDenied, g
       })),
     }));
   };
-  const joinWarm = async (phase, work, timeout = 8000) => {
+  const joinWarm = async (phase, work, timeout = testMs(8000)) => {
     warmStage = phase;
     const startedElapsedMs = performance.now() - warmObservationStarted;
     warmPhaseObservation = { phase, startedElapsedMs, timeoutMs: timeout,
@@ -16580,6 +16870,7 @@ for (const [name, cap, expected, recursive, terminalFault, mixed, depthDenied, g
   if (grandchild) await writeFile(join(cwd, "grandchild.json"), grandchildBytes);
   const handlers = new Map();
   const session = installGoalHostSessionIssuer({ on(name, fn) { handlers.set(name, fn); } });
+  goalFence.own(handlers.get("session_shutdown"));
   await handlers.get("session_start")({}, { cwd, sessionManager: { getSessionId: () => "one-level-sdk",
     getSessionFile: () => join(cwd, "session.jsonl"), getCwd: () => cwd } });
   let confirmations = 0, physical = 0, rootPlanningCalls = 0;
@@ -16660,6 +16951,7 @@ for (const [name, cap, expected, recursive, terminalFault, mixed, depthDenied, g
     (await import("@earendil-works/pi-coding-agent")).initTheme(undefined, false);
     workflowExtension({ on(name, fn) { const listeners = commandHandlers.get(name) ?? []; listeners.push(fn); commandHandlers.set(name, listeners); },
       registerCommand(name, value) { commands.set(name, value); }, registerTool() {}, getThinkingLevel() { return "high"; }, sendMessage() {} });
+    goalFence.own(commandHandlers.get("session_shutdown")?.[0], () => commandContext);
     for (const fn of commandHandlers.get("session_start") ?? []) await fn({}, commandContext);
     t.after(async () => {
       for (const fn of commandHandlers.get("session_shutdown") ?? [])
@@ -17364,7 +17656,7 @@ for (const [name, cap, expected, recursive, terminalFault, mixed, depthDenied, g
 
     const resumed = await joinWarm("original-registered-root-resume-call", invoke(`resume ${root.runId}`));
     root = await joinWarm("original-resumed-family-terminal-observation", (async () => {
-      const deadline = Date.now() + 6000;
+      const deadline = Date.now() + testMs(6000);
       let current;
       do {
         current = await readRunRecord(cwd, root.runId);
@@ -17424,7 +17716,7 @@ for (const [name, cap, expected, recursive, terminalFault, mixed, depthDenied, g
       throw error;
     }
   }
-  const deadline = Date.now() + 40_000;
+  const deadline = Date.now() + testMs(40_000);
   while (!profileBeforeSend && Date.now() < deadline && ["pending", "running"].includes(root.status)) {
     await new Promise(resolve => setTimeout(resolve, 50)); root = await readRunRecord(cwd, root.runId);
   }
@@ -18810,7 +19102,7 @@ test("normal engine Goal consumes real support artifacts after consent and cance
     let connected;
     try {
       connected = await runWorkflowSpec(join(cwd, "goal.json"), cwd, { goalPolicyHost: host, executionProfile: "captured" });
-      const deadline = Date.now() + 20_000;
+      const deadline = Date.now() + testMs(20_000);
       while (Date.now() < deadline && connected.tasks.some(task => ["pending", "running"].includes(task.status))) {
         await new Promise(resolve => setTimeout(resolve, 100));
         connected = await readRunRecord(cwd, connected.runId);
@@ -18998,7 +19290,7 @@ test("normal engine Goal consumes real support artifacts after consent and cance
       let timer;
       try {
         return await Promise.race([promise, new Promise((_, reject) => {
-          timer = setTimeout(() => reject(new Error(`${boundary} original fixture join did not settle`)), 20_000);
+          timer = setTimeout(() => reject(new Error(`${boundary} original fixture join did not settle`)), testMs(20_000));
         })]);
       } finally { clearTimeout(timer); }
     };

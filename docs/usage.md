@@ -133,8 +133,10 @@ the confirmed definition's `allowedEffects` include both `candidate-write` and
 verify"), an achieved Goal copies its verified candidate changes for the allowed
 paths into the working tree. Each changed path must still hold the bytes the
 candidate started from; if any allowed path, Git `HEAD`/index or protected path
-changed meanwhile, nothing is written and the Goal stays blocked as
-`goal_origin_apply_conflict`. Files are written one at a time (temporary file and
+changed before the first write, nothing is written and the Goal stays blocked as
+`goal_origin_apply_conflict`. A change noticed while later paths are being
+written stops at that path: paths already written stay applied and are reported,
+the rest are not written. Files are written one at a time (temporary file and
 rename); Git `HEAD` and the index are never changed. The per-path outcome is
 recorded in the Goal task (`originApply`) and shown by `/workflow goal status`.
 A stop before or during application leaves the remaining paths unapplied and is
@@ -165,8 +167,16 @@ directories.
 ```
 
 `argv` is executed directly (no shell); `timeoutMs` is 1000–600000 (default
-120000) and an optional `cwd` is a relative directory inside the copy. Command
-criteria are supported for root Goals; declared child Goals cannot use them yet.
+120000) and an optional `cwd` is a relative directory inside the copy. Before
+consent the command must resolve (a bare name on `PATH`, a path relative to the
+`cwd`) and the `cwd` must exist inside the working tree (not through a symbolic link that
+leaves it); a command that cannot start makes the criterion UNKNOWN rather than
+not met. The last 8 KiB of stdout/stderr are kept as evidence and replanning
+feedback. A stop during preparation or while the command runs kills it and
+records no verdict; the time limit applies to the command itself, not to output
+still held open by a process it left running. The copy has no `.git`, so commands that need Git
+metadata (for example `git diff`) fail there. Command criteria are supported for
+root Goals; declared child Goals cannot use them yet.
 
 **Tool surface.** Goal runs (a Goal definition, an artifact graph with an
 embedded Goal stage, or a Goal-admitted child workflow) never inherit the native
@@ -193,8 +203,10 @@ read by the Goal commands.
 
 These commands and the read-only `workflow_goal` tool inspect ordinary
 workflow-engine records under `.pi/workflows/<runId>`, without creating missing
-records or starting workers. Identifiers are exact workflow run IDs or exact
-`goal_engine_...` IDs.
+records or starting workers. The `workflow_goal` tool takes exact workflow run
+IDs or exact `goal_engine_...` IDs; slash commands also accept a unique run-ID
+prefix. Listing all Goals reports a run whose records cannot be verified on its
+own line instead of failing the whole list.
 Interactive `create` authors a reusable JSON Goal definition. Authoring and saving
 do not require a live execution backend. Saving, selecting a profile, and executing
 are distinct choices; save-only does not start a run. Cancellation does not grant
@@ -212,8 +224,10 @@ artifact-only criteria; it never defaults to the working directory. An authored
 definition's scope cannot be replaced by an origin-scope override. Host-managed
 artifact publication still requires its separate current custody and consent.
 
-An oracle can declare `subject.path` to compare one exact JSON value from a
-`control` or `refs` artifact, for example `$.result`. The normal control envelope
+An oracle can declare `subject.path` to compare one exact JSON value from the
+worker's `control` artifact, for example `$.result` (exact-value, rubric and
+human criteria observe `target: "artifact"` with `artifact: "control"`; other
+artifact kinds parse but stay UNKNOWN). The normal control envelope
 still carries its schema/digest metadata. No implicit field stripping, wildcard
 selection, or missing-value-to-null conversion occurs. A bounded/unreadable
 artifact is an acquisition gap, not an independently verified failure.
@@ -568,7 +582,10 @@ immutable criteria. Its criteria may use exact JSON values or model rubrics
 verification runs with the inherited verifier role. Its source, authority and role profile are captured before
 the first Goal's host confirmation. It inherits that confirmed root's profile,
 shared request budget and original engine admission; it does not request a second
-confirmation or receive a fresh allowance. Scope/effect widening is rejected
+confirmation or receive a fresh allowance. Because the child spends from that one
+budget, a child `limits.requests` must be omitted or equal to the parent cap; a
+smaller (or, under an uncapped parent, any) child cap is rejected before
+confirmation rather than silently ignored. Scope/effect widening is rejected
 before confirmation. Standalone Goal descendants inherit the confirmed root's
 role-specific model and thinking settings. Their authored defaults and saved
 default profile remain in the immutable source capture but do not override that
@@ -621,13 +638,24 @@ consent. Successful policy dependencies require current independent verification
 and proven effect drain; ordinary sibling tasks retain their own backend and scope.
 Optional user request/cost limits are shown before consent: a blank limit is no
 cap, while an explicit finite nonnegative integer—including zero—remains the
-authored cap; unavailable usage remains unknown, not zero.
+authored cap; unavailable usage remains unknown, not zero. Independently of
+requests, `limits.generations` (an integer from 1 to 100, default 10) bounds the
+first plan plus replans; a replan beyond it ends the Goal as
+`Root replan exhausted: generation limit (N) reached`, so a Goal without a
+request cap still cannot replan forever. The consent preview shows the
+effective `generationLimit`, and a recovery counts the generations of the run it
+recovers. A request cap, a
+model-rubric criterion or human judgment (in the Goal or any declared child
+Goal) needs settled request accounting, which only `openai/` and
+`openai-codex/` models provide; with another provider in the planning,
+execution or (for rubrics) verification role the Goal is refused before
+consent.
 
 | Guarded interface | Current boundary |
 |---|---|
 | `/workflow goal create <objective>` | Author/save/profile flow; execution is an explicit choice with scoped consent. |
 | `/workflow goal run <ref> "<target>"` | Launches a saved definition as a new named workflow run, not a replacement identity for an interrupted Goal. |
-| `/workflow goal pause\|cancel <runId\|goal_engine_ID>` | Both stop the enclosing ordinary workflow run through its original live interactive host. A stop acknowledgement is not proof that descendants and effects have drained; ordinary cancellation is not a separate irreversible lifecycle. |
+| `/workflow goal pause\|cancel <runId\|goal_engine_ID>` | Both stop the enclosing ordinary workflow run through its original live interactive host. A stop acknowledgement is not proof that descendants and effects have drained; ordinary cancellation is not a separate irreversible lifecycle. The generic `/workflow stop <runId>` remains an emergency stop from any session; it only stops work and never resumes, applies or recovers anything. |
 | `/workflow goal resume <runId\|goal_engine_ID>` | Requires original live interactive admission/profile and settled recoverable work. It does not provide cold recovery or permission to replay UNKNOWN effects. |
 | `/workflow goal recover <runId\|goal_engine_ID>` | Cold recovery after the original Pi session ended: starts a **new** run of the same definition with fresh consent. See "Recovering an interrupted Goal". |
 
@@ -638,12 +666,16 @@ Use `/workflow goal help` for the controls. Help and registration never grant
 origin-write authority.
 
 **Output repair.** When a Goal planner, worker or verifier ends with an invalid
-output envelope (missing or empty `<control>`/`<analysis>`/`<refs>` sections),
-that same task is retried once as a new attempt. The retry counts against the
-Goal request cap and needs every earlier request settled; a coding worker
-continues in the same candidate workspace. Verifier envelopes are never
-salvaged from truncated output. If the retry is also invalid or the cap has no
-room, the task stays UNKNOWN and the Goal is blocked rather than guessed.
+output envelope, that same task is retried once as a new attempt. The retry
+counts against the Goal request cap and needs every earlier request settled; a
+coding worker continues in the same candidate workspace. Verifier envelopes must
+be complete (missing or empty `<control>`/`<analysis>`/`<refs>` is invalid,
+never salvaged into a verdict). Planner and worker output keeps the ordinary
+salvage of a cut-off trailing `<analysis>`/`<refs>` when its `<control>` is
+complete, because that control still passes the plan and oracle checks; a
+missing or invalid `<control>` is repaired. If the retry is also invalid or the
+cap has no room, the task stays UNKNOWN and the Goal is blocked rather than
+guessed.
 
 Successful workflow tasks do not by themselves satisfy a Goal criterion.
 Independent verifier receipts must establish each criterion; failed or missing
@@ -666,22 +698,33 @@ runs, its record stays as it was and `resume` cannot continue it, because the
 consent, request budget and candidate workspace lived in that session. In a new
 session, `/workflow goal recover <runId>` starts a new run instead:
 
-- The definition file must be byte-for-byte the definition originally consented
-  to (same fingerprint); otherwise start it fresh with `/workflow goal run`.
+- Only runs of a top-level Goal definition are recovered (not workflows with an
+  embedded Goal stage). The definition file must still parse to the definition
+  originally consented to (same definition fingerprint; formatting changes do
+  not matter); otherwise start it fresh with `/workflow goal run`. A named
+  execution profile the definition declares is selected again; an ad-hoc
+  profile is chosen afresh.
 - The consent preview shows a `recovery` section. Every request reservation of
   the interrupted run family counts against the request cap (an in-flight
   request may have been sent), so a recovery never extends the cap.
 - The last original oracle feedback (verdicts, command output, rubric reasons)
-  is given to the new planner as untrusted data.
-- If the origin is exactly as the interrupted run's last observed candidate
-  saw it, the new candidate workspace starts from that candidate's changed
-  files. Edits a worker made after that observation are not recovered. When
+  is given to the new planner as untrusted data. Only receipts of a generation
+  the run recorded, for exactly the consented criteria, are used.
+- If the allowed paths of the origin are exactly as the interrupted run's last
+  observed candidate saw them, the new candidate workspace starts from that
+  candidate's changed files. Protected files (for example tests) may have
+  changed meanwhile; the new run judges the carried candidate against them. Edits a worker made after that observation are not recovered. When
   the origin changed, a file was deleted, a changed file is too large to keep
   inline, or a file mode changed, the run starts from the origin and the
   preview says why.
-- The interrupted run is never resumed or rewritten; a `goal-recovery.json`
-  marker records which run recovered it, and it cannot be recovered twice.
-  A run still owned by a live session is refused.
+- The interrupted run is never resumed or rewritten. A recovery lease refuses a
+  second recover while one is waiting for consent; the new run records which
+  run it recovers (and a `goal-recovery.json` marker is added next to the old
+  run), so a run cannot be recovered twice even if Pi stopped in between. A run
+  still owned by a live session is refused; in its own session a paused or
+  blocked run continues with `resume`, while a finished run (failed, or
+  completed without achieving the Goal, for example after replanning was
+  exhausted) can also be recovered there.
 
 ## Natural-language invocation
 

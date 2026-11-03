@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { after, test } from "node:test";
 import {
   goalCommandSandboxAvailable,
   goalCommandVerdict,
   goalCommandVerifierConfigIssues,
+  goalCommandVerifierPreflightIssues,
   runGoalCommandVerifier,
 } from "../../.tmp/unit/goal-command-verifier.js";
 import { parseGoalWorkflowSpec } from "../../.tmp/unit/goal-workflow-schema.js";
@@ -137,4 +138,135 @@ test("a command over its time limit is killed and is not met", sandboxed, async 
     config: { argv: [process.execPath, "-e", "setTimeout(() => {}, 60000)"], timeoutMs: 1000 } });
   assert.equal(slow.timedOut, true);
   assert.equal(goalCommandVerdict(slow), "not-met");
+});
+
+test("a command that cannot start is a configuration error, not a candidate verdict", sandboxed, async () => {
+  const f = await fixture("export const sum = (a, b) => a + b;\n");
+  await assert.rejects(runGoalCommandVerifier({ originRoot: f.origin, workspace: f.workspace,
+    config: { argv: ["definitely-not-a-goal-command"] } }), /could not start "definitely-not-a-goal-command"/);
+  await assert.rejects(runGoalCommandVerifier({ originRoot: f.origin, workspace: f.workspace,
+    config: { argv: [process.execPath, "-e", "0"], cwd: "missing" } }), /cwd is not a directory in the working tree: missing/);
+});
+
+test("preflight refuses a command or cwd that cannot run before consent", async () => {
+  const f = await fixture("export const sum = (a, b) => a + b;\n");
+  assert.deepEqual(await goalCommandVerifierPreflightIssues(f.origin, { argv: ["node", "--test"] }), []);
+  assert.deepEqual(await goalCommandVerifierPreflightIssues(f.origin, { argv: [process.execPath, "--test"], cwd: "test" }), []);
+  assert.match((await goalCommandVerifierPreflightIssues(f.origin, { argv: ["definitely-not-a-goal-command"] }))[0], /not found on PATH/);
+  assert.match((await goalCommandVerifierPreflightIssues(f.origin, { argv: ["./scripts/missing.sh"] }))[0], /not an executable file/);
+  assert.match((await goalCommandVerifierPreflightIssues(f.origin, { argv: ["node"], cwd: "nope" }))[0], /cwd "nope" is not a directory/);
+  assert.match((await goalCommandVerifierPreflightIssues(f.origin, { argv: ["./test"] }))[0], /not an executable file/,
+    "a directory is not an executable command");
+});
+
+test("a candidate whose bytes changed after its snapshot is not verified", sandboxed, async () => {
+  const f = await fixture("export const sum = (a, b) => a + b;\n");
+  await writeFile(join(f.workspace.workspaceRoot, "src", "sum.mjs"), "export const sum = () => 5;\n");
+  await assert.rejects(runGoalCommandVerifier({ originRoot: f.origin, workspace: f.workspace,
+    config: { argv: testArgv } }), /candidate bytes changed before command verification: src\/sum.mjs/);
+});
+
+test("preflight resolves relative PATH entries against the command directory, like the run", async () => {
+  const f = await fixture("export const sum = (a, b) => a + b;\n");
+  await mkdir(join(f.origin, "tools"));
+  await writeFile(join(f.origin, "tools", "check-sum"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const previous = process.env.PATH;
+  try {
+    process.env.PATH = `tools${delimiter}${previous}`;
+    assert.deepEqual(await goalCommandVerifierPreflightIssues(f.origin, { argv: ["check-sum"] }), []);
+    if (goalCommandSandboxAvailable()) {
+      const ran = await runGoalCommandVerifier({ originRoot: f.origin, workspace: f.workspace, config: { argv: ["check-sum"] } });
+      assert.equal(goalCommandVerdict(ran), "met", "the sandboxed run finds the same relative PATH entry in the copy");
+    }
+    process.env.PATH = previous;
+    assert.match((await goalCommandVerifierPreflightIssues(f.origin, { argv: ["check-sum"] }))[0], /not found on PATH/);
+  } finally { process.env.PATH = previous; }
+});
+
+test("a stop during preparation never starts the command", sandboxed, async () => {
+  const f = await fixture("export const sum = (a, b) => a + b;\n");
+  const stop = new AbortController();
+  // The stop arrives while the candidate is being overlaid onto the copy.
+  const workspace = { workspaceRoot: f.workspace.workspaceRoot,
+    inspectCandidate: async () => { const candidate = await f.workspace.inspectCandidate(); stop.abort(new Error("stopped during overlay")); return candidate; } };
+  const started = Date.now();
+  await assert.rejects(runGoalCommandVerifier({ originRoot: f.origin, workspace, signal: stop.signal,
+    config: { argv: [process.execPath, "-e", "setTimeout(() => {}, 5000)"] } }), /stopped during overlay/);
+  assert.ok(Date.now() - started < 3000, "the 5 s command was never started");
+});
+
+test("cwd cannot leave the copy through a symbolic link", sandboxed, async () => {
+  const f = await fixture("export const sum = (a, b) => a + b;\n");
+  const outside = await mkdtemp(join(tmpdir(), "goal-command-outside-"));
+  roots.push(outside);
+  await mkdir(join(outside, "sub"));
+  await symlink(outside, join(f.origin, "alias"));
+  assert.match((await goalCommandVerifierPreflightIssues(f.origin, { argv: ["node"], cwd: "alias/sub" }))[0],
+    /leaves the working tree through a symbolic link/);
+  await assert.rejects(runGoalCommandVerifier({ originRoot: f.origin, workspace: f.workspace,
+    config: { argv: [process.execPath, "-e", "0"], cwd: "alias/sub" } }), /leaves the working tree copy/);
+});
+
+test("a command that exits before its deadline is not timed out by output held open afterwards", sandboxed, async () => {
+  const f = await fixture("export const sum = (a, b) => a + b;\n");
+  const result = await runGoalCommandVerifier({ originRoot: f.origin, workspace: f.workspace, config: {
+    argv: [process.execPath, "-e",
+      "require('child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 4000)'], { detached: true, stdio: 'inherit' }).unref()"],
+    timeoutMs: 1000 } });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.timedOut, false);
+  assert.equal(goalCommandVerdict(result), "met");
+});
+
+test("the overlay adds new candidate files and removes deleted ones only in the copy", sandboxed, async () => {
+  const f = await fixture("export const sum = (a, b) => a + b;\n");
+  await writeFile(join(f.origin, "src", "old.mjs"), "old\n");
+  const added = "export const extra = 1;\n";
+  await writeFile(join(f.workspace.workspaceRoot, "src", "extra.mjs"), added);
+  const candidate = { ...f.candidate, files: [...f.candidate.files,
+    { path: "src/extra.mjs", value: { kind: "file", links: 1, mode: "0644", hex: Buffer.from(added).toString("hex") } },
+    { path: "src/old.mjs", value: null }] };
+  const workspace = { workspaceRoot: f.workspace.workspaceRoot, inspectCandidate: async () => structuredClone(candidate) };
+  const result = await runGoalCommandVerifier({ originRoot: f.origin, workspace, config: { argv: [process.execPath, "-e",
+    "const fs=require('fs'); console.log(JSON.stringify({ extra: fs.existsSync('src/extra.mjs'), old: fs.existsSync('src/old.mjs') }))"] } });
+  assert.deepEqual(JSON.parse(result.stdoutTail), { extra: true, old: false });
+  assert.equal(await readFile(join(f.origin, "src", "old.mjs"), "utf8"), "old\n", "deletion happens in the copy only");
+  assert.equal(existsSync(join(f.origin, "src", "extra.mjs")), false);
+});
+
+test("a stop while the command runs kills it and yields no verdict", sandboxed, async () => {
+  const f = await fixture("export const sum = (a, b) => a + b;\n");
+  const stop = new AbortController();
+  setTimeout(() => stop.abort(new Error("stopped while running")), 300);
+  const started = Date.now();
+  await assert.rejects(runGoalCommandVerifier({ originRoot: f.origin, workspace: f.workspace, signal: stop.signal,
+    config: { argv: [process.execPath, "-e", "setTimeout(() => {}, 10000)"] } }), /stopped while running/);
+  assert.ok(Date.now() - started < 5000, "the running command was killed");
+});
+
+test("a working tree above the copy ceilings is refused, not partially verified", sandboxed, async () => {
+  const f = await fixture("export const sum = (a, b) => a + b;\n");
+  await assert.rejects(runGoalCommandVerifier({ originRoot: f.origin, workspace: f.workspace,
+    config: { argv: [process.execPath, "-e", "0"] }, copyLimits: { files: 1 } }), /too large to copy/);
+  await assert.rejects(runGoalCommandVerifier({ originRoot: f.origin, workspace: f.workspace,
+    config: { argv: [process.execPath, "-e", "0"] }, copyLimits: { bytes: 10 } }), /too large to copy/);
+});
+
+test("huge, binary and signal outcomes stay bounded and are not met unless exit 0", sandboxed, async () => {
+  const f = await fixture("export const sum = (a, b) => a + b;\n");
+  const huge = await runGoalCommandVerifier({ originRoot: f.origin, workspace: f.workspace, config: {
+    argv: [process.execPath, "-e", "process.stdout.write('z'.repeat(5e6)); process.exit(1)"] } });
+  assert.equal(goalCommandVerdict(huge), "not-met");
+  assert.ok(huge.stdoutTail.length <= 8_193 && huge.stdoutTail.startsWith("…"),
+    "the tail fits bounded Goal JSON strings with room to spare");
+  const multibyte = await runGoalCommandVerifier({ originRoot: f.origin, workspace: f.workspace, config: {
+    argv: [process.execPath, "-e", "process.stdout.write('é'.repeat(9000)); process.exit(1)"] } });
+  assert.match(multibyte.stdoutTail, /^…é+$/u, "the tail starts on a character boundary");
+  const binary = await runGoalCommandVerifier({ originRoot: f.origin, workspace: f.workspace, config: {
+    argv: [process.execPath, "-e", "process.stdout.write(Buffer.from([0xff, 0xfe, 0, 1])); process.exit(0)"] } });
+  assert.equal(goalCommandVerdict(binary), "met", "binary output does not affect the exit verdict");
+  const signalled = await runGoalCommandVerifier({ originRoot: f.origin, workspace: f.workspace, config: {
+    argv: [process.execPath, "-e", "process.kill(process.pid, 'SIGTERM')"] } });
+  assert.equal(signalled.signal, "SIGTERM");
+  assert.equal(goalCommandVerdict(signalled), "not-met");
 });

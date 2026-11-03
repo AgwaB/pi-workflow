@@ -37,3 +37,31 @@ for (const git of [false, true]) {
       /Goal scope cannot be observed before consent: .*test/);
   });
 }
+
+test("a dirty Git index and worktree are observed as-is before consent, never reset", async () => {
+  const cwd = await workspace(true);
+  const run = (...args) => execFileSync("git", args, { cwd, stdio: "pipe" }).toString();
+  await writeFile(join(cwd, "src", "a.mjs"), "export const a = 'staged';\n");
+  run("add", "src/a.mjs");
+  await writeFile(join(cwd, "src", "a.mjs"), "export const a = 'unstaged on top';\n");
+  const statusBefore = run("status", "--porcelain");
+  await assertGoalScopeObservableBeforeConsent(cwd, definition(["test/a.test.mjs"]));
+  assert.equal(run("status", "--porcelain"), statusBefore, "observation changes neither index nor worktree");
+  assert.equal(run("show", ":src/a.mjs"), "export const a = 'staged';\n");
+});
+
+test("absent allowed paths and absent protected paths are accepted before consent", async () => {
+  const cwd = await workspace(false);
+  const withPaths = { ...definition(["test/missing.test.mjs"]) };
+  withPaths.goal = { ...withPaths.goal, authority: { ...withPaths.goal.authority, allowedPaths: ["src/a.mjs", "src/new/file.mjs"] } };
+  await assertGoalScopeObservableBeforeConsent(cwd, withPaths);
+});
+
+test("a symlinked allowed path is refused before consent", async () => {
+  const cwd = await workspace(false);
+  const { symlink } = await import("node:fs/promises");
+  await symlink(join(cwd, "src", "a.mjs"), join(cwd, "src", "link.mjs"));
+  const linked = { ...definition([]) };
+  linked.goal = { ...linked.goal, authority: { ...linked.goal.authority, allowedPaths: ["src/link.mjs"] } };
+  await assert.rejects(assertGoalScopeObservableBeforeConsent(cwd, linked), /Goal scope cannot be observed before consent/);
+});

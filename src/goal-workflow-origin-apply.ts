@@ -224,6 +224,13 @@ export async function applyGoalCandidateToOrigin(input: ApplyGoalCandidateToOrig
 				await input.onProgress?.(record);
 				return finish("conflict", `Origin changed during application (${drifted.join(", ")}); remaining paths were not applied.`);
 			}
+			// A stop that arrived while the in-flight record was persisted wins:
+			// nothing has been written for this path yet.
+			if (input.signal?.aborted) {
+				entry.state = "pending";
+				await input.onProgress?.(record).catch(() => undefined);
+				return finish("interrupted", "Stopped during origin application; remaining paths were not applied.");
+			}
 			let published: boolean;
 			if (change.after === null) {
 				published = await unchanged();
