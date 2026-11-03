@@ -135,6 +135,20 @@ export function parseGoalWorkflowSpec(value: unknown): GoalWorkflowSpec {
 			message: "is not allowed in a public Goal workflow definition",
 		});
 	}
+	// A Goal profile carries only model/thinking per role, so Fast would show
+	// at consent but never reach a request. (Authored model/thinking defaults
+	// are documented as replaced by the captured role settings.)
+	if (isRecord(spec.defaults) && Object.hasOwn(spec.defaults, "fast"))
+		issues.push({ path: "$.defaults.fast", message: "is not supported for Goal runs yet" });
+	if (isRecord(spec.executionProfiles))
+		for (const [name, profile] of Object.entries(spec.executionProfiles))
+			if (isRecord(profile))
+				for (const [slot, override] of Object.entries(profile))
+					if (isRecord(override) && Object.hasOwn(override, "fast"))
+						issues.push({
+							path: `$.executionProfiles.${name}.${slot}.fast`,
+							message: "is not supported for Goal runs yet",
+						});
 	validateGoal(spec.goal, "$.goal", issues);
 	assertValidatedGoalWorkflowSpec(data, issues);
 	const parsed = data;

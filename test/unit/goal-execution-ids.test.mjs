@@ -39,3 +39,19 @@ test("limits.generations is an optional integer from 1 to 100, defaulting to 10"
   for (const generations of [0, 101, 1.5, null, "3"])
     assert.throws(() => parseGoalWorkflowSpec(withLimits({ generations })), /generations: must be an integer from 1 to 100/, String(generations));
 });
+
+test("Fast, which a Goal profile cannot carry, is refused before consent", () => {
+  const base = definition([exact("c", "result")]);
+  assert.doesNotThrow(() => parseGoalWorkflowSpec({ ...base, defaults: { agent: "researcher", maxRuntimeMs: 60_000, maxConcurrency: 1 } }),
+    "applied defaults stay accepted");
+  assert.doesNotThrow(() => parseGoalWorkflowSpec({ ...base, defaults: { model: "fixture/child-default", thinking: "low" } }),
+    "authored model/thinking defaults stay accepted; captured role settings replace them");
+  assert.throws(() => parseGoalWorkflowSpec({ ...base, defaults: { fast: "on" } }), /\$\.defaults\.fast: is not supported for Goal runs yet/);
+  assert.throws(() => parseGoalWorkflowSpec({ ...base, defaults: { fast: "off" } }), /\$\.defaults\.fast/);
+  const profiled = { ...base, defaultExecutionProfile: "quick",
+    executionProfiles: { quick: { "goal.$planner": { model: "openai-codex/gpt-6-sol", thinking: "low" } } } };
+  assert.doesNotThrow(() => parseGoalWorkflowSpec(profiled), "role model/thinking belong in executionProfiles");
+  assert.throws(() => parseGoalWorkflowSpec({ ...profiled,
+    executionProfiles: { quick: { "goal.$planner": { model: "openai-codex/gpt-6-sol", thinking: "low", fast: "on" } } } }),
+  /\$\.executionProfiles\.quick\.goal\.\$planner\.fast: is not supported for Goal runs yet/);
+});

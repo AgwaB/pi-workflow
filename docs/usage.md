@@ -235,7 +235,12 @@ artifact is an acquisition gap, not an independently verified failure.
 Goal profile slots are `goal.$planner`, `$worker`, `$verifier`, `$synthesis`, and
 `$judge`; embedded policies use their canonical stage path as the prefix. Concrete
 launch settings are captured from the selected workflow profile. Resume uses the
-captured profile, not a new Pi model/thinking selection. In child profile captures,
+captured profile, not a new Pi model/thinking selection. Role model/thinking come
+only from that profile (declared `executionProfiles` or the current Pi setting);
+a Goal definition's `defaults.model`/`defaults.thinking` do not change them (the
+consent preview shows the captured role settings). Fast (`fast` in `defaults` or
+`executionProfiles`) is not supported for Goal runs yet and is refused before
+consent. In child profile captures,
 ordinary model-backed stages without `profileRole` inherit the captured worker
 (`research-execution`) role, including nested stages and foreach templates.
 Explicit roles remain distinct. Unmarked dynamic decision-profile slots inherit
