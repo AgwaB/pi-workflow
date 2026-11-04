@@ -19723,8 +19723,7 @@ test("registered /workflow goal authors a finite reusable scope and saves withou
     cwd, hasUI: true, mode: "tui",
     ui: { notify(message, level) { messages.push({ message, level }); } },
   });
-  assert.match(messages.at(-1).message,
-    /pending NEVER-launched root task, static child task, or exact materialized foreach item/);
+  assert.match(messages.at(-1).message, /^  \/workflow goal judge <runId> +Accept or reject/m);
   assert.deepEqual(await readdir(cwd), [], "help does not create a run or require profile selection");
   await commands.get("workflow").handler("goal protected help", {
     cwd, hasUI: true, mode: "tui",

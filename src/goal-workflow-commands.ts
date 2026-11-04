@@ -27,7 +27,40 @@ import {
 import type { WorkflowRunRecord, WorkflowTaskRunRecord, CompiledWorkflow } from "./types.js";
 import type { GoalProfileCaptureRevision, GoalProfileScope } from "./goal-types.js";
 
-export const WORKFLOW_GOAL_HELP = "Ordinary workflow-engine Goal controls: /workflow goal list | status/criteria/evidence <runId|goal_engine_ID> | pause/cancel/resume/recover <runId|goal_engine_ID> | judge <runId> | profile <runId>. Profile is a run-only exception under the original live root for an actual captured pending NEVER-launched root task, static child task, or exact materialized foreach item; it saves no preference and requires opaque TUI scope/runtime selection, a reason, and one final full-JSON confirmation. Judge requires the original genuine interactive Pi TUI, takes no inline verdict, and accepts or rejects only the displayed immutable criterion (no effect widening). Dismiss leaves pending; stopping revokes a held dialog. Waiting-user means pending human judgment, not provider work. Unsupported human producers remain UNKNOWN. Pause and cancel stop the ordinary run; resume requires its original live interactive session and admission. After that session ended, recover <runId> starts a new run of the same definition with fresh consent, prior requests counted, the last oracle feedback and, when the origin is unchanged, the last observed candidate. Read commands and workflow_goal are strictly read-only. There is no apply command: when the consented definition allows candidate-write and origin-apply, an achieved coding Goal applies its verified candidate to the allowed paths automatically, and a changed origin writes nothing. No ordinary background/wait support. Author: /workflow goal create <objective>; execute: /workflow goal run <workflow> \"task\".";
+/** `/workflow goal help`: grouped by when each command is useful, within ~100 columns. */
+export const WORKFLOW_GOAL_HELP = [
+  "Goal: give Pi an objective and checks. It plans, works, checks and retries until they all pass.",
+  "",
+  "Start",
+  "  /workflow goal create [objective]             Write a Goal definition step by step",
+  "  /workflow goal run <definition> \"<request>\"   Run a saved definition (asks for consent once)",
+  "",
+  "See how it went",
+  "  /workflow goal status [runId]                 Result, attempts, changed files and the next step",
+  "                                                Without a runId: every Goal in this project",
+  "",
+  "Stop or continue",
+  "  /workflow goal pause <runId>                  Stop now; nothing is applied to your files",
+  "  /workflow goal cancel <runId>                 Same as pause",
+  "  /workflow goal resume <runId>                 Continue a stopped Goal in this Pi session",
+  "  /workflow goal recover <runId>                Continue as a new run after a restart or failure",
+  "                                                (asks for consent again; earlier attempts count)",
+  "",
+  "When a Goal waits for you",
+  "  /workflow goal judge <runId>                  Accept or reject a criterion that needs you",
+  "",
+  "Details for troubleshooting (JSON)",
+  "  /workflow goal list                           Every Goal run",
+  "  /workflow goal criteria <runId>               Criteria, verdicts and models",
+  "  /workflow goal evidence <runId>               Raw check output and records",
+  "  /workflow goal profile <runId>                Change the model of one task that has not started",
+  "                                                (available only in a few situations)",
+  "",
+  "Good to know",
+  "  • If the definition allows it, an achieved coding Goal copies its verified changes into your",
+  "    files automatically, only for the allowed paths. If those files changed, nothing is written.",
+  "  • The run ID (workflow_…) is shown when a Goal starts and by status.",
+].join("\n");
 
 export function parseOrdinaryWorkflowGoalTool(input: unknown): { action: "list" | "status" | "criteria" | "evidence"; goalId?: string } {
   // Check proxies before any reflective operation: even getPrototypeOf can run a trap.
