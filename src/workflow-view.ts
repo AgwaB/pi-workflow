@@ -1,3 +1,4 @@
+import { goalStageLabel, goalTaskLabel } from "./goal-labels.js";
 import { stat } from "node:fs/promises";
 import { readFileLinesBounded } from "./workflow-preview.js";
 export { readFileLinesBounded } from "./workflow-preview.js";
@@ -708,7 +709,7 @@ export class WorkflowView implements Component {
 			width,
 			"Stages",
 			leftLines,
-			`${this.currentStageId(run) ?? "Stage"} tasks`,
+			`${stageTitle(run, this.currentStageId(run) ?? "Stage")} tasks`,
 			this.taskLines(run, rightBodyWidth),
 			34,
 		);
@@ -774,10 +775,10 @@ export class WorkflowView implements Component {
 				"Task Detail",
 				width,
 				[
-					`${statusGlyph(this.theme, task.status)} ${strong(this.theme, task.displayName)} ${statusBadge(this.theme, task.status)} ${healthInline(this.theme, taskHealth)} ${muted(this.theme, this.breadcrumbText())}`,
+					`${statusGlyph(this.theme, task.status)} ${strong(this.theme, taskTitle(run, task))} ${statusBadge(this.theme, task.status)} ${healthInline(this.theme, taskHealth)} ${muted(this.theme, this.breadcrumbText())}`,
 					taskMetaLine(this.theme, [
 						["agent", task.agent],
-						["stage", task.stageId ?? "(none)"],
+						["stage", task.stageId ? stageTitle(run, task.stageId) : "(none)"],
 						["runtime", taskRuntimeSummary(task)],
 						["elapsed", taskElapsed(task)],
 					]),
@@ -906,7 +907,8 @@ export class WorkflowView implements Component {
 			const selected = stage.id === currentStage;
 			const status = statusForSummary(stage.summary);
 			const prefix = selected ? accent(this.theme, "› ") : "  ";
-			const label = `${prefix}${statusGlyph(this.theme, status)} ${selected ? strong(this.theme, stage.id) : stage.id}`;
+			const name = stageTitle(run, stage.id);
+			const label = `${prefix}${statusGlyph(this.theme, status)} ${selected ? strong(this.theme, name) : name}`;
 			const right = `${statusBadge(this.theme, status)} ${progressBar(this.theme, stage.summary, 8)}`;
 			const line = joinColumns(
 				label,
@@ -925,7 +927,8 @@ export class WorkflowView implements Component {
 			const selected = stage.id === currentStage;
 			const status = statusForSummary(stage.summary);
 			const prefix = selected ? accent(this.theme, "› ") : "  ";
-			const label = `${prefix}${statusGlyph(this.theme, status)} ${selected ? strong(this.theme, stage.id) : stage.id}`;
+			const name = stageTitle(run, stage.id);
+			const label = `${prefix}${statusGlyph(this.theme, status)} ${selected ? strong(this.theme, name) : name}`;
 			const line = joinColumns(
 				label,
 				compactStatusLabel(this.theme, status),
@@ -951,7 +954,8 @@ export class WorkflowView implements Component {
 		for (const { item: task, index } of window.rows) {
 			const selected = index === this.selectedTask;
 			const prefix = selected ? accent(this.theme, "› ") : "  ";
-			const left = `${prefix}${statusGlyph(this.theme, task.status)} ${selected ? strong(this.theme, task.displayName) : task.displayName}`;
+			const title = taskTitle(run, task);
+			const left = `${prefix}${statusGlyph(this.theme, task.status)} ${selected ? strong(this.theme, title) : title}`;
 			const right = taskListStatusLabel(
 				this.theme,
 				task,
@@ -993,9 +997,9 @@ export class WorkflowView implements Component {
 	): string[] {
 		const thinkingClamp = taskThinkingClamp(task);
 		const lines = [
-			`${statusGlyph(this.theme, task.status)} ${strong(this.theme, task.displayName)}`,
+			`${statusGlyph(this.theme, task.status)} ${strong(this.theme, taskTitle(run, task))}`,
 			kvRow(this.theme, "status", task.status),
-			kvRow(this.theme, "stage", task.stageId ?? "(none)"),
+			kvRow(this.theme, "stage", task.stageId ? stageTitle(run, task.stageId) : "(none)"),
 			"",
 			accent(this.theme, "Runtime"),
 			kvRow(this.theme, "agent", task.agent, "syntaxType"),
@@ -1404,9 +1408,10 @@ export class WorkflowView implements Component {
 			? this.currentStageId(this.detailRun)
 			: undefined;
 		if (stageId && (this.mode === "tasks" || this.mode === "task"))
-			parts.push(stageId);
+			parts.push(this.detailRun ? stageTitle(this.detailRun, stageId) : stageId);
 		const task = this.selectedTaskRecord();
-		if (task && this.mode === "task") parts.push(task.displayName);
+		if (task && this.mode === "task")
+			parts.push(this.detailRun ? taskTitle(this.detailRun, task) : task.displayName);
 		return parts.join(" › ");
 	}
 
@@ -1806,6 +1811,14 @@ function runToSummary(cwd: string, run: WorkflowRunRecord): WorkflowSummary {
 			lastMessage: task.lastMessage,
 		})),
 	};
+}
+
+function taskTitle(run: WorkflowRunRecord, task: WorkflowTaskRunRecord): string {
+	return goalTaskLabel(run, task) ?? task.displayName;
+}
+
+function stageTitle(run: WorkflowRunRecord, stageId: string): string {
+	return goalStageLabel(run, stageId) ?? stageId;
 }
 
 function stageSummaries(

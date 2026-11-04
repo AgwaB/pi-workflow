@@ -148,9 +148,16 @@ test("recovery is refused for a changed definition, an achieved Goal, a live own
   await utimes(lock, stale, stale);
   await planWorkflowGoalRecovery(owned.cwd, RUN, notLive);
 
-  await assert.rejects(planWorkflowGoalRecovery(owned.cwd, RUN, runId => runId === RUN), /use \/workflow goal resume/);
-  // A finished (failed) run of this session can be recovered as a new run.
+  await assert.rejects(planWorkflowGoalRecovery(owned.cwd, RUN, runId => runId === RUN), /still running in this session/);
   const runFile = join(owned.cwd, ".pi", "workflows", RUN, "run.json");
+  // A stopped run of this session can be recovered too: resume may be impossible
+  // after a stop (a model request cut off), and recovery is the way on.
+  const stopped = JSON.parse(await readFile(runFile, "utf8"));
+  stopped.status = "interrupted";
+  stopped.tasks[0] = { ...stopped.tasks[0], status: "interrupted", statusDetail: "workflow_stopped" };
+  await json(runFile, stopped);
+  assert.equal((await planWorkflowGoalRecovery(owned.cwd, RUN, runId => runId === RUN)).plan.fromRunId, RUN);
+  // A finished (failed) run of this session can be recovered as a new run.
   const failed = JSON.parse(await readFile(runFile, "utf8"));
   failed.status = "failed";
   failed.tasks[0] = { ...failed.tasks[0], status: "failed", statusDetail: "launch_failed",
@@ -295,4 +302,21 @@ test("the seed is written through the candidate workspace and re-checked against
   const drifted = await host("drift");
   await assert.rejects(seedWorkflowGoalRecoveryCandidate(drifted, definition, plan), /origin changed after consent/);
   await drifted.cleanup();
+});
+
+test("a Goal run continued by recovery can no longer be resumed", async () => {
+  const { resumeRun } = await import("../../.tmp/unit/engine.js");
+  const { cwd } = await interruptedRun();
+  const runFile = join(cwd, ".pi", "workflows", RUN, "run.json");
+  const stopped = JSON.parse(await readFile(runFile, "utf8"));
+  stopped.status = "interrupted";
+  stopped.backend = { type: "pi-subagent" };
+  stopped.tasks[0] = { ...stopped.tasks[0], status: "interrupted", statusDetail: "workflow_stopped" };
+  await json(runFile, stopped);
+  const successor = "workflow_mvzrecov_f7e8d9";
+  await mkdir(join(cwd, ".pi", "workflows", successor), { recursive: true });
+  await json(join(cwd, ".pi", "workflows", successor, "run.json"), { schemaVersion: 1, runId: successor, name: "recover-me",
+    status: "running", cwd, goalParticipation: stopped.goalParticipation,
+    goalRecovery: { fromRunId: RUN, priorRequests: 5, priorGenerations: 2, feedbackGeneration: 1, seededPaths: [] }, tasks: [] });
+  await assert.rejects(resumeRun(cwd, RUN), new RegExp(`Goal run ${RUN} was continued as ${successor}; it cannot be resumed`));
 });

@@ -1798,6 +1798,8 @@ export interface WorkflowIndexRecord {
 		rootRunId?: string;
 		round?: number;
 		fanout?: unknown[];
+		/** Display-only progress of a running root Goal. */
+		goal?: import("./goal-progress.js").WorkflowGoalProgress;
 		/**
 		 * Deprecated compatibility projection. New index writes omit task rows;
 		 * consumers that need task-level details should load runJson/run.json.

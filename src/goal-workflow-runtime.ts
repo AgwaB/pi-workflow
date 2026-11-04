@@ -41,6 +41,7 @@ import { createTaskRunRecord, deriveRunStatus, fromProjectPath, readCompiledWork
 import { hashDynamicRequest, readDynamicEvents } from "./dynamic-events.js";
 import { createWorkflowStopSignal, throwIfWorkflowStopRequested } from "./workflow-stop.js";
 import { workflowTaskAttemptIdentity, workflowTaskSessionId } from "./launch-session.js";
+import { attemptEndedOnItsOwnWhileStopping, attemptObservedFailing } from "./observed-attempt-ends.js";
 import { goalWorkspacePathCheck, type GoalWorkspacePath } from "./goal-workspace.js";
 import { buildForeachGeneratedTasks, nextTaskRecordIndex } from "./engine-run-graph.js";
 import type { WorkflowRunRecord, WorkflowTaskRunRecord } from "./types.js";
@@ -837,6 +838,19 @@ const requestChannels = new Map<string, { attemptKey: string; prepared: Prepared
   channel: Awaited<ReturnType<typeof openGoalRequestBudgetChannel>> }>();
 const requestResumeAttempts = new Map<string, string>();
 const workerKey = (run: WorkflowRunRecord, specId: string) => `${resolve(run.cwd)}\0${run.runId}\0${specId}`;
+type GoalLaunchBarrierRecord = NonNullable<WorkflowTaskRunRecord["durableLaunchBarrier"]>["records"][number];
+/**
+ * An earlier attempt that a stop ended and a later attempt continued (resume):
+ * a clean cancellation, or a failure this process itself saw while stopping.
+ * Never the last attempt, which must be acknowledged by its own completion.
+ */
+function stoppedPredecessorAttempt(run: WorkflowRunRecord, taskId: string,
+  barrier: GoalLaunchBarrierRecord | undefined, barriers: readonly GoalLaunchBarrierRecord[]): boolean {
+  return barrier?.phase === "cancellation_acknowledged" && barrier !== barriers.at(-1) && !!barrier.backendAttemptId &&
+    barrier.cancellation?.terminalAttemptId === barrier.backendAttemptId && !!barrier.cancellation.terminalObservedAt &&
+    (barrier.cancellation.terminalStatus === "cancelled" || attemptObservedFailing(run.cwd, run.runId, taskId, barrier));
+}
+export const stoppedPredecessorAttemptForTests = stoppedPredecessorAttempt;
 function assertCandidateRoot(cwd: string, run: WorkflowRunRecord, input: PolicyPreparation): void {
   if (resolve(cwd) !== resolve(run.cwd) || resolve(run.cwd) !== resolve(input.cwd) || run.runId !== input.parentRunId)
     throw new Error("Goal candidate original root binding changed");
@@ -3125,10 +3139,7 @@ export async function settleWorkflowGoalChildStagePredecessors(admission: Prepar
     for (const grant of grants) {
       const attempt = attempts.get(grant.grant.attemptKey), channel = channels.get(grant.grant.attemptKey);
       const barrier = barriers.find(value => value.attemptKey === grant.grant.attemptKey);
-      const cancelledPredecessor = barrier?.phase === "cancellation_acknowledged" &&
-        barrier !== barriers.at(-1) && !!barrier.cancellation && !!barrier.backendAttemptId &&
-        barrier.cancellation.terminalAttemptId === barrier.backendAttemptId &&
-        barrier.cancellation.terminalStatus === "cancelled" && !!barrier.cancellation.terminalObservedAt;
+      const cancelledPredecessor = stoppedPredecessorAttempt(run, producer.taskId, barrier, barriers);
       if (grant.state.phase !== "consumed" || grant.grant.backendId !== "pi-subagent/headless" ||
           grant.grant.runId !== run.runId || grant.grant.task.taskId !== producer.taskId || grant.grant.task.specId !== id ||
           !attempt || attempt.taskId !== producer.taskId || !channel || channel.prepared !== binding.prepared ||
@@ -4649,6 +4660,24 @@ export async function admitWorkflowGoalOutputRepair(run: WorkflowRunRecord,
   return undefined;
 }
 
+/** Live candidate tool channels of each admission, for a graceful pause. */
+const candidateChannelsByAdmission = new WeakMap<PreparedWorkflowGoalPolicyAdmission,
+  Set<{ beginHold(): ReturnType<ReturnType<typeof createGoalRequestBudget>["beginHold"]> }>>();
+
+/**
+ * Graceful pause: hold new model requests and new candidate tool operations
+ * of these live Goal admissions while those already started finish.
+ */
+export function beginWorkflowGoalRequestHolds(admissions: Iterable<PreparedWorkflowGoalPolicyAdmission>) {
+  const holds: Array<ReturnType<ReturnType<typeof createGoalRequestBudget>["beginHold"]>> = [];
+  for (const prepared of admissions) {
+    const budget = preparedPolicies.get(prepared)?.engine?.budget;
+    if (budget) holds.push(budget.beginHold());
+    for (const channel of candidateChannelsByAdmission.get(prepared) ?? []) holds.push(channel.beginHold());
+  }
+  return holds;
+}
+
 export async function prepareWorkflowGoalRequestChannel(cwd: string, run: WorkflowRunRecord,
   task: WorkflowTaskRunRecord, compiled: CompiledTask) {
   const key = typeof run.cwd === "string" ? workerKey(run, task.specId) : undefined;
@@ -5150,10 +5179,8 @@ async function settledWorkflowGoalRequests(input: PolicyPreparation,
         if (grant.state.phase !== "consumed") return null;
         const attempt = attempts.get(grant.grant.attemptKey);
         const barrier = barriers.find(record => record.attemptKey === grant.grant.attemptKey);
-        const cancelledPredecessor = barrier?.phase === "cancellation_acknowledged" &&
-          barrier.attemptKey !== currentAttemptKey && barrier !== barriers.at(-1) &&
-          !!barrier.backendAttemptId && barrier.cancellation?.terminalAttemptId === barrier.backendAttemptId &&
-          barrier.cancellation?.terminalStatus === "cancelled" && !!barrier.cancellation?.terminalObservedAt;
+        const cancelledPredecessor = barrier?.attemptKey !== currentAttemptKey &&
+          stoppedPredecessorAttempt(memberRun, task.taskId, barrier, barriers);
         if (!attempt || attempt.taskId !== task.taskId || grant.grant.backendId !== "pi-subagent/headless" ||
             grant.grant.runId !== memberRun.runId || grant.grant.task.taskId !== task.taskId || grant.grant.task.specId !== task.specId ||
             !barrier?.releaseWinner || (barrier.phase !== "acknowledged" && !cancelledPredecessor) ||
@@ -5759,7 +5786,12 @@ export async function prepareWorkflowGoalCandidateChannel(cwd: string, run: Work
       [candidateChannelBindingBrand]: { value: capturedBinding },
     });
     const originalDrain = channel.drain;
-    channel.drain = async () => { retired = true; stop.dispose(); await originalDrain(); await removeSocketDirectory(); };
+    let byAdmission = candidateChannelsByAdmission.get(prepared);
+    if (!byAdmission) candidateChannelsByAdmission.set(prepared, byAdmission = new Set());
+    byAdmission.add(channel);
+    channel.drain = async () => {
+      retired = true; stop.dispose(); byAdmission!.delete(channel); await originalDrain(); await removeSocketDirectory();
+    };
     candidateChannels.set(key, channel);
     candidateExtensionPaths.add(channel.extensionPath);
     // Independently retire terminal, replaced, or revoked attempts; requests
@@ -5899,10 +5931,12 @@ async function captureWorkflowGoalRejectedRootMember(input: PolicyPreparation,
   for (const grant of grants) {
     const attempt = attempts.get(grant.grant.attemptKey);
     const barrier = barriers.find(record => record.attemptKey === grant.grant.attemptKey);
+    // An attempt a pause stopped and a resumed attempt continued.
+    const stopped = stoppedPredecessorAttempt(run, task.taskId, barrier, barriers);
     if (!attempt || attempt.taskId !== task.taskId || grant.state.phase !== "consumed" ||
         grant.grant.backendId !== "pi-subagent/headless" || grant.grant.runId !== run.runId ||
         grant.grant.task.taskId !== task.taskId || grant.grant.task.specId !== task.specId ||
-        !barrier?.releaseWinner || barrier.phase !== "acknowledged" ||
+        !barrier?.releaseWinner || (barrier.phase !== "acknowledged" && !stopped) ||
         barrier.descriptor.subjectSha256 !== grant.grant.identitySha256 ||
         barrier.launchAuthoritySha256 !== grant.grant.identitySha256 ||
         barrier.backendRunId !== grant.state.backendRunId || barrier.backendAttemptId !== grant.state.backendAttemptId ||
@@ -5910,7 +5944,7 @@ async function captureWorkflowGoalRejectedRootMember(input: PolicyPreparation,
         [grant.grant.identitySha256, barrier.releasePayloadSha256, barrier.decisionSha256,
           barrier.readySha256, barrier.ackSha256].some(digest => typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest)))
       throw new Error("Goal rejected generation requires original root acknowledged authority");
-    assertOriginalUnmeteredNativeAck(attempt, task, grant.grant.attemptKey);
+    assertOriginalUnmeteredNativeAck(attempt, task, grant.grant.attemptKey, stopped);
     if (attempt.channel) await attempt.channel.drain();
     await input.assertCurrent();
     assertPreparedWorkflowGoalPolicyCurrent(input, prepared);
@@ -6195,7 +6229,8 @@ async function observeWorkflowGoalRejectedRootMember(input: PolicyPreparation,
     if (!attempt || attempt.taskId !== task.taskId || grant.state.phase !== "consumed" ||
         grant.grant.backendId !== "pi-subagent/headless" || grant.grant.runId !== run.runId ||
         grant.grant.task.taskId !== task.taskId || grant.grant.task.specId !== task.specId ||
-        !barrier?.releaseWinner || barrier.phase !== "acknowledged" ||
+        !barrier?.releaseWinner ||
+        (barrier.phase !== "acknowledged" && !stoppedPredecessorAttempt(run, task.taskId, barrier, barriers)) ||
         barrier.descriptor.subjectSha256 !== grant.grant.identitySha256 ||
         barrier.launchAuthoritySha256 !== grant.grant.identitySha256 ||
         barrier.backendRunId !== grant.state.backendRunId || barrier.backendAttemptId !== grant.state.backendAttemptId ||
@@ -6203,7 +6238,7 @@ async function observeWorkflowGoalRejectedRootMember(input: PolicyPreparation,
         [grant.grant.identitySha256, barrier.releasePayloadSha256, barrier.decisionSha256,
           barrier.readySha256, barrier.ackSha256].some(digest => typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest)))
       throw new Error("Goal historical rejected root acknowledged authority unavailable");
-    assertOriginalUnmeteredNativeAck(attempt, task, grant.grant.attemptKey);
+    assertOriginalUnmeteredNativeAck(attempt, task, grant.grant.attemptKey, barrier.phase === "cancellation_acknowledged");
     if (attempt.channel) await attempt.channel.drain();
     await input.assertCurrent();
     assertPreparedWorkflowGoalPolicyCurrent(input, prepared);
@@ -6619,9 +6654,13 @@ async function validateWorkflowEngineGoalFamily(input: PolicyPreparation,
     const barrier = task.durableLaunchBarrier?.records.at(-1);
     if (barrier && !["acknowledged", "cancellation_acknowledged"].includes(barrier.phase))
       throw new Error("Goal resume requires known terminal backend/barrier settlement");
-    if (barrier && task.status === "interrupted" && barrier.phase !== "cancellation_acknowledged")
+    // A worker this process saw fail by itself while the Goal was stopping (its
+    // next request was refused) has ended like a cancelled one; only this
+    // process's own observation counts, never the run record alone.
+    const endedOnItsOwn = !!barrier && attemptEndedOnItsOwnWhileStopping(input.cwd, run.runId, task, barrier);
+    if (barrier && task.status === "interrupted" && barrier.phase !== "cancellation_acknowledged" && !endedOnItsOwn)
       throw new Error("Goal resume requires original cancellation acknowledgement");
-    if (barrier?.phase === "cancellation_acknowledged" &&
+    if (barrier?.phase === "cancellation_acknowledged" && !endedOnItsOwn &&
         (barrier.cancellation?.terminalAttemptId !== barrier.backendAttemptId ||
           barrier.cancellation?.terminalStatus !== "cancelled" || !barrier.cancellation?.terminalObservedAt))
       throw new Error("Goal resume requires original cancellation acknowledgement");
@@ -6700,8 +6739,9 @@ async function validateWorkflowEngineGoalFamily(input: PolicyPreparation,
               !receipt.backendAttemptId || !["acknowledged", "cancellation_acknowledged"].includes(receipt.phase) ||
               receipt.phase === "acknowledged" && [receipt.ackSha256, receipt.readySha256, receipt.decisionSha256, receipt.releasePayloadSha256]
                 .some(digest => typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest)) ||
-              receipt.phase === "cancellation_acknowledged" && (receipt.cancellation?.terminalAttemptId !== receipt.backendAttemptId ||
-                receipt.cancellation?.terminalStatus !== "cancelled" || !receipt.cancellation?.terminalObservedAt))
+              receipt.phase === "cancellation_acknowledged" && !(receipt === barrier && endedOnItsOwn) &&
+                (receipt.cancellation?.terminalAttemptId !== receipt.backendAttemptId ||
+                  receipt.cancellation?.terminalStatus !== "cancelled" || !receipt.cancellation?.terminalObservedAt))
             throw new Error("Goal cancellation original root settlement unavailable");
           await attempt.channel.drain();
           await input.assertCurrent(); assertPreparedWorkflowGoalPolicyCurrent(input, prepared);

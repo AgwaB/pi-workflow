@@ -69,7 +69,7 @@ test("WB-004 rejects unsupported and mismatched exact-attempt interruption resul
 			status: "unsupported",
 			runId: "child-run",
 			interruptedAttempts: [],
-			unsupportedAttempts: ["child-attempt"],
+			unsupportedAttempts: ["other-attempt"],
 			record: null,
 		}),
 	});
@@ -79,6 +79,24 @@ test("WB-004 rejects unsupported and mismatched exact-attempt interruption resul
 	);
 	assert.equal(task.status, "running");
 	assert.equal(task.backendHandle.attemptId, "child-attempt");
+
+	// The exact attempt had no live process left: accepted only with terminal proof.
+	setSubagentApiForTests({
+		interruptSubagent: async () => ({
+			status: "unsupported",
+			runId: "child-run",
+			interruptedAttempts: [],
+			unsupportedAttempts: ["child-attempt"],
+			record: { attempts: [{ attemptId: "child-attempt", status: "running" }] },
+		}),
+		getSubagentStatus: async () => {
+			throw new Error("status unavailable");
+		},
+	});
+	await assert.rejects(
+		interruptSubagentTask(task, "exited without proof"),
+		/status unavailable/,
+	);
 
 	setSubagentApiForTests({
 		interruptSubagent: async () => ({
@@ -219,4 +237,28 @@ test("WB-004 fail-fast keeps running workers nonterminal until cancellation ackn
 	assert.equal(running.backendHandle.runId, "child-run");
 	assert.equal(pending.status, "interrupted");
 	assert.equal(pending.statusDetail, "fail_fast_cancelled");
+});
+
+test("an exact attempt that exited before the interrupt counts once its record is terminal", async (t) => {
+	t.after(() => setSubagentApiForTests(undefined));
+	const task = runningTask();
+	let polls = 0;
+	setSubagentApiForTests({
+		interruptSubagent: async () => ({
+			status: "unsupported",
+			runId: "child-run",
+			interruptedAttempts: [],
+			unsupportedAttempts: ["child-attempt"],
+			record: { attempts: [{ attemptId: "child-attempt", status: "running" }] },
+		}),
+		getSubagentStatus: async () => ({
+			runId: "child-run",
+			attempts: [{ attemptId: "child-attempt", status: ++polls < 3 ? "running" : "failed" }],
+		}),
+	});
+	const acknowledgement = await interruptSubagentTask(task, "exited first");
+	assert.equal(acknowledgement.attemptId, "child-attempt");
+	assert.equal(acknowledgement.status, "failed");
+	assert.equal(acknowledgement.interruptStatus, "already-terminal");
+	assert.ok(polls >= 3, "waited for the record to become terminal");
 });

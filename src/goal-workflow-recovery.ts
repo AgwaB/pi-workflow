@@ -286,11 +286,13 @@ export async function planWorkflowGoalRecovery(cwd: string, runIdOrPrefix: strin
 		typeof run.specPath !== "string" || resolve(run.specPath) !== resolve(policy.goal.usesPath))
 		throw new Error("Goal recovery supports runs of a top-level Goal definition; recover workflows with an embedded Goal stage by running them again");
 	if (root.goal?.state === "engine:achieved") throw new Error(`Goal run ${run.runId} already achieved its Goal`);
-	// A paused or blocked run of this session may still hold work; it continues
-	// with resume. A finished run (for example replanning exhausted) cannot
-	// usefully resume and may be recovered as a new run.
-	if (isLive(run.runId) && run.status !== "failed" && run.status !== "completed")
-		throw new Error(`Goal run ${run.runId} is still live in this session; use /workflow goal resume ${run.runId}`);
+	// A run of this session that is still running (or still stopping) may hold
+	// work. Once it is stopped (interrupted) or finished it may be recovered as a
+	// new run even in this session: resume can be impossible after a stop (for
+	// example a model request cut off with unknown usage), and recovery is the
+	// way on. A recovered run is never resumed afterwards (see resumeRun).
+	if (isLive(run.runId) && !["failed", "completed", "interrupted"].includes(run.status))
+		throw new Error(`Goal run ${run.runId} is still running in this session; pause it first, then resume or recover it`);
 	const records = await listRunRecords(cwd);
 	const family = records.filter(record => record.runId === run.runId ||
 		(record.rootRunId ?? record.runId) === run.runId);
