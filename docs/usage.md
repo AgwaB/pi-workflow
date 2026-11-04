@@ -717,7 +717,7 @@ consent.
 | `/workflow goal run <ref> "<target>"` | Launches a saved definition as a new named workflow run, not a replacement identity for an interrupted Goal. |
 | `/workflow goal pause <runId\|goal_engine_ID>` (`cancel` is the same) | Both stop the enclosing ordinary workflow run through its original live interactive host. A stop acknowledgement is not proof that descendants and effects have drained; ordinary cancellation is not a separate irreversible lifecycle. The generic `/workflow stop <runId>` remains an emergency stop from any session; it only stops work and never resumes, applies or recovers anything. |
 | `/workflow goal resume <runId\|goal_engine_ID>` | Requires original live interactive admission/profile and settled recoverable work. It does not provide cold recovery or permission to replay UNKNOWN effects. |
-| `/workflow goal recover <runId\|goal_engine_ID>` | Cold recovery after the original Pi session ended: starts a **new** run of the same definition with fresh consent. See "Recovering an interrupted Goal". |
+| `/workflow goal recover <runId\|goal_engine_ID>` | Starts a **new** run of the same definition with fresh consent, for a stopped run (also in its own session) or after the original Pi session ended; a run that is still running is refused. See "Recovering an interrupted Goal". |
 
 Ordinary Goal commands do not support `wait`, `apply`, or `background`;
 ordinary origin application happens automatically on achievement when consented
@@ -756,7 +756,12 @@ verification. Read-only selection never grants these effects implicitly.
 **Recovering an interrupted Goal.** If Pi exits or crashes while a root Goal
 runs, its record stays as it was and `resume` cannot continue it, because the
 consent, request budget and candidate workspace lived in that session. In a new
-session, `/workflow goal recover <runId>` starts a new run instead:
+session, `/workflow goal recover <runId>` starts a new run instead. A run stopped
+with `pause` in this session can be recovered the same way without restarting Pi;
+this is the way on when `resume` is ruled out (for example a model request was cut
+off by the stop, so its usage is unknown, or a worker ended on its own while the
+Goal was stopping). The pause reply, the status `Next` line and a refused `resume`
+say which applies. A run continued by recovery is never resumed afterwards:
 
 - Only runs of a top-level Goal definition are recovered (not workflows with an
   embedded Goal stage). The definition file must still parse to the definition

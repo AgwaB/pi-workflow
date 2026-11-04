@@ -4289,9 +4289,21 @@ async function handleWorkflowGoalCommand(
 		const host = workflowGoalPolicyHost(ctx, api, goalProduct);
 		if (!host) throw new Error("Ordinary Goal original live interactive host unavailable");
 		const uiSessionSignal = action === "resume" ? workflowUiSignalForCwd(ctx.cwd) : undefined;
-		const updated = action === "resume"
-			? (await resumeRun(ctx.cwd, run.runId, { dynamicUi: dynamicUiFromContext(ctx), goalPolicyHost: host })).run
-			: (await stopRun(ctx.cwd, run.runId, host)).run;
+		let updated: Awaited<ReturnType<typeof stopRun>>["run"];
+		try {
+			updated = action === "resume"
+				? (await resumeRun(ctx.cwd, run.runId, { dynamicUi: dynamicUiFromContext(ctx), goalPolicyHost: host })).run
+				: (await stopRun(ctx.cwd, run.runId, host)).run;
+		} catch (error) {
+			if (action !== "resume") throw error;
+			// A stopped run that cannot resume is continued as a new run.
+			const stopped = await readRunRecord(ctx.cwd, run.runId).catch(() => undefined);
+			const message = error instanceof Error ? error.message : String(error);
+			if (stopped?.status !== "interrupted" || /was continued as/.test(message)) throw error;
+			const blocker = await commands.goalResumeBlocker(ctx.cwd, stopped).catch(() => null);
+			throw new Error(`${message}. This run cannot resume${blocker ? ` because ${blocker}` : ""}; to continue, start a new run ` +
+				`from where it stopped: /workflow goal recover ${run.runId} (asks for consent again).`);
+		}
 		if (uiSessionSignal) {
 			if (updated.status === "running" && !uiSessionSignal.aborted) {
 				await startWorkflowFeedbackTracking(ctx, api, updated.runId, uiSessionSignal);
@@ -4299,7 +4311,8 @@ async function handleWorkflowGoalCommand(
 			if (uiSessionSignal.aborted) return;
 		}
 		// Warning level as before: the reply is told apart from automated run feedback by it.
-		emit(ctx, commands.goalControlMessage(action as "pause" | "cancel" | "resume", updated), "warning");
+		emit(ctx, commands.goalControlMessage(action as "pause" | "cancel" | "resume", updated,
+			action === "resume" ? null : await commands.goalResumeBlocker(ctx.cwd, updated).catch(() => null)), "warning");
 		return;
 	}
 	if (suffix === "protected" || suffix.startsWith("protected "))

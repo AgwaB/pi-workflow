@@ -91,6 +91,34 @@ async function safePath(cwd: string, value: string): Promise<string> {
   }
   return file;
 }
+/**
+ * Why a stopped (interrupted) Goal run cannot be resumed, read from its
+ * records; null when nothing recorded rules resume out. A hint only: resume
+ * itself remains the authority and may still refuse.
+ */
+export async function goalResumeBlocker(cwd: string, run: WorkflowRunRecord): Promise<string | null> {
+  if (run.status !== "interrupted") return null;
+  for (const task of run.tasks) {
+    const barrier = task.durableLaunchBarrier?.records.at(-1);
+    if (task.status !== "interrupted" || !barrier) continue;
+    if (barrier.phase !== "cancellation_acknowledged" || barrier.cancellation?.terminalStatus !== "cancelled")
+      return "a worker ended on its own while the Goal was stopping";
+  }
+  for (const task of run.tasks) {
+    const directory = `.pi/workflows/${run.runId}/tasks/${task.taskId}/artifacts/request-reservations`;
+    let names: string[];
+    try { names = await readdir(await safePath(cwd, directory)); }
+    catch { continue; }
+    for (const name of names.filter(entry => /^[a-f0-9]{64}\.json$/.test(entry))) {
+      let phase: unknown;
+      try { phase = (await json(await safePath(cwd, `${directory}/${name}`)))?.phase; }
+      catch { return "a model request record could not be read"; }
+      if (phase !== "settled") return "a model request was cut off when the Goal stopped, so its usage is unknown";
+    }
+  }
+  return null;
+}
+
 async function checkRoot(cwd: string): Promise<boolean> {
   try { await safePath(cwd, ".pi/workflows"); return true; }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
@@ -780,6 +808,7 @@ export async function readOrdinaryWorkflowGoal(cwd: string, action: string, run:
     recovery: run.goalRecovery ?? null,
     recoveredBy: options.justFinished ? null : await readWorkflowGoalRecoveredBy(cwd, run.runId),
     liveInSession: options.isLive?.(run.runId) ?? false,
+    resumeBlocker: await goalResumeBlocker(cwd, run),
     updatedAt: run.updatedAt,
     requestLanguage: requestLanguage(compiled.task),
     currentWork: run.tasks.filter(t => t.status === "running" || t.status === "blocked").map(t => ({
@@ -969,14 +998,16 @@ export function summarizeOrdinaryWorkflowGoal(data: Awaited<ReturnType<typeof re
     if (data.runStatus === "running" && !waiting && p.statusDetail !== "cancellation_pending")
       next.push(`pause: /workflow goal pause ${data.runId}`);
     if (waiting) next.push(`judge: /workflow goal judge ${data.runId}`);
-    // Same rule as recover: a stopped run still live in this session resumes.
-    if (!achieved && !waiting && data.runStatus === "interrupted" && data.liveInSession)
+    // A stopped run still live in this session resumes, unless its records
+    // rule that out; then (and after the session ended) it is recovered.
+    if (!achieved && !waiting && data.runStatus === "interrupted" && data.liveInSession && !data.resumeBlocker)
       next.push(`continue: /workflow goal resume ${data.runId}`);
     // Recovery counts earlier attempts, so a used-up attempt limit cannot be recovered.
     else if (!achieved && /generation limit \(\d+\) reached/.test(problem ?? ""))
       next.push("more attempts: raise limits.generations in the definition and run it again");
     else if (!achieved && !waiting && ["failed", "interrupted", "completed"].includes(data.runStatus) && !data.recoveredBy)
-      next.push(`continue: /workflow goal recover ${data.runId}`);
+      next.push(`continue: /workflow goal recover ${data.runId}${data.runStatus === "interrupted" && data.liveInSession &&
+        data.resumeBlocker ? ` (a new run; this one cannot resume: ${data.resumeBlocker})` : ""}`);
   }
   if (data.recovery) lines.push(`Continues ${data.recovery.fromRunId}: its ${data.recovery.priorRequests} request(s) count against the cap; ${data.recovery.seededPaths.length ? `started from its last candidate (${data.recovery.seededPaths.join(", ")})` : "started from the working tree"}.`);
   if (data.recoveredBy) lines.push(`Continued as ${data.recoveredBy}; this run is kept as recorded.`);
@@ -1023,10 +1054,13 @@ export function summarizeOrdinaryWorkflowGoalLine(data: Awaited<ReturnType<typeo
 
 /** `/workflow goal pause|cancel|resume` reply; cancel is the same stop as pause. */
 export function goalControlMessage(action: "pause" | "cancel" | "resume",
-  run: { runId: string; name?: string; status: string }): string {
+  run: { runId: string; name?: string; status: string }, resumeBlocker?: string | null): string {
   const label = run.name ? `${run.name} (${run.runId})` : run.runId;
   if (action === "resume")
     return run.status === "running" ? `Goal ${label} resumed.` : `Goal ${label} resumed and ended: ${run.status}.`;
+  if (run.status === "interrupted" && resumeBlocker)
+    return `Goal ${label} stopped. Nothing more is applied to your files. It cannot resume because ${resumeBlocker}; ` +
+      `to continue, start a new run from where it stopped: /workflow goal recover ${run.runId} (asks for consent again).`;
   if (run.status === "interrupted")
     return `Goal ${label} stopped. Nothing more is applied to your files. To continue: ` +
       `/workflow goal resume ${run.runId} in this Pi session, or /workflow goal recover ${run.runId} after restarting Pi.`;

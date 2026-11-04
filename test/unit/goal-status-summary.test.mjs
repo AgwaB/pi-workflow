@@ -5,9 +5,9 @@ import { summarizeOrdinaryWorkflowGoal } from "../../.tmp/unit/goal-workflow-com
 const criterion = id => ({ id, verifier: { kind: "deterministic" } });
 function status({ runStatus = "completed", state = "engine:achieved", taskStatus = "completed", statusDetail = "goal_achieved",
   message = null, verdicts = ["met"], originApply = null, recoveredBy = null, currentWork = [], generation = 1,
-  liveInSession = false } = {}) {
+  liveInSession = false, resumeBlocker = null } = {}) {
   return { runId: "workflow_s", runStatus, observedUsage: { totalTokens: 1200, costUsd: 0.001, tasksReporting: 3, taskCount: 3 },
-    recovery: null, recoveredBy, currentWork, liveInSession,
+    recovery: null, recoveredBy, currentWork, liveInSession, resumeBlocker,
     policies: [{ goalId: "goal_engine_x", state, taskStatus, statusDetail, importantFailureOrUnknown: message, generation,
       usage: { requests: 8, costMicros: 3000 }, originApply, originalDefinition: { name: "csv-parser" },
       criteria: verdicts.map((verdict, index) => ({ criterion: criterion(`c${index + 1}`), verdict,
@@ -98,4 +98,42 @@ test("list shows one readable line per Goal run", async () => {
     /^Goal csv-parser \(workflow_s\) stopped\. Nothing more is applied to your files\. To continue: \/workflow goal resume workflow_s in this Pi session, or \/workflow goal recover workflow_s after restarting Pi\.$/);
   assert.equal(goalControlMessage("resume", { ...run, status: "running" }), "Goal csv-parser (workflow_s) resumed.");
   assert.doesNotMatch(goalControlMessage("pause", { ...run, status: "running" }), /admission|origin/);
+});
+
+test("a stopped run that cannot resume points to recover, with the reason", async () => {
+  const { goalControlMessage } = await import("../../.tmp/unit/goal-workflow-commands.js");
+  const blocker = "a model request was cut off when the Goal stopped, so its usage is unknown";
+  const text = summarizeOrdinaryWorkflowGoal(status({ runStatus: "interrupted", state: "engine:unknown",
+    taskStatus: "interrupted", statusDetail: "workflow_stopped", message: "Workflow stopped by user request",
+    verdicts: ["unknown"], liveInSession: true, resumeBlocker: blocker }));
+  assert.match(text, new RegExp(`^Next: continue: /workflow goal recover workflow_s \\(a new run; this one cannot resume: ${blocker}\\)$`, "m"));
+  assert.doesNotMatch(text, /goal resume/);
+  const reply = goalControlMessage("pause", { runId: "workflow_s", name: "csv-parser", status: "interrupted" }, blocker);
+  assert.match(reply, /It cannot resume because a model request was cut off/);
+  assert.match(reply, /\/workflow goal recover workflow_s \(asks for consent again\)\.$/);
+  assert.doesNotMatch(reply, /goal resume/);
+});
+
+test("the resume blocker is read from the stopped run's records", async () => {
+  const { mkdtemp, mkdir, writeFile, realpath } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { goalResumeBlocker } = await import("../../.tmp/unit/goal-workflow-commands.js");
+  const cwd = await realpath(await mkdtemp(join(tmpdir(), "goal-resume-blocker-")));
+  const runId = "workflow_blocker";
+  const reservations = join(cwd, ".pi", "workflows", runId, "tasks", "task-3", "artifacts", "request-reservations");
+  await mkdir(reservations, { recursive: true });
+  const reservation = phase => writeFile(join(reservations, `${"a".repeat(64)}.json`), JSON.stringify({ phase }));
+  const barrier = cancellation => ({ records: [{ phase: cancellation ? "cancellation_acknowledged" : "acknowledged",
+    ...(cancellation ? { cancellation: { terminalStatus: cancellation } } : {}) }] });
+  const run = (cancellation, status = "interrupted") => ({ runId, status, tasks: [
+    { taskId: "task-1", status: "completed", durableLaunchBarrier: barrier() },
+    { taskId: "task-3", status: "interrupted", durableLaunchBarrier: barrier(cancellation) }] });
+  await reservation("settled");
+  assert.equal(await goalResumeBlocker(cwd, run("cancelled")), null, "a cleanly cancelled worker with settled requests can resume");
+  assert.equal(await goalResumeBlocker(cwd, run("failed")), "a worker ended on its own while the Goal was stopping");
+  assert.equal(await goalResumeBlocker(cwd, run(undefined)), "a worker ended on its own while the Goal was stopping");
+  await reservation("unknown");
+  assert.equal(await goalResumeBlocker(cwd, run("cancelled")), "a model request was cut off when the Goal stopped, so its usage is unknown");
+  assert.equal(await goalResumeBlocker(cwd, run("cancelled", "running")), null, "only stopped runs are judged");
 });

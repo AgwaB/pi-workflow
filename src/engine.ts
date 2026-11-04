@@ -123,7 +123,7 @@ import { goalHash } from "./goal-json.js";
 
 import { admitWorkflowGoalOutputRepair, assertHumanFamilyKnown, assertPreparedWorkflowGoalPolicyCurrent, assertWorkflowGoalProfileConfigurationCurrent, beginWorkflowGoalInitializationBindings, bindWorkflowGoalRequestTask, bindWorkflowGoalCandidateWorker, captureWorkflowGoalScopedTaskRuntime, captureWorkflowEngineGoalVerifierTask, observeWorkflowGoalCandidate, applyWorkflowGoalCandidateToOrigin, completeWorkflowGoalInitializationBindings, executeWorkflowEngineGoalPolicy, markWorkflowGoalProfilePublicationUnknown, prepareWorkflowEngineGoalRootPlanner, prepareWorkflowEngineGoalWorkers, prepareWorkflowEngineGoalVerifiers, prepareWorkflowEngineGoalVerifierRequest, prepareWorkflowEngineGoalReplanner, prepareWorkflowEngineGoalResume, prepareWorkflowGoalPolicy, prepareWorkflowGoalRootMaterializationPublication, publishWorkflowGoalProfileConfiguration, revokeWorkflowGoalInitializationBindings, workflowGoalProfileConfiguration, workflowEngineGoalAgentDefinitions, workflowEngineGoalVerifierSnapshot, captureWorkflowGoalHumanReview, consumeWorkflowGoalHumanReview, revokeWorkflowGoalHumanReview, type PreparedWorkflowGoalPolicyAdmission, type PreparedWorkflowGoalVerifierRequest, type WorkflowGoalPolicyHost } from "./goal-workflow-runtime.js";
 import type { WorkflowGoalOriginApplyRecord } from "./goal-workflow-origin-apply.js";
-import type { WorkflowGoalRecoveryPlan } from "./goal-workflow-recovery.js";
+import { readWorkflowGoalRecoveredBy, type WorkflowGoalRecoveryPlan } from "./goal-workflow-recovery.js";
 import { goalGenerationLimit } from "./goal-workflow-schema.js";
 import {
 	assertWorkflowGoalProfileExceptionCurrent,
@@ -3829,6 +3829,13 @@ export async function resumeRun(
 	assertRunResumableForResume(current);
 	const ordinaryGoal = current.goalParticipation !== undefined && !isProtectedGoalEngineRun(current);
 	const liveAdmission = ordinaryGoal ? liveGoalPolicyAdmissions.get(`${resolve(cwd)}\0${current.runId}`) : undefined;
+	if (ordinaryGoal && !current.parentRunId && !current.goalChild) {
+		// A Goal continued by recovery lives on in its successor; resuming the
+		// original as well would run the same Goal twice.
+		const recoveredBy = await readWorkflowGoalRecoveredBy(cwd, current.runId);
+		if (recoveredBy)
+			throw new Error(`Goal run ${current.runId} was continued as ${recoveredBy}; it cannot be resumed`);
+	}
 	if (ordinaryGoal) {
 		if (childResumeAdmission && liveAdmission)
 			options = { ...options, goalPolicyHost: liveAdmission.host };
