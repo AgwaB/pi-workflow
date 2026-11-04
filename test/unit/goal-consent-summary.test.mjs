@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  formatGoalExecutionDetails,
   formatGoalExecutionConsent,
   formatGoalProfileExceptionConsent,
   isGoalProfileExceptionPreview,
@@ -44,9 +45,9 @@ test("the execution consent fits on one screen and names what the Goal may do", 
   assert.ok(lines.length <= 30, summary);
   assert.ok(lines.every(line => line.length <= 160), summary);
   assert.match(summary, /^Goal: csv-parser$/m);
-  assert.match(summary, /^Objective: Make parseCsvLine/m);
-  assert.ok(lines.filter(line => line.startsWith("           ")).length <= 2, "objective is at most three lines");
-  assert.match(summary, /^This run: Implement the parser described by the Goal\.$/m);
+  assert.match(summary, /^Objective \(saved in the definition\): Make parseCsvLine/m);
+  assert.ok(lines.filter(line => /^ {37}\S/.test(line)).length <= 2, "objective is at most three lines");
+  assert.match(summary, /^This run \(your request\): Implement the parser described by the Goal\.$/m);
   assert.match(summary, /^Done when all 4 criteria hold:$/m);
   assert.match(summary, /• tests-pass — command passes: node --test test\/csv\.test\.mjs \(timeout 60s\)/);
   assert.match(summary, /• quality — model rubric, min score 1: Score 1 only if the code is readable/);
@@ -109,4 +110,38 @@ test("a single criterion reads naturally and child-workflow effects need declare
     workflows: [] }));
   assert.match(summary, /^Done when this criterion holds:$/m);
   assert.doesNotMatch(summary, /run declared child workflows/);
+});
+
+test("full details explain every part in plain language and end with the exact bound preview", () => {
+  const value = preview({ exclusions: ["deployment", "arbitrary-commands", "cost-accounting"],
+    profile: { name: "captured", roles: [{ role: "planning", model: "openai-codex/gpt-6.1-sol", thinking: "xhigh" },
+      { role: "verification", model: "openai-codex/gpt-6-luna", thinking: "high" }] },
+    workflows: [{ id: "explain", uses: "./explain.json", definition: { name: "explain", goal: { objective: "Explain unknown outcomes." } } }],
+    recovery: { fromRunId: "workflow_old", priorRequests: 3, priorGenerations: 1, carriedCandidate: [], feedbackCriteria: ["tests-pass: not-met"] } });
+  const details = formatGoalExecutionDetails(value);
+  const [readable, raw] = details.split("Exact preview this consent is bound to (JSON)\n");
+  assert.deepEqual(JSON.parse(raw), value, "the exact preview follows unchanged");
+  assert.doesNotMatch(readable, /"executionFoundation"|"profileProposal"/);
+  for (const expected of [
+    /^Objective \(saved in the definition\)$/m,
+    /^This run \(your request\)\n  Implement the parser described by the Goal\.$/m,
+    /^Completion criteria — the Goal is achieved only when all 4 hold$/m,
+    /^  1\. tests-pass\n     Checked by: running a command on a sandboxed copy/m,
+    /^     Command: node --test test\/csv\.test\.mjs$/m,
+    /^     Working directory: \. · time limit 60 s$/m,
+    /^  2\. quality\n     Checked by: a model scoring the result \(needs score 1\) against:\n       Score 1 only if the code is readable/m,
+    /^  3\. owner\n     Checked by: you, with \/workflow goal judge <runId>/m,
+    /^     Expected: \{"ok":true\}$/m,
+    /^  Protected \(never changed\): PROTECTED\.md, test\/csv\.test\.mjs$/m,
+    /^    • apply verified changes to your working tree$/m,
+    /^  Not part of this consent:\n    • deploying or publishing anything\n    • running commands other than the ones written in the criteria\n    • authoritative cost accounting/m,
+    /^Models \(profile captured\)\n  planning +openai-codex\/gpt-6\.1-sol · xhigh\n  checking \(rubric\) +openai-codex\/gpt-6-luna · high$/m,
+    /^  Fast: on \(OpenAI priority tier for every request\)$/m,
+    /^  Requests: 40 · cost: no cap$/m,
+    /^  Attempts \(first plan \+ replans\): 10$/m,
+    /^  • explain — Goal explain \(\.\/explain\.json\)\n      Objective: Explain unknown outcomes\.$/m,
+    /^Recovery of workflow_old\n  Counts its 1 attempt\(s\) and 3 request\(s\) against the limits\n  Starts from the working tree\n  Last verdicts passed to the planner: tests-pass: not-met$/m,
+  ]) assert.match(readable, expected);
+  assert.ok(readable.split("\n").every(line => line.length <= 160), "lines fit a normal terminal");
+  assert.match(formatGoalExecutionDetails({ weird: true }), /could not be described; its exact content follows\.\n\n\{/);
 });

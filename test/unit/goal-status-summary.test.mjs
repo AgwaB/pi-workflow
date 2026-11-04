@@ -20,8 +20,8 @@ test("an achieved, applied Goal reads as one short report", () => {
     "Goal csv-parser (workflow_s) — achieved",
     "Criteria: 1 of 1 met",
     "  ✓ c1 — met (exit 0)",
-    "Used: attempts 2 · requests 8 · cost $0.0030",
     "Working tree: applied src/csv.mjs",
+    "Used: attempts 2 · requests 8 · cost $0.0030",
     "Tokens: 1200",
     "Next: details: /workflow goal criteria|evidence workflow_s",
   ].join("\n"));
@@ -30,7 +30,7 @@ test("an achieved, applied Goal reads as one short report", () => {
 test("partial application, failure and judgment each name the next step", () => {
   const partial = summarizeOrdinaryWorkflowGoal(status({ originApply: { status: "conflict",
     paths: [{ path: "a.ts", state: "applied" }, { path: "b.ts", state: "conflict" }] } }));
-  assert.match(partial, /^Working tree: conflict — a\.ts \(applied\), b\.ts \(conflict\)$/m);
+  assert.match(partial, /^Working tree: conflict — a\.ts \[applied\], b\.ts \[conflict\]$/m);
   const failed = summarizeOrdinaryWorkflowGoal(status({ runStatus: "failed", state: "engine:not-achieved", taskStatus: "failed",
     statusDetail: "launch_failed", message: "Root replan exhausted: generation limit (3) reached", verdicts: ["not-met", "met"], generation: 2 }));
   assert.match(failed, /^Goal csv-parser \(workflow_s\) — not achieved$/m);
@@ -47,4 +47,25 @@ test("partial application, failure and judgment each name the next step", () => 
   assert.match(judging, /^  … c2 — waiting for your judgment$/m);
   assert.match(judging, /^Next: judge: \/workflow goal judge workflow_s · /m);
   assert.doesNotMatch(judging, /^Why:/m);
+});
+
+test("the report tells what each attempt did and how much changed", () => {
+  const data = status({ originApply: { status: "applied", paths: [{ path: "src/csv.mjs", state: "applied" }] } });
+  data.policies[0].changeStats = { "src/csv.mjs": { added: 38, removed: 2 } };
+  data.policies[0].attempts = [
+    { attempt: 1, criteria: [{ id: "tests-pass", verdict: "not-met", exitCode: 1, failed: ['" a , b "', 'ab"c,d'],
+      summary: "tests 12, pass 10, fail 2" }], notes: [{ slot: "result", note: "Implemented quoted fields and escaped quotes." }] },
+    { attempt: 2, criteria: [{ id: "tests-pass", verdict: "met", exitCode: 0, failed: [], summary: "tests 12, pass 12, fail 0" }],
+      notes: [{ slot: "result", note: "Added per-field quote tracking." }] },
+  ];
+  const report = summarizeOrdinaryWorkflowGoal(data).split("\n");
+  const start = report.indexOf("What happened:");
+  assert.deepEqual(report.slice(start, start + 6), [
+    "What happened:",
+    '  Attempt 1: tests-pass not met (exit 1) — failed: " a , b ", ab"c,d · tests 12, pass 10, fail 2',
+    "    Worker: Implemented quoted fields and escaped quotes.",
+    "  Attempt 2: tests-pass met (exit 0) — tests 12, pass 12, fail 0",
+    "    Worker: Added per-field quote tracking.",
+    "Working tree: applied src/csv.mjs (+38 −2 lines)",
+  ]);
 });

@@ -1,3 +1,7 @@
+import { goalTaskLabel } from "./goal-labels.js";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { firstParagraph, firstSentence, lineDiffStats, summarizeCommandOutput } from "./goal-report.js";
 import { lstat, open, readdir, realpath } from "node:fs/promises";
 import { constants } from "node:fs";
 import { createHash } from "node:crypto";
@@ -708,7 +712,9 @@ export async function readOrdinaryWorkflowGoal(cwd: string, action: string, run:
         throw new Error("Ordinary Goal published oracle receipt mismatch");
     }
     const observations = currentReceipt?.observations;
-    policies.push({ goalId: task.goal?.goalId ?? "unavailable", policySpecId: task.specId,
+    const attempts = await readGoalAttemptHistory(cwd, run, task, definition, evidence);
+    const changeStats = action === "status" ? await readGoalChangeStats(cwd, task.goal?.originApply) : {};
+    policies.push({ goalId: task.goal?.goalId ?? "unavailable", policySpecId: task.specId, attempts, changeStats,
       state: task.goal?.state ?? "UNKNOWN", taskStatus: task.status, statusDetail: task.statusDetail ?? null,
       importantFailureOrUnknown: task.lastMessage ?? null, generation,
       originApply: task.goal?.originApply ?? null,
@@ -739,7 +745,89 @@ export async function readOrdinaryWorkflowGoal(cwd: string, action: string, run:
     // skip the scan of every run record for its completion message.
     recovery: run.goalRecovery ?? null,
     recoveredBy: options.justFinished ? null : await readWorkflowGoalRecoveredBy(cwd, run.runId),
-    currentWork: run.tasks.filter(t => t.status === "running" || t.status === "blocked").map(t => ({ specId: t.specId, status: t.status })), policies };
+    currentWork: run.tasks.filter(t => t.status === "running" || t.status === "blocked").map(t => ({
+      specId: t.specId, status: t.status, ...(goalTaskLabel(run, t) ? { label: goalTaskLabel(run, t) } : {}) })), policies };
+}
+
+async function boundedFileBytes(file: string, limit: number): Promise<Buffer> {
+  const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.size > limit) throw new Error("Ordinary Goal report read exceeds its bound");
+    const bytes = Buffer.alloc(stat.size);
+    const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0);
+    return bytes.subarray(0, bytesRead);
+  } finally { await handle.close(); }
+}
+
+/**
+ * What each attempt did, from the verified published receipts and the
+ * workers' own notes: per-criterion verdicts, a short reading of command
+ * output, and the first paragraph of each worker's analysis (model-written).
+ */
+async function readGoalAttemptHistory(cwd: string, run: WorkflowRunRecord, task: WorkflowTaskRunRecord,
+  definition: { goal: { criteria: readonly { id: string }[] } }, evidence: readonly any[]) {
+  const byGeneration = new Map<number, any>();
+  for (const receipt of evidence) byGeneration.set(receipt.generation, receipt);
+  const prior = run.goalRecovery?.priorGenerations ?? 0;
+  const attempts = [];
+  for (const generation of (task.goalRoot?.generations ?? []).slice(-6)) {
+    const receipt = byGeneration.get(generation.generation);
+    const criteria = Array.isArray(receipt?.observations) ? receipt.observations.map((observation: any, index: number) => {
+      const verification = isGoalCommandVerification(observation.verification) ? observation.verification : undefined;
+      return { id: definition.goal.criteria[index]?.id ?? `criterion-${index + 1}`, verdict: String(observation.verdict),
+        ...(verification ? { exitCode: verification.exitCode, timedOut: verification.timedOut,
+          ...summarizeCommandOutput(verification.stdoutTail ?? "", verification.stderrTail ?? "") } : {}) };
+    }) : [];
+    const notes: { slot: string; note: string }[] = [];
+    for (const [slot, specId] of Object.entries(generation.slots)) {
+      const worker = run.tasks.find(candidate => candidate.specId === specId);
+      if (!worker?.files?.output) continue;
+      const directory = dirname(worker.files.output);
+      let note = "";
+      // The worker's own one-line digest says what it changed; its analysis is the fallback.
+      try {
+        const control = JSON.parse((await boundedFileBytes(await safePath(cwd, `${directory}/control.json`), 256 * 1024)).toString("utf8"));
+        if (typeof control?.digest === "string") note = firstSentence(control.digest);
+      } catch { /* no readable control */ }
+      if (!note) {
+        try {
+          note = firstParagraph((await boundedFileBytes(await safePath(cwd, `${directory}/analysis.md`), 256 * 1024)).toString("utf8"));
+        } catch { /* no readable note */ }
+      }
+      if (note) notes.push({ slot, note });
+    }
+    attempts.push({ attempt: prior + generation.generation + 1, criteria, notes });
+  }
+  return attempts;
+}
+
+const sha256Hex = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
+
+/**
+ * Line counts of applied changes. A created file counts its lines; an updated
+ * file is compared with Git HEAD only when HEAD holds exactly the bytes the
+ * Goal started from and the working tree still holds what it applied.
+ */
+async function readGoalChangeStats(cwd: string, originApply: unknown) {
+  const stats: Record<string, { added: number; removed: number }> = {};
+  for (const path of (originApply as any)?.paths ?? []) {
+    if (path?.state !== "applied" || typeof path.path !== "string" || typeof path.afterSha256 !== "string") continue;
+    try {
+      const after = await boundedFileBytes(await safePath(cwd, path.path), 4 * 1024 * 1024);
+      if (sha256Hex(after) !== path.afterSha256) continue;
+      if (path.action === "create") {
+        stats[path.path] = { added: after.toString("utf8").split("\n").length, removed: 0 };
+        continue;
+      }
+      if (path.action !== "update" || typeof path.beforeSha256 !== "string") continue;
+      const { stdout } = await promisify(execFile)("git", ["-C", cwd, "show", `HEAD:${path.path}`],
+        { encoding: "buffer", maxBuffer: 4 * 1024 * 1024, timeout: 5000 });
+      if (sha256Hex(stdout as Buffer) !== path.beforeSha256) continue;
+      stats[path.path] = lineDiffStats((stdout as Buffer).toString("utf8"), after.toString("utf8"));
+    } catch { /* no counts */ }
+  }
+  return stats;
 }
 
 export async function formatOrdinaryWorkflowGoal(cwd: string, action: string, run: WorkflowRunRecord, tasks: WorkflowTaskRunRecord[]): Promise<string> {
@@ -809,16 +897,32 @@ export function summarizeOrdinaryWorkflowGoal(data: Awaited<ReturnType<typeof re
       lines.push(`  ${mark} ${id} — ${label}${command}${reason}`);
     }
     if (p.criteria.length > 8) lines.push(`  … and ${p.criteria.length - 8} more`);
-    const attempts = finite(p.generation) ? `attempts ${p.generation + 1}` : "attempts unknown";
+    const attemptsUsed = finite(p.generation) ? `attempts ${p.generation + 1}` : "attempts unknown";
     const requests = finite(p.usage.requests) ? `requests ${p.usage.requests}` : "requests unknown";
     const cost = finite(p.usage.costMicros) ? `cost $${(p.usage.costMicros / 1_000_000).toFixed(4)}` : "cost unknown";
-    lines.push(`Used: ${attempts} · ${requests} · ${cost}`);
+    const attempts = Array.isArray((p as { attempts?: unknown }).attempts) ? (p as { attempts: any[] }).attempts : [];
+    if (attempts.length) {
+      lines.push("What happened:");
+      for (const attempt of attempts) {
+        const verdicts = attempt.criteria.map((c: any) => {
+          const label = c.verdict === "met" ? "met" : c.verdict === "not-met" ? "not met" : c.verdict === "pending" ? "waiting for you" : "unknown";
+          const exit = c.exitCode !== undefined || c.timedOut ? ` (exit ${c.timedOut ? "timeout" : c.exitCode})` : "";
+          const output = [c.failed?.length ? `failed: ${c.failed.join(", ")}` : "", c.summary ?? ""].filter(Boolean).join(" · ");
+          return `${c.id} ${label}${exit}${output ? ` — ${output}` : ""}`;
+        });
+        lines.push(`  ${clip(`Attempt ${attempt.attempt}: ${verdicts.join("; ") || "not checked"}`, 200)}`);
+        for (const note of attempt.notes) lines.push(`    ${clip(`Worker${attempt.notes.length > 1 ? ` (${note.slot})` : ""}: ${note.note}`, 200)}`);
+      }
+    }
     if (p.originApply) {
       const paths = p.originApply.paths;
+      const stats = ((p as { changeStats?: Record<string, { added: number; removed: number }> }).changeStats) ?? {};
+      const withStats = (path: string) => stats[path] ? `${path} (+${stats[path]!.added} −${stats[path]!.removed} lines)` : path;
       lines.push(p.originApply.status === "applied" && paths.every(path => path.state === "applied")
-        ? `Working tree: applied ${paths.map(path => path.path).join(", ") || "(no changed paths)"}`
-        : `Working tree: ${p.originApply.status} — ${paths.map(path => `${path.path} (${path.state})`).join(", ") || "no paths"}`);
+        ? `Working tree: applied ${paths.map(path => withStats(path.path)).join(", ") || "(no changed paths)"}`
+        : `Working tree: ${p.originApply.status} — ${paths.map(path => `${withStats(path.path)} [${path.state}]`).join(", ") || "no paths"}`);
     }
+    lines.push(`Used: ${attemptsUsed} · ${requests} · ${cost}`);
     const problem = !achieved && !waiting ? (p.importantFailureOrUnknown ?? p.statusDetail) : undefined;
     if (problem) lines.push(`Why: ${clip(problem, 200)}`);
     else if (counts.UNKNOWN && !achieved) lines.push("Why: exact criterion evidence is unavailable");
@@ -830,7 +934,7 @@ export function summarizeOrdinaryWorkflowGoal(data: Awaited<ReturnType<typeof re
   }
   if (data.recovery) lines.push(`Continues ${data.recovery.fromRunId}: its ${data.recovery.priorRequests} request(s) count against the cap; ${data.recovery.seededPaths.length ? `started from its last candidate (${data.recovery.seededPaths.join(", ")})` : "started from the working tree"}.`);
   if (data.recoveredBy) lines.push(`Continued as ${data.recoveredBy}; this run is kept as recorded.`);
-  if (data.currentWork.length) lines.push(`Now: ${data.currentWork.map(t => `${t.specId} ${t.status}`).join(", ")}`);
+  if (data.currentWork.length) lines.push(`Now: ${data.currentWork.map(t => `${t.label ?? t.specId} ${t.status}`).join(", ")}`);
   lines.push(`Tokens: ${finite(usage?.totalTokens) ? usage!.totalTokens : "unknown"}${usage && usage.tasksReporting < usage.taskCount ? " (some tasks did not report usage)" : ""}`);
   next = [...new Set(next)];
   lines.push(`Next: ${[...next, `details: /workflow goal criteria|evidence ${data.runId}`].join(" · ")}`);

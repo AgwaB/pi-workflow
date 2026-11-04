@@ -112,10 +112,10 @@ export function formatGoalExecutionConsent(preview: unknown): string {
 	const goal = definition.goal as Json;
 	const lines: string[] = [];
 	lines.push(clip(`Goal: ${text(definition.name) || "(unnamed)"}`));
-	lines.push(`Objective: ${wrap(text(goal.objective), LINE_WIDTH - 11, OBJECTIVE_LINES, "           ").join("\n")}`);
-	const request = text(preview.request);
-	const target = request.includes("\n\nTarget: ") ? request.slice(request.lastIndexOf("\n\nTarget: ") + 10) : "";
-	if (target) lines.push(clip(`This run: ${oneLine(target)}`));
+	lines.push(`Objective (saved in the definition): ${wrap(text(goal.objective), LINE_WIDTH - 37, OBJECTIVE_LINES,
+		" ".repeat(37)).join("\n")}`);
+	const target = runTarget(preview);
+	if (target) lines.push(clip(`This run (your request): ${oneLine(target)}`));
 	const criteria = Array.isArray(goal.criteria) ? goal.criteria : [];
 	lines.push(criteria.length === 1 ? "Done when this criterion holds:" : `Done when all ${criteria.length} criteria hold:`);
 	for (const criterion of criteria.slice(0, MAX_CRITERIA)) lines.push(`  ${describeCriterion(criterion)}`);
@@ -152,6 +152,131 @@ export function formatGoalExecutionConsent(preview: unknown): string {
 					: "starts from the working tree.")));
 	}
 	lines.push("After you confirm, the Goal plans, works, verifies and retries within this scope without asking again.");
+	return lines.join("\n");
+}
+
+function runTarget(preview: Json): string {
+	const request = text(preview.request);
+	return request.includes("\n\nTarget: ") ? request.slice(request.lastIndexOf("\n\nTarget: ") + 10) : "";
+}
+
+const EXCLUSION_LABELS: Record<string, string> = {
+	deployment: "deploying or publishing anything",
+	credentials: "reading or using credentials",
+	"protected-backend-qualification": "the retired protected Goal backend",
+	"origin-apply": "changing your working tree",
+	"arbitrary-commands": "running commands other than the ones written in the criteria",
+	"cost-accounting": "authoritative cost accounting (costs shown are estimates)",
+	"child-family-budget-accounting": "separate budgets for child workflows (they share this Goal's limits)",
+	"non-deterministic-replan": "reproducible replanning (each replan is a new model decision)",
+};
+
+const ROLE_LABELS: Record<string, string> = {
+	planning: "planning",
+	"research-execution": "work",
+	synthesis: "synthesis",
+	verification: "checking (rubric)",
+	"final-judgment": "final judgment",
+};
+
+function indentWrap(value: string, indent: string, width = LINE_WIDTH): string[] {
+	return wrap(value, width - indent.length, 1_000, indent).map((line, index) => (index === 0 ? `${indent}${line}` : line));
+}
+
+function describeCriterionDetails(criterion: unknown, index: number): string[] {
+	if (!isRecord(criterion) || !isRecord(criterion.verifier)) return [`  ${index}. (unreadable criterion)`];
+	const verifier = criterion.verifier;
+	const config = isRecord(verifier.config) ? verifier.config : {};
+	const subject = isRecord(verifier.subject) ? verifier.subject : {};
+	const lines = [`  ${index}. ${text(criterion.id) || "(unnamed)"}`];
+	const looksAt = `${text(subject.resultSlot) || "result"}${text(subject.path) ? ` → ${text(subject.path)}` : ""}`;
+	if (verifier.producerId === "command-exit-v1") {
+		const argv = Array.isArray(config.argv) ? config.argv.map(String).join(" ") : "";
+		lines.push("     Checked by: running a command on a sandboxed copy of your working tree with the candidate changes",
+			`     Command: ${argv}`,
+			`     Working directory: ${text(config.cwd) || "."} · time limit ${Math.round(Number(config.timeoutMs ?? 120_000) / 1000)} s`,
+			"     Met when: the command exits with code 0 (no network; it can write only inside the copy)");
+	} else if (verifier.kind === "model-rubric") {
+		const rubric = isRecord(config.rubric) ? config.rubric : {};
+		lines.push(`     Checked by: a model scoring the result (needs score ${typeof config.minScore === "number" ? config.minScore : 1}) against:`,
+			...indentWrap(text(rubric.instruction) || text(rubric.statement), "       "),
+			`     Looks at: ${looksAt}`);
+	} else if (verifier.kind === "human") {
+		const condition = isRecord(config.condition) ? Object.values(config.condition).map(String).join("; ") : "";
+		lines.push("     Checked by: you, with /workflow goal judge <runId> when the Goal waits for you",
+			...indentWrap(`Condition: ${condition || "accept or reject"}`, "     "));
+	} else if (verifier.producerId === "json-exact-value-v1") {
+		lines.push(`     Checked by: comparing an exact value (${looksAt})`,
+			...indentWrap(`Expected: ${JSON.stringify(config.expected)}`, "     "));
+	} else {
+		lines.push(`     Checked by: ${text(verifier.kind)} (${text(verifier.producerId)})`);
+	}
+	return lines;
+}
+
+/**
+ * The complete Goal preview in plain language, for "Show full details". The
+ * exact JSON the consent is bound to follows at the end.
+ */
+export function formatGoalExecutionDetails(preview: unknown): string {
+	const raw = JSON.stringify(preview, null, 2);
+	if (!isRecord(preview) || !isRecord(preview.definition) || !isRecord(preview.definition.goal))
+		return `The preview could not be described; its exact content follows.\n\n${raw}`;
+	const definition = preview.definition;
+	const goal = definition.goal as Json;
+	const lines: string[] = [`Goal: ${text(definition.name) || "(unnamed)"}`, "",
+		"Objective (saved in the definition)", ...indentWrap(text(goal.objective), "  ")];
+	const target = runTarget(preview);
+	if (target) lines.push("", "This run (your request)", ...indentWrap(target, "  "));
+	const criteria = Array.isArray(goal.criteria) ? goal.criteria : [];
+	lines.push("", `Completion criteria — the Goal is achieved only when ${criteria.length === 1 ? "this holds" : `all ${criteria.length} hold`}`);
+	criteria.forEach((criterion, index) => lines.push(...describeCriterionDetails(criterion, index + 1)));
+	const authority = isRecord(goal.authority) ? goal.authority : {};
+	const allowed = Array.isArray(authority.allowedPaths) ? authority.allowedPaths.map(String) : [];
+	const protectedPaths = Array.isArray(authority.protectedPaths) ? authority.protectedPaths.map(String) : [];
+	const effects = Array.isArray(authority.allowedEffects) ? authority.allowedEffects.map(String) : [];
+	const workflows = Array.isArray(preview.workflows) ? preview.workflows.filter(isRecord) : [];
+	lines.push("", "Scope",
+		`  May change: ${allowed.length ? allowed.join(", ") : "nothing (no file paths)"}`,
+		`  Protected (never changed): ${protectedPaths.length ? protectedPaths.join(", ") : "none"}`,
+		"  Allowed:", ...effects
+			.filter((effect) => effect !== "workflow-create" || workflows.length > 0)
+			.map((effect) => `    • ${EFFECT_LABELS[effect] ?? effect}`));
+	const exclusions = Array.isArray(preview.exclusions) ? preview.exclusions.map(String) : [];
+	if (exclusions.length)
+		lines.push("  Not part of this consent:", ...exclusions.map((item) => `    • ${EXCLUSION_LABELS[item] ?? item}`));
+	const profile = isRecord(preview.profile) ? preview.profile : {};
+	const roles = Array.isArray(profile.roles) ? profile.roles.filter(isRecord) : [];
+	const defaults = isRecord(definition.defaults) ? definition.defaults : {};
+	lines.push("", `Models (profile ${text(profile.name) || "unknown"})`,
+		...roles.map((role) => `  ${(ROLE_LABELS[text(role.role)] ?? text(role.role)).padEnd(18)} ${text(role.model)} · ${text(role.thinking)}`),
+		`  Fast: ${defaults.fast === "on" ? "on (OpenAI priority tier for every request)" : "off"}`);
+	const limits = isRecord(goal.limits) ? goal.limits : {};
+	const nesting = isRecord(goal.nesting) ? goal.nesting : {};
+	lines.push("", "Limits",
+		`  Requests: ${limitText(limits.requests)} · cost: ${typeof limits.costMicros === "number" ? `${limits.costMicros} micros` : "no cap"}`,
+		`  Attempts (first plan + replans): ${limitText(preview.generationLimit)}`,
+		`  Nested Goal depth: ${typeof nesting.maxDepth === "number" ? nesting.maxDepth : 3}`);
+	if (workflows.length) {
+		lines.push("", "Child workflows the Goal may run");
+		for (const child of workflows) {
+			const childDefinition = isRecord(child.definition) ? child.definition : {};
+			const childGoal = isRecord(childDefinition.goal) ? childDefinition.goal : undefined;
+			lines.push(`  • ${text(child.id)} — ${childGoal ? "Goal" : "workflow"} ${text(childDefinition.name)} (${text(child.uses)})`);
+			if (childGoal) lines.push(...indentWrap(`Objective: ${text(childGoal.objective)}`, "      "));
+		}
+	}
+	if (isRecord(preview.recovery)) {
+		const recovery = preview.recovery;
+		const carried = Array.isArray(recovery.carriedCandidate) ? recovery.carriedCandidate.map(String) : [];
+		lines.push("", `Recovery of ${text(recovery.fromRunId)}`,
+			`  Counts its ${recovery.priorGenerations ?? 0} attempt(s) and ${recovery.priorRequests ?? 0} request(s) against the limits`,
+			`  ${carried.length ? `Starts from its last candidate: ${carried.join(", ")}` : "Starts from the working tree"}`);
+		const feedback = Array.isArray(recovery.feedbackCriteria) ? recovery.feedbackCriteria.map(String) : [];
+		if (feedback.length) lines.push(`  Last verdicts passed to the planner: ${feedback.join(", ")}`);
+	}
+	lines.push("", "After you confirm, the Goal plans, works, verifies and retries within this scope without asking again.",
+		"", "─".repeat(40), "Exact preview this consent is bound to (JSON)", raw);
 	return lines.join("\n");
 }
 

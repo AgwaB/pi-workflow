@@ -216,20 +216,34 @@ do not require a live execution backend. Saving, selecting a profile, and execut
 are distinct choices; save-only does not start a run. Cancellation does not grant
 consent or launch providers. Existing files are not silently overwritten.
 
+Typing `/workflow goal ` suggests its subcommands, and `/workflow goal run `
+suggests saved workflow names.
+
 **Consent screen.** Running a Goal shows one summary above the choices *Run this
-Goal*, *Show full details* and *Cancel*: objective, this run's target, each
+Goal*, *Show full details* and *Cancel*: objective (saved in the definition), this
+run's request, each
 criterion (command, rubric, human or exact value), the paths it may change and the
 protected ones, the allowed effects (whether verified changes are applied to the
 working tree), child workflows, role models, request/cost/attempt limits, Fast, and
-for a recovery what it continues from. *Show full details* opens the complete preview
-the consent is bound to in a read-only viewer and returns to the summary. While a
+for a recovery what it continues from. Nothing is sent to a model before you
+confirm. *Show full details* opens a read-only viewer with every part in plain
+language (each criterion's command, rubric or condition; scope; what the consent does
+not cover; models per role; limits; child workflows; recovery), followed by the exact
+JSON the consent is bound to, and returns to the summary. While a
 Goal runs, the status line shows its attempt and phase, for example
-`● Goal csv-parser · attempt 2 · verifying`. `/workflow goal status` and the
+`● Goal csv-parser · attempt 2 · verifying`, and the `/workflow` run view names its
+tasks by role and attempt (`Plan · attempt 1`, `Work: result · attempt 2`,
+`Check: quality · attempt 2`). `/workflow goal status` and the
 completion message report the outcome in plain lines: whether it was achieved, each
 criterion as met / not met / waiting for your judgment / unknown (no verified
-evidence), attempts, requests, cost, what was applied to the working tree, why it
-stopped, and the next useful command. A recorded achievement whose evidence cannot be
-verified is reported as such, not as achieved.
+evidence), what each attempt did (verdicts, a short reading of test output with the
+first failing tests, and the worker's own note), what was applied to the working tree
+with line counts (updated files are counted against Git `HEAD` only when it holds
+exactly the starting bytes), attempts, requests, cost, why it stopped, and the next
+useful command. A recorded achievement whose evidence cannot be verified is reported
+as such, not as achieved. When a Goal finishes in the session that started it, the
+transcript shows this report as *Goal result*, and the model is asked to explain it in
+plain words (what was wrong, what changed, how it was verified) instead of repeating it.
 
 A definition has exactly one root: `goal` or `artifactGraph`. A Goal declares its
 objective, criteria and verifier selectors/configuration, relative path/effect
