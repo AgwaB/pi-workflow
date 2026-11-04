@@ -96,3 +96,49 @@ test("an earlier attempt that a pause stopped counts for later generations only 
   assert.equal(stopped(run, "task-2", { ...failed, cancellation: { ...failed.cancellation, terminalStatus: "completed" } },
     [failed, resumed]), false);
 });
+
+test("a graceful pause stops waiting when requests settle, a held request waits too long, or time runs out", async () => {
+  const { waitForGoalRequestHolds } = await import("../../.tmp/unit/engine.js");
+  const fake = ({ inFlight, heldForMs = () => 0 }) => {
+    const hold = { released: false, inFlight, heldForMs, release() { hold.released = true; } };
+    return hold;
+  };
+  // Nothing in flight: no wait, no notice.
+  let notices = 0;
+  const idle = fake({ inFlight: () => 0 });
+  const quick = await waitForGoalRequestHolds([idle], { onWait: () => notices++ });
+  assert.equal(quick.settled, true);
+  assert.equal(notices, 0, "no 'is pausing' notice when nothing is in flight");
+  assert.equal(idle.released, false, "the caller releases after its stop");
+  quick.release();
+  assert.equal(idle.released, true);
+
+  // In flight, then settles: one notice, settled.
+  let remaining = 3;
+  const settling = await waitForGoalRequestHolds([fake({ inFlight: () => (remaining-- > 0 ? 1 : 0) })],
+    { pollMs: 5, onWait: () => notices++ });
+  assert.equal(settling.settled, true);
+  assert.equal(notices, 1);
+
+  // A held request waits past its limit: stop waiting (its exchange would time out).
+  const held = await waitForGoalRequestHolds([fake({ inFlight: () => 1, heldForMs: () => 25 })],
+    { pollMs: 5, heldLimitMs: 20 });
+  assert.equal(held.settled, false);
+
+  // Never settles: the overall limit ends the wait.
+  const started = Date.now();
+  const slow = await waitForGoalRequestHolds([fake({ inFlight: () => 1 })], { pollMs: 5, maxWaitMs: 60 });
+  assert.equal(slow.settled, false);
+  assert.ok(Date.now() - started >= 60 && Date.now() - started < 2_000);
+
+  // An aborted pause stops waiting at once.
+  const aborted = await waitForGoalRequestHolds([fake({ inFlight: () => 1 })],
+    { pollMs: 5, signal: AbortSignal.abort() });
+  assert.equal(aborted.settled, false);
+
+  // A failing hold releases every hold before the error surfaces.
+  const other = fake({ inFlight: () => 1 });
+  await assert.rejects(waitForGoalRequestHolds([fake({ inFlight: () => { throw new Error("broken"); } }), other],
+    { pollMs: 5, maxWaitMs: 200 }), /broken/);
+  assert.equal(other.released, true);
+});

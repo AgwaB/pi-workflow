@@ -746,7 +746,15 @@ export async function pauseWorkflowGoalGracefully(cwd: string, runId: string, op
 } = {}): Promise<{ settled: boolean; waitedMs: number; release(): void } | undefined> {
 	const live = liveGoalPolicyAdmissions.get(`${resolve(cwd)}\0${runId}`);
 	if (!live) return undefined;
-	const holds = beginWorkflowGoalRequestHolds(live.admissions.values());
+	return waitForGoalRequestHolds(beginWorkflowGoalRequestHolds(live.admissions.values()), options);
+}
+
+/** The wait of a graceful pause over begun holds; see pauseWorkflowGoalGracefully. */
+export async function waitForGoalRequestHolds(holds: ReadonlyArray<{
+	inFlight(): number; heldForMs(): number; release(): void;
+}>, options: {
+	maxWaitMs?: number; heldLimitMs?: number; pollMs?: number; signal?: AbortSignal; onWait?: () => void;
+} = {}): Promise<{ settled: boolean; waitedMs: number; release(): void }> {
 	const release = () => { for (const hold of holds) hold.release(); };
 	const started = Date.now();
 	const maxWaitMs = options.maxWaitMs ?? 120_000, heldLimitMs = options.heldLimitMs ?? 20_000;
