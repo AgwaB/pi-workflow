@@ -8806,14 +8806,14 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
         if (stop.signal.aborted) resolve();
         else stop.signal.addEventListener("abort", resolve, { once: true });
       });
-      const stopping = invoke(`pause ${run.runId}`);
+      const stopping = invoke(`cancel ${run.runId}`);
       await joinWarm("registered-root-pause-publication", published);
       const intent = await readWorkflowStopIntent(cwd, run.runId);
       assert.equal(intent?.runId, run.runId);
       assert.equal(intent?.reason, "user");
       releaseChild();
       const stopReply = await joinWarm("registered-root-pause", stopping);
-      assert.equal(stopReply, goalControlMessage("pause", { ...run, status: "interrupted" }));
+      assert.equal(stopReply, goalControlMessage("cancel", { ...run, status: "interrupted" }));
       const stoppedCallback = nativeCallbacks.get(stoppedChild.backendRunId);
       assert.ok(stoppedCallback, "the stopped verifier retains its original native callback");
       await joinWarm("original-stopped-verifier-callback", stoppedCallback.settled);
@@ -9255,11 +9255,11 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
           publishedResolve();
           releaseChild();
         } });
-        const stopping = invoke(`pause ${run.runId}`);
+        const stopping = invoke(`cancel ${run.runId}`);
         await joinPipeline("original-reader-cancellation-publication", published);
         stopReply = await joinPipeline("pending-root-pause", stopping);
         setRunLeaseTestHooksForTests();
-        if (stopReply !== registeredTerminalMessage("pause", "interrupted")) {
+        if (stopReply !== registeredTerminalMessage("cancel", "interrupted")) {
           const failed = await readRunRecord(cwd, childId);
           console.error("pending warm original cleanup failure", JSON.stringify({ reply: stopReply,
             status: failed.status, stopIntent: await readWorkflowStopIntent(cwd, childId),
@@ -9269,7 +9269,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
               grants: task.launchAuthority?.records, barriers: task.durableLaunchBarrier?.records })),
           }).slice(0, 8192));
         }
-        assert.equal(stopReply, registeredTerminalMessage("pause", "interrupted"));
+        assert.equal(stopReply, registeredTerminalMessage("cancel", "interrupted"));
         await drainStoppedFeedback();
         await joinPipeline("pending-stop-watcher-settlement", stopWorkflowWatchersForTests([cwd]));
         run = await readRunRecord(cwd, run.runId);
@@ -9441,7 +9441,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
           if (observer.signal.aborted) resolve();
           else observer.signal.addEventListener("abort", resolve, { once: true });
         });
-        const stopping = invoke(`pause ${run.runId}`);
+        const stopping = invoke(`cancel ${run.runId}`);
         await joinPipeline("unknown-channel-root-stop-publication", published);
         releaseChild();
         stopReply = await joinPipeline("unknown-channel-registered-pause", stopping);
@@ -9551,7 +9551,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       stopFeedback = {
         matches: ({ message, level }) => level === "error" &&
           message.startsWith(`Workflow ${run.runId} interrupted (`) ||
-          level === "warning" && message === registeredTerminalMessage("pause", "interrupted"),
+          level === "warning" && message === registeredTerminalMessage("cancel", "interrupted"),
         resolve: notification => {
           stopFeedbackRoute = notification.level === "warning" ? "registered-pause-command-ui" : "automated-workflow";
           stoppedFeedbackResolve(notification);
@@ -9570,12 +9570,12 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
         originalCancellation = structuredClone(receipt);
         releaseChild();
       } });
-      const stopping = invoke(`pause ${run.runId}`);
+      const stopping = invoke(`cancel ${run.runId}`);
       await joinPipeline("root-stop-intent-publication", published);
       stopReply = await joinPipeline("registered-pause-reply", stopping);
       setRunLeaseTestHooksForTests();
       assert.ok(originalCancellation, "capture actual original child ACK before root stop validation");
-      assert.equal(stopReply, registeredTerminalMessage("pause", "interrupted"));
+      assert.equal(stopReply, registeredTerminalMessage("cancel", "interrupted"));
       assert.ok(terminalNotifications.includes(await joinPipeline("terminal-stop-feedback", stoppedFeedback)));
       await drainStoppedFeedback();
       await joinPipeline("stop-watcher-settlement", stopWorkflowWatchersForTests([cwd]));
@@ -9856,7 +9856,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
         const current = await readRunRecord(cwd, run.runId);
         if (!["pending", "running"].includes(current.status)) terminalResolve(current);
       } });
-      const stopping = invoke(`pause ${run.runId}`).then(reply => { stopReply = reply; return reply; });
+      const stopping = invoke(`cancel ${run.runId}`).then(reply => { stopReply = reply; return reply; });
       await joinMixed("root-stop-intent-publication", published);
       const rootIntent = await readWorkflowStopIntent(cwd, run.runId);
       assert.equal(rootIntent?.runId, run.runId);
@@ -9865,7 +9865,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       await joinMixed("registered-pause-reply", stopping);
       const pendingReply = `Workflow stop requested for ${run.runId}, but active work or descendant workflow stop could not be confirmed within 1500ms; stop intent remains durable and cancellation is still pending. Retry /workflow stop ${run.runId}`;
       if (stopReply !== pendingReply)
-        assert.equal(stopReply, goalControlMessage("pause", { ...run, status: "interrupted" }));
+        assert.equal(stopReply, goalControlMessage("cancel", { ...run, status: "interrupted" }));
       const terminal = await joinMixed("original-root-terminal-publication", originalTerminal);
       assert.equal(terminal.status, "interrupted", "bounded pending reply is not terminal cancellation proof");
       setRunLeaseTestHooksForTests();
@@ -10623,7 +10623,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       }
       if (foreachParentReentryStop)
         await joinStop("original-parent-policy-reentry-read", parentPrepareReached);
-      stopping = invoke(`pause ${run.runId}`).then(async reply => {
+      stopping = invoke(`cancel ${run.runId}`).then(async reply => {
         stopReply = reply;
         await heldRootLease?.release();
         heldRootLease = undefined;
@@ -10668,7 +10668,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
         assert.equal(stopReply, pendingReply, "unchanged bounded command returns before original terminal publication");
       }
       if (stopReply !== pendingReply)
-        assert.equal(stopReply, goalControlMessage("pause", { ...run, status: "interrupted" }));
+        assert.equal(stopReply, goalControlMessage("cancel", { ...run, status: "interrupted" }));
       const terminal = await joinStop("original-root-terminal-publication", rootTerminal);
       assert.equal(terminal.root.status, "interrupted");
       assert.equal(terminal.child.status, "interrupted", "original child terminal state precedes root terminal publication");
@@ -11247,7 +11247,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       stopFeedback = { matches, resolve: resolveFeedback };
       const observed = terminalNotifications.find(matches);
       if (observed) resolveFeedback(observed);
-      const paused = await invoke(`pause ${run.runId}`);
+      const paused = await invoke(`cancel ${run.runId}`);
       run = await readRunRecord(cwd, run.runId);
       assert.equal(run.status, "interrupted", paused);
       const notification = await delivered;
@@ -17674,7 +17674,7 @@ for (const [name, cap, expected, recursive, terminalFault, mixed, depthDenied, g
       assert.equal((await readWorkflowStopIntent(cwd, root.runId))?.runId, root.runId);
       interruptedParentObserved = true;
     } });
-    const paused = await joinWarm("original-registered-root-stop-call", invoke(`pause ${root.runId}`));
+    const paused = await joinWarm("original-registered-root-stop-call", invoke(`cancel ${root.runId}`));
     if (warm === "unknown") {
       setRunLeaseTestHooksForTests();
       assert.match(paused, /UNKNOWN|unsettled/i, "sent unanswered cancellation cannot claim known settlement");
@@ -17720,7 +17720,7 @@ for (const [name, cap, expected, recursive, terminalFault, mixed, depthDenied, g
       assert.ok(paused.includes(pending));
       t.diagnostic(pending);
       assert.equal(physical, 4, "pending confirmation does not authorize a successor request");
-    } else assert.equal(paused, goalControlMessage("pause", { ...root, status: "interrupted" }));
+    } else assert.equal(paused, goalControlMessage("cancel", { ...root, status: "interrupted" }));
     await joinWarm("original-root-terminal-publication", rootTerminal);
     setRunLeaseTestHooksForTests();
     assert.equal(interruptedParentObserved, true, "original interrupted immediate parent is covered by root stopping proof");

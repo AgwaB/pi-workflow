@@ -44,6 +44,7 @@ import {
 	refreshRun,
 	resumeRun,
 	hasLiveWorkflowGoalAdmission,
+	pauseWorkflowGoalGracefully,
 	resumeSupervisors,
 	beginWorkflowGoalHumanReview,
 	beginWorkflowGoalProfileException,
@@ -4291,9 +4292,20 @@ async function handleWorkflowGoalCommand(
 		const uiSessionSignal = action === "resume" ? workflowUiSignalForCwd(ctx.cwd) : undefined;
 		let updated: Awaited<ReturnType<typeof stopRun>>["run"];
 		try {
-			updated = action === "resume"
-				? (await resumeRun(ctx.cwd, run.runId, { dynamicUi: dynamicUiFromContext(ctx), goalPolicyHost: host })).run
-				: (await stopRun(ctx.cwd, run.runId, host)).run;
+			if (action === "resume") {
+				updated = (await resumeRun(ctx.cwd, run.runId, { dynamicUi: dynamicUiFromContext(ctx), goalPolicyHost: host })).run;
+			} else {
+				// pause stops after the model requests in flight finish (their usage
+				// stays known, so the run can resume); cancel stops at once.
+				const label = run.name ? `${run.name} (${run.runId})` : run.runId;
+				const pausing = action === "pause"
+					? await pauseWorkflowGoalGracefully(ctx.cwd, run.runId, {
+						onWait: () => emit(ctx, `Goal ${label} is pausing: its current model request finishes first (up to 2 min).`, "info"),
+					})
+					: undefined;
+				try { updated = (await stopRun(ctx.cwd, run.runId, host)).run; }
+				finally { pausing?.release(); }
+			}
 		} catch (error) {
 			if (action !== "resume") throw error;
 			// A stopped run that cannot resume is continued as a new run.
@@ -5593,15 +5605,16 @@ const WORKFLOW_GOAL_ACTION_COMPLETIONS = [
 	{ value: "run", label: "run", description: "Run a saved Goal definition" },
 	{ value: "status", label: "status", description: "Show a Goal run's result and next step" },
 	{ value: "list", label: "list", description: "One line per Goal run" },
-	{ value: "pause", label: "pause", description: "Stop a running Goal" },
-	{ value: "resume", label: "resume", description: "Continue a stopped Goal in this session" },
+	{ value: "pause", label: "pause", description: "Pause after the current model request (resume continues it)" },
+	{ value: "resume", label: "resume", description: "Continue a paused Goal in this session" },
 	{ value: "recover", label: "recover", description: "Continue a stopped or failed Goal as a new run" },
 	{ value: "judge", label: "judge", description: "Give your judgment on a Goal waiting for you" },
+	{ value: "cancel", label: "cancel", description: "Stop a running Goal now (continue later with recover)" },
 	{ value: "help", label: "help", description: "Show the Goal commands" },
 	{ value: "criteria", label: "criteria", description: "Criteria and verdicts (JSON, troubleshooting)" },
 	{ value: "evidence", label: "evidence", description: "Raw check records (JSON, troubleshooting)" },
-	// Not listed: cancel (the same stop as pause) and profile (a rarely available
-	// run-only model exception); both remain accepted commands.
+	// Not listed: profile (a rarely available run-only model exception); it
+	// remains an accepted command.
 ];
 
 const WORKFLOW_ACTION_COMPLETIONS = [

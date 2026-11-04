@@ -75,8 +75,10 @@ import {
 } from "./workflow-stop.js";
 import {
 	retryWorkflowTaskSessionId,
+	workflowTaskAttemptIdentity,
 	workflowTaskSessionId,
 } from "./launch-session.js";
+import { recordObservedAttemptEnd } from "./observed-attempt-ends.js";
 import {
 	assertPreparedLaunchMatchesRecordedProvenance,
 	assertRecordedLaunchBootstrapProvenance,
@@ -1502,6 +1504,8 @@ export async function acknowledgeSubagentTaskInterrupted(
 			throw new Error(
 				"durable launch barrier cancellation evidence is unavailable",
 			);
+		recordObservedAttemptEnd({ cwd, runId: run.runId, taskId: task.taskId, attemptKey: barrierRecord.attemptKey,
+			backendAttemptId: acknowledgement.attemptId, status: acknowledgement.status });
 		barrierRecord.cancellation.interruptStatus = acknowledgement.interruptStatus;
 		barrierRecord.cancellation.terminalAttemptId = acknowledgement.attemptId;
 		barrierRecord.cancellation.terminalStatus = acknowledgement.status;
@@ -2827,9 +2831,17 @@ export async function interruptSubagentTask(
 		throw new Error(
 			`subagent interruption result run ${result?.runId ?? "missing"} does not match ${handle.runId}`,
 		);
+	// "unsupported" for this exact attempt: it had no live process left to
+	// signal (it had just exited by itself). It counts only once its own
+	// record reaches a terminal state below, before the same deadline.
+	const exitedBeforeSignal =
+		result.status === "unsupported" &&
+		result.unsupportedAttempts?.includes(handle.attemptId) === true &&
+		!result.interruptedAttempts?.length;
 	if (
 		result.status !== "interrupt-requested" &&
-		result.status !== "already-terminal"
+		result.status !== "already-terminal" &&
+		!exitedBeforeSignal
 	)
 		throw new Error(
 			`subagent interruption was not acknowledged for exact attempt ${handle.attemptId}: ${result?.status ?? "invalid-result"}`,
@@ -2872,13 +2884,16 @@ export async function interruptSubagentTask(
 	}
 	if (terminalStatus === undefined)
 		throw new Error(
-			`subagent exact attempt ${handle.attemptId} did not reach a terminal state after interruption`,
+			exitedBeforeSignal
+				? `subagent interruption was not acknowledged for exact attempt ${handle.attemptId}: unsupported`
+				: `subagent exact attempt ${handle.attemptId} did not reach a terminal state after interruption`,
 		);
 	return {
 		attemptId: handle.attemptId,
 		status: terminalStatus,
 		observedAt: nowIso(),
-		interruptStatus: result.status,
+		interruptStatus:
+			result.status === "interrupt-requested" ? "interrupt-requested" : "already-terminal",
 	};
 }
 
@@ -4329,6 +4344,13 @@ async function materializeTerminalSubagentResult(
 		subagentResult,
 		outputBytes,
 	);
+	// This process saw the exact attempt end (before any retry renames its identity).
+	recordObservedAttemptEnd({
+		cwd, runId: run.runId, taskId: task.taskId,
+		attemptKey: workflowTaskAttemptIdentity(task, workflowTaskSessionId(run, task)),
+		backendAttemptId: snapshot.attemptId,
+		status: exactTerminalAttempt(snapshot.attempts, snapshot.attemptId) ?? snapshot.status,
+	});
 	const deterministicBootFailure = classifyDeterministicBootFailure({
 		statusInfo,
 		stderrText,

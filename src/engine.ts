@@ -121,7 +121,7 @@ import {
 } from "./goal-generated-materialization.js";
 import { goalHash } from "./goal-json.js";
 
-import { admitWorkflowGoalOutputRepair, assertHumanFamilyKnown, assertPreparedWorkflowGoalPolicyCurrent, assertWorkflowGoalProfileConfigurationCurrent, beginWorkflowGoalInitializationBindings, bindWorkflowGoalRequestTask, bindWorkflowGoalCandidateWorker, captureWorkflowGoalScopedTaskRuntime, captureWorkflowEngineGoalVerifierTask, observeWorkflowGoalCandidate, applyWorkflowGoalCandidateToOrigin, completeWorkflowGoalInitializationBindings, executeWorkflowEngineGoalPolicy, markWorkflowGoalProfilePublicationUnknown, prepareWorkflowEngineGoalRootPlanner, prepareWorkflowEngineGoalWorkers, prepareWorkflowEngineGoalVerifiers, prepareWorkflowEngineGoalVerifierRequest, prepareWorkflowEngineGoalReplanner, prepareWorkflowEngineGoalResume, prepareWorkflowGoalPolicy, prepareWorkflowGoalRootMaterializationPublication, publishWorkflowGoalProfileConfiguration, revokeWorkflowGoalInitializationBindings, workflowGoalProfileConfiguration, workflowEngineGoalAgentDefinitions, workflowEngineGoalVerifierSnapshot, captureWorkflowGoalHumanReview, consumeWorkflowGoalHumanReview, revokeWorkflowGoalHumanReview, type PreparedWorkflowGoalPolicyAdmission, type PreparedWorkflowGoalVerifierRequest, type WorkflowGoalPolicyHost } from "./goal-workflow-runtime.js";
+import { beginWorkflowGoalRequestHolds, admitWorkflowGoalOutputRepair, assertHumanFamilyKnown, assertPreparedWorkflowGoalPolicyCurrent, assertWorkflowGoalProfileConfigurationCurrent, beginWorkflowGoalInitializationBindings, bindWorkflowGoalRequestTask, bindWorkflowGoalCandidateWorker, captureWorkflowGoalScopedTaskRuntime, captureWorkflowEngineGoalVerifierTask, observeWorkflowGoalCandidate, applyWorkflowGoalCandidateToOrigin, completeWorkflowGoalInitializationBindings, executeWorkflowEngineGoalPolicy, markWorkflowGoalProfilePublicationUnknown, prepareWorkflowEngineGoalRootPlanner, prepareWorkflowEngineGoalWorkers, prepareWorkflowEngineGoalVerifiers, prepareWorkflowEngineGoalVerifierRequest, prepareWorkflowEngineGoalReplanner, prepareWorkflowEngineGoalResume, prepareWorkflowGoalPolicy, prepareWorkflowGoalRootMaterializationPublication, publishWorkflowGoalProfileConfiguration, revokeWorkflowGoalInitializationBindings, workflowGoalProfileConfiguration, workflowEngineGoalAgentDefinitions, workflowEngineGoalVerifierSnapshot, captureWorkflowGoalHumanReview, consumeWorkflowGoalHumanReview, revokeWorkflowGoalHumanReview, type PreparedWorkflowGoalPolicyAdmission, type PreparedWorkflowGoalVerifierRequest, type WorkflowGoalPolicyHost } from "./goal-workflow-runtime.js";
 import type { WorkflowGoalOriginApplyRecord } from "./goal-workflow-origin-apply.js";
 import { readWorkflowGoalRecoveredBy, type WorkflowGoalRecoveryPlan } from "./goal-workflow-recovery.js";
 import { goalGenerationLimit } from "./goal-workflow-schema.js";
@@ -728,6 +728,39 @@ function assertWorkflowGoalGenerationAvailable(run: WorkflowRunRecord, policy: C
 /** Whether this process still holds the original live admission of a Goal run. */
 export function hasLiveWorkflowGoalAdmission(cwd: string, runId: string): boolean {
 	return liveGoalPolicyAdmissions.has(`${resolve(cwd)}\0${runId}`);
+}
+
+/**
+ * Graceful pause of a live Goal (like a stop "after the current turn"): new
+ * model requests are held (the requester waits instead of failing) while the
+ * requests already in flight finish and settle, so their usage stays known and
+ * the run can resume. Ends when nothing is in flight, when a held request has
+ * waited `heldLimitMs` (its exchange would time out), or after `maxWaitMs`.
+ * The caller stops the run next and then calls `release`; the stop itself
+ * ends every held request.
+ */
+export async function pauseWorkflowGoalGracefully(cwd: string, runId: string, options: {
+	maxWaitMs?: number; heldLimitMs?: number; pollMs?: number; signal?: AbortSignal;
+	/** Called once when the pause has to wait for requests in flight. */
+	onWait?: () => void;
+} = {}): Promise<{ settled: boolean; waitedMs: number; release(): void } | undefined> {
+	const live = liveGoalPolicyAdmissions.get(`${resolve(cwd)}\0${runId}`);
+	if (!live) return undefined;
+	const holds = beginWorkflowGoalRequestHolds(live.admissions.values());
+	const release = () => { for (const hold of holds) hold.release(); };
+	const started = Date.now();
+	const maxWaitMs = options.maxWaitMs ?? 120_000, heldLimitMs = options.heldLimitMs ?? 20_000;
+	let settled = false, announced = false;
+	try {
+		for (;;) {
+			if (holds.every((hold) => hold.inFlight() === 0)) { settled = true; break; }
+			if (!announced) { announced = true; options.onWait?.(); }
+			if (options.signal?.aborted || Date.now() - started >= maxWaitMs ||
+				holds.some((hold) => hold.heldForMs() >= heldLimitMs)) break;
+			await new Promise((resolveWait) => setTimeout(resolveWait, options.pollMs ?? 100));
+		}
+	} catch (error) { release(); throw error; }
+	return { settled, waitedMs: Date.now() - started, release };
 }
 
 export async function assertOrdinaryGoalCommandCurrent(cwd: string, run: WorkflowRunRecord,

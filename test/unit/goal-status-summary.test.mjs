@@ -91,11 +91,11 @@ test("list shows one readable line per Goal run", async () => {
   const stopped = summarizeOrdinaryWorkflowGoalLine(status({ runStatus: "interrupted", state: "engine:unknown",
     statusDetail: "workflow_stopped", verdicts: ["unknown"], generation: 0 }));
   assert.equal(stopped, "csv-parser — stopped before finishing · 0/1 criteria met · 1 attempt · workflow_s");
-  // pause and cancel are the same stop; the reply says how to continue.
+  // pause stops after the requests in flight (paused), cancel at once (stopped); both say how to continue.
   const run = { runId: "workflow_s", name: "csv-parser" };
-  assert.equal(goalControlMessage("cancel", { ...run, status: "interrupted" }), goalControlMessage("pause", { ...run, status: "interrupted" }));
   assert.match(goalControlMessage("pause", { ...run, status: "interrupted" }),
-    /^Goal csv-parser \(workflow_s\) stopped\. Nothing more is applied to your files\. To continue: \/workflow goal resume workflow_s in this Pi session, or \/workflow goal recover workflow_s after restarting Pi\.$/);
+    /^Goal csv-parser \(workflow_s\) paused\. Nothing more is applied to your files\. To continue: \/workflow goal resume workflow_s in this Pi session, or \/workflow goal recover workflow_s after restarting Pi\.$/);
+  assert.match(goalControlMessage("cancel", { ...run, status: "interrupted" }), /^Goal csv-parser \(workflow_s\) stopped\. /);
   assert.equal(goalControlMessage("resume", { ...run, status: "running" }), "Goal csv-parser (workflow_s) resumed.");
   assert.doesNotMatch(goalControlMessage("pause", { ...run, status: "running" }), /admission|origin/);
 });

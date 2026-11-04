@@ -31,7 +31,9 @@ type Operation = { fingerprint: string; authority?: string; promise: Promise<Res
   phase: "pending" | "awaiting-ack" | "settled" | "unknown"; intent: unknown; path: string; owned: boolean;
   acknowledged: boolean; peer?: GoalAuthenticatedLocalPeer;
   sourceReceipt?: Readonly<GoalCandidateSourceReadReceipt>;
-  sourceInvalidation?: { path: string; expectedDigest: string } };
+  sourceInvalidation?: { path: string; expectedDigest: string };
+  /** Held by a graceful pause before it started: no authority check, no effect. */
+  held?: boolean };
 
 const GOAL_NATIVE_READ_CONTENT_CHARS = 320_000;
 const GOAL_NATIVE_CONTEXT_STRUCTURE_LIMIT = 4_096 * 16;
@@ -679,6 +681,27 @@ export async function openGoalCandidateToolChannel(input: {
     if (closed) throw new Error("Goal candidate channel retired");
     input.stopped.throwIfAborted(); input.assertLive();
   };
+  // Graceful pause: a new operation waits, before it starts, until the hold
+  // ends or the channel stops; a stopped wait ends as a denial with no effect.
+  let hold: { active: boolean; waiting: Set<{ since: number }> } | undefined;
+  const departedPeers = new WeakSet<GoalAuthenticatedLocalPeer>();
+  const waitWhileHeld = async (operation: Operation) => {
+    const state = hold;
+    if (!state?.active) return;
+    const entry = { since: Date.now() };
+    state.waiting.add(entry);
+    operation.held = true;
+    try {
+      while (state.active) {
+        live();
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      // Nobody is left to receive the result of a worker that disconnected.
+      if (operation.peer && departedPeers.has(operation.peer))
+        throw new Error("Goal candidate worker disconnected while its operation was held");
+      operation.held = false; // released: it starts normally
+    } finally { state.waiting.delete(entry); }
+  };
   const track = <T>(promise: Promise<T>): Promise<T> => {
     admitted.add(promise);
     void promise.then(() => admitted.delete(promise), () => admitted.delete(promise));
@@ -788,6 +811,7 @@ export async function openGoalCandidateToolChannel(input: {
     operation.promise = track(queue.then(async () => {
       let creationAttempted = false;
       try {
+        await waitWhileHeld(operation);
         operation.authority = await check();
         if (poisoned) throw new Error("Goal candidate unresolved UNKNOWN outcome");
         validate();
@@ -955,9 +979,11 @@ export async function openGoalCandidateToolChannel(input: {
       } catch (error) { return await unknown(operation, error); }
     },
     onDisconnect(peer) {
+      departedPeers.add(peer);
       const detached: Operation[] = [];
       for (const operation of operations.values()) {
-        if (operation.peer !== peer || operation.phase === "settled" || operation.phase === "unknown") continue;
+        // A held operation never started; it ends as a denial, not UNKNOWN.
+        if (operation.peer !== peer || operation.phase === "settled" || operation.phase === "unknown" || operation.held) continue;
         operation.phase = "unknown"; poisoned = true; detached.push(operation);
       }
       return Promise.all(detached.map(async operation => {
@@ -978,6 +1004,7 @@ export async function openGoalCandidateToolChannel(input: {
       await server.drain();
       while (admitted.size) await Promise.allSettled([...admitted]);
       for (const operation of operations.values()) {
+        if (operation.held && operation.phase === "pending") continue; // never started; settles as a denial
         if (operation.phase === "pending" || operation.phase === "awaiting-ack") await unknown(operation, "channel retired without settled acknowledgement");
       }
       input.stopped.removeEventListener("abort", onAbort);
@@ -1147,7 +1174,18 @@ export async function openGoalCandidateToolChannel(input: {
         observed.readRoot !== nativeReadRoot(leaves))
       throw new Error("Goal candidate native read witness does not match original ACK-settled operations");
   };
-  return { channel, server, extensionPath, drain, async assertExtensionCurrent() {
+  /** Graceful pause: hold new operations while started ones finish and are acknowledged. */
+  const beginHold = () => {
+    const state = { active: true, waiting: new Set<{ since: number }>() };
+    hold = state;
+    return {
+      inFlight: () => [...operations.values()].filter(operation => !operation.held &&
+        (operation.phase === "pending" || operation.phase === "awaiting-ack")).length,
+      heldForMs: () => state.waiting.size ? Date.now() - Math.min(...[...state.waiting].map(entry => entry.since)) : 0,
+      release: () => { state.active = false; if (hold === state) hold = undefined; },
+    };
+  };
+  return { channel, server, extensionPath, drain, beginHold, async assertExtensionCurrent() {
     live(); if (await readFile(extensionPath, "utf8") !== extensionBytes) throw new Error("Goal candidate extension replaced"); live();
   }, assertCompleteSourceReadCoverage, assertNativeReadCoverage };
 }
@@ -1416,7 +1454,37 @@ export function createGoalRequestBudget(limit: number | undefined) {
     nativeReadWitness?: GoalNativeReadWitness; nativeSettlementChannel?: symbol }>();
   const disconnected = new WeakSet<GoalAuthenticatedLocalPeer>();
   let poisoned = false, queue: Promise<void> = Promise.resolve(), queueGeneration = 0;
+  // Graceful pause: while held, a new reservation gets no answer (the requester
+  // waits instead of failing) until the hold ends or its channel stops.
+  let hold: { active: boolean; waiting: Set<{ since: number }> } | undefined;
+  const waitWhileHeld = async (live: () => void) => {
+    const state = hold;
+    if (!state?.active) return;
+    const entry = { since: Date.now() };
+    state.waiting.add(entry);
+    try {
+      while (state.active) {
+        live(); // a stop of the Goal ends the wait (and so the request) at once
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+    } finally { state.waiting.delete(entry); }
+  };
   return {
+    /**
+     * Hold new reservations while the requests already in flight finish and
+     * settle (graceful pause). `inFlight` counts reservations not yet settled;
+     * `heldForMs` is the longest wait of a held request.
+     */
+    beginHold() {
+      const state = { active: true, waiting: new Set<{ since: number }>() };
+      hold = state;
+      return {
+        inFlight: () => [...records.values()].filter(record =>
+          record.phase === "reserved" || record.phase === "released" || record.phase === "settling").length,
+        heldForMs: () => state.waiting.size ? Date.now() - Math.min(...[...state.waiting].map(entry => entry.since)) : 0,
+        release: () => { state.active = false; if (hold === state) hold = undefined; },
+      };
+    },
     assertLaunchCurrent(assertLive: () => void = () => undefined): void {
       assertLive();
       if (poisoned) throw new Error("Goal request outcome UNKNOWN");
@@ -1487,6 +1555,9 @@ export function createGoalRequestBudget(limit: number | undefined) {
       if (input.action === "reserve" && input.nativeSettlementChannel !== undefined &&
           input.nativeReadWitness === undefined)
         throw new Error("Goal source request settlement requires its native read witness");
+      // Held before entering the serialized ledger, so settlements of requests
+      // already in flight are never queued behind a held reservation.
+      if (input.action === "reserve") await waitWhileHeld(input.live);
       const predecessor = queue;
       const operation = predecessor.catch(() => undefined).then(async () => {
         const check = async () => { input.live(); const value = await input.current(); input.live(); return value; };

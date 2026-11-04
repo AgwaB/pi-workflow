@@ -2,6 +2,7 @@ import { goalTaskLabel } from "./goal-labels.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { firstParagraph, firstSentence, lineDiffStats, requestLanguage, summarizeCommandOutput } from "./goal-report.js";
+import { attemptEndedOnItsOwnWhileStopping } from "./observed-attempt-ends.js";
 import { lstat, open, readdir, realpath } from "node:fs/promises";
 import { constants } from "node:fs";
 import { createHash } from "node:crypto";
@@ -41,10 +42,12 @@ export const WORKFLOW_GOAL_HELP = [
   "  /workflow goal list                           One line per Goal run",
   "",
   "Stop or continue",
-  "  /workflow goal pause <runId>                  Stop now; nothing more is applied to your files",
-  "  /workflow goal resume <runId>                 Continue a stopped Goal in this Pi session",
+  "  /workflow goal pause <runId>                  Pause after the current model request finishes",
+  "  /workflow goal resume <runId>                 Continue a paused Goal in this Pi session",
   "  /workflow goal recover <runId>                Continue as a new run after a restart or failure",
   "                                                (asks for consent again; earlier attempts count)",
+  "  /workflow goal cancel <runId>                 Stop now; a model request in progress is cut off,",
+  "                                                so continue with recover",
   "",
   "When a Goal waits for you",
   "  /workflow goal judge <runId>                  Accept or reject a criterion that needs you",
@@ -101,7 +104,9 @@ export async function goalResumeBlocker(cwd: string, run: WorkflowRunRecord): Pr
   for (const task of run.tasks) {
     const barrier = task.durableLaunchBarrier?.records.at(-1);
     if (task.status !== "interrupted" || !barrier) continue;
-    if (barrier.phase !== "cancellation_acknowledged" || barrier.cancellation?.terminalStatus !== "cancelled")
+    // A worker this Pi process saw end by itself while stopping can resume too.
+    if ((barrier.phase !== "cancellation_acknowledged" || barrier.cancellation?.terminalStatus !== "cancelled") &&
+        !attemptEndedOnItsOwnWhileStopping(cwd, run.runId, task, barrier))
       return "a worker ended on its own while the Goal was stopping";
   }
   for (const task of run.tasks) {
@@ -1052,17 +1057,18 @@ export function summarizeOrdinaryWorkflowGoalLine(data: Awaited<ReturnType<typeo
   return parts.join(" · ");
 }
 
-/** `/workflow goal pause|cancel|resume` reply; cancel is the same stop as pause. */
+/** `/workflow goal pause|cancel|resume` reply: pause stops after the requests in flight, cancel at once. */
 export function goalControlMessage(action: "pause" | "cancel" | "resume",
   run: { runId: string; name?: string; status: string }, resumeBlocker?: string | null): string {
   const label = run.name ? `${run.name} (${run.runId})` : run.runId;
   if (action === "resume")
     return run.status === "running" ? `Goal ${label} resumed.` : `Goal ${label} resumed and ended: ${run.status}.`;
+  const done = action === "pause" ? "paused" : "stopped";
   if (run.status === "interrupted" && resumeBlocker)
-    return `Goal ${label} stopped. Nothing more is applied to your files. It cannot resume because ${resumeBlocker}; ` +
+    return `Goal ${label} ${done}. Nothing more is applied to your files. It cannot resume because ${resumeBlocker}; ` +
       `to continue, start a new run from where it stopped: /workflow goal recover ${run.runId} (asks for consent again).`;
   if (run.status === "interrupted")
-    return `Goal ${label} stopped. Nothing more is applied to your files. To continue: ` +
+    return `Goal ${label} ${done}. Nothing more is applied to your files. To continue: ` +
       `/workflow goal resume ${run.runId} in this Pi session, or /workflow goal recover ${run.runId} after restarting Pi.`;
   if (run.status === "running") return `Goal ${label} is stopping. Check it with /workflow goal status ${run.runId}.`;
   return `Goal ${label} had already ended: ${run.status}.`;

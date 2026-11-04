@@ -3629,3 +3629,62 @@ test("source request ACK with changed currentness cannot expose a native witness
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
+
+test("a graceful pause holds a new candidate operation; a stop ends it as a denial, not UNKNOWN", async t => {
+  const root = await disposableRoot(t);
+  const origin = join(root, "origin");
+  await mkdir(origin);
+  await writeFile(join(origin, "input.txt"), "source text\n");
+  const workspace = await prepareGoalWorkspaceHost({
+    originRoot: origin, workspaceRoot: join(root, "workspace"), workspaceId: "held-read",
+    mode: "read-only", repository: "nonGit", scope: ["input.txt"],
+  });
+  const stopped = new AbortController();
+  const opened = await openGoalCandidateToolChannel({
+    directory: join(root, "channel"), evidenceRoot: join(root, "evidence"), identity: { test: "held" },
+    attemptKey: "held-attempt", workspace, tools: ["goal_candidate_read"],
+    assertCurrent: async () => "held-authority", assertLive: () => {}, stopped: stopped.signal,
+  });
+  t.after(async () => { await opened.drain().catch(() => undefined); await workspace.cleanup(); });
+  const registrations = new Map();
+  registerGoalCandidateTools({ registerTool(tool) { registrations.set(tool.name, tool); }, setActiveTools() {}, on() {} },
+    opened.channel);
+  const read = registrations.get("goal_candidate_read");
+  assert.equal((await read.execute("before", { path: "input.txt" })).details.status, "ok");
+
+  // Released hold: the held read starts normally afterwards.
+  const hold = opened.beginHold();
+  assert.equal(hold.inFlight(), 0);
+  let resolved = false;
+  const heldRead = read.execute("during", { path: "input.txt" }).then(result => { resolved = true; return result; });
+  await new Promise(resolve => setTimeout(resolve, 200));
+  assert.equal(resolved, false, "a new operation waits while the pause holds");
+  assert.equal(hold.inFlight(), 0, "a held operation is not counted as in flight");
+  hold.release();
+  assert.equal((await heldRead).details.status, "ok");
+
+  // The worker disconnects while held: after release its read must not start.
+  const departing = opened.beginHold();
+  const abort = new AbortController();
+  const departed = read.execute("departed", { path: "input.txt" }, abort.signal).catch(error => ({ error }));
+  await new Promise(resolve => setTimeout(resolve, 120));
+  abort.abort();
+  await departed;
+  await new Promise(resolve => setTimeout(resolve, 120));
+  departing.release();
+  await new Promise(resolve => setTimeout(resolve, 200));
+  assert.equal(departing.inFlight(), 0, "the departed read did not start after release");
+
+  // Stop during a hold: the held read never starts and ends as a denial.
+  opened.beginHold();
+  const stoppedRead = read.execute("stopped", { path: "input.txt" }).catch(error => ({ error }));
+  await new Promise(resolve => setTimeout(resolve, 120));
+  stopped.abort();
+  await stoppedRead;
+  await opened.drain();
+  const evidence = await fsPromises.readdir(join(root, "evidence"), { recursive: true });
+  for (const name of evidence.filter(entry => entry.endsWith(".json"))) {
+    const record = JSON.parse(await readFile(join(root, "evidence", name), "utf8"));
+    assert.notEqual(record.phase, "unknown", `no UNKNOWN candidate outcome: ${name}`);
+  }
+});

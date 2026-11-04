@@ -204,8 +204,19 @@ read by the Goal commands.
 In the TUI, `status` reads as a report (all Goals without an ID) and `list` as one
 line per run (name, outcome, criteria met, attempts, last update, run ID); outside
 the TUI both print JSON. `criteria` and `evidence` are JSON troubleshooting views.
-`cancel` is accepted as the same stop as `pause`, and `profile` (below) stays
-available, but neither is offered by completion or help.
+`profile` (below) stays available but is not offered by completion or help.
+
+**Pause and cancel.** `pause` stops gracefully, like a stop "after the current turn":
+new model requests of the Goal are held (the requester waits instead of failing)
+while the requests already in flight finish and settle, so their usage stays known;
+then the run stops and `resume` continues it in this session. The wait ends when
+nothing is in flight, when a held request has waited 20 s, or after 2 minutes; a
+request still in flight then is cut off. `cancel` stops at once and cuts off any
+request in flight (its usage stays unknown, so the run is continued with `recover`).
+A worker that this Pi process saw end on its own while the Goal was stopping (for
+example after its next request was refused) is accepted by `resume` like a cancelled
+one; the run record alone never proves that. Held requests apply to the root Goal's
+request budget; nested child Goals with their own budget are stopped at once.
 
 These commands and the read-only `workflow_goal` tool inspect ordinary
 workflow-engine records under `.pi/workflows/<runId>`, without creating missing
@@ -715,7 +726,7 @@ consent.
 |---|---|
 | `/workflow goal create <objective>` | Author/save/profile flow; execution is an explicit choice with scoped consent. |
 | `/workflow goal run <ref> "<target>"` | Launches a saved definition as a new named workflow run, not a replacement identity for an interrupted Goal. |
-| `/workflow goal pause <runId\|goal_engine_ID>` (`cancel` is the same) | Both stop the enclosing ordinary workflow run through its original live interactive host. A stop acknowledgement is not proof that descendants and effects have drained; ordinary cancellation is not a separate irreversible lifecycle. The generic `/workflow stop <runId>` remains an emergency stop from any session; it only stops work and never resumes, applies or recovers anything. |
+| `/workflow goal pause\|cancel <runId\|goal_engine_ID>` | `pause` first lets the model requests in flight settle (see "Pause and cancel"), `cancel` does not; both then stop the enclosing ordinary workflow run through its original live interactive host. A stop acknowledgement is not proof that descendants and effects have drained; ordinary cancellation is not a separate irreversible lifecycle. The generic `/workflow stop <runId>` remains an emergency stop from any session; it only stops work and never resumes, applies or recovers anything. |
 | `/workflow goal resume <runId\|goal_engine_ID>` | Requires original live interactive admission/profile and settled recoverable work. It does not provide cold recovery or permission to replay UNKNOWN effects. |
 | `/workflow goal recover <runId\|goal_engine_ID>` | Starts a **new** run of the same definition with fresh consent, for a stopped run (also in its own session) or after the original Pi session ended; a run that is still running is refused. See "Recovering an interrupted Goal". |
 
@@ -757,7 +768,7 @@ verification. Read-only selection never grants these effects implicitly.
 runs, its record stays as it was and `resume` cannot continue it, because the
 consent, request budget and candidate workspace lived in that session. In a new
 session, `/workflow goal recover <runId>` starts a new run instead. A run stopped
-with `pause` in this session can be recovered the same way without restarting Pi;
+with `pause` or `cancel` in this session can be recovered the same way without restarting Pi;
 this is the way on when `resume` is ruled out (for example a model request was cut
 off by the stop, so its usage is unknown, or a worker ended on its own while the
 Goal was stopping). The pause reply, the status `Next` line and a refused `resume`
