@@ -11852,6 +11852,11 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       assert.equal(commandOracleReplans, 2, "each new candidate was judged and fed back");
     }
     assert.equal(await readFile(join(cwd, "a.txt"), "utf8"), "original", "nothing is applied");
+    // The exhausted Goal's record matches its published verdict, so it reads as a Goal report.
+    const exhaustedStatus = await invoke(`status ${run.runId}`);
+    assert.match(exhaustedStatus, /— not achieved/, exhaustedStatus);
+    assert.match(exhaustedStatus, /Root replan exhausted/, exhaustedStatus);
+    assert.doesNotMatch(exhaustedStatus, /could not be verified|identity mismatch/, exhaustedStatus);
     if (noProgress === true) {
       // The exhausted Goal can be recovered; declining that consent changes nothing.
       const { listRunRecords: listRuns } = await import("../../.tmp/unit/store.js");
@@ -11887,6 +11892,11 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
     assert.match(root.lastMessage ?? "", /generation limit \(1\) reached/, diagnostic);
     assert.equal(await readFile(join(cwd, "a.txt"), "utf8"), "original", "an exhausted Goal applies nothing");
     assert.equal(writes, 1, "only the first generation's worker wrote");
+    assert.equal(root.goal?.state, "engine:not-achieved", "the record matches the published not-met verdict");
+    const exhaustedStatus = await invoke(`status ${run.runId}`);
+    assert.match(exhaustedStatus, /— not achieved/, exhaustedStatus);
+    assert.match(exhaustedStatus, /generation limit \(1\) reached/, exhaustedStatus);
+    assert.doesNotMatch(exhaustedStatus, /could not be verified|identity mismatch/, exhaustedStatus);
     return;
   }
   if (backendLateUnknown) {

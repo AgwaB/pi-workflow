@@ -7442,6 +7442,11 @@ async function launchPendingTaskAt(
 					await options.goalHumanSubmission.acknowledge();
 				}
 				if (lineage && generation && result.state === "not-achieved") {
+					// The not-met verdict is already published as this task's control; record
+					// it now so a replan that ends exhausted (limit or repeat) leaves a record
+					// matching it, which status and recovery read.
+					task.goal = { goalId: result.goalId, contractHash: result.contractHash,
+						state: `engine:${result.state}`, usage: { ...result.usage } };
 					if (!Object.values(generation.slots).length)
 						throw new Error("Root replan requires exact known terminal workers");
 					for (const [slot, id] of Object.entries(generation.slots)) {
