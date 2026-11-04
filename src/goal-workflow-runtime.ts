@@ -7241,11 +7241,13 @@ export async function prepareWorkflowGoalPolicy(input: PolicyPreparation): Promi
           derivedGoalInputs.has(input) || input.parentRunId !== input.ancestryRootRunId)
         throw new Error("Goal recovery requires the original top-level Goal definition");
       if (requestCap !== undefined && recovery.priorRequests >= requestCap)
-        throw new Error(`Goal request cap ${requestCap} is already used by interrupted run ${recovery.fromRunId} ` +
-          `(${recovery.priorRequests} requests); nothing remains to recover with`);
+        throw new Error(`Goal request cap ${requestCap} (limits.requests) is already used by run ${recovery.fromRunId} ` +
+          `(${recovery.priorRequests} requests); nothing remains to recover with. ` +
+          "For more requests, raise limits.requests in the definition and run it again");
       if (recovery.priorGenerations >= goalGenerationLimit(definition))
-        throw new Error(`Goal generation limit ${goalGenerationLimit(definition)} is already used by interrupted run ` +
-          `${recovery.fromRunId} (${recovery.priorGenerations} generations); nothing remains to recover with`);
+        throw new Error(`Goal attempt limit ${goalGenerationLimit(definition)} (limits.generations) is already used by run ` +
+          `${recovery.fromRunId} (${recovery.priorGenerations} attempt${recovery.priorGenerations === 1 ? "" : "s"}); ` +
+          "nothing remains to recover with. For more attempts, raise limits.generations in the definition and run it again");
     }
     // The candidate workspace observes exactly these paths at launch; refuse a
     // scope it cannot observe (for example a directory) before any consent or

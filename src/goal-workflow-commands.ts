@@ -977,8 +977,16 @@ export function summarizeOrdinaryWorkflowGoal(data: Awaited<ReturnType<typeof re
     }
     if (p.criteria.length > 8) lines.push(`  … and ${p.criteria.length - 8} more`);
     const attemptsUsed = finite(p.generation) ? `attempts ${p.generation + 1}` : "attempts unknown";
-    const requests = finite(p.usage.requests) ? `requests ${p.usage.requests}` : "requests unknown";
-    const cost = finite(p.usage.costMicros) ? `cost $${(p.usage.costMicros / 1_000_000).toFixed(4)}` : "cost unknown";
+    // Totals exist only when every request and task is accounted for (an
+    // achieved Goal for requests). Otherwise say so plainly, with the cost
+    // reported so far as a lower bound, instead of "unknown".
+    const unfinished = waiting || ["running", "interrupted", "blocked"].includes(data.runStatus);
+    const requests = finite(p.usage.requests) ? `requests ${p.usage.requests}`
+      : unfinished ? "request count when the Goal finishes" : "request count not recorded";
+    const observedCost = (p.usage as { metrics?: { observed?: { costUsd?: unknown } } }).metrics?.observed?.costUsd;
+    const cost = finite(p.usage.costMicros) ? `cost $${(p.usage.costMicros / 1_000_000).toFixed(4)}`
+      : finite(observedCost) && observedCost > 0 ? `cost at least $${observedCost.toFixed(4)} (not all work reported)`
+        : "cost not reported";
     const attempts = Array.isArray((p as { attempts?: unknown }).attempts) ? (p as { attempts: any[] }).attempts : [];
     if (attempts.length) {
       lines.push("What happened:");
