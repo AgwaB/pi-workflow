@@ -4,9 +4,10 @@ import { summarizeOrdinaryWorkflowGoal } from "../../.tmp/unit/goal-workflow-com
 
 const criterion = id => ({ id, verifier: { kind: "deterministic" } });
 function status({ runStatus = "completed", state = "engine:achieved", taskStatus = "completed", statusDetail = "goal_achieved",
-  message = null, verdicts = ["met"], originApply = null, recoveredBy = null, currentWork = [], generation = 1 } = {}) {
+  message = null, verdicts = ["met"], originApply = null, recoveredBy = null, currentWork = [], generation = 1,
+  liveInSession = false } = {}) {
   return { runId: "workflow_s", runStatus, observedUsage: { totalTokens: 1200, costUsd: 0.001, tasksReporting: 3, taskCount: 3 },
-    recovery: null, recoveredBy, currentWork,
+    recovery: null, recoveredBy, currentWork, liveInSession,
     policies: [{ goalId: "goal_engine_x", state, taskStatus, statusDetail, importantFailureOrUnknown: message, generation,
       usage: { requests: 8, costMicros: 3000 }, originApply, originalDefinition: { name: "csv-parser" },
       criteria: verdicts.map((verdict, index) => ({ criterion: criterion(`c${index + 1}`), verdict,
@@ -37,7 +38,8 @@ test("partial application, failure and judgment each name the next step", () => 
   assert.match(failed, /^Criteria: 1 of 2 met, 1 not met$/m);
   assert.match(failed, /^  ✗ c1 — not met \(exit 1\): exit 1: 3 tests failed$/m);
   assert.match(failed, /^Why: Root replan exhausted: generation limit \(3\) reached$/m);
-  assert.match(failed, /^Next: continue: \/workflow goal recover workflow_s · details: /m);
+  assert.match(failed, /^Next: more attempts: raise limits\.generations in the definition and run it again · details: /m,
+    "a used-up attempt limit cannot be recovered");
   assert.doesNotMatch(summarizeOrdinaryWorkflowGoal(status({ runStatus: "failed", state: "x", taskStatus: "failed",
     verdicts: ["not-met"], recoveredBy: "workflow_next" })), /continue:/, "a recovered run points to its successor instead");
   const judging = summarizeOrdinaryWorkflowGoal(status({ runStatus: "running", state: "engine:pending", taskStatus: "blocked",
@@ -68,4 +70,17 @@ test("the report tells what each attempt did and how much changed", () => {
     "    Worker: Added per-field quote tracking.",
     "Working tree: applied src/csv.mjs (+38 −2 lines)",
   ]);
+});
+
+test("a stopped Goal continues with resume in its own session and with recover after it", () => {
+  const stopped = live => summarizeOrdinaryWorkflowGoal(status({ runStatus: "interrupted", state: "engine:unknown",
+    taskStatus: "interrupted", statusDetail: "workflow_stopped", message: "Workflow stopped by user request",
+    verdicts: ["unknown"], liveInSession: live }));
+  assert.match(stopped(true), /^Next: continue: \/workflow goal resume workflow_s · details: /m);
+  assert.match(stopped(false), /^Next: continue: \/workflow goal recover workflow_s · details: /m);
+  const exhausted = summarizeOrdinaryWorkflowGoal(status({ runStatus: "failed", state: "engine:not-achieved", taskStatus: "failed",
+    statusDetail: "launch_failed", message: "Root replan exhausted: unchanged failed candidate", verdicts: ["not-met"],
+    liveInSession: true }));
+  assert.match(exhausted, /^Next: continue: \/workflow goal recover workflow_s · details: /m,
+    "a finished run cannot resume even in its own session");
 });

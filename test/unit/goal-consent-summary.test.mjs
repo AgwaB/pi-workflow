@@ -145,3 +145,18 @@ test("full details explain every part in plain language and end with the exact b
   assert.ok(readable.split("\n").every(line => line.length <= 160), "lines fit a normal terminal");
   assert.match(formatGoalExecutionDetails({ weird: true }), /could not be described; its exact content follows\.\n\n\{/);
 });
+
+test("summary and details wrap to the terminal width so Pi does not wrap them again", () => {
+  for (const width of [80, 100, 150]) {
+    const summary = formatGoalExecutionConsent(preview(), width).split("\n");
+    assert.ok(summary.every(line => line.length <= width), `summary fits ${width} columns`);
+    assert.equal(summary.find(line => line.startsWith("Objective")).endsWith(" "), false);
+    assert.match(summary[summary.findIndex(line => line.startsWith("Objective")) + 1], /^ {37}\S/,
+      "the objective continues under its hanging indent");
+    const details = formatGoalExecutionDetails(preview(), width);
+    const readable = details.slice(0, details.lastIndexOf("Exact preview this consent is bound to (JSON)")).split("\n");
+    assert.ok(readable.every(line => line.length <= width), `readable details fit ${width} columns`);
+  }
+  assert.ok(formatGoalExecutionConsent(preview(), 20).split("\n").every(line => line.length <= 60), "never narrower than 60");
+  assert.equal(formatGoalExecutionConsent(preview()), formatGoalExecutionConsent(preview(), 160), "default is 160 columns");
+});

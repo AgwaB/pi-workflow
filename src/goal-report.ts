@@ -79,6 +79,28 @@ export function firstParagraph(text: string, max = 220): string {
 	return clip(paragraph.replace(/\s+/gu, " "), max);
 }
 
+const SCRIPTS: Array<[RegExp, string]> = [
+	[/[\uAC00-\uD7A3\u1100-\u11FF\u3130-\u318F]/u, "Korean"],
+	[/[\u3040-\u30FF]/u, "Japanese"],
+	[/[\u4E00-\u9FFF]/u, "Chinese"],
+	[/[\u0400-\u04FF]/u, "Russian"],
+	[/[\u0600-\u06FF]/u, "Arabic"],
+	[/[\u0590-\u05FF]/u, "Hebrew"],
+	[/[\u0E00-\u0E7F]/u, "Thai"],
+	[/[\u0900-\u097F]/u, "Hindi"],
+	[/[\u0370-\u03FF]/u, "Greek"],
+];
+
+/**
+ * The language a request is written in, from its script, so an explanation
+ * can match it without passing the request text itself. Latin-script text
+ * is ambiguous and returns undefined.
+ */
+export function requestLanguage(text: unknown): string | undefined {
+	if (typeof text !== "string") return undefined;
+	return SCRIPTS.find(([pattern]) => pattern.test(text))?.[1];
+}
+
 /** The first sentence of a short model-written summary (for example a worker's digest). */
 export function firstSentence(text: string, max = 220): string {
 	const line = text.replace(/\s+/gu, " ").trim();

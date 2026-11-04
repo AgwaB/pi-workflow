@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { firstParagraph, firstSentence, lineDiffStats, summarizeCommandOutput } from "../../.tmp/unit/goal-report.js";
+import { firstParagraph, firstSentence, lineDiffStats, requestLanguage, summarizeCommandOutput } from "../../.tmp/unit/goal-report.js";
 
 test("command output is read as a short pass/fail summary and the first failures", () => {
   const node = '✔ "a,b" (0.6ms)\n✖ " a , b " (0.5ms)\n✖ "ab\\"c,d" (0.1ms)\nℹ tests 12\nℹ suites 0\nℹ pass 10\nℹ fail 2\nℹ duration_ms 44\n' +
@@ -33,4 +33,13 @@ test("a worker digest is reduced to its first sentence", () => {
     "Updated src/csv.mjs to trim unquoted fields.");
   assert.equal(firstSentence("No sentence end here"), "No sentence end here");
   assert.equal(firstSentence("Version 1.5 works fine. Next."), "Version 1.5 works fine.", "a decimal point is not a sentence end");
+});
+
+test("the request's language is named from its script, never from Latin text", () => {
+  assert.equal(requestLanguage("CSV 파서를 테스트에 맞게 고쳐줘"), "Korean");
+  assert.equal(requestLanguage("パーサーを直して"), "Japanese");
+  assert.equal(requestLanguage("修复解析器"), "Chinese");
+  assert.equal(requestLanguage("Исправь парсер"), "Russian");
+  assert.equal(requestLanguage("Fix the CSV parser"), undefined);
+  assert.equal(requestLanguage(undefined), undefined);
 });

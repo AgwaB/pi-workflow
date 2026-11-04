@@ -240,10 +240,14 @@ evidence), what each attempt did (verdicts, a short reading of test output with 
 first failing tests, and the worker's own note), what was applied to the working tree
 with line counts (updated files are counted against Git `HEAD` only when it holds
 exactly the starting bytes), attempts, requests, cost, why it stopped, and the next
-useful command. A recorded achievement whose evidence cannot be verified is reported
-as such, not as achieved. When a Goal finishes in the session that started it, the
-transcript shows this report as *Goal result*, and the model is asked to explain it in
-plain words (what was wrong, what changed, how it was verified) instead of repeating it.
+useful command (`resume` for a run stopped in this session, `recover` after the session
+ended, and raising `limits.generations` when the attempt limit is used up). A recorded
+achievement whose evidence cannot be verified is reported as such, not as achieved.
+When a Goal finishes in the session that started it, the transcript shows this report
+as *Goal result*, and the model is asked to explain it in plain words (what was wrong,
+what changed, how it was verified) instead of repeating it, in the language of the
+request when its script tells it (Korean, Japanese, Chinese, Russian, …; the request
+text itself is not sent). Consent summaries and details wrap to the terminal width.
 
 A definition has exactly one root: `goal` or `artifactGraph`. A Goal declares its
 objective, criteria and verifier selectors/configuration, relative path/effect

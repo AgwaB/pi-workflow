@@ -1,7 +1,7 @@
 import { goalTaskLabel } from "./goal-labels.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { firstParagraph, firstSentence, lineDiffStats, summarizeCommandOutput } from "./goal-report.js";
+import { firstParagraph, firstSentence, lineDiffStats, requestLanguage, summarizeCommandOutput } from "./goal-report.js";
 import { lstat, open, readdir, realpath } from "node:fs/promises";
 import { constants } from "node:fs";
 import { createHash } from "node:crypto";
@@ -427,8 +427,12 @@ async function assertExactVerifierLaunchIdentity(cwd: string, run: WorkflowRunRe
     throw new Error("Ordinary Goal exact verifier source/launch identity mismatch");
 }
 
+/**
+ * `isLive` says whether this session still holds the run's original admission:
+ * a stopped run that is live continues with resume, otherwise with recover.
+ */
 export async function readOrdinaryWorkflowGoal(cwd: string, action: string, run: WorkflowRunRecord, tasks: WorkflowTaskRunRecord[],
-  options: { justFinished?: boolean } = {}) {
+  options: { justFinished?: boolean; isLive?: (runId: string) => boolean } = {}) {
   const compiled: CompiledWorkflow = await json(await safePath(cwd, `.pi/workflows/${run.runId}/compiled.json`));
   const policies = [];
   for (const task of tasks) {
@@ -745,6 +749,8 @@ export async function readOrdinaryWorkflowGoal(cwd: string, action: string, run:
     // skip the scan of every run record for its completion message.
     recovery: run.goalRecovery ?? null,
     recoveredBy: options.justFinished ? null : await readWorkflowGoalRecoveredBy(cwd, run.runId),
+    liveInSession: options.isLive?.(run.runId) ?? false,
+    requestLanguage: requestLanguage(compiled.task),
     currentWork: run.tasks.filter(t => t.status === "running" || t.status === "blocked").map(t => ({
       specId: t.specId, status: t.status, ...(goalTaskLabel(run, t) ? { label: goalTaskLabel(run, t) } : {}) })), policies };
 }
@@ -839,7 +845,7 @@ export async function formatOrdinaryWorkflowGoal(cwd: string, action: string, ru
  * whose records cannot be verified is reported on its own line instead of
  * failing the whole listing.
  */
-export async function readOrdinaryWorkflowGoalStatuses(cwd: string): Promise<{
+export async function readOrdinaryWorkflowGoalStatuses(cwd: string, isLive?: (runId: string) => boolean): Promise<{
   text: string; runs: Array<Awaited<ReturnType<typeof readOrdinaryWorkflowGoal>> | { runId: string; error: string }>;
 }> {
   const runs = await listOrdinaryWorkflowGoals(cwd);
@@ -849,7 +855,7 @@ export async function readOrdinaryWorkflowGoalStatuses(cwd: string): Promise<{
   const worker = async () => {
     for (let index = next++; index < runs.length; index = next++) {
       const run = runs[index]!;
-      try { results[index] = await readOrdinaryWorkflowGoal(cwd, "status", run, run.tasks.filter(t => t.kind === "goal")); }
+      try { results[index] = await readOrdinaryWorkflowGoal(cwd, "status", run, run.tasks.filter(t => t.kind === "goal"), { isLive }); }
       catch (error) { results[index] = { runId: run.runId, error: error instanceof Error ? error.message : String(error) }; }
     }
   };
@@ -929,7 +935,13 @@ export function summarizeOrdinaryWorkflowGoal(data: Awaited<ReturnType<typeof re
     if (data.runStatus === "running" && !waiting && p.statusDetail !== "cancellation_pending")
       next.push(`pause or cancel: /workflow goal pause|cancel ${data.runId}`);
     if (waiting) next.push(`judge: /workflow goal judge ${data.runId}`);
-    if (!achieved && !waiting && ["failed", "interrupted", "completed"].includes(data.runStatus) && !data.recoveredBy)
+    // Same rule as recover: a stopped run still live in this session resumes.
+    if (!achieved && !waiting && data.runStatus === "interrupted" && data.liveInSession)
+      next.push(`continue: /workflow goal resume ${data.runId}`);
+    // Recovery counts earlier attempts, so a used-up attempt limit cannot be recovered.
+    else if (!achieved && /generation limit \(\d+\) reached/.test(problem ?? ""))
+      next.push("more attempts: raise limits.generations in the definition and run it again");
+    else if (!achieved && !waiting && ["failed", "interrupted", "completed"].includes(data.runStatus) && !data.recoveredBy)
       next.push(`continue: /workflow goal recover ${data.runId}`);
   }
   if (data.recovery) lines.push(`Continues ${data.recovery.fromRunId}: its ${data.recovery.priorRequests} request(s) count against the cap; ${data.recovery.seededPaths.length ? `started from its last candidate (${data.recovery.seededPaths.join(", ")})` : "started from the working tree"}.`);

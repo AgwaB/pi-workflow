@@ -5,6 +5,19 @@
  */
 
 const LINE_WIDTH = 160;
+const MIN_WIDTH = 60;
+/** The width the current formatter call wraps to (see withWidth). */
+let lineWidth = LINE_WIDTH;
+
+/**
+ * Run a formatter at a terminal width: text pre-wrapped wider than the
+ * terminal would be wrapped a second time by Pi, losing the hanging indents.
+ */
+function withWidth<T>(width: number | undefined, format: () => T): T {
+	const previous = lineWidth;
+	lineWidth = Math.max(MIN_WIDTH, Math.min(LINE_WIDTH, Math.floor(width ?? LINE_WIDTH)));
+	try { return format(); } finally { lineWidth = previous; }
+}
 const OBJECTIVE_LINES = 3;
 const MAX_CRITERIA = 6;
 
@@ -18,7 +31,7 @@ const isRecord = (value: unknown): value is Json =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
 const text = (value: unknown): string => (typeof value === "string" ? value : "");
 const oneLine = (value: string): string => value.replace(/\s+/g, " ").trim();
-const clip = (value: string, width = LINE_WIDTH): string =>
+const clip = (value: string, width = lineWidth): string =>
 	value.length <= width ? value : `${value.slice(0, width - 1)}…`;
 
 /** Wrap prose to at most `lines` lines of `width`, marking the cut. */
@@ -105,20 +118,24 @@ function limitText(value: unknown, unit = ""): string {
 }
 
 /** One-screen summary of a Goal execution preview. */
-export function formatGoalExecutionConsent(preview: unknown): string {
+export function formatGoalExecutionConsent(preview: unknown, width?: number): string {
+	return withWidth(width, () => executionConsent(preview));
+}
+
+function executionConsent(preview: unknown): string {
 	if (!isRecord(preview) || !isRecord(preview.definition) || !isRecord(preview.definition.goal))
 		return "The preview could not be summarized; open the full details before deciding.";
 	const definition = preview.definition;
 	const goal = definition.goal as Json;
 	const lines: string[] = [];
 	lines.push(clip(`Goal: ${text(definition.name) || "(unnamed)"}`));
-	lines.push(`Objective (saved in the definition): ${wrap(text(goal.objective), LINE_WIDTH - 37, OBJECTIVE_LINES,
+	lines.push(`Objective (saved in the definition): ${wrap(text(goal.objective), lineWidth - 37, OBJECTIVE_LINES,
 		" ".repeat(37)).join("\n")}`);
 	const target = runTarget(preview);
 	if (target) lines.push(clip(`This run (your request): ${oneLine(target)}`));
 	const criteria = Array.isArray(goal.criteria) ? goal.criteria : [];
 	lines.push(criteria.length === 1 ? "Done when this criterion holds:" : `Done when all ${criteria.length} criteria hold:`);
-	for (const criterion of criteria.slice(0, MAX_CRITERIA)) lines.push(`  ${describeCriterion(criterion)}`);
+	for (const criterion of criteria.slice(0, MAX_CRITERIA)) lines.push(clip(`  ${describeCriterion(criterion)}`));
 	if (criteria.length > MAX_CRITERIA) lines.push(`  … and ${criteria.length - MAX_CRITERIA} more (see full details)`);
 	const authority = isRecord(goal.authority) ? goal.authority : {};
 	const allowed = Array.isArray(authority.allowedPaths) ? authority.allowedPaths.map(String) : [];
@@ -151,7 +168,8 @@ export function formatGoalExecutionConsent(preview: unknown): string {
 				: text(recovery.candidateNotCarried) ? `starts from the working tree (${oneLine(text(recovery.candidateNotCarried))}).`
 					: "starts from the working tree.")));
 	}
-	lines.push("After you confirm, the Goal plans, works, verifies and retries within this scope without asking again.");
+	lines.push(...wrap("After you confirm, the Goal plans, works, verifies and retries within this scope without asking again.",
+		lineWidth, 3, ""));
 	return lines.join("\n");
 }
 
@@ -179,7 +197,7 @@ const ROLE_LABELS: Record<string, string> = {
 	"final-judgment": "final judgment",
 };
 
-function indentWrap(value: string, indent: string, width = LINE_WIDTH): string[] {
+function indentWrap(value: string, indent: string, width = lineWidth): string[] {
 	return wrap(value, width - indent.length, 1_000, indent).map((line, index) => (index === 0 ? `${indent}${line}` : line));
 }
 
@@ -218,7 +236,11 @@ function describeCriterionDetails(criterion: unknown, index: number): string[] {
  * The complete Goal preview in plain language, for "Show full details". The
  * exact JSON the consent is bound to follows at the end.
  */
-export function formatGoalExecutionDetails(preview: unknown): string {
+export function formatGoalExecutionDetails(preview: unknown, width?: number): string {
+	return withWidth(width, () => executionDetails(preview));
+}
+
+function executionDetails(preview: unknown): string {
 	const raw = JSON.stringify(preview, null, 2);
 	if (!isRecord(preview) || !isRecord(preview.definition) || !isRecord(preview.definition.goal))
 		return `The preview could not be described; its exact content follows.\n\n${raw}`;
@@ -275,13 +297,25 @@ export function formatGoalExecutionDetails(preview: unknown): string {
 		const feedback = Array.isArray(recovery.feedbackCriteria) ? recovery.feedbackCriteria.map(String) : [];
 		if (feedback.length) lines.push(`  Last verdicts passed to the planner: ${feedback.join(", ")}`);
 	}
-	lines.push("", "After you confirm, the Goal plans, works, verifies and retries within this scope without asking again.",
-		"", "─".repeat(40), "Exact preview this consent is bound to (JSON)", raw);
-	return lines.join("\n");
+	lines.push("", "After you confirm, the Goal plans, works, verifies and retries within this scope without asking again.");
+	return [...lines.flatMap(fitLine), "", "─".repeat(40), "Exact preview this consent is bound to (JSON)", raw].join("\n");
+}
+
+/** Wrap one long line under its own indent (and after a bullet or number). */
+function fitLine(line: string): string[] {
+	if (line.length <= lineWidth) return [line];
+	const lead = /^(\s*)((?:•|\d+\.)\s+)?/u.exec(line)!;
+	const indent = " ".repeat(lead[0].length || 2);
+	const first = line.slice(lead[0].length);
+	return [lead[0] + wrap(first, lineWidth - lead[0].length, 1_000, indent).join("\n")].flatMap(part => part.split("\n"));
 }
 
 /** One-screen summary of a Goal profile-exception preview. */
-export function formatGoalProfileExceptionConsent(preview: unknown): string {
+export function formatGoalProfileExceptionConsent(preview: unknown, width?: number): string {
+	return withWidth(width, () => profileExceptionConsent(preview));
+}
+
+function profileExceptionConsent(preview: unknown): string {
 	if (!isRecord(preview)) return "The preview could not be summarized; open the full details before deciding.";
 	const runtime = (value: unknown) =>
 		isRecord(value) ? `${text(value.model)} · ${text(value.thinking)}` : "(unknown)";
