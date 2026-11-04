@@ -57,6 +57,7 @@ import workflowExtension, {
   watchWorkflowFeedbackForTests,
 } from "../../.tmp/unit/extension.js";
 import { GoalHostJournal } from "../../.tmp/unit/goal-host-journal.js";
+import { goalControlMessage } from "../../.tmp/unit/goal-workflow-commands.js";
 import { installGoalHostSessionIssuer } from "../../.tmp/unit/goal-host-session.js";
 import { createWorkflowGoalEngineRuntime } from "../../.tmp/unit/goal-workflow-engine-runtime.js";
 import { setSubagentApiForTests, setSubagentLaunchControlsForTests } from "../../.tmp/unit/subagent-backend.js";
@@ -290,8 +291,7 @@ test("ordinary Goal summary preserves stopping and unknown usage without mutatin
     assert.ok(lines.includes("Why: Stopping: original descendant drain remains UNKNOWN"));
     assert.ok(lines.includes("Now: candidate running, verification blocked"));
     assert.ok(lines.includes(expectedUsage), summary);
-    assert.equal(lines.at(-1), "Next: pause or cancel: /workflow goal pause|cancel workflow_summary_fixture · " +
-      "details: /workflow goal criteria|evidence workflow_summary_fixture");
+    assert.equal(lines.at(-1), "Next: pause: /workflow goal pause workflow_summary_fixture");
     assert.doesNotMatch(summary, /DO_NOT_EXPAND_DEFINITION_IN_SUMMARY/);
     assert.ok(summary.length < 2000);
     assert.deepEqual(data, before, "formatting must not change the supplied persisted observation");
@@ -342,6 +342,9 @@ function goalSessionFence(t) {
  * open the full details, then run or cancel. `decide(title, preview)` sees the
  * full preview the consent is bound to.
  */
+/** Full views of Goal judgments opened through "Show everything", newest last. */
+const goalJudgmentViews = [];
+
 function goalConsentUi(ui, decide) {
   let opened;
   return { ...ui,
@@ -366,6 +369,11 @@ function goalConsentUi(ui, decide) {
         const done = value => { component?.dispose?.(); resolve(value); };
         component = factory({ requestRender() {}, terminal: { rows: 40 } }, { fg(_role, value) { return value; }, bold: value => value },
           undefined, done);
+        if (typeof component?.title === "string" && component.title.startsWith("Goal judgment")) {
+          goalJudgmentViews.push(component.text);
+          component.handleInput("\u001b");
+          return;
+        }
         if (typeof component?.title !== "string" || !component.title.startsWith("Confirm Goal")) return;
         assert.match(component.title, /^Confirm Goal (?:execution|profile exception): full details/);
         const marker = "Exact preview this consent is bound to (JSON)\n";
@@ -8375,15 +8383,22 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       new AbortController().signal, undefined, { cwd, hasUI: false, mode: "print", sessionManager: commandContext.sessionManager }), /unknown fields|read-only/);
     assert.equal(workflowDefinitionFingerprint(await readRunRecord(cwd, run.runId)), before);
     for (const selection of [undefined, "Leave pending", true]) {
+      let showed = false;
       commandContext.ui.select = async (title, options) => {
         assert.ok(title.includes(definition.goal.criteria[1].verifier.config.condition.statement));
-        assert.ok(title.includes("untrusted evidence"));
-        const observed = JSON.parse(title.split("Subject: ")[1].split("\nProvenance: ")[0]);
+        assert.match(title, /untrusted/);
+        // Readable: the candidate is shown as a diff of its decoded text, not as hex.
+        assert.ok(title.includes(`+${humanReplan ? "wrong" : "correct"}`), title);
+        assert.doesNotMatch(title, /"hex"/);
+        assert.deepEqual(options, ["Accept this criterion", "Reject this criterion", "Show everything", "Leave pending"]);
+        if (!showed) { showed = true; return "Show everything"; }
+        // The exact captured subject and its provenance are one choice away.
+        const details = goalJudgmentViews.at(-1);
+        const observed = JSON.parse(details.split("\nSubject: ")[1].split("\nProvenance: ")[0]);
         assert.equal(observed.candidate.files[0].value.hex, Buffer.from(humanReplan ? "wrong" : "correct").toString("hex"));
         if (control) assert.deepEqual(observed, control);
         control = observed;
-        assert.ok(title.includes(worker.taskId));
-        assert.deepEqual(options, ["Accept this criterion", "Reject this criterion", "Leave pending"]);
+        assert.ok(details.includes(worker.taskId));
         return selection;
       };
       assert.match(await invoke(`judge ${run.runId}`), /left pending/);
@@ -8550,8 +8565,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
         commandContext.ui.select = async title => {
           const criterion = definition.goal.criteria.find(c => c.id === id);
           assert.ok(title.includes(criterion.verifier.config.condition.statement));
-          const subject = JSON.parse(title.split("Subject: ")[1].split("\nProvenance: ")[0]);
-          assert.equal(subject.candidate.files[0].value.hex, Buffer.from(hex).toString("hex"));
+          assert.ok(title.includes(`+${hex}`), title);
           if (humanMultiple && !injectedDecisionContention) {
             const { acquireRunFileLease } = await import("../../.tmp/unit/store.js");
             heldDecisionLease = await acquireRunFileLease(cwd, run.runId, "supervisor", 1500, t.signal);
@@ -8799,7 +8813,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       assert.equal(intent?.reason, "user");
       releaseChild();
       const stopReply = await joinWarm("registered-root-pause", stopping);
-      assert.equal(stopReply, `Ordinary workflow-engine Goal pause: ${run.runId} interrupted. Stop does not apply origin changes; resume retains original admission/profile.`);
+      assert.equal(stopReply, goalControlMessage("pause", { ...run, status: "interrupted" }));
       const stoppedCallback = nativeCallbacks.get(stoppedChild.backendRunId);
       assert.ok(stoppedCallback, "the stopped verifier retains its original native callback");
       await joinWarm("original-stopped-verifier-callback", stoppedCallback.settled);
@@ -8897,7 +8911,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
           try {
             const reply = await joinWarm(label, invoke(`resume ${run.runId}`));
             assert.match(reply, /changed|immutable|custody|unavailable/i, `${label}: ${reply}`);
-            assert.doesNotMatch(reply, /Ordinary workflow-engine Goal resume:/);
+            assert.doesNotMatch(reply, /^Goal .* resumed/);
             assert.deepEqual(commandMessages, [{ message: reply, level: "error" }], `${label} emits only an error denial`);
             const after = await readFile(runFile);
             assert.equal(after.equals(originalBytes), true, `${label} leaves exact root bytes unchanged: ${JSON.stringify({
@@ -8913,7 +8927,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
         }
       }
 
-      const resumeMessage = status => `Ordinary workflow-engine Goal resume: ${run.runId} ${status}. Stop does not apply origin changes; resume retains original admission/profile.`;
+      const resumeMessage = status => goalControlMessage("resume", { ...run, status });
       let recoveredResolve;
       const recovered = new Promise(resolve => { recoveredResolve = resolve; });
       stopFeedback = {
@@ -9175,8 +9189,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
   }
   if (pipelineWarm || pipelineUnknownChannel) {
     let abortPipeline, stage = "terminal-presend-start", childId, stopReply, stopFeedbackRoute, recoveryFeedbackRoute;
-    const registeredTerminalMessage = (action, status) =>
-      `Ordinary workflow-engine Goal ${action}: ${run.runId} ${status}. Stop does not apply origin changes; resume retains original admission/profile.`;
+    const registeredTerminalMessage = (action, status) => goalControlMessage(action, { ...run, status });
     const cancelled = new Promise((_, reject) => {
       abortPipeline = () => reject(t.signal.reason ?? new Error("pipeline warm test cancelled"));
       if (t.signal.aborted) abortPipeline();
@@ -9474,8 +9487,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
         assert.equal(stoppedSummary.details.observedUsage, "UNKNOWN",
           "pending root has no aggregate run usage; child observations cannot fabricate that total");
         assert.match(stoppedText, /^Tokens: unknown$/m);
-        assert.doesNotMatch(stoppedText, /pause or cancel/, "a stop already in progress is not offered again");
-        assert.match(stoppedText, new RegExp(`^Next: details: /workflow goal criteria\\|evidence ${run.runId}$`, "m"));
+        assert.doesNotMatch(stoppedText, /^Next:/m, "a stop already in progress is not offered again");
         assert.ok(stoppedText.length < 2000);
         assert.doesNotMatch(stoppedText, /originalDefinition|"candidate"|"hex"/);
         assert.equal(await invoke(`status ${run.runId}`), stoppedText);
@@ -9853,7 +9865,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       await joinMixed("registered-pause-reply", stopping);
       const pendingReply = `Workflow stop requested for ${run.runId}, but active work or descendant workflow stop could not be confirmed within 1500ms; stop intent remains durable and cancellation is still pending. Retry /workflow stop ${run.runId}`;
       if (stopReply !== pendingReply)
-        assert.equal(stopReply, `Ordinary workflow-engine Goal pause: ${run.runId} interrupted. Stop does not apply origin changes; resume retains original admission/profile.`);
+        assert.equal(stopReply, goalControlMessage("pause", { ...run, status: "interrupted" }));
       const terminal = await joinMixed("original-root-terminal-publication", originalTerminal);
       assert.equal(terminal.status, "interrupted", "bounded pending reply is not terminal cancellation proof");
       setRunLeaseTestHooksForTests();
@@ -10656,7 +10668,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
         assert.equal(stopReply, pendingReply, "unchanged bounded command returns before original terminal publication");
       }
       if (stopReply !== pendingReply)
-        assert.equal(stopReply, `Ordinary workflow-engine Goal pause: ${run.runId} interrupted. Stop does not apply origin changes; resume retains original admission/profile.`);
+        assert.equal(stopReply, goalControlMessage("pause", { ...run, status: "interrupted" }));
       const terminal = await joinStop("original-root-terminal-publication", rootTerminal);
       assert.equal(terminal.root.status, "interrupted");
       assert.equal(terminal.child.status, "interrupted", "original child terminal state precedes root terminal publication");
@@ -10827,13 +10839,13 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
           stopFeedback = {
             matches: ({ message }) => ["completed", "failed", "blocked", "interrupted"].some(status =>
               message.startsWith(`Workflow ${run.runId} ${status} (`) ||
-              message.startsWith(`Ordinary workflow-engine Goal resume: ${run.runId} ${status}.`)),
+              message === goalControlMessage("resume", { ...run, status })),
             resolve: recoveryFeedbackResolve,
           };
           commandContext.model = { provider: "changed-ui", id: "model" };
           const recoveryReply = await joinStop("registered-foreach-root-resume", invoke(`resume ${run.runId}`));
           assert.doesNotMatch(recoveryReply, /denied|requires|unavailable/);
-          const completedReply = `Ordinary workflow-engine Goal resume: ${run.runId} completed. Stop does not apply origin changes; resume retains original admission/profile.`;
+          const completedReply = goalControlMessage("resume", { ...run, status: "completed" });
           const recoveryNotice = recoveryReply === completedReply
             ? terminalNotifications.findLast(({ message, level }) => level === "warning" && message === completedReply)
             : (await joinStop("registered-foreach-root-resume-feedback",
@@ -11017,7 +11029,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       stopFeedback = {
         matches: ({ message }) => ["completed", "failed", "blocked", "interrupted"].some(status =>
           message.startsWith(`Workflow ${run.runId} ${status} (`) ||
-          message.startsWith(`Ordinary workflow-engine Goal resume: ${run.runId} ${status}.`)),
+          message === goalControlMessage("resume", { ...run, status })),
         resolve: recoveryFeedbackResolve,
       };
       commandContext.model = { provider: "changed-ui", id: "model" };
@@ -11025,7 +11037,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       assert.doesNotMatch(recoveryReply, /denied|requires|unavailable/);
       if (!cancellationFault) assert.deepEqual(commandMessages.filter(message => message.level === "error"), [],
         JSON.stringify(commandMessages));
-      const completedReply = `Ordinary workflow-engine Goal resume: ${run.runId} completed. Stop does not apply origin changes; resume retains original admission/profile.`;
+      const completedReply = goalControlMessage("resume", { ...run, status: "completed" });
       const recoveryNotice = recoveryReply === completedReply
         ? terminalNotifications.findLast(({ message, level }) => level === "warning" && message === completedReply)
         : await joinStop("original-terminal-recovery-feedback", recoveryFeedback);
@@ -15463,7 +15475,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       assert.ok(statusText.includes(`  ✓ ${criterion.id} — met`), statusText);
     assert.match(statusText, new RegExp(`^Used: attempts ${root.goalRoot.generations.at(-1).generation + 1} · requests .+ · cost .+$`, "m"));
     assert.match(statusText, /^Tokens: .+$/m);
-    assert.match(statusText, new RegExp(`^Next: .*details: /workflow goal criteria\\|evidence ${run.runId}$`, "m"));
+    assert.doesNotMatch(statusText, /criteria\|evidence/, "raw details are a help topic, not a next step");
     assert.ok(summary.content[0].text.length < 2000);
     assert.doesNotMatch(summary.content[0].text, /originalDefinition|"candidate"|"hex"/);
     if (uncertain) assert.match(summary.content[0].text, /UNKNOWN|unknown/);
@@ -17708,7 +17720,7 @@ for (const [name, cap, expected, recursive, terminalFault, mixed, depthDenied, g
       assert.ok(paused.includes(pending));
       t.diagnostic(pending);
       assert.equal(physical, 4, "pending confirmation does not authorize a successor request");
-    } else assert.match(paused, /interrupted/);
+    } else assert.equal(paused, goalControlMessage("pause", { ...root, status: "interrupted" }));
     await joinWarm("original-root-terminal-publication", rootTerminal);
     setRunLeaseTestHooksForTests();
     assert.equal(interruptedParentObserved, true, "original interrupted immediate parent is covered by root stopping proof");
@@ -19905,8 +19917,8 @@ test("registered /workflow goal preserves explicit zero user caps", async t => {
   });
   const definition = JSON.parse(await readFile(join(cwd, "goals", "zero-caps.json"), "utf8"));
   assert.deepEqual(definition.goal.limits, { requests: 0, costMicros: 0 });
-  assert.match(preview, /Request cap: 0/);
-  assert.match(preview, /Cost cap \(micros\): 0/);
+  assert.match(preview, /Request cap: 0 model requests/);
+  assert.match(preview, /Cost cap: \$0\.00 \(estimated\)/);
   assert.match(preview, /Usage: unknown until execution begins/);
 });
 

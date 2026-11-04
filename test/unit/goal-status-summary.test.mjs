@@ -24,8 +24,7 @@ test("an achieved, applied Goal reads as one short report", () => {
     "Working tree: applied src/csv.mjs",
     "Used: attempts 2 · requests 8 · cost $0.0030",
     "Tokens: 1200",
-    "Next: details: /workflow goal criteria|evidence workflow_s",
-  ].join("\n"));
+  ].join("\n"), "an achieved Goal needs no next step");
 });
 
 test("partial application, failure and judgment each name the next step", () => {
@@ -38,7 +37,7 @@ test("partial application, failure and judgment each name the next step", () => 
   assert.match(failed, /^Criteria: 1 of 2 met, 1 not met$/m);
   assert.match(failed, /^  ✗ c1 — not met \(exit 1\): exit 1: 3 tests failed$/m);
   assert.match(failed, /^Why: Root replan exhausted: generation limit \(3\) reached$/m);
-  assert.match(failed, /^Next: more attempts: raise limits\.generations in the definition and run it again · details: /m,
+  assert.match(failed, /^Next: more attempts: raise limits\.generations in the definition and run it again$/m,
     "a used-up attempt limit cannot be recovered");
   assert.doesNotMatch(summarizeOrdinaryWorkflowGoal(status({ runStatus: "failed", state: "x", taskStatus: "failed",
     verdicts: ["not-met"], recoveredBy: "workflow_next" })), /continue:/, "a recovered run points to its successor instead");
@@ -47,7 +46,7 @@ test("partial application, failure and judgment each name the next step", () => 
   assert.match(judging, / — waiting for your judgment$/m);
   assert.match(judging, /^Criteria: 1 of 2 met, 1 waiting for your judgment$/m);
   assert.match(judging, /^  … c2 — waiting for your judgment$/m);
-  assert.match(judging, /^Next: judge: \/workflow goal judge workflow_s · /m);
+  assert.match(judging, /^Next: judge: \/workflow goal judge workflow_s$/m);
   assert.doesNotMatch(judging, /^Why:/m);
 });
 
@@ -76,11 +75,27 @@ test("a stopped Goal continues with resume in its own session and with recover a
   const stopped = live => summarizeOrdinaryWorkflowGoal(status({ runStatus: "interrupted", state: "engine:unknown",
     taskStatus: "interrupted", statusDetail: "workflow_stopped", message: "Workflow stopped by user request",
     verdicts: ["unknown"], liveInSession: live }));
-  assert.match(stopped(true), /^Next: continue: \/workflow goal resume workflow_s · details: /m);
-  assert.match(stopped(false), /^Next: continue: \/workflow goal recover workflow_s · details: /m);
+  assert.match(stopped(true), /^Next: continue: \/workflow goal resume workflow_s$/m);
+  assert.match(stopped(false), /^Next: continue: \/workflow goal recover workflow_s$/m);
   const exhausted = summarizeOrdinaryWorkflowGoal(status({ runStatus: "failed", state: "engine:not-achieved", taskStatus: "failed",
     statusDetail: "launch_failed", message: "Root replan exhausted: unchanged failed candidate", verdicts: ["not-met"],
     liveInSession: true }));
-  assert.match(exhausted, /^Next: continue: \/workflow goal recover workflow_s · details: /m,
+  assert.match(exhausted, /^Next: continue: \/workflow goal recover workflow_s$/m,
     "a finished run cannot resume even in its own session");
+});
+
+test("list shows one readable line per Goal run", async () => {
+  const { summarizeOrdinaryWorkflowGoalLine, goalControlMessage } = await import("../../.tmp/unit/goal-workflow-commands.js");
+  const line = summarizeOrdinaryWorkflowGoalLine({ ...status({ verdicts: ["met", "met"] }), updatedAt: "2026-11-04T02:36:22.000Z" });
+  assert.match(line, /^csv-parser — achieved · 2\/2 criteria met · 2 attempts · \d\d\/\d\d \d\d:\d\d · workflow_s$/);
+  const stopped = summarizeOrdinaryWorkflowGoalLine(status({ runStatus: "interrupted", state: "engine:unknown",
+    statusDetail: "workflow_stopped", verdicts: ["unknown"], generation: 0 }));
+  assert.equal(stopped, "csv-parser — stopped before finishing · 0/1 criteria met · 1 attempt · workflow_s");
+  // pause and cancel are the same stop; the reply says how to continue.
+  const run = { runId: "workflow_s", name: "csv-parser" };
+  assert.equal(goalControlMessage("cancel", { ...run, status: "interrupted" }), goalControlMessage("pause", { ...run, status: "interrupted" }));
+  assert.match(goalControlMessage("pause", { ...run, status: "interrupted" }),
+    /^Goal csv-parser \(workflow_s\) stopped\. Nothing more is applied to your files\. To continue: \/workflow goal resume workflow_s in this Pi session, or \/workflow goal recover workflow_s after restarting Pi\.$/);
+  assert.equal(goalControlMessage("resume", { ...run, status: "running" }), "Goal csv-parser (workflow_s) resumed.");
+  assert.doesNotMatch(goalControlMessage("pause", { ...run, status: "running" }), /admission|origin/);
 });

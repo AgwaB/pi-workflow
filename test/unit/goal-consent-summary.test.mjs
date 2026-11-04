@@ -137,7 +137,7 @@ test("full details explain every part in plain language and end with the exact b
     /^  Not part of this consent:\n    • deploying or publishing anything\n    • running commands other than the ones written in the criteria\n    • authoritative cost accounting/m,
     /^Models \(profile captured\)\n  planning +openai-codex\/gpt-6\.1-sol · xhigh\n  checking \(rubric\) +openai-codex\/gpt-6-luna · high$/m,
     /^  Fast: on \(OpenAI priority tier for every request\)$/m,
-    /^  Requests: 40 · cost: no cap$/m,
+    /^  Model requests: 40 · estimated cost: no cap$/m,
     /^  Attempts \(first plan \+ replans\): 10$/m,
     /^  • explain — Goal explain \(\.\/explain\.json\)\n      Objective: Explain unknown outcomes\.$/m,
     /^Recovery of workflow_old\n  Counts its 1 attempt\(s\) and 3 request\(s\) against the limits\n  Starts from the working tree\n  Last verdicts passed to the planner: tests-pass: not-met$/m,
@@ -159,4 +159,17 @@ test("summary and details wrap to the terminal width so Pi does not wrap them ag
   }
   assert.ok(formatGoalExecutionConsent(preview(), 20).split("\n").every(line => line.length <= 60), "never narrower than 60");
   assert.equal(formatGoalExecutionConsent(preview()), formatGoalExecutionConsent(preview(), 160), "default is 160 columns");
+});
+
+test("cost caps read as dollars", async () => {
+  const { formatCostCap } = await import("../../.tmp/unit/goal-consent-summary.js");
+  assert.equal(formatCostCap(0), "$0.00");
+  assert.equal(formatCostCap(500_000), "$0.50");
+  assert.equal(formatCostCap(2_500), "$0.0025");
+  assert.equal(formatCostCap(12_000_000), "$12.00");
+  const withCost = preview();
+  withCost.definition.goal.limits = { requests: 40, costMicros: 500_000 };
+  const summary = formatGoalExecutionConsent(withCost);
+  assert.match(summary, /cost: \$0\.50/);
+  assert.doesNotMatch(summary, /micros/);
 });

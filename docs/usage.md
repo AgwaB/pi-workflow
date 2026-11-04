@@ -195,11 +195,17 @@ read by the Goal commands.
 /workflow goal help
 /workflow goal create <objective>
 /workflow goal run <saved-workflow-ref> "<new target>"
-/workflow goal list
 /workflow goal status [runId|goal_engine_ID]
+/workflow goal list
 /workflow goal criteria <runId|goal_engine_ID>
 /workflow goal evidence <runId|goal_engine_ID>
 ```
+
+In the TUI, `status` reads as a report (all Goals without an ID) and `list` as one
+line per run (name, outcome, criteria met, attempts, last update, run ID); outside
+the TUI both print JSON. `criteria` and `evidence` are JSON troubleshooting views.
+`cancel` is accepted as the same stop as `pause`, and `profile` (below) stays
+available, but neither is offered by completion or help.
 
 These commands and the read-only `workflow_goal` tool inspect ordinary
 workflow-engine records under `.pi/workflows/<runId>`, without creating missing
@@ -209,7 +215,9 @@ prefix. Listing all Goals reports a run whose records cannot be verified on its
 own line instead of failing the whole list.
 Interactive `create` authors a reusable JSON Goal definition. It asks for the
 completion criteria (up to eight; the Goal is achieved only when all hold), the
-allowed and protected paths, the allowed effects, request and cost caps, the
+allowed and protected paths, the allowed effects, request and cost caps (the most
+model requests for the whole Goal, and an estimated cost in US dollars stored as
+`limits.costMicros`), the
 attempt limit (first plan plus replans, `limits.generations`), Fast, and the file
 path; the Goal is named after that file. Authoring and saving
 do not require a live execution backend. Saving, selecting a profile, and executing
@@ -354,9 +362,13 @@ continue.
 Human artifact/control criteria with `kind: "human"` and
 `producerId: "human-acceptance-v1"` await genuine original-session TUI judgment.
 Their config is `{ "condition": { "statement": "Review this criterion" } }`.
-Use `/workflow goal judge <runId>` with no inline verdict or tool arguments.
-The dialog displays the immutable criterion and exact captured untrusted subject;
-acceptance decides only that criterion, never widens effects or grants execution
+Use `/workflow goal judge <runId>` with no inline verdict or tool arguments; the TUI
+announces once per attempt when a Goal starts waiting for it. The dialog shows the
+immutable criterion, the workers' notes and other verdicts of that attempt, and the
+captured untrusted subject readably: a candidate change as a line diff against the
+current working tree, other subjects as formatted JSON. *Show everything* opens the
+full change and the exact captured subject bytes and provenance the judgment is bound
+to; acceptance decides only that criterion, never widens effects or grants execution
 consent again. Dismissal leaves it pending. Stopping the run revokes a held dialog;
 a later selection cannot take effect. `waiting-user` means pending human judgment,
 with no automatic provider work. Rejection permits bounded new work only after
@@ -703,7 +715,7 @@ consent.
 |---|---|
 | `/workflow goal create <objective>` | Author/save/profile flow; execution is an explicit choice with scoped consent. |
 | `/workflow goal run <ref> "<target>"` | Launches a saved definition as a new named workflow run, not a replacement identity for an interrupted Goal. |
-| `/workflow goal pause\|cancel <runId\|goal_engine_ID>` | Both stop the enclosing ordinary workflow run through its original live interactive host. A stop acknowledgement is not proof that descendants and effects have drained; ordinary cancellation is not a separate irreversible lifecycle. The generic `/workflow stop <runId>` remains an emergency stop from any session; it only stops work and never resumes, applies or recovers anything. |
+| `/workflow goal pause <runId\|goal_engine_ID>` (`cancel` is the same) | Both stop the enclosing ordinary workflow run through its original live interactive host. A stop acknowledgement is not proof that descendants and effects have drained; ordinary cancellation is not a separate irreversible lifecycle. The generic `/workflow stop <runId>` remains an emergency stop from any session; it only stops work and never resumes, applies or recovers anything. |
 | `/workflow goal resume <runId\|goal_engine_ID>` | Requires original live interactive admission/profile and settled recoverable work. It does not provide cold recovery or permission to replay UNKNOWN effects. |
 | `/workflow goal recover <runId\|goal_engine_ID>` | Cold recovery after the original Pi session ended: starts a **new** run of the same definition with fresh consent. See "Recovering an interrupted Goal". |
 

@@ -34,6 +34,14 @@ const oneLine = (value: string): string => value.replace(/\s+/g, " ").trim();
 const clip = (value: string, width = lineWidth): string =>
 	value.length <= width ? value : `${value.slice(0, width - 1)}…`;
 
+/** A cost cap in micros (millionths of a dollar) as dollars: $0.50, $0.0025. */
+export function formatCostCap(micros: number): string {
+	const dollars = micros / 1_000_000;
+	const fixed = dollars.toFixed(6).replace(/0+$/u, "");
+	const [whole, fraction = ""] = fixed.split(".");
+	return `$${whole}.${fraction.padEnd(2, "0")}`;
+}
+
 /** Wrap prose to at most `lines` lines of `width`, marking the cut. */
 function wrap(value: string, width: number, lines: number, indent: string): string[] {
 	const words = oneLine(value).split(" ").filter(Boolean);
@@ -155,7 +163,7 @@ function executionConsent(preview: unknown): string {
 	const defaults = isRecord(definition.defaults) ? definition.defaults : {};
 	lines.push(clip([
 		`Requests: ${limitText(limits.requests)}`,
-		`cost: ${typeof limits.costMicros === "number" ? `${limits.costMicros} micros` : "no cap"}`,
+		`cost: ${typeof limits.costMicros === "number" ? formatCostCap(limits.costMicros) : "no cap"}`,
 		`attempts (plan + replans): ${limitText(preview.generationLimit)}`,
 		...(defaults.fast === "on" ? ["Fast: on (priority tier)"] : []),
 	].join(" · ")));
@@ -276,7 +284,7 @@ function executionDetails(preview: unknown): string {
 	const limits = isRecord(goal.limits) ? goal.limits : {};
 	const nesting = isRecord(goal.nesting) ? goal.nesting : {};
 	lines.push("", "Limits",
-		`  Requests: ${limitText(limits.requests)} · cost: ${typeof limits.costMicros === "number" ? `${limits.costMicros} micros` : "no cap"}`,
+		`  Model requests: ${limitText(limits.requests)} · estimated cost: ${typeof limits.costMicros === "number" ? formatCostCap(limits.costMicros) : "no cap"}`,
 		`  Attempts (first plan + replans): ${limitText(preview.generationLimit)}`,
 		`  Nested Goal depth: ${typeof nesting.maxDepth === "number" ? nesting.maxDepth : 3}`);
 	if (workflows.length) {

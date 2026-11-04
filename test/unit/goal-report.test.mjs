@@ -43,3 +43,12 @@ test("the request's language is named from its script, never from Latin text", (
   assert.equal(requestLanguage("Fix the CSV parser"), undefined);
   assert.equal(requestLanguage(undefined), undefined);
 });
+
+test("a unified line diff lists removals before additions with context", async () => {
+  const { unifiedLineDiff } = await import("../../.tmp/unit/goal-report.js");
+  assert.deepEqual(unifiedLineDiff("a\nb\nc\nd\ne\nf\ng\nh", "a\nB\nc\nd\ne\nf\ng\nh\ni"),
+    ["@@ -1,4 +1,4 @@", " a", "-b", "+B", " c", " d", "@@ -7,2 +7,3 @@", " g", " h", "+i"]);
+  assert.deepEqual(unifiedLineDiff("same", "same"), []);
+  assert.deepEqual(unifiedLineDiff("", "x\ny"), ["@@ -0,0 +1,2 @@", "+x", "+y"]);
+  assert.equal(unifiedLineDiff("a\n".repeat(2001), "b\n".repeat(2001)), undefined, "too large to compare");
+});

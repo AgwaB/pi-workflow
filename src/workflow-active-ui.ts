@@ -13,6 +13,8 @@ export const WORKFLOW_LAUNCH_CANCELLED: unique symbol = Symbol(
 );
 
 const ACTIVE_WORKFLOW_LIMIT = 5;
+/** Run and attempt pairs already announced as waiting for the user's judgment. */
+const judgmentAnnounced = new Set<string>();
 
 type WorkflowIndexRun = WorkflowIndexRecord["runs"][number];
 type WorkflowUiContext = Pick<ExtensionContext, "hasUI" | "mode" | "ui">;
@@ -82,6 +84,16 @@ export function renderActiveWorkflowUi(
 				: `● ${truncateLabel(only.name ?? only.runId, 18)} ${visibleProgress(only)}/${only.taskSummary.total}`
 			: `● workflows ${runs.length} active`;
 	safeUiCall(() => ctx.ui.setStatus(WORKFLOW_ACTIVE_STATUS_KEY, status));
+	// A Goal waiting for a human judgment does nothing until the user acts: say so once per attempt.
+	for (const run of runs) {
+		if (run.goal?.phase !== "waiting for your judgment") continue;
+		const key = `${run.runId}\0${run.goal.attempt}`;
+		if (judgmentAnnounced.has(key)) continue;
+		judgmentAnnounced.add(key);
+		safeUiCall(() => ctx.ui.notify(
+			`Goal ${run.name ?? run.runId} is waiting for your judgment. Review it with /workflow goal judge ${run.runId}`,
+			"warning"));
+	}
 	safeUiCall(() =>
 		ctx.ui.setWidget(
 			WORKFLOW_ACTIVE_WIDGET_KEY,

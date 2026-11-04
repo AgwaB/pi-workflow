@@ -241,3 +241,20 @@ test("a running Goal shows its attempt and phase instead of a task count", () =>
 		"● Goal csv-parser · attempt 2 · verifying · 2m",
 	);
 });
+
+test("a Goal waiting for judgment is announced once per attempt", () => {
+	const notices = [];
+	const ctx = {
+		hasUI: true,
+		ui: { setStatus() {}, setWidget() {}, notify(message, level) { notices.push({ message, level }); } },
+	};
+	const waiting = attempt => run({ runId: "workflow_judge", name: "csv-reviewed",
+		goal: { attempt, phase: "waiting for your judgment" } });
+	renderActiveWorkflowUi(ctx, index([waiting(1)]));
+	renderActiveWorkflowUi(ctx, index([waiting(1)]));
+	assert.deepEqual(notices, [{ level: "warning",
+		message: "Goal csv-reviewed is waiting for your judgment. Review it with /workflow goal judge workflow_judge" }]);
+	renderActiveWorkflowUi(ctx, index([run({ runId: "workflow_judge", name: "csv-reviewed", goal: { attempt: 2, phase: "planning" } })]));
+	renderActiveWorkflowUi(ctx, index([waiting(2)]));
+	assert.equal(notices.length, 2, "a later attempt that waits again is announced again");
+});

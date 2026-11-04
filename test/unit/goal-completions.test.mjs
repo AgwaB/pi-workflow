@@ -5,8 +5,9 @@ import { workflowArgumentCompletions } from "../../.tmp/unit/extension.js";
 test("/workflow goal suggests its subcommands and saved definitions to run", () => {
   const workflows = [{ name: "csv-parser" }, { name: "deep-review" }];
   const all = workflowArgumentCompletions("goal ", workflows)?.map(item => item.value);
-  assert.deepEqual(all, ["goal create", "goal run", "goal list", "goal status", "goal pause", "goal resume", "goal cancel",
-    "goal recover", "goal judge", "goal criteria", "goal evidence", "goal profile", "goal help"]);
+  assert.deepEqual(all, ["goal create", "goal run", "goal status", "goal list", "goal pause", "goal resume",
+    "goal recover", "goal judge", "goal help", "goal criteria", "goal evidence"],
+    "everyday commands first, JSON troubleshooting last; cancel (= pause) and profile are not offered");
   assert.deepEqual(workflowArgumentCompletions("goal re", workflows)?.map(item => item.value), ["goal resume", "goal recover"]);
   assert.match(workflowArgumentCompletions("goal rec", workflows)[0].description, /Continue a stopped or failed Goal/);
   assert.deepEqual(workflowArgumentCompletions("goal run ", workflows)?.map(item => item.value),
@@ -30,4 +31,5 @@ test("goal help lists every completed subcommand in short lines", async () => {
   for (const name of subcommands.filter(name => name !== "help"))
     assert.match(WORKFLOW_GOAL_HELP, new RegExp(`^  /workflow goal ${name}\\b`, "m"), `help explains ${name}`);
   assert.doesNotMatch(WORKFLOW_GOAL_HELP, /NEVER-launched|goal_engine_ID|admission|oracle/, "no internal terms");
+  assert.doesNotMatch(WORKFLOW_GOAL_HELP, /goal (cancel|profile)\b/, "the cancel alias and profile exception are not advertised");
 });

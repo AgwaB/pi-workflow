@@ -38,10 +38,10 @@ export const WORKFLOW_GOAL_HELP = [
   "See how it went",
   "  /workflow goal status [runId]                 Result, attempts, changed files and the next step",
   "                                                Without a runId: every Goal in this project",
+  "  /workflow goal list                           One line per Goal run",
   "",
   "Stop or continue",
-  "  /workflow goal pause <runId>                  Stop now; nothing is applied to your files",
-  "  /workflow goal cancel <runId>                 Same as pause",
+  "  /workflow goal pause <runId>                  Stop now; nothing more is applied to your files",
   "  /workflow goal resume <runId>                 Continue a stopped Goal in this Pi session",
   "  /workflow goal recover <runId>                Continue as a new run after a restart or failure",
   "                                                (asks for consent again; earlier attempts count)",
@@ -50,11 +50,8 @@ export const WORKFLOW_GOAL_HELP = [
   "  /workflow goal judge <runId>                  Accept or reject a criterion that needs you",
   "",
   "Details for troubleshooting (JSON)",
-  "  /workflow goal list                           Every Goal run",
   "  /workflow goal criteria <runId>               Criteria, verdicts and models",
   "  /workflow goal evidence <runId>               Raw check output and records",
-  "  /workflow goal profile <runId>                Change the model of one task that has not started",
-  "                                                (available only in a few situations)",
   "",
   "Good to know",
   "  • If the definition allows it, an achieved coding Goal copies its verified changes into your",
@@ -783,6 +780,7 @@ export async function readOrdinaryWorkflowGoal(cwd: string, action: string, run:
     recovery: run.goalRecovery ?? null,
     recoveredBy: options.justFinished ? null : await readWorkflowGoalRecoveredBy(cwd, run.runId),
     liveInSession: options.isLive?.(run.runId) ?? false,
+    updatedAt: run.updatedAt,
     requestLanguage: requestLanguage(compiled.task),
     currentWork: run.tasks.filter(t => t.status === "running" || t.status === "blocked").map(t => ({
       specId: t.specId, status: t.status, ...(goalTaskLabel(run, t) ? { label: goalTaskLabel(run, t) } : {}) })), policies };
@@ -879,7 +877,7 @@ export async function formatOrdinaryWorkflowGoal(cwd: string, action: string, ru
  * failing the whole listing.
  */
 export async function readOrdinaryWorkflowGoalStatuses(cwd: string, isLive?: (runId: string) => boolean): Promise<{
-  text: string; runs: Array<Awaited<ReturnType<typeof readOrdinaryWorkflowGoal>> | { runId: string; error: string }>;
+  text: string; listText: string; runs: Array<Awaited<ReturnType<typeof readOrdinaryWorkflowGoal>> | { runId: string; error: string }>;
 }> {
   const runs = await listOrdinaryWorkflowGoals(cwd);
   const results: Array<Awaited<ReturnType<typeof readOrdinaryWorkflowGoal>> | { runId: string; error: string }> =
@@ -896,7 +894,15 @@ export async function readOrdinaryWorkflowGoalStatuses(cwd: string, isLive?: (ru
   const text = results.length ? results.map(result => "error" in result
     ? `Ordinary workflow-engine Goal ${result.runId}: records could not be verified (${result.error}); use status ${result.runId} for details.`
     : summarizeOrdinaryWorkflowGoal(result)).join("\n\n") : "No goals found in ordinary workflow-engine records.";
-  return { text, runs: results };
+  // One line per run, oldest first so the newest sits next to the prompt.
+  const order = runs.map((run, index) => ({ index, at: run.updatedAt })).sort((a, b) => a.at < b.at ? -1 : a.at > b.at ? 1 : 0);
+  const listText = results.length ? [`Goal runs in this project (${results.length}); details: /workflow goal status <runId>`,
+    ...order.map(({ index }) => {
+      const result = results[index]!;
+      return `  ${"error" in result ? `${result.runId} — records could not be verified (${result.error})`
+        : summarizeOrdinaryWorkflowGoalLine(result)}`;
+    })].join("\n") : "No goals found in this project.";
+  return { text, listText, runs: results };
 }
 
 /** Readable status of one Goal run: what happened, what holds, what to do next. */
@@ -943,12 +949,7 @@ export function summarizeOrdinaryWorkflowGoal(data: Awaited<ReturnType<typeof re
     if (attempts.length) {
       lines.push("What happened:");
       for (const attempt of attempts) {
-        const verdicts = attempt.criteria.map((c: any) => {
-          const label = c.verdict === "met" ? "met" : c.verdict === "not-met" ? "not met" : c.verdict === "pending" ? "waiting for you" : "unknown";
-          const exit = c.exitCode !== undefined || c.timedOut ? ` (exit ${c.timedOut ? "timeout" : c.exitCode})` : "";
-          const output = [c.failed?.length ? `failed: ${c.failed.join(", ")}` : "", c.summary ?? ""].filter(Boolean).join(" · ");
-          return `${c.id} ${label}${exit}${output ? ` — ${output}` : ""}`;
-        });
+        const verdicts = attempt.criteria.map(describeAttemptVerdict);
         lines.push(`  ${clip(`Attempt ${attempt.attempt}: ${verdicts.join("; ") || "not checked"}`, 200)}`);
         for (const note of attempt.notes) lines.push(`    ${clip(`Worker${attempt.notes.length > 1 ? ` (${note.slot})` : ""}: ${note.note}`, 200)}`);
       }
@@ -966,7 +967,7 @@ export function summarizeOrdinaryWorkflowGoal(data: Awaited<ReturnType<typeof re
     if (problem) lines.push(`Why: ${clip(problem, 200)}`);
     else if (counts.UNKNOWN && !achieved) lines.push("Why: exact criterion evidence is unavailable");
     if (data.runStatus === "running" && !waiting && p.statusDetail !== "cancellation_pending")
-      next.push(`pause or cancel: /workflow goal pause|cancel ${data.runId}`);
+      next.push(`pause: /workflow goal pause ${data.runId}`);
     if (waiting) next.push(`judge: /workflow goal judge ${data.runId}`);
     // Same rule as recover: a stopped run still live in this session resumes.
     if (!achieved && !waiting && data.runStatus === "interrupted" && data.liveInSession)
@@ -982,6 +983,53 @@ export function summarizeOrdinaryWorkflowGoal(data: Awaited<ReturnType<typeof re
   if (data.currentWork.length) lines.push(`Now: ${data.currentWork.map(t => `${t.label ?? t.specId} ${t.status}`).join(", ")}`);
   lines.push(`Tokens: ${finite(usage?.totalTokens) ? usage!.totalTokens : "unknown"}${usage && usage.tasksReporting < usage.taskCount ? " (some tasks did not report usage)" : ""}`);
   next = [...new Set(next)];
-  lines.push(`Next: ${[...next, `details: /workflow goal criteria|evidence ${data.runId}`].join(" · ")}`);
+  // Raw criteria/evidence are troubleshooting views (see help), not a next step.
+  if (next.length) lines.push(`Next: ${next.join(" · ")}`);
   return lines.join("\n");
+}
+
+/** One criterion's verdict in one attempt: "<id> met|not met (exit N) — failed: … · tests …". */
+export function describeAttemptVerdict(c: { id: string; verdict: string; exitCode?: unknown; timedOut?: unknown;
+  failed?: string[]; summary?: string }): string {
+  const label = c.verdict === "met" ? "met" : c.verdict === "not-met" ? "not met" : c.verdict === "pending" ? "waiting for you" : "unknown";
+  const exit = c.exitCode !== undefined || c.timedOut ? ` (exit ${c.timedOut ? "timeout" : c.exitCode})` : "";
+  const output = [c.failed?.length ? `failed: ${c.failed.join(", ")}` : "", c.summary ?? ""].filter(Boolean).join(" · ");
+  return `${c.id} ${label}${exit}${output ? ` — ${output}` : ""}`;
+}
+
+/** One line of `/workflow goal list`: name, outcome, criteria, attempts, last update and run ID. */
+export function summarizeOrdinaryWorkflowGoalLine(data: Awaited<ReturnType<typeof readOrdinaryWorkflowGoal>>): string {
+  const head = summarizeOrdinaryWorkflowGoal(data).split("\n")[0] ?? "";
+  // "Goal <name> (<runId>) — <state>"
+  const match = /^Goal (?:(.*) )?\((\S+)\) — (.*)$/u.exec(head);
+  const name = match?.[1] ?? "(unnamed)";
+  const state = match?.[3] ?? data.runStatus;
+  const parts = [`${name} — ${state}`];
+  for (const p of data.policies) {
+    const met = p.criteria.filter(c => c.verdict === "met").length;
+    parts.push(`${met}/${p.criteria.length} criteria met`);
+    if (typeof p.generation === "number") parts.push(`${p.generation + 1} attempt${p.generation ? "s" : ""}`);
+  }
+  if (data.updatedAt) {
+    const when = new Date(data.updatedAt);
+    if (!Number.isNaN(when.getTime())) {
+      const two = (value: number) => String(value).padStart(2, "0");
+      parts.push(`${two(when.getMonth() + 1)}/${two(when.getDate())} ${two(when.getHours())}:${two(when.getMinutes())}`);
+    }
+  }
+  parts.push(data.runId);
+  return parts.join(" · ");
+}
+
+/** `/workflow goal pause|cancel|resume` reply; cancel is the same stop as pause. */
+export function goalControlMessage(action: "pause" | "cancel" | "resume",
+  run: { runId: string; name?: string; status: string }): string {
+  const label = run.name ? `${run.name} (${run.runId})` : run.runId;
+  if (action === "resume")
+    return run.status === "running" ? `Goal ${label} resumed.` : `Goal ${label} resumed and ended: ${run.status}.`;
+  if (run.status === "interrupted")
+    return `Goal ${label} stopped. Nothing more is applied to your files. To continue: ` +
+      `/workflow goal resume ${run.runId} in this Pi session, or /workflow goal recover ${run.runId} after restarting Pi.`;
+  if (run.status === "running") return `Goal ${label} is stopping. Check it with /workflow goal status ${run.runId}.`;
+  return `Goal ${label} had already ended: ${run.status}.`;
 }

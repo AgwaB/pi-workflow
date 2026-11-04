@@ -4050,6 +4050,45 @@ async function confirmGoalPreview(ctx: ExtensionContext, preview: object): Promi
 	}
 }
 
+/** Goal name, attempt, worker notes and other verdicts for the judgment dialog; empty when unreadable. */
+async function goalJudgmentContext(cwd: string, runId: string, criterionId: string):
+	Promise<import("./goal-judgment.js").GoalJudgmentContext> {
+	try {
+		const commands = await import("./goal-workflow-commands.js");
+		const { run, tasks } = await commands.resolveOrdinaryWorkflowGoal(cwd, runId);
+		const data = await commands.readOrdinaryWorkflowGoal(cwd, "status", run, tasks, { justFinished: true });
+		const policy = data.policies[0];
+		const attempt = policy?.attempts?.at(-1);
+		const name = typeof policy?.originalDefinition?.name === "string" ? policy.originalDefinition.name : run.name;
+		return {
+			...(name ? { goalName: name } : {}),
+			...(attempt ? {
+				attempt: attempt.attempt,
+				workerNotes: attempt.notes.map((note) => note.note),
+				otherChecks: attempt.criteria.filter((c: { id: string }) => c.id !== criterionId)
+					.map((c: Parameters<typeof commands.describeAttemptVerdict>[0]) => commands.describeAttemptVerdict(c)),
+			} : {}),
+		};
+	} catch {
+		return {};
+	}
+}
+
+/** A candidate path's current text in the working tree (bounded, inside cwd, no symlink escape). */
+async function readGoalOriginText(cwd: string, path: string): Promise<string | undefined> {
+	if (!path || isAbsolutePath(path) || path.split(/[\\/]/u).includes("..")) return undefined;
+	try {
+		const root = await realpath(cwd);
+		const full = await realpath(join(root, path));
+		if (!full.startsWith(`${root}${sep}`)) return undefined;
+		const info = await lstat(full);
+		if (!info.isFile() || info.size > 1_048_576) return undefined;
+		return await readFile(full, "utf8");
+	} catch {
+		return undefined;
+	}
+}
+
 async function handleWorkflowGoalCommand(
 	args: string,
 	ctx: ExtensionCommandContext,
@@ -4171,34 +4210,40 @@ async function handleWorkflowGoalCommand(
 			const review = await beginWorkflowGoalHumanReview(ctx.cwd, runId, host, dialogSignal);
 			capability = review.capability;
 			const snapshot = review.snapshot as Readonly<Record<string, unknown>>;
-			const criterion = snapshot.criterion as Readonly<Record<string, unknown>> | undefined;
-			const verifier = criterion?.verifier as Readonly<Record<string, unknown>> | undefined;
-			const condition = (verifier?.config as Readonly<Record<string, unknown>> | undefined)?.condition as Readonly<Record<string, unknown>> | undefined;
-			const title = [
-				"Human Goal judgment — untrusted evidence",
-				`Run: ${snapshot.runId}; policy: ${snapshot.policySpecId}; generation: ${snapshot.generation}; criterion: ${snapshot.criterionId}`,
-				`Definition: ${snapshot.definitionFingerprint}; subject digest: ${snapshot.subjectDigest}`,
-				`Condition: ${String(condition?.statement ?? "unavailable")}`,
-				`Subject: ${String(snapshot.subjectBytes ?? "unavailable")}`,
-				`Provenance: ${JSON.stringify(snapshot.source ?? "unavailable")}`,
-			].join("\n");
-			const choice = await ctx.ui.select(title, ["Accept this criterion", "Reject this criterion", "Leave pending"]);
-			if (choice === "Accept this criterion" || choice === "Reject this criterion") {
+			const criterionId = String(snapshot.criterionId ?? "");
+			// The judgment stays bound to the exact captured subject; the dialog shows
+			// it readably (the change as a diff) with the exact bytes one choice away.
+			const judgment = await import("./goal-judgment.js");
+			const context = await goalJudgmentContext(ctx.cwd, runId, criterionId);
+			const view = await judgment.describeGoalJudgment(snapshot, context,
+				(path) => readGoalOriginText(ctx.cwd, path), process.stdout.columns ? process.stdout.columns - 4 : undefined);
+			const canShow = typeof ctx.ui.custom === "function" || typeof ctx.ui.editor === "function";
+			const options = [judgment.GOAL_JUDGE_ACCEPT, judgment.GOAL_JUDGE_REJECT,
+				...(canShow ? [judgment.GOAL_JUDGE_SHOW] : []), judgment.GOAL_JUDGE_PENDING];
+			let choice: string | undefined;
+			for (;;) {
+				choice = await ctx.ui.select(view.summary, options);
+				if (choice !== judgment.GOAL_JUDGE_SHOW) break;
+				await (await import("./goal-text-viewer.js")).showGoalTextViewer(ctx,
+					"Goal judgment: everything (read-only; Esc or Enter returns)", view.details);
+			}
+			const label = context.goalName ? `Goal ${context.goalName}` : `Goal ${runId}`;
+			if (choice === judgment.GOAL_JUDGE_ACCEPT || choice === judgment.GOAL_JUDGE_REJECT) {
 				consumed = true;
-				const run = await submitWorkflowGoalHumanReview(
+				await submitWorkflowGoalHumanReview(
 					ctx.cwd,
 					runId,
 					host,
 					review.capability,
-					choice === "Accept this criterion" ? "accept" : "reject",
+					choice === judgment.GOAL_JUDGE_ACCEPT ? "accept" : "reject",
 					dialogSignal,
 				);
-				emit(ctx, `Human Goal judgment recorded for ${run.runId}; original policy scheduling resumed.`, "info");
+				emit(ctx, `${label}: judgment recorded (${criterionId} ${choice === judgment.GOAL_JUDGE_ACCEPT ? "accepted" : "rejected"}); the Goal continues.`, "info");
 				return;
 			}
 			discardWorkflowGoalHumanReview(review.capability);
 			consumed = true;
-			emit(ctx, "Human Goal judgment left pending; no decision or provider action was taken.", "info");
+			emit(ctx, `${label}: judgment left pending; it keeps waiting for you (/workflow goal judge ${runId}).`, "info");
 			return;
 		} finally {
 			dialog.abort();
@@ -4211,9 +4256,11 @@ async function handleWorkflowGoalCommand(
 		if (action === "list" || (action === "status" && !id)) {
 			if (extra.length || (action === "list" && id)) throw new Error("Ordinary Goal list takes no identifier");
 			const runs = await commands.listOrdinaryWorkflowGoals(ctx.cwd);
-			if (action === "status" && ctx.hasUI && runs.length) {
-				emit(ctx, (await commands.readOrdinaryWorkflowGoalStatuses(ctx.cwd,
-					(runId) => hasLiveWorkflowGoalAdmission(ctx.cwd, runId))).text, "info");
+			// In the TUI both read as text: status in full, list one line per run.
+			if (ctx.hasUI && runs.length) {
+				const statuses = await commands.readOrdinaryWorkflowGoalStatuses(ctx.cwd,
+					(runId) => hasLiveWorkflowGoalAdmission(ctx.cwd, runId));
+				emit(ctx, action === "status" ? statuses.text : statuses.listText, "info");
 				return;
 			}
 			emit(ctx, runs.length ? JSON.stringify({ namespace: "ordinary-workflow-engine", runs: runs.map(run => ({
@@ -4251,7 +4298,8 @@ async function handleWorkflowGoalCommand(
 			}
 			if (uiSessionSignal.aborted) return;
 		}
-		emit(ctx, `Ordinary workflow-engine Goal ${action}: ${updated.runId} ${updated.status}. Stop does not apply origin changes; resume retains original admission/profile.`, "warning");
+		// Warning level as before: the reply is told apart from automated run feedback by it.
+		emit(ctx, commands.goalControlMessage(action as "pause" | "cancel" | "resume", updated), "warning");
 		return;
 	}
 	if (suffix === "protected" || suffix.startsWith("protected "))
@@ -4357,19 +4405,25 @@ async function handleWorkflowGoalCommand(
 			: ["read", "candidate-write", "verify", "origin-apply", "workflow-create"] as const;
 	if (hasCommandCriterion && effectsChoice === "Read and verify only")
 		throw new Error("A command criterion runs against candidate writes; choose a candidate-writing effect.");
-	const readOptionalLimit = async (label: string): Promise<number | undefined | null> => {
-		const text = await ctx.ui.input(label);
-		if (text === undefined) return null;
-		if (text.trim() === "") return undefined;
-		const value = Number(text);
-		if (!/^\d+$/u.test(text) || !Number.isSafeInteger(value) || value < 0)
-			throw new Error(`Goal ${label} requires a nonnegative safe integer or blank for no cap.`);
-		return value;
-	};
-	const requestLimit = await readOptionalLimit("Request cap (blank for no cap)");
-	if (requestLimit === null) return;
-	const costLimit = await readOptionalLimit("Cost cap in micros (blank for no cap)");
-	if (costLimit === null) return;
+	const requestText = await ctx.ui.input(
+		"Request cap: most model requests the whole Goal may make, e.g. 40 (blank for no cap)");
+	if (requestText === undefined) return;
+	let requestLimit: number | undefined;
+	if (requestText.trim()) {
+		requestLimit = Number(requestText.trim());
+		if (!/^\d+$/u.test(requestText.trim()) || !Number.isSafeInteger(requestLimit))
+			throw new Error("Goal request cap must be a whole number of model requests, or blank for no cap.");
+	}
+	// Costs are entered in dollars and stored in micros (millionths of a dollar).
+	const costText = await ctx.ui.input("Cost cap in US dollars, e.g. 0.50; costs are estimates (blank for no cap)");
+	if (costText === undefined) return;
+	let costLimit: number | undefined;
+	if (costText.trim()) {
+		const dollars = costText.trim().replace(/^\$/u, "");
+		if (!/^\d+(?:\.\d{1,6})?$/u.test(dollars) || !Number.isSafeInteger(Math.round(Number(dollars) * 1_000_000)))
+			throw new Error("Goal cost cap must be a dollar amount such as 0.50, or blank for no cap.");
+		costLimit = Math.round(Number(dollars) * 1_000_000);
+	}
 	const attemptsText = await ctx.ui.input("Attempt limit: first plan plus replans, 1-100 (blank for 10)");
 	if (attemptsText === undefined) return;
 	let generations: number | undefined;
@@ -4427,8 +4481,8 @@ async function handleWorkflowGoalCommand(
 		`Protected paths: ${protectedPaths.join(", ") || "none"}`,
 		`Effects: ${(await import("./goal-consent-summary.js")).describeGoalEffects(allowedEffects, false)}`,
 		"Maximum nested depth: 3",
-		`Request cap: ${requestLimit === undefined ? "no cap" : requestLimit}`,
-		`Cost cap (micros): ${costLimit === undefined ? "no cap" : costLimit}`,
+		`Request cap: ${requestLimit === undefined ? "no cap" : `${requestLimit} model requests`}`,
+		`Cost cap: ${costLimit === undefined ? "no cap" : `${(await import("./goal-consent-summary.js")).formatCostCap(costLimit)} (estimated)`}`,
 		`Attempt limit (plan + replans): ${generations ?? 10}`,
 		`Fast: ${fastChoice === FAST_ON ? "on (OpenAI priority tier)" : "off"}`,
 		"Usage: unknown until execution begins",
@@ -5524,17 +5578,17 @@ function parseThinkingLevel(value: string): ThinkingLevel {
 const WORKFLOW_GOAL_ACTION_COMPLETIONS = [
 	{ value: "create", label: "create", description: "Write a Goal definition step by step" },
 	{ value: "run", label: "run", description: "Run a saved Goal definition" },
-	{ value: "list", label: "list", description: "List Goal runs and their results" },
 	{ value: "status", label: "status", description: "Show a Goal run's result and next step" },
-	{ value: "pause", label: "pause", description: "Pause a running Goal" },
-	{ value: "resume", label: "resume", description: "Resume a paused Goal in this session" },
-	{ value: "cancel", label: "cancel", description: "Cancel a running Goal" },
+	{ value: "list", label: "list", description: "One line per Goal run" },
+	{ value: "pause", label: "pause", description: "Stop a running Goal" },
+	{ value: "resume", label: "resume", description: "Continue a stopped Goal in this session" },
 	{ value: "recover", label: "recover", description: "Continue a stopped or failed Goal as a new run" },
 	{ value: "judge", label: "judge", description: "Give your judgment on a Goal waiting for you" },
-	{ value: "criteria", label: "criteria", description: "Show a Goal run's criteria and profile (JSON)" },
-	{ value: "evidence", label: "evidence", description: "Show a Goal run's raw evidence (JSON)" },
-	{ value: "profile", label: "profile", description: "Change the model of one pending Goal task" },
 	{ value: "help", label: "help", description: "Show the Goal commands" },
+	{ value: "criteria", label: "criteria", description: "Criteria and verdicts (JSON, troubleshooting)" },
+	{ value: "evidence", label: "evidence", description: "Raw check records (JSON, troubleshooting)" },
+	// Not listed: cancel (the same stop as pause) and profile (a rarely available
+	// run-only model exception); both remain accepted commands.
 ];
 
 const WORKFLOW_ACTION_COMPLETIONS = [
