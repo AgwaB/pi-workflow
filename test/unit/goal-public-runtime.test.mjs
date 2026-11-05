@@ -10698,7 +10698,8 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       assert.deepEqual(terminal.root.tasks.map(task => task.status), ["completed", "interrupted"]);
       assert.equal(stoppedPolicy.lastMessage, "Workflow stopped by user request");
       const matches = ({ message, level }) => level === "error" &&
-        message === `Workflow ${run.runId} interrupted (1/2 completed, 0 failed, 1 interrupted).\n${stoppedPolicy.specId}: Workflow stopped by user request\nOpen: /workflow ${run.runId}`;
+        // The notice names the stopped task by its readable label, not its spec ID.
+        message === `Workflow ${run.runId} interrupted (1/2 completed, 0 failed, 1 interrupted).\nGoal controller: Workflow stopped by user request\nOpen: /workflow ${run.runId}`;
       await joinStop("original-stop-feedback-observer-drain", stopWorkflowFeedbackAndDrainForTests(cwd, run.runId));
       let pendingNotifications = 0;
       for (const notification of commandMessages.filter(({ level }) => level === "error")) {
