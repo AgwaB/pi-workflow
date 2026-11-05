@@ -17,6 +17,7 @@ import {
 	applyExecutionProfileStageOverrides,
 	collectWorkflowProfileStageSlots,
 	GOAL_EXECUTION_PROFILE,
+	workflowProfileSlotLabel,
 } from "../../.tmp/unit/execution-profile.js";
 import {
 	captureGoalChildProfile,
@@ -1603,4 +1604,52 @@ test("Goal captures concrete parent roles and overrides child defaults without r
 		assert.deepEqual(child, originalChild);
 		assert.deepEqual(profile, originalProfile);
 	}
+});
+
+test("Goal profile slots show readable names while the saved ids stay canonical", async () => {
+	const goal = { schemaVersion: 1, name: "goal-root", goal: {} };
+	const slots = collectWorkflowProfileStageSlots(goal);
+	assert.deepEqual(slots.map((slot) => [slot.id, workflowProfileSlotLabel(slot)]), [
+		["goal.$planner", "Goal: plan"],
+		["goal.$worker", "Goal: work"],
+		["goal.$verifier", "Goal: checks"],
+		["goal.$synthesis", "Goal: summary"],
+		["goal.$judge", "Goal: final judgment"],
+	]);
+	const embedded = { schemaVersion: 1, artifactGraph: { stages: [{ id: "review", type: "goal", goal: { uses: "g.json" } }] } };
+	assert.deepEqual(collectWorkflowProfileStageSlots(embedded).map((slot) => [slot.id, workflowProfileSlotLabel(slot)]), [
+		["review.$planner", "Goal: plan"], ["review.$worker", "Goal: work"], ["review.$verifier", "Goal: checks"],
+		["review.$synthesis", "Goal: summary"], ["review.$judge", "Goal: final judgment"],
+	], "an embedded Goal's slots are named the same way");
+	assert.equal(workflowProfileSlotLabel({ id: "review.triage", kind: "stage" }), "review.triage", "an ordinary stage keeps its id");
+
+	const { workflowPath } = setup("ui-goal-labels");
+	writeSpec(workflowPath, goal);
+	const ui = new ScriptedUi(["Codex", "back", undefined]);
+	ui.previews = [];
+	ui.preview = async (preview) => {
+		ui.previews.push(structuredClone(preview));
+		return ui.script.shift();
+	};
+	await configureWorkflowExecutionProfile({ ui, ...context(goal, workflowPath) });
+	assert.deepEqual(ui.previews[0].rows.map(({ id, label }) => [id, label]), [
+		["goal.$planner", "Goal: plan"],
+		["goal.$worker", "Goal: work"],
+		["goal.$verifier", "Goal: checks"],
+		["goal.$synthesis", "Goal: summary"],
+		["goal.$judge", "Goal: final judgment"],
+	]);
+});
+
+test("native preview renderer shows a row's readable label in place of its id", () => {
+	const theme = { bold: (text) => text, fg: (_color, text) => text };
+	const preview = {
+		profileName: "Codex", page: 1, pages: 1,
+		rows: [{ id: "goal.$planner", label: "Goal: plan", role: "planning", model: SOL, thinking: "high" }],
+		actions: [{ id: "save", label: "Save for next run" }],
+	};
+	const wide = renderWorkflowProfilePreview(preview, theme, 100).join("\n");
+	assert.match(wide, /Goal: plan\s+planning\s+openai-codex\/gpt-6\.1-sol\s+high/);
+	assert.doesNotMatch(wide, /goal\.\$planner/);
+	assert.match(renderWorkflowProfilePreview(preview, theme, 48).join("\n"), /Goal: plan \[planning\]/);
 });

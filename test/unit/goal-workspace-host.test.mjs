@@ -3688,3 +3688,39 @@ test("a graceful pause holds a new candidate operation; a stop ends it as a deni
     assert.notEqual(record.phase, "unknown", `no UNKNOWN candidate outcome: ${name}`);
   }
 });
+
+test("a request a pause held and the stop refused is answered as a denial; the channel still drains", async t => {
+  const root = await mkdtemp(join(tmpdir(), "goal-held-request-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const budget = createGoalRequestBudget(undefined);
+  const stopped = new AbortController();
+  const request = await openGoalRequestBudgetChannel({
+    directory: join(root, "r"), evidenceRoot: join(root, "evidence"), identity: { test: "held" }, attemptKey: "held",
+    model: "fixture/model", budget, current: async () => "held-authority", live() {}, stopped: stopped.signal,
+  });
+  const extension = await readFile(request.extensionPath, "utf8");
+  const marker = "registerGoalRequestBudget(pi, ";
+  const binding = JSON.parse(extension.slice(extension.indexOf(marker) + marker.length, extension.lastIndexOf(', "fixture/model");')));
+  const session = await openGoalAuthenticatedLocalSession(binding);
+  const exchange = (id, action, known) => session.exchange({ id, commitment: goalHash({ id }), action,
+    ...(known === undefined ? {} : { known }) }, { operationId: id, fingerprint: goalHash({ id }) });
+  await exchange("first", "reserve"); await exchange("first", "release"); await exchange("first", "settle", true);
+
+  const hold = budget.beginHold();
+  const held = exchange("second", "reserve").then(value => ({ value }), error => ({ error }));
+  await new Promise(resolve => setTimeout(resolve, 150));
+  assert.equal(hold.inFlight(), 0, "a held request is not in flight");
+  // The stop drains the channel while the request is still held (the live order).
+  const draining = request.drain();
+  await new Promise(resolve => setTimeout(resolve, 10));
+  hold.deny();
+  hold.release(); // ends once: this does not let it through
+  await draining; // would reject "Goal request channel retired" if the handler threw
+  const answer = await held;
+  assert.equal(answer.value?.status, "denied",
+    `the worker is told it was refused (not a dropped connection): ${answer.error?.message ?? ""}`);
+  await session.close().catch(() => undefined);
+  stopped.abort();
+  assert.equal(await budget.settledRequestCount(), 1, "only the first request was made; usage stays known");
+  assert.equal((await fsPromises.readdir(join(root, "evidence"))).length, 1, "no reservation for the refused one");
+});

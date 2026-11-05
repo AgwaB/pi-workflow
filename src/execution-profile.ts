@@ -349,6 +349,22 @@ function mapStage(
 	return next;
 }
 
+/** Display names of a Goal's profile slots; the ids stay the saved keys. */
+const GOAL_PROFILE_SLOT_LABELS: Readonly<Record<string, string>> = {
+	planner: "Goal: plan",
+	worker: "Goal: work",
+	verifier: "Goal: checks",
+	synthesis: "Goal: summary",
+	judge: "Goal: final judgment",
+};
+
+/** What people read for a profile slot. Display only: saved profiles use `slot.id`. */
+export function workflowProfileSlotLabel(slot: Pick<WorkflowProfileStageSlot, "id" | "kind">): string {
+	if (slot.kind !== "goal-profile") return slot.id;
+	const name = slot.id.slice(slot.id.lastIndexOf(".$") + 2);
+	return GOAL_PROFILE_SLOT_LABELS[name] ?? slot.id;
+}
+
 const GOAL_PROFILE_SLOTS: ReadonlyArray<
 	readonly [string, WorkflowProfileRole]
 > = [

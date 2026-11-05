@@ -736,14 +736,15 @@ export function hasLiveWorkflowGoalAdmission(cwd: string, runId: string): boolea
  * requests already in flight finish and settle, so their usage stays known and
  * the run can resume. Ends when nothing is in flight, when a held request has
  * waited `heldLimitMs` (its exchange would time out), or after `maxWaitMs`.
- * The caller stops the run next and then calls `release`; the stop itself
- * ends every held request.
+ * The caller stops the run next, then calls `deny` when the stop succeeded
+ * (held requests are refused and never sent) or `release` when it failed (the
+ * run continues and held requests proceed).
  */
 export async function pauseWorkflowGoalGracefully(cwd: string, runId: string, options: {
 	maxWaitMs?: number; heldLimitMs?: number; pollMs?: number; signal?: AbortSignal;
 	/** Called once when the pause has to wait for requests in flight. */
 	onWait?: () => void;
-} = {}): Promise<{ settled: boolean; waitedMs: number; release(): void } | undefined> {
+} = {}): Promise<{ settled: boolean; waitedMs: number; release(): void; deny(): void } | undefined> {
 	const live = liveGoalPolicyAdmissions.get(`${resolve(cwd)}\0${runId}`);
 	if (!live) return undefined;
 	return waitForGoalRequestHolds(beginWorkflowGoalRequestHolds(live.admissions.values()), options);
@@ -751,11 +752,12 @@ export async function pauseWorkflowGoalGracefully(cwd: string, runId: string, op
 
 /** The wait of a graceful pause over begun holds; see pauseWorkflowGoalGracefully. */
 export async function waitForGoalRequestHolds(holds: ReadonlyArray<{
-	inFlight(): number; heldForMs(): number; release(): void;
+	inFlight(): number; heldForMs(): number; release(): void; deny(): void;
 }>, options: {
 	maxWaitMs?: number; heldLimitMs?: number; pollMs?: number; signal?: AbortSignal; onWait?: () => void;
-} = {}): Promise<{ settled: boolean; waitedMs: number; release(): void }> {
+} = {}): Promise<{ settled: boolean; waitedMs: number; release(): void; deny(): void }> {
 	const release = () => { for (const hold of holds) hold.release(); };
+	const deny = () => { for (const hold of holds) hold.deny(); };
 	const started = Date.now();
 	const maxWaitMs = options.maxWaitMs ?? 120_000, heldLimitMs = options.heldLimitMs ?? 20_000;
 	let settled = false, announced = false;
@@ -768,7 +770,7 @@ export async function waitForGoalRequestHolds(holds: ReadonlyArray<{
 			await new Promise((resolveWait) => setTimeout(resolveWait, options.pollMs ?? 100));
 		}
 	} catch (error) { release(); throw error; }
-	return { settled, waitedMs: Date.now() - started, release };
+	return { settled, waitedMs: Date.now() - started, release, deny };
 }
 
 export async function assertOrdinaryGoalCommandCurrent(cwd: string, run: WorkflowRunRecord,

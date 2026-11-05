@@ -166,7 +166,7 @@ export function renderWorkflowProfilePreview(
 			lines.push(
 				fitLine(
 					` ${renderWideCells(
-						[row.id, row.role, row.model, row.thinking],
+						[row.label ?? row.id, row.role, row.model, row.thinking],
 						dimensions,
 						["text", "muted", "text", "muted"],
 						theme,
@@ -501,7 +501,7 @@ function tableDimensions(
 	if (width < 64) return undefined;
 	const stage = boundedNaturalWidth(
 		"STAGE",
-		rows.map(({ id }) => id),
+		rows.map(({ id, label }) => label ?? id),
 		10,
 		22,
 	);
@@ -560,7 +560,7 @@ function renderStackedRow(
 ): string[] {
 	return [
 		fitLine(
-			` ${theme.fg("text", safeLine(row.id))} ${theme.fg("muted", `[${safeLine(row.role)}]`)}`,
+			` ${theme.fg("text", safeLine(row.label ?? row.id))} ${theme.fg("muted", `[${safeLine(row.role)}]`)}`,
 			width,
 		),
 		fitLine(

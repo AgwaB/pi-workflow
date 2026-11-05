@@ -258,3 +258,20 @@ test("a Goal waiting for judgment is announced once per attempt", () => {
 	renderActiveWorkflowUi(ctx, index([waiting(2)]));
 	assert.equal(notices.length, 2, "a later attempt that waits again is announced again");
 });
+
+test("in the TUI the active workflow line is shown once, in the widget", () => {
+	const statuses = [];
+	const widgets = [];
+	const ctx = {
+		hasUI: true,
+		mode: "tui",
+		ui: {
+			setStatus(key, value) { statuses.push({ key, value }); },
+			setWidget(key, value, options) { widgets.push({ key, value, options }); },
+		},
+	};
+	renderActiveWorkflowUi(ctx, index([run({ name: "csv-parser", goal: { attempt: 1, phase: "working" } })]));
+	assert.deepEqual(statuses.at(-1), { key: WORKFLOW_ACTIVE_STATUS_KEY, value: undefined }, "no repeated footer line");
+	assert.equal(widgets.at(-1).value[0], "Active workflows");
+	assert.match(widgets.at(-1).value[1], /^● Goal csv-parser · attempt 1 · working/);
+});

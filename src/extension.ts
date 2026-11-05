@@ -1465,7 +1465,7 @@ export async function deliverWorkflowFeedback(
 		const problem = firstProblem
 			? `\n${goalTaskLabel(run, firstProblem) ?? firstProblem.displayName ?? firstProblem.specId}: ${firstProblem.lastMessage ?? firstProblem.statusDetail}`
 			: "";
-		const level = run.status === "completed" ? "info" : "error";
+		let level: "info" | "warning" | "error" = run.status === "completed" ? "info" : "error";
 		const notice = `Workflow ${run.runId} ${run.status} (${summary.completed}/${summary.total} completed, ${summary.failed} failed, ${summary.interrupted} interrupted).${problem}\nOpen: /workflow ${run.runId}`;
 		const terminal = await summarizeWorkflowTerminal(ctx.cwd, run);
 		const presentation = terminal.terminal
@@ -1490,6 +1490,9 @@ export async function deliverWorkflowFeedback(
 		let content: string;
 		let details: { goalReport: string; runId: string } | undefined;
 		if (presentation?.goalReport && preview) {
+			// A paused/cancelled Goal or one waiting for the user is not an error;
+			// only a failed Goal keeps the error level. The text is unchanged.
+			if (run.status === "interrupted" || run.status === "blocked") level = "warning";
 			// A Goal report: the screen shows the report itself (see the
 			// workflow-completion renderer); the model is asked to explain it.
 			details = { goalReport: preview, runId: run.runId };
@@ -4101,6 +4104,17 @@ async function readGoalOriginText(cwd: string, path: string): Promise<string | u
 	}
 }
 
+/** Profile-exception refusals that mean no Goal task is eligible right now. */
+const GOAL_PROFILE_NOTHING_ELIGIBLE = [
+	"Goal profile exception has no actual pending",
+	"Goal profile exception captured root inventory is incomplete",
+	"Goal profile exception captured verifier inventory is incomplete",
+	"Goal profile exception captured verifier source inventory is incomplete",
+	"Goal profile exception requires an original pending NEVER-launched",
+	"Goal profile exception requires an exact original pending NEVER-launched",
+	"Goal profile exception selected task acquired an in-flight",
+];
+
 async function handleWorkflowGoalCommand(
 	args: string,
 	ctx: ExtensionCommandContext,
@@ -4128,12 +4142,21 @@ async function handleWorkflowGoalCommand(
 		let consumed = false;
 		try {
 			const prepared = await beginWorkflowGoalProfileException(
-				ctx.cwd, runId, host, dialogSignal);
+				ctx.cwd, runId, host, dialogSignal).catch((error: unknown) => {
+				const detail = error instanceof Error ? error.message : String(error);
+				// Only refusals meaning "nothing is eligible now" get the explanation;
+				// integrity failures keep their exact message.
+				if (!GOAL_PROFILE_NOTHING_ELIGIBLE.some(prefix => detail.startsWith(prefix))) throw error;
+				// Say when an exception applies and what to do instead; keep the exact reason.
+				throw new Error("No Goal task can take a different model now: an exception changes the model of one Goal " +
+					"task that is created but not started yet, and a Goal usually starts its tasks right away. To use other " +
+					`models, choose them before running with /workflow profile <definition>. Detail: ${detail}`, { cause: error });
+			});
 			capability = prepared.capability;
 			const profileUi = createNativeWorkflowProfileUi(ctx.ui);
 			const labels = prepared.options.map(option => option.name);
 			const selectedName = await profileUi.select(
-				"Select one actual pending NEVER-launched root task, static child task, or exact materialized foreach item",
+				"Choose the Goal task (not started yet) whose model to change for this run",
 				labels,
 			);
 			await assertWorkflowGoalProfileExceptionCommandCurrent(
@@ -4314,7 +4337,9 @@ async function handleWorkflowGoalCommand(
 						onWait: () => emit(ctx, `Goal ${label} is pausing: its current model request finishes first (up to 2 min).`, "info"),
 					})
 					: undefined;
-				try { updated = (await stopRun(ctx.cwd, run.runId, host)).run; }
+				// After a stop, held requests are refused (never let through, so
+				// nothing starts after the pause); if the stop fails they continue.
+				try { updated = (await stopRun(ctx.cwd, run.runId, host)).run; pausing?.deny(); }
 				finally { pausing?.release(); }
 			}
 		} catch (error) {
@@ -4333,7 +4358,7 @@ async function handleWorkflowGoalCommand(
 			}
 			if (uiSessionSignal.aborted) return;
 		}
-		// Warning level as before: the reply is told apart from automated run feedback by it.
+		// Warning level as before. The automated run notice starts with "Workflow <runId> <status> (".
 		emit(ctx, commands.goalControlMessage(action as "pause" | "cancel" | "resume", updated,
 			action === "resume" ? null : await commands.goalResumeBlocker(ctx.cwd, updated).catch(() => null)), "warning");
 		return;

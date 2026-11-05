@@ -209,7 +209,9 @@ the TUI both print JSON. `criteria` and `evidence` are JSON troubleshooting view
 **Pause and cancel.** `pause` stops gracefully, like a stop "after the current turn":
 new model requests of the Goal are held (the requester waits instead of failing)
 while the requests already in flight finish and settle, so their usage stays known;
-then the run stops and `resume` continues it in this session. The wait ends when
+then the run stops and `resume` continues it in this session. Requests still held at
+that point are refused and never sent (the worker is told so), and a request that had
+just passed the check when the pause began is waited for like one in flight. The wait ends when
 nothing is in flight, when a held request has waited 20 s, or after 2 minutes; a
 request still in flight then is cut off. `cancel` stops at once and cuts off any
 request in flight (its usage stays unknown, so the run is continued with `recover`).
@@ -249,8 +251,9 @@ confirm. *Show full details* opens a read-only viewer with every part in plain
 language (each criterion's command, rubric or condition; scope; what the consent does
 not cover; models per role; limits; child workflows; recovery), followed by the exact
 JSON the consent is bound to, and returns to the summary. While a
-Goal runs, the status line shows its attempt and phase, for example
-`● Goal csv-parser · attempt 2 · verifying`, and the `/workflow` run view names its
+Goal runs, the *Active workflows* line below the editor shows its attempt, phase and
+elapsed time, for example `● Goal csv-parser · attempt 2 · verifying · 2m` (outside
+the TUI the same line is the status text), and the `/workflow` run view names its
 tasks by role and attempt (`Plan · attempt 1`, `Work: result · attempt 2`,
 `Check: quality · attempt 2`). `/workflow goal status` and the
 completion message report the outcome in plain lines: whether it was achieved, each
@@ -628,13 +631,23 @@ Unsupported cost or incomplete family usage/settlement stays UNKNOWN, not zero
 or achieved. This bounded candidate does not establish general dynamic/nested
 workflow support, general family closure/recovery or live/provider acceptance.
 
+When the Goal result is shown, the automatic run notice under it is a warning for a
+stopped (paused/cancelled) or waiting Goal and an error only for a failed one. The
+execution-profile preview names a Goal's roles `Goal: plan`, `Goal: work`,
+`Goal: checks`, `Goal: summary` and `Goal: final judgment`; saved profiles keep the
+`goal.$planner`… keys. Coding workers checked by a command are told that the Goal
+runs that command after they finish.
+
 `/workflow goal profile <runId>` can explicitly override model/thinking for an
 eligible captured, never-launched root task, or one already-materialized pending
 foreach item in a directly admitted ordinary Goal-owned child. A pending single
 task in a fully static ordinary child is also eligible; static-task exceptions
 are not offered in children containing foreach, dynamic, or embedded Goal stages.
 It requires the retained original
-live host, an exact scope preview, a nonempty reason, and a new confirmation.
+live host, an exact scope preview, a nonempty reason, and a new confirmation. An
+ordinary Goal usually starts its tasks right away, so there is often nothing to
+change; the refusal then says so and points to `/workflow profile <definition>`
+(choose models before the run), followed by the exact reason.
 Acceptance appends a predecessor-linked capture revision; it does not change
 saved profile preferences, root role defaults, sibling items, or shared quotas.
 Cancellation, stale authority, reserved/started items, and lease contention do
