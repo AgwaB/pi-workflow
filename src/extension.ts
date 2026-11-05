@@ -3778,6 +3778,8 @@ export async function notifyUnfinishedRuns(
 	const index = await readFreshIndex(cwd);
 	if (!index?.runs?.length) return;
 	const unfinished = [];
+	// Goal runs continue with /workflow goal recover (a new run), not /workflow resume.
+	const goalRunIds = new Set<string>();
 	// Invalid acknowledgement evidence must never suppress an ordinary warning.
 	const acknowledgements = await readNoticeAcknowledgements(cwd).catch(
 		() => undefined,
@@ -3808,6 +3810,8 @@ export async function notifyUnfinishedRuns(
 		) {
 			const fullRun = await readRunRecord(cwd, run.runId).catch(() => undefined);
 			if (isMockRunProvenance(fullRun?.provenance)) continue;
+			if (fullRun?.goalParticipation && fullRun.tasks.some((task) => task.kind === "goal"))
+				goalRunIds.add(run.runId);
 			unfinished.push(run);
 			continue;
 		}
@@ -3845,7 +3849,14 @@ export async function notifyUnfinishedRuns(
 			const statusLabel = run.degradation?.finalOutputRendered
 				? `${run.status} (final rendered — degraded)`
 				: run.status;
-			return `- ${run.name ?? "(unnamed)"} ${run.runId}${parent}: ${statusLabel}${counts} — /workflow resume ${run.runId}`;
+			// A stopped Goal continues as a new run; status explains a failed one
+			// (recover may be refused when its attempts are used up).
+			const next = !goalRunIds.has(run.runId)
+				? `/workflow resume ${run.runId}`
+				: run.status === "interrupted"
+					? `/workflow goal recover ${run.runId}`
+					: `/workflow goal status ${run.runId}`;
+			return `- ${run.name ?? "(unnamed)"} ${run.runId}${parent}: ${statusLabel}${counts} — ${next}`;
 		});
 	if (needingNotice.length > UNFINISHED_RUN_NOTICE_MAX_RUNS)
 		lines.push(
@@ -4334,7 +4345,11 @@ async function handleWorkflowGoalCommand(
 	assertWorkflowActionAllowedForRole("goal");
 	if (typeof ctx.ui.input !== "function" || typeof ctx.ui.select !== "function")
 		throw new Error("Goal authoring UI unavailable; no definition or run was created.");
-	if (suffix.startsWith("run ")) {
+	if (suffix === "run" || suffix.startsWith("run ")) {
+		const parsed = parseWorkflowRunArgs(suffix);
+		if (!parsed.specPath || !parsed.task)
+			throw new Error(`${parsed.specPath ? "This Goal run needs a request" : "Goal run needs a saved Goal definition and a request"}. ` +
+				'Usage: /workflow goal run <definition> "<request>" (create a definition with /workflow goal create).');
 		await handleWorkflowCommand(suffix, ctx, api, goalProduct);
 		return;
 	}

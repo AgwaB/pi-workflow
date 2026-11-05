@@ -287,7 +287,8 @@ test("ordinary Goal summary preserves stopping and unknown usage without mutatin
     const lines = summary.split("\n");
     assert.equal(lines[0], "Goal (workflow_summary_fixture) — running", "a stopping run with a pending criterion is not waiting for judgment");
     assert.ok(lines.includes("Criteria: 1 of 4 met, 1 not met, 1 waiting for your judgment, 1 unknown (no verified evidence)"));
-    assert.ok(lines.includes("Used: attempts 3 · requests unknown · cost unknown"));
+    assert.ok(lines.includes("Used: attempts 3 · request count when the Goal finishes · cost not reported"),
+      "no total is invented for an unfinished Goal");
     assert.ok(lines.includes("Why: Stopping: original descendant drain remains UNKNOWN"));
     assert.ok(lines.includes("Now: candidate running, verification blocked"));
     assert.ok(lines.includes(expectedUsage), summary);
@@ -296,6 +297,23 @@ test("ordinary Goal summary preserves stopping and unknown usage without mutatin
     assert.ok(summary.length < 2000);
     assert.deepEqual(data, before, "formatting must not change the supplied persisted observation");
   }
+});
+
+test("ordinary Goal summary shows partial cost as a lower bound and never invents totals", async () => {
+  const { summarizeOrdinaryWorkflowGoal } = await import("../../.tmp/unit/goal-workflow-commands.js");
+  const used = (runStatus, usage) => summarizeOrdinaryWorkflowGoal({
+    runId: "workflow_usage_fixture", runStatus, observedUsage: "UNKNOWN", currentWork: [],
+    policies: [{ goalId: "g", state: "x", taskStatus: runStatus, generation: 0, statusDetail: "Workflow stopped by user request",
+      importantFailureOrUnknown: null, criteria: [{ verdict: "unknown" }], usage }],
+  }).split("\n").find(line => line.startsWith("Used: "));
+  const partial = { requests: null, costMicros: null, metrics: { observed: { costUsd: 0.00152394 } } };
+  assert.equal(used("interrupted", partial),
+    "Used: attempts 1 · request count when the Goal finishes · cost at least $0.0015 (not all work reported)");
+  assert.equal(used("failed", partial), "Used: attempts 1 · request count not recorded · cost at least $0.0015 (not all work reported)");
+  assert.equal(used("failed", { requests: null, costMicros: 2500 }), "Used: attempts 1 · request count not recorded · cost $0.0025");
+  assert.equal(used("interrupted", { requests: null, costMicros: null, metrics: { observed: { costUsd: 0 } } }),
+    "Used: attempts 1 · request count when the Goal finishes · cost not reported", "zero observed spend is not a bound");
+  assert.equal(used("completed", { requests: 4, costMicros: 31000 }), "Used: attempts 1 · requests 4 · cost $0.0310");
 });
 
 /**
@@ -7755,14 +7773,14 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
   }
   if (recoveryMode === "generations-used") {
     await assert.rejects(runWorkflowSpec(join(cwd, "goal.json"), cwd, { goalPolicyHost: host, executionProfile: "captured",
-      goalRecovery: recoveryPlan }), /Goal generation limit 1 is already used by interrupted run workflow_mvzolder_000000 \(1 generations\)/);
+      goalRecovery: recoveryPlan }), /Goal attempt limit 1 \(limits\.generations\) is already used by run workflow_mvzolder_000000 \(1 attempt\); nothing remains to recover with\. For more attempts, raise limits\.generations/);
     assert.equal(confirmations, 0, "a recovery never extends the generation limit");
     assert.equal(calls.length, 0); assert.equal(writes, 0);
     return;
   }
   if (recoveryMode === "cap-used") {
     await assert.rejects(runWorkflowSpec(join(cwd, "goal.json"), cwd, { goalPolicyHost: host, executionProfile: "captured",
-      goalRecovery: recoveryPlan }), /Goal request cap 2 is already used by interrupted run workflow_mvzolder_000000 \(2 requests\)/);
+      goalRecovery: recoveryPlan }), /Goal request cap 2 \(limits\.requests\) is already used by run workflow_mvzolder_000000 \(2 requests\); nothing remains to recover with\. For more requests, raise limits\.requests/);
     assert.equal(confirmations, 0, "a recovery never extends the request cap");
     assert.equal(calls.length, 0); assert.equal(budgetPhysicalRequests, 0); assert.equal(writes, 0);
     return;
@@ -9481,7 +9499,8 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
         const stoppedText = stoppedSummary.content[0].text;
         assert.ok(stoppedText.startsWith(`Goal ${definition.name} (${run.runId}) — running\n`), stoppedText);
         assert.match(stoppedText, /^Criteria: 0 of 1 met, 1 unknown \(no verified evidence\)$/m);
-        assert.match(stoppedText, /^Used: attempts 1 · requests unknown · cost unknown$/m);
+        assert.match(stoppedText,
+          /^Used: attempts 1 · request count when the Goal finishes · cost (not reported|at least \$\d+\.\d{4} \(not all work reported\))$/m);
         assert.match(stoppedText, /^Why: .+$/m, "the stop that is still settling is named");
         assert.ok(stoppedText.includes("Now: Goal controller running"), stoppedText);
         assert.equal(stoppedSummary.details.observedUsage, "UNKNOWN",
@@ -10679,7 +10698,8 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       assert.deepEqual(terminal.root.tasks.map(task => task.status), ["completed", "interrupted"]);
       assert.equal(stoppedPolicy.lastMessage, "Workflow stopped by user request");
       const matches = ({ message, level }) => level === "error" &&
-        message === `Workflow ${run.runId} interrupted (1/2 completed, 0 failed, 1 interrupted).\n${stoppedPolicy.specId}: Workflow stopped by user request\nOpen: /workflow ${run.runId}`;
+        // The notice names the stopped task by its readable label, not its spec ID.
+        message === `Workflow ${run.runId} interrupted (1/2 completed, 0 failed, 1 interrupted).\nGoal controller: Workflow stopped by user request\nOpen: /workflow ${run.runId}`;
       await joinStop("original-stop-feedback-observer-drain", stopWorkflowFeedbackAndDrainForTests(cwd, run.runId));
       let pendingNotifications = 0;
       for (const notification of commandMessages.filter(({ level }) => level === "error")) {
@@ -15291,7 +15311,9 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
     const recordPath = join(cwd, ".pi", "workflows", run.runId, "run.json"), bytes = await readFile(recordPath, "utf8");
     const status = await commandTools.get(GOAL_TOOL).execute("original-accounting-status", { action: "status", goalId: run.runId },
       new AbortController().signal, undefined, { cwd });
-    assert.match(status.content[0].text, /^Used: attempts \d+ · requests unknown · cost unknown$/m);
+    assert.match(status.content[0].text,
+      /^Used: attempts \d+ · request count (not recorded|when the Goal finishes) · cost at least \$\d+\.\d{4} \(not all work reported\)$/m,
+      "UNKNOWN keeps the totals open; only the observed spend is shown, as a lower bound");
     assert.match(status.content[0].text, /^Tokens: .+ \(some tasks did not report usage\)$/m);
     assert.equal(await readFile(recordPath, "utf8"), bytes, "registered status is inert evidence, not reservation authority");
     const cold = spawnSync(process.execPath, ["--import", resolve("test/e2e/no-external-actions-guard.mjs"),
@@ -15473,7 +15495,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       : new RegExp(`^Criteria: ${definition.goal.criteria.length} of ${definition.goal.criteria.length} met$`, "m"));
     if (!uncertain) for (const criterion of definition.goal.criteria)
       assert.ok(statusText.includes(`  ✓ ${criterion.id} — met`), statusText);
-    assert.match(statusText, new RegExp(`^Used: attempts ${root.goalRoot.generations.at(-1).generation + 1} · requests .+ · cost .+$`, "m"));
+    assert.match(statusText, new RegExp(`^Used: attempts ${root.goalRoot.generations.at(-1).generation + 1} · (requests \\d+|request count .+) · cost .+$`, "m"));
     assert.match(statusText, /^Tokens: .+$/m);
     assert.doesNotMatch(statusText, /criteria\|evidence/, "raw details are a help topic, not a next step");
     assert.ok(summary.content[0].text.length < 2000);
@@ -20006,6 +20028,20 @@ test("C01 C06 DP15 extension registration and empty read surfaces are inert", as
       false,
       "empty list does not create Goal namespace",
     );
+
+    // goal run without a definition or request explains the Goal command, not /workflow run.
+    for (const [suffix, expected] of [
+      ["run", /^Goal run needs a saved Goal definition and a request\. Usage: \/workflow goal run <definition> "<request>"/],
+      ["run csv-parser", /^This Goal run needs a request\. Usage: \/workflow goal run <definition> "<request>"/],
+    ]) {
+      const base = makeUiContext(cwd, messages);
+      const tui = { ...base, mode: "tui", ui: { ...base.ui, async input() { throw new Error("no prompt expected"); } } };
+      const shown = await commands.get("workflow").handler(`goal ${suffix}`, tui)
+        .then(() => messages.at(-1).message, error => error.message);
+      assert.match(shown, expected, suffix);
+      assert.doesNotMatch(shown, /\/workflow run <workflow/, suffix);
+    }
+    assert.equal(existsSync(join(cwd, ".pi")), false, "a refused goal run creates nothing");
 
     const goalTool = tools.find((tool) => tool.name === GOAL_TOOL);
     const schemaText = JSON.stringify(goalTool.parameters);
