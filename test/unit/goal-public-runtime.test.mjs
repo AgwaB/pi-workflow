@@ -4978,7 +4978,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
                       thinking: "medium",
                     }, "the exact selected item is the sole revised child runtime");
                     assert.equal(evidence.selectedCapture.title,
-                      "Select one actual pending NEVER-launched root task, static child task, or exact materialized foreach item");
+                      "Choose the Goal task (not started yet) whose model to change for this run");
                     assert.ok(evidence.selectedCapture.options.some(option =>
                       option.startsWith("Pending foreach item ") &&
                       option.includes(` / ${request.runId} / `) &&
@@ -7987,7 +7987,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       const expectedProfileLabel =
         `Pending root task 1: ${profileExceptionPreview.originalConfirmationOwner.policySpecId} / ${profileExceptionPreview.scope.template} [planning]`;
       assert.deepEqual(profileFinalCurrentSelection, {
-        title: "Select one actual pending NEVER-launched root task, static child task, or exact materialized foreach item",
+        title: "Choose the Goal task (not started yet) whose model to change for this run",
         labels: [expectedProfileLabel],
       }, "the registered original host exposes the actual published pending selection before final ownership fails");
       assert.equal(profileFinalCurrentCancellationResult,
@@ -9568,11 +9568,14 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       const stoppedFeedback = new Promise(resolve => { stoppedFeedbackResolve = resolve; });
       // Exact registered command UI feedback is authoritative too; it does not prove an automated Workflow notification occurred.
       stopFeedback = {
-        matches: ({ message, level }) => level === "error" &&
-          message.startsWith(`Workflow ${run.runId} interrupted (`) ||
+        // The automated notice is a warning when shown with a Goal report (error
+        // otherwise); the command reply is a warning. They are told apart by text.
+        matches: ({ message, level }) =>
+          ["warning", "error"].includes(level) && message.startsWith(`Workflow ${run.runId} interrupted (`) ||
           level === "warning" && message === registeredTerminalMessage("cancel", "interrupted"),
         resolve: notification => {
-          stopFeedbackRoute = notification.level === "warning" ? "registered-pause-command-ui" : "automated-workflow";
+          stopFeedbackRoute = notification.message.startsWith(`Workflow ${run.runId} interrupted (`)
+            ? "automated-workflow" : "registered-pause-command-ui";
           stoppedFeedbackResolve(notification);
         },
       };
@@ -11259,7 +11262,9 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       assert.equal(calls.length, dispatches);
       // The original feedback observer notifies only after sendMessage and
       // delivery.complete(). Engine scheduler settlement does not join it.
-      const matches = ({ message, level }) => level === "error" &&
+      // Shown with the Goal report, a stopped Goal's automated notice is a
+      // warning (not an error) and still carries the real stop cause.
+      const matches = ({ message, level }) => level === "warning" &&
         message.startsWith(`Workflow ${run.runId} interrupted (`) &&
         message.includes("Workflow stopped by user request");
       let resolveFeedback;
@@ -17062,8 +17067,10 @@ for (const [name, cap, expected, recursive, terminalFault, mixed, depthDenied, g
         const before = await capture();
         const effects = { physical, requests: requests.length, confirmations };
         const denied = await invoke(`profile ${child.runId}`);
-        assert.equal(denied,
-          "Goal profile exception has no actual pending captured root, static child, or exact materialized item scope");
+        assert.equal(denied, "No Goal task can take a different model now: an exception changes the model of one Goal " +
+          "task that is created but not started yet, and a Goal usually starts its tasks right away. To use other " +
+          "models, choose them before running with /workflow profile <definition>. " +
+          "Detail: Goal profile exception has no actual pending captured root, static child, or exact materialized item scope");
         assert.deepEqual(await capture(), before, "unsupported topology cannot change original publication evidence");
         assert.deepEqual({ physical, requests: requests.length, confirmations }, effects,
           "unsupported topology neither confirms an exception nor dispatches a request");

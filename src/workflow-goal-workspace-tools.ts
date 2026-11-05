@@ -35,6 +35,17 @@ type Operation = { fingerprint: string; authority?: string; promise: Promise<Res
   /** Held by a graceful pause before it started: no authority check, no effect. */
   held?: boolean };
 
+/**
+ * A request or tool operation a graceful pause held and then refused: it never
+ * started, so nothing was reserved or changed. Channels answer it as a denial.
+ */
+export class GoalHeldRequestDenied extends Error {
+  constructor(cause?: unknown) {
+    super("Goal paused while this request was held; it was not sent", { cause });
+    this.name = "GoalHeldRequestDenied";
+  }
+}
+
 const GOAL_NATIVE_READ_CONTENT_CHARS = 320_000;
 const GOAL_NATIVE_CONTEXT_STRUCTURE_LIMIT = 4_096 * 16;
 const GOAL_NATIVE_READ_HASH = /^[a-f0-9]{64}$/;
@@ -683,7 +694,7 @@ export async function openGoalCandidateToolChannel(input: {
   };
   // Graceful pause: a new operation waits, before it starts, until the hold
   // ends or the channel stops; a stopped wait ends as a denial with no effect.
-  let hold: { active: boolean; waiting: Set<{ since: number }> } | undefined;
+  let hold: { active: boolean; denied: boolean; waiting: Set<{ since: number }> } | undefined;
   const departedPeers = new WeakSet<GoalAuthenticatedLocalPeer>();
   const waitWhileHeld = async (operation: Operation) => {
     const state = hold;
@@ -699,6 +710,7 @@ export async function openGoalCandidateToolChannel(input: {
       // Nobody is left to receive the result of a worker that disconnected.
       if (operation.peer && departedPeers.has(operation.peer))
         throw new Error("Goal candidate worker disconnected while its operation was held");
+      if (state.denied) throw new GoalHeldRequestDenied();
       operation.held = false; // released: it starts normally
     } finally { state.waiting.delete(entry); }
   };
@@ -1176,13 +1188,18 @@ export async function openGoalCandidateToolChannel(input: {
   };
   /** Graceful pause: hold new operations while started ones finish and are acknowledged. */
   const beginHold = () => {
-    const state = { active: true, waiting: new Set<{ since: number }>() };
+    const state = { active: true, denied: false, waiting: new Set<{ since: number }>() };
     hold = state;
+    // Ends once: a later release after deny does not let held work through.
+    const end = (denied: boolean) => { if (!state.active) return; state.denied = denied; state.active = false; if (hold === state) hold = undefined; };
     return {
       inFlight: () => [...operations.values()].filter(operation => !operation.held &&
         (operation.phase === "pending" || operation.phase === "awaiting-ack")).length,
       heldForMs: () => state.waiting.size ? Date.now() - Math.min(...[...state.waiting].map(entry => entry.since)) : 0,
-      release: () => { state.active = false; if (hold === state) hold = undefined; },
+      /** The run continues: held operations start. */
+      release: () => end(false),
+      /** The run stopped: held operations are refused without effect. */
+      deny: () => end(true),
     };
   };
   return { channel, server, extensionPath, drain, beginHold, async assertExtensionCurrent() {
@@ -1456,7 +1473,10 @@ export function createGoalRequestBudget(limit: number | undefined) {
   let poisoned = false, queue: Promise<void> = Promise.resolve(), queueGeneration = 0;
   // Graceful pause: while held, a new reservation gets no answer (the requester
   // waits instead of failing) until the hold ends or its channel stops.
-  let hold: { active: boolean; waiting: Set<{ since: number }> } | undefined;
+  let hold: { active: boolean; denied: boolean; waiting: Set<{ since: number }> } | undefined;
+  // Reservations past the hold check but not yet recorded: counted as in flight
+  // so a pause that starts in that gap still waits for them.
+  let admitting = 0;
   const waitWhileHeld = async (live: () => void) => {
     const state = hold;
     if (!state?.active) return;
@@ -1467,7 +1487,9 @@ export function createGoalRequestBudget(limit: number | undefined) {
         live(); // a stop of the Goal ends the wait (and so the request) at once
         await new Promise(resolve => setTimeout(resolve, 50));
       }
-    } finally { state.waiting.delete(entry); }
+      if (state.denied) throw new Error("Goal pause refused the held request");
+    } catch (error) { throw new GoalHeldRequestDenied(error); }
+    finally { state.waiting.delete(entry); }
   };
   return {
     /**
@@ -1476,13 +1498,18 @@ export function createGoalRequestBudget(limit: number | undefined) {
      * `heldForMs` is the longest wait of a held request.
      */
     beginHold() {
-      const state = { active: true, waiting: new Set<{ since: number }>() };
+      const state = { active: true, denied: false, waiting: new Set<{ since: number }>() };
       hold = state;
+      // Ends once: a later release after deny does not let held work through.
+    const end = (denied: boolean) => { if (!state.active) return; state.denied = denied; state.active = false; if (hold === state) hold = undefined; };
       return {
-        inFlight: () => [...records.values()].filter(record =>
+        inFlight: () => admitting + [...records.values()].filter(record =>
           record.phase === "reserved" || record.phase === "released" || record.phase === "settling").length,
         heldForMs: () => state.waiting.size ? Date.now() - Math.min(...[...state.waiting].map(entry => entry.since)) : 0,
-        release: () => { state.active = false; if (hold === state) hold = undefined; },
+        /** The run continues: held requests proceed. */
+        release: () => end(false),
+        /** The run stopped: held requests are refused and never sent. */
+        deny: () => end(true),
       };
     },
     assertLaunchCurrent(assertLive: () => void = () => undefined): void {
@@ -1557,8 +1584,9 @@ export function createGoalRequestBudget(limit: number | undefined) {
         throw new Error("Goal source request settlement requires its native read witness");
       // Held before entering the serialized ledger, so settlements of requests
       // already in flight are never queued behind a held reservation.
-      if (input.action === "reserve") await waitWhileHeld(input.live);
+      if (input.action === "reserve") { await waitWhileHeld(input.live); admitting++; }
       const predecessor = queue;
+      let admitted = input.action === "reserve";
       const operation = predecessor.catch(() => undefined).then(async () => {
         const check = async () => { input.live(); const value = await input.current(); input.live(); return value; };
         let record = records.get(input.id);
@@ -1576,6 +1604,7 @@ export function createGoalRequestBudget(limit: number | undefined) {
             nativeSettlementChannel: input.nativeSettlementChannel,
             path: join(input.evidenceRoot, `${goalHash(input.id)}.json`), owned: false, phase: "reserved" };
           records.set(input.id, record); // No refund, including publication failure.
+          if (admitted) { admitted = false; admitting--; } // now counted by its record
           try {
             const created = await writeJsonExclusive(record.path, { schema: "goal-request-reservation-v1", id: input.id,
               commitment: record.commitment, authority, phase: record.phase });
@@ -1640,6 +1669,8 @@ export function createGoalRequestBudget(limit: number | undefined) {
       queueGeneration += 1;
       queue = operation;
       void operation.catch(() => undefined);
+      // A reservation refused before it was recorded stops counting as in flight.
+      void operation.finally(() => { if (admitted) { admitted = false; admitting--; } }).catch(() => undefined);
       return operation;
     },
     async acknowledgeNativeSettlement(input: { id: string; commitment: string; action: string; known?: boolean;
@@ -1735,9 +1766,16 @@ export async function openGoalRequestBudgetChannel(input: {
       if (nativeReadWitness && nativeReadWitness.attemptRoot !== nativeReadAttemptRoot(input.attemptKey))
         throw new Error("Goal request native read witness belongs to another attempt");
       const work = (async () => {
-        await input.budget.operate({ id: `${prefix}:${data.id}`, commitment: data.commitment as string, action: data.action as string,
-          known: data.known === true, nativeReadWitness,
-          evidenceRoot: input.evidenceRoot, current: input.current, live, peer, nativeSettlementChannel });
+        try {
+          await input.budget.operate({ id: `${prefix}:${data.id}`, commitment: data.commitment as string, action: data.action as string,
+            known: data.known === true, nativeReadWitness,
+            evidenceRoot: input.evidenceRoot, current: input.current, live, peer, nativeSettlementChannel });
+        } catch (error) {
+          // A reservation a pause held and refused was never made: answer it as
+          // a denial. (A thrown handler would make the channel's drain fail.)
+          if (error instanceof GoalHeldRequestDenied) return { status: "denied", message: error.message };
+          throw error;
+        }
         live(); return { status: "acknowledged" };
       })();
       pending.add(work); void work.finally(() => pending.delete(work)).catch(() => undefined);

@@ -202,3 +202,29 @@ test("Goal worker request reconstructs only its exact immutable prefix", () => {
   assert.throws(() => reconstructGoalWorkerRequest({ ...input, candidatePrompt: built.prompt.replace(input.prompt, " \n") }),
     /blank advisory proposed work/);
 });
+
+test("a coding worker checked by a command is told the Goal runs that command", () => {
+  const commandDefinition = (effects) => parseGoalWorkflowSpec({
+    schemaVersion: 1,
+    goal: {
+      objective: "Make the parser tests pass",
+      criteria: [
+        { id: "tests-pass", verifier: { kind: "deterministic", producerId: "command-exit-v1", target: "candidate",
+          subject: { artifact: "control", resultSlot: "result" }, config: { argv: ["node", "--test"] } } },
+        { id: "ready", verifier: { kind: "deterministic", producerId: "json-exact-value-v1", target: "artifact",
+          subject: { artifact: "control", path: "$.result", resultSlot: "notes" },
+          config: { comparison: "canonical-json-equality", expected: { ready: true } } } },
+      ],
+      authority: { allowedPaths: ["src/csv.mjs"], protectedPaths: [], allowedEffects: effects },
+      nesting: { maxDepth: 1 },
+    },
+  });
+  const coding = commandDefinition(["read", "verify", "candidate-write"]);
+  const checked = buildGoalWorkerRequest({ definition: coding, request: "fix", id: "result", prompt: "Fix it." }).prompt;
+  assert.match(checked, /the Goal itself runs each criterion command on your candidate files/);
+  assert.match(checked, /Do not report that tests or commands could not be run/);
+  const unchecked = buildGoalWorkerRequest({ definition: coding, request: "fix", id: "notes", prompt: "Note it." }).prompt;
+  assert.doesNotMatch(unchecked, /runs each criterion command/, "only the slot a command checks");
+  const reconstructed = reconstructGoalWorkerRequest({ definition: coding, request: "fix", id: "result", candidatePrompt: checked });
+  assert.equal(reconstructed.prompt, checked, "the prefix stays exact and reconstructible");
+});

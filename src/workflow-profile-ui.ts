@@ -1,6 +1,7 @@
 import {
 	collectWorkflowProfileStageSlots,
 	type WorkflowProfileStageSlot,
+	workflowProfileSlotLabel,
 } from "./execution-profile.js";
 import type { GoalProfileRuntimePatch } from "./goal-types.js";
 import type {
@@ -42,6 +43,8 @@ export type WorkflowProfilePreviewMenuAction =
 
 export interface WorkflowProfilePreviewRow {
 	id: string;
+	/** Display name when it differs from the saved stage id. */
+	label?: string;
 	role: string;
 	model: string;
 	thinking: string;
@@ -471,7 +474,7 @@ async function selectPreviewAction(
 				`${profileName} — stage preview (${page + 1}/${pages})`,
 				...pageRows.map(
 					(row) =>
-						`${clip(row.id, 42)} [${row.role}]\n  ${clip(row.model, 68)} · ${row.thinking}`,
+						`${clip(row.label ?? row.id, 42)} [${row.role}]\n  ${clip(row.model, 68)} · ${row.thinking}`,
 				),
 				...(error
 					? [`Blocked: ${clip(error.replace(/\s+/g, " "), 180)}`]
@@ -492,6 +495,12 @@ async function selectPreviewAction(
 	}
 }
 
+/** A readable label for Goal profile slots; other stages show their id. */
+function labelOf(slot: WorkflowProfileStageSlot): { label?: string } {
+	const label = workflowProfileSlotLabel(slot);
+	return label === slot.id ? {} : { label };
+}
+
 function builtinPreviewRows(
 	slots: readonly WorkflowProfileStageSlot[],
 	profileId: WorkflowBuiltinProfileId,
@@ -500,6 +509,7 @@ function builtinPreviewRows(
 		const runtime = profileRuntimeForRole(profileId, slot.profileRole!);
 		return {
 			id: slot.id,
+			...labelOf(slot),
 			role: slot.profileRole!,
 			model: runtime.model,
 			thinking: runtime.thinking,
@@ -522,6 +532,7 @@ function customPreviewRows(
 		}
 		return {
 			id: slot.id,
+			...labelOf(slot),
 			role: slot.profileRole!,
 			model:
 				assignment.model.kind === "inherit"
@@ -551,7 +562,7 @@ async function editCustomStage(
 ): Promise<WorkflowCustomProfile> {
 	const choices = slots.map((slot) => ({
 		id: slot.id,
-		label: `${slot.id} — ${slot.profileRole}`,
+		label: `${workflowProfileSlotLabel(slot)} — ${slot.profileRole}`,
 	}));
 	while (true) {
 		const stageLabel = await ui.select(

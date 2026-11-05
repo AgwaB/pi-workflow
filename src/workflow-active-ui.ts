@@ -83,7 +83,9 @@ export function renderActiveWorkflowUi(
 				? `● Goal ${truncateLabel(only.name ?? only.runId, 18)} · attempt ${only.goal.attempt} · ${only.goal.phase}`
 				: `● ${truncateLabel(only.name ?? only.runId, 18)} ${visibleProgress(only)}/${only.taskSummary.total}`
 			: `● workflows ${runs.length} active`;
-	safeUiCall(() => ctx.ui.setStatus(WORKFLOW_ACTIVE_STATUS_KEY, status));
+	// In the TUI the widget below the editor shows the same line (with elapsed
+	// time) and stays visible over dialogs, so the footer would only repeat it.
+	safeUiCall(() => ctx.ui.setStatus(WORKFLOW_ACTIVE_STATUS_KEY, ctx.mode === "tui" ? undefined : status));
 	// A Goal waiting for a human judgment does nothing until the user acts: say so once per attempt.
 	for (const run of runs) {
 		if (run.goal?.phase !== "waiting for your judgment") continue;
