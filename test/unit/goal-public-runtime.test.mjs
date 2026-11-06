@@ -17614,8 +17614,9 @@ for (const [name, cap, expected, recursive, terminalFault, mixed, depthDenied, g
         "the deterministic warm barrier holds the actual third original planner callback");
       if (warm === "probe-mutant-two-planner") {
         await joinWarm("original-mutant-two-planner-barrier", warmMutantTwoPlannerBarrier.promise);
+        // An expected timeout: a short window shows the same rejection.
         await assert.rejects(
-          joinWarm("original-mutant-fourth-sdk-combined-timer", heldGrandchildWorkerPromise),
+          joinWarm("original-mutant-fourth-sdk-combined-timer", heldGrandchildWorkerPromise, testMs(2000)),
           /Original three-level warm phase timed out: original-mutant-fourth-sdk-combined-timer/,
           "a two-planner readiness mutant reproduces the combined prerequisite/arrival timeout");
       }
@@ -17626,8 +17627,9 @@ for (const [name, cap, expected, recursive, terminalFault, mixed, depthDenied, g
       "all three unique original planner callbacks reach terminal before fourth-SDK timing begins");
     if (warm === "probe-missing-fourth") {
       await joinWarm("original-missing-fourth-worker-gate", warmMissingFourthWorker.promise);
+      // An expected timeout: a short window shows the same rejection.
       await assert.rejects(
-        joinWarm("original-fourth-sdk-missing-worker", heldGrandchildWorkerPromise),
+        joinWarm("original-fourth-sdk-missing-worker", heldGrandchildWorkerPromise, testMs(2000)),
         /Original three-level warm phase timed out: original-fourth-sdk-missing-worker/,
         "the fresh fourth-SDK phase still rejects a missing worker after the planner barrier");
       assert.equal(physical, 3, "missing fourth worker leaves exactly the original three provider requests");
