@@ -319,19 +319,22 @@ test("ordinary Goal summary shows partial cost as a lower bound and never invent
 /**
  * Test-only watchdog scale. Internal waits and per-test timeouts here are
  * liveness guards, not performance assertions; under heavy machine load they
- * expire although the behaviour is correct. PIWF_TEST_TIME_FACTOR (1-10) wins;
- * otherwise the factor follows the one-minute load per CPU, capped at 3.
+ * expire although the behaviour is correct. PIWF_TEST_TIME_FACTOR (1-10) wins.
+ * Otherwise an internal wait follows the one-minute load per CPU when it
+ * starts (capped at 3), and a per-test timeout always uses the cap: a correct
+ * test is never slower for it, and a load spike after the file started can no
+ * longer time it out.
  */
-const testTimeFactor = (() => {
-  if (process.env.PIWF_TEST_TIME_FACTOR !== undefined) {
-    const factor = Number(process.env.PIWF_TEST_TIME_FACTOR);
-    assert.ok(Number.isFinite(factor) && factor >= 1 && factor <= 10, "PIWF_TEST_TIME_FACTOR must be 1-10");
-    return factor;
-  }
-  const load = osLoadAverage()[0] / Math.max(1, osCpuCount());
-  return Math.min(3, Math.max(1, Math.round(load * 10) / 10));
+const envTimeFactor = (() => {
+  if (process.env.PIWF_TEST_TIME_FACTOR === undefined) return undefined;
+  const factor = Number(process.env.PIWF_TEST_TIME_FACTOR);
+  assert.ok(Number.isFinite(factor) && factor >= 1 && factor <= 10, "PIWF_TEST_TIME_FACTOR must be 1-10");
+  return factor;
 })();
-const testMs = ms => Math.ceil(ms * testTimeFactor);
+const loadTimeFactor = () =>
+  Math.min(3, Math.max(1, Math.round(osLoadAverage()[0] / Math.max(1, osCpuCount()) * 10) / 10));
+const testMs = ms => Math.ceil(ms * (envTimeFactor ?? loadTimeFactor()));
+const testTimeoutMs = ms => Math.ceil(ms * (envTimeFactor ?? 3));
 
 /**
  * When a Goal test fails or times out, fence every Goal host session it
@@ -587,7 +590,7 @@ test("repeated and concurrent stop requests preserve the original physical inten
   assert.equal(await readFile(path, "utf8"), "{", "malformed original intent is not overwritten");
 });
 
-test("concurrent first stop publication preserves the winning bytes and inode", { timeout: testMs(30_000) }, async t => {
+test("concurrent first stop publication preserves the winning bytes and inode", { timeout: testTimeoutMs(30_000) }, async t => {
   const { requestWorkflowStop, workflowStopIntentPath, setRunLeaseTestHooksForTests } =
     await import("../../.tmp/unit/store.js");
   const cwd = await mkdtemp(join(tmpdir(), "goal-stop-first-publication-"));
@@ -643,7 +646,7 @@ test("concurrent first stop publication preserves the winning bytes and inode", 
   }
 });
 
-test("original feedback stop and drain retains in-flight delivery and replacement ownership", { timeout: testMs(30_000) }, async t => {
+test("original feedback stop and drain retains in-flight delivery and replacement ownership", { timeout: testTimeoutMs(30_000) }, async t => {
   // NONAUTHORITY: local terminal records exercise observer lifetime, not admission.
   const cwd = await mkdtemp(join(tmpdir(), "goal-feedback-drain-"));
   const runId = "original_feedback_drain", sessionId = "feedback-drain-session";
@@ -1201,7 +1204,7 @@ test("AC9 native original reservation creation requires proven exclusive ownersh
   });
 });
 
-test("AC9 original request budget poisons bound currentness failures without refund or invented ACK", { timeout: testMs(30_000) }, async t => {
+test("AC9 original request budget poisons bound currentness failures without refund or invented ACK", { timeout: testTimeoutMs(30_000) }, async t => {
   const { createGoalRequestBudget, openGoalRequestBudgetChannel } =
     await import("../../.tmp/unit/workflow-goal-workspace-tools.js");
   const { setRunLeaseTestHooksForTests } = await import("../../.tmp/unit/store.js");
@@ -1363,7 +1366,7 @@ test("AC9 original request budget poisons bound currentness failures without ref
   });
 });
 
-test("AC9 request launch admission drains appended generations without blocking healthy in-flight requests", { timeout: testMs(30_000) }, async t => {
+test("AC9 request launch admission drains appended generations without blocking healthy in-flight requests", { timeout: testTimeoutMs(30_000) }, async t => {
   const { createGoalRequestBudget } = await import("../../.tmp/unit/workflow-goal-workspace-tools.js");
   const deferred = () => {
     let resolve;
@@ -1607,7 +1610,7 @@ const requestPairs = [
   ]),
 ];
 
-test("candidate retirement joins an admitted denial response before closing its connection", { timeout: testMs(30_000) }, async t => {
+test("candidate retirement joins an admitted denial response before closing its connection", { timeout: testTimeoutMs(30_000) }, async t => {
   const { openGoalCandidateToolChannel, registerGoalCandidateTools } = await import("../../.tmp/unit/workflow-goal-workspace-tools.js");
   const { prepareGoalWorkspaceHost } = await import("../../.tmp/unit/goal-workspace-host.js");
   const root = await realpath(await mkdtemp(join(tmpdir(), "goal-candidate-drain-")));
@@ -1667,7 +1670,7 @@ test("candidate retirement joins an admitted denial response before closing its 
   assert.equal(await readFile(join(root, "origin", "a.txt"), "utf8"), "original");
 });
 
-test("stop refuses candidate callbacks at once although the endpoint file is removed after its drain", { timeout: testMs(30_000) }, async t => {
+test("stop refuses candidate callbacks at once although the endpoint file is removed after its drain", { timeout: testTimeoutMs(30_000) }, async t => {
   const { openGoalCandidateToolChannel, registerGoalCandidateTools } = await import("../../.tmp/unit/workflow-goal-workspace-tools.js");
   const { prepareGoalWorkspaceHost } = await import("../../.tmp/unit/goal-workspace-host.js");
   const root = await realpath(await mkdtemp(join(tmpdir(), "goal-candidate-stop-")));
@@ -2582,7 +2585,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
   [false, false, false, undefined, false, "accounting-ack"],
   [false, false, false, undefined, false, 5, "no-read", false, false, "foreach actual backend late UNKNOWN", undefined, true],
   [false, false, false, undefined, false, 0], [false, false, false, undefined, false, "cost0"],
-  [false, false, false, undefined, false, "cost1"]]) test(backendLateUnknown ? "ordinary Goal actual backend late UNKNOWN blocks queued second native API before provider launch" : rubric ? `ordinary Goal original SDK model rubric ${rubric}${rubric === "warm" || rubric === "replan warm" ? " same-live reattachment retains the original captured profile" : ""}${originApply ? " with origin apply" : ""}` : catalog === "ordinary child maxDepth one" ? "ordinary child maxDepth one runs plain artifact graph" : catalog ? `ordinary Goal admitted catalog ${typeof catalog === "string" && catalog.startsWith("children ") ? catalog : `child ${typeof catalog === "string" ? catalog : requestBudget === 2 ? "success" : "exhausted root cap"}`}` : closure ? ordinaryClosureProducerName : `ordinary candidate workers invoke admitted physical callbacks and preserve bytes across replan${codex ? " with captured Codex SSE" : ""}${sourceMode ? ` with scoped source ${sourceMode}` : ""}${uncertain ? " with UNKNOWN outcome" : ""}${custom ? " with explicit custom agent" : ""}${warm ? " with explicit same-live-session resume" : ""}${evidenceFailure ? ` with evidence ${evidenceFailure}` : ""}${commandMode ? " through registered Goal commands" : ""}${requestBudget !== undefined ? ` with native request budget ${requestBudget}` : ""}${originApply ? " with origin apply" : ""}${commandOracle ? ` judged by ${commandOracle === "multiple" ? "two sandboxed commands" : commandOracle === "mixed" ? "a sandboxed command and an exact value" : "a sandboxed command"}` : ""}${scopeDirectory ? " refuses a directory scope before consent" : ""}${recoveryMode ? ` recovering an interrupted run${recoveryMode === "cap-used" ? " whose requests used the cap" : recoveryMode === "generations-used" ? " whose generations used the limit" : ""}` : ""}${generationLimit ? ` stopped by a generation limit of ${generationLimit}` : ""}${noProgress === "plan" ? " stopped when the plan repeats" : noProgress ? " stopped when a failed candidate repeats" : ""}`, { timeout: backendLateUnknown || rubric || catalog || requestBudget === "candidate-policy-configuration-custody" || warm && commandMode ? testMs(30_000) : undefined }, async t => {
+  [false, false, false, undefined, false, "cost1"]]) test(backendLateUnknown ? "ordinary Goal actual backend late UNKNOWN blocks queued second native API before provider launch" : rubric ? `ordinary Goal original SDK model rubric ${rubric}${rubric === "warm" || rubric === "replan warm" ? " same-live reattachment retains the original captured profile" : ""}${originApply ? " with origin apply" : ""}` : catalog === "ordinary child maxDepth one" ? "ordinary child maxDepth one runs plain artifact graph" : catalog ? `ordinary Goal admitted catalog ${typeof catalog === "string" && catalog.startsWith("children ") ? catalog : `child ${typeof catalog === "string" ? catalog : requestBudget === 2 ? "success" : "exhausted root cap"}`}` : closure ? ordinaryClosureProducerName : `ordinary candidate workers invoke admitted physical callbacks and preserve bytes across replan${codex ? " with captured Codex SSE" : ""}${sourceMode ? ` with scoped source ${sourceMode}` : ""}${uncertain ? " with UNKNOWN outcome" : ""}${custom ? " with explicit custom agent" : ""}${warm ? " with explicit same-live-session resume" : ""}${evidenceFailure ? ` with evidence ${evidenceFailure}` : ""}${commandMode ? " through registered Goal commands" : ""}${requestBudget !== undefined ? ` with native request budget ${requestBudget}` : ""}${originApply ? " with origin apply" : ""}${commandOracle ? ` judged by ${commandOracle === "multiple" ? "two sandboxed commands" : commandOracle === "mixed" ? "a sandboxed command and an exact value" : "a sandboxed command"}` : ""}${scopeDirectory ? " refuses a directory scope before consent" : ""}${recoveryMode ? ` recovering an interrupted run${recoveryMode === "cap-used" ? " whose requests used the cap" : recoveryMode === "generations-used" ? " whose generations used the limit" : ""}` : ""}${generationLimit ? ` stopped by a generation limit of ${generationLimit}` : ""}${noProgress === "plan" ? " stopped when the plan repeats" : noProgress ? " stopped when a failed candidate repeats" : ""}`, { timeout: backendLateUnknown || rubric || catalog || requestBudget === "candidate-policy-configuration-custody" || warm && commandMode ? testTimeoutMs(30_000) : undefined }, async t => {
   const { runWorkflowSpec, stopRun, resumeRun, stopWorkflowWatchersForTests } = await import("../../.tmp/unit/engine.js");
   const closureGenerations = closure === "replan-three-criteria" ? 3 : closure === "replan" ? 2 : 1;
   const { readRunRecord, readCompiledWorkflow, supervisorPath, flushPendingIndexUpdatesForTests } = await import("../../.tmp/unit/store.js");
@@ -15741,7 +15744,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       await rm(join(cwd, ".pi", "agents", `${chosenName}.md`), { force: true });
       for (const order of [["policyA", "policyB"], ["policyB", "policyA"]]) {
         await t.test(`profile exception rejects actual empty policy inventory in ${order.join("/")} order`,
-          { timeout: testMs(30_000) }, async () => {
+          { timeout: testTimeoutMs(30_000) }, async () => {
           const workflow = { schemaVersion: 1, artifactGraph: { stages: [
             { id: "result", support: { uses: "./profile-empty-support.mjs" } },
             ...order.map(id => ({ id, type: "goal", goal: { uses: "./profile-empty-policy.json" }, after: "result" })),
@@ -16799,7 +16802,7 @@ for (const [name, cap, expected, recursive, terminalFault, mixed, depthDenied, g
   ["mixed ordinary wrapper Goal rejects compiled mutation after compiled first write", 4, true, true, undefined, true, undefined, "compiled"],
   ["mixed ordinary wrapper Goal child stop after compiled write preserves original publication", 4, true, true, undefined, true, undefined, "child-stop"],
   ["mixed ordinary wrapper Goal root stop after compiled write preserves original publication", 4, true, true, undefined, true, undefined, "root-stop"],
-]) test(name, { timeout: testMs(60_000) }, async t => {
+]) test(name, { timeout: testTimeoutMs(60_000) }, async t => {
   const profileBeforeSend = terminalFault === "profile-before-send" || terminalFault === "profile-history-before-send";
   const { runWorkflowSpec, refreshRun, resumeRun, stopWorkflowWatchersForTests,
     setDynamicControllerHooksForTests } = await import("../../.tmp/unit/engine.js");
