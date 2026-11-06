@@ -17008,6 +17008,14 @@ for (const [name, cap, expected, recursive, terminalFault, mixed, depthDenied, g
   let profileRequestCallback;
   let delayedReadyObserved = false;
   let childParentProfileReservationTamper;
+  // Scheduler passes observed after a fault was injected: the engine has
+  // re-evaluated the faulted state that many times without launching work.
+  let postFaultSchedulePasses = 0, lastPostFaultObservation = 0;
+  const countPostFaultPass = context => {
+    if (context.cwd !== cwd || !(generatedPublicationInjection || childParentProfileReservationTamper)) return;
+    lastPostFaultObservation = Date.now();
+    if (context.phase === "schedule-lease") postFaultSchedulePasses++;
+  };
   let sequentialChildWorkers = 0;
   const host = { ...{ runtime: createWorkflowGoalEngineRuntime(session) }, executionFoundation: "workflow-engine",
     currentRuntime: { model: "openai/gpt-5.1", thinking: "high" },
@@ -17043,6 +17051,7 @@ for (const [name, cap, expected, recursive, terminalFault, mixed, depthDenied, g
     rootPublicationStop;
   if (registeredCommandLaunch) {
     setDynamicControllerHooksForTests({ async onSchedulerObservation(context) {
+      countPostFaultPass(context);
       if (context.cwd !== cwd) return;
       warmSchedulerObservations.push({ elapsedMs: performance.now() - warmObservationStarted, ...context });
       if (warmSchedulerObservations.length > 128) warmSchedulerObservations.shift();
@@ -17114,6 +17123,7 @@ for (const [name, cap, expected, recursive, terminalFault, mixed, depthDenied, g
     t.after(() => setDynamicControllerHooksForTests());
     setDynamicControllerHooksForTests({
       onSchedulerObservation(context) {
+        countPostFaultPass(context);
         if (generatedPublicationFault !== "hold" || context.cwd !== cwd ||
           context.runId !== generatedPublicationRunId ||
           !["publication-join", "root-publication-join"].includes(context.boundary)) return;
@@ -17845,8 +17855,21 @@ for (const [name, cap, expected, recursive, terminalFault, mixed, depthDenied, g
       throw error;
     }
   }
+  // A faulted run never finishes; the assertions below hold once the engine has
+  // re-evaluated the faulted state a few times without launching anything (the
+  // 40 s deadline stays as a cap, not as the expected wait).
+  const quiescentAfterFault = async () => {
+    // Three passes, or two passes and then an idle scheduler for 2 s.
+    if (postFaultSchedulePasses < 2 ||
+        postFaultSchedulePasses < 3 && Date.now() - lastPostFaultObservation < 2_000) return false;
+    if (generatedPublicationInjection) return true;
+    if (!childParentProfileReservationTamper) return false;
+    const retained = await readFile(childParentProfileReservationTamper.file, "utf8").then(JSON.parse, () => undefined);
+    return retained?.phase === "unknown";
+  };
   const deadline = Date.now() + testMs(40_000);
-  while (!profileBeforeSend && Date.now() < deadline && ["pending", "running"].includes(root.status)) {
+  while (!profileBeforeSend && Date.now() < deadline && ["pending", "running"].includes(root.status) &&
+      !await quiescentAfterFault()) {
     await new Promise(resolve => setTimeout(resolve, 50)); root = await readRunRecord(cwd, root.runId);
   }
   assert.equal(confirmations, 1);
